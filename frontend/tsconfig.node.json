@@ -1,0 +1,25 @@
+/**
+ * vite.config.ts 的 tsconfig(vite 配置在 Node 环境执行)。
+ *
+ * 供 `tsc -b` 项目引用;与 src 的 tsconfig.json(浏览器环境)分开编译。
+ * 未安装 @types/node,因此不使用 node 类型,配置只编译 vite.config.ts。
+ */
+
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "noEmit": true
+  },
+  "include": ["vite.config.ts"]
+}

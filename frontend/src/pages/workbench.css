@@ -1,0 +1,709 @@
+/**
+ * 工作台框架 / 任务中心 / 结果分析 专用样式。
+ * 复用 styles.css 中的设计令牌(CSS 变量),不重复定义基础组件样式。
+ */
+
+/* ---------------------------------------------------------------------------
+ * 工作台框架(ProjectPage):侧边导航 + 项目信息头
+ * ------------------------------------------------------------------------- */
+
+.wb {
+  display: flex;
+  align-items: stretch;
+  margin: calc(var(--ies-space-6) * -1);
+  min-height: calc(100vh - var(--ies-topbar-height));
+}
+
+.wb-sidebar {
+  width: var(--ies-sidebar-width);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--ies-color-surface);
+  border-right: 1px solid var(--ies-color-border);
+}
+
+.wb-sidebar__head {
+  display: flex;
+  align-items: center;
+  gap: var(--ies-space-2);
+  padding: var(--ies-space-4);
+  border-bottom: 1px solid var(--ies-color-border);
+}
+
+.wb-sidebar__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--ies-radius-sm);
+  background: var(--ies-primary);
+  color: var(--ies-primary-text-on);
+  font-size: var(--ies-fs-sm);
+  font-weight: 700;
+}
+
+.wb-sidebar__project-name {
+  font-size: var(--ies-fs-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-sidebar__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--ies-space-3);
+}
+
+.wb-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--ies-space-3);
+  padding: var(--ies-space-2) var(--ies-space-3);
+  border-radius: var(--ies-radius-md);
+  color: var(--ies-color-text-secondary);
+  text-decoration: none;
+  font-size: var(--ies-fs-sm);
+  font-weight: 500;
+  transition: background var(--ies-transition), color var(--ies-transition);
+}
+
+.wb-nav-item:hover {
+  background: var(--ies-color-surface-2);
+  color: var(--ies-color-text);
+}
+
+.wb-nav-item--active {
+  background: var(--ies-primary-subtle);
+  color: var(--ies-primary);
+  font-weight: 600;
+}
+
+.wb-nav-icon {
+  flex: none;
+}
+
+.wb-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ies-space-4);
+  padding: var(--ies-space-3) var(--ies-space-5);
+  background: var(--ies-color-surface);
+  border-bottom: 1px solid var(--ies-color-border);
+  position: sticky;
+  top: var(--ies-topbar-height);
+  z-index: 20;
+}
+
+.wb-header__title {
+  font-size: var(--ies-fs-lg);
+  font-weight: 700;
+  color: var(--ies-color-text);
+}
+
+.wb-header__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ies-space-4);
+  margin-top: 2px;
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+}
+
+.wb-header__status {
+  display: flex;
+  align-items: center;
+  gap: var(--ies-space-3);
+  flex: none;
+}
+
+.wb-autosave {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ies-space-1);
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+  white-space: nowrap;
+}
+
+.wb-autosave__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ies-warning);
+}
+
+.wb-autosave--saving,
+.wb-autosave--dirty {
+  color: var(--ies-warning-text);
+}
+
+.wb-autosave--saved {
+  color: var(--ies-success-text);
+}
+
+.wb-autosave--error {
+  color: var(--ies-danger-text);
+}
+
+.wb-content {
+  flex: 1;
+  padding: var(--ies-space-5);
+  min-width: 0;
+}
+
+@media (max-width: 960px) {
+  .wb {
+    flex-direction: column;
+    margin: calc(var(--ies-space-6) * -1) 0 0;
+  }
+
+  .wb-sidebar {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--ies-color-border);
+  }
+
+  .wb-sidebar__head {
+    display: none;
+  }
+
+  .wb-sidebar__nav {
+    flex-direction: row;
+    flex: 1;
+  }
+
+  .wb-nav-item {
+    white-space: nowrap;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 进度条
+ * ------------------------------------------------------------------------- */
+
+.ies-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--ies-space-2);
+  min-width: 130px;
+}
+
+.ies-progress__track {
+  position: relative;
+  flex: 1;
+  height: 8px;
+  border-radius: var(--ies-radius-full);
+  background: var(--ies-color-surface-2);
+  border: 1px solid var(--ies-color-border);
+  overflow: hidden;
+}
+
+.ies-progress__bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: var(--ies-radius-full);
+  background: var(--ies-primary);
+  transition: width 300ms ease;
+}
+
+.ies-progress__bar--indeterminate {
+  width: 35% !important;
+  animation: ies-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes ies-progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.ies-progress__label {
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+  flex: none;
+}
+
+/* ---------------------------------------------------------------------------
+ * 键值列表(kv)
+ * ------------------------------------------------------------------------- */
+
+.ies-kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--ies-space-1) var(--ies-space-4);
+  font-size: var(--ies-fs-sm);
+}
+
+.ies-kv dt {
+  color: var(--ies-color-text-secondary);
+  white-space: nowrap;
+}
+
+.ies-kv dd {
+  margin: 0;
+  word-break: break-word;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------------
+ * 四维结论卡片(物理/最优性/财务/可靠性)
+ * ------------------------------------------------------------------------- */
+
+.ies-dims {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--ies-space-4);
+}
+
+@media (max-width: 1280px) {
+  .ies-dims {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.ies-dim {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ies-space-2);
+  padding: var(--ies-space-4);
+  border: 1px solid var(--ies-color-border);
+  border-left-width: 4px;
+  border-radius: var(--ies-radius-lg);
+  background: var(--ies-color-surface);
+  box-shadow: var(--ies-shadow-sm);
+}
+
+.ies-dim__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ies-space-2);
+}
+
+.ies-dim__title {
+  font-size: var(--ies-fs-sm);
+  font-weight: 700;
+  color: var(--ies-color-text);
+}
+
+.ies-dim__note {
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-dim--passed {
+  border-left-color: var(--ies-success);
+}
+
+.ies-dim--restricted {
+  border-left-color: var(--ies-warning);
+}
+
+.ies-dim--failed {
+  border-left-color: var(--ies-danger);
+}
+
+.ies-dim--na,
+.ies-dim--insufficient {
+  border-left-color: var(--ies-color-border-strong);
+}
+
+/* ---------------------------------------------------------------------------
+ * 诊断列表
+ * ------------------------------------------------------------------------- */
+
+.ies-diag-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ies-space-3);
+}
+
+.ies-diag {
+  border: 1px solid var(--ies-color-border);
+  border-radius: var(--ies-radius-md);
+  padding: var(--ies-space-3) var(--ies-space-4);
+  background: var(--ies-color-surface-2);
+}
+
+.ies-diag__head {
+  display: flex;
+  align-items: center;
+  gap: var(--ies-space-2);
+  flex-wrap: wrap;
+}
+
+.ies-diag__code {
+  font-family: var(--ies-font-mono);
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-muted);
+}
+
+.ies-diag__time {
+  margin-left: auto;
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-muted);
+}
+
+.ies-diag__msg {
+  margin-top: var(--ies-space-1);
+  font-size: var(--ies-fs-sm);
+  color: var(--ies-color-text);
+}
+
+.ies-diag__loc {
+  margin-top: 2px;
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-diag__fix {
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-info-text);
+}
+
+/* ---------------------------------------------------------------------------
+ * 单选卡片(不确定性分析模式)
+ * ------------------------------------------------------------------------- */
+
+.ies-radio-cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--ies-space-3);
+  margin: var(--ies-space-3) 0;
+}
+
+.ies-radio-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--ies-color-border-strong);
+  border-radius: var(--ies-radius-md);
+  padding: var(--ies-space-3) var(--ies-space-4);
+  cursor: pointer;
+  font-size: var(--ies-fs-sm);
+  transition: border-color var(--ies-transition), background var(--ies-transition);
+}
+
+.ies-radio-card input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.ies-radio-card--checked {
+  border-color: var(--ies-primary);
+  background: var(--ies-primary-subtle);
+}
+
+.ies-radio-card:has(input:focus-visible) {
+  outline: var(--ies-focus-ring-width) solid var(--ies-focus-ring-color);
+  outline-offset: var(--ies-focus-ring-offset);
+}
+
+.ies-radio-card__title {
+  font-weight: 600;
+  color: var(--ies-color-text);
+}
+
+.ies-radio-card__desc {
+  color: var(--ies-color-text-secondary);
+  font-size: var(--ies-fs-xs);
+}
+
+/* ---------------------------------------------------------------------------
+ * 字段集(数据集多选)
+ * ------------------------------------------------------------------------- */
+
+.ies-fieldset {
+  border: 1px solid var(--ies-color-border);
+  border-radius: var(--ies-radius-md);
+  padding: var(--ies-space-3) var(--ies-space-4);
+  margin: 0 0 var(--ies-space-4);
+}
+
+.ies-fieldset legend {
+  font-size: var(--ies-fs-sm);
+  font-weight: 600;
+  padding: 0 var(--ies-space-1);
+}
+
+.ies-fieldset .ies-checkbox {
+  display: flex;
+  margin: var(--ies-space-1) 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * 表格选中行
+ * ------------------------------------------------------------------------- */
+
+.ies-table__row--active td {
+  background: var(--ies-primary-subtle);
+}
+
+/* ---------------------------------------------------------------------------
+ * 任务页布局
+ * ------------------------------------------------------------------------- */
+
+.ies-task-layout {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: var(--ies-space-4);
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .ies-task-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ies-task-detail {
+  position: sticky;
+  top: calc(var(--ies-topbar-height) + var(--ies-space-5));
+}
+
+@media (max-width: 1100px) {
+  .ies-task-detail {
+    position: static;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 图表(SVG)
+ * ------------------------------------------------------------------------- */
+
+.ies-chart {
+  margin: 0;
+}
+
+.ies-chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ies-space-3);
+  margin-bottom: var(--ies-space-2);
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-chart__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ies-space-1);
+}
+
+.ies-chart__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.ies-chart__svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.ies-chart__grid {
+  stroke: var(--ies-color-border);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.ies-chart__axis {
+  stroke: var(--ies-color-border-strong);
+  stroke-width: 1;
+}
+
+.ies-chart__tick {
+  font-size: 10px;
+  fill: var(--ies-color-text-muted);
+  font-family: var(--ies-font-family);
+}
+
+.ies-chart__axis-title {
+  font-size: 10px;
+  fill: var(--ies-color-text-secondary);
+  font-family: var(--ies-font-family);
+}
+
+.ies-chart__line {
+  pointer-events: none;
+}
+
+.ies-scatter__point {
+  fill: var(--ies-primary);
+  stroke: var(--ies-color-surface);
+  stroke-width: 1.5;
+  cursor: pointer;
+  transition: r var(--ies-transition);
+}
+
+.ies-scatter__point:hover {
+  opacity: 0.8;
+}
+
+.ies-scatter__point--selected {
+  fill: var(--ies-danger);
+  stroke: var(--ies-color-text);
+  stroke-width: 2;
+}
+
+/* ---------------------------------------------------------------------------
+ * 候选方案列表(Pareto)
+ * ------------------------------------------------------------------------- */
+
+.ies-cand-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ies-space-2);
+}
+
+.ies-cand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ies-space-3);
+  border: 1px solid var(--ies-color-border);
+  border-radius: var(--ies-radius-md);
+  padding: var(--ies-space-2) var(--ies-space-4);
+  font-size: var(--ies-fs-sm);
+  background: var(--ies-color-surface);
+  transition: border-color var(--ies-transition), background var(--ies-transition);
+}
+
+.ies-cand-row:hover {
+  border-color: var(--ies-color-border-strong);
+}
+
+.ies-cand-row--selected {
+  border-color: var(--ies-primary);
+  background: var(--ies-primary-subtle);
+}
+
+.ies-cand-row__vals {
+  display: flex;
+  gap: var(--ies-space-4);
+  font-variant-numeric: tabular-nums;
+  color: var(--ies-color-text-secondary);
+}
+
+/* ---------------------------------------------------------------------------
+ * 评估历史
+ * ------------------------------------------------------------------------- */
+
+.ies-assess-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ies-space-3);
+}
+
+.ies-assess-item {
+  border: 1px solid var(--ies-color-border);
+  border-radius: var(--ies-radius-md);
+  padding: var(--ies-space-3) var(--ies-space-4);
+  background: var(--ies-color-surface);
+}
+
+.ies-assess-item__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ies-space-2);
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+  flex-wrap: wrap;
+}
+
+.ies-assess-item__grades {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ies-space-2);
+  margin-top: var(--ies-space-2);
+}
+
+.ies-assess-item__comment {
+  margin-top: var(--ies-space-2);
+  font-size: var(--ies-fs-sm);
+  color: var(--ies-color-text-secondary);
+}
+
+/* ---------------------------------------------------------------------------
+ * 任务详情折叠区
+ * ------------------------------------------------------------------------- */
+
+.ies-summary {
+  font-size: var(--ies-fs-sm);
+  font-weight: 600;
+  color: var(--ies-primary);
+  cursor: pointer;
+  margin-bottom: var(--ies-space-2);
+}
+
+/* ---------------------------------------------------------------------------
+ * 指标表格(结果页)
+ * ------------------------------------------------------------------------- */
+
+.ies-metric-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--ies-fs-sm);
+}
+
+.ies-metric-table td {
+  padding: var(--ies-space-2) var(--ies-space-3);
+  border-bottom: 1px solid var(--ies-color-border);
+  vertical-align: middle;
+}
+
+.ies-metric-table td:first-child {
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-metric-table td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--ies-color-text);
+  white-space: nowrap;
+}
+
+.ies-metric-table tr:last-child td {
+  border-bottom: 0;
+}
+
+/* 结果页小节间距 */
+.ies-section {
+  margin-bottom: var(--ies-space-4);
+}

@@ -233,8 +233,55 @@ def _register_exception_handlers(app: FastAPI) -> None:
         )
 
 
+def _register_business_routers(application: FastAPI) -> None:
+    """挂载全部业务 API 路由(集成阶段汇总, 按域分组)。
+
+    挂载顺序说明: objects 与 admin 两个模块历史上各自实现了
+    /api/admin/storage 与 /api/admin/health(路径重复), 集成后统一由
+    objects 提供(双认证兼容 + 视图合并), admin 模块仅保留独有端点,
+    因此 objects 先于 admin 挂载, 避免路径遮蔽。
+    """
+    from iesplan.api import (
+        admin,
+        auth,
+        config,
+        datasets,
+        exports,
+        model,
+        objects,
+        projects,
+        results,
+        tasks,
+        validation,
+    )
+
+    # 身份与认证(U01, 窗口会话凭证)
+    application.include_router(auth.router)
+    # 管理维护(U11/U16; objects 先挂载, 其 /storage 与 /health 为统一实现)
+    application.include_router(objects.router)
+    application.include_router(admin.router)
+    # 项目(U02/U03)
+    application.include_router(projects.router)
+    # 系统模型(U04) + 设备类型注册表(公开)
+    application.include_router(model.registry_router)
+    application.include_router(model.model_router)
+    # 数据集(U05) + 模板
+    application.include_router(datasets.router)
+    # 计算配置(U06) + 算法注册表
+    application.include_router(config.config_router)
+    application.include_router(config.registry_router)
+    # 校验(U07)
+    application.include_router(validation.router)
+    # 任务(U08)
+    application.include_router(tasks.router)
+    # 结果(U09/U12/U14)
+    application.include_router(results.router)
+    # 导出(U14/U15)
+    application.include_router(exports.router)
+
+
 def create_app() -> FastAPI:
-    """创建 FastAPI 应用: 中间件、健康路由、根路由与全局异常处理。"""
+    """创建 FastAPI 应用: 中间件、健康路由、根路由、业务路由与全局异常处理。"""
     application = FastAPI(
         title="IES Plan API",
         description="综合能源系统规划平台后端",
@@ -242,8 +289,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     _setup_cors(application)
-    # 挂载 API 路由: 本阶段仅健康检查, 后续阶段在此追加 include_router
+    # 挂载 API 路由: 健康检查 + 全部业务路由
     application.include_router(_build_health_router())
+    _register_business_routers(application)
 
     @application.get("/api", tags=["meta"], summary="服务元信息")
     async def api_root() -> dict[str, str]:

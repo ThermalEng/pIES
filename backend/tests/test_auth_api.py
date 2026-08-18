@@ -1,0 +1,525 @@
+"""身份认证 API 集成测试(U01): 登录/限速/改密/接管/登出/管理员操作/注册。
+
+运行方式: 内存 SQLite + app.dependency_overrides 替换 get_db 依赖
+(不触碰真实数据库, 与 CONTRACT 第 4 节一致)。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from fastapi.testclient import TestClient
+from httpx import Response
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from iesplan.api.auth import SESSION_COOKIE_NAME
+from iesplan.api.auth import router as auth_router
+from iesplan.db import Base, get_db
+from iesplan.main import create_app
+from iesplan.models.identity import AuthEvent, WindowSession
+from iesplan.services import identity
+
+ADMIN_PASSWORD = "Admin12345"
+USER_PASSWORD = "Alice12345"
+
+
+@pytest.fixture()
+def db_session() -> Iterator[Session]:
+    """内存 SQLite 会话(每次测试独立建库)。
+
+    StaticPool + check_same_thread=False: TestClient 在独立线程执行应用逻辑,
+    单连接跨线程共享(内存库标准做法)。
+    """
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    with TestingSession() as session:
+        yield session
+    engine.dispose()
+
+
+@pytest.fixture()
+def client(db_session: Session) -> Iterator[TestClient]:
+    """挂载 /api/auth 路由的应用测试客户端(get_db 替换为内存 SQLite)。"""
+    app = create_app()
+    app.include_router(auth_router)
+
+    def override_get_db() -> Iterator[Session]:
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    identity.reset_login_rate_limit()
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
+
+
+def seed_admin(db: Session) -> identity.User:
+    """创建内置管理员(首登强制改密, 与 seed_admin 语义一致)。"""
+    return identity.create_user(db, "admin", ADMIN_PASSWORD, role="admin", display_name="管理员")
+
+
+def seed_engineer(db: Session, username: str = "alice", password: str = USER_PASSWORD) -> identity.User:
+    """创建普通工程师用户(首登不强制改密, 便于直接测试业务操作)。"""
+    return identity.create_user(
+        db, username, password, role="engineer", force_password_change=False, display_name=username.title()
+    )
+
+
+def login(
+    client: TestClient, username: str, password: str, device: str | None = None
+) -> Response:
+    """便捷登录请求。"""
+    return client.post(
+        "/api/auth/login", json={"username": username, "password": password, "device": device}
+    )
+
+
+def bearer(token: str) -> dict[str, str]:
+    """构造 Authorization 头。"""
+    return {"Authorization": f"Bearer {token}"}
+
+
+# ---------------------------------------------------------------------------
+# 登录
+# ---------------------------------------------------------------------------
+
+
+def test_login_success_returns_token_and_cookie(client: TestClient, db_session: Session) -> None:
+    """登录成功: 返回窗口凭证、用户信息并写入 HttpOnly Cookie。"""
+    seed_admin(db_session)
+    resp = login(client, "admin", ADMIN_PASSWORD, device="window-1")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["token"]
+    assert body["token_type"] == "bearer"
+    assert body["needs_takeover_confirm"] is False
+    user = body["user"]
+    assert user["username"] == "admin"
+    assert user["role"] == "admin"
+    assert user["force_password_change"] is True  # 种子管理员首登强制改密
+    assert client.cookies.get(SESSION_COOKIE_NAME) == body["token"]
+
+
+def test_login_failure_message_unified(client: TestClient, db_session: Session) -> None:
+    """登录失败统一文案: 不区分用户不存在/密码错误(均 401 + login_failed)。"""
+    seed_admin(db_session)
+    r1 = login(client, "nobody", "Wrong12345")
+    r2 = login(client, "admin", "Wrong12345")
+    assert r1.status_code == 401
+    assert r2.status_code == 401
+    e1 = r1.json()["error"]
+    e2 = r2.json()["error"]
+    assert e1["message_key"] == e2["message_key"] == "ies.diag.auth.login_failed"
+    assert "Wrong12345" not in r1.text  # 响应不泄露密码
+
+
+def test_login_rate_limit_locks_after_five_failures(client: TestClient, db_session: Session) -> None:
+    """登录限速: 5 次失败锁定 15 分钟, 锁定期间即使密码正确也拒绝(429)。"""
+    seed_admin(db_session)
+    for _ in range(5):
+        assert login(client, "admin", "Wrong12345").status_code == 401
+    resp = login(client, "admin", "Wrong12345")
+    assert resp.status_code == 429
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.locked"
+    # 锁定期间正确密码同样被拒
+    resp = login(client, "admin", ADMIN_PASSWORD)
+    assert resp.status_code == 429
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.locked"
+    # 限速按用户名隔离: 其他用户名不受影响
+    assert login(client, "alice", USER_PASSWORD).status_code == 401  # 用户不存在但未被锁定
+
+
+def test_login_success_resets_rate_limit(client: TestClient, db_session: Session) -> None:
+    """限速计数: 4 次失败后成功登录, 计数清零(再失败 4 次不触发锁定)。"""
+    seed_admin(db_session)
+    for _ in range(4):
+        login(client, "admin", "Wrong12345")
+    assert login(client, "admin", ADMIN_PASSWORD).status_code == 200
+    for _ in range(4):
+        assert login(client, "admin", "Wrong12345").status_code == 401
+    # 未达 5 次不锁定
+    assert login(client, "admin", "Wrong12345").status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 修改密码(首登强制改密)
+# ---------------------------------------------------------------------------
+
+
+def test_change_password_flow(client: TestClient, db_session: Session) -> None:
+    """改密: 旧密码错误/强度不足被拒; 成功后旧会话失效、强制改密标记清除。"""
+    seed_admin(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    token = r.json()["token"]
+    headers = bearer(token)
+
+    # 旧密码错误
+    resp = client.post(
+        "/api/auth/change-password",
+        json={"old_password": "Nope12345", "new_password": "NewAdmin123"},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.bad_old_password"
+
+    # 强度不足
+    resp = client.post(
+        "/api/auth/change-password",
+        json={"old_password": ADMIN_PASSWORD, "new_password": "short"},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.weak_password"
+
+    # 新旧密码相同
+    resp = client.post(
+        "/api/auth/change-password",
+        json={"old_password": ADMIN_PASSWORD, "new_password": ADMIN_PASSWORD},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.same_password"
+
+    # 改密成功
+    resp = client.post(
+        "/api/auth/change-password",
+        json={"old_password": ADMIN_PASSWORD, "new_password": "NewAdmin123"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+
+    # 凭证版本递增 → 旧会话立即失效
+    assert client.post("/api/auth/refresh", headers=headers).status_code == 401
+
+    # 新密码登录, 强制改密标记已清除
+    r2 = login(client, "admin", "NewAdmin123")
+    assert r2.status_code == 200
+    assert r2.json()["user"]["force_password_change"] is False
+
+
+# ---------------------------------------------------------------------------
+# 窗口接管(单活动窗口, RPD 3.3)
+# ---------------------------------------------------------------------------
+
+
+def test_window_takeover_and_confirm(client: TestClient, db_session: Session) -> None:
+    """接管: 新登录使旧窗口失效(pending); 确认接管后旧会话 revoked, 新凭证可用。"""
+    seed_admin(db_session)
+    r1 = login(client, "admin", ADMIN_PASSWORD, device="window-A")
+    token_a = r1.json()["token"]
+    assert r1.json()["needs_takeover_confirm"] is False
+
+    # 第二窗口登录 → 提示确认接管
+    r2 = login(client, "admin", ADMIN_PASSWORD, device="window-B")
+    token_b = r2.json()["token"]
+    assert r2.json()["needs_takeover_confirm"] is True
+
+    # 旧窗口凭证立即失效(取消防止新操作)
+    assert client.post("/api/auth/refresh", headers=bearer(token_a)).status_code == 401
+
+    # 新窗口确认接管 → 返回全新凭证
+    r3 = client.post("/api/auth/confirm-takeover", headers=bearer(token_b))
+    assert r3.status_code == 200
+    token_c = r3.json()["token"]
+    assert token_c != token_b
+
+    # 旧 B 凭证失效, 新 C 凭证可用
+    assert client.post("/api/auth/refresh", headers=bearer(token_b)).status_code == 401
+    assert client.post("/api/auth/refresh", headers=bearer(token_c)).status_code == 200
+
+    # 数据库状态: A revoked → B revoked → C active, 且 replaced_by 指向后继会话
+    sessions = list(db_session.execute(select(WindowSession).order_by(WindowSession.id)).scalars())
+    assert [s.status for s in sessions] == ["revoked", "revoked", "active"]
+    assert sessions[0].replaced_by_session_id == sessions[2].id
+    assert sessions[1].replaced_by_session_id == sessions[2].id
+
+
+def test_takeover_pending_session_revoked_on_next_login(client: TestClient, db_session: Session) -> None:
+    """连续接管: 第三次登录时, 更早的 pending 会话被撤销(满足每用户至多一条 pending)。"""
+    seed_admin(db_session)
+    r1 = login(client, "admin", ADMIN_PASSWORD)
+    assert r1.status_code == 200
+    r2 = login(client, "admin", ADMIN_PASSWORD)
+    assert r2.status_code == 200
+    r3 = login(client, "admin", ADMIN_PASSWORD)
+    assert r3.status_code == 200
+    assert r3.json()["needs_takeover_confirm"] is True
+    sessions = list(db_session.execute(select(WindowSession).order_by(WindowSession.id)).scalars())
+    statuses = [s.status for s in sessions]
+    # 第一次登录的会话最终为 revoked, 当前会话 active, 至多一条 pending
+    assert statuses.count("active") == 1
+    assert statuses.count("takeover_pending") <= 1
+    assert statuses[0] == "revoked"
+
+
+# ---------------------------------------------------------------------------
+# 登出 / 续期 / 过期
+# ---------------------------------------------------------------------------
+
+
+def test_logout_revokes_session(client: TestClient, db_session: Session) -> None:
+    """登出: 会话撤销、Cookie 清除, 凭证不再可用, 写 logout 审计。"""
+    seed_admin(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    token = r.json()["token"]
+    headers = bearer(token)
+    resp = client.post("/api/auth/logout", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    # 服务端会话已撤销, 且浏览器 Cookie 被清除
+    assert client.post("/api/auth/refresh", headers=headers).status_code == 401
+    assert client.cookies.get(SESSION_COOKIE_NAME) is None
+    events = list(db_session.execute(select(AuthEvent)).scalars())
+    assert any(e.event_type == "logout" for e in events)
+
+
+def test_refresh_extends_session(client: TestClient, db_session: Session) -> None:
+    """会话续期: 返回新过期时刻且原会话仍可用。"""
+    seed_admin(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    token = r.json()["token"]
+    resp = client.post("/api/auth/refresh", headers=bearer(token))
+    assert resp.status_code == 200
+    assert resp.json()["expires_at"]
+    assert client.post("/api/auth/refresh", headers=bearer(token)).status_code == 200
+
+
+def test_expired_session_rejected(client: TestClient, db_session: Session) -> None:
+    """过期校验: 会话过期后请求被拒(401)且会话置 expired 终态。"""
+    seed_admin(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    token = r.json()["token"]
+    session = db_session.execute(select(WindowSession)).scalar_one()
+    session.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    db_session.commit()
+    resp = client.post("/api/auth/refresh", headers=bearer(token))
+    assert resp.status_code == 401
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.session_invalid"
+    db_session.refresh(session)
+    assert session.status == "expired"
+
+
+def test_missing_or_invalid_token_rejected(client: TestClient, db_session: Session) -> None:
+    """缺少/伪造凭证: 一律 401 session_invalid/required。"""
+    seed_admin(db_session)
+    assert client.post("/api/auth/refresh").status_code == 401
+    resp = client.post("/api/auth/refresh", headers=bearer("forged-token"))
+    assert resp.status_code == 401
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.session_invalid"
+
+
+# ---------------------------------------------------------------------------
+# 管理员: 重置密码 / 停用 / 启用 / 用户列表 / 权限校验
+# ---------------------------------------------------------------------------
+
+
+def test_admin_reset_password_invalidates_sessions(client: TestClient, db_session: Session) -> None:
+    """管理员重置密码: 目标用户全部会话失效, 临时密码首登强制改密。"""
+    seed_admin(db_session)
+    alice = seed_engineer(db_session)
+    r = login(client, "alice", USER_PASSWORD)
+    token = r.json()["token"]
+    headers = bearer(token)
+    assert client.post("/api/auth/refresh", headers=headers).status_code == 200
+
+    r2 = login(client, "admin", ADMIN_PASSWORD)
+    admin_headers = bearer(r2.json()["token"])
+    resp = client.post(
+        f"/api/auth/users/{alice.id}/reset-password",
+        json={"new_password": "Temp12345"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+
+    # 旧会话已失效
+    assert client.post("/api/auth/refresh", headers=headers).status_code == 401
+
+    # 临时密码登录 → 强制改密
+    r3 = login(client, "alice", "Temp12345")
+    assert r3.status_code == 200
+    assert r3.json()["user"]["force_password_change"] is True
+
+    # 原密码已不可用
+    assert login(client, "alice", USER_PASSWORD).status_code == 401
+
+
+def test_admin_deactivate_reactivate(client: TestClient, db_session: Session) -> None:
+    """停用: 会话立即失效且登录被拒; 重新启用后恢复登录。"""
+    seed_admin(db_session)
+    alice = seed_engineer(db_session)
+    r = login(client, "alice", USER_PASSWORD)
+    headers = bearer(r.json()["token"])
+    r2 = login(client, "admin", ADMIN_PASSWORD)
+    admin_headers = bearer(r2.json()["token"])
+
+    resp = client.post(f"/api/auth/users/{alice.id}/deactivate", headers=admin_headers)
+    assert resp.status_code == 200
+    # 停用后会话立即失效
+    assert client.post("/api/auth/refresh", headers=headers).status_code == 401
+    # 登录被拒(统一文案, 不区分原因)
+    r3 = login(client, "alice", USER_PASSWORD)
+    assert r3.status_code == 401
+    assert r3.json()["error"]["message_key"] == "ies.diag.auth.login_failed"
+
+    resp = client.post(f"/api/auth/users/{alice.id}/reactivate", headers=admin_headers)
+    assert resp.status_code == 200
+    assert login(client, "alice", USER_PASSWORD).status_code == 200
+
+
+def test_admin_cannot_deactivate_self(client: TestClient, db_session: Session) -> None:
+    """管理员不能停用自己的账号(避免管理员自锁)。"""
+    seed_admin(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    admin_headers = bearer(r.json()["token"])
+    admin = db_session.execute(select(identity.User).where(identity.User.username == "admin")).scalar_one()
+    resp = client.post(f"/api/auth/users/{admin.id}/deactivate", headers=admin_headers)
+    assert resp.status_code == 403
+
+
+def test_admin_users_list_and_permission(client: TestClient, db_session: Session) -> None:
+    """用户列表: 管理员可见全部; 普通用户访问被拒(403)。"""
+    seed_admin(db_session)
+    seed_engineer(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    resp = client.get("/api/auth/users", headers=bearer(r.json()["token"]))
+    assert resp.status_code == 200
+    names = [u["username"] for u in resp.json()["users"]]
+    assert names == ["admin", "alice"]
+
+    r2 = login(client, "alice", USER_PASSWORD)
+    alice_headers = bearer(r2.json()["token"])
+    assert client.get("/api/auth/users", headers=alice_headers).status_code == 403
+    resp = client.put(
+        "/api/auth/settings", json={"registration_enabled": True}, headers=alice_headers
+    )
+    assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 自助注册开关
+# ---------------------------------------------------------------------------
+
+
+def test_register_toggle(client: TestClient, db_session: Session) -> None:
+    """注册开关: 默认关闭(403); 管理员开启后只能注册工程师; 重名冲突 409。"""
+    seed_admin(db_session)
+    # 默认关闭
+    resp = client.post("/api/auth/register", json={"username": "bob", "password": "Bob12345"})
+    assert resp.status_code == 403
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.registration_disabled"
+
+    # 管理员开启(写审计)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    admin_headers = bearer(r.json()["token"])
+    resp = client.put("/api/auth/settings", json={"registration_enabled": True}, headers=admin_headers)
+    assert resp.status_code == 200
+    assert resp.json()["registration_enabled"] is True
+    resp = client.get("/api/auth/settings", headers=admin_headers)
+    assert resp.status_code == 200
+    assert resp.json()["registration_enabled"] is True
+
+    # 注册成功且角色为工程师
+    resp = client.post("/api/auth/register", json={"username": "bob", "password": "Bob12345"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["role"] == "engineer"
+    assert body["force_password_change"] is False
+
+    # 重名冲突
+    resp = client.post("/api/auth/register", json={"username": "bob", "password": "Bob23456"})
+    assert resp.status_code == 409
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.username_taken"
+
+    # 注册用户可登录
+    assert login(client, "bob", "Bob12345").status_code == 200
+
+    # 关闭后再次拒绝
+    resp = client.put("/api/auth/settings", json={"registration_enabled": False}, headers=admin_headers)
+    assert resp.status_code == 200
+    resp = client.post("/api/auth/register", json={"username": "carol", "password": "Carol12345"})
+    assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 会话服务: 批量过期 / 撤销其他会话(API 测试未直接覆盖的服务函数)
+# ---------------------------------------------------------------------------
+
+
+def test_service_expire_sessions(client: TestClient, db_session: Session) -> None:
+    """expire_sessions: 过期的活动会话批量置为 expired, 之后可正常重新登录。"""
+    seed_admin(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    token = r.json()["token"]
+    session = db_session.execute(select(WindowSession)).scalar_one()
+    session.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    db_session.commit()
+    assert identity.expire_sessions(db_session) == 1
+    db_session.refresh(session)
+    assert session.status == "expired"
+    assert client.post("/api/auth/refresh", headers=bearer(token)).status_code == 401
+    assert login(client, "admin", ADMIN_PASSWORD).status_code == 200
+
+
+def test_service_revoke_other_sessions(client: TestClient, db_session: Session) -> None:
+    """revoke_other_sessions: 撤销指定会话以外的全部活动/待接管会话。"""
+    seed_admin(db_session)
+    r1 = login(client, "admin", ADMIN_PASSWORD)
+    token_a = r1.json()["token"]
+    r2 = login(client, "admin", ADMIN_PASSWORD)
+    token_b = r2.json()["token"]
+    user = db_session.execute(select(identity.User).where(identity.User.username == "admin")).scalar_one()
+    keep = db_session.execute(
+        select(WindowSession).where(WindowSession.session_token_hash == identity.token_hash(token_b))
+    ).scalar_one()
+    assert identity.revoke_other_sessions(db_session, user, keep_session_id=keep.id) == 1
+    # 保留的会话仍可用, 被撤销的会话不可用
+    assert client.post("/api/auth/refresh", headers=bearer(token_b)).status_code == 200
+    assert client.post("/api/auth/refresh", headers=bearer(token_a)).status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 审计
+# ---------------------------------------------------------------------------
+
+
+def test_auth_events_recorded(client: TestClient, db_session: Session) -> None:
+    """登录成功/失败/登出/改密/接管/重置/停用均写入 auth_events 审计。"""
+    seed_admin(db_session)
+    alice = seed_engineer(db_session)
+    login(client, "admin", ADMIN_PASSWORD, device="audit-window")
+    login(client, "admin", "Wrong12345")
+    r = login(client, "alice", USER_PASSWORD)
+    token = r.json()["token"]
+    headers = bearer(token)
+    client.post(
+        "/api/auth/change-password",
+        json={"old_password": USER_PASSWORD, "new_password": "Alice9999"},
+        headers=headers,
+    )
+    # 改密后旧凭证已失效, 需重新登录后再登出
+    r1b = login(client, "alice", "Alice9999")
+    token_b = r1b.json()["token"]
+    client.post("/api/auth/logout", headers=bearer(token_b))
+
+    r2 = login(client, "admin", ADMIN_PASSWORD)
+    admin_headers = bearer(r2.json()["token"])
+    client.post(f"/api/auth/users/{alice.id}/deactivate", headers=admin_headers)
+
+    types = [e.event_type for e in db_session.execute(select(AuthEvent)).scalars()]
+    for expected in (
+        "login_success",
+        "login_failure",
+        "logout",
+        "password_change",
+        "account_disabled",
+        "session_takeover",
+    ):
+        assert expected in types, f"缺少审计事件: {expected}"
