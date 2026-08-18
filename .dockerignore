@@ -1,0 +1,10 @@
+data/
+.git/
+node_modules/
+dist/
+**/__pycache__/
+**/*.pyc
+.claude/
+docs/
+IES-Plan-Design-Input.rpd
+LICENSE

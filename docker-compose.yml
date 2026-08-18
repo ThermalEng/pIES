@@ -1,0 +1,93 @@
+# IES Plan - 本地单机部署编排
+# 组件: PostgreSQL(事务事实) / Redis(可重建状态) / backend API / worker / web(nginx)
+# 数据卷位于 ./data, 容器重建不丢数据
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${IESPLAN_DB_NAME:-iesplan}
+      POSTGRES_USER: ${IESPLAN_DB_USER:-iesplan}
+      POSTGRES_PASSWORD: ${IESPLAN_DB_PASSWORD:-iesplan_dev_password}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${IESPLAN_DB_USER:-iesplan} -d ${IESPLAN_DB_NAME:-iesplan}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    command: uvicorn iesplan.main:app --host 0.0.0.0 --port 8000 --workers 2
+    environment:
+      IESPLAN_DB_URL: postgresql+psycopg://${IESPLAN_DB_USER:-iesplan}:${IESPLAN_DB_PASSWORD:-iesplan_dev_password}@postgres:5432/${IESPLAN_DB_NAME:-iesplan}
+      IESPLAN_REDIS_URL: redis://redis:6379/0
+      IESPLAN_DATA_DIR: /data
+      IESPLAN_SECRET_KEY: ${IESPLAN_SECRET_KEY:-dev-only-secret-change-me}
+      IESPLAN_APP_URL: http://localhost:8080
+    volumes:
+      - ./data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: python -m iesplan.worker.main
+    environment:
+      IESPLAN_DB_URL: postgresql+psycopg://${IESPLAN_DB_USER:-iesplan}:${IESPLAN_DB_PASSWORD:-iesplan_dev_password}@postgres:5432/${IESPLAN_DB_NAME:-iesplan}
+      IESPLAN_REDIS_URL: redis://redis:6379/0
+      IESPLAN_DATA_DIR: /data
+      IESPLAN_SECRET_KEY: ${IESPLAN_SECRET_KEY:-dev-only-secret-change-me}
+      IESPLAN_APP_URL: http://localhost:8080
+      IESPLAN_WORKER_TYPE: compute
+    volumes:
+      - ./data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  io_worker:
+    build: ./backend
+    command: python -m iesplan.worker.main
+    environment:
+      IESPLAN_DB_URL: postgresql+psycopg://${IESPLAN_DB_USER:-iesplan}:${IESPLAN_DB_PASSWORD:-iesplan_dev_password}@postgres:5432/${IESPLAN_DB_NAME:-iesplan}
+      IESPLAN_REDIS_URL: redis://redis:6379/0
+      IESPLAN_DATA_DIR: /data
+      IESPLAN_SECRET_KEY: ${IESPLAN_SECRET_KEY:-dev-only-secret-change-me}
+      IESPLAN_APP_URL: http://localhost:8080
+      IESPLAN_WORKER_TYPE: io
+    volumes:
+      - ./data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    ports:
+      - "${IESPLAN_PORT:-8080}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

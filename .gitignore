@@ -1,0 +1,20 @@
+# 运行时数据(数据库、对象存储、日志)
+data/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+# Node
+node_modules/
+dist/
+# IDE
+.idea/
+.vscode/
+*.swp
+# 本地设置
+.claude/settings.local.json
