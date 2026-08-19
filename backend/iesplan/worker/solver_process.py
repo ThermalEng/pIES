@@ -34,6 +34,7 @@ import pickle
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -113,62 +114,68 @@ def run_solver_isolated(
     }
     payload = base64.b64encode(pickle.dumps(request))
     t0 = time.monotonic()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "iesplan.worker.solver_process"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True,  # 独立进程组, 便于整体终止
-    )
+    # 子进程 stdout/stderr 走临时文件而非管道: 结果帧与求解日志可能远超管道
+    # 缓冲(64KB), 管道会在子进程写入时阻塞导致父进程超时误杀(帧被截断)。
+    # 文件承载无此问题; 执行期间 HiGHS 等库日志经子进程 dup2 汇入 stderr 文件。
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "iesplan.worker.solver_process"],
+            stdin=subprocess.PIPE, stdout=out_f, stderr=err_f,
+            start_new_session=True,  # 独立进程组, 便于整体终止
+        )
 
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write(payload)
-        proc.stdin.close()
-    except BrokenPipeError as exc:  # 子进程启动即失败
-        proc.wait()
-        return _fail_response(f"子进程启动失败: {exc}", timed_out=False, canceled=False, t0=t0)
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except BrokenPipeError as exc:  # 子进程启动即失败
+            proc.wait()
+            return _fail_response(f"子进程启动失败: {exc}", timed_out=False, canceled=False, t0=t0)
 
-    # 主线程轮询: 支持超时与取消事件(communicate 会阻塞, 无法响应取消)
-    deadline = t0 + float(timeout_sec) + TERM_GRACE_SECONDS
-    while True:
-        if cancel_event is not None and cancel_event.is_set():
-            _terminate_process(proc, timed_out=False)
-            return _fail_response("任务已取消, 子进程终止", timed_out=False, canceled=True, t0=t0)
-        if time.monotonic() > deadline:
-            _terminate_process(proc, timed_out=True)
+        # 主线程轮询: 支持超时与取消事件(communicate 会阻塞, 无法响应取消)
+        deadline = t0 + float(timeout_sec) + TERM_GRACE_SECONDS
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                _terminate_process(proc, timed_out=False)
+                return _fail_response("任务已取消, 子进程终止", timed_out=False, canceled=True, t0=t0)
+            if time.monotonic() > deadline:
+                _terminate_process(proc, timed_out=True)
+                return _fail_response(
+                    f"求解超时({timeout_sec:g} s), 已终止子进程", timed_out=True, canceled=False, t0=t0
+                )
+            if proc.poll() is not None:
+                break
+            time.sleep(_POLL_INTERVAL)
+
+        out_f.seek(0)
+        err_f.seek(0)
+        out = out_f.read()
+        err = err_f.read()
+        if proc.returncode != 0:
+            # 子进程退出码为信息性: 结果帧(stdout)才是权威(如 RLIMIT_AS 命中时
+            # 异常捕获后写帧再退出 1), 帧不可解析时回退 stderr
+            try:
+                response = pickle.loads(base64.b64decode(out))
+                if isinstance(response, dict) and not response.get("ok"):
+                    response["elapsed_s"] = round(time.monotonic() - t0, 3)
+                    return response
+            except Exception:  # noqa: BLE001 - 帧损坏, 回退 stderr
+                pass
             return _fail_response(
-                f"求解超时({timeout_sec:g} s), 已终止子进程", timed_out=True, canceled=False, t0=t0
+                f"子进程退出码 {proc.returncode}: {err.decode(errors='replace')[-2000:]}",
+                timed_out=False, canceled=False, t0=t0,
             )
-        if proc.poll() is not None:
-            break
-        time.sleep(_POLL_INTERVAL)
-
-    out = proc.stdout.read() if proc.stdout is not None else b""
-    err = proc.stderr.read() if proc.stderr is not None else b""
-    if proc.returncode != 0:
-        # 子进程退出码为信息性: 结果帧(stdout)才是权威(如 RLIMIT_AS 命中时
-        # 异常捕获后写帧再退出 1), 帧不可解析时回退 stderr
         try:
             response = pickle.loads(base64.b64decode(out))
-            if isinstance(response, dict) and not response.get("ok"):
-                response["elapsed_s"] = round(time.monotonic() - t0, 3)
-                return response
-        except Exception:  # noqa: BLE001 - 帧损坏, 回退 stderr
-            pass
-        return _fail_response(
-            f"子进程退出码 {proc.returncode}: {err.decode(errors='replace')[-2000:]}",
-            timed_out=False, canceled=False, t0=t0,
-        )
-    try:
-        response = pickle.loads(base64.b64decode(out))
-    except Exception as exc:  # noqa: BLE001 - 反序列化失败视为协议错误
-        return _fail_response(f"子进程响应解析失败: {exc}: {err.decode(errors='replace')[-500:]}",
-                              timed_out=False, canceled=False, t0=t0)
-    if not isinstance(response, dict):
-        return _fail_response("子进程响应格式非法", timed_out=False, canceled=False, t0=t0)
-    response["elapsed_s"] = round(time.monotonic() - t0, 3)
-    if not response.get("ok"):
-        logger.error("求解子进程失败: %s", response.get("error"))
-    return response
+        except Exception as exc:  # noqa: BLE001 - 反序列化失败视为协议错误
+            return _fail_response(f"子进程响应解析失败: {exc}: {err.decode(errors='replace')[-500:]}",
+                                  timed_out=False, canceled=False, t0=t0)
+        if not isinstance(response, dict):
+            return _fail_response("子进程响应格式非法", timed_out=False, canceled=False, t0=t0)
+        response["elapsed_s"] = round(time.monotonic() - t0, 3)
+        if not response.get("ok"):
+            logger.error("求解子进程失败: %s", response.get("error"))
+        return response
 
 
 def _fail_response(error: str, *, timed_out: bool, canceled: bool, t0: float) -> dict[str, Any]:
@@ -214,12 +221,14 @@ def _child_main() -> int:
     """子进程主入口: 读请求帧 → 设置资源限制 → 执行 → 写响应帧。
 
     设计约束: stdout 只承载响应帧(base64 pickle), 日志/错误一律 stderr。
+    注意: scipy HiGHS 等求解库会把日志行写入 fd 1(stdout), 直接污染协议帧,
+    因此执行期间将 fd 1 重定向到 fd 2(stderr), 帧写入保存的原 stdout fd。
     """
     raw = sys.stdin.buffer.read()
     try:
         request = pickle.loads(base64.b64decode(raw))
     except Exception as exc:  # noqa: BLE001
-        _child_write({"ok": False, "error": f"请求帧解析失败: {exc}"})
+        _child_write({"ok": False, "error": f"请求帧解析失败: {exc}"}, _STDOUT_FD_DEFAULT)
         return 2
 
     for path in request.get("pythonpath", []):
@@ -241,10 +250,21 @@ def _child_main() -> int:
     except (ImportError, ValueError, OSError):  # pragma: no cover - 平台差异
         pass
 
+    # 隔离执行期间的 fd 1: 库日志(HiGHS 等)重定向到 stderr, 帧走保存的 fd
+    saved_stdout = os.dup(1)
+    try:
+        sys.stdout.buffer.flush()
+    except (ValueError, OSError):  # pragma: no cover - 无缓冲等平台差异
+        pass
+    try:
+        os.dup2(2, 1)
+    except OSError:  # pragma: no cover - 极端环境下 fd 2 不可用
+        os.dup2(saved_stdout, 1)
+
     try:
         fn = _resolve_callable(request["fn"])
         result = fn(*request["args"])
-        _child_write({"ok": True, "result": result})
+        _child_write({"ok": True, "result": result}, saved_stdout)
         return 0
     except BaseException as exc:  # noqa: BLE001 - 子进程边界, 全量捕获转错误帧
         _child_write({
@@ -253,14 +273,26 @@ def _child_main() -> int:
             "canceled": False,
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc(),
-        })
+        }, saved_stdout)
         return 1
+    finally:
+        try:
+            os.close(saved_stdout)
+        except OSError:  # pragma: no cover
+            pass
 
 
-def _child_write(response: dict[str, Any]) -> None:
-    """子进程写响应帧(stdout 单行 base64)。"""
-    sys.stdout.buffer.write(base64.b64encode(pickle.dumps(response)))
-    sys.stdout.buffer.flush()
+def _child_write(response: dict[str, Any], fd: int = 1) -> None:
+    """子进程写响应帧(单行 base64, 写入指定 fd)。"""
+    frame = base64.b64encode(pickle.dumps(response))
+    try:
+        os.write(fd, frame)
+    except (BrokenPipeError, OSError):  # pragma: no cover - 父进程已退出
+        pass
+
+
+#: 请求帧解析失败等早期错误路径的默认帧 fd(此时尚未重定向 stdout)
+_STDOUT_FD_DEFAULT = 1
 
 
 if __name__ == "__main__":  # pragma: no cover - 子进程入口

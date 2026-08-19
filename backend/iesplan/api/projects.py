@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,7 @@ from iesplan.core.diagnostics import SEVERITY_BLOCKING
 from iesplan.core.errors import AppError
 from iesplan.db import get_db
 from iesplan.models.identity import User
+from iesplan.services import package as package_service
 from iesplan.services import project as project_service
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -356,3 +357,69 @@ def viewers_endpoint(
         project_service.remove_viewer(db, user, project_id, payload.user_id)
     db.commit()
     return {"members": project_service.list_members(db, project_id)}
+
+
+@router.get("/{project_id}/viewers", summary="查看者/成员清单")
+def list_viewers_endpoint(
+    project_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """当前有效成员清单(所有者/查看者; 需项目 view 权限)。"""
+    project_service.ensure_access(db, user, project_id, "view")
+    return {"members": project_service.list_members(db, project_id)}
+
+
+# ---------------------------------------------------------------------------
+# 项目包导入(U14/RPD 6: 校验提案 → 确认导入, 每次导入新项目身份)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/import", status_code=201, summary="导入项目包(创建导入提案)")
+def import_package_endpoint(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    file: Annotated[UploadFile, File(description="项目包 zip")],
+    idempotency_key: str | None = None,
+) -> dict:
+    """上传项目包并创建导入提案(校验 → 暂存对象 → 拟创建项目快照)。
+
+    相同源文件同一提议人幂等返回既有提案; 校验失败 400 + 校验报告。
+    """
+    data = file.file.read()
+    if not data:
+        raise _http_error(400, "API-REQ-001", "ies.error.empty_file", filename=file.filename or "")
+    proposal = package_service.import_proposal(
+        db, user, data, idempotency_key=idempotency_key
+    )
+    db.commit()
+    return {"proposal": _proposal_to_dict(proposal)}
+
+
+@router.post("/import/{proposal_id}/confirm", status_code=201, summary="确认导入提案")
+def confirm_import_endpoint(
+    proposal_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """确认导入: 创建新项目身份(导入者即所有者), 历史结果作为证据来源保留。"""
+    project = package_service.confirm_import(db, user, proposal_id)
+    db.commit()
+    return {
+        "project": project_service.project_to_dict(project),
+        "my_role": project_service.get_role(db, user, project_id=project.id),
+    }
+
+
+def _proposal_to_dict(proposal) -> dict:
+    """导入提案序列化(API 展示)。"""
+    return {
+        "id": proposal.id,
+        "project_id": proposal.project_id,
+        "proposer_id": proposal.proposer_id,
+        "status": proposal.status,
+        "source_hash": proposal.source_hash,
+        "review_summary": proposal.review_summary,
+        "review_errors": proposal.review_errors,
+        "created_at": proposal.created_at.isoformat() if proposal.created_at else None,
+    }

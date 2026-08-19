@@ -603,6 +603,11 @@ def evaluate_plan(
     else:
         ub[blk("p_bat_ch"): blk("p_bat_ch") + n] = 0.0
         ub[blk("p_bat_dis"): blk("p_bat_dis") + n] = 0.0
+    if not has_hp:
+        # 无热泵时供热/供冷输出必须钳制为 0: 否则热/冷平衡方程中出现
+        # 无成本无限出力(免费能量), 系统过小也不会判不可行(02 §4.5 HP 语义)
+        ub[blk("p_hp_heat"): blk("p_hp_heat") + n] = 0.0
+        ub[blk("p_hp_cool"): blk("p_hp_cool") + n] = 0.0
     for b in binary_blocks:
         lb[blk(b): blk(b) + n] = 0.0
         ub[blk(b): blk(b) + n] = 1.0

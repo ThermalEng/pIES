@@ -1196,6 +1196,10 @@ def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[
         ),
         "assessment": assessment_to_dict(db, assessment) if assessment is not None else None,
         "metrics_summary": content.get("metrics") if content else None,
+        # 证据内容中的候选解列表(方案评价单解 / 规划候选列表, 含 IRR/NPV)
+        "candidates": content.get("candidates") if content and isinstance(content.get("candidates"), list) else None,
+        "best": content.get("best") if content else None,
+        "plan_summary": content.get("summary") if content else None,
         "hourly_refs": content.get("hourly_refs") if content else None,
         "selection": (
             {"id": selection.id, "result_index_id": selection.result_index_id,

@@ -312,6 +312,12 @@ def refresh(request: Request, ctx: AuthCtx) -> dict:
     return {"ok": True, "expires_at": expires_at}
 
 
+@router.get("/me", response_model=UserOut, summary="当前登录用户(页面刷新恢复会话)")
+def me(ctx: AuthCtx) -> UserOut:
+    """返回当前会话对应的用户信息(前端刷新后恢复登录态)。"""
+    return _user_out(ctx.db, ctx.user)
+
+
 @router.post("/confirm-takeover", response_model=AuthResponse, summary="确认接管")
 def confirm_takeover(
     request: Request,
