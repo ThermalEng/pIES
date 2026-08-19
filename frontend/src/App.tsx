@@ -55,6 +55,25 @@ function PagePlaceholder(name: string): ComponentType {
   }
 }
 
+/** 页面加载失败页:显示错误并提供重试(替代永久"加载中", 避免旧构建缓存导致卡死)。 */
+function PageLoadError(name: string): ComponentType {
+  return function PageLoadErrorView() {
+    const { t } = useI18n()
+    return (
+      <div className="ies-page-placeholder" role="alert">
+        <Icon name="warning" size={32} />
+        <p>
+          {name} · {t('ies.common.load_failed')}
+        </p>
+        <Button variant="primary" onClick={() => window.location.reload()}>
+          {t('ies.common.retry')}
+        </Button>
+        <p className="ies-page-subtitle">{t('ies.common.load_failed_hint')}</p>
+      </div>
+    )
+  }
+}
+
 /** 惰性加载页面;模块缺失或加载失败时回退占位,保证应用可启动。 */
 function lazyPage(name: string) {
   return lazy(async () => {
@@ -65,7 +84,8 @@ function lazyPage(name: string) {
       if (!mod.default) return { default: PagePlaceholder(name) }
       return mod
     } catch {
-      return { default: PagePlaceholder(name) }
+      // 构建产物更新后旧 chunk 哈希失效: 显示可重试错误页, 而非永久"加载中"
+      return { default: PageLoadError(name) }
     }
   })
 }
