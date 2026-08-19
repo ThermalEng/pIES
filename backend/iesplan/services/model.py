@@ -164,11 +164,23 @@ def _port_name(carrier: str, direction: str) -> str:
     return f"{carrier}_{direction}" if direction in ("in", "out") else carrier
 
 
-def _port_directions(spec: DeviceTypeSpec) -> dict[str, str]:
-    """设备类型的载体 → 端口方向(确定性): 已登记类型用业务表, 其余按 is_load 推导。"""
+def _port_directions(spec: DeviceTypeSpec, params: dict | None = None) -> dict[str, str]:
+    """设备类型的载体 → 端口方向(确定性): 已登记类型用业务表, 其余按 is_load 推导。
+
+    热泵按 mode 参数裁剪端口: heating 只生成 heat 端口, cooling 只生成 cool 端口,
+    both(默认)生成两类端口 —— 避免未启用的冷/热载体成为拓扑校验的孤立载体
+    (PARAM-UNIT-003 能源不平衡误报)。
+    """
     configured = _DEVICE_PORT_DIRECTIONS.get(spec.type_id)
     if configured is not None:
-        return {c: d for c, d in configured.items() if c in CARRIER_PORT_TYPE}
+        dirs = {c: d for c, d in configured.items() if c in CARRIER_PORT_TYPE}
+        if spec.type_id == "ies.device.heat_pump":
+            mode = (params or {}).get("mode", "both")
+            if mode == "heating":
+                dirs.pop("cool", None)
+            elif mode == "cooling":
+                dirs.pop("heat", None)
+        return dirs
     if spec.is_load:
         return {c: "in" for c in spec.energy_carriers if c in CARRIER_PORT_TYPE}
     return {c: "out" for c in spec.energy_carriers if c in CARRIER_PORT_TYPE}
@@ -585,8 +597,9 @@ def create_device(
     )
     db.add(device)
     db.flush()
-    # 按设备类型能源载体生成端口(如 heat_pump → electric_in/heat_out/cool_out)
-    for carrier, direction in _port_directions(spec).items():
+    # 按设备类型能源载体生成端口(如 heat_pump → electric_in/heat_out/cool_out;
+    # 热泵按 mode 参数裁剪未启用的冷/热载体端口)
+    for carrier, direction in _port_directions(spec, params).items():
         db.add(
             Port(
                 device_id=device.id,
