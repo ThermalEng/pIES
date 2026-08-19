@@ -305,7 +305,10 @@ def _resolve_project_inputs(
     返回 (version, content): version 为 None 表示未固化(仅读草稿内容)。
     草稿与版本内容的领域字段(模型/配置/数据集绑定)一致, 仅差命令簿记,
     因此固化的 content 可直接用于快照组装。
+    已有版本但草稿领域内容已变更(如用户修改模型/参数)时版本不再新鲜,
+    必须按当前草稿重新固化, 否则后续任务会静默运行旧版本输入。
     """
+    version = None
     if project.current_version_id is not None:
         version = db.get(ProjectVersion, project.current_version_id)
         if version is None:
@@ -316,6 +319,9 @@ def _resolve_project_inputs(
                 message_key="ies.diag.store.corrupt",
                 location={"object_type": "project", "object_id": project.id},
             )
+        if not project_service.current_version_matches_draft(db, project):
+            version = None  # 草稿已变更: 需重新固化(首次提交自动固化后亦然)
+    if version is not None:
         return version, _load_content_by_hash(db, version.content_hash)
     draft = _get_current_draft(db, project)
     content = _load_content_by_hash(db, draft.content_hash)

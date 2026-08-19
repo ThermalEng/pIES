@@ -6,8 +6,8 @@
 - users / credentials / window_sessions / auth_events 的写入与状态迁移均在此完成;
 - 密码只存 bcrypt 哈希, 会话令牌只存 sha256 摘要(库内无明文令牌);
 - 登录限速: 同一用户名 5 次失败锁定 15 分钟(进程内存状态);
-- 单活动窗口(RPD 3.3): 新登录使旧 active 会话置为 takeover_pending,
-  确认接管后旧会话 revoked;
+- 单活动窗口(RPD 3.3): 新登录使旧 active 会话撤销, 新会话以 takeover_pending
+  创建, 确认接管后当前会话保留为 active(不轮换凭证);
 - 凭证变更(改密/重置)递增 users.credential_version, 使全部旧会话失效;
 - 业务错误统一抛 AppError(+ 诊断 message_key, 前缀 ies.diag.auth.*),
   响应不泄露堆栈/哈希/明文。
@@ -950,48 +950,56 @@ def confirm_takeover(
     *,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> tuple[WindowSession, str]:
-    """确认接管(RPD 3.3): 撤销旧 pending 会话, 轮换当前会话并签发新窗口凭证。
+) -> WindowSession:
+    """确认接管(RPD 3.3 / 01 §1.5): 保留当前会话并转为 active。
 
-    新窗口在确认接管(已重新加载服务端最新修订)后, 撤销全部旧会话,
-    并返回全新的会话令牌(旧凭证立即失效)。
+    接管流程(schema 01 §1.5): 新登录使旧会话撤销、新会话以 takeover_pending
+    创建(H-01: 确认前无业务权限); 用户确认接管后, 当前待接管会话直接保留
+    为 active(状态列级迁移, 不轮换凭证) —— 客户端既有 Cookie/Bearer 凭证
+    立即生效, 不再依赖响应 Set-Cookie 替换凭证, 避免"确认接管后旧 session
+    仍处于 takeover_pending"导致全部写 API 被拒。
+
+    其余 pending/active 会话(理论上至多各一条, 部分唯一索引保证)一并撤销,
+    保持单活动窗口不变量。返回保留的活动会话。
     """
     now = utcnow()
-    pending = list(
+    # 并发防御: 确认前被新登录撤销的会话不再恢复(重新读取最新状态)
+    current = db.get(WindowSession, current_session.id)
+    if current is None or current.status not in ("takeover_pending", "active"):
+        raise SessionInvalidError()
+    others = list(
         db.execute(
             select(WindowSession).where(
                 WindowSession.user_id == user.id,
-                WindowSession.status == "takeover_pending",
+                WindowSession.status.in_(_ACTIVE_STATUSES),
+                WindowSession.id != current.id,
             )
         ).scalars()
     )
-    # 先撤销旧会话(pending + 当前), 再签发新凭证, 避免触犯 active/pending 唯一索引
-    for old in pending:
+    # 先撤销其余 pending/active 会话, 再把当前会话置为 active
+    # (状态迁移顺序避免触犯 active/pending 部分唯一索引)
+    for old in others:
         _revoke_session(old, now, user.id)
-    _revoke_session(current_session, now, user.id)
+    if current.status != "active":
+        current.status = "active"
     db.flush()
-    new_session, token = _new_window_session(user, now)
-    db.add(new_session)
-    db.flush()
-    # 新会话 id 已生成, 补写被替代会话的 replaced_by 指针(接管追溯)
-    for old in pending:
-        old.replaced_by_session_id = new_session.id
-    current_session.replaced_by_session_id = new_session.id
+    for old in others:
+        old.replaced_by_session_id = current.id
     record_auth_event(
         db,
         "session_takeover",
         user_id=user.id,
-        session_id=new_session.id,
+        session_id=current.id,
         ip=ip,
         user_agent=user_agent,
         detail={
-            "from_session_id": current_session.id,
-            "to_session_id": new_session.id,
+            "from_session_id": None,
+            "to_session_id": current.id,
             "reason": "confirm_takeover",
         },
     )
     db.commit()
-    return new_session, token
+    return current
 
 
 def get_session_by_token(db: Session, token: str) -> WindowSession | None:

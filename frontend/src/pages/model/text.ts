@@ -47,6 +47,7 @@ const TEXTS: Record<string, Entry> = {
   'save.conflict_reload': { zh: '加载服务器版本', en: 'Load server version' },
   'save.conflict_force': { zh: '仍要覆盖保存', en: 'Save anyway' },
   'save.no_revision': { zh: '修订号未知', en: 'Revision unknown' },
+  'save.wait': { zh: '设备正在落库,请稍候再连', en: 'Device is syncing, reconnect shortly' },
 
   // 端口与连接
   'port.solar': { zh: '太阳辐射', en: 'Solar' },
@@ -87,6 +88,7 @@ const TEXTS: Record<string, Entry> = {
   'sidebar.restore_default': { zh: '恢复默认值', en: 'Restore default' },
   'sidebar.help': { zh: '参数帮助', en: 'Parameter help' },
   'sidebar.param_invalid': { zh: '取值应在 [{min}, {max}] 内', en: 'Value must be within [{min}, {max}]' },
+  'sidebar.param_unset': { zh: '(不设置)', en: '(unset)' },
   'sidebar.param_opt': { zh: '可作优化变量', en: 'Optimizable' },
 
   // 诊断

@@ -508,6 +508,17 @@ export default function ResultsPage() {
     setExportOk(false)
     setExportBusy('excel')
     try {
+      // 预热评估缓存:ResultsPage 进入时已调用 api.results.assessments 填充
+      // pkgAssessmentCache(若评估历史为空,resolveAssessmentId 内部会主动触发 full 评估)。
+      const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
+      const taskId = entry ? entry.task.id : 0
+      if (taskId > 0) {
+        try {
+          await api.results.assessments(projectId, taskId)
+        } catch {
+          // 静默:resolveAssessmentId 会再尝试一次
+        }
+      }
       // lang 为前端约定附加参数(后端应按此生成对应语言模板,缺省 zh)
       const input = {
         project_id: projectId,
@@ -525,7 +536,7 @@ export default function ResultsPage() {
     } finally {
       setExportBusy(null)
     }
-  }, [projectId, selectedPkgId, exportLang])
+  }, [projectId, selectedPkgId, exportLang, entries])
 
   const exportPackage = useCallback(async () => {
     setExportError(null)
@@ -959,7 +970,6 @@ export default function ResultsPage() {
                         }
                         icon={a[`dimension_${d.key}`] === 'pass' ? 'check' : a[`dimension_${d.key}`] === 'fail' ? 'cross' : 'question'}
                         label={t(d.labelKey)}
-                        shape="circle"
                       />
                     ))}
                   </div>

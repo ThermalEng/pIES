@@ -80,7 +80,13 @@ export function translateDiagnostic(diag: Diagnostic): string {
 
 /** 将后端错误信封(ApiError)渲染为文案。 */
 export function translateError(err: ApiError): string {
-  return translate(err.message_key, err.params)
+  const raw = translate(err.message_key, err.params)
+  // 兜底: 文案含未替换的 {reason} 占位时,使用 err.code + status 注入,避免把模板原样返回。
+  if (raw.includes('{reason}')) {
+    const fallbackReason = err.code && err.code !== 'API-UNKNOWN' ? err.code : `HTTP ${err.status || 0}`
+    return raw.replace(/\{reason\}/g, fallbackReason)
+  }
+  return raw
 }
 
 interface I18nContextValue {

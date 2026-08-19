@@ -245,8 +245,9 @@ export function carrierLabelKey(carrier: EnergyCarrier): string {
 // 参数默认值
 // ---------------------------------------------------------------------------
 
-/** 按设备属性(存量/新增)取参数默认值:存量优先 existing_default。 */
-export function defaultParamValue(spec: ParameterSpec, kind: DeviceKind): number | null {
+/** 按设备属性(存量/新增)取参数默认值:存量优先 existing_default。
+ *  枚举参数(如 mode)默认值为字符串字面量,数值参数为 number。 */
+export function defaultParamValue(spec: ParameterSpec, kind: DeviceKind): number | string | null {
   if (kind === 'existing' && spec.existing_default !== null) return spec.existing_default
   return spec.default
 }

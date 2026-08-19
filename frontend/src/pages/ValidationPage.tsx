@@ -45,7 +45,7 @@ function ValidationStatusBadge({ status }: { status: ValidationStatus }) {
     blocked: { variant: 'danger', icon: 'stop', shape: 'square' },
   }
   const cfg = map[status]
-  return <Badge label={pt(`ies.validation.status_${status}`)} variant={cfg.variant} icon={cfg.icon} shape={cfg.shape} />
+  return <Badge label={pt(`ies.validation.status_${status}`)} variant={cfg.variant} icon={cfg.icon}  />
 }
 
 export default function ValidationPage() {
@@ -182,7 +182,7 @@ export default function ValidationPage() {
         </p>
         <div className="ies-flex" style={{ marginTop: 'var(--ies-space-3)', flexWrap: 'wrap', gap: 'var(--ies-space-2)' }}>
           {baselineConfirmed ? (
-            <Badge label={pt('ies.validation.baseline_confirmed')} variant="success" icon="check" shape="circle" />
+            <Badge label={pt('ies.validation.baseline_confirmed')} variant="success" icon="check" />
           ) : (
             <Button icon="check" onClick={() => void confirmBaseline()} loading={confirming} disabled={running}>
               {pt('ies.validation.baseline_confirm')}

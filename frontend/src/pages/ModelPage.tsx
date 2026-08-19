@@ -14,7 +14,7 @@
  * - 工具栏:缩放 / 适应视图 / 校验(调用 graph/validate 显示诊断列表,可定位)。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
 import {
   Background,
@@ -30,7 +30,7 @@ import '@xyflow/react/dist/style.css'
 
 import { api } from '../api/client'
 import { ApiError } from '../types'
-import type { Diagnostic, DeviceTypeSpec, Fidelity } from '../types'
+import type { Diagnostic, DeviceTypeSpec, Fidelity, Port } from '../types'
 import { useI18n, translateDiagnostic, translateError } from '../i18n'
 import {
   Alert,
@@ -54,11 +54,11 @@ import {
   defaultDeviceName,
   defaultParamValue,
   deviceFromServer,
+  isLocalId,
   loadLayout,
   localId,
   parseHandle,
   saveLayout,
-  toSemanticContent,
 } from './model/canvasModel'
 import type { LocalConnection, LocalDevice, PortDef } from './model/canvasModel'
 import { lt } from './model/text'
@@ -75,19 +75,18 @@ interface IssueItem {
   deviceId?: string
 }
 
-const AUTOSAVE_DELAY_MS = 1200
+/** 参数规格(类型已在 types.ParameterSpec 声明 enum, 此处直接复用)。 */
+type ParamSpecExt = DeviceTypeSpec['parameters'][string]
+
+interface ExtendedDeviceTypeSpec extends Omit<DeviceTypeSpec, 'parameters'> {
+  parameters: Record<string, ParamSpecExt>
+}
+
 const CARRIER_COLOR: Record<string, string> = {
   electric: '#0e5cad',
   heat: '#c2410c',
   cool: '#0891b2',
   gas: '#8a5a00',
-}
-
-/** 服务器错误是否为保存冲突(修订号过期)。 */
-function isConflictError(err: unknown): boolean {
-  if (!(err instanceof ApiError)) return false
-  if (err.status === 409) return true
-  return /conflict|stale|revision/i.test(`${err.code} ${err.message_key}`)
 }
 
 /** 任意异常 → ApiError(供 translateError 渲染)。 */
@@ -120,10 +119,11 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const { screenToFlowPosition, zoomIn, zoomOut, fitView } = useReactFlow()
 
   // -- 注册表与模型状态 ------------------------------------------------
-  const [deviceTypes, setDeviceTypes] = useState<DeviceTypeSpec[] | null>(null)
+  const [deviceTypes, setDeviceTypes] = useState<ExtendedDeviceTypeSpec[] | null>(null)
   const [typesError, setTypesError] = useState(false)
   const [devices, setDevices] = useState<LocalDevice[]>([])
   const [connections, setConnections] = useState<LocalConnection[]>([])
+  const [ports, setPorts] = useState<Port[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -134,81 +134,21 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   // -- 保存 ------------------------------------------------------------
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [lastError, setLastError] = useState<string | null>(null)
-  const [conflictOpen, setConflictOpen] = useState(false)
-  const [tick, setTick] = useState(0)
 
   // -- 校验与连接诊断 --------------------------------------------------
   const [issues, setIssues] = useState<IssueItem[]>([])
   const [validateResult, setValidateResult] = useState<Diagnostic[] | null>(null)
   const [validating, setValidating] = useState(false)
   const [validateError, setValidateError] = useState<string | null>(null)
-
-  // -- 当前语义状态的引用(供防抖保存读取,避免闭包过期) ----------------
-  const stateRef = useRef({ devices, connections, revision: null as number | null })
-  stateRef.current.devices = devices
-  stateRef.current.connections = connections
-  const forceSaveRef = useRef(false)
-  const saveInFlightRef = useRef(false)
+  const [flash, setFlash] = useState<string | null>(null)
 
   const typeMap = useMemo(() => {
-    const map: Record<string, DeviceTypeSpec> = {}
+    const map: Record<string, ExtendedDeviceTypeSpec> = {}
     for (const spec of deviceTypes ?? []) map[spec.type_id] = spec
     return map
   }, [deviceTypes])
 
-  const specOf = useCallback((typeId: string): DeviceTypeSpec | null => typeMap[typeId] ?? null, [typeMap])
-
-  // -- 脏标记(触发自动保存) -------------------------------------------
-  const markDirty = useCallback(() => {
-    setSaveState('dirty')
-    setAutosave('dirty')
-    setTick((n) => n + 1)
-  }, [setAutosave])
-
-  // -- 保存:语义命令提交(updateDraft) ----------------------------------
-  const performSave = useCallback(async () => {
-    if (saveInFlightRef.current) return
-    saveInFlightRef.current = true
-    const force = forceSaveRef.current
-    forceSaveRef.current = false
-    setSaveState('saving')
-    setAutosave('saving')
-    try {
-      // 语义命令:command + graph 为纯拓扑内容(坐标被 toSemanticContent 排除);
-      // revision 为空表示"接受服务器当前修订"(首次保存/冲突后强制覆盖)。
-      const draft = await api.projects.updateDraft(projectId, {
-        command: 'model.set_graph',
-        revision: force ? null : stateRef.current.revision,
-        graph: toSemanticContent(stateRef.current.devices, stateRef.current.connections),
-      })
-      // 以服务器返回的最新修订号作为基线(冲突检测依据);
-      // 后端尚未实现/返回空信封时保留原修订号。
-      if (draft && typeof draft.revision === 'number') {
-        stateRef.current.revision = draft.revision
-      }
-      setSaveState('saved')
-      setAutosave('saved')
-      setConflictOpen(false)
-      setLastError(null)
-    } catch (err) {
-      const conflict = isConflictError(err)
-      setSaveState(conflict ? 'conflict' : 'error')
-      setAutosave('error')
-      setLastError(conflict ? lt('save.conflict') : translateError(toApiError(err)))
-      setConflictOpen(conflict)
-    } finally {
-      saveInFlightRef.current = false
-    }
-  }, [projectId, setAutosave])
-
-  // 自动保存(防抖):tick 变化且状态为 dirty 时启动定时器
-  useEffect(() => {
-    if (saveState !== 'dirty' || offline) return
-    const timer = window.setTimeout(() => {
-      void performSave()
-    }, AUTOSAVE_DELAY_MS)
-    return () => window.clearTimeout(timer)
-  }, [tick, saveState, offline, performSave])
+  const specOf = useCallback((typeId: string): ExtendedDeviceTypeSpec | null => typeMap[typeId] ?? null, [typeMap])
 
   // -- 加载 ------------------------------------------------------------
   const reloadGraph = useCallback(async () => {
@@ -217,7 +157,10 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       const graph = await api.model.getGraph(projectId)
       const layout = loadLayout(projectId)
       const deviceList = graph.devices.map((d, i) =>
-        deviceFromServer(d, layout[String(d.id)] ?? { x: 80 + (i % 4) * 80, y: 80 + Math.floor(i / 4) * 60 }),
+        // 缺省布局须保证节点互不重叠(节点宽 ≥190px 含端口手柄, 手柄外伸约 7px):
+        // 之前 80px 横距/60px 纵距的密集网格会让相邻节点盖住源端口,
+        // 源端口中心点被邻居节点的 .mp-node__type 命中, 连线手势无法开始。
+        deviceFromServer(d, layout[String(d.id)] ?? { x: 80 + (i % 4) * 260, y: 80 + Math.floor(i / 4) * 180 }),
       )
       const deviceById = new Map(deviceList.map((d) => [d.id, d]))
       const connectionList = graph.connections
@@ -225,19 +168,20 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         .filter((c): c is LocalConnection => c !== null)
       setDevices(deviceList)
       setConnections(connectionList)
+      setPorts(graph.ports)
       setLoadError(null)
     } catch (err) {
       // 后端未就绪/尚无图:以空画布继续(可本地编辑,保存时再校验)
       setLoadError(translateError(toApiError(err)))
       setDevices([])
       setConnections([])
+      setPorts([])
     } finally {
       setLoading(false)
       setSelectedDeviceId(null)
       setSelectedConnId(null)
       setValidateResult(null)
-      setConflictOpen(false)
-      setSaveState('idle')
+      setSaveState('saved')
       setAutosave('saved')
     }
   }, [projectId, setAutosave])
@@ -247,7 +191,11 @@ function ModelCanvas({ projectId }: { projectId: number }) {
     void api.model
       .deviceTypes()
       .then((types) => {
-        if (!cancelled) setDeviceTypes(types)
+        if (!cancelled) {
+          // 注册表 schema 携带 enum 字段,前端参数表单按 spec.enum 渲染下拉/单选。
+          const ext = types.map((t) => ({ ...t })) as ExtendedDeviceTypeSpec[]
+          setDeviceTypes(ext)
+        }
       })
       .catch(() => {
         if (!cancelled) setTypesError(true)
@@ -258,44 +206,84 @@ function ModelCanvas({ projectId }: { projectId: number }) {
     }
   }, [reloadGraph])
 
-  // -- 设备增删改 ------------------------------------------------------
+  // -- 设备增删改(写 SystemGraph) -------------------------------------
   const addDevice = useCallback(
-    (spec: DeviceTypeSpec, position: { x: number; y: number }) => {
-      const sameTypeCount = devices.filter((d) => d.deviceType === spec.type_id).length
-      const device: LocalDevice = {
-        id: localId(),
-        deviceType: spec.type_id,
-        kind: 'new',
-        name: defaultDeviceName(spec, sameTypeCount, locale),
-        params: buildDefaultParams(spec, 'new'),
-        fidelity: 'medium',
-        position,
+    async (spec: ExtendedDeviceTypeSpec, position: { x: number; y: number }) => {
+      try {
+        const sameTypeCount = devices.filter((d) => d.deviceType === spec.type_id).length
+        const name = defaultDeviceName(spec as DeviceTypeSpec, sameTypeCount, locale)
+        const params = buildDefaultParams(spec as DeviceTypeSpec, 'new')
+        const created = await api.model.addDevice(projectId, {
+          device_type: spec.type_id,
+          name,
+          params,
+          kind: 'new',
+          model_fidelity: 'medium',
+        })
+        const device: LocalDevice = {
+          id: String(created.id),
+          deviceType: spec.type_id,
+          kind: 'new',
+          name,
+          params,
+          fidelity: 'medium',
+          position,
+        }
+        setDevices((prev) => [...prev, device])
+        setSelectedDeviceId(device.id)
+        setSelectedConnId(null)
+        // 重新加载端口映射(新增设备后服务器侧会自动创建端口)
+        const graph = await api.model.getGraph(projectId)
+        setPorts(graph.ports)
+        setSaveState('saved')
+        setAutosave('saved')
+        setFlash(t('ies.modeling.device_added', { name }))
+        window.setTimeout(() => setFlash(null), 1800)
+      } catch (err) {
+        setLastError(translateError(toApiError(err)))
+        setSaveState('error')
+        setAutosave('error')
       }
-      setDevices((prev) => [...prev, device])
-      setSelectedDeviceId(device.id)
-      setSelectedConnId(null)
-      markDirty()
     },
-    [devices, locale, markDirty],
+    [devices, locale, projectId, setAutosave, t],
   )
 
   const patchDevice = useCallback(
-    (deviceId: string, patch: Partial<Omit<LocalDevice, 'id' | 'deviceType' | 'position'>>) => {
-      setDevices((prev) => prev.map((d) => (d.id === deviceId ? { ...d, ...patch } : d)))
-      markDirty()
+    async (deviceId: string, patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'fidelity' | 'params'>>) => {
+      try {
+        await api.model.updateDevice(projectId, Number(deviceId), {
+          name: patch.name,
+          params: patch.params,
+        })
+        setDevices((prev) => prev.map((d) => (d.id === deviceId ? { ...d, ...patch } : d)))
+        setSaveState('saved')
+        setAutosave('saved')
+      } catch (err) {
+        setLastError(translateError(toApiError(err)))
+        setSaveState('error')
+        setAutosave('error')
+      }
     },
-    [markDirty],
+    [projectId, setAutosave],
   )
 
   const deleteDevice = useCallback(
-    (deviceId: string) => {
-      setDevices((prev) => prev.filter((d) => d.id !== deviceId))
-      setConnections((prev) => prev.filter((c) => c.fromDeviceId !== deviceId && c.toDeviceId !== deviceId))
-      setSelectedDeviceId((cur) => (cur === deviceId ? null : cur))
-      setSelectedConnId(null)
-      markDirty()
+    async (deviceId: string) => {
+      try {
+        await api.model.deleteDevice(projectId, Number(deviceId))
+        setDevices((prev) => prev.filter((d) => d.id !== deviceId))
+        setConnections((prev) => prev.filter((c) => c.fromDeviceId !== deviceId && c.toDeviceId !== deviceId))
+        setSelectedDeviceId((cur) => (cur === deviceId ? null : cur))
+        setSelectedConnId(null)
+        setSaveState('saved')
+        setAutosave('saved')
+      } catch (err) {
+        setLastError(translateError(toApiError(err)))
+        setSaveState('error')
+        setAutosave('error')
+      }
     },
-    [markDirty],
+    [projectId, setAutosave],
   )
 
   // -- 连接 ------------------------------------------------------------
@@ -308,7 +296,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   )
 
   const handleConnect = useCallback(
-    (conn: RFConnection) => {
+    async (conn: RFConnection) => {
       if (!conn.source || !conn.target || !conn.sourceHandle || !conn.targetHandle) return
       const fromDevice = devices.find((d) => d.id === conn.source)
       const toDevice = devices.find((d) => d.id === conn.target)
@@ -317,43 +305,80 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       const toPort = parseHandle(conn.targetHandle)
       if (!fromPort || !toPort) return
       const result = checkConnection(fromDevice, fromPort, toDevice, toPort, connections)
-      if (result.ok) {
-        const carrier = fromPort.carrier
-        const newConn: LocalConnection = {
+      if (!result.ok) {
+        // 不兼容:生成可定位诊断(不调用服务器)
+        const message = incompatMessage(result.reason, fromDevice, fromPort, toDevice, toPort, connectionLabel)
+        const item: IssueItem = {
           id: localId(),
+          severity: 'error',
+          message,
+          deviceId: result.reason === 'type' || result.reason === 'direction' ? fromDevice.id : toDevice.id,
+        }
+        setIssues((prev) => [...prev.slice(-3), item])
+        return
+      }
+      // 服务器侧必须使用真实 port id;若本地设备为尚未落库的临时 id,先不连线
+      if (isLocalId(fromDevice.id) || isLocalId(toDevice.id)) {
+        const item: IssueItem = {
+          id: localId(),
+          severity: 'warning',
+          message: lt('save.wait'),
+          deviceId: fromDevice.id,
+        }
+        setIssues((prev) => [...prev.slice(-3), item])
+        return
+      }
+      const fromServerPort = ports.find((p) => p.device_id === Number(fromDevice.id) && p.direction === 'out')
+      const toServerPort = ports.find((p) => p.device_id === Number(toDevice.id) && p.direction === 'in')
+      if (!fromServerPort || !toServerPort) return
+      try {
+        const created = await api.model.connect(projectId, {
+          from_port_id: fromServerPort.id,
+          to_port_id: toServerPort.id,
+          conn_type: carrierToConnType(fromPort.carrier) ?? 'electric_line',
+        })
+        const newConn: LocalConnection = {
+          id: String(created.id),
           fromDeviceId: fromDevice.id,
           fromHandle: conn.sourceHandle,
           toDeviceId: toDevice.id,
           toHandle: conn.targetHandle,
-          carrier,
+          carrier: fromPort.carrier,
         }
         setConnections((prev) => [...prev, newConn])
         setSelectedConnId(newConn.id)
         setSelectedDeviceId(null)
         setIssues((prev) => prev.filter((i) => i.deviceId !== fromDevice.id && i.deviceId !== toDevice.id))
-        markDirty()
-        return
+        setSaveState('saved')
+        setAutosave('saved')
+      } catch (err) {
+        const item: IssueItem = {
+          id: localId(),
+          severity: 'error',
+          message: translateError(toApiError(err)),
+          deviceId: fromDevice.id,
+        }
+        setIssues((prev) => [...prev.slice(-3), item])
       }
-      // 不兼容:生成可定位诊断
-      const message = incompatMessage(result.reason, fromDevice, fromPort, toDevice, toPort, connectionLabel)
-      const item: IssueItem = {
-        id: localId(),
-        severity: 'error',
-        message,
-        deviceId: result.reason === 'type' || result.reason === 'direction' ? fromDevice.id : toDevice.id,
-      }
-      setIssues((prev) => [...prev.slice(-3), item])
     },
-    [devices, connections, connectionLabel, markDirty],
+    [devices, connections, ports, projectId, connectionLabel, setAutosave],
   )
 
   const disconnectConn = useCallback(
-    (connId: string) => {
-      setConnections((prev) => prev.filter((c) => c.id !== connId))
-      setSelectedConnId((cur) => (cur === connId ? null : cur))
-      markDirty()
+    async (connId: string) => {
+      try {
+        await api.model.disconnect(projectId, Number(connId))
+        setConnections((prev) => prev.filter((c) => c.id !== connId))
+        setSelectedConnId((cur) => (cur === connId ? null : cur))
+        setSaveState('saved')
+        setAutosave('saved')
+      } catch (err) {
+        setLastError(translateError(toApiError(err)))
+        setSaveState('error')
+        setAutosave('error')
+      }
     },
-    [markDirty],
+    [projectId, setAutosave],
   )
 
   // -- 布局(与拓扑分离:仅坐标,不触发脏标记) --------------------------
@@ -521,36 +546,14 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           <Button
             variant="primary"
             size="sm"
-            onClick={() => void performSave()}
-            disabled={saveState === 'saving' || offline}
+            onClick={() => void reloadGraph()}
+            disabled={loading || offline}
             title={offline ? lt('save.error') : undefined}
-            loading={saveState === 'saving'}
           >
-            {lt('save.button')}
+            {t('ies.common.refresh')}
           </Button>
         </div>
       </div>
-
-      {conflictOpen ? (
-        <Alert variant="error" title={lt('save.conflict')} closable onClose={() => setConflictOpen(false)}>
-          <p>{lt('save.conflict_banner')}</p>
-          <div className="ies-flex" style={{ marginTop: 'var(--ies-space-2)' }}>
-            <Button variant="secondary" size="sm" onClick={() => void reloadGraph()}>
-              {lt('save.conflict_reload')}
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => {
-                forceSaveRef.current = true
-                void performSave()
-              }}
-            >
-              {lt('save.conflict_force')}
-            </Button>
-          </div>
-        </Alert>
-      ) : null}
 
       {saveState === 'error' && lastError ? (
         <Alert variant="error" closable onClose={() => setLastError(null)}>
@@ -660,12 +663,27 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           ) : null}
         </div>
       </div>
+    {flash ? (
+        <div
+          role="status"
+          style={{
+            position: 'fixed',
+            right: 'var(--ies-space-5)',
+            bottom: 'var(--ies-space-5)',
+            zIndex: 90,
+          }}
+        >
+          <Alert variant="success" closable onClose={() => setFlash(null)}>
+            {flash}
+          </Alert>
+        </div>
+      ) : null}
     </div>
   )
 }
 
 /** 注册表缺失时兜底的空 spec(节点仍可渲染,参数表单为空)。 */
-const EMPTY_SPEC: DeviceTypeSpec = {
+const EMPTY_SPEC: ExtendedDeviceTypeSpec = {
   type_id: '',
   version: '',
   name_zh: '',
@@ -844,7 +862,7 @@ function DeviceSidebar({
   onClose,
 }: {
   device: LocalDevice
-  spec: DeviceTypeSpec
+  spec: ExtendedDeviceTypeSpec
   onPatch: (patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'fidelity' | 'params'>>) => void
   onDelete: () => void
   onClose: () => void
@@ -865,8 +883,29 @@ function DeviceSidebar({
 
   const paramKeys = useMemo(() => Object.keys(spec.parameters), [spec])
 
-  const commitParam = (key: string, specParam: DeviceTypeSpec['parameters'][string]) => {
+  const commitParam = (key: string, specParam: ParamSpecExt) => {
     const raw = (paramDrafts[key] ?? '').trim()
+    // 枚举类参数: 保留字符串字面量(如 'heating'),不做 Number 强制。
+    if (Array.isArray(specParam.enum) && specParam.enum.length > 0) {
+      const allowed = specParam.enum.map((v) => String(v))
+      if (raw === '') {
+        const next = { ...device.params }
+        delete next[key]
+        onPatch({ params: next })
+        setErrors((prev) => ({ ...prev, [key]: null }))
+        return
+      }
+      if (!allowed.includes(raw)) {
+        setErrors((prev) => ({
+          ...prev,
+          [key]: lt('sidebar.param_invalid', { min: allowed.join('/'), max: allowed.join('/') }),
+        }))
+        return
+      }
+      onPatch({ params: { ...device.params, [key]: raw } })
+      setErrors((prev) => ({ ...prev, [key]: null }))
+      return
+    }
     if (raw === '') {
       const next = { ...device.params }
       delete next[key]
@@ -891,8 +930,8 @@ function DeviceSidebar({
     setErrors((prev) => ({ ...prev, [key]: null }))
   }
 
-  const restoreDefault = (key: string, specParam: DeviceTypeSpec['parameters'][string]) => {
-    const value = defaultParamValue(specParam, device.kind)
+  const restoreDefault = (key: string, specParam: ParamSpecExt) => {
+    const value = defaultParamValue(specParam as DeviceTypeSpec['parameters'][string], device.kind)
     setParamDrafts((prev) => ({ ...prev, [key]: value === null ? '' : String(value) }))
     if (value === null) {
       const next = { ...device.params }
@@ -907,12 +946,12 @@ function DeviceSidebar({
   const switchKind = (kind: LocalDevice['kind']) => {
     if (kind === device.kind) return
     // 保留用户已修改的参数,仅替换"仍为另一属性默认值"的参数
-    const otherDefaults = buildDefaultParams(spec, kind === 'existing' ? 'new' : 'existing')
+    const otherDefaults = buildDefaultParams(spec as DeviceTypeSpec, kind === 'existing' ? 'new' : 'existing')
     const nextParams: Record<string, unknown> = { ...device.params }
     for (const [key, specParam] of Object.entries(spec.parameters)) {
       const current = device.params[key]
       const other = otherDefaults[key]
-      const target = defaultParamValue(specParam, kind)
+      const target = defaultParamValue(specParam as DeviceTypeSpec['parameters'][string], kind)
       if (current === undefined || (typeof current === 'number' && current === other) || current === other) {
         if (target === null) delete nextParams[key]
         else nextParams[key] = target
@@ -1008,6 +1047,7 @@ function DeviceSidebar({
         {paramKeys.map((key) => {
           const p = spec.parameters[key]
           const range = `${p.min ?? '—'} ~ ${p.max ?? '—'}`
+          const hasEnum = Array.isArray(p.enum) && p.enum.length > 0
           return (
             <div className="mp-param" key={key}>
               <div className="mp-param__head">
@@ -1025,16 +1065,50 @@ function DeviceSidebar({
                 </span>
               </div>
               <div className="mp-param__input-wrap">
-                <Input
-                  className="mp-param__input"
-                  type="number"
-                  value={paramDrafts[key] ?? ''}
-                  aria-label={`${key}${p.unit ? ` (${p.unit})` : ''}`}
-                  aria-describedby={errors[key] ? `mp-param-err-${key}` : undefined}
-                  invalid={Boolean(errors[key])}
-                  onChange={(event) => setParamDrafts((prev) => ({ ...prev, [key]: event.target.value }))}
-                  onBlur={() => commitParam(key, p)}
-                />
+                {hasEnum ? (
+                  <Select
+                    className="mp-param__input"
+                    value={String(paramDrafts[key] ?? '')}
+                    aria-label={`${key}${p.unit ? ` (${p.unit})` : ''}`}
+                    aria-describedby={errors[key] ? `mp-param-err-${key}` : undefined}
+                    invalid={Boolean(errors[key])}
+                    onChange={(event) => {
+                      const v = event.target.value
+                      setParamDrafts((prev) => ({ ...prev, [key]: v }))
+                      // 下拉选择直接提交(避免浏览器对 number 输入的非数字清空)
+                      const allowed = (p.enum ?? []).map((x) => String(x))
+                      if (v === '') {
+                        const next = { ...device.params }
+                        delete next[key]
+                        onPatch({ params: next })
+                      } else if (allowed.includes(v)) {
+                        onPatch({ params: { ...device.params, [key]: v } })
+                      }
+                      setErrors((prev) => ({ ...prev, [key]: null }))
+                    }}
+                  >
+                    <option value="">{lt('sidebar.param_unset')}</option>
+                    {(p.enum ?? []).map((opt) => {
+                      const label = String(opt)
+                      return (
+                        <option key={label} value={label}>
+                          {label}
+                        </option>
+                      )
+                    })}
+                  </Select>
+                ) : (
+                  <Input
+                    className="mp-param__input"
+                    type="number"
+                    value={paramDrafts[key] ?? ''}
+                    aria-label={`${key}${p.unit ? ` (${p.unit})` : ''}`}
+                    aria-describedby={errors[key] ? `mp-param-err-${key}` : undefined}
+                    invalid={Boolean(errors[key])}
+                    onChange={(event) => setParamDrafts((prev) => ({ ...prev, [key]: event.target.value }))}
+                    onBlur={() => commitParam(key, p)}
+                  />
+                )}
                 <span className="mp-param__range" title={p.help_key}>
                   {range}
                 </span>

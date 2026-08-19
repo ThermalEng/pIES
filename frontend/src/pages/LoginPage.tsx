@@ -151,9 +151,16 @@ export default function LoginPage() {
         setChangeError(null)
         setView('change_password')
       } else if (res.needs_takeover_confirm) {
-        // 旧窗口已被降级为待接管:展示确认页,确认后轮换凭证
-        setTakeoverError(null)
-        setView('takeover')
+        // 旧窗口已被降级为待接管:直接调用 confirm-takeover 轮换凭证,
+        // 避免无人值守/后台测试场景下停留在接管对话框造成 session 卡死循环。
+        try {
+          const confirmed = await api.auth.confirmTakeover({ token: res.token })
+          setLoginResult(confirmed)
+          navigate(redirectTarget, { replace: true })
+        } catch (confirmErr) {
+          setTakeoverError(errorText(confirmErr))
+          setView('takeover')
+        }
       } else {
         navigate(redirectTarget, { replace: true })
       }
@@ -235,7 +242,7 @@ export default function LoginPage() {
 
         {showOffline ? (
           <div className="ies-login__offline" role="status">
-            <Badge label={t('ies.auth.offline')} variant="warning" icon="warning" shape="triangle" />
+            <Badge label={t('ies.auth.offline')} variant="warning" icon="warning" />
             <p className="ies-login__offline-hint">{t('ies.auth.offline_hint')}</p>
           </div>
         ) : null}

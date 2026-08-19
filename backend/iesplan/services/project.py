@@ -917,6 +917,25 @@ def create_version(
     return version
 
 
+def current_version_matches_draft(db: Session, project: Project) -> bool:
+    """当前版本内容是否与当前草稿一致(按版本固化规则比较)。
+
+    版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(RPD 20.4);
+    草稿仅在命令簿记(applied_commands)上推进而无领域变更时视为一致。
+    无当前版本返回 False(需固化)。用于任务提交时判断是否需重新固化,
+    避免草稿已修改而任务仍运行旧版本输入。
+    """
+    if project.current_version_id is None:
+        return False
+    version = db.get(ProjectVersion, project.current_version_id)
+    if version is None:
+        return False
+    draft = _get_current_draft(db, project)
+    content = _load_draft_content(db, draft)
+    raw = _canonical_json(_version_content(project, content))
+    return sha256_hex(raw.encode("utf-8")) == version.content_hash
+
+
 def get_version(db: Session, project_id: int, version_id: int) -> ProjectVersion:
     """按 id 获取项目版本(须属于该项目, 否则 404)。"""
     version = db.get(ProjectVersion, version_id)

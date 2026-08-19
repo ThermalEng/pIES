@@ -17,6 +17,7 @@ import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { translate, translateDiagnostic, translateError, useI18n } from '../i18n'
+import { pt } from '../i18n/pageMessages'
 import {
   Alert,
   Badge,
@@ -86,6 +87,16 @@ const DEFAULT_FORM: CreateForm = {
   seed: '',
   distType: 'normal',
   noisePct: 5,
+}
+
+/**
+ * 后端 CalcConfig.version 即为配置 id(写入 PUT /config 返回 envelope.version);
+ * 数据库层无独立的 config id,提交任务时携带 version 即可。
+ * 旧版 CalcConfig.id 始终为 0(纯前端兜底),不能用作任务配置关联。
+ */
+function configVersion(cfg: CalcConfig | null): number | null {
+  if (!cfg) return null
+  return typeof cfg.version === 'number' && cfg.version > 0 ? cfg.version : null
 }
 
 /** 确定性哈希(FNV 变体),用于生成客户端幂等键。 */
@@ -211,11 +222,31 @@ export default function TasksPage() {
   const [form, setForm] = useState<CreateForm>(DEFAULT_FORM)
   const [formError, setFormError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  /** 校验门禁结果:提交前 validation.run 的阻断诊断(空数组 = 通过; null = 未检查/校验不可用)。 */
+  const [blockers, setBlockers] = useState<Diagnostic[] | null>(null)
+  const [checking, setChecking] = useState(false)
   const [duplicate, setDuplicate] = useState<Task | null>(null)
   const [cancelTarget, setCancelTarget] = useState<Task | null>(null)
   const [retryTarget, setRetryTarget] = useState<Task | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [flash, setFlash] = useState<string | null>(null)
+
+  // 派生:当前 config 版本(后端 CalcConfig.version 即为可提交的配置 id)
+  const configVersionValue = useMemo(() => configVersion(config), [config])
+
+  // 算法 id 到 i18n 键('ies.config.algorithm_*' 或 'ies.algo.*')的映射。
+  // 直接拼接 t(`ies.config.algorithm_${config.algorithm}`) 在 algorithm 为
+  // 'milp_hybrid' / 'lp_relax' / 'mc_sampling' 时会得到不存在的键;这里集中处理。
+  const algorithmLabel = useMemo(() => {
+    const raw = String(config?.algorithm ?? '')
+    if (raw === 'milp' || raw === 'milp_hybrid') return t('ies.config.algorithm_milp')
+    if (raw === 'lp' || raw === 'lp_relax') return t('ies.config.algorithm_lp')
+    if (raw === 'heuristic') return t('ies.config.algorithm_heuristic')
+    if (raw === 'ga') return t('ies.config.algorithm_ga')
+    if (raw === 'exhaustive') return t('ies.config.algorithm_exhaustive')
+    if (raw === 'mc_sampling') return t('ies.algo.mc_sampling')
+    return raw || t('ies.common.unknown')
+  }, [config, t])
 
   // -------------------------------------------------------------------------
   // 基础数据加载
@@ -237,7 +268,8 @@ export default function TasksPage() {
   useEffect(() => {
     api.datasets
       .list({ project_id: projectId, limit: 100 })
-      .then((page) => setDatasets(page.items.filter((d) => d.status === 'published')))
+      // 后端数据集创建即 draft 状态(无发布流程); 只要未废弃即可选, 避免误导
+      .then((page) => setDatasets(page.items.filter((d) => d.status !== 'deprecated')))
       .catch(() => setDatasets([]))
   }, [projectId])
 
@@ -351,6 +383,23 @@ export default function TasksPage() {
   const submit = useCallback(
     async (force: boolean) => {
       const input = buildInput(form)
+      // 校验门禁:存在阻断问题禁止提交(与校验页一致; 否则任务提交后约 1 秒
+      // 会被 worker 以数据/配置缺失拒绝, 造成无效提交)
+      setChecking(true)
+      setBlockers(null)
+      try {
+        const res = await api.validation.run(projectId)
+        const blocking = res.diagnostics.filter((d) => d.blocking || d.severity === 'blocking')
+        setBlockers(blocking)
+        if (blocking.length > 0) {
+          setFormError(null)
+          return
+        }
+      } catch {
+        // 校验接口暂不可用:不拦截提交(后端受理时仍会兜底校验)
+      } finally {
+        setChecking(false)
+      }
       if (!force && !submitting) {
         // 重复提交提示:同类型 + 同配置(幂等键相同)的非终结任务
         const dup =
@@ -376,13 +425,38 @@ export default function TasksPage() {
         setSubmitting(false)
       }
     },
-    [buildInput, form, tasks, loadList, submitting, t],
+    [buildInput, form, tasks, loadList, projectId, submitting, t],
   )
 
   const confirmDuplicate = useCallback(() => {
     setDuplicate(null)
     void submit(true)
   }, [submit])
+
+  // 提交对话框打开时预检一次校验门禁, 让用户提前看到阻断问题(不再等到点提交才发现)
+  useEffect(() => {
+    if (!createOpen) return
+    let cancelled = false
+    setBlockers(null)
+    setChecking(true)
+    api.validation
+      .run(projectId)
+      .then((res) => {
+        if (cancelled) return
+        setBlockers(
+          res.valid ? [] : res.diagnostics.filter((d) => d.blocking || d.severity === 'blocking'),
+        )
+      })
+      .catch(() => {
+        if (!cancelled) setBlockers(null) // 校验不可用:提交时再兜底
+      })
+      .finally(() => {
+        if (!cancelled) setChecking(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [createOpen, projectId])
 
   // -------------------------------------------------------------------------
   // 取消 / 重试
@@ -678,9 +752,15 @@ export default function TasksPage() {
               {t('ies.common.cancel')}
             </Button>
             <Button
-              loading={submitting}
-              disabled={form.configId === null}
-              onClick={() => void submit(false)}
+              loading={submitting || checking}
+              disabled={configVersionValue === null}
+              onClick={() => {
+                // 提交前同步 form.configId 为当前已加载 config 版本
+                if (configVersionValue !== null && form.configId !== configVersionValue) {
+                  setForm((prev) => ({ ...prev, configId: configVersionValue }))
+                }
+                void submit(false)
+              }}
             >
               {t('ies.task.submit')}
             </Button>
@@ -690,6 +770,27 @@ export default function TasksPage() {
         <div className="ies-section">
           <Alert variant="info">{t('ies.task.submit_hint')}</Alert>
         </div>
+
+        {checking ? (
+          <div className="ies-section">
+            <Spinner size="sm" />
+            <span className="ies-form-message" style={{ marginLeft: 'var(--ies-space-2)' }}>
+              {t('ies.task.validation_checking')}
+            </span>
+          </div>
+        ) : null}
+        {blockers !== null && blockers.length > 0 ? (
+          <div className="ies-section">
+            <Alert variant="error" title={t('ies.task.validation_blocked', { count: blockers.length })}>
+              {t('ies.task.validation_blocked_note')}
+            </Alert>
+            <ul className="ies-diag-list">
+              {blockers.map((d, i) => (
+                <DiagnosticItem key={`${d.code}-${i}`} diag={d} />
+              ))}
+            </ul>
+          </div>
+        ) : null}
 
         <FormField label={t('ies.common.type')} htmlFor="task-type">
           <Select
@@ -711,7 +812,7 @@ export default function TasksPage() {
               <dt>{t('ies.config.name')}</dt>
               <dd>{config.name}</dd>
               <dt>{t('ies.config.algorithm')}</dt>
-              <dd>{t(`ies.config.algorithm_${config.algorithm}`)}</dd>
+              <dd>{algorithmLabel}</dd>
               <dt>{t('ies.config.objectives')}</dt>
               <dd>{config.objectives.length}</dd>
               <dt>{t('ies.config.min_irr')}</dt>
@@ -724,8 +825,18 @@ export default function TasksPage() {
                   label={t(`ies.config.status_${config.status}`)}
                 />
               </dd>
+              <dt>{t('ies.task.attempt')}</dt>
+              <dd>
+                {configVersionValue !== null
+                  ? `v${configVersionValue}`
+                  : pt('ies.config.no_project')}
+              </dd>
             </dl>
-            {config.status !== 'frozen' ? (
+            {configVersionValue === null ? (
+              <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                <Alert variant="error">{t('ies.task.config_required')}</Alert>
+              </div>
+            ) : config.status !== 'frozen' ? (
               <div style={{ marginTop: 'var(--ies-space-2)' }}>
                 <Alert variant="warning">{t('ies.task.config_not_frozen')}</Alert>
               </div>

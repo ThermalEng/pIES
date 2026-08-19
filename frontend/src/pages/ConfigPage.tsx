@@ -51,6 +51,7 @@ import { formatNumber } from '../lib/format'
 import { ApiError } from '../types'
 import type {
   AlgorithmId,
+  BackendVariableType,
   CalcConfig,
   CalcConfigInput,
   CalcConstraint,
@@ -103,29 +104,44 @@ interface EcoForm {
   minIrr: string
 }
 
-/** 预定义约束(名称/规范表达式/说明键);表达式为受限语法的约束声明,由后端解析校验。 */
+/**
+ * 预定义约束开关(名称即后端 PREDEFINED_CONSTRAINT_KINDS 的 kind,见
+ * backend services/config.py: load_satisfaction / capacity_limits / co2_cap /
+ * energy_cost_cap)。co2_cap 由下方"碳排放目标"段单独配置;
+ * energy_cost_cap 无前端金额输入, 暂不展示。expression 仅作说明文案。
+ */
 const PREDEFINED_CONSTRAINTS = [
   {
-    name: 'energy_balance',
-    expression: 'p_grid_buy + p_pv + p_bat_dis >= e_load + p_bat_ch',
-    commentKey: 'ies.config.con_energy_balance',
+    name: 'load_satisfaction',
+    expression: '负荷必须完全满足(默认不允许削减)',
+    commentKey: 'ies.config.con_load_satisfaction',
   },
-  { name: 'heat_balance', expression: 'p_hp_heat + p_boiler >= h_load', commentKey: 'ies.config.con_heat_balance' },
-  { name: 'cooling_balance', expression: 'p_hp_cool + p_chiller >= c_load', commentKey: 'ies.config.con_cooling_balance' },
-  { name: 'no_reverse_feed', expression: 'p_grid_sell == 0', commentKey: 'ies.config.con_no_reverse_feed' },
-  { name: 'capacity_bounds', expression: 'p_out <= cap_out', commentKey: 'ies.config.con_capacity_bounds' },
-  { name: 'soc_limits', expression: 'soc_min <= soc <= soc_max', commentKey: 'ies.config.con_soc_limits' },
+  {
+    name: 'capacity_limits',
+    expression: '设备出力 ≤ 容量上限',
+    commentKey: 'ies.config.con_capacity_limits',
+  },
 ] as const
 
-const PREDEFINED_NAMES: Set<string> = new Set(PREDEFINED_CONSTRAINTS.map((c) => c.name))
-
 const OBJECTIVE_OPTIONS = [
-  { value: 'after_tax_project_irr', key: 'ies.config.objective_irr_max' },
-  { value: 'npv', key: 'ies.config.objective_npv_max' },
-  { value: 'equity_irr', key: 'ies.config.objective_equity_irr_max' },
+  { value: 'irr_after_tax', key: 'ies.config.objective_irr_max' },
+  { value: 'npv_after_tax', key: 'ies.config.objective_npv_max' },
 ] as const
 
 type ObjectiveValue = (typeof OBJECTIVE_OPTIONS)[number]['value']
+
+/** 前端变量类型 ↔ 后端 VARIABLE_TYPES(continuous/integer/enum/boolean): binary 映射为 boolean。 */
+const TYPE_TO_BACKEND: Record<VariableType, BackendVariableType> = {
+  continuous: 'continuous',
+  binary: 'boolean',
+  integer: 'integer',
+}
+
+const TYPE_FROM_BACKEND: Record<string, VariableType> = {
+  continuous: 'continuous',
+  boolean: 'binary',
+  integer: 'integer',
+}
 
 /** 算法能力表(支持的变量类型;custom 由后端校验)。 */
 const ALGORITHM_CAPABILITIES: Record<AlgorithmId, { types: readonly VariableType[] }> = {
@@ -206,13 +222,26 @@ function deviceCapacity(device: Device, ports: Port[]): number | null {
   return portCaps.length > 0 ? Math.max(...portCaps) : null
 }
 
-/** 设备注册表容量参数(缺省 0 至无上界)。 */
+/**
+ * 设备类型 id(如 ies.device.grid_connection)→ 合法优化变量名短标识。
+ * 后端 _IDENT_RE 要求 ^[A-Za-z_][A-Za-z0-9_]*$(services/config.py),
+ * 类型 id 含点号,直接拼接会得到非法标识符导致保存 422。
+ */
+function variableNameForType(typeId: string): string {
+  const last = typeId.split('.').filter(Boolean).pop() ?? typeId
+  let base = last.replace(/[^A-Za-z0-9_]/g, '_')
+  if (!/^[A-Za-z_]/.test(base)) base = `_${base}`
+  const name = `${base}_capacity`
+  return name.replace(/[^A-Za-z0-9_]/g, '_')
+}
+
+/** 设备注册表容量参数(缺省 0 至无上界;容量默认值恒为数值)。 */
 function specCapacity(spec: DeviceTypeSpec | undefined): { min: number | null; max: number | null; def: number | null } {
   if (!spec) return { min: 0, max: null, def: null }
   const cap =
     spec.parameters['capacity'] ?? spec.parameters['rated_capacity'] ?? spec.parameters['installed_capacity']
   if (!cap) return { min: 0, max: null, def: null }
-  return { min: cap.min, max: cap.max, def: cap.default }
+  return { min: cap.min, max: cap.max, def: typeof cap.default === 'number' ? cap.default : null }
 }
 
 /** 前端本地诊断(定位到配置项 field,渲染于校验诊断列表)。 */
@@ -284,7 +313,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
   })
   const [variables, setVariables] = useState<VariableRow[]>([])
   const [existingDevices, setExistingDevices] = useState<ExistingDeviceRow[]>([])
-  const [objective, setObjective] = useState<ObjectiveValue>('after_tax_project_irr')
+  const [objective, setObjective] = useState<ObjectiveValue>('irr_after_tax')
   const [carbonEnabled, setCarbonEnabled] = useState(false)
   const [carbonCap, setCarbonCap] = useState('')
   const [toggles, setToggles] = useState<Record<string, boolean>>({})
@@ -301,7 +330,6 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
   /** 将后端配置(或默认配置)灌入表单。 */
   function applyConfig(
     cfg: CalcConfig | CalcConfigInput,
-    fromBackend: boolean,
     algos: Array<{ name: string; label: string; description_key: string }>,
     proj: Project | null,
     g: GraphModel | null,
@@ -325,27 +353,27 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       minIrr: cfg.min_irr !== null && cfg.min_irr !== undefined ? percentText(cfg.min_irr) : '',
     })
 
-    const initialMap = objOf(params, PARAM_KEYS.variableInitial)
     const typeMap = objOf(params, PARAM_KEYS.variableDeviceType)
     const rows: VariableRow[] = (cfg.variables ?? []).map((v, idx) => ({
       key: `L${idx}`,
       name: v.name,
-      type: v.type,
-      initial: numText(initialMap[v.name]),
-      lower: numText(v.lower),
-      upper: numText(v.upper),
+      type: TYPE_FROM_BACKEND[v.type] ?? 'continuous',
+      initial: numText(v.initial),
+      lower: numText(v.min),
+      upper: numText(v.max),
       deviceType: typeof typeMap[v.name] === 'string' ? (typeMap[v.name] as string) : null,
     }))
-    // 无已存变量时:按图中"新增"设备类型生成默认容量变量(上下界取注册表)
+    // 无已存变量时:按图中"新增"设备类型生成默认容量变量(上下界取注册表;
+    // 变量名去点号满足后端标识符约束, 初值缺省回退到注册表 default/min, 后端要求必有初值)
     if (rows.length === 0 && g) {
       const newTypes = [...new Set(g.devices.filter((d) => d.kind === 'new').map((d) => d.device_type))]
       for (const dt of newTypes) {
         const cap = specCapacity(sp.find((s) => s.type_id === dt))
         rows.push({
           key: `L${rows.length}`,
-          name: `${dt}_capacity`,
+          name: variableNameForType(dt),
           type: 'continuous',
-          initial: numText(cap.def),
+          initial: numText(cap.def ?? cap.min ?? 0),
           lower: numText(cap.min),
           upper: numText(cap.max),
           deviceType: dt,
@@ -362,23 +390,50 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
     const objectives = cfg.objectives ?? []
     const first = objectives[0]
     setObjective(
-      first && OBJECTIVE_OPTIONS.some((o) => o.value === first.name) ? (first.name as ObjectiveValue) : 'after_tax_project_irr',
+      first && OBJECTIVE_OPTIONS.some((o) => o.value === first.metric) ? (first.metric as ObjectiveValue) : 'irr_after_tax',
     )
 
+    // 约束: 后端格式 {type:'predefined'|'expression', payload} →
+    // 预定义种类(load_satisfaction/capacity_limits)映射为开关; expression 进高级表达式列表。
     const constraints = cfg.constraints ?? []
-    const names = new Set(constraints.map((c) => c.name))
+    const knownKinds: Set<string> = new Set(PREDEFINED_CONSTRAINTS.map((p) => p.name))
     const next: Record<string, boolean> = {}
-    for (const p of PREDEFINED_CONSTRAINTS) next[p.name] = fromBackend ? names.has(p.name) : true
-    setToggles(next)
+    for (const p of PREDEFINED_CONSTRAINTS) next[p.name] = false
     let seq = 0
-    setCustomExprs(
-      constraints
-        .filter((c) => !PREDEFINED_NAMES.has(c.name) && c.name !== 'co2_cap')
-        .map((c) => ({ key: `E${seq++}`, name: c.name, expression: c.expression })),
-    )
+    const custom: CustomExpr[] = []
+    for (const raw of constraints) {
+      const c = raw as { type?: unknown; payload?: Record<string, unknown>; name?: unknown; expression?: unknown }
+      if (c.type === 'predefined') {
+        const kind = typeof c.payload?.kind === 'string' ? c.payload.kind : ''
+        if (knownKinds.has(kind)) next[kind] = true
+      } else if (c.type === 'expression') {
+        const expr = typeof c.payload?.expression === 'string' ? c.payload.expression : ''
+        if (expr.trim()) {
+          const name =
+            typeof c.payload?.name === 'string' && c.payload.name.trim() ? c.payload.name.trim() : `expr${seq + 1}`
+          custom.push({ key: `E${seq++}`, name, expression: expr })
+        }
+      } else if (typeof c.name === 'string' && typeof c.expression === 'string') {
+        // 旧格式 {name, expression} 防御: 非预定义且非碳约束时按表达式处理
+        if (!knownKinds.has(c.name) && c.name !== 'co2_cap') {
+          custom.push({ key: `E${seq++}`, name: c.name, expression: c.expression })
+        }
+      }
+    }
+    setToggles(next)
+    setCustomExprs(custom)
 
-    const carbonValue = num(params, PARAM_KEYS.carbonCap)
-    setCarbonEnabled(carbonValue !== null || names.has('co2_cap'))
+    let carbonValue = num(params, PARAM_KEYS.carbonCap)
+    const carbonFromConstraint = constraints.some((raw) => {
+      const c = raw as { type?: unknown; payload?: Record<string, unknown>; name?: unknown }
+      const kind = c.type === 'predefined' ? c.payload?.kind : undefined
+      if (kind === 'co2_cap' || c.name === 'co2_cap') {
+        if (typeof c.payload?.max_tons === 'number' && Number.isFinite(c.payload.max_tons)) carbonValue = c.payload.max_tons
+        return true
+      }
+      return false
+    })
+    setCarbonEnabled(carbonValue !== null || carbonFromConstraint)
     setCarbonCap(carbonValue !== null ? numText(carbonValue) : '')
 
     setAlgMode(params[PARAM_KEYS.algorithmMode] === 'manual' ? 'manual' : 'auto')
@@ -400,12 +455,10 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       setError(null)
       try {
         let cfg: CalcConfig | CalcConfigInput
-        let fromBackend = true
         try {
           cfg = await api.config.get(projectIdNum)
         } catch {
           cfg = await api.config.default(projectIdNum)
-          fromBackend = false
         }
         if (cancelled) return
         const [algos, proj] = await Promise.all([
@@ -417,7 +470,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
           api.model.deviceTypes().catch(() => [] as DeviceTypeSpec[]),
         ])
         if (cancelled) return
-        applyConfig(cfg, fromBackend, algos.items, proj, g, sp)
+        applyConfig(cfg, algos.items, proj, g, sp)
       } catch (err) {
         if (!cancelled) setError(errorText(err))
       } finally {
@@ -499,9 +552,21 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
         return
       }
       seen.add(varName)
+      // 后端 _IDENT_RE 约束:变量名必须是合法标识符,否则保存必 422
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) {
+        out.push(
+          makeDiag(field, 'CFG-VARNAME-002', 'ies.config.err.variable_name_invalid', 'blocking', { name: varName }),
+        )
+        return
+      }
       const lower = numOrNull(v.lower)
       const upper = numOrNull(v.upper)
       const initial = numOrNull(v.initial)
+      if (initial === null) {
+        out.push(
+          makeDiag(field, 'CFG-VARINI-002', 'ies.config.err.variable_initial_required', 'blocking', { name: varName }),
+        )
+      }
       if (lower !== null && upper !== null && lower > upper) {
         out.push(makeDiag(field, 'CFG-VARBND-001', 'ies.config.err.variable_bounds', 'blocking', { name: varName }))
       }
@@ -518,19 +583,22 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
     const issue = algMode === 'manual' ? algorithmIssue(algorithm, variables) : null
     if (issue) out.push(makeDiag('algorithm', 'CFG-ALG-001', issue.key, 'blocking', issue.params))
     for (const c of customExprs) {
-      if (!c.name.trim() || !c.expression.trim()) {
+      const name = String(c.name ?? '').trim()
+      const expr = String(c.expression ?? '').trim()
+      if (!name || !expr) {
         out.push(makeDiag(`constraint[${c.key}]`, 'CFG-EXPR-001', 'ies.config.err.expression_required', 'blocking'))
       }
     }
     const exprNames = new Set<string>()
     for (const c of customExprs) {
-      if (!c.name.trim()) continue
-      if (exprNames.has(c.name.trim())) {
+      const name = String(c.name ?? '').trim()
+      if (!name) continue
+      if (exprNames.has(name)) {
         out.push(makeDiag(`constraint[${c.key}]`, 'CFG-EXPRDUP-001', 'ies.config.err.expression_name_dup', 'blocking', {
-          name: c.name.trim(),
+          name,
         }))
       }
-      exprNames.add(c.name.trim())
+      exprNames.add(name)
     }
     return out
   }
@@ -539,11 +607,14 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
   function buildInput(): CalcConfigInput {
     const current = config
     const activeRows = variables.filter((v) => v.name.trim())
+    // 变量 → 后端格式: 键名 min/max/initial(后端 _validate_variables 契约);
+    // 类型映射 binary → boolean(后端 VARIABLE_TYPES)。
     const varRows: ConfigVariable[] = activeRows.map((v) => ({
       name: v.name.trim(),
-      type: v.type,
-      lower: numOrNull(v.lower),
-      upper: numOrNull(v.upper),
+      type: TYPE_TO_BACKEND[v.type],
+      initial: numOrNull(v.initial),
+      min: numOrNull(v.lower),
+      max: numOrNull(v.upper),
     }))
     const initialMap: Record<string, number | null> = {}
     const typeMap: Record<string, string> = {}
@@ -551,17 +622,20 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       initialMap[v.name.trim()] = numOrNull(v.initial)
       if (v.deviceType) typeMap[v.name.trim()] = v.deviceType
     }
+    // 约束 → 后端格式 {type, payload}(services/config.py 契约):
+    // 预定义种类直接映射 kind; 自定义表达式带 name/expression。
     const constraints: CalcConstraint[] = PREDEFINED_CONSTRAINTS.filter((p) => toggles[p.name]).map((p) => ({
-      name: p.name,
-      expression: p.expression,
-      comment: pt(p.commentKey),
+      type: 'predefined',
+      payload: { kind: p.name },
     }))
     for (const c of customExprs) {
-      if (c.name.trim() && c.expression.trim()) constraints.push({ name: c.name.trim(), expression: c.expression.trim() })
+      if (c.name.trim() && c.expression.trim()) {
+        constraints.push({ type: 'expression', payload: { name: c.name.trim(), expression: c.expression.trim() } })
+      }
     }
     const carbonValue = numOrNull(carbonCap)
     if (carbonEnabled && carbonValue !== null && carbonValue > 0) {
-      constraints.push({ name: 'co2_cap', expression: `co2_annual <= ${carbonValue}`, comment: pt('ies.config.con_co2_cap') })
+      constraints.push({ type: 'predefined', payload: { kind: 'co2_cap', max_tons: carbonValue } })
     }
     const minIrr = numOrNull(eco.minIrr)
     const params: Record<string, unknown> = {
@@ -580,7 +654,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       description: description.trim() || null,
       params,
       variables: varRows,
-      objectives: [{ name: objective, weight: 1, direction: 'max', expression: null }],
+      objectives: [{ metric: objective, weight: 1, direction: 'max' }],
       constraints,
       min_irr: minIrr !== null ? Number((minIrr / 100).toFixed(6)) : null,
       algorithm: algMode === 'manual' ? algorithm : (current?.algorithm ?? 'milp'),
@@ -607,7 +681,14 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       setFrozen(saved.status === 'frozen')
       setNotice({ kind: 'success', text: pt('ies.config.saved_ok', { version: saved.version }) })
     } catch (err) {
-      setNotice({ kind: 'error', text: errorText(err) })
+      // 后端 422 返回 {diagnostics: [...]} 信封(client.ts 已透传到 params),
+      // 展示完整诊断明细而非笼统的"未知错误"
+      if (err instanceof ApiError && Array.isArray(err.params.diagnostics)) {
+        setDiagnostics(err.params.diagnostics as Diagnostic[])
+        setNotice({ kind: 'error', text: pt('ies.error.data_validation_failed') })
+      } else {
+        setNotice({ kind: 'error', text: errorText(err) })
+      }
     } finally {
       setSaving(false)
     }
@@ -632,7 +713,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
     setSaving(true)
     try {
       const def = await api.config.default(pid)
-      applyConfig(def, false, algorithms, project, graph, specs)
+      applyConfig(def, algorithms, project, graph, specs)
       setNotice({ kind: 'success', text: t('ies.config.default') })
     } catch (err) {
       setNotice({ kind: 'error', text: errorText(err) })
@@ -892,7 +973,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
                         {d.capacity !== null ? formatNumber(d.capacity, { digits: 0 }) : '—'}
                         {d.capacity !== null ? ' kW' : ''}
                       </span>
-                      <Badge label={pt('ies.config.fixed')} variant="neutral" shape="square" size="sm" />
+                      <Badge label={pt('ies.config.fixed')} variant="neutral" size="sm" />
                     </div>
                   </TD>
                 </TR>
@@ -949,7 +1030,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       <Card title={t('ies.config.constraints')}>
         <div className="ies-config-hard">
           <div className="ies-config-hard__title">
-            <Badge label={pt('ies.config.hard_constraint')} variant="danger" shape="square" icon="stop" />
+            <Badge label={pt('ies.config.hard_constraint')} variant="danger" icon="stop" />
             <span>{pt('ies.config.hard_constraint_notice')}</span>
           </div>
           <div className="ies-config-hard__body">

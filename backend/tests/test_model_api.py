@@ -19,14 +19,13 @@ from iesplan.api import model as model_api
 from iesplan.core.diagnostics import (
     CONN_NODE_ORPHAN,
     CONN_TYPE_UNREGISTERED,
-    DATA_COL_MISSING,
     PARAM_CONFLICT,
     PARAM_RNG_OUT,
     PARAM_UNIT_INCONSISTENT,
 )
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
-from iesplan.models import Device, Port, Project
+from iesplan.models import Device, Port, Project, SystemGraph
 from iesplan.models.project import ProjectMember
 from iesplan.services import identity
 from iesplan.services import model as svc
@@ -234,17 +233,21 @@ def test_create_device_unknown_type_rejected(client: TestClient, project_id: int
     assert resp.json()["error"]["code"] == CONN_TYPE_UNREGISTERED
 
 
-def test_create_device_missing_required_param_rejected(client: TestClient, project_id: int) -> None:
-    """缺必填参数被拒: electric_load 未给 load_profile → 400。"""
+def test_create_device_without_profile_param_accepted(client: TestClient, project_id: int) -> None:
+    """缺负荷曲线参数被接受: electric_load 不带 load_profile → 201, 参数归一为 null。
+
+    前端拖拽新建负荷设备时跳过 default=null 的参数键(load_profile/heat_profile 等),
+    缺省按显式 null 处理(与 {'load_profile': null} 语义一致), 不再以 400 阻断创建。
+    """
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": LOAD, "name": "L1", "params": {"peak_power_kw": 100}},
         headers=_headers(client),
     )
-    assert resp.status_code == 400
-    err = resp.json()["error"]
-    assert err["code"] == DATA_COL_MISSING
-    assert err["location"]["field"] == "load_profile"
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["device"]["params"]["load_profile"] is None
+    assert body["device"]["params"]["type_detail"] == LOAD
 
 
 def test_create_device_param_type_mismatch_rejected(client: TestClient, project_id: int) -> None:
@@ -758,10 +761,10 @@ def test_get_graph_missing_project_404(client: TestClient) -> None:
 
 
 def test_validate_device_params_service() -> None:
-    """参数校验(服务层): 必填/越界/枚举/类型/未注册。"""
-    # 必填缺失(纯函数校验, 无需会话)
+    """参数校验(服务层): 缺省归一/越界/枚举/类型/未注册。"""
+    # 缺省 reference 参数归一为 null(前端跳过 null 默认值, 与显式 null 语义一致)
     diags = svc.validate_device_params(LOAD, {"peak_power_kw": 10}, device_id=7)
-    assert any(d.code == DATA_COL_MISSING for d in diags)
+    assert diags == []
     # 合法参数无诊断
     diags = svc.validate_device_params(
         LOAD, {"peak_power_kw": 10, "load_profile": "ref:l"}, device_id=7
@@ -773,3 +776,27 @@ def test_validate_device_params_service() -> None:
     # 未注册类型抛 NotFoundError
     with pytest.raises(svc.NotFoundError):
         svc.validate_device_params("ies.device.nope", {}, device_id=7)
+
+
+def test_working_graph_create_idempotent_and_unique(
+    db_factory: tuple[sessionmaker, int]
+) -> None:
+    """工作图并发防重: 重复取/建返回同一张图, 每项目仅一张工作图(唯一索引兜底)。"""
+    factory, admin_id = db_factory
+    project_id = _create_project(factory, "竞态项目", admin_id)
+    with factory() as session:
+        g1 = svc.get_or_create_working_graph(session, project_id, admin_id)
+        g2 = svc.get_or_create_working_graph(session, project_id, admin_id)
+        assert g1.id == g2.id
+        # 项目下仅一张工作图(挂草稿); 版本图为空
+        rows = session.scalars(
+            sa.select(SystemGraph).where(
+                SystemGraph.project_id == project_id, SystemGraph.draft_id.is_not(None)
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].id == g1.id
+        # 部分唯一索引 uq_system_graphs_working 已随 create_all 建立(SQLite 方言)
+        assert any(
+            i.name == "uq_system_graphs_working" for i in Base.metadata.tables["system_graphs"].indexes
+        )

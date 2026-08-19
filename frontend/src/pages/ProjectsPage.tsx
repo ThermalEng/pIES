@@ -481,9 +481,9 @@ export default function ProjectsPage() {
                   </TD>
                   <TD>
                     {viewer ? (
-                      <Badge label={t('ies.project.viewer_role')} variant="neutral" icon="info" shape="circle" />
+                      <Badge label={t('ies.project.viewer_role')} variant="neutral" icon="info" />
                     ) : (
-                      <Badge label={t('ies.project.owner_role')} variant="primary" icon="check" shape="circle" />
+                      <Badge label={t('ies.project.owner_role')} variant="primary" icon="check" />
                     )}
                   </TD>
                   <TD>
@@ -606,7 +606,7 @@ export default function ProjectsPage() {
               {t('ies.common.cancel')}
             </Button>
             <Button variant="primary" loading={creating} onClick={() => void handleCreateSubmit()}>
-              {t('ies.common.create')}
+              {t('ies.common.confirm')}
             </Button>
           </>
         }
@@ -795,7 +795,6 @@ export default function ProjectsPage() {
                     label={member.role === 'owner' ? t('ies.project.owner_role') : t('ies.project.viewer_role')}
                     variant={member.role === 'owner' ? 'primary' : 'neutral'}
                     icon={member.role === 'owner' ? 'check' : 'info'}
-                    shape="circle"
                   />
                   {removeTarget?.user_id === member.user_id ? (
                     <span className="ies-projects__inline-confirm">

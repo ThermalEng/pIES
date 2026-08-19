@@ -4,7 +4,7 @@
  * 无障碍要求(WCAG 2.2 AA):
  * - 所有交互控件具备语义化元素 + aria 属性(aria-label/aria-describedby/aria-busy 等)。
  * - 焦点可见(:focus-visible 由 styles.css 统一提供)。
- * - 状态徽章不只靠颜色:文字 + 图标 + 形状三重编码。
+ * - 状态徽章不只靠颜色:文字 + 图标 + 语义色(统一圆角矩形, 风格一致)。
  * - 对话框支持 Esc 关闭、焦点圈定与 aria-modal。
  * - 表单字段 label 与控件 id 关联(useId)。
  */
@@ -405,9 +405,11 @@ export interface BadgeProps {
 }
 
 /** 通用徽章:文字 + 图标 + 形状三重编码,状态不只靠颜色。 */
-export function Badge({ label, variant = 'neutral', icon, shape = 'circle', pulse = false, size = 'md' }: BadgeProps) {
+export function Badge({ label, variant = 'neutral', icon, pulse = false, size = 'md' }: BadgeProps) {
+  // 统一圆角矩形: 状态由颜色+图标+文字区分(满足 WCAG 非颜色信息),
+  // 不再用形状区分(避免视觉风格不统一)
   return (
-    <span className={`ies-badge ies-badge--${variant} ies-badge--shape-${shape} ies-badge--${size}`.trim()}>
+    <span className={`ies-badge ies-badge--${variant} ies-badge--shape-square ies-badge--${size}`.trim()}>
       {icon ? (
         <span className="ies-badge__icon" aria-hidden="true">
           <Icon name={icon} size={size === 'sm' ? 11 : 13} />
@@ -419,30 +421,30 @@ export function Badge({ label, variant = 'neutral', icon, shape = 'circle', puls
   )
 }
 
-/** 诊断严重度徽章。 */
+/** 诊断严重度徽章(统一圆角矩形, 颜色+图标+文字区分, 满足 WCAG 非颜色信息)。 */
 export function SeverityBadge({ severity }: { severity: Severity }) {
   const { t } = useI18n()
-  const map: Record<Severity, { variant: BadgeVariant; icon: IconName; shape: BadgeShape }> = {
-    blocking: { variant: 'danger', icon: 'stop', shape: 'square' },
-    error: { variant: 'danger', icon: 'cross', shape: 'circle' },
-    warning: { variant: 'warning', icon: 'warning', shape: 'triangle' },
-    info: { variant: 'info', icon: 'info', shape: 'circle' },
+  const map: Record<Severity, { variant: BadgeVariant; icon: IconName }> = {
+    blocking: { variant: 'danger', icon: 'stop' },
+    error: { variant: 'danger', icon: 'cross' },
+    warning: { variant: 'warning', icon: 'warning' },
+    info: { variant: 'info', icon: 'info' },
   }
   const cfg = map[severity]
-  return <Badge label={t(`ies.severity.${severity}`)} variant={cfg.variant} icon={cfg.icon} shape={cfg.shape} />
+  return <Badge label={t(`ies.severity.${severity}`)} variant={cfg.variant} icon={cfg.icon} />
 }
 
-/** 任务状态徽章(含运行中脉冲)。 */
+/** 任务状态徽章(含运行中脉冲; 统一圆角矩形, 颜色+图标+文字区分状态)。 */
 export function TaskStatusBadge({ status }: { status: TaskStatus }) {
   const { t } = useI18n()
-  const map: Record<TaskStatus, { variant: BadgeVariant; icon: IconName; shape: BadgeShape; pulse?: boolean }> = {
-    queued: { variant: 'neutral', icon: 'clock', shape: 'circle' },
-    running: { variant: 'primary', icon: 'spinner', shape: 'circle', pulse: true },
-    completed: { variant: 'success', icon: 'check', shape: 'circle' },
-    cancelling: { variant: 'warning', icon: 'clock', shape: 'triangle' },
-    cancelled: { variant: 'neutral', icon: 'stop', shape: 'square' },
-    timed_out: { variant: 'warning', icon: 'warning', shape: 'triangle' },
-    failed: { variant: 'danger', icon: 'cross', shape: 'circle' },
+  const map: Record<TaskStatus, { variant: BadgeVariant; icon: IconName; pulse?: boolean }> = {
+    queued: { variant: 'neutral', icon: 'clock' },
+    running: { variant: 'primary', icon: 'spinner', pulse: true },
+    completed: { variant: 'success', icon: 'check' },
+    cancelling: { variant: 'warning', icon: 'clock' },
+    cancelled: { variant: 'neutral', icon: 'stop' },
+    timed_out: { variant: 'warning', icon: 'warning' },
+    failed: { variant: 'danger', icon: 'cross' },
   }
   const cfg = map[status]
   return (
@@ -450,7 +452,6 @@ export function TaskStatusBadge({ status }: { status: TaskStatus }) {
       label={t(`ies.task.status_${status}`)}
       variant={cfg.variant}
       icon={cfg.icon}
-      shape={cfg.shape}
       pulse={cfg.pulse}
     />
   )
@@ -462,31 +463,31 @@ export function TaskOutcomeBadge({ outcome }: { outcome: TaskOutcome | null }) {
   if (!outcome) return null
   const variant: BadgeVariant =
     outcome === 'normal_completion' ? 'success' : outcome === 'partial_batch' ? 'warning' : 'neutral'
-  return <Badge label={t(`ies.task.outcome_${outcome}`)} variant={variant} icon={outcome === 'normal_completion' ? 'check' : 'warning'} shape="diamond" />
+  return <Badge label={t(`ies.task.outcome_${outcome}`)} variant={variant} icon={outcome === 'normal_completion' ? 'check' : 'warning'} />
 }
 
 /** 项目状态徽章。 */
 export function ProjectStatusBadge({ status }: { status: ProjectStatus }) {
   const { t } = useI18n()
-  const map: Record<ProjectStatus, { variant: BadgeVariant; icon: IconName; shape: BadgeShape }> = {
-    active: { variant: 'success', icon: 'check', shape: 'circle' },
-    archived: { variant: 'neutral', icon: 'clock', shape: 'square' },
-    deleted: { variant: 'danger', icon: 'cross', shape: 'circle' },
+  const map: Record<ProjectStatus, { variant: BadgeVariant; icon: IconName }> = {
+    active: { variant: 'success', icon: 'check' },
+    archived: { variant: 'neutral', icon: 'clock' },
+    deleted: { variant: 'danger', icon: 'cross' },
   }
   const cfg = map[status]
-  return <Badge label={t(`ies.project.status_${status}`)} variant={cfg.variant} icon={cfg.icon} shape={cfg.shape} />
+  return <Badge label={t(`ies.project.status_${status}`)} variant={cfg.variant} icon={cfg.icon} />
 }
 
 /** 四维评估等级徽章。 */
 export function AssessmentBadge({ grade }: { grade: AssessmentGrade }) {
   const { t } = useI18n()
-  const map: Record<AssessmentGrade, { variant: BadgeVariant; icon: IconName; shape: BadgeShape }> = {
-    pass: { variant: 'success', icon: 'check', shape: 'circle' },
-    fail: { variant: 'danger', icon: 'cross', shape: 'circle' },
-    unknown: { variant: 'neutral', icon: 'question', shape: 'diamond' },
+  const map: Record<AssessmentGrade, { variant: BadgeVariant; icon: IconName }> = {
+    pass: { variant: 'success', icon: 'check' },
+    fail: { variant: 'danger', icon: 'cross' },
+    unknown: { variant: 'neutral', icon: 'question' },
   }
   const cfg = map[grade]
-  return <Badge label={t(`ies.result.grade_${grade}`)} variant={cfg.variant} icon={cfg.icon} shape={cfg.shape} />
+  return <Badge label={t(`ies.result.grade_${grade}`)} variant={cfg.variant} icon={cfg.icon} />
 }
 
 // ---------------------------------------------------------------------------

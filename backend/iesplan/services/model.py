@@ -23,12 +23,12 @@ from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from iesplan.core.diagnostics import (
     CONN_NODE_ORPHAN,
     CONN_TYPE_UNREGISTERED,
-    DATA_COL_MISSING,
     PARAM_CONFLICT,
     PARAM_RNG_OUT,
     PARAM_UNIT_INCONSISTENT,
@@ -102,6 +102,8 @@ _MODEL_FIDELITIES = ("low", "medium", "high")
 
 #: 必填参数(04 §3 各设备 required 清单中无默认值的 reference 类参数;
 #: 注册表未直接编码必填标志, 在此显式声明; 其余参数均有默认值, 缺省按默认填充)
+#: 缺省时按显式 null 归一(前端跳过 default=null 的参数键, 显式 null 历来可创建,
+#: 此处统一"缺失"与"显式 null"两种写法, 避免前端拖拽负荷设备被 400 阻断)
 _REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
     "ies.device.electric_load": ("load_profile",),
     "ies.device.heat_load": ("heat_profile",),
@@ -186,6 +188,39 @@ def _port_directions(spec: DeviceTypeSpec, params: dict | None = None) -> dict[s
     return {c: "out" for c in spec.energy_carriers if c in CARRIER_PORT_TYPE}
 
 
+def _sync_ports_for_params(
+    db: Session, device: Device, spec: DeviceTypeSpec, params: dict
+) -> None:
+    """按设备参数(热泵 mode)重同步端口: 补齐应存在但缺失的端口, 删除被裁剪的端口。
+
+    被删除端口的既有连接一并删除(端口语义随模式变化, 原连接不再有效);
+    仅影响模式类参数驱动的端口差异, 其余端口不动。
+    """
+    wanted = _port_directions(spec, params)
+    existing = {
+        (p.port_type, p.direction): p for p in db.scalars(select(Port).where(Port.device_id == device.id))
+    }
+    # 删除不再需要的端口(及其连接)
+    for (ptype, direction), port in list(existing.items()):
+        if ptype not in wanted:
+            db.execute(sa.delete(Connection).where(Connection.from_port_id == port.id))
+            db.execute(sa.delete(Connection).where(Connection.to_port_id == port.id))
+            db.delete(port)
+    # 补回应有但缺失的端口
+    for carrier, direction in wanted.items():
+        ptype = CARRIER_PORT_TYPE[carrier]
+        if (ptype, direction) not in existing:
+            db.add(
+                Port(
+                    device_id=device.id,
+                    port_type=ptype,
+                    direction=direction,
+                    name=_port_name(carrier, direction),
+                    params={},
+                )
+            )
+
+
 def _coarse_category(type_id: str) -> str:
     """注册表类型 id → devices.device_type 粗分类别(01 §4.2 CHECK; 未知类型落 'other')。"""
     return _DEVICE_COARSE_CATEGORY.get(type_id, "other")
@@ -233,11 +268,11 @@ def _raise_diagnostics(diags: list[Diagnostic]) -> None:
 
 
 def _find_working_graph(db: Session, project_id: int) -> SystemGraph | None:
-    """项目的工作图(挂草稿即工作图, 01 §4.1)。"""
+    """项目的工作图(挂草稿即工作图, 01 §4.1; 按 id 升序取最早一张, 保证确定性)。"""
     return db.scalar(
-        select(SystemGraph).where(
-            SystemGraph.project_id == project_id, SystemGraph.draft_id.is_not(None)
-        )
+        select(SystemGraph)
+        .where(SystemGraph.project_id == project_id, SystemGraph.draft_id.is_not(None))
+        .order_by(SystemGraph.id)
     )
 
 
@@ -245,6 +280,10 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
     """取项目工作图; 不存在则连同工作草稿一起创建(幂等)。
 
     草稿为工作图的内容载体(01 §3.2/§4.1): 草稿 content_hash 与图内容哈希保持一致。
+    并发安全: 首批设备快速连发时多个请求可能同时判定"无工作图"并发建图(实测同一项目
+    8ms 内出现两张图, 设备被随机分裂); 由 uq_system_graphs_working 部分唯一索引
+    (配合草稿 uq_drafts_revision/uq_drafts_current)兜底 —— 唯一键冲突方回滚本事务
+    半成品后重查胜方已提交的图, 重试上限内必收敛。
     """
     project = db.get(Project, project_id)
     if project is None:
@@ -252,38 +291,47 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
             f"项目不存在: {project_id}",
             location={"object_type": "project", "object_id": str(project_id)},
         )
-    graph = _find_working_graph(db, project_id)
-    if graph is not None:
-        return graph
-    # 复用既有当前草稿, 否则新建(修订号顺延)
-    draft = db.scalar(
-        select(Draft)
-        .where(Draft.project_id == project_id, Draft.is_current.is_(True))
-        .order_by(Draft.revision.desc())
+    for _attempt in range(3):
+        graph = _find_working_graph(db, project_id)
+        if graph is not None:
+            return graph
+        try:
+            # 复用既有当前草稿, 否则新建(修订号顺延)
+            draft = db.scalar(
+                select(Draft)
+                .where(Draft.project_id == project_id, Draft.is_current.is_(True))
+                .order_by(Draft.revision.desc())
+            )
+            if draft is None:
+                max_rev = db.scalar(select(sa.func.max(Draft.revision)).where(Draft.project_id == project_id))
+                draft = Draft(
+                    project_id=project_id,
+                    revision=int(max_rev or 0) + 1,
+                    content_hash="0" * 64,
+                    updated_by=created_by,
+                    is_current=True,
+                )
+                db.add(draft)
+                db.flush()
+            graph = SystemGraph(
+                project_id=project_id,
+                draft_id=draft.id,
+                name="工作图",
+                graph_hash=draft.content_hash,
+                created_by=created_by,
+            )
+            db.add(graph)
+            db.flush()
+            refresh_graph_hash(db, graph)
+            db.commit()
+            return graph
+        except IntegrityError:
+            # 并发竞争者已提交建图/建草稿: 放弃本事务半成品, 下一轮重查胜方结果
+            db.rollback()
+    raise ConflictError(
+        "工作图创建失败: 并发冲突, 请重试",
+        location={"object_type": "project", "object_id": str(project_id)},
     )
-    if draft is None:
-        max_rev = db.scalar(select(sa.func.max(Draft.revision)).where(Draft.project_id == project_id))
-        draft = Draft(
-            project_id=project_id,
-            revision=int(max_rev or 0) + 1,
-            content_hash="0" * 64,
-            updated_by=created_by,
-            is_current=True,
-        )
-        db.add(draft)
-        db.flush()
-    graph = SystemGraph(
-        project_id=project_id,
-        draft_id=draft.id,
-        name="工作图",
-        graph_hash=draft.content_hash,
-        created_by=created_by,
-    )
-    db.add(graph)
-    db.flush()
-    refresh_graph_hash(db, graph)
-    db.commit()
-    return graph
 
 
 def _load_devices(db: Session, graph_id: int) -> list[Device]:
@@ -413,28 +461,20 @@ def validate_device_params(
 
     规则:
     - 类型未注册抛 NotFoundError(CONN-TYPE-002);
-    - 注册表 default 为 None 的参数视为必填(reference 类, 如负荷曲线);
+    - 注册表 default 为 None 的参数视为必填(reference 类, 如负荷曲线), 缺失时
+      归一为显式 null(与前端跳过 null 默认值的行为对齐, 不再因缺键拒绝创建);
     - 数值参数校验 min/max(越界 → PARAM-RNG-003), 枚举参数校验取值, 类型不匹配 → PARAM-UNIT-002;
     - 内部保留键('_' 前缀与 type_detail)不参与校验。
     """
     spec = get_device_type(device_type)
-    params = params or {}
+    params = dict(params or {})  # 拷贝: 归一缺省键不得改写调用方/ORM 上的原字典
+    # 必填参数缺失按显式 null 归一(前端 buildDefaultParams 跳过 default=null 的键,
+    # 拖拽新建负荷设备时 load_profile/heat_profile 等不会出现; 显式 null 历来通过校验)
+    for name in _REQUIRED_PARAMS.get(device_type, ()):
+        params.setdefault(name, None)
     provided = {k: v for k, v in params.items() if not _is_internal_key(k)}
     diags: list[Diagnostic] = []
     loc = {"object_type": "device", "object_id": str(device_id), "field": ""}
-
-    # 必填参数缺失(04 §3 required 中无默认值的 reference 类参数, 见 _REQUIRED_PARAMS)
-    required = list(_REQUIRED_PARAMS.get(device_type, ()))
-    for name in required:
-        if name not in provided:
-            diags.append(
-                make_diag(
-                    DATA_COL_MISSING,
-                    severity=SEVERITY_ERROR,
-                    params={"col": name, "expected": ",".join(required)},
-                    location={**loc, "field": name},
-                )
-            )
 
     for name, value in provided.items():
         pspec = spec.parameters.get(name)
@@ -576,6 +616,9 @@ def create_device(
     params[_TYPE_DETAIL_KEY] = device_type  # 完整注册表类型 id(01 §4.2 细分类别)
     if position is not None:
         params[_LAYOUT_KEY] = _normalize_position(position)
+    # 缺省必填参数归一为显式 null(与 validate_device_params 语义一致, 存储与显式 null 相同)
+    for name in _REQUIRED_PARAMS.get(device_type, ()):
+        params.setdefault(name, None)
     diags = validate_device_params(device_type, params)
     _raise_diagnostics(diags)
     graph = get_or_create_working_graph(db, project_id, created_by)
@@ -672,8 +715,16 @@ def update_device(
         if position is not None:
             new_params[_LAYOUT_KEY] = _normalize_position(position)
         new_params[_TYPE_DETAIL_KEY] = _resolve_type_id(device)
+        # 缺省必填参数归一为显式 null(与创建路径一致, 避免前端缺省键被校验拒绝)
+        for name in _REQUIRED_PARAMS.get(_resolve_type_id(device), ()):
+            new_params.setdefault(name, None)
         diags = validate_device_params(_resolve_type_id(device), new_params, device_id=device.id)
         _raise_diagnostics(diags)
+        # 模式类参数变更(热泵 mode)需重同步端口: 按新参数裁剪/补回载体端口,
+        # 被裁剪端口的既有连接一并删除(端口语义随模式变化, 原连接不再有效)
+        spec = _try_get_device_type(_resolve_type_id(device))
+        if spec is not None:
+            _sync_ports_for_params(db, device, spec, new_params)
         device.params = new_params
     elif position is not None:
         new_params = dict(device.params)
@@ -1086,7 +1137,7 @@ def validate_topology(graph: dict) -> list[Diagnostic]:
                 params={
                     "param": ptype,
                     "expected": "source_and_sink",
-                    "actual": "sink_only" if has_source else "source_only",
+                    "actual": "source_only" if has_source else "sink_only",
                 },
                 location={"object_type": "system_graph", "field": f"carrier:{ptype}"},
             )

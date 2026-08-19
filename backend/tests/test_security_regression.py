@@ -240,17 +240,17 @@ def test_pending_session_rejected_until_confirm(client: TestClient, db: Session)
     assert resp.status_code == 401, resp.text
     assert resp.json()["error"]["params"].get("reason") == "takeover_pending"
 
-    # 确认接管 → 新凭证转 active
+    # 确认接管 → 当前待接管会话保留为 active(凭证不变, 立即可用)
     resp = client.post("/api/auth/confirm-takeover", headers=_bearer(token_b))
     assert resp.status_code == 200, resp.text
     token_c = resp.json()["token"]
-    assert token_c != token_b
+    assert token_c == token_b
     resp = client.get("/api/projects", headers=_bearer(token_c))
     assert resp.status_code == 200, resp.text
 
-    # 旧 pending 凭证已失效
+    # 确认后同一凭证(原 pending)即正式活动凭证, 业务请求放行
     resp = client.get("/api/projects", headers=_bearer(token_b))
-    assert resp.status_code == 401, resp.text
+    assert resp.status_code == 200, resp.text
 
 
 # ---------------------------------------------------------------------------

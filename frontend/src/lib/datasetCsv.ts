@@ -4,8 +4,8 @@
  * 与设计输入 §8(数据约束)及 §15.3(时序数据字段)对齐:
  * - 标准非闰年 365 天;分辨率 15/30/60 分钟;
  * - 首列为时间戳(本地墙钟时间,ISO8601 无偏移后缀,由数据集声明的固定 UTC 偏移解释);
- * - 字段:电/热/冷负荷(kW)、环境温度(°C)、水平面总辐照度(W/m²)、光伏可用率(0-1)、
- *   分时购电价格(元/kWh)、电网排放因子(kgCO₂/kWh);
+ * - 字段:电/热/冷负荷(kWh)、环境温度(°C)、水平面总辐照度(W/m²)、
+ *   购电价格(元/kWh)、电网排放因子(kgCO₂/kWh);
  * - 生成函数均为纯函数(确定性合成,便于复现与测试)。
  */
 
@@ -37,6 +37,7 @@ export function expectedRows(resolution: ResolutionOption): number {
   return ((STANDARD_YEAR_DAYS * 24 * 60) / resolution.minutes) | 0
 }
 
+/** 标准表头(与后端 STANDARD_FIELDS 列序一致: timestamp + 7 个标准字段)。 */
 const HEADERS = [
   'timestamp',
   'e_load',
@@ -44,8 +45,7 @@ const HEADERS = [
   'c_load',
   't_ambient',
   'ghi',
-  'pv_availability',
-  'buy_price',
+  'electricity_price',
   'grid_emission_factor',
 ] as const
 
@@ -88,7 +88,6 @@ export function csvTemplate(): string {
         '400.00',
         '10.0',
         '0.0',
-        '0.000',
         '0.3580',
         '0.5810',
       ].join(','),
@@ -122,7 +121,6 @@ export function syntheticCsv(resolution: ResolutionOption): string {
       const cLoad =
         weekdayFactor * 420 * Math.max(0, (tAmb - 18) / 10) * (hour >= 9 && hour <= 19 ? 1.2 : 0.5)
       const ghi = hour >= 6 && hour <= 18 ? 900 * Math.sin((Math.PI * (hour - 6)) / 12) * (0.85 + 0.15 * n) : 0
-      const pvAvail = Math.min(1, Math.max(0, ghi / 1000))
       const price =
         (hour >= 8 && hour <= 11) || (hour >= 18 && hour <= 21)
           ? 1.05
@@ -137,7 +135,6 @@ export function syntheticCsv(resolution: ResolutionOption): string {
           cLoad.toFixed(2),
           tAmb.toFixed(1),
           ghi.toFixed(1),
-          pvAvail.toFixed(3),
           price.toFixed(4),
           '0.5810',
         ].join(','),

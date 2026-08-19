@@ -226,6 +226,21 @@ function parseErrorEnvelope(body: unknown): ApiErrorBody | null {
 function toApiError(status: number, body: unknown): ApiError {
   const envelope = parseErrorEnvelope(body)
   if (envelope) return new ApiError(status, envelope)
+  // 后端校验失败信封:{diagnostics: [...], count}(PUT /config、数据集上传等 422 响应)。
+  // 无标准 {error} 信封时把诊断透传到 params,页面可展示明细而非"未知错误: HTTP 422"。
+  const raw = body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : {}
+  if (Array.isArray(raw.diagnostics)) {
+    return new ApiError(status, {
+      code: 'VALIDATION-FAILED',
+      message_key: 'ies.error.data_validation_failed',
+      severity: 'error',
+      blocking: true,
+      params: { diagnostics: raw.diagnostics },
+      location: null,
+      fix_hint_key: null,
+      ref_ids: [],
+    })
+  }
   // 无信封:按状态码映射通用文案键
   let fallbackKey = 'ies.error.unknown'
   if (status === 0 || status >= 500) fallbackKey = 'ies.error.internal'
@@ -288,6 +303,8 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
       // 仅当后端明确表示会话无效(ies.diag.auth.session_invalid)或登录请求本身
       // 失败且无法识别时, 才清除本地会话并跳登录页; 其余 401(如权限缺失)
       // 保留信封原样抛出, 由页面展示, 避免误踢登录。
+      // 注: takeover_pending 属于"旧窗口被降级/新会话待确认"中间态(H-01),
+      // 不应立即清空会话/跳登录页, 否则会形成循环登录; 由调用方在确认接管后恢复。
       let envelope: ApiErrorBody | null = null
       try {
         envelope = parseErrorEnvelope(await parseJson(res))
@@ -296,7 +313,9 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
       }
       const isLoginPath = path.startsWith('/auth/login')
       const sessionInvalid = envelope?.message_key === 'ies.diag.auth.session_invalid'
-      if (!isLoginPath && (sessionInvalid || !envelope)) {
+      const takeoverPending =
+        sessionInvalid && (envelope?.params as { reason?: string } | undefined)?.reason === 'takeover_pending'
+      if (!isLoginPath && !takeoverPending && (sessionInvalid || !envelope)) {
         notifyUnauthorized()
       }
       throw new ApiError(401, envelope, envelope ? undefined : 'ies.diag.auth.session_invalid')
@@ -329,7 +348,9 @@ async function requestBlob(path: string, opts: RequestOptions = {}): Promise<Blo
         envelope = null
       }
       const sessionInvalid = envelope?.message_key === 'ies.diag.auth.session_invalid'
-      if (sessionInvalid || !envelope) {
+      const takeoverPending =
+        sessionInvalid && (envelope?.params as { reason?: string } | undefined)?.reason === 'takeover_pending'
+      if (!takeoverPending && (sessionInvalid || !envelope)) {
         notifyUnauthorized()
       }
       throw new ApiError(401, envelope, envelope ? undefined : 'ies.diag.auth.session_invalid')
@@ -425,11 +446,33 @@ function normalizeUser(u: Record<string, unknown>): User {
   }
 }
 
-/** 后端项目包裹 {project, my_role}(或 {project: {...}}) → 前端 Project。 */
+/**
+ * 后端项目包裹 {project, draft, versions, my_role} → 前端 Project。
+ * 草稿摘要只透出修订号与数据集绑定清单(绑定状态以草稿为权威, 数据页真实徽章来源);
+ * create/archive 等端点只返回 {project, my_role}, 不虚构 draft。
+ */
 function projectFromServer(body: unknown): Project {
   const rec = asRecord(body)
   const p = asRecord(rec.project)
-  return { ...(p as unknown as Project), role: (rec.my_role as ProjectRole) ?? undefined }
+  const out = { ...(p as unknown as Project), role: (rec.my_role as ProjectRole) ?? undefined }
+  if (rec.draft !== null && typeof rec.draft === 'object') {
+    const draft = asRecord(rec.draft)
+    const bindings = Array.isArray(draft.dataset_bindings)
+      ? (draft.dataset_bindings as NonNullable<Project['draft']>['dataset_bindings'])
+      : undefined
+    out.draft = {
+      id: Number(draft.id ?? 0),
+      project_id: Number(draft.project_id ?? 0),
+      revision: Number(draft.revision ?? 1),
+      content_hash: String(draft.content_hash ?? ''),
+      is_current: draft.is_current !== false,
+      updated_by: Number(draft.updated_by ?? 0),
+      updated_at: String(draft.updated_at ?? ''),
+      created_at: String(draft.created_at ?? ''),
+      dataset_bindings: bindings,
+    }
+  }
+  return out
 }
 
 /** 后端任务摘要(task_summary) → 前端 Task。 */
@@ -709,6 +752,13 @@ function graphFromServer(body: unknown, projectId: number): GraphModel {
   }
 }
 
+/** 参数默认值适配:后端枚举参数(如 mode='both')默认值为字符串,数值参数为 number。 */
+function paramDefaultValue(v: unknown): number | string | null {
+  if (typeof v === 'number') return v
+  if (typeof v === 'string') return v
+  return null
+}
+
 /** 后端设备类型注册项 → 前端 DeviceTypeSpec(参数规格字段名适配)。 */
 function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
   const params = asRecord(s.parameters)
@@ -728,13 +778,16 @@ function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
             unit: pr.unit === null || pr.unit === undefined ? null : String(pr.unit),
             min: typeof pr.min === 'number' ? (pr.min as number) : null,
             max: typeof pr.max === 'number' ? (pr.max as number) : null,
-            default: typeof pr.default === 'number' ? (pr.default as number) : null,
+            default: paramDefaultValue(pr.default),
             is_optimizable: Boolean(pr.is_optimizable ?? false),
-            existing_default:
-              pr.stock_or_addition === null || pr.stock_or_addition === undefined
-                ? null
-                : Number(pr.stock_or_addition),
+            // 后端同时返回 existing_default(存量默认值)与 stock_or_addition(存量/新增标签);
+            // 取值一律走 existing_default(旧实现误从 stock_or_addition 取值得到 NaN)。
+            existing_default: paramDefaultValue(pr.existing_default),
             help_key: String(pr.help_key ?? ''),
+            // 透出枚举约束(heat_pump.mode=heating/cooling/both 等),前端按 enum 渲染下拉。
+            enum: Array.isArray(pr.enum)
+              ? (pr.enum as Array<string | number | boolean>)
+              : null,
           },
         ]
       }),
@@ -777,6 +830,7 @@ function makeCommand(
   expectedRevision: number,
   type: string,
   payload: Record<string, unknown>,
+  unit = 'model',
 ): Record<string, unknown> {
   commandSeq += 1
   return {
@@ -784,25 +838,58 @@ function makeCommand(
     project_id: projectId,
     expected_revision: expectedRevision,
     session: 'browser',
-    unit: 'model',
+    unit,
     type,
     payload,
   }
 }
 
-/** 解析证据包的最新评估 id(Excel 导出需要; 缓存未命中时拉取评估历史)。 */
+/**
+ * 发送单条草稿语义命令(数据集绑定等非模型命令), 返回新修订号。
+ * 先取项目视图的当前草稿修订作乐观锁, 再 PUT /projects/{id}/draft。
+ */
+async function sendDraftCommand(
+  projectId: number,
+  type: string,
+  payload: Record<string, unknown>,
+): Promise<{ revision: number }> {
+  const view = asRecord(await request<unknown>(`/projects/${projectId}`))
+  const expectedRevision = Number(asRecord(view.draft).revision ?? 1)
+  const cmd = makeCommand(projectId, expectedRevision, type, payload, type.split('.')[0] ?? 'model')
+  const body = asRecord(
+    await request<unknown>(`/projects/${projectId}/draft`, {
+      method: 'PUT',
+      body: { expected_revision: expectedRevision, commands: [cmd] },
+    }),
+  )
+  return { revision: Number(body.revision ?? expectedRevision) }
+}
+
+/** 解析证据包的最新评估 id(Excel 导出需要; 缓存未命中时按需回退:先取最新评估列表,若空则触发一次 full 评估)。 */
 async function resolveAssessmentId(projectId: number, evidencePackageId: number): Promise<number> {
   const cached = pkgAssessmentCache.get(evidencePackageId)
   if (cached !== undefined && cached > 0) return cached
   const taskId = pkgTaskCache.get(evidencePackageId)
   if (taskId !== undefined) {
-    const body = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`)
-    const items = asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer)
-    for (const a of items) pkgAssessmentCache.set(a.evidence_package_id, a.id)
-    const latest = items[0]
-    if (latest) return latest.id
+    try {
+      const body = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`)
+      const items = asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer)
+      for (const a of items) pkgAssessmentCache.set(a.evidence_package_id, a.id)
+      const latest = items[0]
+      if (latest) return latest.id
+      // 评估列表为空:主动触发一次 full 评估(后端 run_assessment 创建新记录)
+      const assess = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assess`, {
+        method: 'POST',
+        body: { assessment_type: 'full' },
+      })
+      const created = assessmentFromServer(asRecord(oneOf<Record<string, unknown>>(assess, 'assessment')))
+      pkgAssessmentCache.set(created.evidence_package_id, created.id)
+      return created.id
+    } catch {
+      // 评估接口不可用:走"无 assessment_id"兼容路径(由后端 fallback 处理)
+    }
   }
-  throw new ApiError(400, null, 'ies.error.unknown')
+  throw new ApiError(404, null, 'ies.error.no_assessment_available')
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +973,13 @@ export interface DatasetsApi {
   uploadDetailed(input: DatasetUploadDetailedInput): Promise<DatasetVersion & { diagnostics?: Diagnostic[] }>
   versions(projectId: number, id: number): Promise<DatasetVersion[]>
   sample(projectId: number, id: number): Promise<DatasetSample>
+  /**
+   * 绑定数据集版本到项目草稿(dataset.bind 语义命令, 写入 draft.content.dataset_bindings)。
+   * 绑定是校验 VALID-DATA-001 与任务数据输入的权威来源。
+   */
+  bind(projectId: number, datasetVersionId: number, datasetId: number): Promise<{ revision: number }>
+  /** 解除数据集版本绑定(dataset.unbind 语义命令)。 */
+  unbind(projectId: number, datasetVersionId: number): Promise<{ revision: number }>
 }
 
 export interface ConfigApi {
@@ -953,7 +1047,10 @@ export const api = {
       return request<void>('/auth/change-password', { method: 'POST', body: input })
     },
     confirmTakeover(input: { token: string }): Promise<LoginResult> {
-      return request<LoginResult>('/auth/confirm-takeover', { method: 'POST', body: input })
+      return request<LoginResult>('/auth/confirm-takeover', { method: 'POST', body: input }).then((res) => {
+        setSession()
+        return res
+      })
     },
     register(input: RegisterRequest): Promise<User> {
       return request<unknown>('/auth/register', { method: 'POST', body: input }).then((res) =>
@@ -1194,6 +1291,16 @@ export const api = {
         return { headers: Object.keys(asRecord(latest?.fields ?? {})), rows: [], total_rows: 0 }
       })
     },
+    bind(projectId: number, datasetVersionId: number, datasetId: number): Promise<{ revision: number }> {
+      return sendDraftCommand(projectId, 'dataset.bind', {
+        dataset_version_id: datasetVersionId,
+        dataset_id: datasetId,
+        role: 'annual',
+      })
+    },
+    unbind(projectId: number, datasetVersionId: number): Promise<{ revision: number }> {
+      return sendDraftCommand(projectId, 'dataset.unbind', { dataset_version_id: datasetVersionId })
+    },
   } satisfies DatasetsApi,
 
   config: {
@@ -1202,7 +1309,8 @@ export const api = {
       return request<unknown>(`/projects/${projectId}/config`).then((body) => configFromServer(body, projectId))
     },
     save(projectId: number, input: CalcConfigInput): Promise<CalcConfig> {
-      // 后端 PUT 需要 {config, expected_revision}(乐观锁绑草稿修订): 先取当前修订
+      // 后端 PUT 需要 {config, expected_revision}(乐观锁绑草稿修订):
+      // GET /projects/{id} 返回 {project, draft, versions, my_role};取 draft.revision。
       return request<unknown>(`/projects/${projectId}`).then((view) => {
         const revision = Number(asRecord(asRecord(view).draft).revision ?? 1)
         return request<unknown>(`/projects/${projectId}/config`, {
@@ -1246,10 +1354,28 @@ export const api = {
       })
     },
     baselineConfirm(projectId: number): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }> {
-      return request<unknown>(`/projects/${projectId}/validation/baseline-confirm`, {
-        method: 'POST',
-        body: { assumptions: {} },
-      }).then((body) => ({ confirmed: asRecord(body).confirmed === true, diagnostics: [] }))
+      // 确认内容须与后端 _current_assumptions 键集一致(validation.py 比对哈希),
+      // 从当前配置导出经济假设, 避免空对象哈希永远不匹配(VALID-FIN-002 恒过期)
+      return api.config
+        .get(projectId)
+        .catch(() => null)
+        .then((cfg) => {
+          const rec = (cfg as unknown as { config?: { parameters?: { economic?: Record<string, unknown> }; irr_floor?: number } }) ?? {}
+          const conf = rec.config ?? {}
+          const params = conf.parameters?.economic ?? {}
+          const assumptions = {
+            discount_rate: params.discount_rate ?? 0.08,
+            tax_rate: params.tax_rate ?? 0.25,
+            project_years: params.project_years ?? 20,
+            depreciation_years: params.depreciation_years ?? 10,
+            currency: params.currency ?? 'CNY',
+            irr_floor: conf.irr_floor ?? 0.08,
+          }
+          return request<unknown>(`/projects/${projectId}/validation/baseline-confirm`, {
+            method: 'POST',
+            body: { assumptions },
+          }).then((body) => ({ confirmed: asRecord(body).confirmed === true, diagnostics: [] }))
+        })
     },
   } satisfies ValidationApi,
 
@@ -1288,10 +1414,33 @@ export const api = {
       }).then((res) => taskFromSummary(asRecord(oneOf<Record<string, unknown>>(res, 'task')), input.project_id))
     },
     get(projectId: number, taskId: number): Promise<TaskDetail> {
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}`).then((body) => {
+      return request<unknown>(`/projects/${projectId}/tasks/${taskId}`).then(async (body) => {
         const detail = taskDetailFromServer(asRecord(oneOf<Record<string, unknown>>(body, 'task')), projectId)
-        // 填充 证据包 → 任务 反向映射(结果/导出 API 以任务为路由键)
-        for (const p of detail.evidence) pkgTaskCache.set(Number(p.package_id), taskId)
+        // 后端任务详情不含 evidence 字段,此接口仅返回任务元数据;前端需要从结果视图拉取证据包。
+        if (detail.evidence.length === 0) {
+          try {
+            const result = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`)
+            const r = asRecord(oneOf<Record<string, unknown>>(result, 'result'))
+            const evidence = asRecord(r.evidence)
+            const pkgId = Number(evidence.id ?? 0)
+            if (pkgId > 0) {
+              const status = String(evidence.status ?? 'complete')
+              detail.evidence = [
+                {
+                  package_id: pkgId,
+                  content_hash: '',
+                  status: status as TaskDetail['evidence'][number]['status'],
+                },
+              ]
+              // 缓存 证据包 → 任务 反向映射(结果/导出 API 以任务为路由键)
+              pkgTaskCache.set(pkgId, taskId)
+            }
+          } catch {
+            // 结果不可用:保持空 evidence(UI 展示"暂无结果")
+          }
+        } else {
+          for (const p of detail.evidence) pkgTaskCache.set(Number(p.package_id), taskId)
+        }
         return detail
       })
     },

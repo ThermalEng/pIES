@@ -173,6 +173,8 @@ export interface Project {
   created_at: ISO8601
   updated_at: ISO8601 | null
   created_by: EntityId
+  /** 草稿摘要(GET /projects/{id} 响应含 draft;缺省缺省时无)。 */
+  draft?: ProjectDraft
   /** 当前登录用户在本项目的角色(列表接口冗余返回)。 */
   role?: ProjectRole
 }
@@ -201,6 +203,13 @@ export interface ProjectDraft {
   updated_by: EntityId
   updated_at: ISO8601
   created_at: ISO8601
+  /** 草稿内容摘要:数据集绑定清单(U03 dataset.bind 语义命令写入)。 */
+  dataset_bindings?: Array<{
+    dataset_version_id: number
+    dataset_id?: number | null
+    role?: string | null
+    note?: string | null
+  }>
 }
 
 export interface ProjectVersion {
@@ -334,10 +343,14 @@ export interface ParameterSpec {
   unit: string | null
   min: number | null
   max: number | null
-  default: number | null
+  /** 默认值:枚举参数为字符串字面量(如 heat_pump.mode='both'),数值参数为 number。 */
+  default: number | string | null
   is_optimizable: boolean
-  existing_default: number | null
+  /** 存量默认值(与 default 同型)。 */
+  existing_default: number | string | null
   help_key: string
+  /** 可选枚举值列表(后端 /api/registry/device-types 透出,前端按此渲染下拉/单选)。 */
+  enum?: Array<string | number | boolean> | null
 }
 
 export interface DeviceTypeSpec {
@@ -435,29 +448,47 @@ export interface DatasetUploadInput {
 
 export type AlgorithmId = 'milp' | 'lp' | 'heuristic' | 'ga' | 'exhaustive' | 'custom'
 
+/** 前端表单变量类型(UI 概念;binary 在提交时映射为后端 boolean)。 */
 export type VariableType = 'continuous' | 'binary' | 'integer'
+
+/** 后端变量类型(services/config.py VARIABLE_TYPES)。 */
+export type BackendVariableType = 'continuous' | 'integer' | 'boolean' | 'enum'
 
 export interface ConfigVariable {
   name: string
-  type: VariableType
-  lower: number | null
-  upper: number | null
+  type: BackendVariableType
+  /** 初始值(continuous/integer 必填;boolean 需 0/1)。 */
+  initial: number | null
+  /** 下界(与后端 min 对应)。 */
+  min: number | null
+  /** 上界(与后端 max 对应)。 */
+  max: number | null
 }
 
 export interface Objective {
-  name: string
+  /** 目标指标 id(与后端 OBJECTIVE_METRICS 一致: irr_after_tax / npv_after_tax 等)。 */
+  metric: string
   /** 多目标加权系数。 */
   weight: number
   direction: 'min' | 'max'
-  /** 目标表达式(可为空,表示默认口径)。 */
-  expression: string | null
 }
 
 export interface CalcConstraint {
-  name: string
-  /** 约束表达式(受限语法,见 04 §4)。 */
-  expression: string
-  comment?: string
+  /** 约束类型(后端 U06 格式): predefined 预定义种类 / expression 受限表达式。 */
+  type: 'predefined' | 'expression'
+  /** 约束载荷: predefined 用 kind(co2_cap 含 max_tons); expression 用 name/expression。 */
+  payload: {
+    /** 预定义约束种类(load_satisfaction / capacity_limits / co2_cap / energy_cost_cap)。 */
+    kind?: string
+    /** co2_cap 的年碳排放上限(tCO₂/年)。 */
+    max_tons?: number
+    /** energy_cost_cap 的年购能费用上限。 */
+    max_amount?: number
+    /** 表达式约束名称(展示用)。 */
+    name?: string
+    /** 表达式约束声明(受限语法, 见 04 §4)。 */
+    expression?: string
+  }
 }
 
 export interface CalcConfig {

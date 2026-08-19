@@ -39,6 +39,14 @@ class SystemGraph(Base):
         regex_check(f"graph_hash ~ '{HASH64_RE}'", name="ck_system_graphs_hash"),
         Index("idx_system_graphs_draft", "draft_id"),
         Index("idx_system_graphs_version", "project_version_id"),
+        # 每项目至多一张工作图(并发建图防重, 01 §4.1; 与草稿 uq_drafts_current 配套)
+        Index(
+            "uq_system_graphs_working",
+            "project_id",
+            unique=True,
+            postgresql_where=sa.text("draft_id IS NOT NULL"),
+            sqlite_where=sa.text("draft_id IS NOT NULL"),
+        ),
     )
 
 

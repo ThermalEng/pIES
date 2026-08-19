@@ -4,7 +4,7 @@
  * 设计要点:
  * - CSS 变量定义色彩/间距/圆角/阴影/字体,组件样式全部基于变量。
  * - WCAG 2.2 AA 对比度:正文/次级文本/主色/语义色均满足 4.5:1(白底)。
- * - 状态不只靠颜色:徽章由 文字 + 图标 + 形状(圆/方/三角/菱形)三重编码。
+ * - 状态不只靠颜色:徽章由 文字 + 图标 + 语义色 编码(统一圆角矩形)。
  * - 分辨率适配:1920x1080 默认 15px 根字号;≥2560px(4K)自动放大根字号;
  *   布局以 rem/百分比为基础,内容区最大宽度 1680px。
  * - 动效尊重 prefers-reduced-motion。
@@ -762,29 +762,12 @@ button {
   display: inline-flex;
 }
 
-/* 形状:圆 / 方 / 三角 / 菱形 */
-.ies-badge--shape-circle {
-  border-radius: var(--ies-radius-full);
-}
-
-.ies-badge--shape-square {
-  border-radius: 3px;
-}
-
-.ies-badge--shape-triangle {
-  border-radius: 50% 50% 50% 50% / 8% 8% 92% 92%;
-  clip-path: polygon(50% 8%, 96% 90%, 4% 90%);
-  padding-top: 6px;
-}
-
+/* 形状:统一圆角矩形(状态由颜色+图标+文字区分, 不再用几何形状, 保证风格统一) */
+.ies-badge--shape-circle,
+.ies-badge--shape-square,
+.ies-badge--shape-triangle,
 .ies-badge--shape-diamond {
   border-radius: 3px;
-  transform: rotate(45deg);
-}
-
-.ies-badge--shape-diamond .ies-badge__label,
-.ies-badge--shape-diamond .ies-badge__icon {
-  transform: rotate(-45deg);
 }
 
 /* 语义色变体(文字对比度均 ≥ 4.5:1) */

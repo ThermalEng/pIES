@@ -92,7 +92,7 @@ function QualityBadge({ version }: { version: DatasetVersion | undefined }) {
   const notes = q.interpolation_notes?.length ?? 0
   const stats = `${pt('ies.data.missing_rate')} ${formatPercent(missing)} · ${pt('ies.data.outlier_rate')} ${formatPercent(outlier)}`
   if (missing > 0.01 || outlier > 0.01) {
-    return <Badge label={stats} variant="warning" icon="warning" shape="triangle" />
+    return <Badge label={stats} variant="warning" icon="warning" />
   }
   if (notes > 0) {
     return (
@@ -125,24 +125,28 @@ interface FieldRow {
 let FIELD_SEQ = 0
 
 function defaultFields(): FieldRow[] {
+  // 单位/字段名须与后端 schema(§8 数据约束 + §15.3 时序字段)一致:
+  // 电/热/冷负荷 → kWh(逐时累计;后端按时段累计行处理);电价 → 元/kWh(unicode 下标);
+  // 排放因子 → kgCO₂/kWh。避免 kW 等功率单位被 PARAM-UNIT-002 阻断。
   return [
-    { key: 'f0', name: 'e_load', unit: 'kW', description: '' },
-    { key: 'f1', name: 'h_load', unit: 'kW', description: '' },
-    { key: 'f2', name: 'c_load', unit: 'kW', description: '' },
+    { key: 'f0', name: 'e_load', unit: 'kWh', description: '' },
+    { key: 'f1', name: 'h_load', unit: 'kWh', description: '' },
+    { key: 'f2', name: 'c_load', unit: 'kWh', description: '' },
     { key: 'f3', name: 't_ambient', unit: '°C', description: '' },
   ]
 }
 
 function sampleFields(): FieldRow[] {
+  // 与 lib/datasetCsv.ts 表头一致(后端 STANDARD_FIELDS: 7 个标准字段);
+  // 单位均按后端 FIELD_SPECS(electricity_price → 元/kWh 等)。
   return [
-    { key: 'f0', name: 'e_load', unit: 'kW', description: '电负荷' },
-    { key: 'f1', name: 'h_load', unit: 'kW', description: '热负荷' },
-    { key: 'f2', name: 'c_load', unit: 'kW', description: '冷负荷' },
+    { key: 'f0', name: 'e_load', unit: 'kWh', description: '电负荷' },
+    { key: 'f1', name: 'h_load', unit: 'kWh', description: '热负荷' },
+    { key: 'f2', name: 'c_load', unit: 'kWh', description: '冷负荷' },
     { key: 'f3', name: 't_ambient', unit: '°C', description: '环境温度' },
     { key: 'f4', name: 'ghi', unit: 'W/m²', description: '水平面总辐照度' },
-    { key: 'f5', name: 'pv_availability', unit: '0-1', description: '光伏可用率' },
-    { key: 'f6', name: 'buy_price', unit: 'CNY/kWh', description: '分时购电价格' },
-    { key: 'f7', name: 'grid_emission_factor', unit: 'kgCO2/kWh', description: '电网排放因子' },
+    { key: 'f5', name: 'electricity_price', unit: '元/kWh', description: '分时购电价格' },
+    { key: 'f6', name: 'grid_emission_factor', unit: 'kgCO₂/kWh', description: '电网排放因子' },
   ]
 }
 
@@ -645,20 +649,47 @@ function VersionDetail({ version }: { version: DatasetVersion }) {
 function VersionsDialog({
   dataset,
   versions,
+  boundVersionIds,
+  projectId,
   open,
   onClose,
+  onChanged,
 }: {
   dataset: Dataset | null
   versions: DatasetVersion[]
+  /** 已绑定到项目草稿的版本 id 集合(权威来源: GET /projects/{id} draft.dataset_bindings)。 */
+  boundVersionIds: Set<number>
+  projectId?: number
   open: boolean
   onClose: () => void
+  onChanged: () => void
 }) {
   const { t } = useI18n()
   const [selected, setSelected] = useState<DatasetVersion | null>(null)
+  const [busyVersion, setBusyVersion] = useState<number | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) setSelected(null)
   }, [open])
+
+  async function toggleBind(v: DatasetVersion, bind: boolean) {
+    if (projectId === undefined || busyVersion !== null) return
+    setBusyVersion(v.id)
+    setActionError(null)
+    try {
+      if (bind) {
+        await api.datasets.bind(projectId, v.id, v.dataset_id)
+      } else {
+        await api.datasets.unbind(projectId, v.id)
+      }
+      onChanged()
+    } catch (err) {
+      setActionError(errorText(err))
+    } finally {
+      setBusyVersion(null)
+    }
+  }
 
   const sorted = [...versions].sort((a, b) => b.version_no - a.version_no)
 
@@ -674,6 +705,7 @@ function VersionsDialog({
         </Button>
       }
     >
+      {actionError ? <Alert variant="error">{actionError}</Alert> : null}
       <Table>
         <THead>
           <TR>
@@ -684,36 +716,62 @@ function VersionsDialog({
             <TH>{pt('ies.data.utc_offset')}</TH>
             <TH>{pt('ies.data.quality')}</TH>
             <TH>{pt('ies.data.license')}</TH>
+            <TH>{pt('ies.data.binding')}</TH>
+            <TH>{t('ies.common.actions')}</TH>
           </TR>
         </THead>
         <TBody>
           {sorted.length === 0 ? (
             <TR>
-              <TD colSpan={7}>{pt('ies.data.no_versions')}</TD>
+              <TD colSpan={9}>{pt('ies.data.no_versions')}</TD>
             </TR>
           ) : (
-            sorted.map((v) => (
-              <TR key={v.id} clickable onClick={() => setSelected(v)}>
-                <TD>
-                  <div className="ies-flex">
-                    <Badge label={`v${v.version_no}`} variant={selected?.id === v.id ? 'primary' : 'neutral'} />
-                    {v.version_no === sorted[0].version_no ? (
-                      <Badge label={pt('ies.data.latest')} variant="success" size="sm" />
-                    ) : null}
-                  </div>
-                </TD>
-                <TD>{formatDateTime(v.created_at)}</TD>
-                <TD>{t(`ies.data.timeline_${v.timeline}`)}</TD>
-                <TD>
-                  <span className="ies-mono">{v.resolution}</span>
-                </TD>
-                <TD>{utcLabel(v.fixed_utc_offset_minutes)}</TD>
-                <TD>
-                  <QualityBadge version={v} />
-                </TD>
-                <TD>{v.license ?? '—'}</TD>
-              </TR>
-            ))
+            sorted.map((v) => {
+              const bound = boundVersionIds.has(v.id)
+              return (
+                <TR key={v.id} clickable onClick={() => setSelected(v)}>
+                  <TD>
+                    <div className="ies-flex">
+                      <Badge label={`v${v.version_no}`} variant={selected?.id === v.id ? 'primary' : 'neutral'} />
+                      {v.version_no === sorted[0].version_no ? (
+                        <Badge label={pt('ies.data.latest')} variant="success" size="sm" />
+                      ) : null}
+                    </div>
+                  </TD>
+                  <TD>{formatDateTime(v.created_at)}</TD>
+                  <TD>{t(`ies.data.timeline_${v.timeline}`)}</TD>
+                  <TD>
+                    <span className="ies-mono">{v.resolution}</span>
+                  </TD>
+                  <TD>{utcLabel(v.fixed_utc_offset_minutes)}</TD>
+                  <TD>
+                    <QualityBadge version={v} />
+                  </TD>
+                  <TD>{v.license ?? '—'}</TD>
+                  <TD>
+                    {bound ? (
+                      <Badge label={pt('ies.data.bound')} variant="success" icon="check" />
+                    ) : (
+                      <Badge label={pt('ies.data.unbound')} variant="neutral" icon="info" />
+                    )}
+                  </TD>
+                  <TD>
+                    <Button
+                      variant={bound ? 'ghost' : 'secondary'}
+                      size="sm"
+                      loading={busyVersion === v.id}
+                      disabled={busyVersion !== null || projectId === undefined}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void toggleBind(v, !bound)
+                      }}
+                    >
+                      {bound ? pt('ies.data.unbind') : pt('ies.data.bind')}
+                    </Button>
+                  </TD>
+                </TR>
+              )
+            })
           )}
         </TBody>
       </Table>
@@ -827,6 +885,7 @@ export function DataPage({ projectId }: DataPageProps) {
   const [previewTarget, setPreviewTarget] = useState<Dataset | null>(null)
   const [templateBusy, setTemplateBusy] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
+  const [busyBind, setBusyBind] = useState<number | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -872,6 +931,27 @@ export function DataPage({ projectId }: DataPageProps) {
   function latestVersion(ds: Dataset): DatasetVersion | undefined {
     const vs = versions[ds.id] ?? []
     return vs.length > 0 ? vs.reduce((a, b) => (a.version_no >= b.version_no ? a : b)) : undefined
+  }
+
+  /** 已绑定到项目草稿的版本 id 集合(权威来源: GET /projects/{id} draft.content.dataset_bindings)。 */
+  const boundVersionIds = new Set((project?.draft?.dataset_bindings ?? []).map((b) => b.dataset_version_id))
+
+  /** 快速绑定最新版本(表格行内操作)。 */
+  async function bindLatest(ds: Dataset) {
+    if (pid === undefined || busyBind !== null) return
+    const v = latestVersion(ds)
+    if (!v) return
+    setBusyBind(v.id)
+    setNotice(null)
+    try {
+      await api.datasets.bind(pid, v.id, ds.id)
+      setNotice({ kind: 'success', text: pt('ies.data.bound_ok') })
+      setRefreshTick((x) => x + 1)
+    } catch (err) {
+      setNotice({ kind: 'error', text: errorText(err) })
+    } finally {
+      setBusyBind(null)
+    }
   }
 
   async function downloadTemplate() {
@@ -990,14 +1070,33 @@ export function DataPage({ projectId }: DataPageProps) {
                     </TD>
                     <TD>{v?.license ?? '—'}</TD>
                     <TD>
-                      {ds.project_id !== null ? (
-                        <Badge label={pt('ies.data.bound')} variant="success" icon="check" />
-                      ) : (
-                        <Badge label={pt('ies.data.unbound')} variant="neutral" icon="info" />
-                      )}
+                      {(() => {
+                        // 绑定状态以草稿 dataset_bindings 为权威(真实 bind 操作写入);
+                        // 不再以"最新版本质量通过"近似
+                        const bound = v !== undefined && boundVersionIds.has(v.id)
+                        return (
+                          <div className="ies-flex" style={{ flexWrap: 'wrap' }}>
+                            <Badge
+                              label={bound ? pt('ies.data.bound') : pt('ies.data.unbound')}
+                              variant={bound ? 'success' : 'neutral'}
+                              icon={bound ? 'check' : 'info'}
+                            />
+                          </div>
+                        )
+                      })()}
                     </TD>
                     <TD>
                       <div className="ies-flex">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          loading={busyBind === v?.id}
+                          disabled={busyBind !== null || v === undefined || boundVersionIds.has(v?.id ?? -1)}
+                          onClick={() => void bindLatest(ds)}
+                          title={pt('ies.data.bind_latest_hint')}
+                        >
+                          {pt('ies.data.bind')}
+                        </Button>
                         <Button variant="ghost" size="sm" onClick={() => setVersionsTarget(ds)}>
                           {t('ies.data.versions')}
                         </Button>
@@ -1031,8 +1130,11 @@ export function DataPage({ projectId }: DataPageProps) {
       <VersionsDialog
         dataset={versionsTarget}
         versions={versionsTarget ? versions[versionsTarget.id] ?? [] : []}
+        boundVersionIds={boundVersionIds}
+        projectId={pid}
         open={versionsTarget !== null}
         onClose={() => setVersionsTarget(null)}
+        onChanged={() => setRefreshTick((x) => x + 1)}
       />
       <PreviewDialog dataset={previewTarget} projectId={pid} open={previewTarget !== null} onClose={() => setPreviewTarget(null)} />
     </div>

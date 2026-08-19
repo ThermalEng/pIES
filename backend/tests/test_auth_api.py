@@ -233,22 +233,22 @@ def test_window_takeover_and_confirm(client: TestClient, db_session: Session) ->
     # 旧窗口凭证立即失效(取消防止新操作)
     assert client.post("/api/auth/refresh", headers=bearer(token_a)).status_code == 401
 
-    # 新窗口确认接管 → 返回全新凭证
+    # 新窗口确认接管 → 当前待接管会话保留为 active(凭证不变)
     r3 = client.post("/api/auth/confirm-takeover", headers=bearer(token_b))
     assert r3.status_code == 200
     token_c = r3.json()["token"]
-    assert token_c != token_b
+    assert token_c == token_b
 
-    # 旧 B 凭证失效, 新 C 凭证可用
-    assert client.post("/api/auth/refresh", headers=bearer(token_b)).status_code == 401
+    # B 凭证确认后转 active 可用(不轮换: 客户端既有凭证立即生效)
+    assert client.post("/api/auth/refresh", headers=bearer(token_b)).status_code == 200
     assert client.post("/api/auth/refresh", headers=bearer(token_c)).status_code == 200
 
-    # 数据库状态: A revoked → B revoked → C active, 且 replaced_by 指向后继
-    # (A 被待接管会话 B 取代, B 被确认后的活动会话 C 取代, 接管追溯链)
+    # 数据库状态: A revoked → B active(保留), 且 A 的 replaced_by 指向 B
+    # (B 为保留会话, 不再派生新会话)
     sessions = list(db_session.execute(select(WindowSession).order_by(WindowSession.id)).scalars())
-    assert [s.status for s in sessions] == ["revoked", "revoked", "active"]
+    assert [s.status for s in sessions] == ["revoked", "active"]
     assert sessions[0].replaced_by_session_id == sessions[1].id
-    assert sessions[1].replaced_by_session_id == sessions[2].id
+    assert sessions[1].replaced_by_session_id is None
 
 
 def test_takeover_pending_session_revoked_on_next_login(client: TestClient, db_session: Session) -> None:

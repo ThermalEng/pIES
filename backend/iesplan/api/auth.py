@@ -278,8 +278,9 @@ def login(
 ) -> AuthResponse:
     """登录: 校验密码 + 登录限速, 创建单活动窗口会话。
 
-    若该账号已有活动窗口, 旧窗口自动置为 takeover_pending(停止接受新操作),
-    响应 needs_takeover_confirm=True, 前端提示确认接管(RPD 3.3)。
+    若该账号已有活动窗口, 旧窗口被撤销、新会话以 takeover_pending 创建
+    (确认接管前无业务权限), 响应 needs_takeover_confirm=True,
+    前端提示确认接管(RPD 3.3 / H-01)。
     """
     ip = _client_ip(request)
     ua = request.headers.get("user-agent")
@@ -350,12 +351,13 @@ def confirm_takeover(
     response: Response,
     ctx: AuthCtx,
 ) -> AuthResponse:
-    """确认接管(RPD 3.3): 撤销旧待接管会话, 签发新的窗口凭证。
+    """确认接管(RPD 3.3 / 01 §1.5): 当前待接管会话直接转为 active。
 
-    新窗口在确认已重新加载服务端最新修订后调用, 返回全新 token
-    (旧凭证立即失效)。
+    不轮换凭证: 客户端既有 Cookie/Bearer 凭证即为最终凭证, 确认后立即
+    拥有业务权限(其余 pending/active 会话被撤销)。返回当前窗口凭证。
     """
-    session, token = identity.confirm_takeover(
+    token = _extract_token(request) or ""
+    identity.confirm_takeover(
         ctx.db,
         ctx.user,
         ctx.session,

@@ -268,6 +268,8 @@
   margin-top: 2px;
   font-size: var(--ies-fs-xs);
   color: var(--ies-color-text-secondary);
+  /* 类型徽标仅作信息展示:不拦截指针事件,避免盖住同节点端口手柄的连线手势 */
+  pointer-events: none;
 }
 
 .mp-node__meta {
@@ -295,12 +297,15 @@
   color: var(--ies-color-text-secondary);
 }
 
-/* 端口句柄:颜色 + 文字(title/aria-label)双重编码 */
+/* 端口句柄:颜色 + 文字(title/aria-label)双重编码。
+ * z-index 高于节点内容(如 .mp-node__type),保证句柄区域始终可命中发起连线;
+ * 句柄为 absolute 定位,同节点内本就画在静态内容之上,此处显式声明防回归。 */
 .mp-handle {
   width: 12px;
   height: 12px;
   border: 2px solid var(--ies-color-surface);
   background: var(--ies-color-text-disabled);
+  z-index: 10;
 }
 
 .mp-handle--electric {
