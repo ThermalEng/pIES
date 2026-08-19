@@ -19,6 +19,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
@@ -337,14 +338,21 @@ def _parse_timestamp_cell(value: str) -> datetime | None:
 
 
 def _parse_number_cell(value: str) -> float | None:
-    """解析数值单元格(去除千分位逗号); 失败返回 None。"""
+    """解析数值单元格(去除千分位逗号); 失败或非有限值返回 None(M-08)。
+
+    Python 的 float() 可接受 "nan"/"inf"/"Infinity" 等非标准常量,
+    非有限值会绕过范围校验并污染下游求解, 一律视为解析失败。
+    """
     v = value.strip().replace(",", "")
     if not v:
         return None
     try:
-        return float(v)
+        parsed = float(v)
     except ValueError:
         return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
 
 
 def parse_csv(data: bytes, resolution: str) -> tuple[list[dict], list[Diagnostic]]:

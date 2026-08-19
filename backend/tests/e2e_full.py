@@ -104,7 +104,6 @@ def poll_task(c: Client, project_id: int, task_id: int, timeout_s: int = 900) ->
         task = r.json()["task"]
         last = task
         st = task["status"]
-        prog = (task.get("summary") or {}).get("percent")
         if st in ("completed", "failed", "cancelled"):
             return task
         time.sleep(3)
@@ -166,7 +165,7 @@ def main() -> int:
     try:
         # 注: 注册开关为进程内存态, backend 双 worker 下需重试以命中开启标志的进程
         def register_user(username: str) -> dict:
-            for attempt in range(8):
+            for _ in range(8):
                 r = c.put("/api/auth/settings", json={"registration_enabled": True})
                 assert r.status_code == 200
                 r = c.post("/api/auth/register", json={
@@ -234,9 +233,12 @@ def main() -> int:
                 "rated_heat_kw": 1200, "max_heat_kw": 1600, "thermal_efficiency": 0.90}, True),
             ("electric_chiller", "ies.device.electric_chiller", {
                 "rated_cooling_kw": 1200, "max_cooling_kw": 1600, "cop": 4.0}, True),
-            ("electric_load", "ies.device.electric_load", {"peak_power_kw": 1200, "load_profile": "ref:e_load"}, True),
-            ("heat_load", "ies.device.heat_load", {"peak_heat_kw": 800, "heat_profile": "ref:h_load"}, True),
-            ("cooling_load", "ies.device.cooling_load", {"peak_cooling_kw": 700, "cooling_profile": "ref:c_load"}, True),
+            ("electric_load", "ies.device.electric_load",
+             {"peak_power_kw": 1200, "load_profile": "ref:e_load"}, True),
+            ("heat_load", "ies.device.heat_load",
+             {"peak_heat_kw": 800, "heat_profile": "ref:h_load"}, True),
+            ("cooling_load", "ies.device.cooling_load",
+             {"peak_cooling_kw": 700, "cooling_profile": "ref:c_load"}, True),
         ]
         positions = [(i * 120, 100 + (i % 3) * 140) for i in range(len(specs))]
         for i, (key, dtype, params, is_existing) in enumerate(specs):
@@ -250,7 +252,6 @@ def main() -> int:
         r = e1.get(f"/api/projects/{project_id}/model", user_id=e1.user_id)
         assert r.status_code == 200
         graph = r.json()
-        dev_by_id = {d["id"]: d for d in graph["devices"]}
         ports = graph["ports"]
         by_key: dict[str, list[dict]] = {}
         for key, dev_id in device_ids.items():
@@ -274,7 +275,7 @@ def main() -> int:
             ("electric_chiller", "cooling", "out", "cooling_load", "cooling", "in"),
         ]
         n_conn = 0
-        for fk, fp, fd, tk, tp, td in pairs:
+        for fk, fp, _, tk, tp, _ in pairs:
             f = port(fk, fp)
             t = port(tk, tp)
             r = e1.post(f"/api/projects/{project_id}/model/connections", user_id=e1.user_id, json={
@@ -424,7 +425,8 @@ def main() -> int:
     try:
         r = e1.post(
             f"/api/projects/{project_id}/tasks/{plan_task_id}/result/select",
-            user_id=e1.user_id, json={"solution_id": 0, "selection_type": "adopt", "reason": "e2e 选择最优候选"})
+            user_id=e1.user_id,
+            json={"solution_id": 0, "selection_type": "adopt", "reason": "e2e 选择最优候选"})
         assert r.status_code == 201, f"选择结果失败: {r.status_code} {r.text[:300]}"
         diff = r.json().get("diff")
         assert diff is not None and diff.get("diff_patch"), "选择响应缺少差异补丁"

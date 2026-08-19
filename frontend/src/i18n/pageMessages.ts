@@ -1,8 +1,8 @@
 /**
- * 页面级文案资源(数据管理页 / 计算配置页专用)。
+ * 页面级文案资源(数据管理页 / 计算配置页 / 项目校验页 / 导出页专用)。
  *
  * 背景:主消息表(i18n/messages_zh|en.ts)由基础层并行维护,为避免并行
- * 编辑冲突,本文件收纳这两个页面新增的文案键,键名仍遵循 "ies.*" 约定;
+ * 编辑冲突,本文件收纳这些页面新增的文案键,键名仍遵循 "ies.*" 约定;
  * 查询顺序:本表 -> 全局消息表 -> 键名本身(与全局 translate 回退行为一致)。
  *
  * 用法:pt('ies.data.resolution') 等价于全局 t(),支持 {name} 占位插值。
@@ -46,6 +46,7 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.data.version_detail': '版本详情',
   'ies.data.provenance_detail': '溯源详情',
   'ies.data.no_versions': '该数据集暂无版本',
+  'ies.data.sample_unavailable': '数据预览暂不可用(后端未提供行级预览接口)',
   'ies.data.latest': '最新',
   'ies.data.rows': '行',
   'ies.data.provenance_source': '来源',
@@ -148,6 +149,49 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.diag.loc.result': '结果',
   'ies.diag.loc.object': '对象',
   'ies.diag.loc.param': '参数',
+
+  // -------------------------------------------------------------------------
+  // 项目校验(ValidationPage: 完整预检 + 财务基准确认)
+  // -------------------------------------------------------------------------
+  'ies.validation.title': '项目校验',
+  'ies.validation.subtitle': '对模型、数据与计算配置做完整预检;存在阻断问题时需修复后才能提交计算任务',
+  'ies.validation.run': '运行校验',
+  'ies.validation.running': '校验中…',
+  'ies.validation.result': '校验结果',
+  'ies.validation.not_run': '尚未运行校验',
+  'ies.validation.not_run_hint': '点击"运行校验"执行模型/数据/配置/基准确认/就绪的完整预检',
+  'ies.validation.diag_count_suffix': '条诊断',
+  'ies.validation.status_ok': '通过',
+  'ies.validation.status_warnings': '存在警告',
+  'ies.validation.status_blocked': '存在阻断问题',
+  'ies.validation.blocked_title': '存在 {count} 项阻断问题',
+  'ies.validation.blocked_note': '当前禁止提交计算任务,请按修复建议处理下列问题后重新运行校验',
+  'ies.validation.warnings_note': '校验通过,但存在警告,建议核对下列诊断项',
+  'ies.validation.run_failed': '校验失败:{reason}',
+  'ies.validation.baseline_title': '财务基准确认',
+  'ies.validation.baseline_desc':
+    '财务基准 = 不新增建设、仅用已有设备运行,作为方案收益的对比参照。确认后系统记录确认人、时间与假设校验值(追加式审计,不可覆盖)。',
+  'ies.validation.baseline_confirm': '确认财务基准',
+  'ies.validation.baseline_confirmed': '财务基准已确认(作为收益对比参照)',
+  'ies.validation.baseline_ok': '财务基准确认已记录',
+  'ies.validation.baseline_failed': '基准确认失败:{reason}',
+
+  // -------------------------------------------------------------------------
+  // 导出(ExportPage: Excel 报告 + 完整项目包)
+  // -------------------------------------------------------------------------
+  'ies.export.subtitle': '导出结果 Excel 报告,或打包完整项目',
+  'ies.export.excel_desc': '导出最近结果的固定模板 Excel 报告(报告语言可选);下载自动开始',
+  'ies.export.lang': '报告语言',
+  'ies.export.lang_zh': '中文',
+  'ies.export.lang_en': 'English',
+  'ies.export.excel_btn': '导出 Excel 报告',
+  'ies.export.no_result': '暂无可用结果:请先在任务中心完成方案评价或规划任务,再导出报告',
+  'ies.export.download_ok': '报告已生成,下载已开始:{filename}',
+  'ies.export.package_ok': '项目包已生成,下载已开始:{filename}',
+  'ies.export.export_failed': '导出失败:{reason}',
+  'ies.export.package_btn': '导出完整项目包',
+  'ies.export.package_desc': '包含模型、版本、数据与历史结果;不含账号、权限与会话信息。仅项目所有者可导出。',
+  'ies.export.package_owner_only': '仅项目所有者可导出完整项目包',
 }
 
 const PAGE_MESSAGES_EN: Record<string, string> = {
@@ -185,6 +229,7 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
   'ies.data.version_detail': 'Version details',
   'ies.data.provenance_detail': 'Provenance details',
   'ies.data.no_versions': 'No versions for this dataset',
+  'ies.data.sample_unavailable': 'Data preview unavailable (no row-level preview endpoint)',
   'ies.data.latest': 'Latest',
   'ies.data.rows': 'rows',
   'ies.data.provenance_source': 'Source',
@@ -285,6 +330,50 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
   'ies.diag.loc.result': 'Result',
   'ies.diag.loc.object': 'Object',
   'ies.diag.loc.param': 'Parameter',
+
+  // Project validation (ValidationPage: full preflight + financial baseline confirmation)
+  'ies.validation.title': 'Project Validation',
+  'ies.validation.subtitle':
+    'Runs a full preflight check on model, data and config; blocking issues must be fixed before submitting calculation tasks',
+  'ies.validation.run': 'Run validation',
+  'ies.validation.running': 'Validating…',
+  'ies.validation.result': 'Validation result',
+  'ies.validation.not_run': 'Validation not run yet',
+  'ies.validation.not_run_hint':
+    'Click "Run validation" to preflight model / data / config / baseline confirmation / readiness',
+  'ies.validation.diag_count_suffix': 'diagnostics',
+  'ies.validation.status_ok': 'Passed',
+  'ies.validation.status_warnings': 'Warnings',
+  'ies.validation.status_blocked': 'Blocked',
+  'ies.validation.blocked_title': '{count} blocking issues',
+  'ies.validation.blocked_note':
+    'Submitting calculation tasks is currently blocked. Fix the issues below and re-run validation.',
+  'ies.validation.warnings_note': 'Validation passed with warnings; review the diagnostics below',
+  'ies.validation.run_failed': 'Validation failed: {reason}.',
+  'ies.validation.baseline_title': 'Financial baseline confirmation',
+  'ies.validation.baseline_desc':
+    'The financial baseline assumes no new construction and uses only existing equipment, serving as the reference for plan returns. Confirmation is recorded with the confirmator, time and assumptions hash (append-only audit, cannot be overwritten).',
+  'ies.validation.baseline_confirm': 'Confirm financial baseline',
+  'ies.validation.baseline_confirmed': 'Financial baseline confirmed (reference for plan returns)',
+  'ies.validation.baseline_ok': 'Financial baseline confirmation recorded',
+  'ies.validation.baseline_failed': 'Baseline confirmation failed: {reason}.',
+
+  // Export (ExportPage: Excel report + full project package)
+  'ies.export.subtitle': 'Export an Excel results report, or package the full project',
+  'ies.export.excel_desc': 'Exports the fixed-template Excel report of the latest result (language selectable); download starts automatically',
+  'ies.export.lang': 'Report language',
+  'ies.export.lang_zh': 'Chinese',
+  'ies.export.lang_en': 'English',
+  'ies.export.excel_btn': 'Export Excel report',
+  'ies.export.no_result':
+    'No result available: complete a calc or optimization task in Tasks first, then export the report',
+  'ies.export.download_ok': 'Report generated; download started: {filename}',
+  'ies.export.package_ok': 'Project package generated; download started: {filename}',
+  'ies.export.export_failed': 'Export failed: {reason}.',
+  'ies.export.package_btn': 'Export full project package',
+  'ies.export.package_desc':
+    'Contains model, versions, data and historical results; excludes accounts, permissions and sessions. Owner-only.',
+  'ies.export.package_owner_only': 'Only the project owner can export the full project package.',
 }
 
 function table(locale: Locale): Record<string, string> {

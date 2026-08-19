@@ -1,8 +1,8 @@
 """管理维护 API 路由(U16, prefix /api/admin)。
 
-认证说明: 正式会话认证由 U01 身份单元提供; 本阶段以 X-User-Id 请求头模拟
-认证主体, 并以全局 admin 角色(user_roles → role code='admin')判定管理员
-(RPD 3.2: 管理员经维护入口只读诊断、解锁与所有权转移, 不得直接编辑业务)。
+认证说明: 统一使用 U01 身份单元提供的窗口会话认证(iesplan.api.auth.CurrentAdmin:
+窗口凭证校验 + 全局 admin 角色判定, 未认证 401, 非管理员 403)。
+管理员经维护入口只读诊断、解锁与所有权转移, 不得直接编辑业务(RPD 3.2)。
 
 路由清单:
 - GET  /admin/audit             审计查询(过滤 + 游标分页, RPD 13.2)
@@ -22,13 +22,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from iesplan.core.diagnostics import SEVERITY_BLOCKING, SEVERITY_INFO
-from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
+from iesplan.api.auth import CurrentAdmin
+from iesplan.core.diagnostics import SEVERITY_INFO
+from iesplan.core.errors import ConflictError, ForbiddenError, NotFoundError
 from iesplan.db import get_db
 from iesplan.models.audit import RetentionRule
 from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease
@@ -41,28 +42,6 @@ from iesplan.services import queue
 from iesplan.services import tasks as tasks_service
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-
-
-def _http_error(status: int, code: str, message_key: str, params: dict[str, Any]) -> AppError:
-    """构造带指定 HTTP 状态码的应用错误(状态码在错误实例上设置)。"""
-    err = AppError("", code=code, severity=SEVERITY_BLOCKING, message_key=message_key, params=params)
-    err.http_status = status
-    return err
-
-
-def get_current_user(request: Request, db: Annotated[Session, Depends(get_db)]) -> User:
-    """当前认证主体(阶段实现: 从 X-User-Id 请求头读取; 正式会话认证由 U01 提供)。"""
-    raw = request.headers.get("X-User-Id")
-    if not raw:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "missing_identity"})
-    try:
-        user_id = int(raw)
-    except ValueError as exc:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "bad_identity"}) from exc
-    user = db.get(User, user_id)
-    if user is None:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "unknown_user"})
-    return user
 
 
 def require_admin(db: Session, user: User) -> User:
@@ -110,7 +89,7 @@ def _record_maintenance(
 @router.get("/audit", summary="审计查询(管理员)")
 def query_audit_endpoint(
     db: Annotated[Session, Depends(get_db)],
-    admin: Annotated[User, Depends(get_current_user)],
+    admin: CurrentAdmin,
     entity_type: str | None = Query(default=None, description="对象类型过滤"),
     entity_id: int | None = Query(default=None, description="对象标识过滤"),
     action: str | None = Query(default=None, description="审计动作过滤"),
@@ -133,7 +112,7 @@ def query_audit_endpoint(
 @router.get("/diagnostics", summary="运维诊断视图(管理员)")
 def diagnostics_endpoint(
     db: Annotated[Session, Depends(get_db)],
-    admin: Annotated[User, Depends(get_current_user)],
+    admin: CurrentAdmin,
 ) -> dict:
     """运维诊断视图: 任务/队列/存储/保留策略/维护记录/最近失败任务。"""
     require_admin(db, admin)
@@ -200,7 +179,7 @@ class UnlockTaskRequest(BaseModel):
 def unlock_task_endpoint(
     payload: UnlockTaskRequest,
     db: Annotated[Session, Depends(get_db)],
-    admin: Annotated[User, Depends(get_current_user)],
+    admin: CurrentAdmin,
 ) -> dict:
     """管理员解锁卡死任务(RPD 3.2 维护入口)。
 
@@ -290,10 +269,12 @@ class TransferProjectRequest(BaseModel):
 def transfer_project_endpoint(
     payload: TransferProjectRequest,
     db: Annotated[Session, Depends(get_db)],
-    admin: Annotated[User, Depends(get_current_user)],
+    admin: CurrentAdmin,
 ) -> dict:
     """被停用所有者的项目经管理员明确、受审计的维护操作转移给有效工程师(RPD 3.2)。
 
+    前置校验(H-10): 原所有者必须已停用(disabled), 否则拒绝并要求先停用其账号;
+    目标用户须存在且 status=active。
     语义: 撤销原所有者成员行 → 授予目标用户 owner(追加式授权) → 原所有者
     追加 viewer 行 → ownership_transfers 记 completed → 审计(actor_type=admin)。
     """
@@ -314,7 +295,15 @@ def transfer_project_endpoint(
     if payload.target_user_id == project.owner_id:
         raise ConflictError("目标用户已是项目所有者", params={"user_id": payload.target_user_id})
 
+    # H-10: 原 owner 必须已停用(管理员维护转移仅限停用所有者场景)
     from_user_id = project.owner_id
+    from_user = db.get(User, from_user_id)
+    if from_user is not None and from_user.status == "active":
+        raise ConflictError(
+            "原所有者仍处于启用状态, 请先停用其账号再转移所有权",
+            params={"user_id": from_user_id, "status": from_user.status},
+        )
+
     max_av = db.execute(
         select(func.max(ProjectMember.auth_version)).where(ProjectMember.project_id == project.id)
     ).scalar()

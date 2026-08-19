@@ -8,7 +8,7 @@
 - POST   /api/projects/{id}/tasks/{task_id}/cancel   取消(传播批量子任务)
 - POST   /api/projects/{id}/tasks/{task_id}/retry    手动重试(复用同一快照)
 
-认证与权限: 复用 U02 的 X-User-Id 模拟认证主体(与 projects API 一致);
+认证与权限: 统一使用 U01 身份单元提供的窗口会话认证(iesplan.api.auth.CurrentUser);
 提交/取消/重试要求项目 edit 能力, 列表/详情要求 view 能力。
 """
 
@@ -20,10 +20,10 @@ from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from iesplan.api.projects import get_current_user
+from iesplan.api.auth import CurrentUser
 from iesplan.db import get_db
 from iesplan.models.common import IDEMPOTENCY_KEY_RE
-from iesplan.models.identity import User
+from iesplan.services import project as project_service
 from iesplan.services import tasks as tasks_service
 
 router = APIRouter(prefix="/api/projects/{project_id}/tasks", tags=["tasks"])
@@ -75,7 +75,7 @@ def create_task_endpoint(
     payload: TaskCreateRequest,
     response: Response,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict[str, Any]:
     """提交任务(规格 2.2): 幂等键命中或同快照去重复用返回既有任务并附标记。
 
@@ -104,7 +104,7 @@ def create_task_endpoint(
 def list_tasks_endpoint(
     project_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     task_type: str | None = Query(default=None, alias="type"),
     status: str | None = Query(default=None),
     outcome: str | None = Query(default=None),
@@ -123,7 +123,7 @@ def get_task_endpoint(
     project_id: int,
     task_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict[str, Any]:
     """任务详情(规格 9.2): 状态/结局 + 尝试历史 + 当前租约(不含 token) + 进度 +
     诊断 + 快照摘要 + 批量关系。"""
@@ -135,11 +135,12 @@ def cancel_task_endpoint(
     project_id: int,
     task_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     payload: CancelRequest | None = None,
 ) -> dict[str, Any]:
     """取消任务(规格 6.1): queued 直接取消; running → cancelling 并传播批量子任务;
-    终态 → 409(ies.diag.task.cancel_denied)。"""
+    终态 → 409(ies.diag.task.cancel_denied)。取消为写操作, 要求项目 edit 能力(H-05)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     tasks_service.ensure_task_belongs(db, project_id, task_id)
     reason = payload.reason if payload and payload.reason else "user_cancel"
     task = tasks_service.cancel_task(db, task_id, reason=reason, actor_id=user.id)
@@ -156,11 +157,12 @@ def retry_task_endpoint(
     project_id: int,
     task_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     payload: RetryRequest | None = None,
 ) -> dict[str, Any]:
     """手动重试(规格 6.4): 仅终态任务; 复用同一 calc_snapshot_id(输入含义不变);
-    计算类快照缺失 → 409(TASK-DATA-001)。"""
+    计算类快照缺失 → 409(TASK-DATA-001)。重试为写操作, 要求项目 edit 能力(H-05)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     tasks_service.ensure_task_belongs(db, project_id, task_id)
     task = tasks_service.retry_task(db, user, task_id)
     db.commit()

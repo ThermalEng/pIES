@@ -29,6 +29,7 @@ os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
 os.environ.setdefault("IESPLAN_QUEUE", "memory")
 
 import pytest  # noqa: E402
+from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
@@ -42,7 +43,6 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.calc import Task, TaskLease  # noqa: E402
-from iesplan.models.identity import User  # noqa: E402
 from iesplan.models.result import EvidencePackage, ResultSelection  # noqa: E402
 from iesplan.services import objects as objects_service  # noqa: E402
 from iesplan.services import queue  # noqa: E402
@@ -107,9 +107,9 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
 # ---------------------------------------------------------------------------
 
 
-def _h(user_id: int) -> dict[str, str]:
-    """认证头(阶段实现: X-User-Id 模拟认证主体)。"""
-    return {"X-User-Id": str(user_id)}
+def _h(client: TestClient, user) -> dict[str, str]:
+    """认证头: 以真实窗口会话登录(同一 client 内缓存, 避免多窗口接管)。"""
+    return login_headers(client, user)
 
 
 def _canonical(doc: dict[str, Any]) -> str:
@@ -117,36 +117,31 @@ def _canonical(doc: dict[str, Any]) -> str:
     return json.dumps(doc, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _make_user(db: Session, username: str) -> User:
-    """直接创建测试用户。"""
-    user = User(username=username, display_name=username, locale="zh-CN")
-    db.add(user)
-    db.commit()
-    return user
 
 
-def _prepare_project(client: TestClient, db: Session, user_id: int, name: str = "结果测试项目") -> int:
+
+def _prepare_project(client: TestClient, db: Session, user, name: str = "结果测试项目") -> int:
     """准备项目: 创建 + 固化不可变版本(计算任务快照装配的前提)。"""
-    resp = client.post("/api/projects", json={"name": name}, headers=_h(user_id))
+    resp = client.post("/api/projects", json={"name": name}, headers=_h(client, user))
     assert resp.status_code == 201, resp.text
     pid = resp.json()["project"]["id"]
     resp = client.post(
         f"/api/projects/{pid}/versions",
         json={"name": "结果基线", "reason": "snapshot_freeze"},
-        headers=_h(user_id),
+        headers=_h(client, user),
     )
     assert resp.status_code == 201, resp.text
     return pid
 
 
 def _submit_task(
-    client: TestClient, pid: int, user_id: int, idempotency_key: str
+    client: TestClient, pid: int, user, idempotency_key: str
 ) -> dict[str, Any]:
     """提交计算任务(optimization), 返回任务体。"""
     resp = client.post(
         f"/api/projects/{pid}/tasks",
         json={"task_type": "optimization", "idempotency_key": idempotency_key},
-        headers=_h(user_id),
+        headers=_h(client, user),
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["task"]
@@ -270,7 +265,7 @@ def _submit_evidence(
 
 
 def _prepare_task_with_evidence(
-    client: TestClient, db: Session, user_id: int, *,
+    client: TestClient, db: Session, user, *,
     hourly_rows: int = 100, complete: bool = True,
 ) -> tuple[int, int, Any, EvidencePackage, list[int]]:
     """完整准备: 项目 → 任务 → 领取 → 逐时对象 → 证据提交 → (可选)任务完成。
@@ -278,13 +273,13 @@ def _prepare_task_with_evidence(
     complete=False 时任务保持 running(租约仍有效), 供同尝试追加证据/单维重查。
     返回 (project_id, task_id, claim, package, hourly_object_ids)。
     """
-    pid = _prepare_project(client, db, user_id)
-    task = _submit_task(client, pid, user_id, idempotency_key=f"res-{pid}")
+    pid = _prepare_project(client, db, user)
+    task = _submit_task(client, pid, user, idempotency_key=f"res-{pid}")
     task_id = task["id"]
     claim = _claim(db, task_id)
     obj_a = _store_hourly(db, hourly_rows)
     obj_b = _store_hourly(db, hourly_rows, fields=["p_grid_buy"])
-    payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], user_id)
+    payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], user.id)
     pkg = _submit_evidence(db, task_id, claim, payload)
     if complete:
         tasks_service.complete_task(db, task_id, solver_status="OPTIMAL")
@@ -299,9 +294,9 @@ def _prepare_task_with_evidence(
 
 def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
     """证据提交: 正常写入 → 不可变内容校验; 过期/失效 token 拒绝(409)。"""
-    owner = _make_user(db, "owner_fence")
-    pid = _prepare_project(client, db, owner.id)
-    task = _submit_task(client, pid, owner.id, idempotency_key="fence-1")
+    owner = make_user(db, "owner_fence")
+    pid = _prepare_project(client, db, owner)
+    task = _submit_task(client, pid, owner, idempotency_key="fence-1")
     task_id = task["id"]
     claim = _claim(db, task_id)
     obj_a = _store_hourly(db, 100)
@@ -361,9 +356,9 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
 
 def test_evidence_checksum_mismatch_records_invalid(client: TestClient, db: Session) -> None:
     """内容校验失败: 证据落库但 status='invalid'(校验失败不可用, 01 §8.1)。"""
-    owner = _make_user(db, "owner_badpkg")
-    pid = _prepare_project(client, db, owner.id)
-    task = _submit_task(client, pid, owner.id, idempotency_key="bad-1")
+    owner = make_user(db, "owner_badpkg")
+    pid = _prepare_project(client, db, owner)
+    task = _submit_task(client, pid, owner, idempotency_key="bad-1")
     claim = _claim(db, task["id"])
     obj_a = _store_hourly(db, 10)
     obj_b = _store_hourly(db, 10, fields=["p_grid_buy"])
@@ -386,11 +381,11 @@ def test_evidence_checksum_mismatch_records_invalid(client: TestClient, db: Sess
 def test_assessment_four_dimensions_and_index(client: TestClient, db: Session) -> None:
     """四维全查: 物理/最优性/财务/可靠性均 pass → usable; 索引指向最新评估;
     再次评估追加新记录不覆盖, 索引只更新引用指针。"""
-    owner = _make_user(db, "owner_assess")
-    pid, task_id, _claim_ok, pkg, _objs = _prepare_task_with_evidence(client, db, owner.id)
+    owner = make_user(db, "owner_assess")
+    pid, task_id, _claim_ok, pkg, _objs = _prepare_task_with_evidence(client, db, owner)
 
     # 1) 评估前: 结果视图有证据无评估
-    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(owner.id))
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(client, owner))
     assert resp.status_code == 200
     view = resp.json()["result"]
     assert view["task"]["business_outcome"] == "normal_completion"
@@ -402,7 +397,7 @@ def test_assessment_four_dimensions_and_index(client: TestClient, db: Session) -
     # 2) 触发评估: 四维 pass, 细粒度 + 派生摘要
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/assess",
-        json={"assessment_type": "full"}, headers=_h(owner.id),
+        json={"assessment_type": "full"}, headers=_h(client, owner),
     )
     assert resp.status_code == 201, resp.text
     a1 = resp.json()["assessment"]
@@ -424,7 +419,7 @@ def test_assessment_four_dimensions_and_index(client: TestClient, db: Session) -
     assert len(index.result_hash) == 64
 
     # 4) 结果视图: 四维结论展示
-    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(owner.id))
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(client, owner))
     view = resp.json()["result"]
     assert view["assessment"]["summary"]["summary"] == "usable"
     assert view["assessment"]["dimensions"]["physical"] == "pass"
@@ -432,7 +427,7 @@ def test_assessment_four_dimensions_and_index(client: TestClient, db: Session) -
     # 5) 再次评估: 追加新记录不覆盖; 索引仍指向最新(同证据包只更新指针)
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/assess",
-        json={"assessment_type": "full"}, headers=_h(owner.id),
+        json={"assessment_type": "full"}, headers=_h(client, owner),
     )
     assert resp.status_code == 201
     a2 = resp.json()["assessment"]
@@ -444,7 +439,7 @@ def test_assessment_four_dimensions_and_index(client: TestClient, db: Session) -
     assert index2.assessment_id == a2["id"]  # 引用指针已更新
 
     # 6) 评估历史接口: 不可变追加可见
-    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result/assessments", headers=_h(owner.id))
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result/assessments", headers=_h(client, owner))
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 2
@@ -456,10 +451,10 @@ def test_assessment_four_dimensions_and_index(client: TestClient, db: Session) -
 def test_assessment_dimension_variants(client: TestClient, db: Session) -> None:
     """四维独立记录: 物理失败→unusable; 时间上限→受限; IRR 多根→受限;
     可靠性部分/不足/未执行分别表达, 汇总不掩盖任何维度。"""
-    owner = _make_user(db, "owner_variant")
+    owner = make_user(db, "owner_variant")
     # 任务保持 running: 变体测试需在同一尝试上追加多份证据
     pid, task_id, claim, _pkg, objs = _prepare_task_with_evidence(
-        client, db, owner.id, complete=False
+        client, db, owner, complete=False
     )
     snap = db.get(Task, task_id).calc_snapshot_id
 
@@ -468,7 +463,7 @@ def test_assessment_dimension_variants(client: TestClient, db: Session) -> None:
         _submit_evidence(db, task_id, claim, payload)
         resp = client.post(
             f"/api/projects/{pid}/tasks/{task_id}/result/assess",
-            json={"assessment_type": "full"}, headers=_h(owner.id),
+            json={"assessment_type": "full"}, headers=_h(client, owner),
         )
         assert resp.status_code == 201, resp.text
         return resp.json()["assessment"]
@@ -539,11 +534,11 @@ def test_assessment_dimension_variants(client: TestClient, db: Session) -> None:
 
 def test_single_dimension_reassessment(client: TestClient, db: Session) -> None:
     """单维重查: 只查指定维度, 其余记 unknown; 仍追加新评估记录。"""
-    owner = _make_user(db, "owner_single")
-    pid, task_id, _claim_ok, _pkg, _objs = _prepare_task_with_evidence(client, db, owner.id)
+    owner = make_user(db, "owner_single")
+    pid, task_id, _claim_ok, _pkg, _objs = _prepare_task_with_evidence(client, db, owner)
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/assess",
-        json={"assessment_type": "physical"}, headers=_h(owner.id),
+        json={"assessment_type": "physical"}, headers=_h(client, owner),
     )
     assert resp.status_code == 201, resp.text
     a = resp.json()["assessment"]
@@ -556,7 +551,7 @@ def test_single_dimension_reassessment(client: TestClient, db: Session) -> None:
     # 未知评估类型 → 400
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/assess",
-        json={"assessment_type": "bogus"}, headers=_h(owner.id),
+        json={"assessment_type": "bogus"}, headers=_h(client, owner),
     )
     assert resp.status_code == 422
 
@@ -569,16 +564,16 @@ def test_single_dimension_reassessment(client: TestClient, db: Session) -> None:
 def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> None:
     """选择结果: 预览校验一致→201; 校验不符→409; 越界解→400; 换选=追加;
     差异预览反映所选解容量与来源版本。"""
-    owner = _make_user(db, "owner_select")
-    pid, task_id, _claim_ok, pkg, _objs = _prepare_task_with_evidence(client, db, owner.id)
+    owner = make_user(db, "owner_select")
+    pid, task_id, _claim_ok, pkg, _objs = _prepare_task_with_evidence(client, db, owner)
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/assess",
-        json={"assessment_type": "full"}, headers=_h(owner.id),
+        json={"assessment_type": "full"}, headers=_h(client, owner),
     )
     assert resp.status_code == 201
 
     # 1) 未选中时差异预览 → 404
-    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result/diff", headers=_h(owner.id))
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result/diff", headers=_h(client, owner))
     assert resp.status_code == 404
 
     # 2) 预览校验: 客户端确认的差异摘要必须与当前补丁一致
@@ -590,7 +585,7 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
         f"/api/projects/{pid}/tasks/{task_id}/result/select",
         json={"solution_id": 0, "selection_type": "adopt", "reason": "IRR 最高",
               "preview_checksum": preview},
-        headers=_h(owner.id),
+        headers=_h(client, owner),
     )
     assert resp.status_code == 201, resp.text
     body = resp.json()
@@ -610,14 +605,14 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
         f"/api/projects/{pid}/tasks/{task_id}/result/select",
         json={"solution_id": 1, "selection_type": "adopt",
               "preview_checksum": sha256(b"stale-preview").hexdigest()},
-        headers=_h(owner.id),
+        headers=_h(client, owner),
     )
     assert resp.status_code == 409
 
     # 4) 越界解标识 → 400
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/select",
-        json={"solution_id": 99, "selection_type": "adopt"}, headers=_h(owner.id),
+        json={"solution_id": 99, "selection_type": "adopt"}, headers=_h(client, owner),
     )
     assert resp.status_code == 400
 
@@ -627,7 +622,7 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
         f"/api/projects/{pid}/tasks/{task_id}/result/select",
         json={"solution_id": 1, "selection_type": "reference", "reference_rule": "benchmark",
               "reason": "参考方案", "preview_checksum": preview1},
-        headers=_h(owner.id),
+        headers=_h(client, owner),
     )
     assert resp.status_code == 201, resp.text
     selections = db.execute(
@@ -637,14 +632,14 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
     assert selections[0].is_current is False
     assert selections[1].is_current is True
     # 差异预览切换到所选解 1
-    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result/diff", headers=_h(owner.id))
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result/diff", headers=_h(client, owner))
     assert resp.status_code == 200
     diff = resp.json()["diff"]
     assert diff["solution_id"] == 1
     assert diff["diff_patch"]["params"]["result_adoption"]["capacities"]["ies.device.pv"] == 400.0
 
     # 6) 结果视图展示当前选中
-    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(owner.id))
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(client, owner))
     view = resp.json()["result"]
     assert view["selection"]["id"] == selections[1].id
     assert view["selection"]["reason"] == "参考方案"
@@ -657,13 +652,13 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
 
 def test_hourly_pagination(client: TestClient, db: Session) -> None:
     """逐时查询: 分页翻页/越界收敛/未知字段 400/按解选择数据源。"""
-    owner = _make_user(db, "owner_hourly")
-    pid, task_id, _claim_ok, _pkg, _objs = _prepare_task_with_evidence(client, db, owner.id)
+    owner = make_user(db, "owner_hourly")
+    pid, task_id, _claim_ok, _pkg, _objs = _prepare_task_with_evidence(client, db, owner)
     url = f"/api/projects/{pid}/tasks/{task_id}/result/hourly"
 
     # 1) 第一页: start=0 end=20 limit=8 → 8 行 + next_start 游标
     resp = client.get(url, params={"field": "p_grid_buy", "start": 0, "end": 20, "limit": 8},
-                      headers=_h(owner.id))
+                      headers=_h(client, owner))
     assert resp.status_code == 200, resp.text
     page = resp.json()
     assert page["field"] == "p_grid_buy"
@@ -675,10 +670,10 @@ def test_hourly_pagination(client: TestClient, db: Session) -> None:
 
     # 2) 翻页至页尾: 第二页 8..16, 末页 16..20 后 next_start=None
     resp = client.get(url, params={"field": "p_grid_buy", "start": 8, "end": 20, "limit": 8},
-                      headers=_h(owner.id))
+                      headers=_h(client, owner))
     assert resp.json()["next_start"] == 16
     resp = client.get(url, params={"field": "p_grid_buy", "start": 16, "end": 20, "limit": 8},
-                      headers=_h(owner.id))
+                      headers=_h(client, owner))
     tail = resp.json()
     assert tail["start"] == 16 and tail["end"] == 20
     assert len(tail["values"]) == 4
@@ -686,27 +681,27 @@ def test_hourly_pagination(client: TestClient, db: Session) -> None:
 
     # 3) 越界: start 超出总行数 → 空页, 不报错
     resp = client.get(url, params={"field": "p_grid_buy", "start": 200, "limit": 10},
-                      headers=_h(owner.id))
+                      headers=_h(client, owner))
     page = resp.json()
     assert page["values"] == [] and page["next_start"] is None
     assert page["total_rows"] == 100
 
     # 4) 缺省 end: 到末尾
     resp = client.get(url, params={"field": "p_grid_buy", "start": 95, "limit": 100},
-                      headers=_h(owner.id))
+                      headers=_h(client, owner))
     assert resp.json()["end"] == 100
 
     # 5) 未知字段 → 400(可用字段清单)
-    resp = client.get(url, params={"field": "no_such_field"}, headers=_h(owner.id))
+    resp = client.get(url, params={"field": "no_such_field"}, headers=_h(client, owner))
     assert resp.status_code == 400
 
     # 6) 按解选择数据源: solution_id=1 的引用字段
     resp = client.get(url, params={"field": "p_grid_buy", "solution_id": 1, "start": 0, "limit": 3},
-                      headers=_h(owner.id))
+                      headers=_h(client, owner))
     assert resp.status_code == 200
     assert len(resp.json()["values"]) == 3
     # 引用内不存在的字段 → 400
-    resp = client.get(url, params={"field": "soc", "solution_id": 1}, headers=_h(owner.id))
+    resp = client.get(url, params={"field": "soc", "solution_id": 1}, headers=_h(client, owner))
     assert resp.status_code == 400
 
 
@@ -717,11 +712,11 @@ def test_hourly_pagination(client: TestClient, db: Session) -> None:
 
 def test_run_check_task(client: TestClient, db: Session) -> None:
     """检查任务: 对已有证据包创建 report 任务; 无证据包 → 404。"""
-    owner = _make_user(db, "owner_check")
-    pid, task_id, _claim_ok, pkg, _objs = _prepare_task_with_evidence(client, db, owner.id)
+    owner = make_user(db, "owner_check")
+    pid, task_id, _claim_ok, pkg, _objs = _prepare_task_with_evidence(client, db, owner)
 
     resp = client.post(
-        f"/api/projects/{pid}/tasks/{task_id}/result/check", json={}, headers=_h(owner.id)
+        f"/api/projects/{pid}/tasks/{task_id}/result/check", json={}, headers=_h(client, owner)
     )
     assert resp.status_code == 201, resp.text
     task = resp.json()["task"]
@@ -733,23 +728,23 @@ def test_run_check_task(client: TestClient, db: Session) -> None:
     # 显式指定证据包
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/check",
-        json={"evidence_package_id": pkg.id}, headers=_h(owner.id),
+        json={"evidence_package_id": pkg.id}, headers=_h(client, owner),
     )
     assert resp.status_code == 201
 
     # 无证据包的任务 → 404
-    pid2 = _prepare_project(client, db, owner.id, name="无证据项目")
-    task2 = _submit_task(client, pid2, owner.id, idempotency_key="check-none")
+    pid2 = _prepare_project(client, db, owner, name="无证据项目")
+    task2 = _submit_task(client, pid2, owner, idempotency_key="check-none")
     resp = client.post(
-        f"/api/projects/{pid2}/tasks/{task2['id']}/result/check", json={}, headers=_h(owner.id)
+        f"/api/projects/{pid2}/tasks/{task2['id']}/result/check", json={}, headers=_h(client, owner)
     )
     assert resp.status_code == 404
 
 
 def test_result_view_permission(client: TestClient, db: Session) -> None:
     """权限: 非项目成员访问结果视图 → 403。"""
-    owner = _make_user(db, "owner_perm")
-    outsider = _make_user(db, "outsider_perm")
-    pid, task_id, _claim_ok, _pkg, _objs = _prepare_task_with_evidence(client, db, owner.id)
-    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(outsider.id))
+    owner = make_user(db, "owner_perm")
+    outsider = make_user(db, "outsider_perm")
+    pid, task_id, _claim_ok, _pkg, _objs = _prepare_task_with_evidence(client, db, owner)
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(client, outsider))
     assert resp.status_code == 403

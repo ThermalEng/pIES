@@ -11,7 +11,7 @@
 
 集成说明: U16(iesplan.api.admin)历史版本也在 /api/admin 下实现了
 /storage 与 /health 两个路径(认证与响应形状不同)。为避免路径遮蔽, 本模块
-统一提供这两个端点: 认证同时接受窗口会话凭证与 X-User-Id 阶段认证,
+统一提供这两个端点: 认证仅接受窗口会话凭证(真实会话 + 全局 admin 角色),
 响应为两版视图的并集(兼容既有调用方与测试)。
 """
 
@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from iesplan import __version__
 from iesplan.api.auth import get_auth_context
-from iesplan.core.errors import AppError, ForbiddenError
+from iesplan.core.errors import ForbiddenError
 from iesplan.db import get_db
 from iesplan.models.audit import StoredObject
 from iesplan.models.calc import Task
@@ -49,36 +49,20 @@ class CleanupRequest(BaseModel):
 
 
 def get_current_admin(request: Request, db: DbSession) -> User:
-    """统一管理员认证依赖: 优先窗口会话凭证, 兼容 X-User-Id 阶段认证。
+    """统一管理员认证依赖: 仅接受真实窗口会话 + 全局 admin 角色判定。
 
-    - 窗口会话凭证(auth.get_auth_context): 无效则尝试 X-User-Id;
-    - 两种方式均无有效主体 → 401(AuthRequiredError);
+    - 会话无效/未认证 → 401(AuthRequiredError/SessionInvalidError), 不回退任何
+      客户端声明的身份输入(已删除 X-User-Id 兼容认证, 防身份伪造, C-01);
     - 主体非管理员 → 403(ForbiddenError, ies.diag.perm.denied)。
     """
-    user: User | None = None
-    try:
-        ctx = get_auth_context(request, db)
-        user = ctx.user
-    except AppError:
-        user = None
-    if user is None:
-        raw = request.headers.get("X-User-Id")
-        if not raw:
-            raise identity.AuthRequiredError()
-        try:
-            user_id = int(raw)
-        except ValueError as exc:
-            raise identity.AuthRequiredError() from exc
-        user = db.get(User, user_id)
-        if user is None:
-            raise identity.AuthRequiredError()
-    if not identity.has_role(db, user, "admin"):
+    ctx = get_auth_context(request, db)
+    if not identity.has_role(db, ctx.user, "admin"):
         raise ForbiddenError(
             "需要管理员权限",
-            params={"user_id": user.id},
-            location={"object_type": "user", "object_id": user.id},
+            params={"user_id": ctx.user.id},
+            location={"object_type": "user", "object_id": ctx.user.id},
         )
-    return user
+    return ctx.user
 
 
 #: 当前管理员依赖(须在 get_current_admin 定义之后声明)

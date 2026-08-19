@@ -404,7 +404,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
         try {
           cfg = await api.config.get(projectIdNum)
         } catch {
-          cfg = await api.config.default()
+          cfg = await api.config.default(projectIdNum)
           fromBackend = false
         }
         if (cancelled) return
@@ -631,7 +631,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
     if (pid === undefined) return
     setSaving(true)
     try {
-      const def = await api.config.default()
+      const def = await api.config.default(pid)
       applyConfig(def, false, algorithms, project, graph, specs)
       setNotice({ kind: 'success', text: t('ies.config.default') })
     } catch (err) {

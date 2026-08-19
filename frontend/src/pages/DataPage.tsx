@@ -728,10 +728,12 @@ function VersionsDialog({
 
 function PreviewDialog({
   dataset,
+  projectId,
   open,
   onClose,
 }: {
   dataset: Dataset | null
+  projectId?: number
   open: boolean
   onClose: () => void
 }) {
@@ -744,8 +746,12 @@ function PreviewDialog({
     let cancelled = false
     setSample(null)
     setError(null)
+    if (projectId === undefined) {
+      setError(pt('ies.data.sample_unavailable'))
+      return
+    }
     api.datasets
-      .sample(dataset.id)
+      .sample(projectId, dataset.id)
       .then((s) => {
         if (!cancelled) setSample(s)
       })
@@ -755,7 +761,7 @@ function PreviewDialog({
     return () => {
       cancelled = true
     }
-  }, [open, dataset])
+  }, [open, dataset, projectId])
 
   return (
     <Dialog
@@ -843,7 +849,7 @@ export function DataPage({ projectId }: DataPageProps) {
         const entries = await Promise.all(
           page.items.map(async (ds) => {
             try {
-              const vs = await api.datasets.versions(ds.id)
+              const vs = pid !== undefined ? await api.datasets.versions(pid, ds.id) : []
               return [ds.id, vs] as const
             } catch {
               return [ds.id, [] as DatasetVersion[]] as const
@@ -1028,7 +1034,7 @@ export function DataPage({ projectId }: DataPageProps) {
         open={versionsTarget !== null}
         onClose={() => setVersionsTarget(null)}
       />
-      <PreviewDialog dataset={previewTarget} open={previewTarget !== null} onClose={() => setPreviewTarget(null)} />
+      <PreviewDialog dataset={previewTarget} projectId={pid} open={previewTarget !== null} onClose={() => setPreviewTarget(null)} />
     </div>
   )
 }

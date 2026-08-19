@@ -62,6 +62,7 @@ from iesplan.models.identity import User
 from iesplan.models.project import Draft, Project, ProjectVersion
 from iesplan.models.result import Report
 from iesplan.models.uncertainty import SampleTask
+from iesplan.services import identity as identity_service
 from iesplan.services import project as project_service
 from iesplan.services import queue
 
@@ -1207,6 +1208,20 @@ def list_tasks(
     return {"items": items, "next_cursor": next_cursor}
 
 
+#: 任务诊断 context 白名单(M-03): 仅这些内部字段可向普通项目成员展示,
+#: 其余(路径/对象 id/求解器参数等)仅管理员可见或置空
+_DIAG_CONTEXT_ALLOWLIST: frozenset[str] = frozenset(
+    {"trace_id", "queue", "snapshot_id", "business_outcome", "outcome"}
+)
+
+
+def _sanitize_diag_context(context: dict[str, Any] | None) -> dict[str, Any] | None:
+    """诊断 context 脱敏(M-03): 白名单字段保留, 其余剔除。"""
+    if not isinstance(context, dict):
+        return None
+    return {k: v for k, v in context.items() if k in _DIAG_CONTEXT_ALLOWLIST} or None
+
+
 def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[str, Any]:
     """任务详情(规格 9.2: 尝试/租约/进度/诊断/快照/批量关系; 不暴露 lease_token)。"""
     project_service.ensure_access(db, user, project_id, "view")
@@ -1269,10 +1284,16 @@ def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[
     diagnostics = db.execute(
         select(TaskDiagnostic).where(TaskDiagnostic.task_id == task.id).order_by(TaskDiagnostic.id)
     ).scalars().all()
+    # M-03: stack_trace 与完整 context 仅对全局管理员返回(受控审计视角);
+    # viewer/owner 一律返回 stack_trace=null, context 仅保留白名单字段
+    is_admin = identity_service.has_role(db, user, "admin")
     detail["diagnostics"] = [
-        {"id": d.id, "level": d.level, "code": d.code, "message": d.message,
-         "stack_trace": d.stack_trace, "context": d.context, "attempt_id": d.attempt_id,
-         "created_at": d.created_at}
+        {
+            "id": d.id, "level": d.level, "code": d.code, "message": d.message,
+            "stack_trace": d.stack_trace if is_admin else None,
+            "context": d.context if is_admin else _sanitize_diag_context(d.context),
+            "attempt_id": d.attempt_id, "created_at": d.created_at,
+        }
         for d in diagnostics
     ]
 

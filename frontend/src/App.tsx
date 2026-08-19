@@ -206,7 +206,7 @@ export default function App() {
           }
         >
           <Route path="/" element={<ProjectListPage />} />
-          <Route path="/projects/:id" element={<WorkbenchPage />} />
+          <Route path="/projects/:id/*" element={<WorkbenchPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />

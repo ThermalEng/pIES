@@ -111,6 +111,8 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
 
     app.dependency_overrides[get_db] = _override_get_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
+        test_client._test_db = db_session  # type: ignore[attr-defined]  # 供 _h 登录辅助使用
+        test_client._auth_tokens = {}  # type: ignore[attr-defined]  # 窗口凭证缓存
         yield test_client
 
 
@@ -119,9 +121,27 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
 # ---------------------------------------------------------------------------
 
 
-def _h(user_id: int) -> dict[str, str]:
-    """业务端点认证头(阶段实现: X-User-Id 模拟认证主体)。"""
-    return {"X-User-Id": str(user_id)}
+def _h(client: TestClient, user_id: int) -> dict[str, str]:
+    """业务端点认证头: 以窗口会话登录(同一 client 内按用户缓存)。
+
+    每用户单活动窗口: 重复登录会使旧凭证降级为 takeover_pending,
+    因此与 _login 共享缓存, 同一用户在整个测试中只登录一次。
+    """
+    db: Session = client._test_db  # type: ignore[attr-defined]
+    cache: dict[int, str] = client._auth_tokens  # type: ignore[attr-defined]
+    token = cache.get(user_id)
+    if token is None:
+        user = db.get(User, user_id)
+        assert user is not None
+        roles = identity.user_roles(db, user)
+        password = ADMIN_PASSWORD if "admin" in roles else ENGINEER_PASSWORD
+        resp = client.post(
+            "/api/auth/login", json={"username": user.username, "password": password}
+        )
+        assert resp.status_code == 200, resp.text
+        token = resp.json()["token"]
+        cache[user_id] = token
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -130,16 +150,22 @@ def _auth(token: str) -> dict[str, str]:
 
 
 def _seed_admin(db: Session) -> int:
-    """创建内置管理员(首登强制改密, 与 seed_admin 语义一致)。"""
-    user = identity.create_user(db, ADMIN_USERNAME, ADMIN_PASSWORD, role="admin", display_name="管理员")
+    """创建内置管理员(测试内不再强制改密, 等价于已改密的正式管理员,
+    避免 C-02 强制改密门禁阻断管理端点)。"""
+    user = identity.create_user(
+        db, ADMIN_USERNAME, ADMIN_PASSWORD, role="admin", display_name="管理员",
+        force_password_change=False,
+    )
     return user.id
 
 
 def _login(client: TestClient, username: str, password: str) -> dict[str, Any]:
-    """登录并返回 {token, user}。"""
+    """登录并返回 {token, user}(同时写入 _h 缓存, 保持单活动窗口)。"""
     resp = client.post("/api/auth/login", json={"username": username, "password": password})
     assert resp.status_code == 200, resp.text
     body = resp.json()
+    cache: dict[int, str] = client._auth_tokens  # type: ignore[attr-defined]
+    cache[body["user"]["id"]] = body["token"]
     return {"token": body["token"], "user": body["user"]}
 
 
@@ -173,7 +199,7 @@ def _create_project(client: TestClient, user_id: int, name: str = "集成测试�
     resp = client.post(
         "/api/projects",
         json={"name": name, "currency": "CNY", "utc_offset_minutes": 480},
-        headers=_h(user_id),
+        headers=_h(client, user_id),
     )
     assert resp.status_code == 201, resp.text
     body = resp.json()
@@ -190,7 +216,7 @@ def _add_device(
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": device_type, "name": name, "params": params, "position": {"x": 1.0, "y": 1.0}},
-        headers=_h(user_id),
+        headers=_h(client, user_id),
     )
     assert resp.status_code == 201, resp.text
     return resp.json()
@@ -203,7 +229,7 @@ def _add_connection(
     resp = client.post(
         f"/api/projects/{project_id}/model/connections",
         json={"from_port_id": from_port_id, "to_port_id": to_port_id, "attrs": {}},
-        headers=_h(user_id),
+        headers=_h(client, user_id),
     )
     assert resp.status_code == 201, resp.text
 
@@ -221,14 +247,14 @@ def _create_sample_dataset(client: TestClient, user_id: int, project_id: int) ->
     resp = client.post(
         f"/api/projects/{project_id}/datasets",
         json={"name": "上海样例", "description": "集成测试内置样例"},
-        headers=_h(user_id),
+        headers=_h(client, user_id),
     )
     assert resp.status_code == 201, resp.text
     dataset_id = resp.json()["dataset"]["id"]
     resp = client.post(
         f"/api/projects/{project_id}/datasets/{dataset_id}/sample",
         params={"resolution": "1h", "region": "shanghai"},
-        headers=_h(user_id),
+        headers=_h(client, user_id),
     )
     assert resp.status_code == 201, resp.text
     version = resp.json()["dataset_version"]
@@ -253,7 +279,7 @@ def _bind_dataset(client: TestClient, user_id: int, project_id: int, revision: i
                 }
             ],
         },
-        headers=_h(user_id),
+        headers=_h(client, user_id),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -263,14 +289,14 @@ def _bind_dataset(client: TestClient, user_id: int, project_id: int, revision: i
 
 def _save_config(client: TestClient, user_id: int, project_id: int, revision: int) -> dict[str, Any]:
     """读取默认配置并保存(带乐观锁修订), 返回 {config, version}。"""
-    resp = client.get(f"/api/projects/{project_id}/config", headers=_h(user_id))
+    resp = client.get(f"/api/projects/{project_id}/config", headers=_h(client, user_id))
     assert resp.status_code == 200, resp.text
     default_config = resp.json()["config"]
     assert default_config["irr_floor"] == 0.08  # RPD: 最低 IRR 硬约束默认 8%
     resp = client.put(
         f"/api/projects/{project_id}/config",
         json={"config": default_config, "expected_revision": revision},
-        headers=_h(user_id),
+        headers=_h(client, user_id),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -292,7 +318,7 @@ def _baseline_confirm(client: TestClient, user_id: int, project_id: int, config:
     resp = client.post(
         f"/api/projects/{project_id}/validation/baseline-confirm",
         json={"assumptions": assumptions},
-        headers=_h(user_id),
+        headers=_h(client, user_id),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -307,7 +333,7 @@ def _submit_calc_task(
     payload: dict[str, Any] = {"task_type": "calc", "config": {"horizon_years": 1}}
     if idempotency_key is not None:
         payload["idempotency_key"] = idempotency_key
-    resp = client.post(f"/api/projects/{project_id}/tasks", json=payload, headers=_h(user_id))
+    resp = client.post(f"/api/projects/{project_id}/tasks", json=payload, headers=_h(client, user_id))
     task = resp.json()["task"]
     return task["id"], resp.status_code
 
@@ -322,7 +348,7 @@ def _run_task_to_completion(db: Session, task_id: int) -> None:
 
 def _get_task(client: TestClient, user_id: int, project_id: int, task_id: int) -> dict[str, Any]:
     """任务详情。"""
-    resp = client.get(f"/api/projects/{project_id}/tasks/{task_id}", headers=_h(user_id))
+    resp = client.get(f"/api/projects/{project_id}/tasks/{task_id}", headers=_h(client, user_id))
     assert resp.status_code == 200, resp.text
     return resp.json()["task"]
 
@@ -330,7 +356,7 @@ def _get_task(client: TestClient, user_id: int, project_id: int, task_id: int) -
 def _result_view(client: TestClient, user_id: int, project_id: int, task_id: int) -> dict[str, Any]:
     """结果视图。"""
     resp = client.get(
-        f"/api/projects/{project_id}/tasks/{task_id}/result", headers=_h(user_id)
+        f"/api/projects/{project_id}/tasks/{task_id}/result", headers=_h(client, user_id)
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["result"]
@@ -403,14 +429,14 @@ def _prepare_project(
                     _port(devices["cload"], "cooling"))
 
     # 系统图断言: 设备 9 台(含 3 负荷), 连接 10 条
-    resp = client.get(f"/api/projects/{pid}/model", headers=_h(user_id))
+    resp = client.get(f"/api/projects/{pid}/model", headers=_h(client, user_id))
     assert resp.status_code == 200, resp.text
     graph = resp.json()
     assert len(graph["devices"]) == 9
     assert len(graph["connections"]) == 10
 
     # 模型校验: 无 error/blocking(拓扑完整)
-    resp = client.get(f"/api/projects/{pid}/model/validate", headers=_h(user_id))
+    resp = client.get(f"/api/projects/{pid}/model/validate", headers=_h(client, user_id))
     assert resp.status_code == 200, resp.text
     diags = resp.json()["diagnostics"]
     assert not any(d["severity"] in ("error", "blocking") for d in diags), diags
@@ -450,7 +476,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
 
     # 预检门禁: 未确认基线时阻断提交(财务基准确认门禁 RPD 10.2)
     pid = _create_project(client, eng_id, name="预检门禁项目")
-    resp = client.post(f"/api/projects/{pid}/validation/run", headers=_h(eng_id))
+    resp = client.post(f"/api/projects/{pid}/validation/run", headers=_h(client, eng_id))
     assert resp.status_code == 200, resp.text
     report = resp.json()["report"]
     assert report["blocks_submit"] is True
@@ -496,7 +522,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     resp = client.get(
         f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/hourly",
         params={"field": "p_grid_buy", "limit": 48},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 200, resp.text
     hourly = resp.json()
@@ -508,7 +534,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     resp = client.post(
         f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/assess",
         json={"assessment_type": "full"},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 201, resp.text
     assessment = resp.json()["assessment"]
@@ -517,7 +543,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
 
     # 评估历史不可变追加
     resp = client.get(
-        f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/assessments", headers=_h(eng_id)
+        f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/assessments", headers=_h(client, eng_id)
     )
     assert resp.status_code == 200
     items = resp.json()["items"]
@@ -529,7 +555,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     resp = client.post(
         f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/select",
         json={"solution_id": 0, "selection_type": "adopt", "reason": "集成测试采纳"},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 201, resp.text
     selection = resp.json()
@@ -541,7 +567,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
 
     # 差异预览(应用前确认, RPD REQ-RESULT-003)
     resp = client.get(
-        f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/diff", headers=_h(eng_id)
+        f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/diff", headers=_h(client, eng_id)
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["diff"]["preview_checksum"] == diff["preview_checksum"]
@@ -550,7 +576,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     resp = client.post(
         f"/api/projects/{ctx['project_id']}/exports/excel",
         json={"evidence_package_id": evidence_package_id, "assessment_id": assessment["id"], "lang": "zh"},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 200, resp.text
     excel_meta = resp.json()
@@ -558,14 +584,14 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     resp = client.get(
         f"/api/projects/{ctx['project_id']}/exports/excel/download",
         params={"token": excel_meta["token"]},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 200 and resp.content[:2] == b"PK"  # xlsx 为 zip 容器
     assert len(resp.content) == excel_meta["size_bytes"]
 
     # 项目包导出(仅所有者) → 下载 → 导入(新项目) → 确认
     resp = client.post(
-        f"/api/projects/{ctx['project_id']}/exports/package", headers=_h(eng_id)
+        f"/api/projects/{ctx['project_id']}/exports/package", headers=_h(client, eng_id)
     )
     assert resp.status_code == 200, resp.text
     pkg_meta = resp.json()
@@ -573,7 +599,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     resp = client.get(
         f"/api/projects/{ctx['project_id']}/exports/package/download",
         params={"token": pkg_meta["token"]},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 200
     pkg_bytes = resp.content
@@ -590,7 +616,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     assert imported.id > ctx["project_id"]
     # 导入项目可读取: 设备/连接/配置/数据集绑定完整迁移
     imported_pid = imported.id
-    resp = client.get(f"/api/projects/{imported_pid}", headers=_h(importer_id))
+    resp = client.get(f"/api/projects/{imported_pid}", headers=_h(client, importer_id))
     assert resp.status_code == 200, resp.text
     view = resp.json()
     assert len(view["draft"]["content"]["model"]["devices"]) == 9
@@ -601,7 +627,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     resp = client.post(
         f"/api/projects/{imported_pid}/apply-result",
         json={"diff_patch": diff["diff_patch"], "source_result_id": str(task_id)},
-        headers=_h(importer_id),
+        headers=_h(client, importer_id),
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["version"]["version_no"] == 2
@@ -621,7 +647,7 @@ def test_rpd_project_semantics(client: TestClient, db: Session) -> None:
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={"expected_revision": 99, "commands": []},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 409
     assert resp.json()["error"]["message_key"] == "ies.diag.store.save_conflict"
@@ -636,7 +662,7 @@ def test_rpd_project_semantics(client: TestClient, db: Session) -> None:
                  "type": "project.set_language", "payload": {"language": "zh-CN"}}
             ],
         },
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 200
     assert resp.json()["revision"] == 2
@@ -651,29 +677,33 @@ def test_rpd_project_semantics(client: TestClient, db: Session) -> None:
                  "type": "project.set_language", "payload": {"language": "zh-CN"}}
             ],
         },
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 200
     assert resp.json()["revision"] == 2  # 不递增
 
     # 归档 → 编辑 409
-    resp = client.post(f"/api/projects/{pid}/archive", headers=_h(eng_id))
+    resp = client.post(f"/api/projects/{pid}/archive", headers=_h(client, eng_id))
     assert resp.status_code == 200
     assert resp.json()["project"]["status"] == "archived"
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={"expected_revision": 2, "commands": []},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 409
-    resp = client.post(f"/api/projects/{pid}/unarchive", headers=_h(eng_id))
+    resp = client.post(f"/api/projects/{pid}/unarchive", headers=_h(client, eng_id))
     assert resp.status_code == 200
 
     # 删除必须显式确认: 未确认 → 400; 确认 → 204
-    resp = client.request("DELETE", f"/api/projects/{pid}", json={"confirm": False}, headers=_h(eng_id))
+    resp = client.request(
+        "DELETE", f"/api/projects/{pid}", json={"confirm": False}, headers=_h(client, eng_id)
+    )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "PROJ-DEL-001"
-    resp = client.request("DELETE", f"/api/projects/{pid}", json={"confirm": True}, headers=_h(eng_id))
+    resp = client.request(
+        "DELETE", f"/api/projects/{pid}", json={"confirm": True}, headers=_h(client, eng_id)
+    )
     assert resp.status_code == 204
 
     # 版本语义: 创建版本 → 版本列表 → 恢复(不倒写历史)
@@ -681,18 +711,18 @@ def test_rpd_project_semantics(client: TestClient, db: Session) -> None:
     resp = client.post(
         f"/api/projects/{pid2}/versions",
         json={"name": "v1", "reason": "manual_save"},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 201
     version_id = resp.json()["version"]["id"]
     resp = client.post(
         f"/api/projects/{pid2}/versions/{version_id}/restore",
         json={"name": "恢复副本"},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 200
     assert resp.json()["version"]["version_no"] == 2
-    resp = client.get(f"/api/projects/{pid2}/versions", headers=_h(eng_id))
+    resp = client.get(f"/api/projects/{pid2}/versions", headers=_h(client, eng_id))
     assert resp.status_code == 200 and len(resp.json()["versions"]) == 2
 
 
@@ -727,7 +757,7 @@ def test_rpd_task_semantics(client: TestClient, db: Session) -> None:
     resp = client.post(
         f"/api/projects/{ctx['project_id']}/tasks/{task_id}/cancel",
         json={"reason": "测试取消"},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["cancel_status"] == "cancelled"
@@ -735,7 +765,7 @@ def test_rpd_task_semantics(client: TestClient, db: Session) -> None:
     resp = client.post(
         f"/api/projects/{ctx['project_id']}/tasks/{task_id}/cancel",
         json={},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 409
 
@@ -755,10 +785,11 @@ def test_rpd_permission_gates(client: TestClient, db: Session) -> None:
     ctx = _prepare_project(client, db, eng_id)
 
     # 查看者(非所有者)导出包 → 403
-    resp = client.post(f"/api/projects/{ctx['project_id']}/exports/package", headers=_h(viewer_id))
+    resp = client.post(f"/api/projects/{ctx['project_id']}/exports/package", headers=_h(client, viewer_id))
     assert resp.status_code == 403, resp.text
 
-    # 未认证访问业务端点 → 401
+    # 未认证访问业务端点 → 401(先清空 cookie jar, 避免残留会话 Cookie)
+    client.cookies.clear()
     resp = client.get(f"/api/projects/{ctx['project_id']}", headers={})
     assert resp.status_code == 401
 
@@ -767,14 +798,14 @@ def test_rpd_permission_gates(client: TestClient, db: Session) -> None:
     assert resp.status_code == 403
     assert resp.json()["error"]["message_key"] == "ies.diag.perm.denied"
 
-    # 管理员(X-User-Id 阶段认证兼容)访问存储/健康 → 200
-    # (先清除 TestClient cookie jar, 避免工程师会话 cookie 优先于 X-User-Id)
+    # 管理员(窗口会话认证)访问存储/健康 → 200
+    # (先清除 TestClient cookie jar, 避免工程师会话 cookie 影响后续请求)
     client.cookies.clear()
-    resp = client.get("/api/admin/storage", headers=_h(admin_id))
+    resp = client.get("/api/admin/storage", headers=_h(client, admin_id))
     assert resp.status_code == 200
     body = resp.json()
     assert "stats" in body and "sample_verify" in body and "objects" in body
-    resp = client.get("/api/admin/health", headers=_h(admin_id))
+    resp = client.get("/api/admin/health", headers=_h(client, admin_id))
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
@@ -784,7 +815,7 @@ def test_rpd_permission_gates(client: TestClient, db: Session) -> None:
 
     # 管理端审计: 项目创建事件可查询(RPD 13.2)
     resp = client.get(
-        "/api/admin/audit", params={"action": "project.created"}, headers=_h(admin_id)
+        "/api/admin/audit", params={"action": "project.created"}, headers=_h(client, admin_id)
     )
     assert resp.status_code == 200
     items = resp.json()["items"]
@@ -804,13 +835,13 @@ def test_rpd_config_gate(client: TestClient, db: Session) -> None:
     resp = client.put(
         f"/api/projects/{pid}/config",
         json={"config": {"parameters": {}}, "expected_revision": 1},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 422
     body = resp.json()
     assert body["count"] >= 1 and any(d["severity"] in ("error", "blocking") for d in body["diagnostics"])
 
-    resp = client.get(f"/api/projects/{pid}/config/default", headers=_h(eng_id))
+    resp = client.get(f"/api/projects/{pid}/config/default", headers=_h(client, eng_id))
     assert resp.status_code == 200
     config = resp.json()["config"]
     assert config["algorithm"]["mode"] == "auto"
@@ -832,7 +863,7 @@ def test_rpd_dataset_validation(client: TestClient, db: Session) -> None:
     eng_id = _seed_engineer_direct(client, db)
     pid = _create_project(client, eng_id)
     resp = client.post(
-        f"/api/projects/{pid}/datasets", json={"name": "坏数据"}, headers=_h(eng_id)
+        f"/api/projects/{pid}/datasets", json={"name": "坏数据"}, headers=_h(client, eng_id)
     )
     dataset_id = resp.json()["dataset"]["id"]
 
@@ -845,7 +876,7 @@ def test_rpd_dataset_validation(client: TestClient, db: Session) -> None:
         f"/api/projects/{pid}/datasets/{dataset_id}/versions",
         data={"resolution": "1h", "utc_offset_minutes": "480"},
         files={"file": ("bad.csv", bad_csv, "text/csv")},
-        headers=_h(eng_id),
+        headers=_h(client, eng_id),
     )
     assert resp.status_code == 400, resp.text
     body = resp.json()

@@ -16,11 +16,13 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
+import os
 import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -36,6 +38,8 @@ from iesplan.core.security import (
 )
 from iesplan.models.common import EMAIL_RE, USERNAME_RE
 from iesplan.models.identity import AuthEvent, Credential, Role, User, UserRole, WindowSession
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -139,6 +143,15 @@ class RegistrationDisabledError(AuthError):
     message_key = "ies.diag.auth.registration_disabled"
 
 
+class ForcePasswordChangeError(AuthError):
+    """强制改密门禁(403): 有效密码凭证 requires_change=True 时,
+    除改密/登出/本人信息外的全部业务请求被拒(C-02, AUTH-FPC-001)。"""
+
+    http_status = 403
+    code = "AUTH-FPC-001"
+    message_key = "ies.diag.auth.force_password_change"
+
+
 class BadRequestError(AuthError):
     """请求参数非法(400)。"""
 
@@ -149,7 +162,94 @@ class BadRequestError(AuthError):
 
 # ---------------------------------------------------------------------------
 # 登录限速(进程内存: username -> 失败时间戳 / 锁定截止时刻)
+#
+# 局限说明(H-03): 内存限速为单进程状态 —— 多 Uvicorn Worker 下失败计数被
+# 分散到各进程, 进程重启后锁定状态丢失。生产多 Worker 部署应使用 Redis 原子
+# 计数(见下方 _rate_redis); Redis 不可用(依赖缺失/连接失败/运行期错误)时
+# 自动降级为内存限速并记 warning 日志, 不阻断登录功能。
 # ---------------------------------------------------------------------------
+
+try:
+    import redis as _redis_module
+
+    _REDIS_IMPORT_OK = True
+except Exception:  # pragma: no cover - 环境缺 redis 依赖时降级内存限速
+    _redis_module = None  # type: ignore[assignment]
+    _REDIS_IMPORT_OK = False
+
+#: Redis 登录限速键前缀
+_RATE_KEY_PREFIX = "iesplan:ratelimit:login"
+#: 惰性初始化的 Redis 客户端(单例; 连接失败置 None 后不再重试, 保持内存降级)
+_rate_redis_client: Any = None
+
+
+def _rate_redis() -> Any | None:
+    """尝试获取 Redis 客户端用于跨 Worker 限速; 不可用返回 None(降级内存)。
+
+    IESPLAN_QUEUE=memory(测试/单机模式)时直接跳过 Redis, 保持进程内限速,
+    避免测试环境共享 Redis 键造成跨测试/跨进程状态污染;
+    超时/连接失败/运行期错误一律捕获, 由调用方回退内存限速。
+    """
+    global _rate_redis_client
+    if os.environ.get("IESPLAN_QUEUE", "auto").lower() == "memory":
+        return None
+    if _rate_redis_client is not None:
+        return _rate_redis_client
+    if not _REDIS_IMPORT_OK:
+        return None
+    try:
+        client = _redis_module.Redis.from_url(
+            settings.redis_url, decode_responses=True,
+            socket_connect_timeout=1.0, socket_timeout=2.0,
+        )
+        client.ping()  # 探测连接, 失败抛异常
+        _rate_redis_client = client
+        logger.warning("登录限速使用 Redis 后端(跨 Worker 共享)")
+    except Exception:  # noqa: BLE001 - 降级内存限速, 不阻断登录
+        logger.warning("Redis 不可用, 登录限速降级为进程内存(单进程有效)")
+        _rate_redis_client = None
+    return _rate_redis_client
+
+
+def _rate_key(username: str) -> str:
+    """Redis 限速键(用户名小写化; TTL 即锁定期, INCR 幂等)。"""
+    return f"{_RATE_KEY_PREFIX}:{(username or '').strip().lower()}"
+
+
+def _redis_is_locked(username: str) -> bool:
+    """Redis 限速判定: 计数达到上限即锁定(键 TTL 过期后自动解除)。"""
+    r = _rate_redis()
+    if r is None:
+        return False
+    try:
+        count = r.get(_rate_key(username))
+        return count is not None and int(count) >= MAX_LOGIN_FAILURES
+    except Exception:  # noqa: BLE001 - 运行期错误降级内存
+        return False
+
+
+def _redis_record_failure(username: str) -> None:
+    """Redis 记录一次失败: INCR 计数, 键 TTL = 锁定时长(滑动重置)。"""
+    r = _rate_redis()
+    if r is None:
+        return
+    try:
+        r.incr(_rate_key(username))
+        r.expire(_rate_key(username), LOCKOUT_SECONDS)
+    except Exception:  # noqa: BLE001 - 运行期错误降级内存
+        pass
+
+
+def _redis_clear(username: str) -> None:
+    """登录成功后清除 Redis 限速键。"""
+    r = _rate_redis()
+    if r is None:
+        return
+    try:
+        r.delete(_rate_key(username))
+    except Exception:  # noqa: BLE001
+        pass
+
 
 _LOGIN_FAILURES: dict[str, list[float]] = {}
 _LOGIN_LOCKED_UNTIL: dict[str, float] = {}
@@ -157,7 +257,9 @@ _RATE_LOCK = threading.RLock()
 
 
 def _is_locked(username: str) -> bool:
-    """是否处于锁定期; 锁定时间已过则顺带清理状态。"""
+    """是否处于锁定期(Redis 优先, 降级内存); 锁定时间已过则顺带清理状态。"""
+    if _redis_is_locked(username):
+        return True
     until = _LOGIN_LOCKED_UNTIL.get(username)
     if until is None:
         return False
@@ -170,7 +272,9 @@ def _is_locked(username: str) -> bool:
 
 
 def _record_failure(username: str) -> None:
-    """记录一次登录失败; 时间窗(锁定时长)内累计达到上限则触发锁定。"""
+    """记录一次登录失败(Redis 优先, 降级内存);
+    时间窗(锁定时长)内累计达到上限则触发锁定。"""
+    _redis_record_failure(username)
     with _RATE_LOCK:
         if _is_locked(username):
             return
@@ -185,18 +289,25 @@ def _record_failure(username: str) -> None:
 
 
 def _clear_failures(username: str) -> None:
-    """登录成功后清除该用户名限速状态。"""
+    """登录成功后清除该用户名限速状态(Redis + 内存)。"""
+    _redis_clear(username)
     with _RATE_LOCK:
         _LOGIN_FAILURES.pop(username, None)
         _LOGIN_LOCKED_UNTIL.pop(username, None)
 
 
 def reset_login_rate_limit(username: str | None = None) -> None:
-    """清空登录限速状态(测试与运维恢复用)。
+    """清空登录限速状态(测试与运维恢复用; Redis 键一并清除)。
 
     参数:
         username: 为空时清空全部用户名; 否则只清指定用户名。
     """
+    r = _rate_redis()
+    if r is not None and username is not None:
+        try:
+            r.delete(_rate_key(username))
+        except Exception:  # noqa: BLE001
+            pass
     with _RATE_LOCK:
         if username is None:
             _LOGIN_FAILURES.clear()
@@ -696,15 +807,23 @@ def authenticate(
 # ---------------------------------------------------------------------------
 
 
-def _new_window_session(user: User, now: datetime) -> tuple[WindowSession, str]:
-    """构造新的 active 会话行, 返回 (会话行, 令牌原文; 令牌原文只由调用方持有)。"""
+def _new_window_session(
+    user: User, now: datetime, status: str = "active"
+) -> tuple[WindowSession, str]:
+    """构造新会话行, 返回 (会话行, 令牌原文; 令牌原文只由调用方持有)。
+
+    参数:
+        status: 新会话初始状态 —— "active" 为正式活动窗口;
+                "takeover_pending" 为待接管窗口(H-01: 接管确认前不拥有业务权限,
+                仅允许确认接管/改密/登出/本人信息接口)。
+    """
     token = new_session_token()
     return (
         WindowSession(
             session_token_hash=token_hash(token),
             user_id=user.id,
             credential_version_at_issue=user.credential_version,
-            status="active",
+            status=status,
             created_at=now,
             last_seen_at=now,
             expires_at=_session_expires_at(now),
@@ -754,17 +873,20 @@ def create_window_session(
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> tuple[WindowSession, str, bool]:
-    """创建窗口会话(单活动窗口, RPD 3.3)。
+    """创建窗口会话(单活动窗口, RPD 3.3; 接管确认语义 H-01)。
 
     流程:
         1. 先清理该用户已过期的会话;
-        2. 撤销残留的 takeover_pending 会话(被本次登录取代);
-        3. 若存在 active 会话, 置为 takeover_pending(旧窗口停止接受新操作);
-        4. 创建新的 active 会话。
+        2. 撤销残留的 takeover_pending 会话(被本次登录取代; 部分唯一索引
+           每用户至多一条 pending);
+        3. 若存在 active 会话, 直接撤销(本次登录触发接管);
+        4. 触发接管时(存在被撤销的 active 或残留 pending)新会话创建为
+           takeover_pending —— 在确认接管(confirm_takeover)之前不拥有任何
+           业务权限; 否则创建为 active。
 
     返回:
         (session, token, old_session_displaced):
-        old_session_displaced 为 True 表示存在旧活动窗口被降级
+        old_session_displaced 为 True 表示存在旧活动窗口被降级/撤销
         (前端据此提示确认接管并重新加载最新修订)。
     """
     now = utcnow()
@@ -778,27 +900,31 @@ def create_window_session(
             )
         ).scalars()
     )
-    for old in pending:
-        _revoke_session(old, now, user.id)
-    # 若存在 active 会话, 先降级为 takeover_pending(部分唯一索引每用户至多一条 active)
+    # 若存在 active 会话, 直接撤销 —— 新会话以 takeover_pending 创建,
+    # 避免同时存在两条 pending 触发唯一索引冲突(部分唯一索引每用户至多一条 active)
     active = db.execute(
         select(WindowSession).where(
             WindowSession.user_id == user.id,
             WindowSession.status == "active",
         )
     ).scalar_one_or_none()
-    displaced = False
+    displaced = active is not None or bool(pending)
+    for old in pending:
+        _revoke_session(old, now, user.id)
     if active is not None:
-        active.status = "takeover_pending"
-        displaced = True
+        _revoke_session(active, now, user.id)
     db.flush()
-    # 再创建新的 active 会话(此时旧会话已离开 active 唯一索引范围)
-    new_session, token = _new_window_session(user, now)
+    # 创建新会话: 触发接管时初始为 takeover_pending(H-01, 确认前无业务权限)
+    new_session, token = _new_window_session(
+        user, now, status="takeover_pending" if displaced else "active"
+    )
     db.add(new_session)
     db.flush()
-    # 被撤销的残留 pending 会话由新会话接管(补 replaced_by 指针, 接管追溯)
+    # 被撤销的残留 pending/active 会话由新会话接管(补 replaced_by 指针, 接管追溯)
     for old in pending:
         old.replaced_by_session_id = new_session.id
+    if active is not None:
+        active.replaced_by_session_id = new_session.id
     if displaced:
         record_auth_event(
             db,
@@ -808,7 +934,7 @@ def create_window_session(
             ip=ip,
             user_agent=user_agent,
             detail={
-                "from_session_id": active.id,
+                "from_session_id": active.id if active is not None else None,
                 "to_session_id": new_session.id,
                 "reason": "new_login",
             },

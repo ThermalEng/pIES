@@ -6,9 +6,16 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+#: 默认签名密钥(仅限开发环境; 生产必须通过 IESPLAN_SECRET_KEY 覆盖, 见 README)
+DEFAULT_DEV_SECRET_KEY = "dev-only-secret-change-me"
 
 
 class Settings(BaseSettings):
@@ -22,8 +29,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     #: 对象存储根目录(内容寻址对象落盘位置)
     data_dir: Path = Path("/data")
-    #: 签名密钥(会话令牌、防伪签名等;生产必须覆盖)
-    secret_key: str = "dev-only-secret-change-me"
+    #: 签名密钥(会话令牌、下载授权 HMAC 等; 生产必须通过 IESPLAN_SECRET_KEY
+    #: 覆盖, 默认值仅限开发环境 —— 启动校验见下方 model_validator(C-04))
+    secret_key: str = DEFAULT_DEV_SECRET_KEY
     #: 对外服务地址(用于生成链接)
     app_url: str = "http://localhost:8080"
     #: worker 类型: compute(计算) | io(导入导出等 IO 任务)
@@ -45,6 +53,21 @@ class Settings(BaseSettings):
     def sqlalchemy_url(self) -> str:
         """SQLAlchemy 引擎 URL(与 db_url 一致, 供引擎构造使用)。"""
         return self.db_url
+
+    @model_validator(mode="after")
+    def _warn_on_default_secret_key(self) -> Settings:
+        """启动校验(C-04): 签名密钥仍为默认开发值时记录 warning 日志。
+
+        不阻断开发环境启动; 生产部署必须通过 IESPLAN_SECRET_KEY 覆盖,
+        否则下载授权等 HMAC 签名可被伪造(详见 README 安全部署说明)。
+        """
+        if self.secret_key == DEFAULT_DEV_SECRET_KEY:
+            logger.warning(
+                "IESPLAN_SECRET_KEY 仍为默认开发值(%r), 生产环境必须设置强随机密钥, "
+                "否则 HMAC 下载授权等签名可被伪造",
+                DEFAULT_DEV_SECRET_KEY,
+            )
+        return self
 
 
 #: 模块级单例; 由 db.py 等模块直接引用

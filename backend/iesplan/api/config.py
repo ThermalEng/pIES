@@ -8,6 +8,10 @@
 
 注意: 本模块导出 config_router / registry_router 两个路由, 由集成阶段在
 main.py 通过 include_router 挂载(get_db 依赖见 iesplan/db.py)。
+
+认证与权限: 配置域全部端点要求窗口会话认证(iesplan.api.auth.CurrentUser,
+未认证 401); 读/校验接口要求项目 view, 保存要求项目 edit(403);
+算法注册表(/api/registry/algorithms)公开。
 """
 
 from __future__ import annotations
@@ -19,8 +23,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from iesplan.api.auth import CurrentUser
 from iesplan.db import get_db
 from iesplan.services import config as config_service
+from iesplan.services import project as project_service
 
 #: FastAPI 依赖注入的数据库会话
 DbSession = Annotated[Session, Depends(get_db)]
@@ -56,8 +62,9 @@ def _has_errors(diags: list) -> bool:
 
 
 @config_router.get("", summary="读取当前计算配置")
-def get_config_endpoint(project_id: int, db: DbSession) -> dict:
+def get_config_endpoint(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """当前配置 + 参数元数据; 未保存过返回生成的默认配置(version=None)。"""
+    project_service.ensure_access(db, user, project_id, "view")
     return config_service.get_config(project_id, db)
 
 
@@ -66,8 +73,10 @@ def save_config_endpoint(
     project_id: int,
     body: ConfigSaveRequest,
     db: DbSession,
+    user: CurrentUser,
 ) -> JSONResponse:
     """保存配置(与草稿修订绑定); 校验不通过返回 422 + diagnostics, 不落库。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     graph = config_service.load_work_graph(db, project_id)
     diags = config_service.validate_config(body.config, graph)
     if _has_errors(diags):
@@ -93,16 +102,19 @@ def validate_config_endpoint(
     project_id: int,
     body: ConfigValidateRequest,
     db: DbSession,
+    user: CurrentUser,
 ) -> dict:
     """只校验不保存; 始终返回 200 + diagnostics(前端实时校验用)。"""
+    project_service.ensure_access(db, user, project_id, "view")
     graph = config_service.load_work_graph(db, project_id)
     diags = config_service.validate_config(body.config, graph)
     return {"diagnostics": _diagnostics(diags), "count": len(diags)}
 
 
 @config_router.get("/default", summary="重新生成默认计算配置")
-def default_config_endpoint(project_id: int, db: DbSession) -> dict:
+def default_config_endpoint(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """基于系统模型设备清单重新生成默认配置(不保存)。"""
+    project_service.ensure_access(db, user, project_id, "view")
     graph = config_service.load_work_graph(db, project_id)
     return {
         "config": config_service.get_default_config(project_id, db),

@@ -270,7 +270,7 @@ export default function ResultsPage() {
             (tk.type === 'calc' || tk.type === 'optimization' || tk.type === 'uncertainty'),
         )
         const details = await Promise.all(
-          completed.slice(0, 10).map((tk) => api.tasks.get(tk.id).catch(() => null)),
+          completed.slice(0, 10).map((tk) => api.tasks.get(projectId, tk.id).catch(() => null)),
         )
         const collected: Array<{ pkg: EvidencePackageSummary; task: TaskDetail }> = []
         for (const d of details) {
@@ -310,11 +310,14 @@ export default function ResultsPage() {
     }
     let cancelled = false
     const load = async () => {
+      // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
+      const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
+      const taskId = entry ? entry.task.id : 0
       try {
         const [res, ass, hr] = await Promise.all([
-          api.results.result(selectedPkgId).catch(() => null),
-          api.results.assessments(selectedPkgId).catch(() => [] as ResultAssessment[]),
-          api.results.hourly(selectedPkgId).catch(() => null),
+          api.results.result(projectId, taskId).catch(() => null),
+          api.results.assessments(projectId, taskId).catch(() => [] as ResultAssessment[]),
+          api.results.hourly(projectId, taskId).catch(() => null),
         ])
         if (cancelled) return
         setMetrics(res?.metrics ?? null)
@@ -344,7 +347,7 @@ export default function ResultsPage() {
         const rows = await Promise.all(
           page.items.map(async (ds) => {
             try {
-              const vs = await api.datasets.versions(ds.id)
+              const vs = await api.datasets.versions(projectId, ds.id)
               return { name: ds.name, version_no: vs.length > 0 ? vs[vs.length - 1].version_no : 0 }
             } catch {
               return null
@@ -459,7 +462,9 @@ export default function ResultsPage() {
     setApplyOk(false)
     setApplying(true)
     try {
-      await api.results.select(projectId, {
+      // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
+      const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
+      await api.results.select(projectId, entry?.task.id ?? 0, {
         result_index_id: selectedCandidate.indexId,
         reason: 'user-selected-pareto-candidate',
       })
@@ -479,7 +484,8 @@ export default function ResultsPage() {
     setAssessBusy(true)
     try {
       const score = Number(assessScore)
-      const created = await api.results.assess(selectedPkgId, {
+      const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
+      const created = await api.results.assess(projectId, entry?.task.id ?? 0, {
         dimensions: { ...assessGrades },
         ...(Number.isFinite(score) && assessScore.trim() !== '' ? { overall_score: score } : {}),
         ...(assessComment.trim() !== '' ? { comment: assessComment.trim() } : {}),

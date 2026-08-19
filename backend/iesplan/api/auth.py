@@ -24,8 +24,18 @@ from iesplan.db import get_db
 from iesplan.models.identity import User, WindowSession
 from iesplan.services import identity
 
-#: 窗口凭证 Cookie 名
+#: 会话 Cookie 名
 SESSION_COOKIE_NAME = "ies_session"
+
+#: 强制改密门禁(C-02)豁免路径: 仅允许改密/登出/本人信息
+_FPC_ALLOWED_PATHS: frozenset[str] = frozenset(
+    {"/api/auth/change-password", "/api/auth/logout", "/api/auth/me"}
+)
+#: 待接管(pending)会话允许的路径(H-01): 确认接管 + 强制改密门禁豁免路径
+#: (避免强制改密用户被 pending 状态卡死: 可先改密或登出, 再重新登录)
+_PENDING_ALLOWED_PATHS: frozenset[str] = frozenset(
+    _FPC_ALLOWED_PATHS | {"/api/auth/confirm-takeover"}
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -148,10 +158,15 @@ def _client_ip(request: Request) -> str | None:
 
 
 def get_auth_context(request: Request, db: DbSession) -> AuthContext:
-    """解析窗口凭证并校验: 哈希匹配 + 状态 active + 未过期 + 凭证版本一致 + 用户有效。
+    """解析窗口凭证并校验: 哈希匹配 + 状态 + 未过期 + 凭证版本一致 + 用户有效。
 
-    校验失败抛 SessionInvalidError(401); 任一次校验通过都会顺带刷新
-    last_seen_at(会话活跃时间)。
+    安全门禁(校验失败抛对应异常):
+    - H-01: takeover_pending 会话仅允许确认接管/改密/登出/本人信息路径,
+      其余业务请求一律 401(SessionInvalidError, params.reason=takeover_pending);
+    - C-02: 有效密码凭证 requires_change=True 时, 除改密/登出/本人信息外
+      全部业务请求返回 403(AUTH-FPC-001, 强制改密未解除前无业务权限)。
+
+    任一次校验通过都会顺带刷新 last_seen_at(会话活跃时间)。
     """
     token = _extract_token(request)
     if not token:
@@ -160,7 +175,12 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
     if session is None:
         raise identity.SessionInvalidError()
     now = identity.utcnow()
-    if session.status != "active":
+    path = request.url.path
+    if session.status == "takeover_pending":
+        # H-01: 接管确认前新会话不拥有业务权限; 仅放行接管/改密/登出/本人信息
+        if path not in _PENDING_ALLOWED_PATHS:
+            raise identity.SessionInvalidError(params={"reason": "takeover_pending"})
+    elif session.status != "active":
         raise identity.SessionInvalidError()
     expires_at = identity.as_utc(session.expires_at)
     if expires_at is not None and expires_at < now:
@@ -179,6 +199,12 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
         session.revoked_by = user.id
         db.commit()
         raise identity.SessionInvalidError()
+    # C-02: 强制改密门禁(服务端统一执行, 不依赖前端配合)
+    cred = identity.get_active_password_credential(db, user)
+    if cred is not None and cred.requires_change and path not in _FPC_ALLOWED_PATHS:
+        raise identity.ForcePasswordChangeError(
+            params={"hint": "首次登录请先修改初始密码, 未改密前仅可使用改密/登出/本人信息接口"}
+        )
     session.last_seen_at = now
     db.commit()
     return AuthContext(db=db, user=user, session=session)

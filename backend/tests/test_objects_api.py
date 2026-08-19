@@ -82,8 +82,12 @@ def client(session: Session, data_dir) -> Iterator[TestClient]:
 
 
 def seed_admin(session: Session) -> User:
-    """创建内置管理员(与 seed_admin 语义一致, 首登强制改密)。"""
-    return identity.create_user(session, "admin", ADMIN_PASSWORD, role="admin", display_name="管理员")
+    """创建内置管理员(与 seed_admin 语义一致; 测试内不再强制改密,
+    等价于已改密的正式管理员, 避免 C-02 强制改密门禁阻断管理端点)。"""
+    return identity.create_user(
+        session, "admin", ADMIN_PASSWORD, role="admin", display_name="管理员",
+        force_password_change=False,
+    )
 
 
 def seed_engineer(session: Session, username: str = "alice") -> User:

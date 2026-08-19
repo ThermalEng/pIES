@@ -293,7 +293,7 @@ export default function TasksPage() {
     const load = async () => {
       setDetailLoading(true)
       try {
-        const d = await api.tasks.get(selectedId)
+        const d = await api.tasks.get(projectId, selectedId)
         if (!cancelled) {
           setDetail(d)
           setDetailError(null)
@@ -391,7 +391,7 @@ export default function TasksPage() {
     if (!cancelTarget) return
     setActionError(null)
     try {
-      await api.tasks.cancel(cancelTarget.id)
+      await api.tasks.cancel(projectId, cancelTarget.id)
       setCancelTarget(null)
       setFlash(t('ies.task.cancel_ok', { task_id: cancelTarget.id }))
       await loadList()
@@ -405,7 +405,7 @@ export default function TasksPage() {
     if (!retryTarget) return
     setActionError(null)
     try {
-      await api.tasks.retry(retryTarget.id)
+      await api.tasks.retry(projectId, retryTarget.id)
       setRetryTarget(null)
       setFlash(t('ies.task.retry_ok'))
       await loadList()

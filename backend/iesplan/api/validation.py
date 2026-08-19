@@ -7,22 +7,20 @@
                                                              确认人/时间/内容校验)
 - GET   /api/projects/{project_id}/validation                最近一次校验报告(未持久化时现场执行)
 
-认证说明: 与 iesplan.api.projects 一致, 本阶段以 X-User-Id 请求头模拟认证主体
-(集成时以 iesplan.api.auth 的窗口会话凭证校验依赖替换)。
+认证说明: 统一使用 U01 身份单元提供的窗口会话认证
+(iesplan.api.auth.CurrentUser; 未认证 401, 权限不足 403)。
 """
 
 from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from iesplan.core.diagnostics import SEVERITY_BLOCKING
-from iesplan.core.errors import AppError
+from iesplan.api.auth import CurrentUser
 from iesplan.db import get_db
-from iesplan.models.identity import User
 from iesplan.services import project as project_service
 from iesplan.services import validation as validation_service
 
@@ -31,35 +29,6 @@ router = APIRouter(prefix="/api/projects/{project_id}/validation", tags=["valida
 
 #: FastAPI 依赖注入的数据库会话
 DbSession = Annotated[Session, Depends(get_db)]
-
-
-def _http_error(status: int, code: str, message_key: str, params: dict[str, Any]) -> AppError:
-    """构造带指定 HTTP 状态码的应用错误(状态码在错误实例上设置)。"""
-    err = AppError("", code=code, severity=SEVERITY_BLOCKING, message_key=message_key, params=params)
-    err.http_status = status
-    return err
-
-
-def get_current_user(request: Request, db: DbSession) -> User:
-    """当前认证主体(阶段实现: 从 X-User-Id 请求头读取; 正式会话认证由 U01 提供)。
-
-    集成时以 iesplan.api.auth 的窗口会话凭证校验依赖替换本函数。
-    """
-    raw = request.headers.get("X-User-Id")
-    if not raw:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "missing_identity"})
-    try:
-        user_id = int(raw)
-    except ValueError as exc:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "bad_identity"}) from exc
-    user = db.get(User, user_id)
-    if user is None:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "unknown_user"})
-    return user
-
-
-#: 当前用户依赖(须在 get_current_user 定义之后声明)
-CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 # ---------------------------------------------------------------------------

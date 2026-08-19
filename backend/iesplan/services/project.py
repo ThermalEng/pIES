@@ -26,6 +26,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -80,14 +81,12 @@ ROLE_CAPABILITIES: dict[str, set[str]] = {
 
 
 def get_role(db: Session, user: User, project_id: int) -> str | None:
-    """返回用户在项目中的当前角色: 'owner' | 'viewer' | None(非成员, 01 §2.1)。"""
-    member = db.execute(
-        select(ProjectMember).where(
-            ProjectMember.project_id == project_id,
-            ProjectMember.user_id == user.id,
-            ProjectMember.revoked_at.is_(None),
-        )
-    ).scalar_one_or_none()
+    """返回用户在项目中的当前角色: 'owner' | 'viewer' | None(非成员, 01 §2.1)。
+
+    有效成员判定(M-01): revoked_at 为空 且 (expires_at 为空 或 未过期);
+    临时授权到期后视同无权限。
+    """
+    member = _current_member(db, project_id, user.id)
     return member.role if member is not None else None
 
 
@@ -188,6 +187,15 @@ def transfer_ownership(db: Session, user: User, project_id: int, target_user_id:
     target = db.get(User, target_user_id)
     if target is None:
         raise NotFoundError("目标用户不存在", params={"user_id": target_user_id})
+    if target.status != "active":
+        raise ConflictError(
+            "目标用户未启用, 不能接收所有权",
+            params={"user_id": target_user_id, "status": target.status},
+        )
+    if target.is_system:
+        raise ConflictError(
+            "目标用户是系统账号, 不能接收所有权", params={"user_id": target_user_id}
+        )
     if target_user_id == project.owner_id:
         raise ConflictError("目标用户已是项目所有者", params={"user_id": target_user_id})
 
@@ -261,13 +269,27 @@ def list_members(db: Session, project_id: int) -> list[dict]:
 
 
 def _current_member(db: Session, project_id: int, user_id: int) -> ProjectMember | None:
-    return db.execute(
+    """当前有效成员行(M-01): revoked_at 为空 且 (expires_at 为空 或 未过期)。"""
+    member = db.execute(
         select(ProjectMember).where(
             ProjectMember.project_id == project_id,
             ProjectMember.user_id == user_id,
             ProjectMember.revoked_at.is_(None),
         )
     ).scalar_one_or_none()
+    if member is None:
+        return None
+    if member.expires_at is not None and _as_utc(member.expires_at) < datetime.now(UTC):
+        # 临时授权已过期: 视同无成员(不修改行, 仅判定失效)
+        return None
+    return member
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """将可能为 naive 的 datetime 按 UTC 解释(SQLite 测试环境回读为 naive)。"""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _next_auth_version(db: Session, project_id: int) -> int:
@@ -356,13 +378,21 @@ def get_project_view(db: Session, user: User, project_id: int) -> dict:
 
 
 def list_visible_projects(db: Session, user: User) -> list[dict]:
-    """我可见的项目列表(所有者 + 查看者, 不含已删除, RPD 3.2)。"""
+    """我可见的项目列表(所有者 + 查看者, 不含已删除, RPD 3.2)。
+
+    有效成员判定含 expires_at(M-01): 临时授权到期后不再可见。
+    """
+    now = datetime.now(UTC)
     rows = db.execute(
         select(Project, ProjectMember.role)
         .join(ProjectMember, ProjectMember.project_id == Project.id)
         .where(
             ProjectMember.user_id == user.id,
             ProjectMember.revoked_at.is_(None),
+            sa.or_(
+                ProjectMember.expires_at.is_(None),
+                ProjectMember.expires_at > now,
+            ),
             Project.status != "deleted",
         )
         .order_by(Project.created_at.desc())

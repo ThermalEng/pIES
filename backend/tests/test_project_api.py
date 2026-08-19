@@ -22,6 +22,7 @@ from typing import Any
 os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
 
 import pytest  # noqa: E402
+from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
@@ -33,7 +34,6 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.audit import AuditLog  # noqa: E402
-from iesplan.models.identity import Role, User, UserRole  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -90,35 +90,14 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
 # ---------------------------------------------------------------------------
 
 
-def _h(user_id: int) -> dict[str, str]:
-    """认证头(阶段实现: X-User-Id 模拟认证主体)。"""
-    return {"X-User-Id": str(user_id)}
+def _h(client: TestClient, user) -> dict[str, str]:
+    """认证头: 以真实窗口会话登录(同一 client 内缓存, 避免多窗口接管)。"""
+    return login_headers(client, user)
 
 
-def _make_user(db: Session, username: str) -> User:
-    """直接创建测试用户。"""
-    user = User(username=username, display_name=username, locale="zh-CN")
-    db.add(user)
-    db.commit()
-    return user
-
-
-def _make_admin(db: Session, username: str) -> User:
-    """创建带全局 admin 角色的用户。"""
-    user = User(username=username, display_name=username)
-    db.add(user)
-    db.flush()
-    role = Role(code="admin", name="管理员", description="测试管理员", is_system=True)
-    db.add(role)
-    db.flush()
-    db.add(UserRole(user_id=user.id, role_id=role.id, granted_by=user.id))
-    db.commit()
-    return user
-
-
-def _create_project(client: TestClient, user_id: int, name: str, **kw: Any) -> int:
+def _create_project(client: TestClient, user, name: str, **kw: Any) -> int:
     """创建项目并返回项目 id。"""
-    resp = client.post("/api/projects", json={"name": name, **kw}, headers=_h(user_id))
+    resp = client.post("/api/projects", json={"name": name, **kw}, headers=_h(client, user))
     assert resp.status_code == 201, resp.text
     return resp.json()["project"]["id"]
 
@@ -146,9 +125,9 @@ def _load_content(oid: str) -> dict:
 
 def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None:
     """创建→查看者→只读→编辑→版本→归档→删除→转移→审计 全流程。"""
-    owner = _make_user(db_session, "owner1")
-    viewer = _make_user(db_session, "viewer1")
-    owner_h, viewer_h = _h(owner.id), _h(viewer.id)
+    owner = make_user(db_session, "owner1")
+    viewer = make_user(db_session, "viewer1")
+    owner_h, viewer_h = _h(client, owner), _h(client, viewer)
 
     # 1. 创建项目: 创建者=所有者, 初始草稿 revision=1
     resp = client.post(
@@ -181,8 +160,8 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert roles == {owner.id: "owner", viewer.id: "viewer"}
 
     # 非成员不可见(403)
-    stranger = _make_user(db_session, "stranger1")
-    assert client.get(f"/api/projects/{pid}", headers=_h(stranger.id)).status_code == 403
+    stranger = make_user(db_session, "stranger1")
+    assert client.get(f"/api/projects/{pid}", headers=_h(client, stranger)).status_code == 403
 
     # 3. 查看者只读: GET 200, 编辑 403
     assert client.get(f"/api/projects/{pid}", headers=viewer_h).status_code == 200
@@ -294,7 +273,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert client.get(f"/api/projects/{pid}", headers=owner_h).status_code == 404
 
     # 8. 所有权转移: 原所有者变 viewer
-    pid2 = _create_project(client, owner.id, "转移测试项目")
+    pid2 = _create_project(client, owner, "转移测试项目")
     resp = client.post(
         f"/api/projects/{pid2}/transfer",
         json={"target_user_id": viewer.id},
@@ -336,9 +315,9 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
 
 def test_restore_version(client: TestClient, db_session: Session) -> None:
     """恢复历史版本: 创建新版本+新草稿, 不倒写历史。"""
-    owner = _make_user(db_session, "owner_restore")
-    owner_h = _h(owner.id)
-    pid = _create_project(client, owner.id, "恢复测试")
+    owner = make_user(db_session, "owner_restore")
+    owner_h = _h(client, owner)
+    pid = _create_project(client, owner, "恢复测试")
 
     commands = [
         _device_cmd("r-cmd-1", "光伏1", "pv", "new"),
@@ -391,9 +370,9 @@ def test_restore_version(client: TestClient, db_session: Session) -> None:
 
 def test_apply_result(client: TestClient, db_session: Session) -> None:
     """应用选定结果: 参数差异补丁→新草稿+新版本, 来源版本不变。"""
-    owner = _make_user(db_session, "owner_apply")
-    owner_h = _h(owner.id)
-    pid = _create_project(client, owner.id, "应用结果测试")
+    owner = make_user(db_session, "owner_apply")
+    owner_h = _h(client, owner)
+    pid = _create_project(client, owner, "应用结果测试")
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={
@@ -452,9 +431,9 @@ def test_apply_result(client: TestClient, db_session: Session) -> None:
 
 def test_duplicate_project(client: TestClient, db_session: Session) -> None:
     """复制项目为独立候选方案(复制者为新所有者, 内容随副本)。"""
-    owner = _make_user(db_session, "owner_dup")
-    owner_h = _h(owner.id)
-    pid = _create_project(client, owner.id, "复制源项目")
+    owner = make_user(db_session, "owner_dup")
+    owner_h = _h(client, owner)
+    pid = _create_project(client, owner, "复制源项目")
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={
@@ -483,38 +462,38 @@ def test_duplicate_project(client: TestClient, db_session: Session) -> None:
 
 def test_admin_maintenance_readonly(client: TestClient, db_session: Session) -> None:
     """管理员维护只读: 可读任意项目, 不能业务编辑(RPD 3.2)。"""
-    owner = _make_user(db_session, "owner_maint")
-    admin = _make_admin(db_session, "admin_maint")
-    stranger = _make_user(db_session, "stranger_maint")
-    pid = _create_project(client, owner.id, "维护测试")
+    owner = make_user(db_session, "owner_maint")
+    admin = make_user(db_session, "admin_maint", role="admin")
+    stranger = make_user(db_session, "stranger_maint")
+    pid = _create_project(client, owner, "维护测试")
 
-    assert client.get(f"/api/projects/{pid}", headers=_h(admin.id)).status_code == 200
+    assert client.get(f"/api/projects/{pid}", headers=_h(client, admin)).status_code == 200
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={"expected_revision": 1, "commands": []},
-        headers=_h(admin.id),
+        headers=_h(client, admin),
     )
     assert resp.status_code == 403
     # 非成员非管理员 → 403
-    assert client.get(f"/api/projects/{pid}", headers=_h(stranger.id)).status_code == 403
+    assert client.get(f"/api/projects/{pid}", headers=_h(client, stranger)).status_code == 403
 
 
 def test_visible_listing(client: TestClient, db_session: Session) -> None:
     """可见列表: 所有者与查看者可见, 非成员不可见。"""
-    owner = _make_user(db_session, "owner_list")
-    viewer = _make_user(db_session, "viewer_list")
-    stranger = _make_user(db_session, "stranger_list")
-    pid = _create_project(client, owner.id, "列表项目")
+    owner = make_user(db_session, "owner_list")
+    viewer = make_user(db_session, "viewer_list")
+    stranger = make_user(db_session, "stranger_list")
+    pid = _create_project(client, owner, "列表项目")
     resp = client.put(
         f"/api/projects/{pid}/viewers",
         json={"user_id": viewer.id, "action": "add"},
-        headers=_h(owner.id),
+        headers=_h(client, owner),
     )
     assert resp.status_code == 200
 
-    owner_list = client.get("/api/projects", headers=_h(owner.id)).json()["projects"]
-    viewer_list = client.get("/api/projects", headers=_h(viewer.id)).json()["projects"]
-    stranger_list = client.get("/api/projects", headers=_h(stranger.id)).json()["projects"]
+    owner_list = client.get("/api/projects", headers=_h(client, owner)).json()["projects"]
+    viewer_list = client.get("/api/projects", headers=_h(client, viewer)).json()["projects"]
+    stranger_list = client.get("/api/projects", headers=_h(client, stranger)).json()["projects"]
     assert [p["id"] for p in owner_list] == [pid]
     assert [p["id"] for p in viewer_list] == [pid]
     assert stranger_list == []
@@ -524,36 +503,36 @@ def test_visible_listing(client: TestClient, db_session: Session) -> None:
 
 def test_remove_viewer(client: TestClient, db_session: Session) -> None:
     """移除查看者后失去读权限; 不能移除所有者。"""
-    owner = _make_user(db_session, "owner_rmv")
-    viewer = _make_user(db_session, "viewer_rmv")
-    pid = _create_project(client, owner.id, "移除查看者")
+    owner = make_user(db_session, "owner_rmv")
+    viewer = make_user(db_session, "viewer_rmv")
+    pid = _create_project(client, owner, "移除查看者")
     client.put(
         f"/api/projects/{pid}/viewers",
         json={"user_id": viewer.id, "action": "add"},
-        headers=_h(owner.id),
+        headers=_h(client, owner),
     )
     resp = client.put(
         f"/api/projects/{pid}/viewers",
         json={"user_id": viewer.id, "action": "remove"},
-        headers=_h(owner.id),
+        headers=_h(client, owner),
     )
     assert resp.status_code == 200
     assert [m["user_id"] for m in resp.json()["members"]] == [owner.id]
-    assert client.get(f"/api/projects/{pid}", headers=_h(viewer.id)).status_code == 403
+    assert client.get(f"/api/projects/{pid}", headers=_h(client, viewer)).status_code == 403
     # 不能移除所有者
     resp = client.put(
         f"/api/projects/{pid}/viewers",
         json={"user_id": owner.id, "action": "remove"},
-        headers=_h(owner.id),
+        headers=_h(client, owner),
     )
     assert resp.status_code == 409
 
 
 def test_invalid_commands(client: TestClient, db_session: Session) -> None:
     """命令校验: 缺幂等标识/未知类型/陈旧修订。"""
-    owner = _make_user(db_session, "owner_inv")
-    owner_h = _h(owner.id)
-    pid = _create_project(client, owner.id, "命令校验")
+    owner = make_user(db_session, "owner_inv")
+    owner_h = _h(client, owner)
+    pid = _create_project(client, owner, "命令校验")
 
     # 缺少幂等标识 → 400
     resp = client.put(
@@ -592,3 +571,21 @@ def test_invalid_commands(client: TestClient, db_session: Session) -> None:
         headers=owner_h,
     )
     assert resp.status_code == 409
+
+
+def test_anonymous_and_xuserid_rejected(client: TestClient, db_session: Session) -> None:
+    """匿名访问一律 401; 伪造 X-User-Id 头不再被接受(已由窗口会话认证取代)。"""
+    # 匿名 GET / 列表 → 401
+    resp = client.get("/api/projects")
+    assert resp.status_code == 401
+    assert resp.json()["error"]["message_key"] in ("ies.diag.auth.required", "ies.diag.auth.session_invalid")
+    # 匿名 POST / 创建 → 401
+    resp = client.post("/api/projects", json={"name": "匿名项目"})
+    assert resp.status_code == 401
+    # 伪造 X-User-Id 头(旧模拟鉴权) → 401
+    resp = client.get("/api/projects", headers={"X-User-Id": "1"})
+    assert resp.status_code == 401
+    # 登录后(窗口凭证) → 200
+    owner = make_user(db_session, "owner_anon")
+    resp = client.get("/api/projects", headers=_h(client, owner))
+    assert resp.status_code == 200

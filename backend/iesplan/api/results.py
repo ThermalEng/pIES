@@ -10,9 +10,9 @@
 - GET    /api/projects/{id}/tasks/{task_id}/result/hourly  逐时结果查询(对象存储, 分页)
 - POST   /api/projects/{id}/tasks/{task_id}/result/check   对已有证据包创建检查任务
 
-认证与权限: 复用 U02 的 X-User-Id 模拟认证主体; 读接口要求项目 view,
-写接口(assess/select/check)要求项目 edit。结果应用(apply_result)由项目单元处理,
-本路由只提供数据与差异补丁。
+认证与权限: 统一使用 U01 身份单元提供的窗口会话认证(iesplan.api.auth.CurrentUser);
+读接口要求项目 view, 写接口(assess/select/check)要求项目 edit。结果应用
+(apply_result)由项目单元处理, 本路由只提供数据与差异补丁。
 """
 
 from __future__ import annotations
@@ -23,12 +23,11 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from iesplan.api.projects import get_current_user
+from iesplan.api.auth import CurrentUser
 from iesplan.core.errors import NotFoundError
 from iesplan.db import get_db
 from iesplan.models.calc import Task
 from iesplan.models.common import HASH64_RE
-from iesplan.models.identity import User
 from iesplan.services import project as project_service
 from iesplan.services import results as results_service
 from iesplan.services import tasks as tasks_service
@@ -77,7 +76,7 @@ def get_result_endpoint(
     project_id: int,
     task_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict[str, Any]:
     """结果视图: 四维结论(细粒度 + 派生摘要)/业务结局/指标摘要/逐时结果引用/当前选中。
 
@@ -91,7 +90,7 @@ def list_assessments_endpoint(
     project_id: int,
     task_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict[str, Any]:
     """评估历史: 全部证据包上的评估记录(追加式不可变, 时间倒序)。"""
     results_service.result_view(db, user, project_id, task_id)  # 权限 + 归属校验
@@ -105,7 +104,7 @@ def assess_endpoint(
     task_id: int,
     payload: AssessRequest,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict[str, Any]:
     """触发新评估(RPD 11.2): 对任务最新证据包执行四维(或单维)检查, 创建新评估记录
     不覆盖历史; 随后更新结果索引的最新引用(同证据包只挂接指针)。"""
@@ -135,7 +134,7 @@ def select_result_endpoint(
     task_id: int,
     payload: SelectRequest,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict[str, Any]:
     """选择结果(01 §8.4 追加式): 保存所选解标识/类型/理由 + 差异补丁审计;
     换选=新行 + 旧行 is_current=false。提供 preview_checksum 时校验确认预览
@@ -166,7 +165,7 @@ def diff_endpoint(
     project_id: int,
     task_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict[str, Any]:
     """选中结果的参数差异预览(补丁 + 校验值 + 来源版本), 应用前要求用户确认
     (REQ-RESULT-003); 无选中 → 404。"""
@@ -186,7 +185,7 @@ def hourly_endpoint(
     project_id: int,
     task_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     field: str = Query(description="逐时字段名(如 p_grid_buy)"),
     solution_id: int | None = Query(default=None, description="逐时结果引用所属解(缺省第一份)"),
     start: int = Query(default=0, ge=0, description="起始行号(含)"),
@@ -211,7 +210,7 @@ def check_task_endpoint(
     project_id: int,
     task_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     payload: CheckRequest | None = None,
 ) -> dict[str, Any]:
     """对已有证据包创建检查任务(report 类型, io 池); Worker 消费后执行四维复查。"""

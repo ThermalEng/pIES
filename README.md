@@ -19,6 +19,18 @@ docker compose up -d --build
 # 首次登录必须修改密码
 ```
 
+## 生产部署安全要求
+
+> ⚠️ **生产环境必须覆盖以下默认值**, 否则存在严重安全风险:
+
+| 配置项 | 默认值(仅开发) | 生产要求 |
+| --- | --- | --- |
+| `IESPLAN_SECRET_KEY` | `dev-only-secret-change-me` | 必须设置高强度随机密钥(下载授权签名等使用) |
+| `IESPLAN_DEFAULT_ADMIN_PASSWORD` | `iesplan-admin-initial` | 首启后立即改密, 或部署时注入一次性随机初始密码 |
+| `IESPLAN_DB_PASSWORD` | `iesplan_dev_password` | 必须修改数据库密码 |
+| HTTPS | 无 | 建议部署层启用 TLS(`Secure` Cookie 自动生效) |
+| Redis 认证 | 无 | 生产建议配置密码/ACL(仅局域网时风险可控) |
+
 ## 架构
 
 ```

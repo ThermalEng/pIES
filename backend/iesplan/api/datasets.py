@@ -13,6 +13,10 @@
 错误统一 AppError + 诊断 message_key; 数据校验失败返回 400 + diagnostics
 (字段/行号定位, RPD 8.3)。
 
+认证与权限: 除模板下载(公开)外, 全部端点要求窗口会话认证
+(iesplan.api.auth.CurrentUser, 未认证 401); 读接口要求项目 view,
+写接口(创建/上传/样例)要求项目 edit(查看者只读, 所有者可上传, 403)。
+
 挂载方式(由 main.py 后续阶段追加):
     from iesplan.api.datasets import router
     application.include_router(router)
@@ -23,15 +27,17 @@ from __future__ import annotations
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from iesplan.api.auth import CurrentUser
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.db import get_db
 from iesplan.services import dataset as dataset_service
+from iesplan.services import project as project_service
 from iesplan.services.dataset import DataValidationError
 
 #: 路由: 统一前缀 /api, 各端点自带路径
@@ -174,8 +180,10 @@ def create_dataset(
     project_id: int,
     body: DatasetCreate,
     db: DbSession,
+    user: CurrentUser,
 ) -> dict:
-    """创建数据集元数据(名称在项目内唯一, 冲突返回 409)。"""
+    """创建数据集元数据(名称在项目内唯一, 冲突返回 409; 需项目 edit 能力)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     ds = dataset_service.create_dataset(
         db,
         project_id,
@@ -190,8 +198,9 @@ def create_dataset(
 
 
 @router.get("/projects/{project_id}/datasets", summary="数据集列表+最新版本")
-def list_datasets(project_id: int, db: DbSession) -> dict:
-    """项目数据集列表, 每个附带最新版本摘要(含质量报告)。"""
+def list_datasets(project_id: int, db: DbSession, user: CurrentUser) -> dict:
+    """项目数据集列表, 每个附带最新版本摘要(含质量报告; 需项目 view 能力)。"""
+    project_service.ensure_access(db, user, project_id, "view")
     dataset_service.require_project(db, project_id)
     items = dataset_service.list_datasets_with_latest(db, project_id)
     return {
@@ -206,8 +215,9 @@ def list_datasets(project_id: int, db: DbSession) -> dict:
 
 
 @router.get("/projects/{project_id}/datasets/{dataset_id}", summary="数据集详情(版本列表+质量报告)")
-def get_dataset(project_id: int, dataset_id: int, db: DbSession) -> dict:
-    """数据集详情: 元数据 + 全部版本(含质量报告与文件摘要)。"""
+def get_dataset(project_id: int, dataset_id: int, db: DbSession, user: CurrentUser) -> dict:
+    """数据集详情: 元数据 + 全部版本(含质量报告与文件摘要; 需项目 view 能力)。"""
+    project_service.ensure_access(db, user, project_id, "view")
     ds = _require_dataset(db, project_id, dataset_id)
     versions = dataset_service.list_dataset_versions(db, dataset_id)
     return {
@@ -231,7 +241,9 @@ def get_dataset(project_id: int, dataset_id: int, db: DbSession) -> dict:
 def upload_version(
     project_id: int,
     dataset_id: int,
+    request: Request,
     db: DbSession,
+    user: CurrentUser,
     file: Annotated[UploadFile, File(description="CSV 数据文件")],
     resolution: Annotated[str, Form(description="分辨率: 15min | 30min | 1h")],
     utc_offset_minutes: Annotated[int, Form(description="固定 UTC 偏移(分钟)")] = 480,
@@ -240,18 +252,30 @@ def upload_version(
         str | None, Form(description="元信息 JSON: {source_category, license, provenance, created_reason}")
     ] = None,
 ):
-    """上传并校验数据集版本。
+    """上传并校验数据集版本(需项目 edit 能力)。
 
+    大小门禁(H-08): 先按 Content-Length 头预检, 再以 (上限+1) 字节封顶流式读取,
+    超限立即拒绝 —— 任何情况下都不会把超大文件完整读入内存。
     校验通过: 201 + {dataset_version, quality_report, diagnostics};
     存在阻断性诊断(行数/时间戳/缺失/范围等): 400 + diagnostics(字段/行号定位)。
     """
+    project_service.ensure_access(db, user, project_id, "edit")
     _require_dataset(db, project_id, dataset_id)
     if resolution not in RESOLUTIONS:
         raise _http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
     if not isinstance(utc_offset_minutes, int) or not (-720 <= utc_offset_minutes <= 840):
         raise _http_error(400, "API-REQ-001", "ies.error.invalid_utc_offset", value=utc_offset_minutes)
 
-    data = file.file.read()
+    # Content-Length 预检(存在时; multipart 包含其他字段, 仅作快速拒绝)
+    try:
+        raw_len = int(request.headers.get("content-length", "0"))
+    except ValueError:
+        raw_len = 0
+    if raw_len > _MAX_UPLOAD_BYTES:
+        raise _http_error(400, "API-REQ-001", "ies.error.file_too_large", max_bytes=_MAX_UPLOAD_BYTES)
+
+    # 封顶流式读取: 最多读 (上限+1) 字节, 超出即拒绝(内存占用有界)
+    data = file.file.read(_MAX_UPLOAD_BYTES + 1)
     if not data:
         raise _http_error(400, "API-REQ-001", "ies.error.empty_file", filename=file.filename or "")
     if len(data) > _MAX_UPLOAD_BYTES:
@@ -281,8 +305,9 @@ def upload_version(
     "/projects/{project_id}/datasets/{dataset_id}/versions/{version_no}",
     summary="版本元数据+溯源",
 )
-def get_version(project_id: int, dataset_id: int, version_no: int, db: DbSession) -> dict:
+def get_version(project_id: int, dataset_id: int, version_no: int, db: DbSession, user: CurrentUser) -> dict:
     """版本详情: 元数据 + 溯源 + 许可证 + 文件引用(对象哈希/大小), 不返回数据本体。"""
+    project_service.ensure_access(db, user, project_id, "view")
     _require_dataset(db, project_id, dataset_id)
     result = dataset_service.get_dataset_version(db, dataset_id, version_no)
     version = result["version"]
@@ -309,15 +334,17 @@ def create_sample(
     project_id: int,
     dataset_id: int,
     db: DbSession,
+    user: CurrentUser,
     resolution: Annotated[str, Query(description="分辨率: 15min | 30min | 1h")] = "1h",
     region: Annotated[str, Query(description="地区: shanghai | beijing | guangzhou")] = "shanghai",
 ) -> dict:
-    """为目标数据集生成确定性内置样例数据版本(REQ-DATA-003/004)。"""
+    """为目标数据集生成确定性内置样例数据版本(REQ-DATA-003/004; 需项目 edit 能力)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     _require_dataset(db, project_id, dataset_id)
     if resolution not in RESOLUTIONS:
         raise _http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
     version = dataset_service.create_builtin_sample(
-        db, project_id, resolution, region=region, user_id=None, dataset_id=dataset_id
+        db, project_id, resolution, region=region, user_id=user.id, dataset_id=dataset_id
     )
     return {
         "dataset_version": _version_dict(version),

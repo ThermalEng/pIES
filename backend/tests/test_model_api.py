@@ -1,6 +1,6 @@
 """系统模型单元测试(U04): 设备/连接/拓扑校验/图序列化往返/内容哈希稳定。
 
-- API 层: SQLite 内存库(StaticPool 单连接) + FastAPI TestClient, 认证用 X-User-Id 占位;
+- API 层: SQLite 内存库(StaticPool 单连接) + FastAPI TestClient, 认证用窗口会话登录;
 - 服务层: 直接驱动 iesplan.services.model;
 - 数据源: registry 内置 9 类设备(04 §3)。
 """
@@ -26,7 +26,9 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
-from iesplan.models import Device, Port, Project, User
+from iesplan.models import Device, Port, Project
+from iesplan.models.project import ProjectMember
+from iesplan.services import identity
 from iesplan.services import model as svc
 
 GRID = "ies.device.grid_connection"
@@ -41,30 +43,55 @@ LOAD_PROFILE = {"load_profile": "ref:load1"}
 HEAT_PROFILE = {"heat_profile": "ref:heat1"}
 COOL_PROFILE = {"cooling_profile": "ref:cool1"}
 
-_HEADERS = {"X-User-Id": "1"}
+#: 种子管理员密码(经 /api/auth/login 真实登录)
+ADMIN_PASSWORD = "Admin12345"
+
+
+def _headers(client: TestClient) -> dict[str, str]:
+    """认证头: 以种子管理员窗口会话登录(同一 client 内缓存)。"""
+    try:
+        token: str | None = client._auth_token  # type: ignore[attr-defined]
+    except AttributeError:
+        token = None
+    if token is None:
+        resp = client.post(
+            "/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD}
+        )
+        assert resp.status_code == 200, resp.text
+        token = resp.json()["token"]
+        client._auth_token = token  # type: ignore[attr-defined]
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture()
 def db_factory() -> tuple[sessionmaker, int]:
-    """SQLite 内存库(单连接共享, 跨线程) + 种子管理员(首行 id=1, 对应 X-User-Id 占位)。"""
+    """SQLite 内存库(单连接共享, 跨线程) + 种子管理员(首行 id=1)。"""
     engine = sa.create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     with factory() as session:
-        admin = User(username="admin", display_name="管理员")
-        session.add(admin)
-        session.commit()
+        admin = identity.create_user(
+            session, "admin", ADMIN_PASSWORD, role="admin",
+            force_password_change=False, display_name="管理员",
+        )
         admin_id = admin.id
     return factory, admin_id
 
 
 def _create_project(factory: sessionmaker, name: str, admin_id: int) -> int:
-    """直连会话创建项目, 返回项目 id。"""
+    """直连会话创建项目(含所有者成员行, 满足 U02 ensure_access), 返回项目 id。"""
     with factory() as session:
         project = Project(name=name, owner_id=admin_id, created_by=admin_id)
         session.add(project)
+        session.flush()
+        session.add(
+            ProjectMember(
+                project_id=project.id, user_id=admin_id, role="owner",
+                auth_version=1, granted_by=admin_id,
+            )
+        )
         session.commit()
         return project.id
 
@@ -110,7 +137,7 @@ def _create_device(
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": device_type, "name": name, "params": params or {}, **extra},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 201, resp.text
     return resp.json()
@@ -129,7 +156,7 @@ def _connect(client: TestClient, project_id: int, from_port_id: int, to_port_id:
     resp = client.post(
         f"/api/projects/{project_id}/model/connections",
         json={"from_port_id": from_port_id, "to_port_id": to_port_id},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 201, resp.text
     return resp.json()
@@ -137,14 +164,14 @@ def _connect(client: TestClient, project_id: int, from_port_id: int, to_port_id:
 
 def _get_graph(client: TestClient, project_id: int) -> dict:
     """读取项目系统图。"""
-    resp = client.get(f"/api/projects/{project_id}/model", headers=_HEADERS)
+    resp = client.get(f"/api/projects/{project_id}/model", headers=_headers(client))
     assert resp.status_code == 200, resp.text
     return resp.json()
 
 
 def _get_validate(client: TestClient, project_id: int) -> list[dict]:
     """调用模型校验接口, 返回诊断列表。"""
-    resp = client.get(f"/api/projects/{project_id}/model/validate", headers=_HEADERS)
+    resp = client.get(f"/api/projects/{project_id}/model/validate", headers=_headers(client))
     assert resp.status_code == 200, resp.text
     return resp.json()["diagnostics"]
 
@@ -187,7 +214,7 @@ def test_create_device_out_of_range_param_rejected(client: TestClient, project_i
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": PV, "name": "PV1", "params": {"efficiency": 0.9}},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     err = resp.json()["error"]
@@ -201,7 +228,7 @@ def test_create_device_unknown_type_rejected(client: TestClient, project_id: int
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": "ies.device.wind_turbine", "name": "W1"},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == CONN_TYPE_UNREGISTERED
@@ -212,7 +239,7 @@ def test_create_device_missing_required_param_rejected(client: TestClient, proje
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": LOAD, "name": "L1", "params": {"peak_power_kw": 100}},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     err = resp.json()["error"]
@@ -225,7 +252,7 @@ def test_create_device_param_type_mismatch_rejected(client: TestClient, project_
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": HP, "name": "HP1", "params": {"cop": "高"}},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "PARAM-UNIT-002"
@@ -236,7 +263,7 @@ def test_create_device_enum_violation_rejected(client: TestClient, project_id: i
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": HP, "name": "HP1", "params": {"source_type": "ocean"}},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == PARAM_RNG_OUT
@@ -289,7 +316,7 @@ def test_create_device_duplicate_name_rejected(client: TestClient, project_id: i
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": PV, "name": "PV1"},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 409
 
@@ -301,7 +328,7 @@ def test_update_device_name_and_params(client: TestClient, project_id: int) -> N
     resp = client.put(
         f"/api/projects/{project_id}/model/devices/{device_id}",
         json={"name": "PV-A", "params": {"efficiency": 0.3, "tilt_deg": 45}},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -311,7 +338,7 @@ def test_update_device_name_and_params(client: TestClient, project_id: int) -> N
     resp = client.put(
         f"/api/projects/{project_id}/model/devices/{device_id}",
         json={"params": {"efficiency": 0.9}},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == PARAM_RNG_OUT
@@ -319,7 +346,7 @@ def test_update_device_name_and_params(client: TestClient, project_id: int) -> N
     resp = client.put(
         f"/api/projects/{project_id}/model/devices/{device_id}",
         json={"position": {"x": 5, "y": 6}},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 200
     graph = _get_graph(client, project_id)
@@ -359,7 +386,7 @@ def test_connect_energy_mismatch_rejected_with_location(client: TestClient, proj
     resp = client.post(
         f"/api/projects/{project_id}/model/connections",
         json={"from_port_id": _port(grid, "electric_out")["id"], "to_port_id": _port(heat, "heat_in")["id"]},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     err = resp.json()["error"]
@@ -381,7 +408,7 @@ def test_connect_direction_invalid_rejected(client: TestClient, project_id: int)
             "from_port_id": _port(load, "electric_in")["id"],
             "to_port_id": _port(grid, "electric_out")["id"],
         },
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     err = resp.json()["error"]
@@ -396,7 +423,7 @@ def test_connect_duplicate_rejected(client: TestClient, project_id: int) -> None
     resp = client.post(
         f"/api/projects/{project_id}/model/connections",
         json={"from_port_id": grid_out["id"], "to_port_id": load_in["id"]},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "CONN-DUP-001"
@@ -409,7 +436,7 @@ def test_connect_self_loop_rejected(client: TestClient, project_id: int) -> None
     resp = client.post(
         f"/api/projects/{project_id}/model/connections",
         json={"from_port_id": port["id"], "to_port_id": port["id"]},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "CONN-DUP-002"
@@ -431,7 +458,7 @@ def test_connect_cross_project_rejected(
             "from_port_id": grid_out["id"],
             "to_port_id": _port(other_load, "electric_in")["id"],
         },
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "CONN-PORT-003"
@@ -479,14 +506,14 @@ def test_disconnect(client: TestClient, project_id: int) -> None:
     conn = _connect(client, project_id, grid_out["id"], load_in["id"])
     conn_id = conn["connection"]["id"]
     resp = client.delete(
-        f"/api/projects/{project_id}/model/connections/{conn_id}", headers=_HEADERS
+        f"/api/projects/{project_id}/model/connections/{conn_id}", headers=_headers(client)
     )
     assert resp.status_code == 200
     graph = _get_graph(client, project_id)
     assert graph["connections"] == []
     # 再删 → 404
     resp = client.delete(
-        f"/api/projects/{project_id}/model/connections/{conn_id}", headers=_HEADERS
+        f"/api/projects/{project_id}/model/connections/{conn_id}", headers=_headers(client)
     )
     assert resp.status_code == 404
 
@@ -497,7 +524,7 @@ def test_delete_device_cascades(client: TestClient, project_id: int) -> None:
     _connect(client, project_id, grid_out["id"], load_in["id"])
     device_id = load["device"]["id"]
     resp = client.delete(
-        f"/api/projects/{project_id}/model/devices/{device_id}", headers=_HEADERS
+        f"/api/projects/{project_id}/model/devices/{device_id}", headers=_headers(client)
     )
     assert resp.status_code == 200
     graph = _get_graph(client, project_id)
@@ -633,7 +660,7 @@ def test_validate_unregistered_type_diagnostic(
 
     client_app.dependency_overrides[get_db] = _override
     with TestClient(client_app, raise_server_exceptions=False) as test_client:
-        resp = test_client.get(f"/api/projects/{project_id}/model/validate", headers=_HEADERS)
+        resp = test_client.get(f"/api/projects/{project_id}/model/validate", headers=_headers(test_client))
         assert resp.status_code == 200
         diags = resp.json()["diagnostics"]
     assert any(d["code"] == CONN_TYPE_UNREGISTERED for d in diags)
@@ -681,14 +708,14 @@ def test_content_hash_stable(client: TestClient, project_id: int) -> None:
     client.put(
         f"/api/projects/{project_id}/model/devices/{device_id}",
         json={"position": {"x": 1, "y": 2}},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert _get_graph(client, project_id)["graph_hash"] == h1
     # 参数变化 → 哈希变化
     client.put(
         f"/api/projects/{project_id}/model/devices/{device_id}",
         json={"params": {"efficiency": 0.3}},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     h2 = _get_graph(client, project_id)["graph_hash"]
     assert h2 != h1
@@ -703,7 +730,7 @@ def test_content_hash_changes_on_connect_and_disconnect(client: TestClient, proj
     h_conn = _get_graph(client, project_id)["graph_hash"]
     assert h_conn != h_empty
     client.delete(
-        f"/api/projects/{project_id}/model/connections/{conn['connection']['id']}", headers=_HEADERS
+        f"/api/projects/{project_id}/model/connections/{conn['connection']['id']}", headers=_headers(client)
     )
     h_disconnected = _get_graph(client, project_id)["graph_hash"]
     # 断开后设备/端口行 id 不变 → 哈希回到初值(内容寻址语义)
@@ -720,7 +747,7 @@ def test_empty_graph_for_new_project(client: TestClient, project_id: int) -> Non
 
 def test_get_graph_missing_project_404(client: TestClient) -> None:
     """项目不存在 → 404(带定位)。"""
-    resp = client.get("/api/projects/999/model", headers=_HEADERS)
+    resp = client.get("/api/projects/999/model", headers=_headers(client))
     assert resp.status_code == 404
     assert resp.json()["error"]["location"]["object_type"] == "project"
 

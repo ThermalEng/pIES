@@ -6,13 +6,15 @@
  * - 后端错误信封解析为 ApiError;成功响应兼容裸 JSON 与 {ok, data} 信封。
  * - 401(会话失效):清除会话标记并跳转 /login。
  *
- * URL 规范(后端实现时应按此挂载路由):
- *   POST   /api/projects/{id}/viewers             添加查看者(body: {username})
- *   DELETE /api/projects/{id}/viewers/{userId}    移除查看者
+ * 后端契约(backend/iesplan/api/projects.py):
+ *   PUT /api/projects/{id}/viewers   添加/移除查看者(body: {user_id, action: add|remove})
+ *                                    返回 {members: [...]}
+ * 注意:后端按用户 id 而非用户名操作查看者,本模块经管理员用户清单解析用户名 → id。
  */
 
 import { ApiError } from '../../types'
 import type { ApiErrorBody, ProjectMember } from '../../types'
+import { api } from '../../api/client'
 
 /** 后端错误信封解析(与 client.ts 的 parseErrorEnvelope 一致)。 */
 function parseEnvelope(body: unknown): ApiErrorBody | null {
@@ -48,7 +50,7 @@ function unwrap<T>(body: unknown): T {
   return body as T
 }
 
-async function request<T>(path: string, method: 'POST' | 'DELETE', body?: unknown): Promise<T> {
+async function request<T>(path: string, method: 'POST' | 'PUT' | 'DELETE', body?: unknown): Promise<T> {
   let res: Response
   try {
     res = await fetch(`/api${path}`, {
@@ -95,12 +97,35 @@ async function request<T>(path: string, method: 'POST' | 'DELETE', body?: unknow
   return unwrap<T>(payload)
 }
 
+/** 后端查看者接口返回 {members: [...]}: 解包成员清单。 */
+function membersOf(body: unknown): ProjectMember[] {
+  const rec = body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : {}
+  return Array.isArray(rec.members) ? (rec.members as ProjectMember[]) : []
+}
+
+/** 解析用户名 → 用户 id(后端查看者/转移接口均按 id 操作)。 */
+async function resolveUserId(username: string): Promise<number> {
+  const page = await api.admin.users({ limit: 1000 })
+  const user = page.items.find((u) => u.username === username)
+  if (!user) throw new ApiError(400, null, 'ies.project.viewer_not_found')
+  return user.id
+}
+
 /** 添加查看者(仅所有者)。 */
-export function addProjectViewer(projectId: number, username: string): Promise<ProjectMember> {
-  return request<ProjectMember>(`/projects/${projectId}/viewers`, 'POST', { username })
+export async function addProjectViewer(projectId: number, username: string): Promise<ProjectMember> {
+  const userId = await resolveUserId(username)
+  const body = await request<unknown>(`/projects/${projectId}/viewers`, 'PUT', {
+    user_id: userId,
+    action: 'add',
+  })
+  const members = membersOf(body)
+  return members[members.length - 1] ?? ({} as ProjectMember)
 }
 
 /** 移除查看者(仅所有者)。 */
-export function removeProjectViewer(projectId: number, userId: number): Promise<void> {
-  return request<void>(`/projects/${projectId}/viewers/${userId}`, 'DELETE')
+export async function removeProjectViewer(projectId: number, userId: number): Promise<void> {
+  await request<unknown>(`/projects/${projectId}/viewers`, 'PUT', {
+    user_id: userId,
+    action: 'remove',
+  })
 }

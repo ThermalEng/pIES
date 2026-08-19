@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -475,6 +476,9 @@ def _check_param_value(
     if pspec.min is not None or pspec.max is not None or isinstance(pspec.default, (int, float)):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return [_type_mismatch_diag(name, value, pspec, loc)]
+        # M-08: 拒绝 NaN/Infinity(非有限值可绕过 min/max 比较, 污染后续求解与哈希)
+        if not math.isfinite(float(value)):
+            return [_type_mismatch_diag(name, value, pspec, loc)]
         if pspec.min is not None and value < pspec.min:
             return [
                 make_diag(
@@ -699,7 +703,10 @@ def _check_connection_attrs(attrs: dict) -> tuple[float | None, float, dict]:
     """
     capacity = attrs.get("capacity")
     if capacity is not None:
-        if isinstance(capacity, bool) or not isinstance(capacity, (int, float)) or capacity < 0:
+        if (
+            isinstance(capacity, bool) or not isinstance(capacity, (int, float))
+            or not math.isfinite(float(capacity)) or capacity < 0
+        ):
             raise ModelValidationError(
                 "连接容量非法",
                 code=PARAM_RNG_OUT,
@@ -708,7 +715,10 @@ def _check_connection_attrs(attrs: dict) -> tuple[float | None, float, dict]:
                 location={"object_type": "connection", "field": "capacity"},
             )
     loss_rate = attrs.get("loss_rate", 0)
-    if isinstance(loss_rate, bool) or not isinstance(loss_rate, (int, float)) or not 0 <= loss_rate <= 1:
+    if (
+        isinstance(loss_rate, bool) or not isinstance(loss_rate, (int, float))
+        or not math.isfinite(float(loss_rate)) or not 0 <= loss_rate <= 1
+    ):
         raise ModelValidationError(
             "连接损耗率非法",
             code=PARAM_RNG_OUT,

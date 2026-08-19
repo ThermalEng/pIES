@@ -195,6 +195,8 @@ export const messagesEn: Record<string, string> = {
   'ies.project.delete_ok': 'Project deleted',
   'ies.project.viewer_added': 'Viewer {username} added',
   'ies.project.viewer_removed': 'Viewer {username} removed',
+  'ies.project.transfer_unknown_user': 'Cannot resolve user {username}, please select from the list',
+  'ies.project.viewer_not_found': 'User {username} not found',
 
   // -------------------------------------------------------------------------
   // Modeling
@@ -414,6 +416,7 @@ export const messagesEn: Record<string, string> = {
   'ies.task.no_diagnostics': 'No diagnostics',
   'ies.task.diagnostic_location': 'Location',
   'ies.task.fix_hint': 'Fix suggestion',
+  'ies.diag.raw': 'Diagnostic: {message}',
   'ies.task.outcome_note': 'Business note',
   'ies.task.select_task_hint': 'Select a task on the left to view details',
   'ies.task.cancel_failed': 'Cancel failed: {reason}',

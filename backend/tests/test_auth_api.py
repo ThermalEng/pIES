@@ -61,9 +61,17 @@ def client(db_session: Session) -> Iterator[TestClient]:
         yield test_client
 
 
-def seed_admin(db: Session) -> identity.User:
-    """创建内置管理员(首登强制改密, 与 seed_admin 语义一致)。"""
-    return identity.create_user(db, "admin", ADMIN_PASSWORD, role="admin", display_name="管理员")
+def seed_admin(db: Session, force_change: bool = True) -> identity.User:
+    """创建内置管理员(默认首登强制改密, 与 seed_admin 语义一致)。
+
+    参数:
+        force_change: 需要管理员执行业务/管理操作的测试传 False(等价于
+            已改密后的正式管理员状态, 避免强制改密门禁(C-02)阻断管理端点)。
+    """
+    return identity.create_user(
+        db, "admin", ADMIN_PASSWORD, role="admin", display_name="管理员",
+        force_password_change=force_change,
+    )
 
 
 def seed_engineer(db: Session, username: str = "alice", password: str = USER_PASSWORD) -> identity.User:
@@ -211,8 +219,8 @@ def test_change_password_flow(client: TestClient, db_session: Session) -> None:
 
 
 def test_window_takeover_and_confirm(client: TestClient, db_session: Session) -> None:
-    """接管: 新登录使旧窗口失效(pending); 确认接管后旧会话 revoked, 新凭证可用。"""
-    seed_admin(db_session)
+    """接管: 新登录使旧窗口撤销, 新窗口 pending(确认前无业务权限); 确认后转 active。"""
+    seed_admin(db_session, force_change=False)
     r1 = login(client, "admin", ADMIN_PASSWORD, device="window-A")
     token_a = r1.json()["token"]
     assert r1.json()["needs_takeover_confirm"] is False
@@ -235,16 +243,18 @@ def test_window_takeover_and_confirm(client: TestClient, db_session: Session) ->
     assert client.post("/api/auth/refresh", headers=bearer(token_b)).status_code == 401
     assert client.post("/api/auth/refresh", headers=bearer(token_c)).status_code == 200
 
-    # 数据库状态: A revoked → B revoked → C active, 且 replaced_by 指向后继会话
+    # 数据库状态: A revoked → B revoked → C active, 且 replaced_by 指向后继
+    # (A 被待接管会话 B 取代, B 被确认后的活动会话 C 取代, 接管追溯链)
     sessions = list(db_session.execute(select(WindowSession).order_by(WindowSession.id)).scalars())
     assert [s.status for s in sessions] == ["revoked", "revoked", "active"]
-    assert sessions[0].replaced_by_session_id == sessions[2].id
+    assert sessions[0].replaced_by_session_id == sessions[1].id
     assert sessions[1].replaced_by_session_id == sessions[2].id
 
 
 def test_takeover_pending_session_revoked_on_next_login(client: TestClient, db_session: Session) -> None:
-    """连续接管: 第三次登录时, 更早的 pending 会话被撤销(满足每用户至多一条 pending)。"""
-    seed_admin(db_session)
+    """连续接管(H-01): 接管未确认前再次登录, 更早的 pending 会话被撤销,
+    新会话仍为 takeover_pending(每用户至多一条 pending, 无 active 被绕过)。"""
+    seed_admin(db_session, force_change=False)
     r1 = login(client, "admin", ADMIN_PASSWORD)
     assert r1.status_code == 200
     r2 = login(client, "admin", ADMIN_PASSWORD)
@@ -254,9 +264,10 @@ def test_takeover_pending_session_revoked_on_next_login(client: TestClient, db_s
     assert r3.json()["needs_takeover_confirm"] is True
     sessions = list(db_session.execute(select(WindowSession).order_by(WindowSession.id)).scalars())
     statuses = [s.status for s in sessions]
-    # 第一次登录的会话最终为 revoked, 当前会话 active, 至多一条 pending
-    assert statuses.count("active") == 1
-    assert statuses.count("takeover_pending") <= 1
+    # 三次登录: 前两次会话均被撤销, 当前会话为 takeover_pending(等待确认)
+    assert statuses == ["revoked", "revoked", "takeover_pending"]
+    assert statuses.count("active") == 0
+    assert statuses.count("takeover_pending") == 1
     assert statuses[0] == "revoked"
 
 
@@ -283,7 +294,7 @@ def test_logout_revokes_session(client: TestClient, db_session: Session) -> None
 
 def test_refresh_extends_session(client: TestClient, db_session: Session) -> None:
     """会话续期: 返回新过期时刻且原会话仍可用。"""
-    seed_admin(db_session)
+    seed_admin(db_session, force_change=False)
     r = login(client, "admin", ADMIN_PASSWORD)
     token = r.json()["token"]
     resp = client.post("/api/auth/refresh", headers=bearer(token))
@@ -323,7 +334,7 @@ def test_missing_or_invalid_token_rejected(client: TestClient, db_session: Sessi
 
 def test_admin_reset_password_invalidates_sessions(client: TestClient, db_session: Session) -> None:
     """管理员重置密码: 目标用户全部会话失效, 临时密码首登强制改密。"""
-    seed_admin(db_session)
+    seed_admin(db_session, force_change=False)
     alice = seed_engineer(db_session)
     r = login(client, "alice", USER_PASSWORD)
     token = r.json()["token"]
@@ -353,7 +364,7 @@ def test_admin_reset_password_invalidates_sessions(client: TestClient, db_sessio
 
 def test_admin_deactivate_reactivate(client: TestClient, db_session: Session) -> None:
     """停用: 会话立即失效且登录被拒; 重新启用后恢复登录。"""
-    seed_admin(db_session)
+    seed_admin(db_session, force_change=False)
     alice = seed_engineer(db_session)
     r = login(client, "alice", USER_PASSWORD)
     headers = bearer(r.json()["token"])
@@ -376,7 +387,7 @@ def test_admin_deactivate_reactivate(client: TestClient, db_session: Session) ->
 
 def test_admin_cannot_deactivate_self(client: TestClient, db_session: Session) -> None:
     """管理员不能停用自己的账号(避免管理员自锁)。"""
-    seed_admin(db_session)
+    seed_admin(db_session, force_change=False)
     r = login(client, "admin", ADMIN_PASSWORD)
     admin_headers = bearer(r.json()["token"])
     admin = db_session.execute(select(identity.User).where(identity.User.username == "admin")).scalar_one()
@@ -386,7 +397,7 @@ def test_admin_cannot_deactivate_self(client: TestClient, db_session: Session) -
 
 def test_admin_users_list_and_permission(client: TestClient, db_session: Session) -> None:
     """用户列表: 管理员可见全部; 普通用户访问被拒(403)。"""
-    seed_admin(db_session)
+    seed_admin(db_session, force_change=False)
     seed_engineer(db_session)
     r = login(client, "admin", ADMIN_PASSWORD)
     resp = client.get("/api/auth/users", headers=bearer(r.json()["token"]))
@@ -410,7 +421,7 @@ def test_admin_users_list_and_permission(client: TestClient, db_session: Session
 
 def test_register_toggle(client: TestClient, db_session: Session) -> None:
     """注册开关: 默认关闭(403); 管理员开启后只能注册工程师; 重名冲突 409。"""
-    seed_admin(db_session)
+    seed_admin(db_session, force_change=False)
     # 默认关闭
     resp = client.post("/api/auth/register", json={"username": "bob", "password": "Bob12345"})
     assert resp.status_code == 403
@@ -469,8 +480,12 @@ def test_service_expire_sessions(client: TestClient, db_session: Session) -> Non
 
 
 def test_service_revoke_other_sessions(client: TestClient, db_session: Session) -> None:
-    """revoke_other_sessions: 撤销指定会话以外的全部活动/待接管会话。"""
-    seed_admin(db_session)
+    """revoke_other_sessions: 撤销指定会话以外的全部活动/待接管会话。
+
+    单活动窗口语义(H-01)下每用户至多一条 active/pending: 第二次登录时旧
+    active 已被撤销, 因此通常无可撤销的"其他"会话; 保留会话确认接管后可用。
+    """
+    seed_admin(db_session, force_change=False)
     r1 = login(client, "admin", ADMIN_PASSWORD)
     token_a = r1.json()["token"]
     r2 = login(client, "admin", ADMIN_PASSWORD)
@@ -479,9 +494,13 @@ def test_service_revoke_other_sessions(client: TestClient, db_session: Session) 
     keep = db_session.execute(
         select(WindowSession).where(WindowSession.session_token_hash == identity.token_hash(token_b))
     ).scalar_one()
-    assert identity.revoke_other_sessions(db_session, user, keep_session_id=keep.id) == 1
-    # 保留的会话仍可用, 被撤销的会话不可用
-    assert client.post("/api/auth/refresh", headers=bearer(token_b)).status_code == 200
+    assert identity.revoke_other_sessions(db_session, user, keep_session_id=keep.id) == 0
+    # 保留的会话仍为待接管(不因 revoke_other_sessions 变化): 确认接管后可用
+    r3 = client.post("/api/auth/confirm-takeover", headers=bearer(token_b))
+    assert r3.status_code == 200, r3.text
+    token_c = r3.json()["token"]
+    assert client.post("/api/auth/refresh", headers=bearer(token_c)).status_code == 200
+    # 被接管撤销的旧会话不可用
     assert client.post("/api/auth/refresh", headers=bearer(token_a)).status_code == 401
 
 
@@ -492,7 +511,7 @@ def test_service_revoke_other_sessions(client: TestClient, db_session: Session) 
 
 def test_auth_events_recorded(client: TestClient, db_session: Session) -> None:
     """登录成功/失败/登出/改密/接管/重置/停用均写入 auth_events 审计。"""
-    seed_admin(db_session)
+    seed_admin(db_session, force_change=False)
     alice = seed_engineer(db_session)
     login(client, "admin", ADMIN_PASSWORD, device="audit-window")
     login(client, "admin", "Wrong12345")
@@ -510,7 +529,11 @@ def test_auth_events_recorded(client: TestClient, db_session: Session) -> None:
     client.post("/api/auth/logout", headers=bearer(token_b))
 
     r2 = login(client, "admin", ADMIN_PASSWORD)
-    admin_headers = bearer(r2.json()["token"])
+    admin_token = r2.json()["token"]
+    # 第二次登录的新窗口为待接管(H-01), 确认接管后取得正式凭证再执行管理操作
+    r2c = client.post("/api/auth/confirm-takeover", headers=bearer(admin_token))
+    assert r2c.status_code == 200, r2c.text
+    admin_headers = bearer(r2c.json()["token"])
     client.post(f"/api/auth/users/{alice.id}/deactivate", headers=admin_headers)
 
     types = [e.event_type for e in db_session.execute(select(AuthEvent)).scalars()]

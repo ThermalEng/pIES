@@ -1,7 +1,7 @@
 """项目 API 路由(U02 权限 / U03 项目写入单元, prefix /api/projects)。
 
-认证说明: 正式会话认证由 U01 身份单元提供(iesplan.api.auth.get_current_user,
-窗口会话凭证); 本阶段以 X-User-Id 请求头模拟认证主体, 集成时替换依赖即可。
+认证说明: 统一使用 U01 身份单元提供的窗口会话认证
+(iesplan.api.auth.CurrentUser, 校验窗口凭证; 未认证 401, 权限不足 403)。
 
 路由清单:
 - POST   /api/projects                         创建项目(创建者=所有者)
@@ -24,14 +24,14 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from iesplan.api.auth import CurrentUser
 from iesplan.core.diagnostics import SEVERITY_BLOCKING
 from iesplan.core.errors import AppError
 from iesplan.db import get_db
-from iesplan.models.identity import User
 from iesplan.services import package as package_service
 from iesplan.services import project as project_service
 
@@ -45,24 +45,6 @@ def _http_error(status: int, code: str, message_key: str, params: dict[str, Any]
     )
     err.http_status = status
     return err
-
-
-def get_current_user(request: Request, db: Annotated[Session, Depends(get_db)]) -> User:
-    """当前认证主体(阶段实现: 从 X-User-Id 请求头读取; 正式会话认证由 U01 提供)。
-
-    集成时以 iesplan.api.auth 的窗口会话凭证校验依赖替换本函数。
-    """
-    raw = request.headers.get("X-User-Id")
-    if not raw:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "missing_identity"})
-    try:
-        user_id = int(raw)
-    except ValueError as exc:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "bad_identity"}) from exc
-    user = db.get(User, user_id)
-    if user is None:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "unknown_user"})
-    return user
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +127,7 @@ class ApplyResultRequest(BaseModel):
 def create_project_endpoint(
     payload: ProjectCreateRequest,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """创建项目: 创建者即所有者, 并创建初始草稿(revision=1)。"""
     project = project_service.create_project(
@@ -162,7 +144,7 @@ def create_project_endpoint(
 @router.get("", summary="我可见的项目列表")
 def list_projects_endpoint(
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """我可见的项目列表(所有者 + 查看者, 不含已删除)。"""
     return {"projects": project_service.list_visible_projects(db, user)}
@@ -172,7 +154,7 @@ def list_projects_endpoint(
 def get_project_endpoint(
     project_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """项目视图: 项目 + 草稿摘要(含内容) + 版本列表。"""
     return project_service.get_project_view(db, user, project_id)
@@ -183,7 +165,7 @@ def update_draft_endpoint(
     project_id: int,
     payload: DraftUpdateRequest,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """应用草稿语义命令(乐观锁: 预期修订不符 → 409; 整批重试幂等)。"""
     result = project_service.update_draft(
@@ -198,7 +180,7 @@ def create_version_endpoint(
     project_id: int,
     payload: VersionCreateRequest,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """从当前草稿创建不可变项目版本。"""
     version = project_service.create_version(
@@ -212,7 +194,7 @@ def create_version_endpoint(
 def list_versions_endpoint(
     project_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """版本列表(新版本在前)。"""
     project_service.ensure_access(db, user, project_id, "view")
@@ -225,7 +207,7 @@ def get_version_endpoint(
     project_id: int,
     version_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """版本详情。"""
     project_service.ensure_access(db, user, project_id, "view")
@@ -238,7 +220,7 @@ def restore_version_endpoint(
     project_id: int,
     version_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     payload: RestoreRequest | None = None,
 ) -> dict:
     """恢复历史版本: 创建新版本 + 新草稿, 不倒写历史(REQ-PROJ-002)。"""
@@ -256,7 +238,7 @@ def apply_result_endpoint(
     project_id: int,
     payload: ApplyResultRequest,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """应用选定结果: 参数差异补丁应用到新草稿并创建新版本, 来源版本不变。"""
     result = project_service.apply_result(
@@ -274,7 +256,7 @@ def apply_result_endpoint(
 def archive_project_endpoint(
     project_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """归档项目(归档后只读, 不能编辑/提交计算)。"""
     project = project_service.archive_project(db, user, project_id)
@@ -289,7 +271,7 @@ def archive_project_endpoint(
 def unarchive_project_endpoint(
     project_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """撤销归档(恢复为 active)。"""
     project = project_service.unarchive_project(db, user, project_id)
@@ -305,7 +287,7 @@ def delete_project_endpoint(
     project_id: int,
     payload: DeleteConfirmRequest,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> None:
     """删除项目(RPD 5.3): 必须携带 {"confirm": true} 显式确认。"""
     project_service.delete_project(db, user, project_id, confirm=payload.confirm)
@@ -316,7 +298,7 @@ def delete_project_endpoint(
 def duplicate_project_endpoint(
     project_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     payload: DuplicateRequest | None = None,
 ) -> dict:
     """复制项目为独立候选方案(复制者成为新项目所有者)。"""
@@ -332,7 +314,7 @@ def transfer_ownership_endpoint(
     project_id: int,
     payload: TransferRequest,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """转移所有权: 原所有者默认成为查看者(RPD 3.2)。"""
     project = project_service.transfer_ownership(db, user, project_id, payload.target_user_id)
@@ -348,7 +330,7 @@ def viewers_endpoint(
     project_id: int,
     payload: ViewerRequest,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """添加/移除查看者(仅所有者), 返回当前有效成员清单。"""
     if payload.action == "add":
@@ -363,7 +345,7 @@ def viewers_endpoint(
 def list_viewers_endpoint(
     project_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """当前有效成员清单(所有者/查看者; 需项目 view 权限)。"""
     project_service.ensure_access(db, user, project_id, "view")
@@ -378,17 +360,26 @@ def list_viewers_endpoint(
 @router.post("/import", status_code=201, summary="导入项目包(创建导入提案)")
 def import_package_endpoint(
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
     file: Annotated[UploadFile, File(description="项目包 zip")],
     idempotency_key: str | None = None,
 ) -> dict:
     """上传项目包并创建导入提案(校验 → 暂存对象 → 拟创建项目快照)。
 
+    大小门禁(H-07): 以 (上限+1) 字节封顶流式读取, 超限立即拒绝
+    (压缩包字节上限 MAX_PACKAGE_BYTES, 与 Nginx client_max_body_size 对齐),
+    完整解压前的条目/单文件/总解压大小预检在 services/package._parse_package。
     相同源文件同一提议人幂等返回既有提案; 校验失败 400 + 校验报告。
     """
-    data = file.file.read()
+    # 封顶流式读取: 最多读 (上限+1) 字节, 超出即拒绝(内存占用有界)
+    data = file.file.read(package_service.MAX_PACKAGE_BYTES + 1)
     if not data:
-        raise _http_error(400, "API-REQ-001", "ies.error.empty_file", filename=file.filename or "")
+        raise _http_error(400, "API-REQ-001", "ies.error.empty_file", {"filename": file.filename or ""})
+    if len(data) > package_service.MAX_PACKAGE_BYTES:
+        raise _http_error(
+            413, "PKG-SIZE-001", "ies.diag.pkg.too_large",
+            {"reason": "package_too_large", "max_bytes": package_service.MAX_PACKAGE_BYTES},
+        )
     proposal = package_service.import_proposal(
         db, user, data, idempotency_key=idempotency_key
     )
@@ -400,7 +391,7 @@ def import_package_endpoint(
 def confirm_import_endpoint(
     proposal_id: int,
     db: Annotated[Session, Depends(get_db)],
-    user: Annotated[User, Depends(get_current_user)],
+    user: CurrentUser,
 ) -> dict:
     """确认导入: 创建新项目身份(导入者即所有者), 历史结果作为证据来源保留。"""
     project = package_service.confirm_import(db, user, proposal_id)

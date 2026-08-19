@@ -205,6 +205,8 @@ export const messagesZh: Record<string, string> = {
   'ies.project.delete_ok': '项目已删除',
   'ies.project.viewer_added': '已添加查看者 {username}',
   'ies.project.viewer_removed': '已移除查看者 {username}',
+  'ies.project.transfer_unknown_user': '无法解析用户名 {username},请从列表选择',
+  'ies.project.viewer_not_found': '未找到用户 {username}',
 
   // -------------------------------------------------------------------------
   // 系统建模
@@ -424,6 +426,7 @@ export const messagesZh: Record<string, string> = {
   'ies.task.no_diagnostics': '无诊断信息',
   'ies.task.diagnostic_location': '定位',
   'ies.task.fix_hint': '修复建议',
+  'ies.diag.raw': '诊断: {message}',
   'ies.task.outcome_note': '业务说明',
   'ies.task.select_task_hint': '在左侧选择一个任务查看详情',
   'ies.task.cancel_failed': '取消失败:{reason}',

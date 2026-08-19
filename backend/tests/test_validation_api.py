@@ -23,6 +23,7 @@ from iesplan.db import Base, get_db
 from iesplan.main import create_app
 from iesplan.models.identity import User
 from iesplan.services import config as config_service
+from iesplan.services import identity
 from iesplan.services import project as project_service
 from iesplan.services import validation as validation_service
 
@@ -30,8 +31,24 @@ from iesplan.services import validation as validation_service
 GRID = "ies.device.grid_connection"
 ELECTRIC_LOAD = "ies.device.electric_load"
 
-#: 测试客户端请求头(X-User-Id = 1 对应种子管理员)
-_HEADERS = {"X-User-Id": "1"}
+#: 种子管理员密码(经 /api/auth/login 真实登录)
+ADMIN_PASSWORD = "Admin12345"
+
+
+def _headers(client: TestClient) -> dict[str, str]:
+    """认证头: 以种子管理员窗口会话登录(同一 client 内缓存)。"""
+    try:
+        token: str | None = client._auth_token  # type: ignore[attr-defined]
+    except AttributeError:
+        token = None
+    if token is None:
+        resp = client.post(
+            "/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD}
+        )
+        assert resp.status_code == 200, resp.text
+        token = resp.json()["token"]
+        client._auth_token = token  # type: ignore[attr-defined]
+    return {"Authorization": f"Bearer {token}"}
 
 #: 与默认配置一致的财务基准关键假设(预检不产生 VALID-FIN-002 警告)
 DEFAULT_ASSUMPTIONS: dict = {
@@ -65,9 +82,10 @@ def factory(engine: sa.Engine) -> Iterator[sessionmaker]:
     """会话工厂(expire_on_commit=False) + 种子管理员(首行 id=1)。"""
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     with factory() as session:
-        admin = User(username="admin", display_name="管理员")
-        session.add(admin)
-        session.commit()
+        identity.create_user(
+            session, "admin", ADMIN_PASSWORD, role="admin",
+            force_password_change=False, display_name="管理员",
+        )
     yield factory
 
 
@@ -133,7 +151,7 @@ def _bind_version(client: TestClient, project_id: int, version_id: int, cmd_id: 
                 }
             ],
         },
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -141,7 +159,7 @@ def _bind_version(client: TestClient, project_id: int, version_id: int, cmd_id: 
 
 def _run_report(client: TestClient, project_id: int) -> dict:
     """执行预检并返回报告字典(断言 200)。"""
-    resp = client.post(f"/api/projects/{project_id}/validation/run", headers=_HEADERS)
+    resp = client.post(f"/api/projects/{project_id}/validation/run", headers=_headers(client))
     assert resp.status_code == 200, resp.text
     return resp.json()["report"]
 
@@ -188,7 +206,7 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     grid = client.post(
         f"/api/projects/{pid}/model/devices",
         json={"device_type": GRID, "name": "电网连接"},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert grid.status_code == 201, grid.text
     load = client.post(
@@ -198,7 +216,7 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
             "name": "电负荷",
             "params": {"load_profile": "ref:load1"},
         },
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert load.status_code == 201, load.text
     grid_out = next(p for p in grid.json()["ports"] if p["name"] == "electric_out")
@@ -206,19 +224,19 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     conn = client.post(
         f"/api/projects/{pid}/model/connections",
         json={"from_port_id": grid_out["id"], "to_port_id": load_in["id"]},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert conn.status_code == 201, conn.text
     # 2) 数据: 内置样例(1h, 上海) + 绑定到草稿(权威绑定来源为 dataset_bindings)
     resp = client.post(
-        f"/api/projects/{pid}/datasets", json={"name": "样例数据"}, headers=_HEADERS
+        f"/api/projects/{pid}/datasets", json={"name": "样例数据"}, headers=_headers(client)
     )
     assert resp.status_code == 201, resp.text
     ds_id = resp.json()["dataset"]["id"]
     resp = client.post(
         f"/api/projects/{pid}/datasets/{ds_id}/sample",
         params={"resolution": "1h"},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 201, resp.text
     version_id = resp.json()["dataset_version"]["id"]
@@ -232,7 +250,7 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     resp = client.post(
         f"/api/projects/{pid}/validation/baseline-confirm",
         json={"assumptions": DEFAULT_ASSUMPTIONS},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -262,7 +280,7 @@ def test_baseline_confirm_state_change(client: TestClient, factory: sessionmaker
     resp = client.post(
         f"/api/projects/{pid}/validation/baseline-confirm",
         json={"assumptions": DEFAULT_ASSUMPTIONS},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 200, resp.text
     report = _run_report(client, pid)
@@ -281,7 +299,7 @@ def test_baseline_stale_after_config_change(
     resp = client.post(
         f"/api/projects/{pid}/validation/baseline-confirm",
         json={"assumptions": {"discount_rate": 0.09}},  # 与默认 0.08 不一致
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 200
     report = _run_report(client, pid)
@@ -296,14 +314,14 @@ def test_get_latest_validation_report(
 ) -> None:
     """GET /validation 返回最近一次持久化的报告; 无记录时现场执行(stored=False)。"""
     pid = _create_project(factory)
-    resp = client.get(f"/api/projects/{pid}/validation", headers=_HEADERS)
+    resp = client.get(f"/api/projects/{pid}/validation", headers=_headers(client))
     assert resp.status_code == 200
     body = resp.json()
     assert body["stored"] is False
     assert body["report"]["blocks_submit"] is True
     # 执行一次预检并持久化
     _run_report(client, pid)
-    resp = client.get(f"/api/projects/{pid}/validation", headers=_HEADERS)
+    resp = client.get(f"/api/projects/{pid}/validation", headers=_headers(client))
     assert resp.status_code == 200
     body = resp.json()
     assert body["stored"] is True
@@ -317,13 +335,13 @@ def test_get_latest_validation_report(
 
 def _create_sample_version(client: TestClient, pid: int, name: str = "样例数据") -> int:
     """创建项目数据集并生成 1h 样例版本, 返回版本 id。"""
-    resp = client.post(f"/api/projects/{pid}/datasets", json={"name": name}, headers=_HEADERS)
+    resp = client.post(f"/api/projects/{pid}/datasets", json={"name": name}, headers=_headers(client))
     assert resp.status_code == 201, resp.text
     ds_id = resp.json()["dataset"]["id"]
     resp = client.post(
         f"/api/projects/{pid}/datasets/{ds_id}/sample",
         params={"resolution": "1h"},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["dataset_version"]["id"]
@@ -386,7 +404,7 @@ def test_blocking_errors_not_downgraded_by_warnings(
     resp = client.post(
         f"/api/projects/{pid}/model/devices",
         json={"device_type": GRID, "name": "孤立的电网连接"},
-        headers=_HEADERS,
+        headers=_headers(client),
     )
     assert resp.status_code == 201
     report = _run_report(client, pid)
@@ -443,5 +461,5 @@ def test_hash_assumptions_canonical_numbers() -> None:
 
 def test_missing_project_404(client: TestClient) -> None:
     """项目不存在应返回 404(避免泄露存在性细节, 与 U03 行为一致)。"""
-    resp = client.post("/api/projects/999999/validation/run", headers=_HEADERS)
+    resp = client.post("/api/projects/999999/validation/run", headers=_headers(client))
     assert resp.status_code == 404

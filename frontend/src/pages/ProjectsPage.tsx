@@ -268,9 +268,15 @@ export default function ProjectsPage() {
       setTransferError(t('ies.project.username_required'))
       return
     }
+    // 后端按用户 id 转移(target_user_id): 从管理员用户清单解析用户名 → id
+    const user = transferUsers.find((u) => u.username === username)
+    if (!user) {
+      setTransferError(t('ies.project.transfer_unknown_user', { username }))
+      return
+    }
     setTransferring(true)
     try {
-      await api.projects.transfer(target.id, { target_username: username })
+      await api.projects.transfer(target.id, { target_user_id: user.id })
       setTransferTarget(null)
       setNotice({ kind: 'success', text: t('ies.project.transfer_ok') })
       await loadProjects(false, true)

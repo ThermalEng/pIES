@@ -34,6 +34,7 @@ os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
 os.environ.setdefault("IESPLAN_QUEUE", "memory")
 
 import pytest  # noqa: E402
+from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from openpyxl import load_workbook  # noqa: E402
 from sqlalchemy import create_engine, select  # noqa: E402
@@ -52,7 +53,7 @@ from iesplan.main import create_app  # noqa: E402
 from iesplan.models.audit import AuditLog, ImportProposal, ObjectRef  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
-from iesplan.models.identity import Role, User, UserRole  # noqa: E402
+from iesplan.models.identity import User  # noqa: E402
 from iesplan.models.project import (  # noqa: E402
     AdminMaintenanceAction,
     OwnershipTransfer,
@@ -124,45 +125,30 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
 # ---------------------------------------------------------------------------
 
 
-def _h(user_id: int) -> dict[str, str]:
-    """认证头(阶段实现: X-User-Id 模拟认证主体)。"""
-    return {"X-User-Id": str(user_id)}
+def _h(client: TestClient, user) -> dict[str, str]:
+    """认证头: 以真实窗口会话登录(同一 client 内缓存, 避免多窗口接管)。"""
+    return login_headers(client, user)
 
 
-def _make_user(db: Session, username: str) -> User:
-    """直接创建测试用户。"""
-    user = User(username=username, display_name=username, locale="zh-CN")
-    db.add(user)
-    db.commit()
-    return user
 
 
-def _make_admin(db: Session, username: str) -> User:
-    """创建带全局 admin 角色的用户。"""
-    user = User(username=username, display_name=username)
-    db.add(user)
-    db.flush()
-    role = Role(code="admin", name="管理员", description="测试管理员", is_system=True)
-    db.add(role)
-    db.flush()
-    db.add(UserRole(user_id=user.id, role_id=role.id, granted_by=user.id))
-    db.commit()
-    return user
 
 
-def _create_project(client: TestClient, user_id: int, name: str = "导出测试项目") -> int:
+
+
+def _create_project(client: TestClient, user, name: str = "导出测试项目") -> int:
     """创建项目并返回项目 id。"""
-    resp = client.post("/api/projects", json={"name": name}, headers=_h(user_id))
+    resp = client.post("/api/projects", json={"name": name}, headers=_h(client, user))
     assert resp.status_code == 201, resp.text
     return resp.json()["project"]["id"]
 
 
-def _create_version(client: TestClient, user_id: int, project_id: int) -> int:
+def _create_version(client: TestClient, user, project_id: int) -> int:
     """创建项目版本并返回版本 id。"""
     resp = client.post(
         f"/api/projects/{project_id}/versions",
         json={"name": "基准版本 v1", "reason": "manual_save"},
-        headers=_h(user_id),
+        headers=_h(client, user),
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["version"]["id"]
@@ -270,9 +256,11 @@ def _seed_evidence(
     return package.id, assessment.id
 
 
-def _download(client: TestClient, url: str, token: str) -> tuple[int, bytes, str]:
-    """带 token 下载, 返回 (status, content, content_type)。"""
-    resp = client.get(url, params={"token": token})
+def _download(
+    client: TestClient, url: str, token: str, headers: dict | None = None
+) -> tuple[int, bytes, str]:
+    """带 token 下载(下载端点要求登录, 需传授权头), 返回 (status, content, content_type)。"""
+    resp = client.get(url, params={"token": token}, headers=headers)
     return resp.status_code, resp.content, resp.headers.get("content-type", "")
 
 
@@ -312,21 +300,21 @@ def test_export_package_owner_only_with_manifest_and_checksum(
     client: TestClient, db: Session,
 ) -> None:
     """仅所有者可导出项目包; 包含版本化清单/对象清单/逐对象内容校验。"""
-    owner = _make_user(db, "owner")
-    viewer = _make_user(db, "viewer")
-    stranger = _make_user(db, "stranger")
-    pid = _create_project(client, owner.id)
-    vid = _create_version(client, owner.id, pid)
+    owner = make_user(db, "owner")
+    viewer = make_user(db, "viewer")
+    stranger = make_user(db, "stranger")
+    pid = _create_project(client, owner)
+    vid = _create_version(client, owner, pid)
     dvid = _seed_dataset_version(db, pid, tag="pkg")
     ep_id, a_id = _seed_evidence(db, pid, vid, dvid, owner.id)
 
     # 查看者 / 非成员 → 403
-    for user_id in (viewer.id, stranger.id):
-        resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(user_id))
+    for user in (viewer, stranger):
+        resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, user))
         assert resp.status_code == 403, resp.text
 
     # 所有者导出 → 下载授权 + 清单
-    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(owner.id))
+    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["token"]
@@ -334,7 +322,8 @@ def test_export_package_owner_only_with_manifest_and_checksum(
     assert body["file_name"].endswith(".zip")
 
     status, content, ctype = _download(
-        client, f"/api/projects/{pid}/exports/package/download", body["token"]
+        client, f"/api/projects/{pid}/exports/package/download", body["token"],
+        headers=_h(client, owner),
     )
     assert status == 200
     assert "zip" in ctype
@@ -369,28 +358,28 @@ def test_viewer_can_export_excel_bilingual_and_fixed_reference(
     client: TestClient, db: Session,
 ) -> None:
     """查看者可导出 Excel(标题中英双语, 固定引用证据包与评估, 不重新求解)。"""
-    owner = _make_user(db, "owner")
-    viewer = _make_user(db, "viewer")
-    pid = _create_project(client, owner.id)
-    vid = _create_version(client, owner.id, pid)
+    owner = make_user(db, "owner")
+    viewer = make_user(db, "viewer")
+    pid = _create_project(client, owner)
+    vid = _create_version(client, owner, pid)
     dvid = _seed_dataset_version(db, pid, tag="xls")
     ep_id, a_id = _seed_evidence(db, pid, vid, dvid, owner.id)
     resp = client.put(
         f"/api/projects/{pid}/viewers",
-        json={"user_id": viewer.id, "action": "add"}, headers=_h(owner.id),
+        json={"user_id": viewer.id, "action": "add"}, headers=_h(client, owner),
     )
     assert resp.status_code == 200, resp.text
 
     resp = client.post(
         f"/api/projects/{pid}/exports/excel",
         json={"evidence_package_id": ep_id, "assessment_id": a_id, "lang": "zh"},
-        headers=_h(viewer.id),
+        headers=_h(client, viewer),
     )
     assert resp.status_code == 200, resp.text
     token = resp.json()["token"]
 
     status, content, ctype = _download(
-        client, f"/api/projects/{pid}/exports/excel/download", token
+        client, f"/api/projects/{pid}/exports/excel/download", token, headers=_h(client, viewer)
     )
     assert status == 200
     assert "spreadsheetml" in ctype
@@ -424,16 +413,18 @@ def test_viewer_cannot_export_package_and_bad_identity(
     client: TestClient, db: Session,
 ) -> None:
     """查看者可导 Excel 但不可导项目包; 缺认证头 401。"""
-    owner = _make_user(db, "owner")
-    viewer = _make_user(db, "viewer")
-    pid = _create_project(client, owner.id)
+    owner = make_user(db, "owner")
+    viewer = make_user(db, "viewer")
+    pid = _create_project(client, owner)
     resp = client.put(
         f"/api/projects/{pid}/viewers",
-        json={"user_id": viewer.id, "action": "add"}, headers=_h(owner.id),
+        json={"user_id": viewer.id, "action": "add"}, headers=_h(client, owner),
     )
     assert resp.status_code == 200
-    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(viewer.id))
+    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, viewer))
     assert resp.status_code == 403, resp.text
+    # 匿名(清空 cookie jar, 避免携带先前登录会话 Cookie)→ 401
+    client.cookies.clear()
     resp = client.post(f"/api/projects/{pid}/exports/package")
     assert resp.status_code == 401, resp.text
 
@@ -447,17 +438,18 @@ def test_import_creates_new_identity_owner_and_evidence_source(
     client: TestClient, db: Session,
 ) -> None:
     """导入 → 新项目身份(不覆盖)/所有者=导入者/历史结果作为证据来源(不伪造任务)。"""
-    owner = _make_user(db, "owner")
-    importer = _make_user(db, "importer")
-    pid = _create_project(client, owner.id)
-    vid = _create_version(client, owner.id, pid)
+    owner = make_user(db, "owner")
+    importer = make_user(db, "importer")
+    pid = _create_project(client, owner)
+    vid = _create_version(client, owner, pid)
     dvid = _seed_dataset_version(db, pid, tag="imp")
     ep_id, a_id = _seed_evidence(db, pid, vid, dvid, owner.id)
 
-    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(owner.id))
+    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
     zip_bytes = client.get(
         f"/api/projects/{pid}/exports/package/download",
         params={"token": resp.json()["token"]},
+        headers=_h(client, owner),
     ).content
     original_evidence_count = len(
         db.execute(select(ObjectRef).where(ObjectRef.ref_type == "imported_evidence")).scalars().all()
@@ -512,20 +504,21 @@ def test_import_creates_new_identity_owner_and_evidence_source(
     assert same.id == new_project.id
 
     # 非提案人确认 → 403
-    other = _make_user(db, "other")
+    other = make_user(db, "other")
     with pytest.raises(ForbiddenError):
         package_service.confirm_import(db, other, proposal.id)
 
 
 def test_import_rejects_corrupt_and_non_zip(client: TestClient, db: Session) -> None:
     """导入校验失败拒绝: 篡改内容(完整性)与非 zip(格式)。"""
-    owner = _make_user(db, "owner")
-    importer = _make_user(db, "importer")
-    pid = _create_project(client, owner.id)
-    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(owner.id))
+    owner = make_user(db, "owner")
+    importer = make_user(db, "importer")
+    pid = _create_project(client, owner)
+    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
     zip_bytes = client.get(
         f"/api/projects/{pid}/exports/package/download",
         params={"token": resp.json()["token"]},
+        headers=_h(client, owner),
     ).content
 
     # 非 zip → 格式校验失败
@@ -546,13 +539,14 @@ def test_import_rejects_corrupt_and_non_zip(client: TestClient, db: Session) -> 
 
 def test_import_proposal_rejects_forbidden_sections(client: TestClient, db: Session) -> None:
     """包含账号/权限/会话等禁止内容的包拒绝导入(RPD 6)。"""
-    owner = _make_user(db, "owner")
-    importer = _make_user(db, "importer")
-    pid = _create_project(client, owner.id)
-    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(owner.id))
+    owner = make_user(db, "owner")
+    importer = make_user(db, "importer")
+    pid = _create_project(client, owner)
+    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
     zip_bytes = client.get(
         f"/api/projects/{pid}/exports/package/download",
         params={"token": resp.json()["token"]},
+        headers=_h(client, owner),
     ).content
     # 向清单注入禁止键
     buf = io.BytesIO()
@@ -578,9 +572,9 @@ def test_import_proposal_rejects_forbidden_sections(client: TestClient, db: Sess
 
 def test_download_token_expired_and_tampered(client: TestClient, db: Session) -> None:
     """短期授权过期/伪造拒绝(下载 400)。"""
-    owner = _make_user(db, "owner")
-    pid = _create_project(client, owner.id)
-    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(owner.id))
+    owner = make_user(db, "owner")
+    pid = _create_project(client, owner)
+    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
     object_id = resp.json()["object_id"]
 
     # 过期 token(exp 在过去)→ 服务层拒绝
@@ -588,7 +582,8 @@ def test_download_token_expired_and_tampered(client: TestClient, db: Session) ->
     with pytest.raises(package_service.DownloadTokenError):
         package_service.verify_download_token(expired, expected_kind="package")
     status, _content, _ct = _download(
-        client, f"/api/projects/{pid}/exports/package/download", expired
+        client, f"/api/projects/{pid}/exports/package/download", expired,
+        headers=_h(client, owner),
     )
     assert status == 400
 
@@ -598,17 +593,22 @@ def test_download_token_expired_and_tampered(client: TestClient, db: Session) ->
     with pytest.raises(package_service.DownloadTokenError):
         package_service.verify_download_token(tampered_token, expected_kind="package")
     status, _content, _ct = _download(
-        client, f"/api/projects/{pid}/exports/package/download", tampered_token
+        client, f"/api/projects/{pid}/exports/package/download", tampered_token,
+        headers=_h(client, owner),
     )
     assert status == 400
 
     # 类型不符(excel token 用于包下载)→ 拒绝
-    excel_token = package_service.create_download_token(object_id, "excel")
+    excel_token = package_service.create_download_token(
+        object_id, "excel", project_id=pid, user_id=owner.id
+    )
     with pytest.raises(package_service.DownloadTokenError):
         package_service.verify_download_token(excel_token, expected_kind="package")
 
     # 正常 token 校验通过(5 分钟窗口内)
     info = package_service.verify_download_token(valid, expected_kind="package")
+    assert info["object_id"] == object_id
+    assert info["project_id"] == pid and info["user_id"] == owner.id
     assert info["object_id"] == object_id
 
 
@@ -619,15 +619,15 @@ def test_download_token_expired_and_tampered(client: TestClient, db: Session) ->
 
 def test_admin_health_storage_and_audit(client: TestClient, db: Session) -> None:
     """管理员可读健康/存储/审计; 非管理员 403。"""
-    admin = _make_admin(db, "admin1")
-    owner = _make_user(db, "owner")
-    pid = _create_project(client, owner.id)
+    admin = make_user(db, "admin1", role="admin")
+    owner = make_user(db, "owner")
+    pid = _create_project(client, owner)
 
     # 非管理员 → 403
-    resp = client.get("/api/admin/health", headers=_h(owner.id))
+    resp = client.get("/api/admin/health", headers=_h(client, owner))
     assert resp.status_code == 403, resp.text
 
-    resp = client.get("/api/admin/health", headers=_h(admin.id))
+    resp = client.get("/api/admin/health", headers=_h(client, admin))
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "ok"
@@ -635,24 +635,24 @@ def test_admin_health_storage_and_audit(client: TestClient, db: Session) -> None
     assert body["readiness"]["db"] is True
     assert "queue" in body and "storage" in body and "metrics" in body
 
-    resp = client.get("/api/admin/storage", headers=_h(admin.id))
+    resp = client.get("/api/admin/storage", headers=_h(client, admin))
     assert resp.status_code == 200
     assert "stats" in resp.json() and "sample_verify" in resp.json()
 
-    resp = client.get("/api/admin/audit", params={"entity_type": "project"}, headers=_h(admin.id))
+    resp = client.get("/api/admin/audit", params={"entity_type": "project"}, headers=_h(client, admin))
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert any(item["action"] == "project.created" and item["entity_id"] == pid for item in items)
 
-    resp = client.get("/api/admin/audit", params={"action": "project.exported"}, headers=_h(admin.id))
+    resp = client.get("/api/admin/audit", params={"action": "project.exported"}, headers=_h(client, admin))
     assert resp.status_code == 200 and resp.json()["items"] == []
 
 
 def test_admin_unlock_task(client: TestClient, db: Session) -> None:
     """管理员解锁卡死任务: running → queued, 租约吊销, 槽释放, 全程审计。"""
-    admin = _make_admin(db, "admin1")
-    owner = _make_user(db, "owner")
-    pid = _create_project(client, owner.id)
+    admin = make_user(db, "admin1", role="admin")
+    owner = make_user(db, "owner")
+    pid = _create_project(client, owner)
     now = datetime.now(UTC)
     task = Task(project_id=pid, type="calc", status="running", requested_by=owner.id)
     db.add(task)
@@ -669,7 +669,7 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
     db.commit()
 
     resp = client.post(
-        "/api/admin/unlock-task", json={"task_id": task.id}, headers=_h(admin.id)
+        "/api/admin/unlock-task", json={"task_id": task.id}, headers=_h(client, admin)
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["unlocked"] is True
@@ -694,22 +694,22 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
     task.status = "completed"
     db.commit()
     resp = client.post(
-        "/api/admin/unlock-task", json={"task_id": task.id}, headers=_h(admin.id)
+        "/api/admin/unlock-task", json={"task_id": task.id}, headers=_h(client, admin)
     )
     assert resp.status_code == 409
 
 
 def test_admin_transfer_project_for_disabled_owner(client: TestClient, db: Session) -> None:
     """停用所有者转移: 管理员受审计维护操作转移所有权, 原所有者变查看者。"""
-    admin = _make_admin(db, "admin1")
-    owner = _make_user(db, "owner")
-    target = _make_user(db, "engineer")
-    pid = _create_project(client, owner.id)
+    admin = make_user(db, "admin1", role="admin")
+    owner = make_user(db, "owner")
+    target = make_user(db, "engineer")
+    pid = _create_project(client, owner)
 
     # 非管理员 → 403
     resp = client.post(
         "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": target.id}, headers=_h(owner.id),
+        json={"project_id": pid, "target_user_id": target.id}, headers=_h(client, owner),
     )
     assert resp.status_code == 403
 
@@ -718,15 +718,25 @@ def test_admin_transfer_project_for_disabled_owner(client: TestClient, db: Sessi
     db.commit()
     resp = client.post(
         "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": target.id}, headers=_h(admin.id),
+        json={"project_id": pid, "target_user_id": target.id}, headers=_h(client, admin),
     )
     assert resp.status_code == 409, resp.text
     target.status = "active"
     db.commit()
 
+    # H-10: 原 owner 仍启用 → 409(须先停用)
     resp = client.post(
         "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": target.id}, headers=_h(admin.id),
+        json={"project_id": pid, "target_user_id": target.id}, headers=_h(client, admin),
+    )
+    assert resp.status_code == 409, resp.text
+
+    # 停用原 owner 后转移 → 200
+    owner.status = "disabled"
+    db.commit()
+    resp = client.post(
+        "/api/admin/transfer-project",
+        json={"project_id": pid, "target_user_id": target.id}, headers=_h(client, admin),
     )
     assert resp.status_code == 200, resp.text
     project = db.get(Project, pid)

@@ -106,9 +106,30 @@ class DownloadTokenError(AppError):
     message_key = "ies.diag.export.token_invalid"
 
 
+class PackageSizeError(AppError):
+    """项目包超限(上传字节/条目数/单条目解压大小/总解压大小, HTTP 413, H-07)。
+
+    在任何解压读取之前完成门禁, 防止 ZIP Bomb 消耗内存与 CPU。
+    """
+
+    code = "PKG-SIZE-001"
+    http_status = 413
+    severity = SEVERITY_ERROR
+    message_key = "ies.diag.pkg.too_large"
+
+
 # ---------------------------------------------------------------------------
-# 下载授权: 短期单对象签名 token(含 object_id + 过期, 过期 5 分钟)
+# 下载授权: 短期单对象签名 token(绑定项目与签发用户 + 过期, 过期 5 分钟)
 # ---------------------------------------------------------------------------
+
+#: 项目包上传字节上限(压缩后; 与 Nginx client_max_body_size 对齐为 2GB, H-07)
+MAX_PACKAGE_BYTES: int = 2 * 1024 * 1024 * 1024
+#: 项目包 zip 最大条目数(含目录; 超限拒绝, 防数十万小文件, H-07)
+MAX_PACKAGE_ENTRIES: int = 5000
+#: 单条目解压后大小上限(512MB, 防单文件巨大膨胀, H-07)
+MAX_PACKAGE_ENTRY_BYTES: int = 512 * 1024 * 1024
+#: 全部条目解压后总大小上限(4GB, 防整体 ZIP Bomb, H-07)
+MAX_PACKAGE_TOTAL_BYTES: int = 4 * 1024 * 1024 * 1024
 
 
 def _token_sign(payload: str) -> str:
@@ -122,17 +143,26 @@ def create_download_token(
     object_id: int,
     kind: str,
     *,
+    project_id: int,
+    user_id: int,
     ttl_seconds: int = DOWNLOAD_TOKEN_TTL_SECONDS,
 ) -> str:
-    """签发短期单对象下载授权 token。
+    """签发短期单对象下载授权 token(C-04: 绑定项目与签发用户)。
 
-    token = base64url(payload) + "." + hmac 签名; payload 含 object_id/kind/exp,
-    缺省 5 分钟过期。授权与项目无关, 仅绑定单对象(下载时按对象读取)。
+    token = base64url(payload) + "." + hmac 签名; payload 含 object_id/kind/
+    project_id/user_id/exp, 缺省 5 分钟过期。下载时必须验证 token 绑定的项目
+    与当前会话用户一致, 防止跨项目对象下载。
     """
     exp = int(datetime.now(UTC).timestamp()) + max(int(ttl_seconds), 1)
     payload = base64.urlsafe_b64encode(
         json.dumps(
-            {"object_id": int(object_id), "kind": str(kind), "exp": exp},
+            {
+                "object_id": int(object_id),
+                "kind": str(kind),
+                "project_id": int(project_id),
+                "user_id": int(user_id),
+                "exp": exp,
+            },
             sort_keys=True,
         ).encode("utf-8")
     ).decode("ascii")
@@ -140,14 +170,15 @@ def create_download_token(
 
 
 def verify_download_token(token: str, *, expected_kind: str | None = None) -> dict[str, Any]:
-    """校验下载授权 token: 格式/签名/过期, 返回 {object_id, kind}。
+    """校验下载授权 token: 格式/签名/过期, 返回 {object_id, kind, project_id, user_id}。
 
+    签名比较使用 hmac.compare_digest(常量时间, 防时序侧信道);
     签名不符/格式非法/已过期一律抛 DownloadTokenError。
     """
     if not isinstance(token, str) or "." not in token:
         raise DownloadTokenError("", params={"reason": "bad_token"})
     payload, sig = token.rsplit(".", 1)
-    if _token_sign(payload) != sig:
+    if not hmac.compare_digest(_token_sign(payload), sig):
         raise DownloadTokenError("", params={"reason": "bad_signature"})
     try:
         data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
@@ -159,7 +190,15 @@ def verify_download_token(token: str, *, expected_kind: str | None = None) -> di
         raise DownloadTokenError("", params={"reason": "expired"})
     if expected_kind is not None and data.get("kind") != expected_kind:
         raise DownloadTokenError("", params={"reason": "kind_mismatch", "expected": expected_kind})
-    return {"object_id": int(data["object_id"]), "kind": data.get("kind")}
+    # C-04: 旧版(未绑定项目/用户)token 一律视为无效
+    if data.get("project_id") is None or data.get("user_id") is None:
+        raise DownloadTokenError("", params={"reason": "bad_payload"})
+    return {
+        "object_id": int(data["object_id"]),
+        "kind": data.get("kind"),
+        "project_id": int(data["project_id"]),
+        "user_id": int(data["user_id"]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +635,7 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
         extra={"file_name": f"project-package-{project.id}.zip"},
     )
     expires_at = datetime.now(UTC) + timedelta(seconds=DOWNLOAD_TOKEN_TTL_SECONDS)
-    token = create_download_token(obj.id, "package")
+    token = create_download_token(obj.id, "package", project_id=project.id, user_id=user.id)
     return PackageExport(
         object_id=obj.id, oid=obj.oid, sha256=obj.sha256, size_bytes=obj.size_bytes,
         media_type=obj.media_type, file_name=f"project-package-{project.id}.zip",
@@ -612,6 +651,13 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
 def _parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
     """解析项目包 zip: (manifest, {entry_path: bytes}); 校验失败抛 ImportValidationError。
 
+    前置门禁(H-07, 任何解压读取之前执行, 防 ZIP Bomb 内存/CPU 耗尽):
+    - 上传字节上限(MAX_PACKAGE_BYTES, 2GB);
+    - zip 文件头与条目数预检(MAX_PACKAGE_ENTRIES, 5000);
+    - 单条目解压大小(按 zip 头声明的 file_size 预检, MAX_PACKAGE_ENTRY_BYTES);
+    - 总解压大小上限(MAX_PACKAGE_TOTAL_BYTES)。
+    超限抛 PackageSizeError(PKG-SIZE-001, 413)。
+
     校验项(RPD 6):
     - 格式: 合法 zip, 无路径穿越条目;
     - 兼容性: 主版本号与当前格式兼容(1.x);
@@ -620,13 +666,44 @@ def _parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
     - 必需文件: project.json / draft.json 存在。
     """
     reasons: list[str] = []
+    if len(data) > MAX_PACKAGE_BYTES:
+        raise PackageSizeError(
+            "",
+            params={"reason": "package_too_large", "max_bytes": MAX_PACKAGE_BYTES,
+                    "actual_bytes": len(data)},
+        )
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
     except (zipfile.BadZipFile, OSError) as exc:
         raise ImportValidationError(["文件不是合法的 zip 项目包"]) from exc
     with zf:
+        # 条目数与单条目/总解压大小预检(zip 头部声明值, 不做真实解压)
+        infos = zf.infolist()
+        if len(infos) > MAX_PACKAGE_ENTRIES:
+            raise PackageSizeError(
+                "",
+                params={"reason": "too_many_entries", "max_entries": MAX_PACKAGE_ENTRIES,
+                        "actual_entries": len(infos)},
+            )
+        total_uncompressed = 0
+        for info in infos:
+            if info.is_dir():
+                continue
+            if info.file_size > MAX_PACKAGE_ENTRY_BYTES:
+                raise PackageSizeError(
+                    "",
+                    params={"reason": "entry_too_large", "entry": info.filename,
+                            "max_bytes": MAX_PACKAGE_ENTRY_BYTES, "actual_bytes": info.file_size},
+                )
+            total_uncompressed += info.file_size
+            if total_uncompressed > MAX_PACKAGE_TOTAL_BYTES:
+                raise PackageSizeError(
+                    "",
+                    params={"reason": "total_uncompressed_too_large",
+                            "max_bytes": MAX_PACKAGE_TOTAL_BYTES, "actual_bytes": total_uncompressed},
+                )
         entries: dict[str, bytes] = {}
-        for info in zf.infolist():
+        for info in infos:
             if info.is_dir():
                 continue
             name = info.filename
@@ -1112,23 +1189,34 @@ def _section_rows(section: Any) -> list[tuple[str, Any]]:
     return rows
 
 
+def _excel_safe(value: Any) -> Any:
+    """Excel 公式注入防护(M-09): 用户可控字符串以 = + - @ 开头时前置单引号。
+
+    所有写入 Excel 单元格的用户可控值都必须经过本函数, 防止恶意项目名/设备名/
+    评论等在打开报表时被 Excel/LibreOffice 当作公式执行(客户端文件风险)。
+    """
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@"):
+        return "'" + value
+    return value
+
+
 def _set_sheet_title(ws, title_zh: str, title_en: str) -> None:
     """写入双语节标题(加粗)。"""
-    cell = ws.cell(row=1, column=1, value=f"{title_zh} / {title_en}")
+    cell = ws.cell(row=1, column=1, value=_excel_safe(f"{title_zh} / {title_en}"))
     cell.font = Font(bold=True)
 
 
 def _write_kv(ws, rows: list[tuple[str, Any]], start_row: int = 3) -> int:
-    """写键值行(两列), 返回下一可用行号。"""
+    """写键值行(两列), 返回下一可用行号(全部值经 _excel_safe 防公式注入)。"""
     row = start_row
     for key, value in rows:
-        ws.cell(row=row, column=1, value=str(key))
+        ws.cell(row=row, column=1, value=_excel_safe(str(key)))
         if value is None:
             ws.cell(row=row, column=2, value="—")
         elif isinstance(value, (dict, list)):
-            ws.cell(row=row, column=2, value=json.dumps(value, ensure_ascii=False)[:500])
+            ws.cell(row=row, column=2, value=_excel_safe(json.dumps(value, ensure_ascii=False)[:500]))
         else:
-            ws.cell(row=row, column=2, value=value)
+            ws.cell(row=row, column=2, value=_excel_safe(value))
         row += 1
     return row
 
@@ -1280,12 +1368,15 @@ def export_excel(
         kp_sheet.cell(row=2, column=3, value="单位 / Unit")
         for item in kp_rows:
             if isinstance(item, dict):
-                kp_sheet.cell(row=r, column=1, value=str(item.get("name") or item.get("key") or ""))
-                kp_sheet.cell(row=r, column=2, value=item.get("value"))
-                kp_sheet.cell(row=r, column=3, value=item.get("unit") or "")
+                kp_sheet.cell(
+                    row=r, column=1,
+                    value=_excel_safe(str(item.get("name") or item.get("key") or "")),
+                )
+                kp_sheet.cell(row=r, column=2, value=_excel_safe(item.get("value")))
+                kp_sheet.cell(row=r, column=3, value=_excel_safe(item.get("unit") or ""))
             elif isinstance(item, tuple) and len(item) >= 2:
-                kp_sheet.cell(row=r, column=1, value=str(item[0]))
-                kp_sheet.cell(row=r, column=2, value=item[1])
+                kp_sheet.cell(row=r, column=1, value=_excel_safe(str(item[0])))
+                kp_sheet.cell(row=r, column=2, value=_excel_safe(item[1]))
             r += 1
     else:
         kp_sheet.cell(row=3, column=1, value="无指标数据 / No metric data")
@@ -1302,9 +1393,12 @@ def export_excel(
         for dev in devices:
             params = dev.get("params") or {}
             type_name = params.get("type_detail") or dev.get("device_type") or "—"
-            dev_sheet.cell(row=r, column=1, value=str(dev.get("name") or ""))
-            dev_sheet.cell(row=r, column=2, value=str(type_name))
-            dev_sheet.cell(row=r, column=3, value=json.dumps(params, ensure_ascii=False)[:300])
+            dev_sheet.cell(row=r, column=1, value=_excel_safe(str(dev.get("name") or "")))
+            dev_sheet.cell(row=r, column=2, value=_excel_safe(str(type_name)))
+            dev_sheet.cell(
+                row=r, column=3,
+                value=_excel_safe(json.dumps(params, ensure_ascii=False)[:300]),
+            )
             r += 1
     else:
         dev_sheet.cell(row=3, column=1, value="无设备配置 / No equipment")

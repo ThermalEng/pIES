@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
 
@@ -24,13 +25,19 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from iesplan.api.auth import router as auth_router
 from iesplan.api.config import config_router, registry_router
 from iesplan.db import Base, get_db
 from iesplan.main import _register_exception_handlers
 from iesplan.models.identity import User
 from iesplan.models.model import Device, SystemGraph
-from iesplan.models.project import Draft, Project
+from iesplan.models.project import Draft, Project, ProjectMember
 from iesplan.services import config as config_service
+from iesplan.services import identity
+
+#: 配置域测试所有者(经窗口会话登录)
+OWNER_USERNAME = "config_owner"
+OWNER_PASSWORD = "Config12345"
 
 #: 草稿/图内容哈希(sha256 十六进制)
 _HASH64 = "0" * 64
@@ -57,9 +64,14 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
     设备: 存量光伏(kind=existing, 容量固定)、新建光伏(kind=new, 容量变量)、
     新建电池(kind=new, 容量/功率变量)、存量电负荷(kind=existing)。
     """
-    owner = User(username="config_owner", display_name="配置测试所有者")
-    db.add(owner)
-    db.flush()
+    owner = db.execute(
+        select(User).where(User.username == OWNER_USERNAME)
+    ).scalar_one_or_none()
+    if owner is None:
+        owner = identity.create_user(
+            db, OWNER_USERNAME, OWNER_PASSWORD, role="engineer",
+            force_password_change=False, display_name="配置测试所有者",
+        )
     proj = Project(
         name="配置测试项目",
         currency="CNY",
@@ -68,6 +80,13 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
         created_by=owner.id,
     )
     db.add(proj)
+    db.flush()
+    db.add(
+        ProjectMember(
+            project_id=proj.id, user_id=owner.id, role="owner",
+            auth_version=1, granted_by=owner.id, granted_at=datetime.now(UTC),
+        )
+    )
     db.flush()
     draft = Draft(
         project_id=proj.id,
@@ -105,6 +124,7 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
 def make_app(db: Session) -> FastAPI:
     """挂载配置路由的测试应用(get_db 覆盖为传入会话)。"""
     application = FastAPI(title="IES Plan Config API Test")
+    application.include_router(auth_router)
     application.include_router(config_router)
     application.include_router(registry_router)
     _register_exception_handlers(application)
@@ -114,8 +134,22 @@ def make_app(db: Session) -> FastAPI:
 
 @pytest.fixture()
 def client(db: Session) -> Iterator[TestClient]:
-    """测试客户端。"""
+    """测试客户端: 预置配置所有者并登录, 客户端默认携带窗口会话凭证头。"""
+    owner = db.execute(
+        select(User).where(User.username == OWNER_USERNAME)
+    ).scalar_one_or_none()
+    if owner is None:
+        identity.create_user(
+            db, OWNER_USERNAME, OWNER_PASSWORD, role="engineer",
+            force_password_change=False, display_name="配置测试所有者",
+        )
     with TestClient(make_app(db), raise_server_exceptions=False) as test_client:
+        resp = test_client.post(
+            "/api/auth/login",
+            json={"username": OWNER_USERNAME, "password": OWNER_PASSWORD},
+        )
+        assert resp.status_code == 200, resp.text
+        test_client.headers["Authorization"] = f"Bearer {resp.json()['token']}"
         yield test_client
 
 
@@ -616,3 +650,12 @@ def test_variable_device_ref_unknown_diagnostic() -> None:
     }
     diags = config_service.validate_config(cfg, graph)
     assert any(d.code == "CONN-TYPE-002" for d in diags)
+
+
+def test_anonymous_config_401(db: Session) -> None:
+    """配置端点匿名访问 → 401(认证先于项目权限判定)。"""
+    with TestClient(make_app(db), raise_server_exceptions=False) as anon:
+        resp = anon.get("/api/projects/1/config")
+        assert resp.status_code == 401
+        resp = anon.put("/api/projects/1/config", json={"config": {}, "expected_revision": 1})
+        assert resp.status_code == 401

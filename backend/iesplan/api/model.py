@@ -10,8 +10,8 @@
 - GET    /api/projects/{project_id}/model/validate  拓扑+参数诊断
 - GET    /api/registry/device-types                  设备类型+参数 schema(公开, 供画布)
 
-认证说明: 与 iesplan.api.projects 一致, 本阶段以 X-User-Id 请求头模拟认证主体
-(集成时以 iesplan.api.auth 的窗口会话凭证校验依赖替换)。
+认证说明: 统一使用 U01 身份单元提供的窗口会话认证
+(iesplan.api.auth.CurrentUser; 未认证 401, 权限不足 403)。
 
 路由挂载(集成阶段在 main.py 中执行):
     app.include_router(registry_router)
@@ -20,18 +20,18 @@
 
 from __future__ import annotations
 
+import math
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from iesplan.core.diagnostics import SEVERITY_BLOCKING
-from iesplan.core.errors import AppError
+from iesplan.api.auth import CurrentUser
 from iesplan.core.registry import DeviceTypeSpec, ParameterSpec, list_device_types
 from iesplan.db import get_db
-from iesplan.models.identity import User
 from iesplan.services import model as svc
+from iesplan.services import project as project_service
 
 #: 设备类型注册表(公开, 前端画布取设备面板与参数表单 schema)
 registry_router = APIRouter(prefix="/api", tags=["registry"])
@@ -40,35 +40,6 @@ registry_router = APIRouter(prefix="/api", tags=["registry"])
 model_router = APIRouter(prefix="/api/projects/{project_id}/model", tags=["model"])
 
 DbSession = Annotated[Session, Depends(get_db)]
-
-
-def _http_error(status: int, code: str, message_key: str, params: dict[str, Any]) -> AppError:
-    """构造带指定 HTTP 状态码的应用错误(状态码在错误实例上设置)。"""
-    err = AppError("", code=code, severity=SEVERITY_BLOCKING, message_key=message_key, params=params)
-    err.http_status = status
-    return err
-
-
-def get_current_user(request: Request, db: DbSession) -> User:
-    """当前认证主体(阶段实现: 从 X-User-Id 请求头读取; 正式会话认证由 U01 提供)。
-
-    集成时以 iesplan.api.auth 的窗口会话凭证校验依赖替换本函数。
-    """
-    raw = request.headers.get("X-User-Id")
-    if not raw:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "missing_identity"})
-    try:
-        user_id = int(raw)
-    except ValueError as exc:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "bad_identity"}) from exc
-    user = db.get(User, user_id)
-    if user is None:
-        raise _http_error(401, "AUTH-REQ-001", "ies.diag.perm.denied", {"reason": "unknown_user"})
-    return user
-
-
-#: 当前用户依赖(须在 get_current_user 定义之后声明)
-CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +52,14 @@ class Position(BaseModel):
 
     x: float
     y: float
+
+    @field_validator("x", "y")
+    @classmethod
+    def _finite(cls, value: float) -> float:
+        """M-08: 拒绝 NaN/Infinity 坐标(非有限值绕过范围校验)。"""
+        if not math.isfinite(value):
+            raise ValueError("坐标必须为有限数值")
+        return value
 
 
 class DeviceCreate(BaseModel):
@@ -165,7 +144,8 @@ def device_types_public() -> dict[str, Any]:
 
 @model_router.get("", summary="获取项目系统图(设备+端口+连接+布局)")
 def get_model_graph(project_id: int, db: DbSession, user: CurrentUser) -> dict:
-    """读取项目工作图: 拓扑(设备/端口/连接)与画布布局对象。"""
+    """读取项目工作图: 拓扑(设备/端口/连接)与画布布局对象(需项目 view 能力)。"""
+    project_service.ensure_access(db, user, project_id, "view")
     return svc.get_graph(db, project_id)
 
 
@@ -181,7 +161,8 @@ def create_device(
     db: DbSession,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """创建设备: 校验注册表类型与参数, 按载体生成端口, 返回设备与端口。"""
+    """创建设备: 校验注册表类型与参数, 按载体生成端口, 返回设备与端口(需 edit)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     device = svc.create_device(
         db,
         project_id,
@@ -205,7 +186,8 @@ def update_device(
     db: DbSession,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """更新设备名称/参数/位置(仅更新提供的字段; 参数重新按注册表校验)。"""
+    """更新设备名称/参数/位置(仅更新提供的字段; 参数重新按注册表校验; 需 edit)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     device = svc.update_device(
         db,
         project_id,
@@ -224,7 +206,8 @@ def delete_device(
     db: DbSession,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """删除设备及其端口与关联连接。"""
+    """删除设备及其端口与关联连接(需项目 edit 能力)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     svc.delete_device(db, project_id, device_id)
     return {"ok": True, "deleted": device_id}
 
@@ -241,7 +224,8 @@ def create_connection(
     db: DbSession,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """创建连接: 校验能源类型一致/方向兼容/同项目/无重复, 失败返回带定位的诊断。"""
+    """创建连接: 校验能源类型一致/方向兼容/同项目/无重复, 失败返回带定位的诊断(需 edit)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     conn = svc.connect(db, project_id, body.from_port_id, body.to_port_id, attrs=body.attrs)
     return {"connection": svc.serialize_connection(conn)}
 
@@ -254,7 +238,8 @@ def update_connection(
     db: DbSession,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """更新连接属性(capacity/loss_rate/params)。"""
+    """更新连接属性(capacity/loss_rate/params; 需项目 edit 能力)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     conn = svc.update_connection(db, project_id, conn_id, body.attrs)
     return {"connection": svc.serialize_connection(conn)}
 
@@ -266,7 +251,8 @@ def delete_connection(
     db: DbSession,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """删除连接。"""
+    """删除连接(需项目 edit 能力)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
     svc.disconnect(db, project_id, conn_id)
     return {"ok": True, "deleted": conn_id}
 
@@ -278,6 +264,7 @@ def delete_connection(
 
 @model_router.get("/validate", summary="模型校验(拓扑+参数诊断)")
 def validate_model(project_id: int, db: DbSession, user: CurrentUser) -> dict[str, Any]:
-    """返回拓扑与参数诊断列表(错误/警告, 含对象定位, 04 §5.4 结构)。"""
+    """返回拓扑与参数诊断列表(错误/警告, 含对象定位, 04 §5.4 结构; 需项目 view 能力)。"""
+    project_service.ensure_access(db, user, project_id, "view")
     diags = svc.validate_project_model(db, project_id)
     return {"diagnostics": [d.to_dict() for d in diags]}

@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 import sqlalchemy as sa
+from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -24,8 +25,7 @@ from iesplan.config import settings
 from iesplan.core.timeaxis import build_axis
 from iesplan.db import Base, get_db
 from iesplan.models.dataset import DatasetFile, DatasetVersion
-from iesplan.models.identity import User
-from iesplan.models.project import Project
+from iesplan.models.project import Project, ProjectMember
 from iesplan.services import dataset as ds_service
 from iesplan.services.dataset import (
     STANDARD_FIELDS,
@@ -72,18 +72,20 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return d
 
 
-def _make_user(session: Session) -> User:
-    """创建测试用户。"""
-    user = User(username="alice", display_name="Alice")
-    session.add(user)
-    session.flush()
-    return user
 
 
-def _make_project(session: Session, user: User, name: str = "测试项目") -> Project:
-    """创建测试项目。"""
+
+def _make_project(session: Session, user, name: str = "测试项目") -> Project:
+    """创建测试项目(含所有者成员行, 满足项目权限判定)。"""
     proj = Project(name=name, owner_id=user.id, created_by=user.id)
     session.add(proj)
+    session.flush()
+    session.add(
+        ProjectMember(
+            project_id=proj.id, user_id=user.id, role="owner",
+            auth_version=1, granted_by=user.id, granted_at=datetime.now(UTC),
+        )
+    )
     session.flush()
     return proj
 
@@ -438,7 +440,7 @@ def test_put_object_dedup_and_ref_count(session: Session, data_dir: Path) -> Non
 
 
 def _create_dataset_via_api(
-    client: TestClient, session: Session, project_id: int, name: str = "负荷数据"
+    client: TestClient, session: Session, project_id: int, user, name: str = "负荷数据"
 ) -> int:
     """通过 API 创建数据集, 返回 dataset_id。"""
     resp = client.post(
@@ -449,6 +451,7 @@ def _create_dataset_via_api(
             "license": "CC-BY-4.0",
             "provenance": {"origin": "测试"},
         },
+        headers=login_headers(client, user),
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["dataset"]["id"]
@@ -467,32 +470,37 @@ def test_api_template_download(client: TestClient) -> None:
 
 def test_api_create_dataset_and_conflict(client: TestClient, session: Session) -> None:
     """创建数据集成功; 同名(同项目)返回 409。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    ds_id = _create_dataset_via_api(client, session, proj.id)
+    ds_id = _create_dataset_via_api(client, session, proj.id, user)
     resp = client.post(
         f"/api/projects/{proj.id}/datasets",
         json={"name": "负荷数据"},
+        headers=login_headers(client, user),
     )
     assert resp.status_code == 409
     assert ds_id > 0
     # 不存在项目 → 404
-    resp = client.post("/api/projects/999999/datasets", json={"name": "x"})
+    resp = client.post(
+        "/api/projects/999999/datasets", json={"name": "x"},
+        headers=login_headers(client, user),
+    )
     assert resp.status_code == 404
 
 
 def test_api_upload_valid_version(client: TestClient, session: Session, data_dir: Path) -> None:
     """合法 1h 全年级上传: 201, 版本/质量报告/对象/引用齐全。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    ds_id = _create_dataset_via_api(client, session, proj.id)
+    ds_id = _create_dataset_via_api(client, session, proj.id, user)
     csv_bytes = make_csv("1h", n=8760)
     resp = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
         data={"resolution": "1h", "utc_offset_minutes": "480"},
         files={"file": ("data.csv", csv_bytes, "text/csv")},
+        headers=login_headers(client, user),
     )
     assert resp.status_code == 201, resp.text
     body = resp.json()
@@ -520,14 +528,15 @@ def test_api_upload_valid_version(client: TestClient, session: Session, data_dir
 
 def test_api_upload_too_few_rows_blocked(client: TestClient, session: Session) -> None:
     """行数不足(10 行)上传应被阻断: 400 + DATA-TS-004 诊断。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    ds_id = _create_dataset_via_api(client, session, proj.id)
+    ds_id = _create_dataset_via_api(client, session, proj.id, user)
     resp = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
         data={"resolution": "1h"},
         files={"file": ("small.csv", make_csv(n=10), "text/csv")},
+        headers=login_headers(client, user),
     )
     assert resp.status_code == 400
     codes = [d["code"] for d in resp.json()["diagnostics"]]
@@ -538,10 +547,10 @@ def test_api_upload_too_few_rows_blocked(client: TestClient, session: Session) -
 
 def test_api_upload_duplicate_ts_blocked(client: TestClient, session: Session) -> None:
     """重复时间戳上传应被阻断: 400 + DATA-TS-001。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    ds_id = _create_dataset_via_api(client, session, proj.id)
+    ds_id = _create_dataset_via_api(client, session, proj.id, user)
 
     def dup(row: dict, i: int) -> dict:
         return row
@@ -552,6 +561,7 @@ def test_api_upload_duplicate_ts_blocked(client: TestClient, session: Session) -
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
         data={"resolution": "1h"},
         files={"file": ("dup.csv", rows_to_csv(rows), "text/csv")},
+        headers=login_headers(client, user),
     )
     assert resp.status_code == 400
     codes = [d["code"] for d in resp.json()["diagnostics"]]
@@ -560,10 +570,10 @@ def test_api_upload_duplicate_ts_blocked(client: TestClient, session: Session) -
 
 def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
     """越界值上传应被阻断: 400 + RES-RANGE-001(带字段定位)。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    ds_id = _create_dataset_via_api(client, session, proj.id)
+    ds_id = _create_dataset_via_api(client, session, proj.id, user)
 
     def corrupt(row: dict, i: int) -> dict:
         if i == 5:
@@ -574,6 +584,7 @@ def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
         data={"resolution": "1h"},
         files={"file": ("range.csv", make_csv(transform=corrupt), "text/csv")},
+        headers=login_headers(client, user),
     )
     assert resp.status_code == 400
     diagnostics = resp.json()["diagnostics"]
@@ -582,18 +593,19 @@ def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
 
 def test_api_list_and_detail(client: TestClient, session: Session) -> None:
     """列表返回最新版本; 详情返回版本列表+质量报告。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    ds_id = _create_dataset_via_api(client, session, proj.id, name="配电负荷")
+    ds_id = _create_dataset_via_api(client, session, proj.id, user, name="配电负荷")
     csv_bytes = make_csv(n=8760)
     client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
         data={"resolution": "1h"},
         files={"file": ("data.csv", csv_bytes, "text/csv")},
+        headers=login_headers(client, user),
     )
     # 列表
-    resp = client.get(f"/api/projects/{proj.id}/datasets")
+    resp = client.get(f"/api/projects/{proj.id}/datasets", headers=login_headers(client, user))
     assert resp.status_code == 200
     items = resp.json()["datasets"]
     assert len(items) == 1
@@ -601,7 +613,7 @@ def test_api_list_and_detail(client: TestClient, session: Session) -> None:
     latest = items[0]["latest_version"]
     assert latest is not None and latest["version_no"] == 1
     # 详情
-    resp = client.get(f"/api/projects/{proj.id}/datasets/{ds_id}")
+    resp = client.get(f"/api/projects/{proj.id}/datasets/{ds_id}", headers=login_headers(client, user))
     assert resp.status_code == 200
     versions = resp.json()["versions"]
     assert len(versions) == 1
@@ -611,16 +623,19 @@ def test_api_list_and_detail(client: TestClient, session: Session) -> None:
 
 def test_api_version_metadata_no_data_content(client: TestClient, session: Session) -> None:
     """版本详情只返回元数据+溯源+文件引用, 不含数据行。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    ds_id = _create_dataset_via_api(client, session, proj.id)
+    ds_id = _create_dataset_via_api(client, session, proj.id, user)
     client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
         data={"resolution": "1h"},
         files={"file": ("data.csv", make_csv(n=8760), "text/csv")},
+        headers=login_headers(client, user),
     )
-    resp = client.get(f"/api/projects/{proj.id}/datasets/{ds_id}/versions/1")
+    resp = client.get(
+        f"/api/projects/{proj.id}/datasets/{ds_id}/versions/1", headers=login_headers(client, user)
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["dataset_version"]["version_no"] == 1
@@ -632,30 +647,33 @@ def test_api_version_metadata_no_data_content(client: TestClient, session: Sessi
     assert data_files[0]["row_count"] == 8760
     assert "rows" not in body and "content" not in body
     # 不存在的版本 → 404
-    resp = client.get(f"/api/projects/{proj.id}/datasets/{ds_id}/versions/99")
+    resp = client.get(
+        f"/api/projects/{proj.id}/datasets/{ds_id}/versions/99", headers=login_headers(client, user)
+    )
     assert resp.status_code == 404
 
 
 def test_api_unknown_dataset_404(client: TestClient, session: Session) -> None:
     """项目不存在或数据集不属于项目应返回 404。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    resp = client.get(f"/api/projects/{proj.id}/datasets/424242")
+    resp = client.get(f"/api/projects/{proj.id}/datasets/424242", headers=login_headers(client, user))
     assert resp.status_code == 404
-    resp = client.get("/api/projects/424242/datasets")
+    resp = client.get("/api/projects/424242/datasets", headers=login_headers(client, user))
     assert resp.status_code == 404
 
 
 def test_api_sample_generation(client: TestClient, session: Session, data_dir: Path) -> None:
     """内置样例: 201 + 溯源(source_category=builtin_sample) + 质量报告; 重复生成内容哈希一致。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    ds_id = _create_dataset_via_api(client, session, proj.id, name="样例容器")
+    ds_id = _create_dataset_via_api(client, session, proj.id, user, name="样例容器")
     resp = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/sample",
         params={"resolution": "1h", "region": "shanghai"},
+        headers=login_headers(client, user),
     )
     assert resp.status_code == 201, resp.text
     body = resp.json()
@@ -673,6 +691,7 @@ def test_api_sample_generation(client: TestClient, session: Session, data_dir: P
     resp2 = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/sample",
         params={"resolution": "1h", "region": "shanghai"},
+        headers=login_headers(client, user),
     )
     assert resp2.status_code == 201
     assert resp2.json()["dataset_version"]["version_no"] == 2
@@ -681,7 +700,7 @@ def test_api_sample_generation(client: TestClient, session: Session, data_dir: P
 
 def test_sample_service_deterministic_across_calls(session: Session, data_dir: Path) -> None:
     """服务层直接调用: 两次生成的行内容完全一致(含对象落盘去重)。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
     v1 = ds_service.create_builtin_sample(session, proj.id, "1h", region="beijing")
@@ -696,16 +715,30 @@ def test_sample_service_deterministic_across_calls(session: Session, data_dir: P
 
 def test_upload_with_fields_declaration(client: TestClient, session: Session) -> None:
     """上传时声明字段单位: 合法单位通过; 单位不匹配被阻断(PARAM-UNIT-002)。"""
-    user = _make_user(session)
+    user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    ds_id = _create_dataset_via_api(client, session, proj.id)
+    ds_id = _create_dataset_via_api(client, session, proj.id, user)
     fields_json = '{"e_load": {"unit": "kWh"}, "t_ambient": {"unit": "C"}}'
     resp = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
         data={"resolution": "1h", "fields": fields_json},
         files={"file": ("data.csv", make_csv(n=8760), "text/csv")},
+        headers=login_headers(client, user),
     )
     assert resp.status_code == 400, resp.text
     codes = [d["code"] for d in resp.json()["diagnostics"]]
     assert "PARAM-UNIT-002" in codes
+
+
+def test_anonymous_and_xuserid_dataset_401(client: TestClient, session: Session) -> None:
+    """数据集端点匿名访问 → 401; 伪造 X-User-Id 不再被接受(模板下载保持公开)。"""
+    resp = client.get("/api/projects/1/datasets")
+    assert resp.status_code == 401
+    resp = client.post("/api/projects/1/datasets", json={"name": "匿名数据集"})
+    assert resp.status_code == 401
+    resp = client.get("/api/projects/1/datasets", headers={"X-User-Id": "1"})
+    assert resp.status_code == 401
+    # 模板下载(公开)不受影响
+    resp = client.get("/api/datasets/template", params={"resolution": "1h"})
+    assert resp.status_code == 200
