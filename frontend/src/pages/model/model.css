@@ -595,6 +595,27 @@
   color: var(--ies-color-text-muted);
 }
 
+/* 结构化参数(如 import_tariff 分时电价):子键输入行 */
+.mp-param__dict {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ies-space-1);
+}
+
+.mp-param__dict-item {
+  display: flex;
+  align-items: center;
+  gap: var(--ies-space-2);
+}
+
+.mp-param__dict-label {
+  flex: 0 0 4.5rem;
+  font-size: var(--ies-fs-xs);
+  font-family: var(--ies-font-mono, monospace);
+  color: var(--ies-color-text-muted);
+}
+
 .mp-sidebar__footer {
   padding: var(--ies-space-3) var(--ies-space-4);
   border-top: 1px solid var(--ies-color-border);

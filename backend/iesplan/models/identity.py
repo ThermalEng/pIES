@@ -45,6 +45,8 @@ class User(Base):
     )
     credential_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("0"))
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa.text("false"))
+    #: 外部认证主体(OIDC sub; 仅外部认证账号非空, 唯一约束防重复绑定)
+    auth_subject: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
     )
@@ -59,6 +61,7 @@ class User(Base):
         CheckConstraint("fixed_utc_offset_minutes BETWEEN -720 AND 840", name="ck_users_utc_offset"),
         UniqueConstraint("username", name="uq_users_username"),
         UniqueConstraint("email", name="uq_users_email"),
+        UniqueConstraint("auth_subject", name="uq_users_auth_subject"),
         Index("idx_users_status", "status"),
     )
 
@@ -199,6 +202,23 @@ class WindowSession(Base):
             sqlite_where=sa.text("status = 'takeover_pending'"),
         ),
         Index("idx_window_sessions_user", "user_id", "status"),
+    )
+
+
+class AppSetting(Base):
+    """应用级键值设置(身份/安全域, 如自助注册开关)。
+
+    多 worker 一致性的权威来源(M-12): 注册开关等设置落库,
+    所有 Worker 从同一来源读取, 避免进程内存态在多 Worker 间不一致。
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
     )
 
 

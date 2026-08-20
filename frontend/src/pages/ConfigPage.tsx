@@ -45,9 +45,10 @@ import {
   THead,
   TR,
 } from '../components/ui'
-import { translateError, useI18n } from '../i18n'
+import { errorMessage, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { formatNumber } from '../lib/format'
+import { useWorkbench } from './workbench'
 import { ApiError } from '../types'
 import type {
   AlgorithmId,
@@ -173,10 +174,6 @@ let SEQ = 0
 // 纯工具
 // ---------------------------------------------------------------------------
 
-function errorText(err: unknown): string {
-  return err instanceof ApiError ? translateError(err) : pt('ies.error.unknown', { reason: String(err) })
-}
-
 function numOrNull(s: string): number | null {
   const trimmed = s.trim()
   const v = Number(trimmed)
@@ -292,12 +289,15 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
   const { id } = useParams()
   const pid = projectId ?? (id !== undefined && Number.isFinite(Number(id)) ? Number(id) : undefined)
   const { t } = useI18n()
+  // 工作台内已由 WorkbenchProvider 拉取项目;独立挂载时本地兜底
+  const wbProject = useWorkbench().project
+  const [fallbackProject, setFallbackProject] = useState<Project | null>(null)
+  const project = wbProject ?? fallbackProject
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [frozen, setFrozen] = useState(false)
   const [config, setConfig] = useState<CalcConfig | null>(null)
-  const [project, setProject] = useState<Project | null>(null)
   const [algorithms, setAlgorithms] = useState<Array<{ name: string; label: string; description_key: string }>>([])
   const [graph, setGraph] = useState<GraphModel | null>(null)
   const [specs, setSpecs] = useState<DeviceTypeSpec[]>([])
@@ -337,7 +337,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
   ) {
     setConfig('status' in cfg ? (cfg as CalcConfig) : null)
     setFrozen('status' in cfg && cfg.status === 'frozen')
-    setProject(proj)
+    if (proj) setFallbackProject(proj)
     setAlgorithms(algos)
     setGraph(g)
     setSpecs(sp)
@@ -454,25 +454,18 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       setLoading(true)
       setError(null)
       try {
-        let cfg: CalcConfig | CalcConfigInput
-        try {
-          cfg = await api.config.get(projectIdNum)
-        } catch {
-          cfg = await api.config.default(projectIdNum)
-        }
-        if (cancelled) return
-        const [algos, proj] = await Promise.all([
+        // 全部 5 个请求彼此独立, 一次并行(原先分 3 段串行, 页面前置耗时是各段之和)
+        const [cfgRes, algos, proj, g, sp] = await Promise.all([
+          api.config.get(projectIdNum).catch(() => api.config.default(projectIdNum)),
           api.config.algorithms().catch(() => ({ items: [] as Array<{ name: string; label: string; description_key: string }> })),
-          api.projects.get(projectIdNum).catch(() => null),
-        ])
-        const [g, sp] = await Promise.all([
+          wbProject ? Promise.resolve(null) : api.projects.get(projectIdNum).catch(() => null),
           api.model.getGraph(projectIdNum).catch(() => null),
           api.model.deviceTypes().catch(() => [] as DeviceTypeSpec[]),
         ])
         if (cancelled) return
-        applyConfig(cfg, algos.items, proj, g, sp)
+        applyConfig(cfgRes, algos.items, proj, g, sp)
       } catch (err) {
-        if (!cancelled) setError(errorText(err))
+        if (!cancelled) setError(errorMessage(err))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -687,7 +680,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
         setDiagnostics(err.params.diagnostics as Diagnostic[])
         setNotice({ kind: 'error', text: pt('ies.error.data_validation_failed') })
       } else {
-        setNotice({ kind: 'error', text: errorText(err) })
+        setNotice({ kind: 'error', text: errorMessage(err) })
       }
     } finally {
       setSaving(false)
@@ -702,7 +695,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       setDiagnostics(res.diagnostics)
       setNotice(res.valid ? { kind: 'success', text: t('ies.config.validate_ok') } : null)
     } catch (err) {
-      setNotice({ kind: 'error', text: errorText(err) })
+      setNotice({ kind: 'error', text: errorMessage(err) })
     } finally {
       setValidating(false)
     }
@@ -716,7 +709,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       applyConfig(def, algorithms, project, graph, specs)
       setNotice({ kind: 'success', text: t('ies.config.default') })
     } catch (err) {
-      setNotice({ kind: 'error', text: errorText(err) })
+      setNotice({ kind: 'error', text: errorMessage(err) })
     } finally {
       setSaving(false)
     }

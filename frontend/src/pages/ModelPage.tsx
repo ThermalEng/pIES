@@ -869,7 +869,7 @@ function DeviceSidebar({
 }) {
   const { t } = useI18n()
   const [nameDraft, setNameDraft] = useState(device.name)
-  const [paramDrafts, setParamDrafts] = useState<Record<string, string>>(() => draftsOf(device.params))
+  const [paramDrafts, setParamDrafts] = useState<Record<string, ParamDraft>>(() => draftsOf(device.params))
   const [errors, setErrors] = useState<Record<string, string | null>>({})
   const [armed, setArmed] = useState(false)
 
@@ -884,9 +884,10 @@ function DeviceSidebar({
   const paramKeys = useMemo(() => Object.keys(spec.parameters), [spec])
 
   const commitParam = (key: string, specParam: ParamSpecExt) => {
-    const raw = (paramDrafts[key] ?? '').trim()
+    const draft = paramDrafts[key] ?? ''
     // 枚举类参数: 保留字符串字面量(如 'heating'),不做 Number 强制。
     if (Array.isArray(specParam.enum) && specParam.enum.length > 0) {
+      const raw = String(draft)
       const allowed = specParam.enum.map((v) => String(v))
       if (raw === '') {
         const next = { ...device.params }
@@ -906,6 +907,35 @@ function DeviceSidebar({
       setErrors((prev) => ({ ...prev, [key]: null }))
       return
     }
+    // 结构化参数(字典,如 import_tariff={peak,flat,valley}):子键全部填齐才提交。
+    if (typeof draft === 'object') {
+      const subKeys = Object.keys(draft)
+      const filled = subKeys.filter((k) => draft[k] !== '')
+      if (filled.length === 0) {
+        const next = { ...device.params }
+        delete next[key]
+        onPatch({ params: next })
+        setErrors((prev) => ({ ...prev, [key]: null }))
+        return
+      }
+      if (filled.length < subKeys.length) {
+        setErrors((prev) => ({ ...prev, [key]: lt('sidebar.param_dict_incomplete') }))
+        return
+      }
+      const obj: Record<string, number> = {}
+      for (const k of subKeys) {
+        const v = Number(draft[k])
+        if (!Number.isFinite(v)) {
+          setErrors((prev) => ({ ...prev, [key]: lt('sidebar.param_dict_invalid', { key: k }) }))
+          return
+        }
+        obj[k] = v
+      }
+      onPatch({ params: { ...device.params, [key]: obj } })
+      setErrors((prev) => ({ ...prev, [key]: null }))
+      return
+    }
+    const raw = String(draft).trim()
     if (raw === '') {
       const next = { ...device.params }
       delete next[key]
@@ -932,7 +962,7 @@ function DeviceSidebar({
 
   const restoreDefault = (key: string, specParam: ParamSpecExt) => {
     const value = defaultParamValue(specParam as DeviceTypeSpec['parameters'][string], device.kind)
-    setParamDrafts((prev) => ({ ...prev, [key]: value === null ? '' : String(value) }))
+    setParamDrafts((prev) => ({ ...prev, [key]: draftsOfValue(value) }))
     if (value === null) {
       const next = { ...device.params }
       delete next[key]
@@ -1046,8 +1076,18 @@ function DeviceSidebar({
         {paramKeys.length === 0 ? <p>{lt('sidebar.params_none')}</p> : null}
         {paramKeys.map((key) => {
           const p = spec.parameters[key]
-          const range = `${p.min ?? '—'} ~ ${p.max ?? '—'}`
           const hasEnum = Array.isArray(p.enum) && p.enum.length > 0
+          // 结构化参数(默认值为对象,如 import_tariff):按 spec 判定,避免草稿缺失时渲染错位
+          const isDict =
+            !hasEnum &&
+            ((typeof p.default === 'object' && p.default !== null) ||
+              (typeof p.existing_default === 'object' && p.existing_default !== null))
+          // 字典草稿:未初始化(参数被清空)时回退 spec 默认值做子键骨架
+          const dictDraft: Record<string, string> =
+            typeof paramDrafts[key] === 'object' && paramDrafts[key] !== null
+              ? (paramDrafts[key] as Record<string, string>)
+              : (draftsOfValue(isDict ? (p.default ?? p.existing_default) : null) as Record<string, string>)
+          const range = isDict ? (p.unit ?? '') : `${p.min ?? '—'} ~ ${p.max ?? '—'}`
           return (
             <div className="mp-param" key={key}>
               <div className="mp-param__head">
@@ -1097,11 +1137,36 @@ function DeviceSidebar({
                       )
                     })}
                   </Select>
+                ) : isDict ? (
+                  /* 结构化参数(如 import_tariff 分时电价):按子键渲染子输入 */
+                  <div className="mp-param__dict">
+                    {Object.keys(dictDraft).map((subKey) => (
+                      <label key={subKey} className="mp-param__dict-item">
+                        <span className="mp-param__dict-label">{subKey}</span>
+                        <Input
+                          className="mp-param__input"
+                          type="number"
+                          value={dictDraft[subKey] ?? ''}
+                          aria-label={`${key}.${subKey}${p.unit ? ` (${p.unit})` : ''}`}
+                          invalid={Boolean(errors[key])}
+                          onChange={(event) => {
+                            // 基于完整子键骨架合并(不能只展开 paramDrafts[key]:
+                            // 未初始化时它是 undefined,展开后只剩当前编辑的子键,其余丢失)
+                            setParamDrafts((prev) => ({
+                              ...prev,
+                              [key]: { ...dictDraft, [subKey]: event.target.value },
+                            }))
+                          }}
+                          onBlur={() => commitParam(key, p)}
+                        />
+                      </label>
+                    ))}
+                  </div>
                 ) : (
                   <Input
                     className="mp-param__input"
                     type="number"
-                    value={paramDrafts[key] ?? ''}
+                    value={String(paramDrafts[key] ?? '')}
                     aria-label={`${key}${p.unit ? ` (${p.unit})` : ''}`}
                     aria-describedby={errors[key] ? `mp-param-err-${key}` : undefined}
                     invalid={Boolean(errors[key])}
@@ -1138,11 +1203,30 @@ function DeviceSidebar({
   )
 }
 
-function draftsOf(params: Record<string, unknown>): Record<string, string> {
-  const out: Record<string, string> = {}
+/** 参数草稿值:字符串(枚举/数值输入)或对象(结构化参数,如 import_tariff 分时电价)。 */
+type ParamDraft = string | Record<string, string>
+
+/** 参数值 → 草稿:number/string 转字符串,对象转字符串子键表。 */
+function draftsOfValue(value: unknown): ParamDraft {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'number') return String(value)
+  if (typeof value === 'string') return value
+  if (typeof value === 'object') {
+    const out: Record<string, string> = {}
+    for (const [key, val] of Object.entries(value)) {
+      if (typeof val === 'number') out[key] = String(val)
+      else if (typeof val === 'string') out[key] = val
+    }
+    return out
+  }
+  return ''
+}
+
+function draftsOf(params: Record<string, unknown>): Record<string, ParamDraft> {
+  const out: Record<string, ParamDraft> = {}
   for (const [key, value] of Object.entries(params)) {
-    if (typeof value === 'number') out[key] = String(value)
-    else if (typeof value === 'string') out[key] = value
+    const draft = draftsOfValue(value)
+    if (draft !== '') out[key] = draft
   }
   return out
 }

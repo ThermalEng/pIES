@@ -155,8 +155,6 @@ export type IncompatReason = 'type' | 'direction' | 'same_device' | 'duplicate' 
 export interface Compatibility {
   ok: boolean
   reason: IncompatReason | null
-  /** 不兼容时的可定位说明(设备名)。 */
-  detail: string | null
 }
 
 /**
@@ -173,24 +171,16 @@ export function checkConnection(
   existing: LocalConnection[],
 ): Compatibility {
   if (fromDevice.id === toDevice.id) {
-    return { ok: false, reason: 'same_device', detail: fromDevice.name }
+    return { ok: false, reason: 'same_device' }
   }
   if (fromPort.carrier === 'solar' || toPort.carrier === 'solar') {
-    return { ok: false, reason: 'solar', detail: null }
+    return { ok: false, reason: 'solar' }
   }
   if (fromPort.carrier !== toPort.carrier) {
-    return {
-      ok: false,
-      reason: 'type',
-      detail: `${fromDevice.name}(${fromPort.carrier}) → ${toDevice.name}(${toPort.carrier})`,
-    }
+    return { ok: false, reason: 'type' }
   }
   if (fromPort.direction !== 'out' || toPort.direction !== 'in') {
-    return {
-      ok: false,
-      reason: 'direction',
-      detail: `${fromDevice.name} ${fromPort.direction} → ${toDevice.name} ${toPort.direction}`,
-    }
+    return { ok: false, reason: 'direction' }
   }
   const fromHandle = handleId(fromPort.carrier, fromPort.direction)
   const toHandle = handleId(toPort.carrier, toPort.direction)
@@ -200,9 +190,9 @@ export function checkConnection(
       (c.fromDeviceId === toDevice.id && c.fromHandle === toHandle && c.toDeviceId === fromDevice.id && c.toHandle === fromHandle),
   )
   if (dup) {
-    return { ok: false, reason: 'duplicate', detail: `${fromDevice.name} → ${toDevice.name}` }
+    return { ok: false, reason: 'duplicate' }
   }
-  return { ok: true, reason: null, detail: null }
+  return { ok: true, reason: null }
 }
 
 // ---------------------------------------------------------------------------
@@ -245,9 +235,13 @@ export function carrierLabelKey(carrier: EnergyCarrier): string {
 // 参数默认值
 // ---------------------------------------------------------------------------
 
+/** 参数默认值(与 ParameterSpec.default 同型:number | string | 字典对象 | null)。 */
+export type ParamValue = number | string | Record<string, number> | null
+
 /** 按设备属性(存量/新增)取参数默认值:存量优先 existing_default。
- *  枚举参数(如 mode)默认值为字符串字面量,数值参数为 number。 */
-export function defaultParamValue(spec: ParameterSpec, kind: DeviceKind): number | string | null {
+ *  枚举参数(如 mode)默认值为字符串字面量,数值参数为 number,
+ *  结构化参数(如 import_tariff)为 {peak, flat, valley} 对象。 */
+export function defaultParamValue(spec: ParameterSpec, kind: DeviceKind): ParamValue {
   if (kind === 'existing' && spec.existing_default !== null) return spec.existing_default
   return spec.default
 }
@@ -295,58 +289,6 @@ export function paramNumber(params: Record<string, unknown>, key: string): numbe
 export function defaultDeviceName(spec: DeviceTypeSpec, sameTypeCount: number, locale: 'zh' | 'en'): string {
   const label = locale === 'zh' ? spec.name_zh : spec.name_en
   return `${label} ${sameTypeCount + 1}`
-}
-
-/** 语义内容(updateDraft 载荷的 model 部分):布局坐标被明确排除。 */
-export interface ModelSemanticContent {
-  devices: Array<{
-    id: string
-    device_type: string
-    kind: DeviceKind
-    name: string
-    params: Record<string, unknown>
-    model_fidelity: Fidelity
-    status: 'active'
-  }>
-  connections: Array<{
-    id: string
-    from_device_id: string
-    from_port: { carrier: EnergyCarrier; direction: 'in' | 'out' }
-    to_device_id: string
-    to_port: { carrier: EnergyCarrier; direction: 'in' | 'out' }
-    conn_type: NonNullable<Connection['conn_type']>
-    loss_rate: number
-  }>
-}
-
-/** 将本地状态序列化为语义内容(坐标不入语义)。 */
-export function toSemanticContent(devices: LocalDevice[], connections: LocalConnection[]): ModelSemanticContent {
-  return {
-    devices: devices.map((d) => ({
-      id: d.id,
-      device_type: d.deviceType,
-      kind: d.kind,
-      name: d.name,
-      params: d.params,
-      model_fidelity: d.fidelity,
-      status: 'active' as const,
-    })),
-    connections: connections.map((c) => {
-      const from = parseHandle(c.fromHandle)
-      const to = parseHandle(c.toHandle)
-      const carrier = from?.carrier ?? c.carrier
-      const connType = carrierToConnType(carrier) ?? 'electric_line'
-      return {
-        id: c.id,
-        from_device_id: c.fromDeviceId,
-        from_port: { carrier, direction: from?.direction ?? 'out' },
-        to_device_id: c.toDeviceId,
-        to_port: { carrier, direction: to?.direction ?? 'in' },
-        conn_type: connType,
-        loss_rate: 0,
-      }
-    }),
-  }
 }
 
 // ---------------------------------------------------------------------------

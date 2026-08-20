@@ -4,17 +4,21 @@
   后续请求可从 ``Authorization: Bearer <token>`` 或 Cookie 读取;
 - 依赖: get_current_user / get_current_admin(供其他业务单元复用);
 - 错误统一 AppError + 诊断 message_key(ies.diag.auth.*), 响应不泄露堆栈/哈希;
-- 自助注册开关默认关闭, 由管理员 PUT /api/auth/settings 切换
-  (进程内存态, 重启恢复默认关闭; 持久化留待安全设置配置表落地)。
+- 自助注册开关默认关闭, 持久化到数据库(app_settings, 修复 M-12 多 Worker
+  不一致), 由管理员 PUT /api/auth/settings 切换;
+- 外部认证(OIDC/SSO): IESPLAN_AUTH_PROVIDER=oidc 时登录页展示 SSO 入口,
+  回调经 services.external_auth(标准实现 Authlib)完成令牌交换与账号绑定。
 """
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -23,6 +27,7 @@ from iesplan.core.errors import ForbiddenError, NotFoundError
 from iesplan.db import get_db
 from iesplan.models.identity import User, WindowSession
 from iesplan.services import identity
+from iesplan.services.external_auth import ExternalAuthError
 
 #: 会话 Cookie 名
 SESSION_COOKIE_NAME = "ies_session"
@@ -40,21 +45,27 @@ _PENDING_ALLOWED_PATHS: frozenset[str] = frozenset(
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 # ---------------------------------------------------------------------------
-# 自助注册开关(默认关闭; 开启后只能注册工程师, RPD 3.1)
+# 公开设置(登录页无需认证即可感知注册开关/SSO 入口)
 # ---------------------------------------------------------------------------
 
-_registration_enabled: bool = False
+
+class PublicSettings(BaseModel):
+    """登录页可见的公开设置(不泄露任何内部细节)。"""
+
+    registration_enabled: bool
+    sso_enabled: bool
+    sso_provider_name: str = ""
 
 
-def registration_enabled() -> bool:
-    """自助注册是否开启。"""
-    return _registration_enabled
+def public_settings(db: Session) -> PublicSettings:
+    """公开设置: 注册开关(数据库权威值) + 外部认证入口。"""
+    from iesplan.services import external_auth
 
-
-def set_registration_enabled(value: bool) -> None:
-    """设置自助注册开关(管理员接口调用)。"""
-    global _registration_enabled
-    _registration_enabled = bool(value)
+    return PublicSettings(
+        registration_enabled=identity.registration_enabled(db),
+        sso_enabled=external_auth.is_oidc_enabled(),
+        sso_provider_name="OIDC" if external_auth.is_oidc_enabled() else "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +107,6 @@ class SettingsUpdate(BaseModel):
     """安全设置更新。"""
 
     registration_enabled: bool
-
 
 class UserOut(BaseModel):
     """用户信息(不含任何敏感字段)。"""
@@ -155,6 +165,11 @@ def _extract_token(request: Request) -> str | None:
 def _client_ip(request: Request) -> str | None:
     """客户端 IP(代理部署时由反向代理注入 X-Forwarded-For, 后续阶段可扩展)。"""
     return request.client.host if request.client else None
+
+
+def _pkce_verifier() -> str:
+    """生成 PKCE code_verifier(S256 要求 43-128 字符)。"""
+    return secrets.token_urlsafe(48)[:64]
 
 
 def get_auth_context(request: Request, db: DbSession) -> AuthContext:
@@ -229,10 +244,8 @@ CurrentAdmin = Annotated[User, Depends(get_current_admin)]
 
 
 def _require_admin(ctx: AuthContext) -> User:
-    """便捷校验: 当前用户须为管理员, 否则抛 403。"""
-    if not identity.has_role(ctx.db, ctx.user, "admin"):
-        raise ForbiddenError()
-    return ctx.user
+    """便捷校验: 当前用户须为管理员, 否则抛 403(与 get_current_admin 同逻辑)。"""
+    return get_current_admin(ctx)
 
 
 def _user_out(db: Session, user: User) -> UserOut:
@@ -371,7 +384,7 @@ def confirm_takeover(
 @router.post("/register", response_model=UserOut, summary="自助注册(默认关闭, 仅工程师)")
 def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
     """自助注册: 注册开关开启时可用, 只能创建 engineer 角色(RPD 3.1)。"""
-    if not registration_enabled():
+    if not identity.registration_enabled(db):
         raise identity.RegistrationDisabledError()
     user = identity.create_user(
         db,
@@ -456,11 +469,32 @@ def admin_reactivate_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
     return {"ok": True}
 
 
+@router.delete("/users/{user_id}", summary="删除账号(管理员, 级联删除其项目)")
+def admin_delete_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
+    """删除账号(管理员): 该账号拥有的项目一并删除。
+
+    - 不能删除自己 / 系统账号;
+    - 目标账号置 disabled, 全部会话/凭证撤销, 其拥有的项目全部软删。
+    """
+    _require_admin(ctx)
+    target = identity.get_user_by_id(ctx.db, user_id)
+    if target is None:
+        raise NotFoundError("", params={"object_type": "user", "id": user_id})
+    result = identity.delete_user(
+        ctx.db,
+        ctx.user,
+        target,
+        ip=_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return {"ok": True, **result}
+
+
 @router.put("/settings", summary="更新安全设置(管理员)")
 def update_settings(payload: SettingsUpdate, request: Request, ctx: AuthCtx) -> dict:
-    """更新安全设置: 自助注册开关(默认关闭)。"""
+    """更新安全设置: 自助注册开关(默认关闭, 持久化到数据库, 多 Worker 一致)。"""
     _require_admin(ctx)
-    set_registration_enabled(payload.registration_enabled)
+    identity.set_registration_enabled(ctx.db, payload.registration_enabled, updated_by=ctx.user.id)
     identity.record_auth_event(
         ctx.db,
         "maintenance",
@@ -470,11 +504,83 @@ def update_settings(payload: SettingsUpdate, request: Request, ctx: AuthCtx) -> 
         detail={"action": "registration_toggle", "registration_enabled": payload.registration_enabled},
     )
     ctx.db.commit()
-    return {"registration_enabled": registration_enabled()}
+    return {"registration_enabled": identity.registration_enabled(ctx.db)}
 
 
 @router.get("/settings", summary="读取安全设置(管理员)")
 def read_settings(ctx: AuthCtx) -> dict:
     """读取安全设置(管理员)。"""
     _require_admin(ctx)
-    return {"registration_enabled": registration_enabled()}
+    return {"registration_enabled": identity.registration_enabled(ctx.db)}
+
+
+# ---------------------------------------------------------------------------
+# 公开端点: 登录页感知(注册开关 / SSO 入口) + OIDC 单点登录
+# ---------------------------------------------------------------------------
+
+
+@router.get("/public-settings", response_model=PublicSettings, summary="公开设置(登录页)")
+def get_public_settings(db: DbSession) -> PublicSettings:
+    """登录页公开设置: 自助注册开关与外部认证(SSO)入口状态。
+
+    无需认证(登录页渲染前置条件); 仅暴露登录页需要的布尔与显示名,
+    不泄露任何内部配置细节。
+    """
+    return public_settings(db)
+
+
+@router.get("/oidc/login", summary="外部认证(SSO)登录入口")
+def oidc_login(request: Request, db: DbSession) -> RedirectResponse:
+    """跳转 OIDC 提供方授权页(PKCE + state 防 CSRF)。
+
+    state 为签名令牌(含 nonce 与 PKCE verifier, 360s 窗口), 回调时校验。
+    """
+    from iesplan.services import external_auth
+
+    if not external_auth.is_oidc_enabled():
+        raise NotFoundError("", params={"object_type": "auth_provider"})
+    nonce = secrets.token_urlsafe(24)
+    verifier = _pkce_verifier()
+    state = external_auth.build_state(nonce, verifier)
+    url = external_auth.build_authorization_url(state)
+    # 回调完成前由签名 state 携带 nonce/verifier(无状态, 多 Worker 可用)
+    return RedirectResponse(url)
+
+
+@router.get("/oidc/callback", summary="OIDC 回调(令牌交换)")
+def oidc_callback(
+    request: Request,
+    response: Response,
+    db: DbSession,
+    code: str = "",
+    state: str = "",
+) -> RedirectResponse:
+    """OIDC 提供方回调: 校验 state → 交换令牌 → 账号绑定 → 签发窗口会话。
+
+    成功: 建立浏览器会话并 302 回首页(带 ies_session Cookie);
+    失败: 302 回登录页并携带 error 提示(不泄露提供方细节)。
+    """
+    from iesplan.services import external_auth
+
+    if not external_auth.is_oidc_enabled():
+        raise NotFoundError("", params={"object_type": "auth_provider"})
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent")
+    try:
+        payload = external_auth.verify_state(state)
+        claims = external_auth.exchange_code(code, payload["verifier"])
+    except ExternalAuthError as exc:
+        identity.record_auth_event(
+            db, "login_failure", ip=ip, user_agent=ua,
+            detail={"reason": exc.params.get("reason", "oidc_failed")},
+        )
+        db.commit()
+        return RedirectResponse(f"/login?error=oidc_failed", status_code=302)
+    user = external_auth.provision_user(db, claims, ip=ip, user_agent=ua)
+    db.flush()
+    session, token, displaced = identity.create_window_session(
+        db, user, "oidc", ip=ip, user_agent=ua
+    )
+    _set_session_cookie(response, request, token)
+    db.commit()
+    return RedirectResponse("/", status_code=302)

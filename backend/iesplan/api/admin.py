@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentAdmin
 from iesplan.core.diagnostics import SEVERITY_INFO
-from iesplan.core.errors import ConflictError, ForbiddenError, NotFoundError
+from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.db import get_db
 from iesplan.models.audit import RetentionRule
 from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease
@@ -42,19 +42,6 @@ from iesplan.services import queue
 from iesplan.services import tasks as tasks_service
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-
-
-def require_admin(db: Session, user: User) -> User:
-    """管理员判定: 全局 admin 角色(user_roles 当前有效授权), 否则 403。"""
-    from iesplan.services import identity as identity_service
-
-    if not identity_service.has_role(db, user, "admin"):
-        raise ForbiddenError(
-            "需要管理员权限",
-            params={"user_id": user.id},
-            location={"object_type": "user", "object_id": user.id},
-        )
-    return user
 
 
 def _record_maintenance(
@@ -101,7 +88,6 @@ def query_audit_endpoint(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     """审计查询(RPD 13.2): 过滤 + 游标分页, 按时间倒序。"""
-    require_admin(db, admin)
     return audit_service.query_audit(
         db, entity_type=entity_type, entity_id=entity_id, action=action,
         actor_id=actor_id, actor_type=actor_type, since=since, until=until,
@@ -115,7 +101,6 @@ def diagnostics_endpoint(
     admin: CurrentAdmin,
 ) -> dict:
     """运维诊断视图: 任务/队列/存储/保留策略/维护记录/最近失败任务。"""
-    require_admin(db, admin)
     tasks_by_status = dict(
         db.execute(select(Task.status, func.count()).group_by(Task.status)).all()
     )
@@ -187,7 +172,6 @@ def unlock_task_endpoint(
     释放并发槽、终止当前尝试, 任务回到 queued 重新排队。全程审计
     (audit_log + admin_maintenance_actions)。
     """
-    require_admin(db, admin)
     task = db.get(Task, payload.task_id)
     if task is None:
         raise NotFoundError(
@@ -278,7 +262,6 @@ def transfer_project_endpoint(
     语义: 撤销原所有者成员行 → 授予目标用户 owner(追加式授权) → 原所有者
     追加 viewer 行 → ownership_transfers 记 completed → 审计(actor_type=admin)。
     """
-    require_admin(db, admin)
     project = db.get(Project, payload.project_id)
     if project is None or project.status == "deleted":
         raise NotFoundError(

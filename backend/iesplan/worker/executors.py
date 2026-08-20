@@ -37,6 +37,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from iesplan.core.diagnostics import TASK_SOLVE_FAILED
+from iesplan.core.jsonutil import jsonable
 from iesplan.core.idgen import sha256_hex
 from iesplan.engines.eval_run import EvalResult
 from iesplan.engines.planning import PlanningResult
@@ -838,19 +839,8 @@ def _write_engine_diags(ctx: RunContext, diags: list[dict]) -> None:
 
 
 def _jsonable(value: Any) -> Any:
-    """递归转换 JSON 安全值(np 数组 → list, Decimal → str 保精度, datetime → iso)。"""
-    if isinstance(value, dict):
-        return {k: _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
-    if isinstance(value, np.ndarray):
-        return _jsonable(value.tolist())
-    if isinstance(value, np.generic):
-        return float(value)
+    """递归转换 JSON 安全值(共享实现见 core/jsonutil; worker 的 Decimal 需保精度,
+    先显式 str() 再交给 jsonable, 避免哈希口径改为 float)。"""
     if isinstance(value, Decimal):
         return str(value)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)
+    return jsonable(value)

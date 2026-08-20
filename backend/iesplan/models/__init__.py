@@ -35,6 +35,7 @@ from iesplan.models.calc import (
 )
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
 from iesplan.models.identity import (
+    AppSetting,
     AuthEvent,
     Credential,
     Role,

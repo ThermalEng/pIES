@@ -35,6 +35,9 @@ class Project(Base):
         Integer, nullable=False, server_default=sa.text("480")
     )
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
+    # 管理员访问授权(所有者控制): false = 管理员不可查看项目细节/转移所有权(仅整体管理);
+    # true = 管理员可查看细节并转移所有权。默认 false。
+    admin_access: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa.text("false"))
     # 循环依赖指针: 先建表, 后补外键(use_alter)
     current_draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id", use_alter=True))
     current_version_id: Mapped[int | None] = mapped_column(ForeignKey("project_versions.id", use_alter=True))

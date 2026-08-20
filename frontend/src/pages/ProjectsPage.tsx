@@ -19,6 +19,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { translateError, useI18n } from '../i18n'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
+import { formatUtcOffset } from './workbench'
 import {
   Alert,
   Badge,
@@ -40,8 +41,8 @@ import {
   TaskOutcomeBadge,
   TaskStatusBadge,
 } from '../components/ui'
-import type { AdminUserRow, ApiError, Currency, Project, ProjectMember, ProjectListParams, Task } from '../types'
-import { addProjectViewer, removeProjectViewer } from './projects/projectApi'
+import { ApiError } from '../types'
+import type { AdminUserRow, Currency, Project, ProjectMember, ProjectListParams, Task } from '../types'
 
 type StatusFilter = 'all' | 'active' | 'archived'
 type RowOp = 'archive' | 'unarchive' | 'duplicate' | 'delete' | 'transfer' | 'viewers'
@@ -55,15 +56,6 @@ const PAGE_SIZE = 50
 
 /** 常用 UTC 偏移(小时,-12:00 ~ +14:00),创建对话框候选值;默认 +08:00(480 分钟)。 */
 const UTC_OFFSET_HOURS: number[] = Array.from({ length: 27 }, (_, i) => i - 12)
-
-/** 偏移分钟数 -> "UTC+08:00" 展示文案。 */
-function formatUtcOffset(minutes: number): string {
-  const sign = minutes < 0 ? '-' : '+'
-  const abs = Math.abs(minutes)
-  const h = Math.floor(abs / 60)
-  const m = abs % 60
-  return `UTC${sign}${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
-}
 
 export default function ProjectsPage() {
   const { t } = useI18n()
@@ -319,7 +311,11 @@ export default function ProjectsPage() {
     if (!username) return
     setViewerSubmitting('add')
     try {
-      await addProjectViewer(target.id, username)
+      // 后端查看者接口按用户 id 操作: 先由管理员用户清单解析用户名 → id
+      const page = await api.admin.users({ limit: 1000 })
+      const user = page.items.find((u) => u.username === username)
+      if (!user) throw new ApiError(400, null, 'ies.project.viewer_not_found')
+      await api.projects.updateViewer(target.id, { user_id: user.id, action: 'add' })
       setNewViewerName('')
       setNotice({ kind: 'success', text: t('ies.project.viewer_added', { username }) })
       await refreshViewers(target.id)
@@ -335,7 +331,7 @@ export default function ProjectsPage() {
     if (!target) return
     setViewerSubmitting('remove')
     try {
-      await removeProjectViewer(target.id, member.user_id)
+      await api.projects.updateViewer(target.id, { user_id: member.user_id, action: 'remove' })
       setRemoveTarget(null)
       setNotice({ kind: 'success', text: t('ies.project.viewer_removed', { username: member.username }) })
       await refreshViewers(target.id)

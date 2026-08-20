@@ -6,7 +6,7 @@
  * ies.modeling.*、ies.severity.* 等)优先通过 useI18n().t() 使用。
  */
 
-import { getLocale } from '../../i18n'
+import { getLocale, interpolate } from '../../i18n'
 
 interface Entry {
   zh: string
@@ -90,6 +90,8 @@ const TEXTS: Record<string, Entry> = {
   'sidebar.param_invalid': { zh: '取值应在 [{min}, {max}] 内', en: 'Value must be within [{min}, {max}]' },
   'sidebar.param_unset': { zh: '(不设置)', en: '(unset)' },
   'sidebar.param_opt': { zh: '可作优化变量', en: 'Optimizable' },
+  'sidebar.param_dict_incomplete': { zh: '请填写全部子项', en: 'Fill in all sub-values' },
+  'sidebar.param_dict_invalid': { zh: '子项 {key} 不是有效数值', en: 'Sub-value {key} is not a valid number' },
 
   // 诊断
   'diag.title': { zh: '校验诊断', en: 'Validation diagnostics' },
@@ -110,9 +112,5 @@ export function lt(key: string, params?: Record<string, string | number>): strin
   const locale = getLocale()
   const entry = TEXTS[key]
   const template = entry ? (locale === 'zh' ? entry.zh : entry.en) : key
-  if (!params) return template
-  return template.replace(/\{(\w+)\}/g, (match, name: string) => {
-    const value = params[name]
-    return value === undefined ? match : String(value)
-  })
+  return interpolate(template, params)
 }

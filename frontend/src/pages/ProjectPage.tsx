@@ -2,18 +2,21 @@
  * 工作台框架(ProjectPage):侧边导航 + 项目信息头 + 内容出口。
  *
  * - 侧边导航:模型 / 数据 / 配置 / 校验 / 任务 / 结果 / 导出。
- * - 项目信息头:项目名称、版本、币种、UTC 偏移、自动保存状态、离线徽章。
+ * - 项目信息头:项目名称、版本、币种、UTC 偏移、自动保存状态、离线徽章;
+ *   所有者可切换"管理员访问"授权(授权后管理员可查看项目细节并转移所有权)。
  *
  * 子页面通过 useWorkbench()/useAutosave()(见 workbench.tsx)读取上下文;
  * 保存草稿时调用 useAutosave().setStatus(...) 更新头部状态指示。
  * 路由挂载见 WorkbenchPage.tsx(子页面均为其嵌套路由)。
  */
 
+import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 
-import { Icon, Spinner } from '../components/ui'
-import { useI18n } from '../i18n'
+import { api } from '../api/client'
+import { Alert, Icon, Spinner } from '../components/ui'
+import { errorMessage, useI18n } from '../i18n'
 import { formatUtcOffset, useWorkbench } from './workbench'
 import type { AutosaveStatus } from './workbench'
 import './workbench.css'
@@ -147,9 +150,26 @@ function AutosaveIndicator({ status }: { status: AutosaveStatus }) {
  */
 export default function ProjectPage() {
   const { t } = useI18n()
-  const { projectId, project, currentVersion, offline, autosave } = useWorkbench()
+  const { projectId, project, currentVersion, offline, autosave, refresh } = useWorkbench()
+  const [adminAccessBusy, setAdminAccessBusy] = useState(false)
+  const [adminAccessError, setAdminAccessError] = useState<string | null>(null)
 
   const projectName = project?.name ?? t('ies.nav.workbench')
+
+  /** 所有者切换管理员访问授权。 */
+  const toggleAdminAccess = async (enabled: boolean) => {
+    if (!project) return
+    setAdminAccessBusy(true)
+    setAdminAccessError(null)
+    try {
+      await api.projects.setAdminAccess(project.id, enabled)
+      await refresh()
+    } catch (err) {
+      setAdminAccessError(errorMessage(err))
+    } finally {
+      setAdminAccessBusy(false)
+    }
+  }
 
   return (
     <div className="wb">
@@ -194,14 +214,31 @@ export default function ProjectPage() {
                 <span>
                   {t('ies.workbench.utc')}: {formatUtcOffset(project.fixed_utc_offset_minutes)}
                 </span>
+                {project.role === 'owner' ? (
+                  <span className="wb-header__admin-access">
+                    <label className="ies-checkbox-label" htmlFor="wb-admin-access">
+                      {t('ies.workbench.admin_access')}
+                    </label>
+                    <input
+                      id="wb-admin-access"
+                      type="checkbox"
+                      checked={Boolean(project.admin_access)}
+                      disabled={adminAccessBusy}
+                      onChange={(event) => toggleAdminAccess(event.target.checked)}
+                    />
+                  </span>
+                ) : null}
               </div>
             ) : null}
           </div>
           <div className="wb-header__status">
             <AutosaveIndicator status={autosave} />
+            {adminAccessError ? (
+              <Alert variant="error" title={adminAccessError} closable onClose={() => setAdminAccessError(null)} />
+            ) : null}
             {offline ? (
               <span
-                className="ies-badge ies-badge--warning ies-badge--shape-triangle"
+                className="ies-badge ies-badge--warning ies-badge--shape-square"
                 title={t('ies.workbench.offline_hint')}
                 role="status"
               >

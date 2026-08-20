@@ -20,7 +20,7 @@ import { useCallback, useState } from 'react'
 import { api } from '../api/client'
 import { DiagnosticsList } from '../components/DiagnosticsList'
 import { Alert, Badge, Button, Card, EmptyState, Spinner } from '../components/ui'
-import type { BadgeShape, BadgeVariant, IconName } from '../components/ui'
+import type { BadgeVariant, IconName } from '../components/ui'
 import { translateError, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import type { ApiError, Diagnostic, ValidationResult } from '../types'
@@ -36,16 +36,16 @@ function deriveStatus(diagnostics: Diagnostic[]): ValidationStatus {
   return 'ok'
 }
 
-/** 校验状态徽章(文字 + 图标 + 形状三重编码)。 */
+/** 校验状态徽章(文字 + 图标双重编码)。 */
 function ValidationStatusBadge({ status }: { status: ValidationStatus }) {
   useI18n() // 订阅语言切换,pt() 随全局表联动
-  const map: Record<ValidationStatus, { variant: BadgeVariant; icon: IconName; shape: BadgeShape }> = {
-    ok: { variant: 'success', icon: 'check', shape: 'circle' },
-    warnings: { variant: 'warning', icon: 'warning', shape: 'triangle' },
-    blocked: { variant: 'danger', icon: 'stop', shape: 'square' },
+  const map: Record<ValidationStatus, { variant: BadgeVariant; icon: IconName }> = {
+    ok: { variant: 'success', icon: 'check' },
+    warnings: { variant: 'warning', icon: 'warning' },
+    blocked: { variant: 'danger', icon: 'stop' },
   }
   const cfg = map[status]
-  return <Badge label={pt(`ies.validation.status_${status}`)} variant={cfg.variant} icon={cfg.icon}  />
+  return <Badge label={pt(`ies.validation.status_${status}`)} variant={cfg.variant} icon={cfg.icon} />
 }
 
 export default function ValidationPage() {
@@ -148,7 +148,7 @@ export default function ValidationPage() {
           <>
             <div className="ies-flex" style={{ flexWrap: 'wrap', gap: 'var(--ies-space-2)', alignItems: 'center' }}>
               <ValidationStatusBadge status={status} />
-              <span className="ies-badge ies-badge--neutral ies-badge--shape-circle">
+              <span className="ies-badge ies-badge--neutral ies-badge--shape-square">
                 <span className="ies-badge__label">
                   {result.diagnostics.length} {pt('ies.validation.diag_count_suffix')}
                 </span>

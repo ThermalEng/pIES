@@ -408,10 +408,59 @@ def test_admin_users_list_and_permission(client: TestClient, db_session: Session
     r2 = login(client, "alice", USER_PASSWORD)
     alice_headers = bearer(r2.json()["token"])
     assert client.get("/api/auth/users", headers=alice_headers).status_code == 403
-    resp = client.put(
-        "/api/auth/settings", json={"registration_enabled": True}, headers=alice_headers
+
+
+def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Session) -> None:
+    """删除账号: 该账号拥有的项目一并删除(级联), 账号停用且会话失效。"""
+    seed_admin(db_session, force_change=False)
+    alice = seed_engineer(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    admin_headers = bearer(r.json()["token"])
+    alice_headers = bearer(login(client, "alice", USER_PASSWORD).json()["token"])
+
+    # alice 创建两个项目
+    p1 = client.post(
+        "/api/projects", json={"name": "级联删除1", "currency": "CNY", "utc_offset_minutes": 480},
+        headers=alice_headers,
     )
-    assert resp.status_code == 403
+    assert p1.status_code == 201
+    p2 = client.post(
+        "/api/projects", json={"name": "级联删除2", "currency": "CNY", "utc_offset_minutes": 480},
+        headers=alice_headers,
+    )
+    assert p2.status_code == 201
+    pid1 = p1.json()["project"]["id"]
+    pid2 = p2.json()["project"]["id"]
+
+    # 管理员删除账号 alice → 两个项目一并软删
+    resp = client.delete(f"/api/auth/users/{alice.id}", headers=admin_headers)
+    assert resp.status_code == 200
+    assert resp.json()["deleted_projects"] == 2
+
+    # alice 会话失效、登录被拒
+    assert client.post("/api/auth/refresh", headers=alice_headers).status_code == 401
+    assert login(client, "alice", USER_PASSWORD).status_code == 401
+    # 项目已删除(整体视图仍可见, status=deleted; 细节视图 404)
+    admin_view = client.get("/api/projects/admin-visible", headers=admin_headers)
+    assert admin_view.status_code == 200
+    by_id = {p["id"]: p for p in admin_view.json()["projects"]}
+    assert by_id[pid1]["status"] == "deleted"
+    assert by_id[pid2]["status"] == "deleted"
+    assert client.get(f"/api/projects/{pid1}", headers=admin_headers).status_code == 404
+
+
+def test_admin_cannot_delete_self_or_system(client: TestClient, db_session: Session) -> None:
+    """管理员不能删除自己; 系统账号不可删除。"""
+    seed_admin(db_session, force_change=False)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    admin_headers = bearer(r.json()["token"])
+    admin = db_session.execute(select(identity.User).where(identity.User.username == "admin")).scalar_one()
+    assert client.delete(f"/api/auth/users/{admin.id}", headers=admin_headers).status_code == 403
+    sys_user = db_session.execute(
+        select(identity.User).where(identity.User.is_system.is_(True))
+    ).scalars().all()
+    for u in sys_user:
+        assert client.delete(f"/api/auth/users/{u.id}", headers=admin_headers).status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -420,14 +469,22 @@ def test_admin_users_list_and_permission(client: TestClient, db_session: Session
 
 
 def test_register_toggle(client: TestClient, db_session: Session) -> None:
-    """注册开关: 默认关闭(403); 管理员开启后只能注册工程师; 重名冲突 409。"""
+    """注册开关: 默认关闭(403); 管理员开启后只能注册工程师; 重名冲突 409。
+
+    开关持久化到数据库(app_settings): 同一会话内读取与写入一致;
+    公开设置端点无需认证即可感知开关状态(登录页渲染条件)。
+    """
     seed_admin(db_session, force_change=False)
-    # 默认关闭
+    # 默认关闭(公开设置端点可感知, 无需认证)
+    resp = client.get("/api/auth/public-settings")
+    assert resp.status_code == 200
+    assert resp.json()["registration_enabled"] is False
+    assert resp.json()["sso_enabled"] is False
     resp = client.post("/api/auth/register", json={"username": "bob", "password": "Bob12345"})
     assert resp.status_code == 403
     assert resp.json()["error"]["message_key"] == "ies.diag.auth.registration_disabled"
 
-    # 管理员开启(写审计)
+    # 管理员开启(写审计 + 持久化到 app_settings)
     r = login(client, "admin", ADMIN_PASSWORD)
     admin_headers = bearer(r.json()["token"])
     resp = client.put("/api/auth/settings", json={"registration_enabled": True}, headers=admin_headers)
@@ -436,6 +493,15 @@ def test_register_toggle(client: TestClient, db_session: Session) -> None:
     resp = client.get("/api/auth/settings", headers=admin_headers)
     assert resp.status_code == 200
     assert resp.json()["registration_enabled"] is True
+    # 公开设置同步生效(登录页无需登录即可见注册按钮)
+    assert client.get("/api/auth/public-settings").json()["registration_enabled"] is True
+    # 持久化: app_settings 表已写入
+    from iesplan.models.identity import AppSetting
+
+    row = db_session.execute(
+        select(AppSetting).where(AppSetting.key == "registration_enabled")
+    ).scalar_one()
+    assert row.value["value"] is True
 
     # 注册成功且角色为工程师
     resp = client.post("/api/auth/register", json={"username": "bob", "password": "Bob12345"})
@@ -457,6 +523,7 @@ def test_register_toggle(client: TestClient, db_session: Session) -> None:
     assert resp.status_code == 200
     resp = client.post("/api/auth/register", json={"username": "carol", "password": "Carol12345"})
     assert resp.status_code == 403
+    assert client.get("/api/auth/public-settings").json()["registration_enabled"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -546,3 +613,93 @@ def test_auth_events_recorded(client: TestClient, db_session: Session) -> None:
         "session_takeover",
     ):
         assert expected in types, f"缺少审计事件: {expected}"
+
+
+# ---------------------------------------------------------------------------
+# 公开设置(登录页)与外部认证(OIDC/SSO)
+# ---------------------------------------------------------------------------
+
+
+def test_public_settings_unauthenticated(client: TestClient, db_session: Session) -> None:
+    """公开设置端点: 无需认证即可读取(登录页渲染前置条件)。"""
+    resp = client.get("/api/auth/public-settings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body) == {"registration_enabled", "sso_enabled", "sso_provider_name"}
+    assert body["registration_enabled"] is False
+    assert body["sso_enabled"] is False
+    # 不应暴露内部细节
+    assert "secret" not in body
+
+
+def test_oidc_disabled_by_default(client: TestClient, db_session: Session) -> None:
+    """OIDC 默认关闭: 登录入口返回 404, 公开设置 sso_enabled=False。"""
+    resp = client.get("/api/auth/oidc/login")
+    assert resp.status_code == 404
+    assert client.get("/api/auth/public-settings").json()["sso_enabled"] is False
+
+
+def test_oidc_state_roundtrip(client: TestClient, db_session: Session) -> None:
+    """state 签名令牌: 签发→校验往返; 篡改/过期均被拒。"""
+    import time as _time
+
+    from unittest.mock import patch
+
+    from iesplan.services import external_auth
+    from iesplan.services.external_auth import ExternalAuthError
+
+    state = external_auth.build_state(nonce="n1", code_verifier="v1")
+    payload = external_auth.verify_state(state)
+    assert payload == {"nonce": "n1", "verifier": "v1"}
+
+    # 篡改 state → 拒签(BadSignature → ExternalAuthError)
+    with pytest.raises(ExternalAuthError):
+        external_auth.verify_state(state + "x")
+    # 伪造内容(不同盐/密钥)→ 拒签
+    from itsdangerous import URLSafeTimedSerializer
+
+    from iesplan.config import settings
+
+    forged = URLSafeTimedSerializer(
+        "different-secret", salt="oidc-pkce-state", signer_kwargs={"key_derivation": "hmac"}
+    ).dumps({"nonce": "n", "verifier": "v"})
+    with pytest.raises(ExternalAuthError):
+        external_auth.verify_state(forged)
+    # 过期 → 拒绝(收窄安全窗口为 1s 后休眠触发; itsdangerous 秒级精度, 需 >1s 差)
+    with patch.object(external_auth, "AUTH_CODE_WINDOW_SECONDS", 1):
+        stale = external_auth.build_state(nonce="n2", code_verifier="v2")
+        _time.sleep(2.1)
+        with pytest.raises(ExternalAuthError):
+            external_auth.verify_state(stale)
+
+
+def test_oidc_provision_user_jit(client: TestClient, db_session: Session) -> None:
+    """JIT 建号: 首次外部主体登录自动创建 engineer 账号并绑定 subject。
+
+    同一 subject 再次登录返回同一用户(不重复建号); 绑定关系落库。
+    """
+    from iesplan.services import external_auth
+
+    claims = {"sub": "oidc-user-001", "name": "外部用户", "email": "oidc@example.com"}
+    user = external_auth.provision_user(db_session, claims)
+    assert user.username == "oidc_user_001"
+    assert user.auth_subject == "oidc-user-001"
+    assert user.email == "oidc@example.com"
+    assert "engineer" in identity.user_roles(db_session, user)
+
+    # 同 subject 再次登录: 返回同一用户(不重复建号)
+    user2 = external_auth.provision_user(db_session, claims)
+    assert user2.id == user.id
+    assert db_session.execute(select(identity.User)).scalars().all() == [user]
+
+    # 用户名规则冲突 → 追加序号: 不同 subject 清洗后用户名恰好与既有账号同名
+    claims2 = {"sub": "OIDC_USER.001", "name": "x"}  # 小写+点→下划线 → oidc_user_001
+    user3 = external_auth.provision_user(db_session, claims2)
+    assert user3.username == "oidc_user_001_2"
+    assert user3.auth_subject == "OIDC_USER.001"
+
+
+def test_oidc_callback_disabled(client: TestClient, db_session: Session) -> None:
+    """回调在 OIDC 未启用时返回 404。"""
+    resp = client.get("/api/auth/oidc/callback?code=x&state=y")
+    assert resp.status_code == 404

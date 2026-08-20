@@ -38,7 +38,7 @@ export function expectedRows(resolution: ResolutionOption): number {
 }
 
 /** 标准表头(与后端 STANDARD_FIELDS 列序一致: timestamp + 7 个标准字段)。 */
-const HEADERS = [
+export const HEADERS = [
   'timestamp',
   'e_load',
   'h_load',

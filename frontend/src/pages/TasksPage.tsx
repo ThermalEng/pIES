@@ -500,8 +500,6 @@ export default function TasksPage() {
   const cancellable = detail && (detail.status === 'queued' || detail.status === 'running' || detail.status === 'cancelling')
   const retryable = detail && (detail.status === 'failed' || detail.status === 'timed_out' || detail.status === 'cancelled')
 
-  const publishedDatasets = datasets
-
   // -------------------------------------------------------------------------
   // 渲染
   // -------------------------------------------------------------------------
@@ -615,7 +613,7 @@ export default function TasksPage() {
               <div className="ies-flex" style={{ flexWrap: 'wrap', marginBottom: 'var(--ies-space-3)' }}>
                 <TaskStatusBadge status={detail.status} />
                 <TaskOutcomeBadge outcome={detail.business_outcome} />
-                <span className="ies-badge ies-badge--neutral ies-badge--shape-circle">
+                <span className="ies-badge ies-badge--neutral ies-badge--shape-square">
                   <span className="ies-badge__label">#{detail.id}</span>
                 </span>
               </div>
@@ -848,10 +846,10 @@ export default function TasksPage() {
           </Alert>
         )}
 
-        {publishedDatasets.length > 0 ? (
+        {datasets.length > 0 ? (
           <fieldset className="ies-fieldset">
             <legend>{t('ies.task.datasets')}</legend>
-            {publishedDatasets.map((ds) => (
+            {datasets.map((ds) => (
               <Checkbox
                 key={ds.id}
                 label={ds.name}

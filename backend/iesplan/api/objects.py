@@ -20,20 +20,19 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from iesplan import __version__
-from iesplan.api.auth import get_auth_context
-from iesplan.core.errors import ForbiddenError
+from iesplan.api.auth import get_current_admin
 from iesplan.db import get_db
 from iesplan.models.audit import StoredObject
 from iesplan.models.calc import Task
 from iesplan.models.identity import User
 from iesplan.models.project import Project
-from iesplan.services import identity, queue
+from iesplan.services import queue
 from iesplan.services import objects as objects_service
 
 #: 对象域管理路由: 挂载前缀 /api/admin(仅管理员)
@@ -48,24 +47,7 @@ class CleanupRequest(BaseModel):
     dry_run: bool = True
 
 
-def get_current_admin(request: Request, db: DbSession) -> User:
-    """统一管理员认证依赖: 仅接受真实窗口会话 + 全局 admin 角色判定。
-
-    - 会话无效/未认证 → 401(AuthRequiredError/SessionInvalidError), 不回退任何
-      客户端声明的身份输入(已删除 X-User-Id 兼容认证, 防身份伪造, C-01);
-    - 主体非管理员 → 403(ForbiddenError, ies.diag.perm.denied)。
-    """
-    ctx = get_auth_context(request, db)
-    if not identity.has_role(db, ctx.user, "admin"):
-        raise ForbiddenError(
-            "需要管理员权限",
-            params={"user_id": ctx.user.id},
-            location={"object_type": "user", "object_id": ctx.user.id},
-        )
-    return ctx.user
-
-
-#: 当前管理员依赖(须在 get_current_admin 定义之后声明)
+#: 当前管理员依赖(复用 auth 模块的权威判定: 真实窗口会话 + 全局 admin 角色, 防身份伪造 C-01)
 CurrentAdmin = Annotated[User, Depends(get_current_admin)]
 
 

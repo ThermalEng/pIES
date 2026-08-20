@@ -31,15 +31,12 @@ async function resolveEvidencePackage(projectId: number): Promise<number | null>
   const done = page.items
     .filter((tk) => tk.status === 'completed')
     .sort((a, b) => b.requested_at.localeCompare(a.requested_at))
-  // 最多尝试最近的 10 个已完成任务
-  for (const tk of done.slice(0, 10)) {
-    try {
-      // 先取任务详情,填充适配层的 证据包→任务 映射缓存(Excel 导出反查评估依赖)
-      await api.tasks.get(projectId, tk.id)
-      const r = await api.results.result(projectId, tk.id)
-      if (r.evidence_package_id > 0) return r.evidence_package_id
-    } catch {
-      // 单任务解析失败继续尝试下一个
+  // 最多尝试最近的 10 个已完成任务;tasks.get 内部已拉取结果视图填充 evidence,
+  // 各任务并行解析(原先逐任务串行 + 重复 result 请求)。
+  const details = await Promise.allSettled(done.slice(0, 10).map((tk) => api.tasks.get(projectId, tk.id)))
+  for (const d of details) {
+    if (d.status === 'fulfilled' && d.value.evidence.length > 0) {
+      return d.value.evidence[0].package_id
     }
   }
   return null

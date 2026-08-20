@@ -26,6 +26,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from iesplan.core.jsonutil import canonical_json, jsonable
+
 import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -75,8 +77,10 @@ ROLE_CAPABILITIES: dict[str, set[str]] = {
         "duplicate", "export_package", "export_excel",  # owner 覆盖 viewer 全部能力
     },
     "viewer": {"view", "export_excel"},
-    # 管理员经维护入口只读访问(不含任何业务编辑能力)
-    "maintenance_admin": {"view", "maintenance"},
+    # 管理员经维护入口只读访问(不含业务编辑能力); 未获项目所有者授权
+    # (admin_access=false)时, 管理员连 view 都没有(项目细节与管理员隔离);
+    # 获授权后可查看细节并转移所有权(view + maintenance + transfer)
+    "maintenance_admin": {"view", "maintenance", "transfer"},
 }
 
 
@@ -91,31 +95,28 @@ def get_role(db: Session, user: User, project_id: int) -> str | None:
 
 
 def _is_admin(db: Session, user: User) -> bool:
-    """用户是否持有全局 admin 角色(经 user_roles 当前有效授权)。"""
-    row = db.execute(
-        select(Role.id)
-        .join(UserRole, UserRole.role_id == Role.id)
-        .where(
-            UserRole.user_id == user.id,
-            UserRole.revoked_at.is_(None),
-            Role.code == "admin",
-        )
-        .limit(1)
-    ).first()
-    return row is not None
+    """用户是否持有全局 admin 角色(委托 identity 的权威判定)。"""
+    from iesplan.services import identity
+
+    return identity.has_role(db, user, "admin")
 
 
 def ensure_access(db: Session, user: User, project_id: int, *capabilities: str) -> None:
     """访问判定(U02, RPD 20.2): 用户必须同时具备全部请求能力, 否则 ForbiddenError。
 
-    - owner 具备全部业务能力; viewer 只读; 管理员(全局 admin 角色)经维护入口
-      只读访问(view + maintenance)。
+    - owner 具备全部业务能力; viewer 只读;
+    - 管理员(全局 admin 角色)默认与项目隔离: 仅当项目所有者开启 admin_access
+      授权后方可 view + transfer; manage_lifecycle(删除/归档)始终授予管理员
+      (默认即可整体管理删除, 无需授权)。
     - 项目不存在或已删除一律按 NotFoundError(不泄露项目存在性细节)。
     """
-    _get_project(db, project_id)  # 存在性检查: 不存在/已删除 → 404
+    project = _get_project(db, project_id)  # 存在性检查: 不存在/已删除 → 404
     granted = set(ROLE_CAPABILITIES.get(get_role(db, user, project_id) or "", set()))
     if _is_admin(db, user):
-        granted |= ROLE_CAPABILITIES["maintenance_admin"]
+        if project.admin_access:
+            granted |= ROLE_CAPABILITIES["maintenance_admin"]
+        # 管理员始终可管理项目整体生命周期(删除/归档), 无需授权
+        granted |= {"manage_lifecycle"}
     missing = [cap for cap in capabilities if cap not in granted]
     if missing:
         raise ForbiddenError(
@@ -247,6 +248,24 @@ def transfer_ownership(db: Session, user: User, project_id: int, target_user_id:
         before={"from_user_id": from_user_id},
         after={"to_user_id": target_user_id, "auth_version": auth_version},
     )
+    return project
+
+
+def set_admin_access(db: Session, user: User, project_id: int, enabled: bool) -> Project:
+    """切换管理员访问授权(仅所有者): 授权后管理员可查看项目细节并转移所有权。
+
+    未授权时管理员与项目细节隔离(仅整体管理/删除), 默认关闭。
+    """
+    ensure_access(db, user, project_id, "manage_members")
+    project = _get_project(db, project_id)
+    if project.admin_access != enabled:
+        project.admin_access = enabled
+        project.updated_at = datetime.now(UTC)
+        db.flush()
+        _audit(
+            db, "project", project_id, "project.admin_access_changed", user.id,
+            after={"admin_access": enabled},
+        )
     return project
 
 
@@ -398,6 +417,18 @@ def list_visible_projects(db: Session, user: User) -> list[dict]:
         .order_by(Project.created_at.desc())
     ).all()
     return [{**project_to_dict(p), "my_role": role} for p, role in rows]
+
+
+def list_all_projects(db: Session) -> list[dict]:
+    """全部项目整体视图(管理员管理入口): 含已删除, 仅整体管理字段。
+
+    不含草稿内容/版本等细节(未获授权的项目细节与管理员隔离);
+    附带 admin_access 供管理端判断是否可进入项目查看细节。
+    """
+    projects = db.execute(
+        select(Project).order_by(Project.created_at.desc())
+    ).scalars().all()
+    return [project_to_dict(p) for p in projects]
 
 
 def archive_project(db: Session, user: User, project_id: int) -> Project:
@@ -574,14 +605,14 @@ def update_draft(
             continue
         _validate_command_scope(cmd, project_id)
         result = _apply_command(content, cmd)
-        applied[cid] = {"revision": draft.revision + 1, "result": _jsonable(result)}
+        applied[cid] = {"revision": draft.revision + 1, "result": jsonable(result)}
         changed = True
         results.append(
             {
                 "command_id": cid,
                 "status": "applied",
                 "revision": draft.revision + 1,
-                "result": _jsonable(result),
+                "result": jsonable(result),
             }
         )
 
@@ -932,7 +963,7 @@ def current_version_matches_draft(db: Session, project: Project) -> bool:
         return False
     draft = _get_current_draft(db, project)
     content = _load_draft_content(db, draft)
-    raw = _canonical_json(_version_content(project, content))
+    raw = canonical_json(_version_content(project, content))
     return sha256_hex(raw.encode("utf-8")) == version.content_hash
 
 
@@ -1081,6 +1112,7 @@ def project_to_dict(project: Project) -> dict:
         "currency": project.currency,
         "fixed_utc_offset_minutes": project.fixed_utc_offset_minutes,
         "schema_version": project.schema_version,
+        "admin_access": project.admin_access,
         "current_draft_id": project.current_draft_id,
         "current_version_id": project.current_version_id,
         "created_at": project.created_at,
@@ -1157,6 +1189,11 @@ def version_to_dict(version: ProjectVersion) -> dict:
     }
 
 
+def require_project(db: Session, project_id: int) -> Project:
+    """按 id 取项目; 不存在或已删除(软删)一律 404(无回收站语义)。"""
+    return _get_project(db, project_id)
+
+
 def _get_project(db: Session, project_id: int) -> Project:
     """按 id 取项目; 不存在或已删除(软删)一律 404(无回收站语义)。"""
     project = db.get(Project, project_id)
@@ -1167,6 +1204,11 @@ def _get_project(db: Session, project_id: int) -> Project:
             location={"object_type": "project", "object_id": project_id},
         )
     return project
+
+
+def get_current_draft(db: Session, project: Project) -> Draft:
+    """取项目当前草稿(is_current=true 且修订最大者); 缺失视为数据损坏。"""
+    return _get_current_draft(db, project)
 
 
 def _get_current_draft(db: Session, project: Project) -> Draft:
@@ -1280,7 +1322,7 @@ def _store_content(db: Session, content: dict) -> str:
 
     相同内容的重复写入按 oid 去重并递增引用计数(对象清理由 U11/U16 负责)。
     """
-    raw = _canonical_json(content)
+    raw = canonical_json(content)
     content_hash = sha256_hex(raw.encode("utf-8"))
     obj = db.execute(select(StoredObject).where(StoredObject.oid == content_hash)).scalar_one_or_none()
     if obj is None:
@@ -1388,24 +1430,6 @@ def _get_object_by_oid(db: Session, oid: str) -> StoredObject:
     return obj
 
 
-def _canonical_json(content: dict) -> str:
-    """规范化 JSON(键排序、紧凑分隔), 保证相同内容的哈希稳定。"""
-    return json.dumps(_jsonable(content), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _jsonable(value: Any) -> Any:
-    """递归转换为 JSON 安全值(datetime → ISO 字符串, Decimal → float)。"""
-    if isinstance(value, dict):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        return float(value)
-    return value
-
-
 def _audit(
     db: Session,
     entity_type: str,
@@ -1423,8 +1447,8 @@ def _audit(
             action=action,
             actor_id=actor_id,
             actor_type="user",
-            before=_jsonable(before) if before else None,
-            after=_jsonable(after) if after else None,
+            before=jsonable(before) if before else None,
+            after=jsonable(after) if after else None,
         )
     )
 
@@ -1455,4 +1479,6 @@ __all__ = [
     "project_to_dict",
     "draft_to_dict",
     "version_to_dict",
+    "set_admin_access",
+    "list_all_projects",
 ]

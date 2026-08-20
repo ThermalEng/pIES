@@ -29,22 +29,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.core.diagnostics import SEVERITY_BLOCKING
-from iesplan.core.errors import AppError
+from iesplan.core.errors import ForbiddenError, http_error
 from iesplan.db import get_db
 from iesplan.services import package as package_service
 from iesplan.services import project as project_service
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
-
-
-def _http_error(status: int, code: str, message_key: str, params: dict[str, Any]) -> AppError:
-    """构造带指定 HTTP 状态码的应用错误(状态码在错误实例上设置)。"""
-    err = AppError(
-        "", code=code, severity=SEVERITY_BLOCKING, message_key=message_key, params=params
-    )
-    err.http_status = status
-    return err
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +138,22 @@ def list_projects_endpoint(
 ) -> dict:
     """我可见的项目列表(所有者 + 查看者, 不含已删除)。"""
     return {"projects": project_service.list_visible_projects(db, user)}
+
+
+@router.get("/admin-visible", summary="全部项目整体视图(管理员)")
+def list_all_projects_endpoint(
+    db: Annotated[Session, Depends(get_db)],
+    admin: CurrentUser,
+) -> dict:
+    """管理员整体管理入口: 全部项目(含已删除), 不含项目内容细节(草稿/版本)。
+
+    未获项目所有者授权的项目只暴露整体管理字段(name/status/owner), 供删除管理;
+    细节(草稿内容)与管理员隔离, 经 GET /projects/{id} 访问未授权项目返回 403。
+    """
+    if not project_service._is_admin(db, admin):
+        raise ForbiddenError()
+    projects = project_service.list_all_projects(db)
+    return {"projects": projects}
 
 
 @router.get("/{project_id}", summary="项目视图")
@@ -282,6 +288,28 @@ def unarchive_project_endpoint(
     }
 
 
+class AdminAccessRequest(BaseModel):
+    """管理员访问授权切换请求体(仅所有者)。"""
+
+    enabled: bool
+
+
+@router.put("/{project_id}/admin-access", summary="切换管理员访问授权(所有者)")
+def set_admin_access_endpoint(
+    project_id: int,
+    payload: AdminAccessRequest,
+    db: Annotated[Session, Depends(get_db)],
+    user: CurrentUser,
+) -> dict:
+    """所有者授权管理员查看项目细节并转移所有权; 关闭后管理员与项目细节隔离。"""
+    project = project_service.set_admin_access(db, user, project_id, payload.enabled)
+    db.commit()
+    return {
+        "project": project_service.project_to_dict(project),
+        "my_role": project_service.get_role(db, user, project_id),
+    }
+
+
 @router.delete("/{project_id}", status_code=204, summary="删除项目")
 def delete_project_endpoint(
     project_id: int,
@@ -374,11 +402,11 @@ def import_package_endpoint(
     # 封顶流式读取: 最多读 (上限+1) 字节, 超出即拒绝(内存占用有界)
     data = file.file.read(package_service.MAX_PACKAGE_BYTES + 1)
     if not data:
-        raise _http_error(400, "API-REQ-001", "ies.error.empty_file", {"filename": file.filename or ""})
+        raise http_error(400, "API-REQ-001", "ies.error.empty_file", filename=file.filename or "")
     if len(data) > package_service.MAX_PACKAGE_BYTES:
-        raise _http_error(
+        raise http_error(
             413, "PKG-SIZE-001", "ies.diag.pkg.too_large",
-            {"reason": "package_too_large", "max_bytes": package_service.MAX_PACKAGE_BYTES},
+            reason="package_too_large", max_bytes=package_service.MAX_PACKAGE_BYTES,
         )
     proposal = package_service.import_proposal(
         db, user, data, idempotency_key=idempotency_key

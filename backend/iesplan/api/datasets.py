@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.core.errors import AppError, NotFoundError
+from iesplan.core.errors import NotFoundError, http_error
 from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.db import get_db
 from iesplan.services import dataset as dataset_service
@@ -67,13 +67,6 @@ class DatasetCreate(BaseModel):
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
-
-
-def _http_error(status: int, code: str, message_key: str, **params) -> AppError:
-    """构造带指定 HTTP 状态码的 AppError(基类默认 500, 按需覆盖)。"""
-    err = AppError(code=code, message_key=message_key, params=params)
-    err.http_status = status
-    return err
 
 
 def _require_dataset(db: Session, project_id: int, dataset_id: int):
@@ -149,9 +142,9 @@ def _parse_json_field(raw: str | None, name: str) -> dict:
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise _http_error(400, "API-REQ-001", "ies.error.invalid_json", field=name) from exc
+        raise http_error(400, "API-REQ-001", "ies.error.invalid_json", field=name) from exc
     if not isinstance(value, dict):
-        raise _http_error(400, "API-REQ-001", "ies.error.invalid_json", field=name)
+        raise http_error(400, "API-REQ-001", "ies.error.invalid_json", field=name)
     return value
 
 
@@ -164,7 +157,7 @@ def _parse_json_field(raw: str | None, name: str) -> dict:
 def download_template(resolution: str = Query(default="1h")) -> Response:
     """下载标准 CSV 模板(字段说明/单位/示例, 双语注释行, REQ-DATA-002)。"""
     if resolution not in RESOLUTIONS:
-        raise _http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
+        raise http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
     content = dataset_service.get_template(resolution)
     headers = {"Content-Disposition": f'attachment; filename="iesplan_dataset_template_{resolution}.csv"'}
     return Response(content=content, media_type="text/csv; charset=utf-8", headers=headers)
@@ -262,9 +255,9 @@ def upload_version(
     project_service.ensure_access(db, user, project_id, "edit")
     _require_dataset(db, project_id, dataset_id)
     if resolution not in RESOLUTIONS:
-        raise _http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
+        raise http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
     if not isinstance(utc_offset_minutes, int) or not (-720 <= utc_offset_minutes <= 840):
-        raise _http_error(400, "API-REQ-001", "ies.error.invalid_utc_offset", value=utc_offset_minutes)
+        raise http_error(400, "API-REQ-001", "ies.error.invalid_utc_offset", value=utc_offset_minutes)
 
     # Content-Length 预检(存在时; multipart 包含其他字段, 仅作快速拒绝)
     try:
@@ -272,14 +265,14 @@ def upload_version(
     except ValueError:
         raw_len = 0
     if raw_len > _MAX_UPLOAD_BYTES:
-        raise _http_error(400, "API-REQ-001", "ies.error.file_too_large", max_bytes=_MAX_UPLOAD_BYTES)
+        raise http_error(400, "API-REQ-001", "ies.error.file_too_large", max_bytes=_MAX_UPLOAD_BYTES)
 
     # 封顶流式读取: 最多读 (上限+1) 字节, 超出即拒绝(内存占用有界)
     data = file.file.read(_MAX_UPLOAD_BYTES + 1)
     if not data:
-        raise _http_error(400, "API-REQ-001", "ies.error.empty_file", filename=file.filename or "")
+        raise http_error(400, "API-REQ-001", "ies.error.empty_file", filename=file.filename or "")
     if len(data) > _MAX_UPLOAD_BYTES:
-        raise _http_error(400, "API-REQ-001", "ies.error.file_too_large", max_bytes=_MAX_UPLOAD_BYTES)
+        raise http_error(400, "API-REQ-001", "ies.error.file_too_large", max_bytes=_MAX_UPLOAD_BYTES)
 
     fields_dict = _parse_json_field(fields, "fields")
     meta_dict = _parse_json_field(meta, "meta")
@@ -342,7 +335,7 @@ def create_sample(
     project_service.ensure_access(db, user, project_id, "edit")
     _require_dataset(db, project_id, dataset_id)
     if resolution not in RESOLUTIONS:
-        raise _http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
+        raise http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
     version = dataset_service.create_builtin_sample(
         db, project_id, resolution, region=region, user_id=user.id, dataset_id=dataset_id
     )

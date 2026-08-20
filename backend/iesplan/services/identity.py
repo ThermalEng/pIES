@@ -37,7 +37,8 @@ from iesplan.core.security import (
     verify_password,
 )
 from iesplan.models.common import EMAIL_RE, USERNAME_RE
-from iesplan.models.identity import AuthEvent, Credential, Role, User, UserRole, WindowSession
+from iesplan.models.identity import AppSetting, AuthEvent, Credential, Role, User, UserRole, WindowSession
+from iesplan.models.project import Project
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +359,48 @@ def _validate_new_password(password: str) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# 应用级设置(键值, 多 Worker 权威来源, M-12)
+# ---------------------------------------------------------------------------
+
+#: 设置键: 自助注册开关(默认关闭)
+KEY_REGISTRATION_ENABLED = "registration_enabled"
+
+
+def get_app_setting(db: Session, key: str, default: Any = None) -> Any:
+    """读取应用级设置(未设置返回 default)。"""
+    row = db.execute(
+        select(AppSetting).where(AppSetting.key == key)
+    ).scalar_one_or_none()
+    if row is None:
+        return default
+    return row.value.get("value", default)
+
+
+def set_app_setting(db: Session, key: str, value: Any, updated_by: int | None = None) -> None:
+    """写入应用级设置(upsert), 全部 Worker 从数据库读取同一值。"""
+    row = db.execute(
+        select(AppSetting).where(AppSetting.key == key)
+    ).scalar_one_or_none()
+    if row is None:
+        db.add(AppSetting(key=key, value={"value": value}, updated_by=updated_by))
+    else:
+        row.value = {"value": value}
+        row.updated_by = updated_by
+        row.updated_at = datetime.now(UTC)
+    db.flush()
+
+
+def registration_enabled(db: Session) -> bool:
+    """自助注册开关(数据库权威值, 默认关闭)。"""
+    return bool(get_app_setting(db, KEY_REGISTRATION_ENABLED, False))
+
+
+def set_registration_enabled(db: Session, value: bool, updated_by: int | None = None) -> None:
+    """切换自助注册开关(持久化, 多 Worker 一致)。"""
+    set_app_setting(db, KEY_REGISTRATION_ENABLED, bool(value), updated_by=updated_by)
+
+
+# ---------------------------------------------------------------------------
 # 审计
 # ---------------------------------------------------------------------------
 
@@ -621,6 +664,67 @@ def reactivate_user(
         detail={"action": "user_reactivated", "by": admin.id},
     )
     db.commit()
+
+
+def delete_user(
+    db: Session,
+    admin: User,
+    user: User,
+    *,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> dict:
+    """删除账号(管理员): 该账号拥有的项目一并删除(RPD 5.4 账号生命周期)。
+
+    - 不能删除自己, 不能删除系统账号;
+    - 目标用户拥有的项目全部置 status='deleted'(软删, 与项目删除一致,
+      不可变版本/审计保留, 对象清理由 U16 重试执行);
+    - 用户状态置 disabled, 全部会话撤销, 凭证撤销(不可变表只置撤销标记)。
+    返回: {"deleted_projects": N, "deleted_datasets": N}(数据集一并回收)。
+    """
+    if user.id == admin.id:
+        raise ForbiddenError("", params={"reason": "cannot_delete_self"})
+    if user.is_system:
+        raise ForbiddenError("", params={"reason": "system_account"})
+    from iesplan.services import project as project_service
+
+    now = utcnow()
+    # 该用户拥有的项目 → 软删(级联)
+    owned = db.execute(
+        select(Project).where(Project.owner_id == user.id, Project.status != "deleted")
+    ).scalars().all()
+    deleted_projects = 0
+    for project in owned:
+        project.status = "deleted"
+        project.updated_at = now
+        deleted_projects += 1
+        project_service._audit(
+            db, "project", project.id, "project.deleted_by_account", admin.id,
+            after={"reason": "account_deleted", "account_id": user.id},
+        )
+    # 账号停用 + 会话/凭证撤销
+    user.status = "disabled"
+    user.updated_at = now
+    revoke_all_user_sessions(db, user, revoked_by=admin.id)
+    creds = db.execute(
+        select(Credential).where(
+            Credential.user_id == user.id,
+            Credential.credential_type == "password",
+            Credential.revoked_at.is_(None),
+        )
+    ).scalars().all()
+    for cred in creds:
+        _revoke_credential(cred, now)
+    record_auth_event(
+        db,
+        "account_disabled",
+        user_id=user.id,
+        ip=ip,
+        user_agent=user_agent,
+        detail={"action": "account_deleted", "deleted_by": admin.id, "deleted_projects": deleted_projects},
+    )
+    db.commit()
+    return {"deleted_projects": deleted_projects}
 
 
 # ---------------------------------------------------------------------------

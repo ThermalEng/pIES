@@ -227,7 +227,6 @@ export default function ResultsPage() {
   const [dataVersions, setDataVersions] = useState<Array<{ name: string; version_no: number }>>([])
 
   // Pareto 选择与应用
-  const [candidates, setCandidates] = useState<Candidate[]>([])
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null)
   const [applyOpen, setApplyOpen] = useState(false)
   const [applying, setApplying] = useState(false)
@@ -415,9 +414,7 @@ export default function ResultsPage() {
   const demandMetrics = useMemo(() => pickMetrics(metrics, [/demand/i]), [metrics])
   const relMetrics = useMemo(() => pickMetrics(metrics, [/^rel\.|sample/i]), [metrics])
 
-  useEffect(() => {
-    setCandidates(extractCandidates(metrics))
-  }, [metrics])
+  const candidates = useMemo(() => extractCandidates(metrics), [metrics])
 
   const selectedCandidate = useMemo(() => {
     if (!selectedCandidateId) return null
@@ -508,18 +505,8 @@ export default function ResultsPage() {
     setExportOk(false)
     setExportBusy('excel')
     try {
-      // 预热评估缓存:ResultsPage 进入时已调用 api.results.assessments 填充
-      // pkgAssessmentCache(若评估历史为空,resolveAssessmentId 内部会主动触发 full 评估)。
-      const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
-      const taskId = entry ? entry.task.id : 0
-      if (taskId > 0) {
-        try {
-          await api.results.assessments(projectId, taskId)
-        } catch {
-          // 静默:resolveAssessmentId 会再尝试一次
-        }
-      }
-      // lang 为前端约定附加参数(后端应按此生成对应语言模板,缺省 zh)
+      // 评估缓存已由选中包加载效应填充(pkgAssessmentCache);
+      // 若评估历史为空,api.exports.excel → resolveAssessmentId 内部会主动触发 full 评估。
       const input = {
         project_id: projectId,
         evidence_package_id: selectedPkgId,
@@ -536,7 +523,7 @@ export default function ResultsPage() {
     } finally {
       setExportBusy(null)
     }
-  }, [projectId, selectedPkgId, exportLang, entries])
+  }, [projectId, selectedPkgId, exportLang])
 
   const exportPackage = useCallback(async () => {
     setExportError(null)

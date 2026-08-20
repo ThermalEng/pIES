@@ -23,7 +23,7 @@ import type {
 import { createPortal } from 'react-dom'
 
 import { useI18n } from '../i18n'
-import type { AssessmentGrade, ProjectStatus, Severity, TaskStatus, TaskOutcome } from '../types'
+import type { ProjectStatus, Severity, TaskStatus, TaskOutcome } from '../types'
 
 // ---------------------------------------------------------------------------
 // 图标(内联 SVG,stroke 随当前文字颜色)
@@ -389,16 +389,11 @@ export function TD({ align = 'left', className, children, ...rest }: TDProps) {
 
 export type BadgeVariant = 'neutral' | 'primary' | 'success' | 'danger' | 'warning' | 'info'
 
-/** 状态徽章形状(与颜色正交的编码维度)。 */
-export type BadgeShape = 'circle' | 'square' | 'triangle' | 'diamond'
-
 export interface BadgeProps {
   label: string
   variant?: BadgeVariant
   /** 图标(图标 + 文字双重编码)。 */
   icon?: IconName
-  /** 形状(形状 + 颜色双重编码)。 */
-  shape?: BadgeShape
   /** 运行中动画脉冲。 */
   pulse?: boolean
   size?: 'sm' | 'md'
@@ -476,18 +471,6 @@ export function ProjectStatusBadge({ status }: { status: ProjectStatus }) {
   }
   const cfg = map[status]
   return <Badge label={t(`ies.project.status_${status}`)} variant={cfg.variant} icon={cfg.icon} />
-}
-
-/** 四维评估等级徽章。 */
-export function AssessmentBadge({ grade }: { grade: AssessmentGrade }) {
-  const { t } = useI18n()
-  const map: Record<AssessmentGrade, { variant: BadgeVariant; icon: IconName }> = {
-    pass: { variant: 'success', icon: 'check' },
-    fail: { variant: 'danger', icon: 'cross' },
-    unknown: { variant: 'neutral', icon: 'question' },
-  }
-  const cfg = map[grade]
-  return <Badge label={t(`ies.result.grade_${grade}`)} variant={cfg.variant} icon={cfg.icon} />
 }
 
 // ---------------------------------------------------------------------------
@@ -642,13 +625,4 @@ export function Dialog({ open, onClose, title, children, footer, size = 'md' }: 
     </div>,
     document.body,
   )
-}
-
-// ---------------------------------------------------------------------------
-// 屏幕阅读器专用文本
-// ---------------------------------------------------------------------------
-
-/** 仅读屏可见的文本。 */
-export function SrText({ children }: { children: ReactNode }) {
-  return <span className="sr-only">{children}</span>
 }

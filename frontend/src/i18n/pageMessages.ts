@@ -8,7 +8,7 @@
  * 用法:pt('ies.data.resolution') 等价于全局 t(),支持 {name} 占位插值。
  */
 
-import { getLocale, translate } from './index'
+import { getLocale, interpolate, translate } from './index'
 import type { Locale } from './index'
 
 const PAGE_MESSAGES_ZH: Record<string, string> = {
@@ -394,15 +394,6 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
 
 function table(locale: Locale): Record<string, string> {
   return locale === 'zh' ? PAGE_MESSAGES_ZH : PAGE_MESSAGES_EN
-}
-
-/** {name} 占位插值(与全局 translate 一致)。 */
-function interpolate(template: string, params?: Record<string, unknown> | null): string {
-  if (!params) return template
-  return template.replace(/\{(\w+)\}/g, (match, name: string) => {
-    const value = params[name]
-    return value === undefined || value === null ? match : String(value)
-  })
 }
 
 /**

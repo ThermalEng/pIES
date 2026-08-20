@@ -3,6 +3,8 @@
  *
  * 视图状态机(均在 /login 路由内切换,不离开公开路由):
  *   login            登录表单(用户名/密码,表单原生 Enter 提交)
+ *   register         自助注册(仅管理员开启注册开关后显示入口;
+ *                    注册成功后回登录表单)
  *   change_password  首次登录强制改密(后端 user.force_password_change = true;
  *                    改密成功即凭证轮换,须用新密码重新登录)
  *   takeover         窗口接管确认(后端 needs_takeover_confirm = true:
@@ -10,6 +12,9 @@
  *                    confirm-takeover 撤销旧会话并轮换新窗口凭证)
  *
  * 其他能力:
+ *   - 注册开关 / SSO 入口: 登录页渲染时拉取公开设置(GET /api/auth/public-settings,
+ *     无需认证); registration_enabled=true 时显示注册入口,
+ *     sso_enabled=true 时显示 SSO 登录按钮(跳转 /api/auth/oidc/login)。
  *   - 会话过期:全局 401 处理器(api/client + App 注册)带 state.reason=expired
  *     跳回本页,此处展示过期提示(ies.auth.session_expired)。
  *   - 登录/改密错误:直接渲染后端诊断信封 message_key 对应文案
@@ -21,6 +26,9 @@
  *   POST /api/auth/login            → {token, user{force_password_change}, needs_takeover_confirm}
  *   POST /api/auth/change-password  → 改密后凭证版本递增,当前及旧会话全部失效
  *   POST /api/auth/confirm-takeover → 以 Cookie 凭证确认,返回全新 token
+ *   GET  /api/auth/public-settings  → {registration_enabled, sso_enabled, sso_provider_name}
+ *   POST /api/auth/register         → 仅开关开启时可用(创建 engineer 账号)
+ *   GET  /api/auth/oidc/login       → 302 跳转 OIDC 提供方授权页
  */
 
 import { useEffect, useState } from 'react'
@@ -28,9 +36,10 @@ import type { FormEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 import { api } from '../api/client'
-import { ApiError } from '../types'
-import { useI18n } from '../i18n'
-import { Alert, Badge, Button, Checkbox, FormField, Input } from '../components/ui'
+import { ApiError, PublicAuthSettings } from '../types'
+import { errorMessage, useI18n } from '../i18n'
+import type { Locale } from '../i18n'
+import { Alert, Badge, Button, Checkbox, FormField, Input, Select } from '../components/ui'
 
 // ---------------------------------------------------------------------------
 // 类型(与后端 AuthResponse 对齐;脚手架 LoginResponse 已过时,此处本地收窄)
@@ -54,7 +63,7 @@ interface AuthResponse {
   needs_takeover_confirm: boolean
 }
 
-type View = 'login' | 'change_password' | 'takeover'
+type View = 'login' | 'register' | 'change_password' | 'takeover'
 
 // ---------------------------------------------------------------------------
 // 辅助
@@ -89,7 +98,7 @@ function isNetworkFailure(err: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 export default function LoginPage() {
-  const { t } = useI18n()
+  const { t, locale, setLocale } = useI18n()
   const navigate = useNavigate()
   const location = useLocation()
   const browserOnline = useOnlineStatus()
@@ -122,9 +131,30 @@ export default function LoginPage() {
   const [takeoverError, setTakeoverError] = useState<string | null>(null)
   const [takeoverBusy, setTakeoverBusy] = useState(false)
 
-  /** 渲染后端诊断文案(ApiError.message_key + params 插值)。 */
-  const errorText = (err: unknown): string =>
-    err instanceof ApiError ? t(err.message_key, err.params) : t('ies.error.unknown')
+  // 公开设置(注册开关 / SSO 入口; 登录页渲染前置条件, 失败不阻断登录)
+  const [publicSettings, setPublicSettings] = useState<PublicAuthSettings | null>(null)
+  const [settingsError, setSettingsError] = useState<string | null>(null)
+
+  // 自助注册表单
+  const [regUsername, setRegUsername] = useState('')
+  const [regDisplayName, setRegDisplayName] = useState('')
+  const [regEmail, setRegEmail] = useState('')
+  const [regPassword, setRegPassword] = useState('')
+  const [regConfirm, setRegConfirm] = useState('')
+  const [regError, setRegError] = useState<string | null>(null)
+  const [regBusy, setRegBusy] = useState(false)
+
+  // 拉取公开设置(无需认证; 失败时注册/SSO 入口隐藏, 登录不受影响)
+  useEffect(() => {
+    api.auth
+      .publicSettings()
+      .then(setPublicSettings)
+      .catch(() => setSettingsError(t('ies.error.network')))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** 渲染后端诊断文案(共享 errorMessage:ApiError 走 translateError,其余兜底)。 */
+  const errorText = (err: unknown): string => errorMessage(err)
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -169,6 +199,40 @@ export default function LoginPage() {
       setLoginError(errorText(err))
     } finally {
       setLoginBusy(false)
+    }
+  }
+
+  const handleRegister = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!regUsername.trim() || !regPassword || !regConfirm) {
+      setRegError(t('ies.auth.required'))
+      return
+    }
+    if (regPassword !== regConfirm) {
+      setRegError(t('ies.auth.password_mismatch'))
+      return
+    }
+    setRegError(null)
+    setRegBusy(true)
+    try {
+      await api.auth.register({
+        username: regUsername.trim(),
+        password: regPassword,
+        display_name: regDisplayName.trim() || regUsername.trim(),
+        email: regEmail.trim() || undefined,
+      })
+      // 注册成功: 回登录表单并提示用新账号登录
+      setNotice(t('ies.auth.register_ok'))
+      setRegUsername('')
+      setRegDisplayName('')
+      setRegEmail('')
+      setRegPassword('')
+      setRegConfirm('')
+      setView('login')
+    } catch (err) {
+      setRegError(errorText(err))
+    } finally {
+      setRegBusy(false)
     }
   }
 
@@ -256,6 +320,16 @@ export default function LoginPage() {
 
         {view === 'login' ? (
           <form className="ies-login__form" onSubmit={handleLogin} noValidate>
+            <FormField label={t('ies.auth.language')} htmlFor="login-language">
+              <Select
+                id="login-language"
+                value={locale}
+                onChange={(event) => setLocale(event.target.value as Locale)}
+              >
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </Select>
+            </FormField>
             <FormField label={t('ies.auth.username')} htmlFor="login-username" required>
               <Input
                 id="login-username"
@@ -291,6 +365,114 @@ export default function LoginPage() {
             <Button type="submit" variant="primary" size="lg" fullWidth loading={loginBusy}>
               {t('ies.auth.login_submit')}
             </Button>
+            {publicSettings?.sso_enabled ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="lg"
+                fullWidth
+                disabled={loginBusy}
+                onClick={() => {
+                  // 302 跳转 OIDC 提供方授权页(整页跳转, 保留浏览器会话上下文)
+                  window.location.assign('/api/auth/oidc/login')
+                }}
+              >
+                {t('ies.auth.sso')}
+              </Button>
+            ) : null}
+            {publicSettings?.registration_enabled ? (
+              <div className="ies-login__switch">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={loginBusy}
+                  onClick={() => {
+                    setLoginError(null)
+                    setView('register')
+                  }}
+                >
+                  {t('ies.auth.register')}
+                </Button>
+              </div>
+            ) : null}
+            {settingsError ? <p className="ies-form-message">{settingsError}</p> : null}
+          </form>
+        ) : null}
+
+        {view === 'register' ? (
+          <form className="ies-login__form" onSubmit={handleRegister} noValidate>
+            <FormField label={t('ies.auth.register_title')} htmlFor="reg-username" required>
+              <Input
+                id="reg-username"
+                name="username"
+                value={regUsername}
+                onChange={(event) => setRegUsername(event.target.value)}
+                autoComplete="username"
+                autoFocus
+                disabled={regBusy}
+              />
+            </FormField>
+            <FormField label={t('ies.auth.display_name')} htmlFor="reg-display-name">
+              <Input
+                id="reg-display-name"
+                name="display_name"
+                value={regDisplayName}
+                onChange={(event) => setRegDisplayName(event.target.value)}
+                disabled={regBusy}
+              />
+            </FormField>
+            <FormField label={t('ies.auth.username') + ' (Email)'} htmlFor="reg-email">
+              <Input
+                id="reg-email"
+                name="email"
+                type="email"
+                value={regEmail}
+                onChange={(event) => setRegEmail(event.target.value)}
+                autoComplete="email"
+                disabled={regBusy}
+              />
+            </FormField>
+            <FormField label={t('ies.auth.new_password')} htmlFor="reg-password" required>
+              <Input
+                id="reg-password"
+                name="password"
+                type="password"
+                value={regPassword}
+                onChange={(event) => setRegPassword(event.target.value)}
+                autoComplete="new-password"
+                disabled={regBusy}
+              />
+            </FormField>
+            <FormField label={t('ies.auth.confirm_password')} htmlFor="reg-confirm" required>
+              <Input
+                id="reg-confirm"
+                name="confirm"
+                type="password"
+                value={regConfirm}
+                onChange={(event) => setRegConfirm(event.target.value)}
+                autoComplete="new-password"
+                disabled={regBusy}
+              />
+            </FormField>
+            {regError ? (
+              <Alert variant="error" title={regError} closable onClose={() => setRegError(null)} />
+            ) : null}
+            <Button type="submit" variant="primary" size="lg" fullWidth loading={regBusy}>
+              {t('ies.auth.register_submit')}
+            </Button>
+            <div className="ies-login__switch">
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={regBusy}
+                onClick={() => {
+                  setRegError(null)
+                  setView('login')
+                }}
+              >
+                {t('ies.auth.have_account')}
+              </Button>
+            </div>
           </form>
         ) : null}
 

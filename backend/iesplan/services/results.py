@@ -30,6 +30,8 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from iesplan.core.jsonutil import canonical_json, jsonable
+
 import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -141,26 +143,6 @@ class ResultInvalidRequestError(AppError):
 # ---------------------------------------------------------------------------
 # 内部工具
 # ---------------------------------------------------------------------------
-
-
-def _jsonable(value: Any) -> Any:
-    """递归转换为 JSON 安全值(datetime → ISO 字符串, Decimal → float)。"""
-    if isinstance(value, dict):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (int, float, str, bool)) or value is None:
-        return value
-    return str(value)
-
-
-def _canonical_json(content: dict) -> str:
-    """规范化 JSON(键排序、紧凑分隔), 保证相同内容哈希稳定(可复现性)。"""
-    return json.dumps(_jsonable(content), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _get_task(db: Session, task_id: int) -> Task:
@@ -296,7 +278,7 @@ def _validate_evidence_payload(
     if not isinstance(content, dict):
         problems.append("content 必须是对象")
     elif isinstance(checksum, str) and re.fullmatch(HASH64_RE, checksum):
-        if sha256_hex(_canonical_json(content).encode("utf-8")) != checksum:
+        if sha256_hex(canonical_json(content).encode("utf-8")) != checksum:
             problems.append("内容校验失败: content 与 checksum 不一致")
     if not isinstance(payload.get("seed"), int):
         problems.append("seed 必须是整数(可复现性, REQ-NF-001)")
@@ -355,7 +337,7 @@ def submit_evidence(
     invalid_reason = ";".join(problems) if problems else None
 
     # 打包: 规范化序列化整个载荷(含 content 与 checksum, 即"清单+内容校验")
-    blob = _canonical_json(payload).encode("utf-8")
+    blob = canonical_json(payload).encode("utf-8")
     content_hash = sha256_hex(blob)
     obj = objects_service.put_object(
         db, blob, content_type="application/json", source_category="evidence",
@@ -847,7 +829,7 @@ def update_result_index(
             params={"task_id": task_id, "project_id": task.project_id},
         )
     snapshot = db.get(CalcSnapshot, task.calc_snapshot_id) if task.calc_snapshot_id else None
-    result_hash = sha256_hex(_canonical_json({
+    result_hash = sha256_hex(canonical_json({
         "snapshot_hash": snapshot.content_hash if snapshot is not None else None,
         "evidence_hash": package.content_hash,
         "business_outcome": business_outcome,
@@ -998,7 +980,7 @@ def select_result(
             raise ResultInvalidRequestError(
                 "preview_checksum 格式非法(须为 64 位十六进制)", code="RES-REQ-005",
             )
-        actual = sha256_hex(_canonical_json(diff_patch).encode("utf-8"))
+        actual = sha256_hex(canonical_json(diff_patch).encode("utf-8"))
         if actual != preview_checksum:
             raise ConflictError(
                 "确认预览内容校验失败: 差异补丁已变化, 请重新确认(RPD 20.3)",
@@ -1067,7 +1049,7 @@ def selection_diff(db: Session, project_id: int) -> dict[str, Any] | None:
     return {
         "solution_id": solution_id,
         "diff_patch": diff_patch,
-        "preview_checksum": sha256_hex(_canonical_json(diff_patch).encode("utf-8")),
+        "preview_checksum": sha256_hex(canonical_json(diff_patch).encode("utf-8")),
         "result_index_id": index.id,
         "evidence_package_id": package.id,
         "project_version_id": index.project_version_id,

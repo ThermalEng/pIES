@@ -461,21 +461,70 @@ def test_duplicate_project(client: TestClient, db_session: Session) -> None:
 
 
 def test_admin_maintenance_readonly(client: TestClient, db_session: Session) -> None:
-    """管理员维护只读: 可读任意项目, 不能业务编辑(RPD 3.2)。"""
+    """管理员访问门禁: 未获所有者授权时项目细节隔离(403), 授权后可读/可转移; 均不能业务编辑。
+
+    - 默认 admin_access=false: 管理员 GET 项目 → 403(细节隔离), transfer → 403,
+      但可删除(整体管理, 无需授权);
+    - 所有者开启授权后: 管理员可读、可转移所有权, 仍不能编辑(维护只读);
+    - 非成员非管理员 → 403。
+    """
     owner = make_user(db_session, "owner_maint")
     admin = make_user(db_session, "admin_maint", role="admin")
     stranger = make_user(db_session, "stranger_maint")
+    recipient = make_user(db_session, "recipient_maint")
     pid = _create_project(client, owner, "维护测试")
 
-    assert client.get(f"/api/projects/{pid}", headers=_h(client, admin)).status_code == 200
+    # 未授权: 管理员不可读项目细节, 不可转移所有权
+    assert client.get(f"/api/projects/{pid}", headers=_h(client, admin)).status_code == 403
+    resp = client.post(
+        f"/api/projects/{pid}/transfer",
+        json={"target_user_id": recipient.id},
+        headers=_h(client, admin),
+    )
+    assert resp.status_code == 403
+    # 未授权: 管理员仍可删除(整体管理, 无需授权)
+    resp = client.request(
+        "DELETE", f"/api/projects/{pid}", headers=_h(client, admin), json={"confirm": True}
+    )
+    assert resp.status_code == 204
+    # 恢复(重新创建)后授权 → 可读、可转移, 仍不可编辑
+    pid2 = _create_project(client, owner, "维护测试2")
+    assert client.get(f"/api/projects/{pid2}", headers=_h(client, admin)).status_code == 403
     resp = client.put(
-        f"/api/projects/{pid}/draft",
+        f"/api/projects/{pid2}/admin-access",
+        json={"enabled": True},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200
+    assert client.get(f"/api/projects/{pid2}", headers=_h(client, admin)).status_code == 200
+    resp = client.put(
+        f"/api/projects/{pid2}/draft",
         json={"expected_revision": 1, "commands": []},
         headers=_h(client, admin),
     )
     assert resp.status_code == 403
+    # 授权后: 管理员可转移所有权(需求: 授权后可转移至另一账号)
+    resp = client.post(
+        f"/api/projects/{pid2}/transfer",
+        json={"target_user_id": recipient.id},
+        headers=_h(client, admin),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["project"]["owner_id"] == recipient.id
+    assert body["my_role"] is None  # 管理员非项目成员, 凭 admin 角色 + 授权访问
+    # 新所有者可读; 原所有者降为 viewer; 管理员仍不可编辑
+    assert client.get(f"/api/projects/{pid2}", headers=_h(client, recipient)).status_code == 200
+    owner_view = client.get(f"/api/projects/{pid2}", headers=_h(client, owner))
+    assert owner_view.status_code == 200 and owner_view.json()["my_role"] == "viewer"
+    resp = client.put(
+        f"/api/projects/{pid2}/draft",
+        json={"expected_revision": 2, "commands": []},
+        headers=_h(client, admin),
+    )
+    assert resp.status_code == 403
     # 非成员非管理员 → 403
-    assert client.get(f"/api/projects/{pid}", headers=_h(client, stranger)).status_code == 403
+    assert client.get(f"/api/projects/{pid2}", headers=_h(client, stranger)).status_code == 403
 
 
 def test_visible_listing(client: TestClient, db_session: Session) -> None:

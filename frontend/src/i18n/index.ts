@@ -11,7 +11,8 @@
 import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
-import type { ApiError, Diagnostic } from '../types'
+import type { Diagnostic } from '../types'
+import { ApiError } from '../types'
 import { messagesEn } from './messages_en'
 import { messagesZh } from './messages_zh'
 
@@ -41,7 +42,7 @@ export function getLocale(): Locale {
 }
 
 /** 渲染插值参数:文案内 {name} 占位符替换为 params 中的值。 */
-function interpolate(template: string, params?: Record<string, unknown> | null): string {
+export function interpolate(template: string, params?: Record<string, unknown> | null): string {
   if (!params) return template
   return template.replace(/\{(\w+)\}/g, (match, name: string) => {
     const value = params[name]
@@ -87,6 +88,12 @@ export function translateError(err: ApiError): string {
     return raw.replace(/\{reason\}/g, fallbackReason)
   }
   return raw
+}
+
+/** 任意异常 → 用户可读文案:ApiError 走 translateError,其余统一"未知错误"兜底。 */
+export function errorMessage(err: unknown): string {
+  if (err instanceof ApiError) return translateError(err)
+  return translate('ies.error.unknown', { reason: String(err) })
 }
 
 interface I18nContextValue {

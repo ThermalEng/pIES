@@ -763,10 +763,7 @@ button {
 }
 
 /* 形状:统一圆角矩形(状态由颜色+图标+文字区分, 不再用几何形状, 保证风格统一) */
-.ies-badge--shape-circle,
-.ies-badge--shape-square,
-.ies-badge--shape-triangle,
-.ies-badge--shape-diamond {
+.ies-badge--shape-square {
   border-radius: 3px;
 }
 
@@ -1393,6 +1390,13 @@ button {
   flex: 1;
 }
 
+/* 登录表单下的次级入口(注册 / 返回登录) */
+.ies-login__switch {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--ies-space-2);
+}
+
 /* ---------------------------------------------------------------------------
  * 项目列表页
  * ------------------------------------------------------------------------- */
@@ -1729,6 +1733,17 @@ button {
   display: flex;
   gap: var(--ies-space-3);
   flex-wrap: wrap;
+}
+
+/* 开关行(如"开放注册") */
+.ies-settings__toggle-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ies-space-2);
+}
+
+.ies-settings__toggle-row input[type='checkbox'] {
+  accent-color: var(--ies-primary, #0e5cad);
 }
 
 .ies-settings__actions {

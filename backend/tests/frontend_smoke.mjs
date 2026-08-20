@@ -54,17 +54,33 @@ function check(name, cond, detail = '') {
 
 // ---- 流程 ----
 async function main() {
+  // 0) 登录页公开设置(无需认证): 注册开关 / SSO 入口
+  const pub = await api.auth.publicSettings()
+  check('auth.publicSettings → {registration_enabled, sso_enabled}', 'registration_enabled' in pub && 'sso_enabled' in pub, JSON.stringify(pub))
+
   // 1) 登录(初始密码可能已改)
   let login
   try {
     login = await api.auth.login({ username: 'admin', password: 'iesplan-admin-initial' })
   } catch {
-    login = await api.auth.login({ username: 'admin', password: 'Iesplan-Admin#2026e2e' })
+    try {
+      login = await api.auth.login({ username: 'admin', password: 'Iesplan-Admin#2026e2e' })
+    } catch {
+      login = await api.auth.login({ username: 'admin', password: 'AdminTest123' })
+    }
   }
   check('auth.login', !!login.token && !!login.user, JSON.stringify({ role: login.user.role, fpc: login.user.force_password_change }))
   if (login.needs_takeover_confirm) {
     const tk = await api.auth.confirmTakeover({ token: login.token })
     check('auth.confirmTakeover', !!tk.token)
+  }
+
+  // 1.5) 管理员安全设置(注册开关持久化)
+  try {
+    const sec = await api.admin.getSecuritySettings()
+    check('admin.getSecuritySettings → registration_enabled', typeof sec.registration_enabled === 'boolean', JSON.stringify(sec))
+  } catch {
+    check('admin.getSecuritySettings', false, '跳过(非管理员或无权限)')
   }
 
   // 2) auth.me → User(页面只读 id/username)

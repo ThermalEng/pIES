@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan.core.jsonutil import jsonable
 from iesplan.models.audit import AuditLog
 from iesplan.models.identity import User
 
@@ -87,17 +88,6 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _jsonable(value: Any) -> Any:
-    """递归转换为 JSON 安全值(datetime → ISO 字符串)。"""
-    if isinstance(value, dict):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
-
-
 def audit(
     db: Session,
     actor_id: int | None,
@@ -152,8 +142,8 @@ def audit(
         actor_id=actor_id,
         actor_type=actor_type,
         ip=ip,
-        before=_jsonable(before) if before else None,
-        after=_jsonable(after) or None,
+        before=jsonable(before) if before else None,
+        after=jsonable(after) or None,
         request_id=request_id,
         trace_id=trace_id,
     )

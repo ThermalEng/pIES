@@ -84,43 +84,6 @@ export function formatPercent(value: number | null | undefined, digits = 1): str
 // 能量 / 功率 / 温度
 // ---------------------------------------------------------------------------
 
-/** 能量标度:千瓦时 -> (值, 单位键)。1 GWh = 1,000,000 kWh;1 MWh = 1,000 kWh。 */
-export function scaleEnergy(valueInKwh: number): { value: number; unitKey: string } {
-  const abs = Math.abs(valueInKwh)
-  if (abs >= 1_000_000) return { value: valueInKwh / 1_000_000, unitKey: 'ies.unit.gwh' }
-  if (abs >= 1_000) return { value: valueInKwh / 1_000, unitKey: 'ies.unit.mwh' }
-  return { value: valueInKwh, unitKey: 'ies.unit.kwh' }
-}
-
-/** 能量格式化(输入 kWh,自动选 kWh/MWh/GWh 标度)。 */
-export function formatEnergy(valueInKwh: number | null | undefined, opts: NumberOptions = {}): string {
-  if (valueInKwh === null || valueInKwh === undefined || Number.isNaN(valueInKwh)) return '—'
-  const { value, unitKey } = scaleEnergy(valueInKwh)
-  return `${formatNumber(value, { digits: opts.digits ?? 2 })} ${unitLabel(unitKey)}`
-}
-
-/** 功率标度:千瓦 -> (值, 单位键)。 */
-export function scalePower(valueInKw: number): { value: number; unitKey: string } {
-  const abs = Math.abs(valueInKw)
-  if (abs >= 1_000_000) return { value: valueInKw / 1_000_000, unitKey: 'ies.unit.gw' }
-  if (abs >= 1_000) return { value: valueInKw / 1_000, unitKey: 'ies.unit.mw' }
-  return { value: valueInKw, unitKey: 'ies.unit.kw' }
-}
-
-/** 功率格式化(输入 kW,自动选 kW/MW/GW 标度)。 */
-export function formatPower(valueInKw: number | null | undefined, opts: NumberOptions = {}): string {
-  if (valueInKw === null || valueInKw === undefined || Number.isNaN(valueInKw)) return '—'
-  const { value, unitKey } = scalePower(valueInKw)
-  return `${formatNumber(value, { digits: opts.digits ?? 1 })} ${unitLabel(unitKey)}`
-}
-
-/** 温度格式化(摄氏度;可选华氏度转换)。 */
-export function formatTemperature(valueCelsius: number | null | undefined, unit: 'c' | 'f' = 'c'): string {
-  if (valueCelsius === null || valueCelsius === undefined || Number.isNaN(valueCelsius)) return '—'
-  const value = unit === 'f' ? valueCelsius * 1.8 + 32 : valueCelsius
-  return `${formatNumber(value, { digits: 1 })}${unit === 'f' ? '°F' : '°C'}`
-}
-
 /** 二氧化碳排放格式化(kg -> tCO2)。 */
 export function formatCo2(valueKg: number | null | undefined): string {
   if (valueKg === null || valueKg === undefined || Number.isNaN(valueKg)) return '—'
@@ -164,44 +127,12 @@ export function formatMoney(
     maximumFractionDigits: digits,
     useGrouping: opts.group ?? true,
   }).format(abs)
-  if (getLocale() === 'zh') {
-    return `${sign}${symbolOf(currency)}${body}`
-  }
   return `${sign}${symbolOf(currency)}${body}`
 }
 
 function symbolOf(currency: 'CNY' | 'USD'): string {
   if (getLocale() === 'zh') return currency === 'CNY' ? '¥' : 'US$'
   return currency === 'CNY' ? 'CN¥' : '$'
-}
-
-// ---------------------------------------------------------------------------
-// 字节 / 时长
-// ---------------------------------------------------------------------------
-
-/** 存储大小格式化(B -> KB -> MB -> GB -> TB)。 */
-export function formatBytes(bytes: number | null | undefined): string {
-  if (bytes === null || bytes === undefined || Number.isNaN(bytes)) return '—'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = bytes
-  let idx = 0
-  while (value >= 1024 && idx < units.length - 1) {
-    value /= 1024
-    idx += 1
-  }
-  return `${formatNumber(value, { digits: idx === 0 ? 0 : 1 })} ${units[idx]}`
-}
-
-/** 时长格式化(秒 -> 时分秒)。 */
-export function formatDuration(totalSeconds: number | null | undefined): string {
-  if (totalSeconds === null || totalSeconds === undefined || Number.isNaN(totalSeconds)) return '—'
-  const s = Math.max(0, Math.round(totalSeconds))
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const sec = s % 60
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-  if (m > 0) return `${m}:${String(sec).padStart(2, '0')}`
-  return `${sec}s`
 }
 
 // ---------------------------------------------------------------------------
@@ -259,23 +190,4 @@ export function formatRelativeTime(iso: string | null | undefined, now: number =
   if (hours < 24) return zh ? `${hours} 小时前` : `${hours} h ago`
   const days = Math.floor(hours / 24)
   return zh ? `${days} 天前` : `${days} d ago`
-}
-
-// ---------------------------------------------------------------------------
-// 通用单位换算(展示辅助;计算口径以后端 units 模块为准)
-// ---------------------------------------------------------------------------
-
-/** 焦耳 -> 千瓦时。 */
-export function joulesToKwh(joules: number): number {
-  return joules / 3_600_000
-}
-
-/** 千瓦时 -> 吉焦。 */
-export function kwhToGj(kwh: number): number {
-  return kwh * 0.0036
-}
-
-/** 吉焦 -> 千瓦时。 */
-export function gjToKwh(gj: number): number {
-  return gj / 0.0036
 }

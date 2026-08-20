@@ -89,3 +89,10 @@ class ConflictError(AppError):
     severity = SEVERITY_ERROR
     message_key = "ies.diag.store.save_conflict"
     http_status = 409
+
+
+def http_error(status: int, code: str, message_key: str, **params: object) -> AppError:
+    """构造带指定 HTTP 状态码的 AppError(基类默认 500, 按需覆盖)。"""
+    err = AppError(code=code, message_key=message_key, params=dict(params))
+    err.http_status = status
+    return err

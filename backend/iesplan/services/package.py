@@ -29,6 +29,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from iesplan.core.jsonutil import jsonable
+
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from sqlalchemy import select
@@ -259,36 +261,6 @@ def packages_root() -> Path:
     return root
 
 
-def _get_project(db: Session, project_id: int) -> Project:
-    """按 id 取项目; 不存在或已删除(软删)一律 404。"""
-    project = db.get(Project, project_id)
-    if project is None or project.status == "deleted":
-        raise NotFoundError(
-            "项目不存在",
-            params={"project_id": project_id},
-            location={"object_type": "project", "object_id": project_id},
-        )
-    return project
-
-
-def _get_current_draft(db: Session, project: Project) -> Draft:
-    """取项目当前草稿(is_current=true 且修订最大者); 缺失视为数据损坏。"""
-    draft = db.execute(
-        select(Draft)
-        .where(Draft.project_id == project.id, Draft.is_current.is_(True))
-        .order_by(Draft.revision.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if draft is None:
-        raise AppError(
-            "项目缺少当前草稿(数据损坏)",
-            code="SYS-STORE-001",
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "project", "object_id": project.id},
-        )
-    return draft
-
 
 def _bound_dataset_ids(content: dict) -> list[int]:
     """从项目内容取出绑定的数据集版本 id 清单。"""
@@ -359,19 +331,6 @@ def _collect_evidence(db: Session, project_id: int) -> list[dict]:
     return out
 
 
-def _jsonable(value: Any) -> Any:
-    """递归转换为 JSON 安全值(datetime → ISO 字符串, Decimal → float)。"""
-    if isinstance(value, dict):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
-
-
 def _build_package_zip(
     db: Session, project: Project, draft: Draft, draft_content: dict,
 ) -> tuple[bytes, dict]:
@@ -424,7 +383,7 @@ def _build_package_zip(
             "schema_version": project.schema_version,
             "created_at": project.created_at,
         }
-        project_json = json.dumps(_jsonable(project_meta), ensure_ascii=False, indent=2).encode()
+        project_json = json.dumps(jsonable(project_meta), ensure_ascii=False, indent=2).encode()
         _add("project.json", project_json, "application/json")
         zf.writestr("project.json", project_json)
 
@@ -455,7 +414,7 @@ def _build_package_zip(
                 },
                 "content": version_contents.get(version.version_no, {}),
             }
-            raw = json.dumps(_jsonable(version_doc), ensure_ascii=False, indent=2).encode()
+            raw = json.dumps(jsonable(version_doc), ensure_ascii=False, indent=2).encode()
             _add(path, raw, "application/json")
             zf.writestr(path, raw)
             files_meta["versions"].append(path)
@@ -502,7 +461,7 @@ def _build_package_zip(
                     for item in item["files"]
                 ],
             }
-            meta_raw = json.dumps(_jsonable(meta_doc), ensure_ascii=False, indent=2).encode()
+            meta_raw = json.dumps(jsonable(meta_doc), ensure_ascii=False, indent=2).encode()
             meta_path = f"{base}/dataset.json"
             _add(meta_path, meta_raw, "application/json")
             zf.writestr(meta_path, meta_raw)
@@ -566,7 +525,7 @@ def _build_package_zip(
                     for r in item["index"]
                 ],
             }
-            evidence_raw = json.dumps(_jsonable(evidence_doc), ensure_ascii=False, indent=2).encode()
+            evidence_raw = json.dumps(jsonable(evidence_doc), ensure_ascii=False, indent=2).encode()
             evidence_path = f"{base}.json"
             _add(evidence_path, evidence_raw, "application/json")
             zf.writestr(evidence_path, evidence_raw)
@@ -594,7 +553,7 @@ def _build_package_zip(
             "objects": objects_manifest,
             "checksums": {"entry_count": len(objects_manifest), "aggregate_sha256": aggregate},
         }
-        manifest_raw = json.dumps(_jsonable(manifest), ensure_ascii=False, indent=2).encode()
+        manifest_raw = json.dumps(jsonable(manifest), ensure_ascii=False, indent=2).encode()
         zf.writestr("manifest.json", manifest_raw)
     return buf.getvalue(), manifest
 
@@ -609,8 +568,8 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
     包内不含: 账号/权限与查看者名单/会话/全局系统配置/部署环境密钥(RPD 6)。
     """
     project_service.ensure_access(db, user, project_id, "export_package")
-    project = _get_project(db, project_id)
-    draft = _get_current_draft(db, project)
+    project = project_service.require_project(db, project_id)
+    draft = project_service.get_current_draft(db, project)
     draft_content = project_service.load_content_object(db, draft.content_hash)
     zip_bytes, manifest = _build_package_zip(db, project, draft, draft_content)
 
@@ -1238,7 +1197,7 @@ def export_excel(
     - 注明适用单位与数据来源(数据集版本/溯源/许可证/内容校验值)。
     """
     project_service.ensure_access(db, user, project_id, "export_excel")
-    project = _get_project(db, project_id)
+    project = project_service.require_project(db, project_id)
     evidence = db.get(EvidencePackage, evidence_package_id)
     if evidence is None:
         raise NotFoundError(

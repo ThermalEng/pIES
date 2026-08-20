@@ -26,27 +26,10 @@ logger = logging.getLogger(__name__)
 APP_NAME = "iesplan"
 
 # ---------------------------------------------------------------------------
-# 并行开发兼容: core/errors 与 db 由其他 agent 实现, 尚未就绪时优雅降级,
-# 不阻断应用启动, 依赖可用性由 /api/readyz 上报。
+# 全局异常 → 标准错误信封(与 AppError.to_dict 同构; fix_hint_key/ref_ids 补默认)
 # ---------------------------------------------------------------------------
 
-try:
-    from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
-except ImportError:
-    # core/errors 尚未实现: 无法识别 AppError, 一律按未捕获异常处理
-    AppError = None
-    ConflictError = ForbiddenError = NotFoundError = None
-
-# AppError 子类 -> HTTP 状态码 (契约: Forbidden=403, NotFound=404, Conflict=409, 其余=400)
-_APP_ERROR_STATUS: tuple[tuple[type, int], ...] = tuple(
-    (cls, status)
-    for cls, status in (
-        (ForbiddenError, 403),
-        (NotFoundError, 404),
-        (ConflictError, 409),
-    )
-    if cls is not None
-)
+from iesplan.core.errors import AppError
 
 
 def _error_envelope(
@@ -75,23 +58,8 @@ def _error_envelope(
     }
 
 
-def _app_error_status(exc: Exception) -> int:
-    """返回 AppError 对应的 HTTP 状态码。
-
-    优先采用异常自带的 http_status (如 Forbidden=403/NotFound=404/Conflict=409),
-    否则按子类映射, 兜底 400。
-    """
-    http_status = getattr(exc, "http_status", None)
-    if isinstance(http_status, int):
-        return http_status
-    for cls, status in _APP_ERROR_STATUS:
-        if isinstance(exc, cls):
-            return status
-    return 400
-
-
 def _app_error_response(exc: Exception) -> JSONResponse:
-    """将 AppError 转换为诊断 JSON 响应 (属性驱动, 与具体实现解耦)。"""
+    """将 AppError 转换为诊断 JSON 响应 (异常自带 code/http_status 等属性)。"""
     body = _error_envelope(
         code=str(getattr(exc, "code", "API-APP-001")),
         message_key=str(getattr(exc, "message_key", "ies.error.app")),
@@ -100,7 +68,11 @@ def _app_error_response(exc: Exception) -> JSONResponse:
         params=getattr(exc, "params", None),
         location=getattr(exc, "location", None),
     )
-    return JSONResponse(status_code=_app_error_status(exc), content=body)
+    # 优先采用异常自带的 http_status(403/404/409/413...), 否则兜底 400
+    status = getattr(exc, "http_status", None)
+    if not isinstance(status, int):
+        status = 400
+    return JSONResponse(status_code=status, content=body)
 
 
 def _db_available() -> bool:
@@ -126,10 +98,9 @@ def _init_database() -> None:
     数据库状态由 /api/readyz 上报。
     """
     try:
-        from iesplan.db import init_db, seed_admin
+        from iesplan.db import init_db
 
         init_db()
-        seed_admin()
     except Exception:
         logger.exception("启动时数据库初始化失败, 应用继续运行, 就绪检查将返回 503")
 
@@ -218,7 +189,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         """未捕获异常: AppError 映射为诊断 JSON, 其余返回 500 且不泄露堆栈。"""
-        if AppError is not None and isinstance(exc, AppError):
+        if isinstance(exc, AppError):
             return _app_error_response(exc)
         # 完整堆栈仅写入日志, 响应只含通用错误体
         logger.exception(

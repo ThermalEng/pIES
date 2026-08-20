@@ -63,10 +63,10 @@ import type {
   ProjectMember,
   ProjectRole,
   ProjectVersion,
+  PublicAuthSettings,
   RegisterRequest,
   Report,
   ResultAssessment,
-  ResultDiff,
   ResultSelection,
   Severity,
   Task,
@@ -270,6 +270,25 @@ async function parseJson(res: Response): Promise<unknown> {
   }
 }
 
+/**
+ * 401 响应统一处理(区分「会话失效」与「其他 401」):
+ * - 后端认证失败均带诊断信封(message_key);仅当明确表示会话无效
+ *   (ies.diag.auth.session_invalid)或响应不可识别时, 才清除本地会话并跳登录页。
+ * - takeover_pending 属于"旧窗口被降级/新会话待确认"中间态(H-01),
+ *   不应立即清空会话/跳登录页(避免循环登录);由调用方在确认接管后恢复。
+ * - 登录请求自身的 401 不触发跳转(页面内展示错误)。
+ */
+function handleUnauthorized(path: string, envelope: ApiErrorBody | null): ApiError {
+  const isLoginPath = path.startsWith('/auth/login')
+  const sessionInvalid = envelope?.message_key === 'ies.diag.auth.session_invalid'
+  const takeoverPending =
+    sessionInvalid && (envelope?.params as { reason?: string } | undefined)?.reason === 'takeover_pending'
+  if (!isLoginPath && !takeoverPending && (sessionInvalid || !envelope)) {
+    notifyUnauthorized()
+  }
+  return new ApiError(401, envelope, envelope ? undefined : 'ies.diag.auth.session_invalid')
+}
+
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { signal, cleanup } = createAbort(opts.signal, opts.timeoutMs ?? 60_000)
   try {
@@ -299,26 +318,13 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     }
 
     if (res.status === 401) {
-      // 区分「会话失效」与「其他 401」:后端认证失败均带诊断信封(message_key)。
-      // 仅当后端明确表示会话无效(ies.diag.auth.session_invalid)或登录请求本身
-      // 失败且无法识别时, 才清除本地会话并跳登录页; 其余 401(如权限缺失)
-      // 保留信封原样抛出, 由页面展示, 避免误踢登录。
-      // 注: takeover_pending 属于"旧窗口被降级/新会话待确认"中间态(H-01),
-      // 不应立即清空会话/跳登录页, 否则会形成循环登录; 由调用方在确认接管后恢复。
       let envelope: ApiErrorBody | null = null
       try {
         envelope = parseErrorEnvelope(await parseJson(res))
       } catch {
         envelope = null
       }
-      const isLoginPath = path.startsWith('/auth/login')
-      const sessionInvalid = envelope?.message_key === 'ies.diag.auth.session_invalid'
-      const takeoverPending =
-        sessionInvalid && (envelope?.params as { reason?: string } | undefined)?.reason === 'takeover_pending'
-      if (!isLoginPath && !takeoverPending && (sessionInvalid || !envelope)) {
-        notifyUnauthorized()
-      }
-      throw new ApiError(401, envelope, envelope ? undefined : 'ies.diag.auth.session_invalid')
+      throw handleUnauthorized(path, envelope)
     }
 
     const payload = await parseJson(res)
@@ -347,13 +353,7 @@ async function requestBlob(path: string, opts: RequestOptions = {}): Promise<Blo
       } catch {
         envelope = null
       }
-      const sessionInvalid = envelope?.message_key === 'ies.diag.auth.session_invalid'
-      const takeoverPending =
-        sessionInvalid && (envelope?.params as { reason?: string } | undefined)?.reason === 'takeover_pending'
-      if (!takeoverPending && (sessionInvalid || !envelope)) {
-        notifyUnauthorized()
-      }
-      throw new ApiError(401, envelope, envelope ? undefined : 'ies.diag.auth.session_invalid')
+      throw handleUnauthorized(path, envelope)
     }
     if (!res.ok) {
       const payload = await parseJson(res)
@@ -752,10 +752,18 @@ function graphFromServer(body: unknown, projectId: number): GraphModel {
   }
 }
 
-/** 参数默认值适配:后端枚举参数(如 mode='both')默认值为字符串,数值参数为 number。 */
-function paramDefaultValue(v: unknown): number | string | null {
+/** 参数默认值适配:后端枚举参数(如 mode='both')默认值为字符串,数值参数为 number,
+ *  结构化参数(如 import_tariff)为 {peak,flat,valley} 对象,原样透传。 */
+function paramDefaultValue(v: unknown): number | string | Record<string, number> | null {
   if (typeof v === 'number') return v
   if (typeof v === 'string') return v
+  if (typeof v === 'object' && v !== null) {
+    const out: Record<string, number> = {}
+    for (const [key, val] of Object.entries(v)) {
+      if (typeof val === 'number') out[key] = val
+    }
+    return Object.keys(out).length > 0 ? out : null
+  }
   return null
 }
 
@@ -816,6 +824,9 @@ const pkgTaskCache = new Map<number, number>()
 
 /** 证据包 id → 最新评估 id(由评估历史填充; Excel 导出需要 assessment_id)。 */
 const pkgAssessmentCache = new Map<number, number>()
+
+/** 任务 → 结果视图原始响应缓存(hourly 复用 result 的同一次 GET, 避免重复往返)。 */
+const resultBodyCache = new Map<string, Record<string, unknown>>()
 
 /** 下载授权会话(id → 下载参数; 后端下载走短期 token, 前端以会话 id 引用)。 */
 const downloadSessions = new Map<number, { projectId: number; kind: 'excel' | 'package'; token: string; filename: string }>()
@@ -921,6 +932,8 @@ export interface AuthApi {
   register(input: RegisterRequest): Promise<User>
   /** 获取当前登录用户(页面刷新后恢复用户信息)。 */
   me(): Promise<User>
+  /** 登录页公开设置(无需认证): 注册开关 / SSO 入口。 */
+  publicSettings(): Promise<PublicAuthSettings>
 }
 
 export interface ProjectsApi {
@@ -936,6 +949,10 @@ export interface ProjectsApi {
   duplicate(id: number): Promise<Project>
   transfer(id: number, input: { target_user_id: number }): Promise<void>
   viewers(id: number): Promise<ProjectMember[]>
+  /** 添加/移除查看者(仅所有者;后端按用户 id 操作)。 */
+  updateViewer(id: number, input: { user_id: number; action: 'add' | 'remove' }): Promise<ProjectMember[]>
+  /** 切换管理员访问授权(仅所有者): 授权后管理员可查看项目细节并转移所有权。 */
+  setAdminAccess(id: number, enabled: boolean): Promise<Project>
 }
 
 export interface ModelApi {
@@ -1012,7 +1029,6 @@ export interface ResultsApi {
   assessments(projectId: number, taskId: number): Promise<ResultAssessment[]>
   assess(projectId: number, taskId: number, input: AssessmentInput): Promise<ResultAssessment>
   select(projectId: number, taskId: number, input: { result_index_id: number; reason?: string }): Promise<ResultSelection>
-  diff(projectId: number, taskId: number): Promise<ResultDiff>
   hourly(projectId: number, taskId: number): Promise<{ resolution: string; n: number; flows: Record<string, number[]> }>
 }
 
@@ -1028,6 +1044,16 @@ export interface AdminApi {
   storage(): Promise<{ total_bytes: number; used_bytes: number; quota_bytes: number | null; object_count: number }>
   health(): Promise<HealthStatus>
   audit(params?: AuditListParams): Promise<PageResult<AuditEntry>>
+  /** 删除账号(管理员): 该账号拥有的项目一并删除。 */
+  deleteUser(userId: number): Promise<{ deleted_projects: number }>
+  /** 停用账号(管理员)。 */
+  deactivateUser(userId: number): Promise<void>
+  /** 重新启用账号(管理员)。 */
+  reactivateUser(userId: number): Promise<void>
+  /** 读取安全设置(管理员)。 */
+  getSecuritySettings(): Promise<{ registration_enabled: boolean }>
+  /** 更新安全设置: 自助注册开关(管理员)。 */
+  setRegistrationEnabled(enabled: boolean): Promise<{ registration_enabled: boolean }>
 }
 
 export const api = {
@@ -1056,6 +1082,16 @@ export const api = {
       return request<unknown>('/auth/register', { method: 'POST', body: input }).then((res) =>
         normalizeUser(asRecord(res)),
       )
+    },
+    publicSettings(): Promise<PublicAuthSettings> {
+      return request<unknown>('/auth/public-settings').then((res) => {
+        const body = asRecord(res)
+        return {
+          registration_enabled: Boolean(body.registration_enabled),
+          sso_enabled: Boolean(body.sso_enabled),
+          sso_provider_name: String(body.sso_provider_name ?? ''),
+        }
+      })
     },
     me(): Promise<User> {
       return request<unknown>('/auth/me').then((res) => normalizeUser(asRecord(res)))
@@ -1191,6 +1227,17 @@ export const api = {
     },
     viewers(id: number): Promise<ProjectMember[]> {
       return request<unknown>(`/projects/${id}/viewers`).then((body) => asList<ProjectMember>(body, 'members'))
+    },
+    updateViewer(id: number, input: { user_id: number; action: 'add' | 'remove' }): Promise<ProjectMember[]> {
+      return request<unknown>(`/projects/${id}/viewers`, { method: 'PUT', body: input }).then((body) =>
+        asList<ProjectMember>(body, 'members'),
+      )
+    },
+    setAdminAccess(id: number, enabled: boolean): Promise<Project> {
+      return request<unknown>(`/projects/${id}/admin-access`, {
+        method: 'PUT',
+        body: { enabled },
+      }).then((body) => projectFromServer(body))
     },
   } satisfies ProjectsApi,
 
@@ -1467,6 +1514,8 @@ export const api = {
         // 后端返回 {result: {evidence, metrics_summary, ...}}
         const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
         const evidence = asRecord(r.evidence)
+        // 缓存原始响应, hourly 复用同一次 GET(避免选中包时重复请求同一端点)
+        resultBodyCache.set(`${projectId}:${taskId}`, r)
         return {
           evidence_package_id: Number(evidence.id ?? 0),
           metrics: (r.metrics_summary as Record<string, MetricValue>) ?? {},
@@ -1512,40 +1561,44 @@ export const api = {
         }
       })
     },
-    diff(projectId: number, taskId: number): Promise<ResultDiff> {
-      // 后端 diff 为「选中结果参数差异预览」(diff_patch), 与前端两包对比语义不同;
-      // 页面未使用该方法, 此处按后端形状做最小映射。
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/diff`).then((body) => {
-        const diff = asRecord(oneOf<Record<string, unknown>>(body, 'diff'))
-        return {
-          a: { evidence_package_id: Number(diff.evidence_package_id ?? 0), label: 'selected' },
-          b: { evidence_package_id: 0, label: '' },
-          entries: [],
-        }
-      })
-    },
     hourly(projectId: number, taskId: number): Promise<{ resolution: string; n: number; flows: Record<string, number[]> }> {
       // 后端 hourly 为单字段分页查询(需 field 参数): 先取结果视图的 hourly_refs
-      // 字段清单, 再逐字段拉取完整序列组装 flows。
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then(async (body) => {
+      // 字段清单, 再并行拉取各字段完整序列组装 flows。
+      // 结果视图复用 result() 已拉取的缓存(避免同一次选中重复 GET 同一端点)。
+      const cacheKey = `${projectId}:${taskId}`
+      const pending = resultBodyCache.get(cacheKey)
+        ? Promise.resolve({ result: resultBodyCache.get(cacheKey) })
+        : request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then((body) => {
+            const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
+            resultBodyCache.set(cacheKey, r)
+            return { result: r }
+          })
+      return pending.then(async (body) => {
         const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
         const refs = Array.isArray(r.hourly_refs) ? (r.hourly_refs as Record<string, unknown>[]) : []
         const ref = refs[0]
         if (!ref) return { resolution: '', n: 0, flows: {} }
         const fields = Array.isArray(ref.fields) ? (ref.fields as string[]).slice(0, 16) : []
         const rows = Number(ref.rows ?? 0)
+        // 各字段序列完全独立, 并行拉取(原先逐字段串行最多 16 次往返)
+        const pages = await Promise.all(
+          fields.map(async (field) => {
+            try {
+              const page = asRecord(
+                await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/hourly`, {
+                  query: { field, start: 0, end: rows, limit: Math.max(rows, 1) },
+                }),
+              )
+              return [field, page.values] as const
+            } catch {
+              // 单字段读取失败不影响其余字段
+              return null
+            }
+          }),
+        )
         const flows: Record<string, number[]> = {}
-        for (const field of fields) {
-          try {
-            const page = asRecord(
-              await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/hourly`, {
-                query: { field, start: 0, end: rows, limit: Math.max(rows, 1) },
-              }),
-            )
-            if (Array.isArray(page.values)) flows[field] = page.values as number[]
-          } catch {
-            // 单字段读取失败不影响其余字段
-          }
+        for (const hit of pages) {
+          if (hit && Array.isArray(hit[1])) flows[hit[0]] = hit[1] as number[]
         }
         return { resolution: '', n: rows, flows }
       })
@@ -1707,6 +1760,29 @@ export const api = {
           limit: page.limit,
         }
       })
+    },
+    deleteUser(userId: number): Promise<{ deleted_projects: number }> {
+      return request<unknown>(`/auth/users/${userId}`, { method: 'DELETE' }).then((body) => {
+        const rec = asRecord(body)
+        return { deleted_projects: Number(rec.deleted_projects ?? 0) }
+      })
+    },
+    deactivateUser(userId: number): Promise<void> {
+      return request<void>(`/auth/users/${userId}/deactivate`, { method: 'POST' })
+    },
+    reactivateUser(userId: number): Promise<void> {
+      return request<void>(`/auth/users/${userId}/reactivate`, { method: 'POST' })
+    },
+    getSecuritySettings(): Promise<{ registration_enabled: boolean }> {
+      return request<unknown>('/auth/settings').then((body) => ({
+        registration_enabled: Boolean(asRecord(body).registration_enabled),
+      }))
+    },
+    setRegistrationEnabled(enabled: boolean): Promise<{ registration_enabled: boolean }> {
+      return request<unknown>('/auth/settings', {
+        method: 'PUT',
+        body: { registration_enabled: enabled },
+      }).then((body) => ({ registration_enabled: Boolean(asRecord(body).registration_enabled) }))
     },
   } satisfies AdminApi,
 }

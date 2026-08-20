@@ -124,13 +124,6 @@ export interface LoginRequest {
   remember?: boolean
 }
 
-export interface LoginResponse {
-  user: User
-  /** 首次登录(或管理员重置后)必须修改密码。 */
-  force_password_change: boolean
-  credential_version: number
-}
-
 export interface RegisterRequest {
   username: string
   display_name: string
@@ -138,14 +131,11 @@ export interface RegisterRequest {
   password: string
 }
 
-export interface ChangePasswordRequest {
-  old_password: string
-  new_password: string
-}
-
-/** 所有权转移确认(目标用户凭 token 接管项目)。 */
-export interface TakeoverConfirmRequest {
-  token: string
+/** 登录页公开设置(无需认证; 不包含任何内部细节)。 */
+export interface PublicAuthSettings {
+  registration_enabled: boolean
+  sso_enabled: boolean
+  sso_provider_name: string
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +158,8 @@ export interface Project {
   /** 项目固定 UTC 偏移(分钟),所有时序数据按此偏移解释。 */
   fixed_utc_offset_minutes: number
   schema_version: number
+  /** 管理员访问授权(所有者控制): true = 管理员可查看细节并转移所有权。 */
+  admin_access: boolean
   current_draft_id: EntityId | null
   current_version_id: EntityId | null
   created_at: ISO8601
@@ -343,11 +335,12 @@ export interface ParameterSpec {
   unit: string | null
   min: number | null
   max: number | null
-  /** 默认值:枚举参数为字符串字面量(如 heat_pump.mode='both'),数值参数为 number。 */
-  default: number | string | null
+  /** 默认值:枚举参数为字符串字面量(如 heat_pump.mode='both'),数值参数为 number,
+   *  结构化参数为对象(如 grid_connection.import_tariff={peak,flat,valley})。 */
+  default: number | string | Record<string, number> | null
   is_optimizable: boolean
   /** 存量默认值(与 default 同型)。 */
-  existing_default: number | string | null
+  existing_default: number | string | Record<string, number> | null
   help_key: string
   /** 可选枚举值列表(后端 /api/registry/device-types 透出,前端按此渲染下拉/单选)。 */
   enum?: Array<string | number | boolean> | null
@@ -769,22 +762,6 @@ export interface ResultBundle {
   /** 逐时时间轴元数据。 */
   axis?: { resolution: string; n: number; fixed_utc_offset_minutes: number }
   diagnostics: Diagnostic[]
-}
-
-/** 结果对比条目。 */
-export interface ResultDiffEntry {
-  metric_id: string
-  label_key: string
-  a: number | null
-  b: number | null
-  delta: number | null
-  delta_pct: number | null
-}
-
-export interface ResultDiff {
-  a: { evidence_package_id: EntityId; label: string }
-  b: { evidence_package_id: EntityId; label: string }
-  entries: ResultDiffEntry[]
 }
 
 export type ReportType = 'excel' | 'pdf' | 'html'

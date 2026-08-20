@@ -19,6 +19,7 @@ import { useParams } from 'react-router-dom'
 
 import { api, downloadBlob } from '../api/client'
 import { DiagnosticsList } from '../components/DiagnosticsList'
+import { formatUtcOffset, useWorkbench } from './workbench'
 import {
   Alert,
   Badge,
@@ -39,9 +40,10 @@ import {
   THead,
   TR,
 } from '../components/ui'
-import { translateError, useI18n } from '../i18n'
+import { errorMessage, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import {
+  HEADERS,
   RESOLUTION_OPTIONS,
   csvTemplate,
   expectedRows,
@@ -49,7 +51,6 @@ import {
   syntheticCsv,
 } from '../lib/datasetCsv'
 import { formatDateTime, formatPercent } from '../lib/format'
-import { ApiError } from '../types'
 import type { Dataset, DatasetSample, DatasetVersion, Diagnostic, Project } from '../types'
 
 export interface DataPageProps {
@@ -62,16 +63,6 @@ const OFFSET_OPTIONS: readonly number[] = (() => {
   for (let m = -720; m <= 840; m += 60) list.push(m)
   return list
 })()
-
-function errorText(err: unknown): string {
-  return err instanceof ApiError ? translateError(err) : pt('ies.error.unknown', { reason: String(err) })
-}
-
-function utcLabel(minutes: number): string {
-  const sign = minutes >= 0 ? '+' : '-'
-  const abs = Math.abs(minutes)
-  return `UTC${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`
-}
 
 function provenanceSummary(p: Record<string, unknown> | null): string {
   if (!p) return '—'
@@ -139,15 +130,21 @@ function defaultFields(): FieldRow[] {
 function sampleFields(): FieldRow[] {
   // 与 lib/datasetCsv.ts 表头一致(后端 STANDARD_FIELDS: 7 个标准字段);
   // 单位均按后端 FIELD_SPECS(electricity_price → 元/kWh 等)。
-  return [
-    { key: 'f0', name: 'e_load', unit: 'kWh', description: '电负荷' },
-    { key: 'f1', name: 'h_load', unit: 'kWh', description: '热负荷' },
-    { key: 'f2', name: 'c_load', unit: 'kWh', description: '冷负荷' },
-    { key: 'f3', name: 't_ambient', unit: '°C', description: '环境温度' },
-    { key: 'f4', name: 'ghi', unit: 'W/m²', description: '水平面总辐照度' },
-    { key: 'f5', name: 'electricity_price', unit: '元/kWh', description: '分时购电价格' },
-    { key: 'f6', name: 'grid_emission_factor', unit: 'kgCO₂/kWh', description: '电网排放因子' },
-  ]
+  const specs: Record<string, { unit: string; description: string }> = {
+    e_load: { unit: 'kWh', description: '电负荷' },
+    h_load: { unit: 'kWh', description: '热负荷' },
+    c_load: { unit: 'kWh', description: '冷负荷' },
+    t_ambient: { unit: '°C', description: '环境温度' },
+    ghi: { unit: 'W/m²', description: '水平面总辐照度' },
+    electricity_price: { unit: '元/kWh', description: '分时购电价格' },
+    grid_emission_factor: { unit: 'kgCO₂/kWh', description: '电网排放因子' },
+  }
+  return HEADERS.filter((h) => h !== 'timestamp').map((name, i) => ({
+    key: `f${i}`,
+    name,
+    unit: specs[name].unit,
+    description: specs[name].description,
+  }))
 }
 
 /** 统一上传管线:附带分辨率/UTC 偏移/字段定义/许可证(设计输入 §8.2)。 */
@@ -194,7 +191,7 @@ function UploadResultPanel({ result }: { result: UploadOutcome }) {
       <div className="ies-flex" style={{ flexWrap: 'wrap' }}>
         <Badge label={`v${version.version_no}`} variant="primary" />
         <Badge label={`${pt('ies.data.resolution')}: ${version.resolution}`} variant="neutral" />
-        <Badge label={utcLabel(version.fixed_utc_offset_minutes)} variant="neutral" />
+        <Badge label={formatUtcOffset(version.fixed_utc_offset_minutes)} variant="neutral" />
         {version.license ? <Badge label={version.license} variant="neutral" /> : null}
         <Badge label={pt('ies.data.binding')} variant="neutral" />
       </div>
@@ -299,7 +296,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
       })
       setResult(res)
     } catch (err) {
-      setError(errorText(err))
+      setError(errorMessage(err))
     } finally {
       setBusy(false)
     }
@@ -373,7 +370,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
             <Select id="dset-offset" value={offset} onChange={(e) => setOffset(Number(e.target.value))}>
               {OFFSET_OPTIONS.map((m) => (
                 <option key={m} value={m}>
-                  {utcLabel(m)}
+                  {formatUtcOffset(m)}
                 </option>
               ))}
             </Select>
@@ -498,7 +495,7 @@ function SampleDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
       })
       setResult(res)
     } catch (err) {
-      setError(errorText(err))
+      setError(errorMessage(err))
     } finally {
       setBusy(false)
     }
@@ -685,7 +682,7 @@ function VersionsDialog({
       }
       onChanged()
     } catch (err) {
-      setActionError(errorText(err))
+      setActionError(errorMessage(err))
     } finally {
       setBusyVersion(null)
     }
@@ -743,7 +740,7 @@ function VersionsDialog({
                   <TD>
                     <span className="ies-mono">{v.resolution}</span>
                   </TD>
-                  <TD>{utcLabel(v.fixed_utc_offset_minutes)}</TD>
+                  <TD>{formatUtcOffset(v.fixed_utc_offset_minutes)}</TD>
                   <TD>
                     <QualityBadge version={v} />
                   </TD>
@@ -814,7 +811,7 @@ function PreviewDialog({
         if (!cancelled) setSample(s)
       })
       .catch((err) => {
-        if (!cancelled) setError(errorText(err))
+        if (!cancelled) setError(errorMessage(err))
       })
     return () => {
       cancelled = true
@@ -872,10 +869,13 @@ export function DataPage({ projectId }: DataPageProps) {
   const { id } = useParams()
   const pid = projectId ?? (id !== undefined && Number.isFinite(Number(id)) ? Number(id) : undefined)
   const { t } = useI18n()
+  // 工作台内已由 WorkbenchProvider 拉取项目;独立挂载(无上下文)时本地兜底
+  const wbProject = useWorkbench().project
+  const [fallbackProject, setFallbackProject] = useState<Project | null>(null)
+  const project = wbProject ?? fallbackProject
 
   const [datasets, setDatasets] = useState<Dataset[] | null>(null)
   const [versions, setVersions] = useState<Record<number, DatasetVersion[]>>({})
-  const [project, setProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
@@ -896,11 +896,12 @@ export function DataPage({ projectId }: DataPageProps) {
         const page = await api.datasets.list(pid !== undefined ? { project_id: pid, limit: 100 } : { limit: 100 })
         if (cancelled) return
         setDatasets(page.items)
-        if (pid !== undefined) {
+        // 独立挂载时兜底拉取项目信息(工作台内 WorkbenchProvider 已持有)
+        if (pid !== undefined && !wbProject) {
           api.projects
             .get(pid)
             .then((p) => {
-              if (!cancelled) setProject(p)
+              if (!cancelled) setFallbackProject(p)
             })
             .catch(() => undefined)
         }
@@ -917,7 +918,7 @@ export function DataPage({ projectId }: DataPageProps) {
         )
         if (!cancelled) setVersions(Object.fromEntries(entries))
       } catch (err) {
-        if (!cancelled) setLoadError(errorText(err))
+        if (!cancelled) setLoadError(errorMessage(err))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -948,7 +949,7 @@ export function DataPage({ projectId }: DataPageProps) {
       setNotice({ kind: 'success', text: pt('ies.data.bound_ok') })
       setRefreshTick((x) => x + 1)
     } catch (err) {
-      setNotice({ kind: 'error', text: errorText(err) })
+      setNotice({ kind: 'error', text: errorMessage(err) })
     } finally {
       setBusyBind(null)
     }
@@ -995,7 +996,7 @@ export function DataPage({ projectId }: DataPageProps) {
           <p className="ies-page-subtitle">
             {project ? `${project.name} · ` : ''}
             {pt('ies.data.resolution')} 15/30/60 min · {pt('ies.data.calendar_note')} ·{' '}
-            {pt('ies.data.utc_offset')} {project ? utcLabel(project.fixed_utc_offset_minutes) : '±14h'}
+            {pt('ies.data.utc_offset')} {project ? formatUtcOffset(project.fixed_utc_offset_minutes) : '±14h'}
           </p>
         </div>
         <div className="ies-flex">
@@ -1055,7 +1056,7 @@ export function DataPage({ projectId }: DataPageProps) {
                         <div className="ies-flex" style={{ flexWrap: 'wrap' }}>
                           <Badge label={`v${v.version_no}`} variant="primary" size="sm" />
                           <span className="ies-mono">
-                            {v.resolution} · {utcLabel(v.fixed_utc_offset_minutes)}
+                            {v.resolution} · {formatUtcOffset(v.fixed_utc_offset_minutes)}
                           </span>
                         </div>
                       ) : (

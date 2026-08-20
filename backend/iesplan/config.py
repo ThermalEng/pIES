@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     default_admin_password: str = "iesplan-admin-initial"
     #: 对象存储最小剩余空间阈值(字节), 低于该值拒绝写入(2GB 安全阈值)
     storage_min_free_bytes: int = 2000000000
+    #: 外部认证提供方: disabled(内置账号) | oidc(OpenID Connect 单点登录)
+    auth_provider: str = "disabled"
+    #: OIDC 提供方配置(仅 auth_provider=oidc 时生效, 经 IESPLAN_ 前缀环境变量覆盖)
+    oidc_discovery_url: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
     #: 调试模式(详细日志、异常透出等)
     debug: bool = False
 

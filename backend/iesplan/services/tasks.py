@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from iesplan.core.jsonutil import canonical_json, jsonable
+
 import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -194,107 +196,12 @@ class StorageEstimate:
 # ---------------------------------------------------------------------------
 
 
-def _jsonable(value: Any) -> Any:
-    """递归转换为 JSON 安全值(datetime → ISO 字符串, Decimal → float)。"""
-    if isinstance(value, dict):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        return float(value)
-    return value
-
-
-def _canonical_json(content: dict) -> str:
-    """规范化 JSON(键排序、紧凑分隔), 保证相同内容的哈希稳定(可复现性)。"""
-    return json.dumps(_jsonable(content), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _load_content_by_hash(db: Session, content_hash: str) -> dict:
-    """按内容校验值读取内容对象并校验(缺失/哈希不符视为数据损坏)。"""
-    obj = db.execute(select(StoredObject).where(StoredObject.oid == content_hash)).scalar_one_or_none()
-    if obj is None or not obj.storage_path:
-        raise AppError(
-            "内容对象缺失(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_hash},
-        )
-    path = Path(settings.data_dir) / "objects" / obj.storage_path
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise AppError(
-            "内容对象读取失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_hash},
-        ) from exc
-    if sha256_hex(raw.encode("utf-8")) != content_hash:
-        raise AppError(
-            "内容校验失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_hash},
-        )
-    try:
-        parsed = json.loads(raw)
-    except ValueError as exc:
-        raise AppError(
-            "内容对象解析失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise AppError(
-            "内容对象结构非法(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-        )
-    return parsed
-
 
 # ---------------------------------------------------------------------------
+
 # 项目/草稿/版本解析
 # ---------------------------------------------------------------------------
 
-
-def _get_project(db: Session, project_id: int) -> Project:
-    """按 id 取项目; 不存在或已删除(软删)一律 404。"""
-    project = db.get(Project, project_id)
-    if project is None or project.status == "deleted":
-        raise NotFoundError(
-            "项目不存在",
-            params={"project_id": project_id},
-            location={"object_type": "project", "object_id": project_id},
-        )
-    return project
-
-
-def _get_current_draft(db: Session, project: Project) -> Draft:
-    """取项目当前草稿(is_current=true 且修订最大者); 缺失视为数据损坏。"""
-    draft = db.execute(
-        select(Draft)
-        .where(Draft.project_id == project.id, Draft.is_current.is_(True))
-        .order_by(Draft.revision.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if draft is None:
-        raise AppError(
-            "项目缺少当前草稿(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "project", "object_id": project.id},
-        )
-    return draft
 
 
 def _resolve_project_inputs(
@@ -322,9 +229,9 @@ def _resolve_project_inputs(
         if not project_service.current_version_matches_draft(db, project):
             version = None  # 草稿已变更: 需重新固化(首次提交自动固化后亦然)
     if version is not None:
-        return version, _load_content_by_hash(db, version.content_hash)
-    draft = _get_current_draft(db, project)
-    content = _load_content_by_hash(db, draft.content_hash)
+        return version, project_service.load_content_object(db, version.content_hash)
+    draft = project_service.get_current_draft(db, project)
+    content = project_service.load_content_object(db, draft.content_hash)
     if not freeze:
         return None, content
     # 草稿固化: 借 U03 版本服务创建不可变项目版本(计算输入固定, RPD 9.4)
@@ -348,7 +255,7 @@ def _derive_random_seed(calc_config: dict) -> int:
 
     相同输入 → 相同种子 → 相同快照哈希, 不破坏可复现性。
     """
-    digest = sha256_hex(_canonical_json(calc_config).encode("utf-8"))
+    digest = sha256_hex(canonical_json(calc_config).encode("utf-8"))
     return int(digest[:12], 16)  # 取 48 bit 作为非负种子
 
 
@@ -372,14 +279,14 @@ def assemble_snapshot(
     快照直接复用(快照不可变故复用安全)。任务级 config 并入快照的
     calc_config_snapshot.task_params, 保证"相同输入 → 相同哈希"。
     """
-    project = _get_project(db, project_id)
+    project = project_service.require_project(db, project_id)
     actor = user or db.get(User, project.owner_id)
     if actor is None:
         raise InvalidRequestError("无法确定快照创建者", params={"project_id": project_id})
     version, content = _resolve_project_inputs(db, project, actor, freeze=True)
     calc_config: dict[str, Any] = dict(content.get("calc_config") or {})
     if config:
-        calc_config["task_params"] = _jsonable(config)
+        calc_config["task_params"] = jsonable(config)
     random_seed = calc_config.get("random_seed")
     if random_seed is None:
         random_seed = _derive_random_seed(calc_config)
@@ -396,7 +303,7 @@ def assemble_snapshot(
         "random_seed": random_seed,
         "tolerances": tolerances,
     }
-    content_hash = sha256_hex(_canonical_json(hash_input).encode("utf-8"))
+    content_hash = sha256_hex(canonical_json(hash_input).encode("utf-8"))
 
     existing = db.execute(
         select(CalcSnapshot).where(CalcSnapshot.content_hash == content_hash)
@@ -490,7 +397,7 @@ def estimate_storage(
     S_avail = min(Σ objects.quota_bytes − Σ size_bytes, 卷空闲空间);
     配额未配置(Σ quota = 0)时仅以卷空闲空间为准。
     """
-    project = _get_project(db, project_id)
+    project = project_service.require_project(db, project_id)
     actor = db.get(User, project.owner_id)
     if actor is None:
         raise NotFoundError("项目所有者不存在", params={"project_id": project_id})
@@ -614,7 +521,7 @@ def create_task(
     - 入队: 按类型进入 compute/io 逻辑队列(Redis, 可重建视图)。
     """
     project_service.ensure_access(db, user, project_id, "edit")
-    project = _get_project(db, project_id)
+    project = project_service.require_project(db, project_id)
     if project.status != "active":
         raise ConflictError("项目已归档或已删除, 不能提交任务", params={"project_id": project_id})
     if task_type not in TASK_TYPES:
@@ -1198,7 +1105,7 @@ def list_tasks(
 ) -> dict[str, Any]:
     """任务列表(规格 9.1: 状态/结局过滤 + 游标分页, requested_at 倒序)。"""
     project_service.ensure_access(db, user, project_id, "view")
-    _get_project(db, project_id)
+    project_service.require_project(db, project_id)
     stmt = select(Task).where(Task.project_id == project_id)
     if task_type is not None:
         stmt = stmt.where(Task.type == task_type)
