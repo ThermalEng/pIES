@@ -2,7 +2,7 @@
 
 审查意见第 4/5 条定案:计算模块的输入是装配文件(第 4 步产物)+ 模块调用命令(第 3 步
 产物)+ 计算要求;本桥接把装配对象(AssemblySpec)收敛为计算引擎(evaluate_plan)
-消费的方案 dict,同时提供 ``plan_from_content`` 兼容入口(项目内容 → 装配 → 方案,
+消费的方案 dict,同时提供 ``plan_from_content`` 入口(项目内容 → 装配 → 方案,
 供 analysis wrapper 与既有任务装配复用)。
 
 设计要点(05 架构总览 §4 依赖图,③→④ 契约):
@@ -10,25 +10,15 @@
   逐时序列 → 引擎输入结构);
 - ``plan_from_content(content, data, axis)``:项目内容 → 装配 → 方案;
 - 设备参数以业务单位原样透传(引擎在内部换算,装配检查只做量纲一致性);
-- 端口方向派生经 devices 注册表(iesplan.devices.registry.port_directions),
-  避免硬编码 _DEVICE_PORT_DIRECTIONS(核验 M6 修复项)。
+- 无回退路径(§9.5):装配错误原样向上报告, 调用方必须显式提供合法
+  AssemblySpec 或处理装配异常(不再跳过端口/边/管道/建模方法静默降级)。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from iesplan.assembly.schema import AssemblySpec, MODEL_METHOD_MECHANISM
-
-
-def _port_direction(device_type: str, carrier: str) -> str:
-    """端口方向:优先经 devices 注册表 yaml 派生,失败回退 bidirectional。"""
-    try:
-        from iesplan.devices.registry import get_registry
-
-        return get_registry().port_directions(device_type).get(carrier, "bidirectional")
-    except Exception:
-        return "bidirectional"
+from iesplan.assembly.schema import AssemblySpec
 
 
 def plan_from_assembly(spec: AssemblySpec, axis: Any = None) -> dict:
@@ -91,6 +81,9 @@ def plan_from_content(content: dict, data: dict | None = None, axis: Any = None)
 
     content 为项目草稿内容(model.devices/connections + calc_config);
     装配层负责边-端解析与端口方向派生, 本函数把装配结果收敛为方案 dict。
+
+    无回退路径(§9.5): 装配失败原样向上报告, 不跳过装配层降级为旧式直接映射;
+    调用方需要显式保证项目内容可装配, 或自行捕获装配异常。
     """
     from iesplan.assembly.builder import build_assembly
 
@@ -99,41 +92,8 @@ def plan_from_content(content: dict, data: dict | None = None, axis: Any = None)
     if connections:
         graph["connections"] = connections
     cfg = content.get("calc_config") or {}
-    try:
-        spec = build_assembly(graph, calc_config=cfg)
-    except Exception:
-        # 装配失败(如图结构不完整): 回退直接映射, 保证兼容既有调用方
-        spec = None
-    if spec is None:
-        return _direct_plan(content)
+    spec = build_assembly(graph, calc_config=cfg)
     return plan_from_assembly(spec, axis=axis)
-
-
-def _direct_plan(content: dict) -> dict:
-    """项目内容 → 方案 dict(不依赖装配层, 兼容回退; 与 worker.executors 同构)。"""
-    model = content.get("model") or {}
-    devices: list[dict] = []
-    for dev in model.get("devices") or []:
-        if not isinstance(dev, dict) or not dev.get("device_type"):
-            continue
-        kind = dev.get("kind") or ("new" if dev.get("is_new") else "existing")
-        devices.append(
-            {
-                "type": dev["device_type"],
-                "params": dict(dev.get("params") or {}),
-                "is_new": kind == "new",
-            }
-        )
-    cfg = content.get("calc_config") or {}
-    params = cfg.get("params") or {}
-    return {
-        "devices": devices,
-        "reverse_feed_allowed": bool(params.get("reverse_feed_allowed", False)),
-        "lambda_h": float(params.get("lambda_h", 0.05)),
-        "lambda_c": float(params.get("lambda_c", 0.08)),
-        "c_ph": float(params.get("c_ph", 0.02)),
-        "c_pc": float(params.get("c_pc", 0.02)),
-    }
 
 
 __all__ = ["plan_from_assembly", "plan_from_content"]

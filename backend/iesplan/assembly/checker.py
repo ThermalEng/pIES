@@ -224,27 +224,31 @@ def resolve_model(ctx: CheckContext, model: str) -> tuple[DeviceTypeSpec | None,
 def _default_registry() -> dict[str, DeviceTypeSpec]:
     """注册表默认快照(type_id → DeviceTypeSpec)。
 
-    YAML 设备注册表优先(插件式, 端口定义来自 yaml);静态注册表仅作
-    YAML 目录未初始化时的兜底(核验 M6 修复项)。
-    YAML 注册表初始化错误只回退静态表(注册表本身不可用的兼容场景),
-    但记录日志便于诊断; 设备文件校验错误由注册入口(loader)负责上抛。
+    YAML 设备注册表优先(插件式, 端口定义来自 yaml); 静态注册表仅作
+    YAML 目录**未初始化**时的兜底(BE-REG-03):
+    - 仅 ``AppError(SYS-CFG-001)``(get_registry 未初始化)回退静态表并记录日志;
+    - 转换异常、插件数据错误、注册表内部损坏必须阻断装配检查并暴露根因
+      (不得误判为兼容场景继续使用过期定义)。
     """
-    try:
-        from iesplan.devices.registry import get_registry
-        from iesplan.devices.spec import to_registry_spec
+    from iesplan.devices.registry import get_registry
+    from iesplan.devices.spec import to_registry_spec
 
+    try:
         reg = get_registry()
-        specs = {s.type_id: to_registry_spec(s) for s in reg.list()}
-        merged: dict[str, DeviceTypeSpec] = {}
-        for tid, spec in specs.items():
-            if spec is not None:
-                merged[tid] = spec
-        if merged:
-            return merged
+    except AppError as exc:
+        if exc.code != "SYS-CFG-001":
+            raise
+        logger.warning("YAML 设备注册表未初始化, 回退静态设备表(装配检查): %s", exc)
+        return {s.type_id: s for s in list_device_types()}
+    specs = {s.type_id: to_registry_spec(s) for s in reg.list()}
+    merged: dict[str, DeviceTypeSpec] = {}
+    for tid, spec in specs.items():
+        if spec is not None:
+            merged[tid] = spec
+    if not merged:
         logger.warning("YAML 设备注册表为空, 回退静态设备表(装配检查)")
-    except Exception as exc:
-        logger.warning("YAML 设备注册表不可用, 回退静态设备表(装配检查): %s", exc)
-    return {s.type_id: s for s in list_device_types()}
+        return {s.type_id: s for s in list_device_types()}
+    return merged
 
 
 def _yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPort] | None:
@@ -252,14 +256,18 @@ def _yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPor
 
     yaml 端口(DeviceYamlSpec.ports: 端口名/载体/方向/容量引用)为权威来源,
     装配检查据此做连接合法性(REF-004/REF-005)与可解性检查。
+    仅"注册表未初始化"(AppError SYS-CFG-001)返回 None 走静态方向表;
+    注册表已初始化时的任何错误(注册表损坏/端口数据错误)向上阻断(BE-REG-03)。
     """
-    try:
-        from iesplan.devices.registry import get_registry
+    from iesplan.devices.registry import get_registry
 
+    try:
         reg = get_registry()
-        spec = reg.get(type_id)
-    except Exception:
+    except AppError as exc:
+        if exc.code != "SYS-CFG-001":
+            raise
         return None
+    spec = reg.get(type_id)
     ports: list[AssemblyPort] = []
     for p in spec.ports:
         unit = CARRIER_DEFAULT_QUANTITY_UNIT.get(p.energy_carrier, (QUANTITY_SIGNAL, "-"))[1]

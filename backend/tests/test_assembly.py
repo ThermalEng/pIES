@@ -12,6 +12,8 @@
 
 import textwrap
 
+import pytest
+
 from iesplan.assembly import (
     CheckContext,
     CheckResult,
@@ -1093,3 +1095,67 @@ class TestCheckResult:
             payload = d.to_dict()
             assert payload["code"] and payload["message_key"].startswith("ies.diag.asm.")
             assert isinstance(payload["params"], dict)
+
+
+class TestRegistryFallbackBoundary:
+    """BE-REG-03: 仅"注册表未初始化"(SYS-CFG-001)回退静态表, 其他错误阻断。"""
+
+    def test_uninitialized_registry_falls_back_to_static(self, monkeypatch):
+        import iesplan.assembly.checker as checker_mod
+        from iesplan.core.errors import AppError
+
+        def fake_get_registry():
+            raise AppError("设备注册表尚未初始化", code="SYS-CFG-001")
+
+        monkeypatch.setattr(
+            "iesplan.devices.registry.get_registry", fake_get_registry
+        )
+        reg = checker_mod._default_registry()
+        assert "ies.device.heat_pump" in reg  # 静态表兜底
+
+    def test_conversion_error_blocks_not_fall_back(self, monkeypatch):
+        import iesplan.assembly.checker as checker_mod
+        from iesplan.core.errors import AppError
+
+        def fake_get_registry():
+            raise AppError("注册表内部损坏", code="SYS-CFG-002")
+
+        monkeypatch.setattr(
+            "iesplan.devices.registry.get_registry", fake_get_registry
+        )
+        with pytest.raises(AppError):
+            checker_mod._default_registry()
+
+    def test_yaml_ports_conversion_error_blocks(self, monkeypatch):
+        import iesplan.assembly.checker as checker_mod
+        from iesplan.core.errors import AppError
+
+        def fake_get_registry():
+            raise AppError("注册表内部损坏", code="SYS-CFG-002")
+
+        monkeypatch.setattr(
+            "iesplan.devices.registry.get_registry", fake_get_registry
+        )
+        dev = checker_mod.AssemblyDevice(
+            id="d1", model="ies.device.pv@1.4.0", params={}, ports=[],
+        )
+        with pytest.raises(AppError):
+            checker_mod._yaml_device_ports(dev, "ies.device.pv")
+
+    def test_plan_from_content_propagates_assembly_error(self, monkeypatch):
+        """§9.5: 装配失败原样向上报告, 不再回退 _direct_plan。"""
+        from iesplan.assembly import plan as plan_mod
+        from iesplan.core.errors import AppError
+
+        def fake_build_assembly(graph, calc_config=None):
+            raise AppError("装配失败: 图结构不完整", code="ASM-EDGE-001")
+
+        monkeypatch.setattr(
+            "iesplan.assembly.builder.build_assembly", fake_build_assembly
+        )
+        content = {
+            "model": {"devices": [{"id": 1, "device_type": "ies.device.pv"}]},
+            "calc_config": {},
+        }
+        with pytest.raises(AppError):
+            plan_mod.plan_from_content(content)
