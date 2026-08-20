@@ -1,0 +1,53 @@
+# 热泵(机理模型、无状态;COP 为运行参数, 02 §2.8 数据预测示例另见 heat_pump_dr)
+type_id: ies.device.heat_pump
+version: 1.3.0
+name_zh: 热泵
+name_en: Heat Pump
+help_topic: help.modeling.heat_pump
+model_method: mechanism
+stateful: false
+fidelity: high
+energy_carriers: [electric, heat, cool]
+is_load: false
+capabilities: [heat_pump, controllable, dual_hvac, optimization_variable]
+extends: ies.device.base
+
+ports:
+  - {name: hp_electric_in, port_type: electric, direction: in, energy_carrier: electric,
+     capacity_ref: rated_heat_kw}
+  - {name: hp_heat_out, port_type: thermal, direction: out, energy_carrier: heat,
+     capacity_ref: rated_heat_kw}
+  - {name: hp_cool_out, port_type: cooling, direction: out, energy_carrier: cool,
+     capacity_ref: rated_heat_kw}
+
+parameters:
+  rated_heat_kw: {unit: kW, min: 0, max: 1000000, default: 0, is_optimizable: true,
+                  stock_or_addition: addition, help_key: help.param.heatpump.rated_heat_kw}
+  max_heat_kw: {unit: kW, min: 0, max: 1000000, default: 1000, stock_or_addition: addition,
+                help_key: help.param.heatpump.max_heat_kw}
+  cop: {unit: "-", min: 2.0, max: 6.5, default: 3.2, help_key: help.param.heatpump.cop}
+  cop_profile: {unit: reference, default: null, help_key: help.param.heatpump.cop_profile}
+  source_type: {unit: "-", default: air, enum: [air, ground, water],
+                help_key: help.param.heatpump.source_type}
+  mode: {unit: "-", default: both, enum: [heating, cooling, both],
+         help_key: help.param.heatpump.mode}
+  unit_invest_cost:
+    unit: CNY/kW
+    min: 0
+    default: "$price:device_costs.heat_pump.unit_invest_cost"
+    stock_or_addition: addition
+    help_key: help.param.heatpump.unit_invest_cost
+  lifetime_years:
+    unit: a
+    min: 1
+    max: 50
+    default: "$price:device_costs.heat_pump.lifetime_years"
+    help_key: help.param.heatpump.lifetime_years
+
+time_series:
+  inputs: []
+  outputs: []
+
+function:
+  entry: heat_pump_cop
+  package: iesplan.modeling.functions

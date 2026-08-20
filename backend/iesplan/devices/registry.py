@@ -1,0 +1,192 @@
+"""运行期设备注册表(替代 core/registry.py 静态注册;02 §6.4;05 §7.6)。
+
+- 插件式: 新增设备 = 放入 catalog/<id>.yaml(+csv), 无需改代码, reload() 热加载;
+- 受控加载: 任一设备校验失败即整体拒绝(load_all_devices 语义);
+- 运行期只读: get/list/snapshot; 快照格式沿用 core/registry.py 的 id@version,
+  计算快照引用 id@version, reload 后旧版本仍可解析。
+
+core/registry.py 的静态注册退化为内置兜底副本, 本注册表为 yaml 优先路径。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+from iesplan.core.errors import AppError, NotFoundError
+from iesplan.devices.loader import DEFAULT_CATALOG_DIR, load_all_devices
+from iesplan.devices.pricing import PriceBook, load_price_book
+from iesplan.devices.spec import DeviceYamlSpec
+
+#: 能力字典 → 设备粗分类别(镜像 services/model.py::_DEVICE_COARSE_CATEGORY, yaml 派生)
+_CAPABILITY_COARSE: dict[str, str] = {
+    "grid_connection": "source",
+    "pv": "pv",
+    "storage": "storage",
+    "load": "load",
+    "heat_pump": "converter",
+    "thermal_generation": "boiler",
+    "cooling_generation": "chiller",
+}
+
+
+class DeviceRegistry:
+    """运行期设备注册表(启动时 init_registry 初始化; 插件式热加载)。"""
+
+    def __init__(self, base_dir: Path, price_book: PriceBook) -> None:
+        self.base_dir = Path(base_dir)
+        self.price_book = price_book
+        self._specs: dict[str, DeviceYamlSpec] = {}
+
+    def load(self) -> None:
+        """幂等加载: 目录下全部设备; 任一失败整体拒绝并抛 AppError。"""
+        self._specs = {s.type_id: s for s in load_all_devices(self.base_dir, self.price_book)}
+
+    def reload(self) -> None:
+        """按目录 mtime 变化重新加载(插件式热加载; 计算快照仍引用 id@version 可解析)。"""
+        self.load()
+
+    def get(self, type_id: str) -> DeviceYamlSpec:
+        """按注册 id 取设备类型(未注册抛 NotFoundError, 码 CONN-TYPE-002)。"""
+        spec = self._specs.get(type_id)
+        if spec is None:
+            raise NotFoundError(
+                f"设备类型未注册: {type_id}",
+                code="CONN-TYPE-002",
+                message_key="ies.diag.conn.type_unregistered",
+                params={"device_id": "", "type_id": type_id},
+            )
+        return spec
+
+    def list(self) -> list[DeviceYamlSpec]:
+        """列出全部已注册设备(按注册顺序, 确定性)。"""
+        return list(self._specs.values())
+
+    def snapshot(self) -> list[str]:
+        """注册表快照: ["ies.device.pv@1.4.0", ...](与 core/registry.py 格式一致)。"""
+        return [f"{s.type_id}@{s.version}" for s in self._specs.values()]
+
+    def command_id(self, type_id: str) -> str:
+        """标准调用命令 id: 'ies.command.model.{type_id}.{method}.{version}' (03 §5.2)。"""
+        spec = self.get(type_id)
+        return f"ies.command.model.{spec.type_id}.{spec.model_method}.{spec.version}"
+
+    def get_entry_function(self, type_id: str) -> Callable:
+        """按 type_id 返回统一调用契约 device_entry 函数(02 §6.5)。
+
+        - mechanism: 绑定入口自 modeling.functions.MECHANISM_FUNCTIONS 映射表
+          (yaml function.entry 即映射表键名), 包装为统一契约; 绑定不可用抛
+          AppError 明确诊断, 禁止静默降级;
+        - data_repeat / data_predict: 函数生成(周期外推/模型加载)归 modeling 模块
+          (05 §7.6 generator → modeling), 经 modeling.command 命令注册表取函数。
+        """
+        spec = self.get(type_id)
+        fn = spec.function if isinstance(spec.function, dict) else {}
+        if spec.model_method == "mechanism":
+            entry = fn.get("entry", "")
+            if not isinstance(entry, str) or not entry:
+                raise AppError(
+                    f"设备 {type_id} 缺少机理函数入口(entry)",
+                    code="SYS-CFG-001",
+                    message_key="ies.diag.store.config_invalid",
+                    params={"device_id": type_id},
+                )
+            from iesplan.modeling.functions import as_device_entry, mechanism_spec_for
+
+            ms = mechanism_spec_for(entry)
+            if ms is None:
+                raise AppError(
+                    f"机理映射表缺少函数: {entry!r}(设备 {type_id})",
+                    code="SYS-CFG-001",
+                    message_key="ies.diag.store.config_invalid",
+                    params={"device_id": type_id, "entry": entry},
+                )
+            return as_device_entry(
+                ms.fn,
+                series_keys=ms.series_keys,
+                param_bindings=ms.param_bindings,
+                output_name=ms.output_name,
+                state_key=ms.state_key,
+                state_arg=ms.state_arg,
+                takes_dt=ms.takes_dt,
+            )
+        # data_repeat / data_predict: 函数由 modeling 生成并注册到命令注册表
+        from iesplan.modeling.command import get_entry_function as modeling_entry
+
+        command_id = self.command_id(type_id)
+        try:
+            return modeling_entry(command_id)
+        except Exception as exc:
+            raise AppError(
+                f"{type_id} 的设备函数由 modeling 模块生成(05 §7.6), 绑定不可用; "
+                f"命令: {command_id}",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={"device_id": type_id, "command": command_id},
+            ) from exc
+
+    def port_directions(self, type_id: str) -> dict[str, str]:
+        """载体 → 端口方向(替代 services/model.py::_DEVICE_PORT_DIRECTIONS; yaml ports 派生)。
+
+        同一载体多个端口时: 任一 bidirectional → bidirectional; 方向冲突 → bidirectional。
+        """
+        spec = self.get(type_id)
+        merged: dict[str, str] = {}
+        for port in spec.ports:
+            cur = merged.get(port.energy_carrier)
+            if cur is None:
+                merged[port.energy_carrier] = port.direction
+            elif port.direction == "bidirectional" or cur == "bidirectional":
+                merged[port.energy_carrier] = "bidirectional"
+            elif cur != port.direction:
+                merged[port.energy_carrier] = "bidirectional"
+        return merged
+
+    def coarse_category(self, type_id: str) -> str:
+        """设备粗分类别(替代 services/model.py::_DEVICE_COARSE_CATEGORY; yaml 派生)。"""
+        spec = self.get(type_id)
+        for cap in spec.capabilities:
+            if cap in _CAPABILITY_COARSE:
+                return _CAPABILITY_COARSE[cap]
+        if spec.is_load:
+            return "load"
+        carriers = set(spec.energy_carriers)
+        if "gas" in carriers:
+            return "boiler"
+        if "cool" in carriers:
+            return "chiller"
+        if "heat" in carriers:
+            return "converter"
+        return "other"
+
+
+# ---------------------------------------------------------------------------
+# 进程内单例(与 core/registry.py 现语义一致, 启动时由 main.py 初始化)
+# ---------------------------------------------------------------------------
+
+_registry: DeviceRegistry | None = None
+
+
+def get_registry() -> DeviceRegistry:
+    """进程内单例; 未初始化抛 AppError(SYS-CFG-001)。"""
+    if _registry is None:
+        raise AppError(
+            "设备注册表尚未初始化",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={},
+        )
+    return _registry
+
+
+def init_registry(base_dir: Path | None = None, book: PriceBook | None = None) -> DeviceRegistry:
+    """初始化(或重初始化)进程内设备注册表; 返回注册表实例。
+
+    缺省 base_dir 为内置 catalog/, 缺省价格书为内置 prices.yaml。
+    """
+    global _registry
+    base = Path(base_dir) if base_dir is not None else DEFAULT_CATALOG_DIR
+    price_book = book if book is not None else load_price_book()
+    _registry = DeviceRegistry(base, price_book)
+    _registry.load()
+    return _registry

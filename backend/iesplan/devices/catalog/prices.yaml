@@ -1,0 +1,45 @@
+# devices/catalog/prices.yaml — 统一价格/成本/税收默认值(唯一事实源, 02 §5;05 §7.8)
+# 设备 yaml 参数默认值以 $price:<点分路径> 引用;键删除 → 相关设备加载失败(错误含键名),
+# 不再出现"默认值不落库 → CAPEX 静默 0"。
+version: 1.0.0
+currency: CNY
+
+# 能源价格(默认值; 项目级配置可覆盖)
+energy_prices:
+  electricity:
+    import_tariff: {peak: 1.1, flat: 0.7, valley: 0.3}   # CNY/kWh 分时购电价
+    export_tariff: 0.35                                  # CNY/kWh 上网电价
+    demand_charge: 40.0                                  # CNY/kW·月 需量电费
+  gas:
+    price: 3.2                                           # CNY/m³
+    lhv_kj_per_m3: 35900                                 # kJ/m³
+  grid_emission_factor: 0.581                            # kgCO2/kWh
+
+# 设备单位成本与寿命默认(键名 = 设备 type_id 末段; 05 §7.8 裁决格式)
+device_costs:
+  pv: {unit_invest_cost: 3500, unit: CNY/kWp, lifetime_years: 25, annual_om_rate: 0.01}
+  battery: {unit_invest_cost: 900, unit: CNY/kWh, lifetime_years: 10, annual_om_rate: 0.02}
+  heat_pump: {unit_invest_cost: 1800, unit: CNY/kW, lifetime_years: 20, annual_om_rate: 0.01}
+  gas_boiler: {unit_invest_cost: 600, unit: CNY/kW, lifetime_years: 15, annual_om_rate: 0.02}
+  electric_chiller: {unit_invest_cost: 1200, unit: CNY/kW, lifetime_years: 18, annual_om_rate: 0.01}
+  electric_load: {unit_invest_cost: 0, unit: CNY/kW, lifetime_years: 20}
+
+# 财务默认(替换 financial.py 默认参数; 05 §7.8: tax 并入 finance 段)
+finance:
+  tax_rate: 0.25
+  discount_rate: 0.08
+  project_years: 20
+  depreciation_years: 10
+  irr_floor: 0.08
+
+# 排放因子(kgCO2 当量/单位; 电网因子以 energy_prices.grid_emission_factor 为准)
+emissions:
+  natural_gas: 0.202      # kgCO2/kWh(天然气燃烧)
+  heat_steam: 0.0         # kgCO2/kWh(热力, 占位)
+
+# 算法容差默认值(05 §7.8: 03 §4.3 algorithm 段, 供 engines/selector 读取;
+# 键名与受控注册表算法 id 一致(ies.algo.*, 04 §7.3 快照格式))
+algorithm:
+  ies.algo.milp_hybrid: {gap_rel: 0.001, time_limit_s: 600, seed: 42, n_typical_days: 12, irr_min: 0.08, discount_rate: 0.08}
+  ies.algo.lp_relax: {time_limit_s: 300, seed: 42}
+  ies.algo.mc_sampling: {n_samples: 100, seed_base: 42, max_parallel: 4}

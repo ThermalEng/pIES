@@ -1,0 +1,48 @@
+# 电网连接(机理模型、无状态;电价默认值自 prices.yaml 引用)
+type_id: ies.device.grid_connection
+version: 1.2.0
+name_zh: 电网连接
+name_en: Grid Connection
+help_topic: help.modeling.grid_connection
+model_method: mechanism
+stateful: false
+fidelity: medium
+energy_carriers: [electric]
+is_load: false
+capabilities: [grid_connection, power_balance_node]
+extends: ies.device.base
+
+ports:
+  - {name: grid_port, port_type: electric, direction: out, energy_carrier: electric,
+     capacity_ref: max_import_power_kw}
+
+parameters:
+  max_import_power_kw: {unit: kW, min: 0, max: 200000, default: 0, is_optimizable: true,
+                        help_key: help.param.grid.max_import_power_kw}
+  max_export_power_kw: {unit: kW, min: 0, max: 200000, default: 0, is_optimizable: true,
+                        help_key: help.param.grid.max_export_power_kw}
+  voltage_level_kv: {unit: kV, default: 10, enum: [0.4, 10, 35, 110],
+                     help_key: help.param.grid.voltage_level_kv}
+  import_tariff:
+    unit: CNY/kWh
+    min: 0
+    default: "$price:energy_prices.electricity.import_tariff"
+    help_key: help.param.grid.import_tariff
+  export_tariff:
+    unit: CNY/kWh
+    min: 0
+    default: "$price:energy_prices.electricity.export_tariff"
+    help_key: help.param.grid.export_tariff
+  demand_charge:
+    unit: CNY/kW·月
+    min: 0
+    default: "$price:energy_prices.electricity.demand_charge"
+    help_key: help.param.grid.demand_charge
+
+time_series:
+  inputs: []
+  outputs: []
+
+function:
+  entry: power_balance
+  package: iesplan.modeling.functions

@@ -1,0 +1,33 @@
+# 电负荷(数据-周期重复、无状态; 周期曲线数据源为同名标准 csv electric_load.csv, 必选)
+type_id: ies.device.electric_load
+version: 1.2.0
+name_zh: 电负荷
+name_en: Electric Load
+help_topic: help.modeling.electric_load
+model_method: data_repeat
+stateful: false
+fidelity: medium
+energy_carriers: [electric]
+is_load: true
+capabilities: [load, switchable]
+extends: ies.device.base
+
+ports:
+  - {name: load_in, port_type: electric, direction: in, energy_carrier: electric,
+     capacity_ref: peak_power_kw}
+
+parameters:
+  peak_power_kw: {unit: kW, min: 0, max: 10000000, default: 0,
+                  help_key: help.param.load.peak_power_kw}
+  load_profile: {unit: reference, default: null, help_key: help.param.load.load_profile}
+  annual_energy_kwh: {unit: kWh, min: 0, default: 0, help_key: help.param.load.annual_energy_kwh}
+  is_switchable: {unit: "-", default: false, help_key: help.param.load.is_switchable}
+
+time_series:
+  inputs:
+    - {key: e_load, unit: kWh, resolution: 1h, required: true, period: day}
+  outputs: []
+
+function:
+  entry: periodic_load_output
+  package: iesplan.modeling.functions.electric_load

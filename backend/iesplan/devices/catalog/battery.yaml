@@ -1,0 +1,58 @@
+# 电池储能(机理模型、有状态;states 声明 SOC, 02 §2.8 示例)
+type_id: ies.device.battery
+version: 1.5.0
+name_zh: 电池储能
+name_en: Battery Storage
+help_topic: help.modeling.battery
+model_method: mechanism
+stateful: true
+fidelity: high
+energy_carriers: [electric]
+is_load: false
+capabilities: [storage, controllable, optimization_variable]
+extends: ies.device.base
+
+ports:
+  - {name: bat_in, port_type: electric, direction: in, energy_carrier: electric,
+     capacity_ref: rated_power_kw}
+  - {name: bat_out, port_type: electric, direction: out, energy_carrier: electric,
+     capacity_ref: rated_power_kw}
+
+parameters:
+  capacity_kwh: {unit: kWh, min: 0, max: 10000000, default: 0, is_optimizable: true,
+                 stock_or_addition: addition, help_key: help.param.battery.capacity_kwh}
+  max_capacity_kwh: {unit: kWh, min: 0, max: 10000000, default: 5000,
+                     stock_or_addition: addition, help_key: help.param.battery.max_capacity_kwh}
+  rated_power_kw: {unit: kW, min: 0, max: 1000000, default: 0, is_optimizable: true,
+                   stock_or_addition: addition, help_key: help.param.battery.rated_power_kw}
+  charge_efficiency: {unit: "-", min: 0.5, max: 1.0, default: 0.95,
+                      help_key: help.param.battery.charge_efficiency}
+  discharge_efficiency: {unit: "-", min: 0.5, max: 1.0, default: 0.95,
+                         help_key: help.param.battery.discharge_efficiency}
+  max_soc: {unit: "-", min: 0.5, max: 1.0, default: 0.90, help_key: help.param.battery.max_soc}
+  min_soc: {unit: "-", min: 0, max: 0.5, default: 0.1, help_key: help.param.battery.min_soc}
+  initial_soc: {unit: "-", min: 0, max: 1.0, default: 0.5, help_key: help.param.battery.initial_soc}
+  cycle_life: {unit: 次, min: 100, max: 20000, default: 6000, help_key: help.param.battery.cycle_life}
+  unit_invest_cost:
+    unit: CNY/kWh
+    min: 0
+    default: "$price:device_costs.battery.unit_invest_cost"
+    stock_or_addition: addition
+    help_key: help.param.battery.unit_invest_cost
+  lifetime_years:
+    unit: a
+    min: 1
+    max: 50
+    default: "$price:device_costs.battery.lifetime_years"
+    help_key: help.param.battery.lifetime_years
+
+states:
+  - {key: soc, unit: "-", initial_ref: initial_soc, bounds: {min_ref: min_soc, max_ref: max_soc}}
+
+time_series:
+  inputs: []
+  outputs: []
+
+function:
+  entry: simulate_battery
+  package: iesplan.modeling.functions

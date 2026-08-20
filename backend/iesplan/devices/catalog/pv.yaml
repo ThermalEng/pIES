@@ -1,0 +1,55 @@
+# 光伏(机理模型、无状态;字段命名按 05 §7.1/§7.7 裁决)
+type_id: ies.device.pv
+version: 1.4.0
+name_zh: 光伏
+name_en: Photovoltaic (PV)
+help_topic: help.modeling.pv
+model_method: mechanism
+stateful: false
+fidelity: high
+energy_carriers: [solar, electric]
+is_load: false
+capabilities: [pv, controllable, optimization_variable]
+extends: ies.device.base
+
+ports:
+  - {name: solar_in, port_type: solar, direction: in, energy_carrier: solar}
+  - {name: pv_out, port_type: electric, direction: out, energy_carrier: electric,
+     capacity_ref: rated_capacity_kwp}
+
+parameters:
+  rated_capacity_kwp:
+    unit: kWp
+    min: 0
+    max: 1000000
+    default: 0
+    is_optimizable: true
+    stock_or_addition: addition
+    help_key: help.param.pv.rated_capacity_kwp
+  max_capacity_kwp: {unit: kWp, min: 0, max: 1000000, default: 1000, stock_or_addition: addition,
+                     help_key: help.param.pv.max_capacity_kwp}
+  efficiency: {unit: "-", min: 0.05, max: 0.5, default: 0.20, help_key: help.param.pv.efficiency}
+  tilt_deg: {unit: deg, min: 0, max: 90, default: 30, help_key: help.param.pv.tilt_deg}
+  azimuth_deg: {unit: deg, min: 0, max: 360, default: 180, help_key: help.param.pv.azimuth_deg}
+  unit_invest_cost:
+    unit: CNY/kWp
+    min: 0
+    default: "$price:device_costs.pv.unit_invest_cost"
+    stock_or_addition: addition
+    help_key: help.param.pv.unit_invest_cost
+  lifetime_years:
+    unit: a
+    min: 1
+    max: 50
+    default: "$price:device_costs.pv.lifetime_years"
+    help_key: help.param.pv.lifetime_years
+
+time_series:
+  inputs:
+    - {key: ghi, unit: W/m², resolution: 1h, required: true}
+    - {key: t_ambient, unit: "°C", resolution: 1h, required: true}
+  outputs: []
+
+function:
+  entry: pv_output
+  package: iesplan.modeling.functions

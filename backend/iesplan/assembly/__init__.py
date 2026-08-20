@@ -1,0 +1,48 @@
+"""装配与检查模块(审查意见第 4 条,docs/review-0820/04-assembly-checker.md)。
+
+边-端(edge-node)模型:节点 = 设备实例,端 = 端口,边 = 输出→输入链接
+(两端参数同一时间步严格相等;损耗/延迟必须经管道设备建模,体现非同时性)。
+
+公共 API:
+- parse_assembly / load_assembly_file:文本 → AssemblySpec(阶段 A 语法/结构);
+- build_assembly / dumps_assembly / build_assembly_text:项目图 → 规范文本(确定性);
+- check_assembly / check_assembly_text / check_graph_inputs:四阶段检查(语法 A →
+  连接合法性 B → 模型可解性 C → 整体可解性 D),输出结构化 ASM 域诊断;
+- check_graph_inputs 为任务装配闸门集成点(error 级诊断阻断任务下发)。
+
+依赖方向:assembly → core(diagnostics/units/registry/expression)+ models(仅常量),
+不依赖 services/engines/worker。
+"""
+
+from iesplan.assembly.builder import build_assembly, build_assembly_text, dumps_assembly
+from iesplan.assembly.checker import (
+    AssemblyCheckError,
+    BusSummary,
+    CheckContext,
+    CheckResult,
+    check_assembly,
+    check_assembly_text,
+    check_graph_inputs,
+)
+from iesplan.assembly.diags import ASM_ALL_CODES
+from iesplan.assembly.parser import ParseResult, load_assembly_file, parse_assembly
+from iesplan.assembly.schema import AssemblySpec, FORMAT_VERSION
+
+__all__ = [
+    "parse_assembly",
+    "load_assembly_file",
+    "build_assembly",
+    "dumps_assembly",
+    "build_assembly_text",
+    "check_assembly",
+    "check_assembly_text",
+    "check_graph_inputs",
+    "CheckContext",
+    "CheckResult",
+    "BusSummary",
+    "AssemblyCheckError",
+    "AssemblySpec",
+    "ParseResult",
+    "ASM_ALL_CODES",
+    "FORMAT_VERSION",
+]
