@@ -135,7 +135,8 @@ def _flow_value(value: Any) -> str:
 def _build_data_refs(device: dict) -> list[DataRef]:
     """从设备参数提取数据集引用:
     - 引用类参数值为 dict 含 dataset_version_id → DataRef(key=参数名, ...);
-    - 显式 "data_refs" 参数(列表)→ 逐项解析。
+    - 显式 "data_refs" 参数(列表)→ 逐项解析;
+    - 遗留字符串引用 "dataset:e_load" → (key=参数名, 占位 vid=0, 列名派生)。
     """
     params = device.get("params") or {}
     refs: list[DataRef] = []
@@ -153,6 +154,12 @@ def _build_data_refs(device: dict) -> list[DataRef]:
                     unit=str(value.get("unit", "")),
                     resolution=str(value.get("resolution", "")),
                 )
+            )
+        elif isinstance(value, str) and value.startswith("dataset:"):
+            # 遗留字符串引用 "dataset:e_load": 列名 = 冒号后段(先到先得, 见 _merge_dataset_meta)
+            col = value.split(":", 1)[1].strip() or key
+            refs.append(
+                DataRef(key=key, dataset_version_id=0, columns=[col], dataset_name=col)
             )
         # 注:纯数值的 *_profile 参数(如 cop_profile: 0 = 恒定 COP)是参数而非数据集引用,不转换
     for i, item in enumerate(params.get("data_refs") or []):
@@ -173,20 +180,53 @@ def _build_data_refs(device: dict) -> list[DataRef]:
 
 
 def _merge_dataset_meta(refs: list[DataRef], datasets: dict[int, dict] | None) -> list[DataRef]:
-    """用数据集元信息补齐 data_refs 的列/单位/分辨率(缺失时保留声明值)。"""
+    """用数据集元信息补齐 data_refs 的列/单位/分辨率(缺失时保留声明值)。
+
+    遗留占位引用(dataset_version_id=0, 来自 "dataset:col" 字符串)按列名匹配
+    绑定的数据集版本(先到先得): 命中则回填真实版本 id/单位/分辨率 —— 该解析
+    在装配检查/装配文本阶段完成, 保证遗留内容可过闸门且装配文本自洽。
+    """
     if not datasets:
         return refs
+    # 占位引用: 列名 → 首个提供该列的数据集版本; 单位按列取
+    col_vid: dict[str, int] = {}
+    col_unit: dict[str, str] = {}
+    meta_by_vid: dict[int, dict] = {}
+    for vid, meta in datasets.items():
+        meta_by_vid[vid] = meta
+        if not isinstance(meta, dict):
+            continue
+        col_units = meta.get("column_units") if isinstance(meta.get("column_units"), dict) else {}
+        for col in meta.get("columns", []):
+            if not isinstance(col, str):
+                continue
+            col_vid.setdefault(col, vid)
+            unit = col_units.get(col)
+            if isinstance(unit, str) and unit:
+                col_unit.setdefault(col, unit)
     merged: list[DataRef] = []
     for ref in refs:
         meta = datasets.get(ref.dataset_version_id)
+        resolved_vid = ref.dataset_version_id
+        if ref.dataset_version_id == 0 and ref.columns:
+            # 遗留占位: 按列名定位绑定数据集
+            vid = next((col_vid[c] for c in ref.columns if c in col_vid), None)
+            if vid is not None:
+                resolved_vid = vid
+                meta = meta_by_vid.get(vid)
         if isinstance(meta, dict):
+            # 数据集元信息为权威单位(codex 二次审核 Medium-8: 显式 unit 只是
+            # 期望声明, 元信息缺失该列单位时才用声明值, 不一致由检查器报阻断)
+            col_unit_for_ref = next(
+                (col_unit[c] for c in ref.columns if c in col_unit), ""
+            ) or ref.unit
             merged.append(
                 DataRef(
                     key=ref.key,
-                    dataset_version_id=ref.dataset_version_id,
+                    dataset_version_id=resolved_vid or int(meta.get("id", 0)),
                     dataset_name=ref.dataset_name or str(meta.get("name", "")),
                     columns=ref.columns or [c for c in meta.get("columns", []) if isinstance(c, str)],
-                    unit=ref.unit or str(meta.get("unit", "")),
+                    unit=col_unit_for_ref,
                     resolution=ref.resolution or str(meta.get("resolution", "")),
                 )
             )

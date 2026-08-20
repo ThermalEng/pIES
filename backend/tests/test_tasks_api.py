@@ -562,3 +562,34 @@ def test_queue_heartbeat_progress_cancel(db: Session) -> None:
     assert queue.get_cancel(101) == "user_cancel"
     queue.clear_cancel(101)
     assert queue.get_cancel(101) is None
+
+
+# ---------------------------------------------------------------------------
+# analysis 任务类型(03 §8 / §9.7: 批量分析注册与执行)
+# ---------------------------------------------------------------------------
+
+
+def test_analysis_task_type_registered(client: TestClient, db: Session) -> None:
+    """analysis 任务类型: 创建成功、入 compute 队列、快照绑定。"""
+    owner = make_user(db, "owner_analysis")
+    pid = _prepare_project(client, db, owner)
+    status, body = _submit_task(
+        client, pid, owner, task_type="analysis",
+        config={"sweeps": [{"param_path": "calc_config.irr_floor",
+                            "values": [0.06, 0.08], "unit": "-"}]},
+        idempotency_key="analysis-1",
+    )
+    assert status == 201, body
+    task = body["task"]
+    assert task["type"] == "analysis"
+    assert task["calc_snapshot_id"] is not None  # 计算类任务绑定快照
+    assert queue.dequeue("compute") == task["id"]
+
+
+def test_analysis_task_rejected_without_sweeps(client: TestClient, db: Session) -> None:
+    """analysis 任务缺 sweeps → 400(参数非法)。"""
+    owner = make_user(db, "owner_analysis_bad")
+    pid = _prepare_project(client, db, owner)
+    status, body = _submit_task(client, pid, owner, task_type="analysis", config={})
+    assert status == 400
+    assert body["error"]["code"] == "TASK-REQ-001"

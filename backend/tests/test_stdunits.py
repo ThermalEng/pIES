@@ -344,6 +344,14 @@ class TestToSiFromSi:
                 fn()
             assert ei.value.code == "PARAM-UNIT-002"
 
+    def test_composite_usd_conversion_rejected(self):
+        """复合单位含非固定汇率币种也拒绝折算(codex 二次审核 Medium-7)。"""
+        for unit in ("USD/kWh", "USD/kW·月", "USD·h", "CNY/USD"):
+            with pytest.raises(UnitError):
+                to_si(1, unit)
+            with pytest.raises(UnitError):
+                from_si(1, unit)
+
     def test_to_si_unknown_unit(self):
         with pytest.raises(UnitError):
             to_si(1, "bogus")
@@ -524,10 +532,12 @@ class TestRegistryCompat:
             assert uid in UNITS
 
     def test_base_units_untouched(self):
-        # 不改写既有 core/units.py:新词条只出现在本包注册表
-        assert "kg" not in base_units.UNITS
-        assert "月" not in base_units.UNITS
+        # 01 定案 §4.1:core/units.py 为唯一换算入口(扩展注册表直接并入),
+        # 新词条(kWp 等)以别名并入、既有词条系数不变
+        assert "kg" in base_units.UNITS  # 扩展注册表并入 core/units.py
+        assert "月" in base_units.UNITS
         assert base_units.UNITS["kW"].to_si == 1e3
+        assert base_units.UNITS["kW"].symbol_en == "kW"
 
     def test_alias_map_extended(self):
         assert ALIAS_MAP["kwp"] == "kW"

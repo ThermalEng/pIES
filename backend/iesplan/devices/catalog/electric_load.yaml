@@ -13,13 +13,13 @@ capabilities: [load, switchable]
 extends: ies.device.base
 
 ports:
-  - {name: load_in, port_type: electric, direction: in, energy_carrier: electric,
+  - {name: electric_in, port_type: electric, direction: in, energy_carrier: electric,
      capacity_ref: peak_power_kw}
 
 parameters:
   peak_power_kw: {unit: kW, min: 0, max: 10000000, default: 0,
                   help_key: help.param.load.peak_power_kw}
-  load_profile: {unit: reference, default: null, help_key: help.param.load.load_profile}
+  load_profile: {unit: reference, default: 0, help_key: help.param.load.load_profile}
   annual_energy_kwh: {unit: kWh, min: 0, default: 0, help_key: help.param.load.annual_energy_kwh}
   is_switchable: {unit: "-", default: false, help_key: help.param.load.is_switchable}
 
@@ -30,4 +30,4 @@ time_series:
 
 function:
   entry: periodic_load_output
-  package: iesplan.modeling.functions.electric_load
+  package: iesplan.modeling.functions

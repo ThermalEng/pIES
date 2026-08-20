@@ -13,7 +13,7 @@ capabilities: [grid_connection, power_balance_node]
 extends: ies.device.base
 
 ports:
-  - {name: grid_port, port_type: electric, direction: out, energy_carrier: electric,
+  - {name: electric_out, port_type: electric, direction: out, energy_carrier: electric,
      capacity_ref: max_import_power_kw}
 
 parameters:

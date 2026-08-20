@@ -1,0 +1,36 @@
+# 热负荷(数据-周期重复、无状态; 周期曲线数据源为同名标准 csv heat_load.csv, 必选)
+type_id: ies.device.heat_load
+version: 1.1.0
+name_zh: 热负荷
+name_en: Heat Load
+help_topic: help.modeling.heat_load
+model_method: data_repeat
+stateful: false
+fidelity: medium
+energy_carriers: [heat]
+is_load: true
+capabilities: [load, heat_load]
+extends: ies.device.base
+
+ports:
+  - {name: heat_in, port_type: thermal, direction: in, energy_carrier: heat,
+     capacity_ref: peak_heat_kw}
+
+parameters:
+  peak_heat_kw: {unit: kW, min: 0, max: 10000000, default: 0,
+                 help_key: help.param.heatload.peak_heat_kw}
+  heat_profile: {unit: reference, default: 0, help_key: help.param.heatload.heat_profile}
+  annual_heat_kwh: {unit: kWh, min: 0, default: 0, help_key: help.param.heatload.annual_heat_kwh}
+  supply_temp_c: {unit: "°C", min: 30, max: 95, default: 70,
+                  help_key: help.param.heatload.supply_temp_c}
+  return_temp_c: {unit: "°C", min: 10, max: 70, default: 50,
+                  help_key: help.param.heatload.return_temp_c}
+
+time_series:
+  inputs:
+    - {key: h_load, unit: kWh, resolution: 1h, required: true, period: day}
+  outputs: []
+
+function:
+  entry: periodic_load_output
+  package: iesplan.modeling.functions

@@ -13,9 +13,8 @@ capabilities: [storage, controllable, optimization_variable]
 extends: ies.device.base
 
 ports:
-  - {name: bat_in, port_type: electric, direction: in, energy_carrier: electric,
-     capacity_ref: rated_power_kw}
-  - {name: bat_out, port_type: electric, direction: out, energy_carrier: electric,
+  # 双向端口(充放电互斥): 端口名为载体名, 与 services/model.py 端口命名约定一致
+  - {name: electric, port_type: electric, direction: bidirectional, energy_carrier: electric,
      capacity_ref: rated_power_kw}
 
 parameters:

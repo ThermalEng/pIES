@@ -133,6 +133,39 @@ def clear_commands() -> None:
     _GENERATED_FUNCS.clear()
 
 
+#: 计算引擎命令注册表(03 §9.3 命令化:引擎函数以命令 id 注册,executors 经
+#: modeling 分发,不再直接 import 引擎函数;算法选择见 engines/selector.py)
+_COMPUTE_COMMANDS: dict[str, Callable] = {
+    "ies.command.compute.evaluate_plan.v1": "iesplan.engines.eval_run.evaluate_plan",
+    "ies.command.compute.run_planning.v1": "iesplan.engines.planning.run_planning",
+    "ies.command.compute.uncertainty.v1": "iesplan.engines.eval_run.evaluate_plan",
+}
+
+
+def init_compute_commands() -> None:
+    """注册计算引擎命令(启动时由 modeling 注册流程调用;03 §9.3)。
+
+    计算引擎以 ``ies.command.compute.*`` 命令 id 注册,executors 经
+    ``get_compute_entry`` 取函数(隔离子进程可经 env path 解析)。
+    """
+    for command_id, ref in _COMPUTE_COMMANDS.items():
+        if command_id not in _COMMANDS:
+            _COMMANDS[command_id] = ModuleCommand(
+                command_id=command_id,
+                function_ref=ref,
+                version="1.0.0",
+                stateful=False,
+            )
+
+
+def get_compute_entry(command_id: str) -> Callable:
+    """按计算引擎命令 id 取函数(未注册抛 NotFoundError)。"""
+    cmd = _COMMANDS.get(command_id)
+    if cmd is None:
+        raise NotFoundError(f"计算引擎命令未注册: {command_id}", code="CONN-TYPE-002")
+    return resolve_function_ref(cmd.function_ref)
+
+
 def snapshot() -> list[str]:
     """注册表快照:["ies.command.model.ies.device.pv.mechanism.1.4.0", ...](确定性)。"""
     return list(_COMMANDS.keys())

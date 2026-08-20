@@ -119,6 +119,22 @@ class DeviceYamlSpec:
     states: list[StateSpec] = field(default_factory=list)
     function: dict = field(default_factory=dict)  # {"entry","package"} 或 {"model_file": {...}}
     base_dir: str = ""  # yaml 所在目录(相对引用 model_file/csv 用)
+    source_path: str = ""  # 源 yaml 完整路径(周期 csv 推导的权威来源, 03 §6.4)
+
+
+def standard_csv_path(spec: DeviceYamlSpec) -> str | None:
+    """data_repeat 设备的标准 csv 路径(03 §6.4 唯一推导规则)。
+
+    权威规则: ``<yaml 完整路径去后缀>.csv``(source_path 权威, codex 二次
+    审核 Medium-4: 以 yaml 文件为基准, 不再先猜目录名再猜 type_id 末段)。
+    source_path 为空(测试手工构造)时退化为 base_dir 目录名; 文件不存在
+    返回 None(由调用方报明确错误)。
+    """
+    base = Path(spec.source_path) if spec.source_path else Path(spec.base_dir) / (
+        f"{Path(spec.base_dir).name}.yaml"
+    )
+    candidate = base.with_suffix(".csv")
+    return str(candidate) if candidate.exists() else None
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +226,7 @@ def load_yaml(path: Path) -> DeviceYamlSpec:
         states=_parse_states(raw.get("states", []), file),
         function=function,
         base_dir=str(path.resolve().parent),
+        source_path=str(path.resolve()),
     )
 
 
@@ -529,6 +546,10 @@ def to_modeling_spec(spec: DeviceYamlSpec):
             model_file = ref
     if isinstance(fn.get("data_file"), str) and fn["data_file"]:
         data_file = fn["data_file"]
+    elif spec.model_method == "data_repeat" and not data_file:
+        # 内置周期设备: 唯一推导规则 yaml 同目录同名 csv(03 §6.4,
+        # standard_csv_path 为权威入口, 与 registry_loader 共用)
+        data_file = standard_csv_path(spec)
     model_function = ""
     if spec.model_method == "mechanism":
         package = fn.get("package") or ""

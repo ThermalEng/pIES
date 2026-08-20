@@ -39,6 +39,11 @@ from iesplan.worker.solver_process import run_solver_isolated  # noqa: E402
 @pytest.fixture(scope="module")
 def engine() -> Iterator[Engine]:
     """模块级 SQLite 内存引擎(StaticPool: 所有会话共享同一连接)。"""
+    # 计算引擎命令注册(模拟 worker 启动, 03 §9.3; 测试直接跑 runner 不经过
+    # worker/main.py 的启动注册流程, 必须自包含注册, 避免全量顺序依赖)
+    from iesplan.modeling.command import init_compute_commands
+
+    init_compute_commands()
     eng = create_engine(
         "sqlite+pysqlite://",
         connect_args={"check_same_thread": False},
@@ -54,6 +59,11 @@ def _clean_state(engine: Engine, db: Session) -> Iterator[None]:
     """每个测试前重置内存队列, 结束后清空全部表(避免测试间串扰)。"""
     queue.force_memory()
     yield
+    # 恢复 setup_environment 改动的全局设置(阈值/数据目录),
+    # 避免污染后续测试文件(如 test_objects_api 的容量检查)
+    from iesplan.config import settings
+
+    settings.storage_min_free_bytes = 2_000_000_000
     with engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
             conn.execute(table.delete())

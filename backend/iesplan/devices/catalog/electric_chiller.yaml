@@ -1,0 +1,49 @@
+# 电制冷机(机理模型、无状态; 电→冷转换, 02 §4.7 线性 COP)
+type_id: ies.device.electric_chiller
+version: 1.2.0
+name_zh: 电制冷机
+name_en: Electric Chiller
+help_topic: help.modeling.chiller
+model_method: mechanism
+stateful: false
+fidelity: medium
+energy_carriers: [electric, cool]
+is_load: false
+capabilities: [cooling_generation, controllable, optimization_variable]
+extends: ies.device.base
+
+ports:
+  - {name: electric_in, port_type: electric, direction: in, energy_carrier: electric,
+     capacity_ref: rated_cooling_kw}
+  - {name: cool_out, port_type: cooling, direction: out, energy_carrier: cool,
+     capacity_ref: rated_cooling_kw}
+
+parameters:
+  rated_cooling_kw: {unit: kW, min: 0, max: 1000000, default: 0, is_optimizable: true,
+                     stock_or_addition: addition, help_key: help.param.chiller.rated_cooling_kw}
+  max_cooling_kw: {unit: kW, min: 0, max: 1000000, default: 1000,
+                   stock_or_addition: addition, help_key: help.param.chiller.max_cooling_kw}
+  cop: {unit: "-", min: 1.5, max: 8.0, default: 4.0, help_key: help.param.chiller.cop}
+  cop_profile: {unit: reference, default: 0, help_key: help.param.chiller.cop_profile}
+  cooling_temp_c: {unit: "°C", min: 3, max: 20, default: 7,
+                   help_key: help.param.chiller.cooling_temp_c}
+  unit_invest_cost:
+    unit: CNY/kW
+    min: 0
+    default: "$price:device_costs.electric_chiller.unit_invest_cost"
+    stock_or_addition: addition
+    help_key: help.param.chiller.unit_invest_cost
+  lifetime_years:
+    unit: a
+    min: 1
+    max: 50
+    default: "$price:device_costs.electric_chiller.lifetime_years"
+    help_key: help.param.chiller.lifetime_years
+
+time_series:
+  inputs: []
+  outputs: []
+
+function:
+  entry: chiller_output
+  package: iesplan.modeling.functions

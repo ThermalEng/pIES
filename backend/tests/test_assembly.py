@@ -513,6 +513,10 @@ class TestPhaseC:
         result = check_spec(parse_ok(text))
         diag = result.by_code(ASM_REF_MODEL_UNREG)[0]
         assert diag.params["registered"] == "ies.device.heat_pump@1.3.0"
+        # 版本陈旧为非阻断警告(目录升级不破坏既有项目提交)
+        assert diag.severity == "warning"
+        assert diag.blocking is False
+        assert ASM_REF_MODEL_UNREG not in result.blocking_diags
 
     def test_ref_002_version_omitted_resolves_latest(self):
         text = minimal_text("- id: hp1\n    model: ies.device.heat_pump\n")
@@ -950,6 +954,47 @@ class TestBuilder:
         assert any(p.name == "electric_in" and p.capacity == 1200.0 for p in hp1.ports)
         assert "capacity: 1200" in dumps_assembly(spec)
 
+    def test_yaml_port_capacity_override_merged(self, monkeypatch):
+        """High-3 修复: YAML 注册表已初始化时, 显式声明 capacity 仍生效
+        (之前 YAML 端口路径提前 return, 覆盖成为死代码)。"""
+        import iesplan.assembly.checker as checker_mod
+
+        registry_initialized = {"specs": None}
+
+        def fake_yaml_ports(device, type_id):
+            # 模拟 YAML 注册表返回端口(注册表已初始化场景)
+            from iesplan.assembly.schema import AssemblyPort
+
+            return [
+                AssemblyPort(
+                    device=device.id, name="electric_in", carrier="electric",
+                    direction="in", quantity="power", unit="W", nature="instant",
+                    capacity=300.0,
+                ),
+                AssemblyPort(
+                    device=device.id, name="heat_out", carrier="heat",
+                    direction="out", quantity="power", unit="W", nature="instant",
+                    capacity=600.0,
+                ),
+            ]
+
+        monkeypatch.setattr(checker_mod, "_yaml_device_ports", fake_yaml_ports)
+        dev = checker_mod.AssemblyDevice(
+            id="hp1", model="ies.device.heat_pump@1.3.0", params={},
+            ports=[
+                checker_mod.AssemblyPort(
+                    device="hp1", name="electric_in", carrier="electric",
+                    direction="in", quantity="power", unit="W", nature="instant",
+                    capacity=999.0,
+                )
+            ],
+        )
+        derived = checker_mod._derive_device_ports(None, checker_mod.CheckContext(), dev)
+        by_name = {p.name: p for p in derived}
+        # 显式 capacity 覆盖 YAML 默认值; 未显式声明的端口保留 YAML 值
+        assert by_name["electric_in"].capacity == 999.0
+        assert by_name["heat_out"].capacity == 600.0
+
     def test_roundtrip_text_check(self):
         text = build_assembly_text(_simple_graph(), datasets=DATASETS)
         result = check_assembly_text(text, ctx=CheckContext(datasets=DATASETS))
@@ -992,6 +1037,35 @@ class TestBuilder:
         result = check_graph_inputs(content)
         assert not result.ok
         assert ASM_REF_MODEL_UNREG in codes(result)
+
+    def test_check_graph_inputs_dataset_gate_enforced(self):
+        """High-1 修复: datasets 元信息必须进入检查上下文, 数据集版本/列/分辨率
+        检查在 check_graph_inputs 路径真实执行(之前只喂给 builder, 检查被绕过)。"""
+        # 版本缺失: 显式 dataset_version_id 不存在 → 阻断
+        graph = _simple_graph()
+        graph["devices"][2]["params"]["load_profile"] = {"dataset_version_id": 999}
+        content = {
+            "model": {k: graph[k] for k in ("devices", "ports", "connections")},
+            "calc_config": {},
+        }
+        result = check_graph_inputs(content, datasets=DATASETS)
+        assert not result.ok
+        diag = next(d for d in result.blocking_diags if d.code == ASM_REF_DATASET)
+        assert diag.params["reason"] == "dataset_version_not_found"
+
+        # 列缺失: 引用列不在数据集列清单 → 阻断
+        graph2 = _simple_graph()
+        graph2["devices"][2]["params"]["load_profile"] = {
+            "dataset_version_id": 17, "columns": ["nope_kw"], "unit": "kW",
+        }
+        content2 = {
+            "model": {k: graph2[k] for k in ("devices", "ports", "connections")},
+            "calc_config": {},
+        }
+        result2 = check_graph_inputs(content2, datasets=DATASETS)
+        assert not result2.ok
+        diag2 = next(d for d in result2.blocking_diags if d.code == ASM_REF_DATASET)
+        assert diag2.params["reason"] == "column_not_found"
 
 
 # ---------------------------------------------------------------------------

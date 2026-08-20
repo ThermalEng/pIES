@@ -60,11 +60,25 @@ def test_readyz_503_when_db_unavailable(client: TestClient, monkeypatch: pytest.
 
 
 def test_readyz_200_when_db_available(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """数据库可用时就绪探针应返回 200。"""
+    """数据库与建模命令注册表均可用时就绪探针应返回 200。"""
     monkeypatch.setattr("iesplan.main._db_available", lambda: True)
+    monkeypatch.setattr("iesplan.main._registry_status", "ok")
     resp = client.get("/api/readyz")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_readyz_503_when_registry_unavailable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """建模命令注册表初始化失败时就绪探针应返回 503(High-6 修复)。"""
+    monkeypatch.setattr("iesplan.main._db_available", lambda: True)
+    monkeypatch.setattr("iesplan.main._registry_status", "error: boom")
+    resp = client.get("/api/readyz")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["error"]["code"] == "API-RZ-002"
+    assert body["error"]["message_key"] == "ies.error.registry_unavailable"
 
 
 def test_cors_allows_local_origin_with_credentials(client: TestClient) -> None:

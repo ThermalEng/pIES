@@ -149,7 +149,7 @@ class TestPriceBook:
         assert book.finance["tax_rate"] == 0.25
         assert book.finance["discount_rate"] == 0.08
         assert book.emissions["natural_gas"] == 0.202
-        assert book.algorithm["milp_hybrid"]["gap_rel"] == 0.001
+        assert book.algorithm["ies.algo.milp_hybrid"]["gap_rel"] == 0.001
 
     def test_get_dotted_path(self):
         book = load_price_book()
@@ -173,8 +173,8 @@ class TestPriceBook:
             "irr_floor": 0.08,
         }
         algo = algorithm_defaults(book)
-        assert algo["milp_hybrid"]["time_limit_s"] == 600
-        assert algo["mc_sampling"]["n_samples"] == 100
+        assert algo["ies.algo.milp_hybrid"]["time_limit_s"] == 600
+        assert algo["ies.algo.mc_sampling"]["n_samples"] == 100
 
     def test_missing_required_section_rejected(self, tmp_path):
         path = _write(tmp_path, "prices.yaml", "version: 1.0.0\ncurrency: CNY\n")
@@ -201,7 +201,7 @@ class TestDeviceYamlParse:
         assert spec.energy_carriers == ["solar", "electric"]
         assert spec.is_load is False
         assert spec.capabilities == ["pv", "controllable", "optimization_variable"]
-        assert [p.name for p in spec.ports] == ["solar_in", "pv_out"]
+        assert [p.name for p in spec.ports] == ["solar_in", "electric_out"]
         assert spec.ports[1].capacity_ref == "rated_capacity_kwp"
         p = spec.parameters["rated_capacity_kwp"]
         assert p.unit == "kWp"
@@ -498,14 +498,18 @@ class TestLoader:
         assert discover_device_dirs(nested) == [nested / "sub"]
 
     def test_catalog_loads_clean(self, book):
-        """内置 catalog: 5 台设备全部加载成功, 联合校验零诊断。"""
+        """内置 catalog: 9 台设备全部加载成功, 联合校验零诊断。"""
         specs = load_all_devices(DEFAULT_CATALOG_DIR, book)
         ids = [s.type_id for s in specs]
         assert ids == sorted(ids)
         assert ids == [
             "ies.device.battery",
+            "ies.device.cooling_load",
+            "ies.device.electric_chiller",
             "ies.device.electric_load",
+            "ies.device.gas_boiler",
             "ies.device.grid_connection",
+            "ies.device.heat_load",
             "ies.device.heat_pump",
             "ies.device.pv",
         ]
@@ -671,7 +675,7 @@ def registry():
 
 class TestRegistry:
     def test_load_get_list_snapshot(self, registry):
-        assert len(registry.list()) == 5
+        assert len(registry.list()) == 9  # 内置 catalog 九类设备
         pv = registry.get("ies.device.pv")
         assert pv.version == "1.4.0"
         snap = registry.snapshot()
@@ -761,6 +765,6 @@ class TestSingleton:
     def test_init_registry_singleton(self):
         reg = init_registry()  # 缺省内置 catalog + 缺省价格书
         assert reg is get_registry()
-        assert len(reg.snapshot()) == 5
+        assert len(reg.snapshot()) == 9  # 内置 catalog 九类设备
         reg2 = init_registry()  # 可重初始化
         assert reg2 is get_registry()

@@ -73,23 +73,25 @@ def finance_params_from_dict(mapping: dict) -> FinanceParams:
 
 
 def _price_finance_defaults() -> dict[str, float]:
-    """读取价格事实源 finance 节(惰性导入 devices 门面,失败回退内置默认)。"""
-    try:
-        # 02 §6.2 定案路径:iesplan.devices.prices
-        from iesplan.devices.prices import finance_defaults, load_price_book  # type: ignore[import-not-found]
+    """读取价格事实源 finance 节(惰性导入 devices 门面,失败回退内置默认)。
 
-        return dict(finance_defaults(load_price_book()))
-    except Exception:
-        pass
-    try:
-        # 03 目录草案路径:iesplan.devices.pricing
-        from iesplan.devices.pricing import (  # type: ignore[import-not-found]
-            finance_defaults,
-            load_price_book,
-        )
-        return dict(finance_defaults(load_price_book()))
-    except Exception:
-        return dict(FALLBACK_PRICE_FINANCE)
+    回退只覆盖"模块不存在"的兼容场景(并行 agent 尚未落地 devices 门面):
+    仅当 ``ModuleNotFoundError`` 且缺失模块就是目标模块时回退; 模块存在但
+    加载失败(文件缺失/语法错误/段缺失或内部依赖错误)一律上抛
+    (codex 二次审核 Medium-6: 不允许把实现错误误判为兼容缺失)。
+    """
+    from importlib import import_module
+
+    for module_name in ("iesplan.devices.pricing", "iesplan.devices.prices"):
+        try:
+            module = import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if getattr(exc, "name", None) == module_name:
+                continue  # 兼容场景: 该模块路径未实现, 尝试下一个
+            raise
+        book = module.load_price_book()
+        return dict(module.finance_defaults(book))
+    return dict(FALLBACK_PRICE_FINANCE)
 
 
 def finance_params_from_config(calc_config: dict | None) -> FinanceParams:

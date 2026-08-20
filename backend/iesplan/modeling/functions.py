@@ -21,7 +21,7 @@ from typing import Callable
 
 import numpy as np
 
-from iesplan.core.units import UnitError, energy_to_joules, power_to_watts, temperature_kelvin
+from iesplan.core.units import UnitError, to_si
 
 from iesplan.modeling.command import DeviceRunResult
 from iesplan.modeling.errors import ModelingConfigError
@@ -423,25 +423,14 @@ def mechanism_spec_for(model_function: str) -> MechanismSpec | None:
 
 
 def _to_si_param(value: float, unit: str) -> float:
-    """业务单位参数 → SI(换算唯一入口 core/units.py 与 stdunits 注册表)。
+    """业务单位参数 → SI(换算唯一入口 core/units.py to_si,01 §4.1 定案)。
 
-    'kWp' 由 stdunits ALIAS_MAP 归一为 kW(注册表已含 kWp → 1000 W);
+    'kWp' 由注册表 ALIAS_MAP 归一为 kW(注册表已含 kWp → 1000 W);
     '-'/无量纲原样透传; 未注册单位抛 UnitError(禁止静默透传, 01 定案)。
     """
     if unit in ("-", "", None):
         return float(value)
-    from iesplan.core.stdunits import to_si as std_to_si
-
-    try:
-        return float(std_to_si(value, unit))
-    except UnitError:
-        pass
-    for conv in (energy_to_joules, power_to_watts, temperature_kelvin):
-        try:
-            return float(conv(value, unit))
-        except UnitError:
-            continue
-    raise UnitError(f"参数单位未注册: {unit!r}")
+    return float(to_si(value, unit))
 
 
 def as_device_entry(

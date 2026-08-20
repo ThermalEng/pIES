@@ -98,6 +98,8 @@ class CalcSnapshot(Base):
     random_seed: Mapped[int] = mapped_column(BigInteger, nullable=False)
     tolerances: Mapped[dict | None] = mapped_column(JSONB)
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 装配文本(装配检查通过后写入, 计算模块输入的第 4 步产物; 04 §6.2)
+    assembly_text: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -137,7 +139,7 @@ class Task(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "type IN ('calc','optimization','uncertainty','import','export','report','dataset_build')",
+            "type IN ('calc','optimization','uncertainty','analysis','import','export','report','dataset_build')",
             name="ck_tasks_type",
         ),
         CheckConstraint(

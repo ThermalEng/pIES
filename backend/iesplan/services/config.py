@@ -52,12 +52,6 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.expression import (
-    DIM_ANGLE,
-    DIM_CURRENCY,
-    DIM_ENERGY,
-    DIM_POWER,
-    DIM_TEMPERATURE,
-    DIM_TIME,
     Dimensions,
     ExpressionError,
     parse_expr,
@@ -72,7 +66,7 @@ from iesplan.core.registry import (
     list_algorithms,
     list_device_types,
 )
-from iesplan.core.units import UNITS
+from iesplan.core.units import UnitError, dims_of
 from iesplan.db import SessionLocal
 from iesplan.models.calc import CalcConfig
 from iesplan.models.model import Device, SystemGraph
@@ -159,18 +153,8 @@ ENVIRONMENTAL_PARAM_SPECS: Final[dict[str, dict]] = {
     },
 }
 
-#: 单位类别 -> 表达式量纲标签(04 §8.3 业务简写)
-_DIM_BY_UNIT_CATEGORY: Final[dict[str, str]] = {
-    "energy": DIM_ENERGY,
-    "power": DIM_POWER,
-    "temperature": DIM_TEMPERATURE,
-    "currency": DIM_CURRENCY,
-    "angle": DIM_ANGLE,
-    "duration": DIM_TIME,
-}
-
-#: 设备类型短名 -> 注册表 id(兼容 models.devices.device_type 的 CHECK 短名,
-#: 注册表 id 可直接使用; 未映射的短名视为无注册表规格)
+# 设备类型短名 -> 注册表 id(兼容 models.devices.device_type 的 CHECK 短名,
+# 注册表 id 可直接使用; 未映射的短名视为无注册表规格)
 _DEVICE_SHORT_ALIASES: Final[dict[str, str]] = {
     "pv": "ies.device.pv",
     "storage": "ies.device.battery",
@@ -391,11 +375,17 @@ def get_default_config(project_id: int, db: Session | None = None) -> dict:
 
 
 def _dims_for_unit(unit: str) -> Dimensions:
-    """变量单位 -> 表达式量纲(未注册单位视为无量纲, 不参与量纲检查)。"""
-    spec = UNITS.get(unit or "")
-    if spec is None or spec.category not in _DIM_BY_UNIT_CATEGORY:
+    """变量单位 -> 表达式量纲(01 §5.5:统一走 core/units.dims_of)。
+
+    已注册单位(含复合,如 kW/kWh/CNY/kWh)精确量纲;未注册单位视为无量纲
+    (不参与量纲检查,兼容旧配置)。
+    """
+    if not unit:
         return Counter()
-    return Counter({_DIM_BY_UNIT_CATEGORY[spec.category]: 1})
+    try:
+        return dims_of(unit)
+    except UnitError:
+        return Counter()
 
 
 def _is_number(value: object) -> bool:

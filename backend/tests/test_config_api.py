@@ -370,7 +370,21 @@ def test_expression_constraint_parse_error_diagnostic(
         f"/api/projects/{project.id}/config",
         json={"config": ok, "expected_revision": 1},
     )
-    assert resp3.status_code == 200, resp3.text
+    assert resp3.status_code == 422, resp3.text
+    codes3 = {d["code"] for d in resp3.json()["diagnostics"]}
+    # 01 §5.5 量纲检查生效: 带量纲变量(kWp→power)与无量纲字面量 0 比较 → 量纲不一致
+    assert "EXPR-DIM-001" in codes3
+
+    # 带单位字面量的同量纲表达式通过(单位后缀由检查器改写为常量)
+    ok2 = dict(default)
+    ok2["constraints"] = [
+        {"type": "expression", "payload": {"expression": f"{var_name} >= 0 W"}}
+    ]
+    resp4 = client.put(
+        f"/api/projects/{project.id}/config",
+        json={"config": ok2, "expected_revision": 1},
+    )
+    assert resp4.status_code == 200, resp4.text
 
 
 def test_validate_endpoint_does_not_save(client: TestClient, db: Session) -> None:
@@ -616,7 +630,7 @@ def test_validate_config_with_dict_graph() -> None:
         "objectives": [{"metric": "irr_after_tax", "direction": "max", "weight": 1.0}],
         "constraints": [
             {"type": "predefined", "payload": {"kind": "load_satisfaction"}},
-            {"type": "expression", "payload": {"expression": "pv_cap >= 50"}},
+            {"type": "expression", "payload": {"expression": "pv_cap >= 50 kW"}},
         ],
         "algorithm": {"mode": "auto", "name": "ies.algo.milp_hybrid"},
         "irr_floor": 0.08,

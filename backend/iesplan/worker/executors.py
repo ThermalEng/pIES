@@ -164,37 +164,148 @@ def execute_calc(ctx: RunContext, content: dict, data: dict, axis: Any, options:
     """方案评价(02 §7): 快照 plan+data → evaluate_plan → 逐时结果/KPI/指标。
 
     产出 payload: result_kind='eval_result', 含逐时流字段、KPI、诊断、
-    四维评估与业务结局。
+    四维评估与业务结局。引擎经建模命令注册表分发(03 §9.3 命令化:
+    algorithm → command_id → function, 不再直接 import 引擎函数)。
     """
     config = content.get("calc_config") or {}
     task_params = config.get("task_params") or {}
     plan = _build_plan(content, config)
-    solver_opts = dict(task_params.get("solver_options") or {})
-    solver_opts.setdefault("timeout", float(solver_opts.get("timeout", 600.0)))
-    solver_opts.setdefault("mip_rel_gap", float(solver_opts.get("mip_rel_gap", 0.001)))
-    ctx.progress(5, "setup", {"n_steps": int(axis.n), "resolution": axis.resolution})
+    command_id, solver_opts = _select_engine(ctx, config, task_params)
+    ctx.progress(5, "setup", {"n_steps": int(axis.n), "resolution": axis.resolution,
+                              "engine": command_id})
     ctx.checkpoint("setup")
 
     result = _run_engine(
-        ctx, "iesplan.engines.eval_run.evaluate_plan",
+        ctx, _engine_entry(command_id),
         (plan, data, axis, solver_opts),
-        timeout_sec=float(solver_opts["timeout"]) + 60.0,
+        timeout_sec=float(solver_opts.get("timeout", 600.0)) + 60.0,
         stage="solve",
         mem_limit_mb=task_params.get("mem_limit_mb"),
     )
     ctx.progress(80, "solve", {"status": result.status, "objective": result.objective,
                                "gap": result.gap})
     ctx.checkpoint("postprocess")
-    payload = _eval_payload(ctx, result)
+    payload = _eval_payload(ctx, content, result, data, axis)
     _write_engine_diags(ctx, result.diagnostics)
     ctx.progress(100, "done", {"solver_status": payload["solver_status"]})
     return payload
 
 
-def _eval_payload(ctx: RunContext, result: EvalResult) -> dict:
-    """EvalResult → 证据包 payload(逐时流 + KPI + 四维评估 + 业务结局, 03 §3.2)。"""
+def _select_engine(ctx: RunContext, config: dict, task_params: dict) -> tuple[str, dict]:
+    """算法选择 + 求解选项收敛(03 §9.3/§9.4, engines/selector.py)。
+
+    合并顺序:快照 tolerances → task_params.solver_options(后者覆盖);
+    随机 seed 来自快照 random_seed(权威来源)。
+    """
+    from iesplan.engines.selector import select_engine
+
+    command_id, opts = select_engine(config, ctx.task.type, snapshot=ctx.snapshot)
+    task_solver = task_params.get("solver_options") or {}
+    if isinstance(task_solver, dict):
+        opts.update(
+            {k: float(v) for k, v in task_solver.items() if isinstance(v, (int, float))}
+        )
+    return command_id, opts
+
+
+def _engine_entry(command_id: str) -> Any:
+    """计算引擎命令 → 函数(经 modeling 命令注册表;未注册抛 NotFoundError)。"""
+    from iesplan.modeling.command import get_compute_entry
+
+    return get_compute_entry(command_id)
+
+
+def plan_for_finance(content: dict) -> dict:
+    """项目内容 → 财务 plan(设备清单, 03 §7.2 财务输入)。
+
+    与 _build_plan 同源(仅财务口径需要设备的存量/新增信息与参数),
+    供逐时财务的 CAPEX 与基准成本估算使用。
+    """
+    return _build_plan(content, content.get("calc_config") or {})
+
+
+def _hourly_financial(ctx: RunContext, content: dict, plan: dict, result: Any, data: dict, axis: Any) -> dict | None:
+    """逐时财务(03 §7.2): 引擎逐时 flows + KPI → finance.hourly.compute_financials。
+
+    以逐时费用列(cost_buy/cost_gas/revenue_sell)求和为权威口径, 与 KPI
+    交叉校验; 基准成本推导口径(codex 二次审核 Medium-5):
+    显式配置 baseline_cost 优先, 缺失时按"零容量基准方案"的 total_op_cost
+    推导(与规划引擎 02 §5.3 同口径), 仍缺失才降级 None
+    (评估 financial 维度降 unknown)。
+    """
+    from iesplan.analysis.wrapper import _estimate_capex, _project_financial_inputs
+    from iesplan.finance.hourly import compute_financials
+    from iesplan.finance.params import finance_params_from_config
+
+    kpi = result.kpi or {}
+    flows = result.flows or {}
+    if result.status != "ok" or not kpi:
+        return None
+    try:
+        fp = finance_params_from_config(content.get("calc_config") or {})
+        capex, baseline = _project_financial_inputs(content, plan)
+        if baseline is None:
+            # 基准成本推导: 零容量基准方案的 total_op_cost(与规划引擎同口径);
+            # 纯存量场景(无新增设备)基准推导返回 None → 现状即基准,
+            # 用当前方案 total_op_cost 兜底(增量语义节省为 0)
+            baseline = _derive_baseline_cost(ctx, content, data, axis)
+        if baseline is None and kpi.get("total_op_cost") is not None:
+            baseline = Decimal(str(float(kpi["total_op_cost"])))
+        fin = compute_financials(kpi, flows, capex, baseline, fp)
+    except (ValueError, TypeError):
+        return None  # 财务输入不完整: 降级不阻断(评估 financial 降 unknown)
+    return {
+        "irr": fin.irr,
+        "irr_status": str(fin.irr_status.value) if fin.irr_status is not None else None,
+        "npv": float(fin.npv),
+        "investment": float(fin.capex),
+        "baseline_cost": float(fin.baseline_cost),
+        "annual_op_cost": float(fin.annual_op_cost),
+        "annual_revenue": float(fin.annual_revenue),
+        "lcoe": float(fin.lcoe) if fin.lcoe is not None else None,
+        "payback_years": fin.payback_years,
+        "cashflows": [float(c) for c in fin.cashflows],
+        "diagnostics": list(fin.detail.get("diagnostics", [])) if getattr(fin, "detail", None) else [],
+    }
+
+
+def _derive_baseline_cost(ctx: RunContext, content: dict, data: dict, axis: Any) -> Decimal | None:
+    """零容量基准方案运行成本 → 财务基准(02 §5.3 口径)。
+
+    与规划引擎 baseline 推导一致: 去掉全部新增设备容量后重新运行评价引擎,
+    取 total_op_cost 作为基准年成本。运行失败/不可行 → None(降级处理)。
+    纯存量场景(无新增设备可剥离): 无基准可推导, 由调用方用当前方案
+    total_op_cost 兜底(现状即基准, 增量语义节省为 0)。
+    """
+    from iesplan.analysis.wrapper import _CAPACITY_KEYS
+
+    plan = plan_for_finance(content)
+    if not any(d.get("is_new") is True for d in plan.get("devices") or []):
+        return None  # 纯存量: 调用方以当前方案成本为基准
+    stripped: list[dict] = []
+    for dev in plan["devices"]:
+        if not isinstance(dev, dict) or dev.get("is_new") is not True:
+            stripped.append(dev)
+            continue
+        params = dict(dev.get("params") or {})
+        for cap_key in _CAPACITY_KEYS:
+            params.pop(cap_key, None)
+        stripped.append({**dev, "params": params})
+    baseline_plan = {**plan, "devices": stripped}
+    try:
+        engine = _engine_entry("ies.command.compute.evaluate_plan.v1")
+        base_res = _run_engine(ctx, engine, (baseline_plan, data, axis, {}),
+                               timeout_sec=60.0, stage="baseline")
+    except Exception:
+        return None
+    if base_res.status != "ok" or not base_res.kpi or base_res.kpi.get("total_op_cost") is None:
+        return None
+    return Decimal(str(float(base_res.kpi["total_op_cost"])))
+
+
+def _eval_payload(ctx: RunContext, content: dict, result: EvalResult, data: dict, axis: Any) -> dict:
+    """EvalResult → 证据包 payload(逐时流 + KPI + 财务 + 四维评估 + 业务结局, 03 §3.2/§7.2)。"""
     solver_status = _eval_solver_status(result)
-    assessment = _assess_eval(result, solver_status)
     flows: dict[str, list[float]] = {name: np.asarray(arr, dtype=float).tolist()
                                      for name, arr in result.flows.items()}
     # 逐时流落对象存储并生成引用(结果视图/逐时查询的引用入口; 证据内容保留 flows 全文)
@@ -213,6 +324,12 @@ def _eval_payload(ctx: RunContext, result: EvalResult) -> dict:
             boundary="scope1+scope2", factor_version="snapshot-bound",
             data_refs=[f"snapshot:{getattr(ctx.snapshot, 'content_hash', '')[:12]}"],
         )
+    # 逐时财务(03 §7.2: 逐时费用列求和 → 现金流/IRR/NPV/LCOE/回收期,
+    # 与 analysis/finance 共用 finance.hourly.compute_financials)
+    financial = _hourly_financial(ctx, content, plan_for_finance(content), result, data, axis)
+    # 四维评估在财务之后生成(codex 二次审核 Medium-5: financial=None 时
+    # 财务维度必须降 unknown 并附降级诊断, 不得仍判 pass)
+    assessment = _assess_eval(result, solver_status, financial=financial)
     summary = {
         "status": result.status,
         "objective": result.objective,
@@ -235,6 +352,7 @@ def _eval_payload(ctx: RunContext, result: EvalResult) -> dict:
         "flow_fields": sorted(flows),
         "flows": flows,
         "hourly_refs": hourly_refs,
+        "financial": financial,
         # 单方案评价: 唯一候选解(结果选择/差异预览按候选解标识寻址)
         "candidate_indices": [0],
         "candidates": [{"index": 0, "capacities": {}, "note": "方案评价单解"}],
@@ -294,8 +412,16 @@ def _eval_solver_status(result: EvalResult) -> str:
     return S_OPTIMAL
 
 
-def _assess_eval(result: EvalResult, solver_status: str) -> dict:
-    """四维评估(01 §8.2 / RPD 10.4): 物理/最优性/财务/可靠性。"""
+def _assess_eval(
+    result: EvalResult, solver_status: str, *, analysis_mode: bool = False, financial: dict | None = None
+) -> dict:
+    """四维评估(01 §8.2 / RPD 10.4): 物理/最优性/财务/可靠性。
+
+    analysis_mode: 批量分析无逐时单解(03 §8.3 大结果不落盘), 物理维度
+    按批量内 ok 率判定, 财务维度按批量 KPI 覆盖判定, 可靠性维度按 n_ok 判定。
+    financial: 逐时财务块(calc 载荷);None 时财务维度必须降 unknown
+    (codex 二次审核 Medium-5: 财务输入不完整 ≠ 财务通过)。
+    """
     audit_failed = any(d.get("code") == "ENG-AUDIT-001" for d in result.diagnostics)
     physical = "fail" if (result.status != "ok" or audit_failed) else "pass"
     optimality = {
@@ -303,15 +429,20 @@ def _assess_eval(result: EvalResult, solver_status: str) -> dict:
         S_TIME_LIMIT_INCUMBENT: "unknown",  # 最优性未确认(gap 未收敛)
         S_MODEL_AUDIT_FAIL: "fail",
     }.get(solver_status, "fail")
-    op_cost = result.kpi.get("total_op_cost") if result.kpi else None
-    financial = "pass" if op_cost is not None else "unknown"
-    reliability = "unknown"  # 单方案评价不涉及样本统计
+    if analysis_mode:
+        n_ok = result.kpi.get("n_ok")
+        financial_dim = "pass" if result.kpi.get("financial_coverage") else "unknown"
+        reliability = "pass" if (n_ok is not None and n_ok > 0) else "fail"
+        physical = "pass" if (n_ok is not None and n_ok > 0) else "fail"
+    else:
+        financial_dim = "pass" if financial is not None else "unknown"
+        reliability = "unknown"  # 单方案评价不涉及样本统计
     return {
         "dimension_physical": physical,
         "dimension_optimality": optimality,
-        "dimension_financial": financial,
+        "dimension_financial": financial_dim,
         "dimension_reliability": reliability,
-        "overall_score": _overall_score(physical, optimality, financial, reliability),
+        "overall_score": _overall_score(physical, optimality, financial_dim, reliability),
         "comment": f"方案评价: 状态 {result.status}, 目标 {result.objective}",
         "detail": {"solver_status": solver_status, "gap": result.gap,
                    "n_diagnostics": len(result.diagnostics)},
@@ -331,7 +462,10 @@ def _outcome_from_solver(solver_status: str) -> str:
 
 
 def execute_plan(ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None) -> dict:
-    """规划(02 §5-§6): planning 引擎 → 候选列表 → IRR/NPV 评估 → 候选对象。"""
+    """规划(02 §5-§6): planning 引擎 → 候选列表 → IRR/NPV 评估 → 候选对象。
+
+    引擎经建模命令注册表分发(03 §9.3: ies.command.compute.run_planning.v1)。
+    """
     config = content.get("calc_config") or {}
     task_params = config.get("task_params") or {}
     plan = _build_plan(content, config)
@@ -348,7 +482,8 @@ def execute_plan(ctx: RunContext, content: dict, data: dict, axis: Any, options:
         max(300.0, float(opts["max_combinations"]) * float(opts["timeout_per_eval"])), 8 * 3600
     )
     result = _run_engine(
-        ctx, "iesplan.engines.planning.run_planning", (plan, data, axis, opts),
+        ctx, _engine_entry("ies.command.compute.run_planning.v1"),
+        (plan, data, axis, opts),
         timeout_sec=total_timeout, stage="solve", mem_limit_mb=task_params.get("mem_limit_mb"),
     )
     ctx.progress(80, "solve", {"status": result.status, "candidates": len(result.candidates)})
@@ -487,7 +622,7 @@ def execute_uncertainty(
         try:
             if mode == MODE_REPLAN_SENSITIVITY:
                 res = _run_engine(
-                    ctx, "iesplan.engines.planning.run_planning",
+                    ctx, _engine_entry("ies.command.compute.run_planning.v1"),
                     (plan, sampled, axis, {**planning_opts, "seed": seed + i}),
                     timeout_sec=(
                         float(planning_opts["timeout_per_eval"]) * int(planning_opts["max_combinations"])
@@ -499,7 +634,7 @@ def execute_uncertainty(
                 metric = _sample_metric_planning(res)
             else:
                 res = _run_engine(
-                    ctx, "iesplan.engines.eval_run.evaluate_plan",
+                    ctx, _engine_entry("ies.command.compute.evaluate_plan.v1"),
                     (plan, sampled, axis, solver_opts), timeout_sec=float(solver_opts["timeout"]) + 60.0,
                     stage=f"sample_{i}", mem_limit_mb=task_params.get("mem_limit_mb"),
                 )
@@ -630,6 +765,151 @@ def _sample_data(data: dict, distributions: dict, rng: np.random.Generator, samp
         else:
             sampled[key] = np.maximum(value * mult, 0.0)
     return sampled
+
+
+# ---------------------------------------------------------------------------
+# 批量分析(task_type=analysis, 03 §8: 确定性单因子/多参数扫描)
+# ---------------------------------------------------------------------------
+
+
+def execute_analysis(
+    ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None
+) -> dict:
+    """批量分析(03 §8): 按 task_params 的扫描规格跑 run_batch 单因子/组合扫描。
+
+    任务参数(task_params):
+        sweeps: [{"param_path": "calc_config.params.discount_rate",
+                  "values": [0.06, 0.08, 0.10], "unit": "-"}];
+        engine: 引擎命令 id(缺省 ies.command.compute.evaluate_plan.v1)。
+
+    产出 payload: result_kind='analysis_result', 含每个组合的结果行
+    (status/kpi/financial)与汇总表(基准/变化率/单调性/极值点)。
+    引擎经建模命令注册表分发(03 §9.3);逐时大结果不落盘(03 §8.3)。
+    """
+    from iesplan.analysis.wrapper import (
+        SweepSpec,
+        run_batch,
+        summarize_batch,
+    )
+
+    config = content.get("calc_config") or {}
+    task_params = config.get("task_params") or {}
+    sweeps_raw = task_params.get("sweeps") or []
+    if not isinstance(sweeps_raw, list) or not sweeps_raw:
+        raise ValueError("analysis 任务缺少扫描规格 task_params.sweeps")
+    sweeps: list[SweepSpec] = []
+    for raw in sweeps_raw:
+        if not isinstance(raw, dict) or not raw.get("param_path") or not raw.get("values"):
+            raise ValueError(f"扫描规格非法: {raw!r}")
+        sweeps.append(
+            SweepSpec(
+                param_path=str(raw["param_path"]),
+                values=tuple(float(v) for v in raw["values"]),
+                unit=raw.get("unit") if isinstance(raw.get("unit"), str) and raw.get("unit") else None,
+            )
+        )
+
+    engine_id = str(task_params.get("engine") or "ies.command.compute.evaluate_plan.v1")
+    engine = _engine_entry(engine_id)
+    solver_opts = dict(task_params.get("solver_options") or {})
+    solver_opts.setdefault("timeout", 120.0)
+    seed = int(getattr(ctx.snapshot, "random_seed", 42) or 42)
+    solver_opts.setdefault("seed", seed)
+
+    ctx.progress(5, "setup", {"n_sweeps": len(sweeps), "engine": engine_id})
+    ctx.checkpoint("setup")
+
+    batch = run_batch(
+        content,
+        data,
+        axis,
+        sweeps,
+        base_options=solver_opts,
+        engine=engine,
+    )
+    ctx.progress(85, "batch", {"n_results": len(batch)})
+    ctx.checkpoint("postprocess")
+
+    results = [
+        {
+            "scenario_index": r.scenario_index,
+            "param_values": dict(r.param_values),
+            "status": r.status,
+            "kpi": _jsonable_kpi(r.kpi),
+            "financial": _financial_to_dict(r.financial),
+            "solver_status": r.solver_status,
+        }
+        for r in batch
+    ]
+    n_ok = sum(1 for r in batch if r.status == "ok")
+    # 汇总表(summarize_batch: 行表 + 指标极值点; 03 §8.2 汇总语义,
+    # codex 二次审核 Medium-1: 之前只返回计数型 summary, 汇总函数未调用)
+    summary = summarize_batch(batch)
+    # 四维评估与业务结局(03 §8: analysis 也按评估模型落 assessment,
+    # 避免 submit_result 写四个 unknown; 批量语义: 物理/财务/可靠性按 ok 率)
+    assessment = _assess_eval(
+        EvalResult(
+            status="ok" if n_ok else "no_feasible",
+            flows={},
+            kpi={"n_ok": n_ok, "financial_coverage": sum(1 for r in batch if r.financial is not None)},
+            diagnostics=[],
+        ),
+        S_OPTIMAL if n_ok else S_NO_FEASIBLE,
+        analysis_mode=True,
+    )
+    outcome = "normal_completion" if n_ok else "no_feasible"
+    payload = {
+        "schema_version": 1,
+        "result_kind": "analysis_result",
+        "task_type": "analysis",
+        "status": "ok" if n_ok else "no_feasible",
+        "solver_status": S_OPTIMAL if n_ok else S_NO_FEASIBLE,
+        "n_results": len(batch),
+        "n_ok": n_ok,
+        "results": results,
+        "summary": summary,
+        "assessment": assessment,
+        "outcome": outcome,
+        "meta": {"axis": {"resolution": ctx.axis_resolution, "n": ctx.axis_n},
+                 "engine": engine_id},
+    }
+    ctx.progress(100, "done", {"n_ok": n_ok, "total": len(batch)})
+    return payload
+
+
+def _jsonable_kpi(kpi: dict | None) -> dict | None:
+    """KPI → 可 JSON 落库(Decimal 金额 → float;shed_events 等列表原样)。"""
+    from decimal import Decimal
+
+    if not isinstance(kpi, dict):
+        return kpi
+    out: dict[str, Any] = {}
+    for key, val in kpi.items():
+        if isinstance(val, Decimal):
+            out[key] = float(val)
+        elif isinstance(val, np.ndarray):
+            out[key] = val.tolist()
+        else:
+            out[key] = val
+    return out
+
+
+def _financial_to_dict(fin) -> dict | None:
+    """FinancialResult → 可 JSON 落库 dict(evidence financial 块, 03 §7.4)。"""
+    if fin is None:
+        return None
+    return {
+        "irr": fin.irr,
+        "irr_status": str(fin.irr_status.value) if getattr(fin, "irr_status", None) is not None else None,
+        "npv": float(fin.npv),
+        "investment": float(fin.capex),
+        "baseline_cost": float(fin.baseline_cost),
+        "cashflows": [float(c) for c in fin.cashflows],
+        "lcoe": float(fin.lcoe) if fin.lcoe is not None else None,
+        "payback_years": fin.payback_years,
+        "annual_op_cost": float(fin.annual_op_cost),
+        "annual_revenue": float(fin.annual_revenue),
+    }
 
 
 # ---------------------------------------------------------------------------

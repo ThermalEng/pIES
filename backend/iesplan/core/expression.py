@@ -26,6 +26,7 @@ from collections import Counter
 from typing import Final
 
 from iesplan.core.errors import AppError
+from iesplan.core.unitparse import NUMBER_RE as _NUMBER_RE
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -389,6 +390,66 @@ def _call(fn: str, args: list[float], text: str) -> float:
 # ---------------------------------------------------------------------------
 # 解析与编译
 # ---------------------------------------------------------------------------
+
+#: 表达式中的显式单位后缀("1500 W" → 常量变量),正则匹配 <数值> <空格> <单位token>
+#: 数值复用 unitparse.NUMBER_RE(科学计数/千分位/中文字数), 单位 token 覆盖
+#: 注册单位形态(含 %、℃ 等单字符)(codex 二次审核 Low-2)
+_UNIT_SUFFIX_RE = re.compile(
+    r"(?<![\w.])(" + _NUMBER_RE.pattern + r")\s+"
+    r"([A-Za-z°℃μ%][A-Za-z0-9°℃μ·/]*)"
+)
+#: 单位后缀改写后的常量变量前缀(01 §5.5 量纲检查配套)
+_QCONST_PREFIX = "qconst"
+
+
+def _unit_dims(unit: str) -> Dimensions:
+    """单位 → 表达式量纲(core/units.dims_of;未注册单位无量纲)。"""
+    try:
+        from iesplan.core.units import dims_of
+
+        return dims_of(unit)
+    except Exception:
+        return _dim_of()
+
+
+def rewrite_unit_suffixes(
+    expr: str, var_dims: dict[str, Dimensions]
+) -> tuple[str, dict[str, Dimensions], dict[str, float]]:
+    """把 "1500 W" 类显式单位后缀改写为带量纲的 SI 数值常量。
+
+    返回 (新表达式, 变量量纲, qconstN → SI 数值): "50 kW" → "qconst1"(量纲
+    power, 数值 50000 W)。qconstN 在编译期按数值常量处理(参与量纲检查,
+    求值期直接代入), 供 parse_expr 与装配检查器/配置校验共用(01 §5.5)。
+    数值统一转为 SI: 表达式变量均为 SI 值(core/units 边界约定),
+    常量不换算将造成 1000 倍量级偏差(codex 二次审核 High-4)。
+    """
+    from iesplan.core.units import ALIAS_MAP, UNITS, UnitError, to_si
+    from iesplan.core.unitparse import parse_number
+
+    counter = 0
+    values: dict[str, float] = {}
+
+    def repl(match: re.Match) -> str:
+        nonlocal counter
+        token = match.group(2)
+        if ALIAS_MAP.get(token.lower()) is None and token not in UNITS:
+            return match.group(0)  # 非已知单位,原样保留
+        counter += 1
+        name = f"{_QCONST_PREFIX}{counter}"
+        var_dims[name] = _unit_dims(token)
+        number = parse_number(match.group(1))  # 含科学计数/千分位/中文字数
+        try:
+            values[name] = to_si(number, token)
+        except UnitError:
+            # 非固定汇率币种(USD 等)禁止自动折算: 保持原数值(量纲仍参与检查,
+            # 折算语义由汇率配置处理, 与 units.to_si 拒绝口径一致)
+            values[name] = number
+        return name
+
+    new_expr = _UNIT_SUFFIX_RE.sub(repl, expr)
+    return new_expr, var_dims, values
+
+
 def parse_expr(
     text: str,
     allowed_vars: set[str] | frozenset[str],
@@ -400,6 +461,7 @@ def parse_expr(
         text: 表达式源码(单行,如 "a * 2 + b / 3")。
         allowed_vars: 允许引用的变量集合(白名单,04 §4.1 EXPR-CODE-001)。
         var_dims: 可选,变量名 → 量纲(默认无量纲);用于量纲一致性检查。
+            含 "1500 W" 类显式单位后缀的表达式在此改写为常量变量(01 §5.5)。
 
     返回:
         CompiledExpr;.eval(values: dict) → float。
@@ -414,8 +476,12 @@ def parse_expr(
     """
     if not text or not text.strip():
         raise ExpressionSyntaxError("空表达式", expr=text)
-    allowed = frozenset(allowed_vars)
+
+    # 显式单位后缀改写("1500 W" → qconstN, 量纲取自单位; 01 §5.5);
+    # 改写在白名单构建之前完成, qconstN 为引擎内部带量纲常量, 白名单放行
     dims: dict[str, Dimensions] = dict(var_dims or {})
+    text, dims, qconst_values = rewrite_unit_suffixes(text, dims)
+    allowed = frozenset(allowed_vars) | {k for k in dims if k.startswith(_QCONST_PREFIX)}
 
     # 双扫描之一:危险标识符模式(混淆手段一律拒绝,04 §4.3 禁止列表)
     lowered = text.lower()
@@ -443,6 +509,7 @@ def parse_expr(
     state = {"nodes": 0, "depth": 0}
 
     def compile_node(node: ast.AST, depth: int) -> tuple:
+        nonlocal qconst_values
         state["nodes"] += 1
         if state["nodes"] > MAX_NODES:
             raise ExpressionRangeError("表达式节点数超过上限", limit=MAX_NODES, expr=text)
@@ -463,10 +530,18 @@ def parse_expr(
                 return ("num", v), _dim_of()
             raise ExpressionSecurityError("仅允许数值常量", literal_type=type(node.value).__name__, expr=text)
         if isinstance(node, ast.Name):
-            if node.id not in allowed:
-                raise ExpressionCodeError(f"变量 {node.id} 未登记", variable=node.id, expr=text)
             if node.id.startswith("_"):
                 raise ExpressionSecurityError("禁止引用下划线前缀标识符", variable=node.id, expr=text)
+            if node.id.startswith(_QCONST_PREFIX):
+                # 单位后缀常量("50 kW" → qconst1): 编译为带量纲数值常量
+                val = qconst_values.get(node.id)
+                if val is None:
+                    raise ExpressionCodeError(
+                        f"单位常量 {node.id} 缺失", variable=node.id, expr=text
+                    )
+                return ("num", val), dims.get(node.id, _dim_of())
+            if node.id not in allowed:
+                raise ExpressionCodeError(f"变量 {node.id} 未登记", variable=node.id, expr=text)
             return ("var", node.id), dims.get(node.id, _dim_of())
         if isinstance(node, ast.BinOp):
             op_type = type(node.op)

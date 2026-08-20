@@ -12,6 +12,7 @@ from decimal import Decimal
 import numpy as np
 import pytest
 
+from iesplan.core.errors import AppError
 from iesplan.finance import (
     FinanceParams,
     FinancialResult,
@@ -418,6 +419,58 @@ def test_finance_params_frozen():
     """FinanceParams 不可变。"""
     with pytest.raises(FrozenInstanceError):
         FinanceParams().discount_rate = Decimal("0.1")  # type: ignore[misc]
+
+
+def test_price_fact_source_error_not_swallowed(monkeypatch):
+    """价格事实源存在但加载失败 → 上抛, 不静默回退内置默认(P2 审查意见)。
+
+    兼容回退只允许"模块缺失"(ImportError); 文件缺失/语法错误等加载失败
+    必须抛 SYS-CFG-001, 避免财务参数来源静默漂移。
+    """
+    import iesplan.devices.pricing as pricing
+    import iesplan.finance.params as params_mod
+
+    def boom() -> None:
+        raise pricing._err("价格文件读取失败", file="prices.yaml")
+
+    monkeypatch.setattr(pricing, "load_price_book", boom)
+    # 事实源路径(已实现)加载失败 → 上抛, 不得回退
+    with pytest.raises(AppError) as excinfo:
+        params_mod._price_finance_defaults()
+    assert excinfo.value.code == "SYS-CFG-001"
+
+
+def test_price_fact_source_missing_module_falls_back(monkeypatch):
+    """事实源模块缺失(兼容场景) → 回退内置默认, 不报错。"""
+    import importlib
+
+    import iesplan.finance.params as params_mod
+
+    def missing(name):
+        exc = ModuleNotFoundError(f"No module named {name!r}")
+        exc.name = name
+        raise exc
+
+    monkeypatch.setattr(importlib, "import_module", missing)
+    defaults = params_mod._price_finance_defaults()
+    assert defaults == params_mod.FALLBACK_PRICE_FINANCE
+
+
+def test_price_fact_source_internal_error_raised(monkeypatch):
+    """模块存在但其内部依赖导入失败(ModuleNotFoundError 指向子依赖)→ 上抛,
+    不得误判为兼容缺失(codex 二次审核 Medium-6)。"""
+    import importlib
+
+    import iesplan.finance.params as params_mod
+
+    def internal_error(name):
+        exc = ModuleNotFoundError("No module named 'iesplan.devices.pricing'")
+        exc.name = "iesplan.devices.pricing._impl"  # 子依赖缺失, 非模块本身
+        raise exc
+
+    monkeypatch.setattr(importlib, "import_module", internal_error)
+    with pytest.raises(ModuleNotFoundError):
+        params_mod._price_finance_defaults()
 
 
 # ---------------------------------------------------------------------------

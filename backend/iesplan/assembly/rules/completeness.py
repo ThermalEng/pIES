@@ -80,11 +80,13 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
                 )
             )
         elif version is not None and version != type_spec.version:
+            # 类型已注册但版本陈旧(设备创建时固化的注册表快照版本 ≠ 当前版本):
+            # 非阻断 —— 引擎按当前注册版本运行, 拒绝会破坏既有项目在目录升级后的提交
             diags.append(
                 make_diag(
                     ASM_REF_MODEL_UNREG,
-                    severity="error",
-                    blocking=True,
+                    severity="warning",
+                    blocking=False,
                     params={
                         "device": dev.id,
                         "model": dev.model,

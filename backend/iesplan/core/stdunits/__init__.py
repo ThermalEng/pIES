@@ -1,51 +1,18 @@
-"""单位标准化内核包(审查意见第 0 条;方案 01,裁决 7.4/7.5 以 01 为准)。
+"""单位标准化兼容垫片(审查意见第 0 条;01 方案定案 §4.1)。
 
-职责:
-- 标准单位体系:既有 `core/units.py` 六类 + 新增 mass/volume/voltage/area/
-  dimensionless 四类注册表(registry.py,不改写既有文件,词条兼容不冲突);
-- 非标准单位字符串解析:parse.py("1000 kW" / "1.5MWh" / "3 元/kWh" / "25℃");
-- 转换 API:Quantity / normalize_unit / to_si / from_si / dims_of / unit_meta /
-  assert_same_dims / convert(convert.py,支持复合单位与仿射温度);
-- 数据字段单位契约:DATA_FIELD_UNITS / hourly_meta(fields.py,裁决 7.5 归 0 层)。
+实现已按定案合并入 `iesplan.core.units` 与 `iesplan.core.unitparse`:
+- 注册表/换算/量纲/字段契约 → core/units.py;
+- 非标准单位字符串解析 → core/unitparse.py。
 
-换算唯一入口语义:计算边界输入装配(业务 → SI)与引擎 KPI 输出(SI → 业务)
-一律经 to_si / from_si;禁止引擎/执行器内自行 ×1000 或维护换算表。
-
-与既有 core/units.py 兼容:UnitError / UnitSpec / format_value 原样复用,
-convert 为超集实现(量纲制,跨类拒绝语义保持)。
+本模块仅保留符号 re-export,保证既有调用点(建模 functions._to_si_param、
+前端镜像导出、测试)无需改动;新代码一律从 core.units / core.unitparse 导入。
 """
 
 from __future__ import annotations
 
-from iesplan.core.units import UnitError, UnitSpec, format_value
+import importlib
 
-from iesplan.core.stdunits.convert import (
-    UNIT_META_TABLE,
-    Quantity,
-    assert_same_dims,
-    convert,
-    dims_of,
-    from_si,
-    normalize_unit,
-    to_si,
-    unit_meta,
-)
-from iesplan.core.stdunits.fields import (
-    DATA_FIELD_UNITS,
-    FLOW_UNITS,
-    flow_unit_of,
-    hourly_meta,
-)
-from iesplan.core.stdunits.parse import (
-    MULTIPLIERS,
-    NUMBER_RE,
-    UnitParseError,
-    parse_number,
-    parse_quantity,
-    parse_unit_string,
-    si_unit_of,
-)
-from iesplan.core.stdunits.registry import (
+from iesplan.core.units import (  # noqa: F401
     AFFINE_UNITS,
     ALIAS_MAP,
     CATEGORIES,
@@ -60,19 +27,56 @@ from iesplan.core.stdunits.registry import (
     CATEGORY_TEMPERATURE,
     CATEGORY_VOLTAGE,
     CATEGORY_VOLUME,
+    DATA_FIELD_UNITS,
     DIM_AREA,
     DIM_MASS,
     DIM_VOLTAGE,
     DIM_VOLUME,
+    FLOW_UNITS,
+    MULTIPLIERS,
     NON_CONVERTIBLE_CURRENCIES,
     SI_BASE_SYMBOL,
     UNIT_REGISTRY_IDS,
     UNITS,
+    UnitError,
+    UnitSpec,
+    assert_same_dims,
     canonical_of,
+    convert,
     dim_key_of,
+    dims_of,
+    flow_unit_of,
+    format_value,
+    from_si,
+    hourly_meta,
     is_known_unit,
     lookup,
+    normalize_unit,
+    to_si,
+    unit_meta,
 )
+from iesplan.core.unitparse import (  # noqa: F401
+    NUMBER_RE,
+    UnitParseError,
+    decompose,
+    parse_number,
+    parse_quantity,
+    parse_unit_string,
+    si_unit_of,
+)
+from iesplan.core.units import Quantity  # noqa: F401
+
+
+def __getattr__(name: str):
+    """动态转发 UNIT_META_TABLE(codex 二次审核 Low-1)。
+
+    静态 ``from ... import UNIT_META_TABLE`` 会复制构建前的 None;
+    源模块首次访问后缓存, shim 中的引用不会同步。经 ``__getattr__``
+    动态转发保证始终取源模块当前值。
+    """
+    if name == "UNIT_META_TABLE":
+        return getattr(importlib.import_module("iesplan.core.units"), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # 注册表与常量

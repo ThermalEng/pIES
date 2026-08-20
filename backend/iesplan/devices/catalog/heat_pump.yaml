@@ -13,11 +13,11 @@ capabilities: [heat_pump, controllable, dual_hvac, optimization_variable]
 extends: ies.device.base
 
 ports:
-  - {name: hp_electric_in, port_type: electric, direction: in, energy_carrier: electric,
+  - {name: electric_in, port_type: electric, direction: in, energy_carrier: electric,
      capacity_ref: rated_heat_kw}
-  - {name: hp_heat_out, port_type: thermal, direction: out, energy_carrier: heat,
+  - {name: heat_out, port_type: thermal, direction: out, energy_carrier: heat,
      capacity_ref: rated_heat_kw}
-  - {name: hp_cool_out, port_type: cooling, direction: out, energy_carrier: cool,
+  - {name: cool_out, port_type: cooling, direction: out, energy_carrier: cool,
      capacity_ref: rated_heat_kw}
 
 parameters:
@@ -26,7 +26,7 @@ parameters:
   max_heat_kw: {unit: kW, min: 0, max: 1000000, default: 1000, stock_or_addition: addition,
                 help_key: help.param.heatpump.max_heat_kw}
   cop: {unit: "-", min: 2.0, max: 6.5, default: 3.2, help_key: help.param.heatpump.cop}
-  cop_profile: {unit: reference, default: null, help_key: help.param.heatpump.cop_profile}
+  cop_profile: {unit: reference, default: 0, help_key: help.param.heatpump.cop_profile}
   source_type: {unit: "-", default: air, enum: [air, ground, water],
                 help_key: help.param.heatpump.source_type}
   mode: {unit: "-", default: both, enum: [heating, cooling, both],

@@ -216,3 +216,48 @@ class TestRuntimeTraps:
         expr = parse_expr("a + 1", VARS)
         with pytest.raises(ExpressionRunError):
             expr.eval({"a": "x"})
+
+    def test_unit_suffix_constant_si_value(self):
+        """显式单位后缀常量换算为 SI 数值(codex 二次审核 High-4)。
+
+        "50 kW" → qconst 常量值为 50000 W, 与 SI 变量值同域比较;
+        W/kW/MW 等价写法在 SI 域求值结果一致。
+        """
+        from iesplan.core.expression import rewrite_unit_suffixes
+
+        # rewrite 层: 数值换算为 SI
+        dims: dict = {}
+        _, _, values = rewrite_unit_suffixes("pv >= 50 kW", dims)
+        qconst = next(iter(values))
+        assert values[qconst] == pytest.approx(50000.0)
+
+        # 编译 + 求值: pv(SI W) >= 50 kW 与 >= 50000 W 语义一致
+        pv_dims = {"pv": _dim_of({"power": 1})}
+        expr_kw = parse_expr("pv >= 50 kW", {"pv"}, dict(pv_dims))
+        expr_w = parse_expr("pv >= 50000 W", {"pv"}, dict(pv_dims))
+        for pv in (0.0, 49999.0, 50000.0, 5e7):
+            assert expr_kw.eval({"pv": pv}) == expr_w.eval({"pv": pv})
+
+        # 温度仿射单位("25 C")→ SI K(偏移换算)
+        t_dims = {"t": _dim_of({"temperature": 1})}
+        expr_c = parse_expr("t >= 25 C", {"t"}, dict(t_dims))
+        expr_k = parse_expr("t >= 298.15 K", {"t"}, dict(t_dims))
+        for t in (273.15, 298.14, 298.15):
+            assert expr_c.eval({"t": t}) == expr_k.eval({"t": t})
+
+    def test_unit_suffix_scientific_and_chinese_numeral(self):
+        """科学计数/中文数字后缀换算(codex 二次审核 Low-2)。"""
+        from iesplan.core.expression import rewrite_unit_suffixes
+
+        dims: dict = {}
+        _, _, values = rewrite_unit_suffixes("p >= 1.5e3 kW", dims)
+        assert next(iter(values.values())) == pytest.approx(1.5e6)
+
+        dims2: dict = {}
+        _, _, values2 = rewrite_unit_suffixes("p >= 1.5万 kW", dims2)
+        assert next(iter(values2.values())) == pytest.approx(1.5e7)
+
+        # 百分号单位
+        dims3: dict = {}
+        _, _, values3 = rewrite_unit_suffixes("r >= 10 %", dims3)
+        assert next(iter(values3.values())) == pytest.approx(0.1)

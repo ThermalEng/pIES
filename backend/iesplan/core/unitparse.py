@@ -1,4 +1,4 @@
-"""非标准单位字符串解析(审查意见第 0 条;方案 01 §3)。
+"""非标准单位字符串解析(审查意见第 0 条;方案 01 §3;定案 §4.3 的 core/unitparse.py)。
 
 词法文法(01 §3.1):
 
@@ -17,7 +17,7 @@
 3. 仿射单位(C/F)只允许独立出现,禁止进入复合/分母(宽松化:独立 C 允许,01 §3.3);
 4. 纯乘数无单位符号("0.5 万")不合法,必须带 symbol 或 context。
 
-本模块只依赖 0 层(core.stdunits.registry / core.errors / core.units),无业务依赖。
+本模块只依赖 core.units 与 core.errors,无业务依赖。
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import re
 from typing import Final
 
 from iesplan.core.errors import AppError
-from iesplan.core.stdunits.registry import (
+from iesplan.core.units import (
     AFFINE_UNITS,
     ALIAS_MAP,
     MULTIPLIERS,
@@ -83,7 +83,7 @@ def parse_number(text: str) -> float:
 
 
 def decompose(unit_string: str) -> tuple[list[tuple[str, str, UnitSpec]], list[tuple[str, str, UnitSpec]]]:
-    """单位串 → (分子 [(乘数字符串, 规范 token, UnitSpec)...], 分母 [...])。
+    """单位串 → (分子 [(乘数字符串, 规范 token, UnitSpec)...], 分母 [...]).
 
     - 全串/单 token 直查优先(含 kWp、千m³ 等别名与复合注册词条);
     - 每 token 按 MULT?(symbol) 最长匹配分解,分子分母内部用 · 或 * 连乘;
@@ -254,6 +254,8 @@ def parse_quantity(text: str, *, context: str | None = None) -> "Quantity":
     异常:
         UnitParseError: 数字缺失 / 单位无法识别 / 单位缺失且无 context。
     """
+    from iesplan.core.units import Quantity  # 延迟导入避免 convert↔parse 循环
+
     stripped = text.strip()
     if not stripped:
         raise UnitParseError(
@@ -311,6 +313,5 @@ def parse_quantity(text: str, *, context: str | None = None) -> "Quantity":
         si_value = value * spec.to_si + spec.offset
     else:
         si_value = value * factor
-    from iesplan.core.stdunits.convert import Quantity  # 延迟导入避免 convert↔parse 循环
 
     return Quantity(value=value, unit=norm, si_value=si_value, si_unit=si_unit_of(norm))

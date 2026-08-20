@@ -1,0 +1,52 @@
+# 燃气锅炉(机理模型、无状态; 燃料→热量转换, 02 §4.6 线性)
+type_id: ies.device.gas_boiler
+version: 1.2.0
+name_zh: 燃气锅炉
+name_en: Gas Boiler
+help_topic: help.modeling.boiler
+model_method: mechanism
+stateful: false
+fidelity: medium
+energy_carriers: [gas, heat]
+is_load: false
+capabilities: [thermal_generation, controllable, optimization_variable]
+extends: ies.device.base
+
+ports:
+  # 燃气端口为双向(services/model.py 同约定): 燃料载体无内部源设备,
+  # 锅炉端口兼作燃料平衡节点(外部管网购入燃气, 拓扑校验按 source_and_sink 放行)
+  - {name: gas, port_type: fuel, direction: bidirectional, energy_carrier: gas,
+     capacity_ref: rated_heat_kw}
+  - {name: heat_out, port_type: thermal, direction: out, energy_carrier: heat,
+     capacity_ref: rated_heat_kw}
+
+parameters:
+  rated_heat_kw: {unit: kW, min: 0, max: 1000000, default: 0, is_optimizable: true,
+                  stock_or_addition: addition, help_key: help.param.boiler.rated_heat_kw}
+  max_heat_kw: {unit: kW, min: 0, max: 1000000, default: 1000,
+                stock_or_addition: addition, help_key: help.param.boiler.max_heat_kw}
+  thermal_efficiency: {unit: "-", min: 0.5, max: 1.0, default: 0.90,
+                       help_key: help.param.boiler.thermal_efficiency}
+  gas_price: {unit: CNY/m³, min: 0, default: 3.2, help_key: help.param.boiler.gas_price}
+  lhv_kj_per_m3: {unit: kJ/m³, min: 10000, max: 60000, default: 35900,
+                  help_key: help.param.boiler.lhv_kj_per_m3}
+  unit_invest_cost:
+    unit: CNY/kW
+    min: 0
+    default: "$price:device_costs.gas_boiler.unit_invest_cost"
+    stock_or_addition: addition
+    help_key: help.param.boiler.unit_invest_cost
+  lifetime_years:
+    unit: a
+    min: 1
+    max: 50
+    default: "$price:device_costs.gas_boiler.lifetime_years"
+    help_key: help.param.boiler.lifetime_years
+
+time_series:
+  inputs: []
+  outputs: []
+
+function:
+  entry: boiler_output
+  package: iesplan.modeling.functions

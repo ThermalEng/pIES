@@ -12,6 +12,7 @@ content(含 model 图)为输入,先 build_assembly 再 check_assembly。
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -38,6 +39,8 @@ from iesplan.core.expression import (
     parse_expr,
 )
 from iesplan.core.registry import DeviceTypeSpec, list_device_types
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 常量与业务表(与 services/model.py 同约定;本模块独立声明,不依赖 services)
@@ -219,8 +222,66 @@ def resolve_model(ctx: CheckContext, model: str) -> tuple[DeviceTypeSpec | None,
 
 
 def _default_registry() -> dict[str, DeviceTypeSpec]:
-    """注册表默认快照(type_id → DeviceTypeSpec)。"""
+    """注册表默认快照(type_id → DeviceTypeSpec)。
+
+    YAML 设备注册表优先(插件式, 端口定义来自 yaml);静态注册表仅作
+    YAML 目录未初始化时的兜底(核验 M6 修复项)。
+    YAML 注册表初始化错误只回退静态表(注册表本身不可用的兼容场景),
+    但记录日志便于诊断; 设备文件校验错误由注册入口(loader)负责上抛。
+    """
+    try:
+        from iesplan.devices.registry import get_registry
+        from iesplan.devices.spec import to_registry_spec
+
+        reg = get_registry()
+        specs = {s.type_id: to_registry_spec(s) for s in reg.list()}
+        merged: dict[str, DeviceTypeSpec] = {}
+        for tid, spec in specs.items():
+            if spec is not None:
+                merged[tid] = spec
+        if merged:
+            return merged
+        logger.warning("YAML 设备注册表为空, 回退静态设备表(装配检查)")
+    except Exception as exc:
+        logger.warning("YAML 设备注册表不可用, 回退静态设备表(装配检查): %s", exc)
     return {s.type_id: s for s in list_device_types()}
+
+
+def _yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPort] | None:
+    """从 YAML 设备注册表取端口定义 → AssemblyPort 列表(未初始化返回 None)。
+
+    yaml 端口(DeviceYamlSpec.ports: 端口名/载体/方向/容量引用)为权威来源,
+    装配检查据此做连接合法性(REF-004/REF-005)与可解性检查。
+    """
+    try:
+        from iesplan.devices.registry import get_registry
+
+        reg = get_registry()
+        spec = reg.get(type_id)
+    except Exception:
+        return None
+    ports: list[AssemblyPort] = []
+    for p in spec.ports:
+        unit = CARRIER_DEFAULT_QUANTITY_UNIT.get(p.energy_carrier, (QUANTITY_SIGNAL, "-"))[1]
+        qty = CARRIER_DEFAULT_QUANTITY_UNIT.get(p.energy_carrier, (QUANTITY_SIGNAL, "-"))[0]
+        capacity = None
+        if p.capacity_ref and p.capacity_ref in spec.parameters:
+            cap = spec.parameters[p.capacity_ref].default
+            if isinstance(cap, (int, float)):
+                capacity = float(cap)
+        ports.append(
+            AssemblyPort(
+                device=device.id,
+                name=p.name,
+                carrier=p.energy_carrier,
+                direction=p.direction,
+                quantity=qty,
+                unit=unit,
+                nature=NATURE_INSTANT,
+                capacity=capacity,
+            )
+        )
+    return ports if ports else None
 
 
 def _port_name(carrier: str, direction: str) -> str:
@@ -229,31 +290,40 @@ def _port_name(carrier: str, direction: str) -> str:
 
 
 def _derive_device_ports(spec: AssemblySpec, ctx: CheckContext, device: AssemblyDevice) -> list[AssemblyPort]:
-    """设备端口推导:注册表方向表 + 显式声明覆盖(capacity;不一致按 REF-005 由阶段 C 告警)。"""
+    """设备端口推导:YAML 端口定义优先, 静态方向表兜底; 显式声明覆盖 capacity。
+
+    YAML 设备注册表(iesplan.devices)的端口定义(端口名/载体/方向/容量)为权威来源,
+    未初始化时回退静态 _DEVICE_PORT_DIRECTIONS 方向表(核验 M6 修复项)。
+    显式声明的 capacity 覆盖在两条路径之后统一合并(codex 二次审核 High-3:
+    之前 YAML 路径提前 return, 显式 capacity 覆盖成为死代码)。
+    """
     type_spec, _ = resolve_model(ctx, device.model)
     if type_spec is None:
         return []  # 模型未注册,端口无从推导(REF-002 已报)
-    configured = _DEVICE_PORT_DIRECTIONS.get(type_spec.type_id)
-    if configured is None:
-        configured = (
-            {c: "in" for c in type_spec.energy_carriers if c in CARRIER_DEFAULT_QUANTITY_UNIT}
-            if type_spec.is_load
-            else {c: "out" for c in type_spec.energy_carriers if c in CARRIER_DEFAULT_QUANTITY_UNIT}
-        )
-    derived: list[AssemblyPort] = []
-    for carrier, direction in configured.items():
-        qty, unit = CARRIER_DEFAULT_QUANTITY_UNIT.get(carrier, (QUANTITY_SIGNAL, "-"))
-        derived.append(
-            AssemblyPort(
-                device=device.id,
-                name=_port_name(carrier, direction),
-                carrier=carrier,
-                direction=direction,
-                quantity=qty,
-                unit=unit,
-                nature=NATURE_INSTANT,
+    # YAML 端口定义优先(DeviceYamlSpec.ports → AssemblyPort)
+    derived = _yaml_device_ports(device, type_spec.type_id)
+    if not derived:
+        configured = _DEVICE_PORT_DIRECTIONS.get(type_spec.type_id)
+        if configured is None:
+            configured = (
+                {c: "in" for c in type_spec.energy_carriers if c in CARRIER_DEFAULT_QUANTITY_UNIT}
+                if type_spec.is_load
+                else {c: "out" for c in type_spec.energy_carriers if c in CARRIER_DEFAULT_QUANTITY_UNIT}
             )
-        )
+        derived = []
+        for carrier, direction in configured.items():
+            qty, unit = CARRIER_DEFAULT_QUANTITY_UNIT.get(carrier, (QUANTITY_SIGNAL, "-"))
+            derived.append(
+                AssemblyPort(
+                    device=device.id,
+                    name=_port_name(carrier, direction),
+                    carrier=carrier,
+                    direction=direction,
+                    quantity=qty,
+                    unit=unit,
+                    nature=NATURE_INSTANT,
+                )
+            )
     # 显式声明覆盖(仅 capacity;载体/方向以注册表推导为准,不一致由阶段 C 报 REF-005)
     explicit_by_name = {ep.name: ep for ep in device.ports}
     merged: list[AssemblyPort] = []
@@ -353,8 +423,22 @@ def ensure_ports(spec: AssemblySpec, ctx: CheckContext) -> dict[str, AssemblyPor
 # ---------------------------------------------------------------------------
 
 
+def _unit_category(unit: str) -> str | None:
+    """单位类别(core/units 注册表类别;未注册返回 None)。"""
+    from iesplan.core.units import ALIAS_MAP, UNITS
+
+    uid = ALIAS_MAP.get(unit.lower())
+    if uid is not None and uid in UNITS:
+        return UNITS[uid].category
+    return None
+
+
 def units_compatible(u1: str | None, u2: str | None) -> bool:
-    """两端单位量纲是否可换算(core/units.py convert 判定;无量纲 "-"/"" 与自身相容)。"""
+    """两端单位量纲是否可换算(core/units.py convert 判定;无量纲 "-"/"" 与自身相容)。
+
+    能量↔功率视为相容(数据列按步能量 kWh 声明、端口按功率 W 的领域约定,
+    引擎按步长换算 kWh×1000/步长小时 → W)。
+    """
     a, b = (u1 or "").strip(), (u2 or "").strip()
     if a == b:
         return True
@@ -367,7 +451,12 @@ def units_compatible(u1: str | None, u2: str | None) -> bool:
         units.convert(1.0, a, b)
         return True
     except Exception:
-        return False
+        pass
+    # 能量↔功率: 数据列按步能量声明, 端口按功率; 引擎按步长换算(见 _merge_rows)
+    cats = {_unit_category(a), _unit_category(b)}
+    if cats == {"energy", "power"}:
+        return True
+    return False
 
 
 _UNIT_CATEGORY_DIMS: dict[str, dict[str, int]] = {
@@ -413,14 +502,11 @@ def _to_watts(value: float | None, unit: str | None) -> float | None:
 # 约束表达式检查
 # ---------------------------------------------------------------------------
 
-#: 表达式中的显式单位后缀("1500 W" → 常量变量),正则匹配 <数值> <空格> <单位token>
-_UNIT_SUFFIX_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s+([A-Za-z°℃μ][A-Za-z0-9°℃μ·/]*)")
 #: 点路径符号 token(<dev>.<port> / <dev>.<param>;表达式引擎 AST 白名单不支持属性访问,
 #: 检查器先做符号重写,未重写成功的点路径即未定义符号 → ASM-CONST-003)
 _SYMBOL_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_.])"
 )
-_QCONST_PREFIX = "qconst"
 
 
 def _rewrite_symbols(expr: str, symbols: dict[str, Dimensions]) -> tuple[str, dict[str, Dimensions]]:
@@ -441,27 +527,6 @@ def _rewrite_symbols(expr: str, symbols: dict[str, Dimensions]) -> tuple[str, di
 def _undefined_symbols(expr: str) -> list[str]:
     """重写后剩余的点路径 token(未定义设备/端口/参数符号)。"""
     return [m.group(1) for m in _SYMBOL_TOKEN_RE.finditer(expr)]
-
-
-def _rewrite_unit_suffixes(expr: str) -> tuple[str, dict[str, Dimensions]]:
-    """把 "1500 W" 类显式单位后缀改写为常量变量(量纲取自单位),返回 (新表达式, 变量量纲)。"""
-    from iesplan.core.units import ALIAS_MAP, UNITS
-
-    var_dims: dict[str, Dimensions] = {}
-    counter = 0
-
-    def repl(match: re.Match) -> str:
-        nonlocal counter
-        token = match.group(2)
-        if ALIAS_MAP.get(token.lower()) is None and token not in UNITS:
-            return match.group(0)  # 非已知单位,原样保留
-        counter += 1
-        name = f"{_QCONST_PREFIX}{counter}"
-        var_dims[name] = _unit_dims(token)
-        return name
-
-    new_expr = _UNIT_SUFFIX_RE.sub(repl, expr)
-    return new_expr, var_dims
 
 
 def _defined_symbols(spec: AssemblySpec, ctx: CheckContext) -> dict[str, Dimensions]:
@@ -493,9 +558,9 @@ def run_constraint_checks(spec: AssemblySpec, ctx: CheckContext) -> list[Diagnos
     for constraint in spec.constraints:
         if not constraint.enabled:
             continue
-        # 1) 点路径符号重写(已知符号 → vN);2) 显式单位后缀 → qconstN
+        # 1) 点路径符号重写(已知符号 → vN);2) 显式单位后缀由 parse_expr
+        #    内部改写为带量纲常量(01 §5.5, 引擎层共享, 检查器不再预改写)
         expr, symbol_dims = _rewrite_symbols(constraint.expr, symbols)
-        expr, suffix_dims = _rewrite_unit_suffixes(expr)
         loc = {"object_type": "constraint", "object_id": constraint.id, "field": "expr"}
         # 未重写成功的点路径 = 引用未定义符号
         undefined = _undefined_symbols(expr)
@@ -514,7 +579,7 @@ def run_constraint_checks(spec: AssemblySpec, ctx: CheckContext) -> list[Diagnos
                 )
             )
             continue
-        var_dims = {**symbol_dims, **suffix_dims}
+        var_dims = symbol_dims
         try:
             parse_expr(expr, set(var_dims), var_dims)
         except ExpressionCodeError as exc:  # 引用未定义符号
@@ -627,6 +692,11 @@ def check_graph_inputs(
     calc_cfg = project_version_content.get("calc_config")
     calc_config = calc_cfg if isinstance(calc_cfg, dict) else None
     spec = build_assembly(graph, datasets=datasets, calc_config=calc_config)
+    # 数据集元信息必须进入检查上下文:缺失版本/列/分辨率检查仅在 ctx.datasets
+    # 非 None 时执行(codex 二次审核 High-1: 之前只喂给 builder, 闸门检查被绕过)
+    ctx = ctx or _default_context(spec)
+    if datasets is not None and ctx.datasets is None:
+        ctx.datasets = datasets
     return check_assembly(spec, ctx=ctx)
 
 

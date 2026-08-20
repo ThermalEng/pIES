@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text as sa_text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from iesplan.config import settings
@@ -36,15 +36,47 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """幂等初始化数据库: 建表 + 种子管理员。
+    """幂等初始化数据库: 建表 + 约束迁移 + 种子管理员。
 
     - 先导入模型模块, 确保全部表注册到 Base.metadata;
-    - create_all 只建不存在的表, 重复调用无副作用。
+    - create_all 只建不存在的表, 重复调用无副作用;
+    - _migrate_constraints: 既有表约束随模型演进做幂等 ALTER
+      (如 ck_tasks_type 增补 'analysis', 03 §9.7)。
     """
     from iesplan import models  # noqa: F401  (注册全部模型)
 
     Base.metadata.create_all(bind=engine)
+    _migrate_constraints()
     seed_admin()
+
+
+def _migrate_constraints() -> None:
+    """既有表约束幂等迁移(Postgres; SQLite 测试库由 create_all 全量重建)。
+
+    仅处理"新增枚举取值"类约束变更: 探测列约束文本, 缺失或未含新值
+    ('analysis')时重建(03 §9.7); 约束完全不存在(旧库手工删过/从未建过)
+    也补建, 不能放任 CHECK 约束缺失(codex 二次审核 Medium-3)。
+    """
+    if not settings.db_url.startswith("postgresql"):
+        return
+    with engine.begin() as conn:
+        row = conn.execute(
+            sa_text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_tasks_type' AND conrelid = 'tasks'::regclass"
+            )
+        ).first()
+        if row is not None and "'analysis'" in row[0]:
+            return  # 已含新值, 无需迁移
+        # 缺失或旧定义: 先删后建(缺失时 DROP IF EXISTS 幂等)
+        conn.execute(sa_text("ALTER TABLE tasks DROP CONSTRAINT IF EXISTS ck_tasks_type"))
+        conn.execute(
+            sa_text(
+                "ALTER TABLE tasks ADD CONSTRAINT ck_tasks_type CHECK "
+                "(type IN ('calc','optimization','uncertainty','analysis','import',"
+                "'export','report','dataset_build'))"
+            )
+        )
 
 
 def seed_admin(password: str | None = None) -> None:

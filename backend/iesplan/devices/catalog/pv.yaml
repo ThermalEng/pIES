@@ -14,7 +14,7 @@ extends: ies.device.base
 
 ports:
   - {name: solar_in, port_type: solar, direction: in, energy_carrier: solar}
-  - {name: pv_out, port_type: electric, direction: out, energy_carrier: electric,
+  - {name: electric_out, port_type: electric, direction: out, energy_carrier: electric,
      capacity_ref: rated_capacity_kwp}
 
 parameters:

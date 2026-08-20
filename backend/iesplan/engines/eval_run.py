@@ -754,9 +754,10 @@ def evaluate_plan(
     # ------------------------------------------------------------------
     timeout = float(opts.get("timeout", DEFAULT_TIME_LIMIT))
     mip_gap_setting = float(opts.get("mip_rel_gap", DEFAULT_MIP_REL_GAP))
+    seed = int(opts.get("seed", 42))  # 快照随机 seed 经 selector 注入(03 §9.4),缺省 42
     result = solve_milp(
         c_obj, integrality, bounds, cons,
-        timeout=timeout, mip_rel_gap=mip_gap_setting, seed=42,
+        timeout=timeout, mip_rel_gap=mip_gap_setting, seed=seed,
     )
     solve_info = {
         "n_steps": n, "dt_s": dt_s, "n_vars": n_vars,

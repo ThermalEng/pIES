@@ -72,17 +72,18 @@ from iesplan.services import queue
 # 常量: 任务类型 / 池 / 状态机
 # ---------------------------------------------------------------------------
 
-#: 全部任务类型(01 §7.2 ck_tasks_type)
+#: 全部任务类型(01 §7.2 ck_tasks_type; 03 §9.7 增补 analysis)
 TASK_TYPES: tuple[str, ...] = (
-    "calc", "optimization", "uncertainty", "import", "export", "report", "dataset_build"
+    "calc", "optimization", "uncertainty", "analysis", "import", "export", "report", "dataset_build"
 )
 #: 计算类任务(必须绑定 calc_snapshot_id, 规格 2.1)
-COMPUTE_TYPES: tuple[str, ...] = ("calc", "optimization", "uncertainty")
+COMPUTE_TYPES: tuple[str, ...] = ("calc", "optimization", "uncertainty", "analysis")
 #: 任务类型 → 队列池(规格 2.1)
 POOL_BY_TYPE: dict[str, str] = {
     "calc": "compute",
     "optimization": "compute",
     "uncertainty": "compute",
+    "analysis": "compute",
     "report": "io",
     "dataset_build": "io",
     "export": "io",
@@ -305,6 +306,10 @@ def assemble_snapshot(
     }
     content_hash = sha256_hex(canonical_json(hash_input).encode("utf-8"))
 
+    # 装配同步闸门(04 §6.2 / 审查意见第 4 条): 任务下发前执行装配检查,
+    # error/blocking 级诊断以 HTTP 422 阻断任务创建(非法连接/缺失输入/欠约束)
+    _assembly_gate(db, project_id, content, task_type)
+
     existing = db.execute(
         select(CalcSnapshot).where(CalcSnapshot.content_hash == content_hash)
     ).scalar_one_or_none()
@@ -320,11 +325,91 @@ def assemble_snapshot(
         random_seed=random_seed,
         tolerances=tolerances,
         content_hash=content_hash,
+        assembly_text=_assembly_text(project_id, content),  # 规范装配文本(计算输入第 4 步产物)
         created_by=actor.id,
     )
     db.add(snapshot)
     db.flush()
     return snapshot
+
+
+def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) -> None:
+    """装配同步闸门(04 §6.2): 计算类任务创建前执行装配检查。
+
+    error/blocking 级诊断 → 抛 AssemblyCheckError(HTTP 422)阻断任务下发,
+    诊断定位到装配文本行/设备/端口(非法连接/缺失输入/约束不足或过度)。
+    数据集元信息(列/单位/分辨率)从绑定版本装配, 供遗留 "dataset:col" 引用解析。
+    """
+    if task_type not in COMPUTE_TYPES:
+        return
+    from iesplan.assembly.checker import AssemblyCheckError, check_graph_inputs
+
+    datasets = _dataset_meta_for(db, content)
+    result = check_graph_inputs(content, datasets=datasets)
+    if not result.ok:
+        raise AssemblyCheckError(result.blocking_diags)
+
+
+def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
+    """项目内容绑定数据集版本 → 元信息 {vid: {id, name, columns, unit, resolution}}。
+
+    供装配检查(数据集引用/单位一致性)与装配文本(legacy 引用回填)使用。
+    """
+    from iesplan.models.dataset import DatasetVersion
+
+    meta: dict[int, dict] = {}
+    for binding in content.get("dataset_bindings", []) or []:
+        vid = binding.get("dataset_version_id")
+        if vid is None:
+            continue
+        try:
+            vid = int(vid)
+        except (TypeError, ValueError):
+            continue
+        version = db.get(DatasetVersion, vid)
+        if version is None:
+            continue
+        fields = version.fields if isinstance(version.fields, dict) else {}
+        units = version.units if isinstance(version.units, dict) else {}
+        # 逐列元信息: 列 → (单位, 分辨率); 供装配检查做单位量纲一致性
+        columns: dict[str, str] = {}
+        for col, field in fields.items():
+            if not isinstance(field, dict):
+                continue
+            unit = field.get("unit") or units.get(col) or ""
+            if isinstance(unit, str) and unit:
+                columns[col] = unit
+        meta[vid] = {
+            "id": vid,
+            "name": f"ds{vid}",
+            "columns": list(columns.keys()),
+            "column_units": columns,
+            "resolution": version.resolution or "",
+        }
+    return meta
+
+
+def _assembly_text(project_id: int, content: dict) -> str:
+    """装配检查通过后的规范装配文本(计算模块输入, 04 §6.2)。
+
+    生成失败(如图结构不完整)返回空串(装配文本为可选增强, 不阻断快照创建;
+    装配检查闸门已在上一步保证内容可装配)。
+    """
+    try:
+        from iesplan.assembly.builder import build_assembly_text
+
+        model_part = content.get("model", content)
+        graph = {
+            "devices": (model_part.get("devices") if isinstance(model_part, dict) else []) or [],
+            "ports": (model_part.get("ports") if isinstance(model_part, dict) else []) or [],
+            "connections": (model_part.get("connections") if isinstance(model_part, dict) else []) or [],
+        }
+        cfg = content.get("calc_config")
+        return build_assembly_text(
+            graph, calc_config=cfg if isinstance(cfg, dict) else None
+        )
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +611,14 @@ def create_task(
         raise ConflictError("项目已归档或已删除, 不能提交任务", params={"project_id": project_id})
     if task_type not in TASK_TYPES:
         raise InvalidRequestError("未知任务类型", code="TASK-REQ-002", params={"task_type": task_type})
+    if task_type == "analysis":
+        # 批量分析必须有扫描规格(03 §8.2: task_params.sweeps)
+        sweeps = (config or {}).get("sweeps")
+        if not isinstance(sweeps, list) or not sweeps:
+            raise InvalidRequestError(
+                "analysis 任务缺少扫描规格(sweeps)",
+                params={"task_type": task_type, "expected": "task_config.sweeps 非空数组"},
+            )
     if idempotency_key is not None and not re.fullmatch(IDEMPOTENCY_KEY_RE, idempotency_key):
         raise InvalidRequestError(
             "幂等键格式非法(须匹配 ^[A-Za-z0-9._:-]{1,128}$)",

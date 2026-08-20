@@ -39,8 +39,8 @@ from iesplan.worker.executors import EngineRunError, RunContext, TaskCancelled
 
 logger = logging.getLogger(__name__)
 
-#: 计算类任务(必须绑定 calc_snapshot_id, 03 规格 2.1)
-COMPUTE_TASK_TYPES: tuple[str, ...] = ("calc", "optimization", "uncertainty")
+#: 计算类任务(必须绑定 calc_snapshot_id, 03 规格 2.1; 03 §9.7 增补 analysis)
+COMPUTE_TASK_TYPES: tuple[str, ...] = ("calc", "optimization", "uncertainty", "analysis")
 #: io 队列任务类型
 IO_TASK_TYPES: tuple[str, ...] = ("report", "dataset_build", "export", "import")
 
@@ -108,6 +108,7 @@ def load_inputs(db: Session, snapshot: CalcSnapshot) -> tuple[dict, dict, TimeAx
             "快照绑定的数据集缺失或为空(输入不可复现)",
             params={"calc_snapshot_id": snapshot.id, "dataset_version_ids": snapshot.dataset_version_ids},
         )
+    _data_to_si(data, actual_resolution)  # 声明单位 → SI(唯一换算边界, 01 §5.2)
     axis = _build_axis(actual_resolution, utc_offset, data)
     return content, data, axis
 
@@ -156,9 +157,12 @@ def _load_dataset_data(
 
 
 def _merge_rows(data: dict[str, np.ndarray], rows: list[dict], resolution: str) -> None:
-    """数据行列表 → 逐时数组(缺失字段置 0; 多版本只补空缺, 先到先得)。"""
+    """数据行列表 → 引擎字段数组(缺失字段置 0; 多版本只补空缺, 先到先得)。
+
+    单位换算统一在计算边界完成(_data_to_si): 本函数只做"声明单位数值 →
+    引擎字段"的搬运与缺失补零, 不在解析层做 kWh→W 等手写换算(01 §5.3)。
+    """
     n = len(rows)
-    step_hours = RESOLUTIONS[resolution][1] / 60.0
     mapping = {
         "e_load": "e_load", "h_load": "h_load", "c_load": "c_load",
         "t_ambient": "temperature", "ghi": "ghi",
@@ -173,10 +177,7 @@ def _merge_rows(data: dict[str, np.ndarray], rows: list[dict], resolution: str) 
         arr = np.asarray([0.0 if v is None else float(v) for v in values], dtype=np.float64)
         if arr.size != n:
             raise SnapshotInputError("数据集行数不一致", params={"field": col, "rows": arr.size})
-        if col in ("e_load", "h_load", "c_load"):
-            arr = arr * 1000.0 / step_hours  # kWh/步 → W
-            data[engine_key] = arr
-        elif col == "grid_emission_factor":
+        if col == "grid_emission_factor":
             # 引擎约定: 排放因子为标量(kg/kWh); 逐时列取均值(缺省 0.581)
             data[engine_key] = float(np.mean(arr))
         else:
@@ -184,6 +185,25 @@ def _merge_rows(data: dict[str, np.ndarray], rows: list[dict], resolution: str) 
     # 缺失的负荷字段置 0(引擎约定: 热/冷缺省为 0)
     for key in ("e_load", "h_load", "c_load"):
         data.setdefault(key, np.zeros(n, dtype=np.float64))
+
+
+def _data_to_si(data: dict[str, np.ndarray], resolution: str) -> None:
+    """引擎输入逐时数据 → SI 功率边界(01 §5.2 data_to_si 语义, 唯一换算点)。
+
+    本波次只换算能量型字段: e_load/h_load/c_load 声明 kWh/步 → 引擎功率 W
+    (= J/步长秒 = kWh × 3.6e6 / (step_min × 60)), 去除 runner 内手写
+    `*1000.0/step_hours`(01 §4.1: 换算经 core/units, 禁止自建换算表)。
+    温度/电价/排放因子保持引擎声明单位(°C / CNY/kWh / kg/kWh), 配套引擎
+    SI 化(P4)不在本波次范围。
+    """
+    from iesplan.core.units import to_si
+
+    step_seconds = RESOLUTIONS[resolution][1] * 60.0
+    for key in ("e_load", "h_load", "c_load"):
+        arr = data.get(key)
+        if isinstance(arr, np.ndarray):
+            # kWh/步 → J/步 → W(引擎约定逐时功率)
+            data[key] = arr * to_si(1.0, "kWh") / step_seconds
 
 
 def _build_axis(resolution: str, utc_offset: int, data: dict) -> TimeAxis:
@@ -228,6 +248,8 @@ def dispatch(ctx: RunContext) -> dict:
             return executors.execute_calc(ctx, content, data, axis)
         if task_type == "optimization":
             return executors.execute_plan(ctx, content, data, axis)
+        if task_type == "analysis":
+            return executors.execute_analysis(ctx, content, data, axis)
         return executors.execute_uncertainty(ctx, content, data, axis)
     if task_type == "report":
         return executors.execute_check(ctx)

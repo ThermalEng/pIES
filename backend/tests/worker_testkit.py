@@ -108,7 +108,7 @@ def setup_environment(
     - devices: 自定义设备清单(缺省: 电网 + 电池, 见 mini_content)。
     """
     settings.data_dir = tmp_path
-    settings.storage_min_free_bytes = 0
+    settings.storage_min_free_bytes = 0  # 测试环境关闭存储门禁
     global _env_seq
     _env_seq += 1
     user = User(username=f"worker-tester-{_env_seq}", display_name="测试用户")
