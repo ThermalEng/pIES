@@ -15,9 +15,9 @@
  * 也可由工作台以 <ConfigPage projectId={id} /> 方式嵌入。
  *
  * 持久化约定(params 键,与后端 calc_configs.params JSONB 双向往返):
- *   evaluation_period_years / discount_rate(小数) / tax_rate(小数) /
- *   depreciation_years / variable_initial(名称->初值) /
- *   variable_device_type(名称->设备类型) / carbon_cap_tco2 / algorithm_mode
+ *   economic.discount_rate/tax_rate/project_years/depreciation_years(经济段) /
+ *   variable_initial(名称->初值) / variable_device_type(名称->设备类型) /
+ *   carbon_cap_tco2 / algorithm_mode
  */
 
 import { useEffect, useState } from 'react'
@@ -156,16 +156,29 @@ const ALGORITHM_CAPABILITIES: Record<AlgorithmId, { types: readonly VariableType
 
 const ALGORITHM_IDS: readonly AlgorithmId[] = ['milp', 'lp', 'heuristic', 'ga', 'exhaustive', 'custom']
 
-/** params JSONB 键(与后端 calc_configs.params 双向往返,见文件头注释)。 */
+/** params JSONB 键(与后端 calc_configs.params 双向往返,见文件头注释)。
+
+经济参数位于嵌套的 parameters.economic(后端权威结构, FE-BE-01):
+discount_rate/tax_rate/project_years/depreciation_years 均在该子对象;
+遗留扁平键(evaluation_period_years/discount_rate 等)不再读写。
+ */
 const PARAM_KEYS = {
-  evaluationPeriod: 'evaluation_period_years',
   discountRate: 'discount_rate',
   taxRate: 'tax_rate',
+  projectYears: 'project_years',
   depreciationYears: 'depreciation_years',
   variableInitial: 'variable_initial',
   variableDeviceType: 'variable_device_type',
   carbonCap: 'carbon_cap_tco2',
   algorithmMode: 'algorithm_mode',
+} as const
+
+/** 经济参数子对象键(parameters.economic)。 */
+const ECONOMIC_KEYS = {
+  discountRate: 'discount_rate',
+  taxRate: 'tax_rate',
+  projectYears: 'project_years',
+  depreciationYears: 'depreciation_years',
 } as const
 
 let SEQ = 0
@@ -345,11 +358,12 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
     setDescription(cfg.description ?? '')
 
     const params = cfg.params ?? {}
+    const eco = objOf(params, 'economic')
     setEco({
-      evaluationPeriod: numText(num(params, PARAM_KEYS.evaluationPeriod)),
-      discountRate: percentText(num(params, PARAM_KEYS.discountRate)),
-      taxRate: percentText(num(params, PARAM_KEYS.taxRate)),
-      depreciationYears: numText(num(params, PARAM_KEYS.depreciationYears)),
+      evaluationPeriod: numText(num(eco, ECONOMIC_KEYS.projectYears) ?? num(params, 'project_years')),
+      discountRate: percentText(num(eco, ECONOMIC_KEYS.discountRate) ?? num(params, 'discount_rate')),
+      taxRate: percentText(num(eco, ECONOMIC_KEYS.taxRate) ?? num(params, 'tax_rate')),
+      depreciationYears: numText(num(eco, ECONOMIC_KEYS.depreciationYears) ?? num(params, 'depreciation_years')),
       minIrr: cfg.min_irr !== null && cfg.min_irr !== undefined ? percentText(cfg.min_irr) : '',
     })
 
@@ -631,17 +645,26 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       constraints.push({ type: 'predefined', payload: { kind: 'co2_cap', max_tons: carbonValue } })
     }
     const minIrr = numOrNull(eco.minIrr)
-    const params: Record<string, unknown> = {
-      ...(current?.params ?? {}),
-      [PARAM_KEYS.evaluationPeriod]: numOrNull(eco.evaluationPeriod),
-      [PARAM_KEYS.discountRate]: pctToDecimal(eco.discountRate),
-      [PARAM_KEYS.taxRate]: pctToDecimal(eco.taxRate),
-      [PARAM_KEYS.depreciationYears]: numOrNull(eco.depreciationYears),
-      [PARAM_KEYS.variableInitial]: initialMap,
-      [PARAM_KEYS.variableDeviceType]: typeMap,
-      [PARAM_KEYS.carbonCap]: carbonEnabled ? carbonValue : null,
-      [PARAM_KEYS.algorithmMode]: algMode,
+    const baseParams = current?.params ?? {}
+    // 经济参数写入 parameters.economic 子对象(FE-BE-01: 后端权威结构);
+    // 移除遗留扁平键(evaluation_period_years 等), 防止双事实源
+    const params: Record<string, unknown> = { ...baseParams }
+    delete params.evaluation_period_years
+    delete params.discount_rate
+    delete params.tax_rate
+    delete params.depreciation_years
+    const ecoObj: Record<string, unknown> = {
+      ...(objOf(baseParams, 'economic') ?? {}),
+      [ECONOMIC_KEYS.projectYears]: numOrNull(eco.evaluationPeriod),
+      [ECONOMIC_KEYS.discountRate]: pctToDecimal(eco.discountRate),
+      [ECONOMIC_KEYS.taxRate]: pctToDecimal(eco.taxRate),
+      [ECONOMIC_KEYS.depreciationYears]: numOrNull(eco.depreciationYears),
     }
+    params.economic = ecoObj
+    params[PARAM_KEYS.variableInitial] = initialMap
+    params[PARAM_KEYS.variableDeviceType] = typeMap
+    params[PARAM_KEYS.carbonCap] = carbonEnabled ? carbonValue : null
+    params[PARAM_KEYS.algorithmMode] = algMode
     return {
       name: name.trim(),
       description: description.trim() || null,

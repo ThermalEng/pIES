@@ -33,12 +33,10 @@ import {
   EmptyState,
   FormField,
   Icon,
-  Input,
   Select,
   Spinner,
   TaskOutcomeBadge,
   TaskStatusBadge,
-  Textarea,
 } from '../components/ui'
 import type { BadgeVariant, IconName } from '../components/ui'
 import { LineChart, ScatterChart } from '../components/charts'
@@ -233,16 +231,8 @@ export default function ResultsPage() {
   const [applyError, setApplyError] = useState<string | null>(null)
   const [applyOk, setApplyOk] = useState(false)
 
-  // 重新评估表单
+  // 重新评估对话框(只触发系统四维检查, FE-BE-03)
   const [assessOpen, setAssessOpen] = useState(false)
-  const [assessGrades, setAssessGrades] = useState<Record<AssessmentDimension, AssessmentGrade>>({
-    physical: 'pass',
-    optimality: 'pass',
-    financial: 'pass',
-    reliability: 'pass',
-  })
-  const [assessScore, setAssessScore] = useState('')
-  const [assessComment, setAssessComment] = useState('')
   const [assessBusy, setAssessBusy] = useState(false)
   const [assessError, setAssessError] = useState<string | null>(null)
   const [assessOk, setAssessOk] = useState(false)
@@ -480,24 +470,19 @@ export default function ResultsPage() {
     setAssessOk(false)
     setAssessBusy(true)
     try {
-      const score = Number(assessScore)
       const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
-      const created = await api.results.assess(projectId, entry?.task.id ?? 0, {
-        dimensions: { ...assessGrades },
-        ...(Number.isFinite(score) && assessScore.trim() !== '' ? { overall_score: score } : {}),
-        ...(assessComment.trim() !== '' ? { comment: assessComment.trim() } : {}),
-      })
+      // 后端 assess = 触发系统四维检查(FE-BE-03: 人工评分输入不支持持久化,
+      // 不再伪装接受评分/评论后静默丢弃)
+      const created = await api.results.assess(projectId, entry?.task.id ?? 0, 'full')
       setAssessments((prev) => [created, ...prev].sort((a, b) => b.created_at.localeCompare(a.created_at)))
       setAssessOk(true)
       setAssessOpen(false)
-      setAssessComment('')
-      setAssessScore('')
     } catch (err) {
       setAssessError(translateError(err as ApiError))
     } finally {
       setAssessBusy(false)
     }
-  }, [selectedPkgId, assessGrades, assessScore, assessComment])
+  }, [selectedPkgId])
 
   const exportExcel = useCallback(async () => {
     if (!selectedPkgId) return
@@ -908,14 +893,6 @@ export default function ResultsPage() {
               <Button
                 variant="secondary"
                 onClick={() => {
-                  if (latestAssessment) {
-                    setAssessGrades({
-                      physical: latestAssessment.dimension_physical,
-                      optimality: latestAssessment.dimension_optimality,
-                      financial: latestAssessment.dimension_financial,
-                      reliability: latestAssessment.dimension_reliability,
-                    })
-                  }
                   setAssessError(null)
                   setAssessOpen(true)
                 }}
@@ -1056,7 +1033,8 @@ export default function ResultsPage() {
         ) : null}
       </Dialog>
 
-      {/* 重新评估对话框 */}
+      {/* 重新运行系统评估对话框(FE-BE-03: 只触发系统四维检查,
+          不支持人工评分持久化, 移除无法落库的评分/评论输入) */}
       <Dialog
         open={assessOpen}
         onClose={() => setAssessOpen(false)}
@@ -1068,46 +1046,12 @@ export default function ResultsPage() {
               {t('ies.common.cancel')}
             </Button>
             <Button loading={assessBusy} onClick={() => void submitAssessment()}>
-              {t('ies.common.save')}
+              {t('ies.result.assess_run')}
             </Button>
           </>
         }
       >
-        <div className="ies-grid ies-grid--cols-2">
-          {DIMENSIONS.map((d) => (
-            <FormField key={d.key} label={t(d.labelKey)} htmlFor={`assess-${d.key}`}>
-              <Select
-                id={`assess-${d.key}`}
-                value={assessGrades[d.key]}
-                onChange={(e) =>
-                  setAssessGrades({ ...assessGrades, [d.key]: e.target.value as AssessmentGrade })
-                }
-              >
-                <option value="pass">{t('ies.result.grade_pass')}</option>
-                <option value="fail">{t('ies.result.grade_fail')}</option>
-                <option value="unknown">{t('ies.result.grade_unknown')}</option>
-              </Select>
-            </FormField>
-          ))}
-        </div>
-        <FormField label={t('ies.result.overall_score')} htmlFor="assess-score">
-          <Input
-            id="assess-score"
-            type="number"
-            min={0}
-            max={100}
-            placeholder="0-100"
-            value={assessScore}
-            onChange={(e) => setAssessScore(e.target.value)}
-          />
-        </FormField>
-        <FormField label={t('ies.common.description')} htmlFor="assess-comment">
-          <Textarea
-            id="assess-comment"
-            value={assessComment}
-            onChange={(e) => setAssessComment(e.target.value)}
-          />
-        </FormField>
+        <p className="ies-muted">{t('ies.result.assess_rerun_hint')}</p>
         {assessError ? <Alert variant="error">{assessError}</Alert> : null}
         {assessOk ? (
           <Alert variant="success" closable onClose={() => setAssessOk(false)}>

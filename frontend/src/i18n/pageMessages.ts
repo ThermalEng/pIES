@@ -200,6 +200,19 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.export.package_btn': '导出完整项目包',
   'ies.export.package_desc': '包含模型、版本、数据与历史结果;不含账号、权限与会话信息。仅项目所有者可导出。',
   'ies.export.package_owner_only': '仅项目所有者可导出完整项目包',
+  // -------------------------------------------------------------------------
+  // 帮助中心(FE-DOC-01: manual/ 唯一正文来源, 构建期生成 manifest)
+  // -------------------------------------------------------------------------
+  'ies.help.nav_title': '目录',
+  'ies.help.version': '适用版本 {version}',
+  'ies.help.updated': '文档更新 {date}',
+  'ies.help.back_to_app': '返回应用',
+  'ies.help.pager': '章节导航',
+  'ies.help.prev': '上一页',
+  'ies.help.next': '下一页',
+  'ies.help.not_found': '章节不存在',
+  'ies.help.locale_missing': '当前语言暂未发布对应章节;可用语言: {locales}。返回顶部切换语言。',
+  'ies.help.open_toc': '展开目录',
 }
 
 const PAGE_MESSAGES_EN: Record<string, string> = {
@@ -390,6 +403,17 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
   'ies.export.package_desc':
     'Contains model, versions, data and historical results; excludes accounts, permissions and sessions. Owner-only.',
   'ies.export.package_owner_only': 'Only the project owner can export the full project package.',
+  // Help Center (FE-DOC-01: manual/ is the single source, manifest generated at build)
+  'ies.help.nav_title': 'Contents',
+  'ies.help.version': 'Version {version}',
+  'ies.help.updated': 'Docs updated {date}',
+  'ies.help.back_to_app': 'Back to app',
+  'ies.help.pager': 'Section navigation',
+  'ies.help.prev': 'Previous',
+  'ies.help.next': 'Next',
+  'ies.help.not_found': 'Section not found',
+  'ies.help.locale_missing': 'This language has no published sections yet; available languages: {locales}. Switch language from the top bar.',
+  'ies.help.open_toc': 'Open table of contents',
 }
 
 function table(locale: Locale): Record<string, string> {

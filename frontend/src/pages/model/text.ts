@@ -66,6 +66,10 @@ const TEXTS: Record<string, Entry> = {
   'conn.incompatible_same_device': { zh: '不能将设备连接到自身', en: 'Cannot connect a device to itself' },
   'conn.incompatible_duplicate': { zh: '这两个端口之间已存在相同连接', en: 'A connection already exists between these ports' },
   'conn.incompatible_solar': { zh: '太阳辐射端口为资源输入,不支持连线', en: 'Solar ports are resource inputs and cannot be wired' },
+  'conn.port_missing': {
+    zh: '服务器未找到匹配的端口(类型/方向不兼容),请刷新后重试',
+    en: 'No matching server port found (type/direction mismatch); refresh and retry',
+  },
 
   // 设备节点
   'node.kind_existing': { zh: '存量', en: 'Existing' },

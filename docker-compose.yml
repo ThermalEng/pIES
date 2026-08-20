@@ -85,7 +85,9 @@ services:
     restart: unless-stopped
 
   web:
-    build: ./frontend
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
     ports:
       - "${IESPLAN_PORT:-8080}:80"
     depends_on:

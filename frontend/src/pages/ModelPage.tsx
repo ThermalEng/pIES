@@ -89,6 +89,15 @@ const CARRIER_COLOR: Record<string, string> = {
   gas: '#8a5a00',
 }
 
+/** 画布载能 → 服务器 port_type(FE-BE-02: 与后端 CARRIER_PORT_TYPE 一致,
+ * 连线按真实端口匹配, 不再按方向取第一个端口)。 */
+const CARRIER_TO_PORT_TYPE: Record<string, Port['port_type']> = {
+  electric: 'electric',
+  heat: 'thermal',
+  cool: 'cooling',
+  gas: 'fuel',
+}
+
 /** 任意异常 → ApiError(供 translateError 渲染)。 */
 function toApiError(err: unknown): ApiError {
   if (err instanceof ApiError) return err
@@ -295,6 +304,30 @@ function ModelCanvas({ projectId }: { projectId: number }) {
     [t],
   )
 
+  /**
+   * 画布句柄(carrier:direction) → 服务器真实端口(FE-BE-02 修复)。
+   *
+   * 按 device_id + port_type(carrier 映射) + 方向兼容性精确匹配:
+   * - 热泵热/冷输出分别为 thermal/cooling, 不再错取第一个 out 端口;
+   * - bidirectional 端口可同时作为 source/target, 但提交同一个真实端口 id;
+   * - 匹配失败返回 null(由调用方给出可定位诊断), 不静默选错端口。
+   */
+  const findServerPort = useCallback(
+    (deviceId: number, carrier: LocalConnection['carrier'], wantDirection: 'in' | 'out'): Port | null => {
+      const portType = CARRIER_TO_PORT_TYPE[carrier]
+      if (!portType) return null
+      const candidates = ports.filter(
+        (p) => p.device_id === deviceId && p.port_type === portType,
+      )
+      if (candidates.length === 0) return null
+      const directional = candidates.find(
+        (p) => p.direction === wantDirection || p.direction === 'bidirectional',
+      )
+      return directional ?? null
+    },
+    [ports],
+  )
+
   const handleConnect = useCallback(
     async (conn: RFConnection) => {
       if (!conn.source || !conn.target || !conn.sourceHandle || !conn.targetHandle) return
@@ -328,9 +361,20 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         setIssues((prev) => [...prev.slice(-3), item])
         return
       }
-      const fromServerPort = ports.find((p) => p.device_id === Number(fromDevice.id) && p.direction === 'out')
-      const toServerPort = ports.find((p) => p.device_id === Number(toDevice.id) && p.direction === 'in')
-      if (!fromServerPort || !toServerPort) return
+      const fromServerPort = findServerPort(Number(fromDevice.id), fromPort.carrier, 'out')
+      const toServerPort = findServerPort(Number(toDevice.id), toPort.carrier, 'in')
+      if (!fromServerPort || !toServerPort) {
+        // 服务器端口缺失/类型不匹配: 可定位诊断(前端本地检查只是即时提示,
+        // 后端仍为最终权威)
+        const item: IssueItem = {
+          id: localId(),
+          severity: 'error',
+          message: lt('conn.port_missing'),
+          deviceId: fromDevice.id,
+        }
+        setIssues((prev) => [...prev.slice(-3), item])
+        return
+      }
       try {
         const created = await api.model.connect(projectId, {
           from_port_id: fromServerPort.id,

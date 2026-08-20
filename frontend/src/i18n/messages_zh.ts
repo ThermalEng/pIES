@@ -11,7 +11,7 @@
  *   ies.help.*   帮助主题标题(正文在 docs/help)
  * 另有 ies.nav / ies.auth / ies.project / ies.modeling / ies.device / ies.data /
  *      ies.config / ies.task / ies.result / ies.export / ies.admin / ies.unit /
- *      ies.metric / ies.validity / ies.algo / ies.tutorial / ies.common / ies.severity。
+ *      ies.metric / ies.validity / ies.algo / ies.common / ies.severity。
  *
  * 插值参数用 {name} 形式,参数名与后端 params 字段一致;文案一律纯文本。
  */
@@ -79,9 +79,8 @@ export const messagesZh: Record<string, string> = {
   'ies.nav.results': '结果分析',
   'ies.nav.exports': '导出',
   'ies.nav.validation': '校验',
-  'ies.nav.tutorial': '使用教程',
+  'ies.nav.help': '帮助中心',
   'ies.nav.settings': '系统设置',
-  'ies.nav.help': '帮助',
   'ies.nav.logout': '退出登录',
   'ies.nav.user_menu': '用户菜单',
   'ies.nav.language': '语言',
@@ -549,6 +548,8 @@ export const messagesZh: Record<string, string> = {
   'ies.result.reassess': '重新评估',
   'ies.result.no_assessments': '尚无评估记录',
   'ies.result.assess_dialog_title': '结果评估',
+  'ies.result.assess_run': '重新运行系统评估',
+  'ies.result.assess_rerun_hint': '对最新证据包重新执行系统四维检查(物理/最优性/财务/可靠性), 评估历史不可变、追加式保留。',
   'ies.result.overall_score': '综合得分',
   'ies.result.assessment_created': '评估已创建(不可变记录)',
   'ies.result.assessment_failed': '评估保存失败:{reason}',
@@ -897,22 +898,4 @@ export const messagesZh: Record<string, string> = {
   // -------------------------------------------------------------------------
   // 使用教程
   // -------------------------------------------------------------------------
-  'ies.tutorial.title': '使用教程',
-  'ies.tutorial.intro': '本教程将引导您完成一个完整的规划流程',
-  'ies.tutorial.step1_title': '创建项目',
-  'ies.tutorial.step1_desc': '填写项目名称、币种与时区,创建规划项目',
-  'ies.tutorial.step2_title': '搭建系统模型',
-  'ies.tutorial.step2_desc': '添加电网连接、光伏、负荷等设备并建立连接',
-  'ies.tutorial.step3_title': '导入数据',
-  'ies.tutorial.step3_desc': '导入逐时负荷、气象与电价数据',
-  'ies.tutorial.step4_title': '配置计算',
-  'ies.tutorial.step4_desc': '设置目标函数、算法与精度等级',
-  'ies.tutorial.step5_title': '运行任务',
-  'ies.tutorial.step5_desc': '创建优化任务并跟踪进度',
-  'ies.tutorial.step6_title': '分析结果',
-  'ies.tutorial.step6_desc': '查看指标、四维评估并导出报告',
-  'ies.tutorial.prev': '上一步',
-  'ies.tutorial.next': '下一步',
-  'ies.tutorial.finish': '完成',
-  'ies.tutorial.start': '开始学习',
 }

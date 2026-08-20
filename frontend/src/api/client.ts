@@ -24,7 +24,6 @@ import type {
   AlgorithmId,
   ApiErrorBody,
   AssessmentGrade,
-  AssessmentInput,
   AuditEntry,
   AuditListParams,
   CalcConfig,
@@ -1027,7 +1026,12 @@ export interface ResultsApi {
     diagnostics: Diagnostic[]
   }>
   assessments(projectId: number, taskId: number): Promise<ResultAssessment[]>
-  assess(projectId: number, taskId: number, input: AssessmentInput): Promise<ResultAssessment>
+  /** 触发系统评估(FE-BE-03: 后端仅接受 assessment_type, 不支持人工评分输入) */
+  assess(
+    projectId: number,
+    taskId: number,
+    assessmentType: 'full' | 'physical' | 'optimality' | 'financial' | 'reliability',
+  ): Promise<ResultAssessment>
   select(projectId: number, taskId: number, input: { result_index_id: number; reason?: string }): Promise<ResultSelection>
   hourly(projectId: number, taskId: number): Promise<{ resolution: string; n: number; flows: Record<string, number[]> }>
 }
@@ -1403,20 +1407,21 @@ export const api = {
     baselineConfirm(projectId: number): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }> {
       // 确认内容须与后端 _current_assumptions 键集一致(validation.py 比对哈希),
       // 从当前配置导出经济假设, 避免空对象哈希永远不匹配(VALID-FIN-002 恒过期)
+      // (FE-BE-05: cfg 已是 CalcConfig, params.economic 为经济段; 旧代码强转
+      // {config:{parameters}} 导致 rec.config 恒不存在 → 恒提交默认值)
       return api.config
         .get(projectId)
         .catch(() => null)
         .then((cfg) => {
-          const rec = (cfg as unknown as { config?: { parameters?: { economic?: Record<string, unknown> }; irr_floor?: number } }) ?? {}
-          const conf = rec.config ?? {}
-          const params = conf.parameters?.economic ?? {}
+          const params = (cfg?.params ?? {}) as Record<string, unknown>
+          const eco = (params.economic ?? params) as Record<string, unknown>
           const assumptions = {
-            discount_rate: params.discount_rate ?? 0.08,
-            tax_rate: params.tax_rate ?? 0.25,
-            project_years: params.project_years ?? 20,
-            depreciation_years: params.depreciation_years ?? 10,
-            currency: params.currency ?? 'CNY',
-            irr_floor: conf.irr_floor ?? 0.08,
+            discount_rate: typeof eco.discount_rate === 'number' ? eco.discount_rate : 0.08,
+            tax_rate: typeof eco.tax_rate === 'number' ? eco.tax_rate : 0.25,
+            project_years: typeof eco.project_years === 'number' ? eco.project_years : 20,
+            depreciation_years: typeof eco.depreciation_years === 'number' ? eco.depreciation_years : 10,
+            currency: typeof eco.currency === 'string' && eco.currency ? eco.currency : 'CNY',
+            irr_floor: typeof cfg?.min_irr === 'number' ? cfg.min_irr : 0.08,
           }
           return request<unknown>(`/projects/${projectId}/validation/baseline-confirm`, {
             method: 'POST',
@@ -1530,12 +1535,12 @@ export const api = {
         return items
       })
     },
-    assess(projectId: number, taskId: number, _input: AssessmentInput): Promise<ResultAssessment> {
-      // 后端 assess 为「触发系统四维检查」(assessment_type), 不接受人工评分输入;
-      // 人工评分无法经后端持久化, 此处降级为触发 full 系统评估(前端输入被忽略)。
+    assess(projectId: number, taskId: number, assessmentType: 'full' | 'physical' | 'optimality' | 'financial' | 'reliability' = 'full'): Promise<ResultAssessment> {
+      // 后端 assess 为「触发系统四维检查」(assessment_type), 不接收人工评分输入
+      // (FE-BE-03: 人工评分无法持久化, 前端不再伪装接受 AssessmentInput 后丢弃)
       return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assess`, {
         method: 'POST',
-        body: { assessment_type: 'full' },
+        body: { assessment_type: assessmentType },
       }).then((body) => assessmentFromServer(asRecord(oneOf<Record<string, unknown>>(body, 'assessment'))))
     },
     select(projectId: number, taskId: number, input: { result_index_id: number; reason?: string }): Promise<ResultSelection> {

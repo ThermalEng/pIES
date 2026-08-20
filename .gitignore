@@ -18,3 +18,4 @@ dist/
 *.swp
 # 本地设置
 .claude/settings.local.json
+frontend/public/help/manifest.json

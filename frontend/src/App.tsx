@@ -5,7 +5,7 @@
  *   /login          登录页(已登录则重定向首页)
  *   /               项目列表
  *   /projects/:id   项目工作台
- *   /tutorial       使用教程(独立页,无外壳)
+ *   /help/*         帮助中心(独立页,无外壳,静态可读)
  *   /settings       系统设置(管理员)
  *   *               404
  *
@@ -13,7 +13,7 @@
  *   src/pages/LoginPage.tsx         默认导出登录组件
  *   src/pages/ProjectListPage.tsx   默认导出项目列表组件
  *   src/pages/WorkbenchPage.tsx     默认导出工作台组件(useParams 取 :id)
- *   src/pages/TutorialPage.tsx      默认导出教程组件
+ *   src/pages/HelpPage.tsx          默认导出帮助中心组件
  *   src/pages/SettingsPage.tsx      默认导出设置组件
  *
  * 页面通过 import.meta.glob 惰性扫描加载:页面文件未就绪时自动回退到内联
@@ -93,7 +93,7 @@ function lazyPage(name: string) {
 const LoginPage = lazyPage('LoginPage')
 const ProjectListPage = lazyPage('ProjectListPage')
 const WorkbenchPage = lazyPage('WorkbenchPage')
-const TutorialPage = lazyPage('TutorialPage')
+const HelpPage = lazyPage('HelpPage')
 const SettingsPage = lazyPage('SettingsPage')
 
 /** 整页加载指示(路由切换 Suspense 兜底)。 */
@@ -162,8 +162,8 @@ function AppShell() {
           <NavLink to="/" end className="ies-topbar__link">
             {t('ies.nav.projects')}
           </NavLink>
-          <NavLink to="/tutorial" className="ies-topbar__link">
-            {t('ies.nav.tutorial')}
+          <NavLink to="/help" className="ies-topbar__link">
+            {t('ies.nav.help')}
           </NavLink>
           <NavLink to="/settings" className="ies-topbar__link">
             {t('ies.nav.settings')}
@@ -215,8 +215,8 @@ export default function App() {
             </PublicOnly>
           }
         />
-        {/* 独立教程页(无应用外壳) */}
-        <Route path="/tutorial" element={<TutorialPage />} />
+        {/* 帮助中心(独立页,无外壳,静态可读) */}
+        <Route path="/help/*" element={<HelpPage />} />
         {/* 应用外壳(需登录) */}
         <Route
           element={
