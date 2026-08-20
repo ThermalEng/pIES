@@ -19,6 +19,18 @@ docker compose up -d --build
 # 首次登录必须修改密码
 ```
 
+## 项目文档
+
+本 README 是项目文档的统一入口：
+
+- [产品文档](manual/README.md)：用户指南和开发者指南的共同入口；
+- [用户指南](manual/user-guide/README.md)：安装使用、项目建模、数据准备、计算分析、结果解释、导入导出和管理员操作；
+- [开发者指南](manual/developer-guide/README.md)：稳定架构原则、公共契约、扩展开发和维护要求；
+- [架构宪法](manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)：开发者指南总则，所有设计、开发、重构和审查必须遵守；
+- [开发过程文档](docs/README.md)：当前开发使用的规格、方案、调研、审查和阶段记录，不属于对外开发者指南。
+
+用户指南与开发者指南必须分开维护。面向用户的操作说明不得散落到开发规格中，内部 ORM、模块路径和实现细节也不得作为用户操作契约。
+
 ## 生产部署安全要求
 
 > ⚠️ **生产环境必须覆盖以下默认值**, 否则存在严重安全风险:
@@ -61,7 +73,8 @@ docker compose up -d --build
 ```
 backend/    Python 3.12 + FastAPI + SQLAlchemy 2.0 (API/Worker/求解器/指标)
 frontend/   TypeScript + React 18 + Vite + @xyflow/react (主界面/教程页)
-docs/       设计规格(数据库/计算模型/任务调度/注册表诊断)与实现契约
+manual/     正式产品文档(用户指南和开发者指南)
+docs/       当前开发过程文档(规格、方案、调研、审查和阶段记录)
 scripts/    动态工作流编排脚本(开发过程产物)
 ```
 
