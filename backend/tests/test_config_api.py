@@ -445,6 +445,51 @@ def test_discount_rate_misplaced_rejected(client: TestClient, db: Session) -> No
     assert "PARAM-CONF-001" in codes
 
 
+def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Session) -> None:
+    """非默认经济参数: 保存 → 重读 → 进入任务快照全链路同值(FE-BE-01)。"""
+    project = seed_project(db)
+    default = _default_config(db, project)
+    cfg = dict(default)
+    cfg["parameters"]["economic"] = {
+        "discount_rate": 0.05,
+        "tax_rate": 0.2,
+        "project_years": 15,
+        "depreciation_years": 5,
+        "currency": "CNY",
+    }
+    resp = client.put(
+        f"/api/projects/{project.id}/config",
+        json={"config": cfg, "expected_revision": 1},
+    )
+    assert resp.status_code == 200, resp.text
+    # 重读: economic 子对象原值保留
+    got = client.get(f"/api/projects/{project.id}/config").json()
+    eco = got["config"]["parameters"]["economic"]
+    assert eco["discount_rate"] == 0.05
+    assert eco["tax_rate"] == 0.2
+    assert eco["project_years"] == 15
+    assert eco["depreciation_years"] == 5
+    # 提交任务 → 快照 calc_config_snapshot 携带同值
+    # (service 层直接调用: config 测试 app 已登录过 owner, 再次登录会触发
+    # 窗口接管; 快照装配不依赖认证会话)
+    from iesplan.models.calc import CalcSnapshot
+    from iesplan.models.identity import User
+    from iesplan.services import tasks as tasks_service
+
+    owner_user = db.execute(
+        select(User).where(User.username == OWNER_USERNAME)
+    ).scalar_one()
+    task = tasks_service.create_task(db, owner_user, project.id, "calc", config={})
+    db.commit()
+    snap = db.query(CalcSnapshot).order_by(CalcSnapshot.id.desc()).first()
+    assert snap is not None
+    eco_snap = snap.calc_config_snapshot["params"]["economic"]
+    assert eco_snap["discount_rate"] == 0.05
+    assert eco_snap["tax_rate"] == 0.2
+    assert eco_snap["project_years"] == 15
+    assert eco_snap["depreciation_years"] == 5
+
+
 def test_irr_floor_missing_rejected(client: TestClient, db: Session) -> None:
     """缺少最低 IRR 硬约束字段 → SYS-CFG-001(REQ-CALC-006)。"""
     project = seed_project(db)

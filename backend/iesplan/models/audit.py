@@ -1,7 +1,10 @@
 """审计与对象域(U11 对象 / U12 审计 / U14 导入 / U15 保留策略写入单元)。
 
-含: objects / object_refs / audit_log / import_proposals / retention_rules。
+含: audit_log / import_proposals / retention_rules。
 对应 01-db-schema.md 第10节。
+
+STO-05: objects / object_refs 的 ORM 已迁移至 iesplan.storage.persistence
+(存储模块所属持久化层), 本文件不再混放对象 ORM 与审计模型。
 """
 
 from __future__ import annotations
@@ -23,64 +26,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
 from iesplan.models.common import HASH64_RE, JSONB, InetType, bigint_pk, regex_check
-
-
-class StoredObject(Base):
-    """内容寻址对象(元数据、引用计数、配额, 01 §10.1)。"""
-
-    __tablename__ = "objects"
-
-    id: Mapped[int] = bigint_pk()
-    oid: Mapped[str] = mapped_column(Text, nullable=False)
-    sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    storage_path: Mapped[str | None] = mapped_column(Text)
-    media_type: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="stored")
-    ref_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("0"))
-    quota_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("0"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
-    )
-    last_referenced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    __table_args__ = (
-        regex_check(f"oid ~ '{HASH64_RE}'", name="ck_objects_oid"),
-        regex_check(f"sha256 ~ '{HASH64_RE}'", name="ck_objects_sha256"),
-        CheckConstraint("size_bytes >= 0", name="ck_objects_size"),
-        CheckConstraint(
-            "status IN ('stored','orphaned','pending_deletion','deleted')", name="ck_objects_status"
-        ),
-        CheckConstraint("ref_count >= 0", name="ck_objects_ref_count"),
-        CheckConstraint("quota_bytes >= 0", name="ck_objects_quota"),
-        UniqueConstraint("oid", name="uq_objects_oid"),
-        UniqueConstraint("sha256", name="uq_objects_sha256"),
-        Index("idx_objects_status", "status", "last_referenced_at"),
-        Index("idx_objects_path", "storage_path"),
-    )
-
-
-class ObjectRef(Base):
-    """对象引用清单(01 §10.2)。"""
-
-    __tablename__ = "object_refs"
-
-    id: Mapped[int] = bigint_pk()
-    object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
-    ref_type: Mapped[str] = mapped_column(Text, nullable=False)
-    ref_entity_type: Mapped[str] = mapped_column(Text, nullable=False)
-    ref_entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    purpose: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
-    )
-
-    __table_args__ = (
-        UniqueConstraint(
-            "object_id", "ref_type", "ref_entity_type", "ref_entity_id", name="uq_object_refs_ref"
-        ),
-        Index("idx_object_refs_entity", "ref_entity_type", "ref_entity_id"),
-    )
 
 
 class AuditLog(Base):

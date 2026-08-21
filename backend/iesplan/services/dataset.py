@@ -43,7 +43,7 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import sha256_hex
 from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis, validate_timestamps
-from iesplan.models.audit import ObjectRef, StoredObject
+from iesplan.models.audit import AuditLog
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
 from iesplan.models.identity import User
 from iesplan.models.project import Project
@@ -737,7 +737,7 @@ def put_object(
     media_type: str,
     *,
     source_category: str = "dataset",
-) -> StoredObject:
+) -> dict:
     """写入内容寻址对象(01 §10.1, 委托 services/objects.py)。
 
     U11 对象服务负责临时区写入→原子 rename 提交→objects 记录→审计与存储门禁;
@@ -747,32 +747,23 @@ def put_object(
     return objects_service.put_object(db, data, media_type, source_category=source_category)
 
 
-def get_object_bytes(obj: StoredObject) -> bytes:
-    """读取对象字节并校验完整性(大小 + sha256 与记录一致, 不一致抛 AppError)。"""
-    from iesplan.config import settings
-
-    path = settings.data_dir / (obj.storage_path or f"objects/{obj.sha256}")
-    raw = path.read_bytes()
-    if len(raw) != obj.size_bytes or sha256_hex(raw) != obj.sha256:
-        raise AppError(
-            code="OBJ-CORRUPT-001",
-            message_key="ies.diag.obj.corrupt",
-            params={"object_id": obj.id, "oid": obj.oid, "expected_size": obj.size_bytes},
-        )
-    return raw
+def get_object_bytes(db: Session, object_id: int) -> bytes:
+    """读取对象字节并校验完整性(STO-05: 按公开对象 ID, 委托 storage 门面)。"""
+    return objects_service.get_object(db, object_id)
 
 
 def add_object_ref(
     db: Session,
-    obj: StoredObject,
+    obj: object,
     ref_type: str,
     ref_entity_type: str,
     ref_entity_id: int,
     purpose: str | None = None,
-) -> ObjectRef:
-    """建立对象引用并原子递增 ref_count(01 §10.2, 委托 services/objects.add_ref)。"""
+) -> "RefInfo | None":
+    """建立对象引用(01 §10.2, STO-05: 接受 ObjectHandle 或元数据 dict, 委托门面)。"""
+    object_id = obj["id"] if isinstance(obj, dict) else obj.id
     return objects_service.add_ref(
-        db, obj.id, ref_type, ref_entity_id, ref_entity_type=ref_entity_type, purpose=purpose
+        db, object_id, ref_type, ref_entity_id, ref_entity_type=ref_entity_type, purpose=purpose
     )
 
 
@@ -1002,8 +993,8 @@ def _commit_version(
     )
     db.add_all([file_data, file_meta])
     db.flush()
-    add_object_ref(db, obj_data, "dataset_file", "dataset_files", file_data.id, purpose="数据集版本数据本体")
-    add_object_ref(db, obj_meta, "dataset_file", "dataset_files", file_meta.id, purpose="数据集版本元数据")
+    add_object_ref(db, {"id": obj_data.id}, "dataset_file", "dataset_files", file_data.id, purpose="数据集版本数据本体")
+    add_object_ref(db, {"id": obj_meta.id}, "dataset_file", "dataset_files", file_meta.id, purpose="数据集版本元数据")
     db.commit()
     return version
 
@@ -1124,7 +1115,10 @@ def get_dataset_version(
         )
     files: list[dict] = []
     for f in db.execute(sa.select(DatasetFile).where(DatasetFile.dataset_version_id == version.id)).scalars():
-        obj = db.get(StoredObject, f.object_id)
+        try:
+            obj = objects_service.object_info(db, f.object_id)
+        except NotFoundError:
+            obj = None
         files.append(
             {
                 "id": f.id,
@@ -1132,8 +1126,8 @@ def get_dataset_version(
                 "format": f.format,
                 "row_count": f.row_count,
                 "size_bytes": f.size_bytes,
-                "sha256": obj.sha256 if obj else None,
-                "media_type": obj.media_type if obj else None,
+                "sha256": obj["sha256"] if obj else None,
+                "media_type": obj["media_type"] if obj else None,
             }
         )
     data_file = next((f for f in files if f["file_kind"] == "data"), None)

@@ -45,6 +45,80 @@ def _clean_commands():
             register_command(cmd)
 
 
+class TestAtomicReplace:
+    """BE-REG-02: 注册表原子替换语义。"""
+
+    def test_replace_all_is_atomic(self):
+        from iesplan.modeling.command import (
+            ModuleCommand,
+            get_command,
+            replace_all_commands,
+            snapshot,
+        )
+
+        staged = {
+            "ies.command.compute.evaluate_plan.v1": ModuleCommand(
+                command_id="ies.command.compute.evaluate_plan.v1",
+                function_ref="iesplan.engines.eval_run.evaluate_plan",
+                version="1.0.0",
+            ),
+            "ies.command.model.ies.device.pv.mechanism.1.4.0": ModuleCommand(
+                command_id="ies.command.model.ies.device.pv.mechanism.1.4.0",
+                function_ref="iesplan.modeling.functions.pv_output",
+                version="1.4.0",
+            ),
+        }
+        replace_all_commands(staged)
+        assert get_command("ies.command.model.ies.device.pv.mechanism.1.4.0") is not None
+        assert len(snapshot()) == 2
+
+    def test_failed_build_keeps_old_snapshot(self, monkeypatch):
+        """任一设备构建失败时旧快照完整保留(BE-REG-02 核心)。"""
+        from iesplan.core.errors import AppError
+        from iesplan.devices import DeviceModelDescriptor
+        from iesplan.modeling import registry_loader
+        from iesplan.modeling.command import ModuleCommand, snapshot
+
+        # 先放入一个"旧"命令
+        old = ModuleCommand(
+            command_id="ies.command.compute.evaluate_plan.v1",
+            function_ref="iesplan.engines.eval_run.evaluate_plan",
+            version="1.0.0",
+        )
+        from iesplan.modeling.command import register_command
+
+        register_command(old)
+        before = snapshot()
+
+        # 描述列表: 一个正常 + 一个构建必败(空 function → 机理缺入口)
+        good = DeviceModelDescriptor(
+            type_id="ies.device.pv", version="1.4.0", name_zh="光伏", name_en="PV",
+            model_method="mechanism", stateful=False, fidelity="medium",
+            energy_carriers=["solar", "electric"], is_load=False,
+            capabilities=[], extends="ies.device.base", help_topic="",
+            parameters={}, ports=[], time_series={}, states=[], function={},
+            standard_csv_path=None,
+        )
+        bad = DeviceModelDescriptor(
+            type_id="ies.device.bogus", version="1.0.0", name_zh="坏设备", name_en="Bad",
+            model_method="mechanism", stateful=False, fidelity="medium",
+            energy_carriers=["electric"], is_load=False,
+            capabilities=[], extends="ies.device.base", help_topic="",
+            parameters={}, ports=[], time_series={}, states=[], function={},
+            standard_csv_path=None,
+        )
+        monkeypatch.setattr(
+            registry_loader, "list_device_descriptors",
+            lambda: [good, bad],
+        )
+        with pytest.raises(AppError):
+            registry_loader.register_catalog_commands()
+        # 旧快照完整保留(不出现部分替换, 也不含失败设备的半成品命令)
+        assert snapshot() == before
+        assert "ies.command.compute.evaluate_plan.v1" in before
+        assert not any("bogus" in c for c in snapshot())
+
+
 class TestSelector:
     def test_default_auto_selects_milp_hybrid(self):
         command_id, opts = select_engine({"algorithm": {"mode": "auto"}}, "calc")

@@ -112,10 +112,12 @@ def _device_cmd(cid: str, name: str, device_type: str = "heat_pump", kind: str =
     }
 
 
-def _load_content(oid: str) -> dict:
-    """从对象存储读取内容文档(测试直读)。"""
-    path = Path(settings.data_dir) / "objects" / f"{oid[:2]}/{oid}.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+def _load_content(db: Session, oid: str) -> dict:
+    """从对象存储读取内容文档(STO-01: 经公开门面, 不拼路径)。"""
+    from iesplan.services import objects as objects_service
+
+    raw = objects_service.get_object(db, oid)
+    return json.loads(raw.decode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +245,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert version["source_draft_revision"] == 2
     assert version["parent_version_id"] is None
     # 版本内容 = 草稿领域内容 + 项目固化字段(币种/UTC 偏移), 无命令簿记
-    vcontent = _load_content(version["content_hash"])
+    vcontent = _load_content(db_session, version["content_hash"])
     assert vcontent["currency"] == "CNY"
     assert vcontent["fixed_utc_offset_minutes"] == 480
     assert vcontent["model"]["devices"][0]["name"] == "热泵1"

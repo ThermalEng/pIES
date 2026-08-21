@@ -48,7 +48,7 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import new_id, sha256_hex
-from iesplan.models.audit import StoredObject
+from iesplan.services import objects as objects_service
 from iesplan.models.calc import (
     CalcSnapshot,
     ComputeSlot,
@@ -427,17 +427,12 @@ def list_cleanup_suggestions(db: Session) -> list[dict[str, Any]]:
     """清理建议(规格 8.3: 按"最安全 → 最激进"排序, 每项含对象清单与预计释放量)。"""
     suggestions: list[dict[str, Any]] = []
 
-    orphaned = db.execute(
-        sa.select(
-            sa.func.count(StoredObject.id),
-            sa.func.coalesce(sa.func.sum(StoredObject.size_bytes), 0),
-        ).where(StoredObject.status == "orphaned")
-    ).one()
+    orphaned = objects_service.orphaned_stats(db)
     suggestions.append({
         "action": "cleanup_orphaned_objects",
         "message_key": "ies.fix.store.orphaned",
-        "count": int(orphaned[0] or 0),
-        "estimate_bytes": int(orphaned[1] or 0),
+        "count": orphaned["count"],
+        "estimate_bytes": orphaned["total_bytes"],
     })
 
     report_count = db.execute(sa.select(sa.func.count(Report.id))).scalar() or 0
@@ -515,15 +510,10 @@ def estimate_storage(
     need = snap_bytes + inter_bytes + result_bytes + evid_bytes
 
     # 可用空间: min(配额余额, 卷空闲空间); 配额未配置视为无限
-    used, quota = db.execute(
-        sa.select(
-            sa.func.coalesce(sa.func.sum(StoredObject.size_bytes), 0),
-            sa.func.coalesce(sa.func.sum(StoredObject.quota_bytes), 0),
-        ).where(StoredObject.status != "deleted")
-    ).one()
+    usage = objects_service.usage_summary(db)
     volume_free = shutil.disk_usage(settings.data_dir).free
-    if int(quota or 0) > 0:
-        avail = max(int(quota) - int(used), 0)
+    if int(usage["quota_bytes"] or 0) > 0:
+        avail = max(int(usage["quota_bytes"]) - int(usage["used_bytes"]), 0)
     else:
         avail = volume_free
     avail = min(avail, volume_free)

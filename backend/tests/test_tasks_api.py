@@ -36,7 +36,7 @@ from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.audit import StoredObject  # noqa: E402
+from iesplan.storage.persistence import StoredObject  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402

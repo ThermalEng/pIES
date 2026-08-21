@@ -41,7 +41,7 @@ from iesplan.core.idgen import sha256_hex
 from iesplan.engines.planning import CAPACITY_PARAM
 from iesplan.metrics import validity
 from iesplan.metrics.financial import IRRStatus
-from iesplan.models.audit import AuditLog, StoredObject
+from iesplan.models.audit import AuditLog
 from iesplan.models.calc import CalcSnapshot, Task, TaskAttempt, TaskLease
 from iesplan.models.common import HASH64_RE
 from iesplan.models.identity import User
@@ -300,10 +300,9 @@ def _validate_evidence_payload(
             if not isinstance(obj_id, int):
                 problems.append("hourly_refs 元素缺少 object_id")
                 continue
-            exists = db.execute(
-                sa.select(StoredObject.id).where(StoredObject.id == obj_id)
-            ).scalar_one_or_none()
-            if exists is None:
+            try:
+                objects_service.object_info(db, obj_id)
+            except NotFoundError:
                 problems.append(f"hourly_refs 引用的对象不存在: object_id={obj_id}")
             if not isinstance(ref.get("fields"), list) or not ref["fields"]:
                 problems.append("hourly_refs 元素缺少 fields 清单")

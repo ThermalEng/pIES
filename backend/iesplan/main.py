@@ -239,10 +239,9 @@ def _register_exception_handlers(app: FastAPI) -> None:
 def _register_business_routers(application: FastAPI) -> None:
     """挂载全部业务 API 路由(集成阶段汇总, 按域分组)。
 
-    挂载顺序说明: objects 与 admin 两个模块历史上各自实现了
-    /api/admin/storage 与 /api/admin/health(路径重复), 集成后统一由
-    objects 提供(双认证兼容 + 视图合并), admin 模块仅保留独有端点,
-    因此 objects 先于 admin 挂载, 避免路径遮蔽。
+    挂载顺序说明(STO-07): 对象存储路由(objects)只提供 /storage 与
+    /storage/health; 全系统运维健康(/admin/health)由独立聚合层 health
+    提供, 两者不重复定义路径, 无兼容并集。
     """
     from iesplan.api import (
         admin,
@@ -250,6 +249,7 @@ def _register_business_routers(application: FastAPI) -> None:
         config,
         datasets,
         exports,
+        health,
         model,
         objects,
         projects,
@@ -260,8 +260,9 @@ def _register_business_routers(application: FastAPI) -> None:
 
     # 身份与认证(U01, 窗口会话凭证)
     application.include_router(auth.router)
-    # 管理维护(U11/U16; objects 先挂载, 其 /storage 与 /health 为统一实现)
+    # 管理维护: 存储路由(objects) + 运维健康聚合(health) + admin 独有端点
     application.include_router(objects.router)
+    application.include_router(health.router)
     application.include_router(admin.router)
     # 项目(U02/U03)
     application.include_router(projects.router)

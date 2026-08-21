@@ -5,9 +5,9 @@
 设计约定:
 - 草稿内容(模型/布局/数据集绑定/计算配置/语言/受控扩展清单)以规范化 JSON 文档
   表示, 按内容寻址落盘(settings.data_dir/objects/<oid[:2]>/<oid>.json),
-  objects 表(StoredObject)登记元数据; drafts.content_hash /
+  objects 表(经 iesplan.storage 公开门面)登记元数据; drafts.content_hash /
   project_versions.content_hash 即内容校验值(sha256)。
-  对象清理与配额维护属于 U11/U16 运维单元职责。
+  对象清理与配额维护属于存储运维单元职责。
   (完整集成后, 模型/数据集/配置的权威数据在 U04/U05/U06 表中; 本实现以内容文档
   作为 U03 阶段自包含的契约载体, 跨单元提交由编排层统一完成。)
 - 草稿修订为追加式: 每次领域修改在同一事务内新建 revision+1 的 Draft 行
@@ -37,7 +37,7 @@ from iesplan.config import settings
 from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.idgen import sha256_hex
-from iesplan.models.audit import AuditLog, StoredObject
+from iesplan.models.audit import AuditLog
 from iesplan.models.calc import Task
 from iesplan.models.identity import Role, User, UserRole
 from iesplan.models.project import (
@@ -925,7 +925,7 @@ def create_version(
         VersionRef(
             project_version_id=version.id,
             ref_type="object",
-            object_id=obj.id,
+            object_id=obj["id"],
             ref_key="project_version_content",
             ref_hash=content_hash,
         )
@@ -1303,81 +1303,48 @@ def _version_content(project: Project, content: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 内容寻址对象存储(草稿/版本内容载体)
+# 内容寻址对象存储(草稿/版本内容载体; 实现经 iesplan.storage 公开门面, STO-01)
 # ---------------------------------------------------------------------------
 
 
-def _object_root() -> Path:
-    """对象存储根目录(settings.data_dir/objects)。"""
-    return Path(settings.data_dir) / "objects"
-
-
-def _object_rel_path(oid: str) -> str:
-    """对象相对路径(按前缀分桶, 便于文件系统规模扩展)。"""
-    return f"{oid[:2]}/{oid}.json"
-
-
 def _store_content(db: Session, content: dict) -> str:
-    """规范化 JSON → 内容寻址对象: 写对象文件 + objects 元数据行, 返回 content_hash。
+    """规范化 JSON → 内容寻址对象(STO-01: 经 storage 公开门面), 返回 content_hash。
 
-    相同内容的重复写入按 oid 去重并递增引用计数(对象清理由 U11/U16 负责)。
+    相同内容的重复写入按 sha256 去重(对象行复用, owner 引用仍单独建立)。
+    storage_path 的解释/分桶/临时文件全部由 iesplan.storage 内部实现,
+    本模块不拼路径、不导入 StoredObject ORM。
     """
+    from iesplan.services import objects as objects_service
+
     raw = canonical_json(content)
     content_hash = sha256_hex(raw.encode("utf-8"))
-    obj = db.execute(select(StoredObject).where(StoredObject.oid == content_hash)).scalar_one_or_none()
-    if obj is None:
-        _write_object_file(content_hash, raw)
-        db.add(
-            StoredObject(
-                oid=content_hash,
-                sha256=content_hash,
-                size_bytes=len(raw),
-                storage_path=_object_rel_path(content_hash),
-                media_type="application/json",
-                status="stored",
-                ref_count=1,
-                quota_bytes=0,
-            )
-        )
-    else:
-        obj.ref_count += 1
+    objects_service.put_object(
+        db, raw.encode("utf-8"), "application/json",
+        source_category="project_content",
+        ref_type="draft_content", ref_id=content_hash, ref_entity_type="drafts",
+        purpose="草稿内容文档(内容寻址)",
+    )
     return content_hash
 
 
-def _write_object_file(oid: str, raw: str) -> None:
-    """原子写入对象文件(临时文件 + rename)。"""
-    path = _object_root() / _object_rel_path(oid)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(raw, encoding="utf-8")
-        tmp.rename(path)
-    except OSError as exc:
-        raise AppError(
-            "内容对象写入失败(存储异常)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-        ) from exc
-
-
 def _load_content_by_hash(db: Session, content_hash: str) -> dict:
-    """按内容校验值读取内容对象并校验(对象缺失/哈希不符视为数据损坏)。"""
-    obj = db.execute(
-        select(StoredObject).where(StoredObject.oid == content_hash)
-    ).scalar_one_or_none()
-    if obj is None or not obj.storage_path:
+    """按内容校验值读取内容对象并校验(对象缺失/哈希不符视为数据损坏)。
+
+    STO-01: 经 storage 公开门面读取(读取时校验大小 + sha256)。
+    """
+    from iesplan.services import objects as objects_service
+
+    try:
+        raw = objects_service.get_object(db, content_hash)
+    except NotFoundError as exc:
         raise AppError(
             "内容对象缺失(数据损坏)",
             code=SYS_STORE_CORRUPT,
             severity=SEVERITY_ERROR,
             message_key="ies.diag.store.corrupt",
             location={"object_type": "object", "object_id": content_hash},
-        )
-    path = _object_root() / obj.storage_path
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
+        ) from exc
+    except ObjectCorruptError as exc:
         raise AppError(
             "内容对象读取失败(数据损坏)",
             code=SYS_STORE_CORRUPT,
@@ -1385,7 +1352,7 @@ def _load_content_by_hash(db: Session, content_hash: str) -> dict:
             message_key="ies.diag.store.corrupt",
             location={"object_type": "object", "object_id": content_hash},
         ) from exc
-    if sha256_hex(raw.encode("utf-8")) != content_hash:
+    if sha256_hex(raw) != content_hash:
         raise AppError(
             "内容校验失败(数据损坏)",
             code=SYS_STORE_CORRUPT,
@@ -1394,8 +1361,8 @@ def _load_content_by_hash(db: Session, content_hash: str) -> dict:
             location={"object_type": "object", "object_id": content_hash},
         )
     try:
-        parsed = json.loads(raw)
-    except ValueError as exc:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
         raise AppError(
             "内容对象解析失败(数据损坏)",
             code=SYS_STORE_CORRUPT,
@@ -1417,9 +1384,12 @@ def _load_draft_content(db: Session, draft: Draft) -> dict:
     return _load_content_by_hash(db, draft.content_hash)
 
 
-def _get_object_by_oid(db: Session, oid: str) -> StoredObject:
-    obj = db.execute(select(StoredObject).where(StoredObject.oid == oid)).scalar_one_or_none()
-    if obj is None:
+def _get_object_by_oid(db: Session, oid: str) -> dict:
+    """按内容校验值解析对象元数据(STO-01: 经 storage 公开门面, 返回句柄 dict)。"""
+    from iesplan.services import objects as objects_service
+
+    handle = objects_service.object_info(db, oid)
+    if handle is None:
         raise AppError(
             "内容对象缺失(数据损坏)",
             code=SYS_STORE_CORRUPT,
@@ -1427,7 +1397,7 @@ def _get_object_by_oid(db: Session, oid: str) -> StoredObject:
             message_key="ies.diag.store.corrupt",
             location={"object_type": "object", "object_id": oid},
         )
-    return obj
+    return handle
 
 
 def _audit(

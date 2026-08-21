@@ -568,7 +568,8 @@ def main() -> int:
         login(a, "admin", ADMIN_NEW_PASSWORD)
         r = a.get("/api/admin/storage", user_id=a.user_id)
         assert r.status_code == 200, f"存储视图失败: {r.status_code} {r.text[:200]}"
-        assert "total_bytes" in r.json() or "stats" in r.json()
+        # STO-07: 单一 StorageStatusDto(objects/capacity 顶层字段)
+        assert "objects" in r.json() and "capacity" in r.json()
         r = a.get("/api/admin/health", user_id=a.user_id)
         assert r.status_code == 200
         r = a.get("/api/healthz")

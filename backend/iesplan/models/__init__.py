@@ -11,18 +11,14 @@
 - result.py     第8节结果: evidence_packages / result_assessments / result_index /
                 result_selections / reports
 - uncertainty.py 第9节不确定性: uncertainty_snapshots / sample_tasks / sample_records
-- audit.py      第10节审计对象: objects / object_refs / audit_log / import_proposals / retention_rules
+- audit.py      第10节审计与对象: audit_log / import_proposals / retention_rules
+                (objects / object_refs 的 ORM 已迁移至 iesplan.storage.persistence,
+                 STO-05; 本包从存储模块再导出以保持元数据注册完整)
 
 导入本包即完成全部模型的元数据注册(供 create_all / alembic autogenerate 使用)。
 """
 
-from iesplan.models.audit import (
-    AuditLog,
-    ImportProposal,
-    ObjectRef,
-    RetentionRule,
-    StoredObject,
-)
+from iesplan.models.audit import AuditLog, ImportProposal, RetentionRule
 from iesplan.models.calc import (
     CalcConfig,
     CalcSnapshot,
@@ -66,6 +62,8 @@ from iesplan.models.uncertainty import (
     SampleTask,
     UncertaintySnapshot,
 )
+# 对象 ORM 已归属存储模块(STO-05), 再导出以保持 models 元数据注册完整
+from iesplan.storage.persistence import ObjectRef, StoredObject
 
 __all__ = [
     # 身份

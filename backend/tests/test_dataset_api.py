@@ -427,7 +427,10 @@ def test_put_object_dedup_and_ref_count(session: Session, data_dir: Path) -> Non
     ref = ds_service.add_object_ref(session, obj1, "dataset_file", "dataset_files", 1, purpose="测试")
     session.commit()
     assert ref.object_id == obj1.id
-    assert obj1.ref_count == 1
+    # STO-05: 句柄为不可变快照, ref_count 经 object_info 查新视图
+    from iesplan.services import objects as objects_service
+
+    assert objects_service.object_info(session, obj1.id)["ref_count"] == 1
     # 内容不同 → 不同对象
     obj3 = ds_service.put_object(session, b"other", "text/csv")
     assert obj3.id != obj1.id

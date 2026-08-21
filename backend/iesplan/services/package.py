@@ -41,7 +41,7 @@ from iesplan.config import settings
 from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.idgen import sha256_hex
-from iesplan.models.audit import ImportProposal, StoredObject
+from iesplan.models.audit import ImportProposal
 from iesplan.models.calc import CalcSnapshot, Task
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
 from iesplan.models.identity import User
@@ -254,14 +254,6 @@ class PackageExport:
         }
 
 
-def packages_root() -> Path:
-    """项目包落盘目录(data_dir/packages), 不存在则自动创建。"""
-    root = settings.data_dir / "packages"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-
 def _bound_dataset_ids(content: dict) -> list[int]:
     """从项目内容取出绑定的数据集版本 id 清单。"""
     return [
@@ -275,7 +267,7 @@ def _collect_datasets(db: Session, dataset_version_ids: list[int]) -> list[dict]
     """收集数据集版本(元数据 + 文件对象内容), 供打包使用。
 
     返回 [{"dataset": Dataset, "version": DatasetVersion,
-            "files": [{"file": DatasetFile, "obj": StoredObject, "content": bytes}]}]。
+            "files": [{"file": DatasetFile, "obj": dict(元数据), "content": bytes}]}]。
     """
     out: list[dict] = []
     for dvid in dict.fromkeys(int(i) for i in dataset_version_ids):
@@ -287,11 +279,12 @@ def _collect_datasets(db: Session, dataset_version_ids: list[int]) -> list[dict]
         for f in db.execute(
             select(DatasetFile).where(DatasetFile.dataset_version_id == version.id)
         ).scalars():
-            obj = db.get(StoredObject, f.object_id)
-            if obj is None:
+            try:
+                obj = objects_service.object_info(db, f.object_id)
+            except NotFoundError:
                 continue
             files.append(
-                {"file": f, "obj": obj, "content": objects_service.get_object(db, obj.id)}
+                {"file": f, "obj": obj, "content": objects_service.get_object(db, obj["id"])}
             )
         out.append({"dataset": dataset, "version": version, "files": files})
     return out
@@ -317,10 +310,13 @@ def _collect_evidence(db: Session, project_id: int) -> list[dict]:
         index = db.execute(
             select(ResultIndex).where(ResultIndex.evidence_package_id == pkg.id)
         ).scalars().all()
-        obj = db.get(StoredObject, pkg.object_id)
         content: bytes | None = None
-        if obj is not None:
-            content = objects_service.get_object(db, obj.id)
+        obj: dict | None = None
+        try:
+            obj = objects_service.object_info(db, pkg.object_id)
+            content = objects_service.get_object(db, obj["id"])
+        except NotFoundError:
+            pass
         out.append(
             {
                 "package": pkg, "task": task, "snapshot": snapshot,
@@ -455,8 +451,8 @@ def _build_package_zip(
                         "format": item["file"].format,
                         "row_count": item["file"].row_count,
                         "size_bytes": item["file"].size_bytes,
-                        "sha256": item["obj"].sha256,
-                        "media_type": item["obj"].media_type,
+                        "sha256": item["obj"]["sha256"],
+                        "media_type": item["obj"]["media_type"],
                     }
                     for item in item["files"]
                 ],
@@ -468,9 +464,9 @@ def _build_package_zip(
             files_meta["datasets"].append(meta_path)
             for file_item in item["files"]:
                 f, obj, content_bytes = file_item["file"], file_item["obj"], file_item["content"]
-                ext = "csv" if _FORMAT_BY_MEDIA.get(obj.media_type or "", "") == "csv" else "json"
+                ext = "csv" if _FORMAT_BY_MEDIA.get(obj.get("media_type") or "", "") == "csv" else "json"
                 entry = f"{base}/v{version.version_no}-{f.file_kind}.{ext}"
-                _add(entry, content_bytes, obj.media_type or "application/octet-stream")
+                _add(entry, content_bytes, obj.get("media_type") or "application/octet-stream")
                 zf.writestr(entry, content_bytes)
 
         # 历史结果证据与评估引用(证据数据 + 评估四维结论; 不重新求解)
@@ -531,7 +527,7 @@ def _build_package_zip(
             zf.writestr(evidence_path, evidence_raw)
             files_meta["evidence"].append(evidence_path)
             if item["content"] is not None:
-                media = (item["object"].media_type if item["object"] else None) or "application/octet-stream"
+                media = (item["object"].get("media_type") if item["object"] else None) or "application/octet-stream"
                 ext = "json" if "json" in media else "bin"
                 entry = f"{base}/result.{ext}"
                 _add(entry, item["content"], media)
@@ -580,24 +576,24 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
         db, obj.id, "export_package", project.id,
         ref_entity_type="projects", purpose="项目包导出对象(23.2 保留)",
     )
-    # 落盘副本(data_dir/packages/{project_id}-{object_id}.zip, 便于运维直接取用)
-    try:
-        (packages_root() / f"project-{project.id}-{obj.id}.zip").write_bytes(zip_bytes)
-    except OSError:
-        pass  # 落盘失败不阻断(对象存储为准)
+    # ObjectHandle → 元数据 dict(公开门面统一形状)
+    obj_info = objects_service.object_info(db, obj.id)
+    # STO-06: 不再写 data_dir/packages 非托管副本(无引用/配额/校验/清理协议);
+    # 对象存储是包的唯一事实源, 下载经短期授权 token 走公开读取门面。
 
     audit_service.audit(
         db, user.id, audit_service.AUDIT_PROJECT_EXPORTED, "project", project.id,
         revision=draft.revision,
         result={"kind": "package", "package_object_id": obj.id, "size_bytes": len(zip_bytes)},
-        checksum_info={"sha256": obj.sha256},
+        checksum_info={"sha256": obj_info["sha256"]},
         extra={"file_name": f"project-package-{project.id}.zip"},
     )
     expires_at = datetime.now(UTC) + timedelta(seconds=DOWNLOAD_TOKEN_TTL_SECONDS)
     token = create_download_token(obj.id, "package", project_id=project.id, user_id=user.id)
     return PackageExport(
-        object_id=obj.id, oid=obj.oid, sha256=obj.sha256, size_bytes=obj.size_bytes,
-        media_type=obj.media_type, file_name=f"project-package-{project.id}.zip",
+        object_id=obj.id, oid=obj_info["oid"], sha256=obj_info["sha256"],
+        size_bytes=obj_info["size_bytes"], media_type=obj_info["media_type"],
+        file_name=f"project-package-{project.id}.zip",
         manifest=manifest, token=token, expires_at=expires_at,
     )
 
@@ -773,7 +769,7 @@ def import_proposal(
         return existing
 
     # 1) 暂存对象: 包内全部对象内容寻址落盘(校验已通过, 逐对象 sha256 一致)
-    staged: dict[str, StoredObject] = {}
+    staged: dict[str, dict] = {}  # path → 元数据 dict(公开门面)
     for entry in manifest.get("objects", []):
         path = entry["path"]
         staged[path] = objects_service.put_object(
@@ -876,19 +872,17 @@ def _create_draft_row(db: Session, project: Project, content: dict, user: User) 
     return draft
 
 
-def _object_by_sha256(db: Session, digest: str) -> StoredObject:
-    """按 sha256 取对象(暂存对象查找); 缺失视为数据损坏。"""
-    obj = db.execute(
-        select(StoredObject).where(StoredObject.sha256 == digest)
-    ).scalar_one_or_none()
-    if obj is None:
+def _object_by_sha256(db: Session, digest: str) -> dict:
+    """按 sha256 取对象(暂存对象查找, STO-05: 经公开门面返回元数据 dict)。"""
+    try:
+        return objects_service.object_by_sha256(db, digest)
+    except NotFoundError as exc:
         raise AppError(
             "导入暂存对象缺失(数据损坏)",
             code="PKG-IMP-002", severity=SEVERITY_ERROR,
             message_key="ies.diag.store.corrupt",
             params={"sha256": digest},
-        )
-    return obj
+        ) from exc
 
 
 def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
@@ -977,7 +971,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             db.add(
                 DatasetFile(
                     dataset_version_id=version.id,
-                    object_id=obj.id,
+                    object_id=obj["id"],
                     file_kind=str(file_meta.get("file_kind") or "data"),
                     format=str(file_meta.get("format") or "csv"),
                     row_count=int(file_meta.get("row_count", 0)),
@@ -1014,7 +1008,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
         for entry in ref_objects:
             obj = _object_by_sha256(db, entry["sha256"])
             objects_service.add_ref(
-                db, obj.id, "imported_evidence", project.id,
+                db, obj["id"], "imported_evidence", project.id,
                 ref_entity_type="projects",
                 purpose="导入的历史结果证据来源(不伪造本地任务)",
             )
@@ -1077,7 +1071,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             VersionRef(
                 project_version_id=version.id,
                 ref_type="object",
-                object_id=obj.id,
+                object_id=obj["id"],
                 ref_key="project_version_content",
                 ref_hash=content_hash,
             )
@@ -1395,7 +1389,6 @@ __all__ = [
     "DOWNLOAD_TOKEN_TTL_SECONDS",
     "create_download_token",
     "verify_download_token",
-    "packages_root",
     "export_package",
     "import_proposal",
     "confirm_import",

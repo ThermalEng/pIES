@@ -1734,7 +1734,10 @@ export const api = {
           checks: {
             liveness: { status: liveness.ok === true ? 'ok' : 'down' },
             readiness: { status: readiness.db === true ? 'ok' : 'down' },
-            storage: { status: storage.ok === true ? 'ok' : 'degraded' },
+            // STO-07: 存储健康 provider 形状 {capacity, ok}; 容量不可测(capacity_unknown)降级
+            storage: {
+              status: storage.ok === true ? 'ok' : 'degraded',
+            },
           },
         }
       })

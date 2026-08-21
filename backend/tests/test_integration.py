@@ -804,14 +804,16 @@ def test_rpd_permission_gates(client: TestClient, db: Session) -> None:
     resp = client.get("/api/admin/storage", headers=_h(client, admin_id))
     assert resp.status_code == 200
     body = resp.json()
-    assert "stats" in body and "sample_verify" in body and "objects" in body
+    # STO-07: 单一 StorageStatusDto(无兼容并集)
+    assert "objects" in body and "refs" in body and "capacity" in body
     resp = client.get("/api/admin/health", headers=_h(client, admin_id))
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
     assert body["liveness"]["ok"] is True and body["readiness"]["db"] is True
     assert "queue" in body and "storage" in body and "metrics" in body
-    assert "checked" in body  # 存储抽样完整性(并集视图)
+    # 存储 health provider 的抽样校验节(STO-07 独立聚合)
+    assert "verify" in body["storage"] and "checked" in body["storage"]["verify"]
 
     # 管理端审计: 项目创建事件可查询(RPD 13.2)
     resp = client.get(

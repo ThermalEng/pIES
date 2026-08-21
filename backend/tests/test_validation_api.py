@@ -22,6 +22,7 @@ from iesplan.config import settings
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
 from iesplan.models.identity import User
+from iesplan.models.project import Project
 from iesplan.services import config as config_service
 from iesplan.services import identity
 from iesplan.services import project as project_service
@@ -307,6 +308,44 @@ def test_baseline_stale_after_config_change(
     assert stale, "应产出 VALID-FIN-002 警告"
     assert stale[0]["severity"] == "warning"
     assert stale[0]["blocking"] is False
+
+
+def test_baseline_nondefault_config_confirm_not_stale(
+    client: TestClient, factory: sessionmaker
+) -> None:
+    """非默认经济配置下, 按当前配置导出假设确认 → 不产出 VALID-FIN-002(FE-BE-05)。"""
+    pid = _create_project(factory)
+    # 1) 保存非默认经济参数(贴现 0.05 / 税率 0.2 / 年限 15 / 折旧 5)
+    with factory() as session:
+        current = config_service.get_config(pid, session)
+        cfg = current["config"]
+        cfg["parameters"]["economic"] = {
+            "discount_rate": 0.05,
+            "tax_rate": 0.2,
+            "project_years": 15,
+            "depreciation_years": 5,
+            "currency": "CNY",
+        }
+        cfg["irr_floor"] = 0.06
+        revision = config_service._current_draft_revision(session, pid)
+        config_service.save_config(session, pid, cfg, revision)
+        session.commit()
+    # 2) 按 _current_assumptions 同源键集确认
+    with factory() as session:
+        current = config_service.get_config(pid, session)
+        project = session.get(Project, pid)
+        assumptions = validation_service._current_assumptions(project, current["config"])
+    resp = client.post(
+        f"/api/projects/{pid}/validation/baseline-confirm",
+        json={"assumptions": assumptions},
+        headers=_headers(client),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["confirmed"] is True
+    # 3) 预检: 无 VALID-FIN-002(刚确认即过期)
+    report = _run_report(client, pid)
+    stale = [d for d in report["diagnostics"] if d["code"] == "VALID-FIN-002"]
+    assert not stale, f"确认后不应立即过期: {stale}"
 
 
 def test_get_latest_validation_report(

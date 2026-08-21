@@ -50,7 +50,8 @@ from iesplan.core.errors import ForbiddenError  # noqa: E402
 from iesplan.core.idgen import sha256_hex  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.audit import AuditLog, ImportProposal, ObjectRef  # noqa: E402
+from iesplan.models.audit import AuditLog, ImportProposal
+from iesplan.storage.persistence import ObjectRef  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
@@ -637,7 +638,11 @@ def test_admin_health_storage_and_audit(client: TestClient, db: Session) -> None
 
     resp = client.get("/api/admin/storage", headers=_h(client, admin))
     assert resp.status_code == 200
-    assert "stats" in resp.json() and "sample_verify" in resp.json()
+    # STO-07: 单一 StorageStatusDto(无兼容并集)
+    body = resp.json()
+    assert "objects" in body and "refs" in body and "capacity" in body
+    assert "corrupt_count" in body and "cleanup_candidates" in body
+    assert "stats" not in body and "sample_verify" not in body
 
     resp = client.get("/api/admin/audit", params={"entity_type": "project"}, headers=_h(client, admin))
     assert resp.status_code == 200
