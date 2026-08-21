@@ -17,14 +17,15 @@
 from __future__ import annotations
 
 import importlib
+import threading
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Callable
+from types import MappingProxyType
 
 import numpy as np
 
+from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.errors import NotFoundError
-from iesplan.core.registry import ParameterSpec
-
 from iesplan.modeling.enums import COMMAND_ID_PREFIX, MODEL_METHODS
 
 
@@ -54,10 +55,32 @@ class DeviceRunResult:
 
 # ---------------------------------------------------------------------------
 # 全局命令注册表(进程内单例;启动时由 main.py 装载 catalog 后自动注册)
+#
+# 原子快照语义(RR-P2-01): 注册表状态 = 单个不可变快照对象引用
+# (命令表 + 生成函数表均为只读映射)。替换操作在一个锁保护的极短临界区
+# 内创建新快照并替换单一引用; reader 先取得快照引用, 再在该快照内查找,
+# 永远不会观察到空表或命令/callable 不匹配的半发布状态。
 # ---------------------------------------------------------------------------
-_COMMANDS: dict[str, ModuleCommand] = {}
-#: 数据方法生成的闭包缓存(闭包无法经 env path 解析,注册命令时附带;命令 id → Callable)
-_GENERATED_FUNCS: dict[str, Callable] = {}
+
+_LOCK = threading.Lock()
+
+
+class _Snapshot:
+    """不可变命令注册表快照(只读映射;整体替换, 不逐项修改)。"""
+
+    __slots__ = ("commands", "generated")
+
+    def __init__(self, commands: Mapping[str, ModuleCommand], generated: Mapping[str, Callable]) -> None:
+        self.commands: Mapping[str, ModuleCommand] = MappingProxyType(dict(commands))
+        self.generated: Mapping[str, Callable] = MappingProxyType(dict(generated))
+
+
+_snapshot: _Snapshot = _Snapshot({}, {})
+
+
+def _current_snapshot() -> _Snapshot:
+    """取当前快照引用(reader 先取引用再查找, 保证读一致性)。"""
+    return _snapshot
 
 
 def make_command_id(device_type: str, model_method: str, version: str) -> str:
@@ -93,7 +116,7 @@ def parse_command_id(command_id: str) -> tuple[str, str, str]:
 
 
 def register_command(cmd: ModuleCommand, fn: Callable | None = None) -> None:
-    """注册命令(建模成果入库;启动时装载 catalog 后自动注册)。
+    """注册命令(单条增量发布: 构造新快照整体替换)。
 
     fn: 数据方法的生成闭包(可选);传入后 ``get_entry_function`` 优先返回闭包,
     否则运行时经 ``resolve_function_ref`` 解析 function_ref。重复注册同 id 视为覆盖。
@@ -102,21 +125,26 @@ def register_command(cmd: ModuleCommand, fn: Callable | None = None) -> None:
         raise ValueError("command_id 不能为空")
     if fn is not None and not callable(fn):
         raise ValueError(f"命令 {cmd.command_id} 的 fn 不可调用")
-    _COMMANDS[cmd.command_id] = cmd
-    if fn is not None:
-        _GENERATED_FUNCS[cmd.command_id] = fn
-    else:
-        _GENERATED_FUNCS.pop(cmd.command_id, None)
+    with _LOCK:
+        global _snapshot
+        commands = dict(_snapshot.commands)
+        generated = dict(_snapshot.generated)
+        commands[cmd.command_id] = cmd
+        if fn is not None:
+            generated[cmd.command_id] = fn
+        else:
+            generated.pop(cmd.command_id, None)
+        _snapshot = _Snapshot(commands, generated)
 
 
 def get_command(command_id: str) -> ModuleCommand | None:
     """按 id 取命令;未注册返回 None。"""
-    return _COMMANDS.get(command_id)
+    return _current_snapshot().commands.get(command_id)
 
 
 def get_command_or_raise(command_id: str) -> ModuleCommand:
     """按 id 取命令;未注册抛 NotFoundError(02 §6.5:未知命令抛 NotFoundError)。"""
-    cmd = _COMMANDS.get(command_id)
+    cmd = _current_snapshot().commands.get(command_id)
     if cmd is None:
         raise NotFoundError(f"建模命令未注册: {command_id}", code="CONN-TYPE-002")
     return cmd
@@ -124,22 +152,47 @@ def get_command_or_raise(command_id: str) -> ModuleCommand:
 
 def list_commands() -> list[ModuleCommand]:
     """已注册命令列表(按注册顺序,确定性)。"""
-    return list(_COMMANDS.values())
+    return list(_current_snapshot().commands.values())
 
 
 def clear_commands() -> None:
     """清空注册表(测试隔离/热重载用;生产启动装载时幂等)。"""
-    _COMMANDS.clear()
-    _GENERATED_FUNCS.clear()
+    with _LOCK:
+        global _snapshot
+        _snapshot = _Snapshot({}, {})
+
+
+def replace_all_commands(
+    commands: dict[str, ModuleCommand],
+    generated: dict[str, Callable] | None = None,
+) -> None:
+    """**原子替换**全局注册表(BE-REG-02 / RR-P2-01)。
+
+    调用方先在临时 dict 中完整构建并校验全部命令, 成功后一次性替换;
+    任一命令失败时调用方不得调用本函数, 旧快照保持完整可用。
+
+    实现: 构造新不可变快照对象, 在锁保护的极短临界区内替换单一引用;
+    reader 先取快照引用再在该快照内查找, 观察不到空表或命令/callable
+    不匹配的中间状态。
+    """
+    new_generated = dict(generated) if generated is not None else {}
+    with _LOCK:
+        global _snapshot
+        _snapshot = _Snapshot(commands, new_generated)
 
 
 #: 计算引擎命令注册表(03 §9.3 命令化:引擎函数以命令 id 注册,executors 经
 #: modeling 分发,不再直接 import 引擎函数;算法选择见 engines/selector.py)
-_COMPUTE_COMMANDS: dict[str, Callable] = {
+_COMPUTE_COMMANDS: dict[str, str] = {
     "ies.command.compute.evaluate_plan.v1": "iesplan.engines.eval_run.evaluate_plan",
     "ies.command.compute.run_planning.v1": "iesplan.engines.planning.run_planning",
     "ies.command.compute.uncertainty.v1": "iesplan.engines.eval_run.evaluate_plan",
 }
+
+
+def compute_command_refs() -> dict[str, str]:
+    """计算引擎命令 id → 函数引用(公开只读视图, 供建模注册流程构建候选快照)。"""
+    return dict(_COMPUTE_COMMANDS)
 
 
 def init_compute_commands() -> None:
@@ -148,19 +201,23 @@ def init_compute_commands() -> None:
     计算引擎以 ``ies.command.compute.*`` 命令 id 注册,executors 经
     ``get_compute_entry`` 取函数(隔离子进程可经 env path 解析)。
     """
-    for command_id, ref in _COMPUTE_COMMANDS.items():
-        if command_id not in _COMMANDS:
-            _COMMANDS[command_id] = ModuleCommand(
-                command_id=command_id,
-                function_ref=ref,
-                version="1.0.0",
-                stateful=False,
-            )
+    with _LOCK:
+        global _snapshot
+        commands = dict(_snapshot.commands)
+        for command_id, ref in _COMPUTE_COMMANDS.items():
+            if command_id not in commands:
+                commands[command_id] = ModuleCommand(
+                    command_id=command_id,
+                    function_ref=ref,
+                    version="1.0.0",
+                    stateful=False,
+                )
+        _snapshot = _Snapshot(commands, _snapshot.generated)
 
 
 def get_compute_entry(command_id: str) -> Callable:
     """按计算引擎命令 id 取函数(未注册抛 NotFoundError)。"""
-    cmd = _COMMANDS.get(command_id)
+    cmd = _current_snapshot().commands.get(command_id)
     if cmd is None:
         raise NotFoundError(f"计算引擎命令未注册: {command_id}", code="CONN-TYPE-002")
     return resolve_function_ref(cmd.function_ref)
@@ -168,7 +225,7 @@ def get_compute_entry(command_id: str) -> Callable:
 
 def snapshot() -> list[str]:
     """注册表快照:["ies.command.model.ies.device.pv.mechanism.1.4.0", ...](确定性)。"""
-    return list(_COMMANDS.keys())
+    return list(_current_snapshot().commands.keys())
 
 
 def resolve_function_ref(function_ref: str) -> Callable:
@@ -188,11 +245,12 @@ def resolve_function_ref(function_ref: str) -> Callable:
 
 def get_entry_function(command_id: str) -> Callable:
     """取命令的执行函数:优先返回注册时附带的生成闭包,否则解析 function_ref。"""
+    snap = _current_snapshot()
     get_command_or_raise(command_id)
-    fn = _GENERATED_FUNCS.get(command_id)
+    fn = snap.generated.get(command_id)
     if fn is not None:
         return fn
-    return resolve_function_ref(_COMMANDS[command_id].function_ref)
+    return resolve_function_ref(snap.commands[command_id].function_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +281,13 @@ def call_command(command_id: str, ctx: dict) -> DeviceRunResult:
     dt_s(float 秒)/prices(dict,可选);缺省键按契约默认值补齐。
     有状态命令会把 state 原样传入函数,结果中的 state_new 供下一时间步回写。
     """
-    cmd = get_command_or_raise(command_id)
-    fn = get_entry_function(command_id)
+    snap = _current_snapshot()
+    cmd = snap.commands.get(command_id)
+    if cmd is None:
+        raise NotFoundError(f"建模命令未注册: {command_id}", code="CONN-TYPE-002")
+    fn = snap.generated.get(command_id)
+    if fn is None:
+        fn = resolve_function_ref(cmd.function_ref)
     params = ctx.get("params") or {}
     series = ctx.get("series") or {}
     state = ctx.get("state")

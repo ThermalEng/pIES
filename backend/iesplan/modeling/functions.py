@@ -209,6 +209,42 @@ def chiller_output(elec_power_w: np.ndarray, cop: float = 4.0) -> np.ndarray:
     return np.asarray(elec_power_w, dtype=np.float64) * cop
 
 
+def transport_pipe(
+    in_flow_w: np.ndarray,
+    loss_rate: float = 0.0,
+    *,
+    state: dict | np.ndarray | None = None,
+    dt_s: float = 3600.0,
+) -> tuple[np.ndarray, dict]:
+    """传输管道(05 §4.8):延迟出流 + 损耗。stateful 函数(延迟缓存)。
+
+    参数:
+        in_flow_w: 入端流量序列 (n,) W。
+        loss_rate: 单位损耗率(0~0.5), 出端 = 入端 × (1 - loss_rate)。
+        state: 上次调用的 state_new; None 或首次调用取延迟缓冲=0。
+        dt_s: 仿真步长(秒, 取自 takes_dt 包装层; 此函数不依赖)。
+    返回:
+        (out: (n,) 出端流量 W, state_new: {'delay_buffer': (n,) 缓存序列})。
+    """
+    if loss_rate < 0 or loss_rate > 0.5:
+        raise ValueError(f"loss_rate 必须在 [0, 0.5], 实际 {loss_rate}")
+    in_arr = np.asarray(in_flow_w, dtype=np.float64)
+    # 状态恢复: state 为 dict 取 delay_buffer, ndarray 直接取, None 取零缓冲。
+    if isinstance(state, dict) and "delay_buffer" in state:
+        cached = np.asarray(state["delay_buffer"], dtype=np.float64)
+    elif isinstance(state, np.ndarray):
+        cached = state.astype(np.float64)
+    else:
+        cached = np.zeros_like(in_arr)
+    if cached.shape != in_arr.shape:
+        cached = np.zeros_like(in_arr)
+    # 延迟出流: 上次缓存整体平移一位, 首位填 0, 乘 (1-loss_rate)。
+    shifted = np.roll(cached, 1)
+    shifted[0] = 0.0
+    out = shifted * (1.0 - loss_rate)
+    return out, {"delay_buffer": in_arr}
+
+
 #: 天然气低位热值默认(kJ/m³,02 §4.6 → J/m³)
 DEFAULT_LHV_J_PER_M3 = 35.9e6
 
@@ -405,6 +441,16 @@ MECHANISM_FUNCTIONS: dict[str, MechanismSpec] = {
         param_bindings={},
         output_name="net_power",
         output_unit="W",
+    ),
+    "transport_pipe": MechanismSpec(
+        name="transport_pipe",
+        fn=transport_pipe,
+        series_keys=("in_flow",),
+        param_bindings={"loss_rate": ParamBinding("loss_rate", "-")},
+        output_name="pipe_out",
+        output_unit="W",
+        state_key="delay_buffer",
+        takes_dt=True,
     ),
 }
 

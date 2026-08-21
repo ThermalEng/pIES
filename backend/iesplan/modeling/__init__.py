@@ -23,6 +23,7 @@ from iesplan.modeling.command import (
     make_command_id,
     parse_command_id,
     register_command,
+    replace_all_commands,
     resolve_function_ref,
     snapshot,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "ModuleCommand",
     "DeviceRunResult",
     "register_command",
+    "replace_all_commands",
     "get_command",
     "get_command_or_raise",
     "list_commands",

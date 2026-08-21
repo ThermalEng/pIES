@@ -15,16 +15,21 @@
 约束(02 §3 / 03 §14.7):mechanism 的 model_function 必须在
 iesplan.modeling.functions.* 白名单内且映射表存在;data_repeat 必须携带 profile;
 data_predict 必须声明 model_file;校验失败抛 ModelingConfigError(拒载,不静默降级)。
+
+RR-P1-02: ``build_command`` 是**无副作用构建器**——返回 (命令描述, 统一
+callable), 不注册任何全局状态。注册/发布由调用方(registry_loader)在
+候选快照全部构建校验成功后一次性原子替换。
 """
 
 from __future__ import annotations
 
-from iesplan.core.registry import ParameterSpec
+from typing import Callable
+
+from iesplan.core.contracts.parameters import ParameterSpec
 
 from iesplan.modeling.command import (
     ModuleCommand,
     make_command_id,
-    register_command,
 )
 from iesplan.modeling.datadriven import build_periodic_entry, build_prediction_entry, periodic_output_key
 from iesplan.modeling.devspec import DeviceSpec, validate_spec
@@ -86,10 +91,12 @@ def _build_state_fields(spec: DeviceSpec) -> tuple[ParameterSpec, ...]:
     return tuple(fields)
 
 
-def build_command(spec: DeviceSpec, profile: dict | None = None) -> ModuleCommand:
-    """按 spec.model_method 生成并注册标准化命令,返回 ModuleCommand(03 §5.2)。
+def build_command(spec: DeviceSpec, profile: dict | None = None) -> tuple[ModuleCommand, Callable]:
+    """按 spec.model_method 生成标准化命令与统一 callable(03 §5.2, RR-P1-02)。
 
     profile: data_repeat 设备的周期曲线数据(标准 csv 列 → 数组,必填)。
+    返回 (ModuleCommand, 统一五参数 device_entry callable);本函数**不注册
+    任何全局状态**, 发布由调用方在候选快照全部构建校验成功后原子执行。
     """
     errors = validate_spec(spec)
     if errors:
@@ -151,5 +158,4 @@ def build_command(spec: DeviceSpec, profile: dict | None = None) -> ModuleComman
         data_file=data_file,
         state_fields=_build_state_fields(spec) if spec.stateful else (),
     )
-    register_command(cmd, fn=entry)
-    return cmd
+    return cmd, entry

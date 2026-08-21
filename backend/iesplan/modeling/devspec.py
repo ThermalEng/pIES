@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from iesplan.core.registry import ParameterSpec
+from iesplan.core.contracts.parameters import ParameterSpec
 
 from iesplan.modeling.enums import FIDELITY_VALUES, MODEL_METHODS
 
