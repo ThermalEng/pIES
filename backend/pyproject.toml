@@ -34,6 +34,10 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["iesplan*"]
 
+[tool.setuptools.package-data]
+# RR-P1-01: 设备目录 YAML/CSV 必须进入安装包(全新镜像从 site-packages 加载默认目录)
+"iesplan.devices" = ["catalog/**/*.yaml", "catalog/**/*.csv"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

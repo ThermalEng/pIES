@@ -1,3 +1,5 @@
 1.只允许使用docker环境编译和测试，不要污染主机环境。在需要时再调用和测试。
-2.开发过程中，需要较强模型的工作应交给codex完成，比如review或red team，其他普通工作claude自己完成。调用codex命令：codex exec --sandbox read-only --ask-for-approval never --skip-git-repo-check -o path_of_codex-review_output.md 'review prompt'
+2.开发过程中，需要较强模型的工作可交给codex完成，比如review，其他普通工作claude自己完成。
 3.不允许使用本机其他文件夹的信息作为信息输入，不允许编辑除了/tmp文件夹和本文件夹外的其他内容。
+4.设计、开发、重构和审查必须先阅读并遵守 `manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md`；与开发过程文档、现有代码或兼容行为冲突时，以该宪法规定的效力顺序裁决。
+5.画布拖放功能的核查，由人工进行，不要用playwright；画布组件的其他功能，如参数设定等，仍由playwright执行。

@@ -39,6 +39,13 @@ services:
       IESPLAN_APP_URL: http://localhost:8080
     volumes:
       - ./data:/data
+    # RR-P2-13: 应用就绪探针(数据库 + 建模命令注册表均可用才算 ready)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/readyz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,6 +97,34 @@ services:
       dockerfile: frontend/Dockerfile
     ports:
       - "${IESPLAN_PORT:-8080}:80"
+    # RR-P2-13: nginx 静态站点健康检查。busybox wget 不支持 -4 且 localhost
+    # 在 alpine 中优先解析 ::1(nginx 只监听 IPv4), 故用 127.0.0.1 直连。
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
+
+  # QA-E2E-01: Playwright 真实用户验收(13.4: 与应用同处 Docker 网络)。
+  # 默认不随 compose up 启动; 验收时: docker compose up -d e2e --build
+  e2e:
+    build:
+      context: .
+      dockerfile: frontend/tests/e2e/Dockerfile
+    environment:
+      E2E_APP_URL: http://web:80
+      # setup 全局首登改密后的管理员新密码(与 tests/e2e/global-setup.ts 一致)
+      E2E_ADMIN_PASSWORD: ${E2E_ADMIN_PASSWORD:-Iesplan-Admin-2026!}
+      E2E_RUN_ID: ${E2E_RUN_ID:-}
+    volumes:
+      - ./frontend/tests/e2e/test-results:/app/e2e/test-results
+    depends_on:
+      web:
+        condition: service_healthy
+    profiles:
+      - e2e

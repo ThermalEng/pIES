@@ -7,6 +7,7 @@
 - [架构宪法](../manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)：所有开发过程必须遵守；
 - [数据与领域规格](spec/)：当前实现使用的数据库、计算、任务和诊断输入规格；
 - [前后端解耦审查结论](fullstack-decoupling-review-2026-08-20.md)：当前问题、已采纳决定和迁移优先级；
+- [前后端解耦整改复审](fullstack-decoupling-rereview-2026-08-21.md)：对 2026-08-20 审查整改结果的验收、阻断项和下一轮门禁；
 - `review-0820/`、路线图和审查报告：阶段性过程材料。
 
 ## 边界
