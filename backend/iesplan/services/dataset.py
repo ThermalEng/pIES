@@ -43,11 +43,18 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import sha256_hex
 from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis, validate_timestamps
-from iesplan.models.audit import AuditLog
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
 from iesplan.models.identity import User
 from iesplan.models.project import Project
-from iesplan.services import objects as objects_service
+from iesplan.storage import (
+    add_ref,
+    get_object,
+    object_info,
+)
+from iesplan.storage import (
+    put_object as _storage_put_object,
+)
+from iesplan.storage.contracts import RefInfo
 
 #: 时间戳诊断码(04 登记 DATA-TS-001..003; 004..007 为本实现新增, 见 NEW_DIAG_CODES)
 DATA_TS_ROW_COUNT = "DATA-TS-004"
@@ -744,12 +751,12 @@ def put_object(
     本模块只做参数适配。数据集单元的文件引用在 DatasetFile 行建立后由
     add_object_ref 补充(对象先落盘, 后建业务引用, 符合 RPD 23.1)。
     """
-    return objects_service.put_object(db, data, media_type, source_category=source_category)
+    return _storage_put_object(db, data, media_type, source_category=source_category)
 
 
 def get_object_bytes(db: Session, object_id: int) -> bytes:
     """读取对象字节并校验完整性(STO-05: 按公开对象 ID, 委托 storage 门面)。"""
-    return objects_service.get_object(db, object_id)
+    return get_object(db, object_id)
 
 
 def add_object_ref(
@@ -759,10 +766,11 @@ def add_object_ref(
     ref_entity_type: str,
     ref_entity_id: int,
     purpose: str | None = None,
-) -> "RefInfo | None":
-    """建立对象引用(01 §10.2, STO-05: 接受 ObjectHandle 或元数据 dict, 委托门面)。"""
+) -> RefInfo | None:
+    """建立对象引用(01 §10.2, STO-05: 接受 ObjectHandle 或元数据 dict,
+    委托门面)。"""
     object_id = obj["id"] if isinstance(obj, dict) else obj.id
-    return objects_service.add_ref(
+    return add_ref(
         db, object_id, ref_type, ref_entity_id, ref_entity_type=ref_entity_type, purpose=purpose
     )
 
@@ -993,8 +1001,14 @@ def _commit_version(
     )
     db.add_all([file_data, file_meta])
     db.flush()
-    add_object_ref(db, {"id": obj_data.id}, "dataset_file", "dataset_files", file_data.id, purpose="数据集版本数据本体")
-    add_object_ref(db, {"id": obj_meta.id}, "dataset_file", "dataset_files", file_meta.id, purpose="数据集版本元数据")
+    add_object_ref(
+        db, {"id": obj_data.id}, "dataset_file", "dataset_files", file_data.id,
+        purpose="数据集版本数据本体",
+    )
+    add_object_ref(
+        db, {"id": obj_meta.id}, "dataset_file", "dataset_files", file_meta.id,
+        purpose="数据集版本元数据",
+    )
     db.commit()
     return version
 
@@ -1116,7 +1130,7 @@ def get_dataset_version(
     files: list[dict] = []
     for f in db.execute(sa.select(DatasetFile).where(DatasetFile.dataset_version_id == version.id)).scalars():
         try:
-            obj = objects_service.object_info(db, f.object_id)
+            obj = object_info(db, f.object_id)
         except NotFoundError:
             obj = None
         files.append(

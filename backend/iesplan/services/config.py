@@ -56,15 +56,17 @@ from iesplan.core.expression import (
     ExpressionError,
     parse_expr,
 )
-from iesplan.core.registry import (
+from iesplan.core.contracts import ParameterSpec
+from iesplan.engines.registry import (
     DEFAULT_ALGORITHM,
     AlgorithmSpec,
-    DeviceTypeSpec,
-    ParameterSpec,
     get_algorithm,
-    get_device_type,
     list_algorithms,
-    list_device_types,
+)
+from iesplan.devices import (
+    DeviceModelDescriptor as DeviceTypeSpec,
+    get_device_descriptor as get_device_type,
+    list_device_descriptors as list_device_types,
 )
 from iesplan.core.units import UnitError, dims_of
 from iesplan.db import SessionLocal
@@ -480,7 +482,7 @@ def _validate_parameters(
                             location={"object_type": "device", "object_id": key, "field": pname},
                         )
                     )
-            elif isinstance(pspec.default, (int, float)) and not isinstance(pspec.default, bool):
+            elif pspec.unit != "reference" and isinstance(pspec.default, (int, float)) and not isinstance(pspec.default, bool):
                 if not _is_number(value):
                     diags.append(
                         make_diag(

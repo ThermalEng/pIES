@@ -32,8 +32,8 @@ from iesplan.models.calc import CalcSnapshot, Task
 from iesplan.models.dataset import DatasetFile, DatasetVersion
 from iesplan.models.project import ProjectVersion
 from iesplan.services import dataset as dataset_service
-from iesplan.services import objects
 from iesplan.services import project as project_service
+from iesplan.storage import get_object
 from iesplan.worker import executors, lease
 from iesplan.worker.executors import EngineRunError, RunContext, TaskCancelled
 
@@ -141,7 +141,7 @@ def _load_dataset_data(
         ).scalars().first()
         if data_file is None:
             continue
-        raw = objects.get_object(db, data_file.object_id)
+        raw = get_object(db, data_file.object_id)
         rows, diags = dataset_service.parse_csv(raw, resolution)
         diags_dicts = [d.to_dict() for d in diags]
         diagnostics.extend(diags_dicts)

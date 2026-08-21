@@ -28,7 +28,6 @@ import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -37,8 +36,8 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from iesplan.core.diagnostics import TASK_SOLVE_FAILED
-from iesplan.core.jsonutil import jsonable
 from iesplan.core.idgen import sha256_hex
+from iesplan.core.jsonutil import jsonable
 from iesplan.engines.eval_run import EvalResult
 from iesplan.engines.planning import PlanningResult
 from iesplan.metrics.engineering import energy_balance_summary
@@ -224,7 +223,10 @@ def plan_for_finance(content: dict) -> dict:
     return _build_plan(content, content.get("calc_config") or {})
 
 
-def _hourly_financial(ctx: RunContext, content: dict, plan: dict, result: Any, data: dict, axis: Any) -> dict | None:
+def _hourly_financial(
+    ctx: RunContext, content: dict, plan: dict, result: Any,
+    data: dict, axis: Any,
+) -> dict | None:
     """逐时财务(03 §7.2): 引擎逐时 flows + KPI → finance.hourly.compute_financials。
 
     以逐时费用列(cost_buy/cost_gas/revenue_sell)求和为权威口径, 与 KPI
@@ -233,7 +235,7 @@ def _hourly_financial(ctx: RunContext, content: dict, plan: dict, result: Any, d
     推导(与规划引擎 02 §5.3 同口径), 仍缺失才降级 None
     (评估 financial 维度降 unknown)。
     """
-    from iesplan.analysis.wrapper import _estimate_capex, _project_financial_inputs
+    from iesplan.analysis.wrapper import _project_financial_inputs
     from iesplan.finance.hourly import compute_financials
     from iesplan.finance.params import finance_params_from_config
 
@@ -376,7 +378,7 @@ def _store_hourly_refs(ctx: RunContext, flows: dict[str, Any]) -> list[dict]:
     结果视图/逐时查询(read_hourly)以 hourly_refs 为引用入口读取对象内容;
     证据内容本身仍保留 flows 全文(自足, 校验/审计可独立复核)。
     """
-    from iesplan.services import objects as objects_service
+    from iesplan.storage import put_object
 
     n = int(ctx.axis_n or 0)
     doc = {
@@ -385,7 +387,7 @@ def _store_hourly_refs(ctx: RunContext, flows: dict[str, Any]) -> list[dict]:
                  "unit": "W(W) / kWh(energy) / 0-1(ratio)"},
     }
     blob = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    obj = objects_service.put_object(
+    obj = put_object(
         ctx.db, blob, "application/json", source_category="evidence",
         purpose="hourly_result", actor_id=ctx.task.requested_by,
     )
@@ -990,9 +992,9 @@ def execute_check(ctx: RunContext) -> dict:
 
 def _load_evidence_payload(db: Session, package: EvidencePackage) -> dict:
     """读取证据包对象内容并解析(内容寻址, 读取时校验哈希, 01 §8.1)。"""
-    from iesplan.services import objects
+    from iesplan.storage import get_object
 
-    raw = objects.get_object(db, package.object_id)
+    raw = get_object(db, package.object_id)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:

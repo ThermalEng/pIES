@@ -26,18 +26,15 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from iesplan.core.jsonutil import canonical_json, jsonable
-
-import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import sha256_hex
+from iesplan.core.jsonutil import canonical_json
 from iesplan.engines.planning import CAPACITY_PARAM
 from iesplan.metrics import validity
 from iesplan.metrics.financial import IRRStatus
@@ -47,9 +44,9 @@ from iesplan.models.common import HASH64_RE
 from iesplan.models.identity import User
 from iesplan.models.project import Project
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex, ResultSelection
-from iesplan.services import objects as objects_service
 from iesplan.services import project as project_service
 from iesplan.services import tasks as tasks_service
+from iesplan.storage import add_ref, get_object, object_info, put_object
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -301,7 +298,7 @@ def _validate_evidence_payload(
                 problems.append("hourly_refs 元素缺少 object_id")
                 continue
             try:
-                objects_service.object_info(db, obj_id)
+                object_info(db, obj_id)
             except NotFoundError:
                 problems.append(f"hourly_refs 引用的对象不存在: object_id={obj_id}")
             if not isinstance(ref.get("fields"), list) or not ref["fields"]:
@@ -338,7 +335,7 @@ def submit_evidence(
     # 打包: 规范化序列化整个载荷(含 content 与 checksum, 即"清单+内容校验")
     blob = canonical_json(payload).encode("utf-8")
     content_hash = sha256_hex(blob)
-    obj = objects_service.put_object(
+    obj = put_object(
         db, blob, content_type="application/json", source_category="evidence",
         actor_id=payload.get("created_by") or task.requested_by,
         actor_type="system",
@@ -355,7 +352,7 @@ def submit_evidence(
     db.add(package)
     db.flush()
     # 对象引用: 证据包引用对象 → 禁止进入清理候选(23.2 双保险)
-    objects_service.add_ref(
+    add_ref(
         db, obj.id, "evidence_package", package.id,
         purpose="evidence_content", actor_id=payload.get("created_by") or task.requested_by,
     )
@@ -384,7 +381,7 @@ def evidence_content(db: Session, package: EvidencePackage) -> dict[str, Any]:
 
     返回证据载荷完整 dict(含 content 与 checksum)。
     """
-    raw = objects_service.get_object(db, package.object_id)
+    raw = get_object(db, package.object_id)
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
@@ -1098,7 +1095,7 @@ def read_hourly(
             "未知逐时字段", code="RES-REQ-007",
             params={"field": field, "available": fields},
         )
-    raw = objects_service.get_object(db, int(ref["object_id"]))
+    raw = get_object(db, int(ref["object_id"]))
     try:
         doc = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:

@@ -40,7 +40,7 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import sha256_hex
-from iesplan.core.registry import DeviceTypeSpec, ParameterSpec, get_device_type
+from iesplan.devices import DeviceModelDescriptor, ParameterSpec, get_device_descriptor
 from iesplan.models.model import Connection, Device, Port, SystemGraph
 from iesplan.models.project import Draft, Project
 from iesplan.services import project as project_service
@@ -66,33 +66,15 @@ CONN_TYPE_BY_PORT: dict[str, str] = {
     "data": "data_link",
 }
 
-#: 设备类型 → 载体 → 端口方向(建模业务约定, 与 RPD §7/§17.3 一致)
-#: 'in' = 消费(汇), 'out' = 供给(源), 'bidirectional' = 双向(储能类)
-_DEVICE_PORT_DIRECTIONS: dict[str, dict[str, str]] = {
-    "ies.device.grid_connection": {"electric": "out"},
-    "ies.device.pv": {"electric": "out"},
-    "ies.device.battery": {"electric": "bidirectional"},
-    "ies.device.electric_load": {"electric": "in"},
-    "ies.device.heat_load": {"heat": "in"},
-    "ies.device.cooling_load": {"cool": "in"},
-    "ies.device.heat_pump": {"electric": "in", "heat": "out", "cool": "out"},
-    # 锅炉燃气端口为双向: 燃料载体无内部源设备, 锅炉端口兼作燃料平衡节点
-    # (外部管网购入燃气, 拓扑校验按 source_and_sink 放行)
-    "ies.device.gas_boiler": {"gas": "bidirectional", "heat": "out"},
-    "ies.device.electric_chiller": {"electric": "in", "cool": "out"},
-}
-
-#: 注册表类型 id → devices.device_type 粗分类别(01 §4.2 CHECK 枚举)
-_DEVICE_COARSE_CATEGORY: dict[str, str] = {
-    "ies.device.grid_connection": "source",
-    "ies.device.pv": "pv",
-    "ies.device.battery": "storage",
-    "ies.device.electric_load": "load",
-    "ies.device.heat_load": "load",
-    "ies.device.cooling_load": "load",
-    "ies.device.heat_pump": "converter",
-    "ies.device.gas_boiler": "boiler",
-    "ies.device.electric_chiller": "chiller",
+#: 能力字典 → 设备粗分类别(yaml capabilities 派生, RR-P1-04: 不再维护设备类型静态表)
+_CAPABILITY_COARSE: dict[str, str] = {
+    "grid_connection": "source",
+    "pv": "pv",
+    "storage": "storage",
+    "load": "load",
+    "heat_pump": "converter",
+    "thermal_generation": "boiler",
+    "cooling_generation": "chiller",
 }
 
 #: 内部保留参数键: '_' 前缀(布局等)与 type_detail(细分类别), 不参与注册表校验与内容哈希
@@ -166,56 +148,72 @@ def _port_name(carrier: str, direction: str) -> str:
     return f"{carrier}_{direction}" if direction in ("in", "out") else carrier
 
 
-def _port_directions(spec: DeviceTypeSpec, params: dict | None = None) -> dict[str, str]:
-    """设备类型的载体 → 端口方向(确定性): 已登记类型用业务表, 其余按 is_load 推导。
+def _descriptor_ports(spec: DeviceModelDescriptor, params: dict | None = None) -> list[dict]:
+    """设备类型的真实端口列表(RR-P1-04: YAML 端口声明为唯一权威来源)。
 
-    热泵按 mode 参数裁剪端口: heating 只生成 heat 端口, cooling 只生成 cool 端口,
-    both(默认)生成两类端口 —— 避免未启用的冷/热载体成为拓扑校验的孤立载体
-    (PARAM-UNIT-003 能源不平衡误报)。
+    返回 [{carrier, direction, name, capacity_ref}]。热泵按 mode 参数裁剪端口:
+    heating 只保留 heat, cooling 只保留 cool —— 避免未启用的冷/热载体成为
+    拓扑校验的孤立载体(PARAM-UNIT-003 能源不平衡误报)。双向端口名不带方向后缀。
     """
-    configured = _DEVICE_PORT_DIRECTIONS.get(spec.type_id)
-    if configured is not None:
-        dirs = {c: d for c, d in configured.items() if c in CARRIER_PORT_TYPE}
-        if spec.type_id == "ies.device.heat_pump":
-            mode = (params or {}).get("mode", "both")
-            if mode == "heating":
-                dirs.pop("cool", None)
-            elif mode == "cooling":
-                dirs.pop("heat", None)
-        return dirs
-    if spec.is_load:
-        return {c: "in" for c in spec.energy_carriers if c in CARRIER_PORT_TYPE}
-    return {c: "out" for c in spec.energy_carriers if c in CARRIER_PORT_TYPE}
+    params = params or {}
+    ports = []
+    for p in spec.ports:
+        carrier = p.energy_carrier
+        if spec.type_id == "ies.device.heat_pump" and carrier in ("heat", "cool"):
+            mode = params.get("mode", "both")
+            if mode == "heating" and carrier == "cool":
+                continue
+            if mode == "cooling" and carrier == "heat":
+                continue
+        ports.append(
+            {
+                "carrier": carrier,
+                "direction": p.direction,
+                "name": p.name,
+                "capacity_ref": p.capacity_ref,
+            }
+        )
+    return ports
 
 
 def _sync_ports_for_params(
-    db: Session, device: Device, spec: DeviceTypeSpec, params: dict
+    db: Session, device: Device, spec: DeviceModelDescriptor, params: dict
 ) -> None:
     """按设备参数(热泵 mode)重同步端口: 补齐应存在但缺失的端口, 删除被裁剪的端口。
 
-    被删除端口的既有连接一并删除(端口语义随模式变化, 原连接不再有效);
-    仅影响模式类参数驱动的端口差异, 其余端口不动。
+    以 YAML 端口声明为唯一权威(与创建设备路径一致): 期望端口集合按端口名
+    (device_id, name) 精确匹配, 支持同一载体多个不同名端口; 不再按
+    carrier+direction 合并(同载能多端口时后一个会覆盖前一个, 服务器端口缺失,
+    前端真实句柄找不到对应服务器端口 → 合法连线被判定端口缺失, 见 codex 复审 N1)。
+    被删除端口的既有连接一并删除(端口语义随模式变化, 原连接不再有效)。
     """
-    wanted = _port_directions(spec, params)
-    existing = {
-        (p.port_type, p.direction): p for p in db.scalars(select(Port).where(Port.device_id == device.id))
-    }
-    # 删除不再需要的端口(及其连接)
-    for (ptype, direction), port in list(existing.items()):
-        if ptype not in wanted:
+    # 期望端口: YAML 声明中可生成连接端口的那部分(按 name 去重)
+    wanted: dict[str, dict] = {}
+    for port in _descriptor_ports(spec, params):
+        if port["carrier"] not in CARRIER_PORT_TYPE:
+            continue  # solar 等环境侧载体不生成可连接端口
+        ptype = CARRIER_PORT_TYPE[port["carrier"]]
+        # 同载能同方向多端口各有真实名; 不同名端口都保留
+        wanted.setdefault(
+            port["name"],
+            {"carrier": port["carrier"], "direction": port["direction"], "ptype": ptype},
+        )
+    existing = {p.name: p for p in db.scalars(select(Port).where(Port.device_id == device.id))}
+    # 删除不再需要的端口(及其连接): 现有端口名不在期望集合内
+    for name, port in existing.items():
+        if name not in wanted:
             db.execute(sa.delete(Connection).where(Connection.from_port_id == port.id))
             db.execute(sa.delete(Connection).where(Connection.to_port_id == port.id))
             db.delete(port)
-    # 补回应有但缺失的端口
-    for carrier, direction in wanted.items():
-        ptype = CARRIER_PORT_TYPE[carrier]
-        if (ptype, direction) not in existing:
+    # 补回应有但缺失的端口(名称取自 YAML 端口声明)
+    for name, want in wanted.items():
+        if name not in existing:
             db.add(
                 Port(
                     device_id=device.id,
-                    port_type=ptype,
-                    direction=direction,
-                    name=_port_name(carrier, direction),
+                    port_type=want["ptype"],
+                    direction=want["direction"],
+                    name=name,
                     params={},
                 )
             )
@@ -223,7 +221,26 @@ def _sync_ports_for_params(
 
 def _coarse_category(type_id: str) -> str:
     """注册表类型 id → devices.device_type 粗分类别(01 §4.2 CHECK; 未知类型落 'other')。"""
-    return _DEVICE_COARSE_CATEGORY.get(type_id, "other")
+    from iesplan.devices import get_device_descriptor
+
+    try:
+        desc = get_device_descriptor(type_id)
+    except NotFoundError:
+        return "other"
+    for cap in desc.capabilities:
+        category = _CAPABILITY_COARSE.get(cap)
+        if category:
+            return category
+    if desc.is_load:
+        return "load"
+    carriers = set(desc.energy_carriers)
+    if "gas" in carriers:
+        return "boiler"
+    if "cool" in carriers:
+        return "chiller"
+    if "heat" in carriers:
+        return "converter"
+    return "other"
 
 
 def _resolve_type_id(device: Device) -> str:
@@ -232,10 +249,10 @@ def _resolve_type_id(device: Device) -> str:
     return detail if isinstance(detail, str) and detail else device.device_type
 
 
-def _try_get_device_type(type_id: str) -> DeviceTypeSpec | None:
+def _try_get_device_type(type_id: str) -> DeviceModelDescriptor | None:
     """按注册表取设备类型; 未注册返回 None(不抛错, 供校验诊断用)。"""
     try:
-        return get_device_type(type_id)
+        return get_device_descriptor(type_id)
     except NotFoundError:
         return None
 
@@ -466,12 +483,12 @@ def validate_device_params(
     - 数值参数校验 min/max(越界 → PARAM-RNG-003), 枚举参数校验取值, 类型不匹配 → PARAM-UNIT-002;
     - 内部保留键('_' 前缀与 type_detail)不参与校验。
     """
-    spec = get_device_type(device_type)
+    spec = get_device_descriptor(device_type)
     params = dict(params or {})  # 拷贝: 归一缺省键不得改写调用方/ORM 上的原字典
     # 必填参数缺失按显式 null 归一(前端 buildDefaultParams 跳过 default=null 的键,
     # 拖拽新建负荷设备时 load_profile/heat_profile 等不会出现; 显式 null 历来通过校验)
-    for name in _REQUIRED_PARAMS.get(device_type, ()):
-        params.setdefault(name, None)
+    for required_name in _REQUIRED_PARAMS.get(device_type, ()):
+        params.setdefault(required_name, None)
     provided = {k: v for k, v in params.items() if not _is_internal_key(k)}
     diags: list[Diagnostic] = []
     loc = {"object_type": "device", "object_id": str(device_id), "field": ""}
@@ -496,6 +513,10 @@ def _check_param_value(
     name: str, value: Any, pspec: ParameterSpec, loc: dict
 ) -> list[Diagnostic]:
     """单参数取值校验(枚举/类型/范围), 返回诊断列表。"""
+    # 引用类参数(unit == "reference", 如负荷曲线/COP 曲线): 值为数据集引用
+    # (字符串/对象)或 None(未绑定); 引用语义由数据绑定层校验, 不在此做类型检查
+    if pspec.unit == "reference":
+        return []
     # 枚举类参数
     if pspec.enum is not None:
         if value not in pspec.enum:
@@ -589,7 +610,7 @@ def create_device(
         position: 画布坐标 {"x": float, "y": float}(布局信息, 不入内容哈希)。
         created_by: 创建者用户 id(工作图不存在时用于建图/建草稿)。
     """
-    spec = get_device_type(device_type)
+    spec = get_device_descriptor(device_type)
     if model_precision not in _MODEL_FIDELITIES:
         raise ModelValidationError(
             "模型精度非法",
@@ -617,8 +638,8 @@ def create_device(
     if position is not None:
         params[_LAYOUT_KEY] = _normalize_position(position)
     # 缺省必填参数归一为显式 null(与 validate_device_params 语义一致, 存储与显式 null 相同)
-    for name in _REQUIRED_PARAMS.get(device_type, ()):
-        params.setdefault(name, None)
+    for required_name in _REQUIRED_PARAMS.get(device_type, ()):
+        params.setdefault(required_name, None)
     diags = validate_device_params(device_type, params)
     _raise_diagnostics(diags)
     graph = get_or_create_working_graph(db, project_id, created_by)
@@ -640,15 +661,18 @@ def create_device(
     )
     db.add(device)
     db.flush()
-    # 按设备类型能源载体生成端口(如 heat_pump → electric_in/heat_out/cool_out;
-    # 热泵按 mode 参数裁剪未启用的冷/热载体端口)
-    for carrier, direction in _port_directions(spec, params).items():
+    # 按设备类型 YAML 端口声明生成端口(RR-P1-04: 端口名/方向/载能来自公开
+    # descriptor, 不再使用静态方向表; 热泵按 mode 参数裁剪未启用的冷/热端口)
+    for port in _descriptor_ports(spec, params):
+        carrier = port["carrier"]
+        if carrier not in CARRIER_PORT_TYPE:
+            continue  # solar 等环境侧载体不生成可连接端口
         db.add(
             Port(
                 device_id=device.id,
                 port_type=CARRIER_PORT_TYPE[carrier],
-                direction=direction,
-                name=_port_name(carrier, direction),
+                direction=port["direction"],
+                name=port["name"],
                 params={},
             )
         )
@@ -716,8 +740,8 @@ def update_device(
             new_params[_LAYOUT_KEY] = _normalize_position(position)
         new_params[_TYPE_DETAIL_KEY] = _resolve_type_id(device)
         # 缺省必填参数归一为显式 null(与创建路径一致, 避免前端缺省键被校验拒绝)
-        for name in _REQUIRED_PARAMS.get(_resolve_type_id(device), ()):
-            new_params.setdefault(name, None)
+        for required_name in _REQUIRED_PARAMS.get(_resolve_type_id(device), ()):
+            new_params.setdefault(required_name, None)
         diags = validate_device_params(_resolve_type_id(device), new_params, device_id=device.id)
         _raise_diagnostics(diags)
         # 模式类参数变更(热泵 mode)需重同步端口: 按新参数裁剪/补回载体端口,

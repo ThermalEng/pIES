@@ -26,10 +26,7 @@ import io
 import json
 import zipfile
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
-
-from iesplan.core.jsonutil import jsonable
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -41,6 +38,7 @@ from iesplan.config import settings
 from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.idgen import sha256_hex
+from iesplan.core.jsonutil import jsonable
 from iesplan.models.audit import ImportProposal
 from iesplan.models.calc import CalcSnapshot, Task
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
@@ -48,8 +46,8 @@ from iesplan.models.identity import User
 from iesplan.models.project import Draft, Project, ProjectMember, ProjectVersion, VersionRef
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex
 from iesplan.services import audit as audit_service
-from iesplan.services import objects as objects_service
 from iesplan.services import project as project_service
+from iesplan.storage import add_ref, get_object, object_by_sha256, object_info, put_object
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -280,11 +278,11 @@ def _collect_datasets(db: Session, dataset_version_ids: list[int]) -> list[dict]
             select(DatasetFile).where(DatasetFile.dataset_version_id == version.id)
         ).scalars():
             try:
-                obj = objects_service.object_info(db, f.object_id)
+                obj = object_info(db, f.object_id)
             except NotFoundError:
                 continue
             files.append(
-                {"file": f, "obj": obj, "content": objects_service.get_object(db, obj["id"])}
+                {"file": f, "obj": obj, "content": get_object(db, obj["id"])}
             )
         out.append({"dataset": dataset, "version": version, "files": files})
     return out
@@ -313,8 +311,8 @@ def _collect_evidence(db: Session, project_id: int) -> list[dict]:
         content: bytes | None = None
         obj: dict | None = None
         try:
-            obj = objects_service.object_info(db, pkg.object_id)
-            content = objects_service.get_object(db, obj["id"])
+            obj = object_info(db, pkg.object_id)
+            content = get_object(db, obj["id"])
         except NotFoundError:
             pass
         out.append(
@@ -527,7 +525,10 @@ def _build_package_zip(
             zf.writestr(evidence_path, evidence_raw)
             files_meta["evidence"].append(evidence_path)
             if item["content"] is not None:
-                media = (item["object"].get("media_type") if item["object"] else None) or "application/octet-stream"
+                media = (
+                    (item["object"].get("media_type") if item["object"] else None)
+                    or "application/octet-stream"
+                )
                 ext = "json" if "json" in media else "bin"
                 entry = f"{base}/result.{ext}"
                 _add(entry, item["content"], media)
@@ -569,15 +570,15 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
     draft_content = project_service.load_content_object(db, draft.content_hash)
     zip_bytes, manifest = _build_package_zip(db, project, draft, draft_content)
 
-    obj = objects_service.put_object(
+    obj = put_object(
         db, zip_bytes, PACKAGE_MEDIA_TYPE, source_category="project_package",
     )
-    objects_service.add_ref(
+    add_ref(
         db, obj.id, "export_package", project.id,
         ref_entity_type="projects", purpose="项目包导出对象(23.2 保留)",
     )
     # ObjectHandle → 元数据 dict(公开门面统一形状)
-    obj_info = objects_service.object_info(db, obj.id)
+    obj_info = object_info(db, obj.id)
     # STO-06: 不再写 data_dir/packages 非托管副本(无引用/配额/校验/清理协议);
     # 对象存储是包的唯一事实源, 下载经短期授权 token 走公开读取门面。
 
@@ -772,11 +773,11 @@ def import_proposal(
     staged: dict[str, dict] = {}  # path → 元数据 dict(公开门面)
     for entry in manifest.get("objects", []):
         path = entry["path"]
-        staged[path] = objects_service.put_object(
+        staged[path] = put_object(
             db, entries[path], entry.get("media_type") or "application/octet-stream",
             source_category="project_package_import",
         )
-    source_obj = objects_service.put_object(
+    source_obj = put_object(
         db, file_bytes, PACKAGE_MEDIA_TYPE, source_category="import_package_source",
     )
 
@@ -875,7 +876,7 @@ def _create_draft_row(db: Session, project: Project, content: dict, user: User) 
 def _object_by_sha256(db: Session, digest: str) -> dict:
     """按 sha256 取对象(暂存对象查找, STO-05: 经公开门面返回元数据 dict)。"""
     try:
-        return objects_service.object_by_sha256(db, digest)
+        return object_by_sha256(db, digest)
     except NotFoundError as exc:
         raise AppError(
             "导入暂存对象缺失(数据损坏)",
@@ -927,7 +928,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     # 复核源包(完整性), 取分区提交内容
     summary = proposal.review_summary or {}
     source_object_id = (summary.get("staging") or {}).get("source_object_id")
-    file_bytes = objects_service.get_object(db, int(source_object_id))
+    file_bytes = get_object(db, int(source_object_id))
     manifest, entries = _parse_package(file_bytes)
 
     # 1) 数据集(先建, 供绑定重映射; 原数据集版本标识 → 新标识)
@@ -1007,7 +1008,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
         ]
         for entry in ref_objects:
             obj = _object_by_sha256(db, entry["sha256"])
-            objects_service.add_ref(
+            add_ref(
                 db, obj["id"], "imported_evidence", project.id,
                 ref_entity_type="projects",
                 purpose="导入的历史结果证据来源(不伪造本地任务)",
@@ -1216,7 +1217,7 @@ def export_excel(
     if version is not None:
         version_content = project_service.load_content_object(db, version.content_hash)
     evidence_content = _parse_evidence_content(
-        objects_service.get_object(db, evidence.object_id)
+        get_object(db, evidence.object_id)
     )
 
     # 数据版本(计算快照绑定的数据集版本 + 溯源/许可证)

@@ -17,17 +17,12 @@ Redis 队列/进度/心跳为可重建视图(见 services/queue.py)。Worker 消
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
-from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
-
-from iesplan.core.jsonutil import canonical_json, jsonable
 
 import sqlalchemy as sa
 from sqlalchemy import select
@@ -48,7 +43,7 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import new_id, sha256_hex
-from iesplan.services import objects as objects_service
+from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.models.calc import (
     CalcSnapshot,
     ComputeSlot,
@@ -61,12 +56,13 @@ from iesplan.models.calc import (
 from iesplan.models.common import IDEMPOTENCY_KEY_RE
 from iesplan.models.dataset import DatasetFile
 from iesplan.models.identity import User
-from iesplan.models.project import Draft, Project, ProjectVersion
-from iesplan.models.result import Report
+from iesplan.models.project import Project, ProjectVersion
+from iesplan.models.result import EvidencePackage, Report
 from iesplan.models.uncertainty import SampleTask
 from iesplan.services import identity as identity_service
 from iesplan.services import project as project_service
 from iesplan.services import queue
+from iesplan.storage import orphaned_stats, usage_summary
 
 # ---------------------------------------------------------------------------
 # 常量: 任务类型 / 池 / 状态机
@@ -427,7 +423,7 @@ def list_cleanup_suggestions(db: Session) -> list[dict[str, Any]]:
     """清理建议(规格 8.3: 按"最安全 → 最激进"排序, 每项含对象清单与预计释放量)。"""
     suggestions: list[dict[str, Any]] = []
 
-    orphaned = objects_service.orphaned_stats(db)
+    orphaned = orphaned_stats(db)
     suggestions.append({
         "action": "cleanup_orphaned_objects",
         "message_key": "ies.fix.store.orphaned",
@@ -474,7 +470,7 @@ def estimate_storage(
     """提交前存储需求估算与安全阈值检查(规格 8.1/8.2)。
 
     S_need = S_snap + S_inter + S_hourly(+S_samples) + S_evid;
-    S_avail = min(Σ objects.quota_bytes − Σ size_bytes, 卷空闲空间);
+    S_avail = min(Σ quota_bytes − Σ size_bytes, 卷空闲空间);
     配额未配置(Σ quota = 0)时仅以卷空闲空间为准。
     """
     project = project_service.require_project(db, project_id)
@@ -510,7 +506,7 @@ def estimate_storage(
     need = snap_bytes + inter_bytes + result_bytes + evid_bytes
 
     # 可用空间: min(配额余额, 卷空闲空间); 配额未配置视为无限
-    usage = objects_service.usage_summary(db)
+    usage = usage_summary(db)
     volume_free = shutil.disk_usage(settings.data_dir).free
     if int(usage["quota_bytes"] or 0) > 0:
         avail = max(int(usage["quota_bytes"]) - int(usage["used_bytes"]), 0)
@@ -622,10 +618,16 @@ def create_task(
                 params={"parent_task_id": parent_task_id, "project_id": project_id},
             )
 
-    # 1) 幂等命中(唯一索引 uq_tasks_idempotency_key 兜底)
+    # 1) 幂等命中(RR-P1-05: 必须限定项目范围 —— 前端幂等键由 config+params
+    #    哈希生成, 跨项目相同; 全局查询会命中他项目任务(replay), 造成
+    #    本项目的列表为空、详情 404。唯一索引 uq_tasks_idempotency_key 同步
+    #    改为 (project_id, idempotency_key) 复合)
     if idempotency_key is not None:
         existing = db.execute(
-            select(Task).where(Task.idempotency_key == idempotency_key)
+            select(Task).where(
+                Task.project_id == project_id,
+                Task.idempotency_key == idempotency_key,
+            )
         ).scalar_one_or_none()
         if existing is not None:
             existing.replay = True  # 返回标记(非列属性, 供 API 呈现)
@@ -1145,12 +1147,36 @@ def _progress_summary(db: Session, task: Task) -> tuple[int | None, float, str |
     return attempt.attempt_no, percent, stage, detail
 
 
+def _evidence_available(db: Session, task: Task) -> bool:
+    """结果可用性: 存在**可展示**的证据包(RR-P1-05)。
+
+    契约: 只有任务 completed 且证据包状态为 complete/partial 才算结果可用;
+    invalid 证据不可展示, queued/running/failed 等状态即使有残留证据行也不算。
+    """
+    if task.status != "completed":
+        return False
+    evidence_status = db.execute(
+        select(EvidencePackage.status)
+        .where(EvidencePackage.task_id == task.id)
+        .order_by(EvidencePackage.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return evidence_status in ("complete", "partial")
+
+
 def task_summary(db: Session, task: Task) -> dict[str, Any]:
-    """任务列表项摘要(规格 9.1 字段)。"""
+    """任务列表项摘要(规格 9.1 字段)。
+
+    RR-P1-05: 增加 ``result_available`` —— 结果可用性是任务元数据的一部分,
+    客户端不得靠探测 /result 端点猜测(未完成的任务不应出现页面级失败)。
+    queued/running 天然 false; completed 若证据包缺失或 invalid 则显式 false
+    (可诊断)。列表批量场景由 ``list_tasks`` 一次性预取, 避免 N+1。
+    """
     attempt_no, percent, stage, _detail = _progress_summary(db, task)
     queue_position: int | None = None
     if task.status == "queued":
         queue_position = queue.queue_position(task.id, POOL_BY_TYPE[task.type])
+    evidence_exists = _evidence_available(db, task)
     summary: dict[str, Any] = {
         "id": task.id,
         "type": task.type,
@@ -1166,6 +1192,7 @@ def task_summary(db: Session, task: Task) -> dict[str, Any]:
         "superseded_by_task_id": task.superseded_by_task_id,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
+        "result_available": evidence_exists,
         "summary": {"attempt_no": attempt_no, "percent": percent, "stage": stage,
                     "queue_position": queue_position},
     }
@@ -1199,9 +1226,38 @@ def list_tasks(
     if cursor is not None:
         stmt = stmt.where(Task.id < cursor)
     rows = db.execute(stmt.order_by(Task.id.desc()).limit(limit + 1)).scalars().all()
-    items = [task_summary(db, task) for task in rows[:limit]]
+    page_tasks = list(rows[:limit])
+    # RR-P1-05: result_available 批量预取(避免 list_tasks 逐任务 N+1 查询
+    # EvidencePackage): 仅 completed 任务需要判定, 一次 EXISTS 批量取回。
+    if page_tasks:
+        completed_ids = [t.id for t in page_tasks if t.status == "completed"]
+        available_ids: set[int] = set()
+        if completed_ids:
+            statuses = db.execute(
+                select(EvidencePackage.task_id, EvidencePackage.status)
+                .where(
+                    EvidencePackage.task_id.in_(completed_ids),
+                    EvidencePackage.status.in_(("complete", "partial")),
+                )
+            ).all()
+            available_ids = {tid for tid, _ in statuses}
+        _result_available_batch = available_ids
+        items = [
+            _task_summary_prefetched(db, task, _result_available_batch)
+            for task in page_tasks
+        ]
+    else:
+        items = []
     next_cursor = rows[-1].id if len(rows) > limit else None
     return {"items": items, "next_cursor": next_cursor}
+
+
+def _task_summary_prefetched(db: Session, task: Task, available_ids: set[int]) -> dict[str, Any]:
+    """列表项摘要: 复用 task_summary, 但结果可用性来自批量预取集合。"""
+    summary = task_summary(db, task)
+    if task.status == "completed":
+        summary["result_available"] = task.id in available_ids
+    return summary
 
 
 #: 任务诊断 context 白名单(M-03): 仅这些内部字段可向普通项目成员展示,

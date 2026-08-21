@@ -242,10 +242,14 @@ def main(argv: list[str] | None = None) -> int:
 
     init_db()
     # 建模命令注册表(设备命令 + 计算引擎命令; 与 API 启动一致, 03 §5.2/§9.3)
+    # 设备 YAML 注册表是命令构建的前置依赖(命令由注册表描述派生),
+    # 必须先 init_registry() 再注册命令(与 main.py _init_modeling_registry 同序)。
     # 注册失败必须阻断启动: 计算 Worker 在空命令注册表上消费任务只会批量失败
     # (codex 二次审核 High-6), 不让其进入消费循环
+    from iesplan.devices import init_registry
     from iesplan.modeling.registry_loader import register_catalog_commands
 
+    init_registry()
     register_catalog_commands()
     worker_type = args.worker_type or os.environ.get("IESPLAN_WORKER_TYPE") or settings.worker_type
     Worker(

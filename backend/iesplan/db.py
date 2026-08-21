@@ -53,9 +53,12 @@ def init_db() -> None:
 def _migrate_constraints() -> None:
     """既有表约束幂等迁移(Postgres; SQLite 测试库由 create_all 全量重建)。
 
-    仅处理"新增枚举取值"类约束变更: 探测列约束文本, 缺失或未含新值
-    ('analysis')时重建(03 §9.7); 约束完全不存在(旧库手工删过/从未建过)
-    也补建, 不能放任 CHECK 约束缺失(codex 二次审核 Medium-3)。
+    处理两类演进:
+    1. 新增枚举取值类约束(如 ck_tasks_type 增补 'analysis', 03 §9.7);
+    2. 唯一索引语义变化(RR-P1-05: uq_tasks_idempotency_key 由全局唯一改为
+       (project_id, idempotency_key) 复合 —— 幂等键由前端 config+params 哈希
+       生成, 跨项目相同, 全局唯一会让另一项目同键提交命中他项目任务)。
+    约束完全不存在(旧库手工删过/从未建过)也补建, 不能放任 CHECK 约束缺失。
     """
     if not settings.db_url.startswith("postgresql"):
         return
@@ -67,16 +70,42 @@ def _migrate_constraints() -> None:
             )
         ).first()
         if row is not None and "'analysis'" in row[0]:
-            return  # 已含新值, 无需迁移
-        # 缺失或旧定义: 先删后建(缺失时 DROP IF EXISTS 幂等)
-        conn.execute(sa_text("ALTER TABLE tasks DROP CONSTRAINT IF EXISTS ck_tasks_type"))
-        conn.execute(
-            sa_text(
-                "ALTER TABLE tasks ADD CONSTRAINT ck_tasks_type CHECK "
-                "(type IN ('calc','optimization','uncertainty','analysis','import',"
-                "'export','report','dataset_build'))"
+            pass  # 已含新值, 无需迁移
+        else:
+            # 缺失或旧定义: 先删后建(缺失时 DROP IF EXISTS 幂等)
+            conn.execute(sa_text("ALTER TABLE tasks DROP CONSTRAINT IF EXISTS ck_tasks_type"))
+            conn.execute(
+                sa_text(
+                    "ALTER TABLE tasks ADD CONSTRAINT ck_tasks_type CHECK "
+                    "(type IN ('calc','optimization','uncertainty','analysis','import',"
+                    "'export','report','dataset_build'))"
+                )
             )
+        # RR-P1-05: 幂等键唯一索引改为项目复合(旧全局唯一约束名相同, 先删后建)
+        # Postgres 唯一约束由 backing index 实现, 约束的索引不能直接 DROP INDEX
+        # (报 "cannot drop index ... because constraint ... requires it"),
+        # 必须先用 ALTER TABLE DROP CONSTRAINT(索引随之删除); 若旧库是手工
+        # 建的独立索引则再补 DROP INDEX IF EXISTS(幂等)。
+        idx = conn.execute(
+            sa_text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE indexname = 'uq_tasks_idempotency_key' AND tablename = 'tasks'"
+            )
+        ).first()
+        needs_rebuild = (
+            idx is None
+            or "project_id" not in idx[0]
+            or "idempotency_key" not in idx[0]
         )
+        if needs_rebuild:
+            conn.execute(sa_text("ALTER TABLE tasks DROP CONSTRAINT IF EXISTS uq_tasks_idempotency_key"))
+            conn.execute(sa_text("DROP INDEX IF EXISTS uq_tasks_idempotency_key"))
+            conn.execute(
+                sa_text(
+                    "CREATE UNIQUE INDEX uq_tasks_idempotency_key ON tasks "
+                    "(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+                )
+            )
 
 
 def seed_admin(password: str | None = None) -> None:

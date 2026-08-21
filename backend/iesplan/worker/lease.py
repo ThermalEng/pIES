@@ -34,8 +34,9 @@ from iesplan.core.errors import AppError
 from iesplan.core.idgen import sha256_hex
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex
-from iesplan.services import objects, queue
+from iesplan.services import queue
 from iesplan.services import tasks as tasks_service
+from iesplan.storage import add_ref, put_object
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +204,7 @@ def submit_result(
     if snapshot is not None:
         blob = _payload_bytes(payload)
         content_hash = sha256_hex(blob)
-        obj = objects.put_object(
+        obj = put_object(
             db, blob, "application/json", source_category="evidence",
             purpose="evidence_package", actor_id=who,
         )
@@ -214,7 +215,7 @@ def submit_result(
         db.add(evidence)
         db.flush()
         evidence_id = evidence.id
-        objects.add_ref(db, obj.id, "evidence_package", evidence.id, purpose="evidence_package",
+        add_ref(db, obj.id, "evidence_package", evidence.id, purpose="evidence_package",
                         actor_id=who)
 
         assessment = payload.get("assessment") or {}

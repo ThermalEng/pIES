@@ -22,24 +22,20 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from decimal import Decimal
-from pathlib import Path
 from typing import Any
-
-from iesplan.core.jsonutil import canonical_json, jsonable
 
 import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from iesplan.config import settings
 from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.idgen import sha256_hex
+from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.models.audit import AuditLog
 from iesplan.models.calc import Task
-from iesplan.models.identity import Role, User, UserRole
+from iesplan.models.identity import User
 from iesplan.models.project import (
     Draft,
     OwnershipTransfer,
@@ -1314,11 +1310,11 @@ def _store_content(db: Session, content: dict) -> str:
     storage_path 的解释/分桶/临时文件全部由 iesplan.storage 内部实现,
     本模块不拼路径、不导入 StoredObject ORM。
     """
-    from iesplan.services import objects as objects_service
+    from iesplan.storage import put_object
 
     raw = canonical_json(content)
     content_hash = sha256_hex(raw.encode("utf-8"))
-    objects_service.put_object(
+    put_object(
         db, raw.encode("utf-8"), "application/json",
         source_category="project_content",
         ref_type="draft_content", ref_id=content_hash, ref_entity_type="drafts",
@@ -1332,10 +1328,10 @@ def _load_content_by_hash(db: Session, content_hash: str) -> dict:
 
     STO-01: 经 storage 公开门面读取(读取时校验大小 + sha256)。
     """
-    from iesplan.services import objects as objects_service
+    from iesplan.storage import ObjectCorruptError, get_object
 
     try:
-        raw = objects_service.get_object(db, content_hash)
+        raw = get_object(db, content_hash)
     except NotFoundError as exc:
         raise AppError(
             "内容对象缺失(数据损坏)",
@@ -1386,9 +1382,9 @@ def _load_draft_content(db: Session, draft: Draft) -> dict:
 
 def _get_object_by_oid(db: Session, oid: str) -> dict:
     """按内容校验值解析对象元数据(STO-01: 经 storage 公开门面, 返回句柄 dict)。"""
-    from iesplan.services import objects as objects_service
+    from iesplan.storage import object_info
 
-    handle = objects_service.object_info(db, oid)
+    handle = object_info(db, oid)
     if handle is None:
         raise AppError(
             "内容对象缺失(数据损坏)",

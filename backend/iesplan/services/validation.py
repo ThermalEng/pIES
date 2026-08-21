@@ -43,7 +43,8 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.core.idgen import sha256_hex
-from iesplan.core.registry import DeviceTypeSpec, get_device_type
+from iesplan.devices import DeviceModelDescriptor as DeviceTypeSpec
+from iesplan.devices import get_device_descriptor as get_device_type
 from iesplan.models.audit import AuditLog
 from iesplan.models.dataset import Dataset, DatasetVersion
 from iesplan.models.identity import User
@@ -51,8 +52,8 @@ from iesplan.models.project import Project
 from iesplan.services import config as config_service
 from iesplan.services import dataset as dataset_service
 from iesplan.services import model as model_service
-from iesplan.services import objects as objects_service
 from iesplan.services import project as project_service
+from iesplan.storage import find_refs_by_owner, object_info
 
 # ---------------------------------------------------------------------------
 # 诊断码(本单元新增, 导入时登记; 04 目录未登记, 见 NEW_DIAG_CODES 扩展模式)
@@ -758,15 +759,17 @@ def store_validation_report(db: Session, project_id: int, report: ValidationRepo
         report.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     obj = dataset_service.put_object(db, raw, _REPORT_MEDIA_TYPE)
-    dataset_service.add_object_ref(db, {"id": obj.id}, "report", "project", project_id, purpose="项目校验报告")
-    obj_info = objects_service.object_info(db, obj.id)
+    dataset_service.add_object_ref(
+        db, {"id": obj.id}, "report", "project", project_id, purpose="项目校验报告"
+    )
+    obj_info = object_info(db, obj.id)
     db.flush()
     return {"object_id": obj.id, "sha256": obj_info["sha256"]}
 
 
 def get_latest_validation_report(db: Session, project_id: int) -> dict | None:
     """读取项目最近一次持久化的校验报告(STO-05: 经公开门面查引用与读对象)。"""
-    refs = objects_service.find_refs_by_owner(db, "report", project_id, ref_entity_type="project")
+    refs = find_refs_by_owner(db, "report", project_id, ref_entity_type="project")
     if not refs:
         return None
     try:
