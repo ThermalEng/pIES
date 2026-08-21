@@ -58,14 +58,24 @@ import { useWorkbench } from './workbench'
 
 const POLL_MS = 5000
 
-/** 可提交的任务类型(方案评价 / 规划优化 / 不确定性分析)。 */
-const SUBMITTABLE_TYPES: TaskType[] = ['calc', 'optimization', 'uncertainty']
+/** 可提交的任务类型(方案评价 / 规划优化 / 不确定性分析 / 批量扫描)。 */
+const SUBMITTABLE_TYPES: TaskType[] = ['calc', 'optimization', 'uncertainty', 'analysis']
 
 /** 进行中的状态(不视为终结)。 */
 const ACTIVE_STATUSES: TaskStatus[] = ['queued', 'running', 'cancelling']
 
 type UncertaintyMode = 'fixed_reliability' | 'replan_sensitivity'
 type DistType = 'normal' | 'triangular' | 'uniform'
+
+/** 批量分析扫描规格行(param_path → 扫描值列表; 后端 03 §8.2 task_params.sweeps)。 */
+interface SweepRow {
+  /** 参数路径(如 calc_config.params.discount_rate)。 */
+  path: string
+  /** 逗号分隔的扫描值(如 0.06,0.08,0.10)。 */
+  values: string
+  /** 可选单位(如 -、%、CNY/kWh)。 */
+  unit: string
+}
 
 interface CreateForm {
   type: TaskType
@@ -76,6 +86,7 @@ interface CreateForm {
   seed: string
   distType: DistType
   noisePct: number
+  sweeps: SweepRow[]
 }
 
 const DEFAULT_FORM: CreateForm = {
@@ -87,6 +98,7 @@ const DEFAULT_FORM: CreateForm = {
   seed: '',
   distType: 'normal',
   noisePct: 5,
+  sweeps: [{ path: '', values: '', unit: '' }],
 }
 
 /**
@@ -351,15 +363,36 @@ export default function TasksPage() {
   // -------------------------------------------------------------------------
   const buildParams = useCallback(
     (f: CreateForm): Record<string, unknown> | undefined => {
-      if (f.type !== 'uncertainty') return undefined
-      const params: Record<string, unknown> = {
-        mode: f.uMode,
-        n_samples: f.nSamples,
-        distribution: { type: f.distType, noise_pct: f.noisePct },
+      if (f.type === 'uncertainty') {
+        const params: Record<string, unknown> = {
+          mode: f.uMode,
+          n_samples: f.nSamples,
+          distribution: { type: f.distType, noise_pct: f.noisePct },
+        }
+        const seed = Number(f.seed.trim())
+        if (Number.isFinite(seed)) params.seed = seed
+        return params
       }
-      const seed = Number(f.seed.trim())
-      if (Number.isFinite(seed)) params.seed = seed
-      return params
+      if (f.type === 'analysis') {
+        // 批量扫描: 构造 task_params.sweeps(03 §8.2), 与后端 executors 格式一致
+        const sweeps = f.sweeps
+          .filter((s) => s.path.trim() && s.values.trim())
+          .map((s) => {
+            const sweep: Record<string, unknown> = {
+              param_path: s.path.trim(),
+              values: s.values
+                .split(',')
+                .map((v) => v.trim())
+                .filter((v) => v !== '')
+                .map((v) => Number(v)),
+            }
+            if (s.unit.trim()) sweep.unit = s.unit.trim()
+            return sweep
+          })
+        if (sweeps.length === 0) return { sweeps: [] }
+        return { sweeps }
+      }
+      return undefined
     },
     [],
   )
@@ -944,6 +977,84 @@ export default function TasksPage() {
                   }
                 />
               </FormField>
+            </div>
+          </div>
+        ) : null}
+
+        {form.type === 'analysis' ? (
+          <div className="ies-section">
+            <Alert variant="warning">{t('ies.task.analysis_hint')}</Alert>
+            {form.sweeps.map((sweep, idx) => (
+              <div key={idx} className="ies-grid ies-grid--cols-3">
+                <FormField label={t('ies.task.sweep_path')} htmlFor={`sweep-path-${idx}`}>
+                  <Input
+                    id={`sweep-path-${idx}`}
+                    type="text"
+                    placeholder="calc_config.params.discount_rate"
+                    value={sweep.path}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        sweeps: form.sweeps.map((s, i) =>
+                          i === idx ? { ...s, path: e.target.value } : s,
+                        ),
+                      })
+                    }
+                  />
+                </FormField>
+                <FormField label={t('ies.task.sweep_values')} htmlFor={`sweep-values-${idx}`}>
+                  <Input
+                    id={`sweep-values-${idx}`}
+                    type="text"
+                    placeholder="0.06,0.08,0.10"
+                    value={sweep.values}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        sweeps: form.sweeps.map((s, i) =>
+                          i === idx ? { ...s, values: e.target.value } : s,
+                        ),
+                      })
+                    }
+                  />
+                </FormField>
+                <FormField label={t('ies.task.sweep_unit')} htmlFor={`sweep-unit-${idx}`}>
+                  <Input
+                    id={`sweep-unit-${idx}`}
+                    type="text"
+                    placeholder="-"
+                    value={sweep.unit}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        sweeps: form.sweeps.map((s, i) =>
+                          i === idx ? { ...s, unit: e.target.value } : s,
+                        ),
+                      })
+                    }
+                  />
+                </FormField>
+              </div>
+            ))}
+            <div className="ies-section__actions">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() =>
+                  setForm({ ...form, sweeps: [...form.sweeps, { path: '', values: '', unit: '' }] })
+                }
+              >
+                {t('ies.task.sweep_add')}
+              </Button>
+              {form.sweeps.length > 1 ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setForm({ ...form, sweeps: form.sweeps.slice(0, -1) })}
+                >
+                  {t('ies.task.sweep_remove')}
+                </Button>
+              ) : null}
             </div>
           </div>
         ) : null}

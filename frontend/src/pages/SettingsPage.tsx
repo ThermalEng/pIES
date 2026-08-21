@@ -7,7 +7,9 @@
  *     当前会话随即失效——下一次请求由全局 401 处理器(api/client + App)引导重新登录,
  *     因此成功后仅提示(ies.auth.password_changed)并清空表单;
  *   - 账号管理(仅管理员):用户列表 + 停用/重新启用 + 删除账号
- *     (删除账号时该账号拥有的项目一并删除)。
+ *     (删除账号时该账号拥有的项目一并删除);
+ *   - 服务健康(仅管理员):存储用量/对象数 + 健康状态
+ *     (QA-E2E-01 场景 7: 管理员查看存储健康)。
  */
 
 import { useEffect, useState } from 'react'
@@ -15,8 +17,9 @@ import type { FormEvent } from 'react'
 
 import { api } from '../api/client'
 import { errorMessage, useI18n } from '../i18n'
-import { Alert, Button, Card, FormField, Input, Table, TBody, TD, TH, THead, TR } from '../components/ui'
-import type { AdminUserRow } from '../types'
+import { Alert, Badge, Button, Card, FormField, Input, Table, TBody, TD, TH, THead, TR } from '../components/ui'
+import { formatBytes } from '../lib/format'
+import type { AdminUserRow, HealthStatus } from '../types'
 
 export default function SettingsPage() {
   const { t, locale, setLocale } = useI18n()
@@ -40,6 +43,17 @@ export default function SettingsPage() {
   const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null)
   const [securityError, setSecurityError] = useState<string | null>(null)
   const [securityBusy, setSecurityBusy] = useState(false)
+
+  // 服务健康(管理员): 存储用量 + 健康状态
+  const [storage, setStorage] = useState<{
+    total_bytes: number
+    used_bytes: number
+    quota_bytes: number | null
+    object_count: number
+  } | null>(null)
+  const [health, setHealth] = useState<HealthStatus | null>(null)
+  const [healthError, setHealthError] = useState<string | null>(null)
+  const [healthBusy, setHealthBusy] = useState(false)
 
   /** 渲染后端诊断文案(共享 errorMessage:ApiError 走 translateError,其余兜底)。 */
   const errorText = (err: unknown): string => errorMessage(err)
@@ -78,8 +92,22 @@ export default function SettingsPage() {
   useEffect(() => {
     loadUsers()
     loadSecuritySettings()
+    loadHealth()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  /** 加载存储用量与健康状态(管理员)。 */
+  const loadHealth = () => {
+    setHealthBusy(true)
+    setHealthError(null)
+    Promise.all([api.admin.storage(), api.admin.health()])
+      .then(([storageData, healthData]) => {
+        setStorage(storageData)
+        setHealth(healthData)
+      })
+      .catch((err) => setHealthError(errorText(err)))
+      .finally(() => setHealthBusy(false))
+  }
 
   const handleDeleteUser = async (user: AdminUserRow) => {
     setUsersBusy(true)
@@ -248,6 +276,50 @@ export default function SettingsPage() {
             </div>
           )}
           <p className="ies-form-message">{t('ies.admin.registration_hint')}</p>
+        </Card>
+
+        <Card title={t('ies.admin.health')} actions={healthBusy ? <Badge label={t('ies.common.loading')} variant="neutral" /> : undefined}>
+          {healthError ? (
+            <Alert variant="error" title={healthError} closable onClose={() => setHealthError(null)}>
+              <Button variant="secondary" size="sm" onClick={() => void loadHealth()}>
+                {t('ies.common.retry')}
+              </Button>
+            </Alert>
+          ) : storage === null || health === null ? (
+            <p>{t('ies.common.loading')}</p>
+          ) : (
+            <>
+              <div className="ies-meta-grid">
+                <div>
+                  <h4 className="ies-config-section-title">{t('ies.admin.storage')}</h4>
+                  <div className="ies-flex" style={{ flexWrap: 'wrap', gap: 'var(--ies-space-2)' }}>
+                    <span className="ies-form-message">
+                      {t('ies.admin.storage_used')}: {formatBytes(storage.total_bytes)}
+                    </span>
+                    {storage.quota_bytes !== null ? (
+                      <span className="ies-form-message">
+                        {t('ies.admin.storage_quota')}: {formatBytes(storage.quota_bytes)}
+                      </span>
+                    ) : null}
+                    <span className="ies-form-message">
+                      {t('ies.admin.object_count')}: {storage.object_count}
+                    </span>
+                  </div>
+                </div>
+                <div>
+                  <h4 className="ies-config-section-title">{t('ies.admin.health')}</h4>
+                  <div className="ies-flex" style={{ flexWrap: 'wrap', gap: 'var(--ies-space-2)' }}>
+                    <Badge
+                      label={t(`ies.admin.health_${health.checks.storage?.status ?? 'down'}`)}
+                      variant={health.checks.storage?.status === 'ok' ? 'success' : 'warning'}
+                      icon={health.checks.storage?.status === 'ok' ? 'check' : 'warning'}
+                    />
+                    <span className="ies-form-message">v{health.version}</span>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
         </Card>
 
         <Card title={t('ies.admin.accounts')}>

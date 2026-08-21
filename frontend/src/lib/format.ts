@@ -84,6 +84,24 @@ export function formatPercent(value: number | null | undefined, digits = 1): str
 // 能量 / 功率 / 温度
 // ---------------------------------------------------------------------------
 
+/** 字节数可读化(B/KB/MB/GB; 存储健康视图用)。 */
+export function formatBytes(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = value
+  let unit = 0
+  while (v >= 1024 && unit < units.length - 1) {
+    v /= 1024
+    unit += 1
+  }
+  const digits = unit === 0 ? 0 : v >= 100 ? 0 : v >= 10 ? 1 : 2
+  return `${numberFormat(intlLocale(), {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+    useGrouping: true,
+  }).format(v)} ${units[unit]}`
+}
+
 /** 二氧化碳排放格式化(kg -> tCO2)。 */
 export function formatCo2(valueKg: number | null | undefined): string {
   if (valueKg === null || valueKg === undefined || Number.isNaN(valueKg)) return '—'

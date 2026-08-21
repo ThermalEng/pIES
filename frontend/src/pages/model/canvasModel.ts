@@ -3,13 +3,16 @@
  *
  * 职责:
  * - 设备本地视图模型(LocalDevice)与注册表 DeviceTypeSpec 的转换。
- * - 端口推导:每种设备类型由 energy_carriers + 设备语义(源/汇/转换)推导
- *   端口列表(能源类型 + 方向);方向规则:out = 源(输出),in = 汇(输入)。
+ * - 端口句柄派生:直接消费注册表 DTO 的真实端口声明(DeviceTypeSpec.ports,
+ *   来源为设备 YAML 目录), 不维护按 type_id 的静态端口表, 也不做能源类型
+ *   启发式兜底; 仅热泵按 mode 参数裁剪未启用的冷/热输出, 与后端端口生成
+ *   规则一致(保证画布句柄与服务端端口一一对应)。
  * - 连接兼容校验:能源类型一致 且 方向为 out → in;不兼容返回可定位原因。
  * - 语义内容序列化(updateDraft 载荷)与 GraphModel 反序列化。
  * - 布局(节点坐标)与拓扑分离:坐标独立持久化,不进入语义内容。
  *
- * 本地端口 id 约定:`{carrier}:{direction}`(节点作用域内唯一)。
+ * 本地端口 id 约定:`{carrier}:{direction}`(节点作用域内唯一;bidirectional
+ * 端口展开为 in/out 两个句柄, 共享同一服务器端口)。
  */
 
 import type {
@@ -39,6 +42,8 @@ export interface LocalDevice {
 }
 
 export interface PortDef {
+  /** YAML 端口声明名(权威来源,RR-P1-04);同载能多端口按 name 区分。 */
+  name: string
   carrier: EnergyCarrier
   direction: 'in' | 'out'
 }
@@ -68,82 +73,59 @@ export function isLocalId(id: string): boolean {
   return id.startsWith(LOCAL_PREFIX)
 }
 
-export function handleId(carrier: EnergyCarrier, direction: 'in' | 'out'): string {
-  return `${carrier}:${direction}`
+export function handleId(name: string, carrier: EnergyCarrier, direction: 'in' | 'out'): string {
+  return `${carrier}:${direction}:${name}`
 }
 
-export function parseHandle(handle: string): { carrier: EnergyCarrier; direction: 'in' | 'out' } | null {
-  const idx = handle.indexOf(':')
-  if (idx <= 0) return null
-  const carrier = handle.slice(0, idx) as EnergyCarrier
-  const direction = handle.slice(idx + 1) as 'in' | 'out'
+export function parseHandle(
+  handle: string,
+): { carrier: EnergyCarrier; direction: 'in' | 'out'; name: string } | null {
+  // 兼容旧句柄 `{carrier}:{direction}`(RR-P1-04 整改前的产物)。
+  // 新句柄格式 `{carrier}:{direction}:{name}`, 旧格式 name 留空, 提交时由
+  // ModelPage 走 carrier+direction 取第一个匹配端口(降级路径, 仅历史存档可触发)。
+  const parts = handle.split(':')
+  if (parts.length < 2) return null
+  const carrier = parts[0] as EnergyCarrier
+  const direction = parts[1] as 'in' | 'out'
   if (!ENERGY_CARRIERS.includes(carrier)) return null
   if (direction !== 'in' && direction !== 'out') return null
-  return { carrier, direction }
+  const name = parts.slice(2).join(':') || ''
+  return { carrier, direction, name }
 }
 
 export const ENERGY_CARRIERS: EnergyCarrier[] = ['electric', 'heat', 'cool', 'gas', 'solar']
 
 // ---------------------------------------------------------------------------
-// 端口推导(类型语义驱动)
+// 端口句柄派生(注册表 DTO 真实端口,RR-P1-04)
 // ---------------------------------------------------------------------------
 
-const ELECTRIC_IN: PortDef = { carrier: 'electric', direction: 'in' }
-const ELECTRIC_OUT: PortDef = { carrier: 'electric', direction: 'out' }
-const HEAT_IN: PortDef = { carrier: 'heat', direction: 'in' }
-const HEAT_OUT: PortDef = { carrier: 'heat', direction: 'out' }
-const COOL_IN: PortDef = { carrier: 'cool', direction: 'in' }
-const COOL_OUT: PortDef = { carrier: 'cool', direction: 'out' }
-const GAS_IN: PortDef = { carrier: 'gas', direction: 'in' }
-const SOLAR_IN: PortDef = { carrier: 'solar', direction: 'in' }
-
 /**
- * 按设备类型推导端口。rule 返回固定端口;未列出的类型按
- * energy_carriers + is_load 启发式兜底(solar 一律 in,其余 is_load 为 in)。
+ * 按设备类型声明(DeviceTypeSpec.ports, 来源为设备 YAML 公开 descriptor)
+ * 派生画布句柄:
+ *
+ * - 每个声明端口映射一个句柄;bidirectional 端口展开为 in/out 两个句柄
+ *   (电池充放电互斥、锅炉燃气购入等, 共享同一服务器端口);
+ * - 热泵按 mode 参数裁剪: heating 无 cool 输出, cooling 无 heat 输出 ——
+ *   与后端 _descriptor_ports 裁剪规则一致, 句柄与服务器端口一一对应;
+ * - 不维护按 type_id 的静态端口表, 无能源类型启发式兜底 —— 端口唯一权威
+ *   来源是注册表 DTO(RR-P1-04: 携带 YAML 端口名, 用于同载能多端口区分)。
  */
 export function derivePorts(spec: DeviceTypeSpec, params: Record<string, unknown>): PortDef[] {
-  const rule = PORT_RULES[spec.type_id]
-  if (rule) return rule(params)
+  const mode = String(params.mode ?? 'both')
   const ports: PortDef[] = []
-  for (const carrier of spec.energy_carriers) {
-    if (carrier === 'solar') {
-      ports.push(SOLAR_IN)
-    } else if (spec.is_load) {
-      ports.push({ carrier, direction: 'in' })
+  for (const p of spec.ports) {
+    if (spec.type_id === 'ies.device.heat_pump') {
+      if (mode === 'heating' && p.energy_carrier === 'cool') continue
+      if (mode === 'cooling' && p.energy_carrier === 'heat') continue
+    }
+    if (p.direction === 'bidirectional') {
+      ports.push({ name: p.name, carrier: p.energy_carrier, direction: 'in' })
+      ports.push({ name: p.name, carrier: p.energy_carrier, direction: 'out' })
     } else {
-      ports.push({ carrier, direction: 'out' })
+      ports.push({ name: p.name, carrier: p.energy_carrier, direction: p.direction })
     }
   }
   return ports
-}
-
-/**
- * 设备类型 → 端口规则。
- * 设备语义(04 注册表 + RPD §7):电网/光伏/热泵/锅炉/制冷机为源或转换设备
- * (消耗载能输入,输出能量);电池充放电互斥,拆为 电输入 + 电输出 两个端口;
- * 冷负荷(冷热组合)按 mode 参数决定是否提供热力输入端口。
- */
-const PORT_RULES: Record<string, (params: Record<string, unknown>) => PortDef[]> = {
-  'ies.device.grid_connection': () => [ELECTRIC_OUT],
-  'ies.device.pv': () => [SOLAR_IN, ELECTRIC_OUT],
-  'ies.device.battery': () => [ELECTRIC_IN, ELECTRIC_OUT],
-  'ies.device.electric_load': () => [ELECTRIC_IN],
-  'ies.device.heat_load': () => [HEAT_IN],
-  'ies.device.cooling_load': (params) => {
-    const mode = String(params.mode ?? 'cooling_only')
-    if (mode === 'heating_only') return [HEAT_IN]
-    if (mode === 'cooling_heating_combo') return [COOL_IN, HEAT_IN]
-    return [COOL_IN]
-  },
-  'ies.device.heat_pump': (params) => {
-    const mode = String(params.mode ?? 'both')
-    const ports: PortDef[] = [ELECTRIC_IN]
-    if (mode === 'heating' || mode === 'both') ports.push(HEAT_OUT)
-    if (mode === 'cooling' || mode === 'both') ports.push(COOL_OUT)
-    return ports
-  },
-  'ies.device.gas_boiler': () => [GAS_IN, HEAT_OUT],
-  'ies.device.electric_chiller': () => [ELECTRIC_IN, COOL_OUT],
 }
 
 // ---------------------------------------------------------------------------
@@ -182,8 +164,8 @@ export function checkConnection(
   if (fromPort.direction !== 'out' || toPort.direction !== 'in') {
     return { ok: false, reason: 'direction' }
   }
-  const fromHandle = handleId(fromPort.carrier, fromPort.direction)
-  const toHandle = handleId(toPort.carrier, toPort.direction)
+  const fromHandle = handleId(fromPort.name, fromPort.carrier, fromPort.direction)
+  const toHandle = handleId(toPort.name, toPort.carrier, toPort.direction)
   const dup = existing.some(
     (c) =>
       (c.fromDeviceId === fromDevice.id && c.fromHandle === fromHandle && c.toDeviceId === toDevice.id && c.toHandle === toHandle) ||
@@ -327,7 +309,7 @@ export function deviceFromServer(
   }
 }
 
-/** 服务器连接 → 本地连接(经 ports 表把端口 id 映射回 载能:方向)。 */
+/** 服务器连接 → 本地连接(经 ports 表把端口 id 映射回 载能:方向:端口名)。 */
 export function connectionFromServer(
   conn: Connection,
   ports: GraphModel['ports'],
@@ -347,9 +329,9 @@ export function connectionFromServer(
   return {
     id: String(conn.id),
     fromDeviceId,
-    fromHandle: handleId(fromCarrier, fromDirection),
+    fromHandle: handleId(fromPort.name, fromCarrier, fromDirection),
     toDeviceId,
-    toHandle: handleId(toCarrier, toDirection),
+    toHandle: handleId(toPort.name, toCarrier, toDirection),
     carrier: fromCarrier,
   }
 }

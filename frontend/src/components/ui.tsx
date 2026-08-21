@@ -14,6 +14,7 @@ import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
   ReactNode,
+  RefObject,
   SelectHTMLAttributes,
   TableHTMLAttributes,
   TdHTMLAttributes,
@@ -357,7 +358,10 @@ export interface TRProps extends TdHTMLAttributes<HTMLTableRowElement> {
 
 export function TR({ clickable, className, children, ...rest }: TRProps) {
   return (
-    <tr className={`${clickable ? 'ies-table__row--clickable' : ''} ${className ?? ''}`.trim()} {...rest}>
+    <tr
+      className={`ies-table__row${clickable ? ' ies-table__row--clickable' : ''} ${className ?? ''}`.trim()}
+      {...rest}
+    >
       {children}
     </tr>
   )
@@ -551,21 +555,37 @@ export interface DialogProps {
   /** 底部操作区。 */
   footer?: ReactNode
   size?: 'sm' | 'md' | 'lg'
+  /** RR-P2-12: 打开时优先聚焦的元素; 缺省聚焦 body 内第一个表单控件。 */
+  initialFocusRef?: RefObject<HTMLElement | null>
 }
 
+/** RR-P2-12: body 内表单控件优先于关闭按钮/链接等操作元素。 */
+const FORM_CONTROL_SELECTOR =
+  'input:not([type="hidden"]), select, textarea, [role="radio"], [role="checkbox"], button:not([aria-label])'
+
 /** 模态对话框:Esc 关闭、焦点圈定、背景滚动锁定、aria-modal。 */
-export function Dialog({ open, onClose, title, children, footer, size = 'md' }: DialogProps) {
+export function Dialog({ open, onClose, title, children, footer, size = 'md', initialFocusRef }: DialogProps) {
   const { t } = useI18n()
   const titleId = useId()
   const panelRef = useRef<HTMLDivElement | null>(null)
+  // RR-P2-12: 记录触发元素, 关闭时恢复焦点(键盘用户的导航连续性)
+  const triggerRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     if (!open) return
     const panel = panelRef.current
 
-    // 打开时焦点移入对话框内第一个可聚焦元素
-    const firstFocusable = panel?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
-    if (firstFocusable) firstFocusable.focus()
+    // 打开时焦点移入对话框内目标元素:
+    // 1) 显式 initialFocusRef(调用方声明);
+    // 2) body 内第一个表单控件(header 先于 body 渲染, 直接 querySelector
+    //    会选中关闭按钮 —— 输入项目名称等场景应聚焦表单, 而非操作按钮);
+    // 3) 兜底第一个可聚焦元素。
+    triggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusTarget =
+      initialFocusRef?.current ??
+      panel?.querySelector<HTMLElement>(FORM_CONTROL_SELECTOR) ??
+      panel?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)
+    if (focusTarget) focusTarget.focus()
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -596,8 +616,12 @@ export function Dialog({ open, onClose, title, children, footer, size = 'md' }: 
     return () => {
       document.body.style.overflow = prevOverflow
       document.removeEventListener('keydown', onKeyDown)
+      // RR-P2-12: 关闭时恢复触发元素焦点(Esc/取消/确认均走此路径)
+      const trigger = triggerRef.current
+      triggerRef.current = null
+      if (trigger && trigger.isConnected) trigger.focus()
     }
-  }, [open, onClose])
+  }, [open, onClose, initialFocusRef])
 
   if (!open) return null
 

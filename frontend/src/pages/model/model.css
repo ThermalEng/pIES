@@ -278,6 +278,8 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--ies-space-2);
+  /* 信息展示行:不拦截指针事件,避免盖住同节点端口手柄的连线手势(同 .mp-node__type) */
+  pointer-events: none;
 }
 
 .mp-node__fidelity {

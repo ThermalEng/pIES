@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
-import { Link, NavLink, useParams } from 'react-router-dom'
+import { Link, NavLink, useNavigate, useParams } from 'react-router-dom'
 
 import { useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
@@ -112,27 +112,37 @@ function TreeNode({
   )
 }
 
-/** 单行内联标记(代码/强调/链接)。 */
-function renderInline(text: string, key: number): ReactNode {
+/** 单行内联标记(代码/强调/链接)。locale 用于内部 .md 链接 → 章节路由。 */
+function renderInline(text: string, key: number, locale: string): ReactNode {
   // 行内代码(最优先, 内容原样)
   const codeRe = /`([^`]+)`/
   const mCode = codeRe.exec(text)
   if (mCode) {
     return (
       <span key={key}>
-        {renderInline(text.slice(0, mCode.index), key * 10 + 1)}
+        {renderInline(text.slice(0, mCode.index), key * 10 + 1, locale)}
         <code className="ies-help__code-inline">{mCode[1]}</code>
-        {renderInline(text.slice(mCode.index + mCode[0].length), key * 10 + 2)}
+        {renderInline(text.slice(mCode.index + mCode[0].length), key * 10 + 2, locale)}
       </span>
     )
   }
   // 链接 [text](href)
   const mLink = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(text)
   if (mLink) {
-    const href = safeHref(mLink[2])
+    const rawHref = mLink[2]
+    // FE-DOC-01 §12.3: 内部相对 .md 链接(如 README 的
+    // "[快速开始](zh-CN/getting-started.md)")解析为客户端章节路由;
+    // 其余链接经 safeHref 安全校验(只放行 http(s)/mailto/绝对/锚点)。
+    let href: string | null = null
+    if (/\.md(#.*)?$/.test(rawHref) && !/^(https?:|mailto:)/i.test(rawHref)) {
+      const id = rawHref.replace(/\.md(#.*)?$/, '').split('/').pop() || ''
+      href = id ? `/help/${locale}/${id}` : null
+    } else {
+      href = safeHref(rawHref)
+    }
     return (
       <span key={key}>
-        {renderInline(text.slice(0, mLink.index), key * 10 + 1)}
+        {renderInline(text.slice(0, mLink.index), key * 10 + 1, locale)}
         {href ? (
           <a
             href={href}
@@ -145,7 +155,7 @@ function renderInline(text: string, key: number): ReactNode {
         ) : (
           <span className="ies-help__link-invalid">{mLink[1]}</span>
         )}
-        {renderInline(text.slice(mLink.index + mLink[0].length), key * 10 + 2)}
+        {renderInline(text.slice(mLink.index + mLink[0].length), key * 10 + 2, locale)}
       </span>
     )
   }
@@ -154,48 +164,52 @@ function renderInline(text: string, key: number): ReactNode {
   if (mStrong) {
     return (
       <span key={key}>
-        {renderInline(text.slice(0, mStrong.index), key * 10 + 1)}
+        {renderInline(text.slice(0, mStrong.index), key * 10 + 1, locale)}
         <strong>{mStrong[1]}</strong>
-        {renderInline(text.slice(mStrong.index + mStrong[0].length), key * 10 + 2)}
+        {renderInline(text.slice(mStrong.index + mStrong[0].length), key * 10 + 2, locale)}
       </span>
     )
   }
   return <span key={key}>{text}</span>
 }
 
-/** Markdown 块渲染器(标题/段落/列表/表格/引用/代码块)。 */
-function MarkdownContent({ content }: { content: string }) {
+/** Markdown 块渲染器(标题/段落/列表/表格/引用/代码块)。
+ *
+ * locale 用于把相对 .md 内部链接解析为 /help/{locale}/{pageId} 客户端路由
+ * (FE-DOC-01 §12.3); useCaptureClicks 捕获后经 onLink 导航, 不整页刷新。
+ */
+function MarkdownContent({ content, locale }: { content: string; locale: string }) {
   const blocks = useMemo(() => splitBlocks(content), [content])
   return (
     <div className="ies-help__markdown">
       {blocks.map((block, i) => (
-        <MarkdownBlock key={i} block={block} />
+        <MarkdownBlock key={i} block={block} locale={locale} />
       ))}
     </div>
   )
 }
 
 /** 渲染单个块。 */
-function MarkdownBlock({ block }: { block: Block }) {
+function MarkdownBlock({ block, locale }: { block: Block; locale: string }) {
   switch (block.type) {
     case 'h1':
-      return <h1 className="ies-help__h1">{renderInline(block.raw, 0)}</h1>
+      return <h1 className="ies-help__h1">{renderInline(block.raw, 0, locale)}</h1>
     case 'h2':
-      return <h2 className="ies-help__h2">{renderInline(block.raw, 0)}</h2>
+      return <h2 className="ies-help__h2">{renderInline(block.raw, 0, locale)}</h2>
     case 'h3':
-      return <h3 className="ies-help__h3">{renderInline(block.raw, 0)}</h3>
+      return <h3 className="ies-help__h3">{renderInline(block.raw, 0, locale)}</h3>
     case 'h4':
-      return <h4 className="ies-help__h4">{renderInline(block.raw, 0)}</h4>
+      return <h4 className="ies-help__h4">{renderInline(block.raw, 0, locale)}</h4>
     case 'h5':
     case 'h6':
-      return <h5 className="ies-help__h5">{renderInline(block.raw, 0)}</h5>
+      return <h5 className="ies-help__h5">{renderInline(block.raw, 0, locale)}</h5>
     case 'p':
-      return <p className="ies-help__p">{renderInline(block.raw, 0)}</p>
+      return <p className="ies-help__p">{renderInline(block.raw, 0, locale)}</p>
     case 'ul':
       return (
         <ul className="ies-help__ul">
           {block.raw.split('\n').map((item, i) => (
-            <li key={i}>{renderInline(item, i)}</li>
+            <li key={i}>{renderInline(item, i, locale)}</li>
           ))}
         </ul>
       )
@@ -203,13 +217,13 @@ function MarkdownBlock({ block }: { block: Block }) {
       return (
         <ol className="ies-help__ol">
           {block.raw.split('\n').map((item, i) => (
-            <li key={i}>{renderInline(item, i)}</li>
+            <li key={i}>{renderInline(item, i, locale)}</li>
           ))}
         </ol>
       )
     case 'blockquote':
       return (
-        <blockquote className="ies-help__blockquote">{renderInline(block.raw, 0)}</blockquote>
+        <blockquote className="ies-help__blockquote">{renderInline(block.raw, 0, locale)}</blockquote>
       )
     case 'table': {
       const rows = block.raw
@@ -225,7 +239,7 @@ function MarkdownBlock({ block }: { block: Block }) {
               <tr>
                 {head.map((h, i) => (
                   <th key={i} scope="col">
-                    {renderInline(h, i)}
+                    {renderInline(h, i, locale)}
                   </th>
                 ))}
               </tr>
@@ -234,7 +248,7 @@ function MarkdownBlock({ block }: { block: Block }) {
               {body.map((row, i) => (
                 <tr key={i}>
                   {row.map((cell, j) => (
-                    <td key={j}>{renderInline(cell, j)}</td>
+                    <td key={j}>{renderInline(cell, j, locale)}</td>
                   ))}
                 </tr>
               ))}
@@ -245,7 +259,8 @@ function MarkdownBlock({ block }: { block: Block }) {
     }
     case 'code': {
       const [, ...body] = block.raw.split('\n')
-      const lines = body.filter((l, idx) => idx < body.length - 1 || l !== '')
+      // 去除末尾 closing fence(```)行; raw 以 ``` 开头并以 ``` 结束
+      const lines = body.filter((l, idx) => idx < body.length - 1 || !/^\s*```\s*$/.test(l))
       return (
         <pre className="ies-help__code">
           <code>{lines.join('\n')}</code>
@@ -322,8 +337,9 @@ export default function HelpPage() {
 
   // 移动端目录打开时点击章节关闭
   const closeNav = useCallback(() => setNavOpen(false), [])
-  // 内容区点击捕获: 内部锚点/路由链接不触发整页刷新
-  useCaptureClicks(contentRef, () => {})
+  const navigate = useNavigate()
+  // 内容区点击捕获: 内部锚点/章节路由链接走客户端导航(不整页刷新)
+  useCaptureClicks(contentRef, navigate)
 
   if (!manifest) {
     return (
@@ -415,7 +431,7 @@ export default function HelpPage() {
           {currentPage ? (
             <article className="ies-help__article">
               <h1 className="ies-help__title">{currentPage.title}</h1>
-              <MarkdownContent content={currentPage.content} />
+              <MarkdownContent content={currentPage.content} locale={currentLocale!} />
               <nav className="ies-help__pager" aria-label={pt('ies.help.pager')}>
                 {position.prev && (
                   <Link to={`/help/${currentLocale}/${position.prev}`} className="ies-btn ies-btn--ghost ies-btn--sm">

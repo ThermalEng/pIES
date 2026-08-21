@@ -62,10 +62,11 @@ function PortHandles({ device, spec }: { device: LocalDevice; spec: DeviceTypeSp
     <>
       {ins.map((port, i) => {
         const label = labelOf(port.carrier)
+        const hid = handleId(port.name, port.carrier, port.direction)
         return (
           <Handle
-            key={handleId(port.carrier, port.direction)}
-            id={handleId(port.carrier, port.direction)}
+            key={hid}
+            id={hid}
             type="target"
             position={Position.Left}
             className={`mp-handle mp-handle--${port.carrier}`}
@@ -77,10 +78,11 @@ function PortHandles({ device, spec }: { device: LocalDevice; spec: DeviceTypeSp
       })}
       {outs.map((port, i) => {
         const label = labelOf(port.carrier)
+        const hid = handleId(port.name, port.carrier, port.direction)
         return (
           <Handle
-            key={handleId(port.carrier, port.direction)}
-            id={handleId(port.carrier, port.direction)}
+            key={hid}
+            id={hid}
             type="source"
             position={Position.Right}
             className={`mp-handle mp-handle--${port.carrier}`}

@@ -14,7 +14,7 @@
  * - 工具栏:缩放 / 适应视图 / 校验(调用 graph/validate 显示诊断列表,可定位)。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent } from 'react'
 import {
   Background,
@@ -135,6 +135,23 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const [ports, setPorts] = useState<Port[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+
+  // 已有设备后继续新增 → 自动 fit 全部节点, 避免节点堆叠遮挡端口句柄
+  // (ReactFlow fitView prop 只在 hasDevices false→true 边沿触发一次, 后续
+  // 新增不重 fit; 连续放置的节点会堆在画布同侧互相遮挡, 连线手势 mouse.down
+  // 命中节点而非句柄, 见 QA-E2E-01 场景 3 专项调试)。
+  // 设备数量增加沿触发: 首个设备由 ReactFlow prop 负责, 删除/reload 不触发;
+  // duration: 0 消除 300ms 动画期间下一次拖放坐标换算的竞态。
+  const AUTO_FIT_OPTIONS = useMemo(() => ({ padding: 0.2, maxZoom: 1 }) as const, [])
+  const previousDeviceCount = useRef(0)
+  useEffect(() => {
+    const previous = previousDeviceCount.current
+    const current = devices.length
+    if (previous > 0 && current > previous) {
+      void fitView({ ...AUTO_FIT_OPTIONS, duration: 0 })
+    }
+    previousDeviceCount.current = current
+  }, [devices.length, fitView, AUTO_FIT_OPTIONS])
 
   // -- 选择与侧栏 ------------------------------------------------------
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
@@ -305,25 +322,31 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   )
 
   /**
-   * 画布句柄(carrier:direction) → 服务器真实端口(FE-BE-02 修复)。
+   * 画布句柄(carrier:direction:name) → 服务器真实端口(RR-P1-04: 按 YAML 端口名精确匹配)。
    *
-   * 按 device_id + port_type(carrier 映射) + 方向兼容性精确匹配:
-   * - 热泵热/冷输出分别为 thermal/cooling, 不再错取第一个 out 端口;
-   * - bidirectional 端口可同时作为 source/target, 但提交同一个真实端口 id;
-   * - 匹配失败返回 null(由调用方给出可定位诊断), 不静默选错端口。
+   * 找不到指定名称的端口返回 null(由调用方给出可定位诊断, 不允许静默回退
+   * 到 carrier+direction 的首个匹配 —— 宪法 5.3: 正确性优先于兼容)。
    */
   const findServerPort = useCallback(
-    (deviceId: number, carrier: LocalConnection['carrier'], wantDirection: 'in' | 'out'): Port | null => {
+    (
+      deviceId: number,
+      carrier: LocalConnection['carrier'],
+      wantDirection: 'in' | 'out',
+      portName: string,
+    ): Port | null => {
+      if (!portName) return null
       const portType = CARRIER_TO_PORT_TYPE[carrier]
       if (!portType) return null
       const candidates = ports.filter(
         (p) => p.device_id === deviceId && p.port_type === portType,
       )
       if (candidates.length === 0) return null
-      const directional = candidates.find(
-        (p) => p.direction === wantDirection || p.direction === 'bidirectional',
+      const by_name = candidates.find(
+        (p) =>
+          p.name === portName &&
+          (p.direction === wantDirection || p.direction === 'bidirectional'),
       )
-      return directional ?? null
+      return by_name ?? null
     },
     [ports],
   )
@@ -361,8 +384,18 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         setIssues((prev) => [...prev.slice(-3), item])
         return
       }
-      const fromServerPort = findServerPort(Number(fromDevice.id), fromPort.carrier, 'out')
-      const toServerPort = findServerPort(Number(toDevice.id), toPort.carrier, 'in')
+      const fromServerPort = findServerPort(
+        Number(fromDevice.id),
+        fromPort.carrier,
+        'out',
+        fromPort.name,
+      )
+      const toServerPort = findServerPort(
+        Number(toDevice.id),
+        toPort.carrier,
+        'in',
+        toPort.name,
+      )
       if (!fromServerPort || !toServerPort) {
         // 服务器端口缺失/类型不匹配: 可定位诊断(前端本地检查只是即时提示,
         // 后端仍为最终权威)
@@ -645,7 +678,16 @@ function ModelCanvas({ projectId }: { projectId: number }) {
                 setSelectedDeviceId(null)
               }}
               onPaneClick={clearSelection}
-              fitView
+              // 空图时不 fitView: 空图 fitView 会把 zoom 撑到 maxZoom(2.5),
+              // 导致拖放放置的节点屏幕尺寸放大、flow 坐标间距缩小,
+              // 连续放置多个设备必然互相重叠、端口句柄被相邻节点遮挡无法连线;
+              // 有节点后 prop 变化(fitViewQueued)自动 fit 全部节点。
+              // 已有设备后继续新增由 AUTO_FIT_OPTIONS effect 触发重 fit
+              // (见前文 effect 注释; 单靠 prop 边沿只会 fit 一次)。
+              // maxZoom 1: 视图永不放大, 放置坐标换算间距恒等于屏幕落点间距,
+              // 任意两个不同落点放置的节点(宽 190 flow)不会重叠(见 QA-E2E-01 场景 6 专项调试)
+              fitView={hasDevices}
+              fitViewOptions={AUTO_FIT_OPTIONS}
               minZoom={0.2}
               maxZoom={2.5}
               deleteKeyCode={null}
@@ -734,6 +776,10 @@ const EMPTY_SPEC: ExtendedDeviceTypeSpec = {
   name_en: '',
   energy_carriers: [],
   is_load: false,
+  capabilities: [],
+  model_method: 'mechanism',
+  stateful: false,
+  ports: [],
   parameters: {},
 }
 

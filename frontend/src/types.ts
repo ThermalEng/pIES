@@ -346,6 +346,15 @@ export interface ParameterSpec {
   enum?: Array<string | number | boolean> | null
 }
 
+/** 服务器端口声明(RR-P1-04: 来自设备 YAML 公开 descriptor, 前端画布按此渲染句柄)。 */
+export interface DevicePortSpec {
+  name: string
+  port_type: PortType
+  direction: 'in' | 'out' | 'bidirectional'
+  energy_carrier: EnergyCarrier
+  capacity_ref: string | null
+}
+
 export interface DeviceTypeSpec {
   type_id: string
   version: string
@@ -353,6 +362,10 @@ export interface DeviceTypeSpec {
   name_en: string
   energy_carriers: EnergyCarrier[]
   is_load: boolean
+  capabilities: string[]
+  model_method: 'mechanism' | 'data_repeat' | 'data_predict'
+  stateful: boolean
+  ports: DevicePortSpec[]
   parameters: Record<string, ParameterSpec>
 }
 
@@ -529,6 +542,7 @@ export type TaskType =
   | 'calc'
   | 'optimization'
   | 'uncertainty'
+  | 'analysis'
   | 'import'
   | 'export'
   | 'report'
@@ -576,6 +590,8 @@ export interface Task {
   max_attempts: number
   created_at: ISO8601
   updated_at: ISO8601 | null
+  /** 是否存在可用证据包(RR-P1-05: 结果可用性是任务元数据, 不靠探测 404 猜测)。 */
+  result_available: boolean
   /** 列表接口返回的进度摘要(主来源仍是详情/轮询接口)。 */
   summary?: TaskSummary
 }

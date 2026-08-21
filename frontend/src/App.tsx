@@ -215,8 +215,12 @@ export default function App() {
             </PublicOnly>
           }
         />
-        {/* 帮助中心(独立页,无外壳,静态可读) */}
-        <Route path="/help/*" element={<HelpPage />} />
+        {/* 帮助中心(独立页,无外壳,静态可读)。
+            RR-P2-10: 显式 lang/pageId 段路由, useParams 才能解析深链接
+            (/help/zh-CN/getting-started); "/help/*" 通配下 useParams 拿不到段参数。 */}
+        <Route path="/help" element={<HelpPage />} />
+        <Route path="/help/:lang" element={<HelpPage />} />
+        <Route path="/help/:lang/:pageId" element={<HelpPage />} />
         {/* 应用外壳(需登录) */}
         <Route
           element={

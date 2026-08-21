@@ -42,6 +42,7 @@ import type {
   Device,
   DeviceInput,
   DeviceKind,
+  DevicePortSpec,
   DeviceTypeSpec,
   Diagnostic,
   EnergyCarrier,
@@ -494,6 +495,7 @@ function taskFromSummary(s: Record<string, unknown>, projectId: number): Task {
     max_attempts: Number(s.max_attempts ?? 1),
     created_at: String(s.created_at ?? ''),
     updated_at: s.updated_at === null || s.updated_at === undefined ? null : String(s.updated_at),
+    result_available: s.result_available === true,
     summary: (s.summary as Task['summary']) ?? undefined,
   }
 }
@@ -766,9 +768,10 @@ function paramDefaultValue(v: unknown): number | string | Record<string, number>
   return null
 }
 
-/** 后端设备类型注册项 → 前端 DeviceTypeSpec(参数规格字段名适配)。 */
+/** 后端设备类型注册项 → 前端 DeviceTypeSpec(参数规格字段名适配 + 真实端口透传)。 */
 function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
   const params = asRecord(s.parameters)
+  const ports = Array.isArray(s.ports) ? (s.ports as DevicePortSpec[]) : []
   return {
     type_id: String(s.type_id ?? ''),
     version: String(s.version ?? ''),
@@ -776,6 +779,10 @@ function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
     name_en: String(s.name_en ?? ''),
     energy_carriers: Array.isArray(s.energy_carriers) ? (s.energy_carriers as EnergyCarrier[]) : [],
     is_load: Boolean(s.is_load ?? false),
+    capabilities: Array.isArray(s.capabilities) ? (s.capabilities as string[]) : [],
+    model_method: (s.model_method as DeviceTypeSpec['model_method']) ?? 'mechanism',
+    stateful: Boolean(s.stateful ?? false),
+    ports,
     parameters: Object.fromEntries(
       Object.entries(params).map(([name, p]) => {
         const pr = asRecord(p)
@@ -1468,8 +1475,9 @@ export const api = {
     get(projectId: number, taskId: number): Promise<TaskDetail> {
       return request<unknown>(`/projects/${projectId}/tasks/${taskId}`).then(async (body) => {
         const detail = taskDetailFromServer(asRecord(oneOf<Record<string, unknown>>(body, 'task')), projectId)
-        // 后端任务详情不含 evidence 字段,此接口仅返回任务元数据;前端需要从结果视图拉取证据包。
-        if (detail.evidence.length === 0) {
+        // RR-P1-05: 结果可用性是任务元数据(result_available), 只有明确可用时
+        // 才读取证据包; 未完成/无结果不是页面级失败, 不靠探测 /result 的 404 猜测。
+        if (detail.result_available) {
           try {
             const result = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`)
             const r = asRecord(oneOf<Record<string, unknown>>(result, 'result'))
@@ -1488,10 +1496,8 @@ export const api = {
               pkgTaskCache.set(pkgId, taskId)
             }
           } catch {
-            // 结果不可用:保持空 evidence(UI 展示"暂无结果")
+            // 结果元数据读取失败: 保持空 evidence(详情仍可查, 结果页负责重试)
           }
-        } else {
-          for (const p of detail.evidence) pkgTaskCache.set(Number(p.package_id), taskId)
         }
         return detail
       })
