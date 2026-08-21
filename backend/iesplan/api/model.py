@@ -28,8 +28,9 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.core.registry import DeviceTypeSpec, ParameterSpec, list_device_types
+from iesplan.core.contracts import ParameterSpec
 from iesplan.db import get_db
+from iesplan.devices import DeviceModelDescriptor, list_device_descriptors
 from iesplan.services import model as svc
 from iesplan.services import project as project_service
 
@@ -116,8 +117,8 @@ def _parameter_schema(p: ParameterSpec) -> dict[str, Any]:
     }
 
 
-def _device_type_schema(spec: DeviceTypeSpec) -> dict[str, Any]:
-    """设备类型注册项 → 公开 schema。"""
+def _device_type_schema(spec: DeviceModelDescriptor) -> dict[str, Any]:
+    """设备类型注册项 → 公开 schema(RR-P1-04: 含 YAML 真实端口/能力/模型元数据)。"""
     return {
         "type_id": spec.type_id,
         "version": spec.version,
@@ -126,15 +127,32 @@ def _device_type_schema(spec: DeviceTypeSpec) -> dict[str, Any]:
         "energy_carriers": list(spec.energy_carriers),
         "is_load": spec.is_load,
         "capabilities": list(spec.capabilities),
+        "model_method": spec.model_method,
+        "stateful": spec.stateful,
+        "fidelity": spec.fidelity,
         "help_topic": spec.help_topic,
+        "ports": [
+            {
+                "name": p.name,
+                "port_type": p.port_type,
+                "direction": p.direction,
+                "energy_carrier": p.energy_carrier,
+                "capacity_ref": p.capacity_ref,
+            }
+            for p in spec.ports
+        ],
         "parameters": {name: _parameter_schema(p) for name, p in spec.parameters.items()},
     }
 
 
 @registry_router.get("/registry/device-types", summary="设备类型注册表(公开)")
 def device_types_public() -> dict[str, Any]:
-    """公开设备类型清单 + 参数 schema(供前端画布渲染设备面板)。"""
-    return {"items": [_device_type_schema(spec) for spec in list_device_types()]}
+    """公开设备类型清单 + 参数 schema + 真实端口(RR-P1-04: 供前端画布渲染)。
+
+    端口/方向/载能来自 YAML 设备目录(公开 descriptor), API 只做序列化,
+    不维护独立的设备类型静态表。
+    """
+    return {"items": [_device_type_schema(desc) for desc in list_device_descriptors()]}
 
 
 # ---------------------------------------------------------------------------

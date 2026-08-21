@@ -23,8 +23,8 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.db import get_db
-from iesplan.services import objects as objects_service
 from iesplan.services import package as package_service
+from iesplan.storage import add_ref, get_object, put_object
 
 router = APIRouter(prefix="/api/projects/{project_id}/exports", tags=["exports"])
 
@@ -58,10 +58,10 @@ def export_excel_endpoint(
     excel_bytes = package_service.export_excel(
         db, user, project_id, payload.evidence_package_id, payload.assessment_id, lang=payload.lang
     )
-    obj = objects_service.put_object(
+    obj = put_object(
         db, excel_bytes, package_service.EXCEL_MEDIA_TYPE, source_category="excel_report",
     )
-    objects_service.add_ref(
+    add_ref(
         db, obj.id, "export_excel", project_id,
         ref_entity_type="projects", purpose="Excel 报告导出",
     )
@@ -104,7 +104,7 @@ def download_excel_endpoint(
     """凭短期授权 token 下载 Excel 报告字节(校验签名/过期 + 项目与用户绑定)。"""
     info = package_service.verify_download_token(token, expected_kind="excel")
     _authorize_download(info, project_id, user)
-    content = objects_service.get_object(db, info["object_id"])
+    content = get_object(db, info["object_id"])
     return Response(
         content=content,
         media_type=package_service.EXCEL_MEDIA_TYPE,
@@ -136,7 +136,7 @@ def download_package_endpoint(
     """凭短期授权 token 下载项目包 zip(校验签名/过期 + 项目与用户绑定)。"""
     info = package_service.verify_download_token(token, expected_kind="package")
     _authorize_download(info, project_id, user)
-    content = objects_service.get_object(db, info["object_id"])
+    content = get_object(db, info["object_id"])
     return Response(
         content=content,
         media_type=package_service.PACKAGE_MEDIA_TYPE,

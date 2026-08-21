@@ -36,10 +36,10 @@ from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, 
 from iesplan.models.identity import User
 from iesplan.models.project import AdminMaintenanceAction, OwnershipTransfer, Project, ProjectMember
 from iesplan.services import audit as audit_service
-from iesplan.services import objects as objects_service
 from iesplan.services import project as project_service
 from iesplan.services import queue
 from iesplan.services import tasks as tasks_service
+from iesplan.storage import storage_stats
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -119,7 +119,7 @@ def diagnostics_endpoint(
     actions = db.execute(
         select(AdminMaintenanceAction).order_by(AdminMaintenanceAction.id.desc()).limit(10)
     ).scalars().all()
-    storage = objects_service.storage_stats(db)
+    storage = storage_stats(db)
     queue_view = queue.queue_status()
     return {
         "tasks": {

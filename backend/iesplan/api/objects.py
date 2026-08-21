@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from iesplan.api.auth import get_current_admin
 from iesplan.db import get_db
 from iesplan.models.identity import User
-from iesplan.services import objects as objects_service
+from iesplan.storage import reconcile, safe_cleanup, sample_verify, storage_stats
 
 #: 对象域管理路由: 挂载前缀 /api/admin(仅管理员)
 router = APIRouter(prefix="/api/admin", tags=["admin-storage"])
@@ -31,9 +31,14 @@ CurrentAdmin = Annotated[User, Depends(get_current_admin)]
 
 
 class CleanupRequest(BaseModel):
-    """清理请求: dry_run=true 只返回计划, false 执行清理。"""
+    """清理请求: dry_run=true 只返回计划, false 执行清理。
+
+    RR-P2-07: 执行必须携带 dry-run 返回的 plan_id; 候选集合与预览不一致时
+    拒绝执行(计划过期), 要求重新预览。
+    """
 
     dry_run: bool = True
+    plan_id: str | None = None
 
 
 @router.get("/storage", summary="存储视图(管理员, 单一 DTO)")
@@ -44,9 +49,9 @@ def admin_storage(db: DbSession, _admin: CurrentAdmin) -> dict:
           refs{count,referenced_objects} / capacity{free_bytes,safe_threshold,
           ok,message,reason?} / corrupt_count / cleanup_candidates / healthy。
     """
-    stats = objects_service.storage_stats(db)
-    verify = objects_service.sample_verify(db, limit=10)
-    cleanup = objects_service.safe_cleanup(db, dry_run=True, limit=100)
+    stats = storage_stats(db)
+    verify = sample_verify(db, limit=10)
+    cleanup = safe_cleanup(db, dry_run=True, limit=100)
     return {
         "objects": stats["objects"],
         "refs": stats["refs"],
@@ -65,13 +70,28 @@ def admin_cleanup(
 ) -> dict:
     """对象清理(两阶段, 仅管理员)。
 
-    第一次以 dry_run=true 调用获得清理计划(不删任何数据);
-    确认后以 dry_run=false 调用执行: 删文件 + 删记录 + 审计。
-    被任意 owner 引用(STO-02: 引用清单为权威)的对象不可清理, 不计入计划。
+    第一次以 dry_run=true 调用获得清理计划(plan_id + 候选摘要, 不删数据);
+    确认后携带 plan_id 以 dry_run=false 执行: 事务内重新验证引用与候选集合,
+    候选变化则拒绝执行并要求重新预览。提交/回滚由本用例统一决定
+    (RR-P1-03: 存储服务只 flush)。
     """
-    return objects_service.safe_cleanup(
-        db, dry_run=req.dry_run, actor_id=_admin.id, actor_type="admin"
+    if req.dry_run:
+        return safe_cleanup(
+            db, dry_run=True, actor_id=_admin.id, actor_type="admin"
+        )
+    if not req.plan_id:
+        from iesplan.core.errors import ConflictError
+
+        raise ConflictError(
+            "执行清理必须携带 dry-run 返回的 plan_id",
+            code="OBJ-CLEAN-001",
+            message_key="ies.diag.obj.cleanup_plan_required",
+        )
+    result = safe_cleanup(
+        db, dry_run=False, actor_id=_admin.id, actor_type="admin", expected_plan_id=req.plan_id
     )
+    db.commit()  # 应用用例拥有事务边界(文件删除 + 记录删除同事务提交)
+    return result
 
 
 @router.get("/storage/health", summary="存储模块健康(管理员)")
@@ -80,13 +100,13 @@ def admin_storage_health(db: DbSession, _admin: CurrentAdmin) -> dict:
 
     字段: {ok, capacity, corrupt_count, orphan_count, reconcile}。
     """
-    stats = objects_service.storage_stats(db)
-    verify = objects_service.sample_verify(db, limit=10)
+    stats = storage_stats(db)
+    verify = sample_verify(db, limit=10)
     return {
         "ok": stats["healthy"] and len(verify["failed"]) == 0,
         "capacity": stats["capacity"],
         "corrupt_count": len(verify["failed"]),
         "orphan_count": stats["objects"]["orphan_count"],
         "object_count": stats["objects"]["count"],
-        "reconcile": objects_service.reconcile(db, dry_run=True),
+        "reconcile": reconcile(db, dry_run=True),
     }

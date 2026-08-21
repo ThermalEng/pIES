@@ -26,8 +26,8 @@ from iesplan.db import get_db
 from iesplan.models.calc import Task
 from iesplan.models.identity import User
 from iesplan.models.project import Project
-from iesplan.services import objects as objects_service
 from iesplan.services import queue
+from iesplan.storage import sample_verify, storage_stats
 
 #: 运维健康聚合路由: 挂载前缀 /api/admin(仅管理员)
 router = APIRouter(prefix="/api/admin", tags=["admin-health"])
@@ -81,8 +81,8 @@ def storage_health_view(db: Session) -> dict:
     字段: {capacity, corrupt_count, orphan_count, object_count, ok,
     verify{checked, ok_count, failed}}。
     """
-    stats = objects_service.storage_stats(db)
-    verify = objects_service.sample_verify(db, limit=10)
+    stats = storage_stats(db)
+    verify = sample_verify(db, limit=10)
     return {
         "capacity": stats["capacity"],
         "corrupt_count": len(verify["failed"]),
