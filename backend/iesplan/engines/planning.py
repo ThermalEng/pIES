@@ -24,7 +24,7 @@ from decimal import Decimal
 
 import numpy as np
 
-from iesplan.core.registry import get_device_type
+from iesplan.devices import get_device_descriptor as get_device_type
 from iesplan.core.timeaxis import TimeAxis
 from iesplan.engines.eval_run import (
     CAPACITY_PARAM,

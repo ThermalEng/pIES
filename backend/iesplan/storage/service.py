@@ -289,12 +289,12 @@ def put_object(
         quota_bytes=0,
     )
     try:
-        db.begin_nested()
-        db.add(obj)
-        db.flush()
+        with db.begin_nested():  # RR-P1-03: 只回滚嵌套 savepoint, 不触调用方外层事务
+            db.add(obj)
+            db.flush()
     except IntegrityError:
         # 并发写入去重: 同内容对象已被其他事务建立, 复用即可(文件内容一致)
-        db.rollback()  # 仅回滚 savepoint(嵌套事务), 不触调用方外层事务
+        # savepoint 已随 begin_nested() 退出自动回滚, 外层事务保持完整
         existing = db.execute(
             sa.select(StoredObject).where(StoredObject.sha256 == digest)
         ).scalar_one_or_none()
@@ -479,15 +479,14 @@ def attach(
         purpose=purpose,
     )
     try:
-        db.begin_nested()
-        db.add(ref)
-        db.flush()
-        obj.ref_count = (obj.ref_count or 0) + 1
-        obj.last_referenced_at = utcnow()
-        db.flush()
+        with db.begin_nested():  # RR-P1-03: 只回滚嵌套 savepoint, 不触调用方外层事务
+            db.add(ref)
+            db.flush()
+            obj.ref_count = (obj.ref_count or 0) + 1
+            obj.last_referenced_at = utcnow()
+            db.flush()
     except IntegrityError:
-        # 并发去重: 回滚 savepoint 后返回既有引用(计数不重复累加)
-        db.rollback()
+        # 并发去重: savepoint 自动回滚, 返回既有引用(计数不重复累加)
         existing = db.execute(
             sa.select(ObjectRef).where(
                 ObjectRef.object_id == obj.id,
@@ -679,19 +678,23 @@ def safe_cleanup(
     actor_id: int | None = None,
     actor_type: str = "admin",
     limit: int = CLEANUP_BATCH_LIMIT,
+    expected_plan_id: str | None = None,
 ) -> dict:
-    """对象清理(23.3/23.4): 先计划后执行, 全程可审计。
+    """对象清理(23.3/23.4): 先计划后执行, 全程可审计(RR-P2-07 稳定计划标识)。
 
     - 候选: 无任何 owner 引用的对象(引用清单为唯一权威, STO-02);
     - 保留规则(retention_rules, 01 §10.5): 命中 active 规则时要求对象年龄
       达到 retention_days, 未命中规则默认 DEFAULT_RETENTION_DAYS 天;
     - 被任意 owner 引用的对象天然不可清理(不再需要实体类型白名单);
-    - dry_run=True: 只返回清理计划, 不删任何数据;
-    - dry_run=False: 执行清理 — 删文件 + 删记录 + 审计, 单事务提交;
-      文件删除失败的对象跳过(保留记录, 便于下次重试)。
+    - dry_run=True: 只返回清理计划(含 plan_id 与候选摘要), 不删任何数据;
+    - dry_run=False: 必须携带 dry-run 返回的 plan_id; 执行前在事务内重新
+      计算候选集合并与计划摘要比对, 候选变化(引用/保留/版本变更)则拒绝
+      执行并要求重新预览; 通过后删文件 + 删记录 + 审计, 只 flush
+      (提交/回滚由应用用例统一决定, RR-P1-03);
+      - 文件删除失败的对象跳过(保留记录, 便于下次重试)。
 
     返回:
-        计划/执行结果字典: dry_run / count / total_bytes / candidates /
+        计划/执行结果字典: plan_id / dry_run / count / total_bytes / candidates /
         retained_count / retained / (dry_run=False 时) removed_count / removed / errors。
     """
     candidates = _candidate_objects(db, limit=limit)
@@ -711,7 +714,24 @@ def safe_cleanup(
             deletable.append(obj)
 
     total_bytes = sum(obj.size_bytes or 0 for obj in deletable)
+    # RR-P2-07: 稳定计划标识 = 候选 oid 有序串联 + 总字节的 sha256(候选变化即失效)
+    plan_payload = "|".join(sorted(obj.oid for obj in deletable)) + f"|{total_bytes}"
+    plan_id = sha256_hex(plan_payload.encode("utf-8")) if deletable else "plan-empty"
+    if not dry_run:
+        if expected_plan_id is None:
+            raise AppError(
+                "执行清理必须携带 dry-run 返回的 plan_id(先预览后执行)",
+                code="OBJ-CLEAN-001",
+                message_key="ies.diag.obj.cleanup_plan_required",
+            )
+        if expected_plan_id != plan_id:
+            raise AppError(
+                "清理计划已过期: 候选集合或引用状态发生变化, 请重新预览后执行",
+                code="OBJ-CLEAN-002",
+                message_key="ies.diag.obj.cleanup_plan_stale",
+            )
     result: dict = {
+        "plan_id": plan_id,
         "dry_run": dry_run,
         "count": len(deletable),
         "total_bytes": total_bytes,
@@ -751,7 +771,7 @@ def safe_cleanup(
         )
         db.delete(obj)
         removed.append(_object_summary(obj))
-    db.commit()
+    db.flush()  # RR-P1-03: 存储只 flush, 提交/回滚由应用用例(API 层)统一决定
     result["dry_run"] = False
     result["removed_count"] = len(removed)
     result["removed"] = removed

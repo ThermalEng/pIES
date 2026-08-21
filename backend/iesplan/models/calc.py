@@ -154,7 +154,9 @@ class Task(Base):
             name="ck_tasks_idempotency_key",
         ),
         CheckConstraint("max_attempts BETWEEN 1 AND 10", name="ck_tasks_max_attempts"),
-        UniqueConstraint("idempotency_key", name="uq_tasks_idempotency_key"),
+        # RR-P1-05: 幂等键唯一性限定项目范围 —— 前端幂等键由 config+params 哈希
+        # 生成, 跨项目相同; 全局唯一会让另一项目同键提交命中他项目任务(replay)
+        UniqueConstraint("project_id", "idempotency_key", name="uq_tasks_idempotency_key"),
         Index("idx_tasks_status", "status", sa.text("priority DESC"), "requested_at"),
         Index("idx_tasks_project", "project_id", sa.text("requested_at DESC")),
     )

@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Final
 
 from iesplan.core.errors import NotFoundError
-from iesplan.core.registry import DEFAULT_ALGORITHM, get_algorithm
+from iesplan.engines.registry import DEFAULT_ALGORITHM, get_algorithm
 
 #: 算法 id → 计算引擎命令(03 §9.3;仅注册已实现函数,阶段 B 的 lp_relax
 #: 变体实现前不暴露为可选算法,避免选到不存在的引擎命令)
