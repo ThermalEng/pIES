@@ -253,9 +253,14 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
                 )
         if type_spec is None:
             continue
-        # 必填参数缺失(default=None 的引用类参数;data_refs.key 可替代)
+        # 必填参数缺失(负荷类设备的引用参数/无默认值参数;data_refs.key 可替代;
+        # 热泵/制冷机 cop_profile 等可选参考不在此列)
         data_keys = {dr.key for dr in dev.data_refs}
-        required = [name for name, ps in type_spec.parameters.items() if ps.default is None]
+        required = [
+            name
+            for name, ps in type_spec.parameters.items()
+            if ps.default is None or (ps.unit == "reference" and type_spec.is_load)
+        ]
         for name in required:
             if name not in dev.params and name not in data_keys:
                 diags.append(

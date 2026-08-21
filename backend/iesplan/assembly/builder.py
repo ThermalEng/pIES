@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import math
+
+from iesplan.core.errors import NotFoundError
 from typing import Any
 
 from iesplan.assembly.checker import PORT_TYPE_TO_CARRIER
@@ -28,7 +30,7 @@ from iesplan.assembly.schema import (
     DataRef,
     TimeAxisRef,
 )
-from iesplan.core.registry import get_device_type
+from iesplan.devices import get_device_descriptor as get_device_type
 
 #: 内部保留参数键(不进入装配文本 params 章节)
 _INTERNAL_PARAM_KEYS: tuple[str, ...] = (
@@ -62,7 +64,8 @@ def _model_ref(type_id: str) -> str:
     try:
         spec = get_device_type(type_id)
         return f"{type_id}@{spec.version}"
-    except Exception:
+    except NotFoundError:
+        # 未注册: 装配继续按裸 id 串行, 由下游装配检查模块显式阻断(RR-P2-05)。
         return type_id
 
 
@@ -405,17 +408,20 @@ def build_assembly(
     return spec
 
 
-def _pipe_in_name() -> str:
-    """管道入端口名(与检查器推导一致:heat_in)。"""
-    from iesplan.assembly.checker import _SYNTH_PIPELINE_SPEC
+# 管道端口名: 与 catalog/transport_pipe.yaml 一致(heat_in/heat_out) —
+# 这是设备 YAML 唯一权威来源, 不再由装配模块维护内置常量。
+_PIPE_IN_NAME = "heat_in"
+_PIPE_OUT_NAME = "heat_out"
 
-    return f"{_SYNTH_PIPELINE_SPEC[2][0]}_in"
+
+def _pipe_in_name() -> str:
+    """管道入端口名。"""
+    return _PIPE_IN_NAME
 
 
 def _pipe_out_name() -> str:
-    from iesplan.assembly.checker import _SYNTH_PIPELINE_SPEC
-
-    return f"{_SYNTH_PIPELINE_SPEC[2][0]}_out"
+    """管道出端口名。"""
+    return _PIPE_OUT_NAME
 
 
 def _num_or_zero(value: Any) -> float:

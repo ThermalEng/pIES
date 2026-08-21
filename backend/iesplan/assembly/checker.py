@@ -29,7 +29,7 @@ from iesplan.assembly.schema import (
 )
 from iesplan.core import units
 from iesplan.core.diagnostics import Diagnostic, SEVERITY_BLOCKING, SEVERITY_ERROR, make_diag
-from iesplan.core.errors import AppError
+from iesplan.core.errors import AppError, NotFoundError
 from iesplan.core.expression import (
     Dimensions,
     ExpressionCodeError,
@@ -38,7 +38,7 @@ from iesplan.core.expression import (
     ExpressionSyntaxError,
     parse_expr,
 )
-from iesplan.core.registry import DeviceTypeSpec, list_device_types
+from iesplan.devices import DeviceModelDescriptor as DeviceTypeSpec
 
 logger = logging.getLogger(__name__)
 
@@ -46,23 +46,9 @@ logger = logging.getLogger(__name__)
 # 常量与业务表(与 services/model.py 同约定;本模块独立声明,不依赖 services)
 # ---------------------------------------------------------------------------
 
-#: 管道设备模型白名单(第 2 步设备初始化模块落地前,检查器按内置最小规格处理)
+#: 管道设备模型(RR-P2-05: 管道为合法业务设备, 在 iesplan.devices YAML 目录
+#; 与其他设备一并注册, 装配模块直接消费 descriptor, 不再维护白名单/内置兜底)。
 PIPELINE_MODEL_IDS: tuple[str, ...] = ("ies.device.transport_pipe",)
-#: 管道模型内置最小规格(载体按 heat;注册表有正式条目后以注册表为准)
-_SYNTH_PIPELINE_SPEC: tuple[str, str, tuple[str, ...]] = ("ies.device.transport_pipe", "1.0.0", ("heat",))
-
-#: 设备类型 → 载体 → 端口方向(建模业务约定,与 services/model.py _DEVICE_PORT_DIRECTIONS 一致)
-_DEVICE_PORT_DIRECTIONS: dict[str, dict[str, str]] = {
-    "ies.device.grid_connection": {"electric": "out"},
-    "ies.device.pv": {"electric": "out"},
-    "ies.device.battery": {"electric": "bidirectional"},
-    "ies.device.electric_load": {"electric": "in"},
-    "ies.device.heat_load": {"heat": "in"},
-    "ies.device.cooling_load": {"cool": "in"},
-    "ies.device.heat_pump": {"electric": "in", "heat": "out", "cool": "out"},
-    "ies.device.gas_boiler": {"gas": "bidirectional", "heat": "out"},
-    "ies.device.electric_chiller": {"electric": "in", "cool": "out"},
-}
 
 #: 载体 → 端口名后缀规则(in/out 为 "{载体}_{方向}",双向为 "{载体}";与 services 一致)
 PORT_TYPE_TO_CARRIER: dict[str, str] = {
@@ -172,7 +158,10 @@ class AssemblyCheckError(AppError):
             message or f"装配检查未通过:{len(self.diagnostics)} 条诊断",
             code=self.code,
             message_key=self.message_key,
-            params={"diag_count": len(self.diagnostics)},
+            params={
+                "diag_count": len(self.diagnostics),
+                "diagnostics": [d.to_dict() for d in self.diagnostics],
+            },
         )
 
 
@@ -189,24 +178,11 @@ def _split_model(model: str) -> tuple[str, str | None]:
     return model, None
 
 
-def _synth_pipeline_spec(type_id: str, version: str | None) -> DeviceTypeSpec:
-    """管道模型内置最小规格(注册表落地前的兜底,05 §8.3)。"""
-    vid, carriers = _SYNTH_PIPELINE_SPEC[1], _SYNTH_PIPELINE_SPEC[2]
-    return DeviceTypeSpec(
-        type_id=type_id,
-        version=version or vid,
-        name_zh="管道传输设备",
-        name_en="Transport Pipeline",
-        energy_carriers=list(carriers),
-        is_load=False,
-        capabilities=["transport", "stateful"],
-    )
-
-
 def resolve_model(ctx: CheckContext, model: str) -> tuple[DeviceTypeSpec | None, bool]:
     """解析模型引用:返回 (类型规格 | None, 是否管道模型)。
 
-    未注册且不在管道白名单 → (None, False);管道白名单模型返回内置最小规格。
+    未注册返回 (None, False): 装配禁止用合成/兜底规格伪装可装配视图,
+    未注册类型必须被装配显式阻断(RR-P2-05)。
     """
     type_id, _ = _split_model(model)
     registry = ctx.registry
@@ -214,62 +190,50 @@ def resolve_model(ctx: CheckContext, model: str) -> tuple[DeviceTypeSpec | None,
         registry = _default_registry()
         ctx.registry = registry
     spec = registry.get(type_id)
-    if spec is not None:
-        return spec, type_id in PIPELINE_MODEL_IDS
-    if type_id in PIPELINE_MODEL_IDS:
-        return _synth_pipeline_spec(type_id, None), True
-    return None, False
+    if spec is None:
+        return None, False
+    return spec, type_id in PIPELINE_MODEL_IDS
 
 
 def _default_registry() -> dict[str, DeviceTypeSpec]:
-    """注册表默认快照(type_id → DeviceTypeSpec)。
+    """装配检查的模块内注册表快照(RR-P2-02/05: 消费 devices 公开 descriptor)。
 
-    YAML 设备注册表优先(插件式, 端口定义来自 yaml); 静态注册表仅作
-    YAML 目录**未初始化**时的兜底(BE-REG-03):
-    - 仅 ``AppError(SYS-CFG-001)``(get_registry 未初始化)回退静态表并记录日志;
-    - 转换异常、插件数据错误、注册表内部损坏必须阻断装配检查并暴露根因
-      (不得误判为兼容场景继续使用过期定义)。
+    从 ``iesplan.devices.list_device_descriptors()`` 公开门面构建本模块自己的
+    只读候选字典; 注册表未初始化(未调用 init_registry)或为空都必须使装配
+    不可用并暴露诊断(宪法 5.3/9.5: 禁止静态回退和宽泛异常兜底)。
     """
-    from iesplan.devices.registry import get_registry
-    from iesplan.devices.spec import to_registry_spec
+    from iesplan.devices import list_device_descriptors
 
-    try:
-        reg = get_registry()
-    except AppError as exc:
-        if exc.code != "SYS-CFG-001":
-            raise
-        logger.warning("YAML 设备注册表未初始化, 回退静态设备表(装配检查): %s", exc)
-        return {s.type_id: s for s in list_device_types()}
-    specs = {s.type_id: to_registry_spec(s) for s in reg.list()}
+    descriptors = list_device_descriptors()
     merged: dict[str, DeviceTypeSpec] = {}
-    for tid, spec in specs.items():
-        if spec is not None:
-            merged[tid] = spec
+    for desc in descriptors:
+        # 直接采用公开 descriptor(不可变映射/元组已冻结), 不复制重建:
+        # 装配只读消费, 共享对象不再可变, 也不会跨模块别名引用下划线符号。
+        merged[desc.type_id] = desc
     if not merged:
-        logger.warning("YAML 设备注册表为空, 回退静态设备表(装配检查)")
-        return {s.type_id: s for s in list_device_types()}
+        raise AppError(
+            "装配检查: YAML 设备注册表为空(未初始化或目录无设备), 装配不可用",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={"service": "assembly"},
+        )
     return merged
 
 
-def _yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPort] | None:
-    """从 YAML 设备注册表取端口定义 → AssemblyPort 列表(未初始化返回 None)。
+def _yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPort]:
+    """从 YAML 设备注册表取端口定义 → AssemblyPort 列表(权威来源)。
 
-    yaml 端口(DeviceYamlSpec.ports: 端口名/载体/方向/容量引用)为权威来源,
+    yaml 端口(DeviceYamlSpec.ports: 端口名/载体/方向/容量引用)为唯一权威,
     装配检查据此做连接合法性(REF-004/REF-005)与可解性检查。
-    仅"注册表未初始化"(AppError SYS-CFG-001)返回 None 走静态方向表;
-    注册表已初始化时的任何错误(注册表损坏/端口数据错误)向上阻断(BE-REG-03)。
+    注册表未初始化或端口数据错误一律向上阻断(RR-P2-05: 无静态回退)。
     """
-    from iesplan.devices.registry import get_registry
+    from iesplan.devices import get_device_descriptor
 
-    try:
-        reg = get_registry()
-    except AppError as exc:
-        if exc.code != "SYS-CFG-001":
-            raise
-        return None
-    spec = reg.get(type_id)
+    spec = get_device_descriptor(type_id)
     ports: list[AssemblyPort] = []
     for p in spec.ports:
+        if p.energy_carrier not in CARRIER_DEFAULT_QUANTITY_UNIT:
+            continue  # solar 等环境侧载体(不可连接)不参与装配端口/母线平衡
         unit = CARRIER_DEFAULT_QUANTITY_UNIT.get(p.energy_carrier, (QUANTITY_SIGNAL, "-"))[1]
         qty = CARRIER_DEFAULT_QUANTITY_UNIT.get(p.energy_carrier, (QUANTITY_SIGNAL, "-"))[0]
         capacity = None
@@ -289,7 +253,7 @@ def _yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPor
                 capacity=capacity,
             )
         )
-    return ports if ports else None
+    return ports
 
 
 def _port_name(carrier: str, direction: str) -> str:
@@ -298,40 +262,20 @@ def _port_name(carrier: str, direction: str) -> str:
 
 
 def _derive_device_ports(spec: AssemblySpec, ctx: CheckContext, device: AssemblyDevice) -> list[AssemblyPort]:
-    """设备端口推导:YAML 端口定义优先, 静态方向表兜底; 显式声明覆盖 capacity。
+    """设备端口推导(RR-P2-05: YAML 公开 descriptor 端口为唯一权威, 无静态回退)。
 
-    YAML 设备注册表(iesplan.devices)的端口定义(端口名/载体/方向/容量)为权威来源,
-    未初始化时回退静态 _DEVICE_PORT_DIRECTIONS 方向表(核验 M6 修复项)。
-    显式声明的 capacity 覆盖在两条路径之后统一合并(codex 二次审核 High-3:
-    之前 YAML 路径提前 return, 显式 capacity 覆盖成为死代码)。
+    已注册设备取 YAML 端口声明; 未注册设备(测试注入的自定义类型)按
+    装配文本显式 ``ports:`` 声明转换。显式声明的 capacity 在两条路径
+    之后统一合并覆盖。
     """
     type_spec, _ = resolve_model(ctx, device.model)
     if type_spec is None:
         return []  # 模型未注册,端口无从推导(REF-002 已报)
-    # YAML 端口定义优先(DeviceYamlSpec.ports → AssemblyPort)
-    derived = _yaml_device_ports(device, type_spec.type_id)
-    if not derived:
-        configured = _DEVICE_PORT_DIRECTIONS.get(type_spec.type_id)
-        if configured is None:
-            configured = (
-                {c: "in" for c in type_spec.energy_carriers if c in CARRIER_DEFAULT_QUANTITY_UNIT}
-                if type_spec.is_load
-                else {c: "out" for c in type_spec.energy_carriers if c in CARRIER_DEFAULT_QUANTITY_UNIT}
-            )
-        derived = []
-        for carrier, direction in configured.items():
-            qty, unit = CARRIER_DEFAULT_QUANTITY_UNIT.get(carrier, (QUANTITY_SIGNAL, "-"))
-            derived.append(
-                AssemblyPort(
-                    device=device.id,
-                    name=_port_name(carrier, direction),
-                    carrier=carrier,
-                    direction=direction,
-                    quantity=qty,
-                    unit=unit,
-                    nature=NATURE_INSTANT,
-                )
-            )
+    try:
+        derived = _yaml_device_ports(device, type_spec.type_id)
+    except NotFoundError:
+        # 测试注入/外部自定义类型(不在 YAML 目录): 按显式声明转换
+        derived = list(device.ports)
     # 显式声明覆盖(仅 capacity;载体/方向以注册表推导为准,不一致由阶段 C 报 REF-005)
     explicit_by_name = {ep.name: ep for ep in device.ports}
     merged: list[AssemblyPort] = []
@@ -354,26 +298,45 @@ def _derive_device_ports(spec: AssemblySpec, ctx: CheckContext, device: Assembly
 
 
 def _derive_pipeline_ports(pipe: AssemblyPipeline) -> list[AssemblyPort]:
-    """管道端口推导:入端 instantaneous / 出端 delayed(延迟取 params.delay_steps,缺省 1)。"""
-    carrier = _SYNTH_PIPELINE_SPEC[2][0]
+    """管道端口推导(从 YAML descriptor 读取真实端口, 不再内置常量)。
+
+    入端 instantaneous / 出端 delayed(延迟取 params.delay_steps, 缺省 1)。
+    """
+    from iesplan.devices import get_device_descriptor
+
+    spec = get_device_descriptor(pipe.model.split("@", 1)[0])
+    in_port = next((p for p in spec.ports if p.direction == "in"), None)
+    out_port = next((p for p in spec.ports if p.direction == "out"), None)
+    if in_port is None or out_port is None:
+        # 未声明输入/输出端口 → 装配阻断, 不再兜底合成(RR-P2-05)。
+        raise AppError(
+            f"管道模型 {pipe.model} 必须声明 in/out 端口, 装配不可用",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={"model": pipe.model},
+        )
     delay = int(pipe.params.get("delay_steps", 1) or 1)
+    in_carrier = in_port.energy_carrier
+    in_qty, in_unit = CARRIER_DEFAULT_QUANTITY_UNIT[in_carrier]
+    out_carrier = out_port.energy_carrier
+    out_qty, out_unit = CARRIER_DEFAULT_QUANTITY_UNIT[out_carrier]
     return [
         AssemblyPort(
             device=pipe.id,
-            name=f"{carrier}_in",
-            carrier=carrier,
+            name=in_port.name,
+            carrier=in_carrier,
             direction="in",
-            quantity=CARRIER_DEFAULT_QUANTITY_UNIT[carrier][0],
-            unit=CARRIER_DEFAULT_QUANTITY_UNIT[carrier][1],
+            quantity=in_qty,
+            unit=in_unit,
             nature=NATURE_INSTANT,
         ),
         AssemblyPort(
             device=pipe.id,
-            name=f"{carrier}_out",
-            carrier=carrier,
+            name=out_port.name,
+            carrier=out_carrier,
             direction="out",
-            quantity=CARRIER_DEFAULT_QUANTITY_UNIT[carrier][0],
-            unit=CARRIER_DEFAULT_QUANTITY_UNIT[carrier][1],
+            quantity=out_qty,
+            unit=out_unit,
             nature=NATURE_DELAYED,
             delay_steps=delay,
         ),
