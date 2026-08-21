@@ -25,6 +25,15 @@ from iesplan.assembly import (
     dumps_assembly,
     parse_assembly,
 )
+
+# RR-P2-05: 装配检查消费运行期 YAML 注册表(无静态回退), 测试需先初始化
+@pytest.fixture(autouse=True)
+def _init_device_registry():
+    """每例前初始化运行期设备注册表(内置 catalog), 保证装配检查可用。"""
+    from iesplan.devices import init_registry
+
+    init_registry()
+    yield
 from iesplan.assembly.diags import (
     ASM_ALL_CODES,
     ASM_CONST_DIM,
@@ -67,7 +76,7 @@ from iesplan.assembly.diags import (
 )
 from iesplan.assembly.schema import AssemblySpec
 from iesplan.core.diagnostics import DIAG_FIX_HINT_KEYS, DIAG_MESSAGE_KEYS, make_diag
-from iesplan.core.registry import DeviceTypeSpec, list_device_types
+from iesplan.devices import DeviceModelDescriptor as DeviceTypeSpec, list_device_descriptors as list_device_types
 
 # ---------------------------------------------------------------------------
 # 通用夹具与辅助
@@ -669,9 +678,20 @@ class TestPhaseD:
             version="1.0.0",
             name_zh="固定发电",
             name_en="Fixed Generation",
+            model_method="mechanism",
+            stateful=False,
+            fidelity="medium",
             energy_carriers=["electric"],
             is_load=False,
             capabilities=["generation"],
+            extends="ies.device.base",
+            help_topic="",
+            parameters={},
+            ports=[],
+            time_series={"inputs": [], "outputs": []},
+            states=[],
+            function={},
+            standard_csv_path=None,
         )
         ctx = CheckContext(
             registry=_registry_with({"ies.device.fixed_gen": fixed_gen}), datasets=DATASETS
@@ -1098,43 +1118,45 @@ class TestCheckResult:
 
 
 class TestRegistryFallbackBoundary:
-    """BE-REG-03: 仅"注册表未初始化"(SYS-CFG-001)回退静态表, 其他错误阻断。"""
+    """RR-P2-05: 静态回退已删除——注册表未初始化/损坏一律使装配不可用并暴露诊断。"""
 
-    def test_uninitialized_registry_falls_back_to_static(self, monkeypatch):
+    def test_uninitialized_registry_blocks_assembly(self, monkeypatch):
+        """RR-P2-05: 注册表不可用(门面抛错)时装配直接阻断, 不回退静态表。"""
         import iesplan.assembly.checker as checker_mod
         from iesplan.core.errors import AppError
 
-        def fake_get_registry():
+        def fake_list_descriptors():
             raise AppError("设备注册表尚未初始化", code="SYS-CFG-001")
 
         monkeypatch.setattr(
-            "iesplan.devices.registry.get_registry", fake_get_registry
+            "iesplan.devices.list_device_descriptors", fake_list_descriptors
         )
-        reg = checker_mod._default_registry()
-        assert "ies.device.heat_pump" in reg  # 静态表兜底
+        with pytest.raises(AppError):  # 不再回退静态表, 直接阻断
+            checker_mod._default_registry()
 
     def test_conversion_error_blocks_not_fall_back(self, monkeypatch):
         import iesplan.assembly.checker as checker_mod
         from iesplan.core.errors import AppError
 
-        def fake_get_registry():
+        def fake_list_descriptors():
             raise AppError("注册表内部损坏", code="SYS-CFG-002")
 
         monkeypatch.setattr(
-            "iesplan.devices.registry.get_registry", fake_get_registry
+            "iesplan.devices.list_device_descriptors", fake_list_descriptors
         )
         with pytest.raises(AppError):
             checker_mod._default_registry()
 
     def test_yaml_ports_conversion_error_blocks(self, monkeypatch):
+        """RR-P2-05: 端口来源(公开 descriptor)出错时装配阻断, 不静默降级。"""
         import iesplan.assembly.checker as checker_mod
         from iesplan.core.errors import AppError
 
-        def fake_get_registry():
+        def fake_get_descriptor(type_id):
             raise AppError("注册表内部损坏", code="SYS-CFG-002")
 
         monkeypatch.setattr(
-            "iesplan.devices.registry.get_registry", fake_get_registry
+            "iesplan.devices.get_device_descriptor", fake_get_descriptor
         )
         dev = checker_mod.AssemblyDevice(
             id="d1", model="ies.device.pv@1.4.0", params={}, ports=[],

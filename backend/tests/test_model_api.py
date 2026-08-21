@@ -190,7 +190,7 @@ def test_device_types_public_endpoint(client: TestClient) -> None:
     resp = client.get("/api/registry/device-types")
     assert resp.status_code == 200
     body = resp.json()
-    assert len(body["items"]) == 9
+    assert len(body["items"]) == 10  # RR-P2-05: 含 transport_pipe 管道设备
     hp = next(i for i in body["items"] if i["type_id"] == HP)
     assert hp["name_zh"] == "热泵"
     assert hp["energy_carriers"] == ["electric", "heat", "cool"]
@@ -287,6 +287,127 @@ def test_create_device_generates_ports_by_carrier(
         assert ports["heat_out"].direction == "out"
         assert ports["cool_out"].port_type == "cooling"
         assert ports["cool_out"].direction == "out"
+
+
+def test_sync_ports_preserves_same_carrier_multi_port(
+    db_factory: tuple[sessionmaker, int], project_id: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同载能多端口按名同步(codex 复审 N1): 不按 carrier+direction 合并。
+
+    旧实现把端口压缩成 {carrier: direction}, 同 electric 载体的两个不同名输入
+    端口会互相覆盖, 服务器只保留一个, 前端真实句柄找不到对应服务器端口 →
+    合法连线被判定端口缺失。新实现以 YAML 端口名 (name) 精确匹配, 两个
+    electric 输入端口(名称不同)都应保留; 同名端口 id 不变, 既有连接保持。
+    """
+    from iesplan.devices import DeviceModelDescriptor
+
+    # 假 spec: 同 electric 载体两个不同名输入端口 + 一个 heat 输出
+    fake_spec = DeviceModelDescriptor(
+        type_id="ies.device.dual_inlet", version="1.0.0", name_zh="双输入", name_en="Dual",
+        model_method="mechanism", stateful=False, fidelity="medium",
+        energy_carriers=["electric", "heat"], is_load=False,
+        capabilities=[], extends="ies.device.base", help_topic="",
+        parameters={}, ports=[], time_series={}, states=[],
+        function={"package": "iesplan.modeling.functions", "entry": "pv_output"},
+        standard_csv_path=None,
+    )
+    # 源设备: electric out + heat out(供连接)
+    source_spec = DeviceModelDescriptor(
+        type_id="ies.device.source_box", version="1.0.0", name_zh="源", name_en="Source",
+        model_method="mechanism", stateful=False, fidelity="medium",
+        energy_carriers=["electric", "heat"], is_load=False,
+        capabilities=[], extends="ies.device.base", help_topic="",
+        parameters={}, ports=[], time_series={}, states=[],
+        function={"package": "iesplan.modeling.functions", "entry": "pv_output"},
+        standard_csv_path=None,
+    )
+
+    def _dual_ports(spec, params=None):
+        return [
+            {"carrier": "electric", "direction": "in", "name": "electric_a", "capacity_ref": None},
+            {"carrier": "electric", "direction": "in", "name": "electric_b", "capacity_ref": None},
+            {"carrier": "heat", "direction": "out", "name": "heat_out", "capacity_ref": None},
+        ]
+
+    def _source_ports(spec, params=None):
+        return [
+            {"carrier": "electric", "direction": "out", "name": "electric_out", "capacity_ref": None},
+            {"carrier": "heat", "direction": "out", "name": "heat_out", "capacity_ref": None},
+        ]
+
+    monkeypatch.setattr(svc, "_descriptor_ports", lambda spec, params=None: (
+        _source_ports(spec) if spec.type_id == "ies.device.source_box" else _dual_ports(spec)
+    ))
+    # create_device/validate_device_params 从注册表读 spec; 假设备不在注册表,
+    # mock 模块级 get_device_descriptor 返回对应假 spec(覆盖创建/校验/同步三路径)
+    monkeypatch.setattr(svc, "get_device_descriptor", lambda type_id: (
+        source_spec if type_id == "ies.device.source_box" else fake_spec
+    ))
+    factory, admin_id = db_factory
+    with factory() as session:
+        # 创建两个设备: 源(source_box) + 目标(dual_inlet)
+        src = svc.create_device(session, project_id, "ies.device.source_box", "Src1", created_by=admin_id)
+        dst = svc.create_device(session, project_id, fake_spec.type_id, "Dual1", created_by=admin_id)
+        src_ports = {p.name: p for p in svc.get_device_ports(session, src.id)}
+        dst_ports = {p.name: p for p in svc.get_device_ports(session, dst.id)}
+        assert set(dst_ports) == {"electric_a", "electric_b", "heat_out"}
+        assert dst_ports["electric_a"].port_type == "electric"
+        assert dst_ports["electric_b"].port_type == "electric"
+
+        # 连接: 源 electric_out → 目标 electric_a(真实端口 id)
+        conn = svc.connect(
+            session, project_id,
+            from_port_id=src_ports["electric_out"].id,
+            to_port_id=dst_ports["electric_a"].id,
+            attrs={"conn_type": "electric_line"},
+        )
+
+        # 更新参数触发 _sync_ports_for_params: 双 electric 端口按名保留(id 不变)
+        electric_a_id = dst_ports["electric_a"].id
+        electric_b_id = dst_ports["electric_b"].id
+        svc.update_device(session, project_id, dst.id, params={})
+        ports_after = {p.name: p for p in svc.get_device_ports(session, dst.id)}
+        assert set(ports_after) == {"electric_a", "electric_b", "heat_out"}
+        assert ports_after["electric_a"].id == electric_a_id  # 同名端口 id 稳定
+        assert ports_after["electric_b"].id == electric_b_id
+
+        # 连接仍保留(未裁剪端口不被误删连接)
+        conns = svc._load_connections(session, dst.graph_id) if hasattr(svc, "_load_connections") else []
+        assert any(c.id == conn.id for c in conns)
+
+        # 裁剪: 期望集合移除 electric_b(同载能但名称不同) → 只有 electric_b 被删,
+        # electric_a 及其连接保留
+        monkeypatch.setattr(
+            svc, "_descriptor_ports",
+            lambda spec, params=None: [
+                {"carrier": "electric", "direction": "in", "name": "electric_a", "capacity_ref": None},
+                {"carrier": "heat", "direction": "out", "name": "heat_out", "capacity_ref": None},
+            ],
+        )
+        svc.update_device(session, project_id, dst.id, params={})
+        ports_final = {p.name: p for p in svc.get_device_ports(session, dst.id)}
+        assert set(ports_final) == {"electric_a", "heat_out"}
+        assert ports_final["electric_a"].id == electric_a_id  # 保留端口 id 不变
+        # electric_a 的连接未被裁剪删除
+        conn_after = svc._load_connections(session, dst.graph_id)
+        assert any(c.id == conn.id for c in conn_after)
+
+        # 补建: 期望集合重新包含 electric_b → 按 name 补建新端口
+        monkeypatch.setattr(svc, "_descriptor_ports", _dual_ports)
+        svc.update_device(session, project_id, dst.id, params={})
+        ports_rebuilt = {p.name: p for p in svc.get_device_ports(session, dst.id)}
+        assert set(ports_rebuilt) == {"electric_a", "electric_b", "heat_out"}
+        assert ports_rebuilt["electric_a"].id == electric_a_id  # 既有端口复用
+        assert ports_rebuilt["electric_b"].id != electric_b_id  # 补建为新 id
+
+
+def test_catalog_compute_command_refs_resolvable() -> None:
+    """计算命令 function_ref 全部可解析(codex 复审 B3): 启动校验不延迟到运行期。"""
+    from iesplan.modeling.command import compute_command_refs, resolve_function_ref
+
+    for command_id, ref in compute_command_refs().items():
+        fn = resolve_function_ref(ref)  # 抛 NotFoundError 即失败
+        assert callable(fn), f"{command_id} 引用不可调用: {ref}"
 
 
 def test_create_device_kind_and_fidelity(db_factory: tuple[sessionmaker, int], project_id: int) -> None:

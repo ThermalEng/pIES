@@ -1,0 +1,15 @@
+{
+  "name": "iesplan-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QA-E2E-01: Playwright 真实用户验收(仅运行于 Docker, 与 docker-compose e2e 服务配套)",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:chromium": "playwright test --project=chromium",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.54.2"
+  }
+}

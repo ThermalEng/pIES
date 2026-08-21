@@ -22,13 +22,28 @@ from iesplan.api.auth import router as auth_router
 from iesplan.api.objects import router as objects_router
 from iesplan.config import settings
 from iesplan.core.errors import AppError
+from iesplan.core.idgen import sha256_hex
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
 from iesplan.models.audit import AuditLog, RetentionRule
+from iesplan.models.identity import User
+from iesplan.services import identity
+from iesplan.storage import (
+    ObjectCorruptError,
+    add_ref,
+    check_capacity,
+    estimate_storage,
+    get_object,
+    list_refs,
+    object_info,
+    put_object,
+    reconcile,
+    remove_ref,
+    safe_cleanup,
+    verify_object,
+)
 from iesplan.storage.contracts import ObjectHandle
 from iesplan.storage.persistence import ObjectRef, StoredObject
-from iesplan.models.identity import User
-from iesplan.services import identity, objects
 
 ADMIN_PASSWORD = "Admin12345"
 USER_PASSWORD = "Alice12345"
@@ -107,9 +122,9 @@ def login(client: TestClient, username: str, password: str):
     return {"Authorization": f"Bearer {resp.json()['token']}"}
 
 
-def _put(session: Session, content: bytes, **kw) -> "ObjectHandle":
+def _put(session: Session, content: bytes, **kw) -> ObjectHandle:
     """便捷写入对象(返回公开句柄, 由调用方决定提交)。"""
-    return objects.put_object(
+    return put_object(
         session, content, content_type=kw.pop("content_type", "application/octet-stream"),
         source_category=kw.pop("source_category", "test"), **kw,
     )
@@ -135,7 +150,7 @@ def test_put_object_writes_file_and_record(session: Session, data_dir) -> None:
     obj = _put(session, content, content_type="text/plain", source_category="user_upload")
     session.commit()
 
-    digest = objects.sha256_hex(content)
+    digest = sha256_hex(content)
     # 对象行: 内容寻址字段齐全
     assert obj.oid == digest
     assert obj.sha256 == digest
@@ -154,7 +169,7 @@ def test_put_object_writes_file_and_record(session: Session, data_dir) -> None:
     ).scalar_one()
     assert audit.after["source_category"] == "user_upload"
     # object_info 与行一致
-    info = objects.object_info(session, obj.id)
+    info = object_info(session, obj.id)
     assert info["oid"] == digest and info["size_bytes"] == len(content)
 
 
@@ -179,10 +194,10 @@ def test_put_object_dedup_still_records_business_ref(session: Session, data_dir)
     obj2 = _put(session, content, ref_type="dataset_file", ref_id=11)
     session.commit()
     assert obj1.id == obj2.id
-    refs = objects.list_refs(session, obj1.id)
+    refs = list_refs(session, obj1.id)
     assert len(refs) == 2  # 两个业务实体分别引用
     assert {r.ref_entity_id for r in refs} == {'10', '11'}
-    assert objects.object_info(session, obj1.id)["ref_count"] == 2
+    assert object_info(session, obj1.id)["ref_count"] == 2
 
 
 def test_get_object_returns_bytes(session: Session, data_dir) -> None:
@@ -190,8 +205,8 @@ def test_get_object_returns_bytes(session: Session, data_dir) -> None:
     content = b"get-me-back" * 20
     obj = _put(session, content)
     session.commit()
-    assert objects.get_object(session, obj.id) == content
-    assert objects.get_object(session, obj.oid) == content  # 也支持 oid 查询
+    assert get_object(session, obj.id) == content
+    assert get_object(session, obj.oid) == content  # 也支持 oid 查询
 
 
 # ---------------------------------------------------------------------------
@@ -207,22 +222,22 @@ def test_add_remove_list_refs(session: Session, data_dir) -> None:
     """
     obj = _put(session, b"ref-target" * 4)
     session.commit()
-    ref = objects.add_ref(session, obj.id, "version_ref", 7, purpose="版本发布")
+    ref = add_ref(session, obj.id, "version_ref", 7, purpose="版本发布")
     session.commit()
     assert ref.ref_entity_type == "project_versions"  # REF_ENTITY_TYPE_MAP 推断
-    assert objects.object_info(session, obj.id)["ref_count"] == 1
-    assert len(objects.list_refs(session, obj.id)) == 1
+    assert object_info(session, obj.id)["ref_count"] == 1
+    assert len(list_refs(session, obj.id)) == 1
 
     # 重复引用幂等: 不重复计数
-    objects.add_ref(session, obj.id, "version_ref", 7)
+    add_ref(session, obj.id, "version_ref", 7)
     session.commit()
-    assert objects.object_info(session, obj.id)["ref_count"] == 1
+    assert object_info(session, obj.id)["ref_count"] == 1
 
-    objects.remove_ref(session, obj.id, "version_ref", 7)
+    remove_ref(session, obj.id, "version_ref", 7)
     session.commit()
-    assert objects.object_info(session, obj.id)["ref_count"] == 0
-    assert objects.object_info(session, obj.id)["status"] == "orphaned"  # 引用归零 → orphaned
-    assert objects.list_refs(session, obj.id) == []
+    assert object_info(session, obj.id)["ref_count"] == 0
+    assert object_info(session, obj.id)["status"] == "orphaned"  # 引用归零 → orphaned
+    assert list_refs(session, obj.id) == []
 
 
 def test_remove_ref_unknown_raises(session: Session, data_dir) -> None:
@@ -230,7 +245,7 @@ def test_remove_ref_unknown_raises(session: Session, data_dir) -> None:
     obj = _put(session, b"no-ref" * 3)
     session.commit()
     with pytest.raises(AppError) as exc:
-        objects.remove_ref(session, obj.id, "report", 1)
+        remove_ref(session, obj.id, "report", 1)
     assert exc.value.http_status == 404
 
 
@@ -247,8 +262,8 @@ def test_get_object_corrupt_hash_raises(session: Session, data_dir) -> None:
     # 篡改磁盘文件(记录哈希不变)
     path = data_dir / "objects" / obj.sha256
     path.write_bytes(b"tampered!" + content[9:])
-    with pytest.raises(objects.ObjectCorruptError) as exc:
-        objects.get_object(session, obj.id)
+    with pytest.raises(ObjectCorruptError) as exc:
+        get_object(session, obj.id)
     assert exc.value.code == "OBJ-CORRUPT-001"
 
 
@@ -257,8 +272,8 @@ def test_get_object_missing_file_raises(session: Session, data_dir) -> None:
     obj = _put(session, b"gone-soon" * 6)
     session.commit()
     (data_dir / "objects" / obj.sha256).unlink()
-    with pytest.raises(objects.ObjectCorruptError):
-        objects.get_object(session, obj.id)
+    with pytest.raises(ObjectCorruptError):
+        get_object(session, obj.id)
 
 
 def test_verify_object_reports_corruption(session: Session, data_dir) -> None:
@@ -266,15 +281,15 @@ def test_verify_object_reports_corruption(session: Session, data_dir) -> None:
     content = b"verify-me" * 12
     obj = _put(session, content)
     session.commit()
-    good = objects.verify_object(session, obj.id)
+    good = verify_object(session, obj.id)
     assert good["ok"] is True and good["hash_ok"] is True and good["size_ok"] is True
 
     (data_dir / "objects" / obj.sha256).write_bytes(b"xx")
-    bad = objects.verify_object(session, obj.id)
+    bad = verify_object(session, obj.id)
     assert bad["ok"] is False and bad["error"] == "ies.diag.obj.corrupt"
 
     (data_dir / "objects" / obj.sha256).unlink()
-    missing = objects.verify_object(session, obj.id)
+    missing = verify_object(session, obj.id)
     assert missing["ok"] is False
 
 
@@ -287,10 +302,10 @@ def test_safe_cleanup_dry_run_plan(session: Session, data_dir) -> None:
     """清理计划: dry_run 只列出无引用对象, 不删任何数据。"""
     orphan = _put(session, b"orphan-1" * 5)
     kept = _put(session, b"kept-1" * 5)
-    objects.add_ref(session, kept.id, "snapshot_ref", 3)
+    add_ref(session, kept.id, "snapshot_ref", 3)
     session.commit()
 
-    plan = objects.safe_cleanup(session, dry_run=True)
+    plan = safe_cleanup(session, dry_run=True)
     assert plan["dry_run"] is True
     assert plan["count"] == 1
     assert plan["candidates"][0]["id"] == orphan.id
@@ -306,7 +321,9 @@ def test_safe_cleanup_execute_removes_unreferenced(session: Session, data_dir) -
     kept = _put(session, b"kept-version" * 7, ref_type="version_ref", ref_id=42)  # project_versions
     session.commit()
 
-    result = objects.safe_cleanup(session, dry_run=False)
+    plan = safe_cleanup(session, dry_run=True)
+    result = safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
+    session.commit()  # RR-P1-03: 应用用例拥有事务, 存储服务只 flush
     assert result["removed_count"] == 1
     assert result["errors"] == []
     # 无引用对象: 文件与记录均已删除
@@ -315,7 +332,7 @@ def test_safe_cleanup_execute_removes_unreferenced(session: Session, data_dir) -
     # 被项目版本引用的对象保留(23.2)
     assert (data_dir / "objects" / kept.sha256).exists()
     assert session.get(StoredObject, kept.id) is not None
-    assert objects.object_info(session, kept.id)["ref_count"] == 1
+    assert object_info(session, kept.id)["ref_count"] == 1
     # 清理审计(01 §10.3)
     assert _count_audit(session, "object_cleanup") == 1
     audit = session.execute(
@@ -335,10 +352,10 @@ def test_safe_cleanup_keeps_referenced_and_protected(session: Session, data_dir)
     ]
     for ref_type, ref_id, _entity in objects_to_ref:
         obj = _put(session, f"protected-{ref_type}-{ref_id}".encode() * 3)
-        objects.add_ref(session, obj.id, ref_type, ref_id)
+        add_ref(session, obj.id, ref_type, ref_id)
     session.commit()
 
-    plan = objects.safe_cleanup(session, dry_run=True)
+    plan = safe_cleanup(session, dry_run=True)
     assert plan["count"] == 0
     assert plan["retained_count"] == 0  # 被引用对象不是"保留", 而是天然不可清理
 
@@ -361,7 +378,7 @@ def test_safe_cleanup_retention_rule_holds(session: Session, data_dir) -> None:
     orphan = _put(session, b"young-orphan" * 4)
     session.commit()
 
-    plan = objects.safe_cleanup(session, dry_run=True)
+    plan = safe_cleanup(session, dry_run=True)
     assert plan["count"] == 0
     assert plan["retained_count"] == 1
     assert plan["retained"][0]["id"] == orphan.id
@@ -372,7 +389,9 @@ def test_safe_cleanup_missing_file_skipped(session: Session, data_dir) -> None:
     orphan = _put(session, b"no-file" * 3)
     session.commit()
     (data_dir / "objects" / orphan.sha256).unlink()
-    result = objects.safe_cleanup(session, dry_run=False)
+    plan = safe_cleanup(session, dry_run=True)
+    result = safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
+    session.commit()  # RR-P1-03
     assert result["removed_count"] == 0
     assert len(result["errors"]) == 1
     assert session.get(StoredObject, orphan.id) is not None
@@ -385,20 +404,20 @@ def test_safe_cleanup_missing_file_skipped(session: Session, data_dir) -> None:
 
 def test_estimate_storage_scales_with_inputs() -> None:
     """容量估算: 随时长/样本数单调不减, 且不小于下限。"""
-    base = objects.estimate_storage("calc", 24, 1)
+    base = estimate_storage("calc", 24, 1)
     assert base > 0
-    assert objects.estimate_storage("calc", 48, 1) > base  # 时长加倍
-    assert objects.estimate_storage("calc", 24, 100) >= base  # 样本增加
-    assert objects.estimate_storage("calc", 0, 0) >= 1024  # 下限
+    assert estimate_storage("calc", 48, 1) > base  # 时长加倍
+    assert estimate_storage("calc", 24, 100) >= base  # 样本增加
+    assert estimate_storage("calc", 0, 0) >= 1024  # 下限
     # 各任务类型均有估算值
     for task_type in ("calc", "optimization", "uncertainty", "import", "export", "report", "dataset_build"):
-        assert objects.estimate_storage(task_type, 24, 10) > 0
+        assert estimate_storage(task_type, 24, 10) > 0
 
 
 def test_estimate_storage_unknown_type_raises() -> None:
     """未知任务类型抛 AppError。"""
     with pytest.raises(AppError):
-        objects.estimate_storage("nope", 1, 1)
+        estimate_storage("nope", 1, 1)
 
 
 def test_check_capacity(session: Session, data_dir, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -409,13 +428,13 @@ def test_check_capacity(session: Session, data_dir, monkeypatch: pytest.MonkeyPa
     from iesplan.storage import service as storage_service
 
     monkeypatch.setattr(storage_service, "shutil", stub)
-    res = objects.check_capacity(session)
+    res = check_capacity(session)
     assert res["ok"] is True
     assert res["free_bytes"] > res["safe_threshold"]
 
     stub2 = SimpleNamespace(disk_usage=lambda _p: SimpleNamespace(free=100))
     monkeypatch.setattr(storage_service, "shutil", stub2)
-    res2 = objects.check_capacity(session)
+    res2 = check_capacity(session)
     assert res2["ok"] is False
     assert "不足" in res2["message"]
 
@@ -446,7 +465,7 @@ def test_api_storage_view(client: TestClient, session: Session, data_dir) -> Non
     headers = login(client, "admin", ADMIN_PASSWORD)
     _put(session, b"api-storage-1" * 3)
     kept = _put(session, b"api-storage-2" * 3)
-    objects.add_ref(session, kept.id, "report", 9)
+    add_ref(session, kept.id, "report", 9)
     session.commit()
 
     resp = client.get("/api/admin/storage", headers=headers)
@@ -477,11 +496,16 @@ def test_api_cleanup_plan_then_execute(client: TestClient, session: Session, dat
     assert p["candidates"][0]["id"] == orphan.id
     assert (data_dir / "objects" / orphan.sha256).exists()
 
-    # 阶段 2: 执行
-    done = client.post("/api/admin/objects/cleanup", json={"dry_run": False}, headers=headers)
+    # 阶段 2: 执行(必须携带 dry-run 返回的 plan_id, RR-P2-07)
+    done = client.post(
+        "/api/admin/objects/cleanup",
+        json={"dry_run": False, "plan_id": p["plan_id"]},
+        headers=headers,
+    )
     assert done.status_code == 200
     d = done.json()
     assert d["dry_run"] is False and d["removed_count"] == 1
+    assert d["plan_id"] == p["plan_id"]
     assert not (data_dir / "objects" / orphan.sha256).exists()
     assert (data_dir / "objects" / kept.sha256).exists()  # 被证据包引用, 保留
 
@@ -517,7 +541,7 @@ class TestTransactionIsolation:
         obj = _put(session, b"txn-isolation" * 3)
         session.commit()
         # 先建立引用
-        objects.add_ref(session, obj.id, "version_ref", 7)
+        add_ref(session, obj.id, "version_ref", 7)
         session.commit()
 
         # 业务修改(同事务未提交): 给对象设配额
@@ -525,7 +549,7 @@ class TestTransactionIsolation:
         row.quota_bytes = 12345
 
         # 重复引用(唯一键冲突路径) → 幂等返回, 不应回滚外层事务
-        ref = objects.add_ref(session, obj.id, "version_ref", 7)
+        ref = add_ref(session, obj.id, "version_ref", 7)
         session.commit()
         assert ref is not None
         # 业务修改仍在: 配额未被回滚丢失
@@ -565,7 +589,7 @@ class TestReconcile:
         session.commit()
         (data_dir / "objects" / obj.sha256).unlink()
 
-        report = objects.reconcile(session, dry_run=True)
+        report = reconcile(session, dry_run=True)
         assert report["dry_run"] is True
         assert any("ab" in o["storage_path"] for o in report["orphan_reported"])
         assert any(c["reason"] == "missing_file" for c in report["corrupt_reported"])
@@ -577,7 +601,7 @@ class TestReconcile:
         file_digest = "cd" + "1" * 62  # 文件名(手工构造)
         (data_dir / "objects").mkdir(parents=True, exist_ok=True)
         (data_dir / "objects" / file_digest).write_bytes(b"orphan-content")
-        report = objects.reconcile(session, dry_run=False)
+        report = reconcile(session, dry_run=False)
         assert report["orphan_registered"] == [f"objects/{file_digest}"]
         # 登记行的 oid/sha256 以内容真实哈希为准(文件名为纯存储标识)
         real_digest = hashlib.sha256(b"orphan-content").hexdigest()
@@ -586,21 +610,21 @@ class TestReconcile:
         ).scalar_one()
         assert row.status == "stored" and row.ref_count == 0
         # 幂等: 再次执行不再登记
-        report2 = objects.reconcile(session, dry_run=False)
+        report2 = reconcile(session, dry_run=False)
         assert report2["orphan_registered"] == []
 
     def test_reconcile_fixes_ref_count_drift(self, session: Session, data_dir) -> None:
         """计数漂移修正: 引用清单为权威, ref_count 缓存不一致时修正并置孤儿状态。"""
         obj = _put(session, b"drift-target" * 2)
-        objects.add_ref(session, obj.id, "report", 5)
+        add_ref(session, obj.id, "report", 5)
         session.commit()
         # 人为制造漂移: 引用清单为空但 ref_count 残留
         session.execute(
             sa.delete(ObjectRef).where(ObjectRef.object_id == obj.id)
         )
         session.flush()
-        report = objects.reconcile(session, dry_run=False)
+        report = reconcile(session, dry_run=False)
         assert report["ref_count_fixed"] >= 1
-        info = objects.object_info(session, obj.id)
+        info = object_info(session, obj.id)
         assert info["ref_count"] == 0
         assert info["status"] == "orphaned"

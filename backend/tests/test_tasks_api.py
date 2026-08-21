@@ -270,6 +270,44 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     assert first["summary"]["percent"] == 0.0
 
 
+def test_idempotency_key_scoped_to_project(client: TestClient, db: Session) -> None:
+    """幂等键必须限定项目范围(RR-P1-05)。
+
+    同一幂等键在不同项目下必须创建各自任务; 跨项目复用既有任务是
+    拒绝服务/数据泄漏语义错误(前端幂等键由 config+params 哈希生成,
+    跨项目相同, 命中他项目任务会让列表为空、详情 404)。
+    """
+    owner = make_user(db, "owner_scope")
+    pid_a = _prepare_project(client, db, owner, name="项目A")
+    pid_b = _prepare_project(client, db, owner, name="项目B")
+    key = "sub-calc-shared-key"
+
+    status, body = _submit_task(client, pid_a, owner, idempotency_key=key)
+    assert status == 201
+    task_a = body["task"]
+
+    # 同键在另一项目提交 → 必须 201 新建, 绝不能 replay 项目 A 的任务
+    status, body = _submit_task(client, pid_b, owner, idempotency_key=key)
+    assert status == 201, f"跨项目幂等键必须新建任务, 实际 {status}: {body}"
+    assert body["replayed"] is False
+    task_b = body["task"]
+    assert task_b["id"] != task_a["id"]
+
+    # 项目 B 列表只含自己的任务; 项目 A 的详情在 B 下不可见(404)
+    resp = client.get(f"/api/projects/{pid_b}/tasks", headers=_h(client, owner))
+    assert resp.status_code == 200
+    ids = [it["id"] for it in resp.json()["items"]]
+    assert task_b["id"] in ids and task_a["id"] not in ids
+    resp = client.get(f"/api/projects/{pid_b}/tasks/{task_a['id']}", headers=_h(client, owner))
+    assert resp.status_code == 404
+
+    # 同项目内同键仍幂等(replay 语义不回归)
+    status, body = _submit_task(client, pid_b, owner, idempotency_key=key)
+    assert status == 200
+    assert body["replayed"] is True
+    assert body["task"]["id"] == task_b["id"]
+
+
 # ---------------------------------------------------------------------------
 # 状态推进(可注入假执行器)
 # ---------------------------------------------------------------------------

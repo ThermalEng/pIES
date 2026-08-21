@@ -114,9 +114,9 @@ def _device_cmd(cid: str, name: str, device_type: str = "heat_pump", kind: str =
 
 def _load_content(db: Session, oid: str) -> dict:
     """从对象存储读取内容文档(STO-01: 经公开门面, 不拼路径)。"""
-    from iesplan.services import objects as objects_service
+    from iesplan.storage import get_object
 
-    raw = objects_service.get_object(db, oid)
+    raw = get_object(db, oid)
     return json.loads(raw.decode("utf-8"))
 
 

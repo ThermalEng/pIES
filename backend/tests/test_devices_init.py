@@ -10,8 +10,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from pytest import approx
 import pytest
+from pytest import approx
 
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.devices import yamlmini
@@ -43,7 +43,6 @@ from iesplan.devices.spec import (
     DeviceYamlSpec,
     load_yaml,
     spec_to_dict,
-    to_registry_spec,
 )
 
 #: 合法机理设备基座(其余测试基于它做局部破坏)
@@ -300,19 +299,25 @@ class TestDeviceYamlParse:
         assert exc.value.code == "SYS-CFG-001"
         assert "line" in exc.value.params
 
-    def test_spec_to_dict_and_registry_spec(self):
+    def test_spec_to_dict_and_model_descriptor(self):
+        """YAML 设备规格 → spec_to_dict 字典 + to_model_descriptor 公开建模描述。"""
         spec = load_yaml(DEFAULT_CATALOG_DIR / "pv.yaml")
         data = spec_to_dict(spec)
         assert data["model_method"] == "mechanism"
         assert data["stateful"] is False
         assert data["parameters"]["rated_capacity_kwp"]["unit"] == "kWp"
         assert data["ports"][1]["capacity_ref"] == "rated_capacity_kwp"
-        reg = to_registry_spec(spec)
-        assert reg.type_id == "ies.device.pv"
-        assert reg.version == "1.4.0"
-        assert reg.energy_carriers == ["solar", "electric"]
-        assert reg.parameters["efficiency"].default == 0.20
-        assert reg.help_topic == "help.modeling.pv"
+        # RR-P2-02: 设备类型事实源为 YAML; 公开建模描述直接来自 to_model_descriptor,
+        # 不再经过 legacy to_registry_spec 的字段筛选(端口/状态等原本被丢失)。
+        from iesplan.devices.spec import to_model_descriptor
+        desc = to_model_descriptor(spec)
+        assert desc.type_id == "ies.device.pv"
+        assert desc.version == "1.4.0"
+        assert desc.energy_carriers == ["solar", "electric"]
+        assert desc.parameters["efficiency"].default == 0.20
+        assert desc.help_topic == "help.modeling.pv"
+        # YAML 真实端口完整透传(原 to_registry_spec 路径丢失):
+        assert any(p.name == "electric_out" and p.port_type == "electric" for p in desc.ports)
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +503,11 @@ class TestLoader:
         assert discover_device_dirs(nested) == [nested / "sub"]
 
     def test_catalog_loads_clean(self, book):
-        """内置 catalog: 9 台设备全部加载成功, 联合校验零诊断。"""
+        """内置 catalog: 10 台设备全部加载成功, 联合校验零诊断。
+
+        RR-P2-05: 管道设备 ``ies.device.transport_pipe`` 作为合法业务设备
+        进入 YAML 目录(单一事实源), 装配模块直接消费 descriptor。
+        """
         specs = load_all_devices(DEFAULT_CATALOG_DIR, book)
         ids = [s.type_id for s in specs]
         assert ids == sorted(ids)
@@ -512,6 +521,7 @@ class TestLoader:
             "ies.device.heat_load",
             "ies.device.heat_pump",
             "ies.device.pv",
+            "ies.device.transport_pipe",
         ]
         assert validate_device_dir(DEFAULT_CATALOG_DIR, book) == []
 
@@ -563,7 +573,7 @@ def _series_spec(
     """构造带 time_series 声明的机理设备 spec(直接 load_yaml, 不做联合校验)。"""
     text = (
         _BASE
-        + f"time_series:\n  inputs:\n"
+        + "time_series:\n  inputs:\n"
         + f"    - {{key: {key}, unit: {unit}, resolution: 1h, required: true{extra}}}\n"
     )
     return load_yaml(_write(tmp_path, f"{name}.yaml", text))
@@ -675,7 +685,7 @@ def registry():
 
 class TestRegistry:
     def test_load_get_list_snapshot(self, registry):
-        assert len(registry.list()) == 9  # 内置 catalog 九类设备
+        assert len(registry.list()) == 10  # RR-P2-05: 含 transport_pipe 管道设备
         pv = registry.get("ies.device.pv")
         assert pv.version == "1.4.0"
         snap = registry.snapshot()
@@ -715,9 +725,9 @@ class TestRegistry:
         fn = registry.get_entry_function("ies.device.pv")
         assert callable(fn)
         # 以统一契约调用: params(业务单位)+ series(内部单位) → DeviceRunResult
-        from iesplan.modeling.command import DeviceRunResult
-
         import numpy as np
+
+        from iesplan.modeling.command import DeviceRunResult
 
         n = 3
         result = fn(
@@ -752,19 +762,63 @@ class TestRegistry:
         )
         assert result.state_new is not None and "soc" in result.state_new
 
-    def test_reload_plugin_adds_device(self, tmp_path, book):
+    def test_reload_rejected_run_period(self, tmp_path, book):
+        """RR-P2-04: 正式发布前不实现运行期热加载; reload 入口已删除。
+
+        注册表仅在 ``init_registry`` 启动期加载一次, 运行期不再提供 reload。
+        本测试断言该入口已下线(运行时调用 AttributeError)。
+        """
         reg = DeviceRegistry(tmp_path, book)
         reg.load()
         assert reg.list() == []
-        _write(tmp_path, "pv2.yaml", _BASE.replace("type_id: ies.device.test", "type_id: ies.device.pv2"))
-        reg.reload()  # 插件式热加载: 无需重启
-        assert [s.type_id for s in reg.list()] == ["ies.device.pv2"]
+        # 运行期不再提供 reload 入口(宪法 5.3)。
+        assert not hasattr(reg, "reload")
 
 
 class TestSingleton:
     def test_init_registry_singleton(self):
         reg = init_registry()  # 缺省内置 catalog + 缺省价格书
         assert reg is get_registry()
-        assert len(reg.snapshot()) == 9  # 内置 catalog 九类设备
+        assert len(reg.snapshot()) == 10  # RR-P2-05: 含 transport_pipe 管道设备
         reg2 = init_registry()  # 可重初始化
         assert reg2 is get_registry()
+
+
+class TestInstalledPackageData:
+    """RR-P1-01: 默认设备目录必须随安装包分发(Docker `pip install .[dev]` 后仍可加载)。
+
+    这些测试不依赖仓库源码目录: 若 catalog 未进入 site-packages 的包资源
+    (pyproject package-data 配置缺失), 以下断言必然失败。
+    """
+
+    def test_catalog_dir_lives_inside_installed_package(self):
+        """catalog 目录必须位于 iesplan 包内(而非仓库源码路径)。"""
+        import iesplan.devices.loader as loader_module
+
+        pkg_root = Path(loader_module.__file__).resolve().parent  # .../iesplan/devices/
+        expected = pkg_root / "catalog"
+        assert DEFAULT_CATALOG_DIR == expected
+        # 仓库源码目录可能恰好存在, 因此额外断言: 该目录属于包树内部
+        assert str(DEFAULT_CATALOG_DIR).startswith(str(pkg_root.parent))
+
+    def test_default_catalog_has_required_resources(self):
+        """安装包内必须有 9 个设备 yaml + prices.yaml + 各 csv(直接按包路径读取)。"""
+        yamls = sorted(DEFAULT_CATALOG_DIR.glob("*.yaml"))
+        names = [p.stem for p in yamls]
+        assert "prices" in names
+        device_yamls = [p for p in yamls if p.stem != "prices"]
+        assert len(device_yamls) == 10
+        assert "pv" in names and "heat_pump" in names and "battery" in names
+        for dev in ("electric_load", "heat_load", "cooling_load"):
+            assert (DEFAULT_CATALOG_DIR / f"{dev}.csv").is_file()
+
+    def test_import_loads_default_catalog_without_cwd_dependence(self, monkeypatch, tmp_path):
+        """换工作目录后仍能经包路径加载默认目录并 init_registry 成功(RR-P1-01)。"""
+        monkeypatch.chdir(tmp_path)  # 不依赖"源码目录恰好是当前工作目录"
+        book = load_price_book()
+        specs = load_all_devices(DEFAULT_CATALOG_DIR, book)
+        assert len(specs) == 10
+        assert validate_device_dir(DEFAULT_CATALOG_DIR, book) == []
+        reg = DeviceRegistry(DEFAULT_CATALOG_DIR, book)
+        reg.load()
+        assert len(reg.snapshot()) == 10

@@ -51,7 +51,6 @@ from iesplan.core.idgen import sha256_hex  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.audit import AuditLog, ImportProposal
-from iesplan.storage.persistence import ObjectRef  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
@@ -62,10 +61,11 @@ from iesplan.models.project import (  # noqa: E402
     ProjectMember,
 )
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
-from iesplan.services import objects as objects_service  # noqa: E402
 from iesplan.services import package as package_service  # noqa: E402
 from iesplan.services import project as project_service  # noqa: E402
 from iesplan.services import queue  # noqa: E402
+from iesplan.storage import put_object
+from iesplan.storage.persistence import ObjectRef  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -164,7 +164,7 @@ def _seed_dataset_version(db: Session, project_id: int, tag: str = "ds") -> int:
         b"2025-01-01 00:00:00,125.5,85.2,60.0\n"
         b"2025-01-01 01:00:00,120.0,80.0,55.0\n"
     )
-    obj = objects_service.put_object(db, csv_content, "text/csv; charset=utf-8",
+    obj = put_object(db, csv_content, "text/csv; charset=utf-8",
                                      source_category="dataset")
     dataset = Dataset(project_id=project_id, name=f"{tag}_数据集", status="published",
                       created_by=user.id)
@@ -207,7 +207,7 @@ def _seed_evidence(
         },
         ensure_ascii=False,
     ).encode("utf-8")
-    obj = objects_service.put_object(db, evidence_content, "application/json",
+    obj = put_object(db, evidence_content, "application/json",
                                      source_category="evidence")
     snapshot = CalcSnapshot(
         project_version_id=version_id, dataset_version_ids=[dataset_version_id],

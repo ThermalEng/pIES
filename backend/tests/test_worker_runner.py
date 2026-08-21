@@ -27,7 +27,8 @@ from iesplan.db import Base  # noqa: E402
 from iesplan.models.calc import Task, TaskAttempt  # noqa: E402
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.models.uncertainty import SampleRecord, SampleTask, UncertaintySnapshot  # noqa: E402
-from iesplan.services import objects, queue  # noqa: E402
+from iesplan.services import queue
+from iesplan.storage import get_object
 from iesplan.worker import lease, runner  # noqa: E402
 from iesplan.worker.solver_process import run_solver_isolated  # noqa: E402
 
@@ -97,7 +98,7 @@ def _evidence_payload(db: Session, task_id: int) -> dict:
         .order_by(EvidencePackage.id.desc())
     ).scalars().first()
     assert package is not None, "证据包不存在"
-    raw = objects.get_object(db, package.object_id)
+    raw = get_object(db, package.object_id)
     return json.loads(raw.decode("utf-8"))
 
 

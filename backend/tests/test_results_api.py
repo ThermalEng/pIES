@@ -44,10 +44,10 @@ from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.calc import Task, TaskLease  # noqa: E402
 from iesplan.models.result import EvidencePackage, ResultSelection  # noqa: E402
-from iesplan.services import objects as objects_service  # noqa: E402
 from iesplan.services import queue  # noqa: E402
 from iesplan.services import results as results_service  # noqa: E402
 from iesplan.services import tasks as tasks_service  # noqa: E402
+from iesplan.storage import put_object
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -169,7 +169,7 @@ def _store_hourly(db: Session, rows: int, fields: list[str] | None = None) -> in
         "meta": {"resolution": "1h", "rows": rows,
                  "units": {"p_grid_buy": "kW", "p_grid_sell": "kW", "soc": "%"}},
     }
-    obj = objects_service.put_object(
+    obj = put_object(
         db, _canonical(doc).encode("utf-8"), "application/json", "eval_results",
         purpose="hourly_result",
     )

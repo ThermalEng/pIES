@@ -24,8 +24,9 @@ from iesplan.models.calc import CalcSnapshot, Task  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
 from iesplan.models.project import Project, ProjectVersion  # noqa: E402
-from iesplan.services import objects, queue  # noqa: E402
 from iesplan.services import project as project_service
+from iesplan.services import queue
+from iesplan.storage import put_object
 
 #: 环境序号(保证同库内用户名/项目名唯一, 避免跨环境 UNIQUE 冲突)
 _env_seq = 0
@@ -122,7 +123,7 @@ def setup_environment(
     dver_id: int | None = None
     if with_dataset:
         csv_bytes = MINI_CSV.encode("utf-8")
-        obj = objects.put_object(db, csv_bytes, "text/csv", "dataset_file", purpose="dataset_data",
+        obj = put_object(db, csv_bytes, "text/csv", "dataset_file", purpose="dataset_data",
                                  actor_id=user.id)
         dset = Dataset(name=f"迷你数据集-{_env_seq}", status="published", created_by=user.id)
         db.add(dset)

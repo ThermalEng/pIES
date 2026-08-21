@@ -13,9 +13,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from iesplan.core.errors import NotFoundError
-from iesplan.core.registry import ParameterSpec
-
+from iesplan.core.contracts.parameters import ParameterSpec
+from iesplan.core.errors import AppError, NotFoundError
 from iesplan.modeling import (
     MECHANISM_FUNCTIONS,
     MODEL_METHOD_DATA_PREDICT,
@@ -23,12 +22,12 @@ from iesplan.modeling import (
     MODEL_METHOD_MECHANISM,
     DeviceRunResult,
     DeviceSpec,
+    ModelingConfigError,
+    ModelingNotImplementedError,
     ModuleCommand,
     PortSpec,
     SeriesSpec,
     StateSpec,
-    ModelingConfigError,
-    ModelingNotImplementedError,
     boiler_output,
     build_command,
     call_command,
@@ -46,6 +45,7 @@ from iesplan.modeling import (
     prediction_model,
     pv_output,
     register_command,
+    replace_all_commands,
     resolve_function_ref,
     simulate_battery,
     snapshot,
@@ -322,8 +322,9 @@ def test_simulate_battery_validation():
 
 
 def test_build_command_pv_schema():
-    cmd = build_command(make_pv_spec())
+    cmd, entry = build_command(make_pv_spec())
     assert isinstance(cmd, ModuleCommand)
+    assert callable(entry)  # RR-P1-02: 无副作用构建返回统一 callable
     assert cmd.command_id == "ies.command.model.ies.device.pv.mechanism.1.4.0"
     assert cmd.function_ref == "iesplan.modeling.functions.pv_output"
     assert cmd.stateful is False
@@ -338,7 +339,13 @@ def test_build_command_pv_schema():
     # 输出字段规格:out 端口(单位取 capacity_ref 参数单位)
     assert [f.name for f in cmd.outputs] == ["pv_out"]
     assert cmd.outputs[0].unit == "kWp"
-    # 注册表
+    # RR-P1-02: 纯构建不注册任何全局状态(发布前不可见)
+    assert get_command(cmd.command_id) is None
+    assert cmd.command_id not in snapshot()
+    # 发布后可见且 callable 与命令同快照
+    from iesplan.modeling.command import replace_all_commands
+
+    replace_all_commands({cmd.command_id: cmd}, generated={cmd.command_id: entry})
     assert get_command(cmd.command_id) is cmd
     assert cmd.command_id in snapshot()
     assert cmd in list_commands()
@@ -360,9 +367,10 @@ def test_build_command_mechanism_no_port_fallback_output():
         model_function="iesplan.modeling.functions.heat_pump_cop",
         time_series={"inputs": (SeriesSpec(key="t_ambient", unit="°C"),), "outputs": ()},
     )
-    cmd = build_command(spec)
+    cmd, entry = build_command(spec)
     assert [f.name for f in cmd.outputs] == ["cop"]
     assert cmd.outputs[0].unit == "-"
+    replace_all_commands({cmd.command_id: cmd}, generated={cmd.command_id: entry})
     result = call_command(
         cmd.command_id,
         {"params": {"efficiency": 0.45}, "series": {"t_ambient": np.array([283.15])},
@@ -373,7 +381,8 @@ def test_build_command_mechanism_no_port_fallback_output():
 
 
 def test_build_command_mechanism_resolves_and_runs():
-    cmd = build_command(make_pv_spec())
+    cmd, _entry = build_command(make_pv_spec())
+    replace_all_commands({cmd.command_id: cmd}, generated={cmd.command_id: _entry})
     ctx = {
         "params": {"rated_capacity_kwp": 500.0, "efficiency": 0.20},
         "series": {
@@ -465,13 +474,14 @@ def test_periodic_repeat_invalid():
 def test_build_command_data_repeat_and_run():
     spec = make_load_spec()
     curve = np.arange(24, dtype=np.float64) + 1.0  # 典型日曲线 1..24 kWh
-    cmd = build_command(spec, profile={"e_load": curve})
+    cmd, _entry = build_command(spec, profile={"e_load": curve})
     assert cmd.command_id == "ies.command.model.ies.device.electric_load.data_repeat.1.2.0"
     assert cmd.function_ref == "iesplan.modeling.datadriven.periodic_repeat"
     assert cmd.stateful is False
     assert cmd.data_file == "electric_load.csv"
     units = {f.name: f.unit for f in cmd.outputs}
     assert units["e_load_kw"] == "kW"
+    replace_all_commands({cmd.command_id: cmd}, generated={cmd.command_id: _entry})
     # 调用:100 步时间轴 → 周期外推 × 容量缩放(peak_power_kw / 曲线峰值)
     ctx = {
         "params": {"peak_power_kw": 2400.0},  # 峰值 24 → 缩放 ×100
@@ -513,7 +523,7 @@ def test_prediction_model_stub_raises():
 
 
 def test_build_command_data_predict_schema_and_stub():
-    cmd = build_command(make_hp_forecast_spec())
+    cmd, _entry = build_command(make_hp_forecast_spec())
     assert cmd.command_id == "ies.command.model.ies.device.heat_pump_dr.data_predict.1.0.0"
     assert cmd.function_ref == "iesplan.modeling.datadriven.prediction_model"
     assert cmd.stateful is True
@@ -522,6 +532,7 @@ def test_build_command_data_predict_schema_and_stub():
     assert "t_ambient" in input_names and "h_load" in input_names
     output_units = {f.name: f.unit for f in cmd.outputs}
     assert output_units["cop"] == "-"
+    replace_all_commands({cmd.command_id: cmd}, generated={cmd.command_id: _entry})
     # 调用 stub:抛 ModelingNotImplementedError(禁止静默降级)
     with pytest.raises(ModelingNotImplementedError):
         call_command(cmd.command_id, {"params": {}, "series": {"t_ambient": np.zeros(24),
@@ -540,7 +551,7 @@ def test_build_command_data_predict_missing_model_file():
 
 
 def test_build_command_battery_state_schema():
-    cmd = build_command(make_battery_spec())
+    cmd, _entry = build_command(make_battery_spec())
     assert cmd.stateful is True
     # 状态字段规格(名称 + 单位 + 上下限取自参数 min/max)
     state_units = {f.name: f.unit for f in cmd.state_fields}
@@ -556,7 +567,8 @@ def test_build_command_battery_state_schema():
 
 
 def test_call_command_battery_state_roundtrip():
-    cmd = build_command(make_battery_spec())
+    cmd, _entry = build_command(make_battery_spec())
+    replace_all_commands({cmd.command_id: cmd}, generated={cmd.command_id: _entry})
     base_ctx = {
         "params": {"capacity_kwh": 100.0, "initial_soc": 0.5, "charge_efficiency": 0.95,
                    "discharge_efficiency": 0.95, "min_soc": 0.1, "max_soc": 0.9},
@@ -582,18 +594,195 @@ def test_mechanism_functions_table():
     # 机理映射表覆盖三类(简单传热/功率平衡/电池有状态)入口
     assert set(MECHANISM_FUNCTIONS) >= {
         "pv_output", "heat_transfer_q", "power_balance", "simulate_battery",
+        "transport_pipe",
     }
     assert MECHANISM_FUNCTIONS["simulate_battery"].state_key == "soc"
     assert MECHANISM_FUNCTIONS["simulate_battery"].takes_dt is True
+    # RR-P2-05: 传输管道 stateful 机理函数(state_key + takes_dt + 元组返回)。
+    spec = MECHANISM_FUNCTIONS["transport_pipe"]
+    assert spec.state_key == "delay_buffer"
+    assert spec.takes_dt is True
+
+    # 运行期实测: 传入 dt_s 不抛 TypeError, 返回 (out, state_new)。
+    from iesplan.modeling.functions import transport_pipe
+
+    out, state_new = transport_pipe(
+        np.array([100.0, 200.0, 300.0]),
+        loss_rate=0.1,
+        state=None,
+        dt_s=3600.0,
+    )
+    assert out.shape == (3,)
+    assert np.allclose(out, [0.0, 0.0, 0.0])  # 首调用无缓存 → 出流全 0
+    assert isinstance(state_new, dict)
+    assert "delay_buffer" in state_new
+    # 二次调用: 缓存上一轮的入流; rolled + 首位覆盖 0 后 × (1 - loss_rate)。
+    out2, state_new2 = transport_pipe(
+        np.array([400.0, 500.0, 600.0]),
+        loss_rate=0.1,
+        state=state_new,
+        dt_s=3600.0,
+    )
+    # cached=[100,200,300]; shifted=roll(...,1)=[300,100,200]; shifted[0]=0 → [0,100,200]; ×0.9
+    expected = np.array([0.0, 100.0, 200.0]) * 0.9
+    assert np.allclose(out2, expected)
 
 
 def test_register_command_override():
     spec = make_pv_spec()
-    cmd = build_command(spec)
+    cmd, _entry = build_command(spec)
     cid = cmd.command_id
+    replace_all_commands({cid: cmd}, generated={cid: _entry})
     assert len(list_commands()) == 1
     # 覆盖注册同 id:版本不变,命令表仍单条
     register_command(ModuleCommand(command_id=cid, function_ref="iesplan.modeling.functions.pv_output",
                                    version="1.4.0"))
     assert len(list_commands()) == 1
     assert get_command(cid).function_ref == "iesplan.modeling.functions.pv_output"
+
+
+# ---------------------------------------------------------------------------
+# RR-P1-02 验收: 真实设备经 register_catalog_commands 发布后 call_command 可执行
+# ---------------------------------------------------------------------------
+
+
+def _build_real_commands():
+    """用真实内置 catalog 构建命令并原子发布; 返回 (command_id → ModuleCommand)。"""
+    from iesplan.devices import init_registry
+    from iesplan.modeling.registry_loader import register_catalog_commands
+
+    init_registry()  # 加载真实 9 台设备(含 csv/价格)
+    register_catalog_commands()
+    return {c.command_id: c for c in list_commands()}
+
+
+def test_catalog_register_mechanism_call():
+    """mechanism 命令(光伏)经公开门面发布后 call_command 真正执行成功。"""
+    commands = _build_real_commands()
+    cmd = commands["ies.command.model.ies.device.pv.mechanism.1.4.0"]
+    assert cmd.stateful is False
+    ctx = {
+        "params": {"rated_capacity_kwp": 500.0, "efficiency": 0.20},
+        "series": {"ghi": np.full(24, 1000.0), "t_ambient": np.full(24, 298.15)},
+        "state": None,
+        "dt_s": 3600.0,
+        "prices": {},
+    }
+    result = call_command(cmd.command_id, ctx)
+    assert set(result.outputs) == {"pv_out"}
+    assert result.outputs["pv_out"].shape == (24,)
+    np.testing.assert_allclose(result.outputs["pv_out"], np.full(24, 437500.0))
+
+
+def test_catalog_register_stateful_call():
+    """stateful 命令(电池)发布后 call_command 执行并回写状态。"""
+    commands = _build_real_commands()
+    cmd = commands["ies.command.model.ies.device.battery.mechanism.1.5.0"]
+    assert cmd.stateful is True
+    ctx = {
+        "params": {"capacity_kwh": 100.0, "initial_soc": 0.5},
+        "series": {"charge_w": np.full(24, 20000.0), "discharge_w": np.zeros(24)},
+        "state": None,
+        "dt_s": 3600.0,
+        "prices": {},
+    }
+    r1 = call_command(cmd.command_id, ctx)
+    assert r1.state_new is not None and "soc" in r1.state_new
+    r2 = call_command(cmd.command_id, {**ctx, "state": r1.state_new})
+    assert r2.outputs["bat_out"][0] == pytest.approx(r1.state_new["soc"])
+
+
+def test_catalog_register_data_repeat_call():
+    """data_repeat 命令(电负荷)发布后 call_command 周期外推执行成功。"""
+    commands = _build_real_commands()
+    cmd = commands["ies.command.model.ies.device.electric_load.data_repeat.1.2.0"]
+    assert cmd.stateful is False
+    assert cmd.data_file is not None  # 标准 csv 已随描述导出并读入 profile
+    ctx = {
+        "params": {"peak_power_kw": 2400.0},
+        "series": {"e_load": np.zeros(100)},
+        "state": None,
+        "dt_s": 3600.0,
+        "prices": {},
+    }
+    result = call_command(cmd.command_id, ctx)
+    # 输出键 = yaml time_series.outputs[0] 或标准 csv 首列(electric_load.csv → e_load)
+    assert "e_load" in result.outputs
+    assert result.outputs["e_load"].shape == (100,)
+    assert float(result.outputs["e_load"][0]) > 0.0  # 曲线外推非零
+
+
+def test_catalog_failure_preserves_old_snapshot_itemwise(monkeypatch: pytest.MonkeyPatch):
+    """第 N 个候选失败后, 旧快照逐项完全相等(命令与 callable 均不可变)。
+
+    覆盖真实场景: good 设备能成功构建(mechanism 函数可解析), bad 设备在
+    其后构建失败 —— 验证前面成功构建的候选没有提前泄漏到全局注册表,
+    旧命令表与 callable 表均逐项一致。
+    """
+    from iesplan.devices import DeviceModelDescriptor
+    from iesplan.modeling import registry_loader
+    from iesplan.modeling.command import _current_snapshot
+
+    # 先发布一个"旧"快照(命令 + 生成 callable)
+    old_cmd, old_entry = build_command(make_pv_spec())
+    replace_all_commands({old_cmd.command_id: old_cmd}, generated={old_cmd.command_id: old_entry})
+
+    before_commands = dict(_current_snapshot().commands)
+    before_generated = dict(_current_snapshot().generated)
+
+    good = DeviceModelDescriptor(
+        type_id="ies.device.pv2", version="1.0.0", name_zh="光伏2", name_en="PV2",
+        model_method="mechanism", stateful=False, fidelity="medium",
+        energy_carriers=["solar", "electric"], is_load=False,
+        capabilities=[], extends="ies.device.base", help_topic="",
+        parameters={}, ports=[], time_series={}, states=[],
+        function={"package": "iesplan.modeling.functions", "entry": "pv_output"},
+        standard_csv_path=None,
+    )
+    bad = DeviceModelDescriptor(
+        type_id="ies.device.bogus", version="1.0.0", name_zh="坏设备", name_en="Bad",
+        model_method="mechanism", stateful=False, fidelity="medium",
+        energy_carriers=["electric"], is_load=False,
+        capabilities=[], extends="ies.device.base", help_topic="",
+        parameters={}, ports=[], time_series={}, states=[],
+        function={"package": "iesplan.modeling.functions", "entry": "nonexistent_fn"},
+        standard_csv_path=None,
+    )
+    monkeypatch.setattr(registry_loader, "list_device_descriptors", lambda: [good, bad])
+    with pytest.raises(AppError):
+        registry_loader.register_catalog_commands()
+
+    # 旧快照逐项完全相等: 命令表与 callable 表均与发布前一致, 无半成品
+    assert dict(_current_snapshot().commands) == before_commands
+    assert dict(_current_snapshot().generated) == before_generated
+    assert _current_snapshot().generated[old_cmd.command_id] is old_entry
+    # good 成功构建但不泄漏到全局快照; bad 因函数不可解析被拒
+    assert "ies.command.model.ies.device.pv2.mechanism.1.0.0" not in _current_snapshot().commands
+    assert "ies.command.model.ies.device.bogus.mechanism.1.0.0" not in _current_snapshot().commands
+
+
+def test_catalog_failure_compute_command_unresolvable(monkeypatch: pytest.MonkeyPatch):
+    """计算命令 function_ref 无法解析时, 整个注册流程拒绝且不发布新状态(codex 复审 B3)。"""
+    from iesplan.modeling import registry_loader
+    from iesplan.modeling.command import _current_snapshot, compute_command_refs
+
+    # 先发布一个"旧"快照(命令 + 生成 callable)
+    old_cmd, old_entry = build_command(make_pv_spec())
+    replace_all_commands({old_cmd.command_id: old_cmd}, generated={old_cmd.command_id: old_entry})
+    before_commands = dict(_current_snapshot().commands)
+    before_generated = dict(_current_snapshot().generated)
+
+    # 注入一个无法解析的计算命令引用(模块存在但函数不存在)
+    bad_refs = dict(compute_command_refs())
+    bad_refs["ies.command.compute.unresolvable.v1"] = "iesplan.modeling.functions.nonexistent_fn"
+    monkeypatch.setattr(registry_loader, "compute_command_refs", lambda: bad_refs)
+    monkeypatch.setattr(
+        registry_loader, "list_device_descriptors", lambda: []
+    )
+    with pytest.raises(AppError):
+        registry_loader.register_catalog_commands()
+
+    # 旧快照逐项完全相等, 无半成品(含计算命令)
+    assert dict(_current_snapshot().commands) == before_commands
+    assert dict(_current_snapshot().generated) == before_generated
+    assert "ies.command.compute.unresolvable.v1" not in _current_snapshot().commands

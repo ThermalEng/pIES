@@ -86,6 +86,21 @@ def _clean_tables(engine: Engine) -> Iterator[None]:
             conn.execute(table.delete())
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _init_runtime_registry():
+    """RR-P1-04: 任务装配/模型写入消费运行期设备注册表(生产启动由 main 初始化)。
+
+    会话级: 内置 catalog 加载一次, 建模命令注册一次(命令表为进程级状态,
+    多次注册会重复构建; 保持幂等)。
+    """
+    from iesplan.devices import init_registry
+    from iesplan.modeling.registry_loader import register_catalog_commands
+
+    init_registry()
+    register_catalog_commands()
+    yield
+
+
 @pytest.fixture()
 def db_session(engine: Engine) -> Iterator[Session]:
     """函数级共享会话(服务与测试共用, 端点内 commit)。"""
@@ -334,6 +349,10 @@ def _submit_calc_task(
     if idempotency_key is not None:
         payload["idempotency_key"] = idempotency_key
     resp = client.post(f"/api/projects/{project_id}/tasks", json=payload, headers=_h(client, user_id))
+    if "task" not in resp.json():
+        body = resp.json()
+        diags = (body.get("error") or {}).get("detail") or body.get("error")
+        raise AssertionError(f"任务创建失败: {resp.status_code} {resp.text[:1500]}")
     task = resp.json()["task"]
     return task["id"], resp.status_code
 
