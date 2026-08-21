@@ -1,0 +1,33 @@
+type_id: ies.device.transport_pipe
+version: 1.0.0
+name_zh: 传输管道
+name_en: Transport Pipeline
+model_method: mechanism
+stateful: true
+fidelity: medium
+energy_carriers: [heat]
+is_load: false
+capabilities: [transport, stateful, dual_direction]
+extends: ies.device.base
+help_topic: help.modeling.pipeline
+ports:
+  - {name: heat_in, port_type: thermal, direction: in, energy_carrier: heat}
+  - {name: heat_out, port_type: thermal, direction: out, energy_carrier: heat}
+parameters:
+  delay_steps:
+    unit: step
+    min: 1
+    max: 100
+    default: 1
+    help_key: help.param.pipeline.delay_steps
+  loss_rate:
+    unit: '-'
+    min: 0
+    max: 0.5
+    default: 0
+    help_key: help.param.pipeline.loss_rate
+states:
+  - {key: delay_buffer, unit: step, initial_ref: delay_steps, bounds: {min_ref: delay_steps, max_ref: delay_steps}}
+function:
+  entry: transport_pipe
+  package: iesplan.modeling.functions

@@ -10,8 +10,8 @@ core/registry.py 的静态注册退化为内置兜底副本, 本注册表为 yam
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.devices.loader import DEFAULT_CATALOG_DIR, load_all_devices
@@ -31,7 +31,10 @@ _CAPABILITY_COARSE: dict[str, str] = {
 
 
 class DeviceRegistry:
-    """运行期设备注册表(启动时 init_registry 初始化; 插件式热加载)。"""
+    """运行期设备注册表(启动时 init_registry 初始化; 运行期只读)。
+
+    RR-P2-04: 正式发布前不实现运行期热加载(架构宪法 5.3); 不暴露 reload 入口。
+    """
 
     def __init__(self, base_dir: Path, price_book: PriceBook) -> None:
         self.base_dir = Path(base_dir)
@@ -41,10 +44,6 @@ class DeviceRegistry:
     def load(self) -> None:
         """幂等加载: 目录下全部设备; 任一失败整体拒绝并抛 AppError。"""
         self._specs = {s.type_id: s for s in load_all_devices(self.base_dir, self.price_book)}
-
-    def reload(self) -> None:
-        """按目录 mtime 变化重新加载(插件式热加载; 计算快照仍引用 id@version 可解析)。"""
-        self.load()
 
     def get(self, type_id: str) -> DeviceYamlSpec:
         """按注册 id 取设备类型(未注册抛 NotFoundError, 码 CONN-TYPE-002)。"""
@@ -183,10 +182,15 @@ def init_registry(base_dir: Path | None = None, book: PriceBook | None = None) -
     """初始化(或重初始化)进程内设备注册表; 返回注册表实例。
 
     缺省 base_dir 为内置 catalog/, 缺省价格书为内置 prices.yaml。
+
+    原子发布(架构宪法 5.3 "全部成功或不发布新状态"): 候选注册表先完整
+    ``load()``(读取/校验所有 YAML、价格引用、CSV), 成功后才一次性替换
+    全局引用; 加载失败不触碰旧注册表, 调用方可继续使用先前有效状态。
     """
     global _registry
     base = Path(base_dir) if base_dir is not None else DEFAULT_CATALOG_DIR
     price_book = book if book is not None else load_price_book()
-    _registry = DeviceRegistry(base, price_book)
-    _registry.load()
-    return _registry
+    candidate = DeviceRegistry(base, price_book)
+    candidate.load()  # 失败抛异常, 全局 _registry 保持不变
+    _registry = candidate  # 全部成功后一次性发布
+    return candidate

@@ -29,7 +29,7 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError
 from iesplan.core.timeaxis import RESOLUTIONS, validate_timestamps
-from iesplan.devices.spec import PERIOD_VALUES, DeviceYamlSpec, SeriesSpec
+from iesplan.devices.spec import PERIOD_VALUES, DeviceModelDescriptor, DeviceYamlSpec, SeriesSpec
 
 #: 时间戳列名(CSV 第一列)
 TIMESTAMP_COL = "timestamp"
@@ -57,6 +57,29 @@ def _normalize_unit(unit: str) -> str:
 def _all_series(spec: DeviceYamlSpec) -> list[SeriesSpec]:
     """yaml 声明的全部时间序列列(inputs + outputs, 保持声明顺序)。"""
     return list(spec.time_series.get("inputs", [])) + list(spec.time_series.get("outputs", []))
+
+
+def load_profile_columns(path: Path, desc: DeviceModelDescriptor) -> dict[str, np.ndarray]:
+    """公开接口: 读取 data_repeat 设备标准 csv → {列名: 一维数组}(BE-REG-01)。
+
+    modeling 模块经本函数消费典型曲线, 不感知 csv 校验规则;
+    必选列缺失/文件错误抛 AppError(原始文件与列错误可见)。
+    """
+    proxy = DeviceYamlSpec(
+        type_id=desc.type_id, version=desc.version, name_zh=desc.name_zh,
+        name_en=desc.name_en, model_method=desc.model_method, stateful=desc.stateful,
+        energy_carriers=list(desc.energy_carriers), is_load=desc.is_load,
+        capabilities=list(desc.capabilities), extends=desc.extends,
+        help_topic=desc.help_topic, parameters=dict(desc.parameters),
+        ports=list(desc.ports), time_series={k: list(v) for k, v in desc.time_series.items()},
+        states=list(desc.states), function=dict(desc.function),
+    )
+    df = read_standard_csv(Path(path), proxy)
+    return {
+        col: df[col].to_numpy(dtype=np.float64)
+        for col in df.columns
+        if col != TIMESTAMP_COL
+    }
 
 
 def _loc(spec: DeviceYamlSpec, field: str) -> dict:

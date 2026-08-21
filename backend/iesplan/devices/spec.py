@@ -6,7 +6,7 @@
 - 状态标志统一为布尔 ``stateful``(02 的 ``statefulness`` 枚举废止);
 - ``fidelity``(low/medium/high)与 model_method 正交共存(沿用 model_fidelity CHECK)。
 
-参数 schema 复用 core/registry.py::ParameterSpec(只读参照其字段命名, 不修改)。
+参数 schema 复用 core/contracts.parameters::ParameterSpec(只读参照其字段命名, 不修改)。
 本模块只做"单个 yaml 文件"的结构解析与字段级校验;跨字段约束(csv 必选、states
 必填等)在 loader.validate_device_dir 完成;``$price:`` 引用解析在 pricing.py。
 """
@@ -17,8 +17,8 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.errors import AppError
-from iesplan.core.registry import ParameterSpec
 from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.devices import yamlmini
 
@@ -120,6 +120,60 @@ class DeviceYamlSpec:
     function: dict = field(default_factory=dict)  # {"entry","package"} 或 {"model_file": {...}}
     base_dir: str = ""  # yaml 所在目录(相对引用 model_file/csv 用)
     source_path: str = ""  # 源 yaml 完整路径(周期 csv 推导的权威来源, 03 §6.4)
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceModelDescriptor:
+    """已验证设备描述的公开契约(BE-REG-01: devices → modeling 唯一传递物)。
+
+    modeling 模块只接收本描述, 不导入 devices 内部目录/价格/CSV 细节;
+    包含建模所需全部信息: 类型/版本/方法/状态、参数规格、端口、时间序列
+    声明与机理函数入口。data_repeat 设备的标准 csv 路径也一并导出
+    (由 devices 负责路径推导, modeling 不感知规则)。
+    """
+
+    type_id: str
+    version: str
+    name_zh: str
+    name_en: str
+    model_method: str  # mechanism | data_repeat | data_predict
+    stateful: bool
+    fidelity: str
+    energy_carriers: list[str]
+    is_load: bool
+    capabilities: list[str]
+    extends: str
+    help_topic: str
+    parameters: dict[str, ParameterSpec]
+    ports: list[PortSpec]
+    time_series: dict[str, list[SeriesSpec]]
+    states: list[StateSpec]
+    function: dict  # {"entry","package"} 或 {"model_file": {...}}
+    standard_csv_path: str | None  # data_repeat 标准 csv(devices 推导); 其余 None
+
+
+def to_model_descriptor(spec: DeviceYamlSpec) -> DeviceModelDescriptor:
+    """DeviceYamlSpec → 公开建模描述(参数默认值经价格解析, 已含 resolved $price:)。"""
+    return DeviceModelDescriptor(
+        type_id=spec.type_id,
+        version=spec.version,
+        name_zh=spec.name_zh,
+        name_en=spec.name_en,
+        model_method=spec.model_method,
+        stateful=spec.stateful,
+        fidelity=spec.fidelity,
+        energy_carriers=list(spec.energy_carriers),
+        is_load=spec.is_load,
+        capabilities=list(spec.capabilities),
+        extends=spec.extends,
+        help_topic=spec.help_topic,
+        parameters=dict(spec.parameters),
+        ports=list(spec.ports),
+        time_series={k: list(v) for k, v in spec.time_series.items()},
+        states=list(spec.states),
+        function=dict(spec.function),
+        standard_csv_path=standard_csv_path(spec),
+    )
 
 
 def standard_csv_path(spec: DeviceYamlSpec) -> str | None:
@@ -315,6 +369,15 @@ def _parse_parameters(items: object, file: str) -> dict[str, ParameterSpec]:
         existing = data.get("existing_default")
         if existing is not None and not isinstance(existing, (int, float)):
             raise _err(f"参数 {name!r} existing_default 必须为数值", file=file, param=name)
+        # RR-P2-02: 与 core.registry._p 同义: 缺省时按 stock_or_addition 派生
+        # (stock→default, addition→0.0); YAML 不必显式声明, 装配/容量等场景仍可消费。
+        if existing is None:
+            if stock == "addition":
+                existing = 0.0
+            elif isinstance(default, (int, float)) and not isinstance(default, bool):
+                existing = default
+            else:
+                existing = default  # 保留 None/字符串等非数值原样
         help_key = data.get("help_key", "")
         if not isinstance(help_key, str):
             raise _err(f"参数 {name!r} help_key 必须为字符串", file=file, param=name)
@@ -502,26 +565,11 @@ def spec_to_dict(spec: DeviceYamlSpec) -> dict:
     }
 
 
-def to_registry_spec(spec: DeviceYamlSpec) -> "DeviceTypeSpec":
-    """转 core/registry.py::DeviceTypeSpec(兼容层, 供现有 API 复用)。
-
-    model_method/stateful 两字段的透传属 core/registry.py 侧改造项(05 §6 兼容边界),
-    本模块只读映射其既有字段。
-    """
-    from iesplan.core.registry import DeviceTypeSpec
-
-    return DeviceTypeSpec(
-        type_id=spec.type_id,
-        version=spec.version,
-        name_zh=spec.name_zh,
-        name_en=spec.name_en,
-        energy_carriers=list(spec.energy_carriers),
-        is_load=spec.is_load,
-        capabilities=list(spec.capabilities),
-        extends=spec.extends,
-        parameters=dict(spec.parameters),
-        help_topic=spec.help_topic,
-    )
+# ---------------------------------------------------------------------------
+# 派生与兼容(RR-P2-02: 移除 to_registry_spec —— core.registry 已退役, 旧
+# DeviceTypeSpec 字段(不含 ports/states/model_method 等)被 devices.DeviceModelDescriptor
+# 全量取代。模块外应直接消费 to_model_descriptor。)
+# ---------------------------------------------------------------------------
 
 
 def to_modeling_spec(spec: DeviceYamlSpec):
