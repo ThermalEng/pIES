@@ -1,0 +1,33 @@
+# 非法设备模型样例（ies.device-model 1.0.0）— 顶层 schema 错误：schema 标识不匹配。
+schema: ies.device-model.old
+schema_version: "1.0.0"
+
+device:
+  id: acme.device.bad
+  version: "1.0.0"
+  names:
+    zh-CN: 非法样例
+    en-US: Invalid Sample
+  model_method: mechanism
+  stateful: false
+  fidelity: high
+  energy_carriers: [electric]
+  capabilities: [pv]
+
+parameters: {}
+
+ports:
+  electric_out:
+    carrier: electric
+    direction: out
+    quantity: power
+    unit: kW
+
+data_inputs: {}
+
+states: {}
+
+model_commands:
+  pv: ies.model-command.pv.generation@1.0.0
+
+extensions: {}
