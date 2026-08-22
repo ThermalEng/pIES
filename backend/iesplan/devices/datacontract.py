@@ -801,28 +801,12 @@ class DeviceDataResult:
 
     def canonical_csv_bytes(self) -> bytes:
         """规范化表格字节(UTF-8, LF, RFC 4180; 元数据按 UTC 形态)。"""
-        buf = io.StringIO()
-        buf.write(serialize_metadata(self.canonical_meta()))
-        buf.write(",".join(self.column_order))
-        buf.write("\n")
-        for row in self.rows:
-            cells: list[str] = []
-            for col in self.column_order:
-                v = row.get(col)
-                if col == TIMESTAMP_COL:
-                    if isinstance(v, datetime):
-                        cells.append(v.astimezone(UTC).isoformat().replace("+00:00", "Z"))
-                    else:
-                        cells.append("")
-                elif isinstance(v, bool):
-                    cells.append("true" if v else "false")
-                elif v is None:
-                    cells.append("")
-                else:
-                    cells.append(_format_number(float(v)))
-            buf.write(",".join(cells))
-            buf.write("\n")
-        return buf.getvalue().encode("utf-8")
+        return canonical_table_bytes(
+            self.utc_timestamps,
+            self.column_order,
+            self.rows,
+            meta=self.canonical_meta(),
+        )
 
 
 def _format_number(v: float) -> str:
@@ -830,6 +814,46 @@ def _format_number(v: float) -> str:
     if not math.isfinite(v):
         raise ValueError(f"非有限数值 {v!r} 不允许进入规范表格")
     return format(v, "g")
+
+
+def canonical_table_bytes(
+    utc_timestamps: list[datetime],
+    columns: tuple[str, ...],
+    rows: list[dict],
+    *,
+    meta: DeviceDataMeta | None = None,
+) -> bytes:
+    """规范化数据表字节(UTC 带 Z 时间戳 + 规范数值格式, UTF-8/LF)。
+
+    0.6.0 事项 2: 包内设备 CSV 与 GUI 上传共用同一规范表格序列化, 同一语义
+    输入 → 同一字节 → 同一摘要。metadata 头可选(GUI 上传与设备 CSV 各自
+    保留自己的元数据头, 数据表部分完全一致)。
+    """
+    buf = io.StringIO()
+    if meta is not None:
+        buf.write(serialize_metadata(meta))
+    buf.write(",".join(columns))
+    buf.write("\n")
+    for ridx, row in enumerate(rows):
+        cells: list[str] = []
+        for col in columns:
+            if col == TIMESTAMP_COL:
+                ts = utc_timestamps[ridx] if ridx < len(utc_timestamps) else None
+                if isinstance(ts, datetime):
+                    cells.append(ts.astimezone(UTC).isoformat().replace("+00:00", "Z"))
+                else:
+                    cells.append("")
+                continue
+            v = row.get(col)
+            if isinstance(v, bool):
+                cells.append("true" if v else "false")
+            elif v is None:
+                cells.append("")
+            else:
+                cells.append(_format_number(float(v)))
+        buf.write(",".join(cells))
+        buf.write("\n")
+    return buf.getvalue().encode("utf-8")
 
 
 def canonicalize_device_data(
@@ -1255,6 +1279,137 @@ def summary_json(result: DeviceDataResult) -> str:
     return json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+# ---------------------------------------------------------------------------
+# 包内设备 CSV / GUI 上传共用规范化流程(0.6.0 事项 2)
+# ---------------------------------------------------------------------------
+
+
+def is_ies_device_data(data: bytes) -> bool:
+    """检测文件是否声明为 ies.device-data 契约(表头之前含 # schema: ies.device-data)。
+
+    GUI 上传路径据此判断是否走完整契约校验(有元数据)还是由上传参数构造
+    元数据(裸 CSV)。只做字节前缀扫描, 不完整解析。
+    """
+    try:
+        head = data[:4096].decode("utf-8", errors="replace")
+    except Exception:
+        return False
+    for line in head.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            return False  # 已进入表头/数据区, 不再有元数据
+        if stripped.lower().startswith("# schema: ies.device-data"):
+            return True
+    return False
+
+
+def build_upload_meta(
+    *,
+    dataset_id: str,
+    device_model: str,
+    resolution: str,
+    utc_offset_minutes: int,
+    series_mode: str = "timeline",
+    timestamp_mode: str = "fixed_offset",
+    period: str | None = None,
+    units: dict[str, str] | None = None,
+) -> DeviceDataMeta:
+    """由 GUI 上传参数构造 ies.device-data 元数据(裸 CSV 上传路径)。
+
+    与包内设备 CSV 的元数据语义完全一致, 只是来源不同(GUI 参数 vs 文件头)。
+    """
+    return DeviceDataMeta(
+        schema_id=SCHEMA_ID,
+        schema_version=SCHEMA_VERSION,
+        dataset_id=dataset_id,
+        device_model=device_model,
+        series_mode=series_mode,
+        resolution=resolution,
+        timestamp_mode=timestamp_mode,
+        fixed_utc_offset_minutes=utc_offset_minutes,
+        period=period,
+        units=dict(units or {}),
+        notes={},
+        declared_columns=tuple((units or {}).keys()),
+    )
+
+
+def normalize_upload_csv(
+    data: bytes,
+    desc,
+    *,
+    dataset_id: str,
+    device_model: str,
+    resolution: str,
+    utc_offset_minutes: int,
+    units: dict[str, str] | None = None,
+    expected_rows: int | None = None,
+) -> DeviceDataResult:
+    """GUI 上传路径的统一规范化入口(0.6.0 事项 2)。
+
+    - 若文件已声明 ies.device-data 元数据: 走 canonicalize_device_data,
+      文件内元数据为权威(与包内设备 CSV 同一条流程);
+    - 否则由上传参数构造元数据(resolution/utc_offset/units), 与包内设备
+      CSV 的规范化流程共用 canonicalize_device_data。
+
+    expected_rows: 期望行数(1h→8760), 由调用方(上传服务)按分辨率传入;
+    为 None 时不校验行数(供小样例测试)。
+    返回 DeviceDataResult(原始摘要 + 规范摘要 + 质量摘要 + 变换记录)。
+    """
+    if is_ies_device_data(data):
+        # 文件已声明元数据(含 dataset_id/device_model): 文件为权威来源,
+        # 上传参数仅用于行数期望, 不覆盖文件声明(保证与包内设备 CSV 同摘要)。
+        return canonicalize_device_data(
+            data, desc, expected_rows=expected_rows
+        )
+    # 裸 CSV: 由调用方按上传参数补元数据(UTC 时间戳用 fixed_offset 语义)
+    meta = build_upload_meta(
+        dataset_id=dataset_id,
+        device_model=device_model,
+        resolution=resolution,
+        utc_offset_minutes=utc_offset_minutes,
+        units=units,
+    )
+    # 复用 canonicalize 内部逻辑: 在文件前插入元数据头。
+    # 裸 CSV 可能含旧版注释行(# 前缀, 非 ies.device-data 元数据), 上传参数为
+    # 权威来源, 旧注释行(表头之前)作为 note.* 保留, 不参与核心字段校验。
+    text = _strip_legacy_comments(data)
+    header_text = serialize_metadata(meta)
+    return canonicalize_device_data(
+        header_text.encode("utf-8") + text,
+        desc,
+        dataset_id=dataset_id,
+        expected_rows=expected_rows,
+    )
+
+
+def _strip_legacy_comments(data: bytes) -> bytes:
+    """去除表头之前的旧版注释行(保留表头与数据行)。
+
+    旧版设备 CSV / GUI 上传模板含 `#` 开头的双语说明行, 不属于
+    ies.device-data 元数据; 上传参数为权威来源, 旧注释行一律丢弃。
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    lines = text.split("\n")
+    out: list[str] = []
+    in_header = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_header:
+            if not stripped:
+                continue  # 表头之前空行
+            if stripped.startswith("#"):
+                continue  # 丢弃旧注释
+            in_header = True
+        out.append(line)
+    return "\n".join(out).encode("utf-8")
+
+
 __all__ = [
     "SCHEMA_ID",
     "SCHEMA_VERSION",
@@ -1269,6 +1424,9 @@ __all__ = [
     "parse_metadata",
     "serialize_metadata",
     "data_inputs_from_descriptor",
+    "build_upload_meta",
+    "is_ies_device_data",
+    "normalize_upload_csv",
     "build_data_quality_report",
     "summary_json",
 ]

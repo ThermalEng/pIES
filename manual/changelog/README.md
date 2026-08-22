@@ -22,6 +22,7 @@
 - 数值按设备模型 value_type/范围/有限性校验：超范围阻断不截断；缺值未在模型中声明阻断；不静默删行/补零/前值填充/解析失败变空集。
 - 规范化产物保留原始文件 SHA-256 与规范表格 SHA-256；同一语义输入得到同一规范摘要。
 - 新增 DATA-META-* / DATA-DIAL-* / DATA-COL-003..006 / DATA-VAL-* / DATA-TIME-* / DATA-ARR-001 / DATA-SUM-001 诊断码。
+- 包内设备 CSV 与 GUI 上传共用同一 `ies.device-data` 规范化流程(`datacontract.normalize_upload_csv` / `datacontract.canonical_table_bytes`)：时区(UTC 带 Z)、时间轴(严格递增/步长对齐)、单位(量纲一致)、缺失值(模型策略)、数组长度(行数一致)统一校验；`devices.profile.load_profile_columns` 与 GUI 上传均经同一规范化器，手写 CSV 与上传对同一内容产生同一规范摘要。
 
 ## 0.1.0 — 开发基线
 
