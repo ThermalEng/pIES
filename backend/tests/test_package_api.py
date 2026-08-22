@@ -715,8 +715,21 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
                        current_attempt_id=attempt.id))
     db.commit()
 
+    # 0.2.0 B2: 未携带 confirm → 409(危险操作确认), 任务保持 running 不被改动
     resp = client.post(
         "/api/admin/unlock-task", json={"task_id": task.id}, headers=_h(client, admin)
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "ADMIN-CONFIRM-REQUIRED"
+    db.refresh(task)
+    assert task.status == "running"
+    db.refresh(attempt)
+    assert attempt.status == "running"
+
+    # 携带 confirm=true → 200, 解锁执行
+    resp = client.post(
+        "/api/admin/unlock-task", json={"task_id": task.id, "confirm": True},
+        headers=_h(client, admin),
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["unlocked"] is True
@@ -741,7 +754,8 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
     task.status = "completed"
     db.commit()
     resp = client.post(
-        "/api/admin/unlock-task", json={"task_id": task.id}, headers=_h(client, admin)
+        "/api/admin/unlock-task", json={"task_id": task.id, "confirm": True},
+        headers=_h(client, admin),
     )
     assert resp.status_code == 409
 
@@ -774,16 +788,34 @@ def test_admin_transfer_project_for_disabled_owner(client: TestClient, db: Sessi
     # H-10: 原 owner 仍启用 → 409(须先停用)
     resp = client.post(
         "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": target.id}, headers=_h(client, admin),
+        json={"project_id": pid, "target_user_id": target.id, "confirm": True},
+        headers=_h(client, admin),
     )
     assert resp.status_code == 409, resp.text
 
-    # 停用原 owner 后转移 → 200
+    # 停用原 owner 后: 未携带 confirm → 409(危险操作确认, 附影响范围提示)
     owner.status = "disabled"
     db.commit()
     resp = client.post(
         "/api/admin/transfer-project",
         json={"project_id": pid, "target_user_id": target.id}, headers=_h(client, admin),
+    )
+    assert resp.status_code == 409, resp.text
+    body = resp.json()["error"]
+    assert body["code"] == "ADMIN-CONFIRM-REQUIRED"
+    # 影响范围提示: from_user / to_user / project_id
+    assert body["params"]["from_user"]["id"] == owner.id
+    assert body["params"]["to_user"]["id"] == target.id
+    assert body["params"]["project_id"] == pid
+    # 未确认不得执行: 所有权未转移
+    project = db.get(Project, pid)
+    assert project.owner_id == owner.id
+
+    # 携带 confirm=true 转移 → 200
+    resp = client.post(
+        "/api/admin/transfer-project",
+        json={"project_id": pid, "target_user_id": target.id, "confirm": True},
+        headers=_h(client, admin),
     )
     assert resp.status_code == 200, resp.text
     project = db.get(Project, pid)
@@ -801,3 +833,42 @@ def test_admin_transfer_project_for_disabled_owner(client: TestClient, db: Sessi
     ).scalar_one()
     assert audit.actor_type == "admin"
     assert audit.after["to_user_id"] == target.id
+
+
+def test_admin_transfer_rejects_admin_or_system_target(client: TestClient, db: Session) -> None:
+    """0.2.0 B2: 所有权转移目标必须是 active 且非 admin、非系统账号。
+
+    避免把项目转给管理员/系统账号绕过"管理员维护只读"; 即使携带 confirm
+    也拒绝(目标校验优先级高于确认)。
+    """
+    admin = make_user(db, "admin1", role="admin")
+    owner = make_user(db, "owner")
+    pid = _create_project(client, owner)
+    owner.status = "disabled"
+    db.commit()
+
+    # 目标为管理员 → 409(即使 confirm=true)
+    resp = client.post(
+        "/api/admin/transfer-project",
+        json={"project_id": pid, "target_user_id": admin.id, "confirm": True},
+        headers=_h(client, admin),
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["params"]["role"] == "admin"
+
+    # 目标为系统账号 → 409
+    sys_user = User(
+        username="sysbot", display_name="系统账号", is_system=True, status="active",
+    )
+    db.add(sys_user)
+    db.commit()
+    resp = client.post(
+        "/api/admin/transfer-project",
+        json={"project_id": pid, "target_user_id": sys_user.id, "confirm": True},
+        headers=_h(client, admin),
+    )
+    assert resp.status_code == 409, resp.text
+
+    # 均未执行: 所有权未转移
+    project = db.get(Project, pid)
+    assert project.owner_id == owner.id

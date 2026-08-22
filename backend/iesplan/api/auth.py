@@ -127,6 +127,19 @@ class UsersListResponse(BaseModel):
     users: list[UserOut]
 
 
+class UserDeleteConfirmRequest(BaseModel):
+    """删除账号确认请求体(0.2.0 B1 误操作防护)。
+
+    删除账号会级联软删其拥有的全部项目且不可恢复, 必须显式确认:
+    - confirm 必须为 True, 否则 400;
+    - confirm_token 由 POST /users/{id}/delete-preview 签发, 绑定目标用户与
+      预览时的项目清单; 缺失/过期/清单变化均拒绝执行(需重新预览)。
+    """
+
+    confirm: bool = False
+    confirm_token: str = ""
+
+
 class AuthResponse(BaseModel):
     """登录/接管响应: 窗口凭证 + 用户信息。"""
 
@@ -469,10 +482,37 @@ def admin_reactivate_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
     return {"ok": True}
 
 
-@router.delete("/users/{user_id}", summary="删除账号(管理员, 级联删除其项目)")
-def admin_delete_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
-    """删除账号(管理员): 该账号拥有的项目一并删除。
+@router.post(
+    "/users/{user_id}/delete-preview",
+    summary="删除账号预告(管理员): 返回将受影响项目清单 + 确认令牌",
+)
+def admin_delete_user_preview(user_id: int, request: Request, ctx: AuthCtx) -> dict:
+    """删除账号预告(管理员, 0.2.0 B1 误操作防护)。
 
+    返回该账号拥有的项目清单(名称/id/数量)并签发签名确认令牌(10 分钟窗口),
+    供管理员确认影响范围后再执行 DELETE /users/{user_id}。执行删除必须携带
+    confirm=true + 该令牌; 预览后清单变化则拒绝执行(需重新预览)。
+    """
+    _require_admin(ctx)
+    target = identity.get_user_by_id(ctx.db, user_id)
+    if target is None:
+        raise NotFoundError("", params={"object_type": "user", "id": user_id})
+    return identity.preview_user_delete(ctx.db, ctx.user, target)
+
+
+@router.delete("/users/{user_id}", summary="删除账号(管理员, 需确认+预告, 级联删除其项目)")
+def admin_delete_user(
+    user_id: int,
+    request: Request,
+    ctx: AuthCtx,
+    payload: UserDeleteConfirmRequest | None = None,
+) -> dict:
+    """删除账号(管理员): 该账号拥有的项目一并删除(0.2.0 B1 误操作防护)。
+
+    - 必须携带 {"confirm": true, "confirm_token": "<preview 签发>"} 显式确认,
+      否则 400(删除账号会级联软删其拥有的全部项目且不可恢复);
+    - confirm_token 由 POST /users/{id}/delete-preview 预览签发, 绑定目标用户
+      与预览时的项目清单; 缺失/过期/篡改/清单变化均拒绝执行;
     - 不能删除自己 / 系统账号;
     - 目标账号置 disabled, 全部会话/凭证撤销, 其拥有的项目全部软删。
     """
@@ -484,6 +524,8 @@ def admin_delete_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
         ctx.db,
         ctx.user,
         target,
+        confirm=bool(payload and payload.confirm),
+        confirm_token=(payload.confirm_token if payload else ""),
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )

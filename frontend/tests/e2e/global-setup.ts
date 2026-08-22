@@ -80,6 +80,7 @@ export default async function globalSetup(): Promise<void> {
   }
 
   // 3) 清理历史测试残留(幂等键前缀 es_ 开头的用户, 级联删除其项目)
+  // B1 上线后删除须先 delete-preview 取得签名令牌, 再 DELETE 携带 confirm。
   const usersRes = await api.get(`${APP_URL}/api/auth/users`, {
     headers: { Authorization: `Bearer ${login.token}` },
   })
@@ -87,8 +88,14 @@ export default async function globalSetup(): Promise<void> {
     const users = await usersRes.json()
     const stale = (users.users ?? []).filter((u: any) => String(u.username).startsWith('es_'))
     for (const u of stale) {
+      const prev = await api.post(`${APP_URL}/api/auth/users/${u.id}/delete-preview`, {
+        headers: { Authorization: `Bearer ${login.token}` },
+      })
+      if (!prev.ok()) continue
+      const preview = await prev.json()
       await api.delete(`${APP_URL}/api/auth/users/${u.id}`, {
         headers: { Authorization: `Bearer ${login.token}` },
+        data: { confirm: true, confirm_token: preview.confirm_token },
       })
     }
   }

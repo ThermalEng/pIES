@@ -115,9 +115,12 @@ export async function createProject(
   return { id: res.id, name: res.name }
 }
 
-/** 删除用户(管理员; 级联删除其项目)。 */
+/** 删除用户(管理员; 先预览取确认令牌, 再携带 confirm + 令牌执行删除)。 */
 export async function deleteUser(ctx: APIRequestContext, userId: number): Promise<void> {
-  await requestJson(ctx, 'DELETE', `/api/auth/users/${userId}`, undefined, await adminToken(ctx))
+  const adminTok = await adminToken(ctx)
+  const preview = await requestJson(ctx, 'POST', `/api/auth/users/${userId}/delete-preview`, undefined, adminTok)
+  const confirmToken = String((preview as { confirm_token?: unknown }).confirm_token ?? '')
+  await requestJson(ctx, 'DELETE', `/api/auth/users/${userId}`, { confirm: true, confirm_token: confirmToken }, adminTok)
 }
 
 /** 删除项目(所有者或管理员)。 */

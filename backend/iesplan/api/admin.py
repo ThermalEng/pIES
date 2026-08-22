@@ -36,6 +36,7 @@ from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, 
 from iesplan.models.identity import User
 from iesplan.models.project import AdminMaintenanceAction, OwnershipTransfer, Project, ProjectMember
 from iesplan.services import audit as audit_service
+from iesplan.services import identity
 from iesplan.services import project as project_service
 from iesplan.services import queue
 from iesplan.services import tasks as tasks_service
@@ -155,9 +156,14 @@ def diagnostics_endpoint(
 
 
 class UnlockTaskRequest(BaseModel):
-    """管理员解锁任务请求体。"""
+    """管理员解锁任务请求体。
+
+    confirm: 危险操作二次确认(布尔)。解锁会把 running 任务推回 queued,
+    可能造成 Worker 竞态/重复计算, 因此须显式确认才执行(0.2.0 B2)。
+    """
 
     task_id: int
+    confirm: bool = False
 
 
 @router.post("/unlock-task", summary="管理员解锁任务")
@@ -172,10 +178,19 @@ def unlock_task_endpoint(
     释放并发槽、终止当前尝试, 任务回到 queued 重新排队。全程审计
     (audit_log + admin_maintenance_actions)。
     """
+    # 存在性检查优先于 confirm: 不存在的任务应返回 404 而非 409(避免泄露)
     task = db.get(Task, payload.task_id)
     if task is None:
         raise NotFoundError(
             "任务不存在", params={"task_id": payload.task_id},
+            location={"object_type": "task", "object_id": payload.task_id},
+        )
+    if not payload.confirm:
+        raise ConflictError(
+            "解锁为危险维护操作, 须携带 confirm=true 确认后执行",
+            code="ADMIN-CONFIRM-REQUIRED",
+            message_key="ies.diag.admin.confirm_required",
+            params={"hint": "解锁会把 running 任务推回 queued, 确认后重新提交"},
             location={"object_type": "task", "object_id": payload.task_id},
         )
     if task.status in ("completed", "cancelled", "timed_out", "failed"):
@@ -243,10 +258,26 @@ def unlock_task_endpoint(
 
 
 class TransferProjectRequest(BaseModel):
-    """管理员转移项目所有权请求体(停用所有者转移)。"""
+    """管理员转移项目所有权请求体(停用所有者转移)。
+
+    confirm: 危险操作二次确认(布尔)。所有权转移为不可轻易回退的管理
+    维护操作(原所有者降为 viewer, 新所有者获得 owner), 须显式确认才执行
+    (0.2.0 B2)。未携带 confirm 时返回 409 + 影响范围提示。
+    """
 
     project_id: int
     target_user_id: int
+    confirm: bool = False
+
+
+def _user_scope(user: User) -> dict[str, Any]:
+    """序列化用户作用范围提示(不含敏感字段)。"""
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "status": user.status,
+    }
 
 
 @router.post("/transfer-project", summary="停用所有者转移(管理员维护操作)")
@@ -258,7 +289,10 @@ def transfer_project_endpoint(
     """被停用所有者的项目经管理员明确、受审计的维护操作转移给有效工程师(RPD 3.2)。
 
     前置校验(H-10): 原所有者必须已停用(disabled), 否则拒绝并要求先停用其账号;
-    目标用户须存在且 status=active。
+    目标用户须存在且 status=active, 且不能是管理员或系统账号(避免把项目转给
+    管理员/系统账号绕过"管理员维护只读")。
+    危险操作防护(0.2.0 B2): 未携带 confirm=true 时返回 409, 并附影响范围
+    (from_user/to_user/项目数), 由管理员确认后重发。
     语义: 撤销原所有者成员行 → 授予目标用户 owner(追加式授权) → 原所有者
     追加 viewer 行 → ownership_transfers 记 completed → 审计(actor_type=admin)。
     """
@@ -275,6 +309,16 @@ def transfer_project_endpoint(
         raise ConflictError(
             "目标用户未启用, 不能接收所有权", params={"user_id": target.id, "status": target.status}
         )
+    if target.is_system:
+        raise ConflictError(
+            "目标用户为系统账号, 不能接收所有权",
+            params={"user_id": target.id, "is_system": True},
+        )
+    if identity.has_role(db, target, "admin"):
+        raise ConflictError(
+            "目标用户为管理员, 不能接收所有权(管理员维护只读)",
+            params={"user_id": target.id, "role": "admin"},
+        )
     if payload.target_user_id == project.owner_id:
         raise ConflictError("目标用户已是项目所有者", params={"user_id": payload.target_user_id})
 
@@ -285,6 +329,22 @@ def transfer_project_endpoint(
         raise ConflictError(
             "原所有者仍处于启用状态, 请先停用其账号再转移所有权",
             params={"user_id": from_user_id, "status": from_user.status},
+        )
+
+    # 0.2.0 B2: 危险操作二次确认; 未确认返回影响范围提示(不执行)
+    if not payload.confirm:
+        raise ConflictError(
+            "所有权转移为危险维护操作, 须携带 confirm=true 确认后执行",
+            code="ADMIN-CONFIRM-REQUIRED",
+            message_key="ies.diag.admin.confirm_required",
+            params={
+                "hint": "确认后原所有者将降为只读查看者, 新所有者获得项目 owner 权限",
+                "from_user": _user_scope(from_user) if from_user is not None else {"id": from_user_id},
+                "to_user": _user_scope(target),
+                "project_id": project.id,
+                "project_count": 1,
+            },
+            location={"object_type": "project", "object_id": project.id},
         )
 
     max_av = db.execute(
@@ -341,5 +401,8 @@ def transfer_project_endpoint(
         "project_id": project.id,
         "from_user_id": from_user_id,
         "to_user_id": payload.target_user_id,
+        "from_user": _user_scope(from_user) if from_user is not None else {"id": from_user_id},
+        "to_user": _user_scope(target),
+        "project_count": 1,
         "my_role": project_service.get_role(db, admin, project.id),
     }

@@ -11,6 +11,15 @@
 ### 安全
 
 - 为基于 Cookie 会话(`ies_session`, SameSite=Lax)的状态变更请求(POST/PUT/PATCH/DELETE)增加 CSRF 双源校验：浏览器请求优先校验 `Origin`、缺失回退 `Referer`，规范化后必须命中可信来源(`app_url` + `IESPLAN_CORS_ORIGINS` + 请求自身 Host 同源来源)，否则返回 403 `AUTH-CSRF-001`；Bearer 认证、无 Origin/Referer 的 API 客户端与只读请求不受影响。
+- 为管理员危险维护操作增加二次确认与作用范围提示：`POST /api/admin/transfer-project`(所有权转移)与 `POST /api/admin/unlock-task`(任务解锁)请求须携带 `confirm=true` 才执行，未确认返回 409 `ADMIN-CONFIRM-REQUIRED` 并附影响范围(from_user/to_user/项目数)提示；所有权转移目标新增校验，必须是 active 且非管理员、非系统账号，避免把项目转给管理员/系统账号绕过"管理员维护只读"。不引入审批链。
+- 管理员删除账号增加误操作防护（0.2.0 B1）：删除账号会级联软删其拥有的全部项目且不可恢复，现必须先调用 `POST /api/auth/users/{user_id}/delete-preview` 预览将受影响的项目清单（名称/ID/数量）并取得签名确认令牌，删除时携带 `{"confirm": true, "confirm_token": "..."}` 才会执行；缺少 confirm、令牌缺失/过期/伪造或预览后项目清单变化均返回 400 `AUTH-DEL-001`。前端账号管理在确认对话框中展示受影响项目清单。
+- 项目删除确认强化(0.2.0 B4)：`DELETE /api/projects/{id}` 不再接受空布尔 `confirm: true` 单独确认，须提供与待删除项目名精确匹配的 `name` 或非空删除原因 `reason` 之一；`confirm` 字段仅为兼容旧调用方保留。审计记录确认方式与删除原因(脱敏)。前端删除确认对话框要求输入项目名才能确认。
+- 部署不可变审计触发器(0.2.0 B4)：`init_db()` 在 PostgreSQL 下执行 `immutable_triggers.py` 的全部 DDL(`ALL_IMMUTABLE_TRIGGER_DDL` + `ALL_IMMUTABLE_REVOKE_DDL`)，为 12 张不可变表(含 `audit_log`/`auth_events`/`project_versions`/`calc_snapshots` 等)创建禁 UPDATE/DELETE 触发器与 `REVOKE UPDATE, DELETE ... FROM PUBLIC`，实现宪法 §16「关键变更保留不可变审计」；部署幂等(DROP FUNCTION IF EXISTS ... CASCADE 后重建)。SQLite 测试库跳过 PostgreSQL 触发器语法。
+- 计算配置保存审计(0.2.0 B4)：`PUT /api/projects/{id}/config` 保存时写入 `config.saved` 审计记录(只含版本/变量数/目标/约束数/算法/随机种子等脱敏元数据，不复制完整配置)。
+
+### 管理
+
+- 对象清理引入软删/保留期（0.2.0-B3 恢复路径）：`POST /api/admin/objects/cleanup` 执行不再立即物理删除，而是把无引用的孤儿对象标记为“待物理回收”，默认保留 7 天；保留期内文件保留、内容可读，管理员可经 `POST /api/admin/objects/restore` 恢复误清理对象，对象重新获得 owner 引用时也会自动恢复。新增 `GET /api/admin/objects/pending` 查看“已删除待回收”清单，`POST /api/admin/objects/purge` 只对已过保留期的待回收对象执行物理回收（先 `dry_run` 预览再执行）；`reconcile` 巡检会兜底物理回收到期对象。
 
 ## 0.1.0 — 开发基线
 

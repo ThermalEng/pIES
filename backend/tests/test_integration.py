@@ -714,7 +714,8 @@ def test_rpd_project_semantics(client: TestClient, db: Session) -> None:
     resp = client.post(f"/api/projects/{pid}/unarchive", headers=_h(client, eng_id))
     assert resp.status_code == 200
 
-    # 删除必须显式确认: 未确认 → 400; 确认 → 204
+    # 删除必须显式确认(0.2.0 B4): 未确认 → 400; 空布尔 confirm 不足以确认 → 400;
+    # 项目名匹配 → 204
     resp = client.request(
         "DELETE", f"/api/projects/{pid}", json={"confirm": False}, headers=_h(client, eng_id)
     )
@@ -722,6 +723,12 @@ def test_rpd_project_semantics(client: TestClient, db: Session) -> None:
     assert resp.json()["error"]["code"] == "PROJ-DEL-001"
     resp = client.request(
         "DELETE", f"/api/projects/{pid}", json={"confirm": True}, headers=_h(client, eng_id)
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "PROJ-DEL-002"
+    resp = client.request(
+        "DELETE", f"/api/projects/{pid}",
+        json={"confirm": True, "name": "集成测试项目"}, headers=_h(client, eng_id),
     )
     assert resp.status_code == 204
 

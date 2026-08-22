@@ -11,6 +11,11 @@
 - 清理(23.3/23.4): safe_cleanup 按 ObjectRef 清单找无任何引用的对象,
   先计划(dry_run)后执行; 被任意存在的 owner 引用都自然阻止清理
   (删除 REF_ENTITY_TYPE_MAP / PROTECTED_ENTITY_TYPES, STO-02);
+- 对象清理恢复路径(0.2.0-B3 软删/保留期): cleanup 执行时不再立即物理删,
+  而是把对象标记为 pending_deletion(记 pending_deleted_at / 保留截止
+  pending_delete_until), 保留期内可 undelete / 重新 attach 恢复;
+  purge_expired 只对已过保留期的对象物理删文件 + 删记录(管理员可显式调用,
+  reconcile 巡检时兜底调用), 从而为明显危险误操作保留延迟删除与恢复路径;
 - 存储门禁(STO-06): 磁盘容量不可测时拒绝新写入并降级 readiness;
 - 恢复(STO-04): reconcile 幂等清理超龄临时文件、登记或删除无元数据最终文件、
   报告有元数据但缺文件的损坏。
@@ -23,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import shutil
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -38,18 +43,29 @@ from iesplan.storage.contracts import (
     BlobMissingError,
     ObjectCorruptError,
     ObjectHandle,
+    ObjectNotPendingDeletionError,
     ObjectOwner,
     ObjectQuotaError,
     RefInfo,
     ReferenceNotFoundError,
     StorageQuotaError,
 )
-from iesplan.storage.persistence import OBJ_STATUS_DELETED, OBJ_STATUS_ORPHANED, ObjectRef, StoredObject
+from iesplan.storage.persistence import (
+    OBJ_STATUS_DELETED,
+    OBJ_STATUS_ORPHANED,
+    OBJ_STATUS_PENDING_DELETION,
+    OBJ_STATUS_STORED,
+    ObjectRef,
+    StoredObject,
+)
 
 logger = logging.getLogger(__name__)
 
 #: 未命中保留规则时孤儿对象的默认保留天数(0 = 引用归零即可清理)
 DEFAULT_RETENTION_DAYS: int = 0
+#: 清理后进入软删保留期的默认天数(0.2.0-B3 恢复路径: 保留期内可恢复,
+#: 到期才物理回收; 0 = 立即软删并物理回收, 仅显式配置时使用)
+DEFAULT_PENDING_DELETE_DAYS: int = 7
 #: 单次清理最大对象数(防一次性事务过大)
 CLEANUP_BATCH_LIMIT: int = 1000
 #: 容量不可测时的降级标志(dict 键, 供 readiness 聚合层读取)
@@ -387,6 +403,12 @@ def object_info(db: Session, object_id: int | str) -> dict:
         "last_referenced_at": (
             as_utc(obj.last_referenced_at).isoformat() if obj.last_referenced_at else None
         ),
+        "pending_deleted_at": (
+            as_utc(obj.pending_deleted_at).isoformat() if obj.pending_deleted_at else None
+        ),
+        "pending_delete_until": (
+            as_utc(obj.pending_delete_until).isoformat() if obj.pending_delete_until else None
+        ),
     }
 
 
@@ -460,6 +482,22 @@ def attach(
     """
     obj = _resolve_object(db, object_id)
     entity_type = ref_entity_type or REF_ENTITY_TYPE_MAP.get(ref_type, ref_type)
+    # 0.2.0-B3 恢复路径: 待物理回收对象重新获得 owner 引用时自动恢复为
+    # 可用状态(清除软删标记), 文件仍在磁盘上, 内容可继续访问。
+    # attach 必然建立引用, 恢复后 ref_count >= 1, 故置 stored。
+    if obj.status == OBJ_STATUS_PENDING_DELETION:
+        obj.status = OBJ_STATUS_STORED
+        obj.pending_deleted_at = None
+        obj.pending_delete_until = None
+        _audit(
+            db,
+            "objects",
+            obj.id,
+            "object_restored",
+            actor_id=actor_id,
+            actor_type=actor_type,
+            after={"reason": "re-attached", "ref_type": ref_type, "ref_entity_id": str(ref_id)},
+        )
     # 幂等: 既有引用直接返回(不重复计数)
     existing = db.execute(
         sa.select(ObjectRef).where(
@@ -644,6 +682,8 @@ def _candidate_objects(db: Session, limit: int = CLEANUP_BATCH_LIMIT) -> list[St
 
     STO-02: 只以 ObjectRef 清单判断(存在任何引用行即非候选);
     ref_count 缓存不一致时由 reconcile 巡检报告并修正。
+    已处于 pending_deletion(待物理回收)的对象不在候选集内(0.2.0-B3):
+    它们走 purge_expired 生命周期, 不会被重复软删。
     """
     has_refs = sa.select(ObjectRef.id).where(ObjectRef.object_id == StoredObject.id).exists()
     stmt = (
@@ -651,6 +691,7 @@ def _candidate_objects(db: Session, limit: int = CLEANUP_BATCH_LIMIT) -> list[St
         .where(
             ~has_refs,
             StoredObject.status != OBJ_STATUS_DELETED,
+            StoredObject.status != OBJ_STATUS_PENDING_DELETION,
         )
         .order_by(StoredObject.created_at)
         .limit(limit)
@@ -668,6 +709,10 @@ def _object_summary(obj: StoredObject) -> dict:
         "media_type": obj.media_type,
         "status": obj.status,
         "created_at": as_utc(obj.created_at).isoformat() if obj.created_at else None,
+        "pending_deleted_at": as_utc(obj.pending_deleted_at).isoformat() if obj.pending_deleted_at else None,
+        "pending_delete_until": (
+            as_utc(obj.pending_delete_until).isoformat() if obj.pending_delete_until else None
+        ),
     }
 
 
@@ -679,6 +724,7 @@ def safe_cleanup(
     actor_type: str = "admin",
     limit: int = CLEANUP_BATCH_LIMIT,
     expected_plan_id: str | None = None,
+    pending_delete_days: int = DEFAULT_PENDING_DELETE_DAYS,
 ) -> dict:
     """对象清理(23.3/23.4): 先计划后执行, 全程可审计(RR-P2-07 稳定计划标识)。
 
@@ -689,13 +735,19 @@ def safe_cleanup(
     - dry_run=True: 只返回清理计划(含 plan_id 与候选摘要), 不删任何数据;
     - dry_run=False: 必须携带 dry-run 返回的 plan_id; 执行前在事务内重新
       计算候选集合并与计划摘要比对, 候选变化(引用/保留/版本变更)则拒绝
-      执行并要求重新预览; 通过后删文件 + 删记录 + 审计, 只 flush
-      (提交/回滚由应用用例统一决定, RR-P1-03);
-      - 文件删除失败的对象跳过(保留记录, 便于下次重试)。
+      执行并要求重新预览;
+    - 0.2.0-B3 软删/保留期: 执行不再立即物理删, 而是把候选对象标记为
+      pending_deletion(记 pending_deleted_at 与保留截止 pending_delete_until),
+      保留期默认 pending_delete_days 天(默认 7); 保留期内对象可经
+      undelete_object / 重新 attach 恢复, 物理回收由 purge_expired 负责
+      (到期后删除文件 + 删除记录 + 审计)。文件已缺失的待回收对象同样
+      标记软删(保留期内仍可恢复), 由 purge 统一收尾。
+      只 flush(提交/回滚由应用用例统一决定, RR-P1-03)。
 
     返回:
         计划/执行结果字典: plan_id / dry_run / count / total_bytes / candidates /
-        retained_count / retained / (dry_run=False 时) removed_count / removed / errors。
+        retained_count / retained / pending_delete_days /
+        (dry_run=False 时) marked_count / marked / errors。
     """
     candidates = _candidate_objects(db, limit=limit)
     rules = list(db.execute(sa.select(RetentionRule).where(RetentionRule.status == "active")).scalars())
@@ -715,7 +767,8 @@ def safe_cleanup(
 
     total_bytes = sum(obj.size_bytes or 0 for obj in deletable)
     # RR-P2-07: 稳定计划标识 = 候选 oid 有序串联 + 总字节的 sha256(候选变化即失效)
-    plan_payload = "|".join(sorted(obj.oid for obj in deletable)) + f"|{total_bytes}"
+    # 0.2.0-B3: 保留期天数纳入计划标识(改动保留期即视为新计划, 需重新预览)。
+    plan_payload = "|".join(sorted(obj.oid for obj in deletable)) + f"|{total_bytes}|{pending_delete_days}"
     plan_id = sha256_hex(plan_payload.encode("utf-8")) if deletable else "plan-empty"
     if not dry_run:
         if expected_plan_id is None:
@@ -738,21 +791,130 @@ def safe_cleanup(
         "candidates": [_object_summary(obj) for obj in deletable],
         "retained_count": len(retained),
         "retained": retained,
+        "pending_delete_days": pending_delete_days,
     }
     if dry_run:
         result["message"] = (
-            f"清理计划: {len(deletable)} 个无引用对象共 {total_bytes} 字节可清理"
+            f"清理计划: {len(deletable)} 个无引用对象共 {total_bytes} 字节将标记为待回收, "
+            f"保留 {pending_delete_days} 天后物理删除"
         )
         return result
 
-    # 执行: 删文件 + 删记录 + 审计(23.4 第 6 步: 重试清理无引用对象)
-    removed: list[dict] = []
+    # 执行(0.2.0-B3 软删/保留期): 只标记待物理回收, 不立即删文件。
+    # 到期物理回收由 purge_expired 负责; 保留期内可 undelete / 重新 attach 恢复。
+    marked: list[dict] = []
+    errors: list[dict] = []
+    now = utcnow()
+    until = now + timedelta(days=pending_delete_days)
+    for obj in deletable:
+        obj.status = OBJ_STATUS_PENDING_DELETION
+        obj.pending_deleted_at = now
+        obj.pending_delete_until = until
+        _audit(
+            db,
+            "objects",
+            obj.id,
+            "object_marked_pending_deletion",
+            actor_id=actor_id,
+            actor_type=actor_type,
+            before={"oid": obj.oid, "sha256": obj.sha256, "size_bytes": obj.size_bytes},
+            after={
+                "status": OBJ_STATUS_PENDING_DELETION,
+                "pending_delete_until": until.isoformat(),
+                "pending_delete_days": pending_delete_days,
+            },
+        )
+        marked.append(_object_summary(obj))
+    db.flush()  # RR-P1-03: 存储只 flush, 提交/回滚由应用用例(API 层)统一决定
+    result["dry_run"] = False
+    result["marked_count"] = len(marked)
+    result["marked"] = marked
+    result["errors"] = errors
+    result["message"] = (
+        f"已将 {len(marked)} 个无引用对象标记为待回收, "
+        f"保留 {pending_delete_days} 天后物理删除"
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 软删/保留期(0.2.0-B3 对象清理恢复路径): 待回收清单 / 物理回收 / 恢复
+# ---------------------------------------------------------------------------
+
+
+def list_pending_deleted(
+    db: Session,
+    *,
+    expired_only: bool = False,
+    limit: int = CLEANUP_BATCH_LIMIT,
+) -> list[dict]:
+    """列出"已删除待回收"对象(管理员查看将被物理回收的对象)。
+
+    返回每个待回收对象的公开摘要(含保留截止 pending_delete_until)。
+    expired_only=True 时只列出已过保留期、可以被 purge_expired 物理回收的对象。
+    按保留截止时间升序(到期优先)。
+    """
+    stmt = (
+        sa.select(StoredObject)
+        .where(StoredObject.status == OBJ_STATUS_PENDING_DELETION)
+        .order_by(StoredObject.pending_delete_until, StoredObject.id)
+        .limit(limit)
+    )
+    if expired_only:
+        stmt = stmt.where(StoredObject.pending_delete_until < utcnow())
+    rows = db.execute(stmt).scalars()
+    return [_object_summary(obj) for obj in rows]
+
+
+def purge_expired(
+    db: Session,
+    *,
+    dry_run: bool = True,
+    actor_id: int | None = None,
+    actor_type: str = "admin",
+    limit: int = CLEANUP_BATCH_LIMIT,
+) -> dict:
+    """物理回收已过保留期的待回收对象(0.2.0-B3: 延迟物理删除)。
+
+    - 只处理 status = pending_deletion 且 pending_delete_until 已过期的对象;
+    - 保留期内对象绝不物理删除(为误操作保留恢复路径);
+    - dry_run=True: 只列出可回收对象与预计释放字节, 不删任何数据;
+    - dry_run=False: 删除文件(缺失则仅删记录并审计损坏) + 删记录 + 审计,
+      只 flush(提交/回滚由应用用例统一决定, RR-P1-03);
+    - 文件删除失败的对象跳过并记录 errors(保留记录, 下次重试)。
+
+    返回: {dry_run, count, total_bytes, candidates/purged, errors}。
+    """
+    now = utcnow()
+    stmt = (
+        sa.select(StoredObject)
+        .where(
+            StoredObject.status == OBJ_STATUS_PENDING_DELETION,
+            StoredObject.pending_delete_until < now,
+        )
+        .order_by(StoredObject.pending_delete_until, StoredObject.id)
+        .limit(limit)
+    )
+    expired = list(db.execute(stmt).scalars())
+    total_bytes = sum(obj.size_bytes or 0 for obj in expired)
+    result: dict = {
+        "dry_run": dry_run,
+        "count": len(expired),
+        "total_bytes": total_bytes,
+        "candidates": [_object_summary(obj) for obj in expired],
+    }
+    if dry_run:
+        result["message"] = (
+            f"可物理回收 {len(expired)} 个已过保留期的待回收对象, 共 {total_bytes} 字节"
+        )
+        return result
+
+    purged: list[dict] = []
     errors: list[dict] = []
     store = get_blob_store()
-    for obj in deletable:
+    for obj in expired:
         if obj.storage_path:
             if not store.exists(obj.storage_path):
-                # 文件已缺失: 跳过删除, 记录保留便于重试(reconcile 上报损坏)
                 errors.append({"id": obj.id, "oid": obj.oid, "reason": "missing_file"})
                 continue
             try:
@@ -764,20 +926,64 @@ def safe_cleanup(
             db,
             "objects",
             obj.id,
-            "object_cleanup",
+            "object_purged",
             actor_id=actor_id,
             actor_type=actor_type,
-            before={"oid": obj.oid, "sha256": obj.sha256, "size_bytes": obj.size_bytes},
+            before={
+                "oid": obj.oid,
+                "sha256": obj.sha256,
+                "size_bytes": obj.size_bytes,
+                "status": obj.status,
+            },
         )
         db.delete(obj)
-        removed.append(_object_summary(obj))
-    db.flush()  # RR-P1-03: 存储只 flush, 提交/回滚由应用用例(API 层)统一决定
+        purged.append(_object_summary(obj))
+    db.flush()
     result["dry_run"] = False
-    result["removed_count"] = len(removed)
-    result["removed"] = removed
+    result["purged_count"] = len(purged)
+    result["purged"] = purged
     result["errors"] = errors
-    result["message"] = f"已清理 {len(removed)} 个无引用对象, {len(errors)} 个失败"
+    result["message"] = f"已物理回收 {len(purged)} 个对象, {len(errors)} 个失败"
     return result
+
+
+def undelete_object(
+    db: Session,
+    object_id: int | str,
+    *,
+    actor_id: int | None = None,
+    actor_type: str = "admin",
+) -> dict:
+    """恢复误清理对象(0.2.0-B3 恢复路径, 管理员)。
+
+    只允许恢复 status = pending_deletion 且仍在保留期内的对象; 文件保留在
+    磁盘上, 恢复后内容立即可访问。已过保留期/已被物理回收的对象不可恢复
+    (抛 ObjectNotPendingDeletionError; 物理删除后文件不再存在, 记录已被移除)。
+
+    返回: 恢复后对象的 object_info 视图。
+    """
+    obj = _resolve_object(db, object_id)
+    if obj.status != OBJ_STATUS_PENDING_DELETION:
+        raise ObjectNotPendingDeletionError(
+            "",
+            params={"object_id": obj.id, "oid": obj.oid, "status": obj.status},
+            location={"object_type": "objects", "object_id": obj.id, "field": "status"},
+        )
+    obj.status = OBJ_STATUS_ORPHANED if (obj.ref_count or 0) == 0 else OBJ_STATUS_STORED
+    obj.pending_deleted_at = None
+    obj.pending_delete_until = None
+    _audit(
+        db,
+        "objects",
+        obj.id,
+        "object_restored",
+        actor_id=actor_id,
+        actor_type=actor_type,
+        before={"status": "pending_deletion"},
+        after={"status": obj.status, "reason": "undelete"},
+    )
+    db.flush()
+    return object_info(db, obj.id)
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +1061,11 @@ def storage_stats(db: Session) -> dict:
         .select_from(StoredObject)
         .where(StoredObject.ref_count == 0)
     ).scalar_one()
+    pending_count = db.execute(
+        sa.select(sa.func.count())
+        .select_from(StoredObject)
+        .where(StoredObject.status == OBJ_STATUS_PENDING_DELETION)
+    ).scalar_one()
     refs_count = db.execute(sa.select(sa.func.count()).select_from(ObjectRef)).scalar_one()
     referenced_objects = db.execute(
         sa.select(sa.func.count(sa.distinct(ObjectRef.object_id))).select_from(ObjectRef)
@@ -866,6 +1077,8 @@ def storage_stats(db: Session) -> dict:
             "total_bytes": int(total_bytes),
             "by_status": {str(k): int(v) for k, v in by_status.items()},
             "orphan_count": int(orphan_count),
+            # 0.2.0-B3: 待物理回收对象数(软删/保留期, 供管理视图提示恢复入口)
+            "pending_deletion_count": int(pending_count),
         },
         "refs": {"count": int(refs_count), "referenced_objects": int(referenced_objects)},
         "capacity": capacity,
@@ -936,10 +1149,11 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
     2. 登记磁盘孤儿(有最终文件但无元数据记录):
        - dry_run: 只报告; 非 dry_run: 为该文件补建元数据行(stored, 无引用);
     3. 报告损坏(有元数据但文件缺失或内容与记录不一致);
-    4. 修正 ref_count 缓存漂移(以 ObjectRef 清单为权威, STO-02)。
+    4. 修正 ref_count 缓存漂移(以 ObjectRef 清单为权威, STO-02);
+    5. 兜底物理回收已过保留期的待回收对象(0.2.0-B3, 非 dry_run 时执行)。
 
     返回: {dry_run, tmp_cleaned, orphan_registered, orphan_reported,
-           corrupt_reported, ref_count_fixed}。
+           corrupt_reported, ref_count_fixed, purged_count}。
     """
     store = get_blob_store()
     tmp_cleaned = store.cleanup_tmp()
@@ -996,6 +1210,9 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
             )
 
     # 4. ref_count 缓存漂移修正(引用清单为权威)
+    #    注意: pending_deletion(待物理回收)对象只修 ref_count, 不改变其状态
+    #    —— 它们是"已计划回收"生命周期的一部分, 不能被孤儿判定重新置回
+    #    orphaned(那会让其脱离 purge 队列, 误清理的恢复路径被意外跳过)。
     ref_count_fixed = 0
     for obj in db.execute(
         sa.select(StoredObject).where(StoredObject.status != OBJ_STATUS_DELETED)
@@ -1005,11 +1222,18 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
         ).scalar_one()
         if (obj.ref_count or 0) != int(actual):
             obj.ref_count = int(actual)
-            if int(actual) == 0:
+            if int(actual) == 0 and obj.status != OBJ_STATUS_PENDING_DELETION:
                 obj.status = OBJ_STATUS_ORPHANED
             ref_count_fixed += 1
     if ref_count_fixed:
         db.flush()
+
+    # 5. 兜底物理回收已过保留期的待回收对象(0.2.0-B3 延迟物理删除;
+    #    只处理到期对象, 保留期内绝不物理删)。
+    purged_count = 0
+    if not dry_run:
+        purge = purge_expired(db, dry_run=False, actor_type="reconcile")
+        purged_count = int(purge.get("purged_count") or 0)
 
     return {
         "dry_run": dry_run,
@@ -1018,5 +1242,6 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
         "orphan_reported": orphan_reported,
         "corrupt_reported": corrupt_reported,
         "ref_count_fixed": ref_count_fixed,
+        "purged_count": purged_count,
         "healthy": not corrupt_reported,
     }

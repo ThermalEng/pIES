@@ -24,6 +24,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -60,6 +61,10 @@ _ACTIVE_STATUSES: Final[tuple[str, str]] = ("active", "takeover_pending")
 _DUMMY_PASSWORD_HASH: Final[str] = (
     "$2b$12$P5GwAaopJcdx8Bx7CEUWOeNFfS/4KQ6wvr321HDFA.oQakKY.W9v."
 )
+#: 删除账号确认令牌有效期(秒): 预览后须在窗口内执行删除(误操作防护窗口)
+_DELETE_CONFIRM_WINDOW_SECONDS: Final[int] = 600
+#: 删除账号确认令牌签名盐(与 OIDC state 盐分离, 独立用途)
+_DELETE_CONFIRM_SALT: Final[str] = "ies.delete-user-confirm"
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +164,20 @@ class BadRequestError(AuthError):
     http_status = 400
     code = "AUTH-BAD-001"
     message_key = "ies.diag.auth.bad_request"
+
+
+class DeleteConfirmRequiredError(BadRequestError):
+    """删除账号缺少确认或确认令牌无效(400)。
+
+    误操作防护(0.2.0 B1): 删除账号会级联软删其拥有的全部项目且不可恢复,
+    必须在预览后携带签名确认令牌显式确认。错误可能原因:
+    - 未携带 confirm=true;
+    - 确认令牌缺失/过期/被篡改;
+    - 预览后目标用户拥有的项目清单发生变化(令牌与当前清单不一致)。
+    """
+
+    code = "AUTH-DEL-001"
+    message_key = "ies.diag.auth.delete_confirm_required"
 
 
 # ---------------------------------------------------------------------------
@@ -666,17 +685,128 @@ def reactivate_user(
     db.commit()
 
 
+# ---------------------------------------------------------------------------
+# 删除账号确认/预告(0.2.0 B1: 误操作防护)
+# ---------------------------------------------------------------------------
+
+
+def _delete_confirm_serializer() -> URLSafeTimedSerializer:
+    """删除确认令牌签名器(与主签名密钥分离, 多 Worker 共享密钥可互认)。"""
+    return URLSafeTimedSerializer(
+        settings.secret_key,
+        salt=_DELETE_CONFIRM_SALT,
+        signer_kwargs={"key_derivation": "hmac"},
+    )
+
+
+def owned_project_ids(db: Session, user: User) -> list[int]:
+    """该用户当前拥有、且尚未删除(软删)的项目 id 列表(升序)。
+
+    供删除预告与确认令牌一致性校验共用, 保证「确认删除的影响范围」
+    与「实际级联删除的范围」一致。
+    """
+    ids = db.execute(
+        select(Project.id).where(
+            Project.owner_id == user.id,
+            Project.status != "deleted",
+        )
+    ).scalars().all()
+    return sorted(ids)
+
+
+def preview_user_delete(
+    db: Session,
+    admin: User,
+    user: User,
+) -> dict:
+    """删除账号预告(管理员): 返回将受影响的项目清单与签名确认令牌。
+
+    - 不能删除自己, 不能删除系统账号(与 delete_user 同约束, 提前拦截);
+    - 返回 {user_id, username, project_count, projects, confirm_token}:
+      projects 为 [{id, name, status}...](仅该用户拥有的未删除项目);
+    - confirm_token 为签名令牌(10 分钟窗口), 绑定目标用户与预览时的
+      项目 id 清单; DELETE 时清单变化将拒绝执行, 需重新预览。
+    """
+    if user.id == admin.id:
+        raise ForbiddenError("", params={"reason": "cannot_delete_self"})
+    if user.is_system:
+        raise ForbiddenError("", params={"reason": "system_account"})
+    owned = db.execute(
+        select(Project).where(
+            Project.owner_id == user.id,
+            Project.status != "deleted",
+        ).order_by(Project.id)
+    ).scalars().all()
+    project_ids = [p.id for p in owned]
+    token = _delete_confirm_serializer().dumps(
+        {
+            "user_id": user.id,
+            "username": user.username,
+            "project_ids": project_ids,
+        }
+    )
+    return {
+        "user_id": user.id,
+        "username": user.username,
+        "project_count": len(owned),
+        "projects": [{"id": p.id, "name": p.name, "status": p.status} for p in owned],
+        "confirm_token": token,
+    }
+
+
+def verify_delete_confirm_token(db: Session, user: User, token: str) -> None:
+    """校验删除确认令牌: 签名有效 + 未过期 + 绑定目标用户 + 项目清单未变化。
+
+    任一不满足抛 DeleteConfirmRequiredError(400), 拒绝删除。
+    """
+    if not token:
+        raise DeleteConfirmRequiredError(
+            "", params={"reason": "missing_confirm", "user_id": user.id}
+        )
+    try:
+        payload = _delete_confirm_serializer().loads(token, max_age=_DELETE_CONFIRM_WINDOW_SECONDS)
+    except (BadSignature, SignatureExpired, TypeError) as exc:
+        raise DeleteConfirmRequiredError(
+            "", params={"reason": "invalid_or_expired_confirm", "user_id": user.id}
+        ) from exc
+    if not isinstance(payload, dict):
+        raise DeleteConfirmRequiredError(
+            "", params={"reason": "invalid_confirm", "user_id": user.id}
+        )
+    if payload.get("user_id") != user.id or payload.get("username") != user.username:
+        raise DeleteConfirmRequiredError(
+            "", params={"reason": "confirm_user_mismatch", "user_id": user.id}
+        )
+    preview_ids = payload.get("project_ids")
+    if not isinstance(preview_ids, list) or not all(isinstance(i, int) for i in preview_ids):
+        raise DeleteConfirmRequiredError(
+            "", params={"reason": "invalid_confirm", "user_id": user.id}
+        )
+    if sorted(preview_ids) != owned_project_ids(db, user):
+        # 预览后项目清单变化: 强制重新预览, 防止基于过期范围确认删除
+        raise DeleteConfirmRequiredError(
+            "",
+            params={"reason": "project_list_changed", "user_id": user.id},
+        )
+
+
 def delete_user(
     db: Session,
     admin: User,
     user: User,
     *,
+    confirm: bool = False,
+    confirm_token: str = "",
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> dict:
     """删除账号(管理员): 该账号拥有的项目一并删除(RPD 5.4 账号生命周期)。
 
     - 不能删除自己, 不能删除系统账号;
+    - 必须显式确认(confirm=True)且携带有效的确认令牌(由 preview_user_delete
+      签发, 10 分钟窗口, 绑定目标用户与预览时的项目清单), 否则 400 ——
+      删除账号会级联软删其拥有的全部项目且不可恢复, 属于「会造成明显数据
+      破坏的误操作」;
     - 目标用户拥有的项目全部置 status='deleted'(软删, 与项目删除一致,
       不可变版本/审计保留, 对象清理由 U16 重试执行);
     - 用户状态置 disabled, 全部会话撤销, 凭证撤销(不可变表只置撤销标记)。
@@ -686,6 +816,11 @@ def delete_user(
         raise ForbiddenError("", params={"reason": "cannot_delete_self"})
     if user.is_system:
         raise ForbiddenError("", params={"reason": "system_account"})
+    if not confirm:
+        raise DeleteConfirmRequiredError(
+            "", params={"reason": "confirm_required", "user_id": user.id}
+        )
+    verify_delete_confirm_token(db, user, confirm_token)
     from iesplan.services import project as project_service
 
     now = utcnow()

@@ -25,3 +25,6 @@ frontend/tsconfig.tsbuildinfo
 docs/
 CLAUDE.md
 AGENTS.md
+
+# uv(仅测试 agent 生成, 项目不用 uv 管理依赖)
+uv.lock

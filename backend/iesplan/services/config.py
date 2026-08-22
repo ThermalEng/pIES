@@ -70,6 +70,7 @@ from iesplan.devices import (
 )
 from iesplan.core.units import UnitError, dims_of
 from iesplan.db import SessionLocal
+from iesplan.models.audit import AuditLog
 from iesplan.models.calc import CalcConfig
 from iesplan.models.model import Device, SystemGraph
 from iesplan.models.project import Draft, Project
@@ -1268,6 +1269,30 @@ def save_config(
     row.tolerances = config.get("tolerances", {})
     row.random_seed = config.get("random_seed")
     row.updated_at = datetime.now(UTC)
+    # 确保新行的 id 已分配(audit_log.entity_id 非空约束)
+    db.flush()
+    # 0.2.0 B4: 配置保存属"项目/数据/计算配置"关键变更(宪法 §16), 保留不可变
+    # 最小化脱敏审计(只记版本/变量数/目标/算法, 不复制完整配置)
+    db.add(
+        AuditLog(
+            entity_type="calc_config",
+            entity_id=row.id,
+            action="config.saved",
+            actor_id=user_id or proj.owner_id,
+            actor_type="user",
+            before=None,
+            after={
+                "project_id": project_id,
+                "version": row.version,
+                "status": row.status,
+                "variables": len(config.get("variables") or []),
+                "objectives": len(config.get("objectives") or []),
+                "constraints": len(config.get("constraints") or []),
+                "algorithm": row.algorithm,
+                "random_seed": config.get("random_seed"),
+            },
+        )
+    )
     # 同步当前草稿内容的 calc_config 节(快照装配/项目包导出以草稿内容为
     # 权威输入, 不更新则保存的配置不进入计算快照与导出包)
     _sync_draft_config(db, proj, config, row)

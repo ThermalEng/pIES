@@ -172,7 +172,9 @@ export const messagesEn: Record<string, string> = {
   'ies.project.unarchive': 'Unarchive',
   'ies.project.unarchive_ok': 'Project restored',
   'ies.project.delete': 'Delete project',
-  'ies.project.delete_confirm': 'This cannot be undone. Delete project {name}?',
+  'ies.project.delete_confirm': 'This cannot be undone. Type the project name {name} to confirm deletion:',
+  'ies.project.delete_name_label': 'Project name',
+  'ies.project.delete_name_mismatch': 'Entered name does not match. Deletion blocked.',
   'ies.project.duplicate': 'Duplicate',
   'ies.project.duplicate_ok': 'Project copy created',
   'ies.project.transfer': 'Transfer ownership',
@@ -607,6 +609,11 @@ export const messagesEn: Record<string, string> = {
   'ies.admin.reactivate': 'Enable',
   'ies.admin.delete_hint': 'Deleting an account also deletes all projects it owns (irreversible).',
   'ies.admin.user_deleted': 'Deleted account {username}; {count} project(s) deleted.',
+  'ies.admin.delete_scope': 'Deleting account {username} cannot be undone and will delete all projects it owns.',
+  'ies.admin.delete_preview': 'Projects that will be deleted ({count}):',
+  'ies.admin.delete_preview_none': 'This account owns no projects to delete.',
+  'ies.admin.project_name': 'Project name',
+  'ies.admin.project_id': 'Project ID',
   'ies.admin.user_deactivated': 'Disabled account {username}.',
   'ies.admin.user_reactivated': 'Re-enabled account {username}.',
   'ies.admin.user_status_active': 'Active',
@@ -802,8 +809,10 @@ export const messagesEn: Record<string, string> = {
   'ies.diag.auth.registration_disabled': 'Registration is not available on this system',
   'ies.diag.auth.required': 'This field is required',
   'ies.diag.auth.bad_request': 'Invalid request: {reason}',
+  'ies.diag.auth.delete_confirm_required': 'Deleting an account permanently deletes all projects it owns. Preview the affected scope and confirm deletion first.',
   'ies.diag.auth.role_invalid': 'Invalid role',
   'ies.diag.auth.csrf_origin_rejected': 'Request origin verification failed. Refresh the page and try again.',
+  'ies.diag.admin.confirm_required': 'This operation has a broad impact. Review the affected scope and confirm to proceed.',
 
   // -------------------------------------------------------------------------
   // Expression engine errors

@@ -68,9 +68,16 @@ class VersionCreateRequest(BaseModel):
 
 
 class DeleteConfirmRequest(BaseModel):
-    """删除确认请求体(RPD 5.3: 必须明确确认)。"""
+    """删除确认请求体(RPD 5.3: 必须明确确认)。
+
+    0.2.0 B4 强化误操作防护: 不再接受空布尔 ``confirm: true`` 单独作为确认。
+    必须提供 ``name``(项目名精确匹配)或 ``reason``(删除原因, 非空)之一;
+    ``confirm`` 字段仅为兼容旧调用方保留, 单独为 true 不足以确认删除。
+    """
 
     confirm: bool = False
+    name: str | None = Field(default=None, max_length=200)
+    reason: str | None = Field(default=None, max_length=1000)
 
 
 class TransferRequest(BaseModel):
@@ -318,8 +325,15 @@ def delete_project_endpoint(
     db: Annotated[Session, Depends(get_db)],
     user: CurrentUser,
 ) -> None:
-    """删除项目(RPD 5.3): 必须携带 {"confirm": true} 显式确认。"""
-    project_service.delete_project(db, user, project_id, confirm=payload.confirm)
+    """删除项目(RPD 5.3): 必须输入项目名或删除原因以确认误操作防护。
+
+    0.2.0 B4: 空布尔 confirm 不再足以确认; 须 name(项目名精确匹配)或
+    reason(非空删除原因)之一。
+    """
+    project_service.delete_project(
+        db, user, project_id, confirm=payload.confirm,
+        name=payload.name, reason=payload.reason,
+    )
     db.commit()
 
 

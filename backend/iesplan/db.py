@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, select, text as sa_text
+import sqlalchemy as sa
+from sqlalchemy import create_engine, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from iesplan.config import settings
@@ -36,17 +38,20 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """幂等初始化数据库: 建表 + 约束迁移 + 种子管理员。
+    """幂等初始化数据库: 建表 + 约束迁移 + 不可变触发器 + 种子管理员。
 
     - 先导入模型模块, 确保全部表注册到 Base.metadata;
     - create_all 只建不存在的表, 重复调用无副作用;
     - _migrate_constraints: 既有表约束随模型演进做幂等 ALTER
-      (如 ck_tasks_type 增补 'analysis', 03 §9.7)。
+      (如 ck_tasks_type 增补 'analysis', 03 §9.7);
+    - _deploy_immutable_triggers: 不可变表(01 §11)部署"禁 UPDATE/DELETE"触发器
+      与 REVOKE(仅 PostgreSQL; SQLite 测试库跳过)。
     """
     from iesplan import models  # noqa: F401  (注册全部模型)
 
     Base.metadata.create_all(bind=engine)
     _migrate_constraints()
+    _deploy_immutable_triggers()
     seed_admin()
 
 
@@ -106,6 +111,84 @@ def _migrate_constraints() -> None:
                     "(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
                 )
             )
+        # 0.2.0-B3: objects 新增软删/保留期列(pending_deleted_at / pending_delete_until),
+        # 旧库 create_all 不会为既有表补列, 这里幂等 ALTER 补列并建到期索引。
+        _add_column_if_missing(conn, "objects", "pending_deleted_at", "TIMESTAMPTZ")
+        _add_column_if_missing(conn, "objects", "pending_delete_until", "TIMESTAMPTZ")
+        conn.execute(
+            sa_text(
+                "CREATE INDEX IF NOT EXISTS idx_objects_pending_until "
+                "ON objects (pending_delete_until)"
+            )
+        )
+        # 既有库补建软删日期 CHECK 约束(新库由 create_all 建, 旧库升级需幂等补):
+        # pending 状态必须同时有 de/until 且 until >= deleted_at, 防负保留期等畸形数据。
+        exists = conn.execute(
+            sa_text(
+                "SELECT 1 FROM pg_constraint WHERE conname = 'ck_objects_pending_deletion_dates'"
+            )
+        ).first()
+        if exists is None:
+            conn.execute(
+                sa_text(
+                    "ALTER TABLE objects ADD CONSTRAINT ck_objects_pending_deletion_dates "
+                    "CHECK (status <> 'pending_deletion' OR (pending_deleted_at IS NOT NULL "
+                    "AND pending_delete_until IS NOT NULL "
+                    "AND pending_delete_until >= pending_deleted_at))"
+                )
+            )
+
+
+def _add_column_if_missing(
+    conn: sa.Connection, table: str, column: str, col_type: str
+) -> None:
+    """Postgres 幂等补列: 列不存在才 ALTER TABLE ADD COLUMN(IF NOT EXISTS 不支持
+    ADD COLUMN, 故先查 information_schema 再执行)。"""
+    exists = conn.execute(
+        sa_text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = :t AND column_name = :c"
+        ),
+        {"t": table, "c": column},
+    ).first()
+    if exists is None:
+        conn.execute(sa_text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+
+
+def _deploy_immutable_triggers() -> None:
+    """不可变表(仅 INSERT)部署"禁止 UPDATE/DELETE"触发器 + REVOKE(01 第0节)。
+
+    三道防线第 2/3 层(第 1 层应用层只允许唯一写入单元发 INSERT 由代码约定保证):
+    1. ``REVOKE UPDATE, DELETE ON <table> FROM PUBLIC``(不授予任何角色该表
+       UPDATE/DELETE);
+    2. 每张不可变表创建 ``tg_<table>_immutable()`` 函数 + BEFORE UPDATE|DELETE
+       触发器, 触发即 RAISE EXCEPTION。
+
+    幂等: 重复执行前先 ``DROP FUNCTION IF EXISTS ... CASCADE`` 清掉同名函数及其
+    关联触发器, 再重建, 与新宪法"关键变更保留不可变审计"一致。
+
+    仅 PostgreSQL 执行; SQLite 测试库不解析 plpgsql 触发器语法, 直接跳过
+    (create_all 每次全量重建, 无生产数据, 不可变性由应用层唯一写入单元保证)。
+    """
+    if not settings.db_url.startswith("postgresql"):
+        return
+    from iesplan.models.immutable_triggers import (
+        ALL_IMMUTABLE_REVOKE_DDL,
+        ALL_IMMUTABLE_TRIGGER_DDL,
+        IMMUTABLE_TABLES,
+    )
+
+    with engine.begin() as conn:
+        for table in IMMUTABLE_TABLES:
+            conn.execute(
+                sa_text(f"DROP FUNCTION IF EXISTS tg_{table}_immutable() CASCADE")
+            )
+        for stmt in ALL_IMMUTABLE_TRIGGER_DDL.split("\n\n"):
+            if stmt.strip():
+                conn.execute(sa_text(stmt))
+        for stmt in ALL_IMMUTABLE_REVOKE_DDL.split("\n"):
+            if stmt.strip():
+                conn.execute(sa_text(stmt))
 
 
 def seed_admin(password: str | None = None) -> None:

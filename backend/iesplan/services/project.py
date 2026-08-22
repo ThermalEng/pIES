@@ -451,10 +451,19 @@ def unarchive_project(db: Session, user: User, project_id: int) -> Project:
     return project
 
 
-def delete_project(db: Session, user: User, project_id: int, confirm: bool = False) -> None:
+def delete_project(
+    db: Session,
+    user: User,
+    project_id: int,
+    confirm: bool = False,
+    name: str | None = None,
+    reason: str | None = None,
+) -> None:
     """删除项目(RPD 5.3: 确认 → 取消排队任务 → 一致性检查 → 硬删除)。
 
-    - 必须显式确认(confirm=True), 否则 400;
+    - 0.2.0 B4 误操作防护: 必须提供 ``name``(与项目名精确匹配)或 ``reason``
+      (非空删除原因)之一; 单独 ``confirm: true`` 不足以确认(参数保留仅为
+      兼容旧调用方, 不单独作为确认条件);
     - 排队/取消中任务置为 cancelled; 存在运行中任务时阻断删除(终止运行任务由
       U07 任务单元负责, 本阶段以冲突提示要求先终止);
     - 项目置 status='deleted'(01 §3.1 软删), 无回收站语义; 不可变版本与审计
@@ -465,6 +474,17 @@ def delete_project(db: Session, user: User, project_id: int, confirm: bool = Fal
     if not confirm:
         raise InvalidRequestError(
             "删除项目必须显式确认", code="PROJ-DEL-001", params={"project_id": project_id}
+        )
+    provided = (name or "").strip() or (reason or "").strip()
+    if not provided:
+        raise InvalidRequestError(
+            "删除项目须输入项目名或删除原因", code="PROJ-DEL-002",
+            params={"project_id": project_id},
+        )
+    if name is not None and (name or "").strip() != project.name:
+        raise InvalidRequestError(
+            "输入的项目名与待删除项目不一致", code="PROJ-DEL-003",
+            params={"project_id": project_id},
         )
     now = datetime.now(UTC)
     # 取消排队/取消中的任务(删除协调, RPD 5.3 第 2 步)
@@ -487,7 +507,14 @@ def delete_project(db: Session, user: User, project_id: int, confirm: bool = Fal
     project.status = "deleted"
     project.updated_at = now
     db.flush()
-    _audit(db, "project", project_id, "project.deleted", user.id, after={"status": "deleted"})
+    _audit(
+        db, "project", project_id, "project.deleted", user.id,
+        after={
+            "status": "deleted",
+            "confirm": "name" if (name or "").strip() else "reason",
+            "reason": (reason or "").strip()[:200] or None,
+        },
+    )
 
 
 def duplicate_project(db: Session, user: User, project_id: int, name: str | None = None) -> Project:

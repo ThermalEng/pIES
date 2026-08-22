@@ -411,7 +411,8 @@ def test_admin_users_list_and_permission(client: TestClient, db_session: Session
 
 
 def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Session) -> None:
-    """删除账号: 该账号拥有的项目一并删除(级联), 账号停用且会话失效。"""
+    """删除账号(0.2.0 B1 误操作防护): 先预览取得确认令牌, 携带 confirm+令牌删除成功,
+    该账号拥有的项目一并软删, 账号停用且会话失效。"""
     seed_admin(db_session, force_change=False)
     alice = seed_engineer(db_session)
     r = login(client, "admin", ADMIN_PASSWORD)
@@ -432,8 +433,23 @@ def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Ses
     pid1 = p1.json()["project"]["id"]
     pid2 = p2.json()["project"]["id"]
 
-    # 管理员删除账号 alice → 两个项目一并软删
-    resp = client.delete(f"/api/auth/users/{alice.id}", headers=admin_headers)
+    # 第一步: 删除预告 → 返回将受影响项目清单 + 确认令牌
+    preview = client.post(f"/api/auth/users/{alice.id}/delete-preview", headers=admin_headers)
+    assert preview.status_code == 200
+    prev = preview.json()
+    assert prev["user_id"] == alice.id
+    assert prev["username"] == "alice"
+    assert prev["project_count"] == 2
+    assert [p["id"] for p in prev["projects"]] == sorted([pid1, pid2])
+    assert prev["confirm_token"]
+
+    # 第二步: 携带 confirm + 令牌删除 → 两个项目一并软删
+    resp = client.request(
+        "DELETE",
+        f"/api/auth/users/{alice.id}",
+        json={"confirm": True, "confirm_token": prev["confirm_token"]},
+        headers=admin_headers,
+    )
     assert resp.status_code == 200
     assert resp.json()["deleted_projects"] == 2
 
@@ -449,6 +465,100 @@ def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Ses
     assert client.get(f"/api/projects/{pid1}", headers=admin_headers).status_code == 404
 
 
+def test_admin_delete_user_requires_confirm_and_token(client: TestClient, db_session: Session) -> None:
+    """删除账号(0.2.0 B1): 无 confirm / 无令牌 / 令牌无效 / 清单变化均被拒(400),
+    账号与项目均不受影响。"""
+    seed_admin(db_session, force_change=False)
+    alice = seed_engineer(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    admin_headers = bearer(r.json()["token"])
+    alice_headers = bearer(login(client, "alice", USER_PASSWORD).json()["token"])
+
+    p1 = client.post(
+        "/api/projects", json={"name": "需确认项目", "currency": "CNY", "utc_offset_minutes": 480},
+        headers=alice_headers,
+    )
+    assert p1.status_code == 201
+    pid1 = p1.json()["project"]["id"]
+
+    # 1) 无 confirm(裸 DELETE)→ 400
+    resp = client.delete(f"/api/auth/users/{alice.id}", headers=admin_headers)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.delete_confirm_required"
+
+    # 2) confirm=true 但无令牌 → 400
+    resp = client.request(
+        "DELETE", f"/api/auth/users/{alice.id}", json={"confirm": True}, headers=admin_headers
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.delete_confirm_required"
+
+    # 3) confirm=true + 伪造令牌 → 400
+    resp = client.request(
+        "DELETE",
+        f"/api/auth/users/{alice.id}",
+        json={"confirm": True, "confirm_token": "forged-token"},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.delete_confirm_required"
+
+    # 4) 预览后项目清单变化(新增项目)→ 旧令牌拒绝(需重新预览)
+    preview = client.post(f"/api/auth/users/{alice.id}/delete-preview", headers=admin_headers)
+    assert preview.status_code == 200
+    old_token = preview.json()["confirm_token"]
+    p2 = client.post(
+        "/api/projects", json={"name": "清单变化项目", "currency": "CNY", "utc_offset_minutes": 480},
+        headers=alice_headers,
+    )
+    assert p2.status_code == 201
+    resp = client.request(
+        "DELETE",
+        f"/api/auth/users/{alice.id}",
+        json={"confirm": True, "confirm_token": old_token},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["message_key"] == "ies.diag.auth.delete_confirm_required"
+
+    # 全部被拒后账号与项目均不受影响
+    assert client.post("/api/auth/refresh", headers=alice_headers).status_code == 200
+    assert login(client, "alice", USER_PASSWORD).status_code == 200
+    # 重复登录触发接管, 确认接管后取得可用凭证再访问项目细节
+    alice_tok = login(client, "alice", USER_PASSWORD).json()["token"]
+    alice2_headers = bearer(
+        client.post("/api/auth/confirm-takeover", headers=bearer(alice_tok)).json()["token"]
+    )
+    admin_view = client.get("/api/projects/admin-visible", headers=admin_headers)
+    by_id = {p["id"]: p for p in admin_view.json()["projects"]}
+    assert by_id[pid1]["status"] == "active"
+    assert client.get(f"/api/projects/{pid1}", headers=alice2_headers).status_code == 200
+
+
+def test_admin_delete_user_preview_zero_projects(client: TestClient, db_session: Session) -> None:
+    """删除预告: 无项目账号返回空清单 + 可正常确认删除。"""
+    seed_admin(db_session, force_change=False)
+    alice = seed_engineer(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    admin_headers = bearer(r.json()["token"])
+
+    preview = client.post(f"/api/auth/users/{alice.id}/delete-preview", headers=admin_headers)
+    assert preview.status_code == 200
+    prev = preview.json()
+    assert prev["project_count"] == 0
+    assert prev["projects"] == []
+    assert prev["confirm_token"]
+
+    resp = client.request(
+        "DELETE",
+        f"/api/auth/users/{alice.id}",
+        json={"confirm": True, "confirm_token": prev["confirm_token"]},
+        headers=admin_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["deleted_projects"] == 0
+
+
 def test_admin_cannot_delete_self_or_system(client: TestClient, db_session: Session) -> None:
     """管理员不能删除自己; 系统账号不可删除。"""
     seed_admin(db_session, force_change=False)
@@ -456,11 +566,14 @@ def test_admin_cannot_delete_self_or_system(client: TestClient, db_session: Sess
     admin_headers = bearer(r.json()["token"])
     admin = db_session.execute(select(identity.User).where(identity.User.username == "admin")).scalar_one()
     assert client.delete(f"/api/auth/users/{admin.id}", headers=admin_headers).status_code == 403
+    # 预告同样被拒(不自锁/不预告系统账号)
+    assert client.post(f"/api/auth/users/{admin.id}/delete-preview", headers=admin_headers).status_code == 403
     sys_user = db_session.execute(
         select(identity.User).where(identity.User.is_system.is_(True))
     ).scalars().all()
     for u in sys_user:
         assert client.delete(f"/api/auth/users/{u.id}", headers=admin_headers).status_code == 403
+        assert client.post(f"/api/auth/users/{u.id}/delete-preview", headers=admin_headers).status_code == 403
 
 
 # ---------------------------------------------------------------------------

@@ -182,7 +182,9 @@ export const messagesZh: Record<string, string> = {
   'ies.project.unarchive': '取消归档',
   'ies.project.unarchive_ok': '项目已恢复',
   'ies.project.delete': '删除项目',
-  'ies.project.delete_confirm': '删除后不可恢复,确定删除项目 {name}?',
+  'ies.project.delete_confirm': '删除后不可恢复。请输入项目名 {name} 以确认删除:',
+  'ies.project.delete_name_label': '项目名称',
+  'ies.project.delete_name_mismatch': '输入的项目名称不匹配,无法删除',
   'ies.project.duplicate': '复制项目',
   'ies.project.duplicate_ok': '项目副本创建成功',
   'ies.project.transfer': '转移所有权',
@@ -617,6 +619,11 @@ export const messagesZh: Record<string, string> = {
   'ies.admin.reactivate': '启用',
   'ies.admin.delete_hint': '删除账号时,该账号拥有的项目将一并删除(不可恢复)。',
   'ies.admin.user_deleted': '已删除账号 {username},级联删除 {count} 个项目。',
+  'ies.admin.delete_scope': '删除账号 {username} 后不可恢复,其拥有的项目将一并删除。',
+  'ies.admin.delete_preview': '将删除 {count} 个项目:',
+  'ies.admin.delete_preview_none': '该账号没有需要删除的项目。',
+  'ies.admin.project_name': '项目名称',
+  'ies.admin.project_id': '项目 ID',
   'ies.admin.user_deactivated': '已停用账号 {username}。',
   'ies.admin.user_reactivated': '已重新启用账号 {username}。',
   'ies.admin.user_status_active': '正常',
@@ -812,8 +819,10 @@ export const messagesZh: Record<string, string> = {
   'ies.diag.auth.registration_disabled': '当前系统未开放注册',
   'ies.diag.auth.required': '必填项不能为空',
   'ies.diag.auth.bad_request': '请求参数错误:{reason}',
+  'ies.diag.auth.delete_confirm_required': '删除账号会连带删除其拥有的全部项目且不可恢复,请先预览影响范围并确认删除。',
   'ies.diag.auth.role_invalid': '无效的角色',
   'ies.diag.auth.csrf_origin_rejected': '请求来源校验未通过,请刷新页面后重试',
+  'ies.diag.admin.confirm_required': '该操作影响范围较大,请核对 {hint} 后确认执行',
 
   // -------------------------------------------------------------------------
   // 表达式引擎错误

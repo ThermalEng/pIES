@@ -30,20 +30,25 @@ from iesplan.models.identity import User
 from iesplan.services import identity
 from iesplan.storage import (
     ObjectCorruptError,
+    ObjectNotPendingDeletionError,
     add_ref,
     check_capacity,
     estimate_storage,
     get_object,
+    list_pending_deleted,
     list_refs,
     object_info,
+    purge_expired,
     put_object,
     reconcile,
     remove_ref,
     safe_cleanup,
+    undelete_object,
     verify_object,
 )
 from iesplan.storage.contracts import ObjectHandle
 from iesplan.storage.persistence import ObjectRef, StoredObject
+from iesplan.storage.service import utcnow
 
 ADMIN_PASSWORD = "Admin12345"
 USER_PASSWORD = "Alice12345"
@@ -315,8 +320,9 @@ def test_safe_cleanup_dry_run_plan(session: Session, data_dir) -> None:
     assert session.get(StoredObject, orphan.id) is not None
 
 
-def test_safe_cleanup_execute_removes_unreferenced(session: Session, data_dir) -> None:
-    """执行清理: 删文件 + 删记录 + 审计; 被引用对象(项目版本引用)不可清理。"""
+def test_safe_cleanup_execute_marks_pending_deletion(session: Session, data_dir) -> None:
+    """执行清理(0.2.0-B3 软删/保留期): 无引用对象标记为待物理回收,
+    不立即删文件, 保留期内可恢复; 被引用对象(项目版本引用)不可清理。"""
     orphan = _put(session, b"orphan-2" * 7)
     kept = _put(session, b"kept-version" * 7, ref_type="version_ref", ref_id=42)  # project_versions
     session.commit()
@@ -324,21 +330,30 @@ def test_safe_cleanup_execute_removes_unreferenced(session: Session, data_dir) -
     plan = safe_cleanup(session, dry_run=True)
     result = safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
     session.commit()  # RR-P1-03: 应用用例拥有事务, 存储服务只 flush
-    assert result["removed_count"] == 1
+    assert result["marked_count"] == 1
     assert result["errors"] == []
-    # 无引用对象: 文件与记录均已删除
-    assert not (data_dir / "objects" / orphan.sha256).exists()
-    assert session.get(StoredObject, orphan.id) is None
+    assert result["pending_delete_days"] == 7
+    # 无引用对象: 标记为待物理回收(软删), 文件与记录都保留
+    row = session.get(StoredObject, orphan.id)
+    assert row is not None
+    assert row.status == "pending_deletion"
+    assert row.pending_deleted_at is not None
+    assert row.pending_delete_until is not None
+    assert row.pending_delete_until > row.pending_deleted_at
+    assert (data_dir / "objects" / orphan.sha256).exists()
+    # 内容仍可读取(恢复路径: 文件未物理删)
+    assert get_object(session, orphan.id) == b"orphan-2" * 7
     # 被项目版本引用的对象保留(23.2)
     assert (data_dir / "objects" / kept.sha256).exists()
     assert session.get(StoredObject, kept.id) is not None
     assert object_info(session, kept.id)["ref_count"] == 1
-    # 清理审计(01 §10.3)
-    assert _count_audit(session, "object_cleanup") == 1
+    # 软删标记审计(01 §10.3)
+    assert _count_audit(session, "object_marked_pending_deletion") == 1
     audit = session.execute(
-        sa.select(AuditLog).where(AuditLog.action == "object_cleanup")
+        sa.select(AuditLog).where(AuditLog.action == "object_marked_pending_deletion")
     ).scalar_one()
     assert audit.entity_id == orphan.id and audit.before["sha256"] == orphan.sha256
+    assert audit.after["status"] == "pending_deletion"
 
 
 def test_safe_cleanup_keeps_referenced_and_protected(session: Session, data_dir) -> None:
@@ -385,16 +400,201 @@ def test_safe_cleanup_retention_rule_holds(session: Session, data_dir) -> None:
 
 
 def test_safe_cleanup_missing_file_skipped(session: Session, data_dir) -> None:
-    """文件已缺失的对象跳过删除, 记录保留以便重试。"""
+    """文件已缺失的对象: 标记为待物理回收(0.2.0-B3 软删), 由 purge 统一收尾。"""
     orphan = _put(session, b"no-file" * 3)
     session.commit()
     (data_dir / "objects" / orphan.sha256).unlink()
     plan = safe_cleanup(session, dry_run=True)
     result = safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
     session.commit()  # RR-P1-03
-    assert result["removed_count"] == 0
-    assert len(result["errors"]) == 1
-    assert session.get(StoredObject, orphan.id) is not None
+    assert result["marked_count"] == 1
+    assert result["errors"] == []
+    row = session.get(StoredObject, orphan.id)
+    assert row is not None
+    assert row.status == "pending_deletion"  # 软删标记, 便于 purge 统一收尾
+
+
+def test_safe_cleanup_stale_plan_rejected(session: Session, data_dir) -> None:
+    """清理计划过期: 候选集合变化后执行被拒绝(要求重新预览)。"""
+    _put(session, b"plan-stale" * 3)
+    session.commit()
+    plan = safe_cleanup(session, dry_run=True)
+    # 候选变化: 新对象加入(引用被解除的原对象也变为候选)
+    _put(session, b"plan-stale-extra" * 2)
+    session.commit()
+    with pytest.raises(AppError) as exc:
+        safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
+    assert exc.value.code == "OBJ-CLEAN-002"
+
+
+# ---------------------------------------------------------------------------
+# 0.2.0-B3 对象清理恢复路径(软删/保留期)
+# ---------------------------------------------------------------------------
+
+
+def test_pending_deleted_list_and_restore(session: Session, data_dir) -> None:
+    """待回收清单 + 恢复: 清理后对象进入清单, 保留期内可 undelete 恢复。"""
+    orphan = _put(session, b"restore-me" * 4)
+    session.commit()
+    plan = safe_cleanup(session, dry_run=True)
+    safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
+    session.commit()
+
+    pending = list_pending_deleted(session)
+    assert len(pending) == 1
+    assert pending[0]["id"] == orphan.id
+    assert pending[0]["status"] == "pending_deletion"
+    assert pending[0]["pending_delete_until"] is not None
+
+    # 恢复: 回到可用状态, 文件仍在
+    info = undelete_object(session, orphan.id)
+    session.commit()
+    assert info["status"] == "orphaned"
+    assert info["pending_deleted_at"] is None
+    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert get_object(session, orphan.id) == b"restore-me" * 4
+    # 恢复审计
+    assert _count_audit(session, "object_restored") == 1
+
+
+def test_undelete_non_pending_raises(session: Session, data_dir) -> None:
+    """恢复非待回收对象抛 ObjectNotPendingDeletionError。"""
+    obj = _put(session, b"live-object" * 3)
+    session.commit()
+    with pytest.raises(ObjectNotPendingDeletionError):
+        undelete_object(session, obj.id)
+
+
+def test_re_attach_restores_pending_object(session: Session, data_dir) -> None:
+    """重新 attach 引用恢复待回收对象(0.2.0-B3: 误清理后可重新绑定恢复)。"""
+    orphan = _put(session, b"re-attach-restore" * 3)
+    session.commit()
+    plan = safe_cleanup(session, dry_run=True)
+    safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
+    session.commit()
+    assert session.get(StoredObject, orphan.id).status == "pending_deletion"
+
+    # 重新建立 owner 引用 → 自动恢复为 stored
+    add_ref(session, orphan.id, "dataset_file", 88)
+    session.commit()
+    info = object_info(session, orphan.id)
+    assert info["status"] == "stored"
+    assert info["ref_count"] == 1
+    assert info["pending_deleted_at"] is None
+    assert (data_dir / "objects" / orphan.sha256).exists()
+
+
+def test_purge_expired_after_retention(session: Session, data_dir) -> None:
+    """保留期到期后 purge 物理回收: 删文件 + 删记录 + 审计; 保留期内不回收。"""
+    orphan = _put(session, b"purge-after-retention" * 3)
+    session.commit()
+    plan = safe_cleanup(session, dry_run=True, pending_delete_days=7)
+    safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"], pending_delete_days=7)
+    session.commit()
+
+    # 保留期内: purge dry_run 无可回收对象
+    pre = purge_expired(session, dry_run=True)
+    assert pre["count"] == 0
+    # 保留期内不物理删
+    assert (data_dir / "objects" / orphan.sha256).exists()
+
+    # 让保留期过期(等价于时间流逝): 同时拨旧 pending_deleted_at 与
+    # pending_delete_until, 保持 CHECK 约束(pending_delete_until >= pending_deleted_at)
+    row = session.get(StoredObject, orphan.id)
+    from datetime import timedelta
+
+    row.pending_deleted_at = utcnow() - timedelta(days=8)
+    row.pending_delete_until = utcnow() - timedelta(seconds=1)
+    session.commit()
+
+    # dry_run 预览可回收对象
+    pre2 = purge_expired(session, dry_run=True)
+    assert pre2["count"] == 1 and pre2["total_bytes"] == orphan.size_bytes
+
+    # 执行物理回收
+    done = purge_expired(session, dry_run=False)
+    session.commit()
+    assert done["purged_count"] == 1
+    assert done["errors"] == []
+    assert not (data_dir / "objects" / orphan.sha256).exists()
+    assert session.get(StoredObject, orphan.id) is None
+    assert _count_audit(session, "object_purged") == 1
+
+
+def test_purge_never_touches_inside_retention(session: Session, data_dir) -> None:
+    """purge 只处理已过保留期的待回收对象, 保留期内对象绝不物理删除。"""
+    orphan = _put(session, b"inside-retention" * 2)
+    session.commit()
+    plan = safe_cleanup(session, dry_run=True, pending_delete_days=30)
+    safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"], pending_delete_days=30)
+    session.commit()
+
+    done = purge_expired(session, dry_run=False)
+    session.commit()
+    assert done["purged_count"] == 0
+    assert done["errors"] == []
+    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert session.get(StoredObject, orphan.id).status == "pending_deletion"
+
+
+def test_pending_objects_excluded_from_new_cleanup(session: Session, data_dir) -> None:
+    """已待回收对象不再是新清理候选(避免重复软删)。"""
+    _put(session, b"already-pending" * 3)
+    session.commit()
+    plan = safe_cleanup(session, dry_run=True)
+    safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
+    session.commit()
+
+    plan2 = safe_cleanup(session, dry_run=True)
+    assert plan2["count"] == 0
+    assert plan2["retained_count"] == 0
+
+
+def test_reconcile_does_not_reset_pending_deletion(session: Session, data_dir) -> None:
+    """reconcile 的 ref_count 漂移修正不把待回收对象重置为 orphaned:
+    待回收对象是"已计划回收"生命周期的一部分, 不能被孤儿判定移出 purge 队列。"""
+    orphan = _put(session, b"drift-pending" * 3)
+    session.commit()
+    plan = safe_cleanup(session, dry_run=True)
+    safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
+    session.commit()
+    assert session.get(StoredObject, orphan.id).status == "pending_deletion"
+
+    # 人为制造 ref_count 漂移(引用清单为空但计数残留)
+    session.execute(
+        sa.delete(ObjectRef).where(ObjectRef.object_id == orphan.id)
+    )
+    session.flush()
+    reconcile(session, dry_run=False)
+    session.commit()
+    row = session.get(StoredObject, orphan.id)
+    assert row.ref_count == 0
+    assert row.status == "pending_deletion"  # 不被重置为 orphaned
+    # 待回收清单仍可见(未脱离 purge 队列)
+    assert [o["id"] for o in list_pending_deleted(session)] == [orphan.id]
+
+
+def test_put_dedup_reattach_restores_pending(session: Session, data_dir) -> None:
+    """put 去重路径: 同内容对象已待回收时, 新业务引用 attach 会自动恢复对象。"""
+    content = b"dedup-pending-restore" * 3
+    obj1 = _put(session, content, ref_type="dataset_file", ref_id=5)
+    session.commit()
+    # 解除引用 → 孤儿 → 清理标记待回收
+    remove_ref(session, obj1.id, "dataset_file", 5)
+    session.commit()
+    plan = safe_cleanup(session, dry_run=True)
+    safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
+    session.commit()
+    assert session.get(StoredObject, obj1.id).status == "pending_deletion"
+
+    # 同内容再次 put + 新引用(去重复用既有行) → attach 自动恢复
+    obj2 = _put(session, content, ref_type="dataset_file", ref_id=99)
+    session.commit()
+    assert obj2.id == obj1.id
+    info = object_info(session, obj1.id)
+    assert info["status"] == "stored" and info["ref_count"] == 1
+    assert info["pending_deleted_at"] is None
+    assert (data_dir / "objects" / obj1.sha256).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +681,8 @@ def test_api_storage_view(client: TestClient, session: Session, data_dir) -> Non
 
 
 def test_api_cleanup_plan_then_execute(client: TestClient, session: Session, data_dir) -> None:
-    """两阶段清理: 先 dry_run 出计划, 再执行; 被引用对象不受影响。"""
+    """两阶段清理(0.2.0-B3): 先 dry_run 出计划, 执行标记待物理回收(软删),
+    不立即删文件; 被引用对象不受影响。"""
     seed_admin(session)
     headers = login(client, "admin", ADMIN_PASSWORD)
     orphan = _put(session, b"api-orphan" * 5)
@@ -504,10 +705,84 @@ def test_api_cleanup_plan_then_execute(client: TestClient, session: Session, dat
     )
     assert done.status_code == 200
     d = done.json()
-    assert d["dry_run"] is False and d["removed_count"] == 1
+    assert d["dry_run"] is False and d["marked_count"] == 1
     assert d["plan_id"] == p["plan_id"]
-    assert not (data_dir / "objects" / orphan.sha256).exists()
+    # 软删: 文件仍在, 记录仍在但状态为待物理回收
+    assert (data_dir / "objects" / orphan.sha256).exists()
+    row = session.get(StoredObject, orphan.id)
+    assert row.status == "pending_deletion"
     assert (data_dir / "objects" / kept.sha256).exists()  # 被证据包引用, 保留
+    assert session.get(StoredObject, kept.id).status != "pending_deletion"
+
+
+def test_api_pending_restore_purge(client: TestClient, session: Session, data_dir) -> None:
+    """恢复路径 API: 待回收清单 / restore 恢复 / purge 物理回收(仅管理员)。"""
+    seed_admin(session)
+    headers = login(client, "admin", ADMIN_PASSWORD)
+    orphan = _put(session, b"api-restore" * 5)
+    session.commit()
+
+    # 清理 → 标记待回收
+    p = client.post("/api/admin/objects/cleanup", json={"dry_run": True}, headers=headers).json()
+    d = client.post(
+        "/api/admin/objects/cleanup",
+        json={"dry_run": False, "plan_id": p["plan_id"]},
+        headers=headers,
+    ).json()
+    assert d["marked_count"] == 1
+
+    # 待回收清单
+    pending = client.get("/api/admin/objects/pending", headers=headers)
+    assert pending.status_code == 200
+    body = pending.json()
+    assert len(body["data"]) == 1 and body["data"][0]["id"] == orphan.id
+    assert body["data"][0]["status"] == "pending_deletion"
+
+    # restore 恢复(保留期内)
+    restored = client.post(
+        "/api/admin/objects/restore", json={"object_id": orphan.id}, headers=headers
+    )
+    assert restored.status_code == 200
+    r = restored.json()["data"]
+    assert r["status"] == "orphaned" and r["pending_deleted_at"] is None
+    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert get_object(session, orphan.id) == b"api-restore" * 5
+    # 恢复后不再在待回收清单
+    pending2 = client.get("/api/admin/objects/pending", headers=headers).json()
+    assert pending2["data"] == []
+
+    # 再清理并让保留期过期, 验证 purge 物理回收
+    p2 = client.post("/api/admin/objects/cleanup", json={"dry_run": True}, headers=headers).json()
+    client.post(
+        "/api/admin/objects/cleanup",
+        json={"dry_run": False, "plan_id": p2["plan_id"]},
+        headers=headers,
+    )
+    row = session.get(StoredObject, orphan.id)
+    from datetime import timedelta
+
+    row.pending_deleted_at = utcnow() - timedelta(days=8)
+    row.pending_delete_until = utcnow() - timedelta(seconds=1)
+    session.commit()
+    pre = client.post("/api/admin/objects/purge", json={"dry_run": True}, headers=headers)
+    assert pre.status_code == 200 and pre.json()["count"] == 1
+    purged = client.post("/api/admin/objects/purge", json={"dry_run": False}, headers=headers)
+    assert purged.status_code == 200 and purged.json()["purged_count"] == 1
+    assert not (data_dir / "objects" / orphan.sha256).exists()
+    assert session.get(StoredObject, orphan.id) is None
+
+
+def test_api_cleanup_execute_requires_plan(client: TestClient, session: Session, data_dir) -> None:
+    """执行清理未携带 plan_id → 409(两阶段强制)。"""
+    seed_admin(session)
+    headers = login(client, "admin", ADMIN_PASSWORD)
+    _put(session, b"no-plan" * 4)
+    session.commit()
+    resp = client.post(
+        "/api/admin/objects/cleanup", json={"dry_run": False}, headers=headers
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "OBJ-CLEAN-001"
 
 
 def test_api_health_reports_corruption(client: TestClient, session: Session, data_dir) -> None:

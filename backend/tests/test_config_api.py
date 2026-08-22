@@ -30,6 +30,7 @@ from iesplan.api.config import config_router, registry_router
 from iesplan.db import Base, get_db
 from iesplan.main import _register_exception_handlers
 from iesplan.models.identity import User
+from iesplan.models.audit import AuditLog
 from iesplan.models.model import Device, SystemGraph
 from iesplan.models.project import Draft, Project, ProjectMember
 from iesplan.services import config as config_service
@@ -718,3 +719,32 @@ def test_anonymous_config_401(db: Session) -> None:
         assert resp.status_code == 401
         resp = anon.put("/api/projects/1/config", json={"config": {}, "expected_revision": 1})
         assert resp.status_code == 401
+
+
+def test_config_save_writes_audit(client, db) -> None:
+    """保存计算配置写入 config.saved 审计(0.2.0 B4, 宪法 §16)。
+
+    审计只含脱敏元数据(版本/变量数/目标数/约束数/算法/随机种子),
+    不复制完整配置, 且与保存同事务提交。
+    """
+    project = seed_project(db)
+    default = _default_config(db, project)
+    resp = client.put(
+        f"/api/projects/{project.id}/config",
+        json={"config": default, "expected_revision": 1},
+    )
+    assert resp.status_code == 200, resp.text
+
+    audit = db.execute(
+        select(AuditLog)
+        .where(AuditLog.action == "config.saved")
+        .order_by(AuditLog.id.desc())
+    ).scalars().first()
+    assert audit is not None, "保存配置应写 config.saved 审计"
+    assert audit.entity_type == "calc_config"
+    # 脱敏: 审计 after 只含元数据(版本/变量数/目标/约束/算法/随机种子),
+    # 不复制完整 config(不记录大对象/敏感内容)
+    after = audit.after or {}
+    assert "variables" in after and "objectives" in after and "algorithm" in after
+    assert "random_seed" in after
+    assert after["variables"] >= 0

@@ -140,3 +140,11 @@ class ReferenceNotFoundError(AppError):
     code = "OBJ-REF-001"
     message_key = "ies.diag.obj.ref_not_found"
     http_status = 404
+
+
+class ObjectNotPendingDeletionError(AppError):
+    """对象不在"待物理回收"状态, 不能执行 undelete(0.2.0-B3 恢复路径)。"""
+
+    code = "OBJ-RESTORE-001"
+    message_key = "ies.diag.obj.not_pending_deletion"
+    http_status = 409

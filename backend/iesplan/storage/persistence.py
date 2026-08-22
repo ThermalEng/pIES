@@ -50,6 +50,11 @@ class StoredObject(Base):
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
     )
     last_referenced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 0.2.0-B3 对象清理恢复路径(软删/保留期): 对象被标记"待物理回收"的时刻;
+    # 经保留期后由 purge 物理删文件+删记录, 保留期内可 undelete / 重新 attach 恢复。
+    pending_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 软删保留期的绝对截止时间(= pending_deleted_at + 保留天数), 到期即可物理回收。
+    pending_delete_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         regex_check(f"oid ~ '{HASH64_RE}'", name="ck_objects_oid"),
@@ -60,10 +65,17 @@ class StoredObject(Base):
         ),
         CheckConstraint("ref_count >= 0", name="ck_objects_ref_count"),
         CheckConstraint("quota_bytes >= 0", name="ck_objects_quota"),
+        CheckConstraint(
+            "status <> 'pending_deletion' OR (pending_deleted_at IS NOT NULL "
+            "AND pending_delete_until IS NOT NULL AND pending_delete_until >= pending_deleted_at)",
+            name="ck_objects_pending_deletion_dates",
+        ),
         UniqueConstraint("oid", name="uq_objects_oid"),
         UniqueConstraint("sha256", name="uq_objects_sha256"),
         Index("idx_objects_status", "status", "last_referenced_at"),
         Index("idx_objects_path", "storage_path"),
+        # 0.2.0-B3: 待回收对象按到期时间排序(到期优先物理回收)。
+        Index("idx_objects_pending_until", "pending_delete_until"),
     )
 
 

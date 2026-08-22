@@ -81,6 +81,7 @@ import type {
   TaskType,
   Timeline,
   User,
+  UserDeletePreview,
   ValidationResult,
 } from '../types'
 import { ApiError } from '../types'
@@ -394,6 +395,30 @@ function asRecord(body: unknown): Record<string, unknown> {
   return body !== null && typeof body === 'object' && !Array.isArray(body)
     ? (body as Record<string, unknown>)
     : {}
+}
+
+/** 删除账号预告响应解析(0.2.0 B1): {user_id, username, project_count, projects, confirm_token}。 */
+function parseUserDeletePreview(body: unknown): UserDeletePreview {
+  const rec = asRecord(body)
+  const projects = Array.isArray(rec.projects)
+    ? (rec.projects as unknown[])
+        .filter((p) => p !== null && typeof p === 'object')
+        .map((p) => {
+          const pr = p as Record<string, unknown>
+          return {
+            id: Number(pr.id ?? 0),
+            name: String(pr.name ?? ''),
+            status: String(pr.status ?? ''),
+          }
+        })
+    : []
+  return {
+    user_id: Number(rec.user_id ?? 0),
+    username: String(rec.username ?? ''),
+    project_count: Number(rec.project_count ?? projects.length),
+    projects,
+    confirm_token: String(rec.confirm_token ?? ''),
+  }
 }
 
 /** 列表信封适配:兼容 {items, next_cursor} 与 {key: [...]} 与裸数组(PageResult 统一)。 */
@@ -951,7 +976,8 @@ export interface ProjectsApi {
   versions(id: number): Promise<ProjectVersion[]>
   archive(id: number): Promise<Project>
   unarchive(id: number): Promise<Project>
-  delete(id: number): Promise<void>
+  /** 删除项目(0.2.0 B4: 须携带与项目名精确匹配的 name 确认)。 */
+  delete(id: number, name: string): Promise<void>
   duplicate(id: number): Promise<Project>
   transfer(id: number, input: { target_user_id: number }): Promise<void>
   viewers(id: number): Promise<ProjectMember[]>
@@ -1055,8 +1081,10 @@ export interface AdminApi {
   storage(): Promise<{ total_bytes: number; used_bytes: number; quota_bytes: number | null; object_count: number }>
   health(): Promise<HealthStatus>
   audit(params?: AuditListParams): Promise<PageResult<AuditEntry>>
-  /** 删除账号(管理员): 该账号拥有的项目一并删除。 */
-  deleteUser(userId: number): Promise<{ deleted_projects: number }>
+  /** 删除账号预告(管理员): 返回将受影响项目清单 + 确认令牌。 */
+  previewUserDelete(userId: number): Promise<UserDeletePreview>
+  /** 删除账号(管理员): 需 confirm=true + preview 签发的 confirm_token, 级联删除其项目。 */
+  deleteUser(userId: number, confirmToken: string): Promise<{ deleted_projects: number }>
   /** 停用账号(管理员)。 */
   deactivateUser(userId: number): Promise<void>
   /** 重新启用账号(管理员)。 */
@@ -1224,8 +1252,9 @@ export const api = {
     unarchive(id: number): Promise<Project> {
       return request<unknown>(`/projects/${id}/unarchive`, { method: 'POST' }).then((body) => projectFromServer(body))
     },
-    delete(id: number): Promise<void> {
-      return request<void>(`/projects/${id}`, { method: 'DELETE', body: { confirm: true } })
+    delete(id: number, name: string): Promise<void> {
+      // 0.2.0 B4 误操作防护: 须携带与待删除项目名精确匹配的 name(替代空布尔 confirm)
+      return request<void>(`/projects/${id}`, { method: 'DELETE', body: { confirm: true, name } })
     },
     duplicate(id: number): Promise<Project> {
       return request<unknown>(`/projects/${id}/duplicate`, { method: 'POST', body: {} }).then((body) =>
@@ -1775,11 +1804,19 @@ export const api = {
         }
       })
     },
-    deleteUser(userId: number): Promise<{ deleted_projects: number }> {
-      return request<unknown>(`/auth/users/${userId}`, { method: 'DELETE' }).then((body) => {
+    deleteUser(userId: number, confirmToken: string): Promise<{ deleted_projects: number }> {
+      return request<unknown>(`/auth/users/${userId}`, {
+        method: 'DELETE',
+        body: { confirm: true, confirm_token: confirmToken },
+      }).then((body) => {
         const rec = asRecord(body)
         return { deleted_projects: Number(rec.deleted_projects ?? 0) }
       })
+    },
+    previewUserDelete(userId: number): Promise<UserDeletePreview> {
+      return request<unknown>(`/auth/users/${userId}/delete-preview`, { method: 'POST' }).then(
+        (body) => parseUserDeletePreview(body),
+      )
     },
     deactivateUser(userId: number): Promise<void> {
       return request<void>(`/auth/users/${userId}/deactivate`, { method: 'POST' })
