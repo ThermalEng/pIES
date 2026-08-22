@@ -1,33 +1,66 @@
-type_id: ies.device.transport_pipe
-version: 1.0.0
-name_zh: 传输管道
-name_en: Transport Pipeline
-model_method: mechanism
-stateful: true
-fidelity: medium
-energy_carriers: [heat]
-is_load: false
-capabilities: [transport, stateful, dual_direction]
-extends: ies.device.base
-help_topic: help.modeling.pipeline
-ports:
-  - {name: heat_in, port_type: thermal, direction: in, energy_carrier: heat}
-  - {name: heat_out, port_type: thermal, direction: out, energy_carrier: heat}
+# 传输管道(机理模型、有状态; 延迟出流 + 损耗)
+schema: ies.device-model
+schema_version: "1.0.0"
+
+device:
+  id: ies.device.transport_pipe
+  version: "1.0.0"
+  names:
+    zh-CN: 传输管道
+    en-US: Transport Pipeline
+  model_method: mechanism
+  stateful: true
+  fidelity: medium
+  energy_carriers: [heat]
+  capabilities: [transport, stateful, dual_direction]
+
 parameters:
   delay_steps:
+    value_type: number
+    quantity: ratio
     unit: step
-    min: 1
-    max: 100
+    required: false
     default: 1
-    help_key: help.param.pipeline.delay_steps
+    minimum: 1
+    maximum: 100
   loss_rate:
-    unit: '-'
-    min: 0
-    max: 0.5
+    value_type: number
+    quantity: ratio
+    unit: "-"
+    required: false
     default: 0
-    help_key: help.param.pipeline.loss_rate
+    minimum: 0
+    maximum: 0.5
+
+ports:
+  heat_in:
+    carrier: heat
+    direction: in
+    quantity: power
+    unit: kW
+  heat_out:
+    carrier: heat
+    direction: out
+    quantity: power
+    unit: kW
+
+data_inputs: {}
+
 states:
-  - {key: delay_buffer, unit: step, initial_ref: delay_steps, bounds: {min_ref: delay_steps, max_ref: delay_steps}}
-function:
-  entry: transport_pipe
-  package: iesplan.modeling.functions
+  delay_buffer:
+    unit: step
+    initial_ref: delay_steps
+    minimum_ref: delay_steps
+    maximum_ref: delay_steps
+
+model_commands:
+  transport: ies.model-command.pipeline.transport@1.0.0
+  stateful: ies.model-command.pipeline.transport@1.0.0
+  dual_direction: ies.model-command.pipeline.transport@1.0.0
+
+extensions:
+  ies.meta:
+    help_topic: help.modeling.pipeline
+    param_help:
+      delay_steps: help.param.pipeline.delay_steps
+      loss_rate: help.param.pipeline.loss_rate

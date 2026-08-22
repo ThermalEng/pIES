@@ -116,30 +116,61 @@ class TestCanonicalization:
 
 
 class TestMigrationReceipt:
-    def test_old_catalog_migrates_to_new(self):
-        """旧格式 catalog YAML → 新 1.0.0 结构，迁移后通过新校验。"""
-        from iesplan.devices.migration import build_migration_receipt
+    #: 旧格式设备 YAML（迁移前的目录形态；catalog 已迁移为新格式，此处用内联夹具）
+    OLD_PV = """\
+type_id: ies.device.pv
+version: 1.4.0
+name_zh: 光伏
+name_en: Photovoltaic (PV)
+help_topic: help.modeling.pv
+model_method: mechanism
+stateful: false
+fidelity: high
+energy_carriers: [solar, electric]
+is_load: false
+capabilities: [pv, controllable, optimization_variable]
+extends: ies.device.base
+ports:
+  - {name: solar_in, port_type: solar, direction: in, energy_carrier: solar}
+  - {name: electric_out, port_type: electric, direction: out, energy_carrier: electric,
+     capacity_ref: rated_capacity_kwp}
+parameters:
+  rated_capacity_kwp:
+    unit: kWp
+    min: 0
+    max: 1000000
+    default: 0
+    is_optimizable: true
+    stock_or_addition: addition
+  efficiency: {unit: "-", min: 0.05, max: 0.5, default: 0.20}
+time_series:
+  inputs:
+    - {key: ghi, unit: W/m², resolution: 1h, required: true}
+    - {key: t_ambient, unit: "°C", resolution: 1h, required: true}
+  outputs: []
+function:
+  entry: pv_output
+  package: iesplan.modeling.functions
+"""
 
-        yamls = sorted(p for p in CATALOG_DIR.glob("*.yaml") if p.stem != "prices")
-        receipt = build_migration_receipt(yamls)
-        assert len(receipt.migrated_files) == len(yamls)
-        # 全部成功迁移
-        assert all(e["migrated"] for e in receipt.migrated_files), [
-            e for e in receipt.migrated_files if not e["migrated"]
-        ]
-        # 每个迁移后文件都产生新旧摘要且新摘要非空
-        for entry in receipt.migrated_files:
-            assert entry["old_sha256"]
-            assert entry["new_sha256"]
-            assert entry["device_id"]
-            assert entry["version"]
+    def test_old_catalog_migrates_to_new(self, tmp_path):
+        """旧格式设备 YAML → 新 1.0.0 结构，迁移后通过新校验，并生成回执。"""
+        yaml_path = tmp_path / "pv.yaml"
+        yaml_path.write_text(self.OLD_PV, encoding="utf-8")
+        receipt = build_migration_receipt([yaml_path])
+        assert len(receipt.migrated_files) == 1
+        entry = receipt.migrated_files[0]
+        assert entry["migrated"] is True, entry
+        assert entry["old_sha256"]
+        assert entry["new_sha256"]
+        assert entry["device_id"] == "ies.device.pv"
+        assert entry["version"] == "1.4.0"
 
     def test_migrated_mapping_preserves_semantics(self):
         """迁移语义等价：type_id/版本/载能/能力/参数范围/端口/状态保留。"""
-        pv_yaml = CATALOG_DIR / "pv.yaml"
-        old_raw = yamlmini.load(pv_yaml.read_text(encoding="utf-8"))
+        old_raw = yamlmini.load(self.OLD_PV)
         new_raw = migrate_device_mapping(old_raw)
-        result = parse_device_model_yaml(new_raw, file=str(pv_yaml))
+        result = parse_device_model_yaml(new_raw, file="pv.yaml")
         assert result.ok, [d.to_dict() for d in result.diagnostics]
         doc = result.document
         assert doc.device.id == "ies.device.pv"
@@ -158,13 +189,27 @@ class TestMigrationReceipt:
 
     def test_legacy_function_removed_from_migrated(self):
         """迁移后文件不含 function/package/entry/宿主机路径。"""
-        for yaml_path in sorted(CATALOG_DIR.glob("*.yaml")):
-            if yaml_path.stem == "prices":
-                continue
-            new_raw = migrate_device_mapping(yamlmini.load(yaml_path.read_text(encoding="utf-8")))
-            text = "\n".join(str(v) for v in [new_raw])
-            assert "function" not in str(new_raw.keys())
+        old_raw = yamlmini.load(self.OLD_PV)
+        new_raw = migrate_device_mapping(old_raw)
+        text = "\n".join(str(v) for v in [new_raw])
+        assert "function" not in str(new_raw.keys())
+        assert "package" not in text
+        assert "entry" not in str(new_raw.get("device", {}).keys())
+        # 不暴露宿主机路径
+        assert "/home" not in text and "C:\\" not in text
+
+    def test_catalog_files_are_new_format_and_contain_no_function(self):
+        """迁移后的 catalog 文件全部为新格式：含 schema/schema_version/model_commands，
+        不含 function/package/entry/module/宿主机路径。"""
+        from iesplan.devices.spec import load_yaml
+
+        yamls = sorted(p for p in CATALOG_DIR.glob("*.yaml") if p.stem != "prices")
+        assert yamls, "catalog 设备 yaml 缺失"
+        for yaml_path in yamls:
+            spec = load_yaml(yaml_path)
+            assert spec.model_commands, f"{yaml_path.name} 缺少 model_commands"
+            text = yaml_path.read_text(encoding="utf-8")
+            assert "function:" not in text, f"{yaml_path.name} 仍含 function"
             assert "package" not in text
-            assert "entry" not in str(new_raw.get("device", {}).keys())
-            # 不暴露宿主机路径
+            assert "iesplan" not in text, f"{yaml_path.name} 暴露实现路径"
             assert "/home" not in text and "C:\\" not in text

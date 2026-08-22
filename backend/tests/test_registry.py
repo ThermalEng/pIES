@@ -52,7 +52,7 @@ class TestDeviceRegistry:
         # 04 §3.3: pv 版本随 YAML 演进, 这里只断言格式合法
         assert pv.version.count(".") == 2
         assert "pv" in pv.capabilities
-        assert pv.energy_carriers == ["solar", "electric"]
+        assert list(pv.energy_carriers) == ["solar", "electric"]
         assert pv.is_load is False
         assert pv.parameters["rated_capacity_kwp"].is_optimizable is True
         assert pv.parameters["rated_capacity_kwp"].stock_or_addition == "addition"

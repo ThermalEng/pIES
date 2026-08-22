@@ -733,20 +733,18 @@ def test_catalog_failure_preserves_old_snapshot_itemwise(monkeypatch: pytest.Mon
     good = DeviceModelDescriptor(
         type_id="ies.device.pv2", version="1.0.0", name_zh="光伏2", name_en="PV2",
         model_method="mechanism", stateful=False, fidelity="medium",
-        energy_carriers=["solar", "electric"], is_load=False,
-        capabilities=[], extends="ies.device.base", help_topic="",
-        parameters={}, ports=[], time_series={}, states=[],
-        function={"package": "iesplan.modeling.functions", "entry": "pv_output"},
-        standard_csv_path=None,
+        energy_carriers=("solar", "electric"), is_load=False,
+        capabilities=("pv",), extends="ies.device.base", help_topic="",
+        parameters={}, ports=(), time_series={}, states=(),
+        model_commands={"pv": "ies.model-command.pv.generation@1.0.0"},
     )
     bad = DeviceModelDescriptor(
         type_id="ies.device.bogus", version="1.0.0", name_zh="坏设备", name_en="Bad",
         model_method="mechanism", stateful=False, fidelity="medium",
-        energy_carriers=["electric"], is_load=False,
-        capabilities=[], extends="ies.device.base", help_topic="",
-        parameters={}, ports=[], time_series={}, states=[],
-        function={"package": "iesplan.modeling.functions", "entry": "nonexistent_fn"},
-        standard_csv_path=None,
+        energy_carriers=("electric",), is_load=False,
+        capabilities=("pv",), extends="ies.device.base", help_topic="",
+        parameters={}, ports=(), time_series={}, states=(),
+        model_commands={"pv": "ies.model-command.unknown.fn@1.0.0"},
     )
     monkeypatch.setattr(registry_loader, "list_device_descriptors", lambda: [good, bad])
     with pytest.raises(AppError):

@@ -45,24 +45,48 @@ from iesplan.devices.spec import (
     spec_to_dict,
 )
 
-#: 合法机理设备基座(其余测试基于它做局部破坏)
+#: 合法机理设备基座(其余测试基于它做局部破坏) — 新 ies.device-model 1.0.0 格式
 _BASE = """\
-type_id: ies.device.test
-version: 1.0.0
-name_zh: 测试设备
-name_en: Test Device
-model_method: mechanism
-stateful: false
-fidelity: medium
-energy_carriers: [electric]
-is_load: false
-ports:
-  - {name: out, port_type: electric, direction: out, energy_carrier: electric}
+schema: ies.device-model
+schema_version: "1.0.0"
+
+device:
+  id: ies.device.test
+  version: "1.0.0"
+  names:
+    zh-CN: 测试设备
+    en-US: Test Device
+  model_method: mechanism
+  stateful: false
+  fidelity: medium
+  energy_carriers: [electric]
+  capabilities: [controllable]
+
 parameters:
-  cap: {unit: kW, min: 0, max: 1000, default: 10}
-function:
-  entry: test_output
-  package: iesplan.modeling.functions.test
+  cap:
+    value_type: number
+    quantity: power
+    unit: kW
+    required: false
+    default: 10
+    minimum: 0
+    maximum: 1000
+
+ports:
+  out:
+    carrier: electric
+    direction: out
+    quantity: power
+    unit: kW
+
+data_inputs: {}
+
+states: {}
+
+model_commands:
+  controllable: ies.model-command.heat_pump.operation@1.0.0
+
+extensions: {}
 """
 
 
@@ -197,9 +221,9 @@ class TestDeviceYamlParse:
         assert spec.model_method == "mechanism"
         assert spec.stateful is False
         assert spec.fidelity == "high"
-        assert spec.energy_carriers == ["solar", "electric"]
+        assert list(spec.energy_carriers) == ["solar", "electric"]
         assert spec.is_load is False
-        assert spec.capabilities == ["pv", "controllable", "optimization_variable"]
+        assert list(spec.capabilities) == ["pv", "controllable", "optimization_variable"]
         assert [p.name for p in spec.ports] == ["solar_in", "electric_out"]
         assert spec.ports[1].capacity_ref == "rated_capacity_kwp"
         p = spec.parameters["rated_capacity_kwp"]
@@ -210,9 +234,11 @@ class TestDeviceYamlParse:
         assert spec.parameters["unit_invest_cost"].unit == "CNY/kWp"
         assert spec.parameters["unit_invest_cost"].default == "$price:device_costs.pv.unit_invest_cost"
         ts = spec.time_series["inputs"]
-        assert [(s.key, s.unit, s.required) for s in ts] == [("ghi", "W/m²", True), ("t_ambient", "°C", True)]
-        assert spec.function == {"entry": "pv_output", "package": "iesplan.modeling.functions"}
-        assert spec.base_dir == str(DEFAULT_CATALOG_DIR)
+        assert [(s.key, s.unit, s.required) for s in ts] == [("ghi", "W/m2", True), ("t_ambient", "°C", True)]
+        # 命令引用为稳定 ID@版本, 不再有 function/package/entry
+        assert spec.model_commands["pv"] == "ies.model-command.pv.generation@1.0.0"
+        assert "function" not in spec_to_dict(spec)
+        assert "iesplan" not in str(spec.model_commands)
 
     def test_load_yaml_battery_stateful(self):
         spec = load_yaml(DEFAULT_CATALOG_DIR / "battery.yaml")
@@ -222,7 +248,7 @@ class TestDeviceYamlParse:
         assert st.key == "soc"
         assert st.unit == "-"
         assert st.initial_ref == "initial_soc"
-        assert st.bounds == {"min_ref": "min_soc", "max_ref": "max_soc"}
+        assert dict(st.bounds) == {"min_ref": "min_soc", "max_ref": "max_soc"}
         assert spec.parameters["cycle_life"].unit == "次"
         assert spec.parameters["min_soc"].default == 0.1
         assert spec.parameters["capacity_kwh"].is_optimizable is True
@@ -258,8 +284,8 @@ class TestDeviceYamlParse:
     @pytest.mark.parametrize(
         "patch, fragment",
         [
-            ("type_id: ies.device.test", "type_id: bad_id"),
-            ("version: 1.0.0", "version: v1"),
+            ("id: ies.device.test", "id: bad_id!"),
+            ('version: "1.0.0"', "version: v1"),
             ("model_method: mechanism", "model_method: data_periodic"),  # 02 旧命名废止
             ("model_method: mechanism", "model_method: data_forecast"),  # 02 旧命名废止
             ("stateful: false", "stateful: maybe"),
@@ -275,19 +301,23 @@ class TestDeviceYamlParse:
 
     def test_load_yaml_param_errors(self, tmp_path):
         bad_params = [
-            "  cap: {unit: kW, min: 10, max: 1, default: 5}",  # min > max
-            "  cap: {unit: kW, min: 0, max: 10, default: 5, bogus: 1}",  # 未知键
-            "  cap: {unit: kW, min: 0, max: 10, default: 5, stock_or_addition: both}",
+            "    minimum: 10\n    maximum: 1",  # minimum > maximum
+            "    bogus: 1",  # 未知键
+            "    stock_or_addition: both",
         ]
         for bad in bad_params:
-            text = _BASE.replace("  cap: {unit: kW, min: 0, max: 1000, default: 10}", bad)
+            # 在 cap 参数块内注入非法内容
+            text = _BASE.replace(
+                "    minimum: 0\n    maximum: 1000", bad
+            )
             with pytest.raises(AppError):
                 load_yaml(_write(tmp_path, "bad.yaml", text))
 
     def test_load_yaml_bad_series_resolution(self, tmp_path):
-        text = _BASE + (
-            "time_series:\n  inputs:\n"
-            "    - {key: e_load, unit: kWh, resolution: 5h, required: true}\n"
+        # 新格式 data_inputs 无 resolution 字段, 结构非法由 schema 拒绝
+        text = _BASE.replace(
+            "data_inputs: {}\n",
+            "data_inputs:\n  e_load:\n    value_type: number\n    quantity: power\n    unit: kW\n    required: true\n    resolution: 5h\n",
         )
         with pytest.raises(AppError):
             load_yaml(_write(tmp_path, "bad.yaml", text))
@@ -307,17 +337,19 @@ class TestDeviceYamlParse:
         assert data["stateful"] is False
         assert data["parameters"]["rated_capacity_kwp"]["unit"] == "kWp"
         assert data["ports"][1]["capacity_ref"] == "rated_capacity_kwp"
-        # RR-P2-02: 设备类型事实源为 YAML; 公开建模描述直接来自 to_model_descriptor,
-        # 不再经过 legacy to_registry_spec 的字段筛选(端口/状态等原本被丢失)。
+        # 公开建模描述直接来自 to_model_descriptor, 端口/命令完整透传
         from iesplan.devices.spec import to_model_descriptor
         desc = to_model_descriptor(spec)
         assert desc.type_id == "ies.device.pv"
         assert desc.version == "1.4.0"
-        assert desc.energy_carriers == ["solar", "electric"]
+        assert list(desc.energy_carriers) == ["solar", "electric"]
         assert desc.parameters["efficiency"].default == 0.20
         assert desc.help_topic == "help.modeling.pv"
-        # YAML 真实端口完整透传(原 to_registry_spec 路径丢失):
+        # YAML 真实端口完整透传
         assert any(p.name == "electric_out" and p.port_type == "electric" for p in desc.ports)
+        # 公开描述不暴露函数/包/宿主机路径
+        assert not hasattr(desc, "function")
+        assert not hasattr(desc, "standard_csv_path")
 
 
 # ---------------------------------------------------------------------------
@@ -333,9 +365,10 @@ class TestPriceResolution:
 
     def test_missing_price_key_rejects_device(self, tmp_path, book):
         text = _BASE.replace(
-            "  cap: {unit: kW, min: 0, max: 1000, default: 10}",
-            '  cap: {unit: kW, min: 0, max: 1000, default: 10}\n'
-            '  unit_cost: {unit: CNY/kW, min: 0, default: "$price:device_costs.nope.unit_invest_cost"}',
+            "    default: 10\n    minimum: 0\n    maximum: 1000",
+            "    default: 10\n    minimum: 0\n    maximum: 1000\n"
+            '  unit_cost:\n    value_type: number\n    quantity: power\n    unit: CNY/kW\n'
+            '    required: false\n    default: "$price:device_costs.nope.unit_invest_cost"',
         )
         _write(tmp_path, "broken.yaml", text)
         diags = validate_device_dir(tmp_path, book)
@@ -354,11 +387,12 @@ class TestPriceResolution:
         catalog = tmp_path / "catalog"
         catalog.mkdir()
         text = _BASE.replace(
-            "type_id: ies.device.test", "type_id: ies.device.plugin_dev"
+            "id: ies.device.test", "id: ies.device.plugin_dev"
         ).replace(
-            "  cap: {unit: kW, min: 0, max: 1000, default: 10}",
-            '  cap: {unit: kW, min: 0, max: 1000, default: 10}\n'
-            '  unit_cost: {unit: CNY/kW, min: 0, default: "$price:device_costs.gas_boiler.unit_invest_cost"}',
+            "    default: 10\n    minimum: 0\n    maximum: 1000",
+            "    default: 10\n    minimum: 0\n    maximum: 1000\n"
+            '  unit_cost:\n    value_type: number\n    quantity: power\n    unit: CNY/kW\n'
+            '    required: false\n    default: "$price:device_costs.gas_boiler.unit_invest_cost"',
         )
         _write(catalog, "plugin_dev.yaml", text)
         specs = load_all_devices(catalog, book)
@@ -370,10 +404,11 @@ class TestPriceResolution:
         catalog = tmp_path / "catalog"
         catalog.mkdir()
         _write(catalog, "good.yaml", _BASE)
-        bad = _BASE.replace("type_id: ies.device.test", "type_id: ies.device.bad").replace(
-            "  cap: {unit: kW, min: 0, max: 1000, default: 10}",
-            '  cap: {unit: kW, min: 0, max: 1000, default: 10}\n'
-            '  unit_cost: {unit: CNY/kW, min: 0, default: "$price:device_costs.missing.unit_invest_cost"}',
+        bad = _BASE.replace("id: ies.device.test", "id: ies.device.bad").replace(
+            "    default: 10\n    minimum: 0\n    maximum: 1000",
+            "    default: 10\n    minimum: 0\n    maximum: 1000\n"
+            '  unit_cost:\n    value_type: number\n    quantity: power\n    unit: CNY/kW\n'
+            '    required: false\n    default: "$price:device_costs.missing.unit_invest_cost"',
         )
         _write(catalog, "bad.yaml", bad)
         with pytest.raises(AppError) as exc:
@@ -391,28 +426,30 @@ class TestCrossFieldValidation:
         "target, replacement",
         [
             ("stateful: false", "stateful: true"),  # stateful 必须声明 states
-            ("model_method: mechanism", "model_method: data_repeat"),  # data_repeat 缺 period
-            ("model_method: mechanism", "model_method: data_predict"),  # data_predict 缺 model_file
+            ("model_method: mechanism", "model_method: data_repeat"),  # data_repeat 缺 period + csv
             (
-                "function:\n  entry: test_output\n  package: iesplan.modeling.functions.test",
-                "",  # mechanism 缺 function
+                "model_commands:\n  controllable: ies.model-command.heat_pump.operation@1.0.0",
+                "",  # mechanism 缺 model_commands → capability 无命令
             ),
             (
-                "package: iesplan.modeling.functions.test",
-                "package: iesplan.devices.generated.test",  # 白名单外
+                "model_commands:\n  controllable: ies.model-command.heat_pump.operation@1.0.0",
+                "model_commands:\n  controllable: ies.model-command.heat_pump.operation",  # 缺版本
             ),
             (
-                "- {name: out, port_type: electric, direction: out, energy_carrier: electric}",
-                "- {name: out, port_type: electric, direction: out, energy_carrier: "
-                "electric, capacity_ref: nope}",  # capacity_ref 引用不存在参数
+                "model_commands:\n  controllable: ies.model-command.heat_pump.operation@1.0.0",
+                "model_commands:\n  controllable: iesplan.modeling.functions.pv_output@1.0.0",  # 模块路径泄露
             ),
             (
-                "ports:\n  - {name: out, port_type: electric, direction: out, "
-                "energy_carrier: electric}",
-                "ports:\n  - {name: out, port_type: electric, direction: out, "
-                "energy_carrier: electric}\n"
-                "  - {name: out, port_type: thermal, direction: out, energy_carrier: heat}",
-            ),  # 端口名重复
+                "  out:\n    carrier: electric\n    direction: out\n    quantity: power\n    unit: kW",
+                "  out:\n    carrier: electric\n    direction: out\n    quantity: power\n    unit: kW\n"
+                "    capacity_parameter: nope",  # capacity_parameter 引用不存在参数
+            ),
+            (
+                "  out:\n    carrier: electric\n    direction: out\n    quantity: power\n    unit: kW",
+                "  out:\n    carrier: electric\n    direction: out\n    quantity: power\n    unit: kW\n"
+                "  out2:\n    carrier: electric\n    direction: out\n    quantity: power\n    unit: kW\n"
+                "    capacity_parameter: nope",  # 第二个端口引用不存在参数
+            ),
         ],
     )
     def test_cross_field_rejects(self, tmp_path, book, target, replacement):
@@ -422,70 +459,35 @@ class TestCrossFieldValidation:
 
     def test_stateless_with_states_rejected(self, tmp_path, book):
         text = _BASE.replace(
-            "stateful: false\n",
-            "stateful: false\nstates:\n  - {key: s, unit: '-'}\n",
+            "states: {}\n",
+            "states:\n  s:\n    unit: '-'\n",
         )
         codes = _diag_codes(tmp_path, book, text)
         assert "SYS-CFG-001" in codes
 
     def test_state_ref_unknown_param_rejected(self, tmp_path, book):
-        text = _BASE.replace("stateful: false", "stateful: true") + (
-            "states:\n  - {key: soc, unit: '-', initial_ref: nope, bounds: {min_ref: a, max_ref: b}}\n"
+        text = _BASE.replace("stateful: false", "stateful: true").replace(
+            "states: {}\n",
+            "states:\n  soc:\n    unit: '-'\n    initial_ref: nope\n",
         )
         codes = _diag_codes(tmp_path, book, text)
         assert "SYS-CFG-001" in codes
 
     def test_data_repeat_requires_csv(self, tmp_path, book):
         text = _BASE.replace("model_method: mechanism", "model_method: data_repeat") + (
-            "time_series:\n  inputs:\n"
-            "    - {key: e_load, unit: kWh, resolution: 1h, required: true, period: day}\n"
+            "data_inputs:\n"
+            "  e_load:\n    value_type: number\n    quantity: energy\n    unit: kWh\n    required: true\n"
         )
         codes = _diag_codes(tmp_path, book, text)
-        assert "SYS-CFG-001" in codes  # 缺同名 csv
+        assert "SYS-CFG-001" in codes  # 缺同名 csv + 缺 period
 
-    def test_data_predict_requires_model_file_on_disk(self, tmp_path, book):
-        text = _predict_yaml()
-        _write(tmp_path, "dev.yaml", text)
-        diags = validate_device_dir(tmp_path, book)
-        assert any(d.code == "SYS-CFG-001" for d in diags)  # cop_model.onnx 不存在
-
-    def test_data_predict_ok_with_csv_and_model_file(self, tmp_path, book):
-        import shutil
-
-        text = _predict_yaml()
-        _write(tmp_path, "dev.yaml", text)
-        shutil.copy(DEFAULT_CATALOG_DIR / "electric_load.csv", tmp_path / "dev.csv")
-        _write(tmp_path, "cop_model.onnx", "dummy-model\n")
-        spec = load_device_type(tmp_path, book)
-        assert spec.type_id == "ies.device.test_predict"
-        assert validate_device_dir(tmp_path, book) == []
-
-
-def _predict_yaml() -> str:
-    return (
-        "type_id: ies.device.test_predict\n"
-        "version: 1.0.0\n"
-        "name_zh: 测试预测\n"
-        "name_en: Test Predict\n"
-        "model_method: data_predict\n"
-        "stateful: false\n"
-        "energy_carriers: [electric]\n"
-        "is_load: false\n"
-        "ports:\n"
-        "  - {name: out, port_type: electric, direction: out, energy_carrier: electric}\n"
-        "parameters:\n"
-        "  cap: {unit: kW, min: 0, max: 1000, default: 10}\n"
-        "time_series:\n"
-        "  inputs:\n"
-        "    - {key: e_load, unit: kWh, resolution: 1h, required: true}\n"
-        "  outputs: []\n"
-        "function:\n"
-        "  model_file:\n"
-        "    path: cop_model.onnx\n"
-        "    format: onnx\n"
-        "    inputs: [t_ambient]\n"
-        "    outputs: [cop]\n"
-    )
+    def test_command_version_missing_rejected(self, tmp_path, book):
+        text = _BASE.replace(
+            "ies.model-command.heat_pump.operation@1.0.0",
+            "ies.model-command.heat_pump.operation",
+        )
+        codes = _diag_codes(tmp_path, book, text)
+        assert "SYS-CFG-001" in codes
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +551,7 @@ class TestLoader:
         multi = tmp_path / "multi"
         multi.mkdir()
         _write(multi, "a.yaml", _BASE)
-        _write(multi, "b.yaml", _BASE.replace("type_id: ies.device.test", "type_id: ies.device.test2"))
+        _write(multi, "b.yaml", _BASE.replace("id: ies.device.test", "id: ies.device.test2"))
         with pytest.raises(AppError) as exc:
             load_device_type(multi, book)
         assert exc.value.params["count"] == 2
@@ -570,12 +572,16 @@ def spec_electric_load():
 def _series_spec(
     tmp_path, key: str, unit: str = "kWh", extra: str = "", name: str = "dev"
 ) -> DeviceYamlSpec:
-    """构造带 time_series 声明的机理设备 spec(直接 load_yaml, 不做联合校验)。"""
-    text = (
-        _BASE
-        + "time_series:\n  inputs:\n"
-        + f"    - {{key: {key}, unit: {unit}, resolution: 1h, required: true{extra}}}\n"
+    """构造带 data_inputs 声明的机理设备 spec(直接 load_yaml, 不做联合校验)。"""
+    data_block = (
+        "data_inputs:\n"
+        f"  {key}:\n"
+        f"    value_type: number\n"
+        f"    quantity: power\n"
+        f"    unit: {unit}\n"
+        f"    required: true\n{extra}"
     )
+    text = _BASE.replace("data_inputs: {}\n", data_block)
     return load_yaml(_write(tmp_path, f"{name}.yaml", text))
 
 
@@ -640,17 +646,7 @@ class TestProfileCsv:
             }
         )
         codes = [d.code for d in validate_series_csv(df, spec)]
-        assert "PARAM-UNIT-002" in codes  # 非标准单位无换算声明
-
-        ok_spec = _series_spec(
-            tmp_path,
-            "ghi",
-            unit="kW",
-            extra=', convert: {to: "W/m²", factor: 1000.0}',
-            name="dev2",
-        )
-        codes_ok = [d.code for d in validate_series_csv(df, ok_spec)]
-        assert "PARAM-UNIT-002" not in codes_ok
+        assert "PARAM-UNIT-002" in codes  # 非标准单位直接拒绝
 
     def test_make_template_csv(self, spec_electric_load):
         text = make_template_csv(spec_electric_load, rows=3)

@@ -21,8 +21,6 @@ from iesplan.devices import yamlmini as _yamlmini
 from iesplan.devices.pricing import PriceBook, resolve_param_default
 from iesplan.devices.profile import read_standard_csv, validate_series_csv
 from iesplan.devices.spec import (
-    FUNCTION_PACKAGE_PREFIX,
-    MODEL_FILE_FORMATS,
     DeviceYamlSpec,
     load_yaml,
     with_resolved_defaults,
@@ -84,18 +82,8 @@ def _diag_from_error(exc: AppError, path: Path) -> Diagnostic:
     )
 
 
-def _in_function_whitelist(package: object) -> bool:
-    """机理函数包白名单: 'iesplan.modeling.functions'(单文件) 或其子模块前缀。
-
-    单文件版(实际模块)与子模块版(未来拆分)均放行, 与 05 §7.7 定案一致。
-    """
-    if not isinstance(package, str) or not package:
-        return False
-    return package == "iesplan.modeling.functions" or package.startswith(FUNCTION_PACKAGE_PREFIX)
-
-
 def _check_cross_field(spec: DeviceYamlSpec, yaml_path: Path) -> list[Diagnostic]:
-    """跨字段约束(02 §3):状态标志/方法标志/函数绑定/引用完整性。"""
+    """跨字段约束(roadmap 0.5.0):状态标志/方法标志/命令引用完整性。"""
     diags: list[Diagnostic] = []
 
     def _loc(field: str) -> dict:
@@ -121,32 +109,21 @@ def _check_cross_field(spec: DeviceYamlSpec, yaml_path: Path) -> list[Diagnostic
     if not spec.parameters:
         _err("parameters", "必须声明至少一个参数")
 
-    fn = spec.function
-    if spec.model_method == "mechanism":
-        entry = fn.get("entry")
-        package = fn.get("package")
-        if not isinstance(entry, str) or not entry:
-            _err("function", "mechanism 设备必须声明 function.entry")
-        if not _in_function_whitelist(package):
-            _err("function", f"function.package 必须在白名单 {FUNCTION_PACKAGE_PREFIX}* 内")
-    elif spec.model_method == "data_predict":
-        mf = fn.get("model_file")
-        if not isinstance(mf, dict) or not mf.get("path") or mf.get("format") not in MODEL_FILE_FORMATS:
-            _err("function", "data_predict 设备必须声明 function.model_file(path/format)")
-        else:
-            for k in ("inputs", "outputs"):
-                if not isinstance(mf.get(k), list):
-                    _err("function", f"function.model_file.{k} 必须为列表")
-    else:  # data_repeat
-        inputs = spec.time_series.get("inputs", [])
+    # model_commands: 每个 capability 必须有命令；值必须是 <command-id>@<exact-version>。
+    commands = dict(spec.model_commands) if spec.model_commands else {}
+    for cap in spec.capabilities:
+        if cap not in commands:
+            _err("model_commands", f"capability {cap!r} 缺少对应 model_command")
+    for cap, ref in commands.items():
+        if not isinstance(ref, str) or "@" not in ref:
+            _err("model_commands", f"命令引用必须为 <command-id>@<exact-version>: {ref!r}(capability {cap!r})")
+        elif "iesplan" in ref or ".py" in ref or "/" in ref:
+            _err("model_commands", f"命令引用禁止函数/包/模块/宿主机路径: {ref!r}")
+
+    if spec.model_method == "data_repeat":
+        inputs = spec.time_series.get("inputs", ())
         if not any(s.required and s.period for s in inputs):
             _err("time_series", "data_repeat 设备 inputs 中至少一个 required 列需带 period")
-        if fn.get("model_file"):
-            _err("function", "data_repeat 设备不得声明 function.model_file")
-        if fn.get("entry"):
-            package = fn.get("package")
-            if not _in_function_whitelist(package):
-                _err("function", f"function.package 必须在白名单 {FUNCTION_PACKAGE_PREFIX}* 内")
 
     for st in spec.states:
         if st.initial_ref and st.initial_ref not in spec.parameters:
@@ -207,25 +184,6 @@ def _validate_device_file(yaml_path: Path, book: PriceBook) -> list[Diagnostic]:
             )
         )
 
-    if spec.model_method == "data_predict":
-        mf = spec.function.get("model_file") if isinstance(spec.function, dict) else None
-        if isinstance(mf, dict) and isinstance(mf.get("path"), str):
-            model_path = Path(spec.base_dir) / mf["path"]
-            if not model_path.exists():
-                diags.append(
-                    make_diag(
-                        SYS_CFG_INVALID,
-                        severity=SEVERITY_ERROR,
-                        blocking=True,
-                        params={"device_id": spec.type_id, "model_file": str(model_path)},
-                        location={
-                            "object_type": "device",
-                            "object_id": spec.type_id,
-                            "field": "model_file",
-                            "file": str(model_path),
-                        },
-                    )
-                )
     return diags
 
 

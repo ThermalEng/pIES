@@ -681,17 +681,16 @@ class TestPhaseD:
             model_method="mechanism",
             stateful=False,
             fidelity="medium",
-            energy_carriers=["electric"],
+            energy_carriers=("electric",),
             is_load=False,
-            capabilities=["generation"],
+            capabilities=("generation",),
             extends="ies.device.base",
             help_topic="",
             parameters={},
-            ports=[],
-            time_series={"inputs": [], "outputs": []},
-            states=[],
-            function={},
-            standard_csv_path=None,
+            ports=(),
+            time_series={"inputs": (), "outputs": ()},
+            states=(),
+            model_commands={},
         )
         ctx = CheckContext(
             registry=_registry_with({"ies.device.fixed_gen": fixed_gen}), datasets=DATASETS

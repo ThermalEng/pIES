@@ -58,12 +58,13 @@ _UNIT_TO_QUANTITY: tuple[tuple[str, str], ...] = (
     ("kwp", "power"),
     ("kw", "power"),
     ("mw", "power"),
+    ("w/m2", "irradiance"),
+    ("w/m", "irradiance"),
     ("kwh", "energy"),
     ("mwh", "energy"),
     ("cny/kwh", "currency_per_energy"),
     ("cny/kw", "currency_per_power"),
     ("cny/m", "currency_per_volume"),
-    ("cny/kw", "currency_per_power"),
     ("kj/m", "energy_per_volume"),
     ("deg", "angle"),
     ("c", "temperature"),
@@ -181,7 +182,19 @@ def migrate_device_mapping(raw: dict) -> dict:
         ports[name] = entry
 
     data_inputs: dict[str, dict] = {}
-    extensions_payload: dict[str, object] = {}
+    extensions_payload: dict[str, object] = {
+        "ies.meta": {
+            "help_topic": raw.get("help_topic", ""),
+            "is_load": bool(raw.get("is_load", False)),
+            "extends": raw.get("extends", "ies.device.base"),
+            "param_help": {
+                name: str(p.get("help_key", ""))
+                for name, p in (raw.get("parameters") or {}).items()
+                if isinstance(p, dict) and p.get("help_key")
+            },
+        }
+    }
+    periods: dict[str, str] = {}
     for section in ("inputs", "outputs"):
         for s in (raw.get("time_series") or {}).get(section, []):
             if not isinstance(s, dict):
@@ -189,17 +202,19 @@ def migrate_device_mapping(raw: dict) -> dict:
             key = s.get("key", "")
             if not key:
                 continue
-            qty, unit = _CARRIER_QUANTITY_UNIT.get(key, ("power", "kW"))
+            unit = str(s.get("unit", "kW"))
             data_inputs[key] = {
                 "value_type": "number",
-                "quantity": qty,
-                "unit": s.get("unit", unit),
+                "quantity": _quantity_of_unit(unit),
+                "unit": unit,
                 "required": bool(s.get("required", True)),
             }
             if s.get("period"):
                 # 周期语义保留在 extensions（1.0.0 schema 的 data_inputs 无 period 字段，
                 # 扩展不得改变核心语义，但允许承载周期粒度元数据）
-                extensions_payload.setdefault("periods", {})[key] = s["period"]
+                periods[key] = str(s["period"])
+    if periods:
+        extensions_payload["periods"] = periods
 
     states: dict[str, dict] = {}
     for st in raw.get("states") or []:

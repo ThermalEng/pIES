@@ -197,16 +197,15 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
         if carrier not in CARRIER_VOCABULARY:
             diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"未知载能: {carrier!r}", file=file, field=f"device.energy_carriers.{carrier}"))
 
-    # 2g) 参数 required / default 交叉
+    # 2g) 参数 minimum/maximum 交叉（minimum > maximum 拒绝）
     params_raw = raw.get("parameters") or {}
     for name, p_raw in params_raw.items():
         if not isinstance(p_raw, dict):
             continue
-        required = p_raw.get("required")
-        default = p_raw.get("default")
-        if required and default is None and p_raw.get("value_type") != "string":
-            # 非字符串必需参数允许 default 缺省为 None（由装配/项目参数给出）
-            pass
+        mn = _number_or_none(p_raw.get("minimum"))
+        mx = _number_or_none(p_raw.get("maximum"))
+        if mn is not None and mx is not None and mn > mx:
+            diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"参数 {name!r} minimum({mn}) 大于 maximum({mx})", file=file, field=f"parameters.{name}"))
 
     if diags:
         return DeviceModelParseResult(document=None, diagnostics=diags)

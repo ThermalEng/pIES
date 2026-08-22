@@ -68,11 +68,11 @@ def load_profile_columns(path: Path, desc: DeviceModelDescriptor) -> dict[str, n
     proxy = DeviceYamlSpec(
         type_id=desc.type_id, version=desc.version, name_zh=desc.name_zh,
         name_en=desc.name_en, model_method=desc.model_method, stateful=desc.stateful,
-        energy_carriers=list(desc.energy_carriers), is_load=desc.is_load,
-        capabilities=list(desc.capabilities), extends=desc.extends,
-        help_topic=desc.help_topic, parameters=dict(desc.parameters),
-        ports=list(desc.ports), time_series={k: list(v) for k, v in desc.time_series.items()},
-        states=list(desc.states), function=dict(desc.function),
+        energy_carriers=tuple(desc.energy_carriers), is_load=desc.is_load,
+        capabilities=tuple(desc.capabilities), extends=desc.extends,
+        help_topic=desc.help_topic, parameters=desc.parameters,
+        ports=tuple(desc.ports), time_series=desc.time_series,
+        states=tuple(desc.states), model_commands=desc.model_commands,
     )
     df = read_standard_csv(Path(path), proxy)
     return {
@@ -163,11 +163,11 @@ def validate_series_csv(df: pd.DataFrame, spec: DeviceYamlSpec) -> list[Diagnost
             )
         )
 
-    # 2) 单位声明一致性(大小写不敏感;非标准单位必须带 convert 声明)
+    # 2) 单位声明一致性(大小写不敏感;非标准单位直接拒绝, 不再支持 convert 声明)
     for s in series:
         std = STANDARD_COLUMN_UNITS.get(s.key)
         if std is not None and s.key in df.columns:
-            if _normalize_unit(s.unit) != _normalize_unit(std[0]) and not s.convert:
+            if _normalize_unit(s.unit) != _normalize_unit(std[0]):
                 diags.append(
                     make_diag(
                         PARAM_UNIT_MISMATCH,
