@@ -1,6 +1,14 @@
 # pIES - 本地单机部署编排
 # 组件: PostgreSQL(事务事实) / Redis(可重建状态) / backend API / worker / web(nginx)
-# 数据卷位于 ./data, 容器重建不丢数据
+# 数据卷位于 ./data, 容器重建不丢数据；首次启动时由 Compose 自动创建。
+#
+# Compose 默认使用 compose 文件所在目录的 basename 作为项目名。目录移动或改名后，
+# 这会留下旧项目的容器；这些容器仍持有旧宿主机 bind mount，并可能在 Docker 重启时
+# 把旧路径下的 data 目录重新创建。固定项目身份，让目录移动后仍由同一套资源管理。
+# 源码或 Dockerfile 变化后必须使用 `docker compose up -d --build`；普通 `up` 可能继续
+# 使用已有镜像。Compose 只重建配置或镜像发生变化的服务，不会无条件重建全部服务。
+name: pies
+
 services:
   postgres:
     image: postgres:16-alpine
