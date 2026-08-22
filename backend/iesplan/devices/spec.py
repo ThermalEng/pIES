@@ -23,7 +23,6 @@ from types import MappingProxyType
 
 from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.errors import AppError
-from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.devices import yamlmini
 from iesplan.devices.parser import parse_device_model_yaml
 
@@ -175,7 +174,10 @@ def to_model_descriptor(spec: DeviceYamlSpec) -> DeviceModelDescriptor:
         parameters=MappingProxyType(dict(spec.parameters)),
         ports=tuple(spec.ports),
         time_series=MappingProxyType(
-            {"inputs": tuple(spec.time_series.get("inputs", ())), "outputs": tuple(spec.time_series.get("outputs", ()))}
+            {
+                "inputs": tuple(spec.time_series.get("inputs", ())),
+                "outputs": tuple(spec.time_series.get("outputs", ())),
+            }
         ),
         states=tuple(spec.states),
         model_commands=MappingProxyType(dict(spec.model_commands)),
@@ -209,7 +211,11 @@ def _parse_parameters(parsed, param_help: MappingProxyType | None = None) -> Map
             max=p.maximum,
             default=default,
             is_optimizable=p.optimizable,
-            existing_default=default if isinstance(default, (int, float)) and not isinstance(default, bool) else (0.0 if p.stock_or_addition == "addition" else default),
+            existing_default=(
+                default
+                if isinstance(default, (int, float)) and not isinstance(default, bool)
+                else (0.0 if p.stock_or_addition == "addition" else default)
+            ),
             stock_or_addition=p.stock_or_addition,
             help_key=str(param_help.get(name, "")),
             enum=tuple(enum) if enum is not None else None,
@@ -304,7 +310,11 @@ def load_yaml(path: Path) -> DeviceYamlSpec:
     info = parsed.device
     names = info.names if info is not None else {}
     meta = parsed.extensions.get("ies.meta")
-    param_help = MappingProxyType(meta.get("param_help", {})) if isinstance(meta, dict) and isinstance(meta.get("param_help"), dict) else MappingProxyType({})
+    param_help = (
+        MappingProxyType(meta.get("param_help", {}))
+        if isinstance(meta, dict) and isinstance(meta.get("param_help"), dict)
+        else MappingProxyType({})
+    )
     return DeviceYamlSpec(
         type_id=info.id,
         version=info.version,
@@ -403,7 +413,12 @@ def spec_to_dict(spec: DeviceYamlSpec) -> dict:
             ],
         },
         "states": [
-            {"key": s.key, "unit": s.unit, "initial_ref": s.initial_ref, "bounds": dict(s.bounds) if s.bounds else None}
+            {
+                "key": s.key,
+                "unit": s.unit,
+                "initial_ref": s.initial_ref,
+                "bounds": dict(s.bounds) if s.bounds else None,
+            }
             for s in spec.states
         ],
         "model_commands": dict(spec.model_commands),

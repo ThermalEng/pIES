@@ -20,9 +20,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from types import MappingProxyType
-
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 #: 契约标识
 SCHEMA_ID = "ies.device-model"

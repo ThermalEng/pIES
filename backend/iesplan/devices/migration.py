@@ -25,18 +25,14 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
 
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.devices import yamlmini
 from iesplan.devices.contracts import (
     SCHEMA_ID,
     SCHEMA_VERSION,
-    DeviceModelDocument,
     canonicalize_device_model,
     canonicalize_raw_mapping,
 )
@@ -283,7 +279,9 @@ def build_migration_receipt(yamls: list[Path]) -> MigrationReceipt:
         _, old_digest = canonicalize_raw_mapping(old_raw)
         new_raw = migrate_device_mapping(old_raw)
         result = parse_device_model_yaml(new_raw, file=str(path))
-        _, new_digest = canonicalize_device_model(result.document) if result.document is not None else ("", "")
+        _, new_digest = (
+            canonicalize_device_model(result.document) if result.document is not None else ("", "")
+        )
         if not result.ok:
             receipt.diagnostics.extend(result.diagnostics)
             receipt.migrated_files.append(
@@ -310,7 +308,11 @@ def build_migration_receipt(yamls: list[Path]) -> MigrationReceipt:
 
 
 def _file_diag(path: Path, detail: str) -> Diagnostic:
-    from iesplan.core.diagnostics import SYS_CFG_INVALID, SEVERITY_ERROR, make_diag
+    from iesplan.core.diagnostics import (
+        SEVERITY_ERROR,
+        SYS_CFG_INVALID,
+        make_diag,
+    )
 
     return make_diag(
         SYS_CFG_INVALID,

@@ -22,27 +22,22 @@ from pathlib import Path
 from types import MappingProxyType
 
 from iesplan.core.diagnostics import (
-    SYS_CFG_INVALID,
     SEVERITY_ERROR,
+    SYS_CFG_INVALID,
     Diagnostic,
     make_diag,
 )
 from iesplan.devices.contracts import (
     DEVICE_MODEL_SCHEMA_PATH,
-    FIDELITY_VALUES,
-    MODEL_METHODS,
     PORT_DIRECTIONS,
     SCHEMA_ID,
     SCHEMA_VERSION,
-    STOCK_OR_ADDITION_VALUES,
-    VALUE_TYPES,
     DeviceDataInput,
     DeviceInfo,
     DeviceModelDocument,
     DeviceParameter,
     DevicePort,
     DeviceState,
-    ModelCommandRef,
 )
 
 _ID_PATTERN = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
@@ -128,7 +123,7 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
     # ---- 阶段 1: JSON Schema（顶层结构 + 未知核心字段） ----
     try:
         import jsonschema
-    except ImportError as exc:  # pragma: no cover
+    except ImportError:  # pragma: no cover
         diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, "jsonschema 依赖缺失", file=file))
         return DeviceModelParseResult(document=None, diagnostics=diags)
     schema = _load_schema()
@@ -137,7 +132,15 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
     except jsonschema.ValidationError as exc:
         path = ".".join(str(p) for p in exc.absolute_path)
         msg = exc.message
-        diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"{msg} (字段: {path or '顶层'})", file=file, field=path or None))
+        diags.append(
+            _err_file(
+                SYS_CFG_INVALID,
+                SEVERITY_ERROR,
+                f"{msg} (字段: {path or '顶层'})",
+                file=file,
+                field=path or None,
+            )
+        )
         return DeviceModelParseResult(document=None, diagnostics=diags)
 
     # ---- 阶段 2: 语义校验（JSON Schema 无法表达的交叉约束） ----
@@ -146,14 +149,23 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
     d_version = device_raw.get("version", "")
     names = device_raw.get("names", {}) if isinstance(device_raw.get("names"), dict) else {}
 
-    def _loc(field: str) -> dict:
-        return {"object_id": d_id, "field": field}
-
     # 2a) schema / schema_version 恒定
     if raw.get("schema") != SCHEMA_ID:
-        diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"schema 必须为 {SCHEMA_ID!r}", file=file, field="schema"))
+        diags.append(
+            _err_file(
+                SYS_CFG_INVALID, SEVERITY_ERROR, f"schema 必须为 {SCHEMA_ID!r}", file=file, field="schema"
+            )
+        )
     if str(raw.get("schema_version")) != SCHEMA_VERSION:
-        diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"schema_version 必须为 {SCHEMA_VERSION!r}", file=file, field="schema_version"))
+        diags.append(
+            _err_file(
+                SYS_CFG_INVALID,
+                SEVERITY_ERROR,
+                f"schema_version 必须为 {SCHEMA_VERSION!r}",
+                file=file,
+                field="schema_version",
+            )
+        )
 
     # 2b) 命令精确版本解析（model_commands 值必须是 <id>@<semver>）
     commands_ok = True
@@ -161,12 +173,28 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
     for capability, ref in (raw.get("model_commands") or {}).items():
         if not isinstance(ref, str):
             commands_ok = False
-            diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"命令引用必须为字符串: {capability!r}", file=file, field=f"model_commands.{capability}"))
+            diags.append(
+                _err_file(
+                    SYS_CFG_INVALID,
+                    SEVERITY_ERROR,
+                    f"命令引用必须为字符串: {capability!r}",
+                    file=file,
+                    field=f"model_commands.{capability}",
+                )
+            )
             continue
         m = _COMMAND_REF_PATTERN.match(ref)
         if m is None:
             commands_ok = False
-            diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"命令引用必须为 <command-id>@<exact-version>: {ref!r}", file=file, field=f"model_commands.{capability}"))
+            diags.append(
+                _err_file(
+                    SYS_CFG_INVALID,
+                    SEVERITY_ERROR,
+                    f"命令引用必须为 <command-id>@<exact-version>: {ref!r}",
+                    file=file,
+                    field=f"model_commands.{capability}",
+                )
+            )
             continue
         parsed_commands[capability] = ref
 
@@ -174,28 +202,64 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
     stateful = bool(device_raw.get("stateful", False))
     states_raw = raw.get("states") or {}
     if stateful and not states_raw:
-        diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, "stateful 设备必须声明 states", file=file, field="states"))
+        diags.append(
+            _err_file(
+                SYS_CFG_INVALID, SEVERITY_ERROR, "stateful 设备必须声明 states", file=file, field="states"
+            )
+        )
     if not stateful and states_raw:
-        diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, "states 仅允许出现在 stateful 设备", file=file, field="states"))
+        diags.append(
+            _err_file(
+                SYS_CFG_INVALID,
+                SEVERITY_ERROR,
+                "states 仅允许出现在 stateful 设备",
+                file=file,
+                field="states",
+            )
+        )
 
     # 2d) capability 必须能在 model_commands 中找到命令
     capabilities = device_raw.get("capabilities") or []
     if commands_ok:
         for cap in capabilities:
             if cap not in parsed_commands:
-                diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"capability {cap!r} 缺少对应 model_command", file=file, field=f"capabilities.{cap}"))
+                diags.append(
+                    _err_file(
+                        SYS_CFG_INVALID,
+                        SEVERITY_ERROR,
+                        f"capability {cap!r} 缺少对应 model_command",
+                        file=file,
+                        field=f"capabilities.{cap}",
+                    )
+                )
 
     # 2e) 端口方向不能缺省（不允许装配器补齐）
     ports_raw = raw.get("ports") or {}
     for port_name, port_raw in ports_raw.items():
         direction = port_raw.get("direction") if isinstance(port_raw, dict) else None
         if direction not in PORT_DIRECTIONS:
-            diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"端口 {port_name!r} 方向非法: {direction!r}", file=file, field=f"ports.{port_name}.direction"))
+            diags.append(
+                _err_file(
+                    SYS_CFG_INVALID,
+                    SEVERITY_ERROR,
+                    f"端口 {port_name!r} 方向非法: {direction!r}",
+                    file=file,
+                    field=f"ports.{port_name}.direction",
+                )
+            )
 
     # 2f) 载能必须在词汇表内
     for carrier in device_raw.get("energy_carriers") or []:
         if carrier not in CARRIER_VOCABULARY:
-            diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"未知载能: {carrier!r}", file=file, field=f"device.energy_carriers.{carrier}"))
+            diags.append(
+                _err_file(
+                    SYS_CFG_INVALID,
+                    SEVERITY_ERROR,
+                    f"未知载能: {carrier!r}",
+                    file=file,
+                    field=f"device.energy_carriers.{carrier}",
+                )
+            )
 
     # 2g) 参数 minimum/maximum 交叉（minimum > maximum 拒绝）
     params_raw = raw.get("parameters") or {}
@@ -205,7 +269,15 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
         mn = _number_or_none(p_raw.get("minimum"))
         mx = _number_or_none(p_raw.get("maximum"))
         if mn is not None and mx is not None and mn > mx:
-            diags.append(_err_file(SYS_CFG_INVALID, SEVERITY_ERROR, f"参数 {name!r} minimum({mn}) 大于 maximum({mx})", file=file, field=f"parameters.{name}"))
+            diags.append(
+                _err_file(
+                    SYS_CFG_INVALID,
+                    SEVERITY_ERROR,
+                    f"参数 {name!r} minimum({mn}) 大于 maximum({mx})",
+                    file=file,
+                    field=f"parameters.{name}",
+                )
+            )
 
     if diags:
         return DeviceModelParseResult(document=None, diagnostics=diags)

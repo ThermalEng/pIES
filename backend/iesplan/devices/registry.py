@@ -114,7 +114,11 @@ class DeviceRegistry:
                     message_key="ies.diag.store.config_invalid",
                     params={"device_id": type_id},
                 )
-            from iesplan.modeling.functions import as_device_entry, mechanism_spec_for, resolve_command_function
+            from iesplan.modeling.functions import (
+                as_device_entry,
+                mechanism_spec_for,
+                resolve_command_function,
+            )
 
             model_function = resolve_command_function(command_id)
             ms = mechanism_spec_for(model_function)

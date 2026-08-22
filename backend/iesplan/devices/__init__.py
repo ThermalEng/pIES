@@ -19,9 +19,11 @@
 """
 
 from iesplan.core.contracts import ParameterSpec
+from iesplan.core.errors import AppError
 from iesplan.devices.loader import DEFAULT_CATALOG_DIR
-from iesplan.devices.spec import DeviceModelDescriptor
+from iesplan.devices.profile import load_profile_columns
 from iesplan.devices.registry import init_registry
+from iesplan.devices.spec import DeviceModelDescriptor
 
 
 def get_profile_columns(type_id: str) -> dict[str, "object"]:
@@ -52,8 +54,8 @@ def list_device_descriptors() -> list[DeviceModelDescriptor]:
     返回已校验、价格已解析的设备建模描述; 外部模块不得导入 devices 内部
     目录扫描/价格解析/CSV 路径实现。注册表未初始化抛 AppError(SYS-CFG-001)。
     """
-    from iesplan.devices.spec import to_model_descriptor
     from iesplan.devices.registry import get_registry
+    from iesplan.devices.spec import to_model_descriptor
 
     registry = get_registry()
     return [to_model_descriptor(s) for s in registry.list()]
@@ -61,15 +63,12 @@ def list_device_descriptors() -> list[DeviceModelDescriptor]:
 
 def get_device_descriptor(type_id: str) -> DeviceModelDescriptor:
     """按类型取公开设备描述(未注册抛 NotFoundError CONN-TYPE-002)。"""
-    from iesplan.devices.spec import to_model_descriptor
     from iesplan.devices.registry import get_registry
+    from iesplan.devices.spec import to_model_descriptor
 
     registry = get_registry()
     return to_model_descriptor(registry.get(type_id))
 
-
-#: 标准 csv 读取（内部实现；get_profile_columns 统一入口）
-from iesplan.devices.profile import load_profile_columns
 
 __all__ = [
     "ParameterSpec",

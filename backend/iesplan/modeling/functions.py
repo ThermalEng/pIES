@@ -22,7 +22,6 @@ from typing import Callable
 import numpy as np
 
 from iesplan.core.units import UnitError, to_si
-
 from iesplan.modeling.command import DeviceRunResult
 from iesplan.modeling.enums import FUNCTION_REF_PREFIX
 from iesplan.modeling.errors import ModelingConfigError

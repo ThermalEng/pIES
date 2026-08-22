@@ -11,8 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from iesplan.core.diagnostics import (
-    SYS_CFG_INVALID,
     SEVERITY_ERROR,
+    SYS_CFG_INVALID,
     Diagnostic,
     make_diag,
 )
@@ -116,7 +116,10 @@ def _check_cross_field(spec: DeviceYamlSpec, yaml_path: Path) -> list[Diagnostic
             _err("model_commands", f"capability {cap!r} 缺少对应 model_command")
     for cap, ref in commands.items():
         if not isinstance(ref, str) or "@" not in ref:
-            _err("model_commands", f"命令引用必须为 <command-id>@<exact-version>: {ref!r}(capability {cap!r})")
+            _err(
+                "model_commands",
+                f"命令引用必须为 <command-id>@<exact-version>: {ref!r}(capability {cap!r})",
+            )
         elif "iesplan" in ref or ".py" in ref or "/" in ref:
             _err("model_commands", f"命令引用禁止函数/包/模块/宿主机路径: {ref!r}")
 
