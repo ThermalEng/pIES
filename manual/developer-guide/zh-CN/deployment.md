@@ -16,6 +16,22 @@ docker compose up -d --build
 
 默认 Web 入口为 `http://localhost:8080`。查看运行状态时使用 Docker/Compose 提供的日志与健康信息，不在主机直接运行应用进程。
 
+源码或 Dockerfile 变化后必须再次执行带 `--build` 的命令。Compose 会复用未变化的基础镜像和构建层，只重建镜像或配置发生变化的服务；不带 `--build` 的 `docker compose up` 可能继续运行旧镜像中的代码。容器重建不会删除 `./data` 中的 bind mount 数据。
+
+## 移动或改名仓库目录
+
+Compose 的 bind mount 会把 `./data` 解析为宿主机绝对路径并保存到容器元数据中。目录移动或改名时，应该先停止原项目，避免旧容器继续引用旧路径：
+
+```bash
+docker compose down
+# 移动或改名仓库目录后，在新目录执行
+docker compose up -d --build
+```
+
+本项目在 Compose 文件中固定项目名为 `pies`，因此今后的目录改名不会再产生另一套 Compose 项目。新目录中的 `./data` 会随仓库整体移动而继续使用；只有全新初始化且目录确实不存在时，Compose 才会自动创建缺失的 bind 源目录。
+
+如果目录改名发生在固定项目名生效之前，管理员应先用 `docker compose ls -a` 识别遗留项目，再对确认无误的旧项目执行 `docker compose -p <旧项目名> down --remove-orphans`。这是一次性的运维清理，不是应用迁移脚本，也不会删除当前目录的 `./data`。不要直接删除旧 `data` 目录；先确认新目录中的数据已经可用，再按备份与恢复流程清理遗留目录。
+
 ## 开发者日常流程
 
 ```text

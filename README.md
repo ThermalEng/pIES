@@ -38,6 +38,8 @@ pIES 面向园区、建筑等综合能源场景，提供从图形化建模、数
 docker compose up -d --build
 ```
 
+源码或 Dockerfile 变化后仍使用上面的 `--build` 命令；Compose 会复用未变化的镜像层和数据目录，并只重建受影响的服务。不要用不带 `--build` 的 `docker compose up` 验证新源码。
+
 浏览器打开 `http://localhost:8080`。默认管理员用户名为 `admin`；初始密码由部署变量 `IESPLAN_DEFAULT_ADMIN_PASSWORD` 提供，首次登录必须修改。
 
 > 生产部署前必须更换默认管理员密码、数据库密码和 `IESPLAN_SECRET_KEY`，并在部署层启用 HTTPS。完整要求见[部署与运行](manual/developer-guide/zh-CN/deployment.md)。
