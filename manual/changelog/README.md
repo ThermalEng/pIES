@@ -23,6 +23,7 @@
 - 规范化产物保留原始文件 SHA-256 与规范表格 SHA-256；同一语义输入得到同一规范摘要。
 - 新增 DATA-META-* / DATA-DIAL-* / DATA-COL-003..006 / DATA-VAL-* / DATA-TIME-* / DATA-ARR-001 / DATA-SUM-001 诊断码。
 - 包内设备 CSV 与 GUI 上传共用同一 `ies.device-data` 规范化流程(`datacontract.normalize_upload_csv` / `datacontract.canonical_table_bytes`)：时区(UTC 带 Z)、时间轴(严格递增/步长对齐)、单位(量纲一致)、缺失值(模型策略)、数组长度(行数一致)统一校验；`devices.profile.load_profile_columns` 与 GUI 上传均经同一规范化器，手写 CSV 与上传对同一内容产生同一规范摘要。
+- 迁移内置设备目录 CSV(`electric_load/heat_load/cooling_load`)到 `ies.device-data` `1.0.0` 格式：数据行原样保留、前插标准元数据头、迁移后全量校验通过才写回；迁移回执(`catalog/migration-receipt-0.6.0.json`)记录迁移文件、旧/新 SHA-256、行数、列声明与校验结果；后续装配只持有已校验的内容引用(`dataset_version_id`/`content_hash`)，不依赖上传文件名。
 
 ## 0.1.0 — 开发基线
 
