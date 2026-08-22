@@ -388,7 +388,7 @@ def test_viewer_can_export_excel_bilingual_and_fixed_reference(
     wb = load_workbook(io.BytesIO(content))
     ws = wb["报告总览"]
     title = ws.cell(row=1, column=1).value
-    assert "IES Plan 项目结果报告" in title  # 中文标题
+    assert "pIES 项目结果报告" in title  # 中文标题
     assert "Project Result Report" in title  # 英文标题
     # 固定引用证据包与评估
     joined = "\n".join(

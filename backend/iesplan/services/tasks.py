@@ -1,6 +1,6 @@
 """任务与资源调度服务(U08 快照装配 / 任务域服务)。
 
-对应 docs/spec/03-task-scheduling.md 与 01-db-schema.md 第 6、7 节:
+设计约束见开发者指南 domain-model.md 与 contracts.md:
 - 快照装配: 从项目版本(或草稿固化)+ 数据集版本 + 计算配置组装不可变快照,
   按 content_hash(sha256) 去重复用(规格 2.2);
 - 任务生命周期: 幂等创建(幂等键 + 同快照去重)、存储门禁、状态机

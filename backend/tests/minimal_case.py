@@ -1,4 +1,4 @@
-"""IES Plan 最小案例脚本: 最小闭环(登录→项目→设备→数据→配置→任务→结果→导出)。
+"""pIES 最小案例脚本: 最小闭环(登录→项目→设备→数据→配置→任务→结果→导出)。
 
 在 docker 内运行: docker compose exec backend python /app/tests/minimal_case.py
 用于动态工作流驱动的 bug 发现与修复循环。
@@ -33,7 +33,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 def main() -> int:
     print("=" * 60)
-    print("IES Plan 最小案例")
+    print("pIES 最小案例")
     print("=" * 60)
     c = httpx.Client(base_url=BASE, timeout=120.0)
 

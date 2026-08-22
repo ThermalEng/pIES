@@ -1,7 +1,6 @@
 """数据集服务(U05 数据集写入单元)。
 
-依据 docs/spec/01-db-schema.md 第5节(数据集)/第10节(对象)、
-IES-Plan-Design-Input.rpd 第8节与 17.4:
+设计约束见开发者指南 domain-model.md、contracts.md 及使用者指南的数据准备章节:
 - 标准 CSV 模板生成(字段说明/单位/示例, 双语注释行, REQ-DATA-002);
 - 上传解析: 错误定位到文件/字段/行号;
 - 校验: 行数(35040/17520/8760)、时间戳严格递增无重复、无缺失值、单位与范围、
@@ -269,7 +268,7 @@ def get_template(resolution: str) -> bytes:
     if resolution not in RESOLUTIONS:
         raise ValueError(f"非法分辨率: {resolution!r},允许值 {sorted(RESOLUTIONS)}")
     lines: list[str] = []
-    lines.append("# IES Plan 数据集模板 / IES Plan dataset template")
+    lines.append("# pIES 数据集模板 / pIES dataset template")
     lines.append(f"# 分辨率 resolution: {resolution}  年步数 steps/year: {RESOLUTIONS[resolution][0]}")
     lines.append("# 时间戳为项目本地时间(无时区), 固定 UTC 偏移在上传时声明; 标准非闰年 365 天")
     lines.append("# Timestamps are project-local naive times; fixed UTC offset is declared on upload.")

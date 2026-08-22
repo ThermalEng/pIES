@@ -1,6 +1,6 @@
 # QA-E2E-01: Playwright 真实用户验收
 
-场景定义见 `docs/fullstack-decoupling-review-2026-08-20.md` §13(QA-E2E-01)。
+场景定义见 `docs/reviews/fullstack-decoupling-review-2026-08-20.md` §13(QA-E2E-01)。
 
 ## 环境要求(13.4)
 

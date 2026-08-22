@@ -4,7 +4,7 @@
  * - 静态可读: 不依赖登录/项目数据/后端; 内容来自构建期生成的
  *   /help/manifest.json(仓库 manual/ 编译产物);
  * - 路由 /help/*: /help 与 /help/:lang/:pageId(深链接可直接打开并刷新恢复);
- * - 桌面端树形侧栏(用户指南/开发者指南两个一级节点), 移动端可展开目录;
+ * - 桌面端树形侧栏(使用者指南/开发者指南/更新日志三个一级节点), 移动端可展开目录;
  * - Markdown 渲染: 标题/段落/列表/表格/引用/链接/行内代码/fenced code block;
  *   默认禁用原始 HTML, 过滤 javascript: 等不安全 URL, 外部链接标识;
  *   内部相对链接转客户端路由, 不触发整页刷新;
@@ -19,6 +19,7 @@ import { Link, NavLink, useNavigate, useParams } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { Icon } from '../components/ui'
+import { BrandMark } from '../components/BrandMark'
 
 /** 构建期生成的帮助中心 manifest(public/help/manifest.json)。 */
 export interface HelpManifest {
@@ -345,7 +346,10 @@ export default function HelpPage() {
     return (
       <div className="ies-help">
         <header className="ies-topbar">
-          <span className="ies-topbar__brand">{t('ies.nav.app_title')}</span>
+          <span className="ies-topbar__brand">
+            <BrandMark className="ies-topbar__brand-mark" />
+            <span className="ies-topbar__brand-name">{t('ies.nav.app_title')}</span>
+          </span>
         </header>
         <main className="ies-help__main">
           <div className="ies-page-placeholder" role="status">
@@ -367,10 +371,8 @@ export default function HelpPage() {
     <div className="ies-app ies-help">
       <header className="ies-topbar">
         <Link to="/" className="ies-topbar__brand" aria-label={t('ies.nav.app_title')}>
-          <span className="ies-topbar__brand-mark" aria-hidden="true">
-            IES
-          </span>
-          <span>{t('ies.nav.app_title')}</span>
+          <BrandMark className="ies-topbar__brand-mark" />
+          <span className="ies-topbar__brand-name">{t('ies.nav.app_title')}</span>
         </Link>
         <nav className="ies-topbar__nav" aria-label={t('ies.nav.help')}>
           <NavLink to="/help" className="ies-topbar__link" aria-current={!pageId ? 'page' : undefined}>

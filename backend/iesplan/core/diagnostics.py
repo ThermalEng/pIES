@@ -1,6 +1,6 @@
 """诊断体系:诊断对象与诊断码目录。
 
-依据 docs/spec/04-registry-diagnostics.md 第 5 节:
+设计约束见开发者指南 contracts.md:
 - 诊断码格式 `<域>-<类别>-<三位序号>`(如 DATA-TS-001),码一旦发布即永久稳定;
 - severity 取值 blocking | error | warning | info,blocking 为独立布尔与 severity 正交;
 - 诊断码与消息键一一对应(如 DATA-TS-001 ↔ ies.diag.data.ts_dup);

@@ -1,6 +1,6 @@
 """Redis 队列与可重建状态服务(最小实现)。
 
-对应 docs/spec/03-task-scheduling.md 第 5/7 节: compute/io 两个逻辑队列(ZSET)、
+设计约束见开发者指南 architecture.md 与 contracts.md: compute/io 两个逻辑队列(ZSET)、
 秒级进度、Worker 心跳、取消信号。
 
 一致性原则(规格 0.2/1.3): 队列/进度/心跳均为**可重建状态** —— 权威事实只在

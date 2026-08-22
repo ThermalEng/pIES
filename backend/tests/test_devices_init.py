@@ -655,7 +655,7 @@ class TestProfileCsv:
     def test_make_template_csv(self, spec_electric_load):
         text = make_template_csv(spec_electric_load, rows=3)
         lines = text.splitlines()
-        assert lines[0].startswith("# IES Plan")
+        assert lines[0].startswith("# pIES")
         data = [ln for ln in lines if not ln.startswith("#")]
         assert data[0] == "timestamp,e_load"
         assert len(data) == 4  # 表头 + 3 示例行

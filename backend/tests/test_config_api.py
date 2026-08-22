@@ -123,7 +123,7 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
 
 def make_app(db: Session) -> FastAPI:
     """挂载配置路由的测试应用(get_db 覆盖为传入会话)。"""
-    application = FastAPI(title="IES Plan Config API Test")
+    application = FastAPI(title="pIES Config API Test")
     application.include_router(auth_router)
     application.include_router(config_router)
     application.include_router(registry_router)

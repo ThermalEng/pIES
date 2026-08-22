@@ -189,7 +189,7 @@ def test_template_contains_bilingual_headers_and_units() -> None:
     content = ds_service.get_template("1h")
     text = content.decode("utf-8")
     assert text[0] == "\ufeff" and text.lstrip("\ufeff").startswith("#")  # BOM + 注释行
-    assert "IES Plan" in text
+    assert "pIES" in text
     for spec in STANDARD_FIELDS.values():
         assert spec.key in text
         assert spec.name_zh in text and spec.name_en in text

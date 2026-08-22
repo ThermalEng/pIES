@@ -40,6 +40,7 @@ import { ApiError, PublicAuthSettings } from '../types'
 import { errorMessage, useI18n } from '../i18n'
 import type { Locale } from '../i18n'
 import { Alert, Badge, Button, Checkbox, FormField, Input, Select } from '../components/ui'
+import { BrandMark } from '../components/BrandMark'
 
 // ---------------------------------------------------------------------------
 // 类型(与后端 AuthResponse 对齐;脚手架 LoginResponse 已过时,此处本地收窄)
@@ -298,10 +299,12 @@ export default function LoginPage() {
     <main className="ies-login">
       <section className="ies-login__card" aria-label={t('ies.auth.login_title')}>
         <header className="ies-login__header">
-          <span className="ies-login__mark" aria-hidden="true">
-            IES
-          </span>
+          <div className="ies-login__brand" aria-label={t('ies.nav.app_title')}>
+            <BrandMark className="ies-login__mark" />
+            <span className="ies-login__wordmark">pIES</span>
+          </div>
           <h1 className="ies-login__title">{t('ies.auth.login_title')}</h1>
+          <p className="ies-login__tagline">{t('ies.auth.brand_tagline')}</p>
         </header>
 
         {showOffline ? (

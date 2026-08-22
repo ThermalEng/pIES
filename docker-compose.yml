@@ -1,4 +1,4 @@
-# IES Plan - 本地单机部署编排
+# pIES - 本地单机部署编排
 # 组件: PostgreSQL(事务事实) / Redis(可重建状态) / backend API / worker / web(nginx)
 # 数据卷位于 ./data, 容器重建不丢数据
 services:

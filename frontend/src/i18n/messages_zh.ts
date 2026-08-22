@@ -69,7 +69,7 @@ export const messagesZh: Record<string, string> = {
   // -------------------------------------------------------------------------
   // 导航
   // -------------------------------------------------------------------------
-  'ies.nav.app_title': '综合能源系统规划',
+  'ies.nav.app_title': 'pIES',
   'ies.nav.projects': '项目列表',
   'ies.nav.workbench': '工作台',
   'ies.nav.model': '系统建模',
@@ -107,7 +107,8 @@ export const messagesZh: Record<string, string> = {
   // 登录 / 账号
   // -------------------------------------------------------------------------
   'ies.auth.login': '登录',
-  'ies.auth.login_title': '登录 IES Plan',
+  'ies.auth.login_title': '登录',
+  'ies.auth.brand_tagline': '园区综合能源系统规划',
   'ies.auth.username': '用户名',
   'ies.auth.password': '密码',
   'ies.auth.remember': '记住我',

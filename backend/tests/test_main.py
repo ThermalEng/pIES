@@ -232,5 +232,5 @@ def test_module_level_app_created() -> None:
     """模块级 app 实例存在 (uvicorn 入口 iesplan.main:app)。"""
     from iesplan.main import app as module_app
 
-    assert module_app.title == "IES Plan API"
+    assert module_app.title == "pIES API"
     assert module_app.version == __version__

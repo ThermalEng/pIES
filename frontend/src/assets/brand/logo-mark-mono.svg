@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="8 7 50 52" role="img" aria-labelledby="title">
+  <title id="title">pIES</title>
+  <path d="M15 52V14" fill="none" stroke="#0e5cad" stroke-width="7.5" stroke-linecap="round"/>
+  <path d="M24 14h12c10 0 16 5 16 14S46 42 36 42H24" fill="none" stroke="#0e5cad" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M27 22h7l7 6-7 6h-7l6-6Z" fill="#0e5cad"/>
+</svg>

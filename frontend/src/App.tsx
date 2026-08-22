@@ -34,6 +34,7 @@ import {
 } from 'react-router-dom'
 
 import { api, hasSession, setUnauthorizedHandler } from './api/client'
+import { BrandMark } from './components/BrandMark'
 import { useI18n } from './i18n'
 import { Button, Icon, Spinner } from './components/ui'
 
@@ -153,10 +154,8 @@ function AppShell() {
     <div className="ies-app">
       <header className="ies-topbar">
         <Link to="/" className="ies-topbar__brand" aria-label={t('ies.nav.app_title')}>
-          <span className="ies-topbar__brand-mark" aria-hidden="true">
-            IES
-          </span>
-          <span>{t('ies.nav.app_title')}</span>
+          <BrandMark className="ies-topbar__brand-mark" />
+          <span className="ies-topbar__brand-name">{t('ies.nav.app_title')}</span>
         </Link>
         <nav className="ies-topbar__nav" aria-label={t('ies.nav.projects')}>
           <NavLink to="/" end className="ies-topbar__link">

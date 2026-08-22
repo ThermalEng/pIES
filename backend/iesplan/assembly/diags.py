@@ -1,4 +1,4 @@
-"""ASM 域诊断码目录(审查意见第 4 条装配/检查,文档 docs/review-0820/04-assembly-checker.md)。
+"""ASM 域诊断码目录(设计约束见开发者指南 contracts.md)。
 
 码格式遵循 04 §5.1:<域>-<类别>-<三位序号>;码一经发布永久稳定;
 码 ↔ 消息键一一对应(ies.diag.asm.*);修复键独立维护(ies.fix.asm.*)。

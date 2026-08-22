@@ -1243,7 +1243,7 @@ def export_excel(
     ws = wb.active
     ws.title = "报告总览"
     # 固定标题: 中英双语(默认简体中文在前)
-    title = ws.cell(row=1, column=1, value="IES Plan 项目结果报告 / IES Plan Project Result Report")
+    title = ws.cell(row=1, column=1, value="pIES 项目结果报告 / pIES Project Result Report")
     title.font = Font(bold=True, size=14)
     lang_label = "简体中文" if lang != "en" else "English"
     ws.cell(row=2, column=1, value=f"生成语言: {lang_label} / Language: {lang}")

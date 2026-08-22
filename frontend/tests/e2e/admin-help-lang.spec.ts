@@ -1,6 +1,6 @@
 // QA-E2E-01 场景 7-11(13.3):
 //   7. 管理员: 用户管理(停用/启用) + 存储健康
-//   8. 帮助中心: 两个一级指南、Markdown 表格/代码、章节跳转和返回
+//   8. 帮助中心: 三个一级文档入口、Markdown 表格/代码、章节跳转和返回
 //   9. 帮助章节深链接 + 刷新保持
 //   10. 语言切换(zh/en)与缺失翻译提示
 //   11. 桌面/移动视口 + 键盘焦点
@@ -60,11 +60,11 @@ test.describe('场景 7: 管理员', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 场景 8: 帮助中心 - 两个指南 + Markdown 渲染 + 章节跳转
+// 场景 8: 帮助中心 - 三个文档入口 + Markdown 渲染 + 章节跳转
 // ---------------------------------------------------------------------------
 
 test.describe('场景 8: 帮助中心', () => {
-  test('两个一级指南、Markdown 表格/代码、章节跳转与返回', async ({ browser }) => {
+  test('三个一级文档入口、Markdown 表格/代码、章节跳转与返回', async ({ browser }) => {
     const username = uniqueName('es-help')
     const password = strongPassword('Init')
     const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
@@ -78,11 +78,12 @@ test.describe('场景 8: 帮助中心', () => {
     // 顶部导航进入帮助中心(规范路由 /help, 无尾斜杠)
     await page.getByRole('navigation', { name: /项目列表|Projects/i }).getByText('帮助中心').click()
     await expect(page).toHaveURL(/\/help\/?$/)
-    // 两个一级指南: 用户指南 / 开发者指南
-    await expect(page.getByText('用户指南').first()).toBeVisible()
+    // 三个一级入口: 使用者指南 / 开发者指南 / 更新日志
+    await expect(page.getByText('使用者指南').first()).toBeVisible()
     await expect(page.getByText('开发者指南').first()).toBeVisible()
+    await expect(page.getByText('更新日志').first()).toBeVisible()
 
-    // 进入用户指南 → 快速开始
+    // 进入使用者指南 → 快速开始
     await page.getByText('快速开始').first().click()
     // RR-P2-10: 规范 locale 为 zh-CN(manual/SUMMARY.zh-CN.md 登记), 不是 zh
     await expect(page).toHaveURL(/\/help\/zh-CN\/[^/]+/i)

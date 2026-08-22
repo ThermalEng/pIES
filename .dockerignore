@@ -6,5 +6,5 @@ dist/
 **/*.pyc
 .claude/
 docs/
-IES-Plan-Design-Input.rpd
+docs/archive/design-input/IES-Plan-Design-Input.rpd
 LICENSE

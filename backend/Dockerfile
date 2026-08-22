@@ -1,4 +1,4 @@
-# IES Plan 后端镜像 (API + Worker 共用)
+# pIES 后端镜像 (API + Worker 共用)
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \

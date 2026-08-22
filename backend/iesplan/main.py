@@ -1,4 +1,4 @@
-"""IES Plan 后端应用入口。
+"""pIES 后端应用入口。
 
 提供 create_app() 应用工厂与模块级 app 实例 (uvicorn 入口: iesplan.main:app)。
 本阶段仅挂载健康检查路由, 业务 API 路由在后续阶段通过 include_router 追加。
@@ -132,11 +132,11 @@ def _init_modeling_registry() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期: 启动时初始化数据库与建模命令注册表, 关闭时记录日志。"""
-    logger.info("IES Plan API 启动, 版本=%s", __version__)
+    logger.info("pIES API 启动, 版本=%s", __version__)
     _init_database()
     _init_modeling_registry()
     yield
-    logger.info("IES Plan API 关闭")
+    logger.info("pIES API 关闭")
 
 
 def _build_health_router() -> APIRouter:
@@ -287,7 +287,7 @@ def _register_business_routers(application: FastAPI) -> None:
 def create_app() -> FastAPI:
     """创建 FastAPI 应用: 中间件、健康路由、根路由、业务路由与全局异常处理。"""
     application = FastAPI(
-        title="IES Plan API",
+        title="pIES API",
         description="综合能源系统规划平台后端",
         version=__version__,
         lifespan=lifespan,

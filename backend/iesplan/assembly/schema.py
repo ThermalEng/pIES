@@ -1,7 +1,7 @@
 """装配数据模型(与装配文本一一对应,文本为唯一事实源)。
 
-对应 docs/review-0820/04-assembly-checker.md §5.2(按 05 §7.1 裁决:
-MODEL_KIND_* 更名为 MODEL_METHOD_*,取值 mechanism/data_repeat/data_predict)。
+设计约束见开发者指南 architecture.md 与 contracts.md；建模方法取值为
+mechanism/data_repeat/data_predict。
 
 所有 dataclass 均为 slots + frozen 语义;列表字段为普通 list,解析后不再可变。
 id 引用一律用点路径字符串 "<device>.<port>",在文件内解析为对象时用

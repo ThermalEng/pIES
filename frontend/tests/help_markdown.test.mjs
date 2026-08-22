@@ -83,13 +83,19 @@ check('en 缺失返回 null', md.resolveLocale(['zh-CN'], 'en') === null)
 try {
   const manifest = JSON.parse(readFileSync('public/help/manifest.json', 'utf8'))
   check('manifest 语言登记', Array.isArray(manifest.locales) && manifest.locales.includes('zh-CN'))
-  check('manifest 两个一级指南', (() => {
+  check('manifest 产品版本为三段式', /^\d+\.\d+\.\d+$/.test(manifest.appVersion))
+  check('manifest 三个一级文档入口', (() => {
     const t = manifest.trees['zh-CN']
-    return t.length === 2 && t[0].title === '用户指南' && t[1].title === '开发者指南'
+    return (
+      t.length === 3 &&
+      t[0].title === '使用者指南' &&
+      t[1].title === '开发者指南' &&
+      t[2].title === '更新日志'
+    )
   })())
   check('manifest 章节正文非空', (() => {
     const ids = Object.keys(manifest.pages).filter((k) => k.startsWith('zh-CN/'))
-    return ids.length >= 8 && ids.every((k) => manifest.pages[k].content.length > 0)
+    return ids.length >= 36 && ids.every((k) => manifest.pages[k].content.length > 0)
   })())
   check('manifest 深链接 id 集合 = 目录展平', (() => {
     const flat = []

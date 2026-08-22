@@ -1,13 +1,11 @@
-# IES Plan 产品文档
+# pIES 正式文档
 
-本目录保存可以交付和长期维护的正式文档。项目总入口仍为根目录 [README](../README.md)。
+`manual/` 是产品使用、设计与版本计划的唯一长期正文来源。根目录 [README](../README.md) 是项目总入口；网页“帮助中心”直接发布本目录内容。
 
-请选择入口：
+## 三个入口
 
-- [用户指南](user-guide/README.md)：面向规划工程师、能源工程人员和系统管理员；
-- [开发者指南](developer-guide/README.md)：面向扩展开发者、集成开发者、维护者和贡献者；
-- [架构宪法](developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)：开发者指南总则及项目开发最高架构规范。
+- [使用者指南](user-guide/README.md)：面向第一次使用 pIES 的规划工程师、能源工程人员和系统管理员；
+- [开发者指南](developer-guide/README.md)：面向维护者、集成开发者、扩展开发者和贡献者；
+- [更新日志](changelog/README.md)：当前版本、倒序变更历史和 [Roadmap](changelog/roadmap.md)。
 
-帮助中心的统一章节顺序见 [`SUMMARY.md`](SUMMARY.md)。
-
-`manual/` 不保存临时调研、审查草稿或阶段实施记录。这些开发过程材料统一放在根目录 `docs/`。
+章节顺序由 [`SUMMARY.md`](SUMMARY.md) 及对应语言目录维护。Review 和归档材料位于 [`docs/`](../docs/README.md)，只提供证据与历史背景，不得覆盖这里的现行说明。

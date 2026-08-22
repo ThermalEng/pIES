@@ -1,6 +1,6 @@
 """模型层测试: 模型注册、约束字符串、关键字段与 SQLite create_all 全链路。
 
-数据来源: docs/spec/01-db-schema.md(41 张表)。
+领域结构依据: manual/developer-guide/zh-CN/domain-model.md。
 SQLite 无法解析 PostgreSQL 正则运算符, 正则 CHECK 在 SQLite 下编译为恒真,
 因此约束字符串断言使用 PostgreSQL 方言编译验证。
 """

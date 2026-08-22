@@ -59,7 +59,7 @@ export const messagesEn: Record<string, string> = {
   // -------------------------------------------------------------------------
   // Navigation
   // -------------------------------------------------------------------------
-  'ies.nav.app_title': 'IES Plan',
+  'ies.nav.app_title': 'pIES',
   'ies.nav.projects': 'Projects',
   'ies.nav.workbench': 'Workbench',
   'ies.nav.model': 'System Modeling',
@@ -97,7 +97,8 @@ export const messagesEn: Record<string, string> = {
   // Auth / account
   // -------------------------------------------------------------------------
   'ies.auth.login': 'Sign in',
-  'ies.auth.login_title': 'Sign in to IES Plan',
+  'ies.auth.login_title': 'Sign in',
+  'ies.auth.brand_tagline': 'Park integrated energy system planning',
   'ies.auth.username': 'Username',
   'ies.auth.password': 'Password',
   'ies.auth.remember': 'Remember me',

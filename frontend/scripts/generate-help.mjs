@@ -4,24 +4,34 @@
  *
  * 在构建阶段从仓库 manual/ 生成 `frontend/public/help/manifest.json`:
  * - 解析 manual/SUMMARY.md 得到可用语言列表;
- * - 解析各 SUMMARY.<locale>.md 得到目录树(用户指南/开发者指南两个一级节点 +
+ * - 解析各 SUMMARY.<locale>.md 得到目录树(使用者指南/开发者指南/更新日志三个一级节点 +
  *   各章节, 章节 id = 文件 basename, 跨语言保持稳定);
  * - 读取每个章节文件正文(Markdown)与最后修改时间;
  * - 生成物由 vite 拷贝进 dist, 不作为第二份手工维护源码提交
  *   (frontend/public/help/ 在 .gitignore 中排除)。
  *
- * 运行:npm run build 构建阶段(Docker 与本机一致); 环境变量 MANUAL_DIR
- * 可覆盖 manual/ 位置(Docker 内为 /manual)。
+ * 运行:npm run build 构建阶段(Docker 与本机一致); 环境变量 MANUAL_DIR、
+ * PRODUCT_PYPROJECT 可分别覆盖 manual/ 与产品 pyproject.toml 的位置。
  */
 
 import { readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
-import { createRequire } from 'node:module'
-
-const require = createRequire(import.meta.url)
 
 const MANUAL_DIR = resolve(process.env.MANUAL_DIR || join(process.cwd(), '..', 'manual'))
+const PRODUCT_PYPROJECT = resolve(
+  process.env.PRODUCT_PYPROJECT || join(process.cwd(), '..', 'backend', 'pyproject.toml'),
+)
 const OUT_FILE = join(process.cwd(), 'public', 'help', 'manifest.json')
+
+/** 从产品唯一版本源 backend/pyproject.toml 读取三段式版本号。 */
+function readProductVersion() {
+  const pyproject = readFileSync(PRODUCT_PYPROJECT, 'utf8')
+  const match = /^version\s*=\s*"(\d+\.\d+\.\d+)"\s*$/m.exec(pyproject)
+  if (!match) {
+    throw new Error(`无法从 ${PRODUCT_PYPROJECT} 读取三段式产品版本号`)
+  }
+  return match[1]
+}
 
 /** 解析 "- [标题](相对路径)" 链接列表, 缩进(2 空格)表示层级。 */
 function parseLinkTree(text) {
@@ -85,9 +95,8 @@ function main() {
     walk(tree, '')
   }
 
-  const pkg = require(join(process.cwd(), 'package.json'))
   const manifest = {
-    appVersion: pkg.version || '0.1.0',
+    appVersion: readProductVersion(),
     generatedAt: new Date().toISOString(),
     locales,
     trees,

@@ -273,7 +273,7 @@ def make_template_csv(spec: DeviceYamlSpec, resolution: str = "1h", rows: int = 
         rows = expected
     series = _all_series(spec)
     lines: list[str] = [
-        "# IES Plan 设备标准时间序列模板 / IES Plan device time series template",
+        "# pIES 设备标准时间序列模板 / pIES device time series template",
         f"# 设备 device: {spec.type_id}  name: {spec.name_zh} / {spec.name_en}",
         f"# 模型方法 model_method: {spec.model_method}  状态 stateful: {spec.stateful}",
         f"# 分辨率 resolution: {resolution}  年步数 steps/year: {expected}",

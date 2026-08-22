@@ -1,21 +1,22 @@
-# IES Plan 开发过程文档
+# Review 与历史归档
 
-本目录只保存当前开发过程中的输入规格、调研、方案、审查、路线图、实施记录和阶段性结论，不是面向外部开发者发布的开发者指南。
+`docs/` 不再承载当前开发规格、实施计划或 Roadmap。正式使用说明、设计蓝图和版本计划统一位于 [`manual/`](../manual/README.md)。
 
-## 当前入口
+## Review
 
-- [架构宪法](../manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)：所有开发过程必须遵守；
-- [数据与领域规格](spec/)：当前实现使用的数据库、计算、任务和诊断输入规格；
-- [前后端解耦审查结论](fullstack-decoupling-review-2026-08-20.md)：当前问题、已采纳决定和迁移优先级；
-- [前后端解耦整改复审](fullstack-decoupling-rereview-2026-08-21.md)：对 2026-08-20 审查整改结果的验收、阻断项和下一轮门禁；
-- `review-0820/`、路线图和审查报告：阶段性过程材料。
+[`reviews/`](reviews/) 保存审查快照和整改证据：
 
-## 边界
+- [2026-08-20 架构专题审查](reviews/2026-08-20-architecture/05-architecture-overview.md)；
+- [2026-08-20 前后端解耦审查](reviews/fullstack-decoupling-review-2026-08-20.md)；
+- [2026-08-21 整改复审](reviews/fullstack-decoupling-rereview-2026-08-21.md)；
+- [安全红队审查](reviews/codex-redteam-report.md)；
+- [二次审查](reviews/codex-review-round2.md)；
+- [人工审查意见](reviews/manual-review-2026-08-20.txt)。
 
-- `docs/` 中的内容可以包含当前事实、目标方案、差距和迁移步骤，但必须明确状态；
-- 未经确认的草案和审查意见不构成稳定公开契约；
-- 成熟、稳定且需要交付给使用者或开发者的内容，应提炼到 `manual/user-guide/` 或 `manual/developer-guide/`；
-- 提炼不是原文复制，必须消除过程上下文、冲突和临时结论，避免形成两个权威版本；
-- 面向用户的操作手册和面向开发者的稳定扩展文档不得直接放在本目录。
+Review 只代表审查日期与当时基线，不能自动证明当前实现状态，也不能覆盖架构宪法和开发者指南。后续 review 应注明日期、对象、提交基线、结论和验证证据。
 
-项目统一入口仍为根目录 [README](../README.md)，正式产品文档入口位于 [`manual/`](../manual/README.md)。
+## Archive
+
+[`archive/`](archive/README.md) 保存已被替代的规格、合同、路线图、设计输入、品牌提案和历史工作流。归档内容停止维护，内部链接和结论可能过时；不得作为新开发输入。
+
+返回[项目入口](../README.md)。

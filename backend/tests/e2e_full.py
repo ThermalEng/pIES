@@ -1,4 +1,4 @@
-"""IES Plan 全栈端到端验证脚本(真实 HTTP, 走 nginx -> backend)。
+"""pIES 全栈端到端验证脚本(真实 HTTP, 走 nginx -> backend)。
 
 运行方式(在 docker 容器内执行, 不污染主机):
     docker run --rm --network host -v <repo>/backend/tests:/tests ies_plan-backend python /tests/e2e_full.py

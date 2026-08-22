@@ -1,4 +1,4 @@
-# IES Plan 设备标准时间序列数据 / IES Plan device standard time series data
+# pIES 设备标准时间序列数据 / pIES device standard time series data
 # 设备 device: ies.device.electric_load(电负荷, data_repeat, 周期 period: day)
 # 分辨率 resolution: 1h  年步数 steps/year: 8760  标准非闰年 365 天
 # 时间戳为项目本地时间(无时区, 固定 UTC 偏移在项目配置声明)

@@ -224,7 +224,7 @@ class Worker:
 
 def main(argv: list[str] | None = None) -> int:
     """Worker 进程入口(python -m iesplan.worker.main)。"""
-    parser = argparse.ArgumentParser(description="IES Plan 计算/I/O Worker")
+    parser = argparse.ArgumentParser(description="pIES 计算/I/O Worker")
     parser.add_argument(
         "--worker-type", choices=("compute", "io"), default=None,
         help="Worker 类型(缺省取 IESPLAN_WORKER_TYPE 环境变量或配置)",

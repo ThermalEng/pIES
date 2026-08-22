@@ -1,7 +1,7 @@
 /**
- * IES Plan 前端领域类型定义。
+ * pIES 前端领域类型定义。
  *
- * 与后端数据库模式(docs/spec/01-db-schema.md)及 API 契约保持一致:
+ * 与开发者指南中的领域模型及接口契约保持一致:
  * - 实体主键一律为 BIGINT,前端用 number。
  * - 时间字段一律 ISO8601 字符串(UTC),展示时经 lib/format 按用户时区格式化。
  * - 后端只输出 message_key + params,文案由前端 i18n 渲染(契约 P3)。

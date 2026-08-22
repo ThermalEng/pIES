@@ -1,7 +1,7 @@
 [project]
 name = "iesplan"
 version = "0.1.0"
-description = "IES Plan - 综合能源系统规划平台"
+description = "pIES - 综合能源系统规划平台"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
