@@ -15,17 +15,14 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 from iesplan.devices.datacontract import (
     SCHEMA_ID,
     SCHEMA_VERSION,
     canonicalize_device_data,
-    parse_metadata,
     parse_data_file,
+    parse_metadata,
     summary_json,
 )
-from iesplan.core.diagnostics import Diagnostic, make_diag
 
 SCHEMA_PATH = Path(__file__).resolve().parents[1] / "iesplan/devices/schema/device-data-v1.0.0.schema.json"
 
@@ -75,7 +72,13 @@ def _e_load_desc() -> _FakeDescriptor:
     )
 
 
-def _valid_csv_text(*, mode: str = "fixed_offset", offset: int = 480, n: int = 3, rows: list[str] | None = None) -> str:
+def _valid_csv_text(
+    *,
+    mode: str = "fixed_offset",
+    offset: int = 480,
+    n: int = 3,
+    rows: list[str] | None = None,
+) -> str:
     lines = [
         "# schema: ies.device-data",
         "# schema_version: 1.0.0",

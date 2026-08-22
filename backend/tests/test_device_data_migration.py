@@ -7,9 +7,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
-import pathlib
+import json
 import shutil
 from pathlib import Path
 
@@ -103,9 +102,6 @@ class TestMigrationFunction:
         迁移把旧版文件规范化为设备模型声明的标准形态; 失败发生在数据本身
         违反契约(如缺必需列或时间戳非法)时, 此时不得写回任何文件。
         """
-        src = CATALOG_DIR / "electric_load.csv"
-        lines = src.read_text(encoding="utf-8").split("\n")
-        data_start = next(i for i, ln in enumerate(lines) if ln.startswith("timestamp,"))
         # 制造缺失必需列(表头只剩 timestamp)
         bad = [
             "# schema: ies.device-data",

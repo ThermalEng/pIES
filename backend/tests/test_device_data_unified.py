@@ -14,7 +14,6 @@ from iesplan.devices import get_device_descriptor
 from iesplan.devices.datacontract import (
     canonicalize_device_data,
     normalize_upload_csv,
-    summary_json,
 )
 from iesplan.devices.profile import canonicalize_profile_csv, load_profile_columns
 
@@ -52,7 +51,8 @@ class TestSharedCanonicalFlow:
         assert not any(d.blocking for d in r_hand.diagnostics), [d.to_dict() for d in r_hand.diagnostics]
         # 目录 CSV 走 profile 路径(与上传共用 normalize_upload_csv)
         r_profile = canonicalize_profile_csv(CATALOG_DIR / "electric_load.csv", desc)
-        assert not any(d.blocking for d in r_profile.diagnostics), [d.to_dict() for d in r_profile.diagnostics]
+        blockers = [d.to_dict() for d in r_profile.diagnostics if d.blocking]
+        assert not blockers, blockers
         # 两条路径都产生规范摘要(canonical_sha256 非空且一致的表格式)
         assert r_hand.canonical_sha256
         assert r_profile.canonical_sha256

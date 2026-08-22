@@ -53,7 +53,7 @@ from iesplan.core.diagnostics import (
     make_diag,
 )
 from iesplan.core.errors import AppError
-from iesplan.core.timeaxis import RESOLUTIONS, validate_timestamps
+from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.core.units import (
     UnitError,
     dims_of,
@@ -297,7 +297,11 @@ def parse_metadata(text_lines: list[str]) -> tuple[DeviceDataMeta, list[Diagnost
                 "DATA-META-004",
                 severity="error",
                 blocking=True,
-                params={"field": "timestamp_mode", "value": timestamp_mode, "allowed": sorted(TIMESTAMP_MODES)},
+                params={
+                    "field": "timestamp_mode",
+                    "value": timestamp_mode,
+                    "allowed": sorted(TIMESTAMP_MODES),
+                },
                 location=loc,
             )
         )
@@ -325,7 +329,11 @@ def parse_metadata(text_lines: list[str]) -> tuple[DeviceDataMeta, list[Diagnost
                         "DATA-META-004",
                         severity="error",
                         blocking=True,
-                        params={"field": "fixed_utc_offset_minutes", "value": offset_raw, "allowed": f"{OFFSET_MIN}..{OFFSET_MAX}"},
+                        params={
+                            "field": "fixed_utc_offset_minutes",
+                            "value": offset_raw,
+                            "allowed": f"{OFFSET_MIN}..{OFFSET_MAX}",
+                        },
                         location=loc,
                     )
                 )
@@ -494,14 +502,16 @@ def parse_data_file(data: bytes) -> tuple[ParsedDataFile | None, list[Diagnostic
     header: list[str] | None = None
     data_rows: list[list[str]] = []
 
-    i = 0
-    # 元数据只能在表头之前
-    for i, line in enumerate(raw_lines):
+    # 元数据只能在表头之前; 记录表头所在物理行号(供数据行切片)
+    header_line_idx = 0
+    for line in raw_lines:
         stripped = line.strip()
         if not stripped:
+            header_line_idx += 1
             continue
         if stripped.startswith("#"):
             meta_lines.append(line)
+            header_line_idx += 1
             continue
         header = [c.strip() for c in line.split(",")]
         break
@@ -555,8 +565,8 @@ def parse_data_file(data: bytes) -> tuple[ParsedDataFile | None, list[Diagnostic
         )
 
     # 数据行: 只允许在表头之后, 不允许穿插注释
-    reader = _csv.reader(io.StringIO("\n".join(raw_lines[i + 1 :])))
-    row_no = i + 1  # 表头行号
+    reader = _csv.reader(io.StringIO("\n".join(raw_lines[header_line_idx + 1 :])))
+    row_no = header_line_idx + 1  # 表头行号
     try:
         for raw_row in reader:
             row_no += 1
@@ -569,7 +579,11 @@ def parse_data_file(data: bytes) -> tuple[ParsedDataFile | None, list[Diagnostic
                 continue
             if len(raw_row) != len(header):
                 diags.append(
-                    _dialect_diag(f"行字段数与表头不一致(行 {row_no}: {len(raw_row)} != {len(header)})", loc, blocking=True)
+                    _dialect_diag(
+                        f"行字段数与表头不一致(行 {row_no}: {len(raw_row)} != {len(header)})",
+                        loc,
+                        blocking=True,
+                    )
                 )
                 continue
             data_rows.append(raw_row)
@@ -600,13 +614,21 @@ def parse_data_file(data: bytes) -> tuple[ParsedDataFile | None, list[Diagnostic
                 continue  # 空字段: 由数值校验阶段按模型策略处理
             if v.lower() in ("nan", "inf", "infinity", "+inf", "-inf"):
                 diags.append(
-                    _dialect_diag(f"非有限数值 {v!r}(行 {ridx + 1})", {**loc, "row": [ridx + 1]}, blocking=True)
+                    _dialect_diag(
+                        f"非有限数值 {v!r}(行 {ridx + 1})",
+                        {**loc, "row": [ridx + 1]},
+                        blocking=True,
+                    )
                 )
                 continue
             if v[0] in _FORMULA_PREFIXES and _parse_number_cell(v) is None:
                 # 公式注入前缀只对非数值文本告警(负号数值是合法输入)
                 diags.append(
-                    _dialect_diag(f"单元格以公式注入前缀 {v[0]!r} 开头(行 {ridx + 1})", {**loc, "row": [ridx + 1]}, blocking=False)
+                    _dialect_diag(
+                        f"单元格以公式注入前缀 {v[0]!r} 开头(行 {ridx + 1})",
+                        {**loc, "row": [ridx + 1]},
+                        blocking=False,
+                    )
                 )
 
     if any(d.blocking for d in diags):
@@ -953,7 +975,11 @@ def canonicalize_device_data(
                         "DATA-COL-006",
                         severity="error",
                         blocking=True,
-                        params={"column": col, "actual": declared_unit, "expected": decl.unit},
+                        params={
+                            "column": col,
+                            "actual": declared_unit,
+                            "expected": decl.unit,
+                        },
                         location={"object_type": "device_data", "object_id": meta.dataset_id, "field": col},
                     )
                 )
@@ -972,7 +998,12 @@ def canonicalize_device_data(
                     severity="error",
                     blocking=True,
                     params={"value": raw_ts, "row_no": ridx + 1},
-                    location={"object_type": "device_data", "object_id": meta.dataset_id, "field": TIMESTAMP_COL, "row": [ridx + 1]},
+                    location={
+                        "object_type": "device_data",
+                        "object_id": meta.dataset_id,
+                        "field": TIMESTAMP_COL,
+                        "row": [ridx + 1],
+                    },
                 )
             )
             continue
@@ -988,7 +1019,11 @@ def canonicalize_device_data(
                 severity="error",
                 blocking=True,
                 params={"kinds": sorted(ts_kinds)},
-                location={"object_type": "device_data", "object_id": meta.dataset_id, "field": TIMESTAMP_COL},
+                location={
+                    "object_type": "device_data",
+                    "object_id": meta.dataset_id,
+                    "field": TIMESTAMP_COL,
+                },
             )
         )
 
@@ -1007,7 +1042,11 @@ def canonicalize_device_data(
                     severity="error",
                     blocking=True,
                     params={"value": raw, "detail": "timestamp_mode=utc 必须带 Z"},
-                    location={"object_type": "device_data", "object_id": meta.dataset_id, "field": TIMESTAMP_COL},
+                    location={
+                        "object_type": "device_data",
+                        "object_id": meta.dataset_id,
+                        "field": TIMESTAMP_COL,
+                    },
                 )
             )
 
@@ -1021,8 +1060,16 @@ def canonicalize_device_data(
                     "DATA-TS-004",
                     severity="error",
                     blocking=True,
-                    params={"expected": expected_rows, "actual": len(parsed.rows), "resolution": meta.resolution},
-                    location={"object_type": "device_data", "object_id": meta.dataset_id, "field": TIMESTAMP_COL},
+                    params={
+                        "expected": expected_rows,
+                        "actual": len(parsed.rows),
+                        "resolution": meta.resolution,
+                    },
+                    location={
+                        "object_type": "device_data",
+                        "object_id": meta.dataset_id,
+                        "field": TIMESTAMP_COL,
+                    },
                 )
             )
     else:  # periodic
@@ -1034,8 +1081,17 @@ def canonicalize_device_data(
                         "DATA-TIME-004",
                         severity="error",
                         blocking=True,
-                        params={"period": meta.period, "resolution": meta.resolution, "expected": n_expected, "actual": len(parsed.rows)},
-                        location={"object_type": "device_data", "object_id": meta.dataset_id, "field": TIMESTAMP_COL},
+                        params={
+                            "period": meta.period,
+                            "resolution": meta.resolution,
+                            "expected": n_expected,
+                            "actual": len(parsed.rows),
+                        },
+                        location={
+                            "object_type": "device_data",
+                            "object_id": meta.dataset_id,
+                            "field": TIMESTAMP_COL,
+                        },
                     )
                 )
 
@@ -1059,7 +1115,12 @@ def canonicalize_device_data(
                             severity="error",
                             blocking=True,
                             params={"column": col, "row_no": ridx + 1},
-                            location={"object_type": "device_data", "object_id": meta.dataset_id, "field": col, "row": [ridx + 1]},
+                            location={
+                                "object_type": "device_data",
+                                "object_id": meta.dataset_id,
+                                "field": col,
+                                "row": [ridx + 1],
+                            },
                         )
                     )
                     out[col] = None
@@ -1073,8 +1134,18 @@ def canonicalize_device_data(
                         "DATA-VAL-001",
                         severity="error",
                         blocking=True,
-                        params={"column": col, "value": cell, "row_no": ridx + 1, "detail": "非有限数值或格式非法"},
-                        location={"object_type": "device_data", "object_id": meta.dataset_id, "field": col, "row": [ridx + 1]},
+                        params={
+                            "column": col,
+                            "value": cell,
+                            "row_no": ridx + 1,
+                            "detail": "非有限数值或格式非法",
+                        },
+                        location={
+                            "object_type": "device_data",
+                            "object_id": meta.dataset_id,
+                            "field": col,
+                            "row": [ridx + 1],
+                        },
                     )
                 )
                 out[col] = None
@@ -1086,8 +1157,18 @@ def canonicalize_device_data(
                         "DATA-VAL-001",
                         severity="error",
                         blocking=True,
-                        params={"column": col, "value": num, "minimum": decl.minimum, "row_no": ridx + 1},
-                        location={"object_type": "device_data", "object_id": meta.dataset_id, "field": col, "row": [ridx + 1]},
+                        params={
+                            "column": col,
+                            "value": num,
+                            "minimum": decl.minimum,
+                            "row_no": ridx + 1,
+                        },
+                        location={
+                            "object_type": "device_data",
+                            "object_id": meta.dataset_id,
+                            "field": col,
+                            "row": [ridx + 1],
+                        },
                     )
                 )
             if decl.maximum is not None and num > decl.maximum:
@@ -1096,8 +1177,18 @@ def canonicalize_device_data(
                         "DATA-VAL-001",
                         severity="error",
                         blocking=True,
-                        params={"column": col, "value": num, "maximum": decl.maximum, "row_no": ridx + 1},
-                        location={"object_type": "device_data", "object_id": meta.dataset_id, "field": col, "row": [ridx + 1]},
+                        params={
+                            "column": col,
+                            "value": num,
+                            "maximum": decl.maximum,
+                            "row_no": ridx + 1,
+                        },
+                        location={
+                            "object_type": "device_data",
+                            "object_id": meta.dataset_id,
+                            "field": col,
+                            "row": [ridx + 1],
+                        },
                     )
                 )
             out[col] = num
@@ -1111,7 +1202,11 @@ def canonicalize_device_data(
                 severity="error",
                 blocking=True,
                 params={"expected": len(parsed.rows), "actual": len(utc_ts)},
-                location={"object_type": "device_data", "object_id": meta.dataset_id, "field": TIMESTAMP_COL},
+                location={
+                    "object_type": "device_data",
+                    "object_id": meta.dataset_id,
+                    "field": TIMESTAMP_COL,
+                },
             )
         )
 
@@ -1181,23 +1276,29 @@ def _validate_timeline(utc_ts: list[datetime], meta) -> list[Diagnostic]:
         elif utc_ts[i] < utc_ts[i - 1]:
             disorder_rows.append(i)
     if dup_rows:
+        first_dup = [r + 1 for r in dup_rows[:MAX_ROWS_PER_DIAG]]
         out.append(
             make_diag(
                 "DATA-TIME-001",
                 severity="error",
                 blocking=True,
-                params={"detail": "重复时间戳", "count": len(dup_rows), "first_rows": [r + 1 for r in dup_rows[:MAX_ROWS_PER_DIAG]]},
-                location={**loc, "row": [r + 1 for r in dup_rows[:MAX_ROWS_PER_DIAG]]},
+                params={"detail": "重复时间戳", "count": len(dup_rows), "first_rows": first_dup},
+                location={**loc, "row": first_dup},
             )
         )
     if disorder_rows:
+        first_dis = [r + 1 for r in disorder_rows[:MAX_ROWS_PER_DIAG]]
         out.append(
             make_diag(
                 "DATA-TIME-001",
                 severity="error",
                 blocking=True,
-                params={"detail": "时间戳未严格递增", "count": len(disorder_rows), "first_rows": [r + 1 for r in disorder_rows[:MAX_ROWS_PER_DIAG]]},
-                location={**loc, "row": [r + 1 for r in disorder_rows[:MAX_ROWS_PER_DIAG]]},
+                params={
+                    "detail": "时间戳未严格递增",
+                    "count": len(disorder_rows),
+                    "first_rows": first_dis,
+                },
+                location={**loc, "row": first_dis},
             )
         )
     # 步长对齐(相邻差必须等于 resolution 步长)
@@ -1207,13 +1308,19 @@ def _validate_timeline(utc_ts: list[datetime], meta) -> list[Diagnostic]:
         if abs(delta - step_seconds) > 1e-6:
             mis_rows.append(i)
     if mis_rows:
+        first_mis = [r + 1 for r in mis_rows[:MAX_ROWS_PER_DIAG]]
         out.append(
             make_diag(
                 "DATA-TIME-002",
                 severity="error",
                 blocking=True,
-                params={"resolution": meta.resolution, "step_seconds": step_seconds, "count": len(mis_rows), "first_rows": [r + 1 for r in mis_rows[:MAX_ROWS_PER_DIAG]]},
-                location={**loc, "row": [r + 1 for r in mis_rows[:MAX_ROWS_PER_DIAG]]},
+                params={
+                    "resolution": meta.resolution,
+                    "step_seconds": step_seconds,
+                    "count": len(mis_rows),
+                    "first_rows": first_mis,
+                },
+                location={**loc, "row": first_mis},
             )
         )
     return out
