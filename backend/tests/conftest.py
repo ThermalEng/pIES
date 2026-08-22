@@ -26,3 +26,16 @@ def _init_device_registry():
 
     init_registry(book=load_price_book())
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_rate_limit():
+    """每个测试前清空全局限速状态(进程内存跨测试共享, 防止累计触发 429)。
+
+    与 test_auth_api 中 identity.reset_login_rate_limit() 同策略: 限速状态
+    是模块级单例, 不重置会让单进程内多个测试共享计数, 累计超阈值误伤后续测试。
+    """
+    from iesplan.api.limits import reset_rate_limit
+
+    reset_rate_limit()
+    yield

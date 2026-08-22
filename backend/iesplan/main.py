@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -164,10 +163,12 @@ def _build_health_router() -> APIRouter:
             )
             return JSONResponse(status_code=503, content=body)
         if _registry_status != "ok":
+            # A3 脱敏: 注册表初始化失败的原始异常串(可能含内部路径/凭证/堆栈)
+            # 只进日志(_init_modeling_registry 已记录), 探针响应只给服务标识, 不泄详情
             body = _error_envelope(
                 code="API-RZ-002",
                 message_key="ies.error.registry_unavailable",
-                params={"service": "modeling_registry", "detail": _registry_status},
+                params={"service": "modeling_registry", "detail": "unavailable"},
             )
             return JSONResponse(status_code=503, content=body)
         return JSONResponse(status_code=200, content={"status": "ok", "service": APP_NAME, "db": "ok"})
@@ -175,23 +176,29 @@ def _build_health_router() -> APIRouter:
     return router
 
 
+def _setup_middleware(app: FastAPI) -> None:
+    """注册资源使用边界中间件(0.2.0 A4): 全局限流(按 IP)。
+
+    只限流高成本端点与合理全局阈值; 健康/就绪探针与登录接口豁免
+    (登录已有用户名级限速)。关闭开关时透明放行。
+    """
+    from iesplan.api.limits import RateLimitMiddleware
+
+    app.add_middleware(RateLimitMiddleware)
+
+
 def _setup_cors(app: FastAPI) -> None:
     """配置 CORS: 允许同域/本地开发来源携带凭据访问。
 
     来源列表可用环境变量 IESPLAN_CORS_ORIGINS (逗号分隔) 覆盖。
+    CSRF 中间件信任同一来源清单(iesplan.api.csrf.cors_origin_list),
+    保证「允许跨域携带凭据的来源」与「CSRF 校验信任的来源」一致。
     """
-    raw = os.environ.get("IESPLAN_CORS_ORIGINS", "")
-    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
-    if not origins:
-        origins = [
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5173",
-        ]
+    from iesplan.api.csrf import cors_origin_list
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=origins,
+        allow_origins=cors_origin_list(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -293,6 +300,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     _setup_cors(application)
+    _setup_middleware(application)
+    # CSRF 防护: Cookie 会话状态变更请求的双源校验(切片 A2)
+    from iesplan.api.csrf import CSRFOriginGuardMiddleware, build_trusted_origins
+
+    application.add_middleware(CSRFOriginGuardMiddleware, trusted_origins=build_trusted_origins())
     # 挂载 API 路由: 健康检查 + 全部业务路由
     application.include_router(_build_health_router())
     _register_business_routers(application)

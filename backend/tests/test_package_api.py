@@ -613,6 +613,48 @@ def test_download_token_expired_and_tampered(client: TestClient, db: Session) ->
     assert info["object_id"] == object_id
 
 
+def test_download_rejects_object_not_in_project(client: TestClient, db: Session) -> None:
+    """归属校验回归(0.2.0 A3 补丁): object 不属于该 project 时下载被拒。
+
+    场景: 项目 A 导出对象 O; 攻击者(或普通用户)用「项目 B 的 URL + 自签
+    project_id=B 的 token」请求下载。签名/绑定层会通过(user_id 是自己、
+    project_id 一致), 但 object O 从未被项目 B 引用 → 归属校验拒绝。
+    """
+    owner = make_user(db, "owner")
+    pid_a = _create_project(client, owner, name="归属校验项目A")
+    pid_b = _create_project(client, owner, name="归属校验项目B")
+
+    # 项目 A 导出项目包 → 拿到 object_id + 合法 token
+    resp = client.post(f"/api/projects/{pid_a}/exports/package", headers=_h(client, owner))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    object_id = body["object_id"]
+    token_a = body["token"]
+
+    # 项目 A 正常下载 → 200(该 object 被项目 A 引用)
+    status, content, _ct = _download(
+        client, f"/api/projects/{pid_a}/exports/package/download", token_a,
+        headers=_h(client, owner),
+    )
+    assert status == 200, f"项目 A 下载应成功, got {status}"
+
+    # 用「项目 B 的 URL + 自签 project_id=B 的 token」请求下载项目 A 的对象 → 400
+    forged = package_service.create_download_token(
+        object_id, "package", project_id=pid_b, user_id=owner.id
+    )
+    status, _content, _ct = _download(
+        client, f"/api/projects/{pid_b}/exports/package/download", forged,
+        headers=_h(client, owner),
+    )
+    assert status == 400, f"跨项目下载应被归属校验拒绝, got {status}"
+    # 用项目 A 的 URL + 该伪造 token(project_id 不匹配)→ 同样 400(绑定层先拦)
+    status, _content, _ct = _download(
+        client, f"/api/projects/{pid_a}/exports/package/download", forged,
+        headers=_h(client, owner),
+    )
+    assert status == 400, f"绑定层应拦截, got {status}"
+
+
 # ---------------------------------------------------------------------------
 # 管理端点(U16)
 # ---------------------------------------------------------------------------

@@ -46,6 +46,20 @@ class Settings(BaseSettings):
     default_admin_password: str = "iesplan-admin-initial"
     #: 对象存储最小剩余空间阈值(字节), 低于该值拒绝写入(2GB 安全阈值)
     storage_min_free_bytes: int = 2000000000
+    #: 全局限流开关(0.2.0 资源使用边界; 默认开启, 本地开发阈值宽松不误伤)
+    rate_limit_enabled: bool = True
+    #: 全局限流窗口(秒); 单 IP 在窗口内超过上限即 429
+    rate_limit_window_seconds: int = 60
+    #: 全局限流每 IP 请求上限(窗口内; 宽松默认, 生产可通过环境变量收紧)
+    rate_limit_max_requests: int = 1000
+    #: 全局限流豁免路径(逗号分隔; 健康/就绪探针与登录接口除外 —— 登录已有
+    #: 更严格的用户名级限速, 放行以兼容 k8s/nginx 探针高频轮询)
+    rate_limit_exempt_paths: str = "/api/healthz,/api/readyz,/api/auth/login"
+    #: 用户上传配额(字节); 每个用户已用对象存储量(所属项目)超过该值拒绝上传
+    #: (数据集版本上传与项目包导入统一计入; 0 = 不限)
+    upload_quota_bytes: int = 0
+    #: 项目级上传配额(字节); 0 = 不限(仅启用全局 upload_quota_bytes 时叠加生效)
+    project_quota_bytes: int = 0
     #: 外部认证提供方: disabled(内置账号) | oidc(OpenID Connect 单点登录)
     auth_provider: str = "disabled"
     #: OIDC 提供方配置(仅 auth_provider=oidc 时生效, 经 IESPLAN_ 前缀环境变量覆盖)

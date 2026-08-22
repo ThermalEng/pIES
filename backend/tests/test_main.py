@@ -71,7 +71,10 @@ def test_readyz_200_when_db_available(client: TestClient, monkeypatch: pytest.Mo
 def test_readyz_503_when_registry_unavailable(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """建模命令注册表初始化失败时就绪探针应返回 503(High-6 修复)。"""
+    """建模命令注册表初始化失败时就绪探针应返回 503(High-6 修复)。
+
+    A3 脱敏: 响应不得泄露原始异常串(内部路径/细节只进日志)。
+    """
     monkeypatch.setattr("iesplan.main._db_available", lambda: True)
     monkeypatch.setattr("iesplan.main._registry_status", "error: boom")
     resp = client.get("/api/readyz")
@@ -79,6 +82,10 @@ def test_readyz_503_when_registry_unavailable(
     body = resp.json()
     assert body["error"]["code"] == "API-RZ-002"
     assert body["error"]["message_key"] == "ies.error.registry_unavailable"
+    # 脱敏断言: 响应不含原始异常详情
+    assert body["error"]["params"]["detail"] == "unavailable"
+    assert "boom" not in resp.text
+    assert "error: boom" not in resp.text
 
 
 def test_cors_allows_local_origin_with_credentials(client: TestClient) -> None:

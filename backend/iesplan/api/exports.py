@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from iesplan.api.auth import CurrentUser
 from iesplan.db import get_db
 from iesplan.services import package as package_service
-from iesplan.storage import add_ref, get_object, put_object
+from iesplan.storage import add_ref, get_object, list_refs, put_object
 
 router = APIRouter(prefix="/api/projects/{project_id}/exports", tags=["exports"])
 
@@ -79,6 +79,7 @@ def export_excel_endpoint(
 
 
 def _authorize_download(
+    db: Session,
     info: dict,
     project_id: int,
     user: Any,
@@ -86,10 +87,19 @@ def _authorize_download(
     """下载授权校验(C-04): token 绑定的项目/用户必须与当前请求一致。
 
     防止跨项目对象下载(token 泄漏或伪造场景下仍无法越权读取)。
+    额外校验: token 指向的 object 必须确实被该 project 引用(见下),
+    封堵"用可预测签名 + 自填 user_id/project_id 伪造 token 下载他项目对象"的路径。
     """
     if info.get("project_id") != project_id or info.get("user_id") != user.id:
         raise package_service.DownloadTokenError(
             "", params={"reason": "project_or_user_mismatch", "project_id": project_id}
+        )
+    # 归属校验: object 必须存在一条指向该 project 的 owner 引用。
+    # 否则即使签名/绑定校验通过, 也说明该对象不属于此项目 → 拒绝。
+    refs = list_refs(db, info["object_id"])
+    if not any(ref.ref_entity_id == str(project_id) for ref in refs):
+        raise package_service.DownloadTokenError(
+            "", params={"reason": "object_not_in_project", "project_id": project_id}
         )
     return info
 
@@ -103,7 +113,7 @@ def download_excel_endpoint(
 ) -> Response:
     """凭短期授权 token 下载 Excel 报告字节(校验签名/过期 + 项目与用户绑定)。"""
     info = package_service.verify_download_token(token, expected_kind="excel")
-    _authorize_download(info, project_id, user)
+    _authorize_download(db, info, project_id, user)
     content = get_object(db, info["object_id"])
     return Response(
         content=content,
@@ -135,7 +145,7 @@ def download_package_endpoint(
 ) -> Response:
     """凭短期授权 token 下载项目包 zip(校验签名/过期 + 项目与用户绑定)。"""
     info = package_service.verify_download_token(token, expected_kind="package")
-    _authorize_download(info, project_id, user)
+    _authorize_download(db, info, project_id, user)
     content = get_object(db, info["object_id"])
     return Response(
         content=content,

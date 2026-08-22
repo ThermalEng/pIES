@@ -645,6 +645,51 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
     assert view["selection"]["reason"] == "参考方案"
 
 
+def test_result_select_idor_belongs_check(client: TestClient, db: Session) -> None:
+    """A3 越权防御: select 端点入口校验任务归属 —— task 属于项目 A、URL 传项目 B
+    → 404; 正常请求(项目 A 路径)不受影响。对齐 diff/hourly 端点的
+    ensure_task_belongs(select 此前仅靠服务层按 task 真实归属校验, 未先做
+    归属 404, URL project_id 与任务归属不一致时存在语义缺口)。"""
+    owner = make_user(db, "owner_select_idor")
+    pid_a, task_id, _claim_ok, pkg, _objs = _prepare_task_with_evidence(client, db, owner)
+    resp = client.post(
+        f"/api/projects/{pid_a}/tasks/{task_id}/result/assess",
+        json={"assessment_type": "full"}, headers=_h(client, owner),
+    )
+    assert resp.status_code == 201
+    pid_b = _prepare_project(client, db, owner, name="项目B(非任务归属)")
+
+    # 1) 越权: URL project_id=项目 B, task 真实归属项目 A → 404(不泄露任务存在性)
+    resp = client.post(
+        f"/api/projects/{pid_b}/tasks/{task_id}/result/select",
+        json={"solution_id": 0, "selection_type": "adopt"}, headers=_h(client, owner),
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["error"]["code"] == "RES-MISS-003"
+
+    # 2) 正常请求不受影响: 项目 A 路径成功选中(校验值正确)
+    payload = results_service.evidence_content(db, pkg)
+    content = payload["content"]
+    expected_diff = results_service.build_diff_patch(content, 0)
+    preview = sha256(_canonical(expected_diff).encode("utf-8")).hexdigest()
+    resp = client.post(
+        f"/api/projects/{pid_a}/tasks/{task_id}/result/select",
+        json={"solution_id": 0, "selection_type": "adopt", "preview_checksum": preview},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["selection"]["project_id"] == pid_a
+    # 选中只落在任务真实归属项目(项目 A), 项目 B 无当前选中
+    selections = db.execute(
+        select(ResultSelection).where(ResultSelection.project_id == pid_a,
+                                     ResultSelection.is_current.is_(True))
+    ).scalars().all()
+    assert len(selections) == 1
+    assert db.execute(
+        select(ResultSelection).where(ResultSelection.project_id == pid_b)
+    ).scalar_one_or_none() is None
+
+
 # ---------------------------------------------------------------------------
 # 逐时分页查询
 # ---------------------------------------------------------------------------

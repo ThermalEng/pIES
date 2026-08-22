@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.limits import QUOTA_CODE, QUOTA_MESSAGE_KEY, QuotaError, check_upload_quota
 from iesplan.core.errors import ForbiddenError, http_error
 from iesplan.db import get_db
 from iesplan.services import package as package_service
@@ -408,6 +409,18 @@ def import_package_endpoint(
             413, "PKG-SIZE-001", "ies.diag.pkg.too_large",
             reason="package_too_large", max_bytes=package_service.MAX_PACKAGE_BYTES,
         )
+    # 0.2.0 A4: 用户上传配额门禁(项目包导入计入; 导入创建新项目身份, 无目标
+    # 项目, 故只应用用户级配额; 默认不启用, 本地开发宽松)
+    try:
+        check_upload_quota(
+            db, user_id=user.id, project_id=None, incoming_bytes=len(data)
+        )
+    except QuotaError as exc:
+        raise http_error(
+            413, QUOTA_CODE, QUOTA_MESSAGE_KEY,
+            used_bytes=exc.used_bytes, quota_bytes=exc.quota_bytes,
+            scope=exc.scope, owner_id=exc.owner_id,
+        ) from exc
     proposal = package_service.import_proposal(
         db, user, data, idempotency_key=idempotency_key
     )

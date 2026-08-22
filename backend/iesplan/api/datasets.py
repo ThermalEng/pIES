@@ -33,6 +33,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.limits import (
+    META_CODE,
+    META_MESSAGE_KEY,
+    QUOTA_CODE,
+    QUOTA_MESSAGE_KEY,
+    QuotaError,
+    check_upload_quota,
+    validate_upload_fields,
+    validate_upload_meta,
+)
 from iesplan.core.errors import NotFoundError, http_error
 from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.db import get_db
@@ -276,6 +286,28 @@ def upload_version(
 
     fields_dict = _parse_json_field(fields, "fields")
     meta_dict = _parse_json_field(meta, "meta")
+
+    # 0.2.0 A4: meta/fields schema 白名单 —— 拒绝未知键与畸形结构(不破坏合法上传)
+    meta_errors = validate_upload_meta(meta_dict)
+    fields_errors = validate_upload_fields(fields_dict)
+    if meta_errors or fields_errors:
+        raise http_error(
+            400, META_CODE, META_MESSAGE_KEY,
+            errors=meta_errors + fields_errors,
+        )
+
+    # 0.2.0 A4: 用户/项目上传配额门禁(超配额 413; 默认不启用, 本地开发宽松)
+    try:
+        check_upload_quota(
+            db, user_id=user.id, project_id=project_id, incoming_bytes=len(data)
+        )
+    except QuotaError as exc:
+        raise http_error(
+            413, QUOTA_CODE, QUOTA_MESSAGE_KEY,
+            used_bytes=exc.used_bytes, quota_bytes=exc.quota_bytes,
+            scope=exc.scope, owner_id=exc.owner_id,
+        ) from exc
+
     try:
         version = dataset_service.upload_dataset_version(
             db, dataset_id, resolution, utc_offset_minutes, fields_dict, data, meta_dict

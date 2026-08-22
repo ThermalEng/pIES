@@ -703,6 +703,9 @@ export const messagesZh: Record<string, string> = {
   'ies.error.unknown': '未知错误:{reason}',
   'ies.error.duplicate_name': '同名{entity_type}已存在:{name}',
   'ies.error.no_assessment_available': '该证据包尚无评估记录,请稍后再试',
+  'ies.error.rate_limited': '请求过于频繁,请稍后再试',
+  'ies.error.upload_quota_exceeded': '上传超出配额({used_bytes}/{quota_bytes} 字节),请清理后重试',
+  'ies.error.meta_invalid': '数据集元数据或字段信息不合法:{errors}',
   'ies.msg.err.generic': '操作失败:{reason}',
 
   // -------------------------------------------------------------------------
@@ -736,6 +739,7 @@ export const messagesZh: Record<string, string> = {
   'ies.fix.valid.data_fix_version': '修复数据集版本质量问题或重新上传',
   'ies.fix.valid.data_fix_offset': '重新上传数据集使其 UTC 偏移与项目一致',
   'ies.fix.valid.data_fix_binding': '修复绑定指向(版本缺失或属于其他项目)',
+  'ies.fix.rate_retry': '等待片刻后重试请求',
   'ies.fix.valid.fin_confirm': '前往校验页确认财务基准',
   'ies.fix.valid.fin_reconfirm': '基准确认内容已变化,需重新确认',
   'ies.fix.valid.ready_check': '修复项目/草稿使计算快照可组装',
@@ -809,6 +813,7 @@ export const messagesZh: Record<string, string> = {
   'ies.diag.auth.required': '必填项不能为空',
   'ies.diag.auth.bad_request': '请求参数错误:{reason}',
   'ies.diag.auth.role_invalid': '无效的角色',
+  'ies.diag.auth.csrf_origin_rejected': '请求来源校验未通过,请刷新页面后重试',
 
   // -------------------------------------------------------------------------
   // 表达式引擎错误

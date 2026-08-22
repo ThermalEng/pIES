@@ -138,7 +138,13 @@ def select_result_endpoint(
 ) -> dict[str, Any]:
     """选择结果(01 §8.4 追加式): 保存所选解标识/类型/理由 + 差异补丁审计;
     换选=新行 + 旧行 is_current=false。提供 preview_checksum 时校验确认预览
-    内容与当前差异补丁一致, 不一致 → 409(须重新确认)。"""
+    内容与当前差异补丁一致, 不一致 → 409(须重新确认)。
+
+    A3 越权防御: 入口先 ensure_task_belongs, 对齐 diff/hourly 端点 —— URL
+    project_id 与任务真实归属不一致时 404, 防止把选中写入非 URL 项目或读取
+    他项目差异(selection_diff 以 URL project_id 读取当前选中)。
+    """
+    tasks_service.ensure_task_belongs(db, project_id, task_id)
     selection = results_service.select_result(
         db, user, task_id, payload.solution_id, payload.selection_type,
         reference_rule=payload.reference_rule, reason=payload.reason,

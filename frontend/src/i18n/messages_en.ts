@@ -693,6 +693,9 @@ export const messagesEn: Record<string, string> = {
   'ies.error.unknown': 'Unknown error: {reason}',
   'ies.error.duplicate_name': 'A {entity_type} with the same name already exists: {name}',
   'ies.error.no_assessment_available': 'No assessment record exists for this evidence package yet; please retry.',
+  'ies.error.rate_limited': 'Too many requests. Please retry later.',
+  'ies.error.upload_quota_exceeded': 'Upload exceeds quota ({used_bytes}/{quota_bytes} bytes). Please clean up and retry.',
+  'ies.error.meta_invalid': 'Dataset metadata or field info is invalid: {errors}',
   'ies.msg.err.generic': 'Operation failed: {reason}',
 
   // -------------------------------------------------------------------------
@@ -726,6 +729,7 @@ export const messagesEn: Record<string, string> = {
   'ies.fix.valid.data_fix_version': 'Fix blocking quality issues or re-upload the version.',
   'ies.fix.valid.data_fix_offset': 'Re-upload the dataset so its UTC offset matches the project.',
   'ies.fix.valid.data_fix_binding': 'Repair the binding (version is missing or from another project).',
+  'ies.fix.rate_retry': 'Wait a moment and retry the request.',
   'ies.fix.valid.fin_confirm': 'Confirm the financial baseline on the validation page.',
   'ies.fix.valid.fin_reconfirm': 'Baseline assumptions changed; reconfirm before submitting.',
   'ies.fix.valid.ready_check': 'Repair project/draft so the calc snapshot can be assembled.',
@@ -799,6 +803,7 @@ export const messagesEn: Record<string, string> = {
   'ies.diag.auth.required': 'This field is required',
   'ies.diag.auth.bad_request': 'Invalid request: {reason}',
   'ies.diag.auth.role_invalid': 'Invalid role',
+  'ies.diag.auth.csrf_origin_rejected': 'Request origin verification failed. Refresh the page and try again.',
 
   // -------------------------------------------------------------------------
   // Expression engine errors
