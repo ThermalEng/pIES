@@ -12,6 +12,17 @@
 
 - 为基于 Cookie 会话(`ies_session`, SameSite=Lax)的状态变更请求(POST/PUT/PATCH/DELETE)增加 CSRF 双源校验：浏览器请求优先校验 `Origin`、缺失回退 `Referer`，规范化后必须命中可信来源(`app_url` + `IESPLAN_CORS_ORIGINS` + 请求自身 Host 同源来源)，否则返回 403 `AUTH-CSRF-001`；Bearer 认证、无 Origin/Referer 的 API 客户端与只读请求不受影响。
 
+### 设备数据文件契约(`ies.device-data` 1.0.0)
+
+- 发布 `ies.device-data` `1.0.0` 机器可读 schema(`backend/iesplan/devices/schema/device-data-v1.0.0.schema.json`)与唯一纯函数规范化器(`iesplan.devices.datacontract.canonicalize_device_data`)。
+- CSV 元数据(`# schema`/`# schema_version`/`# dataset_id`/`# device_model`/`# series_mode`/`# resolution`/`# timestamp_mode`/`# unit.<column>`)与方言(UTF-8/LF/英文逗号/RFC 4180/小数 `.`/布尔 `true|false`/禁 NaN/Inf/公式/区域化数字/千位分隔符)校验。
+- `timestamp_mode=fixed_offset` 必须声明 `fixed_utc_offset_minutes`(-840..840)，不依赖机器时区/夏令时；`series_mode=periodic` 必须声明 `period`(day|week|year)。
+- 列声明与设备模型核对：未声明列/重复列拒绝、必需列缺失拒绝、列单位量纲不一致拒绝；规范输出按模型声明顺序排列。
+- 时间轴：timeline 时间戳严格递增无重复、与分辨率对齐、同文件不混用带Z/带偏移/无偏移；utc 用 RFC 3339 带 Z，fixed_offset 由文件级偏移唯一换算 UTC。
+- 数值按设备模型 value_type/范围/有限性校验：超范围阻断不截断；缺值未在模型中声明阻断；不静默删行/补零/前值填充/解析失败变空集。
+- 规范化产物保留原始文件 SHA-256 与规范表格 SHA-256；同一语义输入得到同一规范摘要。
+- 新增 DATA-META-* / DATA-DIAL-* / DATA-COL-003..006 / DATA-VAL-* / DATA-TIME-* / DATA-ARR-001 / DATA-SUM-001 诊断码。
+
 ## 0.1.0 — 开发基线
 
 > 发布日期：2026-08-22；发布状态：正式稳定版之前的开发版本
