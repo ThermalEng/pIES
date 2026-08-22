@@ -8,4 +8,4 @@
 - [开发者指南](developer-guide/README.md)：面向维护者、集成开发者、扩展开发者和贡献者；
 - [更新日志](changelog/README.md)：当前版本、倒序变更历史和 [Roadmap](changelog/roadmap.md)。
 
-章节顺序由 [`SUMMARY.md`](SUMMARY.md) 及对应语言目录维护。Review 和归档材料位于 [`docs/`](../docs/README.md)，只提供证据与历史背景，不得覆盖这里的现行说明。
+章节顺序由 [`SUMMARY.md`](SUMMARY.md) 及对应语言目录维护。Review 和归档材料位于本机 `docs/`（不入库），只提供证据与历史背景，不得覆盖这里的现行说明。

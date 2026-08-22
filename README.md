@@ -49,7 +49,6 @@ docker compose up -d --build
 - [使用者指南](manual/user-guide/README.md)：从登录到建模、计算、结果和管理的 GUI 操作；
 - [开发者指南](manual/developer-guide/README.md)：架构蓝图、公共契约、扩展、部署和贡献规范；
 - [更新日志](manual/changelog/README.md)：倒序版本历史、版本规则和 [Roadmap](manual/changelog/roadmap.md)；
-- [Review 与历史归档](docs/README.md)：审查证据和已停止维护的旧资料，不是当前开发依据。
 
 ## 开发与验证
 

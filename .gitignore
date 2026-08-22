@@ -20,3 +20,8 @@ dist/
 .claude/settings.local.json
 frontend/public/help/manifest.json
 frontend/tsconfig.tsbuildinfo
+
+# 工作痕迹(不入库,仅本机保留)
+docs/
+CLAUDE.md
+AGENTS.md
