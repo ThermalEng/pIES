@@ -1384,6 +1384,15 @@ def _validate_timeline(utc_ts: list[datetime], meta) -> list[Diagnostic]:
 
 def _units_compatible(declared: str, model: str) -> bool:
     """单位量纲兼容(大小写不敏感; 未注册单位按字符串一致判断)。"""
+    return units_compatible(declared, model)
+
+
+def units_compatible(declared: str, model: str) -> bool:
+    """单位量纲兼容(大小写不敏感; 未注册单位按字符串一致判断)。
+
+    公开导出, 供 services 层做同一量纲判定(上传 fields 声明与描述符
+    权威单位的一致性校验收敛到同一规则)。
+    """
     try:
         return dict(dims_of(declared)) == dict(dims_of(model))
     except UnitError:
@@ -1466,6 +1475,24 @@ def is_ies_device_data(data: bytes) -> bool:
         if stripped.lower().startswith("# schema: ies.device-data"):
             return True
     return False
+
+
+def declared_device_model(data: bytes) -> str:
+    """提取文件头声明的 device_model(未声明返回空串; 只扫描表头之前文本行)。"""
+    try:
+        head = data[:4096].decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+    for line in head.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            return ""  # 已进入表头区
+        kv = _parse_meta_line(stripped)
+        if kv is not None and kv[0] == "device_model":
+            return kv[1]
+    return ""
 
 
 def build_upload_meta(
@@ -1589,7 +1616,9 @@ __all__ = [
     "data_inputs_from_descriptor",
     "build_upload_meta",
     "is_ies_device_data",
+    "declared_device_model",
     "normalize_upload_csv",
     "build_data_quality_report",
     "summary_json",
+    "units_compatible",
 ]

@@ -690,8 +690,15 @@ def build_quality_report(
     df: pd.DataFrame,
     diags: list[Diagnostic],
     content_hash: str,
+    *,
+    canonical_sha256: str | None = None,
+    raw_sha256: str | None = None,
 ) -> dict:
-    """生成版本质量报告(01 §5.2 quality_report)。"""
+    """生成版本质量报告(01 §5.2 quality_report)。
+
+    canonical_sha256/raw_sha256: 0.6.0 规范化器产物摘要; 仅上传路径提供
+    (内置样例路径无原始文件, 缺省省略, 保持原报告结构不变)。
+    """
     missing_by_field: dict[str, int] = {}
     range_by_field: dict[str, int] = {}
     ts_diags: list[str] = []
@@ -705,7 +712,7 @@ def build_quality_report(
             ts_diags.append(d.code)
     missing_total = sum(missing_by_field.values())
     range_total = sum(range_by_field.values())
-    return {
+    report = {
         "tool": "iesplan.services.dataset",
         "generated_at": datetime.now(UTC).isoformat(),
         "resolution": axis.resolution,
@@ -730,6 +737,11 @@ def build_quality_report(
         "diagnostics": [d.to_dict() for d in diags],
         "has_blocking_errors": any(d.blocking for d in diags),
     }
+    if canonical_sha256 is not None:
+        report["canonical_sha256"] = canonical_sha256
+    if raw_sha256 is not None:
+        report["raw_sha256"] = raw_sha256
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -861,7 +873,7 @@ def _build_fields_info(
         elif isinstance(decl, str):
             unit = decl.strip()
         if spec is not None:
-            if unit and unit.lower() != spec.unit.lower():
+            if unit and not _unit_matches(unit, spec.unit):
                 diags.append(
                     make_diag(
                         PARAM_UNIT_MISMATCH,
@@ -894,6 +906,16 @@ def _build_fields_info(
     return fields, units, diags
 
 
+def _unit_matches(declared: str, model: str) -> bool:
+    """单位量纲兼容判定(0.6.0: 与 ies.device-data 规范化器同一规则)。
+
+    收敛到 datacontract.units_compatible —— 不复制第二套单位换算表。
+    """
+    from iesplan.devices.datacontract import units_compatible
+
+    return units_compatible(declared, model)
+
+
 def _normalized_to_csv_bytes(df: pd.DataFrame) -> bytes:
     """归一化 DataFrame → 规范 CSV 字节(0.6.0: 与设备 CSV 共用同一规范表格)。
 
@@ -923,16 +945,33 @@ def _commit_version(
     declared_fields: dict | None,
     meta: dict,
     actor_id: int | None = None,
+    *,
+    canonical_csv: bytes | None = None,
+    row_count: int | None = None,
+    canonical_sha256: str | None = None,
+    raw_sha256: str | None = None,
 ) -> DatasetVersion:
-    """校验通过后执行版本写入(对象 + 版本行 + 文件行 + 引用, 单事务)。"""
+    """校验通过后执行版本写入(对象 + 版本行 + 文件行 + 引用, 单事务)。
+
+    canonical_csv: 规范化器产出的规范表格字节; 提供时直接落盘并以其摘要为
+    content_hash(上传路径: 与手写 CSV 同一内容 → 同一规范字节 → 同一摘要),
+    缺省由 DataFrame 重新序列化(内置样例路径, 无元数据头)。
+    row_count: 实际数据行数; 缺省用 axis.n(标准年步数)。
+    canonical_sha256/raw_sha256: 规范化器摘要, 透传进质量报告(仅上传路径)。
+    """
     fields_info, units, unit_diags = _build_fields_info(normalized_df, declared_fields)
     all_diags = list(diags) + unit_diags
     if any(d.blocking for d in all_diags):
         raise DataValidationError(all_diags)
 
-    canonical_csv = _normalized_to_csv_bytes(normalized_df)
+    n_rows = row_count if row_count is not None else axis.n
+    if canonical_csv is None:
+        canonical_csv = _normalized_to_csv_bytes(normalized_df)
     content_hash = sha256_hex(canonical_csv)
-    quality_report = build_quality_report(axis, normalized_df, all_diags, content_hash)
+    quality_report = build_quality_report(
+        axis, normalized_df, all_diags, content_hash,
+        canonical_sha256=canonical_sha256, raw_sha256=raw_sha256,
+    )
 
     version_no = 1
     last = db.execute(
@@ -979,7 +1018,7 @@ def _commit_version(
             "resolution": axis.resolution,
             "timeline": TIMELINE_MAP[axis.resolution],
             "fixed_utc_offset_minutes": axis.utc_offset_minutes,
-            "row_count": axis.n,
+            "row_count": n_rows,
             "fields": fields_info,
             "units": units,
             "content_hash": content_hash,
@@ -995,7 +1034,7 @@ def _commit_version(
         object_id=obj_data.id,
         file_kind="data",
         format="csv",
-        row_count=axis.n,
+        row_count=n_rows,
         size_bytes=len(canonical_csv),
     )
     file_meta = DatasetFile(
@@ -1020,6 +1059,34 @@ def _commit_version(
     return version
 
 
+def _standard_fields_descriptor():
+    """标准字段上传描述符(裸 CSV 校验用; 列/单位/范围权威 = STANDARD_FIELDS)。
+
+    经 devices.datacontract.DataInputDecl 表达, 供同一规范化器消费;
+    services 层是标准字段的唯一权威, devices 不复制该映射。
+    必需性沿用本模块 REQUIRED_FIELDS(仅 e_load 必需, 其余可选)。
+    """
+    from iesplan.devices.datacontract import DataInputDecl
+    from iesplan.devices.upload_descriptor import UploadDescriptor
+
+    return UploadDescriptor(
+        type_id="ies.dataset.standard_fields",
+        version="1.0.0",
+        data_inputs={
+            key: DataInputDecl(
+                column_id=key,
+                value_type="number",
+                quantity=None,
+                unit=spec.unit,
+                required=key in REQUIRED_FIELDS,
+                minimum=spec.min,
+                maximum=spec.max,
+            )
+            for key, spec in STANDARD_FIELDS.items()
+        },
+    )
+
+
 def upload_dataset_version(
     db: Session,
     dataset_id: int,
@@ -1033,8 +1100,16 @@ def upload_dataset_version(
 ) -> DatasetVersion:
     """上传并校验数据集版本(RPD 8.3 / REQ-DATA-002)。
 
-    流程: 解析 CSV → 校验(行数/时间戳/缺失/范围/偏移) → 有阻断诊断即抛
-    DataValidationError → 内容寻址落盘 + 版本/文件/引用入库 + 质量报告。
+    0.6.0: 与包内设备 CSV 共用同一 ies.device-data 规范化流程
+    (devices.datacontract.normalize_upload_csv):
+    - 文件声明 ies.device-data 元数据 → 以文件为权威, 按声明的 device_model
+      解析目录设备描述(元数据/精确列/单位/timestamp_mode/device-data 诊断
+      全部强制; 精确版本不匹配 DATA-META-008 阻断);
+    - 裸 CSV(标准字段模板)→ 由上传参数合成元数据头(_standard_fields_descriptor),
+      走同一规范化器; 单位取 STANDARD_FIELDS 权威, fields 声明不一致阻断。
+
+    校验存在阻断诊断即抛 DataValidationError → 内容寻址落盘 + 版本/文件/引用
+    入库 + 质量报告。同一内容的手写 CSV 与 GUI 上传产生同一规范摘要。
 
     参数:
         db: 数据库会话。
@@ -1050,7 +1125,14 @@ def upload_dataset_version(
         DataValidationError: 存在阻断性诊断(携带诊断明细)。
         NotFoundError: 数据集不存在。
         ConflictError: 数据集已 deprecated, 禁止新建版本。
+        LookupError: 文件声明 ies.device-data 但 device_model 未注册。
     """
+    from iesplan.devices.datacontract import normalize_upload_csv
+    from iesplan.devices.upload_descriptor import (
+        resolve_upload_descriptor,
+        upload_declared_units,
+    )
+
     dataset = db.execute(sa.select(Dataset).where(Dataset.id == dataset_id)).scalar_one_or_none()
     if dataset is None:
         raise NotFoundError(params={"entity_type": "dataset", "entity_id": dataset_id})
@@ -1060,15 +1142,45 @@ def upload_dataset_version(
             params={"dataset_id": dataset_id},
         )
 
-    rows, parse_diags = parse_csv(data_bytes, resolution)
-    if any(d.blocking for d in parse_diags):
-        raise DataValidationError(parse_diags)
-    df = pd.DataFrame(rows)
-    axis, normalized, validate_diags = validate_dataset(df, resolution, utc_offset_minutes)
-    all_diags = parse_diags + validate_diags
-    if any(d.blocking for d in all_diags):
-        raise DataValidationError(all_diags)
-    return _commit_version(db, dataset, axis, normalized, all_diags, fields, meta, actor_id=user_id)
+    desc = resolve_upload_descriptor(data_bytes, fallback_desc=_standard_fields_descriptor())
+    declared_units = upload_declared_units(desc, fields)
+    result = normalize_upload_csv(
+        data_bytes,
+        desc,
+        dataset_id=str(dataset_id),
+        device_model=f"{desc.type_id}@{desc.version}",
+        resolution=resolution,
+        utc_offset_minutes=utc_offset_minutes,
+        units=declared_units,
+        expected_rows=RESOLUTIONS[resolution][0],
+    )
+    diags = list(result.diagnostics)
+    if any(d.blocking for d in diags):
+        raise DataValidationError(diags)
+
+    normalized = _result_to_frame(result)
+    axis = build_axis(resolution, utc_offset_minutes=utc_offset_minutes)
+    return _commit_version(
+        db, dataset, axis, normalized, diags, fields, meta,
+        actor_id=user_id,
+        canonical_csv=result.canonical_csv_bytes(),
+        row_count=len(result.rows),
+        canonical_sha256=result.canonical_sha256,
+        raw_sha256=result.raw_sha256,
+    )
+
+
+def _result_to_frame(result) -> pd.DataFrame:
+    """DeviceDataResult → 归一化 DataFrame(timestamp aware UTC, 数值 float)。"""
+    rows = []
+    for ridx, row in enumerate(result.rows):
+        record = {TIMESTAMP_COL: result.utc_timestamps[ridx]}
+        for col in result.column_order:
+            if col != TIMESTAMP_COL:
+                record[col] = row.get(col)
+        rows.append(record)
+    df = pd.DataFrame(rows, columns=[TIMESTAMP_COL, *result.column_order[1:]])
+    return df
 
 
 def get_dataset(db: Session, dataset_id: int) -> Dataset | None:
