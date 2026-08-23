@@ -15,6 +15,11 @@
 """
 
 from iesplan.assembly.builder import build_assembly, build_assembly_text, dumps_assembly
+from iesplan.assembly.canonicalizer import (
+    assembly_sha256,
+    canonical_algorithm_ref,
+    canonicalize_assembly_doc,
+)
 from iesplan.assembly.checker import (
     AssemblyCheckError,
     BusSummary,
@@ -24,8 +29,21 @@ from iesplan.assembly.checker import (
     check_assembly_text,
     check_graph_inputs,
 )
+from iesplan.assembly.contracts import (
+    ASSEMBLY_SCHEMA_PATH,
+    CANON_ALGORITHM_ID,
+    CANON_ALGORITHM_VERSION,
+    SCHEMA_ID,
+    SCHEMA_VERSION,
+    VALIDATOR_ID,
+    VALIDATOR_VERSION,
+    AssemblyValidationError,
+    ValidationReceipt,
+    ValidatedAssemblyArtifact,
+)
 from iesplan.assembly.diags import ASM_ALL_CODES
 from iesplan.assembly.parser import ParseResult, load_assembly_file, parse_assembly
+from iesplan.assembly.parser10 import ParseDocResult, parse_assembly_doc
 from iesplan.assembly.schema import AssemblySpec, FORMAT_VERSION
 
 __all__ = [
@@ -45,4 +63,20 @@ __all__ = [
     "ParseResult",
     "ASM_ALL_CODES",
     "FORMAT_VERSION",
+    # ies.assembly 1.0.0(roadmap 0.7.0)
+    "SCHEMA_ID",
+    "SCHEMA_VERSION",
+    "ASSEMBLY_SCHEMA_PATH",
+    "CANON_ALGORITHM_ID",
+    "CANON_ALGORITHM_VERSION",
+    "VALIDATOR_ID",
+    "VALIDATOR_VERSION",
+    "ValidationReceipt",
+    "ValidatedAssemblyArtifact",
+    "AssemblyValidationError",
+    "canonicalize_assembly_doc",
+    "assembly_sha256",
+    "canonical_algorithm_ref",
+    "parse_assembly_doc",
+    "ParseDocResult",
 ]

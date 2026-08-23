@@ -1,0 +1,33 @@
+# 非法样例: calculation.mode 不在契约枚举内 → ASM-CALC-001
+schema: ies.assembly
+schema_version: "1.0.0"
+
+assembly:
+  id: bad_mode
+  name: 非法计算模式
+
+time_axis:
+  start: "2025-01-01T00:00:00Z"
+  end: "2025-01-02T00:00:00Z"
+  resolution: 1h
+  endpoint: left_closed_right_open
+
+resources:
+  datasets: {}
+
+devices: {}
+
+connections: {}
+
+constraints: {}
+
+calculation:
+  mode: wizardry
+  generator: acme.generator.highs_milp@1.0.0
+  solver: ies.solver.highs@1.7.2
+
+outputs:
+  series: []
+  metrics: []
+
+extensions: {}

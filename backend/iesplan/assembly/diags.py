@@ -18,9 +18,24 @@ from iesplan.core import diagnostics as _core_diags
 # ---------------------------------------------------------------------------
 ASM_SYN_PARSE = "ASM-SYN-001"  # YAML 解析失败/类型错误(键非字符串、值类型不符、未知键)
 ASM_SYN_SECTION = "ASM-SYN-002"  # 未知章节
-ASM_SYN_VERSION = "ASM-SYN-003"  # format_version 不受支持(≠ "1.0")
+ASM_SYN_VERSION = "ASM-SYN-003"  # schema_version/format_version 不受支持(≠ "1.0.0"/"1.0")
 ASM_SYN_FIELD = "ASM-SYN-004"  # 必填字段缺失
 ASM_SYN_TYPE = "ASM-SYN-005"  # 键类型错误(如 params 非 map、delay_steps 非整数、枚举值非法)
+
+# ---------------------------------------------------------------------------
+# ies.assembly 1.0.0 契约(0.7.0):结构 / 资源 / 计算 / 输出 / 产物一致性
+# ---------------------------------------------------------------------------
+ASM_SYN_SCHEMA = "ASM-SYN-006"  # schema 标识无法识别(≠ ies.assembly)
+ASM_SYN_VERSION_PIN = "ASM-SYN-007"  # 引用必须固定精确版本(拒绝 latest/范围版本/未版本化别名)
+ASM_SYN_FORBIDDEN = "ASM-SYN-008"  # 禁止字段(shell/command/executable/函数模块路径/环境变量/凭证)
+ASM_SYN_PATH = "ASM-SYN-009"  # 资源路径非法(绝对路径/.. 逃逸/宿主机路径)
+ASM_RES_INVALID = "ASM-RES-001"  # 资源文件不可读或摘要不一致(不产生可执行产物)
+ASM_CALC_MODE = "ASM-CALC-001"  # calculation.mode 非法
+ASM_CALC_OPTIONS = "ASM-CALC-002"  # calculation.options 非法(未知键/非标量/非有限值)
+ASM_OUTPUT_REF = "ASM-OUT-001"  # outputs 引用未定义设备/端口
+ASM_ART_MISMATCH = "ASM-ART-001"  # 产物一致性校验失败(规范文本/摘要/回执不一致)
+ASM_CONV_UNMAPPABLE = "ASM-CONV-001"  # 旧形态无法映射到 ies.assembly 1.0.0(迁移/导出阻断)
+ASM_INPUT_UNDECLARED = "ASM-INPUT-006"  # 参数未在设备模型声明(ies.assembly 1.0.0: 只允许已声明字段)
 
 # ---------------------------------------------------------------------------
 # 阶段 B:连接合法性(输入对输出、参数性质一致)
@@ -82,6 +97,10 @@ ASM_MESSAGE_KEYS: dict[str, str] = {
     ASM_SYN_VERSION: "ies.diag.asm.syntax.version",
     ASM_SYN_FIELD: "ies.diag.asm.syntax.missing_field",
     ASM_SYN_TYPE: "ies.diag.asm.syntax.bad_type",
+    ASM_SYN_SCHEMA: "ies.diag.asm.syntax.schema_unknown",
+    ASM_SYN_VERSION_PIN: "ies.diag.asm.syntax.version_not_pinned",
+    ASM_SYN_FORBIDDEN: "ies.diag.asm.syntax.forbidden_field",
+    ASM_SYN_PATH: "ies.diag.asm.syntax.path_invalid",
     # edge.*
     ASM_EDGE_BAD_SOURCE: "ies.diag.asm.edge.bad_source",
     ASM_EDGE_BAD_SINK: "ies.diag.asm.edge.bad_sink",
@@ -104,6 +123,18 @@ ASM_MESSAGE_KEYS: dict[str, str] = {
     ASM_INPUT_RANGE: "ies.diag.asm.input.param_range",
     ASM_INPUT_LOAD_DATA: "ies.diag.asm.input.load_no_data",
     ASM_INPUT_DATA_UNIT: "ies.diag.asm.input.data_unit_dim",
+    ASM_INPUT_UNDECLARED: "ies.diag.asm.input.param_undeclared",
+    # res.*
+    ASM_RES_INVALID: "ies.diag.asm.res.invalid",
+    # calc.*
+    ASM_CALC_MODE: "ies.diag.asm.calc.mode",
+    ASM_CALC_OPTIONS: "ies.diag.asm.calc.options",
+    # out.*
+    ASM_OUTPUT_REF: "ies.diag.asm.out.ref_undefined",
+    # artifact.*
+    ASM_ART_MISMATCH: "ies.diag.asm.artifact.mismatch",
+    # conv.*
+    ASM_CONV_UNMAPPABLE: "ies.diag.asm.conv.unmappable",
     # pipe.*
     ASM_PIPE_DELAY_MISSING: "ies.diag.asm.pipe.delay_missing",
     ASM_PIPE_DELAY_RANGE: "ies.diag.asm.pipe.delay_out_of_range",
@@ -131,7 +162,9 @@ ASM_FIX_HINT_KEYS: dict[str, str] = {
 ASM_ALL_CODES: tuple[str, ...] = tuple(ASM_MESSAGE_KEYS)
 
 #: 消息键类别前缀(与 04 §4 登记层级一致)
-ASM_KEY_CATEGORIES: tuple[str, ...] = ("syntax", "edge", "ref", "input", "pipe", "solv", "const")
+ASM_KEY_CATEGORIES: tuple[str, ...] = (
+    "syntax", "edge", "ref", "input", "pipe", "solv", "const", "res", "calc", "out", "artifact", "conv",
+)
 
 # ---------------------------------------------------------------------------
 # 运行期登记(导入即生效;只增不改既有码)
@@ -152,6 +185,17 @@ __all__ = [
     "ASM_SYN_VERSION",
     "ASM_SYN_FIELD",
     "ASM_SYN_TYPE",
+    "ASM_SYN_SCHEMA",
+    "ASM_SYN_VERSION_PIN",
+    "ASM_SYN_FORBIDDEN",
+    "ASM_SYN_PATH",
+    "ASM_RES_INVALID",
+    "ASM_CALC_MODE",
+    "ASM_CALC_OPTIONS",
+    "ASM_OUTPUT_REF",
+    "ASM_ART_MISMATCH",
+    "ASM_CONV_UNMAPPABLE",
+    "ASM_INPUT_UNDECLARED",
     "ASM_EDGE_BAD_SOURCE",
     "ASM_EDGE_BAD_SINK",
     "ASM_EDGE_CARRIER",

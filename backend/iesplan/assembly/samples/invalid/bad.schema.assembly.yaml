@@ -1,0 +1,33 @@
+# 非法样例: schema 标识无法识别(≠ ies.assembly)→ ASM-SYN-006
+schema: ies.assembly.other
+schema_version: "1.0.0"
+
+assembly:
+  id: bad_schema
+  name: 错误 schema 标识
+
+time_axis:
+  start: "2025-01-01T00:00:00Z"
+  end: "2025-01-02T00:00:00Z"
+  resolution: 1h
+  endpoint: left_closed_right_open
+
+resources:
+  datasets: {}
+
+devices: {}
+
+connections: {}
+
+constraints: {}
+
+calculation:
+  mode: fixed_operation
+  generator: acme.generator.highs_milp@1.0.0
+  solver: ies.solver.highs@1.7.2
+
+outputs:
+  series: []
+  metrics: []
+
+extensions: {}

@@ -1,0 +1,38 @@
+# 非法样例: 装配 YAML 携带可执行字段(command)→ ASM-SYN-008
+schema: ies.assembly
+schema_version: "1.0.0"
+
+assembly:
+  id: bad_forbidden
+  name: 禁止字段
+
+time_axis:
+  start: "2025-01-01T00:00:00Z"
+  end: "2025-01-02T00:00:00Z"
+  resolution: 1h
+  endpoint: left_closed_right_open
+
+resources:
+  datasets: {}
+
+devices:
+  hp1:
+    model: ies.device.heat_pump@1.3.0
+    parameters:
+      rated_heat_kw: 600
+      command: "/bin/sh -c solver"
+
+connections: {}
+
+constraints: {}
+
+calculation:
+  mode: fixed_operation
+  generator: acme.generator.highs_milp@1.0.0
+  solver: ies.solver.highs@1.7.2
+
+outputs:
+  series: []
+  metrics: []
+
+extensions: {}

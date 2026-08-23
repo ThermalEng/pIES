@@ -8,6 +8,14 @@
 
 ## Unreleased
 
+### 规范装配产物(`ies.assembly` 1.0.0)
+
+- 发布 `ies.assembly` `1.0.0` 机器可读 schema(`backend/iesplan/assembly/schema/assembly-1.0.0.schema.json`)：顶层 `schema`/`schema_version`/`assembly`/`time_axis`/`resources`/`devices`/`connections`/`constraints`/`calculation`/`outputs`/`extensions` 各节均必需（无内容写空 `{}`/`[]`），未知核心字段拒绝。
+- 唯一规范化器(`iesplan.assembly.canonicalizer`，算法 `ies.assembly.canonical@1.0.0`)：固定顶层键序 + 嵌套键排序、时间统一换算为带 `Z` 的 UTC、`relative_file` 解析为内容寻址对象、数值唯一有限表示（整值浮点与整数同文本）、非有限值拒绝；规范文本为紧凑 JSON + LF，对规范字节计算 SHA-256。相同语义输入产生相同规范文本与摘要。
+- 合法/非法手写样例(`backend/iesplan/assembly/samples/`)：合法样例覆盖全部节与相对文件资源；非法样例分别覆盖 schema 标识错误、未固定精确版本、宿主机路径、可执行字段、非法计算模式。
+- 新增结构诊断码：`ASM-SYN-006`(schema 标识无法识别)、`ASM-SYN-007`(引用未固定精确版本，拒绝 latest/范围版本/未版本化别名)、`ASM-SYN-008`(禁止字段：shell/command/executable/函数模块路径/环境变量/凭证)、`ASM-SYN-009`(资源路径非法)；以及 `ASM-RES-001`/`ASM-CALC-001`/`ASM-CALC-002`/`ASM-OUT-001`/`ASM-ART-001`/`ASM-CONV-001`/`ASM-INPUT-006`。
+- 成功产物为不可变 `ValidatedAssemblyArtifact`（规范文本 + `assembly_sha256` + 校验回执 `ValidationReceipt`）：回执记录校验器 ID/版本、schema、规范化算法 ID/版本、依赖锁、资源摘要与零阻断诊断；`verify()` 重算规范字节摘要核对三件套一致，不一致抛 `AssemblyValidationError`(422) 阻断计算。
+
 ### 设备模型与建模命令契约
 
 - 发布 `ies.device-model` `1.0.0` 契约：机器可读 JSON Schema、唯一规范化规则（稳定键排序 + 规范字节 SHA-256 摘要）、定位到文件/字段/稳定诊断码的诊断，以及合法/非法手写样例。

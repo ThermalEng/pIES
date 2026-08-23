@@ -52,7 +52,6 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 
 目标：在已有装配 parser、四阶段检查和无 fallback 基础上，增加唯一、可签名的成功产物。
 
-1. 发布 `ies.assembly` `1.0.0` 的机器可读 schema、唯一规范化规则、诊断与合法/非法样例。
 2. 让手写文件与 GUI 项目导出进入同一检查入口，成功只签发由规范文本、SHA-256 和校验回执组成的 `ValidatedAssemblyArtifact`。
 3. 为现有装配对象提供一次性迁移和回执，不再以可变 `AssemblySpec/CheckResult` 作为后续计算的持久输入。
 

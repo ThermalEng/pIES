@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.assembly/1.0.0",
+  "title": "ies.assembly 1.0.0 装配 YAML 契约",
+  "description": "装配 YAML 是计算意图的完整、可审查文本:实例化设备模型、绑定数据、连接真实端口、给出约束并精确选择生成器与求解器。禁止 shell/command/executable/函数模块路径/环境变量/凭证。各节均必需,无内容写空 {} 或 []。",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "assembly",
+    "time_axis",
+    "resources",
+    "devices",
+    "connections",
+    "constraints",
+    "calculation",
+    "outputs",
+    "extensions"
+  ],
+  "properties": {
+    "schema": { "const": "ies.assembly" },
+    "schema_version": { "const": "1.0.0" },
+    "assembly": {
+      "type": "object",
+      "required": ["id", "name"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "description": "本装配的稳定 ID(lower_snake_case 或短横线形式)"
+        },
+        "name": { "type": "string", "description": "人类可读名称" }
+      },
+      "additionalProperties": false
+    },
+    "time_axis": {
+      "type": "object",
+      "required": ["start", "end", "resolution", "endpoint"],
+      "properties": {
+        "start": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "description": "区间起点,须带 Z 或 ±HH:MM(可唯一换算 UTC)"
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "description": "区间终点,须带 Z 或 ±HH:MM"
+        },
+        "resolution": { "type": "string", "enum": ["15min", "30min", "1h"] },
+        "endpoint": { "type": "string", "const": "left_closed_right_open" }
+      },
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "object",
+      "required": ["datasets"],
+      "properties": {
+        "datasets": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["source"],
+            "properties": {
+              "source": {
+                "type": "object",
+                "oneOf": [
+                  {
+                    "required": ["kind", "path"],
+                    "properties": {
+                      "kind": { "const": "relative_file" },
+                      "path": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]*$",
+                        "description": "包内相对路径;禁止绝对路径、..、~、盘符与反斜杠"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "required": ["kind", "object_id", "sha256", "media_type"],
+                    "properties": {
+                      "kind": { "const": "object" },
+                      "object_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                      "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                      "media_type": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "devices": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["model"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]*@[0-9]+\\.[0-9]+\\.[0-9]+$",
+            "description": "精确设备模型引用 <device-id>@<exact-version>;禁止 latest/范围版本"
+          },
+          "parameters": {
+            "type": "object",
+            "description": "参数只能使用模型已声明字段;必填参数不得由生成器补默认",
+            "additionalProperties": {
+              "type": ["number", "string", "boolean", "null"]
+            }
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["dataset", "column"],
+              "properties": {
+                "dataset": { "type": "string", "description": "resources.datasets 中声明的 dataset_id" },
+                "column": { "type": "string", "description": "数据集中已校验的列" }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "connections": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["from", "to"],
+        "properties": {
+          "from": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$",
+            "description": "端点 <device-instance>.<port-id>"
+          },
+          "to": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type", "expr"],
+        "properties": {
+          "type": { "type": "string", "enum": ["ratio", "capacity", "schedule", "generic"] },
+          "expr": { "type": "string", "minLength": 1, "description": "表达式引擎语法,引用 <dev>.<port>/<dev>.<param> 符号" },
+          "enabled": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "calculation": {
+      "type": "object",
+      "required": ["mode", "generator", "solver"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["fixed_operation", "capacity_planning", "scenario_evaluation"],
+          "description": "mode 决定问题能力;新增 mode 需随 schema MINOR 演进"
+        },
+        "generator": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*@[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "生成器精确版本引用(能力核对在 0.8.0 注册表建立后执行)"
+        },
+        "solver": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*@[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "求解器精确版本引用"
+        },
+        "options": {
+          "type": "object",
+          "description": "只允许生成器公开 schema 的业务选项;未知选项拒绝",
+          "additionalProperties": {
+            "type": ["number", "string", "boolean", "null"]
+          }
+        },
+        "random_seed": {
+          "type": "integer",
+          "description": "随机种子;对可能使用随机性的生成器/求解器是快照的一部分"
+        }
+      },
+      "additionalProperties": false
+    },
+    "outputs": {
+      "type": "object",
+      "required": ["series", "metrics"],
+      "properties": {
+        "series": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$"
+          },
+          "description": "希望发布的序列引用 <device>.<output>(声明顺序保留)"
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$"
+          },
+          "description": "希望发布的指标引用 <scope>.<metric>(scope 为设备或 system)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "extensions": {
+      "type": "object",
+      "description": "命名空间化扩展(键须含 '.');不得改变核心字段语义或安全规则"
+    }
+  },
+  "additionalProperties": false
+}
