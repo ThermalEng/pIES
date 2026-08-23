@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -200,6 +201,37 @@ def _register_exception_handlers(app: FastAPI) -> None:
                 params={"status_code": exc.status_code, "detail": str(exc.detail)},
             )
         return JSONResponse(status_code=exc.status_code, content=body)
+
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """FastAPI/Pydantic 请求体校验失败: 422 + 标准 8 字段信封。
+
+        码复用 API-REQ-001: 与业务域"请求无效"(projects/datasets 的 empty_file
+        / invalid_json / invalid_resolution 等)同码, 均表示"请求体不可处理"
+        —— message_key 区分文案(本路径用 ies.error.invalid_request, 业务域
+        用具体字段级键如 ies.error.empty_file)。
+
+        校验错误定位到字段路径与消息, 进 params.errors 数组; 当前端点
+        与方法进 params.location 以辅助前端定位。params 不直接渲染进文案,
+        避免文案键膨胀。
+        """
+        errors = [
+            {
+                "loc": ".".join(str(p) for p in e.get("loc", ())),
+                "msg": e.get("msg", ""),
+                "type": e.get("type", ""),
+            }
+            for e in exc.errors()
+        ]
+        body = _error_envelope(
+            code="API-REQ-001",
+            message_key="ies.error.invalid_request",
+            params={"errors": errors, "count": len(errors)},
+            location={"path": request.url.path, "method": request.method},
+        )
+        return JSONResponse(status_code=422, content=body)
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:

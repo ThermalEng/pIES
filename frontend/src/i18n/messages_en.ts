@@ -693,6 +693,7 @@ export const messagesEn: Record<string, string> = {
   'ies.error.app': 'Application error: {reason}',
   'ies.error.internal': 'Internal server error',
   'ies.error.http_exception': 'Request failed (HTTP {status})',
+  'ies.error.invalid_request': 'Invalid request: {count} error(s)',
   'ies.error.route_not_found': 'The requested endpoint does not exist',
   'ies.error.db_unavailable': 'Database temporarily unavailable. Try again later.',
   'ies.error.network': 'Network error. Check your connection.',

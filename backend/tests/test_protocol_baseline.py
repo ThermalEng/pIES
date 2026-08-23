@@ -598,36 +598,47 @@ def test_frontend_contract_adapters_consistent(client: TestClient, db: Session) 
 
 
 # ---------------------------------------------------------------------------
-# 5. 已知偏差记录: pydantic 请求体校验 422 未走标准信封
+# 5. FastAPI/Pydantic 请求体校验 422 → 标准 8 字段信封(0.3.0 收口)
 # ---------------------------------------------------------------------------
 
 
-def test_pydantic_request_validation_422_is_bare_detail(
+def test_pydantic_request_validation_422_uses_envelope(
     client: TestClient, db: Session
 ) -> None:
-    """记录已知偏差: FastAPI 请求体校验(RequestValidationError)422 仍返回
-    裸 {"detail": [...]}, 未走标准 8 字段信封(业务 bug, 本切片不修)。
+    """FastAPI/Pydantic 请求体校验失败走标准 8 字段信封。
 
-    说明: main.py 只注册了 StarletteHTTPException/Exception 处理器,
-    RequestValidationError 命中 FastAPI 内置处理器(422 + {"detail"})。
-    该偏差不影响 C4 锁定的信封路径(配置校验 422 CONFIG-VAL-001 等业务
-    校验均走信封), 但若宪法 §8.3 要求"全非 2xx 走信封", 此处是唯一缺口。
-    断言锁定现状形状, 修复后本测试需同步更新。
+    main.py 注册 RequestValidationError 处理器: code=API-REQ-001,
+    message_key=ies.error.invalid_request, params.errors 数组按字段
+    定位(loc/msg/type), 当前端点进 params.location(经 envelope
+    location 字段, 与 Diagnostic 字段同构)。
     """
     user = make_user(db, "wrap_pyd")
     tok = _login(client, "wrap_pyd")
     pid = _create_project(client, tok, "pydantic 422 项目")
 
-    # config PUT 请求体本身非法(config 应为 dict)→ 422 裸 detail
+    # config PUT 请求体本身非法(config 应为 dict)→ 422 标准信封
     resp = client.put(
         f"/api/projects/{pid}/config",
         json={"config": "not-a-dict"},
         headers=_bearer(tok),
     )
     assert resp.status_code == 422
-    assert set(resp.json()) == {"detail"}, f"期望裸 detail, 实际 {sorted(resp.json())}"
+    assert set(resp.json()) == {"error"}, f"期望标准信封, 实际 {sorted(resp.json())}"
+    err = resp.json()["error"]
+    assert err["code"] == "API-REQ-001"
+    assert err["message_key"] == "ies.error.invalid_request"
+    assert err["blocking"] is True
+    assert err["severity"] == "error"
+    assert err["params"]["count"] >= 1
+    assert isinstance(err["params"]["errors"], list)
+    assert any("config" in e["loc"] for e in err["params"]["errors"])
+    assert err["location"]["path"].endswith("/config")
+    assert err["location"]["method"] == "PUT"
 
-    # 任务提交缺必填字段 → 422 裸 detail
+    # 任务提交缺必填字段 → 422 同样走信封
     resp = client.post(f"/api/projects/{pid}/tasks", json={}, headers=_bearer(tok))
     assert resp.status_code == 422
-    assert set(resp.json()) == {"detail"}
+    err = resp.json()["error"]
+    assert err["code"] == "API-REQ-001"
+    assert err["message_key"] == "ies.error.invalid_request"
+    assert err["params"]["count"] >= 1

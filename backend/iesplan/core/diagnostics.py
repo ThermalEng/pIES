@@ -102,6 +102,7 @@ NEW_DIAG_CODES: dict[str, str] = {
     "SYS-STORE-004": "保存冲突:项目已在其他会话中修改(04 §9.2 表 E save_conflict 无码,在此登记)",
     "DATA-VAL-001": "数据集校验失败(阻断性诊断,HTTP 400;包络码,见 services/dataset.py)",
     "CONFIG-VAL-001": "计算配置校验失败(阻断性诊断,HTTP 422;包络码,见 api/config.py)",
+    "API-REQ-001": "请求体校验失败(422;FastAPI/Pydantic RequestValidationError 包络,见 main.py;业务域复用同码但 message_key 不同)",
 }
 
 # ---------------------------------------------------------------------------
