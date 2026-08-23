@@ -45,6 +45,11 @@ from iesplan.assembly.diags import ASM_ALL_CODES
 from iesplan.assembly.parser import ParseResult, load_assembly_file, parse_assembly
 from iesplan.assembly.parser10 import ParseDocResult, parse_assembly_doc
 from iesplan.assembly.schema import AssemblySpec, FORMAT_VERSION
+from iesplan.assembly.migration import (
+    MigrationResult,
+    migrate_assembly_spec,
+    migrate_assembly_text,
+)
 from iesplan.assembly.validator import (
     AssemblyValidationResult,
     validate_assembly_doc,
@@ -89,4 +94,7 @@ __all__ = [
     "validate_assembly_text",
     "validate_assembly_doc",
     "validate_project_export",
+    "MigrationResult",
+    "migrate_assembly_text",
+    "migrate_assembly_spec",
 ]

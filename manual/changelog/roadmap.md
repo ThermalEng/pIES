@@ -52,8 +52,6 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 
 目标：在已有装配 parser、四阶段检查和无 fallback 基础上，增加唯一、可签名的成功产物。
 
-3. 为现有装配对象提供一次性迁移和回执，不再以可变 `AssemblySpec/CheckResult` 作为后续计算的持久输入。
-
 退出标准：相同输入产生唯一规范文本、摘要和校验回执；校验失败时不产生 artifact。
 
 ## `0.8.0` — GeneratorProvider 与 Solver Bundle
