@@ -13,7 +13,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from iesplan.devices.datacontract import DataInputDecl, declared_device_model, is_ies_device_data
+from iesplan.devices.datacontract import (
+    DataInputDecl,
+    declared_device_model,
+    is_ies_device_data,
+    parse_metadata,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +59,31 @@ def resolve_upload_descriptor(data: bytes, fallback_desc):
         raise LookupError(f"文件声明的设备模型未注册: {model!r}") from exc
 
 
+def declared_upload_meta(data: bytes):
+    """文件已声明 ies.device-data 元数据时返回其元数据声明(裸 CSV 返回 None)。
+
+    只扫描表头之前的文本行(与 declared_device_model 同策略, 不解析数据区),
+    仅读取声明值供调用方按文件为权威推导行数期望/存储时间轴; 解析诊断由
+    规范化器统一给出, 本函数不校验、不阻断。
+    """
+    if not is_ies_device_data(data):
+        return None
+    try:
+        head = data[:65536].decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    meta_lines: list[str] = []
+    for line in head.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            break  # 已进入表头/数据区, 不再有元数据
+        meta_lines.append(line)
+    meta, _diags = parse_metadata(meta_lines)
+    return meta
+
+
 def upload_declared_units(desc, fields: dict | None) -> dict[str, str]:
     """上传 fields 声明 + 描述符权威单位 → unit.<column> 元数据(裸 CSV 用)。
 
@@ -75,5 +105,6 @@ def upload_declared_units(desc, fields: dict | None) -> dict[str, str]:
 __all__ = [
     "UploadDescriptor",
     "resolve_upload_descriptor",
+    "declared_upload_meta",
     "upload_declared_units",
 ]

@@ -276,12 +276,69 @@ class TestGuiUploadParity:
         codes = [d.code for d in exc_info.value.diagnostics]
         assert "DATA-TIME-006" in codes
 
+    def test_gui_upload_metadata_file_authoritative_for_axis(self, upload_env) -> None:
+        """P1: 文件已声明元数据时, 行数期望与存储时间轴以文件为权威。
 
-def handwritten_template(device_model: str, n_rows: int = 3) -> str:
+        30min 文件(全年 17520 行, fixed_offset +540)配 resolution=1h/480 请求:
+        - 不再按请求分辨率(1h→8760)误判行数不匹配, 上传成功;
+        - 版本 resolution/fixed_utc_offset_minutes 按文件声明持久化
+          (30min/540), 而非请求参数(1h/480)。
+        """
+        from iesplan.services.dataset import upload_dataset_version
+
+        session, _proj, ds = upload_env
+        csv_text = handwritten_template(
+            "ies.device.electric_load@1.2.0",
+            n_rows=17520,
+            resolution="30min",
+            fixed_utc_offset_minutes=540,
+            step_minutes=30,
+        )
+        version = upload_dataset_version(
+            session, ds.id, "1h", 480,
+            {},
+            csv_text.encode("utf-8"),
+            {"source_category": "user_upload"},
+        )
+        assert version.resolution == "30min"
+        assert version.fixed_utc_offset_minutes == 540
+        assert version.quality_report["row_count"] == 17520
+        assert version.quality_report["has_blocking_errors"] is False
+
+    def test_gui_upload_metadata_file_row_count_uses_file_resolution(self, upload_env) -> None:
+        """P1: 元数据文件行数期望按文件声明分辨率推导(30min → 17520), 不符阻断。
+
+        声明 30min 却只给 8760 行(1h 全年行数): 期望 17520 → DATA-TS-004,
+        不能被当作 1h 文件静默接受。
+        """
+        from iesplan.services.dataset import DataValidationError, upload_dataset_version
+
+        session, _proj, ds = upload_env
+        csv_text = handwritten_template(
+            "ies.device.electric_load@1.2.0",
+            n_rows=8760,
+            resolution="30min",
+            fixed_utc_offset_minutes=540,
+            step_minutes=30,
+        )
+        with pytest.raises(DataValidationError) as exc_info:
+            upload_dataset_version(session, ds.id, "1h", 480, {}, csv_text.encode("utf-8"), {})
+        codes = [d.code for d in exc_info.value.diagnostics]
+        assert "DATA-TS-004" in codes
+
+
+def handwritten_template(
+    device_model: str,
+    n_rows: int = 3,
+    *,
+    resolution: str = "1h",
+    fixed_utc_offset_minutes: int = 480,
+    step_minutes: int = 60,
+) -> str:
     """构造声明元数据的最小设备数据文件(与目录 electric_load.csv 同构)。
 
     n_rows: 数据行数(数据集版本上传要求全年行数, 对等测试传 8760)。
-    时间戳为固定偏移 480 的本地时间, 逐小时递增。
+    时间戳为固定偏移的本地时间, 按 step_minutes 递增。
     """
     from datetime import datetime, timedelta
 
@@ -291,15 +348,15 @@ def handwritten_template(device_model: str, n_rows: int = 3) -> str:
         "# dataset_id: gui_parity_check",
         f"# device_model: {device_model}",
         "# series_mode: timeline",
-        "# resolution: 1h",
+        f"# resolution: {resolution}",
         "# timestamp_mode: fixed_offset",
-        "# fixed_utc_offset_minutes: 480",
+        f"# fixed_utc_offset_minutes: {fixed_utc_offset_minutes}",
         "# unit.e_load: kWh",
         "timestamp,e_load",
     ]
     t0 = datetime(2025, 1, 1)
     for i in range(n_rows):
-        ts = (t0 + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%S")
+        ts = (t0 + timedelta(minutes=i * step_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
         lines.append(f"{ts},{100.0 + (i % 24) * 0.5}")
     return "\n".join(lines) + "\n"
 

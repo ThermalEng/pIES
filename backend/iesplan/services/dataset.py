@@ -1133,6 +1133,7 @@ def upload_dataset_version(
     """
     from iesplan.devices.datacontract import normalize_upload_csv
     from iesplan.devices.upload_descriptor import (
+        declared_upload_meta,
         resolve_upload_descriptor,
         upload_declared_units,
     )
@@ -1148,6 +1149,19 @@ def upload_dataset_version(
 
     desc = resolve_upload_descriptor(data_bytes, fallback_desc=_standard_fields_descriptor())
     declared_units = upload_declared_units(desc, fields)
+
+    # 文件已声明 ies.device-data 元数据时以文件为权威: 行数期望(全年步数)按
+    # 文件声明的分辨率推导, 请求参数只对裸 CSV(未声明元数据, 由上传参数合成
+    # 元数据头)生效 —— 否则合法的 30min 文件配 1h 请求会被误判行数不匹配拒绝。
+    declared_meta = declared_upload_meta(data_bytes)
+    if declared_meta is not None:
+        expected_rows = (
+            RESOLUTIONS[declared_meta.resolution][0]
+            if declared_meta.resolution in RESOLUTIONS
+            else None
+        )
+    else:
+        expected_rows = RESOLUTIONS[resolution][0]
     result = normalize_upload_csv(
         data_bytes,
         desc,
@@ -1156,14 +1170,22 @@ def upload_dataset_version(
         resolution=resolution,
         utc_offset_minutes=utc_offset_minutes,
         units=declared_units,
-        expected_rows=RESOLUTIONS[resolution][0],
+        expected_rows=expected_rows,
     )
     diags = list(result.diagnostics)
     if any(d.blocking for d in diags):
         raise DataValidationError(diags)
 
     normalized = _result_to_frame(result)
-    axis = build_axis(resolution, utc_offset_minutes=utc_offset_minutes)
+    # 存储时间轴以规范化结果元数据为权威(裸 CSV 时由上传参数合成, 与请求一致;
+    # 元数据文件按文件声明的 resolution/固定偏移, 避免持久化与规范时间戳
+    # 不一致的 axis; utc 模式时间戳即 UTC, 无偏移)。
+    axis = build_axis(
+        result.meta.resolution,
+        utc_offset_minutes=(
+            0 if result.meta.timestamp_mode == "utc" else result.meta.fixed_utc_offset_minutes
+        ),
+    )
     return _commit_version(
         db, dataset, axis, normalized, diags, fields, meta,
         actor_id=user_id,
