@@ -12,7 +12,8 @@
 - ``type_id/version/name_zh/name_en/model_method/stateful/fidelity`` → ``device`` 节；
 - ``energy_carriers/capabilities/is_load`` → ``device.energy_carriers/capabilities``；
 - ``parameters`` → ``parameters``（unit/min/max/default/enum/is_optimizable/
-  stock_or_addition 平移，补 value_type=number/quantity 由 unit 量纲推断）；
+  stock_or_addition 平移，value_type 由 default/enum 实际类型推断
+  （str→string、bool→boolean、int/float→number），quantity 由 unit 量纲推断）；
 - ``ports``（name/port_type/direction/energy_carrier/capacity_ref）→ ``ports``
   （carrier 取 energy_carrier；quantity/unit 由载能推断）；
 - ``time_series.inputs`` → ``data_inputs``（列 ID/单位/必填）；
@@ -62,6 +63,8 @@ _UNIT_TO_QUANTITY: tuple[tuple[str, str], ...] = (
     ("cny/kw", "currency_per_power"),
     ("cny/m", "currency_per_volume"),
     ("kj/m", "energy_per_volume"),
+    ("kj/m3", "energy_per_volume"),
+    ("cny/m3", "currency_per_volume"),
     ("deg", "angle"),
     ("c", "temperature"),
     ("-", "ratio"),
@@ -71,6 +74,9 @@ _UNIT_TO_QUANTITY: tuple[tuple[str, str], ...] = (
     ("a", "duration"),
     ("次", "ratio"),
 )
+
+#: Unicode 上标 → ASCII 数字（单位推断前归一化；W/m² ≡ W/m2、kJ/m³ ≡ kJ/m3）
+_SUPERSCRIPT_TABLE = str.maketrans({"²": "2", "³": "3"})
 
 #: 旧 mechanism 函数入口 → 稳定建模命令 ID（组合根/provider 解析的唯一事实源）
 #: 命令 ID 是稳定命名空间字符串，不含 Python 模块/包/函数名。
@@ -89,6 +95,14 @@ MECHANISM_COMMAND_IDS: dict[str, str] = {
 
 #: 命令版本（迁移回执固定；命令 provider 需与此一致）
 COMMAND_VERSION = "1.0.0"
+
+
+class LegacyFunctionUnmappedError(Exception):
+    """旧格式 ``function`` 入口未映射到稳定建模命令 ID（迁移拒绝）。
+
+    语义（宪法 §2.2 正确性优先）：未知/缺失入口不得静默回退到其他命令，
+    否则迁移后建模行为被改变却仍报告成功；此类文件必须在回执中标记失败。
+    """
 
 
 @dataclass(slots=True)
@@ -110,12 +124,42 @@ class MigrationReceipt:
 
 
 def _quantity_of_unit(unit: str) -> str:
-    """由单位串推断物理量（迁移补全用；新契约要求显式声明）。"""
-    u = (unit or "").strip().lower().replace("·", "/")
+    """由单位串推断物理量（迁移补全用；新契约要求显式声明）。
+
+    先做上标规范化（W/m² → w/m2、kJ/m³ → kj/m3）再查表，
+    避免 Unicode 上标单位落回 ratio。
+    """
+    u = (unit or "").strip().lower().replace("·", "/").translate(_SUPERSCRIPT_TABLE)
     for prefix, quantity in _UNIT_TO_QUANTITY:
         if u == prefix or u.startswith(prefix + "/"):
             return quantity
     return "ratio"
+
+
+def _infer_value_type(p: dict) -> str:
+    """按 default/enum 实际类型推断参数 value_type。
+
+    规则（保留 legacy 参数取值类型，禁止一律声明为 number）：
+    - 任一候选为 bool → ``boolean``；
+    - 任一候选为 str（``$price:`` 价格引用除外）→ ``string``；
+    - 其余 int/float → ``number``。
+    ``$price:`` 是解析期占位符，解析后为数值，不参与类型推断。
+    """
+    candidates: list[object] = []
+    if isinstance(p.get("enum"), list):
+        candidates.extend(p["enum"])
+    if p.get("default") is not None:
+        candidates.append(p["default"])
+    for value in candidates:
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, str):
+            if value.startswith("$price:"):
+                continue
+            return "string"
+        if isinstance(value, (int, float)):
+            return "number"
+    return "number"
 
 
 def migrate_device_mapping(raw: dict) -> dict:
@@ -141,7 +185,7 @@ def migrate_device_mapping(raw: dict) -> dict:
         if not isinstance(p, dict):
             continue
         entry: dict = {
-            "value_type": "number",
+            "value_type": _infer_value_type(p),
             "quantity": _quantity_of_unit(str(p.get("unit", ""))),
             "unit": str(p.get("unit", "-")),
             "required": p.get("required", False),
@@ -238,10 +282,17 @@ def migrate_device_mapping(raw: dict) -> dict:
             model_file = function.get("model_file")
             if isinstance(model_file, dict):
                 entry_name = model_file.get("path")
+    capabilities = device["capabilities"]
     model_commands: dict[str, str] = {}
-    for cap in device["capabilities"]:
-        command_id = MECHANISM_COMMAND_IDS.get(entry_name or "", "ies.model-command.load.periodic")
-        model_commands[cap] = f"{command_id}@{COMMAND_VERSION}"
+    if capabilities:
+        # 缺失/未映射入口必须拒绝（禁止静默回退到 load.periodic 改变建模行为）
+        if not entry_name or entry_name not in MECHANISM_COMMAND_IDS:
+            raise LegacyFunctionUnmappedError(
+                f"旧格式 function 入口未映射到稳定建模命令 ID: {entry_name!r}"
+            )
+        for cap in capabilities:
+            command_id = MECHANISM_COMMAND_IDS[entry_name]
+            model_commands[cap] = f"{command_id}@{COMMAND_VERSION}"
 
     new_raw = {
         "schema": SCHEMA_ID,
@@ -277,7 +328,19 @@ def build_migration_receipt(yamls: list[Path]) -> MigrationReceipt:
             receipt.migrated_files.append(_file_entry(path, migrated=False, error="顶层非映射"))
             continue
         _, old_digest = canonicalize_raw_mapping(old_raw)
-        new_raw = migrate_device_mapping(old_raw)
+        try:
+            new_raw = migrate_device_mapping(old_raw)
+        except LegacyFunctionUnmappedError as exc:
+            receipt.diagnostics.append(_file_diag(path, str(exc)))
+            receipt.migrated_files.append(
+                _file_entry(
+                    path,
+                    migrated=False,
+                    old_digest=old_digest,
+                    error=str(exc),
+                )
+            )
+            continue
         result = parse_device_model_yaml(new_raw, file=str(path))
         _, new_digest = (
             canonicalize_device_model(result.document) if result.document is not None else ("", "")
@@ -347,6 +410,7 @@ def _file_entry(
 
 __all__ = [
     "MigrationReceipt",
+    "LegacyFunctionUnmappedError",
     "migrate_device_mapping",
     "build_migration_receipt",
     "MECHANISM_COMMAND_IDS",

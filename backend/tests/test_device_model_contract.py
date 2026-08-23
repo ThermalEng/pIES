@@ -22,7 +22,11 @@ from iesplan.devices.contracts import (
     canonicalize_device_model,
     canonicalize_raw_mapping,
 )
-from iesplan.devices.migration import build_migration_receipt, migrate_device_mapping
+from iesplan.devices.migration import (
+    LegacyFunctionUnmappedError,
+    build_migration_receipt,
+    migrate_device_mapping,
+)
 from iesplan.devices.parser import parse_device_model_yaml
 
 SAMPLES_DIR = Path(__file__).resolve().parent.parent / "iesplan" / "devices" / "samples"
@@ -79,6 +83,75 @@ class TestSchemaSamples:
         with pytest.raises(yamlmini.YamlParseError):
             yamlmini.load(text)
 
+    def test_value_type_default_cross_check(self):
+        """value_type 与 default 类型不一致 → error 诊断阻断解析。"""
+        raw = _load_sample("acme.device.pv.device.yaml")
+        raw["parameters"]["conversion_efficiency"]["default"] = "abc"  # number 参数 string 默认值
+        result = parse_device_model_yaml(raw, file="x")
+        assert not result.ok
+        assert result.document is None
+        assert any(
+            d.location.get("field") == "parameters.conversion_efficiency.default"
+            for d in result.diagnostics
+        )
+
+    def test_value_type_enum_cross_check(self):
+        """value_type 与 enum 元素类型不一致 → error 诊断阻断解析。"""
+        raw = _load_sample("acme.device.pv.device.yaml")
+        raw["parameters"]["conversion_efficiency"]["enum"] = [0.5, "high"]  # number 参数混合 enum
+        result = parse_device_model_yaml(raw, file="x")
+        assert not result.ok
+        assert result.document is None
+        assert any(
+            d.location.get("field", "").startswith("parameters.conversion_efficiency.enum")
+            for d in result.diagnostics
+        )
+
+    def test_value_type_boolean_default_ok(self):
+        """boolean 参数默认值与类型一致 → 通过校验（bool 不应被当作 number）。"""
+        raw = _load_sample("acme.device.pv.device.yaml")
+        raw["parameters"]["is_switchable"] = {
+            "value_type": "boolean",
+            "quantity": "ratio",
+            "unit": "-",
+            "required": False,
+            "default": True,
+        }
+        result = parse_device_model_yaml(raw, file="x")
+        assert result.ok, [d.to_dict() for d in result.diagnostics]
+        assert result.document.parameters["is_switchable"].default is True
+
+    def test_port_quantity_carrier_mismatch_rejected(self):
+        """端口 quantity 与载能默认物理量不一致（electric 端口声明 irradiance）→ 拒绝。"""
+        raw = _load_sample("acme.device.pv.device.yaml")
+        raw["ports"]["electric_out"]["quantity"] = "irradiance"
+        result = parse_device_model_yaml(raw, file="x")
+        assert not result.ok
+        assert result.document is None
+        assert any(
+            d.location.get("field") == "ports.electric_out.quantity"
+            for d in result.diagnostics
+        )
+
+    def test_port_unit_carrier_mismatch_rejected(self):
+        """端口 unit 与载能规范单位不一致（electric 端口声明 W/m2）→ 拒绝。"""
+        raw = _load_sample("acme.device.pv.device.yaml")
+        raw["ports"]["electric_out"]["unit"] = "W/m2"
+        result = parse_device_model_yaml(raw, file="x")
+        assert not result.ok
+        assert any(
+            d.location.get("field") == "ports.electric_out.unit"
+            for d in result.diagnostics
+        )
+
+    def test_port_unit_superscript_normalized_accepted(self):
+        """端口单位归一化后一致（solar 端口 W/m² ≡ W/m2）→ 通过校验。"""
+        raw = _load_sample("acme.device.pv.device.yaml")
+        raw["ports"]["solar_in"]["unit"] = "W/m²"
+        result = parse_device_model_yaml(raw, file="x")
+        assert result.ok, [d.to_dict() for d in result.diagnostics]
+        assert result.document.ports["solar_in"].unit == "W/m²"
+
 
 class TestCanonicalization:
     def test_canonicalization_deterministic(self):
@@ -113,6 +186,38 @@ class TestCanonicalization:
         # dataclass frozen
         with pytest.raises(Exception):
             doc.device.id = "x"  # type: ignore[misc]
+
+    def test_document_deeply_immutable(self):
+        """extensions 嵌套 dict/list 与参数 default 值深度冻结（浅冻结可被绕过）。"""
+        raw = _load_sample("acme.device.pv.device.yaml")
+        raw["extensions"]["acme.meta"] = {"nested": {"values": [1, 2, 3]}}
+        raw["parameters"]["grid_tariff"] = {
+            "value_type": "number",
+            "quantity": "currency_per_energy",
+            "unit": "CNY/kWh",
+            "required": False,
+            "default": {"peak": 1.1, "flat": [0.7, 0.3]},
+        }
+        result = parse_device_model_yaml(raw, file="x")
+        assert result.ok, [d.to_dict() for d in result.diagnostics]
+        doc = result.document
+        # extensions 嵌套 dict/list 深度冻结
+        ext_nested = doc.extensions["acme.meta"]["nested"]
+        with pytest.raises(TypeError):
+            ext_nested["values"][0] = 99  # type: ignore[index]
+        # 参数 default 结构化值深度冻结
+        default = doc.parameters["grid_tariff"].default
+        with pytest.raises(TypeError):
+            default["peak"] = 0.0  # type: ignore[index]
+        with pytest.raises(TypeError):
+            default["flat"][0] = 0.0  # type: ignore[index]
+        # enum 元素（结构化）深度冻结
+        raw2 = _load_sample("acme.device.pv.device.yaml")
+        raw2["parameters"]["conversion_efficiency"]["enum"] = [{"low": 0.5}, 0.9]
+        result2 = parse_device_model_yaml(raw2, file="x")
+        assert result2.ok, [d.to_dict() for d in result2.diagnostics]
+        with pytest.raises(TypeError):
+            result2.document.parameters["conversion_efficiency"].enum[0]["low"] = 0.1  # type: ignore[index]
 
 
 class TestMigrationReceipt:
@@ -197,6 +302,111 @@ function:
         assert "entry" not in str(new_raw.get("device", {}).keys())
         # 不暴露宿主机路径
         assert "/home" not in text and "C:\\" not in text
+
+    def test_unmapped_legacy_function_rejected(self, tmp_path):
+        """未知 function 入口 → 迁移整体拒绝：回执含 error 诊断且文件标记 migrated=false。
+
+        禁止静默回退到 load.periodic（改变建模行为却报告迁移成功）。
+        """
+        old_raw = yamlmini.load(self.OLD_PV)
+        old_raw["function"]["entry"] = "unknown_legacy_fn"
+        with pytest.raises(LegacyFunctionUnmappedError):
+            migrate_device_mapping(old_raw)
+
+        yaml_path = tmp_path / "unmapped.yaml"
+        yaml_path.write_text(
+            "type_id: ies.device.legacy\n"
+            "version: 1.0.0\n"
+            "name_zh: 旧设备\n"
+            "name_en: Legacy\n"
+            "model_method: mechanism\n"
+            "stateful: false\n"
+            "fidelity: medium\n"
+            "energy_carriers: [electric]\n"
+            "capabilities: [load]\n"
+            "parameters: {}\n"
+            "ports: []\n"
+            "function:\n"
+            "  entry: unknown_legacy_fn\n"
+            "  package: iesplan.modeling.functions\n",
+            encoding="utf-8",
+        )
+        receipt = build_migration_receipt([yaml_path])
+        entry = receipt.migrated_files[0]
+        assert entry["migrated"] is False, entry
+        assert entry["error"]
+        assert receipt.diagnostics
+        assert all(d.severity == "error" for d in receipt.diagnostics)
+        assert any("unknown_legacy_fn" in str(d.params) for d in receipt.diagnostics)
+
+    def test_missing_legacy_function_rejected(self, tmp_path):
+        """旧格式缺失 function 入口（有 capabilities）→ 迁移整体拒绝，不静默回退。"""
+        old_raw = yamlmini.load(self.OLD_PV)
+        old_raw.pop("function", None)
+        with pytest.raises(LegacyFunctionUnmappedError):
+            migrate_device_mapping(old_raw)
+
+        yaml_path = tmp_path / "nofunction.yaml"
+        yaml_path.write_text(
+            "type_id: ies.device.legacy\n"
+            "version: 1.0.0\n"
+            "name_zh: 旧设备\n"
+            "name_en: Legacy\n"
+            "model_method: mechanism\n"
+            "stateful: false\n"
+            "fidelity: medium\n"
+            "energy_carriers: [electric]\n"
+            "capabilities: [load]\n"
+            "parameters: {}\n"
+            "ports: []\n",
+            encoding="utf-8",
+        )
+        receipt = build_migration_receipt([yaml_path])
+        assert receipt.migrated_files[0]["migrated"] is False
+        assert any(d.severity == "error" for d in receipt.diagnostics)
+
+    def test_migration_preserves_parameter_value_types(self):
+        """legacy 参数按 default/enum 实际类型推断 value_type（str→string、bool→boolean）。
+
+        迁移前的旧格式一律声明 number，会把 mode/is_switchable 等字符串/布尔参数
+        错误地固化为 number（改变取值语义）；修复后按实际类型保留。
+        """
+        old_raw = yamlmini.load(self.OLD_PV)
+        old_raw["parameters"]["mode"] = {
+            "unit": "-",
+            "default": "heating",
+            "enum": ["heating", "cooling"],
+        }
+        old_raw["parameters"]["is_switchable"] = {"unit": "-", "default": False}
+        old_raw["parameters"]["efficiency"]["default"] = 0.2
+        new_raw = migrate_device_mapping(old_raw)
+        assert new_raw["parameters"]["mode"]["value_type"] == "string"
+        assert new_raw["parameters"]["is_switchable"]["value_type"] == "boolean"
+        assert new_raw["parameters"]["efficiency"]["value_type"] == "number"
+        assert new_raw["parameters"]["rated_capacity_kwp"]["value_type"] == "number"
+        # 迁移结果仍能通过新契约校验（value_type 与 default/enum 一致）
+        result = parse_device_model_yaml(new_raw, file="pv.yaml")
+        assert result.ok, [d.to_dict() for d in result.diagnostics]
+
+    def test_migration_normalizes_superscript_units(self):
+        """Unicode 上标单位（W/m²、kJ/m³）在推断物理量前归一化为 ASCII。
+
+        修复前 W/m²/kJ/m³ 无法命中推断表，落回 ratio，改变数据列语义。
+        """
+        old_raw = yamlmini.load(self.OLD_PV)
+        old_raw["time_series"]["inputs"] = [
+            {"key": "ghi", "unit": "W/m²", "resolution": "1h", "required": True},
+            {"key": "h_load", "unit": "kJ/m³", "resolution": "1h", "required": True},
+        ]
+        new_raw = migrate_device_mapping(old_raw)
+        assert new_raw["data_inputs"]["ghi"]["quantity"] == "irradiance"
+        assert new_raw["data_inputs"]["h_load"]["quantity"] == "energy_per_volume"
+        # 显式调用推断函数等价
+        from iesplan.devices.migration import _quantity_of_unit
+
+        assert _quantity_of_unit("W/m²") == "irradiance"
+        assert _quantity_of_unit("kJ/m³") == "energy_per_volume"
+        assert _quantity_of_unit("W/m2") == "irradiance"
 
     def test_catalog_files_are_new_format_and_contain_no_function(self):
         """迁移后的 catalog 文件全部为新格式：含 schema/schema_version/model_commands，
