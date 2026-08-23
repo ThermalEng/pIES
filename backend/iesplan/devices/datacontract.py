@@ -979,24 +979,37 @@ def canonicalize_device_data(
     # 列顺序: 规范输出按模型声明顺序排列(仅保留已声明的列)
     declared_present = [c for c in decl_order if c in header]
 
-    # 单位核对(unit.<column> 与设备模型一致)
+    # 单位核对: 存在的数据列必须声明 unit.<column>, 且与设备模型一致
+    # (0.6.0 契约: 缺失单位声明是阻断错误, 不允许无声明静默通过)
     for col, decl in decl_by_id.items():
+        if col not in header:
+            continue  # 列不存在: 必需性已由 DATA-COL-005 覆盖, 不重复报单位缺失
         declared_unit = meta.units.get(col)
-        if declared_unit is not None and decl.unit:
-            if not _units_compatible(declared_unit, decl.unit):
-                diags.append(
-                    make_diag(
-                        "DATA-COL-006",
-                        severity="error",
-                        blocking=True,
-                        params={
-                            "column": col,
-                            "actual": declared_unit,
-                            "expected": decl.unit,
-                        },
-                        location={"object_type": "device_data", "object_id": meta.dataset_id, "field": col},
-                    )
+        if declared_unit is None:
+            diags.append(
+                make_diag(
+                    "DATA-COL-007",
+                    severity="error",
+                    blocking=True,
+                    params={"column": col},
+                    location={"object_type": "device_data", "object_id": meta.dataset_id, "field": col},
                 )
+            )
+            continue
+        if decl.unit and not _units_compatible(declared_unit, decl.unit):
+            diags.append(
+                make_diag(
+                    "DATA-COL-006",
+                    severity="error",
+                    blocking=True,
+                    params={
+                        "column": col,
+                        "actual": declared_unit,
+                        "expected": decl.unit,
+                    },
+                    location={"object_type": "device_data", "object_id": meta.dataset_id, "field": col},
+                )
+            )
 
     # 4) 时间轴
     ts_index = parsed.header.index(TIMESTAMP_COL) if TIMESTAMP_COL in parsed.header else -1

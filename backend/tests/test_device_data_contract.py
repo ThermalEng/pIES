@@ -515,6 +515,20 @@ class TestReviewFixes:
         mismatch = next(d for d in result.diagnostics if d.code == "DATA-META-008")
         assert mismatch.params["expected"] == "ies.device.test@1.0.0"
 
+    def test_missing_unit_declaration_blocked(self) -> None:
+        """数据列存在但缺 unit.<column> 声明 → DATA-COL-007 阻断。"""
+        text = _valid_csv_text().replace("# unit.e_load: kWh\n", "")
+        result = canonicalize_device_data(text.encode("utf-8"), _e_load_desc())
+        assert any(d.code == "DATA-COL-007" and d.blocking for d in result.diagnostics)
+
+    def test_unit_declaration_for_absent_column_not_required(self) -> None:
+        """不存在的列不要求单位声明(必需性由 DATA-COL-005 单独覆盖)。"""
+        desc = _desc(_DataInput("e_load", unit="kWh"), _DataInput("h_load", required=False))
+        result = canonicalize_device_data(_valid_csv_bytes(), desc)
+        codes = [d.code for d in result.diagnostics]
+        assert "DATA-COL-007" not in codes
+
+
 # ---------------------------------------------------------------------------
 # 样例文件(合法/非法)
 # ---------------------------------------------------------------------------
