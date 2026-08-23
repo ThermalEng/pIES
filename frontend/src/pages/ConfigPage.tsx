@@ -697,7 +697,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
       setFrozen(saved.status === 'frozen')
       setNotice({ kind: 'success', text: pt('ies.config.saved_ok', { version: saved.version }) })
     } catch (err) {
-      // 后端 422 返回 {diagnostics: [...]} 信封(client.ts 已透传到 params),
+      // 后端 422 返回标准错误信封(client.ts 把 params.diagnostics 透传到 ApiError.params),
       // 展示完整诊断明细而非笼统的"未知错误"
       if (err instanceof ApiError && Array.isArray(err.params.diagnostics)) {
         setDiagnostics(err.params.diagnostics as Diagnostic[])

@@ -10,8 +10,8 @@
 - GET    /api/projects/{project_id}/datasets/{dataset_id}/versions/{version_no}
                                                        版本元数据+溯源(不返回数据文件)。
 
-错误统一 AppError + 诊断 message_key; 数据校验失败返回 400 + diagnostics
-(字段/行号定位, RPD 8.3)。
+错误统一 AppError + 标准错误信封(宪法 §8.3); 数据校验失败返回
+400 + 信封, 诊断明细入 params.diagnostics(字段/行号定位, RPD 8.3)。
 
 认证与权限: 除模板下载(公开)外, 全部端点要求窗口会话认证
 (iesplan.api.auth.CurrentUser, 未认证 401); 读接口要求项目 view,
@@ -128,13 +128,19 @@ def _dataset_dict(ds) -> dict:
 
 
 def _validation_response(exc: DataValidationError) -> JSONResponse:
-    """校验失败响应: 400 + 标准错误信封 + 诊断明细(信封与全局处理器同构)。"""
+    """校验失败响应: 400 + 标准错误信封, 诊断明细入 params.diagnostics(宪法 §8.3)。"""
     return JSONResponse(
         status_code=400,
-        content={
-            **exc.to_dict(),
-            "diagnostics": [d.to_dict() for d in exc.diagnostics],
-        },
+        content=error_envelope(
+            code=exc.code,
+            message_key=exc.message_key,
+            severity=exc.severity,
+            blocking=exc.blocking,
+            params={
+                "diagnostics": [d.to_dict() for d in exc.diagnostics],
+                "count": len(exc.diagnostics),
+            },
+        ),
     )
 
 
@@ -253,7 +259,8 @@ def upload_version(
     大小门禁(H-08): 先按 Content-Length 头预检, 再以 (上限+1) 字节封顶流式读取,
     超限立即拒绝 —— 任何情况下都不会把超大文件完整读入内存。
     校验通过: 201 + {dataset_version, quality_report, diagnostics};
-    存在阻断性诊断(行数/时间戳/缺失/范围等): 400 + diagnostics(字段/行号定位)。
+    存在阻断性诊断(行数/时间戳/缺失/范围等): 400 + 标准错误信封
+    (诊断明细入 params.diagnostics, 字段/行号定位)。
     """
     project_service.ensure_access(db, user, project_id, "edit")
     _require_dataset(db, project_id, dataset_id)
