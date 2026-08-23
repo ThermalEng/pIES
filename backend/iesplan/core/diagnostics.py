@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace as dc_replace
 from datetime import UTC, datetime
+from types import MappingProxyType
 
 # ---------------------------------------------------------------------------
 # 严重度常量
@@ -197,22 +199,26 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
 }
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class Diagnostic:
     """一条用户可见的问题/提示数据(04 §5.4)。
 
     后端只产数据与消息键,不输出人类可读文案。字段与 04 §5.4 JSON 对齐,
     可序列化(JSON)、可入库(审计)、可跨版本保留(code 稳定)。
+
+    本类型深度不可变:字段集合固定,构造后禁止赋值(FrozenInstanceError);
+    params 为只读映射(MappingProxyType),ref_ids 为 tuple,location(dict 形态)
+    经只读包装保护。需要变更字段时使用 ``replace()`` 或派生方法生成新对象。
     """
 
     code: str
     severity: str = SEVERITY_ERROR
     blocking: bool = False
     message_key: str = ""
-    params: dict = field(default_factory=dict)
-    location: dict | None = None
+    params: Mapping[str, object] = field(default_factory=dict)
+    location: Mapping[str, object] | None = None
     fix_hint_key: str = ""
-    ref_ids: list[str] = field(default_factory=list)
+    ref_ids: tuple[str, ...] = ()
     occurred_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     source: str = ""
     trace_id: str = ""
@@ -221,27 +227,40 @@ class Diagnostic:
     suppressed: bool = False
 
     def __post_init__(self) -> None:
-        """补齐默认消息键与修复键,并校验严重度取值。"""
+        """补齐默认消息键与修复键,冻结容器并校验严重度取值(frozen 标准模式)。"""
         if self.severity not in SEVERITIES:
             raise ValueError(f"非法严重度: {self.severity!r},允许值 {SEVERITIES}")
         if not self.message_key:
-            self.message_key = DIAG_MESSAGE_KEYS.get(self.code, "ies.diag.generic")
+            object.__setattr__(self, "message_key", DIAG_MESSAGE_KEYS.get(self.code, "ies.diag.generic"))
         if not self.fix_hint_key:
-            self.fix_hint_key = DIAG_FIX_HINT_KEYS.get(self.code, "ies.fix.generic")
+            object.__setattr__(self, "fix_hint_key", DIAG_FIX_HINT_KEYS.get(self.code, "ies.fix.generic"))
         if self.code not in DIAG_MESSAGE_KEYS and self.code not in NEW_DIAG_CODES:
             raise ValueError(f"未登记诊断码: {self.code!r};新码须在 NEW_DIAG_CODES 中声明")
+        # 深度不可变: 容器字段统一冻结为只读视图(tuple/MappingProxyType)
+        object.__setattr__(self, "params", _freeze_mapping(self.params))
+        if self.location is not None:
+            if not isinstance(self.location, Mapping):
+                raise TypeError(
+                    f"location 须为 Mapping 或 None,得到 {type(self.location).__name__}"
+                )
+            object.__setattr__(self, "location", _freeze_mapping(self.location))
+        object.__setattr__(self, "ref_ids", tuple(self.ref_ids))
 
     def to_dict(self) -> dict:
-        """序列化为 JSON 兼容字典(04 §5.4 结构)。"""
+        """序列化为 JSON 兼容字典(04 §5.4 结构)。
+
+        返回值是独立副本: params/location 转回普通 dict,ref_ids 转 list,
+        可直接 json.dumps;修改返回值不影响诊断对象本身。
+        """
         return {
             "code": self.code,
             "severity": self.severity,
             "blocking": self.blocking,
             "message_key": self.message_key,
-            "params": self.params,
-            "location": self.location,
+            "params": dict(self.params),
+            "location": dict(self.location) if self.location is not None else None,
             "fix_hint_key": self.fix_hint_key,
-            "ref_ids": self.ref_ids,
+            "ref_ids": list(self.ref_ids),
             "occurred_at": self.occurred_at,
             "source": self.source,
             "trace_id": self.trace_id,
@@ -249,6 +268,43 @@ class Diagnostic:
             "task_id": self.task_id,
             "suppressed": self.suppressed,
         }
+
+    def replace(self, **changes: object) -> Diagnostic:
+        """返回替换指定字段后的新诊断对象(原对象不变)。
+
+        等价 ``dataclasses.replace``,但容器字段(params/ref_ids/location)按
+        构造语义重新冻结,调用方无需关心只读视图类型。
+        """
+        return dc_replace(self, **changes)
+
+    def with_context(
+        self,
+        *,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        trace_id: str | None = None,
+        source: str | None = None,
+    ) -> Diagnostic:
+        """跨层补充上下文(project/task/trace/source)的派生辅助方法。
+
+        仅覆盖显式传入且当前为空的字段,已有上下文不被静默覆盖;
+        未传入任何值时返回等价新对象。
+        """
+        updates: dict[str, str] = {}
+        for name, value in (
+            ("project_id", project_id),
+            ("task_id", task_id),
+            ("trace_id", trace_id),
+            ("source", source),
+        ):
+            if value is not None and not getattr(self, name):
+                updates[name] = value
+        return self.replace(**updates) if updates else self.replace()
+
+
+def _freeze_mapping(mapping: Mapping[str, object]) -> Mapping[str, object]:
+    """把映射冻结为浅只读视图(嵌套容器由 to_dict 副本与约定共同约束)。"""
+    return MappingProxyType(dict(mapping))
 
 
 def make_diag(
@@ -258,9 +314,9 @@ def make_diag(
     fix_hint_key: str = "",
     *,
     blocking: bool | None = None,
-    params: dict | None = None,
-    location: dict | None = None,
-    ref_ids: list[str] | None = None,
+    params: Mapping[str, object] | None = None,
+    location: Mapping[str, object] | None = None,
+    ref_ids: Sequence[str] | None = None,
     source: str = "",
     trace_id: str = "",
     project_id: str = "",
@@ -286,7 +342,7 @@ def make_diag(
         params=params or {},
         location=location,
         fix_hint_key=fix_hint_key,
-        ref_ids=ref_ids or [],
+        ref_ids=tuple(ref_ids or ()),
         source=source,
         trace_id=trace_id,
         project_id=project_id,

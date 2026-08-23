@@ -223,11 +223,15 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
         _check_data(db, project, diags)
     _check_financial_baseline(db, project, config_data, diags)
     _check_readiness(project, diags)
-    # 统一标记: 阻断错误保持阻断(与严重度一致), 警告不降级也不升级
+    # 统一标记: 阻断错误保持阻断(与严重度一致), 警告不降级也不升级。
+    # Diagnostic 为深度不可变类型, 上下文/阻断标记经 replace 生成新对象。
+    marked: list[Diagnostic] = []
     for d in diags:
-        d.project_id = str(project_id)
-        if d.severity in (SEVERITY_BLOCKING, SEVERITY_ERROR):
-            d.blocking = True
+        updated = d.with_context(project_id=str(project_id))
+        if d.severity in (SEVERITY_BLOCKING, SEVERITY_ERROR) and not updated.blocking:
+            updated = updated.replace(blocking=True)
+        marked.append(updated)
+    diags = marked
     blockers = [d for d in diags if d.blocking]
     if blockers:
         status = "blocked"

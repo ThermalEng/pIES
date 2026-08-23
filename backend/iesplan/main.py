@@ -28,36 +28,10 @@ _registry_status: str = "pending"
 APP_NAME = "iesplan"
 
 # ---------------------------------------------------------------------------
-# 全局异常 → 标准错误信封(与 AppError.to_dict 同构; fix_hint_key/ref_ids 补默认)
+# 全局异常 → 标准错误信封(与 AppError.to_dict 同构; 构造器权威源在 core.errors)
 # ---------------------------------------------------------------------------
 
-from iesplan.core.errors import AppError
-
-
-def _error_envelope(
-    *,
-    code: str,
-    message_key: str,
-    severity: str = "error",
-    blocking: bool = True,
-    params: dict[str, Any] | None = None,
-    location: dict[str, Any] | None = None,
-    fix_hint_key: str = "",
-    ref_ids: list[str] | None = None,
-) -> dict[str, Any]:
-    """构造标准错误响应体 {"error": {...}}, 字段对齐契约中的 Diagnostic。"""
-    return {
-        "error": {
-            "code": code,
-            "message_key": message_key,
-            "severity": severity,
-            "blocking": blocking,
-            "params": params or {},
-            "location": location,
-            "fix_hint_key": fix_hint_key,
-            "ref_ids": ref_ids or [],
-        }
-    }
+from iesplan.core.errors import AppError, error_envelope as _error_envelope
 
 
 def _app_error_response(exc: Exception) -> JSONResponse:
@@ -69,6 +43,8 @@ def _app_error_response(exc: Exception) -> JSONResponse:
         blocking=bool(getattr(exc, "blocking", True)),
         params=getattr(exc, "params", None),
         location=getattr(exc, "location", None),
+        fix_hint_key=str(getattr(exc, "fix_hint_key", "") or ""),
+        ref_ids=list(getattr(exc, "ref_ids", ()) or ()),
     )
     # 优先采用异常自带的 http_status(403/404/409/413...), 否则兜底 400
     status = getattr(exc, "http_status", None)

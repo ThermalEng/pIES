@@ -6,11 +6,45 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from typing import Any
+
 from iesplan.core.diagnostics import (
     SEVERITIES,
     SEVERITY_BLOCKING,
     SEVERITY_ERROR,
 )
+
+
+def error_envelope(
+    *,
+    code: str,
+    message_key: str,
+    severity: str = SEVERITY_ERROR,
+    blocking: bool = True,
+    params: Mapping[str, Any] | None = None,
+    location: Mapping[str, Any] | None = None,
+    fix_hint_key: str = "",
+    ref_ids: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """构造标准错误信封 {"error": {...}}(宪法 §8.3,与 Diagnostic 字段同构)。
+
+    全库唯一错误体权威构造器: HTTP 异常处理器、AppError.to_dict、中间件
+    手工响应一律经由本函数输出,字段集固定为
+    code/severity/blocking/message_key/params/location/fix_hint_key/ref_ids。
+    """
+    return {
+        "error": {
+            "code": code,
+            "message_key": message_key,
+            "severity": severity,
+            "blocking": blocking,
+            "params": dict(params or {}),
+            "location": dict(location) if location is not None else None,
+            "fix_hint_key": fix_hint_key,
+            "ref_ids": list(ref_ids or ()),
+        }
+    }
 
 
 class AppError(Exception):
@@ -38,8 +72,10 @@ class AppError(Exception):
         severity: str | None = None,
         blocking: bool | None = None,
         message_key: str | None = None,
-        params: dict | None = None,
-        location: dict | None = None,
+        params: Mapping[str, Any] | None = None,
+        location: Mapping[str, Any] | None = None,
+        fix_hint_key: str = "",
+        ref_ids: Sequence[str] | None = None,
     ) -> None:
         if severity is not None and severity not in SEVERITIES:
             raise ValueError(f"非法严重度: {severity!r}")
@@ -47,21 +83,26 @@ class AppError(Exception):
         self.severity = severity or self.severity
         self.blocking = self.severity == SEVERITY_BLOCKING if blocking is None else blocking
         self.message_key = message_key or self.message_key
-        self.params = dict(params or {})
-        self.location = location
+        self.params: dict[str, Any] = dict(params or {})
+        self.location: Mapping[str, Any] | None = (
+            dict(location) if location is not None else None
+        )
+        self.fix_hint_key = fix_hint_key
+        self.ref_ids: tuple[str, ...] = tuple(ref_ids or ())
         super().__init__(message or self.message_key)
 
-    def to_dict(self) -> dict:
-        """序列化为 API 错误响应体(与诊断对象同构)。"""
-        return {
-            "error": True,
-            "code": self.code,
-            "severity": self.severity,
-            "blocking": self.blocking,
-            "message_key": self.message_key,
-            "params": self.params,
-            "location": self.location,
-        }
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为标准错误信封(error 对象内含 8 个契约字段)。"""
+        return error_envelope(
+            code=self.code,
+            message_key=self.message_key,
+            severity=self.severity,
+            blocking=self.blocking,
+            params=self.params,
+            location=self.location,
+            fix_hint_key=getattr(self, "fix_hint_key", ""),
+            ref_ids=getattr(self, "ref_ids", ()),
+        )
 
 
 class ForbiddenError(AppError):

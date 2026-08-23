@@ -34,6 +34,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from iesplan.config import settings
+from iesplan.core.errors import error_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -182,18 +183,14 @@ def _error_body(code: str, message_key: str, status: int, **params: object) -> J
     fix_hint = RATE_LIMIT_FIX_HINT if code == RATE_LIMIT_CODE else None
     return JSONResponse(
         status_code=status,
-        content={
-            "error": {
-                "code": code,
-                "message_key": message_key,
-                "severity": "error",
-                "blocking": True,
-                "params": params,
-                "location": None,
-                "fix_hint_key": fix_hint,
-                "ref_ids": [],
-            }
-        },
+        content=error_envelope(
+            code=code,
+            message_key=message_key,
+            severity="error",
+            blocking=True,
+            params=params,
+            fix_hint_key=fix_hint or "",
+        ),
     )
 
 
