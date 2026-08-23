@@ -371,9 +371,11 @@ def get_object(db: Session, object_id: int | str) -> bytes:
     try:
         raw = get_blob_store().get_blob(obj.storage_path)
     except BlobMissingError as exc:
+        # §16: 错误响应不得含主机绝对路径; 适配器异常 params 携带的路径只进日志
+        logger.warning("对象文件缺失(仅日志): object_id=%s path=%s", obj.id, exc.params)
         raise ObjectCorruptError(
             "",
-            params={"object_id": obj.id, "oid": obj.oid, "reason": "missing", "path": str(exc.params)},
+            params={"object_id": obj.id, "oid": obj.oid, "reason": "missing"},
         ) from exc
     if len(raw) != obj.size_bytes or sha256_hex(raw) != obj.sha256:
         raise ObjectCorruptError(
@@ -1192,11 +1194,22 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
             )
             db.add(obj)
             db.flush()
+            # §11: 内部路径不入审计; 只记内容摘要 + 大小(可追溯且不泄适配器细节)
             _audit(db, "objects", obj.id, "object_reconciled",
-                   after={"storage_path": path, "source": "orphan_file"})
+                   after={"sha256": digest, "size_bytes": len(content),
+                          "source": "orphan_file"})
             orphan_registered.append(path)
     else:
-        orphan_reported = [{"storage_path": p} for p in orphans]
+        # dry-run 同样读文件算摘要: 报告只含内容寻址摘要, 不泄内部路径(§11)
+        for path in orphans:
+            try:
+                content = store.get_blob(path)
+                orphan_reported.append({
+                    "sha256": sha256_hex(content),
+                    "size_bytes": len(content),
+                })
+            except BlobMissingError:
+                continue
 
     # 3. 损坏: 有记录但文件缺失或内容不一致
     corrupt_reported: list[dict] = []

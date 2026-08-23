@@ -206,6 +206,8 @@ def test_put_object_writes_file_and_record(session: Session, data_dir) -> None:
         sa.select(AuditLog).where(AuditLog.action == "object_created")
     ).scalar_one()
     assert audit.after["source_category"] == "user_upload"
+    # 0.4.0: 审计不记录内部路径(§11)
+    assert "storage_path" not in audit.after
     # object_info 与行一致
     info = object_info(session, obj.id)
     assert info["oid"] == digest and info["size_bytes"] == len(content)
@@ -899,7 +901,9 @@ class TestReconcile:
 
         report = reconcile(session, dry_run=True)
         assert report["dry_run"] is True
-        assert any("ab" in o["storage_path"] for o in report["orphan_reported"])
+        # 0.4.0: 报告只含内容寻址摘要, 不含内部路径(§11)
+        assert any("ab" in o["sha256"] for o in report["orphan_reported"])
+        assert all("storage_path" not in o for o in report["orphan_reported"])
         assert any(c["reason"] == "missing_file" for c in report["corrupt_reported"])
         # dry_run 不登记孤儿、不删记录
         assert report["orphan_registered"] == []
@@ -913,6 +917,12 @@ class TestReconcile:
         assert report["orphan_registered"] == [f"objects/{file_digest}"]
         # 登记行的 oid/sha256 以内容真实哈希为准(文件名为纯存储标识)
         real_digest = hashlib.sha256(b"orphan-content").hexdigest()
+        # 0.4.0: 登记审计只记内容摘要, 不含内部路径(§11)
+        reconcil_audit = session.execute(
+            sa.select(AuditLog).where(AuditLog.action == "object_reconciled")
+        ).scalar_one()
+        assert reconcil_audit.after["sha256"] == real_digest
+        assert "storage_path" not in reconcil_audit.after
         row = session.execute(
             sa.select(StoredObject).where(StoredObject.oid == real_digest)
         ).scalar_one()
