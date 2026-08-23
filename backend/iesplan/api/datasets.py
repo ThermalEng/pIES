@@ -43,7 +43,7 @@ from iesplan.api.limits import (
     validate_upload_fields,
     validate_upload_meta,
 )
-from iesplan.core.errors import NotFoundError, http_error
+from iesplan.core.errors import NotFoundError, error_envelope, http_error
 from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.db import get_db
 from iesplan.services import dataset as dataset_service
@@ -128,18 +128,11 @@ def _dataset_dict(ds) -> dict:
 
 
 def _validation_response(exc: DataValidationError) -> JSONResponse:
-    """校验失败响应: 400 + 错误体 + 诊断明细。"""
+    """校验失败响应: 400 + 标准错误信封 + 诊断明细(信封与全局处理器同构)。"""
     return JSONResponse(
         status_code=400,
         content={
-            "error": {
-                "code": exc.code,
-                "message_key": exc.message_key,
-                "severity": exc.severity,
-                "blocking": exc.blocking,
-                "params": exc.params,
-                "location": exc.location,
-            },
+            **exc.to_dict(),
             "diagnostics": [d.to_dict() for d in exc.diagnostics],
         },
     )

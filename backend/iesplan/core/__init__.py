@@ -5,5 +5,6 @@
 """
 
 from iesplan.core.diagnostics import Diagnostic, make_diag
+from iesplan.core.errors import error_envelope
 
-__all__ = ["Diagnostic", "make_diag"]
+__all__ = ["Diagnostic", "error_envelope", "make_diag"]

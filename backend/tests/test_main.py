@@ -165,6 +165,56 @@ def test_app_error_response_envelope() -> None:
     assert err["blocking"] is True
     assert err["params"] == {"row": 3}
     assert err["location"] == {"object_type": "timeseries", "field": "t0"}
+    # 信封字段集与契约固定: 8 字段同构(0.3.0 C1)
+    assert set(err) == {
+        "code",
+        "message_key",
+        "severity",
+        "blocking",
+        "params",
+        "location",
+        "fix_hint_key",
+        "ref_ids",
+    }
+    assert json.loads(resp.body).keys() == {"error"}
+
+
+def test_app_error_to_dict_envelope_isomorphic() -> None:
+    """AppError.to_dict 与 _error_envelope 输出同一形状(权威源 core.errors)。"""
+    from iesplan.core.errors import AppError, error_envelope
+
+    class _Err(AppError):
+        code = "DATA-TS-001"
+        severity = "blocking"
+        message_key = "ies.diag.data.ts_dup"
+        http_status = 400
+
+    exc = _Err(
+        "boom",
+        params={"row": 3},
+        location={"object_type": "timeseries", "field": "t0"},
+        fix_hint_key="ies.fix.data.ts_dup",
+        ref_ids=["r1"],
+    )
+    assert exc.to_dict() == error_envelope(
+        code="DATA-TS-001",
+        message_key="ies.diag.data.ts_dup",
+        severity="blocking",
+        blocking=True,
+        params={"row": 3},
+        location={"object_type": "timeseries", "field": "t0"},
+        fix_hint_key="ies.fix.data.ts_dup",
+        ref_ids=["r1"],
+    )
+    err = exc.to_dict()["error"]
+    assert err["fix_hint_key"] == "ies.fix.data.ts_dup"
+    assert err["ref_ids"] == ["r1"]
+    # 与 Diagnostic.to_dict 字段同构(信封 8 字段 ⊆ 诊断 14 字段)
+    from iesplan.core.diagnostics import DATA_TS_DUP, make_diag
+
+    diag_fields = set(make_diag(DATA_TS_DUP).to_dict())
+    assert set(err) <= diag_fields
+    json.dumps(exc.to_dict(), ensure_ascii=False)
 
 
 def test_app_error_mapping_integration() -> None:

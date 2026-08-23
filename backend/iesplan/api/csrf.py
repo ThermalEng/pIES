@@ -38,6 +38,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from iesplan.config import settings
+from iesplan.core.errors import error_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -132,18 +133,12 @@ def csrf_reject_response() -> JSONResponse:
     """CSRF 校验失败的标准 403 错误信封(与全局 AppError 处理器同构)。"""
     return JSONResponse(
         status_code=403,
-        content={
-            "error": {
-                "code": "AUTH-CSRF-001",
-                "message_key": "ies.diag.auth.csrf_origin_rejected",
-                "severity": "blocking",
-                "blocking": True,
-                "params": {},
-                "location": None,
-                "fix_hint_key": "",
-                "ref_ids": [],
-            }
-        },
+        content=error_envelope(
+            code="AUTH-CSRF-001",
+            message_key="ies.diag.auth.csrf_origin_rejected",
+            severity="blocking",
+            blocking=True,
+        ),
     )
 
 

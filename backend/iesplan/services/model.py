@@ -1215,6 +1215,5 @@ def validate_project_model(db: Session, project_id: int) -> list[Diagnostic]:
                     },
                 )
             )
-    for d in diags:
-        d.project_id = str(project_id)
-    return diags
+    # Diagnostic 深度不可变: 项目上下文经派生方法生成新对象
+    return [d.with_context(project_id=str(project_id)) for d in diags]
