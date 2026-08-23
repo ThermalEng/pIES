@@ -20,6 +20,24 @@
 ### 管理
 
 - 对象清理引入软删/保留期（0.2.0-B3 恢复路径）：`POST /api/admin/objects/cleanup` 执行不再立即物理删除，而是把无引用的孤儿对象标记为“待物理回收”，默认保留 7 天；保留期内文件保留、内容可读，管理员可经 `POST /api/admin/objects/restore` 恢复误清理对象，对象重新获得 owner 引用时也会自动恢复。新增 `GET /api/admin/objects/pending` 查看“已删除待回收”清单，`POST /api/admin/objects/purge` 只对已过保留期的待回收对象执行物理回收（先 `dry_run` 预览再执行）；`reconcile` 巡检会兜底物理回收到期对象。
+- 资源使用边界（0.2.0 A4）：新增全局 IP 限流（按进程内存滑动窗口，Redis 可用时跨 Worker 原子计数）与按用户/项目的上传配额门禁，超限返回 429 `API-RL-001` / 413 `API-QUOTA-001`；dataset 上传的 `meta`/`fields`/`provenance` 字段经白名单校验，未知键或畸形结构返回 400 `API-META-001`。本地开发与 e2e 默认宽松阈值（限流 120 次/分钟，配额 0 = 不限），通过 `IESPLAN_RATE_LIMIT_MAX_REQUESTS` / `IESPLAN_RATE_LIMIT_WINDOW_SECONDS` / `IESPLAN_UPLOAD_QUOTA_BYTES` / `IESPLAN_PROJECT_QUOTA_BYTES` 配置。
+- 下载授权加固（0.2.0 A3）：`/api/exports` 的下载令牌除原 HMAC 签名外，新增对象归属校验——令牌载荷 `object_id` 必须真实存在，且对象必须被当前会话用户有权限访问的项目引用，否则 403 `AUTH-OBJ-001`；伪造 weak-secret 签发的令牌不再能越权下载。
+- 任务结果查询 IDOR 修复（0.2.0）：`select_result_endpoint` 与 `results.py` `read_hourly` 增加 `ensure_task_belongs(db, project_id, task_id)` 校验，未授权项目任务返回 404 `RES-MISS-003`，阻断"猜测 task_id 跨项目读取结果"的路径。
+- `/api/readyz` 脱敏（0.2.0 A3）：注册表初始化失败的原始异常串（可能含内部路径/凭证）只进日志，探针响应只给 `modeling_registry / detail: unavailable`，避免 503 响应泄露内部堆栈。
+- 对象存储公开面收尾（0.4.0）：`ObjectHandle` 公开字段移除 `storage_path` / `ref_count`，业务模块只能经 `iesplan.storage` 公开门面传递 `ObjectId/ObjectHandle/ObjectOwner`；包导入的 `ImportProposal.source_path` 停止写值（可追溯性由 `source_object_id` 与 `source_hash` 承担）；reconcile 审计与 dry-run 报告不再含内部路径，主机绝对路径不进错误信封（§11/§16 路径泄漏清零）。替换存储适配器不再改变业务契约。
+
+### 错误契约
+
+- 错误响应统一为标准 8 字段信封 `{"error": {code, message_key, severity, blocking, params, location, fix_hint_key, ref_ids}}`（0.3.0）：所有非 2xx 响应（404 路由未找到、403 权限/CSRF、429 限流、413 配额、500 未未捕获）走 `iesplan/core/errors.py:error_envelope` 唯一权威构造器；`code` 格式 `DOMAIN-CATEGORY-NNN`，新码须在 `core/diagnostics.py NEW_DIAG_CODES` 登记。前端 `client.ts` 按 `parseErrorEnvelope` 解析后透传 `params.diagnostics` 等明细到 `ApiError.params`，页面不再特判裸 `{"detail"}`。
+- `Diagnostic` 收敛为深度不可变公共类型（0.3.0 C1）：`@dataclass(frozen=True, slots=True)` + `object.__setattr__` 冻结，params/location 经递归只读包装（MappingProxyType + tuple），`ref_ids` 转 tuple；`to_dict()` 递归解冻为普通 dict/list 供 JSON 序列化；新增 `replace()` 与 `with_context(project_id/task_id/trace_id/source)` 派生方法。
+- 删除空数据降级（0.3.0 C2）：系统模型域返回 `has_graph` 显式字段标识"未建模/已建模"；结果域新增 `evidence_status: no_evidence|available` 显式区分"任务未完成/已提交证据包"，无证据包时 `hourly_refs/metrics` 等字段为 null（前端不再猜测）；任务结果域缺证据包返回 404 `RES-MISS-003`，前端 `no_evidence` 时不渲染空卡片。
+- 配置/数据集校验失败统一信封 + 阻塞语义（0.3.0 C3 + 收口）：`PUT /config` 校验失败返回 422 `CONFIG-VAL-001`，dataset 上传校验失败返回 400 `DATA-VAL-001`，诊断明细进 `params.diagnostics`；`DataValidationError` 显式 `blocking=True` 与配置 422 一致。
+- FastAPI 请求体校验走标准信封（0.3.0 收口）：`RequestValidationError` 注册全局处理器，422 + `error_envelope(code=API-REQ-001, message_key=ies.error.invalid_request, params.errors=...)`，前端无需特判裸 `{"detail"}`。
+
+### 协议门禁
+
+- 公共协议测试基线（0.3.0 C4）：`backend/tests/test_protocol_baseline.py`（628 行）锁定 12 条错误路径的 8 字段信封 + 28 个端点的成功包装键集（AST 门禁禁止裸/包装并存）；新增 / 修改端点必须维持基线。
+- 静态架构门禁（0.3.0 C5）：`backend/tests/test_architecture_gates.py` 白名单基线三门禁——`core` 不依赖业务模块、禁止跨模块私有符号导入、禁止 API 直接导入 ORM；新增违规直接断言失败，存量违规在白名单带 TODO，后续按宪法 §14.3 逐步整改。
 
 ## 0.1.0 — 开发基线
 

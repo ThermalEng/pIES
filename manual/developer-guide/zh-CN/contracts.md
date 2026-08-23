@@ -20,32 +20,42 @@
 
 ## 成功与错误
 
-资源成功响应只有一种外层形态：
+成功资源响应顶层使用**一级命名键包装**，每个键名直接表达资源语义：
 
-```json
-{"data": {}, "meta": {}}
-```
+- 单资源响应：顶层为 `{<resource_name>, ...}`，例如 `{project, draft, versions, my_role}` / `{task, replayed, duplicate, hint}` / `{result}` / `{assessment}` / `{report, stored}`。
+- 列表 + 分页：顶层固定为 `{items, total}` 或 `{items, next_cursor}` 二键（具体由端点选择一种）。
+- 动作响应（确认/状态变更/校验触发）：顶层为 `{ok, ...}`，必要时附 message_key/expires_at/result 等。
+- 必要时可嵌套（如 `{project, draft, versions, my_role}`），嵌套键名同样遵循自我文档化原则。
 
-列表在 `data` 中返回数组，分页、版本和追踪信息放在 `meta`。无正文成功响应使用正确 HTTP 语义，不返回伪造 JSON。
+禁止：
 
-错误使用结构化诊断：
+- `{data, meta}` 这种通用包装（破坏键名自我文档化，分散前端适配层决策）；
+- 同一资源端点既返回裸对象又返回包装对象（裸/包装两版并存）—— 协议基线测试 [`backend/tests/test_protocol_baseline.py`](../../../backend/tests/test_protocol_baseline.py) 的 AST 门禁禁止新增此类违规；
+- `{**data, "data": data}` 双前缀；
+- 204 No Content 返回伪造 JSON。
+
+错误统一使用以下标准信封（参见宪法 §8.3，构造器权威源 `iesplan/core/errors.py:error_envelope`）：
 
 ```json
 {
   "error": {
-    "code": "DOMAIN-CATEGORY-001",
+    "code": "DOMAIN-CATEGORY-NNN",
     "message_key": "ies.error.example",
     "severity": "error",
     "blocking": true,
     "params": {},
     "location": null,
-    "fix_hint_key": null,
+    "fix_hint_key": "",
     "ref_ids": []
   }
 }
 ```
 
-`code` 用于稳定分类，`message_key + params` 用于本地化，`location` 用于定位资源或字段。客户端不得接收堆栈、SQL、宿主机路径或凭证。
+`code` 用于稳定分类（域-类别-三位序号），`message_key + params` 用于本地化，`location` 用于定位资源或字段。客户端不得接收堆栈、SQL、宿主机路径或凭证。
+
+**`code` 格式**：`DOMAIN-CATEGORY-NNN`。`DOMAIN` 是 API 子域（API/PROJ/TASK/DATA/CONFIG/OBJ/PERM/AUTH），`CATEGORY` 是错误类别（REQ/VAL/NF/CONFLICT/SEC/QUOTA/MISS 等）。**同 code 可跨 message_key 复用**（同语义不同文案，由前端按 message_key 渲染），但**禁止跨 code 共享 message_key**（每个 message_key 必须绑定唯一 code）。新码须在 `core/diagnostics.py NEW_DIAG_CODES` 集中登记，未登记即在 `Diagnostic` 构造时抛 ValueError（包络码从 `core/errors.py` 走时不受此约束，但建议同样登记）。
+
+`fix_hint_key` 字段：值为 `""` 表示无修复建议（非 null），与前端 `client.ts:217 ?? null` 容错路径兼容。
 
 ## HTTP 语义
 
@@ -57,6 +67,25 @@
 - 认证、授权、不存在、冲突和校验失败使用一致的标准状态码；
 - 可重试写操作使用作用域明确的幂等键；
 - 并发编辑使用 revision、ETag 或等价乐观锁。
+
+**状态码全局选择规则**（ADR-0005）：
+
+| 状态码 | 触发条件 | 典型码前缀 |
+|---|---|---|
+| 200 / 201 / 204 | 正常成功 / 创建成功 / 无正文成功 | — |
+| 400 | 请求体**业务内容**校验失败（数据集行数/时间戳/缺失、配置业务字段越界） | `*-VAL-*` / `DATA-VAL-*` |
+| 401 | 未认证 | `AUTH-*-001` |
+| 403 | 已认证但无权限 / CSRF / 跨源 | `PERM-DENIED-*` / `AUTH-CSRF-*` |
+| 404 | 资源不存在 / 路由不存在 | `RES-MISS-*` / `API-NF-*` |
+| 409 | 资源状态冲突（重复/乐观锁失败/确认缺失） | `*-CONFLICT-*` / `ADMIN-CONFIRM-*` |
+| 413 | 上传文件过大 / 配额超限 | `API-QUOTA-*` |
+| 422 | 请求体**结构/语义**不可处理（Pydantic schema 错、配置变量类型错/算法参数越界） | `API-REQ-001` / `CONFIG-VAL-*` |
+| 429 | 限流触发 | `API-RL-001` |
+| 500 | 未捕获异常 | `API-500-001` |
+
+**400 与 422 的核心区分**：400 用于**业务内容**校验失败（数据本身有问题，如上传 CSV 行数不够、时间戳乱序）；422 用于**请求体结构/语义**不可处理（schema 不匹配、配置变量类型错、算法参数越界、必填字段缺失）。同一域内选择必须保持一致；端点设计时参考本表并查阅同类端点历史示例。
+
+**上传与下载错误**：413 用于文件大小/配额超限（封顶）；429 用于限流（重试导向）。两者都不视为校验错误，前端按 message_key 渲染。
 
 上传必须声明媒体类型、大小和摘要约束。下载返回受控资源或短期授权，客户端不拼接存储路径。
 

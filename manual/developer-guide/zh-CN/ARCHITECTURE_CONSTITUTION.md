@@ -491,25 +491,9 @@ DTO 禁止：
 
 ### 8.2 成功响应
 
-新契约统一使用：
+成功资源响应顶层只允许 1-3 个键，每个键名直接表达资源语义（如 `{project}` / `{items, next_cursor}` / `{ok, ...}`）。禁止 `{data, meta}` 这种通用包装。必要时可嵌套（嵌套键同样遵循自我文档化原则），列表与分页/版本/追踪分置同顶层两个键。
 
-```json
-{
-  "data": {},
-  "meta": {}
-}
-```
-
-`meta` 可省略，只承载分页、版本、追踪等非资源语义。列表使用：
-
-```json
-{
-  "data": [],
-  "meta": {"next_cursor": null, "limit": 50}
-}
-```
-
-禁止同时返回裸对象和包裹对象、`{**data, "data": data}` 或两版字段并集。`204 No Content` 不返回 JSON。
+状态码与包装键的全局统一规则见 [contracts.md](contracts.md)「HTTP 语义」与「成功与错误」节（ADR-0005）。
 
 ### 8.3 错误与诊断
 
@@ -532,6 +516,8 @@ DTO 禁止：
 
 后端不得把堆栈或内部路径返回给客户端。面向用户的本地化文案由前端根据 `message_key + params` 生成；日志可以包含受控技术详情和 request ID。
 
+错误码 `code` 字段格式 `DOMAIN-CATEGORY-NNN`（域-类别-三位序号），`DOMAIN` 是 API 子域（API/PROJ/TASK/DATA/CONFIG/OBJ/PERM/AUTH），`CATEGORY` 是错误类别（REQ/VAL/NF/CONFLICT/SEC/QUOTA/MISS 等）。同 `code` 可跨 message_key 复用（同语义不同文案），但禁止跨 code 共享 message_key。新码须在 `core/diagnostics.py NEW_DIAG_CODES` 登记。详细规则见 ADR-0005 与 [contracts.md](contracts.md)「成功与错误」节。
+
 禁止捕获契约转换或主资源错误后返回空列表、“暂无数据”或 HTTP 200。
 
 ### 8.4 HTTP 语义
@@ -541,7 +527,7 @@ DTO 禁止：
 - `PUT` 完整替换；
 - `PATCH` 显式部分更新；
 - `DELETE` 执行明确生命周期操作；
-- 冲突使用 `409`，校验失败使用 `400/422` 的项目统一选择，认证使用 `401`，授权使用 `403`，不存在使用 `404`；
+- 冲突使用 `409`，校验失败使用 `400/422` 的项目统一选择（详细语义与选择规则见 [contracts.md](contracts.md)「HTTP 语义」节，ADR-0005），认证使用 `401`，授权使用 `403`，不存在使用 `404`；
 - 创建返回 `201`，异步任务接受返回 `202`；
 - 可重试写操作必须支持幂等键；
 - 并发编辑必须使用 revision/ETag/If-Match 等明确乐观锁，禁止最后写入静默覆盖。
