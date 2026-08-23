@@ -100,6 +100,11 @@ def client(db: Session) -> Iterator[TestClient]:
 
     app.dependency_overrides[get_db] = _override_get_db
     identity.reset_login_rate_limit()
+    # 全局限流状态为进程级共享: 同时清空, 防止本文件残留计数影响后续
+    # 文件的 401 断言(或反之被前序高频文件打成 429)
+    from iesplan.api.limits import reset_rate_limit
+
+    reset_rate_limit()
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 
