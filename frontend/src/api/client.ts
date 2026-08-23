@@ -1058,7 +1058,7 @@ export interface TasksApi {
 export interface ResultsApi {
   result(projectId: number, taskId: number): Promise<{
     evidence_package_id: number
-    metrics: Record<string, MetricValue>
+    metrics: Record<string, MetricValue> | null
     diagnostics: Diagnostic[]
   }>
   assessments(projectId: number, taskId: number): Promise<ResultAssessment[]>
@@ -1552,7 +1552,7 @@ export const api = {
       /** available=已提交证据包; no_evidence=任务尚无证据包(未完成), 内容字段为 null。 */
       evidence_status: 'available' | 'no_evidence'
       evidence_package_id: number
-      metrics: Record<string, MetricValue>
+      metrics: Record<string, MetricValue> | null
       diagnostics: Diagnostic[]
     }> {
       return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then((body) => {
@@ -1567,7 +1567,7 @@ export const api = {
           evidence_package_id: Number(evidence.id ?? 0),
           metrics:
             status === 'no_evidence'
-              ? {}
+              ? null
               : ((r.metrics_summary as Record<string, MetricValue>) ?? {}),
           diagnostics: [],
         }

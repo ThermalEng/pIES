@@ -1150,8 +1150,9 @@ def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[
 
     四维结论以评估记录为准(细粒度 + 派生摘要), 不做任何重新计算(RPD 11.3)。
     任务存在但尚无证据包是可查询的正常状态(任务未完成), evidence_status="no_evidence"
-    显式声明; 各内容字段(metrics_summary/candidates/best/plan_summary/hourly_refs)
-    为 None 仅出现在该状态下, 调用方据 evidence_status 分支而非猜测字段。
+    显式声明; 此时各内容字段(metrics_summary/candidates/best/plan_summary/hourly_refs)
+    一律为 None。调用方须据 evidence_status 分支;available 态下某段内容缺失
+    (如任务类型不含 hourly_refs)同样返回 None, 不应按字段存在性推导状态。
     """
     project_service.ensure_access(db, user, project_id, "view")
     task = tasks_service.ensure_task_belongs(db, project_id, task_id)
