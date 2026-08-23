@@ -8,6 +8,13 @@
 
 ## Unreleased
 
+### 设备模型与建模命令契约
+
+- 发布 `ies.device-model` `1.0.0` 契约：机器可读 JSON Schema、唯一规范化规则（稳定键排序 + 规范字节 SHA-256 摘要）、定位到文件/字段/稳定诊断码的诊断，以及合法/非法手写样例。
+- 设备 YAML 由旧 `type_id`/`function` 格式一次性迁移为 `schema`/`device`/`parameters`/`ports`/`data_inputs`/`states`/`model_commands`/`extensions` 结构；`function.package/function.entry` 替换为稳定 ModelCommand ID + 精确版本（`<command-id>@<exact-version>`），命令 ID 到实现的解析只存在于组合根与 modeling provider 内部。
+- 设备公开 descriptor 收敛为深度不可变值对象（list→tuple、dict→MappingProxyType）；公开面不再暴露函数、包、模块或宿主机路径（`standard_csv_path` 移除，标准 csv 经 `get_profile_columns(type_id)` 门面读取）。
+- 提供内置目录 YAML 的一次性迁移回执（文件清单 + 新旧规范摘要 + 校验结果）。
+
 ### 安全
 
 - 为基于 Cookie 会话(`ies_session`, SameSite=Lax)的状态变更请求(POST/PUT/PATCH/DELETE)增加 CSRF 双源校验：浏览器请求优先校验 `Origin`、缺失回退 `Referer`，规范化后必须命中可信来源(`app_url` + `IESPLAN_CORS_ORIGINS` + 请求自身 Host 同源来源)，否则返回 403 `AUTH-CSRF-001`；Bearer 认证、无 Origin/Referer 的 API 客户端与只读请求不受影响。

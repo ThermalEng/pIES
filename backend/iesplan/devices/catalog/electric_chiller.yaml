@@ -1,49 +1,109 @@
-# 电制冷机(机理模型、无状态; 电→冷转换, 02 §4.7 线性 COP)
-type_id: ies.device.electric_chiller
-version: 1.2.0
-name_zh: 电制冷机
-name_en: Electric Chiller
-help_topic: help.modeling.chiller
-model_method: mechanism
-stateful: false
-fidelity: medium
-energy_carriers: [electric, cool]
-is_load: false
-capabilities: [cooling_generation, controllable, optimization_variable]
-extends: ies.device.base
+# 电制冷机(机理模型、无状态; 电→冷转换)
+schema: ies.device-model
+schema_version: "1.0.0"
 
-ports:
-  - {name: electric_in, port_type: electric, direction: in, energy_carrier: electric,
-     capacity_ref: rated_cooling_kw}
-  - {name: cool_out, port_type: cooling, direction: out, energy_carrier: cool,
-     capacity_ref: rated_cooling_kw}
+device:
+  id: ies.device.electric_chiller
+  version: "1.2.0"
+  names:
+    zh-CN: 电制冷机
+    en-US: Electric Chiller
+  model_method: mechanism
+  stateful: false
+  fidelity: medium
+  energy_carriers: [electric, cool]
+  capabilities: [cooling_generation, controllable, optimization_variable]
 
 parameters:
-  rated_cooling_kw: {unit: kW, min: 0, max: 1000000, default: 0, is_optimizable: true,
-                     stock_or_addition: addition, help_key: help.param.chiller.rated_cooling_kw}
-  max_cooling_kw: {unit: kW, min: 0, max: 1000000, default: 1000,
-                   stock_or_addition: addition, help_key: help.param.chiller.max_cooling_kw}
-  cop: {unit: "-", min: 1.5, max: 8.0, default: 4.0, help_key: help.param.chiller.cop}
-  cop_profile: {unit: reference, default: 0, help_key: help.param.chiller.cop_profile}
-  cooling_temp_c: {unit: "°C", min: 3, max: 20, default: 7,
-                   help_key: help.param.chiller.cooling_temp_c}
-  unit_invest_cost:
-    unit: CNY/kW
-    min: 0
-    default: "$price:device_costs.electric_chiller.unit_invest_cost"
+  rated_cooling_kw:
+    value_type: number
+    quantity: power
+    unit: kW
+    required: false
+    default: 0
+    minimum: 0
+    maximum: 1000000
+    optimizable: true
     stock_or_addition: addition
-    help_key: help.param.chiller.unit_invest_cost
+  max_cooling_kw:
+    value_type: number
+    quantity: power
+    unit: kW
+    required: false
+    default: 1000
+    minimum: 0
+    maximum: 1000000
+    stock_or_addition: addition
+  cop:
+    value_type: number
+    quantity: ratio
+    unit: "-"
+    required: false
+    default: 4.0
+    minimum: 1.5
+    maximum: 8.0
+  cop_profile:
+    value_type: number
+    quantity: ratio
+    unit: reference
+    required: false
+    default: 0
+  cooling_temp_c:
+    value_type: number
+    quantity: temperature
+    unit: "°C"
+    required: false
+    default: 7
+    minimum: 3
+    maximum: 20
+  unit_invest_cost:
+    value_type: number
+    quantity: currency_per_power
+    unit: CNY/kW
+    required: false
+    default: "$price:device_costs.electric_chiller.unit_invest_cost"
+    minimum: 0
+    stock_or_addition: addition
   lifetime_years:
+    value_type: number
+    quantity: duration
     unit: a
-    min: 1
-    max: 50
+    required: false
     default: "$price:device_costs.electric_chiller.lifetime_years"
-    help_key: help.param.chiller.lifetime_years
+    minimum: 1
+    maximum: 50
 
-time_series:
-  inputs: []
-  outputs: []
+ports:
+  electric_in:
+    carrier: electric
+    direction: in
+    quantity: power
+    unit: kW
+    capacity_parameter: rated_cooling_kw
+  cool_out:
+    carrier: cool
+    direction: out
+    quantity: power
+    unit: kW
+    capacity_parameter: rated_cooling_kw
 
-function:
-  entry: chiller_output
-  package: iesplan.modeling.functions
+data_inputs: {}
+
+states: {}
+
+model_commands:
+  cooling_generation: ies.model-command.chiller.generation@1.0.0
+  controllable: ies.model-command.chiller.generation@1.0.0
+  optimization_variable: ies.model-command.chiller.generation@1.0.0
+
+extensions:
+  ies.meta:
+    help_topic: help.modeling.chiller
+    param_help:
+      rated_cooling_kw: help.param.chiller.rated_cooling_kw
+      max_cooling_kw: help.param.chiller.max_cooling_kw
+      cop: help.param.chiller.cop
+      cop_profile: help.param.chiller.cop_profile
+      cooling_temp_c: help.param.chiller.cooling_temp_c
+      unit_invest_cost: help.param.chiller.unit_invest_cost
+      lifetime_years: help.param.chiller.lifetime_years

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from pathlib import Path
+from dataclasses import replace
 
 import numpy as np
 
@@ -45,24 +45,23 @@ logger = logging.getLogger(__name__)
 
 
 def _descriptor_to_modeling_spec(desc: DeviceModelDescriptor) -> ModelingDeviceSpec:
-    """公开设备描述 → modeling 规格(05 §2.3 阶段 ①→② 契约)。
+    """公开设备描述 → modeling 规格(roadmap 0.5.0 阶段 ①→② 契约)。
 
-    与 devices.spec.to_modeling_spec 同构, 但输入为已校验的公开描述
-    (不再需要 devices 内部字段; csv 路径已由 devices 推导)。
+    命令解析只在 provider 内部完成：
+    - mechanism: 取设备 model_commands 首个稳定命令 ID，经
+      ``iesplan.modeling.functions.resolve_command_function`` 解析为机理函数;
+    - data_repeat: 标准 csv 数据经 ``iesplan.devices.get_profile_columns`` 读取
+      (devices 内部解析路径, 公开描述不含宿主机路径)。
     """
-    fn = desc.function if isinstance(desc.function, dict) else {}
-    model_file = None
-    if isinstance(fn.get("model_file"), dict):
-        ref = fn["model_file"].get("file")
-        if isinstance(ref, str) and ref:
-            model_file = ref
-    data_file = desc.standard_csv_path
+    commands = dict(desc.model_commands) if desc.model_commands else {}
     model_function = ""
     if desc.model_method == "mechanism":
-        package = fn.get("package") or ""
-        entry = fn.get("entry") or ""
-        if package and entry:
-            model_function = f"{package}.{entry}"
+        ref = next(iter(commands.values()), "")
+        command_id = ref.split("@", 1)[0] if "@" in ref else ref
+        if command_id:
+            from iesplan.modeling.functions import resolve_command_function
+
+            model_function = resolve_command_function(command_id)
     return ModelingDeviceSpec(
         type_id=desc.type_id,
         version=desc.version,
@@ -78,8 +77,8 @@ def _descriptor_to_modeling_spec(desc: DeviceModelDescriptor) -> ModelingDeviceS
         stateful=desc.stateful,
         fidelity=desc.fidelity,
         model_function=model_function,
-        model_file=model_file,
-        data_file=data_file,
+        model_file=None,
+        data_file=None,
         ports=tuple(
             ModelingPortSpec(
                 name=p.name,
@@ -118,14 +117,14 @@ def _descriptor_to_modeling_spec(desc: DeviceModelDescriptor) -> ModelingDeviceS
 def _load_profile_csv(desc: DeviceModelDescriptor) -> dict[str, np.ndarray] | None:
     """data_repeat 设备: 读取 devices 推导的标准 csv(列名 → 一维数组)。
 
-    无 csv 返回 None(由 build_command 的 data_file 校验给出明确错误);
+    经 ``iesplan.devices.get_profile_columns`` 公开门面按 type_id 读取;
     读取/校验失败抛 AppError(不降级为 warning: 原始文件/列错误必须可见)。
     """
-    from iesplan.devices import load_profile_columns
+    from iesplan.devices import get_profile_columns
 
-    if desc.standard_csv_path is None:
+    if desc.model_method != "data_repeat":
         return None
-    return load_profile_columns(Path(desc.standard_csv_path), desc)
+    return get_profile_columns(desc.type_id)
 
 
 def register_catalog_commands() -> int:
@@ -157,13 +156,15 @@ def register_catalog_commands() -> int:
         profile = None
         if desc.model_method == "data_repeat":
             profile = _load_profile_csv(desc)
-            if profile is None and mspec.data_file is None:
+            if profile is None:
                 raise AppError(
                     f"data_repeat 设备 {desc.type_id} 缺少标准 csv 数据(启动注册拒绝)",
                     code="SYS-CFG-001",
                     message_key="ies.diag.store.config_invalid",
                     params={"device_id": desc.type_id},
                 )
+            # 数据已成功读取; data_file 只作逻辑引用(非宿主机路径, 不参与计算)。
+            mspec = replace(mspec, data_file=f"ies.profile:{desc.type_id}")
         try:
             cmd, entry = build_command(mspec, profile=profile)
         except Exception as exc:

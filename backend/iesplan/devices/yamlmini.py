@@ -130,7 +130,10 @@ def _parse_block(
 def _parse_map(
     lines: list[tuple[int, str, int]], idx: int, indent: int
 ) -> tuple[dict, int]:
-    """解析块映射(缩进 == indent 的键值行);返回 (dict, 下一行索引)。"""
+    """解析块映射(缩进 == indent 的键值行);返回 (dict, 下一行索引)。
+
+    重复键直接拒绝(YAML 1.2 安全子集要求, 宪法 §7.8);不允许静默覆盖。
+    """
     result: dict = {}
     while idx < len(lines):
         ind, content, lineno = lines[idx]
@@ -150,6 +153,8 @@ def _parse_map(
                 value, idx = None, idx + 1
         else:
             value, idx = _parse_value(val, lineno), idx + 1
+        if key in result:
+            raise YamlParseError(f"重复键: {key!r}", lineno)
         result[key] = value
     return result, idx
 
@@ -254,6 +259,8 @@ def _parse_flow_map(text: str, lineno: int) -> dict:
         key, sep, val = _split_key_value(part)
         if not sep:
             raise YamlParseError(f"流式映射项非法: {part!r}", lineno)
+        if key in result:
+            raise YamlParseError(f"重复键: {key!r}", lineno)
         result[key] = _parse_value(val, lineno)
     return result
 

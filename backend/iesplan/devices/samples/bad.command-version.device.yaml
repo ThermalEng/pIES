@@ -1,0 +1,33 @@
+# 非法设备模型样例（ies.device-model 1.0.0）— 命令版本缺失（model_commands 值缺少 @exact-version）。
+schema: ies.device-model
+schema_version: "1.0.0"
+
+device:
+  id: acme.device.bad
+  version: "1.0.0"
+  names:
+    zh-CN: 非法样例
+    en-US: Invalid Sample
+  model_method: mechanism
+  stateful: false
+  fidelity: high
+  energy_carriers: [electric]
+  capabilities: [pv]
+
+parameters: {}
+
+ports:
+  electric_out:
+    carrier: electric
+    direction: out
+    quantity: power
+    unit: kW
+
+data_inputs: {}
+
+states: {}
+
+model_commands:
+  pv: ies.model-command.pv.generation
+
+extensions: {}

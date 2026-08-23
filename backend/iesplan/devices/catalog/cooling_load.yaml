@@ -1,39 +1,97 @@
 # 冷负荷(数据-周期重复、无状态; 周期曲线数据源为同名标准 csv cooling_load.csv, 必选)
-type_id: ies.device.cooling_load
-version: 1.1.0
-name_zh: 冷负荷
-name_en: Cooling Load
-help_topic: help.modeling.cooling_load
-model_method: data_repeat
-stateful: false
-fidelity: medium
-energy_carriers: [cool]
-is_load: true
-capabilities: [load, cooling_load, dual_hvac]
-extends: ies.device.base
+schema: ies.device-model
+schema_version: "1.0.0"
 
-ports:
-  - {name: cool_in, port_type: cooling, direction: in, energy_carrier: cool,
-     capacity_ref: peak_cooling_kw}
+device:
+  id: ies.device.cooling_load
+  version: "1.1.0"
+  names:
+    zh-CN: 冷负荷
+    en-US: Cooling Load
+  model_method: data_repeat
+  stateful: false
+  fidelity: medium
+  energy_carriers: [cool]
+  capabilities: [load, cooling_load, dual_hvac]
 
 parameters:
-  mode: {unit: "-", enum: [cooling_only, heating_only, cooling_heating_combo],
-         default: cooling_only, help_key: help.param.coolingload.mode}
-  peak_cooling_kw: {unit: kW, min: 0, max: 10000000, default: 0,
-                    help_key: help.param.coolingload.peak_cooling_kw}
-  cooling_profile: {unit: reference, default: 0, help_key: help.param.coolingload.cooling_profile}
-  annual_cooling_kwh: {unit: kWh, min: 0, default: 0,
-                       help_key: help.param.coolingload.annual_cooling_kwh}
-  supply_temp_c: {unit: "°C", min: 3, max: 20, default: 7,
-                  help_key: help.param.coolingload.supply_temp_c}
-  return_temp_c: {unit: "°C", min: 7, max: 30, default: 12,
-                  help_key: help.param.coolingload.return_temp_c}
+  mode:
+    value_type: string
+    quantity: ratio
+    unit: "-"
+    required: false
+    default: cooling_only
+    enum: [cooling_only, heating_only, cooling_heating_combo]
+  peak_cooling_kw:
+    value_type: number
+    quantity: power
+    unit: kW
+    required: false
+    default: 0
+    minimum: 0
+    maximum: 10000000
+  cooling_profile:
+    value_type: number
+    quantity: ratio
+    unit: reference
+    required: false
+    default: 0
+  annual_cooling_kwh:
+    value_type: number
+    quantity: energy
+    unit: kWh
+    required: false
+    default: 0
+    minimum: 0
+  supply_temp_c:
+    value_type: number
+    quantity: temperature
+    unit: "°C"
+    required: false
+    default: 7
+    minimum: 3
+    maximum: 20
+  return_temp_c:
+    value_type: number
+    quantity: temperature
+    unit: "°C"
+    required: false
+    default: 12
+    minimum: 7
+    maximum: 30
 
-time_series:
-  inputs:
-    - {key: c_load, unit: kWh, resolution: 1h, required: true, period: day}
-  outputs: []
+ports:
+  cool_in:
+    carrier: cool
+    direction: in
+    quantity: power
+    unit: kW
+    capacity_parameter: peak_cooling_kw
 
-function:
-  entry: periodic_load_output
-  package: iesplan.modeling.functions
+data_inputs:
+  c_load:
+    value_type: number
+    quantity: energy
+    unit: kWh
+    required: true
+
+states: {}
+
+model_commands:
+  load: ies.model-command.load.periodic@1.0.0
+  cooling_load: ies.model-command.load.periodic@1.0.0
+  dual_hvac: ies.model-command.load.periodic@1.0.0
+
+extensions:
+  ies.meta:
+    help_topic: help.modeling.cooling_load
+    is_load: true
+    param_help:
+      mode: help.param.coolingload.mode
+      peak_cooling_kw: help.param.coolingload.peak_cooling_kw
+      cooling_profile: help.param.coolingload.cooling_profile
+      annual_cooling_kwh: help.param.coolingload.annual_cooling_kwh
+      supply_temp_c: help.param.coolingload.supply_temp_c
+      return_temp_c: help.param.coolingload.return_temp_c
+  periods:
+    c_load: day
