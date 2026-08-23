@@ -191,6 +191,29 @@ class TestDiagnosticImmutability:
         assert d.params == {"count": 2}
         assert d.ref_ids == ("r1",)
 
+    def test_nested_containers_frozen_recursively(self):
+        """深度不可变: 嵌套 dict/list 一并只读化, 构造后任何层级不可改。"""
+        params = {"nested": {"k": 1, "items": [1, 2]}}
+        d = make_diag(DATA_TS_DUP, params=params, location={"where": {"row": [0]}})
+        # 构造时递归复制: 修改外部嵌套对象不影响诊断
+        params["nested"]["k"] = 999
+        with pytest.raises(TypeError):
+            d.params["nested"]["k"] = 999  # type: ignore[index]
+        with pytest.raises(TypeError):
+            d.params["nested"]["items"][0] = 9  # type: ignore[index]
+        with pytest.raises(TypeError):
+            d.location["where"]["row"][0] = 9  # type: ignore[index]
+        assert d.params == {"nested": {"k": 1, "items": (1, 2)}}  # 嵌套 list 冻结为 tuple
+        # 嵌套 list 冻结为 tuple(MappingProxyType 底层为 tuple)
+        assert d.params["nested"]["items"] == (1, 2)  # type: ignore[comparison-overlap]
+        # to_dict 递归解冻: 嵌套 dict/list 可 JSON 序列化且为独立副本
+        data = d.to_dict()
+        assert data["params"]["nested"] == {"k": 1, "items": [1, 2]}
+        assert isinstance(data["params"]["nested"]["items"], list)
+        json.dumps(data, ensure_ascii=False)  # 不得抛 TypeError
+        data["params"]["nested"]["k"] = 777
+        assert d.params["nested"]["k"] == 1  # type: ignore[index]
+
     def test_replace_creates_new_instance(self):
         import dataclasses
 

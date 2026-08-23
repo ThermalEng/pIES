@@ -289,7 +289,7 @@ def test_parse_csv_bad_timestamp() -> None:
     assert any(d.code == "DATA-FILE-004" for d in diags)
     ts_diag = next(d for d in diags if d.code == "DATA-FILE-004")
     assert ts_diag.location.get("field") == TIMESTAMP_COL
-    assert ts_diag.location.get("row") == [3]  # 表头第 1 行, 数据行从第 2 行起
+    assert tuple(ts_diag.location.get("row")) == (3,)  # 表头第 1 行, 数据行从第 2 行起
     assert parsed[1][TIMESTAMP_COL] is None
 
 
@@ -301,7 +301,7 @@ def test_parse_csv_non_numeric_value() -> None:
     assert any(d.code == "RES-NUM-001" for d in diags)
     num_diag = next(d for d in diags if d.code == "RES-NUM-001")
     assert num_diag.location.get("field") == "e_load"
-    assert num_diag.location.get("row") == [3]  # 表头第 1 行, 数据行从第 2 行起
+    assert tuple(num_diag.location.get("row")) == (3,)  # 表头第 1 行, 数据行从第 2 行起
     assert parsed[1]["e_load"] is None
 
 
@@ -375,7 +375,7 @@ def test_validate_range_violations() -> None:
     assert len(ranges) == 3
     assert all(d.blocking for d in ranges)
     by_field = {d.location.get("field"): d.location.get("row") for d in ranges}
-    assert by_field == {"e_load": [11], "t_ambient": [21], "ghi": [31]}
+    assert {k: tuple(v) for k, v in by_field.items()} == {"e_load": (11,), "t_ambient": (21,), "ghi": (31,)}
 
 
 def test_validate_valid_full_year() -> None:

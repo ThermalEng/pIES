@@ -207,8 +207,8 @@ class Diagnostic:
     可序列化(JSON)、可入库(审计)、可跨版本保留(code 稳定)。
 
     本类型深度不可变:字段集合固定,构造后禁止赋值(FrozenInstanceError);
-    params 为只读映射(MappingProxyType),ref_ids 为 tuple,location(dict 形态)
-    经只读包装保护。需要变更字段时使用 ``replace()`` 或派生方法生成新对象。
+    params/location 经递归只读包装(任意嵌套 dict/list 均不可修改),
+    ref_ids 为 tuple。需要变更字段时使用 ``replace()`` 或派生方法生成新对象。
     """
 
     code: str
@@ -249,7 +249,7 @@ class Diagnostic:
     def to_dict(self) -> dict:
         """序列化为 JSON 兼容字典(04 §5.4 结构)。
 
-        返回值是独立副本: params/location 转回普通 dict,ref_ids 转 list,
+        返回值是独立副本: params/location 转回普通 dict/list(任意嵌套),
         可直接 json.dumps;修改返回值不影响诊断对象本身。
         """
         return {
@@ -257,8 +257,8 @@ class Diagnostic:
             "severity": self.severity,
             "blocking": self.blocking,
             "message_key": self.message_key,
-            "params": dict(self.params),
-            "location": dict(self.location) if self.location is not None else None,
+            "params": _thaw_mapping(self.params),
+            "location": _thaw_mapping(self.location) if self.location is not None else None,
             "fix_hint_key": self.fix_hint_key,
             "ref_ids": list(self.ref_ids),
             "occurred_at": self.occurred_at,
@@ -302,9 +302,36 @@ class Diagnostic:
         return self.replace(**updates) if updates else self.replace()
 
 
+def _freeze_value(value: object) -> object:
+    """递归冻结容器为只读视图(dict→MappingProxyType, list→tuple)。
+
+    嵌套层级不受限: 任意深度的 dict/list 都被只读包装, 标量与元组原样保留,
+    保证构造后无法通过任何途径修改 params/location 的内容(深度不可变)。
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: _freeze_value(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_value(v) for v in value)
+    return value
+
+
 def _freeze_mapping(mapping: Mapping[str, object]) -> Mapping[str, object]:
-    """把映射冻结为浅只读视图(嵌套容器由 to_dict 副本与约定共同约束)。"""
-    return MappingProxyType(dict(mapping))
+    """把映射递归冻结为只读视图(任意嵌套 dict/list 一并只读化)。"""
+    return _freeze_value(mapping)  # type: ignore[return-value]
+
+
+def _thaw_value(value: object) -> object:
+    """递归解冻单值(dict→普通 dict, tuple→list, 标量原样; 与 _freeze_value 互逆)。"""
+    if isinstance(value, Mapping):
+        return {k: _thaw_value(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_value(v) for v in value]
+    return value
+
+
+def _thaw_mapping(mapping: Mapping[str, object]) -> dict[str, object]:
+    """递归解冻为普通 dict/list(JSON 可序列化, 与 _freeze_value 互逆)。"""
+    return {k: _thaw_value(v) for k, v in mapping.items()}
 
 
 def make_diag(
