@@ -120,7 +120,11 @@ def get_blob_store() -> FileSystemBlobStore:
 
 
 def _to_handle(obj: StoredObject) -> ObjectHandle:
-    """ORM 行 → 公开句柄(业务模块不得接触 ORM)。"""
+    """ORM 行 → 公开句柄(业务模块不得接触 ORM)。
+
+    0.4.0: 不再携带 storage_path(§11 内部路径)与 ref_count(§10.3 可重建
+    缓存); 引用状态经 object_info/list_refs 公开门面查询。
+    """
     return ObjectHandle(
         id=obj.id,
         oid=obj.oid,
@@ -128,8 +132,6 @@ def _to_handle(obj: StoredObject) -> ObjectHandle:
         size_bytes=obj.size_bytes,
         media_type=obj.media_type,
         status=obj.status,
-        storage_path=obj.storage_path,
-        ref_count=obj.ref_count or 0,
         created_at=as_utc(obj.created_at).isoformat() if obj.created_at else None,
     )
 
@@ -338,7 +340,8 @@ def put_object(
             "size_bytes": obj.size_bytes,
             "media_type": obj.media_type,
             "source_category": source_category,
-            "storage_path": obj.storage_path,
+            # 0.4.0: 不再记录 storage_path(§11 内部路径不得进入日志/审计);
+            # 内容寻址 oid 即为可追溯标识
         },
     )
 
@@ -387,14 +390,18 @@ def get_object(db: Session, object_id: int | str) -> bytes:
 
 
 def object_info(db: Session, object_id: int | str) -> dict:
-    """对象元数据视图(不含内容)。"""
+    """对象元数据视图(不含内容)。
+
+    0.4.0: 不再输出 storage_path(§11 内部路径不得进入 DTO/日志/证据包,
+    该 dict 会经 api/objects.py 恢复端点直接序列化为响应); ref_count 为
+    §10.3 可重建缓存, 仅供管理视图参考, 权威引用清单经 list_refs 查询。
+    """
     obj = _resolve_object(db, object_id)
     return {
         "id": obj.id,
         "oid": obj.oid,
         "sha256": obj.sha256,
         "size_bytes": obj.size_bytes,
-        "storage_path": obj.storage_path,
         "media_type": obj.media_type,
         "status": obj.status,
         "ref_count": obj.ref_count,

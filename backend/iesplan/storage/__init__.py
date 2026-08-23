@@ -21,7 +21,10 @@ from iesplan.storage.contracts import (
     ObjectId,
     ObjectNotPendingDeletionError,
     ObjectOwner,
+    ObjectQuotaError,
     ObjectStore,
+    RefInfo,
+    ReferenceNotFoundError,
     StorageQuotaError,
 )
 from iesplan.storage.service import (
@@ -56,7 +59,10 @@ __all__ = [
     "ObjectId",
     "ObjectNotPendingDeletionError",
     "ObjectOwner",
+    "ObjectQuotaError",
     "ObjectStore",
+    "RefInfo",
+    "ReferenceNotFoundError",
     "StorageQuotaError",
     "add_ref",
     "attach",

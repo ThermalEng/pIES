@@ -46,6 +46,7 @@ from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
 from iesplan.models.identity import User
 from iesplan.models.project import Project
 from iesplan.storage import (
+    RefInfo,
     add_ref,
     get_object,
     object_info,
@@ -53,7 +54,6 @@ from iesplan.storage import (
 from iesplan.storage import (
     put_object as _storage_put_object,
 )
-from iesplan.storage.contracts import RefInfo
 
 #: 时间戳诊断码(04 登记 DATA-TS-001..003; 004..007 为本实现新增, 见 NEW_DIAG_CODES)
 DATA_TS_ROW_COUNT = "DATA-TS-004"

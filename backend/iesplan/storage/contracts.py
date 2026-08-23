@@ -20,9 +20,12 @@ ObjectId: TypeAlias = int | str
 
 @dataclass(frozen=True, slots=True)
 class ObjectHandle:
-    """公开对象句柄(不可变值对象, 不暴露 ORM)。
+    """公开对象句柄(不可变值对象, 不暴露 ORM, 0.4.0 收窄)。
 
-    字段名与持久化行一致(sha256/size_bytes/media_type/ref_count/status),
+    0.4.0: 移除适配器/缓存字段 storage_path/ref_count —— 存储路径属 §11
+    敏感信息, ref_count 是可重建缓存(§10.3), 均不得进入业务层公开对象;
+    引用状态经 object_info/list_refs 等公开门面查询。
+    保留字段即持久化公开视图(sha256/size_bytes/media_type/status/created_at),
     业务模块可直接消费, 无需接触 ORM。
     """
 
@@ -32,8 +35,6 @@ class ObjectHandle:
     size_bytes: int
     media_type: str | None
     status: str
-    storage_path: str | None = None
-    ref_count: int = 0
     created_at: str | None = None
 
 
