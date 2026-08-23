@@ -695,6 +695,52 @@ def test_result_select_idor_belongs_check(client: TestClient, db: Session) -> No
 # ---------------------------------------------------------------------------
 
 
+def test_result_view_no_evidence_explicit_status(client: TestClient, db: Session) -> None:
+    """0.3.0 C2: 任务存在但尚无证据包 → 结果视图 evidence_status="no_evidence"
+    显式声明, 内容字段为 None(不再静默空数据猜测); 有证据后翻转为 available。"""
+    owner = make_user(db, "owner_noevid")
+    pid = _prepare_project(client, db, owner)
+    task = _submit_task(client, pid, owner, idempotency_key="noevid-1")
+    task_id = task["id"]
+
+    # 无证据包: 显式 no_evidence + evidence=None + 内容字段全 None
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(client, owner))
+    assert resp.status_code == 200, resp.text
+    view = resp.json()["result"]
+    assert view["evidence_status"] == "no_evidence"
+    assert view["evidence"] is None
+    assert view["metrics_summary"] is None
+    assert view["candidates"] is None
+    assert view["best"] is None
+    assert view["plan_summary"] is None
+    assert view["hourly_refs"] is None
+
+    # 逐时查询同样显式 404(不再以空 content 调 read_hourly)
+    resp = client.get(
+        f"/api/projects/{pid}/tasks/{task_id}/result/hourly",
+        params={"field": "p_grid_buy"}, headers=_h(client, owner),
+    )
+    assert resp.status_code == 404, resp.text
+    body = resp.json()
+    assert body["error"]["code"] == "RES-MISS-003"
+    assert body["error"]["location"]["object_type"] == "evidence_package"
+
+    # 提交证据包后: evidence_status 翻转为 available, 内容字段出现
+    claim = _claim(db, task_id)
+    obj_a = _store_hourly(db, 10)
+    obj_b = _store_hourly(db, 10, fields=["p_grid_buy"])
+    payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], owner.id)
+    pkg = _submit_evidence(db, task_id, claim, payload)
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(client, owner))
+    assert resp.status_code == 200, resp.text
+    view = resp.json()["result"]
+    assert view["evidence_status"] == "available"
+    assert view["evidence"] is not None
+    assert view["evidence"]["id"] == pkg.id
+    assert view["metrics_summary"] is not None
+    assert view["hourly_refs"] is not None
+
+
 def test_hourly_pagination(client: TestClient, db: Session) -> None:
     """逐时查询: 分页翻页/越界收敛/未知字段 400/按解选择数据源。"""
     owner = make_user(db, "owner_hourly")

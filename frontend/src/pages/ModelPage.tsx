@@ -181,23 +181,31 @@ function ModelCanvas({ projectId }: { projectId: number }) {
     setLoading(true)
     try {
       const graph = await api.model.getGraph(projectId)
-      const layout = loadLayout(projectId)
-      const deviceList = graph.devices.map((d, i) =>
-        // 缺省布局须保证节点互不重叠(节点宽 ≥190px 含端口手柄, 手柄外伸约 7px):
-        // 之前 80px 横距/60px 纵距的密集网格会让相邻节点盖住源端口,
-        // 源端口中心点被邻居节点的 .mp-node__type 命中, 连线手势无法开始。
-        deviceFromServer(d, layout[String(d.id)] ?? { x: 80 + (i % 4) * 260, y: 80 + Math.floor(i / 4) * 180 }),
-      )
-      const deviceById = new Map(deviceList.map((d) => [d.id, d]))
-      const connectionList = graph.connections
-        .map((c) => connectionFromServer(c, graph.ports, deviceById))
-        .filter((c): c is LocalConnection => c !== null)
-      setDevices(deviceList)
-      setConnections(connectionList)
-      setPorts(graph.ports)
-      setLoadError(null)
+      // has_graph=false 为后端显式空态(项目尚未建模): 渲染初始画布, 非错误。
+      if (!graph.has_graph) {
+        setDevices([])
+        setConnections([])
+        setPorts([])
+        setLoadError(null)
+      } else {
+        const layout = loadLayout(projectId)
+        const deviceList = graph.devices.map((d, i) =>
+          // 缺省布局须保证节点互不重叠(节点宽 ≥190px 含端口手柄, 手柄外伸约 7px):
+          // 之前 80px 横距/60px 纵距的密集网格会让相邻节点盖住源端口,
+          // 源端口中心点被邻居节点的 .mp-node__type 命中, 连线手势无法开始。
+          deviceFromServer(d, layout[String(d.id)] ?? { x: 80 + (i % 4) * 260, y: 80 + Math.floor(i / 4) * 180 }),
+        )
+        const deviceById = new Map(deviceList.map((d) => [d.id, d]))
+        const connectionList = graph.connections
+          .map((c) => connectionFromServer(c, graph.ports, deviceById))
+          .filter((c): c is LocalConnection => c !== null)
+        setDevices(deviceList)
+        setConnections(connectionList)
+        setPorts(graph.ports)
+        setLoadError(null)
+      }
     } catch (err) {
-      // 后端未就绪/尚无图:以空画布继续(可本地编辑,保存时再校验)
+      // 加载失败(网络/权限等): 显示错误并以空画布继续(可本地编辑,保存时再校验)
       setLoadError(translateError(toApiError(err)))
       setDevices([])
       setConnections([])

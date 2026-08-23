@@ -319,6 +319,8 @@ export interface ConnectionInput {
 
 /** 系统图完整模型(节点/设备/端口/连接)。 */
 export interface GraphModel {
+  /** 后端显式空态: false=项目尚未建模(无工作图), 此时 graph 为空骨架。 */
+  has_graph: boolean
   graph: SystemGraph
   devices: Device[]
   ports: Port[]

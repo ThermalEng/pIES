@@ -199,13 +199,17 @@ def hourly_endpoint(
     limit: int = Query(default=5000, ge=1, le=50000, description="每页行数"),
 ) -> dict[str, Any]:
     """逐时结果查询(REQ-RESULT-002): 从对象存储读取(校验 sha256), 行号分页
-    返回 values + next_start 供翻页。"""
+    返回 values + next_start 供翻页。任务尚无证据包 → 404(不再以空内容查询)。"""
     project_service.ensure_access(db, user, project_id, "view")
     tasks_service.ensure_task_belongs(db, project_id, task_id)
     package = results_service.latest_evidence(db, task_id)
-    content: dict[str, Any] = {}
-    if package is not None:
-        content = results_service.evidence_content(db, package)
+    if package is None:
+        raise NotFoundError(
+            "任务尚无证据包, 无逐时结果可查",
+            params={"task_id": task_id},
+            location={"object_type": "evidence_package", "object_id": None},
+        )
+    content = results_service.evidence_content(db, package)
     return results_service.read_hourly(
         db, content, field, start=start, end=end, limit=limit, solution_id=solution_id
     )

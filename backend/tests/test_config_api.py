@@ -219,6 +219,30 @@ def test_default_config_device_params_use_registry_defaults(db: Session) -> None
 
 
 # ---------------------------------------------------------------------------
+# 1b. 默认配置读取语义(0.3.0 C2: 未保存配置是显式产品功能, 非静默降级)
+# ---------------------------------------------------------------------------
+
+
+def test_get_config_unsaved_default_explicit_semantics(
+    client: TestClient, db: Session
+) -> None:
+    """未保存配置 → version=None + status="draft" + updated_at=None 显式声明,
+    config 为完整生成的默认配置(与 /config/default 一致), meta 含参数元数据。"""
+    project = seed_project(db)
+    resp = client.get(f"/api/projects/{project.id}/config")
+    assert resp.status_code == 200, resp.text
+    got = resp.json()
+    # 显式状态: 从未保存过(无 CalcConfig 行)
+    assert got["version"] is None
+    assert got["status"] == "draft"
+    assert got["updated_at"] is None
+    # 默认配置内容完整且与服务层生成一致
+    assert got["config"] == _default_config(db, project)
+    # 参数元数据存在(设备/经济段)
+    assert got["meta"]["parameters"]["economic"]["discount_rate"]["default"] == 0.08
+
+
+# ---------------------------------------------------------------------------
 # 2. 保存与读取
 # ---------------------------------------------------------------------------
 
@@ -227,7 +251,6 @@ def test_save_then_get_config(client: TestClient, db: Session) -> None:
     """PUT 保存(与草稿修订绑定)→ GET 读回一致, 且带参数元数据。"""
     project = seed_project(db)
     default = _default_config(db, project)
-
     resp = client.put(
         f"/api/projects/{project.id}/config",
         json={"config": default, "expected_revision": 1},
