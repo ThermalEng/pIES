@@ -1,0 +1,68 @@
+# 合法设备模型样例（ies.device-model 1.0.0）— 可直接手写并通过校验。
+schema: ies.device-model
+schema_version: "1.0.0"
+
+device:
+  id: acme.device.pv
+  version: "1.0.0"
+  names:
+    zh-CN: 光伏发电
+    en-US: Photovoltaic
+  model_method: mechanism
+  stateful: false
+  fidelity: high
+  energy_carriers: [electric, solar]
+  capabilities: [pv, controllable, optimization_variable]
+
+parameters:
+  rated_capacity_kwp:
+    value_type: number
+    quantity: power
+    unit: kWp
+    required: true
+    minimum: 0
+    maximum: 1000000
+    optimizable: true
+    stock_or_addition: addition
+  conversion_efficiency:
+    value_type: number
+    quantity: ratio
+    unit: "1"
+    required: true
+    minimum: 0
+    maximum: 1
+
+ports:
+  solar_in:
+    carrier: solar
+    direction: in
+    quantity: irradiance
+    unit: W/m2
+  electric_out:
+    carrier: electric
+    direction: out
+    quantity: power
+    unit: kW
+    capacity_parameter: rated_capacity_kwp
+
+data_inputs:
+  ghi:
+    value_type: number
+    quantity: irradiance
+    unit: W/m2
+    required: true
+    minimum: 0
+  t_ambient:
+    value_type: number
+    quantity: temperature
+    unit: "°C"
+    required: true
+
+states: {}
+
+model_commands:
+  pv: ies.model-command.pv.generation@1.0.0
+  controllable: ies.model-command.pv.generation@1.0.0
+  optimization_variable: ies.model-command.pv.generation@1.0.0
+
+extensions: {}

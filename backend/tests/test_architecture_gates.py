@@ -83,6 +83,10 @@ WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
     # ---- services 域内部: identity 复用 project 私有审计写入 ----
     ("iesplan.services.identity", "project_service._audit"):
         "服务层间复用 project 私有审计写入; TODO: 提升公开审计 API。",
+    # ---- devices 域内部: parser 复用 contracts 递归深度冻结 helper ----
+    ("iesplan.devices.parser", "_freeze"):
+        "devices 域 parser 复用 contracts 私有递归冻结函数(roadmap 0.5.0 review: "
+        "extensions/参数 default 深度不可变); TODO: 提升 contracts 公开 deep_freeze 后移除。",
 }
 
 # ---------------------------------------------------------------------------

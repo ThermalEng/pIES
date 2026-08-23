@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from pathlib import Path
+from dataclasses import replace
 
 import numpy as np
 
@@ -40,29 +40,100 @@ from iesplan.modeling.devspec import DeviceSpec as ModelingDeviceSpec
 from iesplan.modeling.devspec import PortSpec as ModelingPortSpec
 from iesplan.modeling.devspec import SeriesSpec as ModelingSeriesSpec
 from iesplan.modeling.devspec import StateSpec as ModelingStateSpec
+from iesplan.modeling.functions import MODEL_COMMAND_VERSIONS
 
 logger = logging.getLogger(__name__)
 
 
-def _descriptor_to_modeling_spec(desc: DeviceModelDescriptor) -> ModelingDeviceSpec:
-    """公开设备描述 → modeling 规格(05 §2.3 阶段 ①→② 契约)。
+def _resolve_command_ref(ref: str, *, device_id: str, capability: str) -> str:
+    """解析 ``<command-id>@<exact-version>`` 并校验命令 provider 版本**严格相等**。
 
-    与 devices.spec.to_modeling_spec 同构, 但输入为已校验的公开描述
-    (不再需要 devices 内部字段; csv 路径已由 devices 推导)。
+    任一失败抛 AppError(SYS-CFG-001) 阻断发布（宪法 §2.2 正确性优先：
+    声明版本被丢弃或静默降级会改变建模行为却仍报告成功）。
     """
-    fn = desc.function if isinstance(desc.function, dict) else {}
-    model_file = None
-    if isinstance(fn.get("model_file"), dict):
-        ref = fn["model_file"].get("file")
-        if isinstance(ref, str) and ref:
-            model_file = ref
-    data_file = desc.standard_csv_path
+    command_id, sep, declared_version = ref.partition("@")
+    if not sep or not declared_version:
+        raise AppError(
+            f"设备 {device_id} capability {capability!r} 命令引用缺少精确版本: {ref!r}",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={"device_id": device_id, "capability": capability, "ref": ref},
+        )
+    registered_version = MODEL_COMMAND_VERSIONS.get(command_id)
+    if registered_version is None:
+        raise AppError(
+            f"未知建模命令 ID: {command_id!r}(设备 {device_id}, capability {capability!r})",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={"device_id": device_id, "capability": capability, "command_id": command_id},
+        )
+    if declared_version != registered_version:
+        raise AppError(
+            f"命令 {command_id} 声明版本 {declared_version!r} 与 provider 注册版本 "
+            f"{registered_version!r} 不一致(设备 {device_id}, capability {capability!r})",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={
+                "device_id": device_id,
+                "capability": capability,
+                "command_id": command_id,
+                "declared_version": declared_version,
+                "registered_version": registered_version,
+            },
+        )
+    return command_id
+
+
+def _descriptor_to_modeling_spec(desc: DeviceModelDescriptor) -> ModelingDeviceSpec:
+    """公开设备描述 → modeling 规格(roadmap 0.5.0 阶段 ①→② 契约)。
+
+    命令解析只在 provider 内部完成，保留完整 capability→command 映射：
+    - **逐 capability** 解析/校验全部命令引用（缺失、未知 ID、版本不一致均
+      抛 AppError(SYS-CFG-001) 阻断发布，不静默取首个映射）；
+    - mechanism: 全部能力命令必须解析为**同一**机理函数（否则无法表示为
+      单一 provider，显式拒绝而非任选其一）；
+    - data_repeat/data_predict: 命令 ID/版本同样必须可解析（关系不被静默忽略）。
+    """
+    commands = dict(desc.model_commands) if desc.model_commands else {}
+    # 逐 capability 解析完整 capability→command 映射（任一失败拒绝发布）
+    resolved: dict[str, str] = {}
+    for capability in desc.capabilities:
+        ref = commands.get(capability)
+        if ref is None:
+            raise AppError(
+                f"设备 {desc.type_id} capability {capability!r} 缺少对应 model_command",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={"device_id": desc.type_id, "capability": capability},
+            )
+        resolved[capability] = _resolve_command_ref(
+            ref, device_id=desc.type_id, capability=capability
+        )
     model_function = ""
     if desc.model_method == "mechanism":
-        package = fn.get("package") or ""
-        entry = fn.get("entry") or ""
-        if package and entry:
-            model_function = f"{package}.{entry}"
+        if not resolved:
+            raise AppError(
+                f"机理设备 {desc.type_id} 缺少 model_commands(启动注册拒绝)",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={"device_id": desc.type_id},
+            )
+        from iesplan.modeling.functions import resolve_command_function
+
+        # 全部能力命令逐一解析为机理函数；必须一致（单一 provider 约束）
+        model_functions = {
+            resolve_command_function(command_id)
+            for command_id in dict.fromkeys(resolved.values())
+        }
+        if len(model_functions) != 1:
+            raise AppError(
+                f"设备 {desc.type_id} 的 capabilities 引用了不同建模命令, "
+                f"无法表示为单一机理 provider: {commands}",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={"device_id": desc.type_id, "model_commands": commands},
+            )
+        model_function = next(iter(model_functions))
     return ModelingDeviceSpec(
         type_id=desc.type_id,
         version=desc.version,
@@ -78,8 +149,8 @@ def _descriptor_to_modeling_spec(desc: DeviceModelDescriptor) -> ModelingDeviceS
         stateful=desc.stateful,
         fidelity=desc.fidelity,
         model_function=model_function,
-        model_file=model_file,
-        data_file=data_file,
+        model_file=None,
+        data_file=None,
         ports=tuple(
             ModelingPortSpec(
                 name=p.name,
@@ -118,14 +189,14 @@ def _descriptor_to_modeling_spec(desc: DeviceModelDescriptor) -> ModelingDeviceS
 def _load_profile_csv(desc: DeviceModelDescriptor) -> dict[str, np.ndarray] | None:
     """data_repeat 设备: 读取 devices 推导的标准 csv(列名 → 一维数组)。
 
-    无 csv 返回 None(由 build_command 的 data_file 校验给出明确错误);
+    经 ``iesplan.devices.get_profile_columns`` 公开门面按 type_id 读取;
     读取/校验失败抛 AppError(不降级为 warning: 原始文件/列错误必须可见)。
     """
-    from iesplan.devices import load_profile_columns
+    from iesplan.devices import get_profile_columns
 
-    if desc.standard_csv_path is None:
+    if desc.model_method != "data_repeat":
         return None
-    return load_profile_columns(Path(desc.standard_csv_path), desc)
+    return get_profile_columns(desc.type_id)
 
 
 def register_catalog_commands() -> int:
@@ -157,13 +228,15 @@ def register_catalog_commands() -> int:
         profile = None
         if desc.model_method == "data_repeat":
             profile = _load_profile_csv(desc)
-            if profile is None and mspec.data_file is None:
+            if profile is None:
                 raise AppError(
                     f"data_repeat 设备 {desc.type_id} 缺少标准 csv 数据(启动注册拒绝)",
                     code="SYS-CFG-001",
                     message_key="ies.diag.store.config_invalid",
                     params={"device_id": desc.type_id},
                 )
+            # 数据已成功读取; data_file 只作逻辑引用(非宿主机路径, 不参与计算)。
+            mspec = replace(mspec, data_file=f"ies.profile:{desc.type_id}")
         try:
             cmd, entry = build_command(mspec, profile=profile)
         except Exception as exc:

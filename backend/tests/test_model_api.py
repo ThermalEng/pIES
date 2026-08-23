@@ -305,21 +305,19 @@ def test_sync_ports_preserves_same_carrier_multi_port(
     fake_spec = DeviceModelDescriptor(
         type_id="ies.device.dual_inlet", version="1.0.0", name_zh="双输入", name_en="Dual",
         model_method="mechanism", stateful=False, fidelity="medium",
-        energy_carriers=["electric", "heat"], is_load=False,
-        capabilities=[], extends="ies.device.base", help_topic="",
-        parameters={}, ports=[], time_series={}, states=[],
-        function={"package": "iesplan.modeling.functions", "entry": "pv_output"},
-        standard_csv_path=None,
+        energy_carriers=("electric", "heat"), is_load=False,
+        capabilities=(), extends="ies.device.base", help_topic="",
+        parameters={}, ports=(), time_series={}, states=(),
+        model_commands={},
     )
     # 源设备: electric out + heat out(供连接)
     source_spec = DeviceModelDescriptor(
         type_id="ies.device.source_box", version="1.0.0", name_zh="源", name_en="Source",
         model_method="mechanism", stateful=False, fidelity="medium",
-        energy_carriers=["electric", "heat"], is_load=False,
-        capabilities=[], extends="ies.device.base", help_topic="",
-        parameters={}, ports=[], time_series={}, states=[],
-        function={"package": "iesplan.modeling.functions", "entry": "pv_output"},
-        standard_csv_path=None,
+        energy_carriers=("electric", "heat"), is_load=False,
+        capabilities=(), extends="ies.device.base", help_topic="",
+        parameters={}, ports=(), time_series={}, states=(),
+        model_commands={},
     )
 
     def _dual_ports(spec, params=None):

@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iesplan.dev/schema/device-model/1.0.0",
+  "title": "ies.device-model",
+  "description": "设备模型 YAML 1.0.0 机器可读 schema。设备模型 YAML 是设备类型的公开说明书：参数、端口、数据需求、状态与建模命令引用。文件中禁止函数/包/模块/宿主机路径/凭证。",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "ies.device-model",
+      "description": "固定契约标识。"
+    },
+    "schema_version": {
+      "const": "1.0.0",
+      "description": "本文件契约版本（非设备版本）。不能识别的 MAJOR 必须拒绝。"
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "names", "model_method", "stateful", "fidelity", "energy_carriers", "capabilities"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*$",
+          "description": "稳定设备身份，使用反向域或组织命名空间；不得以目录名或 Python 包名充当身份。"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "设备语义版本 MAJOR.MINOR.PATCH。"
+        },
+        "names": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["zh-CN", "en-US"],
+          "properties": {
+            "zh-CN": {"type": "string", "minLength": 1},
+            "en-US": {"type": "string", "minLength": 1}
+          }
+        },
+        "model_method": {
+          "type": "string",
+          "enum": ["mechanism", "data_repeat", "data_predict"],
+          "description": "建模方式：机理/数据-周期重复/数据-预测。"
+        },
+        "stateful": {"type": "boolean"},
+        "fidelity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "energy_carriers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "description": "端口载能集合去重汇总。"
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "description": "设备可参与的业务问题；每个能力必须能在 model_commands 中找到对应命令。"
+        }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["value_type", "quantity", "unit", "required"],
+        "properties": {
+          "value_type": {"type": "string", "enum": ["number", "string", "boolean"]},
+          "quantity": {"type": "string", "minLength": 1},
+          "unit": {"type": "string", "minLength": 1},
+          "required": {"type": "boolean"},
+          "default": {},
+          "minimum": {"type": "number"},
+          "maximum": {"type": "number"},
+          "enum": {"type": "array", "uniqueItems": true},
+          "optimizable": {"type": "boolean"},
+          "stock_or_addition": {"type": "string", "enum": ["stock", "addition", "not_applicable"]}
+        }
+      }
+    },
+    "ports": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["carrier", "direction", "quantity", "unit"],
+        "properties": {
+          "carrier": {"type": "string", "minLength": 1},
+          "direction": {"type": "string", "enum": ["in", "out", "bidirectional"]},
+          "quantity": {"type": "string", "minLength": 1},
+          "unit": {"type": "string", "minLength": 1},
+          "capacity_parameter": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "data_inputs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["value_type", "quantity", "unit", "required"],
+        "properties": {
+          "value_type": {"type": "string", "enum": ["number", "string", "boolean"]},
+          "quantity": {"type": "string", "minLength": 1},
+          "unit": {"type": "string", "minLength": 1},
+          "required": {"type": "boolean"},
+          "minimum": {"type": "number"},
+          "maximum": {"type": "number"}
+        }
+      }
+    },
+    "states": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unit"],
+        "properties": {
+          "unit": {"type": "string", "minLength": 1},
+          "initial_ref": {"type": "string", "minLength": 1},
+          "minimum_ref": {"type": "string", "minLength": 1},
+          "maximum_ref": {"type": "string", "minLength": 1}
+        }
+      },
+      "description": "有状态设备的状态声明（量纲/单位/初值来源）；无状态设备必须为 {}。"
+    },
+    "model_commands": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*@[0-9]+\\.[0-9]+\\.[0-9]+$",
+        "description": "稳定 ModelCommand ID 加精确版本，形如 <command-id>@<exact-version>；禁止函数/包/模块路径/宿主机路径/凭证。"
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "description": "插件私有扩展；键必须是插件命名空间，不得改变核心语义或安全规则。"
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "schema_version",
+    "device",
+    "parameters",
+    "ports",
+    "data_inputs",
+    "states",
+    "model_commands",
+    "extensions"
+  ]
+}

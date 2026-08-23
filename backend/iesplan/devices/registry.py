@@ -61,6 +61,30 @@ class DeviceRegistry:
         """列出全部已注册设备(按注册顺序, 确定性)。"""
         return list(self._specs.values())
 
+    def csv_path_for(self, type_id: str) -> Path:
+        """data_repeat 设备标准 csv 路径（路径解析只存在于 devices 模块内部）。
+
+        权威规则：``<yaml 完整路径去后缀>.csv``；文件不存在返回明确错误。
+        外部模块不感知该规则（经 get_profile_columns 消费）。
+        """
+        spec = self.get(type_id)
+        if not spec.source_path:
+            raise AppError(
+                f"设备 {type_id} 缺少源 yaml 路径, 无法推导标准 csv",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={"device_id": type_id},
+            )
+        candidate = Path(spec.source_path).with_suffix(".csv")
+        if not candidate.exists():
+            raise AppError(
+                f"data_repeat 设备 {type_id} 缺少标准 csv: {candidate.name}",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={"device_id": type_id, "file": candidate.name},
+            )
+        return candidate
+
     def snapshot(self) -> list[str]:
         """注册表快照: ["ies.device.pv@1.4.0", ...](与 core/registry.py 格式一致)。"""
         return [f"{s.type_id}@{s.version}" for s in self._specs.values()]
@@ -71,34 +95,39 @@ class DeviceRegistry:
         return f"ies.command.model.{spec.type_id}.{spec.model_method}.{spec.version}"
 
     def get_entry_function(self, type_id: str) -> Callable:
-        """按 type_id 返回统一调用契约 device_entry 函数(02 §6.5)。
+        """按 type_id 返回统一调用契约 device_entry 函数(roadmap 0.5.0)。
 
-        - mechanism: 绑定入口自 modeling.functions.MECHANISM_FUNCTIONS 映射表
-          (yaml function.entry 即映射表键名), 包装为统一契约; 绑定不可用抛
-          AppError 明确诊断, 禁止静默降级;
-        - data_repeat / data_predict: 函数生成(周期外推/模型加载)归 modeling 模块
-          (05 §7.6 generator → modeling), 经 modeling.command 命令注册表取函数。
+        - mechanism: 经设备 model_commands 的稳定命令 ID 在 modeling provider
+          内解析机理函数（组合根/provider 解析，设备文件不暴露函数入口）;
+        - data_repeat / data_predict: 函数生成(周期外推/模型加载)归 modeling 模块,
+          经 modeling.command 命令注册表取函数。
         """
         spec = self.get(type_id)
-        fn = spec.function if isinstance(spec.function, dict) else {}
+        commands = dict(spec.model_commands) if spec.model_commands else {}
         if spec.model_method == "mechanism":
-            entry = fn.get("entry", "")
-            if not isinstance(entry, str) or not entry:
+            ref = next(iter(commands.values()), "")
+            command_id = ref.split("@", 1)[0] if "@" in ref else ref
+            if not command_id:
                 raise AppError(
-                    f"设备 {type_id} 缺少机理函数入口(entry)",
+                    f"设备 {type_id} 缺少机理命令(model_commands)",
                     code="SYS-CFG-001",
                     message_key="ies.diag.store.config_invalid",
                     params={"device_id": type_id},
                 )
-            from iesplan.modeling.functions import as_device_entry, mechanism_spec_for
+            from iesplan.modeling.functions import (
+                as_device_entry,
+                mechanism_spec_for,
+                resolve_command_function,
+            )
 
-            ms = mechanism_spec_for(entry)
+            model_function = resolve_command_function(command_id)
+            ms = mechanism_spec_for(model_function)
             if ms is None:
                 raise AppError(
-                    f"机理映射表缺少函数: {entry!r}(设备 {type_id})",
+                    f"机理映射表缺少函数: {command_id!r}(设备 {type_id})",
                     code="SYS-CFG-001",
                     message_key="ies.diag.store.config_invalid",
-                    params={"device_id": type_id, "entry": entry},
+                    params={"device_id": type_id, "command_id": command_id},
                 )
             return as_device_entry(
                 ms.fn,

@@ -1,159 +1,164 @@
-"""设备 yaml 规范:数据模型与结构校验(02 §2、§6.1;05 §7.6 合并入 spec.py)。
+"""设备 yaml 规范：数据模型与公开契约（roadmap 0.5.0 迁移后）。
 
-字段命名遵循 05 §7.1 裁决:
-- 模型类型标志统一为 ``model_method``,取值 ``mechanism | data_repeat | data_predict``
-  (02 的 ``modeling_method`` / ``data_periodic`` / ``data_forecast`` 命名废止);
-- 状态标志统一为布尔 ``stateful``(02 的 ``statefulness`` 枚举废止);
-- ``fidelity``(low/medium/high)与 model_method 正交共存(沿用 model_fidelity CHECK)。
+本模块是 ``ies.device-model`` 1.0.0 新格式的**解析与值对象层**：
+- ``load_yaml`` 解析新格式（schema/device/parameters/ports/data_inputs/states/
+  model_commands/extensions）；
+- ``DeviceModelDescriptor`` 是公开深度不可变值对象（list→tuple, dict→
+  MappingProxyType）；**不暴露 function/package/module/宿主机路径**；
+- ``to_model_descriptor`` 把解析后的 YAML 规格转为公开描述。
 
-参数 schema 复用 core/contracts.parameters::ParameterSpec(只读参照其字段命名, 不修改)。
-本模块只做"单个 yaml 文件"的结构解析与字段级校验;跨字段约束(csv 必选、states
-必填等)在 loader.validate_device_dir 完成;``$price:`` 引用解析在 pricing.py。
+消费方（services/assembly/engines/modeling）只读公开 descriptor 字段：
+type_id/version/name_zh/name_en/model_method/stateful/fidelity/energy_carriers/
+is_load/capabilities/extends/help_topic/parameters/ports/time_series/states/
+model_commands。``function`` 与 ``standard_csv_path`` 已从公开面移除——
+建模命令解析只存在于组合根与 modeling provider 内部。
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
 
 from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.errors import AppError
-from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.devices import yamlmini
+from iesplan.devices.parser import parse_device_model_yaml
 
 # ---------------------------------------------------------------------------
-# 模型类型标志枚举(05 §7.1 定案)
+# 枚举（新契约）
 # ---------------------------------------------------------------------------
 
-#: 模型类型标志:机理 / 数据-周期重复 / 数据-预测
 MODEL_METHODS: tuple[str, ...] = ("mechanism", "data_repeat", "data_predict")
-#: 模型精度档(与 model_method 正交,沿用 model_fidelity CHECK 取值)
 FIDELITY_VALUES: tuple[str, ...] = ("low", "medium", "high")
-#: 端口类型(02 §2.2 表 + pv 示例的 solar 端口)
 PORT_TYPES: tuple[str, ...] = ("electric", "thermal", "cooling", "fuel", "water", "data", "solar")
-#: 端口方向
 PORT_DIRECTIONS: tuple[str, ...] = ("in", "out", "bidirectional")
-#: data_repeat 周期粒度
 PERIOD_VALUES: tuple[str, ...] = ("day", "week", "year")
-#: data_predict 模型文件格式
-MODEL_FILE_FORMATS: tuple[str, ...] = ("onnx", "csv_lookup", "python")
 
-#: 模型类型标志中文名(展示用)
 MODEL_METHOD_LABELS: dict[str, str] = {
     "mechanism": "机理模型",
     "data_repeat": "数据-周期重复",
     "data_predict": "数据-预测",
 }
 
-_ID_PATTERN = re.compile(r"^ies\.device\.[a-z][a-z0-9_]*$")
 _SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
-#: mechanism 函数包白名单前缀(05 §7.7: 限 iesplan.modeling.functions.*)
-FUNCTION_PACKAGE_PREFIX = "iesplan.modeling.functions."
+
+#: 载能 → 端口类型（公开 descriptor 端口携带 port_type 供前端/装配消费）
+CARRIER_PORT_TYPE: dict[str, str] = {
+    "electric": "electric",
+    "heat": "thermal",
+    "cool": "cooling",
+    "gas": "fuel",
+    "solar": "solar",
+    "water": "water",
+    "data": "data",
+}
 
 
 def _err(message: str, **params: object) -> AppError:
-    """结构错误:统一 SYS-CFG-001(02 §6.1:码沿用 SYS-CFG-001)。"""
     return AppError(message, code="SYS-CFG-001", message_key="ies.diag.store.config_invalid", params=params)
 
 
 # ---------------------------------------------------------------------------
-# 数据模型(02 §6.1)
+# 数据模型（深度不可变）
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class SeriesSpec:
-    """时间序列列声明(02 §2.4)。"""
+    """时间序列列声明（映射自新格式 data_inputs；装配/建模消费）。"""
 
     key: str
     unit: str
-    resolution: str  # "15min" | "30min" | "1h"
+    resolution: str = "1h"
     required: bool = True
-    period: str | None = None  # "day" | "week" | "year"(仅 data_repeat)
-    convert: dict | None = None  # 非标准单位换算声明 {to, factor, offset}
+    period: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class PortSpec:
-    """端口定义(02 §2.2)。"""
+    """端口定义（映射自新格式 ports）。"""
 
     name: str
-    port_type: str  # electric/thermal/cooling/fuel/water/data/solar
-    direction: str  # in/out/bidirectional
+    port_type: str
+    direction: str
     energy_carrier: str
     capacity_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class StateSpec:
-    """状态定义(02 §2.5,stateful 设备)。"""
+    """状态定义（映射自新格式 states）。"""
 
     key: str
     unit: str
     initial_ref: str | None = None
-    bounds: dict[str, str] | None = None  # {"min_ref": ..., "max_ref": ...}
+    bounds: MappingProxyType | None = None  # {"min_ref":..., "max_ref":...}
 
 
 @dataclass(frozen=True, slots=True)
 class DeviceYamlSpec:
-    """设备 yaml 规格(02 §6.1;字段命名按 05 §7.1/§7.7)。"""
+    """设备 yaml 规格（内部解析结果；字段命名按新契约）。
 
-    type_id: str
-    version: str
-    name_zh: str
-    name_en: str
-    model_method: str  # mechanism | data_repeat | data_predict
-    stateful: bool
-    fidelity: str = "medium"
-    energy_carriers: list[str] = field(default_factory=list)
-    is_load: bool = False
-    capabilities: list[str] = field(default_factory=list)
-    extends: str = "ies.device.base"
-    help_topic: str = ""
-    ports: list[PortSpec] = field(default_factory=list)
-    parameters: dict[str, ParameterSpec] = field(default_factory=dict)
-    time_series: dict[str, list[SeriesSpec]] = field(
-        default_factory=lambda: {"inputs": [], "outputs": []}
-    )
-    states: list[StateSpec] = field(default_factory=list)
-    function: dict = field(default_factory=dict)  # {"entry","package"} 或 {"model_file": {...}}
-    base_dir: str = ""  # yaml 所在目录(相对引用 model_file/csv 用)
-    source_path: str = ""  # 源 yaml 完整路径(周期 csv 推导的权威来源, 03 §6.4)
-
-
-@dataclass(frozen=True, slots=True)
-class DeviceModelDescriptor:
-    """已验证设备描述的公开契约(BE-REG-01: devices → modeling 唯一传递物)。
-
-    modeling 模块只接收本描述, 不导入 devices 内部目录/价格/CSV 细节;
-    包含建模所需全部信息: 类型/版本/方法/状态、参数规格、端口、时间序列
-    声明与机理函数入口。data_repeat 设备的标准 csv 路径也一并导出
-    (由 devices 负责路径推导, modeling 不感知规则)。
+    只承载解析后的不可变数据；``model_commands`` 映射
+    capability → ``<command-id>@<exact-version>``。``source_path`` 是
+    **内部**路径字段（devices 模块用于标准 csv 推导），不进公开 descriptor。
     """
 
     type_id: str
     version: str
     name_zh: str
     name_en: str
-    model_method: str  # mechanism | data_repeat | data_predict
+    model_method: str
+    stateful: bool
+    fidelity: str = "medium"
+    energy_carriers: tuple[str, ...] = ()
+    is_load: bool = False
+    capabilities: tuple[str, ...] = ()
+    extends: str = "ies.device.base"
+    help_topic: str = ""
+    ports: tuple[PortSpec, ...] = ()
+    parameters: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
+    time_series: MappingProxyType = field(
+        default_factory=lambda: MappingProxyType({"inputs": (), "outputs": ()})
+    )
+    states: tuple[StateSpec, ...] = ()
+    model_commands: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
+    extensions: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
+    source_path: str = ""  # 内部：源 yaml 完整路径（标准 csv 推导用，不进公开 descriptor）
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceModelDescriptor:
+    """已验证设备描述的公开契约（深度不可变；devices → 外部模块唯一传递物）。
+
+    建模命令由 ``model_commands``（capability → 稳定命令 ID@版本）声明；
+    **不包含** function/package/module/宿主机路径。
+    """
+
+    type_id: str
+    version: str
+    name_zh: str
+    name_en: str
+    model_method: str
     stateful: bool
     fidelity: str
-    energy_carriers: list[str]
+    energy_carriers: tuple[str, ...]
     is_load: bool
-    capabilities: list[str]
+    capabilities: tuple[str, ...]
     extends: str
     help_topic: str
-    parameters: dict[str, ParameterSpec]
-    ports: list[PortSpec]
-    time_series: dict[str, list[SeriesSpec]]
-    states: list[StateSpec]
-    function: dict  # {"entry","package"} 或 {"model_file": {...}}
-    standard_csv_path: str | None  # data_repeat 标准 csv(devices 推导); 其余 None
+    parameters: MappingProxyType  # name → ParameterSpec
+    ports: tuple[PortSpec, ...]
+    time_series: MappingProxyType  # {"inputs": tuple, "outputs": tuple}
+    states: tuple[StateSpec, ...]
+    model_commands: MappingProxyType  # capability → "id@version"
 
 
 def to_model_descriptor(spec: DeviceYamlSpec) -> DeviceModelDescriptor:
-    """DeviceYamlSpec → 公开建模描述(参数默认值经价格解析, 已含 resolved $price:)。"""
+    """DeviceYamlSpec → 公开建模描述（深度不可变，不含路径/函数入口）。"""
     return DeviceModelDescriptor(
         type_id=spec.type_id,
         version=spec.version,
@@ -162,53 +167,130 @@ def to_model_descriptor(spec: DeviceYamlSpec) -> DeviceModelDescriptor:
         model_method=spec.model_method,
         stateful=spec.stateful,
         fidelity=spec.fidelity,
-        energy_carriers=list(spec.energy_carriers),
+        energy_carriers=tuple(spec.energy_carriers),
         is_load=spec.is_load,
-        capabilities=list(spec.capabilities),
+        capabilities=tuple(spec.capabilities),
         extends=spec.extends,
         help_topic=spec.help_topic,
-        parameters=dict(spec.parameters),
-        ports=list(spec.ports),
-        time_series={k: list(v) for k, v in spec.time_series.items()},
-        states=list(spec.states),
-        function=dict(spec.function),
-        standard_csv_path=standard_csv_path(spec),
+        parameters=MappingProxyType(dict(spec.parameters)),
+        ports=tuple(spec.ports),
+        time_series=MappingProxyType(
+            {
+                "inputs": tuple(spec.time_series.get("inputs", ())),
+                "outputs": tuple(spec.time_series.get("outputs", ())),
+            }
+        ),
+        states=tuple(spec.states),
+        model_commands=MappingProxyType(dict(spec.model_commands)),
     )
 
 
-def standard_csv_path(spec: DeviceYamlSpec) -> str | None:
-    """data_repeat 设备的标准 csv 路径(03 §6.4 唯一推导规则)。
+def model_command_refs(desc: DeviceModelDescriptor) -> list[str]:
+    """公开辅助：设备声明的全部命令引用（id@version 列表）。"""
+    return list(desc.model_commands.values())
 
-    权威规则: ``<yaml 完整路径去后缀>.csv``(source_path 权威, codex 二次
-    审核 Medium-4: 以 yaml 文件为基准, 不再先猜目录名再猜 type_id 末段)。
-    source_path 为空(测试手工构造)时退化为 base_dir 目录名; 文件不存在
-    返回 None(由调用方报明确错误)。
+
+# ---------------------------------------------------------------------------
+# 解析（新格式 → DeviceYamlSpec）
+# ---------------------------------------------------------------------------
+
+
+def _parse_parameters(parsed, param_help: MappingProxyType | None = None) -> MappingProxyType:
+    """新格式 parameters → {name: ParameterSpec}（价格引用原样保留）。
+
+    ``param_help`` 取自 extensions.ies.meta.param_help（help_key 元数据）。
     """
-    base = Path(spec.source_path) if spec.source_path else Path(spec.base_dir) / (
-        f"{Path(spec.base_dir).name}.yaml"
+    param_help = param_help or MappingProxyType({})
+    out: dict[str, ParameterSpec] = {}
+    for name, p in parsed.parameters.items():
+        default = p.default
+        enum = p.enum
+        out[name] = ParameterSpec(
+            name=name,
+            unit=p.unit,
+            min=p.minimum,
+            max=p.maximum,
+            default=default,
+            is_optimizable=p.optimizable,
+            existing_default=(
+                default
+                if isinstance(default, (int, float)) and not isinstance(default, bool)
+                else (0.0 if p.stock_or_addition == "addition" else default)
+            ),
+            stock_or_addition=p.stock_or_addition,
+            help_key=str(param_help.get(name, "")),
+            enum=tuple(enum) if enum is not None else None,
+        )
+    return MappingProxyType(out)
+
+
+def _parse_ports(parsed) -> tuple[PortSpec, ...]:
+    out: list[PortSpec] = []
+    for name, p in parsed.ports.items():
+        out.append(
+            PortSpec(
+                name=name,
+                port_type=CARRIER_PORT_TYPE.get(p.carrier, p.carrier),
+                direction=p.direction,
+                energy_carrier=p.carrier,
+                capacity_ref=p.capacity_parameter,
+            )
+        )
+    return tuple(out)
+
+
+def _parse_time_series(parsed) -> MappingProxyType:
+    """新格式 data_inputs → time_series（inputs 节；outputs 为空）。
+
+    周期粒度自 extensions.periods 恢复（data_repeat 设备）。
+    """
+    periods = (
+        parsed.extensions.get("periods")
+        if isinstance(parsed.extensions.get("periods"), Mapping)
+        else {}
     )
-    candidate = base.with_suffix(".csv")
-    return str(candidate) if candidate.exists() else None
+    inputs: list[SeriesSpec] = []
+    for column, d in parsed.data_inputs.items():
+        inputs.append(
+            SeriesSpec(
+                key=column,
+                unit=d.unit,
+                resolution="1h",
+                required=d.required,
+                period=periods.get(column),
+            )
+        )
+    return MappingProxyType({"inputs": tuple(inputs), "outputs": ()})
 
 
-# ---------------------------------------------------------------------------
-# 解析(结构/枚举/必填字段,AppError SYS-CFG-001)
-# ---------------------------------------------------------------------------
+def _parse_states(parsed) -> tuple[StateSpec, ...]:
+    out: list[StateSpec] = []
+    for name, s in parsed.states.items():
+        bounds = None
+        if s.minimum_ref or s.maximum_ref:
+            b: dict[str, str] = {}
+            if s.minimum_ref:
+                b["min_ref"] = s.minimum_ref
+            if s.maximum_ref:
+                b["max_ref"] = s.maximum_ref
+            bounds = MappingProxyType(b)
+        out.append(StateSpec(key=name, unit=s.unit, initial_ref=s.initial_ref, bounds=bounds))
+    return tuple(out)
 
 
-def _req_str(raw: dict, key: str, file: str) -> str:
-    value = raw.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise _err(f"缺少必填字段: {key}", file=file, field=key)
-    return value.strip()
+def _meta(parsed, key: str, default: object = "") -> object:
+    """extensions.ies.meta 元数据读取（help_topic/is_load/extends 等）。
+
+    extensions 已深度冻结（MappingProxyType），按 Mapping 判定。
+    """
+    meta = parsed.extensions.get("ies.meta")
+    if not isinstance(meta, Mapping):
+        return default
+    return meta.get(key, default)
 
 
 def load_yaml(path: Path) -> DeviceYamlSpec:
-    """解析单个设备 yaml;结构/枚举/必填字段非法抛 AppError(码 SYS-CFG-001)。
-
-    参数默认值原样保留(可能为 ``$price:`` 字符串), 价格解析在加载期由
-    pricing.resolve_param_default 完成。
-    """
+    """解析单个新格式设备 yaml；结构/未知字段非法抛 AppError（码 SYS-CFG-001）。"""
     path = Path(path)
     file = str(path)
     try:
@@ -220,279 +302,57 @@ def load_yaml(path: Path) -> DeviceYamlSpec:
     if not isinstance(raw, dict):
         raise _err("设备 yaml 顶层必须为映射", file=file)
 
-    type_id = _req_str(raw, "type_id", file)
-    if not _ID_PATTERN.match(type_id):
-        raise _err(f"type_id 不合法: {type_id!r}", file=file, type_id=type_id)
-    version = _req_str(raw, "version", file)
-    if not _SEMVER_PATTERN.match(version):
-        raise _err(f"version 必须为 semver x.y.z: {version!r}", file=file, version=version)
-    name_zh = _req_str(raw, "name_zh", file)
-    name_en = _req_str(raw, "name_en", file)
-    model_method = _req_str(raw, "model_method", file)
-    if model_method not in MODEL_METHODS:
-        raise _err(
-            f"model_method 非法: {model_method!r}, 允许值 {MODEL_METHODS}",
-            file=file,
-            model_method=model_method,
-        )
-    stateful = raw.get("stateful")
-    if not isinstance(stateful, bool):
-        raise _err("stateful 必须为布尔值", file=file)
-    fidelity = raw.get("fidelity", "medium")
-    if fidelity not in FIDELITY_VALUES:
-        raise _err(f"fidelity 非法: {fidelity!r}", file=file, fidelity=fidelity)
-    carriers = raw.get("energy_carriers", [])
-    if not isinstance(carriers, list) or not carriers or not all(isinstance(c, str) for c in carriers):
-        raise _err("energy_carriers 必须为非空字符串列表", file=file)
-    is_load = raw.get("is_load", False)
-    if not isinstance(is_load, bool):
-        raise _err("is_load 必须为布尔值", file=file)
-    capabilities = raw.get("capabilities", [])
-    if not isinstance(capabilities, list) or not all(isinstance(c, str) for c in capabilities):
-        raise _err("capabilities 必须为字符串列表", file=file)
-    extends = raw.get("extends", "ies.device.base")
-    if not isinstance(extends, str):
-        raise _err("extends 必须为字符串", file=file)
-    help_topic = raw.get("help_topic", "")
-    if not isinstance(help_topic, str):
-        raise _err("help_topic 必须为字符串", file=file)
+    result = parse_device_model_yaml(raw, file=file)
+    if not result.ok:
+        first = result.diagnostics[0] if result.diagnostics else None
+        if first is not None:
+            raise _err(
+                f"设备 yaml 校验失败: {first.params.get('detail', '')}",
+                file=file,
+                field=first.location.get("field") if first.location else None,
+                diagnostics=[d.to_dict() for d in result.diagnostics],
+            )
+        raise _err("设备 yaml 校验失败", file=file)
 
-    function = raw.get("function") or {}
-    if not isinstance(function, dict):
-        raise _err("function 必须为映射", file=file)
-
+    parsed = result.document
+    info = parsed.device
+    names = info.names if info is not None else {}
+    meta = parsed.extensions.get("ies.meta")
+    param_help = (
+        MappingProxyType(meta.get("param_help", {}))
+        if isinstance(meta, Mapping) and isinstance(meta.get("param_help"), Mapping)
+        else MappingProxyType({})
+    )
     return DeviceYamlSpec(
-        type_id=type_id,
-        version=version,
-        name_zh=name_zh,
-        name_en=name_en,
-        model_method=model_method,
-        stateful=stateful,
-        fidelity=fidelity,
-        energy_carriers=list(carriers),
-        is_load=is_load,
-        capabilities=list(capabilities),
-        extends=extends,
-        help_topic=help_topic,
-        ports=_parse_ports(raw.get("ports", []), file),
-        parameters=_parse_parameters(raw.get("parameters", {}), file),
-        time_series=_parse_time_series(raw.get("time_series", {}), file),
-        states=_parse_states(raw.get("states", []), file),
-        function=function,
-        base_dir=str(path.resolve().parent),
+        type_id=info.id,
+        version=info.version,
+        name_zh=names.get("zh-CN", ""),
+        name_en=names.get("en-US", ""),
+        model_method=info.model_method,
+        stateful=info.stateful,
+        fidelity=info.fidelity,
+        energy_carriers=tuple(info.energy_carriers),
+        is_load=bool(_meta(parsed, "is_load", False)),
+        capabilities=tuple(info.capabilities),
+        extends=str(_meta(parsed, "extends", "ies.device.base")),
+        help_topic=str(_meta(parsed, "help_topic", "")),
+        ports=_parse_ports(parsed),
+        parameters=_parse_parameters(parsed, param_help),
+        time_series=_parse_time_series(parsed),
+        states=_parse_states(parsed),
+        model_commands=MappingProxyType(dict(parsed.model_commands)),
+        extensions=parsed.extensions,
         source_path=str(path.resolve()),
     )
 
 
-def _parse_ports(items: object, file: str) -> list[PortSpec]:
-    if not isinstance(items, list):
-        raise _err("ports 必须为列表", file=file)
-    out: list[PortSpec] = []
-    for it in items:
-        if not isinstance(it, dict):
-            raise _err("端口必须为映射", file=file)
-        name = it.get("name")
-        if not isinstance(name, str) or not name:
-            raise _err("端口缺少 name", file=file)
-        port_type = it.get("port_type")
-        if port_type not in PORT_TYPES:
-            raise _err(f"端口 {name!r} port_type 非法: {port_type!r}", file=file, port=name)
-        direction = it.get("direction")
-        if direction not in PORT_DIRECTIONS:
-            raise _err(f"端口 {name!r} direction 非法: {direction!r}", file=file, port=name)
-        carrier = it.get("energy_carrier")
-        if not isinstance(carrier, str) or not carrier:
-            raise _err(f"端口 {name!r} 缺少 energy_carrier", file=file, port=name)
-        capacity_ref = it.get("capacity_ref")
-        if capacity_ref is not None and not isinstance(capacity_ref, str):
-            raise _err(f"端口 {name!r} capacity_ref 必须为字符串", file=file, port=name)
-        out.append(
-            PortSpec(
-                name=name,
-                port_type=port_type,
-                direction=direction,
-                energy_carrier=carrier,
-                capacity_ref=capacity_ref,
-            )
-        )
-    return out
-
-
-_PARAM_KEYS = (
-    "unit",
-    "min",
-    "max",
-    "default",
-    "is_optimizable",
-    "stock_or_addition",
-    "existing_default",
-    "enum",
-    "help_key",
-)
-
-
-def _parse_parameters(items: object, file: str) -> dict[str, ParameterSpec]:
-    if not isinstance(items, dict):
-        raise _err("parameters 必须为映射", file=file)
-    out: dict[str, ParameterSpec] = {}
-    for name, data in items.items():
-        if not isinstance(name, str) or not name:
-            raise _err("参数名必须为非空字符串", file=file)
-        if not isinstance(data, dict):
-            raise _err(f"参数 {name!r} 必须为映射", file=file, param=name)
-        unknown = [k for k in data if k not in _PARAM_KEYS]
-        if unknown:
-            raise _err(f"参数 {name!r} 含未知键: {unknown}", file=file, param=name, keys=unknown)
-        unit = data.get("unit")
-        if not isinstance(unit, str) or not unit.strip():
-            raise _err(f"参数 {name!r} 缺少 unit", file=file, param=name)
-        mn, mx = data.get("min"), data.get("max")
-        for v in (mn, mx):
-            if v is not None and not isinstance(v, (int, float)):
-                raise _err(f"参数 {name!r} min/max 必须为数值或 null", file=file, param=name)
-        if isinstance(mn, (int, float)) and isinstance(mx, (int, float)) and mn > mx:
-            raise _err(f"参数 {name!r} min({mn}) 大于 max({mx})", file=file, param=name)
-        default = data.get("default")
-        if not isinstance(default, (int, float, str, dict, list, bool, type(None))):
-            raise _err(f"参数 {name!r} default 类型非法", file=file, param=name)
-        is_optimizable = data.get("is_optimizable", False)
-        if not isinstance(is_optimizable, bool):
-            raise _err(f"参数 {name!r} is_optimizable 必须为布尔值", file=file, param=name)
-        stock = data.get("stock_or_addition", "stock")
-        if stock not in ("stock", "addition"):
-            raise _err(f"参数 {name!r} stock_or_addition 非法: {stock!r}", file=file, param=name)
-        enum = data.get("enum")
-        if enum is not None:
-            if not isinstance(enum, list):
-                raise _err(f"参数 {name!r} enum 必须为列表", file=file, param=name)
-            enum = tuple(enum)
-        existing = data.get("existing_default")
-        if existing is not None and not isinstance(existing, (int, float)):
-            raise _err(f"参数 {name!r} existing_default 必须为数值", file=file, param=name)
-        # RR-P2-02: 与 core.registry._p 同义: 缺省时按 stock_or_addition 派生
-        # (stock→default, addition→0.0); YAML 不必显式声明, 装配/容量等场景仍可消费。
-        if existing is None:
-            if stock == "addition":
-                existing = 0.0
-            elif isinstance(default, (int, float)) and not isinstance(default, bool):
-                existing = default
-            else:
-                existing = default  # 保留 None/字符串等非数值原样
-        help_key = data.get("help_key", "")
-        if not isinstance(help_key, str):
-            raise _err(f"参数 {name!r} help_key 必须为字符串", file=file, param=name)
-        out[name] = ParameterSpec(
-            name=name,
-            unit=unit,
-            min=mn,
-            max=mx,
-            default=default,
-            is_optimizable=is_optimizable,
-            existing_default=existing,
-            stock_or_addition=stock,
-            help_key=help_key,
-            enum=enum,
-        )
-    return out
-
-
-_SERIES_KEYS = ("key", "unit", "resolution", "required", "period", "convert")
-
-
-def _parse_time_series(raw: object, file: str) -> dict[str, list[SeriesSpec]]:
-    if raw is None:
-        raw = {}
-    if not isinstance(raw, dict):
-        raise _err("time_series 必须为映射", file=file)
-    unknown_sec = [k for k in raw if k not in ("inputs", "outputs")]
-    if unknown_sec:
-        raise _err(f"time_series 含未知章节: {unknown_sec}", file=file, keys=unknown_sec)
-    return {
-        "inputs": _parse_series_list(raw.get("inputs", []), file),
-        "outputs": _parse_series_list(raw.get("outputs", []), file),
-    }
-
-
-def _parse_series_list(items: object, file: str) -> list[SeriesSpec]:
-    if not isinstance(items, list):
-        raise _err("time_series 章节必须为列表", file=file)
-    out: list[SeriesSpec] = []
-    for it in items:
-        if not isinstance(it, dict):
-            raise _err("时间序列列必须为映射", file=file)
-        unknown = [k for k in it if k not in _SERIES_KEYS]
-        if unknown:
-            raise _err(f"时间序列列含未知键: {unknown}", file=file, keys=unknown)
-        key = it.get("key")
-        if not isinstance(key, str) or not key:
-            raise _err("时间序列列缺少 key", file=file)
-        unit = it.get("unit", "")
-        if not isinstance(unit, str):
-            raise _err(f"列 {key!r} unit 必须为字符串", file=file, field=key)
-        resolution = it.get("resolution", "1h")
-        if resolution not in RESOLUTIONS:
-            raise _err(f"列 {key!r} resolution 非法: {resolution!r}", file=file, field=key)
-        required = it.get("required", True)
-        if not isinstance(required, bool):
-            raise _err(f"列 {key!r} required 必须为布尔值", file=file, field=key)
-        period = it.get("period")
-        if period is not None and period not in PERIOD_VALUES:
-            raise _err(f"列 {key!r} period 非法: {period!r}", file=file, field=key)
-        convert = it.get("convert")
-        if convert is not None and not isinstance(convert, dict):
-            raise _err(f"列 {key!r} convert 必须为映射", file=file, field=key)
-        out.append(
-            SeriesSpec(
-                key=key,
-                unit=unit,
-                resolution=resolution,
-                required=required,
-                period=period,
-                convert=convert,
-            )
-        )
-    return out
-
-
-_STATE_KEYS = ("key", "unit", "initial_ref", "bounds")
-
-
-def _parse_states(items: object, file: str) -> list[StateSpec]:
-    if items is None:
-        return []
-    if not isinstance(items, list):
-        raise _err("states 必须为列表", file=file)
-    out: list[StateSpec] = []
-    for it in items:
-        if not isinstance(it, dict):
-            raise _err("状态必须为映射", file=file)
-        unknown = [k for k in it if k not in _STATE_KEYS]
-        if unknown:
-            raise _err(f"状态含未知键: {unknown}", file=file, keys=unknown)
-        key = it.get("key")
-        if not isinstance(key, str) or not key:
-            raise _err("状态缺少 key", file=file)
-        unit = it.get("unit", "")
-        if not isinstance(unit, str):
-            raise _err(f"状态 {key!r} unit 必须为字符串", file=file, field=key)
-        initial_ref = it.get("initial_ref")
-        if initial_ref is not None and not isinstance(initial_ref, str):
-            raise _err(f"状态 {key!r} initial_ref 必须为字符串", file=file, field=key)
-        bounds = it.get("bounds")
-        if bounds is not None:
-            if not isinstance(bounds, dict) or not all(k in ("min_ref", "max_ref") for k in bounds):
-                raise _err(
-                    f"状态 {key!r} bounds 必须为 {{min_ref, max_ref}} 映射", file=file, field=key
-                )
-            for v in bounds.values():
-                if not isinstance(v, str):
-                    raise _err(f"状态 {key!r} bounds 引用必须为参数名字符串", file=file, field=key)
-        out.append(StateSpec(key=key, unit=unit, initial_ref=initial_ref, bounds=bounds))
-    return out
+def _parse_parameters_legacy(items: object, file: str) -> dict[str, ParameterSpec]:  # pragma: no cover
+    """旧格式参数解析（迁移期保留；新格式不再使用）。"""
+    return {}
 
 
 # ---------------------------------------------------------------------------
-# 派生与兼容
+# 兼容与派生
 # ---------------------------------------------------------------------------
 
 
@@ -503,11 +363,14 @@ def with_resolved_defaults(spec: DeviceYamlSpec, resolved: dict[str, object]) ->
     parameters = dict(spec.parameters)
     for name, value in resolved.items():
         parameters[name] = replace(parameters[name], default=value)
-    return replace(spec, parameters=parameters)
+    return replace(spec, parameters=MappingProxyType(parameters))
 
 
 def spec_to_dict(spec: DeviceYamlSpec) -> dict:
-    """序列化为 JSON 兼容字典(供 GET /api/devices/types 等 API 输出)。"""
+    """序列化为 JSON 兼容字典（供 GET /api/devices/types 等 API 输出）。
+
+    不再输出 function/宿主机路径；model_commands 为公开命令引用。
+    """
     return {
         "type_id": spec.type_id,
         "version": spec.version,
@@ -548,62 +411,38 @@ def spec_to_dict(spec: DeviceYamlSpec) -> dict:
         "time_series": {
             "inputs": [
                 {"key": s.key, "unit": s.unit, "resolution": s.resolution,
-                 "required": s.required, "period": s.period, "convert": s.convert}
-                for s in spec.time_series.get("inputs", [])
+                 "required": s.required, "period": s.period}
+                for s in spec.time_series.get("inputs", ())
             ],
             "outputs": [
                 {"key": s.key, "unit": s.unit, "resolution": s.resolution,
-                 "required": s.required, "period": s.period, "convert": s.convert}
-                for s in spec.time_series.get("outputs", [])
+                 "required": s.required, "period": s.period}
+                for s in spec.time_series.get("outputs", ())
             ],
         },
         "states": [
-            {"key": s.key, "unit": s.unit, "initial_ref": s.initial_ref, "bounds": s.bounds}
+            {
+                "key": s.key,
+                "unit": s.unit,
+                "initial_ref": s.initial_ref,
+                "bounds": dict(s.bounds) if s.bounds else None,
+            }
             for s in spec.states
         ],
-        "function": spec.function,
+        "model_commands": dict(spec.model_commands),
     }
 
 
-# ---------------------------------------------------------------------------
-# 派生与兼容(RR-P2-02: 移除 to_registry_spec —— core.registry 已退役, 旧
-# DeviceTypeSpec 字段(不含 ports/states/model_method 等)被 devices.DeviceModelDescriptor
-# 全量取代。模块外应直接消费 to_model_descriptor。)
-# ---------------------------------------------------------------------------
-
-
 def to_modeling_spec(spec: DeviceYamlSpec):
-    """转 modeling.devspec.DeviceSpec(建模模块输入, 05 §2.3 阶段 ①→② 契约)。
+    """转 modeling.devspec.DeviceSpec（建模模块输入；命令解析在 provider 内部）。
 
-    映射规则:
-    - model_function = function.package + '.' + function.entry(机理);
-    - data_file / model_file 取自 function.model_file 或 yaml 所在目录相对引用;
-    - ports/time_series/states 字段直接平移(两包字段签名一致)。
+    机理设备：model_function 由稳定命令 ID 在 modeling provider 内解析；
+    本函数不再拼接 function.package/entry（文件不暴露模块路径）。
     """
     from iesplan.modeling.devspec import DeviceSpec as ModelingDeviceSpec
     from iesplan.modeling.devspec import PortSpec as ModelingPortSpec
     from iesplan.modeling.devspec import SeriesSpec as ModelingSeriesSpec
     from iesplan.modeling.devspec import StateSpec as ModelingStateSpec
-
-    fn = spec.function if isinstance(spec.function, dict) else {}
-    model_file = None
-    data_file = None
-    if isinstance(fn.get("model_file"), dict):
-        ref = fn["model_file"].get("file")
-        if isinstance(ref, str) and ref:
-            model_file = ref
-    if isinstance(fn.get("data_file"), str) and fn["data_file"]:
-        data_file = fn["data_file"]
-    elif spec.model_method == "data_repeat" and not data_file:
-        # 内置周期设备: 唯一推导规则 yaml 同目录同名 csv(03 §6.4,
-        # standard_csv_path 为权威入口, 与 registry_loader 共用)
-        data_file = standard_csv_path(spec)
-    model_function = ""
-    if spec.model_method == "mechanism":
-        package = fn.get("package") or ""
-        entry = fn.get("entry") or ""
-        if package and entry:
-            model_function = f"{package}.{entry}"
 
     return ModelingDeviceSpec(
         type_id=spec.type_id,
@@ -619,9 +458,9 @@ def to_modeling_spec(spec: DeviceYamlSpec):
         model_method=spec.model_method,
         stateful=spec.stateful,
         fidelity=spec.fidelity,
-        model_function=model_function,
-        model_file=model_file,
-        data_file=data_file,
+        model_function="",  # 由 modeling provider 经命令 ID 解析
+        model_file=None,
+        data_file=None,
         ports=tuple(
             ModelingPortSpec(
                 name=p.name,
@@ -638,14 +477,14 @@ def to_modeling_spec(spec: DeviceYamlSpec):
                     key=s.key, unit=s.unit, resolution=s.resolution,
                     required=s.required, period=s.period,
                 )
-                for s in spec.time_series.get("inputs", [])
+                for s in spec.time_series.get("inputs", ())
             ),
             "outputs": tuple(
                 ModelingSeriesSpec(
                     key=s.key, unit=s.unit, resolution=s.resolution,
                     required=s.required, period=s.period,
                 )
-                for s in spec.time_series.get("outputs", [])
+                for s in spec.time_series.get("outputs", ())
             ),
         },
         states=tuple(

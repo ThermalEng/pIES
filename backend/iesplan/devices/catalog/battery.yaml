@@ -1,57 +1,148 @@
-# 电池储能(机理模型、有状态;states 声明 SOC, 02 §2.8 示例)
-type_id: ies.device.battery
-version: 1.5.0
-name_zh: 电池储能
-name_en: Battery Storage
-help_topic: help.modeling.battery
-model_method: mechanism
-stateful: true
-fidelity: high
-energy_carriers: [electric]
-is_load: false
-capabilities: [storage, controllable, optimization_variable]
-extends: ies.device.base
+# 电池储能(机理模型、有状态;states 声明 SOC)
+schema: ies.device-model
+schema_version: "1.0.0"
 
-ports:
-  # 双向端口(充放电互斥): 端口名为载体名, 与 services/model.py 端口命名约定一致
-  - {name: electric, port_type: electric, direction: bidirectional, energy_carrier: electric,
-     capacity_ref: rated_power_kw}
+device:
+  id: ies.device.battery
+  version: "1.5.0"
+  names:
+    zh-CN: 电池储能
+    en-US: Battery Storage
+  model_method: mechanism
+  stateful: true
+  fidelity: high
+  energy_carriers: [electric]
+  capabilities: [storage, controllable, optimization_variable]
 
 parameters:
-  capacity_kwh: {unit: kWh, min: 0, max: 10000000, default: 0, is_optimizable: true,
-                 stock_or_addition: addition, help_key: help.param.battery.capacity_kwh}
-  max_capacity_kwh: {unit: kWh, min: 0, max: 10000000, default: 5000,
-                     stock_or_addition: addition, help_key: help.param.battery.max_capacity_kwh}
-  rated_power_kw: {unit: kW, min: 0, max: 1000000, default: 0, is_optimizable: true,
-                   stock_or_addition: addition, help_key: help.param.battery.rated_power_kw}
-  charge_efficiency: {unit: "-", min: 0.5, max: 1.0, default: 0.95,
-                      help_key: help.param.battery.charge_efficiency}
-  discharge_efficiency: {unit: "-", min: 0.5, max: 1.0, default: 0.95,
-                         help_key: help.param.battery.discharge_efficiency}
-  max_soc: {unit: "-", min: 0.5, max: 1.0, default: 0.90, help_key: help.param.battery.max_soc}
-  min_soc: {unit: "-", min: 0, max: 0.5, default: 0.1, help_key: help.param.battery.min_soc}
-  initial_soc: {unit: "-", min: 0, max: 1.0, default: 0.5, help_key: help.param.battery.initial_soc}
-  cycle_life: {unit: 次, min: 100, max: 20000, default: 6000, help_key: help.param.battery.cycle_life}
-  unit_invest_cost:
-    unit: CNY/kWh
-    min: 0
-    default: "$price:device_costs.battery.unit_invest_cost"
+  capacity_kwh:
+    value_type: number
+    quantity: energy
+    unit: kWh
+    required: false
+    default: 0
+    minimum: 0
+    maximum: 10000000
+    optimizable: true
     stock_or_addition: addition
-    help_key: help.param.battery.unit_invest_cost
+  max_capacity_kwh:
+    value_type: number
+    quantity: energy
+    unit: kWh
+    required: false
+    default: 5000
+    minimum: 0
+    maximum: 10000000
+    stock_or_addition: addition
+  rated_power_kw:
+    value_type: number
+    quantity: power
+    unit: kW
+    required: false
+    default: 0
+    minimum: 0
+    maximum: 1000000
+    optimizable: true
+    stock_or_addition: addition
+  charge_efficiency:
+    value_type: number
+    quantity: ratio
+    unit: "-"
+    required: false
+    default: 0.95
+    minimum: 0.5
+    maximum: 1.0
+  discharge_efficiency:
+    value_type: number
+    quantity: ratio
+    unit: "-"
+    required: false
+    default: 0.95
+    minimum: 0.5
+    maximum: 1.0
+  max_soc:
+    value_type: number
+    quantity: ratio
+    unit: "-"
+    required: false
+    default: 0.9
+    minimum: 0.5
+    maximum: 1.0
+  min_soc:
+    value_type: number
+    quantity: ratio
+    unit: "-"
+    required: false
+    default: 0.1
+    minimum: 0
+    maximum: 0.5
+  initial_soc:
+    value_type: number
+    quantity: ratio
+    unit: "-"
+    required: false
+    default: 0.5
+    minimum: 0
+    maximum: 1.0
+  cycle_life:
+    value_type: number
+    quantity: ratio
+    unit: 次
+    required: false
+    default: 6000
+    minimum: 100
+    maximum: 20000
+  unit_invest_cost:
+    value_type: number
+    quantity: currency_per_energy
+    unit: CNY/kWh
+    required: false
+    default: "$price:device_costs.battery.unit_invest_cost"
+    minimum: 0
+    stock_or_addition: addition
   lifetime_years:
+    value_type: number
+    quantity: duration
     unit: a
-    min: 1
-    max: 50
+    required: false
     default: "$price:device_costs.battery.lifetime_years"
-    help_key: help.param.battery.lifetime_years
+    minimum: 1
+    maximum: 50
+
+ports:
+  electric:
+    carrier: electric
+    direction: bidirectional
+    quantity: power
+    unit: kW
+    capacity_parameter: rated_power_kw
+
+data_inputs: {}
 
 states:
-  - {key: soc, unit: "-", initial_ref: initial_soc, bounds: {min_ref: min_soc, max_ref: max_soc}}
+  soc:
+    unit: "-"
+    initial_ref: initial_soc
+    minimum_ref: min_soc
+    maximum_ref: max_soc
 
-time_series:
-  inputs: []
-  outputs: []
+model_commands:
+  storage: ies.model-command.battery.storage@1.0.0
+  controllable: ies.model-command.battery.storage@1.0.0
+  optimization_variable: ies.model-command.battery.storage@1.0.0
 
-function:
-  entry: simulate_battery
-  package: iesplan.modeling.functions
+extensions:
+  ies.meta:
+    help_topic: help.modeling.battery
+    param_help:
+      capacity_kwh: help.param.battery.capacity_kwh
+      max_capacity_kwh: help.param.battery.max_capacity_kwh
+      rated_power_kw: help.param.battery.rated_power_kw
+      charge_efficiency: help.param.battery.charge_efficiency
+      discharge_efficiency: help.param.battery.discharge_efficiency
+      max_soc: help.param.battery.max_soc
+      min_soc: help.param.battery.min_soc
+      initial_soc: help.param.battery.initial_soc
+      cycle_life: help.param.battery.cycle_life
+      unit_invest_cost: help.param.battery.unit_invest_cost
+      lifetime_years: help.param.battery.lifetime_years
