@@ -542,7 +542,10 @@ def test_api_upload_too_few_rows_blocked(client: TestClient, session: Session) -
         headers=login_headers(client, user),
     )
     assert resp.status_code == 400
-    codes = [d["code"] for d in resp.json()["diagnostics"]]
+    err = resp.json()["error"]
+    assert err["code"] == "DATA-VAL-001"
+    assert err["message_key"] == "ies.error.data_validation_failed"
+    codes = [d["code"] for d in err["params"]["diagnostics"]]
     assert "DATA-TS-004" in codes
     # 未创建任何版本
     assert session.query(DatasetVersion).count() == 0
@@ -567,7 +570,7 @@ def test_api_upload_duplicate_ts_blocked(client: TestClient, session: Session) -
         headers=login_headers(client, user),
     )
     assert resp.status_code == 400
-    codes = [d["code"] for d in resp.json()["diagnostics"]]
+    codes = [d["code"] for d in resp.json()["error"]["params"]["diagnostics"]]
     assert "DATA-TS-001" in codes
 
 
@@ -590,7 +593,7 @@ def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
         headers=login_headers(client, user),
     )
     assert resp.status_code == 400
-    diagnostics = resp.json()["diagnostics"]
+    diagnostics = resp.json()["error"]["params"]["diagnostics"]
     assert any(d["code"] == "RES-RANGE-001" and d["location"]["field"] == "t_ambient" for d in diagnostics)
 
 
@@ -730,7 +733,7 @@ def test_upload_with_fields_declaration(client: TestClient, session: Session) ->
         headers=login_headers(client, user),
     )
     assert resp.status_code == 400, resp.text
-    codes = [d["code"] for d in resp.json()["diagnostics"]]
+    codes = [d["code"] for d in resp.json()["error"]["params"]["diagnostics"]]
     assert "PARAM-UNIT-002" in codes
 
 

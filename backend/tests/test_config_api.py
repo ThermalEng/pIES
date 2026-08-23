@@ -319,7 +319,7 @@ def test_invalid_variable_bounds_rejected(client: TestClient, db: Session) -> No
         json={"config": bad, "expected_revision": 1},
     )
     assert resp.status_code == 422
-    codes = {d["code"] for d in resp.json()["diagnostics"]}
+    codes = {d["code"] for d in resp.json()["error"]["params"]["diagnostics"]}
     assert "PARAM-RNG-003" in codes
 
     # min > max → PARAM-CONF-001
@@ -333,7 +333,7 @@ def test_invalid_variable_bounds_rejected(client: TestClient, db: Session) -> No
         json={"config": bad2, "expected_revision": 1},
     )
     assert resp2.status_code == 422
-    codes2 = {d["code"] for d in resp2.json()["diagnostics"]}
+    codes2 = {d["code"] for d in resp2.json()["error"]["params"]["diagnostics"]}
     assert "PARAM-CONF-001" in codes2
     # 非法类型 → SYS-CFG-001
     bad3 = dict(default)
@@ -343,7 +343,40 @@ def test_invalid_variable_bounds_rejected(client: TestClient, db: Session) -> No
         json={"config": bad3, "expected_revision": 1},
     )
     assert resp3.status_code == 422
-    assert "SYS-CFG-001" in {d["code"] for d in resp3.json()["diagnostics"]}
+    assert "SYS-CFG-001" in {d["code"] for d in resp3.json()["error"]["params"]["diagnostics"]}
+
+
+def test_save_validation_error_envelope_shape(client: TestClient, db: Session) -> None:
+    """422 校验失败为标准 8 字段错误信封(宪法 §8.3), 诊断明细入 params.diagnostics。"""
+    project = seed_project(db)
+    default = _default_config(db, project)
+    bad = dict(default)
+    bad["variables"] = [dict(default["variables"][0], type="fuzzy")]
+    resp = client.put(
+        f"/api/projects/{project.id}/config",
+        json={"config": bad, "expected_revision": 1},
+    )
+    assert resp.status_code == 422
+    assert resp.json().keys() == {"error"}
+    err = resp.json()["error"]
+    # 信封字段集与契约固定: 8 字段同构
+    assert set(err) == {
+        "code",
+        "message_key",
+        "severity",
+        "blocking",
+        "params",
+        "location",
+        "fix_hint_key",
+        "ref_ids",
+    }
+    assert err["code"] == "CONFIG-VAL-001"
+    assert err["message_key"] == "ies.error.data_validation_failed"
+    assert err["severity"] == "error"
+    assert err["blocking"] is True
+    diags = err["params"]["diagnostics"]
+    assert err["params"]["count"] == len(diags) >= 1
+    assert any(d["code"] == "SYS-CFG-001" for d in diags)
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +402,7 @@ def test_expression_constraint_parse_error_diagnostic(
         json={"config": broken, "expected_revision": 1},
     )
     assert resp.status_code == 422
-    codes = {d["code"] for d in resp.json()["diagnostics"]}
+    codes = {d["code"] for d in resp.json()["error"]["params"]["diagnostics"]}
     assert "EXPR-SYN-001" in codes
 
     # 未登记变量
@@ -382,7 +415,7 @@ def test_expression_constraint_parse_error_diagnostic(
         json={"config": undeclared, "expected_revision": 1},
     )
     assert resp2.status_code == 422
-    codes2 = {d["code"] for d in resp2.json()["diagnostics"]}
+    codes2 = {d["code"] for d in resp2.json()["error"]["params"]["diagnostics"]}
     assert "EXPR-CODE-001" in codes2
 
     # 合法表达式通过, 且表达式可引用变量
@@ -395,7 +428,7 @@ def test_expression_constraint_parse_error_diagnostic(
         json={"config": ok, "expected_revision": 1},
     )
     assert resp3.status_code == 422, resp3.text
-    codes3 = {d["code"] for d in resp3.json()["diagnostics"]}
+    codes3 = {d["code"] for d in resp3.json()["error"]["params"]["diagnostics"]}
     # 01 §5.5 量纲检查生效: 带量纲变量(kWp→power)与无量纲字面量 0 比较 → 量纲不一致
     assert "EXPR-DIM-001" in codes3
 
@@ -465,7 +498,7 @@ def test_discount_rate_misplaced_rejected(client: TestClient, db: Session) -> No
         json={"config": cfg, "expected_revision": 1},
     )
     assert resp.status_code == 422
-    codes = {d["code"] for d in resp.json()["diagnostics"]}
+    codes = {d["code"] for d in resp.json()["error"]["params"]["diagnostics"]}
     assert "PARAM-CONF-001" in codes
 
 
@@ -525,7 +558,7 @@ def test_irr_floor_missing_rejected(client: TestClient, db: Session) -> None:
         json={"config": cfg, "expected_revision": 1},
     )
     assert resp.status_code == 422
-    codes = {d["code"] for d in resp.json()["diagnostics"]}
+    codes = {d["code"] for d in resp.json()["error"]["params"]["diagnostics"]}
     assert "SYS-CFG-001" in codes
 
 
@@ -545,7 +578,7 @@ def test_algorithm_incompatible_rejected(client: TestClient, db: Session) -> Non
         json={"config": cfg, "expected_revision": 1},
     )
     assert resp.status_code == 422
-    diags = resp.json()["diagnostics"]
+    diags = resp.json()["error"]["params"]["diagnostics"]
     assert any(d["code"] == "SYS-CFG-001" for d in diags)
     lp = next(d for d in diags if d["code"] == "SYS-CFG-001")
     assert "irr_hard_constraint" in lp["params"]["missing_capabilities"]
@@ -582,7 +615,7 @@ def test_algorithm_unknown_rejected(client: TestClient, db: Session) -> None:
         json={"config": cfg, "expected_revision": 1},
     )
     assert resp.status_code == 422
-    codes = {d["code"] for d in resp.json()["diagnostics"]}
+    codes = {d["code"] for d in resp.json()["error"]["params"]["diagnostics"]}
     assert "CONN-TYPE-002" in codes
 
 

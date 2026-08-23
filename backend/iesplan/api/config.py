@@ -1,7 +1,7 @@
 """计算配置 API(U06): /api/projects/{id}/config 与 /api/registry/algorithms。
 
 - GET    /api/projects/{id}/config          当前配置 + 参数元数据(单位/范围/帮助键)
-- PUT    /api/projects/{id}/config          保存 {config, expected_revision}; 校验不通过返回 422 + diagnostics
+- PUT    /api/projects/{id}/config          保存 {config, expected_revision}; 校验不通过返回 422 + 标准错误信封
 - POST   /api/projects/{id}/config/validate 只校验不保存
 - GET    /api/projects/{id}/config/default  重新生成默认配置
 - GET    /api/registry/algorithms           算法列表 + 能力
@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.core.errors import error_envelope
 from iesplan.db import get_db
 from iesplan.services import config as config_service
 from iesplan.services import project as project_service
@@ -75,14 +76,18 @@ def save_config_endpoint(
     db: DbSession,
     user: CurrentUser,
 ) -> JSONResponse:
-    """保存配置(与草稿修订绑定); 校验不通过返回 422 + diagnostics, 不落库。"""
+    """保存配置(与草稿修订绑定); 校验不通过返回 422 + 标准错误信封, 不落库。"""
     project_service.ensure_access(db, user, project_id, "edit")
     graph = config_service.load_work_graph(db, project_id)
     diags = config_service.validate_config(body.config, graph)
     if _has_errors(diags):
         return JSONResponse(
             status_code=422,
-            content={"diagnostics": _diagnostics(diags), "count": len(diags)},
+            content=error_envelope(
+                code="CONFIG-VAL-001",
+                message_key="ies.error.data_validation_failed",
+                params={"diagnostics": _diagnostics(diags), "count": len(diags)},
+            ),
         )
     row = config_service.save_config(db, project_id, body.config, body.expected_revision)
     return JSONResponse(

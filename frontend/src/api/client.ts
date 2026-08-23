@@ -227,8 +227,10 @@ function parseErrorEnvelope(body: unknown): ApiErrorBody | null {
 function toApiError(status: number, body: unknown): ApiError {
   const envelope = parseErrorEnvelope(body)
   if (envelope) return new ApiError(status, envelope)
-  // 后端校验失败信封:{diagnostics: [...], count}(PUT /config、数据集上传等 422 响应)。
-  // 无标准 {error} 信封时把诊断透传到 params,页面可展示明细而非"未知错误: HTTP 422"。
+  // 0.3.0 C3: 全部错误路径已迁移标准 {error} 信封(宪法 §8.3), 诊断明细在
+  // params.diagnostics(parseErrorEnvelope 已透传)。此裸 {diagnostics} fallback 仅作
+  // 防御性兜底(未来回归/非标准错误体), 成功响应的 diagnostics 兄弟字段
+  // (model/validate 200、dataset 上传 201)不经由此处, 由 unwrapBody 直接返回。
   const raw = body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : {}
   if (Array.isArray(raw.diagnostics)) {
     return new ApiError(status, {

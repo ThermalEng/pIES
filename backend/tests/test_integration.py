@@ -867,7 +867,10 @@ def test_rpd_config_gate(client: TestClient, db: Session) -> None:
     )
     assert resp.status_code == 422
     body = resp.json()
-    assert body["count"] >= 1 and any(d["severity"] in ("error", "blocking") for d in body["diagnostics"])
+    params = body["error"]["params"]
+    assert params["count"] >= 1 and any(
+        d["severity"] in ("error", "blocking") for d in params["diagnostics"]
+    )
 
     resp = client.get(f"/api/projects/{pid}/config/default", headers=_h(client, eng_id))
     assert resp.status_code == 200
@@ -909,7 +912,7 @@ def test_rpd_dataset_validation(client: TestClient, db: Session) -> None:
     assert resp.status_code == 400, resp.text
     body = resp.json()
     assert body["error"]["message_key"] == "ies.error.data_validation_failed"
-    assert any(d["code"] == "DATA-TS-004" for d in body["diagnostics"])
+    assert any(d["code"] == "DATA-TS-004" for d in body["error"]["params"]["diagnostics"])
 
     # 标准模板下载(公开; UTF-8 BOM 起始)
     resp = client.get("/api/datasets/template", params={"resolution": "1h"})
