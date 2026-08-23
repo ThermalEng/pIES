@@ -832,10 +832,14 @@ class DeviceDataResult:
 
 
 def _format_number(v: float) -> str:
-    """数值规范形: 去尾零(与 Python repr 一致, 但保有限性)。"""
+    """数值规范形: Python repr(最短往返表示)。
+
+    repr(float) 保证 float(repr(v)) == v 精确往返, 规范摘要忠实反映校验后的
+    数值; 不得用低位宽格式(如 %g)静默舍入用户数据。
+    """
     if not math.isfinite(v):
         raise ValueError(f"非有限数值 {v!r} 不允许进入规范表格")
-    return format(v, "g")
+    return repr(float(v))
 
 
 def canonical_table_bytes(

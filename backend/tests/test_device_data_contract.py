@@ -457,6 +457,23 @@ class TestCanonicalize:
 
 
 # ---------------------------------------------------------------------------
+# review 修复回归(0.6.0): 精度/时间模式/模型绑定/单位声明
+# ---------------------------------------------------------------------------
+
+
+class TestReviewFixes:
+    def test_high_precision_value_preserved_in_canonical_summary(self) -> None:
+        """>6 位有效数字的值不得在规范摘要中被静默舍入(finding P1 精度)。"""
+        value = "0.123456789"
+        text = _valid_csv_text(rows=[f"2025-01-01T00:00:00,{value}"])
+        result = canonicalize_device_data(text.encode("utf-8"), _e_load_desc())
+        assert not any(d.blocking for d in result.diagnostics), [d.to_dict() for d in result.diagnostics]
+        canonical = result.canonical_csv_bytes().decode("utf-8")
+        assert "0.123456789" in canonical
+        # 规范值精确往返
+        assert result.rows[0]["e_load"] == float(value)
+
+# ---------------------------------------------------------------------------
 # 样例文件(合法/非法)
 # ---------------------------------------------------------------------------
 
