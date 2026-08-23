@@ -17,6 +17,7 @@ model_commands。``function`` 与 ``standard_csv_path`` 已从公开面移除—
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -243,7 +244,11 @@ def _parse_time_series(parsed) -> MappingProxyType:
 
     周期粒度自 extensions.periods 恢复（data_repeat 设备）。
     """
-    periods = parsed.extensions.get("periods") if isinstance(parsed.extensions.get("periods"), dict) else {}
+    periods = (
+        parsed.extensions.get("periods")
+        if isinstance(parsed.extensions.get("periods"), Mapping)
+        else {}
+    )
     inputs: list[SeriesSpec] = []
     for column, d in parsed.data_inputs.items():
         inputs.append(
@@ -274,9 +279,12 @@ def _parse_states(parsed) -> tuple[StateSpec, ...]:
 
 
 def _meta(parsed, key: str, default: object = "") -> object:
-    """extensions.ies.meta 元数据读取（help_topic/is_load/extends 等）。"""
+    """extensions.ies.meta 元数据读取（help_topic/is_load/extends 等）。
+
+    extensions 已深度冻结（MappingProxyType），按 Mapping 判定。
+    """
     meta = parsed.extensions.get("ies.meta")
-    if not isinstance(meta, dict):
+    if not isinstance(meta, Mapping):
         return default
     return meta.get(key, default)
 
@@ -312,7 +320,7 @@ def load_yaml(path: Path) -> DeviceYamlSpec:
     meta = parsed.extensions.get("ies.meta")
     param_help = (
         MappingProxyType(meta.get("param_help", {}))
-        if isinstance(meta, dict) and isinstance(meta.get("param_help"), dict)
+        if isinstance(meta, Mapping) and isinstance(meta.get("param_help"), Mapping)
         else MappingProxyType({})
     )
     return DeviceYamlSpec(
