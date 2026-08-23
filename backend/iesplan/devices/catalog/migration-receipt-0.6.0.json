@@ -1,0 +1,47 @@
+{
+  "entries": [
+    {
+      "blocking_diagnostics": [],
+      "columns": [
+        "timestamp",
+        "e_load"
+      ],
+      "device_model": "ies.device.electric_load@1.2.0",
+      "file": "electric_load.csv",
+      "new_sha256": "cdbc587db5412dfa883c8ba91dcd102a5a64a5d1b1281f4f60664b6847958ab5",
+      "ok": true,
+      "old_sha256": "721e22aa97ab9fdff45551898d9f9ec33dfa638356b523e39bf5d544696ffce6",
+      "row_count": 8760
+    },
+    {
+      "blocking_diagnostics": [],
+      "columns": [
+        "timestamp",
+        "h_load"
+      ],
+      "device_model": "ies.device.heat_load@1.1.0",
+      "file": "heat_load.csv",
+      "new_sha256": "af46ce70493e0178358ba32fa0c753721fdcb1f0023a7d6a364d3c05ffa89c87",
+      "ok": true,
+      "old_sha256": "ba0b65df707005141b87b7ea69176be898634325cc2fc9d47f137511dbd8f375",
+      "row_count": 8760
+    },
+    {
+      "blocking_diagnostics": [],
+      "columns": [
+        "timestamp",
+        "c_load"
+      ],
+      "device_model": "ies.device.cooling_load@1.1.0",
+      "file": "cooling_load.csv",
+      "new_sha256": "3f29135e38aa39098ab95ea576456285467ae312be8ab7bd970799dc5d3845f6",
+      "ok": true,
+      "old_sha256": "65b0e8b74cc800ac00945b1cf3f2ce0a098d1282898c22c5210bef7c94b10608",
+      "row_count": 8760
+    }
+  ],
+  "from_schema": "legacy_catalog_csv",
+  "generated_at": "2026-08-22T15:15:55.661197+00:00",
+  "migration": "ies.device-data",
+  "to_schema": "1.0.0"
+}

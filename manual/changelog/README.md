@@ -39,6 +39,19 @@
 - 公共协议测试基线（0.3.0 C4）：`backend/tests/test_protocol_baseline.py`（628 行）锁定 12 条错误路径的 8 字段信封 + 28 个端点的成功包装键集（AST 门禁禁止裸/包装并存）；新增 / 修改端点必须维持基线。
 - 静态架构门禁（0.3.0 C5）：`backend/tests/test_architecture_gates.py` 白名单基线三门禁——`core` 不依赖业务模块、禁止跨模块私有符号导入、禁止 API 直接导入 ORM；新增违规直接断言失败，存量违规在白名单带 TODO，后续按宪法 §14.3 逐步整改。
 
+### 设备数据文件契约(`ies.device-data` 1.0.0)
+
+- 发布 `ies.device-data` `1.0.0` 机器可读 schema(`backend/iesplan/devices/schema/device-data-v1.0.0.schema.json`)与唯一纯函数规范化器(`iesplan.devices.datacontract.canonicalize_device_data`)。
+- CSV 元数据(`# schema`/`# schema_version`/`# dataset_id`/`# device_model`/`# series_mode`/`# resolution`/`# timestamp_mode`/`# unit.<column>`)与方言(UTF-8/LF/英文逗号/RFC 4180/小数 `.`/布尔 `true|false`/禁 NaN/Inf/公式/区域化数字/千位分隔符)校验。
+- `timestamp_mode=fixed_offset` 必须声明 `fixed_utc_offset_minutes`(-840..840)，不依赖机器时区/夏令时；`series_mode=periodic` 必须声明 `period`(day|week|year)。
+- 列声明与设备模型核对：未声明列/重复列拒绝、必需列缺失拒绝、列单位量纲不一致拒绝；规范输出按模型声明顺序排列。
+- 时间轴：timeline 时间戳严格递增无重复、与分辨率对齐、同文件不混用带Z/带偏移/无偏移；utc 用 RFC 3339 带 Z，fixed_offset 由文件级偏移唯一换算 UTC。
+- 数值按设备模型 value_type/范围/有限性校验：超范围阻断不截断；缺值未在模型中声明阻断；不静默删行/补零/前值填充/解析失败变空集。
+- 规范化产物保留原始文件 SHA-256 与规范表格 SHA-256；同一语义输入得到同一规范摘要。
+- 新增 DATA-META-* / DATA-DIAL-* / DATA-COL-003..006 / DATA-VAL-* / DATA-TIME-* / DATA-ARR-001 / DATA-SUM-001 诊断码。
+- 包内设备 CSV 与 GUI 上传共用同一 `ies.device-data` 规范化流程(`datacontract.normalize_upload_csv` / `datacontract.canonical_table_bytes`)：时区(UTC 带 Z)、时间轴(严格递增/步长对齐)、单位(量纲一致)、缺失值(模型策略)、数组长度(行数一致)统一校验；`devices.profile.load_profile_columns` 与 GUI 上传均经同一规范化器，手写 CSV 与上传对同一内容产生同一规范摘要。
+- 迁移内置设备目录 CSV(`electric_load/heat_load/cooling_load`)到 `ies.device-data` `1.0.0` 格式：数据行原样保留、前插标准元数据头、迁移后全量校验通过才写回；迁移回执(`catalog/migration-receipt-0.6.0.json`)记录迁移文件、旧/新 SHA-256、行数、列声明与校验结果；后续装配只持有已校验的内容引用(`dataset_version_id`/`content_hash`)，不依赖上传文件名。
+
 ## 0.1.0 — 开发基线
 
 > 发布日期：2026-08-22；发布状态：正式稳定版之前的开发版本

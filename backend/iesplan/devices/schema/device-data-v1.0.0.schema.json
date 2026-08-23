@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.device-data/1.0.0",
+  "title": "ies.device-data 1.0.0",
+  "description": "设备数据 CSV 文件契约 1.0.0 机器可读 schema。本文件描述 CSV 文件声明与规范化产物的约束；实际 CSV 语法(UTF-8/LF/逗号/RFC 4180)见 device-data-csv.md 格式页。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "dataset_id",
+    "device_model",
+    "series_mode",
+    "resolution",
+    "timestamp_mode",
+    "units",
+    "columns"
+  ],
+  "properties": {
+    "schema": {
+      "const": "ies.device-data"
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "dataset_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "device_model": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9._-]+@\\d+\\.\\d+\\.\\d+$"
+    },
+    "series_mode": {
+      "enum": ["timeline", "periodic"]
+    },
+    "resolution": {
+      "enum": ["15min", "30min", "1h"]
+    },
+    "timestamp_mode": {
+      "enum": ["utc", "fixed_offset"]
+    },
+    "fixed_utc_offset_minutes": {
+      "type": "integer",
+      "minimum": -840,
+      "maximum": 840
+    },
+    "period": {
+      "enum": ["day", "week", "year"]
+    },
+    "units": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "columns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "row_count": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}
