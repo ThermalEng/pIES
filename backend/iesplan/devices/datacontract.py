@@ -681,16 +681,18 @@ def data_inputs_from_descriptor(desc) -> list[DataInputDecl]:
     不可用时读取 ``time_series.inputs``(key/unit/required/period), 并在
     文档/注释中标注"最终以 ies.device-model 1.0.0 data_inputs 为准"。
     """
+    from collections.abc import Mapping
+
     inputs = getattr(desc, "data_inputs", None)
-    if isinstance(inputs, dict) and inputs:
+    if isinstance(inputs, Mapping) and inputs:
         out: list[DataInputDecl] = []
         for col_id, spec in inputs.items():
             out.append(_decl_from_spec(str(col_id), spec))
         if out:
             return out
-    # fallback: time_series.inputs(0.5.0 尚未发布的形态)
+    # fallback: time_series.inputs(0.5.0 的 descriptor 形态; Mapping/映射均可)
     series = getattr(desc, "time_series", None) or {}
-    series_inputs = series.get("inputs") if isinstance(series, dict) else []
+    series_inputs = series.get("inputs") if isinstance(series, Mapping) else []
     return [
         DataInputDecl(
             column_id=s.key,
