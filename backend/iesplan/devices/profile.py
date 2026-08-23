@@ -29,6 +29,7 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError
 from iesplan.core.timeaxis import RESOLUTIONS, validate_timestamps
+from iesplan.devices.datacontract import data_inputs_from_descriptor
 from iesplan.devices.spec import PERIOD_VALUES, DeviceModelDescriptor, DeviceYamlSpec, SeriesSpec
 
 #: 时间戳列名(CSV 第一列)
@@ -64,22 +65,73 @@ def load_profile_columns(path: Path, desc: DeviceModelDescriptor) -> dict[str, n
 
     modeling 模块经本函数消费典型曲线, 不感知 csv 校验规则;
     必选列缺失/文件错误抛 AppError(原始文件与列错误可见)。
+
+    0.6.0: 经 ies.device-data 1.0.0 规范化流程读取(canonicalize_profile_csv),
+    与 GUI 上传共用同一时区/时间轴/单位/缺失值/数组长度校验; 阻断诊断即抛
+    AppError, 不静默删行/补零。模型允许缺失(required=False)的列以 NaN 表示
+    缺失值(消费方可识别), 不允许缺失的值在规范化阶段已阻断, 到达本函数的
+    数组不含被零填充的伪数据。
     """
-    proxy = DeviceYamlSpec(
-        type_id=desc.type_id, version=desc.version, name_zh=desc.name_zh,
-        name_en=desc.name_en, model_method=desc.model_method, stateful=desc.stateful,
-        energy_carriers=tuple(desc.energy_carriers), is_load=desc.is_load,
-        capabilities=tuple(desc.capabilities), extends=desc.extends,
-        help_topic=desc.help_topic, parameters=desc.parameters,
-        ports=tuple(desc.ports), time_series=desc.time_series,
-        states=tuple(desc.states), model_commands=desc.model_commands,
-    )
-    df = read_standard_csv(Path(path), proxy)
-    return {
-        col: df[col].to_numpy(dtype=np.float64)
-        for col in df.columns
-        if col != TIMESTAMP_COL
+    result = canonicalize_profile_csv(Path(path), desc)
+    blockers = [d for d in result.diagnostics if d.blocking]
+    if blockers:
+        raise AppError(
+            f"设备 csv 校验失败: {path} — {[d.code for d in blockers]}",
+            code=DATA_COL_MISSING,
+            message_key="ies.diag.data.col_missing",
+            params={"file": str(path), "diagnostics": [d.to_dict() for d in blockers]},
+        )
+    required_cols = {
+        d.column_id
+        for d in data_inputs_from_descriptor(desc)
+        if d.required
     }
+    out: dict[str, np.ndarray] = {}
+    for col in result.column_order:
+        if col == TIMESTAMP_COL:
+            continue
+        values = [row.get(col) for row in result.rows]
+        if col in required_cols and any(v is None for v in values):
+            # 必需列缺值已被规范化阶段阻断(DATA-VAL-002), 此处为防御性断言
+            raise AppError(
+                f"设备 csv 必需列存在未解析值: {path} — {col}",
+                code=DATA_COL_MISSING,
+                message_key="ies.diag.data.col_missing",
+                params={"file": str(path), "column": col},
+            )
+        # 可选列保留缺失(NaN); 禁止零填充静默改变建模输入
+        out[col] = np.asarray([np.nan if v is None else float(v) for v in values], dtype=np.float64)
+    return out
+
+
+def canonicalize_profile_csv(path: Path, desc: DeviceModelDescriptor):
+    """设备标准 csv → ies.device-data 规范化产物(0.6.0 事项 2)。
+
+    与 GUI 上传路径共用同一规范化流程: 文件已声明 ies.device-data 元数据时
+    以文件为准(canonicalize_device_data), 否则由设备描述构造元数据
+    (normalize_upload_csv, 列单位取 time_series 声明)。
+    """
+    from iesplan.devices.datacontract import (
+        canonicalize_device_data,
+        is_ies_device_data,
+        normalize_upload_csv,
+    )
+
+    data = Path(path).read_bytes()
+    if is_ies_device_data(data):
+        return canonicalize_device_data(data, desc)
+    series = desc.time_series.get("inputs") or []
+    units = {s.key: s.unit for s in series if s.unit}
+    resolution = next((s.resolution for s in series if s.resolution), "1h")
+    return normalize_upload_csv(
+        data,
+        desc,
+        dataset_id=f"{desc.type_id.replace('.', '_')}_profile",
+        device_model=f"{desc.type_id}@{desc.version}",
+        resolution=resolution,
+        utc_offset_minutes=480,
+        units=units,
+    )
 
 
 def _loc(spec: DeviceYamlSpec, field: str) -> dict:

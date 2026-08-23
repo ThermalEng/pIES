@@ -1,9 +1,13 @@
-# pIES 设备标准时间序列数据 / pIES device standard time series data
-# 设备 device: ies.device.electric_load(电负荷, data_repeat, 周期 period: day)
-# 分辨率 resolution: 1h  年步数 steps/year: 8760  标准非闰年 365 天
-# 时间戳为项目本地时间(无时区, 固定 UTC 偏移在项目配置声明)
-# 列 column, 单位 unit
-# e_load, kWh
+# schema: ies.device-data
+# schema_version: 1.0.0
+# dataset_id: electric_load
+# device_model: ies.device.electric_load@1.2.0
+# series_mode: timeline
+# resolution: 1h
+# timestamp_mode: fixed_offset
+# fixed_utc_offset_minutes: 480
+# unit.e_load: kWh
+# note.migrated_from: legacy_catalog_csv
 timestamp,e_load
 2025-01-01T00:00:00,48.3
 2025-01-01T01:00:00,49.634
@@ -8765,3 +8769,4 @@ timestamp,e_load
 2025-12-31T21:00:00,112.103
 2025-12-31T22:00:00,101.725
 2025-12-31T23:00:00,91.548
+

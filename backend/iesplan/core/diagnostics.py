@@ -12,7 +12,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace as dc_replace
+from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 from datetime import UTC, datetime
 from types import MappingProxyType
 
@@ -100,9 +101,40 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-TS-007": "时序列时间戳与时间轴步长不对齐(存在非整倍于步长的偏差)",
     "RES-MISS-003": "请求的资源不存在",
     "SYS-STORE-004": "保存冲突:项目已在其他会话中修改(04 §9.2 表 E save_conflict 无码,在此登记)",
-    "DATA-VAL-001": "数据集校验失败(阻断性诊断,HTTP 400;包络码,见 services/dataset.py)",
+    # ies.device-data 1.0.0 契约(0.6.0): CSV 元数据/方言/列/时间/数值契约诊断
+    "DATA-META-001": "元数据行缺失或重复: {key}(每个元数据键只能出现一次, 且只能在表头之前)",
+    "DATA-META-002": "必需的 ies.device-data 元数据缺失: {key}",
+    "DATA-META-003": "ies.device-data schema 标识或版本无法识别(期望 ies.device-data 1.0.0)",
+    "DATA-META-004": "元数据枚举值非法: {field}={value}(允许 {allowed})",
+    "DATA-META-005": "timestamp_mode=fixed_offset 必须提供固定 UTC 偏移且范围在 -840..840",
+    "DATA-META-006": "series_mode=periodic 必须提供 period(day|week|year)",
+    "DATA-META-007": "固定 UTC 偏移越界(-840..840): {value}",
+    "DATA-META-008": "device_model 与被校验的设备描述符不匹配: 声明 {declared}, 期望 {expected}",
+    "DATA-META-009": "文件声明的 device_model 未注册: {device_model}",
+    "DATA-DIAL-001": "CSV 方言不符合 ies.device-data 契约: {detail}",
+    "DATA-COL-003": "CSV 列未在设备模型 data_inputs 中声明: {column}",
+    "DATA-COL-004": "CSV 列重复: {column}",
+    "DATA-COL-005": "CSV 缺少设备模型必需的 data_inputs 列: {column}",
+    "DATA-COL-006": "列单位与设备模型声明不一致: {column} {actual} != {expected}",
+    "DATA-COL-007": "数据列缺少 unit.<column> 单位声明: {column}",
+    # DATA-VAL-001 同时是 DataValidationError 的包络码(HTTP 400, 见 services/dataset.py);
+    # 此处按诊断语义登记(与 DIAG_MESSAGE_KEYS val_type_range 一致)。
+    "DATA-VAL-001": "列值不符合设备模型 value_type 或范围: {column}",
+    "DATA-VAL-002": "缺失值未在设备模型中声明允许: {column}",
+    "DATA-TIME-001": "timeline 时间戳未严格递增或重复",
+    "DATA-TIME-002": "timeline 时间戳与声明分辨率不对齐",
+    "DATA-TIME-003": "同文件混用带 Z/带偏移/无偏移时间戳",
+    "DATA-TIME-004": "periodic 行数与周期/分辨率不匹配",
+    "DATA-TIME-005": "时间戳无法唯一换算到 UTC(非法格式或缺少偏移声明)",
+    "DATA-TIME-006": "时间戳形态与声明 timestamp_mode 不匹配: {value}"
+    "(期望模式 {timestamp_mode}, 实际形态 {form})",
+    "DATA-ARR-001": "数组长度与时间轴长度不一致",
+    "DATA-SUM-001": "规范化摘要与内容不一致(内容被修改后摘要失效)",
     "CONFIG-VAL-001": "计算配置校验失败(阻断性诊断,HTTP 422;包络码,见 api/config.py)",
-    "API-REQ-001": "请求体校验失败(422;FastAPI/Pydantic RequestValidationError 包络,见 main.py;业务域复用同码但 message_key 不同)",
+    "API-REQ-001": (
+        "请求体校验失败(422;FastAPI/Pydantic RequestValidationError 包络,"
+        "见 main.py;业务域复用同码但 message_key 不同)"
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -156,6 +188,36 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
     },
     "RES-MISS-003": "ies.diag.res.not_found",
     "SYS-STORE-004": "ies.diag.store.save_conflict",
+    **{
+        code: "ies.diag.data." + suffix
+        for code, suffix in {
+            "DATA-META-001": "meta_dup_or_missing",
+            "DATA-META-002": "meta_missing_required",
+            "DATA-META-003": "meta_schema_unknown",
+            "DATA-META-004": "meta_enum_invalid",
+            "DATA-META-005": "meta_offset_required",
+            "DATA-META-006": "meta_period_required",
+            "DATA-META-007": "meta_offset_out_of_range",
+            "DATA-META-008": "meta_model_mismatch",
+            "DATA-META-009": "meta_model_unregistered",
+            "DATA-DIAL-001": "dialect_invalid",
+            "DATA-COL-003": "col_undeclared",
+            "DATA-COL-004": "col_duplicate",
+            "DATA-COL-005": "col_required_missing",
+            "DATA-COL-006": "col_unit_mismatch",
+            "DATA-COL-007": "col_unit_declaration_missing",
+            "DATA-VAL-001": "val_type_range",
+            "DATA-VAL-002": "val_missing_not_allowed",
+            "DATA-TIME-001": "time_not_monotonic",
+            "DATA-TIME-002": "time_not_aligned",
+            "DATA-TIME-003": "time_mixed_zone",
+            "DATA-TIME-004": "time_period_row_count",
+            "DATA-TIME-005": "time_convert_failed",
+            "DATA-TIME-006": "time_form_mode_mismatch",
+            "DATA-ARR-001": "array_length_mismatch",
+            "DATA-SUM-001": "summary_mismatch",
+        }.items()
+    },
 }
 
 # 每个码对应的修复建议键(独立于消息键维护)
@@ -198,6 +260,36 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     **{
         code: "ies.fix.data.ts_row_count"
         for code in ("DATA-TS-004", "DATA-TS-005", "DATA-TS-006", "DATA-TS-007")
+    },
+    **{
+        code: "ies.fix.data.device_data_contract"
+        for code in (
+            "DATA-META-001",
+            "DATA-META-002",
+            "DATA-META-003",
+            "DATA-META-004",
+            "DATA-META-005",
+            "DATA-META-006",
+            "DATA-META-007",
+            "DATA-META-008",
+            "DATA-META-009",
+            "DATA-DIAL-001",
+            "DATA-COL-003",
+            "DATA-COL-004",
+            "DATA-COL-005",
+            "DATA-COL-006",
+            "DATA-COL-007",
+            "DATA-VAL-001",
+            "DATA-VAL-002",
+            "DATA-TIME-001",
+            "DATA-TIME-002",
+            "DATA-TIME-003",
+            "DATA-TIME-004",
+            "DATA-TIME-005",
+            "DATA-TIME-006",
+            "DATA-ARR-001",
+            "DATA-SUM-001",
+        )
     },
 }
 

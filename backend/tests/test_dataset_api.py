@@ -554,7 +554,7 @@ def test_api_upload_too_few_rows_blocked(client: TestClient, session: Session) -
 
 
 def test_api_upload_duplicate_ts_blocked(client: TestClient, session: Session) -> None:
-    """重复时间戳上传应被阻断: 400 + DATA-TS-001。"""
+    """重复时间戳上传应被阻断: 400 + DATA-TIME-001(ies.device-data 契约诊断)。"""
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
@@ -573,11 +573,11 @@ def test_api_upload_duplicate_ts_blocked(client: TestClient, session: Session) -
     )
     assert resp.status_code == 400
     codes = [d["code"] for d in resp.json()["error"]["params"]["diagnostics"]]
-    assert "DATA-TS-001" in codes
+    assert "DATA-TIME-001" in codes
 
 
 def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
-    """越界值上传应被阻断: 400 + RES-RANGE-001(带字段定位)。"""
+    """越界值上传应被阻断: 400 + DATA-VAL-001(带字段定位)。"""
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
@@ -596,7 +596,42 @@ def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
     )
     assert resp.status_code == 400
     diagnostics = resp.json()["error"]["params"]["diagnostics"]
-    assert any(d["code"] == "RES-RANGE-001" and d["location"]["field"] == "t_ambient" for d in diagnostics)
+    assert any(d["code"] == "DATA-VAL-001" and d["location"]["field"] == "t_ambient" for d in diagnostics)
+
+
+def test_api_upload_unknown_device_model_400(client: TestClient, session: Session) -> None:
+    """声明未注册 device_model 的上传 → 400 + 阻断诊断(DATA-META-009), 而非 500。"""
+    user = make_user(session, "alice")
+    proj = _make_project(session, user)
+    session.commit()
+    ds_id = _create_dataset_via_api(client, session, proj.id, user)
+
+    meta_csv = (
+        "# schema: ies.device-data\n"
+        "# schema_version: 1.0.0\n"
+        "# dataset_id: unknown_model_upload\n"
+        "# device_model: ies.device.nonexistent@1.0.0\n"
+        "# series_mode: timeline\n"
+        "# resolution: 1h\n"
+        "# timestamp_mode: fixed_offset\n"
+        "# fixed_utc_offset_minutes: 480\n"
+        "# unit.e_load: kWh\n"
+        "timestamp,e_load\n"
+        "2025-01-01T00:00:00,48.3\n"
+    )
+    resp = client.post(
+        f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
+        data={"resolution": "1h"},
+        files={"file": ("meta.csv", meta_csv.encode("utf-8"), "text/csv")},
+        headers=login_headers(client, user),
+    )
+    assert resp.status_code == 400, resp.text
+    err = resp.json()["error"]
+    assert err["code"] == "DATA-VAL-001"
+    codes = [d["code"] for d in err["params"]["diagnostics"]]
+    assert "DATA-META-009" in codes
+    # 未创建任何版本
+    assert session.query(DatasetVersion).count() == 0
 
 
 def test_api_list_and_detail(client: TestClient, session: Session) -> None:
@@ -722,21 +757,40 @@ def test_sample_service_deterministic_across_calls(session: Session, data_dir: P
 
 
 def test_upload_with_fields_declaration(client: TestClient, session: Session) -> None:
-    """上传时声明字段单位: 合法单位通过; 单位不匹配被阻断(PARAM-UNIT-002)。"""
+    """上传时声明字段单位: 量纲兼容单位通过; 不兼容单位被阻断(DATA-COL-006)。
+
+    0.6.0: 单位校验收敛到 ies.device-data 规范化器(量纲感知), "C" 是 "°C"
+    的注册别名, 不再因字符串不同误报; 真正不兼容(如 MW vs kWh)阻断。
+    """
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
     ds_id = _create_dataset_via_api(client, session, proj.id, user)
+
+    def warm(row: dict, i: int) -> dict:
+        row["t_ambient"] = 20.0
+        return row
+
     fields_json = '{"e_load": {"unit": "kWh"}, "t_ambient": {"unit": "C"}}'
     resp = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
         data={"resolution": "1h", "fields": fields_json},
+        files={"file": ("data.csv", make_csv(n=8760, transform=warm), "text/csv")},
+        headers=login_headers(client, user),
+    )
+    assert resp.status_code == 201, resp.text
+
+    # 真正不兼容的单位 → 400 + DATA-COL-006
+    bad_json = '{"e_load": {"unit": "MW"}}'
+    resp_bad = client.post(
+        f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
+        data={"resolution": "1h", "fields": bad_json},
         files={"file": ("data.csv", make_csv(n=8760), "text/csv")},
         headers=login_headers(client, user),
     )
-    assert resp.status_code == 400, resp.text
-    codes = [d["code"] for d in resp.json()["error"]["params"]["diagnostics"]]
-    assert "PARAM-UNIT-002" in codes
+    assert resp_bad.status_code == 400, resp_bad.text
+    codes = [d["code"] for d in resp_bad.json()["error"]["params"]["diagnostics"]]
+    assert "DATA-COL-006" in codes
 
 
 def test_anonymous_and_xuserid_dataset_401(client: TestClient, session: Session) -> None:
