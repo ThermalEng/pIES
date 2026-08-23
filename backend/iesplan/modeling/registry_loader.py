@@ -40,28 +40,100 @@ from iesplan.modeling.devspec import DeviceSpec as ModelingDeviceSpec
 from iesplan.modeling.devspec import PortSpec as ModelingPortSpec
 from iesplan.modeling.devspec import SeriesSpec as ModelingSeriesSpec
 from iesplan.modeling.devspec import StateSpec as ModelingStateSpec
+from iesplan.modeling.functions import MODEL_COMMAND_VERSIONS
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_command_ref(ref: str, *, device_id: str, capability: str) -> str:
+    """解析 ``<command-id>@<exact-version>`` 并校验命令 provider 版本**严格相等**。
+
+    任一失败抛 AppError(SYS-CFG-001) 阻断发布（宪法 §2.2 正确性优先：
+    声明版本被丢弃或静默降级会改变建模行为却仍报告成功）。
+    """
+    command_id, sep, declared_version = ref.partition("@")
+    if not sep or not declared_version:
+        raise AppError(
+            f"设备 {device_id} capability {capability!r} 命令引用缺少精确版本: {ref!r}",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={"device_id": device_id, "capability": capability, "ref": ref},
+        )
+    registered_version = MODEL_COMMAND_VERSIONS.get(command_id)
+    if registered_version is None:
+        raise AppError(
+            f"未知建模命令 ID: {command_id!r}(设备 {device_id}, capability {capability!r})",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={"device_id": device_id, "capability": capability, "command_id": command_id},
+        )
+    if declared_version != registered_version:
+        raise AppError(
+            f"命令 {command_id} 声明版本 {declared_version!r} 与 provider 注册版本 "
+            f"{registered_version!r} 不一致(设备 {device_id}, capability {capability!r})",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={
+                "device_id": device_id,
+                "capability": capability,
+                "command_id": command_id,
+                "declared_version": declared_version,
+                "registered_version": registered_version,
+            },
+        )
+    return command_id
 
 
 def _descriptor_to_modeling_spec(desc: DeviceModelDescriptor) -> ModelingDeviceSpec:
     """公开设备描述 → modeling 规格(roadmap 0.5.0 阶段 ①→② 契约)。
 
-    命令解析只在 provider 内部完成：
-    - mechanism: 取设备 model_commands 首个稳定命令 ID，经
-      ``iesplan.modeling.functions.resolve_command_function`` 解析为机理函数;
-    - data_repeat: 标准 csv 数据经 ``iesplan.devices.get_profile_columns`` 读取
-      (devices 内部解析路径, 公开描述不含宿主机路径)。
+    命令解析只在 provider 内部完成，保留完整 capability→command 映射：
+    - **逐 capability** 解析/校验全部命令引用（缺失、未知 ID、版本不一致均
+      抛 AppError(SYS-CFG-001) 阻断发布，不静默取首个映射）；
+    - mechanism: 全部能力命令必须解析为**同一**机理函数（否则无法表示为
+      单一 provider，显式拒绝而非任选其一）；
+    - data_repeat/data_predict: 命令 ID/版本同样必须可解析（关系不被静默忽略）。
     """
     commands = dict(desc.model_commands) if desc.model_commands else {}
+    # 逐 capability 解析完整 capability→command 映射（任一失败拒绝发布）
+    resolved: dict[str, str] = {}
+    for capability in desc.capabilities:
+        ref = commands.get(capability)
+        if ref is None:
+            raise AppError(
+                f"设备 {desc.type_id} capability {capability!r} 缺少对应 model_command",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={"device_id": desc.type_id, "capability": capability},
+            )
+        resolved[capability] = _resolve_command_ref(
+            ref, device_id=desc.type_id, capability=capability
+        )
     model_function = ""
     if desc.model_method == "mechanism":
-        ref = next(iter(commands.values()), "")
-        command_id = ref.split("@", 1)[0] if "@" in ref else ref
-        if command_id:
-            from iesplan.modeling.functions import resolve_command_function
+        if not resolved:
+            raise AppError(
+                f"机理设备 {desc.type_id} 缺少 model_commands(启动注册拒绝)",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={"device_id": desc.type_id},
+            )
+        from iesplan.modeling.functions import resolve_command_function
 
-            model_function = resolve_command_function(command_id)
+        # 全部能力命令逐一解析为机理函数；必须一致（单一 provider 约束）
+        model_functions = {
+            resolve_command_function(command_id)
+            for command_id in dict.fromkeys(resolved.values())
+        }
+        if len(model_functions) != 1:
+            raise AppError(
+                f"设备 {desc.type_id} 的 capabilities 引用了不同建模命令, "
+                f"无法表示为单一机理 provider: {commands}",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={"device_id": desc.type_id, "model_commands": commands},
+            )
+        model_function = next(iter(model_functions))
     return ModelingDeviceSpec(
         type_id=desc.type_id,
         version=desc.version,

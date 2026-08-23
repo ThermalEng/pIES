@@ -490,20 +490,39 @@ MODEL_COMMAND_DATA_METHODS: dict[str, str] = {
     "ies.model-command.load.periodic": "data_repeat",
 }
 
+#: 稳定建模命令 provider 版本（roadmap 0.5.0: 设备文件 ``<command-id>@<exact-version>``
+#: 必须与 provider 注册版本**严格相等**；组合根注册期不一致即拒绝发布）。
+#: 迁移回执（devices.migration.COMMAND_VERSION）必须与此表保持一致。
+MODEL_COMMAND_VERSIONS: dict[str, str] = {
+    "ies.model-command.pv.generation": "1.0.0",
+    "ies.model-command.heat_pump.operation": "1.0.0",
+    "ies.model-command.boiler.generation": "1.0.0",
+    "ies.model-command.chiller.generation": "1.0.0",
+    "ies.model-command.boiler.gas_volume": "1.0.0",
+    "ies.model-command.battery.storage": "1.0.0",
+    "ies.model-command.heat_transfer.simple": "1.0.0",
+    "ies.model-command.grid.power_balance": "1.0.0",
+    "ies.model-command.pipeline.transport": "1.0.0",
+    "ies.model-command.load.periodic": "1.0.0",
+}
+
 
 def resolve_command_function(command_id: str) -> str:
     """稳定命令 ID → 机理 model_function（env path）。
 
     命令 ID 未注册抛 ModelingConfigError（启动注册拒绝，不静默 fallback）。
     仅组合根/provider 调用；设备文件/公开 descriptor 不包含该解析。
+    数据方法命令（data_repeat/data_predict）优先于机理表判定：
+    ``load.periodic`` 同时在机理表存在陈旧绑定（periodic_load_output 未实现），
+    若先查机理表会误报"机理函数缺失"而非按数据方法解析。
     """
+    if command_id in MODEL_COMMAND_DATA_METHODS:
+        return command_id  # data_repeat: function_ref 由 build_command 生成
     if command_id in MODEL_COMMAND_MECHANISM:
         name = MODEL_COMMAND_MECHANISM[command_id]
         if name not in MECHANISM_FUNCTIONS:
             raise ModelingConfigError(f"命令 {command_id} 绑定机理函数缺失: {name!r}")
         return f"{FUNCTION_REF_PREFIX}{name}"
-    if command_id in MODEL_COMMAND_DATA_METHODS:
-        return command_id  # data_repeat: function_ref 由 build_command 生成
     raise ModelingConfigError(
         f"未知建模命令 ID: {command_id!r}(组合根注册拒绝)",
         params={"command_id": command_id},

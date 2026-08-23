@@ -784,3 +784,110 @@ def test_catalog_failure_compute_command_unresolvable(monkeypatch: pytest.Monkey
     assert dict(_current_snapshot().commands) == before_commands
     assert dict(_current_snapshot().generated) == before_generated
     assert "ies.command.compute.unresolvable.v1" not in _current_snapshot().commands
+
+
+def _descriptor(
+    type_id: str,
+    *,
+    capabilities: tuple[str, ...],
+    model_commands: dict[str, str],
+    model_method: str = "mechanism",
+) -> "DeviceModelDescriptor":
+    """构造公开设备描述(绕过 YAML 解析, 直接进入建模注册流程)。"""
+    from iesplan.devices import DeviceModelDescriptor  # noqa: PLC0415
+
+    return DeviceModelDescriptor(
+        type_id=type_id,
+        version="1.0.0",
+        name_zh="测试设备",
+        name_en="Test Device",
+        model_method=model_method,
+        stateful=False,
+        fidelity="medium",
+        energy_carriers=("electric",),
+        is_load=False,
+        capabilities=capabilities,
+        extends="ies.device.base",
+        help_topic="",
+        parameters={},
+        ports=(),
+        time_series={},
+        states=(),
+        model_commands=model_commands,
+    )
+
+
+def _register_one(monkeypatch: pytest.MonkeyPatch, desc) -> None:
+    """仅注册单台设备(monkeypatch 公开门面), 断言抛 AppError。"""
+    from iesplan.modeling import registry_loader
+
+    monkeypatch.setattr(registry_loader, "list_device_descriptors", lambda: [desc])
+    with pytest.raises(AppError) as exc:
+        registry_loader.register_catalog_commands()
+    assert exc.value.code == "SYS-CFG-001"
+    assert exc.value.params.get("device_id") == desc.type_id
+
+
+def test_catalog_rejects_command_version_mismatch(monkeypatch: pytest.MonkeyPatch):
+    """声明命令版本与 provider 注册版本不一致 → AppError(SYS-CFG-001) 阻断发布。
+
+    修复前 ref.split("@", 1)[0] 丢弃声明版本, 不比对即注册成功。
+    """
+    desc = _descriptor(
+        "ies.device.pv_wrongver",
+        capabilities=("pv",),
+        model_commands={"pv": "ies.model-command.pv.generation@9.9.9"},
+    )
+    _register_one(monkeypatch, desc)
+
+
+def test_catalog_rejects_unknown_command(monkeypatch: pytest.MonkeyPatch):
+    """未知命令 ID → AppError(SYS-CFG-001) 阻断发布(而非只校验首个映射)。"""
+    desc = _descriptor(
+        "ies.device.unknown_cmd",
+        capabilities=("pv",),
+        model_commands={"pv": "ies.model-command.unknown.fn@1.0.0"},
+    )
+    _register_one(monkeypatch, desc)
+
+
+def test_catalog_rejects_capability_missing_command(monkeypatch: pytest.MonkeyPatch):
+    """capability 无对应 model_command → 逐 capability 解析拒绝, 不静默忽略。"""
+    desc = _descriptor(
+        "ies.device.missing_cap",
+        capabilities=("pv", "mystery"),
+        model_commands={"pv": "ies.model-command.pv.generation@1.0.0"},
+    )
+    _register_one(monkeypatch, desc)
+
+
+def test_catalog_rejects_divergent_capability_commands(monkeypatch: pytest.MonkeyPatch):
+    """capabilities 引用不同命令(无法表示为单一机理 provider) → 显式拒绝。"""
+    desc = _descriptor(
+        "ies.device.divergent",
+        capabilities=("pv", "load"),
+        model_commands={
+            "pv": "ies.model-command.pv.generation@1.0.0",
+            "load": "ies.model-command.load.periodic@1.0.0",
+        },
+    )
+    _register_one(monkeypatch, desc)
+
+
+def test_catalog_accepts_all_capabilities_same_command(monkeypatch: pytest.MonkeyPatch):
+    """多 capability 指向同一命令(完整映射逐项校验一致) → 注册成功。"""
+    from iesplan.modeling import registry_loader
+
+    desc = _descriptor(
+        "ies.device.ok_multi",
+        capabilities=("pv", "controllable"),
+        model_commands={
+            "pv": "ies.model-command.pv.generation@1.0.0",
+            "controllable": "ies.model-command.pv.generation@1.0.0",
+        },
+    )
+    monkeypatch.setattr(registry_loader, "list_device_descriptors", lambda: [desc])
+    registry_loader.register_catalog_commands()
+    cmd = get_command("ies.command.model.ies.device.ok_multi.mechanism.1.0.0")
+    assert cmd is not None
+    assert cmd.function_ref == "iesplan.modeling.functions.pv_output"
