@@ -353,12 +353,14 @@ class TestCanonicalize:
         assert result.utc_timestamps[0].tzinfo is not None
 
     def test_mixed_zone_rejected(self) -> None:
+        """同文件混用带 Z/无偏移时间戳: 与声明模式不符的形态全部阻断。"""
         text = _valid_csv_text(rows=[
             "2024-12-31T16:00:00Z,100.0",
             "2025-01-01T01:00:00,101.0",
         ])
         result = canonicalize_device_data(text.encode("utf-8"), _e_load_desc())
-        assert any(d.code == "DATA-TIME-003" for d in result.diagnostics)
+        # fixed_offset 文件: 带 Z 形态与声明模式不符 → DATA-TIME-006
+        assert any(d.code == "DATA-TIME-006" for d in result.diagnostics)
 
     def test_unknown_column_rejected(self) -> None:
         text = _valid_csv_text()
@@ -472,6 +474,37 @@ class TestReviewFixes:
         assert "0.123456789" in canonical
         # 规范值精确往返
         assert result.rows[0]["e_load"] == float(value)
+
+    def test_fixed_offset_rejects_inline_z_timestamp(self) -> None:
+        """fixed_offset 文件内出现带 Z 时间戳 → 阻断, 不转成行级偏移。"""
+        text = _valid_csv_text(rows=["2024-12-31T16:00:00Z,100.0"])
+        result = canonicalize_device_data(text.encode("utf-8"), _e_load_desc())
+        assert any(d.code == "DATA-TIME-006" and d.blocking for d in result.diagnostics)
+
+    def test_fixed_offset_rejects_inline_numeric_offset(self) -> None:
+        """fixed_offset 文件内出现 +09:00 行级偏移 → 阻断。"""
+        text = _valid_csv_text(rows=["2025-01-01T09:00:00+09:00,100.0"])
+        result = canonicalize_device_data(text.encode("utf-8"), _e_load_desc())
+        assert any(d.code == "DATA-TIME-006" and d.blocking for d in result.diagnostics)
+
+    def test_utc_mode_rejects_naive_timestamp(self) -> None:
+        """timestamp_mode=utc 只接受带 Z 形态; 无偏移本地时间阻断。"""
+        text = _valid_csv_text(mode="utc", rows=["2025-01-01T00:00:00,100.0"])
+        result = canonicalize_device_data(text.encode("utf-8"), _e_load_desc())
+        assert any(d.code == "DATA-TIME-006" and d.blocking for d in result.diagnostics)
+
+    def test_utc_mode_accepts_z_only(self) -> None:
+        """utc 模式全部带 Z → 正常通过。"""
+        text = _valid_csv_text(
+            mode="utc",
+            rows=[
+                "2024-12-31T16:00:00Z,100.0",
+                "2024-12-31T17:00:00Z,101.0",
+                "2024-12-31T18:00:00Z,102.0",
+            ],
+        )
+        result = canonicalize_device_data(text.encode("utf-8"), _e_load_desc())
+        assert not any(d.blocking for d in result.diagnostics), [d.to_dict() for d in result.diagnostics]
 
 # ---------------------------------------------------------------------------
 # 样例文件(合法/非法)

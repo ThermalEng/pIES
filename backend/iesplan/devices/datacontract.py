@@ -739,11 +739,11 @@ def _num(v: object) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _parse_timestamp_cell(value: str, timestamp_mode: str) -> tuple[datetime | None, str | None, bool | None]:
-    """解析单个时间戳单元格 → (datetime, kind, has_zone)。
+def _parse_timestamp_cell(value: str) -> tuple[datetime | None, str | None, bool | None]:
+    """解析单个时间戳单元格 → (datetime_utc_or_naive, form, has_zone)。
 
-    kind: 'utc_z' | 'fixed_offset' | 'offset' 用于检测同文件混用。
-    返回 (None, None, None) 表示解析失败。
+    form(时间戳形态): 'utc_z' | 'offset' | 'local'; has_zone 表示是否带时区
+    信息。返回 (None, None, None) 表示解析失败。
     """
     v = value.strip()
     if not v:
@@ -765,7 +765,7 @@ def _parse_timestamp_cell(value: str, timestamp_mode: str) -> tuple[datetime | N
         if dt.tzinfo is None:
             return None, None, None
         return dt.astimezone(UTC), "offset", True
-    # 无偏移
+    # 无偏移本地时间(保持 naive; 换算由调用方按声明模式执行)
     dt = _parse_naive_dt(v)
     if dt is None:
         return None, None, None
@@ -991,10 +991,10 @@ def canonicalize_device_data(
     # 4) 时间轴
     ts_index = parsed.header.index(TIMESTAMP_COL) if TIMESTAMP_COL in parsed.header else -1
     timestamps_parsed: list[tuple[datetime, str]] = []
-    ts_kinds: set[str] = set()
+    ts_forms: set[str] = set()
     for ridx, row in enumerate(parsed.rows):
         raw_ts = row[ts_index] if ts_index >= 0 and ts_index < len(row) else ""
-        dt, kind, has_zone = _parse_timestamp_cell(raw_ts, meta.timestamp_mode)
+        dt, form, _has_zone = _parse_timestamp_cell(raw_ts)
         if dt is None:
             diags.append(
                 make_diag(
@@ -1011,18 +1011,62 @@ def canonicalize_device_data(
                 )
             )
             continue
-        if kind is not None:
-            ts_kinds.add(kind)
+        # 时间戳形态必须与声明 timestamp_mode 匹配(0.6.0 契约: 不允许行内
+        # 偏移绕过文件级 fixed_utc_offset_minutes, utc 模式只接受带 Z 形态)
+        if meta.timestamp_mode == "fixed_offset" and form != "local":
+            diags.append(
+                make_diag(
+                    "DATA-TIME-006",
+                    severity="error",
+                    blocking=True,
+                    params={
+                        "value": raw_ts,
+                        "timestamp_mode": meta.timestamp_mode,
+                        "form": form,
+                        "row_no": ridx + 1,
+                    },
+                    location={
+                        "object_type": "device_data",
+                        "object_id": meta.dataset_id,
+                        "field": TIMESTAMP_COL,
+                        "row": [ridx + 1],
+                    },
+                )
+            )
+            continue
+        if meta.timestamp_mode == "utc" and form != "utc_z":
+            diags.append(
+                make_diag(
+                    "DATA-TIME-006",
+                    severity="error",
+                    blocking=True,
+                    params={
+                        "value": raw_ts,
+                        "timestamp_mode": meta.timestamp_mode,
+                        "form": form,
+                        "row_no": ridx + 1,
+                    },
+                    location={
+                        "object_type": "device_data",
+                        "object_id": meta.dataset_id,
+                        "field": TIMESTAMP_COL,
+                        "row": [ridx + 1],
+                    },
+                )
+            )
+            continue
+        if form is not None:
+            ts_forms.add(form)
         timestamps_parsed.append((dt, raw_ts))
 
-    # 同文件不混用带Z/带偏移/无偏移
-    if len(ts_kinds) > 1:
+    # 同文件不混用带Z/带偏移/无偏移时间戳形态
+    if len(ts_forms) > 1:
         diags.append(
             make_diag(
                 "DATA-TIME-003",
                 severity="error",
                 blocking=True,
-                params={"kinds": sorted(ts_kinds)},
+                params={"kinds": sorted(ts_forms)},
                 location={
                     "object_type": "device_data",
                     "object_id": meta.dataset_id,
@@ -1031,28 +1075,13 @@ def canonicalize_device_data(
             )
         )
 
-    # 换算到 UTC
+    # 换算到 UTC(fixed_offset 只有无偏移本地时间进入本段; utc 只带 Z)
     utc_ts: list[datetime] = []
-    for dt, raw in timestamps_parsed:
+    for dt, _raw in timestamps_parsed:
         if dt.tzinfo is not None:
             utc_ts.append(dt.astimezone(UTC))
-        elif meta.timestamp_mode == "fixed_offset":
-            utc_ts.append(_apply_fixed_offset(dt, meta.fixed_utc_offset_minutes))
         else:
-            # utc 模式无偏移 → 拒绝(必须带 Z)
-            diags.append(
-                make_diag(
-                    "DATA-TIME-005",
-                    severity="error",
-                    blocking=True,
-                    params={"value": raw, "detail": "timestamp_mode=utc 必须带 Z"},
-                    location={
-                        "object_type": "device_data",
-                        "object_id": meta.dataset_id,
-                        "field": TIMESTAMP_COL,
-                    },
-                )
-            )
+            utc_ts.append(_apply_fixed_offset(dt, meta.fixed_utc_offset_minutes))
 
     # timeline: 严格递增/步长/行数
     if meta.series_mode == "timeline":

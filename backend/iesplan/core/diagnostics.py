@@ -118,6 +118,8 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-TIME-003": "同文件混用带 Z/带偏移/无偏移时间戳",
     "DATA-TIME-004": "periodic 行数与周期/分辨率不匹配",
     "DATA-TIME-005": "时间戳无法唯一换算到 UTC(非法格式或缺少偏移声明)",
+    "DATA-TIME-006": "时间戳形态与声明 timestamp_mode 不匹配: {value}"
+    "(期望模式 {timestamp_mode}, 实际形态 {form})",
     "DATA-ARR-001": "数组长度与时间轴长度不一致",
     "DATA-SUM-001": "规范化摘要与内容不一致(内容被修改后摘要失效)",
 }
@@ -195,6 +197,7 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-TIME-003": "time_mixed_zone",
             "DATA-TIME-004": "time_period_row_count",
             "DATA-TIME-005": "time_convert_failed",
+            "DATA-TIME-006": "time_form_mode_mismatch",
             "DATA-ARR-001": "array_length_mismatch",
             "DATA-SUM-001": "summary_mismatch",
         }.items()
@@ -264,6 +267,7 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-TIME-003",
             "DATA-TIME-004",
             "DATA-TIME-005",
+            "DATA-TIME-006",
             "DATA-ARR-001",
             "DATA-SUM-001",
         )
