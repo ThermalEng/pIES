@@ -545,6 +545,8 @@ def test_api_upload_too_few_rows_blocked(client: TestClient, session: Session) -
     err = resp.json()["error"]
     assert err["code"] == "DATA-VAL-001"
     assert err["message_key"] == "ies.error.data_validation_failed"
+    # 校验失败阻断当前操作: blocking 必须为 true(与 config 422 包络一致)
+    assert err["blocking"] is True
     codes = [d["code"] for d in err["params"]["diagnostics"]]
     assert "DATA-TS-004" in codes
     # 未创建任何版本

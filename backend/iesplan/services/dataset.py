@@ -230,6 +230,8 @@ class DataValidationError(AppError):
     """数据集校验失败(携带阻断性诊断列表, HTTP 400)。
 
     API 层捕获后返回 400 + 诊断明细(字段/行号定位)。
+    校验失败阻断当前操作: 显式 blocking=True(severity 保持 error,
+    与 config 422 包络一致, §8.3 示例 blocking: true)。
     """
 
     code = "DATA-VAL-001"
@@ -239,7 +241,9 @@ class DataValidationError(AppError):
 
     def __init__(self, diagnostics: list[Diagnostic], message: str = "") -> None:
         self.diagnostics = list(diagnostics)
-        super().__init__(message or f"数据集校验失败: 共 {len(self.diagnostics)} 条阻断性诊断")
+        # 校验失败阻断当前操作: 显式 blocking=True(severity 保持 error,
+        # 与 config 422 包络一致, §8.3 示例 blocking: true)
+        super().__init__(message or f"数据集校验失败: 共 {len(self.diagnostics)} 条阻断性诊断", blocking=True)
 
 
 # ---------------------------------------------------------------------------

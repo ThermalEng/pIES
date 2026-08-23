@@ -143,6 +143,25 @@ def _is_private(name: str) -> bool:
     return name.startswith("_") and not (name.startswith("__") and name.endswith("__"))
 
 
+def _relative_target(mod: str, node: ast.ImportFrom) -> str:
+    """解析 ImportFrom 的目标模块(绝对导入原样; 相对导入按当前模块定位)。
+
+    相对层级: level=1 → 当前包(去掉模块名本身), level=2 → 父包, 依此类推;
+    module 为 None(如 from . import x)时只取包基。
+    示例: 模块 iesplan.api.config 中 from .auth import x → iesplan.api.auth;
+    from ..models import x → iesplan.models。
+    """
+    if node.level == 0 and node.module:
+        return node.module
+    parts = mod.split(".")
+    base = parts[: len(parts) - node.level] if node.level <= len(parts) else []
+    if not base:
+        return ""  # 相对层级超出 iesplan 根(不会发生, 但防御)
+    if node.module:
+        base = base + node.module.split(".")
+    return ".".join(base)
+
+
 def _is_business_import(module: str) -> bool:
     """门禁 1 判定: module 是否为 core 禁止依赖的业务模块。
 
@@ -186,18 +205,20 @@ def _find_private_symbol_imports(
     found: list[tuple[str, str]] = []
     for path, mod in _iter_modules(scan_root, pkg_root):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        # 收集本模块导入的本地名 -> 完整模块路径(仅 iesplan 内部)
+        # 收集本模块导入的本地名 -> 完整模块路径(仅 iesplan 内部;
+        # 含相对导入 level>0, 如 from ..checker import _x)
         local_to_module: dict[str, str] = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for a in node.names:
                     if a.name.startswith("iesplan"):
                         local_to_module[a.asname or a.name] = a.name
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                if node.module.startswith("iesplan"):
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                target = _relative_target(mod, node)
+                if target.startswith("iesplan"):
                     for a in node.names:
                         if a.name != "*":
-                            local_to_module[a.asname or a.name] = f"{node.module}.{a.name}"
+                            local_to_module[a.asname or a.name] = f"{target}.{a.name}"
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for a in node.names:
@@ -205,8 +226,9 @@ def _find_private_symbol_imports(
                         tail = a.name[len("iesplan") + 1 :]
                         if any(_is_private(p) for p in tail.split(".")[1:]):
                             found.append((mod, f"import {a.name}"))
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                if node.module.startswith("iesplan"):
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                target = _relative_target(mod, node)
+                if target.startswith("iesplan"):
                     for a in node.names:
                         if _is_private(a.name):
                             found.append((mod, a.name))
@@ -285,3 +307,47 @@ def test_api_no_direct_orm_imports():
     assert not new, (
         f"API 直接导入 ORM(新增违规, 需整改或登记白名单): {new}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 门禁自校验(构造 AST 断言检测逻辑, 不依赖真实代码状态)
+# ---------------------------------------------------------------------------
+
+def _parse_src(src: str) -> ast.Module:
+    return ast.parse(src, mode="exec")
+
+
+def test_gate_private_import_relative_detection():
+    """门禁 2 自校验: 相对导入(from ..x import _y)私有符号必须被检出。"""
+    # 模拟 iesplan.api.config 中 from ..services import config 私有访问
+    tree = _parse_src("from ..services import config\nconfig._row_to_config()\n")
+    mod = "iesplan.api.config"
+    local_to_module: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            target = _relative_target(mod, node)
+            for a in node.names:
+                if a.name != "*":
+                    local_to_module[a.asname or a.name] = f"{target}.{a.name}"
+    assert local_to_module["config"] == "iesplan.services.config"
+    # 私有属性访问必须命中
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and _is_private(node.attr):
+            base = node.value
+            if isinstance(base, ast.Name) and base.id in local_to_module:
+                hits.append(node.attr)
+    assert "_row_to_config" in hits
+
+
+def test_gate_relative_target_levels():
+    """_relative_target 相对层级解析自校验。"""
+    cases = {
+        "from .auth import x": "iesplan.api.auth",
+        "from ..models import x": "iesplan.models",
+        "from . import x": "iesplan.api",
+        "from iesplan.db import get_db": "iesplan.db",
+    }
+    for src, expected in cases.items():
+        (node,) = [n for n in ast.walk(_parse_src(src)) if isinstance(n, ast.ImportFrom)]
+        assert _relative_target("iesplan.api.config", node) == expected
