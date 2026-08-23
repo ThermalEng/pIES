@@ -32,6 +32,8 @@ from iesplan.devices.contracts import (
     PORT_DIRECTIONS,
     SCHEMA_ID,
     SCHEMA_VERSION,
+    VALUE_TYPES,
+    _freeze,
     DeviceDataInput,
     DeviceInfo,
     DeviceModelDocument,
@@ -67,6 +69,25 @@ CARRIER_DEFAULT_QUANTITY: dict[str, str] = {
     "water": "flow",
     "data": "signal",
 }
+
+#: 物理量 → 规范业务单位（端口量纲一致性校验；比较前单位归一化，W/m² ≡ W/m2）
+QUANTITY_CANONICAL_UNIT: dict[str, str] = {
+    "power": "kw",
+    "irradiance": "w/m2",
+    "flow": "m3/h",
+    "signal": "-",
+}
+
+#: Unicode 上标 → ASCII 数字（端口单位归一化；W/m² ≡ W/m2）
+_SUPERSCRIPT_TABLE = str.maketrans({"²": "2", "³": "3"})
+
+
+def normalize_unit(unit: str) -> str:
+    """单位串归一化（小写 + 去空白 + 上标转 ASCII + · → /）。
+
+    用于端口量纲一致性比对：``W/m²`` 与 ``W/m2`` 归一化后相等。
+    """
+    return (unit or "").strip().lower().replace("·", "/").translate(_SUPERSCRIPT_TABLE)
 
 
 def _load_schema() -> dict:
@@ -248,7 +269,7 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
                 )
             )
 
-    # 2f) 载能必须在词汇表内
+    # 2f) 载能词汇表 + 端口量纲一致性
     for carrier in device_raw.get("energy_carriers") or []:
         if carrier not in CARRIER_VOCABULARY:
             diags.append(
@@ -260,6 +281,42 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
                     field=f"device.energy_carriers.{carrier}",
                 )
             )
+
+    # 2f') 端口 quantity/unit 必须与载能物理量一致（unit 归一化后比对，W/m2≡W/m²）
+    for port_name, port_raw in ports_raw.items():
+        if not isinstance(port_raw, dict):
+            continue
+        carrier = port_raw.get("carrier")
+        expected_quantity = CARRIER_DEFAULT_QUANTITY.get(carrier)
+        if expected_quantity is None:
+            continue  # 未知载能由词汇表检查拒绝
+        declared_quantity = port_raw.get("quantity")
+        if declared_quantity != expected_quantity:
+            diags.append(
+                _err_file(
+                    SYS_CFG_INVALID,
+                    SEVERITY_ERROR,
+                    f"端口 {port_name!r} 物理量 {declared_quantity!r} 与载能 "
+                    f"{carrier!r} 不一致（应为 {expected_quantity!r}）",
+                    file=file,
+                    field=f"ports.{port_name}.quantity",
+                )
+            )
+            continue
+        canonical_unit = QUANTITY_CANONICAL_UNIT.get(expected_quantity)
+        if canonical_unit is not None:
+            declared_unit = port_raw.get("unit")
+            if normalize_unit(str(declared_unit)) != canonical_unit:
+                diags.append(
+                    _err_file(
+                        SYS_CFG_INVALID,
+                        SEVERITY_ERROR,
+                        f"端口 {port_name!r} 单位 {declared_unit!r} 与载能 "
+                        f"{carrier!r} 规范单位 {canonical_unit} 不一致（归一化后比对）",
+                        file=file,
+                        field=f"ports.{port_name}.unit",
+                    )
+                )
 
     # 2g) 参数 minimum/maximum 交叉（minimum > maximum 拒绝）
     params_raw = raw.get("parameters") or {}
@@ -278,6 +335,37 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
                     field=f"parameters.{name}",
                 )
             )
+
+    # 2h) value_type 与 default/enum 取值类型交叉校验（类型不一致 → error 阻断）
+    for name, p_raw in params_raw.items():
+        if not isinstance(p_raw, dict):
+            continue
+        value_type = p_raw.get("value_type")
+        if value_type not in VALUE_TYPES:
+            continue  # 非法枚举已由 JSON Schema 拒绝
+        if not _value_type_matches(value_type, p_raw.get("default")):
+            diags.append(
+                _err_file(
+                    SYS_CFG_INVALID,
+                    SEVERITY_ERROR,
+                    f"参数 {name!r} default 类型与 value_type={value_type!r} 不一致",
+                    file=file,
+                    field=f"parameters.{name}.default",
+                )
+            )
+        enum_raw = p_raw.get("enum")
+        if isinstance(enum_raw, list):
+            for idx, item in enumerate(enum_raw):
+                if not _value_type_matches(value_type, item):
+                    diags.append(
+                        _err_file(
+                            SYS_CFG_INVALID,
+                            SEVERITY_ERROR,
+                            f"参数 {name!r} enum[{idx}] 类型与 value_type={value_type!r} 不一致",
+                            file=file,
+                            field=f"parameters.{name}.enum[{idx}]",
+                        )
+                    )
 
     if diags:
         return DeviceModelParseResult(document=None, diagnostics=diags)
@@ -301,10 +389,14 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
                 quantity=p_raw.get("quantity", ""),
                 unit=p_raw.get("unit", ""),
                 required=bool(p_raw.get("required", False)),
-                default=p_raw.get("default"),
+                default=_freeze(p_raw.get("default")),
                 minimum=_number_or_none(p_raw.get("minimum")),
                 maximum=_number_or_none(p_raw.get("maximum")),
-                enum=tuple(p_raw["enum"]) if isinstance(p_raw.get("enum"), list) else None,
+                enum=(
+                    tuple(_freeze(v) for v in p_raw["enum"])
+                    if isinstance(p_raw.get("enum"), list)
+                    else None
+                ),
                 optimizable=bool(p_raw.get("optimizable", False)),
                 stock_or_addition=p_raw.get("stock_or_addition", "stock"),
             )
@@ -350,9 +442,8 @@ def parse_device_model_yaml(raw: dict, *, file: str = "") -> DeviceModelParseRes
             for name, s_raw in (states_raw).items()
         }
     )
-    extensions = MappingProxyType(
-        {k: v for k, v in (raw.get("extensions") or {}).items()}
-    )
+    # extensions 深度冻结（递归转换嵌套 dict/list，保证不可变文档全深度不可变）
+    extensions = _freeze(raw.get("extensions") or {})
     document = DeviceModelDocument(
         schema_id=SCHEMA_ID,
         schema_version=SCHEMA_VERSION,
@@ -376,10 +467,33 @@ def _number_or_none(value: object) -> float | None:
     return None
 
 
+def _value_type_matches(value_type: str, value: object) -> bool:
+    """value_type 与取值类型交叉校验（default/enum 元素）。
+
+    规则：
+    - 未声明/显式 null、结构化 dict/list 不在此判定（结构校验另行负责）；
+    - ``$price:`` 是价格引用占位符（解析期替换为数值），不按字面字符串判定；
+    - bool 不是 number（Python 中 bool 是 int 子类，必须显式排除）。
+    """
+    if value is None or isinstance(value, (dict, list)):
+        return True
+    if isinstance(value, str):
+        if value.startswith("$price:"):
+            return True
+        return value_type == "string"
+    if isinstance(value, bool):
+        return value_type == "boolean"
+    if isinstance(value, (int, float)):
+        return value_type == "number"
+    return False
+
+
 __all__ = [
     "DeviceModelParseResult",
     "parse_device_model_yaml",
     "CARRIER_VOCABULARY",
     "CARRIER_DEFAULT_QUANTITY",
+    "QUANTITY_CANONICAL_UNIT",
+    "normalize_unit",
     "_load_schema",
 ]
