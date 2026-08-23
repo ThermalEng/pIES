@@ -887,7 +887,6 @@ def canonicalize_device_data(
     desc,
     *,
     dataset_id: str | None = None,
-    require_meta: bool = True,
     expected_rows: int | None = None,
 ) -> DeviceDataResult:
     """规范化设备数据 CSV 字节 → DeviceDataResult(唯一纯函数入口)。
@@ -906,8 +905,6 @@ def canonicalize_device_data(
         data: CSV 字节。
         desc: 公开设备描述(经 devices.list_device_descriptors / get_device_descriptor)。
         dataset_id: 覆盖 dataset_id 元数据(缺省用文件声明; 上传场景由调用方指定)。
-        require_meta: True 时缺失必需元数据阻断; False 时允许无元数据(包内
-            CSV 迁移路径, 由调用方补充默认元数据)。
         expected_rows: 期望行数(1h→8760); 提供时校验 timeline 行数。
     """
     diags: list[Diagnostic] = []
@@ -929,9 +926,22 @@ def canonicalize_device_data(
     meta = parsed.meta
     if dataset_id is not None:
         meta = _replace_meta(meta, dataset_id=dataset_id)
-    if not require_meta and not meta.schema_id:
-        # 无元数据: 由调用方在调用前补齐默认元数据
-        pass
+
+    # 元数据必须绑定到本次校验使用的精确描述符版本(0.6.0 契约: 一份文件只
+    # 绑定一个精确设备模型版本; desc.type_id@desc.version 决定允许的列)
+    expected_model = f"{getattr(desc, 'type_id', '')}@{getattr(desc, 'version', '')}"
+    if meta.device_model != expected_model:
+        diags.append(
+            make_diag(
+                "DATA-META-008",
+                severity="error",
+                blocking=True,
+                params={"declared": meta.device_model, "expected": expected_model},
+                location={
+                    "object_type": "device_data", "object_id": meta.dataset_id, "field": "device_model",
+                },
+            )
+        )
 
     # 列声明
     decls = data_inputs_from_descriptor(desc)

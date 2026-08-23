@@ -78,12 +78,13 @@ def _valid_csv_text(
     offset: int = 480,
     n: int = 3,
     rows: list[str] | None = None,
+    device_model: str = "ies.device.test@1.0.0",
 ) -> str:
     lines = [
         "# schema: ies.device-data",
         "# schema_version: 1.0.0",
         "# dataset_id: campus_electric_load_2025",
-        "# device_model: ies.device.electric_load@1.2.0",
+        f"# device_model: {device_model}",
         "# series_mode: timeline",
         "# resolution: 1h",
         f"# timestamp_mode: {mode}",
@@ -438,7 +439,7 @@ class TestCanonicalize:
             "# schema: ies.device-data",
             "# schema_version: 1.0.0",
             "# dataset_id: periodic_day",
-            "# device_model: ies.device.electric_load@1.2.0",
+            "# device_model: ies.device.test@1.0.0",
             "# series_mode: periodic",
             "# resolution: 1h",
             "# timestamp_mode: fixed_offset",
@@ -505,6 +506,14 @@ class TestReviewFixes:
         )
         result = canonicalize_device_data(text.encode("utf-8"), _e_load_desc())
         assert not any(d.blocking for d in result.diagnostics), [d.to_dict() for d in result.diagnostics]
+
+    def test_device_model_mismatch_blocked(self) -> None:
+        """device_model 与被校验描述符不一致 → DATA-META-008 阻断。"""
+        text = _valid_csv_text(device_model="ies.device.other@9.9.9")
+        result = canonicalize_device_data(text.encode("utf-8"), _e_load_desc())
+        assert any(d.code == "DATA-META-008" and d.blocking for d in result.diagnostics)
+        mismatch = next(d for d in result.diagnostics if d.code == "DATA-META-008")
+        assert mismatch.params["expected"] == "ies.device.test@1.0.0"
 
 # ---------------------------------------------------------------------------
 # 样例文件(合法/非法)
