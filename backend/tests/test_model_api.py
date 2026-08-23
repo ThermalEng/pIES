@@ -862,11 +862,20 @@ def test_content_hash_changes_on_connect_and_disconnect(client: TestClient, proj
 
 
 def test_empty_graph_for_new_project(client: TestClient, project_id: int) -> None:
-    """未建模项目返回空图结构(而非 404)。"""
+    """未建模项目返回显式空态(has_graph=False + graph_id=None), 而非 404。"""
     graph = _get_graph(client, project_id)
+    # 0.3.0 C2: 空态语义显式化, 前端据 has_graph 渲染初始画布, 不再从 graph_id 猜测
+    assert graph["has_graph"] is False
     assert graph["graph_id"] is None
     assert graph["devices"] == []
     assert graph["layout"] == {"devices": {}}
+
+    # 建模后 has_graph=True(正常流程不受影响)
+    _create_device(client, project_id, PV, "PV1")
+    graph2 = _get_graph(client, project_id)
+    assert graph2["has_graph"] is True
+    assert graph2["graph_id"] is not None
+    assert len(graph2["devices"]) == 1
 
 
 def test_get_graph_missing_project_404(client: TestClient) -> None:

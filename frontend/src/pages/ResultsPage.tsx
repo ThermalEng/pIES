@@ -216,6 +216,7 @@ export default function ResultsPage() {
 
   // 选中证据包的结果数据
   const [metrics, setMetrics] = useState<Record<string, MetricValue> | null>(null)
+  const [noEvidence, setNoEvidence] = useState(false)
   const [resultDiag, setResultDiag] = useState<Diagnostic[]>([])
   const [assessments, setAssessments] = useState<ResultAssessment[]>([])
   const [hourly, setHourly] = useState<{ resolution: string; n: number; flows: Record<string, number[]> } | null>(null)
@@ -291,6 +292,7 @@ export default function ResultsPage() {
   useEffect(() => {
     if (!selectedPkgId) {
       setMetrics(null)
+      setNoEvidence(false)
       setResultDiag([])
       setAssessments([])
       setHourly(null)
@@ -310,6 +312,8 @@ export default function ResultsPage() {
         ])
         if (cancelled) return
         setMetrics(res?.metrics ?? null)
+        // evidence_status=no_evidence: 任务存在但尚无证据包(后端显式状态, 非猜测)
+        setNoEvidence(res?.evidence_status === 'no_evidence')
         setResultDiag(res?.diagnostics ?? [])
         setAssessments([...(ass ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)))
         setHourly(hr)
@@ -664,6 +668,13 @@ export default function ResultsPage() {
       {resultError ? (
         <div className="ies-section">
           <Alert variant="error">{resultError}</Alert>
+        </div>
+      ) : null}
+
+      {/* 后端显式 no_evidence 状态: 任务存在但证据包尚未提交, 不以空数据伪装成功 */}
+      {noEvidence ? (
+        <div className="ies-section">
+          <Alert variant="warning">{t('ies.result.no_evidence')}</Alert>
         </div>
       ) : null}
 

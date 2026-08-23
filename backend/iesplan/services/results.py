@@ -1149,6 +1149,9 @@ def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[
     """结果视图: 四维结论/业务结局/指标摘要/逐时结果引用/当前选中。
 
     四维结论以评估记录为准(细粒度 + 派生摘要), 不做任何重新计算(RPD 11.3)。
+    任务存在但尚无证据包是可查询的正常状态(任务未完成), evidence_status="no_evidence"
+    显式声明; 各内容字段(metrics_summary/candidates/best/plan_summary/hourly_refs)
+    为 None 仅出现在该状态下, 调用方据 evidence_status 分支而非猜测字段。
     """
     project_service.ensure_access(db, user, project_id, "view")
     task = tasks_service.ensure_task_belongs(db, project_id, task_id)
@@ -1166,6 +1169,8 @@ def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[
             "business_outcome": task.business_outcome,
             "calc_snapshot_id": task.calc_snapshot_id,
         },
+        # no_evidence=任务尚无证据包(未完成); available=已提交证据包
+        "evidence_status": "no_evidence" if package is None else "available",
         "evidence": (
             {"id": package.id, "status": package.status, "content_hash": package.content_hash,
              "attempt_id": package.attempt_id, "created_at": package.created_at.isoformat()

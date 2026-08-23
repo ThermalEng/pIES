@@ -1049,7 +1049,9 @@ def serialize_connection(conn: Connection) -> dict:
 def get_graph(db: Session, project_id: int) -> dict:
     """读取项目工作图: 拓扑(设备/端口/连接) + 布局对象。
 
-    项目不存在抛 NotFoundError; 尚无工作图时返回空图结构(graph_id=None)。
+    项目不存在抛 NotFoundError。尚无工作图时是正常流程(新建项目未建模),
+    返回显式空态: has_graph=False + 空拓扑结构(graph_id=None), 调用方不得再从
+    graph_id 是否为 None 猜测图是否存在。
     """
     project = db.get(Project, project_id)
     if project is None:
@@ -1060,6 +1062,7 @@ def get_graph(db: Session, project_id: int) -> dict:
     graph = _find_working_graph(db, project_id)
     if graph is None:
         return {
+            "has_graph": False,
             "graph_id": None,
             "name": "",
             "graph_hash": "",
@@ -1079,6 +1082,7 @@ def get_graph(db: Session, project_id: int) -> dict:
                 "position": {"x": float(pos["x"]), "y": float(pos["y"])}
             }
     return {
+        "has_graph": True,
         "graph_id": graph.id,
         "name": graph.name,
         "graph_hash": graph.graph_hash,

@@ -743,11 +743,14 @@ function connFromServer(c: Record<string, unknown>, graphId: number): Connection
   }
 }
 
-/** 后端系统图 dict(graph_id/name/graph_hash/devices/ports/connections) → 前端 GraphModel。 */
+/** 后端系统图 dict(has_graph/graph_id/name/graph_hash/devices/ports/connections) → 前端 GraphModel。
+ *  has_graph=false 为后端显式空态(项目尚未建模), 不再从 graph_id==null 猜测。 */
 function graphFromServer(body: unknown, projectId: number): GraphModel {
   const g = asRecord(body)
-  const graphId = g.graph_id === null || g.graph_id === undefined ? 0 : Number(g.graph_id)
+  const hasGraph = g.has_graph !== false && g.graph_id !== null && g.graph_id !== undefined
+  const graphId = hasGraph ? Number(g.graph_id) : 0
   return {
+    has_graph: hasGraph,
     graph: {
       id: graphId,
       project_id: projectId,
@@ -1546,19 +1549,26 @@ export const api = {
 
   results: {
     result(projectId: number, taskId: number): Promise<{
+      /** available=已提交证据包; no_evidence=任务尚无证据包(未完成), 内容字段为 null。 */
+      evidence_status: 'available' | 'no_evidence'
       evidence_package_id: number
       metrics: Record<string, MetricValue>
       diagnostics: Diagnostic[]
     }> {
       return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then((body) => {
-        // 后端返回 {result: {evidence, metrics_summary, ...}}
+        // 后端返回 {result: {evidence_status, evidence, metrics_summary, ...}}
         const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
         const evidence = asRecord(r.evidence)
         // 缓存原始响应, hourly 复用同一次 GET(避免选中包时重复请求同一端点)
         resultBodyCache.set(`${projectId}:${taskId}`, r)
+        const status = r.evidence_status === 'no_evidence' ? 'no_evidence' : 'available'
         return {
+          evidence_status: status,
           evidence_package_id: Number(evidence.id ?? 0),
-          metrics: (r.metrics_summary as Record<string, MetricValue>) ?? {},
+          metrics:
+            status === 'no_evidence'
+              ? {}
+              : ((r.metrics_summary as Record<string, MetricValue>) ?? {}),
           diagnostics: [],
         }
       })
@@ -1617,7 +1627,9 @@ export const api = {
         const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
         const refs = Array.isArray(r.hourly_refs) ? (r.hourly_refs as Record<string, unknown>[]) : []
         const ref = refs[0]
-        if (!ref) return { resolution: '', n: 0, flows: {} }
+        // 无证据包/无逐时引用是显式状态(后端 evidence_status/no_hourly_refs),
+        // 不再静默返回空 flows 掩盖失败。
+        if (!ref) throw new ApiError(404, null, 'ies.error.no_hourly_data')
         const fields = Array.isArray(ref.fields) ? (ref.fields as string[]).slice(0, 16) : []
         const rows = Number(ref.rows ?? 0)
         // 各字段序列完全独立, 并行拉取(原先逐字段串行最多 16 次往返)
