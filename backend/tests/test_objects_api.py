@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
+from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,7 @@ from iesplan.models.identity import User
 from iesplan.services import identity
 from iesplan.storage import (
     ObjectCorruptError,
+    ObjectHandle,
     ObjectNotPendingDeletionError,
     add_ref,
     check_capacity,
@@ -46,7 +48,6 @@ from iesplan.storage import (
     undelete_object,
     verify_object,
 )
-from iesplan.storage.contracts import ObjectHandle
 from iesplan.storage.persistence import ObjectRef, StoredObject
 from iesplan.storage.service import utcnow
 
@@ -145,6 +146,35 @@ def _count_audit(session: Session, action: str, entity_type: str = "objects") ->
 
 
 # ---------------------------------------------------------------------------
+# 公开契约(0.4.0 存储公开面收窄)
+# ---------------------------------------------------------------------------
+
+
+def test_object_handle_public_field_set() -> None:
+    """0.4.0 契约: ObjectHandle 只暴露公开元数据字段, 无适配器/缓存字段。
+
+    存储路径(§11 敏感)与 ref_count(§10.3 可重建缓存)已从公开句柄移除;
+    引用/计数状态经 object_info/list_refs 公开门面查询。
+    """
+    names = {f.name for f in fields(ObjectHandle)}
+    assert names == {
+        "id", "oid", "sha256", "size_bytes", "media_type", "status", "created_at",
+    }
+    assert "storage_path" not in names
+    assert "ref_count" not in names
+
+
+def test_object_info_has_no_storage_path(session: Session, data_dir) -> None:
+    """0.4.0 契约: object_info 元数据视图不输出 storage_path(§11 内部路径
+    不得进入 DTO —— 该 dict 会经 /api/admin/objects/restore 响应序列化)。"""
+    obj = _put(session, b"no-path-in-info", content_type="text/plain")
+    session.commit()
+    info = object_info(session, obj.id)
+    assert "storage_path" not in info
+    assert info["id"] == obj.id and info["sha256"] == obj.sha256
+
+
+# ---------------------------------------------------------------------------
 # 写入与落盘
 # ---------------------------------------------------------------------------
 
@@ -162,7 +192,10 @@ def test_put_object_writes_file_and_record(session: Session, data_dir) -> None:
     assert obj.size_bytes == len(content)
     assert obj.media_type == "text/plain"
     assert obj.status == "stored"
-    assert obj.ref_count == 0
+    # 0.4.0 收窄: 公开句柄不再暴露适配器/缓存字段 storage_path/ref_count
+    # (存储路径 §11 敏感; 引用计数 §10.3 可重建缓存, 经 object_info 查询)
+    assert not hasattr(obj, "storage_path")
+    assert not hasattr(obj, "ref_count")
     # 文件在最终位置, 临时区无残留(原子 rename)
     path = data_dir / "objects" / digest
     assert path.read_bytes() == content

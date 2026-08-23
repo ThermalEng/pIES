@@ -813,12 +813,14 @@ def import_proposal(
     )
 
     # 3) 导入提案(校验报告 + 分区提交内容, 01 §10.4)
+    # 0.4.0: 不再写 source_path(该列可空且无任何消费点) —— storage_path 属
+    # §11 内部路径, 不得进入审计记录; 可追溯性由 review_summary.source_object_id
+    # (内容寻址对象 ID)与 source_hash 承担。
     proposal = ImportProposal(
         project_id=project.id,
         proposer_id=user.id,
         source_type="json",
         source_hash=source_hash,
-        source_path=source_obj.storage_path,
         status="proposed",
         review_summary={
             "package": {

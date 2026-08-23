@@ -62,7 +62,9 @@ from iesplan.models.uncertainty import (
     SampleTask,
     UncertaintySnapshot,
 )
-# 对象 ORM 已归属存储模块(STO-05), 再导出以保持 models 元数据注册完整
+# 0.4.0 门面收尾(STO-05): 对象 ORM 已归属存储模块, 业务层不得导入
+# iesplan.storage.persistence; 此处为唯一豁免 —— Base.metadata 需要全表
+# 注册(迁移/create_all), 仅注册作用, 不向业务层扩散 ORM 类型。
 from iesplan.storage.persistence import ObjectRef, StoredObject
 
 __all__ = [
