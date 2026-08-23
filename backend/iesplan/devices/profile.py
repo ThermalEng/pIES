@@ -64,22 +64,57 @@ def load_profile_columns(path: Path, desc: DeviceModelDescriptor) -> dict[str, n
 
     modeling 模块经本函数消费典型曲线, 不感知 csv 校验规则;
     必选列缺失/文件错误抛 AppError(原始文件与列错误可见)。
+
+    0.6.0: 经 ies.device-data 1.0.0 规范化流程读取(canonicalize_profile_csv),
+    与 GUI 上传共用同一时区/时间轴/单位/缺失值/数组长度校验; 阻断诊断即抛
+    AppError, 不静默删行/补零。
     """
-    proxy = DeviceYamlSpec(
-        type_id=desc.type_id, version=desc.version, name_zh=desc.name_zh,
-        name_en=desc.name_en, model_method=desc.model_method, stateful=desc.stateful,
-        energy_carriers=list(desc.energy_carriers), is_load=desc.is_load,
-        capabilities=list(desc.capabilities), extends=desc.extends,
-        help_topic=desc.help_topic, parameters=dict(desc.parameters),
-        ports=list(desc.ports), time_series={k: list(v) for k, v in desc.time_series.items()},
-        states=list(desc.states), function=dict(desc.function),
+    result = canonicalize_profile_csv(Path(path), desc)
+    blockers = [d for d in result.diagnostics if d.blocking]
+    if blockers:
+        raise AppError(
+            f"设备 csv 校验失败: {path} — {[d.code for d in blockers]}",
+            code=DATA_COL_MISSING,
+            message_key="ies.diag.data.col_missing",
+            params={"file": str(path), "diagnostics": [d.to_dict() for d in blockers]},
+        )
+    out: dict[str, np.ndarray] = {}
+    for col in result.column_order:
+        if col == TIMESTAMP_COL:
+            continue
+        values = [row.get(col) for row in result.rows]
+        out[col] = np.asarray([0.0 if v is None else float(v) for v in values], dtype=np.float64)
+    return out
+
+
+def canonicalize_profile_csv(path: Path, desc: DeviceModelDescriptor):
+    """设备标准 csv → ies.device-data 规范化产物(0.6.0 事项 2)。
+
+    与 GUI 上传路径共用 normalize_upload_csv: 文件已声明 ies.device-data
+    元数据时以文件为准, 否则由设备描述构造上传参数(列单位取 time_series
+    声明, 最终以 ies.device-model 1.0.0 data_inputs 为准)。
+    """
+    from iesplan.devices.datacontract import (
+        canonicalize_device_data,
+        is_ies_device_data,
+        normalize_upload_csv,
     )
-    df = read_standard_csv(Path(path), proxy)
-    return {
-        col: df[col].to_numpy(dtype=np.float64)
-        for col in df.columns
-        if col != TIMESTAMP_COL
-    }
+
+    data = Path(path).read_bytes()
+    if is_ies_device_data(data):
+        return canonicalize_device_data(data, desc)
+    series = desc.time_series.get("inputs") or []
+    units = {s.key: s.unit for s in series if s.unit}
+    resolution = next((s.resolution for s in series if s.resolution), "1h")
+    return normalize_upload_csv(
+        data,
+        desc,
+        dataset_id=f"{desc.type_id.replace('.', '_')}_profile",
+        device_model=f"{desc.type_id}@{desc.version}",
+        resolution=resolution,
+        utc_offset_minutes=480,
+        units=units,
+    )
 
 
 def _loc(spec: DeviceYamlSpec, field: str) -> dict:

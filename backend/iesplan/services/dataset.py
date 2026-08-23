@@ -895,15 +895,23 @@ def _build_fields_info(
 
 
 def _normalized_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    """归一化 DataFrame → 规范 CSV 字节(表头 + UTC ISO 时间戳)。"""
-    out = df.copy()
-    ts_col = out[TIMESTAMP_COL]
-    out[TIMESTAMP_COL] = [ts.isoformat() for ts in ts_col.tolist()]
+    """归一化 DataFrame → 规范 CSV 字节(0.6.0: 与设备 CSV 共用同一规范表格)。
+
+    时间戳统一 UTC 带 Z、数值去尾零(经 datacontract.canonical_table_bytes),
+    同一语义输入 → 同一规范摘要(GUI 上传与包内设备 CSV 一致)。
+    """
+    from iesplan.devices.datacontract import canonical_table_bytes
+
+    ts_col = df[TIMESTAMP_COL]
+    utc_stamps = [
+        t.astimezone(UTC) if getattr(t, "tzinfo", None) is not None else t.replace(tzinfo=UTC)
+        for t in ts_col.tolist()
+    ]
     cols = [TIMESTAMP_COL]
-    cols += [c for c in STANDARD_FIELDS if c in out.columns]
-    cols += [c for c in out.columns if c not in STANDARD_FIELDS and c != TIMESTAMP_COL]
-    out = out[cols]
-    return out.to_csv(index=False, lineterminator="\n").encode("utf-8")
+    cols += [c for c in STANDARD_FIELDS if c in df.columns]
+    cols += [c for c in df.columns if c not in STANDARD_FIELDS and c != TIMESTAMP_COL]
+    rows = [dict(r) for r in df.to_dict("records")]
+    return canonical_table_bytes(utc_stamps, tuple(cols), rows, meta=None)
 
 
 def _commit_version(
