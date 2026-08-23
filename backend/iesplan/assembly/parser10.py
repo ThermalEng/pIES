@@ -145,10 +145,26 @@ def parse_assembly_doc(text: str, *, source_name: str = "assembly.yaml") -> Pars
         )
         return ParseDocResult(doc=None, diagnostics=diags)
 
-    builder = _DocBuilder(diags)
-    doc = builder.build(tree, source_name=source_name)
+    doc = run_structure_checks(tree, source_name=source_name, diags=diags)
     has_blocking = any(d.blocking for d in diags)
     return ParseDocResult(doc=None if has_blocking else doc, diagnostics=diags)
+
+
+def run_structure_checks(
+    tree: dict[str, Any],
+    *,
+    source_name: str = "<doc>",
+    diags: list[Diagnostic] | None = None,
+) -> dict[str, Any] | None:
+    """结构阶段复检入口(供校验器对已解析文档再次走结构阶段)。
+
+    返回 normalized 文档树(已浅拷贝);存在阻断诊断时返回 None,诊断写入
+    ``diags``(调用方传入的容器)或内部容器。
+    """
+    own_diags: list[Diagnostic] = [] if diags is None else diags
+    builder = _DocBuilder(own_diags)
+    doc = builder.build(tree, source_name=source_name)
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +598,7 @@ class _DocBuilder:
 __all__ = [
     "ParseDocResult",
     "parse_assembly_doc",
+    "run_structure_checks",
     "TOP_SECTIONS",
     "MODES",
 ]

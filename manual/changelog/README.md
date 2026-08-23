@@ -15,6 +15,8 @@
 - 合法/非法手写样例(`backend/iesplan/assembly/samples/`)：合法样例覆盖全部节与相对文件资源；非法样例分别覆盖 schema 标识错误、未固定精确版本、宿主机路径、可执行字段、非法计算模式。
 - 新增结构诊断码：`ASM-SYN-006`(schema 标识无法识别)、`ASM-SYN-007`(引用未固定精确版本，拒绝 latest/范围版本/未版本化别名)、`ASM-SYN-008`(禁止字段：shell/command/executable/函数模块路径/环境变量/凭证)、`ASM-SYN-009`(资源路径非法)；以及 `ASM-RES-001`/`ASM-CALC-001`/`ASM-CALC-002`/`ASM-OUT-001`/`ASM-ART-001`/`ASM-CONV-001`/`ASM-INPUT-006`。
 - 成功产物为不可变 `ValidatedAssemblyArtifact`（规范文本 + `assembly_sha256` + 校验回执 `ValidationReceipt`）：回执记录校验器 ID/版本、schema、规范化算法 ID/版本、依赖锁、资源摘要与零阻断诊断；`verify()` 重算规范字节摘要核对三件套一致，不一致抛 `AssemblyValidationError`(422) 阻断计算。
+- 统一校验入口(`iesplan.assembly.validator`)：四阶段校验（结构 → 模型与数据 → 图与系统 → 计算兼容），手写 `validate_assembly_text` 与 GUI 项目导出 `validate_project_export` 收敛到同一入口；成功只签发 `ValidatedAssemblyArtifact`，失败返回完整诊断列表且不产生任何 artifact。
+- GUI 项目导出构造器(`iesplan.assembly.builder10`)：项目内容（设备/端口/连接/数据集绑定/计算配置）映射到 `ies.assembly` `1.0.0` 文档；`loss_rate > 0` 的连接自动包裹为 `ies.device.transport_pipe@<version>` 设备实例；计算字段显式（`mode`/`generator`/`solver`/`options`/`random_seed`），旧形态 `algorithm`/`tolerances` 通过推导与映射（legacy 求解器 `ies.solver.highs@1.7.2`）保持显式；`outputs` 派生为空列表（应用层可补）。
 
 ### 设备模型与建模命令契约
 

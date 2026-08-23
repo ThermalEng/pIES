@@ -45,6 +45,12 @@ from iesplan.assembly.diags import ASM_ALL_CODES
 from iesplan.assembly.parser import ParseResult, load_assembly_file, parse_assembly
 from iesplan.assembly.parser10 import ParseDocResult, parse_assembly_doc
 from iesplan.assembly.schema import AssemblySpec, FORMAT_VERSION
+from iesplan.assembly.validator import (
+    AssemblyValidationResult,
+    validate_assembly_doc,
+    validate_assembly_text,
+    validate_project_export,
+)
 
 __all__ = [
     "parse_assembly",
@@ -79,4 +85,8 @@ __all__ = [
     "canonical_algorithm_ref",
     "parse_assembly_doc",
     "ParseDocResult",
+    "AssemblyValidationResult",
+    "validate_assembly_text",
+    "validate_assembly_doc",
+    "validate_project_export",
 ]
