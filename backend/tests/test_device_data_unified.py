@@ -255,13 +255,15 @@ class TestGuiUploadParity:
         assert "DATA-COL-006" in codes
 
     def test_gui_upload_declared_file_unknown_device_rejected(self, upload_env) -> None:
-        """声明未注册 device_model 的文件 → 明确失败, 不猜测。"""
-        from iesplan.services.dataset import upload_dataset_version
+        """声明未注册 device_model 的文件 → 阻断性校验错误(DATA-META-009), 不猜测。"""
+        from iesplan.services.dataset import DataValidationError, upload_dataset_version
 
         session, _proj, ds = upload_env
         bad = handwritten_template("ies.device.nonexistent@1.0.0")
-        with pytest.raises(LookupError):
+        with pytest.raises(DataValidationError) as exc_info:
             upload_dataset_version(session, ds.id, "1h", 480, {}, bad.encode("utf-8"), {})
+        codes = [d.code for d in exc_info.value.diagnostics]
+        assert "DATA-META-009" in codes
 
     def test_gui_upload_inline_offset_in_fixed_offset_file_blocked(self, upload_env) -> None:
         """上传文件声明 fixed_offset 但行内带偏移 → DATA-TIME-006 阻断(经 GUI 路径)。"""

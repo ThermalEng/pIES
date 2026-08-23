@@ -12,7 +12,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace as dc_replace
+from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 from datetime import UTC, datetime
 from types import MappingProxyType
 
@@ -109,6 +110,7 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-META-006": "series_mode=periodic 必须提供 period(day|week|year)",
     "DATA-META-007": "固定 UTC 偏移越界(-840..840): {value}",
     "DATA-META-008": "device_model 与被校验的设备描述符不匹配: 声明 {declared}, 期望 {expected}",
+    "DATA-META-009": "文件声明的 device_model 未注册: {device_model}",
     "DATA-DIAL-001": "CSV 方言不符合 ies.device-data 契约: {detail}",
     "DATA-COL-003": "CSV 列未在设备模型 data_inputs 中声明: {column}",
     "DATA-COL-004": "CSV 列重复: {column}",
@@ -129,7 +131,10 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-ARR-001": "数组长度与时间轴长度不一致",
     "DATA-SUM-001": "规范化摘要与内容不一致(内容被修改后摘要失效)",
     "CONFIG-VAL-001": "计算配置校验失败(阻断性诊断,HTTP 422;包络码,见 api/config.py)",
-    "API-REQ-001": "请求体校验失败(422;FastAPI/Pydantic RequestValidationError 包络,见 main.py;业务域复用同码但 message_key 不同)",
+    "API-REQ-001": (
+        "请求体校验失败(422;FastAPI/Pydantic RequestValidationError 包络,"
+        "见 main.py;业务域复用同码但 message_key 不同)"
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -194,6 +199,7 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-META-006": "meta_period_required",
             "DATA-META-007": "meta_offset_out_of_range",
             "DATA-META-008": "meta_model_mismatch",
+            "DATA-META-009": "meta_model_unregistered",
             "DATA-DIAL-001": "dialect_invalid",
             "DATA-COL-003": "col_undeclared",
             "DATA-COL-004": "col_duplicate",
@@ -266,6 +272,7 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-META-006",
             "DATA-META-007",
             "DATA-META-008",
+            "DATA-META-009",
             "DATA-DIAL-001",
             "DATA-COL-003",
             "DATA-COL-004",

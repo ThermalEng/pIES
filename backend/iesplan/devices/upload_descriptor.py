@@ -6,15 +6,17 @@
 - 裸 CSV → 调用方提供的 fallback 描述符(services 层从自身 STANDARD_FIELDS
   权威构建, 本模块不复制任何列/单位映射)。
 
-本模块只依赖 core/errors 与 datacontract, 不导入 services。
+本模块只依赖 core(errors/diagnostics)与 datacontract, 不导入 services。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from iesplan.core.diagnostics import make_diag
 from iesplan.devices.datacontract import (
     DataInputDecl,
+    DeviceDataError,
     declared_device_model,
     is_ies_device_data,
     parse_metadata,
@@ -34,11 +36,43 @@ class UploadDescriptor:
         return f"{self.type_id}@{self.version}"
 
 
+def _declared_model_error(model: str) -> DeviceDataError:
+    """文件声明的 device_model 无法解析或未注册 → 阻断性校验错误(HTTP 400)。
+
+    - 未声明 device_model → DATA-META-002(必需元数据缺失);
+    - 声明的设备模型未注册 → DATA-META-009。
+    均携带阻断诊断与 params.diagnostics, 即使未经过服务层转换也能以
+    400 + 诊断明细输出, 不会变成未捕获内部错误(500)。
+    """
+    if model:
+        diag = make_diag(
+            "DATA-META-009",
+            severity="error",
+            blocking=True,
+            params={"device_model": model},
+            location={"object_type": "device_data", "object_id": "", "field": "device_model"},
+        )
+        message = f"文件声明的设备模型未注册: {model!r}"
+    else:
+        diag = make_diag(
+            "DATA-META-002",
+            severity="error",
+            blocking=True,
+            params={"key": "device_model"},
+            location={"object_type": "device_data", "object_id": "", "field": "metadata"},
+        )
+        message = "文件声明 ies.device-data 但缺少 device_model"
+    err = DeviceDataError([diag], message=message)
+    err.params["diagnostics"] = [diag.to_dict()]
+    return err
+
+
 def resolve_upload_descriptor(data: bytes, fallback_desc):
     """按上传字节解析校验用描述符。
 
     - 声明 ies.device-data → 目录设备描述(精确版本由规范化器比对
-      DATA-META-008); 文件头 device_model 无法解析或未注册 → 抛 LookupError,
+      DATA-META-008); 文件头 device_model 无法解析或未注册 → 抛
+      DeviceDataError(HTTP 400 阻断诊断, 由服务层转上传校验响应),
       阻断上传, 不猜测;
     - 裸 CSV → fallback_desc(调用方权威)。
     """
@@ -47,16 +81,15 @@ def resolve_upload_descriptor(data: bytes, fallback_desc):
     model = declared_device_model(data)
     type_id = model.split("@", 1)[0] if model else ""
     if not type_id:
-        raise LookupError(f"文件声明 ies.device-data 但缺少 device_model: {model!r}")
+        raise _declared_model_error(model)
     from iesplan.core.errors import NotFoundError
     from iesplan.devices import get_device_descriptor
 
     try:
         return get_device_descriptor(type_id)
     except NotFoundError as exc:
-        # 未注册设备模型是上传内容校验失败(400 阻断), 不是资源不存在(404);
-        # 调用方(数据服务)转成阻断性诊断。
-        raise LookupError(f"文件声明的设备模型未注册: {model!r}") from exc
+        # 未注册设备模型是上传内容校验失败(400 阻断), 不是资源不存在(404)。
+        raise _declared_model_error(model) from exc
 
 
 def declared_upload_meta(data: bytes):

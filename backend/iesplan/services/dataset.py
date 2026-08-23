@@ -1126,12 +1126,12 @@ def upload_dataset_version(
     返回:
         新建的 DatasetVersion(已提交)。
     异常:
-        DataValidationError: 存在阻断性诊断(携带诊断明细)。
+        DataValidationError: 存在阻断性诊断(携带诊断明细); 文件声明的
+            device_model 未注册/无法解析同样转为阻断性校验错误(400)。
         NotFoundError: 数据集不存在。
         ConflictError: 数据集已 deprecated, 禁止新建版本。
-        LookupError: 文件声明 ies.device-data 但 device_model 未注册。
     """
-    from iesplan.devices.datacontract import normalize_upload_csv
+    from iesplan.devices.datacontract import DeviceDataError, normalize_upload_csv
     from iesplan.devices.upload_descriptor import (
         declared_upload_meta,
         resolve_upload_descriptor,
@@ -1147,7 +1147,12 @@ def upload_dataset_version(
             params={"dataset_id": dataset_id},
         )
 
-    desc = resolve_upload_descriptor(data_bytes, fallback_desc=_standard_fields_descriptor())
+    try:
+        desc = resolve_upload_descriptor(data_bytes, fallback_desc=_standard_fields_descriptor())
+    except DeviceDataError as exc:
+        # 文件声明的 device_model 未注册/无法解析是上传内容校验失败
+        # (400 + 阻断诊断), 不是未捕获内部错误(500)。
+        raise DataValidationError(list(exc.diagnostics)) from exc
     declared_units = upload_declared_units(desc, fields)
 
     # 文件已声明 ies.device-data 元数据时以文件为权威: 行数期望(全年步数)按
