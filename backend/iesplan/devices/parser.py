@@ -33,13 +33,13 @@ from iesplan.devices.contracts import (
     SCHEMA_ID,
     SCHEMA_VERSION,
     VALUE_TYPES,
-    _freeze,
     DeviceDataInput,
     DeviceInfo,
     DeviceModelDocument,
     DeviceParameter,
     DevicePort,
     DeviceState,
+    _freeze,
 )
 
 _ID_PATTERN = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")

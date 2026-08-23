@@ -15,6 +15,7 @@ import pytest
 
 from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.errors import AppError, NotFoundError
+from iesplan.devices import DeviceModelDescriptor
 from iesplan.modeling import (
     MECHANISM_FUNCTIONS,
     MODEL_METHOD_DATA_PREDICT,
@@ -792,9 +793,8 @@ def _descriptor(
     capabilities: tuple[str, ...],
     model_commands: dict[str, str],
     model_method: str = "mechanism",
-) -> "DeviceModelDescriptor":
+) -> DeviceModelDescriptor:
     """构造公开设备描述(绕过 YAML 解析, 直接进入建模注册流程)。"""
-    from iesplan.devices import DeviceModelDescriptor  # noqa: PLC0415
 
     return DeviceModelDescriptor(
         type_id=type_id,
