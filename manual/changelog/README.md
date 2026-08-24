@@ -1,79 +1,187 @@
 # 更新日志
 
-本页记录已经实现的用户可感知行为、公共设计与迁移要求。新版本在上；尚未实现的开发顺序单独见 [Roadmap](roadmap.md)。
+本页只记录已经实现并通过验收的变化，按完成时间倒序排列。每个版本条目固定回答四个问题：**什么时候完成、更新了什么、解决了什么问题、版本进展到哪里**。尚未实现的工作只写入 [Roadmap](roadmap.md)。
 
-产品使用 `MAJOR.MINOR.PATCH` 三段式版本。当前产品版本为 `0.1.0`，当前开发目标为 `0.8.0`，首个正式稳定版本为 `1.0.0`。完整规则见[版本化与发布](../developer-guide/zh-CN/versioning-and-release.md)。
+## 当前版本状态
 
-`Unreleased` 只保存已经完成并通过相应验收、但尚未正式发布的变化。一项工作写入这里时必须从 Roadmap 删除；部分完成只迁移已完成部分。这里不收录愿望、待办、目标状态或预计完成版本。
+| 口径 | 当前状态 |
+| --- | --- |
+| 正式产品版本（`backend/pyproject.toml`） | `0.1.0` |
+| 最新完成并合入 `master` 的开发里程碑 | `0.7.0`（2026-08-24） |
+| 下一开发目标 | `0.8.0` |
+| 首个正式稳定版本 | `1.0.0` |
+
+> `0.2.0`～`0.7.0` 已完成开发与合并，但尚未执行正式发布流程，因此仍归在 `Unreleased`。它们表示开发里程碑已经推进到 `0.7.0`，不表示产品元数据、镜像和 Git 标签已经从 `0.1.0` 正式升级。正式发布时必须统一更新版本源、构建产物和标签；完整规则见[版本化与发布](../developer-guide/zh-CN/versioning-and-release.md)。
 
 ## Unreleased
 
-### 规范装配产物(`ies.assembly` 1.0.0)
+### 里程碑摘要
 
-- 发布 `ies.assembly` `1.0.0` 机器可读 schema(`backend/iesplan/assembly/schema/assembly-1.0.0.schema.json`)：顶层 `schema`/`schema_version`/`assembly`/`time_axis`/`resources`/`devices`/`connections`/`constraints`/`calculation`/`outputs`/`extensions` 各节均必需（无内容写空 `{}`/`[]`），未知核心字段拒绝。
-- 唯一规范化器(`iesplan.assembly.canonicalizer`，算法 `ies.assembly.canonical@1.0.0`)：固定顶层键序 + 嵌套键排序、时间统一换算为带 `Z` 的 UTC、`relative_file` 解析为内容寻址对象、数值唯一有限表示（整值浮点与整数同文本）、非有限值拒绝；规范文本为紧凑 JSON + LF，对规范字节计算 SHA-256。相同语义输入产生相同规范文本与摘要。
-- 合法/非法手写样例(`backend/iesplan/assembly/samples/`)：合法样例覆盖全部节与相对文件资源；非法样例分别覆盖 schema 标识错误、未固定精确版本、宿主机路径、可执行字段、非法计算模式。
-- 新增结构诊断码：`ASM-SYN-006`(schema 标识无法识别)、`ASM-SYN-007`(引用未固定精确版本，拒绝 latest/范围版本/未版本化别名)、`ASM-SYN-008`(禁止字段：shell/command/executable/函数模块路径/环境变量/凭证)、`ASM-SYN-009`(资源路径非法)；以及 `ASM-RES-001`/`ASM-CALC-001`/`ASM-CALC-002`/`ASM-OUT-001`/`ASM-ART-001`/`ASM-CONV-001`/`ASM-INPUT-006`。
-- 成功产物为不可变 `ValidatedAssemblyArtifact`（规范文本 + `assembly_sha256` + 校验回执 `ValidationReceipt`）：回执记录校验器 ID/版本、schema、规范化算法 ID/版本、依赖锁、资源摘要与零阻断诊断；`verify()` 重算规范字节摘要核对三件套一致，不一致抛 `AssemblyValidationError`(422) 阻断计算。
-- 统一校验入口(`iesplan.assembly.validator`)：四阶段校验（结构 → 模型与数据 → 图与系统 → 计算兼容），手写 `validate_assembly_text` 与 GUI 项目导出 `validate_project_export` 收敛到同一入口；成功只签发 `ValidatedAssemblyArtifact`，失败返回完整诊断列表且不产生任何 artifact。
-- GUI 项目导出构造器(`iesplan.assembly.builder10`)：项目内容（设备/端口/连接/数据集绑定/计算配置）映射到 `ies.assembly` `1.0.0` 文档；`loss_rate > 0` 的连接自动包裹为 `ies.device.transport_pipe@<version>` 设备实例；计算字段显式（`mode`/`generator`/`solver`/`options`/`random_seed`），旧形态 `algorithm`/`tolerances` 通过推导与映射（legacy 求解器 `ies.solver.highs@1.7.2`）保持显式；`outputs` 派生为空列表（应用层可补）。
-- 旧形态一次性迁移(`iesplan.assembly.migration`)：`FORMAT_VERSION = "1.0"` 的 `AssemblySpec` / 装配文本 → `ies.assembly` `1.0.0` 文档 + 迁移回执（`migration`/`from_format`/`to_schema`/`old_sha256`/`new_sha256`/`transformations`/`ok`/`diagnostics`）；迁移产物经同一 `validate_assembly_doc` 入口验证。旧形态无法唯一映射的字段（无模型精确版本、缺 `solver`、数据集缺 `sha256`/`media_type` 等）产生 `ASM-CONV-001` 阻断诊断，回执 `ok=False`；不发布半迁移状态。
-- 生产计算入口收敛：任务下发在创建 `Task` / `CalcSnapshot` 前同步调用唯一 `validate_project_export` 闸门；校验失败返回阻断诊断且不留下任务或快照，不再旁路调用旧 `check_graph_inputs`。
-- 持久输入收敛：`CalcSnapshot` 写入规范文本、`assembly_sha256` 和确定性校验回执三件套，旧 `assembly_text` 仅保留为历史审计列且新快照不再写入；Worker 执行前严格恢复并复验三件套，缺失、版本不匹配、含阻断诊断或摘要被篡改均拒绝执行。项目证据包同步导出三件套。
-- 迁移边界：迁移后不再以可变 `AssemblySpec`/`CheckResult` 作为后续计算的持久输入；`MigrationResult.doc` 是不可变 `ies.assembly` `1.0.0` 文档，可经统一入口规范化为 `ValidatedAssemblyArtifact`。ASM 诊断码静态登记于核心注册表，装配模块不再在导入时修改核心状态。
+| 完成时间 | 版本进展 | 更新了什么 | 解决了什么问题 |
+| --- | --- | --- | --- |
+| 2026-08-24 | `0.6.0 → 0.7.0` | 发布规范装配契约、统一校验入口和不可变校验产物，并接入任务、快照与 Worker | 消除旧 Checker 旁路、可变装配输入、摘要与回执不一致以及执行前不复验的问题 |
+| 2026-08-24 | `0.5.0 → 0.6.0` | 发布设备数据文件契约、唯一 CSV 规范化器和目录迁移回执 | 消除时间轴、单位、缺失值、数值精度和 GUI/包内数据处理不一致的问题 |
+| 2026-08-24 | `0.4.0 → 0.5.0` | 发布设备模型契约、稳定 ModelCommand ID 和深度不可变 descriptor | 消除公开模型中暴露函数/模块/宿主机路径，以及旧 YAML 无法稳定复现的问题 |
+| 2026-08-23 | `0.3.0 → 0.4.0` | 收窄对象存储公开边界，清理路径与引用计数泄漏 | 使业务层不再依赖存储内部实现，避免主机路径进入 DTO、审计或错误响应 |
+| 2026-08-23 | `0.2.0 → 0.3.0` | 统一错误信封、不可变诊断、无证据语义和协议/架构门禁 | 消除裸 `detail`、空数据静默降级、可变诊断和端点协议漂移 |
+| 2026-08-22～2026-08-23 | `0.1.0 → 0.2.0` | 加固会话、下载、任务结果、管理员操作、对象回收、配额与不可变审计 | 修复 CSRF、越权读取/下载、误删、立即物理清理、资源滥用和内部信息泄漏风险 |
 
-### 设备模型与建模命令契约
+### 0.7.0 开发里程碑 — 规范装配产物
 
-- 发布 `ies.device-model` `1.0.0` 契约：机器可读 JSON Schema、唯一规范化规则（稳定键排序 + 规范字节 SHA-256 摘要）、定位到文件/字段/稳定诊断码的诊断，以及合法/非法手写样例。
-- 设备 YAML 由旧 `type_id`/`function` 格式一次性迁移为 `schema`/`device`/`parameters`/`ports`/`data_inputs`/`states`/`model_commands`/`extensions` 结构；`function.package/function.entry` 替换为稳定 ModelCommand ID + 精确版本（`<command-id>@<exact-version>`），命令 ID 到实现的解析只存在于组合根与 modeling provider 内部。
-- 设备公开 descriptor 收敛为深度不可变值对象（list→tuple、dict→MappingProxyType）；公开面不再暴露函数、包、模块或宿主机路径（`standard_csv_path` 移除，标准 csv 经 `get_profile_columns(type_id)` 门面读取）。
-- 提供内置目录 YAML 的一次性迁移回执（文件清单 + 新旧规范摘要 + 校验结果）。
+**完成时间**：2026-08-24
 
-### 安全
+**版本进展**：开发里程碑由 `0.6.0` 推进到 `0.7.0`；已合入 `master`，尚未正式发布。
 
-- 为基于 Cookie 会话(`ies_session`, SameSite=Lax)的状态变更请求(POST/PUT/PATCH/DELETE)增加 CSRF 双源校验：浏览器请求优先校验 `Origin`、缺失回退 `Referer`，规范化后必须命中可信来源(`app_url` + `IESPLAN_CORS_ORIGINS` + 请求自身 Host 同源来源)，否则返回 403 `AUTH-CSRF-001`；Bearer 认证、无 Origin/Referer 的 API 客户端与只读请求不受影响。
-- 为管理员危险维护操作增加二次确认与作用范围提示：`POST /api/admin/transfer-project`(所有权转移)与 `POST /api/admin/unlock-task`(任务解锁)请求须携带 `confirm=true` 才执行，未确认返回 409 `ADMIN-CONFIRM-REQUIRED` 并附影响范围(from_user/to_user/项目数)提示；所有权转移目标新增校验，必须是 active 且非管理员、非系统账号，避免把项目转给管理员/系统账号绕过"管理员维护只读"。不引入审批链。
-- 管理员删除账号增加误操作防护（0.2.0 B1）：删除账号会级联软删其拥有的全部项目且不可恢复，现必须先调用 `POST /api/auth/users/{user_id}/delete-preview` 预览将受影响的项目清单（名称/ID/数量）并取得签名确认令牌，删除时携带 `{"confirm": true, "confirm_token": "..."}` 才会执行；缺少 confirm、令牌缺失/过期/伪造或预览后项目清单变化均返回 400 `AUTH-DEL-001`。前端账号管理在确认对话框中展示受影响项目清单。
-- 项目删除确认强化(0.2.0 B4)：`DELETE /api/projects/{id}` 不再接受空布尔 `confirm: true` 单独确认，须提供与待删除项目名精确匹配的 `name` 或非空删除原因 `reason` 之一；`confirm` 字段仅为兼容旧调用方保留。审计记录确认方式与删除原因(脱敏)。前端删除确认对话框要求输入项目名才能确认。
-- 部署不可变审计触发器(0.2.0 B4)：`init_db()` 在 PostgreSQL 下执行 `immutable_triggers.py` 的全部 DDL(`ALL_IMMUTABLE_TRIGGER_DDL` + `ALL_IMMUTABLE_REVOKE_DDL`)，为 12 张不可变表(含 `audit_log`/`auth_events`/`project_versions`/`calc_snapshots` 等)创建禁 UPDATE/DELETE 触发器与 `REVOKE UPDATE, DELETE ... FROM PUBLIC`，实现宪法 §16「关键变更保留不可变审计」；部署幂等(DROP FUNCTION IF EXISTS ... CASCADE 后重建)。SQLite 测试库跳过 PostgreSQL 触发器语法。
-- 计算配置保存审计(0.2.0 B4)：`PUT /api/projects/{id}/config` 保存时写入 `config.saved` 审计记录(只含版本/变量数/目标/约束数/算法/随机种子等脱敏元数据，不复制完整配置)。
+#### 更新了什么
 
-### 管理
+- 发布 `ies.assembly` `1.0.0` 机器可读 schema、唯一规范化器 `ies.assembly.canonical@1.0.0`、合法/非法样例和稳定 `ASM-*` 诊断码。
+- 规范化过程固定键顺序、UTC 时间、有限数值表示和内容寻址资源，输出紧凑 JSON + LF，并对规范字节计算 SHA-256。
+- 统一手写装配与 GUI 项目导出的四阶段校验入口；成功只签发不可变 `ValidatedAssemblyArtifact`，其中包含规范文本、`assembly_sha256` 和确定性 `ValidationReceipt`。
+- 新增 GUI 项目导出构造器和旧 `AssemblySpec` 一次性迁移；旧算法/容差配置显式映射为固定版本的 generator、solver 与 options。
+- 生产任务在创建 `Task` / `CalcSnapshot` 前经过统一校验闸门；快照持久化三件套，Worker 执行前重新恢复和复验；项目证据包同步导出三件套。
 
-- 对象清理引入软删/保留期（0.2.0-B3 恢复路径）：`POST /api/admin/objects/cleanup` 执行不再立即物理删除，而是把无引用的孤儿对象标记为“待物理回收”，默认保留 7 天；保留期内文件保留、内容可读，管理员可经 `POST /api/admin/objects/restore` 恢复误清理对象，对象重新获得 owner 引用时也会自动恢复。新增 `GET /api/admin/objects/pending` 查看“已删除待回收”清单，`POST /api/admin/objects/purge` 只对已过保留期的待回收对象执行物理回收（先 `dry_run` 预览再执行）；`reconcile` 巡检会兜底物理回收到期对象。
-- 资源使用边界（0.2.0 A4）：新增全局 IP 限流（按进程内存滑动窗口，Redis 可用时跨 Worker 原子计数）与按用户/项目的上传配额门禁，超限返回 429 `API-RL-001` / 413 `API-QUOTA-001`；dataset 上传的 `meta`/`fields`/`provenance` 字段经白名单校验，未知键或畸形结构返回 400 `API-META-001`。本地开发与 e2e 默认宽松阈值（限流 120 次/分钟，配额 0 = 不限），通过 `IESPLAN_RATE_LIMIT_MAX_REQUESTS` / `IESPLAN_RATE_LIMIT_WINDOW_SECONDS` / `IESPLAN_UPLOAD_QUOTA_BYTES` / `IESPLAN_PROJECT_QUOTA_BYTES` 配置。
-- 下载授权加固（0.2.0 A3）：`/api/exports` 的下载令牌除原 HMAC 签名外，新增对象归属校验——令牌载荷 `object_id` 必须真实存在，且对象必须被当前会话用户有权限访问的项目引用，否则 403 `AUTH-OBJ-001`；伪造 weak-secret 签发的令牌不再能越权下载。
-- 任务结果查询 IDOR 修复（0.2.0）：`select_result_endpoint` 与 `results.py` `read_hourly` 增加 `ensure_task_belongs(db, project_id, task_id)` 校验，未授权项目任务返回 404 `RES-MISS-003`，阻断"猜测 task_id 跨项目读取结果"的路径。
-- `/api/readyz` 脱敏（0.2.0 A3）：注册表初始化失败的原始异常串（可能含内部路径/凭证）只进日志，探针响应只给 `modeling_registry / detail: unavailable`，避免 503 响应泄露内部堆栈。
-- 对象存储公开面收尾（0.4.0）：`ObjectHandle` 公开字段移除 `storage_path` / `ref_count`，业务模块只能经 `iesplan.storage` 公开门面传递 `ObjectId/ObjectHandle/ObjectOwner`；包导入的 `ImportProposal.source_path` 停止写值（可追溯性由 `source_object_id` 与 `source_hash` 承担）；reconcile 审计与 dry-run 报告不再含内部路径，主机绝对路径不进错误信封（§11/§16 路径泄漏清零）。替换存储适配器不再改变业务契约。
+#### 解决了什么问题
 
-### 错误契约
+- 关闭 `services/tasks._assembly_gate` 直接调用旧 `check_graph_inputs`、绕过新校验入口的生产路径。
+- 不再把可变 `AssemblySpec` / `CheckResult` 或旧 YAML 当作新计算的持久输入，避免校验后内容被改变或无法复现。
+- 摘要、规范文本、回执、schema 或依赖版本不一致时立即阻断，避免篡改或错误版本进入 Worker。
+- 拒绝宿主机路径、可执行字段、未固定精确版本和无法唯一映射的旧配置；迁移失败不产生半迁移状态。
+- 装配诊断码改为核心静态登记，装配模块不再通过导入时副作用修改核心注册表。
 
-- 错误响应统一为标准 8 字段信封 `{"error": {code, message_key, severity, blocking, params, location, fix_hint_key, ref_ids}}`（0.3.0）：所有非 2xx 响应（404 路由未找到、403 权限/CSRF、429 限流、413 配额、500 未未捕获）走 `iesplan/core/errors.py:error_envelope` 唯一权威构造器；`code` 格式 `DOMAIN-CATEGORY-NNN`，新码须在 `core/diagnostics.py NEW_DIAG_CODES` 登记。前端 `client.ts` 按 `parseErrorEnvelope` 解析后透传 `params.diagnostics` 等明细到 `ApiError.params`，页面不再特判裸 `{"detail"}`。
-- `Diagnostic` 收敛为深度不可变公共类型（0.3.0 C1）：`@dataclass(frozen=True, slots=True)` + `object.__setattr__` 冻结，params/location 经递归只读包装（MappingProxyType + tuple），`ref_ids` 转 tuple；`to_dict()` 递归解冻为普通 dict/list 供 JSON 序列化；新增 `replace()` 与 `with_context(project_id/task_id/trace_id/source)` 派生方法。
-- 删除空数据降级（0.3.0 C2）：系统模型域返回 `has_graph` 显式字段标识"未建模/已建模"；结果域新增 `evidence_status: no_evidence|available` 显式区分"任务未完成/已提交证据包"，无证据包时 `hourly_refs/metrics` 等字段为 null（前端不再猜测）；任务结果域缺证据包返回 404 `RES-MISS-003`，前端 `no_evidence` 时不渲染空卡片。
-- 配置/数据集校验失败统一信封 + 阻塞语义（0.3.0 C3 + 收口）：`PUT /config` 校验失败返回 422 `CONFIG-VAL-001`，dataset 上传校验失败返回 400 `DATA-VAL-001`，诊断明细进 `params.diagnostics`；`DataValidationError` 显式 `blocking=True` 与配置 422 一致。
-- FastAPI 请求体校验走标准信封（0.3.0 收口）：`RequestValidationError` 注册全局处理器，422 + `error_envelope(code=API-REQ-001, message_key=ies.error.invalid_request, params.errors=...)`，前端无需特判裸 `{"detail"}`。
+#### 迁移与兼容影响
 
-### 协议门禁
+- 旧装配通过 `iesplan.assembly.migration` 迁移并生成包含新旧摘要、转换记录和诊断的回执。
+- 缺少模型精确版本、solver、数据摘要或媒体类型等无法唯一推导的信息时，以 `ASM-CONV-001` 阻断并要求人工补齐。
+- 历史 `assembly_text` 仅保留用于审计；新快照以规范文本、摘要和回执为执行依据。
 
-- 公共协议测试基线（0.3.0 C4）：`backend/tests/test_protocol_baseline.py`（628 行）锁定 12 条错误路径的 8 字段信封 + 28 个端点的成功包装键集（AST 门禁禁止裸/包装并存）；新增 / 修改端点必须维持基线。
-- 静态架构门禁（0.3.0 C5）：`backend/tests/test_architecture_gates.py` 白名单基线三门禁——`core` 不依赖业务模块、禁止跨模块私有符号导入、禁止 API 直接导入 ORM；新增违规直接断言失败，存量违规在白名单带 TODO，后续按宪法 §14.3 逐步整改。
+### 0.6.0 开发里程碑 — 设备数据文件契约
 
-### 设备数据文件契约(`ies.device-data` 1.0.0)
+**完成时间**：2026-08-24
 
-- 发布 `ies.device-data` `1.0.0` 机器可读 schema(`backend/iesplan/devices/schema/device-data-v1.0.0.schema.json`)与唯一纯函数规范化器(`iesplan.devices.datacontract.canonicalize_device_data`)。
-- CSV 元数据(`# schema`/`# schema_version`/`# dataset_id`/`# device_model`/`# series_mode`/`# resolution`/`# timestamp_mode`/`# unit.<column>`)与方言(UTF-8/LF/英文逗号/RFC 4180/小数 `.`/布尔 `true|false`/禁 NaN/Inf/公式/区域化数字/千位分隔符)校验。
-- `timestamp_mode=fixed_offset` 必须声明 `fixed_utc_offset_minutes`(-840..840)，不依赖机器时区/夏令时；`series_mode=periodic` 必须声明 `period`(day|week|year)。
-- 列声明与设备模型核对：未声明列/重复列拒绝、必需列缺失拒绝、列单位量纲不一致拒绝；规范输出按模型声明顺序排列。
-- 时间轴：timeline 时间戳严格递增无重复、与分辨率对齐、同文件不混用带Z/带偏移/无偏移；utc 用 RFC 3339 带 Z，fixed_offset 由文件级偏移唯一换算 UTC。
-- 数值按设备模型 value_type/范围/有限性校验：超范围阻断不截断；缺值未在模型中声明阻断；不静默删行/补零/前值填充/解析失败变空集。
-- 规范化产物保留原始文件 SHA-256 与规范表格 SHA-256；同一语义输入得到同一规范摘要。
-- 新增 DATA-META-* / DATA-DIAL-* / DATA-COL-003..006 / DATA-VAL-* / DATA-TIME-* / DATA-ARR-001 / DATA-SUM-001 诊断码。
-- 包内设备 CSV 与 GUI 上传共用同一 `ies.device-data` 规范化流程(`datacontract.normalize_upload_csv` / `datacontract.canonical_table_bytes`)：时区(UTC 带 Z)、时间轴(严格递增/步长对齐)、单位(量纲一致)、缺失值(模型策略)、数组长度(行数一致)统一校验；`devices.profile.load_profile_columns` 与 GUI 上传均经同一规范化器，手写 CSV 与上传对同一内容产生同一规范摘要。
-- 迁移内置设备目录 CSV(`electric_load/heat_load/cooling_load`)到 `ies.device-data` `1.0.0` 格式：数据行原样保留、前插标准元数据头、迁移后全量校验通过才写回；迁移回执(`catalog/migration-receipt-0.6.0.json`)记录迁移文件、旧/新 SHA-256、行数、列声明与校验结果；后续装配只持有已校验的内容引用(`dataset_version_id`/`content_hash`)，不依赖上传文件名。
+**版本进展**：开发里程碑由 `0.5.0` 推进到 `0.6.0`；已合入 `master`，尚未正式发布。
 
-## 0.1.0 — 开发基线
+#### 更新了什么
+
+- 发布 `ies.device-data` `1.0.0` schema 与唯一纯函数规范化器，统一 CSV 元数据、UTF-8/LF/RFC 4180 方言、时间轴、单位、数值和缺失值规则。
+- `fixed_offset` 必须声明固定 UTC 偏移，`periodic` 必须声明周期；timeline 必须严格递增、无重复并与分辨率对齐。
+- 数据列与精确版本设备模型核对，规范输出按模型声明顺序排列，同时保留原文件和规范表格 SHA-256。
+- GUI 上传、手写 CSV 和包内 profile 读取共用同一规范化入口；内置负荷目录迁移到新格式并生成 `migration-receipt-0.6.0.json`。
+
+#### 解决了什么问题
+
+- 消除依赖机器时区/夏令时、时间戳模式宽松、时间轴元数据与实际数据不一致造成的非确定性。
+- 消除浮点精度丢失、NaN/Inf、区域化数字、公式、非法缺值以及解析失败后静默补零或变空集。
+- 消除 GUI 上传与包内 CSV 使用不同校验逻辑、同一内容产生不同摘要的问题。
+- 未知设备模型、版本不精确、必需列缺失、单位量纲不一致和数组长度错误现在返回稳定阻断诊断，而不是 500 或静默接受。
+
+#### 迁移与兼容影响
+
+- 内置 `electric_load`、`heat_load`、`cooling_load` 数据行保持不变，仅补充标准元数据并在写回前全量校验。
+- 后续装配引用已校验的 `dataset_version_id` / `content_hash`，不再依赖上传文件名。
+
+### 0.5.0 开发里程碑 — 设备模型契约
+
+**完成时间**：2026-08-24
+
+**版本进展**：开发里程碑由 `0.4.0` 推进到 `0.5.0`；已合入 `master`，尚未正式发布。
+
+#### 更新了什么
+
+- 发布 `ies.device-model` `1.0.0` JSON Schema、唯一规范化规则、规范字节 SHA-256、稳定诊断码和合法/非法样例。
+- 设备 YAML 从 `type_id` / `function` 迁移为 `schema`、`device`、`parameters`、`ports`、`data_inputs`、`states`、`model_commands` 和 `extensions`。
+- 可执行实现改由稳定的 `<command-id>@<exact-version>` 解析；命令到实现的映射只存在于组合根和 modeling provider 内部。
+- 公开 descriptor 深度不可变；标准 profile 通过 `get_profile_columns(type_id)` 门面读取；内置目录迁移生成新旧摘要与校验回执。
+
+#### 解决了什么问题
+
+- 公开设备描述不再暴露函数、包、模块和宿主机路径，业务代码不再依赖 Python 实现细节。
+- 拒绝无法映射的旧 `function`、未固定命令版本、错误 `value_type` 与枚举/默认值组合，避免迁移后语义漂移。
+- descriptor 中嵌套 list/dict 统一冻结，解决调用方可修改公共契约对象的问题。
+- 修复 0.5.0 descriptor 使用 `MappingProxyType` 后，0.6.0 数据输入消费者无法读取 `time_series` 的合并兼容问题。
+
+#### 迁移与兼容影响
+
+- 旧设备 YAML 必须一次性迁移到 `ies.device-model` `1.0.0`；不能唯一映射的记录明确失败，不做静默 fallback。
+- 旧 `standard_csv_path` 和实现路径不再属于公共 descriptor。
+
+### 0.4.0 开发里程碑 — 存储公开边界
+
+**完成时间**：2026-08-23
+
+**版本进展**：开发里程碑由 `0.3.0` 推进到 `0.4.0`；已合入 `master`，尚未正式发布。
+
+#### 更新了什么
+
+- `ObjectHandle` 公开字段移除 `storage_path` / `ref_count`，业务模块只通过 `iesplan.storage` 门面传递 `ObjectId`、`ObjectHandle` 和 `ObjectOwner`。
+- 包导入不再写入 `ImportProposal.source_path`，改由 `source_object_id` 与 `source_hash` 提供追溯。
+- reconcile 审计、dry-run 报告、健康 DTO 和错误信封不再包含内部绝对路径。
+
+#### 解决了什么问题
+
+- 消除业务层对本地文件路径、引用计数和具体存储适配器的耦合。
+- 消除主机路径通过公开 DTO、审计、健康检查或异常响应泄漏的问题。
+- 替换对象存储实现时，不再需要改变业务层公共契约。
+
+#### 迁移与兼容影响
+
+- 调用方必须使用对象 ID、内容摘要和 owner 关系完成访问与追溯，不能读取内部存储路径或引用计数。
+
+### 0.3.0 开发里程碑 — 错误与协议契约
+
+**完成时间**：2026-08-23
+
+**版本进展**：开发里程碑由 `0.2.0` 推进到 `0.3.0`；已合入 `master`，尚未正式发布。
+
+#### 更新了什么
+
+- 所有非 2xx 响应统一为包含 `code`、`message_key`、`severity`、`blocking`、`params`、`location`、`fix_hint_key`、`ref_ids` 的标准错误信封。
+- `Diagnostic` 改为深度不可变公共值对象，并提供 `replace()`、`with_context()` 和可序列化的 `to_dict()`。
+- 系统模型新增 `has_graph`，结果新增 `evidence_status`；缺少证据包时明确返回 `no_evidence` 或 `RES-MISS-003`，不再伪造空结果。
+- 配置、数据集和 FastAPI 请求体校验统一错误信封与阻断语义。
+- 新增公共协议基线和静态架构门禁，锁定错误路径、成功包装键、Core 依赖方向、跨模块私有导入和 API/ORM 边界。
+
+#### 解决了什么问题
+
+- 前端不再同时处理裸 `detail`、自定义错误对象和标准信封。
+- 消除“无模型/无证据”被表现为空数组或空卡片的静默降级，防止用户把缺失数据误认为有效零结果。
+- 消除诊断对象在跨层传递时被修改的问题。
+- 新增端点或重构模块时，测试会阻止协议包装和架构边界继续漂移。
+
+#### 迁移与兼容影响
+
+- API 客户端必须读取标准 `error` 信封；诊断明细位于 `params.diagnostics`。
+- 依赖空数组表示“无证据”的调用方必须改为判断 `evidence_status` 或处理明确的 404。
+
+### 0.2.0 开发里程碑 — 安全与管理防护
+
+**完成时间**：功能实现于 2026-08-22，文档与验收记录于 2026-08-23 收口。
+
+**版本进展**：开发里程碑由 `0.1.0` 推进到 `0.2.0`；已合入 `master`，尚未正式发布。
+
+#### 更新了什么
+
+- 为 Cookie 会话的 POST/PUT/PATCH/DELETE 请求增加 Origin/Referer CSRF 校验；Bearer 客户端和只读请求保持兼容。
+- 下载令牌增加对象存在性、项目引用和当前用户权限校验；任务结果查询增加项目—任务归属校验；`/api/readyz` 对外隐藏内部异常。
+- 管理员转移项目、解锁任务和删除账号增加确认、影响范围预览、签名确认令牌和目标账号约束；项目删除要求精确项目名或非空原因。
+- 对象清理改为默认保留 7 天的软删—恢复—到期清理流程；新增 pending、restore、purge 和 reconcile 收口。
+- 新增全局 IP 限流、用户/项目上传配额和 dataset 元数据白名单。
+- PostgreSQL 为 12 张关键不可变表建立禁止 UPDATE/DELETE 的触发器和权限约束；计算配置保存写入脱敏审计。
+
+#### 解决了什么问题
+
+- 修复浏览器会话 CSRF、伪造下载令牌跨项目取对象、猜测 `task_id` 跨项目读结果等第三方攻击面。
+- 防止管理员误转项目、误解锁任务、未预览即级联删除账号，以及仅凭布尔值误删项目。
+- 防止孤儿对象清理后立即不可恢复，并降低误清理造成永久数据丢失的风险。
+- 防止上传滥用、畸形元数据进入系统，以及健康探针泄露内部路径、凭证或堆栈。
+- 关键审计、快照和版本记录由数据库层阻止修改或删除，避免只依赖应用层约定。
+
+#### 迁移与兼容影响
+
+- 浏览器状态变更请求必须来自可信来源；管理员危险操作调用方必须按新确认流程提交请求。
+- 对象清理调用方应先 dry-run，并通过待回收列表、恢复与到期清理接口管理生命周期。
+- 部署需配置可信来源、限流与配额参数；PostgreSQL 初始化会幂等重建不可变审计触发器。
+
+## 0.1.0 — 2026-08-22 — 开发基线
 
 > 发布日期：2026-08-22；发布状态：正式稳定版之前的开发版本
 
