@@ -66,4 +66,6 @@ docker compose up -d --build
 
 ## 许可
 
-见 [LICENSE](LICENSE)。
+Copyright © 2026 pIES Contributors.
+
+本项目采用 [Mozilla Public License 2.0](LICENSE)（SPDX：`MPL-2.0`）。
