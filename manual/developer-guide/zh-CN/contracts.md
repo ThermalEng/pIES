@@ -27,6 +27,8 @@
 - 动作响应（确认/状态变更/校验触发）：顶层为 `{ok, ...}`，必要时附 message_key/expires_at/result 等。
 - 必要时可嵌套（如 `{project, draft, versions, my_role}`），嵌套键名同样遵循自我文档化原则。
 
+**每个路由端点的允许顶层键集必须登记**在 [`iesplan/api/wrapper_keys.py`](../../../backend/iesplan/api/wrapper_keys.py) 的 `WRAPPER_KEYS` 集中登记表（对应错误信封 `NEW_DIAG_CODES` 的管理模式）：新增/修改端点先登记再改代码，协议基线测试 `test_wrapper_keys_registered`（AST 全量扫描，含间接返回端点）强制校验，未登记或键集超出登记即失败。非 JSON 响应端点（302 重定向 / 二进制下载）豁免。
+
 禁止：
 
 - `{data, meta}` 这种通用包装（破坏键名自我文档化，分散前端适配层决策）；

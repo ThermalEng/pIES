@@ -642,3 +642,58 @@ def test_pydantic_request_validation_422_uses_envelope(
     assert err["code"] == "API-REQ-001"
     assert err["message_key"] == "ies.error.invalid_request"
     assert err["params"]["count"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# 6. 命名键集中登记表门禁(对应错误信封 NEW_DIAG_CODES 的管理模式)
+# ---------------------------------------------------------------------------
+
+#: 非 JSON 响应端点(302 重定向 / 二进制下载), 不要求登记包装键
+_JSON_EXEMPT_HANDLERS = frozenset({
+    "oidc_login",          # 302 RedirectResponse → /login?error=...
+    "oidc_callback",       # 302 RedirectResponse → /
+    "download_template",   # CSV 模板二进制下载
+    "download_excel_endpoint",   # excel 二进制下载
+    "download_package_endpoint", # 项目包二进制下载
+})
+
+
+def test_wrapper_keys_registered() -> None:
+    """门禁: 全部 JSON 路由端点的顶层键集必须命中 WRAPPER_KEYS 登记表。
+
+    对应错误信封的 NEW_DIAG_CODES 强制登记制度 —— 新增端点必须先登记
+    (iesplan/api/wrapper_keys.py), 键集超出登记或未登记即失败。
+    间接返回(return 服务调用结果)的端点要求登记(键集从服务层提取),
+    防止服务层形状变化未被察觉。
+    """
+    from iesplan.api.wrapper_keys import WRAPPER_KEYS
+
+    scanned = 0
+    unregistered: list[str] = []
+    overrunning: list[str] = []
+    for path, func in _route_handler_functions():
+        if func.name in _JSON_EXEMPT_HANDLERS:
+            continue
+        scanned += 1
+        shapes = _collect_shapes(func)
+        if not shapes:
+            # 间接返回: 必须登记(登记值本身是契约, 服务层形状变化
+            # 由运行时断言 test_success_wrapper_* 覆盖实测端点)
+            if func.name not in WRAPPER_KEYS:
+                unregistered.append(f"{path.name}:{func.name}(间接返回未登记)")
+            continue
+        actual = set().union(*shapes)
+        allowed = WRAPPER_KEYS.get(func.name)
+        if allowed is None:
+            unregistered.append(f"{path.name}:{func.name} 实际={sorted(actual)}")
+        elif not actual.issubset(allowed):
+            overrunning.append(
+                f"{path.name}:{func.name} 键集超出登记: {sorted(actual - allowed)}"
+            )
+    assert scanned > 0, "AST 扫描未找到任何路由函数(api 包结构变化?)"
+    assert not unregistered, (
+        f"命名键未登记(先登记 iesplan/api/wrapper_keys.py): {unregistered}"
+    )
+    assert not overrunning, (
+        f"命名键超出登记(先改登记表再改代码): {overrunning}"
+    )
