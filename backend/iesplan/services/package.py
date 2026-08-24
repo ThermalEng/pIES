@@ -492,6 +492,11 @@ def _build_package_zip(
                     "program_version": snapshot.program_version if snapshot else None,
                     "random_seed": snapshot.random_seed if snapshot else None,
                     "dataset_version_ids": (snapshot.dataset_version_ids if snapshot else []),
+                    "canonical_assembly_text": (
+                        snapshot.canonical_assembly_text if snapshot else None
+                    ),
+                    "assembly_sha256": snapshot.assembly_sha256 if snapshot else None,
+                    "assembly_receipt": snapshot.assembly_receipt if snapshot else None,
                 },
                 "assessments": [
                     {

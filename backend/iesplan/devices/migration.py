@@ -29,8 +29,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from iesplan.core import yamlmini
 from iesplan.core.diagnostics import Diagnostic
-from iesplan.devices import yamlmini
 from iesplan.devices.contracts import (
     SCHEMA_ID,
     SCHEMA_VERSION,

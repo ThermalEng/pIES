@@ -33,15 +33,16 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan.assembly import ValidatedAssemblyArtifact  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.storage.persistence import StoredObject  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
 from iesplan.services import queue  # noqa: E402
 from iesplan.services import tasks as tasks_service
+from iesplan.storage.persistence import StoredObject  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -257,8 +258,22 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     snapshots = db.execute(select(CalcSnapshot)).scalars().all()
     assert len(snapshots) == 2
     by_id = {s.id: s for s in snapshots}
-    assert by_id[snapshot_a].content_hash  # 64 位 hex
-    assert len(by_id[snapshot_a].content_hash) == 64
+    persisted = by_id[snapshot_a]
+    assert persisted.content_hash  # 64 位 hex
+    assert len(persisted.content_hash) == 64
+    assert persisted.assembly_text is None
+    assert persisted.canonical_assembly_text
+    assert persisted.assembly_sha256 == sha256(
+        persisted.canonical_assembly_text.encode("utf-8")
+    ).hexdigest()
+    assert isinstance(persisted.assembly_receipt, dict)
+    assert "issued_at" not in persisted.assembly_receipt
+    artifact = ValidatedAssemblyArtifact.from_persisted(
+        persisted.canonical_assembly_text,
+        persisted.assembly_sha256,
+        persisted.assembly_receipt,
+    )
+    assert artifact.receipt.assembly_sha256 == persisted.assembly_sha256
 
     # 6) 列表可见 2 个任务(步骤 2/3 均为既有任务复用; 含摘要与排队位次)
     resp = client.get(f"/api/projects/{pid}/tasks", headers=_h(client, owner))
@@ -268,6 +283,46 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     first = items[0]
     assert first["summary"]["queue_position"] is not None
     assert first["summary"]["percent"] == 0.0
+
+
+def test_compute_submission_uses_unified_assembly_gate(
+    client: TestClient, db: Session
+) -> None:
+    """未注册模型必须由 0.7.0 统一入口阻断，且不得留下任务或快照。"""
+    owner = make_user(db, "owner_assembly_gate")
+    pid = _create_project(client, owner, "装配闸门反例")
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={
+            "expected_revision": 1,
+            "commands": [
+                {
+                    "id": "bad-model",
+                    "unit": "model",
+                    "type": "model.upsert_device",
+                    "payload": {
+                        "name": "未知设备",
+                        "device_type": "ies.device.not_registered",
+                        "kind": "existing",
+                    },
+                }
+            ],
+        },
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    _bind_and_freeze(client, pid, owner, None)
+
+    status, body = _submit_task(client, pid, owner, idempotency_key="bad-assembly")
+    assert status == 422
+    error = body["error"]
+    assert error["code"] == "ASM-VALIDATE-FAILED"
+    diagnostics = error["params"]["diagnostics"]
+    assert diagnostics
+    assert all(item["blocking"] for item in diagnostics)
+    assert {item["code"] for item in diagnostics} & {"ASM-SYN-007", "ASM-REF-002"}
+    assert db.execute(select(func.count(Task.id))).scalar() == 0
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
 
 
 def test_idempotency_key_scoped_to_project(client: TestClient, db: Session) -> None:

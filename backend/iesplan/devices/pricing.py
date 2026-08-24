@@ -10,8 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from iesplan.core import yamlmini
 from iesplan.core.errors import AppError, NotFoundError
-from iesplan.devices import yamlmini
 from iesplan.devices.spec import DeviceYamlSpec
 
 #: ``$price:`` 引用前缀

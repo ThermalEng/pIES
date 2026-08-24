@@ -25,6 +25,7 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan.assembly import AssemblyValidationError, ValidatedAssemblyArtifact
 from iesplan.core.diagnostics import SEVERITY_BLOCKING, TASK_DATA_SNAPSHOT_MISSING
 from iesplan.core.errors import AppError
 from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis
@@ -75,6 +76,7 @@ def load_inputs(db: Session, snapshot: CalcSnapshot) -> tuple[dict, dict, TimeAx
     """
     if snapshot is None:
         raise SnapshotInputError("计算快照缺失", location={"object_type": "calc_snapshot"})
+    _verify_snapshot_assembly(snapshot)
     version = db.get(ProjectVersion, snapshot.project_version_id)
     if version is None:
         raise SnapshotInputError(
@@ -111,6 +113,33 @@ def load_inputs(db: Session, snapshot: CalcSnapshot) -> tuple[dict, dict, TimeAx
     _data_to_si(data, actual_resolution)  # 声明单位 → SI(唯一换算边界, 01 §5.2)
     axis = _build_axis(actual_resolution, utc_offset, data)
     return content, data, axis
+
+
+
+def _verify_snapshot_assembly(snapshot: CalcSnapshot) -> ValidatedAssemblyArtifact:
+    """恢复并校验快照中的规范装配三件套；旧/畸形快照禁止进入计算。"""
+    text = snapshot.canonical_assembly_text
+    digest = snapshot.assembly_sha256
+    receipt = snapshot.assembly_receipt
+    if (
+        not isinstance(text, str)
+        or not text
+        or not isinstance(digest, str)
+        or not isinstance(receipt, dict)
+    ):
+        raise SnapshotInputError(
+            "计算快照缺少规范装配产物三件套",
+            params={"calc_snapshot_id": snapshot.id, "reason": "assembly_artifact_missing"},
+            location={"object_type": "calc_snapshot", "object_id": snapshot.id},
+        )
+    try:
+        return ValidatedAssemblyArtifact.from_persisted(text, digest, receipt)
+    except (AssemblyValidationError, TypeError, ValueError) as exc:
+        raise SnapshotInputError(
+            "计算快照规范装配产物不一致",
+            params={"calc_snapshot_id": snapshot.id, "reason": "assembly_artifact_invalid"},
+            location={"object_type": "calc_snapshot", "object_id": snapshot.id},
+        ) from exc
 
 
 def _load_dataset_data(

@@ -22,9 +22,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 
+from iesplan.core import yamlmini
 from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.errors import AppError
-from iesplan.devices import yamlmini
 from iesplan.devices.parser import parse_device_model_yaml
 
 # ---------------------------------------------------------------------------

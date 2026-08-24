@@ -98,8 +98,13 @@ class CalcSnapshot(Base):
     random_seed: Mapped[int] = mapped_column(BigInteger, nullable=False)
     tolerances: Mapped[dict | None] = mapped_column(JSONB)
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    #: 装配文本(装配检查通过后写入, 计算模块输入的第 4 步产物; 04 §6.2)
+    #: 0.7.0 之前的非规范 YAML，仅保留旧快照审计；新快照不得写入/消费。
     assembly_text: Mapped[str | None] = mapped_column(Text)
+    #: 规范装配文本 + SHA-256 + 确定性校验回执（三件套）。旧快照升级后可为 NULL，
+    #: Worker 必须拒绝缺任一成员的快照；所有新快照由统一校验入口完整写入。
+    canonical_assembly_text: Mapped[str | None] = mapped_column(Text)
+    assembly_sha256: Mapped[str | None] = mapped_column(Text)
+    assembly_receipt: Mapped[dict | None] = mapped_column(JSONB)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -107,6 +112,10 @@ class CalcSnapshot(Base):
 
     __table_args__ = (
         regex_check(f"content_hash ~ '{HASH64_RE}'", name="ck_calc_snapshots_content_hash"),
+        regex_check(
+            f"assembly_sha256 IS NULL OR assembly_sha256 ~ '{HASH64_RE}'",
+            name="ck_calc_snapshots_assembly_sha256",
+        ),
         Index("idx_calc_snapshots_version", "project_version_id", sa.text("created_at DESC")),
     )
 
@@ -139,7 +148,8 @@ class Task(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "type IN ('calc','optimization','uncertainty','analysis','import','export','report','dataset_build')",
+            "type IN ('calc','optimization','uncertainty','analysis',"
+            "'import','export','report','dataset_build')",
             name="ck_tasks_type",
         ),
         CheckConstraint(

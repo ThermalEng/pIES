@@ -110,6 +110,37 @@ def _assert_completed(db: Session, task_id: int, outcome: str) -> Task:
     return task
 
 
+def test_load_inputs_rejects_legacy_snapshot_without_artifact(db: Session, tmp_path: Path):
+    """旧快照没有规范文本/SHA/回执三件套时必须在读取任何业务输入前阻断。"""
+    env = setup_environment(db, tmp_path, task_type="calc")
+    snapshot = env["snapshot"]
+    snapshot.canonical_assembly_text = None
+    snapshot.assembly_sha256 = None
+    snapshot.assembly_receipt = None
+    db.commit()
+
+    with pytest.raises(runner.SnapshotInputError) as exc_info:
+        runner.load_inputs(db, snapshot)
+    assert exc_info.value.params["reason"] == "assembly_artifact_missing"
+
+
+def test_load_inputs_rejects_tampered_artifact_receipt(db: Session, tmp_path: Path):
+    """持久化回执版本被改写后，即使文本/SHA 未变也不得进入计算。"""
+    env = setup_environment(db, tmp_path, task_type="calc")
+    snapshot = env["snapshot"]
+    receipt = dict(snapshot.assembly_receipt)
+    receipt["canonical_algorithm"] = {
+        **receipt["canonical_algorithm"],
+        "version": "9.9.9",
+    }
+    snapshot.assembly_receipt = receipt
+    db.commit()
+
+    with pytest.raises(runner.SnapshotInputError) as exc_info:
+        runner.load_inputs(db, snapshot)
+    assert exc_info.value.params["reason"] == "assembly_artifact_invalid"
+
+
 # ---------------------------------------------------------------------------
 # 方案评价(task_type=calc)
 # ---------------------------------------------------------------------------

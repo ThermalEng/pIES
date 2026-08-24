@@ -113,6 +113,26 @@ def _migrate_constraints() -> None:
             )
         # 0.2.0-B3: objects 新增软删/保留期列(pending_deleted_at / pending_delete_until),
         # 旧库 create_all 不会为既有表补列, 这里幂等 ALTER 补列并建到期索引。
+        # 0.7.0: 计算快照持久化唯一规范装配产物三件套。旧快照不能伪造回执，
+        # 因此升级列保持可空；Worker 对缺失成员执行阻断，新快照始终完整写入。
+        _add_column_if_missing(conn, "calc_snapshots", "canonical_assembly_text", "TEXT")
+        _add_column_if_missing(conn, "calc_snapshots", "assembly_sha256", "TEXT")
+        _add_column_if_missing(conn, "calc_snapshots", "assembly_receipt", "JSONB")
+        assembly_hash_check = conn.execute(
+            sa_text(
+                "SELECT 1 FROM pg_constraint "
+                "WHERE conname = 'ck_calc_snapshots_assembly_sha256'"
+            )
+        ).first()
+        if assembly_hash_check is None:
+            conn.execute(
+                sa_text(
+                    "ALTER TABLE calc_snapshots ADD CONSTRAINT "
+                    "ck_calc_snapshots_assembly_sha256 CHECK "
+                    "(assembly_sha256 IS NULL OR assembly_sha256 ~ '^[0-9a-f]{64}$')"
+                )
+            )
+
         _add_column_if_missing(conn, "objects", "pending_deleted_at", "TIMESTAMPTZ")
         _add_column_if_missing(conn, "objects", "pending_delete_until", "TIMESTAMPTZ")
         conn.execute(

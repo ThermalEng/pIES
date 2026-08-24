@@ -44,6 +44,13 @@ include = ["iesplan*"]
     "schema/*.json",
     "samples/*.yaml",
 ]
+# 0.7.0: ies.assembly JSON Schema 与合法/非法样例同为包内资源
+"iesplan.assembly" = [
+    "schema/*.json",
+    "samples/valid/*.yaml",
+    "samples/invalid/*.yaml",
+    "samples/data/*.csv",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -3,24 +3,41 @@
 码格式遵循 04 §5.1:<域>-<类别>-<三位序号>;码一经发布永久稳定;
 码 ↔ 消息键一一对应(ies.diag.asm.*);修复键独立维护(ies.fix.asm.*)。
 
-登记方式:本模块导入时把 ASM 域码/消息键/修复键**运行期登记**进
-core/diagnostics.py 的目录字典(只增不改既有码,不修改任何既有文件),
-使 make_diag/Diagnostic 的"未登记码拒绝"校验对 ASM 码放行,同时保持
-core/diagnostics.py 的文档目录语义(新码集中声明)。
+登记方式:稳定码统一在 ``core/diagnostics.py::NEW_DIAG_CODES`` 静态登记；
+消息键与修复键由本模块自治维护。禁止通过导入副作用改写 core 全局目录。
+装配模块统一调用 ``make_asm_diag``，显式把本域消息键传给核心诊断对象。
 """
 
 from __future__ import annotations
 
-from iesplan.core import diagnostics as _core_diags
+from collections.abc import Mapping, Sequence
+
+from iesplan.core.diagnostics import SEVERITY_ERROR, Diagnostic
+from iesplan.core.diagnostics import make_diag as _make_diag
 
 # ---------------------------------------------------------------------------
 # 阶段 A:语法与结构(parser 内完成)
 # ---------------------------------------------------------------------------
 ASM_SYN_PARSE = "ASM-SYN-001"  # YAML 解析失败/类型错误(键非字符串、值类型不符、未知键)
 ASM_SYN_SECTION = "ASM-SYN-002"  # 未知章节
-ASM_SYN_VERSION = "ASM-SYN-003"  # format_version 不受支持(≠ "1.0")
+ASM_SYN_VERSION = "ASM-SYN-003"  # schema_version/format_version 不受支持(≠ "1.0.0"/"1.0")
 ASM_SYN_FIELD = "ASM-SYN-004"  # 必填字段缺失
 ASM_SYN_TYPE = "ASM-SYN-005"  # 键类型错误(如 params 非 map、delay_steps 非整数、枚举值非法)
+
+# ---------------------------------------------------------------------------
+# ies.assembly 1.0.0 契约(0.7.0):结构 / 资源 / 计算 / 输出 / 产物一致性
+# ---------------------------------------------------------------------------
+ASM_SYN_SCHEMA = "ASM-SYN-006"  # schema 标识无法识别(≠ ies.assembly)
+ASM_SYN_VERSION_PIN = "ASM-SYN-007"  # 引用必须固定精确版本(拒绝 latest/范围版本/未版本化别名)
+ASM_SYN_FORBIDDEN = "ASM-SYN-008"  # 禁止字段(shell/command/executable/函数模块路径/环境变量/凭证)
+ASM_SYN_PATH = "ASM-SYN-009"  # 资源路径非法(绝对路径/.. 逃逸/宿主机路径)
+ASM_RES_INVALID = "ASM-RES-001"  # 资源文件不可读或摘要不一致(不产生可执行产物)
+ASM_CALC_MODE = "ASM-CALC-001"  # calculation.mode 非法
+ASM_CALC_OPTIONS = "ASM-CALC-002"  # calculation.options 非法(未知键/非标量/非有限值)
+ASM_OUTPUT_REF = "ASM-OUT-001"  # outputs 引用未定义设备/端口
+ASM_ART_MISMATCH = "ASM-ART-001"  # 产物一致性校验失败(规范文本/摘要/回执不一致)
+ASM_CONV_UNMAPPABLE = "ASM-CONV-001"  # 旧形态无法映射到 ies.assembly 1.0.0(迁移/导出阻断)
+ASM_INPUT_UNDECLARED = "ASM-INPUT-006"  # 参数未在设备模型声明(ies.assembly 1.0.0: 只允许已声明字段)
 
 # ---------------------------------------------------------------------------
 # 阶段 B:连接合法性(输入对输出、参数性质一致)
@@ -82,6 +99,10 @@ ASM_MESSAGE_KEYS: dict[str, str] = {
     ASM_SYN_VERSION: "ies.diag.asm.syntax.version",
     ASM_SYN_FIELD: "ies.diag.asm.syntax.missing_field",
     ASM_SYN_TYPE: "ies.diag.asm.syntax.bad_type",
+    ASM_SYN_SCHEMA: "ies.diag.asm.syntax.schema_unknown",
+    ASM_SYN_VERSION_PIN: "ies.diag.asm.syntax.version_not_pinned",
+    ASM_SYN_FORBIDDEN: "ies.diag.asm.syntax.forbidden_field",
+    ASM_SYN_PATH: "ies.diag.asm.syntax.path_invalid",
     # edge.*
     ASM_EDGE_BAD_SOURCE: "ies.diag.asm.edge.bad_source",
     ASM_EDGE_BAD_SINK: "ies.diag.asm.edge.bad_sink",
@@ -104,6 +125,18 @@ ASM_MESSAGE_KEYS: dict[str, str] = {
     ASM_INPUT_RANGE: "ies.diag.asm.input.param_range",
     ASM_INPUT_LOAD_DATA: "ies.diag.asm.input.load_no_data",
     ASM_INPUT_DATA_UNIT: "ies.diag.asm.input.data_unit_dim",
+    ASM_INPUT_UNDECLARED: "ies.diag.asm.input.param_undeclared",
+    # res.*
+    ASM_RES_INVALID: "ies.diag.asm.res.invalid",
+    # calc.*
+    ASM_CALC_MODE: "ies.diag.asm.calc.mode",
+    ASM_CALC_OPTIONS: "ies.diag.asm.calc.options",
+    # out.*
+    ASM_OUTPUT_REF: "ies.diag.asm.out.ref_undefined",
+    # artifact.*
+    ASM_ART_MISMATCH: "ies.diag.asm.artifact.mismatch",
+    # conv.*
+    ASM_CONV_UNMAPPABLE: "ies.diag.asm.conv.unmappable",
     # pipe.*
     ASM_PIPE_DELAY_MISSING: "ies.diag.asm.pipe.delay_missing",
     ASM_PIPE_DELAY_RANGE: "ies.diag.asm.pipe.delay_out_of_range",
@@ -131,19 +164,55 @@ ASM_FIX_HINT_KEYS: dict[str, str] = {
 ASM_ALL_CODES: tuple[str, ...] = tuple(ASM_MESSAGE_KEYS)
 
 #: 消息键类别前缀(与 04 §4 登记层级一致)
-ASM_KEY_CATEGORIES: tuple[str, ...] = ("syntax", "edge", "ref", "input", "pipe", "solv", "const")
+ASM_KEY_CATEGORIES: tuple[str, ...] = (
+    "syntax",
+    "edge",
+    "ref",
+    "input",
+    "pipe",
+    "solv",
+    "const",
+    "res",
+    "calc",
+    "out",
+    "artifact",
+    "conv",
+)
 
-# ---------------------------------------------------------------------------
-# 运行期登记(导入即生效;只增不改既有码)
-# ---------------------------------------------------------------------------
-_core_diags.DIAG_MESSAGE_KEYS.update(ASM_MESSAGE_KEYS)
-_core_diags.DIAG_FIX_HINT_KEYS.update(ASM_FIX_HINT_KEYS)
 
-
-def register_asm_codes() -> None:
-    """显式登记 ASM 域码(幂等;模块导入时已自动执行,供测试断言使用)。"""
-    _core_diags.DIAG_MESSAGE_KEYS.update(ASM_MESSAGE_KEYS)
-    _core_diags.DIAG_FIX_HINT_KEYS.update(ASM_FIX_HINT_KEYS)
+def make_asm_diag(
+    code: str,
+    severity: str = SEVERITY_ERROR,
+    *,
+    blocking: bool | None = None,
+    params: Mapping[str, object] | None = None,
+    location: Mapping[str, object] | None = None,
+    ref_ids: Sequence[str] | None = None,
+    source: str = "",
+    trace_id: str = "",
+    project_id: str = "",
+    task_id: str = "",
+) -> Diagnostic:
+    """构造 ASM 域诊断，不依赖或修改 core 的业务消息目录。"""
+    try:
+        message_key = ASM_MESSAGE_KEYS[code]
+        fix_hint_key = ASM_FIX_HINT_KEYS[code]
+    except KeyError as exc:
+        raise ValueError(f"未登记 ASM 诊断码: {code!r}") from exc
+    return _make_diag(
+        code,
+        severity,
+        message_key,
+        fix_hint_key,
+        blocking=blocking,
+        params=params,
+        location=location,
+        ref_ids=ref_ids,
+        source=source,
+        trace_id=trace_id,
+        project_id=project_id,
+        task_id=task_id,
+    )
 
 
 __all__ = [
@@ -152,6 +221,17 @@ __all__ = [
     "ASM_SYN_VERSION",
     "ASM_SYN_FIELD",
     "ASM_SYN_TYPE",
+    "ASM_SYN_SCHEMA",
+    "ASM_SYN_VERSION_PIN",
+    "ASM_SYN_FORBIDDEN",
+    "ASM_SYN_PATH",
+    "ASM_RES_INVALID",
+    "ASM_CALC_MODE",
+    "ASM_CALC_OPTIONS",
+    "ASM_OUTPUT_REF",
+    "ASM_ART_MISMATCH",
+    "ASM_CONV_UNMAPPABLE",
+    "ASM_INPUT_UNDECLARED",
     "ASM_EDGE_BAD_SOURCE",
     "ASM_EDGE_BAD_SINK",
     "ASM_EDGE_CARRIER",
@@ -188,5 +268,5 @@ __all__ = [
     "ASM_FIX_HINT_KEYS",
     "ASM_ALL_CODES",
     "ASM_KEY_CATEGORIES",
-    "register_asm_codes",
+    "make_asm_diag",
 ]

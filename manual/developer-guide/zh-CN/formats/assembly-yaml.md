@@ -79,6 +79,18 @@ extensions: {}
 | `outputs` | 希望发布的序列和指标，不是宿主机输出路径 |
 | `extensions` | 命名空间化扩展 |
 
+`constraints` 为命名映射，条目形态：
+
+```yaml
+constraints:
+  c1:
+    type: ratio      # ratio | capacity | schedule | generic
+    expr: "hp1.electric_in <= 0.8 * grid.electric_out"
+    enabled: true    # 可选
+```
+
+`outputs` 的 `series` 引用 `<device>.<output>`（通常为真实端口），`metrics` 引用 `<scope>.<metric>`（scope 为设备实例或 `system`）；两者保留声明顺序，设备或作用域不存在时校验失败。
+
 ## 引用和版本固定
 
 设备模型、建模命令、生成器、求解器和结果适配器最终都必须固定到精确版本。人工装配文件直接固定设备、生成器和求解器；设备模型再固定所需建模命令。校验回执记录解析后的完整依赖锁。
@@ -163,7 +175,9 @@ source:
 2. `assembly_sha256`：对规范字节计算 SHA-256；
 3. 校验回执：校验器 ID/版本、schema、依赖锁、资源摘要和零阻断诊断。
 
-生成器必须同时验证三者一致。人工修改规范文本、替换资源或变更依赖后，摘要和回执失效，必须重新装配。
+生成器必须同时验证三者一致。人工修改规范文本、替换资源或变更依赖后，摘要和回执失效，必须重新装配。回执只证明输入语义，不包含签发时间、trace 或 task 等运行上下文；任务和快照表单独记录运行审计时间，从而保证相同输入产生逐字节一致的回执。
+
+生产计算下发必须先通过 `validate_project_export` 唯一入口，失败时不得创建任务或快照。成功后，`CalcSnapshot` 持久化规范文本、`assembly_sha256` 与校验回执；旧 `assembly_text` 仅作为历史审计列保留，新快照不再写入。Worker 在加载项目与数据前严格恢复并复验三件套，缺失、版本不匹配、含阻断诊断或摘要被篡改时均拒绝执行。
 
 业务单位在规范装配中继续保持可读且明确；单位兼容在装配阶段证明，向求解器内部单位的实际换算由生成器完成，并记录在 Bundle 证据中。
 
@@ -175,6 +189,14 @@ source:
 - 数值使用唯一有限十进制表示，不依赖本地 locale；
 - 注释、显示空白和 YAML 表示差异不参与语义摘要；
 - 规范化算法 ID 和版本写入回执。
+
+规范化算法标识为 `ies.assembly.canonical@1.0.0`（回执 `canonical_algorithm` 记录
+ID 与版本）。规范文本为 UTF-8/LF 的紧凑 JSON：顶层键序固定
+（schema → schema_version → assembly → time_axis → resources → devices →
+connections → constraints → calculation → outputs → extensions），嵌套映射按
+键名排序，`series`/`metrics` 保留声明顺序；整值浮点与整数同规范文本
+（`800` 与 `800.0` 语义相同），非有限数值确定性拒绝。任何语义变化必须升级
+规范化算法版本并保留历史解释能力。
 
 相同语义必须得到相同摘要。若规范化算法发生语义变化，必须升级其版本并保留历史解释能力。
 

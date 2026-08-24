@@ -39,7 +39,16 @@ ALL_TABLES: tuple[str, ...] = (
 
 #: 关键列抽查: 表名 -> 必须存在的列(取文档有代表性的列, 含类型敏感列)
 KEY_COLUMNS: dict[str, set[str]] = {
-    "users": {"id", "username", "display_name", "email", "status", "credential_version", "is_system", "auth_subject"},
+    "users": {
+        "id",
+        "username",
+        "display_name",
+        "email",
+        "status",
+        "credential_version",
+        "is_system",
+        "auth_subject",
+    },
     "roles": {"code", "name", "is_system"},
     "user_roles": {"user_id", "role_id", "granted_by", "granted_at", "revoked_at"},
     "credentials": {"user_id", "credential_type", "secret_hash", "strength_score", "requires_change"},
@@ -67,7 +76,8 @@ KEY_COLUMNS: dict[str, set[str]] = {
         "project_id", "name", "params", "variables", "min_irr", "algorithm", "random_seed", "version"
     },
     "calc_snapshots": {
-        "project_version_id", "dataset_version_ids", "calc_config_snapshot", "random_seed", "content_hash"
+        "project_version_id", "dataset_version_ids", "calc_config_snapshot", "random_seed",
+        "content_hash", "canonical_assembly_text", "assembly_sha256", "assembly_receipt",
     },
     "tasks": {"project_id", "type", "status", "business_outcome", "idempotency_key", "max_attempts"},
     "task_attempts": {"task_id", "attempt_no", "worker_id", "status", "stop_reason"},

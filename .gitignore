@@ -28,3 +28,7 @@ AGENTS.md
 
 # uv(仅测试 agent 生成, 项目不用 uv 管理依赖)
 uv.lock
+
+# 装配契约随包发布的样例数据，不属于运行时 data/ 目录
+!backend/iesplan/assembly/samples/data/
+!backend/iesplan/assembly/samples/data/*.csv

@@ -1,0 +1,98 @@
+schema: ies.assembly
+schema_version: "1.0.0"
+
+assembly:
+  id: campus_demo
+  name: 园区最小算例
+
+time_axis:
+  start: "2025-01-01T00:00:00+08:00"
+  end: "2025-01-02T00:00:00+08:00"
+  resolution: 1h
+  endpoint: left_closed_right_open
+
+resources:
+  datasets:
+    campus_load:
+      source:
+        kind: relative_file
+        path: data/campus_load.data.csv
+    campus_heat:
+      source:
+        kind: relative_file
+        path: data/campus_heat.data.csv
+
+devices:
+  grid:
+    model: ies.device.grid_connection@1.2.0
+    parameters:
+      max_import_power_kw: 800
+      max_export_power_kw: 200
+  pv1:
+    model: ies.device.pv@1.4.0
+    parameters:
+      rated_capacity_kwp: 300
+  bat1:
+    model: ies.device.battery@1.5.0
+    parameters:
+      capacity_kwh: 400
+      rated_power_kw: 200
+  hp1:
+    model: ies.device.heat_pump@1.3.0
+    parameters:
+      rated_heat_kw: 600
+      cop: 3.5
+      cop_profile: 0
+  elec_load:
+    model: ies.device.electric_load@1.2.0
+    parameters:
+      peak_power_kw: 100
+    data:
+      e_load:
+        dataset: campus_load
+        column: e_load
+  heat_load:
+    model: ies.device.heat_load@1.1.0
+    data:
+      h_load:
+        dataset: campus_heat
+        column: h_load
+
+connections:
+  e_grid_pv:
+    from: grid.electric_out
+    to: pv1.electric_out
+  e_bat:
+    from: bat1.electric
+    to: grid.electric_out
+  e_hp_elec:
+    from: grid.electric_out
+    to: hp1.electric_in
+  e_load:
+    from: grid.electric_out
+    to: elec_load.electric_in
+  e_heat:
+    from: hp1.heat_out
+    to: heat_load.heat_in
+
+constraints:
+  c1:
+    type: ratio
+    expr: "hp1.electric_in <= 0.8 * grid.electric_out"
+
+calculation:
+  mode: fixed_operation
+  generator: acme.generator.highs_milp@1.0.0
+  solver: ies.solver.highs@1.7.2
+  options:
+    relative_gap: 0.0001
+    time_limit_seconds: 600
+  random_seed: 42
+
+outputs:
+  series:
+    - grid.electric_out
+  metrics:
+    - system.total_energy_cost
+
+extensions: {}

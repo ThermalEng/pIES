@@ -38,9 +38,10 @@ from iesplan.assembly.diags import (
     ASM_REF_PORT_DECL,
     ASM_REF_PORT_UNDEF,
 )
+from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.assembly.parser import PORT_DECL_OVERRIDE_FIELDS
 from iesplan.assembly.schema import AssemblySpec
-from iesplan.core.diagnostics import Diagnostic, make_diag
+from iesplan.core.diagnostics import Diagnostic
 
 
 def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:

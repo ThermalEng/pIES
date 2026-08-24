@@ -13,8 +13,8 @@ import pandas as pd
 import pytest
 from pytest import approx
 
+from iesplan.core import yamlmini
 from iesplan.core.errors import AppError, NotFoundError
-from iesplan.devices import yamlmini
 from iesplan.devices.loader import (
     DEFAULT_CATALOG_DIR,
     discover_device_dirs,
@@ -317,7 +317,13 @@ class TestDeviceYamlParse:
         # 新格式 data_inputs 无 resolution 字段, 结构非法由 schema 拒绝
         text = _BASE.replace(
             "data_inputs: {}\n",
-            "data_inputs:\n  e_load:\n    value_type: number\n    quantity: power\n    unit: kW\n    required: true\n    resolution: 5h\n",
+            "data_inputs:\n"
+            "  e_load:\n"
+            "    value_type: number\n"
+            "    quantity: power\n"
+            "    unit: kW\n"
+            "    required: true\n"
+            "    resolution: 5h\n",
         )
         with pytest.raises(AppError):
             load_yaml(_write(tmp_path, "bad.yaml", text))

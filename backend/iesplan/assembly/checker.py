@@ -1,8 +1,8 @@
 """装配检查器编排:阶段 B(连接合法性)→ C(模型可解性)→ D(整体可解性)→ 约束表达式。
 
-入口统一返回 CheckResult(diagnostics 全量收集,不做短路,一次检查给出完整清单);
-check_graph_inputs 是任务装配集成点(tasks.assemble_snapshot 调用):以项目版本
-content(含 model 图)为输入,先 build_assembly 再 check_assembly。
+入口统一返回 CheckResult(diagnostics 全量收集,不做短路,一次检查给出完整清单)。
+check_graph_inputs 保留为旧 AssemblySpec 格式的兼容检查入口；生产任务下发已收敛到
+validator.validate_project_export，并只消费 ValidatedAssemblyArtifact。
 
 端口解析(注册表推导 + 显式声明覆盖)在本模块完成并缓存到 CheckContext.resolved_ports:
 - 设备端口:按设备类型业务方向表(services/model.py 同约定)推导,载体→(物理量, 标准单位);
@@ -17,18 +17,19 @@ import re
 from dataclasses import dataclass, field
 
 from iesplan.assembly.diags import ASM_CONST_DIM, ASM_CONST_SYNTAX, ASM_CONST_UNDEF
+from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.assembly.schema import (
     CARRIER_DEFAULT_QUANTITY_UNIT,
     NATURE_DELAYED,
     NATURE_INSTANT,
+    QUANTITY_SIGNAL,
     AssemblyDevice,
     AssemblyPipeline,
     AssemblyPort,
     AssemblySpec,
-    QUANTITY_SIGNAL,
 )
 from iesplan.core import units
-from iesplan.core.diagnostics import Diagnostic, SEVERITY_BLOCKING, SEVERITY_ERROR, make_diag
+from iesplan.core.diagnostics import SEVERITY_BLOCKING, SEVERITY_ERROR, Diagnostic
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.core.expression import (
     Dimensions,
@@ -142,10 +143,10 @@ class CheckResult:
 
 
 class AssemblyCheckError(AppError):
-    """装配检查未通过(存在 error/blocking 级诊断),供任务装配闸门抛 HTTP 422。
+    """旧 AssemblySpec 检查未通过（存在 error/blocking 级诊断）。
 
-    携带完整诊断列表;tasks.assemble_snapshot 调用 check_graph_inputs 后,
-    结果不为 ok 时抛本异常并写入任务 diagnostics。
+    携带完整诊断列表，供仍显式调用 ``check_graph_inputs`` 的兼容入口使用；
+    生产任务闸门使用 ``AssemblyValidationError``，不再签发本错误对应的旧产物。
     """
 
     code = "ASM-CHECK-FAILED"
@@ -506,7 +507,6 @@ def _defined_symbols(spec: AssemblySpec, ctx: CheckContext) -> dict[str, Dimensi
     symbols: dict[str, Dimensions] = {}
     for ref, port in resolved.items():
         symbols[ref] = _unit_dims(port.unit, port.quantity)
-    registry = ctx.registry or _default_registry()
     for device in spec.devices:
         type_spec, _ = resolve_model(ctx, device.model)
         if type_spec is None:
@@ -644,11 +644,12 @@ def check_graph_inputs(
     datasets: dict[int, dict] | None = None,
     ctx: CheckContext | None = None,
 ) -> CheckResult:
-    """任务装配集成点:内容 → build_assembly → check_assembly。
+    """旧项目内容兼容检查：content → build_assembly → check_assembly。
 
-    供 tasks.assemble_snapshot 在 content_hash 去重之后调用;
-    返回结果中 error 级诊断即阻断任务下发(写入任务 diagnostics)。
-    content 结构:{"model": {devices, ports, connections}, "calc_config": {...}} 或扁平图结构。
+    新生产计算路径不得以此结果作为持久输入；应调用
+    ``validator.validate_project_export`` 并消费 ``ValidatedAssemblyArtifact``。
+    content 结构：{"model": {devices, ports, connections}, "calc_config": {...}}
+    或扁平图结构。
     """
     from iesplan.assembly.builder import build_assembly
 

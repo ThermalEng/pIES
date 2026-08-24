@@ -19,6 +19,7 @@ os.environ.setdefault("IESPLAN_QUEUE", "memory")
 
 from sqlalchemy.orm import Session  # noqa: E402
 
+from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, Task  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
@@ -154,6 +155,13 @@ def setup_environment(
 
     snapshot = None
     if task_type in COMPUTE_TYPES:
+        canonical_text = '{"schema":"ies.assembly","schema_version":"1.0.0"}\n'
+        assembly_digest = sha256(canonical_text.encode("utf-8")).hexdigest()
+        artifact = ValidatedAssemblyArtifact(
+            canonical_text=canonical_text,
+            assembly_sha256=assembly_digest,
+            receipt=ValidationReceipt(assembly_sha256=assembly_digest),
+        ).verify_or_raise()
         snapshot = CalcSnapshot(
             project_version_id=version.id,
             dataset_version_ids=[dver_id] if dver_id is not None else [],
@@ -164,6 +172,9 @@ def setup_environment(
             random_seed=int(config.get("seed", 42)) if config else 42,
             tolerances={},
             content_hash=sha256(f"snapshot-{task_type}".encode()).hexdigest(),
+            canonical_assembly_text=artifact.canonical_text,
+            assembly_sha256=artifact.assembly_sha256,
+            assembly_receipt=artifact.receipt.to_dict(),
             created_by=user.id,
         )
         db.add(snapshot)

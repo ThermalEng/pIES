@@ -3,7 +3,8 @@
 公开边界:
 - 外部模块仅允许消费 ``list_device_descriptors`` / ``get_device_descriptor`` /
   ``DeviceModelDescriptor`` / ``ParameterSpec``（由 core/contracts 转发）/
-  ``get_profile_columns``（modeling 按 type_id 取标准 csv 数据）；
+  ``get_profile_columns``（modeling 按 type_id 取标准 csv 数据）/
+  ``data_inputs_from_descriptor``（跨域只读数据输入声明）；
 - 注册表生命周期入口 ``init_registry``（组合根使用）；
 - 内部模块（loader/pricing/registry/profile/parser/contracts）不下划线符号、
   路径推导、价格解析实现不再由 facade 转出。
@@ -20,6 +21,7 @@
 
 from iesplan.core.contracts import ParameterSpec
 from iesplan.core.errors import AppError
+from iesplan.devices.datacontract import data_inputs_from_descriptor
 from iesplan.devices.loader import DEFAULT_CATALOG_DIR
 from iesplan.devices.profile import load_profile_columns
 from iesplan.devices.registry import init_registry
@@ -78,5 +80,6 @@ __all__ = [
     "list_device_descriptors",
     "get_device_descriptor",
     "get_profile_columns",
+    "data_inputs_from_descriptor",
     "load_profile_columns",
 ]

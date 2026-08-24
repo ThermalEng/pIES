@@ -27,6 +27,7 @@ from iesplan.assembly.diags import (
     ASM_SYN_TYPE,
     ASM_SYN_VERSION,
 )
+from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.assembly.schema import (
     CARRIERS,
     DIRECTIONS,
@@ -45,7 +46,7 @@ from iesplan.assembly.schema import (
     DataRef,
     TimeAxisRef,
 )
-from iesplan.core.diagnostics import Diagnostic, SEVERITY_ERROR, make_diag
+from iesplan.core.diagnostics import SEVERITY_ERROR, Diagnostic
 
 #: 顶层允许章节
 _TOP_SECTIONS: tuple[str, ...] = (
@@ -404,7 +405,7 @@ def _parse_mapping(cursor: _LineCursor, min_indent: int) -> dict[str, Any]:
 def _load_yaml(text: str) -> dict[str, Any]:
     """YAML 子集文本 → 顶层映射(语法错误抛 _YamlParseError)。"""
     raw_lines: list[tuple[int, str]] = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
+    for raw in text.splitlines():
         stripped = raw.rstrip()
         if not stripped.strip() or stripped.lstrip().startswith("#"):
             continue

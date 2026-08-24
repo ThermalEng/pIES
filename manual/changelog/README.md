@@ -2,11 +2,25 @@
 
 本页记录已经实现的用户可感知行为、公共设计与迁移要求。新版本在上；尚未实现的开发顺序单独见 [Roadmap](roadmap.md)。
 
-产品使用 `MAJOR.MINOR.PATCH` 三段式版本。当前产品版本为 `0.1.0`，当前开发目标为 `0.2.0`，首个正式稳定版本为 `1.0.0`。完整规则见[版本化与发布](../developer-guide/zh-CN/versioning-and-release.md)。
+产品使用 `MAJOR.MINOR.PATCH` 三段式版本。当前产品版本为 `0.1.0`，当前开发目标为 `0.8.0`，首个正式稳定版本为 `1.0.0`。完整规则见[版本化与发布](../developer-guide/zh-CN/versioning-and-release.md)。
 
 `Unreleased` 只保存已经完成并通过相应验收、但尚未正式发布的变化。一项工作写入这里时必须从 Roadmap 删除；部分完成只迁移已完成部分。这里不收录愿望、待办、目标状态或预计完成版本。
 
 ## Unreleased
+
+### 规范装配产物(`ies.assembly` 1.0.0)
+
+- 发布 `ies.assembly` `1.0.0` 机器可读 schema(`backend/iesplan/assembly/schema/assembly-1.0.0.schema.json`)：顶层 `schema`/`schema_version`/`assembly`/`time_axis`/`resources`/`devices`/`connections`/`constraints`/`calculation`/`outputs`/`extensions` 各节均必需（无内容写空 `{}`/`[]`），未知核心字段拒绝。
+- 唯一规范化器(`iesplan.assembly.canonicalizer`，算法 `ies.assembly.canonical@1.0.0`)：固定顶层键序 + 嵌套键排序、时间统一换算为带 `Z` 的 UTC、`relative_file` 解析为内容寻址对象、数值唯一有限表示（整值浮点与整数同文本）、非有限值拒绝；规范文本为紧凑 JSON + LF，对规范字节计算 SHA-256。相同语义输入产生相同规范文本与摘要。
+- 合法/非法手写样例(`backend/iesplan/assembly/samples/`)：合法样例覆盖全部节与相对文件资源；非法样例分别覆盖 schema 标识错误、未固定精确版本、宿主机路径、可执行字段、非法计算模式。
+- 新增结构诊断码：`ASM-SYN-006`(schema 标识无法识别)、`ASM-SYN-007`(引用未固定精确版本，拒绝 latest/范围版本/未版本化别名)、`ASM-SYN-008`(禁止字段：shell/command/executable/函数模块路径/环境变量/凭证)、`ASM-SYN-009`(资源路径非法)；以及 `ASM-RES-001`/`ASM-CALC-001`/`ASM-CALC-002`/`ASM-OUT-001`/`ASM-ART-001`/`ASM-CONV-001`/`ASM-INPUT-006`。
+- 成功产物为不可变 `ValidatedAssemblyArtifact`（规范文本 + `assembly_sha256` + 校验回执 `ValidationReceipt`）：回执记录校验器 ID/版本、schema、规范化算法 ID/版本、依赖锁、资源摘要与零阻断诊断；`verify()` 重算规范字节摘要核对三件套一致，不一致抛 `AssemblyValidationError`(422) 阻断计算。
+- 统一校验入口(`iesplan.assembly.validator`)：四阶段校验（结构 → 模型与数据 → 图与系统 → 计算兼容），手写 `validate_assembly_text` 与 GUI 项目导出 `validate_project_export` 收敛到同一入口；成功只签发 `ValidatedAssemblyArtifact`，失败返回完整诊断列表且不产生任何 artifact。
+- GUI 项目导出构造器(`iesplan.assembly.builder10`)：项目内容（设备/端口/连接/数据集绑定/计算配置）映射到 `ies.assembly` `1.0.0` 文档；`loss_rate > 0` 的连接自动包裹为 `ies.device.transport_pipe@<version>` 设备实例；计算字段显式（`mode`/`generator`/`solver`/`options`/`random_seed`），旧形态 `algorithm`/`tolerances` 通过推导与映射（legacy 求解器 `ies.solver.highs@1.7.2`）保持显式；`outputs` 派生为空列表（应用层可补）。
+- 旧形态一次性迁移(`iesplan.assembly.migration`)：`FORMAT_VERSION = "1.0"` 的 `AssemblySpec` / 装配文本 → `ies.assembly` `1.0.0` 文档 + 迁移回执（`migration`/`from_format`/`to_schema`/`old_sha256`/`new_sha256`/`transformations`/`ok`/`diagnostics`）；迁移产物经同一 `validate_assembly_doc` 入口验证。旧形态无法唯一映射的字段（无模型精确版本、缺 `solver`、数据集缺 `sha256`/`media_type` 等）产生 `ASM-CONV-001` 阻断诊断，回执 `ok=False`；不发布半迁移状态。
+- 生产计算入口收敛：任务下发在创建 `Task` / `CalcSnapshot` 前同步调用唯一 `validate_project_export` 闸门；校验失败返回阻断诊断且不留下任务或快照，不再旁路调用旧 `check_graph_inputs`。
+- 持久输入收敛：`CalcSnapshot` 写入规范文本、`assembly_sha256` 和确定性校验回执三件套，旧 `assembly_text` 仅保留为历史审计列且新快照不再写入；Worker 执行前严格恢复并复验三件套，缺失、版本不匹配、含阻断诊断或摘要被篡改均拒绝执行。项目证据包同步导出三件套。
+- 迁移边界：迁移后不再以可变 `AssemblySpec`/`CheckResult` 作为后续计算的持久输入；`MigrationResult.doc` 是不可变 `ies.assembly` `1.0.0` 文档，可经统一入口规范化为 `ValidatedAssemblyArtifact`。ASM 诊断码静态登记于核心注册表，装配模块不再在导入时修改核心状态。
 
 ### 设备模型与建模命令契约
 

@@ -25,15 +25,6 @@ from iesplan.assembly import (
     dumps_assembly,
     parse_assembly,
 )
-
-# RR-P2-05: 装配检查消费运行期 YAML 注册表(无静态回退), 测试需先初始化
-@pytest.fixture(autouse=True)
-def _init_device_registry():
-    """每例前初始化运行期设备注册表(内置 catalog), 保证装配检查可用。"""
-    from iesplan.devices import init_registry
-
-    init_registry()
-    yield
 from iesplan.assembly.diags import (
     ASM_ALL_CODES,
     ASM_CONST_DIM,
@@ -48,11 +39,13 @@ from iesplan.assembly.diags import (
     ASM_EDGE_SELF_LOOP,
     ASM_EDGE_UNIT_DIM,
     ASM_EDGE_ZERO_CAP,
+    ASM_FIX_HINT_KEYS,
     ASM_INPUT_DATA_UNIT,
     ASM_INPUT_LOAD_DATA,
     ASM_INPUT_PARAM,
     ASM_INPUT_RANGE,
     ASM_INPUT_UNFED,
+    ASM_MESSAGE_KEYS,
     ASM_PIPE_DELAY_MISSING,
     ASM_PIPE_DELAY_RANGE,
     ASM_PIPE_NOT_PATH,
@@ -73,10 +66,22 @@ from iesplan.assembly.diags import (
     ASM_SYN_SECTION,
     ASM_SYN_TYPE,
     ASM_SYN_VERSION,
+    make_asm_diag,
 )
 from iesplan.assembly.schema import AssemblySpec
-from iesplan.core.diagnostics import DIAG_FIX_HINT_KEYS, DIAG_MESSAGE_KEYS, make_diag
-from iesplan.devices import DeviceModelDescriptor as DeviceTypeSpec, list_device_descriptors as list_device_types
+from iesplan.core.diagnostics import DIAG_FIX_HINT_KEYS, DIAG_MESSAGE_KEYS, NEW_DIAG_CODES
+from iesplan.devices import DeviceModelDescriptor as DeviceTypeSpec
+from iesplan.devices import list_device_descriptors as list_device_types
+
+
+# RR-P2-05: 装配检查消费运行期 YAML 注册表(无静态回退), 测试需先初始化
+@pytest.fixture(autouse=True)
+def _init_device_registry():
+    """每例前初始化运行期设备注册表(内置 catalog), 保证装配检查可用。"""
+    from iesplan.devices import init_registry
+
+    init_registry()
+    yield
 
 # ---------------------------------------------------------------------------
 # 通用夹具与辅助
@@ -302,20 +307,23 @@ HAPPY_TEXT = textwrap.dedent(
 
 
 class TestDiagRegistration:
-    def test_asm_codes_registered_in_core_directory(self):
+    def test_asm_codes_statically_registered_without_core_mutation(self):
         for code in ASM_ALL_CODES:
-            assert code in DIAG_MESSAGE_KEYS, f"{code} 未登记消息键"
-            assert code in DIAG_FIX_HINT_KEYS, f"{code} 未登记修复键"
+            assert code in NEW_DIAG_CODES, f"{code} 未在 core.NEW_DIAG_CODES 静态登记"
+            assert code not in DIAG_MESSAGE_KEYS, f"{code} 不得通过导入副作用改写 core 消息目录"
+            assert code not in DIAG_FIX_HINT_KEYS, f"{code} 不得通过导入副作用改写 core 修复目录"
+            assert code in ASM_MESSAGE_KEYS, f"{code} 未登记 ASM 消息键"
+            assert code in ASM_FIX_HINT_KEYS, f"{code} 未登记 ASM 修复键"
 
     def test_message_key_namespace(self):
         for code in ASM_ALL_CODES:
-            key = DIAG_MESSAGE_KEYS[code]
+            key = ASM_MESSAGE_KEYS[code]
             assert key.startswith("ies.diag.asm."), f"{code} → {key}"
-            fix = DIAG_FIX_HINT_KEYS[code]
+            fix = ASM_FIX_HINT_KEYS[code]
             assert fix.startswith("ies.fix.asm."), f"{code} → {fix}"
 
     def test_make_diag_accepts_asm_codes(self):
-        d = make_diag(ASM_SOLV_NO_SOURCE, params={"carrier": "heat"})
+        d = make_asm_diag(ASM_SOLV_NO_SOURCE, params={"carrier": "heat"})
         assert d.message_key == "ies.diag.asm.solv.no_source"
         assert d.fix_hint_key == "ies.fix.asm.solv.no_source"
         assert d.severity == "error"
@@ -979,8 +987,6 @@ class TestBuilder:
         """High-3 修复: YAML 注册表已初始化时, 显式声明 capacity 仍生效
         (之前 YAML 端口路径提前 return, 覆盖成为死代码)。"""
         import iesplan.assembly.checker as checker_mod
-
-        registry_initialized = {"specs": None}
 
         def fake_yaml_ports(device, type_id):
             # 模拟 YAML 注册表返回端口(注册表已初始化场景)

@@ -22,8 +22,8 @@ from __future__ import annotations
 
 from iesplan.assembly.checker import (
     _PEAK_PARAM_BY_LOAD,
-    _to_watts,
     BusSummary,
+    _to_watts,
     ensure_ports,
     resolve_model,
 )
@@ -37,9 +37,9 @@ from iesplan.assembly.diags import (
     ASM_SOLV_ORPHAN,
     ASM_SOLV_OVER_CONSTRAINED,
 )
+from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.assembly.schema import AssemblySpec
-from iesplan.core.diagnostics import Diagnostic, make_diag
-
+from iesplan.core.diagnostics import Diagnostic
 
 # ---------------------------------------------------------------------------
 # 母线构造

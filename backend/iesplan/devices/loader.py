@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from iesplan.core import yamlmini as _yamlmini
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     SYS_CFG_INVALID,
@@ -17,7 +18,6 @@ from iesplan.core.diagnostics import (
     make_diag,
 )
 from iesplan.core.errors import AppError
-from iesplan.devices import yamlmini as _yamlmini
 from iesplan.devices.pricing import PriceBook, resolve_param_default
 from iesplan.devices.profile import read_standard_csv, validate_series_csv
 from iesplan.devices.spec import (

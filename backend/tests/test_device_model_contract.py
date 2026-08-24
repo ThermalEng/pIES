@@ -9,12 +9,12 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
 
-from iesplan.core.errors import AppError
-from iesplan.devices import yamlmini
+from iesplan.core import yamlmini
 from iesplan.devices.contracts import (
     SCHEMA_ID,
     SCHEMA_VERSION,
@@ -184,7 +184,7 @@ class TestCanonicalization:
         # 嵌套值对象 frozen
         assert doc.device.names is not None
         # dataclass frozen
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             doc.device.id = "x"  # type: ignore[misc]
 
     def test_document_deeply_immutable(self):
@@ -288,7 +288,7 @@ function:
         # 端口方向保留
         assert doc.ports["electric_out"].direction == "out"
         # model_commands 全部引用稳定命令 ID
-        for cap, ref in doc.model_commands.items():
+        for _cap, ref in doc.model_commands.items():
             assert "@" in ref
             assert "iesplan" not in ref and ".py" not in ref
 

@@ -25,8 +25,9 @@ from iesplan.assembly.diags import (
     ASM_EDGE_UNIT_DIM,
     ASM_EDGE_ZERO_CAP,
 )
+from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.assembly.schema import AssemblySpec
-from iesplan.core.diagnostics import Diagnostic, make_diag
+from iesplan.core.diagnostics import Diagnostic
 
 OUTPUT_DIRECTIONS = ("out", "bidirectional")
 INPUT_DIRECTIONS = ("in", "bidirectional")
