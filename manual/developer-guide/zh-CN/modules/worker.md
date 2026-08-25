@@ -21,6 +21,8 @@ Worker 负责“可靠执行”，领域模块负责“怎样计算”。
 
 模块不修改项目草稿、不补快照缺失输入、不选择最新数据、不实现设备公式，也不绕过 application/result 的写入资格检查。
 
+用户算法插件是特例化执行载荷，不是 Worker 进程插件。普通 Worker 固定插件包与环境摘要，仍依次调用通用沙箱 GeneratorProvider、SolverRuntime/ExecutorProvider 和 ResultAdapterProvider；这些 provider 通过公开内部协议分阶段调用独立 `plugin_runner`。Worker 不得把 ZIP 解压到自身代码目录、加入 `sys.path`、import 入口或向 runner 传递数据库/对象存储凭证。
+
 ## 输入
 
 | 输入 | 进入条件 |
@@ -90,6 +92,7 @@ ExecutionReceipt + 原始输出
 - Worker 不解释装配字段、不拼命令字符串、不根据 solver 名称添加分支；
 - 每个 attempt 的 Solver Bundle、ExecutionReceipt 和原始输出都进入证据链；
 - 诊断和日志不得包含凭证、宿主机路径或敏感原始数据。
+- 用户插件 attempt 还必须固定包摘要、依赖锁、runner/runtime 摘要、实际资源限制和隔离执行回执；runner 失联按明确可重试策略处理，不能在普通 Worker 内降级执行。
 
 ## 完成标准
 

@@ -13,10 +13,11 @@
 5. [领域模型与追溯链](domain-model.md)：项目、数据、配置、任务、结果和对象生命周期；
 6. [公共契约](contracts.md)：HTTP、数据类型、单位、时间、诊断和异步语义；
 7. [扩展体系](extensions.md)：设备、建模命令、生成器、运行时、存储和数据 provider；
-8. [前端与帮助中心](frontend.md)：前端输入输出、状态、GUI 开发流程与正式文档；
-9. [部署与运行](deployment.md)：Docker 部署、安全、健康、备份和恢复；
-10. [开发、测试与贡献](development.md)：变更流程、测试层次和完成标准；
-11. [版本化与发布](versioning-and-release.md)：三段式版本、变更日志和发布门禁。
+8. [模型与算法](customization-center.md)：模型库、算法插件、共享园地、隔离执行与业务选择边界；
+9. [前端与帮助中心](frontend.md)：前端输入输出、状态、GUI 开发流程与正式文档；
+10. [部署与运行](deployment.md)：Docker 部署、安全、健康、备份和恢复；
+11. [开发、测试与贡献](development.md)：变更流程、测试层次和完成标准；
+12. [版本化与发布](versioning-and-release.md)：三段式版本、变更日志和发布门禁。
 
 ## 按任务进入
 
@@ -40,6 +41,7 @@
 | 后台任务、租约与结果提交 | [Worker](modules/worker.md) |
 | repository、数据库约束或 migration | [持久化](modules/persistence.md) |
 | 页面、表单、状态或帮助中心 | [前端与帮助中心](frontend.md) |
+| 用户自定义模型、算法插件、共享安装或选择 | [模型与算法](customization-center.md)与[AI 开发功能要求](ai-development/customization-center-requirements.md) |
 
 ## 使用原则
 

@@ -66,6 +66,9 @@
 | results | 证据、评估、候选选择与历史解释 | 固定来源的结果视图 |
 | exports | 报告/项目包任务、对象引用与下载授权 | 导出资源 |
 | operations | 模块健康、容量、备份和维护协调 | 聚合运维状态 |
+| customizations | 模型/插件草稿与版本、共享申请、逻辑安装、停用和可选择目录 | 用户模型/算法目录与共享状态 |
+
+`customizations` 只拥有用户目录和生命周期用例。设备 YAML 的语义校验调用 devices 公开门面，算法插件 contract 与自检调用 computation/runner 公开能力，字节和引用调用 storage；不得在应用层复制这些规则。共享园地安装只创建 `CatalogInstallation` 与对象 owner 引用，不复制底层内容。
 
 ## 开发一个新用例
 

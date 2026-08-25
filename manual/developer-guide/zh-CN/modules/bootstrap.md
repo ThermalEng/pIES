@@ -22,6 +22,8 @@
 
 组合根不实现业务规则，不读取模块私有注册表，不把各模块注册项合并成一个全局表，也不修改业务数据来“修复”启动。
 
+用户算法包不作为启动 provider 候选。组合根只注册受信任的通用沙箱 GeneratorProvider、ExecutorProvider、ResultAdapterProvider 和 `plugin_runner` 客户端，并验证其协议版本、Python runtime、隔离能力和最小自检；具体用户包由任务快照按摘要传递。这样可以在运行期增加用户目录内容，同时不热加载 API 或 Worker 模块，也不改变标准计算链。
+
 ## 输入与输出
 
 | 输入 | 要求 |

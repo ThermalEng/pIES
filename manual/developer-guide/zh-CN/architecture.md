@@ -119,6 +119,8 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 | [api](modules/api.md) | HTTP DTO、认证依赖、状态码和错误适配 | ORM 查询和领域计算 |
 | [worker](modules/worker.md) | 领取、租约、执行、重试和提交结果 | 缺失命令时降级运行 |
 
+用户模型和算法插件不是新的全局 provider 注册表。各领域模块仍分别拥有设备模型、生成器、执行器和结果 contract；`application/customizations` 只编排用户目录、修订、共享申请、引用安装和可用性查询。组合根只注册通用的沙箱 generator、executor 和 result adapter；用户算法代码作为不可变任务载荷交给其隔离 runner，不能被 API 或普通 Worker import。完整边界见[模型与算法](customization-center.md)。
+
 ## 依赖方向
 
 ```text
@@ -151,6 +153,8 @@ devices · modeling · assembly · computation · finance · analysis · storage
 8. 新增的是财务口径或结果比较吗？分别进入 finance 或 analysis；
 9. 新增的是一次跨模块用户动作吗？由 application 编排；
 10. HTTP、后台执行和页面只分别适配已有用例、任务 contract 和公开 DTO。
+
+网页参数配置、在线 YAML 编辑和 YAML 上传必须汇合为同一个规范设备模型版本。算法插件 ZIP 可以在运行期进入用户目录，但只能作为内容寻址的任务载荷由通用隔离运行器执行；这不是把用户模块加入 API/Worker 的 Python 环境或模块注册表。
 
 若同一条业务规则需要在多个模块复制，先确定唯一所有者，其他模块通过 contract 消费；不要维护同步清单。
 

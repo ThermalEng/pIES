@@ -52,11 +52,15 @@ docker compose up -d --build
 
 Compose 服务承担不同职责：Web 提供静态前端，backend 处理同步 HTTP，compute/I/O Worker 执行相应任务，PostgreSQL 保存权威事实，Redis 保存可重建队列与进度。某个服务能够启动，不代表整体已经 ready。
 
+实现“算法插件”后，Compose 还必须提供独立 `plugin_runner` 服务。普通 Worker 只发送固定包摘要、输入摘要、租约上下文和资源限制，不向用户插件解释器暴露 Docker Socket、数据库、`./data`、仓库目录或业务秘密。runner 使用只读根文件系统、非 root 身份、临时工作目录和默认断网策略；依赖只从构建阶段批准的离线来源取得。具体 contract 见[模型与算法](customization-center.md)和[算法插件包](formats/algorithm-plugin-package.md)。
+
 ## Solver 执行隔离
 
 计算 Worker 的 SolverRuntime 必须使用部署批准的 ExecutorProvider。部署配置负责把稳定 executable ID 映射到固定 solver 镜像或二进制，并声明参数/环境 allowlist、CPU、内存、运行时间、文件大小、进程数和网络策略；这些宿主机细节不得写入装配 YAML 或 Solver Bundle。
 
 普通 solver 默认断网，运行身份不能访问业务数据库、对象存储凭证和仓库工作区。每个 attempt 使用独立可写目录，输入只读，输出只允许 manifest 声明的相对路径。取消、超时和租约失效后必须终止并回收完整进程组。
+
+用户算法插件使用比内置 solver 更严格的隔离配置。Docker 中的普通 Worker 不得通过挂载 `/var/run/docker.sock` 动态创建容器；隔离由部署时已配置的 `plugin_runner`/sandbox adapter 提供。若本地 Compose 与生产平台采用不同隔离实现，两者必须通过同一内部任务、环境身份和执行回执契约。
 
 readiness 至少核验 executor 隔离能力、solver 精确版本和最小自检 Bundle；不能仅因宿主机存在同名命令就视为可用。真实 solver 的生成/执行集成测试同样只在 Docker 中运行。
 
@@ -112,6 +116,7 @@ readiness 至少核验 executor 隔离能力、solver 精确版本和最小自�
 - 新环境只依赖 Docker 和受控配置即可启动；
 - 实例展示实际产品与 provider 版本；
 - compute Worker 能展示并自检实际 generator/executor/solver/result adapter 版本与隔离能力；
+- plugin runner 能展示 runner contract、Python runtime 和 sandbox 能力，并在隔离不满足时拒绝用户插件任务；
 - 必需依赖失败时不进入 ready；
 - 备份能同时恢复数据库与对象，并通过摘要核对；
 - 升级、回滚和故障演练都有可重复步骤；

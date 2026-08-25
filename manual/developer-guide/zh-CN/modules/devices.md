@@ -31,6 +31,8 @@
 
 无论 provider 如何发现文件，进入目录前都必须符合相同设备模型 schema；目录路径、远端服务和包入口只是实现选择，不属于其他模块可依赖的输入方式。时序样例使用[设备数据 CSV](../formats/device-data-csv.md)。
 
+用户“模型库”的参数配置、在线 YAML 编辑和 YAML 上传都必须调用本模块同一个安全解析、校验、规范化和 descriptor 入口。用户目录和共享审批不属于 devices；但模型能否发布、是否可用于装配的语义结论必须由 devices 公开门面给出，不能由 application 或前端复制校验。
+
 ## 输出
 
 主要输出是不可变 `DeviceDescriptor` 集合。每个描述至少保证：
