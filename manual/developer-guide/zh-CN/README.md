@@ -13,7 +13,7 @@
 5. [领域模型与追溯链](domain-model.md)：项目、数据、配置、任务、结果和对象生命周期；
 6. [公共契约](contracts.md)：HTTP、数据类型、单位、时间、诊断和异步语义；
 7. [扩展体系](extensions.md)：设备、建模命令、生成器、运行时、存储和数据 provider；
-8. [模型与算法](customization-center.md)：模型库、算法插件、共享园地、隔离执行与业务选择边界；
+8. [模型与算法](customization-center.md)：外部模型/插件的文件交付、版本、共享、安装和选择规则；
 9. [前端与帮助中心](frontend.md)：前端输入输出、状态、GUI 开发流程与正式文档；
 10. [部署与运行](deployment.md)：Docker 部署、安全、健康、备份和恢复；
 11. [开发、测试与贡献](development.md)：变更流程、测试层次和完成标准；
