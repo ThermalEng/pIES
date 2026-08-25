@@ -4,6 +4,7 @@
  *
  * 权限规则(后端仍会权威校验,此处仅为可用性提示):
  * - 仅所有者可执行归档/删除等管理操作;共享通过项目包导出/导入完成。
+ * - 管理员不持有项目, 不可创建项目(仅负责账号与系统管理)。
  *
  * 键盘可达性:
  * - 列表行可 Tab 聚焦,Enter / Space 打开项目(行内按钮独立聚焦)。
@@ -12,7 +13,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { translateError, useI18n } from '../i18n'
@@ -57,6 +58,7 @@ const UTC_OFFSET_HOURS: number[] = Array.from({ length: 27 }, (_, i) => i - 12)
 export default function ProjectsPage() {
   const { t } = useI18n()
   const navigate = useNavigate()
+  const { isAdmin } = useOutletContext<{ isAdmin: boolean | null }>() as { isAdmin: boolean | null }
 
   // 列表
   const [projects, setProjects] = useState<Project[]>([])
@@ -267,9 +269,11 @@ export default function ProjectsPage() {
     <div className="ies-content--wide">
       <div className="ies-page-header">
         <h1 className="ies-page-title">{t('ies.nav.projects')}</h1>
-        <Button variant="primary" icon="plus" onClick={() => setCreateOpen(true)}>
-          {t('ies.project.new')}
-        </Button>
+        {isAdmin === false ? (
+          <Button variant="primary" icon="plus" onClick={() => setCreateOpen(true)}>
+            {t('ies.project.new')}
+          </Button>
+        ) : null}
       </div>
 
       {notice ? (
@@ -320,15 +324,19 @@ export default function ProjectsPage() {
           <Spinner label={t('ies.common.loading')} />
         </div>
       ) : sortedProjects.length === 0 ? (
-        <EmptyState
-          icon="info"
-          title={t('ies.project.empty')}
-          action={
-            <Button variant="primary" icon="plus" onClick={() => setCreateOpen(true)}>
-              {t('ies.project.new')}
-            </Button>
-          }
-        />
+        isAdmin === true ? (
+          <EmptyState icon="info" title={t('ies.project.empty_admin')} />
+        ) : isAdmin === false ? (
+          <EmptyState
+            icon="info"
+            title={t('ies.project.empty')}
+            action={
+              <Button variant="primary" icon="plus" onClick={() => setCreateOpen(true)}>
+                {t('ies.project.new')}
+              </Button>
+            }
+          />
+        ) : null
       ) : (
         <Table>
           <THead>

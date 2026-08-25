@@ -38,8 +38,8 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { ApiError, PublicAuthSettings } from '../types'
 import { errorMessage, useI18n } from '../i18n'
-import type { Locale } from '../i18n'
-import { Alert, Badge, Button, Checkbox, FormField, Input, Select } from '../components/ui'
+import type { Locale } from '../i18n'  // Locale kept for setLocale typing if needed
+import { Alert, Badge, Button, Checkbox, FormField, Input } from '../components/ui'
 import { BrandMark } from '../components/BrandMark'
 
 // ---------------------------------------------------------------------------
@@ -323,16 +323,6 @@ export default function LoginPage() {
 
         {view === 'login' ? (
           <form className="ies-login__form" onSubmit={handleLogin} noValidate>
-            <FormField label={t('ies.auth.language')} htmlFor="login-language">
-              <Select
-                id="login-language"
-                value={locale}
-                onChange={(event) => setLocale(event.target.value as Locale)}
-              >
-                <option value="zh">中文</option>
-                <option value="en">English</option>
-              </Select>
-            </FormField>
             <FormField label={t('ies.auth.username')} htmlFor="login-username" required>
               <Input
                 id="login-username"
@@ -540,6 +530,20 @@ export default function LoginPage() {
             </div>
           </div>
         ) : null}
+        <footer className="ies-login__footer">
+          <button
+            type="button"
+            className="ies-login__locale"
+            onClick={() => setLocale((locale === 'zh' ? 'en' : 'zh') as Locale)}
+            aria-label={t('ies.nav.language')}
+          >
+            <span className={locale === 'zh' ? 'is-active' : ''}>中文</span>
+            <span className="ies-login__locale-sep" aria-hidden="true">
+              /
+            </span>
+            <span className={locale === 'en' ? 'is-active' : ''}>EN</span>
+          </button>
+        </footer>
       </section>
     </main>
   )

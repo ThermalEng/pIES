@@ -125,7 +125,7 @@ export default function ModelPage() {
 function ModelCanvas({ projectId }: { projectId: number }) {
   const { t, locale } = useI18n()
   const { setAutosave, offline } = useWorkbench()
-  const { screenToFlowPosition, zoomIn, zoomOut, fitView } = useReactFlow()
+  const { screenToFlowPosition, fitView } = useReactFlow()
 
   // -- 注册表与模型状态 ------------------------------------------------
   const [deviceTypes, setDeviceTypes] = useState<ExtendedDeviceTypeSpec[] | null>(null)
@@ -609,12 +609,6 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           <SaveStateChip state={saveState} />
         </div>
         <div className="mp-toolbar">
-          <IconButton aria-label={lt('toolbar.zoom_in')} onClick={() => void zoomIn({ duration: 200 })}>
-            <Icon name="plus" size={15} />
-          </IconButton>
-          <IconButton aria-label={lt('toolbar.zoom_out')} onClick={() => void zoomOut({ duration: 200 })}>
-            <Icon name="search" size={15} />
-          </IconButton>
           <IconButton aria-label={lt('toolbar.fit')} onClick={() => void fitView({ padding: 0.2, duration: 300 })}>
             <Icon name="info" size={15} />
           </IconButton>

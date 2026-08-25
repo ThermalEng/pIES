@@ -1717,7 +1717,7 @@ export const api = {
             return {
               ...base,
               roles: typeof u.role === 'string' && u.role ? [u.role] : [],
-              project_count: 0,
+              project_count: Number(u.project_count ?? 0),
               last_active_at: base.last_login_at,
             }
           }),

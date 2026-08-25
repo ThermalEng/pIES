@@ -43,6 +43,7 @@ export type IconName =
   | 'download'
   | 'upload'
   | 'plus'
+  | 'minus'
   | 'trash'
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
@@ -83,6 +84,7 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
   download: <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />,
   upload: <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />,
   plus: <path d="M12 5v14M5 12h14" />,
+  minus: <path d="M5 12h14" />,
   trash: (
     <>
       <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
@@ -570,6 +572,10 @@ export function Dialog({ open, onClose, title, children, footer, size = 'md', in
   const panelRef = useRef<HTMLDivElement | null>(null)
   // RR-P2-12: 记录触发元素, 关闭时恢复焦点(键盘用户的导航连续性)
   const triggerRef = useRef<HTMLElement | null>(null)
+  const onCloseRef = useRef(onClose)
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
 
   useEffect(() => {
     if (!open) return
@@ -590,7 +596,7 @@ export function Dialog({ open, onClose, title, children, footer, size = 'md', in
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
-        onClose()
+        onCloseRef.current()
         return
       }
       // 焦点圈定:Tab 在对话框内循环
@@ -621,12 +627,12 @@ export function Dialog({ open, onClose, title, children, footer, size = 'md', in
       triggerRef.current = null
       if (trigger && trigger.isConnected) trigger.focus()
     }
-  }, [open, onClose, initialFocusRef])
+  }, [open, initialFocusRef])
 
   if (!open) return null
 
   return createPortal(
-    <div className="ies-dialog-overlay" onClick={onClose}>
+    <div className="ies-dialog-overlay" onClick={() => onCloseRef.current()}>
       <div
         ref={panelRef}
         className={`ies-dialog ies-dialog--${size}`}
@@ -639,12 +645,12 @@ export function Dialog({ open, onClose, title, children, footer, size = 'md', in
           <h2 id={titleId} className="ies-dialog__title">
             {title}
           </h2>
-          <IconButton aria-label={t('ies.common.close')} onClick={onClose} autoFocus={false}>
+          <IconButton aria-label={t('ies.common.close')} onClick={() => onCloseRef.current()} autoFocus={false}>
             <Icon name="cross" size={16} />
           </IconButton>
         </header>
         <div className="ies-dialog__body">{children}</div>
-        {footer ? <footer className="ies-dialog__footer">{footer}</footer> : null}
+        {footer ? <footer className="ies-dialog__footer" onClick={(e) => e.stopPropagation()}>{footer}</footer> : null}
       </div>
     </div>,
     document.body,

@@ -19,7 +19,6 @@ import { Link, NavLink, useNavigate, useParams } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import { Icon } from '../components/ui'
-import { BrandMark } from '../components/BrandMark'
 
 /** 构建期生成的帮助中心 manifest(public/help/manifest.json)。 */
 export interface HelpManifest {
@@ -345,12 +344,6 @@ export default function HelpPage() {
   if (!manifest) {
     return (
       <div className="ies-help">
-        <header className="ies-topbar">
-          <span className="ies-topbar__brand">
-            <BrandMark className="ies-topbar__brand-mark" />
-            <span className="ies-topbar__brand-name">{t('ies.nav.app_title')}</span>
-          </span>
-        </header>
         <main className="ies-help__main">
           <div className="ies-page-placeholder" role="status">
             <Icon name="info" size={24} />
@@ -361,43 +354,10 @@ export default function HelpPage() {
     )
   }
 
-  const versionLabel = interpolate(pt('ies.help.version'), { version: manifest.appVersion })
-  const updatedLabel = interpolate(pt('ies.help.updated'), {
-    date: new Date(manifest.generatedAt).toLocaleDateString(locale === 'en' ? 'en-US' : 'zh-CN'),
-  })
   const navTitle = pt('ies.help.nav_title')
 
   return (
-    <div className="ies-app ies-help">
-      <header className="ies-topbar">
-        <Link to="/" className="ies-topbar__brand" aria-label={t('ies.nav.app_title')}>
-          <BrandMark className="ies-topbar__brand-mark" />
-          <span className="ies-topbar__brand-name">{t('ies.nav.app_title')}</span>
-        </Link>
-        <nav className="ies-topbar__nav" aria-label={t('ies.nav.help')}>
-          <NavLink to="/help" className="ies-topbar__link" aria-current={!pageId ? 'page' : undefined}>
-            {t('ies.nav.help')}
-          </NavLink>
-        </nav>
-        <div className="ies-topbar__spacer" />
-        <div className="ies-topbar__actions">
-          <span className="ies-help__version" title={updatedLabel}>
-            <Icon name="info" size={13} />
-            <span>{versionLabel}</span>
-          </span>
-          {/* 语言切换: 切到当前可用语言; 不可用时保持提示 */}
-          <Link
-            to={currentLocale === 'zh' ? `/help/en/${currentId || ''}` : `/help/zh/${currentId || ''}`}
-            className="ies-btn ies-btn--ghost ies-btn--sm"
-            aria-label={t('ies.nav.language')}
-          >
-            {currentLocale === 'zh' ? 'EN' : '中文'}
-          </Link>
-          <Link to="/" className="ies-btn ies-btn--secondary ies-btn--sm">
-            {pt('ies.help.back_to_app')}
-          </Link>
-        </div>
-      </header>
+    <div className="ies-help">
 
       <div className="ies-help__body">
         {/* 移动端目录开关 */}

@@ -14,6 +14,7 @@
 
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
+import { useOutletContext } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { errorMessage, useI18n } from '../i18n'
@@ -23,6 +24,7 @@ import type { HealthStatus } from '../types'
 
 export default function SettingsPage() {
   const { t, locale, setLocale } = useI18n()
+  const { isAdmin } = useOutletContext<{ isAdmin: boolean | null }>() as { isAdmin: boolean | null }
 
   // 修改密码
   const [oldPassword, setOldPassword] = useState('')
@@ -73,10 +75,11 @@ export default function SettingsPage() {
   }
 
   useEffect(() => {
+    if (isAdmin !== true) return
     loadSecuritySettings()
     loadHealth()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [isAdmin])
 
   /** 加载存储用量与健康状态(管理员)。 */
   const loadHealth = () => {
@@ -125,7 +128,7 @@ export default function SettingsPage() {
     <div className="ies-page">
       <header className="ies-page-header">
         <h1 className="ies-page-title">{t('ies.nav.settings')}</h1>
-        <p className="ies-page-subtitle">{t('ies.admin.title')}</p>
+        {isAdmin === true ? <p className="ies-page-subtitle">{t('ies.admin.title')}</p> : null}
       </header>
 
       <div className="ies-settings-grid">
@@ -205,7 +208,9 @@ export default function SettingsPage() {
           </form>
         </Card>
 
-        <Card title={t('ies.admin.security')}>
+        {isAdmin === true ? (
+          <>
+            <Card title={t('ies.admin.security')}>
           {securityError ? (
             <Alert variant="error" title={securityError} closable onClose={() => setSecurityError(null)} />
           ) : null}
@@ -260,17 +265,31 @@ export default function SettingsPage() {
                   <h4 className="ies-config-section-title">{t('ies.admin.health')}</h4>
                   <div className="ies-flex" style={{ flexWrap: 'wrap', gap: 'var(--ies-space-2)' }}>
                     <Badge
-                      label={t(`ies.admin.health_${health.checks.storage?.status ?? 'down'}`)}
-                      variant={health.checks.storage?.status === 'ok' ? 'success' : 'warning'}
-                      icon={health.checks.storage?.status === 'ok' ? 'check' : 'warning'}
+                      label={t(`ies.admin.health_${health.status ?? 'down'}`)}
+                      variant={health.status === 'ok' ? 'success' : health.status === 'degraded' ? 'warning' : 'danger'}
+                      icon={health.status === 'ok' ? 'check' : 'warning'}
                     />
-                    <span className="ies-form-message">v{health.version}</span>
                   </div>
+                  {health.status === 'degraded' ? (
+                    <p className="ies-form-message" style={{ marginTop: 'var(--ies-space-1)' }}>
+                      {t('ies.admin.health_degraded_hint')}
+                    </p>
+                  ) : null}
+                  <p className="ies-form-message" style={{ marginTop: 'var(--ies-space-1)' }}>
+                    {t('ies.admin.health_hint')}
+                  </p>
                 </div>
+              </div>
+              <div style={{ marginTop: 'var(--ies-space-3)', borderTop: '1px solid var(--ies-color-border)', paddingTop: 'var(--ies-space-2)' }}>
+                <span className="ies-form-message">
+                  {t('ies.admin.version')}: v{health.version}
+                </span>
               </div>
             </>
           )}
         </Card>
+          </>
+        ) : null}
       </div>
     </div>
   )

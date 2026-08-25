@@ -1409,6 +1409,56 @@ button {
   flex: 1;
 }
 
+/* 登录页底部语言切换(左下角, 与顶栏 中文/EN 同款交互, 纤细分段样式) */
+.ies-login__footer {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  margin-top: var(--ies-space-2);
+  padding-top: var(--ies-space-4);
+  border-top: 1px solid var(--ies-color-border);
+}
+
+.ies-login__locale {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ies-color-text-muted);
+  font-size: var(--ies-fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.ies-login__locale:hover {
+  background: var(--ies-color-bg-subtle, #f6f8fb);
+  border-color: var(--ies-color-border);
+  color: var(--ies-color-text);
+}
+
+.ies-login__locale:focus-visible {
+  outline: 2px solid var(--ies-color-primary, #0e5cad);
+  outline-offset: 2px;
+}
+
+.ies-login__locale .is-active {
+  color: var(--ies-color-text);
+  font-weight: 700;
+}
+
+.ies-login__locale-sep {
+  color: var(--ies-color-border);
+  font-weight: 400;
+}
+
 /* 登录表单下的次级入口(注册 / 返回登录) */
 .ies-login__switch {
   display: flex;

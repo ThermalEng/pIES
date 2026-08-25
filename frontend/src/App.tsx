@@ -5,9 +5,9 @@
  *   /login          登录页(已登录则重定向首页)
  *   /               项目列表
  *   /projects/:id   项目工作台
- *   /help/*         帮助中心(独立页,无外壳,静态可读)
  *   /admin/users    账号管理(管理员)
  *   /settings       系统设置(管理员)
+ *   /help/*         帮助中心(一級菜单最后一项, 在应用外壳内)
  *   *               404
  *
  * 页面组件约定(由并行 agent 实现,路径即约定,不得改名):
@@ -196,9 +196,6 @@ function AppShell() {
           <NavLink to="/" end className="ies-topbar__link">
             {t('ies.nav.projects')}
           </NavLink>
-          <NavLink to="/help" className="ies-topbar__link">
-            {t('ies.nav.help')}
-          </NavLink>
           {isAdmin === true ? (
             <NavLink to="/admin/users" className="ies-topbar__link">
               {t('ies.nav.accounts')}
@@ -206,6 +203,9 @@ function AppShell() {
           ) : null}
           <NavLink to="/settings" className="ies-topbar__link">
             {t('ies.nav.settings')}
+          </NavLink>
+          <NavLink to="/help" className="ies-topbar__link">
+            {t('ies.nav.help')}
           </NavLink>
         </nav>
         <div className="ies-topbar__spacer" />
@@ -254,12 +254,6 @@ export default function App() {
             </PublicOnly>
           }
         />
-        {/* 帮助中心(独立页,无外壳,静态可读)。
-            RR-P2-10: 显式 lang/pageId 段路由, useParams 才能解析深链接
-            (/help/zh-CN/getting-started); "/help/*" 通配下 useParams 拿不到段参数。 */}
-        <Route path="/help" element={<HelpPage />} />
-        <Route path="/help/:lang" element={<HelpPage />} />
-        <Route path="/help/:lang/:pageId" element={<HelpPage />} />
         {/* 应用外壳(需登录) */}
         <Route
           element={
@@ -279,6 +273,11 @@ export default function App() {
             }
           />
           <Route path="/settings" element={<SettingsPage />} />
+          {/* 帮助中心(一級菜单最后一项, 在应用外壳内, 无需返回应用按钮)。
+              RR-P2-10: 显式 lang/pageId 段路由 */}
+          <Route path="/help" element={<HelpPage />} />
+          <Route path="/help/:lang" element={<HelpPage />} />
+          <Route path="/help/:lang/:pageId" element={<HelpPage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

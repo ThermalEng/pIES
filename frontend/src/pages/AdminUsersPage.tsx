@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react'
 
 import { api } from '../api/client'
 import { errorMessage, useI18n } from '../i18n'
-import { Alert, Badge, Button, Card, Dialog, FormField, Input, Table, TBody, TD, TH, THead, TR } from '../components/ui'
+import { Alert, Button, Card, Dialog, FormField, Input, Table, TBody, TD, TH, THead, TR } from '../components/ui'
 import type { AdminUserRow, UserDeletePreview } from '../types'
 
 export default function AdminUsersPage() {
@@ -35,6 +35,9 @@ export default function AdminUsersPage() {
   const [resetConfirm, setResetConfirm] = useState('')
   const [resetError, setResetError] = useState<string | null>(null)
   const [resetBusy, setResetBusy] = useState(false)
+  // 重置成功后展示密码(要求复制/截图后确认)
+  const [resetDone, setResetDone] = useState<{ username: string; password: string } | null>(null)
+  const [resetCopied, setResetCopied] = useState(false)
 
   /** 渲染后端诊断文案(共享 errorMessage:ApiError 走 translateError,其余兜底)。 */
   const errorText = (err: unknown): string => errorMessage(err)
@@ -95,26 +98,6 @@ export default function AdminUsersPage() {
     setDeleteError(null)
   }
 
-  const handleToggleUser = async (user: AdminUserRow, enable: boolean) => {
-    setUsersBusy(true)
-    setUsersError(null)
-    setUsersNotice(null)
-    try {
-      if (enable) await api.admin.reactivateUser(user.id)
-      else await api.admin.deactivateUser(user.id)
-      setUsersNotice(
-        enable
-          ? t('ies.admin.user_reactivated', { username: user.username })
-          : t('ies.admin.user_deactivated', { username: user.username }),
-      )
-      loadUsers()
-    } catch (err) {
-      setUsersError(errorText(err))
-    } finally {
-      setUsersBusy(false)
-    }
-  }
-
   const handleResetSubmit = async () => {
     const target = resetTarget
     if (!target) return
@@ -130,10 +113,13 @@ export default function AdminUsersPage() {
     setResetError(null)
     try {
       await api.admin.resetPassword(target.id, resetPassword)
-      setUsersNotice(t('ies.admin.reset_ok', { username: target.username }))
+      const donePassword = resetPassword
       setResetTarget(null)
       setResetPassword('')
       setResetConfirm('')
+      setResetDone({ username: target.username, password: donePassword })
+      setResetCopied(false)
+      loadUsers()
     } catch (err) {
       setResetError(errorText(err))
     } finally {
@@ -146,6 +132,20 @@ export default function AdminUsersPage() {
     setResetPassword('')
     setResetConfirm('')
     setResetError(null)
+  }
+  const handleCloseResetDone = () => {
+    setResetDone(null)
+    setResetCopied(false)
+  }
+  const handleCopyResetPassword = async () => {
+    if (!resetDone) return
+    try {
+      await navigator.clipboard.writeText(resetDone.password)
+      setResetCopied(true)
+    } catch {
+      // 降级: 选中文本由用户手动复制
+      setResetCopied(false)
+    }
   }
 
   return (
@@ -174,7 +174,7 @@ export default function AdminUsersPage() {
             <THead>
               <TR>
                 <TH>{t('ies.admin.username')}</TH>
-                <TH>{t('ies.admin.status')}</TH>
+                <TH>{t('ies.admin.project_count')}</TH>
                 <TH>{t('ies.admin.roles')}</TH>
                 <TH>{t('ies.admin.actions')}</TH>
               </TR>
@@ -186,30 +186,10 @@ export default function AdminUsersPage() {
                     {u.display_name}
                     <span className="ies-mono"> ({u.username})</span>
                   </TD>
-                  <TD>
-                    <Badge
-                      label={t(
-                        u.status === 'disabled'
-                          ? 'ies.admin.user_status_disabled'
-                          : u.status === 'locked'
-                            ? 'ies.admin.user_status_locked'
-                            : 'ies.admin.user_status_active',
-                      )}
-                      variant={u.status === 'active' ? 'primary' : 'neutral'}
-                    />
-                  </TD>
+                  <TD>{u.project_count}</TD>
                   <TD>{(u.roles ?? []).join(', ')}</TD>
                   <TD>
                     <div className="ies-flex" style={{ gap: 'var(--ies-space-1)' }}>
-                      {u.status === 'disabled' ? (
-                        <Button variant="secondary" size="sm" disabled={usersBusy} onClick={() => void handleToggleUser(u, true)}>
-                          {t('ies.admin.reactivate')}
-                        </Button>
-                      ) : (
-                        <Button variant="secondary" size="sm" disabled={usersBusy || u.username === 'admin'} onClick={() => void handleToggleUser(u, false)}>
-                          {t('ies.admin.deactivate')}
-                        </Button>
-                      )}
                       <Button
                         variant="secondary"
                         size="sm"
@@ -286,6 +266,34 @@ export default function AdminUsersPage() {
           />
         </FormField>
         {resetError ? <Alert variant="error" title={resetError} closable onClose={() => setResetError(null)} /> : null}
+      </Dialog>
+
+      {/* 重置成功后展示新密码(要求复制/截图后确认, 仅显示一次) */}
+      <Dialog
+        open={resetDone !== null}
+        onClose={handleCloseResetDone}
+        title={t('ies.admin.reset_done_title')}
+        size="sm"
+        footer={
+          <Button variant="primary" onClick={handleCloseResetDone}>
+            {t('ies.admin.reset_done_confirm')}
+          </Button>
+        }
+      >
+        {resetDone ? (
+          <>
+            <Alert variant="success">{t('ies.admin.reset_done_desc', { username: resetDone.username })}</Alert>
+            <div className="ies-flex" style={{ gap: 'var(--ies-space-2)', alignItems: 'center', margin: 'var(--ies-space-3) 0' }}>
+              <code className="ies-mono" style={{ fontSize: '1.1em', padding: 'var(--ies-space-2)', background: 'var(--ies-color-bg-muted)', borderRadius: 'var(--ies-radius-sm)', flex: 1, wordBreak: 'break-all' }}>
+                {resetDone.password}
+              </code>
+              <Button variant="secondary" size="sm" onClick={() => void handleCopyResetPassword()}>
+                {resetCopied ? t('ies.admin.reset_copied') : t('ies.admin.reset_copy')}
+              </Button>
+            </div>
+            <p className="ies-form-message">{t('ies.admin.reset_done_hint')}</p>
+          </>
+        ) : null}
       </Dialog>
 
       {/* 删除账号确认(0.2.0 B1 误操作防护): 先预告影响范围, 再携带确认令牌删除 */}
