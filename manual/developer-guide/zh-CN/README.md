@@ -41,7 +41,7 @@
 | 后台任务、租约与结果提交 | [Worker](modules/worker.md) |
 | repository、数据库约束或 migration | [持久化](modules/persistence.md) |
 | 页面、表单、状态或帮助中心 | [前端与帮助中心](frontend.md) |
-| 用户自定义模型、算法插件、共享安装或选择 | [模型与算法](customization-center.md)与[AI 开发功能要求](ai-development/customization-center-requirements.md) |
+| 用户自定义模型、算法插件、共享安装或选择 | [模型与算法](customization-center.md) |
 
 ## 使用原则
 

@@ -211,4 +211,4 @@ Docker 部署新增独立 `plugin_runner` 服务，供通用 generator 和 execu
 - 历史项目与任务不因共享状态、卸载或新版本发布而改变解释；
 - 全部编译、测试和浏览器验收在 Docker 中完成，画布拖放仍由人工验收。
 
-具体实施切片、端点草案、数据表、测试矩阵和禁止事项见[AI 开发功能要求](ai-development/customization-center-requirements.md)。
+具体实施切片、端点草案、数据表和测试矩阵属于仓库内部开发控制材料，不进入帮助中心公开正文。

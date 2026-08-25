@@ -43,7 +43,6 @@
   - [部署与运行](developer-guide/zh-CN/deployment.md)
   - [开发、测试与贡献](developer-guide/zh-CN/development.md)
   - [版本化与发布](developer-guide/zh-CN/versioning-and-release.md)
-  - [AI 开发功能要求：模型与算法](developer-guide/zh-CN/ai-development/customization-center-requirements.md)
 - [更新日志](changelog/README.md)
   - [Roadmap](changelog/roadmap.md)
 
