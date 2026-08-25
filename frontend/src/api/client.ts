@@ -60,7 +60,6 @@ import type {
   Project,
   ProjectCreateInput,
   ProjectListParams,
-  ProjectMember,
   ProjectRole,
   ProjectVersion,
   PublicAuthSettings,
@@ -461,6 +460,7 @@ function normalizeUser(u: Record<string, unknown>): User {
     username: String(u.username ?? ''),
     display_name: String(u.display_name ?? ''),
     email: u.email === null || u.email === undefined ? null : String(u.email),
+    role: String(u.role ?? ''),
     status: (u.status as User['status']) ?? 'active',
     locale: String(u.locale ?? 'zh-CN'),
     timezone: String(u.timezone ?? 'UTC'),
@@ -983,13 +983,6 @@ export interface ProjectsApi {
   unarchive(id: number): Promise<Project>
   /** 删除项目(0.2.0 B4: 须携带与项目名精确匹配的 name 确认)。 */
   delete(id: number, name: string): Promise<void>
-  duplicate(id: number): Promise<Project>
-  transfer(id: number, input: { target_user_id: number }): Promise<void>
-  viewers(id: number): Promise<ProjectMember[]>
-  /** 添加/移除查看者(仅所有者;后端按用户 id 操作)。 */
-  updateViewer(id: number, input: { user_id: number; action: 'add' | 'remove' }): Promise<ProjectMember[]>
-  /** 切换管理员访问授权(仅所有者): 授权后管理员可查看项目细节并转移所有权。 */
-  setAdminAccess(id: number, enabled: boolean): Promise<Project>
 }
 
 export interface ModelApi {
@@ -1094,6 +1087,8 @@ export interface AdminApi {
   deactivateUser(userId: number): Promise<void>
   /** 重新启用账号(管理员)。 */
   reactivateUser(userId: number): Promise<void>
+  /** 重置密码(管理员): 签发临时密码并强制目标用户改密, 其全部会话失效。 */
+  resetPassword(userId: number, newPassword: string): Promise<void>
   /** 读取安全设置(管理员)。 */
   getSecuritySettings(): Promise<{ registration_enabled: boolean }>
   /** 更新安全设置: 自助注册开关(管理员)。 */
@@ -1260,29 +1255,6 @@ export const api = {
     delete(id: number, name: string): Promise<void> {
       // 0.2.0 B4 误操作防护: 须携带与待删除项目名精确匹配的 name(替代空布尔 confirm)
       return request<void>(`/projects/${id}`, { method: 'DELETE', body: { confirm: true, name } })
-    },
-    duplicate(id: number): Promise<Project> {
-      return request<unknown>(`/projects/${id}/duplicate`, { method: 'POST', body: {} }).then((body) =>
-        projectFromServer(body),
-      )
-    },
-    transfer(id: number, input: { target_user_id: number }): Promise<void> {
-      // 后端按用户 id 转移(target_user_id)
-      return request<void>(`/projects/${id}/transfer`, { method: 'POST', body: { target_user_id: input.target_user_id } })
-    },
-    viewers(id: number): Promise<ProjectMember[]> {
-      return request<unknown>(`/projects/${id}/viewers`).then((body) => asList<ProjectMember>(body, 'members'))
-    },
-    updateViewer(id: number, input: { user_id: number; action: 'add' | 'remove' }): Promise<ProjectMember[]> {
-      return request<unknown>(`/projects/${id}/viewers`, { method: 'PUT', body: input }).then((body) =>
-        asList<ProjectMember>(body, 'members'),
-      )
-    },
-    setAdminAccess(id: number, enabled: boolean): Promise<Project> {
-      return request<unknown>(`/projects/${id}/admin-access`, {
-        method: 'PUT',
-        body: { enabled },
-      }).then((body) => projectFromServer(body))
     },
   } satisfies ProjectsApi,
 
@@ -1837,6 +1809,12 @@ export const api = {
     },
     reactivateUser(userId: number): Promise<void> {
       return request<void>(`/auth/users/${userId}/reactivate`, { method: 'POST' })
+    },
+    resetPassword(userId: number, newPassword: string): Promise<void> {
+      return request<void>(`/auth/users/${userId}/reset-password`, {
+        method: 'POST',
+        body: { new_password: newPassword },
+      })
     },
     getSecuritySettings(): Promise<{ registration_enabled: boolean }> {
       return request<unknown>('/auth/settings').then((body) => ({

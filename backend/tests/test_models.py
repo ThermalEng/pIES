@@ -22,11 +22,12 @@ from iesplan.models.immutable_triggers import (
     IMMUTABLE_TABLES,
 )
 
-#: 01-db-schema.md 全部 41 张表 + 应用级设置表(app_settings, 身份域扩展)
+#: 01-db-schema.md 全部 39 张表 + 应用级设置表(app_settings, 身份域扩展)
+#: (0.8.0 剔除共享成员/所有权转移: project_members / ownership_transfers 已移除)
 ALL_TABLES: tuple[str, ...] = (
     "users", "roles", "user_roles", "credentials", "window_sessions", "auth_events",
     "app_settings",
-    "project_members", "ownership_transfers", "admin_maintenance_actions",
+    "admin_maintenance_actions",
     "projects", "drafts", "project_versions", "version_refs",
     "system_graphs", "devices", "ports", "connections",
     "datasets", "dataset_versions", "dataset_files",
@@ -56,8 +57,6 @@ KEY_COLUMNS: dict[str, set[str]] = {
         "session_token_hash", "user_id", "credential_version_at_issue", "replaced_by_session_id", "expires_at"
     },
     "auth_events": {"user_id", "session_id", "event_type", "occurred_at", "detail"},
-    "project_members": {"project_id", "user_id", "role", "auth_version", "expires_at"},
-    "ownership_transfers": {"from_user_id", "to_user_id", "status", "transfer_version"},
     "admin_maintenance_actions": {"action_type", "performed_by", "status", "params", "result"},
     "projects": {
         "name", "owner_id", "currency", "fixed_utc_offset_minutes", "current_draft_id", "current_version_id"
@@ -110,8 +109,6 @@ PARTIAL_UNIQUE_INDEXES: dict[str, str] = {
     "credentials": "uq_credentials_active_password",
     "window_sessions": "uq_window_sessions_one_active",
     "drafts": "uq_drafts_current",
-    "project_members": "uq_project_members_current",
-    "ownership_transfers": "uq_ownership_transfers_open",
     "task_leases": "uq_task_leases_one_active",
     "compute_slots": "uq_compute_slots_attempt",
     "result_index": "uq_result_index_latest",

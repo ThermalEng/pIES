@@ -6,6 +6,7 @@
  *   /               项目列表
  *   /projects/:id   项目工作台
  *   /help/*         帮助中心(独立页,无外壳,静态可读)
+ *   /admin/users    账号管理(管理员)
  *   /settings       系统设置(管理员)
  *   *               404
  *
@@ -20,7 +21,7 @@
  * 占位组件,不阻塞构建;页面就绪后无缝启用(代码分割)。
  */
 
-import { Suspense, lazy, useEffect } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import type { ComponentType, ReactNode } from 'react'
 import {
   Link,
@@ -31,12 +32,14 @@ import {
   Routes,
   useLocation,
   useNavigate,
+  useOutletContext,
 } from 'react-router-dom'
 
 import { api, hasSession, setUnauthorizedHandler } from './api/client'
 import { BrandMark } from './components/BrandMark'
 import { useI18n } from './i18n'
 import { Button, Icon, Spinner } from './components/ui'
+import type { User } from './types'
 
 /** 页面模块约定路径(见文件头注释),惰性扫描避免页面未就绪时构建失败。 */
 const pageLoaders = import.meta.glob<{ default: ComponentType }>('./pages/*.tsx')
@@ -96,6 +99,7 @@ const ProjectListPage = lazyPage('ProjectListPage')
 const WorkbenchPage = lazyPage('WorkbenchPage')
 const HelpPage = lazyPage('HelpPage')
 const SettingsPage = lazyPage('SettingsPage')
+const AdminUsersPage = lazyPage('AdminUsersPage')
 
 /** 整页加载指示(路由切换 Suspense 兜底)。 */
 function PageLoading() {
@@ -124,11 +128,21 @@ function PublicOnly({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
+/** 管理员页守卫: 依据外壳已加载的当前用户角色判定(权威校验仍由后端完成)。 */
+function RequireAdmin({ children }: { children: ReactNode }) {
+  const { isAdmin } = useOutletContext<{ isAdmin: boolean | null }>()
+  if (isAdmin === null) return <PageLoading />
+  if (!isAdmin) return <Navigate to="/" replace />
+  return <>{children}</>
+}
+
 /** 应用外壳:顶栏(品牌/导航/语言/退出)+ 内容出口。 */
 function AppShell() {
   const { t, locale, setLocale } = useI18n()
   const navigate = useNavigate()
   const location = useLocation()
+  const [currentUser, setCurrentUser] = useState<User | null>(null)
+  const [userLoaded, setUserLoaded] = useState(false)
 
   // 会话失效(401)统一处理:清除会话并跳转登录页
   useEffect(() => {
@@ -139,6 +153,27 @@ function AppShell() {
     })
     return () => setUnauthorizedHandler(null)
   }, [navigate, location.pathname])
+
+  // 加载当前用户角色, 用于管理员导航/页面守卫(后端 403 为权威闸门)
+  useEffect(() => {
+    let cancelled = false
+    api.auth
+      .me()
+      .then((u) => {
+        if (!cancelled) {
+          setCurrentUser(u)
+          setUserLoaded(true)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setUserLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const isAdmin = userLoaded ? currentUser?.role === 'admin' : null
 
   const handleLogout = () => {
     void api.auth.logout().finally(() => {
@@ -164,6 +199,11 @@ function AppShell() {
           <NavLink to="/help" className="ies-topbar__link">
             {t('ies.nav.help')}
           </NavLink>
+          {isAdmin === true ? (
+            <NavLink to="/admin/users" className="ies-topbar__link">
+              {t('ies.nav.accounts')}
+            </NavLink>
+          ) : null}
           <NavLink to="/settings" className="ies-topbar__link">
             {t('ies.nav.settings')}
           </NavLink>
@@ -181,7 +221,7 @@ function AppShell() {
       </header>
       <main className="ies-app__main">
         <div className="ies-content">
-          <Outlet />
+          <Outlet context={{ isAdmin }} />
         </div>
       </main>
     </div>
@@ -230,6 +270,14 @@ export default function App() {
         >
           <Route path="/" element={<ProjectListPage />} />
           <Route path="/projects/:id/*" element={<WorkbenchPage />} />
+          <Route
+            path="/admin/users"
+            element={
+              <RequireAdmin>
+                <AdminUsersPage />
+              </RequireAdmin>
+            }
+          />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />

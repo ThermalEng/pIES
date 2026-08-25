@@ -91,15 +91,6 @@ def _create_project(client: TestClient, owner_token: str, name: str) -> int:
     return resp.json()["project"]["id"]
 
 
-def _add_viewer(client: TestClient, owner_token: str, pid: int, viewer_id: int) -> None:
-    resp = client.put(
-        f"/api/projects/{pid}/viewers",
-        json={"user_id": viewer_id, "action": "add"},
-        headers=_bearer(owner_token),
-    )
-    assert resp.status_code == 200, resp.text
-
-
 # ---------------------------------------------------------------------------
 # C-01: 对象管理 API 拒绝伪造 X-User-Id
 # ---------------------------------------------------------------------------
@@ -173,32 +164,31 @@ def test_force_password_change_gates_business_api(client: TestClient, db: Sessio
 # ---------------------------------------------------------------------------
 
 
-def test_model_api_viewer_readonly_and_stranger_denied(client: TestClient, db: Session) -> None:
-    """viewer 可读模型, 写模型 403; 非成员写 403。"""
+def test_model_api_non_owner_denied_and_owner_allowed(client: TestClient, db: Session) -> None:
+    """非所有者读/写模型一律 403(0.8.0 起无共享成员); 所有者可读可写。"""
     make_user(db, "owner_c03")
-    viewer = make_user(db, "viewer_c03")
+    other = make_user(db, "other_c03")
     make_user(db, "stranger_c03")
     owner_token = _login(client, "owner_c03")
     pid = _create_project(client, owner_token, "模型权限项目")
-    _add_viewer(client, owner_token, pid, viewer.id)
 
-    viewer_token = _login(client, "viewer_c03")
-    # 读(图/校验)→ 200
-    resp = client.get(f"/api/projects/{pid}/model", headers=_bearer(viewer_token))
-    assert resp.status_code == 200, resp.text
-    resp = client.get(f"/api/projects/{pid}/model/validate", headers=_bearer(viewer_token))
-    assert resp.status_code == 200, resp.text
+    other_token = _login(client, "other_c03")
+    # 非所有者读 → 403
+    resp = client.get(f"/api/projects/{pid}/model", headers=_bearer(other_token))
+    assert resp.status_code == 403, resp.text
+    resp = client.get(f"/api/projects/{pid}/model/validate", headers=_bearer(other_token))
+    assert resp.status_code == 403, resp.text
 
-    # 写(设备/连接)→ 403
+    # 非所有者写(设备/连接)→ 403
     body = {"device_type": "ies.device.pv", "name": "PV1", "params": {}}
     resp = client.post(
-        f"/api/projects/{pid}/model/devices", json=body, headers=_bearer(viewer_token)
+        f"/api/projects/{pid}/model/devices", json=body, headers=_bearer(other_token)
     )
     assert resp.status_code == 403, resp.text
     resp = client.post(
         f"/api/projects/{pid}/model/connections",
         json={"from_port_id": 1, "to_port_id": 2},
-        headers=_bearer(viewer_token),
+        headers=_bearer(other_token),
     )
     assert resp.status_code == 403, resp.text
 
@@ -254,17 +244,16 @@ def test_pending_session_rejected_until_confirm(client: TestClient, db: Session)
 
 
 # ---------------------------------------------------------------------------
-# H-05: viewer 取消任务 403
+# H-05: 非所有者取消/重试任务 403
 # ---------------------------------------------------------------------------
 
 
-def test_viewer_cannot_cancel_or_retry_task(client: TestClient, db: Session) -> None:
-    """viewer 取消/重试任务 → 403(要求项目 edit 能力)。"""
+def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) -> None:
+    """非所有者取消/重试任务 → 403(要求项目 edit 能力, 仅所有者具备)。"""
     make_user(db, "owner_c05")
-    viewer = make_user(db, "viewer_c05")
+    other = make_user(db, "other_c05")
     owner_token = _login(client, "owner_c05")
     pid = _create_project(client, owner_token, "任务权限项目")
-    _add_viewer(client, owner_token, pid, viewer.id)
 
     # 所有者提交任务
     resp = client.post(
@@ -275,17 +264,17 @@ def test_viewer_cannot_cancel_or_retry_task(client: TestClient, db: Session) -> 
     assert resp.status_code == 201, resp.text
     task_id = resp.json()["task"]["id"]
 
-    viewer_token = _login(client, "viewer_c05")
+    other_token = _login(client, "other_c05")
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/cancel",
-        json={"reason": "viewer-cancel"},
-        headers=_bearer(viewer_token),
+        json={"reason": "other-cancel"},
+        headers=_bearer(other_token),
     )
     assert resp.status_code == 403, resp.text
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/retry",
         json={},
-        headers=_bearer(viewer_token),
+        headers=_bearer(other_token),
     )
     assert resp.status_code == 403, resp.text
 

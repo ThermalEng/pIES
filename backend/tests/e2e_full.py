@@ -470,7 +470,7 @@ def main() -> int:
         fail(f"Excel 导出失败: {exc}")
         return 1
 
-    step("项目包导出(所有者) -> 下载; 查看者包导出 403; 查看者 Excel 导出成功")
+    step("项目包导出(所有者) -> 下载")
     package_token = None
     try:
         r = e1.post(f"/api/projects/{project_id}/exports/package", user_id=e1.user_id)
@@ -480,22 +480,8 @@ def main() -> int:
                    user_id=e1.user_id, params={"token": package_token})
         assert r.status_code == 200 and r.content[:2] == b"PK", "项目包下载失败"
         ok(f"项目包 zip {len(r.content)} 字节")
-        # 添加查看者 eng2
-        r = e1.put(f"/api/projects/{project_id}/viewers", user_id=e1.user_id,
-                   json={"user_id": eng2["id"], "action": "add"})
-        assert r.status_code == 200, f"添加查看者失败: {r.status_code} {r.text[:300]}"
-        # 查看者包导出 -> 403
-        e2 = Client()
-        login(e2, eng2["username"], ENG_PASSWORD)
-        r = e2.post(f"/api/projects/{project_id}/exports/package", user_id=e2.user_id)
-        assert r.status_code == 403, f"查看者导出项目包应为 403, 实际 {r.status_code} {r.text[:200]}"
-        # 查看者 Excel 导出 -> 成功
-        r = e2.post(f"/api/projects/{project_id}/exports/excel", user_id=e2.user_id, json={
-            "evidence_package_id": evidence_id, "assessment_id": assessment_id, "lang": "zh"})
-        assert r.status_code == 200, f"查看者 Excel 导出失败: {r.status_code} {r.text[:200]}"
-        ok("查看者包导出 403, 查看者 Excel 导出成功")
     except Exception as exc:  # noqa: BLE001
-        fail(f"项目包导出/权限检查失败: {exc}")
+        fail(f"项目包导出失败: {exc}")
         return 1
 
     step("项目包导入(另一工程师) -> 新项目身份/所有者正确")

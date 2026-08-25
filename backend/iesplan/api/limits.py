@@ -270,16 +270,13 @@ def _dataset_files_bytes(db, project_ids: list[int]) -> int:
 
 
 def _project_ids_for_user(db, user_id: int) -> list[int]:
-    """用户作为所有者或成员(未撤销)的未删除项目 id 列表。"""
+    """用户拥有的未删除项目 id 列表(0.8.0: 已剔除共享成员)。"""
     import sqlalchemy as sa
 
-    from iesplan.models.project import Project, ProjectMember
+    from iesplan.models.project import Project
 
     owned = sa.select(Project.id).where(Project.owner_id == user_id, Project.status != "deleted")
-    member = sa.select(ProjectMember.project_id).where(
-        ProjectMember.user_id == user_id, ProjectMember.revoked_at.is_(None)
-    )
-    rows = db.execute(owned.union(member)).scalars().all()
+    rows = db.execute(owned).scalars().all()
     return list(rows)
 
 

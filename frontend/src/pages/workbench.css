@@ -123,17 +123,6 @@
   color: var(--ies-color-text-secondary);
 }
 
-/* 管理员访问授权开关(所有者可见) */
-.wb-header__admin-access {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--ies-space-1);
-}
-
-.wb-header__admin-access input[type='checkbox'] {
-  accent-color: var(--ies-primary, #0e5cad);
-}
-
 .wb-header__status {
   display: flex;
   align-items: center;

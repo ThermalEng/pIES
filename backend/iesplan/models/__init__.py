@@ -1,9 +1,9 @@
-"""ORM 模型包: 全部 41 张表的 SQLAlchemy 2.0 声明。
+"""ORM 模型包: 全部 39 张表的 SQLAlchemy 2.0 声明。
 
 表域分布(与 01-db-schema.md 章节对应):
 - identity.py   第1节身份: users / roles / user_roles / credentials / window_sessions / auth_events
-- project.py    第2、3节权限与项目: project_members / ownership_transfers / admin_maintenance_actions /
-                projects / drafts / project_versions / version_refs
+- project.py    第2、3节权限与项目: admin_maintenance_actions / projects / drafts /
+                project_versions / version_refs
 - model.py      第4节系统模型: system_graphs / devices / ports / connections
 - dataset.py    第5节数据集: datasets / dataset_versions / dataset_files
 - calc.py       第6、7节配置与任务: calc_configs / calc_snapshots / tasks / task_attempts /
@@ -44,9 +44,7 @@ from iesplan.models.model import Connection, Device, Port, SystemGraph
 from iesplan.models.project import (
     AdminMaintenanceAction,
     Draft,
-    OwnershipTransfer,
     Project,
-    ProjectMember,
     ProjectVersion,
     VersionRef,
 )
@@ -75,9 +73,7 @@ __all__ = [
     "Credential",
     "WindowSession",
     "AuthEvent",
-    # 权限
-    "ProjectMember",
-    "OwnershipTransfer",
+    # 权限(0.8.0: 仅保留管理员维护审计表, 共享成员/所有权转移已剔除)
     "AdminMaintenanceAction",
     # 项目
     "Project",

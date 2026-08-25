@@ -137,7 +137,7 @@ class TestGuiUploadParity:
         from iesplan.db import Base
         from iesplan.models.dataset import Dataset
         from iesplan.models.identity import User
-        from iesplan.models.project import Project, ProjectMember
+        from iesplan.models.project import Project
 
         monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
         data_root = Path(settings.data_dir)
@@ -155,12 +155,6 @@ class TestGuiUploadParity:
             proj = Project(name="上传项目", owner_id=user.id, created_by=user.id)
             session.add(proj)
             session.flush()
-            session.add(
-                ProjectMember(
-                    project_id=proj.id, user_id=user.id, role="owner",
-                    auth_version=1, granted_by=user.id, granted_at=datetime.now(UTC),
-                )
-            )
             ds = Dataset(project_id=proj.id, name="设备数据", status="draft", created_by=user.id)
             session.add(ds)
             session.commit()

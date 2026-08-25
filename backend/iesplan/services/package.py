@@ -43,7 +43,7 @@ from iesplan.models.audit import ImportProposal
 from iesplan.models.calc import CalcSnapshot, Task
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
 from iesplan.models.identity import User
-from iesplan.models.project import Draft, Project, ProjectMember, ProjectVersion, VersionRef
+from iesplan.models.project import Draft, Project, ProjectVersion, VersionRef
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex
 from iesplan.services import audit as audit_service
 from iesplan.services import project as project_service
@@ -810,12 +810,6 @@ def import_proposal(
     )
     db.add(project)
     db.flush()
-    db.add(
-        ProjectMember(
-            project_id=project.id, user_id=user.id, role="owner",
-            auth_version=1, granted_by=user.id,
-        )
-    )
 
     # 3) 导入提案(校验报告 + 分区提交内容, 01 §10.4)
     # 0.4.0: 不再写 source_path(该列可空且无任何消费点) —— storage_path 属

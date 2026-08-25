@@ -1,11 +1,9 @@
 /**
- * 项目列表页(/):展示当前用户参与的项目(所有者/查看者)及其状态,
- * 支持新建、打开、归档/撤销归档、复制、删除(明确确认)、转移所有权、管理查看者。
+ * 项目列表页(/):展示当前用户拥有的项目(0.8.0 起无共享成员)及其状态,
+ * 支持新建、打开、归档/撤销归档、删除(明确确认)。
  *
  * 权限规则(后端仍会权威校验,此处仅为可用性提示):
- * - 查看者(role === 'viewer')仅可打开项目;其余操作禁用并显示原因
- *   (ies.project.owner_only),并附在按钮 title 上供悬停/读屏获取。
- * - 归档/删除/转移所有权/管理查看者/复制仅所有者可执行。
+ * - 仅所有者可执行归档/删除等管理操作;共享通过项目包导出/导入完成。
  *
  * 键盘可达性:
  * - 列表行可 Tab 聚焦,Enter / Space 打开项目(行内按钮独立聚焦)。
@@ -27,7 +25,6 @@ import {
   Dialog,
   EmptyState,
   FormField,
-  Icon,
   Input,
   ProjectStatusBadge,
   Select,
@@ -42,10 +39,10 @@ import {
   TaskStatusBadge,
 } from '../components/ui'
 import { ApiError } from '../types'
-import type { AdminUserRow, Currency, Project, ProjectMember, ProjectListParams, Task } from '../types'
+import type { Currency, Project, ProjectListParams, Task } from '../types'
 
 type StatusFilter = 'all' | 'active' | 'archived'
-type RowOp = 'archive' | 'unarchive' | 'duplicate' | 'delete' | 'transfer' | 'viewers'
+type RowOp = 'archive' | 'unarchive' | 'delete'
 
 interface Notice {
   kind: 'success' | 'error'
@@ -86,22 +83,6 @@ export default function ProjectsPage() {
   // 0.2.0 B4 删除确认强化: 须输入项目名精确匹配(替代旧空布尔 confirm)
   const [deleteName, setDeleteName] = useState('')
   const [deleteNameError, setDeleteNameError] = useState<string | null>(null)
-
-  // 转移所有权对话框
-  const [transferTarget, setTransferTarget] = useState<Project | null>(null)
-  const [transferUsername, setTransferUsername] = useState('')
-  const [transferUsers, setTransferUsers] = useState<AdminUserRow[]>([])
-  const [transferError, setTransferError] = useState<string | null>(null)
-  const [transferring, setTransferring] = useState(false)
-
-  // 管理查看者对话框
-  const [viewersTarget, setViewersTarget] = useState<Project | null>(null)
-  const [viewersMembers, setViewersMembers] = useState<ProjectMember[]>([])
-  const [viewersLoading, setViewersLoading] = useState(false)
-  const [viewersError, setViewersError] = useState<string | null>(null)
-  const [newViewerName, setNewViewerName] = useState('')
-  const [viewerSubmitting, setViewerSubmitting] = useState<'add' | 'remove' | null>(null)
-  const [removeTarget, setRemoveTarget] = useState<ProjectMember | null>(null)
 
   /** 请求序号:丢弃过期响应(切换筛选/并发刷新时)。 */
   const seqRef = useRef(0)
@@ -253,114 +234,6 @@ export default function ProjectsPage() {
   }
 
   // -------------------------------------------------------------------------
-  // 转移所有权
-  // -------------------------------------------------------------------------
-
-  const openTransfer = async (project: Project) => {
-    setTransferTarget(project)
-    setTransferUsername('')
-    setTransferError(null)
-    setTransferUsers([])
-    try {
-      // 有管理员接口权限时列出工程师供选择;无权限(403)时退化为手输用户名
-      const page = await api.admin.users({ status: 'active', limit: 200 })
-      setTransferUsers(page.items)
-    } catch {
-      setTransferUsers([])
-    }
-  }
-
-  const handleTransferSubmit = async () => {
-    const target = transferTarget
-    if (!target) return
-    const username = transferUsername.trim()
-    if (!username) {
-      setTransferError(t('ies.project.username_required'))
-      return
-    }
-    // 后端按用户 id 转移(target_user_id): 从管理员用户清单解析用户名 → id
-    const user = transferUsers.find((u) => u.username === username)
-    if (!user) {
-      setTransferError(t('ies.project.transfer_unknown_user', { username }))
-      return
-    }
-    setTransferring(true)
-    try {
-      await api.projects.transfer(target.id, { target_user_id: user.id })
-      setTransferTarget(null)
-      setNotice({ kind: 'success', text: t('ies.project.transfer_ok') })
-      await loadProjects(false, true)
-    } catch (err) {
-      setTransferError(translateError(err as ApiError))
-    } finally {
-      setTransferring(false)
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // 管理查看者
-  // -------------------------------------------------------------------------
-
-  const refreshViewers = async (projectId: number) => {
-    setViewersLoading(true)
-    setViewersError(null)
-    try {
-      setViewersMembers(await api.projects.viewers(projectId))
-    } catch (err) {
-      setViewersError(translateError(err as ApiError))
-    } finally {
-      setViewersLoading(false)
-    }
-  }
-
-  const openViewers = async (project: Project) => {
-    setViewersTarget(project)
-    setViewersMembers([])
-    setViewersError(null)
-    setRemoveTarget(null)
-    setNewViewerName('')
-    await refreshViewers(project.id)
-  }
-
-  const handleAddViewer = async () => {
-    const target = viewersTarget
-    if (!target) return
-    const username = newViewerName.trim()
-    if (!username) return
-    setViewerSubmitting('add')
-    try {
-      // 后端查看者接口按用户 id 操作: 先由管理员用户清单解析用户名 → id
-      const page = await api.admin.users({ limit: 1000 })
-      const user = page.items.find((u) => u.username === username)
-      if (!user) throw new ApiError(400, null, 'ies.project.viewer_not_found')
-      await api.projects.updateViewer(target.id, { user_id: user.id, action: 'add' })
-      setNewViewerName('')
-      setNotice({ kind: 'success', text: t('ies.project.viewer_added', { username }) })
-      await refreshViewers(target.id)
-    } catch (err) {
-      setViewersError(translateError(err as ApiError))
-    } finally {
-      setViewerSubmitting(null)
-    }
-  }
-
-  const handleRemoveViewer = async (member: ProjectMember) => {
-    const target = viewersTarget
-    if (!target) return
-    setViewerSubmitting('remove')
-    try {
-      await api.projects.updateViewer(target.id, { user_id: member.user_id, action: 'remove' })
-      setRemoveTarget(null)
-      setNotice({ kind: 'success', text: t('ies.project.viewer_removed', { username: member.username }) })
-      await refreshViewers(target.id)
-    } catch (err) {
-      setViewersError(translateError(err as ApiError))
-    } finally {
-      setViewerSubmitting(null)
-    }
-  }
-
-  // -------------------------------------------------------------------------
   // 键盘可达性
   // -------------------------------------------------------------------------
 
@@ -386,13 +259,9 @@ export default function ProjectsPage() {
     })
   }, [projects])
 
-  const canManage = (project: Project) => project.role !== 'viewer'
-
   // -------------------------------------------------------------------------
   // 渲染
   // -------------------------------------------------------------------------
-
-  const ownerOnly = t('ies.project.owner_only')
 
   return (
     <div className="ies-content--wide">
@@ -474,7 +343,6 @@ export default function ProjectsPage() {
           </THead>
           <TBody>
             {sortedProjects.map((project) => {
-              const viewer = !canManage(project)
               const archived = project.status === 'archived'
               const rowBusy = busy?.id === project.id
               const latest = latestTasks[project.id]
@@ -494,11 +362,7 @@ export default function ProjectsPage() {
                     ) : null}
                   </TD>
                   <TD>
-                    {viewer ? (
-                      <Badge label={t('ies.project.viewer_role')} variant="neutral" icon="info" />
-                    ) : (
-                      <Badge label={t('ies.project.owner_role')} variant="primary" icon="check" />
-                    )}
+                    <Badge label={t('ies.project.owner_role')} variant="primary" icon="check" />
                   </TD>
                   <TD>
                     <ProjectStatusBadge status={project.status} />
@@ -522,7 +386,6 @@ export default function ProjectsPage() {
                   </TD>
                   <TD>
                     <div className="ies-projects__actions" onClick={stopRow}>
-                      {viewer ? <span className="ies-projects__perm-note">{ownerOnly}</span> : null}
                       <Button size="sm" variant="ghost" onClick={() => openProject(project)}>
                         {t('ies.project.open')}
                       </Button>
@@ -530,8 +393,7 @@ export default function ProjectsPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          disabled={viewer || rowBusy}
-                          title={viewer ? ownerOnly : undefined}
+                          disabled={rowBusy}
                           loading={rowBusy && busy?.op === 'unarchive'}
                           onClick={() =>
                             void runOp('unarchive', project, () => api.projects.unarchive(project.id), 'ies.project.unarchive_ok')
@@ -543,8 +405,7 @@ export default function ProjectsPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          disabled={viewer || rowBusy}
-                          title={viewer ? ownerOnly : undefined}
+                          disabled={rowBusy}
                           loading={rowBusy && busy?.op === 'archive'}
                           onClick={() => setArchiveTarget(project)}
                         >
@@ -553,39 +414,8 @@ export default function ProjectsPage() {
                       )}
                       <Button
                         size="sm"
-                        variant="ghost"
-                        disabled={viewer || rowBusy}
-                        title={viewer ? ownerOnly : undefined}
-                        loading={rowBusy && busy?.op === 'duplicate'}
-                        onClick={() =>
-                          void runOp('duplicate', project, () => api.projects.duplicate(project.id), 'ies.project.duplicate_ok')
-                        }
-                      >
-                        {t('ies.project.duplicate')}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={viewer || rowBusy}
-                        title={viewer ? ownerOnly : undefined}
-                        onClick={() => void openTransfer(project)}
-                      >
-                        {t('ies.project.transfer')}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={viewer || rowBusy}
-                        title={viewer ? ownerOnly : undefined}
-                        onClick={() => void openViewers(project)}
-                      >
-                        {t('ies.project.viewers')}
-                      </Button>
-                      <Button
-                        size="sm"
                         variant="danger"
-                        disabled={viewer || rowBusy}
-                        title={viewer ? ownerOnly : undefined}
+                        disabled={rowBusy}
                         loading={rowBusy && busy?.op === 'delete'}
                         onClick={() => {
                           setDeleteTarget(project)
@@ -722,159 +552,6 @@ export default function ProjectsPage() {
             }}
           />
         </FormField>
-      </Dialog>
-
-      {/* 转移所有权 */}
-      <Dialog
-        open={transferTarget !== null}
-        onClose={() => setTransferTarget(null)}
-        title={t('ies.project.transfer')}
-        size="sm"
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setTransferTarget(null)} disabled={transferring}>
-              {t('ies.common.cancel')}
-            </Button>
-            <Button variant="primary" loading={transferring} onClick={() => void handleTransferSubmit()}>
-              {t('ies.project.transfer')}
-            </Button>
-          </>
-        }
-      >
-        <FormField label={t('ies.project.transfer')} htmlFor="pp-transfer-user" error={transferError}>
-          {transferUsers.length > 0 ? (
-            <Select
-              id="pp-transfer-user"
-              value={transferUsername}
-              invalid={!!transferError}
-              onChange={(event) => {
-                setTransferUsername(event.target.value)
-                setTransferError(null)
-              }}
-            >
-              <option value="">{t('ies.project.username_placeholder')}</option>
-              {transferUsers.map((user) => (
-                <option key={user.id} value={user.username}>
-                  {user.display_name} ({user.username})
-                </option>
-              ))}
-            </Select>
-          ) : (
-            <Input
-              id="pp-transfer-user"
-              value={transferUsername}
-              placeholder={t('ies.project.username_placeholder')}
-              invalid={!!transferError}
-              onChange={(event) => {
-                setTransferUsername(event.target.value)
-                setTransferError(null)
-              }}
-            />
-          )}
-        </FormField>
-        {transferTarget && transferUsername.trim() ? (
-          <p className="ies-projects__muted">
-            {t('ies.project.transfer_confirm', {
-              name: transferTarget.name,
-              username: transferUsername.trim(),
-            })}
-          </p>
-        ) : null}
-      </Dialog>
-
-      {/* 管理查看者 */}
-      <Dialog
-        open={viewersTarget !== null}
-        onClose={() => setViewersTarget(null)}
-        title={t('ies.project.viewers')}
-        size="md"
-        footer={
-          <Button variant="secondary" onClick={() => setViewersTarget(null)}>
-            {t('ies.common.close')}
-          </Button>
-        }
-      >
-        {viewersError ? (
-          <Alert variant="error" title={viewersError} closable onClose={() => setViewersError(null)}>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                if (viewersTarget) void refreshViewers(viewersTarget.id)
-              }}
-            >
-              {t('ies.common.retry')}
-            </Button>
-          </Alert>
-        ) : null}
-        {viewersLoading ? (
-          <div className="ies-projects__loading" role="status">
-            <Spinner label={t('ies.common.loading')} />
-          </div>
-        ) : viewersMembers.length === 0 ? (
-          <p className="ies-projects__muted">{t('ies.common.no_data')}</p>
-        ) : (
-          <ul className="ies-projects__members">
-            {viewersMembers.map((member) => (
-              <li key={member.user_id} className="ies-projects__member">
-                <div>
-                  <div className="ies-projects__name">{member.display_name}</div>
-                  <div className="ies-projects__desc">
-                    {member.username} · {formatDateTime(member.granted_at)}
-                  </div>
-                </div>
-                <div className="ies-projects__member-right">
-                  <Badge
-                    label={member.role === 'owner' ? t('ies.project.owner_role') : t('ies.project.viewer_role')}
-                    variant={member.role === 'owner' ? 'primary' : 'neutral'}
-                    icon={member.role === 'owner' ? 'check' : 'info'}
-                  />
-                  {removeTarget?.user_id === member.user_id ? (
-                    <span className="ies-projects__inline-confirm">
-                      <span className="ies-projects__muted">
-                        {t('ies.project.remove_viewer_confirm', { username: member.username })}
-                      </span>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        loading={viewerSubmitting === 'remove'}
-                        onClick={() => void handleRemoveViewer(member)}
-                      >
-                        {t('ies.common.confirm')}
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setRemoveTarget(null)}>
-                        {t('ies.common.cancel')}
-                      </Button>
-                    </span>
-                  ) : member.role === 'viewer' ? (
-                    <Button size="sm" variant="ghost" onClick={() => setRemoveTarget(member)}>
-                      <Icon name="trash" size={14} />
-                      {t('ies.project.remove_viewer')}
-                    </Button>
-                  ) : null}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-        <div className="ies-projects__add-viewer">
-          <Input
-            value={newViewerName}
-            placeholder={t('ies.project.username_placeholder')}
-            aria-label={t('ies.project.add_viewer')}
-            onChange={(event) => setNewViewerName(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') void handleAddViewer()
-            }}
-          />
-          <Button
-            variant="secondary"
-            loading={viewerSubmitting === 'add'}
-            onClick={() => void handleAddViewer()}
-          >
-            {t('ies.project.add_viewer')}
-          </Button>
-        </div>
       </Dialog>
     </div>
   )

@@ -31,28 +31,30 @@ test.describe('场景 7: 管理员', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, 'admin', adminPassword)
 
-    // 进入系统设置
+    // 进入账号管理(一级导航)
+    await page.getByRole('navigation', { name: /项目列表|Projects/i }).getByText('账号管理').click()
+    await expect(page).toHaveURL(/\/admin\/users$/)
+
+    // 7a. 用户管理: 找到目标用户 → 停用
+    const usersCard = page.locator('main').locator('div', { hasText: /用户管理|User management/i }).first()
+    await expect(usersCard.getByText(targetUser)).toBeVisible({ timeout: 15_000 })
+    const row = usersCard.locator('tr', { hasText: targetUser })
+    await row.getByRole('button', { name: /停用|Deactivate/i }).click()
+    await expect(usersCard.getByText(/已停用账号|deactivated/i).first()).toBeVisible({ timeout: 10_000 })
+    // 状态列变为停用
+    await expect(row.getByText(/disabled|停用/i)).toBeVisible()
+
+    // 7b. 重新启用
+    await row.getByRole('button', { name: /启用|Reactivate/i }).click()
+    await expect(usersCard.getByText(/已重新启用|reactivated/i).first()).toBeVisible({ timeout: 10_000 })
+
+    // 7c. 存储健康: 在系统设置页查看
     await page.getByRole('navigation', { name: /项目列表|Projects/i }).getByText('系统设置').click()
     await expect(page).toHaveURL(/\/settings$/)
-
-    // 7a. 存储健康卡片
     const healthCard = page.locator('.ies-settings-grid').locator('div', { hasText: /服务健康|Service health/i }).first()
     await expect(healthCard).toBeVisible({ timeout: 15_000 })
     await expect(healthCard.getByText(/已用空间|Used/i)).toBeVisible({ timeout: 15_000 })
     await expect(healthCard.getByText(/对象数|Objects/i)).toBeVisible()
-
-    // 7b. 用户管理: 找到目标用户 → 停用
-    const usersTable = page.locator('div', { hasText: /账号管理|Accounts/i }).first()
-    await expect(usersTable.getByText(targetUser)).toBeVisible({ timeout: 15_000 })
-    const row = usersTable.locator('tr', { hasText: targetUser })
-    await row.getByRole('button', { name: /停用|Deactivate/i }).click()
-    await expect(usersTable.getByText(/已停用账号|deactivated/i).first()).toBeVisible({ timeout: 10_000 })
-    // 状态列变为停用
-    await expect(row.getByText(/disabled|停用/i)).toBeVisible()
-
-    // 7c. 重新启用
-    await row.getByRole('button', { name: /启用|Reactivate/i }).click()
-    await expect(usersTable.getByText(/已重新启用|reactivated/i).first()).toBeVisible({ timeout: 10_000 })
 
     session.assertNoErrors()
     await context.close()

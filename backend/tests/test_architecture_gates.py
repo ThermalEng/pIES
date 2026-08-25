@@ -99,7 +99,7 @@ WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
     ("iesplan.api.admin", 34): frozenset({"RetentionRule"}),
     ("iesplan.api.admin", 35): frozenset({"ComputeSlot", "Task", "TaskAttempt", "TaskDiagnostic", "TaskLease"}),
     ("iesplan.api.admin", 36): frozenset({"User"}),
-    ("iesplan.api.admin", 37): frozenset({"AdminMaintenanceAction", "OwnershipTransfer", "Project", "ProjectMember"}),
+    ("iesplan.api.admin", 36): frozenset({"AdminMaintenanceAction"}),
     # ---- health.py: 健康检查直接计数 ORM ----
     ("iesplan.api.health", 26): frozenset({"Task"}),
     ("iesplan.api.health", 27): frozenset({"User"}),
@@ -109,7 +109,7 @@ WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
     ("iesplan.api.results", 30): frozenset({"HASH64_RE"}),
     # ---- limits.py: 配额统计函数内局部导入(非模块顶层) ----
     ("iesplan.api.limits", 260): frozenset({"Dataset", "DatasetFile", "DatasetVersion"}),
-    ("iesplan.api.limits", 276): frozenset({"Project", "ProjectMember"}),
+    ("iesplan.api.limits", 276): frozenset({"Project"}),
     # ---- auth.py: 认证/会话 ORM ----
     ("iesplan.api.auth", 28): frozenset({"User", "WindowSession"}),
     # ---- objects.py: 对象归属校验 ORM ----

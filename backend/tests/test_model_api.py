@@ -26,7 +26,6 @@ from iesplan.core.diagnostics import (
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
 from iesplan.models import Device, Port, Project, SystemGraph
-from iesplan.models.project import ProjectMember
 from iesplan.services import identity
 from iesplan.services import model as svc
 
@@ -80,17 +79,11 @@ def db_factory() -> tuple[sessionmaker, int]:
 
 
 def _create_project(factory: sessionmaker, name: str, admin_id: int) -> int:
-    """直连会话创建项目(含所有者成员行, 满足 U02 ensure_access), 返回项目 id。"""
+    """直连会话创建项目(projects.owner_id 记录所有者, 满足 U02 ensure_access)。"""
     with factory() as session:
         project = Project(name=name, owner_id=admin_id, created_by=admin_id)
         session.add(project)
         session.flush()
-        session.add(
-            ProjectMember(
-                project_id=project.id, user_id=admin_id, role="owner",
-                auth_version=1, granted_by=admin_id,
-            )
-        )
         session.commit()
         return project.id
 

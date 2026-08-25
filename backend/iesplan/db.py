@@ -157,6 +157,13 @@ def _migrate_constraints() -> None:
                     "AND pending_delete_until >= pending_deleted_at))"
                 )
             )
+        # 0.8.0: 剔除过度设计(复制项目/转移所有权/共享成员/管理员访问授权)后,
+        # projects.admin_access 列不再有语义, 幂等删列(旧库已删则跳过);
+        # project_members / ownership_transfers 两张废弃表一并删除
+        # (项目权限以 projects.owner_id 为唯一权威, 无历史消费方)。
+        conn.execute(sa_text("ALTER TABLE projects DROP COLUMN IF EXISTS admin_access"))
+        conn.execute(sa_text("DROP TABLE IF EXISTS project_members"))
+        conn.execute(sa_text("DROP TABLE IF EXISTS ownership_transfers"))
 
 
 def _add_column_if_missing(

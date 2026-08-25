@@ -56,9 +56,7 @@ from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa:
 from iesplan.models.identity import User  # noqa: E402
 from iesplan.models.project import (  # noqa: E402
     AdminMaintenanceAction,
-    OwnershipTransfer,
     Project,
-    ProjectMember,
 )
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.services import package as package_service  # noqa: E402
@@ -365,11 +363,7 @@ def test_viewer_can_export_excel_bilingual_and_fixed_reference(
     vid = _create_version(client, owner, pid)
     dvid = _seed_dataset_version(db, pid, tag="xls")
     ep_id, a_id = _seed_evidence(db, pid, vid, dvid, owner.id)
-    resp = client.put(
-        f"/api/projects/{pid}/viewers",
-        json={"user_id": viewer.id, "action": "add"}, headers=_h(client, owner),
-    )
-    assert resp.status_code == 200, resp.text
+    _grant_viewer(db, pid, viewer.id)
 
     resp = client.post(
         f"/api/projects/{pid}/exports/excel",
@@ -417,11 +411,7 @@ def test_viewer_cannot_export_package_and_bad_identity(
     owner = make_user(db, "owner")
     viewer = make_user(db, "viewer")
     pid = _create_project(client, owner)
-    resp = client.put(
-        f"/api/projects/{pid}/viewers",
-        json={"user_id": viewer.id, "action": "add"}, headers=_h(client, owner),
-    )
-    assert resp.status_code == 200
+    _grant_viewer(db, pid, viewer.id)
     resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, viewer))
     assert resp.status_code == 403, resp.text
     # 匿名(清空 cookie jar, 避免携带先前登录会话 Cookie)→ 401
@@ -476,11 +466,8 @@ def test_import_creates_new_identity_owner_and_evidence_source(
     assert new_project.name != old_project.name
     assert new_project.name.startswith("导出测试项目")
 
-    # 原授权关系不迁移: 新项目无原所有者成员行
-    members = db.execute(
-        select(ProjectMember).where(ProjectMember.project_id == new_project.id)
-    ).scalars().all()
-    assert len(members) == 1 and members[0].user_id == importer.id and members[0].role == "owner"
+    # 原授权关系不迁移: 0.8.0 起无成员表, 导入者即新项目唯一所有者
+    # (projects.owner_id == importer.id, 见上); 项目包内不携带账号权限。
 
     # 草稿内容迁移(模型/配置)且修订从 1 开始
     draft_content = project_service.get_current_draft_content(db, new_project.id)
@@ -758,117 +745,3 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
         headers=_h(client, admin),
     )
     assert resp.status_code == 409
-
-
-def test_admin_transfer_project_for_disabled_owner(client: TestClient, db: Session) -> None:
-    """停用所有者转移: 管理员受审计维护操作转移所有权, 原所有者变查看者。"""
-    admin = make_user(db, "admin1", role="admin")
-    owner = make_user(db, "owner")
-    target = make_user(db, "engineer")
-    pid = _create_project(client, owner)
-
-    # 非管理员 → 403
-    resp = client.post(
-        "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": target.id}, headers=_h(client, owner),
-    )
-    assert resp.status_code == 403
-
-    # 目标未启用 → 409
-    target.status = "disabled"
-    db.commit()
-    resp = client.post(
-        "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": target.id}, headers=_h(client, admin),
-    )
-    assert resp.status_code == 409, resp.text
-    target.status = "active"
-    db.commit()
-
-    # H-10: 原 owner 仍启用 → 409(须先停用)
-    resp = client.post(
-        "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": target.id, "confirm": True},
-        headers=_h(client, admin),
-    )
-    assert resp.status_code == 409, resp.text
-
-    # 停用原 owner 后: 未携带 confirm → 409(危险操作确认, 附影响范围提示)
-    owner.status = "disabled"
-    db.commit()
-    resp = client.post(
-        "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": target.id}, headers=_h(client, admin),
-    )
-    assert resp.status_code == 409, resp.text
-    body = resp.json()["error"]
-    assert body["code"] == "ADMIN-CONFIRM-REQUIRED"
-    # 影响范围提示: from_user / to_user / project_id
-    assert body["params"]["from_user"]["id"] == owner.id
-    assert body["params"]["to_user"]["id"] == target.id
-    assert body["params"]["project_id"] == pid
-    # 未确认不得执行: 所有权未转移
-    project = db.get(Project, pid)
-    assert project.owner_id == owner.id
-
-    # 携带 confirm=true 转移 → 200
-    resp = client.post(
-        "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": target.id, "confirm": True},
-        headers=_h(client, admin),
-    )
-    assert resp.status_code == 200, resp.text
-    project = db.get(Project, pid)
-    assert project.owner_id == target.id
-    # 原所有者追加为 viewer; 转移审计记录存在
-    members = db.execute(
-        select(ProjectMember).where(ProjectMember.project_id == pid, ProjectMember.revoked_at.is_(None))
-    ).scalars().all()
-    roles = {m.user_id: m.role for m in members}
-    assert roles[target.id] == "owner" and roles[owner.id] == "viewer"
-    transfer = db.execute(select(OwnershipTransfer).where(OwnershipTransfer.project_id == pid)).scalar_one()
-    assert transfer.status == "completed" and transfer.from_user_id == owner.id
-    audit = db.execute(
-        select(AuditLog).where(AuditLog.action == "maintenance.transfer_ownership")
-    ).scalar_one()
-    assert audit.actor_type == "admin"
-    assert audit.after["to_user_id"] == target.id
-
-
-def test_admin_transfer_rejects_admin_or_system_target(client: TestClient, db: Session) -> None:
-    """0.2.0 B2: 所有权转移目标必须是 active 且非 admin、非系统账号。
-
-    避免把项目转给管理员/系统账号绕过"管理员维护只读"; 即使携带 confirm
-    也拒绝(目标校验优先级高于确认)。
-    """
-    admin = make_user(db, "admin1", role="admin")
-    owner = make_user(db, "owner")
-    pid = _create_project(client, owner)
-    owner.status = "disabled"
-    db.commit()
-
-    # 目标为管理员 → 409(即使 confirm=true)
-    resp = client.post(
-        "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": admin.id, "confirm": True},
-        headers=_h(client, admin),
-    )
-    assert resp.status_code == 409, resp.text
-    assert resp.json()["error"]["params"]["role"] == "admin"
-
-    # 目标为系统账号 → 409
-    sys_user = User(
-        username="sysbot", display_name="系统账号", is_system=True, status="active",
-    )
-    db.add(sys_user)
-    db.commit()
-    resp = client.post(
-        "/api/admin/transfer-project",
-        json={"project_id": pid, "target_user_id": sys_user.id, "confirm": True},
-        headers=_h(client, admin),
-    )
-    assert resp.status_code == 409, resp.text
-
-    # 均未执行: 所有权未转移
-    project = db.get(Project, pid)
-    assert project.owner_id == owner.id

@@ -32,7 +32,7 @@ from iesplan.main import _register_exception_handlers
 from iesplan.models.identity import User
 from iesplan.models.audit import AuditLog
 from iesplan.models.model import Device, SystemGraph
-from iesplan.models.project import Draft, Project, ProjectMember
+from iesplan.models.project import Draft, Project
 from iesplan.services import config as config_service
 from iesplan.services import identity
 
@@ -81,13 +81,6 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
         created_by=owner.id,
     )
     db.add(proj)
-    db.flush()
-    db.add(
-        ProjectMember(
-            project_id=proj.id, user_id=owner.id, role="owner",
-            auth_version=1, granted_by=owner.id, granted_at=datetime.now(UTC),
-        )
-    )
     db.flush()
     draft = Draft(
         project_id=proj.id,

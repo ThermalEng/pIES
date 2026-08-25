@@ -122,10 +122,6 @@ def main():
     s, body = call("GET", "/auth/users", token=token)
     check("auth.users → {users:[UserOut]}", s == 200 and isinstance(body.get("users"), list) and "role" in body["users"][0], str(s))
 
-    # 11) viewers → {members:[...]}
-    s, body = call("GET", f"/projects/{project_id}/viewers", token=token)
-    check("projects.viewers → {members:[...]}", s == 200 and isinstance(body.get("members"), list), str(list(body.keys())))
-
     print()
     if FAIL:
         print(f"共 {len(FAIL)} 项未通过:")

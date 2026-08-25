@@ -6,11 +6,10 @@
  *   - 修改密码:调用 POST /api/auth/change-password。后端在改密后轮换凭证版本,
  *     当前会话随即失效——下一次请求由全局 401 处理器(api/client + App)引导重新登录,
  *     因此成功后仅提示(ies.auth.password_changed)并清空表单;
- *   - 账号管理(仅管理员):用户列表 + 停用/重新启用 + 删除账号
- *     (删除账号会级联删除该账号拥有的全部项目且不可恢复, 采用「预告→确认」两步:
- *      先 preview 返回将受影响项目清单 + 确认令牌, 确认时携带令牌执行删除);
+ *   - 安全设置(仅管理员): 自助注册开关
  *   - 服务健康(仅管理员):存储用量/对象数 + 健康状态
  *     (QA-E2E-01 场景 7: 管理员查看存储健康)。
+ *   账号管理(用户列表/停用/重置密码/删除)已移至一级入口 /admin/users。
  */
 
 import { useEffect, useState } from 'react'
@@ -18,9 +17,9 @@ import type { FormEvent } from 'react'
 
 import { api } from '../api/client'
 import { errorMessage, useI18n } from '../i18n'
-import { Alert, Badge, Button, Card, Dialog, FormField, Input, Table, TBody, TD, TH, THead, TR } from '../components/ui'
+import { Alert, Badge, Button, Card, FormField, Input } from '../components/ui'
 import { formatBytes } from '../lib/format'
-import type { AdminUserRow, HealthStatus, UserDeletePreview } from '../types'
+import type { HealthStatus } from '../types'
 
 export default function SettingsPage() {
   const { t, locale, setLocale } = useI18n()
@@ -32,17 +31,6 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-
-  // 账号管理(管理员)
-  const [users, setUsers] = useState<AdminUserRow[] | null>(null)
-  const [usersError, setUsersError] = useState<string | null>(null)
-  const [usersBusy, setUsersBusy] = useState(false)
-  const [usersNotice, setUsersNotice] = useState<string | null>(null)
-  // 删除账号预告(0.2.0 B1): 选中目标后先预览影响范围, 确认后携带令牌删除
-  const [deletePreview, setDeletePreview] = useState<UserDeletePreview | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<AdminUserRow | null>(null)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
-  const [deleteBusy, setDeleteBusy] = useState(false)
 
   // 安全设置(管理员): 自助注册开关
   const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null)
@@ -84,18 +72,7 @@ export default function SettingsPage() {
     }
   }
 
-  const loadUsers = () => {
-    setUsersBusy(true)
-    setUsersError(null)
-    api.admin
-      .users({ limit: 200 })
-      .then((page) => setUsers(page.items))
-      .catch((err) => setUsersError(errorText(err)))
-      .finally(() => setUsersBusy(false))
-  }
-
   useEffect(() => {
-    loadUsers()
     loadSecuritySettings()
     loadHealth()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -112,63 +89,6 @@ export default function SettingsPage() {
       })
       .catch((err) => setHealthError(errorText(err)))
       .finally(() => setHealthBusy(false))
-  }
-
-  /** 请求删除预告(0.2.0 B1): 返回将受影响项目清单 + 确认令牌, 展示在确认对话框。 */
-  const handlePreviewDeleteUser = async (user: AdminUserRow) => {
-    setDeleteTarget(user)
-    setDeleteError(null)
-    setDeletePreview(null)
-    setDeleteBusy(true)
-    try {
-      const preview = await api.admin.previewUserDelete(user.id)
-      setDeletePreview(preview)
-    } catch (err) {
-      setDeleteError(errorText(err))
-    } finally {
-      setDeleteBusy(false)
-    }
-  }
-
-  const handleDeleteUser = async () => {
-    if (!deleteTarget || !deletePreview) return
-    setDeleteBusy(true)
-    setDeleteError(null)
-    setUsersError(null)
-    setUsersNotice(null)
-    try {
-      const result = await api.admin.deleteUser(deleteTarget.id, deletePreview.confirm_token)
-      setUsersNotice(t('ies.admin.user_deleted', { username: deleteTarget.username, count: result.deleted_projects }))
-      setDeleteTarget(null)
-      setDeletePreview(null)
-      loadUsers()
-    } catch (err) {
-      setDeleteError(errorText(err))
-    } finally {
-      setDeleteBusy(false)
-    }
-  }
-
-  const handleCancelDelete = () => {
-    setDeleteTarget(null)
-    setDeletePreview(null)
-    setDeleteError(null)
-  }
-
-  const handleToggleUser = async (user: AdminUserRow, enable: boolean) => {
-    setUsersBusy(true)
-    setUsersError(null)
-    setUsersNotice(null)
-    try {
-      if (enable) await api.admin.reactivateUser(user.id)
-      else await api.admin.deactivateUser(user.id)
-      setUsersNotice(enable ? t('ies.admin.user_reactivated', { username: user.username }) : t('ies.admin.user_deactivated', { username: user.username }))
-      loadUsers()
-    } catch (err) {
-      setUsersError(errorText(err))
-    } finally {
-      setUsersBusy(false)
-    }
   }
 
   const handleChangePassword = async (event: FormEvent<HTMLFormElement>) => {
@@ -351,127 +271,7 @@ export default function SettingsPage() {
             </>
           )}
         </Card>
-
-        <Card title={t('ies.admin.accounts')}>
-          {usersError ? (
-            <Alert variant="error" title={usersError} closable onClose={() => setUsersError(null)} />
-          ) : null}
-          {usersNotice ? (
-            <Alert variant="success" closable onClose={() => setUsersNotice(null)}>
-              {usersNotice}
-            </Alert>
-          ) : null}
-          {users === null && !usersError ? (
-            <p>{t('ies.common.loading')}</p>
-          ) : (
-            <Table>
-              <THead>
-                <TR>
-                  <TH>{t('ies.admin.username')}</TH>
-                  <TH>{t('ies.admin.status')}</TH>
-                  <TH>{t('ies.admin.roles')}</TH>
-                  <TH>{t('ies.admin.actions')}</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {(users ?? []).map((u) => (
-                  <TR key={u.id}>
-                    <TD>
-                      {u.display_name}
-                      <span className="ies-mono"> ({u.username})</span>
-                    </TD>
-                    <TD>{u.status}</TD>
-                    <TD>{(u.roles ?? []).join(', ')}</TD>
-                    <TD>
-                      <div className="ies-flex" style={{ gap: 'var(--ies-space-1)' }}>
-                        {u.status === 'disabled' ? (
-                          <Button variant="secondary" size="sm" disabled={usersBusy} onClick={() => handleToggleUser(u, true)}>
-                            {t('ies.admin.reactivate')}
-                          </Button>
-                        ) : (
-                          <Button variant="secondary" size="sm" disabled={usersBusy || u.username === 'admin'} onClick={() => handleToggleUser(u, false)}>
-                            {t('ies.admin.deactivate')}
-                          </Button>
-                        )}
-                        <Button
-                          variant="danger"
-                          size="sm"
-                          disabled={usersBusy || u.username === 'admin'}
-                          onClick={() => void handlePreviewDeleteUser(u)}
-                        >
-                          {t('ies.admin.delete_user')}
-                        </Button>
-                      </div>
-                    </TD>
-                  </TR>
-                ))}
-              </TBody>
-            </Table>
-          )}
-          <p className="ies-form-message">{t('ies.admin.delete_hint')}</p>
-        </Card>
       </div>
-
-      {/* 删除账号确认(0.2.0 B1 误操作防护): 先预告影响范围, 再携带确认令牌删除 */}
-      <Dialog
-        open={deleteTarget !== null}
-        onClose={handleCancelDelete}
-        title={t('ies.admin.delete_user')}
-        size="md"
-        footer={
-          <>
-            <Button variant="secondary" onClick={handleCancelDelete} disabled={deleteBusy}>
-              {t('ies.common.cancel')}
-            </Button>
-            <Button
-              variant="danger"
-              loading={deleteBusy}
-              disabled={!deletePreview}
-              onClick={() => void handleDeleteUser()}
-            >
-              {t('ies.admin.delete_confirm')}
-            </Button>
-          </>
-        }
-      >
-        <Alert variant="error">
-          {t('ies.admin.delete_scope', { username: deleteTarget?.username ?? '' })}
-        </Alert>
-        {deleteError ? (
-          <Alert variant="error" title={deleteError} closable onClose={() => setDeleteError(null)} />
-        ) : null}
-        {deletePreview === null && !deleteError ? (
-          <p>{t('ies.common.loading')}</p>
-        ) : deletePreview !== null ? (
-          <div className="ies-config-section">
-            <h4 className="ies-config-section-title">
-              {t('ies.admin.delete_preview', { count: deletePreview.project_count })}
-            </h4>
-            {deletePreview.projects.length === 0 ? (
-              <p className="ies-form-message">{t('ies.admin.delete_preview_none')}</p>
-            ) : (
-              <Table>
-                <THead>
-                  <TR>
-                    <TH>{t('ies.admin.project_name')}</TH>
-                    <TH>{t('ies.admin.project_id')}</TH>
-                  </TR>
-                </THead>
-                <TBody>
-                  {deletePreview.projects.map((p) => (
-                    <TR key={p.id}>
-                      <TD>{p.name}</TD>
-                      <TD>
-                        <span className="ies-mono">{p.id}</span>
-                      </TD>
-                    </TR>
-                  ))}
-                </TBody>
-              </Table>
-            )}
-          </div>
-        ) : null}
-      </Dialog>
     </div>
   )
 }

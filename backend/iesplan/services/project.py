@@ -24,7 +24,6 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -38,9 +37,7 @@ from iesplan.models.calc import Task
 from iesplan.models.identity import User
 from iesplan.models.project import (
     Draft,
-    OwnershipTransfer,
     Project,
-    ProjectMember,
     ProjectVersion,
     VersionRef,
 )
@@ -66,28 +63,23 @@ class InvalidRequestError(AppError):
 # 访问控制(U02)
 # ---------------------------------------------------------------------------
 
-#: 能力矩阵: 项目角色 → 能力集合(RPD 3.2 / 20.2)
-ROLE_CAPABILITIES: dict[str, set[str]] = {
-    "owner": {
-        "view", "edit", "manage_members", "manage_lifecycle", "transfer",
-        "duplicate", "export_package", "export_excel",  # owner 覆盖 viewer 全部能力
-    },
-    "viewer": {"view", "export_excel"},
-    # 管理员经维护入口只读访问(不含业务编辑能力); 未获项目所有者授权
-    # (admin_access=false)时, 管理员连 view 都没有(项目细节与管理员隔离);
-    # 获授权后可查看细节并转移所有权(view + maintenance + transfer)
-    "maintenance_admin": {"view", "maintenance", "transfer"},
-}
+#: 所有者能力集(0.8.0: 剔除共享成员/转移所有权后, 项目权限以 projects.owner_id
+#: 为唯一权威; 共享走"导出项目包 → 他人导入"流程, 包内不携带账号权限)。
+OWNER_CAPABILITIES: frozenset[str] = frozenset(
+    {"view", "edit", "manage_lifecycle", "export_package", "export_excel"}
+)
 
 
 def get_role(db: Session, user: User, project_id: int) -> str | None:
-    """返回用户在项目中的当前角色: 'owner' | 'viewer' | None(非成员, 01 §2.1)。
+    """返回用户在项目中的角色: 'owner'(项目所有者) | None(非所有者)。
 
-    有效成员判定(M-01): revoked_at 为空 且 (expires_at 为空 或 未过期);
-    临时授权到期后视同无权限。
+    0.8.0 起不存在 viewer/成员授权: 非所有者一律无项目访问能力
+    (管理员除外, 见 ensure_access)。
     """
-    member = _current_member(db, project_id, user.id)
-    return member.role if member is not None else None
+    project = db.get(Project, project_id)
+    if project is None:
+        return None
+    return "owner" if project.owner_id == user.id else None
 
 
 def _is_admin(db: Session, user: User) -> bool:
@@ -100,19 +92,16 @@ def _is_admin(db: Session, user: User) -> bool:
 def ensure_access(db: Session, user: User, project_id: int, *capabilities: str) -> None:
     """访问判定(U02, RPD 20.2): 用户必须同时具备全部请求能力, 否则 ForbiddenError。
 
-    - owner 具备全部业务能力; viewer 只读;
-    - 管理员(全局 admin 角色)默认与项目隔离: 仅当项目所有者开启 admin_access
-      授权后方可 view + transfer; manage_lifecycle(删除/归档)始终授予管理员
-      (默认即可整体管理删除, 无需授权)。
+    - 仅项目所有者具备全部业务能力;
+    - 管理员(全局 admin 角色)始终可查看项目细节与管理生命周期(删除/归档),
+      不得业务编辑;
     - 项目不存在或已删除一律按 NotFoundError(不泄露项目存在性细节)。
     """
-    project = _get_project(db, project_id)  # 存在性检查: 不存在/已删除 → 404
-    granted = set(ROLE_CAPABILITIES.get(get_role(db, user, project_id) or "", set()))
+    _get_project(db, project_id)  # 存在性检查: 不存在/已删除 → 404
+    granted = set(OWNER_CAPABILITIES) if get_role(db, user, project_id) == "owner" else set()
     if _is_admin(db, user):
-        if project.admin_access:
-            granted |= ROLE_CAPABILITIES["maintenance_admin"]
         # 管理员始终可管理项目整体生命周期(删除/归档), 无需授权
-        granted |= {"manage_lifecycle"}
+        granted |= {"view", "manage_lifecycle"}
     missing = [cap for cap in capabilities if cap not in granted]
     if missing:
         raise ForbiddenError(
@@ -120,199 +109,6 @@ def ensure_access(db: Session, user: User, project_id: int, *capabilities: str) 
             params={"required": list(capabilities), "missing": missing, "project_id": project_id},
             location={"object_type": "project", "object_id": project_id},
         )
-
-
-def maintenance_access(db: Session, user: User, project_id: int) -> bool:
-    """管理员维护只读访问判定(U02, RPD 3.2): 管理员只读查看, 不得业务编辑。"""
-    return _is_admin(db, user)
-
-
-def add_viewer(db: Session, user: User, project_id: int, target_user_id: int) -> ProjectMember:
-    """添加查看者(仅所有者, 追加式授权, 01 §2.1)。"""
-    ensure_access(db, user, project_id, "manage_members")
-    _get_project(db, project_id)
-    target = db.get(User, target_user_id)
-    if target is None:
-        raise NotFoundError("目标用户不存在", params={"user_id": target_user_id})
-    existing = _current_member(db, project_id, target_user_id)
-    if existing is not None:
-        raise ConflictError("该用户已是项目成员", params={"user_id": target_user_id, "role": existing.role})
-    auth_version = _next_auth_version(db, project_id)
-    now = datetime.now(UTC)
-    member = ProjectMember(
-        project_id=project_id,
-        user_id=target_user_id,
-        role="viewer",
-        auth_version=auth_version,
-        granted_by=user.id,
-        granted_at=now,
-    )
-    db.add(member)
-    db.flush()
-    _audit(
-        db, "project", project_id, "project.viewer_added", user.id,
-        after={"user_id": target_user_id, "role": "viewer", "auth_version": auth_version},
-    )
-    return member
-
-
-def remove_viewer(db: Session, user: User, project_id: int, target_user_id: int) -> None:
-    """移除查看者(仅所有者; 撤销置 revoked_at, 追加式, 01 §2.1)。"""
-    ensure_access(db, user, project_id, "manage_members")
-    member = _current_member(db, project_id, target_user_id)
-    if member is None:
-        raise NotFoundError("目标用户不是项目查看者", params={"user_id": target_user_id})
-    if member.role == "owner":
-        raise ConflictError("不能移除项目所有者", params={"user_id": target_user_id})
-    member.revoked_at = datetime.now(UTC)
-    member.revoked_by = user.id
-    db.flush()
-    _audit(
-        db, "project", project_id, "project.viewer_removed", user.id,
-        after={"user_id": target_user_id, "role": "viewer"},
-    )
-
-
-def transfer_ownership(db: Session, user: User, project_id: int, target_user_id: int) -> Project:
-    """转移项目所有权(仅所有者, 原所有者默认成为查看者, RPD 3.2)。
-
-    在 ownership_transfers 记录一次性 completed 转移, 同事务内:
-    撤销原 owner → 授予新 owner → 原所有者追加 viewer 行; 项目始终至少一个 owner。
-    """
-    ensure_access(db, user, project_id, "transfer")
-    project = _get_project(db, project_id)
-    target = db.get(User, target_user_id)
-    if target is None:
-        raise NotFoundError("目标用户不存在", params={"user_id": target_user_id})
-    if target.status != "active":
-        raise ConflictError(
-            "目标用户未启用, 不能接收所有权",
-            params={"user_id": target_user_id, "status": target.status},
-        )
-    if target.is_system:
-        raise ConflictError(
-            "目标用户是系统账号, 不能接收所有权", params={"user_id": target_user_id}
-        )
-    if target_user_id == project.owner_id:
-        raise ConflictError("目标用户已是项目所有者", params={"user_id": target_user_id})
-
-    from_user_id = project.owner_id  # 原所有者(审计与撤销使用, 先于 owner_id 变更)
-    auth_version = _next_auth_version(db, project_id)
-    now = datetime.now(UTC)
-    # 目标用户若原为查看者, 先撤销其查看者行, 再授予 owner
-    target_member = _current_member(db, project_id, target_user_id)
-    if target_member is not None:
-        target_member.revoked_at = now
-        target_member.revoked_by = user.id
-    # 原所有者: 撤销 owner 行 + 追加 viewer 行
-    owner_member = _current_member(db, project_id, from_user_id)
-    if owner_member is not None:
-        owner_member.revoked_at = now
-        owner_member.revoked_by = user.id
-    db.add(
-        ProjectMember(
-            project_id=project_id, user_id=target_user_id, role="owner",
-            auth_version=auth_version, granted_by=user.id, granted_at=now,
-        )
-    )
-    db.add(
-        ProjectMember(
-            project_id=project_id, user_id=from_user_id, role="viewer",
-            auth_version=auth_version, granted_by=user.id, granted_at=now,
-        )
-    )
-    # 转移审计记录(01 §2.2)
-    db.add(
-        OwnershipTransfer(
-            project_id=project_id,
-            from_user_id=from_user_id,
-            to_user_id=target_user_id,
-            status="completed",
-            transfer_version=auth_version,
-            proposed_by=user.id,
-            proposed_at=now,
-            decided_by=user.id,
-            decided_at=now,
-            completed_at=now,
-        )
-    )
-    project.owner_id = target_user_id
-    project.updated_at = now
-    db.flush()
-    _audit(
-        db, "project", project_id, "project.transferred", user.id,
-        before={"from_user_id": from_user_id},
-        after={"to_user_id": target_user_id, "auth_version": auth_version},
-    )
-    return project
-
-
-def set_admin_access(db: Session, user: User, project_id: int, enabled: bool) -> Project:
-    """切换管理员访问授权(仅所有者): 授权后管理员可查看项目细节并转移所有权。
-
-    未授权时管理员与项目细节隔离(仅整体管理/删除), 默认关闭。
-    """
-    ensure_access(db, user, project_id, "manage_members")
-    project = _get_project(db, project_id)
-    if project.admin_access != enabled:
-        project.admin_access = enabled
-        project.updated_at = datetime.now(UTC)
-        db.flush()
-        _audit(
-            db, "project", project_id, "project.admin_access_changed", user.id,
-            after={"admin_access": enabled},
-        )
-    return project
-
-
-def list_members(db: Session, project_id: int) -> list[dict]:
-    """当前有效成员清单(供成员管理界面展示)。"""
-    rows = db.execute(
-        select(ProjectMember)
-        .where(ProjectMember.project_id == project_id, ProjectMember.revoked_at.is_(None))
-        .order_by(ProjectMember.id)
-    ).scalars().all()
-    return [
-        {
-            "user_id": m.user_id,
-            "role": m.role,
-            "auth_version": m.auth_version,
-            "granted_at": m.granted_at,
-        }
-        for m in rows
-    ]
-
-
-def _current_member(db: Session, project_id: int, user_id: int) -> ProjectMember | None:
-    """当前有效成员行(M-01): revoked_at 为空 且 (expires_at 为空 或 未过期)。"""
-    member = db.execute(
-        select(ProjectMember).where(
-            ProjectMember.project_id == project_id,
-            ProjectMember.user_id == user_id,
-            ProjectMember.revoked_at.is_(None),
-        )
-    ).scalar_one_or_none()
-    if member is None:
-        return None
-    if member.expires_at is not None and _as_utc(member.expires_at) < datetime.now(UTC):
-        # 临时授权已过期: 视同无成员(不修改行, 仅判定失效)
-        return None
-    return member
-
-
-def _as_utc(dt: datetime | None) -> datetime | None:
-    """将可能为 naive 的 datetime 按 UTC 解释(SQLite 测试环境回读为 naive)。"""
-    if dt is None:
-        return None
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
-
-
-def _next_auth_version(db: Session, project_id: int) -> int:
-    """项目级授权版本递增: 角色变更/转移/成员增减时递增(01 §2.1)。"""
-    max_av = db.execute(
-        select(func.max(ProjectMember.auth_version)).where(ProjectMember.project_id == project_id)
-    ).scalar()
-    return (max_av or 0) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -358,13 +154,8 @@ def create_project(
         db.flush()
     except IntegrityError as exc:
         raise ConflictError("已存在同名项目", params={"name": name}) from exc
-    # 初始草稿(revision=1)与所有者成员行, 与项目创建同事务
+    # 初始草稿(revision=1), 与项目创建同事务(所有者以 projects.owner_id 记录)
     _new_draft_row(db, project, _initial_content(lang), user)
-    db.add(
-        ProjectMember(
-            project_id=project.id, user_id=user.id, role="owner", auth_version=1, granted_by=user.id
-        )
-    )
     _audit(
         db, "project", project.id, "project.created", user.id,
         after={
@@ -393,33 +184,25 @@ def get_project_view(db: Session, user: User, project_id: int) -> dict:
 
 
 def list_visible_projects(db: Session, user: User) -> list[dict]:
-    """我可见的项目列表(所有者 + 查看者, 不含已删除, RPD 3.2)。
+    """我的项目列表(仅所有者, 不含已删除)。
 
-    有效成员判定含 expires_at(M-01): 临时授权到期后不再可见。
+    0.8.0 剔除共享成员: 项目只属于所有者; 共享通过项目包导出/导入完成。
     """
-    now = datetime.now(UTC)
     rows = db.execute(
-        select(Project, ProjectMember.role)
-        .join(ProjectMember, ProjectMember.project_id == Project.id)
+        select(Project)
         .where(
-            ProjectMember.user_id == user.id,
-            ProjectMember.revoked_at.is_(None),
-            sa.or_(
-                ProjectMember.expires_at.is_(None),
-                ProjectMember.expires_at > now,
-            ),
+            Project.owner_id == user.id,
             Project.status != "deleted",
         )
         .order_by(Project.created_at.desc())
-    ).all()
-    return [{**project_to_dict(p), "my_role": role} for p, role in rows]
+    ).scalars().all()
+    return [{**project_to_dict(p), "my_role": "owner"} for p in rows]
 
 
 def list_all_projects(db: Session) -> list[dict]:
     """全部项目整体视图(管理员管理入口): 含已删除, 仅整体管理字段。
 
-    不含草稿内容/版本等细节(未获授权的项目细节与管理员隔离);
-    附带 admin_access 供管理端判断是否可进入项目查看细节。
+    不含草稿内容/版本等细节(管理员经维护入口只读访问)。
     """
     projects = db.execute(
         select(Project).order_by(Project.created_at.desc())
@@ -515,53 +298,6 @@ def delete_project(
             "reason": (reason or "").strip()[:200] or None,
         },
     )
-
-
-def duplicate_project(db: Session, user: User, project_id: int, name: str | None = None) -> Project:
-    """复制项目为独立候选方案(REQ-PROJ-003): 复制者成为新项目所有者。
-
-    仅复制当前草稿内容(候选方案从当前状态开始); 版本历史不复制。
-    """
-    ensure_access(db, user, project_id, "duplicate")
-    source = _get_project(db, project_id)
-    draft = _get_current_draft(db, source)
-    content = _load_draft_content(db, draft)
-    # 新项目名称去重(名称全局唯一)
-    base = (name or "").strip() or f"{source.name} 副本"
-    candidate = base
-    index = 2
-    while db.execute(select(Project.id).where(Project.name == candidate)).first() is not None:
-        candidate = f"{base} ({index})"
-        index += 1
-    project = Project(
-        name=candidate,
-        description=source.description,
-        status="active",
-        owner_id=user.id,
-        currency=source.currency,
-        fixed_utc_offset_minutes=source.fixed_utc_offset_minutes,
-        schema_version=source.schema_version,
-        created_by=user.id,
-    )
-    db.add(project)
-    try:
-        db.flush()
-    except IntegrityError as exc:
-        raise ConflictError("已存在同名项目", params={"name": candidate}) from exc
-    # 复制内容并重置命令簿记(独立候选从干净修订开始)
-    content.pop("applied_commands", None)
-    _new_draft_row(db, project, content, user)
-    db.add(
-        ProjectMember(
-            project_id=project.id, user_id=user.id, role="owner", auth_version=1, granted_by=user.id
-        )
-    )
-    _audit(
-        db, "project", project.id, "project.duplicated", user.id,
-        after={"source_project_id": source.id, "source_draft_revision": draft.revision, "name": candidate},
-    )
-    db.flush()
-    return project
 
 
 # ---------------------------------------------------------------------------
@@ -1135,7 +871,6 @@ def project_to_dict(project: Project) -> dict:
         "currency": project.currency,
         "fixed_utc_offset_minutes": project.fixed_utc_offset_minutes,
         "schema_version": project.schema_version,
-        "admin_access": project.admin_access,
         "current_draft_id": project.current_draft_id,
         "current_version_id": project.current_version_id,
         "created_at": project.created_at,
@@ -1452,17 +1187,12 @@ __all__ = [
     "ensure_access",
     "get_role",
     "maintenance_access",
-    "add_viewer",
-    "remove_viewer",
-    "transfer_ownership",
-    "list_members",
     "create_project",
     "get_project_view",
     "list_visible_projects",
     "archive_project",
     "unarchive_project",
     "delete_project",
-    "duplicate_project",
     "update_draft",
     "create_version",
     "get_version",
@@ -1472,6 +1202,5 @@ __all__ = [
     "project_to_dict",
     "draft_to_dict",
     "version_to_dict",
-    "set_admin_access",
     "list_all_projects",
 ]

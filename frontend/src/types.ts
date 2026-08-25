@@ -107,6 +107,8 @@ export interface User {
   username: string
   display_name: string
   email: string | null
+  /** 后端 UserOut 精简角色(admin / engineer / ''), 用于前端导航权限呈现。 */
+  role: string
   status: UserStatus
   locale: string
   timezone: string
@@ -146,7 +148,7 @@ export type ProjectStatus = 'active' | 'archived' | 'deleted'
 
 export type Currency = 'CNY' | 'USD'
 
-export type ProjectRole = 'owner' | 'viewer'
+export type ProjectRole = 'owner'
 
 export interface Project {
   id: EntityId
@@ -158,8 +160,6 @@ export interface Project {
   /** 项目固定 UTC 偏移(分钟),所有时序数据按此偏移解释。 */
   fixed_utc_offset_minutes: number
   schema_version: number
-  /** 管理员访问授权(所有者控制): true = 管理员可查看细节并转移所有权。 */
-  admin_access: boolean
   current_draft_id: EntityId | null
   current_version_id: EntityId | null
   created_at: ISO8601
@@ -176,14 +176,6 @@ export interface ProjectCreateInput {
   description?: string
   currency: Currency
   fixed_utc_offset_minutes?: number
-}
-
-export interface ProjectMember {
-  user_id: EntityId
-  username: string
-  display_name: string
-  role: ProjectRole
-  granted_at: ISO8601
 }
 
 export interface ProjectDraft {

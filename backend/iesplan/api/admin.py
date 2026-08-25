@@ -2,13 +2,12 @@
 
 认证说明: 统一使用 U01 身份单元提供的窗口会话认证(iesplan.api.auth.CurrentAdmin:
 窗口凭证校验 + 全局 admin 角色判定, 未认证 401, 非管理员 403)。
-管理员经维护入口只读诊断、解锁与所有权转移, 不得直接编辑业务(RPD 3.2)。
+管理员经维护入口只读诊断与解锁, 不得直接编辑业务(RPD 3.2)。
 
 路由清单:
 - GET  /admin/audit             审计查询(过滤 + 游标分页, RPD 13.2)
 - GET  /admin/diagnostics       运维诊断视图(任务/队列/存储/保留策略/维护记录)
 - POST /admin/unlock-task       管理员解锁任务(卡死任务回收 → queued)
-- POST /admin/transfer-project  停用所有者转移(管理员受审计维护操作, RPD 3.2)
 
 集成说明: /admin/storage 与 /admin/health 由 U11(iesplan.api.objects)统一提供
 (双认证兼容 + 两版视图并集), 本模块不再重复定义, 避免路径遮蔽。
@@ -34,10 +33,8 @@ from iesplan.db import get_db
 from iesplan.models.audit import RetentionRule
 from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease
 from iesplan.models.identity import User
-from iesplan.models.project import AdminMaintenanceAction, OwnershipTransfer, Project, ProjectMember
+from iesplan.models.project import AdminMaintenanceAction
 from iesplan.services import audit as audit_service
-from iesplan.services import identity
-from iesplan.services import project as project_service
 from iesplan.services import queue
 from iesplan.services import tasks as tasks_service
 from iesplan.storage import storage_stats
@@ -151,7 +148,7 @@ def diagnostics_endpoint(
 
 
 # ---------------------------------------------------------------------------
-# 路由: 管理员维护操作(解锁 / 所有权转移)
+# 路由: 管理员维护操作(解锁)
 # ---------------------------------------------------------------------------
 
 
@@ -255,154 +252,3 @@ def unlock_task_endpoint(
     )
     db.commit()
     return {"task_id": task.id, "unlocked": True, "status": "queued"}
-
-
-class TransferProjectRequest(BaseModel):
-    """管理员转移项目所有权请求体(停用所有者转移)。
-
-    confirm: 危险操作二次确认(布尔)。所有权转移为不可轻易回退的管理
-    维护操作(原所有者降为 viewer, 新所有者获得 owner), 须显式确认才执行
-    (0.2.0 B2)。未携带 confirm 时返回 409 + 影响范围提示。
-    """
-
-    project_id: int
-    target_user_id: int
-    confirm: bool = False
-
-
-def _user_scope(user: User) -> dict[str, Any]:
-    """序列化用户作用范围提示(不含敏感字段)。"""
-    return {
-        "id": user.id,
-        "username": user.username,
-        "display_name": user.display_name,
-        "status": user.status,
-    }
-
-
-@router.post("/transfer-project", summary="停用所有者转移(管理员维护操作)")
-def transfer_project_endpoint(
-    payload: TransferProjectRequest,
-    db: Annotated[Session, Depends(get_db)],
-    admin: CurrentAdmin,
-) -> dict:
-    """被停用所有者的项目经管理员明确、受审计的维护操作转移给有效工程师(RPD 3.2)。
-
-    前置校验(H-10): 原所有者必须已停用(disabled), 否则拒绝并要求先停用其账号;
-    目标用户须存在且 status=active, 且不能是管理员或系统账号(避免把项目转给
-    管理员/系统账号绕过"管理员维护只读")。
-    危险操作防护(0.2.0 B2): 未携带 confirm=true 时返回 409, 并附影响范围
-    (from_user/to_user/项目数), 由管理员确认后重发。
-    语义: 撤销原所有者成员行 → 授予目标用户 owner(追加式授权) → 原所有者
-    追加 viewer 行 → ownership_transfers 记 completed → 审计(actor_type=admin)。
-    """
-    project = db.get(Project, payload.project_id)
-    if project is None or project.status == "deleted":
-        raise NotFoundError(
-            "项目不存在", params={"project_id": payload.project_id},
-            location={"object_type": "project", "object_id": payload.project_id},
-        )
-    target = db.get(User, payload.target_user_id)
-    if target is None:
-        raise NotFoundError("目标用户不存在", params={"user_id": payload.target_user_id})
-    if target.status != "active":
-        raise ConflictError(
-            "目标用户未启用, 不能接收所有权", params={"user_id": target.id, "status": target.status}
-        )
-    if target.is_system:
-        raise ConflictError(
-            "目标用户为系统账号, 不能接收所有权",
-            params={"user_id": target.id, "is_system": True},
-        )
-    if identity.has_role(db, target, "admin"):
-        raise ConflictError(
-            "目标用户为管理员, 不能接收所有权(管理员维护只读)",
-            params={"user_id": target.id, "role": "admin"},
-        )
-    if payload.target_user_id == project.owner_id:
-        raise ConflictError("目标用户已是项目所有者", params={"user_id": payload.target_user_id})
-
-    # H-10: 原 owner 必须已停用(管理员维护转移仅限停用所有者场景)
-    from_user_id = project.owner_id
-    from_user = db.get(User, from_user_id)
-    if from_user is not None and from_user.status == "active":
-        raise ConflictError(
-            "原所有者仍处于启用状态, 请先停用其账号再转移所有权",
-            params={"user_id": from_user_id, "status": from_user.status},
-        )
-
-    # 0.2.0 B2: 危险操作二次确认; 未确认返回影响范围提示(不执行)
-    if not payload.confirm:
-        raise ConflictError(
-            "所有权转移为危险维护操作, 须携带 confirm=true 确认后执行",
-            code="ADMIN-CONFIRM-REQUIRED",
-            message_key="ies.diag.admin.confirm_required",
-            params={
-                "hint": "确认后原所有者将降为只读查看者, 新所有者获得项目 owner 权限",
-                "from_user": _user_scope(from_user) if from_user is not None else {"id": from_user_id},
-                "to_user": _user_scope(target),
-                "project_id": project.id,
-                "project_count": 1,
-            },
-            location={"object_type": "project", "object_id": project.id},
-        )
-
-    max_av = db.execute(
-        select(func.max(ProjectMember.auth_version)).where(ProjectMember.project_id == project.id)
-    ).scalar()
-    auth_version = (max_av or 0) + 1
-    now = datetime.now(UTC)
-    # 撤销原所有者 + 目标用户既有成员行, 再授予
-    for member in db.execute(
-        select(ProjectMember).where(
-            ProjectMember.project_id == project.id,
-            ProjectMember.user_id.in_((from_user_id, payload.target_user_id)),
-            ProjectMember.revoked_at.is_(None),
-        )
-    ).scalars():
-        member.revoked_at = now
-        member.revoked_by = admin.id
-    db.add(
-        ProjectMember(
-            project_id=project.id, user_id=payload.target_user_id, role="owner",
-            auth_version=auth_version, granted_by=admin.id, granted_at=now,
-        )
-    )
-    db.add(
-        ProjectMember(
-            project_id=project.id, user_id=from_user_id, role="viewer",
-            auth_version=auth_version, granted_by=admin.id, granted_at=now,
-        )
-    )
-    db.add(
-        OwnershipTransfer(
-            project_id=project.id, from_user_id=from_user_id, to_user_id=payload.target_user_id,
-            status="completed", transfer_version=auth_version,
-            proposed_by=admin.id, proposed_at=now,
-            decided_by=admin.id, decided_at=now, completed_at=now,
-        )
-    )
-    project.owner_id = payload.target_user_id
-    project.updated_at = now
-    db.flush()
-    _record_maintenance(
-        db, admin, "user_override",
-        params={"project_id": project.id, "from_user_id": from_user_id},
-        result={"to_user_id": payload.target_user_id, "auth_version": auth_version},
-    )
-    audit_service.audit(
-        db, admin.id, audit_service.AUDIT_MAINTENANCE_TRANSFER_OWNERSHIP, "project", project.id,
-        actor_type="admin",
-        before={"from_user_id": from_user_id},
-        extra={"to_user_id": payload.target_user_id, "auth_version": auth_version},
-    )
-    db.commit()
-    return {
-        "project_id": project.id,
-        "from_user_id": from_user_id,
-        "to_user_id": payload.target_user_id,
-        "from_user": _user_scope(from_user) if from_user is not None else {"id": from_user_id},
-        "to_user": _user_scope(target),
-        "project_count": 1,
-        "my_role": project_service.get_role(db, admin, project.id),
-    }

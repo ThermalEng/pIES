@@ -25,7 +25,7 @@ from iesplan.config import settings
 from iesplan.core.timeaxis import build_axis
 from iesplan.db import Base, get_db
 from iesplan.models.dataset import DatasetFile, DatasetVersion
-from iesplan.models.project import Project, ProjectMember
+from iesplan.models.project import Project
 from iesplan.services import dataset as ds_service
 from iesplan.services.dataset import (
     STANDARD_FIELDS,
@@ -76,16 +76,10 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _make_project(session: Session, user, name: str = "测试项目") -> Project:
-    """创建测试项目(含所有者成员行, 满足项目权限判定)。"""
+    """创建测试项目(projects.owner_id 记录所有者, 满足项目权限判定)。"""
     proj = Project(name=name, owner_id=user.id, created_by=user.id)
     session.add(proj)
     session.flush()
-    session.add(
-        ProjectMember(
-            project_id=proj.id, user_id=user.id, role="owner",
-            auth_version=1, granted_by=user.id, granted_at=datetime.now(UTC),
-        )
-    )
     session.flush()
     return proj
 

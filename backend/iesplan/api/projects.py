@@ -15,9 +15,6 @@
 - POST   /api/projects/{id}/apply-result       应用选定结果(参数差异补丁→新草稿+新版本)
 - POST   /api/projects/{id}/archive|unarchive  归档/撤销归档
 - DELETE /api/projects/{id}                    删除(须 confirm: true)
-- POST   /api/projects/{id}/duplicate          复制为独立候选方案
-- POST   /api/projects/{id}/transfer           转移所有权(原所有者→viewer)
-- PUT    /api/projects/{id}/viewers            添加/移除查看者
 """
 
 from __future__ import annotations
@@ -78,25 +75,6 @@ class DeleteConfirmRequest(BaseModel):
     confirm: bool = False
     name: str | None = Field(default=None, max_length=200)
     reason: str | None = Field(default=None, max_length=1000)
-
-
-class TransferRequest(BaseModel):
-    """所有权转移请求体。"""
-
-    target_user_id: int
-
-
-class ViewerRequest(BaseModel):
-    """查看者管理请求体。"""
-
-    user_id: int
-    action: Literal["add", "remove"]
-
-
-class DuplicateRequest(BaseModel):
-    """复制项目请求体(名称可选, 缺省 "<原名> 副本")。"""
-
-    name: str | None = Field(default=None, max_length=200)
 
 
 class RestoreRequest(BaseModel):
@@ -296,28 +274,6 @@ def unarchive_project_endpoint(
     }
 
 
-class AdminAccessRequest(BaseModel):
-    """管理员访问授权切换请求体(仅所有者)。"""
-
-    enabled: bool
-
-
-@router.put("/{project_id}/admin-access", summary="切换管理员访问授权(所有者)")
-def set_admin_access_endpoint(
-    project_id: int,
-    payload: AdminAccessRequest,
-    db: Annotated[Session, Depends(get_db)],
-    user: CurrentUser,
-) -> dict:
-    """所有者授权管理员查看项目细节并转移所有权; 关闭后管理员与项目细节隔离。"""
-    project = project_service.set_admin_access(db, user, project_id, payload.enabled)
-    db.commit()
-    return {
-        "project": project_service.project_to_dict(project),
-        "my_role": project_service.get_role(db, user, project_id),
-    }
-
-
 @router.delete("/{project_id}", status_code=204, summary="删除项目")
 def delete_project_endpoint(
     project_id: int,
@@ -335,64 +291,6 @@ def delete_project_endpoint(
         name=payload.name, reason=payload.reason,
     )
     db.commit()
-
-
-@router.post("/{project_id}/duplicate", status_code=201, summary="复制为独立候选方案")
-def duplicate_project_endpoint(
-    project_id: int,
-    db: Annotated[Session, Depends(get_db)],
-    user: CurrentUser,
-    payload: DuplicateRequest | None = None,
-) -> dict:
-    """复制项目为独立候选方案(复制者成为新项目所有者)。"""
-    project = project_service.duplicate_project(
-        db, user, project_id, name=payload.name if payload else None
-    )
-    db.commit()
-    return {"project": project_service.project_to_dict(project), "my_role": "owner"}
-
-
-@router.post("/{project_id}/transfer", summary="转移项目所有权")
-def transfer_ownership_endpoint(
-    project_id: int,
-    payload: TransferRequest,
-    db: Annotated[Session, Depends(get_db)],
-    user: CurrentUser,
-) -> dict:
-    """转移所有权: 原所有者默认成为查看者(RPD 3.2)。"""
-    project = project_service.transfer_ownership(db, user, project_id, payload.target_user_id)
-    db.commit()
-    return {
-        "project": project_service.project_to_dict(project),
-        "my_role": project_service.get_role(db, user, project_id),
-    }
-
-
-@router.put("/{project_id}/viewers", summary="添加/移除查看者")
-def viewers_endpoint(
-    project_id: int,
-    payload: ViewerRequest,
-    db: Annotated[Session, Depends(get_db)],
-    user: CurrentUser,
-) -> dict:
-    """添加/移除查看者(仅所有者), 返回当前有效成员清单。"""
-    if payload.action == "add":
-        project_service.add_viewer(db, user, project_id, payload.user_id)
-    else:
-        project_service.remove_viewer(db, user, project_id, payload.user_id)
-    db.commit()
-    return {"members": project_service.list_members(db, project_id)}
-
-
-@router.get("/{project_id}/viewers", summary="查看者/成员清单")
-def list_viewers_endpoint(
-    project_id: int,
-    db: Annotated[Session, Depends(get_db)],
-    user: CurrentUser,
-) -> dict:
-    """当前有效成员清单(所有者/查看者; 需项目 view 权限)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    return {"members": project_service.list_members(db, project_id)}
 
 
 # ---------------------------------------------------------------------------

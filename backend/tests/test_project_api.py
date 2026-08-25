@@ -1,9 +1,8 @@
 """项目权限(U02)与项目/草稿/版本(U03) API 集成测试。
 
-覆盖流程: 创建→添加查看者→查看者只读(编辑 403)→所有者编辑(修订递增/幂等/冲突)
-→版本创建(内容快照)→归档后禁止编辑→删除流程(需显式确认)→所有权转移
-(原所有者变 viewer)→审计事件存在; 另覆盖: 恢复版本、应用结果、复制项目、
-管理员维护只读、查看者移除、可见列表与无效命令。
+覆盖流程: 创建→查看者只读(编辑 403)→所有者编辑(修订递增/幂等/冲突)
+→版本创建(内容快照)→归档后禁止编辑→删除流程(需显式确认)→审计事件存在;
+另覆盖: 恢复版本、应用结果、管理员维护只读、可见列表与无效命令。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录,
 不依赖部署 Postgres; 通过 app.dependency_overrides 替换 get_db。
@@ -126,10 +125,10 @@ def _load_content(db: Session, oid: str) -> dict:
 
 
 def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None:
-    """创建→查看者→只读→编辑→版本→归档→删除→转移→审计 全流程。"""
+    """创建→非所有者不可见→编辑→版本→归档→删除→审计 全流程。"""
     owner = make_user(db_session, "owner1")
-    viewer = make_user(db_session, "viewer1")
-    owner_h, viewer_h = _h(client, owner), _h(client, viewer)
+    stranger = make_user(db_session, "stranger1")
+    owner_h = _h(client, owner)
 
     # 1. 创建项目: 创建者=所有者, 初始草稿 revision=1
     resp = client.post(
@@ -150,31 +149,16 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert view["draft"]["content"]["calc_config"]["params"] == {}
     assert view["versions"] == []
 
-    # 2. 添加查看者
-    resp = client.put(
-        f"/api/projects/{pid}/viewers",
-        json={"user_id": viewer.id, "action": "add"},
-        headers=owner_h,
-    )
-    assert resp.status_code == 200
-    members = resp.json()["members"]
-    roles = {m["user_id"]: m["role"] for m in members}
-    assert roles == {owner.id: "owner", viewer.id: "viewer"}
-
-    # 非成员不可见(403)
-    stranger = make_user(db_session, "stranger1")
+    # 2. 非所有者不可见/不可编辑(0.8.0 起无共享成员, 权限仅属所有者)
     assert client.get(f"/api/projects/{pid}", headers=_h(client, stranger)).status_code == 403
-
-    # 3. 查看者只读: GET 200, 编辑 403
-    assert client.get(f"/api/projects/{pid}", headers=viewer_h).status_code == 200
     edit_payload = {
         "expected_revision": 1,
         "commands": [_device_cmd("cmd-x", "热泵X")],
     }
-    resp = client.put(f"/api/projects/{pid}/draft", json=edit_payload, headers=viewer_h)
+    resp = client.put(f"/api/projects/{pid}/draft", json=edit_payload, headers=_h(client, stranger))
     assert resp.status_code == 403
 
-    # 4. 所有者编辑(语义命令, 乐观锁, 幂等)
+    # 3. 所有者编辑(语义命令, 乐观锁, 幂等)
     commands = [
         {
             "id": "cmd-1", "project_id": pid, "expected_revision": 1, "session": "win-1",
@@ -284,40 +268,18 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert resp.status_code == 204
     assert client.get(f"/api/projects/{pid}", headers=owner_h).status_code == 404
 
-    # 8. 所有权转移: 原所有者变 viewer
-    pid2 = _create_project(client, owner, "转移测试项目")
-    resp = client.post(
-        f"/api/projects/{pid2}/transfer",
-        json={"target_user_id": viewer.id},
-        headers=owner_h,
-    )
-    assert resp.status_code == 200
-    assert resp.json()["project"]["owner_id"] == viewer.id
-    assert resp.json()["my_role"] == "viewer"
-    # 原所有者不能再编辑, 新所有者可以
-    resp = client.put(f"/api/projects/{pid2}/draft", json=edit_payload, headers=owner_h)
-    assert resp.status_code == 403
-    resp = client.put(f"/api/projects/{pid2}/draft", json=edit_payload, headers=viewer_h)
-    assert resp.status_code == 200
-
-    # 9. 审计事件存在
+    # 8. 审计事件存在
     rows = db_session.execute(select(AuditLog).order_by(AuditLog.id)).scalars().all()
     actions = [row.action for row in rows]
     for expected in (
         "project.created",
-        "project.viewer_added",
         "project.draft_updated",
         "project.version_created",
         "project.archived",
         "project.unarchived",
         "project.deleted",
-        "project.transferred",
     ):
         assert expected in actions, f"缺少审计事件 {expected}: {actions}"
-    # 转移审计含转移前后双方
-    transfer_log = next(row for row in rows if row.action == "project.transferred")
-    assert transfer_log.before["from_user_id"] == owner.id
-    assert transfer_log.after["to_user_id"] == viewer.id
     # 删除审计含确认方式与原因(0.2.0 B4)
     deleted_log = next(row for row in rows if row.action == "project.deleted")
     assert deleted_log.after["confirm"] == "name"
@@ -441,102 +403,30 @@ def test_apply_result(client: TestClient, db_session: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 复制 / 维护访问 / 列表 / 成员管理 / 命令校验
+# 维护访问 / 列表 / 命令校验
 # ---------------------------------------------------------------------------
 
 
-def test_duplicate_project(client: TestClient, db_session: Session) -> None:
-    """复制项目为独立候选方案(复制者为新所有者, 内容随副本)。"""
-    owner = make_user(db_session, "owner_dup")
-    owner_h = _h(client, owner)
-    pid = _create_project(client, owner, "复制源项目")
-    resp = client.put(
-        f"/api/projects/{pid}/draft",
-        json={
-            "expected_revision": 1,
-            "commands": [_device_cmd("d-cmd-1", "光伏1", "pv", "new")],
-        },
-        headers=owner_h,
-    )
-    assert resp.status_code == 200 and resp.json()["revision"] == 2
-
-    resp = client.post(f"/api/projects/{pid}/duplicate", headers=owner_h)
-    assert resp.status_code == 201
-    dup = resp.json()["project"]
-    assert dup["id"] != pid
-    assert dup["name"] == "复制源项目 副本"
-    assert dup["owner_id"] == owner.id
-
-    # 副本草稿从 revision=1 开始, 领域内容与源一致
-    dup_view = client.get(f"/api/projects/{dup['id']}", headers=owner_h).json()
-    assert dup_view["draft"]["revision"] == 1
-    src_view = client.get(f"/api/projects/{pid}", headers=owner_h).json()
-    src_content = {k: v for k, v in src_view["draft"]["content"].items() if k != "applied_commands"}
-    dup_content = {k: v for k, v in dup_view["draft"]["content"].items() if k != "applied_commands"}
-    assert src_content == dup_content
-
-
 def test_admin_maintenance_readonly(client: TestClient, db_session: Session) -> None:
-    """管理员访问门禁: 未获所有者授权时项目细节隔离(403), 授权后可读/可转移; 均不能业务编辑。
-
-    - 默认 admin_access=false: 管理员 GET 项目 → 403(细节隔离), transfer → 403,
-      但可删除(整体管理, 无需授权);
-    - 所有者开启授权后: 管理员可读、可转移所有权, 仍不能编辑(维护只读);
-    - 非成员非管理员 → 403。
-    """
+    """管理员维护访问: 可读/可删/可转移(admin.py 维护入口), 不能业务编辑; 非成员 403。"""
     owner = make_user(db_session, "owner_maint")
     admin = make_user(db_session, "admin_maint", role="admin")
     stranger = make_user(db_session, "stranger_maint")
-    recipient = make_user(db_session, "recipient_maint")
     pid = _create_project(client, owner, "维护测试")
 
-    # 未授权: 管理员不可读项目细节, 不可转移所有权
-    assert client.get(f"/api/projects/{pid}", headers=_h(client, admin)).status_code == 403
-    resp = client.post(
-        f"/api/projects/{pid}/transfer",
-        json={"target_user_id": recipient.id},
-        headers=_h(client, admin),
-    )
-    assert resp.status_code == 403
-    # 未授权: 管理员仍可删除(整体管理, 无需授权; 0.2.0 B4 需项目名/原因确认)
+    # 管理员可读项目细节(维护只读), 可删除(整体管理, 0.2.0 B4 需项目名/原因确认)
+    assert client.get(f"/api/projects/{pid}", headers=_h(client, admin)).status_code == 200
     resp = client.request(
         "DELETE", f"/api/projects/{pid}", headers=_h(client, admin),
         json={"confirm": True, "name": "维护测试"},
     )
     assert resp.status_code == 204
-    # 恢复(重新创建)后授权 → 可读、可转移, 仍不可编辑
+
+    # 管理员不能业务编辑(维护只读)
     pid2 = _create_project(client, owner, "维护测试2")
-    assert client.get(f"/api/projects/{pid2}", headers=_h(client, admin)).status_code == 403
-    resp = client.put(
-        f"/api/projects/{pid2}/admin-access",
-        json={"enabled": True},
-        headers=_h(client, owner),
-    )
-    assert resp.status_code == 200
-    assert client.get(f"/api/projects/{pid2}", headers=_h(client, admin)).status_code == 200
     resp = client.put(
         f"/api/projects/{pid2}/draft",
         json={"expected_revision": 1, "commands": []},
-        headers=_h(client, admin),
-    )
-    assert resp.status_code == 403
-    # 授权后: 管理员可转移所有权(需求: 授权后可转移至另一账号)
-    resp = client.post(
-        f"/api/projects/{pid2}/transfer",
-        json={"target_user_id": recipient.id},
-        headers=_h(client, admin),
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["project"]["owner_id"] == recipient.id
-    assert body["my_role"] is None  # 管理员非项目成员, 凭 admin 角色 + 授权访问
-    # 新所有者可读; 原所有者降为 viewer; 管理员仍不可编辑
-    assert client.get(f"/api/projects/{pid2}", headers=_h(client, recipient)).status_code == 200
-    owner_view = client.get(f"/api/projects/{pid2}", headers=_h(client, owner))
-    assert owner_view.status_code == 200 and owner_view.json()["my_role"] == "viewer"
-    resp = client.put(
-        f"/api/projects/{pid2}/draft",
-        json={"expected_revision": 2, "commands": []},
         headers=_h(client, admin),
     )
     assert resp.status_code == 403
@@ -545,53 +435,19 @@ def test_admin_maintenance_readonly(client: TestClient, db_session: Session) -> 
 
 
 def test_visible_listing(client: TestClient, db_session: Session) -> None:
-    """可见列表: 所有者与查看者可见, 非成员不可见。"""
+    """可见列表: 仅所有者可见(0.8.0 起无共享成员), 非所有者不可见。"""
     owner = make_user(db_session, "owner_list")
-    viewer = make_user(db_session, "viewer_list")
+    other = make_user(db_session, "other_list")
     stranger = make_user(db_session, "stranger_list")
     pid = _create_project(client, owner, "列表项目")
-    resp = client.put(
-        f"/api/projects/{pid}/viewers",
-        json={"user_id": viewer.id, "action": "add"},
-        headers=_h(client, owner),
-    )
-    assert resp.status_code == 200
 
     owner_list = client.get("/api/projects", headers=_h(client, owner)).json()["projects"]
-    viewer_list = client.get("/api/projects", headers=_h(client, viewer)).json()["projects"]
+    other_list = client.get("/api/projects", headers=_h(client, other)).json()["projects"]
     stranger_list = client.get("/api/projects", headers=_h(client, stranger)).json()["projects"]
     assert [p["id"] for p in owner_list] == [pid]
-    assert [p["id"] for p in viewer_list] == [pid]
+    assert other_list == []
     assert stranger_list == []
     assert owner_list[0]["my_role"] == "owner"
-    assert viewer_list[0]["my_role"] == "viewer"
-
-
-def test_remove_viewer(client: TestClient, db_session: Session) -> None:
-    """移除查看者后失去读权限; 不能移除所有者。"""
-    owner = make_user(db_session, "owner_rmv")
-    viewer = make_user(db_session, "viewer_rmv")
-    pid = _create_project(client, owner, "移除查看者")
-    client.put(
-        f"/api/projects/{pid}/viewers",
-        json={"user_id": viewer.id, "action": "add"},
-        headers=_h(client, owner),
-    )
-    resp = client.put(
-        f"/api/projects/{pid}/viewers",
-        json={"user_id": viewer.id, "action": "remove"},
-        headers=_h(client, owner),
-    )
-    assert resp.status_code == 200
-    assert [m["user_id"] for m in resp.json()["members"]] == [owner.id]
-    assert client.get(f"/api/projects/{pid}", headers=_h(client, viewer)).status_code == 403
-    # 不能移除所有者
-    resp = client.put(
-        f"/api/projects/{pid}/viewers",
-        json={"user_id": owner.id, "action": "remove"},
-        headers=_h(client, owner),
-    )
-    assert resp.status_code == 409
 
 
 def test_invalid_commands(client: TestClient, db_session: Session) -> None:

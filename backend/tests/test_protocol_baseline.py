@@ -345,7 +345,6 @@ def test_success_wrappers_projects_domain(client: TestClient, db: Session) -> No
     _assert_wrapper(client.get("/api/projects", headers=_bearer(tok)), {"projects"})
     _assert_wrapper(client.get(f"/api/projects/{pid}", headers=_bearer(tok)), {"project", "draft", "versions", "my_role"})
     _assert_wrapper(client.get(f"/api/projects/{pid}/versions", headers=_bearer(tok)), {"versions"})
-    _assert_wrapper(client.get(f"/api/projects/{pid}/viewers", headers=_bearer(tok)), {"members"})
 
 
 def test_success_wrappers_tasks_results_domain(client: TestClient, db: Session) -> None:

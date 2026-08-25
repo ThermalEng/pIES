@@ -31,9 +31,6 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
         {"healthy", "maintenance_actions", "queue", "retention_rules", "storage", "tasks"}
     ),
     "unlock_task_endpoint": frozenset({"status", "task_id", "unlocked", "message"}),
-    "transfer_project_endpoint": frozenset(
-        {"from_user", "from_user_id", "my_role", "project_count", "project_id", "to_user", "to_user_id"}
-    ),
     # ---- auth.py ----
     "login": frozenset({"token", "token_type", "user", "needs_takeover_confirm"}),  # AuthResponse
     "logout": frozenset({"ok"}),
@@ -117,12 +114,7 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "apply_result_endpoint": frozenset({"draft", "version"}),  # services.project.apply_result
     "archive_project_endpoint": frozenset({"my_role", "project"}),
     "unarchive_project_endpoint": frozenset({"my_role", "project"}),
-    "set_admin_access_endpoint": frozenset({"my_role", "project"}),
     "delete_project_endpoint": frozenset({"deleted", "ok"}),
-    "duplicate_project_endpoint": frozenset({"my_role", "project"}),
-    "transfer_ownership_endpoint": frozenset({"my_role", "project"}),
-    "viewers_endpoint": frozenset({"members"}),
-    "list_viewers_endpoint": frozenset({"members"}),
     "import_package_endpoint": frozenset({"proposal"}),
     "confirm_import_endpoint": frozenset({"my_role", "project"}),
     # ---- results.py ----
