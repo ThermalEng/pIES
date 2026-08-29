@@ -53,6 +53,13 @@ ASM_EDGE_LOOSE_BIDI = "ASM-EDGE-008"  # 双向-双向直连且母线无其他确
 ASM_EDGE_ZERO_CAP = "ASM-EDGE-009"  # 边容量为 0 或负值(警告)
 
 # ---------------------------------------------------------------------------
+# 装配 2.0.0 接口网络纯协议校验(0.8.0 切片): 连接/绑定/内容锁
+# ---------------------------------------------------------------------------
+ASM_EDGE_RANGE_CONFLICT = "ASM-EDGE-010"  # 连接两端有效区间无交集(值域冲突)
+ASM_BIND_INVALID = "ASM-BIND-001"  # 预定义绑定非法(接口类型/来源模式/数据引用不匹配)
+ASM_LOCK_MISMATCH = "ASM-LOCK-001"  # 设备实例 definition 与 descriptor 内容锁不一致
+
+# ---------------------------------------------------------------------------
 # 阶段 C:模型可解性(引用与输入完备)
 # ---------------------------------------------------------------------------
 ASM_REF_DUP_DEVICE = "ASM-REF-001"  # 设备实例 id 重复
@@ -113,6 +120,9 @@ ASM_MESSAGE_KEYS: dict[str, str] = {
     ASM_EDGE_DUPLICATE: "ies.diag.asm.edge.duplicate",
     ASM_EDGE_LOOSE_BIDI: "ies.diag.asm.edge.loose_bidi",
     ASM_EDGE_ZERO_CAP: "ies.diag.asm.edge.zero_capacity",
+    ASM_EDGE_RANGE_CONFLICT: "ies.diag.asm.edge.range_conflict",
+    ASM_BIND_INVALID: "ies.diag.asm.bind.invalid",
+    ASM_LOCK_MISMATCH: "ies.diag.asm.lock.mismatch",
     # ref.*
     ASM_REF_DUP_DEVICE: "ies.diag.asm.ref.dup_device",
     ASM_REF_MODEL_UNREG: "ies.diag.asm.ref.model_unregistered",
@@ -167,6 +177,8 @@ ASM_ALL_CODES: tuple[str, ...] = tuple(ASM_MESSAGE_KEYS)
 ASM_KEY_CATEGORIES: tuple[str, ...] = (
     "syntax",
     "edge",
+    "bind",
+    "lock",
     "ref",
     "input",
     "pipe",
@@ -241,6 +253,9 @@ __all__ = [
     "ASM_EDGE_DUPLICATE",
     "ASM_EDGE_LOOSE_BIDI",
     "ASM_EDGE_ZERO_CAP",
+    "ASM_EDGE_RANGE_CONFLICT",
+    "ASM_BIND_INVALID",
+    "ASM_LOCK_MISMATCH",
     "ASM_REF_DUP_DEVICE",
     "ASM_REF_MODEL_UNREG",
     "ASM_REF_PORT_UNDEF",

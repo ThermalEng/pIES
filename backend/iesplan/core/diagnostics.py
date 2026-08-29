@@ -193,6 +193,19 @@ NEW_DIAG_CODES: dict[str, str] = {
     "ASM-OUT-001": "输出引用未定义设备或端口",
     "ASM-ART-001": "规范文本、摘要与校验回执不一致",
     "ASM-CONV-001": "旧装配形态无法唯一迁移到 ies.assembly 1.0.0",
+    # 装配 2.0.0 接口网络纯协议校验(0.8.0 切片): 值域冲突/预定义绑定/内容锁
+    "ASM-EDGE-010": "连接两端有效区间无交集(值域冲突)",
+    "ASM-BIND-001": "预定义接口绑定非法(来源模式/数据引用/接口类型不匹配)",
+    "ASM-LOCK-001": "设备实例 definition 与提供的 descriptor 内容锁不一致",
+    # 技术方程建模 2.0.0 contract(0.8.0 切片): 公共 AST 与数学贡献诊断
+    "MOD-EQ-001": "方程表达式语法非法: {detail}",
+    "MOD-EQ-002": "方程引用了未声明的标识符: {name}(只允许 properties/interfaces/equations.variables)",
+    "MOD-EQ-003": "方程量纲/单位冲突: {detail}",
+    "MOD-EQ-004": "方程存在循环引用: {cycle}",
+    "MOD-EQ-005": "关系输出冲突: {detail}",
+    "MOD-EQ-006": "状态变量缺少 initial 初值: {name}",
+    "MOD-EQ-007": "非时变 property 被时间索引引用: {name}",
+    "MOD-EQ-008": "方程引用了 blind 接口(不连接、不接收数据): {name}",
 }
 
 # ---------------------------------------------------------------------------
