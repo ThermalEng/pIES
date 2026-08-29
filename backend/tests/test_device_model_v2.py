@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 
+from iesplan.core.yamlmini import YamlParseError
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices.contracts2 import (
     SCHEMA_ID,
@@ -19,7 +20,6 @@ from iesplan.devices.contracts2 import (
 from iesplan.devices.migration2 import migrate_v1_to_v2
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.devices.template2 import instantiate_template
-
 
 # ---------------------------------------------------------------------------
 # 合法样例
@@ -145,7 +145,7 @@ equations:
       initial: {property_ref: initial_soc}
   relations:
     - id: soc_transition
-      expression: "soc[t] = soc[t-1] + charge_in[t] * charge_efficiency - discharge_out[t] / discharge_efficiency"
+      expression: "soc[t] = soc[t-1] + charge_in[t] - discharge_out[t]"
 """
         r = _parse(text)
         assert r.ok, [d.params.get("detail") for d in r.diagnostics]
@@ -257,7 +257,12 @@ class TestInvalidModel:
         assert d
 
     def test_property_range_inverted(self):
-        d = self._diag_details(HEAT_PUMP_YAML.replace("minimum: 1\n      maximum: 10", "minimum: 10\n      maximum: 1"))
+        d = self._diag_details(
+            HEAT_PUMP_YAML.replace(
+                "minimum: 1\n      maximum: 10",
+                "minimum: 10\n      maximum: 1",
+            )
+        )
         assert any("minimum" in x and "maximum" in x for x in d)
 
     def test_interface_bad_type(self):
@@ -267,7 +272,8 @@ class TestInvalidModel:
     def test_interface_source_on_in(self):
         text = HEAT_PUMP_YAML.replace(
             "  electricity_in:\n    type: in\n    carrier: electricity",
-            "  electricity_in:\n    type: in\n    carrier: electricity\n    source:\n      mode: constant\n      value: 5",
+            "  electricity_in:\n    type: in\n    carrier: electricity\n"
+            "    source:\n      mode: constant\n      value: 5",
         )
         d = self._diag_details(text)
         assert any("禁止声明 source" in x for x in d)
@@ -284,7 +290,8 @@ class TestInvalidModel:
     def test_blind_with_source(self):
         text = HEAT_PUMP_YAML.replace(
             "  unused_terminal:\n    carrier: heat",
-            "  unused_terminal:\n    type: blind\n    carrier: heat\n    source:\n      mode: constant\n      value: 1",
+            "  unused_terminal:\n    type: blind\n    carrier: heat\n"
+            "    source:\n      mode: constant\n      value: 1",
         )
         d = self._diag_details(text)
         assert any("禁止声明 source" in x for x in d)
@@ -295,8 +302,10 @@ class TestInvalidModel:
         assert any("必须声明 value" in x for x in d)
 
     def test_data_repeat_missing_data_ref(self):
-        text = HEAT_PUMP_YAML.replace("      mode: data_predict\n      data_ref: ambient_temperature_prediction",
-                                      "      mode: data_predict")
+        text = HEAT_PUMP_YAML.replace(
+            "      mode: data_predict\n      data_ref: ambient_temperature_prediction",
+            "      mode: data_predict",
+        )
         d = self._diag_details(text)
         assert any("必须声明 data_ref" in x for x in d)
 
@@ -365,7 +374,7 @@ equations:
     def test_duplicate_yaml_keys(self):
         import pytest
 
-        with pytest.raises(Exception):
+        with pytest.raises(YamlParseError):
             yaml_load("schema: ies.device-model\nschema: ies.device-model")
 
     def test_aggregated_diagnostics(self):
@@ -487,6 +496,49 @@ equations:
         assert src.data_ref == "my_curve"
         assert src.mode == "data_repeat"
 
+    def test_add_interface_fields_declared_by_inputs(self):
+        """inputs 可添加任意同构字段；完整模型校验负责判断新增结构是否合法。"""
+        raw = yaml_load(
+            """
+schema: ies.device-model
+schema_version: "2.0.0"
+device: {id: acme.device.load_template, names: {zh-CN: 负荷模板, en-US: Load Template}}
+inputs:
+  interfaces:
+    demand:
+      type: object
+      fields:
+        type: {type: string}
+        carrier: {type: string}
+        unit: {type: string}
+        valid_range:
+          minimum: {type: number, unit: kW}
+          maximum: {type: number, unit: kW}
+        source:
+          mode: {type: string}
+          data_ref: {type: data_repeat, data_ref: load_curve}
+properties: {}
+interfaces: {}
+equations: {variables: {}, relations: []}
+"""
+        )
+        values = {
+            "interfaces": {
+                "demand": {
+                    "type": "predefined",
+                    "carrier": "electricity",
+                    "unit": "kW",
+                    "valid_range": {"minimum": 0, "maximum": 1000},
+                    "source": {"mode": "data_repeat", "data_ref": "project_load"},
+                }
+            }
+        }
+        res, diags = instantiate_template(raw, values)
+        assert res is not None, [d.params.get("detail") for d in diags]
+        iface = res.document.interfaces["demand"]
+        assert iface.type == "predefined"
+        assert iface.source.data_ref == "project_load"
+
     def test_inputs_removed_after_instantiation(self):
         res, _ = instantiate_template(
             yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
@@ -500,39 +552,51 @@ equations:
         assert any("未在模板 inputs 中声明" in d.params.get("detail", "") for d in diags)
 
     def test_type_error_rejected(self):
-        res, diags = instantiate_template(yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": "x"}}})
+        res, diags = instantiate_template(
+            yaml_load(self.TEMPLATE),
+            {"properties": {"peak_power_kw": {"value": "x"}}},
+        )
         assert res is None
         assert any("期望 number" in d.params.get("detail", "") for d in diags)
 
     def test_range_error_rejected(self):
-        res, diags = instantiate_template(yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 9999}}})
+        res, diags = instantiate_template(
+            yaml_load(self.TEMPLATE),
+            {"properties": {"peak_power_kw": {"value": 9999}}},
+        )
         assert res is None
         assert any("高于 valid_range.maximum" in d.params.get("detail", "") for d in diags)
 
     def test_equivalent_direct_yaml_same_sha(self):
         res, diags = instantiate_template(
             yaml_load(self.TEMPLATE),
-            {"properties": {"peak_power_kw": {"value": 250}, "is_switchable": {"value": True}, "new_prop": {"value": 120}}},
+            {
+                "properties": {
+                    "peak_power_kw": {"value": 250},
+                    "is_switchable": {"value": True},
+                    "new_prop": {"value": 120},
+                }
+            },
         )
         assert res is not None, [d.params.get("detail") for d in diags]
-        direct = f"""
+        direct = """
 schema: ies.device-model
 schema_version: "2.0.0"
-device: {{id: acme.device.electric_load, names: {{zh-CN: 电负荷, en-US: Electric Load}}}}
+device: {id: acme.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 properties:
-  cop: {{value: 3.0, unit: "1", valid_range: {{minimum: 1, maximum: 10}}}}
-  peak_power_kw: {{value: 250, unit: kW, valid_range: {{minimum: 0, maximum: 1000}}}}
-  is_switchable: {{value: true, unit: "-"}}
-  new_prop: {{value: 120, unit: kW, valid_range: {{minimum: 0, maximum: 500}}}}
+  cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}
+  peak_power_kw: {value: 250, unit: kW, valid_range: {minimum: 0, maximum: 1000}}
+  is_switchable: {value: true, unit: "-"}
+  new_prop: {value: 120, unit: kW, valid_range: {minimum: 0, maximum: 500}}
 interfaces:
   electric_demand:
     type: predefined
     carrier: electricity
     unit: kW
-    valid_range: {{minimum: 0, maximum: null}}
-    source: {{mode: data_repeat, data_ref: typical_day_load}}
+    valid_range: {minimum: 0, maximum: null}
+    source: {mode: data_repeat, data_ref: typical_day_load}
 equations:
-  variables: {{}}
+  variables: {}
   relations: []
 """
         r_direct = _parse(direct)
@@ -559,7 +623,7 @@ equations:
             yaml_load(self.TEMPLATE), {"properties": {"peak_power_kw": {"value": 250}}}
         )
         receipt = res.receipt
-        assert receipt["instantiator"] == "ies.device-model.template@2.0.0"
+        assert receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
         assert receipt["template_sha256"]
         assert receipt["inputs_sha256"]
         assert receipt["content_sha256"] == res.content_sha256

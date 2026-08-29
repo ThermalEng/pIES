@@ -122,9 +122,9 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "upload_project_model_temp_file": frozenset({"temp_file", "upload_id"}),
     "list_project_models_endpoint": frozenset({"project_models"}),
     "save_project_model_endpoint": frozenset(
-        {"duplicate", "project_model", "receipt"}
+        {"duplicate", "project_model", "project_revision", "receipt"}
     ),  # 幂等重放时 duplicate 存在, 登记并集
-    "delete_project_model_endpoint": frozenset({"deleted", "ok"}),
+    "delete_project_model_endpoint": frozenset({"deleted", "ok", "project_revision"}),
     # ---- results.py ----
     "get_result_endpoint": frozenset({"result"}),  # services.results.result_view
     "list_assessments_endpoint": frozenset({"items", "total"}),

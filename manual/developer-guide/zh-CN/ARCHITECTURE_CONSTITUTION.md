@@ -122,13 +122,17 @@ Solver Bundle
 
 设备文件必须使用稳定 ID，并由统一 `schema_version`、规范内容摘要和校验回执固定语义；禁止为单个设备声明独立语义版本。设备文件禁止包含函数、包、模块、shell、可执行路径、价格、成本、税务、折旧或其他项目经济假设。不负责计算精度、算法选择、项目设备实例、画布布局或前端展示文案。
 
-设备文件顶层只使用 `schema`、`schema_version`、`device`、`properties`、`interfaces` 和 `equations`：
+普通设备模型顶层只使用 `schema`、`schema_version`、`device`、`properties`、`interfaces` 和 `equations`；
+同一范式的未实例化模型可以额外声明顶层 `inputs`，但仍使用相同的 `schema` 与
+`schema_version`，不形成独立模型类型或模板 schema：
 
 - `device` 只表达稳定身份和显示信息；
 - `properties` 只表达不随时间变化的技术常量；
 - `interfaces` 只表达序列交互，统一使用 `in`、`out`、`bidirectional`、`predefined`、`blind` 五种类型；缺省类型规范化为 `blind`；
 - `predefined` 只能从 `constant`、`data_repeat`、`data_predict` 获得序列，不连接其他设备；`blind` 既不连接其他设备，也不接收预定义数据；
 - `equations` 以受限声明式方程表达 properties、接口序列与内部变量的技术关系，不得成为任意代码执行入口。
+- `inputs` 只声明允许外部填写的同构字段路径；实例化时字段存在则覆盖、不存在则添加，删除
+  `inputs` 后必须重新通过完整设备模型校验。
 
 公开门面只导出类似 `get_device()`、`list_devices()`、`register(provider)` 的能力以及不可变 `DeviceDescriptor`。
 

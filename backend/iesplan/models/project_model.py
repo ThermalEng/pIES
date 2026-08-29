@@ -52,6 +52,8 @@ class ProjectModel(Base):
     device_id: Mapped[str] = mapped_column(Text, nullable=False)
     #: 清单修订号(模型实例被重新保存时递增; 本切片恒为 1)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("1"))
+    #: 本次保存产生的项目草稿 revision（用于幂等重放返回同一结果）
+    project_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     #: 规范内容摘要(小写 64 位十六进制 SHA-256)
     content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     #: 模型规范 YAML/JSON 文件对象引用(objects.id)
@@ -73,6 +75,7 @@ class ProjectModel(Base):
     __table_args__ = (
         CheckConstraint("suffix >= 1", name="ck_project_models_suffix"),
         CheckConstraint("revision >= 1", name="ck_project_models_revision"),
+        CheckConstraint("project_revision >= 2", name="ck_project_models_project_revision"),
         regex_check(f"content_sha256 ~ '{HASH64_RE}'", name="ck_project_models_content_sha256"),
         regex_check(
             "template_sha256 IS NULL OR template_sha256 ~ '^[0-9a-f]{64}$'",

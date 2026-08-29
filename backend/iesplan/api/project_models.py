@@ -72,7 +72,7 @@ class DataFileRefDTO(BaseModel):
         description="数据引用名(对应 interface source.data_ref)",
     )
     upload_id: str = Field(pattern=_UPLOAD_ID_PATTERN, description="临时上传会话标识(不透明十进制字符串)")
-    object_id: int = Field(ge=1, description="临时对象 id")
+    object_id: str = Field(pattern=_UPLOAD_ID_PATTERN, description="临时对象 id(不透明十进制字符串)")
     sha256: str = Field(pattern=_SHA256_PATTERN, description="声明的内容摘要")
 
 
@@ -100,12 +100,24 @@ class ModelSaveRequest(ModelCandidateRequest):
         default=None, min_length=1, max_length=128,
         pattern=r"^[A-Za-z0-9._:-]{1,128}$", description="项目内幂等键",
     )
+    expected_revision: int = Field(ge=1, description="预期项目草稿 revision(乐观锁)")
+
+
+class ModelDeleteRequest(BaseModel):
+    """删除项目模型同样推进项目草稿 revision。"""
+
+    expected_revision: int = Field(ge=1)
 
 
 def _to_data_file_refs(dtos: list[DataFileRefDTO]) -> tuple[DataFileRef, ...]:
     """DTO → 领域值对象(upload_id 由不透明十进制字符串解析)。"""
     return tuple(
-        DataFileRef(data_ref=d.data_ref, upload_id=int(d.upload_id), object_id=d.object_id, sha256=d.sha256)
+        DataFileRef(
+            data_ref=d.data_ref,
+            upload_id=int(d.upload_id),
+            object_id=int(d.object_id),
+            sha256=d.sha256,
+        )
         for d in dtos
     )
 
@@ -179,7 +191,7 @@ def upload_project_model_temp_file(
     result = upload_temp_data_file(
         db, user, project_id, content=content, data_ref=data_ref, upload_id=upload_id
     )
-    db.commit()
+    result["temp_file"]["object_id"] = str(result["temp_file"]["object_id"])
     return {"temp_file": result["temp_file"], "upload_id": str(upload_id)}
 
 
@@ -213,8 +225,8 @@ def save_project_model_endpoint(
         template_inputs=payload.template_inputs,
         data_files=_to_data_file_refs(payload.data_files),
         idempotency_key=payload.idempotency_key,
+        expected_revision=payload.expected_revision,
     )
-    db.commit()
     return result
 
 
@@ -222,10 +234,12 @@ def save_project_model_endpoint(
 def delete_project_model_endpoint(
     project_id: int,
     model_id: int,
+    payload: ModelDeleteRequest,
     db: DbSession,
     user: CurrentUser,
 ) -> dict[str, Any]:
     """删除项目模型(硬删除清单行 + 解绑对象引用; 编号不复用)。"""
-    delete_project_model(db, user, project_id, model_id)
-    db.commit()
-    return {"ok": True, "deleted": model_id}
+    revision = delete_project_model(
+        db, user, project_id, model_id, expected_revision=payload.expected_revision
+    )
+    return {"ok": True, "deleted": str(model_id), "project_revision": revision}

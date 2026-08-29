@@ -1,4 +1,4 @@
-"""模板 inputs 深度合并与实例化器（`ies.device-model.template@2.0.0`）。
+"""`ies.device-model` 的 inputs 深度合并与实例化器。
 
 `inputs` 与模型使用同构树形结构：叶子节点是 `type` 声明（number/boolean/string/
 data_repeat/data_predict），叶子路径对应模型中的具体字段：
@@ -17,9 +17,9 @@ data_repeat/data_predict），叶子路径对应模型中的具体字段：
 5. 合并后删除 inputs，输出普通 2.0.0 模型；
 6. 输出必须重新通过完整 2.0.0 校验，最终 schema 不允许的新增字段拒绝。
 
-切片边界：本版本支持合并到已存在目标（覆盖）与添加 property；添加 interface 或
-equation variable 需要 carrier/source 等额外声明，超出本切片范围，明确报错。
-模板修改不改变已经生成的模型。保存模板摘要、输入摘要、实例化器版本与
+所有已声明 inputs 字段都使用相同的覆盖/添加规则；新增结构能否成立由实例化后的
+完整 `ies.device-model` 校验统一裁决，不在实例化器内另设模型类型特例。
+模板修改不改变已经生成的模型。保存模板摘要、输入摘要、实例化器算法标识与
 最终模型摘要用于追溯（由调用方持久化，本模块只提供纯计算）。
 """
 
@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from iesplan.devices.contracts2 import (
     INPUT_DATA_TYPES,
@@ -38,7 +39,8 @@ from iesplan.devices.contracts2 import (
 )
 from iesplan.devices.parser2 import ParseError, parse_device_model_v2, parse_template_inputs
 
-INSTANTIATOR_VERSION = "ies.device-model.template@2.0.0"
+#: 实例化算法标识，只用于回执追溯；不是模型类型或 schema_version。
+INSTANTIATOR_VERSION = "ies.device-model.instantiator@1.0.0"
 
 #: 允许的叶子路径第一段 → 模型容器（用于“添加”场景与非法路径拒绝）
 _ALLOWED_FIRST_SEGMENTS = ("properties", "interfaces", "equations")
@@ -180,10 +182,9 @@ def _merge_tree(leaves: tuple[TemplateInputSpec, ...], template_raw: Mapping[str
     model_root: dict[str, Any] = merged
     for leaf in leaves:
         if leaf.path.split(".")[0] not in _ALLOWED_FIRST_SEGMENTS:
-            raise ParseError(f"inputs.{leaf.path} 不是允许的合并目标（仅 properties/interfaces/equations 下）")
-        if leaf.path.split(".")[0] in ("interfaces", "equations") and _is_add_target(leaf, model_root):
             raise ParseError(
-                f"inputs.{leaf.path} 添加 interface/variable 不在本切片支持范围，请先在模板模型部分声明"
+                f"inputs.{leaf.path} 不是允许的合并目标"
+                "（仅 properties/interfaces/equations 下）"
             )
         # 用户提交树中按叶子路径取用户值
         user_value: Any = inputs
@@ -197,17 +198,6 @@ def _merge_tree(leaves: tuple[TemplateInputSpec, ...], template_raw: Mapping[str
         _validate_source_mode(leaf, model_root)
         _apply_leaf(leaf, model_root, user_value)
     return model_root
-
-
-def _is_add_target(leaf: TemplateInputSpec, model: dict[str, Any]) -> bool:
-    """叶子路径在模型中是否不存在（添加场景）。"""
-    node: Any = model
-    for seg in leaf.path.split("."):
-        if not isinstance(node, Mapping) or seg not in node:
-            return True
-        node = node[seg]
-    return False
-
 
 def instantiate_template(
     template_raw: Mapping[str, Any],

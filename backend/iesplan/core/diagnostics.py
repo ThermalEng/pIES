@@ -104,7 +104,7 @@ NEW_DIAG_CODES: dict[str, str] = {
     # ies.device-data 1.0.0 契约(0.6.0): CSV 元数据/方言/列/时间/数值契约诊断
     "DATA-META-001": "元数据行缺失或重复: {key}(每个元数据键只能出现一次, 且只能在表头之前)",
     "DATA-META-002": "必需的 ies.device-data 元数据缺失: {key}",
-    "DATA-META-003": "ies.device-data schema 标识或版本无法识别(期望 ies.device-data 1.0.0)",
+    "DATA-META-003": "ies.device-data schema 标识或版本无法识别: {schema} {schema_version}",
     "DATA-META-004": "元数据枚举值非法: {field}={value}(允许 {allowed})",
     "DATA-META-005": "timestamp_mode=fixed_offset 必须提供固定 UTC 偏移且范围在 -840..840",
     "DATA-META-006": "series_mode=periodic 必须提供 period(day|week|year)",
@@ -119,16 +119,23 @@ NEW_DIAG_CODES: dict[str, str] = {
         "ies.device-data 2.0.0 文件 source_mode 与设备接口声明的预定义来源模式"
         "不匹配: {column} 声明 {mode}, 文件 {source_mode}"
     ),
+    "DATA-META-012": (
+        "计算序列绑定的项目基线摘要不匹配: 声明 {declared}, 期望 {expected}"
+    ),
     "DATA-DIAL-001": "CSV 方言不符合 ies.device-data 契约: {detail}",
-    "DATA-COL-003": "CSV 列未在设备模型 data_inputs 中声明: {column}",
+    "DATA-COL-003": "CSV 列未在设备模型 predefined interfaces 中声明: {column}",
     "DATA-COL-004": "CSV 列重复: {column}",
-    "DATA-COL-005": "CSV 缺少设备模型必需的 data_inputs 列: {column}",
+    "DATA-COL-005": "CSV 缺少设备模型必需的 predefined interface 列: {column}",
     "DATA-COL-006": "列单位与设备模型声明不一致: {column} {actual} != {expected}",
     "DATA-COL-007": "数据列缺少 unit.<column> 单位声明: {column}",
     # DATA-VAL-001 同时是 DataValidationError 的包络码(HTTP 400, 见 services/dataset.py);
     # 此处按诊断语义登记(与 DIAG_MESSAGE_KEYS val_type_range 一致)。
     "DATA-VAL-001": "列值不符合设备模型 value_type 或范围: {column}",
     "DATA-VAL-002": "缺失值未在设备模型中声明允许: {column}",
+    "DATA-STEP-001": "step 必须是非负十进制整数: {value}",
+    "DATA-STEP-002": "原始文件 step 必须严格递增且不重复",
+    "DATA-STEP-003": "计算文件 step 必须从 0 开始连续递增到 point_count-1",
+    "DATA-STEP-004": "step 点数与期望不匹配: 期望 {expected}, 实际 {actual}",
     "DATA-TIME-001": "timeline 时间戳未严格递增或重复",
     "DATA-TIME-002": "timeline 时间戳与声明分辨率不对齐",
     "DATA-TIME-003": "同文件混用带 Z/带偏移/无偏移时间戳",
@@ -207,10 +214,12 @@ NEW_DIAG_CODES: dict[str, str] = {
     "MOD-EQ-007": "非时变 property 被时间索引引用: {name}",
     "MOD-EQ-008": "方程引用了 blind 接口(不连接、不接收数据): {name}",
     # PROJ 域: 项目模型候选门禁与保存(application/projects 用例, 切片 dm2-A)。
-    # 文件内容校验(列/单位/周期/分辨率/时间轴)委托 devices 数据契约
-    # (阶段 2 worktree B 并行开发), 本切片只覆盖文件存在/摘要/归属三类。
+    # 配套数据文件的存在性、摘要、归属和内容契约都在同一门禁校验。
     "PROJ-MDL-001": "候选模型引用的临时数据文件不存在或不可用: {data_ref}(期望存在对象,实际不可用)",
-    "PROJ-MDL-002": "临时数据文件内容摘要与声明不一致: {data_ref}(期望 {expected_sha256},实际 {actual_sha256})",
+    "PROJ-MDL-002": (
+        "临时数据文件内容摘要与声明不一致: "
+        "{data_ref}(期望 {expected_sha256},实际 {actual_sha256})"
+    ),
     "PROJ-MDL-003": "临时数据文件归属与上传会话不一致: {data_ref}(该对象不属于 upload_id={upload_id})",
     "PROJ-MDL-004": "最终设备 ID 无法通过身份校验: {final_id}(由基础 ID {base_device_id} 追加 _N 后缀后非法)",
     "PROJ-MDL-005": "候选模型校验失败, 保存被拒绝(不写项目模型目录、不登记清单、不分配编号)",
@@ -282,6 +291,7 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-META-009": "meta_model_unregistered",
             "DATA-META-010": "meta_content_mismatch",
             "DATA-META-011": "meta_source_mode_mismatch",
+            "DATA-META-012": "meta_project_baseline_mismatch",
             "DATA-DIAL-001": "dialect_invalid",
             "DATA-COL-003": "col_undeclared",
             "DATA-COL-004": "col_duplicate",
@@ -290,6 +300,10 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-COL-007": "col_unit_declaration_missing",
             "DATA-VAL-001": "val_type_range",
             "DATA-VAL-002": "val_missing_not_allowed",
+            "DATA-STEP-001": "step_invalid",
+            "DATA-STEP-002": "step_not_monotonic",
+            "DATA-STEP-003": "step_not_contiguous",
+            "DATA-STEP-004": "step_count_mismatch",
             "DATA-TIME-001": "time_not_monotonic",
             "DATA-TIME-002": "time_not_aligned",
             "DATA-TIME-003": "time_mixed_zone",
@@ -368,6 +382,7 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-META-009",
             "DATA-META-010",
             "DATA-META-011",
+            "DATA-META-012",
             "DATA-DIAL-001",
             "DATA-COL-003",
             "DATA-COL-004",
@@ -376,6 +391,10 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-COL-007",
             "DATA-VAL-001",
             "DATA-VAL-002",
+            "DATA-STEP-001",
+            "DATA-STEP-002",
+            "DATA-STEP-003",
+            "DATA-STEP-004",
             "DATA-TIME-001",
             "DATA-TIME-002",
             "DATA-TIME-003",

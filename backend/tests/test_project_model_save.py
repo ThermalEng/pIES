@@ -43,6 +43,7 @@ from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.audit import AuditLog  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
+from iesplan.models.project import Project  # noqa: E402
 from iesplan.models.project_model import ProjectModel, ProjectModelSequence  # noqa: E402
 from iesplan.services import identity  # noqa: E402
 from iesplan.services import project as project_service  # noqa: E402
@@ -145,12 +146,6 @@ inputs:
         default: 100
     is_switchable:
       value: {type: boolean, default: false}
-  interfaces:
-    electric_demand:
-      source:
-        data_ref:
-          type: data_repeat
-          data_ref: typical_day_load
 properties:
   cop: {value: 3.0, unit: "1", valid_range: {minimum: 1, maximum: 10}}
 interfaces:
@@ -159,7 +154,7 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: null}
-    source: {mode: data_repeat, data_ref: typical_day_load}
+    source: {mode: constant, value: 0}
 equations:
   variables: {}
   relations: []
@@ -180,7 +175,7 @@ interfaces:
     carrier: electricity
     unit: kW
     valid_range: {minimum: 0, maximum: null}
-    source: {mode: data_repeat, data_ref: typical_day_load}
+    source: {mode: constant, value: 0}
 equations:
   variables: {}
   relations: []
@@ -188,7 +183,42 @@ equations:
 
 TEMPLATE_INPUTS = {"properties": {"peak_power_kw": {"value": 250}, "is_switchable": {"value": True}}}
 
-DATA_CSV = b"timestamp,load_kw\n2026-01-01 00:00,10.0\n2026-01-01 01:00,12.5\n"
+DATA_MODEL_YAML = """
+schema: ies.device-model
+schema_version: "2.0.0"
+device: {id: acme.device.profile_load, names: {zh-CN: 曲线负荷, en-US: Profile Load}}
+properties: {}
+interfaces:
+  electric_demand:
+    type: predefined
+    carrier: electricity
+    unit: kW
+    valid_range: {minimum: 0, maximum: 1000}
+    source: {mode: data_repeat, data_ref: load_data}
+equations: {variables: {}, relations: []}
+"""
+
+
+def _data_csv() -> bytes:
+    from iesplan.core.yamlmini import load as yaml_load
+    from iesplan.devices import content_sha256, parse_device_model_v2
+
+    parsed = parse_device_model_v2(yaml_load(DATA_MODEL_YAML))
+    assert parsed.document is not None
+    lines = [
+        "# schema: ies.device-data",
+        "# schema_version: 2.0.0",
+        "# dataset_id: test.load.profile",
+        "# device_id: acme.device.profile_load",
+        f"# device_content_sha256: {content_sha256(parsed.document)}",
+        "# source_mode: data_repeat",
+        "# resolution: 1h",
+        "# period: day",
+        "# unit.electric_demand: kW",
+        "step,electric_demand",
+        *[f"{step},{10 + step}" for step in range(24)],
+    ]
+    return ("\n".join(lines) + "\n").encode()
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +295,7 @@ def _upload_temp(client: TestClient, pid: int, headers: dict, data_ref: str = "l
     resp = client.post(
         f"/api/projects/{pid}/models/temp-files",
         data={"data_ref": data_ref},
-        files={"file": ("load.csv", DATA_CSV, "text/csv")},
+        files={"file": ("load.csv", _data_csv(), "text/csv")},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
@@ -279,8 +309,17 @@ def _save(
     template_inputs: dict | None = None,
     data_files: list[dict] | None = None,
     idempotency_key: str | None = None,
+    expected_revision: int | None = None,
 ):
-    body: dict = {"model_yaml": yaml_text, "source": source}
+    if expected_revision is None:
+        project = client.get(f"/api/projects/{pid}", headers=headers)
+        assert project.status_code == 200, project.text
+        expected_revision = project.json()["draft"]["revision"]
+    body: dict = {
+        "model_yaml": yaml_text,
+        "source": source,
+        "expected_revision": expected_revision,
+    }
     if source == "template":
         body["template_inputs"] = template_inputs
     if data_files:
@@ -398,7 +437,7 @@ def test_validate_data_file_missing_and_digest(client: TestClient, db_session: S
     # 正确引用: valid
     resp = client.post(
         f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": HEAT_PUMP_YAML, "data_files": [ref]},
+        json={"model_yaml": DATA_MODEL_YAML, "data_files": [ref]},
         headers=headers,
     )
     assert resp.json()["valid"] is True, resp.json()
@@ -406,16 +445,16 @@ def test_validate_data_file_missing_and_digest(client: TestClient, db_session: S
     bad_digest = dict(ref, sha256="0" * 64)
     resp = client.post(
         f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": HEAT_PUMP_YAML, "data_files": [bad_digest]},
+        json={"model_yaml": DATA_MODEL_YAML, "data_files": [bad_digest]},
         headers=headers,
     )
     codes = [d["code"] for d in resp.json()["diagnostics"]]
     assert "PROJ-MDL-002" in codes
     # 对象不存在 → PROJ-MDL-001
-    missing = dict(ref, object_id=99999999)
+    missing = dict(ref, object_id="99999999")
     resp = client.post(
         f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": HEAT_PUMP_YAML, "data_files": [missing]},
+        json={"model_yaml": DATA_MODEL_YAML, "data_files": [missing]},
         headers=headers,
     )
     codes = [d["code"] for d in resp.json()["diagnostics"]]
@@ -424,7 +463,7 @@ def test_validate_data_file_missing_and_digest(client: TestClient, db_session: S
     wrong_owner = dict(ref, upload_id="123456")
     resp = client.post(
         f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": HEAT_PUMP_YAML, "data_files": [wrong_owner]},
+        json={"model_yaml": DATA_MODEL_YAML, "data_files": [wrong_owner]},
         headers=headers,
     )
     codes = [d["code"] for d in resp.json()["diagnostics"]]
@@ -452,7 +491,8 @@ def test_save_success_direct_yaml(client: TestClient, db_session: Session) -> No
     resp = _save(client, pid, headers, HEAT_PUMP_YAML)
     assert resp.status_code == 201, resp.text
     body = resp.json()
-    assert set(body) == {"project_model", "receipt", "duplicate"}
+    assert set(body) == {"project_model", "receipt", "project_revision", "duplicate"}
+    assert body["project_revision"] == 2
     model = body["project_model"]
     assert model["device_id"] == "acme.device.heat_pump_1"
     assert model["base_device_id"] == "acme.device.heat_pump"
@@ -490,14 +530,14 @@ def test_save_with_temp_data_file_finalize(client: TestClient, db_session: Sessi
         "object_id": up["temp_file"]["object_id"],
         "sha256": up["temp_file"]["sha256"],
     }
-    resp = _save(client, pid, headers, HEAT_PUMP_YAML, data_files=[ref])
+    resp = _save(client, pid, headers, DATA_MODEL_YAML, data_files=[ref])
     assert resp.status_code == 201, resp.text
     # 临时引用已解绑; 数据对象转为最终 owner(purpose=data:load_data)
     assert find_refs_by_entity_type(db_session, "project_model_temp") == []
     final_refs = find_refs_by_entity_type(db_session, "project_model")
     data_purposes = [r["purpose"] for r in final_refs]
     assert "data:load_data" in data_purposes
-    handle = object_info(db_session, ref["object_id"])
+    handle = object_info(db_session, int(ref["object_id"]))
     assert handle["status"] == "stored"
     assert handle["ref_count"] == 1
 
@@ -550,9 +590,15 @@ def test_numbering_monotonic_and_delete_no_reuse(client: TestClient, db_session:
     assert m2["device_id"] == "acme.device.heat_pump_2"
     assert m1["content_sha256"] != m2["content_sha256"]  # 最终 ID 不同 → 摘要不同
     # 删除 _2 → 编号不复用: 下一次保存是 _3
-    resp_del = client.delete(f"/api/projects/{pid}/models/{m2['id']}", headers=headers)
+    current = client.get(f"/api/projects/{pid}", headers=headers).json()["draft"]["revision"]
+    resp_del = client.request(
+        "DELETE",
+        f"/api/projects/{pid}/models/{m2['id']}",
+        json={"expected_revision": current},
+        headers=headers,
+    )
     assert resp_del.status_code == 200, resp_del.text
-    assert resp_del.json() == {"ok": True, "deleted": m2["id"]}
+    assert resp_del.json()["deleted"] == m2["id"]
     r3 = _save(client, pid, headers, HEAT_PUMP_YAML)
     assert r3.status_code == 201, r3.text
     assert r3.json()["project_model"]["device_id"] == "acme.device.heat_pump_3"
@@ -565,7 +611,7 @@ def test_numbering_monotonic_and_delete_no_reuse(client: TestClient, db_session:
     # GENERATED ALWAYS AS IDENTITY 不复用), 因此按对象 id 断言而非行 id。
     final_refs = find_refs_by_entity_type(db_session, "project_model")
     for obj_id in (m2["model_object_id"], m2["receipt_object_id"]):
-        assert not any(r["object_id"] == obj_id for r in final_refs), f"被删模型对象 {obj_id} 仍有引用"
+        assert not any(str(r["object_id"]) == obj_id for r in final_refs), f"被删模型对象 {obj_id} 仍有引用"
     assert len(final_refs) == 4  # 模型 _1 与 _3 各 2 个引用
     audit_actions = [
         a.action
@@ -603,7 +649,7 @@ def test_save_permissions_and_project_state(client: TestClient, db_session: Sess
     headers, pid = _make_owner(client, db_session, "sv_perm")
     viewer = _headers_for(client, db_session, "sv_viewer")
     # 非成员保存/校验 → 403(权限在读取敏感内容前失败)
-    assert _save(client, pid, viewer, HEAT_PUMP_YAML).status_code == 403
+    assert _save(client, pid, viewer, HEAT_PUMP_YAML, expected_revision=1).status_code == 403
     assert client.post(
         f"/api/projects/{pid}/models/validate", json={"model_yaml": HEAT_PUMP_YAML},
         headers=viewer,
@@ -648,7 +694,7 @@ def test_template_and_direct_yaml_converge(client: TestClient, db_session: Sessi
     assert v_direct.ok and v_tpl.ok
     assert v_direct.content_sha256 == v_tpl.content_sha256
     assert v_direct.receipt["content_sha256"] == v_tpl.receipt["content_sha256"]
-    assert v_tpl.receipt["instantiator"] == "ies.device-model.template@2.0.0"
+    assert v_tpl.receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
     assert "instantiator" not in v_direct.receipt
 
 
@@ -682,7 +728,9 @@ def test_save_failure_midway_no_half_state(
     monkeypatch.setattr(ms, "put_object", _flaky_put)
     owner = identity_user(db_session, "sv_crash")
     with pytest.raises(RuntimeError, match="simulated storage failure"):
-        save_project_model(db_session, owner, pid, model_yaml=HEAT_PUMP_YAML)
+        save_project_model(
+            db_session, owner, pid, model_yaml=HEAT_PUMP_YAML, expected_revision=1
+        )
     # API 层不提交 → 事务整体回滚: 无清单行、无编号、无对象引用、无审计
     # (回滚后再断言: 未提交行只对会话可见, 对用户不可见)
     db_session.rollback()
@@ -721,14 +769,15 @@ def test_save_failure_during_finalize_keeps_temp_owner(
     ref_obj = DataFileRef(
         data_ref="load_data",
         upload_id=int(up["upload_id"]),
-        object_id=up["temp_file"]["object_id"],
+        object_id=int(up["temp_file"]["object_id"]),
         sha256=up["temp_file"]["sha256"],
     )
     with pytest.raises(RuntimeError, match="simulated finalize failure"):
         save_project_model(
             db_session, owner, pid,
-            model_yaml=HEAT_PUMP_YAML,
+            model_yaml=DATA_MODEL_YAML,
             data_files=(ref_obj,),
+            expected_revision=1,
         )
     db_session.rollback()
     # 清单/编号未提交; 数据对象仍属临时 owner(可恢复)
@@ -736,11 +785,11 @@ def test_save_failure_during_finalize_keeps_temp_owner(
     assert _seq_rows(db_session, pid) == []
     temp_refs = find_refs_by_entity_type(db_session, "project_model_temp")
     assert len(temp_refs) == 1
-    assert temp_refs[0]["object_id"] == up["temp_file"]["object_id"]
+    assert str(temp_refs[0]["object_id"]) == up["temp_file"]["object_id"]
     assert find_refs_by_entity_type(db_session, "project_model") == []
     # 撤销 detach 故障注入: 保存失败后临时文件仍可用, 正常保存成功
     monkeypatch.undo()
-    resp = _save(client, pid, headers, HEAT_PUMP_YAML, data_files=[ref])
+    resp = _save(client, pid, headers, DATA_MODEL_YAML, data_files=[ref])
     assert resp.status_code == 201, resp.text
     assert find_refs_by_entity_type(db_session, "project_model_temp") == []
 
@@ -763,7 +812,7 @@ def test_reconcile_stale_temp_files(client: TestClient, db_session: Session) -> 
     report3 = reconcile_stale_temp_files(db_session, older_than=timedelta(minutes=0), dry_run=False)
     assert report3["stale_count"] == 1
     assert find_refs_by_entity_type(db_session, "project_model_temp") == []
-    handle = object_info(db_session, up["temp_file"]["object_id"])
+    handle = object_info(db_session, int(up["temp_file"]["object_id"]))
     assert handle["status"] == "orphaned"
     # 幂等: 再次执行无副作用
     report4 = reconcile_stale_temp_files(db_session, older_than=timedelta(minutes=0), dry_run=False)
@@ -810,13 +859,27 @@ def test_concurrent_numbering_unique(tmp_path: Path) -> None:
 
     def _worker() -> None:
         try:
-            with factory() as s:
-                u = s.get(User, user.id)
-                result = save_project_model(
-                    s, u, pid, model_yaml=HEAT_PUMP_YAML, source="direct_yaml"
-                )
-                s.commit()
-                results.append(result)
+            from iesplan.core.errors import ConflictError
+
+            for _attempt in range(10):
+                with factory() as s:
+                    u = s.get(User, user.id)
+                    project = s.get(Project, pid)
+                    revision = project_service.get_current_draft(s, project).revision
+                    try:
+                        result = save_project_model(
+                            s,
+                            u,
+                            pid,
+                            model_yaml=HEAT_PUMP_YAML,
+                            source="direct_yaml",
+                            expected_revision=revision,
+                        )
+                    except ConflictError:
+                        continue
+                    results.append(result)
+                    return
+            raise AssertionError("并发 revision 冲突重试耗尽")
         except Exception as exc:  # noqa: BLE001 - 线程内收集
             errors.append(exc)
 

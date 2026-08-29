@@ -12,10 +12,8 @@ device-model-yaml.md「进入项目前的候选模型门禁」:
 6. 临时 owner → 幂等 finalize → reconciliation: 失败事务不留半文件、孤立引用
    或对用户不可见的已占编号(对象文件遗留由存储运维 safe_cleanup 回收)。
 
-切片边界(阶段 2 待增强): ``data_repeat``/``data_predict`` 配套文件的
-「文件存在 + 摘要一致 + 归属一致」校验在本用例完成; 文件内容(列/单位/
-周期/分辨率/时间轴/数值)校验委托 devices 数据契约(worktree B 并行开发,
-切片间不耦合), 合并后在本模块增强。
+``data_repeat``/``data_predict`` 配套文件在同一门禁中完成存在性、摘要、临时
+归属、data_ref、step、列、单位、采样间隔与数值范围校验。
 """
 
 from __future__ import annotations
@@ -49,6 +47,7 @@ from iesplan.devices import (
     parse_device_model_v2,
     to_dict,
 )
+from iesplan.devices.datacontract2 import canonicalize_device_data_v2
 from iesplan.models.audit import AuditLog
 from iesplan.models.project import Project
 from iesplan.models.project_model import (
@@ -244,14 +243,43 @@ def _parse_candidate_document(
 
 
 def _validate_data_files(
-    db: Session, data_files: tuple[DataFileRef, ...]
+    db: Session,
+    data_files: tuple[DataFileRef, ...],
+    document: DeviceModelDocument,
 ) -> list[Diagnostic]:
-    """配套数据文件校验(本切片边界: 文件存在 + 摘要一致 + 归属一致)。
-
-    文件内容校验(列/单位/周期/分辨率/时间轴/数值)委托 devices 数据契约,
-    阶段 2 worktree B 合并后在此增强。
-    """
+    """配套文件完整门禁：引用、临时归属与 devices 数据内容契约。"""
     diags: list[Diagnostic] = []
+    expected_refs = {
+        iface.source.data_ref
+        for iface in document.interfaces.values()
+        if iface.type == "predefined"
+        and iface.source is not None
+        and iface.source.mode in ("data_repeat", "data_predict")
+        and iface.source.data_ref is not None
+    }
+    submitted_refs = [ref.data_ref for ref in data_files]
+    for data_ref in sorted(expected_refs - set(submitted_refs)):
+        diags.append(_diag(
+            PROJ_MDL_DATA_MISSING,
+            f"缺少模型声明的配套数据文件: {data_ref}",
+            field=f"data_files.{data_ref}",
+            params={"data_ref": data_ref, "expected": "已上传的配套文件", "actual": "missing"},
+        ))
+    for data_ref in sorted(set(submitted_refs) - expected_refs):
+        diags.append(_diag(
+            PROJ_MDL_DATA_MISSING,
+            f"配套数据引用未在模型中声明: {data_ref}",
+            field=f"data_files.{data_ref}",
+            params={"data_ref": data_ref, "expected": sorted(expected_refs), "actual": data_ref},
+        ))
+    duplicates = {data_ref for data_ref in submitted_refs if submitted_refs.count(data_ref) > 1}
+    for data_ref in sorted(duplicates):
+        diags.append(_diag(
+            PROJ_MDL_DATA_OWNER_MISMATCH,
+            f"同一 data_ref 重复提交: {data_ref}",
+            field=f"data_files.{data_ref}",
+            params={"data_ref": data_ref, "expected": "每个 data_ref 一个文件", "actual": "duplicate"},
+        ))
     for ref in data_files:
         fld = f"data_files.{ref.data_ref}"
         try:
@@ -288,6 +316,12 @@ def _validate_data_files(
                               "actual": "不属于该上传会话"})
             )
             continue
+        result = canonicalize_device_data_v2(
+            get_object(db, ref.object_id),
+            document,
+            expected_data_ref=ref.data_ref,
+        )
+        diags.extend(diag for diag in result.diagnostics if diag.blocking)
     return diags
 
 
@@ -321,7 +355,7 @@ def validate_candidate(
         raw, source, template_inputs, file="<candidate>"
     )
     diags.extend(parse_diags)
-    data_diags = _validate_data_files(db, data_files)
+    data_diags = _validate_data_files(db, data_files, doc) if doc is not None else []
     diags.extend(data_diags)
     if diags:
         return CandidateValidation(ok=False, diagnostics=diags)
@@ -437,7 +471,25 @@ def _load_stored_receipt(db: Session, model: ProjectModel) -> dict[str, Any]:
     return parsed
 
 
-def save_project_model(
+def _project_model_draft_refs(db: Session, project_id: int) -> list[dict[str, object]]:
+    """项目草稿只保存模型清单引用，不复制模型正文。"""
+    rows = db.execute(
+        sa.select(ProjectModel)
+        .where(ProjectModel.project_id == project_id)
+        .order_by(ProjectModel.suffix)
+    ).scalars()
+    return [
+        {
+            "id": str(model.id),
+            "device_id": model.device_id,
+            "revision": model.revision,
+            "content_sha256": model.content_sha256,
+        }
+        for model in rows
+    ]
+
+
+def _save_project_model(
     db: Session,
     user,
     project_id: int,
@@ -447,11 +499,12 @@ def save_project_model(
     template_inputs: Mapping[str, Any] | None = None,
     data_files: tuple[DataFileRef, ...] = (),
     idempotency_key: str | None = None,
+    expected_revision: int,
 ) -> dict[str, Any]:
     """正式保存项目模型(候选校验 → 编号分配 → 规范化 → 原子保存)。
 
-    返回 ``{project_model, receipt, duplicate}``。事务由调用方(API 层)提交;
-    任何一步失败抛出异常并回滚 —— 不留下半文件、孤立引用或不可见已占编号。
+    返回 ``{project_model, receipt, project_revision, duplicate}``。公共 application
+    用例拥有提交/回滚边界；任何一步失败不留下半文件、孤立引用或不可见已占编号。
     """
     project_service.ensure_access(db, user, project_id, "edit")
     project = db.get(Project, project_id)
@@ -473,8 +526,16 @@ def save_project_model(
             return {
                 "project_model": project_model_to_dict(existing),
                 "receipt": _load_stored_receipt(db, existing),
+                "project_revision": existing.project_revision,
                 "duplicate": True,
             }
+    current_draft = project_service.get_current_draft(db, project)
+    if current_draft.revision != expected_revision:
+        raise ConflictError(
+            "项目草稿已被其他操作更新",
+            params={"expected_revision": expected_revision, "current_revision": current_draft.revision},
+            location={"object_type": "draft", "object_id": str(current_draft.id)},
+        )
 
     validation = validate_candidate(
         db, user, project_id,
@@ -522,6 +583,7 @@ def save_project_model(
         base_device_id=base_device_id,
         device_id=final_id,
         revision=1,
+        project_revision=expected_revision + 1,
         content_sha256=final_sha256,
         model_object_id=model_handle.id,
         receipt_object_id=receipt_handle.id,
@@ -573,11 +635,53 @@ def save_project_model(
         )
     )
     db.flush()
+    new_draft = project_service.replace_project_model_refs(
+        db,
+        user,
+        project_id,
+        expected_revision,
+        _project_model_draft_refs(db, project_id),
+    )
+    model.project_revision = new_draft.revision
+    db.flush()
     return {
         "project_model": project_model_to_dict(model),
         "receipt": final_receipt,
+        "project_revision": new_draft.revision,
         "duplicate": False,
     }
+
+
+def save_project_model(
+    db: Session,
+    user,
+    project_id: int,
+    *,
+    model_yaml: str,
+    expected_revision: int,
+    source: str = MODEL_SOURCE_DIRECT,
+    template_inputs: Mapping[str, Any] | None = None,
+    data_files: tuple[DataFileRef, ...] = (),
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """事务型保存命令；application 层统一提交或回滚。"""
+    try:
+        result = _save_project_model(
+            db,
+            user,
+            project_id,
+            model_yaml=model_yaml,
+            expected_revision=expected_revision,
+            source=source,
+            template_inputs=template_inputs,
+            data_files=data_files,
+            idempotency_key=idempotency_key,
+        )
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +689,7 @@ def save_project_model(
 # ---------------------------------------------------------------------------
 
 
-def upload_temp_data_file(
+def _upload_temp_data_file(
     db: Session, user, project_id: int, *, content: bytes, data_ref: str, upload_id: int
 ) -> dict[str, Any]:
     """把配套数据文件写入临时隔离区(临时 owner 引用)。
@@ -616,6 +720,21 @@ def upload_temp_data_file(
     }
 
 
+def upload_temp_data_file(
+    db: Session, user, project_id: int, *, content: bytes, data_ref: str, upload_id: int
+) -> dict[str, Any]:
+    """事务型临时文件上传命令。"""
+    try:
+        result = _upload_temp_data_file(
+            db, user, project_id, content=content, data_ref=data_ref, upload_id=upload_id
+        )
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
 def new_temp_upload_id() -> int:
     """生成临时上传会话标识(63 位正整数, 对外以不透明十进制字符串传输)。"""
     return secrets.randbelow(2**63 - 1) + 1
@@ -637,7 +756,14 @@ def _get_project_model(db: Session, project_id: int, model_id: int) -> ProjectMo
     return model
 
 
-def delete_project_model(db: Session, user, project_id: int, model_id: int) -> None:
+def _delete_project_model(
+    db: Session,
+    user,
+    project_id: int,
+    model_id: int,
+    *,
+    expected_revision: int,
+) -> int:
     """删除项目模型(硬删除清单行 + 解绑最终 owner 引用)。
 
     - 对象解除引用后进入 orphaned, 由存储运维 safe_cleanup/purge 物理回收;
@@ -666,6 +792,38 @@ def delete_project_model(db: Session, user, project_id: int, model_id: int) -> N
     )
     db.delete(model)
     db.flush()
+    new_draft = project_service.replace_project_model_refs(
+        db,
+        user,
+        project_id,
+        expected_revision,
+        _project_model_draft_refs(db, project_id),
+    )
+    return new_draft.revision
+
+
+def delete_project_model(
+    db: Session,
+    user,
+    project_id: int,
+    model_id: int,
+    *,
+    expected_revision: int,
+) -> int:
+    """事务型删除命令；编号计数器不回退。"""
+    try:
+        revision = _delete_project_model(
+            db,
+            user,
+            project_id,
+            model_id,
+            expected_revision=expected_revision,
+        )
+        db.commit()
+        return revision
+    except Exception:
+        db.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -687,19 +845,20 @@ def get_project_models(db: Session, user, project_id: int) -> list[dict]:
 def project_model_to_dict(model: ProjectModel) -> dict[str, Any]:
     """清单行 → 公开视图。"""
     return {
-        "id": model.id,
-        "project_id": model.project_id,
+        "id": str(model.id),
+        "project_id": str(model.project_id),
         "device_id": model.device_id,
         "base_device_id": model.base_device_id,
         "suffix": model.suffix,
         "revision": model.revision,
+        "project_revision": model.project_revision,
         "content_sha256": model.content_sha256,
-        "model_object_id": model.model_object_id,
-        "receipt_object_id": model.receipt_object_id,
+        "model_object_id": str(model.model_object_id),
+        "receipt_object_id": str(model.receipt_object_id),
         "source": model.source,
         "template_sha256": model.template_sha256,
         "inputs_sha256": model.inputs_sha256,
-        "created_by": model.created_by,
+        "created_by": str(model.created_by),
         "created_at": model.created_at.isoformat() if model.created_at else None,
     }
 

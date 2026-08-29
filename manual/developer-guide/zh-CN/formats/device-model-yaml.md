@@ -77,7 +77,9 @@ equations:
 
 ## 顶层字段
 
-顶层只允许下列字段；全部必需，没有内容时写 `{}`，不得增加第二套核心结构。
+普通模型顶层只允许下列六个字段；全部必需，没有内容时写 `{}`，不得增加第二套核心结构。
+未实例化模型仍使用同一 `schema` 和 `schema_version`，只额外允许顶层 `inputs` 声明可填写字段；
+它不是新的模型类型，也没有独立模板 schema 版本。
 
 | 字段 | 作用 |
 |---|---|
@@ -87,6 +89,7 @@ equations:
 | `properties` | 不随时间变化的纯技术常量 |
 | `interfaces` | 与外部交互的序列数据定义 |
 | `equations` | properties、接口序列与内部变量之间的声明式关系 |
+| `inputs` | 仅未实例化模型可用；声明外部输入可覆盖或添加的同构字段路径，实例化后删除 |
 
 禁止恢复独立顶层 `parameters`、`ports`、`data_inputs`、`states`、`model_commands`、`extensions`，也禁止通过别名兼容这些旧字段。
 
