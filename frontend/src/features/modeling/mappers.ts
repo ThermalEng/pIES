@@ -598,19 +598,26 @@ export function savedModelFromServer(body: unknown): SavedModelInfo {
   if (!model || typeof model.device_id !== 'string' || typeof model.content_sha256 !== 'string') {
     throw new MapperError('候选保存响应缺少 project_model.device_id / content_sha256')
   }
+  // 摘要计数从校验回执读取(权威); 回执缺失时保持 0 计数
+  const receipt = asRecord(rec?.receipt)
+  const summary = {
+    property_count:
+      receipt && typeof receipt.property_count === 'number' ? receipt.property_count : 0,
+    interface_count:
+      receipt && typeof receipt.interface_count === 'number' ? receipt.interface_count : 0,
+    relation_count:
+      receipt && typeof receipt.relation_count === 'number' ? receipt.relation_count : 0,
+  }
   return {
-    model_id: typeof model.id === 'string' ? model.id : '',
+    // 最终编号 = 后端分配的 _N 设备 ID(前端不预分配); 主表行 id 为不透明十进制
+    model_id: model.device_id,
     device_id: model.device_id,
     suffix: typeof model.suffix === 'number' ? model.suffix : 0,
     base_device_id: typeof model.base_device_id === 'string' ? model.base_device_id : model.device_id,
     schema_version: '2.0.0',
     canonical_yaml: '',
     content_sha256: model.content_sha256,
-    summary: {
-      property_count: 0,
-      interface_count: 0,
-      relation_count: 0,
-    },
+    summary,
     project_revision: typeof rec?.project_revision === 'number' ? rec.project_revision : 0,
     source: (model.source === 'template' ? 'template' : 'direct_yaml') as 'direct_yaml' | 'template',
     template_id: typeof model.template_id === 'string' ? model.template_id : null,
@@ -666,12 +673,11 @@ export function buildCandidateRequest(candidate: CandidateModel): CandidateSaveR
     }
     return {
       source: 'template',
-      content: null,
-      template_id: candidate.template_id,
-      template_revision: candidate.template_revision,
+      model_yaml: '',
+      template_id: candidate.template_id,      template_revision: candidate.template_revision,
       template_sha256: candidate.template_sha256,
-      inputs: candidate.inputs_json ?? {},
-      project_revision: candidate.project_revision,
+      template_inputs: candidate.inputs_json ?? {},
+      expected_revision: candidate.project_revision,
       idempotency_key: candidate.idempotency_key,
       data_files: candidate.data_files,
     }
@@ -680,13 +686,13 @@ export function buildCandidateRequest(candidate: CandidateModel): CandidateSaveR
     throw new MapperError('source=yaml 必须提供候选 YAML 内容')
   }
   return {
-    source: 'yaml',
-    content: candidate.content_yaml,
+    source: 'direct_yaml',
+    model_yaml: candidate.content_yaml,
     template_id: null,
     template_revision: null,
     template_sha256: null,
-    inputs: null,
-    project_revision: candidate.project_revision,
+    template_inputs: null,
+    expected_revision: candidate.project_revision,
     idempotency_key: candidate.idempotency_key,
     data_files: candidate.data_files,
   }
@@ -715,13 +721,13 @@ export function buildYamlSkeleton(): string {
     '    zh-CN: 设备名称',
     '    en-US: Device Name',
     '',
-    'properties:',
+    'properties: {}',
     '  # cop:',
     '  #   value: 3.2',
     '  #   unit: "1"',
     '  #   valid_range: {minimum: 1, maximum: 10}',
     '',
-    'interfaces:',
+    'interfaces: {}',
     '  # electricity_in:',
     '  #   type: in',
     '  #   carrier: electricity',

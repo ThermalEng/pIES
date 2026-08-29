@@ -185,7 +185,7 @@ check('提交: 合法表单产出 inputs 树', (() => {
   const values = md.defaultFormValues(root)
   values['properties.peak_power_kw.value'] = { kind: 'number', text: '150' }
   values['properties.is_switchable.value'] = { kind: 'boolean', checked: true }
-  values['interfaces.electric_demand.source.data_ref'] = { kind: 'data', file_ref: 'temp:1', file_name: 'load.csv' }
+  values['interfaces.electric_demand.source.data_ref'] = { kind: 'data', file_ref: 'temp:1', file_name: 'load.csv', data_ref: 'typical_day_load', upload: { upload_id: 'u1', object_id: 'o1', sha256: 'ab'.repeat(32) } }
   const result = md.formValuesToInputsOrErrors(root, values)
   if (!result.ok) return false
   const inputs = result.inputs
@@ -243,33 +243,75 @@ check('提交: 单叶子数组模板元素为标量', (() => {
 })())
 
 // ---------------------------------------------------------------------------
-// 临时文件引用收集
+// 数据文件引用收集(collectDataFileRefs: data_ref → 临时对象 + 摘要)
 // ---------------------------------------------------------------------------
-check('文件引用: 只收集已上传 data 叶子', (() => {
+const uploadedField = {
+  kind: 'data',
+  file_ref: 'obj:1',
+  file_name: 'a.csv',
+  data_ref: 'typical_day_load',
+  upload: { upload_id: 'u1', object_id: 'obj:1', sha256: 'ab'.repeat(32) },
+}
+check('文件引用: 收集已上传 data 叶子(含 upload 回执)', (() => {
   const values = md.defaultFormValues(root)
-  values['interfaces.electric_demand.source.data_ref'] = { kind: 'data', file_ref: 'temp:1', file_name: 'a.csv' }
+  values['interfaces.electric_demand.source.data_ref'] = uploadedField
   values['properties.label.value'] = { kind: 'string', text: 'x' }
-  const refs = md.collectTempFileRefs(values)
-  return refs.length === 1 && refs[0].path === 'interfaces.electric_demand.source.data_ref' && refs[0].temp_file_ref === 'temp:1'
+  const refs = md.collectDataFileRefs(values)
+  return (
+    refs.length === 1 &&
+    refs[0].data_ref === 'typical_day_load' &&
+    refs[0].upload_id === 'u1' &&
+    refs[0].object_id === 'obj:1' &&
+    refs[0].sha256 === 'ab'.repeat(32)
+  )
+})())
+check('文件引用: 无 upload 回执(上传未完成)不收集', (() => {
+  const values = { x: { kind: 'data', file_ref: 'obj:1', file_name: 'a.csv', data_ref: 'r', upload: null } }
+  return md.collectDataFileRefs(values).length === 0
+})())
+check('文件引用: data_ref 缺失回退字段路径', (() => {
+  const values = { 'interfaces.i.source.data_ref': { ...uploadedField, data_ref: null } }
+  const refs = md.collectDataFileRefs(values)
+  return refs.length === 1 && refs[0].data_ref === 'interfaces.i.source.data_ref'
 })())
 
 // ---------------------------------------------------------------------------
-// 模板解析(名称本地化 / 严格形状)
+// 模板解析(真实后端目录项: 无 names; 状态/修订/摘要透传 / 严格形状)
 // ---------------------------------------------------------------------------
-const tmplRaw = {
+const catalogItem = {
+  id: '17',
   template_id: 'ies.test.sample',
-  names: { 'zh-CN': '样例模板', 'en-US': 'Sample Template' },
-  schema_version: '2.0.0',
-  content_sha256: 'ab'.repeat(32),
-  revision: 3,
-  has_inputs: true,
+  status: 'published',
+  description: 'e2e 模板',
+  draft_revision: 2,
+  draft_sha256: 'ef'.repeat(32),
+  draft_has_inputs: true,
+  published_revision: 1,
+  published_at: '2026-08-29T00:00:00Z',
+  created_at: '2026-08-28T00:00:00Z',
+  updated_at: '2026-08-29T00:00:00Z',
+  revision: {
+    id: '55',
+    revision: 1,
+    schema_version: '2.0.0',
+    content_sha256: 'ab'.repeat(32),
+    inputs_sha256: 'cd'.repeat(32),
+    input_count: 4,
+    yaml_object_id: '61',
+    receipt_object_id: '62',
+    summary_object_id: '63',
+    published_by: '9',
+    published_at: '2026-08-29T00:00:00Z',
+  },
 }
-const summary = md.templateSummaryFromServer(tmplRaw, 'zh')
-check('模板: zh 名称解析', summary.name === '样例模板' && summary.template_id === 'ies.test.sample')
-check('模板: en 名称解析', md.templateSummaryFromServer(tmplRaw, 'en').name === 'Sample Template')
-check('模板: 未知 locale 回退 zh', md.templateSummaryFromServer(tmplRaw, 'fr').name === '样例模板')
-check('模板: 空 names 回退 template_id', md.templateSummaryFromServer({ ...tmplRaw, names: {} }, 'zh').name === 'ies.test.sample')
-check('模板: 摘要与修订透传', summary.content_sha256.length === 64 && summary.revision === 3 && summary.has_inputs === true)
+const summary = md.templateSummaryFromServer(catalogItem, 'zh')
+check('模板: 展示名回退模板 ID', summary.name === '' && summary.template_id === 'ies.test.sample')
+check('模板: 状态与描述透传', summary.status === 'published' && summary.description === 'e2e 模板')
+check('模板: 草稿/发布修订透传', summary.draft_revision === 2 && summary.published_revision === 1)
+check('模板: revision 精确视图解析', summary.revision !== null && summary.revision.revision === 1 && summary.revision.content_sha256.length === 64 && summary.revision.input_count === 4)
+check('模板: content_sha256 取 revision 摘要', summary.content_sha256 === 'ab'.repeat(32))
+check('模板: has_inputs 透传', summary.has_inputs === true)
+check('模板: 无 revision 时摘要取草稿', md.templateSummaryFromServer({ ...catalogItem, revision: undefined }, 'zh').content_sha256 === 'ef'.repeat(32))
 check('模板: 缺 template_id 抛 MapperError', (() => {
   try {
     md.templateSummaryFromServer({ names: {} }, 'zh')
@@ -279,15 +321,17 @@ check('模板: 缺 template_id 抛 MapperError', (() => {
   }
 })())
 
-const docBody = {
-  template: tmplRaw,
+const detailBody = {
+  template: catalogItem,
   document: { schema: 'ies.device-model', schema_version: '2.0.0', inputs: inputsRaw },
+  diagnostics: [],
 }
-const doc = md.templateDocumentFromServer(docBody, 'zh')
-check('模板详情: 文档解析出 inputs 树', doc.inputs.length === 3 && doc.summary.template_id === 'ies.test.sample')
-check('模板详情: 缺 document 抛 MapperError', (() => {
+const detail = md.templateDetailFromServer(detailBody, 'zh')
+check('模板详情: 文档解析出 inputs 树', detail.inputs.length === 3 && detail.summary.template_id === 'ies.test.sample')
+check('模板详情: 诊断列表解析', Array.isArray(detail.diagnostics) && detail.diagnostics.length === 0)
+check('模板详情: 缺 template 抛 MapperError', (() => {
   try {
-    md.templateDocumentFromServer({ template: tmplRaw }, 'zh')
+    md.templateDetailFromServer({ document: {} }, 'zh')
     return false
   } catch (err) {
     return err.name === 'MapperError'
@@ -295,28 +339,63 @@ check('模板详情: 缺 document 抛 MapperError', (() => {
 })())
 
 // ---------------------------------------------------------------------------
-// 保存结果解析(权威: 最终 _N ID / 规范 YAML / 摘要 / revision)
+// 保存结果解析(真实信封 {project_model, project_revision}: 最终 _N ID / 溯源)
 // ---------------------------------------------------------------------------
 const saveBody = {
-  model: {
-    model_id: 'ies.test.sample_1',
-    device_id: 'ies.test.sample',
-    schema_version: '2.0.0',
-    canonical_yaml: 'schema: ies.device-model\n',
+  project_model: {
+    id: '101',
+    project_id: '7',
+    device_id: 'ies.test.sample_1',
+    base_device_id: 'ies.test.sample',
+    suffix: 1,
+    revision: 1,
+    project_revision: 2,
     content_sha256: 'cd'.repeat(32),
-    summary: { property_count: 2, interface_count: 1, relation_count: 0 },
-    project_revision: 4,
+    model_object_id: '81',
+    receipt_object_id: '82',
+    source: 'template',
+    template_id: 'ies.test.sample',
+    template_revision: 1,
+    template_sha256: 'ab'.repeat(32),
+    inputs_sha256: 'de'.repeat(32),
+    created_by: '9',
+    created_at: '2026-08-29T00:00:00Z',
   },
-  project_revision: 4,
+  receipt: {
+    property_count: 4,
+    interface_count: 1,
+    relation_count: 0,
+  },
+  project_revision: 2,
 }
 const saved = md.savedModelFromServer(saveBody)
-check('保存: 最终 _N ID', saved.model_id === 'ies.test.sample_1')
-check('保存: 规范 YAML 与摘要', saved.canonical_yaml.includes('ies.device-model') && saved.content_sha256.length === 64)
-check('保存: 摘要计数', saved.summary.property_count === 2 && saved.summary.interface_count === 1)
-check('保存: 项目修订', saved.project_revision === 4)
-check('保存: 响应缺 model 抛 MapperError', (() => {
+check('保存: 最终编号 = _N 设备 ID(非不透明主行 id)', saved.model_id === 'ies.test.sample_1' && saved.device_id === 'ies.test.sample_1')
+check('保存: 摘要与来源', saved.content_sha256.length === 64 && saved.source === 'template')
+check('保存: 模板溯源透传', saved.template_id === 'ies.test.sample' && saved.template_revision === 1)
+check('保存: 项目修订', saved.project_revision === 2)
+check('保存: 摘要计数来自回执', saved.summary.property_count === 4 && saved.summary.interface_count === 1 && saved.summary.relation_count === 0)
+check('保存: 无回执时计数保持 0', (() => {
+  const s = md.savedModelFromServer({ ...saveBody, receipt: undefined })
+  return s.summary.property_count === 0 && s.summary.interface_count === 0
+})())
+check('保存: 响应缺 project_model 抛 MapperError', (() => {
   try {
-    md.savedModelFromServer({ project_revision: 4 })
+    md.savedModelFromServer({ project_revision: 2 })
+    return false
+  } catch (err) {
+    return err.name === 'MapperError'
+  }
+})())
+check('保存: direct_yaml 来源', md.savedModelFromServer({ ...saveBody, project_model: { ...saveBody.project_model, source: 'direct_yaml', template_id: null } }).source === 'direct_yaml')
+
+// 项目模型清单行(projectModelFromServer)
+const rowSummary = md.projectModelFromServer(saveBody.project_model)
+check('清单: device_id 与编号', rowSummary.device_id === 'ies.test.sample_1' && rowSummary.suffix === 1)
+check('清单: 模板溯源透传', rowSummary.template_id === 'ies.test.sample' && rowSummary.template_revision === 1)
+check('清单: source 判别', rowSummary.source === 'template')
+check('清单: 缺 device_id 抛 MapperError', (() => {
+  try {
+    md.projectModelFromServer({ suffix: 1 })
     return false
   } catch (err) {
     return err.name === 'MapperError'
@@ -358,43 +437,77 @@ check('诊断: 裸 diagnostics 数组容错', (() => {
 })())
 
 // ---------------------------------------------------------------------------
-// 候选请求构建(source 判别)
+// 候选请求构建(source 判别; template 引用三要素 + inputs + data_files)
 // ---------------------------------------------------------------------------
 check('请求: template 来源', (() => {
   const req = md.buildCandidateRequest({
     source: 'template',
     template_id: 'ies.test.sample',
+    template_revision: 1,
+    template_sha256: 'ab'.repeat(32),
     inputs_json: { properties: { x: { value: 1 } } },
     content_yaml: null,
     project_revision: 2,
     idempotency_key: 'k1',
-    temp_file_refs: [],
+    data_files: [],
   })
-  return req.source === 'template' && req.template_id === 'ies.test.sample' && req.content === null
+  return (
+    req.source === 'template' &&
+    req.template_id === 'ies.test.sample' &&
+    req.template_revision === 1 &&
+    req.template_sha256 === 'ab'.repeat(32) &&
+    req.template_inputs && req.template_inputs.properties.x.value === 1 &&
+    req.expected_revision === 2 &&
+    req.model_yaml === ''
+  )
 })())
 check('请求: template 缺 template_id 抛错', (() => {
   try {
-    md.buildCandidateRequest({ source: 'template', template_id: null, inputs_json: {}, content_yaml: null, project_revision: 1, idempotency_key: 'k', temp_file_refs: [] })
+    md.buildCandidateRequest({ source: 'template', template_id: null, template_revision: 1, template_sha256: 'ab'.repeat(32), inputs_json: {}, content_yaml: null, project_revision: 1, idempotency_key: 'k', data_files: [] })
     return false
   } catch (err) {
     return err.name === 'MapperError'
   }
 })())
+check('请求: template 缺 revision 抛错', (() => {
+  try {
+    md.buildCandidateRequest({ source: 'template', template_id: 't', template_revision: null, template_sha256: null, inputs_json: {}, content_yaml: null, project_revision: 1, idempotency_key: 'k', data_files: [] })
+    return false
+  } catch (err) {
+    return err.name === 'MapperError'
+  }
+})())
+check('请求: template 携带 data_files', (() => {
+  const req = md.buildCandidateRequest({
+    source: 'template',
+    template_id: 't',
+    template_revision: 1,
+    template_sha256: 'ab'.repeat(32),
+    inputs_json: {},
+    content_yaml: null,
+    project_revision: 2,
+    idempotency_key: 'k3',
+    data_files: [{ data_ref: 'r1', upload_id: 'u1', object_id: 'o1', sha256: 'cd'.repeat(32) }],
+  })
+  return Array.isArray(req.data_files) && req.data_files.length === 1 && req.data_files[0].data_ref === 'r1'
+})())
 check('请求: yaml 来源', (() => {
   const req = md.buildCandidateRequest({
     source: 'yaml',
     template_id: null,
+    template_revision: null,
+    template_sha256: null,
     inputs_json: null,
     content_yaml: 'schema: ies.device-model\n',
     project_revision: 2,
     idempotency_key: 'k2',
-    temp_file_refs: [],
+    data_files: [],
   })
-  return req.source === 'yaml' && req.content.includes('ies.device-model') && req.template_id === null
+  return req.source === 'direct_yaml' && req.model_yaml.includes('ies.device-model') && req.template_id === null && req.expected_revision === 2
 })())
 check('请求: yaml 空内容抛错', (() => {
   try {
-    md.buildCandidateRequest({ source: 'yaml', template_id: null, inputs_json: null, content_yaml: '   ', project_revision: 1, idempotency_key: 'k', temp_file_refs: [] })
+    md.buildCandidateRequest({ source: 'yaml', template_id: null, template_revision: null, template_sha256: null, inputs_json: null, content_yaml: '   ', project_revision: 1, idempotency_key: 'k', data_files: [] })
     return false
   } catch (err) {
     return err.name === 'MapperError'
@@ -413,7 +526,8 @@ check('ID: 空串拒绝', md.isValidDeviceId('') === false)
 const skeleton = md.buildYamlSkeleton()
 check('骨架: 顶层 schema', skeleton.includes('schema: ies.device-model'))
 check('骨架: schema_version 2.0.0', skeleton.includes('schema_version: "2.0.0"'))
-check('骨架: 五顶层字段齐全', ['device:', 'properties:', 'interfaces:', 'equations:'].every((k) => skeleton.includes(k)))
+check('骨架: 五顶层字段齐全', ['device:', 'properties: {}', 'interfaces: {}', 'equations:'].every((k) => skeleton.includes(k)))
+check('骨架: 空映射可直接提交后端校验(不产生 null 类型诊断)', !skeleton.includes('properties:\n') && !skeleton.includes('interfaces:\n'))
 check('骨架: 不含经济字段', !skeleton.includes('price') && !skeleton.includes('cost'))
 
 check('行列: 首行', (() => { const p = md.yamlLineColumn('abc', 0); return p.line === 1 && p.column === 1 })())

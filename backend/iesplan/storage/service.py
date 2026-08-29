@@ -491,10 +491,10 @@ def attach(
     """
     obj = _resolve_object(db, object_id)
     entity_type = ref_entity_type or REF_ENTITY_TYPE_MAP.get(ref_type, ref_type)
-    # 0.2.0-B3 恢复路径: 待物理回收对象重新获得 owner 引用时自动恢复为
-    # 可用状态(清除软删标记), 文件仍在磁盘上, 内容可继续访问。
-    # attach 必然建立引用, 恢复后 ref_count >= 1, 故置 stored。
-    if obj.status == OBJ_STATUS_PENDING_DELETION:
+    # 恢复路径: 待物理回收(软删)或已解绑(orphaned)对象重新获得 owner 引用时
+    # 自动恢复为可用状态(文件仍在磁盘上, 内容可继续访问)。attach 必然建立
+    # 引用, 恢复后 ref_count >= 1, 故置 stored。
+    if obj.status in (OBJ_STATUS_PENDING_DELETION, OBJ_STATUS_ORPHANED):
         obj.status = OBJ_STATUS_STORED
         obj.pending_deleted_at = None
         obj.pending_delete_until = None

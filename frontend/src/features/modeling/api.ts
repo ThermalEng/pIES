@@ -9,8 +9,8 @@
  *   POST /api/projects/{pid}/models/temp-files           临时数据文件上传(multipart)
  *        → {temp_file: {object_id, oid, sha256, ...}, upload_id}
  *   POST /api/projects/{pid}/models                      正式保存:
- *        source=template: {template_id, template_revision, template_sha256, inputs}
- *        source=yaml:     {content}
+ *        source=template: {template_id, template_revision, template_sha256, template_inputs}
+ *        source=yaml:     {model_yaml}
  *        成功 201 → {project_model, receipt, project_revision}; 失败 400 → 标准
  *        错误信封, params.diagnostics 为聚合诊断(message_key/字段路径/YAML 行列/
  *        expected/actual)。

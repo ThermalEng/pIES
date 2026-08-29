@@ -30,6 +30,7 @@ ALL_TABLES: tuple[str, ...] = (
     "admin_maintenance_actions",
     "projects", "drafts", "project_versions", "version_refs",
     "project_models", "project_model_sequences",
+    "model_templates", "model_template_revisions",
     "system_graphs", "devices", "ports", "connections",
     "datasets", "dataset_versions", "dataset_files",
     "calc_configs", "calc_snapshots",

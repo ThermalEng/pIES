@@ -346,6 +346,33 @@ def _read_template_document(db: Session, object_id: int) -> str:
     return text
 
 
+def _read_template_document_mapping(db: Session, object_id: int) -> Mapping[str, Any] | None:
+    """读取模板规范文档为嵌套 JSON 对象(API 详情返回的契约形态)。
+
+    规范字节为紧凑 JSON 文本(``canonical_bytes`` 产出); 前端契约
+    (features/customization 与 features/modeling)要求 ``document`` 为
+    已解析的对象而非文本, 在此门面处解析, 内部仍以文本形式存储。
+    """
+    text = _read_template_document(db, object_id)
+    try:
+        parsed = json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise AppError(
+            "模板对象损坏",
+            code="SYS-STORE-001",
+            message_key="ies.diag.store.corrupt",
+            location={"object_type": "model_template", "object_id": str(object_id)},
+        ) from None
+    if not isinstance(parsed, Mapping):
+        raise AppError(
+            "模板对象形态非法",
+            code="SYS-STORE-001",
+            message_key="ies.diag.store.corrupt",
+            location={"object_type": "model_template", "object_id": str(object_id)},
+        ) from None
+    return parsed
+
+
 def _load_diagnostics(db: Session, object_id: int | None) -> list[dict[str, Any]]:
     """读取草稿/revision 关联的聚合诊断 JSON(无诊断对象时返回空列表)。"""
     if object_id is None:
@@ -547,13 +574,27 @@ def list_my_templates(db: Session, user) -> list[dict[str, Any]]:
 
 
 def get_template_detail(db: Session, user, template_id: str) -> dict[str, Any]:
-    """模板详情(草稿内容 + 聚合诊断; 已发布时附精确 revision 视图)。"""
+    """模板详情(草稿内容 + 聚合诊断; 已发布时附精确 revision 视图)。
+
+    ``template`` 与目录项同构: 已发布时携带 ``revision`` 字段(最新发布
+    revision 的精确视图), 供「新建模型」表单提交时引用固定 revision。
+    """
     template = _get_owned_template(db, user, template_id)
     document = None
     if template.draft_yaml_object_id is not None:
-        document = _read_template_document(db, template.draft_yaml_object_id)
+        document = _read_template_document_mapping(db, template.draft_yaml_object_id)
+    item = _template_to_dict(template)
+    if template.published_revision > 0:
+        rev = db.execute(
+            sa.select(ModelTemplateRevision).where(
+                ModelTemplateRevision.template_id == template.id,
+                ModelTemplateRevision.revision == template.published_revision,
+            )
+        ).scalar_one_or_none()
+        if rev is not None:
+            item["revision"] = _revision_to_dict(rev)
     return {
-        "template": _template_to_dict(template),
+        "template": item,
         "document": document,
         "diagnostics": _load_diagnostics(db, template.draft_diagnostics_object_id),
     }
@@ -582,7 +623,7 @@ def get_template_revision(db: Session, user, template_id: str, revision: int) ->
     return {
         "template": _template_to_dict(template),
         "revision": _revision_to_dict(row),
-        "document": _read_template_document(db, row.yaml_object_id),
+        "document": _read_template_document_mapping(db, row.yaml_object_id),
         "receipt": json.loads(get_object(db, row.receipt_object_id).decode("utf-8")),
         "summary": json.loads(get_object(db, row.summary_object_id).decode("utf-8")),
         "diagnostics": _load_diagnostics(db, row.diagnostics_object_id),

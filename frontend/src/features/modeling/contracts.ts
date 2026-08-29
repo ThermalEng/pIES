@@ -15,9 +15,9 @@
  *   POST /api/projects/{pid}/models                      正式保存 {project_model, receipt, project_revision}
  *
  * 候选保存判别字段 source:
- *   - source=template: template_id + template_revision + template_sha256 + inputs;
+ *   - source=template: template_id + template_revision + template_sha256 + template_inputs;
  *     后端读取权威模板内容并实例化(不信任客户端自带的模板字节);
- *   - source=yaml: content(候选 YAML 文本)由后端直接解析校验。
+ *   - source=yaml: model_yaml(候选 YAML 文本)由后端直接解析校验。
  * 两条路径汇合为同一个后端用例。
  *
  * 依赖方向: features/modeling → ../../types(共享错误类型)/../../api/client(HTTP 层)。
@@ -124,8 +124,8 @@ export interface TemplateRevisionDetailDto {
 // 候选模型(校验 + 保存)
 // ---------------------------------------------------------------------------
 
-/** 候选来源: 模板实例化 / 直接 YAML 编辑(两者汇合为同一保存用例)。 */
-export type CandidateSource = 'template' | 'yaml'
+/** 候选来源(与后端 ModelSaveRequest.source 一致): 模板实例化 / 直接 YAML 编辑。 */
+export type CandidateSource = 'direct_yaml' | 'template'
 
 /** 配套数据文件引用(已上传的临时对象 + 声明摘要)。 */
 export interface DataFileRefDto {
@@ -137,14 +137,14 @@ export interface DataFileRefDto {
 
 /**
  * 候选校验/保存请求(判别字段 source):
- * - source=template: template_id + template_revision + template_sha256 + inputs;
+ * - source=template: template_id + template_revision + template_sha256 + template_inputs;
  *   后端读取权威模板内容并实例化;
- * - source=yaml: content(候选 YAML 文本)由后端直接解析校验。
+ * - source=yaml: model_yaml(候选 YAML 文本)由后端直接解析校验。
  */
 export interface CandidateSaveRequestDto {
   source: CandidateSource
-  /** source=yaml: 候选 YAML 文本。 */
-  content: string | null
+  /** source=yaml: 候选 YAML 文本; template 来源可省略(后端以权威模板字节为准, 传空串)。 */
+  model_yaml: string
   /** source=template: 稳定模板 ID(不透明字符串)。 */
   template_id: string | null
   /** source=template: 精确发布 revision(固定不可变)。 */
@@ -152,9 +152,9 @@ export interface CandidateSaveRequestDto {
   /** source=template: 精确 revision 的内容摘要(与后端权威内容二次确认)。 */
   template_sha256: string | null
   /** source=template: 表单 JSON inputs 树(只含模板已声明路径)。 */
-  inputs: unknown | null
-  /** 项目草稿修订(乐观锁, 并发编辑不得静默覆盖)。 */
-  project_revision: number
+  template_inputs: unknown | null
+  /** 预期项目草稿修订(乐观锁, 与后端 ModelSaveRequest.expected_revision 对应)。 */
+  expected_revision: number
   /** 幂等键(可重试写操作, 宪法 §8.4)。 */
   idempotency_key: string
   /** 配套数据文件引用(data_ref → 临时隔离区文件)。 */

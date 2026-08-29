@@ -215,9 +215,9 @@ def test_list_templates_and_detail(client: TestClient, db_session: Session) -> N
     assert body["template"]["template_id"] == tpl["template_id"]
     assert body["document"] is not None
     assert body["diagnostics"] == []
-    import json as _json
-
-    doc = _json.loads(body["document"])
+    # 契约: document 为已解析的嵌套 JSON 对象(前端模板详情契约形态)
+    doc = body["document"]
+    assert isinstance(doc, dict)
     assert doc["device"]["id"] == "acme.device.electric_load"
     assert "inputs" in doc
 
@@ -381,6 +381,8 @@ def test_publish_revision_detail_exact(client: TestClient, db_session: Session) 
     assert detail["receipt"]["schema"] == "ies.device-model"
     assert detail["summary"]["property_count"] == 1
     assert detail["summary"]["interface_count"] == 1
+    # 契约: revision 详情 document 为已解析的嵌套 JSON 对象
+    assert isinstance(detail["document"], dict)
     assert "inputs" in detail["document"]
     # 不存在的 revision → 404
     resp2 = client.get(f"/api/model-templates/{tpl['template_id']}/revisions/99", headers=headers)

@@ -11,6 +11,7 @@
 - result.py     第8节结果: evidence_packages / result_assessments / result_index /
                 result_selections / reports
 - uncertainty.py 第9节不确定性: uncertainty_snapshots / sample_tasks / sample_records
+- model_template.py 用户自定义模型模板: model_templates / model_template_revisions
 - audit.py      第10节审计与对象: audit_log / import_proposals / retention_rules
                 (objects / object_refs 的 ORM 已迁移至 iesplan.storage.persistence,
                  STO-05; 本包从存储模块再导出以保持元数据注册完整)
@@ -41,6 +42,7 @@ from iesplan.models.identity import (
 )
 from iesplan.models.immutable_triggers import IMMUTABLE_TABLES
 from iesplan.models.model import Connection, Device, Port, SystemGraph
+from iesplan.models.model_template import ModelTemplate, ModelTemplateRevision
 from iesplan.models.project import (
     AdminMaintenanceAction,
     Draft,
