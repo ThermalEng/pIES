@@ -127,7 +127,7 @@ def create_project(
     """创建项目: 创建者即所有者, 同事务创建初始草稿(revision=1，domain-model §项目聚合)。
 
     业务规则: 管理员不持有业务项目(仅负责账号与系统管理), 创建一律拒绝
-    (403, PERM-DENIED-001 标准信封)。
+    (403, PERM-DENIED-001 标准信封); 普通工程师行为不变。
     名称全局唯一(uq_projects_name), 冲突抛 ConflictError。
     """
     if _is_admin(db, user):
