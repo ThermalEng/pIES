@@ -21,11 +21,30 @@
 
 from iesplan.core.contracts import ParameterSpec
 from iesplan.core.errors import AppError
+from iesplan.devices.contracts2 import (
+    SCHEMA_ID,
+    SCHEMA_VERSION,
+    CanonicalModel,
+    DeviceModelDocument,
+    canonical_bytes,
+    canonical_receipt,
+    content_sha256,
+    is_valid_id,
+    to_dict,
+)
 from iesplan.devices.datacontract import data_inputs_from_descriptor
 from iesplan.devices.loader import DEFAULT_CATALOG_DIR
+from iesplan.devices.migration2 import MigrationResult, migrate_v1_to_v2
+from iesplan.devices.parser2 import (
+    DeviceModelParseResult,
+    ParseError,
+    parse_device_model_v2,
+    parse_template_inputs,
+)
 from iesplan.devices.profile import load_profile_columns
 from iesplan.devices.registry import init_registry
 from iesplan.devices.spec import DeviceModelDescriptor
+from iesplan.devices.template2 import InstantiateResult, instantiate_template
 
 
 def get_profile_columns(type_id: str) -> dict[str, "object"]:
@@ -82,4 +101,22 @@ __all__ = [
     "get_profile_columns",
     "data_inputs_from_descriptor",
     "load_profile_columns",
+    # `ies.device-model` 2.0.0 纯技术契约(阶段 1 交付, 切片 dm2-A 起公开消费)
+    "SCHEMA_ID",
+    "SCHEMA_VERSION",
+    "CanonicalModel",
+    "DeviceModelDocument",
+    "canonical_bytes",
+    "canonical_receipt",
+    "content_sha256",
+    "is_valid_id",
+    "to_dict",
+    "DeviceModelParseResult",
+    "ParseError",
+    "parse_device_model_v2",
+    "parse_template_inputs",
+    "MigrationResult",
+    "migrate_v1_to_v2",
+    "InstantiateResult",
+    "instantiate_template",
 ]

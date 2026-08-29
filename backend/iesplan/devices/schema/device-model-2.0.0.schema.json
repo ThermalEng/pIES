@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iesplan.dev/schema/device-model/2.0.0",
+  "title": "ies.device-model",
+  "description": "设备模型 YAML 2.0.0 机器可读 schema。设备模型只表达纯技术语义：稳定身份、非时变 properties、五类序列 interfaces 与受限声明式 equations。文件中禁止函数/包/模块路径、shell、凭证、价格、成本、计算精度与任意代码入口。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "device", "properties", "interfaces", "equations"],
+  "properties": {
+    "schema": {
+      "const": "ies.device-model"
+    },
+    "schema_version": {
+      "const": "2.0.0"
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "names"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*$",
+          "description": "稳定、小写、带命名空间的设备类型 ID；最终项目内 ID 由基础 ID 加 _N 后缀形成。"
+        },
+        "names": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "propertyNames": {"pattern": "^[a-z]{2}(-[A-Z]{2})?$"},
+          "properties": {
+            "zh-CN": {"type": "string", "minLength": 1},
+            "en-US": {"type": "string", "minLength": 1}
+          },
+          "description": "本地化显示名；显示名不参与引用与计算。"
+        }
+      }
+    },
+    "properties": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["value", "unit"],
+        "properties": {
+          "value": {
+            "description": "非时变技术常量；有限 JSON 标量（number/boolean/string），类型从值本身确定。"
+          },
+          "unit": {"type": "string", "minLength": 1},
+          "valid_range": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["minimum", "maximum"],
+            "properties": {
+              "minimum": {"type": ["number", "null"]},
+              "maximum": {"type": ["number", "null"]}
+            },
+            "description": "可选闭区间边界；null 表示该侧无有限边界。"
+          }
+        }
+      },
+      "description": "不随时间变化的纯技术常量。"
+    },
+    "interfaces": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["carrier", "unit", "valid_range"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["in", "out", "bidirectional", "predefined", "blind"],
+            "description": "接口类型；缺省时规范化为 blind。"
+          },
+          "carrier": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "unit": {"type": "string", "minLength": 1},
+          "valid_range": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["minimum", "maximum"],
+            "properties": {
+              "minimum": {"type": ["number", "null"]},
+              "maximum": {"type": ["number", "null"]}
+            }
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["mode"],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": ["constant", "data_repeat", "data_predict"]
+              },
+              "value": {"type": ["number", "boolean", "string"]},
+              "data_ref": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      },
+      "description": "与外部交互的序列数据定义；type 缺省规范化为 blind。"
+    },
+    "equations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variables", "relations"],
+      "properties": {
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["unit"],
+            "properties": {
+              "unit": {"type": "string", "minLength": 1},
+              "valid_range": {
+                "type": ["object", "null"],
+                "additionalProperties": false,
+                "required": ["minimum", "maximum"],
+                "properties": {
+                  "minimum": {"type": ["number", "null"]},
+                  "maximum": {"type": ["number", "null"]}
+                }
+              },
+              "initial": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["property_ref"],
+                "properties": {
+                  "property_ref": {"type": "string", "minLength": 1},
+                  "value": {"type": ["number", "boolean", "string"]}
+                }
+              }
+            }
+          },
+          "description": "内部序列变量；只存在于 equations，不作为可连接接口。"
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "expression"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*$"},
+              "expression": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      },
+      "description": "properties、接口序列与内部变量之间的受限声明式关系。"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "模板专用 input 声明；结构与语义由解析器严格校验。"
+      },
+      "description": "模板（未实例化阶段）专用的输入声明；实例化后删除，普通模型不得包含。"
+    }
+  }
+}

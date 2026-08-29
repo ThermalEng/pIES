@@ -109,8 +109,16 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-META-005": "timestamp_mode=fixed_offset 必须提供固定 UTC 偏移且范围在 -840..840",
     "DATA-META-006": "series_mode=periodic 必须提供 period(day|week|year)",
     "DATA-META-007": "固定 UTC 偏移越界(-840..840): {value}",
-    "DATA-META-008": "device_model 与被校验的设备描述符不匹配: 声明 {declared}, 期望 {expected}",
+    "DATA-META-008": "device_model/device_id 与被校验的设备描述符不匹配: 声明 {declared}, 期望 {expected}",
     "DATA-META-009": "文件声明的 device_model 未注册: {device_model}",
+    "DATA-META-010": (
+        "ies.device-data 2.0.0 声明的设备内容摘要与目标设备不匹配: "
+        "声明 {declared}, 期望 {expected}"
+    ),
+    "DATA-META-011": (
+        "ies.device-data 2.0.0 文件 source_mode 与设备接口声明的预定义来源模式"
+        "不匹配: {column} 声明 {mode}, 文件 {source_mode}"
+    ),
     "DATA-DIAL-001": "CSV 方言不符合 ies.device-data 契约: {detail}",
     "DATA-COL-003": "CSV 列未在设备模型 data_inputs 中声明: {column}",
     "DATA-COL-004": "CSV 列重复: {column}",
@@ -185,6 +193,28 @@ NEW_DIAG_CODES: dict[str, str] = {
     "ASM-OUT-001": "输出引用未定义设备或端口",
     "ASM-ART-001": "规范文本、摘要与校验回执不一致",
     "ASM-CONV-001": "旧装配形态无法唯一迁移到 ies.assembly 1.0.0",
+    # 装配 2.0.0 接口网络纯协议校验(0.8.0 切片): 值域冲突/预定义绑定/内容锁
+    "ASM-EDGE-010": "连接两端有效区间无交集(值域冲突)",
+    "ASM-BIND-001": "预定义接口绑定非法(来源模式/数据引用/接口类型不匹配)",
+    "ASM-LOCK-001": "设备实例 definition 与提供的 descriptor 内容锁不一致",
+    # 技术方程建模 2.0.0 contract(0.8.0 切片): 公共 AST 与数学贡献诊断
+    "MOD-EQ-001": "方程表达式语法非法: {detail}",
+    "MOD-EQ-002": "方程引用了未声明的标识符: {name}(只允许 properties/interfaces/equations.variables)",
+    "MOD-EQ-003": "方程量纲/单位冲突: {detail}",
+    "MOD-EQ-004": "方程存在循环引用: {cycle}",
+    "MOD-EQ-005": "关系输出冲突: {detail}",
+    "MOD-EQ-006": "状态变量缺少 initial 初值: {name}",
+    "MOD-EQ-007": "非时变 property 被时间索引引用: {name}",
+    "MOD-EQ-008": "方程引用了 blind 接口(不连接、不接收数据): {name}",
+    # PROJ 域: 项目模型候选门禁与保存(application/projects 用例, 切片 dm2-A)。
+    # 文件内容校验(列/单位/周期/分辨率/时间轴)委托 devices 数据契约
+    # (阶段 2 worktree B 并行开发), 本切片只覆盖文件存在/摘要/归属三类。
+    "PROJ-MDL-001": "候选模型引用的临时数据文件不存在或不可用: {data_ref}(期望存在对象,实际不可用)",
+    "PROJ-MDL-002": "临时数据文件内容摘要与声明不一致: {data_ref}(期望 {expected_sha256},实际 {actual_sha256})",
+    "PROJ-MDL-003": "临时数据文件归属与上传会话不一致: {data_ref}(该对象不属于 upload_id={upload_id})",
+    "PROJ-MDL-004": "最终设备 ID 无法通过身份校验: {final_id}(由基础 ID {base_device_id} 追加 _N 后缀后非法)",
+    "PROJ-MDL-005": "候选模型校验失败, 保存被拒绝(不写项目模型目录、不登记清单、不分配编号)",
+    "PROJ-MDL-006": "候选模型 YAML 解析失败: {detail}",
 }
 
 # ---------------------------------------------------------------------------
@@ -250,6 +280,8 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-META-007": "meta_offset_out_of_range",
             "DATA-META-008": "meta_model_mismatch",
             "DATA-META-009": "meta_model_unregistered",
+            "DATA-META-010": "meta_content_mismatch",
+            "DATA-META-011": "meta_source_mode_mismatch",
             "DATA-DIAL-001": "dialect_invalid",
             "DATA-COL-003": "col_undeclared",
             "DATA-COL-004": "col_duplicate",
@@ -266,6 +298,17 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-TIME-006": "time_form_mode_mismatch",
             "DATA-ARR-001": "array_length_mismatch",
             "DATA-SUM-001": "summary_mismatch",
+        }.items()
+    },
+    **{
+        code: "ies.diag.proj." + suffix
+        for code, suffix in {
+            "PROJ-MDL-001": "model_data_missing",
+            "PROJ-MDL-002": "model_data_digest_mismatch",
+            "PROJ-MDL-003": "model_data_owner_mismatch",
+            "PROJ-MDL-004": "model_identity_failed",
+            "PROJ-MDL-005": "model_validation_failed",
+            "PROJ-MDL-006": "model_yaml_parse",
         }.items()
     },
 }
@@ -323,6 +366,8 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-META-007",
             "DATA-META-008",
             "DATA-META-009",
+            "DATA-META-010",
+            "DATA-META-011",
             "DATA-DIAL-001",
             "DATA-COL-003",
             "DATA-COL-004",
@@ -341,6 +386,13 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-SUM-001",
         )
     },
+    **{
+        code: "ies.fix.proj.model_data"
+        for code in ("PROJ-MDL-001", "PROJ-MDL-002", "PROJ-MDL-003")
+    },
+    "PROJ-MDL-004": "ies.fix.proj.model_identity",
+    "PROJ-MDL-005": "ies.fix.proj.model_validation",
+    "PROJ-MDL-006": "ies.fix.proj.model_yaml",
 }
 
 
