@@ -109,8 +109,16 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-META-005": "timestamp_mode=fixed_offset 必须提供固定 UTC 偏移且范围在 -840..840",
     "DATA-META-006": "series_mode=periodic 必须提供 period(day|week|year)",
     "DATA-META-007": "固定 UTC 偏移越界(-840..840): {value}",
-    "DATA-META-008": "device_model 与被校验的设备描述符不匹配: 声明 {declared}, 期望 {expected}",
+    "DATA-META-008": "device_model/device_id 与被校验的设备描述符不匹配: 声明 {declared}, 期望 {expected}",
     "DATA-META-009": "文件声明的 device_model 未注册: {device_model}",
+    "DATA-META-010": (
+        "ies.device-data 2.0.0 声明的设备内容摘要与目标设备不匹配: "
+        "声明 {declared}, 期望 {expected}"
+    ),
+    "DATA-META-011": (
+        "ies.device-data 2.0.0 文件 source_mode 与设备接口声明的预定义来源模式"
+        "不匹配: {column} 声明 {mode}, 文件 {source_mode}"
+    ),
     "DATA-DIAL-001": "CSV 方言不符合 ies.device-data 契约: {detail}",
     "DATA-COL-003": "CSV 列未在设备模型 data_inputs 中声明: {column}",
     "DATA-COL-004": "CSV 列重复: {column}",
@@ -250,6 +258,8 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-META-007": "meta_offset_out_of_range",
             "DATA-META-008": "meta_model_mismatch",
             "DATA-META-009": "meta_model_unregistered",
+            "DATA-META-010": "meta_content_mismatch",
+            "DATA-META-011": "meta_source_mode_mismatch",
             "DATA-DIAL-001": "dialect_invalid",
             "DATA-COL-003": "col_undeclared",
             "DATA-COL-004": "col_duplicate",
@@ -323,6 +333,8 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-META-007",
             "DATA-META-008",
             "DATA-META-009",
+            "DATA-META-010",
+            "DATA-META-011",
             "DATA-DIAL-001",
             "DATA-COL-003",
             "DATA-COL-004",
