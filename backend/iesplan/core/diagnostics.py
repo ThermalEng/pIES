@@ -185,6 +185,15 @@ NEW_DIAG_CODES: dict[str, str] = {
     "ASM-OUT-001": "输出引用未定义设备或端口",
     "ASM-ART-001": "规范文本、摘要与校验回执不一致",
     "ASM-CONV-001": "旧装配形态无法唯一迁移到 ies.assembly 1.0.0",
+    # PROJ 域: 项目模型候选门禁与保存(application/projects 用例, 切片 dm2-A)。
+    # 文件内容校验(列/单位/周期/分辨率/时间轴)委托 devices 数据契约
+    # (阶段 2 worktree B 并行开发), 本切片只覆盖文件存在/摘要/归属三类。
+    "PROJ-MDL-001": "候选模型引用的临时数据文件不存在或不可用: {data_ref}(期望存在对象,实际不可用)",
+    "PROJ-MDL-002": "临时数据文件内容摘要与声明不一致: {data_ref}(期望 {expected_sha256},实际 {actual_sha256})",
+    "PROJ-MDL-003": "临时数据文件归属与上传会话不一致: {data_ref}(该对象不属于 upload_id={upload_id})",
+    "PROJ-MDL-004": "最终设备 ID 无法通过身份校验: {final_id}(由基础 ID {base_device_id} 追加 _N 后缀后非法)",
+    "PROJ-MDL-005": "候选模型校验失败, 保存被拒绝(不写项目模型目录、不登记清单、不分配编号)",
+    "PROJ-MDL-006": "候选模型 YAML 解析失败: {detail}",
 }
 
 # ---------------------------------------------------------------------------
@@ -268,6 +277,17 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-SUM-001": "summary_mismatch",
         }.items()
     },
+    **{
+        code: "ies.diag.proj." + suffix
+        for code, suffix in {
+            "PROJ-MDL-001": "model_data_missing",
+            "PROJ-MDL-002": "model_data_digest_mismatch",
+            "PROJ-MDL-003": "model_data_owner_mismatch",
+            "PROJ-MDL-004": "model_identity_failed",
+            "PROJ-MDL-005": "model_validation_failed",
+            "PROJ-MDL-006": "model_yaml_parse",
+        }.items()
+    },
 }
 
 # 每个码对应的修复建议键(独立于消息键维护)
@@ -341,6 +361,13 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-SUM-001",
         )
     },
+    **{
+        code: "ies.fix.proj.model_data"
+        for code in ("PROJ-MDL-001", "PROJ-MDL-002", "PROJ-MDL-003")
+    },
+    "PROJ-MDL-004": "ies.fix.proj.model_identity",
+    "PROJ-MDL-005": "ies.fix.proj.model_validation",
+    "PROJ-MDL-006": "ies.fix.proj.model_yaml",
 }
 
 
