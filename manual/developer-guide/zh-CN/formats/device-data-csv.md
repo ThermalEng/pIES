@@ -3,7 +3,7 @@
 > 契约标识：`ies.device-data`；目标 schema：`2.0.0`；推荐文件名：`<dataset-id>.data.csv`。
 > 实现状态：生效目标契约，当前代码仍实现旧 `1.0.0` 独立设备版本/`data_inputs` 绑定，迁移顺序见 [Roadmap](../../../changelog/roadmap.md)。
 
-设备数据 CSV 用于人工准备或工具导出的时序输入。它把“这一列是什么、使用什么单位、时间如何解释”写进文件本身，使文件离开原电脑和原项目后仍可校验。
+设备数据 CSV 用于人工准备或工具导出的序列输入。它把“这一列是什么、使用什么单位、一个 step 代表多长间隔”写进文件本身。项目计算序列不使用时间戳和时区；原始文件可声明不同采样间隔，序列预备用例负责转换为项目基线分辨率下的全周期连续 `step` 文件。
 
 ## 可直接手写的最小示例
 
@@ -15,21 +15,21 @@
 # device_content_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 # source_mode: data_predict
 # resolution: 1h
-# timestamp_mode: fixed_offset
-# fixed_utc_offset_minutes: 480
 # unit.electric_demand: kW
-timestamp,electric_demand
-2025-01-01T00:00:00,48.3
-2025-01-01T01:00:00,46.7
-2025-01-01T02:00:00,45.9
+step,electric_demand
+0,48.3
+1,46.7
+2,45.9
 ```
 
-以 UTC 编写时改为：
+序列预备完成后的计算用文件还必须固定项目基线摘要和点数：
 
 ```csv
-# timestamp_mode: utc
-timestamp,electric_demand
-2024-12-31T16:00:00Z,48.3
+# project_baseline_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+# point_count: 8760
+# prepared: true
+step,electric_demand
+0,48.3
 ```
 
 ## 文件结构
@@ -51,14 +51,19 @@ timestamp,electric_demand
 | `dataset_id` | 稳定数据集 ID，不等同于文件名 |
 | `device_id` | 稳定设备 ID，不含设备独立版本 |
 | `device_content_sha256` | 设备规范内容摘要，决定允许绑定的 `predefined` interfaces |
-| `source_mode` | `data_repeat` 或 `data_predict`；`constant` 直接写在设备接口中，不使用 CSV |
-| `resolution` | 固定步长，例如 `15min`、`30min`、`1h` |
-| `timestamp_mode` | `utc` 或 `fixed_offset` |
+| `source_mode` | 原始输入为 `data_repeat` 或 `data_predict`；序列预备生成的计算用文件还可为 `constant` |
+| `resolution` | 该文件每个 step 的采样间隔，例如 `15min`、`30min`、`1h`；原始文件可与项目基线不同 |
 | `unit.<column>` | 每个数值数据列的单位，必须与设备模型一致 |
 
-`timestamp_mode: fixed_offset` 时必须提供 `fixed_utc_offset_minutes`，取值范围 `-840..840`。它表示整份文件的固定偏移，不采用运行机器时区，也不自动应用夏令时。需要夏令时的真实时间线应直接使用 UTC。
+`source_mode: data_repeat` 还必须提供 `period: day`、`week` 或 `year`。周期展开规则由项目基线唯一决定。
 
-`source_mode: data_repeat` 还必须提供 `period: day`、`week` 或 `year`。周期展开规则固定在装配快照中，不能由求解时日期库隐式决定。
+序列预备后可进入装配的文件还必须包含：
+
+| 键 | 含义 |
+|---|---|
+| `project_baseline_sha256` | 产生该计算序列时使用的不可变项目基线摘要 |
+| `point_count` | 全周期点数，必须与基线的 resolution/leap_year 一致 |
+| `prepared` | 固定为 `true`，表示该文件已完成重采样、周期展开或预测生成 |
 
 ## CSV 方言
 
@@ -72,7 +77,7 @@ timestamp,electric_demand
 
 ## 表头与列
 
-第一列固定为 `timestamp`。后续列 ID 必须与所固定设备内容中 `type: predefined` 的 interface ID 完全一致：
+第一列固定为 `step`。原始文件的 step 必须严格递增且不重复；计算用文件必须从 `0` 开始、连续递增到 `point_count - 1`。后续列 ID 必须与所固定设备内容中 `type: predefined` 的 interface ID 完全一致：
 
 - 未声明的列拒绝；
 - 重复列拒绝；
@@ -82,18 +87,28 @@ timestamp,electric_demand
 
 每个 `unit.<column>` 必须与设备模型声明的量纲兼容。`kW` 与 `W` 可以在生成器边界显式换算，但 `kW` 与 `kWh` 不兼容，不能仅因都是数字而接受。
 
-## 时间轴规则
+## step 与序列预备规则
 
-`data_predict` 数据必须满足：
+`constant` 直接取设备 interface 声明的值，并按项目基线展开为全周期计算用文件。`data_repeat` 原始数据表示可重复模板，序列预备用例按文件 `resolution`、项目基线 `resolution`、`leap_year` 和数据列聚合语义完成重采样与全周期展开。原始分辨率、目标分辨率、聚合/插值方法、输入/输出摘要和点数进入变换回执；这些是确定性预备过程，不建立用户配置。
 
-- 时间戳严格递增且无重复；
-- 每一行与声明的固定 `resolution` 对齐；
-- 同一文件不能混用带 `Z`、带偏移和无偏移时间戳；
-- `utc` 模式使用带 `Z` 的 RFC 3339；
-- `fixed_offset` 模式使用 `YYYY-MM-DDTHH:MM:SS`，由文件级偏移唯一换算到 UTC；
-- 起止时间、闰年和预期点数由装配 YAML 明确，CSV 校验器不靠“看起来像一年”猜测。
+`data_predict` 由系统固定的默认预测算法完成训练与预测：
 
-`data_repeat` 数据表示可重复模板。`day`、`week` 或 `year` 的行数必须与周期和分辨率严格匹配；展开后产生的 UTC 时间轴及重复次数进入装配校验回执。
+1. 校验训练输入、训练目标与预测输入；
+2. 按系统固定算法及精确版本训练，得到不可变训练模型产物；
+3. 按项目基线生成全周期预测值；
+4. 输出连续 `step` 计算序列、训练产物摘要和训练/预测回执。
+
+预测算法不进入用户配置和算法选择器。回执至少固定算法 ID/版本、训练输入/目标摘要、预测输入摘要、训练模型产物摘要、随机种子和输出序列摘要；学习得到的参数/系数属于训练产物，不写入设备模型。
+
+进入装配的 `constant`、`data_repeat` 和 `data_predict` 计算序列共同满足：
+
+- `resolution` 与项目基线一致；
+- `step` 从 `0` 开始连续递增且无重复；
+- `point_count` 与普通年/闰年基线推导值一致；
+- 每个值通过有限性、单位、有效区间和缺失策略校验；
+- 原始文件、变换/训练回执、计算序列和项目基线的摘要链完整。
+
+典型日、典型周和典型年属于对全周期计算序列的后续计算截取/聚合，不进入项目基线和序列预备配置。
 
 ## 数值和质量
 
@@ -112,10 +127,10 @@ timestamp,electric_demand
 校验器按以下顺序处理：
 
 1. 识别编码、换行、元数据和固定 CSV 方言；
-2. 解析 schema、设备 ID/内容摘要、来源模式、时间模式、分辨率和单位；
+2. 解析 schema、设备 ID/内容摘要、来源模式、分辨率和单位；
 3. 按 `device_content_sha256` 读取不可变设备内容，并核对 predefined interface、单位、有效区间和缺失策略；
-4. 校验时间单调性、步长、周期和装配要求的覆盖范围；
-5. 将时间规范化为 UTC，将允许的数值表示规范化；
+4. 校验 step 单调性、文件分辨率、周期与项目基线；
+5. 按公开聚合/插值语义生成项目分辨率下的全周期连续 step 序列；
 6. 生成原始摘要、规范表格摘要、质量摘要和变换记录。
 
 装配 YAML 绑定的是数据版本及列，不直接依赖上传文件名。文件更改后形成新数据版本，不能覆盖历史任务所引用的内容。
@@ -124,8 +139,8 @@ timestamp,electric_demand
 
 | 错误 | 正确处理 |
 |---|---|
-| `01/02/2025 08:00` | 拒绝区域歧义日期，改写 RFC 3339 |
-| 缺少偏移的本地时间 | 声明 `fixed_utc_offset_minutes` 或改写 UTC |
+| step 重复或倒退 | 阻断并定位行，修复原始序列 |
+| 文件分辨率与项目不同 | 在序列预备阶段按公开语义转换并保存变换回执 |
 | `electric_demand` 写成 `kWh` | 与设备模型核对量纲，不能靠换算放行 |
 | 少一小时后自动补零 | 阻断并定位缺口，修复源文件或建立有记录的新版本 |
 | CSV 中新增“备注”数据列 | 移到 `note.*` 元数据或由新 schema 明确声明 |
@@ -134,7 +149,7 @@ timestamp,electric_demand
 ## 完成标准
 
 - 示例可以用普通文本编辑器编写并通过 `2.0.0` 校验；
-- UTC、固定偏移、闰年、周期、重复、缺口和非法值均有契约测试；
+- 常量展开、不同输入分辨率、普通年/闰年、周期展开、默认预测训练、连续 step、缺口和非法值均有契约测试；
 - 同一语义输入得到相同规范摘要；
 - 数据来源、原始摘要、变换和最终绑定可追溯；
 - 求解器和技术方程转换器不直接读取未经校验的原始 CSV。

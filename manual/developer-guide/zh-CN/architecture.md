@@ -48,8 +48,8 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 
 1. **设备定义**用统一 schema 发布设备身份、非时变技术常量、序列接口和声明式方程，并以规范内容摘要固定具体内容；
 2. **方程解析**把受限表达式解析成公共 AST 和声明式数学贡献，不引入独立设备命令或设备语义版本；
-3. **装配与检查**验证接口类型、载能、单位、数据来源、连接、规划经济输入和整体可解性，签发规范装配产物；
-4. **计算生成**只消费规范装配产物，由选定 GeneratorProvider 按计算层精度和算法选择生成求解器输入文件及结构化运行命令；
+3. **装配与检查**验证不可变项目计算基线、已预备全周期序列、接口类型、载能、单位、连接、规划配置、公共财务配置和整体可解性，签发规范装配产物；
+4. **计算生成**同时消费规范装配产物与生成阶段选定的计算配置，由 GeneratorProvider 按所选 solver、计算精度和算法选项生成求解器输入文件及结构化运行命令；
 5. **受控求解**只消费 Solver Bundle，在隔离环境按结构化运行命令执行，不再解释项目或设备；
 6. **结果适配**把声明输出和执行回执转成统一 `ComputeResult`；
 7. **财务与结果分析**把计算输出形成财务指标、敏感性、有效性评估和证据。
@@ -62,8 +62,8 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 |---|---|---|---|
 | 设备定义 | 设备 YAML 或等价公开规格 | `DeviceDescriptor` | `properties/interfaces/equations`、单位和内容摘要已校验 |
 | 方程解析 | 设备 descriptor 与受限表达式语法 | 规范方程 AST/数学贡献 | 变量、关系、单位和接口引用明确，无独立设备命令版本 |
-| 装配与检查 | 装配 YAML/项目图、绑定、配置、目录快照 | 诊断或 `ValidatedAssemblyArtifact` | 连接、数据和能力合法，业务单位明确，规范摘要与回执完整 |
-| 计算生成 | 规范装配、固定资源、generator/solver 选择 | Solver Bundle | 求解器输入、结构化命令、输出和适配器声明完整 |
+| 装配与检查 | 装配 YAML/项目图、项目基线、已预备数据、规划/财务配置、目录快照 | 诊断或 `ValidatedAssemblyArtifact` | 连接、数据、规划和财务输入合法，业务单位明确，规范摘要与回执完整 |
+| 计算生成 | 规范装配、固定资源、独立 `CalculationConfig` | Solver Bundle | 计算能力兼容，求解器输入、结构化命令、输出和适配器声明完整 |
 | 受控求解 | Solver Bundle、资源与取消上下文 | `ExecutionReceipt` 与原始输出 | 实际命令、限制、日志、退出和输出摘要完整 |
 | 结果适配 | Bundle、执行回执、声明输出 | `ComputeResult` | 技术/数学状态、候选、流量、单位和依赖版本完整 |
 | 财务与分析 | 计算结果、财务参数、分析命令 | 财务/分析结果与证据 | 指标口径、状态、来源和适用范围可追溯 |
@@ -106,13 +106,13 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 | 能力 | 权威职责 | 明确不负责 |
 |---|---|---|
 | [core](modules/core.md) | 无状态诊断、错误、单位、时间、ID 和纯契约 | 设备/计算 provider 注册、业务默认、持久化 |
-| [devices](modules/devices.md) | 设备身份、非时变 properties、序列 interfaces、equations 和内容摘要 | 项目实例、规划经济、计算精度、画布布局 |
+| [devices](modules/devices.md) | 设备身份、非时变 properties、序列 interfaces、equations 和内容摘要 | 项目实例、规划/财务配置、计算精度、画布布局 |
 | [modeling](modules/modeling.md) | 受限技术方程的解析、校验与公共数学贡献 | 设备目录路径、价格、项目编排和求解执行 |
 | [assembly](modules/assembly.md) | interface 网络装配、完整校验和规范装配产物 | 求解器输入、命令和执行 |
 | [generators](modules/generators.md) | 规范装配到求解器输入、命令与 Bundle | 启动进程、读取数据库、提交任务 |
 | [solver runtime](modules/solver-runtime.md) | 受控执行、资源限制、日志与执行回执 | 设备语义、问题构造、结果解释 |
 | [computation](modules/engines.md) | 生成、执行、结果适配的公共契约与统一结果 | HTTP、会话、ORM 和项目草稿 |
-| [finance](modules/finance.md) | 现金流、NPV、IRR、LCOE 和回收期 | 页面状态和跨用例事务 |
+| [finance](modules/finance.md) | 公共财务配置、现金流、NPV、IRR、LCOE 和回收期 | 规划目标、计算选项、页面状态和跨用例事务 |
 | [analysis](modules/analysis.md) | 敏感性、批量扫描、指标和评估 | 任务租约、HTTP 传输 |
 | [storage](modules/storage.md) | 内容寻址、完整性、引用、保留和存储 provider | 理解项目或结果内部业务表 |
 | [application](modules/application.md) | 权限后的用例、事务和跨模块编排 | 穿透模块私有实现 |
@@ -184,7 +184,7 @@ GUI 表单状态
 
 1. devices 发布包含 properties、interfaces、equations 和内容摘要的完整 descriptor；
 2. modeling 证明其中方程能够被安全解析并形成公共数学贡献；
-3. assembly 证明真实接口、预定义数据、连接、规划经济输入、generator 和 solver 可以组成规范装配产物；
+3. assembly 证明项目基线、已预备数据、真实接口、连接、规划配置和公共财务配置可以组成规范装配产物；
 4. 现有 generator 能表达该设备时不增加分支；确有新数学表达时新增独立 GeneratorProvider；
 5. runtime 不因设备类型改变，ResultAdapter 只按公开映射解释结果；
 6. application 增加创建/校验/提交用例；

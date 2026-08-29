@@ -11,8 +11,8 @@
 | 契约 | 文件或目录 | 作用 | 直接消费者 |
 |---|---|---|---|
 | [设备模型 YAML](formats/device-model-yaml.md) | `*.device.yaml` | 描述设备身份、非时变技术常量、序列接口和声明式方程 | 设备目录、GUI schema、装配与技术模型校验 |
-| [设备数据 CSV](formats/device-data-csv.md) | `*.data.csv` | 提供带时间、单位和来源语义的设备时序数据 | 数据导入器、装配校验 |
-| [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定设备实例、数据绑定、连接、约束和计算选择 | 装配校验器 |
+| [设备数据 CSV](formats/device-data-csv.md) | `*.data.csv` | 提供带 step、采样间隔、单位和来源语义的设备序列数据 | 数据导入器、序列预备用例、装配校验 |
+| [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、已预备数据绑定、连接、规划配置和公共财务配置 | 装配校验器 |
 | [Solver Bundle](formats/solver-bundle.md) | 一个目录或不可变归档 | 固定求解器输入文件、受控命令、预期输出和结果适配器 | 求解运行时 |
 前三种格式允许人工编写。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
 
@@ -23,11 +23,12 @@
 ## 从手写文件到结果
 
 ```text
-设备模型 YAML ─┐
-设备数据 CSV ──┼─→ 装配 YAML ─→ 校验与规范化 ─→ ValidatedAssemblyArtifact
-项目实例/规划经济/计算配置 ─┘                          │
-                                                      ↓
-                                              GeneratorProvider
+设备模型 YAML ───────────────┐
+设备数据 CSV → 序列预备 ─────┼─→ 装配 YAML ─→ 校验与规范化 ─→ ValidatedAssemblyArtifact
+项目实例/规划配置/财务配置 ──┘                          │
+                                        CalculationConfig ─┤
+                                                            ↓
+                                                    GeneratorProvider
                                                       │
                                                       ↓
                    Solver Bundle = 输入文件 + 受控命令 + 输出声明 + ResultAdapter ID
@@ -39,7 +40,7 @@
                                   ExecutionReceipt + 原始输出 ─→ ComputeResult
 ```
 
-装配 YAML 只表达业务装配和计算意图，不包含 shell、可执行文件路径或 Python 模块路径。生成器只接受通过校验的规范装配产物；运行时只接受 Solver Bundle，不再解释设备、项目或装配规则。
+装配 YAML 只表达业务装配、规划意图和公共财务参数，不包含 generator、solver、精度、算法选项、shell、可执行文件路径或 Python 模块路径。生成器只接受通过校验的规范装配产物和独立计算配置；运行时只接受 Solver Bundle，不再解释设备、项目或装配规则。
 
 ## 通用书写规则
 
@@ -49,7 +50,7 @@
 - ID 使用 ASCII 小写命名空间字符串，例如 `acme.device.pv`；局部 ID 使用 `lower_snake_case` 或短横线形式，但同一文件内保持一致；
 - `schema_version`、插件版本和依赖版本使用带引号的 `MAJOR.MINOR.PATCH`；单个设备没有语义版本；
 - 数值必须有限，禁止 `NaN`、`Infinity` 和依赖语言实现的特殊标量；
-- 时间必须能唯一换算到 UTC，不能依赖运行机器的本地时区；
+- 计算序列以 `step` 表达，不携带时间戳和时区；原始采样间隔必须显式，进入装配前转换为项目基线分辨率下的全周期连续 `step`；
 - 单位必须显式，且来自[公共契约](contracts.md)规定的单位词汇；
 - 文件路径一律相对所属包，禁止绝对路径、`..`、符号链接逃逸和隐式当前目录；
 - 密钥、令牌、数据库 ID、宿主机路径、ORM 字段和实现模块路径不得进入公共文件；
@@ -72,8 +73,8 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 人工文件可以保留注释和友好顺序。进入快照前，校验器必须生成唯一规范形态：
 
 1. 解析安全子集并拒绝重复键、非法标量和未知核心字段；
-2. 解析设备内容摘要、数据引用及所有 provider 版本化引用，确认技术方程、生成器和求解器能力；
-3. 将时间换算为 UTC，将路径资源解析为内容寻址对象；
+2. 解析设备内容摘要、已预备数据引用、规划配置和公共财务配置，确认技术方程与业务输入完整；
+3. 核对项目计算基线与全周期连续 `step`，将路径资源解析为内容寻址对象；
 4. 按格式规定排序并移除注释、别名和非语义空白；
 5. 对规范字节和每个外部资源计算 SHA-256；
 6. 生成包含校验器 ID、版本、依赖锁和零阻断诊断的校验回执。

@@ -27,7 +27,7 @@
 | 内置或外部 provider | 一组 `ies.device-model` YAML 或等价候选描述 | provider ID、版本和依赖明确，设备内容有规范摘要 |
 | 单位规范 | property 与 interface 单位 ID | 单位存在且量纲正确 |
 | 方程契约 | relations、内部变量和时间索引 | 标识符、单位和值域可完整校验 |
-| 序列数据 | `predefined` interface 所引用的数据版本 | 时间轴、单位、分辨率和适用范围明确 |
+| 序列数据 | `predefined` interface 所引用的数据版本 | step、单位、分辨率和适用范围明确 |
 
 无论 provider 如何发现文件，进入目录前都必须符合相同设备模型 schema；目录路径、远端服务和包入口只是实现选择，不属于其他模块可依赖的输入方式。时序样例使用[设备数据 CSV](../formats/device-data-csv.md)。
 

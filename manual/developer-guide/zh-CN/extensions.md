@@ -59,7 +59,7 @@
 - ExecutorProvider：把受信任 executable ID 映射为受控进程或容器执行方式；
 - ResultAdapterProvider：把声明输出和执行回执映射为统一 `ComputeResult`。
 
-GeneratorDescriptor 必须提前声明支持的装配 schema、计算 mode、方程 contract、solver、选项、计算精度、内部单位、确定性和配套 ResultAdapter。设备投资、O&M 和能源价格由规划经济配置提供；generator 可以据此形成目标，但不得修改或扩充设备技术 descriptor。
+GeneratorDescriptor 必须提前声明支持的装配 schema、计算 mode、方程 contract、solver、选项、计算精度、内部单位、确定性和配套 ResultAdapter。目标函数、规划变量和约束来自规划配置；设备投资、O&M、能源价格、税率和资金时间成本等来自公共财务配置。generator 可以据此形成目标，但不得修改或扩充设备技术 descriptor。
 
 ExecutorDescriptor 声明 allowlist、资源隔离、取消和 readiness 能力。运行时只执行 Solver Bundle 中的结构化命令；装配 YAML 和设备 YAML 不得含 shell 或代码路径。
 
@@ -67,7 +67,7 @@ ExecutorDescriptor 声明 allowlist、资源隔离、取消和 readiness 能力�
 
 存储适配器只实现字节级保存、读取、删除和健康能力。内容摘要、对象元数据、引用、配额、保留和恢复由 `storage` 领域统一管理；业务模块不能感知底层路径或凭证。
 
-外部气象、价格或排放数据只能生成可审计的数据版本。技术序列按 predefined interface 绑定；价格序列进入规划经济配置，不进入设备技术 interface。数据必须先经过单位、时区、分辨率、缺失值、范围和来源检查，GeneratorProvider 与 SolverRuntime 不得在运行时访问外部服务。
+外部气象、价格或排放数据只能生成可审计的数据版本。技术序列按 predefined interface 绑定；价格数据进入公共财务配置，不进入设备技术 interface。输入数据必须先经过单位、采样间隔、缺失值、范围和来源检查，并在装配前按项目计算基线形成全周期连续 `step`；GeneratorProvider 与 SolverRuntime 不得在运行时访问外部服务。
 
 ## 可执行扩展的共同元数据
 

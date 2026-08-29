@@ -27,6 +27,7 @@ schema_version: "1.0.0"
 
 bundle:
   assembly_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  calculation_config_sha256: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
   generator: acme.generator.highs_milp@1.0.0
   solver: ies.solver.highs@1.7.2
 
@@ -66,10 +67,10 @@ extensions: {}
 
 ## 生成器职责
 
-一个 GeneratorProvider 接收 `ValidatedAssemblyArtifact` 和已固定的资源内容，负责：
+一个 GeneratorProvider 接收 `ValidatedAssemblyArtifact`、已校验的 `CalculationConfig` 和已固定的资源内容，负责：
 
-1. 验证装配摘要、校验回执和自身能力匹配；
-2. 消费已规范化的设备方程贡献，并结合独立规划经济配置建立变量、目标、约束和索引；
+1. 验证装配摘要与校验回执，并验证计算配置中的 generator、solver、精度、算法选项、种子和输出请求能力匹配；
+2. 消费已规范化的设备方程贡献，并结合装配中的规划配置与公共财务配置建立变量、目标、约束和索引；
 3. 在唯一边界把业务单位转换为求解器内部单位；
 4. 生成 MPS、LP、JSON 或特定求解器需要的输入文件；
 5. 声明受控命令、资源限制、预期输出和结果适配器；
@@ -77,7 +78,7 @@ extensions: {}
 
 生成器应是确定性的纯转换：不得连接数据库、对象服务或网络，不得启动求解器，不得读环境变量，不得修改项目或任务状态。资源由调用方按内容摘要解析后显式传入。
 
-同一规范装配、资源摘要、生成器版本和固定种子必须产生相同输入字节及 Bundle 摘要。若底层文件格式本身含非确定字段，生成器必须移除或固定它们。
+同一规范装配、`CalculationConfig`、资源摘要和生成器版本必须产生相同输入字节及 Bundle 摘要。若底层文件格式本身含非确定字段，生成器必须移除或固定它们。
 
 ## 结构化命令
 
@@ -121,7 +122,7 @@ SolverRuntime 是求解器无关的受控执行层，只负责：
 
 回执至少固定：
 
-- Bundle 摘要、assembly 摘要、attempt ID；
+- Bundle 摘要、assembly 摘要、`CalculationConfig` 摘要、attempt ID；
 - executor、solver、generator、result adapter 的 ID 与版本；
 - 实际开始/结束时间、退出码或终止信号；
 - 资源限制和可用的使用统计；

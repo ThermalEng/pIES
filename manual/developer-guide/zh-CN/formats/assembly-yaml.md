@@ -3,7 +3,7 @@
 > 契约标识：`ies.assembly`；目标 schema：`2.0.0`；推荐文件名：`<assembly-id>.assembly.yaml`。
 > 实现状态：生效目标契约；当前代码仍实现旧设备版本、parameters/ports/model commands 绑定，迁移顺序见 [Roadmap](../../../changelog/roadmap.md)。
 
-装配 YAML 是计算意图的完整、可审查文本：它实例化一个精确设备内容，绑定预定义序列，连接可连接的真实 interfaces，区分存量与新增设备，给出规划经济输入、系统约束，并精确选择生成器和求解器。它不包含可执行命令；只有通过全部校验并规范化后的装配产物才能进入生成器。
+装配 YAML 是系统模型与规划意图的完整、可审查文本：它固定项目计算基线，实例化精确设备内容，绑定已完成预备的全周期 `step` 序列，连接可连接的真实 interfaces，区分存量与新增设备，并给出规划配置与公共财务配置。它不包含 generator、solver、计算精度或求解选项；这些计算配置在规范装配产物转换为计算包时固定。
 
 ## 最小结构示例
 
@@ -15,11 +15,10 @@ assembly:
   id: campus_demo
   name: 园区最小算例
 
-time_axis:
-  start: "2025-01-01T00:00:00+08:00"
-  end: "2025-01-02T00:00:00+08:00"
+project_baseline:
   resolution: 1h
-  endpoint: left_closed_right_open
+  leap_year: false
+  scenario_mode: single
 
 resources:
   datasets:
@@ -53,31 +52,23 @@ connections:
     from: grid.electricity_out
     to: load.electricity_in
 
-constraints: {}
-
-planning_economics:
+finance:
   currency: CNY
   base_year: 2025
   devices:
     grid:
-      fixed_om_per_year: {value: 0, unit: CNY/year}
+      unit_price: {value: 0, unit: CNY/kW}
+      fixed_om_rate: 0
   energy_prices: {}
+  tax_rate: 0.25
+  capital_time_cost: 0.08
 
-calculation:
-  mode: fixed_operation
-  precision_profile: standard
-  generator: acme.generator.highs_milp@1.0.0
-  solver: ies.solver.highs@1.7.2
-  options:
-    relative_gap: 0.0001
-    time_limit_seconds: 600
-  random_seed: 42
-
-outputs:
-  series:
-    - grid.import_power
-  metrics:
-    - system.total_energy_cost
+planning:
+  objective:
+    sense: minimize
+    expression: system.total_financial_cost
+  variables: {}
+  constraints: {}
 
 extensions: {}
 ```
@@ -89,24 +80,23 @@ extensions: {}
 | 字段 | 作用 |
 |---|---|
 | `assembly` | 本装配的稳定 ID 和人类可读名称 |
-| `time_axis` | 计算区间、步长和端点语义 |
+| `project_baseline` | 项目创建时固定的时间分辨率、闰年口径和场景模式 |
 | `resources` | 数据等外部资源及其可验证来源 |
 | `devices` | 设备实例、精确设备内容、存量/新增身份、允许的 property 覆盖和预定义接口绑定 |
 | `connections` | 可连接的真实 `<device>.<interface>` 之间的有向连接 |
-| `constraints` | 系统级硬约束和明确命名的业务约束 |
-| `planning_economics` | 求解前影响容量或运行决策的投资、O&M、购售价格等经济输入 |
-| `calculation` | 问题模式、计算精度、生成器、求解器、选项和种子 |
-| `outputs` | 希望发布的序列和指标，不是宿主机输出路径 |
+| `finance` | 规划与财务计算共同消费的设备单价、O&M、能源价格、税率和资金时间成本等公共财务参数 |
+| `planning` | 目标函数、规划变量、上下界和规划/系统约束 |
 | `extensions` | 命名空间化扩展 |
 
-`constraints` 为命名映射；表达式只能使用受限声明式语法：
+`planning.constraints` 为命名映射；表达式只能使用受限声明式语法：
 
 ```yaml
-constraints:
-  c1:
-    type: ratio
-    expression: "hp1.electricity_in[t] <= 0.8 * grid.electricity_out[t]"
-    enabled: true
+planning:
+  constraints:
+    c1:
+      type: ratio
+      expression: "hp1.electricity_in[t] <= 0.8 * grid.electricity_out[t]"
+      enabled: true
 ```
 
 ## 设备内容固定与实例
@@ -117,11 +107,11 @@ constraints:
 
 - `asset_origin` 必须是 `existing` 或 `new`；不得从设备类型、创建时间或是否填写成本推断；
 - `properties` 只能覆盖设备定义已声明且允许实例化的非时变技术常量，并保留明确单位；不能新增字段，也不能放价格、成本或计算精度；
-- `predefined_interfaces` 只能绑定设备中 `type: predefined` 且 `source.mode` 为 `data_repeat` 或 `data_predict` 的 interface；`constant` 直接来自设备内容并按时间轴展开；
+- `predefined_interfaces` 只能绑定设备中 `type: predefined` 的 interface；`constant/data_repeat/data_predict` 均必须先完成序列预备，并绑定项目模型实例中已经替换好的计算用序列文件；
 - `in/out/bidirectional` 通过 connections 取得外部交互；`blind` 既不能连接，也不能绑定预定义数据；
 - 每项覆盖、绑定和身份均进入规范装配摘要与校验回执。
 
-`existing` 的历史投资是沉没成本，不能作为新增投资再次进入目标；但未来 O&M、剩余寿命、残值和退役成本可在规划经济配置中显式提供。`new` 的投资必须与候选容量或建设决策绑定。
+`existing` 的历史投资是沉没成本，不能作为新增投资再次进入目标；但规划和财务计算共同使用的未来 O&M、剩余寿命、残值和退役成本可在公共财务配置中显式提供。`new` 的投资必须与候选容量或建设决策绑定。
 
 ## 连接
 
@@ -136,6 +126,16 @@ constraints:
 - 网络在所选计算模式下具备完整供需和平衡语义。
 
 校验失败不能删边后继续，也不能创建默认 interface、把缺失 type 猜成双向或改变 `blind` 的含义。
+
+## 项目计算基线
+
+`project_baseline` 在创建项目时一次性固定，当前只包含：
+
+- `resolution`：全项目统一计算分辨率，必须能确定性切分一天；
+- `leap_year`：是否按 366 天生成全周期序列；
+- `scenario_mode`：当前固定为 `single`。
+
+基线不保存时区、开始/结束时间、典型日/周/年或计算截取区间。计算序列统一使用从 `0` 开始的连续 `step`，点数由 `resolution` 和 `leap_year` 唯一推导。已有项目基线变更与多场景属于 `1.0.0` 之后的 Roadmap 能力。
 
 ## 预定义序列与资源
 
@@ -159,26 +159,26 @@ source:
 
 `relative_file` 只用于作者包内，不能逃逸包目录。校验器读取后计算摘要，规范装配统一改写为内容寻址对象。网络 URL、宿主机绝对路径、临时上传路径和存储 provider 私有路径不得进入可执行快照。
 
-CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`source_mode`、时间轴和有效区间与目标 predefined interface 一致。
+CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`source_mode`、项目基线摘要、分辨率、点数和有效区间与目标 predefined interface 一致。装配只绑定已经序列预备、覆盖全周期且 `step` 连续的计算用数据版本；原始周期模板、训练输入和预测输入不直接进入装配。
 
-## 规划经济与财务边界
+## 规划配置与公共财务配置
 
-设备 YAML 始终保持纯技术。为了让规划结果正确反映“建什么、建多大、怎样运行”，以下输入在求解前进入 `planning_economics`：
+设备 YAML 始终保持纯技术。`finance` 是整体模型的公共财务参数输入，由规划生成和结果财务计算共同消费，包括：
 
-- 新增设备投资和建设决策关系；
-- 存量或新增设备未来固定/可变 O&M；
-- 能源购入价、售出价及其时序数据；
-- 必要的剩余寿命、退役成本和规划期残值假设。
+- 设备单价与建设投资参数；
+- 存量或新增设备固定/可变 O&M；
+- 能源购入价和售出价；
+- 税率、资金时间成本以及其他规划和财务计算共同使用的参数。
 
-币种、基准年、单位、适用实例和时间范围必须明确。改变这些内容会改变装配摘要，但不会改变设备内容摘要。
+财务配置不保存目标函数、规划变量/约束、计算选项或仅在某一阶段使用的数据。币种、基准年、单位和适用实例必须明确。改变这些内容会改变装配摘要，但不会改变设备内容摘要。
 
-税、折旧、融资结构、折现现金流、NPV 和 IRR 属于方案形成后的 finance 输入；不得用事后财务计算替代上述求解前经济输入。
+`planning` 只保存目标函数、目标权重、规划变量、上下界和规划/系统约束。目标函数可引用模型技术量、规划变量和 `finance` 公共参数，具体计算方法由后续计算包生成阶段选择。
 
-## `calculation`
+## 计算包生成边界
 
-`mode` 决定问题能力，例如 `fixed_operation`、`capacity_planning` 或 `scenario_evaluation`。`precision_profile` 以及其他离散化/数值精度选择属于计算层。`generator` 声明如何把规范装配转换成 Solver Bundle，`solver` 声明实际求解器能力与版本。
+装配 YAML 不包含 `calculation`。规范 `ValidatedAssemblyArtifact` 与独立计算配置一起进入计算包生成用例。计算配置固定 mode、计算精度、离散化、generator、solver、容差、时间限制、选项、随机种子和输出选择，并在生成 Solver Bundle 前完成能力兼容校验。
 
-`options` 只允许生成器公开 schema 中的选项；未知字段拒绝。`random_seed` 对任何可能使用随机性的生成器或求解器都是快照的一部分。
+更换 generator、solver、精度或求解选项只会形成新的计算配置和 Solver Bundle，不改变装配文本及其摘要。
 
 装配 YAML 禁止 shell、executable、参数字符串、脚本、动态导入路径、环境变量、凭证、宿主机工作目录和输出文件路径。这些执行细节只由受信任生成器写入 [Solver Bundle](solver-bundle.md)。
 
@@ -187,7 +187,7 @@ CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`so
 1. **结构校验**：安全 YAML、schema、字段类型、ID、内容摘要和引用形状；
 2. **模型与数据校验**：设备内容、properties、equations、predefined interfaces、数据时间覆盖、单位与状态；
 3. **图与系统校验**：interface 类型、连接、carrier、拓扑、平衡和系统约束；
-4. **计算兼容校验**：存量/新增、规划经济输入、精度、mode、生成器、求解器、选项和输出能力。
+4. **规划与财务完整性校验**：存量/新增、目标函数、规划变量/约束以及规划和财务计算共同必需的公共财务参数。
 
 同阶段尽量聚合可修复诊断；任何 error 都不产生可执行产物。
 
@@ -195,9 +195,9 @@ CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`so
 
 成功结果是不可变三件套：
 
-1. 规范装配文本：时间统一为 UTC，资源变为内容 ID，字段和集合按规定排序；
+1. 规范装配文本：序列统一为项目基线下连续 `step`，资源变为内容 ID，字段和集合按规定排序；
 2. `assembly_sha256`：对规范字节计算 SHA-256；
-3. 校验回执：校验器 ID/版本、schema、设备内容锁、方程 contract、经济配置摘要、provider 依赖锁、资源摘要和零阻断诊断。
+3. 校验回执：校验器 ID/版本、schema、项目基线摘要、设备内容锁、方程 contract、规划配置 revision/摘要、财务配置 revision/摘要、资源摘要和零阻断诊断。
 
 生成器必须同时验证三者。人工修改规范文本、替换资源或变更任一依赖后，摘要和回执失效，必须重新装配。任务创建后只消费该产物，不得重新读取“当前设备”“当前价格”或“最新项目”。
 
@@ -207,7 +207,7 @@ CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`so
 
 - 示例补齐真实设备摘要和数据后可通过 `2.0.0` schema；
 - 装配没有设备独立版本、parameters/ports/model commands 或设备经济字段；
-- 五类 interface、三类 predefined 来源、存量/新增和规划经济边界均有契约测试；
+- 五类 interface、三类 predefined 来源、存量/新增、规划配置和公共财务配置边界均有契约测试；
 - 非法文件没有旁路进入生成器，合法文件只产生一个规范形态；
 - 生成器只读 `ValidatedAssemblyArtifact`，不重新解释原始项目、CSV 路径或 GUI 状态；
 - 旧装配通过显式离线迁移和迁移回执进入新格式，不保留运行期兼容分支。
