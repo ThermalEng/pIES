@@ -25,6 +25,12 @@ from iesplan.core.diagnostics import (
     Diagnostic,
     make_diag,
 )
+from iesplan.core.equation_grammar import (
+    EquationSyntaxError,
+    check_cycles,
+    reference_atoms,
+    split_relation,
+)
 from iesplan.core.units import UnitError, is_known_unit
 from iesplan.devices.contracts2 import (
     INPUT_DATA_TYPES,
@@ -51,12 +57,6 @@ from iesplan.devices.contracts2 import (
 SCHEMA_FILE = "schema/device-model-2.0.0.schema.json"
 
 _ID_PATTERN = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
-
-#: 时间索引模式（表达式中的 ``name[t]``、``name[t-1]``、``name[t+1]``；纯 [t] 无偏移）
-_TIME_INDEX_PATTERN = re.compile(r"\[t\s*(?:([-+])\s*([0-9]+))?\]")
-
-#: 关系式左右两侧拆分（允许行内注释与前后空白）
-_RELATION_SPLIT = re.compile(r"\s*=\s*")
 
 
 class ParseError(Exception):
@@ -177,65 +177,6 @@ def _check_interface_source(iface_id: str, type_: str, source: object, file: str
 # equations 校验
 # ---------------------------------------------------------------------------
 
-def _split_relation(expression: str) -> tuple[str, str]:
-    """把 ``lhs = rhs`` 拆分为左右两侧；不满足时报错。"""
-    parts = _RELATION_SPLIT.split(expression, maxsplit=1)
-    if len(parts) != 2:
-        raise ParseError("relation.expression 必须为 'lhs = rhs' 形式")
-    lhs, rhs = (p.strip() for p in parts)
-    if not lhs or not rhs:
-        raise ParseError("relation.expression 两侧不能为空")
-    return lhs, rhs
-
-
-def _reference_atoms(side: str, file: str, relation_id: str) -> tuple[tuple[str, ...], tuple[int, ...]]:
-    """从表达式一侧提取标识符引用与时间索引。
-
-    解析规则：标识符按允许字符集切分；``name[t±k]`` 形式的时间索引被识别；
-    其余含 ``[`` 的引用（未知函数调用、属性访问、任意下标）直接报错。
-    """
-    atoms: list[str] = []
-    offsets: list[int] = []
-    token_re = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-    pos = 0
-    while pos < len(side):
-        ch = side[pos]
-        if ch.isspace():
-            pos += 1
-            continue
-        if ch.isdigit() or ch in "+-*/^%(),<>=":
-            pos += 1
-            continue
-        m = token_re.match(side, pos)
-        if not m:
-            raise ParseError(
-                f"relation {relation_id!r} 表达式含非法字符 {ch!r}（只允许标识符、数字、运算符与 [t±k] 索引）"
-            )
-        name = m.group(0)
-        pos = m.end()
-        if pos < len(side) and side[pos] == "[":
-            tm = _TIME_INDEX_PATTERN.match(side, pos)
-            if not tm:
-                raise ParseError(
-                    f"relation {relation_id!r} 标识符 {name!r} 的索引必须是 [t]、[t+k] 或 [t-k]"
-                )
-            offset = 0
-            if tm.group(1) is not None:
-                offset = int(tm.group(2))
-                if tm.group(1) == "-":
-                    offset = -offset
-                if offset > 0:
-                    raise ParseError(
-                        f"relation {relation_id!r} 禁止未来引用 {name}[t+{offset}]（跨步只允许过去或当前步）"
-                    )
-            offsets.append(offset)
-            pos = tm.end()
-        else:
-            offsets.append(0)
-        atoms.append(name)
-    return tuple(atoms), tuple(offsets)
-
-
 def validate_equations(
     raw_eq: Mapping[str, Any],
     properties: Mapping[str, PropertySpec],
@@ -301,58 +242,28 @@ def validate_equations(
         if not isinstance(expr, str) or not expr.strip():
             raise ParseError(f"relation {rid!r} 缺少 expression")
         try:
-            lhs, rhs = _split_relation(expr)
-        except ParseError:
-            raise
-        for side in (lhs, rhs):
-            atoms, _ = _reference_atoms(side, file, rid)
-            for name in atoms:
-                if name not in allowed:
-                    raise ParseError(
-                        f"relation {rid!r} 引用了未声明的标识符: {name!r}（只允许 properties、interfaces、equations.variables）"
-                    )
-        # 左侧必须恰好一个引用原子（输出变量）
-        lhs_atoms, _ = _reference_atoms(lhs, file, rid)
-        if len(lhs_atoms) != 1:
-            raise ParseError(f"relation {rid!r} 左侧必须恰好一个变量（当前 {len(lhs_atoms)} 个）")
-        # 边: lhs 变量 -> rhs 引用（用于循环引用检测；变量为起点、引用为终点）
-        rhs_atoms, _ = _reference_atoms(rhs, file, rid)
-        relation_edges.append((lhs_atoms[0], rhs_atoms))
+            lhs, rhs = split_relation(expr)
+            for side in (lhs, rhs):
+                atoms, _ = reference_atoms(side, rid)
+                for name in atoms:
+                    if name not in allowed:
+                        raise ParseError(
+                            f"relation {rid!r} 引用了未声明的标识符: {name!r}（只允许 properties、interfaces、equations.variables）"
+                        )
+            # 左侧必须恰好一个引用原子（输出变量）
+            lhs_atoms, _ = reference_atoms(lhs, rid)
+            if len(lhs_atoms) != 1:
+                raise ParseError(f"relation {rid!r} 左侧必须恰好一个变量（当前 {len(lhs_atoms)} 个）")
+            # 边: lhs 变量 -> rhs 引用（用于循环引用检测；变量为起点、引用为终点）
+            rhs_atoms, _ = reference_atoms(rhs, rid)
+            relation_edges.append((lhs_atoms[0], rhs_atoms))
+        except EquationSyntaxError as exc:
+            raise ParseError(str(exc)) from exc
 
-    _check_cycles(var_specs, relation_edges)
-
-
-def _check_cycles(variables: Mapping[str, EquationVariable], edges: list[tuple[str, tuple[str, ...]]]) -> None:
-    """检测变量定义之间的循环引用（a 依赖 b 且 b 依赖 a）。
-
-    edges: (输出变量, 右侧引用变量元组)。只考虑变量间依赖；properties/interfaces
-    是常量/输入，不构成循环。变量在自身关系右侧出现（如 ``soc[t] = soc[t-1] + …``）
-    是合法的时间状态递推，不构成循环，忽略自环。
-    """
-    graph: dict[str, set[str]] = {vid: set() for vid in variables}
-    for out_var, refs in edges:
-        if out_var in graph:
-            graph[out_var].update(r for r in refs if r in graph and r != out_var)
-    WHITE, GRAY, BLACK = 0, 1, 2
-    color: dict[str, int] = {vid: WHITE for vid in graph}
-    stack: list[str] = []
-
-    def visit(vid: str) -> None:
-        color[vid] = GRAY
-        stack.append(vid)
-        for nxt in sorted(graph[vid]):
-            if color[nxt] == GRAY:
-                idx = stack.index(nxt)
-                cycle = stack[idx:] + [nxt]
-                raise ParseError(f"equations 存在循环引用: {' -> '.join(cycle)}")
-            if color[nxt] == WHITE:
-                visit(nxt)
-        stack.pop()
-        color[vid] = BLACK
-
-    for vid in graph:
-        if color[vid] == WHITE:
-            visit(vid)
+    try:
+        check_cycles(var_specs, relation_edges)
+    except EquationSyntaxError as exc:
+        raise ParseError(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
