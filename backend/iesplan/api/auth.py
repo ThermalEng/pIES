@@ -27,6 +27,7 @@ from iesplan.core.errors import ForbiddenError, NotFoundError
 from iesplan.db import get_db
 from iesplan.models.identity import User, WindowSession
 from iesplan.services import identity
+from iesplan.services import project as project_service
 from iesplan.services.external_auth import ExternalAuthError
 
 #: 会话 Cookie 名
@@ -109,7 +110,7 @@ class SettingsUpdate(BaseModel):
     registration_enabled: bool
 
 class UserOut(BaseModel):
-    """用户信息(不含任何敏感字段)。"""
+    """用户信息(不含任何敏感字段; 普通用户响应语义)。"""
 
     id: int
     username: str
@@ -121,10 +122,21 @@ class UserOut(BaseModel):
     last_login_at: datetime | None = None
 
 
-class UsersListResponse(BaseModel):
-    """用户列表响应。"""
+class AdminUserOut(UserOut):
+    """管理员用户列表项(UserOut + 账号管理展示字段)。
 
-    users: list[UserOut]
+    project_count: 该用户拥有的未删除项目数(active + archived, deleted 不计),
+    由项目领域公开 read model(project_count_by_owner)单次聚合查询提供,
+    仅服务 GET /api/auth/users 管理员列表。
+    """
+
+    project_count: int = 0
+
+
+class UsersListResponse(BaseModel):
+    """用户列表响应(管理员)。"""
+
+    users: list[AdminUserOut]
 
 
 class UserDeleteConfirmRequest(BaseModel):
@@ -420,9 +432,23 @@ def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
 
 @router.get("/users", response_model=UsersListResponse, summary="用户列表(管理员)")
 def list_users(db: DbSession, admin: CurrentAdmin) -> UsersListResponse:
-    """用户列表(管理员): 含停用账号, 返回角色与强制改密状态。"""
+    """用户列表(管理员): 含停用账号, 返回角色与强制改密状态与项目数。
+
+    project_count 经项目领域公开 read model(services.project.
+    project_count_by_owner)一次 GROUP BY 聚合查询取得, 防 N+1;
+    数据库故障沿用统一错误处理(异常向上传播, 不转为 0)。
+    """
     users = identity.list_users(db)
-    return UsersListResponse(users=[_user_out(db, u) for u in users])
+    counts = project_service.project_count_by_owner(db, [u.id for u in users])
+    return UsersListResponse(
+        users=[
+            AdminUserOut(
+                **_user_out(db, u).model_dump(),
+                project_count=counts.get(u.id, 0),
+            )
+            for u in users
+        ]
+    )
 
 
 @router.post("/users/{user_id}/reset-password", summary="重置密码(管理员)")

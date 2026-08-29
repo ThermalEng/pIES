@@ -121,9 +121,15 @@ def create_project_endpoint(
 def list_projects_endpoint(
     db: Annotated[Session, Depends(get_db)],
     user: CurrentUser,
+    status: Literal["active", "archived"] | None = None,
 ) -> dict:
-    """我可见的项目列表(所有者 + 查看者, 不含已删除)。"""
-    return {"projects": project_service.list_visible_projects(db, user)}
+    """我可见的项目列表(仅所有者, 不含已删除; 支持按 status 筛选)。
+
+    参数契约: status 仅接受 'active' / 'archived'; 不传返回全部未删除项目。
+    非法 status 由参数校验返回标准 422 错误信封(API-REQ-001)。
+    管理员不持有业务项目: 应用服务对其返回空列表。
+    """
+    return {"projects": project_service.list_visible_projects(db, user, status=status)}
 
 
 @router.get("/admin-visible", summary="全部项目整体视图(管理员)")

@@ -32,19 +32,19 @@ from iesplan.services import validation as validation_service
 GRID = "ies.device.grid_connection"
 ELECTRIC_LOAD = "ies.device.electric_load"
 
-#: 种子管理员密码(经 /api/auth/login 真实登录)
-ADMIN_PASSWORD = "Admin12345"
+#: 种子工程师密码(经 /api/auth/login 真实登录; 项目由工程师持有)
+ENGINEER_PASSWORD = "Engineer12345"
 
 
 def _headers(client: TestClient) -> dict[str, str]:
-    """认证头: 以种子管理员窗口会话登录(同一 client 内缓存)。"""
+    """认证头: 以种子工程师窗口会话登录(同一 client 内缓存)。"""
     try:
         token: str | None = client._auth_token  # type: ignore[attr-defined]
     except AttributeError:
         token = None
     if token is None:
         resp = client.post(
-            "/api/auth/login", json={"username": "admin", "password": ADMIN_PASSWORD}
+            "/api/auth/login", json={"username": "engineer", "password": ENGINEER_PASSWORD}
         )
         assert resp.status_code == 200, resp.text
         token = resp.json()["token"]
@@ -80,12 +80,20 @@ def engine() -> Iterator[sa.Engine]:
 
 @pytest.fixture()
 def factory(engine: sa.Engine) -> Iterator[sessionmaker]:
-    """会话工厂(expire_on_commit=False) + 种子管理员(首行 id=1)。"""
+    """会话工厂(expire_on_commit=False) + 种子用户(管理员 id=1 / 工程师 id=2)。
+
+    业务规则(0.8.0+/管理员不持有项目): 项目一律由工程师创建并持有;
+    管理员仅用于管理端点断言(health/storage/audit)。
+    """
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     with factory() as session:
         identity.create_user(
-            session, "admin", ADMIN_PASSWORD, role="admin",
+            session, "admin", "Admin12345", role="admin",
             force_password_change=False, display_name="管理员",
+        )
+        identity.create_user(
+            session, "engineer", "Engineer12345", role="engineer",
+            force_password_change=False, display_name="工程师",
         )
     yield factory
 
@@ -129,10 +137,10 @@ def client(factory: sessionmaker, data_dir: Path) -> Iterator[TestClient]:
 
 
 def _create_project(factory: sessionmaker, name: str = "校验测试项目") -> int:
-    """经项目服务创建项目(含初始草稿与所有者成员行), 返回项目 id。"""
+    """经项目服务创建项目(工程师种子创建; 管理员不持有项目), 返回项目 id。"""
     with factory() as session:
-        admin = session.get(User, 1)
-        project = project_service.create_project(session, admin, name)
+        engineer = session.get(User, 2)
+        project = project_service.create_project(session, engineer, name)
         session.commit()
         return project.id
 
@@ -257,7 +265,7 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     body = resp.json()
     assert body["confirmed"] is True
     assert body["assumptions_hash"] == validation_service.hash_assumptions(DEFAULT_ASSUMPTIONS)
-    assert body["confirmed_by"] == 1
+    assert body["confirmed_by"] == 2  # 种子工程师(项目持有者)
     # 5) 预检通过
     report = _run_report(client, pid)
     assert report["status"] == "ok", report["diagnostics"]

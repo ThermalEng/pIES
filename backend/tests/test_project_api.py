@@ -542,3 +542,152 @@ def test_anonymous_and_xuserid_rejected(client: TestClient, db_session: Session)
     owner = make_user(db_session, "owner_anon")
     resp = client.get("/api/projects", headers=_h(client, owner))
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 管理员项目规则(4345872 前端配套): 不持有项目 / 不可创建 / 空列表
+# ---------------------------------------------------------------------------
+
+
+def test_admin_cannot_create_project_via_api(client: TestClient, db_session: Session) -> None:
+    """管理员经 API 创建项目返回 403(标准 ForbiddenError 信封)。"""
+    admin = make_user(db_session, "admin_nocreate", role="admin")
+    resp = client.post(
+        "/api/projects", json={"name": "管理员项目"}, headers=_h(client, admin)
+    )
+    assert resp.status_code == 403
+    err = resp.json()["error"]
+    assert err["code"] == "PERM-DENIED-001"
+    assert err["message_key"] == "ies.diag.perm.denied"
+    assert set(resp.json()) == {"error"}
+
+
+def test_admin_cannot_create_project_via_service(db_session: Session) -> None:
+    """直接调用项目应用服务创建管理员项目同样被拒(规则位于应用服务)。"""
+    from iesplan.core.errors import ForbiddenError
+    from iesplan.services import project as project_service
+
+    admin = make_user(db_session, "admin_nosvc", role="admin")
+    with pytest.raises(ForbiddenError):
+        project_service.create_project(db_session, admin, name="管理员服务项目")
+
+
+def test_engineer_can_create_project(client: TestClient, db_session: Session) -> None:
+    """普通工程师创建项目行为保持不变。"""
+    owner = make_user(db_session, "engineer_ok")
+    resp = client.post(
+        "/api/projects", json={"name": "工程师项目"}, headers=_h(client, owner)
+    )
+    assert resp.status_code == 201
+    assert resp.json()["project"]["owner_id"] == owner.id
+
+
+def test_admin_visible_projects_empty(client: TestClient, db_session: Session) -> None:
+    """管理员访问“我的项目”列表返回空列表(不持有业务项目)。"""
+    owner = make_user(db_session, "owner_emptylist")
+    admin = make_user(db_session, "admin_emptylist", role="admin")
+    _create_project(client, owner, "他人项目")
+
+    resp = client.get("/api/projects", headers=_h(client, admin))
+    assert resp.status_code == 200
+    assert resp.json()["projects"] == []
+
+
+# ---------------------------------------------------------------------------
+# 项目列表状态筛选(4345872 前端配套: status=active|archived)
+# ---------------------------------------------------------------------------
+
+
+def test_project_list_status_filter(client: TestClient, db_session: Session) -> None:
+    """不传 status 返回全部未删除; active/archived 分别只返回对应状态。"""
+    owner = make_user(db_session, "owner_filter")
+    other = make_user(db_session, "owner_other")
+    owner_h = _h(client, owner)
+    pid_active = _create_project(client, owner, "进行中项目")
+    pid_archived = _create_project(client, owner, "已归档项目")
+    other_pid = _create_project(client, other, "他人项目")
+    assert client.post(f"/api/projects/{pid_archived}/archive", headers=owner_h).status_code == 200
+
+    # 不传 status: 全部未删除
+    body = client.get("/api/projects", headers=owner_h).json()
+    assert {p["id"] for p in body["projects"]} == {pid_archived, pid_active}
+    assert all(p["my_role"] == "owner" for p in body["projects"])
+
+    # status=active: 仅进行中
+    body = client.get("/api/projects", headers=owner_h, params={"status": "active"}).json()
+    assert [p["id"] for p in body["projects"]] == [pid_active]
+
+    # status=archived: 仅已归档
+    body = client.get("/api/projects", headers=owner_h, params={"status": "archived"}).json()
+    assert [p["id"] for p in body["projects"]] == [pid_archived]
+
+    # 筛选对每个用户独立生效: other 只能看到自己的项目
+    body = client.get("/api/projects", headers=_h(client, other), params={"status": "active"}).json()
+    assert [p["id"] for p in body["projects"]] == [other_pid]
+
+    # 返回结构保持 {projects: [...]}
+    assert set(client.get("/api/projects", headers=owner_h).json()) == {"projects"}
+
+
+def test_project_list_invalid_status_rejected(client: TestClient, db_session: Session) -> None:
+    """非法 status 走标准参数校验错误信封(422 API-REQ-001)。"""
+    owner = make_user(db_session, "owner_badstatus")
+    resp = client.get("/api/projects", headers=_h(client, owner), params={"status": "bogus"})
+    assert resp.status_code == 422
+    assert set(resp.json()) == {"error"}
+    err = resp.json()["error"]
+    assert err["code"] == "API-REQ-001"
+    assert err["message_key"] == "ies.error.invalid_request"
+    assert any("status" in e["loc"] for e in err["params"]["errors"])
+
+
+def test_admin_global_view_and_lifecycle_unchanged(client: TestClient, db_session: Session) -> None:
+    """admin-visible 整体视图与管理员的既有生命周期管理能力保持不变。"""
+    owner = make_user(db_session, "owner_mgmt")
+    admin = make_user(db_session, "admin_mgmt", role="admin")
+    admin_h = _h(client, admin)
+    pid = _create_project(client, owner, "全局管理项目")
+
+    # /api/projects/admin-visible 行为保持不变(含全部项目, 含已删除)
+    body = client.get("/api/projects/admin-visible", headers=admin_h).json()
+    assert set(body) == {"projects"}
+    assert [p["id"] for p in body["projects"]] == [pid]
+    # 管理员不能业务编辑, 但可管理生命周期(归档/撤销归档/删除, 维护只读)
+    assert client.post(f"/api/projects/{pid}/archive", headers=admin_h).status_code == 200
+    assert client.post(f"/api/projects/{pid}/unarchive", headers=admin_h).status_code == 200
+    resp = client.request(
+        "DELETE", f"/api/projects/{pid}", headers=admin_h,
+        json={"confirm": True, "name": "全局管理项目"},
+    )
+    assert resp.status_code == 204
+    body = client.get("/api/projects/admin-visible", headers=admin_h).json()
+    assert {p["id"]: p["status"] for p in body["projects"]}[pid] == "deleted"
+
+
+def test_project_count_uses_aggregate_query(client: TestClient, db_session: Session) -> None:
+    """用户列表项目数经单次 GROUP BY 聚合查询取得(防 N+1 结构)。"""
+    from unittest.mock import patch
+
+    from iesplan.services import project as project_service
+
+    # 造数: 两个普通用户各持项目
+    u1 = make_user(db_session, "agg_user1")
+    u2 = make_user(db_session, "agg_user2")
+    for name in ("u1-a", "u1-b"):
+        _create_project(client, u1, name)
+    _create_project(client, u2, "u2-a")
+
+    real_execute = db_session.execute
+    queries: list[str] = []
+
+    def spy_execute(statement, *args, **kwargs):
+        queries.append(str(statement.compile()))
+        return real_execute(statement, *args, **kwargs)
+
+    # 公开 read model 一次调用 → 恰好一条聚合 SQL(owner_id GROUP BY)
+    with patch.object(db_session, "execute", side_effect=spy_execute) as mock_exec:
+        counts = project_service.project_count_by_owner(db_session, [u1.id, u2.id])
+    assert mock_exec.call_count == 1
+    assert counts[u1.id] == 2
+    assert counts[u2.id] == 1
+    assert "GROUP BY" in queries[0].upper()

@@ -410,6 +410,78 @@ def test_admin_users_list_and_permission(client: TestClient, db_session: Session
     assert client.get("/api/auth/users", headers=alice_headers).status_code == 403
 
 
+# ---------------------------------------------------------------------------
+# 管理员用户列表: 项目数(账号管理展示, 前端 4345872 配套)
+# ---------------------------------------------------------------------------
+
+
+def _create_project_for(client: TestClient, headers: dict[str, str], name: str) -> int:
+    """以窗口凭证创建项目并返回 project_id(测试造数)。"""
+    resp = client.post(
+        "/api/projects", json={"name": name, "currency": "CNY", "utc_offset_minutes": 480},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["project"]["id"]
+
+
+def test_admin_users_list_returns_project_count(client: TestClient, db_session: Session) -> None:
+    """用户列表: 每个用户返回 project_count(active+archived 计入, deleted 不计)。"""
+    seed_admin(db_session, force_change=False)
+    seed_engineer(db_session, "alice")
+    seed_engineer(db_session, "bob")
+    admin_headers = bearer(login(client, "admin", ADMIN_PASSWORD).json()["token"])
+    alice_headers = bearer(login(client, "alice", USER_PASSWORD).json()["token"])
+
+    # alice: 2 active + 1 archived = 3; bob/admin: 无项目 = 0
+    p1 = _create_project_for(client, alice_headers, "alice-active-1")
+    _create_project_for(client, alice_headers, "alice-active-2")
+    p3 = _create_project_for(client, alice_headers, "alice-archived")
+    assert client.post(f"/api/projects/{p3}/archive", headers=alice_headers).status_code == 200
+
+    resp = client.get("/api/auth/users", headers=admin_headers)
+    assert resp.status_code == 200
+    by_name = {u["username"]: u for u in resp.json()["users"]}
+    assert by_name["alice"]["project_count"] == 3
+    assert by_name["bob"]["project_count"] == 0
+    assert by_name["admin"]["project_count"] == 0
+
+    # deleted 项目不计入
+    assert client.request(
+        "DELETE", f"/api/projects/{p1}", headers=alice_headers,
+        json={"confirm": True, "reason": "清理测试项目"},
+    ).status_code == 204
+    resp = client.get("/api/auth/users", headers=admin_headers)
+    by_name = {u["username"]: u for u in resp.json()["users"]}
+    assert by_name["alice"]["project_count"] == 2
+    assert by_name["bob"]["project_count"] == 0
+
+
+def test_login_and_me_keep_user_semantics(client: TestClient, db_session: Session) -> None:
+    """登录与 /me 保持原有普通用户响应语义(不含 project_count)。
+
+    project_count 仅服务管理员用户列表(GET /api/auth/users); 登录/注册/
+    /me 继续使用原有 UserOut 字段集。
+    """
+    seed_admin(db_session, force_change=False)
+    seed_engineer(db_session)
+    r = login(client, "admin", ADMIN_PASSWORD)
+    user = r.json()["user"]
+    assert "project_count" not in user
+    assert set(user) == {
+        "id", "username", "display_name", "role", "status",
+        "force_password_change", "credential_version", "last_login_at",
+    }
+
+    me = client.get("/api/auth/me", headers=bearer(r.json()["token"])).json()
+    assert "project_count" not in me
+    assert set(me) == set(user)
+
+    # 仅管理员用户列表项携带 project_count
+    users = client.get("/api/auth/users", headers=bearer(r.json()["token"])).json()["users"]
+    assert all("project_count" in u for u in users)
+
+
 def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Session) -> None:
     """删除账号(0.2.0 B1 误操作防护): 先预览取得确认令牌, 携带 confirm+令牌删除成功,
     该账号拥有的项目一并软删, 账号停用且会话失效。"""

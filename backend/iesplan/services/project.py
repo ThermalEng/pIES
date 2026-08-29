@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -127,8 +128,15 @@ def create_project(
 ) -> Project:
     """创建项目: 创建者即所有者, 同事务创建初始草稿(revision=1, 01 §3.1/§3.2)。
 
+    业务规则: 管理员不持有业务项目(仅负责账号与系统管理), 创建一律拒绝
+    (403, PERM-DENIED-001 标准信封); 普通工程师行为不变。
     名称全局唯一(01 §3.1 uq_projects_name), 冲突抛 ConflictError。
     """
+    if _is_admin(db, user):
+        raise ForbiddenError(
+            "管理员不持有项目, 不可创建项目",
+            params={"role": "admin"},
+        )
     name = (name or "").strip()
     if not name:
         raise InvalidRequestError("项目名称不能为空", code="PROJ-CMD-001")
@@ -183,17 +191,25 @@ def get_project_view(db: Session, user: User, project_id: int) -> dict:
     }
 
 
-def list_visible_projects(db: Session, user: User) -> list[dict]:
-    """我的项目列表(仅所有者, 不含已删除)。
+def list_visible_projects(db: Session, user: User, status: str | None = None) -> list[dict]:
+    """我的项目列表(仅所有者, 不含已删除; 支持按状态筛选)。
 
     0.8.0 剔除共享成员: 项目只属于所有者; 共享通过项目包导出/导入完成。
+    业务规则: 管理员不持有业务项目(仅负责账号与系统管理), 一律返回空列表;
+    普通工程师可按状态筛选(status: 'active' 进行中 / 'archived' 已归档 /
+    None 全部未删除), 筛选在数据库查询中完成。
     """
+    if _is_admin(db, user):
+        return []
+    where = [
+        Project.owner_id == user.id,
+        Project.status != "deleted",
+    ]
+    if status in ("active", "archived"):
+        where.append(Project.status == status)
     rows = db.execute(
         select(Project)
-        .where(
-            Project.owner_id == user.id,
-            Project.status != "deleted",
-        )
+        .where(*where)
         .order_by(Project.created_at.desc())
     ).scalars().all()
     return [{**project_to_dict(p), "my_role": "owner"} for p in rows]
@@ -208,6 +224,28 @@ def list_all_projects(db: Session) -> list[dict]:
         select(Project).order_by(Project.created_at.desc())
     ).scalars().all()
     return [project_to_dict(p) for p in projects]
+
+
+def project_count_by_owner(db: Session, owner_ids: Sequence[int]) -> dict[int, int]:
+    """项目数量 read model: owner_id -> 未删除项目数(admin 用户列表等跨领域消费)。
+
+    统计口径(与账号管理展示一致): 该用户拥有的 active + archived 项目,
+    deleted 一律排除; 无项目或缺省不在 owner_ids 中的用户返回 0。
+    实现为一次 GROUP BY 聚合查询(单条 SQL, 防 N+1): 用户数量增加时
+    查询数量保持 1 不变。
+    数据库故障沿用统一错误处理(异常向上传播, 不在此吞掉转为 0)。
+    """
+    if not owner_ids:
+        return {}
+    rows = db.execute(
+        select(Project.owner_id, func.count(Project.id))
+        .where(
+            Project.owner_id.in_(owner_ids),
+            Project.status != "deleted",
+        )
+        .group_by(Project.owner_id)
+    ).all()
+    return {owner_id: count for owner_id, count in rows}
 
 
 def archive_project(db: Session, user: User, project_id: int) -> Project:
@@ -1203,4 +1241,5 @@ __all__ = [
     "draft_to_dict",
     "version_to_dict",
     "list_all_projects",
+    "project_count_by_owner",
 ]
