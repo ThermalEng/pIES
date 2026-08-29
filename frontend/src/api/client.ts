@@ -291,7 +291,12 @@ function handleUnauthorized(path: string, envelope: ApiErrorBody | null): ApiErr
   return new ApiError(401, envelope, envelope ? undefined : 'ies.diag.auth.session_invalid')
 }
 
-async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+/**
+ * 底层请求: 统一错误信封解析 / 401 会话处理 / {ok, data} 信封解包。
+ * 供 feature 层 api.ts(如 features/modeling/api.ts)复用, 避免重复实现 HTTP 层。
+ * 页面与组件不得直接调用, 必须经 feature api。
+ */
+export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { signal, cleanup } = createAbort(opts.signal, opts.timeoutMs ?? 60_000)
   try {
     const headers: Record<string, string> = { ...opts.headers }

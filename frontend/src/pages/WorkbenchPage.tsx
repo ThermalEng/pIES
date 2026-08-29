@@ -29,6 +29,7 @@ import { WorkbenchProvider } from './workbench'
 /** 并行 agent 实现的子页面(惰性扫描,缺失时回退占位)。 */
 const subPageLoaders = import.meta.glob<{ default: ComponentType }>([
   './ModelPage.tsx',
+  './model/NewModelPage.tsx',
   './DataPage.tsx',
   './ConfigPage.tsx',
   './ValidationPage.tsx',
@@ -66,6 +67,7 @@ function lazySubPage(file: string): ComponentType {
 }
 
 const ModelPage = lazySubPage('./ModelPage.tsx')
+const NewModelPage = lazySubPage('./model/NewModelPage.tsx')
 const DataPage = lazySubPage('./DataPage.tsx')
 const ConfigPage = lazySubPage('./ConfigPage.tsx')
 const ValidationPage = lazySubPage('./ValidationPage.tsx')
@@ -86,6 +88,7 @@ export default function WorkbenchPage() {
         <Route element={<ProjectPage />}>
           <Route index element={<Navigate to="tasks" replace />} />
           <Route path="model" element={<ModelPage />} />
+          <Route path="model/new" element={<NewModelPage />} />
           <Route path="data" element={<DataPage />} />
           <Route path="config" element={<ConfigPage />} />
           <Route path="validation" element={<ValidationPage />} />
