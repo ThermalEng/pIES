@@ -13,10 +13,12 @@ import type {
 import type { FormFieldError, FormFieldValue } from './form'
 import type {
   CandidateModel,
+  DataFileRef,
   InputNode,
   ModelDiagnostic,
+  ProjectModelSummary,
   SavedModelInfo,
-  TemplateDocument,
+  TemplateDetail,
   TemplateSummary,
 } from './model'
 import { MapperError } from './model'
@@ -235,7 +237,7 @@ function collectDefaults(node: InputNode, out: Record<string, FormFieldValue>): 
       break
     case 'data_repeat':
     case 'data_predict':
-      out[node.path] = { kind: 'data', file_ref: null, file_name: null }
+      out[node.path] = { kind: 'data', file_ref: null, file_name: null, data_ref: node.data_ref ?? null, upload: null }
       break
   }
 }
@@ -389,9 +391,9 @@ function buildSubmitted(node: InputNode, values: Record<string, FormFieldValue>,
       break
     case 'data_repeat':
     case 'data_predict': {
-      // 已上传临时文件时提交模板声明的 data_ref(临时文件内容由 temp_file_refs 绑定)
+      // 已上传临时文件时提交模板声明的 data_ref(临时文件内容由 data_files 绑定)
       const data = field?.kind === 'data' ? field : null
-      if (data?.file_ref && node.data_ref !== null) out[node.key] = node.data_ref
+      if (data?.file_ref && data?.upload && node.data_ref !== null) out[node.key] = node.data_ref
       break
     }
   }
@@ -430,12 +432,22 @@ function buildArrayItem(
   return null
 }
 
-/** 收集临时数据文件引用(已上传的 data 叶子 → [{path, temp_file_ref}])。 */
-export function collectTempFileRefs(values: Record<string, FormFieldValue>): { path: string; temp_file_ref: string }[] {
-  const refs: { path: string; temp_file_ref: string }[] = []
+/**
+ * 收集配套数据文件引用(已上传的 data 叶子 → DataFileRef)。
+ * file_ref 为临时对象 id; 提交时由候选携带 {data_ref, upload_id, object_id, sha256}。
+ */
+export function collectDataFileRefs(values: Record<string, FormFieldValue>): DataFileRef[] {
+  const refs: DataFileRef[] = []
   for (const [path, value] of Object.entries(values)) {
     if (value.kind === 'data' && value.file_ref) {
-      refs.push({ path, temp_file_ref: value.file_ref })
+      const upload = value.upload
+      if (!upload) continue // 上传失败/未完成: 不提交
+      refs.push({
+        data_ref: value.data_ref || path,
+        upload_id: upload.upload_id,
+        object_id: upload.object_id,
+        sha256: upload.sha256,
+      })
     }
   }
   return refs
@@ -463,33 +475,112 @@ export function localeName(names: Record<string, string> | null | undefined, loc
   return ''
 }
 
-/** 后端模板列表项 → 前端 TemplateSummary。 */
+/** 后端模板列表项 → 前端 TemplateSummary(模板 ID 即展示名; 无独立 names 字段)。 */
 export function templateSummaryFromServer(raw: unknown, locale: string): TemplateSummary {
   const rec = asRecord(raw)
   if (!rec || typeof rec.template_id !== 'string') {
     throw new MapperError('模板列表项缺少 template_id')
   }
-  const names: Record<string, string> = {}
-  const namesRaw = asRecord(rec.names)
-  if (namesRaw) {
-    for (const [k, v] of Object.entries(namesRaw)) {
-      if (typeof v === 'string') names[k] = v
-    }
-  }
+  void locale
   return {
+    id: typeof rec.id === 'string' ? rec.id : '',
     template_id: rec.template_id,
-    names,
-    name: localeName(names, locale) || rec.template_id,
-    schema_version: typeof rec.schema_version === 'string' ? rec.schema_version : '2.0.0',
+    status: rec.status === 'draft' || rec.status === 'published' || rec.status === 'disabled' ? rec.status : 'draft',
     description: typeof rec.description === 'string' ? rec.description : null,
-    content_sha256: typeof rec.content_sha256 === 'string' ? rec.content_sha256 : '',
-    revision: typeof rec.revision === 'number' ? rec.revision : 0,
-    has_inputs: rec.has_inputs === true,
+    draft_revision: typeof rec.draft_revision === 'number' ? rec.draft_revision : 0,
+    draft_sha256: typeof rec.draft_sha256 === 'string' ? rec.draft_sha256 : null,
+    draft_has_inputs: rec.draft_has_inputs === true ? true : rec.draft_has_inputs === false ? false : null,
+    published_revision: typeof rec.published_revision === 'number' ? rec.published_revision : 0,
+    published_at: typeof rec.published_at === 'string' ? rec.published_at : null,
+    created_at: typeof rec.created_at === 'string' ? rec.created_at : null,
+    updated_at: typeof rec.updated_at === 'string' ? rec.updated_at : null,
+    revision: rec.revision !== null && rec.revision !== undefined ? templateRevisionFromServer(rec.revision) : null,
+    name: '',
+    names: {},
+    schema_version: '2.0.0',
+    content_sha256:
+      typeof rec.revision === 'object' && rec.revision !== null && !Array.isArray(rec.revision)
+        ? (typeof (rec.revision as Record<string, unknown>).content_sha256 === 'string'
+            ? ((rec.revision as Record<string, unknown>).content_sha256 as string)
+            : '')
+        : (typeof rec.draft_sha256 === 'string' ? rec.draft_sha256 : ''),
+    has_inputs: rec.draft_has_inputs === true,
   }
 }
 
-/** 模板详情响应 {template, document} → 前端 TemplateDocument(含 inputs 树)。 */
-export function templateDocumentFromServer(body: unknown, locale: string): TemplateDocument {
+/** 精确发布 revision 后端视图 → 前端领域形态(模板 ID + revision + 摘要固定内容)。 */
+export function templateRevisionFromServer(raw: unknown): TemplateSummary['revision'] {
+  const rec = asRecord(raw)
+  if (!rec || typeof rec.revision !== 'number') {
+    throw new MapperError('模板 revision 缺少 revision')
+  }
+  return {
+    id: typeof rec.id === 'string' ? rec.id : '',
+    revision: rec.revision,
+    schema_version: typeof rec.schema_version === 'string' ? rec.schema_version : '2.0.0',
+    content_sha256: typeof rec.content_sha256 === 'string' ? rec.content_sha256 : '',
+    inputs_sha256: typeof rec.inputs_sha256 === 'string' ? rec.inputs_sha256 : null,
+    input_count: typeof rec.input_count === 'number' ? rec.input_count : 0,
+    yaml_object_id: typeof rec.yaml_object_id === 'string' ? rec.yaml_object_id : '',
+    receipt_object_id: typeof rec.receipt_object_id === 'string' ? rec.receipt_object_id : '',
+    summary_object_id: typeof rec.summary_object_id === 'string' ? rec.summary_object_id : '',
+    published_by: typeof rec.published_by === 'string' ? rec.published_by : '',
+    published_at: typeof rec.published_at === 'string' ? rec.published_at : null,
+  }
+}
+
+/** 模板详情响应 {template, document, diagnostics} → 前端 TemplateDetail。 */
+export function templateDetailFromServer(body: unknown, locale: string): TemplateDetail {
+  const rec = asRecord(body)
+  const summaryRaw = asRecord(rec?.template)
+  if (!summaryRaw) throw new MapperError('模板详情缺少 template')
+  const summary = templateSummaryFromServer(summaryRaw, locale)
+  const document = asRecord(rec?.document)
+  const inputs = document ? buildInputTree(document.inputs) : []
+  return {
+    summary,
+    document: document ?? null,
+    inputs,
+    diagnostics: Array.isArray(rec?.diagnostics)
+      ? (rec.diagnostics as unknown[]).map(diagFromServer).filter((d): d is ModelDiagnostic => d !== null)
+      : [],
+    raw: document ?? {},
+  }
+}
+
+/** 项目模型清单行 → 前端领域形态(编号对用户可见)。 */
+export function projectModelFromServer(raw: unknown): ProjectModelSummary {
+  const rec = asRecord(raw)
+  if (!rec || typeof rec.device_id !== 'string') {
+    throw new MapperError('项目模型清单行缺少 device_id')
+  }
+  return {
+    id: typeof rec.id === 'string' ? rec.id : '',
+    project_id: typeof rec.project_id === 'string' ? rec.project_id : '',
+    device_id: rec.device_id,
+    base_device_id: typeof rec.base_device_id === 'string' ? rec.base_device_id : rec.device_id,
+    suffix: typeof rec.suffix === 'number' ? rec.suffix : 0,
+    revision: typeof rec.revision === 'number' ? rec.revision : 1,
+    project_revision: typeof rec.project_revision === 'number' ? rec.project_revision : 0,
+    content_sha256: typeof rec.content_sha256 === 'string' ? rec.content_sha256 : '',
+    model_object_id: typeof rec.model_object_id === 'string' ? rec.model_object_id : '',
+    receipt_object_id: typeof rec.receipt_object_id === 'string' ? rec.receipt_object_id : '',
+    source: rec.source === 'template' ? 'template' : 'direct_yaml',
+    template_id: typeof rec.template_id === 'string' ? rec.template_id : null,
+    template_revision: typeof rec.template_revision === 'number' ? rec.template_revision : null,
+    template_sha256: typeof rec.template_sha256 === 'string' ? rec.template_sha256 : null,
+    inputs_sha256: typeof rec.inputs_sha256 === 'string' ? rec.inputs_sha256 : null,
+    created_by: typeof rec.created_by === 'string' ? rec.created_by : '',
+    created_at: typeof rec.created_at === 'string' ? rec.created_at : null,
+  }
+}
+
+/** 模板详情响应(旧 {template, document} 形态兼容 → 移除前保留)? 由 templateDetailFromServer 取代。 */
+export function templateDocumentFromServer(body: unknown, locale: string): {
+  summary: TemplateSummary
+  inputs: InputNode[]
+  raw: Record<string, unknown>
+} {
   const rec = asRecord(body)
   const summaryRaw = asRecord(rec?.template)
   if (!summaryRaw) throw new MapperError('模板详情缺少 template')
@@ -500,26 +591,31 @@ export function templateDocumentFromServer(body: unknown, locale: string): Templ
   return { summary, inputs, raw: document }
 }
 
-/** 保存成功响应 {model, project_revision} → 前端 SavedModelInfo。 */
+/** 保存成功响应 {project_model, receipt, project_revision} → 前端 SavedModelInfo。 */
 export function savedModelFromServer(body: unknown): SavedModelInfo {
   const rec = asRecord(body)
-  const model = asRecord(rec?.model)
-  if (!model || typeof model.model_id !== 'string' || typeof model.canonical_yaml !== 'string') {
-    throw new MapperError('候选保存响应缺少 model.model_id / model.canonical_yaml')
+  const model = asRecord(rec?.project_model)
+  if (!model || typeof model.device_id !== 'string' || typeof model.content_sha256 !== 'string') {
+    throw new MapperError('候选保存响应缺少 project_model.device_id / content_sha256')
   }
-  const summary = asRecord(model.summary)
   return {
-    model_id: model.model_id,
-    device_id: typeof model.device_id === 'string' ? model.device_id : model.model_id,
-    schema_version: typeof model.schema_version === 'string' ? model.schema_version : '2.0.0',
-    canonical_yaml: model.canonical_yaml,
-    content_sha256: typeof model.content_sha256 === 'string' ? model.content_sha256 : '',
+    model_id: typeof model.id === 'string' ? model.id : '',
+    device_id: model.device_id,
+    suffix: typeof model.suffix === 'number' ? model.suffix : 0,
+    base_device_id: typeof model.base_device_id === 'string' ? model.base_device_id : model.device_id,
+    schema_version: '2.0.0',
+    canonical_yaml: '',
+    content_sha256: model.content_sha256,
     summary: {
-      property_count: typeof summary?.property_count === 'number' ? summary.property_count : 0,
-      interface_count: typeof summary?.interface_count === 'number' ? summary.interface_count : 0,
-      relation_count: typeof summary?.relation_count === 'number' ? summary.relation_count : 0,
+      property_count: 0,
+      interface_count: 0,
+      relation_count: 0,
     },
     project_revision: typeof rec?.project_revision === 'number' ? rec.project_revision : 0,
+    source: (model.source === 'template' ? 'template' : 'direct_yaml') as 'direct_yaml' | 'template',
+    template_id: typeof model.template_id === 'string' ? model.template_id : null,
+    template_revision: typeof model.template_revision === 'number' ? model.template_revision : null,
+    duplicate: rec?.duplicate === true,
   }
 }
 
@@ -565,14 +661,19 @@ export function diagnosticsFromError(error: unknown): ModelDiagnostic[] {
 export function buildCandidateRequest(candidate: CandidateModel): CandidateSaveRequestDto {
   if (candidate.source === 'template') {
     if (!candidate.template_id) throw new MapperError('source=template 必须提供 template_id')
+    if (!candidate.template_revision || !candidate.template_sha256) {
+      throw new MapperError('source=template 必须提供 template_revision 与 template_sha256')
+    }
     return {
       source: 'template',
-      template_id: candidate.template_id,
-      inputs: candidate.inputs_json ?? {},
       content: null,
+      template_id: candidate.template_id,
+      template_revision: candidate.template_revision,
+      template_sha256: candidate.template_sha256,
+      inputs: candidate.inputs_json ?? {},
       project_revision: candidate.project_revision,
       idempotency_key: candidate.idempotency_key,
-      temp_file_refs: candidate.temp_file_refs,
+      data_files: candidate.data_files,
     }
   }
   if (candidate.content_yaml === null || candidate.content_yaml.trim() === '') {
@@ -580,12 +681,14 @@ export function buildCandidateRequest(candidate: CandidateModel): CandidateSaveR
   }
   return {
     source: 'yaml',
-    template_id: null,
-    inputs: null,
     content: candidate.content_yaml,
+    template_id: null,
+    template_revision: null,
+    template_sha256: null,
+    inputs: null,
     project_revision: candidate.project_revision,
     idempotency_key: candidate.idempotency_key,
-    temp_file_refs: candidate.temp_file_refs,
+    data_files: candidate.data_files,
   }
 }
 

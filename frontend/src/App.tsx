@@ -100,6 +100,7 @@ const WorkbenchPage = lazyPage('WorkbenchPage')
 const HelpPage = lazyPage('HelpPage')
 const SettingsPage = lazyPage('SettingsPage')
 const AdminUsersPage = lazyPage('AdminUsersPage')
+const CustomizationPage = lazyPage('CustomizationPage')
 
 /** 整页加载指示(路由切换 Suspense 兜底)。 */
 function PageLoading() {
@@ -196,6 +197,9 @@ function AppShell() {
           <NavLink to="/" end className="ies-topbar__link">
             {t('ies.nav.projects')}
           </NavLink>
+          <NavLink to="/custom" className="ies-topbar__link">
+            {t('ies.nav.custom')}
+          </NavLink>
           {isAdmin === true ? (
             <NavLink to="/admin/users" className="ies-topbar__link">
               {t('ies.nav.accounts')}
@@ -263,6 +267,8 @@ export default function App() {
           }
         >
           <Route path="/" element={<ProjectListPage />} />
+          {/* 自定义: 用户模型模板管理(一级菜单) */}
+          <Route path="/custom" element={<CustomizationPage />} />
           <Route path="/projects/:id/*" element={<WorkbenchPage />} />
           <Route
             path="/admin/users"

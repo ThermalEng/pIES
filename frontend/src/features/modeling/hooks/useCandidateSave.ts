@@ -13,7 +13,7 @@ import { useCallback, useMemo, useState } from 'react'
 
 import { api } from '../../../api/client'
 import { saveCandidate, uploadTempDataFile } from '../api'
-import type { CandidateModel, ModelDiagnostic, ModelSavePhase, SavedModelInfo } from '../model'
+import type { CandidateModel, DataFileRef, ModelDiagnostic, ModelSavePhase, SavedModelInfo } from '../model'
 import { CandidateSaveError } from '../model'
 
 export interface CandidateSaveController {
@@ -30,7 +30,7 @@ export interface CandidateSaveController {
   backToEditing: () => void
   reset: () => void
   /** 上传临时数据文件(临时隔离区; 上传完成 ≠ 模型已保存)。 */
-  uploadTempFile: (file: File) => Promise<{ temp_file_ref: string; file_name: string }>
+  uploadTempFile: (file: File, dataRef: string) => Promise<DataFileRef>
 }
 
 /** 幂等键: 优先 crypto.randomUUID; 非安全上下文(http 非 localhost)回退时间戳+随机段。 */
@@ -103,7 +103,15 @@ export function useCandidateSave(projectId: number): CandidateSaveController {
   }, [])
 
   const uploadTempFile = useCallback(
-    (file: File) => uploadTempDataFile(projectId, file),
+    async (file: File, dataRef: string) => {
+      const result = await uploadTempDataFile(projectId, file, dataRef)
+      return {
+        data_ref: dataRef,
+        upload_id: result.upload_id,
+        object_id: result.temp_file.object_id,
+        sha256: result.temp_file.sha256,
+      }
+    },
     [projectId],
   )
 

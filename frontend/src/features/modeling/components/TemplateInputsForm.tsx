@@ -26,8 +26,8 @@ export interface TemplateInputsFormProps {
   errors: FormFieldError[]
   onFieldChange: (path: string, value: FormFieldValue) => void
   onArrayChange: (path: string, items: Array<Record<string, FormFieldValue>>) => void
-  /** 上传临时数据文件(父层负责调用 api 并回填 file_ref)。 */
-  onUploadFile: (path: string, file: File) => void
+  /** 上传临时数据文件(父层负责调用 api 并回填 file_ref; dataRef 为模板声明的 data_ref)。 */
+  onUploadFile: (path: string, dataRef: string, file: File) => void
   onRemoveFile: (path: string) => void
   /** 当前上传中的叶子路径(显示进度)。 */
   uploadingPath: string | null
@@ -114,7 +114,7 @@ interface NodeEditorProps {
   errorByPath: Map<string, FormFieldError>
   onFieldChange: (path: string, value: FormFieldValue) => void
   onArrayChange: (path: string, items: Array<Record<string, FormFieldValue>>) => void
-  onUploadFile: (path: string, file: File) => void
+  onUploadFile: (path: string, dataRef: string, file: File) => void
   onRemoveFile: (path: string) => void
   uploadingPath: string | null
   disabled: boolean
@@ -252,7 +252,7 @@ function DataFileField({
 }: {
   node: InputNode
   value: FormFieldValue | undefined
-  onUploadFile: (path: string, file: File) => void
+  onUploadFile: (path: string, dataRef: string, file: File) => void
   onRemoveFile: (path: string) => void
   uploading: boolean
   disabled: boolean
@@ -262,7 +262,7 @@ function DataFileField({
   const fileName = value?.kind === 'data' ? value.file_name : null
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file) onUploadFile(node.path, file)
+    if (file) onUploadFile(node.path, node.data_ref ?? '', file)
     e.target.value = '' // 允许重复选择同一文件
   }
   return (
@@ -321,7 +321,7 @@ function ArrayEditor({
       if (child.type === 'number') row[f.rel] = { kind: 'number', text: '' }
       else if (child.type === 'boolean') row[f.rel] = { kind: 'boolean', checked: false }
       else if (child.type === 'string') row[f.rel] = { kind: 'string', text: '' }
-      else if (child.type === 'data_repeat' || child.type === 'data_predict') row[f.rel] = { kind: 'data', file_ref: null, file_name: null }
+      else if (child.type === 'data_repeat' || child.type === 'data_predict') row[f.rel] = { kind: 'data', file_ref: null, file_name: null, data_ref: child.data_ref ?? null, upload: null }
     }
     onArrayChange(node.path, [...items, row])
   }

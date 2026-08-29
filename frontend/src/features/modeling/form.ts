@@ -12,7 +12,16 @@ export type FormFieldValue =
   | { kind: 'number'; text: string }
   | { kind: 'boolean'; checked: boolean }
   | { kind: 'string'; text: string }
-  | { kind: 'data'; file_ref: string | null; file_name: string | null }
+  | {
+      kind: 'data'
+      /** 临时对象 id(上传成功后回填)。 */
+      file_ref: string | null
+      file_name: string | null
+      /** data_ref(模板声明的数据引用名)。 */
+      data_ref: string | null
+      /** 上传回执(upload_id / object_id / sha256; 提交候选时携带)。 */
+      upload: { upload_id: string; object_id: string; sha256: string } | null
+    }
   | { kind: 'array'; items: Array<Record<string, FormFieldValue>> }
 
 /** 模板表单状态: 值 + 触碰标记(touched 字段显示即时校验反馈)。 */

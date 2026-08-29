@@ -79,6 +79,7 @@ export const messagesZh: Record<string, string> = {
   'ies.nav.results': '结果分析',
   'ies.nav.exports': '导出',
   'ies.nav.validation': '校验',
+  'ies.nav.custom': '自定义',
   'ies.nav.help': '帮助中心',
   'ies.nav.accounts': '账号管理',
   'ies.nav.settings': '系统设置',

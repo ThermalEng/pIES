@@ -1,18 +1,19 @@
 /**
- * 建模 feature API 客户端(契约草案, 待 C 合并后联调)。
+ * 建模 feature API 客户端(与真实后端契约一致, 切片 dm2 联调完成)。
  *
- * 端点与字段按阶段 2 worktree C 的候选校验/保存契约草案编写; C 尚未合并,
- * 联调说明见本目录 README.md「待 C 合并后联调」节。端点清单:
- *
- *   GET  /api/model-templates                    模板列表 → {items: [...]}
- *   GET  /api/model-templates/{template_id}      模板详情 → {template, document}
- *   POST /api/projects/{pid}/model-candidates    候选校验+保存:
- *        source=template: {template_id, inputs}  后端模板实例化后完整校验;
- *        source=yaml:     {content}              后端直接解析校验。
- *        成功 201 → {model, project_revision}; 失败 400 → 标准错误信封,
- *        params.diagnostics 为聚合诊断(message_key/字段路径/YAML 行列/expected/actual)。
- *   POST /api/projects/{pid}/temp-files          临时数据文件上传(multipart)
- *        → {temp_file_ref, file_name}(临时隔离区, 不等于模型已保存)。
+ * 端点清单(prefix /api):
+ *   GET  /api/model-templates/catalog                    可用模板目录 → {items: [...]}
+ *   GET  /api/model-templates/{template_id}              模板详情 → {template, document, diagnostics}
+ *   GET  /api/projects/{pid}/models                      项目模型清单 → {project_models: [...]}
+ *   POST /api/projects/{pid}/models/validate             候选模型门禁 → {valid, diagnostics}
+ *   POST /api/projects/{pid}/models/temp-files           临时数据文件上传(multipart)
+ *        → {temp_file: {object_id, oid, sha256, ...}, upload_id}
+ *   POST /api/projects/{pid}/models                      正式保存:
+ *        source=template: {template_id, template_revision, template_sha256, inputs}
+ *        source=yaml:     {content}
+ *        成功 201 → {project_model, receipt, project_revision}; 失败 400 → 标准
+ *        错误信封, params.diagnostics 为聚合诊断(message_key/字段路径/YAML 行列/
+ *        expected/actual)。
  *
  * 本层只做路径拼接、信封解包与严格解析; 不组织跨端点工作流
  * (项目修订获取、幂等键生成等编排在 hooks/ 完成)。
@@ -23,28 +24,68 @@ import { ApiError } from '../../types'
 import {
   buildCandidateRequest,
   diagnosticsFromError,
+  diagFromServer,
+  projectModelFromServer,
   savedModelFromServer,
-  templateDocumentFromServer,
+  templateDetailFromServer,
   templateSummaryFromServer,
 } from './mappers'
-import type { CandidateModel, ModelDiagnostic, SavedModelInfo, TemplateDocument, TemplateSummary } from './model'
+import type { CandidateModel, ModelDiagnostic, ProjectModelSummary, SavedModelInfo, TemplateDetail, TemplateSummary } from './model'
 import { CandidateSaveError, MapperError } from './model'
 
-/** 模板列表(清单端点 {items: [...]} 严格解析, 形状不符不静默返回空列表)。 */
+/** 可用模板目录(已发布且启用; 列表信封 {items: [...]} 严格解析)。 */
 export async function listTemplates(locale: string): Promise<TemplateSummary[]> {
-  const body = await request<unknown>('/model-templates')
+  const body = await request<unknown>('/model-templates/catalog')
   const rec =
     body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null
   if (!rec || !Array.isArray(rec.items)) {
-    throw new MapperError('GET /model-templates 响应缺少 items')
+    throw new MapperError('GET /model-templates/catalog 响应缺少 items')
   }
   return rec.items.map((item) => templateSummaryFromServer(item, locale))
 }
 
 /** 模板详情(供表单生成: 递归解析 document.inputs 树)。 */
-export async function getTemplate(templateId: string, locale: string): Promise<TemplateDocument> {
+export async function getTemplate(templateId: string, locale: string): Promise<TemplateDetail> {
   const body = await request<unknown>(`/model-templates/${encodeURIComponent(templateId)}`)
-  return templateDocumentFromServer(body, locale)
+  return templateDetailFromServer(body, locale)
+}
+
+/** 项目模型清单(最新在前; 编号对用户可见)。 */
+export async function listProjectModels(projectId: number): Promise<ProjectModelSummary[]> {
+  const body = await request<unknown>(`/projects/${projectId}/models`)
+  const rec =
+    body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null
+  if (!rec || !Array.isArray(rec.project_models)) {
+    throw new MapperError('GET /projects/{pid}/models 响应缺少 project_models')
+  }
+  return rec.project_models.map((item) => projectModelFromServer(item))
+}
+
+/**
+ * 候选校验(不保存): 返回 {valid, diagnostics}。
+ * 校验失败在 validate 端点以 200 + {valid: false, diagnostics} 表达;
+ * 传输/服务器错误原样抛出 ApiError。
+ */
+export async function validateCandidate(
+  projectId: number,
+  candidate: CandidateModel,
+): Promise<{ valid: boolean; diagnostics: ModelDiagnostic[] }> {
+  const body = await request<unknown>(`/projects/${projectId}/models/validate`, {
+    method: 'POST',
+    body: buildCandidateRequest(candidate),
+  })
+  const rec =
+    body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null
+  if (!rec || typeof rec.valid !== 'boolean' || !Array.isArray(rec.diagnostics)) {
+    throw new MapperError('POST /models/validate 响应缺少 valid/diagnostics')
+  }
+  const diagnostics: ModelDiagnostic[] = []
+  for (const item of rec.diagnostics as unknown[]) {
+    const parsed = diagFromServer(item)
+    if (parsed === null) throw new MapperError('诊断条目形状与契约不一致')
+    diagnostics.push(parsed)
+  }
+  return { valid: rec.valid as boolean, diagnostics }
 }
 
 /**
@@ -55,7 +96,7 @@ export async function getTemplate(templateId: string, locale: string): Promise<T
  */
 export async function saveCandidate(projectId: number, candidate: CandidateModel): Promise<SavedModelInfo> {
   try {
-    const body = await request<unknown>(`/projects/${projectId}/model-candidates`, {
+    const body = await request<unknown>(`/projects/${projectId}/models`, {
       method: 'POST',
       body: buildCandidateRequest(candidate),
     })
@@ -75,18 +116,35 @@ export async function saveCandidate(projectId: number, candidate: CandidateModel
 export async function uploadTempDataFile(
   projectId: number,
   file: File,
-): Promise<{ temp_file_ref: string; file_name: string }> {
+  dataRef: string,
+): Promise<{ temp_file: { object_id: string; sha256: string; size_bytes: number; oid: string }; upload_id: string }> {
   const formData = new FormData()
   formData.append('file', file)
-  const body = await request<unknown>(`/projects/${projectId}/temp-files`, {
+  formData.append('data_ref', dataRef)
+  const body = await request<unknown>(`/projects/${projectId}/models/temp-files`, {
     method: 'POST',
     formData,
     timeoutMs: 0,
   })
   const rec =
     body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null
-  if (!rec || typeof rec.temp_file_ref !== 'string' || typeof rec.file_name !== 'string') {
-    throw new MapperError('POST /temp-files 响应缺少 temp_file_ref/file_name')
+  const tf = rec?.temp_file as Record<string, unknown> | undefined
+  if (
+    !rec ||
+    typeof rec.upload_id !== 'string' ||
+    !tf ||
+    typeof tf.object_id !== 'string' ||
+    typeof tf.sha256 !== 'string'
+  ) {
+    throw new MapperError('POST /models/temp-files 响应缺少 temp_file/upload_id')
   }
-  return { temp_file_ref: rec.temp_file_ref, file_name: rec.file_name }
+  return {
+    temp_file: {
+      object_id: tf.object_id as string,
+      oid: typeof tf.oid === 'string' ? (tf.oid as string) : '',
+      sha256: tf.sha256 as string,
+      size_bytes: typeof tf.size_bytes === 'number' ? (tf.size_bytes as number) : 0,
+    },
+    upload_id: rec.upload_id as string,
+  }
 }

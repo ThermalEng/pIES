@@ -69,6 +69,7 @@ export const messagesEn: Record<string, string> = {
   'ies.nav.results': 'Results',
   'ies.nav.exports': 'Exports',
   'ies.nav.validation': 'Validation',
+  'ies.nav.custom': 'Custom',
   'ies.nav.help': 'Help Center',
   'ies.nav.accounts': 'Accounts',
   'ies.nav.settings': 'Settings',
