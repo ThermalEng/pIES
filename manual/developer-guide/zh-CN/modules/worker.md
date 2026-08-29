@@ -30,7 +30,7 @@ Worker 负责“可靠执行”，领域模块负责“怎样计算”。
 | 任务 ID | 数据库中存在可领取的权威任务 |
 | attempt 与 fencing token | 由原子领取产生，租约尚有效 |
 | `CalcSnapshot` | 摘要、schema、对象和依赖版本完整 |
-| provider 目录 | 快照固定的 generator、executor、solver、result adapter 与命令均可解析 |
+| provider 与内容目录 | 快照固定的设备内容、方程 contract、generator、executor、solver 与 result adapter 均可解析 |
 | 执行策略 | 超时、资源限制、重试和取消检查点明确 |
 
 Redis 队列消息只是定位提示，不能携带覆盖数据库任务事实的第二份状态。
@@ -76,7 +76,7 @@ ExecutionReceipt + 原始输出
 ## 失败语义
 
 - 队列重复消息：权威领取保证不会产生两个有效 attempt；
-- 命令、generator、executor、result adapter 或快照版本缺失：Worker 不 ready，或任务以明确不可执行诊断失败；
+- 设备内容、方程 contract、generator、executor、result adapter 或快照依赖缺失：Worker 不 ready，或任务以明确不可执行诊断失败；
 - 租约过期：停止权威写入，迟到结果必须被拒绝；
 - 可重试外部故障：新建 attempt，保留旧 attempt 原因；
 - 取消或超时：执行隔离层终止工作，状态不可伪装成普通失败；

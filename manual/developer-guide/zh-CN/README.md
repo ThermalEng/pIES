@@ -12,7 +12,7 @@
 4. [模块开发手册](module-development.md)：按模块选择开发入口、统一阅读方法和完成标准；
 5. [领域模型与追溯链](domain-model.md)：项目、数据、配置、任务、结果和对象生命周期；
 6. [公共契约](contracts.md)：HTTP、数据类型、单位、时间、诊断和异步语义；
-7. [扩展体系](extensions.md)：设备、建模命令、生成器、运行时、存储和数据 provider；
+7. [扩展体系](extensions.md)：设备技术内容、方程转换、生成器、运行时、存储和数据 provider；
 8. [模型与算法](customization-center.md)：外部模型/插件的文件交付、版本、共享、安装和选择规则；
 9. [前端与帮助中心](frontend.md)：前端输入输出、状态、GUI 开发流程与正式文档；
 10. [部署与运行](deployment.md)：Docker 部署、安全、健康、备份和恢复；
@@ -28,7 +28,7 @@
 | 新设备或设备描述 | [设备目录](modules/devices.md) |
 | 手写或校验设备模型 YAML | [设备模型 YAML](formats/device-model-yaml.md) |
 | 手写或校验设备时序 CSV | [设备数据 CSV](formats/device-data-csv.md) |
-| 设备如何形成声明式数学贡献 | [建模命令](modules/modeling.md) |
+| 设备方程如何形成声明式数学贡献 | [技术方程建模](modules/modeling.md) |
 | 手写装配、项目图校验或规范产物 | [装配 YAML](formats/assembly-yaml.md)与[装配与检查](modules/assembly.md) |
 | 从规范装配生成求解器输入和命令 | [计算生成器](modules/generators.md) |
 | 安全执行求解器命令 | [求解运行时](modules/solver-runtime.md) |

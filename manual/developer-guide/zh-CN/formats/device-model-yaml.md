@@ -1,168 +1,276 @@
 # 设备模型 YAML
 
-> 契约标识：`ies.device-model`；目标 schema：`1.0.0`；推荐文件名：`<device-id>.device.yaml`。
+> 契约标识：`ies.device-model`；目标 schema：`2.0.0`；推荐文件名：`<device-id>.device.yaml`。
+> 实现状态：生效目标契约，当前代码、JSON Schema 与内置目录仍实现旧 `1.0.0`，迁移顺序见 [Roadmap](../../../changelog/roadmap.md)。
 
-设备模型 YAML 是一种设备类型的公开说明书。它描述业务参数、真实端口、所需时序列、状态和可用建模命令，但不包含可执行代码的位置。设备目录、GUI、装配校验和插件测试必须消费同一份语义。
+设备模型 YAML 是所有设备共同遵守的纯技术说明。它只回答三件事：设备具有哪些不随时间变化的技术常量、通过哪些序列接口与外部交互、这些常量和序列之间满足什么方程。设备文件不保存价格、成本、财务假设、计算精度、算法选择或可执行实现入口。
 
-## 可直接手写的最小示例
+设备没有独立语义版本字段。`schema_version` 只版本化统一文件格式；具体设备内容由稳定设备 ID、规范字节 SHA-256、发布 revision 和校验回执共同固定。历史项目和任务必须固定内容摘要，不能引用 `latest`。
+
+## 完整示例
 
 ```yaml
 schema: ies.device-model
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 
 device:
-  id: acme.device.pv
-  version: "1.0.0"
+  id: acme.device.heat_pump
   names:
-    zh-CN: 光伏发电
-    en-US: Photovoltaic
-  model_method: mechanism
-  stateful: false
-  fidelity: high
-  energy_carriers:
-    - electricity
-  capabilities:
-    - fixed_operation
-    - capacity_planning
+    zh-CN: 热泵
+    en-US: Heat Pump
 
-parameters:
-  rated_capacity:
-    value_type: number
-    quantity: power
-    unit: kW
-    required: true
-    minimum: 0
-    optimizable: true
-    stock_or_addition: addition
-  conversion_efficiency:
-    value_type: number
-    quantity: ratio
+properties:
+  cop:
+    value: 3.2
     unit: "1"
-    required: true
-    minimum: 0
-    maximum: 1
-
-ports:
-  electricity_out:
-    carrier: electricity
-    direction: out
-    quantity: power
+    valid_range:
+      minimum: 1
+      maximum: 10
+  rated_heat_kw:
+    value: 500
     unit: kW
-    capacity_parameter: rated_capacity
+    valid_range:
+      minimum: 0
+      maximum: 1000000
 
-data_inputs:
-  irradiance:
-    value_type: number
-    quantity: irradiance
-    unit: W/m2
-    required: true
-    minimum: 0
+interfaces:
+  electricity_in:
+    type: in
+    carrier: electricity
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+  heat_out:
+    type: out
+    carrier: heat
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+  ambient_temperature:
+    type: predefined
+    carrier: environment
+    unit: "°C"
+    valid_range:
+      minimum: -50
+      maximum: 60
+    source:
+      mode: data_predict
+      data_ref: ambient_temperature_prediction
+  unused_terminal:
+    type: blind
+    carrier: heat
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
 
-states: {}
-
-model_commands:
-  fixed_operation: acme.model-command.pv.fixed@1.0.0
-  capacity_planning: acme.model-command.pv.planning@1.0.0
-
-extensions: {}
+equations:
+  variables: {}
+  relations:
+    - id: heat_conversion
+      expression: "heat_out[t] = electricity_in[t] * cop"
 ```
+
+示例中的 `expression` 是受限声明式方程，不是 Python、JavaScript、模板或 shell。正式 parser 必须按固定语法生成表达式树并执行标识符、单位和时间索引校验，禁止使用通用语言 `eval`。
 
 ## 顶层字段
 
-| 字段 | 必需 | 作用 |
-|---|---|---|
-| `schema` | 是 | 固定为 `ies.device-model` |
-| `schema_version` | 是 | 本文件契约版本，不是设备版本 |
-| `device` | 是 | 稳定设备身份、显示名、建模方式和能力 |
-| `parameters` | 是 | 实例化时可填写或优化的业务参数；无参数时写 `{}` |
-| `ports` | 是 | 可连接的真实端口；键就是稳定 port ID |
-| `data_inputs` | 是 | CSV 可以绑定的列；无输入时写 `{}` |
-| `states` | 是 | 跨时间步状态；无状态时写 `{}` |
-| `model_commands` | 是 | 按能力引用版本化命令 provider |
-| `extensions` | 是 | 命名空间化可选扩展；没有扩展时写 `{}` |
+顶层只允许下列字段；全部必需，没有内容时写 `{}`，不得增加第二套核心结构。
 
-## `device` 规则
+| 字段 | 作用 |
+|---|---|
+| `schema` | 固定为 `ies.device-model` |
+| `schema_version` | 统一设备文件契约版本；目标值为 `2.0.0` |
+| `device` | 稳定设备身份和显示信息 |
+| `properties` | 不随时间变化的纯技术常量 |
+| `interfaces` | 与外部交互的序列数据定义 |
+| `equations` | properties、接口序列与内部变量之间的声明式关系 |
 
-- `id` 使用反向域或组织命名空间，不得以目录名或 Python 包名充当身份；
-- `version` 是设备语义版本。端口删除、参数改义或单位改变必须升 MAJOR；
-- `names` 至少包含产品默认语言，显示名不是引用键；
-- `model_method` 使用公开枚举，例如 `mechanism`、`empirical`、`hybrid`；
-- `stateful` 必须与 `states` 是否为空一致；
-- `energy_carriers` 是端口载能集合的去重汇总；
-- `capabilities` 声明设备可参与的业务问题，必须能在 `model_commands` 中找到对应命令。
+禁止恢复独立顶层 `parameters`、`ports`、`data_inputs`、`states`、`model_commands`、`extensions`，也禁止通过别名兼容这些旧字段。
 
-## 参数定义
+## `device`
 
-每个参数都必须声明 `value_type`。数值参数还必须声明 `quantity` 和 `unit`，并按需要声明：
+`device` 只包含：
 
-- `required`：实例是否必须给值；
-- `default`：只有业务确有稳定默认时才允许；缺失必填值不得由消费者猜测；
-- `minimum`、`maximum`：闭区间边界；若使用开区间，必须用显式约束字段而不是文字说明；
-- `enum`：字符串允许值；
-- `optimizable`：规划是否可以选择该值；
-- `stock_or_addition`：`stock`、`addition` 或 `not_applicable`，不能从正负号推断。
+| 字段 | 必需 | 规则 |
+|---|---:|---|
+| `id` | 是 | 稳定、小写、带命名空间的设备 ID |
+| `names` | 是 | 本地化显示名；显示名不参与引用和计算 |
 
-金额、比例、功率和能量必须是不同 `quantity`。不得用同一字段同时表示存量容量与新增容量，也不得把百分数 `80` 与比例 `0.8` 混用。
+设备不得声明独立 `version`。也不得声明 `fidelity`、`model_method`、`stateful`、`energy_carriers` 或 `capabilities`：精度和模型方法属于计算层，状态属于方程内部变量，载体集合从 interfaces 推导，能力从技术方程和计算配置判定。
 
-## 端口定义
+## `properties`
 
-每个端口必须声明：
-
-- `carrier`：载能或物质类型；
-- `direction`：`in`、`out` 或确有双向物理语义时的 `bidirectional`；
-- `quantity` 与 `unit`：端口交换量的量纲和规范业务单位；
-- 可选 `capacity_parameter`：约束该端口能力的参数 ID。
-
-端口方向不能由装配器补齐。太阳辐照等外生资源若以 `data_inputs` 表达，就不再伪造为可连接端口。转换损失、储能延迟和非同时性应通过设备方程或明确中间设备表达，不通过“看起来能连”的双向默认端口表达。
-
-## 数据输入与状态
-
-`data_inputs` 的键是 [设备数据 CSV](device-data-csv.md) 的列 ID。每列至少声明类型、量纲、单位和是否必需；可增加范围、空值策略和允许的时间分辨率。CSV 的列名、单位和范围必须与这里一致。
-
-状态定义必须包含状态量纲、单位、初值来源和跨步语义。初值只能来自显式参数、数据绑定或装配字段，不能由求解器适配器临时猜测。
-
-## 建模命令引用
-
-`model_commands` 的值使用 `<command-id>@<exact-version>`。它告诉装配器“哪个版本的公开命令能够把该设备实例转换成规范数学贡献”，不是动态导入地址。
-
-禁止出现：
-
-- `function`、`entry`、`module`、`package` 或任意代码路径；
-- shell 命令、模板代码和表达式求值字符串；
-- 宿主机文件路径、对象存储内部路径或凭证；
-- 由消费者私下解释的 `$price:`、`${ENV}` 等隐式全局引用。
-
-命令 provider 的代码绑定由组合根完成，设备文件只保留稳定 ID 和精确版本。
-
-## 校验顺序
-
-1. 校验 YAML 安全子集、顶层 schema 和未知字段；
-2. 校验 ID、版本、语言、枚举和字段类型；
-3. 校验参数、端口、数据列与状态的量纲、单位和范围；
-4. 校验 `stateful`、载能汇总、capability 与 command 的交叉一致性；
-5. 解析命令精确版本及能力，任何缺失都阻断 provider 发布；
-6. 生成不可变 `DeviceDescriptor` 和规范摘要。
-
-同一 provider 中任一设备失败时，候选集合不得部分发布。诊断必须定位文件、字段路径和稳定诊断码。
-
-## 扩展字段
-
-插件私有字段只能写入：
+`properties` 的键是稳定 property ID。每个 property 表示在一次规范装配和计算快照内不随时间变化的技术常量，例如 COP、额定容量、效率、损耗率或技术寿命。
 
 ```yaml
-extensions:
-  acme.example:
-    surface_color: blue
+properties:
+  efficiency:
+    value: 0.9
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: 1
 ```
 
-扩展键必须是插件命名空间。扩展不得覆盖核心参数、端口、单位、命令选择或安全规则；不理解该扩展的消费者可以原样保留，但不能让它改变核心计算语义。
+规则：
+
+- `value` 必须是有限 JSON 标量；类型从值本身确定，不另写重复 `value_type`；
+- 数值必须声明 `unit`；无量纲使用 `"1"`；
+- `valid_range.minimum`、`valid_range.maximum` 是可选闭区间边界，`null` 表示该侧无有限边界；
+- 设备定义只表达技术常量，不使用 `optimizable` 或 `stock_or_addition`；项目中的存量/新增身份及规划上下界由项目实例和计算配置表达；
+- 禁止价格、单位投资成本、固定/可变运维费、税、折旧、融资、残值和币种；这些属于规划经济配置或财务评价；
+- 禁止 `$price:`、环境变量、路径引用和消费者私下解释的默认值。
+
+## `interfaces`
+
+只有按项目时间轴展开的序列数据才能定义为 interface。常量若作为预定义序列输入，必须在规范化时扩展为覆盖明确时间轴的常量序列。普通设备属性不能伪装成 interface。
+
+每个 interface 至少定义稳定 ID、`carrier`、`unit`、`valid_range` 和接口 `type`。`type` 只有五种：
+
+| 类型 | 连接与数据语义 |
+|---|---|
+| `in` | 从其他设备的兼容输出接口接收序列 |
+| `out` | 向其他设备的兼容输入接口输出序列 |
+| `bidirectional` | 可在同一接口双向交换序列；必须具有确切物理语义 |
+| `predefined` | 不连接其他设备，由 `constant`、`data_repeat` 或 `data_predict` 提供输入序列 |
+| `blind` | 不连接其他设备，也不接收预定义数据 |
+
+未写 `type` 时规范化为 `blind`。除此之外不得猜测方向或连接能力。
+
+共同规则：
+
+- `carrier` 表达接口承载的稳定技术对象；连接双方 carrier 必须相同；
+- `unit` 必须来自公共单位规范，连接双方必须量纲兼容；
+- `valid_range` 约束每个时间点的数据有效区间，越界必须阻断，不能自动截断；
+- `in`、`out`、`bidirectional` 只能通过装配连接取得或提供序列，不能同时声明 `source`；
+- `predefined` 必须声明唯一 `source.mode`，且只能为 `constant`、`data_repeat`、`data_predict`；
+- `blind` 禁止 `source` 和连接；其数值如被方程引用，只能由同一设备的声明式方程确定；无法确定时装配失败；
+- 设备数据 CSV 只绑定 `predefined` interface，不再绑定独立 `data_inputs`。
+
+三种预定义来源：
+
+```yaml
+interfaces:
+  fixed_temperature:
+    type: predefined
+    carrier: environment
+    unit: "°C"
+    valid_range: {minimum: -50, maximum: 60}
+    source:
+      mode: constant
+      value: 25
+
+  repeated_load:
+    type: predefined
+    carrier: electricity
+    unit: kW
+    valid_range: {minimum: 0, maximum: null}
+    source:
+      mode: data_repeat
+      data_ref: typical_day_load
+
+  predicted_weather:
+    type: predefined
+    carrier: environment
+    unit: "°C"
+    valid_range: {minimum: -50, maximum: 60}
+    source:
+      mode: data_predict
+      data_ref: weather_prediction
+```
+
+`constant` 在装配时按明确时间轴展开；`data_repeat` 必须固定周期、分辨率和重复规则；`data_predict` 绑定已生成、已校验、不可变的预测数据版本，不允许计算时访问在线服务或现场运行预测代码。
+
+## `equations`
+
+`equations` 是设备技术行为的唯一声明来源，包含内部序列变量和关系式：
+
+```yaml
+equations:
+  variables:
+    soc:
+      unit: "1"
+      valid_range:
+        minimum: 0.1
+        maximum: 0.9
+      initial:
+        property_ref: initial_soc
+  relations:
+    - id: soc_transition
+      expression: "soc[t] = soc[t-1] + charge_in[t] * charge_efficiency - discharge_out[t] / discharge_efficiency"
+```
+
+规则：
+
+- relation ID 在文件内唯一；
+- 表达式只能引用本文件 properties、interfaces、`equations.variables`、时间索引和公开数学运算；
+- 每个关系必须通过标识符、单位、有效区间和时间索引校验；
+- 内部变量只存在于 equations，不成为可连接接口；
+- 初值、边界和跨步关系必须显式，不能由 solver 猜测；
+- 禁止函数路径、动态导入、任意函数调用、脚本、模板、环境变量和凭证；
+- 计算层可以选择不同精度的离散化或求解方法，但不得改变设备文件声明的技术关系。
+
+## 经济边界
+
+设备文件保持纯技术语义。规划计算单独接收设备投资、固定/可变运维成本、能源购售价格等经济输入，使容量和运行优化能够考虑经济性；财务模块再接收规划结果、税率、折现率、折旧、融资、残值等参数形成现金流和评价。
+
+- 存量设备的历史投资是沉没成本，不重复计入新增投资；
+- 新增设备的投资与规划容量绑定；
+- 存量设备仍可在经济配置中声明未来运维、剩余寿命、残值和退役成本；
+- 价格序列属于规划经济配置的数据输入，不属于设备技术 interface；
+- 改变市场价格、项目币种或财务假设不得改变设备模型摘要。
+
+## 校验与规范化
+
+1. 校验 YAML 安全子集、顶层字段和统一 schema 版本；
+2. 校验稳定 ID、property 标量、单位和有效区间；
+3. 校验五类 interface、carrier、单位、source 和连接资格；
+4. 校验方程标识符、内部变量、单位和时间关系；
+5. 解析并固定所有预定义数据引用；
+6. 生成唯一规范字节、SHA-256 和校验回执。
+
+任一步失败都不得产生可选设备描述。设备文件修改后内容摘要变化，旧项目、任务和证据继续固定旧摘要；不得用同 ID 的当前内容解释历史。
+
+## 进入项目前的候选模型门禁
+
+无论候选模型来自模板实例化、结构化表单还是直接编辑 YAML，都必须先作为未落盘候选字节提交给后端校验。正式顺序固定为：
+
+```text
+编辑/实例化候选模型
+  → 上传并隔离临时数据文件
+  → 后端解析与完整校验
+  → 失败：返回诊断，不写项目模型目录
+  → 成功：分配项目内 `_N` ID、规范化、计算摘要并原子保存
+```
+
+保存前校验必须覆盖：
+
+- 文件级：编码、安全 YAML、重复键、schema 和未知字段；
+- 类型级：标量、mapping、sequence、枚举以及五种 interface type；
+- 技术语义：property 单位和值域、carrier、source/interface 组合与方程；
+- 数据文件：`data_repeat`/`data_predict` 所需文件、列、单位、周期、分辨率、时间轴和摘要；
+- 身份：基础设备 ID 合法，项目内最终 `_N` 编号可唯一分配。
+
+失败诊断必须包含已登记诊断码、消息键、字段路径；能定位 YAML 时还应包含行列，并按问题提供 expected/actual。一次请求应尽可能聚合互不依赖的错误和非法类型，不能只返回首个问题，也不能把失败解释为空模型。
+
+候选模型和临时文件可以留在前端编辑状态或受控临时隔离区，但不得进入项目正式模型目录、设备目录、装配目录或可选择目录。校验失败不得分配或消耗正式编号。全部校验通过后，后端在一个原子提交中：
+
+1. 在项目范围内分配只递增、不复用的 `_1`、`_2`……后缀；
+2. 将最终 `device.id` 与文件名统一为带后缀 ID；
+3. 重新执行身份相关校验并生成规范 YAML、内容摘要和校验回执；
+4. 同时提交模型文件、合法配套数据文件及项目模型清单引用。
+
+任一文件写入、摘要或清单登记失败时整次保存失败，不得留下半个模型、孤立配套文件或已占用但不可见的正式编号。
 
 ## 完成标准
 
-一个设备模型可交付前，应证明：
-
-- 人工示例可以独立通过 `1.0.0` schema；
-- GUI、装配和命令 provider 使用同一 descriptor，不另建设备类型表；
-- 最小/最大参数、端口错误、缺数据列和命令版本缺失均有确定诊断；
-- 修改文件后摘要变化，原快照仍固定旧设备版本和旧摘要；
-- 文件中没有任何实现入口或运行环境秘密。
+- 合法示例可独立通过 `2.0.0` schema；
+- 所有设备只使用上述统一结构，不为具体设备增加核心关键词；
+- GUI、装配、技术模型和计算生成消费同一规范 descriptor；
+- properties、五类 interface、三种 predefined 来源、方程与非法引用均有契约测试；
+- 设备文件不含独立设备版本、计算精度、价格、成本或实现入口；
+- 非法候选不会进入项目模型目录，成功保存必有内容摘要和校验回执；
+- 旧 `1.0.0` 文件通过显式离线迁移和迁移回执进入新格式，不保留运行期兼容分支。

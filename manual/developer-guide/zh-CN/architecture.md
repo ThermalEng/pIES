@@ -1,10 +1,10 @@
 # 系统架构蓝图
 
-> 文档状态：生效蓝图；规范版本：1.0.0；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)；适用范围：pIES 应用、Worker、扩展与前端
+> 文档状态：生效蓝图；规范版本：1.1.0；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)；适用范围：pIES 应用、Worker、扩展与前端
 
 ## 系统目标
 
-pIES 把用户的设备、连接、时序数据和经济约束转化为可校验、可计算、可追溯的规划结果。系统必须允许设备、建模命令、计算 provider 和存储能力经稳定协议扩展，同时保证错误不会被默认值、兼容分支或回退路径掩盖。
+pIES 把用户的设备、连接、时序数据和经济约束转化为可校验、可计算、可追溯的规划结果。系统必须允许设备技术定义、方程转换、计算 provider 和存储能力经稳定协议扩展，同时保证错误不会被默认值、兼容分支或回退路径掩盖。
 
 本章用于回答三个问题：一次业务请求怎样穿过系统；一项新能力应该落在哪个模块；模块之间应交换什么。进入具体实现时，再转到[模块开发手册](module-development.md)。
 
@@ -37,7 +37,7 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 ## 核心业务流
 
 ```text
-设备模型/数据 → 建模命令 → 装配与检查 → 计算生成 → 受控求解 → 结果适配
+设备技术定义/序列数据 → 方程解析与装配检查 → 计算生成 → 受控求解 → 结果适配
                                 │            │          │          │
                                 └────不可变快照与内容摘要───────────┘
                                                              ↓
@@ -46,22 +46,22 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 
 这条流程继承早期架构审查中“定义—建模—装配—计算—分析”的稳定意图，并把计算内部进一步拆成可独立替换的三个边界；以架构宪法为最终裁决：
 
-1. **设备定义**发布参数、单位、端口、能力、状态与模型方法；
-2. **建模命令**把设备能力映射为可解析、可版本化的标准命令；
-3. **装配与检查**以边—端模型验证方向、载能、单位、输入完整性和整体可解性，签发规范装配产物；
-4. **计算生成**只消费规范装配产物，由选定 GeneratorProvider 生成求解器输入文件和结构化命令；
-5. **受控求解**只消费 Solver Bundle，在隔离环境按结构化命令执行，不再解释项目或设备；
+1. **设备定义**用统一 schema 发布设备身份、非时变技术常量、序列接口和声明式方程，并以规范内容摘要固定具体内容；
+2. **方程解析**把受限表达式解析成公共 AST 和声明式数学贡献，不引入独立设备命令或设备语义版本；
+3. **装配与检查**验证接口类型、载能、单位、数据来源、连接、规划经济输入和整体可解性，签发规范装配产物；
+4. **计算生成**只消费规范装配产物，由选定 GeneratorProvider 按计算层精度和算法选择生成求解器输入文件及结构化运行命令；
+5. **受控求解**只消费 Solver Bundle，在隔离环境按结构化运行命令执行，不再解释项目或设备；
 6. **结果适配**把声明输出和执行回执转成统一 `ComputeResult`；
 7. **财务与结果分析**把计算输出形成财务指标、敏感性、有效性评估和证据。
 
-装配不是可选预检查。任何直接从旧项目形状拼接计算输入、缺端口时猜双向端口或装配失败后继续计算的路径都违反蓝图。格式边界详见[文件格式标准](file-formats.md)。
+装配不是可选预检查。任何直接从旧项目形状拼接计算输入、缺接口时猜双向接口、把 `blind` 接口用于连接或装配失败后继续计算的路径都违反蓝图。格式边界详见[文件格式标准](file-formats.md)。
 
 ## 端到端流程的输入与输出
 
 | 阶段 | 接收 | 产出 | 下游可以依赖的保证 |
 |---|---|---|---|
-| 设备定义 | provider 与设备规格 | `DeviceDescriptor` | 参数、端口、能力、单位和版本已校验 |
-| 建模命令 | 设备描述与命令 provider | `ModelCommand` | 输入输出、状态、单位和执行版本明确 |
+| 设备定义 | 设备 YAML 或等价公开规格 | `DeviceDescriptor` | `properties/interfaces/equations`、单位和内容摘要已校验 |
+| 方程解析 | 设备 descriptor 与受限表达式语法 | 规范方程 AST/数学贡献 | 变量、关系、单位和接口引用明确，无独立设备命令版本 |
 | 装配与检查 | 装配 YAML/项目图、绑定、配置、目录快照 | 诊断或 `ValidatedAssemblyArtifact` | 连接、数据和能力合法，业务单位明确，规范摘要与回执完整 |
 | 计算生成 | 规范装配、固定资源、generator/solver 选择 | Solver Bundle | 求解器输入、结构化命令、输出和适配器声明完整 |
 | 受控求解 | Solver Bundle、资源与取消上下文 | `ExecutionReceipt` 与原始输出 | 实际命令、限制、日志、退出和输出摘要完整 |
@@ -106,9 +106,9 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 | 能力 | 权威职责 | 明确不负责 |
 |---|---|---|
 | [core](modules/core.md) | 无状态诊断、错误、单位、时间、ID 和纯契约 | 设备/计算 provider 注册、业务默认、持久化 |
-| [devices](modules/devices.md) | 设备描述、端口、能力、状态和设备 provider | 项目实例、画布布局、建模执行 |
-| [modeling](modules/modeling.md) | 标准建模命令及命令 provider | 读取设备目录内部文件、项目编排 |
-| [assembly](modules/assembly.md) | 边—端装配、完整校验和规范装配产物 | 求解器输入、命令和执行 |
+| [devices](modules/devices.md) | 设备身份、非时变 properties、序列 interfaces、equations 和内容摘要 | 项目实例、规划经济、计算精度、画布布局 |
+| [modeling](modules/modeling.md) | 受限技术方程的解析、校验与公共数学贡献 | 设备目录路径、价格、项目编排和求解执行 |
+| [assembly](modules/assembly.md) | interface 网络装配、完整校验和规范装配产物 | 求解器输入、命令和执行 |
 | [generators](modules/generators.md) | 规范装配到求解器输入、命令与 Bundle | 启动进程、读取数据库、提交任务 |
 | [solver runtime](modules/solver-runtime.md) | 受控执行、资源限制、日志与执行回执 | 设备语义、问题构造、结果解释 |
 | [computation](modules/engines.md) | 生成、执行、结果适配的公共契约与统一结果 | HTTP、会话、ORM 和项目草稿 |
@@ -117,7 +117,7 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 | [storage](modules/storage.md) | 内容寻址、完整性、引用、保留和存储 provider | 理解项目或结果内部业务表 |
 | [application](modules/application.md) | 权限后的用例、事务和跨模块编排 | 穿透模块私有实现 |
 | [api](modules/api.md) | HTTP DTO、认证依赖、状态码和错误适配 | ORM 查询和领域计算 |
-| [worker](modules/worker.md) | 领取、租约、执行、重试和提交结果 | 缺失命令时降级运行 |
+| [worker](modules/worker.md) | 领取、租约、执行、重试和提交结果 | 缺失设备内容、方程能力或 provider 时降级运行 |
 
 用户模型和算法插件不是新的全局 provider 注册表。各领域模块仍分别拥有设备模型、生成器、执行器和结果 contract；`application/customizations` 只编排用户目录、修订、共享申请、引用安装和可用性查询。组合根只注册通用的沙箱 generator、executor 和 result adapter；用户算法代码作为不可变任务载荷交给其隔离 runner，不能被 API 或普通 Worker import。完整边界见[模型与算法](customization-center.md)。
 
@@ -145,7 +145,7 @@ devices · modeling · assembly · computation · finance · analysis · storage
 
 1. 新增的是基础值规则吗？只有完全不知道业务仍成立时才进入 core；
 2. 新增的是某类设备的公开能力吗？进入 devices；
-3. 新增的是设备执行协议吗？进入 modeling；
+3. 新增的是设备方程语法、解析或数学贡献协议吗？进入 modeling；
 4. 新增的是项目能否形成计算问题的规则吗？进入 assembly；
 5. 新增的是装配到求解器输入的转换吗？进入 generators；
 6. 新增的是进程/容器执行方式吗？进入 solver runtime 的 executor provider；
@@ -154,7 +154,7 @@ devices · modeling · assembly · computation · finance · analysis · storage
 9. 新增的是一次跨模块用户动作吗？由 application 编排；
 10. HTTP、后台执行和页面只分别适配已有用例、任务 contract 和公开 DTO。
 
-网页参数配置、在线 YAML 编辑和 YAML 上传必须汇合为同一个规范设备模型版本。算法插件 ZIP 可以在运行期进入用户目录，但只能作为内容寻址的任务载荷由通用隔离运行器执行；这不是把用户模块加入 API/Worker 的 Python 环境或模块注册表。
+网页属性配置、在线 YAML 编辑和 YAML 上传必须汇合为同一个规范设备内容；设备发布只以统一 schema 版本、内容摘要和发布修订固定，不产生独立设备语义版本。算法插件 ZIP 可以在运行期进入用户目录，但只能作为内容寻址的任务载荷由通用隔离运行器执行；这不是把用户模块加入 API/Worker 的 Python 环境或模块注册表。
 
 若同一条业务规则需要在多个模块复制，先确定唯一所有者，其他模块通过 contract 消费；不要维护同步清单。
 
@@ -172,7 +172,7 @@ GUI 表单状态
 
 ## 故障原则
 
-- 必需 provider 或命令注册失败：实例不进入 ready；
+- 必需设备内容、方程 contract 或 provider 无法解析：实例不进入 ready；
 - 项目或装配输入非法：返回完整诊断并阻断任务；
 - 数据库、存储或队列不可用：明确反映在就绪或任务状态；
 - 对象缺失或摘要损坏：返回损坏诊断，不回退旧副本；
@@ -182,9 +182,9 @@ GUI 表单状态
 
 以“新增一种可规划设备”为例，开发顺序是：
 
-1. devices 发布完整 descriptor；
-2. modeling 发布与 descriptor 匹配的命令；
-3. assembly 证明真实端口、数据、命令、generator 和 solver 可以组成规范装配产物；
+1. devices 发布包含 properties、interfaces、equations 和内容摘要的完整 descriptor；
+2. modeling 证明其中方程能够被安全解析并形成公共数学贡献；
+3. assembly 证明真实接口、预定义数据、连接、规划经济输入、generator 和 solver 可以组成规范装配产物；
 4. 现有 generator 能表达该设备时不增加分支；确有新数学表达时新增独立 GeneratorProvider；
 5. runtime 不因设备类型改变，ResultAdapter 只按公开映射解释结果；
 6. application 增加创建/校验/提交用例；

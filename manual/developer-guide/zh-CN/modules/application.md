@@ -59,8 +59,8 @@
 | identity | 用户、凭证、会话、角色与认证审计 | 主体或会话结果 |
 | projects | 项目、成员、草稿、版本、归档与所有权 | 项目 read model |
 | datasets | 上传、质量、版本、对象引用与项目绑定 | 数据版本与质量报告 |
-| modeling | 项目设备、端口、连接、revision 与即时校验 | 项目图修订 |
-| config | 财务参数、变量、目标、约束与配置修订 | 配置版本/诊断 |
+| modeling | 项目设备、properties、interfaces、连接、存量/新增身份、revision 与即时校验 | 项目图修订 |
+| config | 规划经济、计算精度、变量、目标、约束与配置修订 | 配置版本/诊断 |
 | validation | 汇总模型、数据、配置和财务基准 | 项目校验报告 |
 | tasks | 快照、幂等、任务、取消和重试 | 任务受理与状态 |
 | results | 证据、评估、候选选择与历史解释 | 固定来源的结果视图 |
@@ -69,6 +69,20 @@
 | customizations | 模型/插件草稿与版本、共享申请、逻辑安装、停用和可选择目录 | 用户模型/算法目录与共享状态 |
 
 `customizations` 只拥有用户目录和生命周期用例。设备 YAML 的语义校验调用 devices 公开门面，算法插件 contract 与自检调用 computation/runner 公开能力，字节和引用调用 storage；不得在应用层复制这些规则。共享园地安装只创建 `CatalogInstallation` 与对象 owner 引用，不复制底层内容。
+
+## 典型示例：保存项目模型
+
+输入是项目、候选模型 YAML、临时配套文件、基础模型 ID、预期项目 revision 和幂等键。应用层依次：
+
+1. 授权并确认项目草稿可编辑；
+2. 核对 revision、候选字节摘要和临时文件归属；
+3. 调用 devices 对候选模型及数据文件完成解析、类型、技术语义和方程校验；
+4. 有任何 blocking 诊断时直接返回完整诊断，不写项目目录、不登记模型、不分配正式编号；
+5. 校验通过后在项目范围内原子分配只递增、不复用的 `_N` 后缀；
+6. 用最终 ID 重新完成身份校验，生成规范 YAML、内容摘要和回执；
+7. 原子提交模型文件、配套文件、项目模型清单引用和审计，并返回新的项目 revision。
+
+编号分配、文件提交和清单登记属于同一用例的一致性边界。并发请求不能得到相同编号；失败事务不能留下半文件、孤立引用或对用户不可见的已占编号。底层对象存储与数据库无法组成单一事务时，必须使用临时 owner、幂等 finalize 和 reconciliation 达到相同可观察结果。
 
 ## 开发一个新用例
 
@@ -87,7 +101,7 @@
 1. 确认用户有提交权限且项目可计算；
 2. 读取并固定项目版本、数据版本和配置版本；
 3. 调用 assembly，阻断所有 blocking 诊断；
-4. 生成包含 `ValidatedAssemblyArtifact`、资源摘要、generator/solver/executor/result adapter 与命令精确版本的 `CalcSnapshot`；
+4. 生成包含 `ValidatedAssemblyArtifact`、设备内容摘要、方程 contract、规划经济配置摘要、资源摘要及 generator/solver/executor/result adapter 精确版本的 `CalcSnapshot`；
 5. 以项目作用域幂等键创建逻辑任务；
 6. 附加快照对象引用并记录审计；
 7. 提交后发布可重建队列消息；

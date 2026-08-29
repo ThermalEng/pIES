@@ -18,7 +18,7 @@
 ## 模块地图
 
 ```text
-设备模型/数据 ─→ 建模命令 ─→ 装配与检查 ─→ 计算生成器 ─→ Solver Bundle
+设备技术定义/序列数据 ─→ 方程解析 ─→ 装配与检查 ─→ 计算生成器 ─→ Solver Bundle
                                     │                         │
                                     └─规范装配产物             ↓
                                                      求解运行时 ─→ 结果适配
@@ -39,7 +39,7 @@ HTTP API ──→ 应用用例 ──→ 上述领域模块 / 对象存储
 | [bootstrap](modules/bootstrap.md) | 选择实现并验证实例能否服务 | 配置与 provider 候选 | 完整应用装配与 readiness |
 | [core](modules/core.md) | 提供无业务状态的共同语言 | 原始值和纯配置 | 类型、诊断、规范值 |
 | [devices](modules/devices.md) | 描述系统中有哪些设备能力 | 设备 provider 与规格 | `DeviceDescriptor` |
-| [modeling](modules/modeling.md) | 把设备能力变成标准执行命令 | 设备描述、命令 provider | 版本化 `ModelCommand` |
+| [modeling](modules/modeling.md) | 把受限设备方程变成公共数学贡献 | 设备 descriptor、方程 AST | 变量、关系、状态和结果映射 |
 | [assembly](modules/assembly.md) | 把装配 YAML/项目图变成可信规范产物 | 项目图、绑定、配置、各目录快照 | 诊断或 `ValidatedAssemblyArtifact` |
 | [generators](modules/generators.md) | 生成求解器输入文件和结构化命令 | 规范装配、固定资源、生成器选择 | Solver Bundle |
 | [solver runtime](modules/solver-runtime.md) | 在受控环境执行 Bundle 命令 | Solver Bundle、attempt 上下文 | `ExecutionReceipt` 与原始输出 |

@@ -1,11 +1,11 @@
 # pIES 架构宪法
 
 > 状态：生效
-> 版本：1.7.2
+> 版本：1.8.0
 > 生效日期：2026-08-20
-> 最后更新：2026-08-22
+> 最后更新：2026-08-28
 > 适用范围：根目录入口、`manual/`、`docs/`、`backend/`、`frontend/`、数据库、对象存储、Worker、测试与后续插件
-> 依据：2026-08-20 架构专项审查、2026-08-22 ADR-0001、ADR-0002、ADR-0003、ADR-0004，以及项目所有者对 Roadmap 生命周期的明确要求
+> 依据：2026-08-20 架构专项审查、ADR-0001 至 ADR-0006，以及项目所有者对 Roadmap 生命周期和设备纯技术语义的明确要求
 
 ## 1. 文档效力
 
@@ -31,7 +31,7 @@
 
 ### 2.1 开放优先于效率
 
-系统首先保证新设备、新建模命令、新计算生成器、新执行器、新存储后端和新分析能力可通过稳定协议接入；不得为了少一次查询、少一个对象或共享一份可变状态而破坏模块独立性。
+系统首先保证新设备技术内容、新方程能力、新计算生成器、新执行器、新存储后端和新分析能力可通过稳定协议接入；不得为了少一次查询、少一个对象或共享一份可变状态而破坏模块独立性。
 
 允许在证据证明存在性能瓶颈后增加缓存、索引或批处理，但缓存必须可重建，不能成为第二权威事实源。
 
@@ -39,7 +39,7 @@
 
 项目尚未正式发布，不保留旧字段别名、旧模块转发、旧响应并集或静默兼容分支。前后端和开发数据库应一次性迁移到新契约。
 
-错误输入、未注册插件、损坏对象和内部异常必须可见，禁止回退到旧逻辑、静态映射、默认端口、空数组或伪造成功结果。
+错误输入、未注册插件、损坏对象和内部异常必须可见，禁止回退到旧逻辑、静态映射、默认接口、空数组或伪造成功结果。
 
 ### 2.3 模块自治，边界公开
 
@@ -50,7 +50,7 @@
 - 导入以下划线开头的函数、类、常量或变量；
 - 导入对方的 `loader`、`repository`、`persistence`、文件路径 helper 或内部 registry；
 - 查询或修改对方 ORM 模型；
-- 复制对方维护的设备、端口、算法、单位或状态映射；
+- 复制对方维护的设备、接口、算法、单位或状态映射；
 - 通过捕获宽泛异常猜测对方是否可用。
 
 ### 2.4 单一职责不等于全局单例
@@ -66,7 +66,7 @@
 核心业务流程为：
 
 ```text
-设备模型/数据 → 建模命令 → 装配与检查 → 计算生成 → 受控求解 → 结果适配
+设备技术定义/序列数据 → 声明式方程 → 装配与检查 → 计算生成 → 受控求解 → 结果适配
                                 ↓            ↓          ↓          ↓
                           不可变规范装配 ─── Solver Bundle ─── 证据/结果对象
                                 └────── 存储与任务基础能力 ─────────┘
@@ -116,35 +116,44 @@ Solver Bundle
 负责：
 
 - `ies.device-model` YAML/schema 的加载、规范化与完整校验；
-- 参数、端口、能力、状态、模型方法和版本的公开描述；
+- 设备身份、技术常量、序列接口和声明式方程的公开描述；
 - 设备 provider 注册和本模块注册表；
 - 设备目录 API 所需的领域数据。
 
-设备文件必须使用稳定 ID/精确版本引用建模命令，禁止包含函数、包、模块、shell 或可执行路径。不负责建模命令执行、项目设备实例、画布布局或前端展示文案。
+设备文件必须使用稳定 ID，并由统一 `schema_version`、规范内容摘要和校验回执固定语义；禁止为单个设备声明独立语义版本。设备文件禁止包含函数、包、模块、shell、可执行路径、价格、成本、税务、折旧或其他项目经济假设。不负责计算精度、算法选择、项目设备实例、画布布局或前端展示文案。
+
+设备文件顶层只使用 `schema`、`schema_version`、`device`、`properties`、`interfaces` 和 `equations`：
+
+- `device` 只表达稳定身份和显示信息；
+- `properties` 只表达不随时间变化的技术常量；
+- `interfaces` 只表达序列交互，统一使用 `in`、`out`、`bidirectional`、`predefined`、`blind` 五种类型；缺省类型规范化为 `blind`；
+- `predefined` 只能从 `constant`、`data_repeat`、`data_predict` 获得序列，不连接其他设备；`blind` 既不连接其他设备，也不接收预定义数据；
+- `equations` 以受限声明式方程表达 properties、接口序列与内部变量的技术关系，不得成为任意代码执行入口。
 
 公开门面只导出类似 `get_device()`、`list_devices()`、`register(provider)` 的能力以及不可变 `DeviceDescriptor`。
 
-### 4.3 `modeling`：标准建模命令
+### 4.3 `modeling`：声明式技术模型
 
 负责：
 
-- `ModelCommand` 契约；
-- 机理模型和数据驱动模型的标准调用接口；
-- 命令 provider 与本模块注册表；
-- 命令输入、输出、状态和版本校验。
+- 设备声明式方程与内部变量契约；
+- 技术方程到规范变量、关系、状态、接口流和结果映射元数据的标准转换；
+- 受限方程语言、公共 AST 及技术贡献 contract 的版本兼容；
+- 方程输入、输出、单位、状态和 schema 校验。
 
-`ModelCommand` 输出声明式变量、目标、约束、状态和结果映射元数据；禁止启动求解器或返回求解器私有对象。`modeling` 可以消费 `devices` 的公开 descriptor/provider，禁止读取设备目录、价格文件或 profile 内部路径。
+`modeling` 输出声明式变量、技术关系、状态、接口流和结果映射元数据；禁止加入价格/成本目标、启动求解器或返回求解器私有对象。`modeling` 可以消费 `devices` 的公开 descriptor/provider，禁止读取设备目录、价格文件或 profile 内部路径。不得以设备 ID 分支或私有命令映射替代设备文件中的公开技术方程。
 
-### 4.4 `assembly`：边—端装配与同步闸门
+### 4.4 `assembly`：interface 网络装配与同步闸门
 
 负责：
 
 - 将项目模型、配置和数据绑定构造成 `AssemblySpec`；
-- 校验端口方向、载能类型、连接、数据、模型能力、generator/solver 能力和整体可解性；
+- 校验接口类型、载体、单位、有效区间、连接、预定义序列、方程、generator/solver 能力和整体可解性；
+- 校验每个项目设备实例明确区分 `existing` 与 `new`，以及求解前必需的设备投资、固定/可变 O&M 和能源购售价格；
 - 把相对资源解析为内容寻址引用并生成唯一规范装配文本；
 - 签发由规范文本、SHA-256 和校验回执组成的 `ValidatedAssemblyArtifact`。
 
-装配阶段证明业务单位与量纲兼容，但保留明确业务单位；不生成求解器文件和命令。禁止存在 `_direct_plan`、默认双向端口或任何绕过装配检查的计算路径。装配失败必须返回诊断并阻断任务。
+装配阶段证明业务单位与量纲兼容，但保留明确业务单位；不生成求解器文件和命令。存量设备的历史投资按沉没成本处理，不重复计入新增投资；新增设备投资必须绑定建设或容量决策，存量设备未来 O&M、剩余寿命、残值和退役成本仍可作为明确规划输入。接口缺省类型只能规范化为 `blind`，禁止默认双向接口、`_direct_plan` 或任何绕过装配检查的计算路径。装配失败必须返回诊断并阻断任务。
 
 ### 4.5 `computation`：生成、执行与结果适配
 
@@ -154,7 +163,7 @@ Solver Bundle
 - `SolverRuntime` 只校验并执行 Bundle 中的结构化命令，生成 `ExecutionReceipt` 与原始输出；
 - `ResultAdapter` 只把 Bundle、回执和声明输出映射为带 schema/version 的 `ComputeResult`。
 
-GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界，不访问数据库、对象服务、网络或进程环境，不启动求解器。SolverRuntime 不读取装配语义、不判断设备类型、不补数据或切换 solver。ResultAdapter 是结果反向单位换算的唯一边界，不读取当前项目或最新 provider。
+GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界，并从独立规划经济配置形成系统目标；不访问数据库、对象服务、网络或进程环境，不启动求解器。计算精度、离散化、算法和 solver 选择属于计算配置。SolverRuntime 不读取装配语义、不判断设备类型、不补数据或切换 solver。ResultAdapter 是结果反向单位换算的唯一边界，不读取当前项目或最新 provider。
 
 计算模块禁止：
 
@@ -167,7 +176,7 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 ### 4.6 `finance`：财务计算
 
-负责现金流、NPV、IRR、LCOE、回收期和财务状态分类。输入是明确的逐时/年度结果与财务参数，输出为不可变 `FinancialResult`。
+负责现金流、税、折旧、融资、折现、NPV、IRR、LCOE、回收期和财务状态分类。输入是已经使用规划经济配置形成的逐时/年度结果与独立财务参数，输出为不可变 `FinancialResult`。finance 不从设备技术定义读取价格，也不能替代求解前影响容量和运行决策的经济输入。
 
 `finance` 不依赖 HTTP、数据库或前端，不反向依赖应用服务。
 
@@ -202,7 +211,7 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 ### 4.10 `worker`：异步执行
 
-负责领取任务、租约、重试、超时、编排 GeneratorProvider/SolverRuntime/ResultAdapter 和提交结果。Worker 启动时必须验证快照所需命令、generator、executor、solver 与 result adapter 可解析；缺少依赖则启动失败或不进入 ready 状态，不得领取后再临时降级。Worker 不拼 solver 命令，也不解释装配业务。
+负责领取任务、租约、重试、超时、编排 GeneratorProvider/SolverRuntime/ResultAdapter 和提交结果。Worker 启动时必须验证快照所需设备内容、方程 contract、generator、executor、solver 与 result adapter 可解析；缺少依赖则启动失败或不进入 ready 状态，不得领取后再临时降级。Worker 不拼 solver 命令，也不解释装配业务。
 
 ### 4.11 `api`：传输适配
 
@@ -236,7 +245,7 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 应用启动组合层是唯一允许选择具体 provider 并完成依赖注入的位置。它可以：
 
-- 发现并注册设备、建模命令、计算生成器、执行器、结果适配器和存储适配器；
+- 发现并注册设备内容 provider、计算生成器、执行器、结果适配器和存储适配器；统一方程 parser/validator 是版本化公共 contract，不建立每设备命令注册表；
 - 校验公开 ID、版本和依赖能否解析；
 - 发布模块健康状态。
 
@@ -250,9 +259,9 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 - 任一必需 provider 失败时启动失败；
 - 正式发布前不实现运行期热加载；
 - 禁止静态 fallback、宽泛异常回退和部分注册状态；
-- `devices`、`modeling`、`assembly`、`computation` 之间不共享注册表对象。
+- `devices`、`computation` 与 `storage` 之间不共享注册表对象；`modeling` 和 `assembly` 不为设备建立第二注册表。
 
-扩展 ID 应采用稳定命名空间，例如 `ies.device.pv`、`vendor.device.foo`；版本使用语义化版本。破坏性 schema 变化必须提升主版本。
+扩展 ID 应采用稳定命名空间，例如 `ies.device.pv`、`vendor.device.foo`。设备文件自身不声明独立语义版本，以规范内容摘要固定；provider、generator、solver、executor 和 result adapter 使用语义化版本。破坏性 schema 变化必须提升主版本。
 
 ### 5.4 事务
 
@@ -309,9 +318,9 @@ backend/iesplan/
 ├── modeling/
 │   ├── __init__.py
 │   ├── contracts.py
-│   ├── registry.py
-│   ├── providers.py
-│   └── commands/
+│   ├── parser.py
+│   ├── validator.py
+│   └── canonicalizer.py
 ├── assembly/
 │   ├── __init__.py
 │   ├── contracts.py
@@ -406,7 +415,7 @@ feature/
 
 - 数据库内部主键可以使用 `BIGINT`；
 - 对外 JSON 中的标识符必须作为不透明十进制字符串传输，前端类型使用品牌化 `EntityId`/具体 `ProjectId`，不得参与算术；
-- 稳定插件、设备、命令、generator、solver、executor 和 result adapter ID 使用命名空间字符串；
+- 稳定插件、设备、generator、solver、executor 和 result adapter ID 使用命名空间字符串；设备方程随设备内容寻址，不再拥有独立命令 ID；
 - 哈希使用小写 64 位十六进制 SHA-256 字符串；
 - ID 类型不能与普通字符串、名称或数组下标混用。
 
@@ -429,13 +438,13 @@ feature/
 
 规则：
 
-- 单位必须由设备/参数/字段 schema 明确声明；
+- 单位必须由设备 property、接口或字段 schema 明确声明；
 - 含义不固定的裸数值必须使用 `{value, unit}` 或由所在 schema 明确单位；
 - 前端 mapper 负责简单展示换算并生成后端要求的规范输入；
 - 后端校验单位、量纲、范围和领域约束；
 - 装配阶段校验量纲和单位兼容并保留明确业务单位；业务单位到 solver 内部单位只在 GeneratorProvider 边界发生；反向换算只在 ResultAdapter 边界发生；
-- 建模命令、运行时和业务服务中禁止散落 `×1000`、`×3600`、百分比 `/100` 等隐式换算；
-- 单位 ID 与符号由 `core.units` 的无状态规范定义，设备参数引用该规范，不复制映射。
+- 技术方程解析、运行时和业务服务中禁止散落 `×1000`、`×3600`、百分比 `/100` 等隐式换算；
+- 单位 ID 与符号由 `core.units` 的无状态规范定义，设备 property 与接口引用该规范，不复制映射。
 
 ### 7.5 时间
 
@@ -465,6 +474,8 @@ feature/
 ### 7.8 公共文件契约
 
 - 设备模型 YAML、设备数据 CSV 和装配 YAML 必须可按开发者指南直接手写，并使用统一 schema 校验；
+- 设备模型 YAML 只保留纯技术语义：稳定设备身份、非时变 properties、序列 interfaces 和声明式 equations；价格、成本和计算精度不得进入设备文件；
+- 设备序列接口只有 `in`、`out`、`bidirectional`、`predefined`、`blind` 五种；`predefined` 仅允许 `constant`、`data_repeat`、`data_predict`，`blind` 不连接且不接收预定义数据；
 - YAML 使用 YAML 1.2 安全子集，禁止自定义 tag、anchor、alias、合并键、重复键和任意对象构造；
 - 文件路径只能是所属包内规范相对路径，禁止绝对路径、`..`、符号链接逃逸和宿主机路径；
 - 未知核心字段默认拒绝；扩展只能放在命名空间化 `extensions`，不得改变核心语义或安全规则；
@@ -573,9 +584,9 @@ DTO 禁止：
 
 ### 9.5 Schema 驱动 UI
 
-设备端口、参数范围、单位、优化能力、generator/solver 能力和状态声明必须来自公开 schema。前端可以保留通用交互规则，如禁止自环和重复边，但不得按设备类型硬编码热泵、电池或燃气端口规则。
+设备 properties、序列接口、有效区间、单位和方程必须来自公开 schema；规划变量、计算精度和 generator/solver 能力来自计算配置公开 schema。前端可以保留通用交互规则，如禁止自环和重复边，但不得按设备类型硬编码热泵、电池或燃气接口规则。
 
-画布必须使用后端返回的真实 port ID，并按 carrier、direction compatibility 和公开端口语义连接。
+画布必须使用后端返回的真实 interface ID，并按 carrier、五类接口兼容规则和公开接口语义连接；`predefined` 与 `blind` 均不得连接其他设备。
 
 ## 10. 存储与数据生命周期
 
@@ -641,7 +652,7 @@ class ObjectStore(Protocol):
 ## 12. 快照、任务与结果
 
 - Task 必须绑定不可变 `CalcSnapshot`；
-- 快照包含 `ValidatedAssemblyArtifact`、输入内容哈希、schema 版本、设备/命令/generator/solver/executor/result adapter 精确版本、单位契约、随机种子、选项和容差；
+- 快照包含 `ValidatedAssemblyArtifact`、输入内容哈希、schema 版本、设备规范内容摘要、generator/solver/executor/result adapter 精确版本、单位契约、随机种子、选项和容差；
 - 每个计算 attempt 必须封存 Solver Bundle、ExecutionReceipt、stdout/stderr 摘要、声明输出摘要和统一结果；
 - 同一幂等键重复提交返回同一逻辑任务，不重复执行或扣配额；
 - 任务状态机只有公开允许的转换；
@@ -659,7 +670,7 @@ class ObjectStore(Protocol):
 | 存储容量未知或不足 | 不 ready 或存储 degraded；拒绝新写入 |
 | 对象缺失/损坏 | 返回损坏诊断，禁止空内容或旧副本回退 |
 | 项目/装配输入非法 | 返回完整诊断并阻断任务 |
-| Worker 缺命令/generator/executor/result adapter | Worker 不 ready，不领取任务 |
+| Worker 缺设备内容/方程 contract/generator/executor/result adapter | Worker 不 ready，不领取任务 |
 | 生成器失败或结果不确定 | 不发布部分 Bundle；provider 不 ready 或 attempt 明确失败 |
 | Bundle 摘要、路径或命令策略非法 | runtime 不启动进程，形成拒绝回执 |
 | solver 超时、取消、OOM 或异常退出 | 终止进程组，封存失败回执，不伪装成功 |
@@ -705,8 +716,8 @@ CI 必须逐步加入并最终强制：
 - 禁止前端 `shared` 依赖 feature；
 - 禁止页面直接调用底层 HTTP；
 - 检测后端/前端重复设备、generator 和 solver 映射；
-- 检测建模命令/runtime/业务服务中的隐式单位换算常量；
-- 禁止装配和设备文件出现实现模块路径或 shell 命令；
+- 检测技术模型转换/runtime/业务服务中的隐式单位换算常量；
+- 禁止装配和设备文件出现实现模块路径、shell 命令、价格或成本；
 - 禁止 GeneratorProvider 访问网络、数据库、对象存储或启动进程；
 - 禁止 runtime 按设备/generator/solver 名称增加业务分支。
 
@@ -725,11 +736,11 @@ CI 必须逐步加入并最终强制：
 
 ### 14.5 真实用户验收
 
-用户可见功能在合并前必须进行浏览器级验收。除画布拖放与端口连接按仓库约束由人工核查外，其余 GUI 流程使用 Playwright 模拟真实用户，而不是只验证接口返回：
+用户可见功能在合并前必须进行浏览器级验收。除画布拖放与接口连接按仓库约束由人工核查外，其余 GUI 流程使用 Playwright 模拟真实用户，而不是只验证接口返回：
 
 - 从页面入口开始，通过可见文本、role、label 等可访问定位器操作；
 - 登录、导航、填写表单、上传、确认、等待和下载等业务动作通过 UI 完成；
-- 画布拖放与端口连接由人工完成，并记录设备、端口、操作步骤和可见结果；画布参数编辑等其他功能仍由 Playwright 验收；
+- 画布拖放与接口连接由人工完成，并记录设备、接口、操作步骤和可见结果；画布 property 编辑等其他功能仍由 Playwright 验收；
 - 禁止直接修改 localStorage、组件状态或数据库来跳过被测步骤；
 - API 可以用于隔离环境的前置造数和结束清理，但不能代替本场景要验收的用户动作；
 - 覆盖桌面和移动视口、中文和已发布英文内容、前进后退、深链接与刷新；
@@ -738,7 +749,7 @@ CI 必须逐步加入并最终强制：
 - 测试数据必须隔离、可重复、可清理，不能依赖开发者浏览器已有会话；
 - Playwright 和被测服务全部在 Docker 环境运行。
 
-关键主流程至少包括：认证、项目生命周期、模型参数与真实端口、数据上传、配置、校验、任务、结果、导出、管理员操作和帮助中心。纯 HTTP 契约测试不能替代浏览器或人工验收。
+关键主流程至少包括：认证、项目生命周期、设备 property 与真实接口、数据上传、配置、校验、任务、结果、导出、管理员操作和帮助中心。纯 HTTP 契约测试不能替代浏览器或人工验收。
 
 ## 15. 项目文档
 
@@ -791,7 +802,7 @@ docs/                                      # 后台证据，不是开发输入
 - 架构原则、系统上下文、模块公开边界和依赖方向；
 - 领域模型、不可变追溯链和对象生命周期；
 - 公共 HTTP、DTO、诊断、单位、时间和版本规则；
-- 设备模型 YAML、设备数据 CSV、装配 YAML、Solver Bundle 及设备、命令、生成器、执行器、结果适配器、存储和数据 provider；
+- 设备模型 YAML、设备数据 CSV、装配 YAML、Solver Bundle 及设备、技术模型、生成器、执行器、结果适配器、存储和数据 provider；
 - 前端、帮助中心、部署、运行、测试和贡献规范。
 
 开发者指南描述稳定意图、公开不变量和扩展方式，不写文件行号、私有函数签名、ORM 表清单、迁移 SQL、实施 agent 分工或临时默认值。实现成熟度由更新日志与 Roadmap 说明。
@@ -910,8 +921,8 @@ Roadmap 的任何阶段都不得恢复全局注册表、装配 fallback、旧接
 
 一个开放且清晰的 pIES 应满足：
 
-- 新增设备不需要修改前端端口规则或旧静态注册表；
-- 新增设备模型和数据样例可只按公共 YAML/CSV 标准交付，不暴露实现路径；
+- 新增设备不需要修改前端接口规则或旧静态注册表；
+- 新增设备技术模型和数据样例可只按公共 YAML/CSV 标准交付，不暴露实现路径，不携带价格、成本或计算精度；
 - 新增 generator 不需要修改装配、API、GUI 或通用 runtime 的映射表；
 - 新增 solver 主要新增 generator/result adapter/executor provider，不让 Worker 拼命令；
 - 更换对象存储不需要修改项目、数据集、结果或前端；

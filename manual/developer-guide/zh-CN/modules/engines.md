@@ -109,7 +109,7 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 
 ## 增加计算能力
 
-1. 判断需求是新的建模命令、GeneratorProvider、ExecutorProvider 还是 ResultAdapter；
+1. 判断需求是新的公共方程能力、GeneratorProvider、ExecutorProvider 还是 ResultAdapter；
 2. 先定义 descriptor、支持的 schema/mode、版本兼容和失败语义；
 3. 准备最小规范装配与已知答案；
 4. 实现纯生成并固定 Bundle 摘要；

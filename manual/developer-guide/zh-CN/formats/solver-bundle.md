@@ -69,7 +69,7 @@ extensions: {}
 一个 GeneratorProvider 接收 `ValidatedAssemblyArtifact` 和已固定的资源内容，负责：
 
 1. 验证装配摘要、校验回执和自身能力匹配；
-2. 调用版本化建模命令，建立变量、目标、约束和索引；
+2. 消费已规范化的设备方程贡献，并结合独立规划经济配置建立变量、目标、约束和索引；
 3. 在唯一边界把业务单位转换为求解器内部单位；
 4. 生成 MPS、LP、JSON 或特定求解器需要的输入文件；
 5. 声明受控命令、资源限制、预期输出和结果适配器；
@@ -135,7 +135,7 @@ SolverRuntime 是求解器无关的受控执行层，只负责：
 | 失败 | 所属边界 | 处理 |
 |---|---|---|
 | 装配未通过或回执不匹配 | generator 入口 | 拒绝生成，不产生部分 Bundle |
-| 建模命令或生成器能力缺失 | generator | 任务运行前阻断 |
+| 方程 contract 或生成器能力缺失 | generator | 任务运行前阻断 |
 | 输入文件生成中断 | generator | 临时产物不发布 |
 | 摘要、路径或 allowlist 不合法 | runtime 入口 | 不启动进程 |
 | 超时、取消、OOM、非零退出 | runtime | 形成失败 ExecutionReceipt |
@@ -144,7 +144,7 @@ SolverRuntime 是求解器无关的受控执行层，只负责：
 
 ## 增加一个生成器
 
-1. 声明稳定 generator ID、版本、支持的装配 schema、mode、设备/命令能力和 solver；
+1. 声明稳定 generator ID、版本、支持的装配 schema、mode、方程 contract 能力和 solver；
 2. 定义生成器选项 schema、内部单位、确定性和资源上界；
 3. 实现纯转换和配套 result adapter；
 4. 提供最小装配、生成后 Bundle、输入摘要和已知求解结果；

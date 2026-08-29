@@ -1,6 +1,7 @@
 # 设备数据 CSV
 
-> 契约标识：`ies.device-data`；目标 schema：`1.0.0`；推荐文件名：`<dataset-id>.data.csv`。
+> 契约标识：`ies.device-data`；目标 schema：`2.0.0`；推荐文件名：`<dataset-id>.data.csv`。
+> 实现状态：生效目标契约，当前代码仍实现旧 `1.0.0` 独立设备版本/`data_inputs` 绑定，迁移顺序见 [Roadmap](../../../changelog/roadmap.md)。
 
 设备数据 CSV 用于人工准备或工具导出的时序输入。它把“这一列是什么、使用什么单位、时间如何解释”写进文件本身，使文件离开原电脑和原项目后仍可校验。
 
@@ -8,10 +9,11 @@
 
 ```csv
 # schema: ies.device-data
-# schema_version: 1.0.0
+# schema_version: 2.0.0
 # dataset_id: campus_electric_load_2025
-# device_model: acme.device.electric_load@1.0.0
-# series_mode: timeline
+# device_id: acme.device.electric_load
+# device_content_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+# source_mode: data_predict
 # resolution: 1h
 # timestamp_mode: fixed_offset
 # fixed_utc_offset_minutes: 480
@@ -47,15 +49,16 @@ timestamp,electric_demand
 | `schema` | 固定为 `ies.device-data` |
 | `schema_version` | 文件契约版本 |
 | `dataset_id` | 稳定数据集 ID，不等同于文件名 |
-| `device_model` | `<device-id>@<exact-version>`，决定允许的数据列 |
-| `series_mode` | `timeline` 或 `periodic` |
+| `device_id` | 稳定设备 ID，不含设备独立版本 |
+| `device_content_sha256` | 设备规范内容摘要，决定允许绑定的 `predefined` interfaces |
+| `source_mode` | `data_repeat` 或 `data_predict`；`constant` 直接写在设备接口中，不使用 CSV |
 | `resolution` | 固定步长，例如 `15min`、`30min`、`1h` |
 | `timestamp_mode` | `utc` 或 `fixed_offset` |
 | `unit.<column>` | 每个数值数据列的单位，必须与设备模型一致 |
 
 `timestamp_mode: fixed_offset` 时必须提供 `fixed_utc_offset_minutes`，取值范围 `-840..840`。它表示整份文件的固定偏移，不采用运行机器时区，也不自动应用夏令时。需要夏令时的真实时间线应直接使用 UTC。
 
-`series_mode: periodic` 还必须提供 `period: day`、`week` 或 `year`。周期展开规则固定在装配快照中，不能由求解时日期库隐式决定。
+`source_mode: data_repeat` 还必须提供 `period: day`、`week` 或 `year`。周期展开规则固定在装配快照中，不能由求解时日期库隐式决定。
 
 ## CSV 方言
 
@@ -69,19 +72,19 @@ timestamp,electric_demand
 
 ## 表头与列
 
-第一列固定为 `timestamp`。后续列 ID 必须与设备模型 `data_inputs` 完全一致：
+第一列固定为 `timestamp`。后续列 ID 必须与所固定设备内容中 `type: predefined` 的 interface ID 完全一致：
 
 - 未声明的列拒绝；
 - 重复列拒绝；
 - 必需列缺失拒绝；
-- 规范输出按设备模型中的声明顺序排列；
-- 一份文件只绑定一个精确设备模型版本。
+- 规范输出按设备模型中的 interface 声明顺序排列；
+- 一份文件只绑定一个稳定设备 ID 和一个精确内容摘要；不能用当前同 ID 内容解释旧数据。
 
 每个 `unit.<column>` 必须与设备模型声明的量纲兼容。`kW` 与 `W` 可以在生成器边界显式换算，但 `kW` 与 `kWh` 不兼容，不能仅因都是数字而接受。
 
 ## 时间轴规则
 
-`timeline` 数据必须满足：
+`data_predict` 数据必须满足：
 
 - 时间戳严格递增且无重复；
 - 每一行与声明的固定 `resolution` 对齐；
@@ -90,11 +93,11 @@ timestamp,electric_demand
 - `fixed_offset` 模式使用 `YYYY-MM-DDTHH:MM:SS`，由文件级偏移唯一换算到 UTC；
 - 起止时间、闰年和预期点数由装配 YAML 明确，CSV 校验器不靠“看起来像一年”猜测。
 
-`periodic` 数据表示可重复模板。`day`、`week` 或 `year` 的行数必须与周期和分辨率严格匹配；展开后产生的 UTC 时间轴及重复次数进入装配校验回执。
+`data_repeat` 数据表示可重复模板。`day`、`week` 或 `year` 的行数必须与周期和分辨率严格匹配；展开后产生的 UTC 时间轴及重复次数进入装配校验回执。
 
 ## 数值和质量
 
-每个值先按设备模型的 `value_type`、范围和有限性校验，再参与装配：
+每个值先按目标 interface 的单位、`valid_range` 和有限性校验，再参与装配：
 
 - 超范围值是阻断错误，不自动截断；
 - 缺值只按设备模型声明的策略处理；未声明时阻断；
@@ -109,8 +112,8 @@ timestamp,electric_demand
 校验器按以下顺序处理：
 
 1. 识别编码、换行、元数据和固定 CSV 方言；
-2. 解析 schema、设备版本、时间模式、分辨率和单位；
-3. 与设备模型核对列、类型、量纲、范围和缺失策略；
+2. 解析 schema、设备 ID/内容摘要、来源模式、时间模式、分辨率和单位；
+3. 按 `device_content_sha256` 读取不可变设备内容，并核对 predefined interface、单位、有效区间和缺失策略；
 4. 校验时间单调性、步长、周期和装配要求的覆盖范围；
 5. 将时间规范化为 UTC，将允许的数值表示规范化；
 6. 生成原始摘要、规范表格摘要、质量摘要和变换记录。
@@ -130,8 +133,8 @@ timestamp,electric_demand
 
 ## 完成标准
 
-- 示例可以用普通文本编辑器编写并通过 `1.0.0` 校验；
+- 示例可以用普通文本编辑器编写并通过 `2.0.0` 校验；
 - UTC、固定偏移、闰年、周期、重复、缺口和非法值均有契约测试；
 - 同一语义输入得到相同规范摘要；
 - 数据来源、原始摘要、变换和最终绑定可追溯；
-- 求解器和模型命令不直接读取未经校验的原始 CSV。
+- 求解器和技术方程转换器不直接读取未经校验的原始 CSV。

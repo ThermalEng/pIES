@@ -89,7 +89,7 @@ readiness 至少核验 executor 隔离能力、solver 精确版本和最小自�
 1. 容器是否存活；
 2. 进程 `healthz` 是否响应；
 3. `readyz` 中哪个必需依赖不可用；
-4. 失败属于数据库、storage、provider、命令目录、generator、runtime 还是 Worker；
+4. 失败属于数据库、storage、provider、方程解析、generator、runtime 还是 Worker；
 5. 再进入对应模块日志，并使用 request/task/attempt ID 关联。
 
 不要因为 Redis、对象存储或 provider 失败而在部署层强行改用另一实现；替换 provider 必须通过配置、组合根和版本记录完成。

@@ -30,7 +30,7 @@
 
 Python 项目元数据 `backend/pyproject.toml` 是产品版本唯一权威源。后端运行时从已安装包元数据读取版本；前端帮助清单在构建时读取同一来源。
 
-`frontend/package.json` 只描述私有前端构建包，不作为产品版本。设备、算法和测试工具中的版本也不等同于产品版本。
+`frontend/package.json` 只描述私有前端构建包，不作为产品版本。统一设备 schema、算法插件/provider 和测试工具各自的 contract/语义版本也不等同于产品版本；单个设备只以内容摘要和发布 revision 固定，不拥有独立语义版本。
 
 ## 更新日志
 

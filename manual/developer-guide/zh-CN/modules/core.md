@@ -19,7 +19,7 @@
 
 `core` 不负责：
 
-- 设备、命令、generator、solver 或其他 provider 注册；
+- 设备、方程、generator、solver 或其他 provider/内容注册；
 - 项目默认值、任务状态、权限决策或业务校验；
 - 数据库、缓存、对象存储和网络访问；
 - 为某个上层模块提供带业务名称的便捷包装。

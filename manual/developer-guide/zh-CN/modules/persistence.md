@@ -12,7 +12,7 @@
 
 每张表和 repository 都必须有唯一领域所有者。例如身份事实属于 identity，用于计算的快照和任务事实属于 tasks，证据索引属于 results，对象元数据与引用属于 storage。
 
-模型与算法目录至少区分条目、不可变版本、用户安装引用和共享申请。`CustomVersion` 只保存对象 ID、摘要、schema、稳定 ID、精确版本和来源；`CatalogInstallation` 对 `(user_id, custom_version_id)` 唯一，不能保存内容副本；`ShareRequest` 绑定精确版本与摘要，审核后不能替换申请内容。运行环境是按摘要重建的缓存，不作为权威表事实。
+模型与算法目录至少区分条目、不可变发布、用户安装引用和共享申请。设备发布保存对象 ID、摘要、统一 schema、稳定设备 ID、revision 和来源，不保存独立设备语义版本；算法插件发布另存精确语义版本。`CatalogInstallation` 对 `(user_id, publication_id)` 唯一，不能保存内容副本；`ShareRequest` 绑定精确发布与摘要，审核后不能替换申请内容。运行环境是按摘要重建的缓存，不作为权威表事实。
 
 repository 负责：
 

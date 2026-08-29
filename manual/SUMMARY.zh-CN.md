@@ -23,7 +23,7 @@
     - [组合根与启动](developer-guide/zh-CN/modules/bootstrap.md)
     - [Core 基础能力](developer-guide/zh-CN/modules/core.md)
     - [设备目录](developer-guide/zh-CN/modules/devices.md)
-    - [建模命令](developer-guide/zh-CN/modules/modeling.md)
+    - [技术方程建模](developer-guide/zh-CN/modules/modeling.md)
     - [装配与检查](developer-guide/zh-CN/modules/assembly.md)
     - [计算生成与求解](developer-guide/zh-CN/modules/engines.md)
       - [计算生成器](developer-guide/zh-CN/modules/generators.md)

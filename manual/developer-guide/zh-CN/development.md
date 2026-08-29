@@ -64,7 +64,7 @@ API / Worker / 前端适配
 
 后端、前端和系统验收保持职责分离。Playwright 可以通过公开接口准备隔离数据，但不能绕过正在验收的 UI 操作。
 
-所有测试都在 Docker 中执行。画布拖放和端口连接由人工核查；画布参数编辑等非拖放功能仍可自动验收。
+所有测试都在 Docker 中执行。画布拖放和 interface 连接由人工核查；画布 property 编辑等非拖放功能仍可自动验收。
 
 ## 端点实现：状态码与包装键选择
 
@@ -86,10 +86,10 @@ C4 协议基线的 AST 门禁禁止同一端点出现裸对象/包装对象两�
 - `core` 不依赖业务模块；
 - 业务模块不拼对象路径；
 - 前端 `shared` 不依赖 feature，页面不直接调用底层 HTTP；
-- 前后端没有重复设备、端口、generator/solver 或单位映射；
+- 前后端没有重复设备、interface、generator/solver 或单位映射；
 - 设备/装配文件没有实现入口、shell 或宿主机路径；
 - GeneratorProvider 不访问数据库、对象服务、网络或进程；
-- 建模命令、runtime 和业务服务没有隐式单位换算；
+- 设备方程解析、runtime 和业务服务没有隐式单位换算；
 - runtime 不按设备、generator 或 solver 名称复制业务分支。
 
 现行门禁测试在 [`backend/tests/test_architecture_gates.py`](../../../backend/tests/test_architecture_gates.py)（已实现 core 反向依赖、跨模块私有导入、API-ORM 三条；其余 9 条待后续批次补齐）。
