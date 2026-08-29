@@ -47,6 +47,7 @@ docker compose run --rm e2e npx playwright test --project=chromium --grep "场�
 | 9 | 帮助章节深链接刷新保持 | `admin-help-lang.spec.ts` |
 | 10 | 语言切换与缺失翻译提示 | `admin-help-lang.spec.ts` |
 | 11 | 桌面/移动视口 + 键盘焦点 | `admin-help-lang.spec.ts` |
+| 12 | 新建项目模型: 模板表单提交、失败保留输入与诊断、保存状态流转、直接 YAML 编辑(非拖放; 候选保存端点未合并, 由 route mock 提供契约响应, 见 spec 头部注释) | `model-new.spec.ts` |
 
 ## 真实用户原则(§13.2)
 

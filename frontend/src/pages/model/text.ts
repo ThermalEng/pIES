@@ -31,6 +31,7 @@ const TEXTS: Record<string, Entry> = {
   'toolbar.fit': { zh: '适应视图', en: 'Fit view' },
   'toolbar.validate': { zh: '校验', en: 'Validate' },
   'toolbar.validating': { zh: '校验中…', en: 'Validating…' },
+  'toolbar.new_model': { zh: '从模板或 YAML 新建项目模型', en: 'Create a model from a template or YAML' },
 
   // 保存
   'save.button': { zh: '保存', en: 'Save' },

@@ -27,11 +27,13 @@ import {
 } from '@xyflow/react'
 import type { Edge as RFEdge, Connection as RFConnection, Node as RFNode } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { useNavigate } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { ApiError } from '../types'
 import type { Diagnostic, DeviceTypeSpec, Fidelity, Port } from '../types'
 import { useI18n, translateDiagnostic, translateError } from '../i18n'
+import { pt } from '../i18n/pageMessages'
 import {
   Alert,
   Button,
@@ -126,6 +128,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const { t, locale } = useI18n()
   const { setAutosave, offline } = useWorkbench()
   const { screenToFlowPosition, fitView } = useReactFlow()
+  const navigate = useNavigate()
 
   // -- 注册表与模型状态 ------------------------------------------------
   const [deviceTypes, setDeviceTypes] = useState<ExtendedDeviceTypeSpec[] | null>(null)
@@ -609,6 +612,14 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           <SaveStateChip state={saveState} />
         </div>
         <div className="mp-toolbar">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => navigate(`/projects/${projectId}/model/new`)}
+            title={lt('toolbar.new_model')}
+          >
+            {pt('ies.modeling.new_model')}
+          </Button>
           <IconButton aria-label={lt('toolbar.fit')} onClick={() => void fitView({ padding: 0.2, duration: 300 })}>
             <Icon name="info" size={15} />
           </IconButton>
