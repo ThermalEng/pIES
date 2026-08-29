@@ -48,6 +48,12 @@ from iesplan.models.project import (
     ProjectVersion,
     VersionRef,
 )
+from iesplan.models.project_model import (
+    MODEL_SOURCE_DIRECT,
+    MODEL_SOURCE_TEMPLATE,
+    ProjectModel,
+    ProjectModelSequence,
+)
 from iesplan.models.result import (
     EvidencePackage,
     Report,
@@ -80,6 +86,11 @@ __all__ = [
     "Draft",
     "ProjectVersion",
     "VersionRef",
+    # 项目模型清单(切片 dm2-A)
+    "ProjectModel",
+    "ProjectModelSequence",
+    "MODEL_SOURCE_DIRECT",
+    "MODEL_SOURCE_TEMPLATE",
     # 系统模型
     "SystemGraph",
     "Device",

@@ -38,18 +38,22 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """幂等初始化数据库: 建表 + 约束迁移 + 不可变触发器 + 种子管理员。
+    """幂等初始化数据库: 建表 + 版本化迁移 + 约束迁移 + 不可变触发器 + 种子管理员。
 
     - 先导入模型模块, 确保全部表注册到 Base.metadata;
     - create_all 只建不存在的表, 重复调用无副作用;
+    - apply_migrations: 版本化 schema 迁移(宪法 §11, 台账幂等; 0001 项目模型
+      清单表由版本化迁移创建, 不依赖 create_all 作为发布机制);
     - _migrate_constraints: 既有表约束随模型演进做幂等 ALTER
       (如 ck_tasks_type 增补 'analysis', 03 §9.7);
     - _deploy_immutable_triggers: 不可变表(01 §11)部署"禁 UPDATE/DELETE"触发器
       与 REVOKE(仅 PostgreSQL; SQLite 测试库跳过)。
     """
     from iesplan import models  # noqa: F401  (注册全部模型)
+    from iesplan.migrations import apply_migrations
 
     Base.metadata.create_all(bind=engine)
+    apply_migrations(engine)
     _migrate_constraints()
     _deploy_immutable_triggers()
     seed_admin()

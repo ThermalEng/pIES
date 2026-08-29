@@ -117,6 +117,14 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "delete_project_endpoint": frozenset({"deleted", "ok"}),
     "import_package_endpoint": frozenset({"proposal"}),
     "confirm_import_endpoint": frozenset({"my_role", "project"}),
+    # ---- project_models.py (切片 dm2-A: 候选门禁与原子保存) ----
+    "validate_project_model_candidate": frozenset({"diagnostics", "valid"}),
+    "upload_project_model_temp_file": frozenset({"temp_file", "upload_id"}),
+    "list_project_models_endpoint": frozenset({"project_models"}),
+    "save_project_model_endpoint": frozenset(
+        {"duplicate", "project_model", "receipt"}
+    ),  # 幂等重放时 duplicate 存在, 登记并集
+    "delete_project_model_endpoint": frozenset({"deleted", "ok"}),
     # ---- results.py ----
     "get_result_endpoint": frozenset({"result"}),  # services.results.result_view
     "list_assessments_endpoint": frozenset({"items", "total"}),
