@@ -77,19 +77,44 @@ class DataFileRefDTO(BaseModel):
 
 
 class ModelCandidateRequest(BaseModel):
-    """候选模型请求体(校验与保存共用; 模板来源时携带 inputs 实例化)。"""
+    """候选模型请求体(校验与保存共用)。
 
-    model_yaml: str = Field(min_length=1, max_length=2_000_000, description="候选模型 YAML 文本")
+    来源判别:
+    - ``source=direct_yaml``: ``model_yaml`` 为完整候选模型 YAML(必填);
+    - ``source=template``: ``template_id`` + ``template_revision`` +
+      ``template_sha256`` 固定精确模板 revision(后端读取权威内容实例化,
+      不信任客户端自带的模板字节); ``template_inputs`` 为用户 inputs。
+      ``model_yaml`` 可省略(校验端点允许内联模板 YAML 形态)。
+    """
+
+    model_yaml: str = Field(default="", max_length=2_000_000, description="候选模型 YAML 文本(直接来源必填)或模板来源的权威模板字节(可省略)")
     source: Literal["direct_yaml", "template"] = "direct_yaml"
+    template_id: str | None = Field(
+        default=None, description="模板来源: 稳定模板 ID(不透明字符串)",
+    )
+    template_revision: int | None = Field(
+        default=None, ge=1, description="模板来源: 精确发布 revision(固定不可变)",
+    )
+    template_sha256: str | None = Field(
+        default=None, pattern=_SHA256_PATTERN,
+        description="模板来源: 精确 revision 的内容摘要(与后端权威内容二次确认)",
+    )
     template_inputs: dict[str, Any] | None = Field(
         default=None, description="模板来源时用户提交的 inputs(未声明字段拒绝)"
     )
     data_files: list[DataFileRefDTO] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _template_requires_inputs(self) -> ModelCandidateRequest:
-        if self.source == "template" and self.template_inputs is None:
-            raise ValueError("source=template 必须携带 template_inputs")
+    def _source_requires_fields(self) -> ModelCandidateRequest:
+        if self.source == "direct_yaml" and not self.model_yaml.strip():
+            raise ValueError("source=direct_yaml 必须提供 model_yaml")
+        if self.source == "template":
+            if not self.template_id or not self.template_revision or not self.template_sha256:
+                raise ValueError(
+                    "source=template 必须携带 template_id、template_revision 与 template_sha256"
+                )
+            if self.template_inputs is None:
+                raise ValueError("source=template 必须携带 template_inputs")
         return self
 
 
@@ -143,6 +168,9 @@ def validate_project_model_candidate(
         db, user, project_id,
         model_yaml=payload.model_yaml,
         source=payload.source,
+        template_id=payload.template_id,
+        template_revision=payload.template_revision,
+        template_sha256=payload.template_sha256,
         template_inputs=payload.template_inputs,
         data_files=_to_data_file_refs(payload.data_files),
     )
@@ -150,7 +178,6 @@ def validate_project_model_candidate(
         "valid": validation.ok,
         "diagnostics": [d.to_dict() for d in validation.diagnostics],
     }
-
 
 @router.post("/temp-files", status_code=201, summary="配套数据文件临时上传")
 def upload_project_model_temp_file(
@@ -222,6 +249,9 @@ def save_project_model_endpoint(
         db, user, project_id,
         model_yaml=payload.model_yaml,
         source=payload.source,
+        template_id=payload.template_id,
+        template_revision=payload.template_revision,
+        template_sha256=payload.template_sha256,
         template_inputs=payload.template_inputs,
         data_files=_to_data_file_refs(payload.data_files),
         idempotency_key=payload.idempotency_key,

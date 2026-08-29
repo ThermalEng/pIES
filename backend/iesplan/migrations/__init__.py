@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import sqlalchemy as sa
 from sqlalchemy import MetaData, Table
 from sqlalchemy import text as sa_text
@@ -35,6 +37,118 @@ def _build_ledger() -> Table:
 
 
 _LEDGER = _build_ledger()
+
+
+# ---------------------------------------------------------------------------
+# 迁移 0002: 用户模型模板主表与不可变发布 revision 表(切片 dm2)
+# ---------------------------------------------------------------------------
+
+_MIGRATION_0002_POSTGRES = """
+CREATE TABLE IF NOT EXISTS model_templates (
+    id BIGSERIAL PRIMARY KEY,
+    template_id TEXT NOT NULL,
+    owner_id BIGINT NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','published','disabled')),
+    description TEXT,
+    draft_yaml_object_id BIGINT REFERENCES objects(id),
+    draft_diagnostics_object_id BIGINT REFERENCES objects(id),
+    draft_sha256 TEXT CHECK (draft_sha256 IS NULL OR draft_sha256 ~ '^[0-9a-f]{64}$'),
+    draft_has_inputs BOOLEAN,
+    draft_revision BIGINT NOT NULL DEFAULT 0 CHECK (draft_revision >= 0),
+    draft_updated_at TIMESTAMPTZ,
+    published_revision BIGINT NOT NULL DEFAULT 0 CHECK (published_revision >= 0),
+    published_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (owner_id, template_id)
+);
+CREATE INDEX IF NOT EXISTS idx_model_templates_owner ON model_templates (owner_id);
+
+CREATE TABLE IF NOT EXISTS model_template_revisions (
+    id BIGSERIAL PRIMARY KEY,
+    template_id BIGINT NOT NULL REFERENCES model_templates(id),
+    revision BIGINT NOT NULL CHECK (revision >= 1),
+    schema_version TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+    inputs_sha256 TEXT CHECK (inputs_sha256 IS NULL OR inputs_sha256 ~ '^[0-9a-f]{64}$'),
+    input_count BIGINT NOT NULL DEFAULT 0 CHECK (input_count >= 0),
+    yaml_object_id BIGINT NOT NULL REFERENCES objects(id),
+    receipt_object_id BIGINT NOT NULL REFERENCES objects(id),
+    summary_object_id BIGINT NOT NULL REFERENCES objects(id),
+    diagnostics_object_id BIGINT REFERENCES objects(id),
+    idempotency_key TEXT,
+    published_by BIGINT NOT NULL REFERENCES users(id),
+    published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (template_id, revision),
+    UNIQUE (template_id, content_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_mtr_template ON model_template_revisions (template_id);
+CREATE INDEX IF NOT EXISTS idx_mtr_idem_key
+    ON model_template_revisions (template_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+"""
+
+_MIGRATION_0002_SQLITE = """
+CREATE TABLE IF NOT EXISTS model_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id TEXT NOT NULL,
+    owner_id INTEGER NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','published','disabled')),
+    description TEXT,
+    draft_yaml_object_id INTEGER REFERENCES objects(id),
+    draft_diagnostics_object_id INTEGER REFERENCES objects(id),
+    draft_sha256 TEXT CHECK (length(draft_sha256) = 64),
+    draft_has_inputs BOOLEAN,
+    draft_revision INTEGER NOT NULL DEFAULT 0 CHECK (draft_revision >= 0),
+    draft_updated_at TIMESTAMP,
+    published_revision INTEGER NOT NULL DEFAULT 0 CHECK (published_revision >= 0),
+    published_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (owner_id, template_id)
+);
+CREATE INDEX IF NOT EXISTS idx_model_templates_owner ON model_templates (owner_id);
+
+CREATE TABLE IF NOT EXISTS model_template_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL REFERENCES model_templates(id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    schema_version TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    inputs_sha256 TEXT,
+    input_count INTEGER NOT NULL DEFAULT 0 CHECK (input_count >= 0),
+    yaml_object_id INTEGER NOT NULL REFERENCES objects(id),
+    receipt_object_id INTEGER NOT NULL REFERENCES objects(id),
+    summary_object_id INTEGER NOT NULL REFERENCES objects(id),
+    diagnostics_object_id INTEGER REFERENCES objects(id),
+    idempotency_key TEXT,
+    published_by INTEGER NOT NULL REFERENCES users(id),
+    published_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (template_id, revision),
+    UNIQUE (template_id, content_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_mtr_template ON model_template_revisions (template_id);
+CREATE INDEX IF NOT EXISTS idx_mtr_idem_key
+    ON model_template_revisions (template_id, idempotency_key);
+"""
+
+
+def _migrate_0002(conn: sa.Connection) -> None:
+    """创建用户模型模板主表与不可变发布 revision 表(0002)。
+
+    全新数据库与已执行 0001 的存量数据库同一路径: 迁移按版本在台账登记,
+    幂等执行; 存量库已有 model_templates 时 IF NOT EXISTS 跳过(仅防重复
+    执行, 正常路径由台账版本控制)。
+    """
+    ddl = (
+        _MIGRATION_0002_POSTGRES
+        if conn.dialect.name == "postgresql"
+        else _MIGRATION_0002_SQLITE
+    )
+    for stmt in ddl.split(";"):
+        stripped = stmt.strip()
+        if stripped:
+            conn.execute(sa_text(stripped))
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +226,30 @@ CREATE INDEX IF NOT EXISTS idx_project_models_object ON project_models (model_ob
 """
 
 
+def _ensure_columns(
+    conn: sa.Connection,
+    table: str,
+    columns: dict[str, str],
+) -> None:
+    """按方言为存量表补充缺失列(幂等)。
+
+    Postgres: ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``;
+    SQLite(<3.35 无 IF NOT EXISTS): 先查 pragma table_info 再逐列 ADD。
+    全新库随建表语句已含全部列, 本函数仅覆盖「已执行旧迁移的存量库」。
+    """
+    if conn.dialect.name == "postgresql":
+        for name, ddl in columns.items():
+            conn.execute(sa_text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {ddl}"))
+        return
+    existing = {
+        row[1]
+        for row in conn.execute(sa_text(f"PRAGMA table_info({table})")).all()
+    }
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(sa_text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
 def _migrate_0001(conn: sa.Connection) -> None:
     """创建项目模型清单表与编号序列表(0001, 切片 dm2-A)。
 
@@ -127,11 +265,18 @@ def _migrate_0001(conn: sa.Connection) -> None:
         stripped = stmt.strip()
         if stripped:
             conn.execute(sa_text(stripped))
+    # 切片 dm2: 存量库(已执行 0001)补充模板来源列; 全新库建表语句已含
+    _ensure_columns(
+        conn,
+        "project_models",
+        {"template_id": "TEXT", "template_revision": "BIGINT"},
+    )
 
 
 #: 有序迁移清单(version, name, upgrade)
-MIGRATIONS: list[tuple[str, str, object]] = [
+MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
+    ("0002_model_template_lifecycle", "用户模型模板主表与不可变发布 revision 表", _migrate_0002),
 ]
 
 MIGRATION_VERSIONS: tuple[str, ...] = tuple(m[0] for m in MIGRATIONS)
@@ -153,7 +298,7 @@ def apply_migrations(engine: sa.Engine) -> list[str]:
         for version, name, upgrade in MIGRATIONS:
             if version in existing:
                 continue
-            upgrade(conn)
+            upgrade(conn)  # type: ignore[call-arg]  # 运行时为可调用迁移函数
             conn.execute(
                 _LEDGER.insert().values(version=version, name=name)
             )

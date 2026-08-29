@@ -302,10 +302,36 @@ def _upload_temp(client: TestClient, pid: int, headers: dict, data_ref: str = "l
     return resp.json()
 
 
+def _publish_template(client: TestClient, headers: dict, yaml_text: str) -> dict:
+    """通过真实模板生命周期创建并发布模板, 返回 (template_id, revision, content_sha256)。"""
+    resp = client.post(
+        "/api/model-templates",
+        json={"model_yaml": yaml_text, "description": "e2e 模板"},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    tpl = resp.json()["template"]
+    template_id = tpl["template_id"]
+    assert tpl["draft_revision"] == 1
+    pub = client.post(
+        f"/api/model-templates/{template_id}/publish",
+        json={"expected_revision": 1, "idempotency_key": f"pub-{template_id}"},
+        headers=headers,
+    )
+    assert pub.status_code == 201, pub.text
+    body = pub.json()
+    assert body["duplicate"] is False
+    assert body["revision"]["revision"] == 1
+    return template_id, body["revision"]["revision"], body["revision"]["content_sha256"]
+
+
 def _save(
     client: TestClient, pid: int, headers: dict, yaml_text: str,
     *,
     source: str = "direct_yaml",
+    template_id: str | None = None,
+    template_revision: int | None = None,
+    template_sha256: str | None = None,
     template_inputs: dict | None = None,
     data_files: list[dict] | None = None,
     idempotency_key: str | None = None,
@@ -322,6 +348,10 @@ def _save(
     }
     if source == "template":
         body["template_inputs"] = template_inputs
+        if template_id:
+            body["template_id"] = template_id
+            body["template_revision"] = template_revision
+            body["template_sha256"] = template_sha256
     if data_files:
         body["data_files"] = data_files
     if idempotency_key:
@@ -404,9 +434,17 @@ def test_validate_endpoint_yaml_parse_error(client: TestClient, db_session: Sess
 
 def test_validate_endpoint_template(client: TestClient, db_session: Session) -> None:
     headers, pid = _make_owner(client, db_session, "val_tpl")
+    # 模板走真实生命周期: 创建并发布后, 校验端点提交模板稳定引用
+    template_id, tpl_revision, tpl_sha = _publish_template(client, headers, TEMPLATE_YAML)
     resp = client.post(
         f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": TEMPLATE_YAML, "source": "template", "template_inputs": TEMPLATE_INPUTS},
+        json={
+            "source": "template",
+            "template_id": template_id,
+            "template_revision": tpl_revision,
+            "template_sha256": tpl_sha,
+            "template_inputs": TEMPLATE_INPUTS,
+        },
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
@@ -416,13 +454,30 @@ def test_validate_endpoint_template(client: TestClient, db_session: Session) -> 
     resp2 = client.post(
         f"/api/projects/{pid}/models/validate",
         json={
-            "model_yaml": TEMPLATE_YAML, "source": "template",
+            "source": "template",
+            "template_id": template_id,
+            "template_revision": tpl_revision,
+            "template_sha256": tpl_sha,
             "template_inputs": {"properties": {"not_declared": {"value": 1}}},
         },
         headers=headers,
     )
     assert resp2.status_code == 200, resp2.text
     assert resp2.json()["valid"] is False
+    # 摘要与权威内容不一致(候选引用的内容已失效) → validate 端点以聚合诊断表达
+    resp3 = client.post(
+        f"/api/projects/{pid}/models/validate",
+        json={
+            "source": "template",
+            "template_id": template_id,
+            "template_revision": tpl_revision,
+            "template_sha256": "0" * 64,
+            "template_inputs": TEMPLATE_INPUTS,
+        },
+        headers=headers,
+    )
+    assert resp3.status_code == 200, resp3.text
+    assert resp3.json()["valid"] is False
 
 
 def test_validate_data_file_missing_and_digest(client: TestClient, db_session: Session) -> None:
@@ -532,14 +587,32 @@ def test_save_with_temp_data_file_finalize(client: TestClient, db_session: Sessi
     }
     resp = _save(client, pid, headers, DATA_MODEL_YAML, data_files=[ref])
     assert resp.status_code == 201, resp.text
-    # 临时引用已解绑; 数据对象转为最终 owner(purpose=data:load_data)
+    # 临时引用已解绑; 内容锁: 最终 owner 持有重新生成的规范数据对象
+    # (purpose=data:load_data), 原始临时对象解绑后进入孤儿生命周期
     assert find_refs_by_entity_type(db_session, "project_model_temp") == []
     final_refs = find_refs_by_entity_type(db_session, "project_model")
     data_purposes = [r["purpose"] for r in final_refs]
     assert "data:load_data" in data_purposes
+    data_refs = [r for r in final_refs if r["purpose"] == "data:load_data"]
+    assert len(data_refs) == 1
+    # 内容锁: 规范数据对象绑定最终 _N 模型(device_id 与内容摘要一致)
+    locked = object_info(db_session, int(data_refs[0]["object_id"]))
+    assert locked["status"] == "stored"
+    assert locked["ref_count"] == 1
+    from iesplan.storage import get_object
+    from iesplan.devices import content_sha256
+    from iesplan.devices.datacontract2 import parse_data_file_v2
+
+    parsed, _diags = parse_data_file_v2(get_object(db_session, int(data_refs[0]["object_id"])))
+    assert parsed is not None
+    assert parsed.meta.device_id == "acme.device.profile_load_1"
+    model = db_session.execute(
+        select(ProjectModel).where(ProjectModel.project_id == pid)
+    ).scalar_one()
+    assert parsed.meta.device_content_sha256 == model.content_sha256
+    # 原始临时对象解绑(不再被本项目模型引用)
     handle = object_info(db_session, int(ref["object_id"]))
-    assert handle["status"] == "stored"
-    assert handle["ref_count"] == 1
+    assert handle["status"] == "orphaned"
 
 
 def test_save_validation_failure_no_save_no_number(client: TestClient, db_session: Session) -> None:
@@ -668,19 +741,37 @@ def test_save_permissions_and_project_state(client: TestClient, db_session: Sess
 def test_template_and_direct_yaml_converge(client: TestClient, db_session: Session) -> None:
     headers, pid = _make_owner(client, db_session, "sv_conv")
     r_direct = _save(client, pid, headers, DIRECT_EQ_YAML)
-    r_tpl = _save(
-        client, pid, headers, TEMPLATE_YAML,
-        source="template", template_inputs=TEMPLATE_INPUTS,
-    )
     assert r_direct.status_code == 201, r_direct.text
+    # 模板走真实生命周期: 创建草稿 → 发布不可变 revision → 保存时提交模板引用
+    template_id, tpl_revision, tpl_sha = _publish_template(client, headers, TEMPLATE_YAML)
+    r_tpl = _save(
+        client, pid, headers, "",
+        source="template",
+        template_id=template_id,
+        template_revision=tpl_revision,
+        template_sha256=tpl_sha,
+        template_inputs=TEMPLATE_INPUTS,
+    )
     assert r_tpl.status_code == 201, r_tpl.text
     # 同一用例、同一编号域: _1 / _2
     assert r_direct.json()["project_model"]["suffix"] == 1
     assert r_tpl.json()["project_model"]["suffix"] == 2
     assert r_tpl.json()["project_model"]["source"] == "template"
     assert r_direct.json()["project_model"]["template_sha256"] is None
-    assert len(r_tpl.json()["project_model"]["template_sha256"]) == 64
-    assert len(r_tpl.json()["project_model"]["inputs_sha256"]) == 64
+    tpl_model = r_tpl.json()["project_model"]
+    assert tpl_model["template_id"] == template_id
+    assert tpl_model["template_revision"] == tpl_revision
+    assert len(tpl_model["template_sha256"]) == 64
+    assert len(tpl_model["inputs_sha256"]) == 64
+    # 最终回执完整保留模板溯源与实例化器算法标识
+    receipt = r_tpl.json()["receipt"]
+    assert receipt["template_id"] == template_id
+    assert receipt["template_revision"] == tpl_revision
+    assert receipt["template_sha256"] == tpl_sha
+    assert receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
+    assert "inputs_sha256" in receipt
+    assert "candidate_content_sha256" in receipt
+    assert "instantiator" not in r_direct.json()["receipt"]
     # 等值语义: 候选校验级规范摘要一致(去后缀后的基础摘要);
     # 回执结构按来源不同(模板回执含 instantiator/追溯摘要), 规范摘要必须一致
     owner = identity_user(db_session, "sv_conv")

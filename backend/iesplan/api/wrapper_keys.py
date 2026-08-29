@@ -125,6 +125,26 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
         {"duplicate", "project_model", "project_revision", "receipt"}
     ),  # 幂等重放时 duplicate 存在, 登记并集
     "delete_project_model_endpoint": frozenset({"deleted", "ok", "project_revision"}),
+    # ---- model_templates.py (切片 dm2: 用户自定义模型模板生命周期) ----
+    "create_template_endpoint": frozenset({"template"}),
+    "list_templates_endpoint": frozenset({"templates"}),
+    "list_available_templates_endpoint": frozenset({"items"}),
+    "get_template_endpoint": frozenset(
+        {"template", "document", "diagnostics"}
+    ),  # application.model_templates.get_template_detail
+    "save_template_draft_endpoint": frozenset({"template"}),
+    "validate_template_endpoint": frozenset({"diagnostics", "valid"}),
+    "publish_template_endpoint": frozenset(
+        {"duplicate", "revision"}
+    ),  # 相同内容/幂等键重放时 duplicate 存在, 登记并集
+    "disable_template_endpoint": frozenset({"template"}),
+    "enable_template_endpoint": frozenset({"template"}),
+    "delete_template_endpoint": frozenset(
+        {"deleted", "ok"}
+    ),  # application.model_templates.delete_template_draft
+    "get_template_revision_endpoint": frozenset(
+        {"template", "revision", "document", "receipt", "summary", "diagnostics"}
+    ),  # application.model_templates.get_template_revision
     # ---- results.py ----
     "get_result_endpoint": frozenset({"result"}),  # services.results.result_view
     "list_assessments_endpoint": frozenset({"items", "total"}),

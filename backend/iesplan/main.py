@@ -266,6 +266,7 @@ def _register_business_routers(application: FastAPI) -> None:
         exports,
         health,
         model,
+        model_templates,
         objects,
         project_models,
         projects,
@@ -284,6 +285,8 @@ def _register_business_routers(application: FastAPI) -> None:
     application.include_router(projects.router)
     # 项目模型候选门禁与保存(切片 dm2-A)
     application.include_router(project_models.router)
+    # 用户自定义模型模板(切片 dm2: 完整生命周期 + 项目模板目录)
+    application.include_router(model_templates.router)
     # 系统模型(U04) + 设备类型注册表(公开)
     application.include_router(model.registry_router)
     application.include_router(model.model_router)

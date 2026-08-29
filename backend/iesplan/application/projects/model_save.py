@@ -66,6 +66,10 @@ from iesplan.storage import (
     object_info,
     put_object,
 )
+from iesplan.application.model_templates import (
+    TEMPLATE_OWNER_NAMESPACE,
+    resolve_template_revision,
+)
 
 #: 临时 owner 命名空间(上传会话隔离区; 保存成功 finalize 后解绑)
 TEMP_OWNER_NAMESPACE: str = "project_model_temp"
@@ -147,6 +151,8 @@ class CandidateValidation:
     receipt: dict[str, Any] | None = None
     template_sha256: str | None = None
     inputs_sha256: str | None = None
+    #: 模板溯源(模板稳定 ID / 精确 revision / 摘要 / schema_version; 模板来源时非空)
+    template_provenance: dict[str, Any] | None = None
     data_files: tuple[DataFileRef, ...] = ()
 
     @property
@@ -209,6 +215,46 @@ def _parse_candidate_yaml(model_yaml: str) -> tuple[Mapping[str, Any] | None, li
     return raw, diags
 
 
+def _load_template_authoritative_document(
+    db: Session,
+    user,
+    template_id: str,
+    template_revision: int,
+    template_sha256: str,
+) -> tuple[Mapping[str, Any], dict[str, Any]]:
+    """读取项目模型候选引用的权威模板内容(经对象存储门面)。
+
+    模板来源候选只提交稳定模板 ID、精确 revision 与 content_sha256, 后端
+    从模板 revision 的对象引用读取权威规范字节; 候选携带的摘要只作二次
+    确认(不一致 → 409, 内容已失效)。返回 (模板原始映射, 模板溯源)。
+    """
+    ref = resolve_template_revision(db, user, template_id, template_revision, template_sha256)
+    raw = get_object(db, ref.yaml_object_id)
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise AppError(
+            "模板 revision 对象损坏",
+            code="SYS-STORE-001",
+            message_key="ies.diag.store.corrupt",
+            location={"object_type": "model_template", "object_id": str(ref.yaml_object_id)},
+        ) from None
+    if not isinstance(parsed, Mapping):
+        raise AppError(
+            "模板 revision 对象形态非法",
+            code="SYS-STORE-001",
+            message_key="ies.diag.store.corrupt",
+            location={"object_type": "model_template", "object_id": str(ref.yaml_object_id)},
+        )
+    provenance = {
+        "template_id": template_id,
+        "template_revision": ref.revision,
+        "template_sha256": ref.content_sha256,
+        "template_schema_version": ref.schema_version,
+    }
+    return parsed, provenance
+
+
 def _parse_candidate_document(
     raw: Mapping[str, Any], source: str, template_inputs: Mapping[str, Any] | None, file: str
 ) -> tuple[
@@ -240,7 +286,6 @@ def _parse_candidate_document(
     assert doc is not None
     text = canonical_bytes(doc).decode("utf-8")
     return doc, [], text, content_sha256(doc), canonical_receipt(doc), None, None
-
 
 def _validate_data_files(
     db: Session,
@@ -332,6 +377,9 @@ def validate_candidate(
     *,
     model_yaml: str,
     source: str = MODEL_SOURCE_DIRECT,
+    template_id: str | None = None,
+    template_revision: int | None = None,
+    template_sha256: str | None = None,
     template_inputs: Mapping[str, Any] | None = None,
     data_files: tuple[DataFileRef, ...] = (),
 ) -> CandidateValidation:
@@ -340,6 +388,11 @@ def validate_candidate(
     依次执行: 项目 view 授权 → YAML 安全解析 → devices 2.0 完整校验(或模板
     实例化) → 配套数据文件存在/摘要/归属校验。任何失败聚合诊断返回, 不写
     对象、不登记清单、不分配编号。
+
+    ``source=template`` 时若携带模板稳定 ID/精确 revision/内容摘要, 后端
+    从模板 revision 读取权威内容并实例化(候选提交的 model_yaml 被覆盖为
+    权威规范字节, 不信任客户端自带的模板字节); 未携带模板引用时为旧契约
+    路径(model_yaml 即模板 YAML, 校验用, 正式保存仍以权威内容为准)。
     """
     project_service.ensure_access(db, user, project_id, "view")
     if source not in (MODEL_SOURCE_DIRECT, MODEL_SOURCE_TEMPLATE):
@@ -348,9 +401,31 @@ def validate_candidate(
             diagnostics=[_diag(PROJ_MDL_YAML_PARSE, f"未知来源: {source!r}", field="source",
                                params={"expected": "direct_yaml|template", "actual": source})],
         )
-    raw, diags = _parse_candidate_yaml(model_yaml)
+    raw: Mapping[str, Any] | None = None
+    provenance: dict[str, Any] | None = None
+    if source == MODEL_SOURCE_TEMPLATE and template_id and template_revision and template_sha256:
+        try:
+            template_raw, provenance = _load_template_authoritative_document(
+                db, user, template_id, template_revision, template_sha256
+            )
+        except (AppError, ConflictError, NotFoundError) as exc:
+            return CandidateValidation(
+                ok=False,
+                diagnostics=[_diag(
+                    exc.code, exc.message_key or str(exc), field="template_id",
+                    params={"template_id": template_id, "template_revision": template_revision,
+                            "detail": str(exc)},
+                )],
+            )
+        # 权威模板字节为规范 JSON: 直接 json.loads(跳过 yamlmini, 避免 JSON
+        # 与 YAML 安全子集解析差异)
+        raw = template_raw
     if raw is None:
-        return CandidateValidation(ok=False, diagnostics=diags)
+        raw, diags = _parse_candidate_yaml(model_yaml)
+        if raw is None:
+            return CandidateValidation(ok=False, diagnostics=diags)
+    else:
+        diags = []
     doc, parse_diags, canonical_text, sha256, receipt, tpl_sha, inputs_sha = _parse_candidate_document(
         raw, source, template_inputs, file="<candidate>"
     )
@@ -367,6 +442,7 @@ def validate_candidate(
         receipt=receipt,
         template_sha256=tpl_sha,
         inputs_sha256=inputs_sha,
+        template_provenance=provenance,
         data_files=data_files,
     )
 
@@ -471,6 +547,81 @@ def _load_stored_receipt(db: Session, model: ProjectModel) -> dict[str, Any]:
     return parsed
 
 
+def _finalize_data_files(
+    db: Session,
+    data_files: tuple[DataFileRef, ...],
+    base_doc: DeviceModelDocument,
+    final_doc: DeviceModelDocument,
+) -> dict[str, Any]:
+    """把配套数据文件按最终 _N 模型锁定并落盘(内容锁)。
+
+    返回 ``{data_ref: ObjectHandle}``: 数据区(列/单位/step/数值范围)以
+    基础文档校验(原始文件头按基础 ID 声明), 落盘字节的元数据改写为最终
+    ``device_id`` 与最终 ``device_content_sha256`` —— 编号分配后的模型与其
+    配套数据形成可复核的内容锁。失败抛 AppError, 由调用方整体回滚。
+    """
+    from iesplan.devices.datacontract2 import (
+        DeviceData2Meta,
+        canonicalize_device_data_v2,
+        serialize_metadata_v2,
+    )
+
+    handles: dict[str, Any] = {}
+    for ref in data_files:
+        raw = get_object(db, ref.object_id)
+        # 数据区校验: 与原始文件头(基础 ID)一致; 最终模型不允许改变预定义
+        # 接口列/单位/step/数值范围(只允许 device.id 与内容摘要变化)
+        result = canonicalize_device_data_v2(raw, base_doc, expected_data_ref=ref.data_ref)
+        blocking = [d for d in result.diagnostics if d.blocking]
+        if blocking:
+            raise AppError(
+                "配套数据文件与最终模型内容锁不一致",
+                code="SYS-STORE-001",
+                message_key="ies.diag.store.corrupt",
+                params={"data_ref": ref.data_ref,
+                        "diagnostics": [d.to_dict() for d in blocking]},
+                location={"object_type": "project_model", "data_ref": ref.data_ref},
+            )
+        meta = result.meta
+        assert final_doc.device is not None
+        # 最终文件元数据: 绑定最终 _N 模型的 device_id 与内容摘要(内容锁)
+        locked_meta = DeviceData2Meta(
+            schema_id=meta.schema_id, schema_version=meta.schema_version,
+            dataset_id=meta.dataset_id,
+            device_id=final_doc.device.id,
+            device_content_sha256=content_sha256(final_doc),
+            source_mode=meta.source_mode, resolution=meta.resolution,
+            period=meta.period,
+            project_baseline_sha256=meta.project_baseline_sha256,
+            point_count=meta.point_count, prepared=meta.prepared,
+            units=meta.units, notes=meta.notes,
+            declared_columns=meta.declared_columns,
+        )
+        text = result.canonical_csv_bytes().decode("utf-8")
+        lines = text.split("\n")
+        header_idx = next(
+            (i for i, line in enumerate(lines) if line.strip() and not line.strip().startswith("#")),
+            len(lines),
+        )
+        locked_text = serialize_metadata_v2(locked_meta, column_order=meta.declared_columns or None)
+        locked_bytes = (locked_text + "\n".join(lines[header_idx:])).encode("utf-8")
+        # 内容锁闭合: 最终字节必须能按最终文档重新完整校验(无诊断)
+        verify = canonicalize_device_data_v2(locked_bytes, final_doc, expected_data_ref=ref.data_ref)
+        if any(d.blocking for d in verify.diagnostics):
+            raise AppError(
+                "配套数据文件最终字节无法通过内容锁校验",
+                code="SYS-STORE-001",
+                message_key="ies.diag.store.corrupt",
+                params={"data_ref": ref.data_ref,
+                        "diagnostics": [d.to_dict() for d in verify.diagnostics]},
+                location={"object_type": "project_model", "data_ref": ref.data_ref},
+            )
+        handle = put_object(db, locked_bytes, DATA_MEDIA_TYPE,
+                            source_category="project_model_data")
+        handles[ref.data_ref] = handle
+    return handles
+
+
 def _project_model_draft_refs(db: Session, project_id: int) -> list[dict[str, object]]:
     """项目草稿只保存模型清单引用，不复制模型正文。"""
     rows = db.execute(
@@ -496,6 +647,9 @@ def _save_project_model(
     *,
     model_yaml: str,
     source: str = MODEL_SOURCE_DIRECT,
+    template_id: str | None = None,
+    template_revision: int | None = None,
+    template_sha256: str | None = None,
     template_inputs: Mapping[str, Any] | None = None,
     data_files: tuple[DataFileRef, ...] = (),
     idempotency_key: str | None = None,
@@ -503,8 +657,11 @@ def _save_project_model(
 ) -> dict[str, Any]:
     """正式保存项目模型(候选校验 → 编号分配 → 规范化 → 原子保存)。
 
-    返回 ``{project_model, receipt, project_revision, duplicate}``。公共 application
-    用例拥有提交/回滚边界；任何一步失败不留下半文件、孤立引用或不可见已占编号。
+    模板来源候选提交模板稳定 ID、精确 revision、content_sha256 与 inputs,
+    后端读取权威模板内容并实例化(``model_yaml`` 为权威模板的规范字节);
+    直接 YAML 来源提交完整 ``model_yaml``。两条路径汇入同一候选校验与
+    保存用例。返回 ``{project_model, receipt, project_revision, duplicate}``;
+    公共 application 用例拥有提交/回滚边界。
     """
     project_service.ensure_access(db, user, project_id, "edit")
     project = db.get(Project, project_id)
@@ -540,6 +697,9 @@ def _save_project_model(
     validation = validate_candidate(
         db, user, project_id,
         model_yaml=model_yaml, source=source,
+        template_id=template_id,
+        template_revision=template_revision,
+        template_sha256=template_sha256,
         template_inputs=template_inputs, data_files=data_files,
     )
     if not validation.ok or validation.document is None:
@@ -551,6 +711,7 @@ def _save_project_model(
             },
             location={"object_type": "project_model", "project_id": project_id},
         )
+    template_provenance = validation.template_provenance
     document = validation.document
     base_device_id = document.device.id if document.device is not None else ""
 
@@ -567,6 +728,17 @@ def _save_project_model(
             location={"object_type": "project_model", "project_id": project_id},
         )
 
+    # 最终回执: 完整保留模板溯源(模板 ID/精确 revision/模板摘要/inputs 摘要/
+    # 实例化器算法标识/候选模型摘要)与最终模型摘要
+    final_receipt = dict(final_receipt)
+    if template_provenance is not None:
+        final_receipt["instantiator"] = "ies.device-model.instantiator@1.0.0"
+        final_receipt.update(template_provenance)
+        if validation.inputs_sha256 is not None:
+            final_receipt["inputs_sha256"] = validation.inputs_sha256
+        if validation.content_sha256:
+            final_receipt["candidate_content_sha256"] = validation.content_sha256
+
     # 对象写入(内容寻址; 先写字节与回执, 清单行建立后统一 attach 最终 owner)
     model_handle = put_object(
         db, canonical_text.encode("utf-8"), MODEL_MEDIA_TYPE,
@@ -576,6 +748,19 @@ def _save_project_model(
         db, _receipt_bytes(final_receipt), MODEL_MEDIA_TYPE,
         source_category="project_model_receipt",
     )
+
+    # 内容锁: 配套数据文件必须与最终 _N 模型一致(device_id / device_content_sha256 /
+    # 列 / 单位 / step 连续 / 有效区间)。数据区按基础文档校验(存在/摘要/归属/
+    # 内容), 落盘字节绑定最终 _N 模型(失败整体拒绝, 已占编号随事务回滚)。
+    lock_diags = _validate_data_files(db, data_files, document)
+    if lock_diags:
+        raise ModelCandidateRejectedError(
+            "",
+            params={"diagnostics": [d.to_dict() for d in lock_diags],
+                    "count": len(lock_diags)},
+            location={"object_type": "project_model", "project_id": project_id},
+        )
+    data_handles = _finalize_data_files(db, data_files, document, final_doc)
 
     model = ProjectModel(
         project_id=project_id,
@@ -588,7 +773,13 @@ def _save_project_model(
         model_object_id=model_handle.id,
         receipt_object_id=receipt_handle.id,
         source=source,
-        template_sha256=validation.template_sha256,
+        template_id=template_id,
+        template_revision=template_revision,
+        template_sha256=(
+            template_provenance["template_sha256"]
+            if template_provenance is not None
+            else None
+        ),
         inputs_sha256=validation.inputs_sha256,
         idempotency_key=idempotency_key,
         created_by=user.id,
@@ -609,8 +800,11 @@ def _save_project_model(
     attach(db, receipt_handle.id, FINAL_OWNER_NAMESPACE, model.id,
            ref_entity_type=FINAL_OWNER_NAMESPACE, purpose="receipt")
     for ref in validation.data_files:
-        attach(db, ref.object_id, FINAL_OWNER_NAMESPACE, model.id,
-               ref_entity_type=FINAL_OWNER_NAMESPACE, purpose=f"data:{ref.data_ref}")
+        handle = data_handles.get(ref.data_ref)
+        if handle is not None:
+            attach(db, handle.id, FINAL_OWNER_NAMESPACE, model.id,
+                   ref_entity_type=FINAL_OWNER_NAMESPACE, purpose=f"data:{ref.data_ref}")
+        # 原始临时对象不再属于本项目模型(引用解除, 进入孤儿生命周期)
         try:
             detach(db, ref.object_id, TEMP_OWNER_NAMESPACE, ref.upload_id,
                    ref_entity_type=TEMP_OWNER_NAMESPACE)
@@ -630,6 +824,8 @@ def _save_project_model(
                 "suffix": suffix,
                 "content_sha256": final_sha256,
                 "source": source,
+                "template_id": template_id,
+                "template_revision": template_revision,
                 "data_refs": [r.data_ref for r in validation.data_files],
             },
         )
@@ -660,6 +856,9 @@ def save_project_model(
     model_yaml: str,
     expected_revision: int,
     source: str = MODEL_SOURCE_DIRECT,
+    template_id: str | None = None,
+    template_revision: int | None = None,
+    template_sha256: str | None = None,
     template_inputs: Mapping[str, Any] | None = None,
     data_files: tuple[DataFileRef, ...] = (),
     idempotency_key: str | None = None,
@@ -673,6 +872,9 @@ def save_project_model(
             model_yaml=model_yaml,
             expected_revision=expected_revision,
             source=source,
+            template_id=template_id,
+            template_revision=template_revision,
+            template_sha256=template_sha256,
             template_inputs=template_inputs,
             data_files=data_files,
             idempotency_key=idempotency_key,
@@ -856,6 +1058,8 @@ def project_model_to_dict(model: ProjectModel) -> dict[str, Any]:
         "model_object_id": str(model.model_object_id),
         "receipt_object_id": str(model.receipt_object_id),
         "source": model.source,
+        "template_id": model.template_id,
+        "template_revision": model.template_revision,
         "template_sha256": model.template_sha256,
         "inputs_sha256": model.inputs_sha256,
         "created_by": str(model.created_by),

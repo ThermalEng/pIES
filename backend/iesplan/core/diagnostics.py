@@ -224,6 +224,15 @@ NEW_DIAG_CODES: dict[str, str] = {
     "PROJ-MDL-004": "最终设备 ID 无法通过身份校验: {final_id}(由基础 ID {base_device_id} 追加 _N 后缀后非法)",
     "PROJ-MDL-005": "候选模型校验失败, 保存被拒绝(不写项目模型目录、不登记清单、不分配编号)",
     "PROJ-MDL-006": "候选模型 YAML 解析失败: {detail}",
+    # 用户自定义模型模板域(application/model_templates 用例, 切片 dm2)。
+    # 草稿保存/发布共用同一校验门禁; 生命周期操作以标准错误信封返回。
+    "TPL-MDL-001": "模板 YAML 解析失败: {detail}",
+    "TPL-MDL-002": "模板校验失败, 保存/发布被拒绝(不落盘、不产生 revision)",
+    "TPL-MDL-003": "模板草稿已被其他操作更新(期望 {expected_revision}, 当前 {current_revision})",
+    "TPL-MDL-004": "模板或模板 revision 不存在",
+    "TPL-MDL-005": "模板当前状态不允许该生命周期操作: {status}",
+    "TPL-MDL-006": "模板没有可发布的草稿内容(需先保存草稿)",
+    "TPL-MDL-007": "已发布模板禁止删除(发布 revision 与内容证据必须保留)",
 }
 
 # ---------------------------------------------------------------------------
@@ -325,6 +334,18 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "PROJ-MDL-006": "model_yaml_parse",
         }.items()
     },
+    **{
+        code: "ies.diag.tpl." + suffix
+        for code, suffix in {
+            "TPL-MDL-001": "template_yaml_parse",
+            "TPL-MDL-002": "template_validation_failed",
+            "TPL-MDL-003": "template_revision_conflict",
+            "TPL-MDL-004": "template_not_found",
+            "TPL-MDL-005": "template_status_invalid",
+            "TPL-MDL-006": "template_revision_required",
+            "TPL-MDL-007": "template_already_published",
+        }.items()
+    },
 }
 
 # 每个码对应的修复建议键(独立于消息键维护)
@@ -412,6 +433,15 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     "PROJ-MDL-004": "ies.fix.proj.model_identity",
     "PROJ-MDL-005": "ies.fix.proj.model_validation",
     "PROJ-MDL-006": "ies.fix.proj.model_yaml",
+    **{
+        code: "ies.fix.tpl.template"
+        for code in ("TPL-MDL-001", "TPL-MDL-002")
+    },
+    "TPL-MDL-003": "ies.fix.tpl.revision_conflict",
+    "TPL-MDL-004": "ies.fix.tpl.not_found",
+    "TPL-MDL-005": "ies.fix.tpl.status_invalid",
+    "TPL-MDL-006": "ies.fix.tpl.revision_required",
+    "TPL-MDL-007": "ies.fix.tpl.already_published",
 }
 
 
