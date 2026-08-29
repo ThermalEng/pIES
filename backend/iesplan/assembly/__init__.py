@@ -57,6 +57,19 @@ from iesplan.assembly.validator import (
     validate_assembly_text,
     validate_project_export,
 )
+from iesplan.assembly.validator2 import (
+    CANON2_ALGORITHM_ID,
+    CANON2_ALGORITHM_VERSION,
+    PREDEFINED_SOURCE_MODES,
+    SCHEMA2_ID,
+    SCHEMA2_VERSION,
+    VALIDATOR2_ID,
+    VALIDATOR2_VERSION,
+    InterfaceNetworkResult,
+    NetworkReceipt,
+    ValidatedInterfaceNetwork,
+    validate_interface_network2,
+)
 
 __all__ = [
     "parse_assembly",
@@ -98,4 +111,16 @@ __all__ = [
     "MigrationResult",
     "migrate_assembly_text",
     "migrate_assembly_spec",
+    # 2.0 接口网络纯协议校验(ies.assembly 2.0.0 切片)
+    "SCHEMA2_ID",
+    "SCHEMA2_VERSION",
+    "VALIDATOR2_ID",
+    "VALIDATOR2_VERSION",
+    "CANON2_ALGORITHM_ID",
+    "CANON2_ALGORITHM_VERSION",
+    "PREDEFINED_SOURCE_MODES",
+    "NetworkReceipt",
+    "ValidatedInterfaceNetwork",
+    "InterfaceNetworkResult",
+    "validate_interface_network2",
 ]
