@@ -320,6 +320,14 @@ check('模板: 缺 template_id 抛 MapperError', (() => {
     return err.name === 'MapperError'
   }
 })())
+check('模板: 未知 status 抛 MapperError(§7.1 枚举严格)', (() => {
+  try {
+    md.templateSummaryFromServer({ ...catalogItem, status: 'archived' }, 'zh')
+    return false
+  } catch (err) {
+    return err.name === 'MapperError'
+  }
+})())
 
 const detailBody = {
   template: catalogItem,
@@ -387,6 +395,14 @@ check('保存: 响应缺 project_model 抛 MapperError', (() => {
   }
 })())
 check('保存: direct_yaml 来源', md.savedModelFromServer({ ...saveBody, project_model: { ...saveBody.project_model, source: 'direct_yaml', template_id: null } }).source === 'direct_yaml')
+check('保存: 未知 source 抛 MapperError(§7.1 枚举严格)', (() => {
+  try {
+    md.savedModelFromServer({ ...saveBody, project_model: { ...saveBody.project_model, source: 'yaml' } })
+    return false
+  } catch (err) {
+    return err.name === 'MapperError'
+  }
+})())
 
 // 项目模型清单行(projectModelFromServer)
 const rowSummary = md.projectModelFromServer(saveBody.project_model)

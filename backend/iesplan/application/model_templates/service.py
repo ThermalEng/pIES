@@ -356,7 +356,7 @@ def _read_template_document_mapping(db: Session, object_id: int) -> Mapping[str,
     text = _read_template_document(db, object_id)
     try:
         parsed = json.loads(text)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         raise AppError(
             "模板对象损坏",
             code="SYS-STORE-001",

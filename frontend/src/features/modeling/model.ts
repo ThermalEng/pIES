@@ -152,8 +152,6 @@ export interface SavedModelInfo {
   suffix: number
   base_device_id: string
   schema_version: string
-  /** 规范 YAML(正式保存响应不直接携带, 由模型对象读取; 保持空)。 */
-  canonical_yaml: string
   content_sha256: string
   summary: { property_count: number; interface_count: number; relation_count: number }
   /** 保存后的项目草稿修订。 */

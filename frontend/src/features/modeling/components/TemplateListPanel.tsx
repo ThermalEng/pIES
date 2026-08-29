@@ -52,7 +52,7 @@ export function TemplateListPanel({ templates, loading, error, selectedId, onSel
                 className={`ies-modeling__template-item${selectedId === t.template_id ? ' is-selected' : ''}`}
                 onClick={() => onSelect(t.template_id)}
               >
-                <span className="ies-modeling__template-name">{t.name}</span>
+                {t.name ? <span className="ies-modeling__template-name">{t.name}</span> : null}
                 <span className="ies-modeling__template-id">{t.template_id}</span>
                 <span className="ies-modeling__template-meta">
                   <Badge variant={t.has_inputs ? 'primary' : 'neutral'} size="sm" label={pt('ies.modeling.template_has_inputs')} />

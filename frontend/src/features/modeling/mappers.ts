@@ -482,10 +482,15 @@ export function templateSummaryFromServer(raw: unknown, locale: string): Templat
     throw new MapperError('模板列表项缺少 template_id')
   }
   void locale
+  // 枚举严格校验(§7.1): 枚举之外的值必须被拒绝, 不静默映射为合法值
+  const status = rec.status
+  if (status !== 'draft' && status !== 'published' && status !== 'disabled') {
+    throw new MapperError(`模板列表项 status 非法: ${String(status)}`)
+  }
   return {
     id: typeof rec.id === 'string' ? rec.id : '',
     template_id: rec.template_id,
-    status: rec.status === 'draft' || rec.status === 'published' || rec.status === 'disabled' ? rec.status : 'draft',
+    status,
     description: typeof rec.description === 'string' ? rec.description : null,
     draft_revision: typeof rec.draft_revision === 'number' ? rec.draft_revision : 0,
     draft_sha256: typeof rec.draft_sha256 === 'string' ? rec.draft_sha256 : null,
@@ -575,22 +580,6 @@ export function projectModelFromServer(raw: unknown): ProjectModelSummary {
   }
 }
 
-/** 模板详情响应(旧 {template, document} 形态兼容 → 移除前保留)? 由 templateDetailFromServer 取代。 */
-export function templateDocumentFromServer(body: unknown, locale: string): {
-  summary: TemplateSummary
-  inputs: InputNode[]
-  raw: Record<string, unknown>
-} {
-  const rec = asRecord(body)
-  const summaryRaw = asRecord(rec?.template)
-  if (!summaryRaw) throw new MapperError('模板详情缺少 template')
-  const document = asRecord(rec?.document)
-  if (!document) throw new MapperError('模板详情缺少 document')
-  const summary = templateSummaryFromServer(summaryRaw, locale)
-  const inputs = buildInputTree(document.inputs)
-  return { summary, inputs, raw: document }
-}
-
 /** 保存成功响应 {project_model, receipt, project_revision} → 前端 SavedModelInfo。 */
 export function savedModelFromServer(body: unknown): SavedModelInfo {
   const rec = asRecord(body)
@@ -600,6 +589,11 @@ export function savedModelFromServer(body: unknown): SavedModelInfo {
   }
   // 摘要计数从校验回执读取(权威); 回执缺失时保持 0 计数
   const receipt = asRecord(rec?.receipt)
+  // 枚举严格校验(§7.1): 未知 source 拒绝, 不静默映射为 direct_yaml
+  const source = model.source
+  if (source !== 'direct_yaml' && source !== 'template') {
+    throw new MapperError(`保存结果 source 非法: ${String(source)}`)
+  }
   const summary = {
     property_count:
       receipt && typeof receipt.property_count === 'number' ? receipt.property_count : 0,
@@ -615,11 +609,10 @@ export function savedModelFromServer(body: unknown): SavedModelInfo {
     suffix: typeof model.suffix === 'number' ? model.suffix : 0,
     base_device_id: typeof model.base_device_id === 'string' ? model.base_device_id : model.device_id,
     schema_version: '2.0.0',
-    canonical_yaml: '',
     content_sha256: model.content_sha256,
     summary,
     project_revision: typeof rec?.project_revision === 'number' ? rec.project_revision : 0,
-    source: (model.source === 'template' ? 'template' : 'direct_yaml') as 'direct_yaml' | 'template',
+    source,
     template_id: typeof model.template_id === 'string' ? model.template_id : null,
     template_revision: typeof model.template_revision === 'number' ? model.template_revision : null,
     duplicate: rec?.duplicate === true,
@@ -635,6 +628,8 @@ export function diagFromServer(raw: unknown): ModelDiagnostic | null {
   return {
     code: typeof rec.code === 'string' ? rec.code : 'MODEL-VAL-001',
     message_key: rec.message_key,
+    // 严重度未知时回退 'error'(合法枚举成员): 诊断必须保持可见,
+    // 丢弃整条诊断比徽章颜色降级更糟(与 source/status 的拒绝语义不同)
     severity: rec.severity === 'blocking' || rec.severity === 'warning' || rec.severity === 'info' ? rec.severity : 'error',
     blocking: rec.blocking === true,
     field: loc && typeof loc.field === 'string' ? loc.field : null,

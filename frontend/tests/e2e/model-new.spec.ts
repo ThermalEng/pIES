@@ -18,6 +18,8 @@
 // 实例化后候选文档(用户 inputs 合并、顶层 inputs 删除)的规范内容摘要 ——
 // 该值在前端用与后端 canonical_bytes 相同的算法(键排序 + 紧凑 JSON +
 // 非 ASCII 保留)计算, 并在测试中独立验证数据文件内容锁。
+// 固定规范化器: ies.device-model.canonical@2.0.0(回执字段); 若后端升级
+// 规范化器, 需同步本文件 canonicalJson 的字节输出(含 floatB 的 .0 后缀)。
 
 import { test, expect } from '@playwright/test'
 import type { Page } from '@playwright/test'
@@ -188,7 +190,7 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
     await createEngineer(apiCtx.request, username, password)
     const userToken = await loginToken(apiCtx.request, username, password)
-    const { templateId, revision } = await publishTemplate(apiCtx.request, userToken)
+    await publishTemplate(apiCtx.request, userToken)
     await apiCtx.close()
 
     const context = await browser.newContext()

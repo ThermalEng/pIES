@@ -195,20 +195,6 @@ export interface ProjectModelDto {
   created_at: string | null
 }
 
-/** 保存成功返回的最终模型(权威: 最终 _N ID、规范 YAML、摘要、项目 revision)。 */
-export interface ModelSummaryDto {
-  model_id: string
-  device_id: string
-  schema_version: string
-  /** 规范 YAML 文本。 */
-  canonical_yaml: string
-  /** 规范内容 SHA-256(小写 64 位十六进制)。 */
-  content_sha256: string
-  summary: { property_count: number; interface_count: number; relation_count: number }
-  /** 项目草稿修订(保存后更新)。 */
-  project_revision: number
-}
-
 /** 候选保存成功响应(单资源信封 {project_model, receipt, project_revision})。 */
 export interface CandidateSaveResultDto {
   project_model: ProjectModelDto

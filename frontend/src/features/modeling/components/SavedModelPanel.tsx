@@ -1,11 +1,10 @@
 /**
  * SavedModelPanel: 正式保存成功面板。
  *
- * 以后端返回为权威: 最终 _N ID、规范 YAML、内容摘要(SHA-256)、摘要计数、
- * 项目 revision。前端不预分配编号; 只有此时模型才进入项目模型列表并允许进入装配。
+ * 以后端返回为权威: 最终 _N ID、内容摘要(SHA-256)、摘要计数、项目 revision。
+ * 前端不预分配编号; 只有此时模型才进入项目模型列表并允许进入装配。
+ * (保存响应不含规范 YAML 文本, 面板不提供空内容的"展开"入口。)
  */
-
-import { useState } from 'react'
 
 import { pt } from '../../../i18n/pageMessages'
 import { Badge, Card } from '../../../components/ui'
@@ -16,7 +15,6 @@ export interface SavedModelPanelProps {
 }
 
 export function SavedModelPanel({ saved }: SavedModelPanelProps) {
-  const [showYaml, setShowYaml] = useState(false)
   return (
     <Card className="ies-modeling__saved" title={pt('ies.modeling.saved.title')}>
       <div className="ies-modeling__saved-grid">
@@ -46,12 +44,6 @@ export function SavedModelPanel({ saved }: SavedModelPanelProps) {
             })}
           </span>
         </div>
-      </div>
-      <div className="ies-modeling__saved-yaml">
-        <button type="button" className="ies-modeling__saved-toggle" onClick={() => setShowYaml((v) => !v)} aria-expanded={showYaml}>
-          {pt(showYaml ? 'ies.modeling.saved.hide' : 'ies.modeling.saved.show')}
-        </button>
-        {showYaml ? <pre className="ies-modeling__saved-pre">{saved.canonical_yaml}</pre> : null}
       </div>
       <p className="ies-modeling__saved-note">{pt('ies.modeling.saved.enter_list_note')}</p>
     </Card>
