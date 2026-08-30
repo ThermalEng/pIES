@@ -50,7 +50,7 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 
 目标：先把旧设备目录迁移到纯技术统一契约，再把规范装配到 solver 输入的转换收敛为确定性纯生成边界。
 
-1. 发布 `ies.device-model` `2.0.0` schema、受限方程语法、规范化规则和合法/非法样例；顶层只保留 `schema/device/properties/interfaces/equations`，设备不带独立版本、计算精度、价格或成本。
+1. 发布 `ies.device-model` `2.0.0` schema、受限方程语法、规范化规则和合法/非法样例；完成模型顶层只保留 `schema/schema_version/device/properties/interfaces/equations`，设备不带独立语义版本、计算精度、价格或成本。
 2. 一次性迁移内置设备、解析器、目录 descriptor、设备数据 CSV、装配、API/前端 contract 和测试；建立“候选校验成功后才分配 `_N` 编号并原子保存”的项目模型门禁，五类 interface 与三种 predefined 来源均有确定校验，旧 `1.0.0` 只允许离线迁移并生成回执，不运行期双读。
 3. 在项目创建时固定只含 `resolution/leap_year/scenario_mode` 的不可变项目计算基线；当前只支持单场景，不引入计算时区，典型日、周、年由计算过程截取。
 4. 建立基于项目计算基线的序列预备流程：原始输入允许不同采样步长，常量与周期数据确定性转换并展开为完整周期连续 `step`，预测数据由系统固定默认算法完成训练与预测；生成计算用序列文件、预备回执，并替换项目模型实例中的数据引用。
