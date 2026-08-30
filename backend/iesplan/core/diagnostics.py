@@ -233,6 +233,12 @@ NEW_DIAG_CODES: dict[str, str] = {
     "TPL-MDL-005": "模板当前状态不允许该生命周期操作: {status}",
     "TPL-MDL-006": "模板没有可发布的草稿内容(需先保存草稿)",
     "TPL-MDL-007": "已发布模板禁止删除(发布 revision 与内容证据必须保留)",
+    # 公开命名空间与稳定 ID（任务书 §一～§二）
+    "TPL-NS-001": "slug 格式非法: {slug}(期望 {expected})",
+    "TPL-NS-002": "device.id 与后端计算结果不一致: 期望 {expected}, 实际 {actual}",
+    "TPL-NS-003": "public_namespace 非法或缺失(客户端不得提交或覆盖命名空间)",
+    "TPL-NS-004": "模板稳定 ID 格式非法: {template_id}",
+    "TPL-NS-005": "模板 slug 已存在(同一用户 slug 唯一)",
 }
 
 # ---------------------------------------------------------------------------
@@ -344,6 +350,11 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "TPL-MDL-005": "template_status_invalid",
             "TPL-MDL-006": "template_revision_required",
             "TPL-MDL-007": "template_already_published",
+            "TPL-NS-001": "namespace_slug_invalid",
+            "TPL-NS-002": "namespace_device_id_mismatch",
+            "TPL-NS-003": "namespace_forbidden",
+            "TPL-NS-004": "namespace_stable_id_invalid",
+            "TPL-NS-005": "namespace_slug_conflict",
         }.items()
     },
 }
@@ -442,6 +453,7 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     "TPL-MDL-005": "ies.fix.tpl.status_invalid",
     "TPL-MDL-006": "ies.fix.tpl.revision_required",
     "TPL-MDL-007": "ies.fix.tpl.already_published",
+    **{code: "ies.fix.tpl.namespace" for code in ("TPL-NS-001", "TPL-NS-002", "TPL-NS-003", "TPL-NS-004", "TPL-NS-005")},
 }
 
 

@@ -134,14 +134,15 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     ),  # application.model_templates.get_template_detail
     "save_template_draft_endpoint": frozenset({"template"}),
     "validate_template_endpoint": frozenset({"diagnostics", "valid"}),
-    "publish_template_endpoint": frozenset(
-        {"duplicate", "revision"}
-    ),  # 相同内容/幂等键重放时 duplicate 存在, 登记并集
+    "publish_template_endpoint": frozenset({"duplicate", "revision"}),
     "disable_template_endpoint": frozenset({"template"}),
     "enable_template_endpoint": frozenset({"template"}),
-    "delete_template_endpoint": frozenset(
-        {"deleted", "ok"}
-    ),  # application.model_templates.delete_template_draft
+    "delete_template_endpoint": frozenset({"deleted", "ok"}),
+    "get_template_revision_endpoint": frozenset({"template", "revision", "document", "receipt", "summary", "diagnostics"}),
+    "list_draft_revisions_endpoint": frozenset({"draft_revisions"}),
+    "get_draft_revision_endpoint": frozenset({"id", "revision", "yaml_object_id", "canonical_sha256", "inputs_sha256", "source", "created_by", "created_at", "document"}),
+    "migrate_draft_endpoint": frozenset({"new_template_id", "old_template_id", "new_content_sha256", "old_content_sha256"}),
+    "migrate_published_endpoint": frozenset({"receipt", "duplicate"}),
     "get_template_revision_endpoint": frozenset(
         {"template", "revision", "document", "receipt", "summary", "diagnostics"}
     ),  # application.model_templates.get_template_revision

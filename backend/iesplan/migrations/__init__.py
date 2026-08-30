@@ -273,10 +273,152 @@ def _migrate_0001(conn: sa.Connection) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# 迁移 0003: 公开命名空间与不可变草稿历史（任务书 §一～§四）
+# ---------------------------------------------------------------------------
+
+_MIGRATION_0003_POSTGRES = """
+-- 用户公开命名空间（12 位小写 Crockford Base32，60 bit 熵；全局唯一）
+ALTER TABLE users ADD COLUMN IF NOT EXISTS public_namespace TEXT;
+ALTER TABLE users ADD CONSTRAINT ck_users_public_namespace
+    CHECK (public_namespace IS NULL OR public_namespace ~ '^[0-9a-hjkmnp-tv-z]{12}$');
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_public_namespace
+    ON users (public_namespace) WHERE public_namespace IS NOT NULL;
+
+-- 草稿不可变历史表（每次持久化形成新 revision）
+CREATE TABLE IF NOT EXISTS model_template_draft_revisions (
+    id BIGSERIAL PRIMARY KEY,
+    entry_id BIGINT NOT NULL REFERENCES model_templates(id),
+    revision BIGINT NOT NULL CHECK (revision >= 1),
+    yaml_object_id BIGINT NOT NULL REFERENCES objects(id),
+    canonical_sha256 TEXT NOT NULL CHECK (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+    inputs_sha256 TEXT CHECK (inputs_sha256 IS NULL OR inputs_sha256 ~ '^[0-9a-f]{64}$'),
+    source TEXT NOT NULL CHECK (source IN ('form','yaml_editor','upload','derived','migration')),
+    created_by BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    diagnostics_object_id BIGINT REFERENCES objects(id),
+    UNIQUE (entry_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_mtdr_entry ON model_template_draft_revisions (entry_id);
+
+-- 模板主表：当前草稿 revision 指针与最新发布 revision 指针（不可变历史的索引）
+ALTER TABLE model_templates ADD COLUMN IF NOT EXISTS current_draft_revision_id BIGINT
+    REFERENCES model_template_draft_revisions(id);
+ALTER TABLE model_templates ADD COLUMN IF NOT EXISTS current_published_revision_id BIGINT
+    REFERENCES model_template_revisions(id);
+
+-- 已发布模板离线迁移回执（旧 ID → 新 ID 映射、摘要、回执）
+CREATE TABLE IF NOT EXISTS template_migration_receipts (
+    id BIGSERIAL PRIMARY KEY,
+    old_template_id TEXT NOT NULL,
+    new_template_id TEXT NOT NULL,
+    entry_id BIGINT NOT NULL REFERENCES model_templates(id),
+    old_content_sha256 TEXT NOT NULL CHECK (old_content_sha256 ~ '^[0-9a-f]{64}$'),
+    new_content_sha256 TEXT NOT NULL CHECK (new_content_sha256 ~ '^[0-9a-f]{64}$'),
+    migrated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    migrated_by BIGINT NOT NULL REFERENCES users(id),
+    UNIQUE (old_template_id),
+    UNIQUE (new_template_id)
+);
+"""
+
+_MIGRATION_0003_SQLITE = """
+ALTER TABLE users ADD COLUMN public_namespace TEXT;
+
+CREATE TABLE IF NOT EXISTS model_template_draft_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id INTEGER NOT NULL REFERENCES model_templates(id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    yaml_object_id INTEGER NOT NULL REFERENCES objects(id),
+    canonical_sha256 TEXT NOT NULL CHECK (length(canonical_sha256) = 64),
+    inputs_sha256 TEXT,
+    source TEXT NOT NULL CHECK (source IN ('form','yaml_editor','upload','derived','migration')),
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    diagnostics_object_id INTEGER REFERENCES objects(id),
+    UNIQUE (entry_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_mtdr_entry ON model_template_draft_revisions (entry_id);
+
+ALTER TABLE model_templates ADD COLUMN current_draft_revision_id INTEGER REFERENCES model_template_draft_revisions(id);
+ALTER TABLE model_templates ADD COLUMN current_published_revision_id INTEGER REFERENCES model_template_revisions(id);
+
+CREATE TABLE IF NOT EXISTS template_migration_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_template_id TEXT NOT NULL,
+    new_template_id TEXT NOT NULL,
+    entry_id INTEGER NOT NULL REFERENCES model_templates(id),
+    old_content_sha256 TEXT NOT NULL CHECK (length(old_content_sha256) = 64),
+    new_content_sha256 TEXT NOT NULL CHECK (length(new_content_sha256) = 64),
+    migrated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    migrated_by INTEGER NOT NULL REFERENCES users(id),
+    UNIQUE (old_template_id),
+    UNIQUE (new_template_id)
+);
+"""
+
+
+def _migrate_0003(conn: sa.Connection) -> None:
+    """公开命名空间与不可变草稿历史（0003）。
+
+    - users.public_namespace：全局唯一 12 位 Crockford Base32；
+    - model_template_draft_revisions：不可变草稿历史；
+    - model_templates 指针列：当前草稿/发布 revision；
+    - template_migration_receipts：离线迁移回执。
+
+    幂等：Postgres 用 IF NOT EXISTS；SQLite 用 pragma 检查后 ADD COLUMN。
+    不在 db.py 中补列或改表（任务书 §三：禁止启动流程补列）。
+    """
+    if conn.dialect.name == "postgresql":
+        for stmt in _MIGRATION_0003_POSTGRES.split(";"):
+            stripped = stmt.strip()
+            if stripped:
+                conn.execute(sa_text(stripped))
+    else:
+        # SQLite: 先用 _ensure_columns 处理 ALTER TABLE（避免 duplicate column）
+        _ensure_columns(conn, "users", {"public_namespace": "TEXT"})
+        _ensure_columns(conn, "model_templates", {
+            "current_draft_revision_id": "INTEGER REFERENCES model_template_draft_revisions(id)",
+            "current_published_revision_id": "INTEGER REFERENCES model_template_revisions(id)",
+            "slug": "TEXT",
+            "public_namespace": "TEXT",
+        })
+        # 其余 DDL（建表、索引）可直接执行（IF NOT EXISTS 已处理）
+        for stmt in _MIGRATION_0003_SQLITE.split(";"):
+            stripped = stmt.strip()
+            if stripped and "ALTER TABLE" not in stripped:
+                conn.execute(sa_text(stripped))
+    # 既有用户一次性分配 namespace（CSPRNG + 碰撞重试，任务书 §三）
+    _allocate_namespaces_for_existing_users(conn)
+
+
+def _allocate_namespaces_for_existing_users(conn: sa.Connection) -> None:
+    """为既有用户一次性分配 public_namespace（全局唯一，碰撞重试）。"""
+    from iesplan.core.namespace import generate_namespace
+
+    # 检查 users 表是否存在（全新库可能尚未 create_all）
+    try:
+        rows = conn.execute(sa_text("SELECT id FROM users WHERE public_namespace IS NULL")).all()
+    except Exception:
+        return
+    for (uid,) in rows:
+        for _ in range(10):
+            ns = generate_namespace()
+            try:
+                conn.execute(
+                    sa_text("UPDATE users SET public_namespace = :ns WHERE id = :uid AND public_namespace IS NULL"),
+                    {"ns": ns, "uid": uid},
+                )
+                break
+            except Exception:
+                continue
+
+
 #: 有序迁移清单(version, name, upgrade)
 MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
     ("0002_model_template_lifecycle", "用户模型模板主表与不可变发布 revision 表", _migrate_0002),
+    ("0003_public_namespace_and_draft_history", "公开命名空间与不可变草稿历史", _migrate_0003),
 ]
 
 MIGRATION_VERSIONS: tuple[str, ...] = tuple(m[0] for m in MIGRATIONS)

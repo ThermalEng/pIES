@@ -278,9 +278,14 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
 # ---------------------------------------------------------------------------
 
 
+_token_ns_map: dict[str, str] = {}
+
 def _make_owner(client: TestClient, db: Session, name: str) -> tuple[dict, int]:
     user = make_user(db, name)
     headers = login_headers(client, user)
+    token = headers.get("Authorization", "").replace("Bearer ", "")
+    if token and getattr(user, 'public_namespace', None):
+        _token_ns_map[token] = user.public_namespace
     resp = client.post("/api/projects", json={"name": f"{name} 项目"}, headers=headers)
     assert resp.status_code == 201, resp.text
     return headers, resp.json()["project"]["id"]
@@ -288,7 +293,11 @@ def _make_owner(client: TestClient, db: Session, name: str) -> tuple[dict, int]:
 
 def _headers_for(client: TestClient, db: Session, username: str) -> dict:
     user = make_user(db, username)
-    return login_headers(client, user)
+    headers = login_headers(client, user)
+    token = headers.get("Authorization", "").replace("Bearer ", "")
+    if token and getattr(user, 'public_namespace', None):
+        _token_ns_map[token] = user.public_namespace
+    return headers
 
 
 def _upload_temp(client: TestClient, pid: int, headers: dict, data_ref: str = "load_data") -> dict:
@@ -302,11 +311,17 @@ def _upload_temp(client: TestClient, pid: int, headers: dict, data_ref: str = "l
     return resp.json()
 
 
-def _publish_template(client: TestClient, headers: dict, yaml_text: str) -> dict:
+def _publish_template(client: TestClient, headers: dict, yaml_text: str, slug: str = "electric-load") -> dict:
     """通过真实模板生命周期创建并发布模板, 返回 (template_id, revision, content_sha256)。"""
+    if "acme.device.electric_load" in yaml_text:
+        token = headers.get("Authorization", "").replace("Bearer ", "")
+        ns = _token_ns_map.get(token)
+        if ns:
+            from iesplan.core.namespace import build_stable_id as _bs
+            yaml_text = yaml_text.replace("acme.device.electric_load", _bs(ns, slug))
     resp = client.post(
         "/api/model-templates",
-        json={"model_yaml": yaml_text, "description": "e2e 模板"},
+        json={"slug": slug, "model_yaml": yaml_text, "description": "e2e 模板"},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text

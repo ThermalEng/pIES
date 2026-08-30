@@ -80,6 +80,7 @@ export default function CustomizationPage() {
   const [loading, setLoading] = useState(true)
   const [mode, setMode] = useState<EditorMode>('list')
   const [selected, setSelected] = useState<TemplateDto | null>(null)
+  const [slug, setSlug] = useState('')
   const [yamlText, setYamlText] = useState(TEMPLATE_SKELETON)
   const [description, setDescription] = useState('')
   const [diagnostics, setDiagnostics] = useState<ModelDiagnosticDto[]>([])
@@ -115,15 +116,18 @@ export default function CustomizationPage() {
         const detail = await getTemplateDetail(tpl.template_id)
         setYamlText(detail.document ? JSON.stringify(detail.document, null, 2) : TEMPLATE_SKELETON)
         setDescription(detail.template.description ?? '')
+        setSlug(detail.template.slug ?? '')
         setDiagnostics(detail.diagnostics)
       } catch (err) {
         setActionError(err instanceof Error ? err.message : String(err))
         setYamlText(TEMPLATE_SKELETON)
         setDescription('')
+        setSlug('')
       }
     } else {
       setYamlText(TEMPLATE_SKELETON)
       setDescription('')
+      setSlug('')
     }
     setMode('edit')
   }, [])
@@ -157,9 +161,18 @@ export default function CustomizationPage() {
     setBusy(true)
     setActionError(null)
     try {
+      // 创建时：从 slug 输入框取值；若为空则从 YAML 的 device.id 末段推断（容错）
+      let createSlug = slug.trim()
+      if (!selected && !createSlug) {
+        const m = yamlText.match(/^\s{2}id:\s*["']?([^"'\s#]+)/m)
+        if (m) {
+          const parts = m[1].split('.')
+          createSlug = parts[parts.length - 1] || ''
+        }
+      }
       const result = selected
         ? await saveTemplateDraft(selected.template_id, yamlText, selected.draft_revision, description)
-        : await createTemplate(yamlText, description || null)
+        : await createTemplate(createSlug || 'my-device', yamlText, description || null)
       setSelected(result)
       setDiagnostics([])
       await reload()
@@ -279,6 +292,8 @@ export default function CustomizationPage() {
               </div>
               <div className="ies-custom-card__meta">
                 {tpl.description ? <span className="ies-custom-card__desc">{tpl.description}</span> : null}
+                {tpl.slug ? <span>slug: {tpl.slug}</span> : null}
+                {tpl.public_namespace ? <span>ns: {tpl.public_namespace.slice(0, 6)}…</span> : null}
                 <span>
                   {pt('ies.custom.draft_rev')}: {tpl.draft_revision}
                 </span>
@@ -324,6 +339,32 @@ export default function CustomizationPage() {
               <Badge variant={selected.status === 'published' ? 'success' : 'neutral'} size="sm" label={pt(`ies.custom.status.${selected.status}`)} />
             ) : null}
           </div>
+
+          {!selected ? (
+            <>
+              <label className="ies-form-label" htmlFor="ies-custom-slug">
+                slug {pt('ies.custom.slug_hint')}
+              </label>
+              <input
+                id="ies-custom-slug"
+                className="ies-input"
+                value={slug}
+                onChange={(e) => setSlug(e.target.value)}
+                maxLength={64}
+                placeholder="my-heat-pump"
+                pattern="[a-z0-9]+([._-][a-z0-9]+)*"
+                aria-label="slug"
+              />
+            </>
+          ) : (
+            <div className="ies-custom-id-display">
+              <span>slug: {selected.slug ?? '—'}</span>
+              {' · '}
+              <span>namespace: {selected.public_namespace ?? '—'}</span>
+              {' · '}
+              <span>完整 ID: {selected.template_id}</span>
+            </div>
+          )}
 
           <label className="ies-form-label" htmlFor="ies-custom-yaml">
             {pt('ies.custom.yaml_label')}

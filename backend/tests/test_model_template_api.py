@@ -121,16 +121,33 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
         yield c
 
 
+_owner_ns_map: dict[int, str] = {}
+
 def _make_owner(client: TestClient, db: Session, name: str) -> dict:
     user = make_user(db, name)
-    return login_headers(client, user)
+    headers = login_headers(client, user)
+    # 记录用户 namespace 供 _create 重写旧 ID
+    ns = getattr(user, 'public_namespace', None)
+    if ns:
+        _owner_ns_map[id(headers)] = ns
+    return headers
+
+
+def _yaml_for_user(yaml_text: str, slug: str, headers: dict) -> str:
+    if "acme.device.electric_load" in yaml_text:
+        ns = _owner_ns_map.get(id(headers))
+        if ns:
+            from iesplan.core.namespace import build_stable_id
+            yaml_text = yaml_text.replace("acme.device.electric_load", build_stable_id(ns, slug))
+    return yaml_text
 
 
 def _create(client: TestClient, headers: dict, yaml_text: str = TEMPLATE_YAML,
-            description: str | None = "测试模板") -> dict:
+            description: str | None = "测试模板", slug: str = "electric-load") -> dict:
+    yaml_text = _yaml_for_user(yaml_text, slug, headers)
     resp = client.post(
         "/api/model-templates",
-        json={"model_yaml": yaml_text, "description": description},
+        json={"slug": slug, "model_yaml": yaml_text, "description": description},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
@@ -155,7 +172,8 @@ def _publish(client: TestClient, headers: dict, template_id: str,
 def test_create_template_draft(client: TestClient, db_session: Session) -> None:
     headers = _make_owner(client, db_session, "tpl_create")
     tpl = _create(client, headers)
-    assert tpl["template_id"] == "acme.device.electric_load"
+    assert tpl["template_id"].startswith("user.")
+    assert tpl["template_id"].endswith(".device.electric-load")
     assert tpl["status"] == "draft"
     assert tpl["draft_revision"] == 1
     assert tpl["published_revision"] == 0
@@ -164,7 +182,7 @@ def test_create_template_draft(client: TestClient, db_session: Session) -> None:
     from iesplan.storage import find_refs_by_entity_type
 
     refs = find_refs_by_entity_type(db_session, "model_template")
-    assert len(refs) == 1
+    assert len(refs) == 2  # draft_yaml + draft_revision diagnostics
     audit = db_session.execute(
         select(AuditLog).where(AuditLog.entity_type == "model_template")
     ).scalars().all()
@@ -173,17 +191,19 @@ def test_create_template_draft(client: TestClient, db_session: Session) -> None:
 
 def test_create_template_duplicate_id_conflict(client: TestClient, db_session: Session) -> None:
     headers = _make_owner(client, db_session, "tpl_dup")
-    _create(client, headers)
+    _create(client, headers, slug="electric-load")
+    yaml2 = _yaml_for_user(TEMPLATE_YAML, "electric-load", headers)
     resp = client.post(
-        "/api/model-templates", json={"model_yaml": TEMPLATE_YAML}, headers=headers
+        "/api/model-templates", json={"slug": "electric-load", "model_yaml": yaml2}, headers=headers
     )
     assert resp.status_code == 409, resp.text
 
 
 def test_create_template_missing_inputs_rejected(client: TestClient, db_session: Session) -> None:
     headers = _make_owner(client, db_session, "tpl_noin")
+    yaml_noin = _yaml_for_user(NO_INPUTS_YAML, "no-inputs-test", headers)
     resp = client.post(
-        "/api/model-templates", json={"model_yaml": NO_INPUTS_YAML}, headers=headers
+        "/api/model-templates", json={"slug": "no-inputs-test", "model_yaml": yaml_noin}, headers=headers
     )
     assert resp.status_code == 400, resp.text
     err = resp.json()["error"]
@@ -196,7 +216,8 @@ def test_create_template_invalid_yaml_rejected(client: TestClient, db_session: S
     headers = _make_owner(client, db_session, "tpl_bad")
     bad = TEMPLATE_YAML.replace("schema: ies.device-model",
                                 "schema: ies.device-model\nschema: ies.device-model")
-    resp = client.post("/api/model-templates", json={"model_yaml": bad}, headers=headers)
+    bad = _yaml_for_user(bad, "bad-yaml", headers)
+    resp = client.post("/api/model-templates", json={"slug": "bad-yaml", "model_yaml": bad}, headers=headers)
     assert resp.status_code == 400, resp.text
     assert resp.json()["error"]["code"] == "TPL-MDL-002"
 
@@ -218,7 +239,7 @@ def test_list_templates_and_detail(client: TestClient, db_session: Session) -> N
     # 契约: document 为已解析的嵌套 JSON 对象(前端模板详情契约形态)
     doc = body["document"]
     assert isinstance(doc, dict)
-    assert doc["device"]["id"] == "acme.device.electric_load"
+    assert doc["device"]["id"] == tpl["template_id"]
     assert "inputs" in doc
 
 
@@ -230,7 +251,7 @@ def test_template_permission_isolation(client: TestClient, db_session: Session) 
     for method, url, payload in (
         ("get", f"/api/model-templates/{tpl['template_id']}", None),
         ("put", f"/api/model-templates/{tpl['template_id']}",
-         {"model_yaml": TEMPLATE_YAML, "expected_revision": 1}),
+         {"model_yaml": _yaml_for_user(TEMPLATE_YAML, "electric-load", owner), "expected_revision": 1}),
         ("post", f"/api/model-templates/{tpl['template_id']}/publish",
          {"expected_revision": 1}),
         ("post", f"/api/model-templates/{tpl['template_id']}/disable", None),
@@ -255,9 +276,10 @@ def test_template_permission_isolation(client: TestClient, db_session: Session) 
 def test_update_draft_with_expected_revision(client: TestClient, db_session: Session) -> None:
     headers = _make_owner(client, db_session, "tpl_upd")
     tpl = _create(client, headers)
+    yaml_v2 = _yaml_for_user(TEMPLATE_V2_YAML, "electric-load", headers)
     resp = client.put(
         f"/api/model-templates/{tpl['template_id']}",
-        json={"model_yaml": TEMPLATE_V2_YAML, "expected_revision": 1,
+        json={"model_yaml": yaml_v2, "expected_revision": 1,
               "description": "更新说明"},
         headers=headers,
     )
@@ -271,9 +293,10 @@ def test_update_draft_with_expected_revision(client: TestClient, db_session: Ses
 def test_update_draft_revision_conflict(client: TestClient, db_session: Session) -> None:
     headers = _make_owner(client, db_session, "tpl_conf")
     tpl = _create(client, headers)
+    yaml_v2b = _yaml_for_user(TEMPLATE_V2_YAML, "electric-load", headers)
     resp = client.put(
         f"/api/model-templates/{tpl['template_id']}",
-        json={"model_yaml": TEMPLATE_V2_YAML, "expected_revision": 2},
+        json={"model_yaml": yaml_v2b, "expected_revision": 2},
         headers=headers,
     )
     assert resp.status_code == 409, resp.text
@@ -286,9 +309,10 @@ def test_update_draft_revision_conflict(client: TestClient, db_session: Session)
 def test_update_draft_validation_failure_keeps_content(client: TestClient, db_session: Session) -> None:
     headers = _make_owner(client, db_session, "tpl_fail")
     tpl = _create(client, headers)
+    yaml_noin2 = _yaml_for_user(NO_INPUTS_YAML, "electric-load", headers)
     resp = client.put(
         f"/api/model-templates/{tpl['template_id']}",
-        json={"model_yaml": NO_INPUTS_YAML, "expected_revision": 1},
+        json={"model_yaml": yaml_noin2, "expected_revision": 1},
         headers=headers,
     )
     assert resp.status_code == 400, resp.text
@@ -334,9 +358,10 @@ def test_publish_after_update_creates_new_revision(client: TestClient, db_sessio
     headers = _make_owner(client, db_session, "tpl_pub2")
     tpl = _create(client, headers)
     _publish(client, headers, tpl["template_id"], 1, key="pub-a")
+    yaml_v2 = _yaml_for_user(TEMPLATE_V2_YAML, "electric-load", headers)
     resp = client.put(
         f"/api/model-templates/{tpl['template_id']}",
-        json={"model_yaml": TEMPLATE_V2_YAML, "expected_revision": 1},
+        json={"model_yaml": yaml_v2, "expected_revision": 1},
         headers=headers,
     )
     assert resp.status_code == 200
@@ -356,9 +381,10 @@ def test_publish_idempotency_key_replay(client: TestClient, db_session: Session)
     tpl = _create(client, headers)
     body1 = _publish(client, headers, tpl["template_id"], 1, key="same-key")
     # 更新草稿后使用同一幂等键 → 仍返回第一次发布的 revision(不新增)
+    yaml_v2_idem = _yaml_for_user(TEMPLATE_V2_YAML, "electric-load", headers)
     client.put(
         f"/api/model-templates/{tpl['template_id']}",
-        json={"model_yaml": TEMPLATE_V2_YAML, "expected_revision": 1},
+        json={"model_yaml": yaml_v2_idem, "expected_revision": 1},
         headers=headers,
     )
     body2 = _publish(client, headers, tpl["template_id"], 2, key="same-key")
@@ -513,16 +539,16 @@ def test_validate_endpoint_exact_revision_and_reference_errors(
 
 def test_catalog_available_templates(client: TestClient, db_session: Session) -> None:
     headers = _make_owner(client, db_session, "tpl_cat")
+    tpl = _create(client, headers, slug="cat-test")
     # 草稿不出现在目录
-    _create(client, headers)
     resp = client.get("/api/model-templates/catalog", headers=headers)
     assert resp.json()["items"] == []
     # 发布后出现(同模板发布)
-    body = _publish(client, headers, "acme.device.electric_load", 1, key="cat-1")
+    body = _publish(client, headers, tpl["template_id"], 1, key="cat-1")
     resp2 = client.get("/api/model-templates/catalog", headers=headers)
     items = resp2.json()["items"]
     assert len(items) == 1
-    assert items[0]["template_id"] == "acme.device.electric_load"
+    assert items[0]["template_id"] == tpl["template_id"]
     assert items[0]["revision"]["revision"] == 1
     assert items[0]["revision"]["content_sha256"] == body["revision"]["content_sha256"]
     assert items[0]["status"] == "published"
@@ -537,8 +563,10 @@ def test_migrations_fresh_and_upgrade(tmp_path: Path) -> None:
     """0001→0002 全链迁移: 全新库直接到最新; 存量库(已执行 0001)增量升级。"""
     from iesplan.migrations import MIGRATION_VERSIONS, apply_migrations
 
-    # 全新库
+    # 全新库：需先建基表（users 等由 create_all 创建），再跑迁移
     fresh = create_engine(f"sqlite+pysqlite:///{tmp_path / 'fresh.db'}")
+    from iesplan.db import Base as _Base
+    _Base.metadata.create_all(fresh)
     applied = apply_migrations(fresh)
     assert applied == list(MIGRATION_VERSIONS)
     tables = {t.name for t in fresh.connect().exec_driver_sql(
@@ -548,13 +576,20 @@ def test_migrations_fresh_and_upgrade(tmp_path: Path) -> None:
     fresh.dispose()
     # 存量库: 先模拟只执行 0001(手动建表 + 台账), 再跑完整迁移
     legacy = create_engine(f"sqlite+pysqlite:///{tmp_path / 'legacy.db'}")
+    from iesplan.db import Base as _Base2
+    _Base2.metadata.create_all(legacy)
     with legacy.begin() as conn:
         conn.exec_driver_sql(
-            "CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        conn.exec_driver_sql(
+            "DELETE FROM schema_migrations"
         )
         conn.exec_driver_sql(
             "INSERT INTO schema_migrations (version, name) VALUES ('0001_project_model_manifest', '项目模型清单与编号序列表')"
         )
     applied2 = apply_migrations(legacy)
-    assert applied2 == ["0002_model_template_lifecycle"]
+    # 0003 也应被应用（公开命名空间与草稿历史）
+    assert "0002_model_template_lifecycle" in applied2
+    assert "0003_public_namespace_and_draft_history" in applied2
     legacy.dispose()
