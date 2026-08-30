@@ -51,7 +51,11 @@ export default function NewModelPage() {
   const [uploadError, setUploadError] = useState<string | null>(null)
 
   const templates = useTemplates()
-  const detail = useTemplateDocument(selectedTemplateId)
+  const selectedTemplate = useMemo(
+    () => templates.templates?.find((item) => item.template_id === selectedTemplateId) ?? null,
+    [templates.templates, selectedTemplateId],
+  )
+  const detail = useTemplateDocument(selectedTemplate)
   const form = useTemplateForm(detail.document)
   const yaml = useYamlForm(YAML_SKELETON)
   const save = useCandidateSave(projectId)

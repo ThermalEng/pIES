@@ -33,7 +33,7 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.audit import AuditLog  # noqa: E402
-from iesplan.models.model_template import ModelTemplate, ModelTemplateRevision  # noqa: E402
+from iesplan.models.model_template import ModelTemplateRevision  # noqa: E402
 
 PASSWORD = "Test12345"
 
@@ -455,7 +455,7 @@ def test_delete_published_rejected(client: TestClient, db_session: Session) -> N
 def test_validate_endpoint_direct_yaml(client: TestClient, db_session: Session) -> None:
     headers = _make_owner(client, db_session, "tpl_val")
     resp = client.post(
-        f"/api/model-templates/acme.device.electric_load/validate",
+        "/api/model-templates/acme.device.electric_load/validate",
         json={"model_yaml": TEMPLATE_YAML},
         headers=headers,
     )
@@ -463,13 +463,47 @@ def test_validate_endpoint_direct_yaml(client: TestClient, db_session: Session) 
     assert resp.json()["valid"] is True
     # 非法输入(无 inputs)→ 聚合诊断
     resp2 = client.post(
-        f"/api/model-templates/acme.device.electric_load/validate",
+        "/api/model-templates/acme.device.electric_load/validate",
         json={"model_yaml": NO_INPUTS_YAML},
         headers=headers,
     )
     assert resp2.status_code == 200
     assert resp2.json()["valid"] is False
     assert any(d["code"] == "TPL-MDL-001" for d in resp2.json()["diagnostics"])
+
+
+def test_validate_endpoint_exact_revision_and_reference_errors(
+    client: TestClient, db_session: Session,
+) -> None:
+    """精确发布版可重校验；错误引用走标准错误信封而非伪造校验结果。"""
+    headers = _make_owner(client, db_session, "tpl_val_rev")
+    tpl = _create(client, headers)
+    published = _publish(client, headers, tpl["template_id"], 1, key="val-rev")
+    revision = published["revision"]
+
+    ok = client.post(
+        f"/api/model-templates/{tpl['template_id']}/validate",
+        json={
+            "template_id": tpl["template_id"],
+            "template_revision": revision["revision"],
+            "template_sha256": revision["content_sha256"],
+        },
+        headers=headers,
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json() == {"valid": True, "diagnostics": []}
+
+    mismatch = client.post(
+        f"/api/model-templates/{tpl['template_id']}/validate",
+        json={
+            "template_id": tpl["template_id"],
+            "template_revision": revision["revision"],
+            "template_sha256": "0" * 64,
+        },
+        headers=headers,
+    )
+    assert mismatch.status_code == 409, mismatch.text
+    assert mismatch.json()["error"]["code"] == "SYS-STORE-004"
 
 
 # ---------------------------------------------------------------------------
@@ -507,8 +541,6 @@ def test_migrations_fresh_and_upgrade(tmp_path: Path) -> None:
     fresh = create_engine(f"sqlite+pysqlite:///{tmp_path / 'fresh.db'}")
     applied = apply_migrations(fresh)
     assert applied == list(MIGRATION_VERSIONS)
-    from iesplan.models.model_template import ModelTemplate
-
     tables = {t.name for t in fresh.connect().exec_driver_sql(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "model_templates" in tables

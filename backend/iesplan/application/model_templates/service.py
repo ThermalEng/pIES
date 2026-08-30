@@ -42,7 +42,6 @@ from iesplan.devices import (
     canonical_receipt,
     content_sha256,
     parse_device_model_v2,
-    to_dict,
 )
 from iesplan.models.audit import AuditLog
 from iesplan.models.model_template import (
@@ -377,14 +376,37 @@ def _load_diagnostics(db: Session, object_id: int | None) -> list[dict[str, Any]
     """读取草稿/revision 关联的聚合诊断 JSON(无诊断对象时返回空列表)。"""
     if object_id is None:
         return []
+    parsed = _read_json_object(db, object_id, expected_type=list)
+    if not all(isinstance(item, dict) for item in parsed):
+        raise _corrupt_template_object(object_id, "诊断对象包含非法条目")
+    return list(parsed)
+
+
+def _corrupt_template_object(object_id: int, message: str) -> AppError:
+    """构造统一的模板对象损坏错误；读取失败不得静默降级为空数据。"""
+    return AppError(
+        message,
+        code="SYS-STORE-001",
+        message_key="ies.diag.store.corrupt",
+        location={"object_type": "model_template", "object_id": str(object_id)},
+    )
+
+
+def _read_json_object(
+    db: Session,
+    object_id: int,
+    *,
+    expected_type: type[list] | type[Mapping],
+) -> Any:
+    """读取 JSON 对象并严格核对形态，损坏时返回标准系统错误。"""
     raw = get_object(db, object_id)
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-    return [d for d in parsed if isinstance(d, dict)]
+        raise _corrupt_template_object(object_id, "模板关联对象损坏") from None
+    if not isinstance(parsed, expected_type):
+        raise _corrupt_template_object(object_id, "模板关联对象形态非法")
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -624,10 +646,36 @@ def get_template_revision(db: Session, user, template_id: str, revision: int) ->
         "template": _template_to_dict(template),
         "revision": _revision_to_dict(row),
         "document": _read_template_document_mapping(db, row.yaml_object_id),
-        "receipt": json.loads(get_object(db, row.receipt_object_id).decode("utf-8")),
-        "summary": json.loads(get_object(db, row.summary_object_id).decode("utf-8")),
+        "receipt": _read_json_object(db, row.receipt_object_id, expected_type=Mapping),
+        "summary": _read_json_object(db, row.summary_object_id, expected_type=Mapping),
         "diagnostics": _load_diagnostics(db, row.diagnostics_object_id),
     }
+
+
+def validate_template_revision(
+    db: Session,
+    user,
+    template_id: str,
+    revision: int,
+    content_sha256_value: str,
+) -> TemplateValidation:
+    """重新校验一个精确发布 revision；引用与存储错误保持标准错误信封。
+
+    API 层不得直接读取对象存储。这里先按稳定引用解析并核对摘要，再经应用
+    门面读取不可变内容。对象损坏属于系统错误，不能伪装成无诊断的校验失败。
+    """
+    ref = resolve_template_revision(
+        db, user, template_id, revision, content_sha256_value,
+    )
+    document = _read_template_document_mapping(db, ref.yaml_object_id)
+    if document is None:  # 防御式分支；当前读取门面只会返回 Mapping 或抛错
+        raise AppError(
+            "模板 revision 对象损坏",
+            code="SYS-STORE-001",
+            message_key="ies.diag.store.corrupt",
+            location={"object_type": "model_template", "object_id": str(ref.yaml_object_id)},
+        )
+    return validate_template_raw(document)
 
 
 # ---------------------------------------------------------------------------

@@ -32,3 +32,4 @@ uv.lock
 # 装配契约随包发布的样例数据，不属于运行时 data/ 目录
 !backend/iesplan/assembly/samples/data/
 !backend/iesplan/assembly/samples/data/*.csv
+/.claude/

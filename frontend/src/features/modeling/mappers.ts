@@ -534,12 +534,20 @@ export function templateRevisionFromServer(raw: unknown): TemplateSummary['revis
   }
 }
 
-/** 模板详情响应 {template, document, diagnostics} → 前端 TemplateDetail。 */
+/**
+ * 模板草稿详情或精确 revision 详情 → 前端 TemplateDetail。
+ * 精确 revision 接口将 revision 与 template 分列返回；这里把它合入 summary，
+ * 使项目候选始终携带与 document 完全一致的 revision/hash。
+ */
 export function templateDetailFromServer(body: unknown, locale: string): TemplateDetail {
   const rec = asRecord(body)
   const summaryRaw = asRecord(rec?.template)
   if (!summaryRaw) throw new MapperError('模板详情缺少 template')
-  const summary = templateSummaryFromServer(summaryRaw, locale)
+  const exactRevision = rec?.revision
+  const summary = templateSummaryFromServer(
+    exactRevision === undefined ? summaryRaw : { ...summaryRaw, revision: exactRevision },
+    locale,
+  )
   const document = asRecord(rec?.document)
   const inputs = document ? buildInputTree(document.inputs) : []
   return {

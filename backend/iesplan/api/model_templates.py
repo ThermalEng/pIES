@@ -30,7 +30,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
@@ -46,15 +45,12 @@ from iesplan.application.model_templates import (
     list_available_templates,
     list_my_templates,
     publish_template,
-    resolve_template_revision,
     save_template_draft,
     set_template_status,
+    validate_template_revision,
     validate_template_yaml,
 )
-from iesplan.application.model_templates.service import validate_template_raw
-from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.db import get_db
-from iesplan.storage import get_object
 
 router = APIRouter(prefix="/api/model-templates", tags=["model-templates"])
 
@@ -84,7 +80,11 @@ class TemplateValidateRequest(BaseModel):
       对已发布的精确 revision 重新校验(不读取当前草稿)。
     """
 
-    model_yaml: str | None = Field(default=None, max_length=2_000_000, description="候选模板 YAML 文本(在线编辑)")
+    model_yaml: str | None = Field(
+        default=None,
+        max_length=2_000_000,
+        description="候选模板 YAML 文本(在线编辑)",
+    )
     template_id: str | None = Field(default=None, description="已发布模板稳定 ID")
     template_revision: int | None = Field(default=None, ge=1, description="精确发布 revision")
     template_sha256: str | None = Field(
@@ -188,30 +188,10 @@ def validate_template_endpoint(
     if payload.model_yaml is not None and payload.model_yaml.strip():
         validation = validate_template_yaml(payload.model_yaml)
     else:
-        # 对已发布精确 revision 重新校验(权威内容从对象存储读取)
-        try:
-            ref = resolve_template_revision(
-                db, user, template_id, payload.template_revision or 0,
-                payload.template_sha256 or "",
-            )
-        except (AppError, ConflictError, NotFoundError) as exc:
-            return {
-                "valid": False,
-                "diagnostics": [{
-                    "code": exc.code, "message_key": exc.message_key,
-                    "severity": "error", "blocking": True,
-                    "params": {"detail": str(exc)},
-                    "location": {"object_type": "model_template",
-                                 "template_id": template_id},
-                    "fix_hint_key": "", "ref_ids": [],
-                }],
-            }
-        raw = get_object(db, ref.yaml_object_id)
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return {"valid": False, "diagnostics": []}
-        validation = validate_template_raw(parsed)
+        validation = validate_template_revision(
+            db, user, template_id, payload.template_revision or 0,
+            payload.template_sha256 or "",
+        )
     return {
         "valid": validation.ok,
         "diagnostics": [d.to_dict() for d in validation.diagnostics],

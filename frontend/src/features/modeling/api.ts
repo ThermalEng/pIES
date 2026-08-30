@@ -3,7 +3,8 @@
  *
  * 端点清单(prefix /api):
  *   GET  /api/model-templates/catalog                    可用模板目录 → {items: [...]}
- *   GET  /api/model-templates/{template_id}              模板详情 → {template, document, diagnostics}
+ *   GET  /api/model-templates/{template_id}/revisions/{revision}
+ *                                                        固定发布版详情
  *   GET  /api/projects/{pid}/models                      项目模型清单 → {project_models: [...]}
  *   POST /api/projects/{pid}/models/validate             候选模型门禁 → {valid, diagnostics}
  *   POST /api/projects/{pid}/models/temp-files           临时数据文件上传(multipart)
@@ -44,9 +45,20 @@ export async function listTemplates(locale: string): Promise<TemplateSummary[]> 
   return rec.items.map((item) => templateSummaryFromServer(item, locale))
 }
 
-/** 模板详情(供表单生成: 递归解析 document.inputs 树)。 */
-export async function getTemplate(templateId: string, locale: string): Promise<TemplateDetail> {
-  const body = await request<unknown>(`/model-templates/${encodeURIComponent(templateId)}`)
+/**
+ * 精确发布版模板详情(供项目模型表单生成)。
+ *
+ * 项目建模必须读取目录选中时的不可变 revision，不能读取随后可能继续编辑的
+ * 管理草稿，否则表单 inputs 与保存请求携带的 revision/hash 会来自不同内容。
+ */
+export async function getTemplate(
+  templateId: string,
+  revision: number,
+  locale: string,
+): Promise<TemplateDetail> {
+  const body = await request<unknown>(
+    `/model-templates/${encodeURIComponent(templateId)}/revisions/${revision}`,
+  )
   return templateDetailFromServer(body, locale)
 }
 

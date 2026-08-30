@@ -46,15 +46,16 @@ export function useTemplates() {
   return { templates, loading, error, reload }
 }
 
-/** 选中模板详情(表单生成输入); 切换模板时丢弃旧详情, 取消旧请求。 */
-export function useTemplateDocument(templateId: string | null) {
+/** 选中模板的精确发布版详情; 切换模板时丢弃旧详情, 取消旧请求。 */
+export function useTemplateDocument(template: TemplateSummary | null) {
   const { locale } = useI18n()
   const [document, setDocument] = useState<TemplateDocument | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!templateId) {
+    const revision = template?.revision?.revision
+    if (!template || !revision) {
       setDocument(null)
       setError(null)
       return
@@ -62,7 +63,7 @@ export function useTemplateDocument(templateId: string | null) {
     let cancelled = false
     setLoading(true)
     setError(null)
-    getTemplate(templateId, locale)
+    getTemplate(template.template_id, revision, locale)
       .then((doc) => {
         if (!cancelled) setDocument(doc)
       })
@@ -78,7 +79,7 @@ export function useTemplateDocument(templateId: string | null) {
     return () => {
       cancelled = true
     }
-  }, [templateId, locale])
+  }, [template?.template_id, template?.revision?.revision, locale])
 
   return { document, loading, error }
 }

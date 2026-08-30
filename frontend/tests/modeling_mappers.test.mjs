@@ -337,6 +337,27 @@ const detailBody = {
 const detail = md.templateDetailFromServer(detailBody, 'zh')
 check('模板详情: 文档解析出 inputs 树', detail.inputs.length === 3 && detail.summary.template_id === 'ies.test.sample')
 check('模板详情: 诊断列表解析', Array.isArray(detail.diagnostics) && detail.diagnostics.length === 0)
+const exactRevision = {
+  id: '19',
+  revision: 3,
+  schema_version: '2.0.0',
+  content_sha256: 'ef'.repeat(32),
+  inputs_sha256: 'ab'.repeat(32),
+  input_count: 3,
+  yaml_object_id: '31',
+  receipt_object_id: '32',
+  summary_object_id: '33',
+  published_by: '5',
+  published_at: '2026-08-30T00:00:00Z',
+}
+const exactDetail = md.templateDetailFromServer(
+  { template: { ...catalogItem, revision: undefined }, revision: exactRevision, document: detailBody.document, diagnostics: [] },
+  'zh',
+)
+check(
+  '精确 revision 详情: 独立 revision 字段合入模板摘要',
+  exactDetail.summary.revision?.revision === 3 && exactDetail.summary.content_sha256 === exactRevision.content_sha256,
+)
 check('模板详情: 缺 template 抛 MapperError', (() => {
   try {
     md.templateDetailFromServer({ document: {} }, 'zh')

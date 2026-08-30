@@ -19,6 +19,7 @@ from iesplan.application.model_templates.service import (
     resolve_template_revision,
     save_template_draft,
     set_template_status,
+    validate_template_revision,
     validate_template_yaml,
 )
 
@@ -36,5 +37,6 @@ __all__ = [
     "resolve_template_revision",
     "save_template_draft",
     "set_template_status",
+    "validate_template_revision",
     "validate_template_yaml",
 ]
