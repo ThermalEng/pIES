@@ -1,4 +1,4 @@
-"""不可变表触发器 DDL(字符串常量, 01-db-schema.md 第0节三道防线)。
+"""不可变表触发器 DDL（字符串常量，三道防线见 ARCHITECTURE_CONSTITUTION.md §11 数据库与持久化/§16 安全与审计 与 modules/persistence.md）。
 
 三道防线:
 1. 应用层只允许该实体的唯一写入单元(U01-U16)发 INSERT;
@@ -8,12 +8,12 @@
 
 本模块提供 SQL 文本常量, 由 ``db.init_db`` 的 ``_deploy_immutable_triggers`` 在
 PostgreSQL 下幂等执行(先 DROP FUNCTION IF EXISTS ... CASCADE 再重建), SQLite
-测试库跳过。不可变表清单与 01 §11 完全一致。
+测试库跳过。不可变表清单以本模块常量与迁移为准（见 modules/persistence.md §必须遵循的规范）。
 """
 
 from __future__ import annotations
 
-#: 不可变表清单(仅 INSERT, 禁止 UPDATE/DELETE)——01 §11 权威列表
+#: 不可变表清单（仅 INSERT，禁止 UPDATE/DELETE）
 IMMUTABLE_TABLES: tuple[str, ...] = (
     "auth_events",
     "admin_maintenance_actions",

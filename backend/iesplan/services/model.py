@@ -1,6 +1,6 @@
 """系统模型服务(U04 模型写入单元): 设备/端口/连接写入、拓扑校验与图内容寻址。
 
-- 写入目标为关系模型表(01-db-schema 第 4 节): system_graphs / devices / ports / connections;
+- 写入目标为关系模型表（见 modules/persistence.md；表见 models/model.py）: system_graphs / devices / ports / connections;
 - 设备类型与参数 schema 以受控注册表(04 §3)为唯一事实源, 类型未注册/参数越界一律拒绝;
 - 端口按设备类型的能源载体自动生成(如 heat_pump → electric_in/heat_out/cool_out);
 - 连接校验: 能源类型一致 + 方向兼容(源→汇) + 同项目同图 + 无重复, 失败返回可定位诊断;

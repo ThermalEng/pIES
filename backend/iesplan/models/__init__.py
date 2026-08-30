@@ -1,6 +1,6 @@
 """ORM 模型包: 全部 39 张表的 SQLAlchemy 2.0 声明。
 
-表域分布(与 01-db-schema.md 章节对应):
+表域分布(领域所有者见 modules/persistence.md 与各模型模块 docstring):
 - identity.py   第1节身份: users / roles / user_roles / credentials / window_sessions / auth_events
 - project.py    第2、3节权限与项目: admin_maintenance_actions / projects / drafts /
                 project_versions / version_refs

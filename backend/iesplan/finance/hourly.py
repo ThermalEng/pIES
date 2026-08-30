@@ -1,4 +1,4 @@
-"""逐时运行 → 财务数据(03-module-decoupling.md §7.3/§7.4,意见第 6 条)。
+"""逐时运行 → 财务数据（见 modules/finance.md 与 ARCHITECTURE_CONSTITUTION.md §4.6）。
 
 输入为计算模块的逐时 flows(费用列 cost_buy/cost_gas/revenue_sell,单位 CNY/步,
 SI 已归一)+ 年度 KPI(buy_cost/gas_cost/sell_revenue/total_op_cost/annual_*_kwh)

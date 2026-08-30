@@ -1,6 +1,6 @@
 """系统模型域(U04 模型写入单元): system_graphs / devices / ports / connections。
 
-对应 01-db-schema.md 第4节。
+领域归属与约束见 manual/developer-guide/zh-CN/modules/persistence.md 与 ARCHITECTURE_CONSTITUTION.md §11 数据库与持久化。
 """
 
 from __future__ import annotations

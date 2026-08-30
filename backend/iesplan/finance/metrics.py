@@ -1,7 +1,6 @@
 """财务指标模块:IRR 求根分类与税后现金流构建(自 metrics/financial.py 迁入,签名与 Decimal 语义不变)。
 
-依据 03-module-decoupling.md §7(财务计算模块)与 02-calc-model.md §5.2/§5.3/§5.4/附录 B
-(IRR 语义与线性化前提、基准方案与净收益、税后现金流 ATCF、默认参数:贴现率 8%、税率 25%、折旧年限 10)。
+依据 modules/finance.md 与 ARCHITECTURE_CONSTITUTION.md §4.6（IRR 语义、基准方案与净收益、税后现金流 ATCF；默认参数见 FinanceParams）。
 
 金额一律使用 Decimal;内部数值求根使用 numpy float64。
 """
