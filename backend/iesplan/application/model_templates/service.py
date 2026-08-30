@@ -211,7 +211,7 @@ def _validate_device_id_match(yaml_device_id: str, expected_id: str) -> None:
     """校验 YAML 中的 device.id 与后端计算结果一致，不一致返回阻断诊断。"""
     if yaml_device_id != expected_id:
         err = AppError(
-            f"device.id 与后端计算结果不一致",
+            "device.id 与后端计算结果不一致",
             code=TPL_NS_ID_MISMATCH,
             message_key="ies.diag.tpl.api.device_id_mismatch",
             params={"expected": expected_id, "actual": yaml_device_id,
@@ -511,7 +511,6 @@ def _save_draft(
     # 校验通过: 规范 YAML 落盘(内容寻址), 形成新的不可变草稿 revision
     handle = put_object(db, validation.canonical_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
                         source_category="model_template_draft")
-    old = template.draft_yaml_object_id
     old_diags = template.draft_diagnostics_object_id
     template.draft_yaml_object_id = handle.id
     template.draft_sha256 = validation.content_sha256
@@ -1158,6 +1157,24 @@ def migrate_published_template(
     from iesplan.models.draft_revision import TemplateMigrationReceipt
     from iesplan.models.project_model import ProjectModel
 
+    # 迁移会把主行的稳定 ID 更新为新 ID；因此幂等重放必须先按旧 ID
+    # 查回执，否则第二次调用会在读取模板主行时误报 404。
+    existing_receipt = db.execute(
+        sa.select(TemplateMigrationReceipt)
+        .join(ModelTemplate, ModelTemplate.id == TemplateMigrationReceipt.entry_id)
+        .where(
+            TemplateMigrationReceipt.old_template_id == old_template_id,
+            ModelTemplate.owner_id == user.id,
+        )
+    ).scalar_one_or_none()
+    if existing_receipt is not None:
+        return {"receipt": {
+            "old_template_id": old_template_id,
+            "new_template_id": existing_receipt.new_template_id,
+            "old_content_sha256": existing_receipt.old_content_sha256,
+            "new_content_sha256": existing_receipt.new_content_sha256,
+        }, "duplicate": True}
+
     old_template = _get_owned_template(db, user, old_template_id)
     if old_template.published_revision == 0:
         raise AppError(
@@ -1207,29 +1224,53 @@ def migrate_published_template(
     new_text = validation_new.canonical_text
     new_sha = validation_new.content_sha256
 
-    # 检查是否已有迁移回执（幂等）
-    existing_receipt = db.execute(
-        sa.select(TemplateMigrationReceipt).where(
-            TemplateMigrationReceipt.old_template_id == old_template_id
-        )
-    ).scalar_one_or_none()
-    if existing_receipt is not None:
-        return {"receipt": {
-            "old_template_id": old_template_id,
-            "new_template_id": existing_receipt.new_template_id,
-            "old_content_sha256": existing_receipt.old_content_sha256,
-            "new_content_sha256": existing_receipt.new_content_sha256,
-        }, "duplicate": True}
-
-    # 原子更新：模板主表 + 新规范对象 + 回执 + 项目模型引用（同一事务）
+    # 原子更新：保留旧 publication，新增一个不可变迁移 publication，
+    # 再切换主表指针和全部项目模型溯源（同一事务）。
     try:
+        new_revision_number = old_template.published_revision + 1
+        yaml_handle = put_object(db, new_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
+                                 source_category="model_template_revision")
+        publication_receipt = validation_new.receipt or canonical_receipt(validation_new.document)
+        publication_receipt = {
+            **dict(publication_receipt),
+            "template_id": new_template_id,
+            "revision": new_revision_number,
+            "schema": SCHEMA_ID,
+            "schema_version": SCHEMA_VERSION,
+            "inputs_sha256": validation_new.inputs_sha256,
+            "input_count": validation_new.input_count,
+            "migration": {
+                "old_template_id": old_template_id,
+                "old_revision": old_template.published_revision,
+            },
+        }
+        receipt_handle = _put_json(db, publication_receipt, "model_template_receipt")
+        summary_handle = _put_json(db, _build_summary(validation_new.document), "model_template_summary")
+        diag_handle = _put_json(db, [], "model_template_diagnostics")
+        new_revision = ModelTemplateRevision(
+            template_id=old_template.id,
+            revision=new_revision_number,
+            schema_version=SCHEMA_VERSION,
+            content_sha256=new_sha,
+            inputs_sha256=validation_new.inputs_sha256,
+            input_count=validation_new.input_count,
+            yaml_object_id=yaml_handle.id,
+            receipt_object_id=receipt_handle.id,
+            summary_object_id=summary_handle.id,
+            diagnostics_object_id=diag_handle.id,
+            published_by=user.id,
+        )
+        db.add(new_revision)
+        db.flush()
         old_template.template_id = new_template_id
         old_template.slug = new_slug
         old_template.public_namespace = namespace
-        new_handle = put_object(db, new_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
-                                source_category="model_template_revision")
-        attach(db, new_handle.id, TEMPLATE_OWNER_NAMESPACE, old_template.id,
-               ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="revision")
+        old_template.published_revision = new_revision_number
+        old_template.current_published_revision_id = new_revision.id
+        old_template.published_at = datetime.now(UTC)
+        for handle in (yaml_handle, receipt_handle, summary_handle, diag_handle):
+            attach(db, handle.id, TEMPLATE_OWNER_NAMESPACE, old_template.id,
+                   ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="revision")
         receipt = TemplateMigrationReceipt(
             old_template_id=old_template_id,
             new_template_id=new_template_id,
@@ -1243,7 +1284,12 @@ def migrate_published_template(
         db.execute(
             sa.update(ProjectModel)
             .where(ProjectModel.template_id == old_template_id)
-            .values(template_id=new_template_id)
+            .values(
+                template_id=new_template_id,
+                template_revision=new_revision_number,
+                template_sha256=new_sha,
+                inputs_sha256=validation_new.inputs_sha256,
+            )
         )
         db.commit()
     except Exception:
@@ -1380,4 +1426,3 @@ def get_draft_revision(db: Session, user, template_id: str, revision: int) -> di
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "document": _read_template_document_mapping(db, row.yaml_object_id),
     }
-

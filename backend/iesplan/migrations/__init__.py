@@ -289,6 +289,14 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_public_namespace
     ON users (public_namespace) WHERE public_namespace IS NOT NULL;
 
+-- 模板公开身份：存量 0002 表没有 slug/命名空间快照，必须显式补列。
+ALTER TABLE model_templates ADD COLUMN IF NOT EXISTS slug TEXT;
+ALTER TABLE model_templates ADD COLUMN IF NOT EXISTS public_namespace TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_model_templates_template_id
+    ON model_templates (template_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_model_templates_owner_slug
+    ON model_templates (owner_id, slug) WHERE slug IS NOT NULL;
+
 -- 草稿不可变历史表（每次持久化形成新 revision）
 CREATE TABLE IF NOT EXISTS model_template_draft_revisions (
     id BIGSERIAL PRIMARY KEY,
@@ -402,6 +410,16 @@ def _migrate_0003(conn: sa.Connection) -> None:
             stripped = stmt.strip()
             if stripped and "ALTER TABLE" not in stripped:
                 conn.execute(sa_text(stripped))
+        # 0002 的存量 SQLite 表只有 (owner_id, template_id) 唯一约束；
+        # 新 ORM 契约要求稳定 ID 全局唯一、同一用户 slug 唯一。
+        conn.execute(sa_text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_model_templates_template_id "
+            "ON model_templates (template_id)"
+        ))
+        conn.execute(sa_text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_model_templates_owner_slug "
+            "ON model_templates (owner_id, slug) WHERE slug IS NOT NULL"
+        ))
     # 既有用户一次性分配 namespace（CSPRNG + 碰撞重试，任务书 §三）
     _allocate_namespaces_for_existing_users(conn)
 
