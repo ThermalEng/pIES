@@ -1,6 +1,6 @@
 """对象存储服务(STO-01~07): 内容寻址写入/读取/引用/清理/门禁/恢复。
 
-对应 RPD 第 23 节与 01-db-schema.md 第 10 节。本模块是对象域唯一写入单元:
+对应架构宪法 §10 存储与数据生命周期 / §13 故障与健康语义、modules/storage §对象清理恢复路径 与 domain-model §对象生命周期。本模块是对象域唯一写入单元:
 
 - put_object: 经 BlobStore 适配器原子落盘 → upsert 元数据行 → (可选)owner 引用;
 - 内容去重(23.1): 相同 sha256 只存一份, 复用既有记录; owner 引用单独建立;
@@ -256,7 +256,7 @@ def put_object(
     actor_id: int | None = None,
     actor_type: str = "system",
 ) -> ObjectHandle:
-    """写入内容寻址对象(01 §10.1 / RPD 23.1), 返回公开句柄。
+    """写入内容寻址对象(架构宪法 §10 存储与数据生命周期), 返回公开句柄。
 
     流程: 门禁 → BlobStore 原子落盘 → upsert 元数据行(唯一键竞争走
     savepoint 内回退重查, 不触调用方事务) → (可选)建立 owner 引用。

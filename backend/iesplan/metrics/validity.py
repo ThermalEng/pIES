@@ -1,6 +1,6 @@
 """结果有效性四维状态模型。
 
-依据 01-db-schema.md §8.2(result_assessments 四维评估)与 RPD 第 10.4 节。
+依据架构宪法 §12 快照任务与结果 + domain-model §快照任务结果（四维评估）+ contracts §快照与异步契约。
 数据库枚举为 pass/fail/unknown;本模块提供内存内更细分的状态模型:
 
     物理有效性 PhysicalValidity  : 潮流/热网/供需平衡
@@ -20,7 +20,7 @@ from enum import StrEnum
 from iesplan.metrics.financial import IRRStatus
 
 _DEFINITION_VERSION = "1.0.0"
-_REF_BASE = ["01-db-schema.md#8.2", "ies.validity.four_dimensions"]
+_REF_BASE = ["ARCHITECTURE_CONSTITUTION.md#12", "domain-model.md#快照任务结果", "contracts.md#快照与异步契约"]
 
 
 class ValidityLevel(StrEnum):

@@ -22,7 +22,7 @@ from iesplan.models.immutable_triggers import (
     IMMUTABLE_TABLES,
 )
 
-#: 01-db-schema.md 全部 39 张表 + 应用级设置表(app_settings, 身份域扩展)
+#: 全量表清单（以 models/__init__.py 与 migrations 为准，含 app_settings 身份域扩展）
 #: (0.8.0 剔除共享成员/所有权转移: project_members / ownership_transfers 已移除)
 ALL_TABLES: tuple[str, ...] = (
     "users", "roles", "user_roles", "credentials", "window_sessions", "auth_events",

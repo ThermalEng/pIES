@@ -1,7 +1,7 @@
 """审计与对象域(U11 对象 / U12 审计 / U14 导入 / U15 保留策略写入单元)。
 
 含: audit_log / import_proposals / retention_rules。
-对应 01-db-schema.md 第10节。
+领域归属与约束见 manual/developer-guide/zh-CN/modules/persistence.md 与 ARCHITECTURE_CONSTITUTION.md §11 数据库与持久化。
 
 STO-05: objects / object_refs 的 ORM 已迁移至 iesplan.storage.persistence
 (存储模块所属持久化层), 本文件不再混放对象 ORM 与审计模型。

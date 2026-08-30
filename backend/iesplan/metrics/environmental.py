@@ -1,7 +1,6 @@
 """环境指标模块:运行期温室气体排放核算。
 
-依据 02-calc-model.md §8(逐时结果含 co2_grid/co2_gas/co2_total)与附录 B
-(默认排放因子:电网 0.581 kgCO2/kWh、燃气 2.0 kgCO2/m3)。
+依据 ARCHITECTURE_CONSTITUTION.md §12 快照、任务与结果 与 modules/analysis.md（逐时结果含 co2_*；默认排放因子见代码常量与测试）。
 
 关键不变量(REQ-ENV-001):排放边界(boundary)与因子版本(factor_version)
 必须随输出绑定,保证任何结果都能追溯其口径。

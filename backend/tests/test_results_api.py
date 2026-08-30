@@ -355,7 +355,7 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
 
 
 def test_evidence_checksum_mismatch_records_invalid(client: TestClient, db: Session) -> None:
-    """内容校验失败: 证据落库但 status='invalid'(校验失败不可用, 01 §8.1)。"""
+    """内容校验失败：证据落库但 status='invalid'（校验失败不可用，见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §12）"""
     owner = make_user(db, "owner_badpkg")
     pid = _prepare_project(client, db, owner)
     task = _submit_task(client, pid, owner, idempotency_key="bad-1")
@@ -525,7 +525,7 @@ def test_assessment_dimension_variants(client: TestClient, db: Session) -> None:
     assert a["dimensions"]["reliability"] == "fail"
     assert a["fine_states"]["reliability"] == "insufficient"
 
-    # 8) 可靠性未执行: 结果不要求可靠性评估 → not_executed(不判通过, REQ-VALID-001)
+    # 8) 可靠性未执行：结果不要求可靠性评估 → not_executed（不判通过，见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）
     a = assess({"reliability": {"executed": False}})
     assert a["dimensions"]["reliability"] == "unknown"
     assert a["fine_states"]["reliability"] == "not_executed"
@@ -594,13 +594,13 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
     assert body["diff"]["diff_patch"] == expected_diff
     assert body["diff"]["preview_checksum"] == preview
     assert body["diff"]["project_version_id"] is not None
-    # 补丁含容量参数名映射(04 §3)与财务摘要
+    # 补丁含容量参数名映射与财务摘要（见 manual/developer-guide/zh-CN/domain-model.md §规划、财务与计算配置）
     patch = body["diff"]["diff_patch"]["params"]["result_adoption"]
     assert patch["capacities"]["ies.device.pv"] == 500.0
     assert patch["capacity_params"]["rated_capacity_kwp"] == 500.0
     assert patch["irr"] == 0.12
 
-    # 3) 预览校验不符 → 409(确认预览内容校验, RPD 20.3)
+    # 3) 预览校验不符 → 409（确认预览内容校验，见 manual/developer-guide/zh-CN/contracts.md §HTTP 语义 409 冲突）
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/select",
         json={"solution_id": 1, "selection_type": "adopt",

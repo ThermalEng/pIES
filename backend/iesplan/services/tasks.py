@@ -234,7 +234,7 @@ def _resolve_project_inputs(
     content = project_service.load_content_object(db, draft.content_hash)
     if not freeze:
         return None, content
-    # 草稿固化: 借 U03 版本服务创建不可变项目版本(计算输入固定, RPD 9.4)
+    # 草稿固化: 借项目版本服务创建不可变项目版本（计算输入固定，宪法 §12 + domain-model §项目聚合）
     version = project_service.create_version(
         db, actor, project.id, name="计算任务自动固化", description=None, reason="snapshot_freeze"
     )

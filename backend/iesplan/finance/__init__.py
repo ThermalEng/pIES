@@ -1,9 +1,9 @@
-"""财务计算模块门面(03-module-decoupling.md §7 / 05-architecture-overview.md §3.1)。
+"""财务计算模块门面（见 ARCHITECTURE_CONSTITUTION.md §4.6 与 modules/finance.md）。
 
 定位:2 层独立包,在计算模块逐时运行结果之上计算财务数据(现金流/NPV/IRR/LCOE/
 回收期),产出 evidence `financial` 块;不依赖 engines(依赖方向 engines→finance 单向)。
 
-公共入口(与 03 §7.2 对齐):
+公共入口:
 - metrics:npv / cashflow_irr / build_project_cashflows / project_npv / project_irr /
   build_equity_cashflows / equity_irr / IRRStatus(自 metrics/financial.py 迁入);
 - hourly:compute_financials / compute_lcoe / compute_payback / FinancialResult(新增);

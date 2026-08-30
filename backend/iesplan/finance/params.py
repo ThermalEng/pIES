@@ -1,11 +1,10 @@
-"""财务参数定义与来源(03-module-decoupling.md §7.2 finance/params.py)。
+"""财务参数定义与来源（见 modules/finance.md 与 ARCHITECTURE_CONSTITUTION.md §4.6）。
 
 FinanceParams 为财务计算的唯一参数载体;finance_params_from_config 从
 calc_config(parameters.economic_* / 顶层 irr_floor)与价格初始化文件 prices.yaml
 的 finance 节合并取值,项目级显式参数优先,其次价格事实源,最后内置默认值。
 
-价格事实源属设备初始化模块(1 层 devices, 02-device-init-module.md §5/§6.2:
-prices.yaml finance 节 = tax_rate/discount_rate/project_years/depreciation_years/irr_floor);
+价格事实源属设备初始化模块（见 modules/devices.md；prices.yaml finance 节含 tax_rate/discount_rate 等）；
 该模块可能由并行 agent 实施,本模块以惰性导入 + 内置兜底默认值的方式保持独立可导入。
 """
 

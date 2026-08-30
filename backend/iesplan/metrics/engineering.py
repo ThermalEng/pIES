@@ -1,6 +1,6 @@
 """工程指标模块:能量平衡、峰值需量、容量利用率、负荷满足率。
 
-依据 02-calc-model.md §3(电/热/冷平衡与输配损耗)、§8(逐时结果字段与 KPI)。
+依据 ARCHITECTURE_CONSTITUTION.md §4.5 computation 与 modules/analysis.md（电/热/冷平衡与输配损耗、逐时结果与 KPI）。
 
 所有指标输出均携带 definition_version、unit、refs(REQ-RESULT-002),
 保证结果可追溯其定义口径。
@@ -14,9 +14,9 @@ from decimal import Decimal
 import numpy as np
 
 _DEFINITION_VERSION = "1.0.0"
-_REF_BASE = ["ies.metric.energy_balance@1.0.0", "02-calc-model.md#section-3"]
+_REF_BASE = ["ies.metric.energy_balance@1.0.0", "ARCHITECTURE_CONSTITUTION.md#4.5"]
 
-# 年步数表:分辨率 -> 年步数(02 §1.1)
+# 年步数表:分辨率 -> 年步数（由 CalculationConfig 分辨率决定）
 _RESOLUTION_STEPS = {"15min": 35040, "30min": 17520, "1h": 8760}
 # 输配损耗率默认值(02 附录 B:热 0.05、冷 0.08)
 _DEFAULT_LOSS = {"heat": 0.05, "cool": 0.08}

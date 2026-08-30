@@ -7,7 +7,7 @@
   触发器 + REVOKE(DDL 生成正确性, 供 Postgres 部署前静态校验);
 - ``init_db`` 在 SQLite 下仍可安全执行(含触发器部署早退)。
 
-依据: 01-db-schema.md 第0节三道防线 / 宪法 §16 关键变更不可变审计。
+依据: ARCHITECTURE_CONSTITUTION.md §11 数据库与持久化 / §16 安全与审计（三道防线：应用写入单元、REVOKE、触发器）。
 """
 
 from __future__ import annotations

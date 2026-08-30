@@ -1,7 +1,6 @@
 """项目校验服务(U07 项目校验单元): 计算前完整预检与财务基准确认。
 
-对应 RPD 第 9.3 节(任意方案评价)、17.5.7 REQ-CALC-007(校验门禁)、
-10.2(财务基准确认)与 01-db-schema.md 第 10 节(审计/对象)。
+依据架构宪法 §12 快照任务与结果、§16 安全与审计 与 domain-model §快照任务结果、§对象生命周期、§身份权限审计（校验门禁、财务基准确认、审计/对象）。
 U07 只聚合只读证据, 不修改模型/数据/配置(21.2):
 
 - 模型完整性: 至少 1 个电网连接与 1 个负荷; 电/热/冷每个有负荷的载体都有供给设备;
@@ -12,7 +11,7 @@ U07 只聚合只读证据, 不修改模型/数据/配置(21.2):
   绑定的版本存在且属于本项目, 版本质量报告无阻断错误(报告缺失/损坏一律按阻断
   fail-closed 处理), UTC 偏移与项目一致;
 - 配置: 目标/约束/算法兼容(config.validate_config), 最低 IRR 硬约束存在(REQ-CALC-006);
-- 财务基准确认(RPD 10.2): 必须有用户确认证据(确认人/确认内容完整性校验值),
+- 财务基准确认(架构宪法 §16 安全与审计 + domain-model §对象生命周期): 必须有用户确认证据(确认人/确认内容完整性校验值),
   确认经 audit_log 追加式记录(mark_baseline_confirmed), 确认内容与当前配置
   不一致时给出警告(参数已变更需重新确认);
 - 计算就绪: 项目活动且快照可组装(项目版本存在或草稿可固化)。
@@ -87,7 +86,7 @@ def _register_diag_codes() -> None:
         VALID_DATA_VERSION_INVALID: "所选数据集版本存在阻断性质量问题",
         VALID_DATA_UTC_MISMATCH: "数据集 UTC 偏移与项目不一致",
         VALID_DATA_BINDING_BROKEN: "绑定的数据集版本缺失/已删除或不属于本项目",
-        VALID_FIN_NO_CONFIRM: "缺少财务基准确认证据(RPD 10.2)",
+        VALID_FIN_NO_CONFIRM: "缺少财务基准确认证据(架构宪法 §16 安全与审计)",
         VALID_FIN_STALE: "财务基准确认内容与当前配置不一致, 需重新确认",
         VALID_READY_NOT_ASSEMBLABLE: "计算快照不可组装",
     }
@@ -131,7 +130,7 @@ _register_diag_codes()
 # 常量
 # ---------------------------------------------------------------------------
 
-#: 财务基准确认审计动作(追加式, 不可覆盖; RPD 10.2 确认证据)
+#: 财务基准确认审计动作(追加式, 不可覆盖; 架构宪法 §16 安全与审计 + domain-model §对象生命周期 确认证据)
 BASELINE_ACTION: str = "project.baseline_confirmed"
 
 #: 电网连接注册表类型 id(模型完整性检查)
@@ -283,7 +282,7 @@ def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
     devices = graph.get("devices", [])
     ports = graph.get("ports", [])
     loc = {"object_type": "project", "object_id": str(project_id)}
-    # 至少 1 个电网连接(供能接口, RPD 7.1)
+    # 至少 1 个电网连接(供能接口, 架构宪法 §12 快照任务与结果 + domain-model §项目聚合)
     if not any(d.get("device_type") == GRID_TYPE_ID for d in devices):
         diags.append(
             make_diag(
@@ -550,7 +549,7 @@ def _current_assumptions(project: Project, config: dict) -> dict:
 def _check_financial_baseline(
     db: Session, project: Project, config_data: dict, diags: list[Diagnostic]
 ) -> None:
-    """财务基准确认证据检查(RPD 10.2): 确认人/确认内容校验值齐全; 内容过期给警告。"""
+    """财务基准确认证据检查(架构宪法 §16 安全与审计): 确认人/确认内容校验值齐全; 内容过期给警告。"""
     loc = {
         "object_type": "project",
         "object_id": str(project.id),
@@ -643,9 +642,9 @@ def _bad_assumptions(**params: Any) -> AppError:
 
 
 def hash_assumptions(assumptions: dict) -> str:
-    """关键假设内容 → 完整性校验值(规范化 → sha256, 与 01 §3.2 同款规范)。
+    """关键假设内容 → 完整性校验值(规范化 → sha256, 与架构宪法 §12 快照任务与结果 同款规范)。
 
-    用于记录"确认内容的完整性校验信息"(RPD 10.2)。规范化要点:
+    用于记录"确认内容的完整性校验信息"(架构宪法 §16 安全与审计)。规范化要点:
     - 数值(整数/浮点/Decimal)统一转为规范化 Decimal 文本, 20 与 20.0 视为同一内容,
       不同精度不产生误判(REQ-FIN-001 确认内容可复现);
     - 非有限数值(NaN/Infinity)与不支持的类型一律拒绝(失败即抛, 不静默兜底);
@@ -701,9 +700,9 @@ def mark_baseline_confirmed(
     *,
     assumptions: dict | None = None,
 ) -> AuditLog:
-    """记录财务基准确认(RPD 10.2: 确认人/确认时间/确认内容完整性校验)。
+    """记录财务基准确认(架构宪法 §16 安全与审计: 确认人/确认时间/确认内容完整性校验)。
 
-    证据以审计事件追加式记录(不可覆盖, 01 §10.3), 供 U11 指标单元与校验门禁读取。
+    证据以审计事件追加式记录(不可覆盖, 架构宪法 §16 + domain-model §对象生命周期), 供 U11 指标单元与校验门禁读取。
 
     参数:
         db: 数据库会话。

@@ -1,7 +1,7 @@
 """快照与任务域(U07 任务 / U08 快照写入单元)。
 
 含: calc_configs / calc_snapshots / tasks / task_attempts / task_leases /
-task_progress / task_diagnostics / compute_slots。对应 01-db-schema.md 第6、7节。
+task_progress / task_diagnostics / compute_slots。领域归属与约束见 manual/developer-guide/zh-CN/modules/persistence.md 与 ARCHITECTURE_CONSTITUTION.md §11 数据库与持久化。
 """
 
 from __future__ import annotations

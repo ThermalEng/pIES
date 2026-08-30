@@ -1,20 +1,19 @@
-"""项目包服务(U15)与结果 Excel 导出(U15/U14)。
+"""项目包服务与结果 Excel 导出。
 
-对应 RPD 第 6 节(项目包)/11.3(Excel)/17.8(导出约束)/13.2(审计)/23节(存储)与
-01-db-schema.md 第 10 节(审计与对象):
+依据架构宪法 §10/§12 与 domain-model §快照、任务和结果/§对象生命周期 及 contracts §公共文件契约：
 
-- export_package: 仅所有者; 版本化清单(格式版本/清单/对象清单), 流式导出
-  模型/配置/版本/数据集版本与溯源/历史结果证据与评估引用/内容校验;
-  不含账号/权限/会话/全局配置/密钥(RPD 6);
-- import_proposal: 导入前校验(格式/兼容性/清单/完整性, sha256 逐对象校验);
-  暂存对象 + 拟创建项目快照 + 分区提交内容 + 校验报告(01 §10.4);
-- confirm_import: 提交导入 — 每次导入创建新项目身份(不覆盖已有), 导入者成为
-  所有者, 原授权关系不迁移, 历史结果作为证据来源保留(不伪造本地任务, RPD 6);
-- export_excel: 固定模板(标题中英双语, 默认中文), 固定引用证据包与评估,
-  不重新求解(REQ-EXPORT-001); 查看者可导出 Excel, 仅所有者可导出项目包;
-- 下载授权: 短期单对象授权(HMAC 签名 token 含 object_id + 过期, 过期 5 分钟)。
+- export_package: 仅所有者；版本化清单(格式版本/清单/对象清单)，流式导出
+  模型/配置/版本/数据集版本与溯源/历史结果证据与评估引用/内容校验；
+  不含账号/权限/会话/全局配置/密钥（domain-model §对象生命周期、架构宪法 §16）；
+- import_proposal: 导入前校验(格式/兼容性/清单/完整性，sha256 逐对象校验)；
+  暂存对象 + 拟创建项目快照 + 分区提交内容 + 校验报告；
+- confirm_import: 提交导入 — 每次导入创建新项目身份(不覆盖已有)，导入者成为
+  所有者，原授权关系不迁移，历史结果作为证据来源保留(不伪造本地任务)；
+- export_excel: 固定模板(标题中英双语，默认中文)，固定引用证据包与评估，
+  不重新求解；查看者可导出 Excel，仅所有者可导出项目包；
+- 下载授权: 短期单对象授权(HMAC 签名 token 含 object_id + 过期，过期 5 分钟)。
 
-本层服务不主动 commit(数据集样例服务除外, 其内部自提交), 事务边界由 API 层控制。
+本层服务不主动 commit，事务边界由 API 层控制。
 """
 
 from __future__ import annotations
@@ -63,13 +62,13 @@ EXCEL_MEDIA_TYPE = (
 )
 #: 下载授权有效期(秒, 短期单对象授权, 默认 5 分钟)
 DOWNLOAD_TOKEN_TTL_SECONDS = 300
-#: 包内禁止出现的清单键(账号/权限/会话/全局配置/密钥不得随包导出, RPD 6)
+#: 包内禁止出现的清单键(账号/权限/会话/全局配置/密钥不得随包导出，见 domain-model §对象生命周期)
 FORBIDDEN_MANIFEST_KEYS: frozenset[str] = frozenset(
     {"accounts", "permissions", "sessions", "global_config", "secrets"}
 )
 #: 项目包必需文件
 REQUIRED_PACKAGE_FILES: tuple[str, ...] = ("manifest.json", "project.json", "draft.json")
-#: 数据集版本内容媒体类型映射(01 §5.3 format CHECK)
+#: 数据集版本内容媒体类型映射(format 校验)
 _FORMAT_BY_MEDIA: dict[str, str] = {
     "text/csv; charset=utf-8": "csv",
     "text/csv": "csv",
@@ -107,7 +106,7 @@ class DownloadTokenError(AppError):
 
 
 class PackageSizeError(AppError):
-    """项目包超限(上传字节/条目数/单条目解压大小/总解压大小, HTTP 413, H-07)。
+    """项目包超限(上传字节/条目数/单条目解压大小/总解压大小, HTTP 413)。
 
     在任何解压读取之前完成门禁, 防止 ZIP Bomb 消耗内存与 CPU。
     """
@@ -122,13 +121,13 @@ class PackageSizeError(AppError):
 # 下载授权: 短期单对象签名 token(绑定项目与签发用户 + 过期, 过期 5 分钟)
 # ---------------------------------------------------------------------------
 
-#: 项目包上传字节上限(压缩后; 与 Nginx client_max_body_size 对齐为 2GB, H-07)
+#: 项目包上传字节上限(压缩后; 与 Nginx client_max_body_size 对齐为 2GB)
 MAX_PACKAGE_BYTES: int = 2 * 1024 * 1024 * 1024
-#: 项目包 zip 最大条目数(含目录; 超限拒绝, 防数十万小文件, H-07)
+#: 项目包 zip 最大条目数(含目录; 超限拒绝, 防数十万小文件)
 MAX_PACKAGE_ENTRIES: int = 5000
-#: 单条目解压后大小上限(512MB, 防单文件巨大膨胀, H-07)
+#: 单条目解压后大小上限(512MB, 防单文件巨大膨胀)
 MAX_PACKAGE_ENTRY_BYTES: int = 512 * 1024 * 1024
-#: 全部条目解压后总大小上限(4GB, 防整体 ZIP Bomb, H-07)
+#: 全部条目解压后总大小上限(4GB, 防整体 ZIP Bomb)
 MAX_PACKAGE_TOTAL_BYTES: int = 4 * 1024 * 1024 * 1024
 
 
@@ -147,7 +146,7 @@ def create_download_token(
     user_id: int,
     ttl_seconds: int = DOWNLOAD_TOKEN_TTL_SECONDS,
 ) -> str:
-    """签发短期单对象下载授权 token(C-04: 绑定项目与签发用户)。
+    """签发短期单对象下载授权 token(绑定项目与签发用户，架构宪法 §16)。
 
     token = base64url(payload) + "." + hmac 签名; payload 含 object_id/kind/
     project_id/user_id/exp, 缺省 5 分钟过期。下载时必须验证 token 绑定的项目
@@ -190,7 +189,7 @@ def verify_download_token(token: str, *, expected_kind: str | None = None) -> di
         raise DownloadTokenError("", params={"reason": "expired"})
     if expected_kind is not None and data.get("kind") != expected_kind:
         raise DownloadTokenError("", params={"reason": "kind_mismatch", "expected": expected_kind})
-    # C-04: 旧版(未绑定项目/用户)token 一律视为无效
+    # 旧版(未绑定项目/用户)token 一律视为无效
     if data.get("project_id") is None or data.get("user_id") is None:
         raise DownloadTokenError("", params={"reason": "bad_payload"})
     return {
@@ -202,7 +201,7 @@ def verify_download_token(token: str, *, expected_kind: str | None = None) -> di
 
 
 # ---------------------------------------------------------------------------
-# 项目包导出(U15, RPD 6 / REQ-EXPORT-001)
+# 项目包导出(架构宪法 §12、domain-model §对象生命周期)
 # ---------------------------------------------------------------------------
 
 
@@ -289,7 +288,7 @@ def _collect_datasets(db: Session, dataset_version_ids: list[int]) -> list[dict]
 
 
 def _collect_evidence(db: Session, project_id: int) -> list[dict]:
-    """收集项目历史结果证据与评估引用(经任务归属项目, RPD 6)。"""
+    """收集项目历史结果证据与评估引用(经任务归属项目，domain-model §快照、任务和结果)。"""
     packages = db.execute(
         select(EvidencePackage)
         .join(Task, Task.id == EvidencePackage.task_id)
@@ -328,7 +327,7 @@ def _collect_evidence(db: Session, project_id: int) -> list[dict]:
 def _build_package_zip(
     db: Session, project: Project, draft: Draft, draft_content: dict,
 ) -> tuple[bytes, dict]:
-    """组装项目包 zip 字节与清单(流式写入; 不含账号/权限/会话/密钥)。"""
+    """组装项目包 zip 字节与清单(流式写入; 不含账号/权限/会话/密钥，见 domain-model §对象生命周期)。"""
     versions = db.execute(
         select(ProjectVersion)
         .where(ProjectVersion.project_id == project.id)
@@ -561,13 +560,13 @@ def _build_package_zip(
 
 
 def export_package(db: Session, user: User, project_id: int) -> PackageExport:
-    """导出完整项目包(仅所有者, RPD 6 / REQ-EXPORT-001)。
+    """导出完整项目包(仅所有者，架构宪法 §12/domain-model §对象生命周期)。
 
     流程: 权限校验 → 组装 zip(模型/配置/草稿/版本/数据集版本与溯源/历史结果
-    证据与评估引用/内容校验) → 写入 data_dir/packages → 内容寻址对象登记 →
+    证据与评估引用/内容校验) → 内容寻址对象登记 →
     业务引用 + 审计 → 短期单对象下载授权。
 
-    包内不含: 账号/权限与查看者名单/会话/全局系统配置/部署环境密钥(RPD 6)。
+    包内不含: 账号/权限与查看者名单/会话/全局系统配置/部署环境密钥。
     """
     project_service.ensure_access(db, user, project_id, "export_package")
     project = project_service.require_project(db, project_id)
@@ -584,7 +583,7 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
     )
     # ObjectHandle → 元数据 dict(公开门面统一形状)
     obj_info = object_info(db, obj.id)
-    # STO-06: 不再写 data_dir/packages 非托管副本(无引用/配额/校验/清理协议);
+    # 不再写 data_dir/packages 非托管副本(无引用/配额/校验/清理协议，架构宪法 §10);
     # 对象存储是包的唯一事实源, 下载经短期授权 token 走公开读取门面。
 
     audit_service.audit(
@@ -605,21 +604,21 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
 
 
 # ---------------------------------------------------------------------------
-# 项目包导入(U14, RPD 6: 校验 → 提案 → 确认; 每次导入创建新项目身份)
+# 项目包导入(校验 → 提案 → 确认; 每次导入创建新项目身份，domain-model §对象生命周期/§快照、任务和结果)
 # ---------------------------------------------------------------------------
 
 
 def _parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
     """解析项目包 zip: (manifest, {entry_path: bytes}); 校验失败抛 ImportValidationError。
 
-    前置门禁(H-07, 任何解压读取之前执行, 防 ZIP Bomb 内存/CPU 耗尽):
+    前置门禁(任何解压读取之前执行, 防 ZIP Bomb 内存/CPU 耗尽):
     - 上传字节上限(MAX_PACKAGE_BYTES, 2GB);
     - zip 文件头与条目数预检(MAX_PACKAGE_ENTRIES, 5000);
     - 单条目解压大小(按 zip 头声明的 file_size 预检, MAX_PACKAGE_ENTRY_BYTES);
     - 总解压大小上限(MAX_PACKAGE_TOTAL_BYTES)。
     超限抛 PackageSizeError(PKG-SIZE-001, 413)。
 
-    校验项(RPD 6):
+    校验项:
     - 格式: 合法 zip, 无路径穿越条目;
     - 兼容性: 主版本号与当前格式兼容(1.x);
     - 清单: manifest.json 存在, package_type=project, 无账号/权限/会话/全局配置/密钥;
@@ -734,7 +733,7 @@ def _parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
 
 
 def _unique_project_name(db: Session, base: str) -> str:
-    """项目名称去重: 已存在同名项目时追加 " (导入 n)" 后缀(不静默覆盖, RPD 6)。"""
+    """项目名称去重: 已存在同名项目时追加 " (导入 n)" 后缀(不静默覆盖)。"""
     candidate = base
     index = 2
     while db.execute(select(Project.id).where(Project.name == candidate)).first() is not None:
@@ -749,7 +748,7 @@ def import_proposal(
     file_bytes: bytes,
     idempotency_key: str | None = None,
 ) -> ImportProposal:
-    """创建导入提案(U14, RPD 6): 校验 → 暂存对象 → 拟创建项目快照 → 校验报告。
+    """创建导入提案: 校验 → 暂存对象 → 拟创建项目快照 → 校验报告(domain-model §对象生命周期)。
 
     - 校验失败(格式/兼容性/清单/完整性)抛 ImportValidationError, 不创建任何记录;
     - 相同源文件(sha256)同一提议人已有提案时幂等返回既有提案(不重复暂存);
@@ -888,14 +887,14 @@ def _object_by_sha256(db: Session, digest: str) -> dict:
 
 
 def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
-    """提交导入(U14, RPD 6): 创建新项目身份, 导入者成为所有者。
+    """提交导入(U14, domain-model §对象生命周期): 创建新项目身份, 导入者成为所有者。
 
     分区提交内容(单事务):
     - 数据集: 重建 Dataset/DatasetVersion/DatasetFile(引用暂存对象, 原标识重映射);
     - 草稿: revision=1 领域内容(数据集绑定重映射, 证据来源登记);
     - 版本: 按包内版本顺序重建 ProjectVersion(新身份版本号, 不倒写原版本);
     - 证据: 历史结果作为证据来源保留 — 登记对象引用(imported_evidence)与
-      评估摘要, 不创建本地任务(不伪造本地任务, RPD 6)。
+      评估摘要, 不创建本地任务(不伪造本地任务, domain-model §快照、任务和结果)。
 
     导入约束: 不得静默覆盖(名称去重 + 新项目身份); 账号/权限/会话不随包导入;
     导入者成为新项目所有者; 原授权关系不迁移。
@@ -992,7 +991,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
         content.pop("applied_commands", None)  # 命令簿记不外泄
         return content
 
-    # 2) 证据来源: 历史结果作为证据来源保留(不伪造本地任务, RPD 6)
+    # 2) 证据来源: 历史结果作为证据来源保留(不伪造本地任务, domain-model §快照、任务和结果)
     imported_evidence: list[dict[str, Any]] = []
     for evidence_path in manifest.get("files", {}).get("evidence", []):
         if evidence_path not in entries:
@@ -1101,7 +1100,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
 
 
 # ---------------------------------------------------------------------------
-# Excel 报告导出(U15/U14, RPD 11.3 / REQ-EXPORT-001: 固定模板, 固定引用, 不重新求解)
+# Excel 报告导出(U15/U14, domain-model §快照、任务和结果 / contracts §公共文件契约 / REQ-EXPORT-001: 固定模板, 固定引用, 不重新求解)
 # ---------------------------------------------------------------------------
 
 
@@ -1184,7 +1183,7 @@ def export_excel(
     assessment_id: int,
     lang: str = "zh",
 ) -> bytes:
-    """导出固定模板 Excel 报告(查看者可导出, RPD 11.3 / REQ-EXPORT-001)。
+    """导出固定模板 Excel 报告(查看者可导出, domain-model §快照、任务和结果 / contracts §公共文件契约 / REQ-EXPORT-001)。
 
     - 固定引用给定证据包与结果评估, 导出时不重新求解(11.2);
     - 标题中英双语(默认简体中文); 内容: 项目版本/计算快照/数据版本/计算配置/

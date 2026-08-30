@@ -1,21 +1,20 @@
-"""计算配置服务(U06): 默认配置生成、保存、校验与读取。
+"""计算配置服务: 默认配置生成、保存、校验与读取。
 
-对应 RPD 第 9.2 节(参数/变量/目标/约束)、第 17.5 节(REQ-CALC-002~007)、
-02-calc-model.md 第 5-6 节(优化构建/目标)与 01-db-schema.md 第 6 节(calc_configs)。
+依据 架构宪法 §4 后端模块与职责(modeling/assembly) + 领域模型 §规划、财务与计算配置。
 
 本模块是计算配置域的唯一写入单元:
 
-- 默认配置基于系统模型(当前工作图)设备清单与受控注册表(04 §3)生成:
+- 默认配置基于系统模型(当前工作图)设备清单与受控注册表生成:
   设备参数取注册表默认值(叠加设备行参数), 新建设备的容量类参数
   (is_optimizable)生成 continuous 优化变量, 存量设备容量固定不生成变量;
 - 默认目标 = 税后项目投资 IRR 最大化; 默认最低 IRR 硬约束 0.08
-  (REQ-CALC-004/006: 最低税后项目投资 IRR 是不可被目标权重抵消的硬约束,
+  (最低税后项目投资 IRR 是不可被目标权重抵消的硬约束,
   与折现率是两个独立字段);
 - 保存与草稿修订绑定(乐观锁): expected_revision 与当前草稿修订不一致抛
-  ConflictError(SYS-STORE-004);
+  ConflictError;
 - 校验: 变量类型/初始值在界内、目标合法、约束表达式用 expression.parse_expr
   做解析+量纲+范围校验、IRR 硬约束与折现率独立、算法能力兼容
-  (mode=auto 不做能力检查, REQ-CALC-005)。
+  (mode=auto 不做能力检查)。
 
 计算配置结构(JSON):
 {
@@ -82,10 +81,10 @@ from iesplan.models.project import Draft, Project
 #: 默认配置名(每项目一个当前配置行, 版本化)
 DEFAULT_CONFIG_NAME: Final[str] = "default"
 
-#: 变量类型白名单(RPD 17.5 REQ-CALC-002: 连续/整数/枚举/布尔)
+#: 变量类型白名单(连续/整数/枚举/布尔; 宪法 §4 + 领域模型 §规划、财务与计算配置)
 VARIABLE_TYPES: Final[tuple[str, ...]] = ("continuous", "integer", "enum", "boolean")
 
-#: 目标指标字典(02 §6.1 版本 1 可选目标; id -> 中文说明)
+#: 目标指标字典(领域模型 §规划、财务与计算配置 可选目标; id -> 中文说明)
 OBJECTIVE_METRICS: Final[dict[str, str]] = {
     "irr_after_tax": "税后项目投资 IRR(主目标)",
     "npv_after_tax": "税后 NPV",
@@ -94,7 +93,7 @@ OBJECTIVE_METRICS: Final[dict[str, str]] = {
     "pv_self_consumption": "光伏自用率",
 }
 
-#: 预定义约束种类(RPD 17.5 REQ-CALC-004: 简单模式使用预定义约束)
+#: 预定义约束种类(简单模式使用预定义约束; 宪法 §4 + 领域模型 §规划、财务与计算配置)
 PREDEFINED_CONSTRAINT_KINDS: Final[dict[str, str]] = {
     "load_satisfaction": "负荷必须完全满足(默认不允许削减)",
     "capacity_limits": "设备容量上限",
@@ -102,7 +101,7 @@ PREDEFINED_CONSTRAINT_KINDS: Final[dict[str, str]] = {
     "energy_cost_cap": "年购能费用上限",
 }
 
-#: 算法注册表 id -> calc_configs.algorithm 列短名(01 §6.1 CHECK 允许值)
+#: 算法注册表 id -> calc_configs.algorithm 列短名
 #: mc_sampling 属采样/不确定性类而非求解类, 归入 'custom'。
 ALGO_DB_CLASS: Final[dict[str, str]] = {
     "ies.algo.milp_hybrid": "milp",
@@ -144,7 +143,7 @@ ECONOMIC_PARAM_SPECS: Final[dict[str, dict]] = {
     },
 }
 
-#: 环境参数规格(排放因子, 02 §8/§10.3 排放边界)
+#: 环境参数规格(排放因子, 排放边界; 领域模型 §规划、财务与计算配置)
 ENVIRONMENTAL_PARAM_SPECS: Final[dict[str, dict]] = {
     "emission_factor_grid": {
         "unit": "tCO2/MWh", "min": 0.0, "max": 10.0, "default": 0.581,
@@ -303,7 +302,7 @@ def _default_parameters(graph: dict) -> dict:
 
 
 def _default_variables(graph: dict) -> list[dict]:
-    """默认变量集(02 §5.7): 新建设备容量参数为 continuous 变量, 存量固定不生成。"""
+    """默认变量集(领域模型 §规划、财务与计算配置): 新建设备容量参数为 continuous 变量, 存量固定不生成。"""
     variables: list[dict] = []
     for dev in normalize_devices(graph):
         spec = resolve_device_type(dev["device_type"])
@@ -344,7 +343,7 @@ def _build_default_config(db: Session, project_id: int) -> dict:
         "parameters": params,
         "variables": _default_variables(graph),
         "objectives": [{"metric": "irr_after_tax", "direction": "max", "weight": 1.0}],
-        # REQ-CALC-004: 默认不允许未满足负荷
+        # 默认不允许未满足负荷(领域模型 §规划、财务与计算配置)
         "constraints": [
             {"type": "predefined", "payload": {"kind": "load_satisfaction", "allow_shed": False}}
         ],
@@ -378,7 +377,7 @@ def get_default_config(project_id: int, db: Session | None = None) -> dict:
 
 
 def _dims_for_unit(unit: str) -> Dimensions:
-    """变量单位 -> 表达式量纲(01 §5.5:统一走 core/units.dims_of)。
+    """变量单位 -> 表达式量纲(统一走 core/units.dims_of, 宪法 §4)。
 
     已注册单位(含复合,如 kW/kWh/CNY/kWh)精确量纲;未注册单位视为无量纲
     (不参与量纲检查,兼容旧配置)。
@@ -552,7 +551,7 @@ def _validate_parameters(
 def _validate_variables(
     config: dict, devices_by_key: dict, diags: list[Diagnostic]
 ) -> None:
-    """变量校验(REQ-CALC-002): 类型/初始值在界内/枚举取值/设备引用。"""
+    """变量校验: 类型/初始值在界内/枚举取值/设备引用(宪法 §4 + 领域模型 §规划、财务与计算配置)。"""
     variables = config["variables"]
     if not isinstance(variables, list):
         return
@@ -698,7 +697,7 @@ def _validate_variables(
 
 
 def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
-    """目标校验(REQ-CALC-004): 至少一个目标, 指标/方向/权重合法。"""
+    """目标校验: 至少一个目标, 指标/方向/权重合法(宪法 §4 + 领域模型 §规划、财务与计算配置)。"""
     objectives = config["objectives"]
     if not isinstance(objectives, list) or not objectives:
         diags.append(
@@ -764,7 +763,7 @@ def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
 def _validate_expression_constraint(
     payload: dict, variables: list[dict], idx: int, diags: list[Diagnostic]
 ) -> None:
-    """表达式约束校验(REQ-CALC-004/005): parse_expr 解析+量纲+范围, 初始值试算。"""
+    """表达式约束校验: parse_expr 解析+量纲+范围, 初始值试算(宪法 §4 + 领域模型 §规划、财务与计算配置)。"""
     loc = {"object_type": "constraint", "object_id": f"expr[{idx}]", "field": "payload.expression"}
     expr = payload.get("expression") if isinstance(payload, dict) else None
     if not isinstance(expr, str) or not expr.strip():
@@ -890,7 +889,7 @@ def _validate_constraints(
 
 
 def _validate_irr_and_discount(config: dict, diags: list[Diagnostic]) -> None:
-    """IRR 硬约束与折现率独立字段检查(REQ-CALC-006)。
+    """IRR 硬约束与折现率独立字段检查(宪法 §4 + 领域模型 §规划、财务与计算配置)。
 
     - irr_floor 必须是顶层字段(0..1), 不得混入经济参数段;
     - discount_rate 必须位于 parameters.economic, 不得出现在顶层;
@@ -901,7 +900,7 @@ def _validate_irr_and_discount(config: dict, diags: list[Diagnostic]) -> None:
         diags.append(
             make_diag(
                 "SYS-CFG-001", SEVERITY_ERROR,
-                params={"field": "irr_floor", "reason": "缺少最低 IRR 硬约束字段(REQ-CALC-006)"},
+                params={"field": "irr_floor", "reason": "缺少最低 IRR 硬约束字段"},
                 location={"object_type": "config", "object_id": "", "field": "irr_floor"},
             )
         )
@@ -958,7 +957,7 @@ def _validate_irr_and_discount(config: dict, diags: list[Diagnostic]) -> None:
 
 
 def _validate_algorithm(config: dict, diags: list[Diagnostic]) -> None:
-    """算法校验(REQ-CALC-005): 手动模式检查注册与能力兼容; auto 不查能力。"""
+    """算法校验: 手动模式检查注册与能力兼容; auto 不查能力(宪法 §4 + 领域模型 §规划、财务与计算配置)。"""
     algo = config["algorithm"]
     mode = algo.get("mode", "auto")
     if mode == "auto":
@@ -979,7 +978,7 @@ def _validate_algorithm(config: dict, diags: list[Diagnostic]) -> None:
     # 能力需求推导
     needs: set[str] = set()
     if config.get("irr_floor") is not None:
-        needs.add("irr_hard_constraint")  # 最低 IRR 硬约束(02 §5.6/§6.2)
+        needs.add("irr_hard_constraint")  # 最低 IRR 硬约束
     objectives = config.get("objectives") or []
     if len(objectives) > 1:
         needs.add("multi_objective")
@@ -993,7 +992,7 @@ def _validate_algorithm(config: dict, diags: list[Diagnostic]) -> None:
         isinstance(v, dict) and v.get("type") == "continuous"
         for v in variables
     ):
-        needs.add("capacity_design")  # 容量设计(02 §5.6 双层分解)
+        needs.add("capacity_design")  # 容量设计
     missing = sorted(needs - set(spec.capabilities))
     if missing:
         diags.append(
@@ -1079,7 +1078,7 @@ def validate_config(
     graph: dict,
     data_version_ref: list[int] | None = None,
 ) -> list[Diagnostic]:
-    """校验计算配置(RPD 17.5 REQ-CALC-007 校验门禁的配置部分)。
+    """校验计算配置(配置校验门禁; 宪法 §4 + 领域模型 §规划、财务与计算配置)。
 
     参数:
         config: 计算配置 dict(结构见模块 docstring)。
@@ -1132,7 +1131,7 @@ def validate_config(
 
 
 def _current_draft_revision(db: Session, project_id: int) -> int:
-    """当前草稿修订号; 项目尚无草稿时按 1 处理(01 §3.2 初始草稿 revision=1)。"""
+    """当前草稿修订号; 项目尚无草稿时按 1 处理(领域模型 §项目聚合 初始草稿 revision=1)。"""
     proj = db.get(Project, project_id)
     if proj is None:
         raise NotFoundError(

@@ -1,13 +1,11 @@
-"""全链路集成测试: 覆盖 11 个业务单元端到端流程(RPD 关键语义抽查)。
+"""全链路集成测试：覆盖核心业务链端到端（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §14.2 必需测试 及 §12 快照、任务与结果； manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）。
 
 链路: 注册/登录(管理员+工程师) → 创建项目 → 添加设备(电网/光伏/热泵/锅炉/
 制冷机/电池/负荷)与连接 → 生成内置样例数据集 → 绑定数据集 → 保存计算配置 +
 财务基准确认 → 提交方案评价任务 → Worker 真实执行(evaluate_plan 全算例,
 8760 步) → 任务完成 → 四维评估 → 选择结果 → Excel 导出 → 项目包导出/导入。
 
-另抽查 RPD 语义: 草稿乐观锁(409)、归档后禁止编辑、删除需显式确认、
-任务同快照去重(200 duplicate)、非所有者禁止导出包(403)、非管理员禁止
-存储视图(403)、财务基准确认门禁(未确认 → 预检阻断)。
+另抽查核心语义：草稿乐观锁(409)、归档后禁止编辑、删除需显式确认、任务同快照去重、导出权限门禁、存储视图权限、财务基准校验门禁（见 manual/developer-guide/zh-CN/contracts.md §HTTP 语义； manual/developer-guide/zh-CN/domain-model.md §项目聚合/对象生命周期； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §8/§10/§16）。
 
 执行方式: 内存 SQLite(StaticPool) + 临时对象存储目录 + 内存队列,
 不依赖部署 Postgres/Redis(与基础层降级路径一致)。
@@ -88,7 +86,7 @@ def _clean_tables(engine: Engine) -> Iterator[None]:
 
 @pytest.fixture(autouse=True, scope="session")
 def _init_runtime_registry():
-    """RR-P1-04: 任务装配/模型写入消费运行期设备注册表(生产启动由 main 初始化)。
+    """任务装配/模型写入消费运行期设备注册表（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §4.2 devices §5.2组合根； manual/developer-guide/zh-CN/modules/devices.md）。删除 RR-P1-04 旧 Roadmap 编号。
 
     会话级: 内置 catalog 加载一次, 建模命令注册一次(命令表为进程级状态,
     多次注册会重复构建; 保持幂等)。
@@ -307,7 +305,7 @@ def _save_config(client: TestClient, user_id: int, project_id: int, revision: in
     resp = client.get(f"/api/projects/{project_id}/config", headers=_h(client, user_id))
     assert resp.status_code == 200, resp.text
     default_config = resp.json()["config"]
-    assert default_config["irr_floor"] == 0.08  # RPD: 最低 IRR 硬约束默认 8%
+    assert default_config["irr_floor"] == 0.08  # 最低 IRR 硬约束默认 8% 见 manual/developer-guide/zh-CN/domain-model.md §规划、财务与计算配置 及 manual/developer-guide/zh-CN/modules/finance.md
     resp = client.put(
         f"/api/projects/{project_id}/config",
         json={"config": default_config, "expected_revision": revision},
@@ -493,7 +491,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     eng_login = _login(client, "eng_li", ENGINEER_PASSWORD)
     assert eng_login["user"]["role"] == "engineer"
 
-    # 预检门禁: 未确认基线时阻断提交(财务基准确认门禁 RPD 10.2)
+    # 预检门禁：未确认基线时阻断提交（见 manual/developer-guide/zh-CN/domain-model.md §规划、财务与计算配置； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §4.4 assembly）
     pid = _create_project(client, eng_id, name="预检门禁项目")
     resp = client.post(f"/api/projects/{pid}/validation/run", headers=_h(client, eng_id))
     assert resp.status_code == 200, resp.text
@@ -582,9 +580,9 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     diff = selection["diff"]
     assert diff is not None
     assert diff["diff_patch"]["params"]["result_adoption"]["solution_index"] == 0
-    assert diff["preview_checksum"] is not None  # RPD: 差异补丁带校验值
+    assert diff["preview_checksum"] is not None  # 差异补丁带校验值见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果 及 manual/developer-guide/zh-CN/contracts.md §快照与异步契约
 
-    # 差异预览(应用前确认, RPD REQ-RESULT-003)
+    # 差异预览（应用前确认，见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）
     resp = client.get(
         f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/diff", headers=_h(client, eng_id)
     )
@@ -642,7 +640,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     assert len(view["draft"]["content"]["dataset_bindings"]) == 1
     assert view["draft"]["content"]["calc_config"]["params"] != {}
 
-    # 应用选中结果到新草稿(参数差异补丁, RPD 20.12)
+    # 应用选中结果到新草稿（参数差异补丁，见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）
     resp = client.post(
         f"/api/projects/{imported_pid}/apply-result",
         json={"diff_patch": diff["diff_patch"], "source_result_id": str(task_id)},
@@ -653,11 +651,11 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 测试 2: RPD 项目语义(乐观锁 / 归档 / 删除确认 / 版本)
+# 测试 2: 项目语义（乐观锁/归档/删除确认/版本）（见 manual/developer-guide/zh-CN/contracts.md §HTTP 语义 409 冲突； manual/developer-guide/zh-CN/domain-model.md §项目聚合）
 # ---------------------------------------------------------------------------
 
 
-def test_rpd_project_semantics(client: TestClient, db: Session) -> None:
+def test_project_semantics(client: TestClient, db: Session) -> None:
     """草稿乐观锁 409、归档后禁止编辑、删除须 confirm、版本创建/恢复。"""
     eng_id = _seed_engineer_direct(client, db)
     pid = _create_project(client, eng_id)
@@ -753,11 +751,11 @@ def test_rpd_project_semantics(client: TestClient, db: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 测试 3: RPD 任务语义(去重 / 幂等 / 取消)
+# 测试 3: 任务语义（去重/幂等/取消）（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §12 快照、任务与结果； manual/developer-guide/zh-CN/contracts.md §快照与异步契约）
 # ---------------------------------------------------------------------------
 
 
-def test_rpd_task_semantics(client: TestClient, db: Session) -> None:
+def test_task_semantics(client: TestClient, db: Session) -> None:
     """同快照重复提交 → 200 duplicate; 幂等键命中 → 200 replayed; 任务可取消。"""
     eng_id = _seed_engineer_direct(client, db)
     ctx = _prepare_project(client, db, eng_id)
@@ -797,11 +795,11 @@ def test_rpd_task_semantics(client: TestClient, db: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 测试 4: RPD 权限门禁
+# 测试 4: 权限门禁（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §16 安全与审计； manual/developer-guide/zh-CN/contracts.md §HTTP 语义）
 # ---------------------------------------------------------------------------
 
 
-def test_rpd_permission_gates(client: TestClient, db: Session) -> None:
+def test_permission_gates(client: TestClient, db: Session) -> None:
     """非所有者禁止导出项目包(403); 非管理员禁止存储视图(403); 未认证 401。"""
     admin_id = _seed_admin(db)
     admin_login = _login(client, ADMIN_USERNAME, ADMIN_PASSWORD)
@@ -830,7 +828,7 @@ def test_rpd_permission_gates(client: TestClient, db: Session) -> None:
     resp = client.get("/api/admin/storage", headers=_h(client, admin_id))
     assert resp.status_code == 200
     body = resp.json()
-    # STO-07: 单一 StorageStatusDto(无兼容并集)
+    # 单一 StorageStatusDto（无兼容并集，见 manual/developer-guide/zh-CN/modules/storage.md §边界 及 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §2.2 正确性优先于兼容） 删除 STO-07 旧存储规格编号
     assert "objects" in body and "refs" in body and "capacity" in body
     resp = client.get("/api/admin/health", headers=_h(client, admin_id))
     assert resp.status_code == 200
@@ -838,10 +836,10 @@ def test_rpd_permission_gates(client: TestClient, db: Session) -> None:
     assert body["status"] == "ok"
     assert body["liveness"]["ok"] is True and body["readiness"]["db"] is True
     assert "queue" in body and "storage" in body and "metrics" in body
-    # 存储 health provider 的抽样校验节(STO-07 独立聚合)
+    # 存储 health provider 的抽样校验节（独立聚合，见 manual/developer-guide/zh-CN/modules/storage.md §失败语义）
     assert "verify" in body["storage"] and "checked" in body["storage"]["verify"]
 
-    # 管理端审计: 项目创建事件可查询(RPD 13.2)
+    # 管理端审计：项目创建事件可查询（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §16 安全与审计； manual/developer-guide/zh-CN/domain-model.md §身份、权限和审计）
     resp = client.get(
         "/api/admin/audit", params={"action": "project.created"}, headers=_h(client, admin_id)
     )
@@ -851,11 +849,11 @@ def test_rpd_permission_gates(client: TestClient, db: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 测试 5: 配置校验门禁(RPD 17.5 REQ-CALC-007)
+# 测试 5: 配置校验门禁（见 manual/developer-guide/zh-CN/domain-model.md §规划、财务与计算配置； manual/developer-guide/zh-CN/modules/assembly.md）
 # ---------------------------------------------------------------------------
 
 
-def test_rpd_config_gate(client: TestClient, db: Session) -> None:
+def test_config_gate(client: TestClient, db: Session) -> None:
     """非法配置保存被拒(422 + diagnostics), 合法默认配置可保存。"""
     eng_id = _seed_engineer_direct(client, db)
     pid = _create_project(client, eng_id)
@@ -885,11 +883,11 @@ def test_rpd_config_gate(client: TestClient, db: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 测试 6: 数据集校验语义(RPD 8.3)
+# 测试 6: 数据集校验语义（见 manual/developer-guide/zh-CN/domain-model.md §数据集； manual/developer-guide/zh-CN/file-formats.md §通用书写规则）
 # ---------------------------------------------------------------------------
 
 
-def test_rpd_dataset_validation(client: TestClient, db: Session) -> None:
+def test_dataset_validation(client: TestClient, db: Session) -> None:
     """坏数据上传 → 400 + diagnostics 定位(行数); 模板可下载。"""
     eng_id = _seed_engineer_direct(client, db)
     pid = _create_project(client, eng_id)

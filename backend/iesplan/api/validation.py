@@ -37,7 +37,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 
 
 class BaselineConfirmRequest(BaseModel):
-    """财务基准确认请求体(RPD 10.2: 关键假设, 服务端计算内容完整性校验值)。"""
+    """财务基准确认请求体(宪法 §16 + domain-model §对象生命周期: 关键假设, 服务端计算内容完整性校验值)。"""
 
     assumptions: dict[str, Any] = Field(
         default_factory=dict,
@@ -52,9 +52,9 @@ class BaselineConfirmRequest(BaseModel):
 
 @router.post("/run", summary="执行完整预检")
 def run_validation(project_id: int, db: DbSession, user: CurrentUser) -> dict:
-    """执行完整预检(REQ-CALC-007 校验门禁): 一次返回全部诊断, 阻断则 blocks_submit=true。
+    """执行完整预检(校验门禁): 一次返回全部诊断, 阻断则 blocks_submit=true。
 
-    报告持久化为内容寻址对象(01 §10.2 ref_type='report'), GET /validation 可读取最近报告。
+    报告持久化为内容寻址对象(ref_type='report'), GET /validation 可读取最近报告。
     """
     project_service.ensure_access(db, user, project_id, "view")
     report = validation_service.validate_project(db, project_id)

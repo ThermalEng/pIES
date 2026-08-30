@@ -1,16 +1,16 @@
-"""任务类型执行函数(计算 Worker 职责, 03 规格 2.1/§3.2、RPD 12.2)。
+"""任务类型执行函数（计算 Worker 职责，见宪法 §4.5/§12 与 architecture §核心业务流）。
 
 每个执行器:
 - 调用引擎(经 run_solver_isolated 隔离子进程)与指标模块;
 - 阶段化进度报告(record_progress)与取消检查点(每阶段检查 cancelling);
 - 产出结果 payload(含四维评估与业务结局), 由 runner 统一落证据包/评估/
-  结果索引(03 §4.1 ③, 写入资格由 lease.submit_result 的 fencing 保证)。
+  结果索引（写入资格由 lease.submit_result 的 fencing 保证，见宪法 §12）。
 
-任务类型映射(01 §7.2 枚举 ↔ 本模块执行器):
-    calc          → execute_calc           (方案评价, 02 §7)
-    optimization  → execute_plan           (规划, 02 §5-§6)
-    uncertainty   → execute_uncertainty    (不确定性分析, 02 §10; 父任务顺序执行样本)
-    report        → execute_check          (结果检查, 01 §8.2 四维评估)
+任务类型映射（本模块执行器与 domain-model §快照任务和结果对应）:
+    calc          → execute_calc           （方案评价）
+    optimization  → execute_plan           （规划）
+    uncertainty   → execute_uncertainty    （不确定性分析；父任务顺序执行样本）
+    report        → execute_check          （结果检查；四维评估见 domain-model §快照任务和结果）
     dataset_build → execute_dataset_process(数据集处理, 占位执行器)
     export        → execute_export         (Excel/项目包导出, 占位执行器)
     import        → execute_package_import (项目包导入, 占位执行器)
@@ -50,7 +50,7 @@ from iesplan.worker.solver_process import run_solver_isolated
 
 logger = logging.getLogger(__name__)
 
-#: 求解器状态常量(02 §11.4)
+#: 求解器状态常量
 S_OPTIMAL = "OPTIMAL"
 S_TIME_LIMIT_INCUMBENT = "TIME_LIMIT_WITH_INCUMBENT"
 S_NO_FEASIBLE = "NO_FEASIBLE_FOUND"
@@ -58,7 +58,7 @@ S_BASE_INFEASIBLE = "BASE_INFEASIBLE"
 S_IRR_FLOOR = "INFEASIBLE_BY_IRR_FLOOR"
 S_MODEL_AUDIT_FAIL = "MODEL_AUDIT_FAIL"
 
-#: 不确定性两种分析模式(RPD 10.5)
+#: 不确定性两种分析模式（见 domain-model §快照任务和结果）
 MODE_FIXED_RELIABILITY = "fixed_reliability"
 MODE_REPLAN_SENSITIVITY = "replan_sensitivity"
 
@@ -67,7 +67,7 @@ RELIABILITY_RATIO_THRESHOLD = 0.8
 
 
 class TaskCancelled(Exception):
-    """取消检查点触发(03 §6.1: Worker 轮询到取消信号后终止执行)。"""
+    """取消检查点触发（Worker 轮询到取消信号后终止执行，见宪法 §12）。"""
 
     def __init__(self, stage: str = "") -> None:
         self.stage = stage
@@ -95,12 +95,12 @@ class RunContext:
     io_params: dict[str, Any] = field(default_factory=dict)  # io 任务参数(队列消息扩展)
 
     def progress(self, percent: float, stage: str, detail: dict | None = None) -> None:
-        """阶段化进度报告(03 §7: PG 持久进度 + Redis 秒级进度)。"""
+        """阶段化进度报告（PG 持久进度 + Redis 秒级进度，见 contracts §快照与异步契约）。"""
         if self.progress_fn is not None:
             self.progress_fn(percent, stage, detail)
 
     def checkpoint(self, stage: str) -> None:
-        """取消检查点: 每阶段检查任务是否 cancelling(03 §6.1)。
+        """取消检查点: 每阶段检查任务是否 cancelling（见宪法 §12）。
 
         取消信号(Redis cancel 键)或停止事件置位 → 抛 TaskCancelled。
         """
@@ -160,11 +160,11 @@ def _run_engine(
 
 
 def execute_calc(ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None) -> dict:
-    """方案评价(02 §7): 快照 plan+data → evaluate_plan → 逐时结果/KPI/指标。
+    """方案评价: 快照 plan+data → evaluate_plan → 逐时结果/KPI/指标。
 
     产出 payload: result_kind='eval_result', 含逐时流字段、KPI、诊断、
-    四维评估与业务结局。引擎经建模命令注册表分发(03 §9.3 命令化:
-    algorithm → command_id → function, 不再直接 import 引擎函数)。
+    四维评估与业务结局。引擎经建模命令注册表分发（命令化:
+    algorithm → command_id → function，不再直接 import 引擎函数）。
     """
     config = content.get("calc_config") or {}
     task_params = config.get("task_params") or {}
@@ -191,7 +191,7 @@ def execute_calc(ctx: RunContext, content: dict, data: dict, axis: Any, options:
 
 
 def _select_engine(ctx: RunContext, config: dict, task_params: dict) -> tuple[str, dict]:
-    """算法选择 + 求解选项收敛(03 §9.3/§9.4, engines/selector.py)。
+    """算法选择 + 求解选项收敛（见 architecture §核心业务流，engines/selector.py）。
 
     合并顺序:快照 tolerances → task_params.solver_options(后者覆盖);
     随机 seed 来自快照 random_seed(权威来源)。
@@ -215,7 +215,7 @@ def _engine_entry(command_id: str) -> Any:
 
 
 def plan_for_finance(content: dict) -> dict:
-    """项目内容 → 财务 plan(设备清单, 03 §7.2 财务输入)。
+    """项目内容 → 财务 plan（设备清单，财务输入见 domain-model）。
 
     与 _build_plan 同源(仅财务口径需要设备的存量/新增信息与参数),
     供逐时财务的 CAPEX 与基准成本估算使用。
@@ -227,12 +227,12 @@ def _hourly_financial(
     ctx: RunContext, content: dict, plan: dict, result: Any,
     data: dict, axis: Any,
 ) -> dict | None:
-    """逐时财务(03 §7.2): 引擎逐时 flows + KPI → finance.hourly.compute_financials。
+    """逐时财务: 引擎逐时 flows + KPI → finance.hourly.compute_financials。
 
     以逐时费用列(cost_buy/cost_gas/revenue_sell)求和为权威口径, 与 KPI
     交叉校验; 基准成本推导口径(codex 二次审核 Medium-5):
     显式配置 baseline_cost 优先, 缺失时按"零容量基准方案"的 total_op_cost
-    推导(与规划引擎 02 §5.3 同口径), 仍缺失才降级 None
+    推导（与规划引擎同口径），仍缺失才降级 None
     (评估 financial 维度降 unknown)。
     """
     from iesplan.analysis.wrapper import _project_financial_inputs
@@ -272,7 +272,7 @@ def _hourly_financial(
 
 
 def _derive_baseline_cost(ctx: RunContext, content: dict, data: dict, axis: Any) -> Decimal | None:
-    """零容量基准方案运行成本 → 财务基准(02 §5.3 口径)。
+    """零容量基准方案运行成本 → 财务基准。
 
     与规划引擎 baseline 推导一致: 去掉全部新增设备容量后重新运行评价引擎,
     取 total_op_cost 作为基准年成本。运行失败/不可行 → None(降级处理)。
@@ -306,7 +306,7 @@ def _derive_baseline_cost(ctx: RunContext, content: dict, data: dict, axis: Any)
 
 
 def _eval_payload(ctx: RunContext, content: dict, result: EvalResult, data: dict, axis: Any) -> dict:
-    """EvalResult → 证据包 payload(逐时流 + KPI + 财务 + 四维评估 + 业务结局, 03 §3.2/§7.2)。"""
+    """EvalResult → 证据包 payload（逐时流 + KPI + 财务 + 四维评估 + 业务结局）。"""
     solver_status = _eval_solver_status(result)
     flows: dict[str, list[float]] = {name: np.asarray(arr, dtype=float).tolist()
                                      for name, arr in result.flows.items()}
@@ -326,7 +326,7 @@ def _eval_payload(ctx: RunContext, content: dict, result: EvalResult, data: dict
             boundary="scope1+scope2", factor_version="snapshot-bound",
             data_refs=[f"snapshot:{getattr(ctx.snapshot, 'content_hash', '')[:12]}"],
         )
-    # 逐时财务(03 §7.2: 逐时费用列求和 → 现金流/IRR/NPV/LCOE/回收期,
+    # 逐时财务（逐时费用列求和 → 现金流/IRR/NPV/LCOE/回收期，
     # 与 analysis/finance 共用 finance.hourly.compute_financials)
     financial = _hourly_financial(ctx, content, plan_for_finance(content), result, data, axis)
     # 四维评估在财务之后生成(codex 二次审核 Medium-5: financial=None 时
@@ -373,7 +373,7 @@ def _eval_payload(ctx: RunContext, content: dict, result: EvalResult, data: dict
 
 
 def _store_hourly_refs(ctx: RunContext, flows: dict[str, Any]) -> list[dict]:
-    """逐时流 → 对象存储对象, 返回 hourly_refs 引用清单(03 §3.2 逐时结果引用)。
+    """逐时流 → 对象存储对象，返回 hourly_refs 引用清单。
 
     结果视图/逐时查询(read_hourly)以 hourly_refs 为引用入口读取对象内容;
     证据内容本身仍保留 flows 全文(自足, 校验/审计可独立复核)。
@@ -400,7 +400,7 @@ def _store_hourly_refs(ctx: RunContext, flows: dict[str, Any]) -> list[dict]:
 
 
 def _eval_solver_status(result: EvalResult) -> str:
-    """EvalResult → 求解器状态码(02 §11.4, 03 §3.2 映射依据)。
+    """EvalResult → 求解器状态码。
 
     status 是权威信号(scipy milp 仅在证明最优时返回 ok; 命中时间上限 →
     time_limit 并携带 incumbent); gap 含数值噪声(如 2e-14), 不直接参与判定。
@@ -417,9 +417,9 @@ def _eval_solver_status(result: EvalResult) -> str:
 def _assess_eval(
     result: EvalResult, solver_status: str, *, analysis_mode: bool = False, financial: dict | None = None
 ) -> dict:
-    """四维评估(01 §8.2 / RPD 10.4): 物理/最优性/财务/可靠性。
+    """四维评估（物理/最优性/财务/可靠性，见 domain-model §快照任务和结果）。
 
-    analysis_mode: 批量分析无逐时单解(03 §8.3 大结果不落盘), 物理维度
+    analysis_mode: 批量分析无逐时单解（大结果不落盘，见宪法 §10），物理维度
     按批量内 ok 率判定, 财务维度按批量 KPI 覆盖判定, 可靠性维度按 n_ok 判定。
     financial: 逐时财务块(calc 载荷);None 时财务维度必须降 unknown
     (codex 二次审核 Medium-5: 财务输入不完整 ≠ 财务通过)。
@@ -452,7 +452,7 @@ def _assess_eval(
 
 
 def _outcome_from_solver(solver_status: str) -> str:
-    """求解器状态 → 业务结局(03 §3.2 表; 复用 U07 映射)。"""
+    """求解器状态 → 业务结局（复用任务业务结局映射）。"""
     from iesplan.services.tasks import map_business_outcome
 
     return map_business_outcome(solver_status)
@@ -464,9 +464,9 @@ def _outcome_from_solver(solver_status: str) -> str:
 
 
 def execute_plan(ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None) -> dict:
-    """规划(02 §5-§6): planning 引擎 → 候选列表 → IRR/NPV 评估 → 候选对象。
+    """规划: planning 引擎 → 候选列表 → IRR/NPV 评估 → 候选对象。
 
-    引擎经建模命令注册表分发(03 §9.3: ies.command.compute.run_planning.v1)。
+    引擎经建模命令注册表分发（ies.command.compute.run_planning.v1）。
     """
     config = content.get("calc_config") or {}
     task_params = config.get("task_params") or {}
@@ -479,7 +479,7 @@ def execute_plan(ctx: RunContext, content: dict, data: dict, axis: Any, options:
     ctx.progress(5, "setup", {"n_steps": int(axis.n), "max_combinations": opts["max_combinations"]})
     ctx.checkpoint("setup")
 
-    # 总超时: 组合数 × 单次评价上限 + 裕量(≤ 任务级硬超时 8h, 03 §6.2)
+    # 总超时: 组合数 × 单次评价上限 + 裕量（≤ 任务级硬超时 8h）
     total_timeout = min(
         max(300.0, float(opts["max_combinations"]) * float(opts["timeout_per_eval"])), 8 * 3600
     )
@@ -545,7 +545,7 @@ def _planning_payload(ctx: RunContext, result: PlanningResult) -> dict:
 
 
 def _assess_planning(result: PlanningResult, solver_status: str) -> dict:
-    """规划结果四维评估(02 §5.6: IRR 硬约束 + 基准可行性)。"""
+    """规划结果四维评估（IRR 硬约束 + 基准可行性，见 domain-model）。"""
     physical = "pass" if result.baseline_cost is not None else "fail"
     optimality = "pass" if result.best is not None else "fail"
     if result.best is not None:
@@ -565,21 +565,21 @@ def _assess_planning(result: PlanningResult, solver_status: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 不确定性分析(task_type=uncertainty, 03 §5.4 / RPD 10.5)
+# 不确定性分析（task_type=uncertainty，见 domain-model §快照任务和结果）
 # ---------------------------------------------------------------------------
 
 
 def execute_uncertainty(
     ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None,
 ) -> dict:
-    """不确定性分析(02 §10): 父任务顺序执行样本子任务。
+    """不确定性分析: 父任务顺序执行样本子任务。
 
     - 不可变输入: uncertainty_snapshots 行(方法/样本数/种子/分布/内容哈希);
     - 每个样本: sample_tasks 行(状态逐样本) + sample_records(数值指标);
     - 固定方案可靠性(mode=fixed_reliability): 容量固定, 只重优化运行;
     - 重规划敏感性(mode=replan_sensitivity): 每个样本重新优化容量;
     - 每个样本运行在隔离求解器子进程(支撑资源限制/超时/取消);
-    - 无效样本单独统计(有效数/总数/剔除原因, RPD 10.5), 不静默计入分布。
+    - 无效样本单独统计（有效数/总数/剔除原因），不静默计入分布。
     """
     config = content.get("calc_config") or {}
     task_params = config.get("task_params") or {}
@@ -597,7 +597,7 @@ def execute_uncertainty(
     planning_opts.setdefault("timeout_per_eval", 30.0)
     planning_opts.setdefault("max_combinations", 40)
 
-    # 不可变不确定性快照(01 §9.1; 记录方法/分布/种子)
+    # 不可变不确定性快照（记录方法/分布/种子，见 domain-model §快照任务和结果）
     unc_hash = sha256_hex(json.dumps(
         {"method": method, "n_samples": n_samples, "seed": seed, "distributions": distributions},
         ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -672,7 +672,7 @@ def execute_uncertainty(
     if valid == n_samples:
         outcome = "normal_completion"
     elif valid > 0:
-        outcome = "partial_batch"  # 部分样本完成(03 §3.2)
+        outcome = "partial_batch"  # 部分样本完成
     else:
         outcome = "no_recommendation"
     assessment = {
@@ -733,7 +733,7 @@ def _sample_metric_planning(result: PlanningResult) -> dict:
 
 
 def _sample_data(data: dict, distributions: dict, rng: np.random.Generator, sample_index: int) -> dict:
-    """按分布采样逐时输入(02 §10; RPD 10.5: 种子进入快照, 可复现)。
+    """按分布采样逐时输入（种子进入快照，可复现，见 domain-model）。
 
     分布格式(calc_config.task_params.distributions):
         {"e_load": {"kind": "normal|uniform|scenario", "sigma": 0.1, "amplitude": 0.2,
@@ -770,14 +770,14 @@ def _sample_data(data: dict, distributions: dict, rng: np.random.Generator, samp
 
 
 # ---------------------------------------------------------------------------
-# 批量分析(task_type=analysis, 03 §8: 确定性单因子/多参数扫描)
+# 批量分析（task_type=analysis，确定性单因子/多参数扫描）
 # ---------------------------------------------------------------------------
 
 
 def execute_analysis(
     ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None
 ) -> dict:
-    """批量分析(03 §8): 按 task_params 的扫描规格跑 run_batch 单因子/组合扫描。
+    """批量分析: 按 task_params 的扫描规格跑 run_batch 单因子/组合扫描。
 
     任务参数(task_params):
         sweeps: [{"param_path": "calc_config.params.discount_rate",
@@ -786,7 +786,7 @@ def execute_analysis(
 
     产出 payload: result_kind='analysis_result', 含每个组合的结果行
     (status/kpi/financial)与汇总表(基准/变化率/单调性/极值点)。
-    引擎经建模命令注册表分发(03 §9.3);逐时大结果不落盘(03 §8.3)。
+    引擎经建模命令注册表分发；逐时大结果不落盘（见宪法 §10）。
     """
     from iesplan.analysis.wrapper import (
         SweepSpec,
@@ -844,10 +844,10 @@ def execute_analysis(
         for r in batch
     ]
     n_ok = sum(1 for r in batch if r.status == "ok")
-    # 汇总表(summarize_batch: 行表 + 指标极值点; 03 §8.2 汇总语义,
+    # 汇总表（summarize_batch: 行表 + 指标极值点；
     # codex 二次审核 Medium-1: 之前只返回计数型 summary, 汇总函数未调用)
     summary = summarize_batch(batch)
-    # 四维评估与业务结局(03 §8: analysis 也按评估模型落 assessment,
+    # 四维评估与业务结局（analysis 也按评估模型落 assessment，
     # 避免 submit_result 写四个 unknown; 批量语义: 物理/财务/可靠性按 ok 率)
     assessment = _assess_eval(
         EvalResult(
@@ -897,7 +897,7 @@ def _jsonable_kpi(kpi: dict | None) -> dict | None:
 
 
 def _financial_to_dict(fin) -> dict | None:
-    """FinancialResult → 可 JSON 落库 dict(evidence financial 块, 03 §7.4)。"""
+    """FinancialResult → 可 JSON 落库 dict（evidence financial 块）。"""
     if fin is None:
         return None
     return {
@@ -915,7 +915,7 @@ def _financial_to_dict(fin) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# 结果检查(task_type=report, 01 §8.2 / RPD 10.4)
+# 结果检查（task_type=report，四维评估见 domain-model §快照任务和结果）
 # ---------------------------------------------------------------------------
 
 
@@ -969,7 +969,7 @@ def execute_check(ctx: RunContext) -> dict:
     )
     ctx.db.add(assess)
     ctx.db.flush()
-    # 挂接最新评估引用(01 §8.3: assessment_id 可 UPDATE)
+    # 挂接最新评估引用（assessment_id 可 UPDATE）
     ctx.db.execute(
         sa.update(ResultIndex).where(ResultIndex.evidence_package_id == package.id)
         .values(assessment_id=assess.id)
@@ -991,7 +991,7 @@ def execute_check(ctx: RunContext) -> dict:
 
 
 def _load_evidence_payload(db: Session, package: EvidencePackage) -> dict:
-    """读取证据包对象内容并解析(内容寻址, 读取时校验哈希, 01 §8.1)。"""
+    """读取证据包对象内容并解析（内容寻址，读取时校验哈希）。"""
     from iesplan.storage import get_object
 
     raw = get_object(db, package.object_id)
@@ -1003,7 +1003,7 @@ def _load_evidence_payload(db: Session, package: EvidencePackage) -> dict:
 
 
 def _assess_payload(payload: dict) -> dict:
-    """对既有证据包重新派生四维评估(与提交时同口径, RPD 10.4: 可追溯不覆盖)。"""
+    """对既有证据包重新派生四维评估（与提交时同口径，可追溯不覆盖）。"""
     raw = payload.get("assessment")
     assessment = dict(raw) if isinstance(raw, dict) else {}
     dims = ["dimension_physical", "dimension_optimality", "dimension_financial", "dimension_reliability"]
@@ -1044,7 +1044,7 @@ def execute_export(ctx: RunContext) -> dict:
 def execute_package_import(ctx: RunContext) -> dict:
     """项目包导入(task_type=import, io 队列)占位执行器。
 
-    项目包导入与校验(01 §10.4)由另一 agent 实现; 本波次只留分派与占位。
+    项目包导入与校验由另一实现负责；本波次只留分派与占位。
     """
     return _io_placeholder(ctx, io_kind="package_import", stage_hint="项目包导入与校验")
 
@@ -1074,7 +1074,7 @@ def _io_placeholder(ctx: RunContext, *, io_kind: str, stage_hint: str) -> dict:
 
 
 def _build_plan(content: dict, config: dict | None = None) -> dict:
-    """项目内容 → 方案 dict(02 §7.4 evaluate_plan 输入: devices/损耗/泵系数)。"""
+    """项目内容 → 方案 dict（evaluate_plan 输入: devices/损耗/泵系数）。"""
     model = content.get("model") or {}
     devices: list[dict] = []
     for dev in model.get("devices") or []:
@@ -1106,7 +1106,7 @@ def _overall_score(physical: str, optimality: str, financial: str, reliability: 
 
 
 def _write_engine_diags(ctx: RunContext, diags: list[dict]) -> None:
-    """引擎诊断 → 任务诊断(不可变表; 只写 error/warning 级, 03 §6.3)。"""
+    """引擎诊断 → 任务诊断（不可变表；只写 error/warning 级）。"""
     for d in diags:
         severity = str(d.get("severity") or "info")
         if severity not in ("error", "warning", "blocking"):

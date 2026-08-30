@@ -153,7 +153,7 @@ def _count_audit(session: Session, action: str, entity_type: str = "objects") ->
 def test_object_handle_public_field_set() -> None:
     """0.4.0 契约: ObjectHandle 只暴露公开元数据字段, 无适配器/缓存字段。
 
-    存储路径(§11 敏感)与 ref_count(§10.3 可重建缓存)已从公开句柄移除;
+    存储路径（敏感）与 ref_count（可重建缓存）已从公开句柄移除（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §10.3 引用； manual/developer-guide/zh-CN/modules/storage.md §必须遵循的规范） 删除 §11/§10.3 旧规格编号
     引用/计数状态经 object_info/list_refs 公开门面查询。
     """
     names = {f.name for f in fields(ObjectHandle)}
@@ -165,7 +165,7 @@ def test_object_handle_public_field_set() -> None:
 
 
 def test_object_info_has_no_storage_path(session: Session, data_dir) -> None:
-    """0.4.0 契约: object_info 元数据视图不输出 storage_path(§11 内部路径
+    """契约：object_info 元数据视图不输出 storage_path（内部路径敏感，见 manual/developer-guide/zh-CN/modules/storage.md §必须遵循的规范； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §10.2 路径与适配器）
     不得进入 DTO —— 该 dict 会经 /api/admin/objects/restore 响应序列化)。"""
     obj = _put(session, b"no-path-in-info", content_type="text/plain")
     session.commit()
@@ -193,7 +193,7 @@ def test_put_object_writes_file_and_record(session: Session, data_dir) -> None:
     assert obj.media_type == "text/plain"
     assert obj.status == "stored"
     # 0.4.0 收窄: 公开句柄不再暴露适配器/缓存字段 storage_path/ref_count
-    # (存储路径 §11 敏感; 引用计数 §10.3 可重建缓存, 经 object_info 查询)
+    # （存储路径敏感；引用计数为可重建缓存，经 object_info 查询，见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §10.3）
     assert not hasattr(obj, "storage_path")
     assert not hasattr(obj, "ref_count")
     # 文件在最终位置, 临时区无残留(原子 rename)
@@ -228,7 +228,7 @@ def test_put_object_dedup_same_content(session: Session, data_dir) -> None:
 
 
 def test_put_object_dedup_still_records_business_ref(session: Session, data_dir) -> None:
-    """去重: 复用对象记录, 但传入的业务引用仍按 object_refs 单独建立(RPD 23.1)。"""
+    """去重：复用对象记录，但传入的业务引用仍按 object_refs 单独建立（见 manual/developer-guide/zh-CN/modules/storage.md §写入与引用流程； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §10.3 引用）"""
     content = b"dedup-with-ref" * 3
     obj1 = _put(session, content, ref_type="dataset_file", ref_id=10)
     obj2 = _put(session, content, ref_type="dataset_file", ref_id=11)
@@ -257,7 +257,7 @@ def test_get_object_returns_bytes(session: Session, data_dir) -> None:
 def test_add_remove_list_refs(session: Session, data_dir) -> None:
     """引用: add_ref 递增计数 / remove_ref 递减 / list_refs 枚举; 归零置 orphaned。
 
-    STO-05: put_object 返回不可变 ObjectHandle(快照); ref_count 状态变化经
+    put_object 返回不可变 ObjectHandle（快照）；ref_count 状态变化经 object_info 查询（见 manual/developer-guide/zh-CN/modules/storage.md §输出） 删除 STO-05 旧编号
     object_info 查询新视图(不再依赖 ORM identity map 的活对象)。
     """
     obj = _put(session, b"ref-target" * 4)
@@ -371,7 +371,7 @@ def test_safe_cleanup_execute_marks_pending_deletion(session: Session, data_dir)
 
     plan = safe_cleanup(session, dry_run=True)
     result = safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
-    session.commit()  # RR-P1-03: 应用用例拥有事务, 存储服务只 flush
+    session.commit()  # 应用用例拥有事务，存储服务只 flush（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §5.4 事务）
     assert result["marked_count"] == 1
     assert result["errors"] == []
     assert result["pending_delete_days"] == 7
@@ -389,7 +389,7 @@ def test_safe_cleanup_execute_marks_pending_deletion(session: Session, data_dir)
     assert (data_dir / "objects" / kept.sha256).exists()
     assert session.get(StoredObject, kept.id) is not None
     assert object_info(session, kept.id)["ref_count"] == 1
-    # 软删标记审计(01 §10.3)
+    # 软删标记审计（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §16 安全与审计； manual/developer-guide/zh-CN/modules/storage.md §对象清理恢复路径）
     assert _count_audit(session, "object_marked_pending_deletion") == 1
     audit = session.execute(
         sa.select(AuditLog).where(AuditLog.action == "object_marked_pending_deletion")
@@ -739,7 +739,7 @@ def test_api_cleanup_plan_then_execute(client: TestClient, session: Session, dat
     assert p["candidates"][0]["id"] == orphan.id
     assert (data_dir / "objects" / orphan.sha256).exists()
 
-    # 阶段 2: 执行(必须携带 dry-run 返回的 plan_id, RR-P2-07)
+    # 阶段 2: 执行（必须携带 dry-run 返回的 plan_id，见 manual/developer-guide/zh-CN/modules/storage.md §对象清理恢复路径）
     done = client.post(
         "/api/admin/objects/cleanup",
         json={"dry_run": False, "plan_id": p["plan_id"]},
@@ -828,7 +828,7 @@ def test_api_cleanup_execute_requires_plan(client: TestClient, session: Session,
 
 
 def test_api_health_reports_corruption(client: TestClient, session: Session, data_dir) -> None:
-    """健康接口(STO-07): 抽样校验发现被篡改对象(存储 health provider 的 verify 节)。"""
+    """健康接口：抽样校验发现被篡改对象（存储 health provider 的 verify 节，见 manual/developer-guide/zh-CN/modules/storage.md §失败语义）"""
     seed_admin(session)
     headers = login(client, "admin", ADMIN_PASSWORD)
     obj = _put(session, b"health-check" * 10)
@@ -851,7 +851,7 @@ def test_api_health_reports_corruption(client: TestClient, session: Session, dat
 
 
 class TestTransactionIsolation:
-    """STO-03: 唯一键竞争不得回滚调用方事务(存储只 flush, 竞争在 savepoint 内处理)。"""
+    """唯一键竞争不得回滚调用方事务（存储只 flush，竞争在 savepoint 内处理，见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §5.4 事务）"""
 
     def test_duplicate_ref_conflict_keeps_business_changes(self, session: Session, data_dir) -> None:
         """先修改业务行, 再触发重复引用竞争, 断言业务修改仍在事务中。"""
@@ -892,7 +892,7 @@ class TestTransactionIsolation:
 
 
 class TestReconcile:
-    """STO-04: reconciliation 幂等恢复(临时文件清理/孤儿登记/损坏报告/计数修正)。"""
+    """reconciliation 幂等恢复（临时文件清理/孤儿登记/损坏报告/计数修正，见 manual/developer-guide/zh-CN/modules/storage.md §失败语义）"""
 
     def test_reconcile_reports_orphan_and_corrupt(self, session: Session, data_dir) -> None:
         """dry_run: 报告磁盘孤儿(有文件无记录)与损坏(有记录无文件), 不修改。"""

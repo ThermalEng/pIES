@@ -36,7 +36,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 
 
 def ops_health_view(db: Session) -> dict:
-    """运维健康视图(RPD 13.3): 存活/就绪/任务指标/队列指标/存储容量。
+    """运维健康视图(架构宪法 §13 故障与健康语义): 存活/就绪/任务指标/队列指标/存储容量。
 
     STO-07: 本聚合层只编排各模块公开 provider, 不实现任何模块内部逻辑;
     存储健康取 storage.health_view(容量 + 抽样校验), 队列取 queue_status。
@@ -56,7 +56,7 @@ def ops_health_view(db: Session) -> dict:
     storage = storage_health_view(db)
     queue_view = queue.queue_status()
     # 健康判定: 存活 + 就绪 + 存储门禁; 队列为可重建视图(Redis 可重建),
-    # 其降级状态在 queue 节单独上报, 不影响整体状态(RPD 13.3)
+    # 其降级状态在 queue 节单独上报, 不影响整体状态
     healthy = db_ok and storage["capacity"]["ok"]
     return {
         "status": "ok" if healthy else "degraded",

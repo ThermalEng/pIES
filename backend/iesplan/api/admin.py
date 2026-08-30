@@ -2,10 +2,10 @@
 
 认证说明: 统一使用 U01 身份单元提供的窗口会话认证(iesplan.api.auth.CurrentAdmin:
 窗口凭证校验 + 全局 admin 角色判定, 未认证 401, 非管理员 403)。
-管理员经维护入口只读诊断与解锁, 不得直接编辑业务(RPD 3.2)。
+管理员经维护入口只读诊断与解锁, 不得直接编辑业务(宪法 §16 安全与审计 + domain-model §身份权限审计)。
 
 路由清单:
-- GET  /admin/audit             审计查询(过滤 + 游标分页, RPD 13.2)
+- GET  /admin/audit             审计查询(过滤 + 游标分页, domain-model §身份权限审计 + contracts §HTTP语义)
 - GET  /admin/diagnostics       运维诊断视图(任务/队列/存储/保留策略/维护记录)
 - POST /admin/unlock-task       管理员解锁任务(卡死任务回收 → queued)
 
@@ -13,7 +13,7 @@
 (双认证兼容 + 两版视图并集), 本模块不再重复定义, 避免路径遮蔽。
 
 全部维护操作写不可变审计(audit_log, actor_type='admin')与
-admin_maintenance_actions(01 §2.3)。
+admin_maintenance_actions(domain-model §快照任务结果/对象生命周期 + modules/persistence.md)。
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def _record_maintenance(
     params: dict[str, Any] | None = None,
     result: dict[str, Any] | None = None,
 ) -> AdminMaintenanceAction:
-    """记录管理员维护操作(01 §2.3, 不可变追加式)。"""
+    """记录管理员维护操作(domain-model §快照任务结果/对象生命周期 + modules/persistence.md, 不可变追加式)。"""
     row = AdminMaintenanceAction(
         action_type=action_type,
         performed_by=admin.id,
@@ -85,7 +85,7 @@ def query_audit_endpoint(
     cursor: int | None = Query(default=None, description="游标(上一页末条 id)"),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
-    """审计查询(RPD 13.2): 过滤 + 游标分页, 按时间倒序。"""
+    """审计查询(domain-model §身份权限审计 + contracts §HTTP语义): 过滤 + 游标分页, 按时间倒序。"""
     return audit_service.query_audit(
         db, entity_type=entity_type, entity_id=entity_id, action=action,
         actor_id=actor_id, actor_type=actor_type, since=since, until=until,
@@ -169,7 +169,7 @@ def unlock_task_endpoint(
     db: Annotated[Session, Depends(get_db)],
     admin: CurrentAdmin,
 ) -> dict:
-    """管理员解锁卡死任务(RPD 3.2 维护入口)。
+    """管理员解锁卡死任务(宪法 §16 + domain-model §身份权限审计 维护入口)。
 
     适用范围: running/cancelling 状态且租约已失活的任务; 执行: 吊销租约、
     释放并发槽、终止当前尝试, 任务回到 queued 重新排队。全程审计

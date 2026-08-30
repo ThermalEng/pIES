@@ -1,12 +1,12 @@
 """项目与权限域模型(U02 权限 / U03 项目写入单元)。
 
 含: projects / drafts / project_versions / version_refs / admin_maintenance_actions。
-对应 01-db-schema.md 第2、3节。0.8.0 起剔除共享成员/所有权转移: 项目权限以
+领域归属与约束见 manual/developer-guide/zh-CN/modules/persistence.md 与 ARCHITECTURE_CONSTITUTION.md §11 数据库与持久化。0.8.0 起剔除共享成员/所有权转移: 项目权限以
 projects.owner_id 为唯一权威, 不再有 project_members / ownership_transfers 表。
 
 注意: projects.current_draft_id -> drafts 与 current_version_id -> project_versions
 存在循环外键, 用 ``use_alter=True`` 让 SQLAlchemy 在建表后补 ALTER 语句,
-与 01 §11 迁移顺序第5步"先建表、后补指针列"一致。
+与 manual/developer-guide/zh-CN/modules/persistence.md §修改 schema 保持一致（先建表、后补指针列）。
 """
 
 from __future__ import annotations

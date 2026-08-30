@@ -1,6 +1,6 @@
 """身份域模型(U01 身份写入单元): users / roles / user_roles / credentials / window_sessions / auth_events。
 
-对应 01-db-schema.md 第1节。
+领域归属与约束见 manual/developer-guide/zh-CN/modules/persistence.md 与 ARCHITECTURE_CONSTITUTION.md §11 数据库与持久化。
 """
 
 from __future__ import annotations
