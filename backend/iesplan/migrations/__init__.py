@@ -446,11 +446,161 @@ def _allocate_namespaces_for_existing_users(conn: sa.Connection) -> None:
                 continue
 
 
+# ---------------------------------------------------------------------------
+# 迁移 0004: 项目计算基线(0.6.5 前置阶段事项 1)
+# ---------------------------------------------------------------------------
+
+#: 默认基线(1h / 非闰年 / single)的确定性摘要; 由 core.ProjectBaseline 按
+#: 当前规范化算法计算(SQL 回填与 Python 同源, 算法语义变化时此处自动跟随)。
+def _default_baseline_sha256() -> str:
+    from iesplan.core.contracts import ProjectBaseline
+
+    return ProjectBaseline(
+        resolution="1h", leap_year=False, scenario_mode="single",
+    ).digest()
+
+
+#: 旧库回填语句: 仅填充 NULL 行, 幂等(重复执行不覆盖已回填值)。
+_BACKFILL_SQL = """
+UPDATE projects SET baseline_resolution='1h' WHERE baseline_resolution IS NULL;
+UPDATE projects SET baseline_leap_year=false WHERE baseline_leap_year IS NULL;
+UPDATE projects SET baseline_scenario_mode='single' WHERE baseline_scenario_mode IS NULL;
+UPDATE project_versions SET baseline_resolution='1h' WHERE baseline_resolution IS NULL;
+UPDATE project_versions SET baseline_leap_year=false WHERE baseline_leap_year IS NULL;
+UPDATE project_versions SET baseline_scenario_mode='single' WHERE baseline_scenario_mode IS NULL;
+"""
+
+
+def _migrate_0004(conn: sa.Connection) -> None:
+    """项目计算基线(0004, 0.6.5 事项 1)。
+
+    - projects / project_versions 增加基线四列(resolution/leap_year/
+      scenario_mode/sha256); 存量行按确定性默认基线(1h/非闰年/single)
+      回填摘要(摘要由 Python 侧按当前规范化算法计算后注入, 与 SQL 同源);
+      回填后 SET NOT NULL 并补 CHECK 约束;
+    - 删除旧 ``fixed_utc_offset_minutes`` 列(projects / project_versions):
+      时区语义随项目计算基线废除(宪法 7.5), 不保留兼容别名;
+    - 幂等: 全新库由 create_all 先行建列, 本迁移仅处理存量库
+      (ADD COLUMN IF NOT EXISTS / PRAGMA 守卫 + NULL 行回填)。
+
+    SQLite 测试库: 全新库经 create_all 重建(无旧列), 本迁移基本为 no-op;
+    对含旧列且无 CHECK 引用约束的存量 SQLite 库执行真实 DROP COLUMN。
+    """
+    if conn.dialect.name == "postgresql":
+        _migrate_0004_postgres(conn)
+    else:
+        _migrate_0004_sqlite(conn)
+
+
+def _migrate_0004_postgres(conn: sa.Connection) -> None:
+    """Postgres 分支: 加列 → 锁表回填 → NOT NULL → CHECK → 删旧列。"""
+    digest = _default_baseline_sha256()
+    for table in ("projects", "project_versions"):
+        _ensure_columns(
+            conn, table,
+            {
+                "baseline_resolution": "TEXT",
+                "baseline_leap_year": "BOOLEAN",
+                "baseline_scenario_mode": "TEXT",
+                "baseline_sha256": "TEXT",
+            },
+        )
+    # 回填 + 摘要注入与 SET NOT NULL 之间锁表, 杜绝并发插入 NULL 与
+    # 回填/加约束之间的原子性窗口。
+    conn.execute(sa_text("LOCK TABLE projects IN EXCLUSIVE MODE"))
+    conn.execute(sa_text("LOCK TABLE project_versions IN EXCLUSIVE MODE"))
+    for stmt in _BACKFILL_SQL.split(";"):
+        stripped = stmt.strip()
+        if stripped:
+            conn.execute(sa_text(stripped))
+    conn.execute(
+        sa_text("UPDATE projects SET baseline_sha256=:digest WHERE baseline_sha256 IS NULL"),
+        {"digest": digest},
+    )
+    conn.execute(
+        sa_text("UPDATE project_versions SET baseline_sha256=:digest WHERE baseline_sha256 IS NULL"),
+        {"digest": digest},
+    )
+    for table in ("projects", "project_versions"):
+        for column in (
+            "baseline_resolution",
+            "baseline_leap_year",
+            "baseline_scenario_mode",
+            "baseline_sha256",
+        ):
+            conn.execute(sa_text(f"ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL"))
+        conn.execute(
+            sa_text(
+                f"DO $$ BEGIN "
+                f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_{table}_baseline_resolution') THEN "
+                f"ALTER TABLE {table} ADD CONSTRAINT ck_{table}_baseline_resolution "
+                f"CHECK (baseline_resolution IN ('15min','30min','1h')); END IF; END $$;"
+            )
+        )
+        conn.execute(
+            sa_text(
+                f"DO $$ BEGIN "
+                f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_{table}_baseline_scenario') THEN "
+                f"ALTER TABLE {table} ADD CONSTRAINT ck_{table}_baseline_scenario "
+                f"CHECK (baseline_scenario_mode IN ('single')); END IF; END $$;"
+            )
+        )
+        conn.execute(
+            sa_text(
+                f"DO $$ BEGIN "
+                f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_{table}_baseline_sha256') THEN "
+                f"ALTER TABLE {table} ADD CONSTRAINT ck_{table}_baseline_sha256 "
+                f"CHECK (baseline_sha256 ~ '^[0-9a-f]{{64}}$'); END IF; END $$;"
+            )
+        )
+        # 旧时区列: DROP COLUMN 自动级联删除其 CHECK 约束(pg)。
+        conn.execute(
+            sa_text(f"ALTER TABLE {table} DROP COLUMN IF EXISTS fixed_utc_offset_minutes")
+        )
+
+
+def _migrate_0004_sqlite(conn: sa.Connection) -> None:
+    """SQLite 分支: PRAGMA 守卫加列(带默认值) → 回填摘要 → 删旧列。
+
+    全新库(create_all 已含基线列、无旧列)为 no-op; 存量库按旧布局补列。
+    SQLite ``ADD COLUMN ... NOT NULL`` 必须带 DEFAULT, 存量行即默认值。
+    """
+    digest = _default_baseline_sha256()
+    defaults = {
+        "baseline_resolution": "TEXT NOT NULL DEFAULT '1h'",
+        "baseline_leap_year": "BOOLEAN NOT NULL DEFAULT 0",
+        "baseline_scenario_mode": "TEXT NOT NULL DEFAULT 'single'",
+        "baseline_sha256": f"TEXT NOT NULL DEFAULT '{digest}'",
+    }
+    for table in ("projects", "project_versions"):
+        _ensure_columns(conn, table, defaults)
+        existing = {
+            row[1]
+            for row in conn.execute(sa_text(f"PRAGMA table_info({table})")).all()
+        }
+        if "baseline_sha256" in existing:
+            conn.execute(
+                sa_text(
+                    f"UPDATE {table} SET baseline_sha256=:digest "
+                    f"WHERE baseline_sha256 IS NULL"
+                ),
+                {"digest": digest},
+            )
+        if "fixed_utc_offset_minutes" in existing:
+            # SQLite 3.35+ 支持 DROP COLUMN; 列被 CHECK 约束引用时失败并
+            # 抛出 DBAPIError(SQLite 测试库由 create_all 全量重建, 实际
+            # 不存在含旧 CHECK 的存量库; 生产为 Postgres, 自动级联删除)。
+            conn.execute(
+                sa_text(f"ALTER TABLE {table} DROP COLUMN fixed_utc_offset_minutes")
+            )
+
+
 #: 有序迁移清单(version, name, upgrade)
 MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
     ("0002_model_template_lifecycle", "用户模型模板主表与不可变发布 revision 表", _migrate_0002),
     ("0003_public_namespace_and_draft_history", "公开命名空间与不可变草稿历史", _migrate_0003),
+    ("0004_project_baseline", "项目计算基线固定与旧时区列删除", _migrate_0004),
 ]
 
 MIGRATION_VERSIONS: tuple[str, ...] = tuple(m[0] for m in MIGRATIONS)

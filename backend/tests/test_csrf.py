@@ -89,7 +89,16 @@ def _bearer(token: str) -> dict[str, str]:
 
 def _create_project(client: TestClient, owner_token: str, name: str) -> int:
     """创建项目(返回 project_id), 使用 Bearer 认证保证幂等。"""
-    resp = client.post("/api/projects", json={"name": name}, headers=_bearer(owner_token))
+    resp = client.post(
+        "/api/projects",
+        json={
+            "name": name,
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
+        headers=_bearer(owner_token),
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()["project"]["id"]
 

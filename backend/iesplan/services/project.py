@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 
 from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
+from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
 from iesplan.core.idgen import sha256_hex
 from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.models.audit import AuditLog
@@ -120,7 +121,10 @@ def create_project(
     user: User,
     name: str,
     currency: str = "CNY",
-    utc_offset_minutes: int = 480,
+    *,
+    baseline_resolution: str,
+    baseline_leap_year: bool,
+    baseline_scenario_mode: str,
     description: str | None = None,
     language: str | None = None,
 ) -> Project:
@@ -129,6 +133,11 @@ def create_project(
     业务规则: 管理员不持有业务项目(仅负责账号与系统管理), 创建一律拒绝
     (403, PERM-DENIED-001 标准信封); 普通工程师行为不变。
     名称全局唯一(uq_projects_name), 冲突抛 ConflictError。
+    项目计算基线(0.6.5 事项 1): 创建时必须显式提供 resolution/leap_year/
+    scenario_mode 三字段, 缺失或非法一律拒绝(PROJ-BASE-001), 不静默使用
+    默认值; 摘要经 ``core.contracts.ProjectBaseline`` 确定性计算。默认值
+    (1h/非闰年/single)只用于迁移对存量项目的回填, 不用于新项目创建。
+    基线创建后无任何更新入口, 数据库层另有不可变触发器(Postgres)。
     """
     if _is_admin(db, user):
         raise ForbiddenError(
@@ -140,10 +149,22 @@ def create_project(
         raise InvalidRequestError("项目名称不能为空", code="PROJ-CMD-001")
     if currency not in ("CNY", "USD"):
         raise InvalidRequestError("币种仅支持 CNY/USD", params={"currency": currency})
-    if not -720 <= utc_offset_minutes <= 840:
+    if not isinstance(baseline_leap_year, bool):
         raise InvalidRequestError(
-            "UTC 偏移必须在 -720~840 分钟之间", params={"utc_offset_minutes": utc_offset_minutes}
+            "项目计算基线必须显式提供 leap_year(布尔值)",
+            code="PROJ-BASE-001",
+            params={"baseline_leap_year": baseline_leap_year},
         )
+    try:
+        baseline = ProjectBaseline(
+            resolution=baseline_resolution,
+            leap_year=baseline_leap_year,
+            scenario_mode=baseline_scenario_mode,
+        )
+    except ProjectBaselineError as exc:
+        raise InvalidRequestError(
+            str(exc), code="PROJ-BASE-001", params={"baseline": str(exc)}
+        ) from exc
     lang = language or getattr(user, "locale", None) or "zh-CN"
     project = Project(
         name=name,
@@ -151,7 +172,10 @@ def create_project(
         status="active",
         owner_id=user.id,
         currency=currency,
-        fixed_utc_offset_minutes=utc_offset_minutes,
+        baseline_resolution=baseline.resolution,
+        baseline_leap_year=baseline.leap_year,
+        baseline_scenario_mode=baseline.scenario_mode,
+        baseline_sha256=baseline.digest(),
         schema_version=1,
         created_by=user.id,
     )
@@ -165,7 +189,8 @@ def create_project(
     _audit(
         db, "project", project.id, "project.created", user.id,
         after={
-            "name": name, "currency": currency, "utc_offset_minutes": utc_offset_minutes,
+            "name": name, "currency": currency,
+            "project_baseline": baseline.to_dict(),
             "owner_id": user.id,
         },
     )
@@ -707,7 +732,10 @@ def create_version(
         source_draft_id=draft.id,
         source_draft_revision=draft.revision,
         reason=reason,
-        fixed_utc_offset_minutes=project.fixed_utc_offset_minutes,
+        baseline_resolution=project.baseline_resolution,
+        baseline_leap_year=project.baseline_leap_year,
+        baseline_scenario_mode=project.baseline_scenario_mode,
+        baseline_sha256=project.baseline_sha256,
         currency=project.currency,
         schema_version=project.schema_version,
         content_hash=content_hash,
@@ -905,7 +933,12 @@ def project_to_dict(project: Project) -> dict:
         "status": project.status,
         "owner_id": project.owner_id,
         "currency": project.currency,
-        "fixed_utc_offset_minutes": project.fixed_utc_offset_minutes,
+        "project_baseline": {
+            "resolution": project.baseline_resolution,
+            "leap_year": project.baseline_leap_year,
+            "scenario_mode": project.baseline_scenario_mode,
+            "sha256": project.baseline_sha256,
+        },
         "schema_version": project.schema_version,
         "current_draft_id": project.current_draft_id,
         "current_version_id": project.current_version_id,
@@ -976,7 +1009,12 @@ def version_to_dict(version: ProjectVersion) -> dict:
         "source_draft_id": version.source_draft_id,
         "source_draft_revision": version.source_draft_revision,
         "reason": version.reason,
-        "fixed_utc_offset_minutes": version.fixed_utc_offset_minutes,
+        "project_baseline": {
+            "resolution": version.baseline_resolution,
+            "leap_year": version.baseline_leap_year,
+            "scenario_mode": version.baseline_scenario_mode,
+            "sha256": version.baseline_sha256,
+        },
         "currency": version.currency,
         "schema_version": version.schema_version,
         "content_hash": version.content_hash,
@@ -1129,7 +1167,12 @@ def _version_content(project: Project, content: dict) -> dict:
     """版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(domain-model §项目聚合)。"""
     version_content = {k: v for k, v in content.items() if k != "applied_commands"}
     version_content["currency"] = project.currency
-    version_content["fixed_utc_offset_minutes"] = project.fixed_utc_offset_minutes
+    version_content["project_baseline"] = {
+        "resolution": project.baseline_resolution,
+        "leap_year": project.baseline_leap_year,
+        "scenario_mode": project.baseline_scenario_mode,
+        "sha256": project.baseline_sha256,
+    }
     return version_content
 
 

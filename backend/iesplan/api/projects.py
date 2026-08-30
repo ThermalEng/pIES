@@ -41,11 +41,21 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
 class ProjectCreateRequest(BaseModel):
-    """创建项目请求体。"""
+    """创建项目请求体。
+
+    项目计算基线(0.6.5 事项 1)为创建时必填三字段, 缺失或非法一律 422:
+    - baseline_resolution: '15min' | '30min' | '1h'(全项目统一计算分辨率);
+    - baseline_leap_year: 是否按 366 天(闰年)生成全周期序列;
+    - baseline_scenario_mode: 当前仅 'single'。
+    基线创建后不可修改(无任何更新入口); 默认值仅用于迁移存量项目回填,
+    新项目创建必须显式提供, 不静默补齐。
+    """
 
     name: str = Field(min_length=1, max_length=200)
     currency: Literal["CNY", "USD"] = "CNY"
-    utc_offset_minutes: int = Field(default=480, ge=-720, le=840)
+    baseline_resolution: Literal["15min", "30min", "1h"]
+    baseline_leap_year: bool
+    baseline_scenario_mode: Literal["single"]
     description: str | None = Field(default=None, max_length=2000)
 
 
@@ -105,12 +115,18 @@ def create_project_endpoint(
     db: Annotated[Session, Depends(get_db)],
     user: CurrentUser,
 ) -> dict:
-    """创建项目: 创建者即所有者, 并创建初始草稿(revision=1)。"""
+    """创建项目: 创建者即所有者, 并创建初始草稿(revision=1)。
+
+    项目计算基线三字段(baseline_resolution/baseline_leap_year/
+    baseline_scenario_mode)为必填, 创建时一次性固定且创建后不可修改。
+    """
     project = project_service.create_project(
         db, user,
         name=payload.name,
         currency=payload.currency,
-        utc_offset_minutes=payload.utc_offset_minutes,
+        baseline_resolution=payload.baseline_resolution,
+        baseline_leap_year=payload.baseline_leap_year,
+        baseline_scenario_mode=payload.baseline_scenario_mode,
         description=payload.description,
     )
     db.commit()

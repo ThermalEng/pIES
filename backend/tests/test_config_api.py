@@ -27,6 +27,7 @@ from sqlalchemy.pool import StaticPool
 
 from iesplan.api.auth import router as auth_router
 from iesplan.api.config import config_router, registry_router
+from iesplan.core.contracts import ProjectBaseline
 from iesplan.db import Base, get_db
 from iesplan.main import _register_exception_handlers
 from iesplan.models.identity import User
@@ -76,7 +77,12 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
     proj = Project(
         name="配置测试项目",
         currency="CNY",
-        fixed_utc_offset_minutes=480,
+        baseline_resolution="1h",
+        baseline_leap_year=False,
+        baseline_scenario_mode="single",
+        baseline_sha256=ProjectBaseline(
+            resolution="1h", leap_year=False, scenario_mode="single"
+        ).digest(),
         owner_id=owner.id,
         created_by=owner.id,
     )

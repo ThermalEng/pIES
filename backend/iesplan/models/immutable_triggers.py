@@ -110,3 +110,35 @@ END $$ LANGUAGE plpgsql;
 CREATE TRIGGER tg_tasks_terminal BEFORE UPDATE ON tasks
   FOR EACH ROW EXECUTE FUNCTION tg_tasks_terminal();
 """
+
+#: projects / project_versions: 项目计算基线(0.6.5 事项 1)创建时一次性固定,
+#: 创建后不可修改。行级 UPDATE 若改变任一基线列(含摘要)即拒绝 —— 基线是
+#: 序列预备、装配与历史任务解释的权威事实, 不允许运行期篡改。
+PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL: str = """\
+-- projects: 基线列不可修改(0.6.5 事项 1)
+CREATE FUNCTION tg_projects_baseline_immutable() RETURNS trigger AS $$
+BEGIN
+  IF OLD.baseline_resolution IS DISTINCT FROM NEW.baseline_resolution
+     OR OLD.baseline_leap_year IS DISTINCT FROM NEW.baseline_leap_year
+     OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode
+     OR OLD.baseline_sha256 IS DISTINCT FROM NEW.baseline_sha256 THEN
+    RAISE EXCEPTION '项目计算基线创建后不可修改';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER tg_projects_baseline_immutable BEFORE UPDATE ON projects
+  FOR EACH ROW EXECUTE FUNCTION tg_projects_baseline_immutable();
+-- project_versions: 版本固化基线同样不可修改(版本表整体只 INSERT)
+CREATE FUNCTION tg_project_versions_baseline_immutable() RETURNS trigger AS $$
+BEGIN
+  IF OLD.baseline_resolution IS DISTINCT FROM NEW.baseline_resolution
+     OR OLD.baseline_leap_year IS DISTINCT FROM NEW.baseline_leap_year
+     OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode
+     OR OLD.baseline_sha256 IS DISTINCT FROM NEW.baseline_sha256 THEN
+    RAISE EXCEPTION '项目版本基线固化后不可修改';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER tg_project_versions_baseline_immutable BEFORE UPDATE ON project_versions
+  FOR EACH ROW EXECUTE FUNCTION tg_project_versions_baseline_immutable();
+"""

@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
 from iesplan.config import settings  # noqa: E402
+from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, Task  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
@@ -117,7 +118,12 @@ def setup_environment(
     db.add(user)
     db.flush()
     project = Project(name=f"测试项目-{_env_seq}-{task_type}", owner_id=user.id,
-                      created_by=user.id, status="active")
+                      created_by=user.id, status="active",
+                      baseline_resolution="1h", baseline_leap_year=False,
+                      baseline_scenario_mode="single",
+                      baseline_sha256=ProjectBaseline(
+                          resolution="1h", leap_year=False, scenario_mode="single"
+                      ).digest())
     db.add(project)
     db.flush()
 
@@ -146,7 +152,12 @@ def setup_environment(
     content_hash = project_service.store_content_object(db, content)
     version = ProjectVersion(
         project_id=project.id, version_no=1, name="v1", reason="snapshot_freeze",
-        fixed_utc_offset_minutes=480, currency="CNY", schema_version=1,
+        baseline_resolution="1h", baseline_leap_year=False,
+        baseline_scenario_mode="single",
+        baseline_sha256=ProjectBaseline(
+            resolution="1h", leap_year=False, scenario_mode="single"
+        ).digest(),
+        currency="CNY", schema_version=1,
         content_hash=content_hash, created_by=user.id,
     )
     db.add(version)

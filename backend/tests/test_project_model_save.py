@@ -286,7 +286,16 @@ def _make_owner(client: TestClient, db: Session, name: str) -> tuple[dict, int]:
     token = headers.get("Authorization", "").replace("Bearer ", "")
     if token and getattr(user, 'public_namespace', None):
         _token_ns_map[token] = user.public_namespace
-    resp = client.post("/api/projects", json={"name": f"{name} 项目"}, headers=headers)
+    resp = client.post(
+        "/api/projects",
+        json={
+            "name": f"{name} 项目",
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
+        headers=headers,
+    )
     assert resp.status_code == 201, resp.text
     return headers, resp.json()["project"]["id"]
 

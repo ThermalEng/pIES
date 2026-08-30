@@ -32,9 +32,12 @@ class Project(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     currency: Mapped[str] = mapped_column(Text, nullable=False, server_default="CNY")
-    fixed_utc_offset_minutes: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=sa.text("480")
-    )
+    # 项目计算基线(0.6.5 事项 1): 创建时一次性固定, 创建后不可修改
+    # (宪法 7.5: 计算序列不使用时间戳或时区, 统一从 0 开始的连续 step)。
+    baseline_resolution: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline_leap_year: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
     # 循环依赖指针: 先建表, 后补外键(use_alter)
     current_draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id", use_alter=True))
@@ -48,7 +51,18 @@ class Project(Base):
     __table_args__ = (
         CheckConstraint("status IN ('active','archived','deleted')", name="ck_projects_status"),
         CheckConstraint("currency IN ('CNY','USD')", name="ck_projects_currency"),
-        CheckConstraint("fixed_utc_offset_minutes BETWEEN -720 AND 840", name="ck_projects_utc_offset"),
+        CheckConstraint(
+            "baseline_resolution IN ('15min','30min','1h')",
+            name="ck_projects_baseline_resolution",
+        ),
+        CheckConstraint(
+            "baseline_scenario_mode IN ('single')",
+            name="ck_projects_baseline_scenario",
+        ),
+        regex_check(
+            f"baseline_sha256 ~ '{HASH64_RE}'",
+            name="ck_projects_baseline_sha256",
+        ),
         UniqueConstraint("name", name="uq_projects_name"),
         Index("idx_projects_status", "status"),
         Index("idx_projects_owner", "owner_id"),
@@ -106,14 +120,27 @@ class ProjectVersion(Base):
     source_draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id"))
     source_draft_revision: Mapped[int | None] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    fixed_utc_offset_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 项目计算基线(版本固化, 自包含; 创建后不可修改)
+    baseline_resolution: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline_leap_year: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     currency: Mapped[str | None] = mapped_column(Text)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     content_hash: Mapped[str] = mapped_column(Text, nullable=False)
 
     __table_args__ = (
         CheckConstraint(
-            "fixed_utc_offset_minutes BETWEEN -720 AND 840", name="ck_project_versions_utc_offset"
+            "baseline_resolution IN ('15min','30min','1h')",
+            name="ck_project_versions_baseline_resolution",
+        ),
+        CheckConstraint(
+            "baseline_scenario_mode IN ('single')",
+            name="ck_project_versions_baseline_scenario",
+        ),
+        regex_check(
+            f"baseline_sha256 ~ '{HASH64_RE}'",
+            name="ck_project_versions_baseline_sha256",
         ),
         CheckConstraint("currency IS NULL OR currency IN ('CNY','USD')", name="ck_project_versions_currency"),
         regex_check(f"content_hash ~ '{HASH64_RE}'", name="ck_project_versions_content_hash"),

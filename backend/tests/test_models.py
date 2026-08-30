@@ -63,10 +63,14 @@ KEY_COLUMNS: dict[str, set[str]] = {
     "auth_events": {"user_id", "session_id", "event_type", "occurred_at", "detail"},
     "admin_maintenance_actions": {"action_type", "performed_by", "status", "params", "result"},
     "projects": {
-        "name", "owner_id", "currency", "fixed_utc_offset_minutes", "current_draft_id", "current_version_id"
+        "name", "owner_id", "currency", "baseline_resolution", "baseline_leap_year",
+        "baseline_scenario_mode", "baseline_sha256", "current_draft_id", "current_version_id"
     },
     "drafts": {"project_id", "revision", "content_hash", "parent_draft_id", "is_current"},
-    "project_versions": {"project_id", "version_no", "content_hash", "fixed_utc_offset_minutes", "reason"},
+    "project_versions": {
+        "project_id", "version_no", "content_hash", "baseline_resolution",
+        "baseline_leap_year", "baseline_scenario_mode", "baseline_sha256", "reason"
+    },
     "version_refs": {"project_version_id", "ref_type", "object_id", "ref_hash"},
     "system_graphs": {"project_id", "draft_id", "project_version_id", "graph_hash"},
     "devices": {"graph_id", "device_type", "kind", "params", "model_fidelity"},
