@@ -135,8 +135,8 @@ def create_template_endpoint(
     if payload.public_namespace is not None:
         raise AppError(
             "客户端不得提交 public_namespace",
-            code="TPL-NS-003",
-            message_key="ies.diag.tpl.namespace_forbidden",
+            code="API-REQ-002",
+            message_key="ies.diag.tpl.api.namespace_forbidden",
             params={"field": "public_namespace"},
             location={"object_type": "model_template", "field": "public_namespace"},
         )

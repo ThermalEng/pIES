@@ -82,11 +82,11 @@ TPL_MDL_NOT_FOUND = "TPL-MDL-004"  # 模板或 revision 不存在
 TPL_MDL_STATUS_INVALID = "TPL-MDL-005"  # 生命周期状态不允许该操作
 TPL_MDL_REVISION_REQUIRED = "TPL-MDL-006"  # 尚未发布, 需要先发布
 TPL_MDL_ALREADY_PUBLISHED = "TPL-MDL-007"  # 已发布模板禁止删除
-TPL_NS_SLUG_INVALID = "TPL-NS-001"  # slug 格式非法
-TPL_NS_ID_MISMATCH = "TPL-NS-002"  # device.id 与期望不一致
-TPL_NS_FORBIDDEN = "TPL-NS-003"  # 客户端伪造 namespace
-TPL_NS_STABLE_ID_INVALID = "TPL-NS-004"  # 稳定 ID 格式非法
-TPL_NS_SLUG_CONFLICT = "TPL-NS-005"  # slug 已存在
+TPL_NS_SLUG_INVALID = "API-VAL-002"  # slug 格式非法
+TPL_NS_ID_MISMATCH = "API-VAL-003"  # device.id 与期望不一致
+TPL_NS_FORBIDDEN = "API-REQ-002"  # 客户端伪造 namespace
+TPL_NS_STABLE_ID_INVALID = "API-VAL-004"  # 稳定 ID 格式非法
+TPL_NS_SLUG_CONFLICT = "API-CONFLICT-001"  # slug 已存在
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ def _validate_slug(slug: str) -> None:
         err = AppError(
             f"slug 格式非法: {slug!r}",
             code=TPL_NS_SLUG_INVALID,
-            message_key="ies.diag.tpl.namespace_slug_invalid",
+            message_key="ies.diag.tpl.api.slug_invalid",
             params={"slug": slug, "expected": "小写字母/数字，点/下划线/连字符分段，1-64 字符"},
             location={"object_type": "model_template", "field": "slug"},
         )
@@ -213,7 +213,7 @@ def _validate_device_id_match(yaml_device_id: str, expected_id: str) -> None:
         err = AppError(
             f"device.id 与后端计算结果不一致",
             code=TPL_NS_ID_MISMATCH,
-            message_key="ies.diag.tpl.namespace_device_id_mismatch",
+            message_key="ies.diag.tpl.api.device_id_mismatch",
             params={"expected": expected_id, "actual": yaml_device_id,
                     "field": "device.id"},
             location={"object_type": "model_template", "field": "device.id"},
@@ -480,8 +480,8 @@ def _save_draft(
     if template.template_id and not is_valid_stable_id(template.template_id):
         raise AppError(
             "旧发布内容需先完成显式迁移才能产生新的 publication",
-            code="TPL-NS-004",
-            message_key="ies.diag.tpl.namespace_stable_id_invalid",
+            code="API-VAL-004",
+            message_key="ies.diag.tpl.api.stable_id_invalid",
             params={"template_id": template.template_id, "expected": "user.<namespace>.device.<slug>"},
             location={"object_type": "model_template", "template_id": template_id},
         )
@@ -494,15 +494,8 @@ def _save_draft(
         )
     validation = validate_template_yaml(model_yaml)
     if not validation.ok or validation.document is None:
-        # 校验失败: 保留上一次成功草稿内容, 仅更新诊断对象(编辑会话内可见)
-        diag_handle = _put_json(db, [d.to_dict() for d in validation.diagnostics],
-                                "model_template_draft_diagnostics")
-        old = template.draft_diagnostics_object_id
-        template.draft_diagnostics_object_id = diag_handle.id
-        if old is not None:
-            detach(db, old, TEMPLATE_OWNER_NAMESPACE, template.id,
-                   ref_entity_type=TEMPLATE_OWNER_NAMESPACE)
-        db.flush()
+        # 校验失败不落盘、不推进 revision、不留下部分引用（任务书 §四）
+        # 诊断通过错误信封的 params.diagnostics 返回，前端在编辑会话内保留
         raise TemplateValidationError(
             "",
             params={"diagnostics": [d.to_dict() for d in validation.diagnostics],
@@ -809,8 +802,8 @@ def _publish(
     if template.template_id and not is_valid_stable_id(template.template_id):
         raise AppError(
             "旧发布内容需先完成显式迁移才能产生新的 publication",
-            code="TPL-NS-004",
-            message_key="ies.diag.tpl.namespace_stable_id_invalid",
+            code="API-VAL-004",
+            message_key="ies.diag.tpl.api.stable_id_invalid",
             params={"template_id": template.template_id, "expected": "user.<namespace>.device.<slug>"},
             location={"object_type": "model_template", "template_id": template_id},
         )
@@ -940,6 +933,7 @@ def _publish(
         attach(db, handle.id, TEMPLATE_OWNER_NAMESPACE, template.id,
                ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="revision")
     template.published_revision = row.revision
+    template.current_published_revision_id = row.id
     template.published_at = datetime.now(UTC)
     template.status = TEMPLATE_STATUS_PUBLISHED
     db.add(
@@ -1183,8 +1177,8 @@ def migrate_published_template(
     if existing is not None and existing.id != old_template.id:
         raise AppError(
             "新稳定 ID 已被占用",
-            code="TPL-NS-005",
-            message_key="ies.diag.tpl.namespace_slug_conflict",
+            code="API-CONFLICT-001",
+            message_key="ies.diag.tpl.api.slug_conflict",
             params={"new_template_id": new_template_id},
         )
 
@@ -1202,11 +1196,16 @@ def migrate_published_template(
     old_sha = rev.content_sha256
     parsed = json.loads(old_text)
     parsed["device"]["id"] = new_template_id
-    new_text = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    new_doc_result = validate_template_raw(parsed)
-    # 也可直接用 canonical_bytes 计算
-    import hashlib
-    new_sha = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+    validation_new = validate_template_raw(parsed)
+    if not validation_new.ok or validation_new.document is None:
+        raise TemplateValidationError(
+            "",
+            params={"diagnostics": [d.to_dict() for d in validation_new.diagnostics],
+                    "count": len(validation_new.diagnostics)},
+            location={"object_type": "model_template", "template_id": old_template_id},
+        )
+    new_text = validation_new.canonical_text
+    new_sha = validation_new.content_sha256
 
     # 检查是否已有迁移回执（幂等）
     existing_receipt = db.execute(
@@ -1218,20 +1217,19 @@ def migrate_published_template(
         return {"receipt": {
             "old_template_id": old_template_id,
             "new_template_id": existing_receipt.new_template_id,
-            "old_content_sha256": old_text[:0] or old_sha,
-            "new_content_sha256": new_sha,
+            "old_content_sha256": existing_receipt.old_content_sha256,
+            "new_content_sha256": existing_receipt.new_content_sha256,
         }, "duplicate": True}
 
-    # 原子更新：模板主表 + 回执（同一事务）
+    # 原子更新：模板主表 + 新规范对象 + 回执 + 项目模型引用（同一事务）
     try:
         old_template.template_id = new_template_id
         old_template.slug = new_slug
-        # 更新新规范对象
+        old_template.public_namespace = namespace
         new_handle = put_object(db, new_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
                                 source_category="model_template_revision")
         attach(db, new_handle.id, TEMPLATE_OWNER_NAMESPACE, old_template.id,
                ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="revision")
-        # 创建迁移回执
         receipt = TemplateMigrationReceipt(
             old_template_id=old_template_id,
             new_template_id=new_template_id,
@@ -1242,7 +1240,6 @@ def migrate_published_template(
         )
         db.add(receipt)
         db.flush()
-        # 更新项目模型引用（若存在）
         db.execute(
             sa.update(ProjectModel)
             .where(ProjectModel.template_id == old_template_id)
@@ -1287,11 +1284,17 @@ def migrate_draft_to_new_stable_id(
     old_text = _read_template_document(db, old_template.draft_yaml_object_id)
     parsed = json.loads(old_text)
     parsed["device"]["id"] = new_id
-    new_text = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    import hashlib
-    new_sha = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+    validation_new = validate_template_raw(parsed)
+    if not validation_new.ok or validation_new.document is None:
+        raise TemplateValidationError(
+            "",
+            params={"diagnostics": [d.to_dict() for d in validation_new.diagnostics],
+                    "count": len(validation_new.diagnostics)},
+            location={"object_type": "model_template", "template_id": old_template_id},
+        )
+    new_text = validation_new.canonical_text
+    new_sha = validation_new.content_sha256
     old_sha = old_template.draft_sha256 or ""
-    # 原子更新
     try:
         new_handle = put_object(db, new_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
                                 source_category="model_template_draft")
@@ -1299,8 +1302,28 @@ def migrate_draft_to_new_stable_id(
                ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_yaml")
         old_template.template_id = new_id
         old_template.slug = new_slug
+        old_template.public_namespace = namespace
         old_template.draft_yaml_object_id = new_handle.id
         old_template.draft_sha256 = new_sha
+        # 同步创建新的不可变草稿 revision（不伪造历史）
+        from iesplan.models.draft_revision import ModelTemplateDraftRevision as _DraftRevMig
+        diag_h = _put_json(db, [], "model_template_draft_diagnostics")
+        new_dr = _DraftRevMig(
+            entry_id=old_template.id,
+            revision=old_template.draft_revision + 1,
+            yaml_object_id=new_handle.id,
+            canonical_sha256=new_sha,
+            inputs_sha256=validation_new.inputs_sha256,
+            source="migration",
+            created_by=user.id,
+            diagnostics_object_id=diag_h.id,
+        )
+        db.add(new_dr)
+        db.flush()
+        attach(db, diag_h.id, TEMPLATE_OWNER_NAMESPACE, old_template.id,
+               ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_revision")
+        old_template.draft_revision = new_dr.revision
+        old_template.current_draft_revision_id = new_dr.id
         db.commit()
     except Exception:
         db.rollback()

@@ -280,8 +280,12 @@ def _migrate_0001(conn: sa.Connection) -> None:
 _MIGRATION_0003_POSTGRES = """
 -- 用户公开命名空间（12 位小写 Crockford Base32，60 bit 熵；全局唯一）
 ALTER TABLE users ADD COLUMN IF NOT EXISTS public_namespace TEXT;
-ALTER TABLE users ADD CONSTRAINT ck_users_public_namespace
-    CHECK (public_namespace IS NULL OR public_namespace ~ '^[0-9a-hjkmnp-tv-z]{12}$');
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_users_public_namespace') THEN
+        ALTER TABLE users ADD CONSTRAINT ck_users_public_namespace
+            CHECK (public_namespace IS NULL OR public_namespace ~ '^[0-9a-hjkmnp-tv-z]{12}$');
+    END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_public_namespace
     ON users (public_namespace) WHERE public_namespace IS NOT NULL;
 
@@ -370,7 +374,17 @@ def _migrate_0003(conn: sa.Connection) -> None:
     不在 db.py 中补列或改表（任务书 §三：禁止启动流程补列）。
     """
     if conn.dialect.name == "postgresql":
-        for stmt in _MIGRATION_0003_POSTGRES.split(";"):
+        # Execute DO block separately, then remaining statements
+        # DO block contains semicolons inside, so execute whole postgres DDL with a single execute per statement block
+        # Split on ';' outside of $$ blocks
+        import re
+        pg_sql = _MIGRATION_0003_POSTGRES
+        # Extract DO blocks and execute separately
+        do_blocks = re.findall(r'DO \$\$.*?END \$\$;', pg_sql, flags=re.DOTALL)
+        remaining = re.sub(r'DO \$\$.*?END \$\$;', '', pg_sql, flags=re.DOTALL)
+        for block in do_blocks:
+            conn.execute(sa_text(block))
+        for stmt in remaining.split(";"):
             stripped = stmt.strip()
             if stripped:
                 conn.execute(sa_text(stripped))
