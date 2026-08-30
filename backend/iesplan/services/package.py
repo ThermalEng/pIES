@@ -4,9 +4,11 @@
 
 - export_package: 仅所有者；版本化清单(格式版本/清单/对象清单)，流式导出
   模型/配置/版本/数据集版本与溯源/历史结果证据与评估引用/内容校验；
+  含当前生效规划/财务配置 revision 快照(0.6.5 事项 3)；
   不含账号/权限/会话/全局配置/密钥（domain-model §对象生命周期、架构宪法 §16）；
-- import_proposal: 导入前校验(格式/兼容性/清单/完整性，sha256 逐对象校验)；
-  暂存对象 + 拟创建项目快照 + 分区提交内容 + 校验报告；
+- import_proposal: 导入前校验(格式/兼容性/清单/完整性，sha256 逐对象校验；
+  包内规划/财务配置严格恢复 + 领域校验 + 摘要一致，缺失 = 导入后无配置，
+  不静默默认)；暂存对象 + 拟创建项目快照 + 分区提交内容 + 校验报告；
 - confirm_import: 提交导入 — 每次导入创建新项目身份(不覆盖已有)，导入者成为
   所有者，原授权关系不迁移，历史结果作为证据来源保留(不伪造本地任务)；
 - export_excel: 固定模板(标题中英双语，默认中文)，固定引用证据包与评估，
@@ -34,18 +36,28 @@ from sqlalchemy.orm import Session
 
 from iesplan import __version__
 from iesplan.config import settings
-from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
+from iesplan.core.contracts import (
+    FinanceConfig,
+    FinanceConfigError,
+    PlanningConfig,
+    PlanningConfigError,
+    ProjectBaseline,
+    ProjectBaselineError,
+)
 from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.idgen import sha256_hex
 from iesplan.core.jsonutil import jsonable
+from iesplan.finance.contracts import validate_finance_domain
 from iesplan.models.audit import ImportProposal
 from iesplan.models.calc import CalcSnapshot, Task
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
 from iesplan.models.identity import User
 from iesplan.models.project import Draft, Project, ProjectVersion, VersionRef
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex
+from iesplan.planning.contracts import validate_planning_domain
 from iesplan.services import audit as audit_service
+from iesplan.services import config_revisions as config_service
 from iesplan.services import project as project_service
 from iesplan.storage import add_ref, get_object, object_by_sha256, object_info, put_object
 
@@ -355,6 +367,7 @@ def _build_package_zip(
         "versions": [],
         "datasets": [],
         "evidence": [],
+        "configs": {},
     }
 
     def _add(path: str, data: bytes, media_type: str) -> None:
@@ -394,6 +407,32 @@ def _build_package_zip(
         ).encode()
         _add("draft.json", draft_json, "application/json")
         zf.writestr("draft.json", draft_json)
+
+        # 当前生效规划/财务配置 revision(0.6.5 事项 3): 仅导出当前生效
+        # 快照(与 draft.json 同语义; revision 追加历史属服务端状态, 不入包)。
+        # 经配置服务读取(内容摘要与持久化摘要不一致 → 数据损坏, 导出拒绝)。
+        if project.finance_revision is not None:
+            finance, finance_rev, _ = config_service.get_finance_config(db, project.id)
+            config_doc = {
+                "revision": finance_rev,
+                "content_sha256": finance.revision,
+                "finance_config": finance.to_dict(),
+            }
+            config_raw = json.dumps(jsonable(config_doc), ensure_ascii=False, indent=2).encode()
+            _add("finance_config.json", config_raw, "application/json")
+            zf.writestr("finance_config.json", config_raw)
+            files_meta["configs"]["finance_config"] = "finance_config.json"
+            if project.planning_revision is not None:
+                planning, planning_rev, _ = config_service.get_planning_config(db, project.id)
+                config_doc = {
+                    "revision": planning_rev,
+                    "content_sha256": planning.revision,
+                    "planning_config": planning.to_dict(),
+                }
+                config_raw = json.dumps(jsonable(config_doc), ensure_ascii=False, indent=2).encode()
+                _add("planning_config.json", config_raw, "application/json")
+                zf.writestr("planning_config.json", config_raw)
+                files_meta["configs"]["planning_config"] = "planning_config.json"
 
         # 项目版本(不可变, 版本内容 + 版本元数据; 不含创建者账号)
         for version in versions:
@@ -753,6 +792,88 @@ def _unique_project_name(db: Session, base: str) -> str:
     return candidate
 
 
+def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
+    """解析包内规划/财务配置 revision 文件(0.6.5 事项 3), 严格校验。
+
+    返回 {"finance": FinanceConfig, "planning": PlanningConfig | None};
+    包未携带配置时返回 {}(导入后项目无配置, 不静默默认)。
+
+    校验(任一失败 → ImportValidationError, 拒绝整个导入):
+    - files.configs 声明的路径必须存在且为合法 JSON;
+    - 规划配置文件存在但财务配置缺失 → 拒绝(规划必须引用财务配置 revision);
+    - 内容严格恢复(FinanceConfig/PlanningConfig.from_dict: 拒未知/缺失字段,
+      声明 revision 必须等于规范摘要, 防伪造/防漂移);
+    - 领域校验(币种一致性 PROJ-FIN-002、设备引用 PROJ-PLAN-003);
+    - 文件级 content_sha256 必须等于内容摘要(与持久化契约同语义);
+    - 规划配置 finance_revision 必须等于包内财务配置摘要(宪法 4.6 同 revision)。
+    """
+    files_meta = manifest.get("files") or {}
+    configs_meta = files_meta.get("configs") or {}
+    if not configs_meta:
+        return {}
+    if not isinstance(configs_meta, dict):
+        raise ImportValidationError(["清单 files.configs 结构非法(期望映射)"])
+    reasons: list[str] = []
+
+    finance_path = configs_meta.get("finance_config")
+    planning_path = configs_meta.get("planning_config")
+    if finance_path is None and planning_path is not None:
+        raise ImportValidationError(
+            ["包内携带规划配置但缺少财务配置(规划配置必须引用已保存的 FinanceConfig revision)"]
+        )
+    if finance_path is None:
+        raise ImportValidationError(["清单 files.configs 缺少 finance_config 条目"])
+
+    def _load(package_field: str, path: str) -> dict:
+        if not isinstance(path, str) or path not in entries:
+            raise ImportValidationError(
+                [f"清单 files.configs.{package_field} 指向的包内文件缺失: {path}"]
+            )
+        try:
+            doc = json.loads(entries[path].decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ImportValidationError([f"包内 {path} 无法解析为 JSON"]) from exc
+        if not isinstance(doc, dict):
+            raise ImportValidationError([f"包内 {path} 结构非法(期望对象)"])
+        return doc
+
+    finance_doc = _load("finance_config", finance_path)
+    finance_payload = finance_doc.get("finance_config")
+    try:
+        finance = FinanceConfig.from_dict(finance_payload)
+    except FinanceConfigError as exc:
+        reasons.append(f"包内财务配置非法: {exc}")
+    else:
+        for d in validate_finance_domain(finance):
+            reasons.append(f"包内财务配置领域校验失败: {d.params.get('detail') or d.code}")
+        if finance_doc.get("content_sha256") != finance.revision:
+            reasons.append("包内财务配置 content_sha256 与内容摘要不一致")
+
+    planning: PlanningConfig | None = None
+    if planning_path is not None:
+        planning_doc = _load("planning_config", planning_path)
+        planning_payload = planning_doc.get("planning_config")
+        try:
+            planning = PlanningConfig.from_dict(planning_payload)
+        except PlanningConfigError as exc:
+            reasons.append(f"包内规划配置非法: {exc}")
+        else:
+            for d in validate_planning_domain(planning):
+                reasons.append(f"包内规划配置领域校验失败: {d.params.get('detail') or d.code}")
+            if planning_doc.get("content_sha256") != planning.revision:
+                reasons.append("包内规划配置 content_sha256 与内容摘要不一致")
+            if finance is not None and planning.finance_revision != finance.revision:
+                reasons.append(
+                    "包内规划配置引用的 FinanceConfig revision 与包内财务配置不一致"
+                )
+    if reasons:
+        raise ImportValidationError(reasons)
+    result: dict = {"finance": finance}
+    if planning is not None:
+        result["planning"] = planning
+    return result
+
+
 def import_proposal(
     db: Session,
     user: User,
@@ -814,6 +935,9 @@ def import_proposal(
         baseline = ProjectBaseline.from_dict(project_meta.get("project_baseline"))
     except ProjectBaselineError as exc:
         raise ImportValidationError([f"包内项目计算基线非法: {exc}"]) from exc
+    # 规划/财务配置 revision(0.6.5 事项 3): 包内配置严格校验(缺失 = 导入后
+    # 无配置, 不静默默认; 非法/摘要不一致 → 拒绝整个导入)。
+    package_configs = _parse_config_files(entries, manifest)
     project = Project(
         name=name,
         description=project_meta.get("description"),
@@ -851,6 +975,18 @@ def import_proposal(
                 "name": name, "currency": currency,
                 "project_baseline": baseline.to_dict(),
                 "schema_version": project.schema_version,
+            },
+            "configs": {
+                "finance": {
+                    "present": "finance" in package_configs,
+                    "content_sha256": package_configs["finance"].revision
+                    if "finance" in package_configs else None,
+                },
+                "planning": {
+                    "present": "planning" in package_configs,
+                    "content_sha256": package_configs["planning"].revision
+                    if "planning" in package_configs else None,
+                },
             },
             "staging": {
                 "object_count": len(staged),
@@ -913,6 +1049,8 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     - 数据集: 重建 Dataset/DatasetVersion/DatasetFile(引用暂存对象, 原标识重映射);
     - 草稿: revision=1 领域内容(数据集绑定重映射, 证据来源登记);
     - 版本: 按包内版本顺序重建 ProjectVersion(新身份版本号, 不倒写原版本);
+    - 配置: 包内规划/财务配置 revision 重建为 revision=1 行(与提案同源
+      重校验, 失败 → 整个事务回滚, 不落任何行; 0.6.5 事项 3);
     - 证据: 历史结果作为证据来源保留 — 登记对象引用(imported_evidence)与
       评估摘要, 不创建本地任务(不伪造本地任务, domain-model §快照、任务和结果)。
 
@@ -1125,7 +1263,25 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     if prev_version is not None:
         project.current_version_id = prev_version.id
 
-    # 5) 提案收尾 + 审计
+    # 5) 规划/财务配置 revision(0.6.5 事项 3): 从暂存源包重解析并重建
+    # revision=1 行(与提案同源校验, 确认阶段为强制点; 失败 → 整个事务回滚,
+    # 不落任何行)。规划保存服务强制与当前财务配置同 revision。
+    package_configs = _parse_config_files(entries, manifest)
+    if "finance" in package_configs:
+        try:
+            config_service.save_finance_config(
+                db, project.id, package_configs["finance"].to_dict(), None, user.id
+            )
+            if "planning" in package_configs:
+                config_service.save_planning_config(
+                    db, project.id, package_configs["planning"].to_dict(), None, user.id
+                )
+        except AppError as exc:
+            raise ImportValidationError(
+                [f"包内配置在确认阶段校验失败: {getattr(exc, 'code', 'PKG-IMP-001')} {exc}"]
+            ) from exc
+
+    # 6) 提案收尾 + 审计
     proposal.status = "applied"
     proposal.decided_by = user.id
     proposal.decided_at = datetime.now(UTC)
@@ -1137,6 +1293,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             "imported_versions": len(version_paths),
             "imported_datasets": len(dataset_id_map),
             "evidence_objects": len(imported_evidence),
+            "imported_configs": len(package_configs),
         },
         checksum_info={"sha256": proposal.source_hash},
     )
