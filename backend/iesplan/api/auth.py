@@ -233,7 +233,7 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
     if user is None or user.status != "active":
         raise identity.SessionInvalidError()
     if session.credential_version_at_issue != user.credential_version:
-        # 凭证已轮换(改密/重置): 旧会话立即失效(RPD 3.4 凭证失效机制)
+        # 凭证已轮换(改密/重置): 旧会话立即失效(domain-model §身份权限审计 凭证失效机制)
         session.status = "revoked"
         session.revoked_at = now
         session.revoked_by = user.id
@@ -318,7 +318,7 @@ def login(
 
     若该账号已有活动窗口, 旧窗口被撤销、新会话以 takeover_pending 创建
     (确认接管前无业务权限), 响应 needs_takeover_confirm=True,
-    前端提示确认接管(RPD 3.3 / H-01)。
+    前端提示确认接管(domain-model §身份权限审计)。
     """
     ip = _client_ip(request)
     ua = request.headers.get("user-agent")
@@ -389,7 +389,7 @@ def confirm_takeover(
     response: Response,
     ctx: AuthCtx,
 ) -> AuthResponse:
-    """确认接管(RPD 3.3 / 01 §1.5): 当前待接管会话直接转为 active。
+    """确认接管(domain-model §身份权限审计): 当前待接管会话直接转为 active。
 
     不轮换凭证: 客户端既有 Cookie/Bearer 凭证即为最终凭证, 确认后立即
     拥有业务权限(其余 pending/active 会话被撤销)。返回当前窗口凭证。
@@ -408,7 +408,7 @@ def confirm_takeover(
 
 @router.post("/register", response_model=UserOut, summary="自助注册(默认关闭, 仅工程师)")
 def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
-    """自助注册: 注册开关开启时可用, 只能创建 engineer 角色(RPD 3.1)。"""
+    """自助注册: 注册开关开启时可用, 只能创建 engineer 角色(domain-model §身份权限审计)。"""
     if not identity.registration_enabled(db):
         raise identity.RegistrationDisabledError()
     user = identity.create_user(

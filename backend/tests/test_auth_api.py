@@ -214,7 +214,7 @@ def test_change_password_flow(client: TestClient, db_session: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 窗口接管(单活动窗口, RPD 3.3)
+# 窗口接管（单活动窗口，见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §16 安全与审计； manual/developer-guide/zh-CN/modules/api.md）
 # ---------------------------------------------------------------------------
 
 

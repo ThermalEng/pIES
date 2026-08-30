@@ -48,7 +48,7 @@ def main():
     if status != 200:
         print("无法登录, 中止"); sys.exit(1)
     token = data["token"]
-    # 旧会话位移 → 新会话为 takeover_pending: 需先确认接管(RPD 3.3)
+    # 旧会话位移 → 新会话为 takeover_pending: 需先确认接管(domain-model §身份、权限和审计)
     if data.get("needs_takeover_confirm"):
         s2, d2 = call("POST", "/auth/confirm-takeover", {"token": token}, token)
         if s2 == 200 and "token" in (d2 or {}):

@@ -11,7 +11,7 @@
                                                        版本元数据+溯源(不返回数据文件)。
 
 错误统一 AppError + 标准错误信封(宪法 §8.3); 数据校验失败返回
-400 + 信封, 诊断明细入 params.diagnostics(字段/行号定位, RPD 8.3)。
+400 + 信封, 诊断明细入 params.diagnostics(字段/行号定位, file-formats §设备数据 CSV)。
 
 认证与权限: 除模板下载(公开)外, 全部端点要求窗口会话认证
 (iesplan.api.auth.CurrentUser, 未认证 401); 读接口要求项目 view,
@@ -65,7 +65,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 
 
 class DatasetCreate(BaseModel):
-    """创建数据集请求(01 §5.1; source_category/provenance 归属版本, 见服务文档)。"""
+    """创建数据集请求(source_category/provenance 归属版本, 见服务文档)。"""
 
     name: str = Field(min_length=1, max_length=200, description="数据集名称")
     description: str | None = Field(default=None, max_length=2000, description="说明")

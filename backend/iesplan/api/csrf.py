@@ -5,7 +5,7 @@
 导航发出的跨站 POST, 第三方站点可通过自动提交的表单触发注销、改密、接管、
 创建/修改/删除项目、上传、对象清理等状态变更(登录用户被动执行)。
 
-设计(RPD 0.2.0 批次 A / OWASP CSRF 防护速查表「双源校验」方案):
+设计(OWASP CSRF 防护速查表「双源校验」方案):
 - 只拦截「基于 Cookie 会话 + 状态变更方法(POST/PUT/PATCH/DELETE)」的请求;
 - Bearer 认证请求(API 客户端/无 Cookie 场景)不经过本校验, 不受影响;
 - 无 Origin/Referer 的非浏览器客户端(CLI/脚本/测试 TestClient)放行;

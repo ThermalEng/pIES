@@ -1,17 +1,16 @@
-"""结果与证据服务(U09 结果写入单元 / U12 有效性检查单元 / U14 结果选择)。
+"""结果与证据服务（结果写入 / 有效性检查 / 结果选择）。
 
-对应 RPD 第 10/11 节、17.7/17.8 与 01-db-schema.md 第 8 节:
+对应 manual/developer-guide/zh-CN/domain-model.md《领域模型与追溯链》#快照、任务和结果 / #对象生命周期 与 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md#12 快照、任务与结果：证据/评估/索引/选中的不可变与追加语义。
 - submit_evidence: 证据包提交 —— 校验当前尝试写入资格(租约 + fencing token),
   保存不可变证据包(快照引用/算法/种子/停止条件/原始求解状态/候选索引/指标对象/
   逐时结果对象引用/清单 + 内容校验), 证据包只 INSERT 不 UPDATE;
 - get_evidence / evidence_content: 证据读取(对象存储, 读取时校验);
 - run_assessment: 四维有效性检查(物理/最优性/财务/可靠性, 调用 metrics.validity
   状态模型), 每次检查创建新评估记录不覆盖原记录; 四维结论独立记录, 汇总
-  (可用/受限使用/不可用)只在读取时从细粒度状态派生, 绝不覆盖原始维度
-  (核心不变量 4, RPD 10.4);
+  （可用/受限使用/不可用）只在读取时从细粒度状态派生，绝不覆盖原始维度（见 manual/developer-guide/zh-CN/modules/analysis.md《结果分析》#输出 与 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md#7.7 不可变内容与哈希：汇总不掩盖维度）。
 - update_result_index: 结果索引 —— 只保留最新引用, 新结果发布插入新行并转交
   旧行 is_latest 标记; 同证据包挂接新评估只更新 assessment_id 指针;
-- select_result: 结果选中(追加式, 01 §8.4) —— 保存所选解标识/用户/类型/参数
+- select_result: 结果选中（追加式，见 manual/developer-guide/zh-CN/domain-model.md#项目聚合 / #典型生命周期：换选=新行 + 旧行 is_current=false，仅追加不覆盖）
   差异补丁与确认预览内容校验(所选解标识与补丁承载于不可变审计日志);
 - build_diff_patch: 参数差异补丁生成(结果应用由项目单元 apply_result 处理);
 - read_hourly: 逐时结果查询(对象存储, 分页);
@@ -52,15 +51,15 @@ from iesplan.storage import add_ref, get_object, object_info, put_object
 # 常量
 # ---------------------------------------------------------------------------
 
-#: 证据包状态(01 §8.1)
+#: 证据包状态（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：Evidence 不可变，status=complete/partial/invalid 的业务语义）
 EVIDENCE_COMPLETE = "complete"
 EVIDENCE_PARTIAL = "partial"
 EVIDENCE_INVALID = "invalid"
 
-#: 评估类型(full=四维全查; 单维=只查该维, 其余维度记 unknown, 01 §8.2 追加语义)
+#: 评估类型（full=四维全查；单维=只查该维，其余记 unknown，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：评估记录追加式不覆盖）
 ASSESSMENT_TYPES: tuple[str, ...] = ("full", "physical", "optimality", "financial", "reliability")
 
-#: 结果选中类型(01 §8.4 业务索引)
+#: 结果选中类型（见 manual/developer-guide/zh-CN/domain-model.md#项目计算：候选方案应用产生新项目版本，选中记录追加式）
 SELECTION_TYPES: tuple[str, ...] = ("adopt", "reference")
 
 #: 评估规则版本(规则变更时递增, 随每次评估记录保存)
@@ -72,10 +71,10 @@ EVIDENCE_SCHEMA_VERSION = "1.0.0"
 DEFAULT_HOURLY_LIMIT = 5000
 MAX_HOURLY_LIMIT = 50000
 
-#: 可靠性有效样本下限(低于即证据不足, RPD 17.7 REQ-REL-003; 内容可覆盖)
+#: 可靠性有效样本下限（低于即证据不足，见 manual/developer-guide/zh-CN/modules/analysis.md#失败语义：样本不足→证据不足状态，需与配置/任务参数一致；阈值由配置覆盖）
 DEFAULT_MIN_VALID_SAMPLES = 30
 
-#: 最优性 gap 阈值(%)(02 §9.2 默认停止条件 0.1%; 内容可覆盖)
+#: 最优性 gap 阈值(%)（默认 0.1%，见 manual/developer-guide/zh-CN/modules/analysis.md#边界 与 manual/developer-guide/zh-CN/architecture.md#计算生成：容差/停止条件由 CalculationConfig 固定；内容可覆盖）
 DEFAULT_GAP_THRESHOLD_PCT = 0.1
 
 #: 证据载荷必需字段(清单部分, 与 content 内容校验值共同构成"清单+内容校验")
@@ -84,7 +83,7 @@ _REQUIRED_EVIDENCE_KEYS: tuple[str, ...] = (
     "candidate_indices", "metrics", "hourly_refs", "content", "checksum",
 )
 
-#: 求解器状态 → 最优性细粒度状态(RPD 17.7 REQ-VALID-002; 与 03 规格 3.2 表同源)
+#: 求解器状态 → 最优性细粒度状态（见 manual/developer-guide/zh-CN/modules/analysis.md#结果分析：物理/最优性/财务/可靠性四维独立评估，细粒度状态不被汇总覆盖）
 _OPTIMALITY_BY_SOLVER: dict[str, str] = {
     "OPTIMAL": "passed",
     "TIME_LIMIT_WITH_INCUMBENT": "restricted",
@@ -97,7 +96,7 @@ _OPTIMALITY_BY_SOLVER: dict[str, str] = {
     "NO_PARETO_FEASIBLE": "failed",
 }
 
-#: 引擎内部状态码 → 最优性细粒度状态(02 §11.4)
+#: 引擎内部状态码 → 最优性细粒度状态（见 manual/developer-guide/zh-CN/modules/solver-runtime.md《求解运行时》与 manual/developer-guide/zh-CN/modules/analysis.md#输出：最优性按求解状态/间隙判定）
 _ENGINE_STATUS_TO_OPTIMALITY: dict[str, str] = {
     "ok": "passed",
     "time_limit": "restricted",
@@ -163,7 +162,7 @@ def _audit(
     before: dict | None = None,
     after: dict | None = None,
 ) -> None:
-    """写入不可变审计日志(01 §10.3; 本模块只 INSERT)。"""
+    """写入不可变审计日志（见 manual/developer-guide/zh-CN/domain-model.md#身份、权限和审计：关键变更留不可变审计，本模块只 INSERT）。"""
     db.add(
         AuditLog(
             entity_type=entity_type,
@@ -188,7 +187,7 @@ def _evidence_project_version(db: Session, task: Task) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# 证据服务(01 §8.1: 不可变证据包)
+# 证据服务（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果 / #对象生命周期：证据包不可变，内容寻址）
 # ---------------------------------------------------------------------------
 
 
@@ -253,7 +252,7 @@ def _validate_evidence_payload(
     校验项: 必需字段齐全(清单)、快照与任务输入一致、seed/候选索引/逐时引用
     类型合法、content 校验值(sha256)与清单一致、逐时对象引用存在且可读。
     校验不通过不抛错, 以问题清单返回 —— 由调用方落库为 status='invalid'
-    (校验失败不可用, 01 §8.1), 保留审计痕迹。
+    （校验失败不可用，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：校验失败的证据仍落库标记不可用并保留审计）。
     """
     problems: list[str] = []
     missing = [key for key in _REQUIRED_EVIDENCE_KEYS if key not in payload]
@@ -278,7 +277,7 @@ def _validate_evidence_payload(
         if sha256_hex(canonical_json(content).encode("utf-8")) != checksum:
             problems.append("内容校验失败: content 与 checksum 不一致")
     if not isinstance(payload.get("seed"), int):
-        problems.append("seed 必须是整数(可复现性, REQ-NF-001)")
+        problems.append("seed 必须是整数（可复现性，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：CalcSnapshot 固定随机种子）")
     for key in ("stop_condition", "solve", "metrics"):
         if not isinstance(payload.get(key), dict):
             problems.append(f"{key} 必须是对象")
@@ -315,11 +314,11 @@ def submit_evidence(
     token: str | UUID,
     payload: dict[str, Any],
 ) -> EvidencePackage:
-    """提交证据包(01 §8.1 不可变; 规格 4.1 ③ 由 Worker 在尝试内调用)。
+    """提交证据包（不可变；见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果 与 manual/developer-guide/zh-CN/modules/worker.md《Worker》#租约/提交结果：由 Worker 在 attempt 内经 fencing 提交）。
 
     流程: 写入资格校验(尝试 running + 租约 active + fencing token 未过期) →
     载荷校验(清单 + content 校验值) → 打包为内容寻址对象 → 建立证据包行 →
-    建立对象引用(证据包引用的对象不可清理, RPD 23.2)。证据包只 INSERT,
+    建立对象引用（证据包引用的对象不可清理，见 manual/developer-guide/zh-CN/modules/storage.md《对象存储》#对象清理恢复路径 / #必须遵循的规范：任一有效 owner 引用阻止清理）。证据包只 INSERT，
     同一任务每次提交追加新行(不覆盖)。
     """
     task = _get_task(db, task_id)
@@ -327,7 +326,7 @@ def submit_evidence(
         raise EvidenceInvalidError("证据载荷必须是 JSON 对象", code="EVID-DATA-001")
     _verify_write_eligibility(db, task, attempt_id, token)
 
-    # 载荷校验: 校验失败仍落库但标记 invalid(校验失败不可用, 01 §8.1), 保留审计痕迹
+    # 载荷校验：校验失败仍落库但标记 invalid（校验失败不可用，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果），保留审计
     problems = _validate_evidence_payload(db, task, payload)[1]
     status = EVIDENCE_INVALID if problems else EVIDENCE_COMPLETE
     invalid_reason = ";".join(problems) if problems else None
@@ -439,15 +438,15 @@ def list_assessments(db: Session, task_id: int) -> list[ResultAssessment]:
 
 
 # ---------------------------------------------------------------------------
-# 四维有效性检查(U12, RPD 10.4 / 17.7)
+# 四维有效性检查（见 manual/developer-guide/zh-CN/modules/analysis.md《结果分析》#边界/失败语义：物理/最优性/财务/可靠性四维独立评估）
 # ---------------------------------------------------------------------------
 
 
 def _check_physical(content: dict[str, Any], evidence_status: str) -> tuple[validity.PhysicalValidity, dict]:
-    """物理有效性: 能量守恒残差 + 容量约束 + 边界条件(02 §9.1 后验审计)。
+    """物理有效性：能量守恒残差 + 容量约束 + 边界条件（见 manual/developer-guide/zh-CN/modules/analysis.md#作用/开发思路：工程指标后验审计）。
 
     证据包携带求解器残差审计结果(归一化残差 vs 容差)与约束/边界违例清单;
-    缺少所需证据时不得判定通过(REQ-VALID-001)。
+    缺少所需证据时不得判定通过（见 manual/developer-guide/zh-CN/modules/analysis.md#失败语义：指标所需字段缺失→不可评估，不可判通过）。
     """
     if evidence_status != EVIDENCE_COMPLETE:
         return validity.PhysicalValidity.insufficient, {"reason": "evidence_status_invalid"}
@@ -481,7 +480,7 @@ def _check_physical(content: dict[str, Any], evidence_status: str) -> tuple[vali
 
 
 def _check_optimality(content: dict[str, Any]) -> tuple[validity.OptimalityValidity, dict]:
-    """最优性有效性: 求解状态/Gap/停止原因(REQ-VALID-002)。
+    """最优性有效性：求解状态/Gap/停止原因（见 manual/developer-guide/zh-CN/modules/analysis.md#输出：四维评估细分状态）。
 
     记录原始求解状态、目标值、界、相对 Gap 与停止原因; Gap 只在求解器
     给出数学上有效的 Gap 时参与判定(证据包内 stop_condition 携带)。
@@ -503,7 +502,7 @@ def _check_optimality(content: dict[str, Any]) -> tuple[validity.OptimalityValid
     }
     fine = _OPTIMALITY_BY_SOLVER.get(solver_status) or _ENGINE_STATUS_TO_OPTIMALITY.get(solver_status)
     if fine is None:
-        # 无法证明最优性: 无依据不判通过(REQ-VALID-001)
+        # 无法证明最优性：无依据不判通过（见 manual/developer-guide/zh-CN/modules/analysis.md#失败语义）
         return validity.OptimalityValidity.insufficient, checks
     if fine == "passed" and gap is not None:
         try:
@@ -516,7 +515,7 @@ def _check_optimality(content: dict[str, Any]) -> tuple[validity.OptimalityValid
 
 
 def _check_financial(content: dict[str, Any]) -> tuple[validity.FinancialValidity, dict]:
-    """财务有效性: 现金流与 IRR 状态细分(REQ-FIN-005 / 02 §5.2)。
+    """财务有效性：现金流与 IRR 状态细分（见 manual/developer-guide/zh-CN/modules/finance.md《财务计算》#输出：IRR 状态细分与 manual/developer-guide/zh-CN/modules/analysis.md#输出）。
 
     IRR 状态(unique/none/multiple/degenerate/out_of_domain/numerical_failure)
     映射财务细粒度状态, 使用 metrics.validity.financial_validity_from_irr。
@@ -545,7 +544,7 @@ def _check_financial(content: dict[str, Any]) -> tuple[validity.FinancialValidit
 
 
 def _check_reliability(content: dict[str, Any]) -> tuple[validity.ReliabilityStatus, dict]:
-    """可靠性状态: 样本统计(未执行/部分/不足/有效, REQ-REL-003)。
+    """可靠性状态：样本统计（未执行/部分/不足/有效，见 manual/developer-guide/zh-CN/modules/analysis.md#失败语义：样本不足→证据不足）。
 
     无效样本单独统计不静默计入有效分布; 有效样本低于下限视为证据不足。
     """
@@ -577,7 +576,7 @@ def _check_reliability(content: dict[str, Any]) -> tuple[validity.ReliabilitySta
 
 
 def _fine_to_db(dimension: str, fine: Any) -> str:
-    """细粒度状态 → 数据库粗粒度枚举(01 §8.2 CHECK: pass/fail/unknown)。
+    """细粒度状态 → 数据库粗粒度枚举（pass/fail/unknown，见 manual/developer-guide/zh-CN/modules/analysis.md#输出：细粒度 vs 汇总，DB 粗粒度仅为存储形态）。
 
     数据库三值无法表达 restricted/na/insufficient, 归入 unknown; 权威细粒度
     状态与理由保存于 detail JSONB, 汇总只从细粒度派生(核心不变量 4)。
@@ -607,7 +606,7 @@ def run_assessment(
     assessment_type: str = "full",
     user: User | None = None,
 ) -> ResultAssessment:
-    """执行四维有效性检查并创建新评估记录(追加式, 不覆盖原记录, RPD 11.2)。
+    """执行四维有效性检查并创建新评估记录（追加式，不覆盖原记录，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：评估记录不可变追加）。
 
     assessment_type: full=四维全查; physical/optimality/financial/reliability=
     只查单维(其余维度记 unknown)。四维结论独立记录; 汇总(可用/受限使用/不可用)
@@ -622,7 +621,7 @@ def run_assessment(
     content = _evidence_inner(evidence_content(db, package))
 
     if package.status == EVIDENCE_INVALID:
-        # 校验失败不可用: 缺少可信证据, 不得判定任一维度通过(REQ-VALID-001)
+        # 校验失败不可用：缺少可信证据，不得判定任一维度通过（见 manual/developer-guide/zh-CN/modules/analysis.md#失败语义）
         return _build_assessment(
             db, package,
             checked=["physical", "optimality", "financial", "reliability"],
@@ -787,7 +786,7 @@ def assessment_to_dict(db: Session, assessment: ResultAssessment) -> dict[str, A
 
 
 # ---------------------------------------------------------------------------
-# 结果索引(01 §8.3: 仅最新引用, 不覆盖历史评估)
+# 结果索引（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：结果索引仅最新引用，不覆盖历史评估）
 # ---------------------------------------------------------------------------
 
 
@@ -801,8 +800,8 @@ def update_result_index(
 
     - 同证据包挂接新评估: 只更新最新索引行的 assessment_id 指针(历史评估仍可
       通过 8.2 查询, 不覆盖);
-    - 新证据包发布: 旧行 is_latest=false, 插入新行(01 §8.3 同一事务);
-    - result_hash = 输入快照哈希 + 证据内容哈希 + 业务结局(01 §8.3 业务哈希)。
+    - 新证据包发布：旧行 is_latest=false，插入新行（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：同一事务转交最新标记）；
+    - result_hash = 输入快照哈希 + 证据内容哈希 + 业务结局（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：结果可追溯至快照与对象摘要）。
     """
     assessment = db.get(ResultAssessment, assessment_id)
     if assessment is None:
@@ -861,7 +860,7 @@ def update_result_index(
 
 
 def latest_index(db: Session, task: Task) -> ResultIndex | None:
-    """任务当前版本的"最新"结果索引行(01 §8.3 is_latest)。"""
+    """任务当前版本的“最新”结果索引行（is_latest，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果）。"""
     project_version_id = _evidence_project_version(db, task)
     if project_version_id is None:
         return None
@@ -877,7 +876,7 @@ def latest_index(db: Session, task: Task) -> ResultIndex | None:
 
 
 def build_diff_patch(content: dict[str, Any], solution_id: int) -> dict[str, Any]:
-    """生成参数差异补丁(供项目单元 apply_result 应用; RPD 10.1 应用=新版本)。
+    """生成参数差异补丁(供项目单元 apply_result 应用; domain-model §快照、任务和结果：候选方案应用产生新项目版本)。
 
     补丁形状: {"params": {"result_adoption": {...}}}, apply_result 深合并进
     calc_config.params。容量同时给出设备类型粒度(type_id → 容量)与
@@ -979,7 +978,7 @@ def select_result(
         actual = sha256_hex(canonical_json(diff_patch).encode("utf-8"))
         if actual != preview_checksum:
             raise ConflictError(
-                "确认预览内容校验失败: 差异补丁已变化, 请重新确认(RPD 20.3)",
+                "确认预览内容校验失败: 差异补丁已变化, 请重新确认(domain-model §快照、任务和结果 + contracts §快照与异步契约)",
                 params={"preview_checksum": preview_checksum, "actual": actual},
             )
 
@@ -1148,7 +1147,7 @@ def read_hourly(
 def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[str, Any]:
     """结果视图: 四维结论/业务结局/指标摘要/逐时结果引用/当前选中。
 
-    四维结论以评估记录为准(细粒度 + 派生摘要), 不做任何重新计算(RPD 11.3)。
+    四维结论以评估记录为准(细粒度 + 派生摘要), 不做任何重新计算(domain-model §快照、任务和结果)。
     任务存在但尚无证据包是可查询的正常状态(任务未完成), evidence_status="no_evidence"
     显式声明; 此时各内容字段(metrics_summary/candidates/best/plan_summary/hourly_refs)
     一律为 None。调用方须据 evidence_status 分支;available 态下某段内容缺失

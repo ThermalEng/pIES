@@ -80,7 +80,7 @@ def get_result_endpoint(
 ) -> dict[str, Any]:
     """结果视图: 四维结论(细粒度 + 派生摘要)/业务结局/指标摘要/逐时结果引用/当前选中。
 
-    展示只读聚合, 不重新计算(REQ-RESULT-001, RPD 11.3)。
+    展示只读聚合, 不重新计算(domain-model §快照任务结果)。
     """
     return {"result": results_service.result_view(db, user, project_id, task_id)}
 
@@ -106,7 +106,7 @@ def assess_endpoint(
     db: Annotated[Session, Depends(get_db)],
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """触发新评估(RPD 11.2): 对任务最新证据包执行四维(或单维)检查, 创建新评估记录
+    """触发新评估(domain-model §快照任务结果/§对象生命周期): 对任务最新证据包执行四维(或单维)检查, 创建新评估记录
     不覆盖历史; 随后更新结果索引的最新引用(同证据包只挂接指针)。"""
     tasks_service.ensure_task_belongs(db, project_id, task_id)
     package = results_service.latest_evidence(db, task_id)

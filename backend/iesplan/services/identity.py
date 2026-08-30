@@ -1,14 +1,14 @@
-"""身份与认证服务(U01): 用户、凭证、窗口会话、登录限速与认证审计。
+"""身份与认证服务: 用户、凭证、窗口会话、登录限速与认证审计。
 
-对应 RPD 第 3 节(用户/权限/会话)与 01-db-schema.md 第 1 节(身份)。
+依据 架构宪法 §16 安全与审计 + 领域模型 §身份、权限和审计。
 本模块是身份域的唯一写入单元:
 
 - users / credentials / window_sessions / auth_events 的写入与状态迁移均在此完成;
 - 密码只存 bcrypt 哈希, 会话令牌只存 sha256 摘要(库内无明文令牌);
 - 登录限速: 同一用户名 5 次失败锁定 15 分钟(进程内存状态);
-- 单活动窗口(RPD 3.3): 新登录使旧 active 会话撤销, 新会话以 takeover_pending
-  创建, 确认接管后当前会话保留为 active(不轮换凭证);
-- 凭证变更(改密/重置)递增 users.credential_version, 使全部旧会话失效;
+- 单活动窗口: 新登录使旧 active 会话撤销, 新会话以 takeover_pending
+  创建, 确认接管后当前会话保留为 active(不轮换凭证; 宪法 §16 + 领域模型 §身份、权限和审计);
+- 凭证变更(改密/重置)递增 users.credential_version, 使全部旧会话失效(宪法 §16 + 领域模型 §身份、权限和审计);
 - 业务错误统一抛 AppError(+ 诊断 message_key, 前缀 ies.diag.auth.*),
   响应不泄露堆栈/哈希/明文。
 """
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 MAX_LOGIN_FAILURES: Final[int] = 5
 #: 锁定时长(秒): 达到失败上限后锁定 15 分钟
 LOCKOUT_SECONDS: Final[int] = 15 * 60
-#: 内置角色(RPD 3.1: 管理员、工程师)
+#: 内置角色(管理员、工程师; 宪法 §16 + 领域模型 §身份、权限和审计)
 ROLE_ADMIN: Final[str] = "admin"
 ROLE_ENGINEER: Final[str] = "engineer"
 #: 会话活动状态集合(非终态)
@@ -545,7 +545,7 @@ def create_user(
     参数:
         username: 登录名(自动去空格并转小写, 须匹配 ^[a-z0-9_]{3,32}$)。
         password: 明文密码(bcrypt 哈希入库, 须满足强度规则)。
-        role: 内置角色编码, 仅允许 admin / engineer(RPD 3.1)。
+        role: 内置角色编码, 仅允许 admin / engineer(宪法 §16 + 领域模型 §身份、权限和审计)。
         force_password_change: 是否要求首次登录后强制改密(种子/重置场景为 True)。
         created_by: 创建者用户 id; 自助注册为 None, 此时自授权。
     返回:
@@ -800,7 +800,7 @@ def delete_user(
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> dict:
-    """删除账号(管理员): 该账号拥有的项目一并删除(RPD 5.4 账号生命周期)。
+    """删除账号(管理员): 该账号拥有的项目一并删除(账号生命周期, 宪法 §16 + 领域模型 §项目聚合)。
 
     - 不能删除自己, 不能删除系统账号;
     - 必须显式确认(confirm=True)且携带有效的确认令牌(由 preview_user_delete
@@ -886,7 +886,7 @@ def change_password(
     """修改密码: 校验旧密码/强度, 递增凭证版本使全部旧会话失效, 写审计。
 
     - 首登强制改密状态(credential.requires_change)在校验通过后清除;
-    - 凭证版本递增后, 旧窗口会话全部失效, 前端须重新登录(RPD 3.4 凭证失效机制)。
+    - 凭证版本递增后, 旧窗口会话全部失效, 前端须重新登录(凭证失效机制, 宪法 §16 + 领域模型 §身份、权限和审计)。
     """
     cred = get_active_password_credential(db, user)
     if cred is None or not verify_password(old_password, cred.secret_hash):
@@ -1042,7 +1042,7 @@ def authenticate(
 
 
 # ---------------------------------------------------------------------------
-# 窗口会话(单活动窗口, RPD 3.3)
+# 窗口会话(单活动窗口, 宪法 §16 + 领域模型 §身份、权限和审计)
 # ---------------------------------------------------------------------------
 
 
@@ -1112,7 +1112,7 @@ def create_window_session(
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> tuple[WindowSession, str, bool]:
-    """创建窗口会话(单活动窗口, RPD 3.3; 接管确认语义 H-01)。
+    """创建窗口会话(单活动窗口, 接管确认语义 H-01; 宪法 §16 + 领域模型 §身份、权限和审计)。
 
     流程:
         1. 先清理该用户已过期的会话;
@@ -1190,9 +1190,9 @@ def confirm_takeover(
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> WindowSession:
-    """确认接管(RPD 3.3 / 01 §1.5): 保留当前会话并转为 active。
+    """确认接管(宪法 §16 + 领域模型 §身份、权限和审计): 保留当前会话并转为 active。
 
-    接管流程(schema 01 §1.5): 新登录使旧会话撤销、新会话以 takeover_pending
+    接管流程(领域模型 §身份、权限和审计): 新登录使旧会话撤销、新会话以 takeover_pending
     创建(H-01: 确认前无业务权限); 用户确认接管后, 当前待接管会话直接保留
     为 active(状态列级迁移, 不轮换凭证) —— 客户端既有 Cookie/Bearer 凭证
     立即生效, 不再依赖响应 Set-Cookie 替换凭证, 避免"确认接管后旧 session

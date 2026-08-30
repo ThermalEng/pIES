@@ -1,19 +1,19 @@
-"""项目访问控制(U02)与项目/草稿/版本服务(U03)。
+"""项目访问控制与项目/草稿/版本服务。
 
-对应 RPD 第 3.2/5/17.2/20 节与 01-db-schema.md 第 2、3 节。
+依据架构宪法 §4.9/§12 与 domain-model §项目聚合（草稿/版本）及 §对象生命周期：
 
 设计约定:
 - 草稿内容(模型/布局/数据集绑定/计算配置/语言/受控扩展清单)以规范化 JSON 文档
   表示, 按内容寻址落盘(settings.data_dir/objects/<oid[:2]>/<oid>.json),
   objects 表(经 iesplan.storage 公开门面)登记元数据; drafts.content_hash /
   project_versions.content_hash 即内容校验值(sha256)。
-  对象清理与配额维护属于存储运维单元职责。
-  (完整集成后, 模型/数据集/配置的权威数据在 U04/U05/U06 表中; 本实现以内容文档
-  作为 U03 阶段自包含的契约载体, 跨单元提交由编排层统一完成。)
+  对象清理与配额维护属于存储运维职责（架构宪法 §10）。
+  (模型/数据集/配置的权威数据由对应领域模块持久化；本层以内容文档
+  作为草稿阶段自包含的契约载体，跨模块提交由 application 编排层统一完成。)
 - 草稿修订为追加式: 每次领域修改在同一事务内新建 revision+1 的 Draft 行
-  (旧行置 is_current=false, 01 §3.2), 内容写入与修订递增严格同事务(21.4)。
-- project_versions / version_refs 仅 INSERT(不可变, 01 §3.3/§3.4)。
-- 审计事件(audit_log)与业务写入同事务写入(21.4)。
+  (旧行置 is_current=false, domain-model §项目聚合)，内容写入与修订递增严格同事务。
+- project_versions / version_refs 仅 INSERT（不可变版本，domain-model §项目聚合）。
+- 审计事件(audit_log)与业务写入同事务写入（domain-model §身份、权限和审计）。
 - 本层服务不主动 commit, 事务边界由 API 层(请求级)控制; 抛出
   IntegrityError(如并发修订冲突)后调用方须回滚会话。
 """
@@ -51,7 +51,7 @@ from iesplan.models.project import (
 class InvalidRequestError(AppError):
     """请求/草稿命令校验失败(HTTP 400)。
 
-    code 为 U03 域内稳定标识(不入全局诊断目录, 前端按 message_key 渲染文案)。
+    code 为项目域内稳定标识(前端按 message_key 渲染文案，见 contracts §成功与错误)。
     """
 
     code = "PROJ-CMD-001"
@@ -61,11 +61,10 @@ class InvalidRequestError(AppError):
 
 
 # ---------------------------------------------------------------------------
-# 访问控制(U02)
+# 访问控制
 # ---------------------------------------------------------------------------
 
-#: 所有者能力集(0.8.0: 剔除共享成员/转移所有权后, 项目权限以 projects.owner_id
-#: 为唯一权威; 共享走"导出项目包 → 他人导入"流程, 包内不携带账号权限)。
+#: 所有者能力集(项目权限以 projects.owner_id 为唯一权威；共享走“导出项目包 → 他人导入”流程，包内不携带账号权限，见 domain-model §项目聚合/§对象生命周期)。
 OWNER_CAPABILITIES: frozenset[str] = frozenset(
     {"view", "edit", "manage_lifecycle", "export_package", "export_excel"}
 )
@@ -74,8 +73,7 @@ OWNER_CAPABILITIES: frozenset[str] = frozenset(
 def get_role(db: Session, user: User, project_id: int) -> str | None:
     """返回用户在项目中的角色: 'owner'(项目所有者) | None(非所有者)。
 
-    0.8.0 起不存在 viewer/成员授权: 非所有者一律无项目访问能力
-    (管理员除外, 见 ensure_access)。
+    项目权限以 owner_id 为唯一权威，非所有者无项目访问能力（管理员除外，见 ensure_access；依据 domain-model §身份、权限和审计、架构宪法 §16）。
     """
     project = db.get(Project, project_id)
     if project is None:
@@ -91,7 +89,7 @@ def _is_admin(db: Session, user: User) -> bool:
 
 
 def ensure_access(db: Session, user: User, project_id: int, *capabilities: str) -> None:
-    """访问判定(U02, RPD 20.2): 用户必须同时具备全部请求能力, 否则 ForbiddenError。
+    """访问判定(架构宪法 §16、domain-model §身份、权限和审计)：用户必须同时具备全部请求能力，否则 ForbiddenError。
 
     - 仅项目所有者具备全部业务能力;
     - 管理员(全局 admin 角色)始终可查看项目细节与管理生命周期(删除/归档),
@@ -113,7 +111,7 @@ def ensure_access(db: Session, user: User, project_id: int, *capabilities: str) 
 
 
 # ---------------------------------------------------------------------------
-# 项目服务(U03): 生命周期
+# 项目服务: 生命周期
 # ---------------------------------------------------------------------------
 
 
@@ -126,11 +124,11 @@ def create_project(
     description: str | None = None,
     language: str | None = None,
 ) -> Project:
-    """创建项目: 创建者即所有者, 同事务创建初始草稿(revision=1, 01 §3.1/§3.2)。
+    """创建项目: 创建者即所有者, 同事务创建初始草稿(revision=1，domain-model §项目聚合)。
 
     业务规则: 管理员不持有业务项目(仅负责账号与系统管理), 创建一律拒绝
-    (403, PERM-DENIED-001 标准信封); 普通工程师行为不变。
-    名称全局唯一(01 §3.1 uq_projects_name), 冲突抛 ConflictError。
+    (403, PERM-DENIED-001 标准信封)。
+    名称全局唯一(uq_projects_name), 冲突抛 ConflictError。
     """
     if _is_admin(db, user):
         raise ForbiddenError(
@@ -176,7 +174,7 @@ def create_project(
 
 
 def get_project_view(db: Session, user: User, project_id: int) -> dict:
-    """项目视图: 项目 + 草稿摘要(含内容) + 版本列表(RPD 5.1)。"""
+    """项目视图: 项目 + 草稿摘要(含内容) + 版本列表(domain-model §项目聚合)。"""
     ensure_access(db, user, project_id, "view")
     project = _get_project(db, project_id)
     draft = _get_current_draft(db, project)
@@ -194,7 +192,7 @@ def get_project_view(db: Session, user: User, project_id: int) -> dict:
 def list_visible_projects(db: Session, user: User, status: str | None = None) -> list[dict]:
     """我的项目列表(仅所有者, 不含已删除; 支持按状态筛选)。
 
-    0.8.0 剔除共享成员: 项目只属于所有者; 共享通过项目包导出/导入完成。
+    项目只属于所有者；共享通过项目包导出/导入完成（domain-model §项目聚合/§对象生命周期）。
     业务规则: 管理员不持有业务项目(仅负责账号与系统管理), 一律返回空列表;
     普通工程师可按状态筛选(status: 'active' 进行中 / 'archived' 已归档 /
     None 全部未删除), 筛选在数据库查询中完成。
@@ -249,7 +247,7 @@ def project_count_by_owner(db: Session, owner_ids: Sequence[int]) -> dict[int, i
 
 
 def archive_project(db: Session, user: User, project_id: int) -> Project:
-    """归档项目(归档后不可编辑/提交计算, 只读, RPD 5.3)。"""
+    """归档项目(归档后不可编辑/提交计算, 只读，domain-model §项目聚合)。"""
     ensure_access(db, user, project_id, "manage_lifecycle")
     project = _get_project(db, project_id)
     if project.status != "archived":
@@ -261,7 +259,7 @@ def archive_project(db: Session, user: User, project_id: int) -> Project:
 
 
 def unarchive_project(db: Session, user: User, project_id: int) -> Project:
-    """撤销归档(恢复为 active, RPD 5.3)。"""
+    """撤销归档(恢复为 active，domain-model §项目聚合)。"""
     ensure_access(db, user, project_id, "manage_lifecycle")
     project = _get_project(db, project_id)
     if project.status != "active":
@@ -280,15 +278,15 @@ def delete_project(
     name: str | None = None,
     reason: str | None = None,
 ) -> None:
-    """删除项目(RPD 5.3: 确认 → 取消排队任务 → 一致性检查 → 硬删除)。
+    """删除项目(确认 → 取消排队任务 → 一致性检查 → 归档/删除，domain-model §项目聚合/§对象生命周期)。
 
-    - 0.2.0 B4 误操作防护: 必须提供 ``name``(与项目名精确匹配)或 ``reason``
+    - 误操作防护: 必须提供 ``name``(与项目名精确匹配)或 ``reason``
       (非空删除原因)之一; 单独 ``confirm: true`` 不足以确认(参数保留仅为
       兼容旧调用方, 不单独作为确认条件);
     - 排队/取消中任务置为 cancelled; 存在运行中任务时阻断删除(终止运行任务由
-      U07 任务单元负责, 本阶段以冲突提示要求先终止);
-    - 项目置 status='deleted'(01 §3.1 软删), 无回收站语义; 不可变版本与审计
-      记录保留, 对象清理由 U16 运维单元重试执行。
+      任务单元负责, 本阶段以冲突提示要求先终止);
+    - 项目置 status='deleted'(软删，无回收站语义); 不可变版本与审计
+      记录保留, 对象清理由存储运维重试执行（架构宪法 §10/§12）。
     """
     ensure_access(db, user, project_id, "manage_lifecycle")
     project = _get_project(db, project_id)
@@ -308,7 +306,7 @@ def delete_project(
             params={"project_id": project_id},
         )
     now = datetime.now(UTC)
-    # 取消排队/取消中的任务(删除协调, RPD 5.3 第 2 步)
+    # 取消排队/取消中的任务(删除协调)
     cancellable = db.execute(
         select(Task).where(
             Task.project_id == project_id,
@@ -318,13 +316,13 @@ def delete_project(
     for task in cancellable:
         task.status = "cancelled"
         task.updated_at = now
-    # 一致性检查: 运行中任务阻断删除(第 3 步)
+    # 一致性检查: 运行中任务阻断删除
     running = db.execute(
         select(Task.id).where(Task.project_id == project_id, Task.status == "running").limit(1)
     ).first()
     if running is not None:
         raise ConflictError("项目存在运行中的计算任务, 无法删除", params={"project_id": project_id})
-    # 硬删除: 置 deleted(第 5 步)
+    # 置 deleted(软删，无回收站语义)
     project.status = "deleted"
     project.updated_at = now
     db.flush()
@@ -339,10 +337,10 @@ def delete_project(
 
 
 # ---------------------------------------------------------------------------
-# 项目服务(U03): 草稿修订
+# 项目服务: 草稿修订
 # ---------------------------------------------------------------------------
 
-#: 草稿命令类型 → 处理函数(语义命令, RPD 20.3)
+#: 草稿命令类型 → 处理函数(语义命令，见架构宪法 §4.4/§12、domain-model §项目聚合)
 _COMMAND_HANDLERS: dict[str, Any] = {}
 
 
@@ -353,14 +351,14 @@ def update_draft(
     commands: list[dict],
     expected_revision: int,
 ) -> dict:
-    """应用草稿语义命令(RPD 20.3, 唯一写入单元 U03)。
+    """应用草稿语义命令(架构宪法 §4.4 assembly/§12、domain-model §项目聚合，唯一写入：项目草稿)。
 
     每个命令至少包含: id(幂等命令标识)/project_id/expected_revision/session
-    (发起窗口会话, 校验由 U01 负责)/unit(唯一写入单元)/type/payload。
+    (发起窗口会话)/unit(唯一写入单元)/type/payload。
     语义:
     - 乐观锁: 当前修订 != expected_revision 且存在未应用命令 → ConflictError;
       全部命令已应用(整批重试) → 返回原结果且不再递增修订(幂等)。
-    - 领域内容修改与新 Draft 行(revision+1)在同一事务内完成(01 §3.2)。
+    - 领域内容修改与新 Draft 行(revision+1)在同一事务内完成(domain-model §项目聚合)。
     返回 {"revision": 新修订号, "results": [每命令结果]}。
     """
     ensure_access(db, user, project_id, "edit")
@@ -443,7 +441,7 @@ def _already_applied(applied: dict, cmd: Any) -> bool:
 
 
 def _idempotent_result(cid: str, record: dict) -> dict:
-    """幂等重试结果: 返回命令首次应用时的原始结果(20.3 相同命令重试返回原结果)。"""
+    """幂等重试结果: 返回命令首次应用时的原始结果(相同命令重试返回原结果，domain-model §项目聚合)。"""
     return {
         "command_id": cid,
         "status": "idempotent",
@@ -453,7 +451,7 @@ def _idempotent_result(cid: str, record: dict) -> dict:
 
 
 def _validate_command_scope(cmd: dict, project_id: int) -> None:
-    """校验命令携带的项目标识与唯一写入单元(20.3)。"""
+    """校验命令携带的项目标识与唯一写入单元(架构宪法 §4.9、domain-model §项目聚合)。"""
     pid = cmd.get("project_id")
     if pid is not None and pid != project_id:
         raise InvalidRequestError(
@@ -487,7 +485,7 @@ def _apply_command(content: dict, cmd: dict) -> dict:
 
 
 def _cmd_model_upsert_device(content: dict, payload: dict) -> dict:
-    """upsert 设备实例(模型内容, U04 内容的契约表示; 布局位置入 layout 节)。"""
+    """upsert 设备实例(模型内容契约表示；布局位置入 layout 节，domain-model §项目聚合)。"""
     name = payload.get("name")
     if not isinstance(name, str) or not name:
         raise InvalidRequestError("model.upsert_device 缺少设备名称", code="PROJ-CMD-005")
@@ -561,13 +559,13 @@ def _cmd_model_remove_connection(content: dict, payload: dict) -> dict:
 
 
 def _cmd_layout_patch(content: dict, payload: dict) -> dict:
-    """布局补丁(布局是显示事实, 不改变工程语义, RPD 20.5)。"""
+    """布局补丁(布局是显示事实, 不改变工程语义，架构宪法 §4.4)。"""
     _deep_merge(content["layout"], payload)
     return {"stored": True}
 
 
 def _cmd_dataset_bind(content: dict, payload: dict) -> dict:
-    """绑定数据集版本(U05 内容的契约表示)。"""
+    """绑定数据集版本(domain-model §数据集/§项目聚合的契约表示)。"""
     dvid = payload.get("dataset_version_id")
     if not isinstance(dvid, int):
         raise InvalidRequestError("dataset.bind 需要整数 dataset_version_id", code="PROJ-CMD-005")
@@ -595,7 +593,7 @@ def _cmd_dataset_unbind(content: dict, payload: dict) -> dict:
 
 
 def _cmd_config_patch(content: dict, payload: dict) -> dict:
-    """计算配置补丁(参数/目标/约束/容差等, U06 内容的契约表示)。"""
+    """计算配置补丁(参数/目标/约束/容差等，domain-model §规划、财务与计算配置)。"""
     _deep_merge(content["calc_config"], payload)
     return {"stored": True}
 
@@ -615,7 +613,7 @@ def _cmd_config_set_variable(content: dict, payload: dict) -> dict:
 
 
 def _cmd_project_set_language(content: dict, payload: dict) -> dict:
-    """设置项目语言(版本固化语言, RPD 20.4)。"""
+    """设置项目语言(版本固化语言，domain-model §项目聚合)。"""
     lang = payload.get("language")
     if lang not in ("zh-CN", "en"):
         raise InvalidRequestError("project.set_language 仅支持 zh-CN/en", code="PROJ-CMD-005")
@@ -624,7 +622,7 @@ def _cmd_project_set_language(content: dict, payload: dict) -> dict:
 
 
 def _cmd_project_set_extensions(content: dict, payload: dict) -> dict:
-    """更新受控扩展清单(扩展校验由 SEC 域负责, 此处仅登记声明)。"""
+    """更新受控扩展清单(扩展校验由安全域负责, 此处仅登记声明，架构宪法 §16)。"""
     ext = payload.get("extensions")
     if not isinstance(ext, dict):
         raise InvalidRequestError("project.set_extensions 需要 extensions 对象", code="PROJ-CMD-005")
@@ -659,7 +657,7 @@ def _deep_merge(base: dict, patch: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 项目服务(U03): 版本
+# 项目服务: 版本
 # ---------------------------------------------------------------------------
 
 
@@ -673,11 +671,11 @@ def create_version(
     parent_version_id: int | None = None,
     source_result_id: str | None = None,
 ) -> ProjectVersion:
-    """从当前草稿创建不可变项目版本(RPD 20.4 / REQ-PROJ-002)。
+    """从当前草稿创建不可变项目版本(domain-model §项目聚合/§快照、任务和结果)。
 
     快照内容: 模型/布局/数据集绑定/计算配置/语言/币种/UTC 偏移/受控扩展清单/
     模式版本/内容校验; 父版本缺省取项目当前版本; source_result_id(应用结果的
-    来源结果标识)记入审计。project_versions 仅 INSERT(不可变)。
+    来源结果标识)记入审计。project_versions 仅 INSERT(不可变，domain-model §项目聚合)。
     """
     ensure_access(db, user, project_id, "edit")
     project = _get_project(db, project_id)
@@ -716,7 +714,7 @@ def create_version(
     )
     db.add(version)
     db.flush()
-    # 版本引用清单: 内容对象引用(版本自包含, 01 §3.4)
+    # 版本引用清单: 内容对象引用(版本自包含，domain-model §项目聚合/§对象生命周期)
     obj = _get_object_by_oid(db, content_hash)
     db.add(
         VersionRef(
@@ -746,9 +744,9 @@ def create_version(
 
 
 def current_version_matches_draft(db: Session, project: Project) -> bool:
-    """当前版本内容是否与当前草稿一致(按版本固化规则比较)。
+    """当前版本内容是否与当前草稿一致(按版本固化规则比较，domain-model §项目聚合)。
 
-    版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(RPD 20.4);
+    版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段;
     草稿仅在命令簿记(applied_commands)上推进而无领域变更时视为一致。
     无当前版本返回 False(需固化)。用于任务提交时判断是否需重新固化,
     避免草稿已修改而任务仍运行旧版本输入。
@@ -793,7 +791,7 @@ def restore_version(
     name: str | None = None,
     description: str | None = None,
 ) -> dict:
-    """恢复历史版本: 创建新版本 + 新草稿, 不倒写历史(REQ-PROJ-002)。
+    """恢复历史版本: 创建新版本 + 新草稿, 不倒写历史(domain-model §项目聚合)。
 
     恢复后的新草稿内容与目标版本一致; 新版本 parent 指向被恢复的版本。
     返回 {"version": 新版本, "draft": 新草稿}。
@@ -840,7 +838,7 @@ def apply_result(
     description: str | None = None,
     source_result_id: str | None = None,
 ) -> dict:
-    """应用选定规划结果(RPD 10.1 / 20.12 / REQ-PROJ-001)。
+    """应用选定规划结果(domain-model §项目聚合/§快照、任务和结果)。
 
     参数差异补丁(diff_patch)应用到新草稿, 创建新版本; 结果来源版本保持不变。
     - diff_patch 直接作用于 calc_config 节(如 {"params": {...}});
@@ -1064,7 +1062,7 @@ def _get_current_draft(db: Session, project: Project) -> Draft:
 
 
 def _new_draft_row(db: Session, project: Project, content: dict, user: User) -> Draft:
-    """追加新草稿行(修订 = max(revision)+1, 与内容写入同一事务, 01 §3.2)。
+    """追加新草稿行(修订 = max(revision)+1, 与内容写入同一事务，domain-model §项目聚合)。
 
     旧当前草稿置 is_current=false; 更新项目 current_draft_id 指针。
     """
@@ -1096,7 +1094,7 @@ def _new_draft_row(db: Session, project: Project, content: dict, user: User) -> 
 
 
 def _next_version_no(db: Session, project_id: int) -> int:
-    """项目内版本号单调递增(01 §3.3)。"""
+    """项目内版本号单调递增(domain-model §项目聚合)。"""
     max_no = db.execute(
         select(func.max(ProjectVersion.version_no)).where(ProjectVersion.project_id == project_id)
     ).scalar()
@@ -1128,7 +1126,7 @@ def _initial_content(language: str = "zh-CN") -> dict:
 
 
 def _version_content(project: Project, content: dict) -> dict:
-    """版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(RPD 20.4)。"""
+    """版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(domain-model §项目聚合)。"""
     version_content = {k: v for k, v in content.items() if k != "applied_commands"}
     version_content["currency"] = project.currency
     version_content["fixed_utc_offset_minutes"] = project.fixed_utc_offset_minutes
@@ -1136,12 +1134,12 @@ def _version_content(project: Project, content: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 内容寻址对象存储(草稿/版本内容载体; 实现经 iesplan.storage 公开门面, STO-01)
+# 内容寻址对象存储(草稿/版本内容载体; 实现经 iesplan.storage 公开门面，架构宪法 §10)
 # ---------------------------------------------------------------------------
 
 
 def _store_content(db: Session, content: dict) -> str:
-    """规范化 JSON → 内容寻址对象(STO-01: 经 storage 公开门面), 返回 content_hash。
+    """规范化 JSON → 内容寻址对象(架构宪法 §10/§12、domain-model §对象生命周期)，返回 content_hash。
 
     相同内容的重复写入按 sha256 去重(对象行复用, owner 引用仍单独建立)。
     storage_path 的解释/分桶/临时文件全部由 iesplan.storage 内部实现,
@@ -1163,7 +1161,7 @@ def _store_content(db: Session, content: dict) -> str:
 def _load_content_by_hash(db: Session, content_hash: str) -> dict:
     """按内容校验值读取内容对象并校验(对象缺失/哈希不符视为数据损坏)。
 
-    STO-01: 经 storage 公开门面读取(读取时校验大小 + sha256)。
+    经 storage 公开门面读取(读取时校验大小 + sha256，架构宪法 §10)。
     """
     from iesplan.storage import ObjectCorruptError, get_object
 
@@ -1218,7 +1216,7 @@ def _load_draft_content(db: Session, draft: Draft) -> dict:
 
 
 def _get_object_by_oid(db: Session, oid: str) -> dict:
-    """按内容校验值解析对象元数据(STO-01: 经 storage 公开门面, 返回句柄 dict)。"""
+    """按内容校验值解析对象元数据(经 storage 公开门面, 返回句柄 dict，架构宪法 §10)。"""
     from iesplan.storage import object_info
 
     handle = object_info(db, oid)
@@ -1242,7 +1240,7 @@ def _audit(
     before: dict | None = None,
     after: dict | None = None,
 ) -> None:
-    """审计事件写入(与业务写入同事务, 21.4; 只含脱敏元数据, 13.2)。"""
+    """审计事件写入(与业务写入同事务，架构宪法 §16/domain-model §身份、权限和审计；只含脱敏元数据)。"""
     db.add(
         AuditLog(
             entity_type=entity_type,

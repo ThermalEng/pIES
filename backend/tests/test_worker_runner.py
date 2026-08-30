@@ -389,7 +389,7 @@ class TestCheckAndCancel:
         status = _claim_and_run(db, report_task.id)
         assert status == "completed"
         _assert_completed(db, report_task.id, "normal_completion")
-        # 追加了新的系统评估记录(不覆盖原记录, RPD 11.2)
+        # 追加了新的系统评估记录(不覆盖原记录, domain-model §快照、任务和结果)
         assessments = db.execute(
             select(ResultAssessment).order_by(ResultAssessment.id)
         ).scalars().all()

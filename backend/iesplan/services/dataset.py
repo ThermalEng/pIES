@@ -95,7 +95,7 @@ class FieldSpec:
     description_en: str
 
 
-#: 标准字段注册表(顺序即模板列顺序; 范围依据 RPD 8.3 与 17.4 数据约束)
+#: 标准字段注册表(顺序即模板列顺序; 范围依据 file-formats §设备数据 CSV + domain-model §数据集 数据约束)
 STANDARD_FIELDS: dict[str, FieldSpec] = {
     "e_load": FieldSpec(
         key="e_load",
@@ -185,7 +185,7 @@ REQUIRED_COLUMNS: tuple[str, ...] = (TIMESTAMP_COL, *REQUIRED_FIELDS)
 _MAX_ROWS_PER_DIAG: int = 5
 
 # ---------------------------------------------------------------------------
-# 数据文件诊断码注册(RPD 8.3: 错误必须定位到文件/字段/行号)
+# 数据文件诊断码注册(file-formats §设备数据 CSV + domain-model §数据集: 错误必须定位到文件/字段/行号)
 # 新码集中在 iesplan/core/diagnostics.py 的 NEW_DIAG_CODES 声明; 并行开发阶段
 # 由各业务单元在导入时登记, 保持码目录可增量扩展。
 # ---------------------------------------------------------------------------
@@ -540,7 +540,7 @@ def validate_dataset(
     resolution: str,
     utc_offset_minutes: int,
 ) -> tuple[TimeAxis, pd.DataFrame, list[Diagnostic]]:
-    """校验并归一化数据集(RPD 8.3 / 17.4)。
+    """校验并归一化数据集(file-formats §设备数据 CSV + domain-model §数据集)。
 
     检查项:
     1. 必需列(timestamp + e_load)存在;
@@ -764,7 +764,7 @@ def put_object(
 
     U11 对象服务负责临时区写入→原子 rename 提交→objects 记录→审计与存储门禁;
     本模块只做参数适配。数据集单元的文件引用在 DatasetFile 行建立后由
-    add_object_ref 补充(对象先落盘, 后建业务引用, 符合 RPD 23.1)。
+    add_object_ref 补充(对象先落盘, 后建业务引用, 符合架构宪法 §10 存储 + domain-model §对象生命周期)。
     """
     return _storage_put_object(db, data, media_type, source_category=source_category)
 
@@ -1102,7 +1102,7 @@ def upload_dataset_version(
     *,
     user_id: int | None = None,
 ) -> DatasetVersion:
-    """上传并校验数据集版本(RPD 8.3 / REQ-DATA-002)。
+    """上传并校验数据集版本(file-formats §设备数据 CSV + domain-model §数据集)。
 
     0.6.0: 与包内设备 CSV 共用同一 ies.device-data 规范化流程
     (devices.datacontract.normalize_upload_csv):
@@ -1360,7 +1360,7 @@ def _sample_params(region: str) -> dict:
 
 
 def _generate_sample_rows(axis: TimeAxis, region: str, rng: np.random.Generator) -> list[dict]:
-    """确定性生成 365 天合成数据(季节 + 日模式, RPD 8.2/REQ-DATA-004)。
+    """确定性生成 365 天合成数据(季节 + 日模式, file-formats §设备数据 CSV + domain-model §数据集)。
 
     含: 电/热/冷负荷、环境温度、水平总辐照、分时电价、电网排放因子。
     全部计算只依赖 (hour_of_year, day_of_year, season) 与固定顺序的 rng 采样,

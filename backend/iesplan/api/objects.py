@@ -3,7 +3,7 @@
 - GET  /api/admin/storage              存储视图: 单一 StorageStatusDto
   (对象用量/引用数/容量/损坏/待回收数量; 不再返回两版响应并集);
 - POST /api/admin/objects/cleanup      两阶段清理: {dry_run: true} 先出计划,
-                                       {dry_run: false} 再执行(RPD 23.3/23.4);
+                                       {dry_run: false} 再执行;
  0.2.0-B3: 执行改为软删/保留期(标记待物理回收, 不立即删文件);
 - GET  /api/admin/objects/pending      "已删除待回收"清单(待物理回收对象);
 - POST /api/admin/objects/restore      恢复保留期内的待回收对象(误清理恢复);

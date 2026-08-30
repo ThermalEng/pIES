@@ -50,7 +50,7 @@ class ProjectCreateRequest(BaseModel):
 
 
 class DraftUpdateRequest(BaseModel):
-    """草稿语义命令批量请求体(RPD 20.3)。"""
+    """草稿语义命令批量请求体(宪法 §4.4 assembly、§12 快照 + domain-model §项目聚合)。"""
 
     expected_revision: int = Field(ge=1)
     commands: list[dict[str, Any]] = Field(default_factory=list)
@@ -65,7 +65,7 @@ class VersionCreateRequest(BaseModel):
 
 
 class DeleteConfirmRequest(BaseModel):
-    """删除确认请求体(RPD 5.3: 必须明确确认)。
+    """删除确认请求体(domain-model §项目聚合: 必须明确确认)。
 
     0.2.0 B4 强化误操作防护: 不再接受空布尔 ``confirm: true`` 单独作为确认。
     必须提供 ``name``(项目名精确匹配)或 ``reason``(删除原因, 非空)之一;
@@ -85,7 +85,7 @@ class RestoreRequest(BaseModel):
 
 
 class ApplyResultRequest(BaseModel):
-    """应用结果请求体(RPD 20.12: 参数差异补丁 + 可选来源版本/结果标识)。"""
+    """应用结果请求体(宪法 §4.4 assembly、§12 快照 + domain-model §项目聚合: 参数差异补丁 + 可选来源版本/结果标识)。"""
 
     diff_patch: dict[str, Any]
     version_id: int | None = None
@@ -287,7 +287,7 @@ def delete_project_endpoint(
     db: Annotated[Session, Depends(get_db)],
     user: CurrentUser,
 ) -> None:
-    """删除项目(RPD 5.3): 必须输入项目名或删除原因以确认误操作防护。
+    """删除项目(domain-model §项目聚合): 必须输入项目名或删除原因以确认误操作防护。
 
     0.2.0 B4: 空布尔 confirm 不再足以确认; 须 name(项目名精确匹配)或
     reason(非空删除原因)之一。
@@ -300,7 +300,7 @@ def delete_project_endpoint(
 
 
 # ---------------------------------------------------------------------------
-# 项目包导入(U14/RPD 6: 校验提案 → 确认导入, 每次导入新项目身份)
+# 项目包导入(校验提案 → 确认导入, 每次新项目身份)
 # ---------------------------------------------------------------------------
 
 

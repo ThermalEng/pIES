@@ -524,7 +524,7 @@ def test_import_rejects_corrupt_and_non_zip(client: TestClient, db: Session) -> 
 
 
 def test_import_proposal_rejects_forbidden_sections(client: TestClient, db: Session) -> None:
-    """包含账号/权限/会话等禁止内容的包拒绝导入(RPD 6)。"""
+    """包含账号/权限/会话等禁止内容的包拒绝导入（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §7.8 公共文件契约； manual/developer-guide/zh-CN/file-formats.md §通用书写规则）"""
     owner = make_user(db, "owner")
     importer = make_user(db, "importer")
     pid = _create_project(client, owner)
