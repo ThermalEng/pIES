@@ -253,7 +253,9 @@ def provision_user(
     user = identity.create_user(
         db,
         username=username,
-        password=secrets.token_urlsafe(24),  # 随机密码: 仅外部认证登录, 禁用密码兜底
+        # 固定前缀保证满足本地密码复杂度门禁；随机主体仍提供充足熵。
+        # 该凭证不向用户公开，外部账号仍只能经 OIDC 登录。
+        password=f"Aa1!{secrets.token_urlsafe(24)}",
         role="engineer",
         force_password_change=False,
         display_name=str(claims.get("name") or claims.get("preferred_username") or username),

@@ -827,7 +827,6 @@ def test_oidc_disabled_by_default(client: TestClient, db_session: Session) -> No
 def test_oidc_state_roundtrip(client: TestClient, db_session: Session) -> None:
     """state 签名令牌: 签发→校验往返; 篡改/过期均被拒。"""
     import time as _time
-
     from unittest.mock import patch
 
     from iesplan.services import external_auth
@@ -843,8 +842,6 @@ def test_oidc_state_roundtrip(client: TestClient, db_session: Session) -> None:
     # 伪造内容(不同盐/密钥)→ 拒签
     from itsdangerous import URLSafeTimedSerializer
 
-    from iesplan.config import settings
-
     forged = URLSafeTimedSerializer(
         "different-secret", salt="oidc-pkce-state", signer_kwargs={"key_derivation": "hmac"}
     ).dumps({"nonce": "n", "verifier": "v"})
@@ -858,12 +855,17 @@ def test_oidc_state_roundtrip(client: TestClient, db_session: Session) -> None:
             external_auth.verify_state(stale)
 
 
-def test_oidc_provision_user_jit(client: TestClient, db_session: Session) -> None:
+def test_oidc_provision_user_jit(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """JIT 建号: 首次外部主体登录自动创建 engineer 账号并绑定 subject。
 
     同一 subject 再次登录返回同一用户(不重复建号); 绑定关系落库。
     """
     from iesplan.services import external_auth
+
+    # 即使随机部分碰巧不含大小写/数字，内部凭证也必须稳定通过复杂度门禁。
+    monkeypatch.setattr(external_auth.secrets, "token_urlsafe", lambda _size: "_" * 24)
 
     claims = {"sub": "oidc-user-001", "name": "外部用户", "email": "oidc@example.com"}
     user = external_auth.provision_user(db_session, claims)

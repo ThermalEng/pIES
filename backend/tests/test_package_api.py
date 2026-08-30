@@ -353,28 +353,25 @@ def test_export_package_owner_only_with_manifest_and_checksum(
     assert audit.after["result"]["kind"] == "package"
 
 
-def test_viewer_can_export_excel_bilingual_and_fixed_reference(
+def test_owner_can_export_excel_bilingual_and_fixed_reference(
     client: TestClient, db: Session,
 ) -> None:
-    """查看者可导出 Excel(标题中英双语, 固定引用证据包与评估, 不重新求解)。"""
+    """所有者可导出 Excel(标题中英双语, 固定引用证据包与评估, 不重新求解)。"""
     owner = make_user(db, "owner")
-    viewer = make_user(db, "viewer")
     pid = _create_project(client, owner)
     vid = _create_version(client, owner, pid)
     dvid = _seed_dataset_version(db, pid, tag="xls")
     ep_id, a_id = _seed_evidence(db, pid, vid, dvid, owner.id)
-    _grant_viewer(db, pid, viewer.id)
-
     resp = client.post(
         f"/api/projects/{pid}/exports/excel",
         json={"evidence_package_id": ep_id, "assessment_id": a_id, "lang": "zh"},
-        headers=_h(client, viewer),
+        headers=_h(client, owner),
     )
     assert resp.status_code == 200, resp.text
     token = resp.json()["token"]
 
     status, content, ctype = _download(
-        client, f"/api/projects/{pid}/exports/excel/download", token, headers=_h(client, viewer)
+        client, f"/api/projects/{pid}/exports/excel/download", token, headers=_h(client, owner)
     )
     assert status == 200
     assert "spreadsheetml" in ctype
@@ -404,15 +401,16 @@ def test_viewer_can_export_excel_bilingual_and_fixed_reference(
     assert "年购电量" in kp_values
 
 
-def test_viewer_cannot_export_package_and_bad_identity(
+def test_non_owner_cannot_export_package_and_bad_identity(
     client: TestClient, db: Session,
 ) -> None:
-    """查看者可导 Excel 但不可导项目包; 缺认证头 401。"""
+    """项目不共享：非所有者不可导出项目包；缺认证头 401。"""
     owner = make_user(db, "owner")
-    viewer = make_user(db, "viewer")
+    other_user = make_user(db, "other_user")
     pid = _create_project(client, owner)
-    _grant_viewer(db, pid, viewer.id)
-    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, viewer))
+    resp = client.post(
+        f"/api/projects/{pid}/exports/package", headers=_h(client, other_user),
+    )
     assert resp.status_code == 403, resp.text
     # 匿名(清空 cookie jar, 避免携带先前登录会话 Cookie)→ 401
     client.cookies.clear()
