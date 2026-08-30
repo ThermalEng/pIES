@@ -84,7 +84,7 @@ def _create_project(client: TestClient, user, name: str = "限流项目") -> int
     """通过 API 创建项目, 返回 project_id。"""
     resp = client.post(
         "/api/projects",
-        json={"name": name, "currency": "CNY", "utc_offset_minutes": 480},
+        json={"name": name, "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"},
         headers=_login(client, user),
     )
     assert resp.status_code == 201, resp.text

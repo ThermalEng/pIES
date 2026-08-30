@@ -64,7 +64,7 @@ def main():
     check("projects.list → {projects:[...]}", s == 200 and isinstance(body.get("projects"), list), str(s))
     project_id = body["projects"][0]["id"] if body.get("projects") else None
     if project_id is None:
-        s, body = call("POST", "/projects", {"name": "smoke-project", "currency": "CNY", "utc_offset_minutes": 480}, token, expect=201)
+        s, body = call("POST", "/projects", {"name": "smoke-project", "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"}, token, expect=201)
         project_id = body["project"]["id"]
         check("projects.create → {project,my_role}", "my_role" in body, str(body.keys()))
 

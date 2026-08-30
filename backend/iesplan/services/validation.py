@@ -65,7 +65,6 @@ VALID_CONFIG_NOT_SAVED = "VALID-CONFIG-001"  # 计算配置未保存(使用默�
 VALID_CONFIG_NO_IRR = "VALID-CONFIG-002"  # 缺少最低 IRR 硬约束
 VALID_DATA_NO_BINDING = "VALID-DATA-001"  # 未绑定任何数据集版本
 VALID_DATA_VERSION_INVALID = "VALID-DATA-002"  # 数据集版本质量阻断
-VALID_DATA_UTC_MISMATCH = "VALID-DATA-003"  # 数据集 UTC 偏移与项目不一致
 VALID_DATA_BINDING_BROKEN = "VALID-DATA-004"  # 绑定的版本缺失/已删除/不属于本项目
 VALID_FIN_NO_CONFIRM = "VALID-FIN-001"  # 缺少财务基准确认证据
 VALID_FIN_STALE = "VALID-FIN-002"  # 财务基准确认内容与当前配置不一致
@@ -84,7 +83,6 @@ def _register_diag_codes() -> None:
         VALID_CONFIG_NO_IRR: "缺少最低 IRR 硬约束(REQ-CALC-006)",
         VALID_DATA_NO_BINDING: "项目未绑定任何数据集版本",
         VALID_DATA_VERSION_INVALID: "所选数据集版本存在阻断性质量问题",
-        VALID_DATA_UTC_MISMATCH: "数据集 UTC 偏移与项目不一致",
         VALID_DATA_BINDING_BROKEN: "绑定的数据集版本缺失/已删除或不属于本项目",
         VALID_FIN_NO_CONFIRM: "缺少财务基准确认证据(架构宪法 §16 安全与审计)",
         VALID_FIN_STALE: "财务基准确认内容与当前配置不一致, 需重新确认",
@@ -100,7 +98,6 @@ def _register_diag_codes() -> None:
         VALID_CONFIG_NO_IRR: "ies.diag.valid.config_no_irr",
         VALID_DATA_NO_BINDING: "ies.diag.valid.data_no_binding",
         VALID_DATA_VERSION_INVALID: "ies.diag.valid.data_version_invalid",
-        VALID_DATA_UTC_MISMATCH: "ies.diag.valid.data_utc_mismatch",
         VALID_DATA_BINDING_BROKEN: "ies.diag.valid.data_binding_broken",
         VALID_FIN_NO_CONFIRM: "ies.diag.valid.fin_no_confirm",
         VALID_FIN_STALE: "ies.diag.valid.fin_stale",
@@ -115,7 +112,6 @@ def _register_diag_codes() -> None:
         VALID_CONFIG_NO_IRR: "ies.fix.valid.config_set_irr",
         VALID_DATA_NO_BINDING: "ies.fix.valid.data_bind",
         VALID_DATA_VERSION_INVALID: "ies.fix.valid.data_fix_version",
-        VALID_DATA_UTC_MISMATCH: "ies.fix.valid.data_fix_offset",
         VALID_DATA_BINDING_BROKEN: "ies.fix.valid.data_fix_binding",
         VALID_FIN_NO_CONFIRM: "ies.fix.valid.fin_confirm",
         VALID_FIN_STALE: "ies.fix.valid.fin_reconfirm",
@@ -469,20 +465,6 @@ def _check_data(db: Session, project: Project, diags: list[Diagnostic]) -> None:
                         "dataset_id": version.dataset_id,
                         "version_no": version.version_no,
                         "codes": blocking_codes,
-                    },
-                    location=loc,
-                )
-            )
-        if version.fixed_utc_offset_minutes != project.fixed_utc_offset_minutes:
-            diags.append(
-                make_diag(
-                    VALID_DATA_UTC_MISMATCH,
-                    severity=SEVERITY_ERROR,
-                    params={
-                        "dataset_id": version.dataset_id,
-                        "version_no": version.version_no,
-                        "offset_minutes": version.fixed_utc_offset_minutes,
-                        "expected_minutes": project.fixed_utc_offset_minutes,
                     },
                     location=loc,
                 )

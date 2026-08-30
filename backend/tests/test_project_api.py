@@ -30,6 +30,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.config import settings  # noqa: E402
+from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.audit import AuditLog  # noqa: E402
@@ -95,8 +96,15 @@ def _h(client: TestClient, user) -> dict[str, str]:
 
 
 def _create_project(client: TestClient, user, name: str, **kw: Any) -> int:
-    """创建项目并返回项目 id。"""
-    resp = client.post("/api/projects", json={"name": name, **kw}, headers=_h(client, user))
+    """创建项目并返回项目 id(测试脚手架: 显式携带默认基线, kw 可覆盖)。"""
+    body = {
+        "name": name,
+        "baseline_resolution": "1h",
+        "baseline_leap_year": False,
+        "baseline_scenario_mode": "single",
+        **kw,
+    }
+    resp = client.post("/api/projects", json=body, headers=_h(client, user))
     assert resp.status_code == 201, resp.text
     return resp.json()["project"]["id"]
 
@@ -133,7 +141,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     # 1. 创建项目: 创建者=所有者, 初始草稿 revision=1
     resp = client.post(
         "/api/projects",
-        json={"name": "园区综合能源", "currency": "CNY", "utc_offset_minutes": 480},
+        json={"name": "园区综合能源", "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"},
         headers=owner_h,
     )
     assert resp.status_code == 201
@@ -142,7 +150,15 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert body["project"]["owner_id"] == owner.id
     assert body["project"]["status"] == "active"
     assert body["project"]["currency"] == "CNY"
-    assert body["project"]["fixed_utc_offset_minutes"] == 480
+    assert body["project"]["project_baseline"] == {
+        "resolution": "1h",
+        "leap_year": False,
+        "scenario_mode": "single",
+        "sha256": ProjectBaseline(
+            resolution="1h", leap_year=False, scenario_mode="single"
+        ).digest(),
+    }
+    assert "fixed_utc_offset_minutes" not in body["project"]
     assert body["my_role"] == "owner"
     view = client.get(f"/api/projects/{pid}", headers=owner_h).json()
     assert view["draft"]["revision"] == 1
@@ -228,10 +244,18 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert version["reason"] == "milestone"
     assert version["source_draft_revision"] == 2
     assert version["parent_version_id"] is None
-    # 版本内容 = 草稿领域内容 + 项目固化字段(币种/UTC 偏移), 无命令簿记
+    # 版本内容 = 草稿领域内容 + 项目固化字段(币种/项目计算基线), 无命令簿记
     vcontent = _load_content(db_session, version["content_hash"])
     assert vcontent["currency"] == "CNY"
-    assert vcontent["fixed_utc_offset_minutes"] == 480
+    assert vcontent["project_baseline"] == {
+        "resolution": "1h",
+        "leap_year": False,
+        "scenario_mode": "single",
+        "sha256": ProjectBaseline(
+            resolution="1h", leap_year=False, scenario_mode="single"
+        ).digest(),
+    }
+    assert "fixed_utc_offset_minutes" not in vcontent
     assert vcontent["model"]["devices"][0]["name"] == "热泵1"
     assert vcontent["calc_config"]["params"]["tariff"] == 0.6
     assert "applied_commands" not in vcontent
@@ -553,7 +577,14 @@ def test_admin_cannot_create_project_via_api(client: TestClient, db_session: Ses
     """管理员经 API 创建项目返回 403(标准 ForbiddenError 信封)。"""
     admin = make_user(db_session, "admin_nocreate", role="admin")
     resp = client.post(
-        "/api/projects", json={"name": "管理员项目"}, headers=_h(client, admin)
+        "/api/projects",
+        json={
+            "name": "管理员项目",
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
+        headers=_h(client, admin),
     )
     assert resp.status_code == 403
     err = resp.json()["error"]
@@ -569,14 +600,26 @@ def test_admin_cannot_create_project_via_service(db_session: Session) -> None:
 
     admin = make_user(db_session, "admin_nosvc", role="admin")
     with pytest.raises(ForbiddenError):
-        project_service.create_project(db_session, admin, name="管理员服务项目")
+        project_service.create_project(
+            db_session, admin, name="管理员服务项目",
+            baseline_resolution="1h",
+            baseline_leap_year=False,
+            baseline_scenario_mode="single",
+        )
 
 
 def test_engineer_can_create_project(client: TestClient, db_session: Session) -> None:
-    """普通工程师创建项目行为保持不变。"""
+    """普通工程师创建项目行为保持不变(显式携带基线三字段)。"""
     owner = make_user(db_session, "engineer_ok")
     resp = client.post(
-        "/api/projects", json={"name": "工程师项目"}, headers=_h(client, owner)
+        "/api/projects",
+        json={
+            "name": "工程师项目",
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
+        headers=_h(client, owner),
     )
     assert resp.status_code == 201
     assert resp.json()["project"]["owner_id"] == owner.id

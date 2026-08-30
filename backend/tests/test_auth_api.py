@@ -418,7 +418,7 @@ def test_admin_users_list_and_permission(client: TestClient, db_session: Session
 def _create_project_for(client: TestClient, headers: dict[str, str], name: str) -> int:
     """以窗口凭证创建项目并返回 project_id(测试造数)。"""
     resp = client.post(
-        "/api/projects", json={"name": name, "currency": "CNY", "utc_offset_minutes": 480},
+        "/api/projects", json={"name": name, "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
@@ -493,12 +493,12 @@ def test_admin_delete_user_cascades_projects(client: TestClient, db_session: Ses
 
     # alice 创建两个项目
     p1 = client.post(
-        "/api/projects", json={"name": "级联删除1", "currency": "CNY", "utc_offset_minutes": 480},
+        "/api/projects", json={"name": "级联删除1", "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"},
         headers=alice_headers,
     )
     assert p1.status_code == 201
     p2 = client.post(
-        "/api/projects", json={"name": "级联删除2", "currency": "CNY", "utc_offset_minutes": 480},
+        "/api/projects", json={"name": "级联删除2", "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"},
         headers=alice_headers,
     )
     assert p2.status_code == 201
@@ -547,7 +547,7 @@ def test_admin_delete_user_requires_confirm_and_token(client: TestClient, db_ses
     alice_headers = bearer(login(client, "alice", USER_PASSWORD).json()["token"])
 
     p1 = client.post(
-        "/api/projects", json={"name": "需确认项目", "currency": "CNY", "utc_offset_minutes": 480},
+        "/api/projects", json={"name": "需确认项目", "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"},
         headers=alice_headers,
     )
     assert p1.status_code == 201
@@ -580,7 +580,7 @@ def test_admin_delete_user_requires_confirm_and_token(client: TestClient, db_ses
     assert preview.status_code == 200
     old_token = preview.json()["confirm_token"]
     p2 = client.post(
-        "/api/projects", json={"name": "清单变化项目", "currency": "CNY", "utc_offset_minutes": 480},
+        "/api/projects", json={"name": "清单变化项目", "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"},
         headers=alice_headers,
     )
     assert p2.status_code == 201

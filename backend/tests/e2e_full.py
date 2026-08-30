@@ -200,13 +200,17 @@ def main() -> int:
         r = e1.post("/api/projects", user_id=e1.user_id, json={
             "name": f"E2E 综合能源项目 {suffix}",
             "currency": "CNY",
-            "utc_offset_minutes": 480,
+            "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single",
             "description": "全栈端到端验证项目",
         })
         assert r.status_code == 201, f"创建项目失败: {r.status_code} {r.text[:300]}"
         project = r.json()["project"]
         project_id = project["id"]
-        assert project["currency"] == "CNY" and project["fixed_utc_offset_minutes"] == 480
+        assert project["currency"] == "CNY"
+        assert project["project_baseline"]["resolution"] == "1h"
+        assert project["project_baseline"]["leap_year"] is False
+        assert project["project_baseline"]["scenario_mode"] == "single"
+        assert len(project["project_baseline"]["sha256"]) == 64
         assert r.json()["my_role"] == "owner"
         ok(f"project_id={project_id}")
     except Exception as exc:  # noqa: BLE001

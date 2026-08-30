@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 from iesplan import __version__
 from iesplan.config import settings
+from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
 from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.idgen import sha256_hex
@@ -372,7 +373,12 @@ def _build_package_zip(
             "description": project.description,
             "status": project.status,
             "currency": project.currency,
-            "fixed_utc_offset_minutes": project.fixed_utc_offset_minutes,
+            "project_baseline": {
+                "resolution": project.baseline_resolution,
+                "leap_year": project.baseline_leap_year,
+                "scenario_mode": project.baseline_scenario_mode,
+                "sha256": project.baseline_sha256,
+            },
             "schema_version": project.schema_version,
             "created_at": project.created_at,
         }
@@ -398,7 +404,12 @@ def _build_package_zip(
                     "name": version.name,
                     "description": version.description,
                     "reason": version.reason,
-                    "fixed_utc_offset_minutes": version.fixed_utc_offset_minutes,
+                    "project_baseline": {
+                        "resolution": version.baseline_resolution,
+                        "leap_year": version.baseline_leap_year,
+                        "scenario_mode": version.baseline_scenario_mode,
+                        "sha256": version.baseline_sha256,
+                    },
                     "currency": version.currency,
                     "schema_version": version.schema_version,
                     "content_hash": version.content_hash,
@@ -791,19 +802,28 @@ def import_proposal(
     currency = project_meta.get("currency") or "CNY"
     if currency not in ("CNY", "USD"):
         raise ImportValidationError([f"包内币种非法: {currency}"])
+    # 项目计算基线(0.6.5 事项 1): 包必须携带完整基线, 缺失/非法/摘要不一致
+    # 一律拒绝导入(不静默默认; 默认基线只用于数据库迁移对存量项目的回填)。
+    baseline_errors = ProjectBaseline.validate(project_meta.get("project_baseline"))
+    if baseline_errors:
+        raise ImportValidationError(
+            [f"包内项目计算基线非法: {d.params.get('detail') or d.code}" for d in baseline_errors]
+        )
     try:
-        offset = int(project_meta.get("fixed_utc_offset_minutes", 480))
-    except (TypeError, ValueError) as exc:
-        raise ImportValidationError(["包内 UTC 偏移非法"]) from exc
-    if not -720 <= offset <= 840:
-        raise ImportValidationError([f"包内 UTC 偏移越界: {offset}"])
+        # from_dict 同时校验派生 sha256 字段与规范化摘要一致(防伪造/防漂移)。
+        baseline = ProjectBaseline.from_dict(project_meta.get("project_baseline"))
+    except ProjectBaselineError as exc:
+        raise ImportValidationError([f"包内项目计算基线非法: {exc}"]) from exc
     project = Project(
         name=name,
         description=project_meta.get("description"),
         status="active",
         owner_id=user.id,
         currency=currency,
-        fixed_utc_offset_minutes=offset,
+        baseline_resolution=baseline.resolution,
+        baseline_leap_year=baseline.leap_year,
+        baseline_scenario_mode=baseline.scenario_mode,
+        baseline_sha256=baseline.digest(),
         schema_version=int(project_meta.get("schema_version", 1) or 1),
         created_by=user.id,
     )
@@ -829,7 +849,7 @@ def import_proposal(
             },
             "project_snapshot": {
                 "name": name, "currency": currency,
-                "fixed_utc_offset_minutes": offset,
+                "project_baseline": baseline.to_dict(),
                 "schema_version": project.schema_version,
             },
             "staging": {
@@ -1045,6 +1065,29 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             continue
         doc = json.loads(entries[version_path].decode("utf-8"))
         ver_meta = doc.get("version") or {}
+        # 版本基线: 包内版本必须携带与项目一致的基线(缺失/不一致 → 拒绝,
+        # 版本内容自包含, 不以"当前项目"解释历史版本)。
+        version_baseline_errors = ProjectBaseline.validate(
+            ver_meta.get("project_baseline")
+        )
+        if version_baseline_errors:
+            raise ImportValidationError(
+                [f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线非法: "
+                 f"{d.params.get('detail') or d.code}" for d in version_baseline_errors]
+            )
+        try:
+            version_baseline = ProjectBaseline.from_dict(
+                ver_meta.get("project_baseline")
+            )
+        except ProjectBaselineError as exc:
+            raise ImportValidationError(
+                [f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线非法: {exc}"]
+            ) from exc
+        if version_baseline.to_dict()["sha256"] != project.baseline_sha256:
+            raise ImportValidationError(
+                [f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线"
+                 "与项目不一致(版本必须与项目共享同一基线)"]
+            )
         version_content = _remap(dict(doc.get("content") or {}))
         content_hash = project_service.store_content_object(db, version_content)
         db.flush()  # 内容重映射可能产生新对象行, 先 flush 再按校验值取对象
@@ -1059,9 +1102,10 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             source_draft_id=None,
             source_draft_revision=None,
             reason="imported",
-            fixed_utc_offset_minutes=int(
-                ver_meta.get("fixed_utc_offset_minutes", project.fixed_utc_offset_minutes)
-            ),
+            baseline_resolution=version_baseline.resolution,
+            baseline_leap_year=version_baseline.leap_year,
+            baseline_scenario_mode=version_baseline.scenario_mode,
+            baseline_sha256=version_baseline.digest(),
             currency=ver_meta.get("currency") or project.currency,
             schema_version=int(ver_meta.get("schema_version", 1) or 1),
             content_hash=content_hash,

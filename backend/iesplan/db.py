@@ -207,6 +207,7 @@ def _deploy_immutable_triggers() -> None:
         ALL_IMMUTABLE_REVOKE_DDL,
         ALL_IMMUTABLE_TRIGGER_DDL,
         IMMUTABLE_TABLES,
+        PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL,
     )
 
     with engine.begin() as conn:
@@ -218,6 +219,12 @@ def _deploy_immutable_triggers() -> None:
             if stmt.strip():
                 conn.execute(sa_text(stmt))
         for stmt in ALL_IMMUTABLE_REVOKE_DDL.split("\n"):
+            if stmt.strip():
+                conn.execute(sa_text(stmt))
+        # 项目计算基线不可变触发器(0.6.5 事项 1): 先 DROP 再重建保证幂等
+        for func in ("tg_projects_baseline_immutable", "tg_project_versions_baseline_immutable"):
+            conn.execute(sa_text(f"DROP FUNCTION IF EXISTS {func}() CASCADE"))
+        for stmt in PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL.split("\n\n"):
             if stmt.strip():
                 conn.execute(sa_text(stmt))
 

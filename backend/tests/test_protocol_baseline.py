@@ -126,8 +126,17 @@ def _bearer(token: str) -> dict[str, str]:
 
 
 def _create_project(client: TestClient, token: str, name: str) -> int:
-    """通过 API 创建项目, 返回 project_id。"""
-    resp = client.post("/api/projects", json={"name": name}, headers=_bearer(token))
+    """通过 API 创建项目, 返回 project_id(显式携带默认基线)。"""
+    resp = client.post(
+        "/api/projects",
+        json={
+            "name": name,
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
+        headers=_bearer(token),
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()["project"]["id"]
 
@@ -339,7 +348,16 @@ def test_success_wrappers_projects_domain(client: TestClient, db: Session) -> No
     """
     user = make_user(db, "wrap_proj")
     tok = _login(client, "wrap_proj")
-    resp = client.post("/api/projects", json={"name": "包装项目"}, headers=_bearer(tok))
+    resp = client.post(
+        "/api/projects",
+        json={
+            "name": "包装项目",
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
+        headers=_bearer(tok),
+    )
     body = _assert_wrapper(resp, {"project", "my_role"})
     pid = body["project"]["id"]
     _assert_wrapper(client.get("/api/projects", headers=_bearer(tok)), {"projects"})

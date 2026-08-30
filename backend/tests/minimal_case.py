@@ -71,7 +71,7 @@ def main() -> int:
 
     # ---------- 3. 创建项目 ----------
     r = ec.post("/api/projects", json={"name": f"最小案例 {ts}", "currency": "CNY",
-                                       "utc_offset_minutes": 480}, headers=eh)
+                                       "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"}, headers=eh)
     check("创建项目", r.status_code in (200, 201), f"{r.status_code} {r.text[:300]}")
     pid = r.json().get("project", {}).get("id") or r.json().get("id")
     check("项目 id", bool(pid), f"{r.text[:200]}")

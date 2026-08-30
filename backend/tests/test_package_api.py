@@ -137,7 +137,16 @@ def _h(client: TestClient, user) -> dict[str, str]:
 
 def _create_project(client: TestClient, user, name: str = "导出测试项目") -> int:
     """创建项目并返回项目 id。"""
-    resp = client.post("/api/projects", json={"name": name}, headers=_h(client, user))
+    resp = client.post(
+        "/api/projects",
+        json={
+            "name": name,
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
+        headers=_h(client, user),
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()["project"]["id"]
 
