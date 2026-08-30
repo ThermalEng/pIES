@@ -29,6 +29,8 @@ ALL_TABLES: tuple[str, ...] = (
     "app_settings",
     "admin_maintenance_actions",
     "projects", "drafts", "project_versions", "version_refs",
+    "project_models", "project_model_sequences",
+    "model_templates", "model_template_revisions",
     "system_graphs", "devices", "ports", "connections",
     "datasets", "dataset_versions", "dataset_files",
     "calc_configs", "calc_snapshots",
@@ -160,7 +162,7 @@ def _check_sqltext(table: sa.Table, fragment: str) -> bool:
 
 
 def test_models_import_and_all_tables_registered() -> None:
-    """全部 41 张表均注册到 Base.metadata, 无多余/缺失。"""
+    """全部 43 张表均注册到 Base.metadata, 无多余/缺失。"""
     registered = set(Base.metadata.tables)
     missing = set(ALL_TABLES) - registered
     extra = registered - set(ALL_TABLES)

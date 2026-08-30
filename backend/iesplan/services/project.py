@@ -1007,6 +1007,43 @@ def get_current_draft(db: Session, project: Project) -> Draft:
     return _get_current_draft(db, project)
 
 
+def replace_project_model_refs(
+    db: Session,
+    user: User,
+    project_id: int,
+    expected_revision: int,
+    refs: list[dict[str, object]],
+) -> Draft:
+    """以项目模型清单的权威快照推进草稿修订。
+
+    项目模型文件与清单由 application/projects 用例原子保存；本函数只拥有项目
+    草稿事实，执行乐观锁并把不透明模型 ID、device_id、revision 与内容摘要写入
+    新草稿。调用方与本函数共享同一数据库事务。
+    """
+    ensure_access(db, user, project_id, "edit")
+    project = _get_project(db, project_id)
+    draft = _get_current_draft(db, project)
+    if draft.revision != expected_revision:
+        raise ConflictError(
+            "项目草稿已被其他操作更新",
+            params={"expected_revision": expected_revision, "current_revision": draft.revision},
+            location={"object_type": "draft", "object_id": str(draft.id)},
+        )
+    content = _load_draft_content(db, draft)
+    content["project_models"] = refs
+    new_draft = _new_draft_row(db, project, content, user)
+    _audit(
+        db,
+        "project",
+        project.id,
+        "project.models_updated",
+        user.id,
+        after={"revision": new_draft.revision, "model_count": len(refs)},
+    )
+    db.flush()
+    return new_draft
+
+
 def _get_current_draft(db: Session, project: Project) -> Draft:
     """取项目当前草稿(is_current=true 且修订最大者)。"""
     draft = db.execute(
@@ -1221,10 +1258,8 @@ def _audit(
 
 __all__ = [
     "InvalidRequestError",
-    "ROLE_CAPABILITIES",
     "ensure_access",
     "get_role",
-    "maintenance_access",
     "create_project",
     "get_project_view",
     "list_visible_projects",
@@ -1239,6 +1274,7 @@ __all__ = [
     "apply_result",
     "project_to_dict",
     "draft_to_dict",
+    "replace_project_model_refs",
     "version_to_dict",
     "list_all_projects",
     "project_count_by_owner",

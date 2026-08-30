@@ -2111,3 +2111,31 @@ button {
   color: var(--ies-color-text-secondary);
   text-decoration: line-through;
 }
+
+
+/* 自定义页(用户模型模板管理) */
+.ies-custom-page { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+.ies-page-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ies-custom-list { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.ies-custom-card { border: 1px solid var(--ies-border, #d8dee6); border-radius: 8px; padding: 14px 16px; background: var(--ies-surface, #fff); }
+.ies-custom-card__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ies-custom-card__name { font-weight: 600; border: none; background: none; cursor: pointer; color: inherit; text-align: left; }
+.ies-custom-card__meta { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 6px; color: #667; font-size: 13px; }
+.ies-custom-card__sha { font-family: ui-monospace, monospace; }
+.ies-custom-card__revisions { margin-top: 8px; display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.ies-custom-card__rev { border: 1px solid var(--ies-border, #d8dee6); border-radius: 4px; padding: 2px 8px; background: none; cursor: pointer; }
+.ies-custom-card__actions { margin-top: 10px; display: flex; gap: 8px; }
+.ies-custom-empty { color: #667; padding: 24px 0; }
+.ies-custom-editor { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.ies-custom-editor__head { display: flex; align-items: center; gap: 12px; }
+.ies-custom-editor__yaml { font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace; font-size: 13px; line-height: 1.5; }
+.ies-custom-warn { color: var(--ies-danger, #c0392b); font-size: 13px; }
+.ies-custom-editor__actions { display: flex; gap: 8px; }
+.ies-custom-diagnostics { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ies-custom-diagnostics__item { border-left: 3px solid var(--ies-danger, #c0392b); background: var(--ies-danger-bg, #fdf0ef); padding: 8px 10px; font-size: 13px; border-radius: 0 4px 4px 0; }
+.ies-custom-diagnostics__code { font-weight: 600; margin-right: 8px; font-family: ui-monospace, monospace; }
+.ies-custom-diagnostics__field { display: block; color: #667; margin-top: 2px; font-family: ui-monospace, monospace; font-size: 12px; }
+.ies-custom-diagnostics__expected { display: block; color: #667; margin-top: 2px; font-size: 12px; }
+.ies-custom-revision { border: 1px solid var(--ies-success, #27ae60); background: var(--ies-success-bg, #eafaf1); border-radius: 6px; padding: 10px 12px; }
+.ies-custom-revision h3 { margin: 0 0 4px; font-size: 14px; }
+.ies-custom-revision p { margin: 0; font-size: 13px; }

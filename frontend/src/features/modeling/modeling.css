@@ -1,0 +1,458 @@
+/* 建模 feature(模型模板管理 / 模板表单 / 直接 YAML 编辑 / 诊断与保存状态)。
+   与全局设计变量(styles.css :root)保持一致, 类名前缀 ies-modeling__。 */
+
+.ies-modeling__page {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem 2rem;
+  max-width: 1100px;
+}
+
+.ies-modeling__header h2 {
+  margin: 0 0 0.25rem;
+  font-size: var(--ies-fs-xl);
+}
+
+.ies-modeling__subtitle {
+  margin: 0;
+  color: var(--ies-color-text-secondary);
+  font-size: var(--ies-fs-sm);
+}
+
+/* 页签 */
+.ies-modeling__tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--ies-color-border);
+}
+
+.ies-modeling__tab {
+  padding: 0.5rem 1rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ies-color-text-secondary);
+  font-size: var(--ies-fs-md);
+  cursor: pointer;
+}
+
+.ies-modeling__tab:hover {
+  color: var(--ies-primary);
+}
+
+.ies-modeling__tab.is-active {
+  color: var(--ies-primary);
+  border-bottom-color: var(--ies-primary);
+  font-weight: 600;
+}
+
+/* 保存状态条 */
+.ies-modeling__status-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--ies-color-surface-2);
+  border: 1px solid var(--ies-color-border);
+  border-radius: 8px;
+}
+
+.ies-modeling__status-desc {
+  color: var(--ies-color-text-secondary);
+  font-size: var(--ies-fs-sm);
+}
+
+/* 模板列表 */
+.ies-modeling__loading {
+  padding: 1.5rem;
+  display: flex;
+  justify-content: center;
+}
+
+.ies-modeling__template-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.ies-modeling__template-item {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--ies-color-border);
+  border-radius: 8px;
+  background: var(--ies-color-surface);
+  cursor: pointer;
+  font: inherit;
+}
+
+.ies-modeling__template-item:hover {
+  border-color: var(--ies-primary);
+}
+
+.ies-modeling__template-item.is-selected {
+  border-color: var(--ies-primary);
+  background: var(--ies-primary-subtle);
+}
+
+.ies-modeling__template-name {
+  font-weight: 600;
+}
+
+.ies-modeling__template-id {
+  color: var(--ies-color-text-muted);
+  font-size: var(--ies-fs-xs);
+  font-family: var(--ies-font-mono);
+}
+
+.ies-modeling__template-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-modeling__template-desc {
+  color: var(--ies-color-text-secondary);
+  font-size: var(--ies-fs-sm);
+}
+
+/* 模板页布局 */
+.ies-modeling__template-layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.ies-modeling__hint {
+  color: var(--ies-color-text-muted);
+  font-size: var(--ies-fs-sm);
+  padding: 0.5rem 0;
+}
+
+.ies-modeling__form-panel {
+  border: 1px solid var(--ies-color-border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+/* 递归表单 */
+.ies-modeling__form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.ies-modeling__group {
+  border: 0;
+  margin: 0;
+  padding: 0.5rem 0 0 0.75rem;
+  border-left: 2px solid var(--ies-color-border);
+}
+
+.ies-modeling__group legend {
+  font-size: var(--ies-fs-sm);
+  font-weight: 600;
+  color: var(--ies-color-text-secondary);
+  padding: 0 0.25rem;
+  font-family: var(--ies-font-mono);
+}
+
+.ies-modeling__group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.ies-modeling__field-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ies-modeling__field-row label {
+  font-size: var(--ies-fs-sm);
+  font-family: var(--ies-font-mono);
+}
+
+.ies-modeling__unsupported {
+  padding: 0.4rem 0.6rem;
+  border: 1px dashed var(--ies-warning);
+  color: var(--ies-warning-text);
+  background: var(--ies-warning-subtle);
+  border-radius: 6px;
+  font-size: var(--ies-fs-xs);
+}
+
+/* data 文件字段 */
+.ies-modeling__data-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--ies-color-border);
+  border-radius: 8px;
+  background: var(--ies-color-surface-2);
+}
+
+.ies-modeling__data-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.ies-modeling__data-label {
+  font-size: var(--ies-fs-sm);
+  font-weight: 600;
+  font-family: var(--ies-font-mono);
+}
+
+.ies-modeling__data-ref {
+  color: var(--ies-color-text-muted);
+  font-size: var(--ies-fs-xs);
+  font-family: var(--ies-font-mono);
+}
+
+.ies-modeling__data-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ies-modeling__file-input {
+  display: none;
+}
+
+/* 数组编辑器 */
+.ies-modeling__array {
+  border: 1px solid var(--ies-color-border);
+  border-radius: 8px;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ies-modeling__array legend {
+  font-size: var(--ies-fs-sm);
+  font-weight: 600;
+  color: var(--ies-color-text-secondary);
+  padding: 0 0.25rem;
+  font-family: var(--ies-font-mono);
+}
+
+.ies-modeling__array-note {
+  font-weight: 400;
+  color: var(--ies-color-text-muted);
+}
+
+.ies-modeling__array-empty {
+  color: var(--ies-color-text-muted);
+  font-size: var(--ies-fs-xs);
+}
+
+.ies-modeling__array-row {
+  display: grid;
+  grid-template-columns: 2rem 1fr auto;
+  gap: 0.5rem;
+  align-items: start;
+  padding: 0.4rem 0;
+  border-top: 1px dashed var(--ies-color-border);
+}
+
+.ies-modeling__array-row:first-of-type {
+  border-top: 0;
+}
+
+.ies-modeling__array-index {
+  color: var(--ies-color-text-muted);
+  font-family: var(--ies-font-mono);
+  font-size: var(--ies-fs-xs);
+  padding-top: 0.5rem;
+}
+
+.ies-modeling__array-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* YAML 编辑器 */
+.ies-modeling__yaml-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ies-modeling__yaml-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ies-modeling__yaml-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.ies-modeling__yaml-title {
+  font-weight: 600;
+  font-size: var(--ies-fs-md);
+}
+
+.ies-modeling__yaml-cursor {
+  color: var(--ies-color-text-muted);
+  font-size: var(--ies-fs-xs);
+  font-family: var(--ies-font-mono);
+}
+
+.ies-modeling__yaml-textarea {
+  min-height: 46vh;
+  font-family: var(--ies-font-mono);
+  font-size: var(--ies-fs-sm);
+  line-height: 1.45;
+  tab-size: 2;
+  resize: vertical;
+}
+
+.ies-modeling__yaml-hint {
+  color: var(--ies-color-text-muted);
+  font-size: var(--ies-fs-xs);
+  margin: 0;
+}
+
+.ies-modeling__yaml-warn {
+  color: var(--ies-warning-text);
+  background: var(--ies-warning-subtle);
+  border: 1px solid var(--ies-warning);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  font-size: var(--ies-fs-xs);
+  margin: 0;
+}
+
+/* 诊断列表 */
+.ies-modeling__diag-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ies-modeling__diag-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--ies-color-border);
+  border-radius: 6px;
+  background: var(--ies-color-surface);
+}
+
+.ies-modeling__diag-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ies-modeling__diag-code {
+  font-family: var(--ies-font-mono);
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-secondary);
+}
+
+.ies-modeling__diag-text {
+  font-size: var(--ies-fs-sm);
+}
+
+.ies-modeling__diag-loc,
+.ies-modeling__diag-ea {
+  font-size: var(--ies-fs-xs);
+  color: var(--ies-color-text-muted);
+  font-family: var(--ies-font-mono);
+}
+
+/* 保存成功面板 */
+.ies-modeling__saved {
+  border-color: var(--ies-success) !important;
+}
+
+.ies-modeling__saved-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.ies-modeling__saved-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.ies-modeling__saved-label {
+  color: var(--ies-color-text-muted);
+  font-size: var(--ies-fs-xs);
+}
+
+.ies-modeling__saved-hash {
+  font-family: var(--ies-font-mono);
+  font-size: var(--ies-fs-xs);
+  word-break: break-all;
+}
+
+.ies-modeling__saved-yaml {
+  margin-top: 0.75rem;
+}
+
+.ies-modeling__saved-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--ies-primary);
+  cursor: pointer;
+  font-size: var(--ies-fs-sm);
+  padding: 0;
+}
+
+.ies-modeling__saved-pre {
+  margin-top: 0.5rem;
+  max-height: 40vh;
+  overflow: auto;
+  background: var(--ies-color-surface-2);
+  border: 1px solid var(--ies-color-border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  font-family: var(--ies-font-mono);
+  font-size: var(--ies-fs-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ies-modeling__saved-note {
+  margin: 0.75rem 0 0;
+  color: var(--ies-success-text);
+  font-size: var(--ies-fs-sm);
+}
+
+/* 底部操作区 */
+.ies-modeling__footer {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding-top: 0.5rem;
+}

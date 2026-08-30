@@ -279,6 +279,13 @@ def test_add_remove_list_refs(session: Session, data_dir) -> None:
     assert object_info(session, obj.id)["status"] == "orphaned"  # 引用归零 → orphaned
     assert list_refs(session, obj.id) == []
 
+    # orphaned 对象重新建立 owner 引用 → 自动恢复为 stored(内容锁/临时文件
+    # 替换场景: 同内容对象被旧引用解绑后再次 attach, 必须恢复可用状态)
+    add_ref(session, obj.id, "version_ref", 8, purpose="重新引用")
+    session.commit()
+    assert object_info(session, obj.id)["status"] == "stored"
+    assert object_info(session, obj.id)["ref_count"] == 1
+
 
 def test_remove_ref_unknown_raises(session: Session, data_dir) -> None:
     """解除不存在的引用抛 NotFoundError。"""

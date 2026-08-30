@@ -491,10 +491,10 @@ def attach(
     """
     obj = _resolve_object(db, object_id)
     entity_type = ref_entity_type or REF_ENTITY_TYPE_MAP.get(ref_type, ref_type)
-    # 0.2.0-B3 恢复路径: 待物理回收对象重新获得 owner 引用时自动恢复为
-    # 可用状态(清除软删标记), 文件仍在磁盘上, 内容可继续访问。
-    # attach 必然建立引用, 恢复后 ref_count >= 1, 故置 stored。
-    if obj.status == OBJ_STATUS_PENDING_DELETION:
+    # 恢复路径: 待物理回收(软删)或已解绑(orphaned)对象重新获得 owner 引用时
+    # 自动恢复为可用状态(文件仍在磁盘上, 内容可继续访问)。attach 必然建立
+    # 引用, 恢复后 ref_count >= 1, 故置 stored。
+    if obj.status in (OBJ_STATUS_PENDING_DELETION, OBJ_STATUS_ORPHANED):
         obj.status = OBJ_STATUS_STORED
         obj.pending_deleted_at = None
         obj.pending_delete_until = None
@@ -650,6 +650,18 @@ def list_refs(db: Session, object_id: int | str) -> list[RefInfo]:
     return [_to_refinfo(r) for r in rows]
 
 
+def _ref_to_public_dict(r: ObjectRef) -> dict:
+    """ObjectRef 行 → 公开视图 dict(与 find_refs_by_owner 同构)。"""
+    return {
+        "object_id": r.object_id,
+        "ref_type": r.ref_type,
+        "ref_entity_type": r.ref_entity_type,
+        "ref_entity_id": r.ref_entity_id,
+        "purpose": r.purpose,
+        "created_at": as_utc(r.created_at).isoformat() if r.created_at else None,
+    }
+
+
 def find_refs_by_owner(
     db: Session, ref_type: str, owner_id: int, ref_entity_type: str | None = None
 ) -> list[dict]:
@@ -668,17 +680,21 @@ def find_refs_by_owner(
         )
         .order_by(ObjectRef.id.desc())
     ).scalars()
-    return [
-        {
-            "object_id": r.object_id,
-            "ref_type": r.ref_type,
-            "ref_entity_type": r.ref_entity_type,
-            "ref_entity_id": r.ref_entity_id,
-            "purpose": r.purpose,
-            "created_at": as_utc(r.created_at).isoformat() if r.created_at else None,
-        }
-        for r in rows
-    ]
+    return [_ref_to_public_dict(r) for r in rows]
+
+
+def find_refs_by_entity_type(db: Session, ref_entity_type: str) -> list[dict]:
+    """按引用方实体类型列全部引用(公开门面, 供临时 owner reconciliation)。
+
+    STO-05: 调用方(如 application 用例)声明实体类型字符串, 存储只判断
+    "是否有引用", 不导入业务模型。返回与 find_refs_by_owner 同构的公开视图。
+    """
+    rows = db.execute(
+        sa.select(ObjectRef)
+        .where(ObjectRef.ref_entity_type == ref_entity_type)
+        .order_by(ObjectRef.id)
+    ).scalars()
+    return [_ref_to_public_dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

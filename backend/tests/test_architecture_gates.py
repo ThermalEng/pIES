@@ -96,9 +96,11 @@ WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
 # 每条目均需整改: 经 services 公开面访问数据, 整改后移除条目。
 WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
     # ---- admin.py: 管理端运维直接查询 ORM ----
-    ("iesplan.api.admin", 34): frozenset({"RetentionRule"}),
-    ("iesplan.api.admin", 35): frozenset({"ComputeSlot", "Task", "TaskAttempt", "TaskDiagnostic", "TaskLease"}),
-    ("iesplan.api.admin", 36): frozenset({"User"}),
+    ("iesplan.api.admin", 33): frozenset({"RetentionRule"}),
+    ("iesplan.api.admin", 34): frozenset(
+        {"ComputeSlot", "Task", "TaskAttempt", "TaskDiagnostic", "TaskLease"}
+    ),
+    ("iesplan.api.admin", 35): frozenset({"User"}),
     ("iesplan.api.admin", 36): frozenset({"AdminMaintenanceAction"}),
     # ---- health.py: 健康检查直接计数 ORM ----
     ("iesplan.api.health", 26): frozenset({"Task"}),
