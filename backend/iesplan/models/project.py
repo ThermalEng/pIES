@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import sqlalchemy as sa
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
@@ -39,6 +39,10 @@ class Project(Base):
     baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
     baseline_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
+    # 当前生效配置 revision 指针(指向 finance_configs/planning_configs 的
+    # 不可变 revision; 指针可移动, revision 行本身仅 INSERT, 宪法 4.6)
+    finance_revision: Mapped[int | None] = mapped_column(BigInteger)
+    planning_revision: Mapped[int | None] = mapped_column(BigInteger)
     # 循环依赖指针: 先建表, 后补外键(use_alter)
     current_draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id", use_alter=True))
     current_version_id: Mapped[int | None] = mapped_column(ForeignKey("project_versions.id", use_alter=True))

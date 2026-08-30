@@ -40,6 +40,10 @@ from iesplan.models.identity import (
     UserRole,
     WindowSession,
 )
+from iesplan.models.config_revision import (
+    FinanceConfigRevision,
+    PlanningConfigRevision,
+)
 from iesplan.models.immutable_triggers import IMMUTABLE_TABLES
 from iesplan.models.model import Connection, Device, Port, SystemGraph
 from iesplan.models.model_template import ModelTemplate, ModelTemplateRevision
@@ -112,6 +116,9 @@ __all__ = [
     "TaskProgress",
     "TaskDiagnostic",
     "ComputeSlot",
+    # 规划/财务配置 revision(0.6.5 事项 3)
+    "FinanceConfigRevision",
+    "PlanningConfigRevision",
     # 结果
     "EvidencePackage",
     "ResultAssessment",

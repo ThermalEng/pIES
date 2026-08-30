@@ -103,6 +103,14 @@ NEW_DIAG_CODES: dict[str, str] = {
     "SYS-STORE-004": "保存冲突:项目已在其他会话中修改(04 §9.2 表 E save_conflict 无码,在此登记)",
     # 项目计算基线(0.6.5 前置阶段事项 1): 创建时一次性固定的不可变口径
     "PROJ-BASE-001": "项目计算基线非法: {detail}",
+    # 公共财务配置与规划配置(0.6.5 前置阶段事项 3): 不可变 revision 契约
+    "PROJ-FIN-001": "公共财务配置非法: {detail}",
+    "PROJ-FIN-002": "公共财务配置领域校验失败: {detail}",
+    "PROJ-FIN-003": "公共财务配置持久化摘要不一致: {detail}",
+    "PROJ-PLAN-001": "规划配置非法: {detail}",
+    "PROJ-PLAN-002": "规划配置引用的 FinanceConfig revision 不一致: {detail}",
+    "PROJ-PLAN-003": "规划配置领域校验失败: {detail}",
+    "PROJ-PLAN-004": "规划配置持久化摘要不一致: {detail}",
     # ies.device-data 1.0.0 契约(0.6.0): CSV 元数据/方言/列/时间/数值契约诊断
     "DATA-META-001": "元数据行缺失或重复: {key}(每个元数据键只能出现一次, 且只能在表头之前)",
     "DATA-META-002": "必需的 ies.device-data 元数据缺失: {key}",

@@ -262,6 +262,7 @@ def _register_business_routers(application: FastAPI) -> None:
         admin,
         auth,
         config,
+        config_revisions,
         datasets,
         exports,
         health,
@@ -295,6 +296,8 @@ def _register_business_routers(application: FastAPI) -> None:
     # 计算配置(U06) + 算法注册表
     application.include_router(config.config_router)
     application.include_router(config.registry_router)
+    # 规划/财务配置 revision(0.6.5 事项 3)
+    application.include_router(config_revisions.router)
     # 校验(U07)
     application.include_router(validation.router)
     # 任务(U08)

@@ -27,6 +27,8 @@ IMMUTABLE_TABLES: tuple[str, ...] = (
     "result_assessments",
     "uncertainty_snapshots",
     "audit_log",
+    "finance_configs",
+    "planning_configs",
 )
 
 
