@@ -61,7 +61,11 @@ class ModelTemplate(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa.text("'draft'"))
     #: 简短说明(用户自述, 不参与引用与计算)
     description: Mapped[str | None] = mapped_column(Text)
-    #: 草稿 YAML 对象引用(objects.id; 无草稿时 NULL)
+    #: 客户端提交的 slug（与稳定 ID 的 slug 部分一致）
+    slug: Mapped[str | None] = mapped_column(Text)
+    #: 公开命名空间快照（分配时命名空间，终身不变）
+    public_namespace: Mapped[str | None] = mapped_column(Text)
+    #: 草稿 YAML 对象引用(objects.id; 无草稿时 NULL) — 兼容字段，权威为 draft_revisions
     draft_yaml_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
     #: 草稿最近一次校验的聚合诊断 JSON 对象引用(objects.id; 无草稿时 NULL)
     draft_diagnostics_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
@@ -72,6 +76,10 @@ class ModelTemplate(Base):
     #: 草稿乐观锁修订(每次保存草稿 +1; 并发编辑以 expected_revision 拒绝)
     draft_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("0"))
     draft_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: 当前草稿 revision 行指针（不可变历史）
+    current_draft_revision_id: Mapped[int | None] = mapped_column(ForeignKey("model_template_draft_revisions.id"))
+    #: 最新发布 revision 行指针
+    current_published_revision_id: Mapped[int | None] = mapped_column(ForeignKey("model_template_revisions.id"))
     #: 最新已发布 revision(0 = 尚未发布)
     published_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("0"))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -90,8 +98,10 @@ class ModelTemplate(Base):
             f"draft_sha256 IS NULL OR draft_sha256 ~ '{HASH64_RE}'",
             name="ck_model_templates_draft_sha256",
         ),
-        #: 同一用户模板 ID 唯一(模板按用户隔离, 不构成全局命名空间)
-        UniqueConstraint("owner_id", "template_id", name="uq_model_templates_owner_id"),
+        #: 稳定 ID 全局唯一（新命名空间全局唯一）
+        UniqueConstraint("template_id", name="uq_model_templates_template_id"),
+        #: 同一用户 slug 唯一（避免重复）
+        UniqueConstraint("owner_id", "slug", name="uq_model_templates_owner_slug"),
         Index("idx_model_templates_owner", "owner_id"),
     )
 

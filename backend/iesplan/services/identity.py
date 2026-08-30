@@ -595,10 +595,25 @@ def create_user(
                 params={"email": email},
             )
     role_row = ensure_role(db, role, name="工程师" if role == ROLE_ENGINEER else "管理员")
+    from iesplan.core.namespace import generate_namespace
+    # 分配公开命名空间（CSPRNG，60 bit 熵；全局唯一，碰撞重试）
+    ns = None
+    for _ in range(20):
+        candidate = generate_namespace()
+        # 检查唯一性（极低碰撞概率，但仍需保证）
+        from sqlalchemy import select as _select
+        from iesplan.models.identity import User as _User
+        exists = db.execute(_select(_User).where(_User.public_namespace == candidate)).scalar_one_or_none()
+        if exists is None:
+            ns = candidate
+            break
+    if ns is None:
+        raise RuntimeError("无法分配唯一的 public_namespace")
     user = User(
         username=username,
         display_name=(display_name or "").strip() or username,
         email=email,
+        public_namespace=ns,
     )
     db.add(user)
     db.flush()

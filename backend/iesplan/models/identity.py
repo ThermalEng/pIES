@@ -29,6 +29,8 @@ class User(Base):
     """用户账号(01 §1.1)。
 
     生命周期状态: active 正常 / disabled 停用 / locked 锁定;删除一律软删。
+    新增 public_namespace：系统分配的 12 位小写 Crockford Base32（60 bit 熵），
+    首次需要时分配，终身不变、不可转让、不复用；不包含个人信息；账号改名/停用/重启用不改变。
     """
 
     __tablename__ = "users"
@@ -47,6 +49,8 @@ class User(Base):
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa.text("false"))
     #: 外部认证主体(OIDC sub; 仅外部认证账号非空, 唯一约束防重复绑定)
     auth_subject: Mapped[str | None] = mapped_column(Text)
+    #: 公开命名空间（12 位小写 Crockford Base32，全局唯一，首次需要时分配）
+    public_namespace: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
     )
@@ -59,10 +63,17 @@ class User(Base):
         regex_check(f"email IS NULL OR email ~ '{EMAIL_RE}'", name="ck_users_email_format"),
         CheckConstraint("status IN ('active','disabled','locked')", name="ck_users_status"),
         CheckConstraint("fixed_utc_offset_minutes BETWEEN -720 AND 840", name="ck_users_utc_offset"),
+        regex_check(
+            "public_namespace IS NULL OR public_namespace ~ '^[0-9a-hjkmnp-tv-z]{12}$'",
+            name="ck_users_public_namespace",
+        ),
         UniqueConstraint("username", name="uq_users_username"),
         UniqueConstraint("email", name="uq_users_email"),
         UniqueConstraint("auth_subject", name="uq_users_auth_subject"),
         Index("idx_users_status", "status"),
+        Index("uq_users_public_namespace", "public_namespace", unique=True,
+              postgresql_where=sa.text("public_namespace IS NOT NULL"),
+              sqlite_where=sa.text("public_namespace IS NOT NULL")),
     )
 
 

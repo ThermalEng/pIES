@@ -23,6 +23,8 @@ export type TemplateStatusDto = 'draft' | 'published' | 'disabled'
 export interface TemplateDto {
   id: string
   template_id: string
+  slug: string | null
+  public_namespace: string | null
   status: TemplateStatusDto
   description: string | null
   draft_revision: number
@@ -58,6 +60,7 @@ export interface TemplateDetailDto {
 
 /** 创建/保存草稿请求。 */
 export interface TemplateDraftRequestDto {
+  slug: string
   model_yaml: string
   description?: string | null
   /** 保存草稿时必填(乐观锁)。 */

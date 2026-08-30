@@ -39,10 +39,10 @@ export async function getTemplateDetail(templateId: string): Promise<TemplateDet
 }
 
 /** 创建模板草稿(模板 ID = YAML 的 device.id)。 */
-export async function createTemplate(modelYaml: string, description: string | null): Promise<TemplateDto> {
+export async function createTemplate(slug: string, modelYaml: string, description: string | null): Promise<TemplateDto> {
   const body = await request<unknown>('/model-templates', {
     method: 'POST',
-    body: { model_yaml: modelYaml, description },
+    body: { slug, model_yaml: modelYaml, description },
   })
   const rec = asRecord(body)
   if (!rec || !rec.template) {

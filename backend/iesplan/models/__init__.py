@@ -43,6 +43,7 @@ from iesplan.models.identity import (
 from iesplan.models.immutable_triggers import IMMUTABLE_TABLES
 from iesplan.models.model import Connection, Device, Port, SystemGraph
 from iesplan.models.model_template import ModelTemplate, ModelTemplateRevision
+from iesplan.models.draft_revision import ModelTemplateDraftRevision, TemplateMigrationReceipt
 from iesplan.models.project import (
     AdminMaintenanceAction,
     Draft,

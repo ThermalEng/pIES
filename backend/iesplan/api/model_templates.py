@@ -40,10 +40,14 @@ from iesplan.api.auth import CurrentUser
 from iesplan.application.model_templates import (
     create_template_draft,
     delete_template_draft,
+    get_draft_revision,
     get_template_detail,
     get_template_revision,
     list_available_templates,
+    list_draft_revisions,
     list_my_templates,
+    migrate_draft_to_new_stable_id,
+    migrate_published_template,
     publish_template,
     save_template_draft,
     set_template_status,
@@ -65,10 +69,15 @@ _TEMPLATE_ID_PATTERN = r"^[a-z0-9]+([._-][a-z0-9]+)*$"
 
 
 class TemplateCreateRequest(BaseModel):
-    """创建模板草稿(模板 ID 由 YAML 的 device.id 决定)。"""
+    """创建模板草稿(客户端提交 slug，后端组合 user.<namespace>.device.<slug>)。"""
 
+    slug: str = Field(min_length=1, max_length=64, description="模板 slug（小写字母/数字，点/下划线/连字符分段）")
     model_yaml: str = Field(min_length=1, max_length=2_000_000, description="模板 YAML 文本(含顶层 inputs)")
     description: str | None = Field(default=None, max_length=500, description="简短说明")
+    # 客户端不得提交 public_namespace（服务端分配）；若提交则拒绝
+    public_namespace: str | None = Field(default=None, description="禁止客户端提交")
+
+    model_config = {"extra": "forbid"}
 
 
 class TemplateValidateRequest(BaseModel):
@@ -122,8 +131,17 @@ def create_template_endpoint(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """创建模板草稿(校验失败 400 聚合诊断; 同用户模板 ID 重复 409)。"""
+    from iesplan.core.errors import AppError
+    if payload.public_namespace is not None:
+        raise AppError(
+            "客户端不得提交 public_namespace",
+            code="API-REQ-002",
+            message_key="ies.diag.tpl.api.namespace_forbidden",
+            params={"field": "public_namespace"},
+            location={"object_type": "model_template", "field": "public_namespace"},
+        )
     result = create_template_draft(
-        db, user, model_yaml=payload.model_yaml, description=payload.description
+        db, user, slug=payload.slug, model_yaml=payload.model_yaml, description=payload.description
     )
     return {"template": result}
 
@@ -255,3 +273,50 @@ def get_template_revision_endpoint(
 ) -> dict[str, Any]:
     """精确发布 revision: 规范 YAML + 校验回执 + 结构摘要 + 聚合诊断。"""
     return get_template_revision(db, user, template_id, revision)
+
+
+@router.get("/{template_id}/draft-revisions", summary="草稿不可变历史")
+def list_draft_revisions_endpoint(
+    template_id: str,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    """列出模板的不可变草稿 revision 历史（旧 revision 可读）。"""
+    return {"draft_revisions": list_draft_revisions(db, user, template_id)}
+
+
+@router.get("/{template_id}/draft-revisions/{revision}", summary="精确草稿 revision")
+def get_draft_revision_endpoint(
+    template_id: str,
+    revision: int,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    """读取精确草稿 revision（不可变）。"""
+    return get_draft_revision(db, user, template_id, revision)
+
+
+class MigrateDraftRequest(BaseModel):
+    new_slug: str = Field(min_length=1, max_length=64, description="新 slug")
+
+
+@router.post("/{template_id}/migrate-draft", summary="未发布草稿显式迁移")
+def migrate_draft_endpoint(
+    template_id: str,
+    payload: MigrateDraftRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    """未发布草稿显式迁移：生成新稳定 ID、摘要与迁移回执。"""
+    return migrate_draft_to_new_stable_id(db, user, template_id, payload.new_slug)
+
+
+@router.post("/{template_id}/migrate-published", summary="已发布模板离线迁移")
+def migrate_published_endpoint(
+    template_id: str,
+    payload: MigrateDraftRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    """已发布模板离线迁移：旧 ID → 新 ID，原子更新全部引用。"""
+    return migrate_published_template(db, user, template_id, payload.new_slug)
