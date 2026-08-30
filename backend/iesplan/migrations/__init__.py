@@ -595,12 +595,108 @@ def _migrate_0004_sqlite(conn: sa.Connection) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# 迁移 0005: 公共财务配置与规划配置不可变 revision 表(0.6.5 事项 3)
+# ---------------------------------------------------------------------------
+
+_MIGRATION_0005_POSTGRES = """
+-- 公共财务配置 revision 表(仅 INSERT, 不可变; 每次保存形成新 revision)
+CREATE TABLE IF NOT EXISTS finance_configs (
+    id BIGSERIAL PRIMARY KEY,
+    project_id BIGINT NOT NULL REFERENCES projects(id),
+    revision BIGINT NOT NULL CHECK (revision >= 1),
+    content JSONB NOT NULL,
+    content_sha256 TEXT NOT NULL
+        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+    created_by BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_finance_configs_project
+    ON finance_configs (project_id, revision DESC);
+
+-- 规划配置 revision 表(仅 INSERT, 不可变; 引用同一 FinanceConfig revision)
+CREATE TABLE IF NOT EXISTS planning_configs (
+    id BIGSERIAL PRIMARY KEY,
+    project_id BIGINT NOT NULL REFERENCES projects(id),
+    revision BIGINT NOT NULL CHECK (revision >= 1),
+    content JSONB NOT NULL,
+    content_sha256 TEXT NOT NULL
+        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+    finance_revision TEXT NOT NULL
+        CHECK (finance_revision ~ '^[0-9a-f]{64}$'),
+    created_by BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_planning_configs_project
+    ON planning_configs (project_id, revision DESC);
+"""
+
+_MIGRATION_0005_SQLITE = """
+CREATE TABLE IF NOT EXISTS finance_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    content TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (project_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_finance_configs_project
+    ON finance_configs (project_id, revision DESC);
+
+CREATE TABLE IF NOT EXISTS planning_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    content TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    finance_revision TEXT NOT NULL CHECK (length(finance_revision) = 64),
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (project_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_planning_configs_project
+    ON planning_configs (project_id, revision DESC);
+"""
+
+
+def _migrate_0005(conn: sa.Connection) -> None:
+    """公共财务配置与规划配置不可变 revision 表(0005, 0.6.5 事项 3)。
+
+    - finance_configs / planning_configs: 仅 INSERT 的 revision 追加表
+      (不可变性由 immutable_triggers 部署的禁 UPDATE/DELETE 触发器保证);
+    - projects 增加 finance_revision / planning_revision 当前生效指针
+      (_ensure_columns 守卫: 全新库随 ORM create_all 已含列时为 no-op,
+      存量库按需补列; 与 0004 同模式);
+    - 幂等: IF NOT EXISTS + 列守卫。
+    """
+    ddl = (
+        _MIGRATION_0005_POSTGRES
+        if conn.dialect.name == "postgresql"
+        else _MIGRATION_0005_SQLITE
+    )
+    for stmt in ddl.split(";"):
+        stripped = stmt.strip()
+        if stripped:
+            conn.execute(sa_text(stripped))
+    # 项目当前生效 revision 指针(指向不可变 revision, 指针本身可移动)
+    _ensure_columns(
+        conn,
+        "projects",
+        {"finance_revision": "BIGINT", "planning_revision": "BIGINT"},
+    )
+
+
 #: 有序迁移清单(version, name, upgrade)
 MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
     ("0002_model_template_lifecycle", "用户模型模板主表与不可变发布 revision 表", _migrate_0002),
     ("0003_public_namespace_and_draft_history", "公开命名空间与不可变草稿历史", _migrate_0003),
     ("0004_project_baseline", "项目计算基线固定与旧时区列删除", _migrate_0004),
+    ("0005_finance_planning_configs", "公共财务与规划配置不可变 revision 表", _migrate_0005),
 ]
 
 MIGRATION_VERSIONS: tuple[str, ...] = tuple(m[0] for m in MIGRATIONS)
