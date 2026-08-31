@@ -442,6 +442,9 @@ def _parse_predict_file(
     实际字节摘要一致(摘要链闭合)。
     """
     parsed, diags = parse_data_file_v2(data)
+    blocking = [d for d in diags if d.blocking]
+    if blocking:
+        return None, blocking
     if parsed is None:
         return None, diags
     if parsed.raw_sha256 != declared_sha256:
