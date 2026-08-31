@@ -1080,6 +1080,77 @@ def replace_project_model_refs(
     return new_draft
 
 
+def record_sequence_prep_refs(
+    db: Session,
+    user: User,
+    project_id: int,
+    expected_revision: int,
+    prepared: dict,
+) -> Draft:
+    """以序列预备产物清单推进草稿修订(0.6.5 事项 3 事务式发布)。
+
+    与 ``replace_project_model_refs`` 同构: 本函数只拥有项目草稿事实;
+    预备产物对象与模型实例引用由 application/sequence_prep 用例在同一
+    事务内原子写入/替换, 任一失败整体回滚(不发布部分状态、不替换引用)。
+
+    ``prepared``: {model_id: {interface_id: {object_id, content_sha256,
+    receipt_sha256, source_mode}}}——写入新草稿的 ``prepared_sequences`` 键。
+    """
+    ensure_access(db, user, project_id, "edit")
+    project = _get_project(db, project_id)
+    draft = _get_current_draft(db, project)
+    if draft.revision != expected_revision:
+        raise ConflictError(
+            "项目草稿已被其他操作更新",
+            params={"expected_revision": expected_revision, "current_revision": draft.revision},
+            location={"object_type": "draft", "object_id": str(draft.id)},
+        )
+    content = _load_draft_content(db, draft)
+    content["prepared_sequences"] = prepared
+    new_draft = _new_draft_row(db, project, content, user)
+    _audit(
+        db,
+        "project",
+        project.id,
+        "project.sequence_prep_published",
+        user.id,
+        after={"revision": new_draft.revision, "prepared_model_count": len(prepared)},
+    )
+    db.flush()
+    return new_draft
+
+
+def load_draft_content(db: Session, draft: Draft) -> dict:
+    """读取草稿内容文档(公开只读门面; 供应用层合并预备产物清单)。"""
+    return _load_draft_content(db, draft)
+
+
+def load_latest_prepared_sequences(
+    db: Session, project: Project, *, before_revision: int
+) -> dict:
+    """取最近一份带 ``prepared_sequences`` 的历史草稿清单(回滚基准)。
+
+    从 ``before_revision - 1`` 向下遍历不可变草稿, 返回最新携带
+    ``prepared_sequences`` 键的清单(从未预备过返回空字典); 找不到内容对象
+    的历史草稿跳过(数据损坏时保持回滚可用)。
+    """
+    for revision in range(before_revision - 1, 0, -1):
+        draft = db.execute(
+            select(Draft)
+            .where(Draft.project_id == project.id, Draft.revision == revision)
+        ).scalar_one_or_none()
+        if draft is None:
+            continue
+        try:
+            content = _load_draft_content(db, draft)
+        except AppError:  # pragma: no cover - 历史对象缺失/损坏: 跳过该 revision
+            continue
+        prepared = content.get("prepared_sequences")
+        if isinstance(prepared, dict):
+            return prepared
+    return {}
+
+
 def _get_current_draft(db: Session, project: Project) -> Draft:
     """取项目当前草稿(is_current=true 且修订最大者)。"""
     draft = db.execute(

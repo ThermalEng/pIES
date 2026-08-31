@@ -234,6 +234,22 @@ NEW_DIAG_CODES: dict[str, str] = {
     "PROJ-MDL-004": "最终设备 ID 无法通过身份校验: {final_id}(由基础 ID {base_device_id} 追加 _N 后缀后非法)",
     "PROJ-MDL-005": "候选模型校验失败, 保存被拒绝(不写项目模型目录、不登记清单、不分配编号)",
     "PROJ-MDL-006": "候选模型 YAML 解析失败: {detail}",
+    # 序列预备(0.6.5 事项 3): 基于项目计算基线的重采样/周期展开/预测/事务式发布。
+    # 语义分类固定为瞬时/强度量、区间累计量、状态/离散量三类(device-data-csv.md
+    # 「step 与序列预备规则」); 语义不明确必须阻断, 不允许回退到"全部均值"。
+    "DATA-PREP-001": "列物理量语义缺失或未知: {column}(必须显式声明 {allowed} 之一)",
+    "DATA-PREP-002": "重采样输入与目标网格无法对齐: {detail}",
+    "DATA-PREP-003": (
+        "周期模板行数 {actual} 与 period/resolution 推导值 {expected} 不一致"
+        "(period={period}, resolution={resolution})"
+    ),
+    "DATA-PREP-004": "周期展开点数 {actual} 与项目基线推导点数 {expected} 不一致",
+    "DATA-PREP-005": "data_predict 显式训练输入/训练目标/预测输入非法: {detail}",
+    "DATA-PREP-006": "预备输出校验失败: {detail}",
+    "DATA-PREP-007": "输入文件已是预备产物(prepared=true), 禁止重复预备: {detail}",
+    "PROJ-PREP-001": (
+        "序列预备失败, 发布被拒绝(不生成正式产物、不替换模型引用): {detail}"
+    ),
     # 用户自定义模型模板域(application/model_templates 用例, 切片 dm2)。
     # 草稿保存/发布共用同一校验门禁; 生命周期操作以标准错误信封返回。
     "TPL-MDL-001": "模板 YAML 解析失败: {detail}",
@@ -348,6 +364,19 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "PROJ-MDL-004": "model_identity_failed",
             "PROJ-MDL-005": "model_validation_failed",
             "PROJ-MDL-006": "model_yaml_parse",
+            "PROJ-PREP-001": "prep_rejected",
+        }.items()
+    },
+    **{
+        code: "ies.diag.data." + suffix
+        for code, suffix in {
+            "DATA-PREP-001": "prep_semantics_missing",
+            "DATA-PREP-002": "prep_grid_misaligned",
+            "DATA-PREP-003": "prep_period_row_count",
+            "DATA-PREP-004": "prep_expansion_mismatch",
+            "DATA-PREP-005": "prep_predict_input_invalid",
+            "DATA-PREP-006": "prep_output_invalid",
+            "DATA-PREP-007": "prep_already_prepared",
         }.items()
     },
     **{
@@ -454,6 +483,19 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     "PROJ-MDL-004": "ies.fix.proj.model_identity",
     "PROJ-MDL-005": "ies.fix.proj.model_validation",
     "PROJ-MDL-006": "ies.fix.proj.model_yaml",
+    "PROJ-PREP-001": "ies.fix.proj.prep_rejected",
+    **{
+        code: "ies.fix.data.prep_" + suffix
+        for code, suffix in {
+            "DATA-PREP-001": "semantics_declaration",
+            "DATA-PREP-002": "grid_alignment",
+            "DATA-PREP-003": "period_row_count",
+            "DATA-PREP-004": "expansion_mismatch",
+            "DATA-PREP-005": "predict_input",
+            "DATA-PREP-006": "output_validation",
+            "DATA-PREP-007": "already_prepared",
+        }.items()
+    },
     **{
         code: "ies.fix.tpl.template"
         for code in ("TPL-MDL-001", "TPL-MDL-002")
