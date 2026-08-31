@@ -642,6 +642,54 @@ class TestPrepareDataPredict:
         assert not outcome.ok
         assert outcome.diagnostics[0].code == "DATA-PREP-005"
 
+    def test_malformed_predict_input_metadata_rejected(self):
+        """回归: data_predict 显式输入文件元数据/CSV 含阻断诊断时必须拒绝,不使用 parsed 结果。"""
+        document = _predict_document()
+        assert document.device is not None
+        tin, tgt, pin = _predict_files(document, n_train=24, n_predict=8760)
+
+        # 构造元数据非法的训练输入: 缺少必填 dataset_id(触发 DATA-META-002 blocking)
+        bad_lines = [
+            "# schema: ies.device-data",
+            "# schema_version: 2.0.0",
+            # 故意缺失 dataset_id
+            f"# device_id: {document.device.id}",
+            f"# device_content_sha256: {content_sha256(document)}",
+            "# source_mode: data_predict",
+            "# resolution: 1h",
+            "# unit.temp: °C",
+            "# unit.ghi: W/m²",
+            "step,temp,ghi",
+            "0,20.0,500.0",
+        ]
+        bad_data = ("\n".join(bad_lines) + "\n").encode()
+        bad_tin = PredictFile(data=bad_data, sha256=hashlib.sha256(bad_data).hexdigest())
+        outcome = prepare_data_predict(document, BASELINE_1H, bad_tin, tgt, pin, _predict_spec())
+        assert not outcome.ok
+        assert outcome.result is None
+        assert any(d.blocking for d in outcome.diagnostics)
+
+        # 同理: 预测输入缺少表头 step 列(DATA-COL-005 blocking)
+        bad_pin_lines = [
+            "# schema: ies.device-data",
+            "# schema_version: 2.0.0",
+            "# dataset_id: pred.in",
+            f"# device_id: {document.device.id}",
+            f"# device_content_sha256: {content_sha256(document)}",
+            "# source_mode: data_predict",
+            "# resolution: 1h",
+            "# unit.temp: °C",
+            "# unit.ghi: W/m²",
+            "temp,ghi",
+            "20.0,500.0",
+        ]
+        bad_pin_data = ("\n".join(bad_pin_lines) + "\n").encode()
+        bad_pin = PredictFile(data=bad_pin_data, sha256=hashlib.sha256(bad_pin_data).hexdigest())
+        outcome2 = prepare_data_predict(document, BASELINE_1H, tin, tgt, bad_pin, _predict_spec())
+        assert not outcome2.ok
+        assert outcome2.result is None
+        assert any(d.blocking for d in outcome2.diagnostics)
+
     def test_resample_prediction_input_to_baseline(self):
         # 预测输入 15min(全周期 35040 步) → 基线 1h(8760 步)
         document = _predict_document()
