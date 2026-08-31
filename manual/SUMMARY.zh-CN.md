@@ -41,8 +41,7 @@
   - [模型与算法](developer-guide/zh-CN/customization-center.md)
   - [前端与帮助中心](developer-guide/zh-CN/frontend.md)
   - [部署与运行](developer-guide/zh-CN/deployment.md)
-  - [开发、测试与贡献](developer-guide/zh-CN/development.md)
-  - [版本化与发布](developer-guide/zh-CN/versioning-and-release.md)
+  - [规范索引与文档边界](developer-guide/zh-CN/normative-index.md)
 - [更新日志](changelog/README.md)
   - [Roadmap](changelog/roadmap.md)
 

@@ -1,6 +1,8 @@
-# 开发、测试与贡献
+# 内部开发、测试与贡献流程
 
-> 文档状态：生效蓝图；规范版本：1.0.0；上位规范：[架构宪法](ARCHITECTURE_CONSTITUTION.md)
+> 文档类型：内部过程控制；状态：生效；上位规范：[架构宪法](../../manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)
+>
+> 本文不定义产品行为、架构目标或公共契约；这些内容以 `manual/developer-guide/` 为准。
 
 ## 变更流程
 
@@ -17,7 +19,7 @@
 
 ## 从零进入一个模块
 
-1. 从[模块开发手册](module-development.md)选择对应章节；
+1. 从[模块开发手册](../../manual/developer-guide/zh-CN/module-development.md)选择对应章节；
 2. 写出上游、公开输入、本模块处理、公开输出和下游；
 3. 从模块公开门面和 contract 阅读代码，不先从最长的实现文件开始；
 4. 找到现有协议测试，确认当前已经承诺的行为；
@@ -68,12 +70,12 @@ API / Worker / 前端适配
 
 ## 端点实现：状态码与包装键选择
 
-实现 HTTP 端点前，先查阅 [contracts.md](contracts.md)「成功与错误」与「HTTP 语义」两节确定：
+实现 HTTP 端点前，先查阅[公共契约](../../manual/developer-guide/zh-CN/contracts.md)的「成功与错误」与「HTTP 语义」两节确定：
 
 1. **成功响应包装键**：使用一级命名键（`{project}` / `{items, total}` / `{ok, ...}`），禁止 `{data, meta}` 通用包装；列表加分页统一用 `{items, total}` 或 `{items, next_cursor}` 二键。
-2. **状态码**：按 [contracts.md](contracts.md) 状态码表选择，重点区分 **400（业务内容校验）vs 422（请求体结构/语义不可处理）**。
+2. **状态码**：按[公共契约](../../manual/developer-guide/zh-CN/contracts.md)状态码表选择，重点区分 **400（业务内容校验）vs 422（请求体结构/语义不可处理）**。
 3. **错误信封**：使用 `error_envelope(code=..., message_key=..., ...)` 构造（`iesplan/core/errors.py` 权威源），新码须登记到 `NEW_DIAG_CODES`。禁止手工拼 `{"error": {...}}` 字面量。
-4. **测试覆盖**：受影响测试全绿 + 协议基线 [`test_protocol_baseline.py`](../../../backend/tests/test_protocol_baseline.py) 通过（C4 锁定 8 字段集与包装键）。
+4. **测试覆盖**：受影响测试全绿 + 协议基线 [`test_protocol_baseline.py`](../../backend/tests/test_protocol_baseline.py) 通过（C4 锁定 8 字段集与包装键）。
 
 C4 协议基线的 AST 门禁禁止同一端点出现裸对象/包装对象两版并存；新增端点必须维持一端点一形状。
 
@@ -92,7 +94,7 @@ C4 协议基线的 AST 门禁禁止同一端点出现裸对象/包装对象两�
 - 设备方程解析、runtime 和业务服务没有隐式单位换算；
 - runtime 不按设备、generator 或 solver 名称复制业务分支。
 
-现行门禁测试在 [`backend/tests/test_architecture_gates.py`](../../../backend/tests/test_architecture_gates.py)（已实现 core 反向依赖、跨模块私有导入、API-ORM 三条；其余 9 条待后续批次补齐）。
+现行门禁测试在 [`backend/tests/test_architecture_gates.py`](../../backend/tests/test_architecture_gates.py)（已实现 core 反向依赖、跨模块私有导入、API-ORM 三条；其余 9 条待后续批次补齐）。
 
 ## 完成定义
 
@@ -134,7 +136,7 @@ C4 协议基线的 AST 门禁禁止同一端点出现裸对象/包装对象两�
 | 功能负责人 | 写清当前 GUI 流程、失败处理与限制 | 使用者指南、更新日志 |
 | 领域或架构负责人 | 维护稳定边界、公共契约和扩展蓝图 | 开发者指南；必要时先提交 ADR |
 | Review 负责人 | 记录审查对象、基线、证据和结论 | `docs/reviews/` |
-| 发布负责人 | 统一产品版本，整理倒序历史、Roadmap 和发布门禁 | 更新日志、版本化与发布章节 |
+| 发布负责人 | 统一产品版本，整理倒序历史、Roadmap 和发布门禁 | 更新日志与内部发布流程 |
 
 同一人可以兼任多个角色，但每项变更必须明确谁负责同步正式文档。Review 中已经成熟的结论由对应领域负责人提炼进入开发者指南，原文不直接变成实现规格。
 

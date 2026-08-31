@@ -1,6 +1,6 @@
 # 计算生成与求解
 
-> 文档状态：生效目标蓝图；目标代码边界：`backend/iesplan/computation/`；现有 `backend/iesplan/engines/` 按 Roadmap 迁移。
+> 文档状态：生效目标蓝图；目标代码边界：`backend/iesplan/computation/`。
 
 ## 作用
 

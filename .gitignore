@@ -21,8 +21,16 @@ dist/
 frontend/public/help/manifest.json
 frontend/tsconfig.tsbuildinfo
 
-# 工作痕迹(不入库,仅本机保留)
-docs/
+# 工作痕迹(不入库,仅本机保留)。文档治理入口、内部交接与显式归档例外需要随仓库传播。
+docs/*
+!docs/README.md
+!docs/development/
+!docs/development/*.md
+!docs/archive/
+docs/archive/*
+!docs/archive/README.md
+!docs/archive/development/
+!docs/archive/development/*.md
 CLAUDE.md
 AGENTS.md
 
