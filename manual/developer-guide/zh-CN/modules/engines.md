@@ -4,18 +4,21 @@
 
 ## 作用
 
-计算模块把“一个已经证明合法的业务系统”交给具体求解器，并把原始求解输出恢复为统一结果。它不是一个同时理解项目、拼数学模型、运行进程和解释结果的“大引擎”，而是四个严格分开的环节：
+计算模块把“一个已经证明合法的业务系统”交给具体求解器，并把原始求解输出恢复为统一结果。它不是一个同时理解项目、拼数学模型、运行进程和解释结果的“大引擎”，而是把序列物化与生成、执行、结果适配边界分开：
 
 ```text
-ValidatedAssemblyArtifact
+ValidatedAssemblyArtifact + CalculationConfig
           ↓
-GeneratorProvider ─→ Solver Bundle
-                         ↓
-                   SolverRuntime
-                         ↓
-ExecutionReceipt + 原始输出
+constant/data_repeat/data_predict 序列物化
           ↓
-ResultAdapter ─→ ComputeResult
+阶段一：GeneratorProvider → Solver Bundle → SolverRuntime
+          ↓
+data_predict > 1 ? ─否→ ResultAdapter → ComputeResult
+          │是
+          ↓
+阶段二：以上次结果为初始值，重建预测目标与计算模型并迭代求解
+          ↓
+ResultAdapter → ComputeResult
 ```
 
 这条边界使新增求解器不必修改项目、API 或 Worker 的业务逻辑，也使运行外部进程的安全规则不依赖某个算法实现。
@@ -24,6 +27,7 @@ ResultAdapter ─→ ComputeResult
 
 | 子模块 | 输入 | 输出 | 不负责 |
 |---|---|---|---|
+| 序列物化 | 装配中的来源声明和固定输入、项目基线、计算配置 | 全周期连续序列与回执 | 改写装配、项目模型或数据版本 |
 | [生成器](generators.md) | 已校验装配、固定资源、生成选项 | Solver Bundle | 启动求解器、读取数据库、提交结果 |
 | [求解运行时](solver-runtime.md) | Solver Bundle、取消与资源上下文 | ExecutionReceipt、原始输出 | 解释设备、构造数学问题、财务分析 |
 | Result Adapter | Bundle、回执、声明输出 | `ComputeResult` | 重试、重新求解、读取当前项目 |
@@ -36,9 +40,10 @@ ResultAdapter ─→ ComputeResult
 计算入口只接受：
 
 - 由装配模块签发的 `ValidatedAssemblyArtifact`；
-- 与装配回执一致的内容寻址资源；
+- 与装配回执一致的预定义来源声明和内容寻址输入资源；
+- 预测目标类型及其所需时间、自回归和外生协变量绑定；
 - 精确 generator、solver、executor 和 result adapter 版本；
-- 固定生成选项、求解选项、随机种子和资源上限；
+- 固定预测算法与参数、生成选项、求解选项、收敛容差、最大迭代数、随机种子和资源上限；
 - Worker 提供的 attempt、取消、租约和证据写入上下文。
 
 不接受项目草稿、前端表单、ORM 对象、未经校验的 YAML/CSV、宿主机路径和动态函数入口。
@@ -57,6 +62,16 @@ ResultAdapter ─→ ComputeResult
 进程退出码为零不等于存在可推荐方案；不可行也不是内部异常。结果适配器必须完整映射这些语义。
 
 ## 开发思路
+
+### 先物化序列并决定求解流程
+
+计算阶段按同一快照展开 `constant`、重复 `data_repeat`，并按目标类型和计算配置独立生成各 `data_predict`。然后用这些序列完成一次完整的阶段一求解。
+
+- `data_predict` 数量为零或一：阶段一结果直接作为权威结果；
+- `data_predict` 数量大于一：用阶段一结果作为初始值，启动阶段二；
+- `constant` 和 `data_repeat` 不计入触发数量。
+
+阶段二在每次迭代中重建完整预测目标和计算模型，再生成 Bundle 并求解，直到达到计算配置的收敛容差或最大迭代数。阶段一对阶段二只提供初始值；阶段二仍从固定装配、输入和配置重建模型，不依赖阶段一产物才能表达正确模型；阶段一只缩短其寻优路径。阶段二的最终结果是权威结果。
 
 ### 先冻结业务输入
 

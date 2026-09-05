@@ -3,7 +3,7 @@
 > 契约标识：`ies.assembly`；目标 schema：`2.0.0`；推荐文件名：`<assembly-id>.assembly.yaml`。
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
 
-装配 YAML 是系统模型与规划意图的完整、可审查文本：它固定项目计算基线，实例化精确设备内容，绑定已完成预备的全周期 `step` 序列，连接可连接的真实 interfaces，区分存量与新增设备，并给出规划配置与公共财务配置。它不包含 generator、solver、计算精度或求解选项；这些计算配置在规范装配产物转换为计算包时固定。
+装配 YAML 是系统模型与规划意图的完整、可审查文本：它固定项目计算基线，实例化精确设备内容，绑定已校验的预定义来源声明、规范数据和不可变输入引用，连接可连接的真实 interfaces，区分存量与新增设备，并给出规划配置与公共财务配置。它不包含物化后的未来序列、generator、solver、预测算法、计算精度或求解选项；这些计算事项在规范装配产物转换为计算包时固定。
 
 ## 最小结构示例
 
@@ -107,7 +107,7 @@ planning:
 
 - `asset_origin` 必须是 `existing` 或 `new`；不得从设备类型、创建时间或是否填写成本推断；
 - `properties` 只能覆盖设备定义已声明且允许实例化的非时变技术常量，并保留明确单位；不能新增字段，也不能放价格、成本或计算精度；
-- `predefined_interfaces` 只能绑定设备中 `type: predefined` 的 interface；`constant/data_repeat/data_predict` 均必须先完成序列预备，并绑定项目模型实例中已经替换好的计算用序列文件；
+- `predefined_interfaces` 只能绑定设备中 `type: predefined` 的 interface；`constant/data_repeat/data_predict` 均固定来源声明及所需的不可变输入引用，不得在装配前替换为物化后的未来序列；
 - `in/out/bidirectional` 通过 connections 取得外部交互；`blind` 既不能连接，也不能绑定预定义数据；
 - 每项覆盖、绑定和身份均进入规范装配摘要与校验回执。
 
@@ -159,7 +159,7 @@ source:
 
 `relative_file` 只用于作者包内，不能逃逸包目录。校验器读取后计算摘要，规范装配统一改写为内容寻址对象。网络 URL、宿主机绝对路径、临时上传路径和存储 provider 私有路径不得进入可执行快照。
 
-CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`source_mode`、项目基线摘要、分辨率、点数和有效区间与目标 predefined interface 一致。装配只绑定已经序列预备、覆盖全周期且 `step` 连续的计算用数据版本；原始周期模板、训练输入和预测输入不直接进入装配。
+CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`source_mode`、分辨率、输入 `step` 和有效区间与目标 predefined interface 一致。装配绑定经校验和规范化的完整年度序列、训练目标、历史输入与未来已知协变量的内容寻址引用。装配必须确认每个输入序列至少覆盖一个完整年度，点数为年度点数的正整数倍，并且所有序列与项目基线分辨率一致、彼此点数相同、`step` 一一对应。任一不符合时必须阻断，不重采样、插值、聚合、融合或补齐。项目基线摘要、物化后点数和全周期连续 `step` 在计算阶段产物与回执中固定。
 
 ## 规划配置与公共财务配置
 
@@ -176,7 +176,7 @@ CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`so
 
 ## 计算包生成边界
 
-装配 YAML 不包含 `calculation`。规范 `ValidatedAssemblyArtifact` 与独立计算配置一起进入计算包生成用例。计算配置固定 mode、计算精度、离散化、generator、solver、容差、时间限制、选项、随机种子和输出选择，并在生成 Solver Bundle 前完成能力兼容校验。
+装配 YAML 不包含 `calculation`。规范 `ValidatedAssemblyArtifact` 与独立计算配置一起进入计算包生成用例。计算配置固定 mode、预测目标所用算法与参数、计算精度、离散化、generator、solver、阶段二适用时的收敛容差与最大迭代数、时间限制、选项、随机种子和输出选择，并在生成 Solver Bundle 前完成能力兼容校验。
 
 更换 generator、solver、精度或求解选项只会形成新的计算配置和 Solver Bundle，不改变装配文本及其摘要。
 

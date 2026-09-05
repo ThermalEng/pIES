@@ -57,6 +57,7 @@ interfaces:
       maximum: 60
     source:
       mode: data_predict
+      target_type: ambient_temperature
       data_ref: ambient_temperature_prediction
   unused_terminal:
     type: blind
@@ -129,7 +130,7 @@ properties:
 
 ## `interfaces`
 
-只有按项目计算基线展开的序列数据才能定义为 interface。常量若作为预定义序列输入，必须在序列预备时扩展为覆盖全周期连续 `step` 的常量序列。普通设备属性不能伪装成 interface。
+只有随计算 `step` 变化的序列数据才能定义为 interface。常量若作为预定义序列输入，在设备模型中只声明其来源值，计算阶段再扩展为覆盖全周期连续 `step` 的常量序列。普通设备属性不能伪装成 interface。
 
 每个 interface 至少定义稳定 ID、`carrier`、`unit`、`valid_range` 和接口 `type`。`type` 只有五种：
 
@@ -150,6 +151,7 @@ properties:
 - `valid_range` 约束每个时间点的数据有效区间，越界必须阻断，不能自动截断；
 - `in`、`out`、`bidirectional` 只能通过装配连接取得或提供序列，不能同时声明 `source`；
 - `predefined` 必须声明唯一 `source.mode`，且只能为 `constant`、`data_repeat`、`data_predict`；
+- `data_predict` 必须声明唯一 `source.target_type`；其他来源模式禁止该字段；
 - `blind` 禁止 `source` 和连接；其数值如被方程引用，只能由同一设备的声明式方程确定；无法确定时装配失败；
 - 设备数据 CSV 只绑定 `predefined` interface，不再绑定独立 `data_inputs`。
 
@@ -173,7 +175,7 @@ interfaces:
     valid_range: {minimum: 0, maximum: null}
     source:
       mode: data_repeat
-      data_ref: typical_day_load
+      data_ref: historical_year_load
 
   predicted_weather:
     type: predefined
@@ -182,10 +184,11 @@ interfaces:
     valid_range: {minimum: -50, maximum: 60}
     source:
       mode: data_predict
+      target_type: ambient_temperature
       data_ref: weather_prediction
 ```
 
-`constant`、`data_repeat` 和 `data_predict` 在装配前都必须按项目计算基线形成已校验、不可变的全周期连续 `step` 数据版本，并由项目模型实例改为引用该计算用序列文件。`constant` 直接展开，`data_repeat` 按周期确定性转换与重复，`data_predict` 由系统固定默认算法完成训练和预测；计算时不得访问在线服务或现场训练模型。
+`constant`、`data_repeat` 和 `data_predict` 在装配前只固定已校验的来源声明、规范数据和内容寻址引用，不生成或替换为未来全周期序列。计算阶段根据项目基线统一展开 `constant`、重复 `data_repeat` 并预测 `data_predict`。`data_predict.target_type` 表达预测目标的技术语义，由该目标类型声明允许的时间特征、自回归特征和外生协变量；具体预测算法与参数属于计算配置，不写入设备文件。
 
 ## `equations`
 
@@ -254,7 +257,7 @@ equations:
 - 文件级：编码、安全 YAML、重复键、schema 和未知字段；
 - 类型级：标量、mapping、sequence、枚举以及五种 interface type；
 - 技术语义：property 单位和值域、carrier、source/interface 组合与方程；
-- 数据文件：`data_repeat`/`data_predict` 所需原始文件与三类预定义来源生成的计算用文件、列、单位、周期、分辨率、连续 `step` 和摘要；
+- 数据文件：`data_repeat`/`data_predict` 所需原始文件、预测目标类型及其要求的输入引用、列、单位、周期、分辨率、`step` 和摘要；
 - 身份：基础设备 ID 合法，项目内最终 `_N` 编号可唯一分配。
 
 失败诊断必须包含已登记诊断码、消息键、字段路径；能定位 YAML 时还应包含行列，并按问题提供 expected/actual。一次请求应尽可能聚合互不依赖的错误和非法类型，不能只返回首个问题，也不能把失败解释为空模型。
