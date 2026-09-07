@@ -61,9 +61,9 @@
 | datasets | 上传、质量、版本、完整年度与序列对齐校验、表示规范化、对象引用与项目绑定 | 经校验的不可变数据版本 |
 | modeling | 项目设备、properties、interfaces、连接、存量/新增身份、revision 与即时校验 | 项目图修订 |
 | planning | 目标函数/权重、规划变量、上下界和规划/系统约束 | 规划配置 revision/诊断 |
-| finance | 规划与财务计算共同使用的设备单价、O&M、能源价格、税率和资金时间成本 | 财务配置 revision/诊断 |
+| finance | `FinanceProfile`/`FinanceOverrides` 的解析校验与确定性合并，签发不可变 `EffectiveFinanceConfig`（三摘要） | `EffectiveFinanceConfig` 摘要与诊断 |
 | calculation | mode、预测算法与参数、generator、solver、精度、容差、选项、种子和输出选择 | 计算配置 revision/诊断 |
-| validation | 汇总项目基线、模型、规范数据与固定输入引用、规划配置和公共财务配置 | 项目校验报告 |
+| validation | 汇总项目基线、模型、规范数据与固定输入引用、规划配置和 `EffectiveFinanceConfig` | 项目校验报告 |
 | tasks | 快照、幂等、任务、取消和重试 | 任务受理与状态 |
 | results | 证据、评估、候选选择与历史解释 | 固定来源的结果视图 |
 | exports | 报告/项目包任务、对象引用与下载授权 | 导出资源 |

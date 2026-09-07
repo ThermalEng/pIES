@@ -1,20 +1,24 @@
 # 文件格式标准
 
-> 文档状态：生效目标契约；设备模型、设备数据与装配目标 schema 为 `2.0.0`，Solver Bundle 目标 schema 为 `1.0.0`。
+> 文档状态：生效目标契约；设备模型、设备数据与装配目标 schema 为 `2.0.0`，财务三件套（`FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig`）目标 schema 为 `1.0.0`，Solver Bundle 目标 schema 为 `1.0.0`。本章规定插件开发和离线交换必须共同遵守的文件边界；财务三件套的字段级定义见[财务 YAML 契约](formats/finance-yaml.md)。
 
-本章规定插件开发和离线交换必须共同遵守的文件边界。目标不是把内部对象“导出成差不多能读的文件”，而是让开发者只看本章及对应格式页，就能手写、校验和交付一个不依赖当前代码目录的输入包。
+目标不是把内部对象“导出成差不多能读的文件”，而是让开发者只看本章及对应格式页，就能手写、校验和交付一个不依赖当前代码目录的输入包。
 
 任何目录 YAML、CSV 和装配对象都不因文件扩展名自动等同于本标准；只有通过对应版本的完整校验与规范化，才可声明兼容。
 
-## 四种公共计算文件契约
+## 公共计算与财务文件契约
 
-| 契约 | 文件或目录 | 作用 | 直接消费者 |
+| 契约 | 文件 | 作用 | 直接消费者 |
 |---|---|---|---|
 | [设备模型 YAML](formats/device-model-yaml.md) | `*.device.yaml` | 描述设备身份、非时变技术常量、序列接口和声明式方程 | 设备目录、GUI schema、装配与技术模型校验 |
 | [设备数据 CSV](formats/device-data-csv.md) | `*.data.csv` | 提供带 step、采样间隔、单位和来源语义的设备序列数据 | 数据导入器、装配校验、计算阶段序列物化 |
-| [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、规划配置和公共财务配置 | 装配校验器 |
+| [地区 FinanceProfile YAML](formats/finance-yaml.md) | `*.finance-profile.yaml` / `finance_profile.yaml` | 注册地区财务基准：`region`/`currency`/`base_year`/`price_basis`/`cost_method`、按 `finance_type` 的时间口径成本分量、能源购售价格 | 财务合并器与装配校验 |
+| [项目 FinanceOverrides YAML](formats/finance-yaml.md) | `*.finance-overrides.yaml` / `finance_overrides.yaml` | 稀疏原子覆盖：精确引用 `FinanceProfile {id, content_sha256}`，只替换既有 `finance_type` 分量与 constant 能源价格的金额 | 财务合并器 |
+| [有效财务快照](formats/finance-yaml.md) | `*.effective-finance.yaml` / `effective_finance.yaml` | 合并器确定性产物：`profile_id` / `profile_sha256` / `overrides_sha256` / `content_sha256` 与合并后的完整 `finance_types` / `energy_prices` | 装配校验、计算生成与求解 |
+| [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、指向有效财务快照的精确引用、`finance_binding`、`tariff_bindings`、规划配置 | 装配校验器 |
 | [Solver Bundle](formats/solver-bundle.md) | 一个目录或不可变归档 | 固定求解器输入文件、受控命令、预期输出和结果适配器 | 求解运行时 |
-前三种格式允许人工编写。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
+
+人工 authoring：设备模型 YAML、设备数据 CSV、`FinanceProfile`、`FinanceOverrides` 与装配 YAML 允许人工编写。`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，不能人工 authoring（导入时连同精确 Profile 与 Overrides 重新合并验证）。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
 
 ## 扩展交付契约
 
@@ -23,24 +27,22 @@
 ## 从手写文件到结果
 
 ```text
-设备模型 YAML ───────────────┐
-设备数据 CSV → 校验/规范化 ───┼─→ 装配 YAML ─→ 校验与规范化 ─→ ValidatedAssemblyArtifact
-项目实例/规划配置/财务配置 ──┘                          │
-                                        CalculationConfig ─┤
-                                                            ↓
-                                        预定义序列物化 → GeneratorProvider
-                                                      │
-                                                      ↓
-                   Solver Bundle = 输入文件 + 受控命令 + 输出声明 + ResultAdapter ID
-                                                      │
-                                                      ↓
-                                            SolverRuntime 执行命令
-                                                      │
-                                                      ↓
-                                  ExecutionReceipt + 原始输出 ─→ ComputeResult
+地区 FinanceProfile（人工 authoring，注册地区财务基准）
+项目 FinanceOverrides（人工 authoring，精确引用 Profile 摘要）
+        │ 两者并列
+        ▼
+merger（确定性合并 + 完整校验）──→ EffectiveFinanceConfig（不可人工 authoring，三摘要）
+                                          │ 只消费该不可变快照
+                                          ▼
+设备模型 YAML / 设备数据 CSV / 规划配置 → 校验与规范化 → 装配 YAML ──→ ValidatedAssemblyArtifact
+                                                          │             │
+                                          assembly.finance │精确引用     ▼
+                                          （摘要+血缘，不内联）    物化序列 → GeneratorProvider → Solver Bundle
+                                                          ▼
+                                          SolverRuntime 执行 → ExecutionReceipt → ComputeResult
 ```
 
-装配 YAML 只表达业务装配、规划意图和公共财务参数，不包含 generator、solver、精度、算法选项、shell、可执行文件路径或 Python 模块路径。生成器只接受通过校验的规范装配产物和独立计算配置；运行时只接受 Solver Bundle，不再解释设备、项目或装配规则。
+装配 YAML 只表达业务装配、规划意图、指向有效财务快照的精确引用与财务绑定，不内联完整财务配置，也不包含 generator、solver、精度、算法选项、shell、可执行文件路径或 Python 模块路径。生成器只接受通过校验的规范装配产物和独立计算配置；运行时只接受 Solver Bundle，不再解释设备、项目或装配规则。计算只消费不可变 `EffectiveFinanceConfig`，不运行期继承 Profile、不读取最新地区价格、不静默默认值。
 
 ## 通用书写规则
 
@@ -49,7 +51,7 @@
 - UTF-8 编码；规范输出使用 LF 换行；
 - ID 使用 ASCII 小写命名空间字符串，例如 `acme.device.pv`；局部 ID 使用 `lower_snake_case` 或短横线形式，但同一文件内保持一致；
 - `schema_version`、插件版本和依赖版本使用带引号的 `MAJOR.MINOR.PATCH`；单个设备没有语义版本；
-- 数值必须有限，禁止 `NaN`、`Infinity` 和依赖语言实现的特殊标量；
+- 数值必须有限，禁止 `NaN`、`Infinity` 和依赖语言实现的特殊标量；财务金额使用 `{value, unit}` 原子十进制定点字符串，禁止 `null` 与部分金额；
 - 计算序列以 `step` 表达，不携带时间戳和时区；每个原始输入序列必须至少覆盖一个完整年度，与项目基线及其他输入使用相同分辨率、点数和 `step` 对应关系；装配前不做重采样、插值、聚合或融合，全周期计算序列只在计算阶段生成；
 - 单位必须显式，且来自[公共契约](contracts.md)规定的单位词汇；
 - 文件路径一律相对所属包，禁止绝对路径、`..`、符号链接逃逸和隐式当前目录；
@@ -68,16 +70,22 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 
 消费者必须先识别 `schema`，再按自己声明支持的 `schema_version` 校验。不能识别的 MAJOR 必须拒绝；不得猜测字段、静默降级或把旧格式当作新格式继续执行。
 
+## 声明式配置与 YAML 边界
+
+人工编写、导入导出、进入快照的声明式配置统一使用 YAML：`device` / `assembly` / `finance`（`FinanceProfile`、`FinanceOverrides`、`EffectiveFinanceConfig`）/ `planning` / `calculation` 与项目包内配置均为 `.yaml`，按安全子集解析、规范化与确定性摘要生成，不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容。HTTP JSON DTO、数据库内部行/列存储、求解器专用输入和大结果可继续使用对应域的原生格式，不强制转 YAML。
+
 ## 人工编写与规范化
 
 人工文件可以保留注释和友好顺序。进入快照前，校验器必须生成唯一规范形态：
 
 1. 解析安全子集并拒绝重复键、非法标量和未知核心字段；
-2. 解析设备内容摘要、规范数据与预定义来源引用、规划配置和公共财务配置，确认技术方程与业务输入完整；
+2. 解析设备内容摘要、规范数据与预定义来源引用、规划配置、有效财务快照引用与财务绑定（`finance_binding`/`tariff_bindings`），确认技术方程与业务输入完整；
 3. 核对项目计算基线、完整年度点数，以及所有输入序列的分辨率、点数和 `step` 对应关系，将路径资源解析为内容寻址对象；
 4. 按格式规定排序并移除注释、别名和非语义空白；
 5. 对规范字节和每个外部资源计算 SHA-256；
 6. 生成包含校验器 ID、版本、依赖锁和零阻断诊断的校验回执。
+
+财务三件套的规范化与摘要遵循[财务 YAML 契约](formats/finance-yaml.md)的统一定义：解析 YAML → 移除派生摘要字段 → 生成唯一规范 YAML 字节 → `SHA-256(canonical_bytes)` → 写 `content_sha256`（`content_sha256` 不参与自身摘要）。`FinanceOverrides` 精确引用 `profile content_sha256`，`EffectiveFinanceConfig` 记录 `profile_sha256`/`overrides_sha256`/`content_sha256` 三摘要。
 
 只有“规范装配文本 + 摘要 + 校验回执”共同组成的 `ValidatedAssemblyArtifact` 可以进入生成器。文件被修改后必须重新校验，旧回执不得复用。
 

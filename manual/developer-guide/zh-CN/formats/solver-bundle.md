@@ -70,7 +70,7 @@ extensions: {}
 一个 GeneratorProvider 接收 `ValidatedAssemblyArtifact`、已校验的 `CalculationConfig` 和已固定的资源内容，负责：
 
 1. 验证装配摘要与校验回执，并验证计算配置中的 generator、solver、精度、算法选项、种子和输出请求能力匹配；
-2. 消费已规范化的设备方程贡献，并结合装配中的规划配置与公共财务配置建立变量、目标、约束和索引；
+2. 消费已规范化的设备方程贡献，并结合装配中的规划配置与 `EffectiveFinanceConfig` 建立变量、目标、约束和索引；
 3. 在唯一边界把业务单位转换为求解器内部单位；
 4. 生成 MPS、LP、JSON 或特定求解器需要的输入文件；
 5. 声明受控命令、资源限制、预期输出和结果适配器；

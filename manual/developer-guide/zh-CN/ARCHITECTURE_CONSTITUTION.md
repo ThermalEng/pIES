@@ -1,11 +1,11 @@
 # pIES 架构宪法
 
 > 状态：生效
-> 版本：1.9.0
+> 版本：1.10.0
 > 生效日期：2026-08-20
-> 最后更新：2026-09-05
+> 最后更新：2026-09-07
 > 适用范围：根目录入口、`manual/`、`docs/`、`backend/`、`frontend/`、数据库、对象存储、Worker、测试与后续插件
-> 依据：2026-08-20 架构专项审查、ADR-0001 至 ADR-0007，以及项目所有者对文档边界、设备纯技术语义和两阶段预测求解的明确要求
+> 依据：2026-08-20 架构专项审查、ADR-0001 至 ADR-0007、2026-09-07 地区 FinanceProfile 三件套规范
 
 ## 1. 文档效力
 
@@ -120,7 +120,7 @@ Solver Bundle
 - 设备 provider 注册和本模块注册表；
 - 设备目录 API 所需的领域数据。
 
-设备文件必须使用稳定 ID，并由统一 `schema_version`、规范内容摘要和校验回执固定语义；禁止为单个设备声明独立语义版本。设备文件禁止包含函数、包、模块、shell、可执行路径、价格、成本、税务、折旧或其他项目经济假设。不负责计算精度、算法选择、项目设备实例、画布布局或前端展示文案。
+设备文件必须使用稳定 ID，并由统一 `schema_version`、规范内容摘要和校验回执固定语义；禁止为单个设备声明独立语义版本。设备文件禁止包含函数、包、模块、shell、可执行路径、价格、成本、税务、折旧或其他项目经济假设。不负责计算精度、算法选择、项目设备实例、画布布局或前端展示文案。稳定 ID `device.id` 标识一个纯技术设备模型（`ies.device-model`），与独立财务类别 `finance_type` 和项目内的装配实例 `instance_id` 严格分离；技术模型不得新增 `finance_type`，也不恢复 `capabilities`、`energy_carriers`、`model_method`、`fidelity`、`stateful` 或设备版本等冗余字段。
 
 完成实例化并可进入项目正式模型目录、装配和计算链的设备模型，顶层只使用
 `schema`、`schema_version`、`device`、`properties`、`interfaces` 和 `equations`。
@@ -146,19 +146,19 @@ Solver Bundle
 - 受限方程语言、公共 AST 及技术贡献 contract 的版本兼容；
 - 方程输入、输出、单位、状态和 schema 校验。
 
-`modeling` 输出声明式变量、技术关系、状态、接口流和结果映射元数据；禁止加入价格/成本目标、启动求解器或返回求解器私有对象。`modeling` 可以消费 `devices` 的公开 descriptor/provider，禁止读取设备目录、价格文件或 profile 内部路径。不得以设备 ID 分支或私有命令映射替代设备文件中的公开技术方程。
+`modeling` 输出声明式变量、技术关系、状态、接口流和结果映射元数据；禁止加入价格/成本目标、启动求解器或返回求解器私有对象。`modeling` 可以消费 `devices` 的公开 descriptor/provider，禁止读取设备目录、价格文件或 profile 内部路径。不得以设备 ID 分支或私有命令映射替代设备文件中的公开技术方程。`finance_type` 不进入设备文件；装配实例通过显式 `finance_binding` 把财务 `finance_type` 的 `driver` 映射到本实例设备的 `property`/`interface` 并校验存在性与单位，禁止按技术模型名称、载体或模型 ID 猜测财务类别。
 
 ### 4.4 `assembly`：interface 网络装配与同步闸门
 
 负责：
 
-- 将不可变项目计算基线、已规范化并固定输入引用的项目模型实例、连接、规划配置和公共财务配置构造成 `AssemblySpec`；
-- 校验接口类型、载体、单位、有效区间、连接、预定义来源声明与不可变输入引用、方程、规划目标/约束、公共财务参数和整体可解性；
-- 校验每个项目设备实例明确区分 `existing` 与 `new`，以及规划和财务计算共同需要的设备单价、固定/可变 O&M、能源购售价格、税率和资金时间成本等公共财务参数；
+- 将不可变项目计算基线、已规范化并固定输入引用的项目模型实例、连接、规划配置和有效财务快照构造成 `AssemblySpec`；
+- 校验接口类型、载体、单位、有效区间、连接、预定义来源声明与不可变输入引用、方程、规划目标/约束、有效财务快照和整体可解性；
+- 校验每个项目设备实例明确区分 `existing` 与 `new`，以及规划和财务计算共同需要的有效财务快照；
 - 把相对资源解析为内容寻址引用并生成唯一规范装配文本；
 - 签发由规范文本、SHA-256 和校验回执组成的 `ValidatedAssemblyArtifact`。
 
-装配阶段证明业务单位与量纲兼容，但保留明确业务单位；不选择 generator、solver、计算精度或求解选项，不生成求解器文件和命令。存量设备的历史投资按沉没成本处理，不重复计入新增投资；新增设备投资必须绑定建设或容量决策。接口缺省类型只能规范化为 `blind`，禁止默认双向接口、`_direct_plan` 或任何绕过装配检查的计算路径。装配失败必须返回诊断并阻断后续计算包生成。
+装配阶段证明业务单位与量纲兼容，但保留明确业务单位；不选择 generator、solver、计算精度或求解选项，不生成求解器文件和命令。装配只消费装配前确定性合并并完整校验签发的不可变有效财务快照，并以精确内容引用固定之，不在装配内内联另一份完整财务配置。每个设备实例都必须显式声明财务绑定，统一判别联合：`type: costed`（绑定财务类别 `finance_type`，并把其 driver 映射到本实例设备真实存在的 `property`/`interface`，校验存在性、聚合与单位量纲）或 `type: none`（无设备成本贡献；可作为能源计费的纯计量点），禁止按设备名称、载体或技术模型 `device.id` 猜测经济相关性；能源购售计费通过独立计量绑定（`binding_id`）引用能源价格 `price_id` 并显式映射到方向明确的实例接口与聚合，价格条目的载体与购/售方向显式声明、不靠键名推断，计量点实例可以为 `type: none`。增量成本遵循明确原则：`new` 按新增驱动量计入固定建设与线性分量，`existing` 不计沉没历史建设成本和与决策无关的固定 O&M，但 `costed` 设备仍计算决策相关可变 O&M，能源购售只在独立计量绑定声明的计费点产生。接口缺省类型只能规范化为 `blind`，禁止默认双向接口、`_direct_plan` 或任何绕过装配检查的计算路径。装配失败必须返回诊断并阻断后续计算包生成。具体 schema、字段、公式与聚合枚举以下层装配与财务格式页为唯一正文。
 
 ### 4.5 `computation`：生成、执行与结果适配
 
@@ -183,7 +183,7 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 ### 4.6 `finance`：财务计算
 
-负责公共财务参数的领域结构与校验，以及现金流、税、折旧、融资、折现、NPV、IRR、LCOE、回收期和财务状态分类。财务配置只保存设备单价、运维成本、能源价格、税率和资金时间成本等规划与财务计算共同使用的参数，不保存目标函数、规划变量/约束、计算选项或仅在某一阶段生效的数据。规划生成器与结果财务计算消费同一不可变财务配置 revision；财务计算再结合规划结果输出不可变 `FinancialResult`。finance 不从设备技术定义读取价格。
+财务事实分层：地区 `FinanceProfile` 是已注册、内容寻址、可复用的地区财务基准（系统不得把它硬编码为全局默认，样例只作示范或注册 provider 的输入）；项目 `FinanceOverrides` 精确引用 Profile 的稳定 ID 与内容摘要，只对既有成本模型与能源价格做原子稀疏覆盖（不新增/删除财务类别与价格条目，不改变分量方法、单位、口径，也不改写价格条目的载体与购/售方向）；两者由确定性合并器合并并完整校验，生成不可变 `EffectiveFinanceConfig`（记录 `profile_sha256` / `overrides_sha256` / `content_sha256`）。它是装配、规划与财务计算唯一消费的财务快照：计算不运行期继承 Profile、不读取最新地区价格、不静默默认值；`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，导入时连同精确来源重新合并验证。成本函数为固定建设成本加多个独立线性分量，产出时间口径明确的分量（按年项与窗口合计项相加前须显式时间跨度换算）；Profile 不隐式定义一次性投资与运行期成本之间的转换（不做隐式年化，不隐含资本回收系数、利率或年限等值），此类显式规则若为规划所需，由规划配置契约版本化定义；总成本由规划配置显式组合，不静默相加。能源价格条目以稳定自定义 `price_id` 登记（不存在固定白名单价格键），每项显式声明 `carrier`（来自系统公共载体词汇，不复制封闭清单）与 `direction: purchase|sale`（会计方向，不靠 price_id 或键名推断）；价格为有限 Decimal、正/零/负均合法（零电价合法）；每个计量绑定先算 `raw_charge = Σ price×e`，`purchase` 分量 = +raw_charge（正购电价时为正，成本向）、`sale` 分量 = −raw_charge（正售电价出口时为负，收益以负值自动抵减），分量是已带符号的记账贡献、规划组合统一按加法书写不另加负号，负价自然反转该方向效果（负购电价使 purchase 分量为负、负售电价使 sale 分量为正）；支持常数价格与引用经校验完整年度序列的价格，序列元数据在装配时与项目基线核对，不匹配阻断且不重采样。财务类别（设备成本）与能源计费在装配中分别显式绑定：前者按实例判别联合绑定到实例及其技术接口，后者以独立计量绑定引用 `price_id` 并绑定方向明确的计费点实例/接口与聚合（计量点实例可为无设备成本的 `type: none`），两者都禁止按名称、载体或 `device.id` 猜测。财务契约范围不包含折旧、融资与后评价指标输入。Profile 可登记适用税目（税种、法定税率、适用对象）并声明金额含税口径；成本与价格计算直接使用文件金额，不执行计税或扣税运算；本契约不定义税后换算规则，不得扩展为税务引擎或造成重复加税。`backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 不得作为第二权威源或运行期兼容。finance 不从设备技术定义读取价格。
 
 `finance` 不依赖 HTTP、数据库或前端，不反向依赖应用服务。
 
@@ -413,10 +413,11 @@ feature/
 - HTTP JSON 使用 UTF-8、`application/json`；
 - 字段名统一 `snake_case`，前后端 contract 保持同名，不做隐式 camelCase 转换；
 - 每个长期保存的文档、快照、装配文件、证据和插件规格必须有 `schema_version`；
-- 插件文件还必须有独立 `schema` 标识；设备模型 YAML、设备数据 CSV、装配 YAML 和 Solver Bundle 分别使用 `ies.device-model`、`ies.device-data`、`ies.assembly`、`ies.solver-bundle`；
+- 插件文件还必须有独立 `schema` 标识；设备模型 YAML、设备数据 CSV、装配 YAML 和 Solver Bundle 分别使用 `ies.device-model`、`ies.device-data`、`ies.assembly`、`ies.solver-bundle`；财务三件套 `ies.finance-profile`/`ies.finance-overrides`/`ies.effective-finance-config` 的标识、版本与文件名由[财务 YAML 契约](formats/finance-yaml.md)登记，不在此枚举字段；
 - 枚举值使用小写 `snake_case`，枚举之外的值必须被拒绝；
 - 不允许以 `Record<string, unknown>` 代替已经稳定的公开 DTO；
 - 不允许同一字段有多种未标记形态，例如有时数字、有时对象、有时字符串。
+- 人工编写、导入导出、进入快照的声明式配置统一使用 YAML（含 `device`/`assembly`/`finance`/`planning`/`calculation` 与项目包内配置）；HTTP JSON DTO、数据库内部存储、求解器专用格式和大结果直接使用 YAML 之外的表示时，不强制统一为 YAML。
 
 ### 7.2 标识符
 
@@ -461,7 +462,7 @@ feature/
 - 原始输入序列必须覆盖至少一个完整年度，且点数是项目基线年度点数的正整数倍；同一项目计算的所有输入序列必须与项目基线使用相同分辨率，并且彼此点数相同、`step` 一一对应；装配前只校验和规范化表示，不做重采样、插值、聚合、融合或自动补齐，不符合时必须由用户在导入前修正；全周期 `constant/data_repeat/data_predict` 序列只在计算阶段按项目基线物化；
 - 数据库存储 `TIMESTAMPTZ`；
 - 持续时间使用明确单位或 ISO 8601 duration，不用含义不明的整数；
-- 计算序列必须声明项目基线摘要、分辨率、点数和单位；数组长度必须与基线推导点数一致。多场景与已有项目基线变更属于 `1.0.0` 之后的 Roadmap 能力。
+- 计算序列必须声明项目基线摘要、分辨率、点数和单位；数组长度必须与基线推导点数一致。多场景与已有项目基线变更属于后续公开契约能力，不能作为本格式的隐式例外。
 
 ### 7.6 集合与顺序
 
@@ -481,19 +482,19 @@ feature/
 
 ### 7.8 公共文件契约
 
-- 设备模型 YAML、设备数据 CSV 和装配 YAML 必须可按开发者指南直接手写，并使用统一 schema 校验；
-- 设备模型 YAML 只保留纯技术语义：稳定设备身份、非时变 properties、序列 interfaces 和声明式 equations；价格、成本和计算精度不得进入设备文件；
+- `device`/`assembly`/`finance`（财务三件套）/`planning`/`calculation` 与项目包内配置以 YAML 为权威书写形态并按安全子集解析/规范化/确定性摘要；CSV、HTTP JSON DTO、数据库内部行/列存储、求解器专用输入和大结果可继续使用对应域的原生格式，不强制转 YAML；不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容（细则见 [finance-yaml.md](formats/finance-yaml.md)）；
+- 设备模型 YAML 只保留纯技术语义：稳定设备身份、非时变 properties、序列 interfaces 和声明式 equations；价格、成本和计算精度不得进入设备文件；财务成本模型按 `finance_type` 在地区 `FinanceProfile` 中定义，装配消费其合并产物；
 - 设备序列接口只有 `in`、`out`、`bidirectional`、`predefined`、`blind` 五种；`predefined` 仅允许 `constant`、`data_repeat`、`data_predict`，`blind` 不连接且不接收预定义数据；
 - YAML 使用 YAML 1.2 安全子集，禁止自定义 tag、anchor、alias、合并键、重复键和任意对象构造；
 - 文件路径只能是所属包内规范相对路径，禁止绝对路径、`..`、符号链接逃逸和宿主机路径；
 - 未知核心字段默认拒绝；扩展只能放在命名空间化 `extensions`，不得改变核心语义或安全规则；
 - 装配 YAML 禁止 shell、command、executable、函数/模块路径、环境变量和凭证；
-- 原始装配通过结构、模型/数据、图/系统、规划/财务完整性四阶段校验后，才能生成 `ValidatedAssemblyArtifact`；
+- 原始装配通过结构、模型/数据、图/系统、规划/财务完整性四阶段校验后，才能生成 `ValidatedAssemblyArtifact`；财务成本仅由不可变 `EffectiveFinanceConfig` 参与校验，`FinanceOverrides` 仅作进入装配前的合并输入，不在装配中运行期继承；
 - Solver Bundle 只能由已注册 GeneratorProvider 生成，必须包含输入摘要、结构化命令、输出声明和 ResultAdapter 精确版本；
 - Bundle 命令以受信任 executor/executable ID 和参数数组表达，禁止 `sh -c`、管道、重定向、替换、通配和未声明网络；
-- 四种 schema 独立语义化版本；不能识别的 MAJOR 必须拒绝，不得猜测或静默降级。
+- 各 `schema` 独立语义化版本；不能识别的 MAJOR 必须拒绝，不得猜测或静默降级；`backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 不得作为第二权威源、静默回退或旧格式运行期兼容保留。
 
-具体字段和人工示例以[文件格式标准](file-formats.md)为唯一正式说明。
+具体字段、schema 版本和人工示例以[文件格式标准](file-formats.md)及[财务 YAML](formats/finance-yaml.md)、[装配 YAML](formats/assembly-yaml.md) 等格式页为唯一正式说明。
 
 ## 8. HTTP API 契约
 
