@@ -1,8 +1,10 @@
 """`ies.device-data` 2.0.0 连续 step 文件契约。
 
-原始输入可用不同采样间隔，但统一以非负整数 ``step`` 表达，不含时间戳、时区
-或 UTC 偏移。序列预备用例生成的计算文件还必须固定项目基线摘要，并使用从 0
-开始的连续 step。本模块只实现纯协议解析、设备内容绑定、数值校验和规范摘要。
+装配前输入(``prepared: false``)以非负整数 ``step`` 表达原始序列, 不含时间戳、
+时区或 UTC 偏移; 0.6.5 起只接受完整年度整数倍、与项目基线同分辨率的
+0..N-1 严格连续输入, 不做任何重采样/插值/聚合/补齐(计算阶段物化的
+``prepared: true`` 计算文件必须固定项目基线摘要并使用从 0 开始的连续 step,
+物化实现见后续版本)。本模块只实现纯协议解析、设备内容绑定、数值校验和规范摘要。
 """
 
 from __future__ import annotations
@@ -26,7 +28,6 @@ SCHEMA_VERSION = "2.0.0"
 STEP_COL = "step"
 SOURCE_MODES = ("constant", "data_repeat", "data_predict")
 RESOLUTION_VALUES = tuple(RESOLUTIONS)
-PERIOD_VALUES = ("day", "week", "year")
 MAX_ROWS_PER_DIAG = 5
 
 _REQUIRED_META_KEYS = (
@@ -147,18 +148,16 @@ def parse_metadata_v2(text_lines: list[str]) -> tuple[DeviceData2Meta, list[Diag
     source_mode = raw["source_mode"]
     period = raw.get("period") or None
     if source_mode == "data_repeat":
-        if period is None:
+        # 0.6.5 装配前口径：原始 data_repeat 必须是完整年度序列，不再接受
+        # day/week 模板（旧序列预备路径已退役，不做运行期展开/补齐）
+        if period != "year":
             diags.append(_diag(
-                "DATA-META-006", {"field": "period", "mode": source_mode}, field_name="period",
-            ))
-        elif period not in PERIOD_VALUES:
-            diags.append(_diag(
-                "DATA-META-004", {"field": "period", "value": period, "allowed": PERIOD_VALUES},
-                field_name="period",
+                "DATA-META-013", {"field": "period", "actual": period or "(缺失)",
+                                   "expected": "year"}, field_name="period",
             ))
     elif period is not None:
         diags.append(_diag(
-            "DATA-META-004", {"field": "period", "value": period, "allowed": "仅 data_repeat"},
+            "DATA-META-004", {"field": "period", "value": period, "allowed": "仅 data_repeat:year"},
             field_name="period",
         ))
 
@@ -318,13 +317,6 @@ def parse_data_file_v2(data: bytes) -> tuple[ParsedDataFile2 | None, list[Diagno
     return ParsedDataFile2(meta, normalized, rows, hashlib.sha256(data).hexdigest()), diags
 
 
-def periodic_rows(resolution: str, period: str) -> int | None:
-    if resolution not in RESOLUTIONS or period not in PERIOD_VALUES:
-        return None
-    per_day = 1440 // RESOLUTIONS[resolution][1]
-    return {"day": per_day, "week": per_day * 7, "year": per_day * 365}[period]
-
-
 @dataclass(frozen=True, slots=True)
 class DeviceData2Result:
     meta: DeviceData2Meta
@@ -376,6 +368,8 @@ def canonicalize_device_data_v2(
     expected_rows: int | None = None,
     expected_project_baseline_sha256: str | None = None,
     expected_data_ref: str | None = None,
+    baseline_resolution: str | None = None,
+    baseline_point_count: int | None = None,
 ) -> DeviceData2Result:
     parsed, diags = parse_data_file_v2(data)
     raw_sha = hashlib.sha256(data).hexdigest()
@@ -490,6 +484,32 @@ def canonicalize_device_data_v2(
                 "DATA-STEP-002", {"detail": "step 必须严格递增且不重复"},
                 field_name=STEP_COL, rows=bad_order,
             ))
+        # 0.6.5 口径：装配前原始序列必须 0..N-1 严格连续，不做插值/补齐；
+        # 且 resolution 与点数由传入的项目基线唯一推导（不得小于一个完整年度，
+        # 点数为年度点数的正整数倍）。data_repeat raw 亦要求完整年度序列，
+        # 不在此再按 day/week 推导（period 已在上游限定为 year）。
+        if not meta.prepared:
+            if steps != list(range(len(steps))):
+                diags.append(_diag(
+                    "DATA-STEP-005", {"expected": "0..N-1 连续递增",
+                                      "actual_start": steps[0] if steps else None,
+                                      "actual_end": steps[-1] if steps else None}, field_name=STEP_COL,
+                ))
+            if baseline_resolution is not None and meta.resolution != baseline_resolution:
+                diags.append(_diag(
+                    "DATA-META-004",
+                    {"field": "resolution", "value": meta.resolution, "allowed": baseline_resolution},
+                    field_name="resolution",
+                ))
+            if baseline_point_count is not None:
+                n = len(steps)
+                if n < baseline_point_count or n % baseline_point_count != 0:
+                    diags.append(_diag(
+                        "DATA-STEP-006",
+                        {"expected": f"{baseline_point_count} 的正整数倍(≥{baseline_point_count})",
+                         "actual": n, "baseline_point_count": baseline_point_count},
+                        field_name=STEP_COL,
+                    ))
         if meta.prepared:
             if steps != list(range(len(steps))):
                 diags.append(_diag(
@@ -500,13 +520,6 @@ def canonicalize_device_data_v2(
                 diags.append(_diag(
                     "DATA-STEP-004",
                     {"expected": meta.point_count, "actual": len(steps)},
-                    field_name=STEP_COL,
-                ))
-        elif meta.source_mode == "data_repeat" and meta.period is not None:
-            expected = periodic_rows(meta.resolution, meta.period)
-            if expected is not None and len(steps) != expected:
-                diags.append(_diag(
-                    "DATA-STEP-004", {"expected": expected, "actual": len(steps), "period": meta.period},
                     field_name=STEP_COL,
                 ))
         if expected_rows is not None and len(steps) != expected_rows:
@@ -585,7 +598,7 @@ def pending_from_result(result: DeviceData2Result) -> PendingDataFile | None:
 __all__ = [
     "SCHEMA_ID", "SCHEMA_VERSION", "STEP_COL", "DeviceData2Meta", "ParsedDataFile2",
     "DeviceData2Result", "PendingDataFile", "parse_metadata_v2", "serialize_metadata_v2",
-    "parse_data_file_v2", "periodic_rows", "canonical_table_bytes_v2",
+    "parse_data_file_v2", "canonical_table_bytes_v2",
     "canonicalize_device_data_v2", "build_data_quality_report_v2", "summary_json_v2",
     "pending_from_result",
 ]

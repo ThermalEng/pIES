@@ -132,6 +132,10 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-META-012": (
         "计算序列绑定的项目基线摘要不匹配: 声明 {declared}, 期望 {expected}"
     ),
+    "DATA-META-013": (
+        "data_repeat 原始输入必须声明 period=year(装配前只接受完整年度序列, "
+        "不再支持 day/week 模板): 实际 {actual}"
+    ),
     "DATA-DIAL-001": "CSV 方言不符合 ies.device-data 契约: {detail}",
     "DATA-COL-003": "CSV 列未在设备模型 predefined interfaces 中声明: {column}",
     "DATA-COL-004": "CSV 列重复: {column}",
@@ -146,6 +150,15 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-STEP-002": "原始文件 step 必须严格递增且不重复",
     "DATA-STEP-003": "计算文件 step 必须从 0 开始连续递增到 point_count-1",
     "DATA-STEP-004": "step 点数与期望不匹配: 期望 {expected}, 实际 {actual}",
+    # 0.6.5 装配前口径: 原始输入不允许重采样/插值/补齐, 必须自 0 连续
+    "DATA-STEP-005": (
+        "装配前原始输入 step 必须从 0 开始连续递增到 N-1, 不允许稀疏/缺口: "
+        "实际起始 {actual_start}, 实际截止 {actual_end}"
+    ),
+    "DATA-STEP-006": (
+        "装配前原始输入点数必须覆盖至少一个完整年度且为项目基线年度点数的"
+        "正整数倍: 基线年度点数 {baseline_point_count}, 实际 {actual}"
+    ),
     "DATA-TIME-001": "timeline 时间戳未严格递增或重复",
     "DATA-TIME-002": "timeline 时间戳与声明分辨率不对齐",
     "DATA-TIME-003": "同文件混用带 Z/带偏移/无偏移时间戳",
@@ -234,21 +247,11 @@ NEW_DIAG_CODES: dict[str, str] = {
     "PROJ-MDL-004": "最终设备 ID 无法通过身份校验: {final_id}(由基础 ID {base_device_id} 追加 _N 后缀后非法)",
     "PROJ-MDL-005": "候选模型校验失败, 保存被拒绝(不写项目模型目录、不登记清单、不分配编号)",
     "PROJ-MDL-006": "候选模型 YAML 解析失败: {detail}",
-    # 序列预备(0.6.5 事项 3): 基于项目计算基线的重采样/周期展开/预测/事务式发布。
-    # 语义分类固定为瞬时/强度量、区间累计量、状态/离散量三类(device-data-csv.md
-    # 「step 与序列预备规则」); 语义不明确必须阻断, 不允许回退到"全部均值"。
-    "DATA-PREP-001": "列物理量语义缺失或未知: {column}(必须显式声明 {allowed} 之一)",
-    "DATA-PREP-002": "重采样输入与目标网格无法对齐: {detail}",
-    "DATA-PREP-003": (
-        "周期模板行数 {actual} 与 period/resolution 推导值 {expected} 不一致"
-        "(period={period}, resolution={resolution})"
-    ),
-    "DATA-PREP-004": "周期展开点数 {actual} 与项目基线推导点数 {expected} 不一致",
-    "DATA-PREP-005": "data_predict 显式训练输入/训练目标/预测输入非法: {detail}",
-    "DATA-PREP-006": "预备输出校验失败: {detail}",
-    "DATA-PREP-007": "输入文件已是预备产物(prepared=true), 禁止重复预备: {detail}",
-    "PROJ-PREP-001": (
-        "序列预备失败, 发布被拒绝(不生成正式产物、不替换模型引用): {detail}"
+    # 0.6.5 装配前口径: 项目绑定输入序列必须彼此同分辨率、同点数且 step 一一对应
+    "PROJ-MDL-007": (
+        "装配前跨序列一致性校验失败: 输入序列 {data_ref}({device_id}) 与项目既有"
+        "装配输入不同分辨率、不同点数或 step 不对应(装配输入必须同分辨率、同点数、"
+        "step 一一对应)"
     ),
     # 用户自定义模型模板域(application/model_templates 用例, 切片 dm2)。
     # 草稿保存/发布共用同一校验门禁; 生命周期操作以标准错误信封返回。
@@ -333,6 +336,7 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-META-010": "meta_content_mismatch",
             "DATA-META-011": "meta_source_mode_mismatch",
             "DATA-META-012": "meta_project_baseline_mismatch",
+            "DATA-META-013": "meta_repeat_year_only",
             "DATA-DIAL-001": "dialect_invalid",
             "DATA-COL-003": "col_undeclared",
             "DATA-COL-004": "col_duplicate",
@@ -345,6 +349,8 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-STEP-002": "step_not_monotonic",
             "DATA-STEP-003": "step_not_contiguous",
             "DATA-STEP-004": "step_count_mismatch",
+            "DATA-STEP-005": "step_not_contiguous_raw",
+            "DATA-STEP-006": "step_count_baseline_multiple",
             "DATA-TIME-001": "time_not_monotonic",
             "DATA-TIME-002": "time_not_aligned",
             "DATA-TIME-003": "time_mixed_zone",
@@ -364,19 +370,7 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "PROJ-MDL-004": "model_identity_failed",
             "PROJ-MDL-005": "model_validation_failed",
             "PROJ-MDL-006": "model_yaml_parse",
-            "PROJ-PREP-001": "prep_rejected",
-        }.items()
-    },
-    **{
-        code: "ies.diag.data." + suffix
-        for code, suffix in {
-            "DATA-PREP-001": "prep_semantics_missing",
-            "DATA-PREP-002": "prep_grid_misaligned",
-            "DATA-PREP-003": "prep_period_row_count",
-            "DATA-PREP-004": "prep_expansion_mismatch",
-            "DATA-PREP-005": "prep_predict_input_invalid",
-            "DATA-PREP-006": "prep_output_invalid",
-            "DATA-PREP-007": "prep_already_prepared",
+            "PROJ-MDL-007": "input_alignment_failed",
         }.items()
     },
     **{
@@ -454,6 +448,7 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-META-010",
             "DATA-META-011",
             "DATA-META-012",
+            "DATA-META-013",
             "DATA-DIAL-001",
             "DATA-COL-003",
             "DATA-COL-004",
@@ -466,6 +461,8 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-STEP-002",
             "DATA-STEP-003",
             "DATA-STEP-004",
+            "DATA-STEP-005",
+            "DATA-STEP-006",
             "DATA-TIME-001",
             "DATA-TIME-002",
             "DATA-TIME-003",
@@ -483,19 +480,7 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     "PROJ-MDL-004": "ies.fix.proj.model_identity",
     "PROJ-MDL-005": "ies.fix.proj.model_validation",
     "PROJ-MDL-006": "ies.fix.proj.model_yaml",
-    "PROJ-PREP-001": "ies.fix.proj.prep_rejected",
-    **{
-        code: "ies.fix.data.prep_" + suffix
-        for code, suffix in {
-            "DATA-PREP-001": "semantics_declaration",
-            "DATA-PREP-002": "grid_alignment",
-            "DATA-PREP-003": "period_row_count",
-            "DATA-PREP-004": "expansion_mismatch",
-            "DATA-PREP-005": "predict_input",
-            "DATA-PREP-006": "output_validation",
-            "DATA-PREP-007": "already_prepared",
-        }.items()
-    },
+    "PROJ-MDL-007": "ies.fix.proj.input_alignment",
     **{
         code: "ies.fix.tpl.template"
         for code in ("TPL-MDL-001", "TPL-MDL-002")

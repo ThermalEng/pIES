@@ -1080,75 +1080,143 @@ def replace_project_model_refs(
     return new_draft
 
 
-def record_sequence_prep_refs(
-    db: Session,
-    user: User,
-    project_id: int,
-    expected_revision: int,
-    prepared: dict,
-) -> Draft:
-    """以序列预备产物清单推进草稿修订(0.6.5 事项 3 事务式发布)。
+# ---------------------------------------------------------------------------
+# 0.6.5 退役清理: 旧序列预备(sequence_prep)路径残留的一次性清理
+# ---------------------------------------------------------------------------
 
-    与 ``replace_project_model_refs`` 同构: 本函数只拥有项目草稿事实;
-    预备产物对象与模型实例引用由 application/sequence_prep 用例在同一
-    事务内原子写入/替换, 任一失败整体回滚(不发布部分状态、不替换引用)。
+#: 旧序列预备写入草稿内容的清单键(0.6.5 已退役; 新代码不读取该键)
+LEGACY_PREP_DRAFT_KEY: str = "prepared_sequences"
+#: 旧序列预备产物 owner 引用 purpose 前缀(已退役; 新代码不建立/不消费)
+LEGACY_PREP_PURPOSE_PREFIX: str = "sequence_prep:"
+#: 旧序列预备产物挂载的实体类型(与 project_model 最终 owner 一致)
+LEGACY_PREP_ENTITY_TYPE: str = "project_model"
 
-    ``prepared``: {model_id: {interface_id: {object_id, content_sha256,
-    receipt_sha256, source_mode}}}——写入新草稿的 ``prepared_sequences`` 键。
+
+def purge_legacy_sequence_prep(db: Session, *, dry_run: bool = True) -> dict[str, Any]:
+    """一次性清理 0.6.5 退役的旧序列预备路径残留(幂等, 只离线执行)。
+
+    旧 ``sequence_prep`` 路径(本版本已整体删除)会把装配前预备清单写入草稿
+    内容的 ``prepared_sequences`` 键, 并把预备产物以 ``sequence_prep:*``
+    目的挂到项目模型清单行。本函数只处理这些历史落盘痕迹; 退役后不存在任何
+    运行期读取(不双读、不兼容转发), 调用方只应通过离线 CLI 执行:
+
+    - 草稿: 扫描全部草稿内容对象; 当前草稿含键的移除该键, 按内容寻址推进
+      一条新草稿行(更新者取项目所有者, 与项目创建/修订链同语义并写审计);
+      历史(非当前)草稿与版本内容属不可变证据, 只计入回执、不做改写;
+      已软删项目的历史草稿不再推进修订(项目不可复活), 计入回执跳过清理;
+    - 对象引用: 解绑全部 ``sequence_prep:*`` 目的引用, 对象随后进入
+      orphaned 生命周期, 物理回收由存储运维 ``safe_cleanup`` 负责;
+    - ``dry_run=True`` 只扫描与报告, 不做任何写入(回执字段与执行路径一致)。
+
+    回执字段: ``schema/dry_run/generated_at/drafts_scanned/drafts_with_key/
+    current_drafts_cleaned/historical_drafts_with_key/deleted_project_drafts/
+    versions_scanned/versions_with_key/prep_refs_found/prep_refs_detached/
+    prep_object_ids/cleaned_projects``。幂等: 重复执行时当前草稿无键、无新
+    修订推进、无重复解绑(历史草稿/版本内容因不可变证据要求始终计入扫描计数)。
     """
-    ensure_access(db, user, project_id, "edit")
-    project = _get_project(db, project_id)
-    draft = _get_current_draft(db, project)
-    if draft.revision != expected_revision:
-        raise ConflictError(
-            "项目草稿已被其他操作更新",
-            params={"expected_revision": expected_revision, "current_revision": draft.revision},
-            location={"object_type": "draft", "object_id": str(draft.id)},
-        )
-    content = _load_draft_content(db, draft)
-    content["prepared_sequences"] = prepared
-    new_draft = _new_draft_row(db, project, content, user)
-    _audit(
-        db,
-        "project",
-        project.id,
-        "project.sequence_prep_published",
-        user.id,
-        after={"revision": new_draft.revision, "prepared_model_count": len(prepared)},
+    from iesplan.storage import ReferenceNotFoundError as StorageRefNotFound
+    from iesplan.storage import detach as storage_detach
+    from iesplan.storage import find_refs_by_entity_type
+
+    drafts = list(
+        db.execute(
+            select(Draft).order_by(Draft.project_id, Draft.revision)
+        ).scalars()
     )
-    db.flush()
-    return new_draft
+    versions = list(
+        db.execute(
+            select(ProjectVersion).order_by(ProjectVersion.project_id, ProjectVersion.version_no)
+        ).scalars()
+    )
 
-
-def load_draft_content(db: Session, draft: Draft) -> dict:
-    """读取草稿内容文档(公开只读门面; 供应用层合并预备产物清单)。"""
-    return _load_draft_content(db, draft)
-
-
-def load_latest_prepared_sequences(
-    db: Session, project: Project, *, before_revision: int
-) -> dict:
-    """取最近一份带 ``prepared_sequences`` 的历史草稿清单(回滚基准)。
-
-    从 ``before_revision - 1`` 向下遍历不可变草稿, 返回最新携带
-    ``prepared_sequences`` 键的清单(从未预备过返回空字典); 找不到内容对象
-    的历史草稿跳过(数据损坏时保持回滚可用)。
-    """
-    for revision in range(before_revision - 1, 0, -1):
-        draft = db.execute(
-            select(Draft)
-            .where(Draft.project_id == project.id, Draft.revision == revision)
-        ).scalar_one_or_none()
-        if draft is None:
-            continue
+    def _content_has_key(content_hash: str) -> bool:
         try:
+            content = _load_content_by_hash(db, content_hash)
+        except AppError:  # 历史对象缺失/损坏: 跳过(数据损坏不阻断清理)
+            return False
+        return content.get(LEGACY_PREP_DRAFT_KEY) is not None
+
+    dirty_drafts = [draft for draft in drafts if _content_has_key(draft.content_hash)]
+    current_dirty = [draft for draft in dirty_drafts if draft.is_current]
+    historical_dirty = [draft for draft in dirty_drafts if not draft.is_current]
+    versions_with_key = [version for version in versions if _content_has_key(version.content_hash)]
+
+    prep_refs = [
+        ref for ref in find_refs_by_entity_type(db, LEGACY_PREP_ENTITY_TYPE)
+        if str(ref.get("purpose") or "").startswith(LEGACY_PREP_PURPOSE_PREFIX)
+    ]
+
+    # 预分类(不分 dry/apply): 当前脏草稿按项目是否存活区分
+    # "可清理" = 项目存在且未软删(修订链继续, 推进新草稿行); "软删跳过" =
+    # 项目缺失或已软删(修订链冻结, 只解绑预备产物引用, 不复活项目草稿)。
+    def _alive(draft_id: int) -> bool:
+        row = db.get(Project, draft_id)
+        return row is not None and row.status != "deleted"
+
+    cleanable_current = [draft for draft in current_dirty if _alive(draft.project_id)]
+    deleted_current = [draft for draft in current_dirty if not _alive(draft.project_id)]
+    deleted_project_drafts = [draft.id for draft in deleted_current]
+
+    cleaned_projects: list[int] = []
+    detached: list[dict[str, Any]] = []
+    if not dry_run:
+        for draft in cleanable_current:
+            project = db.get(Project, draft.project_id)
             content = _load_draft_content(db, draft)
-        except AppError:  # pragma: no cover - 历史对象缺失/损坏: 跳过该 revision
-            continue
-        prepared = content.get("prepared_sequences")
-        if isinstance(prepared, dict):
-            return prepared
-    return {}
+            removed = content.pop(LEGACY_PREP_DRAFT_KEY, None)
+            owner = db.get(User, project.owner_id)
+            if owner is None:  # 项目所有者缺失: 数据损坏, 不静默改签
+                raise AppError(
+                    "项目所有者缺失(数据损坏)",
+                    code=SYS_STORE_CORRUPT,
+                    severity=SEVERITY_ERROR,
+                    message_key="ies.diag.store.corrupt",
+                    location={"object_type": "project", "object_id": project.id},
+                )
+            new_draft = _new_draft_row(db, project, content, owner)
+            _audit(
+                db,
+                "project",
+                project.id,
+                "project.sequence_prep_legacy_purged",
+                project.owner_id,
+                after={
+                    "revision": new_draft.revision,
+                    "removed_prepared_sequences": removed is not None,
+                    "schema": "ies.cleanup.sequence_prep@1.0.0",
+                },
+            )
+            cleaned_projects.append(project.id)
+        for ref in prep_refs:
+            try:
+                owner_id = int(ref["ref_entity_id"])
+            except (TypeError, ValueError):  # 非法 owner 标识不属本清理(防御)
+                continue
+            try:
+                storage_detach(
+                    db, ref["object_id"], ref["ref_type"], owner_id,
+                    ref_entity_type=ref["ref_entity_type"],
+                )
+            except StorageRefNotFound:  # 引用已被其他路径解绑: 幂等跳过
+                continue
+            detached.append(ref)
+    receipt = {
+        "schema": "ies.cleanup.sequence_prep@1.0.0",
+        "dry_run": dry_run,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "drafts_scanned": len(drafts),
+        "drafts_with_key": len(dirty_drafts),
+        "current_drafts_cleaned": len(cleanable_current),
+        "deleted_project_drafts": sorted(deleted_project_drafts),
+        "historical_drafts_with_key": len(historical_dirty),
+        "versions_scanned": len(versions),
+        "versions_with_key": len(versions_with_key),
+        "prep_refs_found": len(prep_refs),
+        "prep_refs_detached": len(detached),
+        "prep_object_ids": sorted({str(ref["object_id"]) for ref in detached}),
+        "cleaned_projects": sorted(cleaned_projects),
+    }
+    return receipt
 
 
 def _get_current_draft(db: Session, project: Project) -> Draft:

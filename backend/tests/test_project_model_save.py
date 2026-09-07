@@ -198,25 +198,40 @@ interfaces:
 equations: {variables: {}, relations: []}
 """
 
+#: 与 DATA_MODEL_YAML 同形态的第二设备(跨序列一致性测试用)
+DATA_MODEL2_YAML = DATA_MODEL_YAML.replace("acme.device.profile_load", "acme.device.pv_gen")
 
-def _data_csv() -> bytes:
+
+def _data_csv(
+    *,
+    model_yaml: str = DATA_MODEL_YAML,
+    device_id: str = "acme.device.profile_load",
+    resolution: str = "1h",
+    period: str = "year",
+    n: int = 8760,
+) -> bytes:
+    """0.6.5 装配前口径合法的配套数据文件(默认: 1h 完整普通年 8760 行)。
+
+    项目测试基线统一为 1h/非闰年(见 _make_owner), 故 8760 = 一个完整年度;
+    值域在 electric_demand 0..1000 内取小波值, 不触发 DATA-VAL-001。
+    """
     from iesplan.core.yamlmini import load as yaml_load
     from iesplan.devices import content_sha256, parse_device_model_v2
 
-    parsed = parse_device_model_v2(yaml_load(DATA_MODEL_YAML))
+    parsed = parse_device_model_v2(yaml_load(model_yaml))
     assert parsed.document is not None
     lines = [
         "# schema: ies.device-data",
         "# schema_version: 2.0.0",
         "# dataset_id: test.load.profile",
-        "# device_id: acme.device.profile_load",
+        f"# device_id: {device_id}",
         f"# device_content_sha256: {content_sha256(parsed.document)}",
         "# source_mode: data_repeat",
-        "# resolution: 1h",
-        "# period: day",
+        f"# resolution: {resolution}",
+        f"# period: {period}",
         "# unit.electric_demand: kW",
         "step,electric_demand",
-        *[f"{step},{10 + step}" for step in range(24)],
+        *[f"{i},{20 + (i % 40)}" for i in range(n)],
     ]
     return ("\n".join(lines) + "\n").encode()
 
@@ -280,7 +295,9 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
 
 _token_ns_map: dict[str, str] = {}
 
-def _make_owner(client: TestClient, db: Session, name: str) -> tuple[dict, int]:
+def _make_owner(
+    client: TestClient, db: Session, name: str, *, leap: bool = False
+) -> tuple[dict, int]:
     user = make_user(db, name)
     headers = login_headers(client, user)
     token = headers.get("Authorization", "").replace("Bearer ", "")
@@ -291,7 +308,7 @@ def _make_owner(client: TestClient, db: Session, name: str) -> tuple[dict, int]:
         json={
             "name": f"{name} 项目",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_leap_year": leap,
             "baseline_scenario_mode": "single",
         },
         headers=headers,
@@ -309,11 +326,14 @@ def _headers_for(client: TestClient, db: Session, username: str) -> dict:
     return headers
 
 
-def _upload_temp(client: TestClient, pid: int, headers: dict, data_ref: str = "load_data") -> dict:
+def _upload_temp(
+    client: TestClient, pid: int, headers: dict, data_ref: str = "load_data",
+    content: bytes | None = None,
+) -> dict:
     resp = client.post(
         f"/api/projects/{pid}/models/temp-files",
         data={"data_ref": data_ref},
-        files={"file": ("load.csv", _data_csv(), "text/csv")},
+        files={"file": ("load.csv", content if content is not None else _data_csv(), "text/csv")},
         headers=headers,
     )
     assert resp.status_code == 201, resp.text
@@ -623,9 +643,8 @@ def test_save_with_temp_data_file_finalize(client: TestClient, db_session: Sessi
     locked = object_info(db_session, int(data_refs[0]["object_id"]))
     assert locked["status"] == "stored"
     assert locked["ref_count"] == 1
-    from iesplan.storage import get_object
-    from iesplan.devices import content_sha256
     from iesplan.devices.datacontract2 import parse_data_file_v2
+    from iesplan.storage import get_object
 
     parsed, _diags = parse_data_file_v2(get_object(db_session, int(data_refs[0]["object_id"])))
     assert parsed is not None
@@ -938,6 +957,162 @@ def test_reconcile_stale_temp_files(client: TestClient, db_session: Session) -> 
 
 
 # ---------------------------------------------------------------------------
+# 5b. 0.6.5 装配前口径: 单文件与项目基线对齐 + 装配前跨序列一致性(绑定门禁)
+# ---------------------------------------------------------------------------
+
+
+def _ref_from_upload(up: dict, data_ref: str = "load_data") -> dict:
+    return {
+        "data_ref": data_ref,
+        "upload_id": str(up["upload_id"]),
+        "object_id": up["temp_file"]["object_id"],
+        "sha256": up["temp_file"]["sha256"],
+    }
+
+
+def _save_data_model(
+    client: TestClient, pid: int, headers: dict, model_yaml: str, up: dict
+):
+    return _save(client, pid, headers, model_yaml, data_files=[_ref_from_upload(up)])
+
+
+def test_save_rejects_legacy_day_template(client: TestClient, db_session: Session) -> None:
+    """day 模板(旧序列预备时代)与少于完整年度的输入在绑定处被结构化拒绝。"""
+    headers, pid = _make_owner(client, db_session, "sv_cad")
+    up_day = _upload_temp(client, pid, headers, content=_data_csv(period="day", n=24))
+    resp = client.post(
+        f"/api/projects/{pid}/models/validate",
+        json={"model_yaml": DATA_MODEL_YAML, "data_files": [_ref_from_upload(up_day)]},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    codes = [d["code"] for d in resp.json()["diagnostics"]]
+    assert "DATA-META-013" in codes
+    save = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_day)
+    assert save.status_code == 400, save.text
+    assert save.json()["error"]["code"] == "PROJ-MDL-005"
+    save_codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
+    assert "DATA-META-013" in save_codes
+    assert _model_rows(db_session, pid) == []
+    assert _seq_rows(db_session, pid) == []
+
+
+def test_save_rejects_short_or_non_multiple_input(
+    client: TestClient, db_session: Session
+) -> None:
+    headers, pid = _make_owner(client, db_session, "sv_short")
+    # 8759 < 8760: 未覆盖完整年度 → DATA-STEP-006
+    up = _upload_temp(client, pid, headers, content=_data_csv(n=8759))
+    save = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up)
+    assert save.status_code == 400, save.text
+    codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
+    assert "DATA-STEP-006" in codes
+    # 8761(非 8760 整数倍)同样拒绝; 恰为 1×8760 通过
+    up2 = _upload_temp(client, pid, headers, content=_data_csv(n=8761))
+    save2 = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up2)
+    assert save2.status_code == 400, save2.text
+    codes2 = [d["code"] for d in save2.json()["error"]["params"]["diagnostics"]]
+    assert "DATA-STEP-006" in codes2
+    # 失败不落盘、不占号、不写审计
+    assert _model_rows(db_session, pid) == []
+    assert _seq_rows(db_session, pid) == []
+    assert db_session.execute(
+        select(AuditLog).where(AuditLog.entity_type == "project_model")
+    ).scalars().all() == []
+
+
+def test_save_rejects_resolution_mismatch_with_baseline(
+    client: TestClient, db_session: Session
+) -> None:
+    """不同采样间隔(15min)在 1h 项目导入: 不做重采样对齐, 直接拒绝。"""
+    headers, pid = _make_owner(client, db_session, "sv_res")
+    up = _upload_temp(
+        client, pid, headers, content=_data_csv(resolution="15min", n=35040)
+    )
+    save = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up)
+    assert save.status_code == 400, save.text
+    codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
+    assert "DATA-META-004" in codes
+    assert _model_rows(db_session, pid) == []
+
+
+def test_leap_year_project_gate_counts(client: TestClient, db_session: Session) -> None:
+    """闰年基线(366 天, 年度 8784): 8760(非闰年)拒绝, 8784 通过。"""
+    headers, pid = _make_owner(client, db_session, "sv_leap", leap=True)
+    up_wrong = _upload_temp(client, pid, headers, content=_data_csv(n=8760))
+    save = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_wrong)
+    assert save.status_code == 400, save.text
+    codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
+    assert "DATA-STEP-006" in codes
+    up_ok = _upload_temp(client, pid, headers, content=_data_csv(n=8784))
+    ok = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_ok)
+    assert ok.status_code == 201, ok.text
+    assert _model_rows(db_session, pid)[0].suffix == 1
+
+
+def test_cross_sequence_alignment_blocks_inconsistent_second_model(
+    client: TestClient, db_session: Session
+) -> None:
+    """同项目装配输入必须同分辨率同点数: 第二个模型(2 年 17520)与既有
+    8760 不一致 → PROJ-MDL-007 阻断; 修正为 8760 后绑定成功。"""
+    headers, pid = _make_owner(client, db_session, "sv_xseq")
+    up_a = _upload_temp(client, pid, headers)
+    r1 = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_a)
+    assert r1.status_code == 201, r1.text
+    assert r1.json()["project_model"]["device_id"] == "acme.device.profile_load_1"
+
+    # 模型 B 单文件满足 2×年度(17520), 但与项目既有输入点数不一致
+    up_b = _upload_temp(
+        client, pid, headers,
+        content=_data_csv(model_yaml=DATA_MODEL2_YAML, device_id="acme.device.pv_gen", n=17520),
+    )
+    save = _save_data_model(client, pid, headers, DATA_MODEL2_YAML, up_b)
+    assert save.status_code == 400, save.text
+    codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
+    assert "PROJ-MDL-007" in codes
+    # 校验端点同样暴露该一致性诊断
+    resp = client.post(
+        f"/api/projects/{pid}/models/validate",
+        json={"model_yaml": DATA_MODEL2_YAML, "data_files": [_ref_from_upload(up_b)]},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    vcodes = [d["code"] for d in resp.json()["diagnostics"]]
+    assert "PROJ-MDL-007" in vcodes
+    assert vcodes.count("PROJ-MDL-007") == 1
+    # 失败不落盘、草稿修订不推进
+    assert [m.device_id for m in _model_rows(db_session, pid)] == ["acme.device.profile_load_1"]
+    draft = client.get(f"/api/projects/{pid}", headers=headers).json()["draft"]["revision"]
+    assert draft == 2
+
+    # 修正为同点数(8760)后绑定成功, 编号域继续 _2
+    up_b2 = _upload_temp(
+        client, pid, headers,
+        content=_data_csv(model_yaml=DATA_MODEL2_YAML, device_id="acme.device.pv_gen", n=8760),
+    )
+    r2 = _save_data_model(client, pid, headers, DATA_MODEL2_YAML, up_b2)
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["project_model"]["device_id"] == "acme.device.pv_gen_2"
+
+
+def test_two_year_input_aligns_when_bound_first(
+    client: TestClient, db_session: Session
+) -> None:
+    """2×年度(17520)本身满足口径: 首绑通过, 后续同点数输入同样通过。"""
+    headers, pid = _make_owner(client, db_session, "sv_xseq2")
+    up_a = _upload_temp(client, pid, headers, content=_data_csv(n=17520))
+    r1 = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_a)
+    assert r1.status_code == 201, r1.text
+    up_b = _upload_temp(
+        client, pid, headers,
+        content=_data_csv(model_yaml=DATA_MODEL2_YAML, device_id="acme.device.pv_gen", n=17520),
+    )
+    r2 = _save_data_model(client, pid, headers, DATA_MODEL2_YAML, up_b)
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["project_model"]["suffix"] == 2
+
+
+# ---------------------------------------------------------------------------
 # 6. 并发编号唯一(文件 SQLite 多连接 + 线程)
 # ---------------------------------------------------------------------------
 
@@ -965,7 +1140,11 @@ def test_concurrent_numbering_unique(tmp_path: Path) -> None:
         s.commit()
     with factory() as s:
         u = s.get(User, user.id)
-        project = project_service.create_project(s, u, "并发项目")
+        project = project_service.create_project(
+            s, u, "并发项目",
+            baseline_resolution="1h", baseline_leap_year=False,
+            baseline_scenario_mode="single",
+        )
         s.commit()
         pid = project.id
 
