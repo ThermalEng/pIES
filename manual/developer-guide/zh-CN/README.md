@@ -8,7 +8,7 @@
 
 1. [架构宪法](ARCHITECTURE_CONSTITUTION.md)：最高原则与冲突裁决；
 2. [系统架构蓝图](architecture.md)：系统上下文、端到端流程、模块职责和依赖方向；
-3. [文件格式标准](file-formats.md)：可手写的设备模型 YAML、数据 CSV、装配 YAML，以及生成器产出的 Solver Bundle；
+3. [文件格式标准](file-formats.md)：可手写的设备模型 YAML、数据 CSV、财务 YAML、装配 YAML，以及生成器产出的 Solver Bundle；
 4. [模块开发手册](module-development.md)：按模块选择开发入口、统一阅读方法和完成标准；
 5. [领域模型与追溯链](domain-model.md)：项目、数据、配置、任务、结果和对象生命周期；
 6. [公共契约](contracts.md)：HTTP、数据类型、单位、时间、诊断和异步语义；
@@ -29,6 +29,7 @@
 | 手写或校验设备时序 CSV | [设备数据 CSV](formats/device-data-csv.md) |
 | 设备方程如何形成声明式数学贡献 | [技术方程建模](modules/modeling.md) |
 | 手写装配、项目图校验或规范产物 | [装配 YAML](formats/assembly-yaml.md)与[装配与检查](modules/assembly.md) |
+| 手写或校验财务 YAML（FinanceProfile/Overrides/Effective） | [财务 YAML](formats/finance-yaml.md) |
 | 从规范装配生成求解器输入和命令 | [计算生成器](modules/generators.md) |
 | 安全执行求解器命令 | [求解运行时](modules/solver-runtime.md) |
 | 计算全链路或结果适配 | [计算生成与求解](modules/engines.md) |
