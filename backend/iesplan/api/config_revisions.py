@@ -1,16 +1,27 @@
-"""规划/财务配置 revision API(0.6.5 事项 3)。
+"""财务三件套与规划配置 revision API(0.6.5 条目 1-2;替换旧单体 FinanceConfig)。
 
-- GET  /api/projects/{id}/finance-config      当前财务配置 + revision
-- PUT  /api/projects/{id}/finance-config      追加不可变 revision(乐观锁)
-- GET  /api/projects/{id}/planning-config     当前规划配置 + revision
-- PUT  /api/projects/{id}/planning-config     追加不可变 revision(乐观锁)
+项目侧(prefix /api/projects/{project_id}):
+- GET  /finance-profile         当前引用 Profile(含注册信息)
+- PUT  /finance-profile         引用/切换已登记 Profile(原子生成空覆盖 Effective)
+- GET  /finance-overrides       当前 Overrides(无覆盖 → 404)
+- PUT  /finance-overrides       保存 Overrides → 确定性重合并生成 Effective
+- DELETE /finance-overrides     清空覆盖(回退到 Profile 裸合并, 空覆盖文档)
+- GET  /effective-finance       当前 EffectiveFinanceConfig(未生成 → 404)
+- GET  /planning-config         当前规划配置 + revision
+- PUT  /planning-config         追加不可变 revision(引用 Effective content)
 
-认证与权限: 全部端点要求窗口会话认证(CurrentUser); 读要求项目 view,
-写要求项目 edit(403)。校验失败 400/422 标准错误信封; 并发冲突 409
+地区 Profile 登记(prefix /api/finance-profiles, 全局):
+- GET  /                        已登记 Profile 列表
+- POST /                        登记地区 Profile(内容寻址)
+- GET  /{profile_id}            按稳定 id 取 Profile
+
+认证与权限: 全部端点要求窗口会话认证(CurrentUser); 项目读要求 view、
+写要求 edit(403)。校验失败 400/422 标准错误信封; 并发冲突 409
 (SYS-STORE-004); 未保存 404(无静默默认, 宪法 2.2)。
 
-DTO 契约(宪法 8.1): 请求/响应字段与 core 契约一一对应; finance_config /
-planning_config 为完整字典形态(含派生 revision 字段, 由服务层严格恢复)。
+DTO 契约(宪法 8.1): 请求/响应字段与 core/finance 契约一一对应;
+finance_profile / finance_overrides / effective_finance / planning_config
+为完整字典形态(含派生 content_sha256 字段, 由服务层严格恢复)。
 """
 
 from __future__ import annotations
@@ -22,6 +33,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.core.errors import NotFoundError
 from iesplan.db import get_db
 from iesplan.services import config_revisions as config_service
 from iesplan.services import project as project_service
@@ -30,57 +42,143 @@ from iesplan.services import project as project_service
 DbSession = Annotated[Session, Depends(get_db)]
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["config-revisions"])
+profile_router = APIRouter(prefix="/api/finance-profiles", tags=["finance-profiles"])
 
 
-class FinanceConfigSaveRequest(BaseModel):
+class ProfileSaveRequest(BaseModel):
     """保存财务配置请求体(乐观锁: expected_revision=当前指针; 首次保存为 null)。"""
 
-    finance_config: dict[str, Any]
+    finance_profile: dict[str, Any]
+
+
+class OverridesSaveRequest(BaseModel):
+    """保存 FinanceOverrides 请求体(乐观锁: expected_revision=当前 overrides_revision)。"""
+
+    finance_overrides: dict[str, Any]
     expected_revision: int | None = Field(default=None, ge=1)
 
 
 class PlanningConfigSaveRequest(BaseModel):
-    """保存规划配置请求体(finance_config 引用一致性由服务层强制)。"""
+    """保存规划配置请求体(引用 Effective content_sha256 一致性由服务层强制)。"""
 
     planning_config: dict[str, Any]
     expected_revision: int | None = Field(default=None, ge=1)
+
+
+class ProfileRegistrationRequest(BaseModel):
+    """登记地区 Profile 请求体。"""
+
+    finance_profile: dict[str, Any]
 
 
 def _finance_response(config: Any, revision: int) -> dict:
     return {"finance_config": config.to_dict(), "revision": revision}
 
 
+def _effective_response(effective: Any, revision: int) -> dict:
+    return {"effective_finance_config": effective.to_dict(), "revision": revision}
+
+
+def _overrides_response(overrides: Any, revision: int) -> dict:
+    return {"finance_overrides": overrides.to_dict(), "revision": revision}
+
+
 def _planning_response(config: Any, revision: int) -> dict:
     return {"planning_config": config.to_dict(), "revision": revision}
 
 
-@router.get("/finance-config", summary="当前公共财务配置")
-def get_finance_config_endpoint(
+def _profile_row_response(row: dict) -> dict:
+    return row
+
+
+# ---------------------------------------------------------------------------
+# 项目侧: Profile 引用 / Overrides / Effective / Planning
+# ---------------------------------------------------------------------------
+
+
+@router.get("/finance-profile", summary="当前引用的地区 FinanceProfile")
+def get_project_profile_endpoint(
     project_id: int,
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
-    """读取项目当前生效财务配置(未保存 → 404 标准错误信封)。"""
+    """读取项目当前引用的注册 Profile(未引用 → 404)。"""
     project_service.ensure_access(db, user, project_id, "view")
-    config, revision, _ = config_service.get_finance_config(db, project_id)
-    return _finance_response(config, revision)
+    profile, row = config_service.get_project_profile(db, project_id)
+    return {"finance_profile": profile.to_dict(), "row": _profile_row_response(row)}
 
 
-@router.put("/finance-config", summary="保存公共财务配置(新 revision)")
-def save_finance_config_endpoint(
+@router.put("/finance-profile", summary="引用/切换已登记的地区 FinanceProfile")
+def set_project_profile_endpoint(
     project_id: int,
-    payload: FinanceConfigSaveRequest,
+    payload: ProfileSaveRequest,
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
-    """保存财务配置: 追加不可变 revision 并更新项目指针(乐观锁 409)。"""
+    """项目引用已登记 Profile: 原子生成空覆盖 Effective(用户不可直接 author)。"""
     project_service.ensure_access(db, user, project_id, "edit")
-    _, revision = config_service.save_finance_config(
-        db, project_id, payload.finance_config, payload.expected_revision, user.id
+    profile_row, profile = config_service.get_finance_profile(
+        db, str(payload.finance_profile.get("profile", {}).get("id", ""))
+    )
+    overrides_rev, eff_row, effective = config_service.set_project_finance_profile(
+        db, project_id, profile.profile_id, user.id
+    )
+    return {
+        "finance_profile": profile.to_dict(),
+        "overrides_revision": overrides_rev,
+        **dict(_effective_response(effective, eff_row.revision)),
+    }
+
+
+@router.get("/finance-overrides", summary="当前 FinanceOverrides")
+def get_finance_overrides_endpoint(
+    project_id: int,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
+    """读取项目当前 FinanceOverrides(无覆盖 → 404, 不静默返回空文档)。"""
+    project_service.ensure_access(db, user, project_id, "view")
+    overrides, revision = config_service.get_finance_overrides(db, project_id)
+    if overrides is None or revision is None:
+        raise NotFoundError(
+            "项目尚未保存 FinanceOverrides",
+            params={"project_id": project_id},
+            location={"object_type": "finance_overrides", "object_id": project_id},
+        )
+    return _overrides_response(overrides, revision)
+
+
+@router.put("/finance-overrides", summary="保存 FinanceOverrides(自动重合并 Effective)")
+def save_finance_overrides_endpoint(
+    project_id: int,
+    payload: OverridesSaveRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
+    """保存覆盖: 追加 Overrides revision → 重新合并生成新 Effective(失败原子)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
+    overrides_rev, eff_row, effective = config_service.save_finance_overrides(
+        db, project_id, payload.finance_overrides, payload.expected_revision, user.id
     )
     db.commit()
-    config, _, _ = config_service.get_finance_config(db, project_id)
-    return _finance_response(config, revision)
+    overrides, _ = config_service.get_finance_overrides(db, project_id)
+    assert overrides is not None
+    return {
+        **_overrides_response(overrides, overrides_rev),
+        **dict(_effective_response(effective, eff_row.revision)),
+    }
+
+
+@router.get("/effective-finance", summary="当前 EffectiveFinanceConfig")
+def get_effective_finance_endpoint(
+    project_id: int,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
+    """读取项目当前 EffectiveFinanceConfig(未生成 → 404)。"""
+    project_service.ensure_access(db, user, project_id, "view")
+    effective, revision, _ = config_service.get_effective_finance_config(db, project_id)
+    return _effective_response(effective, revision)
 
 
 @router.get("/planning-config", summary="当前规划配置")
@@ -102,7 +200,7 @@ def save_planning_config_endpoint(
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
-    """保存规划配置: 强制 finance_revision 与当前财务配置一致(422), 乐观锁 409。"""
+    """保存规划配置: 强制 finance_content_sha256 与当前 Effective 一致(400), 乐观锁 409。"""
     project_service.ensure_access(db, user, project_id, "edit")
     _, revision = config_service.save_planning_config(
         db, project_id, payload.planning_config, payload.expected_revision, user.id
@@ -110,3 +208,49 @@ def save_planning_config_endpoint(
     db.commit()
     config, _, _ = config_service.get_planning_config(db, project_id)
     return _planning_response(config, revision)
+
+
+# ---------------------------------------------------------------------------
+# 地区 Profile 注册表(全局)
+# ---------------------------------------------------------------------------
+
+
+@profile_router.get("", summary="已登记 FinanceProfile 列表")
+def list_finance_profiles_endpoint(
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
+    """列出已登记地区 Profile(按 profile_id 去重取最新登记)。"""
+    items = config_service.list_finance_profiles(db)
+    return {"items": items, "count": len(items)}
+
+
+@profile_router.post("", summary="登记地区 FinanceProfile(内容寻址)")
+def register_finance_profile_endpoint(
+    payload: ProfileRegistrationRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
+    """登记地区 Profile(内容寻址; 相同 profile_id+sha256 幂等返回既有)。"""
+    row, profile = config_service.register_finance_profile(
+        db, payload.finance_profile, user.id
+    )
+    db.commit()
+    return {
+        "finance_profile": profile.to_dict(),
+        "row": config_service.profile_row_dict(row),
+    }
+
+
+@profile_router.get("/{profile_id}", summary="按稳定 id 取地区 FinanceProfile")
+def get_finance_profile_endpoint(
+    profile_id: str,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
+    """读取已登记 Profile(按 profile_id 最新登记; 不存在 → 404)。"""
+    row, profile = config_service.get_finance_profile(db, profile_id)
+    return {
+        "finance_profile": profile.to_dict(),
+        "row": config_service.profile_row_dict(row),
+    }

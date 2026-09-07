@@ -144,6 +144,8 @@ def _parse_map(
         if content.startswith("- "):
             raise YamlParseError("映射中不得出现序列项", lineno)
         key, sep, val = _split_key_value(content)
+        # 键按标量语义解析(剥引号; 裸标识符行为不变, 引号键是 YAML 合法形态)
+        key = _parse_scalar(key, lineno)
         # 空值键("key:" 或 "key: "), 且下一行缩进更深 → 该键的嵌套块
         if (not sep or not val) and not content.startswith("-"):
             nxt = lines[idx + 1] if idx + 1 < len(lines) else None
@@ -331,3 +333,92 @@ def _parse_scalar(text: str, lineno: int) -> object:
     if _FLOAT_RE.fullmatch(text):
         return float(text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# 序列化(block 风格;与 load 子集互逆, 供项目包/导入导出 YAML 文件使用)
+# ---------------------------------------------------------------------------
+
+
+def _dump_scalar(value: object) -> str:
+    """标量序列化: 字符串一律带双引号(保证与 load 解析 round-trip)。"""
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, str):
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+        )
+        return f'"{escaped}"'
+    raise YamlParseError(f"不支持的标量类型: {type(value).__name__}", 0)
+
+
+def dump(value: object) -> str:
+    """对象 → block 风格 YAML 文本(与 load 互逆, 稳定键序, 无锚点/别名)。
+
+    支持 dict/list/标量; dict 键按字符串排序输出, 嵌套缩进 2 空格;
+    LF 换行; 非 ASCII 字符原样保留。round-trip 保证:
+    ``load(dump(x)) == x``。
+    """
+    lines: list[str] = []
+
+    def _write(item: object, indent: int) -> None:
+        pad = " " * indent
+        if isinstance(item, dict):
+            if not item:
+                lines.append(f"{pad}{{}}")
+                return
+            for key in sorted(item, key=str):
+                child = item[key]
+                if isinstance(child, dict) and child:
+                    lines.append(f"{pad}{_dump_scalar(str(key))}:")
+                    _write(child, indent + 2)
+                elif isinstance(child, list) and child:
+                    lines.append(f"{pad}{_dump_scalar(str(key))}:")
+                    _write(child, indent + 2)
+                elif isinstance(child, dict) or isinstance(child, list):
+                    lines.append(
+                        f"{pad}{_dump_scalar(str(key))}: "
+                        f"{'{}' if isinstance(child, dict) else '[]'}"
+                    )
+                else:
+                    lines.append(f"{pad}{_dump_scalar(str(key))}: {_dump_scalar(child)}")
+        elif isinstance(item, list):
+            for child in item:
+                if isinstance(child, dict) and child:
+                    first = sorted(child, key=str)[0]
+                    rest = {k: v for k, v in child.items() if k != first}
+                    if isinstance(rest, dict) and not rest:
+                        lines.append(
+                            f"{pad}- {_dump_scalar(str(first))}: {_dump_scalar(child[first])}"
+                        )
+                        continue
+                    lines.append(
+                        f"{pad}- {_dump_scalar(str(first))}: {_dump_scalar(child[first])}"
+                    )
+                    # 续写键缩进 = list 行缩进 + 2(- 后的映射续写规则)
+                    _write(rest, indent + 2)
+                elif isinstance(child, dict):
+                    lines.append(f"{pad}- {{}}")
+                elif isinstance(child, list) and child:
+                    lines.append(f"{pad}- ")
+                    _write(child, indent + 2)
+                elif isinstance(child, list):
+                    lines.append(f"{pad}- []")
+                else:
+                    lines.append(f"{pad}- {_dump_scalar(child)}")
+        else:
+            lines.append(f"{pad}{_dump_scalar(item)}")
+
+    _write(value, 0)
+    return "\n".join(lines) + "\n"

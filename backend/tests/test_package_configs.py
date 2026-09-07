@@ -1,13 +1,15 @@
-"""项目包携带规划/财务配置 revision(0.6.5 事项 3)导出/导入集成测试。
+"""项目包携带财务三件套/规划配置 YAML(0.6.5 条目 1-2)导出/导入集成测试。
 
 覆盖:
-- 导出: 项目有配置 → 包内含 finance_config.json / planning_config.json
-  (对象清单逐对象校验值一致, manifest.files.configs 登记); 无配置 → 不含;
-- 导入: 配置随包重建为 revision=1(不覆盖既有项目, 新项目身份, 所有者=导入者);
-  规划配置 finance_revision 与财务配置摘要一致; 无配置包导入后无配置(不静默默认);
-- 校验拒绝(ImportValidationError, PKG-IMP-001): 规划缺财务引用 / 文件级
-  content_sha256 不一致 / 声明 revision 被篡改 / 币种领域校验失败 /
-  规划引用的财务 revision 与包内不一致。
+- 导出: 项目有配置 → 包内含 finance_profile.yaml / finance_overrides.yaml /
+  effective_finance.yaml / planning_config.yaml(对象清单逐对象校验值一致,
+  manifest.files.configs 登记四键); 无配置 → 不含;
+- 导入: 三件套随包重建(revision 由服务层生成), 导入时从精确来源重新合并
+  验证三摘要(effective_from_sources); 规划引用 Effective content 一致;
+  无配置包导入后无配置(不静默默认);
+- 校验拒绝(ImportValidationError, PKG-IMP-001): 三件套缺一 / 声明
+  content_sha256 被篡改 / Effective 与 Profile+Overrides 重新合并不一致 /
+  规划引用与包内有效快照不一致 / 越权覆盖。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录。
 """
@@ -32,42 +34,84 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from iesplan.api import config_revisions as config_api  # noqa: E402
 from iesplan.api import exports as exports_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.core.contracts import (  # noqa: E402
-    FinanceConfig,
-    PlanningConfig,
-    ProjectBaseline,
-)
+from iesplan.core.contracts import PlanningConfig, ProjectBaseline  # noqa: E402
 from iesplan.core.idgen import sha256_hex  # noqa: E402
+from iesplan.core.yamlmini import dump as yaml_dump  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.finance import (  # noqa: E402
+    EffectiveFinanceConfig,
+    FinanceOverrides,
+    FinanceProfile,
+    merge_effective,
+)
 from iesplan.main import create_app  # noqa: E402
 from iesplan.services import package as package_service  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# 样例
+# 样例(与 test_config_revisions 同源)
 # ---------------------------------------------------------------------------
 
-FINANCE_PAYLOAD: dict = {
-    "currency": "CNY",
-    "base_year": 2025,
-    "devices": {
-        "heat_pump_1": {
-            "unit_investment": {"value": "1800", "unit": "CNY/kW"},
-            "fixed_om_rate": "0.02",
-            "variable_om": {"value": "0.03", "unit": "CNY/kWh"},
+PROFILE_PAYLOAD: dict = {
+    "schema": "ies.finance-profile",
+    "schema_version": "1.0.0",
+    "profile": {
+        "id": "cn-north-demo",
+        "region": "CN-North",
+        "currency": "CNY",
+        "base_year": 2025,
+        "price_basis": "tax_inclusive",
+        "cost_method": "fixed_plus_linear",
+    },
+    "finance_types": {
+        "pv_system": {
+            "upfront_capex": {
+                "fixed": {"value": "0", "unit": "CNY"},
+                "linear": {"capacity_kw": {"unit_cost": {"value": "3500", "unit": "CNY/kW"}}},
+            },
+            "annual_fixed_om": {
+                "linear": {"capacity_kw": {"unit_cost": {"value": "35", "unit": "CNY/kW/a"}}},
+            },
+            "period_variable_om": {
+                "linear": {"generated_kwh": {"unit_cost": {"value": "0.01", "unit": "CNY/kWh"}}},
+            },
         },
     },
     "energy_prices": {
-        "electricity_purchase": {"value": "0.6", "unit": "CNY/kWh"},
+        "grid_import": {
+            "carrier": "electricity",
+            "direction": "purchase",
+            "kind": "constant",
+            "value": {"value": "0.7", "unit": "CNY/kWh"},
+        },
     },
-    "tax_rate": "0.25",
-    "capital_time_cost": "0.08",
+    "taxes": {},
 }
 
 
-def _planning_payload(finance_revision: str) -> dict:
+def _overrides_payload(profile: FinanceProfile) -> dict:
+    return {
+        "schema": "ies.finance-overrides",
+        "schema_version": "1.0.0",
+        "profile_ref": {"id": profile.profile_id, "content_sha256": profile.content_sha256},
+        "finance_types": {
+            "pv_system": {
+                "upfront_capex": {
+                    "fixed": {"value": "1500", "unit": "CNY"},
+                    "linear": {"capacity_kw": {"unit_cost": {"value": "3200", "unit": "CNY/kW"}}},
+                },
+            },
+        },
+        "energy_prices": {
+            "grid_import": {"kind": "constant", "value": {"value": "0.75", "unit": "CNY/kWh"}},
+        },
+    }
+
+
+def _planning_payload(effective_sha: str) -> dict:
     return {
         "objective": {"sense": "minimize", "expression": "system.total_financial_cost"},
         "variables": {
@@ -79,14 +123,8 @@ def _planning_payload(finance_revision: str) -> dict:
                 "unit": "kW",
             },
         },
-        "constraints": {
-            "c1": {
-                "type": "ratio",
-                "expression": "hp1.electricity_in[t] <= 0.8 * grid.electricity_out[t]",
-                "enabled": True,
-            },
-        },
-        "finance_revision": finance_revision,
+        "constraints": {},
+        "finance_content_sha256": effective_sha,
     }
 
 
@@ -128,6 +166,8 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
     settings.data_dir = tmp_path
     app = create_app()
     app.include_router(projects_api.router)
+    app.include_router(config_api.router)
+    app.include_router(config_api.profile_router)
     app.include_router(exports_api.router)
 
     def _override_get_db() -> Iterator[Session]:
@@ -157,28 +197,37 @@ def _create_project(client: TestClient, user, name: str = "配置包项目") -> 
     return resp.json()["project"]["id"]
 
 
-def _save_finance(client: TestClient, user, pid: int) -> str:
-    """保存财务配置, 返回其规范摘要(revision)。"""
+def _setup_finance(client: TestClient, user, pid: int) -> tuple[FinanceProfile, FinanceOverrides, EffectiveFinanceConfig]:
+    """登记 Profile → 项目引用(空覆盖 rev1) → 保存真实覆盖(rev2)。"""
+    profile = FinanceProfile.from_dict(PROFILE_PAYLOAD)
+    resp = client.post(
+        "/api/finance-profiles", json={"finance_profile": PROFILE_PAYLOAD}, headers=_h(client, user)
+    )
+    assert resp.status_code == 200, resp.text
     resp = client.put(
-        f"/api/projects/{pid}/finance-config",
-        json={"finance_config": FINANCE_PAYLOAD, "expected_revision": None},
+        f"/api/projects/{pid}/finance-profile",
+        json={"finance_profile": PROFILE_PAYLOAD},
         headers=_h(client, user),
     )
     assert resp.status_code == 200, resp.text
-    return resp.json()["finance_config"]["revision"]
+    overrides = FinanceOverrides.from_dict(_overrides_payload(profile), profile=profile)
+    resp = client.put(
+        f"/api/projects/{pid}/finance-overrides",
+        json={"finance_overrides": overrides.to_dict(), "expected_revision": 1},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    effective = merge_effective(profile, overrides)
+    return profile, overrides, effective
 
 
-def _save_planning(client: TestClient, user, pid: int, finance_revision: str) -> str:
+def _save_planning(client: TestClient, user, pid: int, effective_sha: str) -> None:
     resp = client.put(
         f"/api/projects/{pid}/planning-config",
-        json={
-            "planning_config": _planning_payload(finance_revision),
-            "expected_revision": None,
-        },
+        json={"planning_config": _planning_payload(effective_sha), "expected_revision": None},
         headers=_h(client, user),
     )
     assert resp.status_code == 200, resp.text
-    return resp.json()["planning_config"]["revision"]
 
 
 def _export_zip(client: TestClient, user, pid: int) -> bytes:
@@ -195,20 +244,8 @@ def _export_zip(client: TestClient, user, pid: int) -> bytes:
     return resp.content
 
 
-def _config_doc(payload: dict, digest: str) -> dict:
-    """构造包内配置文件文档形态: {revision, content_sha256, <field>: payload}。"""
-    return {
-        "revision": 1,
-        "content_sha256": digest,
-        **payload,
-    }
-
-
-def _build_package(extra_entries: dict[str, dict], configs_meta: dict) -> bytes:
-    """手工构造项目包 zip(含给定配置文件与 files.configs 清单, 完整对象清单)。
-
-    供负例测试使用: 先经 _config_doc 构造合法配置文档, 测试再篡改字段。
-    """
+def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes:
+    """手工构造项目包 zip(含给定 YAML 配置文件与 files.configs 清单, 完整对象清单)。"""
     entries: dict[str, bytes] = {
         "project.json": json.dumps(
             {
@@ -224,15 +261,15 @@ def _build_package(extra_entries: dict[str, dict], configs_meta: dict) -> bytes:
             {"revision": 1, "content_hash": "0" * 64, "content": {}}
         ).encode(),
     }
-    for path, doc in extra_entries.items():
-        entries[path] = json.dumps(doc, ensure_ascii=False).encode()
+    for path, raw in extra_entries.items():
+        entries[path] = raw
 
     objects = [
         {
             "path": path,
             "sha256": sha256_hex(raw),
             "size_bytes": len(raw),
-            "media_type": "application/json",
+            "media_type": "application/yaml" if path.endswith(".yaml") else "application/json",
         }
         for path, raw in sorted(entries.items())
     ]
@@ -262,15 +299,22 @@ def _build_package(extra_entries: dict[str, dict], configs_meta: dict) -> bytes:
     return buf.getvalue()
 
 
-def _valid_finance_doc() -> tuple[dict, str]:
-    """合法财务配置文档 + 摘要(供负例篡改基底)。"""
-    config = FinanceConfig.from_dict(FINANCE_PAYLOAD)
-    return _config_doc({"finance_config": config.to_dict()}, config.revision), config.revision
-
-
-def _valid_planning_doc(finance_revision: str) -> tuple[dict, str]:
-    config = PlanningConfig.from_dict(_planning_payload(finance_revision))
-    return _config_doc({"planning_config": config.to_dict()}, config.revision), config.revision
+def _valid_triplet_entries() -> tuple[dict[str, bytes], dict]:
+    """合法三件套 YAML 条目 + configs_meta(供负例篡改基底)。"""
+    profile = FinanceProfile.from_dict(PROFILE_PAYLOAD)
+    overrides = FinanceOverrides.from_dict(_overrides_payload(profile), profile=profile)
+    effective = merge_effective(profile, overrides)
+    entries = {
+        "finance_profile.yaml": yaml_dump(profile.to_dict()).encode("utf-8"),
+        "finance_overrides.yaml": yaml_dump(overrides.to_dict()).encode("utf-8"),
+        "effective_finance.yaml": yaml_dump(effective.to_dict()).encode("utf-8"),
+    }
+    configs_meta = {
+        "finance_profile": "finance_profile.yaml",
+        "finance_overrides": "finance_overrides.yaml",
+        "effective_finance": "effective_finance.yaml",
+    }
+    return entries, configs_meta
 
 
 # ---------------------------------------------------------------------------
@@ -279,84 +323,74 @@ def _valid_planning_doc(finance_revision: str) -> tuple[dict, str]:
 
 
 def test_export_and_import_roundtrip_with_configs(client: TestClient, db: Session) -> None:
-    """有财务+规划配置的项目包: 导出含两文件与清单登记; 导入重建 revision=1。"""
+    """有财务三件套+规划配置的项目包: 导出含四 YAML 与清单登记; 导入重建。"""
     owner = make_user(db, "pkg_owner")
     importer = make_user(db, "pkg_importer")
     pid = _create_project(client, owner)
-    finance_rev = _save_finance(client, owner, pid)
-    planning_rev = _save_planning(client, owner, pid, finance_rev)
+    profile, overrides, effective = _setup_finance(client, owner, pid)
+    _save_planning(client, owner, pid, effective.content_sha256)
 
     zip_bytes = _export_zip(client, owner, pid)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         assert manifest["files"]["configs"] == {
-            "finance_config": "finance_config.json",
-            "planning_config": "planning_config.json",
+            "finance_profile": "finance_profile.yaml",
+            "finance_overrides": "finance_overrides.yaml",
+            "effective_finance": "effective_finance.yaml",
+            "planning_config": "planning_config.yaml",
         }
         names = set(zf.namelist())
-        assert {"finance_config.json", "planning_config.json"} <= names
+        assert {
+            "finance_profile.yaml",
+            "finance_overrides.yaml",
+            "effective_finance.yaml",
+            "planning_config.yaml",
+        } <= names
         # 逐对象校验值一致
         for entry in manifest["objects"]:
             raw = zf.read(entry["path"])
             assert len(raw) == entry["size_bytes"]
             assert sha256_hex(raw) == entry["sha256"]
-        finance_doc = json.loads(zf.read("finance_config.json").decode("utf-8"))
-        assert finance_doc["content_sha256"] == finance_rev
-        planning_doc = json.loads(zf.read("planning_config.json").decode("utf-8"))
-        assert planning_doc["content_sha256"] == planning_rev
+        # 文件内容摘要与契约一致
+        from iesplan.core.yamlmini import load as yaml_load
+
+        p = FinanceProfile.from_dict(yaml_load(zf.read("finance_profile.yaml").decode("utf-8")))
+        assert p.content_sha256 == profile.content_sha256
+        o = FinanceOverrides.from_dict(
+            yaml_load(zf.read("finance_overrides.yaml").decode("utf-8")), profile=p
+        )
+        assert o.content_sha256 == overrides.content_sha256
+        e = EffectiveFinanceConfig.from_dict(
+            yaml_load(zf.read("effective_finance.yaml").decode("utf-8"))
+        )
+        assert e.content_sha256 == effective.content_sha256
 
     proposal = package_service.import_proposal(db, importer, zip_bytes)
-    assert proposal.review_summary["configs"]["finance"]["present"] is True
-    assert proposal.review_summary["configs"]["finance"]["content_sha256"] == finance_rev
+    summary_configs = proposal.review_summary["configs"]
+    assert summary_configs["finance_triplet"]["present"] is True
+    assert summary_configs["finance_triplet"]["profile_sha256"] == profile.content_sha256
+    assert summary_configs["finance_triplet"]["overrides_sha256"] == overrides.content_sha256
+    assert summary_configs["finance_triplet"]["content_sha256"] == effective.content_sha256
     new_project = package_service.confirm_import(db, importer, proposal.id)
     db.commit()
 
-    # 新项目身份, 配置重建为 revision=1, 规划/财务同 revision
+    # 新项目身份, 配置重建: Effective 血缘一致, 规划引用一致
     assert new_project.id != pid
     resp = client.get(
-        f"/api/projects/{new_project.id}/finance-config", headers=_h(client, importer)
+        f"/api/projects/{new_project.id}/effective-finance", headers=_h(client, importer)
     )
     assert resp.status_code == 200
-    assert resp.json()["revision"] == 1
-    assert resp.json()["finance_config"]["revision"] == finance_rev
+    assert resp.json()["effective_finance_config"]["content_sha256"] == effective.content_sha256
     resp = client.get(
         f"/api/projects/{new_project.id}/planning-config", headers=_h(client, importer)
     )
     assert resp.status_code == 200
-    assert resp.json()["revision"] == 1
-    assert resp.json()["planning_config"]["finance_revision"] == finance_rev
-    assert proposal.review_summary["configs"]["planning"]["present"] is True
+    assert resp.json()["planning_config"]["finance_content_sha256"] == effective.content_sha256
+    assert summary_configs["planning"]["present"] is True
 
 
-def test_export_import_finance_only(client: TestClient, db: Session) -> None:
-    """仅有财务配置: 包内只含 finance_config.json; 导入后规划配置不存在(404)。"""
-    owner = make_user(db, "fin_owner")
-    importer = make_user(db, "fin_importer")
-    pid = _create_project(client, owner)
-    finance_rev = _save_finance(client, owner, pid)
-
-    zip_bytes = _export_zip(client, owner, pid)
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-        assert manifest["files"]["configs"] == {"finance_config": "finance_config.json"}
-        assert "planning_config.json" not in zf.namelist()
-
-    proposal = package_service.import_proposal(db, importer, zip_bytes)
-    new_project = package_service.confirm_import(db, importer, proposal.id)
-    db.commit()
-    resp = client.get(
-        f"/api/projects/{new_project.id}/finance-config", headers=_h(client, importer)
-    )
-    assert resp.status_code == 200
-    assert resp.json()["finance_config"]["revision"] == finance_rev
-    resp = client.get(
-        f"/api/projects/{new_project.id}/planning-config", headers=_h(client, importer)
-    )
-    assert resp.status_code == 404
-
-
-def test_export_import_without_configs(client: TestClient, db: Session) -> None:
-    """无配置项目: 包不含配置文件; 导入后无配置(不静默默认)。"""
+def test_export_without_configs(client: TestClient, db: Session) -> None:
+    """无配置项目: 包不含 YAML; 导入后无配置(不静默默认)。"""
     owner = make_user(db, "none_owner")
     importer = make_user(db, "none_importer")
     pid = _create_project(client, owner)
@@ -365,14 +399,14 @@ def test_export_import_without_configs(client: TestClient, db: Session) -> None:
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         assert manifest["files"]["configs"] == {}
-        assert "finance_config.json" not in zf.namelist()
+        assert "finance_profile.yaml" not in zf.namelist()
 
     proposal = package_service.import_proposal(db, importer, zip_bytes)
-    assert proposal.review_summary["configs"]["finance"]["present"] is False
+    assert proposal.review_summary["configs"]["finance_triplet"]["present"] is False
     new_project = package_service.confirm_import(db, importer, proposal.id)
     db.commit()
     resp = client.get(
-        f"/api/projects/{new_project.id}/finance-config", headers=_h(client, importer)
+        f"/api/projects/{new_project.id}/effective-finance", headers=_h(client, importer)
     )
     assert resp.status_code == 404
 
@@ -382,81 +416,94 @@ def test_export_import_without_configs(client: TestClient, db: Session) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_import_rejects_planning_without_finance(client: TestClient, db: Session) -> None:
+def test_import_rejects_incomplete_triplet(client: TestClient, db: Session) -> None:
+    """三件套缺一(有效快照缺失) → 拒绝。"""
     importer = make_user(db, "rej_imp_1")
-    planning_doc, _ = _valid_planning_doc("0" * 64)
-    zip_bytes = _build_package(
-        {"planning_config.json": planning_doc},
-        {"planning_config": "planning_config.json"},
-    )
+    entries, configs_meta = _valid_triplet_entries()
+    del entries["effective_finance.yaml"]
+    configs_meta = {k: v for k, v in configs_meta.items() if k != "effective_finance"}
+    zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_service.ImportValidationError) as excinfo:
         package_service.import_proposal(db, importer, zip_bytes)
-    assert any("财务配置" in r for r in excinfo.value.reasons)
+    assert any("effective_finance" in r for r in excinfo.value.reasons)
 
 
-def test_import_rejects_tampered_content_sha256(client: TestClient, db: Session) -> None:
+def test_import_rejects_tampered_profile_sha(client: TestClient, db: Session) -> None:
+    """Profile 声明 content_sha256 被篡改 → 拒绝。"""
     importer = make_user(db, "rej_imp_2")
-    finance_doc, _ = _valid_finance_doc()
-    finance_doc["content_sha256"] = "0" * 64  # 文件级摘要与内容不一致
-    zip_bytes = _build_package(
-        {"finance_config.json": finance_doc},
-        {"finance_config": "finance_config.json"},
-    )
+    entries, configs_meta = _valid_triplet_entries()
+    profile = FinanceProfile.from_dict(PROFILE_PAYLOAD)
+    bad = {**profile.to_dict(), "content_sha256": "0" * 64}
+    entries["finance_profile.yaml"] = yaml_dump(bad).encode("utf-8")
+    zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_service.ImportValidationError) as excinfo:
         package_service.import_proposal(db, importer, zip_bytes)
     assert any("content_sha256" in r for r in excinfo.value.reasons)
 
 
-def test_import_rejects_tampered_declared_revision(client: TestClient, db: Session) -> None:
+def test_import_rejects_effective_remerge_mismatch(client: TestClient, db: Session) -> None:
+    """Effective 与 Profile+Overrides 重新合并不一致(篡改 Effective 叶子) → 拒绝。"""
     importer = make_user(db, "rej_imp_3")
-    config = FinanceConfig.from_dict(FINANCE_PAYLOAD)
-    doc = _config_doc({"finance_config": {**config.to_dict(), "revision": "0" * 64}}, config.revision)
-    zip_bytes = _build_package(
-        {"finance_config.json": doc},
-        {"finance_config": "finance_config.json"},
-    )
+    entries, configs_meta = _valid_triplet_entries()
+    from iesplan.core.yamlmini import load as yaml_load
+
+    effective_doc = yaml_load(entries["effective_finance.yaml"].decode("utf-8"))
+    # 篡改被覆盖叶子金额(与 Overrides 的 1500 不一致), 但保留声明 content_sha256
+    effective_doc["finance_types"]["pv_system"]["upfront_capex"]["fixed"]["value"] = "9999"
+    entries["effective_finance.yaml"] = yaml_dump(effective_doc).encode("utf-8")
+    zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_service.ImportValidationError) as excinfo:
         package_service.import_proposal(db, importer, zip_bytes)
-    assert any("财务配置非法" in r for r in excinfo.value.reasons)
+    # 篡改叶子 → 自身摘要重算不一致或与来源重新合并不一致, 两者都拒绝
+    assert any(
+        "Effective" in r and ("不一致" in r or "重新合并" in r)
+        for r in excinfo.value.reasons
+    )
 
 
-def test_import_rejects_currency_domain_violation(client: TestClient, db: Session) -> None:
+def test_import_rejects_effective_remerge_bloodline(client: TestClient, db: Session) -> None:
+    """篡改 Effective 叶子并同步声明摘要: from_dict 通过, 但来源重合并血缘拒绝。"""
+    importer = make_user(db, "rej_imp_6")
+    entries, configs_meta = _valid_triplet_entries()
+    from iesplan.core.yamlmini import load as yaml_load
+
+    effective_doc = yaml_load(entries["effective_finance.yaml"].decode("utf-8"))
+    effective_doc["finance_types"]["pv_system"]["upfront_capex"]["fixed"]["value"] = "9999"
+    # 移除声明摘要后重建(重算新摘要), 使结构校验通过
+    effective_doc.pop("content_sha256", None)
+    tampered = EffectiveFinanceConfig.from_dict(effective_doc)
+    entries["effective_finance.yaml"] = yaml_dump(tampered.to_dict()).encode("utf-8")
+    zip_bytes = _build_package(entries, configs_meta)
+    with pytest.raises(package_service.ImportValidationError) as excinfo:
+        package_service.import_proposal(db, importer, zip_bytes)
+    assert any("重新合并" in r for r in excinfo.value.reasons)
+
+
+def test_import_rejects_planning_finance_mismatch(client: TestClient, db: Session) -> None:
+    """规划引用的 Effective content_sha256 与包内有效快照不一致 → 拒绝。"""
     importer = make_user(db, "rej_imp_4")
-    bad_payload = {
-        **FINANCE_PAYLOAD,
-        "devices": {
-            "heat_pump_1": {
-                "unit_investment": {"value": "1800", "unit": "USD/kW"},
-                "fixed_om_rate": "0.02",
-                "variable_om": {"value": "0.03", "unit": "CNY/kWh"},
-            },
-        },
-    }
-    config = FinanceConfig.from_dict(bad_payload)
-    doc = _config_doc({"finance_config": config.to_dict()}, config.revision)
-    zip_bytes = _build_package(
-        {"finance_config.json": doc},
-        {"finance_config": "finance_config.json"},
-    )
+    entries, configs_meta = _valid_triplet_entries()
+    planning = PlanningConfig.from_dict(_planning_payload("0" * 64))
+    entries["planning_config.yaml"] = yaml_dump(planning.to_dict()).encode("utf-8")
+    configs_meta = {**configs_meta, "planning_config": "planning_config.yaml"}
+    zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_service.ImportValidationError) as excinfo:
         package_service.import_proposal(db, importer, zip_bytes)
-    assert any("领域校验失败" in r for r in excinfo.value.reasons)
+    assert any("finance_content_sha256" in r or "不一致" in r for r in excinfo.value.reasons)
 
 
-def test_import_rejects_planning_finance_revision_mismatch(
-    client: TestClient, db: Session
-) -> None:
+def test_import_rejects_override_scope_violation(client: TestClient, db: Session) -> None:
+    """包内 Overrides 越权(新增 finance_type) → 拒绝。"""
     importer = make_user(db, "rej_imp_5")
-    finance_doc, finance_rev = _valid_finance_doc()
-    planning_doc, _ = _valid_planning_doc("0" * 64)  # 引用其他摘要
-    zip_bytes = _build_package(
-        {"finance_config.json": finance_doc, "planning_config.json": planning_doc},
-        {
-            "finance_config": "finance_config.json",
-            "planning_config": "planning_config.json",
-        },
-    )
+    entries, configs_meta = _valid_triplet_entries()
+    from iesplan.core.yamlmini import load as yaml_load
+
+    overrides_doc = yaml_load(entries["finance_overrides.yaml"].decode("utf-8"))
+    overrides_doc["finance_types"]["new_tech"] = {
+        "upfront_capex": {"fixed": {"value": "1", "unit": "CNY"}}
+    }
+    entries["finance_overrides.yaml"] = yaml_dump(overrides_doc).encode("utf-8")
+    zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_service.ImportValidationError) as excinfo:
         package_service.import_proposal(db, importer, zip_bytes)
-    assert any("finance_revision" in r or "不一致" in r for r in excinfo.value.reasons)
-    assert finance_rev  # 摘要本身有效, 失败来自引用不一致
+    assert any("FinanceOverrides" in r for r in excinfo.value.reasons)

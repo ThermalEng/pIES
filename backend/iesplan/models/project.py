@@ -39,9 +39,18 @@ class Project(Base):
     baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
     baseline_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
-    # 当前生效配置 revision 指针(指向 finance_configs/planning_configs 的
-    # 不可变 revision; 指针可移动, revision 行本身仅 INSERT, 宪法 4.6)
-    finance_revision: Mapped[int | None] = mapped_column(BigInteger)
+    # 当前生效财务三件套/规划配置 revision 指针(0.6.5 条目 1-2):
+    # finance_profiles / finance_overrides / effective_finance_revisions /
+    # planning_configs 均仅 INSERT, 指针指向当前生效 revision(指针可移动);
+    # finance_profile_id 指向项目引用的已注册 Profile 主键(内容寻址),
+    # overrides_revision 指向当前覆盖 revision(空 = 无覆盖, 空覆盖文档),
+    # effective_finance_revision 指向合并器产出的有效快照 revision,
+    # planning_revision 指向当前规划配置 revision。
+    finance_profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("finance_profiles.id")
+    )
+    overrides_revision: Mapped[int | None] = mapped_column(BigInteger)
+    effective_finance_revision: Mapped[int | None] = mapped_column(BigInteger)
     planning_revision: Mapped[int | None] = mapped_column(BigInteger)
     # 循环依赖指针: 先建表, 后补外键(use_alter)
     current_draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id", use_alter=True))

@@ -714,7 +714,7 @@ def create_version(
         raise InvalidRequestError("版本名称不能为空", code="PROJ-CMD-001")
     draft = _get_current_draft(db, project)
     content = _load_draft_content(db, draft)
-    version_content = _version_content(project, content)
+    version_content = _version_content(db, project, content)
     content_hash = _store_content(db, version_content)
 
     if parent_version_id is not None:
@@ -786,7 +786,7 @@ def current_version_matches_draft(db: Session, project: Project) -> bool:
         return False
     draft = _get_current_draft(db, project)
     content = _load_draft_content(db, draft)
-    raw = canonical_json(_version_content(project, content))
+    raw = canonical_json(_version_content(db, project, content))
     return sha256_hex(raw.encode("utf-8")) == version.content_hash
 
 
@@ -1302,8 +1302,14 @@ def _initial_content(language: str = "zh-CN") -> dict:
     }
 
 
-def _version_content(project: Project, content: dict) -> dict:
-    """版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(domain-model §项目聚合)。"""
+def _version_content(db: Session, project: Project, content: dict) -> dict:
+    """版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(domain-model §项目聚合)。
+
+    固化字段: 币种、项目计算基线、以及**财务三件套/规划配置引用**(0.6.5
+    条目 2, 目标四闭合): 版本自包含 Effective 三内容摘要与规划配置摘要,
+    历史版本不随当前配置解释; 项目未生成有效财务快照时 finance 块省略
+    (与无配置项目包同语义, 不静默默认)。
+    """
     version_content = {k: v for k, v in content.items() if k != "applied_commands"}
     version_content["currency"] = project.currency
     version_content["project_baseline"] = {
@@ -1312,9 +1318,39 @@ def _version_content(project: Project, content: dict) -> dict:
         "scenario_mode": project.baseline_scenario_mode,
         "sha256": project.baseline_sha256,
     }
+    # 财务三件套引用闭合: 版本固化当前 Effective 血缘(Effective 内容摘要 +
+    # profile_id/profile_sha256/overrides_sha256), 装配/财务计算只消费该快照。
+    from iesplan.services.config_revisions import get_effective_finance_config
+    from iesplan.core.errors import NotFoundError
+
+    try:
+        effective, _, _ = get_effective_finance_config(db, project.id)
+    except NotFoundError:
+        effective = None
+    if effective is not None:
+        version_content["effective_finance"] = {
+            "profile_id": effective.profile_id,
+            "profile_sha256": effective.profile_sha256,
+            "overrides_sha256": effective.overrides_sha256,
+            "content_sha256": effective.content_sha256,
+        }
+    # 规划配置引用闭合: 版本固化当前规划配置摘要(其 finance_content_sha256
+    # 已指向被固化 Effective)。
+    from iesplan.services.config_revisions import get_planning_config
+
+    try:
+        planning, _, _ = get_planning_config(db, project.id)
+    except NotFoundError:
+        planning = None
+    if planning is not None:
+        version_content["planning_config"] = {
+            "revision": planning.revision,
+            "finance_content_sha256": planning.finance_content_sha256,
+        }
     return version_content
 
 
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # 内容寻址对象存储(草稿/版本内容载体; 实现经 iesplan.storage 公开门面，架构宪法 §10)
 # ---------------------------------------------------------------------------

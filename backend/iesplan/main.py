@@ -296,8 +296,9 @@ def _register_business_routers(application: FastAPI) -> None:
     # 计算配置(U06) + 算法注册表
     application.include_router(config.config_router)
     application.include_router(config.registry_router)
-    # 规划/财务配置 revision(0.6.5 事项 3)
+    # 规划/财务三件套配置 revision(0.6.5 条目 1-2; 含地区 Profile 注册表)
     application.include_router(config_revisions.router)
+    application.include_router(config_revisions.profile_router)
     # 校验(U07)
     application.include_router(validation.router)
     # 任务(U08)

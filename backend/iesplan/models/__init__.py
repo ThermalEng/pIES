@@ -41,7 +41,9 @@ from iesplan.models.identity import (
     WindowSession,
 )
 from iesplan.models.config_revision import (
-    FinanceConfigRevision,
+    EffectiveFinanceRevision,
+    FinanceOverridesRevision,
+    FinanceProfile,
     PlanningConfigRevision,
 )
 from iesplan.models.immutable_triggers import IMMUTABLE_TABLES
@@ -116,8 +118,10 @@ __all__ = [
     "TaskProgress",
     "TaskDiagnostic",
     "ComputeSlot",
-    # 规划/财务配置 revision(0.6.5 事项 3)
-    "FinanceConfigRevision",
+    # 规划/财务三件套 revision(0.6.5 条目 1-2; 替换旧单体 FinanceConfig)
+    "FinanceProfile",
+    "FinanceOverridesRevision",
+    "EffectiveFinanceRevision",
     "PlanningConfigRevision",
     # 结果
     "EvidencePackage",
