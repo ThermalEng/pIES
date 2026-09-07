@@ -1,4 +1,10 @@
-"""ies.device-data 2.0.0 的 step 契约测试。"""
+"""ies.device-data 2.0.0 的 step 契约测试。
+
+0.6.5 装配前口径: 原始输入(``prepared: false``)必须 0..N-1 严格连续,
+``data_repeat`` 只接受完整年度序列(period=year); 绑定项目基线时要求与基线
+同分辨率、点数为基线年度点数(含闰年)的正整数倍。day/week 模板与稀疏 step
+属旧序列预备时代行为, 一律结构化拒绝。
+"""
 
 from __future__ import annotations
 
@@ -19,7 +25,6 @@ from iesplan.devices.datacontract2 import (
     parse_data_file_v2,
     parse_metadata_v2,
     pending_from_result,
-    periodic_rows,
     summary_json_v2,
 )
 
@@ -109,12 +114,28 @@ class TestMetadata:
         result = canonicalize_device_data_v2(text.encode(), _device_doc())
         assert "DATA-META-002" in _codes(result)
 
-    def test_repeat_requires_period(self) -> None:
-        result = canonicalize_device_data_v2(
+    def test_repeat_requires_full_year_period(self) -> None:
+        # 缺失 period → DATA-META-013
+        missing = canonicalize_device_data_v2(
             _csv_text(source_mode="data_repeat", rows=[f"{i},{i}" for i in range(24)]).encode(),
             _device_doc(),
         )
-        assert "DATA-META-006" in _codes(result)
+        assert "DATA-META-013" in _codes(missing)
+        # day/week 模板属旧序列预备时代行为 → 一律拒绝
+        for bad_period in ("day", "week"):
+            result = canonicalize_device_data_v2(
+                _csv_text(source_mode="data_repeat", period=bad_period,
+                          rows=[f"{i},{i}" for i in range(24)]).encode(),
+                _device_doc(),
+            )
+            assert "DATA-META-013" in _codes(result), bad_period
+        # period=year 是唯一合法声明(点数口径由项目基线另行校验)
+        ok = canonicalize_device_data_v2(
+            _csv_text(source_mode="data_repeat", period="year",
+                      rows=[f"{i},{i}" for i in range(24)]).encode(),
+            _device_doc(),
+        )
+        assert "DATA-META-013" not in _codes(ok)
 
     def test_prepared_requires_baseline_and_point_count(self) -> None:
         text = _csv_text().replace("# resolution: 1h", "# resolution: 1h\n# prepared: true")
@@ -137,12 +158,12 @@ class TestDialectAndSteps:
         assert parsed is None
         assert any(diag.code == "DATA-COL-005" for diag in diags)
 
-    def test_raw_sparse_steps_are_valid(self) -> None:
+    def test_raw_sparse_steps_are_blocked(self) -> None:
+        # 0.6.5: 装配前不重采样/插值/补齐, 原始输入必须 0..N-1 严格连续
         result = canonicalize_device_data_v2(
             _csv_text(rows=["0,15", "2,16", "5,17"]).encode(), _device_doc()
         )
-        assert not _codes(result)
-        assert result.steps == [0, 2, 5]
+        assert "DATA-STEP-005" in _codes(result)
 
     def test_step_must_be_nonnegative_integer(self) -> None:
         result = canonicalize_device_data_v2(_csv_text(rows=["0.5,15"]).encode(), _device_doc())
@@ -152,6 +173,7 @@ class TestDialectAndSteps:
         for rows in (["0,15", "0,16"], ["2,15", "1,16"]):
             result = canonicalize_device_data_v2(_csv_text(rows=list(rows)).encode(), _device_doc())
             assert "DATA-STEP-002" in _codes(result)
+            assert "DATA-STEP-005" in _codes(result)  # 非 0..N-1 同时被连续性规则阻断
 
     def test_prepared_steps_are_zero_based_and_contiguous(self) -> None:
         result = canonicalize_device_data_v2(
@@ -172,17 +194,106 @@ class TestDialectAndSteps:
         )
         assert "DATA-META-012" in _codes(result)
 
-    def test_repeat_period_row_count(self) -> None:
-        rows = [f"{i},{i}" for i in range(24)]
-        valid = canonicalize_device_data_v2(
-            _csv_text(source_mode="data_repeat", period="day", rows=rows).encode(), _device_doc()
+
+class TestPreassemblyCadence:
+    """0.6.5 装配前口径: 原始输入与项目基线同分辨率、完整年度整数倍(含闰年)。"""
+
+    def _year_csv(
+        self,
+        *,
+        source_mode: str = "data_repeat",
+        resolution: str = "1h",
+        n: int = 8760,
+        period: str = "year",
+    ) -> bytes:
+        return _csv_text(
+            source_mode=source_mode, resolution=resolution, period=period,
+            rows=[f"{i},{15 + (i % 10)}" for i in range(n)],
+        ).encode()
+
+    def test_1h_normal_year_counts(self) -> None:
+        # 365 天 1h = 8760; 允许完整年度正整数倍(1×、2×)
+        ok = canonicalize_device_data_v2(
+            self._year_csv(n=8760), _device_doc(),
+            baseline_resolution="1h", baseline_point_count=8760,
         )
-        invalid = canonicalize_device_data_v2(
-            _csv_text(source_mode="data_repeat", period="day", rows=rows[:-1]).encode(), _device_doc()
+        assert not _codes(ok)
+        double = canonicalize_device_data_v2(
+            self._year_csv(n=17520), _device_doc(),
+            baseline_resolution="1h", baseline_point_count=8760,
         )
-        assert not _codes(valid)
-        assert "DATA-STEP-004" in _codes(invalid)
-        assert periodic_rows("30min", "week") == 336
+        assert not _codes(double)
+        assert len(double.steps) == 17520
+
+    def test_1h_count_below_or_not_multiple_of_baseline(self) -> None:
+        for n in (8759, 8761, 24, 4380):
+            result = canonicalize_device_data_v2(
+                self._year_csv(n=n), _device_doc(),
+                baseline_resolution="1h", baseline_point_count=8760,
+            )
+            assert "DATA-STEP-006" in _codes(result), n
+
+    def test_leap_year_baseline_counts(self) -> None:
+        # 基线闰年(366 天): 8760(非闰年)拒绝, 8784 与 2×8784 通过
+        wrong = canonicalize_device_data_v2(
+            self._year_csv(n=8760), _device_doc(),
+            baseline_resolution="1h", baseline_point_count=8784,
+        )
+        assert "DATA-STEP-006" in _codes(wrong)
+        leap = canonicalize_device_data_v2(
+            self._year_csv(n=8784), _device_doc(),
+            baseline_resolution="1h", baseline_point_count=8784,
+        )
+        assert not _codes(leap)
+        leap_double = canonicalize_device_data_v2(
+            self._year_csv(n=17568), _device_doc(),
+            baseline_resolution="1h", baseline_point_count=8784,
+        )
+        assert not _codes(leap_double)
+
+    def test_15min_and_30min_baseline_counts(self) -> None:
+        # 15min: 普通年 35040 / 闰年 35136; 30min: 17520 / 17568
+        ok_15 = canonicalize_device_data_v2(
+            self._year_csv(resolution="15min", n=35040), _device_doc(),
+            baseline_resolution="15min", baseline_point_count=35040,
+        )
+        assert not _codes(ok_15)
+        leap_15 = canonicalize_device_data_v2(
+            self._year_csv(resolution="15min", n=35136), _device_doc(),
+            baseline_resolution="15min", baseline_point_count=35136,
+        )
+        assert not _codes(leap_15)
+        short_15 = canonicalize_device_data_v2(
+            self._year_csv(resolution="15min", n=35039), _device_doc(),
+            baseline_resolution="15min", baseline_point_count=35040,
+        )
+        assert "DATA-STEP-006" in _codes(short_15)
+        double_30 = canonicalize_device_data_v2(
+            self._year_csv(resolution="30min", n=35040), _device_doc(),
+            baseline_resolution="30min", baseline_point_count=17520,
+        )
+        assert not _codes(double_30)
+        leap_30 = canonicalize_device_data_v2(
+            self._year_csv(resolution="30min", n=17568), _device_doc(),
+            baseline_resolution="30min", baseline_point_count=17568,
+        )
+        assert not _codes(leap_30)
+
+    def test_resolution_must_match_project_baseline(self) -> None:
+        # 不同采样间隔不在导入时自动对齐: 结构化拒绝(用户导入前自行整理)
+        result = canonicalize_device_data_v2(
+            self._year_csv(resolution="30min", n=17520), _device_doc(),
+            baseline_resolution="15min", baseline_point_count=35040,
+        )
+        assert "DATA-META-004" in _codes(result)
+        assert result.meta.resolution == "30min"
+
+    def test_without_baseline_only_structural_rules_apply(self) -> None:
+        # 纯单文件校验不虚构项目年度: 无基线参数时只要求连续与 period=year
+        ok = canonicalize_device_data_v2(
+            self._year_csv(n=24), _device_doc(),
+        )
+        assert not _codes(ok)
 
 
 class TestBindingColumnsAndValues:
@@ -199,7 +310,7 @@ class TestBindingColumnsAndValues:
     def test_source_mode_mismatch_is_rejected(self) -> None:
         result = canonicalize_device_data_v2(
             _csv_text(
-                source_mode="data_repeat", period="day", columns=["ambient_temperature"],
+                source_mode="data_repeat", period="year", columns=["ambient_temperature"],
                 units={"ambient_temperature": "°C"}, rows=[f"{i},{i}" for i in range(24)],
             ).encode(),
             _device_doc(),
@@ -226,7 +337,7 @@ class TestBindingColumnsAndValues:
 
     def test_units_check_dimension(self) -> None:
         good = _csv_text(
-            source_mode="data_repeat", period="day", units={"electric_demand": "W"},
+            source_mode="data_repeat", period="year", units={"electric_demand": "W"},
             rows=[f"{i},{i}" for i in range(24)],
         )
         bad = good.replace("unit.electric_demand: W", "unit.electric_demand: kWh")
@@ -241,7 +352,7 @@ class TestBindingColumnsAndValues:
 
 class TestCanonicalAndPending:
     def test_same_semantics_same_sha_and_step_output(self) -> None:
-        text = _csv_text(rows=["0,15", "2,16"])
+        text = _csv_text(rows=["0,15", "1,16", "2,17"])
         first = canonicalize_device_data_v2(text.encode(), _device_doc())
         second = canonicalize_device_data_v2(text.encode(), _device_doc())
         assert first.canonical_sha256 == second.canonical_sha256
