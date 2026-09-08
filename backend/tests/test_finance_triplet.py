@@ -2,12 +2,12 @@
 
 0.6.5 条目 1(契约)的首个可验收切片。覆盖:
 - Profile: 完整示例往返、金额 Decimal 纪律(float/int/NaN/Infinity/null 拒绝)、
-  单位规范化、成本非负/价格正零负、carrier/direction/kind、content_sha256 派生与自校验;
+  单位规范化、成本非负/价格正零负、carrier/direction/kind、content_sha256 派生身份;
 - Overrides: profile_ref 精确引用、越权覆盖拒绝(新增 finance_type/driver/price_id、
   改 carrier/direction/单位/分量、顶层禁改字段)、部分金额/null 拒绝、摘要一致性;
 - 空 Overrides 文档: 有效且摘要即 overrides_sha256, 合并结果等于 Profile;
-- 合并器: 稀疏覆盖只替换叶子、未覆盖原样保留、三摘要闭合、重新合并验证可复现;
-- Effective: 只能经合并器生成语义的验证(from_dict 自洽 + 血缘校验)。
+- 合并器: 稀疏覆盖只替换叶子、未覆盖原样保留、三摘要闭合、重新合并可复现;
+- Effective: 只能经合并器生成语义的验证(from_dict 自洽 + 精确来源重新合并)。
 
 测试环境: 纯函数契约测试, 无数据库/HTTP(宪法 §14.2 纯函数单元测试)。
 """
@@ -25,7 +25,6 @@ from iesplan.finance.triplet import (
     FinanceProfile,
     FinanceTripletError,
     SeriesMeta,
-    effective_from_sources,
     merge_effective,
 )
 
@@ -144,12 +143,10 @@ def test_profile_roundtrip_and_content_sha():
     profile = _profile()
     assert profile.content_sha256
     assert len(profile.content_sha256) == 64
-    # 无摘要构造会计算; 声明摘要必须一致
+    # 摘要作为精确内容身份字段: 往返保留声明值(信任流程不重算比对, 2.6)
     recomputed = FinanceProfile.from_dict(profile.to_dict())
     assert recomputed.content_sha256 == profile.content_sha256
     assert recomputed.to_dict() == profile.to_dict()
-    # content_sha256 不参与自身摘要(移除后算, 恒等)
-    assert profile.computed_sha256() == profile.content_sha256
 
 
 def test_profile_sha_changes_with_semantics():
@@ -228,13 +225,6 @@ def test_profile_unknown_fields_rejected():
     payload2["energy_prices"]["grid_import"]["peak"] = "x"
     with pytest.raises(FinanceTripletError, match="未知字段"):
         FinanceProfile.from_dict(payload2)
-
-
-def test_profile_tampered_content_sha_rejected():
-    doc = _profile().to_dict()
-    doc["content_sha256"] = "0" * 64
-    with pytest.raises(FinanceTripletError, match="不一致"):
-        FinanceProfile.from_dict(doc)
 
 
 def test_profile_deep_immutable():
@@ -364,8 +354,6 @@ def test_overrides_price_partial_replace_rejected():
 def test_empty_overrides_doc_is_valid():
     profile = _profile()
     empty = FinanceOverrides.empty_for_profile(profile)
-    # 空覆盖文档不覆盖任何内容, 且其摘要即 overrides_sha256
-    assert empty.content_sha256 == empty.computed_sha256()
     assert not empty.finance_types and not empty.energy_prices
     merged = merge_effective(profile, None)
     # None 与显式空 Overrides 摘要一致
@@ -438,12 +426,12 @@ def test_merge_triple_sha_closed():
     profile = _profile()
     overrides = _overrides(profile)
     effective = merge_effective(profile, overrides)
+    # 血缘身份: Effective 记录来源摘要(不重算比对, 2.6)
     assert effective.profile_sha256 == profile.content_sha256
     assert effective.overrides_sha256 == overrides.content_sha256
     assert len(effective.content_sha256) == 64
-    # 从精确来源重新合并可复现同一 content_sha256
+    # 合并器确定性: 同输入重新合并产生同一对象
     recomputed = merge_effective(profile, overrides)
-    assert recomputed.content_sha256 == effective.content_sha256
     assert recomputed.to_dict() == effective.to_dict()
 
 
@@ -473,33 +461,14 @@ def test_merge_blocks_unbound_override_additions():
         merge_effective(profile, FinanceOverrides.from_dict(payload2))
 
 
-def test_effective_roundtrip_and_revalidate():
+def test_effective_roundtrip():
     profile = _profile()
     overrides = _overrides(profile)
     effective = merge_effective(profile, overrides)
-    # Effective 自洽(from_dict 重放校验)
+    # Effective 自洽(from_dict 重放结构校验, 摘要作为身份保留)
     restored = EffectiveFinanceConfig.from_dict(effective.to_dict())
     assert restored.content_sha256 == effective.content_sha256
     assert restored.to_dict() == effective.to_dict()
-    # effective_from_sources 携带 verify_effective 做血缘 + 重算校验
-    verified = effective_from_sources(profile, overrides, verify_effective=effective)
-    assert verified.content_sha256 == effective.content_sha256
-    # 篡改 Effective content_sha256 -> 拒绝
-    forged = effective.to_dict()
-    forged["content_sha256"] = "0" * 64
-    with pytest.raises(FinanceTripletError, match="不一致"):
-        effective_from_sources(
-            profile, overrides,
-            verify_effective=EffectiveFinanceConfig.from_dict({**forged}),
-        )
-    # 血缘不匹配 -> 拒绝
-    forged2 = effective.to_dict()
-    forged2["profile_id"] = "other-profile"
-    with pytest.raises(FinanceTripletError, match="血缘|不一致"):
-        effective_from_sources(
-            profile, overrides,
-            verify_effective=EffectiveFinanceConfig.from_dict({**forged2}),
-        )
 
 
 def test_effective_deep_immutable():

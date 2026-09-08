@@ -1,13 +1,14 @@
-"""无状态纯数据类型: 规划配置 PlanningConfig(宪法 4.6 / 0.6.5 事项 3)。
+"""无状态纯数据类型: 规划配置 PlanningConfig(宪法 4.6 / 0.6.5 条目 1-2)。
 
 规划配置只描述规划问题: 目标函数/目标权重、规划变量、容量上下界和规划/系统
-约束。它不保存财务参数(设备单价、投资、O&M、能源价格、税率、资金时间成本
-属于公共财务配置 FinanceConfig)或 generator/solver 选项(属于计算配置)。
+约束。它不保存财务参数(财务参数由 FinanceProfile/FinanceOverrides 确定性合并
+生成的不可变 EffectiveFinanceConfig 承载, finance-yaml@1.0.0)或
+generator/solver 选项(属于计算配置)。
 
-- 规划与结果财务计算必须固定同一不可变 FinanceConfig revision:
-  ``finance_revision`` 字段引用该 revision, 一致性由领域校验层
-  (finance.contracts.check_revision_consistency)与装配边界共同强制;
-- 目标函数可以引用模型技术量、财务配置公共参数、规划变量和约束;
+- 规划与结果财务计算必须固定同一不可变 EffectiveFinanceConfig:
+  ``finance_content_sha256`` 字段引用其内容摘要(规范性 content_sha256),
+  一致性由领域校验层与装配边界共同强制;
+- 目标函数可以引用模型技术量、有效快照财务分量、规划变量和约束;
 - 约束为命名映射, 表达式使用受限声明式语法(语法本体属 modeling/装配域,
   本契约只做形状与白名单校验);
 - 配置摘要为确定性 SHA-256(每次保存形成新的不可变 revision);
@@ -32,7 +33,7 @@ from iesplan.core.diagnostics import Diagnostic, make_diag
 
 #: 规划配置规范化算法 ID 与版本(写入摘要; 语义变化必须升版本)。
 PLANNING_CANON_ALGORITHM_ID: Final[str] = "ies.planning_config.canonical"
-PLANNING_CANON_ALGORITHM_VERSION: Final[str] = "1.0.0"
+PLANNING_CANON_ALGORITHM_VERSION: Final[str] = "2.0.0"
 
 #: 目标方向。
 OBJECTIVE_SENSES: Final[tuple[str, ...]] = ("minimize", "maximize")
@@ -283,19 +284,21 @@ class PlanningConfig:
         objective: 目标函数(sense + 受限声明式表达式)。
         variables: 规划变量命名映射(容量/建设决策候选 + 上下界)。
         constraints: 约束命名映射(规划/系统约束)。
-        finance_revision: 规划与结果财务计算固定引用的 FinanceConfig
-            revision(64 位小写十六进制; 一致性由领域校验强制)。
+        finance_content_sha256: 规划与结果财务计算固定引用的
+            EffectiveFinanceConfig content_sha256(64 位小写十六进制;
+            一致性由领域校验强制, 宪法 4.6)。
     """
 
     objective: Objective
     variables: Mapping[str, PlanningVariable]
     constraints: Mapping[str, Constraint]
-    finance_revision: str
+    finance_content_sha256: str
 
     def __post_init__(self) -> None:
-        if not _SHA256_RE.fullmatch(self.finance_revision):
+        if not _SHA256_RE.fullmatch(self.finance_content_sha256):
             raise PlanningConfigError(
-                f"finance_revision 必须为 64 位小写十六进制: {self.finance_revision!r}"
+                f"finance_content_sha256 必须为 64 位小写十六进制: "
+                f"{self.finance_content_sha256!r}"
             )
         if not self.variables:
             raise PlanningConfigError("规划配置必须至少声明一个规划变量")
@@ -321,7 +324,7 @@ class PlanningConfig:
 
     @property
     def revision(self) -> str:
-        """确定性 revision 摘要(ies.planning_config.canonical@1.0.0)。"""
+        """确定性 revision 摘要(ies.planning_config.canonical@2.0.0)。"""
         payload = {
             "objective": self.objective.to_dict(),
             "variables": {
@@ -330,7 +333,7 @@ class PlanningConfig:
             "constraints": {
                 k: v.to_dict() for k, v in sorted(self.constraints.items())
             },
-            "finance_revision": self.finance_revision,
+            "finance_content_sha256": self.finance_content_sha256,
         }
         return hashlib.sha256(
             (
@@ -348,7 +351,7 @@ class PlanningConfig:
             "constraints": {
                 k: v.to_dict() for k, v in sorted(self.constraints.items())
             },
-            "finance_revision": self.finance_revision,
+            "finance_content_sha256": self.finance_content_sha256,
             "revision": self.revision,
         }
 
@@ -360,11 +363,12 @@ class PlanningConfig:
                 f"规划配置必须是字典, 实际 {type(mapping).__name__}"
             )
         unknown = set(mapping) - {
-            "objective", "variables", "constraints", "finance_revision", "revision",
+            "objective", "variables", "constraints", "finance_content_sha256",
+            "revision",
         }
         if unknown:
             raise PlanningConfigError(f"规划配置存在未知字段: {sorted(unknown)}")
-        missing = {"objective", "variables", "finance_revision"} - set(mapping)
+        missing = {"objective", "variables", "finance_content_sha256"} - set(mapping)
         if missing:
             raise PlanningConfigError(f"规划配置缺少必需字段: {sorted(missing)}")
         variables_raw = mapping["variables"]
@@ -383,14 +387,8 @@ class PlanningConfig:
             objective=Objective.from_dict(mapping["objective"]),
             variables=variables,
             constraints=constraints,
-            finance_revision=str(mapping["finance_revision"]),
+            finance_content_sha256=str(mapping["finance_content_sha256"]),
         )
-        declared_revision = mapping.get("revision")
-        if declared_revision is not None and str(declared_revision) != config.revision:
-            raise PlanningConfigError(
-                f"规划配置摘要与规范化算法不一致: 声明 {declared_revision!r}, "
-                f"期望 {config.revision}"
-            )
         return config
 
     @classmethod

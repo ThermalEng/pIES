@@ -86,7 +86,6 @@ class TestParseQuantityExamples:
         [
             "abc kW",  # 数字缺失
             "3 元/(kWh·h)",  # 括号拒绝
-            "3 元/kWh/h",  # 嵌套除法拒绝
             "30 C/kW",  # 仿射单位进入分母拒绝
             "kW·C",  # 仿射单位进入复合拒绝
             "30 C/kW",  # 同上(分母)
@@ -94,13 +93,24 @@ class TestParseQuantityExamples:
             "",
             "   ",
             "kW",  # 无数字
-            "1.5万kWh/h/m",  # 嵌套除法
             "2//m³",  # 空分子
         ],
     )
     def test_example_table_errors(self, text):
         with pytest.raises(UnitParseError):
             parse_quantity(text)
+
+    @pytest.mark.parametrize(
+        ("text", "canonical"),
+        [
+            # 连续除法按 A/(B·C) 语义归一(括号仍拒绝;见 parse_unit_string 合法清单)
+            ("3 元/kWh/h", "CNY/kWh·h"),
+            ("100 CNY/kW/a", "CNY/kW·a"),  # finance-yaml 权威拼写(CNY/kW/a)
+        ],
+    )
+    def test_consecutive_division_quantity_ok(self, text, canonical):
+        q = parse_quantity(text)
+        assert q.unit == canonical
 
     def test_missing_unit_without_context_raises(self):
         with pytest.raises(UnitParseError) as ei:
@@ -217,6 +227,9 @@ class TestParseUnitString:
             ("-", "1"),
             ("kV", "V"),
             ("月", "s"),
+            # 连续除法归一后分母多 token → SI 展示带括号(与 · 连乘同语义)
+            ("CNY/kW/a", "CNY/(W·s)"),
+            ("CNY/kWh/a", "CNY/(J·s)"),
         ],
     )
     def test_si_unit(self, s, si_unit):
@@ -225,8 +238,7 @@ class TestParseUnitString:
     @pytest.mark.parametrize(
         "s",
         [
-            "kW/kWh/h",
-            "CNY/(kWh·h)",
+            "CNY/(kWh·h)",  # 括号仍拒绝(01 §3.1 禁止括号)
             "CNY/kWh/",
             "/kWh",
             "kWh·",
@@ -239,6 +251,19 @@ class TestParseUnitString:
     def test_parse_unit_string_errors(self, s):
         with pytest.raises(UnitParseError):
             parse_unit_string(s)
+
+    @pytest.mark.parametrize(
+        ("s", "canonical", "factor"),
+        [
+            # 连续除法合法化并归一: a/b/c == a/(b·c) == a/b·c (A/(B·C) 系数)
+            ("kW/kWh/h", "kW/kWh·h", 1e3 / (3.6e6 * 3600)),
+            ("CNY/kW/a", "CNY/kW·a", 1 / (1e3 * 8760 * 3600)),
+            ("CNY/kWh/a", "CNY/kWh·a", 1 / (3.6e6 * 8760 * 3600)),
+            ("tCO2/万m³/s", "tCO2/万m³·s", 1e3 / 1e4 / 1.0),
+        ],
+    )
+    def test_consecutive_division_canonical(self, s, canonical, factor):
+        assert parse_unit_string(s) == (canonical, approx(factor))
 
     def test_affine_in_compound_rejected(self):
         with pytest.raises(UnitParseError) as ei:

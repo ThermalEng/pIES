@@ -5,7 +5,7 @@
     quantity    := number [ws] unit-string?
     number      := sign? int (',' int)* ['.' frac]? [('e'|'E') sign? digits]?
                  | sign? digits ['.' frac]? MULT?
-    unit-string := compound ('/' compound)?      # 分母至多一层,拒绝嵌套除法与括号
+    unit-string := compound ('/' compound)*      # 连续除法按 A/(B·C) 语义归一(分母 · 连乘)
     compound    := token (('·'|'*') token)*
     token       := MULT? symbol                  # 如 万m³、kW、元、月
     symbol      := UNITS 键 或 别名(大小写不敏感,含 kWp/MWp/°C 别名)
@@ -15,7 +15,10 @@
 1. 数值与单位之间允许零个或多个空格("1000kW"/"1000 kW"/"3 元/kWh" 均合法);
 2. 单位串缺失时:调用方提供 context(期望单位)则取 context,否则抛 UnitParseError;
 3. 仿射单位(C/F)只允许独立出现,禁止进入复合/分母(宽松化:独立 C 允许,01 §3.3);
-4. 纯乘数无单位符号("0.5 万")不合法,必须带 symbol 或 context。
+4. 纯乘数无单位符号("0.5 万")不合法,必须带 symbol 或 context;
+5. 连续除法(多段 `/`)合法化并归一为「分子 / 分母(· 连乘)」:``a/b/c`` == ``a/(b·c)``
+   == ``a/b·c`` 同一语义(A/(B·C) 系数:因子 = 分子系数 / 各分母系数连乘);
+   括号仍禁止(与 01 §3.1 一致),归一规范形恒用单层 ``/`` + ``·`` 连乘分母。
 
 本模块只依赖 core.units 与 core.errors,无业务依赖。
 """
@@ -87,7 +90,9 @@ def decompose(unit_string: str) -> tuple[list[tuple[str, str, UnitSpec]], list[t
 
     - 全串/单 token 直查优先(含 kWp、千m³ 等别名与复合注册词条);
     - 每 token 按 MULT?(symbol) 最长匹配分解,分子分母内部用 · 或 * 连乘;
-    - 拒绝:嵌套除法(多于一层 /)、括号、空 token、仿射单位进入复合/分母(01 §3.1)。
+    - 连续除法:``a/b/c`` 归一为「分子 a / 分母 b·c」(A/(B·C) 语义);
+      分母各段经 _side 分解后全部归入同一分母 token 列表;
+    - 拒绝:括号、空 token、仿射单位进入复合/分母(01 §3.1 约束 5 放宽嵌套除法)。
 
     异常:
         UnitParseError: 词法/语法不合法。
@@ -140,13 +145,20 @@ def decompose(unit_string: str) -> tuple[list[tuple[str, str, UnitSpec]], list[t
         return result
 
     parts = s.split("/")
-    if len(parts) > 2:
-        raise UnitParseError(
-            f"嵌套除法被拒绝(仅允许一层 /): {s!r}",
-            params={"text": unit_string, "position": s.find("/"), "expected": "最多一个 /", "suggestions": []},
-        )
-    numerator = _side(parts[0])
-    denominator = _side(parts[1]) if len(parts) == 2 else []
+    if len(parts) == 1:
+        numerator = _side(parts[0])
+        denominator: list[tuple[str, str, UnitSpec]] = []
+    else:
+        # 连续除法归一:分子为首段,其余各段 token 全部归入分母(A/(B·C))。
+        if any(p == "" for p in parts):
+            raise UnitParseError(
+                f"除法段存在空 token: {s!r}",
+                params={"text": unit_string, "position": 0, "expected": "token 非空", "suggestions": []},
+            )
+        numerator = _side(parts[0])
+        denominator = []
+        for segment in parts[1:]:
+            denominator.extend(_side(segment))
     if not numerator:
         raise UnitParseError(
             f"分子为空: {s!r}",

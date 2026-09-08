@@ -8,8 +8,9 @@
   (规划与财务完整性)校验, 不在本层;
 - 目标/约束表达式语法本体属 modeling/装配域, 本层只做形状与白名单复核
   (核心契约已拦截结构错误), 领域层补充聚合完整性(存在但全部未启用的约束);
-- 规划与结果财务计算必须固定同一 FinanceConfig revision: 一致性校验见
-  ``finance.contracts.check_finance_revision``(本层不重复实现)。
+- 规划与结果财务计算必须固定同一不可变 EffectiveFinanceConfig:
+  ``finance_content_sha256`` 引用其内容摘要, 一致性由服务层与装配边界
+  共同强制(本层不重复实现, 见 services.config_revisions)。
 
 本模块不依赖 HTTP、数据库或前端, 不反向依赖应用服务。
 """

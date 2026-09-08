@@ -600,7 +600,7 @@ def _migrate_0004_sqlite(conn: sa.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 _MIGRATION_0005_POSTGRES = """
--- 公共财务配置 revision 表(仅 INSERT, 不可变; 每次保存形成新 revision)
+-- 公共财务配置 revision 表(仅 INSERT, 不可变, 每次保存形成新 revision)
 CREATE TABLE IF NOT EXISTS finance_configs (
     id BIGSERIAL PRIMARY KEY,
     project_id BIGINT NOT NULL REFERENCES projects(id),
@@ -615,7 +615,7 @@ CREATE TABLE IF NOT EXISTS finance_configs (
 CREATE INDEX IF NOT EXISTS idx_finance_configs_project
     ON finance_configs (project_id, revision DESC);
 
--- 规划配置 revision 表(仅 INSERT, 不可变; 引用同一 FinanceConfig revision)
+-- 规划配置 revision 表(仅 INSERT, 不可变, 引用同一 FinanceConfig revision)
 CREATE TABLE IF NOT EXISTS planning_configs (
     id BIGSERIAL PRIMARY KEY,
     project_id BIGINT NOT NULL REFERENCES projects(id),
@@ -690,6 +690,174 @@ def _migrate_0005(conn: sa.Connection) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# 迁移 0006: 财务三件套持久化替换旧单体 FinanceConfig(0.6.5 条目 1-2)
+# ---------------------------------------------------------------------------
+
+_MIGRATION_0006_CREATE_POSTGRES = """
+-- 地区 FinanceProfile 注册表(已注册、内容寻址、可复用, 每次登记新行)
+CREATE TABLE IF NOT EXISTS finance_profiles (
+    id BIGSERIAL PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    region TEXT NOT NULL,
+    content JSONB NOT NULL,
+    content_sha256 TEXT NOT NULL
+        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+    object_id BIGINT NOT NULL REFERENCES objects(id),
+    created_by BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (profile_id, content_sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_finance_profiles_id ON finance_profiles (profile_id);
+
+-- 项目 FinanceOverrides 不可变 revision(仅 INSERT)
+CREATE TABLE IF NOT EXISTS finance_overrides (
+    id BIGSERIAL PRIMARY KEY,
+    project_id BIGINT NOT NULL REFERENCES projects(id),
+    revision BIGINT NOT NULL CHECK (revision >= 1),
+    content JSONB NOT NULL,
+    content_sha256 TEXT NOT NULL
+        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+    profile_id TEXT NOT NULL,
+    profile_sha256 TEXT NOT NULL
+        CHECK (profile_sha256 ~ '^[0-9a-f]{64}$'),
+    created_by BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_finance_overrides_project
+    ON finance_overrides (project_id, revision DESC);
+
+-- 项目 EffectiveFinanceConfig 不可变 revision(合并器产物, 仅 INSERT)
+CREATE TABLE IF NOT EXISTS effective_finance_revisions (
+    id BIGSERIAL PRIMARY KEY,
+    project_id BIGINT NOT NULL REFERENCES projects(id),
+    revision BIGINT NOT NULL CHECK (revision >= 1),
+    content JSONB NOT NULL,
+    content_sha256 TEXT NOT NULL
+        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+    profile_id TEXT NOT NULL,
+    profile_sha256 TEXT NOT NULL
+        CHECK (profile_sha256 ~ '^[0-9a-f]{64}$'),
+    overrides_sha256 TEXT NOT NULL
+        CHECK (overrides_sha256 ~ '^[0-9a-f]{64}$'),
+    created_by BIGINT NOT NULL REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_effective_finance_revisions_project
+    ON effective_finance_revisions (project_id, revision DESC);
+"""
+
+
+def _migrate_0006(conn: sa.Connection) -> None:
+    """财务三件套持久化(0006, 0.6.5 条目 1-2)。
+
+    - 新建 finance_profiles / finance_overrides / effective_finance_revisions;
+    - planning_configs.finance_revision → finance_content_sha256(引用
+      EffectiveFinanceConfig.content_sha256), 同时兼容 fresh(create_all 已含新列)
+      与 legacy(0005 旧列)两种基线, 幂等;
+    - 按正确性优先清理无效旧 planning revisions(旧 FinanceConfig 摘要链已失效,
+      因无法迁移而删除)与项目 planning 指针清空;
+    - projects: 删除旧 finance_revision 指针, 新增 finance_profile_id /
+      overrides_revision / effective_finance_revision 指针;
+    - 删除旧 finance_configs 单体表(0.6.5 纯契约先行, 无运行期消费;
+      不保留新旧双轨)。
+    确保新列 NOT NULL/check/索引/不可变触发器正确, 迁移幂等。
+    全新 SQLite 测试库经 ORM create_all 重建(无旧列/旧表), 本迁移基本 no-op;
+    存量库按需补列/删表/清理。
+    """
+    if conn.dialect.name == "postgresql":
+        _migrate_0006_postgres(conn)
+        return
+    _migrate_0006_sqlite(conn)
+
+
+def _migrate_0006_postgres(conn: sa.Connection) -> None:
+    """Postgres 分支: 仅支持两种真实输入, 幂等, B 清理失效规划。"""
+    # 1) 新三件套表
+    for stmt in _MIGRATION_0006_CREATE_POSTGRES.split(";"):
+        stripped = stmt.strip()
+        if stripped:
+            conn.execute(sa_text(stripped))
+    # 2) planning_configs: finance_revision → finance_content_sha256
+    cols = {
+        r[0]
+        for r in conn.execute(
+            sa_text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='planning_configs'"
+            )
+        ).all()
+    }
+    has_old = "finance_revision" in cols
+    has_new = "finance_content_sha256" in cols
+    if has_old and not has_new:
+        # B) legacy 0005 schema: 改名 + 清理失效旧 planning(旧 FinanceConfig
+        # 摘要链无法迁移, 旧规划 revision 直接删除, 项目指针清空)。旧库已按
+        # 0005 部署 planning_configs 不可变触发器(BEFORE DELETE → RAISE),
+        # 必须先临时卸下, 清理后由 init_db 的 _deploy_immutable_triggers
+        # 按当前 IMMUTABLE_TABLES 重建。清空后把列改为 TEXT、保持 NOT NULL
+        # 并增加与 ORM 等价且幂等的 64 位小写 hex CHECK。
+        conn.execute(sa_text("DROP FUNCTION IF EXISTS tg_planning_configs_immutable() CASCADE"))
+        conn.execute(sa_text("ALTER TABLE planning_configs RENAME COLUMN finance_revision TO finance_content_sha256"))
+        conn.execute(sa_text("DELETE FROM planning_configs"))
+        conn.execute(sa_text("UPDATE projects SET planning_revision = NULL WHERE planning_revision IS NOT NULL"))
+        conn.execute(sa_text("ALTER TABLE planning_configs ALTER COLUMN finance_content_sha256 TYPE TEXT USING finance_content_sha256::TEXT"))
+        conn.execute(sa_text("ALTER TABLE planning_configs ALTER COLUMN finance_content_sha256 SET NOT NULL"))
+        conn.execute(sa_text("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_planning_configs_finance_sha256') THEN ALTER TABLE planning_configs ADD CONSTRAINT ck_planning_configs_finance_sha256 CHECK (finance_content_sha256 ~ '^[0-9a-f]{64}$'); END IF; END $$;"))
+    # A) fresh schema: 已含 finance_content_sha256(TEXT NOT NULL/HEX CHECK), 保持现状(不重复修改)
+    # 3) projects: 新指针列 + 删旧列
+    _ensure_columns(
+        conn,
+        "projects",
+        {
+            "finance_profile_id": "BIGINT REFERENCES finance_profiles(id)",
+            "overrides_revision": "BIGINT",
+            "effective_finance_revision": "BIGINT",
+        },
+    )
+    conn.execute(sa_text("ALTER TABLE projects DROP COLUMN IF EXISTS finance_revision"))
+    # 4) 旧单体表退役(旧库可能带 finance_configs 不可变触发器函数)
+    conn.execute(sa_text("DROP FUNCTION IF EXISTS tg_finance_configs_immutable() CASCADE"))
+    conn.execute(sa_text("DROP TABLE IF EXISTS finance_configs"))
+
+
+def _migrate_0006_sqlite(conn: sa.Connection) -> None:
+    """SQLite 分支: 仅支持两种真实输入, B 清理失效规划。"""
+    cols = {
+        "planning_configs": {
+            r[1]
+            for r in conn.execute(sa_text("PRAGMA table_info(planning_configs)")).all()
+        },
+        "projects": {
+            r[1]
+            for r in conn.execute(sa_text("PRAGMA table_info(projects)")).all()
+        },
+    }
+    has_old_planning = "finance_revision" in cols["planning_configs"]
+    has_new_planning = "finance_content_sha256" in cols["planning_configs"]
+    if has_old_planning and not has_new_planning:
+        # B) legacy 0005 schema: 旧规划 revision 因无法迁移而删除, 项目指针清空
+        conn.execute(sa_text("DELETE FROM planning_configs"))
+        conn.execute(sa_text("UPDATE projects SET planning_revision = NULL WHERE planning_revision IS NOT NULL"))
+        conn.execute(sa_text("ALTER TABLE planning_configs DROP COLUMN finance_revision"))
+        _ensure_columns(conn, "planning_configs", {"finance_content_sha256": "TEXT"})
+    # A) fresh schema: 已含 finance_content_sha256, 保持现状(不重复修改)
+    if "finance_revision" in cols["projects"]:
+        conn.execute(sa_text("ALTER TABLE projects DROP COLUMN finance_revision"))
+    _ensure_columns(
+        conn,
+        "projects",
+        {
+            "finance_profile_id": "INTEGER REFERENCES finance_profiles(id)",
+            "overrides_revision": "INTEGER",
+            "effective_finance_revision": "INTEGER",
+        },
+    )
+    conn.execute(sa_text("DROP TABLE IF EXISTS finance_configs"))
+
+
 #: 有序迁移清单(version, name, upgrade)
 MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
@@ -697,6 +865,7 @@ MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0003_public_namespace_and_draft_history", "公开命名空间与不可变草稿历史", _migrate_0003),
     ("0004_project_baseline", "项目计算基线固定与旧时区列删除", _migrate_0004),
     ("0005_finance_planning_configs", "公共财务与规划配置不可变 revision 表", _migrate_0005),
+    ("0006_finance_triplet_persistence", "财务三件套持久化替换旧单体 FinanceConfig", _migrate_0006),
 ]
 
 MIGRATION_VERSIONS: tuple[str, ...] = tuple(m[0] for m in MIGRATIONS)

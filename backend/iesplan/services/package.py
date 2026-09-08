@@ -37,8 +37,6 @@ from sqlalchemy.orm import Session
 from iesplan import __version__
 from iesplan.config import settings
 from iesplan.core.contracts import (
-    FinanceConfig,
-    FinanceConfigError,
     PlanningConfig,
     PlanningConfigError,
     ProjectBaseline,
@@ -48,9 +46,16 @@ from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.idgen import sha256_hex
 from iesplan.core.jsonutil import jsonable
-from iesplan.finance.contracts import validate_finance_domain
+from iesplan.core.yamlmini import dump as yaml_dump
+from iesplan.finance import (
+    EffectiveFinanceConfig,
+    FinanceOverrides,
+    FinanceProfile,
+    FinanceTripletError,
+)
 from iesplan.models.audit import ImportProposal
 from iesplan.models.calc import CalcSnapshot, Task
+from iesplan.models.config_revision import FinanceProfile as FinanceProfileRow
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
 from iesplan.models.identity import User
 from iesplan.models.project import Draft, Project, ProjectVersion, VersionRef
@@ -408,31 +413,49 @@ def _build_package_zip(
         _add("draft.json", draft_json, "application/json")
         zf.writestr("draft.json", draft_json)
 
-        # 当前生效规划/财务配置 revision(0.6.5 事项 3): 仅导出当前生效
-        # 快照(与 draft.json 同语义; revision 追加历史属服务端状态, 不入包)。
-        # 经配置服务读取(内容摘要与持久化摘要不一致 → 数据损坏, 导出拒绝)。
-        if project.finance_revision is not None:
-            finance, finance_rev, _ = config_service.get_finance_config(db, project.id)
-            config_doc = {
-                "revision": finance_rev,
-                "content_sha256": finance.revision,
-                "finance_config": finance.to_dict(),
-            }
-            config_raw = json.dumps(jsonable(config_doc), ensure_ascii=False, indent=2).encode()
-            _add("finance_config.json", config_raw, "application/json")
-            zf.writestr("finance_config.json", config_raw)
-            files_meta["configs"]["finance_config"] = "finance_config.json"
-            if project.planning_revision is not None:
-                planning, planning_rev, _ = config_service.get_planning_config(db, project.id)
-                config_doc = {
-                    "revision": planning_rev,
-                    "content_sha256": planning.revision,
-                    "planning_config": planning.to_dict(),
-                }
-                config_raw = json.dumps(jsonable(config_doc), ensure_ascii=False, indent=2).encode()
-                _add("planning_config.json", config_raw, "application/json")
-                zf.writestr("planning_config.json", config_raw)
-                files_meta["configs"]["planning_config"] = "planning_config.json"
+        # 当前生效财务三件套/规划配置(0.6.5 条目 1-2): 仅导出当前生效
+        # 快照为四个 YAML(finance_profile.yaml / finance_overrides.yaml /
+        # effective_finance.yaml / planning_config.yaml; revision 追加历史属
+        # 服务端状态, 不入包)。经配置服务按精确指针读取(2.6: 不做本地内容
+        # 重算比对)。Profile/Overrides 为 authoring 输入, Effective 为合并器
+        # 产物, 导入时从精确来源重新合并(finance-yaml.md)。
+        configs_meta: dict[str, str] = {}
+        if project.finance_profile_id is not None:
+            profile_row = db.get(FinanceProfileRow, project.finance_profile_id)
+            if profile_row is None:
+                raise AppError(
+                    "项目 FinanceProfile 指针损坏", code="PROJ-FIN-003",
+                    params={"project_id": project.id},
+                )
+            # 精确恢复(禁止 latest 猜测漂移)
+            from iesplan.finance import FinanceProfile as _FP
+            profile = _FP.from_dict({**profile_row.content, "content_sha256": profile_row.content_sha256})
+            profile_raw = yaml_dump(profile.to_dict()).encode("utf-8")
+            _add("finance_profile.yaml", profile_raw, "application/yaml")
+            zf.writestr("finance_profile.yaml", profile_raw)
+            configs_meta["finance_profile"] = "finance_profile.yaml"
+            # Overrides: 无覆盖时导出显式空覆盖文档(overrides_sha256 血缘必须闭合)
+            overrides, _ = config_service.get_finance_overrides(db, project.id)
+            if overrides is None:
+                empty = FinanceOverrides.empty_for_profile(profile)
+                overrides = empty
+            overrides_raw = yaml_dump(overrides.to_dict()).encode("utf-8")
+            _add("finance_overrides.yaml", overrides_raw, "application/yaml")
+            zf.writestr("finance_overrides.yaml", overrides_raw)
+            configs_meta["finance_overrides"] = "finance_overrides.yaml"
+            effective, _, _ = config_service.get_effective_finance_config(db, project.id)
+            effective_raw = yaml_dump(effective.to_dict()).encode("utf-8")
+            _add("effective_finance.yaml", effective_raw, "application/yaml")
+            zf.writestr("effective_finance.yaml", effective_raw)
+            configs_meta["effective_finance"] = "effective_finance.yaml"
+        if project.planning_revision is not None:
+            planning, _, _ = config_service.get_planning_config(db, project.id)
+            planning_raw = yaml_dump(planning.to_dict()).encode("utf-8")
+            _add("planning_config.yaml", planning_raw, "application/yaml")
+            zf.writestr("planning_config.yaml", planning_raw)
+            configs_meta["planning_config"] = "planning_config.yaml"
+        if configs_meta:
+            files_meta["configs"] = configs_meta
 
         # 项目版本(不可变, 版本内容 + 版本元数据; 不含创建者账号)
         for version in versions:
@@ -793,19 +816,23 @@ def _unique_project_name(db: Session, base: str) -> str:
 
 
 def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
-    """解析包内规划/财务配置 revision 文件(0.6.5 事项 3), 严格校验。
+    """解析包内财务三件套/规划配置 YAML(0.6.5 条目 1-2), 严格校验。
 
-    返回 {"finance": FinanceConfig, "planning": PlanningConfig | None};
+    返回 {"profile": FinanceProfile, "overrides": FinanceOverrides,
+          "effective": EffectiveFinanceConfig, "planning": PlanningConfig | None};
     包未携带配置时返回 {}(导入后项目无配置, 不静默默认)。
 
     校验(任一失败 → ImportValidationError, 拒绝整个导入):
-    - files.configs 声明的路径必须存在且为合法 JSON;
-    - 规划配置文件存在但财务配置缺失 → 拒绝(规划必须引用财务配置 revision);
-    - 内容严格恢复(FinanceConfig/PlanningConfig.from_dict: 拒未知/缺失字段,
-      声明 revision 必须等于规范摘要, 防伪造/防漂移);
-    - 领域校验(币种一致性 PROJ-FIN-002、设备引用 PROJ-PLAN-003);
-    - 文件级 content_sha256 必须等于内容摘要(与持久化契约同语义);
-    - 规划配置 finance_revision 必须等于包内财务配置摘要(宪法 4.6 同 revision)。
+    - files.configs 声明的路径必须存在且为合法安全 YAML(yamlmini 子集);
+    - 三件套必须齐全(Profile + Overrides + Effective 一并导入, 缺一拒绝);
+    - 内容严格恢复(FinanceProfile/FinanceOverrides/EffectiveFinanceConfig/
+      PlanningConfig.from_dict: 拒未知/缺失字段);
+    - Overrides 对 Profile 结构校验(profile_ref 精确匹配、只许既有叶子、
+      禁改单位/carrier/direction/tax、禁新增 finance_type/price_id);
+    - 规划配置 finance_content_sha256 必须等于包内 Effective 内容摘要
+      (宪法 4.6 同一有效快照内容摘要)。
+    对象字节完整性由 _parse_package 的对象清单逐对象 sha256 校验承担
+    (外部包入口边界); 领域层不做本地内容重算比对(2.6)。
     """
     files_meta = manifest.get("files") or {}
     configs_meta = files_meta.get("configs") or {}
@@ -815,60 +842,83 @@ def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
         raise ImportValidationError(["清单 files.configs 结构非法(期望映射)"])
     reasons: list[str] = []
 
-    finance_path = configs_meta.get("finance_config")
+    profile_path = configs_meta.get("finance_profile")
+    overrides_path = configs_meta.get("finance_overrides")
+    effective_path = configs_meta.get("effective_finance")
     planning_path = configs_meta.get("planning_config")
-    if finance_path is None and planning_path is not None:
-        raise ImportValidationError(
-            ["包内携带规划配置但缺少财务配置(规划配置必须引用已保存的 FinanceConfig revision)"]
+    required = {
+        "finance_profile": profile_path,
+        "finance_overrides": overrides_path,
+        "effective_finance": effective_path,
+    }
+    for field, path in required.items():
+        if path is None:
+            reasons.append(f"清单 files.configs 缺少 {field} 条目")
+    if planning_path is not None and profile_path is None:
+        reasons.append(
+            "包内携带规划配置但缺少财务三件套(规划必须引用已生成的有效财务快照)"
         )
-    if finance_path is None:
-        raise ImportValidationError(["清单 files.configs 缺少 finance_config 条目"])
+    if reasons:
+        raise ImportValidationError(reasons)
 
-    def _load(package_field: str, path: str) -> dict:
+    def _load_yaml(package_field: str, path: str) -> dict:
         if not isinstance(path, str) or path not in entries:
             raise ImportValidationError(
                 [f"清单 files.configs.{package_field} 指向的包内文件缺失: {path}"]
             )
         try:
-            doc = json.loads(entries[path].decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise ImportValidationError([f"包内 {path} 无法解析为 JSON"]) from exc
+            from iesplan.core.yamlmini import load as yaml_load
+
+            doc = yaml_load(entries[path].decode("utf-8"))
+        except Exception as exc:
+            raise ImportValidationError(
+                [f"包内 {path} 无法解析为安全 YAML: {exc}"]
+            ) from exc
         if not isinstance(doc, dict):
             raise ImportValidationError([f"包内 {path} 结构非法(期望对象)"])
         return doc
 
-    finance_doc = _load("finance_config", finance_path)
-    finance_payload = finance_doc.get("finance_config")
+    profile: FinanceProfile | None = None
+    overrides: FinanceOverrides | None = None
+    effective: EffectiveFinanceConfig | None = None
     try:
-        finance = FinanceConfig.from_dict(finance_payload)
-    except FinanceConfigError as exc:
-        reasons.append(f"包内财务配置非法: {exc}")
-    else:
-        for d in validate_finance_domain(finance):
-            reasons.append(f"包内财务配置领域校验失败: {d.params.get('detail') or d.code}")
-        if finance_doc.get("content_sha256") != finance.revision:
-            reasons.append("包内财务配置 content_sha256 与内容摘要不一致")
+        profile = FinanceProfile.from_dict(_load_yaml("finance_profile", profile_path))
+    except FinanceTripletError as exc:
+        reasons.append(f"包内 FinanceProfile 非法: {exc}")
+    try:
+        overrides = FinanceOverrides.from_dict(
+            _load_yaml("finance_overrides", overrides_path), profile=profile
+        )
+    except FinanceTripletError as exc:
+        reasons.append(f"包内 FinanceOverrides 非法: {exc}")
+    try:
+        effective = EffectiveFinanceConfig.from_dict(
+            _load_yaml("effective_finance", effective_path)
+        )
+    except FinanceTripletError as exc:
+        reasons.append(f"包内 EffectiveFinanceConfig 非法: {exc}")
 
     planning: PlanningConfig | None = None
     if planning_path is not None:
-        planning_doc = _load("planning_config", planning_path)
-        planning_payload = planning_doc.get("planning_config")
+        planning_doc = _load_yaml("planning_config", planning_path)
         try:
-            planning = PlanningConfig.from_dict(planning_payload)
+            planning = PlanningConfig.from_dict(planning_doc)
         except PlanningConfigError as exc:
             reasons.append(f"包内规划配置非法: {exc}")
         else:
             for d in validate_planning_domain(planning):
                 reasons.append(f"包内规划配置领域校验失败: {d.params.get('detail') or d.code}")
-            if planning_doc.get("content_sha256") != planning.revision:
-                reasons.append("包内规划配置 content_sha256 与内容摘要不一致")
-            if finance is not None and planning.finance_revision != finance.revision:
+            if effective is not None and planning.finance_content_sha256 != effective.content_sha256:
                 reasons.append(
-                    "包内规划配置引用的 FinanceConfig revision 与包内财务配置不一致"
+                    "包内规划配置引用的 EffectiveFinanceConfig content_sha256 与包内有效快照不一致"
                 )
     if reasons:
         raise ImportValidationError(reasons)
-    result: dict = {"finance": finance}
+    result: dict = {
+        "profile": profile,
+        "overrides": overrides,
+        "effective": effective,
+    }
     if planning is not None:
         result["planning"] = planning
     return result
@@ -977,10 +1027,14 @@ def import_proposal(
                 "schema_version": project.schema_version,
             },
             "configs": {
-                "finance": {
-                    "present": "finance" in package_configs,
-                    "content_sha256": package_configs["finance"].revision
-                    if "finance" in package_configs else None,
+                "finance_triplet": {
+                    "present": "effective" in package_configs,
+                    "profile_sha256": package_configs["profile"].content_sha256
+                    if "profile" in package_configs else None,
+                    "overrides_sha256": package_configs["overrides"].content_sha256
+                    if "overrides" in package_configs else None,
+                    "content_sha256": package_configs["effective"].content_sha256
+                    if "effective" in package_configs else None,
                 },
                 "planning": {
                     "present": "planning" in package_configs,
@@ -1263,14 +1317,23 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     if prev_version is not None:
         project.current_version_id = prev_version.id
 
-    # 5) 规划/财务配置 revision(0.6.5 事项 3): 从暂存源包重解析并重建
+    # 5) 财务三件套/规划配置(0.6.5 条目 1-2): 从暂存源包重解析并重建
     # revision=1 行(与提案同源校验, 确认阶段为强制点; 失败 → 整个事务回滚,
-    # 不落任何行)。规划保存服务强制与当前财务配置同 revision。
+    # 不落任何行)。重建顺序: 登记 Profile → 保存 Overrides(重合并生成
+    # Effective) → 保存规划(强制与当前 Effective content 一致)。
     package_configs = _parse_config_files(entries, manifest)
-    if "finance" in package_configs:
+    if "effective" in package_configs:
         try:
-            config_service.save_finance_config(
-                db, project.id, package_configs["finance"].to_dict(), None, user.id
+            row, _ = config_service.register_finance_profile(
+                db, package_configs["profile"].to_dict(), user.id
+            )
+            # 精确绑定(禁止 latest 猜测): 直接使用注册返回的精确 row
+            # set_project_finance_profile 内部按精确 {id, sha} 定位
+            config_service.set_project_finance_profile(
+                db, project.id, row.profile_id, user.id, row.content_sha256
+            )
+            config_service.save_finance_overrides(
+                db, project.id, package_configs["overrides"].to_dict(), 1, user.id
             )
             if "planning" in package_configs:
                 config_service.save_planning_config(

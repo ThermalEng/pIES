@@ -18,7 +18,7 @@
 | [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、指向有效财务快照的精确引用、`finance_binding`、`tariff_bindings`、规划配置 | 装配校验器 |
 | [Solver Bundle](formats/solver-bundle.md) | 一个目录或不可变归档 | 固定求解器输入文件、受控命令、预期输出和结果适配器 | 求解运行时 |
 
-人工 authoring：设备模型 YAML、设备数据 CSV、`FinanceProfile`、`FinanceOverrides` 与装配 YAML 允许人工编写。`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，不能人工 authoring（导入时连同精确 Profile 与 Overrides 重新合并验证）。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
+人工 authoring：设备模型 YAML、设备数据 CSV、`FinanceProfile`、`FinanceOverrides` 与装配 YAML 允许人工编写。`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，不能人工 authoring（导入时连同精确 Profile 与 Overrides 从精确来源重新合并，恢复血缘身份；对象字节完整性由外部包入口逐对象校验承担，2.6）。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
 
 ## 扩展交付契约
 
