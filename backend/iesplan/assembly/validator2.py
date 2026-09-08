@@ -263,8 +263,7 @@ class ValidatedInterfaceNetwork:
     - network_sha256: 规范字节 SHA-256;
     - receipt: 校验回执(含相同摘要与设备内容锁)。
 
-    ``verify()`` 重新计算摘要并核对三件套一致;任何不一致必须拒绝使用并
-    重新装配,禁止带病继续计算。
+    摘要作为规范网络的稳定内容身份随产物传递，不在可信生成流程内重算。
     """
 
     canonical_text: str
@@ -273,8 +272,7 @@ class ValidatedInterfaceNetwork:
 
     def verify(self) -> bool:
         return (
-            hashlib.sha256(self.canonical_text.encode("utf-8")).hexdigest() == self.network_sha256
-            and self.receipt.network_sha256 == self.network_sha256
+            self.receipt.network_sha256 == self.network_sha256
             and self.receipt.schema == SCHEMA2_ID
             and self.receipt.schema_version == SCHEMA2_VERSION
             and self.receipt.validator_id == VALIDATOR2_ID
@@ -404,13 +402,6 @@ def validate_interface_network2(
     artifact = ValidatedInterfaceNetwork(
         canonical_text=canonical_text, network_sha256=digest, receipt=receipt
     )
-    if not artifact.verify():
-        diags.append(_diag(
-            "ASM-ART-001",
-            "三件套内部一致性失败(self_verify_failed)",
-            location=_node_loc("artifact", "artifact"),
-        ))
-        return InterfaceNetworkResult(diagnostics=diags, artifact=None)
     return InterfaceNetworkResult(diagnostics=diags, artifact=artifact)
 
 

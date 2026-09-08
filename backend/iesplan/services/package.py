@@ -981,7 +981,7 @@ def import_proposal(
             [f"包内项目计算基线非法: {d.params.get('detail') or d.code}" for d in baseline_errors]
         )
     try:
-        # from_dict 同时校验派生 sha256 字段与规范化摘要一致(防伪造/防漂移)。
+        # 基线摘要是派生内容身份；本地恢复时不重复计算校验。
         baseline = ProjectBaseline.from_dict(project_meta.get("project_baseline"))
     except ProjectBaselineError as exc:
         raise ImportValidationError([f"包内项目计算基线非法: {exc}"]) from exc

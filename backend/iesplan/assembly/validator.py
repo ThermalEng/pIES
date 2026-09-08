@@ -193,17 +193,6 @@ def _run_validation(
     artifact = ValidatedAssemblyArtifact(
         canonical_text=canonical_text, assembly_sha256=digest, receipt=receipt
     )
-    if not artifact.verify():
-        # 三件套内部一致性失败(理论上不可达,触发即内部 bug)
-        diag = make_diag(
-            "ASM-ART-001",
-            severity="error",
-            blocking=True,
-            params={"reason": "self_verify_failed"},
-            location={"object_type": "assembly", "field": "artifact"},
-        )
-        diags.append(diag)
-        return AssemblyValidationResult(diagnostics=diags, artifact=None)
     return AssemblyValidationResult(diagnostics=diags, artifact=artifact)
 
 

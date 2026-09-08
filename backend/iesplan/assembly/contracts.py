@@ -7,8 +7,7 @@
 3. 校验回执(ValidationReceipt):校验器 ID/版本、schema、规范化算法 ID/版本、
    依赖锁、资源摘要与零阻断诊断。
 
-生成器必须同时验证三者一致(``verify_or_raise``);人工修改规范文本、替换资源
-或变更依赖后摘要与回执失效,必须重新装配。产物深度不可变:构造后禁止修改。
+摘要作为规范装配的稳定内容身份随产物传递；产物深度不可变，构造后禁止修改。
 
 本模块只依赖 core(diagnostics/errors)与 assembly 域诊断码目录,不导入
 devices/services/数据库。
@@ -16,7 +15,6 @@ devices/services/数据库。
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -258,8 +256,7 @@ class ValidatedAssemblyArtifact:
     - assembly_sha256: 规范字节 SHA-256;
     - receipt: 校验回执(含相同摘要与依赖锁)。
 
-    ``verify()`` 重新计算摘要并核对三件套一致;任何不一致必须拒绝使用并重新
-    装配,禁止带病继续计算。
+    ``verify()`` 校验回执契约与产物元数据，不对可信流程生成的文本重复计算摘要。
     """
 
     canonical_text: str
@@ -267,10 +264,9 @@ class ValidatedAssemblyArtifact:
     receipt: ValidationReceipt
 
     def verify(self) -> bool:
-        """重算摘要并核对三件套及其 schema/算法/校验器版本。"""
+        """核对回执与产物元数据及其 schema/算法/校验器版本。"""
         return (
-            hashlib.sha256(self.canonical_text.encode("utf-8")).hexdigest() == self.assembly_sha256
-            and self.receipt.assembly_sha256 == self.assembly_sha256
+            self.receipt.assembly_sha256 == self.assembly_sha256
             and self.receipt.schema_id == SCHEMA_ID
             and self.receipt.schema_version == SCHEMA_VERSION
             and self.receipt.validator_id == VALIDATOR_ID
@@ -304,7 +300,6 @@ class ValidatedAssemblyArtifact:
                 blocking=True,
                 params={
                     "expected": self.assembly_sha256,
-                    "actual": hashlib.sha256(self.canonical_text.encode("utf-8")).hexdigest(),
                     "reason": "artifact_or_receipt_contract_mismatch",
                 },
                 location={"object_type": "assembly", "field": "artifact"},

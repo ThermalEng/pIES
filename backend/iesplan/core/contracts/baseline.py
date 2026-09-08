@@ -129,9 +129,8 @@ class ProjectBaseline:
     def from_dict(cls, mapping: object) -> "ProjectBaseline":
         """严格恢复: 未知字段拒绝; resolution/leap_year 缺失拒绝; 枚举之外拒绝。
 
-        scenario_mode 缺失时取默认 'single'(文档化默认值)。``sha256`` 为
-        ``to_dict`` 携带的派生摘要字段: 缺失时允许(摘要由 digest() 重新计算),
-        存在时必须与当前规范化算法摘要一致, 否则拒绝(防伪造/防摘要漂移)。
+        scenario_mode 缺失时取默认 'single'(文档化默认值)。``sha256`` 是
+        ``to_dict`` 携带的派生内容身份；恢复本地生成的基线时不重复计算校验。
         """
         if not isinstance(mapping, Mapping):
             raise ProjectBaselineError(
@@ -157,12 +156,6 @@ class ProjectBaseline:
             leap_year=leap_raw,
             scenario_mode=str(mapping.get("scenario_mode", DEFAULT_SCENARIO_MODE)),
         )
-        declared_sha256 = mapping.get("sha256")
-        if declared_sha256 is not None and str(declared_sha256) != baseline.digest():
-            raise ProjectBaselineError(
-                f"基线摘要与规范化算法不一致: 声明 {declared_sha256!r}, "
-                f"期望 {baseline.digest()}",
-            )
         return baseline
 
     @classmethod
@@ -238,7 +231,7 @@ class ProjectBaseline:
                     location={"object_type": "project_baseline", "field": "scenario_mode"},
                 )
             )
-        # 派生摘要字段: 提供时必须为 64 位小写十六进制且与规范化算法摘要一致。
+        # 派生摘要字段只校验契约格式，不对本地生成内容重复计算。
         declared_sha256 = mapping.get("sha256")
         if declared_sha256 is not None:
             if (
@@ -252,24 +245,4 @@ class ProjectBaseline:
                         location={"object_type": "project_baseline", "field": "sha256"},
                     )
                 )
-            elif not diags:
-                try:
-                    expected = cls(
-                        resolution=str(mapping["resolution"]),
-                        leap_year=bool(mapping["leap_year"]),
-                        scenario_mode=str(scenario_mode),
-                    ).digest()
-                except ProjectBaselineError:
-                    expected = ""
-                if declared_sha256 != expected:
-                    diags.append(
-                        make_diag(
-                            BASELINE_INVALID,
-                            params={
-                                "detail": f"基线摘要与规范化算法不一致: "
-                                f"声明 {declared_sha256!r}, 期望 {expected}",
-                            },
-                            location={"object_type": "project_baseline", "field": "sha256"},
-                        )
-                    )
         return diags

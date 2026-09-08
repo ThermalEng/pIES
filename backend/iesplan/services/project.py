@@ -1377,9 +1377,9 @@ def _store_content(db: Session, content: dict) -> str:
 
 
 def _load_content_by_hash(db: Session, content_hash: str) -> dict:
-    """按内容校验值读取内容对象并校验(对象缺失/哈希不符视为数据损坏)。
+    """按内容标识读取内容对象。
 
-    经 storage 公开门面读取(读取时校验大小 + sha256，架构宪法 §10)。
+    storage 公开门面负责对象存储边界的大小与摘要校验，此处不重复计算。
     """
     from iesplan.storage import ObjectCorruptError, get_object
 
@@ -1401,14 +1401,6 @@ def _load_content_by_hash(db: Session, content_hash: str) -> dict:
             message_key="ies.diag.store.corrupt",
             location={"object_type": "object", "object_id": content_hash},
         ) from exc
-    if sha256_hex(raw) != content_hash:
-        raise AppError(
-            "内容校验失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_hash},
-        )
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:

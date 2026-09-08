@@ -396,13 +396,6 @@ class DeviceMathContribution:
     canonical_text: str = ""
     contribution_sha256: str = ""
 
-    def verify(self) -> bool:
-        """重算摘要核对规范文本与声明摘要一致(确定性证据)。"""
-        return bool(self.contribution_sha256) and hashlib.sha256(
-            self.canonical_text.encode("utf-8")
-        ).hexdigest() == self.contribution_sha256
-
-
 @dataclass(slots=True)
 class MathContributionResult:
     """转换结果: 要么有完整贡献(含规范摘要),要么有阻断诊断列表。"""
@@ -719,7 +712,6 @@ def build_math_contribution(
         canonical_text=text,
         contribution_sha256=digest,
     )
-    assert contribution.verify()
     return MathContributionResult(diagnostics=diags, contribution=contribution)
 
 

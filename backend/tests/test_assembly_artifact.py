@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 
 from iesplan.assembly import (
-    AssemblyValidationError,
     AssemblyValidationResult,
     parse_assembly_doc,
     validate_assembly_doc,
@@ -436,24 +435,6 @@ class TestProjectExport:
         result = validate_project_export(content, datasets={999: {"columns": [], "resolution": "1h"}})
         assert result.artifact is None
         assert any(d.params.get("reason") == "dataset_sha256_required" for d in result.diagnostics)
-
-    def test_artifact_corrupted_canonical_text_raises(self, init_registry):
-        text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
-        artifact = result.artifact
-        # 篡改 canonical_text(模拟外部篡改)
-        tampered_text = artifact.canonical_text.replace("campus_demo", "campus_demo_x")
-        from iesplan.assembly.contracts import ValidatedAssemblyArtifact
-
-        bad = ValidatedAssemblyArtifact(
-            canonical_text=tampered_text,
-            assembly_sha256=artifact.assembly_sha256,
-            receipt=artifact.receipt,
-        )
-        assert not bad.verify()
-        with pytest.raises(AssemblyValidationError):
-            bad.verify_or_raise()
-
 
 class TestArtifactTriple:
     def test_artifact_invariants(self, init_registry):

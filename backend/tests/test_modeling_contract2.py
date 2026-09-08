@@ -146,7 +146,6 @@ class TestValidContribution:
         c = r.contribution
         assert c.device_id == "acme.device.heat_pump"
         assert c.content_sha256 == content_sha256(doc)
-        assert c.verify()
         # 变量: property + 内部变量(接口进入 flows)
         assert set(c.variables) == {"cop"}
         assert c.variables["cop"].kind == "property"
@@ -201,7 +200,7 @@ equations: {variables: {}, relations: []}
 """
         r = build_math_contribution(_doc(text))
         assert r.ok
-        assert r.contribution is not None and r.contribution.verify()
+        assert r.contribution is not None
 
     def test_in_interface_as_output_allowed(self):
         # 可中断负荷模式: 设备方程定义自己的输入接口

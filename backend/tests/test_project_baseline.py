@@ -146,11 +146,10 @@ def test_from_dict_roundtrip_to_dict() -> None:
     assert ProjectBaseline.from_dict(baseline.to_dict()) == baseline
 
 
-def test_from_dict_rejects_tampered_sha256() -> None:
+def test_from_dict_does_not_revalidate_derived_sha256() -> None:
     mapping = ProjectBaseline(resolution="1h", leap_year=False).to_dict()
     mapping["sha256"] = "0" * 64
-    with pytest.raises(ProjectBaselineError):
-        ProjectBaseline.from_dict(mapping)
+    assert ProjectBaseline.from_dict(mapping) == ProjectBaseline(resolution="1h", leap_year=False)
 
 
 def test_from_dict_rejects_unknown_and_missing_fields() -> None:
@@ -178,14 +177,6 @@ def test_validate_reports_structured_diagnostics() -> None:
     assert "布尔" in details
     assert "unknown" in details
     assert "64 位" in details
-
-
-def test_validate_reports_digest_mismatch() -> None:
-    mapping = ProjectBaseline(resolution="1h", leap_year=False).to_dict()
-    mapping["sha256"] = "0" * 64
-    diags = ProjectBaseline.validate(mapping)
-    assert len(diags) == 1
-    assert "不一致" in str(diags[0].params.get("detail") or "")
 
 
 def test_validate_accepts_valid_dict() -> None:

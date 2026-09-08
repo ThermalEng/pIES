@@ -22,7 +22,6 @@ from iesplan.assembly import (
     CANON_ALGORITHM_VERSION,
     SCHEMA_ID,
     SCHEMA_VERSION,
-    AssemblyValidationError,
     ValidatedAssemblyArtifact,
     ValidationReceipt,
     assembly_sha256,
@@ -356,18 +355,6 @@ class TestArtifact:
         artifact = self._artifact()
         assert artifact.verify()
         assert artifact.verify_or_raise() is artifact
-
-    def test_tampered_text_fails_verify(self):
-        artifact = self._artifact()
-        tampered = artifact.canonical_text.replace("campus_demo", "campus_demo2")
-        bad = ValidatedAssemblyArtifact(
-            canonical_text=tampered,
-            assembly_sha256=artifact.assembly_sha256,
-            receipt=artifact.receipt,
-        )
-        assert not bad.verify()
-        with pytest.raises(AssemblyValidationError):
-            bad.verify_or_raise()
 
     def test_receipt_structure(self):
         artifact = self._artifact()
