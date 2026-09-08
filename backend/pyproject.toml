@@ -48,7 +48,7 @@ include = ["iesplan*"]
     "catalog/**/*.yaml",
     "catalog/**/*.csv",
     "schema/*.json",
-    "samples/*.yaml",
+    "samples/**/*.yaml",
 ]
 # 0.7.0: ies.assembly JSON Schema 与合法/非法样例同为包内资源
 "iesplan.assembly" = [
