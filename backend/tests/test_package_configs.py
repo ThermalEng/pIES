@@ -4,12 +4,10 @@
 - 导出: 项目有配置 → 包内含 finance_profile.yaml / finance_overrides.yaml /
   effective_finance.yaml / planning_config.yaml(对象清单逐对象校验值一致,
   manifest.files.configs 登记四键); 无配置 → 不含;
-- 导入: 三件套随包重建(revision 由服务层生成), 导入时从精确来源重新合并
-  验证三摘要(effective_from_sources); 规划引用 Effective content 一致;
-  无配置包导入后无配置(不静默默认);
-- 校验拒绝(ImportValidationError, PKG-IMP-001): 三件套缺一 / 声明
-  content_sha256 被篡改 / Effective 与 Profile+Overrides 重新合并不一致 /
-  规划引用与包内有效快照不一致 / 越权覆盖。
+- 导入: 三件套随包重建(revision 由服务层生成), 从精确来源重新合并;
+  规划引用 Effective content 一致; 无配置包导入后无配置(不静默默认);
+- 校验拒绝(ImportValidationError, PKG-IMP-001): 三件套缺一 / 对象字节
+  校验值被篡改(外部包入口边界, 2.6) / 规划引用与包内有效快照不一致 / 越权覆盖。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录。
 """
@@ -206,7 +204,7 @@ def _setup_finance(client: TestClient, user, pid: int) -> tuple[FinanceProfile, 
     assert resp.status_code == 200, resp.text
     resp = client.put(
         f"/api/projects/{pid}/finance-profile",
-        json={"finance_profile": PROFILE_PAYLOAD},
+        json={"profile_ref": {"id": profile.profile_id, "content_sha256": profile.content_sha256}},
         headers=_h(client, user),
     )
     assert resp.status_code == 200, resp.text
@@ -428,55 +426,25 @@ def test_import_rejects_incomplete_triplet(client: TestClient, db: Session) -> N
     assert any("effective_finance" in r for r in excinfo.value.reasons)
 
 
-def test_import_rejects_tampered_profile_sha(client: TestClient, db: Session) -> None:
-    """Profile 声明 content_sha256 被篡改 → 拒绝。"""
+def test_import_rejects_byte_tampered_package_file(client: TestClient, db: Session) -> None:
+    """外部包入口边界(2.6): 对象字节被篡改(清单校验值不符)→ 拒绝。"""
     importer = make_user(db, "rej_imp_2")
     entries, configs_meta = _valid_triplet_entries()
-    profile = FinanceProfile.from_dict(PROFILE_PAYLOAD)
-    bad = {**profile.to_dict(), "content_sha256": "0" * 64}
-    entries["finance_profile.yaml"] = yaml_dump(bad).encode("utf-8")
     zip_bytes = _build_package(entries, configs_meta)
-    with pytest.raises(package_service.ImportValidationError) as excinfo:
-        package_service.import_proposal(db, importer, zip_bytes)
-    assert any("content_sha256" in r for r in excinfo.value.reasons)
-
-
-def test_import_rejects_effective_remerge_mismatch(client: TestClient, db: Session) -> None:
-    """Effective 与 Profile+Overrides 重新合并不一致(篡改 Effective 叶子) → 拒绝。"""
-    importer = make_user(db, "rej_imp_3")
-    entries, configs_meta = _valid_triplet_entries()
-    from iesplan.core.yamlmini import load as yaml_load
-
-    effective_doc = yaml_load(entries["effective_finance.yaml"].decode("utf-8"))
-    # 篡改被覆盖叶子金额(与 Overrides 的 1500 不一致), 但保留声明 content_sha256
-    effective_doc["finance_types"]["pv_system"]["upfront_capex"]["fixed"]["value"] = "9999"
-    entries["effective_finance.yaml"] = yaml_dump(effective_doc).encode("utf-8")
-    zip_bytes = _build_package(entries, configs_meta)
-    with pytest.raises(package_service.ImportValidationError) as excinfo:
-        package_service.import_proposal(db, importer, zip_bytes)
-    # 篡改叶子 → 自身摘要重算不一致或与来源重新合并不一致, 两者都拒绝
-    assert any(
-        "Effective" in r and ("不一致" in r or "重新合并" in r)
-        for r in excinfo.value.reasons
+    # 篡改包内 effective YAML 一个字节, 但保留原 manifest.json(清单 sha 不变)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        items = {info.filename: zf.read(info) for info in zf.infolist()}
+    assert b"1500" in items["effective_finance.yaml"]
+    items["effective_finance.yaml"] = items["effective_finance.yaml"].replace(
+        b"1500", b"9999", 1
     )
-
-
-def test_import_rejects_effective_remerge_bloodline(client: TestClient, db: Session) -> None:
-    """篡改 Effective 叶子并同步声明摘要: from_dict 通过, 但来源重合并血缘拒绝。"""
-    importer = make_user(db, "rej_imp_6")
-    entries, configs_meta = _valid_triplet_entries()
-    from iesplan.core.yamlmini import load as yaml_load
-
-    effective_doc = yaml_load(entries["effective_finance.yaml"].decode("utf-8"))
-    effective_doc["finance_types"]["pv_system"]["upfront_capex"]["fixed"]["value"] = "9999"
-    # 移除声明摘要后重建(重算新摘要), 使结构校验通过
-    effective_doc.pop("content_sha256", None)
-    tampered = EffectiveFinanceConfig.from_dict(effective_doc)
-    entries["effective_finance.yaml"] = yaml_dump(tampered.to_dict()).encode("utf-8")
-    zip_bytes = _build_package(entries, configs_meta)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, raw in items.items():
+            zf.writestr(path, raw)
     with pytest.raises(package_service.ImportValidationError) as excinfo:
-        package_service.import_proposal(db, importer, zip_bytes)
-    assert any("重新合并" in r for r in excinfo.value.reasons)
+        package_service.import_proposal(db, importer, buf.getvalue())
+    assert any("sha256" in r or "校验值" in r or "对象" in r for r in excinfo.value.reasons)
 
 
 def test_import_rejects_planning_finance_mismatch(client: TestClient, db: Session) -> None:

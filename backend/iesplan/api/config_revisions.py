@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.core.errors import NotFoundError
+from iesplan.core.errors import NotFoundError, http_error
 from iesplan.db import get_db
 from iesplan.services import config_revisions as config_service
 from iesplan.services import project as project_service
@@ -46,15 +46,21 @@ profile_router = APIRouter(prefix="/api/finance-profiles", tags=["finance-profil
 
 
 class ProfileSaveRequest(BaseModel):
-    """保存财务配置请求体(乐观锁: expected_revision=当前指针; 首次保存为 null)。"""
+    """引用/切换地区 FinanceProfile: 必须传精确 profile_ref{id, content_sha256}。"""
 
-    finance_profile: dict[str, Any]
+    profile_ref: dict[str, Any] = Field(..., description="精确引用 {id, content_sha256}")
 
 
 class OverridesSaveRequest(BaseModel):
     """保存 FinanceOverrides 请求体(乐观锁: expected_revision=当前 overrides_revision)。"""
 
     finance_overrides: dict[str, Any]
+    expected_revision: int | None = Field(default=None, ge=1)
+
+
+class OverridesDeleteRequest(BaseModel):
+    """清空 FinanceOverrides 请求体(乐观锁)。"""
+
     expected_revision: int | None = Field(default=None, ge=1)
 
 
@@ -115,14 +121,24 @@ def set_project_profile_endpoint(
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
-    """项目引用已登记 Profile: 原子生成空覆盖 Effective(用户不可直接 author)。"""
+    """项目引用已登记 Profile: 精确引用 {id, content_sha256}, 原子生成空覆盖 Effective。"""
     project_service.ensure_access(db, user, project_id, "edit")
-    profile_row, profile = config_service.get_finance_profile(
-        db, str(payload.finance_profile.get("profile", {}).get("id", ""))
-    )
+    ref = payload.profile_ref
+    profile_id = str(ref.get("id", ""))
+    content_sha256 = str(ref.get("content_sha256", ""))
+    if not profile_id or not content_sha256:
+        raise http_error(
+            400,
+            "PROJ-FIN-001",
+            "ies.diag.param.invalid",
+            detail="profile_ref 必须包含 {id, content_sha256}",
+        )
     overrides_rev, eff_row, effective = config_service.set_project_finance_profile(
-        db, project_id, profile.profile_id, user.id
+        db, project_id, profile_id, user.id, content_sha256
     )
+    # 提交事务: 指针/空覆盖/Effective/planning 失效一次性持久化
+    db.commit()
+    _, profile = config_service.get_finance_profile_by_ref(db, profile_id, content_sha256)
     return {
         "finance_profile": profile.to_dict(),
         "overrides_revision": overrides_rev,
@@ -159,6 +175,27 @@ def save_finance_overrides_endpoint(
     project_service.ensure_access(db, user, project_id, "edit")
     overrides_rev, eff_row, effective = config_service.save_finance_overrides(
         db, project_id, payload.finance_overrides, payload.expected_revision, user.id
+    )
+    db.commit()
+    overrides, _ = config_service.get_finance_overrides(db, project_id)
+    assert overrides is not None
+    return {
+        **_overrides_response(overrides, overrides_rev),
+        **dict(_effective_response(effective, eff_row.revision)),
+    }
+
+
+@router.delete("/finance-overrides", summary="清空 FinanceOverrides(追加空文档, 失效旧 Planning)")
+def delete_finance_overrides_endpoint(
+    project_id: int,
+    payload: OverridesDeleteRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict:
+    """清空覆盖: 追加显式空 Overrides + 新 Effective, 失效旧 Planning(409 乐观锁)。"""
+    project_service.ensure_access(db, user, project_id, "edit")
+    overrides_rev, eff_row, effective = config_service.delete_finance_overrides(
+        db, project_id, payload.expected_revision, user.id
     )
     db.commit()
     overrides, _ = config_service.get_finance_overrides(db, project_id)

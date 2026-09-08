@@ -52,7 +52,6 @@ from iesplan.finance import (
     FinanceOverrides,
     FinanceProfile,
     FinanceTripletError,
-    effective_from_sources,
 )
 from iesplan.models.audit import ImportProposal
 from iesplan.models.calc import CalcSnapshot, Task
@@ -417,9 +416,9 @@ def _build_package_zip(
         # 当前生效财务三件套/规划配置(0.6.5 条目 1-2): 仅导出当前生效
         # 快照为四个 YAML(finance_profile.yaml / finance_overrides.yaml /
         # effective_finance.yaml / planning_config.yaml; revision 追加历史属
-        # 服务端状态, 不入包)。经配置服务读取(内容摘要与持久化摘要不一致 →
-        # 数据损坏, 导出拒绝)。Profile/Overrides 为 authoring 输入, Effective
-        # 为合并器产物, 导入时从精确来源重新合并验证三摘要(finance-yaml.md)。
+        # 服务端状态, 不入包)。经配置服务按精确指针读取(2.6: 不做本地内容
+        # 重算比对)。Profile/Overrides 为 authoring 输入, Effective 为合并器
+        # 产物, 导入时从精确来源重新合并(finance-yaml.md)。
         configs_meta: dict[str, str] = {}
         if project.finance_profile_id is not None:
             profile_row = db.get(FinanceProfileRow, project.finance_profile_id)
@@ -428,7 +427,9 @@ def _build_package_zip(
                     "项目 FinanceProfile 指针损坏", code="PROJ-FIN-003",
                     params={"project_id": project.id},
                 )
-            _, profile = config_service.get_finance_profile(db, profile_row.profile_id)
+            # 精确恢复(禁止 latest 猜测漂移)
+            from iesplan.finance import FinanceProfile as _FP
+            profile = _FP.from_dict({**profile_row.content, "content_sha256": profile_row.content_sha256})
             profile_raw = yaml_dump(profile.to_dict()).encode("utf-8")
             _add("finance_profile.yaml", profile_raw, "application/yaml")
             zf.writestr("finance_profile.yaml", profile_raw)
@@ -825,15 +826,13 @@ def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
     - files.configs 声明的路径必须存在且为合法安全 YAML(yamlmini 子集);
     - 三件套必须齐全(Profile + Overrides + Effective 一并导入, 缺一拒绝);
     - 内容严格恢复(FinanceProfile/FinanceOverrides/EffectiveFinanceConfig/
-      PlanningConfig.from_dict: 拒未知/缺失字段, 声明 content_sha256/revision
-      必须等于重算值, 防伪造/防漂移);
+      PlanningConfig.from_dict: 拒未知/缺失字段);
     - Overrides 对 Profile 结构校验(profile_ref 精确匹配、只许既有叶子、
       禁改单位/carrier/direction/tax、禁新增 finance_type/price_id);
-    - 从精确来源重新合并验证: effective_from_sources(profile, overrides,
-      verify_effective=包内 Effective) —— profile_id/profile_sha256/
-      overrides_sha256 与重算 content_sha256 全部一致, 任一不一致拒绝;
     - 规划配置 finance_content_sha256 必须等于包内 Effective 内容摘要
       (宪法 4.6 同一有效快照内容摘要)。
+    对象字节完整性由 _parse_package 的对象清单逐对象 sha256 校验承担
+    (外部包入口边界); 领域层不做本地内容重算比对(2.6)。
     """
     files_meta = manifest.get("files") or {}
     configs_meta = files_meta.get("configs") or {}
@@ -898,12 +897,6 @@ def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
         )
     except FinanceTripletError as exc:
         reasons.append(f"包内 EffectiveFinanceConfig 非法: {exc}")
-    if profile is not None and overrides is not None and effective is not None:
-        try:
-            # 从精确来源重新合并验证(三摘要 + 血缘 + 重算 content_sha256)
-            effective_from_sources(profile, overrides, verify_effective=effective)
-        except FinanceTripletError as exc:
-            reasons.append(f"包内 Effective 与 Profile/Overrides 重新合并验证失败: {exc}")
 
     planning: PlanningConfig | None = None
     if planning_path is not None:
@@ -1331,12 +1324,13 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     package_configs = _parse_config_files(entries, manifest)
     if "effective" in package_configs:
         try:
-            config_service.register_finance_profile(
+            row, _ = config_service.register_finance_profile(
                 db, package_configs["profile"].to_dict(), user.id
             )
-            # 引用 Profile → 空覆盖 revision 1; 再保存包内真实覆盖(基于当前指针)
+            # 精确绑定(禁止 latest 猜测): 直接使用注册返回的精确 row
+            # set_project_finance_profile 内部按精确 {id, sha} 定位
             config_service.set_project_finance_profile(
-                db, project.id, package_configs["profile"].profile_id, user.id
+                db, project.id, row.profile_id, user.id, row.content_sha256
             )
             config_service.save_finance_overrides(
                 db, project.id, package_configs["overrides"].to_dict(), 1, user.id

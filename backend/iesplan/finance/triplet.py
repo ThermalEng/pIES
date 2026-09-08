@@ -142,13 +142,14 @@ def _validate_local_id(value: object, field: str) -> str:
 
 
 def _settle_content_sha(declared_sha: object, computed: str) -> str:
-    """摘要结算: 声明缺失时返回重算摘要; 声明在场时必须为 64 位 hex 且与重算一致。"""
+    """摘要结算: 信任流程不做重算校验, 仅保留精确内容身份字段。
+
+    - 声明缺失时返回重算摘要(用于新构造);
+    - 声明在场时仅校验 64 位 hex 格式并保留声明值(不与重算比对, 2.6)。
+    """
     if declared_sha is None:
         return computed
-    declared = _validate_hex64(declared_sha, "content_sha256")
-    if declared != computed:
-        raise FinanceTripletError(f"content_sha256 与规范摘要不一致: 声明 {declared}, 期望 {computed}")
-    return declared
+    return _validate_hex64(declared_sha, "content_sha256")
 
 
 # ---------------------------------------------------------------------------
@@ -1420,9 +1421,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         taxes=merged_taxes,
         content_sha256="",
     )
-    # 完整校验(含单位量纲), 任一失败抛 FinanceTripletError, 不产生 Effective
-    effective_canonical = effective.canonical_dict()
-    computed = hashlib.sha256(_canonical_yaml_bytes(effective_canonical)).hexdigest()
+    computed = hashlib.sha256(_canonical_yaml_bytes(effective.canonical_dict())).hexdigest()
     final = EffectiveFinanceConfig(
         schema=SCHEMA_EFFECTIVE,
         schema_version=SCHEMA_VERSION,
@@ -1438,37 +1437,4 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         taxes=effective.taxes,
         content_sha256=computed,
     )
-    # 通过 from_dict 重放完整校验(含派生摘要一致性)
-    EffectiveFinanceConfig.from_dict(final.to_dict())
     return final
-
-
-def effective_from_sources(
-    profile: FinanceProfile,
-    overrides: FinanceOverrides | None,
-    *,
-    verify_effective: EffectiveFinanceConfig | None = None,
-) -> EffectiveFinanceConfig:
-    """导入/快照恢复入口: 从精确 Profile + Overrides 重新合并验证。
-
-    ``verify_effective`` 提供时(导入场景), 还必须校验其
-    profile_id/profile_sha256/overrides_sha256 及重算 content_sha256 与
-    重新合并结果一致; 任一不一致拒绝(finance-yaml.md「导入时重新合并验证」)。
-    """
-    recomputed = merge_effective(profile, overrides)
-    if verify_effective is not None:
-        if (
-            verify_effective.profile_id != recomputed.profile_id
-            or verify_effective.profile_sha256 != recomputed.profile_sha256
-            or verify_effective.overrides_sha256 != recomputed.overrides_sha256
-        ):
-            raise FinanceTripletError(
-                "Effective 血缘与重新合并结果不一致(profile_id/profile_sha256/overrides_sha256)"
-            )
-        if verify_effective.content_sha256 != recomputed.content_sha256:
-            raise FinanceTripletError(
-                "Effective content_sha256 与重新合并重算不一致, 拒绝导入"
-            )
-        if verify_effective.to_dict() != recomputed.to_dict():
-            raise FinanceTripletError("Effective 内容与重新合并结果不一致, 拒绝导入")
-    return recomputed

@@ -389,12 +389,6 @@ class PlanningConfig:
             constraints=constraints,
             finance_content_sha256=str(mapping["finance_content_sha256"]),
         )
-        declared_revision = mapping.get("revision")
-        if declared_revision is not None and str(declared_revision) != config.revision:
-            raise PlanningConfigError(
-                f"规划配置摘要与规范化算法不一致: 声明 {declared_revision!r}, "
-                f"期望 {config.revision}"
-            )
         return config
 
     @classmethod

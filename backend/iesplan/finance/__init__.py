@@ -9,8 +9,8 @@
 - hourly:compute_financials / compute_lcoe / compute_payback / FinancialResult(新增);
 - params:FinanceParams / finance_params_from_config;
 - 财务三件套(finance-yaml@1.0.0):FinanceProfile / FinanceOverrides /
-  EffectiveFinanceConfig 领域结构、规范化摘要与确定性合并器 merge_effective /
-  effective_from_sources(0.6.5 契约切片,见 triplet 模块)。
+  EffectiveFinanceConfig 领域结构、规范化摘要与确定性合并器 merge_effective
+  (0.6.5 契约切片,见 triplet 模块)。
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ from iesplan.finance.triplet import (
     FinanceProfile,
     FinanceTripletError,
     SeriesMeta,
-    effective_from_sources,
     merge_effective,
 )
 
@@ -74,7 +73,6 @@ __all__ = [
     "SeriesMeta",
     "FinanceTripletError",
     "merge_effective",
-    "effective_from_sources",
     "SCHEMA_PROFILE",
     "SCHEMA_OVERRIDES",
     "SCHEMA_EFFECTIVE",

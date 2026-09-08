@@ -18,7 +18,7 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 - `FinanceProfile` 是已注册、内容寻址、可复用的地区财务基准；系统不得把它硬编码为对所有项目生效的全局默认，也不得把样例文件当作隐式默认绑定。仓库内或插件包中的样例只作为示范或注册 provider 的输入。
 - `FinanceOverrides` 精确引用 Profile 的稳定 ID 与内容摘要，只做稀疏原子覆盖，是 authoring 输入。
-- `EffectiveFinanceConfig` 只能由合并器从 Profile 与 Overrides 生成；可以导出、导入、进入快照，但用户不能直接 authoring。导入时连同精确 Profile 与 Overrides 重新合并验证。
+- `EffectiveFinanceConfig` 只能由合并器从 Profile 与 Overrides 生成；可以导出、导入、进入快照，但用户不能直接 authoring。导入时连同精确 Profile 与 Overrides 从精确来源重新合并, 恢复血缘身份。
 
 金额一律为 `{value, unit}` 原子：`value` 为十进制定点字符串（禁止 `float`、`NaN/Infinity`、`null`），`unit` 来自公共单位规范并经 `normalize_unit` 规范化；禁止部分金额（缺 `value` 或 `unit`）与 `null`。成本分量金额非负（允许 `0`，零费用类别、零固定成本均合法）。能源价格不设符号限制：允许有限正数、零与负数（见 `energy_prices` 行与「计价规则」）；禁止 NaN/Infinity。
 
@@ -116,7 +116,7 @@ content_sha256: "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 | `energy_prices.*.ref` | time_series 必填 | 内容寻址对象引用（64 位小写十六进制，对象完整字节 SHA-256），指向经校验的完整年度能源价格序列；序列值同样为有限 Decimal、允许零与负 |
 | `energy_prices.*.series_meta` | time_series 必填 | 不可变时间元数据：`resolution`（15min/30min/1h）、`leap_year`（bool）、`point_count`（整数）、`unit`；装配时与项目基线（resolution、闰年、点数）校验，不一致阻断且不重采样；Profile 不固定唯一项目分辨率 |
 | `taxes` | 可选（无税目可写 `{}`） | 税目登记映射：`id` → `{display_name, tax_type, rate, applies_to}`，见下「税目登记」 |
-| `content_sha256` | 派生 | 规范内容摘要（见「规范化与摘要」）；存在时必须与重算值一致，否则拒绝 |
+| `content_sha256` | 派生 | 规范内容摘要（见「规范化与摘要」）；精确内容身份字段, 信任流程不做重算校验(2.6) |
 
 单位与范围校验：
 
@@ -188,7 +188,7 @@ content_sha256: "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 | 路径 | 规则 |
 |---|---|
 | `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"1.0.0"` |
-| `profile_ref` | 必填 `{id, content_sha256}`：`id` 与目标 Profile 一致，`content_sha256` 必须等于该 Profile 的真实内容摘要；不一致拒绝合并 |
+| `profile_ref` | 必填 `{id, content_sha256}`：`id` 与目标 Profile 一致，`content_sha256` 用于精确内容身份引用（`profile_ref` 摘要、`overrides_sha256` 血缘） |
 | `finance_types` | 只允许覆盖目标 Profile **已存在** 的 `finance_type`；禁止新增或删除 `finance_type` |
 | `finance_types.*` | 只允许按 Profile 实际存在的叶子路径整体替换 `Money` 原子：`<分量>.fixed`（如 `upfront_capex.fixed`）替换为 `{value, unit}`；`<分量>.linear.<driver>.unit_cost` 替换为 `{value, unit}`。被替换叶子必须已在 Profile 声明；禁止新增或删除分量、`fixed` 节点或 `driver`（`driver` 集合不可增删）、禁止改分量类型与 `cost_method`、禁止改 `unit`（规范化后必须与 Profile 相同）；替换值必须为完整 `{value, unit}` 原子，禁止部分金额与 `null`；成本金额非负 |
 | `energy_prices` | 只允许覆盖 Profile **已存在** 的 `price_id`，禁止新增或删除 `price_id`。每个条目的 `energy_prices.<price_id>` 只写定价定义：`{kind: constant, value}` 或 `{kind: time_series, ref, series_meta}`（与 Profile 原 kind 无关）；`carrier` 与 `direction` 由 Profile 继承，在 Overrides 中出现即拒绝；`value.unit`（constant）或 `series_meta.unit`（time_series）必须与 Profile 原项相同；`time_series` 的 `ref` 指向经校验的完整年度价格序列对象，`series_meta` 必须完整并可与 Profile 引用不同序列；不允许部分混合替换（如只换 `ref` 保留旧 `series_meta`，或只换 kind 不带全量字段） |
@@ -270,7 +270,7 @@ content_sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 - `EffectiveFinanceConfig` 只能由合并器生成：`merge(FinanceProfile, FinanceOverrides | None)`；无覆盖时也必须显式携带空 Overrides 摘要（`overrides_sha256` = 空 Overrides 文档的摘要，见下），不允许省略来源字段。
 - 合并结果重新跑完整校验：币种/`price_basis`/`cost_method` 一致性、分量完整性、`price_id` 唯一性与存在性、每项 `carrier`/`direction` 合法且与 Profile 一致、价格有限性（正零负均允许，禁止 NaN/Infinity）、`time_series` 元数据完整、单位量纲规则、`taxes` 引用完整性全部重验；任一失败不产生 Effective。
 - 稀疏覆盖只替换被覆盖叶子：未覆盖的 `finance_types`、能源价格与 `taxes` 全部原样保留，不允许省略、裁剪或按“示例只写用到的部分”生成。
-- `EffectiveFinanceConfig` 可以导出、导入、进入快照；导入时连同精确 Profile 与 Overrides 重新合并验证（`profile_ref` 摘要、`overrides_sha256`、重算 `content_sha256` 全部一致），任何不一致拒绝导入。
+- `EffectiveFinanceConfig` 可以导出、导入、进入快照；导入时连同精确 Profile 与 Overrides 重新合并, 从精确来源恢复血缘身份（`profile_ref` 摘要、`overrides_sha256`）。
 - 装配与计算只消费该不可变快照：不运行期继承 Profile、不读取“最新地区价格”、不静默默认值。
 
 ## 规范化与摘要
@@ -279,10 +279,10 @@ content_sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 
 区分两类摘要，用途与验证对象不同，**不要求相等**：
 
-- **对象字节摘要（bytes SHA-256）**：对落盘/存储对象文件的**完整字节**（含文件内 `content_sha256` 字段）计算，用于内容寻址（`object_id`、`ref.sha256`）与存储/项目包对象校验；
+- **对象字节摘要（bytes SHA-256）**：对落盘/存储对象文件的**完整字节**（含文件内 `content_sha256` 字段）计算，用于内容寻址（`object_id`、`ref.sha256`）与对象存储/项目包外部入口的字节完整性校验；
 - **规范内容摘要（`content_sha256`）**：移除派生摘要字段后的规范 YAML 字节摘要，用于内容身份、覆盖引用与血缘（`profile_ref`、`profile_sha256`/`overrides_sha256`/`content_sha256`）。
 
-由于文件携带自身 `content_sha256` 字段，同一文件的两个摘要通常不相等；两者分别验证、缺一不可（验证顺序见「装配与项目包引用」）。
+由于文件携带自身 `content_sha256` 字段，同一文件的两个摘要通常不相等。信任流程(2.6)中，摘要作为 Profile/Effective 的精确 revision 身份与血缘字段保留，但**不在可信内部流程中对本地内容重算比对**；对象存储自身的内容寻址与项目包外部入口的逐对象字节校验仍必须执行（见「装配与项目包引用」）。
 
 | 文档 | 摘要输入（移除派生字段后） | 语义变化 |
 |---|---|---|
@@ -334,6 +334,6 @@ period_energy_sale(b)     = −raw_charge(b)         # direction: sale
 ## 装配与项目包引用
 
 - 装配 YAML 的 `finance` 节使用**精确引用**指向 Effective YAML：`ref`（`kind: object` 或包内 `relative_file`）携带对象 ID 与**对象字节摘要**；血缘字段（`profile_id`/`profile_sha256`/`overrides_sha256`/`content_sha256`）携带**规范内容摘要**。装配不在内内联一份完整配置；`ValidatedAssemblyArtifact` 固定引用与两类摘要。
-- 验证顺序：读取被引用对象 → 对完整字节重算 SHA-256，必须等于 `ref.sha256`（对象完整性）→ 解析并重算规范内容摘要，必须等于 `content_sha256` 且等于 Effective 文件自身 `content_sha256` 字段（内容身份）。两类摘要分别验证，互不相等也合法。
-- 项目包可携带 `finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml` 三个文件；导入时按上述顺序分别验证各文件，并对 Profile、Overrides 与 Effective 重新合并验证。
+- 验证顺序：读取被引用对象 → 对完整字节重算 SHA-256，必须等于 `ref.sha256`（对象完整性，属对象存储/外部入口校验）；血缘字段作为精确 revision 身份随快照固定，不在可信内部流程中对本地内容重算比对。
+- 项目包可携带 `finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml` 三个文件；导入时对象字节完整性按清单逐对象校验，并对 Profile、Overrides 与 Effective 从精确来源重新合并。
 - 数据库内部存储使用列/JSON 表示，不强制 YAML；HTTP JSON DTO 仍为 JSON。
