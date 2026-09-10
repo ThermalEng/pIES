@@ -267,6 +267,12 @@ def canonical_bytes(document: DeviceModelDocument) -> bytes:
     return json.dumps(to_dict(document), **_CANONICAL_KWARGS).encode("utf-8")
 
 
+def content_sha256(document: DeviceModelDocument) -> str:
+    """兼容存根：返回设备文档规范字节的 SHA（文本仅校验字头，保留此函数以兼容旧测试）。"""
+    import hashlib
+    return hashlib.sha256(canonical_bytes(document)).hexdigest()
+
+
 def canonical_receipt(document: DeviceModelDocument) -> dict[str, Any]:
     """校验回执：schema、规范化器版本与结构摘要。文本文件只校验字头。"""
     return {

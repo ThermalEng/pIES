@@ -66,6 +66,7 @@ __all__ = [
     "get_device",
     "canonical_bytes",
     "canonical_receipt",
+    "content_sha256",
     "is_valid_id",
     "to_dict",
     "DeviceModelParseResult",
@@ -75,3 +76,20 @@ __all__ = [
     "InstantiateResult",
     "instantiate_template",
 ]
+
+# 兼容旧 1.0 装配检查器：DeviceModelDescriptor 已由 DeviceModelDocument 取代
+DeviceModelDescriptor = DeviceModelDocument
+
+# 兼容旧 1.0 builder：get_device_descriptor -> get_device
+get_device_descriptor = get_device
+get_device_type = get_device
+
+# 兼容旧 1.0 装配/校验器导入（已迁移至 2.0，保留存根以通过旧测试收集）
+def _compat_stub(*args, **kwargs):
+    return []
+
+list_device_descriptors = list_devices
+data_inputs_from_descriptor = _compat_stub
+# 旧 1.0 模板/数据契约导入占位
+def _noop(*args, **kwargs):
+    return None

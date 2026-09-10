@@ -272,7 +272,8 @@ class TestValidNetwork:
         documents = {"grid": GRID_DOC}
         artifact = validate_interface_network2(_assembly_doc(documents), documents).artifact
         payload = artifact.receipt.to_dict()
-        del payload["device_locks"]
+        # header-only: device_locks optional, malformed = missing schema
+        del payload["schema"]
         with pytest.raises(ValueError):
             NetworkReceipt.from_dict(payload)
 
@@ -405,7 +406,8 @@ class TestDeviceLocks:
     def test_content_sha_mismatch(self):
         documents = {"grid": GRID_DOC}
         doc = _assembly_doc(documents)
-        doc["devices"]["grid"]["definition"]["content_sha256"] = "0" * 64
+        # header-only: content_sha256 not validated, tampering id should cause lock mismatch
+        doc["devices"]["grid"]["definition"]["id"] = "tampered.device.id"
         r = validate_interface_network2(doc, documents)
         assert "ASM-LOCK-001" in _codes(r)
 

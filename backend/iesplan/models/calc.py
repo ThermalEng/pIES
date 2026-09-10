@@ -26,7 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, IDEMPOTENCY_KEY_RE, JSONB, BigIntArray, bigint_pk, regex_check
+from iesplan.models.common import IDEMPOTENCY_KEY_RE, JSONB, BigIntArray, bigint_pk, regex_check
 
 #: 任务状态枚举(01 §7.2, 与契约第3节一致)
 TASK_STATUSES: tuple[str, ...] = (
@@ -97,13 +97,11 @@ class CalcSnapshot(Base):
     extension_versions: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
     random_seed: Mapped[int] = mapped_column(BigInteger, nullable=False)
     tolerances: Mapped[dict | None] = mapped_column(JSONB)
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     #: 0.7.0 之前的非规范 YAML，仅保留旧快照审计；新快照不得写入/消费。
     assembly_text: Mapped[str | None] = mapped_column(Text)
-    #: 规范装配文本 + SHA-256 + 确定性校验回执（三件套）。旧快照升级后可为 NULL，
-    #: Worker 必须拒绝缺任一成员的快照；所有新快照由统一校验入口完整写入。
+    #: 规范装配文本 + 确定性校验回执（二件套，文本仅校验字头，不做 SHA）。
+    #: 旧快照升级后可为 NULL，Worker 必须拒绝缺任一成员的快照；所有新快照由统一校验入口完整写入。
     canonical_assembly_text: Mapped[str | None] = mapped_column(Text)
-    assembly_sha256: Mapped[str | None] = mapped_column(Text)
     assembly_receipt: Mapped[dict | None] = mapped_column(JSONB)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -111,11 +109,6 @@ class CalcSnapshot(Base):
     )
 
     __table_args__ = (
-        regex_check(f"content_hash ~ '{HASH64_RE}'", name="ck_calc_snapshots_content_hash"),
-        regex_check(
-            f"assembly_sha256 IS NULL OR assembly_sha256 ~ '{HASH64_RE}'",
-            name="ck_calc_snapshots_assembly_sha256",
-        ),
         Index("idx_calc_snapshots_version", "project_version_id", sa.text("created_at DESC")),
     )
 

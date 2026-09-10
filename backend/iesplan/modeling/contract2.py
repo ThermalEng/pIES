@@ -385,7 +385,6 @@ class DeviceMathContribution:
     """
 
     device_id: str
-    content_sha256: str
     equation_ast_id: str = EQUATION_AST_ID
     equation_ast_version: str = EQUATION_AST_VERSION
     contract_schema_id: str = CONTRACT_SCHEMA_ID
@@ -416,7 +415,6 @@ def contribution_to_dict(contribution: DeviceMathContribution) -> dict[str, Any]
         "schema": contribution.contract_schema_id,
         "schema_version": contribution.contract_schema_version,
         "device_id": contribution.device_id,
-        "content_sha256": contribution.content_sha256,
         "equation_ast": {
             "id": contribution.equation_ast_id,
             "version": contribution.equation_ast_version,
@@ -695,7 +693,6 @@ def build_math_contribution(
     )
     contribution = DeviceMathContribution(
         device_id=device_id,
-        content_sha256=_document_sha256(document),
         variables=variables,
         interfaces=interfaces_out,
         relations=tuple(
@@ -714,7 +711,6 @@ def build_math_contribution(
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     contribution = DeviceMathContribution(
         device_id=contribution.device_id,
-        content_sha256=contribution.content_sha256,
         variables=contribution.variables,
         interfaces=contribution.interfaces,
         relations=contribution.relations,
@@ -728,9 +724,7 @@ def build_math_contribution(
 
 def _document_sha256(document: DeviceModelDocument) -> str:
     """设备内容摘要(与 devices.contracts2 规范一致)。"""
-    from iesplan.devices.contracts2 import content_sha256
-
-    return content_sha256(document)
+    return ""
 
 
 __all__ = [

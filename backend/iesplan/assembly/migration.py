@@ -8,7 +8,7 @@ edges/pipelines/constraints/requirements 章节 + 边-端结构);本模块将其
 
 设计要点(0.7.0 文档/任务说明):
 - 迁移为纯函数:输入旧 spec/text + datasets/solver/olderator,产出新 doc + 回执;
-- 旧形态无法唯一映射的字段(无 model version、缺 solver、无数据集 sha256 等)
+- 旧形态无法唯一映射的字段(无 model version、缺 solver、无数据集等)
   产生阻断诊断,回执记录失败 → 失败可见,不存在半迁移;
 - 已迁移内容必须经过 ``validate_assembly_doc`` 才视为可执行;本模块对
   生成的新 doc 调用 ``validate_assembly_doc`` 并把诊断写入回执;
@@ -19,7 +19,6 @@ edges/pipelines/constraints/requirements 章节 + 边-端结构);本模块将其
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -67,8 +66,6 @@ def migrate_assembly_text(
         return MigrationResult(
             doc=None,
             receipt=_make_receipt(
-                text_bytes=text.encode("utf-8"),
-                new_sha="",
                 transformations=[],
                 diagnostics=list(parsed.diagnostics),
                 ok=False,
@@ -89,7 +86,7 @@ def migrate_assembly_spec(
 
     Args:
         spec: 旧形态 ``AssemblySpec``(format_version = "1.0");
-        datasets: 数据集元信息(以版本 id 整数索引),需含 sha256/media_type;
+        datasets: 数据集元信息(以版本 id 整数索引),需含 media_type;
         solver: 新格式 calculation.solver 引用;省略则尝试 LEGACY_SOLVER_REF 推导,
             但保守起见未提供即阻断(失败可见)。
         generator: 新格式 calculation.generator 引用;缺省取旧 spec.requirements.algorithm,
@@ -139,7 +136,7 @@ def migrate_assembly_spec(
     def _utc(dt) -> str:
         return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
-    # 3) resources.datasets(失败可见:数据集元信息缺失或缺 sha256 → 阻断)
+    # 3) resources.datasets(失败可见:数据集元信息缺失 → 阻断)
     resources_datasets, data_diags = _build_resources_from_spec(spec, datasets_map)
     diags.extend(data_diags)
     if data_diags:
@@ -297,11 +294,7 @@ def _validate_migrated(
         diags.append(d)
     if result.artifact is None:
         return _fail_result(diags, transformations, doc=doc)
-    # 新 doc 的 SHA 由校验器产出(回执一致性)
-    new_sha = result.artifact.assembly_sha256
     receipt = _make_receipt(
-        text_bytes=None,
-        new_sha=new_sha,
         transformations=transformations,
         diagnostics=diags,
         ok=True,
@@ -368,16 +361,13 @@ def _build_resources_from_spec(
         if meta is None:
             diags.append(_conv_diag("dataset_meta_missing", dataset_version_id=vid))
             continue
-        sha = str(meta.get("sha256") or meta.get("content_hash") or "")
         media = str(meta.get("media_type") or "text/csv")
-        if not sha:
-            diags.append(_conv_diag("dataset_sha256_required", dataset_version_id=vid))
-            continue
+        # 文本只校验字头，不做 SHA 内容摘要；object_id 仅作为资源标识
+        object_id = str(meta.get("object_id") or f"dataset:{vid}")
         out[f"ds{vid}"] = {
             "source": {
                 "kind": "object",
-                "object_id": f"sha256:{sha}",
-                "sha256": sha,
+                "object_id": object_id,
                 "media_type": media,
             }
         }
@@ -390,7 +380,7 @@ def _datasets_for_validation(doc: dict) -> dict:
     """根据 doc.resources.datasets 的 object_id 重建 validation 阶段的 datasets 快照。
 
     校验器要求 datasets 形参为 {dataset_id: {columns, ...}};迁移结果中
-    resources.datasets 已含 sha256+media_type,但缺 columns 元信息。
+    resources.datasets 已含 media_type,但缺 columns 元信息。
     此处返回空元信息,接受列存在性检查的"无元信息"路径(校验器无 datasets
     参数时不报阻断性 column_not_found)。
     """
@@ -413,8 +403,6 @@ def _fail_result(
     doc: dict | None = None,
 ) -> MigrationResult:
     receipt = _make_receipt(
-        text_bytes=None,
-        new_sha="",
         transformations=transformations,
         diagnostics=diags,
         ok=False,
@@ -424,8 +412,6 @@ def _fail_result(
 
 def _make_receipt(
     *,
-    text_bytes: bytes | None,
-    new_sha: str,
     transformations: list[str],
     diagnostics: list[Diagnostic],
     ok: bool,
@@ -434,8 +420,7 @@ def _make_receipt(
 
     字段:
       migration / from_format / to_schema: 迁移元信息;
-      old_sha256 / new_sha256: 输入/输出摘要(text 路径);
-      transformations: 已记录的字段映射决策;
+      transformations: 已记录的字段映射决策(文本只校验字头，不做 SHA);
       ok: 全部成功且通过 validator 才为 true;
       diagnostics: 全量诊断序列。
     """
@@ -443,8 +428,6 @@ def _make_receipt(
         "migration": "ies.assembly",
         "from_format": FORMAT_VERSION,
         "to_schema": SCHEMA_VERSION,
-        "old_sha256": hashlib.sha256(text_bytes).hexdigest() if text_bytes else "",
-        "new_sha256": new_sha,
         "transformations": list(transformations),
         "ok": ok,
         "diagnostics": [d.to_dict() for d in diagnostics],
