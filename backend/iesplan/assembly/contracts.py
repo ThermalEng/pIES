@@ -1,13 +1,12 @@
 """ies.assembly 1.0.0 契约:ValidatedAssemblyArtifact 与校验回执(roadmap 0.7.0)。
 
-成功产物是不可变三件套(见 manual/developer-guide/zh-CN/formats/assembly-yaml.md
+成功产物是不可变二件套(见 manual/developer-guide/zh-CN/formats/assembly-yaml.md
 「ValidatedAssemblyArtifact」节):
 1. 规范装配文本(canonical_text):时间统一 UTC、资源为内容 ID、字段稳定排序;
-2. assembly_sha256:对规范字节计算的 SHA-256;
-3. 校验回执(ValidationReceipt):校验器 ID/版本、schema、规范化算法 ID/版本、
+2. 校验回执(ValidationReceipt):校验器 ID/版本、schema、规范化算法 ID/版本、
    依赖锁、资源摘要与零阻断诊断。
 
-摘要作为规范装配的稳定内容身份随产物传递；产物深度不可变，构造后禁止修改。
+产物深度不可变，构造后禁止修改。
 
 本模块只依赖 core(diagnostics/errors)与 assembly 域诊断码目录,不导入
 devices/services/数据库。
@@ -99,7 +98,6 @@ class ValidationReceipt:
     不会影响回执。
     """
 
-    assembly_sha256: str = ""
     schema_id: str = SCHEMA_ID
     schema_version: str = SCHEMA_VERSION
     validator_id: str = VALIDATOR_ID
@@ -135,7 +133,6 @@ class ValidationReceipt:
                 "id": self.canonical_algorithm_id,
                 "version": self.canonical_algorithm_version,
             },
-            "assembly_sha256": self.assembly_sha256,
             "dependencies": _thaw_value(self.dependencies),
             "resources": _thaw_value(self.resources),
             "diagnostics": [_stable_diagnostic_dict(diag) for diag in self.diagnostics],
@@ -151,7 +148,6 @@ class ValidationReceipt:
             "schema_version",
             "validator",
             "canonical_algorithm",
-            "assembly_sha256",
             "dependencies",
             "resources",
             "diagnostics",
@@ -218,7 +214,6 @@ class ValidationReceipt:
                 )
             )
         string_fields = {
-            "assembly_sha256": payload["assembly_sha256"],
             "schema": payload["schema"],
             "schema_version": payload["schema_version"],
             "validator.id": validator["id"],
@@ -230,7 +225,6 @@ class ValidationReceipt:
             if not isinstance(value, str) or not value:
                 raise TypeError(f"receipt.{name} 须为非空字符串")
         return cls(
-            assembly_sha256=payload["assembly_sha256"],
             schema_id=payload["schema"],
             schema_version=payload["schema_version"],
             validator_id=validator["id"],
@@ -250,24 +244,21 @@ class ValidationReceipt:
 
 @dataclass(frozen=True, slots=True)
 class ValidatedAssemblyArtifact:
-    """唯一、可签名的成功装配产物(不可变三件套)。
+    """唯一、可签名的成功装配产物(不可变二件套)。
 
     - canonical_text: 规范装配文本(UTF-8, LF;JSON 规范形态);
-    - assembly_sha256: 规范字节 SHA-256;
-    - receipt: 校验回执(含相同摘要与依赖锁)。
+    - receipt: 校验回执。
 
     ``verify()`` 校验回执契约与产物元数据，不对可信流程生成的文本重复计算摘要。
     """
 
     canonical_text: str
-    assembly_sha256: str
     receipt: ValidationReceipt
 
     def verify(self) -> bool:
         """核对回执与产物元数据及其 schema/算法/校验器版本。"""
         return (
-            self.receipt.assembly_sha256 == self.assembly_sha256
-            and self.receipt.schema_id == SCHEMA_ID
+            self.receipt.schema_id == SCHEMA_ID
             and self.receipt.schema_version == SCHEMA_VERSION
             and self.receipt.validator_id == VALIDATOR_ID
             and self.receipt.validator_version == VALIDATOR_VERSION
@@ -280,13 +271,11 @@ class ValidatedAssemblyArtifact:
     def from_persisted(
         cls,
         canonical_text: str,
-        assembly_sha256: str,
         receipt: Mapping[str, object],
     ) -> ValidatedAssemblyArtifact:
-        """严格恢复并验证持久化三件套，供 Worker/审计入口使用。"""
+        """严格恢复并验证持久化二件套，供 Worker/审计入口使用。"""
         artifact = cls(
             canonical_text=canonical_text,
-            assembly_sha256=assembly_sha256,
             receipt=ValidationReceipt.from_dict(receipt),
         )
         return artifact.verify_or_raise()
@@ -299,7 +288,6 @@ class ValidatedAssemblyArtifact:
                 severity="error",
                 blocking=True,
                 params={
-                    "expected": self.assembly_sha256,
                     "reason": "artifact_or_receipt_contract_mismatch",
                 },
                 location={"object_type": "assembly", "field": "artifact"},
@@ -313,7 +301,6 @@ class ValidatedAssemblyArtifact:
             "schema": SCHEMA_ID,
             "schema_version": SCHEMA_VERSION,
             "canonical_text": self.canonical_text,
-            "assembly_sha256": self.assembly_sha256,
             "receipt": self.receipt.to_dict(),
         }
 
