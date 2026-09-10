@@ -32,10 +32,10 @@ MAX_ROWS_PER_DIAG = 5
 
 _REQUIRED_META_KEYS = (
     "schema", "schema_version", "dataset_id", "device_id",
-    "device_content_sha256", "source_mode", "resolution",
+    "source_mode", "resolution",
 )
 _OPTIONAL_META_KEYS = frozenset(
-    {"period", "project_baseline_sha256", "point_count", "prepared"}
+    {"device_content_sha256", "period", "project_baseline_sha256", "point_count", "prepared"}
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ID_RE = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
