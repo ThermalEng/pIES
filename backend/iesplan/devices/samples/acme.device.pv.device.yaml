@@ -1,68 +1,53 @@
-# 合法设备模型样例（ies.device-model 1.0.0）— 可直接手写并通过校验。
 schema: ies.device-model
-schema_version: "1.0.0"
-
+schema_version: "2.0.0"
 device:
   id: acme.device.pv
-  version: "1.0.0"
   names:
     zh-CN: 光伏发电
     en-US: Photovoltaic
-  model_method: mechanism
-  stateful: false
-  fidelity: high
-  energy_carriers: [electric, solar]
-  capabilities: [pv, controllable, optimization_variable]
-
-parameters:
+properties:
   rated_capacity_kwp:
-    value_type: number
-    quantity: power
+    value: 100
     unit: kWp
-    required: true
-    minimum: 0
-    maximum: 1000000
-    optimizable: true
-    stock_or_addition: addition
-  conversion_efficiency:
-    value_type: number
-    quantity: ratio
+    valid_range:
+      minimum: 0
+      maximum: 1000000
+  reference_irradiance:
+    value: 1000
+    unit: W/m2
+    valid_range:
+      minimum: 0
+      maximum: null
+  temp_coeff:
+    value: -0.004
     unit: "1"
-    required: true
-    minimum: 0
-    maximum: 1
-
-ports:
-  solar_in:
+    valid_range:
+      minimum: -0.01
+      maximum: 0
+interfaces:
+  solar_irradiance:
+    type: predefined
     carrier: solar
-    direction: in
-    quantity: irradiance
     unit: W/m2
-  electric_out:
-    carrier: electric
-    direction: out
-    quantity: power
-    unit: kW
-    capacity_parameter: rated_capacity_kwp
-
-data_inputs:
-  ghi:
-    value_type: number
-    quantity: irradiance
-    unit: W/m2
-    required: true
-    minimum: 0
-  t_ambient:
-    value_type: number
-    quantity: temperature
+    valid_range:
+      minimum: 0
+      maximum: 2000
+  ambient_temperature:
+    type: predefined
+    carrier: environment
     unit: "°C"
-    required: true
-
-states: {}
-
-model_commands:
-  pv: ies.model-command.pv.generation@1.0.0
-  controllable: ies.model-command.pv.generation@1.0.0
-  optimization_variable: ies.model-command.pv.generation@1.0.0
-
-extensions: {}
+    valid_range:
+      minimum: -50
+      maximum: 60
+  electric_out:
+    type: out
+    carrier: electricity
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+equations:
+  variables: {}
+  relations:
+    - id: pv_generation
+      expression: "electric_out[t] = rated_capacity_kwp * solar_irradiance[t] / reference_irradiance * (1 + temp_coeff * (ambient_temperature[t] - 25))"

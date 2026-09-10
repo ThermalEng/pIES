@@ -24,7 +24,6 @@ interfaces:
     carrier: environment
     unit: "°C"
     valid_range: {minimum: -50, maximum: 60}
-    source: {mode: data_predict, data_ref: ambient_temperature_prediction}
 equations:
   variables: {}
   relations:
