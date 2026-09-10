@@ -1,9 +1,8 @@
 """无状态纯数据类型: 项目计算基线(宪法 7.5 / 0.6.5 前置阶段事项 1)。
 
-项目创建时一次性固定的不可变计算口径, 当前只包含时间分辨率、是否考虑
-闰年和场景模式; 场景模式当前固定为 ``single``。基线不保存时区、开始/结束
-时间或典型日/周/年截取区间——计算序列统一使用从 ``0`` 开始的连续 ``step``,
-全周期点数由 ``resolution`` 与 ``leap_year`` 唯一推导。
+项目创建时一次性固定的不可变计算口径只包含时间分辨率、是否考虑闰年和
+场景模式。``initial_step``、``step_duration`` 与 ``step_count`` 均从这些
+显式事实唯一推导，不形成第二组可提交字段。
 
 多场景与已有项目基线变更属于 1.0.0 之后的 Roadmap 能力; 本项目只实现
 ``single`` 场景模式。
@@ -32,6 +31,9 @@ SCENARIO_MODES: Final[tuple[str, ...]] = ("single",)
 #: 默认场景模式(当前唯一取值)。
 DEFAULT_SCENARIO_MODE: Final[str] = "single"
 
+#: 设备方程使用的公开时间步长变量名。
+TIMELINE_STEP_DURATION_VAR: Final[str] = "step_duration"
+
 #: 基线规范化算法 ID 与版本(写入摘要; 语义变化必须升版本)。
 BASELINE_CANON_ALGORITHM_ID: Final[str] = "ies.project_baseline.canonical"
 BASELINE_CANON_ALGORITHM_VERSION: Final[str] = "1.0.0"
@@ -41,6 +43,13 @@ _POINT_COUNTS: Final[dict[str, tuple[int, int]]] = {
     "15min": (365 * 24 * 4, 366 * 24 * 4),  # 35040 / 35136
     "30min": (365 * 24 * 2, 366 * 24 * 2),  # 17520 / 17568
     "1h": (365 * 24, 366 * 24),  # 8760 / 8784
+}
+
+#: 分辨率对应的小时步长。
+_RESOLUTION_HOURS: Final[dict[str, float]] = {
+    "15min": 0.25,
+    "30min": 0.5,
+    "1h": 1.0,
 }
 
 #: 摘要必须为 64 位小写十六进制(严格恢复, 不允许截断/伪造摘要)。
@@ -94,6 +103,21 @@ class ProjectBaseline:
         """普通年/闰年全周期点数(由 resolution 与 leap_year 唯一推导)。"""
         normal, leap = _POINT_COUNTS[self.resolution]
         return leap if self.leap_year else normal
+
+    @property
+    def initial_step(self) -> int:
+        """计算序列的首个 step，固定从 0 开始。"""
+        return 0
+
+    @property
+    def step_duration(self) -> float:
+        """由 resolution 唯一推导的步长，单位为小时。"""
+        return _RESOLUTION_HOURS[self.resolution]
+
+    @property
+    def step_count(self) -> int:
+        """由 resolution 与 leap_year 唯一推导的项目计算点数。"""
+        return self.point_count
 
     def canonical_payload(self) -> str:
         """规范化字节负载(稳定键序 + 紧凑 JSON, 摘要计算输入)。"""

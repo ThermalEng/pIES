@@ -599,34 +599,20 @@ def test_mechanism_functions_table():
     }
     assert MECHANISM_FUNCTIONS["simulate_battery"].state_key == "soc"
     assert MECHANISM_FUNCTIONS["simulate_battery"].takes_dt is True
-    # RR-P2-05: 传输管道 stateful 机理函数(state_key + takes_dt + 元组返回)。
+    # 传输管道只表达同一步损耗，不维护延迟状态。
     spec = MECHANISM_FUNCTIONS["transport_pipe"]
-    assert spec.state_key == "delay_buffer"
-    assert spec.takes_dt is True
+    assert spec.state_key is None
+    assert spec.takes_dt is False
 
-    # 运行期实测: 传入 dt_s 不抛 TypeError, 返回 (out, state_new)。
+    # 运行期实测：同一步按 loss_rate 折减。
     from iesplan.modeling.functions import transport_pipe
 
-    out, state_new = transport_pipe(
+    out = transport_pipe(
         np.array([100.0, 200.0, 300.0]),
         loss_rate=0.1,
-        state=None,
-        dt_s=3600.0,
     )
     assert out.shape == (3,)
-    assert np.allclose(out, [0.0, 0.0, 0.0])  # 首调用无缓存 → 出流全 0
-    assert isinstance(state_new, dict)
-    assert "delay_buffer" in state_new
-    # 二次调用: 缓存上一轮的入流; rolled + 首位覆盖 0 后 × (1 - loss_rate)。
-    out2, state_new2 = transport_pipe(
-        np.array([400.0, 500.0, 600.0]),
-        loss_rate=0.1,
-        state=state_new,
-        dt_s=3600.0,
-    )
-    # cached=[100,200,300]; shifted=roll(...,1)=[300,100,200]; shifted[0]=0 → [0,100,200]; ×0.9
-    expected = np.array([0.0, 100.0, 200.0]) * 0.9
-    assert np.allclose(out2, expected)
+    assert np.allclose(out, [90.0, 180.0, 270.0])
 
 
 def test_register_command_override():
