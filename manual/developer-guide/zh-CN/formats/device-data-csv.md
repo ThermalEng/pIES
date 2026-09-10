@@ -40,7 +40,7 @@ step,electric_demand
 | `schema` | 固定为 `ies.device-data` |
 | `schema_version` | 文件契约版本 |
 | `dataset_id` | 稳定数据集 ID，不等同于文件名 |
-| `device_id` | 稳定设备 ID，不含设备独立版本；与 `schema` 字头共同决定允许绑定的 `predefined` interfaces（不做内容摘要） |
+| `device_id` | 稳定设备 ID，不含设备独立版本；与 `schema` 字头共同决定允许绑定的 `predefined` interfaces |
 | `source_mode` | 原始输入只能为 `data_repeat` 或 `data_predict`；`constant` 在装配绑定中直接给值，没有 CSV |
 | `resolution` | 该文件每个 step 的采样间隔，例如 `15min`、`30min`、`1h`；必须与项目基线一致 |
 | `unit.<column>` | 每个数值数据列的单位，必须与设备模型一致 |
@@ -150,5 +150,5 @@ CSV 元数据不能自行决定项目来源绑定。校验器必须同时消费�
 - 完整文件可以用普通文本编辑器编写并通过 `2.0.0` 校验；
 - 日/周/年重复基线、分辨率一致、物化后点数/step 对齐、常量展开、目标类型预测、缺口和非法值均有契约测试；
 - 同一语义输入得到相同规范文本；
-- 数据来源、校验和最终绑定可追溯；
+- 数据来源和最终绑定可追溯；
 - 装配、求解器和技术方程转换器不直接读取未经校验的原始 CSV。
