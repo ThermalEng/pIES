@@ -8,7 +8,7 @@
 
 正式 provider 在启动时发现和原子注册，不支持运行期热加载。设备 YAML 是安全声明内容，不是可执行 provider：内置或用户设备都使用同一个 schema、parser、validator 和方程语言，不为某个设备增加专用 Python 类、命令或语义版本。
 
-网页“模型与算法”中，设备发布由 revision、规范内容摘要和校验回执固定；算法插件 ZIP 才使用独立语义版本，并作为不可变任务载荷交给系统内置通用沙箱 generator/executor/result adapter。上传插件不会把用户模块加入 API、普通 Worker 或 provider 注册表。详细生命周期见[模型与算法](customization-center.md)。
+网页“模型与算法”中，设备发布由 revision、schema 版本和校验回执固定；算法插件 ZIP 才使用独立语义版本，并作为不可变任务载荷交给系统内置通用沙箱 generator/executor/result adapter。上传插件不会把用户模块加入 API、普通 Worker 或 provider 注册表。详细生命周期见[模型与算法](customization-center.md)。
 
 ## 身份与版本规则
 
@@ -17,8 +17,8 @@
 | 对象 | 稳定身份 | 固定具体内容 | 兼容性版本 |
 |---|---|---|---|
 | 设备 YAML | `device.id` | 发布 revision、校验回执 | 仅统一 `ies.device-model` schema 版本 |
-| 算法插件/provider | 命名空间 ID | 包/实现摘要与发布记录 | 独立三段式语义版本 |
-| 数据版本 | dataset ID | 规范内容摘要与变换记录 | 文件 schema 版本 |
+| 算法插件/provider | 命名空间 ID | 发布记录 | 独立三段式语义版本 |
+| 数据版本 | dataset ID | 变换记录 | 文件 schema 版本 |
 
 禁止给单个设备添加 `version`，也禁止用同 ID 的当前内容解释历史摘要。设备 schema 的破坏性变化提升统一 schema MAJOR；可执行 provider 的破坏性 contract 变化提升其自身 MAJOR。
 
@@ -31,7 +31,7 @@
 - `interfaces` 的 carrier、单位、有效区间和五类 type；
 - `predefined` 可绑定输入槽；设备定义不携带项目来源，每个项目装配实例必须声明 `constant/data_repeat/data_predict` 来源；
 - 受限声明式 `equations`；
-- 统一 schema 版本、规范内容摘要和校验回执。
+- 统一 schema 版本和校验回执。
 
 设备文件不得包含独立设备版本、价格、成本、税务、折旧、计算精度、算法选择、实现路径或可执行入口。前端按同一公开 descriptor 呈现 properties 和 interfaces；增加设备不能要求前端、assembly 或 generator 增加设备 ID 判断。
 
@@ -49,7 +49,7 @@
 - 输出 solver 无关的变量、关系、状态、接口流和结果映射；
 - 禁止动态执行、文件/网络访问和 solver 私有对象。
 
-装配固定设备内容摘要和方程 contract；generator 在执行前验证能力匹配。
+装配固定设备 revision 和方程 contract；generator 在执行前验证能力匹配。
 
 ## 计算 provider
 
