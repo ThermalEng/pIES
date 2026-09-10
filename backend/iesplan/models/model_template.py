@@ -11,7 +11,7 @@
   及内容摘要; 相同规范内容的重复发布幂等返回同一 revision;
   revision 一旦发布永不修改或删除(历史项目模型按精确 revision 解释)。
 
-模板稳定 ID、发布 revision、``schema_version`` 与 ``content_sha256`` 共同
+模板稳定 ID、发布 revision 与 ``schema_version`` 共同
 固定精确内容; 项目模型使用模板时固定精确 revision 与摘要。
 
 数据库层由版本化迁移 0002 创建(见 ``iesplan/migrations``, 宪法 §11);
@@ -39,7 +39,6 @@ TEMPLATE_STATUSES: tuple[str, ...] = (
     TEMPLATE_STATUS_PUBLISHED,
     TEMPLATE_STATUS_DISABLED,
 )
-
 
 class ModelTemplate(Base):
     """用户模型模板主表(草稿区 + 生命周期状态)。
@@ -69,9 +68,7 @@ class ModelTemplate(Base):
     draft_yaml_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
     #: 草稿最近一次校验的聚合诊断 JSON 对象引用(objects.id; 无草稿时 NULL)
     draft_diagnostics_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
-    #: 草稿内容摘要(小写 64 位十六进制 SHA-256; 无草稿时 NULL)
-    draft_sha256: Mapped[str | None] = mapped_column(Text)
-    #: 草稿内容是否声明顶层 inputs(列表/表单生成依据)
+    #: 草稿内容摘要(小写 64 位十六进制 SHA-256; 无草稿时 NULL)    #: 草稿内容是否声明顶层 inputs(列表/表单生成依据)
     draft_has_inputs: Mapped[bool | None] = mapped_column(sa.Boolean)
     #: 草稿乐观锁修订(每次保存草稿 +1; 并发编辑以 expected_revision 拒绝)
     draft_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("0"))
@@ -105,12 +102,10 @@ class ModelTemplate(Base):
         Index("idx_model_templates_owner", "owner_id"),
     )
 
-
 class ModelTemplateRevision(Base):
     """不可变模板发布 revision(每次发布一行; 永不修改或删除)。
 
-    ``content_sha256`` 为模板规范字节摘要(含顶层 ``inputs``); 相同规范
-    内容幂等返回同一 revision(``(template_id, content_sha256)`` 唯一约束
+    相同规范内容幂等返回同一 revision
     兜底并发)。``yaml_object_id`` 保存规范 YAML 字节, ``receipt_object_id``
     保存校验回执, ``summary_object_id`` 保存结构摘要 JSON。
     """
@@ -147,14 +142,10 @@ class ModelTemplateRevision(Base):
     __table_args__ = (
         CheckConstraint("revision >= 1", name="ck_model_template_revisions_revision"),
         CheckConstraint("input_count >= 0", name="ck_model_template_revisions_input_count"),
-        regex_check("content_sha256 ~ '^[0-9a-f]{64}$'", name="ck_mtr_content_sha256"),
-        regex_check(
-            "inputs_sha256 IS NULL OR inputs_sha256 ~ '^[0-9a-f]{64}$'",
-            name="ck_mtr_inputs_sha256",
-        ),
+
         UniqueConstraint("template_id", "revision", name="uq_model_template_revisions_revision"),
         #: 同内容幂等(重复发布相同规范内容返回同一 revision)
-        UniqueConstraint("template_id", "content_sha256", name="uq_model_template_revisions_sha"),
+
         Index("idx_mtr_template", "template_id"),
         Index("idx_mtr_idem_key", "template_id", "idempotency_key"),
     )

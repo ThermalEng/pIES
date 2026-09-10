@@ -31,13 +31,11 @@ MODEL_SOURCE_DIRECT = "direct_yaml"
 MODEL_SOURCE_TEMPLATE = "template"
 MODEL_SOURCES: tuple[str, ...] = (MODEL_SOURCE_DIRECT, MODEL_SOURCE_TEMPLATE)
 
-
 class ProjectModel(Base):
     """项目模型清单表(项目内每个已保存模型实例一行)。
 
     device_id 为最终带 ``_N`` 后缀的 ID(与模型 YAML 文件一致);
-    content_sha256 为规范内容摘要(规范化器 ``ies.device-model.canonical@2.0.0``);
-    receipt_object_id 指向校验回执 JSON 对象(回执引用)。
+    receipt_object_id 指向校验回执 JSON 对象。文本文件只校验字头。
     """
 
     __tablename__ = "project_models"
@@ -54,8 +52,6 @@ class ProjectModel(Base):
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("1"))
     #: 本次保存产生的项目草稿 revision（用于幂等重放返回同一结果）
     project_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    #: 规范内容摘要(小写 64 位十六进制 SHA-256)
-    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     #: 模型规范 YAML/JSON 文件对象引用(objects.id)
     model_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
     #: 校验回执对象引用(objects.id)
@@ -66,9 +62,7 @@ class ProjectModel(Base):
     template_id: Mapped[str | None] = mapped_column(Text)
     #: 模板发布 revision(模板来源时非空; 模板更新不影响已保存项目模型)
     template_revision: Mapped[int | None] = mapped_column(BigInteger)
-    #: 模板追溯: 模板原始字节摘要与用户 inputs 摘要(模板来源时非空)
-    template_sha256: Mapped[str | None] = mapped_column(Text)
-    inputs_sha256: Mapped[str | None] = mapped_column(Text)
+    #: 模板追溯: 模板来源时非空
     #: 幂等键(项目内唯一, 重试返回同一逻辑结果)
     idempotency_key: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
@@ -80,15 +74,7 @@ class ProjectModel(Base):
         CheckConstraint("suffix >= 1", name="ck_project_models_suffix"),
         CheckConstraint("revision >= 1", name="ck_project_models_revision"),
         CheckConstraint("project_revision >= 2", name="ck_project_models_project_revision"),
-        regex_check(f"content_sha256 ~ '{HASH64_RE}'", name="ck_project_models_content_sha256"),
-        regex_check(
-            "template_sha256 IS NULL OR template_sha256 ~ '^[0-9a-f]{64}$'",
-            name="ck_project_models_template_sha256",
-        ),
-        regex_check(
-            "inputs_sha256 IS NULL OR inputs_sha256 ~ '^[0-9a-f]{64}$'",
-            name="ck_project_models_inputs_sha256",
-        ),
+
         CheckConstraint(
             "source IN ('direct_yaml','template')", name="ck_project_models_source"
         ),
@@ -98,7 +84,6 @@ class ProjectModel(Base):
         Index("idx_project_models_project", "project_id"),
         Index("idx_project_models_object", "model_object_id"),
     )
-
 
 class ProjectModelSequence(Base):
     """项目模型编号计数器(每项目一行, 只递增不复用)。

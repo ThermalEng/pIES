@@ -5,14 +5,13 @@
 
 顶层只允许 `schema/schema_version/device/properties/interfaces/equations`；
 模板额外允许顶层 `inputs`（见 ``DeviceModelTemplate``）。设备不声明独立语义版本，
-内容由稳定 ID、规范字节 SHA-256、发布 revision 与校验回执固定。
+内容由稳定 ID、发布 revision 与校验回执固定。文本文件只校验字头。
 
 本模块是纯数据类型与纯函数：不访问数据库、文件系统与业务模块。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -185,10 +184,9 @@ class TemplateInputs:
 
 @dataclass(frozen=True, slots=True)
 class CanonicalModel:
-    """规范化结果：规范字节、内容摘要与回执。"""
+    """规范化结果：规范文本与回执。"""
 
     canonical_text: str
-    content_sha256: str
     receipt: Mapping[str, Any]
 
     @property
@@ -269,18 +267,12 @@ def canonical_bytes(document: DeviceModelDocument) -> bytes:
     return json.dumps(to_dict(document), **_CANONICAL_KWARGS).encode("utf-8")
 
 
-def content_sha256(document: DeviceModelDocument) -> str:
-    """对规范字节计算的小写 64 位十六进制 SHA-256（宪法 §7.2）。"""
-    return hashlib.sha256(canonical_bytes(document)).hexdigest()
-
-
 def canonical_receipt(document: DeviceModelDocument) -> dict[str, Any]:
-    """校验回执：schema、规范化器版本、内容摘要与结构摘要。"""
+    """校验回执：schema、规范化器版本与结构摘要。文本文件只校验字头。"""
     return {
         "schema": SCHEMA_ID,
         "schema_version": document.schema_version,
         "canonicalizer": "ies.device-model.canonical@2.0.0",
-        "content_sha256": content_sha256(document),
         "device_id": document.device.id if document.device is not None else None,
         "property_count": len(document.properties),
         "interface_count": len(document.interfaces),

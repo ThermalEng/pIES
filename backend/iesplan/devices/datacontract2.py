@@ -20,7 +20,7 @@ from typing import Any
 
 from iesplan.core.diagnostics import Diagnostic, make_diag
 from iesplan.core.timeaxis import RESOLUTIONS
-from iesplan.devices.contracts2 import DeviceModelDocument, content_sha256, is_valid_id
+from iesplan.devices.contracts2 import DeviceModelDocument, is_valid_id
 from iesplan.devices.datacontract import units_compatible
 
 SCHEMA_ID = "ies.device-data"
@@ -47,7 +47,7 @@ class DeviceData2Meta:
     schema_version: str = SCHEMA_VERSION
     dataset_id: str = ""
     device_id: str = ""
-    device_content_sha256: str = ""
+    device_content_sha256: str = ""  # 保留字段以兼容旧文件，文本只校验字头，不做 SHA 校验
     source_mode: str = "data_predict"
     resolution: str = "1h"
     period: str | None = None
@@ -135,7 +135,6 @@ def parse_metadata_v2(text_lines: list[str]) -> tuple[DeviceData2Meta, list[Diag
     for name, valid, allowed in (
         ("dataset_id", bool(_ID_RE.fullmatch(raw["dataset_id"])), "稳定小写 ID"),
         ("device_id", is_valid_id(raw["device_id"]), "稳定设备 ID"),
-        ("device_content_sha256", bool(_SHA256_RE.fullmatch(raw["device_content_sha256"])), "SHA-256"),
         ("source_mode", raw["source_mode"] in SOURCE_MODES, SOURCE_MODES),
         ("resolution", raw["resolution"] in RESOLUTION_VALUES, RESOLUTION_VALUES),
     ):
@@ -214,7 +213,7 @@ def parse_metadata_v2(text_lines: list[str]) -> tuple[DeviceData2Meta, list[Diag
     return DeviceData2Meta(
         schema_id=raw["schema"], schema_version=raw["schema_version"],
         dataset_id=raw["dataset_id"], device_id=raw["device_id"],
-        device_content_sha256=raw["device_content_sha256"], source_mode=source_mode,
+        device_content_sha256=raw.get("device_content_sha256", ""), source_mode=source_mode,
         resolution=raw["resolution"], period=period,
         project_baseline_sha256=baseline_sha, point_count=point_count, prepared=prepared,
         units=units, notes=notes, declared_columns=tuple(declared),
@@ -379,20 +378,14 @@ def canonicalize_device_data_v2(
     if document is None or document.device is None:
         diags.append(_diag(
             "SYS-CFG-001", {"detail": "缺少已校验的设备模型，无法核对数据绑定"},
-            field_name="device_content_sha256",
+            field_name="device_id",
         ))
         return DeviceData2Result(meta, (STEP_COL,), [], [], parsed.raw_sha256, "", (), diags)
-    expected_sha = content_sha256(document)
     if meta.device_id != document.device.id:
         diags.append(_diag(
             "DATA-META-008",
             {"declared": meta.device_id, "expected": document.device.id},
             field_name="device_id",
-        ))
-    if meta.device_content_sha256 != expected_sha:
-        diags.append(_diag(
-            "DATA-META-010", {"declared": meta.device_content_sha256, "expected": expected_sha},
-            field_name="device_content_sha256",
         ))
     if expected_project_baseline_sha256 is not None and (
         not meta.prepared or meta.project_baseline_sha256 != expected_project_baseline_sha256

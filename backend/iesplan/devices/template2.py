@@ -19,13 +19,12 @@ data_repeat/data_predict），叶子路径对应模型中的具体字段：
 
 所有已声明 inputs 字段都使用相同的覆盖/添加规则；新增结构能否成立由实例化后的
 完整 `ies.device-model` 校验统一裁决，不在实例化器内另设模型类型特例。
-模板修改不改变已经生成的模型。保存模板摘要、输入摘要、实例化器算法标识与
-最终模型摘要用于追溯（由调用方持久化，本模块只提供纯计算）。
+模板修改不改变已经生成的模型。保存实例化器算法标识与
+最终模型用于追溯（由调用方持久化，本模块只提供纯计算）。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -48,22 +47,15 @@ _ALLOWED_FIRST_SEGMENTS = ("properties", "interfaces", "equations")
 
 @dataclass(slots=True)
 class InstantiateResult:
-    """模板实例化结果：最终模型文档 + 追溯摘要。"""
+    """模板实例化结果：最终模型文档 + 追溯。"""
 
     document: Any  # DeviceModelDocument（解析后完整文档）
     canonical_text: str
-    content_sha256: str
-    template_sha256: str
-    inputs_sha256: str
     receipt: dict[str, Any]
 
     @property
     def ok(self) -> bool:
         return self.document is not None
-
-
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _diag_list(file: str, detail: str) -> list[Any]:
@@ -247,28 +239,19 @@ def instantiate_template(
     if not final_result.ok:
         return None, final_result.diagnostics
 
-    # 6) 摘要与回执
-    from iesplan.devices.contracts2 import canonical_bytes
-
+    # 6) 回执
     final_doc = final_result.document
     assert final_doc is not None
-    text = canonical_bytes(final_doc).decode("utf-8")
-    template_text = json.dumps(dict(template_raw), ensure_ascii=False, sort_keys=True)
-    inputs_text = json.dumps(dict(inputs), ensure_ascii=False, sort_keys=True)
+    from iesplan.devices.contracts2 import to_dict
+    text = json.dumps(to_dict(final_doc), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return (
         InstantiateResult(
             document=final_doc,
             canonical_text=text,
-            content_sha256=_sha256_text(text),
-            template_sha256=_sha256_text(template_text),
-            inputs_sha256=_sha256_text(inputs_text),
             receipt={
                 "instantiator": INSTANTIATOR_VERSION,
                 "schema": SCHEMA_ID,
                 "schema_version": SCHEMA_VERSION,
-                "content_sha256": _sha256_text(text),
-                "template_sha256": _sha256_text(template_text),
-                "inputs_sha256": _sha256_text(inputs_text),
             },
         ),
         [],
