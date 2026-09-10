@@ -52,7 +52,7 @@ docker compose up -d --build
 
 Compose 服务承担不同职责：Web 提供静态前端，backend 处理同步 HTTP，compute/I/O Worker 执行相应任务，PostgreSQL 保存权威事实，Redis 保存可重建队列与进度。某个服务能够启动，不代表整体已经 ready。
 
-实现“算法插件”后，Compose 还必须提供独立 `plugin_runner` 服务。普通 Worker 只发送固定包摘要、输入摘要、租约上下文和资源限制，不向用户插件解释器暴露 Docker Socket、数据库、`./data`、仓库目录或业务秘密。runner 使用只读根文件系统、非 root 身份、临时工作目录和默认断网策略；依赖只从构建阶段批准的离线来源取得。具体 contract 见[模型与算法](customization-center.md)和[算法插件包](formats/algorithm-plugin-package.md)。
+实现“算法插件”后，Compose 还必须提供独立 `plugin_runner` 服务。普通 Worker 只发送输入引用、租约上下文和资源限制，不向用户插件解释器暴露 Docker Socket、数据库、`./data`、仓库目录或业务秘密。runner 使用只读根文件系统、非 root 身份、临时工作目录和默认断网策略；依赖只从构建阶段批准的离线来源取得。具体 contract 见[模型与算法](customization-center.md)和[算法插件包](formats/algorithm-plugin-package.md)。
 
 ## Solver 执行隔离
 
@@ -107,7 +107,7 @@ readiness 至少核验 executor 隔离能力、solver 精确版本和最小自�
 
 ## 恢复与升级
 
-恢复演练需要验证数据库记录、对象摘要、owner 引用、项目版本、任务快照和结果之间一致。发现孤儿文件、缺失元数据或摘要不一致时，通过受控 reconciliation 处理，不手工拼路径修补。
+恢复演练需要验证数据库记录、owner 引用、项目版本、任务快照和结果之间一致。发现孤儿文件或缺失元数据时，通过受控 reconciliation 处理，不手工拼路径修补。
 
 升级必须先备份，运行版本化迁移，在隔离 Docker 环境验证，再切换服务。正式发布后，破坏性升级必须提供明确迁移和回滚说明。
 
@@ -118,6 +118,6 @@ readiness 至少核验 executor 隔离能力、solver 精确版本和最小自�
 - compute Worker 能展示并自检实际 generator/executor/solver/result adapter 版本与隔离能力；
 - plugin runner 能展示 runner contract、Python runtime 和 sandbox 能力，并在隔离不满足时拒绝用户插件任务；
 - 必需依赖失败时不进入 ready；
-- 备份能同时恢复数据库与对象，并通过摘要核对；
+- 备份能同时恢复数据库与对象；
 - 升级、回滚和故障演练都有可重复步骤；
 - 开发默认秘密、宿主机路径和临时调试配置没有进入正式镜像。

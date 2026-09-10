@@ -126,7 +126,7 @@ Solver Bundle
 - 设备 provider 注册和本模块注册表；
 - 设备目录 API 所需的领域数据。
 
-设备文件必须使用稳定 ID，并由统一 `schema_version`、规范内容摘要和校验回执固定语义；禁止为单个设备声明独立语义版本。设备文件禁止包含函数、包、模块、shell、可执行路径、价格、成本、税务、折旧或其他项目经济假设。不负责计算精度、算法选择、项目设备实例、画布布局或前端展示文案。稳定 ID `device.id` 标识一个纯技术设备模型（`ies.device-model`），与独立财务类别 `finance_type` 和项目内的装配实例 `instance_id` 严格分离；技术模型不得新增 `finance_type`，也不恢复 `capabilities`、`energy_carriers`、`model_method`、`fidelity`、`stateful` 或设备版本等冗余字段。
+设备文件必须使用稳定 ID，并由统一 `schema_version` 和校验回执固定语义；禁止为单个设备声明独立语义版本。设备文件禁止包含函数、包、模块、shell、可执行路径、价格、成本、税务、折旧或其他项目经济假设。不负责计算精度、算法选择、项目设备实例、画布布局或前端展示文案。稳定 ID `device.id` 标识一个纯技术设备模型（`ies.device-model`），与独立财务类别 `finance_type` 和项目内的装配实例 `instance_id` 严格分离；技术模型不得新增 `finance_type`，也不恢复 `capabilities`、`energy_carriers`、`model_method`、`fidelity`、`stateful` 或设备版本等冗余字段。
 
 完成实例化并可进入项目正式模型目录、装配和计算链的设备模型，顶层只使用
 `schema`、`schema_version`、`device`、`properties`、`interfaces` 和 `equations`。
@@ -189,7 +189,7 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 ### 4.6 `finance`：财务计算
 
-财务事实分层：地区 `FinanceProfile` 是已注册、内容寻址、可复用的地区财务基准（系统不得把它硬编码为全局默认，样例只作示范或注册 provider 的输入）；项目 `FinanceOverrides` 精确引用 Profile 的稳定 ID 与内容摘要，只对既有成本模型与能源价格做原子稀疏覆盖（不新增/删除财务类别与价格条目，不改变分量方法、单位、口径，也不改写价格条目的载体与购/售方向）；两者由确定性合并器合并并完整校验，生成不可变 `EffectiveFinanceConfig`。它是装配、规划与财务计算唯一消费的财务快照：计算不运行期继承 Profile、不读取最新地区价格、不静默默认值；`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，导入时连同精确来源重新合并验证。成本函数为固定建设成本加多个独立线性分量，产出时间口径明确的分量（按年项与窗口合计项相加前须显式时间跨度换算）；Profile 不隐式定义一次性投资与运行期成本之间的转换（不做隐式年化，不隐含资本回收系数、利率或年限等值），此类显式规则若为规划所需，由规划配置契约版本化定义；总成本由规划配置显式组合，不静默相加。能源价格条目以稳定自定义 `price_id` 登记（不存在固定白名单价格键），每项显式声明 `carrier`（来自系统公共载体词汇，不复制封闭清单）与 `direction: purchase|sale`（会计方向，不靠 price_id 或键名推断）；价格为有限 Decimal、正/零/负均合法（零电价合法）；每个计量绑定先算 `raw_charge = Σ price×e`，`purchase` 分量 = +raw_charge（正购电价时为正，成本向）、`sale` 分量 = −raw_charge（正售电价出口时为负，收益以负值自动抵减），分量是已带符号的记账贡献、规划组合统一按加法书写不另加负号，负价自然反转该方向效果（负购电价使 purchase 分量为负、负售电价使 sale 分量为正）；支持常数价格与引用经校验完整年度序列的价格，序列元数据在装配时与项目基线核对，不匹配阻断且不重采样。财务类别（设备成本）与能源计费在装配中分别显式绑定：前者按实例判别联合绑定到实例及其技术接口，后者以独立计量绑定引用 `price_id` 并绑定方向明确的计费点实例/接口与聚合（计量点实例可为无设备成本的 `type: none`），两者都禁止按名称、载体或 `device.id` 猜测。财务契约范围不包含折旧、融资与后评价指标输入。Profile 可登记适用税目（税种、法定税率、适用对象）并声明金额含税口径；成本与价格计算直接使用文件金额，不执行计税或扣税运算；本契约不定义税后换算规则，不得扩展为税务引擎或造成重复加税。`backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 不得作为第二权威源或运行期兼容。finance 不从设备技术定义读取价格。
+财务事实分层：地区 `FinanceProfile` 是已注册、可复用的地区财务基准（以稳定 ID 与 revision 标识，系统不得把它硬编码为全局默认，样例只作示范或注册 provider 的输入）；项目 `FinanceOverrides` 精确引用 Profile 的稳定 ID 与 revision，只对既有成本模型与能源价格做原子稀疏覆盖（不新增/删除财务类别与价格条目，不改变分量方法、单位、口径，也不改写价格条目的载体与购/售方向）；两者由确定性合并器合并并完整校验，生成不可变 `EffectiveFinanceConfig`。它是装配、规划与财务计算唯一消费的财务快照：计算不运行期继承 Profile、不读取最新地区价格、不静默默认值；`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，导入时连同精确来源重新合并验证。成本函数为固定建设成本加多个独立线性分量，产出时间口径明确的分量（按年项与窗口合计项相加前须显式时间跨度换算）；Profile 不隐式定义一次性投资与运行期成本之间的转换（不做隐式年化，不隐含资本回收系数、利率或年限等值），此类显式规则若为规划所需，由规划配置契约版本化定义；总成本由规划配置显式组合，不静默相加。能源价格条目以稳定自定义 `price_id` 登记（不存在固定白名单价格键），每项显式声明 `carrier`（来自系统公共载体词汇，不复制封闭清单）与 `direction: purchase|sale`（会计方向，不靠 price_id 或键名推断）；价格为有限 Decimal、正/零/负均合法（零电价合法）；每个计量绑定先算 `raw_charge = Σ price×e`，`purchase` 分量 = +raw_charge（正购电价时为正，成本向）、`sale` 分量 = −raw_charge（正售电价出口时为负，收益以负值自动抵减），分量是已带符号的记账贡献、规划组合统一按加法书写不另加负号，负价自然反转该方向效果（负购电价使 purchase 分量为负、负售电价使 sale 分量为正）；支持常数价格与引用经校验完整年度序列的价格，序列元数据在装配时与项目基线核对，不匹配阻断且不重采样。财务类别（设备成本）与能源计费在装配中分别显式绑定：前者按实例判别联合绑定到实例及其技术接口，后者以独立计量绑定引用 `price_id` 并绑定方向明确的计费点实例/接口与聚合（计量点实例可为无设备成本的 `type: none`），两者都禁止按名称、载体或 `device.id` 猜测。财务契约范围不包含折旧、融资与后评价指标输入。Profile 可登记适用税目（税种、法定税率、适用对象）并声明金额含税口径；成本与价格计算直接使用文件金额，不执行计税或扣税运算；本契约不定义税后换算规则，不得扩展为税务引擎或造成重复加税。`backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 不得作为第二权威源或运行期兼容。finance 不从设备技术定义读取价格。
 
 `finance` 不依赖 HTTP、数据库或前端，不反向依赖应用服务。
 
@@ -201,7 +201,7 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 负责：
 
-- 内容寻址、哈希和完整性校验；
+- 对象 ID、媒体类型与引用生命周期；
 - 对象元数据、owner 引用、清理、保留和恢复；
 - 文件系统或其他 BlobStore provider；
 - 存储容量和本模块健康状态。
@@ -274,7 +274,7 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 - 禁止静态 fallback、宽泛异常回退和部分注册状态；
 - `devices`、`computation` 与 `storage` 之间不共享注册表对象；`modeling` 和 `assembly` 不为设备建立第二注册表。
 
-扩展 ID 应采用稳定命名空间，例如 `ies.device.pv`、`vendor.device.foo`。设备文件自身不声明独立语义版本，以规范内容摘要固定；provider、generator、solver、executor 和 result adapter 使用语义化版本。破坏性 schema 变化必须提升主版本。
+扩展 ID 应采用稳定命名空间，例如 `ies.device.pv`、`vendor.device.foo`。设备文件自身不声明独立语义版本，以发布 revision 固定；provider、generator、solver、executor 和 result adapter 使用语义化版本。破坏性 schema 变化必须提升主版本。
 
 ### 5.4 事务
 
@@ -429,8 +429,8 @@ feature/
 
 - 数据库内部主键可以使用 `BIGINT`；
 - 对外 JSON 中的标识符必须作为不透明十进制字符串传输，前端类型使用品牌化 `EntityId`/具体 `ProjectId`，不得参与算术；
-- 稳定插件、设备、generator、solver、executor 和 result adapter ID 使用命名空间字符串；设备方程随设备内容寻址，不再拥有独立命令 ID；
-- 哈希使用小写 64 位十六进制 SHA-256 字符串；
+- 稳定插件、设备、generator、solver、executor 和 result adapter ID 使用命名空间字符串；设备方程随设备发布 revision 固定，不再拥有独立命令 ID；
+- 对象标识使用不透明字符串，确需哈希时由存储层统一管理，不在文本配置中要求；
 - ID 类型不能与普通字符串、名称或数组下标混用。
 
 ### 7.3 数值
@@ -468,7 +468,7 @@ feature/
 - 原始输入序列不设统一的完整年度最低长度：`data_repeat` 的完整来源序列整体就是重复基线，可以是完整日、完整周或完整年，不另设周期字段；`data_predict` 的历史输入、训练目标和未来已知协变量覆盖范围由预测目标与计算配置中的算法契约明确要求。原始序列必须与项目基线使用相同分辨率，文件内 `step` 从零开始连续；不同来源在物化前不要求点数相同或 `step` 一一对应。装配前只校验来源、表示及各自适用的覆盖要求，不做重采样、插值、聚合、融合或自动补齐；全周期 `constant/data_repeat/data_predict` 序列只在计算阶段按项目基线物化，物化后所有计算序列必须具有项目基线推导的相同点数并且 `step` 一一对应；
 - 数据库存储 `TIMESTAMPTZ`；
 - 持续时间使用明确单位或 ISO 8601 duration，不用含义不明的整数；
-- 计算序列必须声明项目基线摘要、分辨率、点数和单位；数组长度必须与基线推导点数一致。多场景与已有项目基线变更属于后续公开契约能力，不能作为本格式的隐式例外。
+- 计算序列必须声明项目基线、分辨率、点数和单位；数组长度必须与基线推导点数一致。多场景与已有项目基线变更属于后续公开契约能力，不能作为本格式的隐式例外。
 
 ### 7.6 集合与顺序
 
@@ -487,7 +487,7 @@ feature/
 
 ### 7.8 公共文件契约
 
-- `device`/`assembly`/`finance`（财务三件套）/`planning`/`calculation` 与项目包内配置以 YAML 为权威书写形态并按安全子集解析/规范化/确定性摘要；CSV、HTTP JSON DTO、数据库内部行/列存储、求解器专用输入和大结果可继续使用对应域的原生格式，不强制转 YAML；不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容（细则见 [finance-yaml.md](formats/finance-yaml.md)）；
+- `device`/`assembly`/`finance`（财务三件套）/`planning`/`calculation` 与项目包内配置以 YAML 为权威书写形态并按安全子集解析与规范化；CSV、HTTP JSON DTO、数据库内部行/列存储、求解器专用输入和大结果可继续使用对应域的原生格式，不强制转 YAML；不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容（细则见 [finance-yaml.md](formats/finance-yaml.md)）；
 - 设备模型 YAML 只保留纯技术语义：稳定设备身份、非时变 properties、序列 interfaces 和声明式 equations；价格、成本和计算精度不得进入设备文件；财务成本模型按 `finance_type` 在地区 `FinanceProfile` 中定义，装配消费其合并产物；
 - 设备序列接口只有 `in`、`out`、`bidirectional`、`predefined`、`blind` 五种；`predefined` 仅允许 `constant`、`data_repeat`、`data_predict`，`blind` 不连接且不接收预定义数据；
 - YAML 使用 YAML 1.2 安全子集，禁止自定义 tag、anchor、alias、合并键、重复键和任意对象构造；
@@ -495,7 +495,7 @@ feature/
 - 未知核心字段默认拒绝；扩展只能放在命名空间化 `extensions`，不得改变核心语义或安全规则；
 - 装配 YAML 禁止 shell、command、executable、函数/模块路径、环境变量和凭证；
 - 原始装配通过结构、模型/数据、图/系统、规划/财务完整性四阶段校验后，才能生成 `ValidatedAssemblyArtifact`；财务成本仅由不可变 `EffectiveFinanceConfig` 参与校验，`FinanceOverrides` 仅作进入装配前的合并输入，不在装配中运行期继承；
-- Solver Bundle 只能由已注册 GeneratorProvider 生成，必须包含输入摘要、结构化命令、输出声明和 ResultAdapter 精确版本；
+- Solver Bundle 只能由已注册 GeneratorProvider 生成，必须包含输入引用、结构化命令、输出声明和 ResultAdapter 精确版本；
 - Bundle 命令以受信任 executor/executable ID 和参数数组表达，禁止 `sh -c`、管道、重定向、替换、通配和未声明网络；
 - 各 `schema` 独立语义化版本；不能识别的 MAJOR 必须拒绝，不得猜测或静默降级；`backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 不得作为第二权威源、静默回退或旧格式运行期兼容保留。
 
@@ -559,10 +559,10 @@ DTO 禁止：
 
 ### 8.5 上传与下载
 
-- 上传使用 multipart 或预签名对象协议，API 明确大小、媒体类型和摘要限制；
+- 上传使用 multipart 或预签名对象协议，API 明确大小和媒体类型限制；
 - 下载返回短期授权或标准资源链接，不让前端拼存储路径；
-- 导出响应返回真实资源 ID、文件名、摘要和过期时间，前端不得伪造临时报告 ID；
-- 浏览器文件名和展示格式属于前端，内容摘要与授权属于后端。
+- 导出响应返回真实资源 ID、文件名和过期时间，前端不得伪造临时报告 ID；
+- 浏览器文件名和展示格式属于前端，对象引用与授权属于后端。
 
 ## 9. 前端职责与交互
 
@@ -642,7 +642,7 @@ class ObjectStore(Protocol):
 - 超龄临时文件；
 - 有文件无元数据；
 - 有元数据无文件；
-- 摘要或大小不一致；
+- 大小不一致；
 - 清理中文件已删但事务失败；
 - 并发写入相同内容。
 
@@ -686,7 +686,7 @@ class ObjectStore(Protocol):
 | 项目/装配输入非法 | 返回完整诊断并阻断任务 |
 | Worker 缺设备内容/方程 contract/generator/executor/result adapter | Worker 不 ready，不领取任务 |
 | 生成器失败或结果不确定 | 不发布部分 Bundle；provider 不 ready 或 attempt 明确失败 |
-| Bundle 摘要、路径或命令策略非法 | runtime 不启动进程，形成拒绝回执 |
+| Bundle 路径或命令策略非法 | runtime 不启动进程，形成拒绝回执 |
 | solver 超时、取消、OOM 或异常退出 | 终止进程组，封存失败回执，不伪装成功 |
 | 可重试外部故障 | 按明确策略重试，保留 attempt 和原因 |
 | 内部异常 | 记录 request ID 和堆栈；客户端收到标准 500 错误 |
@@ -709,7 +709,7 @@ class ObjectStore(Protocol):
 - 数据库约束和事务测试；
 - 前后端关键值往返测试；
 - Worker 幂等、租约和失败恢复测试；
-- 四种文件 schema、规范化、摘要和非法人工样例测试；
+- 四种文件 schema、规范化与非法人工样例测试；
 - generator 确定性与 Bundle contract 测试；
 - runtime 命令注入、路径逃逸、隔离、取消、超时和输出边界测试；
 - result adapter 状态、单位和非有限值映射测试；

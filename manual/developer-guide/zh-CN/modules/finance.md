@@ -1,7 +1,7 @@
 # 财务计算
 
 > 文档状态：生效蓝图；代码边界：`backend/iesplan/finance/`。
-> 财务三件套 `FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig` 的文件契约（schema、字段表、完整示例、规范化与摘要、失败语义）以[财务 YAML 契约](../formats/finance-yaml.md)为唯一字段级权威正文，本页只描述模块职责、分割线与其消费方式。
+> 财务三件套 `FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig` 的文件契约（schema、字段表、完整示例、规范化与校验、失败语义）以[财务 YAML 契约](../formats/finance-yaml.md)为唯一字段级权威正文，本页只描述模块职责、分割线与其消费方式。
 
 ## 作用
 
@@ -9,14 +9,14 @@
 
 财务模块分为两个范围，本页明确分段：
 
-1. **财务文件契约**：`FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig` 的领域结构、YAML 解析、安全规范化、确定性摘要与完整校验，以及把合并后的成本/能源分量交给装配、规划与计算消费的边界。字段级定义全部在[财务 YAML 契约](../formats/finance-yaml.md)。
+1. **财务文件契约**：`FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig` 的领域结构、YAML 解析、安全规范化与完整校验，以及把合并后的成本/能源分量交给装配、规划与计算消费的边界。字段级定义全部在[财务 YAML 契约](../formats/finance-yaml.md)。
 2. **长期指标蓝图（FinancialResult）**：把规范化现金流与运行汇总解释为项目/资本金现金流及 NPV、IRR、LCOE、回收期等指标，形成不可变 `FinancialResult`。这是模块蓝图目标，与本次 Profile 文件契约分开规划；Profile 文件契约不包含评价期、折旧、融资等后评价专用输入，蓝图也不能据此提前实现输入字段。
 
 ## 边界
 
 模块负责：
 
-- 财务三件套的领域结构、解析、规范化、摘要与校验，以及确定性合并器的语义（字段细节见[财务 YAML 契约](../formats/finance-yaml.md)）；
+- 财务三件套的领域结构、解析、规范化与校验，以及确定性合并器的语义（字段细节见[财务 YAML 契约](../formats/finance-yaml.md)）；
 - 按时间口径组织成本/能源分量：`upfront_capex`（建设期一次性，仅 `new`）、`annual_fixed_om`（按年度，currency/年）、`period_variable_om` / `period_energy_purchase` / `period_energy_sale`（按运行/计费窗口合计，currency；两个能源分量为**有符号记账贡献**、由 `tariff_bindings` 的每个计量绑定独立产生，符号约定见[财务 YAML 契约](../formats/finance-yaml.md)「计价规则」）；不把分量静默相加成默认总成本，按年分量与窗口合计相加前必须以显式时间跨度换算，组合目标由规划配置显式选择；
 - 长期蓝图：从规范运行汇总生成不可变 `FinancialResult`，并对每个指标独立计算与分类失败状态。
 
@@ -99,18 +99,18 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 - 每个指标的状态不能被综合分数覆盖；
 - 同一 `EffectiveFinanceConfig` 必须同时进入规划和财务计算证据；
 - 财务配置不得包含目标函数、规划约束、solver 选项或阶段性数据；
-- 财务三件套声明式配置使用 YAML，经安全子集解析、规范化与确定性摘要生成，不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容；
+- 财务三件套声明式配置使用 YAML，经安全子集解析与规范化，不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容；
 - 财务成本模型不得写入设备技术文件，不得依赖 `backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 第二权威源；
 - `device.id`（技术模型）、`finance_type`（财务类别）、`instance_id`（装配实例）与 `binding_id`（计量绑定）严格分离：装配实例通过显式 `finance_binding`（`costed`/`none`）声明设备成本，禁止猜测；能源计费走装配 `tariff_bindings`（`binding_id → {price, instance, interface, aggregation}`），`type: none` 的纯计量实例可以承担计费；
 - `FinanceProfile` 不以内置形态充当全局默认；内置只作为样例或注册 provider 的输入。
 
 ## 完成标准
 
-- 财务三件套解析、规范化、确定性摘要与合并的契约测试以[财务 YAML 契约](../formats/finance-yaml.md)为字段权威；拒绝测试覆盖未知 `finance_type`、越权覆盖、`null`/部分金额、旧 JSON 别名，以及外部导入边界的对象身份不匹配；
+- 财务三件套解析、规范化与合并的契约测试以[财务 YAML 契约](../formats/finance-yaml.md)为字段权威；拒绝测试覆盖未知 `finance_type`、越权覆盖、`null`/部分金额、旧 JSON 别名，以及外部导入边界的对象身份不匹配；
 - 手算基准、正常现金流及 IRR 各异常状态均有测试（IRR 属长期蓝图，独立验收）；
 - 项目和资本金口径不会混用；
 - 输入不完整时没有默认现金流或伪指标；
-- 结果可序列化、可追溯且足以生成用户解释（`EffectiveFinanceConfig` 三摘要）；
+- 结果可序列化、可追溯且足以生成用户解释；
 - 新指标不要求 finance 读取项目或任务内部状态。
 
 代码阅读从 `FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig`（及其[文件契约](../formats/finance-yaml.md)）开始；合并器语义与分量时间口径在装配与财务契约测试中核对。对应测试以财务模块测试为入口。

@@ -40,7 +40,7 @@ ResultAdapter → ComputeResult
 计算入口只接受：
 
 - 由装配模块签发的 `ValidatedAssemblyArtifact`；
-- 与装配回执一致的预定义来源声明和内容寻址输入资源；
+- 与装配回执一致的预定义来源声明和对象输入资源；
 - 预测目标类型及其所需时间、自回归和外生协变量绑定；
 - 精确 generator、solver、executor 和 result adapter 版本；
 - 固定预测算法与参数、生成选项、求解选项、收敛容差、最大迭代数、随机种子和资源上限；
@@ -56,7 +56,7 @@ ResultAdapter → ComputeResult
 - 数学状态：有解、不可行、无界、数值失败或未求解；
 - 业务候选：容量、运行轨迹、目标值和约束余量；
 - 算法、生成器、求解器、结果适配器、版本、种子和容差；
-- assembly、Bundle、ExecutionReceipt 和原始输出摘要；
+- assembly、Bundle、ExecutionReceipt 和原始输出；
 - 可定位且不泄露内部路径的结构化诊断。
 
 进程退出码为零不等于存在可推荐方案；不可行也不是内部异常。结果适配器必须完整映射这些语义。
@@ -83,7 +83,7 @@ ResultAdapter → ComputeResult
 
 ### 运行时只执行
 
-SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，采集退出状态、日志、资源和输出摘要。它不根据求解器名称增加业务判断。
+SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，采集退出状态、日志和资源。它不根据求解器名称增加业务判断。
 
 ### 结果适配器只解释
 
@@ -117,7 +117,7 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 - 生成器不访问网络、数据库、对象服务或环境变量，也不启动子进程；
 - 运行时不读取装配语义，不补数据，不切换 solver；
 - 命令使用参数数组和受信任 ID，禁止 shell 字符串；
-- 所有输入、输出、manifest 和回执都内容寻址；
+- 所有输入、输出、manifest 和回执均按对象引用管理；
 - 随机过程固定并回传种子；数值比较使用公开容差；
 - 私有求解器对象、进程句柄和绝对路径不得跨公共边界；
 - 重试由 Worker 按相同快照创建新 attempt，不在 generator/runtime 内隐式循环。
@@ -127,7 +127,7 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 1. 判断需求是新的公共方程能力、GeneratorProvider、ExecutorProvider 还是 ResultAdapter；
 2. 先定义 descriptor、支持的 schema/mode、版本兼容和失败语义；
 3. 准备最小规范装配与已知答案；
-4. 实现纯生成并固定 Bundle 摘要；
+4. 实现纯生成并固定 Bundle；
 5. 用通用 runtime 执行，补齐成功、不可行、超时和异常输出；
 6. 通过 result adapter 映射统一状态和单位；
 7. 在组合根原子注册并验证 readiness；

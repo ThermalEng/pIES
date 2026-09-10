@@ -61,7 +61,7 @@
 | datasets | 上传、质量、版本、来源模式对应的时间覆盖与连续性校验、表示规范化、对象引用与项目绑定 | 经校验的不可变数据版本 |
 | modeling | 项目设备、properties、interfaces、连接、存量/新增身份、revision 与即时校验 | 项目图修订 |
 | planning | 目标函数/权重、规划变量、上下界和规划/系统约束 | 规划配置 revision/诊断 |
-| finance | `FinanceProfile`/`FinanceOverrides` 的解析校验与确定性合并，签发不可变 `EffectiveFinanceConfig`（三摘要） | `EffectiveFinanceConfig` 摘要与诊断 |
+| finance | `FinanceProfile`/`FinanceOverrides` 的解析校验与确定性合并，签发不可变 `EffectiveFinanceConfig` | `EffectiveFinanceConfig` 与诊断 |
 | calculation | mode、预测算法与参数、generator、solver、精度、容差、选项、种子和输出选择 | 计算配置 revision/诊断 |
 | validation | 汇总项目基线、模型、规范数据与固定输入引用、规划配置和 `EffectiveFinanceConfig` | 项目校验报告 |
 | tasks | 快照、幂等、任务、取消和重试 | 任务受理与状态 |
@@ -81,7 +81,7 @@
 3. 调用 devices 对候选模型完成解析、类型、技术语义和方程校验；
 4. 有任何 blocking 诊断时直接返回完整诊断，不写项目目录、不登记模型、不分配正式编号；
 5. 校验通过后在项目范围内原子分配只递增、不复用的 `_N` 后缀；
-6. 用最终 ID 重新完成身份校验，生成规范 YAML、内容摘要和回执；
+6. 用最终 ID 重新完成身份校验，生成规范 YAML 和回执；
 7. 原子提交模型文件、项目模型清单引用和审计，并返回新的项目 revision；拒绝旧 `data_files` 字段。
 
 编号分配、模型文件提交和清单登记属于同一用例的一致性边界。项目模型保存不接受、校验、落盘或关联数据文件；数据文件由数据集用例独立管理。并发请求不能得到相同编号；失败事务不能留下半文件、孤立引用或对用户不可见的已占编号。底层对象存储与数据库无法组成单一事务时，必须使用临时 owner、幂等 finalize 和 reconciliation 达到相同可观察结果。
@@ -90,7 +90,7 @@
 
 输入是项目 ID、项目 revision 和装配实例的 `predefined_interfaces`。该用例不生成未来全周期序列，也不选择预测算法：
 
-1. 授权并固定项目计算基线摘要以及相关模型实例 revision；
+1. 授权并固定项目计算基线以及相关模型实例 revision；
 2. 枚举 `predefined` interfaces，并确认每个输入槽都有且只有一个符合装配格式契约的显式来源绑定；
 3. 校验数据文件、单位、分辨率、连续 `step` 及来源模式对应的覆盖要求；不同原始来源不因点数不同而阻断，也不做重采样、插值、聚合、融合或补齐；
 4. 对 `data_predict` 校验目标类型、训练目标、历史输入和所需未来已知协变量；
@@ -117,11 +117,11 @@
 2. 读取并固定项目版本、数据版本和配置版本；
 3. 调用 assembly，阻断所有 blocking 诊断；
 4. 固定用户选择的计算配置，校验 mode、预测目标所用算法与参数、generator、solver、精度、选项与输出能力；有多个 `data_predict` 时另校验收敛容差与最大迭代数；
-5. 生成包含 `ValidatedAssemblyArtifact`、设备内容摘要、方程 contract、规划/财务/计算配置 revision 与摘要、预测目标和资源摘要及 generator/solver/executor/result adapter 精确版本的 `CalcSnapshot`；
+5. 生成包含 `ValidatedAssemblyArtifact`、设备 revision、方程 contract、规划/财务/计算配置 revision、预测目标和资源引用及 generator/solver/executor/result adapter 精确版本的 `CalcSnapshot`；
 6. 以项目作用域幂等键创建逻辑任务；
 7. 附加快照对象引用并记录审计；
 8. 提交后发布可重建队列消息；
-9. 返回任务 ID、状态、assembly 摘要和实际快照摘要。
+9. 返回任务 ID、状态和实际快照。
 
 Application 不生成 Solver Bundle。计算 Worker 在同一冻结快照上把 `ValidatedAssemblyArtifact` 与计算配置一起交给纯 GeneratorProvider，完成计算配置能力校验并封存 Bundle 后交给 SolverRuntime；这样 HTTP 事务不承担求解器文件生成，也不会让 Worker 回读项目草稿。
 

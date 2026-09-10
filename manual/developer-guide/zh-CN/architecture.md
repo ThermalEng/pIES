@@ -39,14 +39,14 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 ```text
 设备技术定义/序列数据 → 方程解析与装配检查 → 计算生成 → 受控求解 → 结果适配
                                 │            │          │          │
-                                └────不可变快照与内容摘要───────────┘
+                                └────不可变快照───────────┘
                                                              ↓
                                                     财务与结果分析
 ```
 
 这条流程继承早期架构审查中“定义—建模—装配—计算—分析”的稳定意图，并把计算内部进一步拆成可独立替换的三个边界；以架构宪法为最终裁决：
 
-1. **设备定义**用统一 schema 发布设备身份、非时变技术常量、序列接口和声明式方程，并以规范内容摘要固定具体内容；
+1. **设备定义**用统一 schema 发布设备身份、非时变技术常量、序列接口和声明式方程；
 2. **方程解析**把受限表达式解析成公共 AST 和声明式数学贡献，不引入独立设备命令或设备语义版本；
 3. **装配与检查**验证不可变项目计算基线、已规范化数据与固定输入引用、接口类型、载能、单位、连接、规划配置、装配引用的有效财务快照 `EffectiveFinanceConfig` 和整体可解性，签发规范装配产物；
 4. **计算生成**同时消费规范装配产物与生成阶段选定的计算配置，统一物化 `constant/data_repeat/data_predict` 序列，再由 GeneratorProvider 按所选 solver、计算精度和算法选项生成求解器输入文件及结构化运行命令；
@@ -62,9 +62,9 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 |---|---|---|---|
 | 设备定义 | 设备 YAML 或等价公开规格 | `DeviceDescriptor` | `properties/interfaces/equations` 与单位已校验，发布内容身份已固定 |
 | 方程解析 | 设备 descriptor 与受限表达式语法 | 规范方程 AST/数学贡献 | 变量、关系、单位和接口引用明确，无独立设备命令版本 |
-| 装配与检查 | 装配 YAML/项目图、项目基线、规范数据与固定输入引用、规划配置与 `EffectiveFinanceConfig`、目录快照 | 诊断或 `ValidatedAssemblyArtifact` | 连接、数据来源、规划和财务输入合法，业务单位明确，规范摘要与回执完整 |
+| 装配与检查 | 装配 YAML/项目图、项目基线、规范数据与固定输入引用、规划配置与 `EffectiveFinanceConfig`、目录快照 | 诊断或 `ValidatedAssemblyArtifact` | 连接、数据来源、规划和财务输入合法，业务单位明确，校验回执完整 |
 | 计算生成 | 规范装配、固定资源、独立 `CalculationConfig` | 物化序列与 Solver Bundle | 预定义序列按基线生成，计算能力兼容，求解器输入、结构化命令、输出和适配器声明完整 |
-| 受控求解 | Solver Bundle、资源与取消上下文 | `ExecutionReceipt` 与原始输出 | 实际命令、限制、日志、退出和输出摘要完整 |
+| 受控求解 | Solver Bundle、资源与取消上下文 | `ExecutionReceipt` 与原始输出 | 实际命令、限制、日志、退出和输出完整 |
 | 结果适配 | Bundle、执行回执、声明输出 | `ComputeResult` | 技术/数学状态、候选、流量、单位和依赖版本完整 |
 | 财务与分析 | 计算结果、财务参数、分析命令 | 财务/分析结果与证据 | 指标口径、状态、来源和适用范围可追溯 |
 
@@ -98,7 +98,7 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 
 ```text
 结果视图 → Evidence → Attempt → Task → CalcSnapshot
-        → 项目版本 / 数据版本 / 配置版本 / provider 版本 / 对象摘要
+        → 项目版本 / 数据版本 / 配置版本 / provider 版本 / 对象引用
 ```
 
 结果页、评估和导出都沿这条链解释历史。当前草稿、最新数据或最新设备目录只能用于新任务，不能改变旧结果含义。
@@ -108,7 +108,7 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 | 能力 | 权威职责 | 明确不负责 |
 |---|---|---|
 | [core](modules/core.md) | 无状态诊断、错误、单位、时间、ID 和纯契约 | 设备/计算 provider 注册、业务默认、持久化 |
-| [devices](modules/devices.md) | 设备身份、非时变 properties、序列 interfaces、equations 和内容摘要 | 项目实例、规划配置、财务参数、计算精度、画布布局 |
+| [devices](modules/devices.md) | 设备身份、非时变 properties、序列 interfaces、equations | 项目实例、规划配置、财务参数、计算精度、画布布局 |
 | [modeling](modules/modeling.md) | 受限技术方程的解析、校验与公共数学贡献 | 设备目录路径、价格、项目编排和求解执行 |
 | [assembly](modules/assembly.md) | interface 网络装配、完整校验和规范装配产物 | 求解器输入、命令和执行 |
 | [generators](modules/generators.md) | 规范装配到求解器输入、命令与 Bundle | 启动进程、读取数据库、提交任务 |
@@ -116,7 +116,7 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 | [computation](modules/engines.md) | 生成、执行、结果适配的公共契约与统一结果 | HTTP、会话、ORM 和项目草稿 |
 | [finance](modules/finance.md) | 财务三件套（`FinanceProfile`/`FinanceOverrides`/`EffectiveFinanceConfig`）、现金流与指标蓝图 | 规划目标、计算选项、页面状态和跨用例事务 |
 | [analysis](modules/analysis.md) | 敏感性、批量扫描、指标和评估 | 任务租约、HTTP 传输 |
-| [storage](modules/storage.md) | 内容寻址、完整性、引用、保留和存储 provider | 理解项目或结果内部业务表 |
+| [storage](modules/storage.md) | 引用、保留和存储 provider | 理解项目或结果内部业务表 |
 | [application](modules/application.md) | 权限后的用例、事务和跨模块编排 | 穿透模块私有实现 |
 | [api](modules/api.md) | HTTP DTO、认证依赖、状态码和错误适配 | ORM 查询和领域计算 |
 | [worker](modules/worker.md) | 领取、租约、执行、重试和提交结果 | 缺失设备内容、方程能力或 provider 时降级运行 |
@@ -156,7 +156,7 @@ devices · modeling · assembly · computation · finance · analysis · storage
 9. 新增的是一次跨模块用户动作吗？由 application 编排；
 10. HTTP、后台执行和页面只分别适配已有用例、任务 contract 和公开 DTO。
 
-网页属性配置、在线 YAML 编辑和 YAML 上传必须汇合为同一个规范设备内容；设备发布只以统一 schema 版本、内容摘要和发布修订固定，不产生独立设备语义版本。算法插件 ZIP 可以在运行期进入用户目录，但只能作为内容寻址的任务载荷由通用隔离运行器执行；这不是把用户模块加入 API/Worker 的 Python 环境或模块注册表。
+网页属性配置、在线 YAML 编辑和 YAML 上传必须汇合为同一个规范设备内容；设备发布只以统一 schema 版本和发布修订固定，不产生独立设备语义版本。算法插件 ZIP 可以在运行期进入用户目录，但只能作为任务载荷由通用隔离运行器执行；这不是把用户模块加入 API/Worker 的 Python 环境或模块注册表。
 
 若同一条业务规则需要在多个模块复制，先确定唯一所有者，其他模块通过 contract 消费；不要维护同步清单。
 
@@ -177,14 +177,14 @@ GUI 表单状态
 - 必需设备内容、方程 contract 或 provider 无法解析：实例不进入 ready；
 - 项目或装配输入非法：返回完整诊断并阻断任务；
 - 数据库、存储或队列不可用：明确反映在就绪或任务状态；
-- 对象缺失或摘要损坏：返回损坏诊断，不回退旧副本；
+- 对象缺失：返回缺失诊断，不回退旧副本；
 - 内部异常：受控记录追踪信息，客户端只得到标准错误。
 
 ## 开发一个跨模块功能
 
 以“新增一种可规划设备”为例，开发顺序是：
 
-1. devices 发布包含 properties、interfaces、equations 和内容摘要的完整 descriptor；
+1. devices 发布包含 properties、interfaces、equations 的完整 descriptor；
 2. modeling 证明其中方程能够被安全解析并形成公共数学贡献；
 3. assembly 证明项目基线、规范数据与固定输入引用、真实接口、连接、规划配置和有效财务快照可以组成规范装配产物；
 4. 现有 generator 能表达该设备时不增加分支；确有新数学表达时新增独立 GeneratorProvider；

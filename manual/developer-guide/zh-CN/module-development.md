@@ -46,7 +46,7 @@ HTTP API ──→ 应用用例 ──→ 上述领域模块 / 对象存储
 | [computation](modules/engines.md) | 组织生成、执行和结果适配的公共语义 | 装配产物、provider 与执行上下文 | `ComputeResult` 与连续证据 |
 | [finance](modules/finance.md) | 解释方案经济性 | 运行结果、财务参数 | `FinancialResult` |
 | [analysis](modules/analysis.md) | 比较方案并评估证据 | 结果、场景、评估命令 | 分析与评估结果 |
-| [storage](modules/storage.md) | 管理不可变大对象及引用 | 字节、媒体类型、owner | `ObjectHandle` 与完整性状态 |
+| [storage](modules/storage.md) | 管理不可变大对象及引用 | 字节、媒体类型、owner | `ObjectHandle` 与引用状态 |
 | [application](modules/application.md) | 编排一个完整业务用例 | 已认证主体、用例命令 | 业务结果、事件或任务 |
 | [api](modules/api.md) | 把 HTTP 转成应用命令 | HTTP 请求 | 标准响应或错误信封 |
 | [worker](modules/worker.md) | 可靠执行长任务 | 任务、租约、不可变快照 | attempt、进度、证据与终态 |

@@ -55,7 +55,7 @@ API / Worker / 前端适配
 |---|---|
 | 纯函数单元测试 | 数值、转换和边界条件 |
 | 模块协议测试 | 公开门面、provider、原子发布和失败路径 |
-| 文件契约测试 | YAML/CSV schema、规范化、摘要、人工样例和迁移 |
+| 文件契约测试 | YAML/CSV schema、规范化、人工样例和迁移 |
 | Generator 测试 | 纯生成、单位、确定性和 Solver Bundle contract |
 | Runtime/Adapter 测试 | 命令策略、隔离、资源、状态、输出和结果映射 |
 | HTTP 契约测试 | DTO、状态码、权限和错误信封 |

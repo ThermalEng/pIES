@@ -28,16 +28,16 @@
 
 ```text
 地区 FinanceProfile（人工 authoring，注册地区财务基准）
-项目 FinanceOverrides（人工 authoring，精确引用 Profile 摘要）
+项目 FinanceOverrides（人工 authoring，精确引用 Profile revision）
         │ 两者并列
         ▼
-merger（确定性合并 + 完整校验）──→ EffectiveFinanceConfig（不可人工 authoring，三摘要）
+merger（确定性合并 + 完整校验）──→ EffectiveFinanceConfig（不可人工 authoring）
                                           │ 只消费该不可变快照
                                           ▼
 设备模型 YAML / 设备数据 CSV / 规划配置 → 校验与规范化 → 装配 YAML ──→ ValidatedAssemblyArtifact
                                                           │             │
                                           assembly.finance │精确引用     ▼
-                                          （摘要+血缘，不内联）    物化序列 → GeneratorProvider → Solver Bundle
+                                          （精确引用，不内联）    物化序列 → GeneratorProvider → Solver Bundle
                                                           ▼
                                           SolverRuntime 执行 → ExecutionReceipt → ComputeResult
 ```
@@ -72,7 +72,7 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 
 ## 声明式配置与 YAML 边界
 
-人工编写、导入导出、进入快照的声明式配置统一使用 YAML：`device` / `assembly` / `finance`（`FinanceProfile`、`FinanceOverrides`、`EffectiveFinanceConfig`）/ `planning` / `calculation` 与项目包内配置均为 `.yaml`，按安全子集解析、规范化与确定性摘要生成，不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容。HTTP JSON DTO、数据库内部行/列存储、求解器专用输入和大结果可继续使用对应域的原生格式，不强制转 YAML。
+人工编写、导入导出、进入快照的声明式配置统一使用 YAML：`device` / `assembly` / `finance`（`FinanceProfile`、`FinanceOverrides`、`EffectiveFinanceConfig`）/ `planning` / `calculation` 与项目包内配置均为 `.yaml`，按安全子集解析与规范化，不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容。HTTP JSON DTO、数据库内部行/列存储、求解器专用输入和大结果可继续使用对应域的原生格式，不强制转 YAML。
 
 ## 人工编写与规范化
 
@@ -80,7 +80,7 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 
 1. 解析安全子集并拒绝重复键、非法标量和未知核心字段；
 2. 解析设备 revision、规范数据与预定义来源引用、规划配置、有效财务快照引用与财务绑定（`finance_binding`/`tariff_bindings`），确认技术方程与业务输入完整；
-3. 核对项目计算基线、各输入来源的分辨率、连续 `step` 和对应模式的覆盖要求，将路径资源解析为内容寻址对象；
+3. 核对项目计算基线、各输入来源的分辨率、连续 `step` 和对应模式的覆盖要求，将路径资源解析为受控对象引用；
 4. 按格式规定排序并移除注释、别名和非语义空白；
 5. 生成规范字节与外部资源引用；
 6. 生成包含校验器 ID、版本、依赖锁和零阻断诊断的校验回执。
@@ -89,7 +89,7 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 
 只有“规范装配文本 + 校验回执”共同组成的 `ValidatedAssemblyArtifact` 可以进入生成器。用户修改配置后必须重新走入口校验，旧回执不得复用。
 
-人工编辑或模板实例化产生的设备 YAML 在进入项目正式模型目录前也必须通过其完整文件契约。候选模型字节可以送入校验器，但只有校验成功的规范模型、摘要与回执才能原子保存；失败候选不能先落入项目目录再等待异步清理。项目模型保存不接收配套数据文件；数据文件由数据集流程独立保存，并在装配中显式绑定。
+人工编辑或模板实例化产生的设备 YAML 在进入项目正式模型目录前也必须通过其完整文件契约。候选模型字节可以送入校验器，但只有校验成功的规范模型与回执才能原子保存；失败候选不能先落入项目目录再等待异步清理。项目模型保存不接收配套数据文件；数据文件由数据集流程独立保存，并在装配中显式绑定。
 
 ## 插件交付最小集合
 
@@ -112,7 +112,7 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 1. 权威所有者是哪一种契约；
 2. 旧文件能否保持原语义；
 3. 需要升 PATCH、MINOR 还是 MAJOR；
-4. 规范化和摘要是否变化；
+4. 规范化是否变化；
 5. 是否需要离线迁移器及迁移回执；
 6. 手写示例、JSON Schema/CSV schema 与契约测试是否同步。
 

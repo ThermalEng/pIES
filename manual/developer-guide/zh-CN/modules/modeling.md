@@ -6,7 +6,7 @@
 
 `modeling` 把设备 YAML 中受限声明式 `equations` 转换为计算生成器可消费的公共数学贡献。它隔离设备技术语义与具体求解器实现，使 assembly 和 generators 无需读取设备目录文件，也不需要按设备 ID 维护命令映射。
 
-设备方程是设备定义的一部分，不是独立的 `ModelCommand`，没有独立命令 ID、设备语义版本或运行入口。设备具体内容由统一 `schema_version`、规范内容摘要和发布回执固定。
+设备方程是设备定义的一部分，不是独立的 `ModelCommand`，没有独立命令 ID、设备语义版本或运行入口。设备具体内容由统一 `schema_version` 和发布回执固定。
 
 ## 边界
 
@@ -41,7 +41,7 @@
 - 明确业务单位、连续 step 序列轴和广播规则；
 - 结果字段与反向单位映射元数据；
 - 结构化诊断；
-- 设备内容摘要、方程 contract 和规范 AST 摘要。
+- 设备 revision、方程 contract 和规范 AST。
 
 设备技术方程不得包含价格或成本目标项。规划目标由规划配置定义，可引用 `EffectiveFinanceConfig` 中的参数；生成器在系统合并阶段加入。
 
@@ -74,7 +74,7 @@ GeneratorProvider 合并技术贡献、规划配置与 `EffectiveFinanceConfig`
 
 1. 先确认现有语言能否由组合表达，避免增加设备专用操作符；
 2. 定义操作符或函数的输入类型、单位、索引、边界和失败语义；
-3. 更新解析器、AST schema、规范化和稳定摘要规则；
+3. 更新解析器、AST schema 和规范化规则；
 4. 增加合法、非法、单位冲突、越界、循环引用和复杂度上限测试；
 5. 验证 assembly 能在运行前完成数据、连接和状态检查；
 6. 验证至少一个 GeneratorProvider 能消费公共贡献且无需设备 ID 分支；
@@ -91,7 +91,7 @@ GeneratorProvider 合并技术贡献、规划配置与 `EffectiveFinanceConfig`
 ## 必须遵循的规范
 
 - `modeling` 只消费 devices、assembly 和 core 的公开 contract；
-- 方程内容随设备 descriptor 一同进行内容寻址，不存在独立命令目录；
+- 方程内容随设备 descriptor 一同管理，不存在独立命令目录；
 - 不访问数据库、网络、对象存储和当前时间；
 - 不返回 solver 私有对象，不写文件，不启动进程；
 - 相同 descriptor、实例绑定和 contract 版本产生相同规范贡献；
@@ -100,10 +100,10 @@ GeneratorProvider 合并技术贡献、规划配置与 `EffectiveFinanceConfig`
 
 ## 完成标准
 
-- 解析、语义校验、规范化、摘要、错误与兼容性均有协议测试；
+- 解析、语义校验、规范化、错误与兼容性均有协议测试；
 - 新设备只提交统一 YAML/CSV 即可形成技术贡献，不新增命令 provider；
 - generator 不导入设备实现函数，也不按设备 ID 分支；
-- 设备内容摘要、方程 contract 和 AST 摘要进入装配依赖锁与计算证据；
+- 设备 revision、方程 contract 和 AST 进入装配依赖锁与计算证据；
 - 没有 `ModelCommand`、设备专用命令版本、动态执行或运行期热加载旁路。
 
 代码阅读从 `modeling` 公开方程 contract、parser、semantic validator 和 canonicalizer 开始；对应测试以设备方程协议测试为入口。

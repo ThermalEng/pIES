@@ -12,7 +12,7 @@
 
 每张表和 repository 都必须有唯一领域所有者。例如身份事实属于 identity，用于计算的快照和任务事实属于 tasks，证据索引属于 results，对象元数据与引用属于 storage。
 
-模型与算法目录至少区分条目、不可变发布、用户安装引用和共享申请。设备发布保存对象 ID、摘要、统一 schema、稳定设备 ID、revision 和来源，不保存独立设备语义版本；算法插件发布另存精确语义版本。`CatalogInstallation` 对 `(user_id, publication_id)` 唯一，不能保存内容副本；`ShareRequest` 绑定精确发布与摘要，审核后不能替换申请内容。运行环境是按摘要重建的缓存，不作为权威表事实。
+模型与算法目录至少区分条目、不可变发布、用户安装引用和共享申请。设备发布保存对象 ID、统一 schema、稳定设备 ID、revision 和来源，不保存独立设备语义版本；算法插件发布另存精确语义版本。`CatalogInstallation` 对 `(user_id, publication_id)` 唯一，不能保存内容副本；`ShareRequest` 绑定精确发布，审核后不能替换申请内容。运行环境是可重建的缓存，不作为权威表事实。
 
 repository 负责：
 
@@ -54,7 +54,7 @@ application 协调其他模块并最终 commit 或 rollback
 
 模块内部查询返回领域实体或 read model。跨领域页面需要组合数据时，由 application query 调用多个公开 repository/read model，再形成应用结果；不能让 API 写一条跨所有表的 ORM 查询作为新的隐式领域层。
 
-大型字节不存入普通业务表，由 storage 管理；数据库只保存对象 ID、摘要、owner 引用和必要索引。
+大型字节不存入普通业务表，由 storage 管理；数据库只保存对象 ID、owner 引用和必要索引。
 
 ## 修改 schema
 

@@ -20,7 +20,7 @@
 | 算法插件/provider | 命名空间 ID | 发布记录 | 独立三段式语义版本 |
 | 数据版本 | dataset ID | 变换记录 | 文件 schema 版本 |
 
-禁止给单个设备添加 `version`，也禁止用同 ID 的当前内容解释历史摘要。设备 schema 的破坏性变化提升统一 schema MAJOR；可执行 provider 的破坏性 contract 变化提升其自身 MAJOR。
+禁止给单个设备添加 `version`，也禁止用同 ID 的当前内容解释历史 revision。设备 schema 的破坏性变化提升统一 schema MAJOR；可执行 provider 的破坏性 contract 变化提升其自身 MAJOR。
 
 ## 设备内容接入
 
@@ -65,7 +65,7 @@ ExecutorDescriptor 声明 allowlist、资源隔离、取消和 readiness 能力�
 
 ## 存储与数据 provider
 
-存储适配器只实现字节级保存、读取、删除和健康能力。内容摘要、对象元数据、引用、配额、保留和恢复由 `storage` 领域统一管理；业务模块不能感知底层路径或凭证。
+存储适配器只实现字节级保存、读取、删除和健康能力。对象元数据、引用、配额、保留和恢复由 `storage` 领域统一管理；业务模块不能感知底层路径或凭证。
 
 外部气象、价格或排放数据只能生成可审计的数据版本。技术序列按 predefined interface 绑定；价格数据进入财务文件契约（`FinanceProfile`/`FinanceOverrides` 合并产物 `EffectiveFinanceConfig`），不进入设备技术 interface。用户在导入前负责使每个输入来源具有与项目基线一致的分辨率和连续 `step`；不同来源在物化前不要求点数相同。`data_repeat` 的完整来源序列可为完整日、周或年，整体作为重复基线，不另设周期字段。系统在装配前检查单位、分辨率、连续性、对应模式的覆盖要求、缺失值、范围和来源，不执行重采样、插值、聚合或融合。全周期连续 `step` 在计算阶段按项目基线生成并统一对齐。GeneratorProvider 与 SolverRuntime 不得在运行时访问外部服务。
 
@@ -93,7 +93,7 @@ ExecutorDescriptor 声明 allowlist、资源隔离、取消和 readiness 能力�
 7. 在组合根注册候选，验证依赖后原子发布；
 8. 用一个外部扩展证明核心模块和前端无需修改。
 
-用户设备的开发流程则是“写统一 YAML/CSV → 安全校验 → 规范化 → 内容摘要 → 发布”，不执行上述 Python provider 注册步骤。
+用户设备的开发流程则是“写统一 YAML/CSV → 安全校验 → 规范化 → 发布”，不执行上述 Python provider 注册步骤。
 
 ## 扩展验收
 
@@ -101,7 +101,7 @@ ExecutorDescriptor 声明 allowlist、资源隔离、取消和 readiness 能力�
 - 新 provider 的 ID、版本、依赖和能力在启动时可解析；
 - 构建失败不污染已发布状态；
 - 输入、输出、单位和诊断符合公共 contract；
-- 历史任务按设备内容摘要或 provider 精确版本可解释；
+- 历史任务按设备 revision 或 provider 精确版本可解释；
 - 归档解包不能路径逃逸或携带符号链接；
 - 用户代码不会被 API 或普通 Worker import、执行或加入 `sys.path`；
 - 所有测试在 Docker 中执行。
@@ -113,5 +113,5 @@ ExecutorDescriptor 声明 allowlist、资源隔离、取消和 readiness 能力�
 - 设备可只按统一公共 YAML/CSV 开发，算法扩展可只依赖公开 contract 和包 schema 开发；
 - 核心仓库无需增加扩展或设备 ID 判断；
 - 合法与非法内容/provider 都通过统一协议测试；
-- 快照和证据分别显示设备内容摘要及可执行 provider 精确版本；
+- 快照和证据分别显示设备 revision 及可执行 provider 精确版本；
 - 升级、缺依赖和失败不会留下部分注册状态或历史语义漂移。

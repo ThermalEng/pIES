@@ -16,8 +16,8 @@ merger（确定性合并 + 完整校验）── 生成不可变 EffectiveFinanc
 assembly / computation / 项目包（精确引用 Effective YAML）
 ```
 
-- `FinanceProfile` 是已注册、内容寻址、可复用的地区财务基准；系统不得把它硬编码为对所有项目生效的全局默认，也不得把样例文件当作隐式默认绑定。仓库内或插件包中的样例只作为示范或注册 provider 的输入。
-- `FinanceOverrides` 精确引用 Profile 的稳定 ID 与内容摘要，只做稀疏原子覆盖，是 authoring 输入。
+- `FinanceProfile` 是已注册、可复用的地区财务基准（以稳定 ID 与 revision 标识）；系统不得把它硬编码为对所有项目生效的全局默认，也不得把样例文件当作隐式默认绑定。仓库内或插件包中的样例只作为示范或注册 provider 的输入。
+- `FinanceOverrides` 精确引用 Profile 的稳定 ID 与 revision，只做稀疏原子覆盖，是 authoring 输入。
 - `EffectiveFinanceConfig` 只能由合并器从 Profile 与 Overrides 生成；可以导出、导入、进入快照，但用户不能直接 authoring。导入时连同精确 Profile 与 Overrides 从精确来源重新合并, 恢复血缘身份。
 
 金额一律为 `{value, unit}` 原子：`value` 为十进制定点字符串（禁止 `float`、`NaN/Infinity`、`null`），`unit` 来自公共单位规范并经 `normalize_unit` 规范化；禁止部分金额（缺 `value` 或 `unit`）与 `null`。成本分量金额非负（允许 `0`，零费用类别、零固定成本均合法）。能源价格不设符号限制：允许有限正数、零与负数（见 `energy_prices` 行与「计价规则」）；禁止 NaN/Infinity。
@@ -262,14 +262,14 @@ taxes:                                                 # 继承 Profile，原样
 生成规则：
 
 - `EffectiveFinanceConfig` 只能由合并器生成：`merge(FinanceProfile, FinanceOverrides | None)`；无覆盖时使用空 Overrides 文档，不允许省略来源字段。
-- 合并结果重新跑完整校验：币种/`price_basis`/`cost_method` 一致性、分量完整性、`price_id` 唯一性与存在性、每项 `carrier`/`direction` 合法且与 Profile 一致、价格有限性（正零负均允许，禁止 NaN/Infinity）、`time_series` 元数据完整、单位量纲规则、`taxes` 引用完整性全部重验；任一失败不产生 Effective。
+- 合并结果重新跑完整校验：币种/`price_basis`/`cost_method` 一致性、分量完整性、`price_id` 唯一性与存在性、每项 `carrier`/`direction` 合法且与 Profile 一致、价格有限性（正零负均允许，禁止 NaN/Infinity）、`time_series` 元数据完整、单位量纲与 `taxes` 引用完整性全部重验；任一失败不产生 Effective。
 - 稀疏覆盖只替换被覆盖叶子：未覆盖的 `finance_types`、能源价格与 `taxes` 全部原样保留，不允许省略、裁剪或按“示例只写用到的部分”生成。
 - `EffectiveFinanceConfig` 可以导出、导入、进入快照；导入时连同来源 Profile 与 Overrides 重新合并验证。
 - 装配与计算只消费该不可变快照：不运行期继承 Profile、不读取“最新地区价格”、不静默默认值。
 
 ## 规范化
 
-文本财务文件只校验字头（`schema`/`schema_version`）与领域约束，不做规范字节 摘要。规范化仍由公开纯函数完成（映射键稳定排序、金额用定点十进制字符串、单位保留原始拼写、注释与空行移除、LF 换行、非 ASCII 保留），用于确定性比较与测试，不产生内容摘要字段。无覆盖时使用空 Overrides 文档：
+文本财务文件只校验字头（`schema`/`schema_version`）与领域约束。规范化仍由公开纯函数完成（映射键稳定排序、金额用定点十进制字符串、单位保留原始拼写、注释与空行移除、LF 换行、非 ASCII 保留），用于确定性比较与测试。无覆盖时使用空 Overrides 文档：
 
 ```yaml
 schema: ies.finance-overrides
@@ -313,5 +313,5 @@ period_energy_sale(b)     = −raw_charge(b)         # direction: sale
 
 - 装配 YAML 的 `finance` 节引用 Effective YAML：`ref`（`kind: object` 或包内 `relative_file`）携带对象 ID；`profile_id` 携带来源标识。装配不在内内联完整财务配置；`ValidatedAssemblyArtifact` 固定引用。
 - 对象存储写入或项目包外部导入时，在边界一次性确定对象身份；内部读取按对象身份取得已登记内容，来源标识随快照传递。
-- 项目包可携带 `finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml` 三个文件；导入时对象字节完整性按清单逐对象校验，并对 Profile、Overrides 与 Effective 从精确来源重新合并。
+- 项目包可携带 `finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml` 三个文件；导入时按清单逐对象校验，并对 Profile、Overrides 与 Effective 从精确来源重新合并。
 - 数据库内部存储使用列/JSON 表示，不强制 YAML；HTTP JSON DTO 仍为 JSON。
