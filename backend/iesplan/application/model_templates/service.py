@@ -45,7 +45,6 @@ from iesplan.devices import (
     DeviceModelDocument,
     canonical_bytes,
     canonical_receipt,
-    content_sha256,
     parse_device_model_v2,
 )
 from iesplan.models.audit import AuditLog
@@ -151,26 +150,23 @@ def _published_delete_error(template_id: str, published_revision: int) -> AppErr
 
 @dataclass(frozen=True, slots=True)
 class TemplateValidation:
-    """模板完整校验结果: 要么带最终文档, 要么带聚合诊断。"""
+    """模板完整校验结果: 要么带最终文档, 要么带聚合诊断。文本文件只校验字头。"""
 
     ok: bool
     diagnostics: list[Diagnostic] = field(default_factory=list)
     document: DeviceModelDocument | None = None
     canonical_text: str = ""
-    content_sha256: str = ""
     receipt: dict[str, Any] | None = None
-    inputs_sha256: str | None = None
     input_count: int = 0
     has_inputs: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class TemplateRevisionRef:
-    """项目模型候选引用的精确模板 revision(权威内容经对象存储读取)。"""
+    """项目模型候选引用的精确模板 revision(权威内容经对象存储读取)。文本只校验字头。"""
 
     template_id: int
     revision: int
-    content_sha256: str
     yaml_object_id: int
     schema_version: str
 
@@ -266,11 +262,7 @@ def validate_template_raw(raw: Mapping[str, Any]) -> TemplateValidation:
         ok=True,
         document=doc,
         canonical_text=text,
-        content_sha256=content_sha256(doc),
         receipt=canonical_receipt(doc),
-        inputs_sha256=hashlib.sha256(
-            json.dumps(dict(doc.inputs), ensure_ascii=False, sort_keys=True).encode("utf-8")
-        ).hexdigest(),
         input_count=len(inputs.leaves),
         has_inputs=True,
     )
@@ -351,7 +343,6 @@ def _template_to_dict(template: ModelTemplate) -> dict[str, Any]:
         "status": template.status,
         "description": template.description,
         "draft_revision": template.draft_revision,
-        "draft_sha256": template.draft_sha256,
         "draft_has_inputs": template.draft_has_inputs,
         "published_revision": template.published_revision,
         "published_at": template.published_at.isoformat() if template.published_at else None,
@@ -361,13 +352,11 @@ def _template_to_dict(template: ModelTemplate) -> dict[str, Any]:
 
 
 def _revision_to_dict(revision: ModelTemplateRevision) -> dict[str, Any]:
-    """发布 revision 行 → 公开视图(精确 revision 与内容摘要)。"""
+    """发布 revision 行 → 公开视图(精确 revision)。文本文件只校验字头。"""
     return {
         "id": str(revision.id),
         "revision": revision.revision,
         "schema_version": revision.schema_version,
-        "content_sha256": revision.content_sha256,
-        "inputs_sha256": revision.inputs_sha256,
         "input_count": revision.input_count,
         "yaml_object_id": str(revision.yaml_object_id),
         "receipt_object_id": str(revision.receipt_object_id),
@@ -513,7 +502,6 @@ def _save_draft(
                         source_category="model_template_draft")
     old_diags = template.draft_diagnostics_object_id
     template.draft_yaml_object_id = handle.id
-    template.draft_sha256 = validation.content_sha256
     template.draft_has_inputs = validation.has_inputs
     template.draft_revision += 1
     template.draft_updated_at = datetime.now(UTC)
@@ -531,8 +519,6 @@ def _save_draft(
         entry_id=template.id,
         revision=template.draft_revision,
         yaml_object_id=handle.id,
-        canonical_sha256=validation.content_sha256,
-        inputs_sha256=validation.inputs_sha256,
         source="yaml_editor",
         created_by=user.id,
         diagnostics_object_id=diag_handle2.id,
@@ -558,7 +544,6 @@ def _save_draft(
             after={
                 "template_id": template.template_id,
                 "draft_revision": template.draft_revision,
-                "content_sha256": validation.content_sha256,
             },
         )
     )
@@ -631,7 +616,6 @@ def create_template_draft(
             status=TEMPLATE_STATUS_DRAFT,
             description=description,
             draft_yaml_object_id=handle.id,
-            draft_sha256=validation.content_sha256,
             draft_has_inputs=validation.has_inputs,
             draft_revision=1,
             draft_updated_at=datetime.now(UTC),
@@ -657,8 +641,6 @@ def create_template_draft(
         entry_id=template.id,
         revision=1,
         yaml_object_id=handle.id,
-        canonical_sha256=validation.content_sha256,
-        inputs_sha256=validation.inputs_sha256,
         source="yaml_editor",
         created_by=user.id,
         diagnostics_object_id=_diag_h.id,
@@ -675,8 +657,7 @@ def create_template_draft(
             action="model_template.created",
             actor_id=user.id,
             actor_type="user",
-            after={"template_id": template_id, "draft_revision": 1,
-                   "content_sha256": validation.content_sha256},
+            after={"template_id": template_id, "draft_revision": 1},
         )
     )
     db.commit()
@@ -755,15 +736,13 @@ def validate_template_revision(
     user,
     template_id: str,
     revision: int,
-    content_sha256_value: str,
 ) -> TemplateValidation:
     """重新校验一个精确发布 revision；引用与存储错误保持标准错误信封。
 
-    API 层不得直接读取对象存储。这里先按稳定引用解析并核对摘要，再经应用
-    门面读取不可变内容。对象损坏属于系统错误，不能伪装成无诊断的校验失败。
+    API 层不得直接读取对象存储。文本文件只校验字头（schema/schema_version）。
     """
     ref = resolve_template_revision(
-        db, user, template_id, revision, content_sha256_value,
+        db, user, template_id, revision,
     )
     document = _read_template_document_mapping(db, ref.yaml_object_id)
     if document is None:  # 防御式分支；当前读取门面只会返回 Mapping 或抛错
@@ -792,9 +771,8 @@ def _publish(
     """发布草稿为不可变 revision。
 
     - 校验失败 → 400 聚合诊断(不产生 revision);
-    - 相同规范内容的重复发布幂等返回同一 revision(unique(content_sha256) 兜底);
-    - 幂等键重放返回同一逻辑结果(不新增 revision);
-    - 发布成功后模板 status → published, published_revision 推进。
+    - 幂等键重放返回同一逻辑结果(不新增 revision)，否则以 (template_id, revision) 幂等；
+    - 发布成功后模板 status → published, published_revision 推进。文本文件只校验字头。
     """
     template = _get_owned_template(db, user, template_id)
     # 未完成显式迁移的旧发布内容不得产生新的 publication（任务书 §三）
@@ -813,7 +791,7 @@ def _publish(
                     "current_revision": template.draft_revision},
             location={"object_type": "model_template", "template_id": template_id},
         )
-    if template.draft_yaml_object_id is None or template.draft_sha256 is None:
+    if template.draft_yaml_object_id is None:
         raise AppError(
             "模板没有可发布的草稿内容",
             code=TPL_MDL_REVISION_REQUIRED,
@@ -821,8 +799,7 @@ def _publish(
             params={"template_id": template_id},
             location={"object_type": "model_template", "template_id": template_id},
         )
-    # 发布必须核对 expected_revision、草稿对象摘要与校验输入摘要（任务书 §四）
-    # draft_revision 已在上方校验；此处再核对对象内容未被外部篡改
+    # 发布必须核对 expected_revision（任务书 §四）
 
     # 幂等键重放: 返回同一逻辑结果, 不新增 revision
     if idempotency_key:
@@ -834,16 +811,6 @@ def _publish(
         ).scalar_one_or_none()
         if existing is not None:
             return {"revision": _revision_to_dict(existing), "duplicate": True}
-
-    # 相同内容幂等: 直接返回既有 revision
-    same = db.execute(
-        sa.select(ModelTemplateRevision).where(
-            ModelTemplateRevision.template_id == template.id,
-            ModelTemplateRevision.content_sha256 == template.draft_sha256,
-        )
-    ).scalar_one_or_none()
-    if same is not None:
-        return {"revision": _revision_to_dict(same), "duplicate": True}
 
     # 以草稿规范字节为权威内容(草稿保存时已完整校验); 规范字节为 JSON 文本
     doc_text = _read_template_document(db, template.draft_yaml_object_id)
@@ -887,7 +854,6 @@ def _publish(
     receipt = {**dict(receipt), "template_id": template.template_id,
                "revision": template.published_revision + 1,
                "schema": SCHEMA_ID, "schema_version": SCHEMA_VERSION,
-               "inputs_sha256": validation.inputs_sha256,
                "input_count": validation.input_count}
     receipt_handle = _put_json(db, receipt, "model_template_receipt")
     summary = _build_summary(document)
@@ -899,8 +865,6 @@ def _publish(
             template_id=template.id,
             revision=template.published_revision + 1,
             schema_version=SCHEMA_VERSION,
-            content_sha256=validation.content_sha256,
-            inputs_sha256=validation.inputs_sha256,
             input_count=validation.input_count,
             yaml_object_id=yaml_handle.id,
             receipt_object_id=receipt_handle.id,
@@ -913,15 +877,26 @@ def _publish(
         db.flush()
     except IntegrityError as exc:
         db.rollback()
-        # 并发同内容发布: 返回既有 revision(幂等)
-        same = db.execute(
-            sa.select(ModelTemplateRevision).where(
-                ModelTemplateRevision.template_id == template.id,
-                ModelTemplateRevision.content_sha256 == validation.content_sha256,
-            )
-        ).scalar_one_or_none()
-        if same is not None:
-            return {"revision": _revision_to_dict(same), "duplicate": True}
+        # 并发幂等: 以 (template_id, revision) 或 idempotency_key 幂等，文本只校验字头
+        if idempotency_key:
+            same = db.execute(
+                sa.select(ModelTemplateRevision).where(
+                    ModelTemplateRevision.template_id == template.id,
+                    ModelTemplateRevision.idempotency_key == idempotency_key,
+                )
+            ).scalar_one_or_none()
+            if same is not None:
+                return {"revision": _revision_to_dict(same), "duplicate": True}
+        else:
+            # 无幂等键时，按 revision 幂等（同一 revision 重放）
+            same = db.execute(
+                sa.select(ModelTemplateRevision).where(
+                    ModelTemplateRevision.template_id == template.id,
+                    ModelTemplateRevision.revision == template.published_revision + 1,
+                )
+            ).scalar_one_or_none()
+            if same is not None:
+                return {"revision": _revision_to_dict(same), "duplicate": True}
         raise ConflictError(
             "模板发布冲突(并发), 请重试",
             params={"template_id": template_id},
@@ -942,8 +917,7 @@ def _publish(
             action="model_template.published",
             actor_id=user.id,
             actor_type="user",
-            after={"template_id": template.template_id, "revision": row.revision,
-                   "content_sha256": validation.content_sha256},
+            after={"template_id": template.template_id, "revision": row.revision},
         )
     )
     db.flush()
@@ -1088,13 +1062,11 @@ def list_available_templates(db: Session, user) -> list[dict[str, Any]]:
 
 
 def resolve_template_revision(
-    db: Session, user, template_id: str, revision: int, content_sha256: str
+    db: Session, user, template_id: str, revision: int
 ) -> TemplateRevisionRef:
     """解析项目模型候选引用的精确模板 revision(权威内容)。
 
-    校验: 模板存在且属于当前用户、已发布、未停用, revision 匹配且内容
-    摘要与固定 revision 一致(候选携带的摘要只作二次确认, 权威内容从
-    对象存储读取)。返回 revision 内容引用供实例化。
+    校验: 模板存在且属于当前用户、已发布、未停用, revision 匹配。文本文件只校验字头。
     """
     template = _get_owned_template(db, user, template_id)
     if template.status != TEMPLATE_STATUS_PUBLISHED:
@@ -1116,18 +1088,9 @@ def resolve_template_revision(
             location={"object_type": "model_template", "template_id": template_id,
                       "revision": revision},
         )
-    if row.content_sha256 != content_sha256:
-        raise ConflictError(
-            "模板 revision 内容摘要不匹配(候选引用的内容已失效)",
-            params={"template_id": template_id, "revision": revision,
-                    "expected_sha256": row.content_sha256, "actual_sha256": content_sha256},
-            location={"object_type": "model_template", "template_id": template_id,
-                      "revision": revision},
-        )
     return TemplateRevisionRef(
         template_id=template.id,
         revision=row.revision,
-        content_sha256=row.content_sha256,
         yaml_object_id=row.yaml_object_id,
         schema_version=row.schema_version,
     )
@@ -1171,8 +1134,6 @@ def migrate_published_template(
         return {"receipt": {
             "old_template_id": old_template_id,
             "new_template_id": existing_receipt.new_template_id,
-            "old_content_sha256": existing_receipt.old_content_sha256,
-            "new_content_sha256": existing_receipt.new_content_sha256,
         }, "duplicate": True}
 
     old_template = _get_owned_template(db, user, old_template_id)
@@ -1210,7 +1171,6 @@ def migrate_published_template(
         raise TemplateNotFoundError("旧发布 revision 不存在")
 
     old_text = _read_template_document(db, rev.yaml_object_id)
-    old_sha = rev.content_sha256
     parsed = json.loads(old_text)
     parsed["device"]["id"] = new_template_id
     validation_new = validate_template_raw(parsed)
@@ -1222,10 +1182,9 @@ def migrate_published_template(
             location={"object_type": "model_template", "template_id": old_template_id},
         )
     new_text = validation_new.canonical_text
-    new_sha = validation_new.content_sha256
 
     # 原子更新：保留旧 publication，新增一个不可变迁移 publication，
-    # 再切换主表指针和全部项目模型溯源（同一事务）。
+    # 再切换主表指针和全部项目模型溯源（同一事务）。文本只校验字头。
     try:
         new_revision_number = old_template.published_revision + 1
         yaml_handle = put_object(db, new_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
@@ -1237,7 +1196,6 @@ def migrate_published_template(
             "revision": new_revision_number,
             "schema": SCHEMA_ID,
             "schema_version": SCHEMA_VERSION,
-            "inputs_sha256": validation_new.inputs_sha256,
             "input_count": validation_new.input_count,
             "migration": {
                 "old_template_id": old_template_id,
@@ -1251,8 +1209,6 @@ def migrate_published_template(
             template_id=old_template.id,
             revision=new_revision_number,
             schema_version=SCHEMA_VERSION,
-            content_sha256=new_sha,
-            inputs_sha256=validation_new.inputs_sha256,
             input_count=validation_new.input_count,
             yaml_object_id=yaml_handle.id,
             receipt_object_id=receipt_handle.id,
@@ -1275,8 +1231,6 @@ def migrate_published_template(
             old_template_id=old_template_id,
             new_template_id=new_template_id,
             entry_id=old_template.id,
-            old_content_sha256=old_sha,
-            new_content_sha256=new_sha,
             migrated_by=user.id,
         )
         db.add(receipt)
@@ -1287,8 +1241,6 @@ def migrate_published_template(
             .values(
                 template_id=new_template_id,
                 template_revision=new_revision_number,
-                template_sha256=new_sha,
-                inputs_sha256=validation_new.inputs_sha256,
             )
         )
         db.commit()
@@ -1299,8 +1251,6 @@ def migrate_published_template(
     return {"receipt": {
         "old_template_id": old_template_id,
         "new_template_id": new_template_id,
-        "old_content_sha256": old_sha,
-        "new_content_sha256": new_sha,
     }, "duplicate": False}
 
 
@@ -1339,8 +1289,6 @@ def migrate_draft_to_new_stable_id(
             location={"object_type": "model_template", "template_id": old_template_id},
         )
     new_text = validation_new.canonical_text
-    new_sha = validation_new.content_sha256
-    old_sha = old_template.draft_sha256 or ""
     try:
         new_handle = put_object(db, new_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
                                 source_category="model_template_draft")
@@ -1350,16 +1298,13 @@ def migrate_draft_to_new_stable_id(
         old_template.slug = new_slug
         old_template.public_namespace = namespace
         old_template.draft_yaml_object_id = new_handle.id
-        old_template.draft_sha256 = new_sha
-        # 同步创建新的不可变草稿 revision（不伪造历史）
+        # 同步创建新的不可变草稿 revision（不伪造历史）文本只校验字头
         from iesplan.models.draft_revision import ModelTemplateDraftRevision as _DraftRevMig
         diag_h = _put_json(db, [], "model_template_draft_diagnostics")
         new_dr = _DraftRevMig(
             entry_id=old_template.id,
             revision=old_template.draft_revision + 1,
             yaml_object_id=new_handle.id,
-            canonical_sha256=new_sha,
-            inputs_sha256=validation_new.inputs_sha256,
             source="migration",
             created_by=user.id,
             diagnostics_object_id=diag_h.id,
@@ -1374,8 +1319,7 @@ def migrate_draft_to_new_stable_id(
     except Exception:
         db.rollback()
         raise
-    return {"old_template_id": old_template_id, "new_template_id": new_id,
-            "old_content_sha256": old_sha, "new_content_sha256": new_sha}
+    return {"old_template_id": old_template_id, "new_template_id": new_id}
 
 
 def list_draft_revisions(db: Session, user, template_id: str) -> list[dict[str, Any]]:
@@ -1392,8 +1336,6 @@ def list_draft_revisions(db: Session, user, template_id: str) -> list[dict[str, 
             "id": str(r.id),
             "revision": r.revision,
             "yaml_object_id": str(r.yaml_object_id),
-            "canonical_sha256": r.canonical_sha256,
-            "inputs_sha256": r.inputs_sha256,
             "source": r.source,
             "created_by": str(r.created_by),
             "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -1419,8 +1361,6 @@ def get_draft_revision(db: Session, user, template_id: str, revision: int) -> di
         "id": str(row.id),
         "revision": row.revision,
         "yaml_object_id": str(row.yaml_object_id),
-        "canonical_sha256": row.canonical_sha256,
-        "inputs_sha256": row.inputs_sha256,
         "source": row.source,
         "created_by": str(row.created_by),
         "created_at": row.created_at.isoformat() if row.created_at else None,
