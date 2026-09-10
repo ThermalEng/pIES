@@ -113,7 +113,7 @@ def solve(request: SolveRequest) -> SolveResult: ...
 具体 Python 类型由 SDK 生成，但跨进程事实是版本化 JSON 与文件 manifest：
 
 - `GenerateRequest` 只含规范装配文本、固定资源清单、选项、种子和工作目录内逻辑路径；
-- `GenerateResult` 只含生成文件清单、每个文件摘要、求解请求和输出声明；系统通用 GeneratorProvider 据此生成标准 Solver Bundle；
+- `GenerateResult` 只含生成文件清单、求解请求和输出声明；系统通用 GeneratorProvider 据此生成标准 Solver Bundle；
 - `SolveRequest` 由 SolverRuntime 的通用 ExecutorProvider 从 Solver Bundle 建立，只含生成结果、规范选项、种子、停止条件和资源限制；
 - `SolveResult` 只含技术状态、业务结局、声明输出、日志引用和资源统计。
 
@@ -121,15 +121,9 @@ def solve(request: SolveRequest) -> SolveResult: ...
 
 ## 依赖锁
 
-`requirements.lock` 必须是按部署支持格式生成的完整传递依赖锁，每个分发文件带 SHA-256。只允许部署离线仓库中存在且策略允许的纯 Python wheel；第一版拒绝源码包、VCS 依赖、本地绝对路径、可编辑安装、URL 依赖、未锁哈希依赖和原生扩展。
+`requirements.lock` 必须是按部署支持格式生成的完整传递依赖锁。只允许部署离线仓库中存在且策略允许的纯 Python wheel；第一版拒绝源码包、VCS 依赖、本地绝对路径、可编辑安装、URL 依赖和原生扩展。
 
-运行环境身份为：
-
-```text
-sha256(plugin_zip) + sha256(requirements.lock) + runner_contract_version + python_runtime_digest
-```
-
-环境可以缓存和重建，但不能成为任务的权威输入。任务快照保存上述全部身份字段。
+运行环境由 runner contract 版本、Python 运行时与声明的依赖确定。环境可以缓存和重建，但不能成为任务的权威输入。
 
 ## 加工阶段规则
 
