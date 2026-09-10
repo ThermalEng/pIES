@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 
 from iesplan.assembly.validator2 import (
     NetworkReceipt,
@@ -15,7 +14,7 @@ from iesplan.assembly.validator2 import (
     validate_interface_network2,
 )
 from iesplan.core.yamlmini import load as yaml_load
-from iesplan.devices.contracts2 import DeviceModelDocument, content_sha256
+from iesplan.devices.contracts2 import DeviceModelDocument
 from iesplan.devices.parser2 import parse_device_model_v2
 
 
@@ -143,13 +142,13 @@ def _assembly_doc(
     devices: dict | None = None,
     connections: dict | None = None,
 ) -> dict:
-    """构造装配 2.0 接口网络文档(definition 自动取 descriptor 内容锁)。"""
+    """构造装配 2.0 接口网络文档。"""
     doc: dict = {"schema": "ies.assembly", "schema_version": "2.0.0", "devices": {}, "connections": {}}
     devices = devices or {}
     for inst_id, d in documents.items():
         cfg = devices.get(inst_id) or {}
         entry: dict = {
-            "definition": {"id": d.device.id, "content_sha256": content_sha256(d)},
+            "definition": {"id": d.device.id},
             "asset_origin": cfg.get("asset_origin", "existing"),
         }
         if cfg.get("predefined_interfaces"):
@@ -188,14 +187,10 @@ class TestValidNetwork:
         assert r.ok, [d.params.get("detail") for d in r.diagnostics]
         artifact = r.artifact
         assert isinstance(artifact, ValidatedInterfaceNetwork)
-        # 三件套一致
+        # 产物和回执契约一致
         assert artifact.verify()
-        assert artifact.network_sha256 == hashlib.sha256(artifact.canonical_text.encode("utf-8")).hexdigest()
-        assert artifact.receipt.network_sha256 == artifact.network_sha256
-        assert artifact.receipt.device_locks == {
-            "grid": content_sha256(GRID_DOC),
-            "load": content_sha256(LOAD_DOC),
-        }
+        assert "network_sha256" not in artifact.to_dict()
+        assert "device_locks" not in artifact.receipt.to_dict()
         assert artifact.receipt.diagnostics == ()
         # 规范文本确定性形态
         assert '"schema":"ies.assembly"' in artifact.canonical_text
@@ -232,9 +227,9 @@ class TestValidNetwork:
         )
         a = validate_interface_network2(base, documents)
         b = validate_interface_network2(copy.deepcopy(base), documents)
-        assert a.artifact.network_sha256 == b.artifact.network_sha256
         assert a.artifact.canonical_text == b.artifact.canonical_text
-        # 连接声明顺序不影响规范摘要(规范按键排序)
+        assert a.artifact.canonical_text == b.artifact.canonical_text
+        # 连接声明顺序不影响规范文本（规范按键排序）。
         reordered = copy.deepcopy(base)
         reordered["connections"] = {
             "c1": {"from": "grid.electricity_out", "to": "load.electricity_in"},
@@ -242,8 +237,8 @@ class TestValidNetwork:
         }
         del reordered["connections"]["c2"]  # 保持单边,仅验证键序稳定
         c = validate_interface_network2(reordered, documents)
-        assert c.artifact.network_sha256 == a.artifact.network_sha256
-        # 语义变化(换目标) → 摘要变化
+        assert c.artifact.canonical_text == a.artifact.canonical_text
+        # 语义变化会生成不同的规范文本。
         changed = copy.deepcopy(base)
         changed["connections"]["c1"]["to"] = "load.electric_demand"
         d = validate_interface_network2(changed, documents)
@@ -251,7 +246,7 @@ class TestValidNetwork:
         changed2 = copy.deepcopy(base)
         changed2["devices"]["load"]["asset_origin"] = "new"
         e = validate_interface_network2(changed2, documents)
-        assert e.artifact.network_sha256 != a.artifact.network_sha256
+        assert e.artifact.canonical_text != a.artifact.canonical_text
 
     def test_receipt_roundtrip(self):
         documents = {"grid": GRID_DOC, "load": LOAD_DOC}
@@ -262,8 +257,6 @@ class TestValidNetwork:
         )
         artifact = validate_interface_network2(doc, documents).artifact
         receipt = NetworkReceipt.from_dict(artifact.receipt.to_dict())
-        assert receipt.network_sha256 == artifact.network_sha256
-        assert receipt.device_locks == artifact.receipt.device_locks
         assert receipt.to_dict() == artifact.receipt.to_dict()
 
     def test_receipt_rejects_malformed(self):
@@ -272,7 +265,7 @@ class TestValidNetwork:
         documents = {"grid": GRID_DOC}
         artifact = validate_interface_network2(_assembly_doc(documents), documents).artifact
         payload = artifact.receipt.to_dict()
-        # header-only: device_locks optional, malformed = missing schema
+        # 缺少 schema 的回执必须拒绝。
         del payload["schema"]
         with pytest.raises(ValueError):
             NetworkReceipt.from_dict(payload)
@@ -403,10 +396,9 @@ class TestDeviceLocks:
         r = validate_interface_network2(doc, documents)
         assert "ASM-LOCK-001" in _codes(r)
 
-    def test_content_sha_mismatch(self):
+    def test_definition_id_mismatch_is_rejected(self):
         documents = {"grid": GRID_DOC}
         doc = _assembly_doc(documents)
-        # header-only: content_sha256 not validated, tampering id should cause lock mismatch
         doc["devices"]["grid"]["definition"]["id"] = "tampered.device.id"
         r = validate_interface_network2(doc, documents)
         assert "ASM-LOCK-001" in _codes(r)

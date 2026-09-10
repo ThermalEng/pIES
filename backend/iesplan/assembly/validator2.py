@@ -25,7 +25,6 @@ AssemblySpec/ModelCommand/DeviceSpec 与设备注册表;旧 1.0 代码保持原�
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -72,8 +71,6 @@ CANON2_ALGORITHM_VERSION = "2.0.0"
 
 #: 实例/连接/接口 ID 模式(与 devices 2.0 一致)
 _ID_PATTERN = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
-#: content_sha256: 小写 64 位十六进制(兼容旧文档，可选)
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 #: 预定义数据来源模式(装配校验同样只放行这三类)
 PREDEFINED_SOURCE_MODES: tuple[str, ...] = SOURCE_MODES
@@ -131,7 +128,7 @@ class NetworkReceipt:
     """接口网络校验回执(确定性;不含签发时间等运行上下文)。
 
     与 1.0 ``ValidationReceipt`` 同构: 校验器/规范化算法/schema 版本与零阻断诊断。
-    文本只校验字头，兼容旧文档的 network_sha256/device_locks 可选字段（不做 SHA 校验）。
+    文本只校验字头与领域约束；不保留内容摘要字段。
     """
 
     schema: str = SCHEMA2_ID
@@ -140,23 +137,16 @@ class NetworkReceipt:
     validator_version: str = VALIDATOR2_VERSION
     canonical_algorithm_id: str = CANON2_ALGORITHM_ID
     canonical_algorithm_version: str = CANON2_ALGORITHM_VERSION
-    # 兼容旧文档：可选，不参与业务校验
-    network_sha256: str = ""
-    device_locks: Mapping[str, str] = field(default_factory=dict)
     diagnostics: tuple[Diagnostic, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.device_locks, Mapping):
-            raise TypeError("device_locks 须为 Mapping")
         diagnostics = tuple(self.diagnostics)
         if not all(isinstance(diag, Diagnostic) for diag in diagnostics):
             raise TypeError("diagnostics 须仅包含 Diagnostic")
-        object.__setattr__(self, "device_locks", _freeze_value(self.device_locks))
         object.__setattr__(self, "diagnostics", diagnostics)
 
     def to_dict(self) -> dict:
         """确定性 JSON 兼容字典(字段固定顺序)。"""
-        # 兼容旧文档：保留 network_sha256/device_locks（可选）
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
@@ -165,20 +155,17 @@ class NetworkReceipt:
                 "id": self.canonical_algorithm_id,
                 "version": self.canonical_algorithm_version,
             },
-            "network_sha256": self.network_sha256,
-            "device_locks": _thaw_value(self.device_locks),
             "diagnostics": [_stable_diagnostic_dict(diag) for diag in self.diagnostics],
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> NetworkReceipt:
-        """从持久化 JSON 严格恢复;兼容旧文档的 network_sha256/device_locks 可选字段。"""
+        """从持久化 JSON 严格恢复。"""
         if not isinstance(payload, Mapping):
             raise TypeError("receipt 须为 Mapping")
-        # 兼容：旧文档含 network_sha256/device_locks，新文档可选
         allowed_keys = {
             "schema", "schema_version", "validator", "canonical_algorithm",
-            "network_sha256", "device_locks", "diagnostics",
+            "diagnostics",
         }
         if not set(payload).issubset(allowed_keys) or "schema" not in payload:
             raise ValueError("receipt 字段集合与当前契约不一致")
@@ -188,17 +175,13 @@ class NetworkReceipt:
             raise TypeError("receipt.validator/canonical_algorithm 须为 Mapping")
         if set(validator) != {"id", "version"} or set(canonical) != {"id", "version"}:
             raise ValueError("receipt validator/canonical_algorithm 字段集合不一致")
-        locks = payload.get("device_locks", {})
         raw_diags = payload.get("diagnostics", [])
-        if not isinstance(locks, Mapping) or not isinstance(raw_diags, (list, tuple)):
-            raise TypeError("receipt device_locks/diagnostics 类型非法")
-        if not all(isinstance(k, str) and isinstance(v, str) for k, v in locks.items()):
-            raise TypeError("receipt device_locks 值须为字符串")
+        if not isinstance(raw_diags, (list, tuple)):
+            raise TypeError("receipt diagnostics 类型非法")
         diagnostics = tuple(
             _restore_diagnostic(raw) for raw in raw_diags
         )
         string_fields = {
-            "network_sha256": payload.get("network_sha256", ""),
             "schema": payload["schema"],
             "schema_version": payload["schema_version"],
             "validator.id": validator["id"],
@@ -207,22 +190,15 @@ class NetworkReceipt:
             "canonical_algorithm.version": canonical["version"],
         }
         for name, value in string_fields.items():
-            if name == "network_sha256":
-                # 可选字段：可为空
-                if not isinstance(value, str):
-                    raise TypeError(f"receipt.{name} 须为字符串")
-                continue
             if not isinstance(value, str) or not value:
                 raise TypeError(f"receipt.{name} 须为非空字符串")
         return cls(
-            network_sha256=payload.get("network_sha256", ""),
             schema=payload["schema"],
             schema_version=payload["schema_version"],
             validator_id=validator["id"],
             validator_version=validator["version"],
             canonical_algorithm_id=canonical["id"],
             canonical_algorithm_version=canonical["version"],
-            device_locks=locks,
             diagnostics=diagnostics,
         )
 
@@ -264,32 +240,22 @@ def _restore_diagnostic(raw: object) -> Diagnostic:
 
 @dataclass(frozen=True, slots=True)
 class ValidatedInterfaceNetwork:
-    """唯一、可签名的接口网络成功产物(不可变二件套,纯协议版本；兼容旧三件套)。
+    """唯一的接口网络成功产物（不可变二件套）。
 
     - canonical_text: 规范网络文本(确定性 JSON 形态);
-    - network_sha256: 规范字节 SHA-256（兼容旧文档，可选）;
     - receipt: 校验回执。
-
-    文本只校验字头，不做 SHA 强制校验；兼容旧文档的 SHA 字段。
     """
 
     canonical_text: str
-    network_sha256: str = ""
     receipt: NetworkReceipt = None  # type: ignore
 
     def __post_init__(self):
-        # 允许旧调用：ValidatedInterfaceNetwork(canonical_text, receipt) 兼容
         if self.receipt is None:
             raise TypeError("receipt 不能为空")
 
     def verify(self) -> bool:
-        # 兼容：若提供 network_sha256，则校验一致性；否则仅校验字头
-        sha_ok = True
-        if self.network_sha256:
-            sha_ok = self.receipt.network_sha256 == self.network_sha256 or self.receipt.network_sha256 == ""
         return (
-            sha_ok
-            and self.receipt.schema == SCHEMA2_ID
+            self.receipt.schema == SCHEMA2_ID
             and self.receipt.schema_version == SCHEMA2_VERSION
             and self.receipt.validator_id == VALIDATOR2_ID
             and self.receipt.validator_version == VALIDATOR2_VERSION
@@ -311,7 +277,6 @@ class ValidatedInterfaceNetwork:
             "schema": SCHEMA2_ID,
             "schema_version": SCHEMA2_VERSION,
             "canonical_text": self.canonical_text,
-            "network_sha256": self.network_sha256,
             "receipt": self.receipt.to_dict(),
         }
 
@@ -404,25 +369,11 @@ def validate_interface_network2(
         return InterfaceNetworkResult(diagnostics=diags, artifact=None)
 
     canonical_text = _canonical_text(instances, connections)
-    # 兼容：仍计算 SHA 以支持旧测试，但业务校验不依赖
-    digest = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
-    # 兼容：若提供 device documents，则计算 device_locks（旧逻辑），新逻辑仅校验 id
-    try:
-        from iesplan.devices.contracts2 import content_sha256 as _content_sha
-        locks = {
-            inst_id: _content_sha(documents[inst_id])
-            for inst_id in sorted(instances)
-            if documents.get(inst_id) is not None
-        }
-    except Exception:
-        locks = {}
     receipt = NetworkReceipt(
-        network_sha256=digest,
-        device_locks=locks,
         diagnostics=tuple(d for d in diags if not d.blocking),
     )
     artifact = ValidatedInterfaceNetwork(
-        canonical_text=canonical_text, network_sha256=digest, receipt=receipt
+        canonical_text=canonical_text, receipt=receipt
     )
     return InterfaceNetworkResult(diagnostics=diags, artifact=artifact)
 

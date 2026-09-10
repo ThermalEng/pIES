@@ -16,7 +16,6 @@ from iesplan.devices.contracts2 import (
     DeviceModelDocument,
     canonical_bytes,
     canonical_receipt,
-    content_sha256,
     is_valid_id,
     to_dict,
 )
@@ -200,7 +199,6 @@ __all__ = [
     "get_profile_columns",
     "canonical_bytes",
     "canonical_receipt",
-    "content_sha256",
     "is_valid_id",
     "to_dict",
     "DeviceModelParseResult",

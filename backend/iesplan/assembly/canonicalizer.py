@@ -261,12 +261,6 @@ def canonicalize_assembly_doc(doc: Mapping) -> str:
     return canonical_text
 
 
-def assembly_sha256(canonical_text: str) -> str:
-    """兼容存根：规范文本 → SHA（保留以兼容旧测试）。"""
-    import hashlib
-    return hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
-
-
 def canonical_algorithm_ref() -> str:
     """规范化算法 ID@版本(写入回执与文档)。"""
     return f"{CANON_ALGORITHM_ID}@{CANON_ALGORITHM_VERSION}"
@@ -279,6 +273,5 @@ __all__ = [
     "format_utc_z",
     "format_number",
     "canonicalize_assembly_doc",
-    "assembly_sha256",
     "canonical_algorithm_ref",
 ]
