@@ -16,7 +16,7 @@
 
 | 对象 | 稳定身份 | 固定具体内容 | 兼容性版本 |
 |---|---|---|---|
-| 设备 YAML | `device.id` | 规范 SHA-256、发布 revision、校验回执 | 仅统一 `ies.device-model` schema 版本 |
+| 设备 YAML | `device.id` | 发布 revision、校验回执 | 仅统一 `ies.device-model` schema 版本 |
 | 算法插件/provider | 命名空间 ID | 包/实现摘要与发布记录 | 独立三段式语义版本 |
 | 数据版本 | dataset ID | 规范内容摘要与变换记录 | 文件 schema 版本 |
 

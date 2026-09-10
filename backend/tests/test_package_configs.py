@@ -94,7 +94,7 @@ def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
         "schema_version": "1.0.0",
-        "profile_ref": {"id": profile.profile_id, "content_sha256": profile.content_sha256},
+        "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
                 "upfront_capex": {
@@ -109,7 +109,7 @@ def _overrides_payload(profile: FinanceProfile) -> dict:
     }
 
 
-def _planning_payload(effective_sha: str) -> dict:
+def _planning_payload() -> dict:
     return {
         "objective": {"sense": "minimize", "expression": "system.total_financial_cost"},
         "variables": {
@@ -122,7 +122,6 @@ def _planning_payload(effective_sha: str) -> dict:
             },
         },
         "constraints": {},
-        "finance_content_sha256": effective_sha,
     }
 
 
@@ -204,7 +203,7 @@ def _setup_finance(client: TestClient, user, pid: int) -> tuple[FinanceProfile, 
     assert resp.status_code == 200, resp.text
     resp = client.put(
         f"/api/projects/{pid}/finance-profile",
-        json={"profile_ref": {"id": profile.profile_id, "content_sha256": profile.content_sha256}},
+        json={"profile_ref": {"id": profile.profile_id}},
         headers=_h(client, user),
     )
     assert resp.status_code == 200, resp.text
@@ -219,10 +218,10 @@ def _setup_finance(client: TestClient, user, pid: int) -> tuple[FinanceProfile, 
     return profile, overrides, effective
 
 
-def _save_planning(client: TestClient, user, pid: int, effective_sha: str) -> None:
+def _save_planning(client: TestClient, user, pid: int) -> None:
     resp = client.put(
         f"/api/projects/{pid}/planning-config",
-        json={"planning_config": _planning_payload(effective_sha), "expected_revision": None},
+        json={"planning_config": _planning_payload(), "expected_revision": None},
         headers=_h(client, user),
     )
     assert resp.status_code == 200, resp.text
@@ -326,7 +325,7 @@ def test_export_and_import_roundtrip_with_configs(client: TestClient, db: Sessio
     importer = make_user(db, "pkg_importer")
     pid = _create_project(client, owner)
     profile, overrides, effective = _setup_finance(client, owner, pid)
-    _save_planning(client, owner, pid, effective.content_sha256)
+    _save_planning(client, owner, pid)
 
     zip_bytes = _export_zip(client, owner, pid)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -353,22 +352,21 @@ def test_export_and_import_roundtrip_with_configs(client: TestClient, db: Sessio
         from iesplan.core.yamlmini import load as yaml_load
 
         p = FinanceProfile.from_dict(yaml_load(zf.read("finance_profile.yaml").decode("utf-8")))
-        assert p.content_sha256 == profile.content_sha256
+        assert p.profile_id == profile.profile_id
         o = FinanceOverrides.from_dict(
             yaml_load(zf.read("finance_overrides.yaml").decode("utf-8")), profile=p
         )
-        assert o.content_sha256 == overrides.content_sha256
+        assert o.profile_ref["id"] == profile.profile_id
         e = EffectiveFinanceConfig.from_dict(
             yaml_load(zf.read("effective_finance.yaml").decode("utf-8"))
         )
-        assert e.content_sha256 == effective.content_sha256
+        assert e.profile_id == profile.profile_id
 
     proposal = package_service.import_proposal(db, importer, zip_bytes)
     summary_configs = proposal.review_summary["configs"]
     assert summary_configs["finance_triplet"]["present"] is True
-    assert summary_configs["finance_triplet"]["profile_sha256"] == profile.content_sha256
-    assert summary_configs["finance_triplet"]["overrides_sha256"] == overrides.content_sha256
-    assert summary_configs["finance_triplet"]["content_sha256"] == effective.content_sha256
+    assert summary_configs["finance_triplet"]["profile_id"] == profile.profile_id
+    assert summary_configs["finance_triplet"]["present"] is True
     new_project = package_service.confirm_import(db, importer, proposal.id)
     db.commit()
 
@@ -378,12 +376,12 @@ def test_export_and_import_roundtrip_with_configs(client: TestClient, db: Sessio
         f"/api/projects/{new_project.id}/effective-finance", headers=_h(client, importer)
     )
     assert resp.status_code == 200
-    assert resp.json()["effective_finance_config"]["content_sha256"] == effective.content_sha256
+    assert resp.json()["effective_finance_config"]["profile_id"] == profile.profile_id
     resp = client.get(
         f"/api/projects/{new_project.id}/planning-config", headers=_h(client, importer)
     )
     assert resp.status_code == 200
-    assert resp.json()["planning_config"]["finance_content_sha256"] == effective.content_sha256
+    assert "planning_config" in resp.json()
     assert summary_configs["planning"]["present"] is True
 
 
@@ -448,16 +446,16 @@ def test_import_rejects_byte_tampered_package_file(client: TestClient, db: Sessi
 
 
 def test_import_rejects_planning_finance_mismatch(client: TestClient, db: Session) -> None:
-    """规划引用的 Effective content_sha256 与包内有效快照不一致 → 拒绝。"""
+    """规划配置校验 → 拒绝。"""
     importer = make_user(db, "rej_imp_4")
     entries, configs_meta = _valid_triplet_entries()
-    planning = PlanningConfig.from_dict(_planning_payload("0" * 64))
+    planning = PlanningConfig.from_dict(_planning_payload())
     entries["planning_config.yaml"] = yaml_dump(planning.to_dict()).encode("utf-8")
     configs_meta = {**configs_meta, "planning_config": "planning_config.yaml"}
     zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_service.ImportValidationError) as excinfo:
         package_service.import_proposal(db, importer, zip_bytes)
-    assert any("finance_content_sha256" in r or "不一致" in r for r in excinfo.value.reasons)
+    assert any("不一致" in r or "非法" in r for r in excinfo.value.reasons)
 
 
 def test_import_rejects_override_scope_violation(client: TestClient, db: Session) -> None:

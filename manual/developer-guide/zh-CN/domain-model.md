@@ -39,7 +39,7 @@ pIES 把信息按生命周期分为三类：
 
 规划配置只描述目标函数/权重、规划变量、容量上下界和规划/系统约束。它不保存财务参数或 generator/solver 选项。
 
-财务参数以三件套表达：地区 `FinanceProfile`（已注册、内容寻址、可复用的地区财务基准：币种/基准年/金额口径、按 `finance_type` 的时间口径成本分量、能源购售价格）、项目 `FinanceOverrides`（精确引用 Profile 稳定 ID 与内容摘要，只对既有成本/价格做原子稀疏覆盖）与确定性合并器生成的不可变 `EffectiveFinanceConfig`（记录 `profile_sha256` / `overrides_sha256` / `content_sha256`）。三件套不保存目标函数、规划变量/约束、计算选项或仅在某一阶段使用的数据，在项目包内固定为 `.yaml`。规划生成与结果财务计算必须引用同一 `EffectiveFinanceConfig.content_sha256`。
+财务参数以三件套表达：地区 `FinanceProfile`（已注册、可复用的地区财务基准：币种/基准年/金额口径、按 `finance_type` 的时间口径成本分量、能源购售价格）、项目 `FinanceOverrides`（引用 Profile 稳定 ID，只对既有成本/价格做原子稀疏覆盖）与确定性合并器生成的不可变 `EffectiveFinanceConfig`。三件套不保存目标函数、规划变量/约束、计算选项或仅在某一阶段使用的数据，在项目包内固定为 `.yaml`。规划生成与结果财务计算必须引用同一 `EffectiveFinanceConfig`。
 
 计算配置只描述把规范装配产物转换为计算包的方法：mode、预测目标所用算法与参数、generator、solver、计算精度、离散化、阶段二适用时的收敛容差与最大迭代数、时间限制、选项、随机种子和输出选择。计算配置不进入 assembly 内容摘要，在计算包生成时与 `ValidatedAssemblyArtifact` 一起固定。三类配置保存均形成修订，历史任务按当时明确 revision 解释。
 

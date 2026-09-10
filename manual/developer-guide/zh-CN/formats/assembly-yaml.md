@@ -31,14 +31,12 @@ devices:
   grid:
     definition:
       id: ies.device.grid_connection
-      content_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     asset_origin: existing
     properties: {}
     predefined_interfaces: {}
   pv_1:
     definition:
       id: ies.device.pv
-      content_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     asset_origin: new
     properties:
       rated_capacity_kwp:
@@ -50,7 +48,6 @@ devices:
   load:
     definition:
       id: ies.device.electric_load
-      content_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     asset_origin: existing
     properties: {}
     predefined_interfaces:
@@ -69,13 +66,9 @@ connections:
 finance:
   ref:
     kind: object                     # 或包内 relative_file
-    object_id: "sha256:4444444444444444444444444444444444444444444444444444444444444444"
-    sha256: "4444444444444444444444444444444444444444444444444444444444444444"  # 对象完整字节摘要
+    object_id: "4444444444444444444444444444444444444444444444444444444444444444"
     media_type: application/yaml
-  profile_id: cn-north-demo          # 血缘：来源 Profile 与 Overrides（内容摘要）
-  profile_sha256: "1111111111111111111111111111111111111111111111111111111111111111"
-  overrides_sha256: "2222222222222222222222222222222222222222222222222222222222222222"
-  content_sha256: "3333333333333333333333333333333333333333333333333333333333333333"  # 规范内容摘要
+  profile_id: cn-north-demo  # 规范内容摘要
 
 finance_binding:
   instances:
@@ -117,7 +110,7 @@ planning:
 extensions: {}
 ```
 
-示例中的摘要仅为占位值。正式文件必须引用设备规范内容与有效财务快照的真实内容身份：`ref.sha256` 是在对象存储或外部导入边界登记的对象字节身份，血缘区 `profile_sha256`/`overrides_sha256`/`content_sha256` 是规范内容身份；程序内部传递只携带这些身份，不重新计算或比对。被引用的有效快照需含本装配用到的 `finance_type`（如 `pv_system`）与 `energy_prices` 的 `price_id`（如 `grid_import`/`pv_export`），完整字段定义见[财务 YAML 契约](finance-yaml.md)。实例 `instance_id`（如 `pv_1`/`grid`）、计量绑定 `binding_id`（如 `import_meter`）、财务 `finance_type`（如 `pv_system`）与技术模型 `device.id`（如 `ies.device.pv`）严格分离：`grid` 无设备成本、不绑定 `finance_type`（不再虚构 `grid_connection` 等零成本连接类别），其计量与计费完全由 `tariff_bindings` 表达。
+被引用的有效快照需含本装配用到的 `finance_type`（如 `pv_system`）与 `energy_prices` 的 `price_id`（如 `grid_import`/`pv_export`），完整字段定义见[财务 YAML 契约](finance-yaml.md)。实例 `instance_id`（如 `pv_1`/`grid`）、计量绑定 `binding_id`（如 `import_meter`）、财务 `finance_type`（如 `pv_system`）与技术模型 `device.id`（如 `ies.device.pv`）严格分离：`grid` 无设备成本、不绑定 `finance_type`（不再虚构 `grid_connection` 等零成本连接类别），其计量与计费完全由 `tariff_bindings` 表达。
 
 规划目标示例把成本项显式列出：`pv_1__annual_fixed_om`（currency/年）、`pv_1__period_variable_om`、`import_meter__period_energy_purchase`、`export_meter__period_energy_sale`（currency，运行/计费窗口合计）。这些标识符是受限表达式可解析的普通 `Name`，其编码与映射规则见下文「规划表达式中的财务分量标识符」：设备成本分量 = `<instance_id>__<分量>`，能源计费分量 = `<tariff_binding_id>__period_energy_purchase|sale`，不使用点分路径。`annual_fixed_om` 与 `period_*` 量纲不同（currency/年 vs currency），不能直接相加：示例中计算窗口恰好是项目基线覆盖的完整一年，表达式通过**显式时间跨度字面量 `1 year`** 把按年值换算为完整年度窗口金额（currency）后再与 `period_*` 相加；计算窗口不是完整一年时，不得默认相加或做其他隐式缩放（规则见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。会计符号由被引用价格的显式 `direction` 统一决定（定义见[财务 YAML 契约](finance-yaml.md)「计价规则」）：每个计量绑定先算 `raw_charge = Σ price×energy`，`purchase`（如 `grid_import`）分量为 +raw_charge、`sale`（如 `pv_export`）分量为 −raw_charge。分量是**已带符号的记账贡献**（正售电价时 sale 分量自身为负，收益自动抵减成本），因此目标表达式对所有分量**统一使用加法**——示例写 `+ export_meter__period_energy_sale`，不再书写额外负号，也不把“sale 以负号计入”写为规则。该示例是“预算上限约束下的年度运行成本最小化”这一**具体示例，不是通用经济目标**：一次性 `upfront_capex` 不进该目标，改由预算上限约束显式处理（示例上限 `900000 CNY` 为规划人员输入的带单位常数，单位必须与 `EffectiveFinanceConfig.currency` 一致，不是系统财务规则）；具体如何把一次性投资转换为可与运行期成本比较的规划分量，属于 `PlanningConfig` 的明确、版本化规则，需在规划配置契约中定义，本财务 Profile 不隐式定义或默认选择这种转换（不隐含资本回收系数、利率或年限等值）。表达式与约束的具体语法由规划配置契约定义，本格式页只定义财务分量标识符的映射与量纲，不定义表达式语言本身；分量标识符引用设备成本绑定（`pv_1`）与能源计费绑定（`import_meter`/`export_meter`），不依赖任何隐式“系统总成本”聚合。
 
@@ -130,7 +123,7 @@ extensions: {}
 | `resources` | 数据等外部资源及其可验证来源 |
 | `devices` | 设备实例、精确设备内容、存量/新增身份、允许的 property 覆盖和预定义接口绑定 |
 | `connections` | 可连接的真实 `<device>.<interface>` 之间的有向连接 |
-| `finance` | 对装配前由 `FinanceProfile` + `FinanceOverrides` 合并生成、完整校验的不可变 `EffectiveFinanceConfig` 的**精确引用**：`ref` 携带对象字节身份，血缘区携带 `profile_id` / `profile_sha256` / `overrides_sha256` / `content_sha256` 规范内容身份；规划与财务计算共同消费同一引用；装配内不内联另一份完整财务配置 |
+| `finance` | 对装配前由 `FinanceProfile` + `FinanceOverrides` 合并生成、完整校验的不可变 `EffectiveFinanceConfig` 的引用：`ref` 携带对象身份，`profile_id` 携带来源标识；规划与财务计算共同消费同一引用；装配内不内联另一份完整财务配置 |
 | `finance_binding` | 每个设备实例的**设备成本**财务判别联合：`type: costed`（含 `finance_type` 与 `driver → property/interface` 映射）或 `type: none`（该实例无设备成本贡献，可作纯计量点；能源计费不在此表达）。缺口、未知 `finance_type`、非法映射、按增量语义缺失的 driver 与单位量纲不兼容在装配校验中阻断 |
 | `tariff_bindings` | 能源价格计费绑定：`binding_id → {price, instance, interface, aggregation}`，`price` 引用有效快照 `energy_prices` 的 `price_id`（`carrier`/`direction` 由 Profile 条目显式声明）；独立于设备成本绑定，计费点实例可以是 `type: none`；逐点计价与会计方向规则见[财务 YAML 契约](finance-yaml.md) |
 | `planning` | 目标函数、规划变量、上下界和规划/系统约束；目标逐项引用设备成本或能源计费分量（见上方规划示例），不依赖隐式总成本 |
@@ -140,7 +133,7 @@ extensions: {}
 
 ## 设备内容固定与实例
 
-每个设备实例用 `definition.id + definition.content_sha256` 固定具体设备内容。`schema_version` 版本化统一设备格式，不是某台设备的语义版本；装配不得出现 `device_version`、`model@version`、`latest` 或设备私有命令版本。
+每个设备实例用 `definition.id` 固定具体设备内容（按字头校验，不做内容摘要）。`schema_version` 版本化统一设备格式，不是某台设备的语义版本；装配不得出现 `device_version`、`model@version`、`latest` 或设备私有命令版本。
 
 实例规则：
 
@@ -192,18 +185,17 @@ source:
 ```yaml
 source:
   kind: object
-  object_id: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-  sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  object_id: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   media_type: text/csv
 ```
 
-`relative_file` 只用于外部作者包的导入入口，不能逃逸包目录。入口完成文件解析并登记内容对象后，规范装配只保留已登记的内容寻址引用；进入可信内部流程后不再因文件交接而重算或比对 hash。网络 URL、宿主机绝对路径、临时上传路径和存储 provider 私有路径不得进入可执行快照。
+`relative_file` 只用于外部作者包的导入入口，不能逃逸包目录。入口完成文件解析并登记内容对象后，规范装配只保留已登记的内容寻址引用；进入可信内部流程后不再因文件交接而重算校验。网络 URL、宿主机绝对路径、临时上传路径和存储 provider 私有路径不得进入可执行快照。
 
 CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`source_mode`、分辨率、输入 `step` 和有效区间与目标 predefined interface 一致。装配绑定经校验和规范化的重复基线、训练目标、历史输入与未来已知协变量的内容寻址引用。装配必须确认每个来源与项目基线分辨率一致、文件内 `step` 从零开始连续，并符合对应来源模式的覆盖要求；不同原始来源在物化前不要求点数相同或 `step` 一一对应。`data_repeat` 的完整来源序列整体作为重复基线，可为完整日、周或年，不另设周期字段。任一来源自身不符合时必须阻断，不重采样、插值、聚合、融合或补齐。计算阶段按项目基线物化后，所有计算序列统一点数和连续 `step`，并在产物与回执中固定。
 
 ## 规划配置与有效财务快照引用
 
-设备 YAML 始终保持纯技术。有效财务快照是装配前由地区 `FinanceProfile`（已注册、内容寻址、可复用的地区财务基准，不得以硬编码内置充当全局默认）与项目 `FinanceOverrides`（精确引用 `profile {id, content_sha256}`，对既有 `finance_type` 分量叶子做 `{value, unit}` 原子替换、对能源价格条目做定价定义整项替换；税目只属于 Profile，Overrides 不可新增/覆盖/删除）在装配前确定性合并并完整校验后签发，记录 `profile_sha256` / `overrides_sha256` / `content_sha256` 三内容摘要，并以精确引用形式进入装配摘要与校验回执。
+设备 YAML 始终保持纯技术。有效财务快照是装配前由地区 `FinanceProfile`（已注册、可复用的地区财务基准，不得以硬编码内置充当全局默认）与项目 `FinanceOverrides`（引用 `profile {id}`，对既有 `finance_type` 分量叶子做 `{value, unit}` 原子替换、对能源价格条目做定价定义整项替换；税目只属于 Profile，Overrides 不可新增/覆盖/删除）在装配前确定性合并并完整校验后签发，并以引用形式进入装配校验回执。
 
 `assembly.finance` 采用**精确引用**作为规范形态，不在装配内内联完整财务配置：
 
@@ -211,20 +203,15 @@ CSV 必须固定相同的设备 ID 与内容摘要，并且列 ID、单位、`so
 finance:
   ref:
     kind: object            # 或包内 relative_file（作者包内不逃逸）
-    object_id: "sha256:4444444444444444444444444444444444444444444444444444444444444444"
-    sha256: "4444444444444444444444444444444444444444444444444444444444444444"  # 对象字节摘要
+    object_id: "4444444444444444444444444444444444444444444444444444444444444444"
     media_type: application/yaml
   profile_id: cn-north-demo
-  profile_sha256: "1111111111111111111111111111111111111111111111111111111111111111"
-  overrides_sha256: "2222222222222222222222222222222222222222222222222222222222222222"
-  content_sha256: "3333333333333333333333333333333333333333333333333333333333333333"
 ```
 
-引用与血缘规则（两类摘要只承担精确身份和血缘用途；定义见[财务 YAML 契约](finance-yaml.md)「规范化与摘要」）：
+引用规则：
 
-- `ref.sha256` / `object_id` 是在对象存储写入或外部导入边界确定的**对象字节身份**；内部装配按该身份取得已登记对象，不对取得的本地字节再次计算或比对 SHA-256；
-- `content_sha256` 是发布时确定的**规范内容身份**，`profile_sha256` / `overrides_sha256` 记录来源血缘；内部装配保留并传递这些字段，不把它们作为本地文件传递的自校验机制；
-- 外部导入时可在入口一次性完成对象字节完整性检查，并从精确 Profile 与 Overrides 重新合并验证财务语义；进入可信流程后不重复 hash 校验，也不静默改用其他来源；
+- `object_id` 是在对象存储写入或外部导入边界确定的对象身份；内部装配按该身份取得已登记对象；
+- 外部导入时可在入口完成验证，并从来源 Profile 与 Overrides 重新合并验证财务语义；进入可信流程后不重复校验，也不静默改用其他来源；
 - 引用 `time_series` 价格的条目（在 Profile/Overrides 中声明）携带 `resolution`/`leap_year`/`point_count`/`unit` 等不可变序列元数据，装配时与项目基线核对：序列引用对象必须已校验为完整年度序列且元数据一致；不一致阻断，不重采样、不插值（Profile 不固定唯一项目分辨率，校验以被引用序列元数据为准）；时变价格按逐点计价（`Σ price[t]×e[t]`），聚合与计价衔接见[财务 YAML 契约](finance-yaml.md)「聚合与计价衔接」；
 - `planning` 只保存目标函数、目标权重、规划变量、上下界和规划/系统约束。目标函数用普通标识符逐项引用财务分量（映射规则见下文「规划表达式中的财务分量标识符」；示例见上方最小结构：`1 year * pv_1__annual_fixed_om + pv_1__period_variable_om + import_meter__period_energy_purchase + export_meter__period_energy_sale`，其中 `1 year` 为显式时间跨度字面量，把 currency/年 的按年值换算为完整年度窗口金额（currency）后再相加；能源计费分量**已带符号**——`purchase` 分量 = +raw_charge、`sale` 分量 = −raw_charge（`raw_charge = Σ price[t]×e[t]`，正售电价时 sale 分量自身为负），所以目标表达式对所有分量统一使用加法；负价自然反转该方向效果；窗口不是完整一年时不得默认相加）；该示例是“预算上限约束下的运行成本最小化”的具体示例，不是通用经济目标——把一次性 `upfront_capex` 转换为可与运行期成本比较的显式规划分量，属于 `PlanningConfig` 的版本化规则，须在该契约中定义后再使用；有效快照**不静默相加成默认总成本**，不提供隐式“系统总成本”标识符，Profile 不隐式年化或默认选择转换规则；规划配置显式选择或组合哪些分量；
 - 项目覆盖是 authoring 输入，`EffectiveFinanceConfig` 是装配与计算唯一消费的不可变快照：运行期不继承 Profile、不读取“最新地区价格”、不静默默认值。本契约成本分量不包含折旧、融资、还款与 IRR 等后评价输入。
@@ -314,28 +301,27 @@ tariff_bindings:
 
 装配 YAML 不包含 `calculation`。规范 `ValidatedAssemblyArtifact` 与独立计算配置一起进入计算包生成用例。计算配置固定 mode、预测目标所用算法与参数、计算精度、离散化、generator、solver、阶段二适用时的收敛容差与最大迭代数、时间限制、选项、随机种子和输出选择，并在生成 Solver Bundle 前完成能力兼容校验。
 
-更换 generator、solver、精度或求解选项只会形成新的计算配置和 Solver Bundle，不改变装配文本及其摘要。
+更换 generator、solver、精度或求解选项只会形成新的计算配置和 Solver Bundle，不改变装配文本。
 
 装配 YAML 禁止 shell、executable、参数字符串、脚本、动态导入路径、环境变量、凭证、宿主机工作目录和输出文件路径。这些执行细节只由受信任生成器写入 [Solver Bundle](solver-bundle.md)。
 
 ## 四阶段校验
 
-1. **结构校验**：安全 YAML、schema、字段类型、ID、内容身份字段和引用形状（含 `finance` 精确引用与三摘要血缘、`finance_binding` 判别联合、`tariff_bindings` 的 binding_id 结构与命名规则）；
+1. **结构校验**：安全 YAML、schema、字段类型、ID和引用形状（含 `finance` 引用、`finance_binding` 判别联合、`tariff_bindings` 的 binding_id 结构与命名规则）；
 2. **模型与数据校验**：设备内容、properties、equations、predefined interfaces、数据时间覆盖、单位与状态；
 3. **图与系统校验**：interface 类型、连接、carrier、拓扑、平衡和系统约束；校验 `existing`/`new` 身份，以及 `tariff_bindings` 的实例/接口存在性、接口流向与方向可用性；
-4. **规划与财务完整性校验**：每个实例的显式设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性（`new` 全量、`existing` 仅周期可变分量）、`tariff_bindings` 的 `price_id` 存在性、载体/方向相容性与 binding_id 唯一性、目标函数逐项引用（财务分量标识符映射与带单位常量的量纲/`currency` 一致性）、规划变量/约束、有效财务快照血缘与 `driver` 映射的聚合/量纲/存在性校验。
+4. **规划与财务完整性校验**：每个实例的显式设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性（`new` 全量、`existing` 仅周期可变分量）、`tariff_bindings` 的 `price_id` 存在性、载体/方向相容性与 binding_id 唯一性、目标函数逐项引用（财务分量标识符映射与带单位常量的量纲/`currency` 一致性）、规划变量/约束、有效财务快照引用与 `driver` 映射的聚合/量纲/存在性校验。
 
 同阶段尽量聚合可修复诊断；任何 error 都不产生可执行产物。
 
 ## `ValidatedAssemblyArtifact`
 
-成功结果是不可变三件套：
+成功结果是不可变二件套：
 
-1. 规范装配文本：序列统一为项目基线下连续 `step`，资源变为内容 ID，字段和集合按规定排序；`finance` 精确引用、`finance_binding` 与 `tariff_bindings` 亦按稳定顺序规范化；
-2. `assembly_sha256`：对规范字节计算 SHA-256；
-3. 校验回执：校验器 ID/版本、schema、项目基线摘要、设备内容锁、方程 contract、规划配置 revision/摘要、有效财务快照 `ref.sha256`（对象字节摘要）与 `profile_sha256`/`overrides_sha256`/`content_sha256`（内容摘要）、资源摘要和零阻断诊断。
+1. 规范装配文本：序列统一为项目基线下连续 `step`，资源变为内容 ID，字段和集合按规定排序；`finance` 引用、`finance_binding` 与 `tariff_bindings` 亦按稳定顺序规范化；
+2. 校验回执：校验器 ID/版本、schema、项目基线摘要、设备内容锁、方程 contract、规划配置 revision、有效财务快照引用、资源摘要和零阻断诊断。
 
-生成器直接消费这三者，不在内部交接时重算或比对 hash。人工修改规范文本、替换资源或变更财务快照/绑定必须形成新的装配产物；任务创建后只消费该产物，不得重新读取“当前设备”“当前价格”或“最新项目”。
+生成器直接消费这两者。人工修改规范文本、替换资源或变更财务快照/绑定必须形成新的装配产物；任务创建后只消费该产物，不得重新读取“当前设备”“当前价格”或“最新项目”。
 
 规范化算法标识为 `ies.assembly.canonical@2.0.0`。相同语义必须得到相同规范文本、摘要和回执；算法语义变化必须升级版本并保留历史解释能力。
 

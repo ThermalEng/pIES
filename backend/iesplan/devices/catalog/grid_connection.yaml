@@ -23,6 +23,4 @@ interfaces:
       maximum: null
 equations:
   variables: {}
-  relations:
-    - id: import_export_exclusivity
-      expression: "electricity_import[t] * electricity_export[t] = 0"
+  relations: []

@@ -429,12 +429,12 @@ def _build_package_zip(
                 )
             # 精确恢复(禁止 latest 猜测漂移)
             from iesplan.finance import FinanceProfile as _FP
-            profile = _FP.from_dict({**profile_row.content, "content_sha256": profile_row.content_sha256})
+            profile = _FP.from_dict(profile_row.content)
             profile_raw = yaml_dump(profile.to_dict()).encode("utf-8")
             _add("finance_profile.yaml", profile_raw, "application/yaml")
             zf.writestr("finance_profile.yaml", profile_raw)
             configs_meta["finance_profile"] = "finance_profile.yaml"
-            # Overrides: 无覆盖时导出显式空覆盖文档(overrides_sha256 血缘必须闭合)
+            # Overrides: 无覆盖时导出显式空覆盖文档
             overrides, _ = config_service.get_finance_overrides(db, project.id)
             if overrides is None:
                 empty = FinanceOverrides.empty_for_profile(profile)
@@ -827,10 +827,8 @@ def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
     - 三件套必须齐全(Profile + Overrides + Effective 一并导入, 缺一拒绝);
     - 内容严格恢复(FinanceProfile/FinanceOverrides/EffectiveFinanceConfig/
       PlanningConfig.from_dict: 拒未知/缺失字段);
-    - Overrides 对 Profile 结构校验(profile_ref 精确匹配、只许既有叶子、
+    - Overrides 对 Profile 结构校验(profile_ref 匹配、只许既有叶子、
       禁改单位/carrier/direction/tax、禁新增 finance_type/price_id);
-    - 规划配置 finance_content_sha256 必须等于包内 Effective 内容摘要
-      (宪法 4.6 同一有效快照内容摘要)。
     对象字节完整性由 _parse_package 的对象清单逐对象 sha256 校验承担
     (外部包入口边界); 领域层不做本地内容重算比对(2.6)。
     """
@@ -908,10 +906,6 @@ def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
         else:
             for d in validate_planning_domain(planning):
                 reasons.append(f"包内规划配置领域校验失败: {d.params.get('detail') or d.code}")
-            if effective is not None and planning.finance_content_sha256 != effective.content_sha256:
-                reasons.append(
-                    "包内规划配置引用的 EffectiveFinanceConfig content_sha256 与包内有效快照不一致"
-                )
     if reasons:
         raise ImportValidationError(reasons)
     result: dict = {
@@ -1029,16 +1023,12 @@ def import_proposal(
             "configs": {
                 "finance_triplet": {
                     "present": "effective" in package_configs,
-                    "profile_sha256": package_configs["profile"].content_sha256
+                    "profile_id": package_configs["profile"].profile_id
                     if "profile" in package_configs else None,
-                    "overrides_sha256": package_configs["overrides"].content_sha256
-                    if "overrides" in package_configs else None,
-                    "content_sha256": package_configs["effective"].content_sha256
-                    if "effective" in package_configs else None,
                 },
                 "planning": {
                     "present": "planning" in package_configs,
-                    "content_sha256": package_configs["planning"].revision
+                    "revision": package_configs["planning"].revision
                     if "planning" in package_configs else None,
                 },
             },
@@ -1330,7 +1320,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             # 精确绑定(禁止 latest 猜测): 直接使用注册返回的精确 row
             # set_project_finance_profile 内部按精确 {id, sha} 定位
             config_service.set_project_finance_profile(
-                db, project.id, row.profile_id, user.id, row.content_sha256
+                db, project.id, row.profile_id, user.id
             )
             config_service.save_finance_overrides(
                 db, project.id, package_configs["overrides"].to_dict(), 1, user.id

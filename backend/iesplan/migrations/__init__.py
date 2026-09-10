@@ -858,6 +858,59 @@ def _migrate_0006_sqlite(conn: sa.Connection) -> None:
     conn.execute(sa_text("DROP TABLE IF EXISTS finance_configs"))
 
 
+def _migrate_0007(conn: sa.Connection) -> None:
+    """文本文件去 sha256 化(财务三件套 1.11.0)。
+
+    删除 finance_profiles / finance_overrides / effective_finance_revisions /
+    planning_configs 中为文本 YAML 引入的 SHA-256 列与对应 CHECK 约束/
+    唯一约束。文本文件只校验字头，不做内容摘要。
+    全新库经 ORM create_all 已无这些列，本迁移幂等 no-op；存量库按需删列/删约束。
+    """
+    def _drop_column(table: str, column: str) -> None:
+        if conn.dialect.name == "postgresql":
+            conn.execute(sa_text(f'ALTER TABLE {table} DROP COLUMN IF EXISTS {column}'))
+        else:
+            # SQLite: try drop, ignore if not exists
+            try:
+                conn.execute(sa_text(f'ALTER TABLE {table} DROP COLUMN {column}'))
+            except Exception:
+                pass
+
+    def _drop_constraint(table: str, constraint: str) -> None:
+        if conn.dialect.name == "postgresql":
+            conn.execute(sa_text(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {constraint}'))
+        else:
+            pass  # SQLite 约束随列删除
+
+    # finance_profiles
+    _drop_constraint("finance_profiles", "ck_finance_profiles_sha256")
+    _drop_constraint("finance_profiles", "uq_finance_profiles_content")
+    _drop_column("finance_profiles", "content_sha256")
+    # recreate unique on profile_id alone if not exists
+    if conn.dialect.name == "postgresql":
+        conn.execute(sa_text(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_finance_profiles_id') "
+            "THEN ALTER TABLE finance_profiles ADD CONSTRAINT uq_finance_profiles_id UNIQUE (profile_id); END IF; END $$;"
+        ))
+    # finance_overrides
+    _drop_constraint("finance_overrides", "ck_finance_overrides_sha256")
+    _drop_constraint("finance_overrides", "ck_finance_overrides_profile_sha256")
+    _drop_column("finance_overrides", "content_sha256")
+    _drop_column("finance_overrides", "profile_sha256")
+    # effective_finance_revisions
+    _drop_constraint("effective_finance_revisions", "ck_effective_finance_revisions_sha256")
+    _drop_constraint("effective_finance_revisions", "ck_effective_finance_revisions_profile_sha256")
+    _drop_constraint("effective_finance_revisions", "ck_effective_finance_revisions_overrides_sha256")
+    _drop_column("effective_finance_revisions", "content_sha256")
+    _drop_column("effective_finance_revisions", "profile_sha256")
+    _drop_column("effective_finance_revisions", "overrides_sha256")
+    # planning_configs
+    _drop_constraint("planning_configs", "ck_planning_configs_sha256")
+    _drop_constraint("planning_configs", "ck_planning_configs_finance_sha256")
+    _drop_column("planning_configs", "content_sha256")
+    _drop_column("planning_configs", "finance_content_sha256")
+
+
 #: 有序迁移清单(version, name, upgrade)
 MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
@@ -866,6 +919,7 @@ MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0004_project_baseline", "项目计算基线固定与旧时区列删除", _migrate_0004),
     ("0005_finance_planning_configs", "公共财务与规划配置不可变 revision 表", _migrate_0005),
     ("0006_finance_triplet_persistence", "财务三件套持久化替换旧单体 FinanceConfig", _migrate_0006),
+    ("0007_remove_text_sha256", "文本文件去 SHA-256 化（财务三件套字头校验）", _migrate_0007),
 ]
 
 MIGRATION_VERSIONS: tuple[str, ...] = tuple(m[0] for m in MIGRATIONS)

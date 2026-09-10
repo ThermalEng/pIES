@@ -24,17 +24,17 @@
 
 设备技术文件（`ies.device-model`）不提供任何价格或成本。财务成本模型按独立财务类别 `finance_type` 定义在地区 `FinanceProfile` 中；装配为每个实例显式声明**设备成本**绑定 `finance_binding`（判别联合 `type: costed`/`type: none`），`costed` 实例把 `finance_type drivers → device property/interface` 显式映射并校验存在性、聚合与单位量纲，且按 `new`/`existing` 增量语义校验实际计入分量所需 driver 齐全（防止漏成本，沉没分量不强配 driver），禁止按名称、载体或技术模型 ID 猜测财务类别。能源购售通过装配中的独立 `tariff_bindings`（`binding_id → {price, instance, interface, aggregation}`）把 `energy_prices` 的 `price_id` 绑定到计费点实例、接口与聚合：会计方向与载体由价格条目显式声明（`direction: purchase|sale`、`carrier`），不靠键名推断；计费点实例可以是 `type: none` 的纯计量点（`none` 只表示无设备成本，不禁止承担能源计费），`binding_id` 不得与 `instance_id` 相同（装配细节见[装配 YAML](../formats/assembly-yaml.md)）。
 
-规划与财务评价是两个连续但不同的计算阶段，但共用同一份有效财务快照：规划配置独立定义目标函数、规划变量、边界和约束；`EffectiveFinanceConfig` 只定义两阶段都使用的财务参数，不包含目标函数、计算算法或仅在某一阶段应用的数据。规划求解使用这些参数影响“建什么、建多大、怎样运行”，finance 在方案确定后使用同一 `content_sha256` 解释建设计划和运行结果，形成现金流及评价指标。
+规划与财务评价是两个连续但不同的计算阶段，但共用同一份有效财务快照：规划配置独立定义目标函数、规划变量、边界和约束；`EffectiveFinanceConfig` 只定义两阶段都使用的财务参数，不包含目标函数、计算算法或仅在某一阶段应用的数据。规划求解使用这些参数影响“建什么、建多大、怎样运行”，finance 在方案确定后使用同一 `EffectiveFinanceConfig` 解释建设计划和运行结果，形成现金流及评价指标。
 
 ## 输入与有效快照消费
 
 | 输入 | 关键要求 |
 |---|---|
-| `FinanceProfile` / `FinanceOverrides` | 见[财务 YAML 契约](../formats/finance-yaml.md)：Profile 是已注册、内容寻址、可复用的地区财务基准，不得以内置形态充当全局默认；Overrides 精确引用 `profile {id, content_sha256}`，对既有成本分量叶子做 `{value, unit}` 原子替换、对能源价格条目（`price_id`）做定价定义整项替换（`carrier`/`direction` 由 Profile 继承，禁止新增/删除 `price_id`） |
-| `EffectiveFinanceConfig` | 唯一由确定性合并器从 Profile（+ Overrides）生成并完整校验的不可变快照，记录 `profile_sha256` / `overrides_sha256` / `content_sha256`；可导出/导入/进入快照，导入时连同精确来源从精确 Profile 与 Overrides 重新合并恢复血缘身份；装配、规划与计算只消费同一精确引用（见[装配 YAML](../formats/assembly-yaml.md)） |
+| `FinanceProfile` / `FinanceOverrides` | 见[财务 YAML 契约](../formats/finance-yaml.md)：Profile 是已注册、可复用的地区财务基准，不得以内置形态充当全局默认；Overrides 引用 `profile {id}`，对既有成本分量叶子做 `{value, unit}` 原子替换、对能源价格条目（`price_id`）做定价定义整项替换（`carrier`/`direction` 由 Profile 继承，禁止新增/删除 `price_id`） |
+| `EffectiveFinanceConfig` | 唯一由确定性合并器从 Profile（+ Overrides）生成并完整校验的不可变快照；可导出/导入/进入快照，导入时连同来源 Profile 与 Overrides 重新合并验证；装配、规划与计算只消费同一引用（见[装配 YAML](../formats/assembly-yaml.md)） |
 | 建设与替换计划 | 金额币种、发生期、`price_basis`（含税/不含税口径标签）和 `base_year` 明确 |
 | 逐时或年度运行汇总 | 能量、成本、收益的单位和时间范围明确 |
-| 规划与财务基准 | 与当前方案使用同一 `EffectiveFinanceConfig.content_sha256` |
+| 规划与财务基准 | 与当前方案使用同一 `EffectiveFinanceConfig` |
 
 金额与需要精确往返的费率使用十进制定点语义（`Decimal` 字符串，`{value, unit}` 原子，禁止 `null` 与部分金额）；物理量来自规范计算输出。模块不能自行读取“最新地区价格”补齐缺失输入，也不运行期继承 Profile 或覆盖。
 
@@ -57,7 +57,7 @@
 - 投资、运行成本、收益和残值等组成；
 - NPV、IRR、LCOE、回收期及单位；
 - 每个无法正常计算指标的独立状态与原因；
-- `EffectiveFinanceConfig.content_sha256` / `profile_sha256` / `overrides_sha256`、币种、`price_basis`、`base_year` 与计算版本。
+- `EffectiveFinanceConfig`（含币种、`price_basis`、`base_year`）与计算版本。
 
 IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_failure` 等状态一起消费；不能用 `null` 或零模糊这些情况。该蓝图需要的评价期、资金时间价值、折旧等输入不属于本版 Profile 文件契约；落地时按「增加财务指标」流程补入独立契约，不回流为财务文件契约的隐式字段。
 
@@ -84,7 +84,7 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 
 - 币种或口径（`base_year` / `price_basis`）不一致：拒绝计算；
 - 非有限值、长度错误或缺少必需分量：输入诊断；
-- `FinanceOverrides` 引用了未知 `profile id` 或与 `content_sha256` 不一致、覆盖不存在的 `finance_type`/分量/`driver`/`price_id`、改变 driver 集合或分量类型、覆盖中改写 `carrier`/`direction` 或新增/删除 `price_id`、改变单位/币种/`price_basis`/`cost_method`、出现 `null` 或部分金额：阻断，不产生 Effective；
+- `FinanceOverrides` 引用了未知 `profile id`、覆盖不存在的 `finance_type`/分量/`driver`/`price_id`、改变 driver 集合或分量类型、覆盖中改写 `carrier`/`direction` 或新增/删除 `price_id`、改变单位/币种/`price_basis`/`cost_method`、出现 `null` 或部分金额：阻断，不产生 Effective；
 - 被引用的 `time_series` 未通过校验、不是完整年度序列、元数据（resolution/leap_year/point_count）与引用声明或项目基线不一致：阻断，不重采样；
 - IRR 无解、多解或退化：返回对应业务状态，不抛普通内部异常（长期蓝图）；
 - 数值算法未收敛：返回 numeric failure 和受控细节；
@@ -97,7 +97,7 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 - 不依赖 computation 内部实现、HTTP、ORM 和全局价格表；
 - 不用浮点显示舍入值反推现金流；
 - 每个指标的状态不能被综合分数覆盖；
-- 同一 `EffectiveFinanceConfig.content_sha256` 必须同时进入规划和财务计算证据；`profile_sha256` / `overrides_sha256` 共同记录来源；
+- 同一 `EffectiveFinanceConfig` 必须同时进入规划和财务计算证据；
 - 财务配置不得包含目标函数、规划约束、solver 选项或阶段性数据；
 - 财务三件套声明式配置使用 YAML，经安全子集解析、规范化与确定性摘要生成，不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容；
 - 财务成本模型不得写入设备技术文件，不得依赖 `backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 第二权威源；

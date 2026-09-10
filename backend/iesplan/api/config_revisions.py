@@ -21,7 +21,7 @@
 
 DTO 契约(宪法 8.1): 请求/响应字段与 core/finance 契约一一对应;
 finance_profile / finance_overrides / effective_finance / planning_config
-为完整字典形态(含派生 content_sha256 字段, 由服务层严格恢复)。
+为完整字典形态(由服务层严格恢复，文本文件只校验字头)。
 """
 
 from __future__ import annotations
@@ -46,9 +46,9 @@ profile_router = APIRouter(prefix="/api/finance-profiles", tags=["finance-profil
 
 
 class ProfileSaveRequest(BaseModel):
-    """引用/切换地区 FinanceProfile: 必须传精确 profile_ref{id, content_sha256}。"""
+    """引用/切换地区 FinanceProfile: 必须传 profile_ref{id}。"""
 
-    profile_ref: dict[str, Any] = Field(..., description="精确引用 {id, content_sha256}")
+    profile_ref: dict[str, Any] = Field(..., description="引用 {id}")
 
 
 class OverridesSaveRequest(BaseModel):
@@ -65,7 +65,7 @@ class OverridesDeleteRequest(BaseModel):
 
 
 class PlanningConfigSaveRequest(BaseModel):
-    """保存规划配置请求体(引用 Effective content_sha256 一致性由服务层强制)。"""
+    """保存规划配置请求体。"""
 
     planning_config: dict[str, Any]
     expected_revision: int | None = Field(default=None, ge=1)
@@ -121,24 +121,23 @@ def set_project_profile_endpoint(
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
-    """项目引用已登记 Profile: 精确引用 {id, content_sha256}, 原子生成空覆盖 Effective。"""
+    """项目引用已登记 Profile: 引用 {id}, 原子生成空覆盖 Effective。"""
     project_service.ensure_access(db, user, project_id, "edit")
     ref = payload.profile_ref
     profile_id = str(ref.get("id", ""))
-    content_sha256 = str(ref.get("content_sha256", ""))
-    if not profile_id or not content_sha256:
+    if not profile_id:
         raise http_error(
             400,
             "PROJ-FIN-001",
             "ies.diag.param.invalid",
-            detail="profile_ref 必须包含 {id, content_sha256}",
+            detail="profile_ref 必须包含 {id}",
         )
     overrides_rev, eff_row, effective = config_service.set_project_finance_profile(
-        db, project_id, profile_id, user.id, content_sha256
+        db, project_id, profile_id, user.id
     )
     # 提交事务: 指针/空覆盖/Effective/planning 失效一次性持久化
     db.commit()
-    _, profile = config_service.get_finance_profile_by_ref(db, profile_id, content_sha256)
+    _, profile = config_service.get_finance_profile_by_ref(db, profile_id)
     return {
         "finance_profile": profile.to_dict(),
         "overrides_revision": overrides_rev,
@@ -237,7 +236,7 @@ def save_planning_config_endpoint(
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
-    """保存规划配置: 强制 finance_content_sha256 与当前 Effective 一致(400), 乐观锁 409。"""
+    """保存规划配置: 乐观锁 409。"""
     project_service.ensure_access(db, user, project_id, "edit")
     _, revision = config_service.save_planning_config(
         db, project_id, payload.planning_config, payload.expected_revision, user.id
@@ -268,7 +267,7 @@ def register_finance_profile_endpoint(
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
-    """登记地区 Profile(内容寻址; 相同 profile_id+sha256 幂等返回既有)。"""
+    """登记地区 Profile。"""
     row, profile = config_service.register_finance_profile(
         db, payload.finance_profile, user.id
     )

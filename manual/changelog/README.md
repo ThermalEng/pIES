@@ -86,7 +86,7 @@
 
 - 发布 `ies.assembly` `1.0.0` 机器可读 schema、唯一规范化器 `ies.assembly.canonical@1.0.0`、合法/非法样例和稳定 `ASM-*` 诊断码。
 - 规范化过程固定键顺序、UTC 时间、有限数值表示和内容寻址资源，输出紧凑 JSON + LF，并对规范字节计算 SHA-256。
-- 统一手写装配与 GUI 项目导出的四阶段校验入口；成功只签发不可变 `ValidatedAssemblyArtifact`，其中包含规范文本、`assembly_sha256` 和确定性 `ValidationReceipt`。
+- 统一手写装配与 GUI 项目导出的四阶段校验入口；成功只签发不可变 `ValidatedAssemblyArtifact`，其中包含规范文本和确定性 `ValidationReceipt`。
 - 新增 GUI 项目导出构造器和旧 `AssemblySpec` 一次性迁移；旧算法/容差配置显式映射为固定版本的 generator、solver 与 options。
 - 生产任务在创建 `Task` / `CalcSnapshot` 前经过统一校验闸门；快照持久化三件套，Worker 执行前重新恢复和复验；项目证据包同步导出三件套。
 

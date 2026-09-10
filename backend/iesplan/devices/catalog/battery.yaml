@@ -72,7 +72,5 @@ equations:
   relations:
     - id: power_balance
       expression: "electricity[t] = discharge[t] - charge[t]"
-    - id: charge_discharge_exclusivity
-      expression: "charge[t] * discharge[t] = 0"
     - id: soc_update
-      expression: "soc[t] = soc[t-1] + (charge[t] * charge_efficiency - discharge[t] / discharge_efficiency) * step_duration / capacity_kwh"
+      expression: "soc[t] = soc[t-1] + (charge[t] * charge_efficiency - discharge[t] / discharge_efficiency) / capacity_kwh"

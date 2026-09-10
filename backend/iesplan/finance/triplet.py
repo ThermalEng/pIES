@@ -4,27 +4,22 @@
 代码边界: finance 模块(宪法 §4.6)。本模块只依赖标准库与 core.diagnostics / core.units，
 不导入其他业务模块，不访问 HTTP / 数据库 / 前端。
 
-本切片交付三件套**纯域契约** (含规范化/摘要/确定性合并器/空 overrides 摘要)，
+本切片交付三件套**纯域契约** (含确定性合并器/空 overrides)，
 0.6.5 条目 1 的持久化、API 与项目包接入属后续切片。
 
 设计要点(与 finance-yaml.md 逐项对齐):
 - 金额一律 ``{value, unit}`` 原子: ``value`` 为十进制定点字符串，禁止
   float/NaN/Infinity/int/null/bool；unit 经 core.units 规范化校验但保留原始拼写；
-- ``content_sha256`` 为 64 位小写十六进制，**派生字段，不参与自身摘要**；
-- 两类摘要区分: 对象完整字节 SHA-256 与规范内容摘要 (content_sha256)；
+- 文本文件只校验字头（`schema`/`schema_version`）与领域约束，不做内容摘要；
 - Overrides 稀疏原子覆盖: 只替换既有叶子，禁止新增/删除 finance_type/driver/price_id，
   禁止改写单位/carrier/direction/tax 与 profile 级字段；
 - energy price 允许负数、0、正数(有限 Decimal)；成本金额非负；
-- EffectiveFinanceConfig 只能由合并器 ``merge_effective`` 生成；空覆盖时
-  overrides_sha256 = 空 Overrides 文档的规范摘要；
-- 确定性规范化: 解析 YAML(安全子集) -> 校验 -> 移除派生摘要 -> 生成唯一规范
-  YAML 字节 -> SHA-256(canonical_bytes)。
+- EffectiveFinanceConfig 只能由合并器 ``merge_effective`` 生成；空覆盖时使用空 Overrides 文档；
+- 确定性合并：稀疏覆盖只替换被覆盖叶子。
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -65,19 +60,15 @@ FIN_TRIPLET_INVALID = "PROJ-FIN-001"
 #: 金额/价格允许的最大十进制位(含整数与小数部分, 防病态指数输入)。
 MAX_DIGITS: Final[int] = 30
 
-_SHA256_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 _PROFILE_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _LOCAL_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]*$")
-
 
 class FinanceTripletError(ValueError):
     """财务三件套校验失败(非法结构/数值/摘要/越权覆盖)。"""
 
-
 # ---------------------------------------------------------------------------
 # 十进制与单位工具
 # ---------------------------------------------------------------------------
-
 
 def _to_decimal_str(value: object, field_name: str) -> Decimal:
     """字段 -> Decimal; 只接受十进制**字符串**(拒绝 float/int/bool/null)。
@@ -102,13 +93,11 @@ def _to_decimal_str(value: object, field_name: str) -> Decimal:
         raise FinanceTripletError(f"{field_name}: 超出 {MAX_DIGITS} 位十进制精度")
     return d
 
-
 def _decimal_to_canonical(d: Decimal) -> str:
     """Decimal -> 定点十进制字符串(去指数形态, 摘要输入)。"""
     with localcontext() as ctx:
         ctx.prec = MAX_DIGITS
         return format(d, "f")
-
 
 def _normalized_unit(unit: object, field: str) -> str:
     """单位规范化校验(经 core.units; 保留原始拼写, 仅校验可识别)。"""
@@ -120,19 +109,11 @@ def _normalized_unit(unit: object, field: str) -> str:
         raise FinanceTripletError(f"{field}: 单位无法识别 {unit!r}: {exc}") from exc
     return unit
 
-
 def _dims(unit: str) -> Mapping[str, int]:
     """单位量纲(供成本/价格单位一致性校验)。"""
     from iesplan.core.units import dims_of
 
     return dims_of(unit)
-
-
-def _validate_hex64(value: object, field: str) -> str:
-    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
-        raise FinanceTripletError(f"{field}: 必须是 64 位小写十六进制 SHA-256")
-    return value
-
 
 def _validate_local_id(value: object, field: str) -> str:
     """局部 ID(finance_type / price_id / driver / tax id): lower_snake_case 且不含 __。"""
@@ -140,44 +121,13 @@ def _validate_local_id(value: object, field: str) -> str:
         raise FinanceTripletError(f"{field}: 必须为 lower_snake_case 且不含 '__': {value!r}")
     return value
 
-
-def _settle_content_sha(declared_sha: object, computed: str) -> str:
-    """摘要结算: 信任流程不做重算校验, 仅保留精确内容身份字段。
-
-    - 声明缺失时返回重算摘要(用于新构造);
-    - 声明在场时仅校验 64 位 hex 格式并保留声明值(不与重算比对, 2.6)。
-    """
-    if declared_sha is None:
-        return computed
-    return _validate_hex64(declared_sha, "content_sha256")
-
-
 # ---------------------------------------------------------------------------
 # 规范化 YAML 字节(唯一规范形态; 映射键稳定排序/LF/非 ASCII 保留)
 # ---------------------------------------------------------------------------
 
-_CANON_KWARGS: Final[dict] = {
-    "ensure_ascii": False,
-    "sort_keys": True,
-    "separators": (",", ":"),
-    "allow_nan": False,
-}
-
-
-def _canonical_yaml_bytes(payload: Mapping[str, object]) -> bytes:
-    """由已规范化的 payload 生成唯一规范 YAML 字节。
-
-    输出使用 JSON 语义字符串字面量转义(非 ASCII 保留), 与仓库既有规范化器
-    (device-model / assembly)的字节口径一致: 契约只要求"唯一规范字节 +
-    SHA-256"，不要求兼容 PyYAML 文本格式(本仓库统一用 json 语义序列化器)。
-    """
-    return json.dumps(payload, **_CANON_KWARGS).encode("utf-8")
-
-
 # ---------------------------------------------------------------------------
 # Money 原子
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class Money:
@@ -218,11 +168,9 @@ class Money:
             raise FinanceTripletError(f"{field}.unit: 禁止 null")
         return cls(value=value, unit=_normalized_unit(unit, f"{field}.unit"))
 
-
 # ---------------------------------------------------------------------------
 # 成本分量
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class LinearCost:
@@ -240,7 +188,6 @@ class LinearCost:
         if set(mapping) != {"unit_cost"}:
             raise FinanceTripletError(f"线性分量字段非法: {sorted(mapping)}")
         return cls(unit_cost=Money.from_dict(mapping["unit_cost"], field="unit_cost"))
-
 
 @dataclass(frozen=True, slots=True)
 class CostComponent:
@@ -287,7 +234,6 @@ class CostComponent:
         if fixed is None and not linear:
             raise FinanceTripletError("成本分量必须含 fixed 或 linear 之一")
         return cls(fixed=fixed, linear=linear)
-
 
 @dataclass(frozen=True, slots=True)
 class FinanceTypeEntry:
@@ -337,11 +283,9 @@ class FinanceTypeEntry:
             kwargs[comp] = CostComponent.from_dict(mapping[comp])
         return cls(**kwargs)
 
-
 # ---------------------------------------------------------------------------
 # 能源价格条目
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class SeriesMeta:
@@ -396,7 +340,6 @@ class SeriesMeta:
             unit=_normalized_unit(mapping["unit"], "series_meta.unit"),
         )
 
-
 @dataclass(frozen=True, slots=True)
 class EnergyPrice:
     """能源价格条目(price_id 值): 判别联合 constant{value} / time_series{ref, series_meta}。"""
@@ -420,7 +363,8 @@ class EnergyPrice:
         else:
             if self.value is not None or self.ref is None or self.series_meta is None:
                 raise FinanceTripletError("time_series 必须且只能含 ref 与 series_meta")
-            _validate_hex64(self.ref, "energy_price.ref")
+            if not isinstance(self.ref, str) or not self.ref.strip():
+                raise FinanceTripletError("energy_price.ref 必须为非空字符串")
 
     def to_dict(self) -> dict:
         out: dict = {"carrier": self.carrier, "direction": self.direction, "kind": self.kind}
@@ -469,15 +413,13 @@ class EnergyPrice:
             carrier=_validate_local_id(mapping["carrier"], "carrier"),
             direction=str(mapping["direction"]),
             kind=kind,
-            ref=_validate_hex64(mapping["ref"], "ref"),
+            ref=str(mapping["ref"]).strip(),
             series_meta=SeriesMeta.from_dict(mapping["series_meta"]),
         )
-
 
 # ---------------------------------------------------------------------------
 # 税目登记
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class TaxEntry:
@@ -525,11 +467,9 @@ class TaxEntry:
             applies_to=str(mapping["applies_to"]),
         )
 
-
 # ---------------------------------------------------------------------------
 # 类型级校验共享助手(量纲)
 # ---------------------------------------------------------------------------
-
 
 def _check_cost_units(currency: str, finance_type: str, component: str, cost: CostComponent) -> None:
     """成本分量单位量纲校验(宪法 7.4 + finance-yaml.md 字段表)。
@@ -559,7 +499,6 @@ def _check_cost_units(currency: str, finance_type: str, component: str, cost: Co
                     f"必须以 {currency_prefix} 开头(币种前缀)"
                 )
 
-
 def _check_price_unit(currency: str, price_id: str, price: EnergyPrice) -> None:
     """能源价格单位量纲 = currency / (energy unit); 无法在 Profile 单文件
     推导 energy unit 时, 校验币种前缀 + value.unit == series_meta.unit。"""
@@ -583,18 +522,16 @@ def _check_price_unit(currency: str, price_id: str, price: EnergyPrice) -> None:
                 f"energy_price {price_id} series_meta.unit {unit!r} 必须以 {currency_prefix} 开头"
             )
 
-
 # ---------------------------------------------------------------------------
 # FinanceProfile(地区财务基准, 人工 authoring)
 # ---------------------------------------------------------------------------
 
-
 @dataclass(frozen=True, slots=True)
 class FinanceProfile:
-    """地区财务基准(已注册、内容寻址、可复用; 系统不得硬编码为全局默认)。
+    """地区财务基准(已注册、可复用; 系统不得硬编码为全局默认)。
 
-    ``profile`` 为只读字典 {id, region, currency, base_year, price_basis, cost_method};
-    ``content_sha256`` 为派生摘要(移除后对规范 YAML 字节计算)。
+    ``profile`` 为只读字典 {id, region, currency, base_year, price_basis, cost_method}。
+    文本文件只校验字头与领域约束，不做内容摘要。
     """
 
     schema: str
@@ -603,15 +540,12 @@ class FinanceProfile:
     finance_types: Mapping[str, FinanceTypeEntry]
     energy_prices: Mapping[str, EnergyPrice]
     taxes: Mapping[str, TaxEntry] = field(default_factory=lambda: MappingProxyType({}))
-    content_sha256: str = ""
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_PROFILE:
             raise FinanceTripletError(f"schema 必须为 {SCHEMA_PROFILE!r}")
         if self.schema_version != SCHEMA_VERSION:
             raise FinanceTripletError(f"schema_version 必须为 {SCHEMA_VERSION!r}")
-        if self.content_sha256:
-            _validate_hex64(self.content_sha256, "content_sha256")
         # 冻结
         profile_sorted = dict(sorted(self.profile.items(), key=lambda kv: kv[0]))
         object.__setattr__(self, "profile", MappingProxyType(profile_sorted))
@@ -657,8 +591,7 @@ class FinanceProfile:
     def cost_method(self) -> str:
         return str(self.profile["cost_method"])
 
-    # -- 规范化 / 摘要 --
-    def canonical_dict(self) -> dict:
+    def to_dict(self) -> dict:
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
@@ -668,23 +601,12 @@ class FinanceProfile:
             "taxes": {k: v.to_dict() for k, v in sorted(self.taxes.items())},
         }
 
-    def canonical_bytes(self) -> bytes:
-        return _canonical_yaml_bytes(self.canonical_dict())
-
-    def computed_sha256(self) -> str:
-        return hashlib.sha256(self.canonical_bytes()).hexdigest()
-
-    def to_dict(self) -> dict:
-        d = self.canonical_dict()
-        d["content_sha256"] = self.content_sha256
-        return d
-
     @classmethod
     def from_dict(cls, mapping: object) -> FinanceProfile:
         if not isinstance(mapping, Mapping):
             raise FinanceTripletError("FinanceProfile 必须是字典")
         known_profile = {"schema", "schema_version", "profile", "finance_types", "energy_prices", "taxes"}
-        unknown = set(mapping) - known_profile - {"content_sha256"}
+        unknown = set(mapping) - known_profile
         if unknown:
             raise FinanceTripletError(f"FinanceProfile 未知字段: {sorted(unknown)}")
         missing = {"schema", "schema_version", "profile", "finance_types", "energy_prices"} - set(mapping)
@@ -776,17 +698,6 @@ class FinanceProfile:
                 raise FinanceTripletError(f"taxes.{tax_id} 禁止 null")
             taxes[tax_id] = TaxEntry.from_dict(tax_val)
 
-        declared_sha = mapping.get("content_sha256")
-        obj = cls(
-            schema=schema,
-            schema_version=schema_version,
-            profile=profile,
-            finance_types=finance_types,
-            energy_prices=energy_prices,
-            taxes=taxes,
-            content_sha256="",  # 临时: 计算后再填充
-        )
-        # 声明摘要结算后重建(摘要不参与自身计算)
         return cls(
             schema=schema,
             schema_version=schema_version,
@@ -794,7 +705,6 @@ class FinanceProfile:
             finance_types=finance_types,
             energy_prices=energy_prices,
             taxes=taxes,
-            content_sha256=_settle_content_sha(declared_sha, obj.computed_sha256()),
         )
 
     @classmethod
@@ -805,7 +715,6 @@ class FinanceProfile:
         except FinanceTripletError as exc:
             return [make_diag(FIN_TRIPLET_INVALID, params={"detail": str(exc)})]
 
-
 # ---------------------------------------------------------------------------
 # FinanceOverrides(项目覆盖, 人工 authoring)
 # ---------------------------------------------------------------------------
@@ -813,10 +722,9 @@ class FinanceProfile:
 #: Overrides 允许的 finance_type 叶子键: <分量>.fixed 或 <分量>.linear.<driver>.unit_cost
 _OVERRIDE_LEAF_FIELDS: Final[frozenset[str]] = frozenset({"fixed", "linear"})
 
-
 @dataclass(frozen=True, slots=True)
 class FinanceOverrides:
-    """项目 FinanceOverrides: 稀疏原子覆盖(精确引用 Profile 稳定 ID 与内容摘要)。
+    """项目 FinanceOverrides: 稀疏原子覆盖(引用 Profile 稳定 ID)。
 
     覆盖子树的原始形状保留在 ``finance_types`` / ``energy_prices`` 中
     (仅按叶子做形状/单位/存在性校验), 由合并器应用。
@@ -827,21 +735,19 @@ class FinanceOverrides:
     profile_ref: Mapping[str, str]
     finance_types: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     energy_prices: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
-    content_sha256: str = ""
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_OVERRIDES:
             raise FinanceTripletError(f"schema 必须为 {SCHEMA_OVERRIDES!r}")
         if self.schema_version != SCHEMA_VERSION:
             raise FinanceTripletError(f"schema_version 必须为 {SCHEMA_VERSION!r}")
-        if self.content_sha256:
-            _validate_hex64(self.content_sha256, "content_sha256")
-        _validate_hex64(self.profile_ref["content_sha256"], "profile_ref.content_sha256")
+        if "content_sha256" in self.profile_ref:
+            raise FinanceTripletError("profile_ref 不允许 content_sha256（文本只校验字头）")
         object.__setattr__(self, "profile_ref", MappingProxyType(dict(sorted(self.profile_ref.items()))))
         object.__setattr__(self, "finance_types", MappingProxyType(dict(sorted(self.finance_types.items()))))
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
 
-    def canonical_dict(self) -> dict:
+    def to_dict(self) -> dict:
         d: dict = {
             "schema": self.schema,
             "schema_version": self.schema_version,
@@ -853,24 +759,13 @@ class FinanceOverrides:
             d["energy_prices"] = _freeze_overrides(self.energy_prices)
         return d
 
-    def canonical_bytes(self) -> bytes:
-        return _canonical_yaml_bytes(self.canonical_dict())
-
-    def computed_sha256(self) -> str:
-        return hashlib.sha256(self.canonical_bytes()).hexdigest()
-
-    def to_dict(self) -> dict:
-        d = self.canonical_dict()
-        d["content_sha256"] = self.content_sha256
-        return d
-
     @classmethod
     def empty_for_profile(cls, profile: FinanceProfile) -> FinanceOverrides:
-        """生成空 Overrides 文档(不覆盖任何内容), 摘要即 overrides_sha256。"""
+        """生成空 Overrides 文档(不覆盖任何内容)。"""
         mapping = {
             "schema": SCHEMA_OVERRIDES,
             "schema_version": SCHEMA_VERSION,
-            "profile_ref": {"id": profile.profile_id, "content_sha256": profile.content_sha256},
+            "profile_ref": {"id": profile.profile_id},
         }
         return cls.from_dict(mapping)
 
@@ -883,7 +778,7 @@ class FinanceOverrides:
             if forbidden in mapping:
                 raise FinanceTripletError(f"FinanceOverrides 禁止出现字段: {forbidden!r}")
         known_overrides = {"schema", "schema_version", "profile_ref", "finance_types", "energy_prices"}
-        unknown = set(mapping) - known_overrides - {"content_sha256"}
+        unknown = set(mapping) - known_overrides
         if unknown:
             raise FinanceTripletError(f"FinanceOverrides 未知字段: {sorted(unknown)}")
         missing = {"schema", "schema_version", "profile_ref"} - set(mapping)
@@ -896,17 +791,16 @@ class FinanceOverrides:
         if schema_version != SCHEMA_VERSION:
             raise FinanceTripletError(f"schema_version 非法: {schema_version!r}")
         ref_raw = mapping["profile_ref"]
-        if not isinstance(ref_raw, Mapping) or set(ref_raw) != {"id", "content_sha256"}:
-            raise FinanceTripletError("profile_ref 必须为 {id, content_sha256}")
+        if not isinstance(ref_raw, Mapping) or set(ref_raw) != {"id"}:
+            raise FinanceTripletError("profile_ref 必须为 {id}")
         ref_id = str(ref_raw["id"])
         if not _PROFILE_ID_RE.fullmatch(ref_id) or "__" in ref_id:
             raise FinanceTripletError(f"profile_ref.id 非法: {ref_id!r}")
-        ref_sha = _validate_hex64(ref_raw["content_sha256"], "profile_ref.content_sha256")
-        profile_ref = {"id": ref_id, "content_sha256": ref_sha}
+        profile_ref = {"id": ref_id}
         if profile is not None:
-            if profile.profile_id != ref_id or profile.content_sha256 != ref_sha:
+            if profile.profile_id != ref_id:
                 raise FinanceTripletError(
-                    f"profile_ref 与目标 Profile 不一致(id={ref_id}, sha={ref_sha[:12]}…)"
+                    f"profile_ref 与目标 Profile 不一致(id={ref_id})"
                 )
 
         ft_raw = mapping.get("finance_types") or {}
@@ -933,23 +827,12 @@ class FinanceOverrides:
                 raise FinanceTripletError(f"energy_prices.{price_id} 必须为非空字典")
             energy_prices[price_id] = _validate_price_override(price_id, price_val, profile)
 
-        declared_sha = mapping.get("content_sha256")
-        obj = cls(
-            schema=schema,
-            schema_version=schema_version,
-            profile_ref=profile_ref,
-            finance_types=finance_types,
-            energy_prices=energy_prices,
-            content_sha256="",
-        )
-        # 声明摘要结算后重建(摘要不参与自身计算)
         return cls(
             schema=schema,
             schema_version=schema_version,
             profile_ref=profile_ref,
             finance_types=finance_types,
             energy_prices=energy_prices,
-            content_sha256=_settle_content_sha(declared_sha, obj.computed_sha256()),
         )
 
     @classmethod
@@ -959,7 +842,6 @@ class FinanceOverrides:
             return []
         except FinanceTripletError as exc:
             return [make_diag(FIN_TRIPLET_INVALID, params={"detail": str(exc)})]
-
 
 def _freeze_overrides(mapping: Mapping[str, object]) -> dict:
     """覆盖子树原始形状递归转为稳定 dict(合并/摘要使用)。"""
@@ -972,7 +854,6 @@ def _freeze_overrides(mapping: Mapping[str, object]) -> dict:
         else:
             out[str(k)] = v
     return out
-
 
 def _validate_ft_override(
     ft_name: str,
@@ -1063,7 +944,6 @@ def _validate_ft_override(
         out[comp_name] = comp_out
     return out
 
-
 def _validate_price_override(
     price_id: str,
     price_val: Mapping[str, object],
@@ -1112,12 +992,13 @@ def _validate_price_override(
         raise FinanceTripletError(f"energy_prices.{price_id} time_series 必须含 ref 与 series_meta")
     if "value" in price_val:
         raise FinanceTripletError(f"energy_prices.{price_id} time_series 不允许 value")
-    ref = _validate_hex64(price_val["ref"], f"energy_prices.{price_id}.ref")
+    ref = str(price_val["ref"]).strip()
+    if not ref:
+        raise FinanceTripletError(f"energy_prices.{price_id}.ref 必须为非空字符串")
     meta = SeriesMeta.from_dict(price_val["series_meta"])
     if prof_unit is not None:
         _check_same_unit(meta.unit, prof_unit, f"energy_prices.{price_id}")
     return {"kind": "time_series", "ref": ref, "series_meta": meta.to_dict()}
-
 
 def _check_same_unit(unit_a: str, unit_b: str, field: str) -> None:
     """覆盖单位的规范化等价校验(与原 Profile 相同; 不要求原拼写相同)。"""
@@ -1129,26 +1010,21 @@ def _check_same_unit(unit_a: str, unit_b: str, field: str) -> None:
     except UnitError as exc:
         raise FinanceTripletError(f"{field} 单位无法识别 {unit_a!r}: {exc}") from exc
 
-
 # ---------------------------------------------------------------------------
 # EffectiveFinanceConfig(合并器产物, 不可人工 authoring)
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class EffectiveFinanceConfig:
     """不可变 EffectiveFinanceConfig: 装配/规划/财务计算唯一消费的财务快照。
 
-    记录 profile_id / profile_sha256 / overrides_sha256 / content_sha256;
-    只能由合并器 ``merge_effective`` 生成。本对象可导出/导入/进入快照,
-    导入时须连同精确 Profile/Overrides 重新合并验证。
+    只能由合并器 ``merge_effective`` 生成。本对象可导出/导入/进入快照。
+    文本文件只校验字头与领域约束，不做内容摘要。
     """
 
     schema: str
     schema_version: str
     profile_id: str
-    profile_sha256: str
-    overrides_sha256: str
     currency: str
     base_year: int
     price_basis: str
@@ -1156,17 +1032,12 @@ class EffectiveFinanceConfig:
     finance_types: Mapping[str, FinanceTypeEntry]
     energy_prices: Mapping[str, EnergyPrice]
     taxes: Mapping[str, TaxEntry] = field(default_factory=lambda: MappingProxyType({}))
-    content_sha256: str = ""
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_EFFECTIVE:
             raise FinanceTripletError(f"schema 必须为 {SCHEMA_EFFECTIVE!r}")
         if self.schema_version != SCHEMA_VERSION:
             raise FinanceTripletError(f"schema_version 必须为 {SCHEMA_VERSION!r}")
-        if self.content_sha256:
-            _validate_hex64(self.content_sha256, "content_sha256")
-        _validate_hex64(self.profile_sha256, "profile_sha256")
-        _validate_hex64(self.overrides_sha256, "overrides_sha256")
         if not _PROFILE_ID_RE.fullmatch(self.profile_id) or "__" in self.profile_id:
             raise FinanceTripletError(f"profile_id 非法: {self.profile_id!r}")
         if self.currency not in CURRENCIES:
@@ -1181,13 +1052,11 @@ class EffectiveFinanceConfig:
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
         object.__setattr__(self, "taxes", MappingProxyType(dict(sorted(self.taxes.items()))))
 
-    def canonical_dict(self) -> dict:
+    def to_dict(self) -> dict:
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
             "profile_id": self.profile_id,
-            "profile_sha256": self.profile_sha256,
-            "overrides_sha256": self.overrides_sha256,
             "currency": self.currency,
             "base_year": self.base_year,
             "price_basis": self.price_basis,
@@ -1197,30 +1066,19 @@ class EffectiveFinanceConfig:
             "taxes": {k: v.to_dict() for k, v in sorted(self.taxes.items())},
         }
 
-    def canonical_bytes(self) -> bytes:
-        return _canonical_yaml_bytes(self.canonical_dict())
-
-    def computed_sha256(self) -> str:
-        return hashlib.sha256(self.canonical_bytes()).hexdigest()
-
-    def to_dict(self) -> dict:
-        d = self.canonical_dict()
-        d["content_sha256"] = self.content_sha256
-        return d
-
     @classmethod
     def from_dict(cls, mapping: object) -> EffectiveFinanceConfig:
         if not isinstance(mapping, Mapping):
             raise FinanceTripletError("EffectiveFinanceConfig 必须是字典")
         unknown = set(mapping) - {
-            "schema", "schema_version", "profile_id", "profile_sha256", "overrides_sha256",
+            "schema", "schema_version", "profile_id",
             "currency", "base_year", "price_basis", "cost_method",
-            "finance_types", "energy_prices", "taxes", "content_sha256",
+            "finance_types", "energy_prices", "taxes",
         }
         if unknown:
             raise FinanceTripletError(f"EffectiveFinanceConfig 未知字段: {sorted(unknown)}")
         missing = {
-            "schema", "schema_version", "profile_id", "profile_sha256", "overrides_sha256",
+            "schema", "schema_version", "profile_id",
             "currency", "base_year", "price_basis", "cost_method",
             "finance_types", "energy_prices",
         } - set(mapping)
@@ -1235,8 +1093,6 @@ class EffectiveFinanceConfig:
         profile_id = str(mapping["profile_id"])
         if not _PROFILE_ID_RE.fullmatch(profile_id) or "__" in profile_id:
             raise FinanceTripletError(f"profile_id 非法: {profile_id!r}")
-        profile_sha256 = _validate_hex64(mapping["profile_sha256"], "profile_sha256")
-        overrides_sha256 = _validate_hex64(mapping["overrides_sha256"], "overrides_sha256")
         currency = str(mapping["currency"])
         base_year = mapping["base_year"]
         if not isinstance(base_year, int) or isinstance(base_year, bool):
@@ -1278,30 +1134,10 @@ class EffectiveFinanceConfig:
                 raise FinanceTripletError(f"taxes.{tax_id} 禁止 null")
             taxes[tax_id] = TaxEntry.from_dict(tax_val)
 
-        declared_sha = mapping.get("content_sha256")
-        obj = cls(
-            schema=schema,
-            schema_version=schema_version,
-            profile_id=profile_id,
-            profile_sha256=profile_sha256,
-            overrides_sha256=overrides_sha256,
-            currency=currency,
-            base_year=base_year,
-            price_basis=price_basis,
-            cost_method=cost_method,
-            finance_types=finance_types,
-            energy_prices=energy_prices,
-            taxes=taxes,
-            content_sha256="",
-        )
-        computed = obj.computed_sha256()
-        # 声明摘要结算后重建(摘要不参与自身计算)
         return cls(
             schema=schema,
             schema_version=schema_version,
             profile_id=profile_id,
-            profile_sha256=profile_sha256,
-            overrides_sha256=overrides_sha256,
             currency=currency,
             base_year=base_year,
             price_basis=price_basis,
@@ -1309,7 +1145,6 @@ class EffectiveFinanceConfig:
             finance_types=finance_types,
             energy_prices=energy_prices,
             taxes=taxes,
-            content_sha256=_settle_content_sha(declared_sha, computed),
         )
 
     @classmethod
@@ -1320,11 +1155,9 @@ class EffectiveFinanceConfig:
         except FinanceTripletError as exc:
             return [make_diag(FIN_TRIPLET_INVALID, params={"detail": str(exc)})]
 
-
 # ---------------------------------------------------------------------------
 # 确定性合并器
 # ---------------------------------------------------------------------------
-
 
 def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None) -> EffectiveFinanceConfig:
     """确定性合并 Profile 与 Overrides 生成不可变 EffectiveFinanceConfig。
@@ -1342,10 +1175,6 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
             raise FinanceTripletError(
                 f"Overrides profile_ref.id {overrides.profile_ref['id']!r} "
                 f"与 Profile {profile.profile_id!r} 不一致"
-            )
-        if overrides.profile_ref["content_sha256"] != profile.content_sha256:
-            raise FinanceTripletError(
-                "Overrides profile_ref.content_sha256 与 Profile 内容摘要不一致"
             )
 
     # ---- 合并 finance_types: 逐项深拷贝 Profile 再应用覆盖叶子 ----
@@ -1405,13 +1234,10 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
     # ---- taxes: 税目只属于 Profile, 原样继承 ----
     merged_taxes: dict[str, TaxEntry] = dict(profile.taxes)
 
-    # ---- 构造 Effective(先空摘要计算, 再填入) ----
-    effective = EffectiveFinanceConfig(
+    return EffectiveFinanceConfig(
         schema=SCHEMA_EFFECTIVE,
         schema_version=SCHEMA_VERSION,
         profile_id=profile.profile_id,
-        profile_sha256=profile.content_sha256,
-        overrides_sha256=overrides.content_sha256,
         currency=profile.currency,
         base_year=profile.base_year,
         price_basis=profile.price_basis,
@@ -1419,22 +1245,4 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         finance_types=merged_ft,
         energy_prices=merged_ep,
         taxes=merged_taxes,
-        content_sha256="",
     )
-    computed = hashlib.sha256(_canonical_yaml_bytes(effective.canonical_dict())).hexdigest()
-    final = EffectiveFinanceConfig(
-        schema=SCHEMA_EFFECTIVE,
-        schema_version=SCHEMA_VERSION,
-        profile_id=effective.profile_id,
-        profile_sha256=effective.profile_sha256,
-        overrides_sha256=effective.overrides_sha256,
-        currency=effective.currency,
-        base_year=effective.base_year,
-        price_basis=effective.price_basis,
-        cost_method=effective.cost_method,
-        finance_types=effective.finance_types,
-        energy_prices=effective.energy_prices,
-        taxes=effective.taxes,
-        content_sha256=computed,
-    )
-    return final

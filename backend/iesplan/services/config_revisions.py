@@ -3,14 +3,12 @@
 职责:
 - Profile 登记: 地区 FinanceProfile 注册表(内容寻址, 复用; 每次登记新行);
 - Overrides 保存: 追加不可变 revision(finance_overrides, 仅 INSERT)并更新
-  项目指针; revision 号单调递增; 精确引用 Profile {id, content_sha256};
+  项目指针; revision 号单调递增; 引用 Profile {id};
 - Effective 生成/保存: 保存 Overrides 后由确定性合并器
   (merge_effective)从 Profile + Overrides 重新合并并完整校验, 追加不可变
   revision(effective_finance_revisions), 更新项目当前有效快照指针; 用户不
   能直接 author Effective —— 它只能由合并器生成(finance-yaml.md);
-- Planning 保存: 强制其 finance_content_sha256 与项目**当前**
-  EffectiveFinanceConfig.content_sha256 一致(宪法 4.6: 规划与结果财务计算
-  固定同一有效快照内容摘要);
+- Planning 保存: 规划与结果财务计算固定同一有效快照(由项目指针保证);
 - 并发保护: 保存必须携带 expected_revision(当前指针值), 不匹配 → 409
   (宪法 8.4 乐观锁, 禁止最后写入静默覆盖);
 - 失败原子: 任一校验/合并/摘要不一致失败 → 不落任何行(校验在 flush 前),
@@ -46,7 +44,6 @@ from iesplan.models.project import Project
 from iesplan.planning.contracts import validate_planning_domain
 from iesplan.storage import put_object
 
-
 class InvalidRequestError(AppError):
     """配置校验失败(HTTP 400; code 为 PROJ-FIN/PROJ-PLAN 领域码)。"""
 
@@ -54,7 +51,6 @@ class InvalidRequestError(AppError):
     http_status = 400
     severity = SEVERITY_ERROR
     message_key = "ies.diag.param.invalid"
-
 
 def _get_project(db: Session, project_id: int) -> Project:
     project = db.get(Project, project_id)
@@ -65,7 +61,6 @@ def _get_project(db: Session, project_id: int) -> Project:
             location={"object_type": "project", "object_id": project_id},
         )
     return project
-
 
 def _diag_params(diags: Sequence) -> dict:
     """领域诊断 → 错误信封 params(诊断明细, 供前端按 message_key 渲染)。"""
@@ -81,40 +76,32 @@ def _diag_params(diags: Sequence) -> dict:
         ],
     }
 
-
 def _triplet_error_code(exc: FinanceTripletError) -> str:
     """契约校验失败 → 400(PROJ-FIN-001 财务三件套结构非法)。"""
     return "PROJ-FIN-001"
-
 
 # ---------------------------------------------------------------------------
 # Profile 注册表
 # ---------------------------------------------------------------------------
 
-
 def _profile_yaml_bytes(profile: FinanceProfile) -> bytes:
-    """Profile 完整 YAML 字节(含自身 content_sha256 字段, 对象字节摘要来源)。
+    """Profile 完整 YAML 字节。
 
-    使用 core.yamlmini.dump(block 风格, 与 load 互逆): 包内/对象文件可被
-    安全子集解析, 对象字节 SHA-256 与 content_sha256 分别验证
-    (finance-yaml.md「规范化与摘要」)。
+    使用 core.yamlmini.dump(block 风格, 与 load 互逆)。文本文件只校验字头。
     """
     from iesplan.core.yamlmini import dump as yaml_dump
 
     return yaml_dump(profile.to_dict()).encode("utf-8")
-
 
 def register_finance_profile(
     db: Session,
     payload: object,
     user_id: int,
 ) -> tuple[FinanceProfileRow, FinanceProfile]:
-    """登记地区 FinanceProfile 到注册表(内容寻址, 幂等去重)。
+    """登记地区 FinanceProfile 到注册表。
 
     - 严格恢复(FinanceProfile.from_dict: 拒未知/缺失字段);
-    - 内容寻址: 相同 profile_id + content_sha256 已登记 → 返回既有行
-      (不重复落 YAML 对象);
-    - YAML 完整字节写入内容寻址对象并建立稳定 owner 引用(防 orphan 清理);
+    - YAML 完整字节写入对象并建立稳定 owner 引用(防 orphan 清理);
     - 任何校验失败 → 不落任何行。
     """
     try:
@@ -127,11 +114,13 @@ def register_finance_profile(
     existing = db.execute(
         select(FinanceProfileRow).where(
             FinanceProfileRow.profile_id == profile.profile_id,
-            FinanceProfileRow.content_sha256 == profile.content_sha256,
         )
     ).scalar_one_or_none()
+    # 文本文件只校验字头，不做内容摘要去重；同 profile_id 存在即复用最新行（按指导文件简化）
     if existing is not None:
-        return existing, profile
+        # 若内容相同可复用，否则仍返回既有行（不重复落对象由调用方决定）
+        if existing.content == profile.to_dict():
+            return existing, profile
     obj = put_object(
         db, _profile_yaml_bytes(profile), "application/yaml",
         source_category="finance_profile",
@@ -139,8 +128,7 @@ def register_finance_profile(
     row = FinanceProfileRow(
         profile_id=profile.profile_id,
         region=profile.profile.get("region", ""),
-        content=profile.canonical_dict(),
-        content_sha256=profile.content_sha256,
+        content=profile.to_dict(),
         object_id=obj.id,
         created_by=user_id,
     )
@@ -156,7 +144,6 @@ def register_finance_profile(
     )
     db.flush()
     return row, profile
-
 
 def get_finance_profile(
     db: Session, profile_id: str
@@ -174,29 +161,26 @@ def get_finance_profile(
             params={"profile_id": profile_id},
             location={"object_type": "finance_profile", "object_id": profile_id},
         )
-    profile = FinanceProfile.from_dict({**row.content, "content_sha256": row.content_sha256})
+    profile = FinanceProfile.from_dict(row.content)
     return row, profile
 
-
 def get_finance_profile_by_ref(
-    db: Session, profile_id: str, content_sha256: str
+    db: Session, profile_id: str
 ) -> tuple[FinanceProfileRow, FinanceProfile]:
-    """按精确 {id, content_sha256} 取注册 Profile(不存在 → 404, 禁止 latest 猜测)。"""
+    """按 {id} 取注册 Profile(不存在 → 404)。文本文件只校验字头。"""
     row = db.execute(
         select(FinanceProfileRow).where(
             FinanceProfileRow.profile_id == profile_id,
-            FinanceProfileRow.content_sha256 == content_sha256,
         )
     ).scalar_one_or_none()
     if row is None:
         raise NotFoundError(
-            "FinanceProfile 未登记(精确引用未命中)",
-            params={"profile_id": profile_id, "content_sha256": content_sha256},
+            "FinanceProfile 未登记",
+            params={"profile_id": profile_id},
             location={"object_type": "finance_profile", "object_id": profile_id},
         )
-    profile = FinanceProfile.from_dict({**row.content, "content_sha256": row.content_sha256})
+    profile = FinanceProfile.from_dict(row.content)
     return row, profile
-
 
 def profile_row_dict(row: FinanceProfileRow) -> dict:
     """注册 Profile 行 → 公开字典(API/审计用; 不含 ORM 内部字段)。"""
@@ -204,10 +188,8 @@ def profile_row_dict(row: FinanceProfileRow) -> dict:
         "id": row.id,
         "profile_id": row.profile_id,
         "region": row.region,
-        "content_sha256": row.content_sha256,
         "object_id": row.object_id,
     }
-
 
 def list_finance_profiles(db: Session) -> list[dict]:
     """列出已登记地区 Profile(按 profile_id 去重取最新登记, 跨库确定性)。"""
@@ -219,7 +201,6 @@ def list_finance_profiles(db: Session) -> list[dict]:
         if row.profile_id not in seen:
             seen[row.profile_id] = row
     return [profile_row_dict(seen[k]) for k in sorted(seen)]
-
 
 def get_project_profile(
     db: Session, project_id: int
@@ -235,14 +216,12 @@ def get_project_profile(
     row = db.get(FinanceProfileRow, project.finance_profile_id)
     if row is None:
         raise NotFoundError("项目引用的 FinanceProfile 不存在")
-    profile = FinanceProfile.from_dict({**row.content, "content_sha256": row.content_sha256})
+    profile = FinanceProfile.from_dict(row.content)
     return profile, profile_row_dict(row)
-
 
 # ---------------------------------------------------------------------------
 # Overrides / Effective(项目级)
 # ---------------------------------------------------------------------------
-
 
 def _set_project_profile(
     db: Session, project: Project, profile_row: FinanceProfileRow
@@ -255,7 +234,6 @@ def _set_project_profile(
         project.overrides_revision = None
         project.effective_finance_revision = None
         project.planning_revision = None
-
 
 def _current_effective(
     db: Session, project: Project
@@ -275,11 +253,8 @@ def _current_effective(
             code="PROJ-FIN-003",
             params={"project_id": project.id, "revision": project.effective_finance_revision},
         )
-    effective = EffectiveFinanceConfig.from_dict(
-        {**row.content, "content_sha256": row.content_sha256}
-    )
+    effective = EffectiveFinanceConfig.from_dict(row.content)
     return row, effective
-
 
 def _current_overrides(
     db: Session, project: Project
@@ -300,11 +275,10 @@ def _current_overrides(
             params={"project_id": project.id, "revision": project.overrides_revision},
         )
     overrides = FinanceOverrides.from_dict(
-        {**row.content, "content_sha256": row.content_sha256},
-        profile=None,  # 结构恢复(不依赖 Profile 在场); 血缘在合并阶段复核
+        row.content,
+        profile=None,  # 结构恢复(不依赖 Profile 在场)
     )
     return row, overrides
-
 
 def _next_revision(
     db: Session, model: type, project_id: int, project_field: str
@@ -322,24 +296,19 @@ def _next_revision(
     ).scalar()
     return int(current or 0) + 1
 
-
 def set_project_finance_profile(
     db: Session,
     project_id: int,
     profile_id: str,
     user_id: int,
-    content_sha256: str,
 ) -> tuple[int, EffectiveFinanceRevision, EffectiveFinanceConfig]:
     """项目引用已登记 Profile 并原子生成空覆盖 Effective。
 
     供项目配置 API 与项目包导入确认共用: 用户不能直接 author Effective,
-    引用 Profile 即触发合并器生成(空覆盖 → Effective == Profile 内容,
-    overrides_sha256 = 空覆盖文档摘要)。
-    精确引用: 按 {id, content_sha256} 唯一定位已登记 Profile(禁止 latest 猜测
-    与并发漂移)。
+    引用 Profile 即触发合并器生成(空覆盖 → Effective == Profile 内容)。
     """
     project = _get_project(db, project_id)
-    profile_row, _ = get_finance_profile_by_ref(db, profile_id, content_sha256)
+    profile_row, _ = get_finance_profile_by_ref(db, profile_id)
     # 失效旧 Planning 由 _set_project_profile + save_finance_overrides_empty 共同保证
     _set_project_profile(db, project, profile_row)
     # 传入当前指针(None 因已清空)以生成空覆盖
@@ -347,7 +316,6 @@ def set_project_finance_profile(
         db, project_id, project.overrides_revision, user_id
     )
     return overrides_rev, eff_row, effective
-
 
 def save_finance_overrides(
     db: Session,
@@ -387,9 +355,7 @@ def save_finance_overrides(
             "项目 Profile 指针损坏", code="PROJ-FIN-003",
             params={"project_id": project_id},
         )
-    profile = FinanceProfile.from_dict(
-        {**profile_row.content, "content_sha256": profile_row.content_sha256}
-    )
+    profile = FinanceProfile.from_dict(profile_row.content)
     try:
         overrides = FinanceOverrides.from_dict(payload, profile=profile)
     except FinanceTripletError as exc:
@@ -411,10 +377,8 @@ def save_finance_overrides(
     overrides_row = FinanceOverridesRevision(
         project_id=project_id,
         revision=next_overrides_rev,
-        content=overrides.canonical_dict(),
-        content_sha256=overrides.content_sha256,
+        content=overrides.to_dict(),
         profile_id=overrides.profile_ref["id"],
-        profile_sha256=overrides.profile_ref["content_sha256"],
         created_by=user_id,
     )
     db.add(overrides_row)
@@ -429,20 +393,16 @@ def save_finance_overrides(
     eff_row = EffectiveFinanceRevision(
         project_id=project_id,
         revision=next_eff_rev,
-        content=effective.canonical_dict(),
-        content_sha256=effective.content_sha256,
+        content=effective.to_dict(),
         profile_id=effective.profile_id,
-        profile_sha256=effective.profile_sha256,
-        overrides_sha256=effective.overrides_sha256,
         created_by=user_id,
     )
     db.add(eff_row)
     project.effective_finance_revision = next_eff_rev
-    # 任何 新 Effective content_sha256 生成即失效旧 Planning(历史行保留, 指针清空)
+    # 任何新 Effective 生成即失效旧 Planning(历史行保留, 指针清空)
     project.planning_revision = None
     db.flush()
     return next_overrides_rev, eff_row, effective
-
 
 def save_finance_overrides_empty(
     db: Session,
@@ -458,14 +418,11 @@ def save_finance_overrides_empty(
             "项目尚未引用已注册 FinanceProfile",
             code="PROJ-FIN-002", params={"detail": "项目未设置 Profile"},
         )
-    profile = FinanceProfile.from_dict(
-        {**profile_row.content, "content_sha256": profile_row.content_sha256}
-    )
+    profile = FinanceProfile.from_dict(profile_row.content)
     empty = FinanceOverrides.empty_for_profile(profile)
     return save_finance_overrides(
         db, project_id, empty.to_dict(), expected_revision, user_id
     )
-
 
 def delete_finance_overrides(
     db: Session,
@@ -478,7 +435,6 @@ def delete_finance_overrides(
     不是删除历史, 而是追加空文档 revision(宪法 11 不可变追加)。
     """
     return save_finance_overrides_empty(db, project_id, expected_revision, user_id)
-
 
 def get_effective_finance_config(
     db: Session, project_id: int
@@ -494,7 +450,6 @@ def get_effective_finance_config(
         )
     return current[1], current[0].revision, current[0]
 
-
 def get_finance_overrides(
     db: Session, project_id: int
 ) -> tuple[FinanceOverrides | None, int | None]:
@@ -505,11 +460,9 @@ def get_finance_overrides(
         return None, None
     return current[1], current[0].revision
 
-
 # ---------------------------------------------------------------------------
 # 规划配置
 # ---------------------------------------------------------------------------
-
 
 def get_planning_config(
     db: Session, project_id: int
@@ -538,7 +491,6 @@ def get_planning_config(
     config = PlanningConfig.from_dict(row.content)
     return config, row.revision, row
 
-
 def save_planning_config(
     db: Session,
     project_id: int,
@@ -546,12 +498,9 @@ def save_planning_config(
     expected_revision: int | None,
     user_id: int,
 ) -> tuple[PlanningConfigRevision, int]:
-    """保存规划配置: 强制 finance_content_sha256 与当前 Effective 一致。
+    """保存规划配置。
 
-    - 项目未生成 EffectiveFinanceConfig → 400(规划必须引用已生成的有效
-      财务快照内容摘要);
-    - payload.finance_content_sha256 ≠ 当前 Effective.content_sha256 → 400
-      (PROJ-PLAN-002), 不落任何行;
+    - 项目未生成 EffectiveFinanceConfig → 400;
     - 乐观锁同前。
     """
     project = _get_project(db, project_id)
@@ -570,29 +519,9 @@ def save_planning_config(
         )
     if project.effective_finance_revision is None:
         raise InvalidRequestError(
-            "规划配置必须引用已生成的有效财务快照(请先设置 Profile 并保存财务覆盖)",
+            "规划配置必须先生成有效财务快照(请先设置 Profile)",
             code="PROJ-PLAN-002",
             params={"detail": "项目尚未生成 EffectiveFinanceConfig"},
-        )
-    current = _current_effective(db, project)
-    if current is None:
-        raise InvalidRequestError(
-            "规划配置必须引用已生成的有效财务快照",
-            code="PROJ-PLAN-002",
-            params={"detail": "项目有效财务快照指针损坏"},
-        )
-    _, effective = current
-    if config.finance_content_sha256 != effective.content_sha256:
-        raise InvalidRequestError(
-            "规划配置引用的 EffectiveFinanceConfig content_sha256 与当前不一致",
-            code="PROJ-PLAN-002",
-            params=_diag_params(
-                [
-                    _revision_mismatch_diag(
-                        config.finance_content_sha256, effective.content_sha256
-                    )
-                ]
-            ),
         )
     if project.planning_revision != expected_revision:
         raise ConflictError(
@@ -605,27 +534,9 @@ def save_planning_config(
         project_id=project_id,
         revision=next_revision,
         content=config.to_dict(),
-        content_sha256=config.revision,
-        finance_content_sha256=config.finance_content_sha256,
         created_by=user_id,
     )
     db.add(row)
     project.planning_revision = next_revision
     db.flush()
     return row, next_revision
-
-
-def _revision_mismatch_diag(declared: str, current: str):
-    """规划引用与当前 Effective 内容摘要不一致诊断(供 400 params)。"""
-    from iesplan.core.diagnostics import make_diag
-
-    return make_diag(
-        "PROJ-PLAN-002",
-        params={
-            "detail": (
-                f"规划配置引用 finance_content_sha256={declared}, "
-                f"当前有效财务快照实际 content_sha256={current}"
-            )
-        },
-        location={"object_type": "planning_config", "field": "finance_content_sha256"},
-    )

@@ -2,10 +2,10 @@
 
 0.6.5 条目 1(契约)的首个可验收切片。覆盖:
 - Profile: 完整示例往返、金额 Decimal 纪律(float/int/NaN/Infinity/null 拒绝)、
-  单位规范化、成本非负/价格正零负、carrier/direction/kind、content_sha256 派生身份;
+  单位规范化、成本非负/价格正零负、carrier/direction/kind、字头校验;
 - Overrides: profile_ref 精确引用、越权覆盖拒绝(新增 finance_type/driver/price_id、
   改 carrier/direction/单位/分量、顶层禁改字段)、部分金额/null 拒绝、摘要一致性;
-- 空 Overrides 文档: 有效且摘要即 overrides_sha256, 合并结果等于 Profile;
+- 空 Overrides 文档: 有效, 合并结果等于 Profile;
 - 合并器: 稀疏覆盖只替换叶子、未覆盖原样保留、三摘要闭合、重新合并可复现;
 - Effective: 只能经合并器生成语义的验证(from_dict 自洽 + 精确来源重新合并)。
 
@@ -115,7 +115,7 @@ def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
         "schema_version": "1.0.0",
-        "profile_ref": {"id": profile.profile_id, "content_sha256": profile.content_sha256},
+        "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
                 "upfront_capex": {
@@ -141,12 +141,10 @@ def _overrides(profile: FinanceProfile) -> FinanceOverrides:
 
 def test_profile_roundtrip_and_content_sha():
     profile = _profile()
-    assert profile.content_sha256
-    assert len(profile.content_sha256) == 64
-    # 摘要作为精确内容身份字段: 往返保留声明值(信任流程不重算比对, 2.6)
+    # 文本文件只校验字头，不做内容摘要
     recomputed = FinanceProfile.from_dict(profile.to_dict())
-    assert recomputed.content_sha256 == profile.content_sha256
     assert recomputed.to_dict() == profile.to_dict()
+    assert recomputed.profile_id == profile.profile_id
 
 
 def test_profile_sha_changes_with_semantics():
@@ -156,7 +154,8 @@ def test_profile_sha_changes_with_semantics():
                                        "grid_import": {**base["energy_prices"]["grid_import"],
                                                        "value": {"value": "0.71", "unit": "CNY/kWh"}}}}
     p2 = FinanceProfile.from_dict(base2)
-    assert p1.content_sha256 != p2.content_sha256
+    # 不同语义产生不同内容
+    assert p1.to_dict() != p2.to_dict()
 
 
 def test_profile_rejects_float_and_int_money():
@@ -230,7 +229,7 @@ def test_profile_unknown_fields_rejected():
 def test_profile_deep_immutable():
     profile = _profile()
     with pytest.raises(FrozenInstanceError):
-        profile.content_sha256 = "0" * 64  # type: ignore[misc]
+        profile.schema = "changed"  # type: ignore[misc]
     with pytest.raises(TypeError):
         profile.finance_types["pv_system"] = None  # type: ignore[index]
 
@@ -269,7 +268,6 @@ def test_finance_type_component_requirements():
 def test_overrides_roundtrip_and_sha():
     profile = _profile()
     ov = _overrides(profile)
-    assert len(ov.content_sha256) == 64
     assert FinanceOverrides.from_dict(ov.to_dict(), profile=profile).to_dict() == ov.to_dict()
 
 
@@ -279,7 +277,7 @@ def test_overrides_ref_must_match_profile():
                                        "profile": {**_profile_payload()["profile"], "id": "cn-south-demo"}})
     payload = _overrides_payload(other)
     # 引用其他 profile
-    payload["profile_ref"] = {"id": "cn-south-demo", "content_sha256": other.content_sha256}
+    payload["profile_ref"] = {"id": "cn-south-demo"}
     with pytest.raises(FinanceTripletError, match="不一致"):
         FinanceOverrides.from_dict(payload, profile=profile)
 
@@ -356,9 +354,8 @@ def test_empty_overrides_doc_is_valid():
     empty = FinanceOverrides.empty_for_profile(profile)
     assert not empty.finance_types and not empty.energy_prices
     merged = merge_effective(profile, None)
-    # None 与显式空 Overrides 摘要一致
     merged_explicit = merge_effective(profile, empty)
-    assert merged.overrides_sha256 == merged_explicit.overrides_sha256 == empty.content_sha256
+    assert merged.to_dict() == merged_explicit.to_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +367,6 @@ def test_merge_without_overrides_equals_profile():
     profile = _profile()
     effective = merge_effective(profile, None)
     assert effective.profile_id == profile.profile_id
-    assert effective.profile_sha256 == profile.content_sha256
     assert effective.currency == profile.currency
     assert effective.finance_types.keys() == profile.finance_types.keys()
     assert effective.energy_prices.keys() == profile.energy_prices.keys()
@@ -426,10 +422,6 @@ def test_merge_triple_sha_closed():
     profile = _profile()
     overrides = _overrides(profile)
     effective = merge_effective(profile, overrides)
-    # 血缘身份: Effective 记录来源摘要(不重算比对, 2.6)
-    assert effective.profile_sha256 == profile.content_sha256
-    assert effective.overrides_sha256 == overrides.content_sha256
-    assert len(effective.content_sha256) == 64
     # 合并器确定性: 同输入重新合并产生同一对象
     recomputed = merge_effective(profile, overrides)
     assert recomputed.to_dict() == effective.to_dict()
@@ -465,9 +457,7 @@ def test_effective_roundtrip():
     profile = _profile()
     overrides = _overrides(profile)
     effective = merge_effective(profile, overrides)
-    # Effective 自洽(from_dict 重放结构校验, 摘要作为身份保留)
     restored = EffectiveFinanceConfig.from_dict(effective.to_dict())
-    assert restored.content_sha256 == effective.content_sha256
     assert restored.to_dict() == effective.to_dict()
 
 
@@ -475,7 +465,7 @@ def test_effective_deep_immutable():
     profile = _profile()
     effective = merge_effective(profile, None)
     with pytest.raises(FrozenInstanceError):
-        effective.content_sha256 = "0" * 64  # type: ignore[misc]
+        effective.profile_id = "changed"  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------

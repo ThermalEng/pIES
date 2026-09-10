@@ -22,9 +22,8 @@ import pytest
 def _init_device_registry():
     """所有测试自动初始化设备注册表(避免单个测试漏写 fixture)。"""
     from iesplan.devices import init_registry
-    from iesplan.devices.pricing import load_price_book
 
-    init_registry(book=load_price_book())
+    init_registry()
     yield
 
 

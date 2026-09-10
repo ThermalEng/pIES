@@ -3,20 +3,17 @@
 FinanceProfile(地区注册表) / FinanceOverrides(项目覆盖) /
 EffectiveFinanceConfig(项目有效快照):
 
-- ``finance_profiles``: 地区 Profile 注册表。Profile 是已注册、内容寻址、
-  可复用的地区财务基准(宪法 4.6): 每次登记写入新的内容寻址 YAML 对象与
-  注册行(profile_id + content_sha256 唯一), 相同内容 sha256 相同可跨项目
-  共享底层对象; 项目经 Overrides 的 profile_ref{id, content_sha256} 精确引用。
+- ``finance_profiles``: 地区 Profile 注册表。Profile 是已注册、可复用的地区财务基准(宪法 4.6): 每次登记写入新的 YAML 对象与
+  注册行; 项目经 Overrides 的 profile_ref{id} 引用。
 - ``finance_overrides``: 项目 FinanceOverrides 不可变 revision 追加表
-  (每次保存形成新 revision, 不覆盖历史); 精确引用 Profile id/content_sha256。
-- ``effective_finance_revisions``: 合并器确定性产物不可变 revision 追加表;
-  记录 profile_sha256 / overrides_sha256 / content_sha256 三摘要。
+  (每次保存形成新 revision, 不覆盖历史); 引用 Profile id。
+- ``effective_finance_revisions``: 合并器确定性产物不可变 revision 追加表。
 
 projects 当前生效指针:
 - ``finance_profile_id``: 项目当前引用的已注册 Profile 主键;
 - ``overrides_revision``: 项目当前 Overrides revision(无覆盖时指针为空);
 - ``effective_finance_revision``: 项目当前 Effective revision(装配/规划/
-  财务计算唯一消费的快照, 规划配置引用其 content_sha256)。
+  财务计算唯一消费的快照)。
 
 不可变性由 ``models.immutable_triggers.IMMUTABLE_TABLES`` 注册的禁
 UPDATE/DELETE 触发器保证(Postgres), 应用层同样无任何更新入口。
@@ -34,15 +31,13 @@ from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index,
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, JSONB, bigint_pk, regex_check
-
+from iesplan.models.common import JSONB, bigint_pk
 
 class FinanceProfile(Base):
-    """地区 FinanceProfile 注册表(已注册、内容寻址、可复用的地区财务基准)。
+    """地区 FinanceProfile 注册表(已注册、可复用的地区财务基准)。
 
-    每次登记写入新行(profile_id + content_sha256 唯一); content 存规范
-    内容 JSON(FinanceProfile.to_dict 形态), content_sha256 为规范内容摘要;
-    object_id 指向完整 YAML 字节的内容寻址对象(对象字节摘要另行在对象表)。
+    每次登记写入新行; content 存内容 JSON(FinanceProfile.to_dict 形态);
+    object_id 指向 YAML 对象。文本文件只校验字头，不做内容摘要。
     """
 
     __tablename__ = "finance_profiles"
@@ -51,7 +46,6 @@ class FinanceProfile(Base):
     profile_id: Mapped[str] = mapped_column(Text, nullable=False)
     region: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -59,15 +53,9 @@ class FinanceProfile(Base):
     )
 
     __table_args__ = (
-        regex_check(
-            f"content_sha256 ~ '{HASH64_RE}'",
-            name="ck_finance_profiles_sha256",
-        ),
-        # 同一 profile_id 相同内容只登记一次(内容寻址去重)
-        UniqueConstraint("profile_id", "content_sha256", name="uq_finance_profiles_content"),
+        UniqueConstraint("profile_id", name="uq_finance_profiles_id"),
         Index("idx_finance_profiles_id", "profile_id"),
     )
-
 
 class FinanceOverridesRevision(Base):
     """项目 FinanceOverrides 不可变 revision(仅 INSERT, 追加式)。"""
@@ -78,9 +66,7 @@ class FinanceOverridesRevision(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     profile_id: Mapped[str] = mapped_column(Text, nullable=False)
-    profile_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -88,23 +74,13 @@ class FinanceOverridesRevision(Base):
 
     __table_args__ = (
         CheckConstraint("revision >= 1", name="ck_finance_overrides_revision"),
-        regex_check(
-            f"content_sha256 ~ '{HASH64_RE}'",
-            name="ck_finance_overrides_sha256",
-        ),
-        regex_check(
-            f"profile_sha256 ~ '{HASH64_RE}'",
-            name="ck_finance_overrides_profile_sha256",
-        ),
         UniqueConstraint("project_id", "revision", name="uq_finance_overrides_revision"),
         Index("idx_finance_overrides_project", "project_id", sa.text("revision DESC")),
     )
 
-
 class EffectiveFinanceRevision(Base):
     """项目 EffectiveFinanceConfig 不可变 revision(仅 INSERT, 合并器产物)。
 
-    记录三内容摘要: profile_sha256 / overrides_sha256 / content_sha256;
     装配/规划/财务计算只消费当前 Effective revision 指向的快照。
     """
 
@@ -114,10 +90,7 @@ class EffectiveFinanceRevision(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     profile_id: Mapped[str] = mapped_column(Text, nullable=False)
-    profile_sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    overrides_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -125,18 +98,6 @@ class EffectiveFinanceRevision(Base):
 
     __table_args__ = (
         CheckConstraint("revision >= 1", name="ck_effective_finance_revisions_revision"),
-        regex_check(
-            f"content_sha256 ~ '{HASH64_RE}'",
-            name="ck_effective_finance_revisions_sha256",
-        ),
-        regex_check(
-            f"profile_sha256 ~ '{HASH64_RE}'",
-            name="ck_effective_finance_revisions_profile_sha256",
-        ),
-        regex_check(
-            f"overrides_sha256 ~ '{HASH64_RE}'",
-            name="ck_effective_finance_revisions_overrides_sha256",
-        ),
         UniqueConstraint(
             "project_id", "revision", name="uq_effective_finance_revisions_revision"
         ),
@@ -146,13 +107,10 @@ class EffectiveFinanceRevision(Base):
         ),
     )
 
-
 class PlanningConfigRevision(Base):
     """规划配置不可变 revision(仅 INSERT, 追加式)。
 
-    finance_content_sha256 列固定本规划配置引用的 EffectiveFinanceConfig
-    content_sha256(规划与结果财务计算必须消费同一有效快照内容摘要,
-    宪法 4.6)。
+    规划与结果财务计算必须消费同一有效快照(宪法 4.6)。
     """
 
     __tablename__ = "planning_configs"
@@ -161,8 +119,6 @@ class PlanningConfigRevision(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    finance_content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -170,14 +126,6 @@ class PlanningConfigRevision(Base):
 
     __table_args__ = (
         CheckConstraint("revision >= 1", name="ck_planning_configs_revision"),
-        regex_check(
-            f"content_sha256 ~ '{HASH64_RE}'",
-            name="ck_planning_configs_sha256",
-        ),
-        regex_check(
-            f"finance_content_sha256 ~ '{HASH64_RE}'",
-            name="ck_planning_configs_finance_sha256",
-        ),
         UniqueConstraint("project_id", "revision", name="uq_planning_configs_revision"),
         Index("idx_planning_configs_project", "project_id", sa.text("revision DESC")),
     )

@@ -1330,11 +1330,8 @@ def _version_content(db: Session, project: Project, content: dict) -> dict:
     if effective is not None:
         version_content["effective_finance"] = {
             "profile_id": effective.profile_id,
-            "profile_sha256": effective.profile_sha256,
-            "overrides_sha256": effective.overrides_sha256,
-            "content_sha256": effective.content_sha256,
         }
-    # 规划配置引用闭合: 版本固化当前规划配置摘要(其 finance_content_sha256
+    # 规划配置引用闭合: 版本固化当前规划配置摘要
     # 已指向被固化 Effective)。
     from iesplan.services.config_revisions import get_planning_config
 
@@ -1345,7 +1342,8 @@ def _version_content(db: Session, project: Project, content: dict) -> dict:
     if planning is not None:
         version_content["planning_config"] = {
             "revision": planning.revision,
-            "finance_content_sha256": planning.finance_content_sha256,
+            # finance_content_sha256 已移除（文本只校验字头）
+
         }
     return version_content
 

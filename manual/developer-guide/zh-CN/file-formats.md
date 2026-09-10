@@ -13,12 +13,12 @@
 | [设备模型 YAML](formats/device-model-yaml.md) | `*.device.yaml` | 描述设备身份、非时变技术常量、序列接口和声明式方程 | 设备目录、GUI schema、装配与技术模型校验 |
 | [设备数据 CSV](formats/device-data-csv.md) | `*.data.csv` | 提供带 step、采样间隔、单位和来源语义的设备序列数据 | 数据导入器、装配校验、计算阶段序列物化 |
 | [地区 FinanceProfile YAML](formats/finance-yaml.md) | `*.finance-profile.yaml` / `finance_profile.yaml` | 注册地区财务基准：`region`/`currency`/`base_year`/`price_basis`/`cost_method`、按 `finance_type` 的时间口径成本分量、能源购售价格 | 财务合并器与装配校验 |
-| [项目 FinanceOverrides YAML](formats/finance-yaml.md) | `*.finance-overrides.yaml` / `finance_overrides.yaml` | 稀疏原子覆盖：精确引用 `FinanceProfile {id, content_sha256}`，只替换既有 `finance_type` 分量与 constant 能源价格的金额 | 财务合并器 |
-| [有效财务快照](formats/finance-yaml.md) | `*.effective-finance.yaml` / `effective_finance.yaml` | 合并器确定性产物：`profile_id` / `profile_sha256` / `overrides_sha256` / `content_sha256` 与合并后的完整 `finance_types` / `energy_prices` | 装配校验、计算生成与求解 |
+| [项目 FinanceOverrides YAML](formats/finance-yaml.md) | `*.finance-overrides.yaml` / `finance_overrides.yaml` | 稀疏原子覆盖：引用 `FinanceProfile {id}`，只替换既有 `finance_type` 分量与 constant 能源价格的金额 | 财务合并器 |
+| [有效财务快照](formats/finance-yaml.md) | `*.effective-finance.yaml` / `effective_finance.yaml` | 合并器确定性产物：`profile_id` 与合并后的完整 `finance_types` / `energy_prices` | 装配校验、计算生成与求解 |
 | [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、指向有效财务快照的精确引用、`finance_binding`、`tariff_bindings`、规划配置 | 装配校验器 |
 | [Solver Bundle](formats/solver-bundle.md) | 一个目录或不可变归档 | 固定求解器输入文件、受控命令、预期输出和结果适配器 | 求解运行时 |
 
-人工 authoring：设备模型 YAML、设备数据 CSV、`FinanceProfile`、`FinanceOverrides` 与装配 YAML 允许人工编写。`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，不能人工 authoring（导入时连同精确 Profile 与 Overrides 从精确来源重新合并，恢复血缘身份；对象字节完整性由外部包入口逐对象校验承担，2.6）。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
+人工 authoring：设备模型 YAML、设备数据 CSV、`FinanceProfile`、`FinanceOverrides` 与装配 YAML 允许人工编写。`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，不能人工 authoring（导入时连同来源 Profile 与 Overrides 重新合并验证）。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
 
 ## 扩展交付契约
 
@@ -82,10 +82,10 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 2. 解析设备内容摘要、规范数据与预定义来源引用、规划配置、有效财务快照引用与财务绑定（`finance_binding`/`tariff_bindings`），确认技术方程与业务输入完整；
 3. 核对项目计算基线、各输入来源的分辨率、连续 `step` 和对应模式的覆盖要求，将路径资源解析为内容寻址对象；
 4. 按格式规定排序并移除注释、别名和非语义空白；
-5. 对规范字节和每个外部资源计算 SHA-256；
+5. 生成规范字节与外部资源引用；
 6. 生成包含校验器 ID、版本、依赖锁和零阻断诊断的校验回执。
 
-财务三件套的规范化与摘要遵循[财务 YAML 契约](formats/finance-yaml.md)的统一定义：解析 YAML → 移除派生摘要字段 → 生成唯一规范 YAML 字节 → `SHA-256(canonical_bytes)` → 写 `content_sha256`（`content_sha256` 不参与自身摘要）。`FinanceOverrides` 精确引用 `profile content_sha256`，`EffectiveFinanceConfig` 记录 `profile_sha256`/`overrides_sha256`/`content_sha256` 三摘要。
+财务三件套的规范化遵循[财务 YAML 契约](formats/finance-yaml.md)：解析 YAML（安全子集）→ 校验 → 规范化。`FinanceOverrides` 引用 `profile {id}`，`EffectiveFinanceConfig` 不携带内容摘要，文本文件按字头校验。
 
 只有“规范装配文本 + 摘要 + 校验回执”共同组成的 `ValidatedAssemblyArtifact` 可以进入生成器。文件被修改后必须重新校验，旧回执不得复用。
 

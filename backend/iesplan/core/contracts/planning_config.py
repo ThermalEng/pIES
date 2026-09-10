@@ -5,13 +5,12 @@
 生成的不可变 EffectiveFinanceConfig 承载, finance-yaml@1.0.0)或
 generator/solver 选项(属于计算配置)。
 
-- 规划与结果财务计算必须固定同一不可变 EffectiveFinanceConfig:
-  ``finance_content_sha256`` 字段引用其内容摘要(规范性 content_sha256),
-  一致性由领域校验层与装配边界共同强制;
+- 规划与结果财务计算必须固定同一不可变 EffectiveFinanceConfig
+  (由项目当前有效财务快照指针保证, 不做内容摘要);
 - 目标函数可以引用模型技术量、有效快照财务分量、规划变量和约束;
 - 约束为命名映射, 表达式使用受限声明式语法(语法本体属 modeling/装配域,
   本契约只做形状与白名单校验);
-- 配置摘要为确定性 SHA-256(每次保存形成新的不可变 revision);
+- 配置摘要为确定性摘要(每次保存形成新的不可变 revision, 文本只校验字头);
 - 深度不可变: 嵌套容器构造时递归冻结, 同一对象摘要恒定。
 
 本模块只依赖标准库与 ``core.diagnostics``, 不导入任何业务模块
@@ -56,10 +55,8 @@ _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 #: 校验诊断码(登记于 core.diagnostics.NEW_DIAG_CODES)。
 PLANNING_CONFIG_INVALID = "PROJ-PLAN-001"
 
-
 class PlanningConfigError(ValueError):
     """PlanningConfig 校验失败(非法字段/类型/范围/未知键)。"""
-
 
 def _to_decimal(value: object, field_name: str) -> Decimal:
     """字段 → Decimal(与 finance_config 同规: 拒 float/bool/NaN/Infinity)。"""
@@ -80,24 +77,20 @@ def _to_decimal(value: object, field_name: str) -> Decimal:
         raise PlanningConfigError(f"{field_name}: 十进制解析失败") from exc
     return d
 
-
 def _decimal_to_canonical(d: Decimal) -> str:
     """Decimal → 定点十进制字符串(规范化摘要输入)。"""
     with localcontext() as ctx:
         ctx.prec = 30
         return format(d, "f")
 
-
 def _canonical_json(payload: Mapping[str, object]) -> str:
     return json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
 
-
 # ---------------------------------------------------------------------------
 # 子结构
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class Objective:
@@ -137,7 +130,6 @@ class Objective:
         if missing:
             raise PlanningConfigError(f"objective 缺少字段: {sorted(missing)}")
         return cls(sense=str(mapping["sense"]), expression=str(mapping["expression"]))
-
 
 @dataclass(frozen=True, slots=True)
 class PlanningVariable:
@@ -216,7 +208,6 @@ class PlanningVariable:
             ),
         )
 
-
 @dataclass(frozen=True, slots=True)
 class Constraint:
     """规划/系统约束(命名映射中的一项)。
@@ -270,11 +261,9 @@ class Constraint:
             enabled=enabled,
         )
 
-
 # ---------------------------------------------------------------------------
 # PlanningConfig
 # ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class PlanningConfig:
@@ -284,22 +273,14 @@ class PlanningConfig:
         objective: 目标函数(sense + 受限声明式表达式)。
         variables: 规划变量命名映射(容量/建设决策候选 + 上下界)。
         constraints: 约束命名映射(规划/系统约束)。
-        finance_content_sha256: 规划与结果财务计算固定引用的
-            EffectiveFinanceConfig content_sha256(64 位小写十六进制;
-            一致性由领域校验强制, 宪法 4.6)。
+    文本文件只校验字头与领域约束，不做内容摘要。
     """
 
     objective: Objective
     variables: Mapping[str, PlanningVariable]
     constraints: Mapping[str, Constraint]
-    finance_content_sha256: str
 
     def __post_init__(self) -> None:
-        if not _SHA256_RE.fullmatch(self.finance_content_sha256):
-            raise PlanningConfigError(
-                f"finance_content_sha256 必须为 64 位小写十六进制: "
-                f"{self.finance_content_sha256!r}"
-            )
         if not self.variables:
             raise PlanningConfigError("规划配置必须至少声明一个规划变量")
         # 深度不可变 + 稳定键序
@@ -333,7 +314,6 @@ class PlanningConfig:
             "constraints": {
                 k: v.to_dict() for k, v in sorted(self.constraints.items())
             },
-            "finance_content_sha256": self.finance_content_sha256,
         }
         return hashlib.sha256(
             (
@@ -351,7 +331,6 @@ class PlanningConfig:
             "constraints": {
                 k: v.to_dict() for k, v in sorted(self.constraints.items())
             },
-            "finance_content_sha256": self.finance_content_sha256,
             "revision": self.revision,
         }
 
@@ -363,12 +342,12 @@ class PlanningConfig:
                 f"规划配置必须是字典, 实际 {type(mapping).__name__}"
             )
         unknown = set(mapping) - {
-            "objective", "variables", "constraints", "finance_content_sha256",
+            "objective", "variables", "constraints",
             "revision",
         }
         if unknown:
             raise PlanningConfigError(f"规划配置存在未知字段: {sorted(unknown)}")
-        missing = {"objective", "variables", "finance_content_sha256"} - set(mapping)
+        missing = {"objective", "variables"} - set(mapping)
         if missing:
             raise PlanningConfigError(f"规划配置缺少必需字段: {sorted(missing)}")
         variables_raw = mapping["variables"]
@@ -387,7 +366,6 @@ class PlanningConfig:
             objective=Objective.from_dict(mapping["objective"]),
             variables=variables,
             constraints=constraints,
-            finance_content_sha256=str(mapping["finance_content_sha256"]),
         )
         return config
 
