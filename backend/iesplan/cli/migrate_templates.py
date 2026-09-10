@@ -102,16 +102,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.draft:
             result = migrate_draft_to_new_stable_id(db, user, old_id, args.new_slug)
             print(f"草稿迁移成功: {old_id} -> {result['new_template_id']}")
-            print(f"old_sha={result['old_content_sha256']}")
-            print(f"new_sha={result['new_content_sha256']}")
             return 0
         if args.published:
             result = migrate_published_template(db, user, old_id, args.new_slug)
             receipt = result.get("receipt", result)
             print(f"发布迁移成功: {old_id} -> {receipt['new_template_id']}")
-            if "old_content_sha256" in receipt:
-                print(f"old_sha={receipt['old_content_sha256']}")
-                print(f"new_sha={receipt['new_content_sha256']}")
             if result.get("duplicate"):
                 print("幂等命中（已有回执）")
             return 0
@@ -121,9 +116,6 @@ def main(argv: list[str] | None = None) -> int:
             result = migrate_published_template(db, user, old_id, args.new_slug)
             receipt = result.get("receipt", result)
             print(f"发布迁移成功: {old_id} -> {receipt['new_template_id']}")
-            if "old_content_sha256" in receipt:
-                print(f"old_sha={receipt['old_content_sha256']}")
-                print(f"new_sha={receipt['new_content_sha256']}")
             if result.get("duplicate"):
                 print("幂等命中（已有回执）")
             return 0
@@ -133,8 +125,6 @@ def main(argv: list[str] | None = None) -> int:
             if code == "TPL-MDL-006":
                 result = migrate_draft_to_new_stable_id(db, user, old_id, args.new_slug)
                 print(f"草稿迁移成功: {old_id} -> {result['new_template_id']}")
-                print(f"old_sha={result['old_content_sha256']}")
-                print(f"new_sha={result['new_content_sha256']}")
                 return 0
             msg = str(getattr(exc, "message_key", "") or exc)
             print(f"迁移失败: {exc} code={code} key={msg}", file=sys.stderr)

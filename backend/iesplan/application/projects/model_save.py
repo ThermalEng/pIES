@@ -44,7 +44,6 @@ from iesplan.devices import (
     DeviceModelDocument,
     canonical_bytes,
     canonical_receipt,
-    content_sha256,
     instantiate_template,
     is_valid_id,
     parse_device_model_v2,
@@ -143,22 +142,19 @@ class DataFileRef:
 
 @dataclass(slots=True)
 class CandidateValidation:
-    """候选模型完整校验结果: 要么带最终文档(含规范摘要), 要么带诊断列表。
+    """候选模型完整校验结果: 要么带最终文档(含规范文本), 要么带诊断列表。
 
     ``document`` 为解析后文档(未加 _N 后缀); ``receipt``/``canonical_text``
     在直接 YAML 路径下即为规范化结果, 模板路径下由实例化器产出(均以
-    基础 ID 计算, 加后缀后的最终规范由保存步骤重算)。
+    基础 ID 计算, 加后缀后的最终规范由保存步骤重算)。文本文件只校验字头。
     """
 
     ok: bool
     diagnostics: list[Diagnostic] = field(default_factory=list)
     document: DeviceModelDocument | None = None
     canonical_text: str = ""
-    content_sha256: str = ""
     receipt: dict[str, Any] | None = None
-    template_sha256: str | None = None
-    inputs_sha256: str | None = None
-    #: 模板溯源(模板稳定 ID / 精确 revision / 摘要 / schema_version; 模板来源时非空)
+    #: 模板溯源(模板稳定 ID / 精确 revision / schema_version; 模板来源时非空)
     template_provenance: dict[str, Any] | None = None
     data_files: tuple[DataFileRef, ...] = ()
 
@@ -227,15 +223,13 @@ def _load_template_authoritative_document(
     user,
     template_id: str,
     template_revision: int,
-    template_sha256: str,
 ) -> tuple[Mapping[str, Any], dict[str, Any]]:
     """读取项目模型候选引用的权威模板内容(经对象存储门面)。
 
-    模板来源候选只提交稳定模板 ID、精确 revision 与 content_sha256, 后端
-    从模板 revision 的对象引用读取权威规范字节; 候选携带的摘要只作二次
-    确认(不一致 → 409, 内容已失效)。返回 (模板原始映射, 模板溯源)。
+    模板来源候选只提交稳定模板 ID 与精确 revision, 后端
+    从模板 revision 的对象引用读取权威规范字节。文本文件只校验字头。返回 (模板原始映射, 模板溯源)。
     """
-    ref = resolve_template_revision(db, user, template_id, template_revision, template_sha256)
+    ref = resolve_template_revision(db, user, template_id, template_revision)
     raw = get_object(db, ref.yaml_object_id)
     try:
         parsed = json.loads(raw.decode("utf-8"))
@@ -256,7 +250,6 @@ def _load_template_authoritative_document(
     provenance = {
         "template_id": template_id,
         "template_revision": ref.revision,
-        "template_sha256": ref.content_sha256,
         "template_schema_version": ref.schema_version,
     }
     return parsed, provenance
@@ -268,31 +261,27 @@ def _parse_candidate_document(
     DeviceModelDocument | None,
     list[Diagnostic],
     str,
-    str,
     dict[str, Any] | None,
-    str | None,
-    str | None,
 ]:
-    """按来源(直接 YAML / 模板实例化)产出基础文档与规范摘要。
+    """按来源(直接 YAML / 模板实例化)产出基础文档与规范文本。
 
-    返回 (document, diagnostics, canonical_text, content_sha256, receipt,
-    template_sha256, inputs_sha256)。失败时 document 为 None。
+    返回 (document, diagnostics, canonical_text, receipt)。失败时 document 为 None。文本只校验字头。
     """
     if source == MODEL_SOURCE_TEMPLATE:
         result, diags = instantiate_template(raw, dict(template_inputs or {}), file=file)
         if result is None:
-            return None, diags, "", "", None, None, None
+            return None, diags, "", None
         return (
-            result.document, [], result.canonical_text, result.content_sha256,
-            result.receipt, result.template_sha256, result.inputs_sha256,
+            result.document, [], result.canonical_text,
+            result.receipt,
         )
     parse_result = parse_device_model_v2(raw, file=file)
     if not parse_result.ok:
-        return None, parse_result.diagnostics, "", "", None, None, None
+        return None, parse_result.diagnostics, "", None
     doc = parse_result.document
     assert doc is not None
     text = canonical_bytes(doc).decode("utf-8")
-    return doc, [], text, content_sha256(doc), canonical_receipt(doc), None, None
+    return doc, [], text, canonical_receipt(doc)
 
 def _project_baseline_of(project: Project) -> ProjectBaseline:
     """由项目行重建计算基线(项目创建时一次性固定, 列非空; 宪法 7.5)。"""
@@ -536,7 +525,6 @@ def validate_candidate(
     source: str = MODEL_SOURCE_DIRECT,
     template_id: str | None = None,
     template_revision: int | None = None,
-    template_sha256: str | None = None,
     template_inputs: Mapping[str, Any] | None = None,
     data_files: tuple[DataFileRef, ...] = (),
 ) -> CandidateValidation:
@@ -546,10 +534,10 @@ def validate_candidate(
     实例化) → 配套数据文件存在/摘要/归属校验。任何失败聚合诊断返回, 不写
     对象、不登记清单、不分配编号。
 
-    ``source=template`` 时若携带模板稳定 ID/精确 revision/内容摘要, 后端
+    ``source=template`` 时若携带模板稳定 ID/精确 revision, 后端
     从模板 revision 读取权威内容并实例化(候选提交的 model_yaml 被覆盖为
     权威规范字节, 不信任客户端自带的模板字节); 未携带模板引用时为旧契约
-    路径(model_yaml 即模板 YAML, 校验用, 正式保存仍以权威内容为准)。
+    路径(model_yaml 即模板 YAML, 校验用, 正式保存仍以权威内容为准)。文本文件只校验字头。
     """
     project_service.ensure_access(db, user, project_id, "view")
     project = project_service.require_project(db, project_id)
@@ -562,10 +550,10 @@ def validate_candidate(
         )
     raw: Mapping[str, Any] | None = None
     provenance: dict[str, Any] | None = None
-    if source == MODEL_SOURCE_TEMPLATE and template_id and template_revision and template_sha256:
+    if source == MODEL_SOURCE_TEMPLATE and template_id and template_revision:
         try:
             template_raw, provenance = _load_template_authoritative_document(
-                db, user, template_id, template_revision, template_sha256
+                db, user, template_id, template_revision
             )
         except (AppError, ConflictError, NotFoundError) as exc:
             return CandidateValidation(
@@ -585,7 +573,7 @@ def validate_candidate(
             return CandidateValidation(ok=False, diagnostics=diags)
     else:
         diags = []
-    doc, parse_diags, canonical_text, sha256, receipt, tpl_sha, inputs_sha = _parse_candidate_document(
+    doc, parse_diags, canonical_text, receipt = _parse_candidate_document(
         raw, source, template_inputs, file="<candidate>"
     )
     diags.extend(parse_diags)
@@ -601,10 +589,7 @@ def validate_candidate(
         ok=True,
         document=doc,
         canonical_text=canonical_text,
-        content_sha256=sha256,
         receipt=receipt,
-        template_sha256=tpl_sha,
-        inputs_sha256=inputs_sha,
         template_provenance=provenance,
         data_files=data_files,
     )
@@ -661,8 +646,8 @@ def _allocate_suffix(db: Session, project_id: int) -> int:
 
 def _rebuild_with_final_id(
     document: DeviceModelDocument, final_id: str
-) -> tuple[DeviceModelDocument | None, list[Diagnostic], str, str, dict[str, Any]]:
-    """用最终 ID 重建文档: 替换 device.id → 完整重新校验 → 规范摘要与回执。"""
+) -> tuple[DeviceModelDocument | None, list[Diagnostic], str, dict[str, Any]]:
+    """用最终 ID 重建文档: 替换 device.id → 完整重新校验 → 规范文本与回执。文本只校验字头。"""
     raw = to_dict(document)
     raw.setdefault("device", {})
     raw["device"]["id"] = final_id
@@ -672,14 +657,14 @@ def _rebuild_with_final_id(
                   field="device.id", params={"base_device_id": document.device.id if document.device else "",
                                               "final_id": final_id, "expected": "小写命名空间 ID",
                                               "actual": final_id})
-        ], "", "", {}
+        ], "", {}
     result = parse_device_model_v2(raw, file="<candidate>")
     if not result.ok:
-        return None, result.diagnostics, "", "", {}
+        return None, result.diagnostics, "", {}
     doc = result.document
     assert doc is not None
     text = canonical_bytes(doc).decode("utf-8")
-    return doc, [], text, content_sha256(doc), canonical_receipt(doc)
+    return doc, [], text, canonical_receipt(doc)
 
 
 def _find_idempotent_model(db: Session, project_id: int, idempotency_key: str) -> ProjectModel | None:
@@ -721,8 +706,7 @@ def _finalize_data_files(
 
     返回 ``{data_ref: ObjectHandle}``: 数据区(列/单位/step/数值范围)以
     基础文档校验(原始文件头按基础 ID 声明), 落盘字节的元数据改写为最终
-    ``device_id`` 与最终 ``device_content_sha256`` —— 编号分配后的模型与其
-    配套数据形成可复核的内容锁; 有项目基线时逐文件复核 0.6.5 装配前口径。
+    ``device_id`` —— 编号分配后的模型与其配套数据形成可复核的内容锁；文本文件只校验字头。有项目基线时逐文件复核 0.6.5 装配前口径。
     失败抛 AppError, 由调用方整体回滚。
     """
     from iesplan.devices.datacontract2 import (
@@ -755,12 +739,12 @@ def _finalize_data_files(
             )
         meta = result.meta
         assert final_doc.device is not None
-        # 最终文件元数据: 绑定最终 _N 模型的 device_id 与内容摘要(内容锁)
+        # 最终文件元数据: 绑定最终 _N 模型的 device_id（文本只校验字头）
         locked_meta = DeviceData2Meta(
             schema_id=meta.schema_id, schema_version=meta.schema_version,
             dataset_id=meta.dataset_id,
             device_id=final_doc.device.id,
-            device_content_sha256=content_sha256(final_doc),
+            device_content_sha256="",
             source_mode=meta.source_mode, resolution=meta.resolution,
             period=meta.period,
             project_baseline_sha256=meta.project_baseline_sha256,
@@ -798,7 +782,7 @@ def _finalize_data_files(
 
 
 def _project_model_draft_refs(db: Session, project_id: int) -> list[dict[str, object]]:
-    """项目草稿只保存模型清单引用，不复制模型正文。"""
+    """项目草稿只保存模型清单引用，不复制模型正文。文本文件只校验字头。"""
     rows = db.execute(
         sa.select(ProjectModel)
         .where(ProjectModel.project_id == project_id)
@@ -809,7 +793,6 @@ def _project_model_draft_refs(db: Session, project_id: int) -> list[dict[str, ob
             "id": str(model.id),
             "device_id": model.device_id,
             "revision": model.revision,
-            "content_sha256": model.content_sha256,
         }
         for model in rows
     ]
@@ -824,7 +807,6 @@ def _save_project_model(
     source: str = MODEL_SOURCE_DIRECT,
     template_id: str | None = None,
     template_revision: int | None = None,
-    template_sha256: str | None = None,
     template_inputs: Mapping[str, Any] | None = None,
     data_files: tuple[DataFileRef, ...] = (),
     idempotency_key: str | None = None,
@@ -832,11 +814,11 @@ def _save_project_model(
 ) -> dict[str, Any]:
     """正式保存项目模型(候选校验 → 编号分配 → 规范化 → 原子保存)。
 
-    模板来源候选提交模板稳定 ID、精确 revision、content_sha256 与 inputs,
+    模板来源候选提交模板稳定 ID、精确 revision 与 inputs,
     后端读取权威模板内容并实例化(``model_yaml`` 为权威模板的规范字节);
     直接 YAML 来源提交完整 ``model_yaml``。两条路径汇入同一候选校验与
     保存用例。返回 ``{project_model, receipt, project_revision, duplicate}``;
-    公共 application 用例拥有提交/回滚边界。
+    公共 application 用例拥有提交/回滚边界。文本文件只校验字头。
     """
     project_service.ensure_access(db, user, project_id, "edit")
     project = db.get(Project, project_id)
@@ -875,7 +857,6 @@ def _save_project_model(
         model_yaml=model_yaml, source=source,
         template_id=template_id,
         template_revision=template_revision,
-        template_sha256=template_sha256,
         template_inputs=template_inputs, data_files=data_files,
     )
     if not validation.ok or validation.document is None:
@@ -894,7 +875,7 @@ def _save_project_model(
     # 编号分配与文件/清单/审计同事务: 失败整体回滚, 编号不占号
     suffix = _allocate_suffix(db, project_id)
     final_id = f"{base_device_id}_{suffix}"
-    final_doc, identity_diags, canonical_text, final_sha256, final_receipt = _rebuild_with_final_id(
+    final_doc, identity_diags, canonical_text, final_receipt = _rebuild_with_final_id(
         document, final_id
     )
     if final_doc is None:
@@ -904,16 +885,12 @@ def _save_project_model(
             location={"object_type": "project_model", "project_id": project_id},
         )
 
-    # 最终回执: 完整保留模板溯源(模板 ID/精确 revision/模板摘要/inputs 摘要/
-    # 实例化器算法标识/候选模型摘要)与最终模型摘要
+    # 最终回执: 完整保留模板溯源(模板 ID/精确 revision/
+    # 实例化器算法标识)与最终模型
     final_receipt = dict(final_receipt)
     if template_provenance is not None:
         final_receipt["instantiator"] = "ies.device-model.instantiator@1.0.0"
         final_receipt.update(template_provenance)
-        if validation.inputs_sha256 is not None:
-            final_receipt["inputs_sha256"] = validation.inputs_sha256
-        if validation.content_sha256:
-            final_receipt["candidate_content_sha256"] = validation.content_sha256
 
     # 对象写入(内容寻址; 先写字节与回执, 清单行建立后统一 attach 最终 owner)
     model_handle = put_object(
@@ -925,9 +902,9 @@ def _save_project_model(
         source_category="project_model_receipt",
     )
 
-    # 内容锁: 配套数据文件必须与最终 _N 模型一致(device_id / device_content_sha256 /
+    # 内容锁: 配套数据文件必须与最终 _N 模型一致(device_id
     # 列 / 单位 / step 连续 / 有效区间)。数据区按基础文档校验(存在/摘要/归属/
-    # 内容), 落盘字节绑定最终 _N 模型(失败整体拒绝, 已占编号随事务回滚)。
+    # 内容), 落盘字节绑定最终 _N 模型(失败整体拒绝, 已占编号随事务回滚)。文本只校验字头。
     lock_diags = _validate_data_files(db, project_id, data_files, document, baseline)
     if lock_diags:
         raise ModelCandidateRejectedError(
@@ -945,18 +922,11 @@ def _save_project_model(
         device_id=final_id,
         revision=1,
         project_revision=expected_revision + 1,
-        content_sha256=final_sha256,
         model_object_id=model_handle.id,
         receipt_object_id=receipt_handle.id,
         source=source,
         template_id=template_id,
         template_revision=template_revision,
-        template_sha256=(
-            template_provenance["template_sha256"]
-            if template_provenance is not None
-            else None
-        ),
-        inputs_sha256=validation.inputs_sha256,
         idempotency_key=idempotency_key,
         created_by=user.id,
     )
@@ -998,7 +968,6 @@ def _save_project_model(
                 "project_id": project.id,
                 "device_id": final_id,
                 "suffix": suffix,
-                "content_sha256": final_sha256,
                 "source": source,
                 "template_id": template_id,
                 "template_revision": template_revision,
@@ -1034,12 +1003,11 @@ def save_project_model(
     source: str = MODEL_SOURCE_DIRECT,
     template_id: str | None = None,
     template_revision: int | None = None,
-    template_sha256: str | None = None,
     template_inputs: Mapping[str, Any] | None = None,
     data_files: tuple[DataFileRef, ...] = (),
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """事务型保存命令；application 层统一提交或回滚。"""
+    """事务型保存命令；application 层统一提交或回滚。文本文件只校验字头。"""
     try:
         result = _save_project_model(
             db,
@@ -1050,7 +1018,6 @@ def save_project_model(
             source=source,
             template_id=template_id,
             template_revision=template_revision,
-            template_sha256=template_sha256,
             template_inputs=template_inputs,
             data_files=data_files,
             idempotency_key=idempotency_key,
@@ -1164,7 +1131,6 @@ def _delete_project_model(
                 "project_id": project_id,
                 "device_id": model.device_id,
                 "suffix": model.suffix,
-                "content_sha256": model.content_sha256,
             },
         )
     )
@@ -1221,7 +1187,7 @@ def get_project_models(db: Session, user, project_id: int) -> list[dict]:
 
 
 def project_model_to_dict(model: ProjectModel) -> dict[str, Any]:
-    """清单行 → 公开视图。"""
+    """清单行 → 公开视图。文本文件只校验字头。"""
     return {
         "id": str(model.id),
         "project_id": str(model.project_id),
@@ -1230,14 +1196,11 @@ def project_model_to_dict(model: ProjectModel) -> dict[str, Any]:
         "suffix": model.suffix,
         "revision": model.revision,
         "project_revision": model.project_revision,
-        "content_sha256": model.content_sha256,
         "model_object_id": str(model.model_object_id),
         "receipt_object_id": str(model.receipt_object_id),
         "source": model.source,
         "template_id": model.template_id,
         "template_revision": model.template_revision,
-        "template_sha256": model.template_sha256,
-        "inputs_sha256": model.inputs_sha256,
         "created_by": str(model.created_by),
         "created_at": model.created_at.isoformat() if model.created_at else None,
     }

@@ -85,8 +85,8 @@ class TemplateValidateRequest(BaseModel):
 
     支持两种形态:
     - ``model_yaml``: 直接提交候选 YAML 文本(在线编辑即时校验);
-    - ``template_id`` + ``template_revision`` + ``template_sha256``:
-      对已发布的精确 revision 重新校验(不读取当前草稿)。
+    - ``template_id`` + ``template_revision``:
+      对已发布的精确 revision 重新校验(不读取当前草稿)。文本文件只校验字头。
     """
 
     model_yaml: str | None = Field(
@@ -96,9 +96,6 @@ class TemplateValidateRequest(BaseModel):
     )
     template_id: str | None = Field(default=None, description="已发布模板稳定 ID")
     template_revision: int | None = Field(default=None, ge=1, description="精确发布 revision")
-    template_sha256: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$", description="精确 revision 内容摘要",
-    )
 
 
 class TemplateDraftUpdateRequest(BaseModel):
@@ -208,7 +205,6 @@ def validate_template_endpoint(
     else:
         validation = validate_template_revision(
             db, user, template_id, payload.template_revision or 0,
-            payload.template_sha256 or "",
         )
     return {
         "valid": validation.ok,

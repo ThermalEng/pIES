@@ -140,8 +140,8 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "delete_template_endpoint": frozenset({"deleted", "ok"}),
     "get_template_revision_endpoint": frozenset({"template", "revision", "document", "receipt", "summary", "diagnostics"}),
     "list_draft_revisions_endpoint": frozenset({"draft_revisions"}),
-    "get_draft_revision_endpoint": frozenset({"id", "revision", "yaml_object_id", "canonical_sha256", "inputs_sha256", "source", "created_by", "created_at", "document"}),
-    "migrate_draft_endpoint": frozenset({"new_template_id", "old_template_id", "new_content_sha256", "old_content_sha256"}),
+    "get_draft_revision_endpoint": frozenset({"id", "revision", "yaml_object_id", "source", "created_by", "created_at", "document"}),
+    "migrate_draft_endpoint": frozenset({"new_template_id", "old_template_id"}),
     "migrate_published_endpoint": frozenset({"receipt", "duplicate"}),
     "get_template_revision_endpoint": frozenset(
         {"template", "revision", "document", "receipt", "summary", "diagnostics"}
