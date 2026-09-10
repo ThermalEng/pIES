@@ -2,7 +2,7 @@
 
 四阶段校验 → 唯一签名成功产物 ``ValidatedAssemblyArtifact``。
 - 手写装配 YAML(text)与 GUI 项目导出(content)进入同一校验入口,
-  成功只签发由规范文本、SHA-256 与校验回执组成的不可变三件套;
+  成功只签发由规范文本与校验回执组成的不可变二件套;
 - 校验失败不产生可执行产物,返回结构化诊断列表。
 
 四阶段:
@@ -30,7 +30,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -182,16 +181,15 @@ def _run_validation(
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
 
     # --- 规范化与产物签发 --------------------------------------------------
-    canonical_text, digest = canonicalize_assembly_doc(resolved_doc)
+    canonical_text = canonicalize_assembly_doc(resolved_doc)
     dependency_lock = _dependency_lock(doc, registry)
     receipt = ValidationReceipt(
-        assembly_sha256=digest,
         dependencies=dependency_lock,
         resources=resource_digests,
         diagnostics=tuple(d for d in diags if not d.blocking),
     )
     artifact = ValidatedAssemblyArtifact(
-        canonical_text=canonical_text, assembly_sha256=digest, receipt=receipt
+        canonical_text=canonical_text, receipt=receipt
     )
     return AssemblyValidationResult(diagnostics=diags, artifact=artifact)
 
@@ -525,43 +523,14 @@ def _resolve_resources(
         src = entry.get("source") or {}
         kind = src.get("kind")
         if kind == "object":
-            sha = str(src.get("sha256") or "")
             media = str(src.get("media_type") or "")
-            if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
-                diags.append(
-                    make_diag(
-                        ASM_RES_INVALID,
-                        severity="error",
-                        blocking=True,
-                        params={"reason": "invalid_sha256", "dataset_id": str(ds_id)},
-                        location={
-                            "object_type": "assembly",
-                            "field": f"resources.datasets.{ds_id}.source.sha256",
-                        },
-                    )
-                )
-                continue
-            if str(src.get("object_id") or "") != f"sha256:{sha}":
-                diags.append(
-                    make_diag(
-                        ASM_RES_INVALID,
-                        severity="error",
-                        blocking=True,
-                        params={"reason": "object_id_mismatch", "dataset_id": str(ds_id)},
-                        location={
-                            "object_type": "assembly",
-                            "field": f"resources.datasets.{ds_id}.source.object_id",
-                        },
-                    )
-                )
-                continue
+            object_id = str(src.get("object_id") or "")
             entry["source"] = {
                 "kind": "object",
-                "object_id": f"sha256:{sha}",
-                "sha256": sha,
+                "object_id": object_id,
                 "media_type": media,
             }
-            resource_digests[str(ds_id)] = {"sha256": sha, "media_type": media}
+            resource_digests[str(ds_id)] = {"media_type": media}
             continue
         if kind == "relative_file":
             if package_dir is None:
@@ -598,15 +567,13 @@ def _resolve_resources(
                     )
                 )
                 continue
-            sha = hashlib.sha256(data).hexdigest()
             media = _infer_media_type(rel_path)
             entry["source"] = {
                 "kind": "object",
-                "object_id": f"sha256:{sha}",
-                "sha256": sha,
+                "object_id": f"file:{rel_path}",
                 "media_type": media,
             }
-            resource_digests[str(ds_id)] = {"sha256": sha, "media_type": media}
+            resource_digests[str(ds_id)] = {"media_type": media}
             continue
         # 未知 kind 已被结构阶段拒绝,此处忽略
     out = dict(doc)
