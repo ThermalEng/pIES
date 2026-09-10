@@ -1,148 +1,78 @@
-# 电池储能(机理模型、有状态;states 声明 SOC)
 schema: ies.device-model
-schema_version: "1.0.0"
-
+schema_version: "2.0.0"
 device:
   id: ies.device.battery
-  version: "1.5.0"
   names:
     zh-CN: 电池储能
     en-US: Battery Storage
-  model_method: mechanism
-  stateful: true
-  fidelity: high
-  energy_carriers: [electric]
-  capabilities: [storage, controllable, optimization_variable]
-
-parameters:
+properties:
   capacity_kwh:
-    value_type: number
-    quantity: energy
+    value: 1000
     unit: kWh
-    required: false
-    default: 0
-    minimum: 0
-    maximum: 10000000
-    optimizable: true
-    stock_or_addition: addition
-  max_capacity_kwh:
-    value_type: number
-    quantity: energy
-    unit: kWh
-    required: false
-    default: 5000
-    minimum: 0
-    maximum: 10000000
-    stock_or_addition: addition
+    valid_range:
+      minimum: 0
+      maximum: 10000000
   rated_power_kw:
-    value_type: number
-    quantity: power
+    value: 500
     unit: kW
-    required: false
-    default: 0
-    minimum: 0
-    maximum: 1000000
-    optimizable: true
-    stock_or_addition: addition
+    valid_range:
+      minimum: 0
+      maximum: 1000000
   charge_efficiency:
-    value_type: number
-    quantity: ratio
-    unit: "-"
-    required: false
-    default: 0.95
-    minimum: 0.5
-    maximum: 1.0
+    value: 0.95
+    unit: "1"
+    valid_range:
+      minimum: 0.5
+      maximum: 1
   discharge_efficiency:
-    value_type: number
-    quantity: ratio
-    unit: "-"
-    required: false
-    default: 0.95
-    minimum: 0.5
-    maximum: 1.0
-  max_soc:
-    value_type: number
-    quantity: ratio
-    unit: "-"
-    required: false
-    default: 0.9
-    minimum: 0.5
-    maximum: 1.0
-  min_soc:
-    value_type: number
-    quantity: ratio
-    unit: "-"
-    required: false
-    default: 0.1
-    minimum: 0
-    maximum: 0.5
+    value: 0.95
+    unit: "1"
+    valid_range:
+      minimum: 0.5
+      maximum: 1
   initial_soc:
-    value_type: number
-    quantity: ratio
-    unit: "-"
-    required: false
-    default: 0.5
-    minimum: 0
-    maximum: 1.0
+    value: 0.5
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: 1
   cycle_life:
-    value_type: number
-    quantity: ratio
-    unit: 次
-    required: false
-    default: 6000
-    minimum: 100
-    maximum: 20000
-  unit_invest_cost:
-    value_type: number
-    quantity: currency_per_energy
-    unit: CNY/kWh
-    required: false
-    default: "$price:device_costs.battery.unit_invest_cost"
-    minimum: 0
-    stock_or_addition: addition
-  lifetime_years:
-    value_type: number
-    quantity: duration
-    unit: a
-    required: false
-    default: "$price:device_costs.battery.lifetime_years"
-    minimum: 1
-    maximum: 50
-
-ports:
-  electric:
-    carrier: electric
-    direction: bidirectional
-    quantity: power
+    value: 6000
+    unit: "1"
+    valid_range:
+      minimum: 100
+      maximum: 20000
+interfaces:
+  electricity:
+    type: bidirectional
+    carrier: electricity
     unit: kW
-    capacity_parameter: rated_power_kw
-
-data_inputs: {}
-
-states:
-  soc:
-    unit: "-"
-    initial_ref: initial_soc
-    minimum_ref: min_soc
-    maximum_ref: max_soc
-
-model_commands:
-  storage: ies.model-command.battery.storage@1.0.0
-  controllable: ies.model-command.battery.storage@1.0.0
-  optimization_variable: ies.model-command.battery.storage@1.0.0
-
-extensions:
-  ies.meta:
-    help_topic: help.modeling.battery
-    param_help:
-      capacity_kwh: help.param.battery.capacity_kwh
-      max_capacity_kwh: help.param.battery.max_capacity_kwh
-      rated_power_kw: help.param.battery.rated_power_kw
-      charge_efficiency: help.param.battery.charge_efficiency
-      discharge_efficiency: help.param.battery.discharge_efficiency
-      max_soc: help.param.battery.max_soc
-      min_soc: help.param.battery.min_soc
-      initial_soc: help.param.battery.initial_soc
-      cycle_life: help.param.battery.cycle_life
-      unit_invest_cost: help.param.battery.unit_invest_cost
-      lifetime_years: help.param.battery.lifetime_years
+    valid_range:
+      minimum: null
+      maximum: null
+equations:
+  variables:
+    soc:
+      unit: "1"
+      valid_range:
+        minimum: 0
+        maximum: 1
+      initial:
+        property_ref: initial_soc
+    charge:
+      unit: kW
+      valid_range:
+        minimum: 0
+        maximum: null
+    discharge:
+      unit: kW
+      valid_range:
+        minimum: 0
+        maximum: null
+  relations:
+    - id: power_balance
+      expression: "electricity[t] = discharge[t] - charge[t]"
+    - id: charge_discharge_exclusivity
+      expression: "charge[t] * discharge[t] = 0"
+    - id: soc_update
+      expression: "soc[t] = soc[t-1] + (charge[t] * charge_efficiency - discharge[t] / discharge_efficiency) * step_duration / capacity_kwh"

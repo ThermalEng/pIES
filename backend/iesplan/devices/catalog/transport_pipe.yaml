@@ -1,66 +1,34 @@
-# 传输管道(机理模型、有状态; 延迟出流 + 损耗)
 schema: ies.device-model
-schema_version: "1.0.0"
-
+schema_version: "2.0.0"
 device:
   id: ies.device.transport_pipe
-  version: "1.0.0"
   names:
     zh-CN: 传输管道
     en-US: Transport Pipeline
-  model_method: mechanism
-  stateful: true
-  fidelity: medium
-  energy_carriers: [heat]
-  capabilities: [transport, stateful, dual_direction]
-
-parameters:
-  delay_steps:
-    value_type: number
-    quantity: ratio
-    unit: step
-    required: false
-    default: 1
-    minimum: 1
-    maximum: 100
+properties:
   loss_rate:
-    value_type: number
-    quantity: ratio
-    unit: "-"
-    required: false
-    default: 0
-    minimum: 0
-    maximum: 0.5
-
-ports:
+    value: 0.02
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: 0.5
+interfaces:
   heat_in:
+    type: in
     carrier: heat
-    direction: in
-    quantity: power
     unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
   heat_out:
+    type: out
     carrier: heat
-    direction: out
-    quantity: power
     unit: kW
-
-data_inputs: {}
-
-states:
-  delay_buffer:
-    unit: step
-    initial_ref: delay_steps
-    minimum_ref: delay_steps
-    maximum_ref: delay_steps
-
-model_commands:
-  transport: ies.model-command.pipeline.transport@1.0.0
-  stateful: ies.model-command.pipeline.transport@1.0.0
-  dual_direction: ies.model-command.pipeline.transport@1.0.0
-
-extensions:
-  ies.meta:
-    help_topic: help.modeling.pipeline
-    param_help:
-      delay_steps: help.param.pipeline.delay_steps
-      loss_rate: help.param.pipeline.loss_rate
+    valid_range:
+      minimum: 0
+      maximum: null
+equations:
+  variables: {}
+  relations:
+    - id: loss
+      expression: "heat_out[t] = heat_in[t] * (1 - loss_rate)"

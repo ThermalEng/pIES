@@ -1,110 +1,46 @@
-# 燃气锅炉(机理模型、无状态; 燃料→热量转换)
 schema: ies.device-model
-schema_version: "1.0.0"
-
+schema_version: "2.0.0"
 device:
   id: ies.device.gas_boiler
-  version: "1.2.0"
   names:
     zh-CN: 燃气锅炉
     en-US: Gas Boiler
-  model_method: mechanism
-  stateful: false
-  fidelity: medium
-  energy_carriers: [gas, heat]
-  capabilities: [thermal_generation, controllable, optimization_variable]
-
-parameters:
+properties:
   rated_heat_kw:
-    value_type: number
-    quantity: power
+    value: 500
     unit: kW
-    required: false
-    default: 0
-    minimum: 0
-    maximum: 1000000
-    optimizable: true
-    stock_or_addition: addition
-  max_heat_kw:
-    value_type: number
-    quantity: power
-    unit: kW
-    required: false
-    default: 1000
-    minimum: 0
-    maximum: 1000000
-    stock_or_addition: addition
+    valid_range:
+      minimum: 0
+      maximum: 1000000
   thermal_efficiency:
-    value_type: number
-    quantity: ratio
-    unit: "-"
-    required: false
-    default: 0.9
-    minimum: 0.5
-    maximum: 1.0
-  gas_price:
-    value_type: number
-    quantity: currency_per_volume
-    unit: CNY/m³
-    required: false
-    default: 3.2
-    minimum: 0
-  lhv_kj_per_m3:
-    value_type: number
-    quantity: energy_per_volume
-    unit: kJ/m³
-    required: false
-    default: 35900
-    minimum: 10000
-    maximum: 60000
-  unit_invest_cost:
-    value_type: number
-    quantity: currency_per_power
-    unit: CNY/kW
-    required: false
-    default: "$price:device_costs.gas_boiler.unit_invest_cost"
-    minimum: 0
-    stock_or_addition: addition
-  lifetime_years:
-    value_type: number
-    quantity: duration
-    unit: a
-    required: false
-    default: "$price:device_costs.gas_boiler.lifetime_years"
-    minimum: 1
-    maximum: 50
-
-ports:
-  gas:
+    value: 0.9
+    unit: "1"
+    valid_range:
+      minimum: 0.5
+      maximum: 1
+  lhv_kwh_per_m3:
+    value: 9.97
+    unit: kWh/m3
+    valid_range:
+      minimum: 5
+      maximum: 20
+interfaces:
+  gas_in:
+    type: in
     carrier: gas
-    direction: bidirectional
-    quantity: power
-    unit: kW
-    capacity_parameter: rated_heat_kw
+    unit: m3/h
+    valid_range:
+      minimum: 0
+      maximum: null
   heat_out:
+    type: out
     carrier: heat
-    direction: out
-    quantity: power
     unit: kW
-    capacity_parameter: rated_heat_kw
-
-data_inputs: {}
-
-states: {}
-
-model_commands:
-  thermal_generation: ies.model-command.boiler.generation@1.0.0
-  controllable: ies.model-command.boiler.generation@1.0.0
-  optimization_variable: ies.model-command.boiler.generation@1.0.0
-
-extensions:
-  ies.meta:
-    help_topic: help.modeling.boiler
-    param_help:
-      rated_heat_kw: help.param.boiler.rated_heat_kw
-      max_heat_kw: help.param.boiler.max_heat_kw
-      thermal_efficiency: help.param.boiler.thermal_efficiency
-      gas_price: help.param.boiler.gas_price
-      lhv_kj_per_m3: help.param.boiler.lhv_kj_per_m3
-      unit_invest_cost: help.param.boiler.unit_invest_cost
-      lifetime_years: help.param.boiler.lifetime_years
+    valid_range:
+      minimum: 0
+      maximum: null
+equations:
+  variables: {}
+  relations:
+    - id: heat_generation
+      expression: "heat_out[t] = gas_in[t] * lhv_kwh_per_m3 * thermal_efficiency"

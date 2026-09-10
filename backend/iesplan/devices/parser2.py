@@ -141,36 +141,18 @@ def _check_range_bounds(minimum: object, maximum: object, file: str, field: str)
 
 
 def _check_interface_source(iface_id: str, type_: str, source: object, file: str) -> None:
-    """interface type 与 source 组合规则（宪法 §4.2）。"""
-    if type_ not in INTERFACE_TYPES:
-        raise ParseError(f"interfaces.{iface_id}.type 必须是 {INTERFACE_TYPES} 之一")
+    """interface type 与 source 组合规则（决策台账 §3/5：设备模型不得预设来源，绑定在装配）。
+
+    2.0 设备模型（catalog/模板实例化后）禁止携带任何 ``source`` 字段；
+    序列来源 ``constant/data_repeat/data_predict`` 仅在装配 ``predefined_interfaces`` 绑定中声明。
+    此处任何非空 source 均视为违约，统一拒绝。
+    """
     if source is None:
-        if type_ in SOURCE_TYPES:
-            raise ParseError(f"interfaces.{iface_id} 类型为 {type_!r} 必须声明 source")
         return
-    if type_ not in SOURCE_TYPES:
-        raise ParseError(
-            f"interfaces.{iface_id} 类型为 {type_!r} 禁止声明 source "
-            f"(仅 {SOURCE_TYPES} 可携带预定义来源)"
-        )
-    if not isinstance(source, Mapping):
-        raise ParseError(f"interfaces.{iface_id}.source 必须是 mapping")
-    mode = source.get("mode")
-    if mode not in SOURCE_MODES:
-        raise ParseError(
-            f"interfaces.{iface_id}.source.mode 必须是 {SOURCE_MODES} 之一"
-        )
-    if mode == "constant":
-        if "value" not in source:
-            raise ParseError(f"interfaces.{iface_id}.source constant 必须声明 value")
-        if not _is_finite_number(source.get("value")):
-            raise ParseError(f"interfaces.{iface_id}.source.value 必须是有限数值")
-    else:
-        data_ref = source.get("data_ref")
-        if not isinstance(data_ref, str) or not data_ref.strip():
-            raise ParseError(f"interfaces.{iface_id}.source {mode} 必须声明 data_ref")
-        if "value" in source:
-            raise ParseError(f"interfaces.{iface_id}.source {mode} 禁止声明 value")
+    # 设备模型阶段禁止任何 source（含 predefined / blind / in/out/bidirectional）
+    raise ParseError(
+        f"interfaces.{iface_id} 禁止声明 source（设备模型不得预设序列来源，绑定在装配中声明）"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -516,20 +498,17 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
             diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.valid_range"))
             continue
         source_raw = iraw.get("source")
+        if source_raw is not None:
+            diags.append(
+                _diag(
+                    "SYS-CFG-001",
+                    f"interfaces.{iid} 禁止声明 source（设备模型不得预设序列来源，绑定在装配中声明）",
+                    file=file,
+                    field=f"{fld}.source",
+                )
+            )
+            continue
         source: SourceSpec | None = None
-        if type_ in SOURCE_TYPES and source_raw is None:
-            diags.append(_diag("SYS-CFG-001", f"interfaces.{iid} 类型为 {type_!r} 必须声明 source",
-                               file=file, field=f"{fld}.source"))
-        elif source_raw is not None:
-            try:
-                _check_interface_source(iid, type_, source_raw, file)
-                mode = source_raw.get("mode")
-                if mode == "constant":
-                    source = SourceSpec(mode=mode, value=source_raw.get("value"))
-                else:
-                    source = SourceSpec(mode=mode, data_ref=source_raw.get("data_ref"))
-            except ParseError as exc:
-                diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.source"))
         interfaces[iid] = InterfaceSpec(
             id=iid, type=type_, carrier=carrier, unit=unit.strip(), valid_range=vrange, source=source
         )
