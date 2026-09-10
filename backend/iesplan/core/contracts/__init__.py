@@ -14,6 +14,7 @@ from iesplan.core.contracts.baseline import (
     DEFAULT_SCENARIO_MODE,
     RESOLUTION_VALUES,
     SCENARIO_MODES,
+    TIMELINE_STEP_DURATION_VAR,
     ProjectBaseline,
     ProjectBaselineError,
 )
@@ -31,6 +32,7 @@ from iesplan.core.contracts.planning_config import (
 )
 
 __all__ = [
+    "TIMELINE_STEP_DURATION_VAR",
     "BASELINE_CANON_ALGORITHM_ID",
     "BASELINE_CANON_ALGORITHM_VERSION",
     "CONSTRAINT_TYPES",

@@ -33,6 +33,7 @@ from iesplan.core.diagnostics import (
     Diagnostic,
     make_diag,
 )
+from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 from iesplan.core.equation_grammar import (
     EquationSyntaxError,
     check_cycles,
@@ -330,7 +331,7 @@ def ast_to_dict(node: object | None) -> Any:
 
 @dataclass(frozen=True, slots=True)
 class MathVariable:
-    """命名数学量: property 常量(携带技术值)或 equations 内部变量。"""
+    """命名数学量: property 常量或 equations 内部变量。"""
 
     name: str
     kind: str  # property | variable
@@ -338,18 +339,19 @@ class MathVariable:
     valid_range: tuple[float | None, float | None] | None = None
     value: float | bool | str | None = None  # property 常量值;变量为 None
     is_state: bool = False
+    # 状态变量首步取值来源；后续 step 使用上一 step 的状态。
+    initial_property_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class InterfaceFlow:
-    """接口流: 五类接口的序列语义、载体、业务单位与值域。"""
+    """接口流: 五类接口的序列语义、载体、业务单位与值域（设备模型无 source，绑定在实例）。"""
 
     id: str
     type: str  # in/out/bidirectional/predefined/blind
     carrier: str
     unit: str
     valid_range: tuple[float | None, float | None]
-    source_mode: str | None = None  # predefined: constant/data_repeat/data_predict
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +432,7 @@ def contribution_to_dict(contribution: DeviceMathContribution) -> dict[str, Any]
                 ),
                 **({"value": v.value} if v.kind == "property" and v.value is not None else {}),
                 "is_state": v.is_state,
+                **({"initial_property_ref": v.initial_property_ref} if v.is_state and v.initial_property_ref is not None else {}),
             }
             for name, v in sorted(contribution.variables.items())
         },
@@ -439,7 +442,6 @@ def contribution_to_dict(contribution: DeviceMathContribution) -> dict[str, Any]
                 "carrier": flow.carrier,
                 "unit": flow.unit,
                 "valid_range": {"minimum": flow.valid_range[0], "maximum": flow.valid_range[1]},
-                **({"source_mode": flow.source_mode} if flow.source_mode is not None else {}),
             }
             for iid, flow in sorted(contribution.interfaces.items())
         },
@@ -496,6 +498,7 @@ def build_math_contribution(
 
     # ---- 引用表: name → 类别 ----
     kinds: dict[str, str] = {pid: "property" for pid in properties}
+    kinds[TIMELINE_STEP_DURATION_VAR] = "timeline"  # 公开时间轴变量
     iface_type: dict[str, str] = {iid: iface.type for iid, iface in interfaces.items()}
     for iid in interfaces:
         kinds[iid] = "interface"
@@ -563,6 +566,13 @@ def build_math_contribution(
             diags.append(_diag(
                 MOD_EQ_OUTPUT_CONFLICT,
                 f"relation {rid!r} 左侧是常量 property {output!r}(只能定义 interface 或内部变量)",
+                relation_id=rid, name=output,
+            ))
+            continue
+        if out_kind == "timeline":
+            diags.append(_diag(
+                MOD_EQ_OUTPUT_CONFLICT,
+                f"relation {rid!r} 左侧不能是时间轴公开变量 {output!r}",
                 relation_id=rid, name=output,
             ))
             continue
@@ -652,12 +662,14 @@ def build_math_contribution(
             name=pid, kind="property", unit=p.unit, valid_range=p.valid_range, value=p.value
         )
     for vid, v in sorted(eq_vars.items()):
+        is_state = v.initial_property_ref is not None or state_refs.get(vid, False)
         variables[vid] = MathVariable(
             name=vid,
             kind="variable",
             unit=v.unit,
             valid_range=v.valid_range,
-            is_state=v.initial_property_ref is not None or state_refs.get(vid, False),
+            is_state=is_state,
+            initial_property_ref=v.initial_property_ref if is_state else None,
         )
     interfaces_out: dict[str, InterfaceFlow] = {
         iid: InterfaceFlow(
@@ -666,7 +678,6 @@ def build_math_contribution(
             carrier=iface.carrier,
             unit=iface.unit,
             valid_range=iface.valid_range,
-            source_mode=iface.source.mode if iface.source is not None else None,
         )
         for iid, iface in sorted(interfaces.items())
     }

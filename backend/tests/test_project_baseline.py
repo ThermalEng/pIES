@@ -109,7 +109,21 @@ def _owner_headers(client: TestClient, db_session: Session) -> dict:
     ],
 )
 def test_point_count_table(resolution: str, leap_year: bool, expected_points: int) -> None:
-    assert ProjectBaseline(resolution=resolution, leap_year=leap_year).point_count == expected_points
+    baseline = ProjectBaseline(resolution=resolution, leap_year=leap_year)
+    assert baseline.point_count == expected_points
+    assert baseline.initial_step == 0
+    assert baseline.step_count == expected_points
+
+
+@pytest.mark.parametrize(
+    ("resolution", "expected_duration"),
+    [("15min", 0.25), ("30min", 0.5), ("1h", 1.0)],
+)
+def test_step_duration_is_derived_from_resolution(
+    resolution: str, expected_duration: float
+) -> None:
+    baseline = ProjectBaseline(resolution=resolution, leap_year=False)
+    assert baseline.step_duration == expected_duration
 
 
 def test_invalid_resolution_rejected() -> None:

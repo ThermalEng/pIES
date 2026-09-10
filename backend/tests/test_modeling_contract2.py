@@ -156,7 +156,6 @@ class TestValidContribution:
         assert c.interfaces["heat_out"].type == "out"
         assert c.interfaces["heat_out"].carrier == "heat"
         assert c.interfaces["unused_terminal"].type == "blind"
-        assert c.interfaces["unused_terminal"].source_mode is None
         # 关系: 版本化公共 AST(无 eval/函数路径)
         assert len(c.relations) == 1
         rel = c.relations[0]
