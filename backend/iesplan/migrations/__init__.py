@@ -911,6 +911,35 @@ def _migrate_0007(conn: sa.Connection) -> None:
     _drop_column("planning_configs", "finance_content_sha256")
 
 
+def _migrate_0008(conn: sa.Connection) -> None:
+    """文本文件去 sha256 化(装配二件套 1.11.0)。
+
+    删除 calc_snapshots 中为文本装配引入的 SHA-256 列与对应 CHECK 约束/
+    唯一约束。文本文件只校验字头(schema/schema_version + device.id)，不做内容摘要。
+    二进制对象 hash 仍由 objects 表统一管理，不在此列。
+    全新库经 ORM create_all 已无这些列，本迁移幂等 no-op；存量库按需删列/删约束。
+    """
+    def _drop_column(table: str, column: str) -> None:
+        if conn.dialect.name == "postgresql":
+            conn.execute(sa_text(f'ALTER TABLE {table} DROP COLUMN IF EXISTS {column}'))
+        else:
+            try:
+                conn.execute(sa_text(f'ALTER TABLE {table} DROP COLUMN {column}'))
+            except Exception:
+                pass
+
+    def _drop_constraint(table: str, constraint: str) -> None:
+        if conn.dialect.name == "postgresql":
+            conn.execute(sa_text(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {constraint}'))
+        else:
+            pass  # SQLite 约束随列删除
+
+    _drop_constraint("calc_snapshots", "ck_calc_snapshots_content_hash")
+    _drop_constraint("calc_snapshots", "ck_calc_snapshots_assembly_sha256")
+    _drop_column("calc_snapshots", "content_hash")
+    _drop_column("calc_snapshots", "assembly_sha256")
+
+
 #: 有序迁移清单(version, name, upgrade)
 MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
@@ -920,6 +949,7 @@ MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0005_finance_planning_configs", "公共财务与规划配置不可变 revision 表", _migrate_0005),
     ("0006_finance_triplet_persistence", "财务三件套持久化替换旧单体 FinanceConfig", _migrate_0006),
     ("0007_remove_text_sha256", "文本文件去 SHA-256 化（财务三件套字头校验）", _migrate_0007),
+    ("0008_remove_assembly_text_sha256", "文本文件去 SHA-256 化（装配二件套字头校验）", _migrate_0008),
 ]
 
 MIGRATION_VERSIONS: tuple[str, ...] = tuple(m[0] for m in MIGRATIONS)
