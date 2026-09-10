@@ -294,9 +294,10 @@ def assemble_snapshot(
     tolerances = calc_config.get("tolerances") or {}
     extensions = content.get("extensions") or {}
 
-    # 0.7.0 统一生产闸门：先签发规范文本/SHA-256/回执三件套，失败不创建
+    # 0.7.0 统一生产闸门：先签发规范文本/回执二件套，失败不创建
     # 快照或任务。回执（含 schema、算法、依赖锁）进入快照身份，避免同一项目
-    # 输入在校验契约升级后错误复用旧快照。
+    # 输入在校验契约升级后错误复用旧快照；快照去重不再使用 assembly_sha256，
+    # 文本仅校验字头（header-only）。
     artifact = _assembly_gate(db, project_id, content, task_type)
     receipt = artifact.receipt.to_dict()
     hash_input = {
@@ -307,7 +308,6 @@ def assemble_snapshot(
         "extension_versions": extensions,
         "random_seed": random_seed,
         "tolerances": tolerances,
-        "assembly_sha256": artifact.assembly_sha256,
         "assembly_receipt": receipt,
     }
     content_hash = sha256_hex(canonical_json(hash_input).encode("utf-8"))
@@ -328,7 +328,7 @@ def assemble_snapshot(
         tolerances=tolerances,
         content_hash=content_hash,
         canonical_assembly_text=artifact.canonical_text,
-        assembly_sha256=artifact.assembly_sha256,
+        assembly_sha256=None,
         assembly_receipt=receipt,
         created_by=actor.id,
     )

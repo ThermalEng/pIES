@@ -167,11 +167,9 @@ def setup_environment(
     snapshot = None
     if task_type in COMPUTE_TYPES:
         canonical_text = '{"schema":"ies.assembly","schema_version":"1.0.0"}\n'
-        assembly_digest = sha256(canonical_text.encode("utf-8")).hexdigest()
         artifact = ValidatedAssemblyArtifact(
             canonical_text=canonical_text,
-            assembly_sha256=assembly_digest,
-            receipt=ValidationReceipt(assembly_sha256=assembly_digest),
+            receipt=ValidationReceipt(),
         ).verify_or_raise()
         snapshot = CalcSnapshot(
             project_version_id=version.id,
@@ -184,7 +182,7 @@ def setup_environment(
             tolerances={},
             content_hash=sha256(f"snapshot-{task_type}".encode()).hexdigest(),
             canonical_assembly_text=artifact.canonical_text,
-            assembly_sha256=artifact.assembly_sha256,
+            assembly_sha256=None,
             assembly_receipt=artifact.receipt.to_dict(),
             created_by=user.id,
         )

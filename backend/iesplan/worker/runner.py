@@ -117,23 +117,21 @@ def load_inputs(db: Session, snapshot: CalcSnapshot) -> tuple[dict, dict, TimeAx
 
 
 def _verify_snapshot_assembly(snapshot: CalcSnapshot) -> ValidatedAssemblyArtifact:
-    """恢复并校验快照中的规范装配三件套；旧/畸形快照禁止进入计算。"""
+    """恢复并校验快照中的规范装配二件套；旧/畸形快照禁止进入计算（文本仅校验字头）。"""
     text = snapshot.canonical_assembly_text
-    digest = snapshot.assembly_sha256
     receipt = snapshot.assembly_receipt
     if (
         not isinstance(text, str)
         or not text
-        or not isinstance(digest, str)
         or not isinstance(receipt, dict)
     ):
         raise SnapshotInputError(
-            "计算快照缺少规范装配产物三件套",
+            "计算快照缺少规范装配产物二件套",
             params={"calc_snapshot_id": snapshot.id, "reason": "assembly_artifact_missing"},
             location={"object_type": "calc_snapshot", "object_id": snapshot.id},
         )
     try:
-        return ValidatedAssemblyArtifact.from_persisted(text, digest, receipt)
+        return ValidatedAssemblyArtifact.from_persisted(text, receipt)
     except (AssemblyValidationError, TypeError, ValueError) as exc:
         raise SnapshotInputError(
             "计算快照规范装配产物不一致",

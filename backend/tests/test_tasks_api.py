@@ -108,7 +108,17 @@ def _h(client: TestClient, user) -> dict[str, str]:
 
 def _create_project(client: TestClient, user, name: str) -> int:
     """创建项目并返回项目 id。"""
-    resp = client.post("/api/projects", json={"name": name}, headers=_h(client, user))
+    resp = client.post(
+        "/api/projects",
+        json={
+            "name": name,
+            "currency": "CNY",
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
+        headers=_h(client, user),
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()["project"]["id"]
 
@@ -263,17 +273,16 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     assert len(persisted.content_hash) == 64
     assert persisted.assembly_text is None
     assert persisted.canonical_assembly_text
-    assert persisted.assembly_sha256 == sha256(
-        persisted.canonical_assembly_text.encode("utf-8")
-    ).hexdigest()
+    # 文本仅校验字头，快照去重不再使用 assembly_sha256（header-only）
+    assert persisted.assembly_sha256 is None
     assert isinstance(persisted.assembly_receipt, dict)
     assert "issued_at" not in persisted.assembly_receipt
+    assert "assembly_sha256" not in persisted.assembly_receipt
     artifact = ValidatedAssemblyArtifact.from_persisted(
         persisted.canonical_assembly_text,
-        persisted.assembly_sha256,
         persisted.assembly_receipt,
     )
-    assert artifact.receipt.assembly_sha256 == persisted.assembly_sha256
+    assert artifact.verify()
 
     # 6) 列表可见 2 个任务(步骤 2/3 均为既有任务复用; 含摘要与排队位次)
     resp = client.get(f"/api/projects/{pid}/tasks", headers=_h(client, owner))

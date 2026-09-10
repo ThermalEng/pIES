@@ -297,11 +297,10 @@ def _validate_migrated(
         diags.append(d)
     if result.artifact is None:
         return _fail_result(diags, transformations, doc=doc)
-    # 新 doc 的 SHA 由校验器产出(回执一致性)
-    new_sha = result.artifact.assembly_sha256
+    # 迁移后文本仅校验字头，不再计算 SHA
     receipt = _make_receipt(
         text_bytes=None,
-        new_sha=new_sha,
+        new_sha="",
         transformations=transformations,
         diagnostics=diags,
         ok=True,
