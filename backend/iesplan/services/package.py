@@ -567,7 +567,6 @@ def _build_package_zip(
                     "canonical_assembly_text": (
                         snapshot.canonical_assembly_text if snapshot else None
                     ),
-                    "assembly_sha256": snapshot.assembly_sha256 if snapshot else None,
                     "assembly_receipt": snapshot.assembly_receipt if snapshot else None,
                 },
                 "assessments": [

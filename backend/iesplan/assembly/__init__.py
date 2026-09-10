@@ -17,7 +17,6 @@
 
 from iesplan.assembly.builder import build_assembly, build_assembly_text, dumps_assembly
 from iesplan.assembly.canonicalizer import (
-    assembly_sha256,
     canonical_algorithm_ref,
     canonicalize_assembly_doc,
 )
@@ -100,7 +99,6 @@ __all__ = [
     "ValidatedAssemblyArtifact",
     "AssemblyValidationError",
     "canonicalize_assembly_doc",
-    "assembly_sha256",
     "canonical_algorithm_ref",
     "parse_assembly_doc",
     "ParseDocResult",
