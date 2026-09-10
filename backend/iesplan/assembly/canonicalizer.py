@@ -7,9 +7,9 @@
   relative_file 的输入确定性拒绝,不允许未解析资源进入规范字节;
 - 数值使用唯一有限十进制表示(整数与整值浮点同语义 → 同文本,不依赖 locale);
 - 注释/显示空白/YAML 表示差异不参与语义摘要(解析期已丢失,字节级稳定);
-- 规范文本为紧凑 JSON + LF,UTF-8;对规范字节计算 SHA-256。
+- 规范文本为紧凑 JSON + LF,UTF-8。
 
-相同语义必须得到相同规范文本与摘要。规范化算法 ID/版本由 contracts.py 的
+相同语义必须得到相同规范文本。规范化算法 ID/版本由 contracts.py 的
 CANON_ALGORITHM_ID/CANON_ALGORITHM_VERSION 声明并写入校验回执;算法语义变化
 必须升版本并保留历史解释能力。
 
@@ -18,7 +18,6 @@ CANON_ALGORITHM_ID/CANON_ALGORITHM_VERSION 声明并写入校验回执;算法语
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -241,8 +240,8 @@ def _normalize_value(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def canonicalize_assembly_doc(doc: Mapping) -> tuple[str, str]:
-    """唯一规范化:已解析文档 → (规范文本, SHA-256)。
+def canonicalize_assembly_doc(doc: Mapping) -> str:
+    """唯一规范化:已解析文档 → 规范文本。
 
     - doc 必须是已完成结构/模型/数据/资源解析的 ies.assembly 1.0.0 文档
       (resources.datasets.source 均为 object 形态;未知核心字段已在结构阶段拒绝);
@@ -259,13 +258,7 @@ def canonicalize_assembly_doc(doc: Mapping) -> tuple[str, str]:
         allow_nan=False,
     )
     canonical_text = canonical + "\n"
-    digest = hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
-    return canonical_text, digest
-
-
-def assembly_sha256(canonical_text: str) -> str:
-    """规范文本 → SHA-256(供校验回执与产物一致性核对)。"""
-    return hashlib.sha256(canonical_text.encode("utf-8")).hexdigest()
+    return canonical_text
 
 
 def canonical_algorithm_ref() -> str:
@@ -280,6 +273,5 @@ __all__ = [
     "format_utc_z",
     "format_number",
     "canonicalize_assembly_doc",
-    "assembly_sha256",
     "canonical_algorithm_ref",
 ]
