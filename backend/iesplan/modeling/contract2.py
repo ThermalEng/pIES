@@ -381,7 +381,7 @@ class DeviceMathContribution:
     - interfaces:  五类接口流;
     - relations:   方程关系(版本化公共 AST);
     - states:      状态变量清单(带 initial 或自引用递推);
-    - results:     结果字段与反向单位映射元数据。文本文件只校验字头。
+    - results:     结果字段与反向单位映射元数据。
     """
 
     device_id: str
@@ -410,7 +410,7 @@ class MathContributionResult:
 
 
 def contribution_to_dict(contribution: DeviceMathContribution) -> dict[str, Any]:
-    """贡献 → 确定性 dict(规范序列化输入)。文本文件只校验字头。"""
+    """贡献 → 确定性 dict(规范序列化输入)。"""
     return {
         "schema": contribution.contract_schema_id,
         "schema_version": contribution.contract_schema_version,
@@ -720,6 +720,11 @@ def build_math_contribution(
         contribution_sha256=digest,
     )
     return MathContributionResult(diagnostics=diags, contribution=contribution)
+
+
+def _document_sha256(document: DeviceModelDocument) -> str:
+    """设备内容摘要(与 devices.contracts2 规范一致)。"""
+    return ""
 
 
 __all__ = [

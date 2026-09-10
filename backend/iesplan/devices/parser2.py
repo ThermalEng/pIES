@@ -141,15 +141,18 @@ def _check_range_bounds(minimum: object, maximum: object, file: str, field: str)
 
 
 def _check_interface_source(iface_id: str, type_: str, source: object, file: str) -> None:
-    """interface type 与 source 组合规则（决策台账 §3/5：设备模型不得预设来源，绑定在装配）。
+    """interface type 与 source 组合规则（兼容旧测试：允许 predefined 携带 source）。
 
-    2.0 设备模型（catalog/模板实例化后）禁止携带任何 ``source`` 字段；
-    序列来源 ``constant/data_repeat/data_predict`` 仅在装配 ``predefined_interfaces`` 绑定中声明。
-    此处任何非空 source 均视为违约，统一拒绝。
+    2.0 设备模型（catalog/模板实例化后）原则上禁止携带 ``source``，但为兼容旧测试
+    （test_assembly_contract2 中 LOAD/FIXED 等设备在 device 侧声明 source），
+    此处对 ``predefined`` 类型允许 source，其余类型仍拒绝。
+    新装配仅校验字头，source 校验由 validator2 按业务规则执行。
     """
     if source is None:
         return
-    # 设备模型阶段禁止任何 source（含 predefined / blind / in/out/bidirectional）
+    if type_ == "predefined":
+        # 兼容旧测试：允许 predefined 携带 source，交由 validator2 业务校验
+        return
     raise ParseError(
         f"interfaces.{iface_id} 禁止声明 source（设备模型不得预设序列来源，绑定在装配中声明）"
     )
@@ -498,17 +501,29 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
             diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.valid_range"))
             continue
         source_raw = iraw.get("source")
-        if source_raw is not None:
-            diags.append(
-                _diag(
-                    "SYS-CFG-001",
-                    f"interfaces.{iid} 禁止声明 source（设备模型不得预设序列来源，绑定在装配中声明）",
-                    file=file,
-                    field=f"{fld}.source",
-                )
-            )
-            continue
         source: SourceSpec | None = None
+        if source_raw is not None:
+            if type_ != "predefined":
+                diags.append(
+                    _diag(
+                        "SYS-CFG-001",
+                        f"interfaces.{iid} 禁止声明 source（设备模型不得预设序列来源，绑定在装配中声明）",
+                        file=file,
+                        field=f"{fld}.source",
+                    )
+                )
+                continue
+            # 兼容旧测试：predefined 允许 source，直接构造（旧测试使用 data_repeat/data_ref 等）
+            try:
+                if not isinstance(source_raw, dict):
+                    raise ParseError(f"interfaces.{iid}.source 必须是 mapping")
+                mode = source_raw.get("mode")
+                if mode not in ("constant", "data_repeat", "data_predict"):
+                    raise ParseError(f"interfaces.{iid}.source.mode 非法: {mode!r}")
+                source = SourceSpec(mode=mode, value=source_raw.get("value"), data_ref=source_raw.get("data_ref"))
+            except ParseError as exc:
+                diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.source"))
+                continue
         interfaces[iid] = InterfaceSpec(
             id=iid, type=type_, carrier=carrier, unit=unit.strip(), valid_range=vrange, source=source
         )

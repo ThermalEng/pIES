@@ -268,9 +268,8 @@ def canonical_bytes(document: DeviceModelDocument) -> bytes:
 
 
 def content_sha256(document: DeviceModelDocument) -> str:
-    """兼容旧接口：设备文档内容的 SHA-256（header-only 过渡期，由规范字节计算）。"""
+    """兼容存根：返回设备文档规范字节的 SHA（文本仅校验字头，保留此函数以兼容旧测试）。"""
     import hashlib
-
     return hashlib.sha256(canonical_bytes(document)).hexdigest()
 
 
