@@ -27,7 +27,6 @@
 | 内置或外部 provider | 一组 `ies.device-model` YAML 或等价候选描述 | provider ID、版本和依赖明确，设备内容有规范摘要 |
 | 单位规范 | property 与 interface 单位 ID | 单位存在且量纲正确 |
 | 方程契约 | relations、内部变量和时间索引 | 标识符、单位和值域可完整校验 |
-| 序列数据 | `predefined` interface 所引用的数据版本 | step、单位、分辨率和适用范围明确 |
 
 无论 provider 如何发现文件，进入目录前都必须符合相同设备模型 schema；目录路径、远端服务和包入口只是实现选择，不属于其他模块可依赖的输入方式。时序样例使用[设备数据 CSV](../formats/device-data-csv.md)。
 
@@ -42,7 +41,7 @@
 - 类型 ID 稳定，规范内容摘要唯一；
 - property、interface、内部变量和 relation ID 在该内容内唯一；
 - 所有常量、单位、有效区间和接口类型可以解释；
-- 技术方程和预定义数据需求结构完整；
+- 技术方程和预定义输入槽结构完整；
 - 不含目录路径、解析器对象或前端组件信息。
 
 候选校验失败时输出有稳定顺序的 `Diagnostic` 集合，至少可表达字段路径、消息键、expected/actual，并在解析器可知时携带 YAML 行列。校验器应聚合同一阶段互不依赖的问题；结构已经不足以安全解释后续字段时才停止后续阶段。
@@ -56,7 +55,7 @@
     ↓
 读取候选设备描述
     ↓
-逐项校验 ID / 内容摘要 / properties / interfaces / 单位 / equations / 数据引用
+逐项校验 ID / properties / interfaces / 单位 / equations
     ↓
 校验集合内重复与依赖
     ↓
@@ -70,7 +69,7 @@
 1. 按设备模型 YAML 写出可独立校验的设备说明，选择稳定、带命名空间的设备类型 ID；
 2. 定义不随时间变化的纯技术 properties、单位和值域，不写价格或成本；
 3. 定义每个序列 interface 的 carrier、单位、值域和 `in/out/bidirectional/predefined/blind` 类型；缺省只允许成为 `blind`；
-4. 为 `predefined` 选择 `constant/data_repeat/data_predict`，为内部序列变量和跨步关系写出 equations；
+4. 在设备定义中声明 `predefined` 输入槽；每个项目实例必须在装配中为其选择并声明 `constant/data_repeat/data_predict` 来源，序列只在计算阶段物化；为内部序列变量和跨步关系写出 equations；
 5. 校验受限方程，不写函数/包/模块路径、任意代码或计算精度；
 6. 提供合法/非法 YAML、最小/典型数据 CSV 和 provider 契约测试；
 7. 用目录 API、GUI schema、装配校验验证同一描述贯通，而不是修改消费者的设备类型表。
@@ -82,8 +81,7 @@
 | 设备 ID 或内容身份冲突 | provider 注册失败，不发布候选集合 |
 | 单位、值域或接口类型非法 | 给出精确配置诊断，实例不 ready |
 | 方程引用、单位或时间关系非法 | 技术模型校验失败，不发布 descriptor |
-| 字段类型、interface type 或 source 组合非法 | 返回完整候选诊断，不保存项目模型 |
-| 配套周期/预测文件非法或缺失 | 返回数据诊断，模型与临时文件均不正式落盘 |
+| 字段类型、interface type 非法，或设备模型携带来源字段 | 返回完整候选诊断，不保存项目模型 |
 | 请求未知设备类型 | 明确“未注册”错误，不返回默认设备 |
 | provider 读取失败 | 保留失败原因，不回退静态内置表 |
 

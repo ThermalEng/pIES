@@ -17,7 +17,7 @@ solver-bundle/
 └── output/
 ```
 
-`output/` 在生成时为空。求解器只能写入 manifest 声明的相对输出路径。Bundle 可以存为内容寻址目录或不可变归档，但解包后必须保持相同规范路径和摘要。
+`output/` 在生成时为空。求解器只能写入 manifest 声明的相对输出路径。Bundle 可以存为内容寻址目录或不可变归档；解包后保持相同规范路径，摘要只作为发布内容身份随 Bundle 传递，内部运行链不重新计算或比对。
 
 ## `bundle.yaml` 示例
 
@@ -69,7 +69,7 @@ extensions: {}
 
 一个 GeneratorProvider 接收 `ValidatedAssemblyArtifact`、已校验的 `CalculationConfig` 和已固定的资源内容，负责：
 
-1. 验证装配摘要与校验回执，并验证计算配置中的 generator、solver、精度、算法选项、种子和输出请求能力匹配；
+1. 直接消费已签发的装配产物，并验证计算配置中的 generator、solver、精度、算法选项、种子和输出请求能力匹配；内部交接不重算或比对装配 hash；
 2. 消费已规范化的设备方程贡献，并结合装配中的规划配置与 `EffectiveFinanceConfig` 建立变量、目标、约束和索引；
 3. 在唯一边界把业务单位转换为求解器内部单位；
 4. 生成 MPS、LP、JSON 或特定求解器需要的输入文件；
@@ -98,7 +98,7 @@ extensions: {}
 
 SolverRuntime 是求解器无关的受控执行层，只负责：
 
-1. 校验 Bundle schema、整体摘要、输入摘要和规范路径；
+1. 校验 Bundle schema、清单结构和规范路径；内部交接不重算或比对 Bundle 及输入文件 hash；
 2. 确认 executor、executable、参数、环境和资源策略在部署 allowlist 内；
 3. 建立隔离工作目录，以最小权限运行一个命令；
 4. 执行超时、取消、CPU、内存、文件和网络限制；

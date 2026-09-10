@@ -13,7 +13,7 @@
 模块负责：
 
 - GeneratorDescriptor、Provider protocol、能力查询和独立注册状态；
-- 核验 `ValidatedAssemblyArtifact`、依赖锁和资源摘要；
+- 消费已签发的 `ValidatedAssemblyArtifact`、依赖锁和资源引用；
 - 按规范设备方程贡献收集变量、约束、状态、接口流和索引；
 - 按规划配置形成目标、变量边界和规划约束，并从 `EffectiveFinanceConfig` 取得经济参数；价格或成本不得写回设备技术语义；
 - 将规范业务单位显式转换为求解器内部单位；
@@ -28,9 +28,9 @@
 
 | 输入 | 进入条件 |
 |---|---|
-| `ValidatedAssemblyArtifact` | schema、摘要、回执一致，零阻断诊断 |
-| 资源映射 | 每项由内容 ID 映射到只读字节；预定义接口已由当前计算阶段物化为全周期连续序列，摘要与回执一致 |
-| 方程贡献与设备内容锁 | 方程 contract、设备内容摘要和装配依赖锁一致 |
+| `ValidatedAssemblyArtifact` | 已由装配模块签发，零阻断诊断 |
+| 资源映射 | 每项由内容 ID 映射到只读字节；预定义接口已由当前计算阶段物化为全周期连续序列 |
+| 方程贡献与设备内容锁 | 来自装配产物固定的方程 contract、设备内容身份和依赖锁 |
 | `CalculationConfig` | 在计算阶段选择，包含预测算法与参数、generator、solver、精度、求解选项、收敛条件、种子和输出请求 |
 | GeneratorDescriptor | 支持装配 schema、所选计算能力和 solver，且与 `CalculationConfig` 一致 |
 
@@ -54,7 +54,7 @@
 一个生成器建议按以下纯步骤组织：
 
 ```text
-验证入口
+接收已签发输入
   ↓
 方程展开：设备实例 → 规范数学贡献
   ↓
@@ -138,7 +138,7 @@ Bundle 以规范 manifest 与全部输入文件的内容摘要作为身份，不
 | 问题 | 结果 |
 |---|---|
 | 原始或过期装配 YAML | 入口拒绝，要求新的校验产物 |
-| 资源摘要不符 | 完整性失败，不生成输入 |
+| 固定资源引用缺失 | 输入不完整，不生成 Bundle |
 | 方程 contract 或 solver 能力不匹配 | 兼容诊断，执行前阻断 |
 | 单位无法换算或出现非有限数 | 数值输入诊断，定位字段/实例 |
 | writer 中途失败 | 临时产物废弃，不发布 Bundle |

@@ -282,7 +282,7 @@ content_sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 - **对象字节摘要（bytes SHA-256）**：对落盘/存储对象文件的**完整字节**（含文件内 `content_sha256` 字段）计算，用于内容寻址（`object_id`、`ref.sha256`）与对象存储/项目包外部入口的字节完整性校验；
 - **规范内容摘要（`content_sha256`）**：移除派生摘要字段后的规范 YAML 字节摘要，用于内容身份、覆盖引用与血缘（`profile_ref`、`profile_sha256`/`overrides_sha256`/`content_sha256`）。
 
-由于文件携带自身 `content_sha256` 字段，同一文件的两个摘要通常不相等。信任流程(2.6)中，摘要作为 Profile/Effective 的精确 revision 身份与血缘字段保留，但**不在可信内部流程中对本地内容重算比对**；对象存储自身的内容寻址与项目包外部入口的逐对象字节校验仍必须执行（见「装配与项目包引用」）。
+由于文件携带自身 `content_sha256` 字段，同一文件的两个摘要通常不相等。摘要作为 Profile/Effective 的精确 revision 身份与血缘字段保留；对象存储写入或项目包外部导入时可在入口一次性确定并检查对象字节身份，进入可信内部流程后不再对本地内容重算比对。
 
 | 文档 | 摘要输入（移除派生字段后） | 语义变化 |
 |---|---|---|
@@ -309,7 +309,7 @@ profile_ref:
 | 枚举 | 适用目标 | 语义 |
 |---|---|---|
 | `scalar` | 设备 `property`（非时变标量） | 直接取实例化后的 property 值；只用于成本 driver 的年度/一次性量，不用于能源计价；时序 interface 禁止使用 |
-| `integrate_positive` | 非负功率/流率 `interface` | 每步乘 `step_hours` 积分：`e[t] = p[t] × step_hours[t]`，得到与价格序列同轴的能量序列 |
+| `integrate_positive` | 非负功率/流率 `interface` | 每步乘项目基线公开变量 `step_duration`：`e[t] = p[t] × step_duration`，得到与价格序列同轴的能量序列；其时间单位由项目 `resolution` 唯一推导 |
 | `sum_positive` | 区间累计量 `interface` | 接口序列本身即为区间累计能量/累计量序列，直接作为 `e[t]`，不再二次积分 |
 
 时序 `interface` 必须写 `aggregation`；`property` 只能对应 `scalar`，装配映射 `property` 时 `aggregation` 字段可省略（语义固定为 `scalar`）。本契约不接受模糊的双向净值或绝对值：购/售分别绑定方向明确的接口（如 `electricity_in`/`electricity_out`），能量/流量序列在聚合前必须非负并阻断负值，不自动取绝对值；价格本身的零/负值与能量非负是两个独立约束，不得混淆。
@@ -334,6 +334,6 @@ period_energy_sale(b)     = −raw_charge(b)         # direction: sale
 ## 装配与项目包引用
 
 - 装配 YAML 的 `finance` 节使用**精确引用**指向 Effective YAML：`ref`（`kind: object` 或包内 `relative_file`）携带对象 ID 与**对象字节摘要**；血缘字段（`profile_id`/`profile_sha256`/`overrides_sha256`/`content_sha256`）携带**规范内容摘要**。装配不在内内联一份完整配置；`ValidatedAssemblyArtifact` 固定引用与两类摘要。
-- 验证顺序：读取被引用对象 → 对完整字节重算 SHA-256，必须等于 `ref.sha256`（对象完整性，属对象存储/外部入口校验）；血缘字段作为精确 revision 身份随快照固定，不在可信内部流程中对本地内容重算比对。
+- 对象存储写入或项目包外部导入时，在边界一次性确定并检查 `ref.sha256`；内部读取按对象身份取得已登记内容，血缘字段随快照传递，不再对本地文件重算或比对 SHA-256。
 - 项目包可携带 `finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml` 三个文件；导入时对象字节完整性按清单逐对象校验，并对 Profile、Overrides 与 Effective 从精确来源重新合并。
 - 数据库内部存储使用列/JSON 表示，不强制 YAML；HTTP JSON DTO 仍为 JSON。

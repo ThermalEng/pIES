@@ -31,7 +31,7 @@
 | 输入 | 关键要求 |
 |---|---|
 | `FinanceProfile` / `FinanceOverrides` | 见[财务 YAML 契约](../formats/finance-yaml.md)：Profile 是已注册、内容寻址、可复用的地区财务基准，不得以内置形态充当全局默认；Overrides 精确引用 `profile {id, content_sha256}`，对既有成本分量叶子做 `{value, unit}` 原子替换、对能源价格条目（`price_id`）做定价定义整项替换（`carrier`/`direction` 由 Profile 继承，禁止新增/删除 `price_id`） |
-| `EffectiveFinanceConfig` | 唯一由确定性合并器从 Profile（+ Overrides）生成并完整校验的不可变快照，记录 `profile_sha256` / `overrides_sha256` / `content_sha256`；可导出/导入/进入快照，导入时连同精确来源从精确 Profile 与 Overrides 重新合并恢复血缘身份；装配精确引用它并以对象字节摘要做完整性校验（见[装配 YAML](../formats/assembly-yaml.md)）；装配、规划与计算只消费它 |
+| `EffectiveFinanceConfig` | 唯一由确定性合并器从 Profile（+ Overrides）生成并完整校验的不可变快照，记录 `profile_sha256` / `overrides_sha256` / `content_sha256`；可导出/导入/进入快照，导入时连同精确来源从精确 Profile 与 Overrides 重新合并恢复血缘身份；装配、规划与计算只消费同一精确引用（见[装配 YAML](../formats/assembly-yaml.md)） |
 | 建设与替换计划 | 金额币种、发生期、`price_basis`（含税/不含税口径标签）和 `base_year` 明确 |
 | 逐时或年度运行汇总 | 能量、成本、收益的单位和时间范围明确 |
 | 规划与财务基准 | 与当前方案使用同一 `EffectiveFinanceConfig.content_sha256` |
@@ -106,7 +106,7 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 
 ## 完成标准
 
-- 财务三件套解析、规范化、确定性摘要与合并的契约测试以[财务 YAML 契约](../formats/finance-yaml.md)为字段权威；拒绝测试覆盖未知 `finance_type`、越权覆盖、`null`/部分金额、旧 JSON 别名与摘要不匹配；
+- 财务三件套解析、规范化、确定性摘要与合并的契约测试以[财务 YAML 契约](../formats/finance-yaml.md)为字段权威；拒绝测试覆盖未知 `finance_type`、越权覆盖、`null`/部分金额、旧 JSON 别名，以及外部导入边界的对象身份不匹配；
 - 手算基准、正常现金流及 IRR 各异常状态均有测试（IRR 属长期蓝图，独立验收）；
 - 项目和资本金口径不会混用；
 - 输入不完整时没有默认现金流或伪指标；

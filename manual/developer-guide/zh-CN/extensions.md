@@ -29,7 +29,7 @@
 - 稳定设备 ID 和本地化名称；
 - 非时变纯技术 `properties`、单位和值域；
 - `interfaces` 的 carrier、单位、有效区间和五类 type；
-- `predefined` 的 `constant/data_repeat/data_predict` 来源声明；
+- `predefined` 可绑定输入槽；设备定义不携带项目来源，每个项目装配实例必须声明 `constant/data_repeat/data_predict` 来源；
 - 受限声明式 `equations`；
 - 统一 schema 版本、规范内容摘要和校验回执。
 
@@ -67,7 +67,7 @@ ExecutorDescriptor 声明 allowlist、资源隔离、取消和 readiness 能力�
 
 存储适配器只实现字节级保存、读取、删除和健康能力。内容摘要、对象元数据、引用、配额、保留和恢复由 `storage` 领域统一管理；业务模块不能感知底层路径或凭证。
 
-外部气象、价格或排放数据只能生成可审计的数据版本。技术序列按 predefined interface 绑定；价格数据进入财务文件契约（`FinanceProfile`/`FinanceOverrides` 合并产物 `EffectiveFinanceConfig`），不进入设备技术 interface。用户在导入前负责把输入序列整理为至少一个完整年度，并使全部序列的分辨率、点数和 `step` 对应关系一致。系统在装配前检查单位、完整年度、分辨率、点数、缺失值、范围和来源，不执行重采样、插值、聚合或融合。全周期连续 `step` 在计算阶段按项目基线生成。GeneratorProvider 与 SolverRuntime 不得在运行时访问外部服务。
+外部气象、价格或排放数据只能生成可审计的数据版本。技术序列按 predefined interface 绑定；价格数据进入财务文件契约（`FinanceProfile`/`FinanceOverrides` 合并产物 `EffectiveFinanceConfig`），不进入设备技术 interface。用户在导入前负责使每个输入来源具有与项目基线一致的分辨率和连续 `step`；不同来源在物化前不要求点数相同。`data_repeat` 的完整来源序列可为完整日、周或年，整体作为重复基线，不另设周期字段。系统在装配前检查单位、分辨率、连续性、对应模式的覆盖要求、缺失值、范围和来源，不执行重采样、插值、聚合或融合。全周期连续 `step` 在计算阶段按项目基线生成并统一对齐。GeneratorProvider 与 SolverRuntime 不得在运行时访问外部服务。
 
 ## 可执行扩展的共同元数据
 

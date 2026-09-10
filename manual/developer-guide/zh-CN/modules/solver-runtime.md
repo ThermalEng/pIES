@@ -4,13 +4,13 @@
 
 ## 作用
 
-SolverRuntime 在受控环境中执行 Solver Bundle 声明的一个命令，并生成可审计回执。它把进程隔离、资源限制、取消和文件完整性集中在一个通用边界，使生成器不需要自行管理 subprocess，Worker 也不需要理解每种 solver 的命令参数。
+SolverRuntime 在受控环境中执行 Solver Bundle 声明的一个命令，并生成可审计回执。它把进程隔离、资源限制、取消和文件边界集中在一个通用执行层，使生成器不需要自行管理 subprocess，Worker 也不需要理解每种 solver 的命令参数。
 
 ## 边界
 
 模块负责：
 
-- Solver Bundle 的 schema、摘要、路径和命令策略校验；
+- Solver Bundle 的 schema、路径和命令策略校验；
 - ExecutorProvider protocol、受信任 executable 解析和能力检查；
 - 隔离工作目录、最小权限、资源上限与网络策略；
 - 单进程启动、取消、超时和终止；
@@ -23,7 +23,7 @@ SolverRuntime 在受控环境中执行 Solver Bundle 声明的一个命令，并
 
 | 输入 | 进入条件 |
 |---|---|
-| Solver Bundle | schema、manifest 和每个输入摘要一致 |
+| Solver Bundle | schema、manifest、规范路径和声明输入完整 |
 | ExecutorProvider | 精确版本已由组合根装配，支持所声明 executable |
 | AttemptContext | attempt ID、租约 fencing、取消信号、证据目标明确 |
 | DeploymentPolicy | executable/environment allowlist 和硬资源上限 |
@@ -38,7 +38,7 @@ SolverRuntime 在受控环境中执行 Solver Bundle 声明的一个命令，并
 - 开始/结束时间、退出码、信号和终止原因；
 - 请求与实际施加的 CPU、内存、时间、文件和网络策略；
 - stdout、stderr、声明输出及其摘要；
-- 完整性、策略、取消、超时、OOM 和执行错误状态。
+- 清单、策略、取消、超时、OOM 和执行错误状态。
 
 如果进程尚未启动即因 manifest 或策略失败，仍生成“未执行”回执；只有无法建立可信证据时才向 Worker 返回内部基础设施故障。
 
@@ -46,7 +46,7 @@ SolverRuntime 在受控环境中执行 Solver Bundle 声明的一个命令，并
 
 ```text
 接收 Bundle
-  ↓ schema / hash / path 校验
+  ↓ schema / manifest / path 校验
   ↓ executor + executable + policy 校验
 建立隔离工作目录并复制只读输入
   ↓
@@ -124,7 +124,7 @@ runtime 不延长业务租约，不在后台留下脱管求解器，也不复用
 
 | 问题 | runtime 状态 |
 |---|---|
-| Bundle/输入摘要错误 | integrity_failed，未执行 |
+| Bundle schema、manifest 或输入声明错误 | input_rejected，未执行 |
 | executable 或参数不在 allowlist | policy_rejected，未执行 |
 | 无法建立隔离或资源限制 | infrastructure_failed，未执行 |
 | 超时/取消/OOM | 对应终止状态，保存回执 |

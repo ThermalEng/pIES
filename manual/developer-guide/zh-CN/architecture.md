@@ -60,7 +60,7 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 
 | 阶段 | 接收 | 产出 | 下游可以依赖的保证 |
 |---|---|---|---|
-| 设备定义 | 设备 YAML 或等价公开规格 | `DeviceDescriptor` | `properties/interfaces/equations`、单位和内容摘要已校验 |
+| 设备定义 | 设备 YAML 或等价公开规格 | `DeviceDescriptor` | `properties/interfaces/equations` 与单位已校验，发布内容身份已固定 |
 | 方程解析 | 设备 descriptor 与受限表达式语法 | 规范方程 AST/数学贡献 | 变量、关系、单位和接口引用明确，无独立设备命令版本 |
 | 装配与检查 | 装配 YAML/项目图、项目基线、规范数据与固定输入引用、规划配置与 `EffectiveFinanceConfig`、目录快照 | 诊断或 `ValidatedAssemblyArtifact` | 连接、数据来源、规划和财务输入合法，业务单位明确，规范摘要与回执完整 |
 | 计算生成 | 规范装配、固定资源、独立 `CalculationConfig` | 物化序列与 Solver Bundle | 预定义序列按基线生成，计算能力兼容，求解器输入、结构化命令、输出和适配器声明完整 |

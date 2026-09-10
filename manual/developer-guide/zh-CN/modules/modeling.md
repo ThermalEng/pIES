@@ -25,7 +25,7 @@
 
 | 来源 | 输入 | 进入条件 |
 |---|---|---|
-| devices | `DeviceDescriptor` | schema、内容摘要、properties/interfaces/equations 已校验 |
+| devices | `DeviceDescriptor` | schema、properties/interfaces/equations 已校验，发布内容身份已固定 |
 | assembly | 实例化上下文 | 属性覆盖、序列绑定、连接、项目基线/step 和状态初值完整 |
 | GeneratorProvider | 公共数学贡献请求 | 目标方程 contract 版本和所需能力受支持 |
 
