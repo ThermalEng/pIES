@@ -127,10 +127,6 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-META-012": (
         "计算序列绑定的项目基线摘要不匹配: 声明 {declared}, 期望 {expected}"
     ),
-    "DATA-META-013": (
-        "data_repeat 原始输入必须声明 period=year(装配前只接受完整年度序列, "
-        "不再支持 day/week 模板): 实际 {actual}"
-    ),
     "DATA-DIAL-001": "CSV 方言不符合 ies.device-data 契约: {detail}",
     "DATA-COL-003": "CSV 列未在设备模型 predefined interfaces 中声明: {column}",
     "DATA-COL-004": "CSV 列重复: {column}",
@@ -151,8 +147,8 @@ NEW_DIAG_CODES: dict[str, str] = {
         "实际起始 {actual_start}, 实际截止 {actual_end}"
     ),
     "DATA-STEP-006": (
-        "装配前原始输入点数必须覆盖至少一个完整年度且为项目基线年度点数的"
-        "正整数倍: 基线年度点数 {baseline_point_count}, 实际 {actual}"
+        "data_repeat 必须为完整日/周/年序列: {resolution} 下允许点数"
+        " {expected}, 实际 {actual}"
     ),
     "DATA-TIME-001": "timeline 时间戳未严格递增或重复",
     "DATA-TIME-002": "timeline 时间戳与声明分辨率不对齐",
@@ -320,7 +316,6 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-META-009": "meta_model_unregistered",
             "DATA-META-011": "meta_source_mode_mismatch",
             "DATA-META-012": "meta_project_baseline_mismatch",
-            "DATA-META-013": "meta_repeat_year_only",
             "DATA-DIAL-001": "dialect_invalid",
             "DATA-COL-003": "col_undeclared",
             "DATA-COL-004": "col_duplicate",
@@ -334,7 +329,7 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-STEP-003": "step_not_contiguous",
             "DATA-STEP-004": "step_count_mismatch",
             "DATA-STEP-005": "step_not_contiguous_raw",
-            "DATA-STEP-006": "step_count_baseline_multiple",
+            "DATA-STEP-006": "repeat_length_invalid",
             "DATA-TIME-001": "time_not_monotonic",
             "DATA-TIME-002": "time_not_aligned",
             "DATA-TIME-003": "time_mixed_zone",
@@ -426,7 +421,6 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-META-009",
             "DATA-META-011",
             "DATA-META-012",
-            "DATA-META-013",
             "DATA-DIAL-001",
             "DATA-COL-003",
             "DATA-COL-004",

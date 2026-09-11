@@ -1,10 +1,11 @@
 """`ies.device-data` 2.0.0 连续 step 文件契约。
 
 装配前输入(``prepared: false``)以非负整数 ``step`` 表达原始序列, 不含时间戳、
-时区或 UTC 偏移; 0.6.5 起只接受完整年度整数倍、与项目基线同分辨率的
-0..N-1 严格连续输入, 不做任何重采样/插值/聚合/补齐(计算阶段物化的
-``prepared: true`` 计算文件必须使用从 0 开始的连续 step,
-物化实现见后续版本)。本模块只实现纯协议解析、设备内容绑定、数值校验和规范化。
+时区或 UTC 偏移; 0.6.5 起与项目基线同分辨率、0..N-1 严格连续, 不做任何
+重采样/插值/聚合/补齐; ``data_repeat`` 的完整来源序列整体作为重复基线,
+只能是完整日/周/年(点数见 ``repeat_cycle_lengths``, 不另设周期字段)。
+计算阶段物化的 ``prepared: true`` 计算文件必须使用从 0 开始的连续 step,
+物化实现见后续版本。本模块只实现纯协议解析、设备内容绑定、数值校验和规范化。
 """
 
 from __future__ import annotations
@@ -34,8 +35,20 @@ _REQUIRED_META_KEYS = (
     "source_mode", "resolution",
 )
 _OPTIONAL_META_KEYS = frozenset(
-    {"period", "point_count", "prepared"}
+    {"point_count", "prepared"}
 )
+
+
+def repeat_cycle_lengths(resolution: str, *, leap_year: bool = False) -> tuple[int, int, int]:
+    """data_repeat 完整日/周/年点数(0.6.5 条目 3)。
+
+    日/周点数由分辨率年点数按非闰年 365 天推导; 年点数在闰年基线下加一日。
+    完整来源序列整体即重复基线, 不另设周期字段。分辨率非法时抛 KeyError,
+    调用方须保证元信息已校验。
+    """
+    yearly, _, _ = RESOLUTIONS[resolution]
+    day = yearly // 365
+    return day, day * 7, yearly + (day if leap_year else 0)
 _ID_RE = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
 
 
@@ -47,7 +60,6 @@ class DeviceData2Meta:
     device_id: str = ""
     source_mode: str = "data_predict"
     resolution: str = "1h"
-    period: str | None = None
     point_count: int | None = None
     prepared: bool = False
     units: dict[str, str] = field(default_factory=dict)
@@ -141,20 +153,8 @@ def parse_metadata_v2(text_lines: list[str]) -> tuple[DeviceData2Meta, list[Diag
             ))
 
     source_mode = raw["source_mode"]
-    period = raw.get("period") or None
-    if source_mode == "data_repeat":
-        # 0.6.5 装配前口径：原始 data_repeat 必须是完整年度序列，不再接受
-        # day/week 模板（旧序列预备路径已退役，不做运行期展开/补齐）
-        if period != "year":
-            diags.append(_diag(
-                "DATA-META-013", {"field": "period", "actual": period or "(缺失)",
-                                   "expected": "year"}, field_name="period",
-            ))
-    elif period is not None:
-        diags.append(_diag(
-            "DATA-META-004", {"field": "period", "value": period, "allowed": "仅 data_repeat:year"},
-            field_name="period",
-        ))
+    # 0.6.5 条目 3: 不设周期字段; 文件声明 period 属未知核心字段,
+    # 已由上游未知字段分支按 DATA-META-002 拒绝。
 
     prepared_text = raw.get("prepared")
     prepared = prepared_text == "true"
@@ -195,7 +195,7 @@ def parse_metadata_v2(text_lines: list[str]) -> tuple[DeviceData2Meta, list[Diag
         schema_id=raw["schema"], schema_version=raw["schema_version"],
         dataset_id=raw["dataset_id"], device_id=raw["device_id"],
         source_mode=source_mode,
-        resolution=raw["resolution"], period=period,
+        resolution=raw["resolution"],
         point_count=point_count, prepared=prepared,
         units=units, notes=notes, declared_columns=tuple(declared),
     ), diags
@@ -209,8 +209,6 @@ def serialize_metadata_v2(
         f"# dataset_id: {meta.dataset_id}", f"# device_id: {meta.device_id}",
         f"# source_mode: {meta.source_mode}", f"# resolution: {meta.resolution}",
     ]
-    if meta.period is not None:
-        lines.append(f"# period: {meta.period}")
     if meta.prepared:
         lines.extend([
             f"# point_count: {meta.point_count}", "# prepared: true",
@@ -343,7 +341,7 @@ def canonicalize_device_data_v2(
     expected_rows: int | None = None,
     expected_data_ref: str | None = None,
     baseline_resolution: str | None = None,
-    baseline_point_count: int | None = None,
+    baseline_leap_year: bool = False,
 ) -> DeviceData2Result:
     parsed, diags = parse_data_file_v2(data)
     if parsed is None:
@@ -443,10 +441,12 @@ def canonicalize_device_data_v2(
                 "DATA-STEP-002", {"detail": "step 必须严格递增且不重复"},
                 field_name=STEP_COL, rows=bad_order,
             ))
-        # 0.6.5 口径：装配前原始序列必须 0..N-1 严格连续，不做插值/补齐；
-        # 且 resolution 与点数由传入的项目基线唯一推导（不得小于一个完整年度，
-        # 点数为年度点数的正整数倍）。data_repeat raw 亦要求完整年度序列，
-        # 不在此再按 day/week 推导（period 已在上游限定为 year）。
+        # 0.6.5 条目 3 口径: 装配前原始序列必须 0..N-1 严格连续,
+        # 不做插值/补齐; 分辨率与基线一致(另行校验); data_repeat 的完整
+        # 来源序列整体即重复基线, 只能是完整日/周/年, 不另设周期字段。
+        # data_predict 的覆盖要求由预测目标与算法契约规定(后续版本),
+        # 此处只校验连续性与分辨率; constant 没有原始序列文件(格式标准
+        # device-data-csv), 原始 constant 声明仍由来源校验拒绝。
         if not meta.prepared:
             if steps != list(range(len(steps))):
                 diags.append(_diag(
@@ -460,13 +460,16 @@ def canonicalize_device_data_v2(
                     {"field": "resolution", "value": meta.resolution, "allowed": baseline_resolution},
                     field_name="resolution",
                 ))
-            if baseline_point_count is not None:
+            if meta.source_mode == "data_repeat" and meta.resolution in RESOLUTIONS:
+                day_n, week_n, year_n = repeat_cycle_lengths(
+                    meta.resolution, leap_year=baseline_leap_year
+                )
                 n = len(steps)
-                if n < baseline_point_count or n % baseline_point_count != 0:
+                if n not in (day_n, week_n, year_n):
                     diags.append(_diag(
                         "DATA-STEP-006",
-                        {"expected": f"{baseline_point_count} 的正整数倍(≥{baseline_point_count})",
-                         "actual": n, "baseline_point_count": baseline_point_count},
+                        {"expected": f"完整日 {day_n} / 完整周 {week_n} / 完整年 {year_n}",
+                         "actual": n, "resolution": meta.resolution},
                         field_name=STEP_COL,
                     ))
         if meta.prepared:
@@ -519,7 +522,6 @@ class PendingDataFile:
     device_id: str
     source_mode: str
     resolution: str
-    period: str | None
     prepared: bool
     point_count: int | None
     row_count: int
@@ -532,7 +534,7 @@ def pending_from_result(result: DeviceData2Result) -> PendingDataFile | None:
     return PendingDataFile(
         dataset_id=result.meta.dataset_id, device_id=result.meta.device_id,
         source_mode=result.meta.source_mode, resolution=result.meta.resolution,
-        period=result.meta.period, prepared=result.meta.prepared,
+        prepared=result.meta.prepared,
         point_count=result.meta.point_count, row_count=len(result.rows),
         column_order=result.column_order,
     )
