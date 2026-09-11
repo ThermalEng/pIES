@@ -49,7 +49,7 @@ step,electric_demand
 
 `source_mode: data_predict` 的预测目标类型以项目装配 `predefined_interfaces.<interface_id>.target_type` 为唯一权威，CSV 不重复声明。目标类型按计算公开契约规定允许的时间特征、自回归特征和外生协变量；数据绑定必须提供该类型要求的输入，不由预测器根据列名猜测。
 
-CSV 元数据不能自行决定项目来源绑定。校验器必须同时消费已经过装配结构校验的显式绑定上下文，并精确核对 interface ID、`mode`、`data_ref`；`data_predict` 还要核对 `target_type`。缺少绑定、绑定模式与 `source_mode` 不一致、`data_ref` 不是当前固定数据资源身份，或出现属于其他模式的字段时均阻断。
+CSV 元数据不能自行决定项目来源绑定。实例化入口必须同时消费显式绑定上下文，并精确核对 interface ID、`mode` 和项目相对 `path`；`data_predict` 还要核对 `target_type`。缺少绑定、绑定模式与 `source_mode` 不一致、路径不是当前项目内 CSV，或出现属于其他模式的字段时均阻断。
 
 ## CSV 方言
 
@@ -124,13 +124,13 @@ CSV 元数据不能自行决定项目来源绑定。校验器必须同时消费�
 
 1. 识别编码、换行、元数据和固定 CSV 方言；
 2. 解析 schema、设备 ID、来源模式、分辨率和单位；
-3. 要求装配显式绑定上下文，精确核对 interface ID、mode、data_ref 和按需出现的 target_type；
+3. 要求实例化配置提供显式绑定上下文，精确核对 interface ID、mode、项目相对 path 和按需出现的 target_type；
 4. 按 `device_id` 读取设备内容，并核对被绑定的 predefined interface、单位和有效区间；
 5. 校验分辨率与项目基线一致、`step` 从零开始连续，并校验对应来源模式的覆盖要求；`data_repeat` 接受完整日、周或年序列；
 6. 在项目装配时确认所有来源均可按其声明模式物化；原始来源间不校验点数相等，计算阶段物化后再统一点数和 `step`；
-7. 生成边界所需的内容身份、质量结果和校验记录；全周期展开或预测由计算阶段另行完成。
+7. 生成实例来源绑定、质量结果和校验记录；全周期展开或预测由计算阶段另行完成。
 
-装配 YAML 通过 `data_ref` 固定数据资源身份，不直接依赖上传文件名，也不另设列映射；绑定的 interface ID 必须与 CSV 表头中的同名列一致。文件更改后形成新数据版本，不能覆盖历史任务所引用的内容。
+实例化配置通过项目相对 `path` 调用 CSV，不另设列映射；绑定的 interface ID 必须与 CSV 表头中的同名列一致。路径指向的文件发生修改后，用户必须重新实例化并形成新的项目 revision，历史任务仍使用原快照。
 
 ## 常见错误
 

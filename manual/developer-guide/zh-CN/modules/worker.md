@@ -14,7 +14,7 @@ Worker 负责“可靠执行”，领域模块负责“怎样计算”。
 
 - 从可重建队列发现待执行任务；
 - 领取 attempt、获得租约和 fencing token；
-- 加载并校验不可变快照；
+- 加载不可变快照及其固定引用；
 - 对计算任务依次调用已注册 GeneratorProvider、SolverRuntime 和 ResultAdapter；
 - 心跳、进度、取消、超时、重试和资源隔离；
 - 在租约仍有效时提交证据、结果或明确失败。
@@ -51,7 +51,7 @@ Redis 队列消息只是定位提示，不能携带覆盖数据库任务事实�
 队列提示
   ↓ 查询权威任务并原子领取
 Attempt + Lease + Fencing Token
-  ↓ 校验快照、规范装配与 provider 版本
+  ↓ 加载快照并解析其固定的 provider 版本
 加载不可变输入
   ↓ generator 产生并封存 Solver Bundle
   ↓ runtime 受控执行，持续检查租约/取消/超时

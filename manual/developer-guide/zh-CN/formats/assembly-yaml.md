@@ -20,13 +20,6 @@ project_baseline:
   leap_year: false
   scenario_mode: single
 
-resources:
-  datasets:
-    campus_load:
-      source:
-        kind: relative_file
-        path: data/campus_load.data.csv
-
 devices:
   grid:
     definition:
@@ -53,7 +46,7 @@ devices:
     predefined_interfaces:
       electricity_demand:
         mode: data_repeat
-        data_ref: campus_load
+        path: data/campus_load.data.csv
 
 connections:
   grid_to_load:
@@ -120,7 +113,6 @@ extensions: {}
 |---|---|
 | `assembly` | 本装配的稳定 ID 和人类可读名称 |
 | `project_baseline` | 项目创建时固定的时间分辨率、闰年口径和场景模式 |
-| `resources` | 数据等外部资源及其可验证来源 |
 | `devices` | 设备实例、精确设备内容、存量/新增身份、允许的 property 覆盖和预定义接口绑定 |
 | `connections` | 可连接的真实 `<device>.<interface>` 之间的有向连接 |
 | `finance` | 对装配前由 `FinanceProfile` + `FinanceOverrides` 合并生成、完整校验的不可变 `EffectiveFinanceConfig` 的引用：`ref` 携带对象身份，`profile_id` 携带来源标识；规划与财务计算共同消费同一引用；装配内不内联另一份完整财务配置 |
@@ -140,8 +132,8 @@ extensions: {}
 - `asset_origin` 必须是 `existing` 或 `new`；不得从设备类型、创建时间或是否填写成本推断；
 - `properties` 只能覆盖设备定义已声明且允许实例化的非时变技术常量，并保留明确单位；不能新增字段，也不能放价格、成本或计算精度；
 - `predefined_interfaces` 只能绑定设备中 `type: predefined` 的 interface；每个 predefined 槽都必须恰好有一个显式绑定，缺失或绑定不存在/非 predefined 接口均阻断；
-- 来源判别联合严格为 `constant: {mode, value}`、`data_repeat: {mode, data_ref}`、`data_predict: {mode, data_ref, target_type}`；缺少必填字段、混入其他模式字段和所有额外字段均拒绝，没有默认 mode 或默认值；
-- `constant/data_repeat/data_predict` 只固定来源声明及所需的不可变输入引用，不得在装配前替换为物化后的未来序列；规范化文本必须完整保留 `value/data_ref/target_type`；
+- 来源判别联合严格为 `constant: {mode, value}`、`data_repeat: {mode, path}`、`data_predict: {mode, path, target_type}`；`path` 只能是项目目录内 CSV 相对路径。缺少必填字段、混入其他模式字段和所有额外字段均拒绝，没有默认 mode 或默认值；
+- `constant/data_repeat/data_predict` 只固定来源声明及项目相对 CSV 路径，不得在装配前替换为物化后的未来序列；规范化文本必须完整保留 `value/path/target_type`；
 - `in/out/bidirectional` 通过 connections 取得外部交互；`blind` 既不能连接，也不能绑定预定义数据；
 - 每项覆盖、绑定和身份均进入校验回执；
 - 资产身份与增量成本强关联：`existing` 的沉没历史建设成本不计入增量目标，`new` 按新增驱动量计入固定建设成本与线性分量；但所有设备仍计算决策相关可变 O&M 与能源购售（能源购售只经 `tariff_bindings` 计量点产生，见[财务 YAML 契约](finance-yaml.md)）。
@@ -172,26 +164,15 @@ extensions: {}
 
 ## 预定义序列与资源
 
-人工文件可以绑定包内相对文件：
+实例化配置直接以项目相对路径绑定 CSV：
 
 ```yaml
-source:
-  kind: relative_file
-  path: data/campus_load.data.csv
+path: data/campus_load.data.csv
 ```
 
-也可以绑定已登记对象：
+`path` 是实例化配置中的项目相对 CSV 路径，不能逃逸项目目录。后端在实例化入口直接读取并解析该文件，随后固定来源绑定；进入可信内部流程后不再因文件交接而重算校验。网络 URL、宿主机绝对路径、临时上传路径和存储 provider 私有路径不得进入可执行快照。
 
-```yaml
-source:
-  kind: object
-  object_id: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-  media_type: text/csv
-```
-
-`relative_file` 只用于外部作者包的导入入口，不能逃逸包目录。入口完成文件解析并登记内容对象后，规范装配只保留已登记的对象引用；进入可信内部流程后不再因文件交接而重算校验。网络 URL、宿主机绝对路径、临时上传路径和存储 provider 私有路径不得进入可执行快照。
-
-CSV 必须固定相同的设备 ID，并且列 ID、单位、`source_mode`、分辨率、输入 `step` 和有效区间与目标 predefined interface 一致。装配绑定经校验和规范化的重复基线、训练目标、历史输入与未来已知协变量的对象引用。装配必须确认每个来源与项目基线分辨率一致、文件内 `step` 从零开始连续，并符合对应来源模式的覆盖要求；不同原始来源在物化前不要求点数相同或 `step` 一一对应。`data_repeat` 的完整来源序列整体作为重复基线，可为完整日、周或年，不另设周期字段。任一来源自身不符合时必须阻断，不重采样、插值、聚合、融合或补齐。计算阶段按项目基线物化后，所有计算序列统一点数和连续 `step`，并在产物与回执中固定。
+CSV 必须固定相同的设备 ID，并且列 ID、单位、`source_mode`、分辨率、输入 `step` 和有效区间与目标 predefined interface 一致。装配使用实例化入口形成的项目相对 CSV 来源绑定。装配必须确认每个来源与项目基线分辨率一致、文件内 `step` 从零开始连续，并符合对应来源模式的覆盖要求；不同原始来源在物化前不要求点数相同或 `step` 一一对应。`data_repeat` 的完整来源序列整体作为重复基线，可为完整日、周或年，不另设周期字段。任一来源自身不符合时必须阻断，不重采样、插值、聚合、融合或补齐。计算阶段按项目基线物化后，所有计算序列统一点数和连续 `step`，并在产物与回执中固定。
 
 ## 规划配置与有效财务快照引用
 
