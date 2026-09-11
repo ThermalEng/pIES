@@ -1,7 +1,8 @@
-"""0.3.0 C5: 静态架构门禁测试(宪法 §14.3 前三条)。
+"""0.3.0 C5: 静态架构门禁测试(宪法 §14.2 原则)。
 
-宪法 §14.3 要求 CI 逐步加入并最终强制: 禁止 core 依赖业务模块、禁止跨模块
-导入私有符号、禁止 API 直接导入 ORM。本文件建立 0.3.0 基线门禁:
+架构门禁要求 CI 逐步加入并最终强制(宪法 §14.2 原则，门禁细则见
+docs/development/development-workflow.md「架构门禁」): 禁止 core 依赖业务模块、
+禁止跨模块导入私有符号、禁止 API 直接导入 ORM。本文件建立 0.3.0 基线门禁:
 
   1. test_core_no_business_dependencies  — core 不允许 import 任何业务模块;
   2. test_no_cross_module_private_imports — 禁止 from X import _y / import X._y
@@ -29,7 +30,7 @@ _PKG_ROOT = _BACKEND_DIR / "iesplan"
 _CORE_DIR = _PKG_ROOT / "core"
 _API_DIR = _PKG_ROOT / "api"
 
-#: 宪法 §14.3 判定为"业务模块"的 iesplan 顶层子包(core 一律禁止依赖)。
+#: 架构门禁中视为"业务模块"的 iesplan 顶层子包(core 一律禁止依赖)。
 #: 判定规则见 _is_business_import: 允许根包 iesplan(仅 __version__)与
 #: iesplan.core 子树, 其余 iesplan.* 子包(services/api/models/storage/worker/
 #: engines/analysis/…)均视为业务模块。
@@ -273,7 +274,7 @@ def _find_api_orm_imports(
 # ---------------------------------------------------------------------------
 
 def test_core_no_business_dependencies():
-    """宪法 §14.3: 禁止 core 依赖业务模块。基线全绿, 新增即报错。"""
+    """架构门禁: 禁止 core 依赖业务模块(宪法 §14.2)。基线全绿, 新增即报错。"""
     detected = _find_core_business_imports()
     new = [(m, line, src) for (m, line, src) in detected if (m, line) not in WHITELIST_CORE_BUSINESS_DEPS]
     assert not new, (
@@ -282,7 +283,7 @@ def test_core_no_business_dependencies():
 
 
 def test_no_cross_module_private_imports():
-    """宪法 §14.3: 禁止跨模块导入私有符号。现状违规在白名单, 新增即报错。"""
+    """架构门禁: 禁止跨模块导入私有符号(宪法 §14.2)。现状违规在白名单, 新增即报错。"""
     detected = _find_private_symbol_imports()
     new = [(m, s) for (m, s) in detected if (m, s) not in WHITELIST_PRIVATE_IMPORTS]
     assert not new, (
@@ -291,7 +292,7 @@ def test_no_cross_module_private_imports():
 
 
 def test_api_no_direct_orm_imports():
-    """宪法 §14.3: 禁止 API 直接导入 ORM(get_db 依赖注入合法)。
+    """架构门禁: 禁止 API 直接导入 ORM(宪法 §14.2, get_db 依赖注入合法)。
 
     白名单按 (模块, 行号) 豁免, 并校验该行导入符号 ⊆ 白名单符号集,
     同文件新行或白名单行新增符号都会报错。
