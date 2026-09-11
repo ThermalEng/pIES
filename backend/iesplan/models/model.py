@@ -12,7 +12,7 @@ from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Numeric, Te
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, JSONB, bigint_pk, regex_check
+from iesplan.models.common import JSONB, bigint_pk
 
 
 class SystemGraph(Base):
@@ -25,7 +25,6 @@ class SystemGraph(Base):
     draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id"))
     project_version_id: Mapped[int | None] = mapped_column(ForeignKey("project_versions.id"))
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    graph_hash: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -36,7 +35,6 @@ class SystemGraph(Base):
         CheckConstraint(
             "(draft_id IS NULL) <> (project_version_id IS NULL)", name="ck_system_graphs_exclusive"
         ),
-        regex_check(f"graph_hash ~ '{HASH64_RE}'", name="ck_system_graphs_hash"),
         Index("idx_system_graphs_draft", "draft_id"),
         Index("idx_system_graphs_version", "project_version_id"),
         # 每项目至多一张工作图(并发建图防重, 01 §4.1; 与草稿 uq_drafts_current 配套)

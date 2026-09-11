@@ -4,15 +4,15 @@
 
 - ``model_templates``: 模板主表。每行代表当前用户的一个模型模板
   (模板 ID = 模板声明的 ``device.id``, 同一用户内唯一); 保存未发布的
-  草稿内容(对象引用 + 摘要)与生命周期状态:
+  草稿内容(对象引用)与生命周期状态:
   ``draft``(未发布) / ``published``(已发布且启用) / ``disabled``(已发布但停用);
 - ``model_template_revisions``: 不可变发布 revision 表。每次发布把草稿内容
-  固化为单调递增 revision, 保存规范 YAML、校验回执与结构摘要的对象引用
-  及内容摘要; 相同规范内容的重复发布幂等返回同一 revision;
+  固化为单调递增 revision, 保存规范 YAML、校验回执与结构摘要的对象引用;
+  发布幂等以幂等键与 (template_id, revision) 保证, 不按内容去重;
   revision 一旦发布永不修改或删除(历史项目模型按精确 revision 解释)。
 
 模板稳定 ID、发布 revision 与 ``schema_version`` 共同
-固定精确内容; 项目模型使用模板时固定精确 revision 与摘要。
+固定精确内容; 项目模型使用模板时固定精确 revision。
 
 数据库层由版本化迁移 0002 创建(见 ``iesplan/migrations``, 宪法 §11);
 ORM 模型与 Base.metadata 注册仅作测试基建(create_all)与运行期读写载体,
@@ -28,7 +28,7 @@ from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index,
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, bigint_pk, regex_check
+from iesplan.models.common import bigint_pk
 
 #: 模板生命周期状态
 TEMPLATE_STATUS_DRAFT = "draft"
@@ -68,7 +68,7 @@ class ModelTemplate(Base):
     draft_yaml_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
     #: 草稿最近一次校验的聚合诊断 JSON 对象引用(objects.id; 无草稿时 NULL)
     draft_diagnostics_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
-    #: 草稿内容摘要(小写 64 位十六进制 SHA-256; 无草稿时 NULL)    #: 草稿内容是否声明顶层 inputs(列表/表单生成依据)
+    #: 草稿内容是否声明顶层 inputs(列表/表单生成依据)
     draft_has_inputs: Mapped[bool | None] = mapped_column(sa.Boolean)
     #: 草稿乐观锁修订(每次保存草稿 +1; 并发编辑以 expected_revision 拒绝)
     draft_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("0"))
@@ -91,10 +91,6 @@ class ModelTemplate(Base):
         CheckConstraint("status IN ('draft','published','disabled')", name="ck_model_templates_status"),
         CheckConstraint("draft_revision >= 0", name="ck_model_templates_draft_revision"),
         CheckConstraint("published_revision >= 0", name="ck_model_templates_published_revision"),
-        regex_check(
-            f"draft_sha256 IS NULL OR draft_sha256 ~ '{HASH64_RE}'",
-            name="ck_model_templates_draft_sha256",
-        ),
         #: 稳定 ID 全局唯一（新命名空间全局唯一）
         UniqueConstraint("template_id", name="uq_model_templates_template_id"),
         #: 同一用户 slug 唯一（避免重复）
@@ -118,10 +114,6 @@ class ModelTemplateRevision(Base):
     #: 单调递增发布序号(从 1 开始; 同模板内唯一)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     schema_version: Mapped[str] = mapped_column(Text, nullable=False)
-    #: 模板规范字节内容摘要(含顶层 inputs; 与 yaml_object_id 内容一致)
-    content_sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    #: 顶层 inputs 树摘要(模板校验回执追溯用)
-    inputs_sha256: Mapped[str | None] = mapped_column(Text)
     #: 顶层 inputs 叶子数量(表单生成规模提示; 无 inputs 为 0)
     input_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("0"))
     #: 校验诊断 JSON 对象引用(objects.id; 发布前最后校验的聚合诊断)

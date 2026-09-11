@@ -102,7 +102,6 @@ def _version_dict(v, *, with_report: bool = True) -> dict:
         "units": v.units,
         "provenance": v.provenance,
         "license": v.license,
-        "content_hash": v.content_hash,
         "created_by": v.created_by,
         "created_at": v.created_at.isoformat() if v.created_at else None,
         "created_reason": v.created_reason,

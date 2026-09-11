@@ -15,7 +15,7 @@
   只对非豁免路径做限流; 本地/e2e 默认阈值宽松(每窗口 120 次), 可经
   IESPLAN_RATE_LIMIT_MAX_REQUESTS 收紧。
 - ``QuotaError`` / ``check_upload_quota``: 按用户/项目统计已用对象存储,
-  超配额拒绝(复用 storage 的 usage 聚合; 对象内容寻址去重天然按实际占用计)。
+  超配额拒绝(复用 storage 的 usage 聚合; 每次写入新建对象, 按实际占用计)。
 - ``validate_upload_meta`` / ``validate_upload_fields``: dataset 上传的
   provenance/fields/meta schema 白名单, 拒绝未知键或畸形结构。
 """
@@ -249,9 +249,9 @@ class QuotaError(Exception):
 def _dataset_files_bytes(db, project_ids: list[int]) -> int:
     """项目集合内数据集版本文件占用之和(dataset_files.size_bytes)。
 
-    统计口径 = 逻辑分配量: 内容寻址去重时同内容对象被多个版本引用, 其
-    dataset_file 行会重复计列大小 —— 门禁目的(防重复上传刷存储)由逻辑累计
-    即满足, 且语义清晰、无跨表 join、不依赖对象去重实现。
+    统计口径 = 逻辑分配量: 按 dataset_file 行累计 size_bytes(同一对象被
+    多行引用时重复计列) —— 门禁目的(防重复上传刷存储)由逻辑累计即满足,
+    且语义清晰、无跨表 join。
     """
     if not project_ids:
         return 0

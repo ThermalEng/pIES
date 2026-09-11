@@ -5,7 +5,7 @@
                                                            指标摘要/逐时引用/当前选中)
 - GET    /api/projects/{id}/tasks/{task_id}/result/assessments   评估历史(不可变, 追加式)
 - POST   /api/projects/{id}/tasks/{task_id}/result/assess  触发新评估(每次创建新记录)
-- POST   /api/projects/{id}/tasks/{task_id}/result/select  选择结果(solution_id, 预览校验)
+- POST   /api/projects/{id}/tasks/{task_id}/result/select  选择结果
 - GET    /api/projects/{id}/tasks/{task_id}/result/diff    选中结果的参数差异预览
 - GET    /api/projects/{id}/tasks/{task_id}/result/hourly  逐时结果查询(对象存储, 分页)
 - POST   /api/projects/{id}/tasks/{task_id}/result/check   对已有证据包创建检查任务
@@ -27,7 +27,6 @@ from iesplan.api.auth import CurrentUser
 from iesplan.core.errors import NotFoundError
 from iesplan.db import get_db
 from iesplan.models.calc import Task
-from iesplan.models.common import HASH64_RE
 from iesplan.services import project as project_service
 from iesplan.services import results as results_service
 from iesplan.services import tasks as tasks_service
@@ -49,15 +48,12 @@ class AssessRequest(BaseModel):
 
 
 class SelectRequest(BaseModel):
-    """选择结果请求体(01 §8.4; preview_checksum 为客户端确认预览的差异摘要)。"""
+    """选择结果请求体(01 §8.4)。"""
 
     solution_id: int = Field(ge=0, description="所选解标识(证据候选索引)")
     selection_type: Literal["adopt", "reference"] = "adopt"
     reference_rule: str | None = Field(default=None, max_length=200, description="参考规则(基准/边界等)")
     reason: str | None = Field(default=None, max_length=2000, description="选择理由")
-    preview_checksum: str | None = Field(
-        default=None, pattern=HASH64_RE, description="确认预览的差异补丁 sha256(可选, 提供则校验)"
-    )
 
 
 class CheckRequest(BaseModel):
@@ -137,8 +133,7 @@ def select_result_endpoint(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """选择结果(01 §8.4 追加式): 保存所选解标识/类型/理由 + 差异补丁审计;
-    换选=新行 + 旧行 is_current=false。提供 preview_checksum 时校验确认预览
-    内容与当前差异补丁一致, 不一致 → 409(须重新确认)。
+    换选=新行 + 旧行 is_current=false。
 
     A3 越权防御: 入口先 ensure_task_belongs, 对齐 diff/hourly 端点 —— URL
     project_id 与任务真实归属不一致时 404, 防止把选中写入非 URL 项目或读取
@@ -148,7 +143,6 @@ def select_result_endpoint(
     selection = results_service.select_result(
         db, user, task_id, payload.solution_id, payload.selection_type,
         reference_rule=payload.reference_rule, reason=payload.reason,
-        preview_checksum=payload.preview_checksum,
     )
     db.commit()
     diff = results_service.selection_diff(db, project_id)
@@ -198,7 +192,7 @@ def hourly_endpoint(
     end: int | None = Query(default=None, ge=0, description="结束行号(不含, 缺省到末尾)"),
     limit: int = Query(default=5000, ge=1, le=50000, description="每页行数"),
 ) -> dict[str, Any]:
-    """逐时结果查询(REQ-RESULT-002): 从对象存储读取(校验 sha256), 行号分页
+    """逐时结果查询(REQ-RESULT-002): 从对象存储读取, 行号分页
     返回 values + next_start 供翻页。任务尚无证据包 → 404(不再以空内容查询)。"""
     project_service.ensure_access(db, user, project_id, "view")
     tasks_service.ensure_task_belongs(db, project_id, task_id)

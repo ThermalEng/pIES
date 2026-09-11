@@ -7,10 +7,10 @@
 - ASM-REF-003  端口引用 <dev>.<port> 不存在(边端点 / 显式端口声明);
 - ASM-REF-004  数据集引用缺失(dataset_version_id 不存在/列不存在/分辨率与时间轴不符);
 - ASM-REF-005  显式端口声明与注册表推导不一致(告警,以注册表为准);
-- ASM-INPUT-001 设备输入端口无来边(输入不完备;solar 环境侧除外);
-- ASM-INPUT-002 必填参数缺失(注册表 default=None 的引用类参数,data_refs 可替代);
+- ASM-INPUT-001 设备输入端口无来边(输入不完备;外生供给载体、电网单侧运行除外);
+- ASM-INPUT-002 必填参数缺失(2.0 已废止:properties 均带默认值);
 - ASM-INPUT-003 参数值越界/枚举不符(非阻断);
-- ASM-INPUT-004 负荷类设备缺 data_refs;
+- ASM-INPUT-004 已删除(predefined 接口缺显式绑定不阻断,source.data_ref 为默认数据路径);
 - ASM-INPUT-005 data_refs 单位与端口单位量纲不可换算;
 - ASM-PIPE-001/002/003 管道设备延迟声明缺失(警告)/越界/未形成通路(警告)。
 """
@@ -25,8 +25,6 @@ from iesplan.assembly.checker import (
 )
 from iesplan.assembly.diags import (
     ASM_INPUT_DATA_UNIT,
-    ASM_INPUT_LOAD_DATA,
-    ASM_INPUT_PARAM,
     ASM_INPUT_RANGE,
     ASM_INPUT_UNFED,
     ASM_PIPE_DELAY_MISSING,
@@ -40,6 +38,7 @@ from iesplan.assembly.diags import (
 )
 from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.assembly.parser import PORT_DECL_OVERRIDE_FIELDS
+from iesplan.assembly.checker import EXOGENOUS_SUPPLY_CARRIERS, GRID_SIDE_PORTS, grid_side_used
 from iesplan.assembly.schema import AssemblySpec
 from iesplan.core.diagnostics import Diagnostic
 
@@ -80,7 +79,7 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
                     location={"object_type": "device", "object_id": dev.id, "field": "model"},
                 )
             )
-        elif version is not None and version != type_spec.version:
+        elif version is not None and version != type_spec.schema_version:
             # 类型已注册但版本陈旧(设备创建时固化的注册表快照版本 ≠ 当前版本):
             # 非阻断 —— 引擎按当前注册版本运行, 拒绝会破坏既有项目在目录升级后的提交
             diags.append(
@@ -92,7 +91,7 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
                         "device": dev.id,
                         "model": dev.model,
                         "type_id": type_id,
-                        "registered": f"{type_id}@{type_spec.version}",
+                        "registered": f"{type_id}@{type_spec.schema_version}",
                     },
                     location={"object_type": "device", "object_id": dev.id, "field": "model"},
                 )
@@ -238,9 +237,14 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
     for dev in spec.devices:
         type_spec, _ = resolve_model(ctx, dev.model)
         dev_ports = [p for p in ports.values() if p.device == dev.id]
-        # 输入端口无来边(solar 环境侧除外)
+        # 电网进出口为替代运行模式:任一侧已连接时,另一未连接侧视为单侧运行,
+        # 不报输入不完备(未用侧由进出口互斥方程钳零,与 1.0 单端口电网同语义)
+        grid_used = grid_side_used(type_spec, dev.id, spec.edges)
+        # 输入端口无来边(外生供给载体、电网单侧运行除外)
         for port in dev_ports:
-            if port.direction != "in" or port.carrier == "solar":
+            if port.direction != "in" or port.carrier in EXOGENOUS_SUPPLY_CARRIERS:
+                continue
+            if grid_used and port.name in GRID_SIDE_PORTS:
                 continue
             if not in_edges.get(port.ref):
                 diags.append(
@@ -254,50 +258,25 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
                 )
         if type_spec is None:
             continue
-        # 必填参数缺失(负荷类设备的引用参数/无默认值参数;data_refs.key 可替代;
-        # 热泵/制冷机 cop_profile 等可选参考不在此列)
-        data_keys = {dr.key for dr in dev.data_refs}
-        required = [
-            name
-            for name, ps in type_spec.parameters.items()
-            if ps.default is None or (ps.unit == "reference" and type_spec.is_load)
-        ]
-        for name in required:
-            if name not in dev.params and name not in data_keys:
-                diags.append(
-                    make_diag(
-                        ASM_INPUT_PARAM,
-                        severity="error",
-                        blocking=True,
-                        params={"device": dev.id, "param": name},
-                        location={"object_type": "device", "object_id": dev.id, "field": f"params.{name}"},
-                    )
-                )
+        # 注:2.0 properties 均带默认值(value), 无"必填参数"概念;
+        # 旧 ASM-INPUT-002(必填缺失)已废止;缺显式数据绑定不阻断, 接口
+        # source.data_ref 自带默认数据路径(设备参数关键字直接引用项目相对 CSV)。
         # 参数值越界/枚举不符(非阻断;复用 PARAM-RNG-003 语义)
         for name, value in dev.params.items():
             if isinstance(value, (dict, list)) or value is None:
                 continue
-            ps = type_spec.parameters.get(name)
+            ps = type_spec.properties.get(name)
             if ps is None:
                 continue
-            if ps.enum is not None and value not in ps.enum:
-                diags.append(
-                    make_diag(
-                        ASM_INPUT_RANGE,
-                        severity="error",
-                        blocking=False,
-                        params={"device": dev.id, "param": name, "value": value, "enum": list(ps.enum)},
-                        location={"object_type": "device", "object_id": dev.id, "field": f"params.{name}"},
-                    )
-                )
-            elif isinstance(value, (int, float)) and not isinstance(value, bool):
-                if ps.min is not None and value < ps.min:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                minimum, maximum = ps.valid_range or (None, None)
+                if minimum is not None and value < minimum:
                     diags.append(
                         make_diag(
                             ASM_INPUT_RANGE,
                             severity="error",
                             blocking=False,
-                            params={"device": dev.id, "param": name, "value": value, "min": ps.min},
+                            params={"device": dev.id, "param": name, "value": value, "min": minimum},
                             location={
                                 "object_type": "device",
                                 "object_id": dev.id,
@@ -305,13 +284,13 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
                             },
                         )
                     )
-                elif ps.max is not None and value > ps.max:
+                elif maximum is not None and value > maximum:
                     diags.append(
                         make_diag(
                             ASM_INPUT_RANGE,
                             severity="error",
                             blocking=False,
-                            params={"device": dev.id, "param": name, "value": value, "max": ps.max},
+                            params={"device": dev.id, "param": name, "value": value, "max": maximum},
                             location={
                                 "object_type": "device",
                                 "object_id": dev.id,
@@ -319,19 +298,9 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
                             },
                         )
                     )
-        # 负荷类设备缺 data_refs
-        if type_spec.is_load and not dev.data_refs:
-            diags.append(
-                make_diag(
-                    ASM_INPUT_LOAD_DATA,
-                    severity="error",
-                    blocking=True,
-                    params={"device": dev.id},
-                    location={"object_type": "device", "object_id": dev.id, "field": "data_refs"},
-                )
-            )
-        # data_refs 单位与端口单位量纲不可换算
-        in_ports = [p for p in dev_ports if p.direction in ("in", "bidirectional")]
+        # data_refs 单位与端口单位量纲不可换算(数据绑定挂在 predefined 需求接口上,
+        # 与装配入口 INPUT-005 同口径)
+        in_ports = [p for p in dev_ports if p.direction in ("in", "bidirectional", "predefined")]
         for ref in dev.data_refs:
             if not ref.unit:
                 continue

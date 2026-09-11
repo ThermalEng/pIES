@@ -6,7 +6,7 @@
 3. 校验五类 interface、carrier、单位、source 组合与连接资格；
 4. 校验 equations 标识符、内部变量、单位、时间索引引用与循环引用；
 5. 解析模板顶层 ``inputs`` 为扁平叶子声明（供表单生成与实例化校验）；
-6. 生成不可变 ``DeviceModelDocument``，规范化并计算内容摘要与回执。
+6. 生成不可变 ``DeviceModelDocument``，规范化并生成回执。
 
 诊断语义：同阶段互不依赖的问题尽量聚合；结构不足以安全解释后续字段时
 才停止后续阶段。非法类型不得变成 null、默认值或空模型。解析失败不产出部分文档。
@@ -141,21 +141,20 @@ def _check_range_bounds(minimum: object, maximum: object, file: str, field: str)
 
 
 def _check_interface_source(iface_id: str, type_: str, source: object, file: str) -> None:
-    """interface type 与 source 组合规则（兼容旧测试：允许 predefined 携带 source）。
+    """interface type 与 source 组合规则（2.0: 预定义接口必须携带 source，其余禁止）。
 
-    2.0 设备模型（catalog/模板实例化后）原则上禁止携带 ``source``，但为兼容旧测试
-    （test_assembly_contract2 中 LOAD/FIXED 等设备在 device 侧声明 source），
-    此处对 ``predefined`` 类型允许 source，其余类型仍拒绝。
-    新装配仅校验字头，source 校验由 validator2 按业务规则执行。
+    - ``predefined`` 必须声明 ``source``（`mode` 为 constant/data_repeat/data_predict），
+      否则为非法（缺失来源无法在装配时解析包内相对路径）；
+    - 其余类型（in/out/bidirectional/blind）禁止声明 source。
     """
     if source is None:
+        if type_ == "predefined":
+            raise ParseError(f"interfaces.{iface_id} 类型为 predefined 时必须声明 source")
         return
-    if type_ == "predefined":
-        # 兼容旧测试：允许 predefined 携带 source，交由 validator2 业务校验
-        return
-    raise ParseError(
-        f"interfaces.{iface_id} 禁止声明 source（设备模型不得预设序列来源，绑定在装配中声明）"
-    )
+    if type_ != "predefined":
+        raise ParseError(
+            f"interfaces.{iface_id} 禁止声明 source（设备模型不得预设序列来源，绑定在装配中声明）"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +179,8 @@ def validate_equations(
     if not isinstance(relations_raw, list):
         raise ParseError("equations.relations 必须是 sequence")
 
-    allowed = set(properties) | set(interfaces)
+    # step_duration is a calculation-time primitive, not a user-declared field.
+    allowed = set(properties) | set(interfaces) | {"step_duration"}
     var_specs: dict[str, EquationVariable] = {}
     for vid, vraw in variables_raw.items():
         if not isinstance(vid, str) or not _ID_PATTERN.fullmatch(vid):
@@ -235,10 +235,11 @@ def validate_equations(
                         raise ParseError(
                             f"relation {rid!r} 引用了未声明的标识符: {name!r}（只允许 properties、interfaces、equations.variables）"
                         )
-            # 左侧必须恰好一个引用原子（输出变量）
+            # 左侧必须恰好一个引用原子（输出变量），但为兼容 battery 的 exclusivity 约束
+            # charge[t] * discharge[t] = 0（左側 2 变量），放宽为 1 或 2
             lhs_atoms, _ = reference_atoms(lhs, rid)
-            if len(lhs_atoms) != 1:
-                raise ParseError(f"relation {rid!r} 左侧必须恰好一个变量（当前 {len(lhs_atoms)} 个）")
+            if len(lhs_atoms) not in (1, 2):
+                raise ParseError(f"relation {rid!r} 左侧必须恰好一个或两个变量（当前 {len(lhs_atoms)} 个）")
             # 边: lhs 变量 -> rhs 引用（用于循环引用检测；变量为起点、引用为终点）
             rhs_atoms, _ = reference_atoms(rhs, rid)
             relation_edges.append((lhs_atoms[0], rhs_atoms))
@@ -502,7 +503,18 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
             continue
         source_raw = iraw.get("source")
         source: SourceSpec | None = None
-        if source_raw is not None:
+        if source_raw is None:
+            if type_ == "predefined":
+                diags.append(
+                    _diag(
+                        "SYS-CFG-001",
+                        f"interfaces.{iid} 类型为 predefined 时必须声明 source",
+                        file=file,
+                        field=f"{fld}.source",
+                    )
+                )
+                continue
+        else:
             if type_ != "predefined":
                 diags.append(
                     _diag(
@@ -513,13 +525,17 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
                     )
                 )
                 continue
-            # 兼容旧测试：predefined 允许 source，直接构造（旧测试使用 data_repeat/data_ref 等）
+            # 校验 source 内部必填字段
             try:
                 if not isinstance(source_raw, dict):
                     raise ParseError(f"interfaces.{iid}.source 必须是 mapping")
                 mode = source_raw.get("mode")
                 if mode not in ("constant", "data_repeat", "data_predict"):
                     raise ParseError(f"interfaces.{iid}.source.mode 非法: {mode!r}")
+                if mode == "constant" and source_raw.get("value") is None:
+                    raise ParseError(f"interfaces.{iid}.source.mode 为 constant 时必须声明 value")
+                if mode in ("data_repeat", "data_predict") and not source_raw.get("data_ref"):
+                    raise ParseError(f"interfaces.{iid}.source.mode 为 {mode} 时必须声明 data_ref")
                 source = SourceSpec(mode=mode, value=source_raw.get("value"), data_ref=source_raw.get("data_ref"))
             except ParseError as exc:
                 diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.source"))

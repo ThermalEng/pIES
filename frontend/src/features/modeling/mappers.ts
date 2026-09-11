@@ -13,7 +13,6 @@ import type {
 import type { FormFieldError, FormFieldValue } from './form'
 import type {
   CandidateModel,
-  DataFileRef,
   InputNode,
   ModelDiagnostic,
   ProjectModelSummary,
@@ -210,7 +209,7 @@ function buildInputNode(value: unknown, path: string, key: string): InputNode {
 // 表单初始值与即时校验
 // ---------------------------------------------------------------------------
 
-/** 从 inputs 树生成初始表单值(叶子默认值; data 字段初始未上传)。 */
+/** 从 inputs 树生成初始表单值(data 字段为项目内相对 CSV 路径)。 */
 export function defaultFormValues(nodes: InputNode[]): Record<string, FormFieldValue> {
   const out: Record<string, FormFieldValue> = {}
   for (const node of nodes) {
@@ -237,7 +236,7 @@ function collectDefaults(node: InputNode, out: Record<string, FormFieldValue>): 
       break
     case 'data_repeat':
     case 'data_predict':
-      out[node.path] = { kind: 'data', file_ref: null, file_name: null, data_ref: node.data_ref ?? null, upload: null }
+      out[node.path] = { kind: 'data', path: typeof node.default === 'string' ? node.default : node.data_ref ?? '' }
       break
   }
 }
@@ -335,7 +334,7 @@ function validateArrayNode(node: InputNode, values: Record<string, FormFieldValu
 /**
  * 表单值 → 提交 inputs JSON 树。
  * - number 为空的叶子在预检查阶段报必填错误(不进入提交树);
- * - 未上传临时文件的 data 叶子不提交(模板合并保持原样);
+ * - data 叶子直接提交项目内相对 CSV 路径;
  * - boolean / string 整体替换;
  * - array 整体替换为元素数组(元素模板单一声明时; 未添加元素则不提交)。
  * 返回 {ok:false} 时携带字段错误(不抛出, 供页面展示)。
@@ -391,9 +390,8 @@ function buildSubmitted(node: InputNode, values: Record<string, FormFieldValue>,
       break
     case 'data_repeat':
     case 'data_predict': {
-      // 已上传临时文件时提交模板声明的 data_ref(临时文件内容由 data_files 绑定)
       const data = field?.kind === 'data' ? field : null
-      if (data?.file_ref && data?.upload && node.data_ref !== null) out[node.key] = node.data_ref
+      if (data?.path.trim()) out[node.key] = data.path.trim()
       break
     }
   }
@@ -419,7 +417,7 @@ function buildArrayItem(
       } else if (child.type === 'string') {
         obj[child.key] = leaf?.kind === 'string' ? leaf.text : ''
       } else if (child.type === 'data_repeat' || child.type === 'data_predict') {
-        if (leaf?.kind === 'data' && leaf.file_ref && child.data_ref !== null) obj[child.key] = child.data_ref
+        if (leaf?.kind === 'data' && leaf.path.trim()) obj[child.key] = leaf.path.trim()
       }
     }
     return obj
@@ -430,27 +428,6 @@ function buildArrayItem(
   if (itemTemplate.type === 'boolean') return leaf?.kind === 'boolean' ? leaf.checked : false
   if (itemTemplate.type === 'string') return leaf?.kind === 'string' ? leaf.text : ''
   return null
-}
-
-/**
- * 收集配套数据文件引用(已上传的 data 叶子 → DataFileRef)。
- * file_ref 为临时对象 id; 提交时由候选携带 {data_ref, upload_id, object_id, sha256}。
- */
-export function collectDataFileRefs(values: Record<string, FormFieldValue>): DataFileRef[] {
-  const refs: DataFileRef[] = []
-  for (const [path, value] of Object.entries(values)) {
-    if (value.kind === 'data' && value.file_ref) {
-      const upload = value.upload
-      if (!upload) continue // 上传失败/未完成: 不提交
-      refs.push({
-        data_ref: value.data_ref || path,
-        upload_id: upload.upload_id,
-        object_id: upload.object_id,
-        sha256: upload.sha256,
-      })
-    }
-  }
-  return refs
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +470,6 @@ export function templateSummaryFromServer(raw: unknown, locale: string): Templat
     status,
     description: typeof rec.description === 'string' ? rec.description : null,
     draft_revision: typeof rec.draft_revision === 'number' ? rec.draft_revision : 0,
-    draft_sha256: typeof rec.draft_sha256 === 'string' ? rec.draft_sha256 : null,
     draft_has_inputs: rec.draft_has_inputs === true ? true : rec.draft_has_inputs === false ? false : null,
     published_revision: typeof rec.published_revision === 'number' ? rec.published_revision : 0,
     published_at: typeof rec.published_at === 'string' ? rec.published_at : null,
@@ -503,12 +479,6 @@ export function templateSummaryFromServer(raw: unknown, locale: string): Templat
     name: '',
     names: {},
     schema_version: '2.0.0',
-    content_sha256:
-      typeof rec.revision === 'object' && rec.revision !== null && !Array.isArray(rec.revision)
-        ? (typeof (rec.revision as Record<string, unknown>).content_sha256 === 'string'
-            ? ((rec.revision as Record<string, unknown>).content_sha256 as string)
-            : '')
-        : (typeof rec.draft_sha256 === 'string' ? rec.draft_sha256 : ''),
     has_inputs: rec.draft_has_inputs === true,
   }
 }
@@ -523,8 +493,6 @@ export function templateRevisionFromServer(raw: unknown): TemplateSummary['revis
     id: typeof rec.id === 'string' ? rec.id : '',
     revision: rec.revision,
     schema_version: typeof rec.schema_version === 'string' ? rec.schema_version : '2.0.0',
-    content_sha256: typeof rec.content_sha256 === 'string' ? rec.content_sha256 : '',
-    inputs_sha256: typeof rec.inputs_sha256 === 'string' ? rec.inputs_sha256 : null,
     input_count: typeof rec.input_count === 'number' ? rec.input_count : 0,
     yaml_object_id: typeof rec.yaml_object_id === 'string' ? rec.yaml_object_id : '',
     receipt_object_id: typeof rec.receipt_object_id === 'string' ? rec.receipt_object_id : '',
@@ -537,7 +505,7 @@ export function templateRevisionFromServer(raw: unknown): TemplateSummary['revis
 /**
  * 模板草稿详情或精确 revision 详情 → 前端 TemplateDetail。
  * 精确 revision 接口将 revision 与 template 分列返回；这里把它合入 summary，
- * 使项目候选始终携带与 document 完全一致的 revision/hash。
+ * 使项目候选始终携带与 document 完全一致的 revision。
  */
 export function templateDetailFromServer(body: unknown, locale: string): TemplateDetail {
   const rec = asRecord(body)
@@ -575,14 +543,11 @@ export function projectModelFromServer(raw: unknown): ProjectModelSummary {
     suffix: typeof rec.suffix === 'number' ? rec.suffix : 0,
     revision: typeof rec.revision === 'number' ? rec.revision : 1,
     project_revision: typeof rec.project_revision === 'number' ? rec.project_revision : 0,
-    content_sha256: typeof rec.content_sha256 === 'string' ? rec.content_sha256 : '',
     model_object_id: typeof rec.model_object_id === 'string' ? rec.model_object_id : '',
     receipt_object_id: typeof rec.receipt_object_id === 'string' ? rec.receipt_object_id : '',
     source: rec.source === 'template' ? 'template' : 'direct_yaml',
     template_id: typeof rec.template_id === 'string' ? rec.template_id : null,
     template_revision: typeof rec.template_revision === 'number' ? rec.template_revision : null,
-    template_sha256: typeof rec.template_sha256 === 'string' ? rec.template_sha256 : null,
-    inputs_sha256: typeof rec.inputs_sha256 === 'string' ? rec.inputs_sha256 : null,
     created_by: typeof rec.created_by === 'string' ? rec.created_by : '',
     created_at: typeof rec.created_at === 'string' ? rec.created_at : null,
   }
@@ -592,8 +557,8 @@ export function projectModelFromServer(raw: unknown): ProjectModelSummary {
 export function savedModelFromServer(body: unknown): SavedModelInfo {
   const rec = asRecord(body)
   const model = asRecord(rec?.project_model)
-  if (!model || typeof model.device_id !== 'string' || typeof model.content_sha256 !== 'string') {
-    throw new MapperError('候选保存响应缺少 project_model.device_id / content_sha256')
+  if (!model || typeof model.device_id !== 'string') {
+    throw new MapperError('候选保存响应缺少 project_model.device_id')
   }
   // 摘要计数从校验回执读取(权威); 回执缺失时保持 0 计数
   const receipt = asRecord(rec?.receipt)
@@ -617,7 +582,6 @@ export function savedModelFromServer(body: unknown): SavedModelInfo {
     suffix: typeof model.suffix === 'number' ? model.suffix : 0,
     base_device_id: typeof model.base_device_id === 'string' ? model.base_device_id : model.device_id,
     schema_version: '2.0.0',
-    content_sha256: model.content_sha256,
     summary,
     project_revision: typeof rec?.project_revision === 'number' ? rec.project_revision : 0,
     source,
@@ -671,18 +635,17 @@ export function diagnosticsFromError(error: unknown): ModelDiagnostic[] {
 export function buildCandidateRequest(candidate: CandidateModel): CandidateSaveRequestDto {
   if (candidate.source === 'template') {
     if (!candidate.template_id) throw new MapperError('source=template 必须提供 template_id')
-    if (!candidate.template_revision || !candidate.template_sha256) {
-      throw new MapperError('source=template 必须提供 template_revision 与 template_sha256')
+    if (!candidate.template_revision) {
+      throw new MapperError('source=template 必须提供 template_revision')
     }
     return {
       source: 'template',
       model_yaml: '',
-      template_id: candidate.template_id,      template_revision: candidate.template_revision,
-      template_sha256: candidate.template_sha256,
+      template_id: candidate.template_id,
+      template_revision: candidate.template_revision,
       template_inputs: candidate.inputs_json ?? {},
       expected_revision: candidate.project_revision,
       idempotency_key: candidate.idempotency_key,
-      data_files: candidate.data_files,
     }
   }
   if (candidate.content_yaml === null || candidate.content_yaml.trim() === '') {
@@ -693,11 +656,9 @@ export function buildCandidateRequest(candidate: CandidateModel): CandidateSaveR
     model_yaml: candidate.content_yaml,
     template_id: null,
     template_revision: null,
-    template_sha256: null,
     template_inputs: null,
     expected_revision: candidate.project_revision,
     idempotency_key: candidate.idempotency_key,
-    data_files: candidate.data_files,
   }
 }
 

@@ -5,10 +5,19 @@ device:
   names:
     zh-CN: 电负荷
     en-US: Electric Load
-properties: {}
+properties:
+  peak_power_kw:
+    value: 0
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 10000000
 interfaces:
   electricity_demand:
     type: predefined
+    source:
+      mode: data_repeat
+      data_ref: data/electric_load.csv
     carrier: electricity
     unit: kW
     valid_range:

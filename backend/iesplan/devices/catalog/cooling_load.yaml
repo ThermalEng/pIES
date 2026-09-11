@@ -5,10 +5,19 @@ device:
   names:
     zh-CN: 冷负荷
     en-US: Cooling Load
-properties: {}
+properties:
+  peak_cooling_kw:
+    value: 0
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 10000000
 interfaces:
   cool_demand:
     type: predefined
+    source:
+      mode: data_repeat
+      data_ref: data/cooling_load.csv
     carrier: cool
     unit: kW
     valid_range:

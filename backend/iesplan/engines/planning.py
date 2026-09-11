@@ -24,7 +24,6 @@ from decimal import Decimal
 
 import numpy as np
 
-from iesplan.devices import get_device_descriptor as get_device_type
 from iesplan.core.timeaxis import TimeAxis
 from iesplan.engines.eval_run import (
     CAPACITY_PARAM,
@@ -301,18 +300,13 @@ def _with_capacities(plan: dict, caps: dict[str, float]) -> dict:
 def _compute_capex(new_devices: list[tuple[str, dict]], caps: dict[str, float]) -> float:
     """投资成本 CAPEX_0 = Σ c_i·C_i(固定费 F_i 默认 0,02 §4.8/§5.4)。
 
-    单价 c_i 优先取设备参数 unit_invest_cost; 参数缺失时回退注册表默认值
-    (设备创建只存显式参数, 注册表默认值不落库, 缺失会静默产出 0 投资额)。
+    单价 c_i 只取项目财务参数 ``unit_invest_cost``。设备技术模型不承载经济默认值。
     """
     capex = 0.0
     for tid, dev in new_devices:
         cap = caps.get(tid, 0.0)
         if cap <= 0:
             continue
-        raw = (dev.get("params") or {}).get("unit_invest_cost")
-        if raw is None:
-            spec = get_device_type(tid)
-            p = spec.parameters.get("unit_invest_cost")
-            raw = p.default if p is not None and p.default is not None else 0.0
+        raw = (dev.get("params") or {}).get("unit_invest_cost", 0.0)
         capex += float(raw) * cap
     return capex

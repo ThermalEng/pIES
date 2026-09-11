@@ -7,10 +7,8 @@
  *                                                        固定发布版详情
  *   GET  /api/projects/{pid}/models                      项目模型清单 → {project_models: [...]}
  *   POST /api/projects/{pid}/models/validate             候选模型门禁 → {valid, diagnostics}
- *   POST /api/projects/{pid}/models/temp-files           临时数据文件上传(multipart)
- *        → {temp_file: {object_id, oid, sha256, ...}, upload_id}
  *   POST /api/projects/{pid}/models                      正式保存:
- *        source=template: {template_id, template_revision, template_sha256, template_inputs}
+ *        source=template: {template_id, template_revision, template_inputs}
  *        source=yaml:     {model_yaml}
  *        成功 201 → {project_model, receipt, project_revision}; 失败 400 → 标准
  *        错误信封, params.diagnostics 为聚合诊断(message_key/字段路径/YAML 行列/
@@ -121,42 +119,5 @@ export async function saveCandidate(projectId: number, candidate: CandidateModel
       }
     }
     throw err
-  }
-}
-
-/** 临时数据文件上传(临时隔离区; 上传完成 ≠ 模型已保存)。 */
-export async function uploadTempDataFile(
-  projectId: number,
-  file: File,
-  dataRef: string,
-): Promise<{ temp_file: { object_id: string; sha256: string; size_bytes: number; oid: string }; upload_id: string }> {
-  const formData = new FormData()
-  formData.append('file', file)
-  formData.append('data_ref', dataRef)
-  const body = await request<unknown>(`/projects/${projectId}/models/temp-files`, {
-    method: 'POST',
-    formData,
-    timeoutMs: 0,
-  })
-  const rec =
-    body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null
-  const tf = rec?.temp_file as Record<string, unknown> | undefined
-  if (
-    !rec ||
-    typeof rec.upload_id !== 'string' ||
-    !tf ||
-    typeof tf.object_id !== 'string' ||
-    typeof tf.sha256 !== 'string'
-  ) {
-    throw new MapperError('POST /models/temp-files 响应缺少 temp_file/upload_id')
-  }
-  return {
-    temp_file: {
-      object_id: tf.object_id as string,
-      oid: typeof tf.oid === 'string' ? (tf.oid as string) : '',
-      sha256: tf.sha256 as string,
-      size_bytes: typeof tf.size_bytes === 'number' ? (tf.size_bytes as number) : 0,
-    },
-    upload_id: rec.upload_id as string,
   }
 }

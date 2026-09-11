@@ -18,7 +18,7 @@ from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKe
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, JSONB, bigint_pk, regex_check
+from iesplan.models.common import JSONB, bigint_pk
 
 
 class Project(Base):
@@ -37,12 +37,11 @@ class Project(Base):
     baseline_resolution: Mapped[str] = mapped_column(Text, nullable=False)
     baseline_leap_year: Mapped[bool] = mapped_column(Boolean, nullable=False)
     baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
-    baseline_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
     # 当前生效财务三件套/规划配置 revision 指针(0.6.5 条目 1-2):
     # finance_profiles / finance_overrides / effective_finance_revisions /
     # planning_configs 均仅 INSERT, 指针指向当前生效 revision(指针可移动);
-    # finance_profile_id 指向项目引用的已注册 Profile 主键(内容寻址),
+    # finance_profile_id 指向项目引用的已注册 Profile 主键,
     # overrides_revision 指向当前覆盖 revision(空 = 无覆盖, 空覆盖文档),
     # effective_finance_revision 指向合并器产出的有效快照 revision,
     # planning_revision 指向当前规划配置 revision。
@@ -72,10 +71,6 @@ class Project(Base):
             "baseline_scenario_mode IN ('single')",
             name="ck_projects_baseline_scenario",
         ),
-        regex_check(
-            f"baseline_sha256 ~ '{HASH64_RE}'",
-            name="ck_projects_baseline_sha256",
-        ),
         UniqueConstraint("name", name="uq_projects_name"),
         Index("idx_projects_status", "status"),
         Index("idx_projects_owner", "owner_id"),
@@ -90,7 +85,7 @@ class Draft(Base):
     id: Mapped[int] = bigint_pk()
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    content_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
     parent_draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id"))
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa.text("false"))
     updated_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
@@ -102,7 +97,6 @@ class Draft(Base):
     )
 
     __table_args__ = (
-        regex_check(f"content_hash ~ '{HASH64_RE}'", name="ck_drafts_content_hash"),
         UniqueConstraint("project_id", "revision", name="uq_drafts_revision"),
         Index(
             "uq_drafts_current",
@@ -137,10 +131,9 @@ class ProjectVersion(Base):
     baseline_resolution: Mapped[str] = mapped_column(Text, nullable=False)
     baseline_leap_year: Mapped[bool] = mapped_column(Boolean, nullable=False)
     baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
-    baseline_sha256: Mapped[str] = mapped_column(Text, nullable=False)
     currency: Mapped[str | None] = mapped_column(Text)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    content_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
 
     __table_args__ = (
         CheckConstraint(
@@ -151,12 +144,7 @@ class ProjectVersion(Base):
             "baseline_scenario_mode IN ('single')",
             name="ck_project_versions_baseline_scenario",
         ),
-        regex_check(
-            f"baseline_sha256 ~ '{HASH64_RE}'",
-            name="ck_project_versions_baseline_sha256",
-        ),
         CheckConstraint("currency IS NULL OR currency IN ('CNY','USD')", name="ck_project_versions_currency"),
-        regex_check(f"content_hash ~ '{HASH64_RE}'", name="ck_project_versions_content_hash"),
         UniqueConstraint("project_id", "version_no", name="uq_project_versions_version"),
         Index("idx_project_versions_parent", "parent_version_id"),
         Index("idx_project_versions_project", "project_id", sa.text("version_no DESC")),
@@ -173,7 +161,6 @@ class VersionRef(Base):
     ref_type: Mapped[str] = mapped_column(Text, nullable=False)
     object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
     ref_key: Mapped[str | None] = mapped_column(Text)
-    ref_hash: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
     )
@@ -184,7 +171,6 @@ class VersionRef(Base):
             "'evidence_package','report','object')",
             name="ck_version_refs_type",
         ),
-        regex_check("ref_hash IS NULL OR ref_hash ~ '^[0-9a-f]{64}$'", name="ck_version_refs_hash"),
         UniqueConstraint("project_version_id", "ref_type", "object_id", name="uq_version_refs_ref"),
         Index("idx_version_refs_object", "object_id"),
     )

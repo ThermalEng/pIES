@@ -4,9 +4,9 @@
 
 设计约定:
 - 草稿内容(模型/布局/数据集绑定/计算配置/语言/受控扩展清单)以规范化 JSON 文档
-  表示, 按内容寻址落盘(settings.data_dir/objects/<oid[:2]>/<oid>.json),
-  objects 表(经 iesplan.storage 公开门面)登记元数据; drafts.content_hash /
-  project_versions.content_hash 即内容校验值(sha256)。
+  表示, 经 iesplan.storage 公开门面落盘为对象存储对象(按对象 id 寻址);
+  drafts / project_versions 只持有明确的 content_object_id 外键(对象引用),
+  历史定位使用稳定 ID + revision, 不存储、不比对内容摘要。
   对象清理与配额维护属于存储运维职责（架构宪法 §10）。
   (模型/数据集/配置的权威数据由对应领域模块持久化；本层以内容文档
   作为草稿阶段自包含的契约载体，跨模块提交由 application 编排层统一完成。)
@@ -32,7 +32,6 @@ from sqlalchemy.orm import Session
 from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
-from iesplan.core.idgen import sha256_hex
 from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.models.audit import AuditLog
 from iesplan.models.calc import Task
@@ -175,7 +174,6 @@ def create_project(
         baseline_resolution=baseline.resolution,
         baseline_leap_year=baseline.leap_year,
         baseline_scenario_mode=baseline.scenario_mode,
-        baseline_sha256=baseline.digest(),
         schema_version=1,
         created_by=user.id,
     )
@@ -715,7 +713,7 @@ def create_version(
     draft = _get_current_draft(db, project)
     content = _load_draft_content(db, draft)
     version_content = _version_content(db, project, content)
-    content_hash = _store_content(db, version_content)
+    content_handle = _store_content(db, version_content)
 
     if parent_version_id is not None:
         parent_id = get_version(db, project_id, parent_version_id).id
@@ -735,22 +733,19 @@ def create_version(
         baseline_resolution=project.baseline_resolution,
         baseline_leap_year=project.baseline_leap_year,
         baseline_scenario_mode=project.baseline_scenario_mode,
-        baseline_sha256=project.baseline_sha256,
         currency=project.currency,
         schema_version=project.schema_version,
-        content_hash=content_hash,
+        content_object_id=content_handle.id,
     )
     db.add(version)
     db.flush()
     # 版本引用清单: 内容对象引用(版本自包含，domain-model §项目聚合/§对象生命周期)
-    obj = _get_object_by_oid(db, content_hash)
     db.add(
         VersionRef(
             project_version_id=version.id,
             ref_type="object",
-            object_id=obj["id"],
+            object_id=content_handle.id,
             ref_key="project_version_content",
-            ref_hash=content_hash,
         )
     )
     project.current_version_id = version.id
@@ -786,8 +781,9 @@ def current_version_matches_draft(db: Session, project: Project) -> bool:
         return False
     draft = _get_current_draft(db, project)
     content = _load_draft_content(db, draft)
-    raw = canonical_json(_version_content(db, project, content))
-    return sha256_hex(raw.encode("utf-8")) == version.content_hash
+    expected = canonical_json(_version_content(db, project, content)).encode("utf-8")
+    stored = _load_content_bytes(db, version.content_object_id)
+    return stored == expected
 
 
 def get_version(db: Session, project_id: int, version_id: int) -> ProjectVersion:
@@ -832,7 +828,7 @@ def restore_version(
             location={"object_type": "project", "object_id": project_id},
         )
     source = get_version(db, project_id, version_id)
-    content = _load_content_by_hash(db, source.content_hash)
+    content = _load_content_by_object_id(db, source.content_object_id)
     # 恢复内容中的命令簿记清空(新修订从干净状态开始; 与版本内容保持一致)
     content.pop("applied_commands", None)
     new_draft = _new_draft_row(db, project, content, user)
@@ -937,7 +933,6 @@ def project_to_dict(project: Project) -> dict:
             "resolution": project.baseline_resolution,
             "leap_year": project.baseline_leap_year,
             "scenario_mode": project.baseline_scenario_mode,
-            "sha256": project.baseline_sha256,
         },
         "schema_version": project.schema_version,
         "current_draft_id": project.current_draft_id,
@@ -953,7 +948,7 @@ def draft_to_dict(draft: Draft) -> dict:
     return {
         "id": draft.id,
         "revision": draft.revision,
-        "content_hash": draft.content_hash,
+        "content_object_id": draft.content_object_id,
         "parent_draft_id": draft.parent_draft_id,
         "updated_by": draft.updated_by,
         "updated_at": draft.updated_at,
@@ -981,18 +976,19 @@ def initial_content(language: str = "zh-CN") -> dict:
     return _initial_content(language)
 
 
-def store_content_object(db: Session, content: dict) -> str:
-    """内容字典 → 内容寻址对象, 返回 content_hash(草稿内容写入方的统一入口)。
+def store_content_object(db: Session, content: dict) -> int:
+    """内容字典 → 对象存储对象, 返回对象 id(草稿内容写入方的统一入口)。
 
-    相同内容的重复写入按 oid 去重并递增引用计数(对象清理由 U11/U16 负责);
-    与 _store_content 一致, 供校验/模型等单元复用, 避免各写入方自行落盘。
+    每次写入新建对象行(无内容去重), 对象清理
+    由存储运维负责; 与 _store_content 一致, 供校验/模型等单元复用, 避免
+    各写入方自行落盘。
     """
-    return _store_content(db, content)
+    return _store_content(db, content).id
 
 
-def load_content_object(db: Session, content_hash: str) -> dict:
-    """按内容校验值读取内容对象(对象缺失/哈希不符抛 AppError)。"""
-    return _load_content_by_hash(db, content_hash)
+def load_content_object(db: Session, content_object_id: int) -> dict:
+    """按对象 id 读取内容对象(对象缺失/损坏抛 AppError)。"""
+    return _load_content_by_object_id(db, content_object_id)
 
 
 def version_to_dict(version: ProjectVersion) -> dict:
@@ -1013,11 +1009,10 @@ def version_to_dict(version: ProjectVersion) -> dict:
             "resolution": version.baseline_resolution,
             "leap_year": version.baseline_leap_year,
             "scenario_mode": version.baseline_scenario_mode,
-            "sha256": version.baseline_sha256,
         },
         "currency": version.currency,
         "schema_version": version.schema_version,
-        "content_hash": version.content_hash,
+        "content_object_id": version.content_object_id,
     }
 
 
@@ -1053,8 +1048,8 @@ def replace_project_model_refs(
     """以项目模型清单的权威快照推进草稿修订。
 
     项目模型文件与清单由 application/projects 用例原子保存；本函数只拥有项目
-    草稿事实，执行乐观锁并把不透明模型 ID、device_id、revision 与内容摘要写入
-    新草稿。调用方与本函数共享同一数据库事务。
+    草稿事实，执行乐观锁并把项目模型清单引用(不透明模型 ID、device_id、
+    revision)写入新草稿。调用方与本函数共享同一数据库事务。
     """
     ensure_access(db, user, project_id, "edit")
     project = _get_project(db, project_id)
@@ -1078,145 +1073,6 @@ def replace_project_model_refs(
     )
     db.flush()
     return new_draft
-
-
-# ---------------------------------------------------------------------------
-# 0.6.5 退役清理: 旧序列预备(sequence_prep)路径残留的一次性清理
-# ---------------------------------------------------------------------------
-
-#: 旧序列预备写入草稿内容的清单键(0.6.5 已退役; 新代码不读取该键)
-LEGACY_PREP_DRAFT_KEY: str = "prepared_sequences"
-#: 旧序列预备产物 owner 引用 purpose 前缀(已退役; 新代码不建立/不消费)
-LEGACY_PREP_PURPOSE_PREFIX: str = "sequence_prep:"
-#: 旧序列预备产物挂载的实体类型(与 project_model 最终 owner 一致)
-LEGACY_PREP_ENTITY_TYPE: str = "project_model"
-
-
-def purge_legacy_sequence_prep(db: Session, *, dry_run: bool = True) -> dict[str, Any]:
-    """一次性清理 0.6.5 退役的旧序列预备路径残留(幂等, 只离线执行)。
-
-    旧 ``sequence_prep`` 路径(本版本已整体删除)会把装配前预备清单写入草稿
-    内容的 ``prepared_sequences`` 键, 并把预备产物以 ``sequence_prep:*``
-    目的挂到项目模型清单行。本函数只处理这些历史落盘痕迹; 退役后不存在任何
-    运行期读取(不双读、不兼容转发), 调用方只应通过离线 CLI 执行:
-
-    - 草稿: 扫描全部草稿内容对象; 当前草稿含键的移除该键, 按内容寻址推进
-      一条新草稿行(更新者取项目所有者, 与项目创建/修订链同语义并写审计);
-      历史(非当前)草稿与版本内容属不可变证据, 只计入回执、不做改写;
-      已软删项目的历史草稿不再推进修订(项目不可复活), 计入回执跳过清理;
-    - 对象引用: 解绑全部 ``sequence_prep:*`` 目的引用, 对象随后进入
-      orphaned 生命周期, 物理回收由存储运维 ``safe_cleanup`` 负责;
-    - ``dry_run=True`` 只扫描与报告, 不做任何写入(回执字段与执行路径一致)。
-
-    回执字段: ``schema/dry_run/generated_at/drafts_scanned/drafts_with_key/
-    current_drafts_cleaned/historical_drafts_with_key/deleted_project_drafts/
-    versions_scanned/versions_with_key/prep_refs_found/prep_refs_detached/
-    prep_object_ids/cleaned_projects``。幂等: 重复执行时当前草稿无键、无新
-    修订推进、无重复解绑(历史草稿/版本内容因不可变证据要求始终计入扫描计数)。
-    """
-    from iesplan.storage import ReferenceNotFoundError as StorageRefNotFound
-    from iesplan.storage import detach as storage_detach
-    from iesplan.storage import find_refs_by_entity_type
-
-    drafts = list(
-        db.execute(
-            select(Draft).order_by(Draft.project_id, Draft.revision)
-        ).scalars()
-    )
-    versions = list(
-        db.execute(
-            select(ProjectVersion).order_by(ProjectVersion.project_id, ProjectVersion.version_no)
-        ).scalars()
-    )
-
-    def _content_has_key(content_hash: str) -> bool:
-        try:
-            content = _load_content_by_hash(db, content_hash)
-        except AppError:  # 历史对象缺失/损坏: 跳过(数据损坏不阻断清理)
-            return False
-        return content.get(LEGACY_PREP_DRAFT_KEY) is not None
-
-    dirty_drafts = [draft for draft in drafts if _content_has_key(draft.content_hash)]
-    current_dirty = [draft for draft in dirty_drafts if draft.is_current]
-    historical_dirty = [draft for draft in dirty_drafts if not draft.is_current]
-    versions_with_key = [version for version in versions if _content_has_key(version.content_hash)]
-
-    prep_refs = [
-        ref for ref in find_refs_by_entity_type(db, LEGACY_PREP_ENTITY_TYPE)
-        if str(ref.get("purpose") or "").startswith(LEGACY_PREP_PURPOSE_PREFIX)
-    ]
-
-    # 预分类(不分 dry/apply): 当前脏草稿按项目是否存活区分
-    # "可清理" = 项目存在且未软删(修订链继续, 推进新草稿行); "软删跳过" =
-    # 项目缺失或已软删(修订链冻结, 只解绑预备产物引用, 不复活项目草稿)。
-    def _alive(draft_id: int) -> bool:
-        row = db.get(Project, draft_id)
-        return row is not None and row.status != "deleted"
-
-    cleanable_current = [draft for draft in current_dirty if _alive(draft.project_id)]
-    deleted_current = [draft for draft in current_dirty if not _alive(draft.project_id)]
-    deleted_project_drafts = [draft.id for draft in deleted_current]
-
-    cleaned_projects: list[int] = []
-    detached: list[dict[str, Any]] = []
-    if not dry_run:
-        for draft in cleanable_current:
-            project = db.get(Project, draft.project_id)
-            content = _load_draft_content(db, draft)
-            removed = content.pop(LEGACY_PREP_DRAFT_KEY, None)
-            owner = db.get(User, project.owner_id)
-            if owner is None:  # 项目所有者缺失: 数据损坏, 不静默改签
-                raise AppError(
-                    "项目所有者缺失(数据损坏)",
-                    code=SYS_STORE_CORRUPT,
-                    severity=SEVERITY_ERROR,
-                    message_key="ies.diag.store.corrupt",
-                    location={"object_type": "project", "object_id": project.id},
-                )
-            new_draft = _new_draft_row(db, project, content, owner)
-            _audit(
-                db,
-                "project",
-                project.id,
-                "project.sequence_prep_legacy_purged",
-                project.owner_id,
-                after={
-                    "revision": new_draft.revision,
-                    "removed_prepared_sequences": removed is not None,
-                    "schema": "ies.cleanup.sequence_prep@1.0.0",
-                },
-            )
-            cleaned_projects.append(project.id)
-        for ref in prep_refs:
-            try:
-                owner_id = int(ref["ref_entity_id"])
-            except (TypeError, ValueError):  # 非法 owner 标识不属本清理(防御)
-                continue
-            try:
-                storage_detach(
-                    db, ref["object_id"], ref["ref_type"], owner_id,
-                    ref_entity_type=ref["ref_entity_type"],
-                )
-            except StorageRefNotFound:  # 引用已被其他路径解绑: 幂等跳过
-                continue
-            detached.append(ref)
-    receipt = {
-        "schema": "ies.cleanup.sequence_prep@1.0.0",
-        "dry_run": dry_run,
-        "generated_at": datetime.now(UTC).isoformat(),
-        "drafts_scanned": len(drafts),
-        "drafts_with_key": len(dirty_drafts),
-        "current_drafts_cleaned": len(cleanable_current),
-        "deleted_project_drafts": sorted(deleted_project_drafts),
-        "historical_drafts_with_key": len(historical_dirty),
-        "versions_scanned": len(versions),
-        "versions_with_key": len(versions_with_key),
-        "prep_refs_found": len(prep_refs),
-        "prep_refs_detached": len(detached),
-        "prep_object_ids": sorted({str(ref["object_id"]) for ref in detached}),
-        "cleaned_projects": sorted(cleaned_projects),
-    }
-    return receipt
 
 
 def _get_current_draft(db: Session, project: Project) -> Draft:
@@ -1243,7 +1099,7 @@ def _new_draft_row(db: Session, project: Project, content: dict, user: User) -> 
 
     旧当前草稿置 is_current=false; 更新项目 current_draft_id 指针。
     """
-    content_hash = _store_content(db, content)
+    content_handle = _store_content(db, content)
     old = db.execute(
         select(Draft)
         .where(Draft.project_id == project.id, Draft.is_current.is_(True))
@@ -1258,7 +1114,7 @@ def _new_draft_row(db: Session, project: Project, content: dict, user: User) -> 
     draft = Draft(
         project_id=project.id,
         revision=(max_revision or 0) + 1,
-        content_hash=content_hash,
+        content_object_id=content_handle.id,
         parent_draft_id=old.id if old is not None else None,
         is_current=True,
         updated_by=user.id,
@@ -1306,8 +1162,9 @@ def _version_content(db: Session, project: Project, content: dict) -> dict:
     """版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(domain-model §项目聚合)。
 
     固化字段: 币种、项目计算基线、以及**财务三件套/规划配置引用**(0.6.5
-    条目 2, 目标四闭合): 版本自包含 Effective 三内容摘要与规划配置摘要,
-    历史版本不随当前配置解释; 项目未生成有效财务快照时 finance 块省略
+    条目 2, 目标四闭合): 版本自包含 Effective 与规划配置引用(profile_id /
+    revision), 不存业务文本摘要, 历史版本不随当前配置解释;
+    项目未生成有效财务快照时 finance 块省略
     (与无配置项目包同语义, 不静默默认)。
     """
     version_content = {k: v for k, v in content.items() if k != "applied_commands"}
@@ -1316,10 +1173,9 @@ def _version_content(db: Session, project: Project, content: dict) -> dict:
         "resolution": project.baseline_resolution,
         "leap_year": project.baseline_leap_year,
         "scenario_mode": project.baseline_scenario_mode,
-        "sha256": project.baseline_sha256,
     }
-    # 财务三件套引用闭合: 版本固化当前 Effective 血缘(Effective 内容摘要 +
-    # profile_id/profile_sha256/overrides_sha256), 装配/财务计算只消费该快照。
+    # 财务三件套引用闭合: 版本固化当前 Effective 血缘(profile_id +
+    # Effective revision 显式引用), 装配/财务计算只消费该快照。
     from iesplan.services.config_revisions import get_effective_finance_config
     from iesplan.core.errors import NotFoundError
 
@@ -1331,8 +1187,8 @@ def _version_content(db: Session, project: Project, content: dict) -> dict:
         version_content["effective_finance"] = {
             "profile_id": effective.profile_id,
         }
-    # 规划配置引用闭合: 版本固化当前规划配置摘要
-    # 已指向被固化 Effective)。
+    # 规划配置引用闭合: 版本固化当前规划配置 revision(规划行本身
+    # 已指向被固化 Effective)。文本只校验字头, 不存业务文本摘要。
     from iesplan.services.config_revisions import get_planning_config
 
     try:
@@ -1342,54 +1198,52 @@ def _version_content(db: Session, project: Project, content: dict) -> dict:
     if planning is not None:
         version_content["planning_config"] = {
             "revision": planning.revision,
-            # finance_content_sha256 已移除（文本只校验字头）
-
         }
     return version_content
 
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# 内容寻址对象存储(草稿/版本内容载体; 实现经 iesplan.storage 公开门面，架构宪法 §10)
+# 对象存储写入(草稿/版本内容载体; 实现经 iesplan.storage 公开门面，架构宪法 §10)
 # ---------------------------------------------------------------------------
 
 
-def _store_content(db: Session, content: dict) -> str:
-    """规范化 JSON → 内容寻址对象(架构宪法 §10/§12、domain-model §对象生命周期)，返回 content_hash。
+def _store_content(db: Session, content: dict):
+    """规范化 JSON → 对象存储对象(架构宪法 §10/§12、domain-model §对象生命周期)，返回对象句柄。
 
-    相同内容的重复写入按 sha256 去重(对象行复用, owner 引用仍单独建立)。
+    每次写入新建对象行(无内容去重)。
     storage_path 的解释/分桶/临时文件全部由 iesplan.storage 内部实现,
     本模块不拼路径、不导入 StoredObject ORM。
     """
-    from iesplan.storage import put_object
+    from iesplan.storage import attach, put_object
 
     raw = canonical_json(content)
-    content_hash = sha256_hex(raw.encode("utf-8"))
-    put_object(
+    handle = put_object(
         db, raw.encode("utf-8"), "application/json",
         source_category="project_content",
-        ref_type="draft_content", ref_id=content_hash, ref_entity_type="drafts",
-        purpose="草稿内容文档(内容寻址)",
     )
-    return content_hash
+    # owner 引用(对象生命周期权威事实): 草稿/版本内容对象不可清理;
+    # 引用键为稳定的对象 id(重复写入幂等复用同一引用行)。
+    attach(
+        db, handle.id, "draft_content", handle.id, ref_entity_type="drafts",
+        purpose="草稿内容文档",
+    )
+    return handle
 
 
-def _load_content_by_hash(db: Session, content_hash: str) -> dict:
-    """按内容标识读取内容对象。
-
-    storage 公开门面负责对象存储边界的大小与摘要校验，此处不重复计算。
-    """
+def _load_content_bytes(db: Session, content_object_id: int) -> bytes:
+    """按对象 id 读取内容字节(对象缺失/损坏抛 AppError)。"""
     from iesplan.storage import ObjectCorruptError, get_object
 
     try:
-        raw = get_object(db, content_hash)
+        return get_object(db, content_object_id)
     except NotFoundError as exc:
         raise AppError(
             "内容对象缺失(数据损坏)",
             code=SYS_STORE_CORRUPT,
             severity=SEVERITY_ERROR,
             message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_hash},
+            location={"object_type": "object", "object_id": content_object_id},
         ) from exc
     except ObjectCorruptError as exc:
         raise AppError(
@@ -1397,8 +1251,13 @@ def _load_content_by_hash(db: Session, content_hash: str) -> dict:
             code=SYS_STORE_CORRUPT,
             severity=SEVERITY_ERROR,
             message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_hash},
+            location={"object_type": "object", "object_id": content_object_id},
         ) from exc
+
+
+def _load_content_by_object_id(db: Session, content_object_id: int) -> dict:
+    """按对象 id 读取内容对象。"""
+    raw = _load_content_bytes(db, content_object_id)
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
@@ -1419,24 +1278,8 @@ def _load_content_by_hash(db: Session, content_hash: str) -> dict:
 
 
 def _load_draft_content(db: Session, draft: Draft) -> dict:
-    """读取草稿内容文档(按草稿 content_hash 取内容对象)。"""
-    return _load_content_by_hash(db, draft.content_hash)
-
-
-def _get_object_by_oid(db: Session, oid: str) -> dict:
-    """按内容校验值解析对象元数据(经 storage 公开门面, 返回句柄 dict，架构宪法 §10)。"""
-    from iesplan.storage import object_info
-
-    handle = object_info(db, oid)
-    if handle is None:
-        raise AppError(
-            "内容对象缺失(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": oid},
-        )
-    return handle
+    """读取草稿内容文档(按草稿 content_object_id 取内容对象)。"""
+    return _load_content_by_object_id(db, draft.content_object_id)
 
 
 def _audit(

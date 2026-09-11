@@ -21,7 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, JSONB, bigint_pk, regex_check
+from iesplan.models.common import JSONB, bigint_pk
 
 
 class Dataset(Base):
@@ -72,7 +72,6 @@ class DatasetVersion(Base):
     quality_report: Mapped[dict | None] = mapped_column(JSONB)
     provenance: Mapped[dict | None] = mapped_column(JSONB)
     license: Mapped[str | None] = mapped_column(Text)
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -87,14 +86,13 @@ class DatasetVersion(Base):
         CheckConstraint(
             "fixed_utc_offset_minutes BETWEEN -720 AND 840", name="ck_dataset_versions_utc_offset"
         ),
-        regex_check(f"content_hash ~ '{HASH64_RE}'", name="ck_dataset_versions_content_hash"),
         UniqueConstraint("dataset_id", "version_no", name="uq_dataset_versions_version"),
         Index("idx_dataset_versions_dataset", "dataset_id", sa.text("version_no DESC")),
     )
 
 
 class DatasetFile(Base):
-    """数据集版本文件(指向内容寻址对象, 不可变, 01 §5.3)。"""
+    """数据集版本文件(指向对象存储对象, 按对象 id 寻址, 不可变, 01 §5.3)。"""
 
     __tablename__ = "dataset_files"
 

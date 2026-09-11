@@ -18,7 +18,6 @@ import { useNavigate, useOutletContext } from 'react-router-dom'
 import { api } from '../api/client'
 import { translateError, useI18n } from '../i18n'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
-import { formatUtcOffset } from './workbench'
 import {
   Alert,
   Badge,
@@ -40,7 +39,7 @@ import {
   TaskStatusBadge,
 } from '../components/ui'
 import { ApiError } from '../types'
-import type { Currency, Project, ProjectListParams, Task } from '../types'
+import type { BaselineResolution, Currency, Project, ProjectListParams, Task } from '../types'
 
 type StatusFilter = 'all' | 'active' | 'archived'
 type RowOp = 'archive' | 'unarchive' | 'delete'
@@ -52,8 +51,8 @@ interface Notice {
 
 const PAGE_SIZE = 50
 
-/** 常用 UTC 偏移(小时,-12:00 ~ +14:00),创建对话框候选值;默认 +08:00(480 分钟)。 */
-const UTC_OFFSET_HOURS: number[] = Array.from({ length: 27 }, (_, i) => i - 12)
+/** 项目计算基线分辨率候选(创建后不可修改);默认 1h。 */
+const BASELINE_RESOLUTIONS: BaselineResolution[] = ['15min', '30min', '1h']
 
 export default function ProjectsPage() {
   const { t } = useI18n()
@@ -75,7 +74,7 @@ export default function ProjectsPage() {
   const [createOpen, setCreateOpen] = useState(false)
   const [createName, setCreateName] = useState('')
   const [createCurrency, setCreateCurrency] = useState<Currency>('CNY')
-  const [createOffset, setCreateOffset] = useState(480)
+  const [createResolution, setCreateResolution] = useState<BaselineResolution>('1h')
   const [createNameError, setCreateNameError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
 
@@ -220,12 +219,14 @@ export default function ProjectsPage() {
       await api.projects.create({
         name,
         currency: createCurrency,
-        fixed_utc_offset_minutes: createOffset,
+        baseline_resolution: createResolution,
+        baseline_leap_year: false,
+        baseline_scenario_mode: 'single',
       })
       setCreateOpen(false)
       setCreateName('')
       setCreateCurrency('CNY')
-      setCreateOffset(480)
+      setCreateResolution('1h')
       setNotice({ kind: 'success', text: t('ies.project.create_ok') })
       await loadProjects(false, true)
     } catch (err) {
@@ -489,16 +490,17 @@ export default function ProjectsPage() {
             <option value="USD">{t('ies.project.currency_usd')}</option>
           </Select>
         </FormField>
-        <FormField label={t('ies.project.utc_offset')} htmlFor="pp-create-offset">
-          <Select id="pp-create-offset" value={createOffset} onChange={(event) => setCreateOffset(Number(event.target.value))}>
-            {UTC_OFFSET_HOURS.map((h) => {
-              const minutes = h * 60
-              return (
-                <option key={minutes} value={minutes}>
-                  {formatUtcOffset(minutes)}
-                </option>
-              )
-            })}
+        <FormField label={t('ies.project.baseline_resolution')} htmlFor="pp-create-resolution">
+          <Select
+            id="pp-create-resolution"
+            value={createResolution}
+            onChange={(event) => setCreateResolution(event.target.value as BaselineResolution)}
+          >
+            {BASELINE_RESOLUTIONS.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
           </Select>
         </FormField>
       </Dialog>

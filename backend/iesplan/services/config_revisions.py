@@ -1,7 +1,7 @@
 """财务三件套与规划配置 revision 服务(0.6.5 条目 1-2;替换旧单体 FinanceConfig)。
 
 职责:
-- Profile 登记: 地区 FinanceProfile 注册表(内容寻址, 复用; 每次登记新行);
+- Profile 登记: 地区 FinanceProfile 注册表(按 profile_id 复用; 每次登记新行);
 - Overrides 保存: 追加不可变 revision(finance_overrides, 仅 INSERT)并更新
   项目指针; revision 号单调递增; 引用 Profile {id};
 - Effective 生成/保存: 保存 Overrides 后由确定性合并器
@@ -101,7 +101,8 @@ def register_finance_profile(
     """登记地区 FinanceProfile 到注册表。
 
     - 严格恢复(FinanceProfile.from_dict: 拒未知/缺失字段);
-    - YAML 完整字节写入对象并建立稳定 owner 引用(防 orphan 清理);
+    - 注册表按 profile_id 唯一: 同 id 已存在即复用既有行(不改写内容);
+    - 新登记时 YAML 完整字节写入对象并建立稳定 owner 引用(防 orphan 清理);
     - 任何校验失败 → 不落任何行。
     """
     try:
@@ -112,15 +113,15 @@ def register_finance_profile(
             code=_triplet_error_code(exc), params={"detail": str(exc)},
         ) from exc
     existing = db.execute(
-        select(FinanceProfileRow).where(
-            FinanceProfileRow.profile_id == profile.profile_id,
-        )
+        select(FinanceProfileRow)
+        .where(FinanceProfileRow.profile_id == profile.profile_id)
+        .order_by(FinanceProfileRow.id.desc())
+        .limit(1)
     ).scalar_one_or_none()
-    # 文本文件只校验字头，不做内容摘要去重；同 profile_id 存在即复用最新行（按指导文件简化）
+    # 注册表按 profile_id 唯一(0007 起): 同 id 已存在即复用既有行, 不改写
+    # 内容(文本文件只校验字头, 不做内容摘要去重); 返回既有行规范内容。
     if existing is not None:
-        # 若内容相同可复用，否则仍返回既有行（不重复落对象由调用方决定）
-        if existing.content == profile.to_dict():
-            return existing, profile
+        return existing, FinanceProfile.from_dict(existing.content)
     obj = put_object(
         db, _profile_yaml_bytes(profile), "application/yaml",
         source_category="finance_profile",
@@ -145,33 +146,15 @@ def register_finance_profile(
     db.flush()
     return row, profile
 
-def get_finance_profile(
+def get_finance_profile_by_ref(
     db: Session, profile_id: str
 ) -> tuple[FinanceProfileRow, FinanceProfile]:
-    """读取注册 Profile(按稳定 profile_id 取最新登记; 不存在 → 404)。"""
+    """按 {id} 取注册 Profile(同 id 多次登记取最新行; 不存在 → 404)。文本文件只校验字头。"""
     row = db.execute(
         select(FinanceProfileRow)
         .where(FinanceProfileRow.profile_id == profile_id)
         .order_by(FinanceProfileRow.id.desc())
         .limit(1)
-    ).scalar_one_or_none()
-    if row is None:
-        raise NotFoundError(
-            "FinanceProfile 未登记",
-            params={"profile_id": profile_id},
-            location={"object_type": "finance_profile", "object_id": profile_id},
-        )
-    profile = FinanceProfile.from_dict(row.content)
-    return row, profile
-
-def get_finance_profile_by_ref(
-    db: Session, profile_id: str
-) -> tuple[FinanceProfileRow, FinanceProfile]:
-    """按 {id} 取注册 Profile(不存在 → 404)。文本文件只校验字头。"""
-    row = db.execute(
-        select(FinanceProfileRow).where(
-            FinanceProfileRow.profile_id == profile_id,
-        )
     ).scalar_one_or_none()
     if row is None:
         raise NotFoundError(
@@ -229,7 +212,7 @@ def _set_project_profile(
     """项目引用已注册 Profile(更新当前 Profile 指针; Overrides/Effective/Planning 一并失效)。"""
     if project.finance_profile_id != profile_row.id:
         project.finance_profile_id = profile_row.id
-        # Profile 变更后既有 Overrides/Effective 基于旧 Profile, 摘要链不再成立:
+        # Profile 行变更后既有 Overrides/Effective 基于旧行, 显式 revision 引用不再成立:
         # 按失败原子清空指针(不静默保留失效快照, 宪法 2.2/4.6)。
         project.overrides_revision = None
         project.effective_finance_revision = None
@@ -333,8 +316,8 @@ def save_finance_overrides(
        price_id);
     3. 乐观锁: expected_revision 必须等于项目当前 overrides_revision
        (None=首次, 空覆盖文档语义; 不匹配 → 409);
-    4. 追加 Overrides revision(空覆盖 = 显式空文档, overrides_sha256 = 空
-       覆盖摘要);
+    4. 追加 Overrides revision(空覆盖 = 显式空文档; 版本链以显式 revision
+       引用, 不计算业务文本摘要);
     5. 从 Profile + 新 Overrides 确定性合并 → 追加 Effective revision →
        更新项目 overrides_revision + effective_finance_revision;
     6. 任何新 Effective 生成都会使当前 planning 指针失效(历史行保留,

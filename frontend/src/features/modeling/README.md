@@ -24,11 +24,10 @@ pages/model/NewModelPage.tsx        # 路由级组合(模板页签 + YAML 页签
 
 | 状态 | 含义 |
 |---|---|
-| `editing` | 编辑中: 候选内容在本地表单, 未提交; 数据文件仅临时隔离区 |
-| `temporary_uploaded` | 临时已上传: 至少一个 data 字段上传了临时文件(≠ 模型已保存) |
+| `editing` | 编辑中: 候选内容在本地表单, 未提交 |
 | `validating` | 校验中: 已提交候选, 等待后端完整校验 |
 | `validation_failed` | 校验失败: 后端聚合诊断展示, 输入保留, 未分配编号, 未保存 |
-| `saved` | 正式已保存: 以后端返回的最终 `_N` ID / 规范 YAML / 摘要 / 项目 revision 替换编辑状态 |
+| `saved` | 正式已保存: 以后端返回的最终 `_N` ID / 规范 YAML / 项目 revision 替换编辑状态 |
 
 前端不预分配 `_1`/`_2` 编号; 只有 `saved` 才进入项目模型列表并允许进入装配。
 传输/服务器错误与"校验不过"区分: 前者保持 `editing` 并展示重试入口, 不显示保存成功。
@@ -41,12 +40,11 @@ pages/model/NewModelPage.tsx        # 路由级组合(模板页签 + YAML 页签
 |---|---|---|---|
 | `GET /api/model-templates/catalog` | — | `{items: [TemplateSummary]}` | 错误信封 |
 | `GET /api/model-templates/{id}` | — | `{template, document, diagnostics}` | 错误信封 |
-| `POST /api/projects/{pid}/models/validate` | `{source, model_yaml?, template_id?, template_revision?, template_sha256?, template_inputs?}` | `{valid, diagnostics}` | 错误信封 |
-| `POST /api/projects/{pid}/models` | 同上 + `{expected_revision, idempotency_key, data_files}` | `201 {project_model, receipt, project_revision}` | `400` 错误信封, `params.diagnostics` 为聚合诊断 |
-| `POST /api/projects/{pid}/models/temp-files` | multipart `file` + `data_ref` | `201 {temp_file, upload_id}` | 错误信封 |
+| `POST /api/projects/{pid}/models/validate` | `{source, model_yaml?, template_id?, template_revision?, template_inputs?}` | `{valid, diagnostics}` | 错误信封 |
+| `POST /api/projects/{pid}/models` | 同上 + `{expected_revision, idempotency_key}` | `201 {project_model, receipt, project_revision}` | `400` 错误信封, `params.diagnostics` 为聚合诊断 |
 
-e2e 场景 12 跑真实后端全链路(模板目录 → 表单 → 数据文件内容锁失败诊断 →
-修正 → 保存 `_N` → YAML 直接保存), 不再使用 `page.route` mock。
+e2e 场景 12 跑真实后端全链路(模板目录 → 表单填写项目相对 CSV 路径 →
+保存 `_N` → YAML 直接保存), 不再使用 `page.route` mock。
 
 ## 已知边界
 
@@ -54,6 +52,5 @@ e2e 场景 12 跑真实后端全链路(模板目录 → 表单 → 数据文件�
   编辑(不静默丢弃);
 - 模板详情中的 `document` 以已解析的嵌套 JSON 对象传输(后端门面解析), 表单回显/
   提交只消费已解析的 `inputs` 树与 `raw` 引用;
-- 数据文件上传为临时隔离区占位: `data_files` 携带 `{data_ref, upload_id,
-  object_id, sha256}`, 由后端在完整校验阶段做内容锁绑定(摘要不匹配 → 400 聚合
-  诊断, 数据区校验按基础文档、落盘字节绑定最终 `_N` 模型)。
+- `data_repeat` / `data_predict` 输入直接填写项目目录中的相对 CSV 路径；候选保存
+  不上传、复制或绑定数据文件。

@@ -1,7 +1,7 @@
 /**
  * SavedModelPanel: 正式保存成功面板。
  *
- * 以后端返回为权威: 最终 _N ID、内容摘要(SHA-256)、摘要计数、项目 revision。
+ * 以后端返回为权威: 最终 _N ID、摘要计数、项目 revision。
  * 前端不预分配编号; 只有此时模型才进入项目模型列表并允许进入装配。
  * (保存响应不含规范 YAML 文本, 面板不提供空内容的"展开"入口。)
  */
@@ -29,10 +29,6 @@ export function SavedModelPanel({ saved }: SavedModelPanelProps) {
         <div className="ies-modeling__saved-field">
           <span className="ies-modeling__saved-label">{pt('ies.modeling.saved.revision')}</span>
           <span>{saved.project_revision}</span>
-        </div>
-        <div className="ies-modeling__saved-field">
-          <span className="ies-modeling__saved-label">{pt('ies.modeling.saved.sha256')}</span>
-          <code className="ies-modeling__saved-hash">{saved.content_sha256}</code>
         </div>
         <div className="ies-modeling__saved-field">
           <span className="ies-modeling__saved-label">{pt('ies.modeling.saved.summary')}</span>

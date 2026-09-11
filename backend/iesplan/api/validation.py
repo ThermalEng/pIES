@@ -4,7 +4,7 @@
 - POST  /api/projects/{project_id}/validation/run            执行完整预检(模型/数据/配置/财务基准确认/就绪),
                                                              返回 ValidationReport 并持久化最近报告
 - POST  /api/projects/{project_id}/validation/baseline-confirm  记录财务基准确认({assumptions: dict},
-                                                             确认人/时间/内容校验)
+                                                             确认人/时间)
 - GET   /api/projects/{project_id}/validation                最近一次校验报告(未持久化时现场执行)
 
 认证说明: 统一使用 U01 身份单元提供的窗口会话认证
@@ -37,7 +37,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 
 
 class BaselineConfirmRequest(BaseModel):
-    """财务基准确认请求体(宪法 §16 + domain-model §对象生命周期: 关键假设, 服务端计算内容完整性校验值)。"""
+    """财务基准确认请求体(宪法 §16 + domain-model §对象生命周期: 关键假设)。"""
 
     assumptions: dict[str, Any] = Field(
         default_factory=dict,
@@ -54,7 +54,7 @@ class BaselineConfirmRequest(BaseModel):
 def run_validation(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """执行完整预检(校验门禁): 一次返回全部诊断, 阻断则 blocks_submit=true。
 
-    报告持久化为内容寻址对象(ref_type='report'), GET /validation 可读取最近报告。
+    报告持久化为对象存储对象(ref_type='report'), GET /validation 可读取最近报告。
     """
     project_service.ensure_access(db, user, project_id, "view")
     report = validation_service.validate_project(db, project_id)
@@ -70,19 +70,14 @@ def baseline_confirm(
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
-    """记录财务基准确认(确认人/时间/内容完整性校验, 追加式审计, 不可覆盖)。
-
-    服务端计算假设内容的 sha256 校验值并连同确认人/时间写入审计日志。
-    """
+    """记录财务基准确认(确认人/时间, 追加式审计, 不可覆盖)."""
     project_service.ensure_access(db, user, project_id, "edit")
-    digest = validation_service.hash_assumptions(body.assumptions)
     record = validation_service.mark_baseline_confirmed(
-        db, project_id, user, digest, assumptions=body.assumptions
+        db, project_id, user, assumptions=body.assumptions
     )
     db.commit()
     return {
         "confirmed": True,
-        "assumptions_hash": digest,
         "confirmed_by": (record.after or {}).get("confirmed_by"),
         "confirmed_at": (record.after or {}).get("confirmed_at"),
     }

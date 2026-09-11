@@ -225,16 +225,6 @@
   font-family: var(--ies-font-mono);
 }
 
-.ies-modeling__data-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.ies-modeling__file-input {
-  display: none;
-}
-
 /* 数组编辑器 */
 .ies-modeling__array {
   border: 1px solid var(--ies-color-border);
@@ -408,12 +398,6 @@
 .ies-modeling__saved-label {
   color: var(--ies-color-text-muted);
   font-size: var(--ies-fs-xs);
-}
-
-.ies-modeling__saved-hash {
-  font-family: var(--ies-font-mono);
-  font-size: var(--ies-fs-xs);
-  word-break: break-all;
 }
 
 .ies-modeling__saved-yaml {

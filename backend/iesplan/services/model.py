@@ -1,13 +1,14 @@
-"""系统模型服务(U04 模型写入单元): 设备/端口/连接写入、拓扑校验与图内容寻址。
+"""系统模型服务(U04 模型写入单元): 设备/端口/连接写入、拓扑校验与草稿内容同步。
 
 - 写入目标为关系模型表（见 modules/persistence.md；表见 models/model.py）: system_graphs / devices / ports / connections;
 - 设备类型与参数 schema 以受控注册表(04 §3)为唯一事实源, 类型未注册/参数越界一律拒绝;
 - 端口按设备类型的能源载体自动生成(如 heat_pump → electric_in/heat_out/cool_out);
 - 连接校验: 能源类型一致 + 方向兼容(源→汇) + 同项目同图 + 无重复, 失败返回可定位诊断;
-- 图内容哈希: sha256(规范化 JSON), 覆盖节点/边/参数(含行 id), 排除布局与易变元数据。
+- 每次写入后把图内容(节点/边/参数, 含行 id, 排除布局与易变元数据)同步进
+  草稿内容文档(对象引用, 历史定位使用项目 + 草稿 revision)。
 
 约定:
-- 布局坐标存于设备 params["__layout"]["position"], 不参与注册表校验与内容哈希;
+- 布局坐标存于设备 params["__layout"]["position"], 不参与注册表校验与草稿内容同步;
 - 完整注册表类型 id 存于 params["type_detail"](01 §4.2 "细分类别");
 - 诊断码: 优先使用 04 §5.3 已登记码; 连接校验码(CONN-PORT-*)为新码, 经 AppError 输出,
   待诊断目录后续登记(本单元不修改 core/diagnostics 目录)。
@@ -15,7 +16,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -39,8 +39,8 @@ from iesplan.core.diagnostics import (
     make_diag,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
-from iesplan.core.idgen import sha256_hex
-from iesplan.devices import DeviceModelDescriptor, ParameterSpec, get_device_descriptor
+from iesplan.devices import DeviceModelDocument, get_device
+from iesplan.devices.contracts2 import PropertySpec
 from iesplan.models.model import Connection, Device, Port, SystemGraph
 from iesplan.models.project import Draft, Project
 from iesplan.services import project as project_service
@@ -51,11 +51,18 @@ from iesplan.services import project as project_service
 
 #: 载体 → 端口类型(port_type CHECK)。solar 为环境侧载体, 不生成可连接端口。
 CARRIER_PORT_TYPE: dict[str, str] = {
-    "electric": "electric",
+    "electricity": "electric",
     "heat": "thermal",
     "cool": "cooling",
     "gas": "fuel",
 }
+
+#: 外生供给载体对应的端口类型: 目录内无源设备(如燃气, 外部管网购入),
+#: 汇-only 合法, 拓扑源汇平衡跳过(与 assembly.checker
+#: EXOGENOUS_SUPPLY_CARRIERS 豁免同理; 引擎按 gas_price 计价, 不依赖源设备)
+_EXOGENOUS_SUPPLY_PORT_TYPES = frozenset(
+    {CARRIER_PORT_TYPE[c] for c in ("gas",) if c in CARRIER_PORT_TYPE}
+)
 
 #: 端口类型 → 连接类型(conn_type CHECK)
 CONN_TYPE_BY_PORT: dict[str, str] = {
@@ -66,32 +73,13 @@ CONN_TYPE_BY_PORT: dict[str, str] = {
     "data": "data_link",
 }
 
-#: 能力字典 → 设备粗分类别(yaml capabilities 派生, RR-P1-04: 不再维护设备类型静态表)
-_CAPABILITY_COARSE: dict[str, str] = {
-    "grid_connection": "source",
-    "pv": "pv",
-    "storage": "storage",
-    "load": "load",
-    "heat_pump": "converter",
-    "thermal_generation": "boiler",
-    "cooling_generation": "chiller",
-}
-
-#: 内部保留参数键: '_' 前缀(布局等)与 type_detail(细分类别), 不参与注册表校验与内容哈希
+#: 内部保留参数键: '_' 前缀(布局等)与 type_detail(细分类别), 不参与注册表校验与草稿内容同步
 _TYPE_DETAIL_KEY = "type_detail"
 _LAYOUT_KEY = "__layout"
 _MODEL_FIDELITIES = ("low", "medium", "high")
 
-#: 必填参数(04 §3 各设备 required 清单中无默认值的 reference 类参数;
-#: 注册表未直接编码必填标志, 在此显式声明; 其余参数均有默认值, 缺省按默认填充)
-#: 缺省时按显式 null 归一(前端跳过 default=null 的参数键, 显式 null 历来可创建,
-#: 此处统一"缺失"与"显式 null"两种写法, 避免前端拖拽负荷设备被 400 阻断)
-_REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
-    "ies.device.electric_load": ("load_profile",),
-    "ies.device.heat_load": ("heat_profile",),
-    "ies.device.cooling_load": ("cooling_profile",),
-}
-
+#: 2.0 properties 均带默认值, 无必填参数概念; 缺省键不在此校验,
+#: 读取/装配时按注册表默认值解释(显式 null 同样跳过取值检查)
 # ---------------------------------------------------------------------------
 # 连接校验错误码(新码, 经 AppError 输出; 诊断目录后续登记)
 # ---------------------------------------------------------------------------
@@ -110,7 +98,7 @@ class ModelValidationError(AppError):
 
 
 def _is_internal_key(name: str) -> bool:
-    """是否内部保留参数键(布局/细分类别), 不参与注册表校验与内容哈希。"""
+    """是否内部保留参数键(布局/细分类别), 不参与注册表校验与草稿内容同步。"""
     return name.startswith("_") or name == _TYPE_DETAIL_KEY
 
 
@@ -148,7 +136,7 @@ def _port_name(carrier: str, direction: str) -> str:
     return f"{carrier}_{direction}" if direction in ("in", "out") else carrier
 
 
-def _descriptor_ports(spec: DeviceModelDescriptor, params: dict | None = None) -> list[dict]:
+def _descriptor_ports(spec: DeviceModelDocument, params: dict | None = None) -> list[dict]:
     """设备类型的真实端口列表(RR-P1-04: YAML 端口声明为唯一权威来源)。
 
     返回 [{carrier, direction, name, capacity_ref}]。热泵按 mode 参数裁剪端口:
@@ -157,9 +145,18 @@ def _descriptor_ports(spec: DeviceModelDescriptor, params: dict | None = None) -
     """
     params = params or {}
     ports = []
-    for p in spec.ports:
-        carrier = p.energy_carrier
-        if spec.type_id == "ies.device.heat_pump" and carrier in ("heat", "cool"):
+    for name, interface in spec.interfaces.items():
+        direction = interface.type
+        if direction == "predefined":
+            # 数据型需求接口即可连接的负荷端口(与装配端口推导一致);
+            # 环境侧载体(solar 等)无端口类型映射,自然排除
+            if interface.carrier not in CARRIER_PORT_TYPE:
+                continue
+            direction = "in"
+        elif direction not in ("in", "out", "bidirectional"):
+            continue
+        carrier = interface.carrier
+        if spec.device is not None and spec.device.id == "ies.device.heat_pump" and carrier in ("heat", "cool"):
             mode = params.get("mode", "both")
             if mode == "heating" and carrier == "cool":
                 continue
@@ -168,16 +165,16 @@ def _descriptor_ports(spec: DeviceModelDescriptor, params: dict | None = None) -
         ports.append(
             {
                 "carrier": carrier,
-                "direction": p.direction,
-                "name": p.name,
-                "capacity_ref": p.capacity_ref,
+                "direction": direction,
+                "name": name,
+                "capacity_ref": None,
             }
         )
     return ports
 
 
 def _sync_ports_for_params(
-    db: Session, device: Device, spec: DeviceModelDescriptor, params: dict
+    db: Session, device: Device, spec: DeviceModelDocument, params: dict
 ) -> None:
     """按设备参数(热泵 mode)重同步端口: 补齐应存在但缺失的端口, 删除被裁剪的端口。
 
@@ -220,21 +217,22 @@ def _sync_ports_for_params(
 
 
 def _coarse_category(type_id: str) -> str:
-    """注册表类型 id → devices.device_type 粗分类别(01 §4.2 CHECK; 未知类型落 'other')。"""
-    from iesplan.devices import get_device_descriptor
-
+    """从 2.0 接口语义派生持久化所需的粗分类别。"""
     try:
-        desc = get_device_descriptor(type_id)
+        desc = get_device(type_id)
     except NotFoundError:
         return "other"
-    for cap in desc.capabilities:
-        category = _CAPABILITY_COARSE.get(cap)
-        if category:
-            return category
-    if desc.is_load:
+    interfaces = tuple(desc.interfaces.values())
+    carriers = {i.carrier for i in interfaces}
+    if desc.device is not None and desc.device.id == "ies.device.grid_connection":
+        return "source"
+    if "solar" in carriers:
+        return "pv"
+    if any(i.type == "predefined" for i in interfaces):
         return "load"
-    carriers = set(desc.energy_carriers)
-    if "gas" in carriers:
+    if any(i.type == "bidirectional" for i in interfaces):
+        return "storage"
+    if "gas" in carriers and "heat" in carriers:
         return "boiler"
     if "cool" in carriers:
         return "chiller"
@@ -249,10 +247,10 @@ def _resolve_type_id(device: Device) -> str:
     return detail if isinstance(detail, str) and detail else device.device_type
 
 
-def _try_get_device_type(type_id: str) -> DeviceModelDescriptor | None:
+def _try_get_device_type(type_id: str) -> DeviceModelDocument | None:
     """按注册表取设备类型; 未注册返回 None(不抛错, 供校验诊断用)。"""
     try:
-        return get_device_descriptor(type_id)
+        return get_device(type_id)
     except NotFoundError:
         return None
 
@@ -280,7 +278,7 @@ def _raise_diagnostics(diags: list[Diagnostic]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 系统图: 工作图查询/创建与内容哈希
+# 系统图: 工作图查询/创建与草稿内容同步
 # ---------------------------------------------------------------------------
 
 
@@ -296,7 +294,7 @@ def _find_working_graph(db: Session, project_id: int) -> SystemGraph | None:
 def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 1) -> SystemGraph:
     """取项目工作图; 不存在则连同工作草稿一起创建(幂等)。
 
-    草稿为工作图的内容载体(01 §3.2/§4.1): 草稿 content_hash 与图内容哈希保持一致。
+    草稿为工作图的内容载体(01 §3.2/§4.1): 图内容同步进草稿内容文档(对象引用)。
     并发安全: 首批设备快速连发时多个请求可能同时判定"无工作图"并发建图(实测同一项目
     8ms 内出现两张图, 设备被随机分裂); 由 uq_system_graphs_working 部分唯一索引
     (配合草稿 uq_drafts_revision/uq_drafts_current)兜底 —— 唯一键冲突方回滚本事务
@@ -324,7 +322,9 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
                 draft = Draft(
                     project_id=project_id,
                     revision=int(max_rev or 0) + 1,
-                    content_hash="0" * 64,
+                    content_object_id=project_service.store_content_object(
+                        db, project_service.initial_content()
+                    ),
                     updated_by=created_by,
                     is_current=True,
                 )
@@ -334,12 +334,11 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
                 project_id=project_id,
                 draft_id=draft.id,
                 name="工作图",
-                graph_hash=draft.content_hash,
                 created_by=created_by,
             )
             db.add(graph)
             db.flush()
-            refresh_graph_hash(db, graph)
+            sync_draft_content(db, graph)
             db.commit()
             return graph
         except IntegrityError:
@@ -352,7 +351,7 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
 
 
 def _load_devices(db: Session, graph_id: int) -> list[Device]:
-    """图内设备(按 id 升序, 保证内容哈希确定性)。"""
+    """图内设备(按 id 升序, 保证同步内容确定性)。"""
     return list(db.scalars(select(Device).where(Device.graph_id == graph_id).order_by(Device.id)))
 
 
@@ -374,8 +373,8 @@ def _load_connections(db: Session, graph_id: int) -> list[Connection]:
     )
 
 
-def _device_hash_payload(device: Device) -> dict:
-    """设备的内容哈希载荷(排除布局等内部保留键; 服务端默认值兜底, 保证行内/库内一致)。"""
+def _device_content_payload(device: Device) -> dict:
+    """设备的内容载荷(排除布局等内部保留键; 服务端默认值兜底, 保证行内/库内一致)。"""
     params = {k: v for k, v in device.params.items() if not _is_internal_key(k)}
     return {
         "id": device.id,
@@ -388,18 +387,18 @@ def _device_hash_payload(device: Device) -> dict:
     }
 
 
-def refresh_graph_hash(db: Session, graph: SystemGraph) -> str:
-    """重算图内容哈希(规范化 JSON → sha256)并写回, 同步草稿内容哈希。
+def sync_draft_content(db: Session, graph: SystemGraph) -> None:
+    """把图内容同步进草稿内容文档(对象引用)。
 
     内容 = 设备/端口/连接(含行 id 与参数, 排除布局与项目/图/名称等易变元数据),
-    规范化 = 列表按 id 排序 + json sort_keys, 同一内容哈希稳定。
+    规范化 = 列表按 id 排序 + json sort_keys。历史定位使用项目 + 草稿 revision。
     """
-    db.flush()  # 先落盘挂起的新增/删除, 保证哈希覆盖当前事务内的完整图内容
+    db.flush()  # 先落盘挂起的新增/删除, 保证同步覆盖当前事务内的完整图内容
     devices = _load_devices(db, graph.id)
     ports = _load_ports(db, graph.id)
     conns = _load_connections(db, graph.id)
     payload = {
-        "devices": [_device_hash_payload(d) for d in devices],
+        "devices": [_device_content_payload(d) for d in devices],
         "ports": [
             {
                 "id": p.id,
@@ -425,34 +424,24 @@ def refresh_graph_hash(db: Session, graph: SystemGraph) -> str:
             for c in conns
         ],
     }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    graph_hash = sha256_hex(canonical.encode("utf-8"))
-    graph.graph_hash = graph_hash
     if graph.draft_id is not None:
         draft = db.get(Draft, graph.draft_id)
         if draft is not None:
             # 草稿为工作图的内容载体(01 §3.2/§4.1): 图内容并入草稿内容文档并落为
-            # 内容寻址对象, 使草稿 content_hash 可解析(校验/草稿命令依赖);
+            # 对象存储对象(对象引用, 校验/草稿命令经草稿 revision 定位);
             # 既有内容节(dataset_bindings/calc_config 等)原样保留。
             content = _draft_content_with_model(db, draft, payload)
-            draft.content_hash = project_service.store_content_object(db, content)
+            draft.content_object_id = project_service.store_content_object(db, content)
     db.flush()
-    return graph_hash
 
 
 def _draft_content_with_model(db: Session, draft: Draft, payload: dict) -> dict:
     """草稿内容文档: 图内容(设备/端口/连接)并入 model 节, 其余内容节原样保留。
 
-    草稿内容对象缺失(如新建图前的占位哈希)或损坏时回退到初始内容骨架,
-    避免模型写入依赖其他单元的内容落盘时序。
+    草稿内容对象缺失或损坏时直接抛出加载原错误, 不回退初始骨架
+    (宪法 §13: 对象缺失或不可读返回实际错误, 禁止旧副本回退)。
     """
-    try:
-        content = project_service.load_content_object(db, draft.content_hash)
-    except AppError:
-        content = project_service.initial_content()
-    if not isinstance(content, dict):
-        content = project_service.initial_content()
-    content.setdefault("model", {"devices": [], "ports": [], "connections": []})
+    content = project_service.load_content_object(db, draft.content_object_id)
     content["model"] = {
         "devices": payload.get("devices", []),
         "ports": payload.get("ports", []),
@@ -478,23 +467,19 @@ def validate_device_params(
 
     规则:
     - 类型未注册抛 NotFoundError(CONN-TYPE-002);
-    - 注册表 default 为 None 的参数视为必填(reference 类, 如负荷曲线), 缺失时
-      归一为显式 null(与前端跳过 null 默认值的行为对齐, 不再因缺键拒绝创建);
+    - 未声明的参数键拒绝(PARAM-UNIT-002, actual=unknown);缺省键不校验, 按注册表默认值解释;
     - 数值参数校验 min/max(越界 → PARAM-RNG-003), 枚举参数校验取值, 类型不匹配 → PARAM-UNIT-002;
     - 内部保留键('_' 前缀与 type_detail)不参与校验。
     """
-    spec = get_device_descriptor(device_type)
+    spec = get_device(device_type)
     params = dict(params or {})  # 拷贝: 归一缺省键不得改写调用方/ORM 上的原字典
-    # 必填参数缺失按显式 null 归一(前端 buildDefaultParams 跳过 default=null 的键,
-    # 拖拽新建负荷设备时 load_profile/heat_profile 等不会出现; 显式 null 历来通过校验)
-    for required_name in _REQUIRED_PARAMS.get(device_type, ()):
-        params.setdefault(required_name, None)
+    # 内部保留键不参与校验; 其余键必须已在注册表声明(下循环 unknown 即拒)
     provided = {k: v for k, v in params.items() if not _is_internal_key(k)}
     diags: list[Diagnostic] = []
     loc = {"object_type": "device", "object_id": str(device_id), "field": ""}
 
     for name, value in provided.items():
-        pspec = spec.parameters.get(name)
+        pspec = spec.properties.get(name)
         if pspec is None:
             diags.append(
                 make_diag(
@@ -510,70 +495,44 @@ def validate_device_params(
 
 
 def _check_param_value(
-    name: str, value: Any, pspec: ParameterSpec, loc: dict
+    name: str, value: Any, pspec: PropertySpec, loc: dict
 ) -> list[Diagnostic]:
     """单参数取值校验(枚举/类型/范围), 返回诊断列表。"""
-    # 引用类参数(unit == "reference", 如负荷曲线/COP 曲线): 值为数据集引用
-    # (字符串/对象)或 None(未绑定); 引用语义由数据绑定层校验, 不在此做类型检查
-    if pspec.unit == "reference":
-        return []
-    # 枚举类参数
-    if pspec.enum is not None:
-        if value not in pspec.enum:
-            return [
-                make_diag(
-                    PARAM_RNG_OUT,
-                    severity=SEVERITY_ERROR,
-                    params={
-                        "param": name,
-                        "value": _json_clean(value),
-                        "min": None,
-                        "max": None,
-                        "allowed": list(pspec.enum),
-                    },
-                    location={**loc, "field": name},
-                )
-            ]
-        return []
     # 布尔类参数
-    if isinstance(pspec.default, bool):
+    if isinstance(pspec.value, bool):
         if not isinstance(value, bool):
             return [_type_mismatch_diag(name, value, pspec, loc)]
         return []
     # 字典类参数(如分时电价 import_tariff)
-    if isinstance(pspec.default, dict):
-        if not isinstance(value, dict):
-            return [_type_mismatch_diag(name, value, pspec, loc)]
-        return []
     # 数值类参数(带范围或数值默认值)
-    if pspec.min is not None or pspec.max is not None or isinstance(pspec.default, (int, float)):
+    if pspec.minimum is not None or pspec.maximum is not None or isinstance(pspec.value, (int, float)):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return [_type_mismatch_diag(name, value, pspec, loc)]
         # M-08: 拒绝 NaN/Infinity(非有限值可绕过 min/max 比较, 污染后续求解与哈希)
         if not math.isfinite(float(value)):
             return [_type_mismatch_diag(name, value, pspec, loc)]
-        if pspec.min is not None and value < pspec.min:
+        if pspec.minimum is not None and value < pspec.minimum:
             return [
                 make_diag(
                     PARAM_RNG_OUT,
                     severity=SEVERITY_ERROR,
-                    params={"param": name, "value": value, "min": pspec.min, "max": pspec.max},
+                    params={"param": name, "value": value, "min": pspec.minimum, "max": pspec.maximum},
                     location={**loc, "field": name},
                 )
             ]
-        if pspec.max is not None and value > pspec.max:
+        if pspec.maximum is not None and value > pspec.maximum:
             return [
                 make_diag(
                     PARAM_RNG_OUT,
                     severity=SEVERITY_ERROR,
-                    params={"param": name, "value": value, "min": pspec.min, "max": pspec.max},
+                    params={"param": name, "value": value, "min": pspec.minimum, "max": pspec.maximum},
                     location={**loc, "field": name},
                 )
             ]
     return []
 
 
-def _type_mismatch_diag(name: str, value: Any, pspec: ParameterSpec, loc: dict) -> Diagnostic:
+def _type_mismatch_diag(name: str, value: Any, pspec: PropertySpec, loc: dict) -> Diagnostic:
     """参数类型/单位不匹配诊断(期望注册单位, 实际为 Python 类型名)。"""
     return make_diag(
         PARAM_UNIT_MISMATCH,
@@ -599,7 +558,7 @@ def create_device(
     position: dict | None = None,
     created_by: int = 1,
 ) -> Device:
-    """创建设备: 校验类型/参数, 按载体生成端口, 刷新图内容哈希。
+    """创建设备: 校验类型/参数, 按载体生成端口, 同步草稿内容。
 
     参数:
         device_type: 注册表类型 id(如 'ies.device.heat_pump'), 未注册抛 NotFoundError。
@@ -607,10 +566,10 @@ def create_device(
         params: 参数(按注册表 schema 校验, 越界/类型错误/缺必填 → 校验错误并定位)。
         is_existing: True=存量设备(kind='existing'), False=新增设备(kind='new')。
         model_precision: 模型精度 low/medium/high(01 §4.2 model_fidelity)。
-        position: 画布坐标 {"x": float, "y": float}(布局信息, 不入内容哈希)。
+        position: 画布坐标 {"x": float, "y": float}(布局信息, 不同步进草稿内容)。
         created_by: 创建者用户 id(工作图不存在时用于建图/建草稿)。
     """
-    spec = get_device_descriptor(device_type)
+    spec = get_device(device_type)
     if model_precision not in _MODEL_FIDELITIES:
         raise ModelValidationError(
             "模型精度非法",
@@ -637,9 +596,6 @@ def create_device(
     params[_TYPE_DETAIL_KEY] = device_type  # 完整注册表类型 id(01 §4.2 细分类别)
     if position is not None:
         params[_LAYOUT_KEY] = _normalize_position(position)
-    # 缺省必填参数归一为显式 null(与 validate_device_params 语义一致, 存储与显式 null 相同)
-    for required_name in _REQUIRED_PARAMS.get(device_type, ()):
-        params.setdefault(required_name, None)
     diags = validate_device_params(device_type, params)
     _raise_diagnostics(diags)
     graph = get_or_create_working_graph(db, project_id, created_by)
@@ -676,7 +632,7 @@ def create_device(
                 params={},
             )
         )
-    refresh_graph_hash(db, graph)
+    sync_draft_content(db, graph)
     db.commit()
     return device
 
@@ -739,9 +695,6 @@ def update_device(
         if position is not None:
             new_params[_LAYOUT_KEY] = _normalize_position(position)
         new_params[_TYPE_DETAIL_KEY] = _resolve_type_id(device)
-        # 缺省必填参数归一为显式 null(与创建路径一致, 避免前端缺省键被校验拒绝)
-        for required_name in _REQUIRED_PARAMS.get(_resolve_type_id(device), ()):
-            new_params.setdefault(required_name, None)
         diags = validate_device_params(_resolve_type_id(device), new_params, device_id=device.id)
         _raise_diagnostics(diags)
         # 模式类参数变更(热泵 mode)需重同步端口: 按新参数裁剪/补回载体端口,
@@ -755,7 +708,7 @@ def update_device(
         new_params[_LAYOUT_KEY] = _normalize_position(position)
         device.params = new_params
     device.updated_at = datetime.now(UTC)
-    refresh_graph_hash(db, graph)
+    sync_draft_content(db, graph)
     db.commit()
     return device
 
@@ -770,7 +723,7 @@ def delete_device(db: Session, project_id: int, device_id: int) -> None:
         db.execute(sa.delete(Connection).where(Connection.to_port_id.in_(port_ids)))
         db.execute(sa.delete(Port).where(Port.id.in_(port_ids)))
     db.delete(device)
-    refresh_graph_hash(db, graph)
+    sync_draft_content(db, graph)
     db.commit()
 
 
@@ -950,7 +903,7 @@ def connect(
     )
     db.add(conn)
     db.flush()
-    refresh_graph_hash(db, from_graph)
+    sync_draft_content(db, from_graph)
     db.commit()
     return conn
 
@@ -973,11 +926,11 @@ def _get_project_connection(db: Session, project_id: int, conn_id: int) -> tuple
 
 
 def disconnect(db: Session, project_id: int, conn_id: int) -> None:
-    """断开连接(删除连接行并刷新图内容哈希)。"""
+    """断开连接(删除连接行并同步草稿内容)。"""
     conn, graph = _get_project_connection(db, project_id, conn_id)
     _ensure_mutable(graph)
     db.delete(conn)
-    refresh_graph_hash(db, graph)
+    sync_draft_content(db, graph)
     db.commit()
 
 
@@ -995,7 +948,7 @@ def update_connection(db: Session, project_id: int, conn_id: int, attrs: dict) -
         conn.capacity = capacity
         conn.loss_rate = loss_rate
         conn.params = extra
-    refresh_graph_hash(db, graph)
+    sync_draft_content(db, graph)
     db.commit()
     return conn
 
@@ -1065,7 +1018,6 @@ def get_graph(db: Session, project_id: int) -> dict:
             "has_graph": False,
             "graph_id": None,
             "name": "",
-            "graph_hash": "",
             "devices": [],
             "ports": [],
             "connections": [],
@@ -1085,7 +1037,6 @@ def get_graph(db: Session, project_id: int) -> dict:
         "has_graph": True,
         "graph_id": graph.id,
         "name": graph.name,
-        "graph_hash": graph.graph_hash,
         "devices": [serialize_device(d) for d in devices],
         "ports": [serialize_port(p) for p in ports],
         "connections": [serialize_connection(c) for c in conns],
@@ -1103,7 +1054,7 @@ def validate_topology(graph: dict) -> list[Diagnostic]:
 
     - 孤立设备: 无任何连接 → CONN-NODE-001 警告;
     - 未连接负荷: 有连接但无汇入的负荷 → CONN-NODE-001 警告(完全无连接者已按孤立告警, 不重复);
-    - 能源不平衡: 某载体端口只有源无汇(或反之) → PARAM-UNIT-003 错误(注册目录近似码);
+    - 能源不平衡: 某载体端口只有源无汇(或反之) → PARAM-UNIT-003 错误;
     - 重复连接: 同图同两端同类型多条 → PARAM-CONF-001 错误(注册目录近似码)。
     """
     diags: list[Diagnostic] = []
@@ -1134,7 +1085,7 @@ def validate_topology(graph: dict) -> list[Diagnostic]:
     # 2) 未连接负荷警告(负荷必须有汇入连接)
     for d in devices:
         spec = _try_get_device_type(d["device_type"])
-        if spec is None or not spec.is_load:
+        if spec is None or not any(i.type == "predefined" for i in spec.interfaces.values()):
             continue
         dport_ids = {p["id"] for p in ports if p["device_id"] == d["id"]}
         if not dport_ids or not any(pid in conn_ports for pid in dport_ids):
@@ -1149,11 +1100,14 @@ def validate_topology(graph: dict) -> list[Diagnostic]:
                 )
             )
 
-    # 3) 能源不平衡: 某载体端口只有源或只有汇(双向视为源汇兼具)
+    # 3) 能源不平衡: 某载体端口只有源或只有汇(双向视为源汇兼具;
+    #    外生供给载体如燃气无源设备, 汇-only 合法, 跳过)
     type_dirs: dict[str, set[str]] = {}
     for p in ports:
         type_dirs.setdefault(p["port_type"], set()).add(p["direction"])
     for ptype, dirs in sorted(type_dirs.items()):
+        if ptype in _EXOGENOUS_SUPPLY_PORT_TYPES:
+            continue
         has_source = any(d in ("out", "bidirectional") for d in dirs)
         has_sink = any(d in ("in", "bidirectional") for d in dirs)
         if has_source and has_sink:

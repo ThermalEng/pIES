@@ -15,7 +15,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import MappedColumn, mapped_column
 
-#: 内容寻址哈希(sha256 十六进制, 64 位)
+#: 64 位小写十六进制(对象 id 等随机标识格式)
 HASH64_RE: str = "^[0-9a-f]{64}$"
 #: 用户名(小写字母/数字/下划线, 3-32 位)
 USERNAME_RE: str = "^[a-z0-9_]{3,32}$"

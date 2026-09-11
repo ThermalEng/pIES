@@ -78,11 +78,13 @@
                     "additionalProperties": false
                   },
                   {
-                    "required": ["kind", "object_id", "sha256", "media_type"],
+                    "required": ["kind", "object_id", "media_type"],
                     "properties": {
                       "kind": { "const": "object" },
-                      "object_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-                      "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                      "object_id": {
+                        "type": "string",
+                        "description": "对象存储对象 id(不透明标识, 非内容摘要)"
+                      },
                       "media_type": { "type": "string" }
                     },
                     "additionalProperties": false

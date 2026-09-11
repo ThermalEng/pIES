@@ -12,7 +12,7 @@
 
 地区 Profile 登记(prefix /api/finance-profiles, 全局):
 - GET  /                        已登记 Profile 列表
-- POST /                        登记地区 Profile(内容寻址)
+- POST /                        登记地区 Profile(按 profile_id 复用)
 - GET  /{profile_id}            按稳定 id 取 Profile
 
 认证与权限: 全部端点要求窗口会话认证(CurrentUser); 项目读要求 view、
@@ -261,7 +261,7 @@ def list_finance_profiles_endpoint(
     return {"items": items, "count": len(items)}
 
 
-@profile_router.post("", summary="登记地区 FinanceProfile(内容寻址)")
+@profile_router.post("", summary="登记地区 FinanceProfile(注册表按 id 唯一)")
 def register_finance_profile_endpoint(
     payload: ProfileRegistrationRequest,
     db: DbSession,
@@ -285,7 +285,7 @@ def get_finance_profile_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取已登记 Profile(按 profile_id 最新登记; 不存在 → 404)。"""
-    row, profile = config_service.get_finance_profile(db, profile_id)
+    row, profile = config_service.get_finance_profile_by_ref(db, profile_id)
     return {
         "finance_profile": profile.to_dict(),
         "row": config_service.profile_row_dict(row),

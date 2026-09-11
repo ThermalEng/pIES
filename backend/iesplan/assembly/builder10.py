@@ -7,7 +7,7 @@
 不与 builder.py 共享私有符号(避免跨模块私有导入与隐式耦合);本模块提供
 独立的 _device_ref / _model_ref / _resolve_data_bindings 辅助。
 
-依赖: devices 公开门面(get_device_descriptor)、core 公共契约、
+依赖: devices 公开门面(get_device)、core 公共契约、
 assembly.canonicalizer 公开纯函数、core.units;不依赖 services 与 ORM。
 """
 
@@ -44,7 +44,7 @@ _STEPS_PER_YEAR: dict[str, int] = {"15min": 35040, "30min": 17520, "1h": 8760}
 _STEP_SECONDS: dict[str, int] = {"15min": 900, "30min": 1800, "1h": 3600}
 
 #: 管道模型与端口名(与 devices/catalog/transport_pipe.yaml 一致)
-_PIPE_MODEL = "ies.device.transport_pipe@1.0.0"
+_PIPE_MODEL = "ies.device.transport_pipe@2.0.0"
 _PIPE_IN_NAME = "heat_in"
 _PIPE_OUT_NAME = "heat_out"
 
@@ -76,8 +76,8 @@ def build_assembly_doc_from_content(
     字段映射:
     - assembly.id/name: graph.id/name(无 id 则 'legacy_export');
     - time_axis: calc_config.time_axis 派生(start/end/endpoint/resolution);
-    - resources.datasets: 从 dataset_bindings + datasets 元信息(必须含 sha256+media_type)
-      构造为内容寻址对象;
+    - resources.datasets: 从 dataset_bindings + datasets 元信息
+      构造为对象形态引用;
     - devices: 每个实例 → {model: <id>@<version>, parameters: 已清洗参数, data: ...};
     - connections: 每个图连接 → 新格式映射;loss_rate > 0 自动包裹 transport_pipe 设备实例;
     - calculation: mode/generator/solver/options/random_seed。
@@ -117,7 +117,7 @@ def build_assembly_doc_from_content(
 
     end_utc = start_utc + timedelta(seconds=seconds * steps)
 
-    # 2) 数据集 → resources.datasets (object 形态;sha256/media_type 必须可获取)
+    # 2) 数据集 → resources.datasets (object 形态)
     datasets_map = dict(datasets or {})
     resources_datasets, res_diags = _build_resources(datasets_map, model_part.get("dataset_bindings"))
     diags.extend(res_diags)
@@ -158,14 +158,12 @@ def build_assembly_doc_from_content(
         from_ref = f"{device_ref_of.get(from_p.get('device_id'), '?')}.{from_p.get('name')}"
         to_ref = f"{device_ref_of.get(to_p.get('device_id'), '?')}.{to_p.get('name')}"
         loss_rate = _num_or_zero(c.get("loss_rate"))
-        conn_params = c.get("params") or {}
         if loss_rate > 0:
             pipe_id = f"{edge_id}_pipe"
+            # 2.0 transport_pipe 仅声明 loss_rate; 旧连接 delay_steps 无对应属性, 不导出
             devices_out[pipe_id] = {
                 "model": _PIPE_MODEL,
                 "parameters": {
-                    "delay_steps": int(conn_params.get("delay_steps", 1) or 1),
-                    # transport_pipe 模型声明的参数名为 loss_rate(0.5.0 契约)
                     "loss_rate": loss_rate,
                 },
             }
@@ -238,11 +236,11 @@ def _device_ref(device: dict) -> str:
 
 
 def _model_ref(type_id: str) -> str:
-    from iesplan.devices import get_device_descriptor
+    from iesplan.devices import get_device
 
     try:
-        spec = get_device_descriptor(type_id)
-        return f"{type_id}@{spec.version}"
+        spec = get_device(type_id)
+        return f"{type_id}@{spec.schema_version}"
     except NotFoundError:
         # 未注册: 进入校验器阻断(RR-P2-05)
         return type_id
@@ -269,15 +267,19 @@ def _resolve_data_bindings(
     旧形态遗留 `xxx_profile` reference 参数按"模型唯一 data_inputs 列"启发式
     映射到 data_inputs 列;多列或多对多关系无法唯一决定时返回阻断诊断。
     """
-    from iesplan.devices import data_inputs_from_descriptor, get_device_descriptor
+    from iesplan.devices import get_device
 
     diags: list[Diagnostic] = []
     try:
-        descriptor = get_device_descriptor(type_id)
+        descriptor = get_device(type_id)
     except NotFoundError:
         # 未注册设备 → 校验器阻断,此处无法确定 data_inputs
         return None, []
-    data_inputs = data_inputs_from_descriptor(descriptor)
+    data_inputs = [
+        interface
+        for interface in descriptor.interfaces.values()
+        if interface.type == "predefined"
+    ]
     if not data_inputs:
         return None, diags
 
@@ -303,15 +305,15 @@ def _resolve_data_bindings(
                             "reason": "data_binding_unmappable",
                             "device": dev_id,
                             "param": key,
-                            "model_data_inputs": [d.column_id for d in data_inputs],
+                            "model_data_inputs": [d.id for d in data_inputs],
                         },
                         location={"object_type": "device", "object_id": dev_id, "field": f"params.{key}"},
                     )
                 )
                 continue
-            bindings[target_col.column_id] = {
+            bindings[target_col.id] = {
                 "dataset": _dataset_id_for(vid),
-                "column": column or target_col.column_id,
+                "column": column or target_col.id,
             }
         elif isinstance(value, str) and value.startswith("dataset:"):
             col = value.split(":", 1)[1].strip() or key
@@ -345,13 +347,13 @@ def _resolve_data_bindings(
                             "reason": "data_binding_unmappable",
                             "device": dev_id,
                             "param": key,
-                            "model_data_inputs": [d.column_id for d in data_inputs],
+                            "model_data_inputs": [d.id for d in data_inputs],
                         },
                         location={"object_type": "device", "object_id": dev_id, "field": f"params.{key}"},
                     )
                 )
                 continue
-            bindings[target_col.column_id] = {"dataset": _dataset_id_for(vid), "column": col}
+            bindings[target_col.id] = {"dataset": _dataset_id_for(vid), "column": col}
 
     # 显式 data_refs 列表(与上面相同的列解析)
     for item in params.get("data_refs") or []:
@@ -372,15 +374,15 @@ def _resolve_data_bindings(
                             "reason": "data_binding_unmappable",
                             "device": dev_id,
                             "param": key,
-                            "model_data_inputs": [d.column_id for d in data_inputs],
+                            "model_data_inputs": [d.id for d in data_inputs],
                         },
                         location={"object_type": "device", "object_id": dev_id, "field": f"data_refs.{key}"},
                     )
                 )
                 continue
-            bindings[target_col.column_id] = {
+            bindings[target_col.id] = {
                 "dataset": _dataset_id_for(vid),
-                "column": column or target_col.column_id,
+                "column": column or target_col.id,
             }
 
     if any(d.blocking for d in diags):
@@ -394,11 +396,11 @@ def _resolve_data_input_column(data_inputs, param_key: str, column: str | None):
     """
     if column:
         for d in data_inputs:
-            if d.column_id == column:
+            if d.id == column:
                 return d
     # 参数名直接匹配模型 data_inputs 列
     for d in data_inputs:
-        if d.column_id == param_key:
+        if d.id == param_key:
             return d
     # 唯一 data_inputs 列:启发式映射(典型:负荷类设备)
     if len(data_inputs) == 1:
@@ -446,27 +448,12 @@ def _build_resources(
                 )
             )
             continue
-        sha = str(meta.get("sha256") or meta.get("content_hash") or "")
-        media = str(meta.get("media_type") or "text/csv")
-        if not sha:
-            diags.append(
-                make_diag(
-                    ASM_CONV_UNMAPPABLE,
-                    severity="error",
-                    blocking=True,
-                    params={"reason": "dataset_sha256_required", "dataset_version_id": vid},
-                    location={
-                        "object_type": "assembly",
-                        "field": f"resources.datasets.ds{vid}.source.sha256",
-                    },
-                )
-            )
-            continue
+        object_id = str(meta.get("object_id") or f"object:{vid}")
+        media = str(meta.get("media_type") or "application/octet-stream")
         out[_dataset_id_for(vid)] = {
             "source": {
                 "kind": "object",
-                "object_id": f"sha256:{sha}",
-                "sha256": sha,
+                "object_id": object_id,
                 "media_type": media,
             }
         }

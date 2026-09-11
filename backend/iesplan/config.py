@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     db_url: str = "postgresql+psycopg://iesplan:iesplan_dev_password@localhost:5432/iesplan"
     #: Redis 连接串(队列/心跳/可重建状态)
     redis_url: str = "redis://localhost:6379/0"
-    #: 对象存储根目录(内容寻址对象落盘位置)
+    #: 对象存储根目录(对象落盘位置)
     data_dir: Path = Path("/data")
     #: 签名密钥(会话令牌、下载授权 HMAC 等; 生产必须通过 IESPLAN_SECRET_KEY
     #: 覆盖, 默认值仅限开发环境 —— 启动校验见下方 model_validator(C-04))

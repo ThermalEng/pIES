@@ -605,9 +605,6 @@ function VersionDetail({ version }: { version: DatasetVersion }) {
               ))}
             </ul>
           ) : null}
-          <p className="ies-mono" style={{ marginTop: 'var(--ies-space-2)' }}>
-            sha256: {version.content_hash}
-          </p>
         </div>
         <div>
           <h4 className="ies-config-section-title" style={{ marginTop: 0 }}>

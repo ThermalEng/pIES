@@ -30,7 +30,7 @@ from iesplan.assembly.schema import (
     DataRef,
     TimeAxisRef,
 )
-from iesplan.devices import get_device_descriptor as get_device_type
+from iesplan.devices import get_device as get_device_type
 
 #: 内部保留参数键(不进入装配文本 params 章节)
 _INTERNAL_PARAM_KEYS: tuple[str, ...] = (
@@ -63,7 +63,7 @@ def _model_ref(type_id: str) -> str:
     """类型 id → 模型引用(注册表有版本 → id@version;未注册 → 裸 id)。"""
     try:
         spec = get_device_type(type_id)
-        return f"{type_id}@{spec.version}"
+        return f"{type_id}@{spec.schema_version}"
     except NotFoundError:
         # 未注册: 装配继续按裸 id 串行, 由下游装配检查模块显式阻断(RR-P2-05)。
         return type_id
@@ -357,7 +357,7 @@ def build_assembly(
             pipelines.append(
                 AssemblyPipeline(
                     id=pipe_id,
-                    model="ies.device.transport_pipe@1.0.0",
+                    model="ies.device.transport_pipe@2.0.0",
                     params={
                         "delay_steps": int(conn_params.get("delay_steps", 1) or 1),
                         "loss_per_step": loss_rate,

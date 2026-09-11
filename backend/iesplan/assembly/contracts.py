@@ -106,8 +106,6 @@ class ValidationReceipt:
     canonical_algorithm_version: str = CANON_ALGORITHM_VERSION
     dependencies: Mapping[str, object] = field(default_factory=dict)
     resources: Mapping[str, object] = field(default_factory=dict)
-    # 兼容旧三件套：可选
-    assembly_sha256: str = ""
     diagnostics: tuple[Diagnostic, ...] = ()
 
     def __post_init__(self) -> None:
@@ -137,7 +135,6 @@ class ValidationReceipt:
             },
             "dependencies": _thaw_value(self.dependencies),
             "resources": _thaw_value(self.resources),
-            "assembly_sha256": self.assembly_sha256,
             "diagnostics": [_stable_diagnostic_dict(diag) for diag in self.diagnostics],
         }
 
@@ -151,7 +148,6 @@ class ValidationReceipt:
             "schema_version",
             "validator",
             "canonical_algorithm",
-            "assembly_sha256",
             "dependencies",
             "resources",
             "diagnostics",
@@ -218,7 +214,6 @@ class ValidationReceipt:
                 )
             )
         string_fields = {
-            "assembly_sha256": payload.get("assembly_sha256", ""),
             "schema": payload["schema"],
             "schema_version": payload["schema_version"],
             "validator.id": validator["id"],
@@ -227,14 +222,9 @@ class ValidationReceipt:
             "canonical_algorithm.version": canonical["version"],
         }
         for name, value in string_fields.items():
-            if name == "assembly_sha256":
-                if not isinstance(value, str):
-                    raise TypeError(f"receipt.{name} 须为字符串")
-                continue
             if not isinstance(value, str) or not value:
                 raise TypeError(f"receipt.{name} 须为非空字符串")
         return cls(
-            assembly_sha256=payload.get("assembly_sha256", ""),
             schema_id=payload["schema"],
             schema_version=payload["schema_version"],
             validator_id=validator["id"],
@@ -254,7 +244,7 @@ class ValidationReceipt:
 
 @dataclass(frozen=True, slots=True)
 class ValidatedAssemblyArtifact:
-    """唯一、可签名的成功装配产物(不可变二件套；兼容旧三件套)。
+    """唯一、可签名的成功装配产物(不可变二件套)。
 
     - canonical_text: 规范装配文本(UTF-8, LF;JSON 规范形态);
     - receipt: 校验回执。
@@ -263,16 +253,12 @@ class ValidatedAssemblyArtifact:
     """
 
     canonical_text: str
-    assembly_sha256: str = ""
     receipt: ValidationReceipt = None  # type: ignore
 
     def verify(self) -> bool:
-        """核对回执与产物元数据及其 schema/算法/校验器版本。兼容旧 SHA。"""
-        sha_ok = True
-        if self.assembly_sha256:
-            sha_ok = self.receipt.assembly_sha256 == self.assembly_sha256 or self.receipt.assembly_sha256 == ""
+        """核对回执与产物元数据及其 schema/算法/校验器版本。"""
         return (
-            sha_ok and self.receipt.schema_id == SCHEMA_ID
+            self.receipt.schema_id == SCHEMA_ID
             and self.receipt.schema_version == SCHEMA_VERSION
             and self.receipt.validator_id == VALIDATOR_ID
             and self.receipt.validator_version == VALIDATOR_VERSION
@@ -285,22 +271,12 @@ class ValidatedAssemblyArtifact:
     def from_persisted(
         cls,
         canonical_text: str,
-        assembly_sha256_or_receipt: str | Mapping[str, object] = "",
-        receipt: Mapping[str, object] | None = None,
+        receipt: Mapping[str, object],
     ) -> ValidatedAssemblyArtifact:
-        """严格恢复并验证持久化二件套，供 Worker/审计入口使用。兼容旧三件套。"""
-        # 兼容两种调用：from_persisted(text, receipt) 和 from_persisted(text, sha, receipt)
-        if receipt is None:
-            # 2 参数形式：第二个是 receipt
-            receipt_dict = assembly_sha256_or_receipt  # type: ignore
-            sha = ""
-        else:
-            sha = assembly_sha256_or_receipt  # type: ignore
-            receipt_dict = receipt
+        """严格恢复并验证持久化二件套，供 Worker/审计入口使用。"""
         artifact = cls(
             canonical_text=canonical_text,
-            assembly_sha256=sha,  # type: ignore
-            receipt=ValidationReceipt.from_dict(receipt_dict),  # type: ignore
+            receipt=ValidationReceipt.from_dict(receipt),  # type: ignore
         )
         return artifact.verify_or_raise()
 
@@ -325,7 +301,6 @@ class ValidatedAssemblyArtifact:
             "schema": SCHEMA_ID,
             "schema_version": SCHEMA_VERSION,
             "canonical_text": self.canonical_text,
-            "assembly_sha256": self.assembly_sha256,
             "receipt": self.receipt.to_dict(),
         }
 

@@ -3,12 +3,13 @@
 业务模块(project/dataset/results/package/worker)只经本包公开门面访问对象存储:
 - 不导入 ``StoredObject/ObjectRef`` ORM, 不拼接对象路径;
 - 只消费 ``ObjectHandle`` / ``ObjectOwner`` 等不可变值对象;
-- ``storage_path`` 的解释、分桶、临时文件与哈希校验全部是本模块内部实现。
+- ``storage_path`` 的解释、分桶与临时文件全部是本模块内部实现
+  (寻址键为对象 id, 不做内容摘要与复核)。
 
 模块结构(10.10 推荐):
 - contracts.py      纯类型与公开协议(对象存储门面 / 值对象 / 错误类型);
 - persistence.py    StoredObject/ObjectRef repository(模块内部, 迁移自 models/audit.py);
-- service.py        哈希、引用、校验、清理、恢复编排(公开门面实现);
+- service.py        引用、存在性巡检、清理、恢复编排(公开门面实现);
 - adapters/         文件系统 BlobStore 实现(未来可替换为 S3 等 provider)。
 
 依赖方向: 业务模块 → storage(公开协议) → configured BlobStore adapter。
@@ -38,7 +39,6 @@ from iesplan.storage.service import (
     get_object,
     list_pending_deleted,
     list_refs,
-    object_by_sha256,
     object_info,
     orphaned_stats,
     purge_expired,
@@ -75,7 +75,6 @@ __all__ = [
     "get_object",
     "list_pending_deleted",
     "list_refs",
-    "object_by_sha256",
     "object_info",
     "orphaned_stats",
     "purge_expired",

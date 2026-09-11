@@ -36,7 +36,6 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from iesplan.core.diagnostics import TASK_SOLVE_FAILED
-from iesplan.core.idgen import sha256_hex
 from iesplan.core.jsonutil import jsonable
 from iesplan.engines.eval_run import EvalResult
 from iesplan.engines.planning import PlanningResult
@@ -324,7 +323,7 @@ def _eval_payload(ctx: RunContext, content: dict, result: EvalResult, data: dict
             {"grid_purchase": buy_kwh, "gas": gas_m3},
             {"grid_purchase": eff_grid, "gas": eff_gas},
             boundary="scope1+scope2", factor_version="snapshot-bound",
-            data_refs=[f"snapshot:{getattr(ctx.snapshot, 'content_hash', '')[:12]}"],
+            data_refs=[f"snapshot:{getattr(ctx.snapshot, 'id', '')}"],
         )
     # 逐时财务（逐时费用列求和 → 现金流/IRR/NPV/LCOE/回收期，
     # 与 analysis/finance 共用 finance.hourly.compute_financials)
@@ -598,13 +597,9 @@ def execute_uncertainty(
     planning_opts.setdefault("max_combinations", 40)
 
     # 不可变不确定性快照（记录方法/分布/种子，见 domain-model §快照任务和结果）
-    unc_hash = sha256_hex(json.dumps(
-        {"method": method, "n_samples": n_samples, "seed": seed, "distributions": distributions},
-        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-    ).encode("utf-8"))
     unc_snapshot = UncertaintySnapshot(
         calc_snapshot_id=ctx.task.calc_snapshot_id, method=method, n_samples=n_samples,
-        random_seed=seed, distributions=distributions, content_hash=unc_hash,
+        random_seed=seed, distributions=distributions,
         created_by=ctx.task.requested_by,
     )
     ctx.db.add(unc_snapshot)
@@ -991,7 +986,7 @@ def execute_check(ctx: RunContext) -> dict:
 
 
 def _load_evidence_payload(db: Session, package: EvidencePackage) -> dict:
-    """读取证据包对象内容并解析（内容寻址，读取时校验哈希）。"""
+    """读取证据包对象内容并解析（按对象 id 读取，解析失败抛错）。"""
     from iesplan.storage import get_object
 
     raw = get_object(db, package.object_id)

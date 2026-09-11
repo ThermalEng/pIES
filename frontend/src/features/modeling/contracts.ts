@@ -11,11 +11,10 @@
  *   GET  /api/model-templates/{template_id}              模板详情 {template, document, diagnostics}
  *   GET  /api/projects/{pid}/models                      项目模型清单 {project_models: [...]}
  *   POST /api/projects/{pid}/models/validate             候选模型门禁 {valid, diagnostics}
- *   POST /api/projects/{pid}/models/temp-files           配套数据文件临时上传(multipart)
  *   POST /api/projects/{pid}/models                      正式保存 {project_model, receipt, project_revision}
  *
  * 候选保存判别字段 source:
- *   - source=template: template_id + template_revision + template_sha256 + template_inputs;
+ *   - source=template: template_id + template_revision + template_inputs;
  *     后端读取权威模板内容并实例化(不信任客户端自带的模板字节);
  *   - source=yaml: model_yaml(候选 YAML 文本)由后端直接解析校验。
  * 两条路径汇合为同一个后端用例。
@@ -71,8 +70,6 @@ export interface TemplateSummaryDto {
   description: string | null
   /** 草稿乐观锁修订。 */
   draft_revision: number
-  /** 草稿规范字节 SHA-256(未发布草稿时为空)。 */
-  draft_sha256: string | null
   draft_has_inputs: boolean | null
   /** 最新已发布 revision(0 = 尚未发布)。 */
   published_revision: number
@@ -88,8 +85,6 @@ export interface TemplateRevisionDto {
   id: string
   revision: number
   schema_version: string
-  content_sha256: string
-  inputs_sha256: string | null
   input_count: number
   yaml_object_id: string
   receipt_object_id: string
@@ -127,17 +122,9 @@ export interface TemplateRevisionDetailDto {
 /** 候选来源(与后端 ModelSaveRequest.source 一致): 模板实例化 / 直接 YAML 编辑。 */
 export type CandidateSource = 'direct_yaml' | 'template'
 
-/** 配套数据文件引用(已上传的临时对象 + 声明摘要)。 */
-export interface DataFileRefDto {
-  data_ref: string
-  upload_id: string
-  object_id: string
-  sha256: string
-}
-
 /**
  * 候选校验/保存请求(判别字段 source):
- * - source=template: template_id + template_revision + template_sha256 + template_inputs;
+ * - source=template: template_id + template_revision + template_inputs;
  *   后端读取权威模板内容并实例化;
  * - source=yaml: model_yaml(候选 YAML 文本)由后端直接解析校验。
  */
@@ -149,29 +136,12 @@ export interface CandidateSaveRequestDto {
   template_id: string | null
   /** source=template: 精确发布 revision(固定不可变)。 */
   template_revision: number | null
-  /** source=template: 精确 revision 的内容摘要(与后端权威内容二次确认)。 */
-  template_sha256: string | null
   /** source=template: 表单 JSON inputs 树(只含模板已声明路径)。 */
   template_inputs: unknown | null
   /** 预期项目草稿修订(乐观锁, 与后端 ModelSaveRequest.expected_revision 对应)。 */
   expected_revision: number
   /** 幂等键(可重试写操作, 宪法 §8.4)。 */
   idempotency_key: string
-  /** 配套数据文件引用(data_ref → 临时隔离区文件)。 */
-  data_files: DataFileRefDto[]
-}
-
-/** 临时数据文件上传结果(临时隔离区, 不等于模型已保存)。 */
-export interface TempFileUploadResultDto {
-  temp_file: {
-    object_id: string
-    oid: string
-    sha256: string
-    size_bytes: number
-    media_type: string
-    status: string
-  }
-  upload_id: string
 }
 
 /** 项目模型清单行(正式保存后返回; 编号对用户可见)。 */
@@ -183,14 +153,11 @@ export interface ProjectModelDto {
   suffix: number
   revision: number
   project_revision: number
-  content_sha256: string
   model_object_id: string
   receipt_object_id: string
   source: 'direct_yaml' | 'template'
   template_id: string | null
   template_revision: number | null
-  template_sha256: string | null
-  inputs_sha256: string | null
   created_by: string
   created_at: string | null
 }

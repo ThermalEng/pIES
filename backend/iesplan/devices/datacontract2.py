@@ -3,14 +3,13 @@
 装配前输入(``prepared: false``)以非负整数 ``step`` 表达原始序列, 不含时间戳、
 时区或 UTC 偏移; 0.6.5 起只接受完整年度整数倍、与项目基线同分辨率的
 0..N-1 严格连续输入, 不做任何重采样/插值/聚合/补齐(计算阶段物化的
-``prepared: true`` 计算文件必须固定项目基线摘要并使用从 0 开始的连续 step,
-物化实现见后续版本)。本模块只实现纯协议解析、设备内容绑定、数值校验和规范摘要。
+``prepared: true`` 计算文件必须使用从 0 开始的连续 step,
+物化实现见后续版本)。本模块只实现纯协议解析、设备内容绑定、数值校验和规范化。
 """
 
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import json
 import math
@@ -20,8 +19,8 @@ from typing import Any
 
 from iesplan.core.diagnostics import Diagnostic, make_diag
 from iesplan.core.timeaxis import RESOLUTIONS
+from iesplan.core.units import units_compatible
 from iesplan.devices.contracts2 import DeviceModelDocument, is_valid_id
-from iesplan.devices.datacontract import units_compatible
 
 SCHEMA_ID = "ies.device-data"
 SCHEMA_VERSION = "2.0.0"
@@ -35,9 +34,8 @@ _REQUIRED_META_KEYS = (
     "source_mode", "resolution",
 )
 _OPTIONAL_META_KEYS = frozenset(
-    {"device_content_sha256", "period", "project_baseline_sha256", "point_count", "prepared"}
+    {"period", "point_count", "prepared"}
 )
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ID_RE = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
 
 
@@ -47,11 +45,9 @@ class DeviceData2Meta:
     schema_version: str = SCHEMA_VERSION
     dataset_id: str = ""
     device_id: str = ""
-    device_content_sha256: str = ""  # 保留字段以兼容旧文件，文本只校验字头，不做 SHA 校验
     source_mode: str = "data_predict"
     resolution: str = "1h"
     period: str | None = None
-    project_baseline_sha256: str | None = None
     point_count: int | None = None
     prepared: bool = False
     units: dict[str, str] = field(default_factory=dict)
@@ -167,7 +163,6 @@ def parse_metadata_v2(text_lines: list[str]) -> tuple[DeviceData2Meta, list[Diag
             "DATA-META-004", {"field": "prepared", "value": prepared_text, "allowed": ("true", "false")},
             field_name="prepared",
         ))
-    baseline_sha = raw.get("project_baseline_sha256") or None
     point_count: int | None = None
     if raw.get("point_count"):
         try:
@@ -181,20 +176,6 @@ def parse_metadata_v2(text_lines: list[str]) -> tuple[DeviceData2Meta, list[Diag
                 field_name="point_count",
             ))
     if prepared:
-        if baseline_sha is None:
-            diags.append(_diag(
-                "DATA-META-002", {"key": "project_baseline_sha256"}, field_name="project_baseline_sha256",
-            ))
-        elif not _SHA256_RE.fullmatch(baseline_sha):
-            diags.append(_diag(
-                "DATA-META-004",
-                {
-                    "field": "project_baseline_sha256",
-                    "value": baseline_sha,
-                    "allowed": "SHA-256",
-                },
-                field_name="project_baseline_sha256",
-            ))
         if point_count is None:
             diags.append(_diag("DATA-META-002", {"key": "point_count"}, field_name="point_count"))
     elif source_mode == "constant":
@@ -203,19 +184,19 @@ def parse_metadata_v2(text_lines: list[str]) -> tuple[DeviceData2Meta, list[Diag
                                "detail": "constant 只允许预备后的计算文件"},
             field_name="source_mode",
         ))
-    elif baseline_sha is not None or point_count is not None:
+    elif point_count is not None:
         diags.append(_diag(
             "DATA-META-004", {"field": "prepared", "value": prepared_text,
-                               "allowed": "基线摘要和点数仅用于 prepared: true"},
+                               "allowed": "点数仅用于 prepared: true"},
             field_name="prepared",
         ))
 
     return DeviceData2Meta(
         schema_id=raw["schema"], schema_version=raw["schema_version"],
         dataset_id=raw["dataset_id"], device_id=raw["device_id"],
-        device_content_sha256=raw.get("device_content_sha256", ""), source_mode=source_mode,
+        source_mode=source_mode,
         resolution=raw["resolution"], period=period,
-        project_baseline_sha256=baseline_sha, point_count=point_count, prepared=prepared,
+        point_count=point_count, prepared=prepared,
         units=units, notes=notes, declared_columns=tuple(declared),
     ), diags
 
@@ -226,14 +207,12 @@ def serialize_metadata_v2(
     lines = [
         f"# schema: {meta.schema_id}", f"# schema_version: {meta.schema_version}",
         f"# dataset_id: {meta.dataset_id}", f"# device_id: {meta.device_id}",
-        f"# device_content_sha256: {meta.device_content_sha256}",
         f"# source_mode: {meta.source_mode}", f"# resolution: {meta.resolution}",
     ]
     if meta.period is not None:
         lines.append(f"# period: {meta.period}")
     if meta.prepared:
         lines.extend([
-            f"# project_baseline_sha256: {meta.project_baseline_sha256}",
             f"# point_count: {meta.point_count}", "# prepared: true",
         ])
     for column in column_order or tuple(sorted(meta.units)):
@@ -249,7 +228,6 @@ class ParsedDataFile2:
     meta: DeviceData2Meta
     header: tuple[str, ...]
     rows: list[list[str]]
-    raw_sha256: str
     column_order: tuple[str, ...] = ()
 
 
@@ -313,7 +291,7 @@ def parse_data_file_v2(data: bytes) -> tuple[ParsedDataFile2 | None, list[Diagno
         diags.append(_diag("DATA-DIAL-001", {"detail": "正式数据文件至少需要一行"}))
     if any(diag.blocking for diag in diags):
         return None, diags
-    return ParsedDataFile2(meta, normalized, rows, hashlib.sha256(data).hexdigest()), diags
+    return ParsedDataFile2(meta, normalized, rows), diags
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,8 +300,6 @@ class DeviceData2Result:
     column_order: tuple[str, ...]
     rows: list[dict[str, Any]]
     steps: list[int]
-    raw_sha256: str
-    canonical_sha256: str
     transformations: tuple[str, ...]
     diagnostics: list[Diagnostic]
 
@@ -365,35 +341,25 @@ def canonicalize_device_data_v2(
     document: DeviceModelDocument | None,
     *,
     expected_rows: int | None = None,
-    expected_project_baseline_sha256: str | None = None,
     expected_data_ref: str | None = None,
     baseline_resolution: str | None = None,
     baseline_point_count: int | None = None,
 ) -> DeviceData2Result:
     parsed, diags = parse_data_file_v2(data)
-    raw_sha = hashlib.sha256(data).hexdigest()
     if parsed is None:
-        return DeviceData2Result(DeviceData2Meta(), (STEP_COL,), [], [], raw_sha, "", (), diags)
+        return DeviceData2Result(DeviceData2Meta(), (STEP_COL,), [], [], (), diags)
     meta = parsed.meta
     if document is None or document.device is None:
         diags.append(_diag(
             "SYS-CFG-001", {"detail": "缺少已校验的设备模型，无法核对数据绑定"},
             field_name="device_id",
         ))
-        return DeviceData2Result(meta, (STEP_COL,), [], [], parsed.raw_sha256, "", (), diags)
+        return DeviceData2Result(meta, (STEP_COL,), [], [], (), diags)
     if meta.device_id != document.device.id:
         diags.append(_diag(
             "DATA-META-008",
             {"declared": meta.device_id, "expected": document.device.id},
             field_name="device_id",
-        ))
-    if expected_project_baseline_sha256 is not None and (
-        not meta.prepared or meta.project_baseline_sha256 != expected_project_baseline_sha256
-    ):
-        diags.append(_diag(
-            "DATA-META-012", {"declared": meta.project_baseline_sha256,
-                               "expected": expected_project_baseline_sha256},
-            field_name="project_baseline_sha256",
         ))
 
     file_columns = list(parsed.header[1:])
@@ -522,14 +488,8 @@ def canonicalize_device_data_v2(
 
     column_order = (STEP_COL,) + tuple(present_columns)
     transformations = ("steps_validated", "units_declared", "values_checked")
-    provisional = DeviceData2Result(
-        meta, column_order, rows_out, steps, parsed.raw_sha256, "", transformations, diags,
-    )
-    canonical_sha = ""
-    if len(steps) == len(parsed.rows):
-        canonical_sha = hashlib.sha256(provisional.canonical_csv_bytes()).hexdigest()
     return DeviceData2Result(
-        meta, column_order, rows_out, steps, parsed.raw_sha256, canonical_sha, transformations, diags,
+        meta, column_order, rows_out, steps, transformations, diags,
     )
 
 
@@ -537,13 +497,10 @@ def build_data_quality_report_v2(result: DeviceData2Result) -> dict[str, Any]:
     return {
         "schema": result.meta.schema_id, "schema_version": result.meta.schema_version,
         "dataset_id": result.meta.dataset_id, "device_id": result.meta.device_id,
-        "device_content_sha256": result.meta.device_content_sha256,
         "source_mode": result.meta.source_mode, "resolution": result.meta.resolution,
         "prepared": result.meta.prepared,
-        "project_baseline_sha256": result.meta.project_baseline_sha256,
         "point_count": result.meta.point_count, "row_count": len(result.rows),
-        "column_order": list(result.column_order), "raw_sha256": result.raw_sha256,
-        "canonical_sha256": result.canonical_sha256,
+        "column_order": list(result.column_order),
         "has_blocking_errors": any(diag.blocking for diag in result.diagnostics),
         "transformations": list(result.transformations),
         "diagnostics": [diag.to_dict() for diag in result.diagnostics],
@@ -560,30 +517,23 @@ def summary_json_v2(result: DeviceData2Result) -> str:
 class PendingDataFile:
     dataset_id: str
     device_id: str
-    device_content_sha256: str
     source_mode: str
     resolution: str
     period: str | None
     prepared: bool
-    project_baseline_sha256: str | None
     point_count: int | None
-    raw_sha256: str
-    canonical_sha256: str
     row_count: int
     column_order: tuple[str, ...]
 
 
 def pending_from_result(result: DeviceData2Result) -> PendingDataFile | None:
-    if any(diag.blocking for diag in result.diagnostics) or not result.canonical_sha256:
+    if any(diag.blocking for diag in result.diagnostics):
         return None
     return PendingDataFile(
         dataset_id=result.meta.dataset_id, device_id=result.meta.device_id,
-        device_content_sha256=result.meta.device_content_sha256,
         source_mode=result.meta.source_mode, resolution=result.meta.resolution,
         period=result.meta.period, prepared=result.meta.prepared,
-        project_baseline_sha256=result.meta.project_baseline_sha256,
-        point_count=result.meta.point_count, raw_sha256=result.raw_sha256,
-        canonical_sha256=result.canonical_sha256, row_count=len(result.rows),
+        point_count=result.meta.point_count, row_count=len(result.rows),
         column_order=result.column_order,
     )
 

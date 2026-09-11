@@ -13,9 +13,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
@@ -34,10 +31,6 @@ DEFAULT_SCENARIO_MODE: Final[str] = "single"
 #: 设备方程使用的公开时间步长变量名。
 TIMELINE_STEP_DURATION_VAR: Final[str] = "step_duration"
 
-#: 基线规范化算法 ID 与版本(写入摘要; 语义变化必须升版本)。
-BASELINE_CANON_ALGORITHM_ID: Final[str] = "ies.project_baseline.canonical"
-BASELINE_CANON_ALGORITHM_VERSION: Final[str] = "1.0.0"
-
 #: 分辨率 → (普通年 365 天点数, 闰年 366 天点数)。
 _POINT_COUNTS: Final[dict[str, tuple[int, int]]] = {
     "15min": (365 * 24 * 4, 366 * 24 * 4),  # 35040 / 35136
@@ -52,14 +45,9 @@ _RESOLUTION_HOURS: Final[dict[str, float]] = {
     "1h": 1.0,
 }
 
-#: 摘要必须为 64 位小写十六进制(严格恢复, 不允许截断/伪造摘要)。
-_SHA256_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
-
 #: 基线字段白名单(严格恢复: 未知核心字段拒绝, 宪法 7.1)。
-#: ``sha256`` 是 ``to_dict`` 携带的派生摘要字段, 恢复时接受并校验其一致性
-#: (保证 ``from_dict(to_dict(x)) == x`` 自洽, 且摘要可校验)。
 _BASELINE_FIELDS: Final[frozenset[str]] = frozenset(
-    {"resolution", "leap_year", "scenario_mode", "sha256"}
+    {"resolution", "leap_year", "scenario_mode"}
 )
 
 #: 基线校验诊断码(登记于 core.diagnostics.NEW_DIAG_CODES)。
@@ -120,7 +108,9 @@ class ProjectBaseline:
         return self.point_count
 
     def canonical_payload(self) -> str:
-        """规范化字节负载(稳定键序 + 紧凑 JSON, 摘要计算输入)。"""
+        """规范化负载(稳定键序 + 紧凑 JSON)，不含摘要。"""
+        import json
+
         return json.dumps(
             {
                 "resolution": self.resolution,
@@ -131,30 +121,22 @@ class ProjectBaseline:
             separators=(",", ":"),
         )
 
-    def digest(self) -> str:
-        """确定性 SHA-256 摘要(算法 ID/版本前缀 + 规范化负载, 宪法 7.7)。"""
-        return hashlib.sha256(
-            (
-                f"{BASELINE_CANON_ALGORITHM_ID}@{BASELINE_CANON_ALGORITHM_VERSION}\n"
-                f"{self.canonical_payload()}"
-            ).encode("utf-8")
-        ).hexdigest()
-
     def to_dict(self) -> dict:
-        """公开字典形态(含摘要; API/持久化/装配共用的唯一序列化)。"""
+        """公开字典形态(API/持久化/装配共用的唯一序列化)。
+
+        仅包含用户输入口径字段; 不携带内部派生摘要(宪法 2.6)。
+        """
         return {
             "resolution": self.resolution,
             "leap_year": self.leap_year,
             "scenario_mode": self.scenario_mode,
-            "sha256": self.digest(),
         }
 
     @classmethod
     def from_dict(cls, mapping: object) -> "ProjectBaseline":
         """严格恢复: 未知字段拒绝; resolution/leap_year 缺失拒绝; 枚举之外拒绝。
 
-        scenario_mode 缺失时取默认 'single'(文档化默认值)。``sha256`` 是
-        ``to_dict`` 携带的派生内容身份；恢复本地生成的基线时不重复计算校验。
+        scenario_mode 缺失时取默认 'single'(文档化默认值)。
         """
         if not isinstance(mapping, Mapping):
             raise ProjectBaselineError(
@@ -255,18 +237,4 @@ class ProjectBaseline:
                     location={"object_type": "project_baseline", "field": "scenario_mode"},
                 )
             )
-        # 派生摘要字段只校验契约格式，不对本地生成内容重复计算。
-        declared_sha256 = mapping.get("sha256")
-        if declared_sha256 is not None:
-            if (
-                not isinstance(declared_sha256, str)
-                or not _SHA256_RE.fullmatch(declared_sha256)
-            ):
-                diags.append(
-                    make_diag(
-                        BASELINE_INVALID,
-                        params={"detail": "sha256 必须是 64 位小写十六进制字符串"},
-                        location={"object_type": "project_baseline", "field": "sha256"},
-                    )
-                )
         return diags

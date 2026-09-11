@@ -5,7 +5,19 @@ device:
   names:
     zh-CN: 电网连接
     en-US: Grid Connection
-properties: {}
+properties:
+  max_import_power_kw:
+    value: 0
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 200000
+  max_export_power_kw:
+    value: 0
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 200000
 interfaces:
   electricity_import:
     type: out
@@ -23,4 +35,6 @@ interfaces:
       maximum: null
 equations:
   variables: {}
-  relations: []
+  relations:
+    - id: import_export_exclusivity
+      expression: "electricity_import[t] * electricity_export[t] = 0"

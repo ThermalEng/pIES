@@ -7,19 +7,18 @@
 3. ``expected_revision`` 乐观锁更新草稿 YAML(并发编辑拒绝静默覆盖);
 4. 执行安全 YAML、schema、inputs、properties、interfaces、equations 校验,
    一次返回聚合诊断(校验失败不落盘, 不产生 revision);
-5. 发布经过校验的草稿为不可变 revision(相同规范内容幂等返回同一 revision);
+5. 发布经过校验的草稿为不可变 revision(幂等以幂等键与 (template_id, revision) 保证);
 6. 停用 / 重新启用模板(只影响后续选择, 不改变已保存项目模型与历史证据);
 7. 删除尚未发布的草稿(已发布模板禁止删除; 被项目模型引用的 revision 保留);
 8. 所有公开 ID 以不透明十进制字符串传输; 写操作统一由本层管理事务、
    审计、乐观锁与幂等边界; 模板 YAML、校验回执与结构摘要经对象存储门面保存。
 
 项目目录接口(供「新建模型」页面): 可用模板列表 = 当前用户已发布且启用的
-模板, 模板详情固定精确 revision 与内容摘要。
+模板, 模板详情固定精确 revision。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -219,7 +218,7 @@ def _validate_device_id_match(yaml_device_id: str, expected_id: str) -> None:
 
 
 def _put_json(db: Session, value: Any, category: str):
-    """经对象存储门面保存 JSON 字节(内容寻址), 返回 ObjectHandle。
+    """经对象存储门面保存 JSON 字节, 返回 ObjectHandle。
 
     支持 dict 与 list(diagnostic 列表等聚合结构)。
     """
@@ -367,7 +366,7 @@ def _revision_to_dict(revision: ModelTemplateRevision) -> dict[str, Any]:
 
 
 def _read_template_document(db: Session, object_id: int) -> str:
-    """经对象存储门面读取模板规范 YAML 文本(读取时校验完整性)。"""
+    """经对象存储门面读取模板规范 YAML 文本(解码失败抛模板对象损坏错误)。"""
     raw = get_object(db, object_id)
     try:
         text = raw.decode("utf-8")
@@ -497,7 +496,7 @@ def _save_draft(
         expected_stable = template.template_id
         _validate_device_id_match(validation.document.device.id, expected_stable)
 
-    # 校验通过: 规范 YAML 落盘(内容寻址), 形成新的不可变草稿 revision
+    # 校验通过: 规范 YAML 落盘, 形成新的不可变草稿 revision
     handle = put_object(db, validation.canonical_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
                         source_category="model_template_draft")
     old_diags = template.draft_diagnostics_object_id
@@ -756,7 +755,7 @@ def validate_template_revision(
 
 
 # ---------------------------------------------------------------------------
-# 发布(不可变 revision; 相同内容幂等)
+# 发布(不可变 revision; 幂等键/(template_id, revision) 幂等)
 # ---------------------------------------------------------------------------
 
 
@@ -1032,7 +1031,7 @@ def delete_template_draft(
 def list_available_templates(db: Session, user) -> list[dict[str, Any]]:
     """当前用户已发布且启用的模板目录(项目模板选择器)。
 
-    列表项携带最新发布 revision 与内容摘要; 未发布的草稿与停用模板
+    列表项携带最新发布 revision 与结构摘要对象引用; 未发布的草稿与停用模板
     不出现在目录中(停用只影响后续选择)。
     未完成显式迁移的旧 ID 不进入新的选择结果（任务书 §三）。
     """
@@ -1094,232 +1093,6 @@ def resolve_template_revision(
         yaml_object_id=row.yaml_object_id,
         schema_version=row.schema_version,
     )
-
-# ---------------------------------------------------------------------------
-# 离线迁移（任务书 §三：已发布旧 ID 内容的显式迁移）
-# ---------------------------------------------------------------------------
-
-def migrate_published_template(
-    db: Session,
-    user,
-    old_template_id: str,
-    new_slug: str,
-) -> dict[str, Any]:
-    """离线迁移已发布模板：旧 ID → 新 ID，重新规范化并原子更新全部引用。
-
-    步骤（单事务）：
-    1. 读取旧模板的最新发布 revision 规范字节；
-    2. 用新 slug + 用户 namespace 重新组合 device.id；
-    3. 替换 YAML 中的 device.id，重新规范化并生成内容摘要；
-    4. 生成迁移回执；
-    5. 原子更新模板主表、publication、项目模型等全部引用；
-    6. 任一引用不能更新时整体回滚。
-
-    不得伪造已丢失的历史 revision。
-    """
-    from iesplan.models.draft_revision import TemplateMigrationReceipt
-    from iesplan.models.project_model import ProjectModel
-
-    # 迁移会把主行的稳定 ID 更新为新 ID；因此幂等重放必须先按旧 ID
-    # 查回执，否则第二次调用会在读取模板主行时误报 404。
-    existing_receipt = db.execute(
-        sa.select(TemplateMigrationReceipt)
-        .join(ModelTemplate, ModelTemplate.id == TemplateMigrationReceipt.entry_id)
-        .where(
-            TemplateMigrationReceipt.old_template_id == old_template_id,
-            ModelTemplate.owner_id == user.id,
-        )
-    ).scalar_one_or_none()
-    if existing_receipt is not None:
-        return {"receipt": {
-            "old_template_id": old_template_id,
-            "new_template_id": existing_receipt.new_template_id,
-        }, "duplicate": True}
-
-    old_template = _get_owned_template(db, user, old_template_id)
-    if old_template.published_revision == 0:
-        raise AppError(
-            "模板尚未发布，无需迁移",
-            code="TPL-MDL-006",
-            message_key="ies.diag.tpl.revision_required",
-            params={"template_id": old_template_id},
-        )
-    _validate_slug(new_slug)
-    namespace = _ensure_namespace(db, user)
-    new_template_id = build_stable_id(namespace, new_slug)
-
-    # 检查新 ID 是否已被占用
-    existing = db.execute(
-        sa.select(ModelTemplate).where(ModelTemplate.template_id == new_template_id)
-    ).scalar_one_or_none()
-    if existing is not None and existing.id != old_template.id:
-        raise AppError(
-            "新稳定 ID 已被占用",
-            code="API-CONFLICT-001",
-            message_key="ies.diag.tpl.api.slug_conflict",
-            params={"new_template_id": new_template_id},
-        )
-
-    # 读取旧发布 revision 的规范字节
-    rev = db.execute(
-        sa.select(ModelTemplateRevision).where(
-            ModelTemplateRevision.template_id == old_template.id,
-            ModelTemplateRevision.revision == old_template.published_revision,
-        )
-    ).scalar_one_or_none()
-    if rev is None:
-        raise TemplateNotFoundError("旧发布 revision 不存在")
-
-    old_text = _read_template_document(db, rev.yaml_object_id)
-    parsed = json.loads(old_text)
-    parsed["device"]["id"] = new_template_id
-    validation_new = validate_template_raw(parsed)
-    if not validation_new.ok or validation_new.document is None:
-        raise TemplateValidationError(
-            "",
-            params={"diagnostics": [d.to_dict() for d in validation_new.diagnostics],
-                    "count": len(validation_new.diagnostics)},
-            location={"object_type": "model_template", "template_id": old_template_id},
-        )
-    new_text = validation_new.canonical_text
-
-    # 原子更新：保留旧 publication，新增一个不可变迁移 publication，
-    # 再切换主表指针和全部项目模型溯源（同一事务）。文本只校验字头。
-    try:
-        new_revision_number = old_template.published_revision + 1
-        yaml_handle = put_object(db, new_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
-                                 source_category="model_template_revision")
-        publication_receipt = validation_new.receipt or canonical_receipt(validation_new.document)
-        publication_receipt = {
-            **dict(publication_receipt),
-            "template_id": new_template_id,
-            "revision": new_revision_number,
-            "schema": SCHEMA_ID,
-            "schema_version": SCHEMA_VERSION,
-            "input_count": validation_new.input_count,
-            "migration": {
-                "old_template_id": old_template_id,
-                "old_revision": old_template.published_revision,
-            },
-        }
-        receipt_handle = _put_json(db, publication_receipt, "model_template_receipt")
-        summary_handle = _put_json(db, _build_summary(validation_new.document), "model_template_summary")
-        diag_handle = _put_json(db, [], "model_template_diagnostics")
-        new_revision = ModelTemplateRevision(
-            template_id=old_template.id,
-            revision=new_revision_number,
-            schema_version=SCHEMA_VERSION,
-            input_count=validation_new.input_count,
-            yaml_object_id=yaml_handle.id,
-            receipt_object_id=receipt_handle.id,
-            summary_object_id=summary_handle.id,
-            diagnostics_object_id=diag_handle.id,
-            published_by=user.id,
-        )
-        db.add(new_revision)
-        db.flush()
-        old_template.template_id = new_template_id
-        old_template.slug = new_slug
-        old_template.public_namespace = namespace
-        old_template.published_revision = new_revision_number
-        old_template.current_published_revision_id = new_revision.id
-        old_template.published_at = datetime.now(UTC)
-        for handle in (yaml_handle, receipt_handle, summary_handle, diag_handle):
-            attach(db, handle.id, TEMPLATE_OWNER_NAMESPACE, old_template.id,
-                   ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="revision")
-        receipt = TemplateMigrationReceipt(
-            old_template_id=old_template_id,
-            new_template_id=new_template_id,
-            entry_id=old_template.id,
-            migrated_by=user.id,
-        )
-        db.add(receipt)
-        db.flush()
-        db.execute(
-            sa.update(ProjectModel)
-            .where(ProjectModel.template_id == old_template_id)
-            .values(
-                template_id=new_template_id,
-                template_revision=new_revision_number,
-            )
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-
-    return {"receipt": {
-        "old_template_id": old_template_id,
-        "new_template_id": new_template_id,
-    }, "duplicate": False}
-
-
-def migrate_draft_to_new_stable_id(
-    db: Session,
-    user,
-    old_template_id: str,
-    new_slug: str,
-) -> dict[str, Any]:
-    """未发布草稿的显式迁移：生成新稳定 ID、摘要与迁移回执。
-
-    仅适用于未发布草稿；已发布内容走 migrate_published_template。
-    """
-    old_template = _get_owned_template(db, user, old_template_id)
-    if old_template.published_revision > 0:
-        raise AppError(
-            "已发布模板请使用已发布迁移路径",
-            code="TPL-MDL-007",
-            message_key="ies.diag.tpl.already_published",
-        )
-    _validate_slug(new_slug)
-    namespace = _ensure_namespace(db, user)
-    new_id = build_stable_id(namespace, new_slug)
-    if old_template.draft_yaml_object_id is None:
-        raise AppError("草稿无内容", code="TPL-MDL-006",
-                       message_key="ies.diag.tpl.revision_required")
-    old_text = _read_template_document(db, old_template.draft_yaml_object_id)
-    parsed = json.loads(old_text)
-    parsed["device"]["id"] = new_id
-    validation_new = validate_template_raw(parsed)
-    if not validation_new.ok or validation_new.document is None:
-        raise TemplateValidationError(
-            "",
-            params={"diagnostics": [d.to_dict() for d in validation_new.diagnostics],
-                    "count": len(validation_new.diagnostics)},
-            location={"object_type": "model_template", "template_id": old_template_id},
-        )
-    new_text = validation_new.canonical_text
-    try:
-        new_handle = put_object(db, new_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
-                                source_category="model_template_draft")
-        attach(db, new_handle.id, TEMPLATE_OWNER_NAMESPACE, old_template.id,
-               ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_yaml")
-        old_template.template_id = new_id
-        old_template.slug = new_slug
-        old_template.public_namespace = namespace
-        old_template.draft_yaml_object_id = new_handle.id
-        # 同步创建新的不可变草稿 revision（不伪造历史）文本只校验字头
-        from iesplan.models.draft_revision import ModelTemplateDraftRevision as _DraftRevMig
-        diag_h = _put_json(db, [], "model_template_draft_diagnostics")
-        new_dr = _DraftRevMig(
-            entry_id=old_template.id,
-            revision=old_template.draft_revision + 1,
-            yaml_object_id=new_handle.id,
-            source="migration",
-            created_by=user.id,
-            diagnostics_object_id=diag_h.id,
-        )
-        db.add(new_dr)
-        db.flush()
-        attach(db, diag_h.id, TEMPLATE_OWNER_NAMESPACE, old_template.id,
-               ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_revision")
-        old_template.draft_revision = new_dr.revision
-        old_template.current_draft_revision_id = new_dr.id
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    return {"old_template_id": old_template_id, "new_template_id": new_id}
 
 
 def list_draft_revisions(db: Session, user, template_id: str) -> list[dict[str, Any]]:

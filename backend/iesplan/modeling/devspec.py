@@ -1,10 +1,10 @@
 """设备规格数据模型(设备初始化模块的最小可用版,按文档接口实现)。
 
-背景:建模模块(2 层)的输入是设备初始化模块(1 层,``iesplan/devices/``)产出的
-``DeviceSpec``。该包当前尚未落地,按实施规则"依赖模块未实现时用文档定义的接口
-自行实现最小可用版本",本文件按 **03 §4.2(DeviceSpec 字段)** 与 **02 §6.1
-(PortSpec/SeriesSpec/StateSpec 字段)** 的定案接口实现最小版,供建模模块独立导入;
-``iesplan.devices.spec`` 落地后,仅需把 `build.py`/测试中的导入指向新包(字段签名不变)。
+背景:本文件定义建模模块(2 层)的设备规格数据模型 ``DeviceSpec``,供
+``build_command`` 命令生成消费。本文件按 **03 §4.2(DeviceSpec 字段)** 与
+**02 §6.1(PortSpec/SeriesSpec/StateSpec 字段)** 的定案接口实现;运行时设备域
+2.0 文档消费路径见 ``registry_loader`` → ``contract2.build_math_contribution``
+(直接消费 ``DeviceModelDocument``)。
 
 字段命名遵循 05 §7.1 裁决:``model_method``(mechanism|data_repeat|data_predict)、
 ``stateful: bool``;02 的 modeling_method/statefulness 命名废止。

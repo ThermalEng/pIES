@@ -64,7 +64,7 @@ class CleanupRequest(BaseModel):
 class RestoreRequest(BaseModel):
     """恢复误清理对象: 只接受数字对象 ID(待回收对象的对象主键)。
 
-    oid(内容寻址字符串)与业务 sha256 混淆时 404 更利于定位, 故仅限数字 ID;
+    oid(对象字符串)与数字主键混淆时 404 更利于定位, 故仅限数字 ID;
     恢复目标必须是仍在保留期内的 pending_deletion 对象, 已物理回收的不可恢复。
     """
 

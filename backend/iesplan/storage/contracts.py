@@ -2,7 +2,7 @@
 
 - 业务模块只消费不可变值对象 ``ObjectHandle`` / ``ObjectOwner`` 与协议
   ``ObjectStore``, 不导入 ORM、不拼接路径;
-- 对象 ID 可以是数据库主键(int)或内容寻址 oid(str), 由实现统一解析;
+- 对象 ID 可以是数据库主键(int)或不透明 oid(str), 由实现统一解析;
 - owner namespace 是调用方声明的稳定标识, 存储只判断"是否有引用",
   不导入任何业务模型(STO-05)。
 """
@@ -25,13 +25,12 @@ class ObjectHandle:
     0.4.0: 移除适配器/缓存字段 storage_path/ref_count —— 存储路径属 §11
     敏感信息, ref_count 是可重建缓存(§10.3), 均不得进入业务层公开对象;
     引用状态经 object_info/list_refs 等公开门面查询。
-    保留字段即持久化公开视图(sha256/size_bytes/media_type/status/created_at),
-    业务模块可直接消费, 无需接触 ORM。
+    保留字段即持久化公开视图(oid/size_bytes/media_type/status/created_at),
+    业务模块可直接消费, 无需接触 ORM。寻址键为对象 id, 不携带内容摘要。
     """
 
     id: int
     oid: str
-    sha256: str
     size_bytes: int
     media_type: str | None
     status: str
@@ -67,8 +66,8 @@ class RefInfo:
 class ObjectStore(Protocol):
     """对象存储公开门面(最小公开协议, 10.3)。
 
-    - put: 写入字节 → 句柄(内容去重, 同内容复用记录);
-    - get: 按 ID 读取字节(读取时校验大小 + sha256, 损坏抛 ObjectCorruptError);
+    - put: 写入字节 → 新对象句柄(每次写入新建对象, 按对象 id 寻址, 无内容去重);
+    - get: 按 ID 读取字节(缺失抛 ObjectCorruptError; 不做内容复核);
     - stat: 元数据视图(不含内容);
     - attach/detach: 建立/解除 owner 引用(引用清单为唯一权威, STO-02);
     - list_owners: 列出对象全部引用(调试/审计)。
@@ -90,14 +89,14 @@ class ObjectStore(Protocol):
 class BlobStore(Protocol):
     """字节存储适配器(10.7: 文件系统 / S3 等 provider 接口)。
 
-    实现只负责字节的可靠存取与完整性报告, 不理解业务引用与生命周期。
-    - put_blob: 完整字节原子提交, 返回 (storage_path, size);
+    实现只负责字节的可靠存取, 不理解业务引用与生命周期, 不做内容摘要与复核。
+    - put_blob: 完整字节原子提交到调用方给定的对象 id 路径, 返回 storage_path;
     - get_blob: 按 storage_path 读取字节(缺失抛 BlobMissingError);
     - delete_blob: 删除字节(不存在幂等);
     - reconcile: 扫描磁盘孤儿(有文件无记录)与缺失(有记录无文件), 幂等。
     """
 
-    def put_blob(self, content: bytes) -> tuple[str, int]: ...
+    def put_blob(self, content: bytes, oid: str) -> str: ...
 
     def get_blob(self, storage_path: str) -> bytes: ...
 
@@ -114,7 +113,7 @@ class BlobMissingError(AppError):
 
 
 class ObjectCorruptError(AppError):
-    """对象内容与记录不一致(大小或 sha256 不匹配, 或文件缺失)。"""
+    """对象记录/字节缺失(记录无路径或文件缺失; 不做内容复核)。"""
 
     code = "OBJ-CORRUPT-001"
     message_key = "ies.diag.obj.corrupt"

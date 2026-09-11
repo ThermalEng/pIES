@@ -22,8 +22,7 @@
   AssemblyValidationResult(diagnostics, artifact) — artifact 为 None 时校验失败。
 
 模块边界:
-- 跨模块仅消费 devices 公开门面(get_device_descriptor/list_device_descriptors/
-  data_inputs_from_descriptor);
+- 跨模块仅消费 devices 公开门面(get_device/list_devices);
 - 复用 assembly 域内 checker/rules/canonicalizer/parser10/contracts;
 - 不导入 services/ORM/存储私有路径。
 """
@@ -46,7 +45,6 @@ from iesplan.assembly.contracts import (
 from iesplan.assembly.diags import (
     ASM_CALC_OPTIONS,
     ASM_INPUT_DATA_UNIT,
-    ASM_INPUT_LOAD_DATA,
     ASM_INPUT_PARAM,
     ASM_INPUT_RANGE,
     ASM_INPUT_UNDECLARED,
@@ -67,7 +65,6 @@ from iesplan.assembly.schema import (
     TimeAxisRef,
 )
 from iesplan.core.diagnostics import Diagnostic
-from iesplan.devices import data_inputs_from_descriptor
 
 
 @dataclass(slots=True)
@@ -131,7 +128,7 @@ def validate_project_export(
 
     项目内容 → builder10 构造 ies.assembly 1.0.0 文档 → 与手写文件同一校验
     入口。datasets 为 int 视频索引的元信息{vid: {columns, column_units,
-    resolution, sha256, media_type}};solver/generator 显式覆盖旧链推导。
+    resolution, media_type}};solver/generator 显式覆盖旧链推导。
     """
     built = build_assembly_doc_from_content(content, datasets=datasets, solver=solver, generator=generator)
     if built.doc is None:
@@ -163,8 +160,8 @@ def _run_validation(
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
 
-    # --- 资源解析(相对路径 → 内容寻址) ---------------------------------
-    resolved_doc, resource_digests, res_diags = _resolve_resources(doc, package_dir)
+    # --- 资源解析(相对路径 → 对象形态引用) -------------------------------
+    resolved_doc, resource_media, res_diags = _resolve_resources(doc, package_dir)
     diags.extend(res_diags)
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
@@ -185,7 +182,7 @@ def _run_validation(
     dependency_lock = _dependency_lock(doc, registry)
     receipt = ValidationReceipt(
         dependencies=dependency_lock,
-        resources=resource_digests,
+        resources=resource_media,
         diagnostics=tuple(d for d in diags if not d.blocking),
     )
     artifact = ValidatedAssemblyArtifact(
@@ -217,7 +214,7 @@ def _check_devices(doc: dict, registry, diags: list[Diagnostic]) -> None:
             )
             continue
         descriptor = registry[type_id]
-        declared_version = descriptor.version
+        declared_version = descriptor.schema_version
         if version != declared_version:
             # ies.assembly 1.0.0 强制精确版本:版本不一致阻断
             diags.append(
@@ -249,7 +246,7 @@ def _check_required_parameters(doc: dict, registry, diags: list[Diagnostic]) -> 
         # 参数只允许已声明字段
         params_raw = dev.get("parameters") or {}
         for name, value in params_raw.items():
-            if name not in descriptor.parameters:
+            if name not in descriptor.properties:
                 diags.append(
                     make_diag(
                         ASM_INPUT_UNDECLARED,
@@ -264,7 +261,7 @@ def _check_required_parameters(doc: dict, registry, diags: list[Diagnostic]) -> 
                     )
                 )
                 continue
-            ps = descriptor.parameters[name]
+            ps = descriptor.properties[name]
             # 非有限值阻断(不依赖本地约定;宪法定量契约)
             if isinstance(value, float) and not math.isfinite(value):
                 diags.append(
@@ -284,13 +281,13 @@ def _check_required_parameters(doc: dict, registry, diags: list[Diagnostic]) -> 
             if isinstance(value, bool) or value is None:
                 continue
             if isinstance(value, (int, float)):
-                if ps.min is not None and float(value) < ps.min:
+                if ps.minimum is not None and float(value) < ps.minimum:
                     diags.append(
                         make_diag(
                             ASM_INPUT_RANGE,
                             severity="error",
                             blocking=False,
-                            params={"device": dev_id, "param": name, "value": float(value), "min": ps.min},
+                            params={"device": dev_id, "param": name, "value": float(value), "min": ps.minimum},
                             location={
                                 "object_type": "device",
                                 "object_id": dev_id,
@@ -298,13 +295,13 @@ def _check_required_parameters(doc: dict, registry, diags: list[Diagnostic]) -> 
                             },
                         )
                     )
-                elif ps.max is not None and float(value) > ps.max:
+                elif ps.maximum is not None and float(value) > ps.maximum:
                     diags.append(
                         make_diag(
                             ASM_INPUT_RANGE,
                             severity="error",
                             blocking=False,
-                            params={"device": dev_id, "param": name, "value": float(value), "max": ps.max},
+                            params={"device": dev_id, "param": name, "value": float(value), "max": ps.maximum},
                             location={
                                 "object_type": "device",
                                 "object_id": dev_id,
@@ -312,55 +309,6 @@ def _check_required_parameters(doc: dict, registry, diags: list[Diagnostic]) -> 
                             },
                         )
                     )
-            if ps.enum is not None and value not in ps.enum:
-                diags.append(
-                    make_diag(
-                        ASM_INPUT_RANGE,
-                        severity="error",
-                        blocking=False,
-                        params={"device": dev_id, "param": name, "value": value, "enum": list(ps.enum)},
-                        location={
-                            "object_type": "device",
-                            "object_id": dev_id,
-                            "field": f"parameters.{name}",
-                        },
-                    )
-                )
-        # 必填参数非空(默认 None 或 load 类 reference 参数);
-        # 负荷类设备的 reference 参数由 data 绑定承载(新格式按 data_inputs 列绑定)
-        data_keys = set((dev.get("data") or {}).keys())
-        has_data_binding = bool(data_keys)
-        required_names = [
-            name
-            for name, ps in descriptor.parameters.items()
-            if ps.default is None or (ps.unit == "reference" and descriptor.is_load)
-        ]
-        for name in required_names:
-            if name in params_raw or name in data_keys:
-                continue
-            ps = descriptor.parameters[name]
-            if ps.unit == "reference" and descriptor.is_load and has_data_binding:
-                continue
-            diags.append(
-                make_diag(
-                    ASM_INPUT_PARAM,
-                    severity="error",
-                    blocking=True,
-                    params={"device": dev_id, "param": name},
-                    location={"object_type": "device", "object_id": dev_id, "field": f"parameters.{name}"},
-                )
-            )
-        # 负荷类设备必带 data
-        if descriptor.is_load and not (dev.get("data") or {}):
-            diags.append(
-                make_diag(
-                    ASM_INPUT_LOAD_DATA,
-                    severity="error",
-                    blocking=True,
-                    params={"device": dev_id},
-                    location={"object_type": "device", "object_id": dev_id, "field": "data"},
-                )
-            )
 
 
 def _check_data_bindings(
@@ -374,6 +322,9 @@ def _check_data_bindings(
         if not isinstance(dev, Mapping):
             continue
         data_block = dev.get("data") or {}
+        # 注:predefined 接口缺显式数据绑定不阻断 —— 接口 source.data_ref
+        # 自带默认数据路径(2.0 唯一数据路径);设备参数关键字直接引用项目相对
+        # CSV, 无 data_refs/对象绑定机制。此处只校验已给出绑定的引用完整性。
         for col_key, binding in data_block.items():
             if not isinstance(binding, Mapping):
                 continue
@@ -472,8 +423,8 @@ def _check_data_bindings(
                             target_unit = next(
                                 (
                                     d.unit
-                                    for d in data_inputs_from_descriptor(descriptor)
-                                    if d.column_id == col_key
+                                    for d in descriptor.interfaces.values()
+                                    if d.type == "predefined" and d.id == col_key
                                 ),
                                 "",
                             )
@@ -507,16 +458,16 @@ def _resolve_resources(
     doc: dict,
     package_dir: str | Path | None,
 ) -> tuple[dict, dict, list[Diagnostic]]:
-    """resources.datasets:relative_file → 内容寻址对象(object 形态)。
+    """resources.datasets 声明规范化为 object 形态引用。
 
-    返回(resolved_doc, resource_digests, diagnostics)。
-    resource_digests = {dataset_id: {"sha256", "media_type"}} → 回执。
+    返回(resolved_doc, resource_media, diagnostics)。
+    resource_media = {dataset_id: {"media_type"}} → 回执 resources 字段。
     失败 → diag ASM_RES_INVALID 阻断。
     """
     diags: list[Diagnostic] = []
     resources = doc.get("resources") or {}
     datasets = dict(resources.get("datasets") or {})
-    resource_digests: dict[str, dict] = {}
+    resource_media: dict[str, dict] = {}
     for ds_id, entry in datasets.items():
         if not isinstance(entry, Mapping):
             continue
@@ -530,7 +481,7 @@ def _resolve_resources(
                 "object_id": object_id,
                 "media_type": media,
             }
-            resource_digests[str(ds_id)] = {"media_type": media}
+            resource_media[str(ds_id)] = {"media_type": media}
             continue
         if kind == "relative_file":
             if package_dir is None:
@@ -573,12 +524,12 @@ def _resolve_resources(
                 "object_id": f"file:{rel_path}",
                 "media_type": media,
             }
-            resource_digests[str(ds_id)] = {"media_type": media}
+            resource_media[str(ds_id)] = {"media_type": media}
             continue
         # 未知 kind 已被结构阶段拒绝,此处忽略
     out = dict(doc)
     out["resources"] = {"datasets": datasets}
-    return out, resource_digests, diags
+    return out, resource_media, diags
 
 
 def _infer_media_type(path: str) -> str:
@@ -711,13 +662,28 @@ def _check_undefined_ports(spec: AssemblySpec, ctx, diags: list[Diagnostic]) -> 
 
 
 def _check_input_unfed(spec: AssemblySpec, ctx, diags: list[Diagnostic]) -> None:
+    from iesplan.assembly.checker import (
+        EXOGENOUS_SUPPLY_CARRIERS,
+        GRID_SIDE_PORTS,
+        grid_side_used,
+        resolve_model,
+    )
+
     ports = ensure_ports_ctx(spec, ctx)
     in_edges: dict[str, list[str]] = {}
     for edge in spec.edges:
         in_edges.setdefault(edge.to_port, []).append(edge.id)
+    model_of = {d.id: d.model for d in spec.devices}
+    grid_used_cache: dict[str, bool] = {}
     for port_ref, port in ports.items():
-        if port.direction != "in" or port.carrier == "solar":
+        if port.direction != "in" or port.carrier in EXOGENOUS_SUPPLY_CARRIERS:
             continue
+        if port.name in GRID_SIDE_PORTS:
+            if port.device not in grid_used_cache:
+                type_spec, _ = resolve_model(ctx, model_of.get(port.device, ""))
+                grid_used_cache[port.device] = grid_side_used(type_spec, port.device, spec.edges)
+            if grid_used_cache[port.device]:
+                continue
         if not in_edges.get(port_ref):
             dev_id, _, _ = port_ref.partition(".")
             diags.append(
@@ -799,7 +765,6 @@ def _phase4_outputs(doc: dict, diags: list[Diagnostic]) -> None:
 
 def _dependency_lock(doc: dict, registry) -> dict:
     devices_lock: dict[str, str] = {}
-    model_commands: dict[str, str] = {}
     for dev in (doc.get("devices") or {}).values():
         model = dev.get("model")
         if not isinstance(model, str):
@@ -808,14 +773,9 @@ def _dependency_lock(doc: dict, registry) -> dict:
         if not version:
             continue
         devices_lock[type_id] = version
-        descriptor = registry.get(type_id)
-        if descriptor is not None:
-            for capability, ref in descriptor.model_commands.items():
-                model_commands[str(capability)] = str(ref)
     calculation = doc.get("calculation") or {}
     return {
         "devices": dict(sorted(devices_lock.items())),
-        "model_commands": dict(sorted(model_commands.items())),
         "calculation": {
             "mode": str(calculation.get("mode") or ""),
             "generator": str(calculation.get("generator") or ""),
@@ -833,9 +793,9 @@ def _descriptor_for(registry, model: Any):
 
 def _device_registry() -> dict:
     """已注册的设备描述符快照(从 devices 公开门面构建)。"""
-    from iesplan.devices import list_device_descriptors
+    from iesplan.devices import list_devices
 
-    return {desc.type_id: desc for desc in list_device_descriptors()}
+    return {desc.device.id: desc for desc in list_devices() if desc.device is not None}
 
 
 def _split_ref(ref: str) -> tuple[str, str | None]:

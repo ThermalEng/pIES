@@ -741,8 +741,6 @@ class FinanceOverrides:
             raise FinanceTripletError(f"schema 必须为 {SCHEMA_OVERRIDES!r}")
         if self.schema_version != SCHEMA_VERSION:
             raise FinanceTripletError(f"schema_version 必须为 {SCHEMA_VERSION!r}")
-        if "content_sha256" in self.profile_ref:
-            raise FinanceTripletError("profile_ref 不允许 content_sha256（文本只校验字头）")
         object.__setattr__(self, "profile_ref", MappingProxyType(dict(sorted(self.profile_ref.items()))))
         object.__setattr__(self, "finance_types", MappingProxyType(dict(sorted(self.finance_types.items()))))
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))

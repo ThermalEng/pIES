@@ -3,7 +3,7 @@
 规范化是公开纯过程(file-formats.md「人工编写与规范化」):
 - 映射键按格式规则稳定排序;有业务顺序的列表(series/metrics)保留声明顺序;
 - 时间换算为带 Z 的 UTC(解析失败抛 ValueError,结构阶段已先行拒绝无偏移形态);
-- relative_file 已由校验器解析为内容寻址对象(kind: object);本模块对仍为
+- relative_file 已由校验器解析为对象形态引用(kind: object);本模块对仍为
   relative_file 的输入确定性拒绝,不允许未解析资源进入规范字节;
 - 数值使用唯一有限十进制表示(整数与整值浮点同语义 → 同文本,不依赖 locale);
 - 注释/显示空白/YAML 表示差异不参与语义摘要(解析期已丢失,字节级稳定);
@@ -47,7 +47,7 @@ _TOP_ORDER = (
 
 _ASSEMBLY_ORDER = ("id", "name")
 _TIME_AXIS_ORDER = ("start", "end", "resolution", "endpoint")
-_SOURCE_ORDER = ("kind", "object_id", "sha256", "media_type")
+_SOURCE_ORDER = ("kind", "object_id", "media_type")
 _DATASET_ORDER = ("source",)
 _DEVICE_ORDER = ("model", "parameters", "data")
 _DATA_BINDING_ORDER = ("dataset", "column")
@@ -246,7 +246,7 @@ def canonicalize_assembly_doc(doc: Mapping) -> str:
     - doc 必须是已完成结构/模型/数据/资源解析的 ies.assembly 1.0.0 文档
       (resources.datasets.source 均为 object 形态;未知核心字段已在结构阶段拒绝);
     - 规范文本:紧凑 JSON(ensure_ascii=False, separators=(',', ':'), 拒绝 NaN),
-      末尾 LF;UTF-8 编码后计算 SHA-256。
+      末尾 LF。
     """
     plain = _normalize_doc(doc)
     ordered = _ordered(plain, _TOP_ORDER)

@@ -98,7 +98,6 @@ def audit(
     *,
     revision: int | None = None,
     result: dict[str, Any] | None = None,
-    checksum_info: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
     before: dict[str, Any] | None = None,
     actor_type: str = "user",
@@ -108,7 +107,7 @@ def audit(
 ) -> AuditLog:
     """统一审计入口(写不可变 audit_log, 只 INSERT, 宪法 §16 + 领域模型 §对象生命周期 / 领域模型 §身份、权限和审计)。
 
-    只保存身份/时间/动作/对象标识/修订号/结果/必要校验信息; 不复制密码、
+    只保存身份/时间/动作/对象标识/修订号/结果; 不复制密码、
     令牌、完整模型、完整数据集或原始求解日志(敏感与大体量内容一概不入库, 宪法 §16)。
 
     参数:
@@ -119,7 +118,6 @@ def audit(
         object_id: 对象标识(实体 id)。
         revision: 修订号(草稿/版本场景, 记入 after.revision)。
         result: 结果摘要(如 {status: 'ok', package_object_id: 12})。
-        checksum_info: 必要校验信息(如 {sha256: ...})。
         extra: 其他脱敏元数据(合并进 after)。
         before: 变更前关键字段(如 {from_user_id: ...}); 无变更前状态传 None。
         actor_type: 操作者类型 user/system/admin(领域模型 §对象生命周期 CHECK)。
@@ -132,8 +130,6 @@ def audit(
         after["revision"] = revision
     if result is not None:
         after["result"] = result
-    if checksum_info is not None:
-        after["checksum"] = checksum_info
     if extra:
         after.update(extra)
     row = AuditLog(

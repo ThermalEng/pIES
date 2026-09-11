@@ -584,6 +584,19 @@ def assert_same_dims(unit_a: str, unit_b: str) -> None:
         )
 
 
+def units_compatible(declared: str, model: str) -> bool:
+    """单位量纲兼容(大小写不敏感; 未注册单位按字符串一致判断)。
+
+    供 services 层做同一量纲判定(上传 fields 声明与描述符权威单位的一致性校验收敛到同一规则)。
+    """
+    try:
+        return dict(dims_of(declared)) == dict(dims_of(model))
+    except UnitError:
+        return " ".join(declared.strip().lower().split()) == " ".join(
+            model.strip().lower().split()
+        )
+
+
 def convert(value: float, from_unit: str, to_unit: str) -> float:
     """同类量纲单位间换算(经 dims_of 一致性检查后 to_si/from_si 组合,01 §4.2)。
 

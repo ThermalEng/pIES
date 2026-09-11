@@ -33,13 +33,12 @@ OBJ_STATUS_DELETED = "deleted"
 
 
 class StoredObject(Base):
-    """内容寻址对象(元数据、引用计数、配额, 01 §10.1)。"""
+    """对象元数据(寻址键为对象 id, 引用计数、配额, 01 §10.1)。"""
 
     __tablename__ = "objects"
 
     id: Mapped[int] = bigint_pk()
     oid: Mapped[str] = mapped_column(Text, nullable=False)
-    sha256: Mapped[str] = mapped_column(Text, nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     storage_path: Mapped[str | None] = mapped_column(Text)
     media_type: Mapped[str | None] = mapped_column(Text)
@@ -58,7 +57,6 @@ class StoredObject(Base):
 
     __table_args__ = (
         regex_check(f"oid ~ '{HASH64_RE}'", name="ck_objects_oid"),
-        regex_check(f"sha256 ~ '{HASH64_RE}'", name="ck_objects_sha256"),
         CheckConstraint("size_bytes >= 0", name="ck_objects_size"),
         CheckConstraint(
             "status IN ('stored','orphaned','pending_deletion','deleted')", name="ck_objects_status"
@@ -71,7 +69,6 @@ class StoredObject(Base):
             name="ck_objects_pending_deletion_dates",
         ),
         UniqueConstraint("oid", name="uq_objects_oid"),
-        UniqueConstraint("sha256", name="uq_objects_sha256"),
         Index("idx_objects_status", "status", "last_referenced_at"),
         Index("idx_objects_path", "storage_path"),
         # 0.2.0-B3: 待回收对象按到期时间排序(到期优先物理回收)。
@@ -83,7 +80,7 @@ class ObjectRef(Base):
     """对象引用清单(01 §10.2; STO-02: 引用清单为对象生命周期唯一权威)。
 
     ref_entity_id 为 Text: owner 标识是调用方声明的稳定字符串
-    (整数主键或内容寻址 sha256 均可, STO-05), 存储不解析其语义。
+    (整数主键或对象 id 均可, STO-05), 存储不解析其语义。
     """
 
     __tablename__ = "object_refs"

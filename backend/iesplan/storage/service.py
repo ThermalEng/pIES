@@ -1,10 +1,10 @@
-"""对象存储服务(STO-01~07): 内容寻址写入/读取/引用/清理/门禁/恢复。
+"""对象存储服务(STO-01~07): 按对象 id 寻址的写入/读取/引用/清理/门禁/恢复。
 
 对应架构宪法 §10 存储与数据生命周期 / §13 故障与健康语义、modules/storage §对象清理恢复路径 与 domain-model §对象生命周期。本模块是对象域唯一写入单元:
 
-- put_object: 经 BlobStore 适配器原子落盘 → upsert 元数据行 → (可选)owner 引用;
-- 内容去重(23.1): 相同 sha256 只存一份, 复用既有记录; owner 引用单独建立;
-- 读取校验: get_object 读取时校验大小与 sha256, 不一致抛 ObjectCorruptError;
+- put_object: 生成对象 id → 经 BlobStore 适配器原子落盘 → 新增元数据行 →
+  (可选)owner 引用; 每次写入新建对象(无内容去重), 寻址键为对象 id;
+- 读取: get_object 按对象 id 读取字节, 仅报告缺失(不做内容复核);
 - 引用(STO-02): attach/detach 以 ObjectRef 清单为唯一权威, ref_count 仅作
   可重建缓存(一致性巡检在 reconcile 中执行), 业务引用成对解绑由各业务
   模块在其公开删除/替换流程中显式调用;
@@ -27,8 +27,10 @@
 from __future__ import annotations
 
 import logging
+import secrets
 import shutil
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -36,7 +38,6 @@ from sqlalchemy.orm import Session
 
 from iesplan.config import settings
 from iesplan.core.errors import AppError, NotFoundError
-from iesplan.core.idgen import sha256_hex
 from iesplan.models.audit import AuditLog, RetentionRule
 from iesplan.storage.adapters.filesystem import FileSystemBlobStore
 from iesplan.storage.contracts import (
@@ -45,7 +46,6 @@ from iesplan.storage.contracts import (
     ObjectHandle,
     ObjectNotPendingDeletionError,
     ObjectOwner,
-    ObjectQuotaError,
     RefInfo,
     ReferenceNotFoundError,
     StorageQuotaError,
@@ -128,7 +128,6 @@ def _to_handle(obj: StoredObject) -> ObjectHandle:
     return ObjectHandle(
         id=obj.id,
         oid=obj.oid,
-        sha256=obj.sha256,
         size_bytes=obj.size_bytes,
         media_type=obj.media_type,
         status=obj.status,
@@ -150,7 +149,7 @@ def _to_refinfo(ref: ObjectRef) -> RefInfo:
 
 
 def _resolve_object(db: Session, object_id: int | str) -> StoredObject:
-    """按主键 id 或内容寻址 oid 解析对象, 不存在抛 NotFoundError。"""
+    """按主键 id 或对象 id(oid)解析对象, 不存在抛 NotFoundError。"""
     if isinstance(object_id, str):
         obj = db.execute(
             sa.select(StoredObject).where(StoredObject.oid == object_id)
@@ -208,16 +207,6 @@ def _match_retention_rule(rules: list[RetentionRule], obj: StoredObject) -> Rete
     return matched
 
 
-def _check_quota(obj: StoredObject, size_bytes: int) -> None:
-    """对象配额检查: quota_bytes > 0 表示限定额度(0 = 不限)。"""
-    if obj.quota_bytes and size_bytes > obj.quota_bytes:
-        raise ObjectQuotaError(
-            "",
-            params={"object_id": obj.id, "size": size_bytes, "quota": obj.quota_bytes},
-            location={"object_type": "objects", "object_id": str(obj.id), "field": "quota_bytes"},
-        )
-
-
 def _check_disk_capacity() -> None:
     """磁盘余量门禁(STO-06): 低于安全阈值**或容量不可测**拒绝写入。
 
@@ -256,11 +245,14 @@ def put_object(
     actor_id: int | None = None,
     actor_type: str = "system",
 ) -> ObjectHandle:
-    """写入内容寻址对象(架构宪法 §10 存储与数据生命周期), 返回公开句柄。
+    """写入新对象(架构宪法 §10 存储与数据生命周期), 返回公开句柄。
 
-    流程: 门禁 → BlobStore 原子落盘 → upsert 元数据行(唯一键竞争走
-    savepoint 内回退重查, 不触调用方事务) → (可选)建立 owner 引用。
-    文件完整落盘后才建对象行, 对象行 flush 后才建引用。
+    流程: 门禁 → 生成对象 id → BlobStore 原子落盘 → 新增元数据行 →
+    (可选)建立 owner 引用。文件完整落盘后才建对象行, 对象行 flush 后才建引用。
+
+    每次写入新建对象行(无内容去重); 寻址键为对象 id(oid 随机生成,
+    文件名即 oid); 不计算内容摘要, 不做完整性复核 —— 二进制分发完整性
+    不由业务程序负责。
 
     参数:
         db: 数据库会话(本函数只 flush, 提交由调用方负责)。
@@ -270,35 +262,21 @@ def put_object(
             记入创建审计事件的 after.source_category)。
         ref_type/ref_id/ref_entity_type/purpose: 可选初始业务引用(见 attach)。
     返回:
-        ObjectHandle(新建或按 sha256 复用)。
+        ObjectHandle(新建对象)。
     """
-    digest = sha256_hex(content)
-    # 1. 内容去重: 相同 sha256 已存在 → 复用记录(owner 引用仍单独建立)
-    existing = db.execute(
-        sa.select(StoredObject)
-        .where(StoredObject.sha256 == digest, StoredObject.status != OBJ_STATUS_DELETED)
-    ).scalar_one_or_none()
-    if existing is not None:
-        _check_quota(existing, len(content))
-        if ref_type is not None and ref_id is not None:
-            attach(
-                db, existing.id, ref_type, ref_id,
-                ref_entity_type=ref_entity_type, purpose=purpose,
-                actor_id=actor_id, actor_type=actor_type,
-            )
-        return _to_handle(existing)
-
-    # 2. 门禁: 磁盘余量(23.3, 含容量不可测拒绝) + 配额
+    # 1. 门禁: 磁盘余量(23.3, 含容量不可测拒绝; 新对象无配额, quota 检查无意义)
     _check_disk_capacity()
+
+    # 2. 对象 id(随机 64 位 hex, 满足 ck_objects_oid; 文件名即 oid)
+    oid = secrets.token_hex(32)
 
     # 3. BlobStore 原子落盘(临时区 → fsync → rename)
     store = get_blob_store()
-    storage_path, _ = store.put_blob(content)
+    storage_path = store.put_blob(content, oid)
 
-    # 4. 元数据行: 唯一键(oid/sha256)竞争在 savepoint 内回退重查
+    # 4. 元数据行(本函数只 flush, 提交/回滚由调用方负责)
     obj = StoredObject(
-        oid=digest,
-        sha256=digest,
+        oid=oid,
         size_bytes=len(content),
         storage_path=storage_path,
         media_type=content_type,
@@ -306,25 +284,8 @@ def put_object(
         ref_count=0,
         quota_bytes=0,
     )
-    try:
-        with db.begin_nested():  # RR-P1-03: 只回滚嵌套 savepoint, 不触调用方外层事务
-            db.add(obj)
-            db.flush()
-    except IntegrityError:
-        # 并发写入去重: 同内容对象已被其他事务建立, 复用即可(文件内容一致)
-        # savepoint 已随 begin_nested() 退出自动回滚, 外层事务保持完整
-        existing = db.execute(
-            sa.select(StoredObject).where(StoredObject.sha256 == digest)
-        ).scalar_one_or_none()
-        if existing is None:
-            raise
-        if ref_type is not None and ref_id is not None:
-            attach(
-                db, existing.id, ref_type, ref_id,
-                ref_entity_type=ref_entity_type, purpose=purpose,
-                actor_id=actor_id, actor_type=actor_type,
-            )
-        return _to_handle(existing)
+    db.add(obj)
+    db.flush()
 
     # 5. 审计: 对象创建(承载来源类别等元信息, 01 §10.3)
     _audit(
@@ -336,12 +297,11 @@ def put_object(
         actor_type=actor_type,
         after={
             "oid": obj.oid,
-            "sha256": obj.sha256,
             "size_bytes": obj.size_bytes,
             "media_type": obj.media_type,
             "source_category": source_category,
             # 0.4.0: 不再记录 storage_path(§11 内部路径不得进入日志/审计);
-            # 内容寻址 oid 即为可追溯标识
+            # 对象 id 即为可追溯标识
         },
     )
 
@@ -361,7 +321,10 @@ def put_object(
 
 
 def get_object(db: Session, object_id: int | str) -> bytes:
-    """读取对象字节并校验完整性(大小 + sha256), 不一致抛 ObjectCorruptError。"""
+    """按对象 id 读取对象字节; 记录/文件缺失抛 ObjectCorruptError。
+
+    不做内容复核(大小/摘要比对已删除, 二进制分发完整性不由业务程序负责)。
+    """
     obj = _resolve_object(db, object_id)
     if not obj.storage_path:
         raise ObjectCorruptError(
@@ -369,7 +332,7 @@ def get_object(db: Session, object_id: int | str) -> bytes:
             params={"object_id": obj.id, "oid": obj.oid, "reason": "missing_path"},
         )
     try:
-        raw = get_blob_store().get_blob(obj.storage_path)
+        return get_blob_store().get_blob(obj.storage_path)
     except BlobMissingError as exc:
         # §16: 错误响应不得含主机绝对路径; 适配器异常 params 携带的路径只进日志
         logger.warning("对象文件缺失(仅日志): object_id=%s path=%s", obj.id, exc.params)
@@ -377,18 +340,6 @@ def get_object(db: Session, object_id: int | str) -> bytes:
             "",
             params={"object_id": obj.id, "oid": obj.oid, "reason": "missing"},
         ) from exc
-    if len(raw) != obj.size_bytes or sha256_hex(raw) != obj.sha256:
-        raise ObjectCorruptError(
-            "",
-            params={
-                "object_id": obj.id,
-                "oid": obj.oid,
-                "expected_size": obj.size_bytes,
-                "actual_size": len(raw),
-                "expected_sha256": obj.sha256,
-            },
-        )
-    return raw
 
 
 def object_info(db: Session, object_id: int | str) -> dict:
@@ -402,7 +353,6 @@ def object_info(db: Session, object_id: int | str) -> dict:
     return {
         "id": obj.id,
         "oid": obj.oid,
-        "sha256": obj.sha256,
         "size_bytes": obj.size_bytes,
         "media_type": obj.media_type,
         "status": obj.status,
@@ -421,49 +371,29 @@ def object_info(db: Session, object_id: int | str) -> dict:
     }
 
 
-def object_by_sha256(db: Session, digest: str) -> dict:
-    """按内容校验值(sha256)查对象元数据视图; 缺失抛 NotFoundError(STO-05)。"""
-    obj = db.execute(
-        sa.select(StoredObject).where(StoredObject.sha256 == digest)
-    ).scalar_one_or_none()
-    if obj is None:
-        raise NotFoundError(
-            "",
-            params={"object_type": "objects", "sha256": digest},
-            location={"object_type": "objects", "field": "sha256", "value": digest},
-        )
-    return object_info(db, obj.id)
-
-
 def verify_object(db: Session, object_id: int | str) -> dict:
-    """完整性校验(周期性巡检用): 返回报告不抛错。
+    """存在性巡检(周期性巡检用): 返回报告不抛错。
 
-    报告字段: ok / size_ok / hash_ok / expected_* / actual_* / error。
+    只确认记录存在且字节可读(存在性, 非完整性复核)。报告字段:
+    ok / reason / error。
     """
     try:
         obj = _resolve_object(db, object_id)
-        raw = get_object(db, obj.id)
+        get_object(db, obj.id)
     except (NotFoundError, ObjectCorruptError) as exc:
         return {
             "object_id": str(object_id),
             "ok": False,
-            "size_ok": False,
-            "hash_ok": False,
+            "reason": str(exc.params.get("reason") or "missing"),
             "error": exc.message_key,
             "params": exc.params,
         }
-    size_ok = len(raw) == obj.size_bytes
-    hash_ok = sha256_hex(raw) == obj.sha256
     return {
         "object_id": obj.id,
         "oid": obj.oid,
-        "ok": size_ok and hash_ok,
-        "size_ok": size_ok,
-        "hash_ok": hash_ok,
-        "expected_size": obj.size_bytes,
-        "actual_size": len(raw),
-        "expected_sha256": obj.sha256,
-        "error": None if (size_ok and hash_ok) else "ies.diag.obj.corrupt",
+        "ok": True,
+        "reason": None,
+        "error": None,
     }
 
 
@@ -729,7 +659,6 @@ def _object_summary(obj: StoredObject) -> dict:
     return {
         "id": obj.id,
         "oid": obj.oid,
-        "sha256": obj.sha256,
         "size_bytes": obj.size_bytes,
         "media_type": obj.media_type,
         "status": obj.status,
@@ -791,10 +720,16 @@ def safe_cleanup(
             deletable.append(obj)
 
     total_bytes = sum(obj.size_bytes or 0 for obj in deletable)
-    # RR-P2-07: 稳定计划标识 = 候选 oid 有序串联 + 总字节的 sha256(候选变化即失效)
-    # 0.2.0-B3: 保留期天数纳入计划标识(改动保留期即视为新计划, 需重新预览)。
-    plan_payload = "|".join(sorted(obj.oid for obj in deletable)) + f"|{total_bytes}|{pending_delete_days}"
-    plan_id = sha256_hex(plan_payload.encode("utf-8")) if deletable else "plan-empty"
+    # RR-P2-07: 稳定计划标识 = 候选对象 id 明细(有序串联)+总字节+保留期天数,
+    # 不做摘要(候选变化/改动保留期即视为新计划, 需重新预览)。
+    # 0.2.0-B3: 保留期天数纳入计划标识。
+    if deletable:
+        plan_id = (
+            f"plan:{total_bytes}:{pending_delete_days}:"
+            + ",".join(sorted(obj.oid for obj in deletable))
+        )
+    else:
+        plan_id = "plan-empty"
     if not dry_run:
         if expected_plan_id is None:
             raise AppError(
@@ -842,7 +777,7 @@ def safe_cleanup(
             "object_marked_pending_deletion",
             actor_id=actor_id,
             actor_type=actor_type,
-            before={"oid": obj.oid, "sha256": obj.sha256, "size_bytes": obj.size_bytes},
+            before={"oid": obj.oid, "size_bytes": obj.size_bytes},
             after={
                 "status": OBJ_STATUS_PENDING_DELETION,
                 "pending_delete_until": until.isoformat(),
@@ -956,7 +891,6 @@ def purge_expired(
             actor_type=actor_type,
             before={
                 "oid": obj.oid,
-                "sha256": obj.sha256,
                 "size_bytes": obj.size_bytes,
                 "status": obj.status,
             },
@@ -1112,9 +1046,9 @@ def storage_stats(db: Session) -> dict:
 
 
 def sample_verify(db: Session, limit: int = 20) -> dict:
-    """抽样完整性校验(管理健康接口用): 校验最近 limit 个对象的大小 + sha256。
+    """抽样存在性巡检(管理健康接口用): 确认最近 limit 个对象记录存在且字节可读。
 
-    返回: {checked, ok_count, failed: [...], capacity}。
+    不做内容复核。返回: {checked, ok_count, failed: [...], capacity}。
     """
     objs = list(
         db.execute(
@@ -1172,8 +1106,9 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
 
     1. 清理超龄临时文件(中断残留, 默认保留 1 天);
     2. 登记磁盘孤儿(有最终文件但无元数据记录):
-       - dry_run: 只报告; 非 dry_run: 为该文件补建元数据行(stored, 无引用);
-    3. 报告损坏(有元数据但文件缺失或内容与记录不一致);
+       - dry_run: 只报告; 非 dry_run: 为该文件补建元数据行(stored, 无引用,
+         文件名即对象 id, 不计算内容摘要);
+    3. 报告损坏(有元数据但文件缺失; 存在性, 不做内容复核);
     4. 修正 ref_count 缓存漂移(以 ObjectRef 清单为权威, STO-02);
     5. 兜底物理回收已过保留期的待回收对象(0.2.0-B3, 非 dry_run 时执行)。
 
@@ -1197,10 +1132,15 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
                 content = store.get_blob(path)
             except BlobMissingError:
                 continue
-            digest = sha256_hex(content)
+            # 文件名即对象 id(不计算内容摘要); 冲突时跳过(已有记录认领)
+            oid = Path(path).name
+            clash = db.execute(
+                sa.select(StoredObject).where(StoredObject.oid == oid)
+            ).scalar_one_or_none()
+            if clash is not None:
+                continue
             obj = StoredObject(
-                oid=digest,
-                sha256=digest,
+                oid=oid,
                 size_bytes=len(content),
                 storage_path=path,
                 media_type="application/octet-stream",
@@ -1210,24 +1150,24 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
             )
             db.add(obj)
             db.flush()
-            # §11: 内部路径不入审计; 只记内容摘要 + 大小(可追溯且不泄适配器细节)
+            # §11: 内部路径不入审计; 只记对象 id + 大小(可追溯且不泄适配器细节)
             _audit(db, "objects", obj.id, "object_reconciled",
-                   after={"sha256": digest, "size_bytes": len(content),
+                   after={"oid": oid, "size_bytes": len(content),
                           "source": "orphan_file"})
             orphan_registered.append(path)
     else:
-        # dry-run 同样读文件算摘要: 报告只含内容寻址摘要, 不泄内部路径(§11)
+        # dry-run 只报告文件名(即认领后的对象 id)与大小, 不泄内部路径(§11)
         for path in orphans:
             try:
                 content = store.get_blob(path)
                 orphan_reported.append({
-                    "sha256": sha256_hex(content),
+                    "oid": Path(path).name,
                     "size_bytes": len(content),
                 })
             except BlobMissingError:
                 continue
 
-    # 3. 损坏: 有记录但文件缺失或内容不一致
+    # 3. 损坏: 有记录但文件缺失(存在性, 不做内容复核)
     corrupt_reported: list[dict] = []
     for obj in db.execute(
         sa.select(StoredObject).where(StoredObject.status != OBJ_STATUS_DELETED)
@@ -1236,14 +1176,10 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
             corrupt_reported.append({"object_id": obj.id, "oid": obj.oid, "reason": "missing_path"})
             continue
         try:
-            raw = store.get_blob(obj.storage_path)
+            store.get_blob(obj.storage_path)
         except BlobMissingError:
             corrupt_reported.append({"object_id": obj.id, "oid": obj.oid, "reason": "missing_file"})
             continue
-        if len(raw) != obj.size_bytes or sha256_hex(raw) != obj.sha256:
-            corrupt_reported.append(
-                {"object_id": obj.id, "oid": obj.oid, "reason": "hash_mismatch"}
-            )
 
     # 4. ref_count 缓存漂移修正(引用清单为权威)
     #    注意: pending_deletion(待物理回收)对象只修 ref_count, 不改变其状态

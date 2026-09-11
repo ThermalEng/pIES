@@ -25,7 +25,6 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from iesplan.assembly import AssemblyValidationError, ValidatedAssemblyArtifact
 from iesplan.core.diagnostics import SEVERITY_BLOCKING, TASK_DATA_SNAPSHOT_MISSING
 from iesplan.core.errors import AppError
 from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis
@@ -69,14 +68,10 @@ class InvalidTaskTypeError(AppError):
 def load_inputs(db: Session, snapshot: CalcSnapshot) -> tuple[dict, dict, TimeAxis]:
     """装配计算输入(03 §2.2): (项目版本内容, 逐时 data dict, 时间轴)。
 
-    输入全部来自不可变快照: 项目版本 content_hash 指向内容对象(读取时校验
-    哈希, 01 §10.1); 数据集版本文件经 parse_csv 解析为逐时数组; 时间轴按
-    数据集分辨率/固定偏移构建(行数 = 标准年步数时按标准日历, 迷你数据按
-    实际行数, 供测试与分段算例使用)。
+    输入全部来自不可变快照: 项目版本内容对象、数据集逐时数据与时间轴。
     """
     if snapshot is None:
         raise SnapshotInputError("计算快照缺失", location={"object_type": "calc_snapshot"})
-    _verify_snapshot_assembly(snapshot)
     version = db.get(ProjectVersion, snapshot.project_version_id)
     if version is None:
         raise SnapshotInputError(
@@ -85,15 +80,16 @@ def load_inputs(db: Session, snapshot: CalcSnapshot) -> tuple[dict, dict, TimeAx
             location={"object_type": "project_versions", "object_id": snapshot.project_version_id},
         )
     try:
-        content = project_service.load_content_object(db, version.content_hash)
+        content = project_service.load_content_object(db, version.content_object_id)
     except AppError as exc:
         raise SnapshotInputError(
             f"项目版本内容不可用: {exc}",
-            params={"calc_snapshot_id": snapshot.id, "content_hash": version.content_hash},
+            params={"calc_snapshot_id": snapshot.id,
+                    "content_object_id": version.content_object_id},
         ) from exc
 
     # 任务级参数权威来源 = 快照 calc_config_snapshot.task_params(03 规格 2.2:
-    # 任务创建时任务级 config 并入快照哈希, 版本内容不含任务参数)
+    # 任务创建时任务级 config 并入快照输入, 版本内容不含任务参数)
     snapshot_config = snapshot.calc_config_snapshot or {}
     task_params = dict(snapshot_config.get("task_params") or {})
     cfg = content.setdefault("calc_config", {})
@@ -116,28 +112,7 @@ def load_inputs(db: Session, snapshot: CalcSnapshot) -> tuple[dict, dict, TimeAx
 
 
 
-def _verify_snapshot_assembly(snapshot: CalcSnapshot) -> ValidatedAssemblyArtifact:
-    """恢复并校验快照中的规范装配二件套；旧/畸形快照禁止进入计算（文本仅校验字头）。"""
-    text = snapshot.canonical_assembly_text
-    receipt = snapshot.assembly_receipt
-    if (
-        not isinstance(text, str)
-        or not text
-        or not isinstance(receipt, dict)
-    ):
-        raise SnapshotInputError(
-            "计算快照缺少规范装配产物二件套",
-            params={"calc_snapshot_id": snapshot.id, "reason": "assembly_artifact_missing"},
-            location={"object_type": "calc_snapshot", "object_id": snapshot.id},
-        )
-    try:
-        return ValidatedAssemblyArtifact.from_persisted(text, receipt)
-    except (AssemblyValidationError, TypeError, ValueError) as exc:
-        raise SnapshotInputError(
-            "计算快照规范装配产物不一致",
-            params={"calc_snapshot_id": snapshot.id, "reason": "assembly_artifact_invalid"},
-            location={"object_type": "calc_snapshot", "object_id": snapshot.id},
-        ) from exc
+
 
 
 def _load_dataset_data(

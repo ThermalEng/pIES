@@ -4,10 +4,10 @@
  * 能力:
  * - 创建模板(在线编辑完整 YAML, 模板 ID = YAML 的 device.id);
  * - 保存草稿(expected_revision 乐观锁; 校验失败展示聚合诊断并保留输入);
- * - 发布不可变 revision(相同内容幂等; 幂等键重放);
+ * - 发布不可变 revision(幂等键重放);
  * - 停用 / 重新启用(只影响后续选择);
  * - 删除未发布草稿(已发布模板禁止删除);
- * - 查看模板状态、发布 revision、内容摘要与聚合诊断。
+ * - 查看模板状态、发布 revision、结构摘要与聚合诊断。
  *
  * 与「新建项目模型」页面的关系: 发布成功的模板出现在项目模板选择器中,
  * 用户填写 inputs 生成项目模型(模板溯源固定精确 revision)。
@@ -300,7 +300,6 @@ export default function CustomizationPage() {
                 <span>
                   {pt('ies.custom.published_rev')}: {tpl.published_revision}
                 </span>
-                {tpl.draft_sha256 ? <span className="ies-custom-card__sha">{tpl.draft_sha256.slice(0, 12)}…</span> : null}
               </div>
               {tpl.published_revision > 0 ? (
                 <div className="ies-custom-card__revisions">
@@ -404,7 +403,6 @@ export default function CustomizationPage() {
               <h3>{pt('ies.custom.published_ok')}</h3>
               <p>
                 {pt('ies.custom.rev_label')}: v{revisionDetail.revision.revision} ·{' '}
-                {pt('ies.custom.sha_label')}: {revisionDetail.revision.content_sha256.slice(0, 16)}… ·{' '}
                 {pt('ies.custom.schema_version')}: {revisionDetail.revision.schema_version} ·{' '}
                 {pt('ies.custom.inputs')}: {revisionDetail.revision.input_count}
               </p>

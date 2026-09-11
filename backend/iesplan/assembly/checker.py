@@ -39,7 +39,7 @@ from iesplan.core.expression import (
     ExpressionSyntaxError,
     parse_expr,
 )
-from iesplan.devices import DeviceModelDescriptor as DeviceTypeSpec
+from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ PIPELINE_MODEL_IDS: tuple[str, ...] = ("ies.device.transport_pipe",)
 
 #: 载体 → 端口名后缀规则(in/out 为 "{载体}_{方向}",双向为 "{载体}";与 services 一致)
 PORT_TYPE_TO_CARRIER: dict[str, str] = {
-    "electric": "electric",
+    "electric": "electricity",
     "thermal": "heat",
     "cooling": "cool",
     "fuel": "gas",
@@ -172,7 +172,7 @@ class AssemblyCheckError(AppError):
 
 
 def _split_model(model: str) -> tuple[str, str | None]:
-    """模型引用 → (type_id, version|None)("ies.device.pv@1.3.0" → ("ies.device.pv", "1.3.0"))。"""
+    """模型引用 → (type_id, version|None)("ies.device.pv@2.0.0" → ("ies.device.pv", "2.0.0"))。"""
     if "@" in model:
         type_id, _, version = model.rpartition("@")
         return type_id, version or None
@@ -196,21 +196,46 @@ def resolve_model(ctx: CheckContext, model: str) -> tuple[DeviceTypeSpec | None,
     return spec, type_id in PIPELINE_MODEL_IDS
 
 
+#: 电网进出口端口名(与 rules.solvability 的电网识别集合一致)
+GRID_SIDE_PORTS = ("electricity_import", "electricity_export")
+
+#: 外生供给载体: 目录内无源设备, in 端口无来边不报输入不完备(与 solar
+#: 环境侧同理; 燃气由外部管网购入, 引擎按 gas_price 计价, 不依赖来边能量流)
+EXOGENOUS_SUPPLY_CARRIERS = frozenset({"solar", "gas"})
+
+
+def grid_side_used(type_spec, device_id: str, edges) -> bool:
+    """电网设备任一进出口侧是否已连接(单侧运行判定)。
+
+    电网进出口为替代运行模式:单侧使用合法,未用侧由进出口互斥方程钳零,
+    与 1.0 单端口电网同语义;INPUT-001 不得因此阻断。
+    """
+    if (
+        type_spec is None
+        or type_spec.device is None
+        or type_spec.device.id != "ies.device.grid_connection"
+    ):
+        return False
+    side_refs = {f"{device_id}.{name}" for name in GRID_SIDE_PORTS}
+    return any(e.from_port in side_refs or e.to_port in side_refs for e in edges)
+
+
 def _default_registry() -> dict[str, DeviceTypeSpec]:
     """装配检查的模块内注册表快照(RR-P2-02/05: 消费 devices 公开 descriptor)。
 
-    从 ``iesplan.devices.list_device_descriptors()`` 公开门面构建本模块自己的
+    从 ``iesplan.devices.list_devices()`` 公开门面构建本模块自己的
     只读候选字典; 注册表未初始化(未调用 init_registry)或为空都必须使装配
     不可用并暴露诊断(宪法 5.3/9.5: 禁止静态回退和宽泛异常兜底)。
     """
-    from iesplan.devices import list_device_descriptors
+    from iesplan.devices import list_devices
 
-    descriptors = list_device_descriptors()
+    descriptors = list_devices()
     merged: dict[str, DeviceTypeSpec] = {}
     for desc in descriptors:
         # 直接采用公开 descriptor(不可变映射/元组已冻结), 不复制重建:
         # 装配只读消费, 共享对象不再可变, 也不会跨模块别名引用下划线符号。
-        merged[desc.type_id] = desc
+        if desc.device is not None:
+            merged[desc.device.id] = desc
     if not merged:
         raise AppError(
             "装配检查: YAML 设备注册表为空(未初始化或目录无设备), 装配不可用",
@@ -228,30 +253,25 @@ def _yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPor
     装配检查据此做连接合法性(REF-004/REF-005)与可解性检查。
     注册表未初始化或端口数据错误一律向上阻断(RR-P2-05: 无静态回退)。
     """
-    from iesplan.devices import get_device_descriptor
+    from iesplan.devices import get_device
 
-    spec = get_device_descriptor(type_id)
+    spec = get_device(type_id)
     ports: list[AssemblyPort] = []
-    for p in spec.ports:
-        if p.energy_carrier not in CARRIER_DEFAULT_QUANTITY_UNIT:
+    for name, interface in spec.interfaces.items():
+        if interface.carrier not in CARRIER_DEFAULT_QUANTITY_UNIT:
             continue  # solar 等环境侧载体(不可连接)不参与装配端口/母线平衡
-        unit = CARRIER_DEFAULT_QUANTITY_UNIT.get(p.energy_carrier, (QUANTITY_SIGNAL, "-"))[1]
-        qty = CARRIER_DEFAULT_QUANTITY_UNIT.get(p.energy_carrier, (QUANTITY_SIGNAL, "-"))[0]
-        capacity = None
-        if p.capacity_ref and p.capacity_ref in spec.parameters:
-            cap = spec.parameters[p.capacity_ref].default
-            if isinstance(cap, (int, float)):
-                capacity = float(cap)
+        unit = interface.unit
+        qty = CARRIER_DEFAULT_QUANTITY_UNIT.get(interface.carrier, (QUANTITY_SIGNAL, "-"))[0]
         ports.append(
             AssemblyPort(
                 device=device.id,
-                name=p.name,
-                carrier=p.energy_carrier,
-                direction=p.direction,
+                name=name,
+                carrier=interface.carrier,
+                direction=interface.type,
                 quantity=qty,
                 unit=unit,
                 nature=NATURE_INSTANT,
-                capacity=capacity,
+                capacity=None,
             )
         )
     return ports
@@ -273,7 +293,8 @@ def _derive_device_ports(spec: AssemblySpec, ctx: CheckContext, device: Assembly
     if type_spec is None:
         return []  # 模型未注册,端口无从推导(REF-002 已报)
     try:
-        derived = _yaml_device_ports(device, type_spec.type_id)
+        assert type_spec.device is not None
+        derived = _yaml_device_ports(device, type_spec.device.id)
     except NotFoundError:
         # 测试注入/外部自定义类型(不在 YAML 目录): 按显式声明转换
         derived = list(device.ports)
@@ -303,11 +324,11 @@ def _derive_pipeline_ports(pipe: AssemblyPipeline) -> list[AssemblyPort]:
 
     入端 instantaneous / 出端 delayed(延迟取 params.delay_steps, 缺省 1)。
     """
-    from iesplan.devices import get_device_descriptor
+    from iesplan.devices import get_device
 
-    spec = get_device_descriptor(pipe.model.split("@", 1)[0])
-    in_port = next((p for p in spec.ports if p.direction == "in"), None)
-    out_port = next((p for p in spec.ports if p.direction == "out"), None)
+    spec = get_device(pipe.model.split("@", 1)[0])
+    in_port = next(((name, p) for name, p in spec.interfaces.items() if p.type == "in"), None)
+    out_port = next(((name, p) for name, p in spec.interfaces.items() if p.type == "out"), None)
     if in_port is None or out_port is None:
         # 未声明输入/输出端口 → 装配阻断, 不再兜底合成(RR-P2-05)。
         raise AppError(
@@ -317,14 +338,16 @@ def _derive_pipeline_ports(pipe: AssemblyPipeline) -> list[AssemblyPort]:
             params={"model": pipe.model},
         )
     delay = int(pipe.params.get("delay_steps", 1) or 1)
-    in_carrier = in_port.energy_carrier
+    in_name, in_spec = in_port
+    out_name, out_spec = out_port
+    in_carrier = in_spec.carrier
     in_qty, in_unit = CARRIER_DEFAULT_QUANTITY_UNIT[in_carrier]
-    out_carrier = out_port.energy_carrier
+    out_carrier = out_spec.carrier
     out_qty, out_unit = CARRIER_DEFAULT_QUANTITY_UNIT[out_carrier]
     return [
         AssemblyPort(
             device=pipe.id,
-            name=in_port.name,
+            name=in_name,
             carrier=in_carrier,
             direction="in",
             quantity=in_qty,
@@ -333,7 +356,7 @@ def _derive_pipeline_ports(pipe: AssemblyPipeline) -> list[AssemblyPort]:
         ),
         AssemblyPort(
             device=pipe.id,
-            name=out_port.name,
+            name=out_name,
             carrier=out_carrier,
             direction="out",
             quantity=out_qty,
@@ -514,7 +537,7 @@ def _defined_symbols(spec: AssemblySpec, ctx: CheckContext) -> dict[str, Dimensi
         for name, value in device.params.items():
             if isinstance(value, (dict, list)):
                 continue
-            pspec = type_spec.parameters.get(name)
+            pspec = type_spec.properties.get(name)
             p_unit = pspec.unit if pspec is not None else None
             symbols[f"{device.id}.{name}"] = _unit_dims(p_unit, None)
     return symbols

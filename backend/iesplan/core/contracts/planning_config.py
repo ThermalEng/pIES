@@ -10,8 +10,7 @@ generator/solver 选项(属于计算配置)。
 - 目标函数可以引用模型技术量、有效快照财务分量、规划变量和约束;
 - 约束为命名映射, 表达式使用受限声明式语法(语法本体属 modeling/装配域,
   本契约只做形状与白名单校验);
-- 配置摘要为确定性摘要(每次保存形成新的不可变 revision, 文本只校验字头);
-- 深度不可变: 嵌套容器构造时递归冻结, 同一对象摘要恒定。
+- 深度不可变: 嵌套容器构造时递归冻结。
 
 本模块只依赖标准库与 ``core.diagnostics``, 不导入任何业务模块
 (core/contracts 边界, 宪法 4.1)。
@@ -19,9 +18,6 @@ generator/solver 选项(属于计算配置)。
 
 from __future__ import annotations
 
-import hashlib
-import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, Overflow, localcontext
@@ -29,10 +25,6 @@ from types import MappingProxyType
 from typing import Final
 
 from iesplan.core.diagnostics import Diagnostic, make_diag
-
-#: 规划配置规范化算法 ID 与版本(写入摘要; 语义变化必须升版本)。
-PLANNING_CANON_ALGORITHM_ID: Final[str] = "ies.planning_config.canonical"
-PLANNING_CANON_ALGORITHM_VERSION: Final[str] = "2.0.0"
 
 #: 目标方向。
 OBJECTIVE_SENSES: Final[tuple[str, ...]] = ("minimize", "maximize")
@@ -48,9 +40,6 @@ CONSTRAINT_TYPES: Final[tuple[str, ...]] = (
 
 #: 表达式最大长度(受限声明式语法, 防病态输入)。
 EXPRESSION_MAX_LENGTH: Final[int] = 4096
-
-#: 摘要必须为 64 位小写十六进制。
-_SHA256_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 
 #: 校验诊断码(登记于 core.diagnostics.NEW_DIAG_CODES)。
 PLANNING_CONFIG_INVALID = "PROJ-PLAN-001"
@@ -78,15 +67,10 @@ def _to_decimal(value: object, field_name: str) -> Decimal:
     return d
 
 def _decimal_to_canonical(d: Decimal) -> str:
-    """Decimal → 定点十进制字符串(规范化摘要输入)。"""
+    """Decimal → 定点十进制字符串(规范化字典输出)。"""
     with localcontext() as ctx:
         ctx.prec = 30
         return format(d, "f")
-
-def _canonical_json(payload: Mapping[str, object]) -> str:
-    return json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
 
 # ---------------------------------------------------------------------------
 # 子结构
@@ -267,7 +251,7 @@ class Constraint:
 
 @dataclass(frozen=True, slots=True)
 class PlanningConfig:
-    """规划配置(不可变; 每次保存形成新的 revision)。
+    """规划配置(不可变)。
 
     属性:
         objective: 目标函数(sense + 受限声明式表达式)。
@@ -303,25 +287,6 @@ class PlanningConfig:
             ),
         )
 
-    @property
-    def revision(self) -> str:
-        """确定性 revision 摘要(ies.planning_config.canonical@2.0.0)。"""
-        payload = {
-            "objective": self.objective.to_dict(),
-            "variables": {
-                k: v.to_dict() for k, v in sorted(self.variables.items())
-            },
-            "constraints": {
-                k: v.to_dict() for k, v in sorted(self.constraints.items())
-            },
-        }
-        return hashlib.sha256(
-            (
-                f"{PLANNING_CANON_ALGORITHM_ID}@{PLANNING_CANON_ALGORITHM_VERSION}\n"
-                f"{_canonical_json(payload)}"
-            ).encode("utf-8")
-        ).hexdigest()
-
     def to_dict(self) -> dict:
         return {
             "objective": self.objective.to_dict(),
@@ -331,7 +296,6 @@ class PlanningConfig:
             "constraints": {
                 k: v.to_dict() for k, v in sorted(self.constraints.items())
             },
-            "revision": self.revision,
         }
 
     @classmethod
@@ -343,7 +307,6 @@ class PlanningConfig:
             )
         unknown = set(mapping) - {
             "objective", "variables", "constraints",
-            "revision",
         }
         if unknown:
             raise PlanningConfigError(f"规划配置存在未知字段: {sorted(unknown)}")

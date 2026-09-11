@@ -1,11 +1,7 @@
 """财务参数定义与来源（见 modules/finance.md 与 ARCHITECTURE_CONSTITUTION.md §4.6）。
 
-FinanceParams 为财务计算的唯一参数载体;finance_params_from_config 从
-calc_config(parameters.economic_* / 顶层 irr_floor)与价格初始化文件 prices.yaml
-的 finance 节合并取值,项目级显式参数优先,其次价格事实源,最后内置默认值。
-
-价格事实源属设备初始化模块（见 modules/devices.md；prices.yaml finance 节含 tax_rate/discount_rate 等）；
-该模块可能由并行 agent 实施,本模块以惰性导入 + 内置兜底默认值的方式保持独立可导入。
+FinanceParams 为财务计算的唯一参数载体；项目级显式参数覆盖本模块默认值。
+设备技术定义不承载价格或项目财务参数。
 """
 
 from __future__ import annotations
@@ -17,7 +13,7 @@ from decimal import Decimal
 # 默认值
 # ---------------------------------------------------------------------------
 
-#: prices.yaml finance 节默认值(02 §5 定案),devices 模块缺失时的兜底。
+#: 财务模块默认值。
 FALLBACK_PRICE_FINANCE: dict[str, float] = {
     "tax_rate": 0.25,
     "discount_rate": 0.08,
@@ -72,31 +68,14 @@ def finance_params_from_dict(mapping: dict) -> FinanceParams:
 
 
 def _price_finance_defaults() -> dict[str, float]:
-    """读取价格事实源 finance 节(惰性导入 devices 门面,失败回退内置默认)。
-
-    回退只覆盖"模块不存在"的兼容场景(并行 agent 尚未落地 devices 门面):
-    仅当 ``ModuleNotFoundError`` 且缺失模块就是目标模块时回退; 模块存在但
-    加载失败(文件缺失/语法错误/段缺失或内部依赖错误)一律上抛
-    (codex 二次审核 Medium-6: 不允许把实现错误误判为兼容缺失)。
-    """
-    from importlib import import_module
-
-    for module_name in ("iesplan.devices.pricing", "iesplan.devices.prices"):
-        try:
-            module = import_module(module_name)
-        except ModuleNotFoundError as exc:
-            if getattr(exc, "name", None) == module_name:
-                continue  # 兼容场景: 该模块路径未实现, 尝试下一个
-            raise
-        book = module.load_price_book()
-        return dict(module.finance_defaults(book))
+    """返回财务模块默认值。"""
     return dict(FALLBACK_PRICE_FINANCE)
 
 
 def finance_params_from_config(calc_config: dict | None) -> FinanceParams:
     """calc_config → FinanceParams(03 §7.2)。
 
-    取值优先级:项目级 calc_config 显式参数 > prices.yaml finance 节 > 内置默认。
+    取值优先级:项目级 calc_config 显式参数 > 财务模块默认值。
     calc_config 中经济参数位于 parameters.economic(存量格式)或 params(文档别名),
     二者兼容读取;irr_floor 为顶层独立字段(REQ-CALC-006,不得混入经济段)。
     """

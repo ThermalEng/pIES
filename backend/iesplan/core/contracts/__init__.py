@@ -9,8 +9,6 @@
 """
 
 from iesplan.core.contracts.baseline import (
-    BASELINE_CANON_ALGORITHM_ID,
-    BASELINE_CANON_ALGORITHM_VERSION,
     DEFAULT_SCENARIO_MODE,
     RESOLUTION_VALUES,
     SCENARIO_MODES,
@@ -22,8 +20,6 @@ from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.contracts.planning_config import (
     CONSTRAINT_TYPES,
     OBJECTIVE_SENSES,
-    PLANNING_CANON_ALGORITHM_ID,
-    PLANNING_CANON_ALGORITHM_VERSION,
     Constraint,
     Objective,
     PlanningConfig,
@@ -33,13 +29,9 @@ from iesplan.core.contracts.planning_config import (
 
 __all__ = [
     "TIMELINE_STEP_DURATION_VAR",
-    "BASELINE_CANON_ALGORITHM_ID",
-    "BASELINE_CANON_ALGORITHM_VERSION",
     "CONSTRAINT_TYPES",
     "DEFAULT_SCENARIO_MODE",
     "OBJECTIVE_SENSES",
-    "PLANNING_CANON_ALGORITHM_ID",
-    "PLANNING_CANON_ALGORITHM_VERSION",
     "RESOLUTION_VALUES",
     "SCENARIO_MODES",
     "Constraint",

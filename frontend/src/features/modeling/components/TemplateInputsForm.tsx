@@ -5,17 +5,14 @@
  * - number → 数字输入(文本保留编辑中状态, 单位/范围只读提示);
  * - boolean → 开关(Checkbox);
  * - string → 文本输入;
- * - data_repeat / data_predict → 文件上传占位(临时已上传 ≠ 模型已保存);
+ * - data_repeat / data_predict → 项目内相对 CSV 路径;
  * - object / array → 受控结构编辑器(对象递归分组; 数组逐行编辑, 整体替换)。
  *
  * 前端预检查(即时反馈)不阻断提交; 后端校验始终是权威闸门。
  */
 
-import { useRef } from 'react'
-import type { ChangeEvent } from 'react'
-
 import { pt } from '../../../i18n/pageMessages'
-import { Badge, Button, Checkbox, FormField, Input } from '../../../components/ui'
+import { Button, Checkbox, FormField, Input } from '../../../components/ui'
 import type { FormFieldError, FormFieldValue } from '../form'
 import type { InputNode } from '../model'
 
@@ -26,11 +23,6 @@ export interface TemplateInputsFormProps {
   errors: FormFieldError[]
   onFieldChange: (path: string, value: FormFieldValue) => void
   onArrayChange: (path: string, items: Array<Record<string, FormFieldValue>>) => void
-  /** 上传临时数据文件(父层负责调用 api 并回填 file_ref; dataRef 为模板声明的 data_ref)。 */
-  onUploadFile: (path: string, dataRef: string, file: File) => void
-  onRemoveFile: (path: string) => void
-  /** 当前上传中的叶子路径(显示进度)。 */
-  uploadingPath: string | null
   disabled?: boolean
 }
 
@@ -82,9 +74,6 @@ export function TemplateInputsForm({
   errors,
   onFieldChange,
   onArrayChange,
-  onUploadFile,
-  onRemoveFile,
-  uploadingPath,
   disabled = false,
 }: TemplateInputsFormProps) {
   const errorByPath = new Map(errors.map((e) => [e.path, e]))
@@ -98,9 +87,6 @@ export function TemplateInputsForm({
           errorByPath={errorByPath}
           onFieldChange={onFieldChange}
           onArrayChange={onArrayChange}
-          onUploadFile={onUploadFile}
-          onRemoveFile={onRemoveFile}
-          uploadingPath={uploadingPath}
           disabled={disabled}
         />
       ))}
@@ -114,13 +100,10 @@ interface NodeEditorProps {
   errorByPath: Map<string, FormFieldError>
   onFieldChange: (path: string, value: FormFieldValue) => void
   onArrayChange: (path: string, items: Array<Record<string, FormFieldValue>>) => void
-  onUploadFile: (path: string, dataRef: string, file: File) => void
-  onRemoveFile: (path: string) => void
-  uploadingPath: string | null
   disabled: boolean
 }
 
-function NodeEditor({ node, values, errorByPath, onFieldChange, onArrayChange, onUploadFile, onRemoveFile, uploadingPath, disabled }: NodeEditorProps) {
+function NodeEditor({ node, values, errorByPath, onFieldChange, onArrayChange, disabled }: NodeEditorProps) {
   if (node.unsupported) {
     return (
       <div className="ies-modeling__unsupported">
@@ -142,9 +125,6 @@ function NodeEditor({ node, values, errorByPath, onFieldChange, onArrayChange, o
               errorByPath={errorByPath}
               onFieldChange={onFieldChange}
               onArrayChange={onArrayChange}
-              onUploadFile={onUploadFile}
-              onRemoveFile={onRemoveFile}
-              uploadingPath={uploadingPath}
               disabled={disabled}
             />
           ))}
@@ -196,9 +176,7 @@ function NodeEditor({ node, values, errorByPath, onFieldChange, onArrayChange, o
         <DataFileField
           node={node}
           value={values[node.path]}
-          onUploadFile={onUploadFile}
-          onRemoveFile={onRemoveFile}
-          uploading={uploadingPath === node.path}
+          onChange={onFieldChange}
           disabled={disabled}
         />
       )
@@ -245,48 +223,28 @@ function NumberField({
 function DataFileField({
   node,
   value,
-  onUploadFile,
-  onRemoveFile,
-  uploading,
+  onChange,
   disabled,
 }: {
   node: InputNode
   value: FormFieldValue | undefined
-  onUploadFile: (path: string, dataRef: string, file: File) => void
-  onRemoveFile: (path: string) => void
-  uploading: boolean
+  onChange: (path: string, value: FormFieldValue) => void
   disabled: boolean
 }) {
-  const inputRef = useRef<HTMLInputElement>(null)
-  const fileRef = value?.kind === 'data' ? value.file_ref : null
-  const fileName = value?.kind === 'data' ? value.file_name : null
-  const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) onUploadFile(node.path, node.data_ref ?? '', file)
-    e.target.value = '' // 允许重复选择同一文件
-  }
+  const path = value?.kind === 'data' ? value.path : ''
   return (
     <div className="ies-modeling__data-field">
       <div className="ies-modeling__data-head">
         <span className="ies-modeling__data-label">{node.path}</span>
-        {node.data_ref ? <span className="ies-modeling__data-ref">{node.data_ref}</span> : null}
-        <Badge
-          variant={fileRef ? 'success' : 'neutral'}
-          size="sm"
-          label={fileRef ? pt('ies.modeling.form.data_uploaded', { name: fileName ?? '' }) : pt('ies.modeling.form.data_not_uploaded')}
-        />
       </div>
-      <div className="ies-modeling__data-actions">
-        <input ref={inputRef} type="file" className="ies-modeling__file-input" onChange={handleChange} disabled={disabled} aria-label={pt('ies.modeling.form.data_file')} />
-        <Button variant="secondary" size="sm" disabled={disabled || uploading} loading={uploading} onClick={() => inputRef.current?.click()}>
-          {pt('ies.modeling.form.data_upload')}
-        </Button>
-        {fileRef ? (
-          <Button variant="ghost" size="sm" disabled={disabled} onClick={() => onRemoveFile(node.path)}>
-            {pt('ies.modeling.form.data_remove')}
-          </Button>
-        ) : null}
-      </div>
+      <Input
+        type="text"
+        value={path}
+        disabled={disabled}
+        placeholder={node.data_ref ?? 'data/example.csv'}
+        aria-label={pt('ies.modeling.form.data_file')}
+        onChange={(event) => onChange(node.path, { kind: 'data', path: event.target.value })}
+      />
     </div>
   )
 }
@@ -321,7 +279,7 @@ function ArrayEditor({
       if (child.type === 'number') row[f.rel] = { kind: 'number', text: '' }
       else if (child.type === 'boolean') row[f.rel] = { kind: 'boolean', checked: false }
       else if (child.type === 'string') row[f.rel] = { kind: 'string', text: '' }
-      else if (child.type === 'data_repeat' || child.type === 'data_predict') row[f.rel] = { kind: 'data', file_ref: null, file_name: null, data_ref: child.data_ref ?? null, upload: null }
+      else if (child.type === 'data_repeat' || child.type === 'data_predict') row[f.rel] = { kind: 'data', path: child.data_ref ?? '' }
     }
     onArrayChange(node.path, [...items, row])
   }
@@ -395,12 +353,16 @@ function ArrayEditor({
                 )
               }
               if (f.node.type === 'data_repeat' || f.node.type === 'data_predict') {
-                const fileRef = rowValue?.kind === 'data' ? rowValue.file_ref : null
                 return (
-                  <span key={f.rel} className="ies-modeling__data-ref">
-                    {f.node.data_ref ? `${f.rel}: ${f.node.data_ref}` : f.rel}
-                    {fileRef ? ` · ${pt('ies.modeling.form.data_uploaded', { name: '' })}` : ''}
-                  </span>
+                  <Input
+                    key={f.rel}
+                    type="text"
+                    value={rowValue?.kind === 'data' ? rowValue.path : ''}
+                    disabled={disabled}
+                    placeholder={f.node.data_ref ?? 'data/example.csv'}
+                    aria-label={f.rel || itemPath}
+                    onChange={(event) => updateRow(i, f.rel, { kind: 'data', path: event.target.value })}
+                  />
                 )
               }
               if (f.node.type === 'object' || f.node.type === 'array') {

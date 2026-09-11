@@ -25,7 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, JSONB, InetType, bigint_pk, regex_check
+from iesplan.models.common import JSONB, InetType, bigint_pk
 
 
 class AuditLog(Base):
@@ -65,7 +65,7 @@ class ImportProposal(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     proposer_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     source_type: Mapped[str] = mapped_column(Text, nullable=False)
-    source_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    source_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
     source_path: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="proposed")
     review_summary: Mapped[dict | None] = mapped_column(JSONB)
@@ -81,7 +81,6 @@ class ImportProposal(Base):
             "source_type IN ('excel','csv','json','dxf','gis','other')",
             name="ck_import_proposals_source_type",
         ),
-        regex_check(f"source_hash ~ '{HASH64_RE}'", name="ck_import_proposals_source_hash"),
         CheckConstraint(
             "status IN ('proposed','validated','approved','rejected','applied')",
             name="ck_import_proposals_status",

@@ -101,7 +101,12 @@ def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
                         for r in bus_ports
                         if ports[r].direction in ("out", "bidirectional")
                     ],
-                    "sink_refs": [r for r in bus_ports if ports[r].direction in ("in", "bidirectional")],
+                    # predefined 数据接口(负荷需求侧)计入汇;环境侧 solar 不进入端口解析
+                    "sink_refs": [
+                        r
+                        for r in bus_ports
+                        if ports[r].direction in ("in", "bidirectional", "predefined")
+                    ],
                     "edge_ids": edge_ids,
                 }
             )
@@ -122,7 +127,11 @@ def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
                 "source_refs": [
                     r for r in dev_port_refs if ports[r].direction in ("out", "bidirectional")
                 ],
-                "sink_refs": [r for r in dev_port_refs if ports[r].direction in ("in", "bidirectional")],
+                "sink_refs": [
+                    r
+                    for r in dev_port_refs
+                    if ports[r].direction in ("in", "bidirectional", "predefined")
+                ],
                 "edge_ids": [],
             }
         )
@@ -160,7 +169,9 @@ def _grid_caps(spec: AssemblySpec, bus_device_ids: list[str], ctx) -> tuple[bool
             for d in spec.devices
             if d.id in bus_device_ids
             and resolve_model(ctx, d.model)[0] is not None
-            and "grid_connection" in resolve_model(ctx, d.model)[0].capabilities
+            and {
+                "electricity_import", "electricity_export"
+            }.issubset(resolve_model(ctx, d.model)[0].interfaces)
         ),
         None,
     )
@@ -174,6 +185,17 @@ def _grid_caps(spec: AssemblySpec, bus_device_ids: list[str], ctx) -> tuple[bool
         export_tariff is not None and export_tariff > 0
     )
     return True, can_import, can_export
+
+
+def _is_adjustable_source(interfaces) -> bool:
+    """可调源判定(转换/储能类): 既有输出(含双向)又有输入(含双向)才算可调。
+
+    纯输出源(固定出力机组/光伏)不可调; 电网由进出口容量另行判定, 不在此列。
+    替代 1.0 capabilities 名单(2.0 目录已删除该字段)。
+    """
+    outs = any(i.type in ("out", "bidirectional") for i in interfaces.values())
+    ins = any(i.type in ("in", "bidirectional") for i in interfaces.values())
+    return outs and ins
 
 
 def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float | None]:
@@ -194,15 +216,19 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
         if device is None:
             continue
         type_spec, _ = resolve_model(ctx, device.model)
-        caps = type_spec.capabilities if type_spec is not None else []
-        if "controllable" in caps or "storage" in caps:
-            continue  # 可调源不计入固定供给
-        if "grid_connection" in caps:
+        interfaces = type_spec.interfaces if type_spec is not None else {}
+        variables = type_spec.equations.variables if type_spec is not None else {}
+        is_storage = "soc" in variables and any(i.type == "bidirectional" for i in interfaces.values())
+        is_grid = {"electricity_import", "electricity_export"}.issubset(interfaces)
+        is_controllable = _is_adjustable_source(interfaces)
+        if is_grid:
             val = _to_watts(_float_param(device.params, "max_import_power_kw"), "kW")
             if val is not None:
                 fixed_supply += val
                 has_fixed_supply = True
             continue
+        if is_controllable or is_storage:
+            continue  # 可调源不计入固定供给
         if port.capacity is not None:
             fixed_supply += port.capacity
             has_fixed_supply = True
@@ -212,8 +238,9 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
         if device is None:
             continue
         type_spec, _ = resolve_model(ctx, device.model)
-        if type_spec is not None and type_spec.is_load:
-            peak_key = _PEAK_PARAM_BY_LOAD.get(type_spec.type_id)
+        if type_spec is not None and any(i.type == "predefined" for i in type_spec.interfaces.values()):
+            assert type_spec.device is not None
+            peak_key = _PEAK_PARAM_BY_LOAD.get(type_spec.device.id)
             if peak_key is not None:
                 val = _to_watts(_float_param(device.params, peak_key), "kW")
                 if val is not None:
@@ -234,14 +261,15 @@ def _bus_controllable(spec: AssemblySpec, ctx, bus: dict) -> int:
         if device is None:
             continue
         type_spec, _ = resolve_model(ctx, device.model)
-        caps = type_spec.capabilities if type_spec is not None else []
-        if "storage" in caps:
+        interfaces = type_spec.interfaces if type_spec is not None else {}
+        variables = type_spec.equations.variables if type_spec is not None else {}
+        if "soc" in variables and any(i.type == "bidirectional" for i in interfaces.values()):
             n += 2
-        elif "controllable" in caps:
-            n += 1
-        elif "grid_connection" in caps:
+        elif {"electricity_import", "electricity_export"}.issubset(interfaces):
             _, can_import, can_export = _grid_caps(spec, bus["device_ids"], ctx)
             n += (1 if can_import else 0) + (1 if can_export else 0)
+        elif any(i.type in ("out", "bidirectional") for i in interfaces.values()):
+            n += 1
     return n
 
 
@@ -316,17 +344,22 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
         loc = {"object_type": "bus", "field": f"carrier:{carrier}"}
         has_grid, can_import, can_export = _grid_caps(spec, bus["device_ids"], ctx)
         devices = [d for d in spec.devices if d.id in bus["device_ids"]]
-        type_caps = {
-            d.id: (
-                resolve_model(ctx, d.model)[0].capabilities
-                if resolve_model(ctx, d.model)[0] is not None
-                else []
-            )
-            for d in devices
-        }
-        has_storage = any("storage" in caps for caps in type_caps.values())
-        has_controllable = any("controllable" in caps for caps in type_caps.values())
-        has_renewable = any("pv" in caps or "renewable" in caps for caps in type_caps.values())
+        type_specs = {d.id: resolve_model(ctx, d.model)[0] for d in devices}
+        has_storage = any(
+            ts is not None and "soc" in ts.equations.variables
+            for ts in type_specs.values()
+        )
+        # 电网可调性由进出口容量(can_import/can_export)判定, 不计入此处
+        has_controllable = any(
+            ts is not None
+            and not {"electricity_import", "electricity_export"}.issubset(ts.interfaces)
+            and _is_adjustable_source(ts.interfaces)
+            for ts in type_specs.values()
+        )
+        has_renewable = any(
+            ts is not None and any(i.carrier == "solar" for i in ts.interfaces.values())
+            for ts in type_specs.values()
+        )
 
         # 电网端口语义:可进口 → 计入源;可反送 → 计入汇(方向表为 out,需显式并入)
         source_refs = list(bus["source_refs"])
@@ -337,7 +370,9 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
                 for d in spec.devices
                 if d.id in bus["device_ids"]
                 and resolve_model(ctx, d.model)[0] is not None
-                and "grid_connection" in resolve_model(ctx, d.model)[0].capabilities
+                and {"electricity_import", "electricity_export"}.issubset(
+                    resolve_model(ctx, d.model)[0].interfaces
+                )
             }
             grid_port_refs = [r for r in bus["port_refs"] if r.partition(".")[0] in grid_dev_ids]
             if can_import:

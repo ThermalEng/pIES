@@ -23,7 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
 from iesplan.models.calc import TASK_STATUSES
-from iesplan.models.common import HASH64_RE, JSONB, bigint_pk, regex_check
+from iesplan.models.common import JSONB, bigint_pk
 
 
 class UncertaintySnapshot(Base):
@@ -37,7 +37,6 @@ class UncertaintySnapshot(Base):
     n_samples: Mapped[int] = mapped_column(Integer, nullable=False)
     random_seed: Mapped[int] = mapped_column(BigInteger, nullable=False)
     distributions: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -48,7 +47,6 @@ class UncertaintySnapshot(Base):
             "method IN ('monte_carlo','lhs','scenario','robust')", name="ck_uncertainty_method"
         ),
         CheckConstraint("n_samples BETWEEN 1 AND 1000000", name="ck_uncertainty_n_samples"),
-        regex_check(f"content_hash ~ '{HASH64_RE}'", name="ck_uncertainty_content_hash"),
         Index("idx_uncertainty_snapshots_calc", "calc_snapshot_id"),
     )
 

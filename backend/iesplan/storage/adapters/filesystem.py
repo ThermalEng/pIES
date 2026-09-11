@@ -1,6 +1,7 @@
 """文件系统 BlobStore 适配器(STO-04/07: 字节可靠存取 + 可替换 provider)。
 
-- 临时文件完整写入 → fsync → 计算摘要 → 以确定性路径原子 rename 提交;
+- 临时文件完整写入 → fsync → 以调用方给定的对象 id 原子 rename 提交
+  (寻址键为对象 id, 不做内容摘要; 二进制分发完整性不由业务程序负责);
 - 目录扫描(reconcile)报告磁盘孤儿(有文件无记录)与缺失(有记录无文件);
 - 本适配器不读数据库、不理解业务引用; 生命周期与元数据由 storage.service 编排。
 """
@@ -40,16 +41,14 @@ def _path_of(storage_path: str) -> Path:
 class FileSystemBlobStore:
     """本地文件系统字节存储(STO-07: 可被测试内存适配器替换)。"""
 
-    def put_blob(self, content: bytes) -> tuple[str, str]:
-        """完整字节原子提交 → (storage_path, digest)。
+    def put_blob(self, content: bytes, oid: str) -> str:
+        """完整字节原子提交 → storage_path。
 
-        流程: 临时区写入 → fsync → 计算 sha256 → 原子 rename 到
-        data_dir/objects/{sha256}。失败时清理临时文件, 不留下半成品。
+        流程: 临时区写入 → fsync → 原子 rename 到 data_dir/objects/{oid}。
+        文件名即对象 id(调用方保证唯一); 不计算内容摘要。失败时清理临时文件,
+        不留下半成品。
         """
-        import hashlib
-
-        digest = hashlib.sha256(content).hexdigest()
-        final_path = _objects_root() / digest
+        final_path = _objects_root() / oid
         fd, tmp_name = tempfile.mkstemp(dir=_tmp_root(), prefix="put-", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as fh:
@@ -63,7 +62,7 @@ class FileSystemBlobStore:
             except OSError:
                 pass
             raise
-        return f"objects/{digest}", digest
+        return f"objects/{oid}"
 
     def get_blob(self, storage_path: str) -> bytes:
         """按 storage_path 读取字节; 文件缺失抛 BlobMissingError。"""

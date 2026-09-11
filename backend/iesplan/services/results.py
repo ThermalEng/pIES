@@ -3,7 +3,7 @@
 对应 manual/developer-guide/zh-CN/domain-model.md《领域模型与追溯链》#快照、任务和结果 / #对象生命周期 与 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md#12 快照、任务与结果：证据/评估/索引/选中的不可变与追加语义。
 - submit_evidence: 证据包提交 —— 校验当前尝试写入资格(租约 + fencing token),
   保存不可变证据包(快照引用/算法/种子/停止条件/原始求解状态/候选索引/指标对象/
-  逐时结果对象引用/清单 + 内容校验), 证据包只 INSERT 不 UPDATE;
+  逐时结果对象引用/清单校验), 证据包只 INSERT 不 UPDATE;
 - get_evidence / evidence_content: 证据读取(对象存储, 读取时校验);
 - run_assessment: 四维有效性检查(物理/最优性/财务/可靠性, 调用 metrics.validity
   状态模型), 每次检查创建新评估记录不覆盖原记录; 四维结论独立记录, 汇总
@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -32,14 +31,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
-from iesplan.core.idgen import sha256_hex
 from iesplan.core.jsonutil import canonical_json
 from iesplan.engines.planning import CAPACITY_PARAM
 from iesplan.metrics import validity
 from iesplan.metrics.financial import IRRStatus
 from iesplan.models.audit import AuditLog
 from iesplan.models.calc import CalcSnapshot, Task, TaskAttempt, TaskLease
-from iesplan.models.common import HASH64_RE
 from iesplan.models.identity import User
 from iesplan.models.project import Project
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex, ResultSelection
@@ -80,7 +77,7 @@ DEFAULT_GAP_THRESHOLD_PCT = 0.1
 #: 证据载荷必需字段(清单部分, 与 content 内容校验值共同构成"清单+内容校验")
 _REQUIRED_EVIDENCE_KEYS: tuple[str, ...] = (
     "snapshot_id", "algorithm", "seed", "stop_condition", "solve",
-    "candidate_indices", "metrics", "hourly_refs", "content", "checksum",
+    "candidate_indices", "metrics", "hourly_refs", "content",
 )
 
 #: 求解器状态 → 最优性细粒度状态（见 manual/developer-guide/zh-CN/modules/analysis.md#结果分析：物理/最优性/财务/可靠性四维独立评估，细粒度状态不被汇总覆盖）
@@ -187,7 +184,7 @@ def _evidence_project_version(db: Session, task: Task) -> int | None:
 
 
 # ---------------------------------------------------------------------------
-# 证据服务（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果 / #对象生命周期：证据包不可变，内容寻址）
+# 证据服务（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果 / #对象生命周期：证据包不可变，按对象 id 寻址）
 # ---------------------------------------------------------------------------
 
 
@@ -247,10 +244,11 @@ def _verify_write_eligibility(db: Session, task: Task, attempt_id: int, token: s
 def _validate_evidence_payload(
     db: Session, task: Task, payload: dict[str, Any]
 ) -> tuple[dict[str, Any], list[str]]:
-    """校验证据载荷(清单 + 内容校验), 返回 (content, 问题清单)。
+    """校验证据载荷(清单校验), 返回 (content, 问题清单)。
 
     校验项: 必需字段齐全(清单)、快照与任务输入一致、seed/候选索引/逐时引用
-    类型合法、content 校验值(sha256)与清单一致、逐时对象引用存在且可读。
+    类型合法、逐时对象引用存在且可读。载荷内容经对象存储落盘(存储层负责
+    对象字节完整性), 服务层不做内容摘要比对。
     校验不通过不抛错, 以问题清单返回 —— 由调用方落库为 status='invalid'
     （校验失败不可用，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：校验失败的证据仍落库标记不可用并保留审计）。
     """
@@ -267,15 +265,9 @@ def _validate_evidence_payload(
         problems.append(
             f"快照不一致: 证据 {snapshot_id} != 任务输入 {task.calc_snapshot_id}"
         )
-    checksum = payload.get("checksum")
-    if not isinstance(checksum, str) or not re.fullmatch(HASH64_RE, checksum):
-        problems.append("checksum 格式非法(须为 64 位十六进制)")
     content = payload.get("content")
     if not isinstance(content, dict):
         problems.append("content 必须是对象")
-    elif isinstance(checksum, str) and re.fullmatch(HASH64_RE, checksum):
-        if sha256_hex(canonical_json(content).encode("utf-8")) != checksum:
-            problems.append("内容校验失败: content 与 checksum 不一致")
     if not isinstance(payload.get("seed"), int):
         problems.append("seed 必须是整数（可复现性，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：CalcSnapshot 固定随机种子）")
     for key in ("stop_condition", "solve", "metrics"):
@@ -317,7 +309,7 @@ def submit_evidence(
     """提交证据包（不可变；见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果 与 manual/developer-guide/zh-CN/modules/worker.md《Worker》#租约/提交结果：由 Worker 在 attempt 内经 fencing 提交）。
 
     流程: 写入资格校验(尝试 running + 租约 active + fencing token 未过期) →
-    载荷校验(清单 + content 校验值) → 打包为内容寻址对象 → 建立证据包行 →
+    载荷清单校验 → 打包为对象存储对象 → 建立证据包行 →
     建立对象引用（证据包引用的对象不可清理，见 manual/developer-guide/zh-CN/modules/storage.md《对象存储》#对象清理恢复路径 / #必须遵循的规范：任一有效 owner 引用阻止清理）。证据包只 INSERT，
     同一任务每次提交追加新行(不覆盖)。
     """
@@ -331,9 +323,8 @@ def submit_evidence(
     status = EVIDENCE_INVALID if problems else EVIDENCE_COMPLETE
     invalid_reason = ";".join(problems) if problems else None
 
-    # 打包: 规范化序列化整个载荷(含 content 与 checksum, 即"清单+内容校验")
+    # 打包: 规范化序列化整个载荷并落盘为对象存储对象(对象引用定位内容)
     blob = canonical_json(payload).encode("utf-8")
-    content_hash = sha256_hex(blob)
     obj = put_object(
         db, blob, content_type="application/json", source_category="evidence",
         actor_id=payload.get("created_by") or task.requested_by,
@@ -344,7 +335,6 @@ def submit_evidence(
         attempt_id=attempt_id,
         calc_snapshot_id=task.calc_snapshot_id,
         object_id=obj.id,
-        content_hash=content_hash,
         status=status,
         created_by=int(payload.get("created_by") or task.requested_by),
     )
@@ -358,7 +348,7 @@ def submit_evidence(
     _audit(
         db, "evidence_packages", package.id, "evidence_package_created",
         actor_id=payload.get("created_by") or task.requested_by,
-        after={"task_id": task.id, "attempt_id": attempt_id, "content_hash": content_hash,
+        after={"task_id": task.id, "attempt_id": attempt_id, "object_id": obj.id,
                "status": status, "invalid_reason": invalid_reason, "size_bytes": len(blob)},
     )
     return package
@@ -376,9 +366,9 @@ def get_evidence(db: Session, package_id: int) -> EvidencePackage:
 
 
 def evidence_content(db: Session, package: EvidencePackage) -> dict[str, Any]:
-    """读取证据包内容(对象存储, 读取时校验 sha256; 损坏抛数据损坏错误)。
+    """读取证据包内容(对象引用定位; 对象缺失/损坏抛数据损坏错误)。
 
-    返回证据载荷完整 dict(含 content 与 checksum)。
+    返回证据载荷完整 dict。
     """
     raw = get_object(db, package.object_id)
     try:
@@ -399,7 +389,7 @@ def evidence_content(db: Session, package: EvidencePackage) -> dict[str, Any]:
 
 
 def _evidence_inner(payload: dict[str, Any]) -> dict[str, Any]:
-    """证据载荷 → 内容文档: 载荷以 {"content": {...}, "checksum": ...} 打包,
+    """证据载荷 → 内容文档: 载荷以 {"content": {...}} 打包,
     评估/选择/差异等消费内容文档(residuals/financial/reliability/candidates)。"""
     inner = payload.get("content")
     return inner if isinstance(inner, dict) else payload
@@ -801,7 +791,7 @@ def update_result_index(
     - 同证据包挂接新评估: 只更新最新索引行的 assessment_id 指针(历史评估仍可
       通过 8.2 查询, 不覆盖);
     - 新证据包发布：旧行 is_latest=false，插入新行（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：同一事务转交最新标记）；
-    - result_hash = 输入快照哈希 + 证据内容哈希 + 业务结局（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：结果可追溯至快照与对象摘要）。
+    - 索引行经外键可追溯至快照/证据包/评估(稳定 ID 定位, 不存储内容摘要)。
     """
     assessment = db.get(ResultAssessment, assessment_id)
     if assessment is None:
@@ -823,13 +813,6 @@ def update_result_index(
             "项目尚无版本, 结果无法建立索引",
             params={"task_id": task_id, "project_id": task.project_id},
         )
-    snapshot = db.get(CalcSnapshot, task.calc_snapshot_id) if task.calc_snapshot_id else None
-    result_hash = sha256_hex(canonical_json({
-        "snapshot_hash": snapshot.content_hash if snapshot is not None else None,
-        "evidence_hash": package.content_hash,
-        "business_outcome": business_outcome,
-    }).encode("utf-8"))
-
     existing = db.execute(
         select(ResultIndex)
         .where(ResultIndex.project_version_id == project_version_id, ResultIndex.is_latest.is_(True))
@@ -845,7 +828,6 @@ def update_result_index(
             project_version_id=project_version_id,
             evidence_package_id=package.id,
             assessment_id=assessment.id,
-            result_hash=result_hash,
             is_latest=True,
         )
         db.add(index)
@@ -853,8 +835,7 @@ def update_result_index(
     _audit(
         db, "result_index", index.id, "result_index_updated",
         after={"task_id": task_id, "assessment_id": assessment_id,
-               "evidence_package_id": package.id, "business_outcome": business_outcome,
-               "result_hash": result_hash},
+               "evidence_package_id": package.id, "business_outcome": business_outcome},
     )
     return index
 
@@ -931,12 +912,10 @@ def select_result(
     selection_type: str,
     reference_rule: str | None = None,
     reason: str | None = None,
-    preview_checksum: str | None = None,
 ) -> ResultSelection:
     """选择结果(01 §8.4: 追加式, 换选=新行 + 旧行 is_current=false)。
 
-    保存: 所选解标识/选择人/类型/参考规则/理由 + 参数差异补丁与确认预览内容
-    校验(所选解标识与补丁承载于不可变审计日志, 供 diff 预览与结果应用追溯)。
+    保存: 所选解标识/选择人/类型/参考规则/理由 + 参数差异补丁(所选解标识与补丁承载于不可变审计日志, 供 diff 预览与结果应用追溯)。
     """
     if selection_type not in SELECTION_TYPES:
         raise ResultInvalidRequestError(
@@ -969,18 +948,6 @@ def select_result(
         )
 
     diff_patch = build_diff_patch(content, solution_id)
-    # 确认预览内容校验: 客户端确认过的预览摘要必须与当前差异补丁一致
-    if preview_checksum is not None:
-        if not isinstance(preview_checksum, str) or not re.fullmatch(HASH64_RE, preview_checksum):
-            raise ResultInvalidRequestError(
-                "preview_checksum 格式非法(须为 64 位十六进制)", code="RES-REQ-005",
-            )
-        actual = sha256_hex(canonical_json(diff_patch).encode("utf-8"))
-        if actual != preview_checksum:
-            raise ConflictError(
-                "确认预览内容校验失败: 差异补丁已变化, 请重新确认(domain-model §快照、任务和结果 + contracts §快照与异步契约)",
-                params={"preview_checksum": preview_checksum, "actual": actual},
-            )
 
     # 换选: 旧当前选中置 false, 插入新选中行(01 §8.4 同一事务)
     old = db.execute(
@@ -1002,8 +969,7 @@ def select_result(
         db, "result_selections", selection.id, "result_selected", actor_id=user.id,
         after={"task_id": task_id, "solution_id": solution_id, "selection_type": selection_type,
                "reference_rule": reference_rule, "result_index_id": index.id,
-               "evidence_package_id": package.id, "diff_patch": diff_patch,
-               "preview_checksum": preview_checksum},
+               "evidence_package_id": package.id, "diff_patch": diff_patch},
     )
     return selection
 
@@ -1044,7 +1010,6 @@ def selection_diff(db: Session, project_id: int) -> dict[str, Any] | None:
     return {
         "solution_id": solution_id,
         "diff_patch": diff_patch,
-        "preview_checksum": sha256_hex(canonical_json(diff_patch).encode("utf-8")),
         "result_index_id": index.id,
         "evidence_package_id": package.id,
         "project_version_id": index.project_version_id,
@@ -1080,7 +1045,7 @@ def read_hourly(
     limit: int = DEFAULT_HOURLY_LIMIT,
     solution_id: int | None = None,
 ) -> dict[str, Any]:
-    """逐时结果查询(从对象存储读取, 校验 sha256; 行号分页)。
+    """逐时结果查询(从对象存储按对象 id 读取; 行号分页)。
 
     返回: {field, unit, start, end, values, next_start, total_rows}。
     """
@@ -1172,7 +1137,7 @@ def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[
         # no_evidence=任务尚无证据包(未完成); available=已提交证据包
         "evidence_status": "no_evidence" if package is None else "available",
         "evidence": (
-            {"id": package.id, "status": package.status, "content_hash": package.content_hash,
+            {"id": package.id, "status": package.status, "object_id": package.object_id,
              "attempt_id": package.attempt_id, "created_at": package.created_at.isoformat()
              if package.created_at else None}
             if package is not None else None

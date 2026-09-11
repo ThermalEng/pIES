@@ -2,9 +2,9 @@
  * 新建项目模型页面(/projects/:id/model/new)。
  *
  * 模板实例化与直接 YAML 编辑汇合为同一个候选校验/保存用例(frontend.md
- * 「新建并保存项目模型」): 编辑中/临时已上传/校验中/校验失败/正式已保存;
+ * 「新建并保存项目模型」): 编辑中/校验中/校验失败/正式已保存;
  * 校验失败保留输入并按字段路径/YAML 行列展示诊断; 成功后以后端返回的
- * 最终 _N ID、规范 YAML、内容摘要与项目 revision 替换编辑状态。
+ * 最终 _N ID、规范 YAML 与项目 revision 替换编辑状态。
  *
  * 本页只做路由级组合: 数据与状态来自 features/modeling 的 hooks/组件,
  * 不直接拼请求 JSON(宪法 §9)。
@@ -33,7 +33,7 @@ import {
   useTemplates,
   useYamlForm,
 } from '../../features/modeling/hooks'
-import { buildYamlSkeleton, collectDataFileRefs, formValuesToInputsOrErrors, isValidDeviceId } from '../../features/modeling/mappers'
+import { buildYamlSkeleton, formValuesToInputsOrErrors, isValidDeviceId } from '../../features/modeling/mappers'
 import type { FormFieldValue } from '../../features/modeling/form'
 import type { CandidateModel } from '../../features/modeling/model'
 import '../../features/modeling/modeling.css'
@@ -48,7 +48,6 @@ export default function NewModelPage() {
   const { t } = useI18n()
   const [tab, setTab] = useState<CreateTab>('template')
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null)
-  const [uploadError, setUploadError] = useState<string | null>(null)
 
   const templates = useTemplates()
   const selectedTemplate = useMemo(
@@ -96,35 +95,6 @@ export default function NewModelPage() {
     [save],
   )
 
-  /** 临时数据文件上传(临时隔离区; 上传完成 ≠ 模型已保存)。 */
-  const handleUploadFile = useCallback(
-    async (path: string, dataRef: string, file: File) => {
-      setUploadError(null)
-      try {
-        const ref = await save.uploadTempFile(file, dataRef)
-        form.setField(path, {
-          kind: 'data',
-          file_ref: ref.object_id,
-          file_name: file.name,
-          data_ref: dataRef,
-          upload: { upload_id: ref.upload_id, object_id: ref.object_id, sha256: ref.sha256 },
-        })
-        save.markUploaded()
-      } catch (err) {
-        setUploadError(errorMessage(err))
-      }
-    },
-    [form, save],
-  )
-
-  const handleRemoveFile = useCallback(
-    (path: string) => {
-      form.setField(path, { kind: 'data', file_ref: null, file_name: null, data_ref: null, upload: null })
-      save.backToEditing()
-    },
-    [form, save],
-  )
-
   /** 模板表单提交: 表单 → inputs JSON → 候选保存(携带精确模板引用)。 */
   const handleSubmitTemplate = useCallback(async () => {
     if (!detail.document) return
@@ -139,12 +109,10 @@ export default function NewModelPage() {
       source: 'template',
       template_id: summary.template_id,
       template_revision: revision ? revision.revision : null,
-      template_sha256: revision ? revision.content_sha256 : null,
       inputs_json: result.inputs,
       content_yaml: null,
       project_revision: 0, // 由 useCandidateSave 在提交时读取项目草稿修订
       idempotency_key: '', // 由 useCandidateSave 生成
-      data_files: collectDataFileRefs(form.values),
     }
     await save.submit(candidate)
   }, [detail.document, form, save])
@@ -156,12 +124,10 @@ export default function NewModelPage() {
       source: 'yaml',
       template_id: null,
       template_revision: null,
-      template_sha256: null,
       inputs_json: null,
       content_yaml: yaml.yaml_text,
       project_revision: 0,
       idempotency_key: '',
-      data_files: [],
     }
     await save.submit(candidate)
   }, [yaml.yaml_text, save])
@@ -233,14 +199,10 @@ export default function NewModelPage() {
                   errors={form.visibleErrors}
                   onFieldChange={handleFieldChange}
                   onArrayChange={handleArrayChange}
-                  onUploadFile={handleUploadFile}
-                  onRemoveFile={handleRemoveFile}
-                  uploadingPath={null}
                   disabled={save.phase === 'saved' || save.phase === 'validating'}
                 />
               </div>
             ) : null}
-            {uploadError ? <Alert variant="error" title={uploadError} closable onClose={() => setUploadError(null)} /> : null}
           </div>
         </div>
       ) : (

@@ -31,7 +31,6 @@ from sqlalchemy.orm import Session
 
 from iesplan.core.diagnostics import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARNING, TASK_QUEUED
 from iesplan.core.errors import AppError
-from iesplan.core.idgen import sha256_hex
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex
 from iesplan.services import queue
@@ -176,7 +175,7 @@ def submit_result(
 
     单事务顺序:
         1) fencing 校验(租约 active + token 匹配, 0 行 → 拒绝, 整笔回滚);
-        2) 结果序列化 → 内容寻址对象(对象存储, sha256 去重);
+        2) 结果序列化 → 对象存储;
         3) 证据包(evidence_packages, 不可变) + 对象引用;
         4) 四维评估(result_assessments, assessor='system');
         5) 结果索引(result_index: 旧行 is_latest=false → 插新行);
@@ -203,14 +202,13 @@ def submit_result(
     snapshot = db.get(CalcSnapshot, task.calc_snapshot_id) if task.calc_snapshot_id else None
     if snapshot is not None:
         blob = _payload_bytes(payload)
-        content_hash = sha256_hex(blob)
         obj = put_object(
             db, blob, "application/json", source_category="evidence",
             purpose="evidence_package", actor_id=who,
         )
         evidence = EvidencePackage(
             task_id=task.id, attempt_id=attempt_id, calc_snapshot_id=snapshot.id,
-            object_id=obj.id, content_hash=content_hash, status="complete", created_by=who,
+            object_id=obj.id, status="complete", created_by=who,
         )
         db.add(evidence)
         db.flush()
@@ -243,13 +241,11 @@ def submit_result(
             )
             .values(is_latest=False)
         )
-        result_hash = sha256_hex((f"{snapshot.content_hash}:{content_hash}").encode())
         index = ResultIndex(
             project_id=task.project_id,
             project_version_id=snapshot.project_version_id,
             evidence_package_id=evidence.id,
             assessment_id=assess.id,
-            result_hash=result_hash,
             is_latest=True,
         )
         db.add(index)

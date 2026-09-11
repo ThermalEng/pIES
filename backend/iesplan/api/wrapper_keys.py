@@ -69,17 +69,17 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "create_sample": frozenset({"dataset_version", "quality_report"}),
     # ---- exports.py ----
     "export_excel_endpoint": frozenset(
-        {"expires_at_seconds", "file_name", "sha256", "size_bytes", "token"}
+        {"expires_at_seconds", "file_name", "size_bytes", "token"}
     ),
     "export_package_endpoint": frozenset(
-        {"expires_at", "file_name", "manifest", "media_type", "object_id", "oid", "sha256", "size_bytes", "token"}
+        {"expires_at", "file_name", "manifest", "media_type", "object_id", "oid", "size_bytes", "token"}
     ),  # services.package.PackageExport.to_dict
     # ---- health.py ----
     "admin_health": frozenset({"components", "status"}),
     # ---- model.py ----
     "device_types_public": frozenset({"items"}),
     "get_model_graph": frozenset(
-        {"has_graph", "graph_id", "name", "graph_hash", "devices", "ports", "connections", "layout"}
+        {"has_graph", "graph_id", "name", "devices", "ports", "connections", "layout"}
     ),  # services.model.get_graph
     "create_device": frozenset({"device", "ports"}),
     "update_device": frozenset({"device"}),
@@ -119,7 +119,6 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "confirm_import_endpoint": frozenset({"my_role", "project"}),
     # ---- project_models.py (切片 dm2-A: 候选门禁与原子保存) ----
     "validate_project_model_candidate": frozenset({"diagnostics", "valid"}),
-    "upload_project_model_temp_file": frozenset({"temp_file", "upload_id"}),
     "list_project_models_endpoint": frozenset({"project_models"}),
     "save_project_model_endpoint": frozenset(
         {"duplicate", "project_model", "project_revision", "receipt"}
@@ -138,11 +137,8 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "disable_template_endpoint": frozenset({"template"}),
     "enable_template_endpoint": frozenset({"template"}),
     "delete_template_endpoint": frozenset({"deleted", "ok"}),
-    "get_template_revision_endpoint": frozenset({"template", "revision", "document", "receipt", "summary", "diagnostics"}),
     "list_draft_revisions_endpoint": frozenset({"draft_revisions"}),
     "get_draft_revision_endpoint": frozenset({"id", "revision", "yaml_object_id", "source", "created_by", "created_at", "document"}),
-    "migrate_draft_endpoint": frozenset({"new_template_id", "old_template_id"}),
-    "migrate_published_endpoint": frozenset({"receipt", "duplicate"}),
     "get_template_revision_endpoint": frozenset(
         {"template", "revision", "document", "receipt", "summary", "diagnostics"}
     ),  # application.model_templates.get_template_revision
@@ -164,6 +160,24 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "retry_task_endpoint": frozenset({"task"}),
     # ---- validation.py ----
     "run_validation": frozenset({"report", "stored"}),
-    "baseline_confirm": frozenset({"assumptions_hash", "confirmed", "confirmed_at", "confirmed_by"}),
+    "baseline_confirm": frozenset({"confirmed", "confirmed_at", "confirmed_by"}),
     "get_validation_report": frozenset({"report", "stored"}),
+    # ---- config_revisions.py (财务三件套 + 规划配置版本链) ----
+    "get_project_profile_endpoint": frozenset({"finance_profile", "row"}),
+    "set_project_profile_endpoint": frozenset(
+        {"finance_profile", "overrides_revision", "effective_finance_config", "revision"}
+    ),
+    "get_finance_overrides_endpoint": frozenset({"finance_overrides", "revision"}),
+    "save_finance_overrides_endpoint": frozenset(
+        {"finance_overrides", "revision", "effective_finance_config"}
+    ),
+    "delete_finance_overrides_endpoint": frozenset(
+        {"finance_overrides", "revision", "effective_finance_config"}
+    ),
+    "get_effective_finance_endpoint": frozenset({"effective_finance_config", "revision"}),
+    "get_planning_config_endpoint": frozenset({"planning_config", "revision"}),
+    "save_planning_config_endpoint": frozenset({"planning_config", "revision"}),
+    "list_finance_profiles_endpoint": frozenset({"items", "count"}),
+    "register_finance_profile_endpoint": frozenset({"finance_profile", "row"}),
+    "get_finance_profile_endpoint": frozenset({"finance_profile", "row"}),
 }

@@ -13,7 +13,7 @@ property 非时变、blind 不可引用、状态初值)与版本化公共 AST �
 **迁移边界**: 本模块是 modeling 2.0 切片的纯协议实现,不导入、不消费旧 1.0
 的 ``ModelCommand``/``DeviceSpec``(modeling/command.py、devspec.py)与全局
 命令注册表;旧 1.0 代码保持原样,由后续整体迁移切片删除。本模块不建立任何
-设备 ID 分支或私有命令映射,方程语义随设备内容寻址。
+设备 ID 分支或私有命令映射,方程语义随设备内容确定。
 
 依赖边界: 只消费 core(diagnostics/units/equation_grammar)与 devices 公开
 descriptor(contracts2 纯类型);不访问数据库、网络、目录路径与旧注册表。
@@ -21,7 +21,6 @@ descriptor(contracts2 纯类型);不访问数据库、网络、目录路径与�
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -168,10 +167,11 @@ class BinaryNode:
 
 @dataclass(frozen=True, slots=True)
 class RelationAst:
-    """一条关系的版本化公共 AST(``lhs = rhs``;output 为左侧唯一输出变量)。"""
+    """一条关系的版本化公共 AST(``lhs = rhs``;output 为左侧唯一输出变量,
+    双变量左侧的非输出约束关系为 None)。"""
 
     id: str
-    output: str
+    output: str | None
     lhs_root: object | None
     rhs_root: object | None
     lhs_refs: tuple[TimeIndexedRef, ...]
@@ -356,10 +356,11 @@ class InterfaceFlow:
 
 @dataclass(frozen=True, slots=True)
 class MathRelation:
-    """关系式(版本化 AST + 输出变量 + 状态迁移标记)。"""
+    """关系式(版本化 AST + 输出变量 + 状态迁移标记;output 为 None 表示
+    双变量左侧的非输出约束关系,不参与输出唯一性登记)。"""
 
     id: str
-    output: str
+    output: str | None
     ast: RelationAst
     is_state_transition: bool = False
 
@@ -375,7 +376,7 @@ class ResultMappingEntry:
 
 @dataclass(frozen=True, slots=True)
 class DeviceMathContribution:
-    """设备级公共数学贡献(不可变;确定性摘要)。
+    """设备级公共数学贡献(不可变)。
 
     - variables:   property 常量与内部变量(索引域=时间轴);
     - interfaces:  五类接口流;
@@ -395,11 +396,10 @@ class DeviceMathContribution:
     states: tuple[str, ...] = ()
     results: tuple[ResultMappingEntry, ...] = ()
     canonical_text: str = ""
-    contribution_sha256: str = ""
 
 @dataclass(slots=True)
 class MathContributionResult:
-    """转换结果: 要么有完整贡献(含规范摘要),要么有阻断诊断列表。"""
+    """转换结果: 要么有完整贡献(含规范文本),要么有阻断诊断列表。"""
 
     diagnostics: list[Diagnostic] = field(default_factory=list)
     contribution: DeviceMathContribution | None = None
@@ -478,12 +478,13 @@ def build_math_contribution(
     *,
     source_name: str = "<device>",
 ) -> MathContributionResult:
-    """消费 2.0 descriptor → 公共数学贡献(确定性;失败返回阻断诊断)。
+    """消费 2.0 DeviceModelDocument → 公共数学贡献(确定性;失败返回阻断诊断)。
 
     方程词法与拓扑约束(拆分/引用白名单/时间索引/未来引用/循环引用)复用
-    core 公共语法契约 equation_grammar,并叠加建模语义检查: 输出唯一性、
-    property 非时变、blind 不可引用、状态初值完整性与量纲兼容。全部通过后
-    生成规范贡献文本与 SHA-256。
+    core 公共语法契约 equation_grammar,并叠加建模语义检查: 输出唯一性
+    (左侧恰好两个变量为非输出约束关系,如充放互斥)、property 非时变、
+    blind 不可引用、状态初值完整性与量纲兼容。全部通过后
+    生成规范贡献文本。
     """
     diags: list[Diagnostic] = []
     device_id = document.device.id if document.device is not None else ""
@@ -550,6 +551,22 @@ def build_math_contribution(
                     f"relation {rid!r} 引用了 blind 接口 {ref.name!r}(不连接、不接收数据)",
                     relation_id=rid, name=ref.name,
                 ))
+        # 左侧恰好两个变量 = 非输出约束关系(如充放互斥; 与 parser2 的
+        # 1-or-2 规则对齐): 引用卫生检查已在上方完成, 不登记输出
+        if len(lhs_refs) == 2:
+            relations.append(MathRelation(
+                id=rid,
+                output=None,
+                ast=RelationAst(
+                    id=rid,
+                    output=None,
+                    lhs_root=lhs_root,
+                    rhs_root=rhs_root,
+                    lhs_refs=tuple(lhs_refs),
+                    rhs_refs=tuple(rhs_refs),
+                ),
+            ))
+            continue
         # 左侧必须恰好一个输出变量
         if len(lhs_refs) != 1:
             diags.append(_diag(
@@ -610,10 +627,12 @@ def build_math_contribution(
         ))
 
     # ---- 变量间循环引用(core.equation_grammar.check_cycles;忽略自环) ----
+    # 非输出约束关系不定义变量,不参与定义边
     if not any(d.blocking for d in diags):
         edges = [
             (rel.output, tuple(r.name for r in rel.ast.rhs_refs))
             for rel in relations
+            if rel.output is not None
         ]
         try:
             check_cycles(eq_vars, edges)
@@ -690,6 +709,7 @@ def build_math_contribution(
             kind="variable" if rel.output in variables else "interface",
         )
         for rel in sorted(relations, key=lambda r: r.id)
+        if rel.output is not None
     )
     contribution = DeviceMathContribution(
         device_id=device_id,
@@ -708,7 +728,6 @@ def build_math_contribution(
         results=results,
     )
     text = canonical_bytes(contribution).decode("utf-8")
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     contribution = DeviceMathContribution(
         device_id=contribution.device_id,
         variables=contribution.variables,
@@ -717,14 +736,8 @@ def build_math_contribution(
         states=contribution.states,
         results=contribution.results,
         canonical_text=text,
-        contribution_sha256=digest,
     )
     return MathContributionResult(diagnostics=diags, contribution=contribution)
-
-
-def _document_sha256(document: DeviceModelDocument) -> str:
-    """设备内容摘要(与 devices.contracts2 规范一致)。"""
-    return ""
 
 
 __all__ = [

@@ -384,7 +384,7 @@ def _proposal_to_dict(proposal) -> dict:
         "project_id": proposal.project_id,
         "proposer_id": proposal.proposer_id,
         "status": proposal.status,
-        "source_hash": proposal.source_hash,
+        "source_object_id": proposal.source_object_id,
         "review_summary": proposal.review_summary,
         "review_errors": proposal.review_errors,
         "created_at": proposal.created_at.isoformat() if proposal.created_at else None,

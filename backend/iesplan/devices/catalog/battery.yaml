@@ -36,6 +36,18 @@ properties:
     valid_range:
       minimum: 0
       maximum: 1
+  min_soc:
+    value: 0.1
+    unit: "1"
+    valid_range:
+      minimum: 0
+      maximum: 0.5
+  max_soc:
+    value: 0.9
+    unit: "1"
+    valid_range:
+      minimum: 0.5
+      maximum: 1
   cycle_life:
     value: 6000
     unit: "1"
@@ -72,5 +84,7 @@ equations:
   relations:
     - id: power_balance
       expression: "electricity[t] = discharge[t] - charge[t]"
+    - id: charge_discharge_exclusivity
+      expression: "charge[t] * discharge[t] = 0"
     - id: soc_update
-      expression: "soc[t] = soc[t-1] + (charge[t] * charge_efficiency - discharge[t] / discharge_efficiency) / capacity_kwh"
+      expression: "soc[t] = soc[t-1] + (charge[t] * charge_efficiency - discharge[t] / discharge_efficiency) * step_duration / capacity_kwh"

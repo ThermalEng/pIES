@@ -42,11 +42,6 @@ from iesplan.assembly.contracts import (
     ValidationReceipt,
 )
 from iesplan.assembly.diags import ASM_ALL_CODES
-from iesplan.assembly.migration import (
-    MigrationResult,
-    migrate_assembly_spec,
-    migrate_assembly_text,
-)
 from iesplan.assembly.parser import ParseResult, load_assembly_file, parse_assembly
 from iesplan.assembly.parser10 import ParseDocResult, parse_assembly_doc
 from iesplan.assembly.schema import FORMAT_VERSION, AssemblySpec
@@ -106,9 +101,6 @@ __all__ = [
     "validate_assembly_text",
     "validate_assembly_doc",
     "validate_project_export",
-    "MigrationResult",
-    "migrate_assembly_text",
-    "migrate_assembly_spec",
     # 2.0 接口网络纯协议校验(ies.assembly 2.0.0 切片)
     "SCHEMA2_ID",
     "SCHEMA2_VERSION",

@@ -7,7 +7,7 @@
 - 顶层章节与各节字段、类型、ID、枚举、引用形状;
 - 引用必须固定精确版本(拒绝 latest/范围版本/未版本化别名);
 - 资源来源与路径安全(relative_file 包内相对路径,禁止绝对路径/.. /宿主机路径;
-  object 必须 sha256 内容寻址);
+  object 为对象形态引用(按对象 id 寻址));
 - 禁止字段扫描(shell/command/executable/函数模块路径/环境变量/凭证);
 - extensions 命名空间规则。
 
@@ -79,8 +79,6 @@ _REF_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]*\.[a-z0-9_][a-z0-9_.-]*$")
 #: 精确版本引用 <id>@<semver>;禁止 latest/范围版本/未版本化别名
 _EXACT_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _EXACT_REF_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*@[0-9]+\.[0-9]+\.[0-9]+$")
-#: 十六进制 SHA-256
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 #: 禁止出现在装配 YAML 中的键(宪法 §7.8:shell/command/executable/函数模块路径/
 #: 环境变量/凭证);source 映射内的 path 等资源字段除外
@@ -118,7 +116,7 @@ def parse_assembly_doc(text: str, *, source_name: str = "assembly.yaml") -> Pars
     """ies.assembly 1.0.0 文本 → 原始文档树(结构阶段)。
 
     产出 ASM-SYN-* / ASM-CALC-* 结构诊断;存在阻断诊断时 doc 为 None。
-    资源(relative_file)不在本阶段读取,由校验器解析为内容寻址对象。
+    资源(relative_file)不在本阶段读取,由校验器解析为对象形态引用。
     """
     diags: list[Diagnostic] = []
     try:
@@ -395,20 +393,10 @@ class _DocBuilder:
             if path is not None:
                 self._check_package_path(path, f"{field}.source.path")
         elif kind == "object":
-            object_id = self._str(src, "object_id", f"{field}.source.object_id", required=True)
-            sha = self._str(src, "sha256", f"{field}.source.sha256", required=True)
+            self._str(src, "object_id", f"{field}.source.object_id", required=True)
             self._str(src, "media_type", f"{field}.source.media_type", required=True)
-            if object_id is not None and sha is not None:
-                if not _SHA256_RE.match(sha):
-                    self._diag(ASM_SYN_TYPE, f"{field}.source.sha256", {"reason": "invalid_sha256"})
-                if object_id != f"sha256:{sha}":
-                    self._diag(
-                        ASM_SYN_TYPE,
-                        f"{field}.source.object_id",
-                        {"reason": "object_id_must_equal_sha256_prefix"},
-                    )
         for key in src:
-            if key not in ("kind", "path", "object_id", "sha256", "media_type"):
+            if key not in ("kind", "path", "object_id", "media_type"):
                 self._diag(ASM_SYN_PARSE, f"{field}.source.{key}", {"reason": "unknown_key", "key": key})
 
     def _check_package_path(self, path: str, field: str) -> None:

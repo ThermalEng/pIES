@@ -71,7 +71,6 @@ ASM_REF_PORT_DECL = "ASM-REF-005"  # 端口显式声明与注册表推导不一�
 ASM_INPUT_UNFED = "ASM-INPUT-001"  # 设备输入端口无来边(输入不完备)
 ASM_INPUT_PARAM = "ASM-INPUT-002"  # 必填参数缺失
 ASM_INPUT_RANGE = "ASM-INPUT-003"  # 参数值越界/枚举不符(error 级,非阻断)
-ASM_INPUT_LOAD_DATA = "ASM-INPUT-004"  # 负荷类设备缺 data_refs(无 profile 数据不可解)
 ASM_INPUT_DATA_UNIT = "ASM-INPUT-005"  # data_refs 声明单位与端口单位量纲不可换算
 
 ASM_PIPE_DELAY_MISSING = "ASM-PIPE-001"  # 管道设备缺 delay_steps(警告,按 1 处理)
@@ -133,7 +132,6 @@ ASM_MESSAGE_KEYS: dict[str, str] = {
     ASM_INPUT_UNFED: "ies.diag.asm.input.port_unfed",
     ASM_INPUT_PARAM: "ies.diag.asm.input.param_missing",
     ASM_INPUT_RANGE: "ies.diag.asm.input.param_range",
-    ASM_INPUT_LOAD_DATA: "ies.diag.asm.input.load_no_data",
     ASM_INPUT_DATA_UNIT: "ies.diag.asm.input.data_unit_dim",
     ASM_INPUT_UNDECLARED: "ies.diag.asm.input.param_undeclared",
     # res.*
@@ -264,7 +262,6 @@ __all__ = [
     "ASM_INPUT_UNFED",
     "ASM_INPUT_PARAM",
     "ASM_INPUT_RANGE",
-    "ASM_INPUT_LOAD_DATA",
     "ASM_INPUT_DATA_UNIT",
     "ASM_PIPE_DELAY_MISSING",
     "ASM_PIPE_DELAY_RANGE",

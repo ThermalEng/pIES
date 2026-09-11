@@ -4,8 +4,9 @@
 「典型示例:保存项目模型」:
 
 - ``project_models``: 项目模型清单表。每行代表一个已保存的项目模型实例
-  (最终 ``device.id`` 携带项目内 ``_N`` 后缀); 记录规范内容摘要、模型/
-  回执对象引用与来源追溯(直接 YAML / 模板实例化)。
+  (最终 ``device.id`` 携带项目内 ``_N`` 后缀); 记录规范内容对象引用
+  (``model_object_id``)、校验回执对象引用(``receipt_object_id``)与来源追溯
+  (直接 YAML / 模板实例化)。
 - ``project_model_sequences``: 每项目一个编号计数器行。编号只递增、删除
   不复用; ``UPDATE ... RETURNING``(PostgreSQL 行锁)与
   ``(project_id, suffix)`` 唯一约束共同保证并发分配唯一。
@@ -24,7 +25,7 @@ from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index,
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, bigint_pk, regex_check
+from iesplan.models.common import bigint_pk
 
 #: 项目模型来源(直接 YAML 或模板实例化; 两者汇合同一保存用例)
 MODEL_SOURCE_DIRECT = "direct_yaml"

@@ -124,8 +124,7 @@ CREATE FUNCTION tg_projects_baseline_immutable() RETURNS trigger AS $$
 BEGIN
   IF OLD.baseline_resolution IS DISTINCT FROM NEW.baseline_resolution
      OR OLD.baseline_leap_year IS DISTINCT FROM NEW.baseline_leap_year
-     OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode
-     OR OLD.baseline_sha256 IS DISTINCT FROM NEW.baseline_sha256 THEN
+     OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode THEN
     RAISE EXCEPTION '项目计算基线创建后不可修改';
   END IF;
   RETURN NEW;
@@ -137,8 +136,7 @@ CREATE FUNCTION tg_project_versions_baseline_immutable() RETURNS trigger AS $$
 BEGIN
   IF OLD.baseline_resolution IS DISTINCT FROM NEW.baseline_resolution
      OR OLD.baseline_leap_year IS DISTINCT FROM NEW.baseline_leap_year
-     OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode
-     OR OLD.baseline_sha256 IS DISTINCT FROM NEW.baseline_sha256 THEN
+     OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode THEN
     RAISE EXCEPTION '项目版本基线固化后不可修改';
   END IF;
   RETURN NEW;

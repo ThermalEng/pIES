@@ -73,7 +73,6 @@ def export_excel_endpoint(
         "token": token,
         "expires_at_seconds": package_service.DOWNLOAD_TOKEN_TTL_SECONDS,
         "file_name": f"report-{project_id}-{payload.evidence_package_id}.xlsx",
-        "sha256": obj.sha256,
         "size_bytes": obj.size_bytes,
     }
 

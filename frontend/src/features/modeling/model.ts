@@ -2,10 +2,9 @@
  * 建模 feature 前端领域模型(由 mappers.ts 从 contracts.ts DTO 转换而来)。
  *
  * 保存状态机(与 frontend.md「新建并保存项目模型」一致):
- *   editing ──上传临时数据文件──> temporary_uploaded
- *   editing / temporary_uploaded ──提交──> validating
+ *   editing ──提交──> validating
  *   validating ──后端校验失败(聚合诊断)──> validation_failed(保留输入)
- *   validating ──后端校验通过(返回最终 _N ID/规范 YAML/摘要/revision)──> saved
+ *   validating ──后端校验通过(返回最终 _N ID/规范 YAML/revision)──> saved
  *   validation_failed ──再次编辑──> editing
  * 前端不预分配 _N 编号; 只有 saved 才进入项目模型列表并允许进入装配。
  */
@@ -15,10 +14,9 @@ import type { CandidateDiagnosticDto, ModelInputNodeType } from './contracts'
 // 保存状态
 // ---------------------------------------------------------------------------
 
-/** 明确区分的保存状态: 编辑中 / 临时已上传 / 校验中 / 校验失败 / 正式已保存。 */
+/** 明确区分的保存状态: 编辑中 / 校验中 / 校验失败 / 正式已保存。 */
 export type ModelSavePhase =
   | 'editing'
-  | 'temporary_uploaded'
   | 'validating'
   | 'validation_failed'
   | 'saved'
@@ -39,7 +37,6 @@ export interface TemplateSummary {
   status: 'draft' | 'published' | 'disabled'
   description: string | null
   draft_revision: number
-  draft_sha256: string | null
   draft_has_inputs: boolean | null
   published_revision: number
   published_at: string | null
@@ -52,8 +49,6 @@ export interface TemplateSummary {
   /** 兼容字段(模板详情文档含 names; 目录项为空)。 */
   names: Record<string, string>
   schema_version: string
-  /** 内容摘要(有 revision 时 = revision 摘要, 否则 = 草稿摘要)。 */
-  content_sha256: string
   has_inputs: boolean
 }
 
@@ -62,8 +57,6 @@ export interface TemplateRevision {
   id: string
   revision: number
   schema_version: string
-  content_sha256: string
-  inputs_sha256: string | null
   input_count: number
   yaml_object_id: string
   receipt_object_id: string
@@ -114,14 +107,6 @@ export interface TemplateDetail {
 // 候选模型与保存结果
 // ---------------------------------------------------------------------------
 
-/** 配套数据文件引用(data_ref → 临时隔离区文件; 由后端在完整校验阶段绑定)。 */
-export interface DataFileRef {
-  data_ref: string
-  upload_id: string
-  object_id: string
-  sha256: string
-}
-
 /** 提交候选所需的前端领域对象(由页面/hook 组装)。 */
 export interface CandidateModel {
   source: ModelSource
@@ -129,8 +114,6 @@ export interface CandidateModel {
   template_id: string | null
   /** source=template: 精确发布 revision(固定不可变)。 */
   template_revision: number | null
-  /** source=template: 精确 revision 的内容摘要。 */
-  template_sha256: string | null
   /** source=template: 表单 JSON inputs 树。 */
   inputs_json: unknown | null
   /** source=yaml: 候选 YAML 文本。 */
@@ -139,8 +122,6 @@ export interface CandidateModel {
   project_revision: number
   /** 幂等键。 */
   idempotency_key: string
-  /** 配套数据文件引用(data_ref → 临时对象 + 摘要)。 */
-  data_files: DataFileRef[]
 }
 
 /** 保存成功后的正式模型信息(以后端返回为权威)。 */
@@ -152,7 +133,6 @@ export interface SavedModelInfo {
   suffix: number
   base_device_id: string
   schema_version: string
-  content_sha256: string
   summary: { property_count: number; interface_count: number; relation_count: number }
   /** 保存后的项目草稿修订。 */
   project_revision: number
@@ -174,15 +154,12 @@ export interface ProjectModelSummary {
   suffix: number
   revision: number
   project_revision: number
-  content_sha256: string
   model_object_id: string
   receipt_object_id: string
   /** 后端来源值(direct_yaml | template)。 */
   source: 'direct_yaml' | 'template'
   template_id: string | null
   template_revision: number | null
-  template_sha256: string | null
-  inputs_sha256: string | null
   created_by: string
   created_at: string | null
 }

@@ -49,7 +49,7 @@ from iesplan.core.diagnostics import (
     Diagnostic,
     make_diag,
 )
-from iesplan.core.errors import AppError, ConflictError, NotFoundError
+from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.core.expression import (
     Dimensions,
     ExpressionError,
@@ -63,10 +63,10 @@ from iesplan.engines.registry import (
     list_algorithms,
 )
 from iesplan.devices import (
-    DeviceModelDescriptor as DeviceTypeSpec,
-    get_device_descriptor as get_device_type,
-    list_device_descriptors as list_device_types,
+    DeviceModelDocument as DeviceTypeSpec,
+    get_device as get_device_type,
 )
+from iesplan.devices.contracts2 import PropertySpec
 from iesplan.core.units import UnitError, dims_of
 from iesplan.db import SessionLocal
 from iesplan.models.audit import AuditLog
@@ -155,39 +155,20 @@ ENVIRONMENTAL_PARAM_SPECS: Final[dict[str, dict]] = {
     },
 }
 
-# 设备类型短名 -> 注册表 id(兼容 models.devices.device_type 的 CHECK 短名,
-# 注册表 id 可直接使用; 未映射的短名视为无注册表规格)
-_DEVICE_SHORT_ALIASES: Final[dict[str, str]] = {
-    "pv": "ies.device.pv",
-    "storage": "ies.device.battery",
-    "boiler": "ies.device.gas_boiler",
-    "chiller": "ies.device.electric_chiller",
-    "load": "ies.device.electric_load",
-}
-
-
+# 设备类型解析: 优先设备行 params['type_detail'](完整 2.0 注册表 ID),
+# 回退 device_type 列(粗分类短名, 需 CHECK 约束兼容); 注册表 id 可直接使用,
+# 未注册的短名视为无注册表规格(调用方跳过)
 # ---------------------------------------------------------------------------
 # 图/设备类型解析
 # ---------------------------------------------------------------------------
 
 
 def resolve_device_type(device_type: str) -> DeviceTypeSpec | None:
-    """解析设备类型规格: 注册表 id 优先, 兼容短名; 无法识别返回 None。"""
+    """按 2.0 稳定设备 ID 解析设备规格；未注册返回 None。"""
     try:
         return get_device_type(device_type)
     except NotFoundError:
-        pass
-    full = _DEVICE_SHORT_ALIASES.get(device_type)
-    if full is not None:
-        try:
-            return get_device_type(full)
-        except NotFoundError:
-            pass
-    # 后缀匹配(如 "grid_connection" -> "ies.device.grid_connection")
-    for spec in list_device_types():
-        if spec.type_id.rsplit(".", 1)[-1] == device_type:
-            return spec
-    return None
+        return None
 
 
 def normalize_devices(graph: dict) -> list[dict]:
@@ -253,45 +234,26 @@ def load_work_graph(db: Session, project_id: int) -> dict:
     }
 
 
-def _device_max_capacity(dev: dict, spec: DeviceTypeSpec, param: ParameterSpec) -> float | None:
-    """变量上界: 优先取设备 max_* 容量参数当前值(如 max_capacity_kwp), 否则取注册表 max。"""
-    for name, p in spec.parameters.items():
-        if p.stock_or_addition != "addition":
-            continue
-        # 形如 max_*_kw / max_capacity_* 的上限参数(不必是优化变量)
-        if re.match(r"^max_", name):
-            val = dev["params"].get(name, p.default)
-            if isinstance(val, (int, float)) and not isinstance(val, bool):
-                return float(val)
-    return param.max
-
-
 # ---------------------------------------------------------------------------
 # 默认配置生成
 # ---------------------------------------------------------------------------
 
 
-def _safe_var_name(device: dict, param_name: str) -> str:
-    """生成合法标识符变量名: 设备名净化后加参数名, 名称不可用时退回 dev<id>_<param>。"""
-    base = re.sub(r"[^A-Za-z0-9_]", "_", device.get("name") or "").strip("_")
-    if not base:
-        base = f"dev{device.get('id') or 0}"
-    return f"{base}_{param_name}"
-
-
 def _default_parameters(graph: dict) -> dict:
     """设备参数当前值 = 注册表默认值叠加设备行参数(设备行参数优先)。
 
-    存量与新增设备的容量参数均以注册表 existing_default/default 打底:
-    - 存量: 设备行参数即"容量固定"的当前值;
-    - 新增: 当前值=注册表默认(容量参数为 0), 由变量参与优化。
+    解析优先使用设备行 params['type_detail'](模型服务写入的完整 2.0 注册表
+    ID), 回退到 device_type 短名; 未注册返回 None 的设备跳过。存量与新增
+    设备均以注册表 property value 打底, 设备行参数覆盖。
     """
     devices: dict = {}
     for dev in normalize_devices(graph):
-        spec = resolve_device_type(dev["device_type"])
+        params = dev["params"] or {}
+        type_id = params.get("type_detail") or dev["device_type"]
+        spec = resolve_device_type(type_id)
         if spec is None:
             continue
-        merged = {name: p.default for name, p in spec.parameters.items()}
+        merged = {name: p.value for name, p in spec.properties.items()}
         merged.update(dev["params"])  # 设备行参数覆盖注册表默认
         devices[str(dev["id"]) if dev["id"] is not None else dev["name"]] = merged
     return {
@@ -302,33 +264,8 @@ def _default_parameters(graph: dict) -> dict:
 
 
 def _default_variables(graph: dict) -> list[dict]:
-    """默认变量集(领域模型 §规划、财务与计算配置): 新建设备容量参数为 continuous 变量, 存量固定不生成。"""
-    variables: list[dict] = []
-    for dev in normalize_devices(graph):
-        spec = resolve_device_type(dev["device_type"])
-        if spec is None:
-            continue
-        if dev["kind"] not in ("new", "addition"):
-            continue  # 存量设备: 容量固定, 只优化运行
-        for name, p in spec.parameters.items():
-            if not p.is_optimizable:
-                continue
-            current = dev["params"].get(name, p.default)
-            if not isinstance(current, (int, float)) or isinstance(current, bool):
-                current = 0.0
-            variables.append(
-                {
-                    "name": _safe_var_name(dev, name),
-                    "type": "continuous",
-                    "initial": float(current),
-                    "min": float(p.min) if p.min is not None else None,
-                    "max": _device_max_capacity(dev, spec, p),
-                    "device_ref": dev["id"],
-                    "param": name,
-                    "unit": p.unit,
-                }
-            )
-    return variables
+    """默认不从设备技术常量猜测规划变量；规划配置必须显式声明。"""
+    return []
 
 
 def _build_default_config(db: Session, project_id: int) -> dict:
@@ -456,7 +393,9 @@ def _validate_parameters(
         return
     device_params = params.get("devices", {})
     for dev in normalize_devices(graph):
-        spec = resolve_device_type(dev["device_type"])
+        dev_params = dev["params"] or {}
+        type_id = dev_params.get("type_detail") or dev["device_type"]
+        spec = resolve_device_type(type_id)
         key = str(dev["id"]) if dev["id"] is not None else dev["name"]
         devices_by_key[key] = dev
         if spec is None:
@@ -471,18 +410,9 @@ def _validate_parameters(
                 )
             )
             continue
-        for pname, pspec in spec.parameters.items():
-            value = cur.get(pname, pspec.default)
-            if pspec.enum is not None:
-                if value not in pspec.enum:
-                    diags.append(
-                        make_diag(
-                            "PARAM-RNG-003", SEVERITY_ERROR,
-                            params={"param": pname, "value": value, "enum": list(pspec.enum)},
-                            location={"object_type": "device", "object_id": key, "field": pname},
-                        )
-                    )
-            elif pspec.unit != "reference" and isinstance(pspec.default, (int, float)) and not isinstance(pspec.default, bool):
+        for pname, pspec in spec.properties.items():
+            value = cur.get(pname, pspec.value)
+            if isinstance(pspec.value, (int, float)) and not isinstance(pspec.value, bool):
                 if not _is_number(value):
                     diags.append(
                         make_diag(
@@ -492,7 +422,7 @@ def _validate_parameters(
                         )
                     )
                 else:
-                    lo, hi = pspec.min, pspec.max
+                    lo, hi = pspec.minimum, pspec.maximum
                     if (lo is not None and value < lo) or (hi is not None and value > hi):
                         diags.append(
                             make_diag(
@@ -1163,11 +1093,9 @@ def _sync_draft_config(
         return
     from iesplan.services import project as project_service  # 延迟导入避免环
 
-    try:
-        content = project_service.load_content_object(db, draft.content_hash)
-    except AppError:
-        # 占位/缺失内容对象(测试种子或旧数据): 回退初始骨架, 不阻断保存
-        content = project_service.initial_content()
+    # 内容对象缺失或损坏时直接抛出加载原错误, 不回退初始骨架
+    # (宪法 §13: 对象缺失或不可读返回实际错误, 禁止旧副本回退)。
+    content = project_service.load_content_object(db, draft.content_object_id)
     old_calc = content.get("calc_config") or {}
     content["calc_config"] = {
         "params": dict(config.get("parameters") or {}),
@@ -1182,7 +1110,7 @@ def _sync_draft_config(
     }
     if isinstance(old_calc.get("task_params"), dict):
         content["calc_config"]["task_params"] = old_calc["task_params"]
-    draft.content_hash = project_service.store_content_object(db, content)
+    draft.content_object_id = project_service.store_content_object(db, content)
 
 
 def save_config(
@@ -1340,6 +1268,16 @@ def _param_meta(p: ParameterSpec) -> dict:
     }
 
 
+def _property_meta(p: PropertySpec) -> dict:
+    """设备 2.0 技术常量元数据。"""
+    return {
+        "unit": p.unit,
+        "min": p.minimum,
+        "max": p.maximum,
+        "default": p.value,
+    }
+
+
 def parameter_metadata(graph: dict) -> dict:
     """生成参数元数据(每个参数的单位/范围/默认值/帮助键, 供前端渲染)。
 
@@ -1347,11 +1285,13 @@ def parameter_metadata(graph: dict) -> dict:
     """
     device_meta: dict[str, dict] = {}
     for dev in normalize_devices(graph):
-        spec = resolve_device_type(dev["device_type"])
+        params = dev["params"] or {}
+        type_id = params.get("type_detail") or dev["device_type"]
+        spec = resolve_device_type(type_id)
         if spec is None:
             continue
         key = str(dev["id"]) if dev["id"] is not None else dev["name"]
-        device_meta[key] = {name: _param_meta(p) for name, p in spec.parameters.items()}
+        device_meta[key] = {name: _property_meta(p) for name, p in spec.properties.items()}
     return {
         "parameters": {
             "devices": device_meta,

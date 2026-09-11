@@ -28,9 +28,9 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.core.contracts import ParameterSpec
 from iesplan.db import get_db
-from iesplan.devices import DeviceModelDescriptor, list_device_descriptors
+from iesplan.devices import DeviceModelDocument, list_devices
+from iesplan.devices.contracts2 import PropertySpec
 from iesplan.services import model as svc
 from iesplan.services import project as project_service
 
@@ -101,47 +101,33 @@ class ConnectionUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _parameter_schema(p: ParameterSpec) -> dict[str, Any]:
+def _parameter_schema(p: PropertySpec) -> dict[str, Any]:
     """参数规格 → 公开 schema(前端表单渲染用)。"""
     return {
-        "name": p.name,
+        "name": p.id,
         "unit": p.unit,
-        "min": p.min,
-        "max": p.max,
-        "default": p.default,
-        "is_optimizable": p.is_optimizable,
-        "existing_default": p.existing_default,
-        "stock_or_addition": p.stock_or_addition,
-        "help_key": p.help_key,
-        "enum": list(p.enum) if p.enum else None,
+        "min": p.minimum,
+        "max": p.maximum,
+        "default": p.value,
     }
 
 
-def _device_type_schema(spec: DeviceModelDescriptor) -> dict[str, Any]:
+def _device_type_schema(spec: DeviceModelDocument) -> dict[str, Any]:
     """设备类型注册项 → 公开 schema(RR-P1-04: 含 YAML 真实端口/能力/模型元数据)。"""
     return {
-        "type_id": spec.type_id,
-        "version": spec.version,
-        "name_zh": spec.name_zh,
-        "name_en": spec.name_en,
-        "energy_carriers": list(spec.energy_carriers),
-        "is_load": spec.is_load,
-        "capabilities": list(spec.capabilities),
-        "model_method": spec.model_method,
-        "stateful": spec.stateful,
-        "fidelity": spec.fidelity,
-        "help_topic": spec.help_topic,
+        "type_id": spec.device.id,
+        "schema_version": spec.schema_version,
+        "names": dict(spec.device.names),
         "ports": [
             {
-                "name": p.name,
-                "port_type": p.port_type,
-                "direction": p.direction,
-                "energy_carrier": p.energy_carrier,
-                "capacity_ref": p.capacity_ref,
+                "name": name,
+                "direction": p.type,
+                "energy_carrier": p.carrier,
+                "unit": p.unit,
             }
-            for p in spec.ports
+            for name, p in spec.interfaces.items()
         ],
-        "parameters": {name: _parameter_schema(p) for name, p in spec.parameters.items()},
+        "parameters": {name: _parameter_schema(p) for name, p in spec.properties.items()},
     }
 
 
@@ -152,7 +138,7 @@ def device_types_public() -> dict[str, Any]:
     端口/方向/载能来自 YAML 设备目录(公开 descriptor), API 只做序列化,
     不维护独立的设备类型静态表。
     """
-    return {"items": [_device_type_schema(desc) for desc in list_device_descriptors()]}
+    return {"items": [_device_type_schema(desc) for desc in list_devices()]}
 
 
 # ---------------------------------------------------------------------------

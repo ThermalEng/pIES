@@ -64,7 +64,6 @@ RES_RANGE_OUT = "RES-RANGE-001"  # 越出物理合理区间
 RES_PRECISION_MISMATCH = "RES-RANGE-004"  # 跨精度比较
 
 # SEC 域:安全/注册
-SEC_REG_INTEGRITY = "SEC-REG-001"  # 扩展校验失败(校验和/签名)
 SEC_REG_SESSION = "SEC-REG-002"  # 扩展访问会话
 SEC_REG_DB = "SEC-REG-003"  # 扩展访问 DB
 SEC_REG_PATH = "SEC-REG-004"  # 扩展访问任意路径
@@ -121,10 +120,6 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-META-007": "固定 UTC 偏移越界(-840..840): {value}",
     "DATA-META-008": "device_model/device_id 与被校验的设备描述符不匹配: 声明 {declared}, 期望 {expected}",
     "DATA-META-009": "文件声明的 device_model 未注册: {device_model}",
-    "DATA-META-010": (
-        "ies.device-data 2.0.0 声明的设备内容摘要与目标设备不匹配: "
-        "声明 {declared}, 期望 {expected}"
-    ),
     "DATA-META-011": (
         "ies.device-data 2.0.0 文件 source_mode 与设备接口声明的预定义来源模式"
         "不匹配: {column} 声明 {mode}, 文件 {source_mode}"
@@ -167,7 +162,6 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-TIME-006": "时间戳形态与声明 timestamp_mode 不匹配: {value}"
     "(期望模式 {timestamp_mode}, 实际形态 {form})",
     "DATA-ARR-001": "数组长度与时间轴长度不一致",
-    "DATA-SUM-001": "规范化摘要与内容不一致(内容被修改后摘要失效)",
     "CONFIG-VAL-001": "计算配置校验失败(阻断性诊断,HTTP 422;包络码,见 api/config.py)",
     "API-REQ-001": (
         "请求体校验失败(422;FastAPI/Pydantic RequestValidationError 包络,"
@@ -201,7 +195,6 @@ NEW_DIAG_CODES: dict[str, str] = {
     "ASM-INPUT-001": "设备输入端口没有输入连接",
     "ASM-INPUT-002": "设备必填参数缺失",
     "ASM-INPUT-003": "设备参数值越界或不符合枚举",
-    "ASM-INPUT-004": "负荷设备缺少数据绑定",
     "ASM-INPUT-005": "数据绑定单位与设备输入量纲不兼容",
     "ASM-INPUT-006": "参数未在设备模型中声明",
     "ASM-PIPE-001": "管道设备缺少 delay_steps",
@@ -237,13 +230,6 @@ NEW_DIAG_CODES: dict[str, str] = {
     "MOD-EQ-007": "非时变 property 被时间索引引用: {name}",
     "MOD-EQ-008": "方程引用了 blind 接口(不连接、不接收数据): {name}",
     # PROJ 域: 项目模型候选门禁与保存(application/projects 用例, 切片 dm2-A)。
-    # 配套数据文件的存在性、摘要、归属和内容契约都在同一门禁校验。
-    "PROJ-MDL-001": "候选模型引用的临时数据文件不存在或不可用: {data_ref}(期望存在对象,实际不可用)",
-    "PROJ-MDL-002": (
-        "临时数据文件内容摘要与声明不一致: "
-        "{data_ref}(期望 {expected_sha256},实际 {actual_sha256})"
-    ),
-    "PROJ-MDL-003": "临时数据文件归属与上传会话不一致: {data_ref}(该对象不属于 upload_id={upload_id})",
     "PROJ-MDL-004": "最终设备 ID 无法通过身份校验: {final_id}(由基础 ID {base_device_id} 追加 _N 后缀后非法)",
     "PROJ-MDL-005": "候选模型校验失败, 保存被拒绝(不写项目模型目录、不登记清单、不分配编号)",
     "PROJ-MDL-006": "候选模型 YAML 解析失败: {detail}",
@@ -296,7 +282,6 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
     RES_NUM_INVALID: "ies.diag.res.invalid_nan",
     RES_RANGE_OUT: "ies.diag.res.out_of_range",
     RES_PRECISION_MISMATCH: "ies.diag.res.precision_mismatch",
-    SEC_REG_INTEGRITY: "ies.diag.sec.registry_integrity",
     SEC_REG_SANDBOX: "ies.diag.sec.sandbox_violation",
     EXPR_SYNTAX: "ies.expr.syntax_error",
     EXPR_TYPE: "ies.expr.type_error",
@@ -333,7 +318,6 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-META-007": "meta_offset_out_of_range",
             "DATA-META-008": "meta_model_mismatch",
             "DATA-META-009": "meta_model_unregistered",
-            "DATA-META-010": "meta_content_mismatch",
             "DATA-META-011": "meta_source_mode_mismatch",
             "DATA-META-012": "meta_project_baseline_mismatch",
             "DATA-META-013": "meta_repeat_year_only",
@@ -358,15 +342,11 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-TIME-005": "time_convert_failed",
             "DATA-TIME-006": "time_form_mode_mismatch",
             "DATA-ARR-001": "array_length_mismatch",
-            "DATA-SUM-001": "summary_mismatch",
         }.items()
     },
     **{
         code: "ies.diag.proj." + suffix
         for code, suffix in {
-            "PROJ-MDL-001": "model_data_missing",
-            "PROJ-MDL-002": "model_data_digest_mismatch",
-            "PROJ-MDL-003": "model_data_owner_mismatch",
             "PROJ-MDL-004": "model_identity_failed",
             "PROJ-MDL-005": "model_validation_failed",
             "PROJ-MDL-006": "model_yaml_parse",
@@ -415,7 +395,6 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     RES_NUM_INVALID: "ies.fix.res.invalid_nan",
     RES_RANGE_OUT: "ies.fix.res.out_of_range",
     RES_PRECISION_MISMATCH: "ies.fix.res.precision_mismatch",
-    SEC_REG_INTEGRITY: "ies.fix.sec.registry_integrity",
     SEC_REG_SANDBOX: "ies.fix.sec.sandbox_violation",
     EXPR_SYNTAX: "ies.fix.expr.syntax_error",
     EXPR_TYPE: "ies.fix.expr.type_error",
@@ -445,7 +424,6 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-META-007",
             "DATA-META-008",
             "DATA-META-009",
-            "DATA-META-010",
             "DATA-META-011",
             "DATA-META-012",
             "DATA-META-013",
@@ -470,12 +448,7 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-TIME-005",
             "DATA-TIME-006",
             "DATA-ARR-001",
-            "DATA-SUM-001",
         )
-    },
-    **{
-        code: "ies.fix.proj.model_data"
-        for code in ("PROJ-MDL-001", "PROJ-MDL-002", "PROJ-MDL-003")
     },
     "PROJ-MDL-004": "ies.fix.proj.model_identity",
     "PROJ-MDL-005": "ies.fix.proj.model_validation",

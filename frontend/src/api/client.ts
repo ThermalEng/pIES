@@ -496,7 +496,7 @@ function projectFromServer(body: unknown): Project {
       id: Number(draft.id ?? 0),
       project_id: Number(draft.project_id ?? 0),
       revision: Number(draft.revision ?? 1),
-      content_hash: String(draft.content_hash ?? ''),
+      content_object_id: Number(draft.content_object_id ?? 0),
       is_current: draft.is_current !== false,
       updated_by: Number(draft.updated_by ?? 0),
       updated_at: String(draft.updated_at ?? ''),
@@ -712,7 +712,6 @@ function datasetVersionFromServer(v: Record<string, unknown>): DatasetVersion {
         : qualityFromServer(asRecord(v.quality_report)),
     provenance: v.provenance === null || v.provenance === undefined ? null : (v.provenance as Record<string, unknown>),
     license: v.license === null || v.license === undefined ? null : String(v.license),
-    content_hash: String(v.content_hash ?? ''),
     created_by: Number(v.created_by ?? 0),
     created_at: String(v.created_at ?? ''),
     created_reason: v.created_reason === null || v.created_reason === undefined ? null : String(v.created_reason),
@@ -750,7 +749,7 @@ function connFromServer(c: Record<string, unknown>, graphId: number): Connection
   }
 }
 
-/** 后端系统图 dict(has_graph/graph_id/name/graph_hash/devices/ports/connections) → 前端 GraphModel。
+/** 后端系统图 dict(has_graph/graph_id/name/devices/ports/connections) → 前端 GraphModel。
  *  has_graph=false 为后端显式空态(项目尚未建模), 不再从 graph_id==null 猜测。 */
 function graphFromServer(body: unknown, projectId: number): GraphModel {
   const g = asRecord(body)
@@ -764,7 +763,6 @@ function graphFromServer(body: unknown, projectId: number): GraphModel {
       draft_id: null,
       project_version_id: null,
       name: String(g.name ?? ''),
-      graph_hash: String(g.graph_hash ?? ''),
       created_by: 0,
       created_at: '',
     },
@@ -1164,7 +1162,9 @@ export const api = {
           name: input.name,
           description: input.description ?? null,
           currency: input.currency,
-          utc_offset_minutes: input.fixed_utc_offset_minutes ?? 480,
+          baseline_resolution: input.baseline_resolution,
+          baseline_leap_year: input.baseline_leap_year,
+          baseline_scenario_mode: input.baseline_scenario_mode,
         },
       }).then((body) => projectFromServer(body))
     },
@@ -1499,7 +1499,7 @@ export const api = {
               detail.evidence = [
                 {
                   package_id: pkgId,
-                  content_hash: '',
+                  object_id: Number(evidence.object_id ?? 0),
                   status: status as TaskDetail['evidence'][number]['status'],
                 },
               ]
@@ -1575,7 +1575,6 @@ export const api = {
           solution_id: input.result_index_id,
           selection_type: 'adopt',
           reason: input.reason ?? null,
-          preview_checksum: null,
         },
       }).then((body) => {
         const s = asRecord(oneOf<Record<string, unknown>>(body, 'selection'))
@@ -1664,7 +1663,6 @@ export const api = {
             project_id: projectId,
             report_type: 'excel',
             object_id: input.evidence_package_id ?? 0,
-            content_hash: String(rec.sha256 ?? ''),
             generated_by_task_id: null,
             generated_by: 0,
             generated_at: '',
@@ -1691,7 +1689,6 @@ export const api = {
           project_id: projectId,
           report_type: 'pdf' as const,
           object_id: 0,
-          content_hash: String(rec.sha256 ?? ''),
           generated_by_task_id: null,
           generated_by: 0,
           generated_at: '',
@@ -1879,8 +1876,8 @@ async function uploadDataset(
     'meta',
     JSON.stringify({
       source_category: 'user_upload',
-      license: input.license ?? null,
-      provenance: null,
+      // 空许可证省略(后端 meta 白名单要求 license 为字符串, 显式 null 会阻断)
+      ...(input.license ? { license: input.license } : {}),
       created_reason: 'upload',
     }),
   )

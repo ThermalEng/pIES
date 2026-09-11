@@ -5,10 +5,19 @@ device:
   names:
     zh-CN: 热负荷
     en-US: Heat Load
-properties: {}
+properties:
+  peak_heat_kw:
+    value: 0
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 10000000
 interfaces:
   heat_demand:
     type: predefined
+    source:
+      mode: data_repeat
+      data_ref: data/heat_load.csv
     carrier: heat
     unit: kW
     valid_range:

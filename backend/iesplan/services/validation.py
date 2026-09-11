@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -41,9 +40,8 @@ from iesplan.core.diagnostics import (
     make_diag,
 )
 from iesplan.core.errors import AppError, NotFoundError
-from iesplan.core.idgen import sha256_hex
-from iesplan.devices import DeviceModelDescriptor as DeviceTypeSpec
-from iesplan.devices import get_device_descriptor as get_device_type
+from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
+from iesplan.devices import get_device as get_device_type
 from iesplan.models.audit import AuditLog
 from iesplan.models.dataset import Dataset, DatasetVersion
 from iesplan.models.identity import User
@@ -52,7 +50,7 @@ from iesplan.services import config as config_service
 from iesplan.services import dataset as dataset_service
 from iesplan.services import model as model_service
 from iesplan.services import project as project_service
-from iesplan.storage import find_refs_by_owner, object_info
+from iesplan.storage import find_refs_by_owner
 
 # ---------------------------------------------------------------------------
 # 诊断码(本单元新增, 导入时登记; 04 目录未登记, 见 NEW_DIAG_CODES 扩展模式)
@@ -134,7 +132,7 @@ GRID_TYPE_ID: str = "ies.device.grid_connection"
 
 #: 载体 → 端口类型(与 services.model.CARRIER_PORT_TYPE 一致)
 _CARRIER_PORT_TYPE: dict[str, str] = {
-    "electric": "electric",
+    "electricity": "electric",
     "heat": "thermal",
     "cool": "cooling",
 }
@@ -292,7 +290,7 @@ def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
     has_load = False
     for d in devices:
         spec = _device_spec(d)
-        if spec is not None and spec.is_load:
+        if spec is not None and any(i.type == "predefined" for i in spec.interfaces.values()):
             has_load = True
             break
     if not has_load:
@@ -308,8 +306,10 @@ def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
     load_carriers: set[str] = set()
     for d in devices:
         spec = _device_spec(d)
-        if spec is not None and spec.is_load:
-            load_carriers.update(c for c in spec.energy_carriers if c in _CARRIER_PORT_TYPE)
+        if spec is not None and any(i.type == "predefined" for i in spec.interfaces.values()):
+            load_carriers.update(
+                i.carrier for i in spec.interfaces.values() if i.carrier in _CARRIER_PORT_TYPE
+            )
     supply_carriers: set[str] = set()
     for p in ports:
         if p.get("direction") == "out":
@@ -531,7 +531,8 @@ def _current_assumptions(project: Project, config: dict) -> dict:
 def _check_financial_baseline(
     db: Session, project: Project, config_data: dict, diags: list[Diagnostic]
 ) -> None:
-    """财务基准确认证据检查(架构宪法 §16 安全与审计): 确认人/确认内容校验值齐全; 内容过期给警告。"""
+    """财务基准确认证据检查(架构宪法 §16 安全与审计): 确认人齐全且确认内容
+    与当前配置一致即通过; 不一致 → VALID-FIN-002 警告(直接比对原文, 无摘要)。"""
     loc = {
         "object_type": "project",
         "object_id": str(project.id),
@@ -549,8 +550,7 @@ def _check_financial_baseline(
         )
         return
     after = evidence.after or {}
-    digest = after.get("assumptions_hash")
-    if not isinstance(digest, str) or not digest or not after.get("confirmed_by"):
+    if not after.get("confirmed_by"):
         diags.append(
             make_diag(
                 VALID_FIN_NO_CONFIRM,
@@ -560,17 +560,19 @@ def _check_financial_baseline(
             )
         )
         return
-    # 内容校验: 确认时的假设哈希须与当前配置导出假设一致; 不一致为警告(参数已变更)
+    confirmed = after.get("assumptions") or {}
     config = config_data.get("config") or {}
-    if digest != hash_assumptions(_current_assumptions(project, config)):
+    current = _current_assumptions(project, config)
+    if confirmed != current:
         diags.append(
             make_diag(
                 VALID_FIN_STALE,
                 severity=SEVERITY_WARNING,
-                params={"project_id": project.id, "stored_hash": digest},
+                params={"project_id": project.id},
                 location=loc,
             )
         )
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -623,66 +625,13 @@ def _bad_assumptions(**params: Any) -> AppError:
     return err
 
 
-def hash_assumptions(assumptions: dict) -> str:
-    """关键假设内容 → 完整性校验值(规范化 → sha256, 与架构宪法 §12 快照任务与结果 同款规范)。
-
-    用于记录"确认内容的完整性校验信息"(架构宪法 §16 安全与审计)。规范化要点:
-    - 数值(整数/浮点/Decimal)统一转为规范化 Decimal 文本, 20 与 20.0 视为同一内容,
-      不同精度不产生误判(REQ-FIN-001 确认内容可复现);
-    - 非有限数值(NaN/Infinity)与不支持的类型一律拒绝(失败即抛, 不静默兜底);
-    - datetime 统一按 UTC 输出固定格式, 同一瞬时时间表示一致。
-    """
-    if not isinstance(assumptions, dict):
-        raise _bad_assumptions(reason_code="not_an_object")
-    normalized = _canonical_value(assumptions)
-    raw = json.dumps(
-        normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
-    )
-    return sha256_hex(raw.encode("utf-8"))
-
-
-def _canonical_value(value: Any) -> Any:
-    """递归规范化假设内容: 数值 → 规范化 Decimal 文本, 时间 → UTC 文本, 其余原样。"""
-    if isinstance(value, bool) or value is None:
-        return value
-    if isinstance(value, Decimal):
-        return _canonical_number(value)
-    if isinstance(value, int):
-        return _canonical_number(Decimal(value))
-    if isinstance(value, float):
-        return _canonical_number(Decimal(repr(value)))
-    if isinstance(value, datetime):
-        return value.astimezone(UTC).isoformat()
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return [_canonical_value(v) for v in value]
-    if isinstance(value, tuple):
-        return [_canonical_value(v) for v in value]
-    if isinstance(value, dict):
-        return {str(k): _canonical_value(v) for k, v in value.items()}
-    # 其余类型(NaN/Infinity/对象等)一律拒绝: 哈希必须可复现, 不做 str() 兜底
-    raise _bad_assumptions(
-        reason_code="unsupported_type", type=type(value).__name__
-    )
-
-
-def _canonical_number(value: Decimal) -> str:
-    """数值 → 规范化文本(去尾零与指数差异; 非有限值拒绝)。"""
-    if not value.is_finite():
-        raise _bad_assumptions(reason_code="non_finite_number")
-    return format(value.normalize(), "f") if value != value.to_integral() else str(value.normalize())
-
-
 def mark_baseline_confirmed(
     db: Session,
     project_id: int,
     user: User,
-    assumptions_hash: str,
-    *,
     assumptions: dict | None = None,
 ) -> AuditLog:
-    """记录财务基准确认(架构宪法 §16 安全与审计: 确认人/确认时间/确认内容完整性校验)。
+    """记录财务基准确认(架构宪法 §16 安全与审计: 确认人/确认时间)。
 
     证据以审计事件追加式记录(不可覆盖, 架构宪法 §16 + domain-model §对象生命周期), 供 U11 指标单元与校验门禁读取。
 
@@ -690,17 +639,10 @@ def mark_baseline_confirmed(
         db: 数据库会话。
         project_id: 项目 id(不存在或已删除抛 NotFoundError)。
         user: 确认人(记录 id 与确认时间)。
-        assumptions_hash: 确认内容(关键假设)的完整性校验值(sha256 十六进制)。
         assumptions: 可选的假设原文, 一并记录便于复核与前端回显。
     返回:
         新增的审计记录(服务不主动 commit, 事务边界由 API 层控制)。
-
-    校验值必须为 64 位十六进制 sha256(格式非法抛 AppError 400, 拒绝写坏证据)。
     """
-    if not isinstance(assumptions_hash, str) or len(assumptions_hash) != 64 or any(
-        c not in "0123456789abcdefABCDEF" for c in assumptions_hash
-    ):
-        raise _bad_assumptions(reason_code="bad_hash_format")
     project = _require_project(db, project_id)
     now = datetime.now(UTC)
     record = AuditLog(
@@ -710,7 +652,6 @@ def mark_baseline_confirmed(
         actor_id=user.id if user is not None else None,
         actor_type="user",
         after={
-            "assumptions_hash": assumptions_hash,
             "assumptions": dict(assumptions or {}),
             "confirmed_by": user.id if user is not None else None,
             "confirmed_at": now.isoformat(),
@@ -723,12 +664,12 @@ def mark_baseline_confirmed(
 
 
 # ---------------------------------------------------------------------------
-# 校验报告持久化(01 §10.2: 内容寻址对象 + ref_type='report' 引用)
+# 校验报告持久化(01 §10.2: 对象存储对象 + ref_type='report' 引用)
 # ---------------------------------------------------------------------------
 
 
 def store_validation_report(db: Session, project_id: int, report: ValidationReport) -> dict:
-    """校验报告落为内容寻址对象并登记引用(ref_type='report'), 返回摘要。
+    """校验报告落为对象存储对象并登记引用(ref_type='report'), 返回摘要。
 
     GET /validation 可读取该项目的最近一次报告(按引用倒序)。
     报告内 project_id 与入参不一致时拒绝(防止跨项目错挂报告)。
@@ -747,9 +688,8 @@ def store_validation_report(db: Session, project_id: int, report: ValidationRepo
     dataset_service.add_object_ref(
         db, {"id": obj.id}, "report", "project", project_id, purpose="项目校验报告"
     )
-    obj_info = object_info(db, obj.id)
     db.flush()
-    return {"object_id": obj.id, "sha256": obj_info["sha256"]}
+    return {"object_id": obj.id}
 
 
 def get_latest_validation_report(db: Session, project_id: int) -> dict | None:
@@ -772,7 +712,6 @@ __all__ = [
     "BASELINE_ACTION",
     "ValidationReport",
     "validate_project",
-    "hash_assumptions",
     "mark_baseline_confirmed",
     "store_validation_report",
     "get_latest_validation_report",

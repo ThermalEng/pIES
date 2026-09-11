@@ -28,7 +28,6 @@ export interface TemplateDto {
   status: TemplateStatusDto
   description: string | null
   draft_revision: number
-  draft_sha256: string | null
   draft_has_inputs: boolean | null
   published_revision: number
   published_at: string | null
@@ -41,8 +40,6 @@ export interface TemplateRevisionDto {
   id: string
   revision: number
   schema_version: string
-  content_sha256: string
-  inputs_sha256: string | null
   input_count: number
   yaml_object_id: string
   receipt_object_id: string

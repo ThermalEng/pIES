@@ -2,7 +2,7 @@
 
 设计约束见开发者指南 domain-model.md 与 contracts.md:
 - 快照装配: 从项目版本(或草稿固化)+ 数据集版本 + 计算配置组装不可变快照,
-  按 content_hash(sha256) 去重复用(规格 2.2);
+  相同输入复用既有快照(快照内容字段逐项相等判定, 不使用内容摘要);
 - 任务生命周期: 幂等创建(幂等键 + 同快照去重)、存储门禁、状态机
   (queued→running→completed/cancelling→cancelled/timed_out/failed, 终态不可迁移)、
   取消传播(批量子任务)、手动重试(复用同一快照)、并发槽(compute/io 两池);
@@ -42,7 +42,7 @@ from iesplan.core.diagnostics import (
     TASK_TIMEOUT,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
-from iesplan.core.idgen import new_id, sha256_hex
+from iesplan.core.idgen import new_id
 from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.models.calc import (
     CalcSnapshot,
@@ -192,13 +192,6 @@ class StorageEstimate:
 
 
 # ---------------------------------------------------------------------------
-# 内容寻址工具(与 services/project.py 同一规范化约定)
-# ---------------------------------------------------------------------------
-
-
-
-# ---------------------------------------------------------------------------
-
 # 项目/草稿/版本解析
 # ---------------------------------------------------------------------------
 
@@ -229,9 +222,9 @@ def _resolve_project_inputs(
         if not project_service.current_version_matches_draft(db, project):
             version = None  # 草稿已变更: 需重新固化(首次提交自动固化后亦然)
     if version is not None:
-        return version, project_service.load_content_object(db, version.content_hash)
+        return version, project_service.load_content_object(db, version.content_object_id)
     draft = project_service.get_current_draft(db, project)
-    content = project_service.load_content_object(db, draft.content_hash)
+    content = project_service.load_content_object(db, draft.content_object_id)
     if not freeze:
         return None, content
     # 草稿固化: 借项目版本服务创建不可变项目版本（计算输入固定，宪法 §12 + domain-model §项目聚合）
@@ -250,18 +243,34 @@ def _bound_dataset_ids(content: dict) -> list[int]:
     ]
 
 
-def _derive_random_seed(calc_config: dict) -> int:
-    """随机种子强制非 NULL(规格 0.2/2.2): 配置缺省时按配置内容确定性派生。
+def _derive_random_seed(version_id: int) -> int:
+    """随机种子强制非 NULL(规格 0.2/2.2): 配置缺省时取项目版本 id。
 
-    相同输入 → 相同种子 → 相同快照哈希, 不破坏可复现性。
+    版本 id 为明确标识(非内容摘要): 同一版本重提 → 同一种子(可复现,
+    快照复用不受影响); 不同版本 → 不同种子。不做摘要派生。
     """
-    digest = sha256_hex(canonical_json(calc_config).encode("utf-8"))
-    return int(digest[:12], 16)  # 取 48 bit 作为非负种子
+    return int(version_id) % (1 << 48)  # 48 bit 非负种子
 
 
 # ---------------------------------------------------------------------------
-# 快照装配(规格 2.2: 版本 + 数据集 + 配置全文 + 程序版本 + 种子 + 容差 + sha256 去重)
+# 快照装配(规格 2.2: 版本 + 数据集 + 配置全文 + 程序版本 + 种子 + 容差 + 输入一致复用)
 # ---------------------------------------------------------------------------
+
+
+def _snapshot_inputs_equal(snapshot: CalcSnapshot, *, dataset_ids: list[int], calc_config: dict,
+                           program_version: str, extensions: dict, random_seed: int,
+                           tolerances: dict, canonical_text: str | None, receipt: dict) -> bool:
+    """快照输入一致判定: 全部快照内容字段逐项相等(不使用内容摘要)。"""
+    return (
+        list(snapshot.dataset_version_ids or []) == list(dataset_ids)
+        and (snapshot.calc_config_snapshot or {}) == calc_config
+        and (snapshot.program_version or "") == program_version
+        and (snapshot.extension_versions or {}) == extensions
+        and snapshot.random_seed == random_seed
+        and (snapshot.tolerances or {}) == tolerances
+        and (snapshot.canonical_assembly_text or "") == (canonical_text or "")
+        and (snapshot.assembly_receipt or {}) == receipt
+    )
 
 
 def assemble_snapshot(
@@ -271,13 +280,12 @@ def assemble_snapshot(
     config: dict[str, Any] | None = None,
     user: User | None = None,
 ) -> CalcSnapshot:
-    """组装不可变计算快照(内容去重复用, 规格 2.2)。
+    """组装不可变计算快照(相同输入复用, 规格 2.2)。
 
     绑定: 项目版本(无版本时固化当前草稿)、数据集版本 id 清单、计算配置全文、
-    程序版本、受控扩展版本、随机种子(强制非 NULL)、容差; content_hash 对全部
-    输入规范化序列化后取 sha256, 相同输入必然同哈希(可复现), 已有同哈希
-    快照直接复用(快照不可变故复用安全)。任务级 config 并入快照的
-    calc_config_snapshot.task_params, 保证"相同输入 → 相同哈希"。
+    程序版本、受控扩展版本、随机种子(强制非 NULL)、容差与规范装配文本/回执;
+    相同输入复用既有快照(快照内容字段逐项相等判定, 快照不可变故复用安全)。
+    任务级 config 并入快照的 calc_config_snapshot.task_params。
     """
     project = project_service.require_project(db, project_id)
     actor = user or db.get(User, project.owner_id)
@@ -289,34 +297,28 @@ def assemble_snapshot(
         calc_config["task_params"] = jsonable(config)
     random_seed = calc_config.get("random_seed")
     if random_seed is None:
-        random_seed = _derive_random_seed(calc_config)
+        random_seed = _derive_random_seed(version.id)
     dataset_ids = _bound_dataset_ids(content)
     tolerances = calc_config.get("tolerances") or {}
     extensions = content.get("extensions") or {}
 
     # 0.7.0 统一生产闸门：先签发规范文本/回执二件套，失败不创建
     # 快照或任务。回执（含 schema、算法、依赖锁）进入快照身份，避免同一项目
-    # 输入在校验契约升级后错误复用旧快照；快照去重不再使用 assembly_sha256，
+    # 输入在校验契约升级后错误复用旧快照；快照去重使用内容字段逐项相等判定，
     # 文本仅校验字头（header-only）。
     artifact = _assembly_gate(db, project_id, content, task_type)
     receipt = artifact.receipt.to_dict()
-    hash_input = {
-        "project_version_id": version.id,
-        "dataset_version_ids": dataset_ids,
-        "calc_config": calc_config,
-        "program_version": __version__,
-        "extension_versions": extensions,
-        "random_seed": random_seed,
-        "tolerances": tolerances,
-        "assembly_receipt": receipt,
-    }
-    content_hash = sha256_hex(canonical_json(hash_input).encode("utf-8"))
-
-    existing = db.execute(
-        select(CalcSnapshot).where(CalcSnapshot.content_hash == content_hash)
-    ).scalar_one_or_none()
-    if existing is not None:
-        return existing  # 相同输入复用既有快照(不可变, 去重安全)
+    for candidate in db.execute(
+        select(CalcSnapshot)
+        .where(CalcSnapshot.project_version_id == version.id)
+        .order_by(CalcSnapshot.id.desc())
+    ).scalars():
+        if _snapshot_inputs_equal(
+            candidate, dataset_ids=dataset_ids, calc_config=calc_config,
+            program_version=__version__, extensions=extensions, random_seed=random_seed,
+            tolerances=tolerances, canonical_text=artifact.canonical_text, receipt=receipt,
+        ):
+            return candidate  # 相同输入复用既有快照(不可变, 复用安全)
 
     snapshot = CalcSnapshot(
         project_version_id=version.id,
@@ -326,9 +328,7 @@ def assemble_snapshot(
         extension_versions=extensions,
         random_seed=random_seed,
         tolerances=tolerances,
-        content_hash=content_hash,
         canonical_assembly_text=artifact.canonical_text,
-        assembly_sha256=None,
         assembly_receipt=receipt,
         created_by=actor.id,
     )
@@ -362,10 +362,10 @@ def _assembly_gate(
 
 
 def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
-    """项目绑定数据集版本 → 装配公开元信息（含数据对象内容摘要）。
+    """项目绑定数据集版本 → 装配公开元信息（含数据对象元信息：列/单位/分辨率/媒体类型）。
 
     只通过 storage 公开门面读取对象元信息，不跨模块访问对象 ORM。每个版本
-    选择 ``file_kind=data`` 的权威数据本体；缺文件/对象时不伪造摘要，由统一
+    选择 ``file_kind=data`` 的权威数据本体；缺文件/对象时不伪造元信息，由统一
     装配入口给出阻断诊断。
     """
     from iesplan.models.dataset import DatasetVersion
@@ -417,7 +417,6 @@ def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
             "columns": list(columns.keys()),
             "column_units": columns,
             "resolution": version.resolution or "",
-            "sha256": object_meta.get("sha256", ""),
             "media_type": media_type or "",
         }
     return meta
@@ -601,7 +600,7 @@ def create_task(
 
     - 幂等键命中: 返回既有任务(replay=True), 不重复创建、不重复扣配额;
     - 存储门禁(仅计算类): 估算不足 → 409 + SYS-STORE-003 blocking 诊断 + 清理建议;
-    - 快照: 相同输入复用同一 calc_snapshot_id(sha256 去重);
+    - 快照: 相同输入复用同一 calc_snapshot_id(快照内容字段逐项相等判定);
     - 重复提交去重: 同 (project, type, snapshot) 的非终态任务 → 复用返回
       (duplicate=True, 规格"短时间重复 → 复用并提示");
     - 入队: 按类型进入 compute/io 逻辑队列(Redis, 可重建视图)。
@@ -1302,8 +1301,7 @@ def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[
     if task.calc_snapshot_id is not None:
         snapshot = db.get(CalcSnapshot, task.calc_snapshot_id)
         detail["calc_snapshot"] = (
-            {"id": snapshot.id, "content_hash": snapshot.content_hash,
-             "random_seed": snapshot.random_seed}
+            {"id": snapshot.id, "random_seed": snapshot.random_seed}
             if snapshot is not None else None
         )
     else:

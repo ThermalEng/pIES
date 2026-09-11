@@ -46,8 +46,6 @@ from iesplan.application.model_templates import (
     list_available_templates,
     list_draft_revisions,
     list_my_templates,
-    migrate_draft_to_new_stable_id,
-    migrate_published_template,
     publish_template,
     save_template_draft,
     set_template_status,
@@ -290,29 +288,3 @@ def get_draft_revision_endpoint(
 ) -> dict[str, Any]:
     """读取精确草稿 revision（不可变）。"""
     return get_draft_revision(db, user, template_id, revision)
-
-
-class MigrateDraftRequest(BaseModel):
-    new_slug: str = Field(min_length=1, max_length=64, description="新 slug")
-
-
-@router.post("/{template_id}/migrate-draft", summary="未发布草稿显式迁移")
-def migrate_draft_endpoint(
-    template_id: str,
-    payload: MigrateDraftRequest,
-    db: DbSession,
-    user: CurrentUser,
-) -> dict[str, Any]:
-    """未发布草稿显式迁移：生成新稳定 ID、摘要与迁移回执。"""
-    return migrate_draft_to_new_stable_id(db, user, template_id, payload.new_slug)
-
-
-@router.post("/{template_id}/migrate-published", summary="已发布模板离线迁移")
-def migrate_published_endpoint(
-    template_id: str,
-    payload: MigrateDraftRequest,
-    db: DbSession,
-    user: CurrentUser,
-) -> dict[str, Any]:
-    """已发布模板离线迁移：旧 ID → 新 ID，原子更新全部引用。"""
-    return migrate_published_template(db, user, template_id, payload.new_slug)

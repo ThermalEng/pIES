@@ -171,23 +171,30 @@ export interface Project {
   role?: ProjectRole
 }
 
+export type BaselineResolution = '15min' | '30min' | '1h'
+
 export interface ProjectCreateInput {
   name: string
   description?: string
   currency: Currency
-  fixed_utc_offset_minutes?: number
+  /** 项目计算基线(创建必填, 创建后不可修改): 统一计算分辨率. */
+  baseline_resolution: BaselineResolution
+  /** 是否按闰年(366 天)生成全周期序列. */
+  baseline_leap_year: boolean
+  /** 场景模式(当前仅 single). */
+  baseline_scenario_mode: 'single'
 }
 
 export interface ProjectDraft {
   id: EntityId
   project_id: EntityId
   revision: number
-  content_hash: string
+  content_object_id: EntityId
   is_current: boolean
   updated_by: EntityId
   updated_at: ISO8601
   created_at: ISO8601
-  /** 草稿内容摘要:数据集绑定清单(U03 dataset.bind 语义命令写入)。 */
+  /** 草稿数据集绑定清单(U03 dataset.bind 语义命令写入)。 */
   dataset_bindings?: Array<{
     dataset_version_id: number
     dataset_id?: number | null
@@ -211,7 +218,7 @@ export interface ProjectVersion {
   fixed_utc_offset_minutes: number
   currency: Currency
   schema_version: number
-  content_hash: string
+  content_object_id: EntityId
 }
 
 /** 项目列表筛选参数。 */
@@ -232,7 +239,6 @@ export interface SystemGraph {
   draft_id: EntityId | null
   project_version_id: EntityId | null
   name: string
-  graph_hash: string
   created_by: EntityId
   created_at: ISO8601
 }
@@ -411,7 +417,6 @@ export interface DatasetVersion {
   quality_report: QualityReport | null
   provenance: Record<string, unknown> | null
   license: string | null
-  content_hash: string
   created_by: EntityId
   created_at: ISO8601
   created_reason: string | null
@@ -419,6 +424,7 @@ export interface DatasetVersion {
 
 export interface DatasetFile {
   id: EntityId
+  object_id: EntityId
   dataset_version_id: EntityId
   file_kind: 'data' | 'header' | 'manifest' | 'metadata'
   format: 'parquet' | 'csv' | 'json'
@@ -651,13 +657,12 @@ export interface TaskBatch {
 
 export interface CalcSnapshotSummary {
   id: EntityId
-  content_hash: string
   random_seed: number | null
 }
 
 export interface EvidencePackageSummary {
   package_id: EntityId
-  content_hash: string
+  object_id: EntityId
   status: 'complete' | 'partial' | 'invalid'
 }
 
@@ -682,7 +687,6 @@ export interface EvidencePackage {
   attempt_id: EntityId | null
   calc_snapshot_id: EntityId
   object_id: EntityId
-  content_hash: string
   status: 'complete' | 'partial' | 'invalid'
   created_by: EntityId
   created_at: ISO8601
@@ -720,7 +724,6 @@ export interface ResultIndex {
   project_version_id: EntityId
   evidence_package_id: EntityId
   assessment_id: EntityId | null
-  result_hash: string
   is_latest: boolean
   created_at: ISO8601
 }
@@ -783,7 +786,6 @@ export interface Report {
   project_id: EntityId
   report_type: ReportType
   object_id: EntityId
-  content_hash: string
   generated_by_task_id: EntityId | null
   generated_by: EntityId
   generated_at: ISO8601

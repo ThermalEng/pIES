@@ -477,7 +477,7 @@ MODEL_COMMAND_DATA_METHODS: dict[str, str] = {
 
 #: 稳定建模命令 provider 版本（roadmap 0.5.0: 设备文件 ``<command-id>@<exact-version>``
 #: 必须与 provider 注册版本**严格相等**；组合根注册期不一致即拒绝发布）。
-#: 迁移回执（devices.migration.COMMAND_VERSION）必须与此表保持一致。
+#: 旧建模命令版本表（仅供独立 modeling 1.0 测试使用）。
 MODEL_COMMAND_VERSIONS: dict[str, str] = {
     "ies.model-command.pv.generation": "1.0.0",
     "ies.model-command.heat_pump.operation": "1.0.0",

@@ -55,7 +55,7 @@ NATURE_DELAYED = "delayed"  # 输出滞后 delay_steps(管道设备输出端)
 NATURES: tuple[str, ...] = (NATURE_INSTANT, NATURE_DELAYED)
 
 #: 载体枚举(与 models/model.py ports.port_type CHECK 一致 + solar/water/data)
-CARRIERS: tuple[str, ...] = ("electric", "heat", "cool", "gas", "solar", "water", "data")
+CARRIERS: tuple[str, ...] = ("electricity", "heat", "cool", "gas", "solar", "water", "data")
 
 #: 端口方向
 DIRECTIONS: tuple[str, ...] = ("in", "out", "bidirectional")
@@ -65,9 +65,9 @@ RESOLUTIONS: tuple[str, ...] = ("15min", "30min", "1h")
 
 #: 载体 → (默认物理量, 标准单位)(solar 为环境侧, 无连接端口)
 CARRIER_DEFAULT_QUANTITY_UNIT: dict[str, tuple[str, str]] = {
-    "electric": (QUANTITY_POWER, "W"),
-    "heat": (QUANTITY_POWER, "W"),
-    "cool": (QUANTITY_POWER, "W"),
+    "electricity": (QUANTITY_POWER, "kW"),
+    "heat": (QUANTITY_POWER, "kW"),
+    "cool": (QUANTITY_POWER, "kW"),
     "gas": (QUANTITY_FLOW, "m3/s"),
     "water": (QUANTITY_FLOW, "m3/s"),
     "data": (QUANTITY_SIGNAL, "-"),
@@ -137,7 +137,7 @@ class AssemblyDevice:
     """设备实例(节点)。"""
 
     id: str
-    model: str  # "ies.device.heat_pump@1.2.0"
+    model: str  # "ies.device.heat_pump@2.0.0"
     kind: str = DEVICE_KIND_EXISTING  # existing | new
     model_method: str = MODEL_METHOD_MECHANISM  # 建模方法标志(05 §7.1)
     stateful: bool = False  # 有/无状态模型标志
@@ -178,7 +178,7 @@ class AssemblyPipeline:
     """
 
     id: str
-    model: str = "ies.device.transport_pipe@1.0.0"
+    model: str = "ies.device.transport_pipe@2.0.0"
     params: dict[str, object] = field(default_factory=dict)  # delay_steps/loss_per_step
 
 

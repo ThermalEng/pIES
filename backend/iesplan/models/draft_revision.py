@@ -13,14 +13,14 @@ from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index,
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, bigint_pk, regex_check
+from iesplan.models.common import bigint_pk
 
 class ModelTemplateDraftRevision(Base):
     """不可变草稿 revision（每次保存草稿新增一行，永不覆盖）。
 
     - entry_id：模板主表行
     - revision：严格递增（1 开始）
-    - yaml_object_id：规范 YAML 对象（内容寻址）
+    - yaml_object_id：规范 YAML 对象引用（按对象 id 寻址）
     - 规范文本与回执
     - source：创建来源（form/yaml_editor/upload/derived/migration）
     - created_by/created_at：创建者与时间
@@ -50,25 +50,4 @@ class ModelTemplateDraftRevision(Base):
         ),
         UniqueConstraint("entry_id", "revision", name="uq_mtdr_entry_revision"),
         Index("idx_mtdr_entry", "entry_id"),
-    )
-
-class TemplateMigrationReceipt(Base):
-    """离线迁移回执（旧 ID → 新 ID 映射、摘要、回执）。"""
-
-    __tablename__ = "template_migration_receipts"
-
-    id: Mapped[int] = bigint_pk()
-    old_template_id: Mapped[str] = mapped_column(Text, nullable=False)
-    new_template_id: Mapped[str] = mapped_column(Text, nullable=False)
-    entry_id: Mapped[int] = mapped_column(ForeignKey("model_templates.id"), nullable=False)
-
-    migrated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
-    )
-    migrated_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
-
-    __table_args__ = (
-
-        UniqueConstraint("old_template_id", name="uq_tmr_old_id"),
-        UniqueConstraint("new_template_id", name="uq_tmr_new_id"),
     )

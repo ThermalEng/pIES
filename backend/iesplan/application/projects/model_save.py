@@ -6,32 +6,24 @@ device-model-yaml.md「进入项目前的候选模型门禁」:
 1. 候选模型(直接 YAML 或模板实例化)在项目内完整校验(委托 devices 2.0 契约);
 2. 失败: 返回聚合诊断, 不写对象、不登记清单、不分配编号;
 3. 成功: 项目作用域内分配只递增、不复用的 ``_N`` 后缀(行锁 + 唯一约束);
-4. 用最终 ID 重新完成身份校验, 生成规范文本、内容摘要与校验回执;
-5. 原子保存: 模型/回执/配套数据对象 finalize + 清单行 + 审计, 同一事务提交
-   (编号分配、文件提交与清单登记属于同一用例的一致性边界);
-6. 临时 owner → 幂等 finalize → reconciliation: 失败事务不留半文件、孤立引用
-   或对用户不可见的已占编号(对象文件遗留由存储运维 safe_cleanup 回收)。
+4. 用最终 ID 重建并校验候选模型，生成规范文本与校验回执；
+5. 原子保存模型、回执、清单行和审计记录。
 
-``data_repeat``/``data_predict`` 配套文件在同一门禁中完成存在性、摘要、临时
-归属、data_ref、step、列、单位、采样间隔与数值范围校验。0.6.5 起装配前口径
-在绑定处强制: 输入与项目基线同分辨率、覆盖完整年度整数倍且 step 0..N-1
-连续, 与项目既有装配输入跨序列一致(不重采样/插值/补齐, 只结构化拒绝)。
+设备数据不在模型保存用例上传或绑定。模型中的预定义数据引用是项目包内
+相对 CSV 路径，由装配入口解析并完成一次格式与领域校验。
 """
 
 from __future__ import annotations
 
 import json
-import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from iesplan.core.contracts import ProjectBaseline
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     Diagnostic,
@@ -49,10 +41,6 @@ from iesplan.devices import (
     parse_device_model_v2,
     to_dict,
 )
-from iesplan.devices.datacontract2 import (
-    DeviceData2Result,
-    canonicalize_device_data_v2,
-)
 from iesplan.models.audit import AuditLog
 from iesplan.models.project import Project
 from iesplan.models.project_model import (
@@ -62,13 +50,10 @@ from iesplan.models.project_model import (
 )
 from iesplan.services import project as project_service
 from iesplan.storage import (
-    ReferenceNotFoundError,
     attach,
     detach,
-    find_refs_by_entity_type,
     find_refs_by_owner,
     get_object,
-    object_info,
     put_object,
 )
 from iesplan.application.model_templates import (
@@ -76,32 +61,20 @@ from iesplan.application.model_templates import (
     resolve_template_revision,
 )
 
-#: 临时 owner 命名空间(上传会话隔离区; 保存成功 finalize 后解绑)
-TEMP_OWNER_NAMESPACE: str = "project_model_temp"
 #: 最终 owner 命名空间(项目模型清单行持有者)
 FINAL_OWNER_NAMESPACE: str = "project_model"
-
-#: 临时数据文件默认保留时长(超龄由 reconciliation 解绑, 之后对象进入
-#: orphaned, 由存储运维 safe_cleanup/purge 物理回收)
-TEMP_FILE_RETENTION: timedelta = timedelta(days=1)
 
 #: 候选模型 YAML 上限(2 MiB, 防御性限制)
 MAX_MODEL_YAML_BYTES: int = 2 * 1024 * 1024
 
-#: 数据文件媒体类型(设备配套 CSV)
-DATA_MEDIA_TYPE: str = "text/csv; charset=utf-8"
 #: 模型/回执对象媒体类型(规范字节为版本化 JSON 文本)
 MODEL_MEDIA_TYPE: str = "application/json"
 
 #: 项目模型域诊断码(集中登记于 core/diagnostics.py NEW_DIAG_CODES; 消费者
 #: 本地常量与目录同语义, 与 dataset.py 对 DATA-TS-004..007 的处理一致)
-PROJ_MDL_DATA_MISSING = "PROJ-MDL-001"  # 临时数据文件不存在或不可用
-PROJ_MDL_DATA_DIGEST_MISMATCH = "PROJ-MDL-002"  # 数据文件摘要与声明不一致
-PROJ_MDL_DATA_OWNER_MISMATCH = "PROJ-MDL-003"  # 数据文件归属与上传会话不一致
 PROJ_MDL_IDENTITY_FAILED = "PROJ-MDL-004"  # 最终设备 ID 身份校验失败
 PROJ_MDL_VALIDATION_FAILED = "PROJ-MDL-005"  # 候选模型校验失败(保存拒绝, 包络码)
 PROJ_MDL_YAML_PARSE = "PROJ-MDL-006"  # 候选模型 YAML 解析失败
-PROJ_MDL_INPUT_ALIGNMENT = "PROJ-MDL-007"  # 装配前跨序列一致性校验失败(0.6.5 条目 3)
 
 
 # ---------------------------------------------------------------------------
@@ -130,16 +103,6 @@ class ProjectModelNotFoundError(NotFoundError):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class DataFileRef:
-    """配套数据文件引用(本切片校验: 存在 + 摘要 + 临时归属)。"""
-
-    data_ref: str
-    upload_id: int
-    object_id: int
-    sha256: str
-
-
 @dataclass(slots=True)
 class CandidateValidation:
     """候选模型完整校验结果: 要么带最终文档(含规范文本), 要么带诊断列表。
@@ -156,7 +119,6 @@ class CandidateValidation:
     receipt: dict[str, Any] | None = None
     #: 模板溯源(模板稳定 ID / 精确 revision / schema_version; 模板来源时非空)
     template_provenance: dict[str, Any] | None = None
-    data_files: tuple[DataFileRef, ...] = ()
 
     @property
     def blocking_diags(self) -> list[Diagnostic]:
@@ -283,239 +245,6 @@ def _parse_candidate_document(
     text = canonical_bytes(doc).decode("utf-8")
     return doc, [], text, canonical_receipt(doc)
 
-def _project_baseline_of(project: Project) -> ProjectBaseline:
-    """由项目行重建计算基线(项目创建时一次性固定, 列非空; 宪法 7.5)。"""
-    return ProjectBaseline(
-        resolution=project.baseline_resolution,
-        leap_year=project.baseline_leap_year,
-        scenario_mode=project.baseline_scenario_mode,
-    )
-
-
-def _bound_input_summaries(db: Session, project_id: int) -> list[dict[str, Any]]:
-    """项目已绑定模型的数据文件序列摘要(既有装配输入集合; 只读, 不含候选)。
-
-    以公开存储门面读取清单行的模型正文与 ``data:{data_ref}`` 引用对象, 复用
-    devices 2.0 规范化契约得出 ``(resolution, steps)`` 摘要(不跨模块直查
-    ORM)。历史绑定(旧口径落盘字节)按原样如实汇总, 是否与项目新口径一致由
-    装配前跨序列校验裁决, 不做静默改写。返回按 (suffix, data_ref) 稳定排序。
-    """
-    rows = db.execute(
-        sa.select(ProjectModel)
-        .where(ProjectModel.project_id == project_id)
-        .order_by(ProjectModel.suffix)
-    ).scalars()
-    summaries: list[dict[str, Any]] = []
-    for model in rows:
-        raw = get_object(db, model.model_object_id)
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            raise AppError(
-                "项目模型正文对象损坏",
-                code="SYS-STORE-001",
-                message_key="ies.diag.store.corrupt",
-                location={"object_type": "project_model", "object_id": str(model.id)},
-            ) from None
-        if not isinstance(parsed, Mapping):
-            raise AppError(
-                "项目模型正文对象形态非法",
-                code="SYS-STORE-001",
-                message_key="ies.diag.store.corrupt",
-                location={"object_type": "project_model", "object_id": str(model.id)},
-            )
-        doc_result = parse_device_model_v2(parsed, file=f"<project_model:{model.id}>")
-        if not doc_result.ok or doc_result.document is None:
-            raise AppError(
-                "项目模型正文无法通过 devices 2.0 校验",
-                code="SYS-STORE-001",
-                message_key="ies.diag.store.corrupt",
-                location={"object_type": "project_model", "object_id": str(model.id)},
-            )
-        document = doc_result.document
-        for ref in find_refs_by_owner(
-            db, FINAL_OWNER_NAMESPACE, model.id, ref_entity_type=FINAL_OWNER_NAMESPACE
-        ):
-            purpose = str(ref.get("purpose") or "")
-            if not purpose.startswith("data:"):
-                continue
-            data_ref = purpose[len("data:"):]
-            result = canonicalize_device_data_v2(
-                get_object(db, ref["object_id"]), document, expected_data_ref=data_ref
-            )
-            summaries.append({
-                "device_id": model.device_id,
-                "suffix": model.suffix,
-                "data_ref": data_ref,
-                "resolution": result.meta.resolution,
-                "steps": tuple(result.steps),
-            })
-    summaries.sort(key=lambda item: (item["suffix"], item["data_ref"]))
-    return summaries
-
-
-def _check_input_alignment(
-    bound: list[dict[str, Any]], candidate: list[dict[str, Any]]
-) -> list[Diagnostic]:
-    """装配前跨序列一致性(0.6.5 条目 3): 同一项目全部输入必须同分辨率、
-    同点数、step 一一对应。
-
-    既有绑定在前(项目既有输入集合为参考, 判定稳定), 候选文件随后; 任一
-    序列与参考不一致返回 PROJ-MDL-007 阻断诊断(不重采样/插值/补齐, 只
-    结构化拒绝)。单序列或空集合不产生诊断。
-    """
-    diags: list[Diagnostic] = []
-    sequences = bound + candidate
-    if len(sequences) < 2:
-        return diags
-    reference = sequences[0]
-    for summary in sequences[1:]:
-        problems: list[str] = []
-        if summary["resolution"] != reference["resolution"]:
-            problems.append(f"分辨率 {summary['resolution']} != 参考 {reference['resolution']}")
-        if len(summary["steps"]) != len(reference["steps"]):
-            problems.append(
-                f"点数 {len(summary['steps'])} != 参考 {len(reference['steps'])}"
-            )
-        elif summary["steps"] != reference["steps"]:
-            problems.append("step 序列与参考不对应(存在缺口或偏移)")
-        if problems:
-            diags.append(_diag(
-                PROJ_MDL_INPUT_ALIGNMENT,
-                f"装配输入序列与参考不一致: {summary['data_ref']}",
-                field=f"data_files.{summary['data_ref']}",
-                params={
-                    "data_ref": summary["data_ref"],
-                    "device_id": summary["device_id"],
-                    "detail": "; ".join(problems),
-                    "reference_resolution": reference["resolution"],
-                    "reference_point_count": len(reference["steps"]),
-                    "actual_resolution": summary["resolution"],
-                    "actual_point_count": len(summary["steps"]),
-                },
-            ))
-    return diags
-
-
-def _validate_data_files(
-    db: Session,
-    project_id: int,
-    data_files: tuple[DataFileRef, ...],
-    document: DeviceModelDocument,
-    baseline: ProjectBaseline | None = None,
-) -> list[Diagnostic]:
-    """配套文件完整门禁：引用、临时归属、devices 数据内容契约与装配前口径。
-
-    单文件按项目基线校验(0.6.5: 与基线同分辨率、点数为基线年度点数正整数
-    倍且 step 0..N-1 连续); 通过后与项目既有装配输入做跨序列一致性校验
-    (同分辨率、同点数、step 一一对应), 任一不一致结构化拒绝。
-    """
-    diags: list[Diagnostic] = []
-    expected_refs = {
-        iface.source.data_ref
-        for iface in document.interfaces.values()
-        if iface.type == "predefined"
-        and iface.source is not None
-        and iface.source.mode in ("data_repeat", "data_predict")
-        and iface.source.data_ref is not None
-    }
-    submitted_refs = [ref.data_ref for ref in data_files]
-    for data_ref in sorted(expected_refs - set(submitted_refs)):
-        diags.append(_diag(
-            PROJ_MDL_DATA_MISSING,
-            f"缺少模型声明的配套数据文件: {data_ref}",
-            field=f"data_files.{data_ref}",
-            params={"data_ref": data_ref, "expected": "已上传的配套文件", "actual": "missing"},
-        ))
-    for data_ref in sorted(set(submitted_refs) - expected_refs):
-        diags.append(_diag(
-            PROJ_MDL_DATA_MISSING,
-            f"配套数据引用未在模型中声明: {data_ref}",
-            field=f"data_files.{data_ref}",
-            params={"data_ref": data_ref, "expected": sorted(expected_refs), "actual": data_ref},
-        ))
-    duplicates = {data_ref for data_ref in submitted_refs if submitted_refs.count(data_ref) > 1}
-    for data_ref in sorted(duplicates):
-        diags.append(_diag(
-            PROJ_MDL_DATA_OWNER_MISMATCH,
-            f"同一 data_ref 重复提交: {data_ref}",
-            field=f"data_files.{data_ref}",
-            params={"data_ref": data_ref, "expected": "每个 data_ref 一个文件", "actual": "duplicate"},
-        ))
-    candidate_results: list[tuple[DataFileRef, DeviceData2Result | None]] = []
-    for ref in data_files:
-        fld = f"data_files.{ref.data_ref}"
-        try:
-            handle = object_info(db, ref.object_id)
-        except NotFoundError:
-            diags.append(
-                _diag(PROJ_MDL_DATA_MISSING, f"数据文件不存在: {ref.data_ref}", field=fld,
-                      params={"data_ref": ref.data_ref, "object_id": ref.object_id,
-                              "expected": "已上传且可用的临时对象", "actual": "missing"})
-            )
-            candidate_results.append((ref, None))
-            continue
-        if handle["status"] != "stored":
-            diags.append(
-                _diag(PROJ_MDL_DATA_MISSING, f"数据文件状态不可用: {ref.data_ref}", field=fld,
-                      params={"data_ref": ref.data_ref, "object_id": ref.object_id,
-                              "expected": "stored", "actual": handle["status"]})
-            )
-            candidate_results.append((ref, None))
-            continue
-        if str(handle["sha256"]) != ref.sha256:
-            diags.append(
-                _diag(PROJ_MDL_DATA_DIGEST_MISMATCH, f"数据文件摘要不一致: {ref.data_ref}", field=fld,
-                      params={"data_ref": ref.data_ref, "object_id": ref.object_id,
-                              "expected_sha256": ref.sha256, "actual_sha256": handle["sha256"]})
-            )
-            candidate_results.append((ref, None))
-            continue
-        refs = find_refs_by_owner(
-            db, TEMP_OWNER_NAMESPACE, ref.upload_id, ref_entity_type=TEMP_OWNER_NAMESPACE
-        )
-        if not any(r["object_id"] == ref.object_id for r in refs):
-            diags.append(
-                _diag(PROJ_MDL_DATA_OWNER_MISMATCH, f"数据文件归属不一致: {ref.data_ref}", field=fld,
-                      params={"data_ref": ref.data_ref, "object_id": ref.object_id,
-                              "upload_id": ref.upload_id, "expected": f"属于 upload_id={ref.upload_id}",
-                              "actual": "不属于该上传会话"})
-            )
-            candidate_results.append((ref, None))
-            continue
-        result = canonicalize_device_data_v2(
-            get_object(db, ref.object_id),
-            document,
-            expected_data_ref=ref.data_ref,
-            baseline_resolution=baseline.resolution if baseline is not None else None,
-            baseline_point_count=baseline.point_count if baseline is not None else None,
-        )
-        candidate_results.append((ref, result))
-        diags.extend(diag for diag in result.diagnostics if diag.blocking)
-    # 单文件均通过且存在候选时, 做装配前跨序列一致性(候选 + 项目既有绑定)。
-    # 任一单文件未通过(含临时文件缺失)则不进入跨序列裁决, 避免噪音。
-    file_level_ok = not diags
-    if file_level_ok and candidate_results and all(
-        result is not None and not any(d.blocking for d in result.diagnostics)
-        for _, result in candidate_results
-    ):
-        candidate = [
-            {
-                "device_id": document.device.id if document.device is not None else "",
-                "suffix": 0,
-                "data_ref": ref.data_ref,
-                "resolution": result.meta.resolution,
-                "steps": tuple(result.steps),
-            }
-            for ref, result in candidate_results
-            if result is not None
-        ]
-        candidate.sort(key=lambda item: item["data_ref"])
-        bound = _bound_input_summaries(db, project_id) if baseline is not None else []
-        diags.extend(_check_input_alignment(bound, candidate))
-    return diags
-
-
 def validate_candidate(
     db: Session,
     user,
@@ -526,13 +255,11 @@ def validate_candidate(
     template_id: str | None = None,
     template_revision: int | None = None,
     template_inputs: Mapping[str, Any] | None = None,
-    data_files: tuple[DataFileRef, ...] = (),
 ) -> CandidateValidation:
     """候选模型完整校验(门禁, 不保存)。
 
     依次执行: 项目 view 授权 → YAML 安全解析 → devices 2.0 完整校验(或模板
-    实例化) → 配套数据文件存在/摘要/归属校验。任何失败聚合诊断返回, 不写
-    对象、不登记清单、不分配编号。
+    实例化)。任何失败聚合诊断返回, 不写对象、不登记清单、不分配编号。
 
     ``source=template`` 时若携带模板稳定 ID/精确 revision, 后端
     从模板 revision 读取权威内容并实例化(候选提交的 model_yaml 被覆盖为
@@ -540,8 +267,7 @@ def validate_candidate(
     路径(model_yaml 即模板 YAML, 校验用, 正式保存仍以权威内容为准)。文本文件只校验字头。
     """
     project_service.ensure_access(db, user, project_id, "view")
-    project = project_service.require_project(db, project_id)
-    baseline = _project_baseline_of(project)
+    project_service.require_project(db, project_id)
     if source not in (MODEL_SOURCE_DIRECT, MODEL_SOURCE_TEMPLATE):
         return CandidateValidation(
             ok=False,
@@ -577,12 +303,6 @@ def validate_candidate(
         raw, source, template_inputs, file="<candidate>"
     )
     diags.extend(parse_diags)
-    data_diags = (
-        _validate_data_files(db, project_id, data_files, doc, baseline)
-        if doc is not None
-        else []
-    )
-    diags.extend(data_diags)
     if diags:
         return CandidateValidation(ok=False, diagnostics=diags)
     return CandidateValidation(
@@ -591,7 +311,6 @@ def validate_candidate(
         canonical_text=canonical_text,
         receipt=receipt,
         template_provenance=provenance,
-        data_files=data_files,
     )
 
 
@@ -695,92 +414,6 @@ def _load_stored_receipt(db: Session, model: ProjectModel) -> dict[str, Any]:
     return parsed
 
 
-def _finalize_data_files(
-    db: Session,
-    data_files: tuple[DataFileRef, ...],
-    base_doc: DeviceModelDocument,
-    final_doc: DeviceModelDocument,
-    baseline: ProjectBaseline | None = None,
-) -> dict[str, Any]:
-    """把配套数据文件按最终 _N 模型锁定并落盘(内容锁)。
-
-    返回 ``{data_ref: ObjectHandle}``: 数据区(列/单位/step/数值范围)以
-    基础文档校验(原始文件头按基础 ID 声明), 落盘字节的元数据改写为最终
-    ``device_id`` —— 编号分配后的模型与其配套数据形成可复核的内容锁；文本文件只校验字头。有项目基线时逐文件复核 0.6.5 装配前口径。
-    失败抛 AppError, 由调用方整体回滚。
-    """
-    from iesplan.devices.datacontract2 import (
-        DeviceData2Meta,
-        canonicalize_device_data_v2,
-        serialize_metadata_v2,
-    )
-
-    baseline_resolution = baseline.resolution if baseline is not None else None
-    baseline_point_count = baseline.point_count if baseline is not None else None
-    handles: dict[str, Any] = {}
-    for ref in data_files:
-        raw = get_object(db, ref.object_id)
-        # 数据区校验: 与原始文件头(基础 ID)一致; 最终模型不允许改变预定义
-        # 接口列/单位/step/数值范围(只允许 device.id 与内容摘要变化)
-        result = canonicalize_device_data_v2(
-            raw, base_doc, expected_data_ref=ref.data_ref,
-            baseline_resolution=baseline_resolution,
-            baseline_point_count=baseline_point_count,
-        )
-        blocking = [d for d in result.diagnostics if d.blocking]
-        if blocking:
-            raise AppError(
-                "配套数据文件与最终模型内容锁不一致",
-                code="SYS-STORE-001",
-                message_key="ies.diag.store.corrupt",
-                params={"data_ref": ref.data_ref,
-                        "diagnostics": [d.to_dict() for d in blocking]},
-                location={"object_type": "project_model", "data_ref": ref.data_ref},
-            )
-        meta = result.meta
-        assert final_doc.device is not None
-        # 最终文件元数据: 绑定最终 _N 模型的 device_id（文本只校验字头）
-        locked_meta = DeviceData2Meta(
-            schema_id=meta.schema_id, schema_version=meta.schema_version,
-            dataset_id=meta.dataset_id,
-            device_id=final_doc.device.id,
-            device_content_sha256="",
-            source_mode=meta.source_mode, resolution=meta.resolution,
-            period=meta.period,
-            project_baseline_sha256=meta.project_baseline_sha256,
-            point_count=meta.point_count, prepared=meta.prepared,
-            units=meta.units, notes=meta.notes,
-            declared_columns=meta.declared_columns,
-        )
-        text = result.canonical_csv_bytes().decode("utf-8")
-        lines = text.split("\n")
-        header_idx = next(
-            (i for i, line in enumerate(lines) if line.strip() and not line.strip().startswith("#")),
-            len(lines),
-        )
-        locked_text = serialize_metadata_v2(locked_meta, column_order=meta.declared_columns or None)
-        locked_bytes = (locked_text + "\n".join(lines[header_idx:])).encode("utf-8")
-        # 内容锁闭合: 最终字节必须能按最终文档重新完整校验(无诊断)
-        verify = canonicalize_device_data_v2(
-            locked_bytes, final_doc, expected_data_ref=ref.data_ref,
-            baseline_resolution=baseline_resolution,
-            baseline_point_count=baseline_point_count,
-        )
-        if any(d.blocking for d in verify.diagnostics):
-            raise AppError(
-                "配套数据文件最终字节无法通过内容锁校验",
-                code="SYS-STORE-001",
-                message_key="ies.diag.store.corrupt",
-                params={"data_ref": ref.data_ref,
-                        "diagnostics": [d.to_dict() for d in verify.diagnostics]},
-                location={"object_type": "project_model", "data_ref": ref.data_ref},
-            )
-        handle = put_object(db, locked_bytes, DATA_MEDIA_TYPE,
-                            source_category="project_model_data")
-        handles[ref.data_ref] = handle
-    return handles
-
-
 def _project_model_draft_refs(db: Session, project_id: int) -> list[dict[str, object]]:
     """项目草稿只保存模型清单引用，不复制模型正文。文本文件只校验字头。"""
     rows = db.execute(
@@ -808,7 +441,6 @@ def _save_project_model(
     template_id: str | None = None,
     template_revision: int | None = None,
     template_inputs: Mapping[str, Any] | None = None,
-    data_files: tuple[DataFileRef, ...] = (),
     idempotency_key: str | None = None,
     expected_revision: int,
 ) -> dict[str, Any]:
@@ -833,7 +465,6 @@ def _save_project_model(
             "项目已归档, 不能保存模型",
             location={"object_type": "project", "object_id": project_id},
         )
-    baseline = _project_baseline_of(project)
     if idempotency_key:
         existing = _find_idempotent_model(db, project_id, idempotency_key)
         if existing is not None:
@@ -857,7 +488,7 @@ def _save_project_model(
         model_yaml=model_yaml, source=source,
         template_id=template_id,
         template_revision=template_revision,
-        template_inputs=template_inputs, data_files=data_files,
+        template_inputs=template_inputs,
     )
     if not validation.ok or validation.document is None:
         raise ModelCandidateRejectedError(
@@ -892,7 +523,7 @@ def _save_project_model(
         final_receipt["instantiator"] = "ies.device-model.instantiator@1.0.0"
         final_receipt.update(template_provenance)
 
-    # 对象写入(内容寻址; 先写字节与回执, 清单行建立后统一 attach 最终 owner)
+    # 写入模型与回执对象，清单行建立后统一 attach 最终 owner。
     model_handle = put_object(
         db, canonical_text.encode("utf-8"), MODEL_MEDIA_TYPE,
         source_category="project_model",
@@ -901,19 +532,6 @@ def _save_project_model(
         db, _receipt_bytes(final_receipt), MODEL_MEDIA_TYPE,
         source_category="project_model_receipt",
     )
-
-    # 内容锁: 配套数据文件必须与最终 _N 模型一致(device_id
-    # 列 / 单位 / step 连续 / 有效区间)。数据区按基础文档校验(存在/摘要/归属/
-    # 内容), 落盘字节绑定最终 _N 模型(失败整体拒绝, 已占编号随事务回滚)。文本只校验字头。
-    lock_diags = _validate_data_files(db, project_id, data_files, document, baseline)
-    if lock_diags:
-        raise ModelCandidateRejectedError(
-            "",
-            params={"diagnostics": [d.to_dict() for d in lock_diags],
-                    "count": len(lock_diags)},
-            location={"object_type": "project_model", "project_id": project_id},
-        )
-    data_handles = _finalize_data_files(db, data_files, document, final_doc, baseline=baseline)
 
     model = ProjectModel(
         project_id=project_id,
@@ -940,23 +558,11 @@ def _save_project_model(
             location={"object_type": "project_model", "project_id": project_id},
         ) from exc
 
-    # finalize: 模型/回执/配套数据对象从临时隔离区转为最终 owner 引用
+    # 模型与回执对象登记最终 owner 引用。
     attach(db, model_handle.id, FINAL_OWNER_NAMESPACE, model.id,
            ref_entity_type=FINAL_OWNER_NAMESPACE, purpose="model_yaml")
     attach(db, receipt_handle.id, FINAL_OWNER_NAMESPACE, model.id,
            ref_entity_type=FINAL_OWNER_NAMESPACE, purpose="receipt")
-    for ref in validation.data_files:
-        handle = data_handles.get(ref.data_ref)
-        if handle is not None:
-            attach(db, handle.id, FINAL_OWNER_NAMESPACE, model.id,
-                   ref_entity_type=FINAL_OWNER_NAMESPACE, purpose=f"data:{ref.data_ref}")
-        # 原始临时对象不再属于本项目模型(引用解除, 进入孤儿生命周期)
-        try:
-            detach(db, ref.object_id, TEMP_OWNER_NAMESPACE, ref.upload_id,
-                   ref_entity_type=TEMP_OWNER_NAMESPACE)
-        except ReferenceNotFoundError:  # pragma: no cover - 校验时已确认归属, 防御性跳过
-            pass
-
     db.add(
         AuditLog(
             entity_type="project_model",
@@ -971,7 +577,6 @@ def _save_project_model(
                 "source": source,
                 "template_id": template_id,
                 "template_revision": template_revision,
-                "data_refs": [r.data_ref for r in validation.data_files],
             },
         )
     )
@@ -991,8 +596,6 @@ def _save_project_model(
         "project_revision": new_draft.revision,
         "duplicate": False,
     }
-
-
 def save_project_model(
     db: Session,
     user,
@@ -1004,7 +607,6 @@ def save_project_model(
     template_id: str | None = None,
     template_revision: int | None = None,
     template_inputs: Mapping[str, Any] | None = None,
-    data_files: tuple[DataFileRef, ...] = (),
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """事务型保存命令；application 层统一提交或回滚。文本文件只校验字头。"""
@@ -1019,7 +621,6 @@ def save_project_model(
             template_id=template_id,
             template_revision=template_revision,
             template_inputs=template_inputs,
-            data_files=data_files,
             idempotency_key=idempotency_key,
         )
         db.commit()
@@ -1027,62 +628,6 @@ def save_project_model(
     except Exception:
         db.rollback()
         raise
-
-
-# ---------------------------------------------------------------------------
-# 临时数据文件上传(临时 owner 隔离区)
-# ---------------------------------------------------------------------------
-
-
-def _upload_temp_data_file(
-    db: Session, user, project_id: int, *, content: bytes, data_ref: str, upload_id: int
-) -> dict[str, Any]:
-    """把配套数据文件写入临时隔离区(临时 owner 引用)。
-
-    返回 ``{temp_file, upload_id}``; 对象内容寻址去重(同内容复用记录, 引用
-    单独建立)。保存成功时由 finalize 转为最终 owner, 超龄未保存的临时引用
-    由 reconciliation 解绑, 对象随后进入孤儿回收生命周期。
-    """
-    project_service.ensure_access(db, user, project_id, "edit")
-    handle = put_object(
-        db, content, DATA_MEDIA_TYPE,
-        source_category="project_model_temp",
-        ref_type=TEMP_OWNER_NAMESPACE,
-        ref_id=upload_id,
-        ref_entity_type=TEMP_OWNER_NAMESPACE,
-        purpose=f"data:{data_ref}",
-    )
-    return {
-        "temp_file": {
-            "object_id": handle.id,
-            "oid": handle.oid,
-            "sha256": handle.sha256,
-            "size_bytes": handle.size_bytes,
-            "media_type": handle.media_type,
-            "status": handle.status,
-        },
-        "upload_id": upload_id,
-    }
-
-
-def upload_temp_data_file(
-    db: Session, user, project_id: int, *, content: bytes, data_ref: str, upload_id: int
-) -> dict[str, Any]:
-    """事务型临时文件上传命令。"""
-    try:
-        result = _upload_temp_data_file(
-            db, user, project_id, content=content, data_ref=data_ref, upload_id=upload_id
-        )
-        db.commit()
-        return result
-    except Exception:
-        db.rollback()
-        raise
-
-
-def new_temp_upload_id() -> int:
-    """生成临时上传会话标识(63 位正整数, 对外以不透明十进制字符串传输)。"""
-    return secrets.randbelow(2**63 - 1) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -1171,7 +716,7 @@ def delete_project_model(
 
 
 # ---------------------------------------------------------------------------
-# 读取与 reconciliation
+# 读取
 # ---------------------------------------------------------------------------
 
 
@@ -1203,57 +748,4 @@ def project_model_to_dict(model: ProjectModel) -> dict[str, Any]:
         "template_revision": model.template_revision,
         "created_by": str(model.created_by),
         "created_at": model.created_at.isoformat() if model.created_at else None,
-    }
-
-
-def reconcile_stale_temp_files(
-    db: Session, *, older_than: timedelta = TEMP_FILE_RETENTION, dry_run: bool = True
-) -> dict[str, Any]:
-    """临时数据文件 reconciliation(幂等): 解绑超龄临时 owner 引用。
-
-    - 只处理 ``TEMP_OWNER_NAMESPACE`` 引用且超龄者; 保留期内不动;
-    - 解绑后对象 ref_count 归零进入 orphaned, 物理回收由存储运维
-      (safe_cleanup/purge_expired)负责, 本用例不直接删字节;
-    - dry_run=True 只报告; 幂等: 重复执行无副作用。
-    """
-    now = datetime.now(UTC)
-    refs = find_refs_by_entity_type(db, TEMP_OWNER_NAMESPACE)
-    stale: list[dict[str, Any]] = []
-    kept = 0
-    for ref in refs:
-        created = ref.get("created_at")
-        if not created:
-            stale.append(ref)
-            continue
-        try:
-            created_dt = datetime.fromisoformat(created)
-            if created_dt.tzinfo is None:
-                created_dt = created_dt.replace(tzinfo=UTC)
-        except ValueError:
-            stale.append(ref)
-            continue
-        if now - created_dt > older_than:
-            stale.append(ref)
-        else:
-            kept += 1
-    if not dry_run:
-        for ref in stale:
-            try:
-                owner_id = int(ref["ref_entity_id"])
-            except (TypeError, ValueError):
-                continue  # 非法 owner 标识不属本用例(防御): 幂等跳过
-            try:
-                detach(
-                    db, ref["object_id"],
-                    TEMP_OWNER_NAMESPACE, owner_id,
-                    ref_entity_type=TEMP_OWNER_NAMESPACE,
-                )
-            except ReferenceNotFoundError:
-                continue  # 引用已被其他路径解绑: 幂等跳过
-        db.flush()
-    return {
-        "dry_run": dry_run,
-        "stale_count": len(stale),
-        "kept_count": kept,
-        "stale": stale,
     }

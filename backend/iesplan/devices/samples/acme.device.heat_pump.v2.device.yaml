@@ -21,6 +21,7 @@ interfaces:
     valid_range: {minimum: 0, maximum: null}
   ambient_temperature:
     type: predefined
+    source: {mode: data_repeat, data_ref: data/ambient_temperature.csv}
     carrier: environment
     unit: "°C"
     valid_range: {minimum: -50, maximum: 60}

@@ -52,7 +52,6 @@ CREATE TABLE IF NOT EXISTS model_templates (
     description TEXT,
     draft_yaml_object_id BIGINT REFERENCES objects(id),
     draft_diagnostics_object_id BIGINT REFERENCES objects(id),
-    draft_sha256 TEXT CHECK (draft_sha256 IS NULL OR draft_sha256 ~ '^[0-9a-f]{64}$'),
     draft_has_inputs BOOLEAN,
     draft_revision BIGINT NOT NULL DEFAULT 0 CHECK (draft_revision >= 0),
     draft_updated_at TIMESTAMPTZ,
@@ -69,8 +68,6 @@ CREATE TABLE IF NOT EXISTS model_template_revisions (
     template_id BIGINT NOT NULL REFERENCES model_templates(id),
     revision BIGINT NOT NULL CHECK (revision >= 1),
     schema_version TEXT NOT NULL,
-    content_sha256 TEXT NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
-    inputs_sha256 TEXT CHECK (inputs_sha256 IS NULL OR inputs_sha256 ~ '^[0-9a-f]{64}$'),
     input_count BIGINT NOT NULL DEFAULT 0 CHECK (input_count >= 0),
     yaml_object_id BIGINT NOT NULL REFERENCES objects(id),
     receipt_object_id BIGINT NOT NULL REFERENCES objects(id),
@@ -79,8 +76,7 @@ CREATE TABLE IF NOT EXISTS model_template_revisions (
     idempotency_key TEXT,
     published_by BIGINT NOT NULL REFERENCES users(id),
     published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (template_id, revision),
-    UNIQUE (template_id, content_sha256)
+    UNIQUE (template_id, revision)
 );
 CREATE INDEX IF NOT EXISTS idx_mtr_template ON model_template_revisions (template_id);
 CREATE INDEX IF NOT EXISTS idx_mtr_idem_key
@@ -97,7 +93,6 @@ CREATE TABLE IF NOT EXISTS model_templates (
     description TEXT,
     draft_yaml_object_id INTEGER REFERENCES objects(id),
     draft_diagnostics_object_id INTEGER REFERENCES objects(id),
-    draft_sha256 TEXT CHECK (length(draft_sha256) = 64),
     draft_has_inputs BOOLEAN,
     draft_revision INTEGER NOT NULL DEFAULT 0 CHECK (draft_revision >= 0),
     draft_updated_at TIMESTAMP,
@@ -114,8 +109,6 @@ CREATE TABLE IF NOT EXISTS model_template_revisions (
     template_id INTEGER NOT NULL REFERENCES model_templates(id),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     schema_version TEXT NOT NULL,
-    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
-    inputs_sha256 TEXT,
     input_count INTEGER NOT NULL DEFAULT 0 CHECK (input_count >= 0),
     yaml_object_id INTEGER NOT NULL REFERENCES objects(id),
     receipt_object_id INTEGER NOT NULL REFERENCES objects(id),
@@ -124,8 +117,7 @@ CREATE TABLE IF NOT EXISTS model_template_revisions (
     idempotency_key TEXT,
     published_by INTEGER NOT NULL REFERENCES users(id),
     published_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (template_id, revision),
-    UNIQUE (template_id, content_sha256)
+    UNIQUE (template_id, revision)
 );
 CREATE INDEX IF NOT EXISTS idx_mtr_template ON model_template_revisions (template_id);
 CREATE INDEX IF NOT EXISTS idx_mtr_idem_key
@@ -169,12 +161,9 @@ CREATE TABLE IF NOT EXISTS project_models (
     device_id TEXT NOT NULL,
     revision BIGINT NOT NULL DEFAULT 1 CHECK (revision >= 1),
     project_revision BIGINT NOT NULL CHECK (project_revision >= 2),
-    content_sha256 TEXT NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
     model_object_id BIGINT NOT NULL REFERENCES objects(id),
     receipt_object_id BIGINT NOT NULL REFERENCES objects(id),
     source TEXT NOT NULL CHECK (source IN ('direct_yaml','template')),
-    template_sha256 TEXT CHECK (template_sha256 IS NULL OR template_sha256 ~ '^[0-9a-f]{64}$'),
-    inputs_sha256 TEXT CHECK (inputs_sha256 IS NULL OR inputs_sha256 ~ '^[0-9a-f]{64}$'),
     idempotency_key TEXT,
     created_by BIGINT NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -204,12 +193,9 @@ CREATE TABLE IF NOT EXISTS project_models (
     device_id TEXT NOT NULL,
     revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
     project_revision INTEGER NOT NULL CHECK (project_revision >= 2),
-    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
     model_object_id INTEGER NOT NULL REFERENCES objects(id),
     receipt_object_id INTEGER NOT NULL REFERENCES objects(id),
     source TEXT NOT NULL CHECK (source IN ('direct_yaml','template')),
-    template_sha256 TEXT,
-    inputs_sha256 TEXT,
     idempotency_key TEXT,
     created_by INTEGER NOT NULL REFERENCES users(id),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -303,8 +289,6 @@ CREATE TABLE IF NOT EXISTS model_template_draft_revisions (
     entry_id BIGINT NOT NULL REFERENCES model_templates(id),
     revision BIGINT NOT NULL CHECK (revision >= 1),
     yaml_object_id BIGINT NOT NULL REFERENCES objects(id),
-    canonical_sha256 TEXT NOT NULL CHECK (canonical_sha256 ~ '^[0-9a-f]{64}$'),
-    inputs_sha256 TEXT CHECK (inputs_sha256 IS NULL OR inputs_sha256 ~ '^[0-9a-f]{64}$'),
     source TEXT NOT NULL CHECK (source IN ('form','yaml_editor','upload','derived','migration')),
     created_by BIGINT NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -318,20 +302,6 @@ ALTER TABLE model_templates ADD COLUMN IF NOT EXISTS current_draft_revision_id B
     REFERENCES model_template_draft_revisions(id);
 ALTER TABLE model_templates ADD COLUMN IF NOT EXISTS current_published_revision_id BIGINT
     REFERENCES model_template_revisions(id);
-
--- 已发布模板离线迁移回执（旧 ID → 新 ID 映射、摘要、回执）
-CREATE TABLE IF NOT EXISTS template_migration_receipts (
-    id BIGSERIAL PRIMARY KEY,
-    old_template_id TEXT NOT NULL,
-    new_template_id TEXT NOT NULL,
-    entry_id BIGINT NOT NULL REFERENCES model_templates(id),
-    old_content_sha256 TEXT NOT NULL CHECK (old_content_sha256 ~ '^[0-9a-f]{64}$'),
-    new_content_sha256 TEXT NOT NULL CHECK (new_content_sha256 ~ '^[0-9a-f]{64}$'),
-    migrated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    migrated_by BIGINT NOT NULL REFERENCES users(id),
-    UNIQUE (old_template_id),
-    UNIQUE (new_template_id)
-);
 """
 
 _MIGRATION_0003_SQLITE = """
@@ -342,8 +312,6 @@ CREATE TABLE IF NOT EXISTS model_template_draft_revisions (
     entry_id INTEGER NOT NULL REFERENCES model_templates(id),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     yaml_object_id INTEGER NOT NULL REFERENCES objects(id),
-    canonical_sha256 TEXT NOT NULL CHECK (length(canonical_sha256) = 64),
-    inputs_sha256 TEXT,
     source TEXT NOT NULL CHECK (source IN ('form','yaml_editor','upload','derived','migration')),
     created_by INTEGER NOT NULL REFERENCES users(id),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -354,19 +322,6 @@ CREATE INDEX IF NOT EXISTS idx_mtdr_entry ON model_template_draft_revisions (ent
 
 ALTER TABLE model_templates ADD COLUMN current_draft_revision_id INTEGER REFERENCES model_template_draft_revisions(id);
 ALTER TABLE model_templates ADD COLUMN current_published_revision_id INTEGER REFERENCES model_template_revisions(id);
-
-CREATE TABLE IF NOT EXISTS template_migration_receipts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    old_template_id TEXT NOT NULL,
-    new_template_id TEXT NOT NULL,
-    entry_id INTEGER NOT NULL REFERENCES model_templates(id),
-    old_content_sha256 TEXT NOT NULL CHECK (length(old_content_sha256) = 64),
-    new_content_sha256 TEXT NOT NULL CHECK (length(new_content_sha256) = 64),
-    migrated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    migrated_by INTEGER NOT NULL REFERENCES users(id),
-    UNIQUE (old_template_id),
-    UNIQUE (new_template_id)
-);
 """
 
 
@@ -375,27 +330,26 @@ def _migrate_0003(conn: sa.Connection) -> None:
 
     - users.public_namespace：全局唯一 12 位 Crockford Base32；
     - model_template_draft_revisions：不可变草稿历史；
-    - model_templates 指针列：当前草稿/发布 revision；
-    - template_migration_receipts：离线迁移回执。
+    - model_templates 指针列：当前草稿/发布 revision。
 
     幂等：Postgres 用 IF NOT EXISTS；SQLite 用 pragma 检查后 ADD COLUMN。
     不在 db.py 中补列或改表（任务书 §三：禁止启动流程补列）。
     """
     if conn.dialect.name == "postgresql":
-        # Execute DO block separately, then remaining statements
-        # DO block contains semicolons inside, so execute whole postgres DDL with a single execute per statement block
-        # Split on ';' outside of $$ blocks
+        # DO 块含内部分号, 需整块执行; 但必须保持文本顺序(DO 块依赖前面的
+        # ADD COLUMN, 先提 DO 块会在新库/旧库上因列缺失而失败)
         import re
         pg_sql = _MIGRATION_0003_POSTGRES
-        # Extract DO blocks and execute separately
-        do_blocks = re.findall(r'DO \$\$.*?END \$\$;', pg_sql, flags=re.DOTALL)
-        remaining = re.sub(r'DO \$\$.*?END \$\$;', '', pg_sql, flags=re.DOTALL)
-        for block in do_blocks:
-            conn.execute(sa_text(block))
-        for stmt in remaining.split(";"):
-            stripped = stmt.strip()
-            if stripped:
+        for part in re.split(r"(DO \$\$.*?END \$\$;)", pg_sql, flags=re.DOTALL):
+            stripped = part.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("DO"):
                 conn.execute(sa_text(stripped))
+            else:
+                for stmt in stripped.split(";"):
+                    if stmt.strip():
+                        conn.execute(sa_text(stmt.strip()))
     else:
         # SQLite: 先用 _ensure_columns 处理 ALTER TABLE（避免 duplicate column）
         _ensure_columns(conn, "users", {"public_namespace": "TEXT"})
@@ -450,16 +404,6 @@ def _allocate_namespaces_for_existing_users(conn: sa.Connection) -> None:
 # 迁移 0004: 项目计算基线(0.6.5 前置阶段事项 1)
 # ---------------------------------------------------------------------------
 
-#: 默认基线(1h / 非闰年 / single)的确定性摘要; 由 core.ProjectBaseline 按
-#: 当前规范化算法计算(SQL 回填与 Python 同源, 算法语义变化时此处自动跟随)。
-def _default_baseline_sha256() -> str:
-    from iesplan.core.contracts import ProjectBaseline
-
-    return ProjectBaseline(
-        resolution="1h", leap_year=False, scenario_mode="single",
-    ).digest()
-
-
 #: 旧库回填语句: 仅填充 NULL 行, 幂等(重复执行不覆盖已回填值)。
 _BACKFILL_SQL = """
 UPDATE projects SET baseline_resolution='1h' WHERE baseline_resolution IS NULL;
@@ -474,9 +418,8 @@ UPDATE project_versions SET baseline_scenario_mode='single' WHERE baseline_scena
 def _migrate_0004(conn: sa.Connection) -> None:
     """项目计算基线(0004, 0.6.5 事项 1)。
 
-    - projects / project_versions 增加基线四列(resolution/leap_year/
-      scenario_mode/sha256); 存量行按确定性默认基线(1h/非闰年/single)
-      回填摘要(摘要由 Python 侧按当前规范化算法计算后注入, 与 SQL 同源);
+    - projects / project_versions 增加基线三列(resolution/leap_year/
+      scenario_mode); 存量行按默认基线(1h/非闰年/single)回填;
       回填后 SET NOT NULL 并补 CHECK 约束;
     - 删除旧 ``fixed_utc_offset_minutes`` 列(projects / project_versions):
       时区语义随项目计算基线废除(宪法 7.5), 不保留兼容别名;
@@ -494,7 +437,6 @@ def _migrate_0004(conn: sa.Connection) -> None:
 
 def _migrate_0004_postgres(conn: sa.Connection) -> None:
     """Postgres 分支: 加列 → 锁表回填 → NOT NULL → CHECK → 删旧列。"""
-    digest = _default_baseline_sha256()
     for table in ("projects", "project_versions"):
         _ensure_columns(
             conn, table,
@@ -502,10 +444,15 @@ def _migrate_0004_postgres(conn: sa.Connection) -> None:
                 "baseline_resolution": "TEXT",
                 "baseline_leap_year": "BOOLEAN",
                 "baseline_scenario_mode": "TEXT",
-                "baseline_sha256": "TEXT",
             },
         )
-    # 回填 + 摘要注入与 SET NOT NULL 之间锁表, 杜绝并发插入 NULL 与
+    # 存量库可能已按旧版本部署 project_versions 不可变触发器(BEFORE UPDATE →
+    # RAISE), 回填 UPDATE 会被阻断; 先临时卸下(新旧命名), 清理后由 init_db 的
+    # _deploy_immutable_triggers 按当前 IMMUTABLE_TABLES 重建(0006 财务迁移同模式)。
+    conn.execute(sa_text("DROP FUNCTION IF EXISTS tg_project_versions_immutable() CASCADE"))
+    conn.execute(sa_text("DROP TRIGGER IF EXISTS tg_project_versions_no_update ON project_versions"))
+    conn.execute(sa_text("DROP TRIGGER IF EXISTS tg_project_versions_no_delete ON project_versions"))
+    # 回填与 SET NOT NULL 之间锁表, 杜绝并发插入 NULL 与
     # 回填/加约束之间的原子性窗口。
     conn.execute(sa_text("LOCK TABLE projects IN EXCLUSIVE MODE"))
     conn.execute(sa_text("LOCK TABLE project_versions IN EXCLUSIVE MODE"))
@@ -513,20 +460,11 @@ def _migrate_0004_postgres(conn: sa.Connection) -> None:
         stripped = stmt.strip()
         if stripped:
             conn.execute(sa_text(stripped))
-    conn.execute(
-        sa_text("UPDATE projects SET baseline_sha256=:digest WHERE baseline_sha256 IS NULL"),
-        {"digest": digest},
-    )
-    conn.execute(
-        sa_text("UPDATE project_versions SET baseline_sha256=:digest WHERE baseline_sha256 IS NULL"),
-        {"digest": digest},
-    )
     for table in ("projects", "project_versions"):
         for column in (
             "baseline_resolution",
             "baseline_leap_year",
             "baseline_scenario_mode",
-            "baseline_sha256",
         ):
             conn.execute(sa_text(f"ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL"))
         conn.execute(
@@ -545,14 +483,6 @@ def _migrate_0004_postgres(conn: sa.Connection) -> None:
                 f"CHECK (baseline_scenario_mode IN ('single')); END IF; END $$;"
             )
         )
-        conn.execute(
-            sa_text(
-                f"DO $$ BEGIN "
-                f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_{table}_baseline_sha256') THEN "
-                f"ALTER TABLE {table} ADD CONSTRAINT ck_{table}_baseline_sha256 "
-                f"CHECK (baseline_sha256 ~ '^[0-9a-f]{{64}}$'); END IF; END $$;"
-            )
-        )
         # 旧时区列: DROP COLUMN 自动级联删除其 CHECK 约束(pg)。
         conn.execute(
             sa_text(f"ALTER TABLE {table} DROP COLUMN IF EXISTS fixed_utc_offset_minutes")
@@ -560,17 +490,15 @@ def _migrate_0004_postgres(conn: sa.Connection) -> None:
 
 
 def _migrate_0004_sqlite(conn: sa.Connection) -> None:
-    """SQLite 分支: PRAGMA 守卫加列(带默认值) → 回填摘要 → 删旧列。
+    """SQLite 分支: PRAGMA 守卫加列(带默认值) → 删旧列。
 
     全新库(create_all 已含基线列、无旧列)为 no-op; 存量库按旧布局补列。
     SQLite ``ADD COLUMN ... NOT NULL`` 必须带 DEFAULT, 存量行即默认值。
     """
-    digest = _default_baseline_sha256()
     defaults = {
         "baseline_resolution": "TEXT NOT NULL DEFAULT '1h'",
         "baseline_leap_year": "BOOLEAN NOT NULL DEFAULT 0",
         "baseline_scenario_mode": "TEXT NOT NULL DEFAULT 'single'",
-        "baseline_sha256": f"TEXT NOT NULL DEFAULT '{digest}'",
     }
     for table in ("projects", "project_versions"):
         _ensure_columns(conn, table, defaults)
@@ -578,14 +506,6 @@ def _migrate_0004_sqlite(conn: sa.Connection) -> None:
             row[1]
             for row in conn.execute(sa_text(f"PRAGMA table_info({table})")).all()
         }
-        if "baseline_sha256" in existing:
-            conn.execute(
-                sa_text(
-                    f"UPDATE {table} SET baseline_sha256=:digest "
-                    f"WHERE baseline_sha256 IS NULL"
-                ),
-                {"digest": digest},
-            )
         if "fixed_utc_offset_minutes" in existing:
             # SQLite 3.35+ 支持 DROP COLUMN; 列被 CHECK 约束引用时失败并
             # 抛出 DBAPIError(SQLite 测试库由 create_all 全量重建, 实际
@@ -600,31 +520,13 @@ def _migrate_0004_sqlite(conn: sa.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 _MIGRATION_0005_POSTGRES = """
--- 公共财务配置 revision 表(仅 INSERT, 不可变, 每次保存形成新 revision)
-CREATE TABLE IF NOT EXISTS finance_configs (
-    id BIGSERIAL PRIMARY KEY,
-    project_id BIGINT NOT NULL REFERENCES projects(id),
-    revision BIGINT NOT NULL CHECK (revision >= 1),
-    content JSONB NOT NULL,
-    content_sha256 TEXT NOT NULL
-        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
-    created_by BIGINT NOT NULL REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (project_id, revision)
-);
-CREATE INDEX IF NOT EXISTS idx_finance_configs_project
-    ON finance_configs (project_id, revision DESC);
-
--- 规划配置 revision 表(仅 INSERT, 不可变, 引用同一 FinanceConfig revision)
+-- 规划配置 revision 表(仅 INSERT, 不可变; 修订号 revision 标识版本,
+-- 与 ORM PlanningConfigRevision 同形, 无内容摘要列)
 CREATE TABLE IF NOT EXISTS planning_configs (
     id BIGSERIAL PRIMARY KEY,
     project_id BIGINT NOT NULL REFERENCES projects(id),
     revision BIGINT NOT NULL CHECK (revision >= 1),
     content JSONB NOT NULL,
-    content_sha256 TEXT NOT NULL
-        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
-    finance_revision TEXT NOT NULL
-        CHECK (finance_revision ~ '^[0-9a-f]{64}$'),
     created_by BIGINT NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (project_id, revision)
@@ -634,26 +536,11 @@ CREATE INDEX IF NOT EXISTS idx_planning_configs_project
 """
 
 _MIGRATION_0005_SQLITE = """
-CREATE TABLE IF NOT EXISTS finance_configs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id INTEGER NOT NULL REFERENCES projects(id),
-    revision INTEGER NOT NULL CHECK (revision >= 1),
-    content TEXT NOT NULL,
-    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
-    created_by INTEGER NOT NULL REFERENCES users(id),
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (project_id, revision)
-);
-CREATE INDEX IF NOT EXISTS idx_finance_configs_project
-    ON finance_configs (project_id, revision DESC);
-
 CREATE TABLE IF NOT EXISTS planning_configs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id INTEGER NOT NULL REFERENCES projects(id),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     content TEXT NOT NULL,
-    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
-    finance_revision TEXT NOT NULL CHECK (length(finance_revision) = 64),
     created_by INTEGER NOT NULL REFERENCES users(id),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (project_id, revision)
@@ -664,13 +551,14 @@ CREATE INDEX IF NOT EXISTS idx_planning_configs_project
 
 
 def _migrate_0005(conn: sa.Connection) -> None:
-    """公共财务配置与规划配置不可变 revision 表(0005, 0.6.5 事项 3)。
+    """规划配置不可变 revision 表(0005, 0.6.5 事项 3)。
 
-    - finance_configs / planning_configs: 仅 INSERT 的 revision 追加表
-      (不可变性由 immutable_triggers 部署的禁 UPDATE/DELETE 触发器保证);
-    - projects 增加 finance_revision / planning_revision 当前生效指针
-      (_ensure_columns 守卫: 全新库随 ORM create_all 已含列时为 no-op,
-      存量库按需补列; 与 0004 同模式);
+    - planning_configs: 仅 INSERT 的 revision 追加表(修订号 revision 标识版本;
+      不可变性由 immutable_triggers 部署的禁 UPDATE/DELETE 触发器保证);
+    - 旧单体 finance_configs 表不再创建(0006 直接退役; 存量库由 0006 删除);
+    - 旧 finance_revision 列不再创建;
+    - projects 增加 planning_revision 当前生效指针(_ensure_columns 守卫:
+      全新库随 ORM create_all 已含列时为 no-op, 存量库按需补列; 与 0004 同模式);
     - 幂等: IF NOT EXISTS + 列守卫。
     """
     ddl = (
@@ -686,7 +574,7 @@ def _migrate_0005(conn: sa.Connection) -> None:
     _ensure_columns(
         conn,
         "projects",
-        {"finance_revision": "BIGINT", "planning_revision": "BIGINT"},
+        {"planning_revision": "BIGINT"},
     )
 
 
@@ -695,32 +583,27 @@ def _migrate_0005(conn: sa.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 _MIGRATION_0006_CREATE_POSTGRES = """
--- 地区 FinanceProfile 注册表(已注册、内容寻址、可复用, 每次登记新行)
+-- 地区 FinanceProfile 注册表(已注册、可复用, Profile 主键 + 对象引用追溯;
+-- 与 ORM FinanceProfile 同形, 无内容摘要列)
 CREATE TABLE IF NOT EXISTS finance_profiles (
     id BIGSERIAL PRIMARY KEY,
     profile_id TEXT NOT NULL,
     region TEXT NOT NULL,
     content JSONB NOT NULL,
-    content_sha256 TEXT NOT NULL
-        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
     object_id BIGINT NOT NULL REFERENCES objects(id),
     created_by BIGINT NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (profile_id, content_sha256)
+    UNIQUE (profile_id)
 );
 CREATE INDEX IF NOT EXISTS idx_finance_profiles_id ON finance_profiles (profile_id);
 
--- 项目 FinanceOverrides 不可变 revision(仅 INSERT)
+-- 项目 FinanceOverrides 不可变 revision(仅 INSERT; 修订号 revision 标识版本)
 CREATE TABLE IF NOT EXISTS finance_overrides (
     id BIGSERIAL PRIMARY KEY,
     project_id BIGINT NOT NULL REFERENCES projects(id),
     revision BIGINT NOT NULL CHECK (revision >= 1),
     content JSONB NOT NULL,
-    content_sha256 TEXT NOT NULL
-        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
     profile_id TEXT NOT NULL,
-    profile_sha256 TEXT NOT NULL
-        CHECK (profile_sha256 ~ '^[0-9a-f]{64}$'),
     created_by BIGINT NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (project_id, revision)
@@ -734,13 +617,7 @@ CREATE TABLE IF NOT EXISTS effective_finance_revisions (
     project_id BIGINT NOT NULL REFERENCES projects(id),
     revision BIGINT NOT NULL CHECK (revision >= 1),
     content JSONB NOT NULL,
-    content_sha256 TEXT NOT NULL
-        CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
     profile_id TEXT NOT NULL,
-    profile_sha256 TEXT NOT NULL
-        CHECK (profile_sha256 ~ '^[0-9a-f]{64}$'),
-    overrides_sha256 TEXT NOT NULL
-        CHECK (overrides_sha256 ~ '^[0-9a-f]{64}$'),
     created_by BIGINT NOT NULL REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (project_id, revision)
@@ -753,10 +630,10 @@ CREATE INDEX IF NOT EXISTS idx_effective_finance_revisions_project
 def _migrate_0006(conn: sa.Connection) -> None:
     """财务三件套持久化(0006, 0.6.5 条目 1-2)。
 
-    - 新建 finance_profiles / finance_overrides / effective_finance_revisions;
-    - planning_configs.finance_revision → finance_content_sha256(引用
-      EffectiveFinanceConfig.content_sha256), 同时兼容 fresh(create_all 已含新列)
-      与 legacy(0005 旧列)两种基线, 幂等;
+    - 新建 finance_profiles / finance_overrides / effective_finance_revisions
+      (修订号 revision + 对象引用追溯, 与 ORM 同形, 无内容摘要列);
+    - planning_configs 旧 0005 摘要列(finance_revision hash)直接删除,
+      同时兼容 fresh(无旧列)与 legacy(0005 旧列)两种基线, 幂等;
     - 按正确性优先清理无效旧 planning revisions(旧 FinanceConfig 摘要链已失效,
       因无法迁移而删除)与项目 planning 指针清空;
     - projects: 删除旧 finance_revision 指针, 新增 finance_profile_id /
@@ -780,7 +657,7 @@ def _migrate_0006_postgres(conn: sa.Connection) -> None:
         stripped = stmt.strip()
         if stripped:
             conn.execute(sa_text(stripped))
-    # 2) planning_configs: finance_revision → finance_content_sha256
+    # 2) planning_configs: 旧 0005 摘要列直接删除(不改名、不制造 hash 列)
     cols = {
         r[0]
         for r in conn.execute(
@@ -790,23 +667,17 @@ def _migrate_0006_postgres(conn: sa.Connection) -> None:
             )
         ).all()
     }
-    has_old = "finance_revision" in cols
-    has_new = "finance_content_sha256" in cols
-    if has_old and not has_new:
-        # B) legacy 0005 schema: 改名 + 清理失效旧 planning(旧 FinanceConfig
-        # 摘要链无法迁移, 旧规划 revision 直接删除, 项目指针清空)。旧库已按
-        # 0005 部署 planning_configs 不可变触发器(BEFORE DELETE → RAISE),
+    if "finance_revision" in cols:
+        # B) legacy 0005 schema: 旧规划 revision 因旧 FinanceConfig 摘要链失效
+        # 无法迁移, 直接删除旧行并清空项目指针; 旧摘要列直接删除。
+        # 旧库已按 0005 部署 planning_configs 不可变触发器(BEFORE DELETE → RAISE),
         # 必须先临时卸下, 清理后由 init_db 的 _deploy_immutable_triggers
-        # 按当前 IMMUTABLE_TABLES 重建。清空后把列改为 TEXT、保持 NOT NULL
-        # 并增加与 ORM 等价且幂等的 64 位小写 hex CHECK。
+        # 按当前 IMMUTABLE_TABLES 重建。
         conn.execute(sa_text("DROP FUNCTION IF EXISTS tg_planning_configs_immutable() CASCADE"))
-        conn.execute(sa_text("ALTER TABLE planning_configs RENAME COLUMN finance_revision TO finance_content_sha256"))
         conn.execute(sa_text("DELETE FROM planning_configs"))
         conn.execute(sa_text("UPDATE projects SET planning_revision = NULL WHERE planning_revision IS NOT NULL"))
-        conn.execute(sa_text("ALTER TABLE planning_configs ALTER COLUMN finance_content_sha256 TYPE TEXT USING finance_content_sha256::TEXT"))
-        conn.execute(sa_text("ALTER TABLE planning_configs ALTER COLUMN finance_content_sha256 SET NOT NULL"))
-        conn.execute(sa_text("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_planning_configs_finance_sha256') THEN ALTER TABLE planning_configs ADD CONSTRAINT ck_planning_configs_finance_sha256 CHECK (finance_content_sha256 ~ '^[0-9a-f]{64}$'); END IF; END $$;"))
-    # A) fresh schema: 已含 finance_content_sha256(TEXT NOT NULL/HEX CHECK), 保持现状(不重复修改)
+        conn.execute(sa_text("ALTER TABLE planning_configs DROP COLUMN IF EXISTS finance_revision"))
+    # A) fresh schema: 无旧摘要列, 保持现状。
     # 3) projects: 新指针列 + 删旧列
     _ensure_columns(
         conn,
@@ -835,15 +706,12 @@ def _migrate_0006_sqlite(conn: sa.Connection) -> None:
             for r in conn.execute(sa_text("PRAGMA table_info(projects)")).all()
         },
     }
-    has_old_planning = "finance_revision" in cols["planning_configs"]
-    has_new_planning = "finance_content_sha256" in cols["planning_configs"]
-    if has_old_planning and not has_new_planning:
-        # B) legacy 0005 schema: 旧规划 revision 因无法迁移而删除, 项目指针清空
+    if "finance_revision" in cols["planning_configs"]:
+        # B) legacy 0005 schema: 旧规划 revision 因无法迁移而删除, 项目指针清空;
         conn.execute(sa_text("DELETE FROM planning_configs"))
         conn.execute(sa_text("UPDATE projects SET planning_revision = NULL WHERE planning_revision IS NOT NULL"))
         conn.execute(sa_text("ALTER TABLE planning_configs DROP COLUMN finance_revision"))
-        _ensure_columns(conn, "planning_configs", {"finance_content_sha256": "TEXT"})
-    # A) fresh schema: 已含 finance_content_sha256, 保持现状(不重复修改)
+    # A) fresh schema: 无旧摘要列, 保持现状(不重复修改)
     if "finance_revision" in cols["projects"]:
         conn.execute(sa_text("ALTER TABLE projects DROP COLUMN finance_revision"))
     _ensure_columns(
@@ -858,88 +726,6 @@ def _migrate_0006_sqlite(conn: sa.Connection) -> None:
     conn.execute(sa_text("DROP TABLE IF EXISTS finance_configs"))
 
 
-def _migrate_0007(conn: sa.Connection) -> None:
-    """文本文件去 sha256 化(财务三件套 1.11.0)。
-
-    删除 finance_profiles / finance_overrides / effective_finance_revisions /
-    planning_configs 中为文本 YAML 引入的 SHA-256 列与对应 CHECK 约束/
-    唯一约束。文本文件只校验字头，不做内容摘要。
-    全新库经 ORM create_all 已无这些列，本迁移幂等 no-op；存量库按需删列/删约束。
-    """
-    def _drop_column(table: str, column: str) -> None:
-        if conn.dialect.name == "postgresql":
-            conn.execute(sa_text(f'ALTER TABLE {table} DROP COLUMN IF EXISTS {column}'))
-        else:
-            # SQLite: try drop, ignore if not exists
-            try:
-                conn.execute(sa_text(f'ALTER TABLE {table} DROP COLUMN {column}'))
-            except Exception:
-                pass
-
-    def _drop_constraint(table: str, constraint: str) -> None:
-        if conn.dialect.name == "postgresql":
-            conn.execute(sa_text(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {constraint}'))
-        else:
-            pass  # SQLite 约束随列删除
-
-    # finance_profiles
-    _drop_constraint("finance_profiles", "ck_finance_profiles_sha256")
-    _drop_constraint("finance_profiles", "uq_finance_profiles_content")
-    _drop_column("finance_profiles", "content_sha256")
-    # recreate unique on profile_id alone if not exists
-    if conn.dialect.name == "postgresql":
-        conn.execute(sa_text(
-            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_finance_profiles_id') "
-            "THEN ALTER TABLE finance_profiles ADD CONSTRAINT uq_finance_profiles_id UNIQUE (profile_id); END IF; END $$;"
-        ))
-    # finance_overrides
-    _drop_constraint("finance_overrides", "ck_finance_overrides_sha256")
-    _drop_constraint("finance_overrides", "ck_finance_overrides_profile_sha256")
-    _drop_column("finance_overrides", "content_sha256")
-    _drop_column("finance_overrides", "profile_sha256")
-    # effective_finance_revisions
-    _drop_constraint("effective_finance_revisions", "ck_effective_finance_revisions_sha256")
-    _drop_constraint("effective_finance_revisions", "ck_effective_finance_revisions_profile_sha256")
-    _drop_constraint("effective_finance_revisions", "ck_effective_finance_revisions_overrides_sha256")
-    _drop_column("effective_finance_revisions", "content_sha256")
-    _drop_column("effective_finance_revisions", "profile_sha256")
-    _drop_column("effective_finance_revisions", "overrides_sha256")
-    # planning_configs
-    _drop_constraint("planning_configs", "ck_planning_configs_sha256")
-    _drop_constraint("planning_configs", "ck_planning_configs_finance_sha256")
-    _drop_column("planning_configs", "content_sha256")
-    _drop_column("planning_configs", "finance_content_sha256")
-
-
-def _migrate_0008(conn: sa.Connection) -> None:
-    """文本文件去 sha256 化(装配二件套 1.11.0)。
-
-    删除 calc_snapshots 中为文本装配引入的 SHA-256 列与对应 CHECK 约束/
-    唯一约束。文本文件只校验字头(schema/schema_version + device.id)，不做内容摘要。
-    二进制对象 hash 仍由 objects 表统一管理，不在此列。
-    全新库经 ORM create_all 已无这些列，本迁移幂等 no-op；存量库按需删列/删约束。
-    """
-    def _drop_column(table: str, column: str) -> None:
-        if conn.dialect.name == "postgresql":
-            conn.execute(sa_text(f'ALTER TABLE {table} DROP COLUMN IF EXISTS {column}'))
-        else:
-            try:
-                conn.execute(sa_text(f'ALTER TABLE {table} DROP COLUMN {column}'))
-            except Exception:
-                pass
-
-    def _drop_constraint(table: str, constraint: str) -> None:
-        if conn.dialect.name == "postgresql":
-            conn.execute(sa_text(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {constraint}'))
-        else:
-            pass  # SQLite 约束随列删除
-
-    _drop_constraint("calc_snapshots", "ck_calc_snapshots_content_hash")
-    _drop_constraint("calc_snapshots", "ck_calc_snapshots_assembly_sha256")
-    _drop_column("calc_snapshots", "content_hash")
-    _drop_column("calc_snapshots", "assembly_sha256")
-
-
 #: 有序迁移清单(version, name, upgrade)
 MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
@@ -948,8 +734,6 @@ MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0004_project_baseline", "项目计算基线固定与旧时区列删除", _migrate_0004),
     ("0005_finance_planning_configs", "公共财务与规划配置不可变 revision 表", _migrate_0005),
     ("0006_finance_triplet_persistence", "财务三件套持久化替换旧单体 FinanceConfig", _migrate_0006),
-    ("0007_remove_text_sha256", "文本文件去 SHA-256 化（财务三件套字头校验）", _migrate_0007),
-    ("0008_remove_assembly_text_sha256", "文本文件去 SHA-256 化（装配二件套字头校验）", _migrate_0008),
 ]
 
 MIGRATION_VERSIONS: tuple[str, ...] = tuple(m[0] for m in MIGRATIONS)

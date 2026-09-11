@@ -13,7 +13,7 @@ from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Nu
 from sqlalchemy.orm import Mapped, mapped_column
 
 from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, JSONB, bigint_pk, regex_check
+from iesplan.models.common import JSONB, bigint_pk
 
 #: 评估维度取值(01 §8.2)
 DIMENSION_VALUES: tuple[str, ...] = ("pass", "fail", "unknown")
@@ -29,7 +29,6 @@ class EvidencePackage(Base):
     attempt_id: Mapped[int | None] = mapped_column(ForeignKey("task_attempts.id"))
     calc_snapshot_id: Mapped[int] = mapped_column(ForeignKey("calc_snapshots.id"), nullable=False)
     object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -40,7 +39,6 @@ class EvidencePackage(Base):
         CheckConstraint(
             "status IN ('complete','partial','invalid')", name="ck_evidence_packages_status"
         ),
-        regex_check(f"content_hash ~ '{HASH64_RE}'", name="ck_evidence_packages_content_hash"),
         Index("idx_evidence_packages_task", "task_id"),
         Index("idx_evidence_packages_snapshot", "calc_snapshot_id"),
     )
@@ -104,14 +102,12 @@ class ResultIndex(Base):
     project_version_id: Mapped[int] = mapped_column(ForeignKey("project_versions.id"), nullable=False)
     evidence_package_id: Mapped[int] = mapped_column(ForeignKey("evidence_packages.id"), nullable=False)
     assessment_id: Mapped[int | None] = mapped_column(ForeignKey("result_assessments.id"))
-    result_hash: Mapped[str] = mapped_column(Text, nullable=False)
     is_latest: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa.text("true"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
     )
 
     __table_args__ = (
-        regex_check(f"result_hash ~ '{HASH64_RE}'", name="ck_result_index_result_hash"),
         Index(
             "uq_result_index_latest",
             "project_version_id",
@@ -159,7 +155,6 @@ class Report(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     report_type: Mapped[str] = mapped_column(Text, nullable=False)
     object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     generated_by_task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"))
     generated_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     generated_at: Mapped[datetime] = mapped_column(
@@ -169,7 +164,6 @@ class Report(Base):
 
     __table_args__ = (
         CheckConstraint("report_type IN ('excel','pdf','html')", name="ck_reports_type"),
-        regex_check(f"content_hash ~ '{HASH64_RE}'", name="ck_reports_content_hash"),
         CheckConstraint("status IN ('generating','ready','failed')", name="ck_reports_status"),
         Index("idx_reports_project", "project_id", sa.text("generated_at DESC")),
     )
