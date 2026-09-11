@@ -33,14 +33,11 @@ from iesplan.models.model import Device, SystemGraph
 from iesplan.models.project import Draft, Project
 from iesplan.services import config as config_service
 from iesplan.services import identity
+from iesplan.services import project as project_service
 
 #: 配置域测试所有者(经窗口会话登录)
 OWNER_USERNAME = "config_owner"
 OWNER_PASSWORD = "Config12345"
-
-#: 草稿内容对象占位 id(无存储行; 服务层缺失时回退初始骨架)
-_PLACEHOLDER_OBJECT_ID = 1
-
 
 @pytest.fixture()
 def db() -> Iterator[Session]:
@@ -82,10 +79,13 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
     )
     db.add(proj)
     db.flush()
+    content_object_id = project_service.store_content_object(
+        db, project_service.initial_content()
+    )
     draft = Draft(
         project_id=proj.id,
         revision=1,
-        content_object_id=_PLACEHOLDER_OBJECT_ID,
+        content_object_id=content_object_id,
         is_current=True,
         updated_by=owner.id,
     )
