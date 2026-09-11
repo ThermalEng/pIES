@@ -40,7 +40,7 @@ class TestDiagnostic:
         assert d.message_key == "ies.diag.data.ts_leap"
 
     def test_blocking_severity_consistency(self):
-        d = make_diag("SEC-REG-001", severity=SEVERITY_BLOCKING)
+        d = make_diag(DATA_TS_DUP, severity=SEVERITY_BLOCKING)
         assert d.blocking is True
         d2 = make_diag(DATA_TS_DUP, severity=SEVERITY_WARNING)
         assert d2.blocking is False

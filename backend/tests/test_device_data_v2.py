@@ -15,7 +15,6 @@ from iesplan.devices.contracts2 import (
     DeviceModelDocument,
     InterfaceSpec,
     SourceSpec,
-    content_sha256,
 )
 from iesplan.devices.datacontract2 import (
     SCHEMA_ID,
@@ -60,9 +59,7 @@ def _csv_text(
     units: dict[str, str] | None = None,
     rows: list[str] | None = None,
     device_id: str = "acme.device.electric_load",
-    device_sha: str | None = None,
     prepared: bool = False,
-    baseline_sha: str = "a" * 64,
     point_count: int | None = None,
 ) -> str:
     if columns is None:
@@ -71,14 +68,11 @@ def _csv_text(
         ]
     if units is None:
         units = {column: ("°C" if "temperature" in column else "kW") for column in columns}
-    if device_sha is None:
-        device_sha = content_sha256(_device_doc())
     lines = [
         f"# schema: {SCHEMA_ID}",
         f"# schema_version: {SCHEMA_VERSION}",
         "# dataset_id: campus.data.series",
         f"# device_id: {device_id}",
-        f"# device_content_sha256: {device_sha}",
         f"# source_mode: {source_mode}",
         f"# resolution: {resolution}",
     ]
@@ -86,7 +80,6 @@ def _csv_text(
         lines.append(f"# period: {period}")
     if prepared:
         lines.extend([
-            f"# project_baseline_sha256: {baseline_sha}",
             f"# point_count: {point_count if point_count is not None else len(rows or [])}",
             "# prepared: true",
         ])
@@ -103,7 +96,8 @@ def _codes(result) -> set[str]:
 
 class TestMetadata:
     def test_valid_raw_metadata_has_no_time_fields(self) -> None:
-        lines = _csv_text().splitlines()[:8]
+        # 仅元信息行(不含 CSV 表头; 生产调用方同样只传 # 行)
+        lines = [ln for ln in _csv_text().splitlines() if ln.startswith("#")]
         meta, diags = parse_metadata_v2(lines)
         assert not any(diag.blocking for diag in diags)
         assert meta.resolution == "1h"
@@ -187,12 +181,6 @@ class TestDialectAndSteps:
         )
         assert "DATA-STEP-004" in _codes(result)
 
-    def test_expected_baseline_sha_is_enforced(self) -> None:
-        result = canonicalize_device_data_v2(
-            _csv_text(prepared=True, point_count=3).encode(), _device_doc(),
-            expected_project_baseline_sha256="b" * 64,
-        )
-        assert "DATA-META-012" in _codes(result)
 
 
 class TestPreassemblyCadence:
@@ -301,13 +289,10 @@ class TestBindingColumnsAndValues:
         wrong_id = canonicalize_device_data_v2(
             _csv_text(device_id="acme.device.other").encode(), _device_doc()
         )
-        wrong_sha = canonicalize_device_data_v2(
-            _csv_text(device_sha="b" * 64).encode(), _device_doc()
-        )
         assert "DATA-META-008" in _codes(wrong_id)
-        assert "DATA-META-010" in _codes(wrong_sha)
 
     def test_source_mode_mismatch_is_rejected(self) -> None:
+        # 显式绑定上下文声明 data_predict，CSV 字头声明 data_repeat → 阻断
         result = canonicalize_device_data_v2(
             _csv_text(
                 source_mode="data_repeat", period="year", columns=["ambient_temperature"],
@@ -354,8 +339,6 @@ class TestCanonicalAndPending:
     def test_same_semantics_same_sha_and_step_output(self) -> None:
         text = _csv_text(rows=["0,15", "1,16", "2,17"])
         first = canonicalize_device_data_v2(text.encode(), _device_doc())
-        second = canonicalize_device_data_v2(text.encode(), _device_doc())
-        assert first.canonical_sha256 == second.canonical_sha256
         canonical = first.canonical_csv_bytes().decode()
         assert "step,ambient_temperature" in canonical
         assert "timestamp" not in canonical

@@ -4,10 +4,11 @@
 - 候选校验失败: 不落盘、不占号(清单行/编号计数器/对象引用均无变化);
 - 校验通过: 项目内分配 _1、_2……(单调递增); _N 删除后不复用;
 - 并发保存: 编号唯一(原子 UPDATE..RETURNING + 文件 SQLite 多连接);
-- 写文件/DB/finalize 中途失败: 无半成品(事务回滚, 临时引用保留可恢复);
-- 直接 YAML 与模板实例化汇合同一用例(同端点、同编号域、规范摘要一致);
-- 幂等键重放: 返回同一逻辑结果, 不重复占号;
-- reconciliation: 超龄临时数据文件解绑(幂等)。
+- 写对象/DB 中途失败: 无半成品(事务整体回滚);
+- 直接 YAML 与模板实例化汇合同一用例(同端点、同编号域、规范文本一致);
+- 幂等键重放: 返回同一逻辑结果, 不重复占号。
+
+设备预定义数据引用为项目包内相对 CSV 路径(不上传), 由装配入口解析校验。
 
 测试环境: SQLite 文件/内存 + tmp 对象存储目录, 不依赖部署 Postgres;
 create_app() 挂载全部业务路由(含 project_models), get_db 依赖替换。
@@ -18,7 +19,6 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Iterator
-from datetime import timedelta
 from pathlib import Path
 
 # 单文件运行安全网: 固定 SQLite(全量运行时已被其他测试模块先行导入, 无副作用)
@@ -33,8 +33,6 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.application.projects import (
-    DataFileRef,
-    reconcile_stale_temp_files,
     save_project_model,
     validate_candidate,
 )
@@ -47,7 +45,7 @@ from iesplan.models.project import Project  # noqa: E402
 from iesplan.models.project_model import ProjectModel, ProjectModelSequence  # noqa: E402
 from iesplan.services import identity  # noqa: E402
 from iesplan.services import project as project_service  # noqa: E402
-from iesplan.storage import find_refs_by_entity_type, object_info  # noqa: E402
+from iesplan.storage import find_refs_by_entity_type  # noqa: E402
 
 PASSWORD = "Test12345"
 
@@ -183,59 +181,6 @@ equations:
 
 TEMPLATE_INPUTS = {"properties": {"peak_power_kw": {"value": 250}, "is_switchable": {"value": True}}}
 
-DATA_MODEL_YAML = """
-schema: ies.device-model
-schema_version: "2.0.0"
-device: {id: acme.device.profile_load, names: {zh-CN: 曲线负荷, en-US: Profile Load}}
-properties: {}
-interfaces:
-  electric_demand:
-    type: predefined
-    carrier: electricity
-    unit: kW
-    valid_range: {minimum: 0, maximum: 1000}
-    source: {mode: data_repeat, data_ref: load_data}
-equations: {variables: {}, relations: []}
-"""
-
-#: 与 DATA_MODEL_YAML 同形态的第二设备(跨序列一致性测试用)
-DATA_MODEL2_YAML = DATA_MODEL_YAML.replace("acme.device.profile_load", "acme.device.pv_gen")
-
-
-def _data_csv(
-    *,
-    model_yaml: str = DATA_MODEL_YAML,
-    device_id: str = "acme.device.profile_load",
-    resolution: str = "1h",
-    period: str = "year",
-    n: int = 8760,
-) -> bytes:
-    """0.6.5 装配前口径合法的配套数据文件(默认: 1h 完整普通年 8760 行)。
-
-    项目测试基线统一为 1h/非闰年(见 _make_owner), 故 8760 = 一个完整年度;
-    值域在 electric_demand 0..1000 内取小波值, 不触发 DATA-VAL-001。
-    """
-    from iesplan.core.yamlmini import load as yaml_load
-    from iesplan.devices import content_sha256, parse_device_model_v2
-
-    parsed = parse_device_model_v2(yaml_load(model_yaml))
-    assert parsed.document is not None
-    lines = [
-        "# schema: ies.device-data",
-        "# schema_version: 2.0.0",
-        "# dataset_id: test.load.profile",
-        f"# device_id: {device_id}",
-        f"# device_content_sha256: {content_sha256(parsed.document)}",
-        "# source_mode: data_repeat",
-        f"# resolution: {resolution}",
-        f"# period: {period}",
-        "# unit.electric_demand: kW",
-        "step,electric_demand",
-        *[f"{i},{20 + (i % 40)}" for i in range(n)],
-    ]
-    return ("\n".join(lines) + "\n").encode()
-
-
 # ---------------------------------------------------------------------------
 # 测试环境(与 test_project_api 同构)
 # ---------------------------------------------------------------------------
@@ -326,22 +271,8 @@ def _headers_for(client: TestClient, db: Session, username: str) -> dict:
     return headers
 
 
-def _upload_temp(
-    client: TestClient, pid: int, headers: dict, data_ref: str = "load_data",
-    content: bytes | None = None,
-) -> dict:
-    resp = client.post(
-        f"/api/projects/{pid}/models/temp-files",
-        data={"data_ref": data_ref},
-        files={"file": ("load.csv", content if content is not None else _data_csv(), "text/csv")},
-        headers=headers,
-    )
-    assert resp.status_code == 201, resp.text
-    return resp.json()
-
-
-def _publish_template(client: TestClient, headers: dict, yaml_text: str, slug: str = "electric-load") -> dict:
-    """通过真实模板生命周期创建并发布模板, 返回 (template_id, revision, content_sha256)。"""
+def _publish_template(client: TestClient, headers: dict, yaml_text: str, slug: str = "electric-load") -> tuple[str, int]:
+    """通过真实模板生命周期创建并发布模板, 返回 (template_id, revision)。"""
     if "acme.device.electric_load" in yaml_text:
         token = headers.get("Authorization", "").replace("Bearer ", "")
         ns = _token_ns_map.get(token)
@@ -366,7 +297,7 @@ def _publish_template(client: TestClient, headers: dict, yaml_text: str, slug: s
     body = pub.json()
     assert body["duplicate"] is False
     assert body["revision"]["revision"] == 1
-    return template_id, body["revision"]["revision"], body["revision"]["content_sha256"]
+    return template_id, body["revision"]["revision"]
 
 
 def _save(
@@ -375,9 +306,7 @@ def _save(
     source: str = "direct_yaml",
     template_id: str | None = None,
     template_revision: int | None = None,
-    template_sha256: str | None = None,
     template_inputs: dict | None = None,
-    data_files: list[dict] | None = None,
     idempotency_key: str | None = None,
     expected_revision: int | None = None,
 ):
@@ -395,9 +324,6 @@ def _save(
         if template_id:
             body["template_id"] = template_id
             body["template_revision"] = template_revision
-            body["template_sha256"] = template_sha256
-    if data_files:
-        body["data_files"] = data_files
     if idempotency_key:
         body["idempotency_key"] = idempotency_key
     return client.post(f"/api/projects/{pid}/models", json=body, headers=headers)
@@ -479,14 +405,13 @@ def test_validate_endpoint_yaml_parse_error(client: TestClient, db_session: Sess
 def test_validate_endpoint_template(client: TestClient, db_session: Session) -> None:
     headers, pid = _make_owner(client, db_session, "val_tpl")
     # 模板走真实生命周期: 创建并发布后, 校验端点提交模板稳定引用
-    template_id, tpl_revision, tpl_sha = _publish_template(client, headers, TEMPLATE_YAML)
+    template_id, tpl_revision = _publish_template(client, headers, TEMPLATE_YAML)
     resp = client.post(
         f"/api/projects/{pid}/models/validate",
         json={
             "source": "template",
             "template_id": template_id,
             "template_revision": tpl_revision,
-            "template_sha256": tpl_sha,
             "template_inputs": TEMPLATE_INPUTS,
         },
         headers=headers,
@@ -501,72 +426,12 @@ def test_validate_endpoint_template(client: TestClient, db_session: Session) -> 
             "source": "template",
             "template_id": template_id,
             "template_revision": tpl_revision,
-            "template_sha256": tpl_sha,
             "template_inputs": {"properties": {"not_declared": {"value": 1}}},
         },
         headers=headers,
     )
     assert resp2.status_code == 200, resp2.text
     assert resp2.json()["valid"] is False
-    # 摘要与权威内容不一致(候选引用的内容已失效) → validate 端点以聚合诊断表达
-    resp3 = client.post(
-        f"/api/projects/{pid}/models/validate",
-        json={
-            "source": "template",
-            "template_id": template_id,
-            "template_revision": tpl_revision,
-            "template_sha256": "0" * 64,
-            "template_inputs": TEMPLATE_INPUTS,
-        },
-        headers=headers,
-    )
-    assert resp3.status_code == 200, resp3.text
-    assert resp3.json()["valid"] is False
-
-
-def test_validate_data_file_missing_and_digest(client: TestClient, db_session: Session) -> None:
-    headers, pid = _make_owner(client, db_session, "val_data")
-    up = _upload_temp(client, pid, headers)
-    ref = {
-        "data_ref": "load_data",
-        "upload_id": str(up["upload_id"]),
-        "object_id": up["temp_file"]["object_id"],
-        "sha256": up["temp_file"]["sha256"],
-    }
-    # 正确引用: valid
-    resp = client.post(
-        f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": DATA_MODEL_YAML, "data_files": [ref]},
-        headers=headers,
-    )
-    assert resp.json()["valid"] is True, resp.json()
-    # 摘要不一致 → PROJ-MDL-002
-    bad_digest = dict(ref, sha256="0" * 64)
-    resp = client.post(
-        f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": DATA_MODEL_YAML, "data_files": [bad_digest]},
-        headers=headers,
-    )
-    codes = [d["code"] for d in resp.json()["diagnostics"]]
-    assert "PROJ-MDL-002" in codes
-    # 对象不存在 → PROJ-MDL-001
-    missing = dict(ref, object_id="99999999")
-    resp = client.post(
-        f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": DATA_MODEL_YAML, "data_files": [missing]},
-        headers=headers,
-    )
-    codes = [d["code"] for d in resp.json()["diagnostics"]]
-    assert "PROJ-MDL-001" in codes
-    # 归属不一致(错误 upload_id)→ PROJ-MDL-003
-    wrong_owner = dict(ref, upload_id="123456")
-    resp = client.post(
-        f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": DATA_MODEL_YAML, "data_files": [wrong_owner]},
-        headers=headers,
-    )
-    codes = [d["code"] for d in resp.json()["diagnostics"]]
-    assert "PROJ-MDL-003" in codes
 
 
 def test_validate_requires_project_view(client: TestClient, db_session: Session) -> None:
@@ -598,8 +463,6 @@ def test_save_success_direct_yaml(client: TestClient, db_session: Session) -> No
     assert model["suffix"] == 1
     assert model["source"] == "direct_yaml"
     assert model["revision"] == 1
-    assert len(model["content_sha256"]) == 64
-    assert body["receipt"]["content_sha256"] == model["content_sha256"]
     assert body["receipt"]["schema"] == "ies.device-model"
     assert body["duplicate"] is False
     # 清单行 + 编号计数器 + 对象引用 + 审计
@@ -618,44 +481,6 @@ def test_save_success_direct_yaml(client: TestClient, db_session: Session) -> No
     resp_list = client.get(f"/api/projects/{pid}/models", headers=headers)
     assert resp_list.status_code == 200
     assert [m["suffix"] for m in resp_list.json()["project_models"]] == [1]
-
-
-def test_save_with_temp_data_file_finalize(client: TestClient, db_session: Session) -> None:
-    headers, pid = _make_owner(client, db_session, "sv_data")
-    up = _upload_temp(client, pid, headers)
-    ref = {
-        "data_ref": "load_data",
-        "upload_id": str(up["upload_id"]),
-        "object_id": up["temp_file"]["object_id"],
-        "sha256": up["temp_file"]["sha256"],
-    }
-    resp = _save(client, pid, headers, DATA_MODEL_YAML, data_files=[ref])
-    assert resp.status_code == 201, resp.text
-    # 临时引用已解绑; 内容锁: 最终 owner 持有重新生成的规范数据对象
-    # (purpose=data:load_data), 原始临时对象解绑后进入孤儿生命周期
-    assert find_refs_by_entity_type(db_session, "project_model_temp") == []
-    final_refs = find_refs_by_entity_type(db_session, "project_model")
-    data_purposes = [r["purpose"] for r in final_refs]
-    assert "data:load_data" in data_purposes
-    data_refs = [r for r in final_refs if r["purpose"] == "data:load_data"]
-    assert len(data_refs) == 1
-    # 内容锁: 规范数据对象绑定最终 _N 模型(device_id 与内容摘要一致)
-    locked = object_info(db_session, int(data_refs[0]["object_id"]))
-    assert locked["status"] == "stored"
-    assert locked["ref_count"] == 1
-    from iesplan.devices.datacontract2 import parse_data_file_v2
-    from iesplan.storage import get_object
-
-    parsed, _diags = parse_data_file_v2(get_object(db_session, int(data_refs[0]["object_id"])))
-    assert parsed is not None
-    assert parsed.meta.device_id == "acme.device.profile_load_1"
-    model = db_session.execute(
-        select(ProjectModel).where(ProjectModel.project_id == pid)
-    ).scalar_one()
-    assert parsed.meta.device_content_sha256 == model.content_sha256
-    # 原始临时对象解绑(不再被本项目模型引用)
-    handle = object_info(db_session, int(ref["object_id"]))
-    assert handle["status"] == "orphaned"
 
 
 def test_save_validation_failure_no_save_no_number(client: TestClient, db_session: Session) -> None:
@@ -677,7 +502,6 @@ def test_save_validation_failure_no_save_no_number(client: TestClient, db_sessio
     assert _model_rows(db_session, pid) == []
     assert _seq_rows(db_session, pid) == []
     assert find_refs_by_entity_type(db_session, "project_model") == []
-    assert find_refs_by_entity_type(db_session, "project_model_temp") == []
     audit = db_session.execute(
         select(AuditLog).where(AuditLog.entity_type == "project_model")
     ).scalars().all()
@@ -704,7 +528,6 @@ def test_numbering_monotonic_and_delete_no_reuse(client: TestClient, db_session:
     m2 = r2.json()["project_model"]
     assert m1["device_id"] == "acme.device.heat_pump_1"
     assert m2["device_id"] == "acme.device.heat_pump_2"
-    assert m1["content_sha256"] != m2["content_sha256"]  # 最终 ID 不同 → 摘要不同
     # 删除 _2 → 编号不复用: 下一次保存是 _3
     current = client.get(f"/api/projects/{pid}", headers=headers).json()["draft"]["revision"]
     resp_del = client.request(
@@ -755,7 +578,6 @@ def test_idempotency_replay(client: TestClient, db_session: Session) -> None:
     body2 = r2.json()
     assert body2["duplicate"] is True
     assert body2["project_model"]["id"] == r1.json()["project_model"]["id"]
-    assert body2["receipt"]["content_sha256"] == r1.json()["receipt"]["content_sha256"]
     # 不重复占号
     assert len(_model_rows(db_session, pid)) == 1
     assert _seq_rows(db_session, pid)[0].next_suffix == 2
@@ -786,13 +608,12 @@ def test_template_and_direct_yaml_converge(client: TestClient, db_session: Sessi
     r_direct = _save(client, pid, headers, DIRECT_EQ_YAML)
     assert r_direct.status_code == 201, r_direct.text
     # 模板走真实生命周期: 创建草稿 → 发布不可变 revision → 保存时提交模板引用
-    template_id, tpl_revision, tpl_sha = _publish_template(client, headers, TEMPLATE_YAML)
+    template_id, tpl_revision = _publish_template(client, headers, TEMPLATE_YAML)
     r_tpl = _save(
         client, pid, headers, "",
         source="template",
         template_id=template_id,
         template_revision=tpl_revision,
-        template_sha256=tpl_sha,
         template_inputs=TEMPLATE_INPUTS,
     )
     assert r_tpl.status_code == 201, r_tpl.text
@@ -800,23 +621,16 @@ def test_template_and_direct_yaml_converge(client: TestClient, db_session: Sessi
     assert r_direct.json()["project_model"]["suffix"] == 1
     assert r_tpl.json()["project_model"]["suffix"] == 2
     assert r_tpl.json()["project_model"]["source"] == "template"
-    assert r_direct.json()["project_model"]["template_sha256"] is None
     tpl_model = r_tpl.json()["project_model"]
     assert tpl_model["template_id"] == template_id
     assert tpl_model["template_revision"] == tpl_revision
-    assert len(tpl_model["template_sha256"]) == 64
-    assert len(tpl_model["inputs_sha256"]) == 64
     # 最终回执完整保留模板溯源与实例化器算法标识
     receipt = r_tpl.json()["receipt"]
     assert receipt["template_id"] == template_id
     assert receipt["template_revision"] == tpl_revision
-    assert receipt["template_sha256"] == tpl_sha
     assert receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
-    assert "inputs_sha256" in receipt
-    assert "candidate_content_sha256" in receipt
     assert "instantiator" not in r_direct.json()["receipt"]
-    # 等值语义: 候选校验级规范摘要一致(去后缀后的基础摘要);
-    # 回执结构按来源不同(模板回执含 instantiator/追溯摘要), 规范摘要必须一致
+    # 等值语义：候选模型规范内容一致；回执结构按来源分别验证。
     owner = identity_user(db_session, "sv_conv")
     v_direct = validate_candidate(
         db_session, owner, pid, model_yaml=DIRECT_EQ_YAML, source="direct_yaml",
@@ -826,8 +640,6 @@ def test_template_and_direct_yaml_converge(client: TestClient, db_session: Sessi
         model_yaml=TEMPLATE_YAML, source="template", template_inputs=TEMPLATE_INPUTS,
     )
     assert v_direct.ok and v_tpl.ok
-    assert v_direct.content_sha256 == v_tpl.content_sha256
-    assert v_direct.receipt["content_sha256"] == v_tpl.receipt["content_sha256"]
     assert v_tpl.receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
     assert "instantiator" not in v_direct.receipt
 
@@ -871,7 +683,6 @@ def test_save_failure_midway_no_half_state(
     assert _model_rows(db_session, pid) == []
     assert _seq_rows(db_session, pid) == []
     assert find_refs_by_entity_type(db_session, "project_model") == []
-    assert find_refs_by_entity_type(db_session, "project_model_temp") == []
     assert db_session.execute(
         select(AuditLog).where(AuditLog.entity_type == "project_model")
     ).scalars().all() == []
@@ -880,240 +691,6 @@ def test_save_failure_midway_no_half_state(
     assert _seq_rows(db_session, pid)[0].next_suffix == 2
 
 
-def test_save_failure_during_finalize_keeps_temp_owner(
-    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """finalize(detach 临时 owner)中途失败: 临时引用保留(可 reconciliation),
-    清单/编号整体回滚。"""
-    headers, pid = _make_owner(client, db_session, "sv_finalize")
-    up = _upload_temp(client, pid, headers)
-    ref = {
-        "data_ref": "load_data",
-        "upload_id": str(up["upload_id"]),
-        "object_id": up["temp_file"]["object_id"],
-        "sha256": up["temp_file"]["sha256"],
-    }
-    import iesplan.application.projects.model_save as ms
-
-    def _explode_detach(db_, object_id, ref_type, ref_id, **_kw):
-        raise RuntimeError("simulated finalize failure")
-
-    monkeypatch.setattr(ms, "detach", _explode_detach)
-    owner = identity_user(db_session, "sv_finalize")
-    ref_obj = DataFileRef(
-        data_ref="load_data",
-        upload_id=int(up["upload_id"]),
-        object_id=int(up["temp_file"]["object_id"]),
-        sha256=up["temp_file"]["sha256"],
-    )
-    with pytest.raises(RuntimeError, match="simulated finalize failure"):
-        save_project_model(
-            db_session, owner, pid,
-            model_yaml=DATA_MODEL_YAML,
-            data_files=(ref_obj,),
-            expected_revision=1,
-        )
-    db_session.rollback()
-    # 清单/编号未提交; 数据对象仍属临时 owner(可恢复)
-    assert _model_rows(db_session, pid) == []
-    assert _seq_rows(db_session, pid) == []
-    temp_refs = find_refs_by_entity_type(db_session, "project_model_temp")
-    assert len(temp_refs) == 1
-    assert str(temp_refs[0]["object_id"]) == up["temp_file"]["object_id"]
-    assert find_refs_by_entity_type(db_session, "project_model") == []
-    # 撤销 detach 故障注入: 保存失败后临时文件仍可用, 正常保存成功
-    monkeypatch.undo()
-    resp = _save(client, pid, headers, DATA_MODEL_YAML, data_files=[ref])
-    assert resp.status_code == 201, resp.text
-    assert find_refs_by_entity_type(db_session, "project_model_temp") == []
-
-
-# ---------------------------------------------------------------------------
-# 5. reconciliation: 超龄临时数据文件解绑(幂等)
-# ---------------------------------------------------------------------------
-
-
-def test_reconcile_stale_temp_files(client: TestClient, db_session: Session) -> None:
-    headers, pid = _make_owner(client, db_session, "sv_rec")
-    up = _upload_temp(client, pid, headers)
-    # 保留期内不清理
-    report = reconcile_stale_temp_files(db_session, dry_run=True)
-    assert report["stale_count"] == 0
-    assert report["kept_count"] == 1
-    # 超龄(0 分钟) → dry_run 报告 + 执行解绑
-    report2 = reconcile_stale_temp_files(db_session, older_than=timedelta(minutes=0), dry_run=True)
-    assert report2["stale_count"] == 1
-    report3 = reconcile_stale_temp_files(db_session, older_than=timedelta(minutes=0), dry_run=False)
-    assert report3["stale_count"] == 1
-    assert find_refs_by_entity_type(db_session, "project_model_temp") == []
-    handle = object_info(db_session, int(up["temp_file"]["object_id"]))
-    assert handle["status"] == "orphaned"
-    # 幂等: 再次执行无副作用
-    report4 = reconcile_stale_temp_files(db_session, older_than=timedelta(minutes=0), dry_run=False)
-    assert report4["stale_count"] == 0
-    # 已解绑对象重新上传引用可恢复(对象未物理删)
-    up2 = _upload_temp(client, pid, headers)
-    assert up2["temp_file"]["object_id"] == up["temp_file"]["object_id"]
-
-
-# ---------------------------------------------------------------------------
-# 5b. 0.6.5 装配前口径: 单文件与项目基线对齐 + 装配前跨序列一致性(绑定门禁)
-# ---------------------------------------------------------------------------
-
-
-def _ref_from_upload(up: dict, data_ref: str = "load_data") -> dict:
-    return {
-        "data_ref": data_ref,
-        "upload_id": str(up["upload_id"]),
-        "object_id": up["temp_file"]["object_id"],
-        "sha256": up["temp_file"]["sha256"],
-    }
-
-
-def _save_data_model(
-    client: TestClient, pid: int, headers: dict, model_yaml: str, up: dict
-):
-    return _save(client, pid, headers, model_yaml, data_files=[_ref_from_upload(up)])
-
-
-def test_save_rejects_legacy_day_template(client: TestClient, db_session: Session) -> None:
-    """day 模板(旧序列预备时代)与少于完整年度的输入在绑定处被结构化拒绝。"""
-    headers, pid = _make_owner(client, db_session, "sv_cad")
-    up_day = _upload_temp(client, pid, headers, content=_data_csv(period="day", n=24))
-    resp = client.post(
-        f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": DATA_MODEL_YAML, "data_files": [_ref_from_upload(up_day)]},
-        headers=headers,
-    )
-    assert resp.status_code == 200, resp.text
-    codes = [d["code"] for d in resp.json()["diagnostics"]]
-    assert "DATA-META-013" in codes
-    save = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_day)
-    assert save.status_code == 400, save.text
-    assert save.json()["error"]["code"] == "PROJ-MDL-005"
-    save_codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
-    assert "DATA-META-013" in save_codes
-    assert _model_rows(db_session, pid) == []
-    assert _seq_rows(db_session, pid) == []
-
-
-def test_save_rejects_short_or_non_multiple_input(
-    client: TestClient, db_session: Session
-) -> None:
-    headers, pid = _make_owner(client, db_session, "sv_short")
-    # 8759 < 8760: 未覆盖完整年度 → DATA-STEP-006
-    up = _upload_temp(client, pid, headers, content=_data_csv(n=8759))
-    save = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up)
-    assert save.status_code == 400, save.text
-    codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
-    assert "DATA-STEP-006" in codes
-    # 8761(非 8760 整数倍)同样拒绝; 恰为 1×8760 通过
-    up2 = _upload_temp(client, pid, headers, content=_data_csv(n=8761))
-    save2 = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up2)
-    assert save2.status_code == 400, save2.text
-    codes2 = [d["code"] for d in save2.json()["error"]["params"]["diagnostics"]]
-    assert "DATA-STEP-006" in codes2
-    # 失败不落盘、不占号、不写审计
-    assert _model_rows(db_session, pid) == []
-    assert _seq_rows(db_session, pid) == []
-    assert db_session.execute(
-        select(AuditLog).where(AuditLog.entity_type == "project_model")
-    ).scalars().all() == []
-
-
-def test_save_rejects_resolution_mismatch_with_baseline(
-    client: TestClient, db_session: Session
-) -> None:
-    """不同采样间隔(15min)在 1h 项目导入: 不做重采样对齐, 直接拒绝。"""
-    headers, pid = _make_owner(client, db_session, "sv_res")
-    up = _upload_temp(
-        client, pid, headers, content=_data_csv(resolution="15min", n=35040)
-    )
-    save = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up)
-    assert save.status_code == 400, save.text
-    codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
-    assert "DATA-META-004" in codes
-    assert _model_rows(db_session, pid) == []
-
-
-def test_leap_year_project_gate_counts(client: TestClient, db_session: Session) -> None:
-    """闰年基线(366 天, 年度 8784): 8760(非闰年)拒绝, 8784 通过。"""
-    headers, pid = _make_owner(client, db_session, "sv_leap", leap=True)
-    up_wrong = _upload_temp(client, pid, headers, content=_data_csv(n=8760))
-    save = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_wrong)
-    assert save.status_code == 400, save.text
-    codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
-    assert "DATA-STEP-006" in codes
-    up_ok = _upload_temp(client, pid, headers, content=_data_csv(n=8784))
-    ok = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_ok)
-    assert ok.status_code == 201, ok.text
-    assert _model_rows(db_session, pid)[0].suffix == 1
-
-
-def test_cross_sequence_alignment_blocks_inconsistent_second_model(
-    client: TestClient, db_session: Session
-) -> None:
-    """同项目装配输入必须同分辨率同点数: 第二个模型(2 年 17520)与既有
-    8760 不一致 → PROJ-MDL-007 阻断; 修正为 8760 后绑定成功。"""
-    headers, pid = _make_owner(client, db_session, "sv_xseq")
-    up_a = _upload_temp(client, pid, headers)
-    r1 = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_a)
-    assert r1.status_code == 201, r1.text
-    assert r1.json()["project_model"]["device_id"] == "acme.device.profile_load_1"
-
-    # 模型 B 单文件满足 2×年度(17520), 但与项目既有输入点数不一致
-    up_b = _upload_temp(
-        client, pid, headers,
-        content=_data_csv(model_yaml=DATA_MODEL2_YAML, device_id="acme.device.pv_gen", n=17520),
-    )
-    save = _save_data_model(client, pid, headers, DATA_MODEL2_YAML, up_b)
-    assert save.status_code == 400, save.text
-    codes = [d["code"] for d in save.json()["error"]["params"]["diagnostics"]]
-    assert "PROJ-MDL-007" in codes
-    # 校验端点同样暴露该一致性诊断
-    resp = client.post(
-        f"/api/projects/{pid}/models/validate",
-        json={"model_yaml": DATA_MODEL2_YAML, "data_files": [_ref_from_upload(up_b)]},
-        headers=headers,
-    )
-    assert resp.status_code == 200, resp.text
-    vcodes = [d["code"] for d in resp.json()["diagnostics"]]
-    assert "PROJ-MDL-007" in vcodes
-    assert vcodes.count("PROJ-MDL-007") == 1
-    # 失败不落盘、草稿修订不推进
-    assert [m.device_id for m in _model_rows(db_session, pid)] == ["acme.device.profile_load_1"]
-    draft = client.get(f"/api/projects/{pid}", headers=headers).json()["draft"]["revision"]
-    assert draft == 2
-
-    # 修正为同点数(8760)后绑定成功, 编号域继续 _2
-    up_b2 = _upload_temp(
-        client, pid, headers,
-        content=_data_csv(model_yaml=DATA_MODEL2_YAML, device_id="acme.device.pv_gen", n=8760),
-    )
-    r2 = _save_data_model(client, pid, headers, DATA_MODEL2_YAML, up_b2)
-    assert r2.status_code == 201, r2.text
-    assert r2.json()["project_model"]["device_id"] == "acme.device.pv_gen_2"
-
-
-def test_two_year_input_aligns_when_bound_first(
-    client: TestClient, db_session: Session
-) -> None:
-    """2×年度(17520)本身满足口径: 首绑通过, 后续同点数输入同样通过。"""
-    headers, pid = _make_owner(client, db_session, "sv_xseq2")
-    up_a = _upload_temp(client, pid, headers, content=_data_csv(n=17520))
-    r1 = _save_data_model(client, pid, headers, DATA_MODEL_YAML, up_a)
-    assert r1.status_code == 201, r1.text
-    up_b = _upload_temp(
-        client, pid, headers,
-        content=_data_csv(model_yaml=DATA_MODEL2_YAML, device_id="acme.device.pv_gen", n=17520),
-    )
-    r2 = _save_data_model(client, pid, headers, DATA_MODEL2_YAML, up_b)
-    assert r2.status_code == 201, r2.text
-    assert r2.json()["project_model"]["suffix"] == 2
-
-
-# ---------------------------------------------------------------------------
-# 6. 并发编号唯一(文件 SQLite 多连接 + 线程)
 # ---------------------------------------------------------------------------
 
 

@@ -154,9 +154,6 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
         "resolution": "1h",
         "leap_year": False,
         "scenario_mode": "single",
-        "sha256": ProjectBaseline(
-            resolution="1h", leap_year=False, scenario_mode="single"
-        ).digest(),
     }
     assert "fixed_utc_offset_minutes" not in body["project"]
     assert body["my_role"] == "owner"
@@ -245,15 +242,12 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert version["source_draft_revision"] == 2
     assert version["parent_version_id"] is None
     # 版本内容 = 草稿领域内容 + 项目固化字段(币种/项目计算基线), 无命令簿记
-    vcontent = _load_content(db_session, version["content_hash"])
+    vcontent = _load_content(db_session, version["content_object_id"])
     assert vcontent["currency"] == "CNY"
     assert vcontent["project_baseline"] == {
         "resolution": "1h",
         "leap_year": False,
         "scenario_mode": "single",
-        "sha256": ProjectBaseline(
-            resolution="1h", leap_year=False, scenario_mode="single"
-        ).digest(),
     }
     assert "fixed_utc_offset_minutes" not in vcontent
     assert vcontent["model"]["devices"][0]["name"] == "热泵1"
@@ -357,17 +351,17 @@ def test_restore_version(client: TestClient, db_session: Session) -> None:
     assert restored["version"]["reason"] == "restore"
     assert restored["draft"]["revision"] == 4
 
-    # 新草稿内容与 V1 一致(不含锅炉)
+    # 新草稿内容与 V1 一致(不含锅炉); 恢复写入新内容对象(无内容去重)
     view = client.get(f"/api/projects/{pid}", headers=owner_h).json()
     assert view["draft"]["revision"] == 4
-    assert view["draft"]["content_hash"] == v1["content_hash"]
+    assert view["draft"]["content_object_id"] != v1["content_object_id"]
     names = [d["name"] for d in view["draft"]["content"]["model"]["devices"]]
     assert names == ["光伏1"]
 
     # 历史未倒写
     v1_now = client.get(f"/api/projects/{pid}/versions/{v1['id']}", headers=owner_h).json()["version"]
     assert v1_now["version_no"] == 1
-    assert v1_now["content_hash"] == v1["content_hash"]
+    assert v1_now["content_object_id"] == v1["content_object_id"]
 
 
 def test_apply_result(client: TestClient, db_session: Session) -> None:
@@ -417,7 +411,7 @@ def test_apply_result(client: TestClient, db_session: Session) -> None:
 
     # 来源版本保持不变
     v1_now = client.get(f"/api/projects/{pid}/versions/{v1['id']}", headers=owner_h).json()["version"]
-    assert v1_now["content_hash"] == v1["content_hash"]
+    assert v1_now["content_object_id"] == v1["content_object_id"]
 
     # 审计记录来源结果标识
     rows = db_session.execute(

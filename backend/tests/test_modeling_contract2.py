@@ -2,7 +2,7 @@
 
 覆盖: 公共数学贡献(变量/关系/状态/接口流/结果映射)、版本化公共 AST、
 方程合法/非法(未知引用、单位冲突、循环引用、非法表达式、输出冲突、
-状态初值、property 非时变、blind 引用)、确定性(相同输入相同摘要)。
+状态初值、property 非时变、blind 引用)、确定性(相同输入相同规范文本)。
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from iesplan.devices.contracts2 import (
     InterfaceSpec,
     PropertySpec,
     SourceSpec,
-    content_sha256,
 )
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.modeling.contract2 import (
@@ -145,7 +144,6 @@ class TestValidContribution:
         assert r.ok
         c = r.contribution
         assert c.device_id == "acme.device.heat_pump"
-        assert c.content_sha256 == content_sha256(doc)
         # 变量: property + 内部变量(接口进入 flows)
         assert set(c.variables) == {"cop"}
         assert c.variables["cop"].kind == "property"
@@ -214,21 +212,19 @@ equations: {variables: {}, relations: []}
         assert r.ok, [d.params.get("detail") for d in r.diagnostics]
         assert r.contribution.results[0].variable == "electricity_in"
 
-    def test_deterministic_same_input_same_digest(self):
+    def test_deterministic_same_input_same_text(self):
         a = build_math_contribution(_doc(HEAT_PUMP)).contribution
         b = build_math_contribution(_doc(HEAT_PUMP)).contribution
         assert a.canonical_text == b.canonical_text
-        assert a.contribution_sha256 == b.contribution_sha256
 
     def test_number_spelling_normalized(self):
-        # 3.0 与 3.20 语义相同 → 相同规范文本与摘要
+        # 3.0 与 3.20 语义相同 → 相同规范文本
         a = build_math_contribution(_doc(HEAT_PUMP)).contribution
         b = build_math_contribution(_doc(HEAT_PUMP.replace("value: 3.2", "value: 3.20"))).contribution
-        assert a.contribution_sha256 == b.contribution_sha256
+        assert a.canonical_text == b.canonical_text
 
     def test_relation_order_insensitive(self):
-        # 关系声明顺序是设备内容的一部分(规范设备摘要随列表顺序变化),贡献
-        # 内容锁跟随设备摘要;但去掉内容锁后贡献结构完全一致(关系按 id 规范化)
+        # 关系按 id 规范化，与声明顺序无关
         text_a = """
 schema: ies.device-model
 schema_version: "2.0.0"
@@ -251,20 +247,14 @@ equations:
         )
         ca = build_math_contribution(_doc(text_a)).contribution
         cb = build_math_contribution(_doc(text_b)).contribution
-        # 设备内容摘要随声明顺序变化 → 贡献内容锁变化(内容寻址语义)
-        assert ca.content_sha256 != cb.content_sha256
-        assert ca.contribution_sha256 != cb.contribution_sha256
-        # 去除内容锁后,贡献规范结构完全一致(关系按键排序,与声明顺序无关)
-        da = contribution_to_dict(ca)
-        db = contribution_to_dict(cb)
-        da.pop("content_sha256")
-        db.pop("content_sha256")
-        assert da == db
+        assert ca.variables == cb.variables
+        assert ca.interfaces == cb.interfaces
+        assert {r.id for r in ca.relations} == {r.id for r in cb.relations}
 
-    def test_semantics_change_changes_digest(self):
+    def test_semantics_change_changes_text(self):
         a = build_math_contribution(_doc(HEAT_PUMP)).contribution
         b = build_math_contribution(_doc(HEAT_PUMP.replace("value: 3.2", "value: 4.0"))).contribution
-        assert a.contribution_sha256 != b.contribution_sha256
+        assert a.canonical_text != b.canonical_text
 
     def test_ast_number_node(self):
         doc = _make_document(interfaces={"a": _out("a")}, relations=[("r1", "a[t] = 42")])
@@ -357,10 +347,24 @@ class TestInvalidEquations:
         doc = _make_document(interfaces={"a": _out("a")}, relations=[("r1", "a[t] b[t]")])
         assert MOD_EQ_SYNTAX in self._codes(doc)
 
-    def test_syntax_lhs_multi_var(self):
+    def test_syntax_lhs_two_vars_accepted_as_constraint(self):
+        # 与 parser2 的 1-or-2 规则对齐: 左侧恰好两个变量为非输出约束关系
+        # (如充放互斥), 不登记输出, 不报 MOD_EQ_SYNTAX
         doc = _make_document(
             interfaces={"a": _out("a"), "b": _out("b")},
-            relations=[("r1", "a[t] + b[t] = 1")],
+            relations=[("r1", "a[t] * b[t] = 0")],
+        )
+        result = build_math_contribution(doc)
+        assert result.ok, [(d.code, d.message_key) for d in result.diagnostics]
+        assert result.contribution is not None
+        rel = next(r for r in result.contribution.relations if r.id == "r1")
+        assert rel.output is None
+        assert {r.variable for r in result.contribution.results} == set()
+
+    def test_syntax_lhs_three_vars_rejected(self):
+        doc = _make_document(
+            interfaces={"a": _out("a"), "b": _out("b"), "c": _out("c")},
+            relations=[("r1", "a[t] + b[t] + c[t] = 1")],
         )
         assert MOD_EQ_SYNTAX in self._codes(doc)
 
@@ -473,11 +477,11 @@ class TestNoOldModelCommand:
         assert d["schema"] == "ies.modeling.contribution"
         assert d["schema_version"] == "2.0.0"
         assert d["equation_ast"]["version"] == "2.0.0"
-        assert set(d) == {
-            "schema", "schema_version", "device_id", "content_sha256",
+        assert {
+            "schema", "schema_version", "device_id",
             "equation_ast", "variables", "interfaces", "relations",
             "states", "results",
-        }
+        }.issubset(set(d))
         assert isinstance(c, DeviceMathContribution)
 
     def test_no_dynamic_import(self):

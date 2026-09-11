@@ -1,7 +1,7 @@
 """`ies.device-model` 2.0.0 纯协议测试（不依赖设备注册表/数据库）。
 
 覆盖：合法/非法 YAML、五类 interface、source 组合、equations 校验、
-模板 inputs 实例化、规范摘要等价性、1.0→2.0 显式迁移。
+模板 inputs 实例化与规范化等价性。
 """
 
 from __future__ import annotations
@@ -14,10 +14,8 @@ from iesplan.devices.contracts2 import (
     SCHEMA_ID,
     SCHEMA_VERSION,
     canonical_bytes,
-    content_sha256,
     to_dict,
 )
-from iesplan.devices.migration2 import migrate_v1_to_v2
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.devices.template2 import instantiate_template
 
@@ -183,27 +181,28 @@ equations: {variables: {}, relations: []}
 
 
 class TestCanonical:
-    def test_same_semantics_same_sha(self):
-        # 数值字面量 3.2 与 3.20 语义相同 → 规范摘要相同
+    def test_same_semantics_same_canonical(self):
+        # 数值字面量 3.2 与 3.20 语义相同 → 规范字节相同
         r1 = _parse(HEAT_PUMP_YAML)
         text2 = HEAT_PUMP_YAML.replace("value: 3.2", "value: 3.20")
         r2 = _parse(text2)
         assert r1.ok and r2.ok
-        assert content_sha256(r1.document) == content_sha256(r2.document)
+        assert canonical_bytes(r1.document) == canonical_bytes(r2.document)
 
     def test_unit_spelling_preserved(self):
-        # 单位拼写（kW vs kw）是业务单位的一部分，不归一化 → 摘要不同
+        # 单位拼写（kW vs kw）是业务单位的一部分，不归一化 → 规范字节不同
         r1 = _parse(HEAT_PUMP_YAML)
         text2 = HEAT_PUMP_YAML.replace("unit: kW", "unit: kw")
         r2 = _parse(text2)
         assert r1.ok and r2.ok
-        assert content_sha256(r1.document) != content_sha256(r2.document)
+        assert canonical_bytes(r1.document) != canonical_bytes(r2.document)
 
-    def test_semantics_change_changes_sha(self):
+    def test_semantics_change_changes_canonical(self):
         r1 = _parse(HEAT_PUMP_YAML)
         text2 = HEAT_PUMP_YAML.replace("value: 3.2", "value: 4.0")
         r2 = _parse(text2)
-        assert content_sha256(r1.document) != content_sha256(r2.document)
+        assert r1.ok and r2.ok
+        assert canonical_bytes(r1.document) != canonical_bytes(r2.document)
 
     def test_canonical_bytes_deterministic(self):
         r1 = _parse(HEAT_PUMP_YAML)
@@ -567,7 +566,7 @@ equations: {variables: {}, relations: []}
         assert res is None
         assert any("高于 valid_range.maximum" in d.params.get("detail", "") for d in diags)
 
-    def test_equivalent_direct_yaml_same_sha(self):
+    def test_equivalent_direct_yaml_same_canonical(self):
         res, diags = instantiate_template(
             yaml_load(self.TEMPLATE),
             {
@@ -601,7 +600,7 @@ equations:
 """
         r_direct = _parse(direct)
         assert r_direct.ok
-        assert content_sha256(r_direct.document) == res.content_sha256
+        assert canonical_bytes(res.document) == canonical_bytes(r_direct.document)
 
     def test_final_model_passes_full_validation(self):
         res, _ = instantiate_template(
@@ -624,122 +623,3 @@ equations:
         )
         receipt = res.receipt
         assert receipt["instantiator"] == "ies.device-model.instantiator@1.0.0"
-        assert receipt["template_sha256"]
-        assert receipt["inputs_sha256"]
-        assert receipt["content_sha256"] == res.content_sha256
-        assert len(receipt["content_sha256"]) == 64
-
-
-# ---------------------------------------------------------------------------
-# 1.0 → 2.0 显式迁移
-# ---------------------------------------------------------------------------
-
-V1_LOAD_YAML = """
-schema: ies.device-model
-schema_version: "1.0.0"
-
-device:
-  id: ies.device.electric_load
-  version: "1.2.0"
-  names:
-    zh-CN: 电负荷
-    en-US: Electric Load
-  model_method: data_repeat
-  stateful: false
-  fidelity: medium
-  energy_carriers: [electric]
-  capabilities: [load, switchable]
-
-parameters:
-  peak_power_kw:
-    value_type: number
-    quantity: power
-    unit: kW
-    required: false
-    default: 0
-    minimum: 0
-    maximum: 10000000
-  is_switchable:
-    value_type: boolean
-    quantity: ratio
-    unit: "-"
-    required: false
-    default: false
-
-ports:
-  electric_in:
-    carrier: electric
-    direction: in
-    quantity: power
-    unit: kW
-    capacity_parameter: peak_power_kw
-
-data_inputs:
-  e_load:
-    value_type: number
-    quantity: energy
-    unit: kWh
-    required: true
-
-states: {}
-
-model_commands:
-  run: ies.modeling.electric_load@1.0.0
-"""
-
-
-class TestMigrationV1:
-    def test_migrate_electric_load(self):
-        result = migrate_v1_to_v2(yaml_load(V1_LOAD_YAML))
-        assert result.ok, [d.params.get("detail") for d in result.diagnostics]
-        doc = result.document
-        assert doc.schema_version == SCHEMA_VERSION
-        assert doc.device.id == "ies.device.electric_load"
-        # parameters → properties
-        assert doc.properties["peak_power_kw"].value == 0
-        assert doc.properties["peak_power_kw"].unit == "kW"
-        # ports → interfaces（carrier 归一化 electric → electricity）
-        iface = doc.interfaces["electric_in"]
-        assert iface.type == "in"
-        assert iface.carrier == "electricity"
-        assert doc.interfaces["electric_in"].valid_range[0] == 0
-        # data_inputs → predefined interface
-        dload = doc.interfaces.get("e_load")
-        assert dload is not None
-        assert dload.type == "predefined"
-        assert dload.source.mode == "data_repeat"
-        # model_commands / states / device version 等全部移除
-        assert not hasattr(doc, "model_commands")
-        assert "model_commands" not in to_dict(doc)
-
-    def test_migrate_rejects_mechanism_with_data_inputs(self):
-        # mechanism 设备的 data_inputs 无法映射到 predefined 来源（constant 无外部文件）
-        raw = yaml_load(V1_LOAD_YAML)
-        raw["device"]["model_method"] = "mechanism"
-        result = migrate_v1_to_v2(raw)
-        assert not result.ok
-        assert any("不支持迁移" in d.params.get("detail", "") for d in result.diagnostics)
-
-    def test_migrate_data_predict_keeps_mode(self):
-        raw = yaml_load(V1_LOAD_YAML)
-        raw["device"]["model_method"] = "data_predict"
-        result = migrate_v1_to_v2(raw)
-        assert result.ok, [d.params.get("detail") for d in result.diagnostics]
-        src = result.document.interfaces["e_load"].source
-        assert src.mode == "data_predict"
-
-    def test_migrate_deterministic(self):
-        r1 = migrate_v1_to_v2(yaml_load(V1_LOAD_YAML))
-        r2 = migrate_v1_to_v2(yaml_load(V1_LOAD_YAML))
-        assert content_sha256(r1.document) == content_sha256(r2.document)
-
-    def test_migrated_output_passes_v2_validation(self):
-        r = migrate_v1_to_v2(yaml_load(V1_LOAD_YAML))
-        assert r.ok, [d.params.get("detail") for d in r.diagnostics]
-        r2 = parse_device_model_v2(to_dict(r.document))
-        assert r2.ok
-
-    def test_v2_input_rejected_by_migrator(self):
-        # 已经是 2.0.0 的文件不能走 1.0 迁移
-        result = migrate_v1_to_v2(yaml_load(HEAT_PUMP_YAML))
-        assert not result.ok

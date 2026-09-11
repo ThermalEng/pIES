@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -76,8 +75,11 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _make_project(session: Session, user, name: str = "测试项目") -> Project:
-    """创建测试项目(projects.owner_id 记录所有者, 满足项目权限判定)。"""
-    proj = Project(name=name, owner_id=user.id, created_by=user.id)
+    """创建测试项目(projects.owner_id 记录所有者, 满足项目权限判定; 显式携带基线)。"""
+    proj = Project(
+        name=name, owner_id=user.id, created_by=user.id,
+        baseline_resolution="1h", baseline_leap_year=False, baseline_scenario_mode="single",
+    )
     session.add(proj)
     session.flush()
     session.flush()
@@ -410,13 +412,14 @@ def test_validate_15min_resolution() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_put_object_dedup_and_ref_count(session: Session, data_dir: Path) -> None:
-    """相同内容只存一份; 引用计数递增; 文件按 sha256 落盘。"""
+def test_put_object_no_dedup_and_ref_count(session: Session, data_dir: Path) -> None:
+    """每次写入新建对象(无内容去重); 引用计数递增; 文件落盘到对象 id 路径。"""
     payload = b"hello,dataset,1\n1,2,3\n"
     obj1 = ds_service.put_object(session, payload, "text/csv")
     obj2 = ds_service.put_object(session, payload, "text/csv")
-    assert obj1.id == obj2.id
-    obj_path = data_dir / "objects" / obj1.sha256
+    assert obj1.id != obj2.id  # 同内容也不复用
+    assert obj1.oid != obj2.oid
+    obj_path = data_dir / "objects" / obj1.oid
     assert obj_path.read_bytes() == payload
     ref = ds_service.add_object_ref(session, obj1, "dataset_file", "dataset_files", 1, purpose="测试")
     session.commit()
@@ -428,7 +431,7 @@ def test_put_object_dedup_and_ref_count(session: Session, data_dir: Path) -> Non
     # 内容不同 → 不同对象
     obj3 = ds_service.put_object(session, b"other", "text/csv")
     assert obj3.id != obj1.id
-    assert obj3.sha256 == hashlib.sha256(b"other").hexdigest()
+    assert obj3.oid
 
 
 # ---------------------------------------------------------------------------
@@ -506,21 +509,28 @@ def test_api_upload_valid_version(client: TestClient, session: Session, data_dir
     assert version["resolution"] == "1h"
     assert version["timeline"] == "hourly"
     assert version["fixed_utc_offset_minutes"] == 480
-    assert len(version["content_hash"]) == 64
     assert version["license"] == "CC-BY-4.0"  # 继承数据集默认许可证
     report = body["quality_report"]
     assert report["row_count"] == 8760
     assert report["checks"]["row_count"]["ok"] is True
     assert report["checks"]["missing_values"]["total"] == 0
     assert report["diagnostics"] == []
-    # 对象落盘 + 数据文件引用(落盘内容哈希 = 版本 content_hash; 跳过 tmp 临时目录)
+    # 文件引用经版本详情端点读取(上传响应不含 files, 与前端消费一致)
+    detail = client.get(
+        f"/api/projects/{proj.id}/datasets/{ds_id}/versions/1",
+        headers=login_headers(client, user),
+    )
+    assert detail.status_code == 200, detail.text
+    data_files = [f for f in detail.json()["files"] if f["file_kind"] == "data"]
+    assert len(data_files) == 1 and data_files[0]["object_id"]
+    # 对象落盘 + 数据文件引用（不做内部哈希重算比对）
     objects = [p for p in (data_dir / "objects").iterdir() if p.is_file()]
     assert len(objects) >= 1
-    assert any(hashlib.sha256(obj.read_bytes()).hexdigest() == version["content_hash"] for obj in objects)
     versions = session.query(DatasetVersion).all()
     assert len(versions) == 1
-    assert versions[0].content_hash == version["content_hash"]
-    assert session.query(DatasetFile).filter_by(dataset_version_id=versions[0].id).count() == 2
+    files = session.query(DatasetFile).filter_by(dataset_version_id=versions[0].id).all()
+    assert len(files) == 2
+    assert {f.object_id for f in files} == {f["object_id"] for f in detail.json()["files"]}
 
 
 def test_api_upload_too_few_rows_blocked(client: TestClient, session: Session) -> None:
@@ -548,7 +558,7 @@ def test_api_upload_too_few_rows_blocked(client: TestClient, session: Session) -
 
 
 def test_api_upload_duplicate_ts_blocked(client: TestClient, session: Session) -> None:
-    """重复时间戳上传应被阻断: 400 + DATA-TIME-001(ies.device-data 契约诊断)。"""
+    """重复时间戳上传应被阻断: 400 + DATA-TS-001(时序列校验现行码)。"""
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
@@ -567,11 +577,11 @@ def test_api_upload_duplicate_ts_blocked(client: TestClient, session: Session) -
     )
     assert resp.status_code == 400
     codes = [d["code"] for d in resp.json()["error"]["params"]["diagnostics"]]
-    assert "DATA-TIME-001" in codes
+    assert "DATA-TS-001" in codes
 
 
 def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
-    """越界值上传应被阻断: 400 + DATA-VAL-001(带字段定位)。"""
+    """越界值上传应被阻断: 400 + RES-RANGE-001(带字段定位, 现行值域码)。"""
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
@@ -590,16 +600,19 @@ def test_api_upload_range_blocked(client: TestClient, session: Session) -> None:
     )
     assert resp.status_code == 400
     diagnostics = resp.json()["error"]["params"]["diagnostics"]
-    assert any(d["code"] == "DATA-VAL-001" and d["location"]["field"] == "t_ambient" for d in diagnostics)
+    assert any(d["code"] == "RES-RANGE-001" and d["location"]["field"] == "t_ambient" for d in diagnostics)
 
 
-def test_api_upload_unknown_device_model_400(client: TestClient, session: Session) -> None:
-    """声明未注册 device_model 的上传 → 400 + 阻断诊断(DATA-META-009), 而非 500。"""
+def test_api_upload_unknown_device_model_ignored(client: TestClient, session: Session) -> None:
+    """CSV 元信息 device_model 行不再做注册校验(upload_descriptor 1.0 机制已退役,
+    DATA-META-009 无发射点): 数据集↔设备绑定在草稿绑定时校验; 内容合法的上传
+    成功(201), 未知模型行被忽略。"""
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
     ds_id = _create_dataset_via_api(client, session, proj.id, user)
 
+    body_lines = make_csv("1h", n=8760).decode("utf-8").splitlines(keepends=True)
     meta_csv = (
         "# schema: ies.device-data\n"
         "# schema_version: 1.0.0\n"
@@ -610,8 +623,7 @@ def test_api_upload_unknown_device_model_400(client: TestClient, session: Sessio
         "# timestamp_mode: fixed_offset\n"
         "# fixed_utc_offset_minutes: 480\n"
         "# unit.e_load: kWh\n"
-        "timestamp,e_load\n"
-        "2025-01-01T00:00:00,48.3\n"
+        + "".join(body_lines)
     )
     resp = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
@@ -619,13 +631,9 @@ def test_api_upload_unknown_device_model_400(client: TestClient, session: Sessio
         files={"file": ("meta.csv", meta_csv.encode("utf-8"), "text/csv")},
         headers=login_headers(client, user),
     )
-    assert resp.status_code == 400, resp.text
-    err = resp.json()["error"]
-    assert err["code"] == "DATA-VAL-001"
-    codes = [d["code"] for d in err["params"]["diagnostics"]]
-    assert "DATA-META-009" in codes
-    # 未创建任何版本
-    assert session.query(DatasetVersion).count() == 0
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["dataset_version"]["version_no"] == 1
+    assert session.query(DatasetVersion).count() == 1
 
 
 def test_api_list_and_detail(client: TestClient, session: Session) -> None:
@@ -680,7 +688,7 @@ def test_api_version_metadata_no_data_content(client: TestClient, session: Sessi
     assert body["license"] == "CC-BY-4.0"
     data_files = [f for f in body["files"] if f["file_kind"] == "data"]
     assert len(data_files) == 1
-    assert len(data_files[0]["sha256"]) == 64
+    assert data_files[0]["object_id"]
     assert data_files[0]["row_count"] == 8760
     assert "rows" not in body and "content" not in body
     # 不存在的版本 → 404
@@ -702,7 +710,7 @@ def test_api_unknown_dataset_404(client: TestClient, session: Session) -> None:
 
 
 def test_api_sample_generation(client: TestClient, session: Session, data_dir: Path) -> None:
-    """内置样例: 201 + 溯源(source_category=builtin_sample) + 质量报告; 重复生成内容哈希一致。"""
+    """内置样例: 201 + 溯源(source_category=builtin_sample) + 质量报告; 每次生成新版本新数据对象。"""
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
@@ -724,7 +732,7 @@ def test_api_sample_generation(client: TestClient, session: Session, data_dir: P
     assert report["row_count"] == 8760
     assert report["checks"]["missing_values"]["total"] == 0
     assert report["checks"]["ranges"]["total"] == 0
-    # 再次生成: 确定性 → 相同内容哈希, 版本号递增
+    # 再次生成: 新版本号 + 新数据对象(每次生成写入新对象, 无内容去重)
     resp2 = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/sample",
         params={"resolution": "1h", "region": "shanghai"},
@@ -732,26 +740,40 @@ def test_api_sample_generation(client: TestClient, session: Session, data_dir: P
     )
     assert resp2.status_code == 201
     assert resp2.json()["dataset_version"]["version_no"] == 2
-    assert resp2.json()["dataset_version"]["content_hash"] == version["content_hash"]
+    # 文件引用经版本详情端点读取(样例响应不含 files, 与上传端点一致)
+    v1_detail = client.get(
+        f"/api/projects/{proj.id}/datasets/{ds_id}/versions/1",
+        headers=login_headers(client, user),
+    )
+    v2_detail = client.get(
+        f"/api/projects/{proj.id}/datasets/{ds_id}/versions/2",
+        headers=login_headers(client, user),
+    )
+    assert v1_detail.status_code == 200 and v2_detail.status_code == 200
+    v1_data = [f for f in v1_detail.json()["files"] if f["file_kind"] == "data"]
+    v2_data = [f for f in v2_detail.json()["files"] if f["file_kind"] == "data"]
+    assert len(v1_data) == len(v2_data) == 1
+    assert v2_data[0]["object_id"] != v1_data[0]["object_id"]
 
 
-def test_sample_service_deterministic_across_calls(session: Session, data_dir: Path) -> None:
-    """服务层直接调用: 两次生成的行内容完全一致(含对象落盘去重)。"""
+def test_sample_service_fresh_data_per_version(session: Session, data_dir: Path) -> None:
+    """服务层直接调用: 每次生成新版本写入新数据对象(无内容去重), 行数一致。"""
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
     v1 = ds_service.create_builtin_sample(session, proj.id, "1h", region="beijing")
     v2 = ds_service.create_builtin_sample(session, proj.id, "1h", region="beijing")
-    assert v1.content_hash == v2.content_hash
     assert v1.dataset_id == v2.dataset_id
-    # 数据对象按内容去重复用(元数据对象含版本号/时间戳, 不参与去重)
-    obj_ids_v1 = {f.object_id for f in session.query(DatasetFile).filter_by(dataset_version_id=v1.id)}
-    obj_ids_v2 = {f.object_id for f in session.query(DatasetFile).filter_by(dataset_version_id=v2.id)}
-    assert len(obj_ids_v1 & obj_ids_v2) == 1
+    data_obj = lambda vid: {
+        f.object_id for f in session.query(DatasetFile).filter_by(dataset_version_id=vid)
+        if f.file_kind == "data"
+    }
+    assert data_obj(v1.id) != set() and data_obj(v2.id) != set()
+    assert data_obj(v1.id).isdisjoint(data_obj(v2.id))
 
 
 def test_upload_with_fields_declaration(client: TestClient, session: Session) -> None:
-    """上传时声明字段单位: 量纲兼容单位通过; 不兼容单位被阻断(DATA-COL-006)。
+    """上传时声明字段单位: 量纲兼容单位通过; 不兼容单位被阻断(DATA-COL-002 blocking)。
 
     0.6.0: 单位校验收敛到 ies.device-data 规范化器(量纲感知), "C" 是 "°C"
     的注册别名, 不再因字符串不同误报; 真正不兼容(如 MW vs kWh)阻断。
@@ -774,7 +796,7 @@ def test_upload_with_fields_declaration(client: TestClient, session: Session) ->
     )
     assert resp.status_code == 201, resp.text
 
-    # 真正不兼容的单位 → 400 + DATA-COL-006
+    # 真正不兼容的单位 → 400 + DATA-COL-002(blocking, 带 expected/actual)
     bad_json = '{"e_load": {"unit": "MW"}}'
     resp_bad = client.post(
         f"/api/projects/{proj.id}/datasets/{ds_id}/versions",
@@ -783,8 +805,10 @@ def test_upload_with_fields_declaration(client: TestClient, session: Session) ->
         headers=login_headers(client, user),
     )
     assert resp_bad.status_code == 400, resp_bad.text
-    codes = [d["code"] for d in resp_bad.json()["error"]["params"]["diagnostics"]]
-    assert "DATA-COL-006" in codes
+    diags = resp_bad.json()["error"]["params"]["diagnostics"]
+    bad = [d for d in diags if d["code"] == "DATA-COL-002" and d["blocking"]]
+    assert len(bad) == 1
+    assert bad[0]["params"] == {"column": "e_load", "unit": "MW", "expected": "kWh"}
 
 
 def test_anonymous_and_xuserid_dataset_401(client: TestClient, session: Session) -> None:

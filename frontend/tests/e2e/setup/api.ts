@@ -111,6 +111,9 @@ export async function createProject(
   const res = await requestJson(ctx, 'POST', '/api/projects', {
     name,
     description,
+    baseline_resolution: '1h',
+    baseline_leap_year: false,
+    baseline_scenario_mode: 'single',
   }, userToken)
   return { id: res.id, name: res.name }
 }
@@ -149,19 +152,9 @@ export async function buildMinimalModel(
     return t.type_id
   }
   const addDevice = async (keyword: string): Promise<number> => {
-    // 负荷设备必须有 profile 数据引用(装配闸门 ASM-INPUT-004 阻断无数据的负荷);
-    // 字符串引用 "dataset:列名" 由装配按列名匹配绑定数据集版本(与集成测试同构)。
-    const profileRef: Record<string, string> = {
-      electric_load: 'load_profile',
-      heat_load: 'heat_profile',
-      cooling_load: 'cooling_profile',
-    }
+    // 2.0 无 profile 引用参数(source.data_ref 为唯一数据路径);
+    // 负荷数据由运行期按列名合并已绑定数据集, 设备参数只带物理参数。
     const params: Record<string, unknown> = {}
-    const refParam = profileRef[keyword]
-    if (refParam) {
-      const col = { electric_load: 'e_load', heat_load: 'h_load', cooling_load: 'c_load' }[keyword]
-      params[refParam] = `dataset:${col}`
-    }
     const res = await requestJson(ctx, 'POST', `/api/projects/${projectId}/model/devices`, {
       device_type: typeId(keyword),
       name: `E2E ${keyword}`,
@@ -175,8 +168,8 @@ export async function buildMinimalModel(
   const loadId = await addDevice('electric_load')
   const hpId = await addDevice('heat_pump')
   const heatLoadId = await addDevice('heat_load')
-  // 热泵带 cool:out 冷却端口, 系统图需有冷却载体平衡节点(冷却负载),
-  // 否则拓扑校验报 PARAM-UNIT-003 阻断任务提交
+  // 2.0 热泵无制冷接口, 冷负荷由制冷机供冷(否则冷母线无源阻断任务提交)
+  const chillerId = await addDevice('electric_chiller')
   const coolLoadId = await addDevice('cooling_load')
 
   // 读取端口映射后按 载能:方向 匹配连接(热泵 electric in / heat out)
@@ -196,9 +189,10 @@ export async function buildMinimalModel(
     }, userToken)
   await connect(portOf(gridId, 'electric', 'out'), portOf(loadId, 'electric', 'in'), 'electric_line')
   await connect(portOf(gridId, 'electric', 'out'), portOf(hpId, 'electric', 'in'), 'electric_line')
-  // 热泵热端端口类型为 thermal(注册表热载体), 冷端为 cooling
+  await connect(portOf(gridId, 'electric', 'out'), portOf(chillerId, 'electric', 'in'), 'electric_line')
+  // 热泵热端端口类型为 thermal(注册表热载体), 制冷机冷端为 cooling
   await connect(portOf(hpId, 'thermal', 'out'), portOf(heatLoadId, 'thermal', 'in'), 'thermal_pipe')
-  await connect(portOf(hpId, 'cooling', 'out'), portOf(coolLoadId, 'cooling', 'in'), 'cooling_pipe')
+  await connect(portOf(chillerId, 'cooling', 'out'), portOf(coolLoadId, 'cooling', 'in'), 'cooling_pipe')
 }
 
 /** 会话可用性自检: 未登录访问公开页应可读, 受保护页应跳登录。 */

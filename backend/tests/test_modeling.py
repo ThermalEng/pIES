@@ -15,7 +15,6 @@ import pytest
 
 from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.errors import AppError, NotFoundError
-from iesplan.devices import DeviceModelDescriptor
 from iesplan.modeling import (
     MECHANISM_FUNCTIONS,
     MODEL_METHOD_DATA_PREDICT,
@@ -629,84 +628,69 @@ def test_register_command_override():
 
 
 # ---------------------------------------------------------------------------
-# RR-P1-02 验收: 真实设备经 register_catalog_commands 发布后 call_command 可执行
+# RR-P1-02 验收: 真实 2.0 设备经 register_catalog_commands 校验后计算命令可用
 # ---------------------------------------------------------------------------
 
 
-def _build_real_commands():
-    """用真实内置 catalog 构建命令并原子发布; 返回 (command_id → ModuleCommand)。"""
-    from iesplan.devices import init_registry
+def _register_real_catalog():
+    """用真实内置 2.0 catalog 初始化注册表并原子发布; 返回设备文档列表。"""
+    from iesplan.devices import init_registry, list_devices
     from iesplan.modeling.registry_loader import register_catalog_commands
 
-    init_registry()  # 加载真实 9 台设备(含 csv/价格)
-    register_catalog_commands()
-    return {c.command_id: c for c in list_commands()}
+    init_registry()  # 加载真实 2.0 设备
+    validated = register_catalog_commands()
+    docs = list_devices()
+    assert len(docs) > 0
+    assert validated == len(docs)
+    return docs
 
 
-def test_catalog_register_mechanism_call():
-    """mechanism 命令(光伏)经公开门面发布后 call_command 真正执行成功。"""
-    commands = _build_real_commands()
-    cmd = commands["ies.command.model.ies.device.pv.mechanism.1.4.0"]
-    assert cmd.stateful is False
-    ctx = {
-        "params": {"rated_capacity_kwp": 500.0, "efficiency": 0.20},
-        "series": {"ghi": np.full(24, 1000.0), "t_ambient": np.full(24, 298.15)},
-        "state": None,
-        "dt_s": 3600.0,
-        "prices": {},
-    }
-    result = call_command(cmd.command_id, ctx)
-    assert set(result.outputs) == {"pv_out"}
-    assert result.outputs["pv_out"].shape == (24,)
-    np.testing.assert_allclose(result.outputs["pv_out"], np.full(24, 437500.0))
+def test_catalog_registers_compute_commands():
+    """计算引擎命令经公开门面发布后可解析(启动门禁语义)。"""
+    from iesplan.modeling.command import compute_command_refs, get_compute_entry
+
+    _register_real_catalog()
+    commands = {c.command_id: c for c in list_commands()}
+    refs = compute_command_refs()
+    assert refs
+    for command_id in refs:
+        assert command_id in commands
+        assert get_compute_entry(command_id) is not None
 
 
-def test_catalog_register_stateful_call():
-    """stateful 命令(电池)发布后 call_command 执行并回写状态。"""
-    commands = _build_real_commands()
-    cmd = commands["ies.command.model.ies.device.battery.mechanism.1.5.0"]
-    assert cmd.stateful is True
-    ctx = {
-        "params": {"capacity_kwh": 100.0, "initial_soc": 0.5},
-        "series": {"charge_w": np.full(24, 20000.0), "discharge_w": np.zeros(24)},
-        "state": None,
-        "dt_s": 3600.0,
-        "prices": {},
-    }
-    r1 = call_command(cmd.command_id, ctx)
-    assert r1.state_new is not None and "soc" in r1.state_new
-    r2 = call_command(cmd.command_id, {**ctx, "state": r1.state_new})
-    assert r2.outputs["bat_out"][0] == pytest.approx(r1.state_new["soc"])
+def test_catalog_devices_have_valid_contributions():
+    """全部真实 2.0 设备文档的方程贡献校验通过(启动门禁语义)。
 
+    设备数学语义由 contract2 纯协议表达(properties/interfaces/equations);
+    机理/周期重复/状态传递的数值行为由本文件直接构造规格的引擎单测覆盖。
+    """
+    from iesplan.modeling.contract2 import build_math_contribution
 
-def test_catalog_register_data_repeat_call():
-    """data_repeat 命令(电负荷)发布后 call_command 周期外推执行成功。"""
-    commands = _build_real_commands()
-    cmd = commands["ies.command.model.ies.device.electric_load.data_repeat.1.2.0"]
-    assert cmd.stateful is False
-    assert cmd.data_file is not None  # 标准 csv 已随描述导出并读入 profile
-    ctx = {
-        "params": {"peak_power_kw": 2400.0},
-        "series": {"e_load": np.zeros(100)},
-        "state": None,
-        "dt_s": 3600.0,
-        "prices": {},
-    }
-    result = call_command(cmd.command_id, ctx)
-    # 输出键 = yaml time_series.outputs[0] 或标准 csv 首列(electric_load.csv → e_load)
-    assert "e_load" in result.outputs
-    assert result.outputs["e_load"].shape == (100,)
-    assert float(result.outputs["e_load"][0]) > 0.0  # 曲线外推非零
+    docs = _register_real_catalog()
+    for doc in docs:
+        assert doc.device is not None
+        assert doc.device.id
+        assert doc.schema_version == "2.0.0"
+        result = build_math_contribution(doc)
+        assert result.ok, (
+            doc.device.id,
+            [(d.code, d.message_key) for d in result.diagnostics],
+        )
+    by_id = {d.device.id: d for d in docs if d.device is not None}
+    pv = build_math_contribution(by_id["ies.device.pv"])
+    assert pv.ok and pv.contribution is not None
+    assert any(r.id == "pv_generation" for r in pv.contribution.relations)
 
 
 def test_catalog_failure_preserves_old_snapshot_itemwise(monkeypatch: pytest.MonkeyPatch):
-    """第 N 个候选失败后, 旧快照逐项完全相等(命令与 callable 均不可变)。
+    """第 N 个设备方程校验失败后, 旧快照逐项完全相等(命令与 callable 均不可变)。
 
-    覆盖真实场景: good 设备能成功构建(mechanism 函数可解析), bad 设备在
-    其后构建失败 —— 验证前面成功构建的候选没有提前泄漏到全局注册表,
-    旧命令表与 callable 表均逐项一致。
+    覆盖真实场景: good 设备方程贡献校验通过, bad 设备在其后校验失败 ——
+    验证前面的成功校验没有提前泄漏到全局注册表, 旧命令表与 callable 表
+    均逐项一致。
     """
-    from iesplan.devices import DeviceModelDescriptor
+    from iesplan.devices import get_device, init_registry
+    from iesplan.devices.contracts2 import DeviceInfo, EquationRelation, Equations
     from iesplan.modeling import registry_loader
     from iesplan.modeling.command import _current_snapshot
 
@@ -717,23 +701,19 @@ def test_catalog_failure_preserves_old_snapshot_itemwise(monkeypatch: pytest.Mon
     before_commands = dict(_current_snapshot().commands)
     before_generated = dict(_current_snapshot().generated)
 
-    good = DeviceModelDescriptor(
-        type_id="ies.device.pv2", version="1.0.0", name_zh="光伏2", name_en="PV2",
-        model_method="mechanism", stateful=False, fidelity="medium",
-        energy_carriers=("solar", "electric"), is_load=False,
-        capabilities=("pv",), extends="ies.device.base", help_topic="",
-        parameters={}, ports=(), time_series={}, states=(),
-        model_commands={"pv": "ies.model-command.pv.generation@1.0.0"},
+    init_registry()
+    real_pv = get_device("ies.device.pv")
+    good = replace(real_pv, device=DeviceInfo(id="ies.device.pv2"))
+    bad = replace(
+        real_pv,
+        device=DeviceInfo(id="ies.device.bogus"),
+        equations=Equations(
+            relations=(
+                EquationRelation(id="r1", expression="bogus_out[t] = nope[t] + 1"),
+            ),
+        ),
     )
-    bad = DeviceModelDescriptor(
-        type_id="ies.device.bogus", version="1.0.0", name_zh="坏设备", name_en="Bad",
-        model_method="mechanism", stateful=False, fidelity="medium",
-        energy_carriers=("electric",), is_load=False,
-        capabilities=("pv",), extends="ies.device.base", help_topic="",
-        parameters={}, ports=(), time_series={}, states=(),
-        model_commands={"pv": "ies.model-command.unknown.fn@1.0.0"},
-    )
-    monkeypatch.setattr(registry_loader, "list_device_descriptors", lambda: [good, bad])
+    monkeypatch.setattr(registry_loader, "list_devices", lambda: [good, bad])
     with pytest.raises(AppError):
         registry_loader.register_catalog_commands()
 
@@ -741,9 +721,6 @@ def test_catalog_failure_preserves_old_snapshot_itemwise(monkeypatch: pytest.Mon
     assert dict(_current_snapshot().commands) == before_commands
     assert dict(_current_snapshot().generated) == before_generated
     assert _current_snapshot().generated[old_cmd.command_id] is old_entry
-    # good 成功构建但不泄漏到全局快照; bad 因函数不可解析被拒
-    assert "ies.command.model.ies.device.pv2.mechanism.1.0.0" not in _current_snapshot().commands
-    assert "ies.command.model.ies.device.bogus.mechanism.1.0.0" not in _current_snapshot().commands
 
 
 def test_catalog_failure_compute_command_unresolvable(monkeypatch: pytest.MonkeyPatch):
@@ -762,7 +739,7 @@ def test_catalog_failure_compute_command_unresolvable(monkeypatch: pytest.Monkey
     bad_refs["ies.command.compute.unresolvable.v1"] = "iesplan.modeling.functions.nonexistent_fn"
     monkeypatch.setattr(registry_loader, "compute_command_refs", lambda: bad_refs)
     monkeypatch.setattr(
-        registry_loader, "list_device_descriptors", lambda: []
+        registry_loader, "list_devices", lambda: []
     )
     with pytest.raises(AppError):
         registry_loader.register_catalog_commands()
@@ -771,109 +748,3 @@ def test_catalog_failure_compute_command_unresolvable(monkeypatch: pytest.Monkey
     assert dict(_current_snapshot().commands) == before_commands
     assert dict(_current_snapshot().generated) == before_generated
     assert "ies.command.compute.unresolvable.v1" not in _current_snapshot().commands
-
-
-def _descriptor(
-    type_id: str,
-    *,
-    capabilities: tuple[str, ...],
-    model_commands: dict[str, str],
-    model_method: str = "mechanism",
-) -> DeviceModelDescriptor:
-    """构造公开设备描述(绕过 YAML 解析, 直接进入建模注册流程)。"""
-
-    return DeviceModelDescriptor(
-        type_id=type_id,
-        version="1.0.0",
-        name_zh="测试设备",
-        name_en="Test Device",
-        model_method=model_method,
-        stateful=False,
-        fidelity="medium",
-        energy_carriers=("electric",),
-        is_load=False,
-        capabilities=capabilities,
-        extends="ies.device.base",
-        help_topic="",
-        parameters={},
-        ports=(),
-        time_series={},
-        states=(),
-        model_commands=model_commands,
-    )
-
-
-def _register_one(monkeypatch: pytest.MonkeyPatch, desc) -> None:
-    """仅注册单台设备(monkeypatch 公开门面), 断言抛 AppError。"""
-    from iesplan.modeling import registry_loader
-
-    monkeypatch.setattr(registry_loader, "list_device_descriptors", lambda: [desc])
-    with pytest.raises(AppError) as exc:
-        registry_loader.register_catalog_commands()
-    assert exc.value.code == "SYS-CFG-001"
-    assert exc.value.params.get("device_id") == desc.type_id
-
-
-def test_catalog_rejects_command_version_mismatch(monkeypatch: pytest.MonkeyPatch):
-    """声明命令版本与 provider 注册版本不一致 → AppError(SYS-CFG-001) 阻断发布。
-
-    修复前 ref.split("@", 1)[0] 丢弃声明版本, 不比对即注册成功。
-    """
-    desc = _descriptor(
-        "ies.device.pv_wrongver",
-        capabilities=("pv",),
-        model_commands={"pv": "ies.model-command.pv.generation@9.9.9"},
-    )
-    _register_one(monkeypatch, desc)
-
-
-def test_catalog_rejects_unknown_command(monkeypatch: pytest.MonkeyPatch):
-    """未知命令 ID → AppError(SYS-CFG-001) 阻断发布(而非只校验首个映射)。"""
-    desc = _descriptor(
-        "ies.device.unknown_cmd",
-        capabilities=("pv",),
-        model_commands={"pv": "ies.model-command.unknown.fn@1.0.0"},
-    )
-    _register_one(monkeypatch, desc)
-
-
-def test_catalog_rejects_capability_missing_command(monkeypatch: pytest.MonkeyPatch):
-    """capability 无对应 model_command → 逐 capability 解析拒绝, 不静默忽略。"""
-    desc = _descriptor(
-        "ies.device.missing_cap",
-        capabilities=("pv", "mystery"),
-        model_commands={"pv": "ies.model-command.pv.generation@1.0.0"},
-    )
-    _register_one(monkeypatch, desc)
-
-
-def test_catalog_rejects_divergent_capability_commands(monkeypatch: pytest.MonkeyPatch):
-    """capabilities 引用不同命令(无法表示为单一机理 provider) → 显式拒绝。"""
-    desc = _descriptor(
-        "ies.device.divergent",
-        capabilities=("pv", "load"),
-        model_commands={
-            "pv": "ies.model-command.pv.generation@1.0.0",
-            "load": "ies.model-command.load.periodic@1.0.0",
-        },
-    )
-    _register_one(monkeypatch, desc)
-
-
-def test_catalog_accepts_all_capabilities_same_command(monkeypatch: pytest.MonkeyPatch):
-    """多 capability 指向同一命令(完整映射逐项校验一致) → 注册成功。"""
-    from iesplan.modeling import registry_loader
-
-    desc = _descriptor(
-        "ies.device.ok_multi",
-        capabilities=("pv", "controllable"),
-        model_commands={
-            "pv": "ies.model-command.pv.generation@1.0.0",
-            "controllable": "ies.model-command.pv.generation@1.0.0",
-        },
-    )
-    monkeypatch.setattr(registry_loader, "list_device_descriptors", lambda: [desc])
-    registry_loader.register_catalog_commands()
-    cmd = get_command("ies.command.model.ies.device.ok_multi.mechanism.1.0.0")
-    assert cmd is not None
-    assert cmd.function_ref == "iesplan.modeling.functions.pv_output"

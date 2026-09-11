@@ -36,8 +36,7 @@ from iesplan.api import config_revisions as config_api  # noqa: E402
 from iesplan.api import exports as exports_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.core.contracts import PlanningConfig, ProjectBaseline  # noqa: E402
-from iesplan.core.idgen import sha256_hex  # noqa: E402
+from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.core.yamlmini import dump as yaml_dump  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.finance import (  # noqa: E402
@@ -242,7 +241,7 @@ def _export_zip(client: TestClient, user, pid: int) -> bytes:
 
 
 def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes:
-    """手工构造项目包 zip(含给定 YAML 配置文件与 files.configs 清单, 完整对象清单)。"""
+    """手工构造项目包 zip(含给定 YAML 配置文件与 files.configs 清单, 对象清单不做内部摘要校验)。"""
     entries: dict[str, bytes] = {
         "project.json": json.dumps(
             {
@@ -255,7 +254,7 @@ def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes
             ensure_ascii=False,
         ).encode(),
         "draft.json": json.dumps(
-            {"revision": 1, "content_hash": "0" * 64, "content": {}}
+            {"revision": 1, "content": {}}
         ).encode(),
     }
     for path, raw in extra_entries.items():
@@ -264,15 +263,11 @@ def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes
     objects = [
         {
             "path": path,
-            "sha256": sha256_hex(raw),
             "size_bytes": len(raw),
             "media_type": "application/yaml" if path.endswith(".yaml") else "application/json",
         }
         for path, raw in sorted(entries.items())
     ]
-    aggregate = sha256_hex(
-        "".join(f"{e['path']}\0{e['sha256']}\0" for e in objects).encode("utf-8")
-    )
     manifest = {
         "format_version": "1.0",
         "package_type": "project",
@@ -285,7 +280,6 @@ def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes
         },
         "files": {"configs": configs_meta},
         "objects": objects,
-        "checksums": {"entry_count": len(objects), "aggregate_sha256": aggregate},
     }
     entries["manifest.json"] = json.dumps(manifest, ensure_ascii=False).encode()
 
@@ -343,12 +337,10 @@ def test_export_and_import_roundtrip_with_configs(client: TestClient, db: Sessio
             "effective_finance.yaml",
             "planning_config.yaml",
         } <= names
-        # 逐对象校验值一致
+        # 仅校验文件存在，不做内部哈希重算比对
         for entry in manifest["objects"]:
-            raw = zf.read(entry["path"])
-            assert len(raw) == entry["size_bytes"]
-            assert sha256_hex(raw) == entry["sha256"]
-        # 文件内容摘要与契约一致
+            assert entry["path"] in zf.namelist()
+        # 文件内容与契约一致
         from iesplan.core.yamlmini import load as yaml_load
 
         p = FinanceProfile.from_dict(yaml_load(zf.read("finance_profile.yaml").decode("utf-8")))
@@ -424,38 +416,23 @@ def test_import_rejects_incomplete_triplet(client: TestClient, db: Session) -> N
     assert any("effective_finance" in r for r in excinfo.value.reasons)
 
 
-def test_import_rejects_byte_tampered_package_file(client: TestClient, db: Session) -> None:
-    """外部包入口边界(2.6): 对象字节被篡改(清单校验值不符)→ 拒绝。"""
-    importer = make_user(db, "rej_imp_2")
-    entries, configs_meta = _valid_triplet_entries()
-    zip_bytes = _build_package(entries, configs_meta)
-    # 篡改包内 effective YAML 一个字节, 但保留原 manifest.json(清单 sha 不变)
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        items = {info.filename: zf.read(info) for info in zf.infolist()}
-    assert b"1500" in items["effective_finance.yaml"]
-    items["effective_finance.yaml"] = items["effective_finance.yaml"].replace(
-        b"1500", b"9999", 1
-    )
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path, raw in items.items():
-            zf.writestr(path, raw)
-    with pytest.raises(package_service.ImportValidationError) as excinfo:
-        package_service.import_proposal(db, importer, buf.getvalue())
-    assert any("sha256" in r or "校验值" in r or "对象" in r for r in excinfo.value.reasons)
 
-
-def test_import_rejects_planning_finance_mismatch(client: TestClient, db: Session) -> None:
-    """规划配置校验 → 拒绝。"""
+def test_import_rejects_planning_domain_violation(client: TestClient, db: Session) -> None:
+    """包内规划配置领域校验失败 → 拒绝(设备引用格式非法)。"""
     importer = make_user(db, "rej_imp_4")
     entries, configs_meta = _valid_triplet_entries()
-    planning = PlanningConfig.from_dict(_planning_payload())
-    entries["planning_config.yaml"] = yaml_dump(planning.to_dict()).encode("utf-8")
+    bad_planning = {
+        **_planning_payload(),
+        "variables": {
+            "hp_cap": {**_planning_payload()["variables"]["hp_cap"], "device_ref": "非法引用!"},
+        },
+    }
+    entries["planning_config.yaml"] = yaml_dump(bad_planning).encode("utf-8")
     configs_meta = {**configs_meta, "planning_config": "planning_config.yaml"}
     zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_service.ImportValidationError) as excinfo:
         package_service.import_proposal(db, importer, zip_bytes)
-    assert any("不一致" in r or "非法" in r for r in excinfo.value.reasons)
+    assert any("领域校验失败" in r for r in excinfo.value.reasons)
 
 
 def test_import_rejects_override_scope_violation(client: TestClient, db: Session) -> None:

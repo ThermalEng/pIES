@@ -80,8 +80,8 @@ def main() -> int:
     devs = {}
     for t, name, is_new, params in [
         ("ies.device.grid_connection", "电网", False, {"max_import_power_kw": 500}),
-        ("ies.device.electric_load", "电负荷", False, {"peak_power_kw": 300, "load_profile": "e_load"}),
-        ("ies.device.heat_load", "热负荷", False, {"peak_heat_kw": 200, "heat_profile": "h_load"}),
+        ("ies.device.electric_load", "电负荷", False, {"peak_power_kw": 300}),
+        ("ies.device.heat_load", "热负荷", False, {"peak_heat_kw": 200}),
         ("ies.device.heat_pump", "热泵", True, {"rated_heat_kw": 250, "mode": "heating"}),
     ]:
         r = ec.post(f"/api/projects/{pid}/model/devices",

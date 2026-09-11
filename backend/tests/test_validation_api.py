@@ -140,7 +140,10 @@ def _create_project(factory: sessionmaker, name: str = "校验测试项目") -> 
     """经项目服务创建项目(工程师种子创建; 管理员不持有项目), 返回项目 id。"""
     with factory() as session:
         engineer = session.get(User, 2)
-        project = project_service.create_project(session, engineer, name)
+        project = project_service.create_project(
+            session, engineer, name,
+            baseline_resolution="1h", baseline_leap_year=False, baseline_scenario_mode="single",
+        )
         session.commit()
         return project.id
 
@@ -209,9 +212,13 @@ def test_empty_project_blocked(client: TestClient, factory: sessionmaker) -> Non
 
 
 def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> None:
-    """补全设备(电网+负荷连接)、数据(样例)、配置(保存)与基准确认后预检通过。"""
+    """补全设备(电网+负荷)、数据(样例)、配置(保存)与基准确认后预检通过。
+
+    2.0 完整性按设备存在性判定(电网 id + 负荷 predefined 接口 + 出方向
+    供给端口覆盖载体), 无需 1.0 式端口连接; 负荷数据经数据集绑定供给。
+    """
     pid = _create_project(factory)
-    # 1) 设备与连接: 电网 → 负荷
+    # 1) 设备: 电网 + 负荷(连接不再是完整性条件)
     grid = client.post(
         f"/api/projects/{pid}/model/devices",
         json={"device_type": GRID, "name": "电网连接"},
@@ -223,19 +230,10 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
         json={
             "device_type": ELECTRIC_LOAD,
             "name": "电负荷",
-            "params": {"load_profile": "ref:load1"},
         },
         headers=_headers(client),
     )
     assert load.status_code == 201, load.text
-    grid_out = next(p for p in grid.json()["ports"] if p["name"] == "electric_out")
-    load_in = next(p for p in load.json()["ports"] if p["name"] == "electric_in")
-    conn = client.post(
-        f"/api/projects/{pid}/model/connections",
-        json={"from_port_id": grid_out["id"], "to_port_id": load_in["id"]},
-        headers=_headers(client),
-    )
-    assert conn.status_code == 201, conn.text
     # 2) 数据: 内置样例(1h, 上海) + 绑定到草稿(权威绑定来源为 dataset_bindings)
     resp = client.post(
         f"/api/projects/{pid}/datasets", json={"name": "样例数据"}, headers=_headers(client)
@@ -264,13 +262,13 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["confirmed"] is True
-    assert body["assumptions_hash"] == validation_service.hash_assumptions(DEFAULT_ASSUMPTIONS)
+    # 假设原文逐字存入审计(无摘要机制), 响应仅回确认人/时间
     assert body["confirmed_by"] == 2  # 种子工程师(项目持有者)
-    # 5) 预检通过
+    # 5) 预检通过: 无阻断(未连接设备的孤立警告不阻断提交)
     report = _run_report(client, pid)
-    assert report["status"] == "ok", report["diagnostics"]
+    assert report["status"] in ("ok", "warnings"), report["diagnostics"]
     assert report["blocks_submit"] is False
-    assert report["summary"] == {"blocking": 0, "error": 0, "warning": 0, "info": 0}
+    assert report["summary"]["blocking"] == 0 and report["summary"]["error"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +444,11 @@ def test_corrupt_quality_report_blocked(
 def test_blocking_errors_not_downgraded_by_warnings(
     client: TestClient, factory: sessionmaker
 ) -> None:
-    """存在警告(孤立设备)时阻断错误(能源不平衡/缺负荷)仍保持阻断, 不降级。"""
+    """存在警告(孤立设备)时阻断错误(缺负荷)仍保持阻断, 不降级。
+
+    2.0 电网自带双向端口(有源有汇), 孤立电网不再触发能源不平衡;
+    阻断仅剩缺负荷(VALID-MODEL-002)。
+    """
     pid = _create_project(factory)
     resp = client.post(
         f"/api/projects/{pid}/model/devices",
@@ -463,42 +465,42 @@ def test_blocking_errors_not_downgraded_by_warnings(
         d["code"] == "CONN-NODE-001" and d["severity"] == "warning" and not d["blocking"]
         for d in diags
     )
-    # 阻断诊断保持阻断: 能源不平衡(单边电网)+ 缺负荷
+    # 阻断诊断保持阻断: 缺负荷
     blockers = [d for d in diags if d["blocking"]]
     assert blockers, "应存在阻断诊断"
-    assert any(d["code"] == "PARAM-UNIT-003" and d["blocking"] for d in blockers)
     assert any(d["code"] == "VALID-MODEL-002" and d["blocking"] for d in blockers)
     # 警告与阻断并存, blocks_submit 仍为 True
     assert report["blocks_submit"] is True
 
 
 # ---------------------------------------------------------------------------
-# 财务基准确认内容规范化(哈希可复现, 非法内容拒绝)
+# 财务基准确认: 假设原文逐字存入审计(摘要机制已退役, 无规范化哈希)
 # ---------------------------------------------------------------------------
 
 
-def test_hash_assumptions_canonical_numbers() -> None:
-    """数值规范化: 20 与 20.0、Decimal 与 float 同值同哈希; 非法内容拒绝。"""
-    from decimal import Decimal
+def test_baseline_confirm_records_assumptions_verbatim(
+    client: TestClient, factory: sessionmaker
+) -> None:
+    """确认假设逐字落审计 after.assumptions(可复核与前端回显), 不做摘要。"""
+    from iesplan.models.audit import AuditLog
 
-    from iesplan.core.errors import AppError
-
-    assert validation_service.hash_assumptions({"x": 20}) == validation_service.hash_assumptions(
-        {"x": 20.0}
+    pid = _create_project(factory)
+    assumptions = {"target_irr": 0.08, "note": "基准确认"}
+    resp = client.post(
+        f"/api/projects/{pid}/validation/baseline-confirm",
+        json={"assumptions": assumptions},
+        headers=_headers(client),
     )
-    assert validation_service.hash_assumptions({"x": Decimal("0.1")}) == validation_service.hash_assumptions(
-        {"x": 0.1}
-    )
-    assert validation_service.hash_assumptions(
-        {"rate": Decimal("0.100000000000000001")}
-    ) != validation_service.hash_assumptions({"rate": Decimal("0.1")})
-    # 非法内容(非有限数值/不支持类型)拒绝, 且为 400 级输入错误
-    with pytest.raises(AppError) as exc:
-        validation_service.hash_assumptions({"x": float("nan")})
-    assert exc.value.http_status == 400
-    with pytest.raises(AppError) as exc:
-        validation_service.hash_assumptions({"x": {"y": object()}})
-    assert exc.value.http_status == 400
+    assert resp.status_code == 200, resp.text
+    with factory() as session:
+        rows = (
+            session.query(AuditLog)
+            .filter_by(entity_type="project", entity_id=pid, action="project.baseline_confirmed")
+            .order_by(AuditLog.id.desc())
+            .all()
+        )
+    assert rows, "确认必须落审计记录"
+    assert rows[0].after["assumptions"] == assumptions
 
 
 # ---------------------------------------------------------------------------

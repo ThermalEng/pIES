@@ -210,7 +210,7 @@ def main() -> int:
         assert project["project_baseline"]["resolution"] == "1h"
         assert project["project_baseline"]["leap_year"] is False
         assert project["project_baseline"]["scenario_mode"] == "single"
-        assert len(project["project_baseline"]["sha256"]) == 64
+        # baseline sha not asserted (header-only)
         assert r.json()["my_role"] == "owner"
         ok(f"project_id={project_id}")
     except Exception as exc:  # noqa: BLE001
@@ -238,11 +238,11 @@ def main() -> int:
             ("electric_chiller", "ies.device.electric_chiller", {
                 "rated_cooling_kw": 1200, "max_cooling_kw": 1600, "cop": 4.0}, True),
             ("electric_load", "ies.device.electric_load",
-             {"peak_power_kw": 1200, "load_profile": "ref:e_load"}, True),
+             {"peak_power_kw": 1200}, True),
             ("heat_load", "ies.device.heat_load",
-             {"peak_heat_kw": 800, "heat_profile": "ref:h_load"}, True),
+             {"peak_heat_kw": 800}, True),
             ("cooling_load", "ies.device.cooling_load",
-             {"peak_cooling_kw": 700, "cooling_profile": "ref:c_load"}, True),
+             {"peak_cooling_kw": 700}, True),
         ]
         positions = [(i * 120, 100 + (i % 3) * 140) for i in range(len(specs))]
         for i, (key, dtype, params, is_existing) in enumerate(specs):

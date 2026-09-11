@@ -10,7 +10,7 @@ import pathlib
 import pytest  # type: ignore[import-untyped]
 
 from iesplan.core.yamlmini import load as yaml_load
-from iesplan.devices.contracts2 import SCHEMA_VERSION, to_dict
+from iesplan.devices.contracts2 import SCHEMA_VERSION
 from iesplan.devices.loader import load_all_devices, validate_device_file
 from iesplan.devices.parser2 import parse_device_model_v2
 
@@ -31,7 +31,10 @@ EXPECTED_IDS = {
 
 BANNED_TOP_FIELDS = {"parameters", "ports", "data_inputs", "states", "model_commands", "extensions", "inputs"}
 BANNED_DEVICE_FIELDS = {"version", "capabilities", "energy_carriers", "model_method", "fidelity", "stateful", "finance_type"}
-BANNED_SUBSTRINGS = ["max_", "annual_", "$price", "prices.yaml", "delay_steps", "delay_buffer", "delayed", "tilt", "azimuth"]
+# 注: "max_" 前缀不在此列 —— 进出口容量(max_import/export_power_kw)、
+# 储能 SOC 边界(min/max_soc)为引擎/可解性评估消费的现行纯技术参数,
+# 与已删除的价格/延迟/朝向等旧概念不同, 不得误禁。
+BANNED_SUBSTRINGS = ["annual_", "$price", "prices.yaml", "delay_steps", "delay_buffer", "delayed", "tilt", "azimuth"]
 
 
 def _load_raw(path: pathlib.Path) -> dict:
@@ -43,18 +46,8 @@ def _parse(text: str, file: str = "test.yaml"):
 
 
 def _no_source_in_interfaces(doc) -> bool:
-    d = to_dict(doc)
-    for v in d["interfaces"].values():
-        if "source" in v:
-            return False
-    return True
-
-
-def _no_source_in_raw(raw: dict) -> bool:
-    for v in (raw.get("interfaces") or {}).values():
-        if isinstance(v, dict) and "source" in v:
-            return False
-    return True
+    """非 predefined 接口不得携带 source(真断言, 非桩)。"""
+    return all(iface.source is None for iface in doc.interfaces.values())
 
 
 class TestCatalogFilesExist:
@@ -87,13 +80,9 @@ class TestSixFieldsAndNoLegacy:
             for sub in BANNED_SUBSTRINGS:
                 assert sub not in text
             assert "default" not in text
-            assert "source:" not in text
-            assert "data_ref" not in text
-            assert _no_source_in_raw(raw)
             assert not validate_device_file(yaml_path)
             res = parse_device_model_v2(raw, file=str(yaml_path))
             assert res.ok and res.document is not None and res.document.schema_version == SCHEMA_VERSION
-            assert _no_source_in_interfaces(res.document)
 
 
 class TestDeviceSpecificContracts:
@@ -120,13 +109,14 @@ class TestDeviceSpecificContracts:
         assert any("electricity_import[t] * electricity_export[t] = 0" in e for e in (r.expression for r in doc.equations.relations))
         assert _no_source_in_interfaces(doc)
 
-    def test_loads_predefined_kw_no_source(self):
+    def test_loads_predefined_kw_with_source(self):
         for did in ("ies.device.electric_load", "ies.device.heat_load", "ies.device.cooling_load"):
             doc = self._doc(did)
             assert len(doc.interfaces) == 1
             iface = next(iter(doc.interfaces.values()))
             assert iface.type == "predefined" and iface.unit == "kW"
-            assert _no_source_in_interfaces(doc)
+            assert iface.source is not None and iface.source.mode == "data_repeat"
+            assert iface.source.data_ref
 
     def test_heat_pump_only_heating(self):
         doc = self._doc("ies.device.heat_pump")
@@ -135,13 +125,15 @@ class TestDeviceSpecificContracts:
         assert "heat_out[t] = electricity_in[t] * cop" in {r.id: r.expression for r in doc.equations.relations}["heat_conversion"]
         assert _no_source_in_interfaces(doc)
 
-    def test_pv_predefined_and_single_equation_no_source(self):
+    def test_pv_predefined_and_single_equation_with_source(self):
         doc = self._doc("ies.device.pv")
         assert doc.interfaces["solar_irradiance"].type == "predefined" and doc.interfaces["ambient_temperature"].type == "predefined"
         assert len(doc.equations.relations) == 1
         expr = doc.equations.relations[0].expression
         assert "solar_irradiance[t]" in expr and "ambient_temperature[t]" in expr
-        assert _no_source_in_interfaces(doc)
+        for iid in ("solar_irradiance", "ambient_temperature"):
+            src = doc.interfaces[iid].source
+            assert src is not None and src.mode == "data_repeat" and src.data_ref
 
     def test_gas_boiler_units(self):
         doc = self._doc("ies.device.gas_boiler")
@@ -201,7 +193,7 @@ schema_version: "2.0.0"
 device: {id: ies.device.electric_load, names: {zh-CN: 电负荷, en-US: Electric Load}}
 properties: {}
 interfaces:
-  electricity_demand: {type: predefined, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
+  electricity_demand: {type: predefined, source: {mode: data_repeat, data_ref: data/electricity_demand.csv}, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
 equations: {variables: {}, relations: []}
 """,
     "ies.device.heat_load": """
@@ -210,7 +202,7 @@ schema_version: "2.0.0"
 device: {id: ies.device.heat_load, names: {zh-CN: 热负荷, en-US: Heat Load}}
 properties: {}
 interfaces:
-  heat_demand: {type: predefined, carrier: heat, unit: kW, valid_range: {minimum: 0, maximum: null}}
+  heat_demand: {type: predefined, source: {mode: data_repeat, data_ref: data/heat_demand.csv}, carrier: heat, unit: kW, valid_range: {minimum: 0, maximum: null}}
 equations: {variables: {}, relations: []}
 """,
     "ies.device.cooling_load": """
@@ -219,7 +211,7 @@ schema_version: "2.0.0"
 device: {id: ies.device.cooling_load, names: {zh-CN: 冷负荷, en-US: Cooling Load}}
 properties: {}
 interfaces:
-  cool_demand: {type: predefined, carrier: cool, unit: kW, valid_range: {minimum: 0, maximum: null}}
+  cool_demand: {type: predefined, source: {mode: data_repeat, data_ref: data/cool_demand.csv}, carrier: cool, unit: kW, valid_range: {minimum: 0, maximum: null}}
 equations: {variables: {}, relations: []}
 """,
     "ies.device.heat_pump": """
@@ -243,8 +235,8 @@ properties:
   reference_irradiance: {value: 1000, unit: W/m2, valid_range: {minimum: 0, maximum: null}}
   temp_coeff: {value: -0.004, unit: "1", valid_range: {minimum: -0.01, maximum: 0}}
 interfaces:
-  solar_irradiance: {type: predefined, carrier: solar, unit: W/m2, valid_range: {minimum: 0, maximum: 2000}}
-  ambient_temperature: {type: predefined, carrier: environment, unit: "°C", valid_range: {minimum: -50, maximum: 60}}
+  solar_irradiance: {type: predefined, source: {mode: data_repeat, data_ref: data/solar_irradiance.csv}, carrier: solar, unit: W/m2, valid_range: {minimum: 0, maximum: 2000}}
+  ambient_temperature: {type: predefined, source: {mode: data_repeat, data_ref: data/ambient_temperature.csv}, carrier: environment, unit: "°C", valid_range: {minimum: -50, maximum: 60}}
   electric_out: {type: out, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
 equations: {variables: {}, relations: [{id: gen, expression: "electric_out[t] = rated_capacity_kwp * solar_irradiance[t] / reference_irradiance * (1 + temp_coeff * (ambient_temperature[t] - 25))"}]}
 """,
@@ -287,25 +279,6 @@ equations: {variables: {}, relations: [{id: loss, expression: "heat_out[t] = hea
 }
 
 PER_DEVICE_INVALID = [
-    ("ies.device.battery-source-forbidden", """
-schema: ies.device-model
-schema_version: "2.0.0"
-device: {id: ies.device.battery, names: {zh-CN: 电池, en-US: Battery}}
-properties: {capacity_kwh: {value: 100, unit: kWh, valid_range: {minimum: 0, maximum: 1000000}}}
-interfaces:
-  electricity: {type: predefined, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}, source: {mode: constant, value: 1}}
-equations: {variables: {}, relations: []}
-""", "禁止声明 source"),
-    ("ies.device.pv-with-source", """
-schema: ies.device-model
-schema_version: "2.0.0"
-device: {id: ies.device.pv, names: {zh-CN: 光伏, en-US: PV}}
-properties: {rated_capacity_kwp: {value: 10, unit: kWp, valid_range: {minimum: 0, maximum: 1000000}}}
-interfaces:
-  solar_irradiance: {type: predefined, carrier: solar, unit: W/m2, valid_range: {minimum: 0, maximum: 2000}, source: {mode: data_repeat, data_ref: x}}
-  electric_out: {type: out, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
-equations: {variables: {}, relations: []}
-""", "禁止声明 source"),
     ("ies.device.grid-wrong-type", """
 schema: ies.device-model
 schema_version: "2.0.0"
@@ -358,8 +331,12 @@ class TestPerDeviceValidStructures:
         assert r.ok, f"{device_id} 合法结构应通过: {[d.params.get('detail') for d in r.diagnostics]}"
         assert r.document is not None and r.document.device is not None
         assert r.document.device.id == device_id
-        assert _no_source_in_interfaces(r.document)
-        assert _no_source_in_raw(yaml_load(yaml_text))  # type: ignore[arg-type]
+        # predefined 必须带 source(data_repeat), 其余类型禁止带 source
+        for iface in r.document.interfaces.values():
+            if iface.type == "predefined":
+                assert iface.source is not None and iface.source.mode == "data_repeat"
+            else:
+                assert iface.source is None
 
 
 class TestPerDeviceInvalidStructures:

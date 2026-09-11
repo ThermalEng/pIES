@@ -124,7 +124,12 @@ test.describe('场景 6: 任务提交 / 状态 / 结果 / 导出', () => {
     await createEngineer(apiCtx.request, username, password)
     const userTok = await loginToken(apiCtx.request, username, password)
     const projectName = uniqueName('QA 任务项目')
-    const createdProj = await requestJson(apiCtx.request, 'POST', '/api/projects', { name: projectName }, userTok)
+    const createdProj = await requestJson(apiCtx.request, 'POST', '/api/projects', {
+      name: projectName,
+      baseline_resolution: '1h',
+      baseline_leap_year: false,
+      baseline_scenario_mode: 'single',
+    }, userTok)
     const projectId = createdProj.project?.id ?? createdProj.id
     await buildMinimalModel(apiCtx.request, projectId, userTok)
     await apiCtx.close()

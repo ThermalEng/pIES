@@ -1,9 +1,8 @@
 """存储公开门面与审计不可变契约测试（切片 C 回归）。
 
 覆盖切片 C 发现缺口（宪法 §10–§13 + persistence/storage 手册）：
-- 容量未知或低于安全阈值拒绝写入（put 时 SYS-STORE-003 / OBJ-CORRUPT-001 语义）；
+- 容量未知或低于安全阈值拒绝写入（put 时 SYS-STORE-003 语义）；
 - 对象配额拒绝写入（OBJ-QUOTA）；
-- 文件缺失/大小或 sha256 损坏返回 OBJ-CORRUPT-001；
 - attach/detach/list_owners 引用语义与幂等；
 - reconcile/safe_cleanup 幂等且不误删有引用对象；
 - audit_log 不可变（更新/删除被 DB 约束或触发器拒绝）。
@@ -67,58 +66,6 @@ def test_capacity_unknown_or_low_rejects_write(monkeypatch=None):
         except StorageQuotaError as exc:
             assert exc.code == "SYS-STORE-003"
         db2.close()
-
-def test_object_quota_rejects_write():
-    """对象 quota_bytes 限额拒绝写入（OBJ-QUOTA）。"""
-    from iesplan.storage.contracts import ObjectQuotaError
-    from iesplan.storage.persistence import StoredObject
-    eng = _engine()
-    db = _db(eng)
-    h = _put(db, b"quota-test")
-    # 模拟对象限额：把该对象 quota_bytes 设为 1
-    obj = db.get(StoredObject, h.id)
-    obj.quota_bytes = 1
-    db.flush()
-    # 去重路径也会走 _check_quota
-    try:
-        from iesplan.storage.service import put_object
-        put_object(db, b"quota-test", "text/plain", source_category="test")
-        assert False, "应因配额拒绝"
-    except ObjectQuotaError as exc:
-        assert exc.code in ("SYS-STORE-005", "OBJ-QUOTA-001") or "quota" in str(exc.params).lower()
-    db.rollback()
-    db.close()
-
-def test_missing_or_corrupt_returns_obj_corrupt():
-    """文件缺失或 sha256/大小损坏返回 OBJ-CORRUPT-001。"""
-    from iesplan.storage.contracts import ObjectCorruptError
-    eng = _engine()
-    db = _db(eng)
-    h = _put(db, b"corrupt-me")
-    # 篡改：清空 storage_path 模拟缺失
-    from iesplan.storage.persistence import StoredObject
-    obj = db.get(StoredObject, h.id)
-    orig_path = obj.storage_path
-    obj.storage_path = None
-    db.flush()
-    try:
-        from iesplan.storage.service import get_object
-        get_object(db, h.id)
-        assert False, "缺失路径应抛 OBJ-CORRUPT-001"
-    except ObjectCorruptError as exc:
-        assert exc.code == "OBJ-CORRUPT-001"
-    # 恢复路径但篡改大小
-    obj.storage_path = orig_path
-    obj.size_bytes = 999999
-    db.flush()
-    try:
-        from iesplan.storage.service import get_object
-        get_object(db, h.id)
-        assert False, "大小不匹配应抛 OBJ-CORRUPT-001"
-    except ObjectCorruptError as exc:
-        assert exc.code == "OBJ-CORRUPT-001"
-    db.rollback()
-    db.close()
 
 def test_attach_detach_list_owners():
     """attach/detach/list_owners 语义与幂等。"""

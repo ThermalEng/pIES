@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import os
-from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +20,6 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, Task  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
@@ -121,9 +119,7 @@ def setup_environment(
                       created_by=user.id, status="active",
                       baseline_resolution="1h", baseline_leap_year=False,
                       baseline_scenario_mode="single",
-                      baseline_sha256=ProjectBaseline(
-                          resolution="1h", leap_year=False, scenario_mode="single"
-                      ).digest())
+                      )
     db.add(project)
     db.flush()
 
@@ -138,7 +134,7 @@ def setup_environment(
         dver = DatasetVersion(
             dataset_id=dset.id, version_no=1, timeline="hourly", resolution="1h",
             fixed_utc_offset_minutes=480, fields={}, units={},
-            content_hash=sha256(csv_bytes).hexdigest(), created_by=user.id,
+            created_by=user.id,
         )
         db.add(dver)
         db.flush()
@@ -149,16 +145,13 @@ def setup_environment(
         ))
 
     content = mini_content(dver_id if dver_id is not None else 0, config=config, devices=devices)
-    content_hash = project_service.store_content_object(db, content)
+    content_object_id = project_service.store_content_object(db, content)
     version = ProjectVersion(
         project_id=project.id, version_no=1, name="v1", reason="snapshot_freeze",
         baseline_resolution="1h", baseline_leap_year=False,
         baseline_scenario_mode="single",
-        baseline_sha256=ProjectBaseline(
-            resolution="1h", leap_year=False, scenario_mode="single"
-        ).digest(),
         currency="CNY", schema_version=1,
-        content_hash=content_hash, created_by=user.id,
+        content_object_id=content_object_id, created_by=user.id,
     )
     db.add(version)
     db.flush()
@@ -180,9 +173,7 @@ def setup_environment(
             extension_versions={},
             random_seed=int(config.get("seed", 42)) if config else 42,
             tolerances={},
-            content_hash=sha256(f"snapshot-{task_type}".encode()).hexdigest(),
             canonical_assembly_text=artifact.canonical_text,
-            assembly_sha256=None,
             assembly_receipt=artifact.receipt.to_dict(),
             created_by=user.id,
         )

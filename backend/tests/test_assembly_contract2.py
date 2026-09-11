@@ -1,7 +1,7 @@
 """`ies.assembly` 2.0.0 接口网络纯协议校验测试(不依赖注册表/数据库)。
 
 覆盖: 五类 interface 连接规则、predefined/blind 非法连接与绑定、carrier
-相同、单位量纲兼容、有效区间冲突、设备内容锁、三件套产物与确定性。
+相同、单位量纲兼容、有效区间冲突、设备字头校验、二件套产物与确定性。
 """
 
 from __future__ import annotations
@@ -189,8 +189,6 @@ class TestValidNetwork:
         assert isinstance(artifact, ValidatedInterfaceNetwork)
         # 产物和回执契约一致
         assert artifact.verify()
-        assert "network_sha256" not in artifact.to_dict()
-        assert "device_locks" not in artifact.receipt.to_dict()
         assert artifact.receipt.diagnostics == ()
         # 规范文本确定性形态
         assert '"schema":"ies.assembly"' in artifact.canonical_text
@@ -227,7 +225,6 @@ class TestValidNetwork:
         )
         a = validate_interface_network2(base, documents)
         b = validate_interface_network2(copy.deepcopy(base), documents)
-        assert a.artifact.canonical_text == b.artifact.canonical_text
         assert a.artifact.canonical_text == b.artifact.canonical_text
         # 连接声明顺序不影响规范文本（规范按键排序）。
         reordered = copy.deepcopy(base)
@@ -393,13 +390,6 @@ class TestDeviceLocks:
         documents = {"grid": GRID_DOC}
         doc = _assembly_doc(documents)
         doc["devices"]["grid"]["definition"]["id"] = "acme.device.other"
-        r = validate_interface_network2(doc, documents)
-        assert "ASM-LOCK-001" in _codes(r)
-
-    def test_definition_id_mismatch_is_rejected(self):
-        documents = {"grid": GRID_DOC}
-        doc = _assembly_doc(documents)
-        doc["devices"]["grid"]["definition"]["id"] = "tampered.device.id"
         r = validate_interface_network2(doc, documents)
         assert "ASM-LOCK-001" in _codes(r)
 

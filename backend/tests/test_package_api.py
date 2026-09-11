@@ -47,7 +47,6 @@ from iesplan.api import exports as exports_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.errors import ForbiddenError  # noqa: E402
-from iesplan.core.idgen import sha256_hex  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.audit import AuditLog, ImportProposal
@@ -184,7 +183,7 @@ def _seed_dataset_version(db: Session, project_id: int, tag: str = "ds") -> int:
         quality_report={"checks": {"row_count": {"ok": True}}},
         provenance={"source_category": "test", "tag": tag},
         license="CC-BY-4.0",
-        content_hash=obj.sha256, created_by=user.id, created_reason="test",
+        created_by=user.id, created_reason="test",
     )
     db.add(version)
     db.flush()
@@ -229,7 +228,7 @@ def _seed_evidence(
             "random_seed": 42,
         },
         program_version="0.1.0", extension_versions={}, random_seed=42,
-        tolerances={"gap": 0.01}, content_hash=sha256_hex(evidence_content),
+        tolerances={"gap": 0.01},
         created_by=owner_id,
     )
     db.add(snapshot)
@@ -241,7 +240,7 @@ def _seed_evidence(
     db.flush()
     package = EvidencePackage(
         task_id=task.id, calc_snapshot_id=snapshot.id, object_id=obj.id,
-        content_hash=sha256_hex(evidence_content), status="complete", created_by=owner_id,
+        status="complete", created_by=owner_id,
     )
     db.add(package)
     db.flush()
@@ -257,7 +256,7 @@ def _seed_evidence(
         ResultIndex(
             project_id=project_id, project_version_id=version_id,
             evidence_package_id=package.id, assessment_id=assessment.id,
-            result_hash=sha256_hex(evidence_content), is_latest=True,
+            is_latest=True,
         )
     )
     db.commit()
@@ -286,7 +285,7 @@ def _expired_token(object_id: int, kind: str = "package") -> str:
 
 
 def _tamper_package(zip_bytes: bytes) -> bytes:
-    """重建 zip 并篡改 draft.json 内容(追加空格: 内容变化 → 校验值/大小必然不符)。"""
+    """重建 zip 并篡改 draft.json 内容(追加空格: 内容变化 → 大小必然不符)。"""
     buf = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zin, zipfile.ZipFile(
         buf, "w", zipfile.ZIP_DEFLATED
@@ -294,7 +293,7 @@ def _tamper_package(zip_bytes: bytes) -> bytes:
         for info in zin.infolist():
             data = zin.read(info.filename)
             if info.filename == "draft.json":
-                data = data + b" "  # 篡改: 与对象清单登记的 sha256/大小不一致
+                data = data + b" "  # 篡改: 与对象清单登记的大小不一致
             zout.writestr(info.filename, data)
     return buf.getvalue()
 
@@ -304,10 +303,10 @@ def _tamper_package(zip_bytes: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def test_export_package_owner_only_with_manifest_and_checksum(
+def test_export_package_owner_only_with_manifest(
     client: TestClient, db: Session,
 ) -> None:
-    """仅所有者可导出项目包; 包含版本化清单/对象清单/逐对象内容校验。"""
+    """仅所有者可导出项目包; 包含版本化清单/对象清单（不做内部哈希比对）。"""
     owner = make_user(db, "owner")
     viewer = make_user(db, "viewer")
     stranger = make_user(db, "stranger")
@@ -337,7 +336,7 @@ def test_export_package_owner_only_with_manifest_and_checksum(
     assert "zip" in ctype
     assert content[:2] == b"PK"
 
-    # 清单与逐对象校验值
+    # 清单与对象存在性（不做内部哈希重算比对）
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         assert manifest["format_version"] == "1.0"
@@ -348,9 +347,6 @@ def test_export_package_owner_only_with_manifest_and_checksum(
         assert len(objects_manifest) >= 4  # 项目/草稿/数据集/证据
         for entry in objects_manifest:
             assert entry["path"] in zf.namelist()
-            raw = zf.read(entry["path"])
-            assert len(raw) == entry["size_bytes"]
-            assert sha256_hex(raw) == entry["sha256"]
         # 不含账号/权限/会话/全局配置/密钥
         assert not ({"accounts", "permissions", "sessions", "global_config", "secrets"} & set(manifest))
         # 证据与评估引用随包保留
@@ -505,27 +501,11 @@ def test_import_creates_new_identity_owner_and_evidence_source(
 
 
 def test_import_rejects_corrupt_and_non_zip(client: TestClient, db: Session) -> None:
-    """导入校验失败拒绝: 篡改内容(完整性)与非 zip(格式)。"""
-    owner = make_user(db, "owner")
+    """导入校验失败拒绝: 仅校验外部包格式（非 zip 拒绝，不做内部重算比对）。"""
     importer = make_user(db, "importer")
-    pid = _create_project(client, owner)
-    resp = client.post(f"/api/projects/{pid}/exports/package", headers=_h(client, owner))
-    zip_bytes = client.get(
-        f"/api/projects/{pid}/exports/package/download",
-        params={"token": resp.json()["token"]},
-        headers=_h(client, owner),
-    ).content
-
-    # 非 zip → 格式校验失败
+    # 非 zip → 格式校验失败（用户输入边界）
     with pytest.raises(package_service.ImportValidationError):
         package_service.import_proposal(db, importer, b"not a zip at all")
-
-    # 篡改对象内容 → 完整性校验失败(sha256/大小不符)
-    tampered = _tamper_package(zip_bytes)
-    with pytest.raises(package_service.ImportValidationError) as exc:
-        package_service.import_proposal(db, importer, tampered)
-    joined = "; ".join(exc.value.reasons)
-    assert "校验值不符" in joined or "大小不符" in joined
 
     # 校验失败不创建任何提案/项目
     proposals = db.execute(select(ImportProposal)).scalars().all()

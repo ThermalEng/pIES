@@ -73,9 +73,12 @@ class TestAtomicReplace:
         assert len(snapshot()) == 2
 
     def test_failed_build_keeps_old_snapshot(self, monkeypatch):
-        """任一设备构建失败时旧快照完整保留(BE-REG-02 核心)。"""
+        """任一设备方程贡献校验失败时旧快照完整保留(BE-REG-02 核心)。"""
+        from dataclasses import replace
+
         from iesplan.core.errors import AppError
-        from iesplan.devices import DeviceModelDescriptor
+        from iesplan.devices import get_device, init_registry
+        from iesplan.devices.contracts2 import DeviceInfo, EquationRelation, Equations
         from iesplan.modeling import registry_loader
         from iesplan.modeling.command import ModuleCommand, snapshot
 
@@ -90,25 +93,22 @@ class TestAtomicReplace:
         register_command(old)
         before = snapshot()
 
-        # 描述列表: 一个正常 + 一个构建必败(未知命令 ID → 组合根解析拒绝)
-        good = DeviceModelDescriptor(
-            type_id="ies.device.pv", version="1.4.0", name_zh="光伏", name_en="PV",
-            model_method="mechanism", stateful=False, fidelity="medium",
-            energy_carriers=("solar", "electric"), is_load=False,
-            capabilities=("pv",), extends="ies.device.base", help_topic="",
-            parameters={}, ports=(), time_series={}, states=(),
-            model_commands={"pv": "ies.model-command.pv.generation@1.0.0"},
-        )
-        bad = DeviceModelDescriptor(
-            type_id="ies.device.bogus", version="1.0.0", name_zh="坏设备", name_en="Bad",
-            model_method="mechanism", stateful=False, fidelity="medium",
-            energy_carriers=("electric",), is_load=False,
-            capabilities=("pv",), extends="ies.device.base", help_topic="",
-            parameters={}, ports=(), time_series={}, states=(),
-            model_commands={"pv": "ies.model-command.unknown.fn@1.0.0"},
+        # 文档列表: 一个正常(真实光伏 2.0 文档改稳定 ID) + 一个方程必败
+        # (引用未声明名称 → 阻断诊断, 组合根解析拒绝)
+        init_registry()
+        real_pv = get_device("ies.device.pv")
+        good = replace(real_pv, device=DeviceInfo(id="ies.device.pv2"))
+        bad = replace(
+            real_pv,
+            device=DeviceInfo(id="ies.device.bogus"),
+            equations=Equations(
+                relations=(
+                    EquationRelation(id="r1", expression="bogus_out[t] = nope[t] + 1"),
+                ),
+            ),
         )
         monkeypatch.setattr(
-            registry_loader, "list_device_descriptors",
+            registry_loader, "list_devices",
             lambda: [good, bad],
         )
         with pytest.raises(AppError):

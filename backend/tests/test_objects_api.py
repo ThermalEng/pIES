@@ -1,14 +1,13 @@
-"""对象存储服务与 API 集成测试(U11): 写入/去重/引用/清理/校验/门禁/管理接口。
+"""对象存储服务与 API 集成测试(U11): 写入/引用/清理/巡检/门禁/管理接口。
 
 运行方式: 内存 SQLite(StaticPool, 跨线程共享) + 临时 data_dir +
 app.dependency_overrides 替换 get_db 依赖(不触碰真实数据库)。
-覆盖: 写入与落盘、同内容去重、引用计数、无引用清理、被引用不可清理、
-哈希校验失败报错、容量估算与管理 API(仅管理员)。
+覆盖: 写入与落盘(每次写入新建对象, 按对象 id 寻址, 无内容去重)、
+引用计数、无引用清理、被引用不可清理、存在性巡检、容量估算与管理 API(仅管理员)。
 """
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterator
 from dataclasses import fields
 from types import SimpleNamespace
@@ -23,7 +22,6 @@ from iesplan.api.auth import router as auth_router
 from iesplan.api.objects import router as objects_router
 from iesplan.config import settings
 from iesplan.core.errors import AppError
-from iesplan.core.idgen import sha256_hex
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
 from iesplan.models.audit import AuditLog, RetentionRule
@@ -158,7 +156,7 @@ def test_object_handle_public_field_set() -> None:
     """
     names = {f.name for f in fields(ObjectHandle)}
     assert names == {
-        "id", "oid", "sha256", "size_bytes", "media_type", "status", "created_at",
+        "id", "oid", "size_bytes", "media_type", "status", "created_at",
     }
     assert "storage_path" not in names
     assert "ref_count" not in names
@@ -171,7 +169,7 @@ def test_object_info_has_no_storage_path(session: Session, data_dir) -> None:
     session.commit()
     info = object_info(session, obj.id)
     assert "storage_path" not in info
-    assert info["id"] == obj.id and info["sha256"] == obj.sha256
+    assert info["id"] == obj.id and info["oid"] == obj.oid
 
 
 # ---------------------------------------------------------------------------
@@ -180,15 +178,14 @@ def test_object_info_has_no_storage_path(session: Session, data_dir) -> None:
 
 
 def test_put_object_writes_file_and_record(session: Session, data_dir) -> None:
-    """写入: 文件原子落盘到 data_dir/objects/{sha256}, 记录含大小/哈希/类型/来源审计。"""
+    """写入: 文件原子落盘到对象 id 路径, 记录含大小/类型/来源审计。"""
     content = b"hello-object-storage" * 10
     obj = _put(session, content, content_type="text/plain", source_category="user_upload")
     session.commit()
 
-    digest = sha256_hex(content)
-    # 对象行: 内容寻址字段齐全
-    assert obj.oid == digest
-    assert obj.sha256 == digest
+    # 对象行: 字段齐全(oid 为随机 64 位 hex, 文件名即 oid)
+    assert obj.oid
+    assert len(obj.oid) == 64 and all(c in "0123456789abcdef" for c in obj.oid)
     assert obj.size_bytes == len(content)
     assert obj.media_type == "text/plain"
     assert obj.status == "stored"
@@ -196,8 +193,8 @@ def test_put_object_writes_file_and_record(session: Session, data_dir) -> None:
     # （存储路径敏感；引用计数为可重建缓存，经 object_info 查询，见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §10.3）
     assert not hasattr(obj, "storage_path")
     assert not hasattr(obj, "ref_count")
-    # 文件在最终位置, 临时区无残留(原子 rename)
-    path = data_dir / "objects" / digest
+    # 文件在最终位置(文件名即 oid), 临时区无残留(原子 rename)
+    path = data_dir / "objects" / obj.oid
     assert path.read_bytes() == content
     assert list((data_dir / "objects" / "tmp").iterdir()) == []
     # 来源类别记入创建审计
@@ -210,38 +207,42 @@ def test_put_object_writes_file_and_record(session: Session, data_dir) -> None:
     assert "storage_path" not in audit.after
     # object_info 与行一致
     info = object_info(session, obj.id)
-    assert info["oid"] == digest and info["size_bytes"] == len(content)
+    assert info["oid"] and info["size_bytes"] == len(content)
 
 
-def test_put_object_dedup_same_content(session: Session, data_dir) -> None:
-    """去重: 同内容同 sha256 只存一份, 复用既有对象记录与文件。"""
+def test_put_object_no_dedup_same_content(session: Session, data_dir) -> None:
+    """无去重: 同内容两次写入新建两个对象行与两个文件(按对象 id 寻址)。"""
     content = b"same-content-bytes" * 5
     obj1 = _put(session, content)
     obj2 = _put(session, content)
     session.commit()
-    assert obj1.id == obj2.id  # 复用同一行
+    assert obj1.id != obj2.id  # 各自新建
+    assert obj1.oid != obj2.oid
     rows = session.execute(sa.select(StoredObject)).scalars().all()
-    assert len(rows) == 1
+    assert len(rows) == 2
     assert len(list((data_dir / "objects").glob("*.tmp"))) == 0
     files = [p for p in (data_dir / "objects").iterdir() if p.is_file()]
-    assert len(files) == 1  # 磁盘也仅一份
+    assert len(files) == 2  # 磁盘也是两份
+    assert get_object(session, obj1.id) == content
+    assert get_object(session, obj2.id) == content
 
 
-def test_put_object_dedup_still_records_business_ref(session: Session, data_dir) -> None:
-    """去重：复用对象记录，但传入的业务引用仍按 object_refs 单独建立（见 manual/developer-guide/zh-CN/modules/storage.md §写入与引用流程； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §10.3 引用）"""
-    content = b"dedup-with-ref" * 3
+def test_put_object_with_business_ref(session: Session, data_dir) -> None:
+    """写入可附带业务引用: 引用按 object_refs 单独建立（见 manual/developer-guide/zh-CN/modules/storage.md §写入与引用流程； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §10.3 引用）"""
+    content = b"with-ref" * 3
     obj1 = _put(session, content, ref_type="dataset_file", ref_id=10)
     obj2 = _put(session, content, ref_type="dataset_file", ref_id=11)
     session.commit()
-    assert obj1.id == obj2.id
+    assert obj1.id != obj2.id  # 无去重: 各自新建对象
     refs = list_refs(session, obj1.id)
-    assert len(refs) == 2  # 两个业务实体分别引用
-    assert {r.ref_entity_id for r in refs} == {'10', '11'}
-    assert object_info(session, obj1.id)["ref_count"] == 2
+    assert len(refs) == 1  # 各自对象的引用互不干扰
+    assert refs[0].ref_entity_id == '10'
+    assert object_info(session, obj1.id)["ref_count"] == 1
+    assert object_info(session, obj2.id)["ref_count"] == 1
 
 
 def test_get_object_returns_bytes(session: Session, data_dir) -> None:
-    """读取: 返回原始字节(读取时校验大小与哈希)。"""
+    """读取: 返回原始字节(不做内容复核); 缺失文件抛 ObjectCorruptError。"""
     content = b"get-me-back" * 20
     obj = _put(session, content)
     session.commit()
@@ -279,7 +280,7 @@ def test_add_remove_list_refs(session: Session, data_dir) -> None:
     assert object_info(session, obj.id)["status"] == "orphaned"  # 引用归零 → orphaned
     assert list_refs(session, obj.id) == []
 
-    # orphaned 对象重新建立 owner 引用 → 自动恢复为 stored(内容锁/临时文件
+    # orphaned 对象重新建立 owner 引用 → 自动恢复为 stored
     # 替换场景: 同内容对象被旧引用解绑后再次 attach, 必须恢复可用状态)
     add_ref(session, obj.id, "version_ref", 8, purpose="重新引用")
     session.commit()
@@ -297,47 +298,22 @@ def test_remove_ref_unknown_raises(session: Session, data_dir) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 完整性校验
+# 存在性巡检(无内容复核)
 # ---------------------------------------------------------------------------
 
 
-def test_get_object_corrupt_hash_raises(session: Session, data_dir) -> None:
-    """哈希校验失败报错: 文件被篡改后读取抛 ObjectCorruptError。"""
-    content = b"pristine-content" * 8
-    obj = _put(session, content)
+def test_verify_object_existence_only(session: Session, data_dir) -> None:
+    """存在性巡检: 记录存在且字节可读 → ok; 文件缺失 → 缺失报告, 不抛错。"""
+    obj = _put(session, b"existence-check" * 4)
     session.commit()
-    # 篡改磁盘文件(记录哈希不变)
-    path = data_dir / "objects" / obj.sha256
-    path.write_bytes(b"tampered!" + content[9:])
-    with pytest.raises(ObjectCorruptError) as exc:
-        get_object(session, obj.id)
-    assert exc.value.code == "OBJ-CORRUPT-001"
+    report = verify_object(session, obj.id)
+    assert report["ok"] is True and report["error"] is None
 
-
-def test_get_object_missing_file_raises(session: Session, data_dir) -> None:
-    """文件缺失读取报错(视作完整性失败)。"""
-    obj = _put(session, b"gone-soon" * 6)
-    session.commit()
-    (data_dir / "objects" / obj.sha256).unlink()
-    with pytest.raises(ObjectCorruptError):
-        get_object(session, obj.id)
-
-
-def test_verify_object_reports_corruption(session: Session, data_dir) -> None:
-    """verify_object 不抛错, 返回 ok=False 报告(周期性巡检用)。"""
-    content = b"verify-me" * 12
-    obj = _put(session, content)
-    session.commit()
-    good = verify_object(session, obj.id)
-    assert good["ok"] is True and good["hash_ok"] is True and good["size_ok"] is True
-
-    (data_dir / "objects" / obj.sha256).write_bytes(b"xx")
-    bad = verify_object(session, obj.id)
-    assert bad["ok"] is False and bad["error"] == "ies.diag.obj.corrupt"
-
-    (data_dir / "objects" / obj.sha256).unlink()
+    (data_dir / "objects" / obj.oid).unlink()
     missing = verify_object(session, obj.id)
     assert missing["ok"] is False
+    assert missing["reason"] == "missing"
+    assert session.get(StoredObject, obj.id) is not None  # 只报告, 不删记录
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +334,7 @@ def test_safe_cleanup_dry_run_plan(session: Session, data_dir) -> None:
     assert plan["candidates"][0]["id"] == orphan.id
     assert plan["total_bytes"] == orphan.size_bytes
     # 数据未动
-    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert (data_dir / "objects" / orphan.oid).exists()
     assert session.get(StoredObject, orphan.id) is not None
 
 
@@ -382,11 +358,11 @@ def test_safe_cleanup_execute_marks_pending_deletion(session: Session, data_dir)
     assert row.pending_deleted_at is not None
     assert row.pending_delete_until is not None
     assert row.pending_delete_until > row.pending_deleted_at
-    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert (data_dir / "objects" / orphan.oid).exists()
     # 内容仍可读取(恢复路径: 文件未物理删)
     assert get_object(session, orphan.id) == b"orphan-2" * 7
     # 被项目版本引用的对象保留(23.2)
-    assert (data_dir / "objects" / kept.sha256).exists()
+    assert (data_dir / "objects" / kept.oid).exists()
     assert session.get(StoredObject, kept.id) is not None
     assert object_info(session, kept.id)["ref_count"] == 1
     # 软删标记审计（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §16 安全与审计； manual/developer-guide/zh-CN/modules/storage.md §对象清理恢复路径）
@@ -394,7 +370,7 @@ def test_safe_cleanup_execute_marks_pending_deletion(session: Session, data_dir)
     audit = session.execute(
         sa.select(AuditLog).where(AuditLog.action == "object_marked_pending_deletion")
     ).scalar_one()
-    assert audit.entity_id == orphan.id and audit.before["sha256"] == orphan.sha256
+    assert audit.entity_id == orphan.id and audit.before["oid"] == orphan.oid
     assert audit.after["status"] == "pending_deletion"
 
 
@@ -445,7 +421,7 @@ def test_safe_cleanup_missing_file_skipped(session: Session, data_dir) -> None:
     """文件已缺失的对象: 标记为待物理回收(0.2.0-B3 软删), 由 purge 统一收尾。"""
     orphan = _put(session, b"no-file" * 3)
     session.commit()
-    (data_dir / "objects" / orphan.sha256).unlink()
+    (data_dir / "objects" / orphan.oid).unlink()
     plan = safe_cleanup(session, dry_run=True)
     result = safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
     session.commit()  # RR-P1-03
@@ -493,7 +469,7 @@ def test_pending_deleted_list_and_restore(session: Session, data_dir) -> None:
     session.commit()
     assert info["status"] == "orphaned"
     assert info["pending_deleted_at"] is None
-    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert (data_dir / "objects" / orphan.oid).exists()
     assert get_object(session, orphan.id) == b"restore-me" * 4
     # 恢复审计
     assert _count_audit(session, "object_restored") == 1
@@ -523,7 +499,7 @@ def test_re_attach_restores_pending_object(session: Session, data_dir) -> None:
     assert info["status"] == "stored"
     assert info["ref_count"] == 1
     assert info["pending_deleted_at"] is None
-    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert (data_dir / "objects" / orphan.oid).exists()
 
 
 def test_purge_expired_after_retention(session: Session, data_dir) -> None:
@@ -538,7 +514,7 @@ def test_purge_expired_after_retention(session: Session, data_dir) -> None:
     pre = purge_expired(session, dry_run=True)
     assert pre["count"] == 0
     # 保留期内不物理删
-    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert (data_dir / "objects" / orphan.oid).exists()
 
     # 让保留期过期(等价于时间流逝): 同时拨旧 pending_deleted_at 与
     # pending_delete_until, 保持 CHECK 约束(pending_delete_until >= pending_deleted_at)
@@ -558,7 +534,7 @@ def test_purge_expired_after_retention(session: Session, data_dir) -> None:
     session.commit()
     assert done["purged_count"] == 1
     assert done["errors"] == []
-    assert not (data_dir / "objects" / orphan.sha256).exists()
+    assert not (data_dir / "objects" / orphan.oid).exists()
     assert session.get(StoredObject, orphan.id) is None
     assert _count_audit(session, "object_purged") == 1
 
@@ -575,7 +551,7 @@ def test_purge_never_touches_inside_retention(session: Session, data_dir) -> Non
     session.commit()
     assert done["purged_count"] == 0
     assert done["errors"] == []
-    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert (data_dir / "objects" / orphan.oid).exists()
     assert session.get(StoredObject, orphan.id).status == "pending_deletion"
 
 
@@ -616,9 +592,9 @@ def test_reconcile_does_not_reset_pending_deletion(session: Session, data_dir) -
     assert [o["id"] for o in list_pending_deleted(session)] == [orphan.id]
 
 
-def test_put_dedup_reattach_restores_pending(session: Session, data_dir) -> None:
-    """put 去重路径: 同内容对象已待回收时, 新业务引用 attach 会自动恢复对象。"""
-    content = b"dedup-pending-restore" * 3
+def test_reattach_restores_pending(session: Session, data_dir) -> None:
+    """重新 attach 恢复待回收对象: 引用恢复后状态回到 stored(无去重语义)。"""
+    content = b"pending-restore" * 3
     obj1 = _put(session, content, ref_type="dataset_file", ref_id=5)
     session.commit()
     # 解除引用 → 孤儿 → 清理标记待回收
@@ -629,14 +605,13 @@ def test_put_dedup_reattach_restores_pending(session: Session, data_dir) -> None
     session.commit()
     assert session.get(StoredObject, obj1.id).status == "pending_deletion"
 
-    # 同内容再次 put + 新引用(去重复用既有行) → attach 自动恢复
-    obj2 = _put(session, content, ref_type="dataset_file", ref_id=99)
+    # 同一对象重新 attach 新引用 → 自动恢复(新 put 会建新对象, 不复用)
+    add_ref(session, obj1.id, "dataset_file", 99)
     session.commit()
-    assert obj2.id == obj1.id
     info = object_info(session, obj1.id)
     assert info["status"] == "stored" and info["ref_count"] == 1
     assert info["pending_deleted_at"] is None
-    assert (data_dir / "objects" / obj1.sha256).exists()
+    assert (data_dir / "objects" / obj1.oid).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -737,7 +712,7 @@ def test_api_cleanup_plan_then_execute(client: TestClient, session: Session, dat
     p = plan.json()
     assert p["dry_run"] is True and p["count"] == 1
     assert p["candidates"][0]["id"] == orphan.id
-    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert (data_dir / "objects" / orphan.oid).exists()
 
     # 阶段 2: 执行（必须携带 dry-run 返回的 plan_id，见 manual/developer-guide/zh-CN/modules/storage.md §对象清理恢复路径）
     done = client.post(
@@ -750,10 +725,10 @@ def test_api_cleanup_plan_then_execute(client: TestClient, session: Session, dat
     assert d["dry_run"] is False and d["marked_count"] == 1
     assert d["plan_id"] == p["plan_id"]
     # 软删: 文件仍在, 记录仍在但状态为待物理回收
-    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert (data_dir / "objects" / orphan.oid).exists()
     row = session.get(StoredObject, orphan.id)
     assert row.status == "pending_deletion"
-    assert (data_dir / "objects" / kept.sha256).exists()  # 被证据包引用, 保留
+    assert (data_dir / "objects" / kept.oid).exists()  # 被证据包引用, 保留
     assert session.get(StoredObject, kept.id).status != "pending_deletion"
 
 
@@ -787,7 +762,7 @@ def test_api_pending_restore_purge(client: TestClient, session: Session, data_di
     assert restored.status_code == 200
     r = restored.json()["data"]
     assert r["status"] == "orphaned" and r["pending_deleted_at"] is None
-    assert (data_dir / "objects" / orphan.sha256).exists()
+    assert (data_dir / "objects" / orphan.oid).exists()
     assert get_object(session, orphan.id) == b"api-restore" * 5
     # 恢复后不再在待回收清单
     pending2 = client.get("/api/admin/objects/pending", headers=headers).json()
@@ -810,7 +785,7 @@ def test_api_pending_restore_purge(client: TestClient, session: Session, data_di
     assert pre.status_code == 200 and pre.json()["count"] == 1
     purged = client.post("/api/admin/objects/purge", json={"dry_run": False}, headers=headers)
     assert purged.status_code == 200 and purged.json()["purged_count"] == 1
-    assert not (data_dir / "objects" / orphan.sha256).exists()
+    assert not (data_dir / "objects" / orphan.oid).exists()
     assert session.get(StoredObject, orphan.id) is None
 
 
@@ -826,28 +801,6 @@ def test_api_cleanup_execute_requires_plan(client: TestClient, session: Session,
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "OBJ-CLEAN-001"
 
-
-def test_api_health_reports_corruption(client: TestClient, session: Session, data_dir) -> None:
-    """健康接口：抽样校验发现被篡改对象（存储 health provider 的 verify 节，见 manual/developer-guide/zh-CN/modules/storage.md §失败语义）"""
-    seed_admin(session)
-    headers = login(client, "admin", ADMIN_PASSWORD)
-    obj = _put(session, b"health-check" * 10)
-    session.commit()
-
-    healthy = client.get("/api/admin/health", headers=headers)
-    assert healthy.status_code == 200
-    verify = healthy.json()["storage"]["verify"]
-    assert verify["checked"] == 1 and verify["ok_count"] == 1
-
-    (data_dir / "objects" / obj.sha256).write_bytes(b"corrupted-content!!!")
-    broken = client.get("/api/admin/health", headers=headers)
-    assert broken.status_code == 200
-    body = broken.json()
-    verify = body["storage"]["verify"]
-    assert verify["ok_count"] == 0
-    assert len(verify["failed"]) == 1
-    assert verify["failed"][0]["ok"] is False
-    assert body["storage"]["ok"] is False
 
 
 class TestTransactionIsolation:
@@ -873,9 +826,9 @@ class TestTransactionIsolation:
         row2 = session.get(StoredObject, obj.id)
         assert row2.quota_bytes == 12345
 
-    def test_put_object_conflict_keeps_business_changes(self, session: Session, data_dir) -> None:
-        """并发去重冲突路径: put_object 的 IntegrityError 只在 savepoint 内回滚。"""
-        content = b"dedup-conflict" * 2
+    def test_put_object_no_conflict_with_business_changes(self, session: Session, data_dir) -> None:
+        """同内容重复写入新建对象, 不干扰调用方同事务内的业务修改。"""
+        content = b"repeat-content" * 2
         _put(session, content)
         session.commit()
 
@@ -883,10 +836,10 @@ class TestTransactionIsolation:
         row = session.get(StoredObject, 1)
         row.quota_bytes = 999
 
-        # 再次 put 同内容(触发既有行复用路径; 不产生 IntegrityError 但验证正常)
+        # 再次 put 同内容 → 新建对象行(无去重/无冲突路径)
         handle = _put(session, content)
         session.commit()
-        assert handle.id == 1
+        assert handle.id == 2
         row2 = session.get(StoredObject, 1)
         assert row2.quota_bytes == 999
 
@@ -904,34 +857,33 @@ class TestReconcile:
         # 损坏: 记录存在但文件缺失
         obj = _put(session, b"will-be-missing" * 2)
         session.commit()
-        (data_dir / "objects" / obj.sha256).unlink()
+        (data_dir / "objects" / obj.oid).unlink()
 
         report = reconcile(session, dry_run=True)
         assert report["dry_run"] is True
-        # 0.4.0: 报告只含内容寻址摘要, 不含内部路径(§11)
-        assert any("ab" in o["sha256"] for o in report["orphan_reported"])
+        # 报告只含文件名(即认领后的对象 id), 不含内部路径(§11)
+        assert any("ab" in o["oid"] for o in report["orphan_reported"])
         assert all("storage_path" not in o for o in report["orphan_reported"])
         assert any(c["reason"] == "missing_file" for c in report["corrupt_reported"])
         # dry_run 不登记孤儿、不删记录
         assert report["orphan_registered"] == []
 
     def test_reconcile_execute_registers_orphan(self, session: Session, data_dir) -> None:
-        """执行: 为孤儿文件补建元数据行(内容寻址, 无引用)。"""
-        file_digest = "cd" + "1" * 62  # 文件名(手工构造)
+        """执行: 为孤儿文件补建元数据行(文件名即对象 id, 不计算内容摘要, 无引用)。"""
+        file_oid = "cd" + "1" * 62  # 文件名(手工构造, 即认领后的对象 id)
         (data_dir / "objects").mkdir(parents=True, exist_ok=True)
-        (data_dir / "objects" / file_digest).write_bytes(b"orphan-content")
+        (data_dir / "objects" / file_oid).write_bytes(b"orphan-content")
         report = reconcile(session, dry_run=False)
-        assert report["orphan_registered"] == [f"objects/{file_digest}"]
-        # 登记行的 oid/sha256 以内容真实哈希为准(文件名为纯存储标识)
-        real_digest = hashlib.sha256(b"orphan-content").hexdigest()
-        # 0.4.0: 登记审计只记内容摘要, 不含内部路径(§11)
+        assert report["orphan_registered"] == [f"objects/{file_oid}"]
+        # 登记行的 oid 即文件名(不做内容摘要)
+        # 登记审计只记对象 id, 不含内部路径(§11)
         reconcil_audit = session.execute(
             sa.select(AuditLog).where(AuditLog.action == "object_reconciled")
         ).scalar_one()
-        assert reconcil_audit.after["sha256"] == real_digest
+        assert reconcil_audit.after["oid"] == file_oid
         assert "storage_path" not in reconcil_audit.after
         row = session.execute(
-            sa.select(StoredObject).where(StoredObject.oid == real_digest)
+            sa.select(StoredObject).where(StoredObject.oid == file_oid)
         ).scalar_one()
         assert row.status == "stored" and row.ref_count == 0
         # 幂等: 再次执行不再登记

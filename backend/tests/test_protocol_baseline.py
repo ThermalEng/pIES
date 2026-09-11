@@ -209,11 +209,14 @@ def test_error_envelope_shape_all_error_paths(
     admin_tok = _login(client, "proto_admin")
 
     # --- 1) config PUT 422(CONFIG-VAL-001): 非法变量类型触发校验失败 ---
+    # (默认配置不再猜测变量, 用例显式声明)
     pid = _create_project(client, owner_tok, "协议项目")
     _add_device(client, owner_tok, pid)
     cfg = _default_config(client, owner_tok, pid)
     bad_cfg = dict(cfg)
-    bad_cfg["variables"] = [dict(cfg["variables"][0], type="fuzzy")]
+    bad_cfg["variables"] = [
+        {"name": "hp_cap", "type": "fuzzy", "min": 0.0, "max": 1000.0, "initial": 0.0}
+    ]
     resp = client.put(
         f"/api/projects/{pid}/config",
         json={"config": bad_cfg, "expected_revision": 1},
@@ -416,7 +419,7 @@ def test_success_wrappers_config_validation_model_domain(client: TestClient, db:
     _assert_wrapper(client.post(f"/api/projects/{pid}/validation/run", headers=_bearer(tok)), {"report", "stored"})
     _assert_wrapper(client.get("/api/registry/device-types"), {"items"})
     _assert_wrapper(client.get("/api/registry/algorithms"), {"algorithms"})
-    _assert_wrapper(client.get(f"/api/projects/{pid}/model", headers=_bearer(tok)), {"has_graph", "graph_id", "name", "graph_hash", "devices", "ports", "connections", "layout"})
+    _assert_wrapper(client.get(f"/api/projects/{pid}/model", headers=_bearer(tok)), {"has_graph", "graph_id", "name", "devices", "ports", "connections", "layout"})
     _assert_wrapper(client.get(f"/api/projects/{pid}/model/validate", headers=_bearer(tok)), {"diagnostics"})
 
 
@@ -444,7 +447,7 @@ def test_success_wrappers_datasets_auth_admin_exports_domain(client: TestClient,
     # takeover_pending, 尚未确认接管前无法访问业务端点)
     _assert_wrapper(
         client.post(f"/api/projects/{pid}/exports/package", headers=_bearer(tok)),
-        {"token", "expires_at", "file_name", "manifest", "media_type", "object_id", "oid", "sha256", "size_bytes"},
+        {"token", "expires_at", "file_name", "manifest", "media_type", "object_id", "oid", "size_bytes"},
     )
 
     # auth(登录响应是 AuthResponse 模型; 登出为 {"ok"})

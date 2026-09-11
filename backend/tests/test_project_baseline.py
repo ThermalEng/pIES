@@ -2,13 +2,13 @@
 
 覆盖:
 - ``core.contracts.ProjectBaseline``: 合法构造/非法枚举/点数推导(普通年/闰年)/
-  确定性摘要/canonical payload 只含三字段/严格恢复(未知字段/缺失字段/篡改
-  摘要拒绝)/validate 结构化诊断/from_dict(to_dict(x)) 自洽;
-- 项目创建 API: 基线三字段必填(缺失 422)、响应携带 project_baseline 与
-  sha256(与 core 值对象摘要一致)、无旧 utc 字段;
+  canonical payload 只含三字段/严格恢复(未知字段/缺失字段拒绝)/
+  validate 结构化诊断/from_dict(to_dict(x)) 自洽;
+- 项目创建 API: 基线三字段必填(缺失 422)、响应携带 project_baseline、
+  无旧 utc 字段;
 - 版本固化: 版本字典与版本内容均携带 project_baseline;
 - 不可变: 无任何基线更新入口(API 面)+ Postgres 触发器 DDL 常量存在;
-- 迁移 0004: 旧布局 SQLite 库补列回填(1h/false/single + 默认摘要)并删除
+- 迁移 0004: 旧布局 SQLite 库补列回填(1h/false/single)并删除
   fixed_utc_offset_minutes 列。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录。
@@ -141,15 +141,6 @@ def test_leap_year_must_be_bool() -> None:
         ProjectBaseline(resolution="1h", leap_year="false")  # type: ignore[arg-type]
 
 
-def test_digest_deterministic_and_field_sensitive() -> None:
-    a1 = ProjectBaseline(resolution="1h", leap_year=False, scenario_mode="single")
-    a2 = ProjectBaseline(resolution="1h", leap_year=False, scenario_mode="single")
-    assert a1.digest() == a2.digest()
-    assert len(a1.digest()) == 64
-    assert a1.digest() != ProjectBaseline(resolution="30min", leap_year=False).digest()
-    assert a1.digest() != ProjectBaseline(resolution="1h", leap_year=True).digest()
-
-
 def test_canonical_payload_only_three_fields() -> None:
     payload = ProjectBaseline(resolution="1h", leap_year=False).canonical_payload()
     assert set(json.loads(payload)) == {"resolution", "leap_year", "scenario_mode"}
@@ -158,12 +149,6 @@ def test_canonical_payload_only_three_fields() -> None:
 def test_from_dict_roundtrip_to_dict() -> None:
     baseline = ProjectBaseline(resolution="30min", leap_year=True, scenario_mode="single")
     assert ProjectBaseline.from_dict(baseline.to_dict()) == baseline
-
-
-def test_from_dict_does_not_revalidate_derived_sha256() -> None:
-    mapping = ProjectBaseline(resolution="1h", leap_year=False).to_dict()
-    mapping["sha256"] = "0" * 64
-    assert ProjectBaseline.from_dict(mapping) == ProjectBaseline(resolution="1h", leap_year=False)
 
 
 def test_from_dict_rejects_unknown_and_missing_fields() -> None:
@@ -182,7 +167,7 @@ def test_from_dict_scenario_mode_defaults_to_single() -> None:
 
 def test_validate_reports_structured_diagnostics() -> None:
     diags = ProjectBaseline.validate(
-        {"resolution": "2h", "leap_year": "yes", "unknown": 1, "sha256": "zz"}
+        {"resolution": "2h", "leap_year": "yes", "unknown": 1}
     )
     codes = {d.code for d in diags}
     assert codes == {"PROJ-BASE-001"}
@@ -190,7 +175,6 @@ def test_validate_reports_structured_diagnostics() -> None:
     assert "2h" in details
     assert "布尔" in details
     assert "unknown" in details
-    assert "64 位" in details
 
 
 def test_validate_accepts_valid_dict() -> None:
@@ -239,7 +223,7 @@ def test_create_project_rejects_invalid_baseline(client: TestClient, db_session:
     assert resp.status_code == 422
 
 
-def test_create_project_returns_baseline_and_digest(
+def test_create_project_returns_baseline(
     client: TestClient, db_session: Session
 ) -> None:
     headers, _ = _owner_headers(client, db_session)
@@ -260,7 +244,6 @@ def test_create_project_returns_baseline_and_digest(
         resolution="30min", leap_year=True, scenario_mode="single"
     )
     assert project["project_baseline"] == expected.to_dict()
-    assert project["project_baseline"]["sha256"] == expected.digest()
     assert "fixed_utc_offset_minutes" not in project
 
 
@@ -313,7 +296,6 @@ def test_project_view_and_version_freeze_baseline(
     assert resp.status_code == 201, resp.text
     version = resp.json()["version"]
     assert version["project_baseline"] == expected.to_dict()
-    assert version["project_baseline"]["sha256"] == expected.digest()
 
 
 def test_no_baseline_update_endpoint(client: TestClient, db_session: Session) -> None:
@@ -332,7 +314,6 @@ def test_baseline_immutable_trigger_ddl_exists() -> None:
         "baseline_resolution",
         "baseline_leap_year",
         "baseline_scenario_mode",
-        "baseline_sha256",
     ):
         assert column in PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL
 
@@ -382,7 +363,7 @@ CREATE TABLE project_versions (
 
 
 def test_migration_0004_backfills_default_baseline_and_drops_utc_column() -> None:
-    """旧布局 SQLite 库: 补列 → 回填 1h/false/single + 默认摘要 → 删旧列。"""
+    """旧布局 SQLite 库: 补列 → 回填 1h/false/single → 删旧列。"""
     eng = create_engine("sqlite+pysqlite://", connect_args={"check_same_thread": False})
     with eng.begin() as conn:
         conn.execute(text(_OLD_PROJECTS_DDL))
@@ -403,31 +384,25 @@ def test_migration_0004_backfills_default_baseline_and_drops_utc_column() -> Non
     with eng.begin() as conn:
         row = conn.execute(
             text(
-                "SELECT baseline_resolution, baseline_leap_year, baseline_scenario_mode,"
-                " baseline_sha256 FROM projects WHERE id = 1"
+                "SELECT baseline_resolution, baseline_leap_year, baseline_scenario_mode"
+                " FROM projects WHERE id = 1"
             )
         ).one()
         assert row.baseline_resolution == "1h"
         assert row.baseline_leap_year == 0
         assert row.baseline_scenario_mode == "single"
-        expected = ProjectBaseline(
-            resolution="1h", leap_year=False, scenario_mode="single"
-        ).digest()
-        assert row.baseline_sha256 == expected
         vrow = conn.execute(
             text(
-                "SELECT baseline_resolution, baseline_sha256 FROM project_versions WHERE id = 1"
+                "SELECT baseline_resolution FROM project_versions WHERE id = 1"
             )
         ).one()
         assert vrow.baseline_resolution == "1h"
-        assert vrow.baseline_sha256 == expected
         for table in ("projects", "project_versions"):
             cols = {
                 r[1] for r in conn.execute(text(f"PRAGMA table_info({table})")).all()
             }
             assert "fixed_utc_offset_minutes" not in cols, table
-            assert {"baseline_resolution", "baseline_leap_year", "baseline_scenario_mode",
-                    "baseline_sha256"} <= cols
+            assert {"baseline_resolution", "baseline_leap_year", "baseline_scenario_mode"} <= cols
     eng.dispose()
 
 
@@ -456,13 +431,12 @@ def test_service_requires_explicit_baseline(db_session: Session) -> None:
     db_session.flush()
     with pytest.raises(TypeError):
         project_service.create_project(db_session, user, name="缺省基线项目")
-    # 显式基线: 创建成功且摘要与 core 值对象一致
+    # 显式基线: 创建成功
     project = project_service.create_project(
         db_session, user, name="显式基线项目",
         baseline_resolution="1h",
         baseline_leap_year=False,
         baseline_scenario_mode="single",
     )
-    assert project.baseline_sha256 == ProjectBaseline(
-        resolution="1h", leap_year=False, scenario_mode="single"
-    ).digest()
+    assert project.baseline_resolution == "1h"
+    assert project.baseline_leap_year is False

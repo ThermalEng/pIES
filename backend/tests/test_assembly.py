@@ -41,8 +41,6 @@ from iesplan.assembly.diags import (
     ASM_EDGE_ZERO_CAP,
     ASM_FIX_HINT_KEYS,
     ASM_INPUT_DATA_UNIT,
-    ASM_INPUT_LOAD_DATA,
-    ASM_INPUT_PARAM,
     ASM_INPUT_RANGE,
     ASM_INPUT_UNFED,
     ASM_MESSAGE_KEYS,
@@ -70,8 +68,8 @@ from iesplan.assembly.diags import (
 )
 from iesplan.assembly.schema import AssemblySpec
 from iesplan.core.diagnostics import DIAG_FIX_HINT_KEYS, DIAG_MESSAGE_KEYS, NEW_DIAG_CODES
-from iesplan.devices import DeviceModelDescriptor as DeviceTypeSpec
-from iesplan.devices import list_device_descriptors as list_device_types
+from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
+from iesplan.devices import list_devices as list_device_types
 
 
 # RR-P2-05: 装配检查消费运行期 YAML 注册表(无静态回退), 测试需先初始化
@@ -146,7 +144,7 @@ def port_decl(
 
 def pipe_section(params: str) -> str:
     """管道章节文本(params 为流式参数字面量,如 "{delay_steps: 2}")。"""
-    return f"pipelines:\n  - id: pipe_hot\n    model: ies.device.transport_pipe@1.0.0\n    params: {params}\n"
+    return f"pipelines:\n  - id: pipe_hot\n    model: ies.device.transport_pipe@2.0.0\n    params: {params}\n"
 
 
 def constraint_section(expr: str, ctype: str = "ratio") -> str:
@@ -156,47 +154,47 @@ def constraint_section(expr: str, ctype: str = "ratio") -> str:
 
 # 设备行模板(供 minimal_text 复用;"- id: " 前缀在调用处拼接)
 GRID = (
-    "grid\n    model: ies.device.grid_connection@1.2.0\n"
+    "grid\n    model: ies.device.grid_connection@2.0.0\n"
     "    params: {max_import_power_kw: 800, max_export_power_kw: 200}\n"
 )
 GRID_NO_EXPORT = (
-    "grid\n    model: ies.device.grid_connection@1.2.0\n"
+    "grid\n    model: ies.device.grid_connection@2.0.0\n"
     "    params: {max_import_power_kw: 800, max_export_power_kw: 0, export_tariff: 0}\n"
 )
 GRID_ZERO = (
-    "grid\n    model: ies.device.grid_connection@1.2.0\n"
+    "grid\n    model: ies.device.grid_connection@2.0.0\n"
     "    params: {max_import_power_kw: 0, max_export_power_kw: 0, export_tariff: 0}\n"
 )
-HP = "hp1\n    model: ies.device.heat_pump@1.3.0\n    params: {rated_heat_kw: 600, cop_profile: 0}\n"
-PV = "pv1\n    model: ies.device.pv@1.3.0\n"
-BAT = "bat1\n    model: ies.device.battery@1.4.0\n    stateful: true\n"
+HP = "hp1\n    model: ies.device.heat_pump@2.0.0\n    params: {rated_heat_kw: 600, cop_profile: 0}\n"
+PV = "pv1\n    model: ies.device.pv@2.0.0\n"
+BAT = "bat1\n    model: ies.device.battery@2.0.0\n    stateful: true\n"
 E_LOAD = (
-    "elec_load\n    model: ies.device.electric_load@1.1.0\n"
+    "elec_load\n    model: ies.device.electric_load@2.0.0\n"
     "    data_refs:\n"
-    "      - key: load_profile\n        dataset_version_id: 17\n        unit: kW\n"
+    "      - key: electricity_demand\n        dataset_version_id: 17\n        unit: kW\n"
 )
 H_LOAD = (
-    "heat_load\n    model: ies.device.heat_load@1.1.0\n"
+    "heat_load\n    model: ies.device.heat_load@2.0.0\n"
     "    data_refs:\n"
-    "      - key: heat_profile\n        dataset_version_id: 18\n        unit: kW\n"
+    "      - key: heat_demand\n        dataset_version_id: 18\n        unit: kW\n"
 )
 LOAD100 = (
-    "elec_load\n    model: ies.device.electric_load@1.1.0\n    params: {peak_power_kw: 100}\n"
-    "    data_refs:\n      - key: load_profile\n        dataset_version_id: 17\n"
+    "elec_load\n    model: ies.device.electric_load@2.0.0\n    params: {peak_power_kw: 100}\n"
+    "    data_refs:\n      - key: electricity_demand\n        dataset_version_id: 17\n"
 )
 
 # 常用边文本
 HP_PIPE_EDGES = (
     "- id: e1\n  from: hp1.heat_out\n  to: pipe_hot.heat_in\n"
-    "- id: e2\n  from: pipe_hot.heat_out\n  to: heat_load.heat_in\n"
+    "- id: e2\n  from: pipe_hot.heat_out\n  to: heat_load.heat_demand\n"
 )
-GRID_HP_EDGE = "- id: e1\n  from: grid.electric_out\n  to: hp1.electric_in\n"
-GRID_PV_EDGE = "- id: e1\n  from: grid.electric_out\n  to: pv1.electric_out\n"
+GRID_HP_EDGE = "- id: e1\n  from: grid.electricity_import\n  to: hp1.electricity_in\n"
+GRID_PV_EDGE = "- id: e1\n  from: pv1.electric_out\n  to: grid.electricity_export\n"
 
 
 def _registry_with(extra: dict[str, DeviceTypeSpec]) -> dict[str, DeviceTypeSpec]:
     """注册表快照 + 自定义类型(供构造性反例)。"""
-    registry = {s.type_id: s for s in list_device_types()}
+    registry = {s.device.id: s for s in list_device_types() if s.device is not None}
     registry.update(extra)
     return registry
 
@@ -215,83 +213,83 @@ HAPPY_TEXT = textwrap.dedent(
 
     devices:
       - id: grid
-        model: ies.device.grid_connection@1.2.0
+        model: ies.device.grid_connection@2.0.0
         kind: existing
         model_method: mechanism
         stateful: false
         params: {max_import_power_kw: 800, max_export_power_kw: 200, export_tariff: 0.35}
       - id: pv1
-        model: ies.device.pv@1.3.0
+        model: ies.device.pv@2.0.0
         kind: new
         params: {rated_capacity_kwp: 300}
       - id: bat1
-        model: ies.device.battery@1.4.0
+        model: ies.device.battery@2.0.0
         kind: new
         stateful: true
         params: {capacity_kwh: 400, rated_power_kw: 200}
       - id: hp1
-        model: ies.device.heat_pump@1.3.0
+        model: ies.device.heat_pump@2.0.0
         kind: new
         params: {rated_heat_kw: 600, cop: 3.5, cop_profile: 0}
       - id: elec_load
-        model: ies.device.electric_load@1.1.0
+        model: ies.device.electric_load@2.0.0
         kind: existing
         data_refs:
-          - key: load_profile
+          - key: electricity_demand
             dataset_version_id: 17
             columns: [power_kw]
             unit: kW
             resolution: 1h
       - id: heat_load
-        model: ies.device.heat_load@1.1.0
+        model: ies.device.heat_load@2.0.0
         kind: existing
         data_refs:
-          - key: heat_profile
+          - key: heat_demand
             dataset_version_id: 18
             unit: kW
 
     ports:
       - device: pv1
         name: electric_out
-        carrier: electric
+        carrier: electricity
         direction: out
         quantity: power
-        unit: W
+        unit: kW
         nature: instantaneous
         capacity: 320000.0
 
     edges:
       - id: e_grid_pv
-        from: grid.electric_out
+        from: grid.electricity_import
         to: pv1.electric_out
       - id: e_bat
-        from: bat1.electric
-        to: grid.electric_out
+        from: bat1.electricity
+        to: grid.electricity_export
       - id: e_hp_elec
-        from: grid.electric_out
-        to: hp1.electric_in
+        from: grid.electricity_import
+        to: hp1.electricity_in
       - id: e_load
-        from: grid.electric_out
-        to: elec_load.electric_in
+        from: grid.electricity_import
+        to: elec_load.electricity_demand
       - id: e_pipe_in
         from: hp1.heat_out
         to: pipe_hot.heat_in
       - id: e_pipe_out
         from: pipe_hot.heat_out
-        to: heat_load.heat_in
+        to: heat_load.heat_demand
 
     pipelines:
       - id: pipe_hot
-        model: ies.device.transport_pipe@1.0.0
+        model: ies.device.transport_pipe@2.0.0
         params: {delay_steps: 2, loss_per_step: 0.02}
 
     constraints:
       - id: c1
         type: ratio
-        expr: "hp1.electric_in <= 0.8 * grid.electric_out"
+        expr: "hp1.electricity_in <= 0.8 * grid.electricity_import"
       - id: c2
         type: capacity
-        expr: "grid.electric_out <= 800 W"
+        expr: "grid.electricity_import <= 800 W"
 
     requirements:
       algorithm: ies.algo.milp_hybrid@1.0.0
@@ -384,19 +382,19 @@ class TestPhaseA:
         assert ASM_SYN_FIELD in [d.code for d in result.diagnostics]
 
     def test_bad_type_syn_005(self):
-        text = minimal_text("- id: hp1\n    model: ies.device.heat_pump@1.3.0\n    params: [1, 2]\n")
+        text = minimal_text("- id: hp1\n    model: ies.device.heat_pump@2.0.0\n    params: [1, 2]\n")
         result = parse_assembly(text)
         assert result.spec is None
         assert ASM_SYN_TYPE in [d.code for d in result.diagnostics]
 
     def test_bad_enum_syn_005(self):
-        text = minimal_text("- id: hp1\n    model: ies.device.heat_pump@1.3.0\n    model_method: wizardry\n")
+        text = minimal_text("- id: hp1\n    model: ies.device.heat_pump@2.0.0\n    model_method: wizardry\n")
         result = parse_assembly(text)
         assert result.spec is None
         assert ASM_SYN_TYPE in [d.code for d in result.diagnostics]
 
     def test_unknown_key_syn_001(self):
-        text = minimal_text("- id: hp1\n    model: ies.device.heat_pump@1.3.0\n    magic: 1\n")
+        text = minimal_text("- id: hp1\n    model: ies.device.heat_pump@2.0.0\n    magic: 1\n")
         result = parse_assembly(text)
         assert result.spec is None
         assert ASM_SYN_PARSE in [d.code for d in result.diagnostics]
@@ -443,7 +441,7 @@ class TestPhaseB:
         assert ASM_EDGE_BAD_SINK not in codes(result)
 
     def test_edge_001_bad_source(self):
-        edge = "- id: e1\n  from: hp1.electric_in\n  to: grid.electric_out\n"
+        edge = "- id: e1\n  from: hp1.electricity_in\n  to: grid.electricity_import\n"
         text = minimal_text(f"- id: {GRID}- id: {HP}", edge)
         result = check_spec(parse_ok(text))
         assert ASM_EDGE_BAD_SOURCE in codes(result)
@@ -453,41 +451,41 @@ class TestPhaseB:
 
     def test_edge_002_bad_sink(self):
         # 输入对输出(方向倒挂)
-        edge = "- id: e1\n  from: hp1.electric_in\n  to: grid.electric_out\n"
+        edge = "- id: e1\n  from: hp1.electricity_in\n  to: grid.electricity_import\n"
         text = minimal_text(f"- id: {GRID}- id: {HP}", edge)
         result = check_spec(parse_ok(text))
         assert ASM_EDGE_BAD_SINK in codes(result)
 
     def test_edge_003_carrier_mismatch(self):
-        edge = "- id: e1\n  from: grid.electric_out\n  to: hp1.heat_out\n"
+        edge = "- id: e1\n  from: grid.electricity_import\n  to: hp1.heat_out\n"
         text = minimal_text(f"- id: {GRID}- id: {HP}", edge)
         result = check_spec(parse_ok(text))
         assert ASM_EDGE_CARRIER in codes(result)
 
     def test_edge_004_quantity_mismatch(self):
         # 电力端口(power)对燃气端口(flow):注册表推导物理量不一致
-        boiler = "boiler1\n    model: ies.device.gas_boiler@1.2.0\n"
-        edge = "- id: e1\n  from: grid.electric_out\n  to: boiler1.gas\n"
+        boiler = "boiler1\n    model: ies.device.gas_boiler@2.0.0\n"
+        edge = "- id: e1\n  from: grid.electricity_import\n  to: boiler1.gas_in\n"
         text = minimal_text(f"- id: {GRID}- id: {boiler}", edge)
         result = check_spec(parse_ok(text))
         assert ASM_EDGE_QUANTITY in codes(result)
 
     def test_edge_005_unit_dim_mismatch(self):
         # W 与 m3/s 量纲不可换算(units.convert 跨类拒绝)
-        boiler = "boiler1\n    model: ies.device.gas_boiler@1.2.0\n"
-        edge = "- id: e1\n  from: grid.electric_out\n  to: boiler1.gas\n"
+        boiler = "boiler1\n    model: ies.device.gas_boiler@2.0.0\n"
+        edge = "- id: e1\n  from: grid.electricity_import\n  to: boiler1.gas_in\n"
         text = minimal_text(f"- id: {GRID}- id: {boiler}", edge)
         result = check_spec(parse_ok(text))
         assert ASM_EDGE_UNIT_DIM in codes(result)
 
     def test_edge_006_self_loop(self):
-        edge = "- id: e1\n  from: grid.electric_out\n  to: grid.electric_out\n"
+        edge = "- id: e1\n  from: grid.electricity_import\n  to: grid.electricity_import\n"
         text = minimal_text(f"- id: {GRID}", edge)
         result = check_spec(parse_ok(text))
         assert ASM_EDGE_SELF_LOOP in codes(result)
 
     def test_edge_007_duplicate(self):
-        edges = GRID_HP_EDGE + "- id: e2\n  from: grid.electric_out\n  to: hp1.electric_in\n"
+        edges = GRID_HP_EDGE + "- id: e2\n  from: grid.electricity_import\n  to: hp1.electricity_in\n"
         text = minimal_text(f"- id: {GRID}- id: {HP}", edges)
         result = check_spec(parse_ok(text))
         assert ASM_EDGE_DUPLICATE in codes(result)
@@ -495,7 +493,7 @@ class TestPhaseB:
         assert diag.params["edge"] == "e2" and diag.params["dup_of"] == "e1"
 
     def test_edge_009_zero_capacity_warning(self):
-        edge = "- id: e1\n  from: grid.electric_out\n  to: hp1.electric_in\n  capacity: 0\n"
+        edge = "- id: e1\n  from: grid.electricity_import\n  to: hp1.electricity_in\n  capacity: 0\n"
         text = minimal_text(f"- id: {GRID}- id: {HP}", edge)
         result = check_spec(parse_ok(text))
         assert ASM_EDGE_ZERO_CAP in codes(result)
@@ -504,8 +502,8 @@ class TestPhaseB:
 
     def test_edge_008_loose_bidi_bus(self):
         # 双向-双向直连且母线无确定方向端口 → 悬空警告(阶段 D 母线构造后)
-        boiler = "boiler1\n    model: ies.device.gas_boiler@1.2.0\n"
-        edge = "- id: e1\n  from: bat1.electric\n  to: boiler1.gas\n"
+        boiler = "boiler1\n    model: ies.device.gas_boiler@2.0.0\n"
+        edge = "- id: e1\n  from: bat1.electricity\n  to: boiler1.gas_in\n"
         text = minimal_text(f"- id: {BAT}- id: {boiler}", edge)
         result = check_spec(parse_ok(text))
         assert ASM_EDGE_LOOSE_BIDI in codes(result)
@@ -523,7 +521,7 @@ class TestPhaseC:
         assert ASM_REF_DUP_DEVICE in codes(result)
 
     def test_ref_002_unregistered_model(self):
-        text = minimal_text("- id: ghost\n    model: ies.device.unknown@1.0.0\n")
+        text = minimal_text("- id: ghost\n    model: ies.device.unknown@2.0.0\n")
         result = check_spec(parse_ok(text))
         assert ASM_REF_MODEL_UNREG in codes(result)
 
@@ -531,7 +529,7 @@ class TestPhaseC:
         text = minimal_text("- id: hp1\n    model: ies.device.heat_pump@9.9.9\n")
         result = check_spec(parse_ok(text))
         diag = result.by_code(ASM_REF_MODEL_UNREG)[0]
-        assert diag.params["registered"] == "ies.device.heat_pump@1.3.0"
+        assert diag.params["registered"] == "ies.device.heat_pump@2.0.0"
         # 版本陈旧为非阻断警告(目录升级不破坏既有项目提交)
         assert diag.severity == "warning"
         assert diag.blocking is False
@@ -543,7 +541,7 @@ class TestPhaseC:
         assert ASM_REF_MODEL_UNREG not in codes(result)
 
     def test_ref_003_undefined_port(self):
-        edge = "- id: e1\n  from: grid.electric_out\n  to: hp1.missing_in\n"
+        edge = "- id: e1\n  from: grid.electricity_import\n  to: hp1.missing_in\n"
         text = minimal_text(f"- id: {GRID}- id: {HP}", edge)
         result = check_spec(parse_ok(text))
         diag = result.by_code(ASM_REF_PORT_UNDEF)[0]
@@ -566,7 +564,7 @@ class TestPhaseC:
 
     def test_ref_004_dataset_missing(self):
         text = minimal_text(
-            "- id: elec_load\n    model: ies.device.electric_load@1.1.0\n"
+            "- id: elec_load\n    model: ies.device.electric_load@2.0.0\n"
             "    data_refs:\n      - key: load_profile\n        dataset_version_id: 999\n"
         )
         result = check_spec(parse_ok(text), datasets=DATASETS)
@@ -575,7 +573,7 @@ class TestPhaseC:
 
     def test_ref_004_dataset_column_missing(self):
         text = minimal_text(
-            "- id: elec_load\n    model: ies.device.electric_load@1.1.0\n"
+            "- id: elec_load\n    model: ies.device.electric_load@2.0.0\n"
             "    data_refs:\n      - key: load_profile\n        dataset_version_id: 17\n"
             "        columns: [nope_kw]\n"
         )
@@ -586,18 +584,18 @@ class TestPhaseC:
     def test_input_001_port_unfed(self):
         text = minimal_text(f"- id: {GRID}- id: {HP}")
         result = check_spec(parse_ok(text))
-        diag = result.by_code(ASM_INPUT_UNFED)[0]
-        assert diag.params["device"] == "hp1" and diag.params["port"] == "electric_in"
-        assert diag.blocking is True
+        diags = result.by_code(ASM_INPUT_UNFED)
+        assert any(
+            d.params["device"] == "hp1" and d.params["port"] == "electricity_in" and d.blocking
+            for d in diags
+        )
 
-    def test_input_002_required_param_missing(self):
-        text = minimal_text("- id: heat_load\n    model: ies.device.heat_load@1.1.0\n")
-        result = check_spec(parse_ok(text))
-        assert ASM_INPUT_PARAM in codes(result)
+    # 注:ASM-INPUT-002(必填参数缺失)已随 2.0 废止(properties 均带默认值);
+    # ASM-INPUT-004 已删除:predefined 接口缺显式绑定不阻断(见 test_assembly_artifact.py)。
 
     def test_input_003_param_out_of_range(self):
         text = minimal_text(
-            "- id: boiler1\n    model: ies.device.gas_boiler@1.2.0\n"
+            "- id: boiler1\n    model: ies.device.gas_boiler@2.0.0\n"
             "    params: {thermal_efficiency: 1.5}\n"
         )
         result = check_spec(parse_ok(text))
@@ -605,14 +603,9 @@ class TestPhaseC:
         assert diag.params["param"] == "thermal_efficiency"
         assert diag.blocking is False  # 非阻断
 
-    def test_input_004_load_without_data(self):
-        text = minimal_text("- id: elec_load\n    model: ies.device.electric_load@1.1.0\n")
-        result = check_spec(parse_ok(text))
-        assert ASM_INPUT_LOAD_DATA in codes(result)
-
     def test_input_005_data_unit_dim(self):
         text = minimal_text(
-            "- id: elec_load\n    model: ies.device.electric_load@1.1.0\n"
+            "- id: elec_load\n    model: ies.device.electric_load@2.0.0\n"
             "    data_refs:\n      - key: load_profile\n        dataset_version_id: 17\n"
             "        unit: K\n"
         )
@@ -650,10 +643,10 @@ class TestPhaseD:
     def test_happy_text_buses(self):
         result = check_text(HAPPY_TEXT, datasets=DATASETS)
         carriers = {b.carrier for b in result.buses}
-        assert carriers == {"electric", "heat"}
-        electric = next(b for b in result.buses if b.carrier == "electric")
+        assert carriers == {"electricity", "heat"}
+        electric = next(b for b in result.buses if b.carrier == "electricity")
         assert electric.has_grid and electric.has_storage
-        assert "grid.electric_out" in electric.source_port_refs
+        assert "grid.electricity_import" in electric.source_port_refs
         heat = next(b for b in result.buses if b.carrier == "heat")
         assert "pipe_hot.heat_in" in heat.sink_port_refs
         assert "pipe_hot.heat_out" in heat.source_port_refs
@@ -672,7 +665,7 @@ class TestPhaseD:
 
     def test_solv_003_infeasible(self):
         # 电网禁进口禁反送 + 负荷 100 kW:固定供给 0 < 需求 100000 W,无调节手段
-        edge = "- id: e1\n  from: grid.electric_out\n  to: elec_load.electric_in\n"
+        edge = "- id: e1\n  from: grid.electricity_import\n  to: elec_load.electricity_demand\n"
         text = minimal_text(f"- id: {GRID_ZERO}- id: {LOAD100}", edge)
         result = check_spec(parse_ok(text), datasets=DATASETS)
         diag = result.by_code(ASM_SOLV_INFEASIBLE)[0]
@@ -681,31 +674,27 @@ class TestPhaseD:
 
     def test_solv_004_over_constrained_fixed_supply(self):
         # 自定义非可控固定源(注册表快照注入)端口容量 500000 W > 负荷 100000 W
+        from iesplan.devices.contracts2 import DeviceInfo, InterfaceSpec
+
         fixed_gen = DeviceTypeSpec(
-            type_id="ies.device.fixed_gen",
-            version="1.0.0",
-            name_zh="固定发电",
-            name_en="Fixed Generation",
-            model_method="mechanism",
-            stateful=False,
-            fidelity="medium",
-            energy_carriers=("electric",),
-            is_load=False,
-            capabilities=("generation",),
-            extends="ies.device.base",
-            help_topic="",
-            parameters={},
-            ports=(),
-            time_series={"inputs": (), "outputs": ()},
-            states=(),
-            model_commands={},
+            device=DeviceInfo(id="ies.device.fixed_gen"),
+            interfaces={
+                "electric_out": InterfaceSpec(
+                    id="electric_out",
+                    type="out",
+                    carrier="electricity",
+                    unit="kW",
+                    valid_range=(0.0, None),
+                ),
+            },
         )
         ctx = CheckContext(
             registry=_registry_with({"ies.device.fixed_gen": fixed_gen}), datasets=DATASETS
         )
-        gen = "gen1\n    model: ies.device.fixed_gen@1.0.0\n"
-        edge = "- id: e1\n  from: gen1.electric_out\n  to: elec_load.electric_in\n"
-        ports = port_decl("gen1", "electric_out", "electric", "out", "power", "W", "500000.0")
+        gen = "gen1\n    model: ies.device.fixed_gen@2.0.0\n"
+        edge = "- id: e1\n  from: gen1.electric_out\n  to: elec_load.electricity_demand\n"
+        # 端口容量按标准单位(W)声明, 与推导单位(kW)不一致时仅 REF-005 告警
+        ports = port_decl("gen1", "electric_out", "electricity", "out", "power", "W", "500000.0")
         text = minimal_text(f"- id: {gen}- id: {LOAD100}", edge, ports)
         spec = parse_ok(text)
         result = check_assembly(spec, ctx=ctx)
@@ -727,9 +716,9 @@ class TestPhaseD:
         )
         pipelines = (
             "pipelines:\n"
-            "  - id: pipe1\n    model: ies.device.transport_pipe@1.0.0\n"
+            "  - id: pipe1\n    model: ies.device.transport_pipe@2.0.0\n"
             "    params: {delay_steps: 2}\n"
-            "  - id: pipe2\n    model: ies.device.transport_pipe@1.0.0\n"
+            "  - id: pipe2\n    model: ies.device.transport_pipe@2.0.0\n"
             "    params: {delay_steps: 3}\n"
         )
         text = minimal_text(f"- id: {GRID}- id: {HP}", edges, pipelines)
@@ -739,7 +728,7 @@ class TestPhaseD:
         assert diag.location["object_id"] in ("pipe1", "pipe2")
 
     def test_solv_006_orphan(self):
-        pv2 = "pv2\n    model: ies.device.pv@1.3.0\n"
+        pv2 = "pv2\n    model: ies.device.pv@2.0.0\n"
         text = minimal_text(f"- id: {GRID}- id: {PV}- id: {pv2}", GRID_PV_EDGE)
         result = check_spec(parse_ok(text))
         diag = result.by_code(ASM_SOLV_ORPHAN)[0]
@@ -762,14 +751,14 @@ class TestPhaseD:
 class TestConstraints:
     def test_const_001_syntax(self):
         text = minimal_text(
-            f"- id: {GRID}- id: {HP}", "", constraint_section("hp1.electric_in <=")
+            f"- id: {GRID}- id: {HP}", "", constraint_section("hp1.electricity_in <=")
         )
         result = check_spec(parse_ok(text))
         assert ASM_CONST_SYNTAX in codes(result)
 
     def test_const_002_dim_mismatch(self):
         text = minimal_text(
-            f"- id: {GRID}- id: {HP}", "", constraint_section("hp1.electric_in <= 800")
+            f"- id: {GRID}- id: {HP}", "", constraint_section("hp1.electricity_in <= 800")
         )
         result = check_spec(parse_ok(text))
         assert ASM_CONST_DIM in codes(result)
@@ -861,7 +850,7 @@ def _simple_graph(conn_loss: float = 0.0) -> dict:
                 "device_id": 1,
                 "port_type": "electric",
                 "direction": "out",
-                "name": "electric_out",
+                "name": "electricity_import",
                 "capacity": None,
                 "params": {},
             },
@@ -870,7 +859,7 @@ def _simple_graph(conn_loss: float = 0.0) -> dict:
                 "device_id": 2,
                 "port_type": "electric",
                 "direction": "in",
-                "name": "electric_in",
+                "name": "electricity_in",
                 "capacity": None,
                 "params": {},
             },
@@ -888,7 +877,7 @@ def _simple_graph(conn_loss: float = 0.0) -> dict:
                 "device_id": 3,
                 "port_type": "electric",
                 "direction": "in",
-                "name": "electric_in",
+                "name": "electricity_demand",
                 "capacity": None,
                 "params": {},
             },
@@ -897,7 +886,7 @@ def _simple_graph(conn_loss: float = 0.0) -> dict:
                 "device_id": 4,
                 "port_type": "thermal",
                 "direction": "in",
-                "name": "heat_in",
+                "name": "heat_demand",
                 "capacity": None,
                 "params": {},
             },
@@ -946,7 +935,7 @@ class TestBuilder:
         assert spec.source_graph_id == 42
         assert spec.name == "g42"
         assert {d.id for d in spec.devices} == {"d1", "d2", "d3", "d4"}
-        assert spec.device_by_id("d2").model == "ies.device.heat_pump@1.3.0"
+        assert spec.device_by_id("d2").model == "ies.device.heat_pump@2.0.0"
         load = spec.device_by_id("d3")
         assert load.data_refs and load.data_refs[0].key == "load_profile"
         assert load.data_refs[0].dataset_version_id == 17
@@ -977,10 +966,10 @@ class TestBuilder:
 
     def test_graph_port_capacity_becomes_explicit_ports(self):
         graph = _simple_graph()
-        graph["ports"][1]["capacity"] = 1200.0  # hp1.electric_in
+        graph["ports"][1]["capacity"] = 1200.0  # hp1.electricity_in
         spec = build_assembly(graph)
         hp1 = spec.device_by_id("d2")
-        assert any(p.name == "electric_in" and p.capacity == 1200.0 for p in hp1.ports)
+        assert any(p.name == "electricity_in" and p.capacity == 1200.0 for p in hp1.ports)
         assert "capacity: 1200" in dumps_assembly(spec)
 
     def test_yaml_port_capacity_override_merged(self, monkeypatch):
@@ -1007,7 +996,7 @@ class TestBuilder:
 
         monkeypatch.setattr(checker_mod, "_yaml_device_ports", fake_yaml_ports)
         dev = checker_mod.AssemblyDevice(
-            id="hp1", model="ies.device.heat_pump@1.3.0", params={},
+            id="hp1", model="ies.device.heat_pump@2.0.0", params={},
             ports=[
                 checker_mod.AssemblyPort(
                     device="hp1", name="electric_in", carrier="electric",
@@ -1130,11 +1119,11 @@ class TestRegistryFallbackBoundary:
         import iesplan.assembly.checker as checker_mod
         from iesplan.core.errors import AppError
 
-        def fake_list_descriptors():
+        def fake_list_devices():
             raise AppError("设备注册表尚未初始化", code="SYS-CFG-001")
 
         monkeypatch.setattr(
-            "iesplan.devices.list_device_descriptors", fake_list_descriptors
+            "iesplan.devices.list_devices", fake_list_devices
         )
         with pytest.raises(AppError):  # 不再回退静态表, 直接阻断
             checker_mod._default_registry()
@@ -1143,11 +1132,11 @@ class TestRegistryFallbackBoundary:
         import iesplan.assembly.checker as checker_mod
         from iesplan.core.errors import AppError
 
-        def fake_list_descriptors():
+        def fake_list_devices():
             raise AppError("注册表内部损坏", code="SYS-CFG-002")
 
         monkeypatch.setattr(
-            "iesplan.devices.list_device_descriptors", fake_list_descriptors
+            "iesplan.devices.list_devices", fake_list_devices
         )
         with pytest.raises(AppError):
             checker_mod._default_registry()
@@ -1157,14 +1146,14 @@ class TestRegistryFallbackBoundary:
         import iesplan.assembly.checker as checker_mod
         from iesplan.core.errors import AppError
 
-        def fake_get_descriptor(type_id):
+        def fake_get_device(type_id):
             raise AppError("注册表内部损坏", code="SYS-CFG-002")
 
         monkeypatch.setattr(
-            "iesplan.devices.get_device_descriptor", fake_get_descriptor
+            "iesplan.devices.get_device", fake_get_device
         )
         dev = checker_mod.AssemblyDevice(
-            id="d1", model="ies.device.pv@1.4.0", params={}, ports=[],
+            id="d1", model="ies.device.pv@2.0.0", params={}, ports=[],
         )
         with pytest.raises(AppError):
             checker_mod._yaml_device_ports(dev, "ies.device.pv")

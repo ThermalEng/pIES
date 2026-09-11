@@ -1,15 +1,15 @@
 """财务三件套与规划配置(0.6.5 条目 1-2)持久化/服务/API 测试。
 
 覆盖:
-- Profile 登记: 内容寻址去重幂等、owner 引用建立;
-- 项目引用 Profile: 精确 profile_ref{id, content_sha256} 定位, 原子生成空覆盖
+- Profile 登记: 注册表按 id 唯一(同 id 重登记复用既有行)、owner 引用建立;
+- 项目引用 Profile: 精确 profile_ref{id} 定位, 原子生成空覆盖
   Effective(用户不可直接 author Effective), 事务提交后可被新会话读取;
 - Overrides 保存/清空: 追加不可变 revision → 确定性重合并生成 Effective,
   DELETE 追加空文档(乐观锁 409);
 - 领域校验: Profile 未设置无静默默认、覆盖越权(新增 finance_type/price_id/
   改单位/改 carrier/direction)拒绝;
 - 持久化: 不可变 revision 追加、乐观锁 409、未保存 404;
-- Planning: finance_content_sha256 必须等于当前 Effective content(400);
+- Planning: 必须先生成 Effective(400); 保存后返回 revision 指针;
   任何 Profile 切换/Overrides 保存/清空生成新 Effective 时当前指针失效;
 - 迁移 0006: 新表/指针列创建、旧 finance_configs 表与旧指针退役、幂等,
   兼容 fresh 与 legacy 0005 两种输入。
@@ -43,7 +43,6 @@ from iesplan.finance import (  # noqa: E402
     EffectiveFinanceConfig,
     FinanceOverrides,
     FinanceProfile,
-    merge_effective,
 )
 from iesplan.main import create_app  # noqa: E402
 from iesplan.migrations import _migrate_0006  # noqa: E402
@@ -110,7 +109,7 @@ def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
         "schema_version": "1.0.0",
-        "profile_ref": {"id": profile.profile_id, "content_sha256": profile.content_sha256},
+        "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
                 "upfront_capex": {
@@ -125,7 +124,7 @@ def _overrides_payload(profile: FinanceProfile) -> dict:
     }
 
 
-def _planning_payload(effective_sha: str) -> dict:
+def _planning_payload() -> dict:
     return {
         "objective": {"sense": "minimize", "expression": "system.total_financial_cost"},
         "variables": {
@@ -138,7 +137,6 @@ def _planning_payload(effective_sha: str) -> dict:
             },
         },
         "constraints": {},
-        "finance_content_sha256": effective_sha,
     }
 
 
@@ -147,7 +145,7 @@ def _profile() -> FinanceProfile:
 
 
 def _profile_ref(profile: FinanceProfile) -> dict:
-    return {"profile_ref": {"id": profile.profile_id, "content_sha256": profile.content_sha256}}
+    return {"profile_ref": {"id": profile.profile_id}}
 
 
 def _overrides(profile: FinanceProfile) -> FinanceOverrides:
@@ -226,16 +224,14 @@ def _register_profile(client: TestClient, headers: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Profile 登记(内容寻址, 幂等去重)
+# Profile 登记(注册表按 id 唯一, 同 id 重登记幂等复用)
 # ---------------------------------------------------------------------------
 
 
 def test_profile_registration_roundtrip_and_dedup(client: TestClient, db_session: Session) -> None:
     headers, _ = _owner(client, db_session)
-    body = _register_profile(client, headers)
-    profile = FinanceProfile.from_dict(body)
-    # 摘要作为精确内容身份字段保留(信任流程不重算比对)
-    assert len(profile.content_sha256) == 64
+    _register_profile(client, headers)
+    # revision 作为精确配置身份字段保留；信任流程不重算内容。
     # 相同内容重复登记: 幂等返回既有(不重复落对象行)
     first_id = client.get("/api/finance-profiles/cn-north-demo", headers=headers).json()["row"]["id"]
     second_id = client.get("/api/finance-profiles/cn-north-demo", headers=headers).json()["row"]["id"]
@@ -283,7 +279,6 @@ def test_list_finance_profiles_dedup_latest(client: TestClient, db_session: Sess
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 1  # 同一 profile_id 只返回最新一条
-    assert items[0]["content_sha256"] == FinanceProfile.from_dict(profile2_payload).content_sha256
     assert resp.json()["count"] == 1
 
 
@@ -295,25 +290,15 @@ def test_list_finance_profiles_dedup_latest(client: TestClient, db_session: Sess
 def test_project_set_profile_generates_effective(client: TestClient, db_session: Session) -> None:
     headers, pid = _owner(client, db_session)
     _register_profile(client, headers)
-    profile = _profile()
     resp = client.put(
         f"/api/projects/{pid}/finance-profile",
         json=_profile_ref(_profile()),
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    body = resp.json()
-    # 空覆盖: Effective == Profile, 三摘要闭合
-    assert body["effective_finance_config"]["profile_sha256"] == profile.content_sha256
-    assert body["effective_finance_config"]["overrides_sha256"] == (
-        FinanceOverrides.empty_for_profile(profile).content_sha256
-    )
-    effective = EffectiveFinanceConfig.from_dict(body["effective_finance_config"])
-    assert len(effective.content_sha256) == 64
     # GET 一致
     resp = client.get(f"/api/projects/{pid}/effective-finance", headers=headers)
     assert resp.status_code == 200
-    assert resp.json()["effective_finance_config"]["content_sha256"] == effective.content_sha256
 
 
 def test_effective_not_authorable(client: TestClient, db_session: Session) -> None:
@@ -356,8 +341,6 @@ def test_overrides_save_remerges_effective(client: TestClient, db_session: Sessi
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["revision"] == 2  # 空覆盖(1) + 本次真实覆盖(2)
-    expected = merge_effective(profile, overrides)
-    assert body["effective_finance_config"]["content_sha256"] == expected.content_sha256
     # 覆盖生效: 被覆盖叶子为新值, 未覆盖叶子保留
     eff = EffectiveFinanceConfig.from_dict(body["effective_finance_config"])
     assert eff.finance_types["pv_system"].upfront_capex.fixed.value == Decimal("1500")  # type: ignore[union-attr]
@@ -394,7 +377,7 @@ def test_overrides_scope_violations_rejected(client: TestClient, db_session: Ses
             },
         },
         {**base, "energy_prices": {"grid_import": {"carrier": "heat", "direction": "purchase", "kind": "constant", "value": {"value": "1", "unit": "CNY/kWh"}}}},  # 改写 carrier
-        {**base, "profile_ref": {"id": "cn-north-demo", "content_sha256": "0" * 64}},  # 伪造 profile_ref
+        {**base, "profile_ref": {"id": "cn-north-demo", "revision": 1}},  # profile_ref 非精确 {id} 形态
     ]
     for i, bad in enumerate(cases):
         resp = client.put(
@@ -468,10 +451,6 @@ def test_profile_switch_invalidates_chain(client: TestClient, db_session: Sessio
     # 切换后: 新空覆盖 revision(表内 max+1, 不撞旧行); Effective 血缘指向新 Profile
     body = resp.json()
     assert body["overrides_revision"] == 3  # 空覆盖(1) + 真实覆盖(2) + 切换重建(3)
-    assert body["effective_finance_config"]["profile_sha256"] == (
-        FinanceProfile.from_dict(profile2_payload).content_sha256
-    )
-    overrides = FinanceOverrides.from_dict(body["finance_overrides"]) if "finance_overrides" in body else None
     # 新覆盖为空覆盖文档(旧覆盖不残留)
     resp = client.get(f"/api/projects/{pid}/finance-overrides", headers=headers)
     assert resp.status_code == 200
@@ -483,7 +462,7 @@ def test_profile_switch_invalidates_chain(client: TestClient, db_session: Sessio
 
 
 # ---------------------------------------------------------------------------
-# PlanningConfig(finance_content_sha256 引用当前 Effective)
+# PlanningConfig(保存要求当前 Effective 存在; 版本链以显式 revision 引用)
 # ---------------------------------------------------------------------------
 
 
@@ -492,12 +471,12 @@ def test_planning_requires_current_effective(client: TestClient, db_session: Ses
     # 未生成 Effective → 400(PROJ-PLAN-002)
     resp = client.put(
         f"/api/projects/{pid}/planning-config",
-        json={"planning_config": _planning_payload("0" * 64), "expected_revision": None},
+        json={"planning_config": _planning_payload(), "expected_revision": None},
         headers=headers,
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "PROJ-PLAN-002"
-    # 完整链路后, 引用错误 content_sha256 → 400
+    # 生成 Effective 后保存 → 成功, GET 一致
     _register_profile(client, headers)
     client.put(
         f"/api/projects/{pid}/finance-profile",
@@ -506,35 +485,20 @@ def test_planning_requires_current_effective(client: TestClient, db_session: Ses
     )
     resp = client.put(
         f"/api/projects/{pid}/planning-config",
-        json={"planning_config": _planning_payload("0" * 64), "expected_revision": None},
-        headers=headers,
-    )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "PROJ-PLAN-002"
-    # 正确引用 → 成功, GET 一致
-    eff = client.get(f"/api/projects/{pid}/effective-finance", headers=headers).json()
-    effective_sha = eff["effective_finance_config"]["content_sha256"]
-    resp = client.put(
-        f"/api/projects/{pid}/planning-config",
-        json={"planning_config": _planning_payload(effective_sha), "expected_revision": None},
+        json={"planning_config": _planning_payload(), "expected_revision": None},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["revision"] == 1
     resp = client.get(f"/api/projects/{pid}/planning-config", headers=headers)
     assert resp.status_code == 200
-    assert resp.json()["planning_config"]["finance_content_sha256"] == effective_sha
 
 
 def test_planning_config_contract() -> None:
-    effective_sha = "0" * 64
-    config = PlanningConfig.from_dict(_planning_payload(effective_sha))
+    config = PlanningConfig.from_dict(_planning_payload())
     assert PlanningConfig.from_dict(config.to_dict()) == config
-    assert len(config.revision) == 64
     with pytest.raises(PlanningConfigError):
-        PlanningConfig.from_dict({**_planning_payload(effective_sha), "finance_content_sha256": "zz"})
-    with pytest.raises(PlanningConfigError):
-        PlanningConfig.from_dict({**_planning_payload(effective_sha), "finance_revision": effective_sha})
+        PlanningConfig.from_dict({**_planning_payload(), "finance_revision": 1})
 
 
 # ---------------------------------------------------------------------------
@@ -561,41 +525,38 @@ def test_migration_0006_retires_old_tables_and_pointers() -> None:
         assert {"finance_profile_id", "overrides_revision", "effective_finance_revision"} <= proj_cols
         planning_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(planning_configs)")).all()}
         assert "finance_revision" not in planning_cols
-        assert "finance_content_sha256" in planning_cols
     eng.dispose()
 
 
 def test_migration_0006_legacy_0005_schema_cleans_invalid_planning() -> None:
-    """B) 模拟正常完成 0005 的 legacy schema: 0006 清理失效规划行/指针并改名。"""
+    """B) 模拟正常完成 0005 的 legacy schema: 0006 清理失效规划行/指针并退役旧表。"""
     eng = create_engine("sqlite+pysqlite://", connect_args={"check_same_thread": False})
     Base.metadata.create_all(eng)
     with eng.begin() as conn:
         # 造 0005 legacy 形态: 旧 finance_configs 表、旧 planning_configs.finance_revision、
-        # projects.finance_revision / planning_revision 指针与无效历史行
+        # projects.finance_revision 指针与无效历史行
         conn.execute(text(
             "CREATE TABLE finance_configs ("
             " id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id),"
-            " revision INTEGER NOT NULL, content TEXT NOT NULL, content_sha256 TEXT NOT NULL,"
+            " revision INTEGER NOT NULL, content TEXT NOT NULL,"
             " created_by INTEGER NOT NULL REFERENCES users(id),"
             " created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(project_id, revision))"
         ))
         conn.execute(text(
-            "ALTER TABLE planning_configs RENAME COLUMN finance_content_sha256 TO finance_revision"
+            "ALTER TABLE planning_configs ADD COLUMN finance_revision INTEGER"
         ))
         conn.execute(text("ALTER TABLE projects ADD COLUMN finance_revision INTEGER"))
-        # 旧行: 指向将被删除的旧 FinanceConfig(摘要链失效)
+        # 旧行: 指向将被删除的旧 FinanceConfig(旧引用失效)
         conn.execute(text(
             "INSERT INTO projects (name, status, owner_id, currency, baseline_resolution,"
-            " baseline_leap_year, baseline_scenario_mode, baseline_sha256, schema_version,"
+            " baseline_leap_year, baseline_scenario_mode, schema_version,"
             " created_by, planning_revision, finance_revision)"
-            " VALUES ('legacy', 'active', 1, 'CNY', '1h', 0, 'single',"
-            " 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, 1, 7, 3)"
+            " VALUES ('legacy', 'active', 1, 'CNY', '1h', 0, 'single', 1, 1, 7, 3)"
         ))
         conn.execute(text(
-            "INSERT INTO planning_configs (project_id, revision, content, content_sha256,"
+            "INSERT INTO planning_configs (project_id, revision, content,"
             " finance_revision, created_by)"
-            " VALUES (1, 7, '{}', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',"
-            " 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', 1)"
+            " VALUES (1, 7, '{}', 3, 1)"
         ))
         _migrate_0006(conn)
         _migrate_0006(conn)  # 幂等
@@ -607,10 +568,8 @@ def test_migration_0006_legacy_0005_schema_cleans_invalid_planning() -> None:
         # 旧 finance_revision 指针退役
         proj_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(projects)")).all()}
         assert "finance_revision" not in proj_cols
-        # planning_configs 已改名为 finance_content_sha256
         planning_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(planning_configs)")).all()}
         assert "finance_revision" not in planning_cols
-        assert "finance_content_sha256" in planning_cols
         # 旧单体表退役
         tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).all()}
         assert "finance_configs" not in tables
@@ -622,19 +581,19 @@ def test_migration_0006_legacy_0005_schema_cleans_invalid_planning() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _set_profile_and_planning(client: TestClient, headers: dict, pid: int) -> tuple[str, int]:
-    """设置 Profile + 保存规划, 返回 (effective_sha, planning_revision)。"""
+def _set_profile_and_planning(client: TestClient, headers: dict, pid: int) -> int:
+    """设置 Profile + 保存规划, 返回 planning_revision(显式 revision 引用, 非摘要)。"""
     _register_profile(client, headers)
     client.put(f"/api/projects/{pid}/finance-profile", json=_profile_ref(_profile()), headers=headers)
     eff = client.get(f"/api/projects/{pid}/effective-finance", headers=headers).json()
-    effective_sha = eff["effective_finance_config"]["content_sha256"]
+    assert eff["revision"] >= 1
     resp = client.put(
         f"/api/projects/{pid}/planning-config",
-        json={"planning_config": _planning_payload(effective_sha), "expected_revision": None},
+        json={"planning_config": _planning_payload(), "expected_revision": None},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    return effective_sha, resp.json()["revision"]
+    return resp.json()["revision"]
 
 
 def test_planning_invalidated_on_profile_switch(
@@ -642,7 +601,7 @@ def test_planning_invalidated_on_profile_switch(
 ) -> None:
     """Profile 切换生成新 Effective → 当前 planning 指针失效(历史行保留)。"""
     headers, pid = _owner(client, db_session)
-    _, plan_rev = _set_profile_and_planning(client, headers, pid)
+    plan_rev = _set_profile_and_planning(client, headers, pid)
     # 登记第二个 Profile 并切换
     profile2_payload = {
         **PROFILE_PAYLOAD,
@@ -660,8 +619,6 @@ def test_planning_invalidated_on_profile_switch(
     resp = client.get(f"/api/projects/{pid}/planning-config", headers=headers)
     assert resp.status_code == 404
     # 历史 planning 行保留(append-only)
-    from iesplan.models.config_revision import PlanningConfigRevision
-
     rows = db_session.execute(
         text("SELECT COUNT(*) FROM planning_configs WHERE project_id=:p AND revision=:r"),
         {"p": pid, "r": plan_rev},
@@ -700,10 +657,6 @@ def test_planning_invalidated_on_overrides_delete(
     body = resp.json()
     assert body["revision"] == 2  # 追加空文档 revision
     # 空覆盖: Effective == Profile(裸合并)
-    profile = _profile()
-    assert body["effective_finance_config"]["overrides_sha256"] == (
-        FinanceOverrides.empty_for_profile(profile).content_sha256
-    )
     # GET overrides 现在指向空文档(不再 404)
     resp = client.get(f"/api/projects/{pid}/finance-overrides", headers=headers)
     assert resp.status_code == 200
@@ -735,13 +688,20 @@ def test_overrides_delete_optimistic_lock(client: TestClient, db_session: Sessio
     assert resp.json()["revision"] == 2
 
 
-def test_profile_ref_precise_binding_no_latest_drift(
+def test_profile_reregister_reuses_row_no_drift(
     client: TestClient, db_session: Session
 ) -> None:
-    """按精确 {id, content_sha256} 绑定: 同 id 新内容不影响已绑定旧摘要。"""
+    """同 id 重登记复用既有行: 注册表内容不被改写, 已绑定项目不漂移。"""
     headers, pid = _owner(client, db_session)
     _register_profile(client, headers)
-    # 同 profile_id 登记不同内容(新摘要)
+    resp = client.put(
+        f"/api/projects/{pid}/finance-profile",
+        json=_profile_ref(_profile()),
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    old_row_id = client.get(f"/api/projects/{pid}/finance-profile", headers=headers).json()["row"]["id"]
+    # 同 profile_id 登记不同内容 → 200 复用既有行(不改写内容)
     profile2_payload = {
         **PROFILE_PAYLOAD,
         "energy_prices": {
@@ -752,21 +712,16 @@ def test_profile_ref_precise_binding_no_latest_drift(
     }
     resp = client.post("/api/finance-profiles", json={"finance_profile": profile2_payload}, headers=headers)
     assert resp.status_code == 200
-    # 用精确旧摘要绑定(禁止 latest 猜测: 若取 latest 会绑到新摘要)
-    old_profile = _profile()
+    assert resp.json()["row"]["id"] == old_row_id
+    assert resp.json()["finance_profile"]["energy_prices"]["grid_import"]["value"]["value"] == "0.7"
+    # 已绑定项目不漂移: 仍指向既有行与既有内容
+    body = client.get(f"/api/projects/{pid}/finance-profile", headers=headers).json()
+    assert body["row"]["id"] == old_row_id
+    assert body["finance_profile"]["energy_prices"]["grid_import"]["value"]["value"] == "0.7"
+    # 引用未登记 id → 404(不静默回退)
     resp = client.put(
         f"/api/projects/{pid}/finance-profile",
-        json=_profile_ref(old_profile),
-        headers=headers,
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["finance_profile"]["content_sha256"] == old_profile.content_sha256
-    assert body["effective_finance_config"]["profile_sha256"] == old_profile.content_sha256
-    # 精确引用不存在的摘要 → 404(不静默回退 latest)
-    resp = client.put(
-        f"/api/projects/{pid}/finance-profile",
-        json={"profile_ref": {"id": "cn-north-demo", "content_sha256": "0" * 64}},
+        json={"profile_ref": {"id": "no-such-profile"}},
         headers=headers,
     )
     assert resp.status_code == 404
@@ -787,7 +742,6 @@ def test_set_profile_commits_transaction_for_new_session(
     # 独立新会话读取(expire_on_commit=False 语义下仍应从库读到已提交数据)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as fresh:
-        from iesplan.models.config_revision import EffectiveFinanceRevision
         from iesplan.models.project import Project
 
         proj = fresh.get(Project, pid)

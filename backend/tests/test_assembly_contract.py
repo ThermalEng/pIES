@@ -3,9 +3,9 @@
 覆盖:
 - 机器可读 JSON Schema 存在且可加载;
 - 合法样例通过结构阶段,非法样例产出稳定结构诊断;
-- 唯一规范化:相同语义 → 相同规范文本与摘要(键序无关、时间换算 UTC、
+- 唯一规范化:相同语义 → 相同规范文本(键序无关、时间换算 UTC、
   数值唯一有限表示、未解析资源拒绝、非有限值拒绝);
-- ValidatedAssemblyArtifact 三件套一致性校验与回执结构;
+- ValidatedAssemblyArtifact 二件套一致性校验与回执结构;
 - 新增诊断码登记(ASM-SYN-006..009 / ASM-RES / ASM-CALC / ASM-OUT / ASM-ART / ASM-CONV)。
 """
 
@@ -24,7 +24,6 @@ from iesplan.assembly import (
     SCHEMA_VERSION,
     ValidatedAssemblyArtifact,
     ValidationReceipt,
-    assembly_sha256,
     canonicalize_assembly_doc,
     parse_assembly_doc,
 )
@@ -61,8 +60,7 @@ def _load(name: str) -> str:
 def _resolved_doc(name: str) -> dict:
     """解析合法样例并把所有 relative_file 解析为 object(模拟校验器资源解析)。
 
-    规范化器对未解析资源确定性拒绝;规范形态测试不需要真实字节摘要,
-    用占位 SHA-256 表达内容寻址形态即可。
+    规范化器对未解析资源确定性拒绝;规范形态测试仅需对象形态占位。
     """
     result = parse_assembly_doc(_load(name))
     assert result.ok, [d.to_dict() for d in result.diagnostics]
@@ -72,8 +70,7 @@ def _resolved_doc(name: str) -> dict:
         ds_id: {
             "source": {
                 "kind": "object",
-                "object_id": f"sha256:{'0' * 64}",
-                "sha256": "0" * 64,
+                "object_id": f"file:{ds_id}.csv",
                 "media_type": "text/csv",
             }
         }
@@ -119,7 +116,7 @@ class TestSchemaFile:
         # 拒绝 latest / 范围版本 / 未版本化
         import re
 
-        assert re.match(model_pattern, "ies.device.heat_pump@1.3.0")
+        assert re.match(model_pattern, "ies.device.heat_pump@2.0.0")
         assert not re.match(model_pattern, "ies.device.heat_pump")
         assert not re.match(model_pattern, "ies.device.heat_pump@latest")
         assert not re.match(model_pattern, "ies.device.heat_pump@>=1.0.0")
@@ -236,11 +233,11 @@ class TestSamples:
         assert any("timestamp_must_have_zone" in str(d.params) for d in result.diagnostics)
 
     def test_nested_parameters_must_be_scalar(self):
-        text = _load("campus.assembly.yaml").replace("      cop_profile: 0", "      cop_profile: {a: 1}")
+        text = _load("campus.assembly.yaml").replace("      cop: 3.5", "      cop: {a: 1}")
         result = parse_assembly_doc(text)
         assert not result.ok
         assert any(
-            d.code == ASM_SYN_TYPE and d.location["field"] == "devices.hp1.parameters.cop_profile"
+            d.code == ASM_SYN_TYPE and d.location["field"] == "devices.hp1.parameters.cop"
             for d in result.diagnostics
         )
 
@@ -260,12 +257,11 @@ class TestCanonicalization:
     def _doc(self):
         return _resolved_doc("campus.assembly.yaml")
 
-    def test_deterministic_bytes_and_digest(self):
+    def test_deterministic_bytes(self):
         doc = self._doc()
-        t1, d1 = canonicalize_assembly_doc(doc)
-        t2, d2 = canonicalize_assembly_doc(doc)
-        assert t1 == t2 and d1 == d2 and d1 == assembly_sha256(t1)
-        assert len(d1) == 64
+        t1 = canonicalize_assembly_doc(doc)
+        t2 = canonicalize_assembly_doc(doc)
+        assert t1 == t2
 
     def test_key_order_insensitive(self):
         import copy
@@ -281,36 +277,35 @@ class TestCanonicalization:
         for dev_id in list(devices):
             entry = devices.pop(dev_id)
             devices[dev_id] = entry
-        t1, d1 = canonicalize_assembly_doc(doc)
-        t2, d2 = canonicalize_assembly_doc(reordered)
-        assert d1 == d2
+        t1 = canonicalize_assembly_doc(doc)
+        t2 = canonicalize_assembly_doc(reordered)
         assert t1 == t2
 
     def test_time_converted_to_utc_z(self):
         doc = self._doc()
         # start +08:00 → 前一日 16:00 UTC;end +08:00 → 16:00 UTC
-        text, _ = canonicalize_assembly_doc(doc)
+        text = canonicalize_assembly_doc(doc)
         assert '"start":"2024-12-31T16:00:00Z"' in text
         assert '"end":"2025-01-01T16:00:00Z"' in text
         assert "2025-01-01T00:00:00+08:00" not in text
 
     def test_number_unique_representation(self):
         doc = self._doc()
-        doc["devices"]["grid"]["parameters"]["max_import_power_kw"] = 800.0  # 整值浮点
-        t1, d1 = canonicalize_assembly_doc(doc)
-        doc2 = self._doc()  # 原始 int 800
-        t2, d2 = canonicalize_assembly_doc(doc2)
-        assert d1 == d2, "整值浮点与整数必须同规范字节"
-        assert '"max_import_power_kw":800' in t1
+        doc["devices"]["pv1"]["parameters"]["rated_capacity_kwp"] = 300.0  # 整值浮点
+        t1 = canonicalize_assembly_doc(doc)
+        doc2 = self._doc()  # 原始 int 300
+        t2 = canonicalize_assembly_doc(doc2)
+        assert t1 == t2  # 整值浮点与整数必须同规范字节 same canonical text
+        assert '"rated_capacity_kwp":300' in t1
         # 非整值浮点使用最短往返表示
         doc3 = self._doc()
         doc3["calculation"]["options"]["relative_gap"] = 0.0001
-        t3, _ = canonicalize_assembly_doc(doc3)
+        t3 = canonicalize_assembly_doc(doc3)
         assert '"relative_gap":0.0001' in t3
 
     def test_nonfinite_number_rejected(self):
         doc = self._doc()
-        doc["devices"]["grid"]["parameters"]["max_import_power_kw"] = float("nan")
+        doc["devices"]["pv1"]["parameters"]["rated_capacity_kwp"] = float("nan")
         with pytest.raises(ValueError):
             canonicalize_assembly_doc(doc)
         doc2 = self._doc()
@@ -327,11 +322,11 @@ class TestCanonicalization:
     def test_business_order_lists_preserved(self):
         doc = self._doc()
         doc["outputs"]["series"] = ["b.s1", "a.s2"]  # 声明顺序保留,不排序
-        t1, _ = canonicalize_assembly_doc(doc)
+        t1 = canonicalize_assembly_doc(doc)
         assert '"series":["b.s1","a.s2"]' in t1
         doc2 = self._doc()
         doc2["outputs"]["series"] = ["a.s2", "b.s1"]
-        t2, _ = canonicalize_assembly_doc(doc2)
+        t2 = canonicalize_assembly_doc(doc2)
         assert t1 != t2
 
 
@@ -343,13 +338,12 @@ class TestCanonicalization:
 class TestArtifact:
     def _artifact(self) -> ValidatedAssemblyArtifact:
         doc = _resolved_doc("campus.assembly.yaml")
-        text, digest = canonicalize_assembly_doc(doc)
+        text = canonicalize_assembly_doc(doc)
         receipt = ValidationReceipt(
-            assembly_sha256=digest,
             dependencies={"devices": {"ies.device.heat_pump": "1.3.0"}},
-            resources={"campus_load": {"sha256": "x" * 64, "media_type": "text/csv"}},
+            resources={"campus_load": {"media_type": "text/csv"}},
         )
-        return ValidatedAssemblyArtifact(canonical_text=text, assembly_sha256=digest, receipt=receipt)
+        return ValidatedAssemblyArtifact(canonical_text=text, receipt=receipt)
 
     def test_verify_passes(self):
         artifact = self._artifact()
@@ -365,39 +359,35 @@ class TestArtifact:
             "id": CANON_ALGORITHM_ID,
             "version": CANON_ALGORITHM_VERSION,
         }
-        assert receipt["assembly_sha256"] == artifact.assembly_sha256
+        # header-only
         assert "issued_at" not in receipt
 
     def test_receipt_is_deterministic_and_deeply_immutable(self):
         dependencies = {"devices": {"pins": ["1.0.0"]}}
-        resources = {"ds": {"sha256": "a" * 64, "columns": ["load"]}}
+        resources = {"ds": {"columns": ["load"]}}
         first = ValidationReceipt(
-            assembly_sha256="b" * 64,
             dependencies=dependencies,
             resources=resources,
         )
         expected = first.to_dict()
         dependencies["devices"]["pins"].append("tampered")
-        resources["ds"]["sha256"] = "0" * 64
+        resources["ds"]["columns"] = ["tampered"]
         assert first.to_dict() == expected
         with pytest.raises(TypeError):
             first.dependencies["devices"]["new"] = "forbidden"
         second = ValidationReceipt(
-            assembly_sha256="b" * 64,
             dependencies={"devices": {"pins": ["1.0.0"]}},
-            resources={"ds": {"sha256": "a" * 64, "columns": ["load"]}},
+            resources={"ds": {"columns": ["load"]}},
         )
         assert first.to_dict() == second.to_dict()
 
     def test_tampered_receipt_contract_fails_verify(self):
         artifact = self._artifact()
         bad_receipt = ValidationReceipt(
-            assembly_sha256=artifact.assembly_sha256,
             canonical_algorithm_version="9.9.9",
         )
         bad = ValidatedAssemblyArtifact(
             canonical_text=artifact.canonical_text,
-            assembly_sha256=artifact.assembly_sha256,
             receipt=bad_receipt,
         )
         assert not bad.verify()
@@ -406,20 +396,9 @@ class TestArtifact:
         artifact = self._artifact()
         restored = ValidatedAssemblyArtifact.from_persisted(
             artifact.canonical_text,
-            artifact.assembly_sha256,
             artifact.receipt.to_dict(),
         )
         assert restored.to_dict() == artifact.to_dict()
-
-    def test_tampered_receipt_sha_fails_verify(self):
-        artifact = self._artifact()
-        bad_receipt = ValidationReceipt(assembly_sha256="0" * 64)
-        bad = ValidatedAssemblyArtifact(
-            canonical_text=artifact.canonical_text,
-            assembly_sha256=artifact.assembly_sha256,
-            receipt=bad_receipt,
-        )
-        assert not bad.verify()
 
 
 # ---------------------------------------------------------------------------

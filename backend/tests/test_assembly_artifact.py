@@ -3,15 +3,14 @@
 覆盖:
 - 手写 YAML 与 GUI 项目导出进入同一校验入口(validate_assembly_text /
   validate_project_export);
-- 成功路径:签发不可变 ValidatedAssemblyArtifact(三件套一致 + 校验回执);
+- 成功路径:签发不可变 ValidatedAssemblyArtifact(二件套一致 + 校验回执);
 - 失败路径:阻断诊断 → 无 artifact,结构/模型/数据/图系统/计算兼容各阶段诊断定位;
-- 资源解析(relative_file → 内容寻址对象 + 摘要一致性);
+- 资源解析(relative_file → 内容寻址对象);
 - 严格精确版本(不匹配版本号 → 阻断)。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -48,14 +47,12 @@ SAMPLE_DATASETS = {
         "columns": ["e_load"],
         "column_units": {"e_load": "kWh"},
         "resolution": "1h",
-        "sha256": hashlib.sha256((DATA_DIR / "campus_load.data.csv").read_bytes()).hexdigest(),
         "media_type": "text/csv",
     },
     "campus_heat": {
         "columns": ["h_load"],
         "column_units": {"h_load": "kWh"},
         "resolution": "1h",
-        "sha256": hashlib.sha256((DATA_DIR / "campus_heat.data.csv").read_bytes()).hexdigest(),
         "media_type": "text/csv",
     },
 }
@@ -64,9 +61,8 @@ SAMPLE_DATASETS = {
 @pytest.fixture
 def init_registry():
     from iesplan.devices import init_registry
-    from iesplan.devices.pricing import load_price_book
 
-    init_registry(book=load_price_book())
+    init_registry()
     yield
 
 
@@ -80,34 +76,30 @@ class TestHappyPath:
         assert artifact is not None
         assert artifact.verify()
         assert artifact.verify_or_raise() is artifact
-        # 三件套一致
-        assert len(artifact.assembly_sha256) == 64
-        assert artifact.receipt.assembly_sha256 == artifact.assembly_sha256
         # 回执依赖锁包含全部设备与计算引用
         deps = artifact.receipt.dependencies
         devices_lock = deps["devices"]
         assert "ies.device.heat_pump" in devices_lock
         assert "ies.device.grid_connection" in devices_lock
         assert deps["calculation"]["solver"].endswith("@1.7.2")
-        # 资源摘要
+        # 资源媒体类型
         resources = artifact.receipt.resources
         assert "campus_load" in resources
-        assert resources["campus_load"]["sha256"] == SAMPLE_DATASETS["campus_load"]["sha256"]
         assert resources["campus_load"]["media_type"] == "text/csv"
 
 
 class TestUnhappyPath:
     def test_unknown_device_blocks_with_stable_code(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        text = text.replace("ies.device.heat_pump@1.3.0", "ies.device.unknown@1.0.0")
+        text = text.replace("ies.device.heat_pump@2.0.0", "ies.device.unknown@2.0.0")
         result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
         assert not result.ok and result.artifact is None
         assert any(d.code == ASM_REF_MODEL_UNREG for d in result.diagnostics)
 
     def test_version_mismatch_blocks(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        # heat_pump 1.3.0 → 1.0.0 触发精确版本不匹配
-        text = text.replace("ies.device.heat_pump@1.3.0", "ies.device.heat_pump@1.0.0")
+        # heat_pump 2.0.0 → 1.0.0 触发精确版本不匹配
+        text = text.replace("ies.device.heat_pump@2.0.0", "ies.device.heat_pump@1.0.0")
         result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
         assert result.artifact is None
         diag = next(d for d in result.diagnostics if d.code == ASM_REF_MODEL_UNREG)
@@ -116,23 +108,10 @@ class TestUnhappyPath:
 
     def test_undeclared_parameter_blocks(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        text = text.replace("      cop_profile: 0\n", "      cop_profile: 0\n      magic: 1\n")
+        text = text.replace("      cop: 3.5\n", "      cop: 3.5\n      magic: 1\n")
         result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
         assert result.artifact is None
         assert any(d.code == ASM_INPUT_UNDECLARED for d in result.diagnostics)
-
-    def test_missing_dataset_blocks(self, init_registry):
-        text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        # 删除 elec_load.data 绑定 → 该设备缺数据
-        text = text.replace(
-            "    data:\n      e_load:\n        dataset: campus_load\n        column: e_load\n",
-            "",
-        )
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
-        assert result.artifact is None
-        # 缺 data → ASM-INPUT-004 + ASM-INPUT-PARAM(load_profile 必填) + ASM-REF-DATASET
-        codes = {d.code for d in result.diagnostics}
-        assert "ASM-INPUT-004" in codes or "ASM-INPUT-002" in codes
 
     def test_dataset_column_mismatch_blocks(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
@@ -153,8 +132,8 @@ class TestUnhappyPath:
     def test_outputs_reference_unknown_device_blocks(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
         text = text.replace(
-            "  series:\n    - grid.electric_out\n",
-            "  series:\n    - ghost.electric_out\n",
+            "  series:\n    - grid.electricity_import\n",
+            "  series:\n    - ghost.electricity_import\n",
         )
         result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
         assert result.artifact is None
@@ -162,26 +141,19 @@ class TestUnhappyPath:
         assert diag.params["scope"] == "ghost"
 
     def test_input_unfed_blocks(self, init_registry):
-        # 单负荷设备,未连接到任何 source → 阶段 3 报告 ASM-INPUT-001
-        zero_sha = "0" * 64
+        # 热泵 electricity_in 未连接任何 source → 阶段 3 报告 ASM-INPUT-001
+        # (预定义数据接口不参与边连接, 用真实 in 端口覆盖该规则)
         text = (
             "schema: ies.assembly\n"
             'schema_version: "1.0.0"\n'
             "assembly:\n  id: bad\n  name: bad\n"
             'time_axis:\n  start: "2025-01-01T00:00:00Z"\n'
             '  end: "2025-01-02T00:00:00Z"\n  resolution: 1h\n  endpoint: left_closed_right_open\n'
-            f"resources:\n  datasets:\n    ds:\n      source:\n        kind: object\n"
-            f"        object_id: sha256:{zero_sha}\n"
-            f'        sha256: "{zero_sha}"\n'
-            "        media_type: text/csv\n"
+            "resources:\n  datasets: {}\n"
             "devices:\n"
-            "  load:\n"
-            "    model: ies.device.electric_load@1.2.0\n"
-            "    parameters: {peak_power_kw: 100}\n"
-            "    data:\n"
-            "      e_load:\n"
-            "        dataset: ds\n"
-            "        column: e_load\n"
+            "  hp1:\n"
+            "    model: ies.device.heat_pump@2.0.0\n"
+            "    parameters: {rated_heat_kw: 600, cop: 3.5}\n"
             "connections: {}\n"
             "constraints: {}\n"
             "calculation:\n"
@@ -232,7 +204,6 @@ class TestProjectExport:
                             "type_detail": "ies.device.heat_pump",
                             "rated_heat_kw": 600,
                             "cop": 3.5,
-                            "cop_profile": 0,
                         },
                     },
                     {
@@ -250,14 +221,14 @@ class TestProjectExport:
                     {
                         "id": 11,
                         "device_id": 1,
-                        "name": "electric_out",
+                        "name": "electricity_import",
                         "port_type": "electric",
                         "direction": "out",
                     },
                     {
                         "id": 21,
                         "device_id": 2,
-                        "name": "electric_in",
+                        "name": "electricity_in",
                         "port_type": "electric",
                         "direction": "in",
                     },
@@ -271,7 +242,7 @@ class TestProjectExport:
                     {
                         "id": 31,
                         "device_id": 3,
-                        "name": "electric_in",
+                        "name": "electricity_demand",
                         "port_type": "electric",
                         "direction": "in",
                     },
@@ -289,7 +260,6 @@ class TestProjectExport:
                 "columns": ["e_load"],
                 "column_units": {"e_load": "kWh"},
                 "resolution": "1h",
-                "sha256": hashlib.sha256(b"x").hexdigest(),
                 "media_type": "text/csv",
             },
         }
@@ -347,8 +317,6 @@ class TestProjectExport:
                         "kind": "existing",
                         "params": {
                             "type_detail": "ies.device.grid_connection",
-                            "max_import_power_kw": 800,
-                            "max_export_power_kw": 0,
                         },
                     },
                     {
@@ -359,7 +327,6 @@ class TestProjectExport:
                             "type_detail": "ies.device.heat_pump",
                             "rated_heat_kw": 600,
                             "cop": 3.5,
-                            "cop_profile": 0,
                         },
                     },
                     {
@@ -376,25 +343,25 @@ class TestProjectExport:
                     {
                         "id": 11,
                         "device_id": 1,
-                        "name": "electric_out",
-                        "port_type": "electric",
+                        "name": "electricity_import",
+                        "port_type": "electricity",
                         "direction": "out",
                     },
                     {
                         "id": 21,
                         "device_id": 2,
-                        "name": "electric_in",
-                        "port_type": "electric",
+                        "name": "electricity_in",
+                        "port_type": "electricity",
                         "direction": "in",
                     },
                     {
                         "id": 22,
                         "device_id": 2,
                         "name": "heat_out",
-                        "port_type": "thermal",
+                        "port_type": "heat",
                         "direction": "out",
                     },
-                    {"id": 31, "device_id": 3, "name": "heat_in", "port_type": "thermal", "direction": "in"},
+                    {"id": 31, "device_id": 3, "name": "heat_demand", "port_type": "heat", "direction": "in"},
                 ],
                 "connections": [
                     {"id": 101, "from_port_id": 11, "to_port_id": 21, "loss_rate": 0},
@@ -415,26 +382,14 @@ class TestProjectExport:
                 "columns": ["h_load"],
                 "column_units": {"h_load": "kWh"},
                 "resolution": "1h",
-                "sha256": hashlib.sha256(b"x").hexdigest(),
                 "media_type": "text/csv",
             },
         }
         result = validate_project_export(content, datasets=datasets)
         assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
         canonical = result.artifact.canonical_text
-        assert "transport_pipe@1.0.0" in canonical
+        assert "transport_pipe@2.0.0" in canonical
 
-    def test_project_export_missing_dataset_sha_blocks(self, init_registry):
-        content = {
-            "graph_id": 44,
-            "name": "missing",
-            "model": {"devices": [], "ports": [], "connections": []},
-            "calc_config": {},
-            "dataset_bindings": [{"dataset_version_id": 999}],
-        }
-        result = validate_project_export(content, datasets={999: {"columns": [], "resolution": "1h"}})
-        assert result.artifact is None
-        assert any(d.params.get("reason") == "dataset_sha256_required" for d in result.diagnostics)
 
 class TestArtifactTriple:
     def test_artifact_invariants(self, init_registry):
@@ -444,11 +399,6 @@ class TestArtifactTriple:
         # 不可变(校验尝试修改失败)
         with pytest.raises(FrozenInstanceError):
             artifact.canonical_text = "x"
-        # 三件套:文本 + sha256 + 回执
-        text = artifact.canonical_text
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        assert digest == artifact.assembly_sha256
-        assert artifact.receipt.assembly_sha256 == artifact.assembly_sha256
         assert artifact.receipt.schema_id == "ies.assembly"
         assert artifact.receipt.canonical_algorithm_id == "ies.assembly.canonical"
         # 诊断严重度分类

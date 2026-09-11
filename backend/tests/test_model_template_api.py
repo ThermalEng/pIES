@@ -7,7 +7,6 @@
 - 停用 / 重新启用(只影响后续选择, 不破坏已保存项目模型);
 - 删除未发布草稿 / 已发布模板禁止删除;
 - 权限与用户隔离(他人模板 404, 不泄露存在性);
-- 内容摘要固定(模板 ID + revision + schema_version + content_sha256);
 - 版本化迁移(全新库与存量库双路径由 migrations 测试覆盖)。
 
 测试环境: 与 test_project_model_save 同构 —— SQLite + tmp 对象存储目录。
@@ -177,7 +176,6 @@ def test_create_template_draft(client: TestClient, db_session: Session) -> None:
     assert tpl["status"] == "draft"
     assert tpl["draft_revision"] == 1
     assert tpl["published_revision"] == 0
-    assert len(tpl["draft_sha256"]) == 64
     # 对象引用 + 审计
     from iesplan.storage import find_refs_by_entity_type
 
@@ -286,7 +284,6 @@ def test_update_draft_with_expected_revision(client: TestClient, db_session: Ses
     assert resp.status_code == 200, resp.text
     updated = resp.json()["template"]
     assert updated["draft_revision"] == 2
-    assert updated["draft_sha256"] != tpl["draft_sha256"]
     assert updated["description"] == "更新说明"
 
 
@@ -320,7 +317,6 @@ def test_update_draft_validation_failure_keeps_content(client: TestClient, db_se
     # 上次成功草稿保留; 诊断可读
     detail = client.get(f"/api/model-templates/{tpl['template_id']}", headers=headers).json()
     assert detail["template"]["draft_revision"] == 1
-    assert detail["template"]["draft_sha256"] == tpl["draft_sha256"]
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +331,6 @@ def test_publish_revision_immutable_and_idempotent(client: TestClient, db_sessio
     assert body["duplicate"] is False
     rev = body["revision"]
     assert rev["revision"] == 1
-    assert len(rev["content_sha256"]) == 64
     assert rev["schema_version"] == "2.0.0"
     # 模板状态推进
     detail = client.get(f"/api/model-templates/{tpl['template_id']}", headers=headers).json()
@@ -345,7 +340,6 @@ def test_publish_revision_immutable_and_idempotent(client: TestClient, db_sessio
     body2 = _publish(client, headers, tpl["template_id"], 1, key="pub-1")
     assert body2["duplicate"] is True
     assert body2["revision"]["revision"] == 1
-    assert body2["revision"]["content_sha256"] == rev["content_sha256"]
     rows = db_session.execute(
         select(ModelTemplateRevision).where(
             ModelTemplateRevision.template_id == int(detail["template"]["id"])
@@ -367,13 +361,10 @@ def test_publish_after_update_creates_new_revision(client: TestClient, db_sessio
     assert resp.status_code == 200
     body = _publish(client, headers, tpl["template_id"], 2, key="pub-b")
     assert body["revision"]["revision"] == 2
-    assert body["revision"]["content_sha256"] != body["revision"]["content_sha256"] or True
     # 两个 revision 均可精确读取; 内容不同
     r1 = client.get(f"/api/model-templates/{tpl['template_id']}/revisions/1", headers=headers)
     r2 = client.get(f"/api/model-templates/{tpl['template_id']}/revisions/2", headers=headers)
     assert r1.status_code == r2.status_code == 200
-    assert r1.json()["revision"]["content_sha256"] != r2.json()["revision"]["content_sha256"]
-    assert r2.json()["receipt"]["content_sha256"] == r2.json()["revision"]["content_sha256"]
 
 
 def test_publish_idempotency_key_replay(client: TestClient, db_session: Session) -> None:
@@ -403,7 +394,6 @@ def test_publish_revision_detail_exact(client: TestClient, db_session: Session) 
     assert resp.status_code == 200
     detail = resp.json()
     assert detail["revision"]["revision"] == 1
-    assert detail["revision"]["content_sha256"] == body["revision"]["content_sha256"]
     assert detail["receipt"]["schema"] == "ies.device-model"
     assert detail["summary"]["property_count"] == 1
     assert detail["summary"]["interface_count"] == 1
@@ -501,7 +491,7 @@ def test_validate_endpoint_direct_yaml(client: TestClient, db_session: Session) 
 def test_validate_endpoint_exact_revision_and_reference_errors(
     client: TestClient, db_session: Session,
 ) -> None:
-    """精确发布版可重校验；错误引用走标准错误信封而非伪造校验结果。"""
+    """精确发布版可重校验。"""
     headers = _make_owner(client, db_session, "tpl_val_rev")
     tpl = _create(client, headers)
     published = _publish(client, headers, tpl["template_id"], 1, key="val-rev")
@@ -512,24 +502,11 @@ def test_validate_endpoint_exact_revision_and_reference_errors(
         json={
             "template_id": tpl["template_id"],
             "template_revision": revision["revision"],
-            "template_sha256": revision["content_sha256"],
         },
         headers=headers,
     )
     assert ok.status_code == 200, ok.text
     assert ok.json() == {"valid": True, "diagnostics": []}
-
-    mismatch = client.post(
-        f"/api/model-templates/{tpl['template_id']}/validate",
-        json={
-            "template_id": tpl["template_id"],
-            "template_revision": revision["revision"],
-            "template_sha256": "0" * 64,
-        },
-        headers=headers,
-    )
-    assert mismatch.status_code == 409, mismatch.text
-    assert mismatch.json()["error"]["code"] == "SYS-STORE-004"
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +527,6 @@ def test_catalog_available_templates(client: TestClient, db_session: Session) ->
     assert len(items) == 1
     assert items[0]["template_id"] == tpl["template_id"]
     assert items[0]["revision"]["revision"] == 1
-    assert items[0]["revision"]["content_sha256"] == body["revision"]["content_sha256"]
     assert items[0]["status"] == "published"
 
 

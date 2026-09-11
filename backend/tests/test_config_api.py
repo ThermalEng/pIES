@@ -6,16 +6,14 @@
 - 数据库: SQLite :memory:(models 全部表 create_all);
 - 应用: 独立 FastAPI 实例挂载 config_router + registry_router,
   用 dependency_overrides 替换 get_db;
-- 设备类型使用 models.devices.device_type 的 CHECK 短名(pv/storage/load),
-  经 services.config.resolve_device_type 的短名映射解析到注册表规格。
+- 设备类型使用 devices.device_type 的 CHECK 短名(pv/storage/load),
+  完整 2.0 注册表 ID 经设备行 params.type_detail 传递, 默认参数解析优先使用它。
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from hashlib import sha256
 from typing import Any
 
 import pytest
@@ -27,7 +25,6 @@ from sqlalchemy.pool import StaticPool
 
 from iesplan.api.auth import router as auth_router
 from iesplan.api.config import config_router, registry_router
-from iesplan.core.contracts import ProjectBaseline
 from iesplan.db import Base, get_db
 from iesplan.main import _register_exception_handlers
 from iesplan.models.identity import User
@@ -41,8 +38,8 @@ from iesplan.services import identity
 OWNER_USERNAME = "config_owner"
 OWNER_PASSWORD = "Config12345"
 
-#: 草稿/图内容哈希(sha256 十六进制)
-_HASH64 = "0" * 64
+#: 草稿内容对象占位 id(无存储行; 服务层缺失时回退初始骨架)
+_PLACEHOLDER_OBJECT_ID = 1
 
 
 @pytest.fixture()
@@ -80,9 +77,6 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
         baseline_resolution="1h",
         baseline_leap_year=False,
         baseline_scenario_mode="single",
-        baseline_sha256=ProjectBaseline(
-            resolution="1h", leap_year=False, scenario_mode="single"
-        ).digest(),
         owner_id=owner.id,
         created_by=owner.id,
     )
@@ -91,7 +85,7 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
     draft = Draft(
         project_id=proj.id,
         revision=1,
-        content_hash=sha256(b"draft-v1").hexdigest(),
+        content_object_id=_PLACEHOLDER_OBJECT_ID,
         is_current=True,
         updated_by=owner.id,
     )
@@ -102,18 +96,23 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
         project_id=proj.id,
         draft_id=draft.id,
         name="工作图",
-        graph_hash=sha256(b"graph-v1").hexdigest(),
         created_by=owner.id,
     )
     db.add(graph)
     db.flush()
     if with_devices:
+        # 设备行携带完整 2.0 注册表 ID(params.type_detail, 与模型服务写入一致),
+        # device_type 列为粗分类短名(CHECK 约束要求)
         db.add_all(
             [
-                Device(graph_id=graph.id, device_type="pv", kind="existing", name="存量光伏"),
-                Device(graph_id=graph.id, device_type="pv", kind="new", name="新建光伏"),
-                Device(graph_id=graph.id, device_type="storage", kind="new", name="储能电池"),
-                Device(graph_id=graph.id, device_type="load", kind="existing", name="电负荷"),
+                Device(graph_id=graph.id, device_type="pv", kind="existing", name="存量光伏",
+                       params={"type_detail": "ies.device.pv"}),
+                Device(graph_id=graph.id, device_type="pv", kind="new", name="新建光伏",
+                       params={"type_detail": "ies.device.pv"}),
+                Device(graph_id=graph.id, device_type="storage", kind="new", name="储能电池",
+                       params={"type_detail": "ies.device.battery"}),
+                Device(graph_id=graph.id, device_type="load", kind="existing", name="电负荷",
+                       params={"type_detail": "ies.device.electric_load"}),
             ]
         )
     db.commit()
@@ -163,8 +162,11 @@ def _default_config(db: Session, project: Project) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_default_config_new_devices_have_capacity_variables(db: Session) -> None:
-    """新建设备容量参数生成 continuous 变量; 存量设备固定不生成变量。"""
+def test_default_config_declares_no_variables(db: Session) -> None:
+    """默认不从设备技术常量猜测规划变量(已定行为); 规划变量必须显式声明。
+
+    旧行为(新建设备容量参数生成 continuous 变量)已退役。
+    """
     project = seed_project(db)
     cfg = _default_config(db, project)
 
@@ -179,39 +181,20 @@ def test_default_config_new_devices_have_capacity_variables(db: Session) -> None
     )
     # 默认算法 auto(自动选择兼容算法, REQ-CALC-005)
     assert cfg["algorithm"]["mode"] == "auto"
-
-    variables = cfg["variables"]
-    by_param = {v["param"]: v for v in variables}
-    # 新建光伏: rated_capacity_kwp 为 continuous 容量变量, 界 [0, max_capacity_kwp]
-    pv_var = by_param["rated_capacity_kwp"]
-    assert pv_var["type"] == "continuous"
-    assert pv_var["initial"] == 0.0
-    assert pv_var["min"] == 0.0
-    assert pv_var["max"] == 1000.0  # 注册表 max_capacity_kwp 默认 1000
-    assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", pv_var["name"])
-    # 新建电池: capacity_kwh / rated_power_kw 两个容量变量
-    assert by_param["capacity_kwh"]["type"] == "continuous"
-    assert by_param["rated_power_kw"]["type"] == "continuous"
-    # 存量设备不生成变量: 存量光伏 + 存量电负荷
-    var_names = [v["name"] for v in variables]
-    existing_devs = config_service.load_work_graph(db, project.id)["devices"]
-    existing_ids = {d["id"] for d in existing_devs if d["kind"] == "existing"}
-    for v in variables:
-        assert v["device_ref"] not in existing_ids
-    assert len(var_names) == 3  # 新建光伏 1 + 新建电池 2
+    # 无猜测变量
+    assert cfg["variables"] == []
 
 
 def test_default_config_device_params_use_registry_defaults(db: Session) -> None:
-    """设备参数当前值 = 注册表默认值(设备行参数叠加)。"""
+    """设备参数当前值 = 2.0 注册表 property value(设备行参数叠加)。"""
     project = seed_project(db)
     cfg = _default_config(db, project)
     devices = config_service.load_work_graph(db, project.id)["devices"]
     pv_dev = next(d for d in devices if d["kind"] == "new" and d["device_type"] == "pv")
     params = cfg["parameters"]["devices"][str(pv_dev["id"])]
-    assert params["rated_capacity_kwp"] == 0
-    assert params["max_capacity_kwp"] == 1000.0
-    assert params["efficiency"] == 0.20
-    assert params["unit_invest_cost"] == 3500.0
+    assert params["rated_capacity_kwp"] == 100
+    assert params["reference_irradiance"] == 1000
+    assert params["temp_coeff"] == -0.004
     # 经济/环境参数默认值
     assert cfg["parameters"]["economic"]["discount_rate"] == 0.08
     assert cfg["parameters"]["environmental"]["emission_factor_grid"] == 0.581
@@ -266,7 +249,7 @@ def test_save_then_get_config(client: TestClient, db: Session) -> None:
     assert got["version"] == 1
     assert got["config"]["irr_floor"] == 0.08
     assert got["config"]["objectives"][0]["metric"] == "irr_after_tax"
-    # 参数元数据: 每个设备参数带单位/范围/帮助键
+    # 参数元数据: 2.0 技术常量形态(单位/范围/默认值, 无 1.0 帮助键)
     device_meta = got["meta"]["parameters"]["devices"]
     assert device_meta, "必须有设备参数元数据"
     any_pv = next(
@@ -274,8 +257,8 @@ def test_save_then_get_config(client: TestClient, db: Session) -> None:
     )
     spec = any_pv["rated_capacity_kwp"]
     assert spec["unit"] == "kWp"
-    assert spec["help_key"].startswith("help.param.")
     assert spec["min"] == 0.0
+    assert spec["default"] == 100
     # 经济参数元数据
     assert got["meta"]["parameters"]["economic"]["discount_rate"]["default"] == 0.08
 
@@ -303,16 +286,20 @@ def test_project_not_found(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _explicit_var(**kw: Any) -> dict:
+    """显式规划变量(默认配置不再猜测变量, 用例自带声明)。"""
+    base = {"name": "hp_cap", "type": "continuous", "min": 0.0, "max": 1000.0, "initial": 0.0}
+    base.update(kw)
+    return base
+
+
 def test_invalid_variable_bounds_rejected(client: TestClient, db: Session) -> None:
     """初始值越界/min>max → 422 + PARAM-RNG-003 / PARAM-CONF-001。"""
     project = seed_project(db)
     default = _default_config(db, project)
-    # 篡改: 变量初始值超过上界
+    # 变量初始值超过上界
     bad = dict(default)
-    bad["variables"] = [
-        dict(v, initial=5000.0) if v["type"] == "continuous" and v["max"] == 1000.0 else v
-        for v in default["variables"]
-    ]
+    bad["variables"] = [_explicit_var(initial=5000.0)]
     resp = client.put(
         f"/api/projects/{project.id}/config",
         json={"config": bad, "expected_revision": 1},
@@ -323,10 +310,7 @@ def test_invalid_variable_bounds_rejected(client: TestClient, db: Session) -> No
 
     # min > max → PARAM-CONF-001
     bad2 = dict(default)
-    bad2["variables"] = [
-        dict(v, min=900.0, max=100.0) if v["type"] == "continuous" and v["max"] == 1000.0 else v
-        for v in default["variables"]
-    ]
+    bad2["variables"] = [_explicit_var(min=900.0, max=100.0)]
     resp2 = client.put(
         f"/api/projects/{project.id}/config",
         json={"config": bad2, "expected_revision": 1},
@@ -336,7 +320,7 @@ def test_invalid_variable_bounds_rejected(client: TestClient, db: Session) -> No
     assert "PARAM-CONF-001" in codes2
     # 非法类型 → SYS-CFG-001
     bad3 = dict(default)
-    bad3["variables"] = [dict(default["variables"][0], type="fuzzy")]
+    bad3["variables"] = [_explicit_var(type="fuzzy")]
     resp3 = client.put(
         f"/api/projects/{project.id}/config",
         json={"config": bad3, "expected_revision": 1},
@@ -350,7 +334,7 @@ def test_save_validation_error_envelope_shape(client: TestClient, db: Session) -
     project = seed_project(db)
     default = _default_config(db, project)
     bad = dict(default)
-    bad["variables"] = [dict(default["variables"][0], type="fuzzy")]
+    bad["variables"] = [_explicit_var(type="fuzzy")]
     resp = client.put(
         f"/api/projects/{project.id}/config",
         json={"config": bad, "expected_revision": 1},
@@ -389,7 +373,8 @@ def test_expression_constraint_parse_error_diagnostic(
     """表达式语法错误 → EXPR-SYN-001; 未登记变量 → EXPR-CODE-001。"""
     project = seed_project(db)
     default = _default_config(db, project)
-    var_name = default["variables"][0]["name"]
+    default["variables"] = [_explicit_var(unit="kWp")]
+    var_name = "hp_cap"
 
     # 语法错误
     broken = dict(default)
@@ -448,10 +433,7 @@ def test_validate_endpoint_does_not_save(client: TestClient, db: Session) -> Non
     project = seed_project(db)
     default = _default_config(db, project)
     bad = dict(default)
-    bad["variables"] = [
-        dict(v, initial=1e9) if v["type"] == "continuous" and v["max"] == 1000.0 else v
-        for v in default["variables"]
-    ]
+    bad["variables"] = [_explicit_var(initial=1e9)]
     resp = client.post(
         f"/api/projects/{project.id}/config/validate",
         json={"config": bad},
@@ -567,10 +549,15 @@ def test_irr_floor_missing_rejected(client: TestClient, db: Session) -> None:
 
 
 def test_algorithm_incompatible_rejected(client: TestClient, db: Session) -> None:
-    """手动选择不支持能力(IRR 硬约束/容量设计)的算法 → SYS-CFG-001。"""
+    """手动选择不支持能力(IRR 硬约束/容量设计)的算法 → SYS-CFG-001。
+
+    能力需求由配置实际内容派生: irr_floor → irr_hard_constraint,
+    continuous 变量 → capacity_design。
+    """
     project = seed_project(db)
     default = _default_config(db, project)
     cfg = dict(default)
+    cfg["variables"] = [_explicit_var()]
     cfg["algorithm"] = {"mode": "manual", "name": "ies.algo.lp_relax"}  # 无 irr_hard_constraint
     resp = client.put(
         f"/api/projects/{project.id}/config",
@@ -643,7 +630,7 @@ def test_default_endpoint(client: TestClient, db: Session) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["config"]["objectives"][0]["metric"] == "irr_after_tax"
-    assert len(body["config"]["variables"]) == 3
+    assert body["config"]["variables"] == []  # 默认不猜测规划变量
     assert body["meta"]["parameters"]["economic"]["discount_rate"]["unit"] == "-"
 
 

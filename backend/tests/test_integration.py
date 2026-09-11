@@ -247,12 +247,12 @@ def _add_connection(
     assert resp.status_code == 201, resp.text
 
 
-def _port(entry: dict[str, Any], port_type: str) -> int:
-    """按能源类型取设备端口 id(每设备每载体至多一个端口)。"""
+def _port(entry: dict[str, Any], name: str) -> int:
+    """按 2.0 端口名取设备端口 id(每设备内端口名唯一)。"""
     for p in entry["ports"]:
-        if p["port_type"] == port_type:
+        if p["name"] == name:
             return p["id"]
-    raise AssertionError(f"设备缺少 {port_type} 端口: {entry}")
+    raise AssertionError(f"设备缺少 {name} 端口: {entry}")
 
 
 def _create_sample_dataset(client: TestClient, user_id: int, project_id: int) -> tuple[int, int]:
@@ -335,8 +335,9 @@ def _baseline_confirm(client: TestClient, user_id: int, project_id: int, config:
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["confirmed"] is True and len(body["assumptions_hash"]) == 64
+    assert body["confirmed"] is True
     assert body["confirmed_by"] == user_id
+    assert body["confirmed_at"]
 
 
 def _submit_calc_task(
@@ -393,7 +394,7 @@ def _prepare_project(
     devices: dict[str, Any] = {}
     devices["grid"] = _add_device(
         client, user_id, pid, D_GRID, "市电电网",
-        {"max_import_power_kw": 10000, "max_export_power_kw": 0, "demand_charge": 40},
+        {"max_import_power_kw": 10000, "max_export_power_kw": 0},
     )
     devices["pv"] = _add_device(client, user_id, pid, D_PV, "屋顶光伏", {"rated_capacity_kwp": 500})
     devices["battery"] = _add_device(
@@ -403,54 +404,53 @@ def _prepare_project(
     )
     devices["hp"] = _add_device(
         client, user_id, pid, D_HP, "热泵",
-        {"rated_heat_kw": 1000, "cop": 3.0, "mode": "both"},
+        {"rated_heat_kw": 1000, "cop": 3.0},
     )
     devices["boiler"] = _add_device(
         client, user_id, pid, D_BOILER, "燃气锅炉",
-        {"rated_heat_kw": 1000, "thermal_efficiency": 0.92, "gas_price": 3.2},
+        {"rated_heat_kw": 1000, "thermal_efficiency": 0.92},
     )
     devices["chiller"] = _add_device(
         client, user_id, pid, D_CHILLER, "电制冷机",
         {"rated_cooling_kw": 1000, "cop": 4.0},
     )
     devices["eload"] = _add_device(
-        client, user_id, pid, D_ELOAD, "电负荷", {"peak_power_kw": 800, "load_profile": "dataset:e_load"}
+        client, user_id, pid, D_ELOAD, "电负荷", {"peak_power_kw": 800}
     )
     devices["hload"] = _add_device(
-        client, user_id, pid, D_HLOAD, "热负荷", {"heat_profile": "dataset:h_load"}
+        client, user_id, pid, D_HLOAD, "热负荷", {"peak_heat_kw": 800}
     )
     devices["cload"] = _add_device(
-        client, user_id, pid, D_CLOAD, "冷负荷", {"cooling_profile": "dataset:c_load"}
+        client, user_id, pid, D_CLOAD, "冷负荷", {"peak_cooling_kw": 800}
     )
 
-    # 连接(电/热/冷 总线拓扑; 电池双向端口作源或汇)
-    grid_e = _port(devices["grid"], "electric")
-    eload_e = _port(devices["eload"], "electric")
-    pv_e = _port(devices["pv"], "electric")
-    bat_e = _port(devices["battery"], "electric")
-    hp_e = _port(devices["hp"], "electric")
-    ch_e = _port(devices["chiller"], "electric")
+    # 连接(电/热/冷 总线拓扑; 电池双向端口作源或汇;
+    # 2.0 热泵无制冷接口, 冷负荷仅由制冷机供冷)
+    grid_e = _port(devices["grid"], "electricity_import")
+    eload_e = _port(devices["eload"], "electricity_demand")
+    pv_e = _port(devices["pv"], "electric_out")
+    bat_e = _port(devices["battery"], "electricity")
+    hp_e = _port(devices["hp"], "electricity_in")
+    ch_e = _port(devices["chiller"], "electricity_in")
     _add_connection(client, user_id, pid, grid_e, eload_e)
     _add_connection(client, user_id, pid, grid_e, bat_e)
     _add_connection(client, user_id, pid, bat_e, eload_e)
     _add_connection(client, user_id, pid, pv_e, eload_e)
     _add_connection(client, user_id, pid, grid_e, hp_e)
     _add_connection(client, user_id, pid, grid_e, ch_e)
-    _add_connection(client, user_id, pid, _port(devices["hp"], "thermal"),
-                    _port(devices["hload"], "thermal"))
-    _add_connection(client, user_id, pid, _port(devices["boiler"], "thermal"),
-                    _port(devices["hload"], "thermal"))
-    _add_connection(client, user_id, pid, _port(devices["hp"], "cooling"),
-                    _port(devices["cload"], "cooling"))
-    _add_connection(client, user_id, pid, _port(devices["chiller"], "cooling"),
-                    _port(devices["cload"], "cooling"))
+    _add_connection(client, user_id, pid, _port(devices["hp"], "heat_out"),
+                    _port(devices["hload"], "heat_demand"))
+    _add_connection(client, user_id, pid, _port(devices["boiler"], "heat_out"),
+                    _port(devices["hload"], "heat_demand"))
+    _add_connection(client, user_id, pid, _port(devices["chiller"], "cool_out"),
+                    _port(devices["cload"], "cool_demand"))
 
-    # 系统图断言: 设备 9 台(含 3 负荷), 连接 10 条
+    # 系统图断言: 设备 9 台(含 3 负荷), 连接 9 条
     resp = client.get(f"/api/projects/{pid}/model", headers=_h(client, user_id))
     assert resp.status_code == 200, resp.text
     graph = resp.json()
     assert len(graph["devices"]) == 9
-    assert len(graph["connections"]) == 10
+    assert len(graph["connections"]) == 9
 
     # 模型校验: 无 error/blocking(拓扑完整)
     resp = client.get(f"/api/projects/{pid}/model/validate", headers=_h(client, user_id))
@@ -580,14 +580,14 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     diff = selection["diff"]
     assert diff is not None
     assert diff["diff_patch"]["params"]["result_adoption"]["solution_index"] == 0
-    assert diff["preview_checksum"] is not None  # 差异补丁带校验值见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果 及 manual/developer-guide/zh-CN/contracts.md §快照与异步契约
+    assert diff["result_index_id"] == selection["selection"]["result_index_id"]
 
     # 差异预览（应用前确认，见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）
     resp = client.get(
         f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/diff", headers=_h(client, eng_id)
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["diff"]["preview_checksum"] == diff["preview_checksum"]
+    assert resp.json()["diff"]["diff_patch"] == diff["diff_patch"]
 
     # Excel 报告导出 → 短期授权下载
     resp = client.post(
@@ -597,7 +597,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     )
     assert resp.status_code == 200, resp.text
     excel_meta = resp.json()
-    assert excel_meta["size_bytes"] > 0 and excel_meta["sha256"]
+    assert excel_meta["size_bytes"] > 0 and excel_meta["token"]
     resp = client.get(
         f"/api/projects/{ctx['project_id']}/exports/excel/download",
         params={"token": excel_meta["token"]},
@@ -612,7 +612,7 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     )
     assert resp.status_code == 200, resp.text
     pkg_meta = resp.json()
-    assert pkg_meta["object_id"] and pkg_meta["sha256"]
+    assert pkg_meta["object_id"] and pkg_meta["size_bytes"] > 0
     resp = client.get(
         f"/api/projects/{ctx['project_id']}/exports/package/download",
         params={"token": pkg_meta["token"]},

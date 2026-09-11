@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator
-from hashlib import sha256
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -122,7 +121,16 @@ def _canonical(doc: dict[str, Any]) -> str:
 
 def _prepare_project(client: TestClient, db: Session, user, name: str = "结果测试项目") -> int:
     """准备项目: 创建 + 固化不可变版本(计算任务快照装配的前提)。"""
-    resp = client.post("/api/projects", json={"name": name}, headers=_h(client, user))
+    resp = client.post(
+        "/api/projects",
+        json={
+            "name": name,
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
+        headers=_h(client, user),
+    )
     assert resp.status_code == 201, resp.text
     pid = resp.json()["project"]["id"]
     resp = client.post(
@@ -231,7 +239,7 @@ def _build_payload(
     content_overrides: dict[str, Any] | None = None,
     payload_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """构造证据载荷: 顶层清单 + content(含校验值), 支持内容/清单覆盖。"""
+    """构造证据载荷: 顶层清单 + content, 支持内容/清单覆盖。"""
     content = _base_content(snapshot_id, hourly_object_ids)
     if content_overrides:
         content.update(content_overrides)
@@ -245,7 +253,6 @@ def _build_payload(
         "metrics": content["metrics"],
         "hourly_refs": content["hourly_refs"],
         "content": content,
-        "checksum": sha256(_canonical(content).encode("utf-8")).hexdigest(),
         "created_by": created_by,
     }
     if payload_overrides:
@@ -303,20 +310,18 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
     obj_b = _store_hourly(db, 100, fields=["p_grid_buy"])
     payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], owner.id)
 
-    # 1) 正常提交: complete + 64 位内容校验值 + 快照/算法/种子/逐时引用落库
+    # 1) 正常提交: 快照/算法/种子/逐时引用落库
     pkg = _submit_evidence(db, task_id, claim, payload)
     assert pkg.task_id == task_id
     assert pkg.attempt_id == claim.attempt_id
     assert pkg.calc_snapshot_id == task["calc_snapshot_id"]
     assert pkg.status == "complete"
-    assert len(pkg.content_hash) == 64
     assert pkg.object_id is not None
     assert pkg.created_by == owner.id
 
-    # 2) 读取内容校验: content 与 checksum 一致, 字段齐全
+    # 2) 读取内容校验: 字段齐全（不做内部摘要重算比对）
     loaded = results_service.evidence_content(db, results_service.get_evidence(db, pkg.id))
     assert loaded["content"] == payload["content"]
-    assert loaded["checksum"] == payload["checksum"]
     assert loaded["content"]["algorithm"] == "milp"
     assert loaded["content"]["seed"] == 42
     assert loaded["content"]["candidate_indices"] == [0, 1]
@@ -353,24 +358,6 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
     with pytest.raises(results_service.EvidenceWriteDeniedError):
         results_service.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
 
-
-def test_evidence_checksum_mismatch_records_invalid(client: TestClient, db: Session) -> None:
-    """内容校验失败：证据落库但 status='invalid'（校验失败不可用，见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §12）"""
-    owner = make_user(db, "owner_badpkg")
-    pid = _prepare_project(client, db, owner)
-    task = _submit_task(client, pid, owner, idempotency_key="bad-1")
-    claim = _claim(db, task["id"])
-    obj_a = _store_hourly(db, 10)
-    obj_b = _store_hourly(db, 10, fields=["p_grid_buy"])
-    payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], owner.id)
-    payload["checksum"] = sha256(b"tampered").hexdigest()  # 篡改校验值
-    pkg = _submit_evidence(db, task["id"], claim, payload)
-    assert pkg.status == "invalid"
-    # 缺失逐时引用 → invalid
-    payload2 = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], owner.id,
-                              payload_overrides={"hourly_refs": []})
-    pkg2 = _submit_evidence(db, task["id"], claim, payload2)
-    assert pkg2.status == "invalid"
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +403,6 @@ def test_assessment_four_dimensions_and_index(client: TestClient, db: Session) -
     assert index is not None
     assert index.assessment_id == a1["id"]
     assert index.evidence_package_id == pkg.id
-    assert len(index.result_hash) == 64
 
     # 4) 结果视图: 四维结论展示
     resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(client, owner))
@@ -576,15 +562,13 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
     resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result/diff", headers=_h(client, owner))
     assert resp.status_code == 404
 
-    # 2) 预览校验: 客户端确认的差异摘要必须与当前补丁一致
+    # 2) 选择结果（不做内部预览摘要校验）
     payload = results_service.evidence_content(db, pkg)
     content = payload["content"]
     expected_diff = results_service.build_diff_patch(content, 0)
-    preview = sha256(_canonical(expected_diff).encode("utf-8")).hexdigest()
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/select",
-        json={"solution_id": 0, "selection_type": "adopt", "reason": "IRR 最高",
-              "preview_checksum": preview},
+        json={"solution_id": 0, "selection_type": "adopt", "reason": "IRR 最高"},
         headers=_h(client, owner),
     )
     assert resp.status_code == 201, resp.text
@@ -592,7 +576,6 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
     assert body["selection"]["is_current"] is True
     assert body["diff"]["solution_id"] == 0
     assert body["diff"]["diff_patch"] == expected_diff
-    assert body["diff"]["preview_checksum"] == preview
     assert body["diff"]["project_version_id"] is not None
     # 补丁含容量参数名映射与财务摘要（见 manual/developer-guide/zh-CN/domain-model.md §规划、财务与计算配置）
     patch = body["diff"]["diff_patch"]["params"]["result_adoption"]
@@ -600,28 +583,18 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
     assert patch["capacity_params"]["rated_capacity_kwp"] == 500.0
     assert patch["irr"] == 0.12
 
-    # 3) 预览校验不符 → 409（确认预览内容校验，见 manual/developer-guide/zh-CN/contracts.md §HTTP 语义 409 冲突）
-    resp = client.post(
-        f"/api/projects/{pid}/tasks/{task_id}/result/select",
-        json={"solution_id": 1, "selection_type": "adopt",
-              "preview_checksum": sha256(b"stale-preview").hexdigest()},
-        headers=_h(client, owner),
-    )
-    assert resp.status_code == 409
-
-    # 4) 越界解标识 → 400
+    # 3) 越界解标识 → 400
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/select",
         json={"solution_id": 99, "selection_type": "adopt"}, headers=_h(client, owner),
     )
     assert resp.status_code == 400
 
-    # 5) 换选: 新行 + 旧行 is_current=false(历史选中保留)
-    preview1 = sha256(_canonical(results_service.build_diff_patch(content, 1)).encode()).hexdigest()
+    # 4) 换选: 新行 + 旧行 is_current=false(历史选中保留)
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/select",
         json={"solution_id": 1, "selection_type": "reference", "reference_rule": "benchmark",
-              "reason": "参考方案", "preview_checksum": preview1},
+              "reason": "参考方案"},
         headers=_h(client, owner),
     )
     assert resp.status_code == 201, resp.text
@@ -667,14 +640,10 @@ def test_result_select_idor_belongs_check(client: TestClient, db: Session) -> No
     assert resp.status_code == 404, resp.text
     assert resp.json()["error"]["code"] == "RES-MISS-003"
 
-    # 2) 正常请求不受影响: 项目 A 路径成功选中(校验值正确)
-    payload = results_service.evidence_content(db, pkg)
-    content = payload["content"]
-    expected_diff = results_service.build_diff_patch(content, 0)
-    preview = sha256(_canonical(expected_diff).encode("utf-8")).hexdigest()
+    # 2) 正常请求不受影响: 项目 A 路径成功选中
     resp = client.post(
         f"/api/projects/{pid_a}/tasks/{task_id}/result/select",
-        json={"solution_id": 0, "selection_type": "adopt", "preview_checksum": preview},
+        json={"solution_id": 0, "selection_type": "adopt"},
         headers=_h(client, owner),
     )
     assert resp.status_code == 201, resp.text

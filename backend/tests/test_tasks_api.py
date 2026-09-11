@@ -137,13 +137,12 @@ def _seed_dataset(db: Session, *, size_bytes: int = 0, quota_bytes: int = 0, tag
     version = DatasetVersion(
         dataset_id=dataset.id, version_no=1, timeline="hourly", resolution="1h",
         fixed_utc_offset_minutes=480, fields={}, units={},
-        content_hash=sha256(f"{tag}-v1".encode()).hexdigest(), created_by=user.id,
+        created_by=user.id,
     )
     db.add(version)
     db.flush()
     obj = StoredObject(
         oid=sha256(f"{tag}-obj".encode()).hexdigest(),
-        sha256=sha256(f"{tag}-obj".encode()).hexdigest(),
         size_bytes=size_bytes,
         quota_bytes=quota_bytes,
         status="stored",
@@ -264,20 +263,17 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     assert body["task"]["id"] != task_a["id"]
     assert body["task"]["calc_snapshot_id"] != snapshot_a
 
-    # 5) 快照按内容 sha256 去重: 仅 2 个快照(同输入共享 1 个)
+    # 5) 快照按内容去重: 仅 2 个快照(同输入共享 1 个)
     snapshots = db.execute(select(CalcSnapshot)).scalars().all()
     assert len(snapshots) == 2
     by_id = {s.id: s for s in snapshots}
     persisted = by_id[snapshot_a]
-    assert persisted.content_hash  # 64 位 hex
-    assert len(persisted.content_hash) == 64
+    assert persisted.random_seed is not None
     assert persisted.assembly_text is None
     assert persisted.canonical_assembly_text
-    # 文本仅校验字头，快照去重不再使用 assembly_sha256（header-only）
-    assert persisted.assembly_sha256 is None
+    # 文本仅校验字头，快照去重使用内容字段逐项相等判定（header-only）
     assert isinstance(persisted.assembly_receipt, dict)
     assert "issued_at" not in persisted.assembly_receipt
-    assert "assembly_sha256" not in persisted.assembly_receipt
     artifact = ValidatedAssemblyArtifact.from_persisted(
         persisted.canonical_assembly_text,
         persisted.assembly_receipt,
@@ -427,7 +423,8 @@ def test_state_advance_with_fake_executor(client: TestClient, db: Session) -> No
     assert detail["business_outcome"] == "normal_completion"
     assert detail["attempts"][0]["status"] == "succeeded"
     assert detail["progress"]["percent"] == 45.5
-    assert detail["calc_snapshot"]["content_hash"]
+    assert detail["calc_snapshot"]["id"] == detail["calc_snapshot_id"]
+    assert detail["calc_snapshot"]["random_seed"] is not None
     assert detail["current_lease"] is None  # 终态无活跃租约
 
 

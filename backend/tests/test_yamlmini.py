@@ -98,7 +98,6 @@ class TestDump:
             },
             "energy_prices": {},
             "taxes": {},
-            "content_sha256": "a" * 64,
         }
         assert load(dump(payload)) == payload
 
@@ -113,7 +112,7 @@ class TestDump:
         assert load(dump(payload)) == payload
 
     def test_dump_stable_key_order(self) -> None:
-        """映射键稳定排序: 相同语义产生相同字节(摘要输入前提)。"""
+        """映射键稳定排序: 相同语义产生相同字节。"""
         a = dump({"b": 1, "a": 2, "c": {"y": 1, "x": 2}})
         b = dump({"c": {"x": 2, "y": 1}, "a": 2, "b": 1})
         assert a == b

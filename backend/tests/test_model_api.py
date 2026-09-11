@@ -1,4 +1,4 @@
-"""系统模型单元测试(U04): 设备/连接/拓扑校验/图序列化往返/内容哈希稳定。
+"""系统模型单元测试(U04): 设备/连接/拓扑校验/图序列化往返。
 
 - API 层: SQLite 内存库(StaticPool 单连接) + FastAPI TestClient, 认证用窗口会话登录;
 - 服务层: 直接驱动 iesplan.services.model;
@@ -22,6 +22,7 @@ from iesplan.core.diagnostics import (
     PARAM_CONFLICT,
     PARAM_RNG_OUT,
     PARAM_UNIT_INCONSISTENT,
+    PARAM_UNIT_MISMATCH,
 )
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
@@ -35,11 +36,6 @@ BATTERY = "ies.device.battery"
 LOAD = "ies.device.electric_load"
 HEAT_LOAD = "ies.device.heat_load"
 HP = "ies.device.heat_pump"
-
-#: 负荷类必填参考参数(注册表 default=None, 04 §3.5-3.7)
-LOAD_PROFILE = {"load_profile": "ref:load1"}
-HEAT_PROFILE = {"heat_profile": "ref:heat1"}
-COOL_PROFILE = {"cooling_profile": "ref:cool1"}
 
 #: 种子管理员密码(经 /api/auth/login 真实登录)
 ADMIN_PASSWORD = "Admin12345"
@@ -79,9 +75,12 @@ def db_factory() -> tuple[sessionmaker, int]:
 
 
 def _create_project(factory: sessionmaker, name: str, admin_id: int) -> int:
-    """直连会话创建项目(projects.owner_id 记录所有者, 满足 U02 ensure_access)。"""
+    """直连会话创建项目(projects.owner_id 记录所有者, 满足 U02 ensure_access; 显式携带基线)。"""
     with factory() as session:
-        project = Project(name=name, owner_id=admin_id, created_by=admin_id)
+        project = Project(
+            name=name, owner_id=admin_id, created_by=admin_id,
+            baseline_resolution="1h", baseline_leap_year=False, baseline_scenario_mode="single",
+        )
         session.add(project)
         session.flush()
         session.commit()
@@ -179,21 +178,21 @@ def _codes(diags: list[dict]) -> list[str]:
 
 
 def test_device_types_public_endpoint(client: TestClient) -> None:
-    """公开注册表: 9 类设备, 含参数 schema(单位/范围/默认)。"""
+    """公开注册表: 2.0 设备文档, 含真实端口/参数 schema(单位/范围/默认)。"""
     resp = client.get("/api/registry/device-types")
     assert resp.status_code == 200
     body = resp.json()
     assert len(body["items"]) == 10  # RR-P2-05: 含 transport_pipe 管道设备
     hp = next(i for i in body["items"] if i["type_id"] == HP)
-    assert hp["name_zh"] == "热泵"
-    assert hp["energy_carriers"] == ["electric", "heat", "cool"]
+    assert hp["names"]["zh-CN"] == "热泵"
+    assert hp["schema_version"] == "2.0.0"
+    port_names = {p["name"] for p in hp["ports"]}
+    assert port_names == {"electricity_in", "heat_out"}
     rated = hp["parameters"]["rated_heat_kw"]
     assert rated["unit"] == "kW"
     assert rated["min"] == 0
     assert rated["max"] == 1_000_000
-    assert rated["stock_or_addition"] == "addition"
-    mode = hp["parameters"]["mode"]
-    assert mode["enum"] == ["heating", "cooling", "both"]
+    assert rated["default"] == 500
 
 
 # ---------------------------------------------------------------------------
@@ -202,16 +201,16 @@ def test_device_types_public_endpoint(client: TestClient) -> None:
 
 
 def test_create_device_out_of_range_param_rejected(client: TestClient, project_id: int) -> None:
-    """参数越界被拒: pv.efficiency 0.9 > max 0.5 → 400, 定位到字段。"""
+    """参数越界被拒: pv.rated_capacity_kwp 2000000 > max 1000000 → 400, 定位到字段。"""
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
-        json={"device_type": PV, "name": "PV1", "params": {"efficiency": 0.9}},
+        json={"device_type": PV, "name": "PV1", "params": {"rated_capacity_kwp": 2000000}},
         headers=_headers(client),
     )
     assert resp.status_code == 400
     err = resp.json()["error"]
     assert err["code"] == PARAM_RNG_OUT
-    assert err["location"]["field"] == "efficiency"
+    assert err["location"]["field"] == "rated_capacity_kwp"
     assert err["location"]["object_type"] == "device"
 
 
@@ -227,10 +226,10 @@ def test_create_device_unknown_type_rejected(client: TestClient, project_id: int
 
 
 def test_create_device_without_profile_param_accepted(client: TestClient, project_id: int) -> None:
-    """缺负荷曲线参数被接受: electric_load 不带 load_profile → 201, 参数归一为 null。
+    """负荷设备无需曲线参数: electric_load 只带物理参数 → 201。
 
-    前端拖拽新建负荷设备时跳过 default=null 的参数键(load_profile/heat_profile 等),
-    缺省按显式 null 处理(与 {'load_profile': null} 语义一致), 不再以 400 阻断创建。
+    2.0 无 load_profile 类引用参数(source.data_ref 为唯一数据路径);
+    未声明的参数键被拒(PARAM-UNIT-002)。
     """
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
@@ -239,8 +238,19 @@ def test_create_device_without_profile_param_accepted(client: TestClient, projec
     )
     assert resp.status_code == 201, resp.text
     body = resp.json()
-    assert body["device"]["params"]["load_profile"] is None
+    assert "load_profile" not in body["device"]["params"]
     assert body["device"]["params"]["type_detail"] == LOAD
+    # 未声明的引用键直接拒绝(无数据绑定延后机制)
+    resp = client.post(
+        f"/api/projects/{project_id}/model/devices",
+        json={
+            "device_type": LOAD,
+            "name": "L2",
+            "params": {"peak_power_kw": 100, "load_profile": "dataset:e_load"},
+        },
+        headers=_headers(client),
+    )
+    assert resp.status_code == 400, resp.text
 
 
 def test_create_device_param_type_mismatch_rejected(client: TestClient, project_id: int) -> None:
@@ -254,32 +264,34 @@ def test_create_device_param_type_mismatch_rejected(client: TestClient, project_
     assert resp.json()["error"]["code"] == "PARAM-UNIT-002"
 
 
-def test_create_device_enum_violation_rejected(client: TestClient, project_id: int) -> None:
-    """枚举越界被拒: heat_pump.source_type='ocean' → 400 PARAM-RNG-003。"""
+def test_create_device_undeclared_param_rejected(client: TestClient, project_id: int) -> None:
+    """未声明参数被拒: heat_pump.source_type(2.0 未声明) → 400 PARAM-UNIT-002。"""
     resp = client.post(
         f"/api/projects/{project_id}/model/devices",
         json={"device_type": HP, "name": "HP1", "params": {"source_type": "ocean"}},
         headers=_headers(client),
     )
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == PARAM_RNG_OUT
+    assert resp.json()["error"]["code"] == "PARAM-UNIT-002"
 
 
 def test_create_device_generates_ports_by_carrier(
     db_factory: tuple[sessionmaker, int], project_id: int
 ) -> None:
-    """端口按能源载体生成: heat_pump → electric_in/heat_out/cool_out。"""
+    """端口按 2.0 接口生成: heat_pump → electricity_in/heat_out; 负荷需求接口为 in 端口。"""
     factory, admin_id = db_factory
     with factory() as session:
         device = svc.create_device(session, project_id, HP, "HP1", created_by=admin_id)
         ports = {p.name: p for p in svc.get_device_ports(session, device.id)}
-        assert set(ports) == {"electric_in", "heat_out", "cool_out"}
-        assert ports["electric_in"].port_type == "electric"
-        assert ports["electric_in"].direction == "in"
+        assert set(ports) == {"electricity_in", "heat_out"}
+        assert ports["electricity_in"].port_type == "electric"
+        assert ports["electricity_in"].direction == "in"
         assert ports["heat_out"].port_type == "thermal"
         assert ports["heat_out"].direction == "out"
-        assert ports["cool_out"].port_type == "cooling"
-        assert ports["cool_out"].direction == "out"
+        load = svc.create_device(session, project_id, LOAD, "L1", created_by=admin_id)
+        load_ports = {p.name: p for p in svc.get_device_ports(session, load.id)}
+        assert set(load_ports) == {"electricity_demand"}
+        assert load_ports["electricity_demand"].direction == "in"
 
 
 def test_sync_ports_preserves_same_carrier_multi_port(
@@ -292,53 +304,42 @@ def test_sync_ports_preserves_same_carrier_multi_port(
     合法连线被判定端口缺失。新实现以 YAML 端口名 (name) 精确匹配, 两个
     electric 输入端口(名称不同)都应保留; 同名端口 id 不变, 既有连接保持。
     """
-    from iesplan.devices import DeviceModelDescriptor
+    from iesplan.devices.contracts2 import DeviceInfo, DeviceModelDocument
 
-    # 假 spec: 同 electric 载体两个不同名输入端口 + 一个 heat 输出
-    fake_spec = DeviceModelDescriptor(
-        type_id="ies.device.dual_inlet", version="1.0.0", name_zh="双输入", name_en="Dual",
-        model_method="mechanism", stateful=False, fidelity="medium",
-        energy_carriers=("electric", "heat"), is_load=False,
-        capabilities=(), extends="ies.device.base", help_topic="",
-        parameters={}, ports=(), time_series={}, states=(),
-        model_commands={},
-    )
+    def _doc(device_id: str) -> DeviceModelDocument:
+        return DeviceModelDocument(device=DeviceInfo(id=device_id))
+
+    # 假文档: 同 electric 载体两个不同名输入端口 + 一个 heat 输出
+    fake_spec = _doc("ies.device.dual_inlet")
     # 源设备: electric out + heat out(供连接)
-    source_spec = DeviceModelDescriptor(
-        type_id="ies.device.source_box", version="1.0.0", name_zh="源", name_en="Source",
-        model_method="mechanism", stateful=False, fidelity="medium",
-        energy_carriers=("electric", "heat"), is_load=False,
-        capabilities=(), extends="ies.device.base", help_topic="",
-        parameters={}, ports=(), time_series={}, states=(),
-        model_commands={},
-    )
+    source_spec = _doc("ies.device.source_box")
 
     def _dual_ports(spec, params=None):
         return [
-            {"carrier": "electric", "direction": "in", "name": "electric_a", "capacity_ref": None},
-            {"carrier": "electric", "direction": "in", "name": "electric_b", "capacity_ref": None},
+            {"carrier": "electricity", "direction": "in", "name": "electric_a", "capacity_ref": None},
+            {"carrier": "electricity", "direction": "in", "name": "electric_b", "capacity_ref": None},
             {"carrier": "heat", "direction": "out", "name": "heat_out", "capacity_ref": None},
         ]
 
     def _source_ports(spec, params=None):
         return [
-            {"carrier": "electric", "direction": "out", "name": "electric_out", "capacity_ref": None},
+            {"carrier": "electricity", "direction": "out", "name": "electric_out", "capacity_ref": None},
             {"carrier": "heat", "direction": "out", "name": "heat_out", "capacity_ref": None},
         ]
 
     monkeypatch.setattr(svc, "_descriptor_ports", lambda spec, params=None: (
-        _source_ports(spec) if spec.type_id == "ies.device.source_box" else _dual_ports(spec)
+        _source_ports(spec) if spec.device.id == "ies.device.source_box" else _dual_ports(spec)
     ))
-    # create_device/validate_device_params 从注册表读 spec; 假设备不在注册表,
-    # mock 模块级 get_device_descriptor 返回对应假 spec(覆盖创建/校验/同步三路径)
-    monkeypatch.setattr(svc, "get_device_descriptor", lambda type_id: (
+    # create_device/validate_device_params 从注册表读文档; 假设备不在注册表,
+    # mock 模块级 get_device 返回对应假文档(覆盖创建/校验/同步三路径)
+    monkeypatch.setattr(svc, "get_device", lambda type_id: (
         source_spec if type_id == "ies.device.source_box" else fake_spec
     ))
     factory, admin_id = db_factory
     with factory() as session:
         # 创建两个设备: 源(source_box) + 目标(dual_inlet)
         src = svc.create_device(session, project_id, "ies.device.source_box", "Src1", created_by=admin_id)
-        dst = svc.create_device(session, project_id, fake_spec.type_id, "Dual1", created_by=admin_id)
+        dst = svc.create_device(session, project_id, fake_spec.device.id, "Dual1", created_by=admin_id)
         src_ports = {p.name: p for p in svc.get_device_ports(session, src.id)}
         dst_ports = {p.name: p for p in svc.get_device_ports(session, dst.id)}
         assert set(dst_ports) == {"electric_a", "electric_b", "heat_out"}
@@ -371,7 +372,7 @@ def test_sync_ports_preserves_same_carrier_multi_port(
         monkeypatch.setattr(
             svc, "_descriptor_ports",
             lambda spec, params=None: [
-                {"carrier": "electric", "direction": "in", "name": "electric_a", "capacity_ref": None},
+                {"carrier": "electricity", "direction": "in", "name": "electric_a", "capacity_ref": None},
                 {"carrier": "heat", "direction": "out", "name": "heat_out", "capacity_ref": None},
             ],
         )
@@ -438,21 +439,21 @@ def test_create_device_duplicate_name_rejected(client: TestClient, project_id: i
 
 def test_update_device_name_and_params(client: TestClient, project_id: int) -> None:
     """更新设备名称/参数; 非法参数被拒。"""
-    created = _create_device(client, project_id, PV, "PV1", params={"efficiency": 0.2})
+    created = _create_device(client, project_id, PV, "PV1", params={"rated_capacity_kwp": 200})
     device_id = created["device"]["id"]
     resp = client.put(
         f"/api/projects/{project_id}/model/devices/{device_id}",
-        json={"name": "PV-A", "params": {"efficiency": 0.3, "tilt_deg": 45}},
+        json={"name": "PV-A", "params": {"rated_capacity_kwp": 300, "temp_coeff": -0.005}},
         headers=_headers(client),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["device"]["name"] == "PV-A"
-    assert body["device"]["params"]["efficiency"] == 0.3
+    assert body["device"]["params"]["rated_capacity_kwp"] == 300
     # 越界参数更新被拒
     resp = client.put(
         f"/api/projects/{project_id}/model/devices/{device_id}",
-        json={"params": {"efficiency": 0.9}},
+        json={"params": {"rated_capacity_kwp": 2000000}},
         headers=_headers(client),
     )
     assert resp.status_code == 400
@@ -476,8 +477,8 @@ def test_update_device_name_and_params(client: TestClient, project_id: int) -> N
 def _grid_and_load(client: TestClient, project_id: int) -> tuple[dict, dict, dict, dict]:
     """创建电网 + 电负荷, 返回 (grid, grid_out, load, load_in)。"""
     grid = _create_device(client, project_id, GRID, "Grid")
-    load = _create_device(client, project_id, LOAD, "Load", params=dict(LOAD_PROFILE))
-    return grid, _port(grid, "electric_out"), load, _port(load, "electric_in")
+    load = _create_device(client, project_id, LOAD, "Load", params={"peak_power_kw": 800})
+    return grid, _port(grid, "electricity_import"), load, _port(load, "electricity_demand")
 
 
 def test_connect_success(client: TestClient, project_id: int) -> None:
@@ -497,18 +498,18 @@ def test_connect_success(client: TestClient, project_id: int) -> None:
 def test_connect_energy_mismatch_rejected_with_location(client: TestClient, project_id: int) -> None:
     """能源类型不一致被拒(400, 定位到连接与端口)。"""
     grid = _create_device(client, project_id, GRID, "Grid")
-    heat = _create_device(client, project_id, HEAT_LOAD, "Heat", params=dict(HEAT_PROFILE))
+    heat = _create_device(client, project_id, HEAT_LOAD, "Heat", params={"peak_heat_kw": 500})
     resp = client.post(
         f"/api/projects/{project_id}/model/connections",
-        json={"from_port_id": _port(grid, "electric_out")["id"], "to_port_id": _port(heat, "heat_in")["id"]},
+        json={"from_port_id": _port(grid, "electricity_import")["id"], "to_port_id": _port(heat, "heat_demand")["id"]},
         headers=_headers(client),
     )
     assert resp.status_code == 400
     err = resp.json()["error"]
     assert err["code"] == "CONN-PORT-001"
     assert err["location"]["object_type"] == "connection"
-    assert err["location"]["from_port_id"] == _port(grid, "electric_out")["id"]
-    assert err["location"]["to_port_id"] == _port(heat, "heat_in")["id"]
+    assert err["location"]["from_port_id"] == _port(grid, "electricity_import")["id"]
+    assert err["location"]["to_port_id"] == _port(heat, "heat_demand")["id"]
     assert err["params"]["from_port_type"] == "electric"
     assert err["params"]["to_port_type"] == "thermal"
 
@@ -516,12 +517,12 @@ def test_connect_energy_mismatch_rejected_with_location(client: TestClient, proj
 def test_connect_direction_invalid_rejected(client: TestClient, project_id: int) -> None:
     """方向不兼容被拒: 负荷端口(in)不能作为源。"""
     grid = _create_device(client, project_id, GRID, "Grid")
-    load = _create_device(client, project_id, LOAD, "Load", params=dict(LOAD_PROFILE))
+    load = _create_device(client, project_id, LOAD, "Load", params={"peak_power_kw": 800})
     resp = client.post(
         f"/api/projects/{project_id}/model/connections",
         json={
-            "from_port_id": _port(load, "electric_in")["id"],
-            "to_port_id": _port(grid, "electric_out")["id"],
+            "from_port_id": _port(load, "electricity_demand")["id"],
+            "to_port_id": _port(grid, "electricity_import")["id"],
         },
         headers=_headers(client),
     )
@@ -547,7 +548,7 @@ def test_connect_duplicate_rejected(client: TestClient, project_id: int) -> None
 def test_connect_self_loop_rejected(client: TestClient, project_id: int) -> None:
     """自环被拒: 电池双向端口连自身。"""
     battery = _create_device(client, project_id, BATTERY, "B1")
-    port = _port(battery, "electric")
+    port = _port(battery, "electricity")
     resp = client.post(
         f"/api/projects/{project_id}/model/connections",
         json={"from_port_id": port["id"], "to_port_id": port["id"]},
@@ -565,13 +566,13 @@ def test_connect_cross_project_rejected(
     other_project = _create_project(factory, "其他项目", admin_id)
     grid, grid_out, _load, _load_in = _grid_and_load(client, project_id)
     other_load = _create_device(
-        client, other_project, LOAD, "Load2", params=dict(LOAD_PROFILE)
+        client, other_project, LOAD, "Load2", params={"peak_power_kw": 800}
     )
     resp = client.post(
         f"/api/projects/{project_id}/model/connections",
         json={
             "from_port_id": grid_out["id"],
-            "to_port_id": _port(other_load, "electric_in")["id"],
+            "to_port_id": _port(other_load, "electricity_demand")["id"],
         },
         headers=_headers(client),
     )
@@ -582,8 +583,8 @@ def test_connect_cross_project_rejected(
 def test_connect_bidirectional_battery_to_load(client: TestClient, project_id: int) -> None:
     """双向端口可作源: 电池 → 负荷。"""
     battery = _create_device(client, project_id, BATTERY, "B1")
-    load = _create_device(client, project_id, LOAD, "Load", params=dict(LOAD_PROFILE))
-    body = _connect(client, project_id, _port(battery, "electric")["id"], _port(load, "electric_in")["id"])
+    load = _create_device(client, project_id, LOAD, "Load", params={"peak_power_kw": 800})
+    body = _connect(client, project_id, _port(battery, "electricity")["id"], _port(load, "electricity_demand")["id"])
     assert body["connection"]["conn_type"] == "electric_line"
 
 
@@ -599,11 +600,15 @@ def test_connect_attrs_and_update_connection(
             project_id,
             LOAD,
             "Load",
-            params=dict(LOAD_PROFILE),
+            params={"peak_power_kw": 800},
             created_by=admin_id,
         )
-        grid_port = session.scalars(sa.select(Port).where(Port.device_id == grid.id)).one()
-        load_port = session.scalars(sa.select(Port).where(Port.device_id == load.id)).one()
+        grid_port = session.scalars(
+            sa.select(Port).where(Port.device_id == grid.id, Port.name == "electricity_import")
+        ).one()
+        load_port = session.scalars(
+            sa.select(Port).where(Port.device_id == load.id, Port.name == "electricity_demand")
+        ).one()
         conn = svc.connect(
             session, project_id, grid_port.id, load_port.id, attrs={"capacity": 500, "loss_rate": 0.05}
         )
@@ -701,7 +706,7 @@ def test_validate_unconnected_load_warning(client: TestClient, project_id: int) 
 
 def test_validate_energy_imbalance_error(client: TestClient, project_id: int) -> None:
     """能源不平衡: 只建热负荷(热载体只有汇无源) → PARAM-UNIT-003 错误。"""
-    _create_device(client, project_id, HEAT_LOAD, "Heat", params=dict(HEAT_PROFILE))
+    _create_device(client, project_id, HEAT_LOAD, "Heat", params={"peak_heat_kw": 500})
     diags = _get_validate(client, project_id)
     imbalanced = [d for d in diags if d["code"] == PARAM_UNIT_INCONSISTENT]
     assert len(imbalanced) == 1
@@ -789,13 +794,13 @@ def test_validate_unregistered_type_diagnostic(
 def test_graph_serialization_roundtrip(client: TestClient, project_id: int) -> None:
     """图序列化往返: 设备+端口+连接+布局结构完整。"""
     grid = _create_device(client, project_id, GRID, "Grid", position={"x": 10, "y": 20})
-    load = _create_device(client, project_id, LOAD, "Load", params=dict(LOAD_PROFILE))
-    _connect(client, project_id, _port(grid, "electric_out")["id"], _port(load, "electric_in")["id"])
+    load = _create_device(client, project_id, LOAD, "Load", params={"peak_power_kw": 800})
+    _connect(client, project_id, _port(grid, "electricity_import")["id"], _port(load, "electricity_demand")["id"])
     graph = _get_graph(client, project_id)
     assert graph["graph_id"] is not None
     assert graph["name"] == "工作图"
     assert len(graph["devices"]) == 2
-    assert len(graph["ports"]) == 2
+    assert len(graph["ports"]) == 3  # 电网进出口 2 + 负荷需求 1
     assert len(graph["connections"]) == 1
     dev = graph["devices"][0]
     assert dev["device_type"] == GRID
@@ -810,46 +815,6 @@ def test_graph_serialization_roundtrip(client: TestClient, project_id: int) -> N
     # 布局对象按设备 id 索引
     assert graph["layout"]["devices"][str(grid["device"]["id"])] == {"position": {"x": 10.0, "y": 20.0}}
     assert str(load["device"]["id"]) not in graph["layout"]["devices"]
-
-
-def test_content_hash_stable(client: TestClient, project_id: int) -> None:
-    """内容哈希稳定: 重复读取一致; 仅布局变化不变; 内容变化必变。"""
-    created = _create_device(client, project_id, PV, "PV1", params={"efficiency": 0.2})
-    device_id = created["device"]["id"]
-    h1 = _get_graph(client, project_id)["graph_hash"]
-    assert h1
-    assert _get_graph(client, project_id)["graph_hash"] == h1
-    # 仅更新位置 → 哈希不变(布局不入内容)
-    client.put(
-        f"/api/projects/{project_id}/model/devices/{device_id}",
-        json={"position": {"x": 1, "y": 2}},
-        headers=_headers(client),
-    )
-    assert _get_graph(client, project_id)["graph_hash"] == h1
-    # 参数变化 → 哈希变化
-    client.put(
-        f"/api/projects/{project_id}/model/devices/{device_id}",
-        json={"params": {"efficiency": 0.3}},
-        headers=_headers(client),
-    )
-    h2 = _get_graph(client, project_id)["graph_hash"]
-    assert h2 != h1
-    assert _get_graph(client, project_id)["graph_hash"] == h2
-
-
-def test_content_hash_changes_on_connect_and_disconnect(client: TestClient, project_id: int) -> None:
-    """内容哈希随连接增删变化(拓扑内容参与哈希)。"""
-    grid, grid_out, _load, load_in = _grid_and_load(client, project_id)
-    h_empty = _get_graph(client, project_id)["graph_hash"]
-    conn = _connect(client, project_id, grid_out["id"], load_in["id"])
-    h_conn = _get_graph(client, project_id)["graph_hash"]
-    assert h_conn != h_empty
-    client.delete(
-        f"/api/projects/{project_id}/model/connections/{conn['connection']['id']}", headers=_headers(client)
-    )
-    h_disconnected = _get_graph(client, project_id)["graph_hash"]
-    # 断开后设备/端口行 id 不变 → 哈希回到初值(内容寻址语义)
-    assert h_disconnected == h_empty
 
 
 def test_empty_graph_for_new_project(client: TestClient, project_id: int) -> None:
@@ -882,18 +847,21 @@ def test_get_graph_missing_project_404(client: TestClient) -> None:
 
 
 def test_validate_device_params_service() -> None:
-    """参数校验(服务层): 缺省归一/越界/枚举/类型/未注册。"""
-    # 缺省 reference 参数归一为 null(前端跳过 null 默认值, 与显式 null 语义一致)
+    """参数校验(服务层): 合法/未声明拒绝/越界/未注册。"""
+    # 缺省键不校验(2.0 无引用参数, source.data_ref 为唯一数据路径)
     diags = svc.validate_device_params(LOAD, {"peak_power_kw": 10}, device_id=7)
     assert diags == []
-    # 合法参数无诊断
+    # 未声明的引用键 → PARAM-UNIT-002(无数据绑定延后机制)
     diags = svc.validate_device_params(
-        LOAD, {"peak_power_kw": 10, "load_profile": "ref:l"}, device_id=7
+        LOAD, {"peak_power_kw": 10, "load_profile": "dataset:e_load"}, device_id=7
     )
-    assert diags == []
-    # 越界与枚举
-    diags = svc.validate_device_params(HP, {"cop": 9.0, "mode": "tilt"}, device_id=7)
+    assert len(diags) == 1 and diags[0].code == PARAM_UNIT_MISMATCH
+    # 越界(两处同时报告)
+    diags = svc.validate_device_params(HP, {"cop": 9.0, "rated_heat_kw": -5}, device_id=7)
     assert sum(d.code == PARAM_RNG_OUT for d in diags) == 2
+    # 未声明参数 → PARAM-UNIT-002
+    diags = svc.validate_device_params(HP, {"mode": "tilt"}, device_id=7)
+    assert len(diags) == 1
     # 未注册类型抛 NotFoundError
     with pytest.raises(svc.NotFoundError):
         svc.validate_device_params("ies.device.nope", {}, device_id=7)

@@ -31,10 +31,10 @@ ALL_TABLES: tuple[str, ...] = (
     "projects", "drafts", "project_versions", "version_refs",
     "project_models", "project_model_sequences",
     "model_templates", "model_template_revisions", "model_template_draft_revisions",
-    "template_migration_receipts",
     "system_graphs", "devices", "ports", "connections",
     "datasets", "dataset_versions", "dataset_files",
     "calc_configs", "calc_snapshots",
+    "finance_profiles", "finance_overrides", "effective_finance_revisions", "planning_configs",
     "tasks", "task_attempts", "task_leases", "task_progress", "task_diagnostics", "compute_slots",
     "evidence_packages", "result_assessments", "result_index", "result_selections", "reports",
     "uncertainty_snapshots", "sample_tasks", "sample_records",
@@ -64,27 +64,27 @@ KEY_COLUMNS: dict[str, set[str]] = {
     "admin_maintenance_actions": {"action_type", "performed_by", "status", "params", "result"},
     "projects": {
         "name", "owner_id", "currency", "baseline_resolution", "baseline_leap_year",
-        "baseline_scenario_mode", "baseline_sha256", "current_draft_id", "current_version_id"
+        "baseline_scenario_mode", "current_draft_id", "current_version_id"
     },
-    "drafts": {"project_id", "revision", "content_hash", "parent_draft_id", "is_current"},
+    "drafts": {"project_id", "revision", "content_object_id", "parent_draft_id", "is_current"},
     "project_versions": {
-        "project_id", "version_no", "content_hash", "baseline_resolution",
-        "baseline_leap_year", "baseline_scenario_mode", "baseline_sha256", "reason"
+        "project_id", "version_no", "content_object_id", "baseline_resolution",
+        "baseline_leap_year", "baseline_scenario_mode", "reason"
     },
-    "version_refs": {"project_version_id", "ref_type", "object_id", "ref_hash"},
-    "system_graphs": {"project_id", "draft_id", "project_version_id", "graph_hash"},
+    "version_refs": {"project_version_id", "ref_type", "object_id"},
+    "system_graphs": {"project_id", "draft_id", "project_version_id"},
     "devices": {"graph_id", "device_type", "kind", "params", "model_fidelity"},
     "ports": {"device_id", "port_type", "direction", "capacity"},
     "connections": {"graph_id", "from_port_id", "to_port_id", "conn_type", "loss_rate"},
     "datasets": {"project_id", "name", "status", "default_license"},
-    "dataset_versions": {"dataset_id", "version_no", "timeline", "fields", "units", "content_hash"},
+    "dataset_versions": {"dataset_id", "version_no", "timeline", "fields", "units"},
     "dataset_files": {"dataset_version_id", "object_id", "file_kind", "format", "row_count", "size_bytes"},
     "calc_configs": {
         "project_id", "name", "params", "variables", "min_irr", "algorithm", "random_seed", "version"
     },
     "calc_snapshots": {
         "project_version_id", "dataset_version_ids", "calc_config_snapshot", "random_seed",
-        "content_hash", "canonical_assembly_text", "assembly_sha256", "assembly_receipt",
+        "canonical_assembly_text", "assembly_receipt",
     },
     "tasks": {"project_id", "type", "status", "business_outcome", "idempotency_key", "max_attempts"},
     "task_attempts": {"task_id", "attempt_no", "worker_id", "status", "stop_reason"},
@@ -92,22 +92,22 @@ KEY_COLUMNS: dict[str, set[str]] = {
     "task_progress": {"attempt_id", "progress_percent", "stage", "detail"},
     "task_diagnostics": {"task_id", "attempt_id", "level", "code", "message"},
     "compute_slots": {"pool_name", "status", "capacity", "in_use", "current_attempt_id"},
-    "evidence_packages": {"task_id", "attempt_id", "calc_snapshot_id", "object_id", "content_hash"},
+    "evidence_packages": {"task_id", "attempt_id", "calc_snapshot_id", "object_id"},
     "result_assessments": {"evidence_package_id", "assessor", "dimension_physical", "overall_score"},
     "result_index": {
-        "project_id", "project_version_id", "evidence_package_id", "assessment_id", "result_hash", "is_latest"
+        "project_id", "project_version_id", "evidence_package_id", "assessment_id", "is_latest"
     },
     "result_selections": {"project_id", "result_index_id", "selected_by", "is_current"},
-    "reports": {"project_id", "report_type", "object_id", "content_hash", "generated_by_task_id", "status"},
+    "reports": {"project_id", "report_type", "object_id", "generated_by_task_id", "status"},
     "uncertainty_snapshots": {"calc_snapshot_id", "method", "n_samples", "random_seed", "distributions"},
     "sample_tasks": {
         "uncertainty_snapshot_id", "parent_task_id", "parent_sample_id", "sample_index", "depth"
     },
     "sample_records": {"sample_task_id", "variable_name", "value", "unit"},
-    "objects": {"oid", "sha256", "size_bytes", "storage_path", "ref_count", "quota_bytes"},
+    "objects": {"oid", "size_bytes", "storage_path", "ref_count", "quota_bytes"},
     "object_refs": {"object_id", "ref_type", "ref_entity_type", "ref_entity_id"},
     "audit_log": {"entity_type", "entity_id", "action", "actor_type", "before", "after"},
-    "import_proposals": {"project_id", "proposer_id", "source_type", "source_hash", "status"},
+    "import_proposals": {"project_id", "proposer_id", "source_type", "source_object_id", "status"},
     "retention_rules": {"entity_type", "object_kind", "retention_days", "apply_to", "status"},
 }
 
@@ -138,6 +138,10 @@ EXPECTED_IMMUTABLE_TABLES: set[str] = {
     "result_assessments",
     "uncertainty_snapshots",
     "audit_log",
+    "finance_profiles",
+    "finance_overrides",
+    "effective_finance_revisions",
+    "planning_configs",
 }
 
 
@@ -168,7 +172,7 @@ def _check_sqltext(table: sa.Table, fragment: str) -> bool:
 
 
 def test_models_import_and_all_tables_registered() -> None:
-    """全部 43 张表均注册到 Base.metadata, 无多余/缺失。"""
+    """全部 46 张表均注册到 Base.metadata, 无多余/缺失。"""
     registered = set(Base.metadata.tables)
     missing = set(ALL_TABLES) - registered
     extra = registered - set(ALL_TABLES)
@@ -204,7 +208,6 @@ def test_unique_constraints() -> None:
         ("task_leases", "uq_task_leases_token"): ("lease_token",),
         ("sample_records", "uq_sample_records_variable"): ("sample_task_id", "variable_name"),
         ("objects", "uq_objects_oid"): ("oid",),
-        ("objects", "uq_objects_sha256"): ("sha256",),
         ("object_refs", "uq_object_refs_ref"): ("object_id", "ref_type", "ref_entity_type", "ref_entity_id"),
         ("retention_rules", "uq_retention_rules_key"): ("entity_type", "object_kind", "apply_to"),
     }
@@ -239,11 +242,23 @@ def test_regex_constraint_strings() -> None:
     assert _check_sqltext(users, "email IS NULL OR email ~ '^[^@\\s]+@[^@\\s]+$'")
     objects = Base.metadata.tables["objects"]
     assert _check_sqltext(objects, "oid ~ '^[0-9a-f]{64}$'")
-    assert _check_sqltext(objects, "sha256 ~ '^[0-9a-f]{64}$'")
+    assert not any(
+        isinstance(c, CheckConstraint) and "sha256" in str(c.sqltext).lower()
+        for c in objects.constraints
+    ), "objects 不应残留摘要约束"
     tasks = Base.metadata.tables["tasks"]
     assert _check_sqltext(tasks, "idempotency_key IS NULL OR idempotency_key ~ '^[A-Za-z0-9._:-]{1,128}$'")
-    snapshots = Base.metadata.tables["calc_snapshots"]
-    assert _check_sqltext(snapshots, "content_hash ~ '^[0-9a-f]{64}$'")
+    # 业务文本表不再携带内容摘要正则约束(对象引用 + revision 追溯);
+    # 存储层 objects 同样去摘要化(按对象 id 寻址, 见上)。
+    for table_name in (
+        "drafts", "project_versions", "dataset_versions", "evidence_packages",
+        "result_index", "reports", "uncertainty_snapshots", "calc_snapshots",
+    ):
+        table = Base.metadata.tables[table_name]
+        assert not any(
+            isinstance(c, CheckConstraint) and "sha256" in str(c.sqltext).lower()
+            for c in table.constraints
+        ), f"{table_name} 不应残留摘要约束"
 
 
 def test_enum_check_constraints() -> None:
@@ -316,9 +331,8 @@ def test_create_all_on_sqlite_and_roundtrip() -> None:
         # objects + object_refs
         conn.execute(
             sa.text(
-                "INSERT INTO objects (oid, sha256, size_bytes) "
-                "VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', "
-                "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 10)"
+                "INSERT INTO objects (oid, size_bytes) "
+                "VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 10)"
             )
         )
         # tasks(枚举/幂等键)
@@ -332,8 +346,7 @@ def test_create_all_on_sqlite_and_roundtrip() -> None:
         conn.execute(
             sa.text(
                 "INSERT INTO calc_snapshots (project_version_id, calc_config_snapshot, random_seed, "
-                "dataset_version_ids, content_hash, created_by) VALUES (1, '{}', 42, '[1,2]', "
-                "'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1)"
+                "dataset_version_ids, created_by) VALUES (1, '{}', 42, '[1,2]', 1)"
             )
         )
         # window_sessions(INET 回退, UUID 用 task_leases 验证)
@@ -362,7 +375,6 @@ def test_orm_insert_roundtrip() -> None:
         session.flush()
         obj = models.StoredObject(
             oid="c" * 64,
-            sha256="c" * 64,
             size_bytes=1,
             media_type="application/json",
         )

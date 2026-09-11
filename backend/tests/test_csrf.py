@@ -174,7 +174,12 @@ def test_same_origin_cookie_state_change_allowed(client: TestClient, db: Session
 
     resp = client.post(
         "/api/projects",
-        json={"name": "同源项目"},
+        json={
+            "name": "同源项目",
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
         headers={"Origin": "http://testserver"},  # TestClient 默认 Host: testserver
     )
     assert resp.status_code == 201, resp.text
@@ -187,7 +192,12 @@ def test_trusted_origin_cookie_state_change_allowed(client: TestClient, db: Sess
 
     resp = client.post(
         "/api/projects",
-        json={"name": "可信来源项目"},
+        json={
+            "name": "可信来源项目",
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
         headers={"Origin": TRUSTED_ORIGIN},
     )
     assert resp.status_code == 201, resp.text
@@ -201,7 +211,12 @@ def test_no_origin_api_client_allowed(client: TestClient, db: Session) -> None:
     # 客户端仍持有 Cookie(TestClient 登录后自动保存), 但无来源头 → 放行
     resp = client.post(
         "/api/projects",
-        json={"name": "无来源客户端项目"},
+        json={
+            "name": "无来源客户端项目",
+            "baseline_resolution": "1h",
+            "baseline_leap_year": False,
+            "baseline_scenario_mode": "single",
+        },
         headers=_bearer(token),
     )
     assert resp.status_code == 201, resp.text
@@ -209,7 +224,15 @@ def test_no_origin_api_client_allowed(client: TestClient, db: Session) -> None:
     # 纯 Bearer + 无 Cookie 场景(全新客户端, 不共享登录 Cookie)→ 放行
     with TestClient(client.app, raise_server_exceptions=False) as anon:
         anon.headers.update(_bearer(token))
-        resp = anon.post("/api/projects", json={"name": "纯 Bearer 项目"})
+        resp = anon.post(
+            "/api/projects",
+            json={
+                "name": "纯 Bearer 项目",
+                "baseline_resolution": "1h",
+                "baseline_leap_year": False,
+                "baseline_scenario_mode": "single",
+            },
+        )
         assert resp.status_code == 201, resp.text
 
 
@@ -222,7 +245,12 @@ def test_bearer_auth_not_affected_by_origin(client: TestClient, db: Session) -> 
     with TestClient(client.app, raise_server_exceptions=False) as anon:
         resp = anon.post(
             "/api/projects",
-            json={"name": "Bearer 跨域项目"},
+            json={
+                "name": "Bearer 跨域项目",
+                "baseline_resolution": "1h",
+                "baseline_leap_year": False,
+                "baseline_scenario_mode": "single",
+            },
             headers={**_bearer(token), "Origin": EVIL_ORIGIN},
         )
         assert resp.status_code == 201, resp.text
