@@ -44,12 +44,14 @@ from iesplan.analysis.sensitivity import (
     run_sensitivity_analysis,
 )
 from iesplan.analysis.wrapper import (
+    CAPACITY_KEYS,
     AnalysisError,
     BatchResult,
     SweepResult,
     SweepSpec,
     apply_param,
     change_rate,
+    project_financial_inputs,
     run_batch,
     run_sweep,
     summarize_batch,
@@ -57,6 +59,7 @@ from iesplan.analysis.wrapper import (
 )
 
 __all__ = [
+    "CAPACITY_KEYS",
     "AnalysisError",
     "BatchResult",
     "FinancialValidity",
@@ -71,6 +74,7 @@ __all__ = [
     "build_sensitivity_task_config",
     "capacity_utilization",
     "change_rate",
+    "project_financial_inputs",
     "check_financial",
     "energy_balance_summary",
     "load_met_ratio",

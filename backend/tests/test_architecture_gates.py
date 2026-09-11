@@ -68,11 +68,7 @@ WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
     # ---- engines 域内部: planning 复用 eval_run 私有取参函数 ----
     ("iesplan.engines.planning", "_param"):
         "engines 域内 planning 复用 eval_run 私有运行参数读取; TODO: 提升公开。",
-    # ---- worker → analysis: 执行器复用 wrapper 私有财务输入构造 ----
-    ("iesplan.worker.executors", "_project_financial_inputs"):
-        "worker 复用 analysis.wrapper 私有项目财务输入构造; TODO: 提升公开 API。",
-    ("iesplan.worker.executors", "_CAPACITY_KEYS"):
-        "worker 复用 analysis.wrapper 私有容量键集合; TODO: 提升公开常量。",
+    # worker → analysis 私有穿透已整改(0.6.5): 符号提升为 analysis 公开 API。
     # ---- api → services: API 层直接访问服务私有函数 ----
     ("iesplan.api.config", "config_service._row_to_config"):
         "API 层访问 services.config 私有配置序列化(现状违规); "

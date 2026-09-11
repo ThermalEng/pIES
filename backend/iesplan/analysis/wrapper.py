@@ -43,12 +43,14 @@ if TYPE_CHECKING:
     from collections.abc import Any
 
 __all__ = [
+    "CAPACITY_KEYS",
     "AnalysisError",
     "BatchResult",
     "SweepResult",
     "SweepSpec",
     "apply_param",
     "change_rate",
+    "project_financial_inputs",
     "run_batch",
     "run_sweep",
     "summarize_batch",
@@ -62,7 +64,7 @@ except ImportError:
     _assembly_plan = None
 
 #: 设备容量参数候选键(投资估算:capex = Σ unit_invest_cost × 容量,02 §5.3)
-_CAPACITY_KEYS: tuple[str, ...] = (
+CAPACITY_KEYS: tuple[str, ...] = (
     "rated_capacity_kwp",
     "rated_capacity_kw",
     "capacity_kwh",
@@ -318,14 +320,14 @@ def _estimate_capex(plan: dict) -> Decimal:
         unit_cost = params.get("unit_invest_cost")
         if unit_cost is None:
             continue
-        cap = next((params.get(k) for k in _CAPACITY_KEYS if params.get(k) is not None), None)
+        cap = next((params.get(k) for k in CAPACITY_KEYS if params.get(k) is not None), None)
         if cap is None:
             continue
         total += Decimal(str(float(unit_cost))) * Decimal(str(float(cap)))
     return total
 
 
-def _project_financial_inputs(content: dict, plan: dict) -> tuple[Decimal, Decimal | None]:
+def project_financial_inputs(content: dict, plan: dict) -> tuple[Decimal, Decimal | None]:
     """提取财务输入 (capex, baseline_cost)。
 
     baseline_cost 来源: calc_config.params.baseline_cost 或 content['baseline_cost']
@@ -413,7 +415,7 @@ def run_sweep(
                 if finance_params is not None
                 else finance_params_from_config(modified.get("calc_config") or {})
             )
-            capex, baseline = _project_financial_inputs(modified, plan)
+            capex, baseline = project_financial_inputs(modified, plan)
             try:
                 financial = compute_financials(kpi, flows or {}, capex, baseline, fp)
             except (ValueError, TypeError):
@@ -475,7 +477,7 @@ def run_batch(
                     if finance_params is not None
                     else finance_params_from_config(modified.get("calc_config") or {})
                 )
-                capex, baseline = _project_financial_inputs(modified, plan)
+                capex, baseline = project_financial_inputs(modified, plan)
                 try:
                     financial = compute_financials(kpi, flows or {}, capex, baseline, fp)
                 except (ValueError, TypeError):

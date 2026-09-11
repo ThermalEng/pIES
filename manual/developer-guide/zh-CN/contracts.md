@@ -36,7 +36,7 @@
 - `{**data, "data": data}` 双前缀；
 - 204 No Content 返回伪造 JSON。
 
-错误统一使用以下标准信封（参见宪法 §8.3，构造器权威源 `iesplan/core/errors.py:error_envelope`）：
+错误统一使用以下标准信封（参见宪法 §8，构造器权威源 `iesplan/core/errors.py:error_envelope`）：
 
 ```json
 {

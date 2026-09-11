@@ -1,7 +1,7 @@
 # pIES 架构宪法
 
 > 状态：生效
-> 版本：1.12.0
+> 版本：1.12.1
 > 生效日期：2026-08-20
 > 最后更新：2026-09-11
 > 适用范围：根目录入口、`manual/`、`docs/`、`backend/`、`frontend/`、数据库、对象存储、Worker、测试与后续插件
@@ -100,6 +100,8 @@ Solver Bundle
 
 ## 4. 后端模块与职责
 
+各模块的职责、公开边界、输入输出、失败语义和扩展方式以 `modules/` 下对应手册为唯一模块级正文；文件字段、schema 与枚举以 `formats/` 下对应格式页为唯一字段级正文。本节只固定每个模块的拥有者、允许依赖、禁止依赖和公开边界。
+
 ### 4.1 `core`：无业务状态的公共基础
 
 负责：
@@ -126,22 +128,11 @@ Solver Bundle
 - 设备 provider 注册和本模块注册表；
 - 设备目录 API 所需的领域数据。
 
-设备文件必须使用稳定 ID，并由统一 `schema_version` 和校验回执固定语义；禁止为单个设备声明独立语义版本。设备文件禁止包含函数、包、模块、shell、可执行路径、价格、成本、税务、折旧或其他项目经济假设。不负责计算精度、算法选择、项目设备实例、画布布局或前端展示文案。稳定 ID `device.id` 标识一个纯技术设备模型（`ies.device-model`），与独立财务类别 `finance_type` 和项目内的装配实例 `instance_id` 严格分离；技术模型不得新增 `finance_type`，也不恢复 `capabilities`、`energy_carriers`、`model_method`、`fidelity`、`stateful` 或设备版本等冗余字段。
+设备文件必须使用稳定 ID，并由统一 `schema_version` 和校验回执固定语义；禁止为单个设备声明独立语义版本。设备文件禁止包含函数、包、模块、shell、可执行路径、价格、成本、税务、折旧或其他项目经济假设。不负责计算精度、算法选择、项目设备实例、画布布局或前端展示文案。技术模型、财务类别与装配实例三者身份严格分离，禁止按名称、载体或技术模型猜测财务类别。
 
-完成实例化并可进入项目正式模型目录、装配和计算链的设备模型，顶层只使用
-`schema`、`schema_version`、`device`、`properties`、`interfaces` 和 `equations`。
-模型作者使用的未实例化编辑态仍属于同一 `ies.device-model` 范式，不建立独立的
-模型类型、schema 或 schema 版本；它只能使用文件格式标准明确列出的受控编辑态辅助字段，
-并必须在候选模型门禁内完成实例化、移除全部编辑态辅助字段，再按上述六个顶层字段重新完整校验。
-未通过门禁的编辑态内容不得进入项目正式模型目录、装配或计算链。六个正式字段的语义如下：
+公开门面只导出设备查询、注册能力以及不可变 `DeviceDescriptor`。
 
-- `device` 只表达稳定身份和显示信息；
-- `properties` 只表达不随时间变化的技术常量；
-- `interfaces` 只表达序列交互，统一使用 `in`、`out`、`bidirectional`、`predefined`、`blind` 五种类型；缺省类型规范化为 `blind`；
-- `predefined` 只能从 `constant`、`data_repeat`、`data_predict` 获得序列，不连接其他设备；`blind` 既不连接其他设备，也不接收预定义数据；
-- `equations` 以受限声明式方程表达 properties、接口序列与内部变量的技术关系，不得成为任意代码执行入口。
-
-公开门面只导出类似 `get_device()`、`list_devices()`、`register(provider)` 的能力以及不可变 `DeviceDescriptor`。
+文件语义、接口类型与编辑态门禁见 [设备目录](modules/devices.md) 与 [设备模型 YAML](formats/device-model-yaml.md)。
 
 ### 4.3 `modeling`：声明式技术模型
 
@@ -152,19 +143,21 @@ Solver Bundle
 - 受限方程语言、公共 AST 及技术贡献 contract 的版本兼容；
 - 方程输入、输出、单位、状态和 schema 校验。
 
-`modeling` 输出声明式变量、技术关系、状态、接口流和结果映射元数据；禁止加入价格/成本目标、启动求解器或返回求解器私有对象。`modeling` 可以消费 `devices` 的公开 descriptor/provider，禁止读取设备目录、价格文件或 profile 内部路径。不得以设备 ID 分支或私有命令映射替代设备文件中的公开技术方程。`finance_type` 不进入设备文件；装配实例通过显式 `finance_binding` 把财务 `finance_type` 的 `driver` 映射到本实例设备的 `property`/`interface` 并校验存在性与单位，禁止按技术模型名称、载体或模型 ID 猜测财务类别。
+`modeling` 输出声明式变量、技术关系、状态、接口流和结果映射元数据；禁止加入价格/成本目标、启动求解器或返回求解器私有对象。`modeling` 可以消费 `devices` 的公开 descriptor/provider，禁止读取设备目录、价格文件或 profile 内部路径。不得以设备 ID 分支或私有命令映射替代设备文件中的公开技术方程。
+
+详见 [技术方程建模](modules/modeling.md)。
 
 ### 4.4 `assembly`：interface 网络装配与同步闸门
 
 负责：
 
-- 将不可变项目计算基线、已规范化并固定输入引用的项目模型实例、连接、规划配置和有效财务快照构造成 `AssemblySpec`；
+- 将不可变项目计算基线、项目模型实例、连接、规划配置和有效财务快照构造成 `AssemblySpec`；
 - 校验接口类型、载体、单位、有效区间、连接、预定义来源声明与不可变输入引用、方程、规划目标/约束、有效财务快照和整体可解性；
-- 校验每个项目设备实例明确区分 `existing` 与 `new`，以及规划和财务计算共同需要的有效财务快照；
-- 把相对资源解析为引用并生成唯一规范装配文本；
 - 签发由规范文本和校验回执组成的 `ValidatedAssemblyArtifact`。
 
-装配阶段证明业务单位与量纲兼容，但保留明确业务单位；不选择 generator、solver、计算精度或求解选项，不生成求解器文件和命令。装配只消费装配前确定性合并并完整校验签发的不可变有效财务快照，并以稳定 ID 和 revision 固定之，不在装配内内联另一份完整财务配置。每个设备实例都必须显式声明财务绑定，统一判别联合：`type: costed`（绑定财务类别 `finance_type`，并把其 driver 映射到本实例设备真实存在的 `property`/`interface`，校验存在性、聚合与单位量纲）或 `type: none`（无设备成本贡献；可作为能源计费的纯计量点），禁止按设备名称、载体或技术模型 `device.id` 猜测经济相关性；能源购售计费通过独立计量绑定（`binding_id`）引用能源价格 `price_id` 并显式映射到方向明确的实例接口与聚合，价格条目的载体与购/售方向显式声明、不靠键名推断，计量点实例可以为 `type: none`。增量成本遵循明确原则：`new` 按新增驱动量计入固定建设与线性分量，`existing` 不计沉没历史建设成本和与决策无关的固定 O&M，但 `costed` 设备仍计算决策相关可变 O&M，能源购售只在独立计量绑定声明的计费点产生。接口缺省类型只能规范化为 `blind`，禁止默认双向接口、`_direct_plan` 或任何绕过装配检查的计算路径。装配失败必须返回诊断并阻断后续计算包生成。具体 schema、字段、公式与聚合枚举以下层装配与财务格式页为唯一正文。
+装配阶段证明业务单位与量纲兼容，但保留明确业务单位；不选择 generator、solver、计算精度或求解选项，不生成求解器文件和命令。装配只消费装配前合并签发的不可变有效财务快照，不在装配内内联另一份完整财务配置。每个设备实例必须显式声明财务绑定（`costed`/`none`），能源购售计费走独立计量绑定；禁止按名称、载体或技术模型猜测经济相关性，禁止默认双向接口与任何绕过装配检查的计算路径。装配失败必须返回诊断并阻断后续计算包生成。
+
+schema、字段、公式与聚合枚举以 [装配与检查](modules/assembly.md)、[装配 YAML](formats/assembly-yaml.md) 与 [财务 YAML](formats/finance-yaml.md) 为正文。
 
 ### 4.5 `computation`：生成、执行与结果适配
 
@@ -174,9 +167,7 @@ Solver Bundle
 - `SolverRuntime` 只校验并执行 Bundle 中的结构化命令，生成 `ExecutionReceipt` 与原始输出；
 - `ResultAdapter` 只把 Bundle、回执和声明输出映射为带 schema/version 的 `ComputeResult`。
 
-GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界，并按装配中的规划目标/约束与公共财务参数形成系统目标；不访问数据库、对象服务、网络或进程环境，不启动求解器。计算精度、离散化、预测算法及其参数、generator、solver、容差、选项、随机种子和输出选择属于计算配置，在装配文件转换为计算包时固定并完成能力兼容校验。SolverRuntime 不读取装配语义、不判断设备类型、不补数据或切换 solver。ResultAdapter 是结果反向单位换算的唯一边界，不读取当前项目或最新 provider。
-
-`constant`、`data_repeat` 和 `data_predict` 只在计算阶段按快照中的项目基线物化。预测目标类型声明可用的时间、自回归与外生协变量，具体算法及参数由计算配置选择。计算先使用各预测序列的独立预测完成一次完整求解；当 `data_predict` 数量为零或一时，该结果即为最终结果。只有 `data_predict` 数量大于一时，才以首次求解结果为初始值，按公开容差和最大迭代数循环重建完整预测目标与计算模型并求解；此时迭代阶段的最终结果是权威结果。`constant` 和 `data_repeat` 不计入预测序列数量。
+GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界，不访问数据库、对象服务、网络或进程环境，不启动求解器。计算精度、算法、solver、容差、种子与输出选择属于计算配置，在计算包生成时固定并完成能力兼容校验。SolverRuntime 不读取装配语义、不判断设备类型、不补数据或切换 solver。ResultAdapter 是结果反向单位换算的唯一边界，不读取当前项目或最新 provider。预测序列的物化与两阶段求解语义见 [计算生成与求解](modules/engines.md)。
 
 计算模块禁止：
 
@@ -187,9 +178,13 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 - 在装配 YAML 中接受命令、脚本、实现路径或环境变量；
 - 用 shell 字符串执行 solver，或让每个生成器自行管理 subprocess。
 
+生成、执行与结果适配的细节见 [计算生成与求解](modules/engines.md)、[计算生成器](modules/generators.md) 与 [求解运行时](modules/solver-runtime.md)。
+
 ### 4.6 `finance`：财务计算
 
-财务事实分层：地区 `FinanceProfile` 是已注册、可复用的地区财务基准（以稳定 ID 与 revision 标识，系统不得把它硬编码为全局默认，样例只作示范或注册 provider 的输入）；项目 `FinanceOverrides` 精确引用 Profile 的稳定 ID 与 revision，只对既有成本模型与能源价格做原子稀疏覆盖（不新增/删除财务类别与价格条目，不改变分量方法、单位、口径，也不改写价格条目的载体与购/售方向）；两者由确定性合并器合并并完整校验，生成不可变 `EffectiveFinanceConfig`。它是装配、规划与财务计算唯一消费的财务快照：计算不运行期继承 Profile、不读取最新地区价格、不静默默认值；`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，导入时连同精确来源重新合并验证。成本函数为固定建设成本加多个独立线性分量，产出时间口径明确的分量（按年项与窗口合计项相加前须显式时间跨度换算）；Profile 不隐式定义一次性投资与运行期成本之间的转换（不做隐式年化，不隐含资本回收系数、利率或年限等值），此类显式规则若为规划所需，由规划配置契约版本化定义；总成本由规划配置显式组合，不静默相加。能源价格条目以稳定自定义 `price_id` 登记（不存在固定白名单价格键），每项显式声明 `carrier`（来自系统公共载体词汇，不复制封闭清单）与 `direction: purchase|sale`（会计方向，不靠 price_id 或键名推断）；价格为有限 Decimal、正/零/负均合法（零电价合法）；每个计量绑定先算 `raw_charge = Σ price×e`，`purchase` 分量 = +raw_charge（正购电价时为正，成本向）、`sale` 分量 = −raw_charge（正售电价出口时为负，收益以负值自动抵减），分量是已带符号的记账贡献、规划组合统一按加法书写不另加负号，负价自然反转该方向效果（负购电价使 purchase 分量为负、负售电价使 sale 分量为正）；支持常数价格与引用经校验完整年度序列的价格，序列元数据在装配时与项目基线核对，不匹配阻断且不重采样。财务类别（设备成本）与能源计费在装配中分别显式绑定：前者按实例判别联合绑定到实例及其技术接口，后者以独立计量绑定引用 `price_id` 并绑定方向明确的计费点实例/接口与聚合（计量点实例可为无设备成本的 `type: none`），两者都禁止按名称、载体或 `device.id` 猜测。财务契约范围不包含折旧、融资与后评价指标输入。Profile 可登记适用税目（税种、法定税率、适用对象）并声明金额含税口径；成本与价格计算直接使用文件金额，不执行计税或扣税运算；本契约不定义税后换算规则，不得扩展为税务引擎或造成重复加税。`backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 不得作为第二权威源或运行期兼容。finance 不从设备技术定义读取价格。
+财务事实分三层：地区 `FinanceProfile`（已注册、可复用的地区财务基准，不得硬编码为全局默认）、项目 `FinanceOverrides`（精确引用 Profile 的原子稀疏覆盖，不新增/删除类别与价格条目）与确定性合并器生成的不可变 `EffectiveFinanceConfig`（装配、规划与财务计算唯一消费的财务快照；计算不运行期继承 Profile、不读取最新地区价格、不静默默认值）。成本函数、时间口径、能源计价符号约定与绑定规则见 [财务计算](modules/finance.md)，字段级定义见 [财务 YAML 契约](formats/finance-yaml.md)。
+
+财务契约范围不包含折旧、融资、税务引擎与后评价指标输入。`backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 不得作为第二权威源或运行期兼容。`finance` 不从设备技术定义读取价格。
 
 `finance` 不依赖 HTTP、数据库或前端，不反向依赖应用服务。
 
@@ -206,7 +201,9 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 - 文件系统或其他 BlobStore provider；
 - 存储容量和本模块健康状态。
 
-项目、数据集、证据和导出模块只能持有公开 `ObjectId/ObjectHandle`，不得拼路径、读取 `StoredObject` ORM 或自行落盘。
+项目、数据集、证据和导出模块只能持有公开 `ObjectId/ObjectHandle`，不得拼路径、读取 `StoredObject` ORM 或自行落盘。引用清单是权威事实。
+
+协议、保留期、写入与引用流程见 [对象存储](modules/storage.md)。
 
 ### 4.9 `application`：跨模块用例编排
 
@@ -226,6 +223,8 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 负责领取任务、租约、重试、超时、编排 GeneratorProvider/SolverRuntime/ResultAdapter 和提交结果。Worker 启动时必须验证快照所需设备内容、方程 contract、generator、executor、solver 与 result adapter 可解析；缺少依赖则启动失败或不进入 ready 状态，不得领取后再临时降级。Worker 不拼 solver 命令，也不解释装配业务。
 
+执行流程、租约与提交规则见 [Worker](modules/worker.md)。
+
 ### 4.11 `api`：传输适配
 
 负责：
@@ -236,9 +235,13 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 禁止直接查询 ORM、拼对象路径、实现领域计算、组织跨端点工作流或返回兼容响应并集。
 
+路由、DTO 与错误映射见 [API 适配](modules/api.md)，HTTP 语义与信封见 [公共契约](contracts.md)。
+
 ### 4.12 `persistence` / ORM
 
 数据库表按领域归属。ORM 是模块内部实现，不是跨模块 DTO。目标状态下，每个持久化模块拥有自己的 repository；`models/` 在迁移期只是物理集中目录，不构成允许所有模块任意查询所有表的授权。
+
+表归属、约束与事务实现见 [持久化](modules/persistence.md)。
 
 ## 5. 后端依赖与交互规则
 
@@ -278,11 +281,9 @@ GeneratorProvider 是业务单位到求解器内部单位的唯一转换边界�
 
 ### 5.4 事务
 
-- application 用例拥有 `commit/rollback`；
-- repository 和领域服务只能 flush、使用 savepoint 或返回错误；
-- 下层模块禁止对调用方共享 Session 执行全局 `rollback()`；
-- 唯一键竞争使用 upsert 或嵌套事务处理；
-- 跨数据库和文件系统不能伪装为单一 ACID 事务，必须设计幂等恢复协议。
+application 用例拥有事务边界与 `commit/rollback`；下层模块不得对调用方共享状态执行全局回滚。跨数据库与文件系统的操作不得伪装为单一 ACID 事务，必须设计幂等恢复协议。
+
+repository 约束、upsert 与局部回滚规则见 [持久化](modules/persistence.md) 与 [应用用例](modules/application.md)。
 
 ### 5.5 同步与异步
 
@@ -313,104 +314,11 @@ pIES/
 
 正式产品文档目录使用正确英文名称 `manual/`，禁止使用拼写错误的 `mannal/`。`README.md` 继续作为原有项目入口，不另建与其竞争的站点根入口。
 
-```text
-backend/iesplan/
-├── bootstrap/              # 组合根、provider 发现、启动校验
-├── core/
-│   ├── contracts/          # 无状态纯类型
-│   ├── diagnostics.py
-│   ├── errors.py
-│   ├── units.py
-│   └── timeaxis.py
-├── devices/
-│   ├── __init__.py         # 公开门面
-│   ├── contracts.py
-│   ├── registry.py
-│   ├── providers.py
-│   └── catalog/            # ies.device-model YAML 与配套数据样例
-├── modeling/
-│   ├── __init__.py
-│   ├── contracts.py
-│   ├── parser.py
-│   ├── validator.py
-│   └── canonicalizer.py
-├── assembly/
-│   ├── __init__.py
-│   ├── contracts.py
-│   ├── parser.py
-│   ├── validator.py
-│   ├── canonicalizer.py
-│   └── artifact.py
-├── computation/
-│   ├── contracts.py
-│   ├── generators/
-│   │   ├── registry.py
-│   │   └── providers/
-│   ├── runtime/
-│   │   ├── contracts.py
-│   │   └── executors/
-│   └── result_adapters/
-├── finance/
-├── analysis/
-├── storage/
-│   ├── __init__.py
-│   ├── contracts.py
-│   ├── service.py
-│   ├── persistence.py
-│   └── adapters/
-├── application/
-│   ├── projects/
-│   ├── datasets/
-│   ├── modeling/
-│   ├── config/
-│   ├── tasks/
-│   ├── results/
-│   ├── exports/
-│   └── operations/
-├── api/                    # 与 application 用例一一对应的 HTTP 适配
-├── worker/
-└── migrations/
-```
+后端按稳定业务边界分模块：`bootstrap`（组合根与启动校验）、`core`（无状态公共基础）、`devices`/`modeling`/`assembly`/`computation`/`finance`/`analysis`（领域能力）、`storage`（对象与引用）、`application`（跨模块用例编排）、`api`（HTTP 适配）、`worker`（异步执行）、`migrations`（版本化迁移）。前端按 feature 垂直切分：`app/pages` 做路由级组合，`features` 拥有各业务能力的 contract、model、form、mapper、请求与组件，`shared` 只放不知道具体业务也成立的通用能力。
 
-前端按 feature 垂直切分：
+依赖方向必须是：后端 `api/worker → application → 领域模块 → core`，持久化实现只归属其领域所有者；前端 `app/pages → features → shared`，feature 之间不得相互导入内部文件，跨 feature 工作流放在 page 或显式 application hook。
 
-```text
-frontend/src/
-├── app/                    # 路由、provider、应用装配
-├── shared/
-│   ├── api/                # 纯 HTTP、会话、错误解析
-│   ├── ui/
-│   ├── i18n/
-│   ├── format/
-│   └── types/
-├── features/
-│   ├── auth/
-│   ├── projects/
-│   ├── modeling/
-│   ├── datasets/
-│   ├── config/
-│   ├── validation/
-│   ├── tasks/
-│   ├── results/
-│   ├── exports/
-│   └── admin/
-└── pages/                  # 只做路由级组合
-```
-
-每个 feature 推荐包含：
-
-```text
-feature/
-├── api.ts                  # 该 feature 的后端调用
-├── contracts.ts            # 与后端 JSON 一一对应
-├── model.ts                # 前端领域模型
-├── form.ts                 # UI 临时表单类型
-├── mappers.ts              # 纯转换
-├── hooks/                  # 查询、mutation、用例
-└── components/             # 展示组件
-```
-
-依赖方向必须是 `app/pages → features → shared`。feature A 不得导入 feature B 的内部文件；跨 feature 工作流放在 page 或显式 application hook。
+高层目录职责与依赖方向见 [系统架构蓝图](architecture.md)；各模块的代码边界见 `modules/` 下对应手册，前端分层见 [前端与帮助中心](frontend.md)。本宪法不再维护目录清单。
 
 ## 7. 数据类型与序列化规范
 
@@ -418,18 +326,19 @@ feature/
 
 - HTTP JSON 使用 UTF-8、`application/json`；
 - 字段名统一 `snake_case`，前后端 contract 保持同名，不做隐式 camelCase 转换；
-- 每个长期保存的文档、快照、装配文件、证据和插件规格必须有 `schema_version`；
-- 插件文件还必须有独立 `schema` 标识；设备模型 YAML、设备数据 CSV、装配 YAML 和 Solver Bundle 分别使用 `ies.device-model`、`ies.device-data`、`ies.assembly`、`ies.solver-bundle`；财务三件套 `ies.finance-profile`/`ies.finance-overrides`/`ies.effective-finance-config` 的标识、版本与文件名由[财务 YAML 契约](formats/finance-yaml.md)登记，不在此枚举字段；
+- 每个长期保存的文档、快照、装配文件、证据和插件规格必须有 `schema_version`；插件文件另有独立 `schema` 标识；
 - 枚举值使用小写 `snake_case`，枚举之外的值必须被拒绝；
-- 不允许以 `Record<string, unknown>` 代替已经稳定的公开 DTO；
-- 不允许同一字段有多种未标记形态，例如有时数字、有时对象、有时字符串。
-- 人工编写、导入导出、进入快照的声明式配置统一使用 YAML（含 `device`/`assembly`/`finance`/`planning`/`calculation` 与项目包内配置）；HTTP JSON DTO、数据库内部存储、求解器专用格式和大结果直接使用 YAML 之外的表示时，不强制统一为 YAML。
+- 不允许以宽泛映射代替已经稳定的公开 DTO；
+- 不允许同一字段有多种未标记形态。
+- 人工编写、导入导出、进入快照的声明式配置统一使用 YAML；HTTP JSON DTO、数据库内部存储、求解器专用格式和大结果使用各自原生格式，不强制统一为 YAML。
+
+各 `schema` 的标识分配、版本与文件名见 [文件格式标准](file-formats.md) 与 `formats/` 下对应格式页。
 
 ### 7.2 标识符
 
 - 数据库内部主键可以使用 `BIGINT`；
 - 对外 JSON 中的标识符必须作为不透明十进制字符串传输，前端类型使用品牌化 `EntityId`/具体 `ProjectId`，不得参与算术；
-- 稳定插件、设备、generator、solver、executor 和 result adapter ID 使用命名空间字符串；设备方程随设备发布 revision 固定，不再拥有独立命令 ID；
+- 稳定扩展 ID 使用命名空间字符串；设备方程随设备发布 revision 固定，不再拥有独立命令 ID；
 - 对象标识使用不透明字符串，不以内容摘要作为业务身份；
 - ID 类型不能与普通字符串、名称或数组下标混用。
 
@@ -458,17 +367,16 @@ feature/
 - 后端校验单位、量纲、范围和领域约束；
 - 装配阶段校验量纲和单位兼容并保留明确业务单位；业务单位到 solver 内部单位只在 GeneratorProvider 边界发生；反向换算只在 ResultAdapter 边界发生；
 - 技术方程解析、运行时和业务服务中禁止散落 `×1000`、`×3600`、百分比 `/100` 等隐式换算；
-- 单位 ID 与符号由 `core.units` 的无状态规范定义，设备 property 与接口引用该规范，不复制映射。
+- 单位词汇由 `core` 的无状态规范定义，设备 property 与接口引用该规范，不复制映射；完整规则见 [公共契约](contracts.md)。
 
 ### 7.5 时间
 
-- HTTP、数据库、事件、规范装配和证据中的时间戳使用 ISO 8601 UTC 字符串并带 `Z`；
-- 项目创建时一次性固定计算基线，当前基线只包含时间分辨率、是否考虑闰年和场景模式；当前场景模式固定为 `single`，基线创建后不可修改；
-- 项目计算序列不使用时间戳或时区，统一使用从 `0` 开始的连续 `step`；普通年/闰年点数由项目分辨率与基线确定；由分辨率唯一推导、携带明确时间单位的公开步长变量统一命名为 `step_duration`；
-- 原始输入序列不设统一的完整年度最低长度：`data_repeat` 的完整来源序列整体就是重复基线，可以是完整日、完整周或完整年，不另设周期字段；`data_predict` 的历史输入、训练目标和未来已知协变量覆盖范围由预测目标与计算配置中的算法契约明确要求。原始序列必须与项目基线使用相同分辨率，文件内 `step` 从零开始连续；不同来源在物化前不要求点数相同或 `step` 一一对应。装配前只校验来源、表示及各自适用的覆盖要求，不做重采样、插值、聚合、融合或自动补齐；全周期 `constant/data_repeat/data_predict` 序列只在计算阶段按项目基线物化，物化后所有计算序列必须具有项目基线推导的相同点数并且 `step` 一一对应；
-- 数据库存储 `TIMESTAMPTZ`；
-- 持续时间使用明确单位或 ISO 8601 duration，不用含义不明的整数；
-- 计算序列必须声明项目基线、分辨率、点数和单位；数组长度必须与基线推导点数一致。多场景与已有项目基线变更属于后续公开契约能力，不能作为本格式的隐式例外。
+- 时间戳使用 ISO 8601 UTC 字符串并带 `Z`；数据库存储 `TIMESTAMPTZ`；持续时间使用明确单位或 ISO 8601 duration，不用含义不明的整数；
+- 项目创建时一次性固定不可变计算基线（时间分辨率、闰年规则、场景模式），基线创建后不可修改；
+- 项目计算序列统一使用从 `0` 开始的连续 `step`，不使用时间戳或时区；原始序列与基线同分辨率、文件内连续，物化前不要求跨来源对齐，不做重采样、插值、聚合、融合或自动补齐；物化后点数与 `step` 必须完全一致；
+- 计算序列必须声明基线、分辨率、点数和单位。多场景与基线变更属于后续公开契约能力。
+
+时间与集合的完整规则见 [公共契约](contracts.md)，序列文件规则见 [设备数据 CSV](formats/device-data-csv.md)。
 
 ### 7.6 集合与顺序
 
@@ -487,204 +395,68 @@ feature/
 
 ### 7.8 公共文件契约
 
-- `device`/`assembly`/`finance`（财务三件套）/`planning`/`calculation` 与项目包内配置以 YAML 为权威书写形态并按安全子集解析与规范化；CSV、HTTP JSON DTO、数据库内部行/列存储、求解器专用输入和大结果可继续使用对应域的原生格式，不强制转 YAML；不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容（细则见 [finance-yaml.md](formats/finance-yaml.md)）；
-- 设备模型 YAML 只保留纯技术语义：稳定设备身份、非时变 properties、序列 interfaces 和声明式 equations；价格、成本和计算精度不得进入设备文件；财务成本模型按 `finance_type` 在地区 `FinanceProfile` 中定义，装配消费其合并产物；
-- 设备序列接口只有 `in`、`out`、`bidirectional`、`predefined`、`blind` 五种；`predefined` 仅允许 `constant`、`data_repeat`、`data_predict`，`blind` 不连接且不接收预定义数据；
-- YAML 使用 YAML 1.2 安全子集，禁止自定义 tag、anchor、alias、合并键、重复键和任意对象构造；
-- 文件路径只能是所属包内规范相对路径，禁止绝对路径、`..`、符号链接逃逸和宿主机路径；
-- 未知核心字段默认拒绝；扩展只能放在命名空间化 `extensions`，不得改变核心语义或安全规则；
-- 装配 YAML 禁止 shell、command、executable、函数/模块路径、环境变量和凭证；
-- 原始装配通过结构、模型/数据、图/系统、规划/财务完整性四阶段校验后，才能生成 `ValidatedAssemblyArtifact`；财务成本仅由不可变 `EffectiveFinanceConfig` 参与校验，`FinanceOverrides` 仅作进入装配前的合并输入，不在装配中运行期继承；
-- Solver Bundle 只能由已注册 GeneratorProvider 生成，必须包含输入引用、结构化命令、输出声明和 ResultAdapter 精确版本；
-- Bundle 命令以受信任 executor/executable ID 和参数数组表达，禁止 `sh -c`、管道、重定向、替换、通配和未声明网络；
-- 各 `schema` 独立语义化版本；不能识别的 MAJOR 必须拒绝，不得猜测或静默降级；`backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 不得作为第二权威源、静默回退或旧格式运行期兼容保留。
+- 设备模型、设备数据、装配、财务三件套、规划/计算配置以 YAML 为权威书写形态（安全子集：禁止自定义 tag、anchor、alias、合并键、重复键和任意对象构造），未知核心字段默认拒绝，扩展只能放在命名空间化 `extensions`；
+- 设备模型 YAML 只保留纯技术语义；装配 YAML 禁止可执行入口、宿主机路径与凭证；文件路径只能是所属包内规范相对路径；
+- 原始装配通过完整校验后才能生成 `ValidatedAssemblyArtifact`；财务成本仅由不可变 `EffectiveFinanceConfig` 参与校验；
+- Solver Bundle 只能由已注册 GeneratorProvider 生成，命令以受信任 ID 加参数数组表达，禁止 shell 形态；
+- 各 `schema` 独立语义化版本；不能识别的 MAJOR 必须拒绝，不得猜测或静默降级。
 
-具体字段、schema 版本和人工示例以[文件格式标准](file-formats.md)及[财务 YAML](formats/finance-yaml.md)、[装配 YAML](formats/assembly-yaml.md) 等格式页为唯一正式说明。
+具体字段、版本与示例以 [文件格式标准](file-formats.md) 及 `formats/` 下对应格式页为唯一正文；财务口径见 [财务计算](modules/finance.md)。
 
 ## 8. HTTP API 契约
 
-### 8.1 DTO
+API 是传输适配层：只做路由、认证、DTO 与用例转交。禁止直接查询 ORM、拼对象路径、实现领域计算、组织跨端点工作流或返回兼容响应并集。后端 Pydantic DTO 与前端 `contracts.ts` 字段一一对应，并通过 OpenAPI/契约测试校验。
 
-DTO 是请求和响应的明确数据结构，不等于为前端增加额外业务接口。后端 Pydantic DTO 和前端 `contracts.ts` 必须字段一一对应，并通过 OpenAPI/契约测试校验。
+DTO 禁止暴露 ORM、文件路径、内部函数名或 registry 对象；禁止仅为某个页面准备的临时展示状态；禁止依赖前端调用顺序解释；禁止用默认值掩盖必需字段缺失。
 
-DTO 禁止：
+成功响应使用一级命名键包装（键名直接表达资源语义），禁止 `{data, meta}` 通用包装与裸/包装两版并存。错误统一使用标准 `error` 信封，后端不得返回堆栈或内部路径，用户文案由前端按 `message_key + params` 生成。状态码、包装键集、错误码格式与登记规则见 [公共契约](contracts.md)（ADR-0005）。
 
-- 暴露 ORM、文件路径、内部函数名或 registry 对象；
-- 包含仅为某个页面准备的临时展示状态；
-- 依赖前端调用顺序才能解释；
-- 用默认值掩盖必需字段缺失。
-
-### 8.2 成功响应
-
-成功资源响应顶层只允许 1-3 个键，每个键名直接表达资源语义（如 `{project}` / `{items, next_cursor}` / `{ok, ...}`）。禁止 `{data, meta}` 这种通用包装。必要时可嵌套（嵌套键同样遵循自我文档化原则），列表与分页/版本/追踪分置同顶层两个键。
-
-状态码与包装键的全局统一规则见 [contracts.md](contracts.md)「HTTP 语义」与「成功与错误」节（ADR-0005）。
-
-### 8.3 错误与诊断
-
-错误统一使用：
-
-```json
-{
-  "error": {
-    "code": "DOMAIN-CATEGORY-001",
-    "message_key": "ies.error.example",
-    "severity": "error",
-    "blocking": true,
-    "params": {},
-    "location": null,
-    "fix_hint_key": null,
-    "ref_ids": []
-  }
-}
-```
-
-后端不得把堆栈或内部路径返回给客户端。面向用户的本地化文案由前端根据 `message_key + params` 生成；日志可以包含受控技术详情和 request ID。
-
-错误码 `code` 字段格式 `DOMAIN-CATEGORY-NNN`（域-类别-三位序号），`DOMAIN` 是 API 子域（API/PROJ/TASK/DATA/CONFIG/OBJ/PERM/AUTH），`CATEGORY` 是错误类别（REQ/VAL/NF/CONFLICT/SEC/QUOTA/MISS 等）。同 `code` 可跨 message_key 复用（同语义不同文案），但禁止跨 code 共享 message_key。新码须在 `core/diagnostics.py NEW_DIAG_CODES` 登记。详细规则见 ADR-0005 与 [contracts.md](contracts.md)「成功与错误」节。
-
-禁止捕获契约转换或主资源错误后返回空列表、“暂无数据”或 HTTP 200。
-
-### 8.4 HTTP 语义
-
-- `GET` 只读且可安全重试；
-- `POST` 创建资源或执行命令；
-- `PUT` 完整替换；
-- `PATCH` 显式部分更新；
-- `DELETE` 执行明确生命周期操作；
-- 冲突使用 `409`，校验失败使用 `400/422` 的项目统一选择（详细语义与选择规则见 [contracts.md](contracts.md)「HTTP 语义」节，ADR-0005），认证使用 `401`，授权使用 `403`，不存在使用 `404`；
-- 创建返回 `201`，异步任务接受返回 `202`；
-- 可重试写操作必须支持幂等键；
-- 并发编辑必须使用 revision/ETag/If-Match 等明确乐观锁，禁止最后写入静默覆盖。
-
-### 8.5 上传与下载
-
-- 上传使用 multipart 或预签名对象协议，API 明确大小和媒体类型限制；
-- 下载返回短期授权或标准资源链接，不让前端拼存储路径；
-- 导出响应返回真实资源 ID、文件名和过期时间，前端不得伪造临时报告 ID；
-- 浏览器文件名和展示格式属于前端，对象引用与授权属于后端。
+HTTP 方法语义、幂等键、乐观锁与上传下载规则同样以 [公共契约](contracts.md) 为正文；模块职责见 [API 适配](modules/api.md)。禁止捕获错误后返回空列表、“暂无数据”或 HTTP 200 伪装成功；导出响应返回真实资源 ID，前端不得伪造临时报告 ID。
 
 ## 9. 前端职责与交互
 
-### 9.1 基础 HTTP 层
+前端拥有展示状态与未提交表单，不拥有业务事实：输入体验、状态呈现、导航、本地化与可访问性归前端；权限、结构、范围、量纲与领域规则的权威校验归后端。前端预检查只用于即时反馈；前端不得直接调用 Python 函数，后端不得返回只适用于某个组件的临时结构。
 
-`shared/api` 只负责 URL、query、fetch、Cookie、超时、取消、JSON/FormData/Blob 和标准错误解析。它不得导入 Project、Device、Task 等业务类型，也不得发起隐式第二个业务请求。
+`shared/api` 只做纯传输，不得导入业务类型或发起隐式业务请求。各 feature 拥有自己的 contract、model、form 与纯 mapper，页面与组件不得直接拼后端 JSON；多接口工作流放在 hook/page 组合层，底层客户端不得伪造资源、丢弃输入或按旧响应形状猜测。服务器状态必须有明确缓存来源与显式的失效、轮询、取消和竞态策略；React 本地状态只保存瞬时 UI；主请求失败必须展示错误与重试入口，不得解释为“暂无数据”。画布使用后端真实 interface ID 并按公开接口语义连接。
 
-### 9.2 Feature API 与 mapper
-
-- 每个 feature 拥有自己的 `api.ts` 和 `contracts.ts`；
-- DTO 到前端领域模型的转换只存在于 `mappers.ts`；
-- 表单字符串、百分比和本地单位只存在于 `form.ts`；
-- 页面和组件不得直接拼后端 JSON；
-- mapper 是纯函数，不访问网络、缓存或 React 状态。
-
-### 9.3 应用编排
-
-多接口工作流放在 feature hook/use-case 或 page 组合层。底层 API 客户端禁止：
-
-- 自动创建缺失评估；
-- 通过模块级 Map 反查业务关联；
-- 静默丢弃用户输入；
-- 为缺失后端能力伪造资源；
-- 根据旧响应形状进行多分支猜测。
-
-### 9.4 服务器状态
-
-- 服务器状态必须有一个明确缓存来源；
-- query key、失效、轮询、取消和竞态策略必须显式；
-- 模块级全局 Map 不得作为业务事实；
-- React local state 只保存未提交表单、选中项和弹窗等瞬时 UI；
-- 主请求失败必须展示错误和重试入口，只有明确 optional 区块可以局部降级。
-
-### 9.5 Schema 驱动 UI
-
-设备 properties、序列接口、有效区间、单位和方程必须来自公开 schema；目标函数、规划变量与约束来自规划配置 schema，公共财务参数来自财务配置 schema，计算精度和 generator/solver 能力来自计算配置公开 schema。前端可以保留通用交互规则，如禁止自环和重复边，但不得按设备类型硬编码热泵、电池或燃气接口规则。
-
-画布必须使用后端返回的真实 interface ID，并按 carrier、五类接口兼容规则和公开接口语义连接；`predefined` 与 `blind` 均不得连接其他设备。
+目录结构、mapper、query key、表单状态、Schema 驱动 GUI 与帮助中心行为的完整规则以 [前端与帮助中心](frontend.md) 为唯一正文。
 
 ## 10. 存储与数据生命周期
 
-### 10.1 公开协议
+业务模块只持有 `ObjectId/ObjectHandle`，路径由 storage adapter 解释；引用清单是对象是否可清理的权威事实。文件和数据库之间不得伪装为单一事务；实际写入失败或 provider 不可用时，当前操作必须明确失败，不得用扫描、猜测或内容复核预判未发生的故障。
 
-存储模块至少提供以下语义：
-
-```python
-class ObjectStore(Protocol):
-    def put(self, content: bytes, media_type: str) -> ObjectHandle: ...
-    def get(self, object_id: ObjectId) -> bytes: ...
-    def stat(self, object_id: ObjectId) -> ObjectHandle: ...
-    def attach(self, object_id: ObjectId, owner: ObjectOwner) -> None: ...
-    def detach(self, object_id: ObjectId, owner: ObjectOwner) -> None: ...
-```
-
-该协议是模块内调用能力，不要求全部映射成 HTTP 端点。
-
-### 10.2 路径与适配器
-
-- 全仓库只有存储适配器可以解释 `storage_path`；
-- 数据库中路径必须相对一个明确根目录，禁止不同模块二次拼根；
-- 文件系统、S3 等通过 adapter/provider 替换；
-- 不允许导出对象后再静默写一份非托管副本。
-
-### 10.3 引用
-
-- `ObjectOwner(namespace, id, purpose)` 是公开引用契约；
-- 引用清单是权威事实；
-- `ref_count` 如保留只能是可重建缓存；
-- 任意存在的 owner 引用都阻止清理，存储不硬编码业务表名；
-- 创建、替换、删除和过期流程必须成对 attach/detach；
-- 保留策略必须说明软删除后哪些引用继续有效。
-
-### 10.4 故障恢复
-
-文件和数据库之间必须使用原子 rename 和幂等 upsert。已明确发生写入中断时，通过本次操作 ID 重试或清理本次临时文件；不通过后台扫描、大小比对或内容复核为正常读写增加第二套校验。
-
-实际写入失败或 provider 不可用时，当前操作必须明确失败；只有 provider 已无法承担必需请求时 readiness 才降级。不得通过额外扫描、容量猜测或对象内容复核预判未发生的故障。
-
-### 10.5 管理 API
-
-`/admin/storage` 只返回存储模块公开状态。全系统 `/health`/`readyz` 由 operations 聚合各模块公开 health provider，禁止存储 API 直接查询任务、项目、用户和队列内部表。
+公开协议、路径规则、引用流程、保留期、故障恢复与管理 API 的完整规则以 [对象存储](modules/storage.md) 为唯一正文。
 
 ## 11. 数据库与持久化
 
-- schema 变化必须通过版本化 migration，不依赖运行时 `create_all` 作为发布机制；
-- 外键、唯一约束、检查约束和不可变性尽量由数据库保证；
-- repository 只属于表的领域所有者；
-- 跨领域查询通过公开 read model/application query，不直接导入对方 ORM；
-- 审计记录不可变，业务模块通过公开审计接口或版本化事件写入；
-- 删除行为必须明确是软删除、硬删除还是保留，不能以模糊状态代替生命周期；
-- 开发数据不需要长期兼容，使用一次性迁移或重建；
-- 敏感信息、密码哈希、令牌和内部路径不得进入普通 DTO、日志或证据包。
+schema 变化必须通过版本化 migration；约束与不可变性尽量由数据库保证；repository 只属于表的领域所有者；跨领域查询走公开 read model/application query，不直接导入对方 ORM；审计记录不可变；删除行为必须显式；敏感信息不得进入普通 DTO、日志或证据包。
+
+完整规则见 [持久化](modules/persistence.md)。
 
 ## 12. 快照、任务与结果
 
-- Task 必须绑定不可变 `CalcSnapshot`；
-- 快照包含 `ValidatedAssemblyArtifact`、输入内容标识、schema 版本、设备规范内容、generator/solver/executor/result adapter 精确版本、单位契约、随机种子、选项和容差；
-- 每个计算 attempt 必须封存 Solver Bundle、ExecutionReceipt、stdout/stderr、声明输出和统一结果；
-- 同一幂等键重复提交返回同一逻辑任务，不重复执行或扣配额；
-- 任务状态机只有公开允许的转换；
+- Task 必须绑定不可变 `CalcSnapshot`；任务执行期间不得重新读取不断变化的项目草稿；
+- 同一幂等键重复提交返回同一逻辑任务，不重复执行或扣配额；任务状态机只允许公开转换；
 - 失败结果必须保留结构化诊断；
-- 结果、证据和评估必须可追溯到任务、attempt、快照和对象；
-- 系统评估与人工评估分别记录 assessor、输入、时间和审计信息；
+- 结果、证据和评估必须可追溯到任务、attempt、快照和对象；系统评估与人工评估分别记录；
 - 不得通过重新读取当前配置解释历史结果。
+
+快照内容、attempt 封存、Bundle/回执语义与执行编排见 [领域模型与追溯链](domain-model.md)、[Worker](modules/worker.md) 与 [计算生成与求解](modules/engines.md)。
 
 ## 13. 故障与健康语义
 
-| 故障 | 要求 |
-|---|---|
-| 插件/provider/注册失败 | 启动失败或不 ready，不发布部分注册状态 |
-| 数据库不可用 | 不 ready；依赖数据库的请求明确失败 |
-| 实际存储写入失败 | 当前操作明确失败；不以容量猜测代替真实写入结果 |
-| 对象缺失或不可读 | 返回实际 I/O 错误，禁止空内容或旧副本回退 |
-| 项目/装配输入非法 | 返回完整诊断并阻断任务 |
-| Worker 缺设备内容/方程 contract/generator/executor/result adapter | Worker 不 ready，不领取任务 |
-| 生成器失败或结果不确定 | 不发布部分 Bundle；provider 不 ready 或 attempt 明确失败 |
-| Bundle 路径或命令策略非法 | runtime 不启动进程，形成拒绝回执 |
-| solver 超时、取消、OOM 或异常退出 | 终止进程组，封存失败回执，不伪装成功 |
-| 可重试外部故障 | 按明确策略重试，保留 attempt 和原因 |
-| 内部异常 | 记录 request ID 和堆栈；客户端收到标准 500 错误 |
+跨系统通用原则：失败可见、不得 fallback、不得伪造成功、状态完整。
+
+- 必需 provider 或依赖缺失：启动失败或不 ready，不发布部分注册状态；
+- 数据库、存储或队列不可用：明确反映在就绪或任务状态，依赖请求明确失败；实际写入失败时当前操作必须明确失败，不以容量猜测代替真实写入结果；
+- 对象缺失或不可读：返回实际错误，禁止空内容或旧副本回退；
+- 项目/装配输入非法：返回完整诊断并阻断任务；
+- 可重试外部故障：按明确策略重试，保留 attempt 和原因；
+- 内部异常：记录 request ID 和堆栈，客户端只收到标准错误。
 
 `healthz` 只表示进程存活；`readyz` 表示实例具备承接流量/任务的必要依赖。不得用健康检查的“degraded”掩盖实际上无法正确处理请求的状态。
+
+各模块的具体故障状态与处理见 `modules/` 下对应手册（生成、执行与结果适配见 [计算生成与求解](modules/engines.md)，任务执行见 [Worker](modules/worker.md)，对象见 [对象存储](modules/storage.md)）。
 
 ## 14. 测试与架构门禁
 
@@ -692,71 +464,17 @@ class ObjectStore(Protocol):
 
 所有编译、测试、格式化和数据库验证必须在 Docker 环境运行，不得在主机安装或执行项目依赖。只允许读写本仓库和 `/tmp`。
 
-### 14.2 必需测试
+### 14.2 测试原则
 
-每项变更按风险至少覆盖：
+每项变更按风险覆盖：公共 contract、事务、权限与关键用户流程必须有测试；测试不得只断言字段存在，还必须验证关键业务值、单位、ID、版本和错误语义。
 
-- 纯函数单元测试；
-- 模块公开协议测试；
-- HTTP DTO 契约测试；
-- 数据库约束和事务测试；
-- 前后端关键值往返测试；
-- Worker 幂等、租约和失败恢复测试；
-- 四种文件 schema、规范化与非法人工样例测试；
-- generator 确定性与 Bundle contract 测试；
-- runtime 命令注入、路径逃逸、隔离、取消、超时和输出边界测试；
-- result adapter 状态、单位和非有限值映射测试；
-- 存储互操作、引用对称和已记录中断操作的幂等收敛测试；
-- 关键用户流程浏览器测试。
+测试层次、静态架构门禁、完成定义与变更说明的完整规则以 `docs/development/development-workflow.md` 为正文（内部过程控制）；模块路由见 [模块开发手册](module-development.md)，Docker 工作流见 [部署与运行](deployment.md)。
 
-测试不得只断言字段存在，还必须验证关键业务值、单位、ID、版本和错误语义。
+### 14.3 真实用户验收
 
-### 14.3 静态架构测试
+用户可见功能在合并前必须进行浏览器级验收：从页面入口开始，用可访问定位器完成真实业务动作；画布拖放与接口连接由人工核查，其余 GUI 流程使用 Playwright；禁止用状态注入跳过被测步骤；Playwright 与被测服务全部在 Docker 环境运行。纯 HTTP 契约测试不能替代浏览器或人工验收。
 
-CI 必须逐步加入并最终强制：
-
-- 禁止跨模块导入私有符号；
-- 禁止导入其他模块的 loader/repository/persistence；
-- 禁止 API 直接导入 ORM；
-- 禁止业务模块拼对象路径；
-- 禁止 `core` 依赖业务模块；
-- 禁止前端 `shared` 依赖 feature；
-- 禁止页面直接调用底层 HTTP；
-- 检测后端/前端重复设备、generator 和 solver 映射；
-- 检测技术模型转换/runtime/业务服务中的隐式单位换算常量；
-- 禁止装配和设备文件出现实现模块路径、shell 命令、价格或成本；
-- 禁止 GeneratorProvider 访问网络、数据库、对象存储或启动进程；
-- 禁止 runtime 按设备/generator/solver 名称增加业务分支。
-
-### 14.4 完成定义
-
-一项功能只有同时满足以下条件才算完成：
-
-1. 公开 contract 已定义且版本语义明确；
-2. 实现只依赖允许的公开边界；
-3. 失败路径和权限已定义；
-4. DTO 和前端 mapper 同步；
-5. 数据迁移或开发数据重建方案已提供；
-6. Docker 内相关测试通过；
-7. 无静默兼容、fallback、空数据降级或未管理副本；
-8. 文档与代码一致。
-
-### 14.5 真实用户验收
-
-用户可见功能在合并前必须进行浏览器级验收。除画布拖放与接口连接按仓库约束由人工核查外，其余 GUI 流程使用 Playwright 模拟真实用户，而不是只验证接口返回：
-
-- 从页面入口开始，通过可见文本、role、label 等可访问定位器操作；
-- 登录、导航、填写表单、上传、确认、等待和下载等业务动作通过 UI 完成；
-- 画布拖放与接口连接由人工完成，并记录设备、接口、操作步骤和可见结果；画布 property 编辑等其他功能仍由 Playwright 验收；
-- 禁止直接修改 localStorage、组件状态或数据库来跳过被测步骤；
-- API 可以用于隔离环境的前置造数和结束清理，但不能代替本场景要验收的用户动作；
-- 覆盖桌面和移动视口、中文和已发布英文内容、前进后退、深链接与刷新；
-- 断言页面可见结果，同时检查 console error、失败请求和未处理异常；
-- 失败时保留 trace，并按风险保存关键截图或视频；
-- 测试数据必须隔离、可重复、可清理，不能依赖开发者浏览器已有会话；
-- Playwright 和被测服务全部在 Docker 环境运行。
-
-关键主流程至少包括：认证、项目生命周期、设备 property 与真实接口、数据上传、配置、校验、任务、结果、导出、管理员操作和帮助中心。纯 HTTP 契约测试不能替代浏览器或人工验收。
+浏览器验收的完整流程与覆盖要求见 [前端与帮助中心](frontend.md)。
 
 ## 15. 项目文档
 
@@ -813,7 +531,7 @@ docs/                                      # 后台证据，不是开发输入
 - 设备模型 YAML、设备数据 CSV、装配 YAML、Solver Bundle 及设备、技术模型、生成器、执行器、结果适配器、存储和数据 provider；
 - 前端、帮助中心、部署、运行与可验证的质量边界。
 
-开发者指南描述稳定意图、公开不变量和扩展方式，不写文件行号、私有函数签名、ORM 表清单、迁移 SQL、实施 agent 分工、版本计划、任务切片或当前完成状态。它可以提供可独立阅读的规则和示例，但不得通过引用 Roadmap 来表达实现过程。
+开发者指南描述稳定意图、公开不变量和扩展方式，不写文件行号、私有函数签名、ORM 表清单、迁移 SQL、实施 agent 分工、版本计划、任务切片或当前完成状态。它可以提供可独立阅读的规则和示例，但不得通过引用 Roadmap 来表达实现过程。稳定规则的唯一正文关系见 [规范索引与文档边界](normative-index.md)：宪法定义原则，`formats/` 定义文件，`contracts.md` 定义 HTTP，`modules/` 定义模块，Roadmap 只定义版本计划。
 
 ### 15.5 更新日志与 Roadmap
 

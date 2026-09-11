@@ -234,7 +234,7 @@ def _hourly_financial(
     推导（与规划引擎同口径），仍缺失才降级 None
     (评估 financial 维度降 unknown)。
     """
-    from iesplan.analysis.wrapper import _project_financial_inputs
+    from iesplan.analysis.wrapper import project_financial_inputs
     from iesplan.finance.hourly import compute_financials
     from iesplan.finance.params import finance_params_from_config
 
@@ -244,7 +244,7 @@ def _hourly_financial(
         return None
     try:
         fp = finance_params_from_config(content.get("calc_config") or {})
-        capex, baseline = _project_financial_inputs(content, plan)
+        capex, baseline = project_financial_inputs(content, plan)
         if baseline is None:
             # 基准成本推导: 零容量基准方案的 total_op_cost(与规划引擎同口径);
             # 纯存量场景(无新增设备)基准推导返回 None → 现状即基准,
@@ -278,7 +278,7 @@ def _derive_baseline_cost(ctx: RunContext, content: dict, data: dict, axis: Any)
     纯存量场景(无新增设备可剥离): 无基准可推导, 由调用方用当前方案
     total_op_cost 兜底(现状即基准, 增量语义节省为 0)。
     """
-    from iesplan.analysis.wrapper import _CAPACITY_KEYS
+    from iesplan.analysis.wrapper import CAPACITY_KEYS
 
     plan = plan_for_finance(content)
     if not any(d.get("is_new") is True for d in plan.get("devices") or []):
@@ -289,7 +289,7 @@ def _derive_baseline_cost(ctx: RunContext, content: dict, data: dict, axis: Any)
             stripped.append(dev)
             continue
         params = dict(dev.get("params") or {})
-        for cap_key in _CAPACITY_KEYS:
+        for cap_key in CAPACITY_KEYS:
             params.pop(cap_key, None)
         stripped.append({**dev, "params": params})
     baseline_plan = {**plan, "devices": stripped}
