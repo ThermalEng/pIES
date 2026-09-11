@@ -69,33 +69,49 @@ WHITELIST_CORE_BUSINESS_DEPS: dict[tuple[str, int], str] = {}
 # 每条目均需整改: 提升为公开 API 或改为公开等价调用, 整改后移除条目。
 WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
     # ---- analysis 域内部: wrapper 私有财务/指标辅助, sensitivity 复用 ----
-    ("iesplan.analysis.sensitivity", "_financial_to_dict"):
-        "同域 wrapper 私有财务结果序列化辅助; TODO: 提升为 analysis 公开 API 后移除。",
-    ("iesplan.analysis.sensitivity", "_jsonable_kpi"):
-        "同域 wrapper 私有 KPI 可 JSON 化辅助; TODO: 同上。",
+    (
+        "iesplan.analysis.sensitivity",
+        "_financial_to_dict",
+    ): "同域 wrapper 私有财务结果序列化辅助; TODO: 提升为 analysis 公开 API 后移除。",
+    ("iesplan.analysis.sensitivity", "_jsonable_kpi"): "同域 wrapper 私有 KPI 可 JSON 化辅助; TODO: 同上。",
     # ---- assembly 域内部: rules 子包复用 checker/schema 私有工具 ----
-    ("iesplan.assembly.rules.completeness", "_split_model"):
-        "assembly 域内 rules 复用 checker 私有模型拆分函数; TODO: 提升公开。",
-    ("iesplan.assembly.rules.solvability", "_PEAK_PARAM_BY_LOAD"):
-        "assembly 域内 rules 复用 checker 私有峰值参数表; TODO: 提升公开。",
-    ("iesplan.assembly.rules.solvability", "_to_watts"):
-        "assembly 域内 rules 复用 checker 私有单位换算; TODO: 提升公开。",
-    ("iesplan.assembly.checker", "_QUANTITY_DIMS"):
-        "assembly 域内 checker 复用 schema 私有量纲常量; TODO: 提升公开。",
+    (
+        "iesplan.assembly.rules.completeness",
+        "_split_model",
+    ): "assembly 域内 rules 复用 checker 私有模型拆分函数; TODO: 提升公开。",
+    (
+        "iesplan.assembly.rules.solvability",
+        "_PEAK_PARAM_BY_LOAD",
+    ): "assembly 域内 rules 复用 checker 私有峰值参数表; TODO: 提升公开。",
+    (
+        "iesplan.assembly.rules.solvability",
+        "_to_watts",
+    ): "assembly 域内 rules 复用 checker 私有单位换算; TODO: 提升公开。",
+    (
+        "iesplan.assembly.checker",
+        "_QUANTITY_DIMS",
+    ): "assembly 域内 checker 复用 schema 私有量纲常量; TODO: 提升公开。",
     # ---- engines 域内部: planning 复用 eval_run 私有取参函数 ----
-    ("iesplan.engines.planning", "_param"):
-        "engines 域内 planning 复用 eval_run 私有运行参数读取; TODO: 提升公开。",
+    (
+        "iesplan.engines.planning",
+        "_param",
+    ): "engines 域内 planning 复用 eval_run 私有运行参数读取; TODO: 提升公开。",
     # worker → analysis 私有穿透已整改(0.6.5): 符号提升为 analysis 公开 API。
     # ---- api → services: API 层直接访问服务私有函数 ----
-    ("iesplan.api.config", "config_service._row_to_config"):
-        "API 层访问 services.config 私有配置序列化(现状违规); "
-        "TODO: services.config 提供公开 serializer 后移除。",
-    ("iesplan.api.projects", "project_service._is_admin"):
-        "API 层访问 services.project 私有权限判定(现状违规); "
-        "TODO: 提升公开权限 API 后移除。",
+    (
+        "iesplan.api.config",
+        "config_service._row_to_config",
+    ): "API 层访问 services.config 私有配置序列化(现状违规); "
+    "TODO: services.config 提供公开 serializer 后移除。",
+    (
+        "iesplan.api.projects",
+        "project_service._is_admin",
+    ): "API 层访问 services.project 私有权限判定(现状违规); TODO: 提升公开权限 API 后移除。",
     # ---- services 域内部: identity 复用 project 私有审计写入 ----
-    ("iesplan.services.identity", "project_service._audit"):
-        "服务层间复用 project 私有审计写入; TODO: 提升公开审计 API。",
+    (
+        "iesplan.services.identity",
+        "project_service._audit",
+    ): "服务层间复用 project 私有审计写入; TODO: 提升公开审计 API。",
 }
 
 # ---------------------------------------------------------------------------
@@ -136,6 +152,7 @@ _DB_ORM_NAMES = frozenset({"Base", "Session", "sessionmaker", "session"})
 # ---------------------------------------------------------------------------
 # 辅助函数(纯 AST, 不 import 业务模块)
 # ---------------------------------------------------------------------------
+
 
 def _module_path(rel: Path) -> str:
     """把相对于业务包根的 .py 相对路径转成模块路径。"""
@@ -270,9 +287,7 @@ def _find_api_orm_imports(
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 if node.module == "iesplan.models" or node.module.startswith("iesplan.models."):
-                    by_line.setdefault(node.lineno, set()).update(
-                        a.name for a in node.names if a.name != "*"
-                    )
+                    by_line.setdefault(node.lineno, set()).update(a.name for a in node.names if a.name != "*")
                 elif node.module.startswith("iesplan.db"):
                     bad = {a.name for a in node.names if a.name in _DB_ORM_NAMES}
                     if bad:
@@ -289,22 +304,19 @@ def _find_api_orm_imports(
 # 门禁测试
 # ---------------------------------------------------------------------------
 
+
 def test_core_no_business_dependencies():
     """架构门禁: 禁止 core 依赖业务模块(宪法 §14.2)。基线全绿, 新增即报错。"""
     detected = _find_core_business_imports()
     new = [(m, line, src) for (m, line, src) in detected if (m, line) not in WHITELIST_CORE_BUSINESS_DEPS]
-    assert not new, (
-        f"core 依赖业务模块(新增违规, 需整改或登记白名单): {new}"
-    )
+    assert not new, f"core 依赖业务模块(新增违规, 需整改或登记白名单): {new}"
 
 
 def test_no_cross_module_private_imports():
     """架构门禁: 禁止跨模块导入私有符号(宪法 §14.2)。现状违规在白名单, 新增即报错。"""
     detected = _find_private_symbol_imports()
     new = [(m, s) for (m, s) in detected if (m, s) not in WHITELIST_PRIVATE_IMPORTS]
-    assert not new, (
-        f"跨模块私有符号导入(新增违规, 需整改或登记白名单): {new}"
-    )
+    assert not new, f"跨模块私有符号导入(新增违规, 需整改或登记白名单): {new}"
 
 
 def test_api_no_direct_orm_imports():
@@ -319,9 +331,7 @@ def test_api_no_direct_orm_imports():
         allowed = WHITELIST_API_ORM.get((mod, line))
         if allowed is None or not symbols.issubset(allowed):
             new.append((mod, line, sorted(symbols)))
-    assert not new, (
-        f"API 直接导入 ORM(新增违规, 需整改或登记白名单): {new}"
-    )
+    assert not new, f"API 直接导入 ORM(新增违规, 需整改或登记白名单): {new}"
 
 
 # ---------------------------------------------------------------------------
@@ -519,9 +529,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
 _SCAN_OWNERSHIP_DIRS = ("services", "worker", "analysis", "storage", "application")
 
 
-def _find_api_commit_calls(
-    scan_root: Path = _API_DIR, pkg_root: Path = _PKG_ROOT
-) -> list[tuple[str, int]]:
+def _find_api_commit_calls(scan_root: Path = _API_DIR, pkg_root: Path = _PKG_ROOT) -> list[tuple[str, int]]:
     """门禁 4: 扫描 api 下所有 .commit()/.rollback() 调用, 返回 (模块, 行号)。"""
     found: list[tuple[str, int]] = []
     for path, mod in _iter_modules(scan_root, pkg_root):
@@ -536,9 +544,7 @@ def _find_api_commit_calls(
     return found
 
 
-def _find_api_service_fanout(
-    scan_root: Path = _API_DIR, pkg_root: Path = _PKG_ROOT
-) -> dict[str, set[str]]:
+def _find_api_service_fanout(scan_root: Path = _API_DIR, pkg_root: Path = _PKG_ROOT) -> dict[str, set[str]]:
     """门禁 5: 统计每个 api 模块依赖的 iesplan.services.* 子模块集合。"""
     fanout: dict[str, set[str]] = {}
     for path, mod in _iter_modules(scan_root, pkg_root):
@@ -549,11 +555,11 @@ def _find_api_service_fanout(
                 if node.module == "iesplan.services":
                     leaves.update(f"services.{a.name}" for a in node.names if a.name != "*")
                 elif node.module.startswith("iesplan.services."):
-                    leaves.add(node.module[len("iesplan."):])
+                    leaves.add(node.module[len("iesplan.") :])
             elif isinstance(node, ast.Import):
                 for a in node.names:
                     if a.name.startswith("iesplan.services."):
-                        leaves.add(a.name[len("iesplan."):])
+                        leaves.add(a.name[len("iesplan.") :])
         if leaves:
             fanout[mod] = leaves
     return fanout
@@ -637,54 +643,43 @@ def test_api_no_transaction_commit():
     """架构门禁: API 不得提交/回滚事务(宪法 §5.4)。现状 36 处在白名单, 新增即报错。"""
     detected = _find_api_commit_calls()
     new = [(m, line) for (m, line) in detected if (m, line) not in WHITELIST_API_COMMIT]
-    assert not new, (
-        f"API 层新增事务提交/回滚(需迁移到 application 用例): {new}"
-    )
+    assert not new, f"API 层新增事务提交/回滚(需迁移到 application 用例): {new}"
 
 
 def test_api_no_multi_service_fanout():
     """架构门禁: 每个 API 模块至多依赖一个 services 子模块。现状多依赖在白名单。"""
     fanout = _find_api_service_fanout()
     new = {
-        m: sorted(leaves)
-        for m, leaves in fanout.items()
-        if len(leaves) > 1 and m not in WHITELIST_API_FANOUT
+        m: sorted(leaves) for m, leaves in fanout.items() if len(leaves) > 1 and m not in WHITELIST_API_FANOUT
     }
-    assert not new, (
-        f"API 模块新增跨 service 编排(需收敛为单个 application 用例): {new}"
-    )
+    assert not new, f"API 模块新增跨 service 编排(需收敛为单个 application 用例): {new}"
 
 
 def test_worker_no_direct_domain_services():
     """架构门禁: Worker 不得直接依赖 services(切片 1 基线, 迁移后逐项移除白名单)。"""
     detected = _find_worker_service_imports()
     new = sorted((m, t) for (m, t) in detected if (m, t) not in WHITELIST_WORKER_SERVICES)
-    assert not new, (
-        f"Worker 新增 services 直接依赖(需经 application.worker 边界): {new}"
-    )
+    assert not new, f"Worker 新增 services 直接依赖(需经 application.worker 边界): {new}"
 
 
 def test_analysis_no_direct_engine_or_services():
     """架构门禁: analysis 不得直接驱动引擎/services/拼装 plan(切片 1 基线)。"""
     detected = _find_analysis_engine_imports()
     new = sorted((m, t) for (m, t) in detected if (m, t) not in WHITELIST_ANALYSIS_ENGINE)
-    assert not new, (
-        f"analysis 新增计算执行直接依赖(目标只消费 ComputeResult/回执/声明输出): {new}"
-    )
+    assert not new, f"analysis 新增计算执行直接依赖(目标只消费 ComputeResult/回执/声明输出): {new}"
 
 
 def test_table_ownership_no_new_cross_imports():
     """架构门禁: 跨表 ORM 访问不得新增, 只能按 TABLE_OWNERS 收敛后从白名单移除。"""
     detected = _find_cross_model_imports()
     new = sorted((m, t) for (m, t) in detected if (m, t) not in WHITELIST_CROSS_MODEL_IMPORTS)
-    assert not new, (
-        f"新增跨表 ORM 访问(需收敛到归属领域 repository): {new}"
-    )
+    assert not new, f"新增跨表 ORM 访问(需收敛到归属领域 repository): {new}"
 
 
 # ---------------------------------------------------------------------------
 # 门禁自校验(构造 AST 断言检测逻辑, 不依赖真实代码状态)
 # ---------------------------------------------------------------------------
+
 
 def _parse_src(src: str) -> ast.Module:
     return ast.parse(src, mode="exec")

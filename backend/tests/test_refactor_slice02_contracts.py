@@ -1,0 +1,189 @@
+"""解耦重构切片 2：七域公开 contract 与 repository Protocol 契约测试。
+
+覆盖 project/identity/dataset/configuration/tasks/results/package：
+- 门面可导入且 `__all__` 与导出一致；
+- 全部 Record 为 frozen dataclass（跨模块只传不可变值）；
+- 领域错误复用 core 基类诊断码（不新增码）；
+- 全部 repository Protocol 方法首参为调用方事务拥有的 `db: Session`；
+- 源码纯度：不导入 ORM/services/application/api/worker/engines，
+  无 commit/rollback 调用；contracts.py 只依赖标准库与 core。
+"""
+
+from __future__ import annotations
+
+import ast
+import dataclasses
+import inspect
+from pathlib import Path
+
+import iesplan.configuration as configuration
+import iesplan.dataset as dataset
+import iesplan.identity as identity
+import iesplan.package as package
+import iesplan.project as project
+import iesplan.results as results
+import iesplan.tasks as tasks
+from iesplan.configuration.repository import ConfigurationRepository
+from iesplan.core.errors import ConflictError, NotFoundError
+from iesplan.dataset.repository import DatasetRepository
+from iesplan.identity.repository import IdentityRepository
+from iesplan.package.repository import PackageRepository
+from iesplan.project.repository import ProjectRepository
+from iesplan.results.repository import ResultsRepository
+from iesplan.tasks.repository import TasksRepository
+
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+_PKG_ROOT = _BACKEND_DIR / "iesplan"
+
+_DOMAIN_FACADES = {
+    "project": project,
+    "identity": identity,
+    "dataset": dataset,
+    "configuration": configuration,
+    "tasks": tasks,
+    "results": results,
+    "package": package,
+}
+
+_DOMAIN_REPOSITORIES = {
+    "project": ProjectRepository,
+    "identity": IdentityRepository,
+    "dataset": DatasetRepository,
+    "configuration": ConfigurationRepository,
+    "tasks": TasksRepository,
+    "results": ResultsRepository,
+    "package": PackageRepository,
+}
+
+_ERROR_BASES = {
+    "NotFound": NotFoundError,
+    "Conflict": ConflictError,
+}
+
+#: 域源码中禁止出现的跨层导入前缀（本域 contracts 模块自身除外，见纯度测试）
+_BANNED_PREFIXES = (
+    "iesplan.models",
+    "iesplan.services",
+    "iesplan.application",
+    "iesplan.api",
+    "iesplan.worker",
+    "iesplan.engines",
+    "iesplan.devices",
+    "iesplan.assembly",
+    "iesplan.finance",
+    "iesplan.analysis",
+    "iesplan.storage",
+    "iesplan.metrics",
+    "iesplan.planning",
+    "iesplan.db",
+)
+
+
+def _public_names(module) -> dict[str, object]:
+    return {name: getattr(module, name) for name in module.__all__}
+
+
+def test_domain_facades_export_contracts_and_repository():
+    """七域门面可导入，__all__ 非空且全部可解析，含 contract 与 repository 协议。"""
+    assert set(_DOMAIN_FACADES) == set(_DOMAIN_REPOSITORIES)
+    for domain, facade in _DOMAIN_FACADES.items():
+        assert facade.__all__, f"{domain} 门面 __all__ 为空"
+        exported = _public_names(facade)
+        names = set(exported)
+        assert any(n.endswith("Repository") for n in names), f"{domain} 未导出 repository 协议"
+        assert any(n.endswith("Record") or n.endswith("Page") for n in names), (
+            f"{domain} 未导出 contract 记录"
+        )
+        assert any(n.endswith("Error") for n in names), f"{domain} 未导出领域错误"
+
+
+def test_contract_records_are_frozen():
+    """全部公开记录为 frozen dataclass（slots 可选，不强制）。"""
+    checked = 0
+    for domain, facade in _DOMAIN_FACADES.items():
+        for name, obj in _public_names(facade).items():
+            if not (name.endswith("Record") or name.endswith("Page")):
+                continue
+            assert dataclasses.is_dataclass(obj), f"{domain}.{name} 不是 dataclass"
+            assert obj.__dataclass_params__.frozen, f"{domain}.{name} 必须 frozen"
+            checked += 1
+    assert checked >= 20, f"公开记录过少({checked})，契约疑似缺失"
+
+
+def test_domain_errors_reuse_base_codes():
+    """领域错误继承 core 基类且不新增诊断码（诊断码登记在切片外管理）。"""
+    checked = 0
+    for domain, facade in _DOMAIN_FACADES.items():
+        for name, obj in _public_names(facade).items():
+            if not (name.endswith("Error") and inspect.isclass(obj)):
+                continue
+            for suffix, base in _ERROR_BASES.items():
+                if suffix in name:
+                    assert issubclass(obj, base), f"{domain}.{name} 必须继承 {base.__name__}"
+                    assert obj.code == base.code, f"{domain}.{name} 不得新增诊断码"
+                    checked += 1
+                    break
+    assert checked >= 7, f"领域错误过少({checked})"
+
+
+def test_repository_methods_take_caller_session_first():
+    """repository 协议方法首参一律为调用方事务拥有的 db: Session。"""
+    for domain, proto in _DOMAIN_REPOSITORIES.items():
+        methods = [
+            (name, member)
+            for name, member in inspect.getmembers(proto, predicate=inspect.isfunction)
+            if not name.startswith("_")
+        ]
+        assert methods, f"{domain} repository 协议为空"
+        for name, fn in methods:
+            params = list(inspect.signature(fn).parameters.values())
+            if params and params[0].name == "self":
+                params = params[1:]
+            assert params and params[0].name == "db", f"{domain}.{name} 首参必须为调用方事务 db"
+            assert params[0].annotation == "Session", f"{domain}.{name} 首参必须注解为 Session"
+
+
+def _iter_domain_files():
+    for domain in _DOMAIN_FACADES:
+        for path in sorted((_PKG_ROOT / domain).rglob("*.py")):
+            yield domain, path
+
+
+def test_domain_source_purity():
+    """域源码纯度：无 ORM/跨层导入，无 commit/rollback；contracts 只靠标准库+core。"""
+    violations: list[str] = []
+    for domain, path in _iter_domain_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        own_contracts = f"iesplan.{domain}.contracts"
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                mod = node.module
+                if mod == "__future__":
+                    continue
+                if path.name == "contracts.py":
+                    # contracts 只允许标准库与 iesplan.core
+                    if mod.startswith("iesplan.") and not mod.startswith("iesplan.core."):
+                        violations.append(f"{domain}/{path.name}:{node.lineno}: {mod}")
+                    continue
+                else:
+                    if mod == own_contracts or mod.startswith("iesplan.core."):
+                        continue
+                    if mod.split(".")[0] == "sqlalchemy":
+                        continue
+                for prefix in _BANNED_PREFIXES:
+                    if mod == prefix or mod.startswith(prefix + "."):
+                        violations.append(f"{domain}/{path.name}:{node.lineno}: {mod}")
+                        break
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    for prefix in _BANNED_PREFIXES:
+                        if alias.name == prefix or alias.name.startswith(prefix + "."):
+                            violations.append(f"{domain}/{path.name}:{node.lineno}: {alias.name}")
+                            break
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("commit", "rollback")
+            ):
+                violations.append(f"{domain}/{path.name}:{node.lineno}: .{node.func.attr}()")
+    assert not violations, f"域源码纯度违规: {violations}"
