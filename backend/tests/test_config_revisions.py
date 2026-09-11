@@ -778,3 +778,69 @@ def test_version_freezes_effective_and_planning_revisions(
         "revision": eff["revision"],
     }
     assert content["planning_config"] == {"revision": planning_revision}
+
+
+def test_revision_rows_carry_receipt_objects(
+    client: TestClient, db_session: Session
+) -> None:
+    """新建 revision 行必备可审计回执(0.6.5 条目 1: 回执固定引用)。"""
+    import json
+
+    from iesplan.storage import get_object
+
+    headers, pid = _owner(client, db_session, "cfg_receipt")
+    _set_profile_and_planning(client, headers, pid)
+    ptrs = db_session.execute(
+        text(
+            "SELECT overrides_revision, effective_finance_revision,"
+            " planning_revision FROM projects WHERE id=:p"
+        ),
+        {"p": pid},
+    ).one()
+    cases = [
+        ("finance_overrides", ptrs[0], "finance_overrides",
+         {"profile_id": "cn-north-demo"}),
+        ("effective_finance_revisions", ptrs[1], "effective_finance",
+         {"profile_id": "cn-north-demo", "overrides_revision": ptrs[0]}),
+        ("planning_configs", ptrs[2], "planning_config",
+         {"effective_revision": ptrs[1]}),
+    ]
+    for table, rev, kind, refs in cases:
+        rid = db_session.execute(
+            text(
+                f"SELECT receipt_object_id FROM {table}"
+                " WHERE project_id=:p AND revision=:r"
+            ),
+            {"p": pid, "r": rev},
+        ).scalar()
+        assert rid is not None, table
+        receipt = json.loads(get_object(db_session, rid).decode("utf-8"))
+        assert receipt["schema"] == "ies.config-receipt"
+        assert receipt["kind"] == kind
+        assert receipt["project_id"] == pid
+        assert receipt["revision"] == rev
+        assert receipt["refs"] == refs
+
+
+def test_migration_0007_adds_receipt_columns_idempotent() -> None:
+    """0007 为三表补 receipt_object_id 列; 重跑幂等(0.6.5 条目 1)。"""
+    from iesplan.migrations import _migrate_0007
+
+    tables = (
+        "finance_overrides",
+        "effective_finance_revisions",
+        "planning_configs",
+    )
+    engine = create_engine("sqlite+pysqlite://")
+    with engine.begin() as conn:
+        for table in tables:
+            conn.execute(text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
+    with engine.begin() as conn:
+        _migrate_0007(conn)
+        _migrate_0007(conn)
+        for table in tables:
+            cols = {
+                r[1]
+                for r in conn.execute(text(f"PRAGMA table_info({table})")).all()
+            }
+            assert "receipt_object_id" in cols, table

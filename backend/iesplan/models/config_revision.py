@@ -67,6 +67,8 @@ class FinanceOverridesRevision(Base):
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False)
     profile_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 可审计回执对象引用(objects.id; 0011 起新行必备, 存量开发行可空)
+    receipt_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -91,6 +93,8 @@ class EffectiveFinanceRevision(Base):
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False)
     profile_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 可审计回执对象引用(objects.id; 0011 起新行必备, 存量开发行可空)
+    receipt_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
@@ -119,6 +123,8 @@ class PlanningConfigRevision(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    #: 可审计回执对象引用(objects.id; 0011 起新行必备, 存量开发行可空)
+    receipt_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()

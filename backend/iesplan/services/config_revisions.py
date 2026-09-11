@@ -19,7 +19,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -263,6 +265,58 @@ def _current_overrides(
     )
     return row, overrides
 
+def _store_config_receipt(
+    db: Session,
+    *,
+    kind: str,
+    project_id: int,
+    revision: int,
+    refs: dict,
+    created_by: int,
+) -> int:
+    """可审计回执落对象存储, 返回对象 id(0.6.5 条目 1 退出标准)。
+
+    回执记录本次 revision 固定的引用(稳定 ID/revision), 不存业务文本
+    摘要; 调用方把返回 id 写入 revision 行 receipt_object_id 并建 owner
+    引用(防 orphan 清理)。失败抛错, 由外层事务回滚(无部分发布)。
+    """
+    receipt = {
+        "schema": "ies.config-receipt",
+        "schema_version": "1",
+        "kind": kind,
+        "project_id": project_id,
+        "revision": revision,
+        "refs": dict(refs),
+        "created_by": created_by,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    handle = put_object(
+        db,
+        json.dumps(receipt, ensure_ascii=False, sort_keys=True).encode("utf-8"),
+        "application/json",
+        source_category="config_receipt",
+    )
+    return handle.id
+
+
+def _attach_config_receipt(
+    db: Session,
+    *,
+    object_id: int,
+    ref_type: str,
+    row_id: int,
+    ref_entity_type: str,
+    purpose: str,
+) -> None:
+    """回执对象建 owner 引用(引用清单为权威, 防 orphan 清理误回收)。"""
+    from iesplan.storage import add_ref  # 延迟导入避免环(与 register 一致)
+
+    add_ref(
+        db, object_id, ref_type, row_id,
+        ref_entity_type=ref_entity_type, purpose=purpose,
+    )
+
+
 def _next_revision(
     db: Session, model: type, project_id: int, project_field: str
 ) -> int:
@@ -364,8 +418,19 @@ def save_finance_overrides(
         profile_id=overrides.profile_ref["id"],
         created_by=user_id,
     )
+    overrides_row.receipt_object_id = _store_config_receipt(
+        db, kind="finance_overrides", project_id=project_id,
+        revision=next_overrides_rev,
+        refs={"profile_id": overrides.profile_ref["id"]},
+        created_by=user_id,
+    )
     db.add(overrides_row)
     db.flush()
+    _attach_config_receipt(
+        db, object_id=overrides_row.receipt_object_id,
+        ref_type="finance_overrides_revision", row_id=overrides_row.id,
+        ref_entity_type="finance_overrides", purpose="finance_overrides_receipt",
+    )
     project.overrides_revision = next_overrides_rev
     # 合并生成 Effective(from_dict 已按 Profile 完成全部结构校验, 合并失败即
     # 内部错误, 不吞异常, 事务回滚后以 500 可见)
@@ -380,8 +445,24 @@ def save_finance_overrides(
         profile_id=effective.profile_id,
         created_by=user_id,
     )
+    eff_row.receipt_object_id = _store_config_receipt(
+        db, kind="effective_finance", project_id=project_id,
+        revision=next_eff_rev,
+        refs={
+            "profile_id": effective.profile_id,
+            "overrides_revision": next_overrides_rev,
+        },
+        created_by=user_id,
+    )
     db.add(eff_row)
     project.effective_finance_revision = next_eff_rev
+    db.flush()
+    _attach_config_receipt(
+        db, object_id=eff_row.receipt_object_id,
+        ref_type="effective_finance_revision", row_id=eff_row.id,
+        ref_entity_type="effective_finance_revisions",
+        purpose="effective_finance_receipt",
+    )
     # 任何新 Effective 生成即失效旧 Planning(历史行保留, 指针清空)
     project.planning_revision = None
     db.flush()
@@ -519,7 +600,18 @@ def save_planning_config(
         content=config.to_dict(),
         created_by=user_id,
     )
+    row.receipt_object_id = _store_config_receipt(
+        db, kind="planning_config", project_id=project_id,
+        revision=next_revision,
+        refs={"effective_revision": project.effective_finance_revision},
+        created_by=user_id,
+    )
     db.add(row)
     project.planning_revision = next_revision
     db.flush()
+    _attach_config_receipt(
+        db, object_id=row.receipt_object_id,
+        ref_type="planning_config_revision", row_id=row.id,
+        ref_entity_type="planning_configs", purpose="planning_config_receipt",
+    )
     return row, next_revision

@@ -726,6 +726,36 @@ def _migrate_0006_sqlite(conn: sa.Connection) -> None:
     conn.execute(sa_text("DROP TABLE IF EXISTS finance_configs"))
 
 
+def _migrate_0007(conn: sa.Connection) -> None:
+    """配置 revision 可审计回执列(0.6.5 条目 1-2)。
+
+    为 finance_overrides / effective_finance_revisions / planning_configs
+    增加 receipt_object_id 列(对象引用, 指向回执 JSON 对象)。
+    新建 revision 行由服务层必备回执; 存量开发行保持 NULL(读取容忍:
+    空回执不破坏任何加载路径, 与内容引用缺失有本质区别)。
+    全新库经 ORM create_all 已含本列, 本迁移幂等 no-op; 存量库按需加列。
+    迁移失败直接抛出(同一事务回滚, 台账不记录)。
+
+    编号说明: 旧 0007-0010(SHA 清理系)已在合并中整体退役(开发库重建),
+    本编号复用 0007, 版本字符串区分。
+    """
+    _ensure_columns(
+        conn,
+        "finance_overrides",
+        {"receipt_object_id": "BIGINT REFERENCES objects(id)"},
+    )
+    _ensure_columns(
+        conn,
+        "effective_finance_revisions",
+        {"receipt_object_id": "BIGINT REFERENCES objects(id)"},
+    )
+    _ensure_columns(
+        conn,
+        "planning_configs",
+        {"receipt_object_id": "BIGINT REFERENCES objects(id)"},
+    )
+
+
 #: 有序迁移清单(version, name, upgrade)
 MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
@@ -734,6 +764,7 @@ MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0004_project_baseline", "项目计算基线固定与旧时区列删除", _migrate_0004),
     ("0005_finance_planning_configs", "公共财务与规划配置不可变 revision 表", _migrate_0005),
     ("0006_finance_triplet_persistence", "财务三件套持久化替换旧单体 FinanceConfig", _migrate_0006),
+    ("0007_config_revision_receipts", "配置 revision 可审计回执列", _migrate_0007),
 ]
 
 MIGRATION_VERSIONS: tuple[str, ...] = tuple(m[0] for m in MIGRATIONS)
