@@ -24,15 +24,14 @@ from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.core.errors import NotFoundError
 
-#: 旧形态 internal 参数键(builder.py 的 _INTERNAL_PARAM_KEYS 一致含义)
+#: 不进入 parameters 的内部键(data_refs 由绑定器显式消费;
+#: type_detail/model_method/stateful/__layout 为现行内容键, 其余 1.0 键已删除)
 _INTERNAL_PARAM_KEYS: tuple[str, ...] = (
     "type_detail",
     "model_method",
     "stateful",
-    "ref_id",
     "data_refs",
     "__layout",
-    "_assembly_source",
 )
 
 #: 旧链推导的求解器引用(legacy scipy.optimize.milp / HiGHS);
@@ -68,19 +67,21 @@ def build_assembly_doc_from_content(
 ) -> BuildDocResult:
     """项目内容 → ies.assembly 1.0.0 文档(roadmap 0.7.0 事项 2)。
 
-    输入结构(兼容旧服务层):
+    输入结构(现行模型字段, 无 1.0 兼容):
       content = {"model": {"devices": [...], "ports": [...], "connections": [...]},
-                 "calc_config": {...}}
+                 "calc_config": {...}, "name": ...}
       或 content 直接含 devices/ports/connections(扁平图)。
 
     字段映射:
-    - assembly.id/name: graph.id/name(无 id 则 'legacy_export');
+    - assembly.id/name: 内容 name(必填, 缺失阻断; id 为其 slug);
     - time_axis: calc_config.time_axis 派生(start/end/endpoint/resolution);
     - resources.datasets: 从 dataset_bindings + datasets 元信息
       构造为对象形态引用;
     - devices: 每个实例 → {model: <id>@<version>, parameters: 已清洗参数, data: ...};
-    - connections: 每个图连接 → 新格式映射;loss_rate > 0 自动包裹 transport_pipe 设备实例;
-    - calculation: mode/generator/solver/options/random_seed。
+      data 绑定只接受与模型 data_inputs 列精确匹配的显式绑定;
+    - connections: 每个图连接必须有 id 且端口可解析, 否则阻断;
+      loss_rate > 0 自动包裹 transport_pipe 设备实例;
+    - calculation: mode/generator/solver/options/random_seed, 均须显式声明。
 
     返回 (doc, diagnostics)。任一阻断错误 → doc=None(不进入校验器)。
     """
@@ -92,7 +93,34 @@ def build_assembly_doc_from_content(
     calc_cfg = content.get("calc_config") if isinstance(content.get("calc_config"), Mapping) else {}
 
     graph_id = content.get("graph_id")
-    name = str(content.get("name") or (f"graph_{graph_id}" if graph_id else "legacy_export"))
+    name_raw = content.get("name")
+    if isinstance(name_raw, str) and name_raw:
+        name = name_raw
+    elif graph_id:
+        name = f"graph_{graph_id}"
+    else:
+        diags.append(
+            make_diag(
+                ASM_CONV_UNMAPPABLE,
+                severity="error",
+                blocking=True,
+                params={"reason": "assembly_name_missing"},
+                location={"object_type": "assembly", "field": "name"},
+            )
+        )
+        return BuildDocResult(doc=None, diagnostics=diags)
+    slug = _slugify_id(name)
+    if not slug:
+        diags.append(
+            make_diag(
+                ASM_CONV_UNMAPPABLE,
+                severity="error",
+                blocking=True,
+                params={"reason": "assembly_id_empty", "value": name},
+                location={"object_type": "assembly", "field": "name"},
+            )
+        )
+        return BuildDocResult(doc=None, diagnostics=diags)
 
     # 1) 时间轴(start 带偏移则换算为 UTC Z;end 旧形态未声明,从 start + 年步长推导)
     axis_raw = calc_cfg.get("time_axis") if isinstance(calc_cfg.get("time_axis"), Mapping) else {}
@@ -132,7 +160,7 @@ def build_assembly_doc_from_content(
         dev_id = _device_ref(d)
         type_id = _resolve_type_id(d)
         params = _clean_params(d)
-        data_bindings, bind_diags = _resolve_data_bindings(d, datasets_map, type_id, dev_id)
+        data_bindings, bind_diags = _resolve_data_bindings(d, type_id, dev_id)
         diags.extend(bind_diags)
         if bind_diags and any(x.blocking for x in bind_diags):
             continue
@@ -144,23 +172,53 @@ def build_assembly_doc_from_content(
             devices_out[dev_id]["data"] = data_bindings
 
     # 4) 连接(loss_rate > 0 → 包裹管道设备;管道名 = "e<id>_pipe");
-    #    边 id 统一加 e 前缀,满足新格式局部 ID(lower_snake)约束
+    #    边 id 统一加 e 前缀,满足新格式局部 ID(lower_snake)约束;
+    #    无 id / 端口不可解析 / 含 1.0 独有字段一律阻断(无静默丢弃)
     connections_out: dict[str, dict] = {}
     for c in sorted(conns_raw, key=lambda x: str(x.get("id") or "")):
         raw_id = str(c.get("id") or "")
         if not raw_id:
+            diags.append(
+                make_diag(
+                    ASM_CONV_UNMAPPABLE,
+                    severity="error",
+                    blocking=True,
+                    params={"reason": "connection_id_missing"},
+                    location={"object_type": "connection"},
+                )
+            )
             continue
         edge_id = f"e{raw_id}"
         from_p = port_index.get(c.get("from_port_id"))
         to_p = port_index.get(c.get("to_port_id"))
         if from_p is None or to_p is None:
+            diags.append(
+                make_diag(
+                    ASM_CONV_UNMAPPABLE,
+                    severity="error",
+                    blocking=True,
+                    params={"reason": "connection_port_unresolved", "connection": raw_id},
+                    location={"object_type": "connection", "object_id": raw_id},
+                )
+            )
+            continue
+        if "delay_steps" in c:
+            diags.append(
+                make_diag(
+                    ASM_CONV_UNMAPPABLE,
+                    severity="error",
+                    blocking=True,
+                    params={"reason": "connection_delay_unsupported", "connection": raw_id},
+                    location={"object_type": "connection", "object_id": raw_id, "field": "delay_steps"},
+                )
+            )
             continue
         from_ref = f"{device_ref_of.get(from_p.get('device_id'), '?')}.{from_p.get('name')}"
         to_ref = f"{device_ref_of.get(to_p.get('device_id'), '?')}.{to_p.get('name')}"
         loss_rate = _num_or_zero(c.get("loss_rate"))
         if loss_rate > 0:
             pipe_id = f"{edge_id}_pipe"
-            # 2.0 transport_pipe 仅声明 loss_rate; 旧连接 delay_steps 无对应属性, 不导出
+            # transport_pipe 仅声明 loss_rate
             devices_out[pipe_id] = {
                 "model": _PIPE_MODEL,
                 "parameters": {
@@ -195,7 +253,7 @@ def build_assembly_doc_from_content(
     doc = {
         "schema": "ies.assembly",
         "schema_version": "1.0.0",
-        "assembly": {"id": _slugify_id(name), "name": name},
+        "assembly": {"id": slug, "name": name},
         "time_axis": {
             "start": _format_utc(start_utc),
             "end": _format_utc(end_utc),
@@ -228,10 +286,6 @@ def _resolve_type_id(device: dict) -> str:
 
 
 def _device_ref(device: dict) -> str:
-    params = device.get("params") or {}
-    ref = params.get("ref_id")
-    if isinstance(ref, str) and ref:
-        return ref
     return f"d{device.get('id')}"
 
 
@@ -259,13 +313,13 @@ def _clean_params(device: dict) -> dict:
 
 
 def _resolve_data_bindings(
-    device: dict, datasets: dict[int, Mapping], type_id: str, dev_id: str
+    device: dict, type_id: str, dev_id: str
 ) -> tuple[dict | None, list[Diagnostic]]:
-    """从设备的 reference 参数 + 显式 data_refs 列表构造新格式 data 绑定。
+    """从设备的显式绑定参数 + data_refs 列表构造 data 绑定。
 
-    新格式约定:data 绑定键 = 模型 data_inputs 列名;列名 = 数据集已校验列。
-    旧形态遗留 `xxx_profile` reference 参数按"模型唯一 data_inputs 列"启发式
-    映射到 data_inputs 列;多列或多对多关系无法唯一决定时返回阻断诊断。
+    约定:data 绑定键 = 模型 data_inputs 列名;列名 = 数据集已校验列。
+    只有声明列与模型列精确匹配才接受;多列或多对多关系无法唯一决定时
+    返回阻断诊断(无启发式映射)。
     """
     from iesplan.devices import get_device
 
@@ -291,9 +345,23 @@ def _resolve_data_bindings(
             continue
         if isinstance(value, dict) and value.get("dataset_version_id") is not None:
             vid = int(value["dataset_version_id"])
-            meta = datasets.get(vid)
             columns = [c for c in (value.get("columns") or []) if isinstance(c, str)]
-            column = columns[0] if columns else _first_meta_column(meta)
+            if not columns:
+                diags.append(
+                    make_diag(
+                        ASM_CONV_UNMAPPABLE,
+                        severity="error",
+                        blocking=True,
+                        params={
+                            "reason": "data_binding_columns_missing",
+                            "device": dev_id,
+                            "param": key,
+                        },
+                        location={"object_type": "device", "object_id": dev_id, "field": f"params.{key}"},
+                    )
+                )
+                continue
+            column = columns[0]
             target_col = _resolve_data_input_column(data_inputs, key, column)
             if target_col is None:
                 diags.append(
@@ -315,54 +383,29 @@ def _resolve_data_bindings(
                 "dataset": _dataset_id_for(vid),
                 "column": column or target_col.id,
             }
-        elif isinstance(value, str) and value.startswith("dataset:"):
-            col = value.split(":", 1)[1].strip() or key
-            vid = next(
-                (
-                    v
-                    for v, m in datasets.items()
-                    if isinstance(m, Mapping) and col in (m.get("columns") or [])
-                ),
-                None,
-            )
-            if vid is None:
-                diags.append(
-                    make_diag(
-                        ASM_CONV_UNMAPPABLE,
-                        severity="error",
-                        blocking=True,
-                        params={"reason": "legacy_dataset_unresolved", "device": dev_id, "column": col},
-                        location={"object_type": "device", "object_id": dev_id, "field": f"params.{key}"},
-                    )
-                )
-                continue
-            target_col = _resolve_data_input_column(data_inputs, key, col)
-            if target_col is None:
+
+    # 显式 data_refs 列表(与上面相同的列解析)
+    for item in params.get("data_refs") or []:
+        if isinstance(item, Mapping) and item.get("dataset_version_id") is not None:
+            vid = int(item["dataset_version_id"])
+            columns = [c for c in (item.get("columns") or []) if isinstance(c, str)]
+            key = str(item.get("key") or f"data{len(bindings)}")
+            if not columns:
                 diags.append(
                     make_diag(
                         ASM_CONV_UNMAPPABLE,
                         severity="error",
                         blocking=True,
                         params={
-                            "reason": "data_binding_unmappable",
+                            "reason": "data_binding_columns_missing",
                             "device": dev_id,
                             "param": key,
-                            "model_data_inputs": [d.id for d in data_inputs],
                         },
-                        location={"object_type": "device", "object_id": dev_id, "field": f"params.{key}"},
+                        location={"object_type": "device", "object_id": dev_id, "field": f"data_refs.{key}"},
                     )
                 )
                 continue
-            bindings[target_col.id] = {"dataset": _dataset_id_for(vid), "column": col}
-
-    # 显式 data_refs 列表(与上面相同的列解析)
-    for item in params.get("data_refs") or []:
-        if isinstance(item, Mapping) and item.get("dataset_version_id") is not None:
-            vid = int(item["dataset_version_id"])
-            meta = datasets.get(vid)
-            columns = [c for c in (item.get("columns") or []) if isinstance(c, str)]
-            column = columns[0] if columns else _first_meta_column(meta)
-            key = str(item.get("key") or f"data{len(bindings)}")
+            column = columns[0]
             target_col = _resolve_data_input_column(data_inputs, key, column)
             if target_col is None:
                 diags.append(
@@ -391,29 +434,13 @@ def _resolve_data_bindings(
 
 
 def _resolve_data_input_column(data_inputs, param_key: str, column: str | None):
-    """唯一决定 data_inputs 列:旧参数名直接匹配模型列名;否则唯一 data_inputs 列;
-    否则返回 None(无法唯一决定 → 阻断)。
+    """唯一决定 data_inputs 列:只有声明列与模型列精确匹配才接受,
+    否则返回 None(无法唯一决定 → 阻断, 无启发式映射)。
     """
     if column:
         for d in data_inputs:
             if d.id == column:
                 return d
-    # 参数名直接匹配模型 data_inputs 列
-    for d in data_inputs:
-        if d.id == param_key:
-            return d
-    # 唯一 data_inputs 列:启发式映射(典型:负荷类设备)
-    if len(data_inputs) == 1:
-        return data_inputs[0]
-    return None
-
-
-def _first_meta_column(meta: Mapping | None) -> str | None:
-    if not isinstance(meta, Mapping):
-        return None
-    for col in meta.get("columns") or []:
-        if isinstance(col, str) and col:
-            return col
     return None
 
 
@@ -483,8 +510,6 @@ def _build_calculation(
             if isinstance(v, (int, float)):
                 options[str(k)] = float(v)
     seed = calc_cfg.get("random_seed")
-    if seed is None:
-        seed = calc_cfg.get("seed")
     out = {
         "mode": mode,
         "generator": gen,
@@ -548,12 +573,12 @@ def _format_utc(dt) -> str:
 
 
 def _slugify_id(text: str) -> str:
-    """装配 id:仅保留 lower_snake/短横线字符;空时退回 'legacy_export'。"""
+    """装配 id:仅保留 lower_snake/短横线字符;空字符串表示名称无可用字符。"""
     import re
 
-    cleaned = re.sub(r"[^a-z0-9_-]+", "_", text.strip().lower()).strip("-_") or "legacy_export"
+    cleaned = re.sub(r"[^a-z0-9_-]+", "_", text.strip().lower()).strip("-_")
     if not re.match(r"^[a-z][a-z0-9_-]*$", cleaned):
-        cleaned = "legacy_export"
+        return ""
     return cleaned
 
 

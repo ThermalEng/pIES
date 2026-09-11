@@ -84,33 +84,11 @@ def _init_database() -> None:
         logger.exception("启动时数据库初始化失败, 应用继续运行, 就绪检查将返回 503")
 
 
-def _init_modeling_registry() -> None:
-    """启动时注册建模命令(设备目录 → 标准调用命令, 03 §5.2)。
-
-    任一设备校验/命令生成失败 → 抛 AppError 阻断启动(受控加载语义,
-    避免生产进程运行在空命令注册表上)。注册表不可用时记录日志并把状态
-    记入 ``_registry_status`` 供 /api/readyz 上报(API 不阻断启动,
-    但就绪探针返回 503, 容器编排不会把流量切到半初始化实例)。
-    """
-    global _registry_status
-    try:
-        from iesplan.devices import init_registry
-        from iesplan.modeling.registry_loader import register_catalog_commands
-
-        init_registry()  # 设备 YAML 注册表(插件式, 供装配检查/端口派生)
-        register_catalog_commands()  # 建模命令注册表(标准调用命令)
-        _registry_status = "ok"
-    except Exception as exc:
-        logger.exception("启动时建模命令注册失败(受控加载), 应用继续运行但命令注册表为空")
-        _registry_status = f"error: {exc}"
-
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """应用生命周期: 启动时初始化数据库与建模命令注册表, 关闭时记录日志。"""
+    """应用生命周期: 启动时初始化数据库, 关闭时记录日志。"""
     logger.info("pIES API 启动, 版本=%s", __version__)
     _init_database()
-    _init_modeling_registry()
     yield
     logger.info("pIES API 关闭")
 

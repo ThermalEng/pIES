@@ -393,15 +393,6 @@ def test_sync_ports_preserves_same_carrier_multi_port(
         assert ports_rebuilt["electric_b"].id != electric_b_id  # 补建为新 id
 
 
-def test_catalog_compute_command_refs_resolvable() -> None:
-    """计算命令 function_ref 全部可解析(codex 复审 B3): 启动校验不延迟到运行期。"""
-    from iesplan.modeling.command import compute_command_refs, resolve_function_ref
-
-    for command_id, ref in compute_command_refs().items():
-        fn = resolve_function_ref(ref)  # 抛 NotFoundError 即失败
-        assert callable(fn), f"{command_id} 引用不可调用: {ref}"
-
-
 def test_create_device_kind_and_fidelity(db_factory: tuple[sessionmaker, int], project_id: int) -> None:
     """存量/新增与模型精度落库: is_existing=True → kind=existing, precision=low。"""
     factory, admin_id = db_factory

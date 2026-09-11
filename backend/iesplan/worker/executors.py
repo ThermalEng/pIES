@@ -159,12 +159,8 @@ def _run_engine(
 
 
 def execute_calc(ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None) -> dict:
-    """方案评价: 快照 plan+data → evaluate_plan → 逐时结果/KPI/指标。
-
-    产出 payload: result_kind='eval_result', 含逐时流字段、KPI、诊断、
-    四维评估与业务结局。引擎经建模命令注册表分发（命令化:
-    algorithm → command_id → function，不再直接 import 引擎函数）。
-    """
+    """旧计算原型已删除；待 0.8 GeneratorProvider 接入。"""
+    raise NotImplementedError("旧计算执行链已删除，等待 GeneratorProvider/Solver Bundle")
     config = content.get("calc_config") or {}
     task_params = config.get("task_params") or {}
     plan = _build_plan(content, config)
@@ -190,27 +186,13 @@ def execute_calc(ctx: RunContext, content: dict, data: dict, axis: Any, options:
 
 
 def _select_engine(ctx: RunContext, config: dict, task_params: dict) -> tuple[str, dict]:
-    """算法选择 + 求解选项收敛（见 architecture §核心业务流，engines/selector.py）。
-
-    合并顺序:快照 tolerances → task_params.solver_options(后者覆盖);
-    随机 seed 来自快照 random_seed(权威来源)。
-    """
-    from iesplan.engines.selector import select_engine
-
-    command_id, opts = select_engine(config, ctx.task.type, snapshot=ctx.snapshot)
-    task_solver = task_params.get("solver_options") or {}
-    if isinstance(task_solver, dict):
-        opts.update(
-            {k: float(v) for k, v in task_solver.items() if isinstance(v, (int, float))}
-        )
-    return command_id, opts
+    """旧算法选择器已删除，等待 0.8 计算配置与生成器契约。"""
+    raise NotImplementedError("旧算法选择器已删除，等待 GeneratorProvider")
 
 
 def _engine_entry(command_id: str) -> Any:
-    """计算引擎命令 → 函数(经 modeling 命令注册表;未注册抛 NotFoundError)。"""
-    from iesplan.modeling.command import get_compute_entry
-
-    return get_compute_entry(command_id)
+    """旧进程内命令注册表已删除。"""
+    raise NotImplementedError("旧计算命令注册表已删除，等待 SolverRuntime")
 
 
 def plan_for_finance(content: dict) -> dict:

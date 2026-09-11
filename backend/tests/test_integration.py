@@ -84,21 +84,6 @@ def _clean_tables(engine: Engine) -> Iterator[None]:
             conn.execute(table.delete())
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _init_runtime_registry():
-    """任务装配/模型写入消费运行期设备注册表（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §4.2 devices §5.2组合根； manual/developer-guide/zh-CN/modules/devices.md）。删除 RR-P1-04 旧 Roadmap 编号。
-
-    会话级: 内置 catalog 加载一次, 建模命令注册一次(命令表为进程级状态,
-    多次注册会重复构建; 保持幂等)。
-    """
-    from iesplan.devices import init_registry
-    from iesplan.modeling.registry_loader import register_catalog_commands
-
-    init_registry()
-    register_catalog_commands()
-    yield
-
-
 @pytest.fixture()
 def db_session(engine: Engine) -> Iterator[Session]:
     """函数级共享会话(服务与测试共用, 端点内 commit)。"""

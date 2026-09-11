@@ -213,7 +213,7 @@ class TestProjectExport:
                         "params": {
                             "type_detail": "ies.device.electric_load",
                             "peak_power_kw": 100,
-                            "load_profile": {"dataset_version_id": 17, "unit": "kW"},
+                            "load_profile": {"dataset_version_id": 17, "columns": ["electricity_demand"], "unit": "kW"},
                         },
                     },
                 ],
@@ -257,8 +257,8 @@ class TestProjectExport:
         }
         datasets = {
             17: {
-                "columns": ["e_load"],
-                "column_units": {"e_load": "kWh"},
+                "columns": ["electricity_demand"],
+                "column_units": {"electricity_demand": "kWh"},
                 "resolution": "1h",
                 "media_type": "text/csv",
             },
@@ -335,7 +335,7 @@ class TestProjectExport:
                         "kind": "existing",
                         "params": {
                             "type_detail": "ies.device.heat_load",
-                            "heat_profile": {"dataset_version_id": 18, "unit": "kW"},
+                            "heat_profile": {"dataset_version_id": 18, "columns": ["heat_demand"], "unit": "kW"},
                         },
                     },
                 ],
@@ -370,7 +370,6 @@ class TestProjectExport:
                         "from_port_id": 22,
                         "to_port_id": 31,
                         "loss_rate": 0.05,
-                        "params": {"delay_steps": 2},
                     },
                 ],
             },
@@ -379,8 +378,8 @@ class TestProjectExport:
         }
         datasets = {
             18: {
-                "columns": ["h_load"],
-                "column_units": {"h_load": "kWh"},
+                "columns": ["heat_demand"],
+                "column_units": {"heat_demand": "kWh"},
                 "resolution": "1h",
                 "media_type": "text/csv",
             },
@@ -389,6 +388,120 @@ class TestProjectExport:
         assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
         canonical = result.artifact.canonical_text
         assert "transport_pipe@2.0.0" in canonical
+
+    def test_project_export_rejects_unmappable_binding_without_heuristics(self, init_registry):
+        # 无启发式映射: 声明列与模型列不一致 → 阻断(旧 xxx_profile/单列兜底已删除)
+        content = {
+            "graph_id": 44,
+            "name": "bad_binding",
+            "model": {
+                "devices": [
+                    {
+                        "id": 3,
+                        "device_type": "ies.device.electric_load",
+                        "params": {
+                            "type_detail": "ies.device.electric_load",
+                            "load_profile": {"dataset_version_id": 17, "columns": ["nope"], "unit": "kW"},
+                        },
+                    },
+                ],
+                "ports": [],
+                "connections": [],
+            },
+            "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+            "dataset_bindings": [{"dataset_version_id": 17}],
+        }
+        datasets = {
+            17: {
+                "columns": ["nope"],
+                "column_units": {"nope": "kWh"},
+                "resolution": "1h",
+                "media_type": "text/csv",
+            },
+        }
+        result = validate_project_export(content, datasets=datasets)
+        assert result.artifact is None
+        assert any(
+            d.params.get("reason") == "data_binding_unmappable" and d.blocking
+            for d in result.diagnostics
+        )
+
+    def test_project_export_rejects_binding_without_columns(self, init_registry):
+        # 绑定缺 columns 不再回退数据集首列, 直接阻断
+        content = {
+            "graph_id": 46,
+            "name": "no_columns",
+            "model": {
+                "devices": [
+                    {
+                        "id": 3,
+                        "device_type": "ies.device.electric_load",
+                        "params": {
+                            "type_detail": "ies.device.electric_load",
+                            "load_profile": {"dataset_version_id": 17, "unit": "kW"},
+                        },
+                    },
+                ],
+                "ports": [],
+                "connections": [],
+            },
+            "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+            "dataset_bindings": [{"dataset_version_id": 17}],
+        }
+        datasets = {
+            17: {
+                "columns": ["electricity_demand"],
+                "column_units": {"electricity_demand": "kWh"},
+                "resolution": "1h",
+                "media_type": "text/csv",
+            },
+        }
+        result = validate_project_export(content, datasets=datasets)
+        assert result.artifact is None
+        assert any(
+            d.params.get("reason") == "data_binding_columns_missing" and d.blocking
+            for d in result.diagnostics
+        )
+
+    def test_project_export_rejects_missing_name(self, init_registry):
+        # 装配名必填: 缺失不再回退 legacy_export
+        content = {
+            "model": {"devices": [], "ports": [], "connections": []},
+            "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+        }
+        result = validate_project_export(content)
+        assert result.artifact is None
+        assert any(
+            d.params.get("reason") == "assembly_name_missing" and d.blocking
+            for d in result.diagnostics
+        )
+
+    def test_project_export_rejects_bad_connections(self, init_registry):
+        # 无 id / 端口不可解析 / 1.0 独有 delay_steps 一律阻断, 无静默丢弃;
+        # 阻断统一使用 ASM-CONV-001 并携带对应 reason
+        base_ports = [{"id": 11, "device_id": 1, "name": "p", "port_type": "electric", "direction": "out"}]
+        base_devices = [{"id": 1, "device_type": "ies.device.grid_connection", "params": {}}]
+        cases = [
+            ({"connections": [{"from_port_id": 11, "to_port_id": 11}]}, "connection_id_missing"),
+            ({"connections": [{"id": 9, "from_port_id": 11, "to_port_id": 99}]}, "connection_port_unresolved"),
+            (
+                {"connections": [{"id": 9, "from_port_id": 11, "to_port_id": 11, "delay_steps": 2}]},
+                "connection_delay_unsupported",
+            ),
+        ]
+        for conn, reason in cases:
+            content = {
+                "graph_id": 45,
+                "name": "bad_conn",
+                "model": {"devices": base_devices, "ports": base_ports, **conn},
+                "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+            }
+            result = validate_project_export(content)
+            assert result.artifact is None, conn
+            assert any(
+                d.code == "ASM-CONV-001" and d.params.get("reason") == reason and d.blocking
+                for d in result.diagnostics
+            ), (conn, reason)
 
 
 class TestArtifactTriple:
