@@ -1180,24 +1180,26 @@ def _version_content(db: Session, project: Project, content: dict) -> dict:
     from iesplan.core.errors import NotFoundError
 
     try:
-        effective, _, _ = get_effective_finance_config(db, project.id)
+        effective, effective_revision, _ = get_effective_finance_config(db, project.id)
     except NotFoundError:
         effective = None
+        effective_revision = None
     if effective is not None:
         version_content["effective_finance"] = {
             "profile_id": effective.profile_id,
+            "revision": effective_revision,
         }
     # 规划配置引用闭合: 版本固化当前规划配置 revision(规划行本身
     # 已指向被固化 Effective)。文本只校验字头, 不存业务文本摘要。
     from iesplan.services.config_revisions import get_planning_config
 
     try:
-        planning, _, _ = get_planning_config(db, project.id)
+        _, planning_revision, _ = get_planning_config(db, project.id)
     except NotFoundError:
-        planning = None
-    if planning is not None:
+        planning_revision = None
+    if planning_revision is not None:
         version_content["planning_config"] = {
-            "revision": planning.revision,
+            "revision": planning_revision,
         }
     return version_content
 

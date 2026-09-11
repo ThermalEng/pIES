@@ -752,3 +752,29 @@ def test_set_profile_commits_transaction_for_new_session(
             {"p": pid},
         ).scalar()
         assert row == 1
+
+
+def test_version_freezes_effective_and_planning_revisions(
+    client: TestClient, db_session: Session
+) -> None:
+    """版本固化 Effective 修订与规划修订引用(0.6.5 条目 2: 同一份快照引用闭合)。"""
+    import json
+
+    from iesplan.storage import get_object
+
+    headers, pid = _owner(client, db_session, "cfg_version_freeze")
+    planning_revision = _set_profile_and_planning(client, headers, pid)
+    eff = client.get(f"/api/projects/{pid}/effective-finance", headers=headers).json()
+    resp = client.post(
+        f"/api/projects/{pid}/versions",
+        json={"name": "v1", "description": "freeze", "reason": "milestone"},
+        headers=headers,
+    )
+    assert resp.status_code == 201, resp.text
+    raw = get_object(db_session, resp.json()["version"]["content_object_id"])
+    content = json.loads(raw.decode("utf-8"))
+    assert content["effective_finance"] == {
+        "profile_id": "cn-north-demo",
+        "revision": eff["revision"],
+    }
+    assert content["planning_config"] == {"revision": planning_revision}
