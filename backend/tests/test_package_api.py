@@ -42,6 +42,7 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from iesplan import package as package_domain  # noqa: E402
 from iesplan.api import admin as admin_api  # noqa: E402
 from iesplan.api import exports as exports_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
@@ -487,7 +488,9 @@ def test_import_creates_new_identity_owner_and_evidence_source(
     ).scalars().all()
     assert len(new_refs) > original_evidence_count
 
-    # 提案收尾 + 审计
+    # 提案收尾 + 审计(提案为不可变记录，重读确认终态)
+    proposal = package_domain.get_proposal(db, proposal.id)
+    assert proposal is not None
     assert proposal.status == "applied"
     assert proposal.decided_by == importer.id
     # 幂等重放: 已导入提案再次确认返回同一项目

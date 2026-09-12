@@ -32,11 +32,14 @@ from typing import Any
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan import __version__
+from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
+from iesplan import dataset as dataset_domain
+from iesplan import identity as identity_domain
+from iesplan import package as package_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
@@ -47,9 +50,9 @@ from iesplan.core.contracts import (
     ProjectBaseline,
     ProjectBaselineError,
 )
-from iesplan.core.diagnostics import SEVERITY_ERROR
+from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
-from iesplan.core.jsonutil import jsonable
+from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.core.yamlmini import dump as yaml_dump
 from iesplan.finance import (
     EffectiveFinanceConfig,
@@ -57,16 +60,12 @@ from iesplan.finance import (
     FinanceProfile,
     FinanceTripletError,
 )
-from iesplan.models.audit import ImportProposal
-from iesplan.models.calc import CalcSnapshot, Task
-from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
-from iesplan.models.identity import User
-from iesplan.models.project import Draft, Project, ProjectVersion, VersionRef
+from iesplan.identity.contracts import UserRecord
+from iesplan.package.contracts import ImportProposalRecord
 from iesplan.planning.contracts import validate_planning_domain
-from iesplan.services import audit as audit_service
+from iesplan.project.contracts import DraftRecord, ProjectRecord, ProjectVersionRecord
 from iesplan.services import config_revisions as config_service
-from iesplan.services import project as project_service
-from iesplan.storage import add_ref, get_object, object_info, put_object
+from iesplan.storage import ObjectCorruptError, add_ref, attach, get_object, object_info, put_object
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -133,6 +132,151 @@ class PackageSizeError(AppError):
     http_status = 413
     severity = SEVERITY_ERROR
     message_key = "ies.diag.pkg.too_large"
+
+
+# ---------------------------------------------------------------------------
+# 域门面组合(本服务只经公开域接口访问数据,不直接导入 ORM 或跨服务调用)
+# ---------------------------------------------------------------------------
+
+#: 审计动作(与 services.audit.AUDIT_ACTION_CATALOG 同值; 包导出/导入审计经
+#: audit 域门面直接记录, 不再经 services.audit 转调)。
+AUDIT_PROJECT_EXPORTED = "project.exported"
+AUDIT_PROJECT_IMPORT_PROPOSED = "import.proposal_created"
+AUDIT_PROJECT_IMPORTED = "project.imported"
+
+#: 项目所有者能力集(与 services.project.OWNER_CAPABILITIES 同值; 权限判定
+#: 组合收敛到 Wave 2 application 用例前, 以本集合为过渡判定口径)。
+OWNER_CAPABILITIES: frozenset[str] = frozenset(
+    {"view", "edit", "manage_lifecycle", "export_package", "export_excel"}
+)
+
+
+def _audit_entry(
+    db: Session,
+    actor_id: int | None,
+    action: str,
+    entity_type: str,
+    entity_id: int,
+    *,
+    revision: int | None = None,
+    result: dict | None = None,
+    extra: dict | None = None,
+) -> None:
+    """经 audit 域门面追加不可变审计行(与业务写入同事务,只 INSERT)。"""
+    audit_domain.append_entry(
+        db,
+        actor_id=actor_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        revision=revision,
+        result=result,
+        extra=extra,
+    )
+
+
+def _require_project(db: Session, project_id: int) -> ProjectRecord:
+    """按 id 取项目; 不存在或已删除一律 404。"""
+    project = project_domain.get_project(db, project_id)
+    if project is None:
+        raise NotFoundError(
+            "项目不存在",
+            params={"project_id": project_id},
+            location={"object_type": "project", "object_id": project_id},
+        )
+    return project
+
+
+def _get_current_draft(db: Session, project: ProjectRecord) -> DraftRecord:
+    """取项目当前草稿; 缺失视为数据损坏。"""
+    draft = project_domain.get_current_draft(db, project.id)
+    if draft is None:
+        raise AppError(
+            "项目缺少当前草稿(数据损坏)",
+            code=SYS_STORE_CORRUPT,
+            severity=SEVERITY_ERROR,
+            message_key="ies.diag.store.corrupt",
+            location={"object_type": "project", "object_id": project.id},
+        )
+    return draft
+
+
+def _ensure_access(db: Session, user: UserRecord, project_id: int, *capabilities: str) -> None:
+    """访问判定: 仅项目所有者具备全部业务能力, 管理员仅可查看/管理生命周期。
+
+    语义与 services.project.ensure_access 一致(存在性 → 所有者 → 管理员 →
+    缺失能力 403); 权限组合收敛到 Wave 2 application 用例后由用例层统一拥有。
+    """
+    project = _require_project(db, project_id)
+    granted = set(OWNER_CAPABILITIES) if project.owner_id == user.id else set()
+    if "admin" in identity_domain.user_roles(db, user.id):
+        granted |= {"view", "manage_lifecycle"}
+    missing = [cap for cap in capabilities if cap not in granted]
+    if missing:
+        raise ForbiddenError(
+            "缺少所需项目权限",
+            params={"required": list(capabilities), "missing": missing, "project_id": project_id},
+            location={"object_type": "project", "object_id": project_id},
+        )
+
+
+def _store_content_object(db: Session, content: dict) -> int:
+    """内容字典 → 对象存储对象并建立草稿内容引用,返回对象 id(每次写入新行)。"""
+    raw = canonical_json(content)
+    handle = put_object(
+        db,
+        raw.encode("utf-8"),
+        "application/json",
+        source_category="project_content",
+    )
+    attach(
+        db,
+        handle.id,
+        "draft_content",
+        handle.id,
+        ref_entity_type="drafts",
+        purpose="草稿内容文档",
+    )
+    return handle.id
+
+
+def _load_content_object(db: Session, content_object_id: int) -> dict:
+    """按对象 id 读取内容对象(缺失/损坏/结构非法一律按数据损坏明确报错)。"""
+    try:
+        raw = get_object(db, content_object_id)
+    except NotFoundError as exc:
+        raise AppError(
+            "内容对象缺失(数据损坏)",
+            code=SYS_STORE_CORRUPT,
+            severity=SEVERITY_ERROR,
+            message_key="ies.diag.store.corrupt",
+            location={"object_type": "object", "object_id": content_object_id},
+        ) from exc
+    except ObjectCorruptError as exc:
+        raise AppError(
+            "内容对象读取失败(数据损坏)",
+            code=SYS_STORE_CORRUPT,
+            severity=SEVERITY_ERROR,
+            message_key="ies.diag.store.corrupt",
+            location={"object_type": "object", "object_id": content_object_id},
+        ) from exc
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise AppError(
+            "内容对象解析失败(数据损坏)",
+            code=SYS_STORE_CORRUPT,
+            severity=SEVERITY_ERROR,
+            message_key="ies.diag.store.corrupt",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise AppError(
+            "内容对象结构非法(数据损坏)",
+            code=SYS_STORE_CORRUPT,
+            severity=SEVERITY_ERROR,
+            message_key="ies.diag.store.corrupt",
+        )
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -282,19 +426,18 @@ def _bound_dataset_ids(content: dict) -> list[int]:
 def _collect_datasets(db: Session, dataset_version_ids: list[int]) -> list[dict]:
     """收集数据集版本(元数据 + 文件对象内容), 供打包使用。
 
-    返回 [{"dataset": Dataset, "version": DatasetVersion,
-            "files": [{"file": DatasetFile, "obj": dict(元数据), "content": bytes}]}]。
+    返回 [{"dataset": DatasetRecord, "version": DatasetVersionRecord,
+            "files": [{"file": DatasetFileRecord, "obj": dict(元数据), "content": bytes}]}],
+    经 dataset 域公开门面读取, 不直接访问数据集表。
     """
     out: list[dict] = []
     for dvid in dict.fromkeys(int(i) for i in dataset_version_ids):
-        version = db.get(DatasetVersion, dvid)
+        version = dataset_domain.get_version(db, dvid)
         if version is None:
             continue
-        dataset = db.get(Dataset, version.dataset_id)
+        dataset = dataset_domain.get_dataset(db, version.dataset_id)
         files: list[dict] = []
-        for f in db.execute(
-            select(DatasetFile).where(DatasetFile.dataset_version_id == version.id)
-        ).scalars():
+        for f in dataset_domain.list_files(db, version.id):
             try:
                 obj = object_info(db, f.object_id)
             except NotFoundError:
@@ -305,12 +448,15 @@ def _collect_datasets(db: Session, dataset_version_ids: list[int]) -> list[dict]
 
 
 def _collect_evidence(db: Session, project_id: int) -> list[dict]:
-    """收集项目历史结果证据与评估引用(经任务归属项目，domain-model §快照、任务和结果)。"""
+    """收集项目历史结果证据与评估引用(经任务归属项目，domain-model §快照、任务和结果)。
+
+    任务与快照经 tasks 域公开门面读取, 不直接访问任务表。
+    """
     packages = results_domain.list_evidence_for_tasks(db, tasks_domain.list_task_ids(db, project_id))
     out: list[dict] = []
     for pkg in packages:
-        task = db.get(Task, pkg.task_id)
-        snapshot = db.get(CalcSnapshot, pkg.calc_snapshot_id) if pkg.calc_snapshot_id else None
+        task = tasks_domain.get_task(db, pkg.task_id)
+        snapshot = tasks_domain.get_snapshot(db, pkg.calc_snapshot_id) if pkg.calc_snapshot_id else None
         assessments = results_domain.list_package_assessments(db, pkg.id)
         index = results_domain.list_package_index(db, pkg.id)
         content: bytes | None = None
@@ -336,26 +482,21 @@ def _collect_evidence(db: Session, project_id: int) -> list[dict]:
 
 def _build_package_zip(
     db: Session,
-    project: Project,
-    draft: Draft,
+    project: ProjectRecord,
+    draft: DraftRecord,
     draft_content: dict,
 ) -> tuple[bytes, dict]:
-    """组装项目包 zip 字节与清单(流式写入; 不含账号/权限/会话/密钥，见 domain-model §对象生命周期)。"""
-    versions = (
-        db.execute(
-            select(ProjectVersion)
-            .where(ProjectVersion.project_id == project.id)
-            .order_by(ProjectVersion.version_no)
-        )
-        .scalars()
-        .all()
-    )
+    """组装项目包 zip 字节与清单(流式写入; 不含账号/权限/会话/密钥，见 domain-model §对象生命周期)。
+
+    版本经 project 域公开门面按 version_no 升序读取, 不直接访问版本表。
+    """
+    versions = sorted(project_domain.list_versions(db, project.id), key=lambda v: v.version_no)
 
     # 数据集版本 id 全集: 当前草稿绑定 + 全部版本绑定 + 证据快照绑定
     dataset_ids: list[int] = list(_bound_dataset_ids(draft_content))
     version_contents: dict[int, dict] = {}
     for version in versions:
-        content = project_service.load_content_object(db, version.content_object_id)
+        content = _load_content_object(db, version.content_object_id)
         version_contents[version.version_no] = content
         dataset_ids.extend(_bound_dataset_ids(content))
     evidence_list = _collect_evidence(db, project.id)
@@ -615,7 +756,7 @@ def _build_package_zip(
     return buf.getvalue(), manifest
 
 
-def export_package(db: Session, user: User, project_id: int) -> PackageExport:
+def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExport:
     """导出完整项目包(仅所有者，架构宪法 §12/domain-model §对象生命周期)。
 
     流程: 权限校验 → 组装 zip(模型/配置/草稿/版本/数据集版本与溯源/历史结果
@@ -624,10 +765,10 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
 
     包内不含: 账号/权限与查看者名单/会话/全局系统配置/部署环境密钥。
     """
-    project_service.ensure_access(db, user, project_id, "export_package")
-    project = project_service.require_project(db, project_id)
-    draft = project_service.get_current_draft(db, project)
-    draft_content = project_service.load_content_object(db, draft.content_object_id)
+    _ensure_access(db, user, project_id, "export_package")
+    project = _require_project(db, project_id)
+    draft = _get_current_draft(db, project)
+    draft_content = _load_content_object(db, draft.content_object_id)
     zip_bytes, manifest = _build_package_zip(db, project, draft, draft_content)
 
     obj = put_object(
@@ -649,10 +790,10 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
     # 不再写 data_dir/packages 非托管副本(无引用/配额/校验/清理协议，架构宪法 §10);
     # 对象存储是包的唯一事实源, 下载经短期授权 token 走公开读取门面。
 
-    audit_service.audit(
+    _audit_entry(
         db,
         user.id,
-        audit_service.AUDIT_PROJECT_EXPORTED,
+        AUDIT_PROJECT_EXPORTED,
         "project",
         project.id,
         revision=draft.revision,
@@ -810,10 +951,13 @@ def _parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
 
 
 def _unique_project_name(db: Session, base: str) -> str:
-    """项目名称去重: 已存在同名项目时追加 " (导入 n)" 后缀(不静默覆盖)。"""
+    """项目名称去重: 已存在同名项目时追加 " (导入 n)" 后缀(不静默覆盖)。
+
+    经 project 域公开门面判定重名, 不直接访问项目表。
+    """
     candidate = base
     index = 2
-    while db.execute(select(Project.id).where(Project.name == candidate)).first() is not None:
+    while project_domain.project_name_exists(db, candidate):
         candidate = f"{base} (导入 {index})"
         index += 1
     return candidate
@@ -916,10 +1060,10 @@ def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
 
 def import_proposal(
     db: Session,
-    user: User,
+    user: UserRecord,
     file_bytes: bytes,
     idempotency_key: str | None = None,
-) -> ImportProposal:
+) -> ImportProposalRecord:
     """创建导入提案: 校验 → 暂存对象 → 拟创建项目快照 → 校验报告(domain-model §对象生命周期)。
 
     - 校验失败(格式/兼容性/清单/完整性)抛 ImportValidationError, 不创建任何记录;
@@ -934,11 +1078,7 @@ def import_proposal(
     manifest, entries = _parse_package(file_bytes)
     # 幂等: 同一提议人 + 同一幂等键的未确认提案 → 直接返回(校验已通过, 不重复暂存)
     if idempotency_key:
-        for cand in db.execute(
-            select(ImportProposal)
-            .where(ImportProposal.proposer_id == user.id)
-            .order_by(ImportProposal.id.desc())
-        ).scalars():
+        for cand in package_domain.list_proposals_for_proposer(db, user.id):
             if (
                 cand.status == "proposed"
                 and (cand.review_summary or {}).get("idempotency_key") == idempotency_key
@@ -1006,12 +1146,18 @@ def import_proposal(
     # 3) 导入提案(校验报告 + 分区提交内容, 01 §10.4)
     # 不再写 source_path(该列可空且无任何消费点) —— storage_path 属
     # §11 内部路径, 不得进入审计记录; 可追溯性由 source_object_id
-    # (对象存储对象外键)承担。
-    proposal = ImportProposal(
+    # (对象存储对象外键)承担。提案行经 package 域 repository 创建,
+    # 不直接访问提案表。
+    proposal = package_domain.create_proposal(
+        db,
         project_id=project.id,
         proposer_id=user.id,
         source_type="json",
         source_object_id=source_obj.id,
+    )
+    proposal = package_domain.set_proposal_review(
+        db,
+        proposal.id,
         status="proposed",
         review_summary={
             "package": {
@@ -1054,12 +1200,10 @@ def import_proposal(
         },
         review_errors={},
     )
-    db.add(proposal)
-    db.flush()
-    audit_service.audit(
+    _audit_entry(
         db,
         user.id,
-        audit_service.AUDIT_PROJECT_IMPORT_PROPOSED,
+        AUDIT_PROJECT_IMPORT_PROPOSED,
         "import_proposals",
         proposal.id,
         result={"project_id": project.id, "source_object_id": source_obj.id, "staged_objects": len(staged)},
@@ -1067,9 +1211,9 @@ def import_proposal(
     return proposal
 
 
-def _create_draft_row(db: Session, project_id: int, content: dict, user: User):
+def _create_draft_row(db: Session, project_id: int, content: dict, user: UserRecord):
     """新项目身份创建初始草稿(revision=1, 经 project 域 repository)。"""
-    content_object_id = project_service.store_content_object(db, content)
+    content_object_id = _store_content_object(db, content)
     return project_domain.create_draft(
         db,
         project_id=project_id,
@@ -1092,7 +1236,7 @@ def _staged_object_id(staged_by_path: dict[str, int], path: str) -> int:
         ) from exc
 
 
-def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
+def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRecord:
     """提交导入(U14, domain-model §对象生命周期): 创建新项目身份, 导入者成为所有者。
 
     分区提交内容(单事务):
@@ -1107,7 +1251,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     导入约束: 不得静默覆盖(名称去重 + 新项目身份); 账号/权限/会话不随包导入;
     导入者成为新项目所有者; 原授权关系不迁移。
     """
-    proposal = db.get(ImportProposal, proposal_id)
+    proposal = package_domain.get_proposal(db, proposal_id)
     if proposal is None:
         raise NotFoundError(
             "导入提案不存在",
@@ -1120,7 +1264,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             params={"proposal_id": proposal_id},
             location={"object_type": "import_proposals", "object_id": proposal_id},
         )
-    project = db.get(Project, proposal.project_id)
+    project = project_domain.get_project(db, proposal.project_id)
     if project is None:
         raise NotFoundError("导入提案关联项目缺失", params={"proposal_id": proposal_id})
     if proposal.status == "applied":
@@ -1154,32 +1298,30 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
         meta = json.loads(entries[meta_path].decode("utf-8"))
         ds_meta = meta.get("dataset") or {}
         ver_meta = meta.get("version") or {}
-        dataset = Dataset(
-            project_id=project.id,
+        # 数据集重建经 dataset 域公开门面(状态发布紧随创建, 与旧直写终态一致)。
+        dataset = dataset_domain.create_dataset(
+            db,
             name=str(ds_meta.get("name") or "导入数据集"),
-            description=ds_meta.get("description"),
-            status="published",
-            default_license=ds_meta.get("default_license"),
             created_by=user.id,
+            project_id=project.id,
+            description=ds_meta.get("description"),
+            default_license=ds_meta.get("default_license"),
         )
-        db.add(dataset)
-        db.flush()
-        version = DatasetVersion(
+        dataset = dataset_domain.set_dataset_status(db, dataset.id, "published")
+        version = dataset_domain.create_version(
+            db,
             dataset_id=dataset.id,
-            version_no=int(ver_meta.get("version_no", 1)),
             timeline=str(ver_meta.get("timeline") or "hourly"),
-            resolution=ver_meta.get("resolution"),
             fixed_utc_offset_minutes=int(ver_meta.get("fixed_utc_offset_minutes", 480)),
             fields=ver_meta.get("fields") or {},
             units=ver_meta.get("units") or {},
+            created_by=user.id,
+            resolution=ver_meta.get("resolution"),
             quality_report=ver_meta.get("quality_report"),
             provenance=ver_meta.get("provenance"),
             license=ver_meta.get("license"),
-            created_by=user.id,
             created_reason="imported",
         )
-        db.add(version)
-        db.flush()
         dataset_id_map[int(meta.get("dataset_version_id") or 0)] = version.id
         base = meta_path.removesuffix("/dataset.json")
         for file_meta in meta.get("files", []):
@@ -1194,15 +1336,14 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
                     message_key="ies.diag.store.corrupt",
                     params={"path": prefix},
                 )
-            db.add(
-                DatasetFile(
-                    dataset_version_id=version.id,
-                    object_id=staged_by_path[matches[0]],
-                    file_kind=kind,
-                    format=str(file_meta.get("format") or "csv"),
-                    row_count=int(file_meta.get("row_count", 0)),
-                    size_bytes=int(file_meta.get("size_bytes", 0)),
-                )
+            dataset_domain.add_file(
+                db,
+                dataset_version_id=version.id,
+                object_id=staged_by_path[matches[0]],
+                file_kind=kind,
+                format=str(file_meta.get("format") or "csv"),
+                row_count=int(file_meta.get("row_count", 0)),
+                size_bytes=int(file_meta.get("size_bytes", 0)),
             )
 
     def _remap(content: dict) -> dict:
@@ -1278,7 +1419,10 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     _create_draft_row(db, project.id, draft_content, user)
 
     # 4) 版本: 按包内版本顺序重建(新身份版本号, parent 链按导入顺序)
-    prev_version: ProjectVersion | None = None
+    # 经 project 域 create_version 一次完成版本行 + 内容引用 + current 指针
+    # 移动(基线/币种/schema 与项目一致, 由包内基线校验保证, 与旧直写等价;
+    # 新身份下版本号自 1 起按包内顺序重新分配)。
+    prev_version: ProjectVersionRecord | None = None
     version_paths = sorted(manifest.get("files", {}).get("versions", []))
     for version_path in version_paths:
         if version_path not in entries:
@@ -1314,37 +1458,18 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
                 ]
             )
         version_content = _remap(dict(doc.get("content") or {}))
-        content_object_id = project_service.store_content_object(db, version_content)
-        version = ProjectVersion(
+        content_object_id = _store_content_object(db, version_content)
+        version = project_domain.create_version(
+            db,
             project_id=project.id,
-            version_no=int(ver_meta.get("version_no", 1)),
             name=str(ver_meta.get("name") or f"导入版本 {ver_meta.get('version_no', 1)}"),
-            description=ver_meta.get("description"),
-            created_by=user.id,
-            parent_version_id=prev_version.id if prev_version is not None else None,
-            source_draft_id=None,
-            source_draft_revision=None,
             reason="imported",
-            baseline_resolution=version_baseline.resolution,
-            baseline_leap_year=version_baseline.leap_year,
-            baseline_scenario_mode=version_baseline.scenario_mode,
-            currency=ver_meta.get("currency") or project.currency,
-            schema_version=int(ver_meta.get("schema_version", 1) or 1),
+            created_by=user.id,
             content_object_id=content_object_id,
-        )
-        db.add(version)
-        db.flush()
-        db.add(
-            VersionRef(
-                project_version_id=version.id,
-                ref_type="object",
-                object_id=content_object_id,
-                ref_key="project_version_content",
-            )
+            parent_version_id=prev_version.id if prev_version is not None else None,
+            description=ver_meta.get("description"),
         )
         prev_version = version
-    if prev_version is not None:
-        project.current_version_id = prev_version.id
 
     # 5) 财务三件套/规划配置(0.6.5 条目 1-2): 从暂存源包重解析并重建
     # revision=1 行(与提案同源校验, 确认阶段为强制点; 失败 → 整个事务回滚,
@@ -1371,14 +1496,17 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
                 [f"包内配置在确认阶段校验失败: {getattr(exc, 'code', 'PKG-IMP-001')} {exc}"]
             ) from exc
 
-    # 6) 提案收尾 + 审计
-    proposal.status = "applied"
-    proposal.decided_by = user.id
-    proposal.decided_at = datetime.now(UTC)
-    audit_service.audit(
+    # 6) 提案收尾 + 审计(提案状态经 package 域状态机推进)
+    package_domain.set_proposal_review(
+        db,
+        proposal.id,
+        status="applied",
+        decided_by=user.id,
+    )
+    _audit_entry(
         db,
         user.id,
-        audit_service.AUDIT_PROJECT_IMPORTED,
+        AUDIT_PROJECT_IMPORTED,
         "project",
         project.id,
         revision=1,
@@ -1390,7 +1518,8 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             "imported_configs": len(package_configs),
         },
     )
-    return project
+    # 重读项目行: 版本/草稿创建已移动 current 指针, 入口快照已过期
+    return _require_project(db, project.id)
 
 
 # ---------------------------------------------------------------------------
@@ -1471,7 +1600,7 @@ def _write_kv(ws, rows: list[tuple[str, Any]], start_row: int = 3) -> int:
 
 def export_excel(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     evidence_package_id: int,
     assessment_id: int,
@@ -1485,8 +1614,8 @@ def export_excel(
       适用范围与限制;
     - 注明适用单位与数据来源(数据集版本/溯源/许可证/内容校验值)。
     """
-    project_service.ensure_access(db, user, project_id, "export_excel")
-    project = project_service.require_project(db, project_id)
+    _ensure_access(db, user, project_id, "export_excel")
+    project = _require_project(db, project_id)
     evidence = results_domain.get_evidence(db, evidence_package_id)
     if evidence is None:
         raise NotFoundError(
@@ -1494,7 +1623,7 @@ def export_excel(
             params={"evidence_package_id": evidence_package_id},
             location={"object_type": "evidence_packages", "object_id": evidence_package_id},
         )
-    task = db.get(Task, evidence.task_id)
+    task = tasks_domain.get_task(db, evidence.task_id)
     if task is None or task.project_id != project_id:
         raise NotFoundError(
             "证据包不属于该项目",
@@ -1507,21 +1636,25 @@ def export_excel(
             params={"assessment_id": assessment_id, "evidence_package_id": evidence.id},
             location={"object_type": "result_assessments", "object_id": assessment_id},
         )
-    snapshot = db.get(CalcSnapshot, evidence.calc_snapshot_id)
-    version = db.get(ProjectVersion, project.current_version_id) if project.current_version_id else None
+    snapshot = tasks_domain.get_snapshot(db, evidence.calc_snapshot_id) if evidence.calc_snapshot_id else None
+    version = (
+        project_domain.get_version(db, project_id, project.current_version_id)
+        if project.current_version_id
+        else None
+    )
     version_content: dict = {}
     if version is not None:
-        version_content = project_service.load_content_object(db, version.content_object_id)
+        version_content = _load_content_object(db, version.content_object_id)
     evidence_content = _parse_evidence_content(get_object(db, evidence.object_id))
 
     # 数据版本(计算快照绑定的数据集版本 + 溯源/许可证)
     dataset_rows: list[dict[str, Any]] = []
     dvid_list = (snapshot.dataset_version_ids if snapshot else None) or []
     for dvid in dvid_list:
-        dver = db.get(DatasetVersion, int(dvid))
+        dver = dataset_domain.get_version(db, int(dvid))
         if dver is None:
             continue
-        dset = db.get(Dataset, dver.dataset_id)
+        dset = dataset_domain.get_dataset(db, dver.dataset_id)
         dataset_rows.append(
             {
                 "dataset": dset.name if dset else dver.dataset_id,
@@ -1686,10 +1819,10 @@ def export_excel(
 
     buf = io.BytesIO()
     wb.save(buf)
-    audit_service.audit(
+    _audit_entry(
         db,
         user.id,
-        audit_service.AUDIT_PROJECT_EXPORTED,
+        AUDIT_PROJECT_EXPORTED,
         "project",
         project.id,
         result={"kind": "excel", "evidence_package_id": evidence.id, "assessment_id": assessment.id},

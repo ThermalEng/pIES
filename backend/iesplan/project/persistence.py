@@ -115,6 +115,11 @@ def get_project(db: Session, project_id: int) -> ProjectRecord | None:
     return _row_to_project(row)
 
 
+def project_name_exists(db: Session, name: str) -> bool:
+    """项目名是否已被占用（含已软删行，与名称唯一约束口径一致，供导入命名去重）。"""
+    return db.execute(select(Project.id).where(Project.name == name)).first() is not None
+
+
 def list_projects(
     db: Session,
     *,
