@@ -29,10 +29,9 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.application import models as svc
+from iesplan.application.models import selector
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.db import get_db
-from iesplan.devices import DeviceModelDocument, list_devices
-from iesplan.devices.contracts2 import PropertySpec
-from iesplan.project import ensure_access
 
 #: 设备类型注册表(公开, 前端画布取设备面板与参数表单 schema)
 registry_router = APIRouter(prefix="/api", tags=["registry"])
@@ -101,44 +100,14 @@ class ConnectionUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _parameter_schema(p: PropertySpec) -> dict[str, Any]:
-    """参数规格 → 公开 schema(前端表单渲染用)。"""
-    return {
-        "name": p.id,
-        "unit": p.unit,
-        "min": p.minimum,
-        "max": p.maximum,
-        "default": p.value,
-    }
-
-
-def _device_type_schema(spec: DeviceModelDocument) -> dict[str, Any]:
-    """设备类型注册项 → 公开 schema(RR-P1-04: 含 YAML 真实端口/能力/模型元数据)。"""
-    return {
-        "type_id": spec.device.id,
-        "schema_version": spec.schema_version,
-        "names": dict(spec.device.names),
-        "ports": [
-            {
-                "name": name,
-                "direction": p.type,
-                "energy_carrier": p.carrier,
-                "unit": p.unit,
-            }
-            for name, p in spec.interfaces.items()
-        ],
-        "parameters": {name: _parameter_schema(p) for name, p in spec.properties.items()},
-    }
-
-
 @registry_router.get("/registry/device-types", summary="设备类型注册表(公开)")
 def device_types_public() -> dict[str, Any]:
     """公开设备类型清单 + 参数 schema + 真实端口(RR-P1-04: 供前端画布渲染)。
 
-    端口/方向/载能来自 YAML 设备目录(公开 descriptor), API 只做序列化,
-    不维护独立的设备类型静态表。
+    数据路径归 application 用例(application/models/selector.py)；
+    端口/方向/载能来自 YAML 设备目录(公开 descriptor)，路由只做转交。
     """
-    return {"items": [_device_type_schema(desc) for desc in list_devices()]}
+    return selector.list_device_types()
 
 
 # ---------------------------------------------------------------------------
