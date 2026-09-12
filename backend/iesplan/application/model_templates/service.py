@@ -45,6 +45,7 @@ from iesplan.devices import (
     canonical_bytes,
     canonical_receipt,
     parse_device_model_v2,
+    parse_template_inputs,
 )
 from iesplan.model import (
     TEMPLATE_STATUS_DISABLED,
@@ -249,7 +250,6 @@ def validate_template_raw(raw: Mapping[str, Any]) -> TemplateValidation:
                            params={"expected": "顶层 inputs(未实例化模型)",
                                    "actual": "missing"}))
         return TemplateValidation(ok=False, diagnostics=diags)
-    from iesplan.devices.parser2 import parse_template_inputs
     try:
         inputs = parse_template_inputs(doc.inputs, file="<model-template>")
     except Exception as exc:  # noqa: BLE001 - parser2.ParseError 等解析异常统一转为诊断

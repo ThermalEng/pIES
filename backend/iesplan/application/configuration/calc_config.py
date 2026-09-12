@@ -48,7 +48,7 @@ from iesplan.devices import (
     get_device as get_device_type,
 )
 from iesplan.devices.contracts2 import PropertySpec
-from iesplan.engines.registry import (
+from iesplan.engines import (
     DEFAULT_ALGORITHM,
     AlgorithmSpec,
     get_algorithm,

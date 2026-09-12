@@ -849,20 +849,11 @@ def test_application_no_models_orm():
     )
 
 
-#: 门禁 13 临时债务: API 直接调用领域行为(全仓实测 5 对; Wave 2-A/B 收进 application 用例后归零)。
+#: 门禁 13 临时债务: API 直接调用领域行为(归零)。
+#: Wave 2-A: config/model/validation 的授权与设备选择器收进 application 用例
+#: (authorization/selector); Wave 2-C: tasks 幂等键正则改接 core.patterns 权威。
 #: api/auth 经 identity.contracts 属 DTO 传输映射, 不在债务之列。
-TEMP_DEBT_API_DOMAIN_BEHAVIOR: set[tuple[str, str]] = {
-    # api/config.py:30 授权自组织(project.ensure_access)。
-    ("iesplan.api.config", "project"),
-    # api/model.py:33 devices.list_devices 直调; DeviceModelDocument 仅类型注解。
-    ("iesplan.api.model", "devices"),
-    # api/model.py:35 授权自组织(project.ensure_access)。
-    ("iesplan.api.model", "project"),
-    # api/tasks.py:26 越过 application.tasks 直引 tasks.IDEMPOTENCY_KEY_RE。
-    ("iesplan.api.tasks", "tasks"),
-    # api/validation.py:30 授权自组织(project.ensure_access)。
-    ("iesplan.api.validation", "project"),
-}
+TEMP_DEBT_API_DOMAIN_BEHAVIOR: set[tuple[str, str]] = set()
 
 
 def test_api_no_direct_domain_behavior():
