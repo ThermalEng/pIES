@@ -52,6 +52,8 @@ docs/development/development-workflow.md「架构门禁」): 禁止 core 依赖�
      (engines/metrics/finance/analysis/assembly; 现状 4 对, Wave 4 归零);
   16. test_analysis_no_engine_driving — analysis 禁止驱动 engine
      (不自装 plan、不调用引擎, 只消费统一计算结果; 现状 4 对, Wave 4 归零)。
+  17. test_whitelists_have_no_stale_entries — 旧式“只查新增”门禁的白名单条目
+     必须仍被命中, 过期即失败。
 
 Wave 0 门禁 8 改为精确相等: WHITELIST_CROSS_MODEL_IMPORTS 已按实测裁剪
 (删除 services/project/Worker 11 项过期条目, 仅剩 namespace→identity 与
@@ -965,3 +967,35 @@ def test_analysis_no_engine_driving():
         f"analysis 驱动 engine 债务漂移(新增: {sorted(detected - TEMP_DEBT_ANALYSIS_ENGINE_DRIVING)}, "
         f"过期: {sorted(TEMP_DEBT_ANALYSIS_ENGINE_DRIVING - detected)})"
     )
+
+
+def test_whitelists_have_no_stale_entries():
+    """架构门禁 17: 旧式白名单条目必须仍被对应扫描器命中(过期即失败)。
+
+    精确相等门禁(8/9/10/11/12/13/14/15/16)已自带过期检查; 本门禁覆盖仍用
+    “只查新增”形态的门禁 1/2/3/4/5/6/7, 防止全绿掩盖残留。
+    """
+    stale: list[str] = []
+    for key in WHITELIST_CORE_BUSINESS_DEPS:
+        if key not in {(m, line) for (m, line, _src) in _find_core_business_imports()}:
+            stale.append(f"core-business-deps: {key!r}")
+    for key in WHITELIST_PRIVATE_IMPORTS:
+        if key not in {(m, s) for (m, s) in _find_private_symbol_imports()}:
+            stale.append(f"private-imports: {key!r}")
+    for key in WHITELIST_API_ORM:
+        if key not in {(mod, line) for (mod, line, _symbols) in _find_api_orm_imports()}:
+            stale.append(f"api-orm: {key!r}")
+    for key in WHITELIST_API_COMMIT:
+        if key not in {tuple(item) for item in _find_api_commit_calls()}:
+            stale.append(f"api-commit: {key!r}")
+    fanout = _find_api_service_fanout()
+    for key in WHITELIST_API_FANOUT:
+        if len(fanout.get(key, set())) < 2:
+            stale.append(f"api-fanout: {key!r}")
+    for key in WHITELIST_WORKER_SERVICES:
+        if key not in set(_find_worker_service_imports()):
+            stale.append(f"worker-services: {key!r}")
+    for key in WHITELIST_ANALYSIS_ENGINE:
+        if key not in set(_find_analysis_engine_imports()):
+            stale.append(f"analysis-engine: {key!r}")
+    assert not stale, f"白名单存在过期条目(检测已无命中, 须删除): {stale}"
