@@ -162,7 +162,9 @@ OWNED_MODELS: dict[str, frozenset[str]] = {
     "tasks": frozenset({"calc", "uncertainty"}),
     "results": frozenset({"result"}),
     "package": frozenset({"audit"}),
-    "model": frozenset({"model"}),
+    "model": frozenset({"model", "draft_revision", "model_template", "project_model"}),
+    # (Wave 5 集成: 切片 7 起模板/草稿/项目模型三表归 model 域持久化实现，
+    #  门禁 TABLE_OWNERS 划归 model 系且仅 model/persistence.py 使用，补齐。)
 }
 
 

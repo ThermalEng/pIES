@@ -280,8 +280,9 @@ def test_error_envelope_shape_all_error_paths(
     assert_error_envelope(resp, 404, code="API-NF-001", message_key="ies.error.route_not_found")
 
     # --- 6) 500 未捕获异常(API-500-001): 注入端点抛未捕获 RuntimeError ---
+    # (Wave 3 集成: 列表端点改经 application.projects.lifecycle, 注入点跟随)
     monkeypatch.setattr(
-        "iesplan.services.project.list_visible_projects",
+        "iesplan.application.projects.lifecycle.list_visible_projects",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     resp = client.get("/api/projects", headers=_bearer(owner_tok))
