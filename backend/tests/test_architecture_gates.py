@@ -45,6 +45,7 @@ _PKG_ROOT = _BACKEND_DIR / "iesplan"
 #: 各门禁扫描根目录
 _CORE_DIR = _PKG_ROOT / "core"
 _API_DIR = _PKG_ROOT / "api"
+_WORKER_DIR = _PKG_ROOT / "worker"
 
 #: 架构门禁中视为"业务模块"的 iesplan 顶层子包(core 一律禁止依赖)。
 #: 判定规则见 _is_business_import: 允许根包 iesplan(仅 __version__)与
@@ -287,6 +288,16 @@ def test_api_no_direct_orm_imports():
         if allowed is None or not symbols.issubset(allowed):
             new.append((mod, line, sorted(symbols)))
     assert not new, f"API 直接导入 ORM(新增违规, 需整改或登记白名单): {new}"
+
+
+def test_worker_no_direct_orm_imports():
+    """架构门禁: 禁止 Worker 直接导入 ORM(最终验收矩阵, ORM 查询归 application.worker)。
+
+    无白名单, 硬强制: worker 下出现 iesplan.models.* 或 iesplan.db 会话符号
+    导入即失败。
+    """
+    detected = _find_api_orm_imports(scan_root=_WORKER_DIR)
+    assert not detected, f"Worker 直接导入 ORM(需上收至 application.worker 用例): {detected}"
 
 
 # ---------------------------------------------------------------------------
