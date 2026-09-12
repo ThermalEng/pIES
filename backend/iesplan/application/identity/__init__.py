@@ -3,29 +3,16 @@
 W2-B 由 services/identity.py 搬入: 用户管理/窗口会话/登录限速/认证审计/
 应用级设置的全部编排(用例顶层函数拥有事务提交, 数据读写只经
 identity/project/audit 域公开门面, 不导入 iesplan.models.*)。
+
+Wave 3-A: 输入规则、身份错误与身份状态归 identity 域所有(定义见
+iesplan.identity 门面与 iesplan.identity.contracts); 本包只保留审计/
+项目等跨域编排与事务, 域所有名称经此重导出(调用方表面不变)。
 """
 
 from iesplan.application.identity.service import (
     EMAIL_RE,
     KEY_REGISTRATION_ENABLED,
-    LOCKOUT_SECONDS,
-    MAX_LOGIN_FAILURES,
-    ROLE_ADMIN,
-    ROLE_ENGINEER,
     USERNAME_RE,
-    AuthError,
-    AuthRequiredError,
-    BadOldPasswordError,
-    BadRequestError,
-    DeleteConfirmRequiredError,
-    ForcePasswordChangeError,
-    LockedError,
-    LoginFailedError,
-    RegistrationDisabledError,
-    SamePasswordError,
-    SessionInvalidError,
-    UserDisabledError,
-    WeakPasswordError,
     as_utc,
     authenticate,
     change_password,
@@ -50,7 +37,6 @@ from iesplan.application.identity.service import (
     reactivate_user,
     record_auth_event,
     registration_enabled,
-    reset_login_rate_limit,
     reset_password,
     revoke_all_user_sessions,
     revoke_other_sessions,
@@ -64,6 +50,28 @@ from iesplan.application.identity.service import (
     verify_delete_confirm_token,
 )
 from iesplan.core.security import token_hash
+from iesplan.identity import (
+    LOCKOUT_SECONDS,
+    MAX_LOGIN_FAILURES,
+    ROLE_ADMIN,
+    ROLE_ENGINEER,
+    reset_login_rate_limit,
+)
+from iesplan.identity.contracts import (
+    AuthError,
+    AuthRequiredError,
+    BadOldPasswordError,
+    BadRequestError,
+    DeleteConfirmRequiredError,
+    ForcePasswordChangeError,
+    LockedError,
+    LoginFailedError,
+    RegistrationDisabledError,
+    SamePasswordError,
+    SessionInvalidError,
+    UserDisabledError,
+    WeakPasswordError,
+)
 
 __all__ = [
     "EMAIL_RE",
