@@ -33,13 +33,13 @@ from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.identity.contracts import UserRecord
-from iesplan.project import content as project_content
 from iesplan.project.contracts import (
     DraftRecord,
     ProjectConflictError,
     ProjectRecord,
     ProjectVersionRecord,
 )
+from iesplan.storage import ObjectCorruptError, attach, get_object, put_object
 
 # ---------------------------------------------------------------------------
 # 错误类型
@@ -174,7 +174,7 @@ def create_project(
         baseline_leap_year=baseline.leap_year,
         baseline_scenario_mode=baseline.scenario_mode,
     )
-    content_object_id = project_content.store_content_object(db, project_content.initial_content(lang))
+    content_object_id = store_content_object(db, project_domain.initial_content(lang))
     project_domain.create_draft(
         db,
         project_id=project.id,
@@ -203,7 +203,7 @@ def get_project_view(db: Session, user: UserRecord, project_id: int) -> dict:
     ensure_access(db, user, project_id, "view")
     project = _get_project(db, project_id)
     draft = _get_current_draft(db, project)
-    content = project_content.load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     content.pop("applied_commands", None)  # 命令簿记不外泄
     versions = list_versions(db, project_id)
     return {
@@ -363,7 +363,7 @@ def update_draft(
     if not isinstance(commands, list):
         raise InvalidRequestError("commands 必须是数组", code="PROJ-CMD-001")
     draft = _get_current_draft(db, project)
-    content = project_content.load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     applied = content.setdefault("applied_commands", {})
 
     # 幂等重试: 当前修订已推进且整批命令均已应用 → 返回原结果
@@ -406,7 +406,7 @@ def update_draft(
     if not changed:
         return {"revision": draft.revision, "results": results}
 
-    content_object_id = project_content.store_content_object(db, content)
+    content_object_id = store_content_object(db, content)
     try:
         new_draft = project_domain.create_draft(
             db,
@@ -685,9 +685,9 @@ def create_version(
     if not name:
         raise InvalidRequestError("版本名称不能为空", code="PROJ-CMD-001")
     draft = _get_current_draft(db, project)
-    content = project_content.load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     version_content = _version_content(db, project, content)
-    content_object_id = project_content.store_content_object(db, version_content)
+    content_object_id = store_content_object(db, version_content)
 
     if parent_version_id is not None:
         parent_id = get_version(db, project_id, parent_version_id).id
@@ -739,9 +739,9 @@ def current_version_matches_draft(db: Session, project: ProjectRecord) -> bool:
     if version is None:
         return False
     draft = _get_current_draft(db, project)
-    content = project_content.load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     expected = canonical_json(_version_content(db, project, content)).encode("utf-8")
-    stored = project_content.load_content_bytes(db, version.content_object_id)
+    stored = _load_content_bytes(db, version.content_object_id)
     return stored == expected
 
 
@@ -783,10 +783,10 @@ def restore_version(
             location={"object_type": "project", "object_id": project_id},
         )
     source = get_version(db, project_id, version_id)
-    content = project_content.load_content_object(db, source.content_object_id)
+    content = load_content_object(db, source.content_object_id)
     # 恢复内容中的命令簿记清空(新修订从干净状态开始; 与版本内容保持一致)
     content.pop("applied_commands", None)
-    content_object_id = project_content.store_content_object(db, content)
+    content_object_id = store_content_object(db, content)
     new_draft = project_domain.create_draft(
         db,
         project_id=project.id,
@@ -851,7 +851,7 @@ def apply_result(
     if not isinstance(diff_patch, dict):
         raise InvalidRequestError("diff_patch 必须是对象", code="PROJ-CMD-005")
     draft = _get_current_draft(db, project)
-    content = project_content.load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     # 参数差异补丁应用到新草稿内容(原版本不变);
     # diff_patch 直接作用于 calc_config 节, 含 "calc_config" 键时取其值
     inner = diff_patch.get("calc_config")
@@ -860,7 +860,7 @@ def apply_result(
         raise InvalidRequestError("diff_patch 内容非法", code="PROJ-CMD-005")
     _deep_merge(content["calc_config"], patch)
     content.pop("applied_commands", None)
-    content_object_id = project_content.store_content_object(db, content)
+    content_object_id = store_content_object(db, content)
     new_draft = project_domain.create_draft(
         db,
         project_id=project.id,
@@ -942,7 +942,7 @@ def get_current_draft_content(db: Session, project_id: int) -> dict:
     """
     project = _get_project(db, project_id)
     draft = _get_current_draft(db, project)
-    content = project_content.load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     content.pop("applied_commands", None)
     return content
 
@@ -952,21 +952,55 @@ def initial_content(language: str = "zh-CN") -> dict:
 
     供校验/模型等只读或写入方初始化内容文档。
     """
-    return project_content.initial_content(language)
+    return project_domain.initial_content(language)
+
+
+def _load_content_bytes(db: Session, content_object_id: int) -> bytes:
+    """按对象 id 读取内容字节(对象缺失/损坏抛 AppError，供字节级一致性比对)。
+
+    IO 经 storage 公开门面，错误构造经 project 域纯函数。
+    """
+    try:
+        return get_object(db, content_object_id)
+    except NotFoundError as exc:
+        raise project_domain.corrupt_error(
+            "内容对象缺失(数据损坏)", object_id=content_object_id
+        ) from exc
+    except ObjectCorruptError as exc:
+        raise project_domain.corrupt_error(
+            "内容对象读取失败(数据损坏)", object_id=content_object_id
+        ) from exc
 
 
 def store_content_object(db: Session, content: dict) -> int:
     """内容字典 → 对象存储对象, 返回对象 id(草稿内容写入方的统一入口)。
 
     每次写入新建对象行(无内容去重), 对象清理由存储运维负责。
-    实现归属 project 域，此处为调用方兼容委托。
+    IO 经 storage 公开门面（put_object+attach），编码经 project 域纯函数。
     """
-    return project_content.store_content_object(db, content)
+    handle = put_object(
+        db,
+        project_domain.content_to_bytes(content),
+        "application/json",
+        source_category="project_content",
+    )
+    attach(
+        db,
+        handle.id,
+        "draft_content",
+        handle.id,
+        ref_entity_type="drafts",
+        purpose="草稿内容文档",
+    )
+    return handle.id
 
 
 def load_content_object(db: Session, content_object_id: int) -> dict:
-    """按对象 id 读取内容对象(对象缺失/损坏抛 AppError)。"""
-    return project_content.load_content_object(db, content_object_id)
+    """按对象 id 读取内容对象(对象缺失/损坏抛 AppError)。
+
+    IO 经 storage 公开门面，解析与错误构造经 project 域纯函数。
+    """
+    return project_domain.parse_content_object(_load_content_bytes(db, content_object_id))
 
 
 def version_to_dict(version: ProjectVersionRecord) -> dict:
@@ -1038,9 +1072,9 @@ def replace_project_model_refs(
             params={"expected_revision": expected_revision, "current_revision": draft.revision},
             location={"object_type": "draft", "object_id": str(draft.id)},
         )
-    content = project_content.load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     content["project_models"] = refs
-    content_object_id = project_content.store_content_object(db, content)
+    content_object_id = store_content_object(db, content)
     new_draft = project_domain.create_draft(
         db,
         project_id=project.id,

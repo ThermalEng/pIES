@@ -20,14 +20,14 @@ from iesplan.project.contracts import (
 from iesplan.project.repository import ProjectRepository
 
 add_version_ref = persistence.add_version_ref
+content_to_bytes = _content.content_to_bytes
+corrupt_error = _content.corrupt_error
 count_projects_by_owner = persistence.count_projects_by_owner
 create_draft = persistence.create_draft
 create_project = persistence.create_project
 create_version = persistence.create_version
 initial_content = _content.initial_content
-load_content_bytes = _content.load_content_bytes
-load_content_object = _content.load_content_object
-store_content_object = _content.store_content_object
+parse_content_object = _content.parse_content_object
 get_current_draft = persistence.get_current_draft
 get_draft = persistence.get_draft
 get_draft_revision = persistence.get_draft_revision
@@ -51,6 +51,8 @@ __all__ = [
     "ProjectVersionRecord",
     "VersionRefRecord",
     "add_version_ref",
+    "content_to_bytes",
+    "corrupt_error",
     "count_projects_by_owner",
     "create_draft",
     "create_project",
@@ -64,11 +66,9 @@ __all__ = [
     "list_projects",
     "list_version_refs",
     "list_versions",
-    "load_content_bytes",
-    "load_content_object",
+    "parse_content_object",
     "project_name_exists",
     "set_project_status",
-    "store_content_object",
     "update_draft_content_ref",
     "update_revision_pointers",
 ]

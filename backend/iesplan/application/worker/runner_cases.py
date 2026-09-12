@@ -3,7 +3,7 @@
 本模块收拢 ``iesplan.worker.runner`` 原先对领域服务与 ORM 行的直接
 访问, 只做转调与行级读取搬运, 不新增校验/hash/回退:
 
-- 项目版本内容读取 → ``services.project.load_content_object``;
+- 项目版本内容读取 → ``application.projects.content_objects.load_content_object``;
 - 数据集对象字节读取 → ``storage.get_object``;
 - 数据集 CSV 解析 → ``services.dataset.parse_csv``;
 - 快照/任务行读 → ``lease_cases`` 共享读(同包复用);
@@ -21,10 +21,10 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from iesplan import dataset as dataset_domain
+from iesplan.application.projects.content_objects import load_content_object
 from iesplan.application.worker.lease_cases import get_snapshot_record, get_task_record
 from iesplan.dataset import DatasetVersionRecord
 from iesplan.services import dataset as dataset_service
-from iesplan.services import project as project_service
 from iesplan.storage import get_object
 
 __all__ = [
@@ -41,8 +41,8 @@ __all__ = [
 
 
 def load_version_content(db: Session, content_object_id: int) -> dict:
-    """按对象 id 读取项目版本内容对象(转调 project 服务)。"""
-    return project_service.load_content_object(db, content_object_id)
+    """按对象 id 读取项目版本内容对象(转调 application/projects 内容对象用例)。"""
+    return load_content_object(db, content_object_id)
 
 
 def load_dataset_blob(db: Session, object_id: int) -> bytes:

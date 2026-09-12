@@ -24,7 +24,6 @@ configuration)与 ``services.queue`` 可重建视图; 不导入 ``models.*``。
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 from dataclasses import dataclass
@@ -42,6 +41,11 @@ from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.projects.content_objects import (
+    load_content_bytes,
+    load_content_object,
+    store_content_object,
+)
 from iesplan.config import settings
 from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
@@ -59,12 +63,8 @@ from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.services import queue
 from iesplan.storage import (
-    ObjectCorruptError,
-    attach,
-    get_object,
     object_info,
     orphaned_stats,
-    put_object,
     usage_summary,
 )
 from iesplan.tasks.contracts import (
@@ -266,65 +266,6 @@ def _get_current_draft(db: Session, project: ProjectRecord):
     return draft
 
 
-def _load_content_object(db: Session, content_object_id: int) -> dict:
-    """按对象 id 读取内容对象(缺失/损坏/结构非法一律按数据损坏明确报错)。"""
-    try:
-        raw = get_object(db, content_object_id)
-    except NotFoundError as exc:
-        raise AppError(
-            "内容对象缺失(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_object_id},
-        ) from exc
-    except ObjectCorruptError as exc:
-        raise AppError(
-            "内容对象读取失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_object_id},
-        ) from exc
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise AppError(
-            "内容对象解析失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise AppError(
-            "内容对象结构非法(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-        )
-    return parsed
-
-
-def _store_content_object(db: Session, content: dict):
-    """规范化 JSON → 对象存储对象 + 草稿内容引用(每次写入新行)。"""
-    raw = canonical_json(content)
-    handle = put_object(
-        db,
-        raw.encode("utf-8"),
-        "application/json",
-        source_category="project_content",
-    )
-    attach(
-        db,
-        handle.id,
-        "draft_content",
-        handle.id,
-        ref_entity_type="drafts",
-        purpose="草稿内容文档",
-    )
-    return handle
-
-
 def _version_content_for_freeze(db: Session, project: ProjectRecord, content: dict) -> dict:
     """版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(复制 services.project 规则)。
 
@@ -418,36 +359,14 @@ def _resolve_project_inputs(
         if not _current_version_matches_draft(db, project):
             version = None  # 草稿已变更: 需重新固化
     if version is not None:
-        return version, _load_content_object(db, version.content_object_id)
+        return version, load_content_object(db, version.content_object_id)
     draft = _get_current_draft(db, project)
-    content = _load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     if not freeze:
         return None, content
     # 草稿固化: 创建不可变项目版本(计算输入固定)
     version = _freeze_snapshot_version(db, actor, project, draft)
     return version, content
-
-
-def _load_content_bytes(db: Session, content_object_id: int) -> bytes:
-    """按对象 id 读取内容字节(对象缺失/损坏抛数据损坏错误)。"""
-    try:
-        return get_object(db, content_object_id)
-    except NotFoundError as exc:
-        raise AppError(
-            "内容对象缺失(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_object_id},
-        ) from exc
-    except ObjectCorruptError as exc:
-        raise AppError(
-            "内容对象读取失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_object_id},
-        ) from exc
 
 
 def _current_version_matches_draft(db: Session, project: ProjectRecord) -> bool:
@@ -461,9 +380,9 @@ def _current_version_matches_draft(db: Session, project: ProjectRecord) -> bool:
     if version is None:
         return False
     draft = _get_current_draft(db, project)
-    content = _load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     expected = canonical_json(_version_content_for_freeze(db, project, content)).encode("utf-8")
-    stored = _load_content_bytes(db, version.content_object_id)
+    stored = load_content_bytes(db, version.content_object_id)
     return stored == expected
 
 
@@ -474,16 +393,16 @@ def _freeze_snapshot_version(db: Session, actor: UserRecord, project, draft) -> 
             "项目已归档或已删除, 不能创建版本",
             location={"object_type": "project", "object_id": project.id},
         )
-    content = _load_content_object(db, draft.content_object_id)
+    content = load_content_object(db, draft.content_object_id)
     version_content = _version_content_for_freeze(db, project, content)
-    handle = _store_content_object(db, version_content)
+    content_object_id = store_content_object(db, version_content)
     version = project_domain.create_version(
         db,
         project_id=project.id,
         name="计算任务自动固化",
         reason="snapshot_freeze",
         created_by=actor.id,
-        content_object_id=handle.id,
+        content_object_id=content_object_id,
         source_draft_id=draft.id,
         source_draft_revision=draft.revision,
         description=None,
