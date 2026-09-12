@@ -1,12 +1,15 @@
-"""解耦重构切片 2：七域公开 contract 与 repository Protocol 契约测试。
+"""解耦重构切片 2：九域公开 contract 契约测试。
 
-覆盖 project/identity/dataset/configuration/tasks/results/package：
+覆盖 audit/project/identity/dataset/configuration/tasks/results/package/model：
 - 门面可导入且 `__all__` 与导出一致；
 - 全部 Record 为 frozen dataclass（跨模块只传不可变值）；
 - 领域错误复用 core 基类诊断码（不新增码）；
-- 全部 repository Protocol 方法首参为调用方事务拥有的 `db: Session`；
 - 源码纯度：不导入 ORM/services/application/api/worker/engines，
   无 commit/rollback 调用；contracts.py 只依赖标准库与 core。
+
+说明（Wave 1 切片 C）：各域 `*Repository` Protocol 已删除——生产代码中
+无真实端口注入消费（仅门面 re-export 与存在性断言引用），按复用裁决
+直接删除，不再保留无消费者抽象。
 """
 
 from __future__ import annotations
@@ -25,16 +28,7 @@ import iesplan.package as package
 import iesplan.project as project
 import iesplan.results as results
 import iesplan.tasks as tasks
-from iesplan.audit.repository import AuditRepository
-from iesplan.configuration.repository import ConfigurationRepository
 from iesplan.core.errors import ConflictError, NotFoundError
-from iesplan.dataset.repository import DatasetRepository
-from iesplan.identity.repository import IdentityRepository
-from iesplan.model.repository import ModelRepository
-from iesplan.package.repository import PackageRepository
-from iesplan.project.repository import ProjectRepository
-from iesplan.results.repository import ResultsRepository
-from iesplan.tasks.repository import TasksRepository
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _PKG_ROOT = _BACKEND_DIR / "iesplan"
@@ -49,18 +43,6 @@ _DOMAIN_FACADES = {
     "results": results,
     "package": package,
     "model": model,
-}
-
-_DOMAIN_REPOSITORIES = {
-    "audit": AuditRepository,
-    "project": ProjectRepository,
-    "identity": IdentityRepository,
-    "dataset": DatasetRepository,
-    "configuration": ConfigurationRepository,
-    "tasks": TasksRepository,
-    "results": ResultsRepository,
-    "package": PackageRepository,
-    "model": ModelRepository,
 }
 
 _ERROR_BASES = {
@@ -91,14 +73,12 @@ def _public_names(module) -> dict[str, object]:
     return {name: getattr(module, name) for name in module.__all__}
 
 
-def test_domain_facades_export_contracts_and_repository():
-    """七域门面可导入，__all__ 非空且全部可解析，含 contract 与 repository 协议。"""
-    assert set(_DOMAIN_FACADES) == set(_DOMAIN_REPOSITORIES)
+def test_domain_facades_export_contracts():
+    """九域门面可导入，__all__ 非空且全部可解析，含 contract 记录与领域错误。"""
     for domain, facade in _DOMAIN_FACADES.items():
         assert facade.__all__, f"{domain} 门面 __all__ 为空"
         exported = _public_names(facade)
         names = set(exported)
-        assert any(n.endswith("Repository") for n in names), f"{domain} 未导出 repository 协议"
         assert any(n.endswith("Record") or n.endswith("Page") for n in names), (
             f"{domain} 未导出 contract 记录"
         )
@@ -134,23 +114,6 @@ def test_domain_errors_reuse_base_codes():
     assert checked >= 7, f"领域错误过少({checked})"
 
 
-def test_repository_methods_take_caller_session_first():
-    """repository 协议方法首参一律为调用方事务拥有的 db: Session。"""
-    for domain, proto in _DOMAIN_REPOSITORIES.items():
-        methods = [
-            (name, member)
-            for name, member in inspect.getmembers(proto, predicate=inspect.isfunction)
-            if not name.startswith("_")
-        ]
-        assert methods, f"{domain} repository 协议为空"
-        for name, fn in methods:
-            params = list(inspect.signature(fn).parameters.values())
-            if params and params[0].name == "self":
-                params = params[1:]
-            assert params and params[0].name == "db", f"{domain}.{name} 首参必须为调用方事务 db"
-            assert params[0].annotation == "Session", f"{domain}.{name} 首参必须注解为 Session"
-
-
 #: 各域 persistence 实现允许访问的归属 models 子模块（对应 TABLE_OWNERS；
 #: configuration 的 calc_configs 与 tasks 表同文件，tasks 读快照不写配置表）
 OWNED_MODELS: dict[str, frozenset[str]] = {
@@ -174,25 +137,10 @@ def _iter_domain_files():
             yield domain, path
 
 
-def test_implemented_domains_expose_protocol_methods():
-    """已有 persistence 实现的域：门面必须逐一实现其 repository 协议方法。"""
-    for domain, facade in _DOMAIN_FACADES.items():
-        if not (_PKG_ROOT / domain / "persistence.py").exists():
-            continue
-        proto = _DOMAIN_REPOSITORIES[domain]
-        expected = {
-            name
-            for name, member in inspect.getmembers(proto, predicate=inspect.isfunction)
-            if not name.startswith("_")
-        }
-        missing = [name for name in expected if not callable(getattr(facade, name, None))]
-        assert not missing, f"{domain} 门面缺 repository 协议方法: {missing}"
-
-
 def test_domain_source_purity():
     """域源码纯度：无 ORM/跨层导入，无 commit/rollback；contracts 只靠标准库+core。
 
-    唯一例外是各域 persistence.py（repository 实现），它只允许访问本域归属表
+    唯一例外是各域 persistence.py（领域持久化实现），它只允许访问本域归属表
     （OWNED_MODELS），且同样禁跨层导入与 commit/rollback。
     """
     violations: list[str] = []

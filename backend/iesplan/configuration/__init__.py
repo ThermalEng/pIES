@@ -29,7 +29,6 @@ from iesplan.configuration.contracts import (
     OverridesRevisionRecord,
     PlanningRevisionRecord,
 )
-from iesplan.configuration.repository import ConfigurationRepository
 
 append_effective = persistence.append_effective
 append_overrides = persistence.append_overrides
@@ -65,7 +64,6 @@ __all__ = [
     "CalcConfigRecord",
     "ConfigurationConflictError",
     "ConfigurationNotFoundError",
-    "ConfigurationRepository",
     "EffectiveRevisionRecord",
     "FinanceProfileRecord",
     "OverridesRevisionRecord",

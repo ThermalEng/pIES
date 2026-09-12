@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session
 
 from iesplan.audit import persistence
 from iesplan.audit.contracts import AuditError, AuditRecord, RetentionRuleRecord
-from iesplan.audit.repository import AuditRepository
 
 if TYPE_CHECKING:
     from iesplan.identity.contracts import UserRecord
@@ -56,7 +55,6 @@ __all__ = [
     "AUDIT_VERSION_CREATED",
     "AuditError",
     "AuditRecord",
-    "AuditRepository",
     "RetentionRuleRecord",
     "append_entry",
     "audit",

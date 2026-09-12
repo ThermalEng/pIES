@@ -38,7 +38,6 @@ from iesplan.identity.contracts import (
     UserRoleRecord,
     WindowSessionRecord,
 )
-from iesplan.identity.repository import IdentityRepository
 
 add_credential = persistence.add_credential
 bind_auth_subject = persistence.bind_auth_subject
@@ -79,7 +78,6 @@ __all__ = [
     "CredentialRecord",
     "ExternalAuthError",
     "IdentityConflictError",
-    "IdentityRepository",
     "OidcClient",
     "RoleRecord",
     "UserNotFoundError",
