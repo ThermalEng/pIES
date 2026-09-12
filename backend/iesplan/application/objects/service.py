@@ -22,9 +22,10 @@ from iesplan.storage import (
     storage_stats,
     undelete_object,
 )
-
-#: 软删保留期默认天数(与原路由层缺省一致: 未传保留期时保留 7 天)。
-DEFAULT_PENDING_DELETE_DAYS = 7
+#: 软删保留期默认天数唯一所有者为 storage 域
+#: (iesplan.storage.service.DEFAULT_PENDING_DELETE_DAYS); 本用例只复用,
+#: 不再本地复述字面量, 避免两处缺省漂移。
+from iesplan.storage.service import DEFAULT_PENDING_DELETE_DAYS
 
 
 def get_storage_view(db: Session) -> dict:

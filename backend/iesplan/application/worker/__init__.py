@@ -1,4 +1,4 @@
-"""Worker 边界用例包(application/worker): 薄 re-export, 无实现。
+"""Worker 边界用例包(application/worker)。
 
 本包收拢 Worker 对 storage/领域门面与行级读写的直接调用,
 worker 层只经本包推进, 不再直连 ``services.*`` 与 ``models.*``;
@@ -9,10 +9,18 @@ worker 层只经本包推进, 不再直连 ``services.*`` 与 ``models.*``;
   租约 fencing/任务行/结果提交行读写;
 - runner_cases: 快照输入读取转调与输入装配行读;
 - evidence_cases: 证据包查询/检查评估追加/不确定性行写。
+
+包级直接提供三个 worker 层消费的边界辅助(非转调, 有独立调用方):
+- cancel_requested: 取消信号读(可重建视图);
+- store_worker_object / load_worker_object: 对象存储通用写/读。
 """
 
 from __future__ import annotations
 
+from sqlalchemy.orm import Session
+
+from iesplan import tasks as tasks_domain
+from iesplan.application.tasks.submissions import map_business_outcome
 from iesplan.application.worker import evidence_cases, lease_cases, runner_cases
 from iesplan.application.worker.evidence_cases import (
     append_check_assessment,
@@ -69,6 +77,7 @@ from iesplan.application.worker.runner_cases import (
 )
 from iesplan.dataset import DatasetVersionRecord
 from iesplan.results import EvidencePackageRecord, ResultAssessmentRecord
+from iesplan.storage import get_object, put_object
 from iesplan.tasks import SampleTaskRecord, UncertaintySnapshotRecord
 
 __all__ = [
@@ -129,12 +138,6 @@ __all__ = [
     "verify_lease",
     "write_diagnostic",
 ]
-
-from sqlalchemy.orm import Session
-
-from iesplan import tasks as tasks_domain
-from iesplan.application.tasks.submissions import map_business_outcome
-from iesplan.storage import get_object, put_object
 
 
 def cancel_requested(task_id: int) -> bool:
