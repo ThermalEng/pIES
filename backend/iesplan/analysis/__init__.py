@@ -5,17 +5,19 @@
 
 组成:
   - wrapper.py: SweepSpec/SweepResult/BatchResult + apply_param/run_sweep/run_batch
-    /summarize_sweep/summarize_batch(纯计算,无 DB);
+    /summarize_sweep/summarize_batch(纯计算,无 DB;计算结果由调用方经 engine
+    参数注入,不直调引擎);
   - sensitivity.py: 指标对参数的变化率与影响排序(rank_indicators/rank_parameters)
-    + 任务编排(run_sensitivity_analysis,DB 层懒导入)+ 证据载荷
+    + 任务命令定义(build_sensitivity_task_config,纯 dict)+ 证据载荷
     (build_analysis_payload);
   - indicators.py: 能效/排放指标门面(自 metrics.engineering/environmental 迁入);
   - assessment.py: 四维评估门面 + check_financial(读 evidence financial 块);
   - _minfinance.py: 财务依赖(finance 包 M5 落地前的最小实现,接口 03 §7.2)。
 
-依赖(单向无环,03 §11): analysis → engines/finance/assembly/core。
-门面: run_sweep / run_batch / run_sensitivity_analysis / summarize_sweep /
-summarize_batch / build_analysis_payload。
+依赖(Wave 1 解耦后): analysis 只消费计算结果、回执和声明输出,经公开
+finance/metrics/core 门面聚合;不导入 engines/services/assembly.plan。
+门面: run_sweep / run_batch / summarize_sweep / summarize_batch /
+build_analysis_payload / build_sensitivity_task_config。
 """
 
 from __future__ import annotations
@@ -41,7 +43,6 @@ from iesplan.analysis.sensitivity import (
     build_sensitivity_task_config,
     rank_indicators,
     rank_parameters,
-    run_sensitivity_analysis,
 )
 from iesplan.analysis.wrapper import (
     CAPACITY_KEYS,
@@ -83,7 +84,6 @@ __all__ = [
     "rank_indicators",
     "rank_parameters",
     "run_batch",
-    "run_sensitivity_analysis",
     "run_sweep",
     "summarize_batch",
     "summarize_four_dimensions",

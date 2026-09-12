@@ -1,19 +1,21 @@
-"""计算分析 wrapper:调用计算模块与财务计算模块(03 §8.2,审查意见第 7 条)。
+"""计算分析 wrapper:聚合计算结果与财务计算模块(03 §8.2,审查意见第 7 条)。
 
 职责:
   - `run_sweep`: 单因子扫描 — 对 `SweepSpec.values` 每个值,`apply_param` 改写
-    content(深拷贝)→ 装配为 plan → 引擎(`evaluate_plan`)→ `compute_financials`
-    → `SweepResult`。纯函数,无 DB,便于单测;
+    content(深拷贝)→ 声明扫描点 → 调用方注入的计算结果提供者(`engine`)
+    → `compute_financials` → `SweepResult`。纯函数,无 DB,便于单测;
   - `run_batch` / `summarize_batch`: 批量分析 — 多场景 × 多参数组合笛卡尔积
     (任务范围:批量分析(多场景/多参数组合跑));
   - `apply_param`: 点路径改写(校验参数存在、单位已知、数值有限);
   - `summarize_sweep`: 汇总表(基准值/变化率/单调性/极值点,前端图表数据)。
 
-依赖(单向无环,03 §11): analysis → engines(`evaluate_plan`)/finance
-(`compute_financials`;finance 包为里程碑 M5 交付,当前用本包内置最小实现
-`_minfinance`,接口与 03 §7.2 一致,落地后切换导入点)/assembly(M4 落地后
-plan 装配改经 `assembly.plan.plan_from_content`,当前用镜像 executors._build_plan
-的本地适配)。逐时大结果不落盘,只产出 SweepResult + financial 块(03 §8.3)。
+依赖(Wave 1 解耦后): analysis 只消费计算结果(ComputeResult 风格的
+status/kpi/flows/solver_status)、回执和声明输出,不直调引擎、不拼装 plan、
+不依赖 services。计算执行由调用方(Worker/application)编排并经 `engine`
+参数注入公开计算边界;`engine` 缺省为 None,缺失时抛显式未实现错误,
+不 fallback、不恢复旧运行链(0.8 计算入口未实现)。财务经公开 `finance`
+门面(`compute_financials`)。逐时大结果不落盘,只产出 SweepResult +
+financial 块(03 §8.3)。
 """
 
 from __future__ import annotations
@@ -37,7 +39,6 @@ from iesplan.finance import (
 from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError
 from iesplan.core.timeaxis import TimeAxis
-from iesplan.engines.eval_run import evaluate_plan
 
 if TYPE_CHECKING:
     from collections.abc import Any
@@ -56,12 +57,6 @@ __all__ = [
     "summarize_batch",
     "summarize_sweep",
 ]
-
-#: 装配层(M4)落地后启用:plan 装配改经 assembly.plan.plan_from_content
-try:  # pragma: no cover - 依赖包未落地时走本地适配
-    from iesplan.assembly.plan import plan_from_content as _assembly_plan
-except ImportError:
-    _assembly_plan = None
 
 #: 设备容量参数候选键(投资估算:capex = Σ unit_invest_cost × 容量,02 §5.3)
 CAPACITY_KEYS: tuple[str, ...] = (
@@ -264,7 +259,9 @@ def apply_param(content: dict, param_path: str, value: float, unit: str | None =
 
 
 # ---------------------------------------------------------------------------
-# content → plan(装配边界;M4 落地后经 assembly.plan.plan_from_content)
+# content → plan(扫描点声明投影;plan 装配归 assembly,执行编排归 Worker/
+# application,见本模块 docstring。输出形状是注入式计算边界 `engine`
+# 的调用约定,随调用方迁移而收敛,此处不新增装配逻辑)
 # ---------------------------------------------------------------------------
 
 
@@ -289,17 +286,6 @@ def _local_plan(content: dict) -> dict:
         "c_ph": float(params.get("c_ph", 0.02)),
         "c_pc": float(params.get("c_pc", 0.02)),
     }
-
-
-def _plan_for(content: dict, data: dict, axis: TimeAxis) -> dict:
-    """content → evaluate_plan 方案 dict。
-
-    优先经 `assembly.plan.plan_from_content`(M4 装配层,03 §6.2,含业务单位 → SI
-    换算);未落地时用本地适配(_local_plan,镜像 executors._build_plan)。
-    """
-    if _assembly_plan is not None:
-        return _assembly_plan(content, data, axis)
-    return _local_plan(content)
 
 
 # ---------------------------------------------------------------------------
@@ -387,26 +373,35 @@ def run_sweep(
     base_options: dict | None = None,
     *,
     finance_params: FinanceParams | None = None,
-    engine: Callable = evaluate_plan,
+    engine: Callable | None = None,
 ) -> list[SweepResult]:
-    """单因子扫描(03 §8.2):对 spec.values 每个值,apply_param → 引擎 → 财务。
+    """单因子扫描(03 §8.2):对 spec.values 每个值,apply_param → 计算结果 → 财务。
 
     参数:
         content: 项目版本内容(calc_config/model.devices,仅读取+深拷贝改写);
-        data: 逐时数据(引擎输入,evaluate_plan 语义);
+        data: 逐时数据(计算输入,透传计算边界);
         axis: 时间轴(TimeAxis);
         spec: 扫描规格(参数路径 + 取值序列 + 单位);
-        base_options: 计算选项(透传引擎 options,如 {'shedding': True});
+        base_options: 计算选项(透传计算边界 options,如 {'shedding': True});
         finance_params: 财务参数(缺省取 content.calc_config 推导);
-        engine: 计算引擎(默认 evaluate_plan;接口 engine(plan, data, axis, options)
-            → 结果对象含 status/kpi/flows)。
+        engine: 计算结果提供者(调用方注入的公开计算边界;接口
+            engine(plan, data, axis, options) → 结果对象含
+            status/kpi/flows/solver_status,ComputeResult 风格)。
+            缺省 None → 抛显式未实现错误(0.8 计算入口未实现,不 fallback)。
     返回: SweepResult 列表(与 spec.values 同序);仅 'ok' 点计算 financial,
     逐时大结果不落盘(03 §8.3)。
     """
+    if engine is None:
+        raise AnalysisError(
+            "计算结果不可用: analysis 只消费 ComputeResult/回执/声明输出,不直调引擎;"
+            "调用方须经 engine 参数注入计算结果提供者(0.8 计算入口显式未实现)",
+            code="ANA-ENGINE-001",
+            message_key="ies.diag.analysis.compute_unimplemented",
+        )
     results: list[SweepResult] = []
     for value in spec.values:
         modified = apply_param(content, spec.param_path, value, spec.unit)
-        plan = _plan_for(modified, data, axis)
+        plan = _local_plan(modified)
         status, stop_reason, kpi, flows = _run_engine(engine, plan, data, axis, base_options)
         financial: FinancialResult | None = None
         if status == "ok" and isinstance(kpi, dict):
@@ -449,14 +444,22 @@ def run_batch(
     scenarios: Sequence[dict] | None = None,
     base_options: dict | None = None,
     finance_params: FinanceParams | None = None,
-    engine: Callable = evaluate_plan,
+    engine: Callable | None = None,
 ) -> list[BatchResult]:
-    """批量分析:场景 × 参数组合笛卡尔积,逐组合跑引擎(结构化输出)。
+    """批量分析:场景 × 参数组合笛卡尔积,逐组合取计算结果(结构化输出)。
 
-    每个组合 = 各 sweep 各取一个值同时写入场景 content(apply_param),一次引擎
-    运行;输出 BatchResult 列表(param_values 记录组合取值)。场景缺省为单个
-    [content];组合数为 Σ场景 × Π各 sweep 取值数。
+    每个组合 = 各 sweep 各取一个值同时写入场景 content(apply_param),一次计算
+    边界调用;输出 BatchResult 列表(param_values 记录组合取值)。场景缺省为单个
+    [content];组合数为 Σ场景 × Π各 sweep 取值数。`engine` 语义同 run_sweep,
+    缺省 None → 抛显式未实现错误,不 fallback。
     """
+    if engine is None:
+        raise AnalysisError(
+            "计算结果不可用: analysis 只消费 ComputeResult/回执/声明输出,不直调引擎;"
+            "调用方须经 engine 参数注入计算结果提供者(0.8 计算入口显式未实现)",
+            code="ANA-ENGINE-001",
+            message_key="ies.diag.analysis.compute_unimplemented",
+        )
     if not sweeps:
         raise AnalysisError("sweeps 不能为空", params={"detail": "批量分析至少需要一个扫描参数"})
     scene_list: list[dict] = list(scenarios) if scenarios is not None else [content]
@@ -468,7 +471,7 @@ def run_batch(
             for spec, value in zip(sweeps, combo, strict=True):
                 modified = apply_param(modified, spec.param_path, value, spec.unit)
                 param_values[spec.param_path] = float(value)
-            plan = _plan_for(modified, data, axis)
+            plan = _local_plan(modified)
             status, stop_reason, kpi, flows = _run_engine(engine, plan, data, axis, base_options)
             financial: FinancialResult | None = None
             if status == "ok" and isinstance(kpi, dict):
