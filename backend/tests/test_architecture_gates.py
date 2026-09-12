@@ -640,25 +640,8 @@ def _find_worker_transactions(
     return sorted(found)
 
 
-#: 门禁 11 临时债务: Worker 事务调用(纠偏 Wave 3 上收 application.worker 后归零)。
-TEMP_DEBT_WORKER_TX: set[tuple[str, int, str]] = {
-    ("iesplan.worker.lease", 116, ".commit()"),
-    ("iesplan.worker.lease", 118, ".rollback()"),
-    ("iesplan.worker.lease", 166, ".rollback()"),
-    ("iesplan.worker.lease", 270, ".rollback()"),
-    ("iesplan.worker.lease", 305, ".rollback()"),
-    ("iesplan.worker.main", 175, ".commit()"),
-    ("iesplan.worker.runner", 303, ".commit()"),
-    ("iesplan.worker.runner", 308, ".rollback()"),
-    ("iesplan.worker.runner", 311, ".rollback()"),
-    ("iesplan.worker.runner", 314, ".rollback()"),
-    ("iesplan.worker.runner", 331, ".commit()"),
-    ("iesplan.worker.runner", 335, ".rollback()"),
-    ("iesplan.worker.runner", 354, ".commit()"),
-    ("iesplan.worker.runner", 356, ".rollback()"),
-    ("iesplan.worker.runner", 365, ".commit()"),
-    ("iesplan.worker.runner", 367, ".rollback()"),
-}
+#: 门禁 11 临时债务: Worker 事务调用(纠偏 Wave 3 已上收 application.worker, 归零)。
+TEMP_DEBT_WORKER_TX: set[tuple[str, int, str]] = set()
 
 
 def test_application_no_direct_services():
