@@ -7,14 +7,14 @@
 - 自助注册开关默认关闭, 持久化到数据库(app_settings, 修复 M-12 多 Worker
   不一致), 由管理员 PUT /api/auth/settings 切换;
 - 外部认证(OIDC/SSO): IESPLAN_AUTH_PROVIDER=oidc 时登录页展示 SSO 入口,
-  回调经 services.external_auth(标准实现 Authlib)完成令牌交换与账号绑定。
+  回调经 application.identity 用例门面(底经 services.external_auth,
+  标准实现 Authlib)完成令牌交换与账号绑定。
 """
 
 from __future__ import annotations
 
-import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -22,13 +22,21 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from iesplan.application import identity
+from iesplan.application.identity.auth_cases import (
+    ExternalAuthError,
+    begin_oidc_login,
+    complete_oidc_login,
+    get_public_auth_settings,
+    is_oidc_enabled,
+    project_counts_by_owner,
+    record_oidc_login_failure,
+    update_security_settings,
+)
 from iesplan.config import settings
 from iesplan.core.errors import ForbiddenError, NotFoundError
 from iesplan.db import get_db
-from iesplan.models.identity import User, WindowSession
-from iesplan.application import identity
-from iesplan.services import project as project_service
-from iesplan.services.external_auth import ExternalAuthError
+from iesplan.identity.contracts import UserRecord, WindowSessionRecord
 
 #: 会话 Cookie 名
 SESSION_COOKIE_NAME = "ies_session"
@@ -59,13 +67,12 @@ class PublicSettings(BaseModel):
 
 
 def public_settings(db: Session) -> PublicSettings:
-    """公开设置: 注册开关(数据库权威值) + 外部认证入口。"""
-    from iesplan.services import external_auth
-
+    """公开设置: 注册开关(数据库权威值) + 外部认证入口(经 application 门面)。"""
+    registration_enabled, sso_enabled, sso_provider_name = get_public_auth_settings(db)
     return PublicSettings(
-        registration_enabled=identity.registration_enabled(db),
-        sso_enabled=external_auth.is_oidc_enabled(),
-        sso_provider_name="OIDC" if external_auth.is_oidc_enabled() else "",
+        registration_enabled=registration_enabled,
+        sso_enabled=sso_enabled,
+        sso_provider_name=sso_provider_name,
     )
 
 
@@ -168,11 +175,15 @@ class AuthResponse(BaseModel):
 
 @dataclass(frozen=True)
 class AuthContext:
-    """已认证请求上下文: 当前用户 + 其活动会话 + 数据库会话。"""
+    """已认证请求上下文: 当前用户 + 其活动会话 + 数据库会话。
+
+    用户与会话为身份域公开记录(UserRecord/WindowSessionRecord,
+    经 application/identity 门面取数), 不直接引用 ORM。
+    """
 
     db: Session
-    user: User
-    session: WindowSession
+    user: UserRecord
+    session: WindowSessionRecord
 
 
 #: 数据库会话依赖别名(Annotated 风格, 规避 B008)
@@ -190,11 +201,6 @@ def _extract_token(request: Request) -> str | None:
 def _client_ip(request: Request) -> str | None:
     """客户端 IP(代理部署时由反向代理注入 X-Forwarded-For, 后续阶段可扩展)。"""
     return request.client.host if request.client else None
-
-
-def _pkce_verifier() -> str:
-    """生成 PKCE code_verifier(S256 要求 43-128 字符)。"""
-    return secrets.token_urlsafe(48)[:64]
 
 
 def get_auth_context(request: Request, db: DbSession) -> AuthContext:
@@ -224,10 +230,10 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
         raise identity.SessionInvalidError()
     expires_at = identity.as_utc(session.expires_at)
     if expires_at is not None and expires_at < now:
-        # 已过期: 置终态(系统自动过期, 无操作者; 会话写入经 services 身份写入面)
+        # 已过期: 置终态(系统自动过期, 无操作者; 会话写入经 application 身份用例)
         identity.expire_session(db, session.id)
         raise identity.SessionInvalidError()
-    user = db.get(User, session.user_id)
+    user = identity.get_user_by_id(db, session.user_id)
     if user is None or user.status != "active":
         raise identity.SessionInvalidError()
     if session.credential_version_at_issue != user.credential_version:
@@ -244,12 +250,12 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
     return AuthContext(db=db, user=user, session=session)
 
 
-def get_current_user(ctx: AuthCtx) -> User:
+def get_current_user(ctx: AuthCtx) -> UserRecord:
     """依赖: 当前已认证用户(其他业务单元复用)。"""
     return ctx.user
 
 
-def get_current_admin(ctx: AuthCtx) -> User:
+def get_current_admin(ctx: AuthCtx) -> UserRecord:
     """依赖: 当前管理员(无管理员角色抛 403)。"""
     if not identity.has_role(ctx.db, ctx.user, "admin"):
         raise ForbiddenError()
@@ -258,16 +264,16 @@ def get_current_admin(ctx: AuthCtx) -> User:
 
 #: 认证上下文 / 当前用户 / 当前管理员依赖别名(须在依赖函数定义后声明)
 AuthCtx = Annotated[AuthContext, Depends(get_auth_context)]
-CurrentUser = Annotated[User, Depends(get_current_user)]
-CurrentAdmin = Annotated[User, Depends(get_current_admin)]
+CurrentUser = Annotated[UserRecord, Depends(get_current_user)]
+CurrentAdmin = Annotated[UserRecord, Depends(get_current_admin)]
 
 
-def _require_admin(ctx: AuthContext) -> User:
+def _require_admin(ctx: AuthContext) -> UserRecord:
     """便捷校验: 当前用户须为管理员, 否则抛 403(与 get_current_admin 同逻辑)。"""
     return get_current_admin(ctx)
 
 
-def _user_out(db: Session, user: User) -> UserOut:
+def _user_out(db: Session, user: UserRecord) -> UserOut:
     """构造用户响应(角色取 admin 优先; force_password_change 来自有效凭证)。"""
     roles = identity.user_roles(db, user)
     cred = identity.get_active_password_credential(db, user)
@@ -428,12 +434,12 @@ def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
 def list_users(db: DbSession, admin: CurrentAdmin) -> UsersListResponse:
     """用户列表(管理员): 含停用账号, 返回角色与强制改密状态与项目数。
 
-    project_count 经项目领域公开 read model(services.project.
-    project_count_by_owner)一次 GROUP BY 聚合查询取得, 防 N+1;
+    project_count 经 application.identity 薄封装用例(project_counts_by_owner,
+    底为项目领域公开 read model)一次 GROUP BY 聚合查询取得, 防 N+1;
     数据库故障沿用统一错误处理(异常向上传播, 不转为 0)。
     """
     users = identity.list_users(db)
-    counts = project_service.project_count_by_owner(db, [u.id for u in users])
+    counts = project_counts_by_owner(db, [u.id for u in users])
     return UsersListResponse(
         users=[
             AdminUserOut(
@@ -554,19 +560,19 @@ def admin_delete_user(
 
 @router.put("/settings", summary="更新安全设置(管理员)")
 def update_settings(payload: SettingsUpdate, request: Request, ctx: AuthCtx) -> dict:
-    """更新安全设置: 自助注册开关(默认关闭, 持久化到数据库, 多 Worker 一致)。"""
+    """更新安全设置: 自助注册开关(默认关闭, 持久化到数据库, 多 Worker 一致)。
+
+    开关写入与维护审计经 application.identity 用例单事务提交。
+    """
     _require_admin(ctx)
-    identity.set_registration_enabled(ctx.db, payload.registration_enabled, updated_by=ctx.user.id)
-    identity.record_auth_event(
+    registration_enabled = update_security_settings(
         ctx.db,
-        "maintenance",
-        user_id=ctx.user.id,
+        enabled=payload.registration_enabled,
+        updated_by=ctx.user.id,
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
-        detail={"action": "registration_toggle", "registration_enabled": payload.registration_enabled},
     )
-    ctx.db.commit()
-    return {"registration_enabled": identity.registration_enabled(ctx.db)}
+    return {"registration_enabled": registration_enabled}
 
 
 @router.get("/settings", summary="读取安全设置(管理员)")
@@ -595,18 +601,11 @@ def get_public_settings(db: DbSession) -> PublicSettings:
 def oidc_login(request: Request, db: DbSession) -> RedirectResponse:
     """跳转 OIDC 提供方授权页(PKCE + state 防 CSRF)。
 
-    state 为签名令牌(含 nonce 与 PKCE verifier, 360s 窗口), 回调时校验。
+    state 为签名令牌(含 nonce 与 PKCE verifier, 360s 窗口), 回调时校验;
+    授权 URL 构造经 application.identity 用例(未启用抛 404)。
     """
-    from iesplan.services import external_auth
-
-    if not external_auth.is_oidc_enabled():
-        raise NotFoundError("", params={"object_type": "auth_provider"})
-    nonce = secrets.token_urlsafe(24)
-    verifier = _pkce_verifier()
-    state = external_auth.build_state(nonce, verifier)
-    url = external_auth.build_authorization_url(state)
     # 回调完成前由签名 state 携带 nonce/verifier(无状态, 多 Worker 可用)
-    return RedirectResponse(url)
+    return RedirectResponse(begin_oidc_login())
 
 
 @router.get("/oidc/callback", summary="OIDC 回调(令牌交换)")
@@ -621,28 +620,16 @@ def oidc_callback(
 
     成功: 建立浏览器会话并 302 回首页(带 ies_session Cookie);
     失败: 302 回登录页并携带 error 提示(不泄露提供方细节)。
+    令牌交换/账号绑定/会话签发经 application.identity 用例(含事务提交)。
     """
-    from iesplan.services import external_auth
-
-    if not external_auth.is_oidc_enabled():
+    if not is_oidc_enabled():
         raise NotFoundError("", params={"object_type": "auth_provider"})
     ip = _client_ip(request)
     ua = request.headers.get("user-agent")
     try:
-        payload = external_auth.verify_state(state)
-        claims = external_auth.exchange_code(code, payload["verifier"])
+        _, token, _ = complete_oidc_login(db, code=code, state=state, ip=ip, user_agent=ua)
     except ExternalAuthError as exc:
-        identity.record_auth_event(
-            db, "login_failure", ip=ip, user_agent=ua,
-            detail={"reason": exc.params.get("reason", "oidc_failed")},
-        )
-        db.commit()
-        return RedirectResponse(f"/login?error=oidc_failed", status_code=302)
-    user = external_auth.provision_user(db, claims, ip=ip, user_agent=ua)
-    db.flush()
-    session, token, displaced = identity.create_window_session(
-        db, user, "oidc", ip=ip, user_agent=ua
-    )
+        record_oidc_login_failure(db, reason=exc.params.get("reason", "oidc_failed"), ip=ip, user_agent=ua)
+        return RedirectResponse("/login?error=oidc_failed", status_code=302)
     _set_session_cookie(response, request, token)
-    db.commit()
     return RedirectResponse("/", status_code=302)
