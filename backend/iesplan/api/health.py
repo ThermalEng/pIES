@@ -1,10 +1,11 @@
 """运维健康聚合 API(STO-07: 独立聚合层, 不驻留在存储路由)。
 
 - GET /api/admin/health: 全系统运维健康视图(存活/就绪/任务/队列/存储),
-  由本聚合层调用各模块公开 health provider:
-  - 存储模块 → /admin/storage/health 的 provider 逻辑(storage 公开函数);
-  - 队列 → queue.queue_status();
-  - 任务/项目/用户计数 → 只读统计。
+  由本聚合层调用 application 健康门面(application.health 只读探针,
+  再透传各域/服务/存储公开函数):
+  - 存储 → 门面 storage_stats/sample_verify(容量 + 抽样校验);
+  - 队列 → 门面 queue_status();
+  - 任务/项目/用户计数 → 门面只读统计。
 - 存储路由不再实现健康聚合(边界: 存储模块只提供自己的健康结果)。
 
 生产探针(/api/healthz, /api/readyz)由 main._build_health_router 提供,
@@ -17,17 +18,12 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from iesplan import __version__
 from iesplan.api.auth import CurrentAdmin
+from iesplan.application import health as health_ops
 from iesplan.db import get_db
-from iesplan.models.calc import Task
-from iesplan.models.identity import User
-from iesplan.models.project import Project
-from iesplan.services import queue
-from iesplan.storage import sample_verify, storage_stats
 
 #: 运维健康聚合路由: 挂载前缀 /api/admin(仅管理员)
 router = APIRouter(prefix="/api/admin", tags=["admin-health"])
@@ -38,23 +34,16 @@ DbSession = Annotated[Session, Depends(get_db)]
 def ops_health_view(db: Session) -> dict:
     """运维健康视图(架构宪法 §13 故障与健康语义): 存活/就绪/任务指标/队列指标/存储容量。
 
-    STO-07: 本聚合层只编排各模块公开 provider, 不实现任何模块内部逻辑;
-    存储健康取 storage.health_view(容量 + 抽样校验), 队列取 queue_status。
+    STO-07: 本聚合层只编排 application 健康门面, 不实现任何模块内部逻辑;
+    存储健康取门面 storage_stats/sample_verify(容量 + 抽样校验),
+    队列取门面 queue_status。
     """
-    db_ok = True
-    try:
-        db.execute(select(1))
-    except Exception:  # noqa: BLE001  (健康检查只上报状态, 不抛错)
-        db_ok = False
-    tasks_by_status = dict(
-        db.execute(select(Task.status, func.count()).group_by(Task.status)).all()
-    )
-    projects_by_status = dict(
-        db.execute(select(Project.status, func.count()).group_by(Project.status)).all()
-    )
-    users_count = db.execute(select(func.count(User.id))).scalar_one()
+    db_ok = health_ops.check_db(db)
+    tasks_by_status = health_ops.tasks_by_status(db)
+    projects_by_status = health_ops.projects_by_status(db)
+    users_count = health_ops.count_users(db)
     storage = storage_health_view(db)
-    queue_view = queue.queue_status()
+    queue_view = health_ops.queue_status()
     # 健康判定: 存活 + 就绪 + 存储门禁; 队列为可重建视图(Redis 可重建),
     # 其降级状态在 queue 节单独上报, 不影响整体状态
     healthy = db_ok and storage["capacity"]["ok"]
@@ -81,8 +70,8 @@ def storage_health_view(db: Session) -> dict:
     字段: {capacity, corrupt_count, orphan_count, object_count, ok,
     verify{checked, ok_count, failed}}。
     """
-    stats = storage_stats(db)
-    verify = sample_verify(db, limit=10)
+    stats = health_ops.storage_stats(db)
+    verify = health_ops.sample_verify(db, limit=10)
     return {
         "capacity": stats["capacity"],
         "corrupt_count": len(verify["failed"]),
