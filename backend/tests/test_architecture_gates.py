@@ -398,8 +398,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     # 过期删除 11 项: services.tasks→common(services 包已删, 不可达);
     # project.persistence→project(project/ 不在 _SCAN_OWNERSHIP_DIRS, 永不可达);
     # worker 9 项(lease/executors/runner 跨表直引已收敛, 实测为零)。
-    # Wave 1-A 债务: application.namespace.get_or_allocate_namespace 直引 identity ORM, 无生产调用。
-    ("iesplan.application.namespace", "identity"),
+    # (Wave 1-A 已删除穿透 helper, 债务归零, 移除本项)
     # 永久允许: models.common 仅共享基元(bigint_pk/正则, 无业务表), 非跨域业务访问。
     ("iesplan.storage.persistence", "common"),
 }
@@ -834,11 +833,8 @@ def _find_application_orm_imports(
     return found
 
 
-#: 门禁 12 临时债务: application → models/ORM(全仓实测 1 项; Wave 1-A 归零)。
-TEMP_DEBT_APP_ORM: set[tuple[str, str]] = {
-    # application/namespace.py:get_or_allocate_namespace 直引 identity ORM, 无生产调用。
-    ("iesplan.application.namespace", "identity"),
-}
+#: 门禁 12 临时债务: application → models/ORM(Wave 1-A 已删除穿透 helper, 归零)。
+TEMP_DEBT_APP_ORM: set[tuple[str, str]] = set()
 
 
 def test_application_no_models_orm():
