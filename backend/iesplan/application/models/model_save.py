@@ -34,21 +34,26 @@ from iesplan.core.diagnostics import (
     make_diag,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
-from iesplan.core.yamlmini import YamlParseError
-from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import (
     DeviceModelDocument,
+    MAX_CANDIDATE_YAML_BYTES,
     canonical_bytes,
     canonical_receipt,
     instantiate_template,
     is_valid_id,
+    parse_candidate_text,
     parse_device_model_v2,
     to_dict,
 )
 from iesplan.model import (
     MODEL_SOURCE_DIRECT,
     MODEL_SOURCE_TEMPLATE,
+    PROJ_MDL_IDENTITY_FAILED,
+    PROJ_MDL_VALIDATION_FAILED,
+    PROJ_MDL_YAML_PARSE,
+    ModelCandidateRejectedError,
     ModelConflictError,
+    ProjectModelNotFoundError,
     ProjectModelRecord,
 )
 from iesplan.storage import (
@@ -62,38 +67,12 @@ from iesplan.storage import (
 #: 最终 owner 命名空间(项目模型清单行持有者)
 FINAL_OWNER_NAMESPACE: str = "project_model"
 
-#: 候选模型 YAML 上限(2 MiB, 防御性限制)
-MAX_MODEL_YAML_BYTES: int = 2 * 1024 * 1024
-
 #: 模型/回执对象媒体类型(规范字节为版本化 JSON 文本)
 MODEL_MEDIA_TYPE: str = "application/json"
 
-#: 项目模型域诊断码(集中登记于 core/diagnostics.py NEW_DIAG_CODES; 消费者
-#: 本地常量与目录同语义, 与 dataset.py 对 DATA-TS-004..007 的处理一致)
-PROJ_MDL_IDENTITY_FAILED = "PROJ-MDL-004"  # 最终设备 ID 身份校验失败
-PROJ_MDL_VALIDATION_FAILED = "PROJ-MDL-005"  # 候选模型校验失败(保存拒绝, 包络码)
-PROJ_MDL_YAML_PARSE = "PROJ-MDL-006"  # 候选模型 YAML 解析失败
-
-
-# ---------------------------------------------------------------------------
-# 错误类型
-# ---------------------------------------------------------------------------
-
-
-class ModelCandidateRejectedError(AppError):
-    """候选模型校验失败, 保存被拒绝(HTTP 400, 诊断明细入 params.diagnostics)。
-
-    code 与 message_key 见 core/diagnostics.py NEW_DIAG_CODES 集中登记。
-    """
-
-    code = PROJ_MDL_VALIDATION_FAILED
-    severity = SEVERITY_ERROR
-    message_key = "ies.diag.proj.model_validation_failed"
-    http_status = 400
-
-
-class ProjectModelNotFoundError(NotFoundError):
-    """项目模型清单行不存在或不属于该项目。"""
+#: 项目模型候选错误与诊断码归属 model 域（见 iesplan.model.contracts；
+#: 入口文本门禁规则归属 devices.candidate，本层只做编排与诊断映射）。
+#: 候选 YAML 上限见 devices.MAX_CANDIDATE_YAML_BYTES（单一权威）。
 
 
 # ---------------------------------------------------------------------------
@@ -148,54 +127,57 @@ def _diag(
 
 
 def _parse_candidate_yaml(model_yaml: str) -> tuple[Mapping[str, Any] | None, list[Diagnostic]]:
-    """候选 YAML 安全子集解析(重复键/锚点/非法缩进在解析层拒绝)。"""
-    diags: list[Diagnostic] = []
-    if not model_yaml or not model_yaml.strip():
-        diags.append(
+    """候选 YAML 入口文本门禁（规则归属 devices.candidate；本函数只映射诊断码）。
+
+    门禁行为（空文本/字节上限/安全解析/顶层 mapping）与模板草稿侧共用同一实现；
+    诊断码、文案与字段定位与搬迁前一致。
+    """
+    raw, failure = parse_candidate_text(model_yaml)
+    if failure is None:
+        assert raw is not None
+        return raw, []
+    if failure.kind == "empty":
+        return None, [
             _diag(
                 PROJ_MDL_YAML_PARSE,
                 "候选模型 YAML 不能为空",
                 field="model_yaml",
                 params={"expected": "非空 ies.device-model YAML", "actual": "空"},
             )
-        )
-        return None, diags
-    if len(model_yaml.encode("utf-8")) > MAX_MODEL_YAML_BYTES:
-        diags.append(
+        ]
+    if failure.kind == "too_large":
+        return None, [
             _diag(
                 PROJ_MDL_YAML_PARSE,
-                f"候选模型 YAML 超过上限 {MAX_MODEL_YAML_BYTES} 字节",
+                f"候选模型 YAML 超过上限 {MAX_CANDIDATE_YAML_BYTES} 字节",
                 field="model_yaml",
                 params={
-                    "expected": f"≤ {MAX_MODEL_YAML_BYTES} 字节",
-                    "actual": len(model_yaml.encode("utf-8")),
+                    "expected": f"≤ {MAX_CANDIDATE_YAML_BYTES} 字节",
+                    "actual": failure.actual_bytes,
                 },
             )
-        )
-        return None, diags
-    try:
-        raw = yaml_load(model_yaml)
-    except YamlParseError as exc:
-        diags.append(
+        ]
+    if failure.kind == "parse_error":
+        return None, [
             _diag(
                 PROJ_MDL_YAML_PARSE,
-                str(exc),
+                failure.detail,
                 field="model_yaml",
-                params={"expected": "YAML 1.2 安全子集", "actual": str(exc), "line": exc.line},
+                params={
+                    "expected": "YAML 1.2 安全子集",
+                    "actual": failure.detail,
+                    "line": failure.line,
+                },
             )
+        ]
+    return None, [
+        _diag(
+            PROJ_MDL_YAML_PARSE,
+            "候选模型顶层必须是 mapping",
+            field="<root>",
+            params={"expected": "mapping", "actual": failure.actual_type},
         )
-        return None, diags
-    if not isinstance(raw, Mapping):
-        diags.append(
-            _diag(
-                PROJ_MDL_YAML_PARSE,
-                "候选模型顶层必须是 mapping",
-                field="<root>",
-                params={"expected": "mapping", "actual": type(raw).__name__},
-            )
-        )
-        return None, diags
-    return raw, diags
+    ]
 
 
 def _load_template_authoritative_document(

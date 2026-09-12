@@ -36,14 +36,14 @@ from iesplan.core.namespace import (
     is_valid_slug,
     is_valid_stable_id,
 )
-from iesplan.core.yamlmini import YamlParseError
-from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices import (
+    MAX_CANDIDATE_YAML_BYTES,
     SCHEMA_ID,
     SCHEMA_VERSION,
     DeviceModelDocument,
     canonical_bytes,
     canonical_receipt,
+    parse_candidate_text,
     parse_device_model_v2,
     parse_template_inputs,
 )
@@ -67,8 +67,7 @@ from iesplan.storage import (
 #: 模板域 owner 命名空间(模板主表行与 revision 行的对象引用持有者)
 TEMPLATE_OWNER_NAMESPACE: str = "model_template"
 
-#: 候选模板 YAML 上限(2 MiB, 与项目模型候选一致)
-MAX_TEMPLATE_YAML_BYTES: int = 2 * 1024 * 1024
+#: 候选 YAML 上限见 devices.MAX_CANDIDATE_YAML_BYTES（与项目模型候选共用同一权威）
 
 #: 模板 YAML / 回执 / 摘要对象媒体类型(规范字节为 JSON 文本)
 TEMPLATE_MEDIA_TYPE: str = "application/json"
@@ -272,32 +271,37 @@ def validate_template_yaml(model_yaml: str) -> TemplateValidation:
 
     模板必须声明顶层 ``inputs``(未实例化模型特例); 校验失败返回聚合诊断。
     本函数是草稿保存的权威门禁(发布以规范字节重新完整校验)。
+    入口文本门禁规则归属 devices.candidate（与项目模型候选共用同一实现）；
+    本函数只映射诊断码，诊断码、文案与字段定位与搬迁前一致。
     """
-    diags: list[Diagnostic] = []
-    if not model_yaml or not model_yaml.strip():
-        diags.append(_diag(TPL_MDL_YAML_PARSE, "模板 YAML 不能为空", field="model_yaml",
-                           params={"expected": "非空 ies.device-model YAML(含顶层 inputs)",
-                                   "actual": "空"}))
+    raw, failure = parse_candidate_text(model_yaml)
+    if failure is not None:
+        if failure.kind == "empty":
+            diags = [_diag(
+                TPL_MDL_YAML_PARSE, "模板 YAML 不能为空", field="model_yaml",
+                params={"expected": "非空 ies.device-model YAML(含顶层 inputs)",
+                        "actual": "空"},
+            )]
+        elif failure.kind == "too_large":
+            diags = [_diag(
+                TPL_MDL_YAML_PARSE, f"模板 YAML 超过上限 {MAX_CANDIDATE_YAML_BYTES} 字节",
+                field="model_yaml",
+                params={"expected": f"≤ {MAX_CANDIDATE_YAML_BYTES} 字节",
+                        "actual": failure.actual_bytes},
+            )]
+        elif failure.kind == "parse_error":
+            diags = [_diag(
+                TPL_MDL_YAML_PARSE, failure.detail, field="model_yaml",
+                params={"expected": "YAML 1.2 安全子集", "actual": failure.detail,
+                        "line": failure.line},
+            )]
+        else:
+            diags = [_diag(
+                TPL_MDL_YAML_PARSE, "模板顶层必须是 mapping", field="<root>",
+                params={"expected": "mapping", "actual": failure.actual_type},
+            )]
         return TemplateValidation(ok=False, diagnostics=diags)
-    if len(model_yaml.encode("utf-8")) > MAX_TEMPLATE_YAML_BYTES:
-        diags.append(_diag(
-            TPL_MDL_YAML_PARSE, f"模板 YAML 超过上限 {MAX_TEMPLATE_YAML_BYTES} 字节",
-            field="model_yaml",
-            params={"expected": f"≤ {MAX_TEMPLATE_YAML_BYTES} 字节",
-                    "actual": len(model_yaml.encode("utf-8"))},
-        ))
-        return TemplateValidation(ok=False, diagnostics=diags)
-    try:
-        raw = yaml_load(model_yaml)
-    except YamlParseError as exc:
-        diags.append(_diag(TPL_MDL_YAML_PARSE, str(exc), field="model_yaml",
-                           params={"expected": "YAML 1.2 安全子集", "actual": str(exc),
-                                   "line": exc.line}))
-        return TemplateValidation(ok=False, diagnostics=diags)
-    if not isinstance(raw, Mapping):
-        diags.append(_diag(TPL_MDL_YAML_PARSE, "模板顶层必须是 mapping", field="<root>",
-                           params={"expected": "mapping", "actual": type(raw).__name__}))
-        return TemplateValidation(ok=False, diagnostics=diags)
+    assert raw is not None
     return validate_template_raw(raw)
 
 

@@ -6,10 +6,17 @@
 - 2.0 合同类型与规范化：``SCHEMA_ID`` / ``SCHEMA_VERSION`` / ``canonical_bytes``
   等来自 ``contracts2``；
 - 发现/加载通过 ``loader`` 公开函数完成，不暴露 pricing/csv/1.0 spec 路径；
+- 候选 YAML 文本入口门禁（``parse_candidate_text``）归属 ``candidate``，
+  供项目模型候选与模板草稿共用；
 - 不保留旧 registry/兼容层，不暴露 migration；未注册设备经 ``get_device``
   抛 ``NotFoundError``，不返回占位描述。
 """
 
+from iesplan.devices.candidate import (
+    MAX_CANDIDATE_YAML_BYTES,
+    CandidateTextFailure,
+    parse_candidate_text,
+)
 from iesplan.devices.contracts2 import (
     SCHEMA_ID,
     SCHEMA_VERSION,
@@ -51,8 +58,11 @@ def get_device(type_id: str) -> DeviceModelDocument:
 __all__ = [
     "SCHEMA_ID",
     "SCHEMA_VERSION",
+    "CandidateTextFailure",
     "DeviceModelDocument",
+    "MAX_CANDIDATE_YAML_BYTES",
     "CanonicalModel",
+    "parse_candidate_text",
     "DeviceRegistry",
     "DEFAULT_CATALOG_DIR",
     "discover_device_dirs",

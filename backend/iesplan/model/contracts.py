@@ -9,7 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from iesplan.core.errors import ConflictError, NotFoundError
+from iesplan.core.diagnostics import SEVERITY_ERROR
+from iesplan.core.errors import AppError, ConflictError, NotFoundError
 
 
 class ModelNotFoundError(NotFoundError):
@@ -18,6 +19,29 @@ class ModelNotFoundError(NotFoundError):
 
 class ModelConflictError(ConflictError):
     """名称重复/并发建图冲突（沿用基类诊断码，不新增码）。"""
+
+
+#: 项目模型候选诊断码（集中登记于 core/diagnostics.py NEW_DIAG_CODES；
+#: 入口文本门禁与 devices.candidate 共用同一规则，见 MAX_CANDIDATE_YAML_BYTES）。
+PROJ_MDL_IDENTITY_FAILED = "PROJ-MDL-004"  # 最终设备 ID 身份校验失败
+PROJ_MDL_VALIDATION_FAILED = "PROJ-MDL-005"  # 候选模型校验失败（保存拒绝，包络码）
+PROJ_MDL_YAML_PARSE = "PROJ-MDL-006"  # 候选模型 YAML 解析失败
+
+
+class ModelCandidateRejectedError(AppError):
+    """候选模型校验失败，保存被拒绝（HTTP 400，诊断明细入 params.diagnostics）。
+
+    code 与 message_key 见 core/diagnostics.py NEW_DIAG_CODES 集中登记。
+    """
+
+    code = PROJ_MDL_VALIDATION_FAILED
+    severity = SEVERITY_ERROR
+    message_key = "ies.diag.proj.model_validation_failed"
+    http_status = 400
+
+
+class ProjectModelNotFoundError(NotFoundError):
+    """项目模型清单行不存在或不属于该项目。"""
 
 
 @dataclass(frozen=True, slots=True)
