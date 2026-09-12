@@ -86,9 +86,6 @@ QUANTITY_DIMS: dict[str, dict[str, int]] = {
     QUANTITY_SIGNAL: {},
 }
 
-#: 旧下划线别名(兼容历史导入;新代码一律使用 QUANTITY_DIMS)。
-_QUANTITY_DIMS: dict[str, dict[str, int]] = QUANTITY_DIMS
-
 
 @dataclass(slots=True, frozen=True)
 class TimeAxisRef:

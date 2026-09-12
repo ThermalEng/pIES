@@ -221,10 +221,10 @@ class TestPromotedSharedCapabilities:
         assert checker_mod.resolve_ports is context.resolve_ports
         assert checker_mod.resolve_model is context.resolve_model
         assert checker_mod.units_compatible is context.units_compatible
-        assert checker_mod._split_model is context.split_model
-        assert checker_mod._to_watts is context.to_watts
+        # 旧兼容别名已删除（零调用方，宪法 §2.2 不保留兼容别名）。
+        for removed in ("_split_model", "_to_watts", "_default_registry"):
+            assert not hasattr(checker_mod, removed), f"checker.{removed} 兼容残留未删"
         for name in (
-            "_default_registry",
             "_yaml_device_ports",
             "_derive_device_ports",
             "_derive_pipeline_ports",
@@ -251,7 +251,6 @@ class TestPromotedSharedCapabilities:
             "run_constraint_checks",
             "PIPELINE_MODEL_IDS",
             "PORT_TYPE_TO_CARRIER",
-            "_split_model",
         ]
 
     def test_rules_entry_via_package(self):

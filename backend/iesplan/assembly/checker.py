@@ -30,34 +30,18 @@ from iesplan.assembly.context import (
     ensure_ports,
     resolve_model,
     resolve_ports,
-    split_model,
-    to_watts,
     units_compatible,
     yaml_device_ports,
 )
 from iesplan.assembly.rules.constraints import run_constraint_checks
-from iesplan.assembly.schema import (
-    AssemblyDevice,  # noqa: F401 — 重导出兼容(存量测试经 checker 命名空间引用)
-    AssemblyPipeline,  # noqa: F401 — 同上
-    AssemblyPort,  # noqa: F401 — 同上
-    AssemblySpec,
-)
+from iesplan.assembly.schema import AssemblySpec
 from iesplan.core.diagnostics import SEVERITY_BLOCKING, SEVERITY_ERROR, Diagnostic
 from iesplan.core.errors import AppError
-
-# 旧下划线兼容别名(存量调用方经 checker 命名空间引用;新代码一律使用 context 公开名)。
-_split_model = split_model
-_to_watts = to_watts
 
 
 def _port_name(carrier: str, direction: str) -> str:
     """端口命名:in/out 为 "{载体}_{方向}",双向为 "{载体}"。"""
     return f"{carrier}_{direction}" if direction in ("in", "out") else carrier
-
-
-def _default_registry():
-    """兼容入口:委托 context.default_registry(存量测试 monkeypatch 点)。"""
-    return default_registry()
 
 
 def _yaml_device_ports(device, type_id):
@@ -137,7 +121,7 @@ class AssemblyCheckError(AppError):
 
 def _default_context(spec: AssemblySpec | None = None) -> CheckContext:
     """默认检查上下文:注册表快照 + 按 spec 时间轴惰性加载。"""
-    ctx = CheckContext(registry=_default_registry())
+    ctx = CheckContext(registry=default_registry())
     if spec is not None and spec.time_axis is not None:
         ctx.time_axis = {"n": spec.time_axis.steps_per_year, "resolution": spec.time_axis.resolution}
     return ctx
@@ -217,5 +201,4 @@ __all__ = [
     "run_constraint_checks",
     "PIPELINE_MODEL_IDS",
     "PORT_TYPE_TO_CARRIER",
-    "_split_model",
 ]

@@ -25,6 +25,7 @@ from iesplan.assembly import (
     dumps_assembly,
     parse_assembly,
 )
+from iesplan.assembly import context as assembly_context
 from iesplan.assembly.diags import (
     ASM_ALL_CODES,
     ASM_CONST_DIM,
@@ -66,7 +67,7 @@ from iesplan.assembly.diags import (
     ASM_SYN_VERSION,
     make_asm_diag,
 )
-from iesplan.assembly.schema import AssemblySpec
+from iesplan.assembly.schema import AssemblyDevice, AssemblyPort, AssemblySpec
 from iesplan.core.diagnostics import DIAG_FIX_HINT_KEYS, DIAG_MESSAGE_KEYS, NEW_DIAG_CODES
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 from iesplan.devices import list_devices as list_device_types
@@ -995,10 +996,10 @@ class TestBuilder:
             ]
 
         monkeypatch.setattr(checker_mod, "_yaml_device_ports", fake_yaml_ports)
-        dev = checker_mod.AssemblyDevice(
+        dev = AssemblyDevice(
             id="hp1", model="ies.device.heat_pump@2.0.0", params={},
             ports=[
-                checker_mod.AssemblyPort(
+                AssemblyPort(
                     device="hp1", name="electric_in", carrier="electric",
                     direction="in", quantity="power", unit="W", nature="instant",
                     capacity=999.0,
@@ -1116,7 +1117,6 @@ class TestRegistryFallbackBoundary:
 
     def test_uninitialized_registry_blocks_assembly(self, monkeypatch):
         """RR-P2-05: 注册表不可用(门面抛错)时装配直接阻断, 不回退静态表。"""
-        import iesplan.assembly.checker as checker_mod
         from iesplan.core.errors import AppError
 
         def fake_list_devices():
@@ -1126,10 +1126,9 @@ class TestRegistryFallbackBoundary:
             "iesplan.devices.list_devices", fake_list_devices
         )
         with pytest.raises(AppError):  # 不再回退静态表, 直接阻断
-            checker_mod._default_registry()
+            assembly_context.default_registry()
 
     def test_conversion_error_blocks_not_fall_back(self, monkeypatch):
-        import iesplan.assembly.checker as checker_mod
         from iesplan.core.errors import AppError
 
         def fake_list_devices():
@@ -1139,7 +1138,7 @@ class TestRegistryFallbackBoundary:
             "iesplan.devices.list_devices", fake_list_devices
         )
         with pytest.raises(AppError):
-            checker_mod._default_registry()
+            assembly_context.default_registry()
 
     def test_yaml_ports_conversion_error_blocks(self, monkeypatch):
         """RR-P2-05: 端口来源(公开 descriptor)出错时装配阻断, 不静默降级。"""
@@ -1152,7 +1151,7 @@ class TestRegistryFallbackBoundary:
         monkeypatch.setattr(
             "iesplan.devices.get_device", fake_get_device
         )
-        dev = checker_mod.AssemblyDevice(
+        dev = AssemblyDevice(
             id="d1", model="ies.device.pv@2.0.0", params={}, ports=[],
         )
         with pytest.raises(AppError):

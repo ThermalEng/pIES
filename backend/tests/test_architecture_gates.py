@@ -74,23 +74,8 @@ WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
         "_financial_to_dict",
     ): "同域 wrapper 私有财务结果序列化辅助; TODO: 提升为 analysis 公开 API 后移除。",
     ("iesplan.analysis.sensitivity", "_jsonable_kpi"): "同域 wrapper 私有 KPI 可 JSON 化辅助; TODO: 同上。",
-    # ---- assembly 域内部: rules 子包复用 checker/schema 私有工具 ----
-    (
-        "iesplan.assembly.rules.completeness",
-        "_split_model",
-    ): "assembly 域内 rules 复用 checker 私有模型拆分函数; TODO: 提升公开。",
-    (
-        "iesplan.assembly.rules.solvability",
-        "_PEAK_PARAM_BY_LOAD",
-    ): "assembly 域内 rules 复用 checker 私有峰值参数表; TODO: 提升公开。",
-    (
-        "iesplan.assembly.rules.solvability",
-        "_to_watts",
-    ): "assembly 域内 rules 复用 checker 私有单位换算; TODO: 提升公开。",
-    (
-        "iesplan.assembly.checker",
-        "_QUANTITY_DIMS",
-    ): "assembly 域内 checker 复用 schema 私有量纲常量; TODO: 提升公开。",
+    # (Wave 1 集成: assembly 收敛为 parser→context→rules→validator→artifact,
+    #  共享能力经 context 公开, 4 项私有复用已消除, 移除本组。)
     # ---- engines 域内部: planning 复用 eval_run 私有取参函数 ----
     (
         "iesplan.engines.planning",
@@ -419,12 +404,9 @@ WHITELIST_WORKER_SERVICES: set[tuple[str, str]] = {
 # services, 结果分析与计算执行无法分别演进。目标是 analysis 只消费 ComputeResult、
 # ExecutionReceipt 与声明输出。0.8 计算链实现前计算入口保持显式未实现, 不恢复
 # 旧命令注册表或旧机理函数。迁移后逐项移除。
-WHITELIST_ANALYSIS_ENGINE: set[tuple[str, str]] = {
-    ("iesplan.analysis.wrapper", "iesplan.engines.eval_run"),
-    ("iesplan.analysis.wrapper", "iesplan.assembly.plan"),
-    ("iesplan.analysis.sensitivity", "iesplan.services.tasks"),
-    ("iesplan.analysis.sensitivity", "iesplan.services.identity"),
-}
+# (Wave 1 集成: analysis 只消费计算结果/回执/声明输出, engines/services/
+#  assembly.plan 直接依赖已删除, 白名单清空。Worker 侧调用归 Wave 4。)
+WHITELIST_ANALYSIS_ENGINE: set[tuple[str, str]] = set()
 
 # ---------------------------------------------------------------------------
 # 门禁 8: 表归属清单 + 跨表访问白名单 (键 = (访问方模块, models 子模块))
@@ -468,12 +450,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     # (切片 5: services.results 经 results/tasks/project 域门面, 移除 calc/identity/result)
     # ---- project 域 repository 实现（切片 3；唯一允许访问 projects 系表的实现） ----
     ("iesplan.project.persistence", "project"),
-    ("iesplan.services.package", "audit"),
-    ("iesplan.services.package", "calc"),
-    # (切片 5: services.package 经 configuration/results 域门面, 移除 config_revision/result)
-    ("iesplan.services.package", "dataset"),
-    ("iesplan.services.package", "identity"),
-    ("iesplan.services.package", "project"),
+    # (Wave 1 集成: services.package 跨领域读写收敛到域公开门面, 移除 5 项)
     # (切片 8: services.audit 经 audit 域门面, 移除本两项)
     # (切片 4: services.dataset 经 dataset/identity/project 域 repository, 移除 3 项)
     # (切片 9: services.project 经 audit 域门面写审计, 移除本项)
@@ -489,18 +466,11 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     ("iesplan.worker.runner", "project"),
     ("iesplan.worker.runner", "uncertainty"),
     # ---- storage ----
-    # service 的 AuditLog 直写已改由 audit facade(切片 9); 本项仅因 RetentionRule
-    # 仍从 models.audit 导入而保留, 待 storage 域收敛保留规则表后移除。
-    ("iesplan.storage.service", "audit"),
+    # (Wave 1 集成: RetentionRule 经 storage 内部持久化读取, 移除本项)
     # persistence 仅用 common 基元, 无业务表访问, 保留。
     ("iesplan.storage.persistence", "common"),
     # ---- application(目标编排层, 先登记现状; 切片 6 改调领域公开接口) ----
-    ("iesplan.application.model_templates.service", "audit"),
-    ("iesplan.application.model_templates.service", "model_template"),
-    ("iesplan.application.model_templates.service", "draft_revision"),
-    ("iesplan.application.projects.model_save", "audit"),
-    ("iesplan.application.projects.model_save", "project"),
-    ("iesplan.application.projects.model_save", "project_model"),
+    # (Wave 1 集成: model_templates/model_save 改经 model/audit 域门面, 移除 6 项)
     ("iesplan.application.namespace", "identity"),
 }
 
