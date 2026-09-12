@@ -68,19 +68,10 @@ WHITELIST_CORE_BUSINESS_DEPS: dict[tuple[str, int], str] = {}
 #   - 属性访问: 模块别名上的私有属性, 如 config_service._row_to_config。
 # 每条目均需整改: 提升为公开 API 或改为公开等价调用, 整改后移除条目。
 WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
-    # ---- analysis 域内部: wrapper 私有财务/指标辅助, sensitivity 复用 ----
-    (
-        "iesplan.analysis.sensitivity",
-        "_financial_to_dict",
-    ): "同域 wrapper 私有财务结果序列化辅助; TODO: 提升为 analysis 公开 API 后移除。",
-    ("iesplan.analysis.sensitivity", "_jsonable_kpi"): "同域 wrapper 私有 KPI 可 JSON 化辅助; TODO: 同上。",
+    # (Wave 5 集成: analysis 两 wrapper 辅助与 engines eval_run 取参函数已提升
+    #  为公开 API, 移除 3 项; 白名单清空。)
     # (Wave 1 集成: assembly 收敛为 parser→context→rules→validator→artifact,
     #  共享能力经 context 公开, 4 项私有复用已消除, 移除本组。)
-    # ---- engines 域内部: planning 复用 eval_run 私有取参函数 ----
-    (
-        "iesplan.engines.planning",
-        "_param",
-    ): "engines 域内 planning 复用 eval_run 私有运行参数读取; TODO: 提升公开。",
     # worker → analysis 私有穿透已整改(0.6.5): 符号提升为 analysis 公开 API。
     # ---- api → services: API 层直接访问服务私有函数 ----
     # (Wave 3 集成: config._row_to_config 私有访问随 calc_config 用例消除;
