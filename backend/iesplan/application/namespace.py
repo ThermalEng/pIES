@@ -42,13 +42,3 @@ def ensure_public_namespace(db: Session, user) -> str:
                 return str(user.public_namespace)
             continue
     raise RuntimeError("无法分配唯一的 public_namespace（多次碰撞）")
-
-
-def get_or_allocate_namespace(db: Session, user_id: int) -> str:
-    """按用户 ID 分配/读取命名空间（供离线迁移或后台任务使用）。"""
-    from iesplan.models.identity import User
-
-    user = db.get(User, user_id)
-    if user is None:
-        raise ValueError(f"用户 {user_id} 不存在")
-    return ensure_public_namespace(db, user)
