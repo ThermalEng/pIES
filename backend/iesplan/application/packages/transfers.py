@@ -25,29 +25,15 @@ from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.configuration.revisions import (
     get_effective_finance_config as _get_effective_finance_config,
-)
-from iesplan.application.configuration.revisions import (
     get_finance_overrides as _get_finance_overrides,
-)
-from iesplan.application.configuration.revisions import (
     get_planning_config as _get_planning_config,
-)
-from iesplan.application.configuration.revisions import (
     register_finance_profile as _register_finance_profile,
-)
-from iesplan.application.configuration.revisions import (
     save_finance_overrides as _save_finance_overrides,
-)
-from iesplan.application.configuration.revisions import (
     save_planning_config as _save_planning_config,
-)
-from iesplan.application.configuration.revisions import (
     set_project_finance_profile as _set_project_finance_profile,
 )
 from iesplan.application.projects.content_objects import (
     load_content_object as _load_content_object,
-)
-from iesplan.application.projects.content_objects import (
     store_content_object as _store_content_object,
 )
 from iesplan.core.contracts import (
@@ -58,9 +44,7 @@ from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.jsonutil import jsonable
 from iesplan.core.yamlmini import dump as yaml_dump
-from iesplan.finance import (
-    FinanceOverrides,
-)
+from iesplan.finance import FinanceOverrides, FinanceProfile
 from iesplan.identity.contracts import UserRecord
 from iesplan.package import (
     DOWNLOAD_TOKEN_TTL_SECONDS,
@@ -87,9 +71,8 @@ from iesplan.package.contracts import ImportProposalRecord
 from iesplan.project.contracts import DraftRecord, ProjectRecord, ProjectVersionRecord
 from iesplan.storage import add_ref, get_object, object_info, put_object
 
-AUDIT_PROJECT_EXPORTED = "project.exported"
-AUDIT_PROJECT_IMPORT_PROPOSED = "import.proposal_created"
-AUDIT_PROJECT_IMPORTED = "project.imported"
+#: 审计动作常量唯一所有者为 ``iesplan.audit`` 域门面(下文经 ``audit_domain``
+#: 引用, 本层不复制)。
 
 
 def _audit_entry(
@@ -259,9 +242,7 @@ def _build_package_zip(
                     params={"project_id": project.id},
                 )
             # 精确恢复(禁止 latest 猜测漂移)
-            from iesplan.finance import FinanceProfile as _FP
-
-            profile = _FP.from_dict(profile_row.content)
+            profile = FinanceProfile.from_dict(profile_row.content)
             profile_raw = yaml_dump(profile.to_dict()).encode("utf-8")
             _add("finance_profile.yaml", profile_raw, "application/yaml")
             zf.writestr("finance_profile.yaml", profile_raw)
@@ -486,7 +467,7 @@ def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExp
     _audit_entry(
         db,
         user.id,
-        AUDIT_PROJECT_EXPORTED,
+        audit_domain.AUDIT_PROJECT_EXPORTED,
         "project",
         project.id,
         revision=draft.revision,
@@ -665,7 +646,7 @@ def import_proposal(
     _audit_entry(
         db,
         user.id,
-        AUDIT_PROJECT_IMPORT_PROPOSED,
+        audit_domain.AUDIT_PROJECT_IMPORT_PROPOSED,
         "import_proposals",
         proposal.id,
         result={"project_id": project.id, "source_object_id": source_obj.id, "staged_objects": len(staged)},
@@ -963,7 +944,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
     _audit_entry(
         db,
         user.id,
-        AUDIT_PROJECT_IMPORTED,
+        audit_domain.AUDIT_PROJECT_IMPORTED,
         "project",
         project.id,
         revision=1,
@@ -1264,7 +1245,7 @@ def export_excel(
     _audit_entry(
         db,
         user.id,
-        AUDIT_PROJECT_EXPORTED,
+        audit_domain.AUDIT_PROJECT_EXPORTED,
         "project",
         project.id,
         result={"kind": "excel", "evidence_package_id": evidence.id, "assessment_id": assessment.id},

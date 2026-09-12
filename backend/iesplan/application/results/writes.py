@@ -36,7 +36,7 @@ from iesplan.application.tasks.submissions import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.jsonutil import canonical_json
-from iesplan.engines.planning import CAPACITY_PARAM
+from iesplan.engines.eval_run import CAPACITY_PARAM
 from iesplan.identity.contracts import UserRecord
 from iesplan.metrics import validity
 from iesplan.metrics.financial import IRRStatus

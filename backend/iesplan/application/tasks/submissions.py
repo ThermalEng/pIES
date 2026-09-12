@@ -28,7 +28,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
@@ -42,6 +42,11 @@ from iesplan import tasks as tasks_domain
 from iesplan.application.projects import versions as project_versions
 from iesplan.application.projects.content_objects import (
     load_content_object,
+)
+from iesplan.assembly import (
+    AssemblyValidationError,
+    ValidatedAssemblyArtifact,
+    validate_project_export,
 )
 from iesplan.config import settings
 from iesplan.core.diagnostics import (
@@ -69,9 +74,6 @@ from iesplan.tasks.contracts import (
     TaskAttemptRecord,
     TaskRecord,
 )
-
-if TYPE_CHECKING:
-    from iesplan.assembly import ValidatedAssemblyArtifact
 
 # ---------------------------------------------------------------------------
 # 常量: 任务类型 / 池 / 状态机(与 services.tasks 同值, 复制不改语义)
@@ -431,8 +433,6 @@ def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) 
     """
     if task_type not in COMPUTE_TYPES:
         raise InvalidRequestError("仅计算类任务可装配计算快照", params={"task_type": task_type})
-    from iesplan.assembly import AssemblyValidationError, validate_project_export
-
     export_content = dict(content)
     export_content.setdefault("graph_id", project_id)
     export_content.setdefault("name", f"project_{project_id}")
