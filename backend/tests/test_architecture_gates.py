@@ -102,22 +102,16 @@ WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
     ("iesplan.api.admin", 35): frozenset({"User"}),
     ("iesplan.api.admin", 36): frozenset({"AdminMaintenanceAction"}),
     # ---- health.py: 健康检查直接计数 ORM ----
-    ("iesplan.api.health", 26): frozenset({"Task"}),
-    ("iesplan.api.health", 27): frozenset({"User"}),
-    ("iesplan.api.health", 28): frozenset({"Project"}),
+    # (Wave 4 集成: health 改经 application.health 只读探针, 移除 3 项)
     # ---- results.py: 结果查询任务状态与校验正则 ----
     # (切片 5: assess 端点经 tasks_service.ensure_task_belongs 取任务, 移除 Task)
     # (Wave 3 集成: results.py 改经 application 用例, HASH64_RE 直引已消除)
 
-    # ---- limits.py: 配额统计函数内局部导入(非模块顶层) ----
-    ("iesplan.api.limits", 260): frozenset({"Dataset", "DatasetFile", "DatasetVersion"}),
-    ("iesplan.api.limits", 276): frozenset({"Project"}),
-    # ---- auth.py: 认证/会话 ORM ----
-    ("iesplan.api.auth", 28): frozenset({"User", "WindowSession"}),
-    # ---- objects.py: 对象归属校验 ORM ----
-    ("iesplan.api.objects", 28): frozenset({"User"}),
+    # (Wave 4 集成: limits 配额统计收敛到 datasets.quotas, auth 会话取数收敛到
+    #  identity 门面, objects 归属校验收敛到 application.objects, 移除 4 项)
     # ---- tasks.py: 幂等键校验正则常量 ----
-    ("iesplan.api.tasks", 25): frozenset({"IDEMPOTENCY_KEY_RE"}),
+    ("iesplan.api.tasks", 26): frozenset({"IDEMPOTENCY_KEY_RE"}),
+    # (Wave 3 集成: import 排序归位, 该行由 25 移至 26)
 }
 
 #: iesplan.db 中禁止 api 直接导入的 ORM 会话符号(get_db 依赖注入本身合法, 不在列)
@@ -317,15 +311,8 @@ def test_api_no_direct_orm_imports():
 # 后续切片按资源域迁移到 application 用例后逐条移除; 白名单清空后硬强制。
 WHITELIST_API_COMMIT: set[tuple[str, int]] = {
     ("iesplan.api.admin", 253),
-    # (切片 4: get_auth_context 会话写入收敛到 services, 移除 230/240/249 三处提交)
-    ("iesplan.api.auth", 568),
-    ("iesplan.api.auth", 639),
-    ("iesplan.api.auth", 647),
-    ("iesplan.api.objects", 139),
-    ("iesplan.api.objects", 172),
-    ("iesplan.api.objects", 188),
-    # (Wave 3 集成: tasks/datasets/validation/projects/config_revisions/
-    #  exports/results 的路由层提交已随 application 迁移消除, 移除 26 条)
+    # (Wave 4 集成: auth 会话写入与 objects 对象操作已收敛到 application 用例,
+    #  移除 auth 3 条与 objects 3 条; 仅剩 admin 运维解锁 1 条, 归 Wave 5)
 }
 
 # ---------------------------------------------------------------------------
@@ -334,11 +321,8 @@ WHITELIST_API_COMMIT: set[tuple[str, int]] = {
 # 基线核查(2026-09-11, 切片 1): 以下 api 模块同时依赖 2~3 个 services 子模块,
 # 即在路由层组织跨 service 业务流程。目标是每个端点只调用一个 application 用例
 # (model_templates/project_models 已示范该方向)。迁移一个模块就从本集合移除一项。
-WHITELIST_API_FANOUT: set[str] = {
-    "iesplan.api.auth",  # application.identity + services.project + services.external_auth
-    # (Wave 3 集成: tasks/model/config/admin/datasets/validation/projects/
-    #  config_revisions/results 已只经 application 门面, 移除 9 项)
-}
+WHITELIST_API_FANOUT: set[str] = set()
+# (Wave 4 集成: auth 改经 application.identity 单门面, 白名单清空。)
 
 # ---------------------------------------------------------------------------
 # 门禁 6 白名单: worker → services 直接依赖 (键 = (worker 模块, services 目标))
