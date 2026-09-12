@@ -32,7 +32,7 @@ from iesplan.db import get_db
 from iesplan.devices import DeviceModelDocument, list_devices
 from iesplan.devices.contracts2 import PropertySpec
 from iesplan.application import models as svc
-from iesplan.services import project as project_service
+from iesplan.application.projects.lifecycle import ensure_access
 
 #: 设备类型注册表(公开, 前端画布取设备面板与参数表单 schema)
 registry_router = APIRouter(prefix="/api", tags=["registry"])
@@ -149,7 +149,7 @@ def device_types_public() -> dict[str, Any]:
 @model_router.get("", summary="获取项目系统图(设备+端口+连接+布局)")
 def get_model_graph(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """读取项目工作图: 拓扑(设备/端口/连接)与画布布局对象(需项目 view 能力)。"""
-    project_service.ensure_access(db, user, project_id, "view")
+    ensure_access(db, user, project_id, "view")
     return svc.get_graph(db, project_id)
 
 
@@ -166,7 +166,7 @@ def create_device(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """创建设备: 校验注册表类型与参数, 按载体生成端口, 返回设备与端口(需 edit)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     device = svc.create_device(
         db,
         project_id,
@@ -191,7 +191,7 @@ def update_device(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """更新设备名称/参数/位置(仅更新提供的字段; 参数重新按注册表校验; 需 edit)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     device = svc.update_device(
         db,
         project_id,
@@ -211,7 +211,7 @@ def delete_device(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """删除设备及其端口与关联连接(需项目 edit 能力)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     svc.delete_device(db, project_id, device_id)
     return {"ok": True, "deleted": device_id}
 
@@ -229,7 +229,7 @@ def create_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """创建连接: 校验能源类型一致/方向兼容/同项目/无重复, 失败返回带定位的诊断(需 edit)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     conn = svc.connect(db, project_id, body.from_port_id, body.to_port_id, attrs=body.attrs)
     return {"connection": svc.serialize_connection(conn)}
 
@@ -243,7 +243,7 @@ def update_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """更新连接属性(capacity/loss_rate/params; 需项目 edit 能力)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     conn = svc.update_connection(db, project_id, conn_id, body.attrs)
     return {"connection": svc.serialize_connection(conn)}
 
@@ -256,7 +256,7 @@ def delete_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """删除连接(需项目 edit 能力)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     svc.disconnect(db, project_id, conn_id)
     return {"ok": True, "deleted": conn_id}
 
@@ -269,6 +269,6 @@ def delete_connection(
 @model_router.get("/validate", summary="模型校验(拓扑+参数诊断)")
 def validate_model(project_id: int, db: DbSession, user: CurrentUser) -> dict[str, Any]:
     """返回拓扑与参数诊断列表(错误/警告, 含对象定位, 04 §5.4 结构; 需项目 view 能力)。"""
-    project_service.ensure_access(db, user, project_id, "view")
+    ensure_access(db, user, project_id, "view")
     diags = svc.validate_project_model(db, project_id)
     return {"diagnostics": [d.to_dict() for d in diags]}
