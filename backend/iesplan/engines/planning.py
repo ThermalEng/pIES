@@ -28,8 +28,8 @@ from iesplan.core.timeaxis import TimeAxis
 from iesplan.engines.eval_run import (
     CAPACITY_PARAM,
     MAX_CAPACITY_PARAM,
-    _param,
     evaluate_plan,
+    param,
 )
 from iesplan.metrics.financial import (
     IRRStatus,
@@ -106,7 +106,7 @@ class PlanningResult:
 
 def _capacity_grid(type_id: str, dev: dict, step: float | None) -> np.ndarray:
     """单个新增设备的容量离散网格(含 0 = 不建设)。"""
-    max_cap = _param(dev, MAX_CAPACITY_PARAM[type_id], 0.0)
+    max_cap = param(dev, MAX_CAPACITY_PARAM[type_id], 0.0)
     if max_cap <= 0:
         return np.array([0.0])
     if step is None or step <= 0:

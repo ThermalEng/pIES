@@ -23,7 +23,7 @@ from iesplan.engines.devices import (
     pv_output,
     simulate_battery,
 )
-from iesplan.engines.eval_run import EvalResult, evaluate_plan
+from iesplan.engines.eval_run import EvalResult, evaluate_plan, param
 from iesplan.engines.planning import PlanCandidate, PlanningResult, run_planning
 from iesplan.engines.solver import SolveResult, solve_lp, solve_milp
 
@@ -44,6 +44,7 @@ __all__ = [
     "simulate_battery",
     "evaluate_plan",
     "EvalResult",
+    "param",
     "run_planning",
     "PlanCandidate",
     "PlanningResult",

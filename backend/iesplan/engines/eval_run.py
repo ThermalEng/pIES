@@ -145,7 +145,7 @@ def _find_device(plan: dict, type_id: str) -> dict | None:
     return None
 
 
-def _param(dev: dict | None, name: str, default: float) -> float:
+def param(dev: dict | None, name: str, default: float) -> float:
     """设备参数取值(缺失时用默认值)。"""
     if dev is None:
         return default
@@ -404,11 +404,11 @@ def evaluate_plan(
     boiler_dev = _find_device(plan, T_BOILER)
     chiller_dev = _find_device(plan, T_CHILLER)
 
-    has_battery = bat_dev is not None and _param(bat_dev, "capacity_kwh", 0.0) > 0
-    has_hp = hp_dev is not None and _param(hp_dev, "rated_heat_kw", 0.0) > 0
-    has_boiler = boiler_dev is not None and _param(boiler_dev, "rated_heat_kw", 0.0) > 0
-    has_chiller = chiller_dev is not None and _param(chiller_dev, "rated_cooling_kw", 0.0) > 0
-    has_pv = pv_dev is not None and _param(pv_dev, "rated_capacity_kwp", 0.0) > 0
+    has_battery = bat_dev is not None and param(bat_dev, "capacity_kwh", 0.0) > 0
+    has_hp = hp_dev is not None and param(hp_dev, "rated_heat_kw", 0.0) > 0
+    has_boiler = boiler_dev is not None and param(boiler_dev, "rated_heat_kw", 0.0) > 0
+    has_chiller = chiller_dev is not None and param(chiller_dev, "rated_cooling_kw", 0.0) > 0
+    has_pv = pv_dev is not None and param(pv_dev, "rated_capacity_kwp", 0.0) > 0
 
     hp_mode = _str_param(hp_dev, "mode", "both") if has_hp else "none"
     if hp_mode == "cooling_heating_combo":
@@ -432,9 +432,9 @@ def evaluate_plan(
     forbid_reverse = not bool(plan.get("reverse_feed_allowed", False))
     diagnostics: list[dict] = []
     if grid_dev is not None:
-        c_import_w = _param(grid_dev, "max_import_power_kw", 0.0) * 1000.0
-        c_export_w = _param(grid_dev, "max_export_power_kw", 0.0) * 1000.0
-        export_tariff = _param(grid_dev, "export_tariff", -1.0)
+        c_import_w = param(grid_dev, "max_import_power_kw", 0.0) * 1000.0
+        c_export_w = param(grid_dev, "max_export_power_kw", 0.0) * 1000.0
+        export_tariff = param(grid_dev, "export_tariff", -1.0)
     else:
         c_import_w = float("inf")
         c_export_w = 0.0
@@ -448,7 +448,7 @@ def evaluate_plan(
         diagnostics.append(
             _diag("ENG-NOTE-001", "info", "ies.diag.eng.reverse_feed_forbidden")
         )
-    demand_charge = _param(grid_dev, "demand_charge", 0.0)
+    demand_charge = param(grid_dev, "demand_charge", 0.0)
     if grid_dev is not None and demand_charge > 0:
         diagnostics.append(
             _diag("ENG-NOTE-002", "info", "ies.diag.eng.demand_charge_not_modeled",
@@ -461,7 +461,7 @@ def evaluate_plan(
         tariff_sell = np.full(n, float(export_tariff))
     else:
         tariff_sell = _resolve_tariff(data, n, "tariff_sell", 0.35)
-    gas_price = float(_param(boiler_dev, "gas_price", -1.0))
+    gas_price = float(param(boiler_dev, "gas_price", -1.0))
     if gas_price < 0:
         gas_price = float(data.get("gas_price", 3.2))
     eff_grid = float(data.get("emission_factor_grid", 0.581))
@@ -473,17 +473,17 @@ def evaluate_plan(
     # 设备参数(02 §4)
     pv_avail = np.zeros(n)
     if has_pv:
-        cap_w = _param(pv_dev, "rated_capacity_kwp", 0.0) * 1000.0
-        eff_pv = _param(pv_dev, "efficiency", DEFAULT_PV_EFFICIENCY)
+        cap_w = param(pv_dev, "rated_capacity_kwp", 0.0) * 1000.0
+        eff_pv = param(pv_dev, "efficiency", DEFAULT_PV_EFFICIENCY)
         pv_avail = pv_output(
             ghi, cap_w, temperature,
             eff=eff_pv,
-            temp_coeff=_param(pv_dev, "temp_coeff", DEFAULT_TEMP_COEFF),
-            tilt=_param(pv_dev, "tilt_deg", 30.0),
-            azimuth=_param(pv_dev, "azimuth_deg", 180.0),
-            noct=_param(pv_dev, "noct", DEFAULT_NOCT),
+            temp_coeff=param(pv_dev, "temp_coeff", DEFAULT_TEMP_COEFF),
+            tilt=param(pv_dev, "tilt_deg", 30.0),
+            azimuth=param(pv_dev, "azimuth_deg", 180.0),
+            noct=param(pv_dev, "noct", DEFAULT_NOCT),
         )
-        p_inv_w = _param(pv_dev, "inverter_capacity_kw", 0.0) * 1000.0
+        p_inv_w = param(pv_dev, "inverter_capacity_kw", 0.0) * 1000.0
         if p_inv_w <= 0:
             p_inv_w = cap_w
         pv_avail = np.minimum(pv_avail, p_inv_w)
@@ -496,14 +496,14 @@ def evaluate_plan(
     p_ch_max = 0.0
     p_dis_max = 0.0
     if has_battery:
-        e_cap_kwh = _param(bat_dev, "capacity_kwh", 0.0)
+        e_cap_kwh = param(bat_dev, "capacity_kwh", 0.0)
         e_cap_j = e_cap_kwh * KWH_TO_J
-        eta_ch = _param(bat_dev, "charge_efficiency", 0.95)
-        eta_dis = _param(bat_dev, "discharge_efficiency", 0.95)
-        soc_min = _param(bat_dev, "min_soc", DEFAULT_SOC_MIN)
-        soc_max = _param(bat_dev, "max_soc", DEFAULT_SOC_MAX)
-        soc0 = _param(bat_dev, "initial_soc", 0.5)
-        p_rated_kw = _param(bat_dev, "rated_power_kw", 0.0)
+        eta_ch = param(bat_dev, "charge_efficiency", 0.95)
+        eta_dis = param(bat_dev, "discharge_efficiency", 0.95)
+        soc_min = param(bat_dev, "min_soc", DEFAULT_SOC_MIN)
+        soc_max = param(bat_dev, "max_soc", DEFAULT_SOC_MAX)
+        soc0 = param(bat_dev, "initial_soc", 0.5)
+        p_rated_kw = param(bat_dev, "rated_power_kw", 0.0)
         if p_rated_kw <= 0:
             p_rated_kw = e_cap_kwh  # 默认 1C 充放倍率
         p_ch_max = p_rated_kw * 1000.0
@@ -513,8 +513,8 @@ def evaluate_plan(
     cop_h = np.full(n, 0.0)
     cop_c = np.full(n, 0.0)
     if has_hp:
-        hp_cap_w = _param(hp_dev, "rated_heat_kw", 0.0) * 1000.0
-        cop_const = _param(hp_dev, "cop", 3.2)
+        hp_cap_w = param(hp_dev, "rated_heat_kw", 0.0) * 1000.0
+        cop_const = param(hp_dev, "cop", 3.2)
         hp_params = hp_dev.get("params", {})
         profile = hp_params.get("cop_profile")
         # COP 序列优先级:显式 cop_profile > 温度卡诺近似(有温度数据时) > 常数 cop
@@ -533,12 +533,12 @@ def evaluate_plan(
             if hp_mode in ("heating", "both"):
                 cop_h = heat_pump_cop(
                     temperature, "heating",
-                    cop_min=_param(hp_dev, "cop_min", 2.0), cop_max=_param(hp_dev, "cop_max", 5.5),
+                    cop_min=param(hp_dev, "cop_min", 2.0), cop_max=param(hp_dev, "cop_max", 5.5),
                 )
             if hp_mode in ("cooling", "both"):
                 cop_c = heat_pump_cop(
                     temperature, "cooling",
-                    cop_min=_param(hp_dev, "cop_cool_min", 2.5), cop_max=_param(hp_dev, "cop_cool_max", 6.5),
+                    cop_min=param(hp_dev, "cop_cool_min", 2.5), cop_max=param(hp_dev, "cop_cool_max", 6.5),
                 )
         else:
             # 无温度数据:常数 COP(P1,02 §4.5 回归式退化为常数)
@@ -558,16 +558,16 @@ def evaluate_plan(
     lhv_j = DEFAULT_LHV_J_PER_M3
     boiler_gas_max_w = 0.0
     if has_boiler:
-        boiler_eta = _param(boiler_dev, "thermal_efficiency", DEFAULT_BOILER_EFFICIENCY)
-        lhv_j = _param(boiler_dev, "lhv_kj_per_m3", DEFAULT_LHV_J_PER_M3 / 1000.0) * 1000.0
-        boiler_cap_w = _param(boiler_dev, "rated_heat_kw", 0.0) * 1000.0
+        boiler_eta = param(boiler_dev, "thermal_efficiency", DEFAULT_BOILER_EFFICIENCY)
+        lhv_j = param(boiler_dev, "lhv_kj_per_m3", DEFAULT_LHV_J_PER_M3 / 1000.0) * 1000.0
+        boiler_cap_w = param(boiler_dev, "rated_heat_kw", 0.0) * 1000.0
         boiler_gas_max_w = boiler_cap_w / boiler_eta
 
     chiller_cop = DEFAULT_CHILLER_COP
     chiller_elec_max_w = 0.0
     if has_chiller:
-        chiller_cop = _param(chiller_dev, "cop", DEFAULT_CHILLER_COP)
-        chiller_cap_w = _param(chiller_dev, "rated_cooling_kw", 0.0) * 1000.0
+        chiller_cop = param(chiller_dev, "cop", DEFAULT_CHILLER_COP)
+        chiller_cap_w = param(chiller_dev, "rated_cooling_kw", 0.0) * 1000.0
         chiller_elec_max_w = chiller_cap_w / chiller_cop
 
     # ------------------------------------------------------------------
