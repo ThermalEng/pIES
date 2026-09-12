@@ -1,9 +1,116 @@
 # 架构解耦重构临时工作指导
 
-> 状态：临时工作文件，仅适用于 `0.8.0` 开发开始前的解耦重构窗口。
+> 状态：临时工作文件；`fe3d83b` 审查未通过，当前用于 `0.8.0` 开发前的解耦纠偏。
 >
 > 本文件不是宪法、开发者指南或长期契约；与现行宪法、公开契约冲突时无效。
 > 重构完成并通过最终审阅后删除，不作为后续功能设计依据。
+
+## `fe3d83b` 审查裁决与纠偏目标
+
+`fe3d83b` 完成了 API/Worker 表面入口迁移、analysis 执行解耦和 assembly 私有穿透清理，但不是本文定义的最终解耦结果。此前的“Wave 1–5 已完成”和 100% goal 状态已被本次审查否定；后续不得以它们作为停止条件。
+
+审查确认的实际偏离如下：
+
+1. 至少 16 个 application 文件仍导入 `iesplan.services`，多个所谓用例只是直调旧 service 的薄包装。
+2. application 通过 `sa.table("...")` 重新声明表名和列名，以避开 ORM import 门禁；这仍是穿透 persistence，而且制造了第二份数据库结构。
+3. Worker 仍有 commit/rollback，任务尝试的事务所有权没有完整上收到 application.worker。
+4. 旧 `services` 仍约万行，部分业务又被复制进 application，形成两套实现和双重修改点。
+5. 现有门禁只检查 import 形态，无法发现 application 裸 SQL/表定义、Worker 事务和 application→services；且 API/cross-model 白名单并未实际清空。
+6. `test_full_business_chain` 中，旧计算链的 `NotImplementedError` 被回滚后的租约丢失错误地报告为 `lease_rejected`，真实失败原因被遮蔽。
+7. storage 仍反向调用 audit，与本次已确定的“业务审计由 application 编排”目标不一致。
+8. 收尾记录声称本文已删除，但文件仍存在；roadmap/changelog 也没有基于真实完成事实更新。
+
+本轮的最终结果不是继续加 wrapper，而是把已有业务实现收敛到唯一拥有者：
+
+```text
+API/Worker → application 用例 → 领域公开门面 → 该领域 persistence
+```
+
+完成时必须同时满足：
+
+- application 对 `iesplan.services` 的生产代码导入为零；
+- application 不声明或按名访问业务表，不导入其他领域的 persistence/repository 内部实现；
+- Worker 不调用 commit/rollback，完整任务尝试由 application.worker 用例拥有事务；
+- 每项领域规则、常量、映射、表定义和序列化只有一个权威实现；
+- 旧 `services` 的全部生产调用方已迁移，无调用文件立即删除，不保留转发、别名或“只读兼容”；
+- 计算尚未实现时，必须显式返回真实的结构化失败，不得被租约或内部异常遮蔽；
+- Docker 全量测试零失败，不使用 skip/xfail/白名单隐藏本轮未完成项。
+
+## `fe3d83b` 后的纠偏波次
+
+以 `fe3d83b` 为审查基线，只补完未完成部分，不回退已正确的 API、analysis 和 assembly 收敛。仍采用“波次内最多 3 个独立 worktree 并行、波次间串行集成”，但必须先画出真实 DAG 和文件归属，不得为凑并行度拆散同一事务。
+
+### Correction Wave 0：补齐可信门禁
+
+由协调者串行完成并独立提交：
+
+1. 新增 application 禁止导入 `iesplan.services`、`iesplan.models`、领域内部 `persistence/repository/loader` 的门禁。
+2. 新增 application 禁止 `sa.table/Table/text`、裸表名列名和直接 SQL DML 的门禁；领域 persistence 实现不受该禁止。
+3. 新增 Worker 禁止 commit/rollback 以及 services/models/裸 SQL 的门禁。
+4. 所有临时迁移集合都必须与实际检测结果精确相等：既不漏报，也不允许过期项留在集合里冒充“已清空”。
+5. 门禁可以在纠偏过程中使用命名明确的临时债务基线，但必须列出每项真实违规和责任切片；最终验收时全部为空。
+
+本波次的目的是让门禁如实显示当前债务，而不是通过放宽规则继续保持绿色。
+
+### Correction Wave 1：领域垂直收敛
+
+协调者在启动子任务前必须用 `rg` 建立 service 符号→真实调用方清单，然后按互不重叠文件集动态分组。每个纵向切片必须在同一分支内完成“唯一领域实现 → application 调用方迁移 → 旧 service 符号删除”闭环，不得提交临时 service 转发层或两份实现。建议队列：
+
+- **C1-Task/Result/Queue**：由 tasks/results 领域 persistence 接管租约、槽、attempt、result index、sample task 及队列公开能力；删除 application.worker 中的裸表。
+- **C1-Project/Model**：将 project/model/template/draft/project-model 的规则和 persistence 收敛到各自领域公开面；去掉 application 对 `services.project` 的依赖和重复实现。
+- **C1-Configuration/Dataset**：将 config/config-revision/dataset 的权威规则、序列化和 persistence 归回 configuration/dataset；不在 application 保留从 service 复制的映射和校验表。
+- **C1-Identity/Audit/Package/Storage**：将 external-auth、audit、package 和 storage 相关实现收敛到对应领域。普通业务审计由 application 在用例成功路径编排，storage 不导入 audit。
+
+并行时不得让两个子任务同时修改 application 公共入口、架构门禁、启动组装或同一 service。若两个领域存在强事务耦合，合并为一个纵向切片，不通过中间兼容包装强行并行。
+
+### Correction Wave 2：跨领域 application 编排收敛
+
+只在 Wave 1 的相关垂直切片已合并后，处理因跨领域事务而不能在单领域切片中完成的用例。可按下列互不重叠的用例族并行：
+
+- projects/models/configuration/datasets/validations；
+- tasks/results/packages/audits；
+- identity/health/objects/application.worker。
+
+每个 application 函数只负责一个完整用例：输入 DTO、权限、跨领域调用顺序、事务和输出 DTO。它不拥有领域映射、表结构、序列化真相或持久化查询。
+
+禁止以下做法：
+
+- 新增“薄包装”仅转调 service；
+- 把 service 整段复制进 application 后保留两份；
+- 在 application 内复制正则、设备/载体映射、状态机、单位表、错误类或数据库列；
+- 用延迟导入、别名重导出或捕获异常回退到旧 service。
+
+每完成一个用例族，必须在同一切片中删除已无调用的 service 符号或整个 service 文件，不留到“以后再清”。
+
+### Correction Wave 3：Worker 事务与可见失败
+
+本波次由一个写代理串行完成，避免 lease/runner/application.worker 的同一事务链被拆散：
+
+1. `worker` 只调用 application.worker 公开用例，不接收或操作领域记录，不 commit/rollback。
+2. application.worker 通过 tasks/results/dataset/project/storage 公开门面执行快照读取、租约和结果提交，不声明裸表。
+3. 任务领取必须在后续执行回滚之前形成正确可见的租约/尝试状态；执行未实现或异常时，失败收拢不得被误判为 lease rejected。
+4. 不实现 0.8 计算业务。将旧全链测试拆为“任务提交/快照/预检正常”和“当前计算入口显式不可用且错误码正确”两类断言，删除对已不存在的 1.0 真实求解的期待。
+5. 使用现有结构化错误语义；只有在公开契约确实无合适错误码时，才增加一个最小、专用的错误码。
+
+### Correction Wave 4：全局删除与真实收尾
+
+本波次串行执行：
+
+1. 证明生产代码对 `iesplan.services` 零导入，删除剩余 services 文件、重导出、复制常量和过期测试缝线。
+2. 将 API 的 `models.common` 常量移到真正的 core/领域公开所有者，删除 API ORM 豁免。
+3. 所有迁移债务集合必须为空；仅能保留门禁语义上明确的同领域 persistence 归属声明，不能把它命名为白名单。
+4. storage 删除 audit 导入和 `_audit` 编排；需要审计的公开业务用例在 application 成功路径记录。
+5. 修正或取消 `fe3d83b` 的错误“已完成”收尾记录；在真正验收前不更新 roadmap/changelog 为完成。
+6. Docker 中运行架构门禁、相关切片测试和一次全量测试，要求零失败；清理本轮非基础镜像。
+7. 最终 review 通过后，根据真实事实更新 roadmap/changelog，删除本临时文件，提交收尾并确认工作树干净。
+
+### 纠偏期间的协作和提交规则
+
+- Muse 主会话仍是唯一集成协调者；子代理不修改中央门禁、application `__init__`、启动组装、migration、roadmap/changelog、本文或收尾记录。
+- 每个子任务从当前纠偏波次的同一已集成 HEAD 创建独立 worktree/branch，只修改已分配文件，自行 review 和 Docker 聚焦测试后提交。
+- 协调者不盲目合并：每个提交先检查依赖方向、责任归属、重复实现和事务语义，再顺序合并；波次合并后重跑门禁。
+- 一个切片不得通过增加 wrapper、复制实现、放宽门禁、无当前契约依据地改弱测试期望，或保留旧调用方来自证完成。
+- 每个提交报告必须列出：被删除的 service 符号/裸表/跨层事务，新的唯一所有者，仍存在的调用方，Docker 验证，提交 hash。
 
 ## 目标
 
