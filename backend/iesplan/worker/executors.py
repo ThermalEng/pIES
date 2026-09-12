@@ -35,6 +35,7 @@ import numpy as np
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
+from iesplan.application import worker as worker_app
 from iesplan.core.diagnostics import TASK_SOLVE_FAILED
 from iesplan.core.jsonutil import jsonable
 from iesplan.engines.eval_run import EvalResult
@@ -110,10 +111,8 @@ class RunContext:
 
 
 def _cancel_signal(task_id: int) -> bool:
-    """读取取消信号(Redis cancel:{task_id}, 可重建视图)。"""
-    from iesplan.services import queue  # 延迟导入避免模块环
-
-    return queue.get_cancel(task_id) is not None
+    """读取取消信号(Redis cancel:{task_id}, 可重建视图; 经 application.worker 用例)。"""
+    return worker_app.cancel_requested(task_id)
 
 
 # ---------------------------------------------------------------------------
@@ -359,8 +358,6 @@ def _store_hourly_refs(ctx: RunContext, flows: dict[str, Any]) -> list[dict]:
     结果视图/逐时查询(read_hourly)以 hourly_refs 为引用入口读取对象内容;
     证据内容本身仍保留 flows 全文(自足, 校验/审计可独立复核)。
     """
-    from iesplan.storage import put_object
-
     n = int(ctx.axis_n or 0)
     doc = {
         "data": {name: np.asarray(arr, dtype=float).tolist() for name, arr in flows.items()},
@@ -368,13 +365,13 @@ def _store_hourly_refs(ctx: RunContext, flows: dict[str, Any]) -> list[dict]:
                  "unit": "W(W) / kWh(energy) / 0-1(ratio)"},
     }
     blob = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    obj = put_object(
+    object_id = worker_app.store_worker_object(
         ctx.db, blob, "application/json", source_category="evidence",
         purpose="hourly_result", actor_id=ctx.task.requested_by,
     )
     return [{
         "solution_id": 0,
-        "object_id": obj.id,
+        "object_id": object_id,
         "rows": n,
         "fields": sorted(flows),
     }]
@@ -433,10 +430,8 @@ def _assess_eval(
 
 
 def _outcome_from_solver(solver_status: str) -> str:
-    """求解器状态 → 业务结局（复用任务业务结局映射）。"""
-    from iesplan.services.tasks import map_business_outcome
-
-    return map_business_outcome(solver_status)
+    """求解器状态 → 业务结局（经 application.worker 用例复用任务业务结局映射）。"""
+    return worker_app.map_business_outcome(solver_status)
 
 
 # ---------------------------------------------------------------------------
@@ -969,9 +964,7 @@ def execute_check(ctx: RunContext) -> dict:
 
 def _load_evidence_payload(db: Session, package: EvidencePackage) -> dict:
     """读取证据包对象内容并解析（按对象 id 读取，解析失败抛错）。"""
-    from iesplan.storage import get_object
-
-    raw = get_object(db, package.object_id)
+    raw = worker_app.load_worker_object(db, package.object_id)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:

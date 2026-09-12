@@ -23,8 +23,7 @@ from sqlalchemy.orm import Session
 from iesplan.api.auth import CurrentUser
 from iesplan.db import get_db
 from iesplan.models.common import IDEMPOTENCY_KEY_RE
-from iesplan.services import project as project_service
-from iesplan.services import tasks as tasks_service
+from iesplan.application.tasks import views as tasks_app
 
 router = APIRouter(prefix="/api/projects/{project_id}/tasks", tags=["tasks"])
 
@@ -82,7 +81,7 @@ def create_task_endpoint(
 
     幂等/去重复用 → 200(附 replayed/duplicate 标记与提示); 新建 → 201。
     """
-    task, flags = tasks_service.create_task(
+    task, flags = tasks_app.submit_task(
         db, user, project_id, payload.task_type,
         config=payload.config,
         idempotency_key=payload.idempotency_key,
@@ -90,11 +89,10 @@ def create_task_endpoint(
     )
     replayed = bool(flags.get("replay", False))
     duplicate = bool(flags.get("duplicate", False))
-    db.commit()
     if replayed or duplicate:
         response.status_code = 200
     return {
-        "task": tasks_service.task_summary(db, task),
+        "task": tasks_app.task_summary(db, task),
         "replayed": replayed,
         "duplicate": duplicate,
         "hint": "已复用既有任务(输入相同, 未重复计算)" if replayed or duplicate else None,
@@ -113,7 +111,7 @@ def list_tasks_endpoint(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict[str, Any]:
     """任务列表(规格 9.1): 状态/结局过滤 + 游标分页, 含进度摘要与排队位次。"""
-    return tasks_service.list_tasks(
+    return tasks_app.list_tasks(
         db, user, project_id,
         task_type=task_type, status=status, outcome=outcome, cursor=cursor, limit=limit,
     )
@@ -128,7 +126,7 @@ def get_task_endpoint(
 ) -> dict[str, Any]:
     """任务详情(规格 9.2): 状态/结局 + 尝试历史 + 当前租约(不含 token) + 进度 +
     诊断 + 快照摘要 + 批量关系。"""
-    return {"task": tasks_service.task_detail(db, user, project_id, task_id)}
+    return {"task": tasks_app.task_detail(db, user, project_id, task_id)}
 
 
 @router.post("/{task_id}/cancel", summary="取消任务")
@@ -141,13 +139,10 @@ def cancel_task_endpoint(
 ) -> dict[str, Any]:
     """取消任务(规格 6.1): queued 直接取消; running → cancelling 并传播批量子任务;
     终态 → 409(ies.diag.task.cancel_denied)。取消为写操作, 要求项目 edit 能力(H-05)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
-    tasks_service.ensure_task_belongs(db, project_id, task_id)
     reason = payload.reason if payload and payload.reason else "user_cancel"
-    task = tasks_service.cancel_task(db, task_id, reason=reason, actor_id=user.id)
-    db.commit()
+    task = tasks_app.cancel_user_task(db, user, project_id, task_id, reason)
     return {
-        "task": tasks_service.task_summary(db, task),
+        "task": tasks_app.task_summary(db, task),
         "cancel_status": task.status,
         "diagnostic": "cancel_ok",
     }
@@ -163,8 +158,5 @@ def retry_task_endpoint(
 ) -> dict[str, Any]:
     """手动重试(规格 6.4): 仅终态任务; 复用同一 calc_snapshot_id(输入含义不变);
     计算类快照缺失 → 409(TASK-DATA-001)。重试为写操作, 要求项目 edit 能力(H-05)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
-    tasks_service.ensure_task_belongs(db, project_id, task_id)
-    task = tasks_service.retry_task(db, user, task_id)
-    db.commit()
-    return {"task": tasks_service.task_summary(db, task)}
+    task = tasks_app.retry_user_task(db, user, project_id, task_id)
+    return {"task": tasks_app.task_summary(db, task)}
