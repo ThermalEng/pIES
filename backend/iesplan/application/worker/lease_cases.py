@@ -6,13 +6,16 @@
 - 领取/进度/完成/失败/槽释放 → tasks 域门面 + 队列可重建视图;
 - 出队/心跳/取消信号清除 → tasks 域队列视图;
 - 证据对象写入/引用 → ``storage.put_object`` / ``storage.add_ref``;
-- 任务/快照/尝试/诊断读与租约 fencing 写 → tasks/results 域门面。
+- 任务/快照/尝试/诊断读与租约 fencing 写(含带 fencing 的尝试收尾) →
+  tasks/results 域门面;
+- 租约失效错误 ``LeaseRejectedError`` 由本模块拥有(码 TASK-LEASE-001),
+  worker 层仅复出, 不自建错误语义。
 
 ``Claim`` / ``TaskStateError`` / ``LEASE_TTL_SECONDS`` 复用任务提交用例
 同名公开符号, worker 层经本模块取用, 不再直连 ``services.*`` 与 ``models.*``。
 
-本模块不拥有事务(提交/回滚由 worker 层负责); 内部步骤只经领域公开门面
-写入 + flush。
+本模块不拥有事务(只经领域公开门面写入 + flush); 完整尝试事务的提交/
+回滚由同包 ``attempt_cases`` 用例拥有。
 
 依赖方向: worker → application → (storage/领域门面)。
 """
@@ -40,11 +43,12 @@ from iesplan.config import settings
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     SEVERITY_INFO,
+    SEVERITY_WARNING,
     TASK_DATA_HASH_MISMATCH,
     TASK_DATA_SNAPSHOT_MISSING,
     TASK_QUEUED,
 )
-from iesplan.core.errors import NotFoundError
+from iesplan.core.errors import AppError, NotFoundError
 from iesplan.storage import add_ref, put_object
 from iesplan.tasks import (
     CalcSnapshotRecord,
@@ -54,6 +58,18 @@ from iesplan.tasks import (
     TaskNotFoundError,
     TaskRecord,
 )
+
+
+class LeaseRejectedError(AppError):
+    """租约失效/过期后的迟到写回(03 §6.3 建议登记 TASK-LEASE-001, warning 不阻断)。
+
+    Worker 收到本异常必须立即: 终止子进程 → 停止一切 PG/对象存储写入。
+    本类由 application.worker 拥有; ``iesplan.worker.lease`` 仅复出同名符号。
+    """
+
+    code = "TASK-LEASE-001"
+    severity = SEVERITY_WARNING
+    message_key = "ies.diag.task.lease_rejected"
 
 
 def _get_task(db: Session, task_id: int) -> TaskRecord:
@@ -346,6 +362,34 @@ def finish_attempt_record(
         return tasks_domain.finish_attempt(db, attempt_id, status, stop_reason=stop_reason)
     except TaskNotFoundError:
         return None
+
+
+def fenced_release_attempt(
+    db: Session, attempt_id: int, token: UUID | str, *,
+    attempt_status: str, stop_reason: str | None,
+) -> TaskAttemptRecord:
+    """带 fencing 的尝试收尾: 租约 released/revoked + 尝试终态 + 槽释放(03 §4.1 ③)。
+
+    租约不匹配(0 行)或尝试已终态抛 LeaseRejectedError。只 flush 不提交
+    (事务由 attempt_cases 用例拥有)。
+    """
+    lease_status = "released" if attempt_status == "succeeded" else "revoked"
+    n = fence_release_lease(db, attempt_id, token, status=lease_status)
+    if n != 1:
+        raise LeaseRejectedError(
+            "租约失效, 尝试收尾被拒绝",
+            params={"attempt_id": attempt_id},
+        )
+    attempt = get_attempt_record(db, attempt_id)
+    if attempt is None or attempt.status in ("succeeded", "failed", "stopped"):
+        raise LeaseRejectedError("尝试已终态, 不可重复收尾", params={"attempt_id": attempt_id})
+    finished = finish_attempt_record(
+        db, attempt_id, status=attempt_status, stop_reason=stop_reason
+    )
+    if finished is None:
+        raise LeaseRejectedError("尝试已终态, 不可重复收尾", params={"attempt_id": attempt_id})
+    release_slot(db, attempt_id)
+    return finished
 
 
 def write_diagnostic(

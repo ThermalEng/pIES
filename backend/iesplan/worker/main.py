@@ -169,10 +169,13 @@ class Worker:
         return available
 
     def _claim_and_run(self, task_id: int) -> None:
-        """领取(槽 + 尝试 + 租约 + token)并在独立线程中执行。"""
+        """领取(槽 + 尝试 + 租约 + token)并在独立线程中执行。
+
+        领取事务由 application.worker 用例提交, 返回后租约/尝试状态即刻
+        可见; 本层不调用 commit/rollback。
+        """
         with self.session_factory() as db:
             claim = lease.acquire_attempt(db, task_id, self.worker_id)
-            db.commit()
         if claim is None:
             logger.info("领取失败(无槽/非 queued): task=%s", task_id)
             return

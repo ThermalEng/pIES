@@ -1,9 +1,10 @@
-"""全链路集成测试：覆盖核心业务链端到端（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §14.2 必需测试 及 §12 快照、任务与结果； manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）。
+"""集成测试：核心业务链（提交/快照/预检）与计算入口显式不可用（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §14.2 必需测试 及 §12 快照、任务与结果； manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）。
 
 链路: 注册/登录(管理员+工程师) → 创建项目 → 添加设备(电网/光伏/热泵/锅炉/
 制冷机/电池/负荷)与连接 → 生成内置样例数据集 → 绑定数据集 → 保存计算配置 +
-财务基准确认 → 提交方案评价任务 → Worker 真实执行(evaluate_plan 全算例,
-8760 步) → 任务完成 → 四维评估 → 选择结果 → Excel 导出 → 项目包导出/导入。
+财务基准确认 → 提交方案评价任务 → Worker 领取(租约/尝试状态先行可见) →
+执行收拢为显式结构化失败（旧计算链已删除，0.8 计算未实现：failed +
+TASK-SOLVE-001，绝非 lease_rejected；不期待 1.0 真实求解）。
 
 另抽查核心语义：草稿乐观锁(409)、归档后禁止编辑、删除需显式确认、任务同快照去重、导出权限门禁、存储视图权限、财务基准校验门禁（见 manual/developer-guide/zh-CN/contracts.md §HTTP 语义； manual/developer-guide/zh-CN/domain-model.md §项目聚合/对象生命周期； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §8/§10/§16）。
 
@@ -13,10 +14,8 @@
 
 from __future__ import annotations
 
-import io
 import os
 import time
-import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -35,10 +34,12 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
+from iesplan.models.calc import TaskDiagnostic  # noqa: E402
+from iesplan.models.result import EvidencePackage  # noqa: E402
 from iesplan.application import identity  # noqa: E402
-from iesplan.services import queue  # noqa: E402
-from iesplan.services import package as package_service  # noqa: E402
-from iesplan.services import tasks as tasks_service  # noqa: E402
+from iesplan.application import worker as worker_app  # noqa: E402
+from iesplan.core.diagnostics import TASK_SOLVE_FAILED  # noqa: E402
+from iesplan.tasks import queue  # noqa: E402
 from iesplan.worker import runner  # noqa: E402
 
 ADMIN_USERNAME = "admin"
@@ -342,12 +343,11 @@ def _submit_calc_task(
     return task["id"], resp.status_code
 
 
-def _run_task_to_completion(db: Session, task_id: int) -> None:
-    """Worker 真实执行: 领取 → runner.run_task(引擎进程内, 快照输入真实)。"""
-    claim = tasks_service.claim_and_run(db, task_id, "it-worker-1")
+def _acquire_task(db: Session, task_id: int) -> Any:
+    """Worker 领取: 经 application.worker 用例(领取事务已提交, 租约/尝试状态可见)。"""
+    claim = worker_app.acquire_attempt(db, task_id, "it-worker-1")
     assert claim is not None, "任务领取失败"
-    status = runner.run_task(db, claim, worker_id="it-worker-1", isolate=False)
-    assert status == "completed", f"任务执行失败: {status}"
+    return claim
 
 
 def _get_task(client: TestClient, user_id: int, project_id: int, task_id: int) -> dict[str, Any]:
@@ -355,15 +355,6 @@ def _get_task(client: TestClient, user_id: int, project_id: int, task_id: int) -
     resp = client.get(f"/api/projects/{project_id}/tasks/{task_id}", headers=_h(client, user_id))
     assert resp.status_code == 200, resp.text
     return resp.json()["task"]
-
-
-def _result_view(client: TestClient, user_id: int, project_id: int, task_id: int) -> dict[str, Any]:
-    """结果视图。"""
-    resp = client.get(
-        f"/api/projects/{project_id}/tasks/{task_id}/result", headers=_h(client, user_id)
-    )
-    assert resp.status_code == 200, resp.text
-    return resp.json()["result"]
 
 
 # ---------------------------------------------------------------------------
@@ -463,12 +454,17 @@ def _prepare_project(
 
 
 # ---------------------------------------------------------------------------
-# 测试 1: 全链路端到端
+# 测试 1a: 任务提交/快照/预检正常
 # ---------------------------------------------------------------------------
 
 
-def test_full_business_chain(client: TestClient, db: Session) -> None:
-    """注册/登录 → 项目 → 设备/连接 → 数据集 → 配置/基线 → 任务 → 结果 → 导出。"""
+def test_task_submit_snapshot_preguard(client: TestClient, db: Session) -> None:
+    """注册/登录 → 项目 → 设备/连接 → 数据集 → 配置/基线 → 提交方案评价任务。
+
+    断言: 未确认基线时预检阻断提交; 提交后任务 queued 且计算快照已固化。
+    （旧计算链已删除，0.8 计算未实现：本测试止于提交，不期待真实求解；
+    执行语义见测试 1b。）
+    """
     admin_id = _seed_admin(db)
     admin_login = _login(client, ADMIN_USERNAME, ADMIN_PASSWORD)
     # 管理员受审操作: 开启自助注册
@@ -496,144 +492,63 @@ def test_full_business_chain(client: TestClient, db: Session) -> None:
     assert task["status"] == "queued"
     assert task["calc_snapshot_id"] is not None  # 快照已固化
 
-    # Worker 真实执行(evaluate_plan 全算例)
-    _run_task_to_completion(db, task_id)
+    # 领取: 租约/尝试状态先行可见(领取事务已提交), 任务 running
+    claim = _acquire_task(db, task_id)
     task = _get_task(client, eng_id, ctx["project_id"], task_id)
-    assert task["status"] == "completed", task
-    assert task["business_outcome"] == "normal_completion"
-    assert len(task["attempts"]) >= 1
+    assert task["status"] == "running", task
+    assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is not None
 
-    # 结果视图: 四维评估存在 + 逐时引用存在
-    result = _result_view(client, eng_id, ctx["project_id"], task_id)
-    assert result["task"]["business_outcome"] == "normal_completion"
-    assert result["evidence"] is not None and result["evidence"]["status"] == "complete"
-    assert result["assessment"] is not None
-    four = result["assessment"]["dimensions"]
-    assert set(four) == {"physical", "optimality", "financial", "reliability"}
-    assert four["physical"] == "pass"
-    assert four["optimality"] == "pass"
-    assert four["financial"] == "pass"
-    assert four["reliability"] in ("unknown", "pass")
-    assert result["assessment"]["summary"]  # 派生摘要
-    assert result["hourly_refs"], "逐时结果引用缺失"
-    assert result["hourly_refs"][0]["fields"] == sorted(result["hourly_refs"][0]["fields"])
-    assert "p_grid_buy" in result["hourly_refs"][0]["fields"]
-    assert result["selection"] is None  # 尚未选择
-    evidence_package_id = result["evidence"]["id"]
 
-    # 逐时结果读取(从对象存储, 行号分页)
-    resp = client.get(
-        f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/hourly",
-        params={"field": "p_grid_buy", "limit": 48},
-        headers=_h(client, eng_id),
-    )
-    assert resp.status_code == 200, resp.text
-    hourly = resp.json()
-    assert len(hourly["values"]) == 48
-    assert hourly["values"][0] >= 0  # 购电功率非负
-    assert hourly["total_rows"] == 8760
+# ---------------------------------------------------------------------------
+# 测试 1b: 当前计算入口显式不可用且错误码正确
+# ---------------------------------------------------------------------------
 
-    # 触发新评估(四维, 追加式)
-    resp = client.post(
-        f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/assess",
-        json={"assessment_type": "full"},
-        headers=_h(client, eng_id),
-    )
-    assert resp.status_code == 201, resp.text
-    assessment = resp.json()["assessment"]
-    assert assessment["dimensions"]["physical"] in ("pass", "fail", "unknown")
-    assert assessment["evidence_package_id"] == evidence_package_id
 
-    # 评估历史不可变追加
-    resp = client.get(
-        f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/assessments", headers=_h(client, eng_id)
-    )
-    assert resp.status_code == 200
-    items = resp.json()["items"]
-    assert len(items) >= 2
-    ids = [i["id"] for i in items]
-    assert len(set(ids)) == len(ids)  # 不可覆盖
+def test_compute_entry_explicitly_unavailable(client: TestClient, db: Session) -> None:
+    """旧计算链已删除、0.8 计算未实现: 执行收拢为显式结构化失败。
 
-    # 选择结果(带差异补丁审计)
-    resp = client.post(
-        f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/select",
-        json={"solution_id": 0, "selection_type": "adopt", "reason": "集成测试采纳"},
-        headers=_h(client, eng_id),
-    )
-    assert resp.status_code == 201, resp.text
-    selection = resp.json()
-    assert selection["selection"]["is_current"] is True
-    diff = selection["diff"]
-    assert diff is not None
-    assert diff["diff_patch"]["params"]["result_adoption"]["solution_index"] == 0
-    assert diff["result_index_id"] == selection["selection"]["result_index_id"]
+    领取先形成正确可见的租约/尝试状态; 执行器 NotImplementedError 经 runner
+    调度链收拢为 failed + TASK-SOLVE-001(保留原始不可用原因), 绝不误判为
+    lease_rejected, 也不写入任何结果。
+    """
+    eng_id = _seed_engineer_direct(client, db)
+    ctx = _prepare_project(client, db, eng_id)
 
-    # 差异预览（应用前确认，见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）
-    resp = client.get(
-        f"/api/projects/{ctx['project_id']}/tasks/{task_id}/result/diff", headers=_h(client, eng_id)
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["diff"]["diff_patch"] == diff["diff_patch"]
+    task_id, status_code = _submit_calc_task(client, eng_id, ctx["project_id"])
+    assert status_code == 201
 
-    # Excel 报告导出 → 短期授权下载
-    resp = client.post(
-        f"/api/projects/{ctx['project_id']}/exports/excel",
-        json={"evidence_package_id": evidence_package_id, "assessment_id": assessment["id"], "lang": "zh"},
-        headers=_h(client, eng_id),
-    )
-    assert resp.status_code == 200, resp.text
-    excel_meta = resp.json()
-    assert excel_meta["size_bytes"] > 0 and excel_meta["token"]
-    resp = client.get(
-        f"/api/projects/{ctx['project_id']}/exports/excel/download",
-        params={"token": excel_meta["token"]},
-        headers=_h(client, eng_id),
-    )
-    assert resp.status_code == 200 and resp.content[:2] == b"PK"  # xlsx 为 zip 容器
-    assert len(resp.content) == excel_meta["size_bytes"]
+    # 领取: 租约/尝试状态先行可见(领取事务已提交), 任务 running
+    claim = _acquire_task(db, task_id)
+    task = _get_task(client, eng_id, ctx["project_id"], task_id)
+    assert task["status"] == "running", task
+    assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is not None
 
-    # 项目包导出(仅所有者) → 下载 → 导入(新项目) → 确认
-    resp = client.post(
-        f"/api/projects/{ctx['project_id']}/exports/package", headers=_h(client, eng_id)
-    )
-    assert resp.status_code == 200, resp.text
-    pkg_meta = resp.json()
-    assert pkg_meta["object_id"] and pkg_meta["size_bytes"] > 0
-    resp = client.get(
-        f"/api/projects/{ctx['project_id']}/exports/package/download",
-        params={"token": pkg_meta["token"]},
-        headers=_h(client, eng_id),
-    )
-    assert resp.status_code == 200
-    pkg_bytes = resp.content
-    with zipfile.ZipFile(io.BytesIO(pkg_bytes)) as zf:
-        names = zf.namelist()
-        assert any(n.endswith("manifest.json") for n in names)
+    # 执行: 计算入口显式不可用 → failed, 绝非 lease_rejected
+    status = runner.run_task(db, claim, worker_id="it-worker-1", isolate=False)
+    assert status == "failed", status
+    assert status != "lease_rejected", status
 
-    # 导入: 创建提案 → 确认导入(导入者成为新项目所有者)
-    importer_id = _register_engineer(client, admin_login["token"], username="eng_wang")
-    proposal = package_service.import_proposal(db, db.get(User, importer_id), pkg_bytes)
-    assert proposal.review_errors == {}
-    imported = package_service.confirm_import(db, db.get(User, importer_id), proposal.id)
-    db.commit()
-    assert imported.id > ctx["project_id"]
-    # 导入项目可读取: 设备/连接/配置/数据集绑定完整迁移
-    imported_pid = imported.id
-    resp = client.get(f"/api/projects/{imported_pid}", headers=_h(client, importer_id))
-    assert resp.status_code == 200, resp.text
-    view = resp.json()
-    assert len(view["draft"]["content"]["model"]["devices"]) == 9
-    assert len(view["draft"]["content"]["dataset_bindings"]) == 1
-    assert view["draft"]["content"]["calc_config"]["params"] != {}
+    task = _get_task(client, eng_id, ctx["project_id"], task_id)
+    assert task["status"] == "failed", task
 
-    # 应用选中结果到新草稿（参数差异补丁，见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）
-    resp = client.post(
-        f"/api/projects/{imported_pid}/apply-result",
-        json={"diff_patch": diff["diff_patch"], "source_result_id": str(task_id)},
-        headers=_h(client, importer_id),
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["version"]["version_no"] == 2
+    # 失败诊断: 有 TASK-SOLVE-001 且保留原始不可用原因, 无租约类诊断
+    diags = db.query(TaskDiagnostic).filter(TaskDiagnostic.task_id == task_id).all()
+    assert diags, "失败诊断缺失"
+    assert not any(d.code == "TASK-LEASE-001" for d in diags), [
+        (d.code, d.message) for d in diags
+    ]
+    solve = [d for d in diags if d.code == TASK_SOLVE_FAILED]
+    assert solve, [(d.code, d.message) for d in diags]
+    assert all(d.level == "error" for d in solve)
+    assert any("旧计算执行链已删除" in (d.message or "") for d in solve), [
+        (d.code, d.message) for d in solve
+    ]
+    assert all("内部错误" not in (d.message or "") for d in solve), [
+        (d.code, d.message) for d in solve
+    ]
+
+    # 无结果写入: 证据包为空
+    assert db.query(EvidencePackage).filter(EvidencePackage.task_id == task_id).all() == []
 
 
 # ---------------------------------------------------------------------------

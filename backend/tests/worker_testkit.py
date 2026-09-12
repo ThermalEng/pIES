@@ -18,13 +18,13 @@ os.environ.setdefault("IESPLAN_QUEUE", "memory")
 
 from sqlalchemy.orm import Session  # noqa: E402
 
+from iesplan.application.projects.content_objects import store_content_object
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, Task  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
 from iesplan.models.project import Project, ProjectVersion  # noqa: E402
-from iesplan.services import project as project_service
 from iesplan.storage import put_object
 from iesplan.tasks import queue
 
@@ -145,7 +145,7 @@ def setup_environment(
         ))
 
     content = mini_content(dver_id if dver_id is not None else 0, config=config, devices=devices)
-    content_object_id = project_service.store_content_object(db, content)
+    content_object_id = store_content_object(db, content)
     version = ProjectVersion(
         project_id=project.id, version_no=1, name="v1", reason="snapshot_freeze",
         baseline_resolution="1h", baseline_leap_year=False,

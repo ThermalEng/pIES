@@ -6,7 +6,10 @@ worker 层只经本包推进, 不再直连 ``services.*`` 与 ``models.*``;
 
 子模块:
 - lease_cases: 领取/进度/完成/失败/槽释放/队列视图/证据存取转调与
-  租约 fencing/任务行/结果提交行读写;
+  租约 fencing/任务行/结果提交行读写(flush-only,不拥有事务)及
+  LeaseRejectedError 错误语义;
+- attempt_cases: 完整尝试事务所有者(领取/续租/提交/失败/取消各自
+  同事务提交; worker 层不 commit/rollback);
 - runner_cases: 快照输入读取转调与输入装配行读;
 - evidence_cases: 证据包查询/检查评估追加/不确定性行写。
 
@@ -21,7 +24,15 @@ from sqlalchemy.orm import Session
 
 from iesplan import tasks as tasks_domain
 from iesplan.application.tasks.submissions import map_business_outcome
-from iesplan.application.worker import evidence_cases, lease_cases, runner_cases
+from iesplan.application.worker import attempt_cases, evidence_cases, lease_cases, runner_cases
+from iesplan.application.worker.attempt_cases import (
+    SubmitReceipt,
+    acquire_attempt,
+    cancel_attempt,
+    fail_attempt,
+    renew_attempt_lease,
+    submit_attempt_result,
+)
 from iesplan.application.worker.evidence_cases import (
     append_check_assessment,
     create_sample_row,
@@ -35,6 +46,7 @@ from iesplan.application.worker.lease_cases import (
     LEASE_TTL_SECONDS,
     CalcSnapshotRecord,
     Claim,
+    LeaseRejectedError,
     TaskAttemptRecord,
     TaskDiagnosticRecord,
     TaskLeaseRecord,
@@ -50,6 +62,7 @@ from iesplan.application.worker.lease_cases import (
     dequeue_task,
     fail_task,
     fence_release_lease,
+    fenced_release_attempt,
     finish_attempt_record,
     flip_result_index,
     get_attempt_record,
@@ -86,17 +99,22 @@ __all__ = [
     "DatasetVersionRecord",
     "EvidencePackageRecord",
     "LEASE_TTL_SECONDS",
+    "LeaseRejectedError",
     "ResultAssessmentRecord",
     "SampleTaskRecord",
+    "SubmitReceipt",
     "TaskAttemptRecord",
     "TaskDiagnosticRecord",
     "TaskLeaseRecord",
     "TaskRecord",
     "TaskStateError",
     "UncertaintySnapshotRecord",
+    "acquire_attempt",
     "acquire_task",
+    "attempt_cases",
     "append_check_assessment",
     "attach_result_ref",
+    "cancel_attempt",
     "cancel_task_record",
     "clear_cancel_signal",
     "complete_task",
@@ -107,8 +125,10 @@ __all__ = [
     "create_uncertainty_snapshot_record",
     "dequeue_task",
     "evidence_cases",
+    "fail_attempt",
     "fail_task",
     "fence_release_lease",
+    "fenced_release_attempt",
     "finish_attempt_record",
     "flip_result_index",
     "get_attempt_record",
@@ -131,10 +151,12 @@ __all__ = [
     "record_sample_value",
     "record_task_progress",
     "release_slot",
+    "renew_attempt_lease",
     "renew_lease_once",
     "runner_cases",
     "slot_available",
     "store_result_blob",
+    "submit_attempt_result",
     "verify_lease",
     "write_diagnostic",
 ]

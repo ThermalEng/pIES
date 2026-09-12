@@ -27,7 +27,12 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from iesplan.application import worker as worker_app
-from iesplan.core.diagnostics import SEVERITY_BLOCKING, TASK_DATA_SNAPSHOT_MISSING
+from iesplan.core.diagnostics import (
+    SEVERITY_BLOCKING,
+    SEVERITY_ERROR,
+    TASK_DATA_SNAPSHOT_MISSING,
+    TASK_SOLVE_FAILED,
+)
 from iesplan.core.errors import AppError
 from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis
 from iesplan.worker import executors, lease
@@ -54,6 +59,18 @@ class InvalidTaskTypeError(AppError):
 
     code = "TASK-REQ-002"
     message_key = "ies.diag.param.invalid"
+
+
+class ComputeUnavailableError(AppError):
+    """计算执行入口显式不可用(旧计算链已删除, 0.8 计算未实现)。
+
+    确定性失败: 经失败收拢落 failed + TASK-SOLVE-001, 保留执行器原始原因,
+    不得包成"内部错误", 更不得误判为 lease_rejected。
+    """
+
+    code = TASK_SOLVE_FAILED
+    severity = SEVERITY_ERROR
+    message_key = "ies.diag.task.solve_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +299,9 @@ def run_task(
         stop_event: 取消/优雅退出事件(透传给执行器检查点与隔离子进程)。
     返回:
         终态状态: completed / failed / cancelled / lease_rejected。
-    本函数负责提交事务(run_task 是尝试的单一事务边界)。
+    事务边界: 本函数不调用 commit/rollback; 领取/提交/失败/取消各自的完整
+    事务由 application.worker 用例拥有并提交(领取已在执行前提交, 故执行期
+    回滚不会丢失租约; 失败收拢不再误判为 lease_rejected)。
     """
     task = worker_app.get_task_record(db, claim.task_id)
     if task is None:
@@ -298,20 +317,17 @@ def run_task(
     try:
         payload = dispatch(ctx)
         outcome = str(payload.get("outcome") or "normal_completion")
-        receipt = lease.submit_result(db, claim, payload=payload, outcome=outcome,
-                                      actor_id=task.requested_by)
-        db.commit()
-        logger.info("任务完成: task=%s outcome=%s evidence=%s",
-                    task.id, outcome, receipt.evidence_package_id)
+        lease.submit_result(db, claim, payload=payload, outcome=outcome,
+                            actor_id=task.requested_by)
         return "completed"
     except TaskCancelled as exc:
-        db.rollback()
         return _handle_cancel(db, ctx, claim, task, exc.stage)
     except (lease.LeaseRejectedError, SnapshotInputError, EngineRunError, AppError) as exc:
-        db.rollback()
         return _handle_failure(db, ctx, claim, exc)
+    except NotImplementedError as exc:
+        # 旧计算链已删除、0.8 未实现: 显式不可用, 保留原始原因收拢为失败
+        return _handle_failure(db, ctx, claim, ComputeUnavailableError(str(exc)))
     except Exception as exc:  # noqa: BLE001 - 尝试边界: 任何未预期异常落确定性失败
-        db.rollback()
         logger.exception("任务执行内部错误: task=%s", task.id)
         return _handle_failure(db, ctx, claim, RuntimeError(f"内部错误: {exc}"))
 
@@ -319,7 +335,10 @@ def run_task(
 def _handle_cancel(
     db: Session, ctx: RunContext, claim: lease.Claim, task: worker_app.TaskRecord, stage: str,
 ) -> str:
-    """取消收拢(03 §6.1): 部分完成的批量子任务 → partial_batch。"""
+    """取消收拢(03 §6.1): 部分完成的批量子任务 → partial_batch。
+
+    收拢事务由 application.worker 用例提交, 本函数不调用 commit/rollback。
+    """
     logger.info("任务取消: task=%s stage=%s", task.id, stage)
     outcome = None
     if task.type == "uncertainty":
@@ -328,11 +347,9 @@ def _handle_cancel(
             outcome = "partial_batch"
     try:
         lease.cancel_attempt(db, claim, outcome=outcome)
-        db.commit()
         return "cancelled"
     except AppError as exc:
         # 取消竞态: 任务已终态(以先落终态者为准, 03 §6.1 规则 4)
-        db.rollback()
         logger.info("取消竞态忽略: task=%s (%s)", task.id, exc)
         return "cancelled"
 
@@ -340,7 +357,9 @@ def _handle_cancel(
 def _handle_failure(db: Session, ctx: RunContext, claim: lease.Claim, exc: Exception) -> str:
     """失败收拢(03 §6.3): 快照/输入问题 → blocking insufficient_evidence。
 
-    返回失败终态; 租约失效类错误不写终态(由调度器守护回收, 03 §4.3)。
+    收拢事务由 application.worker 用例提交, 本函数不调用 commit/rollback。
+    返回失败终态; 真正的租约失效类错误不写终态(由调度器守护回收, 03 §4.3),
+    执行失败本身绝不误判为 lease_rejected。
     """
     if isinstance(exc, lease.LeaseRejectedError):
         logger.warning("租约失效, 停止一切写回: task=%s (%s)", claim.task_id, exc)
@@ -351,19 +370,18 @@ def _handle_failure(db: Session, ctx: RunContext, claim: lease.Claim, exc: Excep
                 db, claim, code=exc.code, message=str(exc), level=exc.severity,
                 outcome="insufficient_evidence",
             )
-            db.commit()
         except lease.LeaseRejectedError:
-            db.rollback()
             return "lease_rejected"
         return "failed"
-    # 引擎/内部失败: 确定性失败落 failed(TASK-SOLVE-001), 不自动重试
+    # 计算不可用/引擎/内部失败: 确定性失败落 failed, 不自动重试。
+    # 错误码取结构化错误自带码(计算入口显式不可用为 TASK-SOLVE-001),
+    # 未预期异常沿用 TASK-SOLVE-001 包络; 原始原因保留在 message 中。
+    code = exc.code if isinstance(exc, AppError) else TASK_SOLVE_FAILED
     try:
         lease.fail_attempt(
-            db, claim, code="TASK-SOLVE-001", message=str(exc),
+            db, claim, code=code, message=str(exc),
             stack_trace=traceback.format_exc(limit=10),
         )
-        db.commit()
     except lease.LeaseRejectedError:
-        db.rollback()
         return "lease_rejected"
     return "failed"
