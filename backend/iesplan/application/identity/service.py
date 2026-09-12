@@ -32,6 +32,7 @@ from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan.config import settings
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError
+from iesplan.core.namespace import generate_namespace
 from iesplan.core.security import (
     check_password_strength,
     hash_password,
@@ -575,7 +576,6 @@ def create_user(
                 params={"email": email},
             )
     role_row = ensure_role(db, role, name="工程师" if role == ROLE_ENGINEER else "管理员")
-    from iesplan.core.namespace import generate_namespace
 
     # 分配公开命名空间（CSPRNG，60 bit 熵；全局唯一，碰撞重试）
     ns = None
