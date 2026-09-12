@@ -137,11 +137,31 @@ def _iter_domain_files():
             yield domain, path
 
 
+#: 纯函数复用豁免(与 test_architecture_gates._WAVE0_STATE_MODEL_REUSE 同义，
+#: 此处独立声明以免测试间相互导入)：metrics.validity/financial 仅依赖标准库
+#: 与 numpy 的纯词汇/纯函数，results 复用其枚举与纯函数而不是复制第二份
+#: 事实源（收口 §六“领域公开纯函数”复用；复制枚举值才是本测试要防的）。
+_PURE_METRICS_REUSE: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("results", "iesplan.metrics.validity"),
+        ("results", "iesplan.metrics.financial"),
+    }
+)
+
+
+def _is_pure_reuse(domain: str, mod: str) -> bool:
+    return any(
+        domain == owner and (mod == target or mod.startswith(target + "."))
+        for owner, target in _PURE_METRICS_REUSE
+    )
+
+
 def test_domain_source_purity():
     """域源码纯度：无 ORM/跨层导入，无 commit/rollback；contracts 只靠标准库+core。
 
     唯一例外是各域 persistence.py（领域持久化实现），它只允许访问本域归属表
-    （OWNED_MODELS），且同样禁跨层导入与 commit/rollback。
+    （OWNED_MODELS），且同样禁跨层导入与 commit/rollback；另一例外是
+    _PURE_METRICS_REUSE 的纯词汇/纯函数复用（复用而非复制，不记违规）。
     """
     violations: list[str] = []
     for domain, path in _iter_domain_files():
@@ -169,12 +189,16 @@ def test_domain_source_purity():
                             continue
                         violations.append(f"{domain}/{path.name}:{node.lineno}: 非归属表 {mod}")
                         continue
+                if _is_pure_reuse(domain, mod):
+                    continue
                 for prefix in _BANNED_PREFIXES:
                     if mod == prefix or mod.startswith(prefix + "."):
                         violations.append(f"{domain}/{path.name}:{node.lineno}: {mod}")
                         break
             elif isinstance(node, ast.Import):
                 for alias in node.names:
+                    if _is_pure_reuse(domain, alias.name):
+                        continue
                     for prefix in _BANNED_PREFIXES:
                         if alias.name == prefix or alias.name.startswith(prefix + "."):
                             violations.append(f"{domain}/{path.name}:{node.lineno}: {alias.name}")
