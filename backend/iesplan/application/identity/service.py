@@ -11,17 +11,14 @@
 - 凭证变更(改密/重置)递增 users.credential_version, 使全部旧会话失效(宪法 §16 + 领域模型 §身份、权限和审计);
 - 业务错误统一抛 AppError(+ 诊断 message_key, 前缀 ies.diag.auth.*),
   响应不泄露堆栈/哈希/明文。
+- 输入规则、身份错误与身份状态归 identity 域所有(经 identity 门面复用);
+  本模块只保留审计/项目等跨域编排与事务(后端解耦 Wave 3-A)。
 """
 
 from __future__ import annotations
 
-import ipaddress
 import logging
-import os
-import re
-import threading
-import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -31,10 +28,9 @@ from iesplan import audit as audit_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan.config import settings
-from iesplan.core.errors import AppError, ConflictError, ForbiddenError
+from iesplan.core.errors import ConflictError, ForbiddenError
 from iesplan.core.namespace import generate_namespace
 from iesplan.core.security import (
-    check_password_strength,
     hash_password,
     new_session_token,
     token_hash,
@@ -42,8 +38,13 @@ from iesplan.core.security import (
 )
 from iesplan.identity.contracts import (
     AuthEventRecord,
+    BadOldPasswordError,
+    BadRequestError,
     CredentialRecord,
+    DeleteConfirmRequiredError,
+    SamePasswordError,
     UserRecord,
+    WeakPasswordError,
     WindowSessionRecord,
 )
 #: 用户名/邮箱格式唯一权威: iesplan.core.patterns(应用层不得导入
@@ -58,13 +59,6 @@ logger = logging.getLogger(__name__)
 # 常量
 # ---------------------------------------------------------------------------
 
-#: 登录限速: 同一用户名最大连续失败次数
-MAX_LOGIN_FAILURES: Final[int] = 5
-#: 锁定时长(秒): 达到失败上限后锁定 15 分钟
-LOCKOUT_SECONDS: Final[int] = 15 * 60
-#: 内置角色(管理员、工程师; 宪法 §16 + 领域模型 §身份、权限和审计)
-ROLE_ADMIN: Final[str] = "admin"
-ROLE_ENGINEER: Final[str] = "engineer"
 #: 假哈希: 用户不存在/停用/无凭证时也执行一次 bcrypt 校验,
 #: 使各种失败路径耗时均匀, 避免通过响应时间枚举用户名/账号状态
 _DUMMY_PASSWORD_HASH: Final[str] = "$2b$12$P5GwAaopJcdx8Bx7CEUWOeNFfS/4KQ6wvr321HDFA.oQakKY.W9v."
@@ -72,278 +66,6 @@ _DUMMY_PASSWORD_HASH: Final[str] = "$2b$12$P5GwAaopJcdx8Bx7CEUWOeNFfS/4KQ6wvr321
 _DELETE_CONFIRM_WINDOW_SECONDS: Final[int] = 600
 #: 删除账号确认令牌签名盐(与 OIDC state 盐分离, 独立用途)
 _DELETE_CONFIRM_SALT: Final[str] = "ies.delete-user-confirm"
-
-
-# ---------------------------------------------------------------------------
-# 认证业务异常(message_key 前缀 ies.diag.auth.*; http_status 供全局处理器映射)
-# ---------------------------------------------------------------------------
-
-
-class AuthError(AppError):
-    """认证/授权错误基类: 默认 401。"""
-
-    http_status = 401
-    code = "AUTH-REQ-001"
-    message_key = "ies.diag.auth.required"
-
-
-class AuthRequiredError(AuthError):
-    """缺少窗口凭证。"""
-
-    code = "AUTH-REQ-001"
-    message_key = "ies.diag.auth.required"
-
-
-class SessionInvalidError(AuthError):
-    """窗口凭证无效(未找到/过期/已撤销/待接管/凭证版本不匹配)。"""
-
-    code = "AUTH-SESS-001"
-    message_key = "ies.diag.auth.session_invalid"
-
-
-class LoginFailedError(AuthError):
-    """登录失败(统一文案: 不区分用户不存在/密码错误/账号停用)。"""
-
-    code = "AUTH-LOGIN-001"
-    message_key = "ies.diag.auth.login_failed"
-
-
-class LockedError(AuthError):
-    """登录限速锁定(429)。"""
-
-    http_status = 429
-    code = "AUTH-LOCK-001"
-    message_key = "ies.diag.auth.locked"
-
-
-class UserDisabledError(AuthError):
-    """账号停用(403)。"""
-
-    http_status = 403
-    code = "AUTH-USER-001"
-    message_key = "ies.diag.auth.user_disabled"
-
-
-class WeakPasswordError(AuthError):
-    """新密码强度不足(400)。"""
-
-    http_status = 400
-    code = "AUTH-PWD-002"
-    message_key = "ies.diag.auth.weak_password"
-
-
-class BadOldPasswordError(AuthError):
-    """旧密码不正确(400)。"""
-
-    http_status = 400
-    code = "AUTH-PWD-001"
-    message_key = "ies.diag.auth.bad_old_password"
-
-
-class SamePasswordError(AuthError):
-    """新旧密码相同(400)。"""
-
-    http_status = 400
-    code = "AUTH-PWD-003"
-    message_key = "ies.diag.auth.same_password"
-
-
-class RegistrationDisabledError(AuthError):
-    """自助注册未开启(403)。"""
-
-    http_status = 403
-    code = "AUTH-REG-001"
-    message_key = "ies.diag.auth.registration_disabled"
-
-
-class ForcePasswordChangeError(AuthError):
-    """强制改密门禁(403): 有效密码凭证 requires_change=True 时,
-    除改密/登出/本人信息外的全部业务请求被拒(C-02, AUTH-FPC-001)。"""
-
-    http_status = 403
-    code = "AUTH-FPC-001"
-    message_key = "ies.diag.auth.force_password_change"
-
-
-class BadRequestError(AuthError):
-    """请求参数非法(400)。"""
-
-    http_status = 400
-    code = "AUTH-BAD-001"
-    message_key = "ies.diag.auth.bad_request"
-
-
-class DeleteConfirmRequiredError(BadRequestError):
-    """删除账号缺少确认或确认令牌无效(400)。
-
-    误操作防护(0.2.0 B1): 删除账号会级联软删其拥有的全部项目且不可恢复,
-    必须在预览后携带签名确认令牌显式确认。错误可能原因:
-    - 未携带 confirm=true;
-    - 确认令牌缺失/过期/被篡改;
-    - 预览后目标用户拥有的项目清单发生变化(令牌与当前清单不一致)。
-    """
-
-    code = "AUTH-DEL-001"
-    message_key = "ies.diag.auth.delete_confirm_required"
-
-
-# ---------------------------------------------------------------------------
-# 登录限速(进程内存: username -> 失败时间戳 / 锁定截止时刻)
-#
-# 局限说明(H-03): 内存限速为单进程状态 —— 多 Uvicorn Worker 下失败计数被
-# 分散到各进程, 进程重启后锁定状态丢失。生产多 Worker 部署应使用 Redis 原子
-# 计数(见下方 _rate_redis); Redis 不可用(依赖缺失/连接失败/运行期错误)时
-# 自动降级为内存限速并记 warning 日志, 不阻断登录功能。
-# ---------------------------------------------------------------------------
-
-try:
-    import redis as _redis_module
-
-    _REDIS_IMPORT_OK = True
-except Exception:  # pragma: no cover - 环境缺 redis 依赖时降级内存限速
-    _redis_module = None  # type: ignore[assignment]
-    _REDIS_IMPORT_OK = False
-
-#: Redis 登录限速键前缀
-_RATE_KEY_PREFIX = "iesplan:ratelimit:login"
-#: 惰性初始化的 Redis 客户端(单例; 连接失败置 None 后不再重试, 保持内存降级)
-_rate_redis_client: Any = None
-
-
-def _rate_redis() -> Any | None:
-    """尝试获取 Redis 客户端用于跨 Worker 限速; 不可用返回 None(降级内存)。
-
-    IESPLAN_QUEUE=memory(测试/单机模式)时直接跳过 Redis, 保持进程内限速,
-    避免测试环境共享 Redis 键造成跨测试/跨进程状态污染;
-    超时/连接失败/运行期错误一律捕获, 由调用方回退内存限速。
-    """
-    global _rate_redis_client
-    if os.environ.get("IESPLAN_QUEUE", "auto").lower() == "memory":
-        return None
-    if _rate_redis_client is not None:
-        return _rate_redis_client
-    if not _REDIS_IMPORT_OK:
-        return None
-    try:
-        client = _redis_module.Redis.from_url(
-            settings.redis_url,
-            decode_responses=True,
-            socket_connect_timeout=1.0,
-            socket_timeout=2.0,
-        )
-        client.ping()  # 探测连接, 失败抛异常
-        _rate_redis_client = client
-        logger.warning("登录限速使用 Redis 后端(跨 Worker 共享)")
-    except Exception:  # noqa: BLE001 - 降级内存限速, 不阻断登录
-        logger.warning("Redis 不可用, 登录限速降级为进程内存(单进程有效)")
-        _rate_redis_client = None
-    return _rate_redis_client
-
-
-def _rate_key(username: str) -> str:
-    """Redis 限速键(用户名小写化; TTL 即锁定期, INCR 幂等)。"""
-    return f"{_RATE_KEY_PREFIX}:{(username or '').strip().lower()}"
-
-
-def _redis_is_locked(username: str) -> bool:
-    """Redis 限速判定: 计数达到上限即锁定(键 TTL 过期后自动解除)。"""
-    r = _rate_redis()
-    if r is None:
-        return False
-    try:
-        count = r.get(_rate_key(username))
-        return count is not None and int(count) >= MAX_LOGIN_FAILURES
-    except Exception:  # noqa: BLE001 - 运行期错误降级内存
-        return False
-
-
-def _redis_record_failure(username: str) -> None:
-    """Redis 记录一次失败: INCR 计数, 键 TTL = 锁定时长(滑动重置)。"""
-    r = _rate_redis()
-    if r is None:
-        return
-    try:
-        r.incr(_rate_key(username))
-        r.expire(_rate_key(username), LOCKOUT_SECONDS)
-    except Exception:  # noqa: BLE001 - 运行期错误降级内存
-        pass
-
-
-def _redis_clear(username: str) -> None:
-    """登录成功后清除 Redis 限速键。"""
-    r = _rate_redis()
-    if r is None:
-        return
-    try:
-        r.delete(_rate_key(username))
-    except Exception:  # noqa: BLE001
-        pass
-
-
-_LOGIN_FAILURES: dict[str, list[float]] = {}
-_LOGIN_LOCKED_UNTIL: dict[str, float] = {}
-_RATE_LOCK = threading.RLock()
-
-
-def _is_locked(username: str) -> bool:
-    """是否处于锁定期(Redis 优先, 降级内存); 锁定时间已过则顺带清理状态。"""
-    if _redis_is_locked(username):
-        return True
-    until = _LOGIN_LOCKED_UNTIL.get(username)
-    if until is None:
-        return False
-    if time.monotonic() < until:
-        return True
-    with _RATE_LOCK:
-        _LOGIN_LOCKED_UNTIL.pop(username, None)
-        _LOGIN_FAILURES.pop(username, None)
-    return False
-
-
-def _record_failure(username: str) -> None:
-    """记录一次登录失败(Redis 优先, 降级内存);
-    时间窗(锁定时长)内累计达到上限则触发锁定。"""
-    _redis_record_failure(username)
-    with _RATE_LOCK:
-        if _is_locked(username):
-            return
-        now = time.monotonic()
-        window = [t for t in _LOGIN_FAILURES.get(username, []) if now - t < LOCKOUT_SECONDS]
-        window.append(now)
-        if len(window) >= MAX_LOGIN_FAILURES:
-            _LOGIN_LOCKED_UNTIL[username] = now + LOCKOUT_SECONDS
-            _LOGIN_FAILURES.pop(username, None)
-        else:
-            _LOGIN_FAILURES[username] = window
-
-
-def _clear_failures(username: str) -> None:
-    """登录成功后清除该用户名限速状态(Redis + 内存)。"""
-    _redis_clear(username)
-    with _RATE_LOCK:
-        _LOGIN_FAILURES.pop(username, None)
-        _LOGIN_LOCKED_UNTIL.pop(username, None)
-
-
-def reset_login_rate_limit(username: str | None = None) -> None:
-    """清空登录限速状态(测试与运维恢复用; Redis 键一并清除)。
-
-    参数:
-        username: 为空时清空全部用户名; 否则只清指定用户名。
-    """
-    r = _rate_redis()
-    if r is not None and username is not None:
-        try:
-            r.delete(_rate_key(username))
-        except Exception:  # noqa: BLE001
-            pass
-    with _RATE_LOCK:
-        if username is None:
-            _LOGIN_FAILURES.clear()
-            _LOGIN_LOCKED_UNTIL.clear()
-        else:
-            _LOGIN_FAILURES.pop(username, None)
-            _LOGIN_LOCKED_UNTIL.pop(username, None)
 
 
 # ---------------------------------------------------------------------------
@@ -368,30 +90,6 @@ def as_utc(dt: datetime | str | None) -> datetime | None:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
-def _session_expires_at(now: datetime | None = None) -> datetime:
-    """按配置的会话 TTL 计算过期时刻。"""
-    return (now or utcnow()) + timedelta(minutes=settings.session_ttl_minutes)
-
-
-def _clean_ip(ip: str | None) -> str | None:
-    """IP 白名单化: 仅保留合法 IP, 其余(PG INET 不接受的测试客户端名等)存 NULL。"""
-    if not ip:
-        return None
-    try:
-        return str(ipaddress.ip_address(ip))
-    except ValueError:
-        return None
-
-
-def _validate_new_password(password: str) -> tuple[bool, str]:
-    """新密码校验: 强度规则 + bcrypt 72 字节上限, 返回 (ok, reason)。"""
-    ok, reason = check_password_strength(password)
-    if ok and len(password.encode("utf-8")) > 72:
-        return False, "密码过长(UTF-8 编码后不能超过 72 字节)"
-    return ok, reason
-
-
-# ---------------------------------------------------------------------------
 # 应用级设置(键值, 多 Worker 权威来源, M-12)
 # ---------------------------------------------------------------------------
 
@@ -451,7 +149,7 @@ def record_auth_event(
         event_type=event_type,
         user_id=user_id,
         session_id=session_id,
-        ip=_clean_ip(ip),
+        ip=identity_domain.clean_ip(ip),
         user_agent=user_agent,
         detail=detail,
     )
@@ -511,7 +209,7 @@ def create_user(
     db: Session,
     username: str,
     password: str,
-    role: str = ROLE_ENGINEER,
+    role: str = identity_domain.ROLE_ENGINEER,
     force_password_change: bool = True,
     *,
     display_name: str | None = None,
@@ -531,27 +229,13 @@ def create_user(
     返回:
         新用户(已提交)。
     """
-    username = (username or "").strip().lower()
-    if not re.fullmatch(USERNAME_RE, username):
-        raise BadRequestError(
-            "",
-            code="AUTH-USER-003",
-            message_key="ies.diag.auth.username_invalid",
-            params={"username": username, "pattern": USERNAME_RE},
-        )
-    if email:
-        email = email.strip().lower()
-        if not re.fullmatch(EMAIL_RE, email):
-            raise BadRequestError(
-                "",
-                code="AUTH-USER-004",
-                message_key="ies.diag.auth.email_invalid",
-                params={"email": email},
-            )
-    ok, reason = _validate_new_password(password)
+    # 输入规则归 identity 域(用户名/邮箱/密码); 本用例只做跨域编排与事务
+    username = identity_domain.validate_username(username)
+    email = identity_domain.validate_email(email)
+    ok, reason = identity_domain.validate_new_password(password)
     if not ok:
         raise WeakPasswordError(params={"reason": reason})
-    if role not in (ROLE_ADMIN, ROLE_ENGINEER):
+    if role not in (identity_domain.ROLE_ADMIN, identity_domain.ROLE_ENGINEER):
         raise BadRequestError(
             "",
             code="AUTH-USER-006",
@@ -574,7 +258,9 @@ def create_user(
                 message_key="ies.diag.auth.email_taken",
                 params={"email": email},
             )
-    role_row = ensure_role(db, role, name="工程师" if role == ROLE_ENGINEER else "管理员")
+    role_row = ensure_role(
+        db, role, name="工程师" if role == identity_domain.ROLE_ENGINEER else "管理员"
+    )
 
     # 分配公开命名空间（CSPRNG，60 bit 熵；全局唯一，碰撞重试）
     ns = None
@@ -637,9 +323,9 @@ def deactivate_user(
     if user.is_system:
         raise ForbiddenError("", params={"reason": "system_account"})
     current = identity_domain.get_user(db, user.id)
-    if current is not None and current.status == "disabled":
+    if current is not None and current.status == identity_domain.USER_STATUS_DISABLED:
         return
-    identity_domain.set_user_status(db, user.id, "disabled")
+    identity_domain.set_user_status(db, user.id, identity_domain.USER_STATUS_DISABLED)
     revoke_all_user_sessions(db, user, revoked_by=admin.id)
     record_auth_event(
         db,
@@ -665,9 +351,9 @@ def reactivate_user(
     注: 幂等判定读取当前行(理由同 deactivate_user, 快照不可作为判定依据)。
     """
     current = identity_domain.get_user(db, user.id)
-    if current is not None and current.status == "active":
+    if current is not None and current.status == identity_domain.USER_STATUS_ACTIVE:
         return
-    identity_domain.set_user_status(db, user.id, "active")
+    identity_domain.set_user_status(db, user.id, identity_domain.USER_STATUS_ACTIVE)
     record_auth_event(
         db,
         "permission_change",
@@ -830,7 +516,7 @@ def delete_user(
             extra={"reason": "account_deleted", "account_id": user.id},
         )
     # 账号停用 + 会话/凭证撤销
-    identity_domain.set_user_status(db, user.id, "disabled")
+    identity_domain.set_user_status(db, user.id, identity_domain.USER_STATUS_DISABLED)
     revoke_all_user_sessions(db, user, revoked_by=admin.id)
     identity_domain.revoke_credentials(db, user.id)
     record_auth_event(
@@ -870,7 +556,7 @@ def change_password(
         raise BadOldPasswordError()
     if old_password == new_password:
         raise SamePasswordError()
-    ok, reason = _validate_new_password(new_password)
+    ok, reason = identity_domain.validate_new_password(new_password)
     if not ok:
         raise WeakPasswordError(params={"reason": reason})
     was_force_change = cred.requires_change
@@ -910,7 +596,7 @@ def reset_password(
     user_agent: str | None = None,
 ) -> None:
     """管理员重置密码: 签发临时密码(requires_change=True), 全部旧会话失效, 写审计。"""
-    ok, reason = _validate_new_password(new_tmp)
+    ok, reason = identity_domain.validate_new_password(new_tmp)
     if not ok:
         raise WeakPasswordError(params={"reason": reason})
     now = utcnow()
@@ -961,13 +647,13 @@ def authenticate(
     成功时更新 last_login_at 并清空该用户名限速计数。
     """
     username = (username or "").strip().lower()
-    if _is_locked(username):
+    if identity_domain.is_login_locked(username):
         return None, "locked"
     user = get_user_by_username(db, username)
     if user is None:
         # 假校验: 与真实校验耗时保持一致, 防用户名枚举(时间侧信道)
         verify_password(password, _DUMMY_PASSWORD_HASH)
-        _record_failure(username)
+        identity_domain.record_login_failure(username)
         record_auth_event(
             db,
             "login_failure",
@@ -977,17 +663,18 @@ def authenticate(
         )
         db.commit()
         return None, "invalid_credentials"
-    if user.status != "active" or user.is_system:
+    block_reason = identity_domain.login_block_reason(user)
+    if block_reason is not None:
         # 假校验: 同上, 防账号状态枚举(停用/系统账号与密码错误耗时一致)
         verify_password(password, _DUMMY_PASSWORD_HASH)
-        _record_failure(username)
+        identity_domain.record_login_failure(username)
         record_auth_event(
             db,
             "login_failure",
             user_id=user.id,
             ip=ip,
             user_agent=user_agent,
-            detail={"reason": "user_disabled" if user.status != "active" else "system_account"},
+            detail={"reason": block_reason},
         )
         db.commit()
         return None, "invalid_credentials"
@@ -996,7 +683,7 @@ def authenticate(
     if cred is None or secret is None:
         # 假校验: 无有效凭证与密码错误的耗时一致(常规 401 路径)
         verify_password(password, _DUMMY_PASSWORD_HASH)
-        _record_failure(username)
+        identity_domain.record_login_failure(username)
         record_auth_event(
             db,
             "login_failure",
@@ -1008,7 +695,7 @@ def authenticate(
         db.commit()
         return None, "invalid_credentials"
     if not verify_password(password, secret):
-        _record_failure(username)
+        identity_domain.record_login_failure(username)
         record_auth_event(
             db,
             "login_failure",
@@ -1019,7 +706,7 @@ def authenticate(
         )
         db.commit()
         return None, "invalid_credentials"
-    _clear_failures(username)
+    identity_domain.clear_login_failures(username)
     user = identity_domain.touch_login(db, user.id)
     record_auth_event(
         db,
@@ -1064,17 +751,13 @@ def create_window_session(
     """
     now = utcnow()
     identity_domain.expire_sessions(db, user.id)
-    # 先撤销残留的 pending 会话(更早接管流程遗留; 部分唯一索引每用户至多一条 pending)
-    # 若存在 active 会话, 直接撤销 —— 新会话以 takeover_pending 创建,
-    # 避免同时存在两条 pending 触发唯一索引冲突(部分唯一索引每用户至多一条 active)
+    # 单活动窗口规则判定归 identity 域; 此处只执行状态写入、审计与事务
     previous = identity_domain.list_active_sessions(db, user.id)
-    pending = [s for s in previous if s.status == "takeover_pending"]
-    active = next((s for s in previous if s.status == "active"), None)
-    displaced = active is not None or bool(pending)
-    for old in pending:
-        identity_domain.set_session_status(db, old.id, "revoked", revoked_by=user.id)
-    if active is not None:
-        identity_domain.set_session_status(db, active.id, "revoked", revoked_by=user.id)
+    revoke_targets, active, displaced, new_status = identity_domain.plan_login_session(previous)
+    for old in revoke_targets:
+        identity_domain.set_session_status(
+            db, old.id, identity_domain.SESSION_STATUS_REVOKED, revoked_by=user.id
+        )
     # 创建新会话: 触发接管时初始为 takeover_pending(H-01, 确认前无业务权限);
     # 令牌原文只经返回值交调用方持有, 入库的仅为 sha256 摘要。
     token = new_session_token()
@@ -1083,17 +766,17 @@ def create_window_session(
         user_id=user.id,
         token_hash=token_hash(token),
         credential_version_at_issue=user.credential_version,
-        expires_at=_session_expires_at(now).isoformat(),
-        status="takeover_pending" if displaced else "active",
+        expires_at=identity_domain.new_session_expiry(now).isoformat(),
+        status=new_status,
     )
     # 被撤销的残留 pending/active 会话由新会话接管(补 replaced_by 指针, 接管追溯)
-    for old in pending:
+    for old in revoke_targets:
         identity_domain.set_session_status(
-            db, old.id, "revoked", revoked_by=user.id, replaced_by_session_id=new_session.id
-        )
-    if active is not None:
-        identity_domain.set_session_status(
-            db, active.id, "revoked", revoked_by=user.id, replaced_by_session_id=new_session.id
+            db,
+            old.id,
+            identity_domain.SESSION_STATUS_REVOKED,
+            revoked_by=user.id,
+            replaced_by_session_id=new_session.id,
         )
     if displaced:
         record_auth_event(
@@ -1132,20 +815,27 @@ def confirm_takeover(
     其余 pending/active 会话(理论上至多各一条, 部分唯一索引保证)一并撤销,
     保持单活动窗口不变量。返回保留的活动会话。
     """
-    # 并发防御: 确认前被新登录撤销的会话不再恢复(重新读取最新状态)
-    current = identity_domain.get_session(db, current_session.id)
-    if current is None or current.status not in ("takeover_pending", "active"):
-        raise SessionInvalidError()
+    # 并发防御: 确认前被新登录撤销的会话不再恢复(重新读取最新状态;
+    # 可确认状态判定归 identity 域)
+    current = identity_domain.require_takeover_confirmable(
+        identity_domain.get_session(db, current_session.id)
+    )
     others = [s for s in identity_domain.list_active_sessions(db, user.id) if s.id != current.id]
     # 先撤销其余 pending/active 会话, 再把当前会话置为 active
     # (状态迁移顺序避免触犯 active/pending 部分唯一索引)
     for old in others:
-        identity_domain.set_session_status(db, old.id, "revoked", revoked_by=user.id)
-    if current.status != "active":
-        current = identity_domain.set_session_status(db, current.id, "active")
+        identity_domain.set_session_status(
+            db, old.id, identity_domain.SESSION_STATUS_REVOKED, revoked_by=user.id
+        )
+    if current.status != identity_domain.SESSION_STATUS_ACTIVE:
+        current = identity_domain.set_session_status(db, current.id, identity_domain.SESSION_STATUS_ACTIVE)
     for old in others:
         identity_domain.set_session_status(
-            db, old.id, "revoked", revoked_by=user.id, replaced_by_session_id=current.id
+            db,
+            old.id,
+            identity_domain.SESSION_STATUS_REVOKED,
+            revoked_by=user.id,
+            replaced_by_session_id=current.id,
         )
     record_auth_event(
         db,
@@ -1179,7 +869,9 @@ def revoke_session(
     reason: str = "logout",
 ) -> None:
     """撤销单个会话(登出场景), 写 logout / session_revoke 审计。"""
-    identity_domain.set_session_status(db, session.id, "revoked", revoked_by=user.id)
+    identity_domain.set_session_status(
+        db, session.id, identity_domain.SESSION_STATUS_REVOKED, revoked_by=user.id
+    )
     record_auth_event(
         db,
         "logout" if reason == "logout" else "session_revoke",
@@ -1202,7 +894,9 @@ def revoke_other_sessions(
     """撤销用户除指定会话外的全部活动/待接管会话, 返回撤销数量。"""
     rows = [s for s in identity_domain.list_active_sessions(db, user.id) if s.id != keep_session_id]
     for s in rows:
-        identity_domain.set_session_status(db, s.id, "revoked", revoked_by=revoked_by)
+        identity_domain.set_session_status(
+            db, s.id, identity_domain.SESSION_STATUS_REVOKED, revoked_by=revoked_by
+        )
     if rows:
         record_auth_event(
             db,
@@ -1223,7 +917,9 @@ def revoke_all_user_sessions(
     """撤销用户全部活动/待接管会话(凭证变更/停用时调用), 返回撤销数量。"""
     rows = identity_domain.list_active_sessions(db, user.id)
     for s in rows:
-        identity_domain.set_session_status(db, s.id, "revoked", revoked_by=revoked_by)
+        identity_domain.set_session_status(
+            db, s.id, identity_domain.SESSION_STATUS_REVOKED, revoked_by=revoked_by
+        )
     if rows:
         record_auth_event(
             db,
@@ -1246,7 +942,7 @@ def expire_sessions(db: Session, user_id: int | None = None) -> int:
 def extend_session(db: Session, session: WindowSessionRecord) -> datetime:
     """会话续期: 更新最后活跃时间并按 TTL 顺延过期时刻, 返回新的过期时刻。"""
     now = utcnow()
-    new_expires_at = _session_expires_at(now)
+    new_expires_at = identity_domain.new_session_expiry(now)
     identity_domain.extend_session(db, session.id, expires_at=new_expires_at.isoformat())
     db.commit()
     return new_expires_at
@@ -1254,13 +950,15 @@ def extend_session(db: Session, session: WindowSessionRecord) -> datetime:
 
 def expire_session(db: Session, session_id: int) -> None:
     """将会话置为 expired(过期访问时系统自动过期), 并提交。"""
-    identity_domain.set_session_status(db, session_id, "expired")
+    identity_domain.set_session_status(db, session_id, identity_domain.SESSION_STATUS_EXPIRED)
     db.commit()
 
 
 def revoke_session_after_credential_change(db: Session, session_id: int, user_id: int) -> None:
     """凭证已轮换(改密/重置): 撤销旧会话(无审计事件, 调用方随后抛 401), 并提交。"""
-    identity_domain.set_session_status(db, session_id, "revoked", revoked_by=user_id)
+    identity_domain.set_session_status(
+        db, session_id, identity_domain.SESSION_STATUS_REVOKED, revoked_by=user_id
+    )
     db.commit()
 
 

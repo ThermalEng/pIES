@@ -28,6 +28,11 @@ from iesplan.models.identity import (
     WindowSession,
 )
 from iesplan.identity.contracts import (
+    SESSION_STATUS_ACTIVE,
+    SESSION_STATUS_EXPIRED,
+    SESSION_STATUS_REVOKED,
+    SESSION_STATUS_TAKEOVER_PENDING,
+    USER_STATUS_ACTIVE,
     AppSettingRecord,
     AuthEventRecord,
     CredentialRecord,
@@ -193,7 +198,7 @@ def create_user(
     username: str,
     display_name: str,
     email: str | None = None,
-    status: str = "active",
+    status: str = USER_STATUS_ACTIVE,
     is_system: bool = False,
     public_namespace: str | None = None,
 ) -> UserRecord:
@@ -416,7 +421,7 @@ def list_active_sessions(
     """用户非终态会话（active/takeover_pending），按 id 升序）。"""
     stmt = select(WindowSession).where(
         WindowSession.user_id == user_id,
-        WindowSession.status.in_(("active", "takeover_pending")),
+        WindowSession.status.in_((SESSION_STATUS_ACTIVE, SESSION_STATUS_TAKEOVER_PENDING)),
     )
     if exclude_session_id is not None:
         stmt = stmt.where(WindowSession.id != exclude_session_id)
@@ -431,7 +436,7 @@ def create_session(
     token_hash: str,
     credential_version_at_issue: int,
     expires_at: str,
-    status: str = "active",
+    status: str = SESSION_STATUS_ACTIVE,
 ) -> WindowSessionRecord:
     """创建会话行（部分唯一冲突抛 IdentityConflictError，调用方回滚）。"""
     now = _now()
@@ -465,7 +470,7 @@ def set_session_status(
     if row is None:
         raise UserNotFoundError("会话不存在", params={"session_id": session_id})
     row.status = status
-    if status in ("revoked", "expired"):
+    if status in (SESSION_STATUS_REVOKED, SESSION_STATUS_EXPIRED):
         row.revoked_at = _now()
     if revoked_by is not None:
         row.revoked_by = revoked_by
@@ -499,7 +504,7 @@ def extend_session(db: Session, session_id: int, *, expires_at: str) -> WindowSe
 def expire_sessions(db: Session, user_id: int | None = None) -> int:
     """将已过期的非终态会话置 expired，返回数量（不提交）。"""
     stmt = select(WindowSession).where(
-        WindowSession.status.in_(("active", "takeover_pending"))
+        WindowSession.status.in_((SESSION_STATUS_ACTIVE, SESSION_STATUS_TAKEOVER_PENDING))
     )
     if user_id is not None:
         stmt = stmt.where(WindowSession.user_id == user_id)
@@ -510,7 +515,7 @@ def expire_sessions(db: Session, user_id: int | None = None) -> int:
         if expires_at is not None:
             aware = expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC)
             if aware < now:
-                row.status = "expired"
+                row.status = SESSION_STATUS_EXPIRED
                 row.revoked_at = now
                 count += 1
     db.flush()

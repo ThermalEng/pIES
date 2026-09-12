@@ -131,3 +131,130 @@ class AuthEventRecord:
     event_type: str
     occurred_at: str | None = None
     detail: dict[str, Any] | None = None
+
+
+#: 用户状态取值唯一权威(users.status; 应用层与 persistence 经此复用, 不各自写字面量)。
+USER_STATUS_ACTIVE = "active"
+USER_STATUS_DISABLED = "disabled"
+
+#: 会话状态取值唯一权威(window_sessions.status)。
+SESSION_STATUS_ACTIVE = "active"
+SESSION_STATUS_TAKEOVER_PENDING = "takeover_pending"
+SESSION_STATUS_REVOKED = "revoked"
+SESSION_STATUS_EXPIRED = "expired"
+
+
+# ---------------------------------------------------------------------------
+# 认证业务异常(message_key 前缀 ies.diag.auth.*; http_status 供全局处理器映射)
+#
+# 身份错误归 identity 域所有(后端解耦 Wave 3-A: 由 application.identity 搬入,
+# 行为与诊断码不变; 应用层经本模块或应用门面复用, 不重定义)。
+# ---------------------------------------------------------------------------
+
+
+class AuthError(AppError):
+    """认证/授权错误基类: 默认 401。"""
+
+    http_status = 401
+    code = "AUTH-REQ-001"
+    message_key = "ies.diag.auth.required"
+
+
+class AuthRequiredError(AuthError):
+    """缺少窗口凭证。"""
+
+    code = "AUTH-REQ-001"
+    message_key = "ies.diag.auth.required"
+
+
+class SessionInvalidError(AuthError):
+    """窗口凭证无效(未找到/过期/已撤销/待接管/凭证版本不匹配)。"""
+
+    code = "AUTH-SESS-001"
+    message_key = "ies.diag.auth.session_invalid"
+
+
+class LoginFailedError(AuthError):
+    """登录失败(统一文案: 不区分用户不存在/密码错误/账号停用)。"""
+
+    code = "AUTH-LOGIN-001"
+    message_key = "ies.diag.auth.login_failed"
+
+
+class LockedError(AuthError):
+    """登录限速锁定(429)。"""
+
+    http_status = 429
+    code = "AUTH-LOCK-001"
+    message_key = "ies.diag.auth.locked"
+
+
+class UserDisabledError(AuthError):
+    """账号停用(403)。"""
+
+    http_status = 403
+    code = "AUTH-USER-001"
+    message_key = "ies.diag.auth.user_disabled"
+
+
+class WeakPasswordError(AuthError):
+    """新密码强度不足(400)。"""
+
+    http_status = 400
+    code = "AUTH-PWD-002"
+    message_key = "ies.diag.auth.weak_password"
+
+
+class BadOldPasswordError(AuthError):
+    """旧密码不正确(400)。"""
+
+    http_status = 400
+    code = "AUTH-PWD-001"
+    message_key = "ies.diag.auth.bad_old_password"
+
+
+class SamePasswordError(AuthError):
+    """新旧密码相同(400)。"""
+
+    http_status = 400
+    code = "AUTH-PWD-003"
+    message_key = "ies.diag.auth.same_password"
+
+
+class RegistrationDisabledError(AuthError):
+    """自助注册未开启(403)。"""
+
+    http_status = 403
+    code = "AUTH-REG-001"
+    message_key = "ies.diag.auth.registration_disabled"
+
+
+class ForcePasswordChangeError(AuthError):
+    """强制改密门禁(403): 有效密码凭证 requires_change=True 时,
+    除改密/登出/本人信息外的全部业务请求被拒(C-02, AUTH-FPC-001)。"""
+
+    http_status = 403
+    code = "AUTH-FPC-001"
+    message_key = "ies.diag.auth.force_password_change"
+
+
+class BadRequestError(AuthError):
+    """请求参数非法(400)。"""
+
+    http_status = 400
+    code = "AUTH-BAD-001"
+    message_key = "ies.diag.auth.bad_request"
+
+
+class DeleteConfirmRequiredError(BadRequestError):
+    """删除账号缺少确认或确认令牌无效(400)。
+
+    误操作防护(0.2.0 B1): 删除账号会级联软删其拥有的全部项目且不可恢复,
+    必须在预览后携带签名确认令牌显式确认。错误可能原因:
+    - 未携带 confirm=true;
+    - 确认令牌缺失/过期/被篡改;
+    - 预览后目标用户拥有的项目清单发生变化(令牌与当前清单不一致)。
+    """
+
+    code = "AUTH-DEL-001"
+    message_key = "ies.diag.auth.delete_confirm_required"
