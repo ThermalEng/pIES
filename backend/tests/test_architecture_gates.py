@@ -95,12 +95,7 @@ WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
 # 每条目均需整改: 经 services 公开面访问数据, 整改后移除条目。
 WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
     # ---- admin.py: 管理端运维直接查询 ORM ----
-    ("iesplan.api.admin", 33): frozenset({"RetentionRule"}),
-    ("iesplan.api.admin", 34): frozenset(
-        {"ComputeSlot", "Task", "TaskAttempt", "TaskDiagnostic", "TaskLease"}
-    ),
-    ("iesplan.api.admin", 35): frozenset({"User"}),
-    ("iesplan.api.admin", 36): frozenset({"AdminMaintenanceAction"}),
+    # (Wave 5 集成: admin 改经 application 用例取数, 移除 4 项)
     # ---- health.py: 健康检查直接计数 ORM ----
     # (Wave 4 集成: health 改经 application.health 只读探针, 移除 3 项)
     # ---- results.py: 结果查询任务状态与校验正则 ----
@@ -309,11 +304,8 @@ def test_api_no_direct_orm_imports():
 # 基线核查(2026-09-11, 解耦重构切片 1): API 层共 36 处 .commit() 调用, 事务
 # 所有权落在路由层, 违反"事务只由 application 提交/回滚"(宪法 §5.4)。
 # 后续切片按资源域迁移到 application 用例后逐条移除; 白名单清空后硬强制。
-WHITELIST_API_COMMIT: set[tuple[str, int]] = {
-    ("iesplan.api.admin", 253),
-    # (Wave 4 集成: auth 会话写入与 objects 对象操作已收敛到 application 用例,
-    #  移除 auth 3 条与 objects 3 条; 仅剩 admin 运维解锁 1 条, 归 Wave 5)
-}
+WHITELIST_API_COMMIT: set[tuple[str, int]] = set()
+# (Wave 5 集成: admin 运维解锁提交已上收至 application 用例, 白名单清空。)
 
 # ---------------------------------------------------------------------------
 # 门禁 5 白名单: api 跨 service 编排 (值为现状多 service 依赖的模块路径)
