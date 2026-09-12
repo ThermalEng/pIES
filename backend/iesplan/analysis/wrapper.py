@@ -1,50 +1,38 @@
-"""计算分析 wrapper:聚合计算结果与财务计算模块(03 §8.2,审查意见第 7 条)。
+"""扫描点结果消费与纯分析聚合(03 §8.2,审查意见第 7 条)。
 
-职责:
-  - `run_sweep`: 单因子扫描 — 对 `SweepSpec.values` 每个值,`apply_param` 改写
-    content(深拷贝)→ 声明扫描点 → 调用方注入的计算结果提供者(`engine`)
-    → `compute_financials` → `SweepResult`。纯函数,无 DB,便于单测;
-  - `run_batch` / `summarize_batch`: 批量分析 — 多场景 × 多参数组合笛卡尔积
-    (任务范围:批量分析(多场景/多参数组合跑));
-  - `apply_param`: 点路径改写(校验参数存在、单位已知、数值有限);
-  - `summarize_sweep`: 汇总表(基准值/变化率/单调性/极值点,前端图表数据)。
+职责(Wave 4-B: 只消费统一、不可变的计算结果/扫描点结果并做纯分析):
+  - 消费调用方(0.8 调度, application/Worker 侧)产出的扫描点结果
+    (`SweepResult` / `BatchResult`: param_value + status/kpi/financial/
+    solver_status),只做纯分析聚合,不执行计算;
+  - `apply_param`: 点路径改写(分析命令的参数应用,纯函数,无 DB);
+  - `summarize_sweep` / `summarize_batch`: 汇总表(基准值/变化率/单调性/
+    极值点,前端图表数据)。
 
-依赖(Wave 1 解耦后): analysis 只消费计算结果(ComputeResult 风格的
-status/kpi/flows/solver_status)、回执和声明输出,不直调引擎、不拼装 plan、
-不依赖 services。计算执行由调用方(Worker/application)编排并经 `engine`
-参数注入公开计算边界;`engine` 缺省为 None,缺失时抛显式未实现错误,
-不 fallback、不恢复旧运行链(0.8 计算入口未实现)。财务经公开 `finance`
-门面(`compute_financials`)。逐时大结果不落盘,只产出 SweepResult +
-financial 块(03 §8.3)。
+不负责(预留 application/0.8,不在 analysis 内执行): 构造 solver plan、
+调用计算引擎、按扫描值扇出多个计算请求并调度执行、逐点计算财务。
+`financial` 块由调用方随扫描点结果提供(analysis 只读其 irr/npv/lcoe/
+payback_years 等公开属性,不执行财务计算)。逐时大结果不落盘,只产出
+汇总与 financial 块(03 §8.3)。
 """
 
 from __future__ import annotations
 
 import copy
-import itertools
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-from iesplan.finance import (
-    FinanceParams,
-    FinancialResult,
-    compute_financials,
-    finance_params_from_config,
-)
 from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError
-from iesplan.core.timeaxis import TimeAxis
 
 if TYPE_CHECKING:
     from collections.abc import Any
 
 __all__ = [
-    "CAPACITY_KEYS",
     "AnalysisError",
     "BatchResult",
     "SweepResult",
@@ -53,23 +41,9 @@ __all__ = [
     "change_rate",
     "financial_to_dict",
     "jsonable_kpi",
-    "project_financial_inputs",
-    "run_batch",
-    "run_sweep",
     "summarize_batch",
     "summarize_sweep",
 ]
-
-#: 设备容量参数候选键(投资估算:capex = Σ unit_invest_cost × 容量,02 §5.3)
-CAPACITY_KEYS: tuple[str, ...] = (
-    "rated_capacity_kwp",
-    "rated_capacity_kw",
-    "capacity_kwh",
-    "rated_heat_kw",
-    "rated_cooling_kw",
-    "rated_power_kw",
-    "max_import_power_kw",
-)
 
 #: 财务指标展示单位(其余 kpi 键单位 "-")
 _FINANCIAL_INDICATOR_UNITS: dict[str, str] = {
@@ -136,14 +110,15 @@ class SweepSpec:
 
 @dataclass(frozen=True, slots=True)
 class SweepResult:
-    """单点扫描结果(03 §8.2)。
+    """单点扫描结果(03 §8.2): 调度侧产出的不可变扫描点记录, analysis 只消费。
 
     属性:
         param_path / param_value / unit: 本次扫描点;
-        status: 'ok' | 'infeasible' | 'error'(引擎异常/求解失败);
-        kpi: 引擎 KPI dict(Decimal 金额键保留,落库前经 jsonable_kpi);
-        financial: FinancialResult | None(仅 status='ok' 时计算);
-        solver_status: 引擎原始停止原因(如 'optimal'/'infeasible')。
+        status: 'ok' | 'infeasible' | 'error'(求解失败/执行异常, 由调度侧判定);
+        kpi: 计算 KPI dict(Decimal 金额键保留,落库前经 jsonable_kpi);
+        financial: 调用方随点提供的不可变财务块(仅 status='ok' 时存在;
+            analysis 只读 irr/npv/lcoe/payback_years 等公开属性,不执行计算);
+        solver_status: 原始停止原因(如 'optimal'/'infeasible')。
     """
 
     param_path: str
@@ -151,13 +126,13 @@ class SweepResult:
     unit: str
     status: str
     kpi: dict | None = None
-    financial: FinancialResult | None = None
+    financial: Any | None = None
     solver_status: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class BatchResult:
-    """批量组合结果(任务范围:多场景/多参数组合跑,一次引擎运行)。
+    """批量组合结果: 调度侧产出的不可变扫描点记录, analysis 只消费。
 
     scenario_index: 场景索引;param_values: 参数路径 → 取值(本次组合);
     status / kpi / financial / solver_status: 同 SweepResult。
@@ -167,7 +142,7 @@ class BatchResult:
     param_values: dict[str, float]
     status: str
     kpi: dict | None = None
-    financial: FinancialResult | None = None
+    financial: Any | None = None
     solver_status: str = ""
 
 
@@ -261,251 +236,11 @@ def apply_param(content: dict, param_path: str, value: float, unit: str | None =
 
 
 # ---------------------------------------------------------------------------
-# content → plan(扫描点声明投影;plan 装配归 assembly,执行编排归 Worker/
-# application,见本模块 docstring。输出形状是注入式计算边界 `engine`
-# 的调用约定,随调用方迁移而收敛,此处不新增装配逻辑)
-# ---------------------------------------------------------------------------
-
-
-def _local_plan(content: dict) -> dict:
-    """content → 方案 dict(镜像 worker.executors._build_plan,02 §7.4 输入结构)。"""
-    model = content.get("model") or {}
-    devices: list[dict] = []
-    for dev in model.get("devices") or []:
-        if not isinstance(dev, dict) or not dev.get("device_type"):
-            continue
-        kind = dev.get("kind") or ("new" if dev.get("is_new") else "existing")
-        devices.append(
-            {"type": dev["device_type"], "params": dict(dev.get("params") or {}), "is_new": kind == "new"}
-        )
-    cfg = content.get("calc_config") or {}
-    params = cfg.get("params") or {}
-    return {
-        "devices": devices,
-        "reverse_feed_allowed": bool(params.get("reverse_feed_allowed", False)),
-        "lambda_h": float(params.get("lambda_h", 0.05)),
-        "lambda_c": float(params.get("lambda_c", 0.08)),
-        "c_ph": float(params.get("c_ph", 0.02)),
-        "c_pc": float(params.get("c_pc", 0.02)),
-    }
-
-
-# ---------------------------------------------------------------------------
-# 财务输入提取(capex / baseline_cost)
-# ---------------------------------------------------------------------------
-
-
-def _estimate_capex(plan: dict) -> Decimal:
-    """新增设备投资估算:capex = Σ(unit_invest_cost × 容量),02 §5.3 口径。
-
-    存量设备(is_new=False)不计;缺 unit_invest_cost 或容量参数键的设备计 0。
-    """
-    total = Decimal("0")
-    for dev in plan.get("devices") or []:
-        if not isinstance(dev, dict) or dev.get("is_new") is not True:
-            continue
-        params = dev.get("params") or {}
-        unit_cost = params.get("unit_invest_cost")
-        if unit_cost is None:
-            continue
-        cap = next((params.get(k) for k in CAPACITY_KEYS if params.get(k) is not None), None)
-        if cap is None:
-            continue
-        total += Decimal(str(float(unit_cost))) * Decimal(str(float(cap)))
-    return total
-
-
-def project_financial_inputs(content: dict, plan: dict) -> tuple[Decimal, Decimal | None]:
-    """提取财务输入 (capex, baseline_cost)。
-
-    baseline_cost 来源: calc_config.params.baseline_cost 或 content['baseline_cost']
-    (元/年);缺失 → None(compute_financials 记 detail 说明)。
-    """
-    cfg = (content.get("calc_config") or {}).get("params") or {}
-    raw = cfg.get("baseline_cost", content.get("baseline_cost"))
-    baseline: Decimal | None = None
-    if raw is not None:
-        baseline = raw if isinstance(raw, Decimal) else Decimal(str(raw))
-    return _estimate_capex(plan), baseline
-
-
-# ---------------------------------------------------------------------------
-# 引擎调用(状态映射;异常不中断扫描)
-# ---------------------------------------------------------------------------
-
-_INFEASIBLE_STATUSES: frozenset[str] = frozenset({"infeasible", "unbounded"})
-
-
-def _map_status(raw: str | None) -> str:
-    """引擎 status → 扫描结果 status('ok' | 'infeasible' | 'error',03 §8.2)。"""
-    if raw == "ok":
-        return "ok"
-    if raw in _INFEASIBLE_STATUSES:
-        return "infeasible"
-    return "error"
-
-
-def _run_engine(
-    engine: Callable, plan: dict, data: dict, axis: TimeAxis, options: dict | None
-) -> tuple[str, str, dict | None, dict | None]:
-    """调用引擎并归一化结果;异常 → ('error', 异常信息, None, None)。"""
-    try:
-        result = engine(plan, data, axis, options)
-    except Exception as exc:  # noqa: BLE001 - 引擎异常记入单点结果,不中断整条扫描
-        return "error", f"{type(exc).__name__}: {exc}", None, None
-    status = _map_status(getattr(result, "status", None))
-    return (
-        status,
-        getattr(result, "stop_reason", "") or "",
-        getattr(result, "kpi", None),
-        getattr(result, "flows", None),
-    )
-
-
-# ---------------------------------------------------------------------------
-# 单因子扫描(03 §8.2 run_sweep)
-# ---------------------------------------------------------------------------
-
-
-def run_sweep(
-    content: dict,
-    data: dict,
-    axis: TimeAxis,
-    spec: SweepSpec,
-    base_options: dict | None = None,
-    *,
-    finance_params: FinanceParams | None = None,
-    engine: Callable | None = None,
-) -> list[SweepResult]:
-    """单因子扫描(03 §8.2):对 spec.values 每个值,apply_param → 计算结果 → 财务。
-
-    参数:
-        content: 项目版本内容(calc_config/model.devices,仅读取+深拷贝改写);
-        data: 逐时数据(计算输入,透传计算边界);
-        axis: 时间轴(TimeAxis);
-        spec: 扫描规格(参数路径 + 取值序列 + 单位);
-        base_options: 计算选项(透传计算边界 options,如 {'shedding': True});
-        finance_params: 财务参数(缺省取 content.calc_config 推导);
-        engine: 计算结果提供者(调用方注入的公开计算边界;接口
-            engine(plan, data, axis, options) → 结果对象含
-            status/kpi/flows/solver_status,ComputeResult 风格)。
-            缺省 None → 抛显式未实现错误(0.8 计算入口未实现,不 fallback)。
-    返回: SweepResult 列表(与 spec.values 同序);仅 'ok' 点计算 financial,
-    逐时大结果不落盘(03 §8.3)。
-    """
-    if engine is None:
-        raise AnalysisError(
-            "计算结果不可用: analysis 只消费 ComputeResult/回执/声明输出,不直调引擎;"
-            "调用方须经 engine 参数注入计算结果提供者(0.8 计算入口显式未实现)",
-            code="ANA-ENGINE-001",
-            message_key="ies.diag.analysis.compute_unimplemented",
-        )
-    results: list[SweepResult] = []
-    for value in spec.values:
-        modified = apply_param(content, spec.param_path, value, spec.unit)
-        plan = _local_plan(modified)
-        status, stop_reason, kpi, flows = _run_engine(engine, plan, data, axis, base_options)
-        financial: FinancialResult | None = None
-        if status == "ok" and isinstance(kpi, dict):
-            fp = (
-                finance_params
-                if finance_params is not None
-                else finance_params_from_config(modified.get("calc_config") or {})
-            )
-            capex, baseline = project_financial_inputs(modified, plan)
-            try:
-                financial = compute_financials(kpi, flows or {}, capex, baseline, fp)
-            except (ValueError, TypeError):
-                # 财务输入不完整(如 kpi 缺费用键且 flows 空): 降级为 None, 不阻断扫描
-                financial = None
-        results.append(
-            SweepResult(
-                param_path=spec.param_path,
-                param_value=float(value),
-                unit=spec.unit or "",
-                status=status,
-                kpi=kpi if isinstance(kpi, dict) else None,
-                financial=financial,
-                solver_status=stop_reason,
-            )
-        )
-    return results
-
-
-# ---------------------------------------------------------------------------
-# 批量分析(任务范围:多场景/多参数组合跑)
-# ---------------------------------------------------------------------------
-
-
-def run_batch(
-    content: dict,
-    data: dict,
-    axis: TimeAxis,
-    sweeps: Sequence[SweepSpec],
-    *,
-    scenarios: Sequence[dict] | None = None,
-    base_options: dict | None = None,
-    finance_params: FinanceParams | None = None,
-    engine: Callable | None = None,
-) -> list[BatchResult]:
-    """批量分析:场景 × 参数组合笛卡尔积,逐组合取计算结果(结构化输出)。
-
-    每个组合 = 各 sweep 各取一个值同时写入场景 content(apply_param),一次计算
-    边界调用;输出 BatchResult 列表(param_values 记录组合取值)。场景缺省为单个
-    [content];组合数为 Σ场景 × Π各 sweep 取值数。`engine` 语义同 run_sweep,
-    缺省 None → 抛显式未实现错误,不 fallback。
-    """
-    if engine is None:
-        raise AnalysisError(
-            "计算结果不可用: analysis 只消费 ComputeResult/回执/声明输出,不直调引擎;"
-            "调用方须经 engine 参数注入计算结果提供者(0.8 计算入口显式未实现)",
-            code="ANA-ENGINE-001",
-            message_key="ies.diag.analysis.compute_unimplemented",
-        )
-    if not sweeps:
-        raise AnalysisError("sweeps 不能为空", params={"detail": "批量分析至少需要一个扫描参数"})
-    scene_list: list[dict] = list(scenarios) if scenarios is not None else [content]
-    out: list[BatchResult] = []
-    for scene_idx, scene in enumerate(scene_list):
-        for combo in itertools.product(*[tuple(s.values) for s in sweeps]):
-            modified = scene
-            param_values: dict[str, float] = {}
-            for spec, value in zip(sweeps, combo, strict=True):
-                modified = apply_param(modified, spec.param_path, value, spec.unit)
-                param_values[spec.param_path] = float(value)
-            plan = _local_plan(modified)
-            status, stop_reason, kpi, flows = _run_engine(engine, plan, data, axis, base_options)
-            financial: FinancialResult | None = None
-            if status == "ok" and isinstance(kpi, dict):
-                fp = (
-                    finance_params
-                    if finance_params is not None
-                    else finance_params_from_config(modified.get("calc_config") or {})
-                )
-                capex, baseline = project_financial_inputs(modified, plan)
-                try:
-                    financial = compute_financials(kpi, flows or {}, capex, baseline, fp)
-                except (ValueError, TypeError):
-                    financial = None
-            out.append(
-                BatchResult(
-                    scenario_index=scene_idx,
-                    param_values=param_values,
-                    status=status,
-                    kpi=kpi if isinstance(kpi, dict) else None,
-                    financial=financial,
-                    solver_status=stop_reason,
-                )
-            )
-    return out
-
-
-# ---------------------------------------------------------------------------
 # 指标提取与汇总(03 §8.2 summarize_sweep;前端图表数据)
 # ---------------------------------------------------------------------------
 
 
-def _indicators_from(kpi: dict | None, financial: FinancialResult | None) -> dict[str, float]:
+def _indicators_from(kpi: dict | None, financial: Any | None) -> dict[str, float]:
     """从 (kpi, financial) 提取数值指标: kpi 数值键(含 Decimal)+ financial 关键字段。"""
     from decimal import Decimal as _Decimal
 
@@ -584,8 +319,13 @@ def jsonable_kpi(kpi: dict | None) -> dict | None:
     return out
 
 
-def financial_to_dict(fin: FinancialResult | None) -> dict | None:
-    """FinancialResult → 可 JSON 落库 dict(evidence financial 块,03 §7.4)。"""
+def financial_to_dict(fin: Any | None) -> dict | None:
+    """财务块 → 可 JSON 落库 dict(evidence financial 块,03 §7.4)。
+
+    输入为调用方随扫描点提供的不可变财务块(公开属性 irr/irr_status/npv/
+    capex/baseline_cost/cashflows/lcoe/payback_years/annual_op_cost/
+    annual_revenue/detail);analysis 只做结构转换,不执行计算。
+    """
     if fin is None:
         return None
     return {
