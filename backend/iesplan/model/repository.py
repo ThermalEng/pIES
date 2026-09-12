@@ -17,7 +17,11 @@ from iesplan.model.contracts import (
     ConnectionRecord,
     DeviceRecord,
     GraphRecord,
+    ModelTemplateRecord,
+    ModelTemplateRevisionRecord,
     PortRecord,
+    ProjectModelRecord,
+    TemplateDraftRevisionRecord,
 )
 
 
@@ -169,4 +173,158 @@ class ModelRepository(Protocol):
 
     def delete_connection(self, db: Session, conn_id: int) -> None:
         """删除连接行；缺失抛 ModelNotFoundError。"""
+        ...
+
+    # -- 模板主表 ---------------------------------------------------------
+
+    def get_owned_template(
+        self, db: Session, owner_id: int, template_id: str
+    ) -> ModelTemplateRecord | None:
+        """按稳定模板 ID 取当前用户的模板；无/非属返回 None。"""
+        ...
+
+    def list_owned_templates(self, db: Session, owner_id: int) -> list[ModelTemplateRecord]:
+        """当前用户模板（更新时间降序，id 降序）。"""
+        ...
+
+    def list_owned_templates_by_status(
+        self, db: Session, owner_id: int, status: str
+    ) -> list[ModelTemplateRecord]:
+        """当前用户指定状态模板（更新时间降序，id 降序）。"""
+        ...
+
+    def create_template(
+        self,
+        db: Session,
+        *,
+        template_id: str,
+        slug: str,
+        public_namespace: str,
+        owner_id: int,
+        status: str,
+        description: str | None,
+        draft_yaml_object_id: int,
+        draft_has_inputs: bool,
+        draft_revision: int,
+        draft_updated_at: Any,
+    ) -> ModelTemplateRecord:
+        """创建模板主表行；稳定 ID/用户 slug 冲突抛 ModelConflictError。"""
+        ...
+
+    def update_template(
+        self, db: Session, template_row_id: int, **fields: Any
+    ) -> ModelTemplateRecord:
+        """更新模板主表字段（仅提供字段）并返回新视图；缺失抛 ModelNotFoundError。"""
+        ...
+
+    def delete_template(self, db: Session, template_row_id: int) -> None:
+        """硬删除模板主表行；缺失抛 ModelNotFoundError。"""
+        ...
+
+    # -- 模板草稿/发布 revision --------------------------------------------
+
+    def create_draft_revision(
+        self,
+        db: Session,
+        *,
+        entry_id: int,
+        revision: int,
+        yaml_object_id: int,
+        source: str,
+        created_by: int,
+        diagnostics_object_id: int | None,
+    ) -> TemplateDraftRevisionRecord:
+        """新增不可变草稿 revision 行；冲突抛 ModelConflictError。"""
+        ...
+
+    def list_draft_revisions(self, db: Session, entry_id: int) -> list[TemplateDraftRevisionRecord]:
+        """模板草稿 revision 历史（revision 升序）。"""
+        ...
+
+    def get_draft_revision(
+        self, db: Session, entry_id: int, revision: int
+    ) -> TemplateDraftRevisionRecord | None:
+        """取精确草稿 revision；无返回 None。"""
+        ...
+
+    def get_published_revision(
+        self, db: Session, template_row_id: int, revision: int
+    ) -> ModelTemplateRevisionRecord | None:
+        """取精确发布 revision；无返回 None。"""
+        ...
+
+    def find_revision_by_idempotency(
+        self, db: Session, template_row_id: int, idempotency_key: str
+    ) -> ModelTemplateRevisionRecord | None:
+        """按幂等键取发布 revision（重放用）；无返回 None。"""
+        ...
+
+    def create_published_revision(
+        self,
+        db: Session,
+        *,
+        template_row_id: int,
+        revision: int,
+        schema_version: str,
+        input_count: int,
+        yaml_object_id: int,
+        receipt_object_id: int,
+        summary_object_id: int,
+        diagnostics_object_id: int | None,
+        idempotency_key: str | None,
+        published_by: int,
+    ) -> ModelTemplateRevisionRecord:
+        """新增不可变发布 revision 行；冲突抛 ModelConflictError。"""
+        ...
+
+    # -- 项目模型清单 ------------------------------------------------------
+
+    def get_project_model(self, db: Session, model_id: int) -> ProjectModelRecord | None:
+        """按主键取清单行；不存在返回 None。"""
+        ...
+
+    def find_project_model_by_idempotency(
+        self, db: Session, project_id: int, idempotency_key: str
+    ) -> ProjectModelRecord | None:
+        """按幂等键取清单行（重放用）；无返回 None。"""
+        ...
+
+    def create_project_model(
+        self,
+        db: Session,
+        *,
+        project_id: int,
+        suffix: int,
+        base_device_id: str,
+        device_id: str,
+        project_revision: int,
+        model_object_id: int,
+        receipt_object_id: int,
+        source: str,
+        template_id: str | None,
+        template_revision: int | None,
+        idempotency_key: str | None,
+        created_by: int,
+    ) -> ProjectModelRecord:
+        """新增清单行；编号/最终 ID 冲突抛 ModelConflictError。"""
+        ...
+
+    def update_project_model(
+        self, db: Session, model_id: int, **fields: Any
+    ) -> ProjectModelRecord:
+        """更新清单行字段（仅提供字段）并返回新视图；缺失抛 ModelNotFoundError。"""
+        ...
+
+    def delete_project_model(self, db: Session, model_id: int) -> ProjectModelRecord:
+        """硬删除清单行并返回删除前视图；缺失抛 ModelNotFoundError。"""
+        ...
+
+    def list_project_models(
+        self, db: Session, project_id: int, *, newest_first: bool = False
+    ) -> list[ProjectModelRecord]:
+        """项目清单行（默认编号升序；newest_first 时编号降序）。"""
+        ...
+
+    def allocate_project_model_suffix(self, db: Session, project_id: int) -> int:
+        """项目内分配下一个 _N 编号（只递增、删除不复用）；耗尽/冲突抛 ModelConflictError。"""
         ...

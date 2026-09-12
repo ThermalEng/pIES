@@ -20,10 +20,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
+from iesplan import model as model_domain
+from iesplan import project as project_domain
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     Diagnostic,
@@ -41,12 +42,11 @@ from iesplan.devices import (
     parse_device_model_v2,
     to_dict,
 )
-from iesplan.models.audit import AuditLog
-from iesplan.models.project import Project
-from iesplan.models.project_model import (
+from iesplan.model import (
     MODEL_SOURCE_DIRECT,
     MODEL_SOURCE_TEMPLATE,
-    ProjectModel,
+    ModelConflictError,
+    ProjectModelRecord,
 )
 from iesplan.services import project as project_service
 from iesplan.storage import (
@@ -320,42 +320,8 @@ def validate_candidate(
 
 
 def _allocate_suffix(db: Session, project_id: int) -> int:
-    """项目内分配下一个 _N 编号(原子 UPDATE..RETURNING + 唯一约束兜底)。
-
-    只递增、删除不复用: 编号来自 per-project 计数器行, 删除清单行不回落
-    计数器; 并发安全: ``UPDATE ... SET next_suffix = next_suffix + 1 ...
-    RETURNING next_suffix - 1`` 在数据库内原子完成(PostgreSQL 行锁 +
-    SQLite 写锁串行化), 并发请求不可能读到同一编号; 计数器行缺失时以
-    savepoint 插入(next_suffix=2)并重查(与存储 put_object 的唯一键竞争
-    处理同模式)。
-    """
-    for _attempt in range(3):
-        row = db.execute(
-            sa.text(
-                "UPDATE project_model_sequences SET next_suffix = next_suffix + 1 "
-                "WHERE project_id = :pid RETURNING next_suffix - 1"
-            ),
-            {"pid": project_id},
-        ).first()
-        if row is not None:
-            return int(row[0])
-        try:
-            with db.begin_nested():  # 只回滚嵌套 savepoint, 不触调用方外层事务
-                db.execute(
-                    sa.text(
-                        "INSERT INTO project_model_sequences (project_id, next_suffix) "
-                        "VALUES (:pid, 2)"
-                    ),
-                    {"pid": project_id},
-                )
-                db.flush()
-            return 1
-        except IntegrityError:
-            continue  # 并发竞争者已插入计数器行: 下一轮 UPDATE 原子重试
-    raise ConflictError(
-        "项目模型编号分配失败(并发冲突), 请重试",
-        location={"object_type": "project_model", "project_id": str(project_id)},
-    )
+    """项目内分配下一个 _N 编号(经 model 域 repository, 只递增、删除不复用)。"""
+    return model_domain.allocate_project_model_suffix(db, project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -386,13 +352,10 @@ def _rebuild_with_final_id(
     return doc, [], text, canonical_receipt(doc)
 
 
-def _find_idempotent_model(db: Session, project_id: int, idempotency_key: str) -> ProjectModel | None:
-    return db.execute(
-        sa.select(ProjectModel).where(
-            ProjectModel.project_id == project_id,
-            ProjectModel.idempotency_key == idempotency_key,
-        )
-    ).scalar_one_or_none()
+def _find_idempotent_model(
+    db: Session, project_id: int, idempotency_key: str
+) -> ProjectModelRecord | None:
+    return model_domain.find_project_model_by_idempotency(db, project_id, idempotency_key)
 
 
 def _receipt_bytes(receipt: Mapping[str, Any]) -> bytes:
@@ -400,7 +363,7 @@ def _receipt_bytes(receipt: Mapping[str, Any]) -> bytes:
                       separators=(",", ":")).encode("utf-8")
 
 
-def _load_stored_receipt(db: Session, model: ProjectModel) -> dict[str, Any]:
+def _load_stored_receipt(db: Session, model: ProjectModelRecord) -> dict[str, Any]:
     """读取清单行关联的校验回执(读取时经存储门面校验完整性)。"""
     raw = get_object(db, model.receipt_object_id)
     parsed = json.loads(raw.decode("utf-8"))
@@ -416,11 +379,7 @@ def _load_stored_receipt(db: Session, model: ProjectModel) -> dict[str, Any]:
 
 def _project_model_draft_refs(db: Session, project_id: int) -> list[dict[str, object]]:
     """项目草稿只保存模型清单引用，不复制模型正文。文本文件只校验字头。"""
-    rows = db.execute(
-        sa.select(ProjectModel)
-        .where(ProjectModel.project_id == project_id)
-        .order_by(ProjectModel.suffix)
-    ).scalars()
+    rows = model_domain.list_project_models(db, project_id)
     return [
         {
             "id": str(model.id),
@@ -453,7 +412,7 @@ def _save_project_model(
     公共 application 用例拥有提交/回滚边界。文本文件只校验字头。
     """
     project_service.ensure_access(db, user, project_id, "edit")
-    project = db.get(Project, project_id)
+    project = project_domain.get_project(db, project_id)
     if project is None or project.status == "deleted":
         raise NotFoundError(
             "项目不存在",
@@ -533,25 +492,23 @@ def _save_project_model(
         source_category="project_model_receipt",
     )
 
-    model = ProjectModel(
-        project_id=project_id,
-        suffix=suffix,
-        base_device_id=base_device_id,
-        device_id=final_id,
-        revision=1,
-        project_revision=expected_revision + 1,
-        model_object_id=model_handle.id,
-        receipt_object_id=receipt_handle.id,
-        source=source,
-        template_id=template_id,
-        template_revision=template_revision,
-        idempotency_key=idempotency_key,
-        created_by=user.id,
-    )
-    db.add(model)
     try:
-        db.flush()
-    except IntegrityError as exc:
+        model = model_domain.create_project_model(
+            db,
+            project_id=project_id,
+            suffix=suffix,
+            base_device_id=base_device_id,
+            device_id=final_id,
+            project_revision=expected_revision + 1,
+            model_object_id=model_handle.id,
+            receipt_object_id=receipt_handle.id,
+            source=source,
+            template_id=template_id,
+            template_revision=template_revision,
+            idempotency_key=idempotency_key,
+            created_by=user.id,
+        )
+    except ModelConflictError as exc:
         raise ConflictError(
             "项目模型保存冲突(编号或最终 ID 唯一性), 请重试",
             params={"project_id": project_id, "device_id": final_id},
@@ -563,24 +520,22 @@ def _save_project_model(
            ref_entity_type=FINAL_OWNER_NAMESPACE, purpose="model_yaml")
     attach(db, receipt_handle.id, FINAL_OWNER_NAMESPACE, model.id,
            ref_entity_type=FINAL_OWNER_NAMESPACE, purpose="receipt")
-    db.add(
-        AuditLog(
-            entity_type="project_model",
-            entity_id=model.id,
-            action="project_model.created",
-            actor_id=user.id,
-            actor_type="user",
-            after={
-                "project_id": project.id,
-                "device_id": final_id,
-                "suffix": suffix,
-                "source": source,
-                "template_id": template_id,
-                "template_revision": template_revision,
-            },
-        )
+    audit_domain.append_entry(
+        db,
+        entity_type="project_model",
+        entity_id=model.id,
+        action="project_model.created",
+        actor_id=user.id,
+        actor_type="user",
+        extra={
+            "project_id": project.id,
+            "device_id": final_id,
+            "suffix": suffix,
+            "source": source,
+            "template_id": template_id,
+            "template_revision": template_revision,
+        },
     )
-    db.flush()
     new_draft = project_service.replace_project_model_refs(
         db,
         user,
@@ -588,8 +543,9 @@ def _save_project_model(
         expected_revision,
         _project_model_draft_refs(db, project_id),
     )
-    model.project_revision = new_draft.revision
-    db.flush()
+    model = model_domain.update_project_model(
+        db, model.id, project_revision=new_draft.revision
+    )
     return {
         "project_model": project_model_to_dict(model),
         "receipt": final_receipt,
@@ -635,8 +591,10 @@ def save_project_model(
 # ---------------------------------------------------------------------------
 
 
-def _get_project_model(db: Session, project_id: int, model_id: int) -> ProjectModel:
-    model = db.get(ProjectModel, model_id)
+def _get_project_model(
+    db: Session, project_id: int, model_id: int
+) -> ProjectModelRecord:
+    model = model_domain.get_project_model(db, model_id)
     if model is None or model.project_id != project_id:
         raise ProjectModelNotFoundError(
             "项目模型不存在",
@@ -665,22 +623,20 @@ def _delete_project_model(
     for ref in refs:
         detach(db, ref["object_id"], FINAL_OWNER_NAMESPACE, model.id,
                ref_entity_type=FINAL_OWNER_NAMESPACE)
-    db.add(
-        AuditLog(
-            entity_type="project_model",
-            entity_id=model.id,
-            action="project_model.deleted",
-            actor_id=user.id,
-            actor_type="user",
-            after={
-                "project_id": project_id,
-                "device_id": model.device_id,
-                "suffix": model.suffix,
-            },
-        )
+    audit_domain.append_entry(
+        db,
+        entity_type="project_model",
+        entity_id=model.id,
+        action="project_model.deleted",
+        actor_id=user.id,
+        actor_type="user",
+        extra={
+            "project_id": project_id,
+            "device_id": model.device_id,
+            "suffix": model.suffix,
+        },
     )
-    db.delete(model)
-    db.flush()
+    model_domain.delete_project_model(db, model.id)
     new_draft = project_service.replace_project_model_refs(
         db,
         user,
@@ -723,15 +679,11 @@ def delete_project_model(
 def get_project_models(db: Session, user, project_id: int) -> list[dict]:
     """项目模型清单(最新在前; 编号对用户可见, 不存在"不可见已占编号")。"""
     project_service.ensure_access(db, user, project_id, "view")
-    rows = db.execute(
-        sa.select(ProjectModel)
-        .where(ProjectModel.project_id == project_id)
-        .order_by(ProjectModel.suffix.desc(), ProjectModel.id.desc())
-    ).scalars()
+    rows = model_domain.list_project_models(db, project_id, newest_first=True)
     return [project_model_to_dict(m) for m in rows]
 
 
-def project_model_to_dict(model: ProjectModel) -> dict[str, Any]:
+def project_model_to_dict(model: ProjectModelRecord) -> dict[str, Any]:
     """清单行 → 公开视图。文本文件只校验字头。"""
     return {
         "id": str(model.id),
@@ -747,5 +699,5 @@ def project_model_to_dict(model: ProjectModel) -> dict[str, Any]:
         "template_id": model.template_id,
         "template_revision": model.template_revision,
         "created_by": str(model.created_by),
-        "created_at": model.created_at.isoformat() if model.created_at else None,
+        "created_at": model.created_at,
     }
