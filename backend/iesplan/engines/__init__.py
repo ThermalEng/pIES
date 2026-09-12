@@ -23,7 +23,7 @@ from iesplan.engines.devices import (
     pv_output,
     simulate_battery,
 )
-from iesplan.engines.eval_run import EvalResult, evaluate_plan, param
+from iesplan.engines.eval_run import CAPACITY_PARAM, EvalResult, evaluate_plan, param
 from iesplan.engines.planning import PlanCandidate, PlanningResult, run_planning
 from iesplan.engines.registry import (
     DEFAULT_ALGORITHM,
@@ -51,6 +51,7 @@ __all__ = [
     "evaluate_plan",
     "EvalResult",
     "param",
+    "CAPACITY_PARAM",
     "run_planning",
     "PlanCandidate",
     "PlanningResult",
