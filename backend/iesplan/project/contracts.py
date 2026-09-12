@@ -58,6 +58,9 @@ class DraftRecord:
     is_current: bool = False
     updated_by: int = 0
     updated_at: str | None = None
+    # drafts 表无 created_at 列（以 updated_at 为准）；恒为 None，仅为兼容既有
+    # API 输出形状（旧 ORM 缺失属性读值为 None）。
+    created_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +83,7 @@ class ProjectVersionRecord:
     currency: str | None = None
     schema_version: int = 1
     content_object_id: int = 0
+    created_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

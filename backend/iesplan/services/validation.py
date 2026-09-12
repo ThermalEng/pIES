@@ -31,6 +31,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import project as project_domain
 from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
     SEVERITY_ERROR,
@@ -45,7 +46,7 @@ from iesplan.devices import get_device as get_device_type
 from iesplan.models.audit import AuditLog
 from iesplan.models.dataset import Dataset, DatasetVersion
 from iesplan.models.identity import User
-from iesplan.models.project import Project
+from iesplan.project.contracts import ProjectRecord
 from iesplan.services import config as config_service
 from iesplan.services import dataset as dataset_service
 from iesplan.services import model as model_service
@@ -240,10 +241,10 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
     )
 
 
-def _require_project(db: Session, project_id: int) -> Project:
+def _require_project(db: Session, project_id: int) -> ProjectRecord:
     """按 id 取项目; 不存在或已删除(软删)一律 404(与 U03 语义一致)。"""
-    project = db.get(Project, project_id)
-    if project is None or project.status == "deleted":
+    project = project_domain.get_project(db, project_id)
+    if project is None:
         raise NotFoundError(
             f"项目不存在: {project_id}",
             params={"project_id": project_id},
@@ -372,7 +373,7 @@ def _check_config(project_id: int, config_data: dict, graph: dict, diags: list[D
 # ---------------------------------------------------------------------------
 
 
-def _check_data(db: Session, project: Project, diags: list[Diagnostic]) -> None:
+def _check_data(db: Session, project: ProjectRecord, diags: list[Diagnostic]) -> None:
     """数据集: 当前草稿至少绑定一个版本; 绑定版本有效且属于本项目; UTC 偏移一致。
 
     绑定来源以当前草稿内容文档的 dataset_bindings 为权威(U03 dataset.bind),
@@ -397,13 +398,9 @@ def _check_data(db: Session, project: Project, diags: list[Diagnostic]) -> None:
     version_ids = [b["dataset_version_id"] for b in bindings if isinstance(b, dict)]
     rows = db.scalars(select(DatasetVersion).where(DatasetVersion.id.in_(version_ids))).all()
     by_id: dict[int, DatasetVersion] = {v.id: v for v in rows}
-    project_dataset_ids = set(
-        db.scalars(select(Dataset.id).where(Dataset.project_id == project.id)).all()
-    )
+    project_dataset_ids = set(db.scalars(select(Dataset.id).where(Dataset.project_id == project.id)).all())
     for binding in bindings:
-        if not isinstance(binding, dict) or not isinstance(
-            binding.get("dataset_version_id"), int
-        ):
+        if not isinstance(binding, dict) or not isinstance(binding.get("dataset_version_id"), int):
             continue  # 内容损坏的绑定条目由草稿内容校验负责, 不在此重复报
         version_id = binding["dataset_version_id"]
         version = by_id.get(version_id)
@@ -515,7 +512,7 @@ def _latest_baseline_evidence(db: Session, project_id: int) -> AuditLog | None:
     )
 
 
-def _current_assumptions(project: Project, config: dict) -> dict:
+def _current_assumptions(project: ProjectRecord, config: dict) -> dict:
     """从当前配置导出财务基准关键假设(与确认时记录的键集合一致)。"""
     econ = (config.get("parameters") or {}).get("economic") or {}
     return {
@@ -529,7 +526,7 @@ def _current_assumptions(project: Project, config: dict) -> dict:
 
 
 def _check_financial_baseline(
-    db: Session, project: Project, config_data: dict, diags: list[Diagnostic]
+    db: Session, project: ProjectRecord, config_data: dict, diags: list[Diagnostic]
 ) -> None:
     """财务基准确认证据检查(架构宪法 §16 安全与审计): 确认人齐全且确认内容
     与当前配置一致即通过; 不一致 → VALID-FIN-002 警告(直接比对原文, 无摘要)。"""
@@ -580,7 +577,7 @@ def _check_financial_baseline(
 # ---------------------------------------------------------------------------
 
 
-def _check_readiness(project: Project, diags: list[Diagnostic]) -> None:
+def _check_readiness(project: ProjectRecord, diags: list[Diagnostic]) -> None:
     """计算就绪: 项目活动且快照可组装(项目版本存在或草稿可固化)。"""
     loc = {"object_type": "project", "object_id": str(project.id), "field": "snapshot_assembly"}
     if project.status != "active":
@@ -681,9 +678,9 @@ def store_validation_report(db: Session, project_id: int, report: ValidationRepo
             message_key="ies.diag.valid.report_mismatch",
             params={"report_project_id": report.project_id, "project_id": project_id},
         )
-    raw = json.dumps(
-        report.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    raw = json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     obj = dataset_service.put_object(db, raw, _REPORT_MEDIA_TYPE)
     dataset_service.add_object_ref(
         db, {"id": obj.id}, "report", "project", project_id, purpose="项目校验报告"

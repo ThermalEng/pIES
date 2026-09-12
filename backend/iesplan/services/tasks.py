@@ -29,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan import __version__
+from iesplan import project as project_domain
 from iesplan.config import settings
 from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
@@ -43,7 +44,7 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import new_id
-from iesplan.core.jsonutil import canonical_json, jsonable
+from iesplan.core.jsonutil import jsonable
 from iesplan.models.calc import (
     CalcSnapshot,
     ComputeSlot,
@@ -56,9 +57,9 @@ from iesplan.models.calc import (
 from iesplan.models.common import IDEMPOTENCY_KEY_RE
 from iesplan.models.dataset import DatasetFile
 from iesplan.models.identity import User
-from iesplan.models.project import Project, ProjectVersion
 from iesplan.models.result import EvidencePackage, Report
 from iesplan.models.uncertainty import SampleTask
+from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.services import identity as identity_service
 from iesplan.services import project as project_service
 from iesplan.services import queue
@@ -73,7 +74,14 @@ if TYPE_CHECKING:
 
 #: 全部任务类型(01 §7.2 ck_tasks_type; 03 §9.7 增补 analysis)
 TASK_TYPES: tuple[str, ...] = (
-    "calc", "optimization", "uncertainty", "analysis", "import", "export", "report", "dataset_build"
+    "calc",
+    "optimization",
+    "uncertainty",
+    "analysis",
+    "import",
+    "export",
+    "report",
+    "dataset_build",
 )
 #: 计算类任务(必须绑定 calc_snapshot_id, 规格 2.1)
 COMPUTE_TYPES: tuple[str, ...] = ("calc", "optimization", "uncertainty", "analysis")
@@ -196,10 +204,9 @@ class StorageEstimate:
 # ---------------------------------------------------------------------------
 
 
-
 def _resolve_project_inputs(
-    db: Session, project: Project, actor: User, *, freeze: bool
-) -> tuple[ProjectVersion | None, dict]:
+    db: Session, project: ProjectRecord, actor: User, *, freeze: bool
+) -> tuple[ProjectVersionRecord | None, dict]:
     """解析任务输入: 项目版本(或当前草稿内容, 需要时固化)。
 
     返回 (version, content): version 为 None 表示未固化(仅读草稿内容)。
@@ -210,7 +217,7 @@ def _resolve_project_inputs(
     """
     version = None
     if project.current_version_id is not None:
-        version = db.get(ProjectVersion, project.current_version_id)
+        version = project_domain.get_version(db, project.id, project.current_version_id)
         if version is None:
             raise AppError(
                 "项目版本指针缺失(数据损坏)",
@@ -257,9 +264,18 @@ def _derive_random_seed(version_id: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_inputs_equal(snapshot: CalcSnapshot, *, dataset_ids: list[int], calc_config: dict,
-                           program_version: str, extensions: dict, random_seed: int,
-                           tolerances: dict, canonical_text: str | None, receipt: dict) -> bool:
+def _snapshot_inputs_equal(
+    snapshot: CalcSnapshot,
+    *,
+    dataset_ids: list[int],
+    calc_config: dict,
+    program_version: str,
+    extensions: dict,
+    random_seed: int,
+    tolerances: dict,
+    canonical_text: str | None,
+    receipt: dict,
+) -> bool:
     """快照输入一致判定: 全部快照内容字段逐项相等(不使用内容摘要)。"""
     return (
         list(snapshot.dataset_version_ids or []) == list(dataset_ids)
@@ -314,9 +330,15 @@ def assemble_snapshot(
         .order_by(CalcSnapshot.id.desc())
     ).scalars():
         if _snapshot_inputs_equal(
-            candidate, dataset_ids=dataset_ids, calc_config=calc_config,
-            program_version=__version__, extensions=extensions, random_seed=random_seed,
-            tolerances=tolerances, canonical_text=artifact.canonical_text, receipt=receipt,
+            candidate,
+            dataset_ids=dataset_ids,
+            calc_config=calc_config,
+            program_version=__version__,
+            extensions=extensions,
+            random_seed=random_seed,
+            tolerances=tolerances,
+            canonical_text=artifact.canonical_text,
+            receipt=receipt,
         ):
             return candidate  # 相同输入复用既有快照(不可变, 复用安全)
 
@@ -337,9 +359,7 @@ def assemble_snapshot(
     return snapshot
 
 
-def _assembly_gate(
-    db: Session, project_id: int, content: dict, task_type: str
-) -> ValidatedAssemblyArtifact:
+def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) -> ValidatedAssemblyArtifact:
     """计算任务统一装配闸门：只在完整四阶段校验后签发规范三件套。
 
     GUI 项目导出与手写装配共用 ``validate_project_export`` 后续校验链；任何
@@ -347,9 +367,7 @@ def _assembly_gate(
     ``CheckResult`` 或可选 assembly_text。
     """
     if task_type not in COMPUTE_TYPES:
-        raise InvalidRequestError(
-            "仅计算类任务可装配计算快照", params={"task_type": task_type}
-        )
+        raise InvalidRequestError("仅计算类任务可装配计算快照", params={"task_type": task_type})
     from iesplan.assembly import AssemblyValidationError, validate_project_export
 
     export_content = dict(content)
@@ -427,7 +445,9 @@ def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_storage_estimate_inputs(db: Session, project: Project, actor: User) -> tuple[dict, list[int]]:
+def _resolve_storage_estimate_inputs(
+    db: Session, project: ProjectRecord, actor: User
+) -> tuple[dict, list[int]]:
     """只读解析估算输入(版本或草稿内容, 不固化不写库)。"""
     _version, content = _resolve_project_inputs(db, project, actor, freeze=False)
     return content, _bound_dataset_ids(content)
@@ -438,43 +458,53 @@ def list_cleanup_suggestions(db: Session) -> list[dict[str, Any]]:
     suggestions: list[dict[str, Any]] = []
 
     orphaned = orphaned_stats(db)
-    suggestions.append({
-        "action": "cleanup_orphaned_objects",
-        "message_key": "ies.fix.store.orphaned",
-        "count": orphaned["count"],
-        "estimate_bytes": orphaned["total_bytes"],
-    })
+    suggestions.append(
+        {
+            "action": "cleanup_orphaned_objects",
+            "message_key": "ies.fix.store.orphaned",
+            "count": orphaned["count"],
+            "estimate_bytes": orphaned["total_bytes"],
+        }
+    )
 
     report_count = db.execute(sa.select(sa.func.count(Report.id))).scalar() or 0
-    suggestions.append({
-        "action": "archive_old_reports",
-        "message_key": "ies.fix.store.reports",
-        "count": int(report_count),
-        "estimate_bytes": 0,  # 归档释放量由 U11 对象服务按实际对象计算
-    })
+    suggestions.append(
+        {
+            "action": "archive_old_reports",
+            "message_key": "ies.fix.store.reports",
+            "count": int(report_count),
+            "estimate_bytes": 0,  # 归档释放量由 U11 对象服务按实际对象计算
+        }
+    )
 
-    terminal_tasks = db.execute(
-        sa.select(sa.func.count(Task.id)).where(Task.status.in_(TERMINAL_STATUSES))
-    ).scalar() or 0
-    suggestions.append({
-        "action": "cleanup_terminal_task_files",
-        "message_key": "ies.fix.store.task_files",
-        "count": int(terminal_tasks),
-        "estimate_bytes": 0,
-    })
+    terminal_tasks = (
+        db.execute(sa.select(sa.func.count(Task.id)).where(Task.status.in_(TERMINAL_STATUSES))).scalar() or 0
+    )
+    suggestions.append(
+        {
+            "action": "cleanup_terminal_task_files",
+            "message_key": "ies.fix.store.task_files",
+            "count": int(terminal_tasks),
+            "estimate_bytes": 0,
+        }
+    )
 
-    suggestions.append({
-        "action": "archive_project_versions",
-        "message_key": "ies.fix.store.versions",
-        "count": 0,
-        "estimate_bytes": 0,
-    })
-    suggestions.append({
-        "action": "reduce_samples_or_horizon",
-        "message_key": "ies.fix.store.business_throttle",
-        "count": 0,
-        "estimate_bytes": 0,
-    })
+    suggestions.append(
+        {
+            "action": "archive_project_versions",
+            "message_key": "ies.fix.store.versions",
+            "count": 0,
+            "estimate_bytes": 0,
+        }
+    )
+    suggestions.append(
+        {
+            "action": "reduce_samples_or_horizon",
+            "message_key": "ies.fix.store.business_throttle",
+            "count": 0,
+            "estimate_bytes": 0,
+        }
+    )
     return suggestions
 
 
@@ -555,7 +585,8 @@ def ensure_task_belongs(db: Session, project_id: int, task_id: int) -> Task:
     task = _get_task(db, task_id)
     if task.project_id != project_id:
         raise NotFoundError(
-            "任务不存在", params={"task_id": task_id, "project_id": project_id},
+            "任务不存在",
+            params={"task_id": task_id, "project_id": project_id},
             location={"object_type": "task", "object_id": task_id},
         )
     return task
@@ -622,13 +653,15 @@ def create_task(
     if idempotency_key is not None and not re.fullmatch(IDEMPOTENCY_KEY_RE, idempotency_key):
         raise InvalidRequestError(
             "幂等键格式非法(须匹配 ^[A-Za-z0-9._:-]{1,128}$)",
-            code="TASK-REQ-003", params={"idempotency_key": idempotency_key},
+            code="TASK-REQ-003",
+            params={"idempotency_key": idempotency_key},
         )
     if parent_task_id is not None:
         parent = _get_task(db, parent_task_id)
         if parent.project_id != project_id:
             raise InvalidRequestError(
-                "父任务不属于该项目", code="TASK-REQ-004",
+                "父任务不属于该项目",
+                code="TASK-REQ-004",
                 params={"parent_task_id": parent_task_id, "project_id": project_id},
             )
 
@@ -654,9 +687,12 @@ def create_task(
         if estimate.blocked:
             raise StorageQuotaError(
                 "存储空间不足, 任务提交被拒绝",
-                params={"need_bytes": estimate.need, "avail_bytes": estimate.avail,
-                        "min_pad_bytes": settings.storage_min_free_bytes,
-                        "suggestions": estimate.suggestions},
+                params={
+                    "need_bytes": estimate.need,
+                    "avail_bytes": estimate.avail,
+                    "min_pad_bytes": settings.storage_min_free_bytes,
+                    "suggestions": estimate.suggestions,
+                },
                 location={"object_type": "project", "object_id": project_id},
             )
         # 3) 快照装配(去重复用)
@@ -710,14 +746,26 @@ def create_task(
     db.add(task)
     db.flush()
     _write_diagnostic(
-        db, task.id, level=SEVERITY_INFO, code=TASK_QUEUED, message="任务已排队",
-        context={"trace_id": trace_id, "queue": pool, "snapshot_id": task.calc_snapshot_id,
-                 "parent_task_id": parent_task_id},
+        db,
+        task.id,
+        level=SEVERITY_INFO,
+        code=TASK_QUEUED,
+        message="任务已排队",
+        context={
+            "trace_id": trace_id,
+            "queue": pool,
+            "snapshot_id": task.calc_snapshot_id,
+            "parent_task_id": parent_task_id,
+        },
     )
     # 5) 入队(可重建视图; 权威事实 = tasks.status='queued')
     queue.enqueue(
-        task.id, pool, task_type=task_type, snapshot_id=task.calc_snapshot_id,
-        priority=priority, trace_id=trace_id,
+        task.id,
+        pool,
+        task_type=task_type,
+        snapshot_id=task.calc_snapshot_id,
+        priority=priority,
+        trace_id=trace_id,
     )
     return task
 
@@ -736,9 +784,10 @@ def _ensure_slots(db: Session) -> None:
     capacity 行、每行 capacity=1, 池并发度 = 行数, 槽行与尝试一一对应。
     """
     for pool, capacity in (("compute", settings.compute_slots), ("io", IO_SLOT_CAPACITY)):
-        existing = db.execute(
-            select(sa.func.count(ComputeSlot.id)).where(ComputeSlot.pool_name == pool)
-        ).scalar() or 0
+        existing = (
+            db.execute(select(sa.func.count(ComputeSlot.id)).where(ComputeSlot.pool_name == pool)).scalar()
+            or 0
+        )
         for _ in range(max(capacity - int(existing), 0)):
             db.add(ComputeSlot(pool_name=pool, status="free", capacity=1, in_use=0))
     db.flush()
@@ -747,12 +796,16 @@ def _ensure_slots(db: Session) -> None:
 def acquire_slot(db: Session, pool_name: str) -> ComputeSlot | None:
     """占用一个并发槽(in_use+1, FOR UPDATE 行锁防并发争抢); 无空槽返回 None。"""
     _ensure_slots(db)
-    slots = db.execute(
-        select(ComputeSlot)
-        .where(ComputeSlot.pool_name == pool_name, ComputeSlot.status.in_(("free", "busy")))
-        .order_by(ComputeSlot.id)
-        .with_for_update()
-    ).scalars().all()
+    slots = (
+        db.execute(
+            select(ComputeSlot)
+            .where(ComputeSlot.pool_name == pool_name, ComputeSlot.status.in_(("free", "busy")))
+            .order_by(ComputeSlot.id)
+            .with_for_update()
+        )
+        .scalars()
+        .all()
+    )
     for slot in slots:
         if slot.in_use < slot.capacity:
             slot.in_use += 1
@@ -794,17 +847,24 @@ def claim_and_run(db: Session, task_id: int, worker_id: str) -> Claim | None:
     attempt_no = task.attempt_count + 1
     now = datetime.now(UTC)
     attempt = TaskAttempt(
-        task_id=task.id, attempt_no=attempt_no, worker_id=worker_id,
-        status="running", started_at=now,
+        task_id=task.id,
+        attempt_no=attempt_no,
+        worker_id=worker_id,
+        status="running",
+        started_at=now,
     )
     db.add(attempt)
     db.flush()
     token = uuid4()
     db.add(
         TaskLease(
-            attempt_id=attempt.id, lease_token=token, acquired_by=worker_id,
-            acquired_at=now, renewed_at=now,
-            expires_at=now + timedelta(seconds=LEASE_TTL_SECONDS), status="active",
+            attempt_id=attempt.id,
+            lease_token=token,
+            acquired_by=worker_id,
+            acquired_at=now,
+            renewed_at=now,
+            expires_at=now + timedelta(seconds=LEASE_TTL_SECONDS),
+            status="active",
         )
     )
     task.status = "running"
@@ -875,7 +935,11 @@ def complete_task(
     task.updated_at = datetime.now(UTC)
     queue.clear_cancel(task.id)
     _write_diagnostic(
-        db, task.id, level=SEVERITY_INFO, code=TASK_QUEUED, message="任务完成",
+        db,
+        task.id,
+        level=SEVERITY_INFO,
+        code=TASK_QUEUED,
+        message="任务完成",
         attempt_id=attempt.id if attempt else None,
         context={"business_outcome": outcome},
     )
@@ -900,17 +964,20 @@ def fail_task(
     if outcome is None:
         # 快照/数据校验失败 → insufficient_evidence(规格 3.2 表)
         outcome = (
-            "insufficient_evidence"
-            if code in (TASK_DATA_SNAPSHOT_MISSING, TASK_DATA_HASH_MISMATCH)
-            else None
+            "insufficient_evidence" if code in (TASK_DATA_SNAPSHOT_MISSING, TASK_DATA_HASH_MISMATCH) else None
         )
     attempt = _finish_attempt(db, task, status="failed", stop_reason=code or "error")
     task.status = "failed"
     task.business_outcome = outcome
     task.updated_at = datetime.now(UTC)
     _write_diagnostic(
-        db, task.id, level=level, code=code or "TASK-SOLVE-001", message=message,
-        attempt_id=attempt.id if attempt else None, stack_trace=stack_trace,
+        db,
+        task.id,
+        level=level,
+        code=code or "TASK-SOLVE-001",
+        message=message,
+        attempt_id=attempt.id if attempt else None,
+        stack_trace=stack_trace,
         context={"outcome": outcome},
     )
     return task
@@ -927,7 +994,11 @@ def timeout_task(db: Session, task_id: int, *, has_incumbent: bool = False) -> T
     task.business_outcome = "restricted_results" if has_incumbent else "no_recommendation"
     task.updated_at = datetime.now(UTC)
     _write_diagnostic(
-        db, task.id, level=SEVERITY_ERROR, code=TASK_TIMEOUT, message="任务超过硬超时",
+        db,
+        task.id,
+        level=SEVERITY_ERROR,
+        code=TASK_TIMEOUT,
+        message="任务超过硬超时",
         attempt_id=attempt.id if attempt else None,
         context={"seconds": settings.task_timeout_hours * 3600, "incumbent_saved": has_incumbent},
     )
@@ -968,14 +1039,18 @@ def cancel_task(db: Session, task_id: int, reason: str = "user_cancel", actor_id
     task.updated_at = now
     queue.set_cancel(task.id, reason)
     # 批量传播: uncertainty 父任务 → 未完成子任务(规格 5.4/6.1)
-    child_ids = db.execute(
-        select(Task.id)
-        .join(SampleTask, SampleTask.id == Task.id)
-        .where(
-            SampleTask.parent_task_id == task_id,
-            Task.status.not_in(TERMINAL_STATUSES),
+    child_ids = (
+        db.execute(
+            select(Task.id)
+            .join(SampleTask, SampleTask.id == Task.id)
+            .where(
+                SampleTask.parent_task_id == task_id,
+                Task.status.not_in(TERMINAL_STATUSES),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for child_id in child_ids:
         child = _get_task(db, child_id)
         if child.status == "queued":
@@ -999,17 +1074,21 @@ def acknowledge_cancel(db: Session, task_id: int) -> Task:
         return task
     if task.status != "cancelling":
         raise TaskStateError(
-            "任务不在取消中", params={"task_id": task_id, "status": task.status},
+            "任务不在取消中",
+            params={"task_id": task_id, "status": task.status},
             location={"object_type": "task", "object_id": task_id},
         )
     attempt = _finish_attempt(db, task, status="stopped", stop_reason="cancelled")
     outcome: str | None = None
     if task.type == "uncertainty":
-        completed_children = db.execute(
-            sa.select(sa.func.count(Task.id))
-            .join(SampleTask, SampleTask.id == Task.id)
-            .where(SampleTask.parent_task_id == task.id, Task.status == "completed")
-        ).scalar() or 0
+        completed_children = (
+            db.execute(
+                sa.select(sa.func.count(Task.id))
+                .join(SampleTask, SampleTask.id == Task.id)
+                .where(SampleTask.parent_task_id == task.id, Task.status == "completed")
+            ).scalar()
+            or 0
+        )
         if completed_children > 0:
             outcome = "partial_batch"
     task.status = "cancelled"
@@ -1017,7 +1096,11 @@ def acknowledge_cancel(db: Session, task_id: int) -> Task:
     task.updated_at = datetime.now(UTC)
     queue.clear_cancel(task.id)
     _write_diagnostic(
-        db, task.id, level=SEVERITY_INFO, code=TASK_QUEUED, message="任务已取消",
+        db,
+        task.id,
+        level=SEVERITY_INFO,
+        code=TASK_QUEUED,
+        message="任务已取消",
         attempt_id=attempt.id if attempt else None,
         context={"business_outcome": outcome},
     )
@@ -1039,7 +1122,8 @@ def retry_task(db: Session, user: User, task_id: int) -> Task:
     project_service.ensure_access(db, user, task.project_id, "edit")
     if task.status not in TERMINAL_STATUSES:
         raise TaskStateError(
-            "仅终态任务可手动重试", params={"task_id": task_id, "status": task.status},
+            "仅终态任务可手动重试",
+            params={"task_id": task_id, "status": task.status},
             location={"object_type": "task", "object_id": task_id},
         )
     if task.type in COMPUTE_TYPES and task.calc_snapshot_id is None:
@@ -1058,13 +1142,20 @@ def retry_task(db: Session, user: User, task_id: int) -> Task:
     task.updated_at = datetime.now(UTC)
     db.flush()
     _write_diagnostic(
-        db, task.id, level=SEVERITY_INFO, code=TASK_QUEUED, message="手动重试已排队",
-        context={"trace_id": trace_id, "queue": pool, "snapshot_id": task.calc_snapshot_id,
-                 "retry": True},
+        db,
+        task.id,
+        level=SEVERITY_INFO,
+        code=TASK_QUEUED,
+        message="手动重试已排队",
+        context={"trace_id": trace_id, "queue": pool, "snapshot_id": task.calc_snapshot_id, "retry": True},
     )
     queue.enqueue(
-        task.id, pool, task_type=task.type, snapshot_id=task.calc_snapshot_id,
-        priority=task.priority, trace_id=trace_id,
+        task.id,
+        pool,
+        task_type=task.type,
+        snapshot_id=task.calc_snapshot_id,
+        priority=task.priority,
+        trace_id=trace_id,
     )
     return task
 
@@ -1075,7 +1166,11 @@ def retry_task(db: Session, user: User, task_id: int) -> Task:
 
 
 def record_progress(
-    db: Session, task_id: int, stage: str, percent: float, detail: dict[str, Any] | None = None,
+    db: Session,
+    task_id: int,
+    stage: str,
+    percent: float,
+    detail: dict[str, Any] | None = None,
     attempt_id: int | None = None,
 ) -> TaskAttempt | None:
     """记录任务进度(PG UPSERT + Redis 秒级进度, 规格 7.1)。
@@ -1095,10 +1190,15 @@ def record_progress(
     ).scalar_one_or_none()
     now = datetime.now(UTC)
     if existing is None:
-        db.add(TaskProgress(
-            attempt_id=attempt.id, progress_percent=percent, stage=stage,
-            detail=detail, updated_at=now,
-        ))
+        db.add(
+            TaskProgress(
+                attempt_id=attempt.id,
+                progress_percent=percent,
+                stage=stage,
+                detail=detail,
+                updated_at=now,
+            )
+        )
     else:
         existing.progress_percent = percent
         existing.stage = stage
@@ -1129,9 +1229,13 @@ def _task_trace_id(db: Session, task: Task) -> str | None:
 
 def _progress_summary(db: Session, task: Task) -> tuple[int | None, float, str | None, dict[str, Any] | None]:
     """当前进度摘要 (attempt_no, percent, stage, detail): running 优先读 Redis 秒级进度。"""
-    attempt = db.execute(
-        select(TaskAttempt).where(TaskAttempt.task_id == task.id).order_by(TaskAttempt.attempt_no.desc())
-    ).scalars().first()
+    attempt = (
+        db.execute(
+            select(TaskAttempt).where(TaskAttempt.task_id == task.id).order_by(TaskAttempt.attempt_no.desc())
+        )
+        .scalars()
+        .first()
+    )
     if attempt is None:
         return None, 0.0, "queued" if task.status == "queued" else None, None
     percent: float = 0.0
@@ -1207,8 +1311,12 @@ def task_summary(db: Session, task: Task) -> dict[str, Any]:
         "created_at": task.created_at,
         "updated_at": task.updated_at,
         "result_available": evidence_exists,
-        "summary": {"attempt_no": attempt_no, "percent": percent, "stage": stage,
-                    "queue_position": queue_position},
+        "summary": {
+            "attempt_no": attempt_no,
+            "percent": percent,
+            "stage": stage,
+            "queue_position": queue_position,
+        },
     }
     trace_id = _task_trace_id(db, task)
     if trace_id is not None:
@@ -1248,18 +1356,14 @@ def list_tasks(
         available_ids: set[int] = set()
         if completed_ids:
             statuses = db.execute(
-                select(EvidencePackage.task_id, EvidencePackage.status)
-                .where(
+                select(EvidencePackage.task_id, EvidencePackage.status).where(
                     EvidencePackage.task_id.in_(completed_ids),
                     EvidencePackage.status.in_(("complete", "partial")),
                 )
             ).all()
             available_ids = {tid for tid, _ in statuses}
         _result_available_batch = available_ids
-        items = [
-            _task_summary_prefetched(db, task, _result_available_batch)
-            for task in page_tasks
-        ]
+        items = [_task_summary_prefetched(db, task, _result_available_batch) for task in page_tasks]
     else:
         items = []
     next_cursor = rows[-1].id if len(rows) > limit else None
@@ -1294,33 +1398,46 @@ def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[
     task = _get_task(db, task_id)
     if task.project_id != project_id:
         raise NotFoundError(
-            "任务不存在", params={"task_id": task_id, "project_id": project_id},
+            "任务不存在",
+            params={"task_id": task_id, "project_id": project_id},
             location={"object_type": "task", "object_id": task_id},
         )
     detail = task_summary(db, task)
     if task.calc_snapshot_id is not None:
         snapshot = db.get(CalcSnapshot, task.calc_snapshot_id)
         detail["calc_snapshot"] = (
-            {"id": snapshot.id, "random_seed": snapshot.random_seed}
-            if snapshot is not None else None
+            {"id": snapshot.id, "random_seed": snapshot.random_seed} if snapshot is not None else None
         )
     else:
         detail["calc_snapshot"] = None
 
-    attempts = db.execute(
-        select(TaskAttempt).where(TaskAttempt.task_id == task.id).order_by(TaskAttempt.attempt_no)
-    ).scalars().all()
+    attempts = (
+        db.execute(select(TaskAttempt).where(TaskAttempt.task_id == task.id).order_by(TaskAttempt.attempt_no))
+        .scalars()
+        .all()
+    )
     detail["attempts"] = [
-        {"id": a.id, "attempt_no": a.attempt_no, "status": a.status, "worker_id": a.worker_id,
-         "stop_reason": a.stop_reason, "started_at": a.started_at, "finished_at": a.finished_at}
+        {
+            "id": a.id,
+            "attempt_no": a.attempt_no,
+            "status": a.status,
+            "worker_id": a.worker_id,
+            "stop_reason": a.stop_reason,
+            "started_at": a.started_at,
+            "finished_at": a.finished_at,
+        }
         for a in attempts
     ]
     attempt_ids = [a.id for a in attempts] or [0]
-    lease = db.execute(
-        select(TaskLease)
-        .where(TaskLease.attempt_id.in_(attempt_ids), TaskLease.status == "active")
-        .order_by(TaskLease.id.desc())
-    ).scalars().first()
+    lease = (
+        db.execute(
+            select(TaskLease)
+            .where(TaskLease.attempt_id.in_(attempt_ids), TaskLease.status == "active")
+            .order_by(TaskLease.id.desc())
+        )
+        .scalars()
+        .first()
+    )
     detail["current_lease"] = None
     if lease is not None:
         # 只暴露 acquired_by/renewed_at/expires_at, 不暴露 lease_token(规格 9.2)
@@ -1334,38 +1451,59 @@ def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[
 
     attempt_no, percent, stage, detail_json = _progress_summary(db, task)
     detail["progress"] = {
-        "attempt_no": attempt_no, "percent": percent, "stage": stage,
-        "detail": detail_json, "updated_at": None, "source": "pg",
+        "attempt_no": attempt_no,
+        "percent": percent,
+        "stage": stage,
+        "detail": detail_json,
+        "updated_at": None,
+        "source": "pg",
     }
-    progress_row = db.execute(
-        select(TaskProgress)
-        .join(TaskAttempt, TaskAttempt.id == TaskProgress.attempt_id)
-        .where(TaskAttempt.task_id == task.id)
-        .order_by(TaskAttempt.attempt_no.desc())
-    ).scalars().first()
+    progress_row = (
+        db.execute(
+            select(TaskProgress)
+            .join(TaskAttempt, TaskAttempt.id == TaskProgress.attempt_id)
+            .where(TaskAttempt.task_id == task.id)
+            .order_by(TaskAttempt.attempt_no.desc())
+        )
+        .scalars()
+        .first()
+    )
     if progress_row is not None:
         detail["progress"]["updated_at"] = progress_row.updated_at
 
-    diagnostics = db.execute(
-        select(TaskDiagnostic).where(TaskDiagnostic.task_id == task.id).order_by(TaskDiagnostic.id)
-    ).scalars().all()
+    diagnostics = (
+        db.execute(
+            select(TaskDiagnostic).where(TaskDiagnostic.task_id == task.id).order_by(TaskDiagnostic.id)
+        )
+        .scalars()
+        .all()
+    )
     # M-03: stack_trace 与完整 context 仅对全局管理员返回(受控审计视角);
     # viewer/owner 一律返回 stack_trace=null, context 仅保留白名单字段
     is_admin = identity_service.has_role(db, user, "admin")
     detail["diagnostics"] = [
         {
-            "id": d.id, "level": d.level, "code": d.code, "message": d.message,
+            "id": d.id,
+            "level": d.level,
+            "code": d.code,
+            "message": d.message,
             "stack_trace": d.stack_trace if is_admin else None,
             "context": d.context if is_admin else _sanitize_diag_context(d.context),
-            "attempt_id": d.attempt_id, "created_at": d.created_at,
+            "attempt_id": d.attempt_id,
+            "created_at": d.created_at,
         }
         for d in diagnostics
     ]
 
-    child_ids = db.execute(
-        select(Task.id).join(SampleTask, SampleTask.id == Task.id)
-        .where(SampleTask.parent_task_id == task.id)
-    ).scalars().all()
+    child_ids = (
+        db.execute(
+            select(Task.id)
+            .join(SampleTask, SampleTask.id == Task.id)
+            .where(SampleTask.parent_task_id == task.id)
+        )
+        .scalars()
+        .all()
+    )
     children = []
     if child_ids:
         child_rows = db.execute(select(Task).where(Task.id.in_(child_ids))).scalars().all()

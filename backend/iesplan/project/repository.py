@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol
 
 from sqlalchemy.orm import Session
@@ -33,11 +34,15 @@ class ProjectRepository(Protocol):
         db: Session,
         *,
         owner_id: int | None = None,
-        status: str | None = None,
+        statuses: Sequence[str] | None = None,
         limit: int = 50,
         cursor: int | None = None,
     ) -> ProjectPage:
-        """按显式条件列出项目（显式过滤参数不是权限判定）。"""
+        """按显式条件列出项目（显式过滤参数不是权限判定；id 倒序，cursor 为末条 id）。"""
+        ...
+
+    def count_projects_by_owner(self, db: Session, owner_ids: Sequence[int]) -> dict[int, int]:
+        """未删除项目数 read model：owner_id → active + archived 项目数（单条 GROUP BY）。"""
         ...
 
     def create_project(
@@ -52,8 +57,9 @@ class ProjectRepository(Protocol):
         baseline_resolution: str = "1h",
         baseline_leap_year: bool = False,
         baseline_scenario_mode: str = "single",
+        schema_version: int = 1,
     ) -> ProjectRecord:
-        """创建项目（含初始草稿指针初始化）；重名抛 ProjectConflictError。"""
+        """创建项目裸行（不含初始草稿，调用方随后补草稿）；重名抛 ProjectConflictError。"""
         ...
 
     def set_project_status(self, db: Session, project_id: int, status: str) -> ProjectRecord:
@@ -74,7 +80,11 @@ class ProjectRepository(Protocol):
         ...
 
     def get_current_draft(self, db: Session, project_id: int) -> DraftRecord | None:
-        """取项目当前草稿；无草稿返回 None。"""
+        """取项目当前草稿；无草稿返回 None（调用方判数据损坏）。"""
+        ...
+
+    def get_draft(self, db: Session, draft_id: int) -> DraftRecord | None:
+        """按 id 取草稿行（跨域指针解引用用，不存在返回 None）。"""
         ...
 
     def get_draft_revision(self, db: Session, project_id: int, revision: int) -> DraftRecord | None:
@@ -86,13 +96,19 @@ class ProjectRepository(Protocol):
         db: Session,
         *,
         project_id: int,
-        revision: int,
         content_object_id: int,
         updated_by: int,
         parent_draft_id: int | None = None,
         make_current: bool = True,
     ) -> DraftRecord:
-        """追加草稿行；make_current 时以 savepoint 切换 current 标记。"""
+        """追加草稿行（revision = max + 1 内部计算；make_current 时切换 current 标记
+        并移动项目 current_draft_id 指针；并发冲突抛 ProjectConflictError）。"""
+        ...
+
+    def update_draft_content_ref(
+        self, db: Session, draft_id: int, content_object_id: int
+    ) -> DraftRecord | None:
+        """维护草稿内容指针（内容语义归调用方域，本方法只换引用；草稿缺失返回 None）。"""
         ...
 
     def create_version(
@@ -107,8 +123,10 @@ class ProjectRepository(Protocol):
         source_draft_id: int | None = None,
         source_draft_revision: int | None = None,
         description: str | None = None,
+        parent_version_id: int | None = None,
     ) -> ProjectVersionRecord:
-        """追加不可变版本（含 version_no 分配与 current_version_id 指针移动）。"""
+        """追加不可变版本（含 version_no 分配、版本内容对象引用行、
+        current_version_id 指针移动；parent 为空时沿用当前指针）。"""
         ...
 
     def list_versions(self, db: Session, project_id: int) -> list[ProjectVersionRecord]:

@@ -28,6 +28,7 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import project as project_domain
 from iesplan.config import settings
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError
 from iesplan.core.security import (
@@ -39,7 +40,6 @@ from iesplan.core.security import (
 )
 from iesplan.models.common import EMAIL_RE, USERNAME_RE
 from iesplan.models.identity import AppSetting, AuthEvent, Credential, Role, User, UserRole, WindowSession
-from iesplan.models.project import Project
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +58,7 @@ ROLE_ENGINEER: Final[str] = "engineer"
 _ACTIVE_STATUSES: Final[tuple[str, str]] = ("active", "takeover_pending")
 #: 假哈希: 用户不存在/停用/无凭证时也执行一次 bcrypt 校验,
 #: 使各种失败路径耗时均匀, 避免通过响应时间枚举用户名/账号状态
-_DUMMY_PASSWORD_HASH: Final[str] = (
-    "$2b$12$P5GwAaopJcdx8Bx7CEUWOeNFfS/4KQ6wvr321HDFA.oQakKY.W9v."
-)
+_DUMMY_PASSWORD_HASH: Final[str] = "$2b$12$P5GwAaopJcdx8Bx7CEUWOeNFfS/4KQ6wvr321HDFA.oQakKY.W9v."
 #: 删除账号确认令牌有效期(秒): 预览后须在窗口内执行删除(误操作防护窗口)
 _DELETE_CONFIRM_WINDOW_SECONDS: Final[int] = 600
 #: 删除账号确认令牌签名盐(与 OIDC state 盐分离, 独立用途)
@@ -219,8 +217,10 @@ def _rate_redis() -> Any | None:
         return None
     try:
         client = _redis_module.Redis.from_url(
-            settings.redis_url, decode_responses=True,
-            socket_connect_timeout=1.0, socket_timeout=2.0,
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1.0,
+            socket_timeout=2.0,
         )
         client.ping()  # 探测连接, 失败抛异常
         _rate_redis_client = client
@@ -387,9 +387,7 @@ KEY_REGISTRATION_ENABLED = "registration_enabled"
 
 def get_app_setting(db: Session, key: str, default: Any = None) -> Any:
     """读取应用级设置(未设置返回 default)。"""
-    row = db.execute(
-        select(AppSetting).where(AppSetting.key == key)
-    ).scalar_one_or_none()
+    row = db.execute(select(AppSetting).where(AppSetting.key == key)).scalar_one_or_none()
     if row is None:
         return default
     return row.value.get("value", default)
@@ -397,9 +395,7 @@ def get_app_setting(db: Session, key: str, default: Any = None) -> Any:
 
 def set_app_setting(db: Session, key: str, value: Any, updated_by: int | None = None) -> None:
     """写入应用级设置(upsert), 全部 Worker 从数据库读取同一值。"""
-    row = db.execute(
-        select(AppSetting).where(AppSetting.key == key)
-    ).scalar_one_or_none()
+    row = db.execute(select(AppSetting).where(AppSetting.key == key)).scalar_one_or_none()
     if row is None:
         db.add(AppSetting(key=key, value={"value": value}, updated_by=updated_by))
     else:
@@ -596,6 +592,7 @@ def create_user(
             )
     role_row = ensure_role(db, role, name="工程师" if role == ROLE_ENGINEER else "管理员")
     from iesplan.core.namespace import generate_namespace
+
     # 分配公开命名空间（CSPRNG，60 bit 熵；全局唯一，碰撞重试）
     ns = None
     for _ in range(20):
@@ -603,6 +600,7 @@ def create_user(
         # 检查唯一性（极低碰撞概率，但仍需保证）
         from sqlalchemy import select as _select
         from iesplan.models.identity import User as _User
+
         exists = db.execute(_select(_User).where(_User.public_namespace == candidate)).scalar_one_or_none()
         if exists is None:
             ns = candidate
@@ -714,19 +712,28 @@ def _delete_confirm_serializer() -> URLSafeTimedSerializer:
     )
 
 
+def _owned_projects(db: Session, user_id: int) -> list:
+    """该用户拥有、且尚未删除(软删)的项目记录(经 project 域 repository，分页取全)。"""
+    owned = []
+    cursor = None
+    while True:
+        page = project_domain.list_projects(
+            db, owner_id=user_id, statuses=["active", "archived"], limit=500, cursor=cursor
+        )
+        owned.extend(page.items)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+    return owned
+
+
 def owned_project_ids(db: Session, user: User) -> list[int]:
     """该用户当前拥有、且尚未删除(软删)的项目 id 列表(升序)。
 
     供删除预告与确认令牌一致性校验共用, 保证「确认删除的影响范围」
     与「实际级联删除的范围」一致。
     """
-    ids = db.execute(
-        select(Project.id).where(
-            Project.owner_id == user.id,
-            Project.status != "deleted",
-        )
-    ).scalars().all()
-    return sorted(ids)
+    return sorted(p.id for p in _owned_projects(db, user.id))
 
 
 def preview_user_delete(
@@ -746,12 +753,7 @@ def preview_user_delete(
         raise ForbiddenError("", params={"reason": "cannot_delete_self"})
     if user.is_system:
         raise ForbiddenError("", params={"reason": "system_account"})
-    owned = db.execute(
-        select(Project).where(
-            Project.owner_id == user.id,
-            Project.status != "deleted",
-        ).order_by(Project.id)
-    ).scalars().all()
+    owned = sorted(_owned_projects(db, user.id), key=lambda p: p.id)
     project_ids = [p.id for p in owned]
     token = _delete_confirm_serializer().dumps(
         {
@@ -775,9 +777,7 @@ def verify_delete_confirm_token(db: Session, user: User, token: str) -> None:
     任一不满足抛 DeleteConfirmRequiredError(400), 拒绝删除。
     """
     if not token:
-        raise DeleteConfirmRequiredError(
-            "", params={"reason": "missing_confirm", "user_id": user.id}
-        )
+        raise DeleteConfirmRequiredError("", params={"reason": "missing_confirm", "user_id": user.id})
     try:
         payload = _delete_confirm_serializer().loads(token, max_age=_DELETE_CONFIRM_WINDOW_SECONDS)
     except (BadSignature, SignatureExpired, TypeError) as exc:
@@ -785,18 +785,12 @@ def verify_delete_confirm_token(db: Session, user: User, token: str) -> None:
             "", params={"reason": "invalid_or_expired_confirm", "user_id": user.id}
         ) from exc
     if not isinstance(payload, dict):
-        raise DeleteConfirmRequiredError(
-            "", params={"reason": "invalid_confirm", "user_id": user.id}
-        )
+        raise DeleteConfirmRequiredError("", params={"reason": "invalid_confirm", "user_id": user.id})
     if payload.get("user_id") != user.id or payload.get("username") != user.username:
-        raise DeleteConfirmRequiredError(
-            "", params={"reason": "confirm_user_mismatch", "user_id": user.id}
-        )
+        raise DeleteConfirmRequiredError("", params={"reason": "confirm_user_mismatch", "user_id": user.id})
     preview_ids = payload.get("project_ids")
     if not isinstance(preview_ids, list) or not all(isinstance(i, int) for i in preview_ids):
-        raise DeleteConfirmRequiredError(
-            "", params={"reason": "invalid_confirm", "user_id": user.id}
-        )
+        raise DeleteConfirmRequiredError("", params={"reason": "invalid_confirm", "user_id": user.id})
     if sorted(preview_ids) != owned_project_ids(db, user):
         # 预览后项目清单变化: 强制重新预览, 防止基于过期范围确认删除
         raise DeleteConfirmRequiredError(
@@ -832,37 +826,40 @@ def delete_user(
     if user.is_system:
         raise ForbiddenError("", params={"reason": "system_account"})
     if not confirm:
-        raise DeleteConfirmRequiredError(
-            "", params={"reason": "confirm_required", "user_id": user.id}
-        )
+        raise DeleteConfirmRequiredError("", params={"reason": "confirm_required", "user_id": user.id})
     verify_delete_confirm_token(db, user, confirm_token)
     from iesplan.services import project as project_service
 
     now = utcnow()
-    # 该用户拥有的项目 → 软删(级联)
-    owned = db.execute(
-        select(Project).where(Project.owner_id == user.id, Project.status != "deleted")
-    ).scalars().all()
+    # 该用户拥有的项目 → 软删(级联，状态写入经 project 域 repository)
+    owned = _owned_projects(db, user.id)
     deleted_projects = 0
     for project in owned:
-        project.status = "deleted"
-        project.updated_at = now
+        project_domain.set_project_status(db, project.id, "deleted")
         deleted_projects += 1
         project_service._audit(
-            db, "project", project.id, "project.deleted_by_account", admin.id,
+            db,
+            "project",
+            project.id,
+            "project.deleted_by_account",
+            admin.id,
             after={"reason": "account_deleted", "account_id": user.id},
         )
     # 账号停用 + 会话/凭证撤销
     user.status = "disabled"
     user.updated_at = now
     revoke_all_user_sessions(db, user, revoked_by=admin.id)
-    creds = db.execute(
-        select(Credential).where(
-            Credential.user_id == user.id,
-            Credential.credential_type == "password",
-            Credential.revoked_at.is_(None),
+    creds = (
+        db.execute(
+            select(Credential).where(
+                Credential.user_id == user.id,
+                Credential.credential_type == "password",
+                Credential.revoked_at.is_(None),
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for cred in creds:
         _revoke_credential(cred, now)
     record_auth_event(
@@ -1012,7 +1009,10 @@ def authenticate(
         verify_password(password, _DUMMY_PASSWORD_HASH)
         _record_failure(username)
         record_auth_event(
-            db, "login_failure", ip=ip, user_agent=user_agent,
+            db,
+            "login_failure",
+            ip=ip,
+            user_agent=user_agent,
             detail={"reason": "user_not_found", "username": username},
         )
         db.commit()
@@ -1022,7 +1022,11 @@ def authenticate(
         verify_password(password, _DUMMY_PASSWORD_HASH)
         _record_failure(username)
         record_auth_event(
-            db, "login_failure", user_id=user.id, ip=ip, user_agent=user_agent,
+            db,
+            "login_failure",
+            user_id=user.id,
+            ip=ip,
+            user_agent=user_agent,
             detail={"reason": "user_disabled" if user.status != "active" else "system_account"},
         )
         db.commit()
@@ -1033,7 +1037,11 @@ def authenticate(
         verify_password(password, _DUMMY_PASSWORD_HASH)
         _record_failure(username)
         record_auth_event(
-            db, "login_failure", user_id=user.id, ip=ip, user_agent=user_agent,
+            db,
+            "login_failure",
+            user_id=user.id,
+            ip=ip,
+            user_agent=user_agent,
             detail={"reason": "no_credential"},
         )
         db.commit()
@@ -1041,7 +1049,11 @@ def authenticate(
     if not verify_password(password, cred.secret_hash):
         _record_failure(username)
         record_auth_event(
-            db, "login_failure", user_id=user.id, ip=ip, user_agent=user_agent,
+            db,
+            "login_failure",
+            user_id=user.id,
+            ip=ip,
+            user_agent=user_agent,
             detail={"reason": "bad_password"},
         )
         db.commit()
@@ -1049,7 +1061,11 @@ def authenticate(
     _clear_failures(username)
     user.last_login_at = utcnow()
     record_auth_event(
-        db, "login_success", user_id=user.id, ip=ip, user_agent=user_agent,
+        db,
+        "login_success",
+        user_id=user.id,
+        ip=ip,
+        user_agent=user_agent,
         detail={"device": device} if device else None,
     )
     db.commit()
@@ -1061,9 +1077,7 @@ def authenticate(
 # ---------------------------------------------------------------------------
 
 
-def _new_window_session(
-    user: User, now: datetime, status: str = "active"
-) -> tuple[WindowSession, str]:
+def _new_window_session(user: User, now: datetime, status: str = "active") -> tuple[WindowSession, str]:
     """构造新会话行, 返回 (会话行, 令牌原文; 令牌原文只由调用方持有)。
 
     参数:
@@ -1169,9 +1183,7 @@ def create_window_session(
         _revoke_session(active, now, user.id)
     db.flush()
     # 创建新会话: 触发接管时初始为 takeover_pending(H-01, 确认前无业务权限)
-    new_session, token = _new_window_session(
-        user, now, status="takeover_pending" if displaced else "active"
-    )
+    new_session, token = _new_window_session(user, now, status="takeover_pending" if displaced else "active")
     db.add(new_session)
     db.flush()
     # 被撤销的残留 pending/active 会话由新会话接管(补 replaced_by 指针, 接管追溯)

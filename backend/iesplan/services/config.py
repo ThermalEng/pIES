@@ -43,6 +43,7 @@ from typing import Final
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import project as project_domain
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     SEVERITY_WARNING,
@@ -72,7 +73,7 @@ from iesplan.db import SessionLocal
 from iesplan.models.audit import AuditLog
 from iesplan.models.calc import CalcConfig
 from iesplan.models.model import Device, SystemGraph
-from iesplan.models.project import Draft, Project
+from iesplan.project.contracts import ProjectRecord
 
 # ---------------------------------------------------------------------------
 # 常量: 配置结构 / 目标 / 预定义约束
@@ -122,36 +123,63 @@ _IDENT_RE: Final[re.Pattern] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: 经济参数规格(单位/范围/默认值/帮助键; 元数据供前端渲染)
 ECONOMIC_PARAM_SPECS: Final[dict[str, dict]] = {
     "discount_rate": {
-        "unit": "-", "min": 0.0, "max": 1.0, "default": 0.08,
-        "help_key": "help.param.economic.discount_rate", "is_optimizable": False,
+        "unit": "-",
+        "min": 0.0,
+        "max": 1.0,
+        "default": 0.08,
+        "help_key": "help.param.economic.discount_rate",
+        "is_optimizable": False,
     },
     "tax_rate": {
-        "unit": "-", "min": 0.0, "max": 1.0, "default": 0.25,
-        "help_key": "help.param.economic.tax_rate", "is_optimizable": False,
+        "unit": "-",
+        "min": 0.0,
+        "max": 1.0,
+        "default": 0.25,
+        "help_key": "help.param.economic.tax_rate",
+        "is_optimizable": False,
     },
     "project_years": {
-        "unit": "a", "min": 1, "max": 50, "default": 20,
-        "help_key": "help.param.economic.project_years", "is_optimizable": False,
+        "unit": "a",
+        "min": 1,
+        "max": 50,
+        "default": 20,
+        "help_key": "help.param.economic.project_years",
+        "is_optimizable": False,
     },
     "depreciation_years": {
-        "unit": "a", "min": 1, "max": 50, "default": 10,
-        "help_key": "help.param.economic.depreciation_years", "is_optimizable": False,
+        "unit": "a",
+        "min": 1,
+        "max": 50,
+        "default": 10,
+        "help_key": "help.param.economic.depreciation_years",
+        "is_optimizable": False,
     },
     "currency": {
-        "unit": "-", "default": "CNY", "enum": ("CNY", "USD"),
-        "help_key": "help.param.economic.currency", "is_optimizable": False,
+        "unit": "-",
+        "default": "CNY",
+        "enum": ("CNY", "USD"),
+        "help_key": "help.param.economic.currency",
+        "is_optimizable": False,
     },
 }
 
 #: 环境参数规格(排放因子, 排放边界; 领域模型 §规划、财务与计算配置)
 ENVIRONMENTAL_PARAM_SPECS: Final[dict[str, dict]] = {
     "emission_factor_grid": {
-        "unit": "tCO2/MWh", "min": 0.0, "max": 10.0, "default": 0.581,
-        "help_key": "help.param.environmental.emission_factor_grid", "is_optimizable": False,
+        "unit": "tCO2/MWh",
+        "min": 0.0,
+        "max": 10.0,
+        "default": 0.581,
+        "help_key": "help.param.environmental.emission_factor_grid",
+        "is_optimizable": False,
     },
     "emission_factor_gas": {
-        "unit": "tCO2/万m³", "min": 0.0, "max": 50.0, "default": 2.0,
-        "help_key": "help.param.environmental.emission_factor_gas", "is_optimizable": False,
+        "unit": "tCO2/万m³",
+        "min": 0.0,
+        "max": 50.0,
+        "default": 2.0,
+        "help_key": "help.param.environmental.emission_factor_gas",
+        "is_optimizable": False,
     },
 }
 
@@ -203,7 +231,8 @@ def load_work_graph(db: Session, project_id: int) -> dict:
     """
     graph = None
     if project_id is not None:
-        if (proj := db.get(Project, project_id)) is not None and proj.current_draft_id is not None:
+        proj = project_domain.get_project(db, project_id)
+        if proj is not None and proj.current_draft_id is not None:
             graph = db.scalar(
                 select(SystemGraph).where(
                     SystemGraph.project_id == project_id,
@@ -273,7 +302,8 @@ def _build_default_config(db: Session, project_id: int) -> dict:
     graph = load_work_graph(db, project_id)
     params = _default_parameters(graph)
     params["economic"]["currency"] = "CNY"
-    if (proj := db.get(Project, project_id)) is not None:
+    proj = project_domain.get_project(db, project_id)
+    if proj is not None:
         params["economic"]["currency"] = proj.currency or "CNY"
     algo = get_algorithm(DEFAULT_ALGORITHM)
     return {
@@ -287,9 +317,7 @@ def _build_default_config(db: Session, project_id: int) -> dict:
         "algorithm": {"mode": "auto", "name": DEFAULT_ALGORITHM},
         "irr_floor": 0.08,  # 最低税后项目投资 IRR 硬约束(默认 8%)
         "tolerances": {
-            name: p.default
-            for name, p in algo.parameters.items()
-            if name in ("gap_rel", "time_limit_s")
+            name: p.default for name, p in algo.parameters.items() if name in ("gap_rel", "time_limit_s")
         },
         "random_seed": 42,
     }
@@ -338,7 +366,8 @@ def _validate_structure(config: dict, diags: list[Diagnostic]) -> None:
         if key not in config:
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"field": key, "reason": "缺失必需配置段"},
                     location={"object_type": "config", "object_id": "", "field": key},
                 )
@@ -351,7 +380,8 @@ def _validate_structure(config: dict, diags: list[Diagnostic]) -> None:
         if not isinstance(config[key], expected):
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"field": key, "reason": f"配置段必须是 {expected.__name__}"},
                     location={"object_type": "config", "object_id": "", "field": key},
                 )
@@ -361,7 +391,8 @@ def _validate_structure(config: dict, diags: list[Diagnostic]) -> None:
     if algo.get("mode") not in ("auto", "manual"):
         diags.append(
             make_diag(
-                "SYS-CFG-001", SEVERITY_ERROR,
+                "SYS-CFG-001",
+                SEVERITY_ERROR,
                 params={"field": "algorithm.mode", "value": algo.get("mode")},
                 location={"object_type": "config", "object_id": "", "field": "algorithm.mode"},
             )
@@ -370,22 +401,22 @@ def _validate_structure(config: dict, diags: list[Diagnostic]) -> None:
     if seed is not None and (not _is_number(seed) or not 0 <= int(seed) <= _SEED_MAX):
         diags.append(
             make_diag(
-                "PARAM-RNG-003", SEVERITY_ERROR,
+                "PARAM-RNG-003",
+                SEVERITY_ERROR,
                 params={"param": "random_seed", "value": seed, "min": 0, "max": _SEED_MAX},
                 location={"object_type": "config", "object_id": "", "field": "random_seed"},
             )
         )
 
 
-def _validate_parameters(
-    config: dict, graph: dict, devices_by_key: dict, diags: list[Diagnostic]
-) -> None:
+def _validate_parameters(config: dict, graph: dict, devices_by_key: dict, diags: list[Diagnostic]) -> None:
     """参数校验: 设备参数按注册表规格(类型/范围/枚举); 经济/环境参数按固定规格。"""
     params = config["parameters"]
     if not isinstance(params, dict):
         diags.append(
             make_diag(
-                "SYS-CFG-001", SEVERITY_ERROR,
+                "SYS-CFG-001",
+                SEVERITY_ERROR,
                 params={"field": "parameters", "reason": "参数段必须是对象"},
                 location={"object_type": "config", "object_id": "", "field": "parameters"},
             )
@@ -404,7 +435,8 @@ def _validate_parameters(
         if not isinstance(cur, dict):
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"device": key, "reason": "设备参数必须是对象"},
                     location={"object_type": "device", "object_id": key, "field": "params"},
                 )
@@ -416,7 +448,8 @@ def _validate_parameters(
                 if not _is_number(value):
                     diags.append(
                         make_diag(
-                            "PARAM-UNIT-002", SEVERITY_ERROR,
+                            "PARAM-UNIT-002",
+                            SEVERITY_ERROR,
                             params={"param": pname, "value": repr(value), "expected": "数值"},
                             location={"object_type": "device", "object_id": key, "field": pname},
                         )
@@ -426,7 +459,8 @@ def _validate_parameters(
                     if (lo is not None and value < lo) or (hi is not None and value > hi):
                         diags.append(
                             make_diag(
-                                "PARAM-RNG-003", SEVERITY_ERROR,
+                                "PARAM-RNG-003",
+                                SEVERITY_ERROR,
                                 params={"param": pname, "value": value, "min": lo, "max": hi},
                                 location={"object_type": "device", "object_id": key, "field": pname},
                             )
@@ -440,7 +474,8 @@ def _validate_parameters(
         if not isinstance(section_params, dict):
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"field": f"parameters.{section}", "reason": "必须是对象"},
                     location={"object_type": "config", "object_id": "", "field": section},
                 )
@@ -452,7 +487,8 @@ def _validate_parameters(
                 if value not in pspec["enum"]:
                     diags.append(
                         make_diag(
-                            "PARAM-RNG-003", SEVERITY_ERROR,
+                            "PARAM-RNG-003",
+                            SEVERITY_ERROR,
                             params={"param": pname, "value": value, "enum": list(pspec["enum"])},
                             location={"object_type": "config", "object_id": "", "field": pname},
                         )
@@ -461,7 +497,8 @@ def _validate_parameters(
             if not _is_number(value):
                 diags.append(
                     make_diag(
-                        "PARAM-UNIT-002", SEVERITY_ERROR,
+                        "PARAM-UNIT-002",
+                        SEVERITY_ERROR,
                         params={"param": pname, "value": repr(value), "expected": "数值"},
                         location={"object_type": "config", "object_id": "", "field": pname},
                     )
@@ -471,16 +508,15 @@ def _validate_parameters(
                 if (lo is not None and value < lo) or (hi is not None and value > hi):
                     diags.append(
                         make_diag(
-                            "PARAM-RNG-003", SEVERITY_ERROR,
+                            "PARAM-RNG-003",
+                            SEVERITY_ERROR,
                             params={"param": pname, "value": value, "min": lo, "max": hi},
                             location={"object_type": "config", "object_id": "", "field": pname},
                         )
                     )
 
 
-def _validate_variables(
-    config: dict, devices_by_key: dict, diags: list[Diagnostic]
-) -> None:
+def _validate_variables(config: dict, devices_by_key: dict, diags: list[Diagnostic]) -> None:
     """变量校验: 类型/初始值在界内/枚举取值/设备引用(宪法 §4 + 领域模型 §规划、财务与计算配置)。"""
     variables = config["variables"]
     if not isinstance(variables, list):
@@ -496,7 +532,8 @@ def _validate_variables(
         if not isinstance(v, dict):
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"field": f"variables[{idx}]", "reason": "变量声明必须是对象"},
                     location=loc,
                 )
@@ -505,7 +542,8 @@ def _validate_variables(
         if not isinstance(name, str) or not _IDENT_RE.fullmatch(name):
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={
                         "field": "name",
                         "value": name,
@@ -517,7 +555,8 @@ def _validate_variables(
         elif name in seen:
             diags.append(
                 make_diag(
-                    "PARAM-CONF-001", SEVERITY_ERROR,
+                    "PARAM-CONF-001",
+                    SEVERITY_ERROR,
                     params={"variable": name, "reason": "变量名重复"},
                     location=loc,
                 )
@@ -528,7 +567,8 @@ def _validate_variables(
         if vtype not in VARIABLE_TYPES:
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"variable": name, "type": vtype, "allowed": list(VARIABLE_TYPES)},
                     location=loc,
                 )
@@ -541,7 +581,8 @@ def _validate_variables(
                 if val is not None and not _is_number(val):
                     diags.append(
                         make_diag(
-                            "PARAM-UNIT-002", SEVERITY_ERROR,
+                            "PARAM-UNIT-002",
+                            SEVERITY_ERROR,
                             params={"param": name, "field": key, "value": repr(val), "expected": "数值"},
                             location=loc,
                         )
@@ -549,7 +590,8 @@ def _validate_variables(
             if _is_number(lo) and _is_number(hi) and lo > hi:
                 diags.append(
                     make_diag(
-                        "PARAM-CONF-001", SEVERITY_ERROR,
+                        "PARAM-CONF-001",
+                        SEVERITY_ERROR,
                         params={"variable": name, "reason": "min 大于 max"},
                         location=loc,
                     )
@@ -557,7 +599,8 @@ def _validate_variables(
             if initial is None:
                 diags.append(
                     make_diag(
-                        "SYS-CFG-001", SEVERITY_ERROR,
+                        "SYS-CFG-001",
+                        SEVERITY_ERROR,
                         params={"variable": name, "reason": "变量必须有初始值"},
                         location=loc,
                     )
@@ -566,7 +609,8 @@ def _validate_variables(
                 if _is_number(lo) and initial < lo:
                     diags.append(
                         make_diag(
-                            "PARAM-RNG-003", SEVERITY_ERROR,
+                            "PARAM-RNG-003",
+                            SEVERITY_ERROR,
                             params={"param": name, "value": initial, "min": lo, "max": hi},
                             location=loc,
                         )
@@ -574,7 +618,8 @@ def _validate_variables(
                 if _is_number(hi) and initial > hi:
                     diags.append(
                         make_diag(
-                            "PARAM-RNG-003", SEVERITY_ERROR,
+                            "PARAM-RNG-003",
+                            SEVERITY_ERROR,
                             params={"param": name, "value": initial, "min": lo, "max": hi},
                             location=loc,
                         )
@@ -582,7 +627,8 @@ def _validate_variables(
                 if vtype == "integer" and float(initial) != int(initial):
                     diags.append(
                         make_diag(
-                            "SYS-CFG-001", SEVERITY_ERROR,
+                            "SYS-CFG-001",
+                            SEVERITY_ERROR,
                             params={"variable": name, "reason": "integer 变量初始值必须为整数"},
                             location=loc,
                         )
@@ -591,7 +637,8 @@ def _validate_variables(
             if initial not in (0, 1, True, False):
                 diags.append(
                     make_diag(
-                        "PARAM-RNG-003", SEVERITY_ERROR,
+                        "PARAM-RNG-003",
+                        SEVERITY_ERROR,
                         params={"param": name, "value": initial, "min": 0, "max": 1},
                         location=loc,
                     )
@@ -601,7 +648,8 @@ def _validate_variables(
             if not isinstance(values, list) or not values:
                 diags.append(
                     make_diag(
-                        "SYS-CFG-001", SEVERITY_ERROR,
+                        "SYS-CFG-001",
+                        SEVERITY_ERROR,
                         params={"variable": name, "reason": "enum 变量必须提供 values 列表"},
                         location=loc,
                     )
@@ -609,7 +657,8 @@ def _validate_variables(
             elif initial not in values:
                 diags.append(
                     make_diag(
-                        "PARAM-RNG-003", SEVERITY_ERROR,
+                        "PARAM-RNG-003",
+                        SEVERITY_ERROR,
                         params={"param": name, "value": initial, "enum": values},
                         location=loc,
                     )
@@ -619,7 +668,8 @@ def _validate_variables(
         if dev_ref is not None and str(dev_ref) not in devices_by_key:
             diags.append(
                 make_diag(
-                    "CONN-TYPE-002", SEVERITY_ERROR,
+                    "CONN-TYPE-002",
+                    SEVERITY_ERROR,
                     params={"device_id": str(dev_ref), "type_id": ""},
                     location=loc,
                 )
@@ -632,7 +682,8 @@ def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
     if not isinstance(objectives, list) or not objectives:
         diags.append(
             make_diag(
-                "SYS-CFG-001", SEVERITY_ERROR,
+                "SYS-CFG-001",
+                SEVERITY_ERROR,
                 params={"field": "objectives", "reason": "至少需要一个目标"},
                 location={"object_type": "config", "object_id": "", "field": "objectives"},
             )
@@ -647,7 +698,8 @@ def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
         if not isinstance(obj, dict):
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"field": f"objectives[{idx}]", "reason": "目标声明必须是对象"},
                     location=loc,
                 )
@@ -657,7 +709,8 @@ def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
         if metric not in OBJECTIVE_METRICS:
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"metric": metric, "allowed": sorted(OBJECTIVE_METRICS)},
                     location=loc,
                 )
@@ -666,7 +719,8 @@ def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
         if direction not in ("max", "min"):
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"metric": metric, "direction": direction},
                     location=loc,
                 )
@@ -674,7 +728,8 @@ def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
         elif metric == "irr_after_tax" and direction != "max":
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"metric": metric, "reason": "IRR 目标只能取 max 方向"},
                     location=loc,
                 )
@@ -683,7 +738,8 @@ def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
         if not _is_number(weight) or weight < 0:
             diags.append(
                 make_diag(
-                    "PARAM-RNG-003", SEVERITY_ERROR,
+                    "PARAM-RNG-003",
+                    SEVERITY_ERROR,
                     params={"param": f"objectives[{idx}].weight", "value": weight, "min": 0},
                     location=loc,
                 )
@@ -699,7 +755,8 @@ def _validate_expression_constraint(
     if not isinstance(expr, str) or not expr.strip():
         diags.append(
             make_diag(
-                "EXPR-SYN-001", SEVERITY_ERROR,
+                "EXPR-SYN-001",
+                SEVERITY_ERROR,
                 params={"expr": expr},
                 location=loc,
             )
@@ -707,16 +764,15 @@ def _validate_expression_constraint(
         return
     allowed = {v["name"] for v in variables if isinstance(v, dict) and "name" in v}
     dims = {
-        v["name"]: _dims_for_unit(v.get("unit"))
-        for v in variables
-        if isinstance(v, dict) and "name" in v
+        v["name"]: _dims_for_unit(v.get("unit")) for v in variables if isinstance(v, dict) and "name" in v
     }
     try:
         compiled = parse_expr(expr, allowed, dims)
     except ExpressionError as exc:
         diags.append(
             make_diag(
-                exc.code, SEVERITY_ERROR,
+                exc.code,
+                SEVERITY_ERROR,
                 params={**exc.params, "expression": expr},
                 location=loc,
             )
@@ -734,22 +790,22 @@ def _validate_expression_constraint(
     except ExpressionError as exc:
         diags.append(
             make_diag(
-                exc.code, SEVERITY_ERROR,
+                exc.code,
+                SEVERITY_ERROR,
                 params={**exc.params, "expression": expr},
                 location=loc,
             )
         )
 
 
-def _validate_constraints(
-    config: dict, variables: list[dict], diags: list[Diagnostic]
-) -> None:
+def _validate_constraints(config: dict, variables: list[dict], diags: list[Diagnostic]) -> None:
     """约束校验: predefined 种类合法; expression 走受限表达式引擎。"""
     constraints = config["constraints"]
     if not isinstance(constraints, list):
         diags.append(
             make_diag(
-                "SYS-CFG-001", SEVERITY_ERROR,
+                "SYS-CFG-001",
+                SEVERITY_ERROR,
                 params={"field": "constraints", "reason": "约束段必须是数组"},
                 location={"object_type": "config", "object_id": "", "field": "constraints"},
             )
@@ -760,7 +816,8 @@ def _validate_constraints(
         if not isinstance(c, dict):
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"field": f"constraints[{idx}]", "reason": "约束声明必须是对象"},
                     location=loc,
                 )
@@ -773,7 +830,8 @@ def _validate_constraints(
             if kind not in PREDEFINED_CONSTRAINT_KINDS:
                 diags.append(
                     make_diag(
-                        "SYS-CFG-001", SEVERITY_ERROR,
+                        "SYS-CFG-001",
+                        SEVERITY_ERROR,
                         params={"kind": kind, "allowed": sorted(PREDEFINED_CONSTRAINT_KINDS)},
                         location={
                             "object_type": "constraint",
@@ -785,7 +843,8 @@ def _validate_constraints(
             elif kind == "co2_cap" and not _is_number(payload.get("max_tons")):
                 diags.append(
                     make_diag(
-                        "SYS-CFG-001", SEVERITY_ERROR,
+                        "SYS-CFG-001",
+                        SEVERITY_ERROR,
                         params={"kind": kind, "reason": "co2_cap 需要数值 payload.max_tons"},
                         location={
                             "object_type": "constraint",
@@ -797,7 +856,8 @@ def _validate_constraints(
             elif kind == "energy_cost_cap" and not _is_number(payload.get("max_amount")):
                 diags.append(
                     make_diag(
-                        "SYS-CFG-001", SEVERITY_ERROR,
+                        "SYS-CFG-001",
+                        SEVERITY_ERROR,
                         params={"kind": kind, "reason": "energy_cost_cap 需要数值 payload.max_amount"},
                         location={
                             "object_type": "constraint",
@@ -811,7 +871,8 @@ def _validate_constraints(
         else:
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={"type": ctype, "allowed": ["predefined", "expression"]},
                     location=loc,
                 )
@@ -829,7 +890,8 @@ def _validate_irr_and_discount(config: dict, diags: list[Diagnostic]) -> None:
     if irr_floor is None:
         diags.append(
             make_diag(
-                "SYS-CFG-001", SEVERITY_ERROR,
+                "SYS-CFG-001",
+                SEVERITY_ERROR,
                 params={"field": "irr_floor", "reason": "缺少最低 IRR 硬约束字段"},
                 location={"object_type": "config", "object_id": "", "field": "irr_floor"},
             )
@@ -837,7 +899,8 @@ def _validate_irr_and_discount(config: dict, diags: list[Diagnostic]) -> None:
     elif not _is_number(irr_floor) or not 0 <= float(irr_floor) <= 1:
         diags.append(
             make_diag(
-                "PARAM-RNG-003", SEVERITY_ERROR,
+                "PARAM-RNG-003",
+                SEVERITY_ERROR,
                 params={"param": "irr_floor", "value": irr_floor, "min": 0, "max": 1},
                 location={"object_type": "config", "object_id": "", "field": "irr_floor"},
             )
@@ -848,10 +911,9 @@ def _validate_irr_and_discount(config: dict, diags: list[Diagnostic]) -> None:
         if isinstance(econ, dict) and "irr_floor" in econ:
             diags.append(
                 make_diag(
-                    "PARAM-CONF-001", SEVERITY_ERROR,
-                    params={
-                        "reason": "最低 IRR 硬约束是独立顶层字段, 不应位于 parameters.economic"
-                    },
+                    "PARAM-CONF-001",
+                    SEVERITY_ERROR,
+                    params={"reason": "最低 IRR 硬约束是独立顶层字段, 不应位于 parameters.economic"},
                     location={
                         "object_type": "config",
                         "object_id": "",
@@ -862,17 +924,17 @@ def _validate_irr_and_discount(config: dict, diags: list[Diagnostic]) -> None:
         if "discount_rate" in config:
             diags.append(
                 make_diag(
-                    "PARAM-CONF-001", SEVERITY_ERROR,
-                    params={
-                        "reason": "折现率必须位于 parameters.economic, 与最低 IRR 硬约束是不同字段"
-                    },
+                    "PARAM-CONF-001",
+                    SEVERITY_ERROR,
+                    params={"reason": "折现率必须位于 parameters.economic, 与最低 IRR 硬约束是不同字段"},
                     location={"object_type": "config", "object_id": "", "field": "discount_rate"},
                 )
             )
         elif not isinstance(econ, dict) or "discount_rate" not in econ:
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_ERROR,
+                    "SYS-CFG-001",
+                    SEVERITY_ERROR,
                     params={
                         "field": "parameters.economic.discount_rate",
                         "reason": "缺少折现率字段",
@@ -899,7 +961,8 @@ def _validate_algorithm(config: dict, diags: list[Diagnostic]) -> None:
     except NotFoundError:
         diags.append(
             make_diag(
-                "CONN-TYPE-002", SEVERITY_ERROR,
+                "CONN-TYPE-002",
+                SEVERITY_ERROR,
                 params={"device_id": "", "type_id": name},
                 location=loc,
             )
@@ -913,21 +976,16 @@ def _validate_algorithm(config: dict, diags: list[Diagnostic]) -> None:
     if len(objectives) > 1:
         needs.add("multi_objective")
     variables = config.get("variables") or []
-    if any(
-        isinstance(v, dict) and v.get("type") in ("integer", "boolean", "enum")
-        for v in variables
-    ):
+    if any(isinstance(v, dict) and v.get("type") in ("integer", "boolean", "enum") for v in variables):
         needs.add("milp")  # 离散变量需要 MILP 求解能力
-    if any(
-        isinstance(v, dict) and v.get("type") == "continuous"
-        for v in variables
-    ):
+    if any(isinstance(v, dict) and v.get("type") == "continuous" for v in variables):
         needs.add("capacity_design")  # 容量设计
     missing = sorted(needs - set(spec.capabilities))
     if missing:
         diags.append(
             make_diag(
-                "SYS-CFG-001", SEVERITY_ERROR,
+                "SYS-CFG-001",
+                SEVERITY_ERROR,
                 params={
                     "algorithm": name,
                     "missing_capabilities": missing,
@@ -944,7 +1002,8 @@ def _validate_tolerances(config: dict, diags: list[Diagnostic]) -> None:
     if not isinstance(tolerances, dict):
         diags.append(
             make_diag(
-                "SYS-CFG-001", SEVERITY_ERROR,
+                "SYS-CFG-001",
+                SEVERITY_ERROR,
                 params={"field": "tolerances", "reason": "容差必须是对象"},
                 location={"object_type": "config", "object_id": "", "field": "tolerances"},
             )
@@ -961,7 +1020,8 @@ def _validate_tolerances(config: dict, diags: list[Diagnostic]) -> None:
         if p is None:
             diags.append(
                 make_diag(
-                    "SYS-CFG-001", SEVERITY_WARNING,
+                    "SYS-CFG-001",
+                    SEVERITY_WARNING,
                     params={"param": key, "reason": "非当前算法注册参数, 将被忽略"},
                     location=loc,
                 )
@@ -970,7 +1030,8 @@ def _validate_tolerances(config: dict, diags: list[Diagnostic]) -> None:
         if not _is_number(value):
             diags.append(
                 make_diag(
-                    "PARAM-UNIT-002", SEVERITY_ERROR,
+                    "PARAM-UNIT-002",
+                    SEVERITY_ERROR,
                     params={"param": key, "value": repr(value), "expected": "数值"},
                     location=loc,
                 )
@@ -978,7 +1039,8 @@ def _validate_tolerances(config: dict, diags: list[Diagnostic]) -> None:
         elif (p.min is not None and value < p.min) or (p.max is not None and value > p.max):
             diags.append(
                 make_diag(
-                    "PARAM-RNG-003", SEVERITY_ERROR,
+                    "PARAM-RNG-003",
+                    SEVERITY_ERROR,
                     params={"param": key, "value": value, "min": p.min, "max": p.max},
                     location=loc,
                 )
@@ -1023,7 +1085,8 @@ def validate_config(
     if not isinstance(config, dict):
         diags.append(
             make_diag(
-                "SYS-CFG-001", SEVERITY_ERROR,
+                "SYS-CFG-001",
+                SEVERITY_ERROR,
                 params={"reason": "配置必须是对象"},
                 location={"object_type": "config", "object_id": "", "field": ""},
             )
@@ -1036,7 +1099,8 @@ def validate_config(
     ):
         diags.append(
             make_diag(
-                "SYS-CFG-001", SEVERITY_ERROR,
+                "SYS-CFG-001",
+                SEVERITY_ERROR,
                 params={"field": "data_version_ref", "reason": "必须是正整数 id 列表"},
                 location={"object_type": "config", "object_id": "", "field": "data_version_ref"},
             )
@@ -1062,7 +1126,7 @@ def validate_config(
 
 def _current_draft_revision(db: Session, project_id: int) -> int:
     """当前草稿修订号; 项目尚无草稿时按 1 处理(领域模型 §项目聚合 初始草稿 revision=1)。"""
-    proj = db.get(Project, project_id)
+    proj = project_domain.get_project(db, project_id)
     if proj is None:
         raise NotFoundError(
             f"项目不存在: {project_id}",
@@ -1071,14 +1135,17 @@ def _current_draft_revision(db: Session, project_id: int) -> int:
             params={"project_id": project_id},
         )
     if proj.current_draft_id is not None:
-        draft = db.get(Draft, proj.current_draft_id)
+        draft = project_domain.get_draft(db, proj.current_draft_id)
         if draft is not None:
             return draft.revision
     return 1
 
 
 def _sync_draft_config(
-    db: Session, proj: Project, config: dict, row: CalcConfig,
+    db: Session,
+    proj: ProjectRecord,
+    config: dict,
+    row: CalcConfig,
 ) -> None:
     """把已保存配置同步进当前草稿内容的 calc_config 节(不递增草稿修订)。
 
@@ -1088,7 +1155,7 @@ def _sync_draft_config(
     """
     if proj.current_draft_id is None:
         return
-    draft = db.get(Draft, proj.current_draft_id)
+    draft = project_domain.get_draft(db, proj.current_draft_id)
     if draft is None:
         return
     from iesplan.services import project as project_service  # 延迟导入避免环
@@ -1110,7 +1177,8 @@ def _sync_draft_config(
     }
     if isinstance(old_calc.get("task_params"), dict):
         content["calc_config"]["task_params"] = old_calc["task_params"]
-    draft.content_object_id = project_service.store_content_object(db, content)
+    content_object_id = project_service.store_content_object(db, content)
+    project_domain.update_draft_content_ref(db, draft.id, content_object_id)
 
 
 def save_config(
@@ -1133,7 +1201,7 @@ def save_config(
     返回:
         保存后的 CalcConfig 行。
     """
-    proj = db.get(Project, project_id)
+    proj = project_domain.get_project(db, project_id)
     if proj is None:
         raise NotFoundError(
             f"项目不存在: {project_id}",
@@ -1318,7 +1386,7 @@ def get_config(project_id: int, db: Session | None = None) -> dict:
 
 
 def _read_config(db: Session, project_id: int) -> dict:
-    if db.get(Project, project_id) is None:
+    if project_domain.get_project(db, project_id) is None:
         raise NotFoundError(
             f"项目不存在: {project_id}",
             code="RES-MISS-003",

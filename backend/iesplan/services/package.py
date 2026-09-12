@@ -36,6 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan import __version__
+from iesplan import project as project_domain
 from iesplan.config import settings
 from iesplan.core.contracts import (
     PlanningConfig,
@@ -75,9 +76,7 @@ PACKAGE_FORMAT_VERSION = "1.0"
 #: 项目包媒体类型
 PACKAGE_MEDIA_TYPE = "application/zip"
 #: Excel 报告媒体类型
-EXCEL_MEDIA_TYPE = (
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 #: 下载授权有效期(秒, 短期单对象授权, 默认 5 分钟)
 DOWNLOAD_TOKEN_TTL_SECONDS = 300
 #: 包内禁止出现的清单键(账号/权限/会话/全局配置/密钥不得随包导出，见 domain-model §对象生命周期)
@@ -151,9 +150,7 @@ MAX_PACKAGE_TOTAL_BYTES: int = 4 * 1024 * 1024 * 1024
 
 def _token_sign(payload: str) -> str:
     """HMAC-SHA256 签名(密钥取 settings.secret_key)。"""
-    return hmac.new(
-        settings.secret_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
-    ).hexdigest()
+    return hmac.new(settings.secret_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def create_download_token(
@@ -227,8 +224,14 @@ class PackageExport:
     """项目包导出结果(对象记录 + 下载授权 + 清单)。"""
 
     __slots__ = (
-        "object_id", "oid", "size_bytes", "media_type",
-        "file_name", "manifest", "token", "expires_at",
+        "object_id",
+        "oid",
+        "size_bytes",
+        "media_type",
+        "file_name",
+        "manifest",
+        "token",
+        "expires_at",
     )
 
     def __init__(
@@ -295,33 +298,39 @@ def _collect_datasets(db: Session, dataset_version_ids: list[int]) -> list[dict]
                 obj = object_info(db, f.object_id)
             except NotFoundError:
                 continue
-            files.append(
-                {"file": f, "obj": obj, "content": get_object(db, obj["id"])}
-            )
+            files.append({"file": f, "obj": obj, "content": get_object(db, obj["id"])})
         out.append({"dataset": dataset, "version": version, "files": files})
     return out
 
 
 def _collect_evidence(db: Session, project_id: int) -> list[dict]:
     """收集项目历史结果证据与评估引用(经任务归属项目，domain-model §快照、任务和结果)。"""
-    packages = db.execute(
-        select(EvidencePackage)
-        .join(Task, Task.id == EvidencePackage.task_id)
-        .where(Task.project_id == project_id)
-        .order_by(EvidencePackage.id)
-    ).scalars().all()
+    packages = (
+        db.execute(
+            select(EvidencePackage)
+            .join(Task, Task.id == EvidencePackage.task_id)
+            .where(Task.project_id == project_id)
+            .order_by(EvidencePackage.id)
+        )
+        .scalars()
+        .all()
+    )
     out: list[dict] = []
     for pkg in packages:
         task = db.get(Task, pkg.task_id)
         snapshot = db.get(CalcSnapshot, pkg.calc_snapshot_id) if pkg.calc_snapshot_id else None
-        assessments = db.execute(
-            select(ResultAssessment)
-            .where(ResultAssessment.evidence_package_id == pkg.id)
-            .order_by(ResultAssessment.id)
-        ).scalars().all()
-        index = db.execute(
-            select(ResultIndex).where(ResultIndex.evidence_package_id == pkg.id)
-        ).scalars().all()
+        assessments = (
+            db.execute(
+                select(ResultAssessment)
+                .where(ResultAssessment.evidence_package_id == pkg.id)
+                .order_by(ResultAssessment.id)
+            )
+            .scalars()
+            .all()
+        )
+        index = (
+            db.execute(select(ResultIndex).where(ResultIndex.evidence_package_id == pkg.id)).scalars().all()
+        )
         content: bytes | None = None
         obj: dict | None = None
         try:
@@ -331,23 +340,34 @@ def _collect_evidence(db: Session, project_id: int) -> list[dict]:
             pass
         out.append(
             {
-                "package": pkg, "task": task, "snapshot": snapshot,
-                "assessments": assessments, "index": index,
-                "object": obj, "content": content,
+                "package": pkg,
+                "task": task,
+                "snapshot": snapshot,
+                "assessments": assessments,
+                "index": index,
+                "object": obj,
+                "content": content,
             }
         )
     return out
 
 
 def _build_package_zip(
-    db: Session, project: Project, draft: Draft, draft_content: dict,
+    db: Session,
+    project: Project,
+    draft: Draft,
+    draft_content: dict,
 ) -> tuple[bytes, dict]:
     """组装项目包 zip 字节与清单(流式写入; 不含账号/权限/会话/密钥，见 domain-model §对象生命周期)。"""
-    versions = db.execute(
-        select(ProjectVersion)
-        .where(ProjectVersion.project_id == project.id)
-        .order_by(ProjectVersion.version_no)
-    ).scalars().all()
+    versions = (
+        db.execute(
+            select(ProjectVersion)
+            .where(ProjectVersion.project_id == project.id)
+            .order_by(ProjectVersion.version_no)
+        )
+        .scalars()
+        .all()
+    )
 
     # 数据集版本 id 全集: 当前草稿绑定 + 全部版本绑定 + 证据快照绑定
     dataset_ids: list[int] = list(_bound_dataset_ids(draft_content))
@@ -374,9 +394,7 @@ def _build_package_zip(
 
     def _add(path: str, data: bytes, media_type: str) -> None:
         """写入 zip 条目并登记对象清单(路径/大小/类型, 不登记内容摘要)。"""
-        objects_manifest.append(
-            {"path": path, "size_bytes": len(data), "media_type": media_type}
-        )
+        objects_manifest.append({"path": path, "size_bytes": len(data), "media_type": media_type})
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -403,7 +421,8 @@ def _build_package_zip(
         content = {k: v for k, v in draft_content.items() if k != "applied_commands"}
         draft_json = json.dumps(
             {"revision": draft.revision, "content": content},
-            ensure_ascii=False, indent=2,
+            ensure_ascii=False,
+            indent=2,
         ).encode()
         _add("draft.json", draft_json, "application/json")
         zf.writestr("draft.json", draft_json)
@@ -419,11 +438,13 @@ def _build_package_zip(
             profile_row = db.get(FinanceProfileRow, project.finance_profile_id)
             if profile_row is None:
                 raise AppError(
-                    "项目 FinanceProfile 指针损坏", code="PROJ-FIN-003",
+                    "项目 FinanceProfile 指针损坏",
+                    code="PROJ-FIN-003",
                     params={"project_id": project.id},
                 )
             # 精确恢复(禁止 latest 猜测漂移)
             from iesplan.finance import FinanceProfile as _FP
+
             profile = _FP.from_dict(profile_row.content)
             profile_raw = yaml_dump(profile.to_dict()).encode("utf-8")
             _add("finance_profile.yaml", profile_raw, "application/yaml")
@@ -553,9 +574,7 @@ def _build_package_zip(
                     "program_version": snapshot.program_version if snapshot else None,
                     "random_seed": snapshot.random_seed if snapshot else None,
                     "dataset_version_ids": (snapshot.dataset_version_ids if snapshot else []),
-                    "canonical_assembly_text": (
-                        snapshot.canonical_assembly_text if snapshot else None
-                    ),
+                    "canonical_assembly_text": (snapshot.canonical_assembly_text if snapshot else None),
                     "assembly_receipt": snapshot.assembly_receipt if snapshot else None,
                 },
                 "assessments": [
@@ -590,9 +609,8 @@ def _build_package_zip(
             files_meta["evidence"].append(evidence_path)
             if item["content"] is not None:
                 media = (
-                    (item["object"].get("media_type") if item["object"] else None)
-                    or "application/octet-stream"
-                )
+                    item["object"].get("media_type") if item["object"] else None
+                ) or "application/octet-stream"
                 ext = "json" if "json" in media else "bin"
                 entry = f"{base}/result.{ext}"
                 _add(entry, item["content"], media)
@@ -631,11 +649,18 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
     zip_bytes, manifest = _build_package_zip(db, project, draft, draft_content)
 
     obj = put_object(
-        db, zip_bytes, PACKAGE_MEDIA_TYPE, source_category="project_package",
+        db,
+        zip_bytes,
+        PACKAGE_MEDIA_TYPE,
+        source_category="project_package",
     )
     add_ref(
-        db, obj.id, "export_package", project.id,
-        ref_entity_type="projects", purpose="项目包导出对象(23.2 保留)",
+        db,
+        obj.id,
+        "export_package",
+        project.id,
+        ref_entity_type="projects",
+        purpose="项目包导出对象(23.2 保留)",
     )
     # ObjectHandle → 元数据 dict(公开门面统一形状)
     obj_info = object_info(db, obj.id)
@@ -643,7 +668,11 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
     # 对象存储是包的唯一事实源, 下载经短期授权 token 走公开读取门面。
 
     audit_service.audit(
-        db, user.id, audit_service.AUDIT_PROJECT_EXPORTED, "project", project.id,
+        db,
+        user.id,
+        audit_service.AUDIT_PROJECT_EXPORTED,
+        "project",
+        project.id,
         revision=draft.revision,
         result={"kind": "package", "package_object_id": obj.id, "size_bytes": len(zip_bytes)},
         extra={"file_name": f"project-package-{project.id}.zip"},
@@ -651,10 +680,14 @@ def export_package(db: Session, user: User, project_id: int) -> PackageExport:
     expires_at = datetime.now(UTC) + timedelta(seconds=DOWNLOAD_TOKEN_TTL_SECONDS)
     token = create_download_token(obj.id, "package", project_id=project.id, user_id=user.id)
     return PackageExport(
-        object_id=obj.id, oid=obj_info["oid"],
-        size_bytes=obj_info["size_bytes"], media_type=obj_info["media_type"],
+        object_id=obj.id,
+        oid=obj_info["oid"],
+        size_bytes=obj_info["size_bytes"],
+        media_type=obj_info["media_type"],
         file_name=f"project-package-{project.id}.zip",
-        manifest=manifest, token=token, expires_at=expires_at,
+        manifest=manifest,
+        token=token,
+        expires_at=expires_at,
     )
 
 
@@ -685,8 +718,7 @@ def _parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
     if len(data) > MAX_PACKAGE_BYTES:
         raise PackageSizeError(
             "",
-            params={"reason": "package_too_large", "max_bytes": MAX_PACKAGE_BYTES,
-                    "actual_bytes": len(data)},
+            params={"reason": "package_too_large", "max_bytes": MAX_PACKAGE_BYTES, "actual_bytes": len(data)},
         )
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
@@ -698,8 +730,11 @@ def _parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
         if len(infos) > MAX_PACKAGE_ENTRIES:
             raise PackageSizeError(
                 "",
-                params={"reason": "too_many_entries", "max_entries": MAX_PACKAGE_ENTRIES,
-                        "actual_entries": len(infos)},
+                params={
+                    "reason": "too_many_entries",
+                    "max_entries": MAX_PACKAGE_ENTRIES,
+                    "actual_entries": len(infos),
+                },
             )
         total_uncompressed = 0
         for info in infos:
@@ -708,15 +743,22 @@ def _parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
             if info.file_size > MAX_PACKAGE_ENTRY_BYTES:
                 raise PackageSizeError(
                     "",
-                    params={"reason": "entry_too_large", "entry": info.filename,
-                            "max_bytes": MAX_PACKAGE_ENTRY_BYTES, "actual_bytes": info.file_size},
+                    params={
+                        "reason": "entry_too_large",
+                        "entry": info.filename,
+                        "max_bytes": MAX_PACKAGE_ENTRY_BYTES,
+                        "actual_bytes": info.file_size,
+                    },
                 )
             total_uncompressed += info.file_size
             if total_uncompressed > MAX_PACKAGE_TOTAL_BYTES:
                 raise PackageSizeError(
                     "",
-                    params={"reason": "total_uncompressed_too_large",
-                            "max_bytes": MAX_PACKAGE_TOTAL_BYTES, "actual_bytes": total_uncompressed},
+                    params={
+                        "reason": "total_uncompressed_too_large",
+                        "max_bytes": MAX_PACKAGE_TOTAL_BYTES,
+                        "actual_bytes": total_uncompressed,
+                    },
                 )
         entries: dict[str, bytes] = {}
         for info in infos:
@@ -833,25 +875,19 @@ def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
         if path is None:
             reasons.append(f"清单 files.configs 缺少 {field} 条目")
     if planning_path is not None and profile_path is None:
-        reasons.append(
-            "包内携带规划配置但缺少财务三件套(规划必须引用已生成的有效财务快照)"
-        )
+        reasons.append("包内携带规划配置但缺少财务三件套(规划必须引用已生成的有效财务快照)")
     if reasons:
         raise ImportValidationError(reasons)
 
     def _load_yaml(package_field: str, path: str) -> dict:
         if not isinstance(path, str) or path not in entries:
-            raise ImportValidationError(
-                [f"清单 files.configs.{package_field} 指向的包内文件缺失: {path}"]
-            )
+            raise ImportValidationError([f"清单 files.configs.{package_field} 指向的包内文件缺失: {path}"])
         try:
             from iesplan.core.yamlmini import load as yaml_load
 
             doc = yaml_load(entries[path].decode("utf-8"))
         except Exception as exc:
-            raise ImportValidationError(
-                [f"包内 {path} 无法解析为安全 YAML: {exc}"]
-            ) from exc
+            raise ImportValidationError([f"包内 {path} 无法解析为安全 YAML: {exc}"]) from exc
         if not isinstance(doc, dict):
             raise ImportValidationError([f"包内 {path} 结构非法(期望对象)"])
         return doc
@@ -870,9 +906,7 @@ def _parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
     except FinanceTripletError as exc:
         reasons.append(f"包内 FinanceOverrides 非法: {exc}")
     try:
-        effective = EffectiveFinanceConfig.from_dict(
-            _load_yaml("effective_finance", effective_path)
-        )
+        effective = EffectiveFinanceConfig.from_dict(_load_yaml("effective_finance", effective_path))
     except FinanceTripletError as exc:
         reasons.append(f"包内 EffectiveFinanceConfig 非法: {exc}")
 
@@ -923,11 +957,17 @@ def import_proposal(
             .where(ImportProposal.proposer_id == user.id)
             .order_by(ImportProposal.id.desc())
         ).scalars():
-            if cand.status == "proposed" and (cand.review_summary or {}).get("idempotency_key") == idempotency_key:
+            if (
+                cand.status == "proposed"
+                and (cand.review_summary or {}).get("idempotency_key") == idempotency_key
+            ):
                 return cand
     # 源包落盘为新对象(每次提案新建对象行)
     source_obj = put_object(
-        db, file_bytes, PACKAGE_MEDIA_TYPE, source_category="project_package",
+        db,
+        file_bytes,
+        PACKAGE_MEDIA_TYPE,
+        source_category="project_package",
     )
 
     # 1) 暂存对象: 包内全部对象按对象 id 落盘(每次写入新对象, 无内容去重)
@@ -935,11 +975,16 @@ def import_proposal(
     for entry in manifest.get("objects", []):
         path = entry["path"]
         staged[path] = put_object(
-            db, entries[path], entry.get("media_type") or "application/octet-stream",
+            db,
+            entries[path],
+            entry.get("media_type") or "application/octet-stream",
             source_category="project_package_import",
         )
     source_obj = put_object(
-        db, file_bytes, PACKAGE_MEDIA_TYPE, source_category="import_package_source",
+        db,
+        file_bytes,
+        PACKAGE_MEDIA_TYPE,
+        source_category="import_package_source",
     )
 
     # 2) 拟创建项目快照: 新项目身份(每次导入新身份, 导入者成为所有者)
@@ -963,20 +1008,18 @@ def import_proposal(
     # 规划/财务配置 revision(0.6.5 事项 3): 包内配置严格校验(缺失 = 导入后
     # 无配置, 不静默默认; 非法 → 拒绝整个导入)。
     package_configs = _parse_config_files(entries, manifest)
-    project = Project(
+    project = project_domain.create_project(
+        db,
         name=name,
-        description=project_meta.get("description"),
-        status="active",
         owner_id=user.id,
+        created_by=user.id,
+        description=project_meta.get("description"),
         currency=currency,
         baseline_resolution=baseline.resolution,
         baseline_leap_year=baseline.leap_year,
         baseline_scenario_mode=baseline.scenario_mode,
         schema_version=int(project_meta.get("schema_version", 1) or 1),
-        created_by=user.id,
     )
-    db.add(project)
-    db.flush()
 
     # 3) 导入提案(校验报告 + 分区提交内容, 01 §10.4)
     # 不再写 source_path(该列可空且无任何消费点) —— storage_path 属
@@ -996,7 +1039,8 @@ def import_proposal(
                 "exporter_version": manifest.get("exporter_version"),
             },
             "project_snapshot": {
-                "name": name, "currency": currency,
+                "name": name,
+                "currency": currency,
                 "project_baseline": baseline.to_dict(),
                 "schema_version": project.schema_version,
             },
@@ -1004,7 +1048,8 @@ def import_proposal(
                 "finance_triplet": {
                     "present": "effective" in package_configs,
                     "profile_id": package_configs["profile"].profile_id
-                    if "profile" in package_configs else None,
+                    if "profile" in package_configs
+                    else None,
                 },
                 # revision 追加历史属服务端状态、不入包(导出侧同), 提案摘要
                 # 只陈述包内容有无; 导入确认时服务层生成 revision(测试头注)。
@@ -1014,14 +1059,13 @@ def import_proposal(
             },
             "staging": {
                 "object_count": len(staged),
-                "objects": [
-                    {"path": path, "object_id": obj.id}
-                    for path, obj in sorted(staged.items())
-                ],
+                "objects": [{"path": path, "object_id": obj.id} for path, obj in sorted(staged.items())],
                 "source_object_id": source_obj.id,
             },
             "checks": {
-                "zip_ok": True, "manifest_ok": True, "integrity_ok": True,
+                "zip_ok": True,
+                "manifest_ok": True,
+                "integrity_ok": True,
                 "integrity_verified_objects": len(manifest.get("objects", [])),
             },
             "idempotency_key": idempotency_key,
@@ -1031,25 +1075,25 @@ def import_proposal(
     db.add(proposal)
     db.flush()
     audit_service.audit(
-        db, user.id, audit_service.AUDIT_PROJECT_IMPORT_PROPOSED, "import_proposals",
+        db,
+        user.id,
+        audit_service.AUDIT_PROJECT_IMPORT_PROPOSED,
+        "import_proposals",
         proposal.id,
-        result={"project_id": project.id, "source_object_id": source_obj.id,
-                "staged_objects": len(staged)},
+        result={"project_id": project.id, "source_object_id": source_obj.id, "staged_objects": len(staged)},
     )
     return proposal
 
 
-def _create_draft_row(db: Session, project: Project, content: dict, user: User) -> Draft:
-    """新项目身份创建初始草稿(revision=1, 与版本服务同构的对象存储写入路径)。"""
+def _create_draft_row(db: Session, project_id: int, content: dict, user: User):
+    """新项目身份创建初始草稿(revision=1, 经 project 域 repository)。"""
     content_object_id = project_service.store_content_object(db, content)
-    draft = Draft(
-        project_id=project.id, revision=1, content_object_id=content_object_id,
-        parent_draft_id=None, is_current=True, updated_by=user.id,
+    return project_domain.create_draft(
+        db,
+        project_id=project_id,
+        content_object_id=content_object_id,
+        updated_by=user.id,
     )
-    db.add(draft)
-    db.flush()
-    project.current_draft_id = draft.id
-    return draft
 
 
 def _staged_object_id(staged_by_path: dict[str, int], path: str) -> int:
@@ -1059,7 +1103,8 @@ def _staged_object_id(staged_by_path: dict[str, int], path: str) -> int:
     except KeyError as exc:
         raise AppError(
             "导入暂存对象缺失(数据损坏)",
-            code="PKG-IMP-002", severity=SEVERITY_ERROR,
+            code="PKG-IMP-002",
+            severity=SEVERITY_ERROR,
             message_key="ies.diag.store.corrupt",
             params={"path": path},
         ) from exc
@@ -1089,7 +1134,8 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
         )
     if proposal.proposer_id != user.id:
         raise ForbiddenError(
-            "仅提案人可确认导入", params={"proposal_id": proposal_id},
+            "仅提案人可确认导入",
+            params={"proposal_id": proposal_id},
             location={"object_type": "import_proposals", "object_id": proposal_id},
         )
     project = db.get(Project, proposal.project_id)
@@ -1115,8 +1161,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     staged_by_path = {
         str(item.get("path")): int(item.get("object_id"))
         for item in (summary.get("staging") or {}).get("objects", [])
-        if isinstance(item, dict) and item.get("path") is not None
-        and item.get("object_id") is not None
+        if isinstance(item, dict) and item.get("path") is not None and item.get("object_id") is not None
     }
 
     # 1) 数据集(先建, 供绑定重映射; 原数据集版本标识 → 新标识)
@@ -1162,7 +1207,8 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             if len(matches) != 1:
                 raise AppError(
                     "导入暂存对象缺失(数据损坏)",
-                    code="PKG-IMP-002", severity=SEVERITY_ERROR,
+                    code="PKG-IMP-002",
+                    severity=SEVERITY_ERROR,
                     message_key="ies.diag.store.corrupt",
                     params={"path": prefix},
                 )
@@ -1200,7 +1246,8 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
         assessments = doc.get("assessments") or []
         base = evidence_path.removesuffix(".json")
         ref_objects = [
-            entry for entry in manifest.get("objects", [])
+            entry
+            for entry in manifest.get("objects", [])
             if entry.get("path") == evidence_path or entry.get("path", "").startswith(f"{base}/")
         ]
         object_ids: list[int] = []
@@ -1208,7 +1255,10 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             object_id = _staged_object_id(staged_by_path, str(entry.get("path")))
             object_ids.append(object_id)
             add_ref(
-                db, object_id, "imported_evidence", project.id,
+                db,
+                object_id,
+                "imported_evidence",
+                project.id,
                 ref_entity_type="projects",
                 purpose="导入的历史结果证据来源(不伪造本地任务)",
             )
@@ -1218,14 +1268,23 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
                 "task": {k: task_meta.get(k) for k in ("type", "status", "business_outcome")},
                 "snapshot_id": snapshot_meta.get("id"),
                 "assessments": [
-                    {k: a.get(k) for k in ("id", "assessor", "dimension_physical",
-                                           "dimension_optimality", "dimension_financial",
-                                           "dimension_reliability", "overall_score", "comment")}
+                    {
+                        k: a.get(k)
+                        for k in (
+                            "id",
+                            "assessor",
+                            "dimension_physical",
+                            "dimension_optimality",
+                            "dimension_financial",
+                            "dimension_reliability",
+                            "overall_score",
+                            "comment",
+                        )
+                    }
                     for a in assessments
                 ],
                 "objects": [
-                    {"path": e.get("path"), "object_id": oid}
-                    for e, oid in zip(ref_objects, object_ids)
+                    {"path": e.get("path"), "object_id": oid} for e, oid in zip(ref_objects, object_ids)
                 ],
             }
         )
@@ -1234,7 +1293,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     draft_doc = json.loads(entries["draft.json"].decode("utf-8"))
     draft_content = _remap(dict(draft_doc.get("content") or {}))
     draft_content["imported_evidence"] = imported_evidence
-    _create_draft_row(db, project, draft_content, user)
+    _create_draft_row(db, project.id, draft_content, user)
 
     # 4) 版本: 按包内版本顺序重建(新身份版本号, parent 链按导入顺序)
     prev_version: ProjectVersion | None = None
@@ -1246,18 +1305,17 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
         ver_meta = doc.get("version") or {}
         # 版本基线: 包内版本必须携带与项目一致的基线(缺失/不一致 → 拒绝,
         # 版本内容自包含, 不以"当前项目"解释历史版本)。
-        version_baseline_errors = ProjectBaseline.validate(
-            ver_meta.get("project_baseline")
-        )
+        version_baseline_errors = ProjectBaseline.validate(ver_meta.get("project_baseline"))
         if version_baseline_errors:
             raise ImportValidationError(
-                [f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线非法: "
-                 f"{d.params.get('detail') or d.code}" for d in version_baseline_errors]
+                [
+                    f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线非法: "
+                    f"{d.params.get('detail') or d.code}"
+                    for d in version_baseline_errors
+                ]
             )
         try:
-            version_baseline = ProjectBaseline.from_dict(
-                ver_meta.get("project_baseline")
-            )
+            version_baseline = ProjectBaseline.from_dict(ver_meta.get("project_baseline"))
         except ProjectBaselineError as exc:
             raise ImportValidationError(
                 [f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线非法: {exc}"]
@@ -1268,8 +1326,10 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             or version_baseline.scenario_mode != project.baseline_scenario_mode
         ):
             raise ImportValidationError(
-                [f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线"
-                 "与项目不一致(版本必须与项目共享同一基线)"]
+                [
+                    f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线"
+                    "与项目不一致(版本必须与项目共享同一基线)"
+                ]
             )
         version_content = _remap(dict(doc.get("content") or {}))
         content_object_id = project_service.store_content_object(db, version_content)
@@ -1316,9 +1376,7 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
             )
             # 按稳定 profile_id 绑定注册行(注册表按 id 唯一, 同 id 复用既有行)
             # set_project_finance_profile 内部按稳定 profile_id 定位
-            config_service.set_project_finance_profile(
-                db, project.id, row.profile_id, user.id
-            )
+            config_service.set_project_finance_profile(db, project.id, row.profile_id, user.id)
             config_service.save_finance_overrides(
                 db, project.id, package_configs["overrides"].to_dict(), 1, user.id
             )
@@ -1336,7 +1394,11 @@ def confirm_import(db: Session, user: User, proposal_id: int) -> Project:
     proposal.decided_by = user.id
     proposal.decided_at = datetime.now(UTC)
     audit_service.audit(
-        db, user.id, audit_service.AUDIT_PROJECT_IMPORTED, "project", project.id,
+        db,
+        user.id,
+        audit_service.AUDIT_PROJECT_IMPORTED,
+        "project",
+        project.id,
         revision=1,
         result={
             "source_object_id": proposal.source_object_id,
@@ -1446,13 +1508,15 @@ def export_excel(
     evidence = db.get(EvidencePackage, evidence_package_id)
     if evidence is None:
         raise NotFoundError(
-            "证据包不存在", params={"evidence_package_id": evidence_package_id},
+            "证据包不存在",
+            params={"evidence_package_id": evidence_package_id},
             location={"object_type": "evidence_packages", "object_id": evidence_package_id},
         )
     task = db.get(Task, evidence.task_id)
     if task is None or task.project_id != project_id:
         raise NotFoundError(
-            "证据包不属于该项目", params={"evidence_package_id": evidence_package_id},
+            "证据包不属于该项目",
+            params={"evidence_package_id": evidence_package_id},
         )
     assessment = db.get(ResultAssessment, assessment_id)
     if assessment is None or assessment.evidence_package_id != evidence.id:
@@ -1466,9 +1530,7 @@ def export_excel(
     version_content: dict = {}
     if version is not None:
         version_content = project_service.load_content_object(db, version.content_object_id)
-    evidence_content = _parse_evidence_content(
-        get_object(db, evidence.object_id)
-    )
+    evidence_content = _parse_evidence_content(get_object(db, evidence.object_id))
 
     # 数据版本(计算快照绑定的数据集版本 + 溯源/许可证)
     dataset_rows: list[dict[str, Any]] = []
@@ -1529,7 +1591,8 @@ def export_excel(
             f"财务 {assessment.dimension_financial} / 可靠 {assessment.dimension_reliability}"
             + (
                 f" | 综合评分 {float(assessment.overall_score)}"
-                if assessment.overall_score is not None else ""
+                if assessment.overall_score is not None
+                else ""
             ),
         )
     )
@@ -1541,21 +1604,27 @@ def export_excel(
     ws.cell(row=row, column=1, value="适用范围与限制 / Applicability and limitations").font = Font(bold=True)
     _write_kv(ws, _section_rows(applicability) or [("适用范围", "—")], start_row=row + 1)
     ws.cell(
-        row=row + 6, column=1,
+        row=row + 6,
+        column=1,
         value="本报告固定引用证据包与结果评估, 导出时不重新求解 / "
-              "This report references a fixed evidence package and assessment; no re-solve on export.",
+        "This report references a fixed evidence package and assessment; no re-solve on export.",
     ).font = Font(italic=True)
     ws.cell(
-        row=row + 7, column=1,
+        row=row + 7,
+        column=1,
         value="适用单位 / Units: 指标单位以各摘要表注记为准(如 kWh、MW、°C、元/kWh、kgCO₂/kWh)。",
     )
     ws.cell(
-        row=row + 8, column=1,
-        value="数据来源 / Data sources: " + ("; ".join(
-            f"{d['dataset']} v{d['version_no']}({d['resolution']}, "
-            f"许可证 {d['license'] or '—'})"
-            for d in dataset_rows
-        ) or "无绑定数据版本"),
+        row=row + 8,
+        column=1,
+        value="数据来源 / Data sources: "
+        + (
+            "; ".join(
+                f"{d['dataset']} v{d['version_no']}({d['resolution']}, 许可证 {d['license'] or '—'})"
+                for d in dataset_rows
+            )
+            or "无绑定数据版本"
+        ),
     )
 
     # 主要指标表
@@ -1571,7 +1640,8 @@ def export_excel(
         for item in kp_rows:
             if isinstance(item, dict):
                 kp_sheet.cell(
-                    row=r, column=1,
+                    row=r,
+                    column=1,
                     value=_excel_safe(str(item.get("name") or item.get("key") or "")),
                 )
                 kp_sheet.cell(row=r, column=2, value=_excel_safe(item.get("value")))
@@ -1598,7 +1668,8 @@ def export_excel(
             dev_sheet.cell(row=r, column=1, value=_excel_safe(str(dev.get("name") or "")))
             dev_sheet.cell(row=r, column=2, value=_excel_safe(str(type_name)))
             dev_sheet.cell(
-                row=r, column=3,
+                row=r,
+                column=3,
                 value=_excel_safe(json.dumps(params, ensure_ascii=False)[:300]),
             )
             r += 1
@@ -1607,12 +1678,24 @@ def export_excel(
 
     # 财务/环境/工程摘要(证据包内容, 固定引用, 不重新求解)
     for sheet_name, title_zh, title_en, section in (
-        ("财务摘要", "财务摘要", "Financial Summary",
-         _first_section(evidence_content, "financial", "finance")),
-        ("环境摘要", "环境摘要", "Environmental Summary",
-         _first_section(evidence_content, "environmental", "environment", "emissions")),
-        ("工程摘要", "工程摘要", "Engineering Summary",
-         _first_section(evidence_content, "engineering", "engineering_summary")),
+        (
+            "财务摘要",
+            "财务摘要",
+            "Financial Summary",
+            _first_section(evidence_content, "financial", "finance"),
+        ),
+        (
+            "环境摘要",
+            "环境摘要",
+            "Environmental Summary",
+            _first_section(evidence_content, "environmental", "environment", "emissions"),
+        ),
+        (
+            "工程摘要",
+            "工程摘要",
+            "Engineering Summary",
+            _first_section(evidence_content, "engineering", "engineering_summary"),
+        ),
     ):
         ws_s = wb.create_sheet(sheet_name)
         _set_sheet_title(ws_s, title_zh, title_en)
@@ -1622,7 +1705,11 @@ def export_excel(
     buf = io.BytesIO()
     wb.save(buf)
     audit_service.audit(
-        db, user.id, audit_service.AUDIT_PROJECT_EXPORTED, "project", project.id,
+        db,
+        user.id,
+        audit_service.AUDIT_PROJECT_EXPORTED,
+        "project",
+        project.id,
         result={"kind": "excel", "evidence_package_id": evidence.id, "assessment_id": assessment.id},
         extra={"lang": lang},
     )

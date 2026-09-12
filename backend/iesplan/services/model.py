@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from iesplan import project as project_domain
 from iesplan.core.diagnostics import (
     CONN_NODE_ORPHAN,
     CONN_TYPE_UNREGISTERED,
@@ -42,7 +43,7 @@ from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.devices import DeviceModelDocument, get_device
 from iesplan.devices.contracts2 import PropertySpec
 from iesplan.models.model import Connection, Device, Port, SystemGraph
-from iesplan.models.project import Draft, Project
+from iesplan.project.contracts import DraftRecord, ProjectConflictError
 from iesplan.services import project as project_service
 
 # ---------------------------------------------------------------------------
@@ -60,9 +61,7 @@ CARRIER_PORT_TYPE: dict[str, str] = {
 #: 外生供给载体对应的端口类型: 目录内无源设备(如燃气, 外部管网购入),
 #: 汇-only 合法, 拓扑源汇平衡跳过(与 assembly.checker
 #: EXOGENOUS_SUPPLY_CARRIERS 豁免同理; 引擎按 gas_price 计价, 不依赖源设备)
-_EXOGENOUS_SUPPLY_PORT_TYPES = frozenset(
-    {CARRIER_PORT_TYPE[c] for c in ("gas",) if c in CARRIER_PORT_TYPE}
-)
+_EXOGENOUS_SUPPLY_PORT_TYPES = frozenset({CARRIER_PORT_TYPE[c] for c in ("gas",) if c in CARRIER_PORT_TYPE})
 
 #: 端口类型 → 连接类型(conn_type CHECK)
 CONN_TYPE_BY_PORT: dict[str, str] = {
@@ -156,7 +155,11 @@ def _descriptor_ports(spec: DeviceModelDocument, params: dict | None = None) -> 
         elif direction not in ("in", "out", "bidirectional"):
             continue
         carrier = interface.carrier
-        if spec.device is not None and spec.device.id == "ies.device.heat_pump" and carrier in ("heat", "cool"):
+        if (
+            spec.device is not None
+            and spec.device.id == "ies.device.heat_pump"
+            and carrier in ("heat", "cool")
+        ):
             mode = params.get("mode", "both")
             if mode == "heating" and carrier == "cool":
                 continue
@@ -173,9 +176,7 @@ def _descriptor_ports(spec: DeviceModelDocument, params: dict | None = None) -> 
     return ports
 
 
-def _sync_ports_for_params(
-    db: Session, device: Device, spec: DeviceModelDocument, params: dict
-) -> None:
+def _sync_ports_for_params(db: Session, device: Device, spec: DeviceModelDocument, params: dict) -> None:
     """按设备参数(热泵 mode)重同步端口: 补齐应存在但缺失的端口, 删除被裁剪的端口。
 
     以 YAML 端口声明为唯一权威(与创建设备路径一致): 期望端口集合按端口名
@@ -300,8 +301,7 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
     (配合草稿 uq_drafts_revision/uq_drafts_current)兜底 —— 唯一键冲突方回滚本事务
     半成品后重查胜方已提交的图, 重试上限内必收敛。
     """
-    project = db.get(Project, project_id)
-    if project is None:
+    if project_domain.get_project(db, project_id) is None:
         raise NotFoundError(
             f"项目不存在: {project_id}",
             location={"object_type": "project", "object_id": str(project_id)},
@@ -311,25 +311,18 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
         if graph is not None:
             return graph
         try:
-            # 复用既有当前草稿, 否则新建(修订号顺延)
-            draft = db.scalar(
-                select(Draft)
-                .where(Draft.project_id == project_id, Draft.is_current.is_(True))
-                .order_by(Draft.revision.desc())
-            )
+            # 复用既有当前草稿, 否则新建(修订号顺延, 经 project 域 repository)
+            draft = project_domain.get_current_draft(db, project_id)
             if draft is None:
-                max_rev = db.scalar(select(sa.func.max(Draft.revision)).where(Draft.project_id == project_id))
-                draft = Draft(
-                    project_id=project_id,
-                    revision=int(max_rev or 0) + 1,
-                    content_object_id=project_service.store_content_object(
-                        db, project_service.initial_content()
-                    ),
-                    updated_by=created_by,
-                    is_current=True,
+                content_object_id = project_service.store_content_object(
+                    db, project_service.initial_content()
                 )
-                db.add(draft)
-                db.flush()
+                draft = project_domain.create_draft(
+                    db,
+                    project_id=project_id,
+                    content_object_id=content_object_id,
+                    updated_by=created_by,
+                )
             graph = SystemGraph(
                 project_id=project_id,
                 draft_id=draft.id,
@@ -341,7 +334,7 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
             sync_draft_content(db, graph)
             db.commit()
             return graph
-        except IntegrityError:
+        except (IntegrityError, ProjectConflictError):
             # 并发竞争者已提交建图/建草稿: 放弃本事务半成品, 下一轮重查胜方结果
             db.rollback()
     raise ConflictError(
@@ -368,9 +361,7 @@ def _load_ports(db: Session, graph_id: int) -> list[Port]:
 
 def _load_connections(db: Session, graph_id: int) -> list[Connection]:
     """图内连接(按 id 升序)。"""
-    return list(
-        db.scalars(select(Connection).where(Connection.graph_id == graph_id).order_by(Connection.id))
-    )
+    return list(db.scalars(select(Connection).where(Connection.graph_id == graph_id).order_by(Connection.id)))
 
 
 def _device_content_payload(device: Device) -> dict:
@@ -425,17 +416,18 @@ def sync_draft_content(db: Session, graph: SystemGraph) -> None:
         ],
     }
     if graph.draft_id is not None:
-        draft = db.get(Draft, graph.draft_id)
+        draft = project_domain.get_draft(db, graph.draft_id)
         if draft is not None:
             # 草稿为工作图的内容载体(01 §3.2/§4.1): 图内容并入草稿内容文档并落为
             # 对象存储对象(对象引用, 校验/草稿命令经草稿 revision 定位);
             # 既有内容节(dataset_bindings/calc_config 等)原样保留。
             content = _draft_content_with_model(db, draft, payload)
-            draft.content_object_id = project_service.store_content_object(db, content)
+            content_object_id = project_service.store_content_object(db, content)
+            project_domain.update_draft_content_ref(db, draft.id, content_object_id)
     db.flush()
 
 
-def _draft_content_with_model(db: Session, draft: Draft, payload: dict) -> dict:
+def _draft_content_with_model(db: Session, draft: DraftRecord, payload: dict) -> dict:
     """草稿内容文档: 图内容(设备/端口/连接)并入 model 节, 其余内容节原样保留。
 
     草稿内容对象缺失或损坏时直接抛出加载原错误, 不回退初始骨架
@@ -494,9 +486,7 @@ def validate_device_params(
     return diags
 
 
-def _check_param_value(
-    name: str, value: Any, pspec: PropertySpec, loc: dict
-) -> list[Diagnostic]:
+def _check_param_value(name: str, value: Any, pspec: PropertySpec, loc: dict) -> list[Diagnostic]:
     """单参数取值校验(枚举/类型/范围), 返回诊断列表。"""
     # 布尔类参数
     if isinstance(pspec.value, bool):
@@ -676,9 +666,7 @@ def update_device(
                 location={"object_type": "device", "object_id": str(device_id), "field": "name"},
             )
         dup = db.scalar(
-            select(Device.id).where(
-                Device.graph_id == graph.id, Device.name == name, Device.id != device_id
-            )
+            select(Device.id).where(Device.graph_id == graph.id, Device.name == name, Device.id != device_id)
         )
         if dup is not None:
             raise ConflictError(
@@ -745,8 +733,10 @@ def _check_connection_attrs(attrs: dict) -> tuple[float | None, float, dict]:
     capacity = attrs.get("capacity")
     if capacity is not None:
         if (
-            isinstance(capacity, bool) or not isinstance(capacity, (int, float))
-            or not math.isfinite(float(capacity)) or capacity < 0
+            isinstance(capacity, bool)
+            or not isinstance(capacity, (int, float))
+            or not math.isfinite(float(capacity))
+            or capacity < 0
         ):
             raise ModelValidationError(
                 "连接容量非法",
@@ -757,8 +747,10 @@ def _check_connection_attrs(attrs: dict) -> tuple[float | None, float, dict]:
             )
     loss_rate = attrs.get("loss_rate", 0)
     if (
-        isinstance(loss_rate, bool) or not isinstance(loss_rate, (int, float))
-        or not math.isfinite(float(loss_rate)) or not 0 <= loss_rate <= 1
+        isinstance(loss_rate, bool)
+        or not isinstance(loss_rate, (int, float))
+        or not math.isfinite(float(loss_rate))
+        or not 0 <= loss_rate <= 1
     ):
         raise ModelValidationError(
             "连接损耗率非法",
@@ -846,9 +838,9 @@ def connect(
             },
             location={**loc, "field": "port_type"},
         )
-    if (
-        from_port.direction not in ("out", "bidirectional")
-        or to_port.direction not in ("in", "bidirectional")
+    if from_port.direction not in ("out", "bidirectional") or to_port.direction not in (
+        "in",
+        "bidirectional",
     ):
         raise ModelValidationError(
             "端口方向不兼容(连接须为源→汇)",
@@ -1006,8 +998,7 @@ def get_graph(db: Session, project_id: int) -> dict:
     返回显式空态: has_graph=False + 空拓扑结构(graph_id=None), 调用方不得再从
     graph_id 是否为 None 猜测图是否存在。
     """
-    project = db.get(Project, project_id)
-    if project is None:
+    if project_domain.get_project(db, project_id) is None:
         raise NotFoundError(
             f"项目不存在: {project_id}",
             location={"object_type": "project", "object_id": str(project_id)},
@@ -1030,9 +1021,7 @@ def get_graph(db: Session, project_id: int) -> dict:
     for d in devices:
         pos = (d.params.get(_LAYOUT_KEY) or {}).get("position")
         if isinstance(pos, dict) and "x" in pos and "y" in pos:
-            layout_devices[str(d.id)] = {
-                "position": {"x": float(pos["x"]), "y": float(pos["y"])}
-            }
+            layout_devices[str(d.id)] = {"position": {"x": float(pos["x"]), "y": float(pos["y"])}}
     return {
         "has_graph": True,
         "graph_id": graph.id,
@@ -1157,9 +1146,7 @@ def validate_project_model(db: Session, project_id: int) -> list[Diagnostic]:
     diags = validate_topology(graph)
     for dev in graph["devices"]:
         try:
-            diags.extend(
-                validate_device_params(dev["device_type"], dev["params"], device_id=dev["id"])
-            )
+            diags.extend(validate_device_params(dev["device_type"], dev["params"], device_id=dev["id"]))
         except NotFoundError:
             diags.append(
                 make_diag(

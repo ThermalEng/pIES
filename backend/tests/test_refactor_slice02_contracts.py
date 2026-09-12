@@ -143,18 +143,51 @@ def test_repository_methods_take_caller_session_first():
             assert params[0].annotation == "Session", f"{domain}.{name} 首参必须注解为 Session"
 
 
+#: 各域 persistence 实现允许访问的归属 models 子模块（对应 TABLE_OWNERS；
+#: configuration 的 calc_configs 与 tasks 表同文件，tasks 读快照不写配置表）
+OWNED_MODELS: dict[str, frozenset[str]] = {
+    "project": frozenset({"project"}),
+    "identity": frozenset({"identity"}),
+    "dataset": frozenset({"dataset"}),
+    "configuration": frozenset({"config_revision", "calc"}),
+    "tasks": frozenset({"calc", "uncertainty"}),
+    "results": frozenset({"result"}),
+    "package": frozenset({"audit"}),
+}
+
+
 def _iter_domain_files():
     for domain in _DOMAIN_FACADES:
         for path in sorted((_PKG_ROOT / domain).rglob("*.py")):
             yield domain, path
 
 
+def test_implemented_domains_expose_protocol_methods():
+    """已有 persistence 实现的域：门面必须逐一实现其 repository 协议方法。"""
+    for domain, facade in _DOMAIN_FACADES.items():
+        if not (_PKG_ROOT / domain / "persistence.py").exists():
+            continue
+        proto = _DOMAIN_REPOSITORIES[domain]
+        expected = {
+            name
+            for name, member in inspect.getmembers(proto, predicate=inspect.isfunction)
+            if not name.startswith("_")
+        }
+        missing = [name for name in expected if not callable(getattr(facade, name, None))]
+        assert not missing, f"{domain} 门面缺 repository 协议方法: {missing}"
+
+
 def test_domain_source_purity():
-    """域源码纯度：无 ORM/跨层导入，无 commit/rollback；contracts 只靠标准库+core。"""
+    """域源码纯度：无 ORM/跨层导入，无 commit/rollback；contracts 只靠标准库+core。
+
+    唯一例外是各域 persistence.py（repository 实现），它只允许访问本域归属表
+    （OWNED_MODELS），且同样禁跨层导入与 commit/rollback。
+    """
     violations: list[str] = []
     for domain, path in _iter_domain_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         own_contracts = f"iesplan.{domain}.contracts"
+        is_persistence = path.name == "persistence.py"
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 mod = node.module
@@ -169,6 +202,12 @@ def test_domain_source_purity():
                     if mod == own_contracts or mod.startswith("iesplan.core."):
                         continue
                     if mod.split(".")[0] == "sqlalchemy":
+                        continue
+                    if is_persistence and mod.startswith("iesplan.models."):
+                        leaf = mod.split(".")[2]
+                        if leaf in OWNED_MODELS[domain]:
+                            continue
+                        violations.append(f"{domain}/{path.name}:{node.lineno}: 非归属表 {mod}")
                         continue
                 for prefix in _BANNED_PREFIXES:
                     if mod == prefix or mod.startswith(prefix + "."):
