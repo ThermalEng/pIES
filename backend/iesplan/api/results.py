@@ -24,11 +24,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.core.errors import NotFoundError
+from iesplan.application.results import endpoint_cases as results_app
+from iesplan.application.tasks import views as tasks_app
 from iesplan.db import get_db
-from iesplan.services import project as project_service
-from iesplan.services import results as results_service
-from iesplan.services import tasks as tasks_service
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/tasks/{task_id}/result", tags=["results"]
@@ -77,7 +75,7 @@ def get_result_endpoint(
 
     展示只读聚合, 不重新计算(domain-model §快照任务结果)。
     """
-    return {"result": results_service.result_view(db, user, project_id, task_id)}
+    return {"result": results_app.result_view(db, user, project_id, task_id)}
 
 
 @router.get("/assessments", summary="评估历史(不可变)")
@@ -88,8 +86,8 @@ def list_assessments_endpoint(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """评估历史: 全部证据包上的评估记录(追加式不可变, 时间倒序)。"""
-    results_service.result_view(db, user, project_id, task_id)  # 权限 + 归属校验
-    items = [results_service.assessment_to_dict(db, a) for a in results_service.list_assessments(db, task_id)]
+    results_app.result_view(db, user, project_id, task_id)  # 权限 + 归属校验
+    items = [results_app.assessment_to_dict(db, a) for a in results_app.list_assessments(db, task_id)]
     return {"items": items, "total": len(items)}
 
 
@@ -103,23 +101,10 @@ def assess_endpoint(
 ) -> dict[str, Any]:
     """触发新评估(domain-model §快照任务结果/§对象生命周期): 对任务最新证据包执行四维(或单维)检查, 创建新评估记录
     不覆盖历史; 随后更新结果索引的最新引用(同证据包只挂接指针)。"""
-    task = tasks_service.ensure_task_belongs(db, project_id, task_id)
-    package = results_service.latest_evidence(db, task_id)
-    if package is None:
-        raise NotFoundError(
-            "任务尚无证据包, 无法评估",
-            params={"task_id": task_id},
-            location={"object_type": "evidence_package", "object_id": None},
-        )
-    project_service.ensure_access(db, user, project_id, "edit")
-    assessment = results_service.run_assessment(
-        db, package.id, payload.assessment_type, user=user
+    assessment = results_app.assess_task_evidence(
+        db, user, project_id, task_id, payload.assessment_type
     )
-    results_service.update_result_index(
-        db, task_id, assessment.id, business_outcome=task.business_outcome
-    )
-    db.commit()
-    return {"assessment": results_service.assessment_to_dict(db, assessment)}
+    return {"assessment": results_app.assessment_to_dict(db, assessment)}
 
 
 @router.post("/select", status_code=201, summary="选择结果")
@@ -137,13 +122,10 @@ def select_result_endpoint(
     project_id 与任务真实归属不一致时 404, 防止把选中写入非 URL 项目或读取
     他项目差异(selection_diff 以 URL project_id 读取当前选中)。
     """
-    tasks_service.ensure_task_belongs(db, project_id, task_id)
-    selection = results_service.select_result(
-        db, user, task_id, payload.solution_id, payload.selection_type,
+    selection, diff = results_app.select_task_result(
+        db, user, project_id, task_id, payload.solution_id, payload.selection_type,
         reference_rule=payload.reference_rule, reason=payload.reason,
     )
-    db.commit()
-    diff = results_service.selection_diff(db, project_id)
     return {
         "selection": {
             "id": selection.id,
@@ -167,14 +149,7 @@ def diff_endpoint(
 ) -> dict[str, Any]:
     """选中结果的参数差异预览(补丁 + 校验值 + 来源版本), 应用前要求用户确认
     (REQ-RESULT-003); 无选中 → 404。"""
-    tasks_service.ensure_task_belongs(db, project_id, task_id)
-    project_service.ensure_access(db, user, project_id, "view")
-    diff = results_service.selection_diff(db, project_id)
-    if diff is None:
-        raise NotFoundError(
-            "项目尚无当前选中的结果", params={"project_id": project_id},
-            location={"object_type": "result_selection", "object_id": None},
-        )
+    diff = results_app.get_selection_diff(db, user, project_id, task_id)
     return {"diff": diff}
 
 
@@ -192,18 +167,9 @@ def hourly_endpoint(
 ) -> dict[str, Any]:
     """逐时结果查询(REQ-RESULT-002): 从对象存储读取, 行号分页
     返回 values + next_start 供翻页。任务尚无证据包 → 404(不再以空内容查询)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    tasks_service.ensure_task_belongs(db, project_id, task_id)
-    package = results_service.latest_evidence(db, task_id)
-    if package is None:
-        raise NotFoundError(
-            "任务尚无证据包, 无逐时结果可查",
-            params={"task_id": task_id},
-            location={"object_type": "evidence_package", "object_id": None},
-        )
-    content = results_service.evidence_content(db, package)
-    return results_service.read_hourly(
-        db, content, field, start=start, end=end, limit=limit, solution_id=solution_id
+    return results_app.read_task_hourly(
+        db, user, project_id, task_id, field,
+        start=start, end=end, limit=limit, solution_id=solution_id,
     )
 
 
@@ -217,6 +183,5 @@ def check_task_endpoint(
 ) -> dict[str, Any]:
     """对已有证据包创建检查任务(report 类型, io 池); Worker 消费后执行四维复查。"""
     package_id = payload.evidence_package_id if payload else None
-    task = results_service.run_check_task(db, user, project_id, task_id, evidence_package_id=package_id)
-    db.commit()
-    return {"task": tasks_service.task_summary(db, task)}
+    task = results_app.create_check_task(db, user, project_id, task_id, package_id)
+    return {"task": tasks_app.task_summary(db, task)}

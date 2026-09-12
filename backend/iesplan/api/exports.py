@@ -15,16 +15,16 @@ services/package.py create_download_token/verify_download_token)。
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.application.packages import operations as packages_app
+from iesplan.application.packages import reports as reports_app
 from iesplan.db import get_db
-from iesplan.services import package as package_service
-from iesplan.storage import add_ref, get_object, list_refs, put_object
 
 router = APIRouter(prefix="/api/projects/{project_id}/exports", tags=["exports"])
 
@@ -55,52 +55,10 @@ def export_excel_endpoint(
     user: CurrentUser,
 ) -> dict:
     """生成固定模板 Excel 报告, 返回短期单对象下载授权 token(5 分钟)。"""
-    excel_bytes = package_service.export_excel(
-        db, user, project_id, payload.evidence_package_id, payload.assessment_id, lang=payload.lang
+    return reports_app.export_excel_report(
+        db, user, project_id, payload.evidence_package_id, payload.assessment_id,
+        lang=payload.lang,
     )
-    obj = put_object(
-        db, excel_bytes, package_service.EXCEL_MEDIA_TYPE, source_category="excel_report",
-    )
-    add_ref(
-        db, obj.id, "export_excel", project_id,
-        ref_entity_type="projects", purpose="Excel 报告导出",
-    )
-    db.commit()
-    token = package_service.create_download_token(
-        obj.id, "excel", project_id=project_id, user_id=user.id
-    )
-    return {
-        "token": token,
-        "expires_at_seconds": package_service.DOWNLOAD_TOKEN_TTL_SECONDS,
-        "file_name": f"report-{project_id}-{payload.evidence_package_id}.xlsx",
-        "size_bytes": obj.size_bytes,
-    }
-
-
-def _authorize_download(
-    db: Session,
-    info: dict,
-    project_id: int,
-    user: Any,
-) -> dict:
-    """下载授权校验(C-04): token 绑定的项目/用户必须与当前请求一致。
-
-    防止跨项目对象下载(token 泄漏或伪造场景下仍无法越权读取)。
-    额外校验: token 指向的 object 必须确实被该 project 引用(见下),
-    封堵"用可预测签名 + 自填 user_id/project_id 伪造 token 下载他项目对象"的路径。
-    """
-    if info.get("project_id") != project_id or info.get("user_id") != user.id:
-        raise package_service.DownloadTokenError(
-            "", params={"reason": "project_or_user_mismatch", "project_id": project_id}
-        )
-    # 归属校验: object 必须存在一条指向该 project 的 owner 引用。
-    # 否则即使签名/绑定校验通过, 也说明该对象不属于此项目 → 拒绝。
-    refs = list_refs(db, info["object_id"])
-    if not any(ref.ref_entity_id == str(project_id) for ref in refs):
-        raise package_service.DownloadTokenError(
-            "", params={"reason": "object_not_in_project", "project_id": project_id}
-        )
-    return info
 
 
 @router.get("/excel/download", summary="下载 Excel 报告")
@@ -111,15 +69,13 @@ def download_excel_endpoint(
     token: str = Query(..., description="短期下载授权 token"),
 ) -> Response:
     """凭短期授权 token 下载 Excel 报告字节(校验签名/过期 + 项目与用户绑定)。"""
-    info = package_service.verify_download_token(token, expected_kind="excel")
-    _authorize_download(db, info, project_id, user)
-    content = get_object(db, info["object_id"])
+    content, media_type, file_name = reports_app.load_export_download(
+        db, user, project_id, token, "excel"
+    )
     return Response(
         content=content,
-        media_type=package_service.EXCEL_MEDIA_TYPE,
-        headers={
-            "Content-Disposition": f'attachment; filename="report-{project_id}.xlsx"'
-        },
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
     )
 
 
@@ -130,8 +86,7 @@ def export_package_endpoint(
     user: CurrentUser,
 ) -> dict:
     """导出完整项目包(模型/配置/版本/数据集/历史证据, 仅所有者), 返回下载授权。"""
-    result = package_service.export_package(db, user, project_id)
-    db.commit()
+    result = packages_app.export_package(db, user, project_id)
     return result.to_dict()
 
 
@@ -143,13 +98,11 @@ def download_package_endpoint(
     token: str = Query(..., description="短期下载授权 token"),
 ) -> Response:
     """凭短期授权 token 下载项目包 zip(校验签名/过期 + 项目与用户绑定)。"""
-    info = package_service.verify_download_token(token, expected_kind="package")
-    _authorize_download(db, info, project_id, user)
-    content = get_object(db, info["object_id"])
+    content, media_type, file_name = reports_app.load_export_download(
+        db, user, project_id, token, "package"
+    )
     return Response(
         content=content,
-        media_type=package_service.PACKAGE_MEDIA_TYPE,
-        headers={
-            "Content-Disposition": f'attachment; filename="project-package-{project_id}.zip"'
-        },
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
     )
