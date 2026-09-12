@@ -25,9 +25,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan.config import settings
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError
@@ -38,8 +38,13 @@ from iesplan.core.security import (
     token_hash,
     verify_password,
 )
+from iesplan.identity.contracts import (
+    AuthEventRecord,
+    CredentialRecord,
+    UserRecord,
+    WindowSessionRecord,
+)
 from iesplan.models.common import EMAIL_RE, USERNAME_RE
-from iesplan.models.identity import AppSetting, AuthEvent, Credential, Role, User, UserRole, WindowSession
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +59,6 @@ LOCKOUT_SECONDS: Final[int] = 15 * 60
 #: 内置角色(管理员、工程师; 宪法 §16 + 领域模型 §身份、权限和审计)
 ROLE_ADMIN: Final[str] = "admin"
 ROLE_ENGINEER: Final[str] = "engineer"
-#: 会话活动状态集合(非终态)
-_ACTIVE_STATUSES: Final[tuple[str, str]] = ("active", "takeover_pending")
 #: 假哈希: 用户不存在/停用/无凭证时也执行一次 bcrypt 校验,
 #: 使各种失败路径耗时均匀, 避免通过响应时间枚举用户名/账号状态
 _DUMMY_PASSWORD_HASH: Final[str] = "$2b$12$P5GwAaopJcdx8Bx7CEUWOeNFfS/4KQ6wvr321HDFA.oQakKY.W9v."
@@ -347,10 +350,15 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def as_utc(dt: datetime | None) -> datetime | None:
-    """将可能为 naive 的 datetime 按 UTC 解释(SQLite 测试环境回读为 naive)。"""
+def as_utc(dt: datetime | str | None) -> datetime | None:
+    """将可能为 naive 的 datetime 按 UTC 解释(SQLite 测试环境回读为 naive)。
+
+    域记录以 ISO 字符串携带时间, 此处一并接受(认证上下文直接消费会话记录)。
+    """
     if dt is None:
         return None
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
@@ -387,22 +395,15 @@ KEY_REGISTRATION_ENABLED = "registration_enabled"
 
 def get_app_setting(db: Session, key: str, default: Any = None) -> Any:
     """读取应用级设置(未设置返回 default)。"""
-    row = db.execute(select(AppSetting).where(AppSetting.key == key)).scalar_one_or_none()
-    if row is None:
+    record = identity_domain.get_app_setting(db, key)
+    if record is None:
         return default
-    return row.value.get("value", default)
+    return record.value.get("value", default)
 
 
 def set_app_setting(db: Session, key: str, value: Any, updated_by: int | None = None) -> None:
     """写入应用级设置(upsert), 全部 Worker 从数据库读取同一值。"""
-    row = db.execute(select(AppSetting).where(AppSetting.key == key)).scalar_one_or_none()
-    if row is None:
-        db.add(AppSetting(key=key, value={"value": value}, updated_by=updated_by))
-    else:
-        row.value = {"value": value}
-        row.updated_by = updated_by
-        row.updated_at = datetime.now(UTC)
-    db.flush()
+    identity_domain.set_app_setting(db, key, value, updated_by)
 
 
 def registration_enabled(db: Session) -> bool:
@@ -439,15 +440,14 @@ def record_auth_event(
         session_id: 关联窗口会话; 可为 None。
         detail: 事件详情(JSON 可序列化), 如失败原因、变更前后快照。
     """
-    db.add(
-        AuthEvent(
-            event_type=event_type,
-            user_id=user_id,
-            session_id=session_id,
-            ip=_clean_ip(ip),
-            user_agent=user_agent,
-            detail=detail,
-        )
+    identity_domain.record_auth_event(
+        db,
+        event_type=event_type,
+        user_id=user_id,
+        session_id=session_id,
+        ip=_clean_ip(ip),
+        user_agent=user_agent,
+        detail=detail,
     )
 
 
@@ -456,66 +456,44 @@ def record_auth_event(
 # ---------------------------------------------------------------------------
 
 
-def ensure_role(db: Session, code: str, name: str) -> Role:
-    """确保全局角色存在(幂等), 返回角色行。
+def ensure_role(db: Session, code: str, name: str):
+    """确保全局角色存在(幂等), 返回角色记录。
 
     参数:
         code: 角色编码(如 admin / engineer)。
         name: 角色显示名(仅首次创建时使用)。
     """
-    role = db.execute(select(Role).where(Role.code == code)).scalar_one_or_none()
-    if role is None:
-        role = Role(code=code, name=name, description=f"内置角色:{name}", is_system=True)
-        db.add(role)
-        db.flush()
-    return role
+    return identity_domain.ensure_role(db, code, name)
 
 
-def user_roles(db: Session, user: User) -> list[str]:
+def user_roles(db: Session, user: UserRecord) -> list[str]:
     """返回用户当前(未撤销)的角色编码列表, 按角色 id 升序。"""
-    rows = db.execute(
-        select(Role.code)
-        .join(UserRole, UserRole.role_id == Role.id)
-        .where(UserRole.user_id == user.id, UserRole.revoked_at.is_(None))
-        .order_by(Role.id)
-    ).scalars()
-    return list(rows)
+    return identity_domain.user_roles(db, user.id)
 
 
-def has_role(db: Session, user: User, code: str) -> bool:
+def has_role(db: Session, user: UserRecord, code: str) -> bool:
     """用户是否拥有指定角色(当前有效授权)。"""
     return code in user_roles(db, user)
 
 
-def list_users(db: Session) -> list[User]:
+def list_users(db: Session) -> list[UserRecord]:
     """全部用户(含停用), 按 id 升序。"""
-    return list(db.execute(select(User).order_by(User.id)).scalars())
+    return identity_domain.list_users(db)
 
 
-def get_user_by_id(db: Session, user_id: int) -> User | None:
+def get_user_by_id(db: Session, user_id: int) -> UserRecord | None:
     """按主键取用户(含停用), 不存在返回 None。"""
-    return db.get(User, user_id)
+    return identity_domain.get_user(db, user_id)
 
 
-def get_user_by_username(db: Session, username: str) -> User | None:
+def get_user_by_username(db: Session, username: str) -> UserRecord | None:
     """按用户名(强制小写)取用户。"""
-    return db.execute(
-        select(User).where(User.username == (username or "").strip().lower())
-    ).scalar_one_or_none()
+    return identity_domain.get_user_by_username(db, username)
 
 
-def get_active_password_credential(db: Session, user: User) -> Credential | None:
+def get_active_password_credential(db: Session, user: UserRecord) -> CredentialRecord | None:
     """返回用户当前有效的 password 凭证(至多一条), 无则返回 None。"""
-    return db.execute(
-        select(Credential)
-        .where(
-            Credential.user_id == user.id,
-            Credential.credential_type == "password",
-            Credential.revoked_at.is_(None),
-        )
-        .order_by(Credential.created_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    return identity_domain.get_active_credential(db, user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +513,7 @@ def create_user(
     created_by: int | None = None,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> User:
+) -> UserRecord:
     """创建用户 + 密码凭证 + 角色授权(角色表幂等补齐), 并写认证审计。
 
     参数:
@@ -582,7 +560,7 @@ def create_user(
             params={"username": username},
         )
     if email:
-        dup_email = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+        dup_email = identity_domain.get_user_by_email(db, email)
         if dup_email is not None:
             raise ConflictError(
                 "",
@@ -598,36 +576,30 @@ def create_user(
     for _ in range(20):
         candidate = generate_namespace()
         # 检查唯一性（极低碰撞概率，但仍需保证）
-        from sqlalchemy import select as _select
-        from iesplan.models.identity import User as _User
-
-        exists = db.execute(_select(_User).where(_User.public_namespace == candidate)).scalar_one_or_none()
-        if exists is None:
+        if identity_domain.get_user_by_namespace(db, candidate) is None:
             ns = candidate
             break
     if ns is None:
         raise RuntimeError("无法分配唯一的 public_namespace")
-    user = User(
+    user = identity_domain.create_user(
+        db,
         username=username,
         display_name=(display_name or "").strip() or username,
         email=email,
         public_namespace=ns,
     )
-    db.add(user)
-    db.flush()
-    db.add(
-        Credential(
-            user_id=user.id,
-            credential_type="password",
-            secret_hash=hash_password(password),
-            algorithm="bcrypt",
-            strength_score=100 if ok else 0,
-            requires_change=force_password_change,
-            created_by=created_by,
-        )
+    identity_domain.add_credential(
+        db,
+        user_id=user.id,
+        credential_type="password",
+        secret_hash=hash_password(password),
+        algorithm="bcrypt",
+        strength_score=100 if ok else 0,
+        requires_change=force_password_change,
+        created_by=created_by,
     )
     # 追加式授权: 授权人缺省为本人(自注册), 否则为操作管理员
-    db.add(UserRole(user_id=user.id, role_id=role_row.id, granted_by=created_by or user.id))
+    identity_domain.grant_role(db, user_id=user.id, role_id=role_row.id, granted_by=created_by or user.id)
     record_auth_event(
         db,
         "role_change",
@@ -642,8 +614,8 @@ def create_user(
 
 def deactivate_user(
     db: Session,
-    admin: User,
-    user: User,
+    admin: UserRecord,
+    user: UserRecord,
     *,
     ip: str | None = None,
     user_agent: str | None = None,
@@ -651,16 +623,18 @@ def deactivate_user(
     """停用账号(管理员): 状态置 disabled, 立即撤销全部会话并写审计。
 
     约束: 不能停用自己(避免管理员自锁), 不能停用系统账号。
+
+    注: 状态幂等判定必须读取当前行(传入的 UserRecord 是不可变快照,
+    调用方持有旧快照时不能作为判定依据)。
     """
     if user.id == admin.id:
         raise ForbiddenError("", params={"reason": "cannot_deactivate_self"})
     if user.is_system:
         raise ForbiddenError("", params={"reason": "system_account"})
-    if user.status == "disabled":
+    current = identity_domain.get_user(db, user.id)
+    if current is not None and current.status == "disabled":
         return
-    now = utcnow()
-    user.status = "disabled"
-    user.updated_at = now
+    identity_domain.set_user_status(db, user.id, "disabled")
     revoke_all_user_sessions(db, user, revoked_by=admin.id)
     record_auth_event(
         db,
@@ -675,18 +649,20 @@ def deactivate_user(
 
 def reactivate_user(
     db: Session,
-    admin: User,
-    user: User,
+    admin: UserRecord,
+    user: UserRecord,
     *,
     ip: str | None = None,
     user_agent: str | None = None,
 ) -> None:
-    """重新启用账号(管理员): 状态置 active 并写权限变更审计。"""
-    if user.status == "active":
+    """重新启用账号(管理员): 状态置 active 并写权限变更审计。
+
+    注: 幂等判定读取当前行(理由同 deactivate_user, 快照不可作为判定依据)。
+    """
+    current = identity_domain.get_user(db, user.id)
+    if current is not None and current.status == "active":
         return
-    now = utcnow()
-    user.status = "active"
-    user.updated_at = now
+    identity_domain.set_user_status(db, user.id, "active")
     record_auth_event(
         db,
         "permission_change",
@@ -727,7 +703,7 @@ def _owned_projects(db: Session, user_id: int) -> list:
     return owned
 
 
-def owned_project_ids(db: Session, user: User) -> list[int]:
+def owned_project_ids(db: Session, user: UserRecord) -> list[int]:
     """该用户当前拥有、且尚未删除(软删)的项目 id 列表(升序)。
 
     供删除预告与确认令牌一致性校验共用, 保证「确认删除的影响范围」
@@ -738,8 +714,8 @@ def owned_project_ids(db: Session, user: User) -> list[int]:
 
 def preview_user_delete(
     db: Session,
-    admin: User,
-    user: User,
+    admin: UserRecord,
+    user: UserRecord,
 ) -> dict:
     """删除账号预告(管理员): 返回将受影响的项目清单与签名确认令牌。
 
@@ -771,7 +747,7 @@ def preview_user_delete(
     }
 
 
-def verify_delete_confirm_token(db: Session, user: User, token: str) -> None:
+def verify_delete_confirm_token(db: Session, user: UserRecord, token: str) -> None:
     """校验删除确认令牌: 签名有效 + 未过期 + 绑定目标用户 + 项目清单未变化。
 
     任一不满足抛 DeleteConfirmRequiredError(400), 拒绝删除。
@@ -801,8 +777,8 @@ def verify_delete_confirm_token(db: Session, user: User, token: str) -> None:
 
 def delete_user(
     db: Session,
-    admin: User,
-    user: User,
+    admin: UserRecord,
+    user: UserRecord,
     *,
     confirm: bool = False,
     confirm_token: str = "",
@@ -846,22 +822,9 @@ def delete_user(
             after={"reason": "account_deleted", "account_id": user.id},
         )
     # 账号停用 + 会话/凭证撤销
-    user.status = "disabled"
-    user.updated_at = now
+    identity_domain.set_user_status(db, user.id, "disabled")
     revoke_all_user_sessions(db, user, revoked_by=admin.id)
-    creds = (
-        db.execute(
-            select(Credential).where(
-                Credential.user_id == user.id,
-                Credential.credential_type == "password",
-                Credential.revoked_at.is_(None),
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for cred in creds:
-        _revoke_credential(cred, now)
+    identity_domain.revoke_credentials(db, user.id)
     record_auth_event(
         db,
         "account_disabled",
@@ -879,16 +842,9 @@ def delete_user(
 # ---------------------------------------------------------------------------
 
 
-def _revoke_credential(cred: Credential, now: datetime) -> None:
-    """撤销旧凭证(credentials 为不可变表, 只置撤销标记不允许物理删除)。"""
-    cred.revoked_at = now
-    if cred.rotated_at is None:
-        cred.rotated_at = now
-
-
 def change_password(
     db: Session,
-    user: User,
+    user: UserRecord,
     old_password: str,
     new_password: str,
     *,
@@ -901,7 +857,8 @@ def change_password(
     - 凭证版本递增后, 旧窗口会话全部失效, 前端须重新登录(凭证失效机制, 宪法 §16 + 领域模型 §身份、权限和审计)。
     """
     cred = get_active_password_credential(db, user)
-    if cred is None or not verify_password(old_password, cred.secret_hash):
+    secret = identity_domain.get_active_password_secret(db, user.id)
+    if cred is None or secret is None or not verify_password(old_password, secret):
         raise BadOldPasswordError()
     if old_password == new_password:
         raise SamePasswordError()
@@ -910,21 +867,19 @@ def change_password(
         raise WeakPasswordError(params={"reason": reason})
     was_force_change = cred.requires_change
     now = utcnow()
-    _revoke_credential(cred, now)
-    db.add(
-        Credential(
-            user_id=user.id,
-            credential_type="password",
-            secret_hash=hash_password(new_password),
-            algorithm="bcrypt",
-            strength_score=100 if ok else 0,
-            requires_change=False,
-            rotated_at=now,
-            created_by=user.id,
-        )
+    identity_domain.revoke_credentials(db, user.id)
+    identity_domain.add_credential(
+        db,
+        user_id=user.id,
+        credential_type="password",
+        secret_hash=hash_password(new_password),
+        algorithm="bcrypt",
+        strength_score=100 if ok else 0,
+        requires_change=False,
+        created_by=user.id,
+        rotated_at=now.isoformat(),
     )
-    user.credential_version += 1
-    user.updated_at = now
+    updated = identity_domain.bump_credential_version(db, user.id)
     revoke_all_user_sessions(db, user, revoked_by=user.id)
     record_auth_event(
         db,
@@ -932,15 +887,15 @@ def change_password(
         user_id=user.id,
         ip=ip,
         user_agent=user_agent,
-        detail={"was_force_change": was_force_change, "credential_version": user.credential_version},
+        detail={"was_force_change": was_force_change, "credential_version": updated.credential_version},
     )
     db.commit()
 
 
 def reset_password(
     db: Session,
-    admin: User,
-    target_user: User,
+    admin: UserRecord,
+    target_user: UserRecord,
     new_tmp: str,
     *,
     ip: str | None = None,
@@ -951,22 +906,19 @@ def reset_password(
     if not ok:
         raise WeakPasswordError(params={"reason": reason})
     now = utcnow()
-    old = get_active_password_credential(db, target_user)
-    if old is not None:
-        _revoke_credential(old, now)
-    db.add(
-        Credential(
-            user_id=target_user.id,
-            credential_type="password",
-            secret_hash=hash_password(new_tmp),
-            algorithm="bcrypt",
-            strength_score=100 if ok else 0,
-            requires_change=True,
-            created_by=admin.id,
-        )
+    identity_domain.revoke_credentials(db, target_user.id)
+    identity_domain.add_credential(
+        db,
+        user_id=target_user.id,
+        credential_type="password",
+        secret_hash=hash_password(new_tmp),
+        algorithm="bcrypt",
+        strength_score=100 if ok else 0,
+        requires_change=True,
+        created_by=admin.id,
+        rotated_at=now.isoformat(),
     )
-    target_user.credential_version += 1
-    target_user.updated_at = now
+    updated = identity_domain.bump_credential_version(db, target_user.id)
     revoke_all_user_sessions(db, target_user, revoked_by=admin.id)
     record_auth_event(
         db,
@@ -974,7 +926,7 @@ def reset_password(
         user_id=target_user.id,
         ip=ip,
         user_agent=user_agent,
-        detail={"reset_by": admin.id, "credential_version": target_user.credential_version},
+        detail={"reset_by": admin.id, "credential_version": updated.credential_version},
     )
     db.commit()
 
@@ -992,7 +944,7 @@ def authenticate(
     ip: str | None = None,
     user_agent: str | None = None,
     device: str | None = None,
-) -> tuple[User | None, str | None]:
+) -> tuple[UserRecord | None, str | None]:
     """校验用户名与密码, 返回 (user, error_code|None)。
 
     error_code 取值:
@@ -1032,7 +984,8 @@ def authenticate(
         db.commit()
         return None, "invalid_credentials"
     cred = get_active_password_credential(db, user)
-    if cred is None:
+    secret = identity_domain.get_active_password_secret(db, user.id)
+    if cred is None or secret is None:
         # 假校验: 无有效凭证与密码错误的耗时一致(常规 401 路径)
         verify_password(password, _DUMMY_PASSWORD_HASH)
         _record_failure(username)
@@ -1046,7 +999,7 @@ def authenticate(
         )
         db.commit()
         return None, "invalid_credentials"
-    if not verify_password(password, cred.secret_hash):
+    if not verify_password(password, secret):
         _record_failure(username)
         record_auth_event(
             db,
@@ -1059,7 +1012,7 @@ def authenticate(
         db.commit()
         return None, "invalid_credentials"
     _clear_failures(username)
-    user.last_login_at = utcnow()
+    user = identity_domain.touch_login(db, user.id)
     record_auth_event(
         db,
         "login_success",
@@ -1077,70 +1030,14 @@ def authenticate(
 # ---------------------------------------------------------------------------
 
 
-def _new_window_session(user: User, now: datetime, status: str = "active") -> tuple[WindowSession, str]:
-    """构造新会话行, 返回 (会话行, 令牌原文; 令牌原文只由调用方持有)。
-
-    参数:
-        status: 新会话初始状态 —— "active" 为正式活动窗口;
-                "takeover_pending" 为待接管窗口(H-01: 接管确认前不拥有业务权限,
-                仅允许确认接管/改密/登出/本人信息接口)。
-    """
-    token = new_session_token()
-    return (
-        WindowSession(
-            session_token_hash=token_hash(token),
-            user_id=user.id,
-            credential_version_at_issue=user.credential_version,
-            status=status,
-            created_at=now,
-            last_seen_at=now,
-            expires_at=_session_expires_at(now),
-        ),
-        token,
-    )
-
-
-def _revoke_session(
-    session: WindowSession,
-    now: datetime,
-    revoked_by: int | None = None,
-    replaced_by: int | None = None,
-) -> None:
-    """将会话置为 revoked(列级可更新字段: status/revoked_at/revoked_by/replaced_by)。"""
-    session.status = "revoked"
-    session.revoked_at = now
-    if revoked_by is not None:
-        session.revoked_by = revoked_by
-    if replaced_by is not None:
-        session.replaced_by_session_id = replaced_by
-
-
-def _expire_stale_sessions(db: Session, user_id: int, now: datetime) -> int:
-    """将指定用户已过期的活动/待接管会话置为 expired(不提交, 由调用方统一提交)。"""
-    rows = db.execute(
-        select(WindowSession).where(
-            WindowSession.user_id == user_id,
-            WindowSession.status.in_(_ACTIVE_STATUSES),
-        )
-    ).scalars()
-    count = 0
-    for s in rows:
-        expires_at = as_utc(s.expires_at)
-        if expires_at is not None and expires_at < now:
-            s.status = "expired"
-            s.revoked_at = now
-            count += 1
-    return count
-
-
 def create_window_session(
     db: Session,
-    user: User,
+    user: UserRecord,
     device_info: str | None = None,
     *,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> tuple[WindowSession, str, bool]:
+) -> tuple[WindowSessionRecord, str, bool]:
     """创建窗口会话(单活动窗口, 接管确认语义 H-01; 宪法 §16 + 领域模型 §身份、权限和审计)。
 
     流程:
@@ -1158,39 +1055,38 @@ def create_window_session(
         (前端据此提示确认接管并重新加载最新修订)。
     """
     now = utcnow()
-    _expire_stale_sessions(db, user.id, now)
+    identity_domain.expire_sessions(db, user.id)
     # 先撤销残留的 pending 会话(更早接管流程遗留; 部分唯一索引每用户至多一条 pending)
-    pending = list(
-        db.execute(
-            select(WindowSession).where(
-                WindowSession.user_id == user.id,
-                WindowSession.status == "takeover_pending",
-            )
-        ).scalars()
-    )
     # 若存在 active 会话, 直接撤销 —— 新会话以 takeover_pending 创建,
     # 避免同时存在两条 pending 触发唯一索引冲突(部分唯一索引每用户至多一条 active)
-    active = db.execute(
-        select(WindowSession).where(
-            WindowSession.user_id == user.id,
-            WindowSession.status == "active",
-        )
-    ).scalar_one_or_none()
+    previous = identity_domain.list_active_sessions(db, user.id)
+    pending = [s for s in previous if s.status == "takeover_pending"]
+    active = next((s for s in previous if s.status == "active"), None)
     displaced = active is not None or bool(pending)
     for old in pending:
-        _revoke_session(old, now, user.id)
+        identity_domain.set_session_status(db, old.id, "revoked", revoked_by=user.id)
     if active is not None:
-        _revoke_session(active, now, user.id)
-    db.flush()
-    # 创建新会话: 触发接管时初始为 takeover_pending(H-01, 确认前无业务权限)
-    new_session, token = _new_window_session(user, now, status="takeover_pending" if displaced else "active")
-    db.add(new_session)
-    db.flush()
+        identity_domain.set_session_status(db, active.id, "revoked", revoked_by=user.id)
+    # 创建新会话: 触发接管时初始为 takeover_pending(H-01, 确认前无业务权限);
+    # 令牌原文只经返回值交调用方持有, 入库的仅为 sha256 摘要。
+    token = new_session_token()
+    new_session = identity_domain.create_session(
+        db,
+        user_id=user.id,
+        token_hash=token_hash(token),
+        credential_version_at_issue=user.credential_version,
+        expires_at=_session_expires_at(now).isoformat(),
+        status="takeover_pending" if displaced else "active",
+    )
     # 被撤销的残留 pending/active 会话由新会话接管(补 replaced_by 指针, 接管追溯)
     for old in pending:
-        old.replaced_by_session_id = new_session.id
+        identity_domain.set_session_status(
+            db, old.id, "revoked", revoked_by=user.id, replaced_by_session_id=new_session.id
+        )
     if active is not None:
-        active.replaced_by_session_id = new_session.id
+        identity_domain.set_session_status(
+            db, active.id, "revoked", revoked_by=user.id, replaced_by_session_id=new_session.id
+        )
     if displaced:
         record_auth_event(
             db,
@@ -1211,12 +1107,12 @@ def create_window_session(
 
 def confirm_takeover(
     db: Session,
-    user: User,
-    current_session: WindowSession,
+    user: UserRecord,
+    current_session: WindowSessionRecord,
     *,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> WindowSession:
+) -> WindowSessionRecord:
     """确认接管(宪法 §16 + 领域模型 §身份、权限和审计): 保留当前会话并转为 active。
 
     接管流程(领域模型 §身份、权限和审计): 新登录使旧会话撤销、新会话以 takeover_pending
@@ -1228,29 +1124,21 @@ def confirm_takeover(
     其余 pending/active 会话(理论上至多各一条, 部分唯一索引保证)一并撤销,
     保持单活动窗口不变量。返回保留的活动会话。
     """
-    now = utcnow()
     # 并发防御: 确认前被新登录撤销的会话不再恢复(重新读取最新状态)
-    current = db.get(WindowSession, current_session.id)
+    current = identity_domain.get_session(db, current_session.id)
     if current is None or current.status not in ("takeover_pending", "active"):
         raise SessionInvalidError()
-    others = list(
-        db.execute(
-            select(WindowSession).where(
-                WindowSession.user_id == user.id,
-                WindowSession.status.in_(_ACTIVE_STATUSES),
-                WindowSession.id != current.id,
-            )
-        ).scalars()
-    )
+    others = [s for s in identity_domain.list_active_sessions(db, user.id) if s.id != current.id]
     # 先撤销其余 pending/active 会话, 再把当前会话置为 active
     # (状态迁移顺序避免触犯 active/pending 部分唯一索引)
     for old in others:
-        _revoke_session(old, now, user.id)
+        identity_domain.set_session_status(db, old.id, "revoked", revoked_by=user.id)
     if current.status != "active":
-        current.status = "active"
-    db.flush()
+        current = identity_domain.set_session_status(db, current.id, "active")
     for old in others:
-        old.replaced_by_session_id = current.id
+        identity_domain.set_session_status(
+            db, old.id, "revoked", revoked_by=user.id, replaced_by_session_id=current.id
+        )
     record_auth_event(
         db,
         "session_takeover",
@@ -1268,25 +1156,22 @@ def confirm_takeover(
     return current
 
 
-def get_session_by_token(db: Session, token: str) -> WindowSession | None:
+def get_session_by_token(db: Session, token: str) -> WindowSessionRecord | None:
     """按窗口凭证(原文)查找会话(令牌以 sha256 摘要存储)。"""
-    return db.execute(
-        select(WindowSession).where(WindowSession.session_token_hash == token_hash(token))
-    ).scalar_one_or_none()
+    return identity_domain.get_session_by_token_hash(db, token_hash(token))
 
 
 def revoke_session(
     db: Session,
-    user: User,
-    session: WindowSession,
+    user: UserRecord,
+    session: WindowSessionRecord,
     *,
     ip: str | None = None,
     user_agent: str | None = None,
     reason: str = "logout",
 ) -> None:
     """撤销单个会话(登出场景), 写 logout / session_revoke 审计。"""
-    now = utcnow()
-    _revoke_session(session, now, user.id)
+    identity_domain.set_session_status(db, session.id, "revoked", revoked_by=user.id)
     record_auth_event(
         db,
         "logout" if reason == "logout" else "session_revoke",
@@ -1301,24 +1186,15 @@ def revoke_session(
 
 def revoke_other_sessions(
     db: Session,
-    user: User,
+    user: UserRecord,
     keep_session_id: int,
     *,
     revoked_by: int | None = None,
 ) -> int:
     """撤销用户除指定会话外的全部活动/待接管会话, 返回撤销数量。"""
-    now = utcnow()
-    rows = list(
-        db.execute(
-            select(WindowSession).where(
-                WindowSession.user_id == user.id,
-                WindowSession.status.in_(_ACTIVE_STATUSES),
-                WindowSession.id != keep_session_id,
-            )
-        ).scalars()
-    )
+    rows = [s for s in identity_domain.list_active_sessions(db, user.id) if s.id != keep_session_id]
     for s in rows:
-        _revoke_session(s, now, revoked_by)
+        identity_domain.set_session_status(db, s.id, "revoked", revoked_by=revoked_by)
     if rows:
         record_auth_event(
             db,
@@ -1332,22 +1208,14 @@ def revoke_other_sessions(
 
 def revoke_all_user_sessions(
     db: Session,
-    user: User,
+    user: UserRecord,
     *,
     revoked_by: int | None = None,
 ) -> int:
     """撤销用户全部活动/待接管会话(凭证变更/停用时调用), 返回撤销数量。"""
-    now = utcnow()
-    rows = list(
-        db.execute(
-            select(WindowSession).where(
-                WindowSession.user_id == user.id,
-                WindowSession.status.in_(_ACTIVE_STATUSES),
-            )
-        ).scalars()
-    )
+    rows = identity_domain.list_active_sessions(db, user.id)
     for s in rows:
-        _revoke_session(s, now, revoked_by)
+        identity_domain.set_session_status(db, s.id, "revoked", revoked_by=revoked_by)
     if rows:
         record_auth_event(
             db,
@@ -1361,26 +1229,34 @@ def revoke_all_user_sessions(
 
 def expire_sessions(db: Session, user_id: int | None = None) -> int:
     """清理过期会话(状态置 expired, 系统自动过期 revoked_by 为空), 返回数量。"""
-    stmt = select(WindowSession).where(WindowSession.status.in_(_ACTIVE_STATUSES))
-    if user_id is not None:
-        stmt = stmt.where(WindowSession.user_id == user_id)
-    now = utcnow()
-    count = 0
-    for s in db.execute(stmt).scalars():
-        expires_at = as_utc(s.expires_at)
-        if expires_at is not None and expires_at < now:
-            s.status = "expired"
-            s.revoked_at = now
-            count += 1
+    count = identity_domain.expire_sessions(db, user_id)
     if count:
         db.commit()
     return count
 
 
-def extend_session(db: Session, session: WindowSession) -> datetime:
+def extend_session(db: Session, session: WindowSessionRecord) -> datetime:
     """会话续期: 更新最后活跃时间并按 TTL 顺延过期时刻, 返回新的过期时刻。"""
     now = utcnow()
-    session.last_seen_at = now
-    session.expires_at = _session_expires_at(now)
+    new_expires_at = _session_expires_at(now)
+    identity_domain.extend_session(db, session.id, expires_at=new_expires_at.isoformat())
     db.commit()
-    return session.expires_at
+    return new_expires_at
+
+
+def expire_session(db: Session, session_id: int) -> None:
+    """将会话置为 expired(过期访问时系统自动过期), 并提交。"""
+    identity_domain.set_session_status(db, session_id, "expired")
+    db.commit()
+
+
+def revoke_session_after_credential_change(db: Session, session_id: int, user_id: int) -> None:
+    """凭证已轮换(改密/重置): 撤销旧会话(无审计事件, 调用方随后抛 401), 并提交。"""
+    identity_domain.set_session_status(db, session_id, "revoked", revoked_by=user_id)
+    db.commit()
+
+
+def touch_session(db: Session, session_id: int) -> None:
+    """刷新会话最后活跃时间(认证通过后的顺带更新), 并提交。"""
+    identity_domain.heartbeat_session(db, session_id)
+    db.commit()

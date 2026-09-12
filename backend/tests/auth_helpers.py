@@ -9,10 +9,12 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from iesplan.models.identity import User
 from iesplan.services import identity
 
 #: 测试用户统一密码(与 make_user 创建的凭证一致)
@@ -21,16 +23,19 @@ DEFAULT_PASSWORD = "Test12345"
 
 def make_user(
     db: Session, username: str, role: str = "engineer", password: str = DEFAULT_PASSWORD
-) -> User:
-    """创建带密码凭证的测试用户(首登不强制改密, 可真实登录)。"""
+) -> SimpleNamespace:
+    """创建带密码凭证的测试用户(首登不强制改密, 可真实登录)。
+
+    身份服务返回不可变的域记录( frozen slots, 不可附加属性), 此处以
+    SimpleNamespace 快照返回(携带记录全部字段 + _test_password 测试口令)。
+    """
     user = identity.create_user(
         db, username, password, role=role, force_password_change=False, display_name=username
     )
-    user._test_password = password  # type: ignore[attr-defined]  # 测试辅助, 不入库
-    return user
+    return SimpleNamespace(**asdict(user), _test_password=password)
 
 
-def login_headers(client: TestClient, user: User) -> dict[str, str]:
+def login_headers(client: TestClient, user: SimpleNamespace) -> dict[str, str]:
     """以窗口会话登录并返回 Bearer 头(同一 client 内按用户缓存)。
 
     缓存避免同用户重复登录触发单活动窗口接管(旧凭证立即失效)。

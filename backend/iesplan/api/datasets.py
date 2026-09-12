@@ -89,6 +89,13 @@ def _require_dataset(db: Session, project_id: int, dataset_id: int):
     return ds
 
 
+def _iso_ts(value):
+    """时间戳归一化为 ISO 字符串(ORM 行给 datetime, 域记录给 ISO 字符串)。"""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
 def _version_dict(v, *, with_report: bool = True) -> dict:
     """DatasetVersion → JSON 字典。"""
     out = {
@@ -103,7 +110,7 @@ def _version_dict(v, *, with_report: bool = True) -> dict:
         "provenance": v.provenance,
         "license": v.license,
         "created_by": v.created_by,
-        "created_at": v.created_at.isoformat() if v.created_at else None,
+        "created_at": _iso_ts(v.created_at),
         "created_reason": v.created_reason,
     }
     if with_report:
@@ -121,8 +128,8 @@ def _dataset_dict(ds) -> dict:
         "status": ds.status,
         "default_license": ds.default_license,
         "created_by": ds.created_by,
-        "created_at": ds.created_at.isoformat() if ds.created_at else None,
-        "updated_at": ds.updated_at.isoformat() if ds.updated_at else None,
+        "created_at": _iso_ts(ds.created_at),
+        "updated_at": _iso_ts(ds.updated_at),
     }
 
 

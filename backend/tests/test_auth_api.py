@@ -20,7 +20,7 @@ from iesplan.api.auth import SESSION_COOKIE_NAME
 from iesplan.api.auth import router as auth_router
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
-from iesplan.models.identity import AuthEvent, WindowSession
+from iesplan.models.identity import AuthEvent, User, WindowSession
 from iesplan.services import identity
 
 ADMIN_PASSWORD = "Admin12345"
@@ -61,7 +61,7 @@ def client(db_session: Session) -> Iterator[TestClient]:
         yield test_client
 
 
-def seed_admin(db: Session, force_change: bool = True) -> identity.User:
+def seed_admin(db: Session, force_change: bool = True) -> User:
     """创建内置管理员(默认首登强制改密, 与 seed_admin 语义一致)。
 
     参数:
@@ -74,7 +74,7 @@ def seed_admin(db: Session, force_change: bool = True) -> identity.User:
     )
 
 
-def seed_engineer(db: Session, username: str = "alice", password: str = USER_PASSWORD) -> identity.User:
+def seed_engineer(db: Session, username: str = "alice", password: str = USER_PASSWORD) -> User:
     """创建普通工程师用户(首登不强制改密, 便于直接测试业务操作)。"""
     return identity.create_user(
         db, username, password, role="engineer", force_password_change=False, display_name=username.title()
@@ -390,7 +390,7 @@ def test_admin_cannot_deactivate_self(client: TestClient, db_session: Session) -
     seed_admin(db_session, force_change=False)
     r = login(client, "admin", ADMIN_PASSWORD)
     admin_headers = bearer(r.json()["token"])
-    admin = db_session.execute(select(identity.User).where(identity.User.username == "admin")).scalar_one()
+    admin = db_session.execute(select(User).where(User.username == "admin")).scalar_one()
     resp = client.post(f"/api/auth/users/{admin.id}/deactivate", headers=admin_headers)
     assert resp.status_code == 403
 
@@ -636,12 +636,12 @@ def test_admin_cannot_delete_self_or_system(client: TestClient, db_session: Sess
     seed_admin(db_session, force_change=False)
     r = login(client, "admin", ADMIN_PASSWORD)
     admin_headers = bearer(r.json()["token"])
-    admin = db_session.execute(select(identity.User).where(identity.User.username == "admin")).scalar_one()
+    admin = db_session.execute(select(User).where(User.username == "admin")).scalar_one()
     assert client.delete(f"/api/auth/users/{admin.id}", headers=admin_headers).status_code == 403
     # 预告同样被拒(不自锁/不预告系统账号)
     assert client.post(f"/api/auth/users/{admin.id}/delete-preview", headers=admin_headers).status_code == 403
     sys_user = db_session.execute(
-        select(identity.User).where(identity.User.is_system.is_(True))
+        select(User).where(User.is_system.is_(True))
     ).scalars().all()
     for u in sys_user:
         assert client.delete(f"/api/auth/users/{u.id}", headers=admin_headers).status_code == 403
@@ -742,7 +742,7 @@ def test_service_revoke_other_sessions(client: TestClient, db_session: Session) 
     token_a = r1.json()["token"]
     r2 = login(client, "admin", ADMIN_PASSWORD)
     token_b = r2.json()["token"]
-    user = db_session.execute(select(identity.User).where(identity.User.username == "admin")).scalar_one()
+    user = db_session.execute(select(User).where(User.username == "admin")).scalar_one()
     keep = db_session.execute(
         select(WindowSession).where(WindowSession.session_token_hash == identity.token_hash(token_b))
     ).scalar_one()
@@ -877,7 +877,7 @@ def test_oidc_provision_user_jit(
     # 同 subject 再次登录: 返回同一用户(不重复建号)
     user2 = external_auth.provision_user(db_session, claims)
     assert user2.id == user.id
-    assert db_session.execute(select(identity.User)).scalars().all() == [user]
+    assert [u.id for u in db_session.execute(select(User)).scalars().all()] == [user.id]
 
     # 用户名规则冲突 → 追加序号: 不同 subject 清洗后用户名恰好与既有账号同名
     claims2 = {"sub": "OIDC_USER.001", "name": "x"}  # 小写+点→下划线 → oidc_user_001

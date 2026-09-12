@@ -33,12 +33,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import identity as identity_domain
 from iesplan.config import settings
 from iesplan.core.errors import AppError
-from iesplan.models.identity import User
+from iesplan.identity.contracts import IdentityConflictError, UserRecord
 
 logger = logging.getLogger(__name__)
 
@@ -204,9 +204,9 @@ def exchange_code(code: str, code_verifier: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def find_by_subject(db: Session, subject: str) -> User | None:
-    """按外部主体(sub)查找已绑定的本地用户。"""
-    return db.execute(select(User).where(User.auth_subject == subject)).scalar_one_or_none()
+def find_by_subject(db: Session, subject: str) -> UserRecord | None:
+    """按外部主体(sub)查找已绑定的本地用户(经 identity 域)。"""
+    return identity_domain.get_user_by_auth_subject(db, subject)
 
 
 def _subject_username(subject: str) -> str:
@@ -230,7 +230,7 @@ def provision_user(
     *,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> User:
+) -> UserRecord:
     """OIDC 登录主体 → 本地用户(JIT 建号, 首次登录自动创建)。
 
     - 已绑定(subject 匹配): 返回既有用户(不重复建号);
@@ -263,11 +263,10 @@ def provision_user(
         ip=ip,
         user_agent=user_agent,
     )
-    # 绑定外部主体(唯一约束; 冲突回滚并明确报错)
-    user.auth_subject = subject
+    # 绑定外部主体(唯一约束; 冲突回滚并明确报错, 经 identity 域)
     try:
-        db.flush()
-    except Exception as exc:
+        user = identity_domain.bind_auth_subject(db, user.id, subject)
+    except IdentityConflictError as exc:
         db.rollback()
         raise ExternalAuthError(reason="subject_conflict") from exc
     return user

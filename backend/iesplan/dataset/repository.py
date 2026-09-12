@@ -33,6 +33,9 @@ class DatasetRepository(Protocol):
         created_by: int,
         project_id: int | None = None,
         description: str | None = None,
+        default_license: str | None = None,
+        source_category: str | None = None,
+        default_provenance: dict[str, Any] | None = None,
     ) -> DatasetRecord:
         """创建数据集；同范围重名抛 DatasetConflictError。"""
         ...
@@ -46,6 +49,10 @@ class DatasetRepository(Protocol):
         ...
 
     def get_latest_version(self, db: Session, dataset_id: int) -> DatasetVersionRecord | None: ...
+
+    def get_version_by_no(
+        self, db: Session, dataset_id: int, version_no: int
+    ) -> DatasetVersionRecord | None: ...
 
     def create_version(
         self,

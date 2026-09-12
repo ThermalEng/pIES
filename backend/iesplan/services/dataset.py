@@ -24,10 +24,11 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from iesplan import dataset as dataset_domain
+from iesplan import identity as identity_domain
+from iesplan import project as project_domain
 from iesplan.core.diagnostics import (
     DATA_COL_MISSING,
     DATA_COL_UNIT_UNKNOWN,
@@ -41,9 +42,12 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis, validate_timestamps
-from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
-from iesplan.models.identity import User
-from iesplan.models.project import Project
+from iesplan.dataset.contracts import (
+    DatasetConflictError,
+    DatasetRecord,
+    DatasetVersionRecord,
+)
+from iesplan.identity.contracts import UserRecord
 from iesplan.storage import (
     RefInfo,
     add_ref,
@@ -781,15 +785,16 @@ def add_object_ref(
 # ---------------------------------------------------------------------------
 
 
-def default_user(db: Session) -> User:
-    """返回系统操作者(admin); 不存在则创建(认证接入前的占位实现)。"""
-    user = db.execute(
-        sa.select(User).where(User.username == "admin", User.status == "active").limit(1)
-    ).scalar_one_or_none()
-    if user is None:
-        user = User(username="admin", display_name="系统管理员", is_system=True)
-        db.add(user)
-        db.flush()
+def default_user(db: Session) -> UserRecord:
+    """返回系统操作者(admin); 不存在则创建(认证接入前的占位实现, 经 identity 域)。"""
+    user = identity_domain.get_user_by_username(db, "admin")
+    if user is None or user.status != "active":
+        user = identity_domain.create_user(
+            db,
+            username="admin",
+            display_name="系统管理员",
+            is_system=True,
+        )
     return user
 
 
@@ -803,37 +808,33 @@ def create_dataset(
     *,
     user_id: int | None = None,
     description: str | None = None,
-) -> Dataset:
-    """创建数据集元数据(01 §5.1)。
+) -> DatasetRecord:
+    """创建数据集元数据(01 §5.1, 经 dataset 域 repository)。
 
     注: source_category/provenance 按数据模型归属版本(5.2 列), 此处接受参数
     仅为接口完整与默认值透传; 实际入库发生在版本上传(见 upload_dataset_version)。
     """
-    if db.execute(sa.select(Project.id).where(Project.id == project_id)).first() is None:
+    if project_domain.get_project(db, project_id) is None:
         raise NotFoundError(params={"entity_type": "project", "entity_id": project_id})
     actor_id = user_id if user_id is not None else default_user(db).id
-    ds = Dataset(
-        project_id=project_id,
-        name=name,
-        description=description,
-        status="draft",
-        default_license=license,
-        created_by=actor_id,
-    )
-    db.add(ds)
     try:
-        db.flush()
-    except IntegrityError as exc:
+        return dataset_domain.create_dataset(
+            db,
+            name=name,
+            created_by=actor_id,
+            project_id=project_id,
+            description=description,
+            default_license=license,
+            # 透传默认溯源(版本创建时若未显式给出则继承)
+            source_category=source_category if provenance else None,
+            default_provenance=dict(provenance) if provenance else None,
+        )
+    except DatasetConflictError as exc:
         db.rollback()
         raise ConflictError(
             message_key="ies.error.duplicate_name",
             params={"entity_type": "dataset", "name": name, "project_id": project_id},
         ) from exc
-    # 透传默认溯源(版本创建时若未显式给出则继承)
-    if provenance:
-        ds.source_category = source_category
-        ds.default_provenance = dict(provenance)
-    return ds
 
 
 def _build_fields_info(
@@ -933,7 +934,7 @@ def _normalized_to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 def _commit_version(
     db: Session,
-    dataset: Dataset,
+    dataset: DatasetRecord,
     axis: TimeAxis,
     normalized_df: pd.DataFrame,
     diags: list[Diagnostic],
@@ -943,7 +944,7 @@ def _commit_version(
     *,
     canonical_csv: bytes | None = None,
     row_count: int | None = None,
-) -> DatasetVersion:
+) -> DatasetVersionRecord:
     """校验通过后执行版本写入(对象 + 版本行 + 文件行 + 引用, 单事务)。
 
     canonical_csv: 规范化器产出的规范表格字节; 提供时直接落盘(上传路径:
@@ -963,16 +964,6 @@ def _commit_version(
         axis, normalized_df, all_diags,
     )
 
-    version_no = 1
-    last = db.execute(
-        sa.select(DatasetVersion.version_no)
-        .where(DatasetVersion.dataset_id == dataset.id)
-        .order_by(DatasetVersion.version_no.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if last is not None:
-        version_no = last + 1
-
     source_category = (
         meta.get("source_category") or getattr(dataset, "source_category", None) or DEFAULT_SOURCE_CATEGORY
     )
@@ -983,28 +974,27 @@ def _commit_version(
 
     # 数据本体先落盘为对象存储对象; 版本行只持有不可变版本号,
     # 历史定位使用 (dataset_id, version_no), 规范字节经 dataset_files 对象引用读取。
+    # version_no 由 dataset 域分配(单调递增, 并发冲突抛 DatasetConflictError)。
     obj_data = put_object(db, canonical_csv, DATA_MEDIA_TYPE, source_category=source_category)
-    version = DatasetVersion(
+    version = dataset_domain.create_version(
+        db,
         dataset_id=dataset.id,
-        version_no=version_no,
         timeline=TIMELINE_MAP[axis.resolution],
-        resolution=axis.resolution,
         fixed_utc_offset_minutes=axis.utc_offset_minutes,
         fields=fields_info,
         units=units,
+        created_by=actor_id if actor_id is not None else default_user(db).id,
+        resolution=axis.resolution,
         quality_report=quality_report,
         provenance=provenance,
         license=license,
-        created_by=actor_id if actor_id is not None else default_user(db).id,
         created_reason=created_reason,
     )
-    db.add(version)
-    db.flush()
     metadata_json = json.dumps(
         {
             "dataset_id": dataset.id,
             "dataset_version_id": version.id,
-            "version_no": version_no,
+            "version_no": version.version_no,
             "resolution": axis.resolution,
             "timeline": TIMELINE_MAP[axis.resolution],
             "fixed_utc_offset_minutes": axis.utc_offset_minutes,
@@ -1018,7 +1008,8 @@ def _commit_version(
     ).encode("utf-8")
     obj_meta = put_object(db, metadata_json, METADATA_MEDIA_TYPE, source_category=source_category)
 
-    file_data = DatasetFile(
+    file_data = dataset_domain.add_file(
+        db,
         dataset_version_id=version.id,
         object_id=obj_data.id,
         file_kind="data",
@@ -1026,7 +1017,8 @@ def _commit_version(
         row_count=n_rows,
         size_bytes=len(canonical_csv),
     )
-    file_meta = DatasetFile(
+    file_meta = dataset_domain.add_file(
+        db,
         dataset_version_id=version.id,
         object_id=obj_meta.id,
         file_kind="metadata",
@@ -1034,8 +1026,6 @@ def _commit_version(
         row_count=0,
         size_bytes=len(metadata_json),
     )
-    db.add_all([file_data, file_meta])
-    db.flush()
     add_object_ref(
         db, {"id": obj_data.id}, "dataset_file", "dataset_files", file_data.id,
         purpose="数据集版本数据本体",
@@ -1058,7 +1048,7 @@ def upload_dataset_version(
     meta: dict,
     *,
     user_id: int | None = None,
-) -> DatasetVersion:
+) -> DatasetVersionRecord:
     """在用户上传入口校验并保存数据集版本。
 
     CSV 在这里完成一次表头、时间轴、数值、范围和声明单位校验。保存后的内部
@@ -1079,7 +1069,7 @@ def upload_dataset_version(
         NotFoundError: 数据集不存在。
         ConflictError: 数据集已 deprecated, 禁止新建版本。
     """
-    dataset = db.execute(sa.select(Dataset).where(Dataset.id == dataset_id)).scalar_one_or_none()
+    dataset = dataset_domain.get_dataset(db, dataset_id)
     if dataset is None:
         raise NotFoundError(params={"entity_type": "dataset", "entity_id": dataset_id})
     if dataset.status == "deprecated":
@@ -1117,21 +1107,21 @@ def upload_dataset_version(
     )
 
 
-def get_dataset(db: Session, dataset_id: int) -> Dataset | None:
+def get_dataset(db: Session, dataset_id: int) -> DatasetRecord | None:
     """按 id 获取数据集(不存在返回 None)。"""
-    return db.execute(sa.select(Dataset).where(Dataset.id == dataset_id)).scalar_one_or_none()
+    return dataset_domain.get_dataset(db, dataset_id)
 
 
 def require_project(db: Session, project_id: int) -> None:
-    """校验项目存在, 否则 NotFoundError。"""
-    if db.execute(sa.select(Project.id).where(Project.id == project_id)).first() is None:
+    """校验项目存在且未删除, 否则 NotFoundError(与 project 域口径一致)。"""
+    if project_domain.get_project(db, project_id) is None:
         raise NotFoundError(params={"entity_type": "project", "entity_id": project_id})
 
 
 def version_files_summary(db: Session, version_id: int) -> list[dict]:
     """版本文件摘要(不含对象内容)。"""
     files: list[dict] = []
-    for f in db.execute(sa.select(DatasetFile).where(DatasetFile.dataset_version_id == version_id)).scalars():
+    for f in dataset_domain.list_files(db, version_id):
         files.append(
             {
                 "file_kind": f.file_kind,
@@ -1143,17 +1133,11 @@ def version_files_summary(db: Session, version_id: int) -> list[dict]:
     return files
 
 
-def list_dataset_versions(db: Session, dataset_id: int) -> list[DatasetVersion]:
+def list_dataset_versions(db: Session, dataset_id: int) -> list[DatasetVersionRecord]:
     """数据集版本列表(新版本在前)。"""
-    if db.execute(sa.select(Dataset.id).where(Dataset.id == dataset_id)).first() is None:
+    if dataset_domain.get_dataset(db, dataset_id) is None:
         raise NotFoundError(params={"entity_type": "dataset", "entity_id": dataset_id})
-    return list(
-        db.execute(
-            sa.select(DatasetVersion)
-            .where(DatasetVersion.dataset_id == dataset_id)
-            .order_by(DatasetVersion.version_no.desc())
-        ).scalars()
-    )
+    return dataset_domain.list_versions(db, dataset_id)
 
 
 def get_dataset_version(
@@ -1167,21 +1151,19 @@ def get_dataset_version(
         dataset_id: 数据集 id。
         version_no: 版本号; None 取最新版本。
     返回:
-        {"version": DatasetVersion, "files": [{file_kind, format, row_count,
+        {"version": DatasetVersionRecord, "files": [{file_kind, format, row_count,
         size_bytes, media_type}], "data": 汇总引用}。
     """
-    stmt = sa.select(DatasetVersion).where(DatasetVersion.dataset_id == dataset_id)
     if version_no is None:
-        stmt = stmt.order_by(DatasetVersion.version_no.desc()).limit(1)
+        version = dataset_domain.get_latest_version(db, dataset_id)
     else:
-        stmt = stmt.where(DatasetVersion.version_no == version_no)
-    version = db.execute(stmt).scalars().first()
+        version = dataset_domain.get_version_by_no(db, dataset_id, version_no)
     if version is None:
         raise NotFoundError(
             params={"entity_type": "dataset_version", "dataset_id": dataset_id, "version_no": version_no}
         )
     files: list[dict] = []
-    for f in db.execute(sa.select(DatasetFile).where(DatasetFile.dataset_version_id == version.id)).scalars():
+    for f in dataset_domain.list_files(db, version.id):
         try:
             obj = object_info(db, f.object_id)
         except NotFoundError:
@@ -1212,25 +1194,14 @@ def get_dataset_version(
 
 
 def list_datasets_with_latest(db: Session, project_id: int) -> list[dict]:
-    """项目数据集列表, 附带最新版本摘要。"""
-    datasets = list(
-        db.execute(
-            sa.select(Dataset).where(Dataset.project_id == project_id).order_by(Dataset.created_at)
-        ).scalars()
+    """项目数据集列表, 附带最新版本摘要(创建时间升序; 仅本项目, 不含共享集)。"""
+    datasets = sorted(
+        (d for d in dataset_domain.list_datasets(db, project_id) if d.project_id == project_id),
+        key=lambda d: (d.created_at or "", d.id),
     )
-    if not datasets:
-        return []
-    latest_by_id: dict[int, DatasetVersion] = {}
-    versions = db.execute(
-        sa.select(DatasetVersion)
-        .where(DatasetVersion.dataset_id.in_([d.id for d in datasets]))
-        .order_by(DatasetVersion.dataset_id, DatasetVersion.version_no.desc())
-    ).scalars()
-    for v in versions:
-        latest_by_id.setdefault(v.dataset_id, v)
     out: list[dict] = []
     for ds in datasets:
-        out.append({"dataset": ds, "latest_version": latest_by_id.get(ds.id)})
+        out.append({"dataset": ds, "latest_version": dataset_domain.get_latest_version(db, ds.id)})
     return out
 
 
@@ -1350,16 +1321,21 @@ def _sample_seed() -> int:
 
 def _get_or_create_sample_dataset(
     db: Session, project_id: int, region: str, resolution: str, dataset_id: int | None = None
-) -> Dataset:
+) -> DatasetRecord:
     """查找或创建样例数据集(按项目内唯一名称; 指定 dataset_id 时直接复用)。"""
     if dataset_id is not None:
-        ds = db.execute(sa.select(Dataset).where(Dataset.id == dataset_id)).scalar_one_or_none()
+        ds = dataset_domain.get_dataset(db, dataset_id)
         if ds is not None:
             return ds
     name = f"内置样例-{region}-{resolution}"
-    ds = db.execute(
-        sa.select(Dataset).where(Dataset.project_id == project_id, Dataset.name == name)
-    ).scalar_one_or_none()
+    ds = next(
+        (
+            d
+            for d in dataset_domain.list_datasets(db, project_id)
+            if d.project_id == project_id and d.name == name
+        ),
+        None,
+    )
     if ds is None:
         ds = create_dataset(
             db,
@@ -1381,7 +1357,7 @@ def create_builtin_sample(
     *,
     user_id: int | None = None,
     dataset_id: int | None = None,
-) -> DatasetVersion:
+) -> DatasetVersionRecord:
     """生成并保存内置样例数据版本(REQ-DATA-003)。
 
     与上传数据共用同一校验与存储路径; 记录地区/时间范围/分辨率/单位/许可证/溯源。

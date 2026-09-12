@@ -31,6 +31,8 @@ class DatasetRecord:
     status: str = "draft"
     default_license: str | None = None
     created_by: int = 0
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +52,7 @@ class DatasetVersionRecord:
     license: str | None = None
     created_by: int = 0
     created_reason: str | None = None
+    created_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

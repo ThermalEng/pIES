@@ -224,20 +224,15 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
         raise identity.SessionInvalidError()
     expires_at = identity.as_utc(session.expires_at)
     if expires_at is not None and expires_at < now:
-        # 已过期: 置终态(系统自动过期, 无操作者)
-        session.status = "expired"
-        session.revoked_at = now
-        db.commit()
+        # 已过期: 置终态(系统自动过期, 无操作者; 会话写入经 services 身份写入面)
+        identity.expire_session(db, session.id)
         raise identity.SessionInvalidError()
     user = db.get(User, session.user_id)
     if user is None or user.status != "active":
         raise identity.SessionInvalidError()
     if session.credential_version_at_issue != user.credential_version:
         # 凭证已轮换(改密/重置): 旧会话立即失效(domain-model §身份权限审计 凭证失效机制)
-        session.status = "revoked"
-        session.revoked_at = now
-        session.revoked_by = user.id
-        db.commit()
+        identity.revoke_session_after_credential_change(db, session.id, user.id)
         raise identity.SessionInvalidError()
     # C-02: 强制改密门禁(服务端统一执行, 不依赖前端配合)
     cred = identity.get_active_password_credential(db, user)
@@ -245,8 +240,7 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
         raise identity.ForcePasswordChangeError(
             params={"hint": "首次登录请先修改初始密码, 未改密前仅可使用改密/登出/本人信息接口"}
         )
-    session.last_seen_at = now
-    db.commit()
+    identity.touch_session(db, session.id)
     return AuthContext(db=db, user=user, session=session)
 
 

@@ -345,13 +345,11 @@ WHITELIST_API_COMMIT: set[tuple[str, int]] = {
     ("iesplan.api.tasks", 148),
     ("iesplan.api.tasks", 169),
     ("iesplan.api.admin", 253),
-    ("iesplan.api.auth", 230),
-    ("iesplan.api.auth", 240),
-    ("iesplan.api.auth", 249),
-    ("iesplan.api.auth", 574),
-    ("iesplan.api.auth", 645),
-    ("iesplan.api.auth", 653),
-    ("iesplan.api.datasets", 197),
+    # (切片 4: get_auth_context 会话写入收敛到 services, 移除 230/240/249 三处提交)
+    ("iesplan.api.auth", 568),
+    ("iesplan.api.auth", 639),
+    ("iesplan.api.auth", 647),
+    ("iesplan.api.datasets", 204),
     ("iesplan.api.objects", 139),
     ("iesplan.api.objects", 172),
     ("iesplan.api.objects", 188),
@@ -456,13 +454,12 @@ TABLE_OWNERS: dict[str, str] = {
 
 WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     # ---- services ----
-    ("iesplan.services.external_auth", "identity"),
+    # (切片 4: services.external_auth 经 identity 域, 移除本项)
     ("iesplan.services.config", "audit"),
     ("iesplan.services.config", "calc"),
     ("iesplan.services.config", "model"),
     ("iesplan.services.model", "model"),
-    ("iesplan.services.identity", "common"),
-    ("iesplan.services.identity", "identity"),
+    ("iesplan.services.identity", "common"),  # 仅正则基元(无业务表); 切片 4 已移除 identity 表访问
     ("iesplan.services.config_revisions", "config_revision"),
     ("iesplan.services.tasks", "calc"),
     ("iesplan.services.tasks", "common"),
@@ -488,9 +485,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     ("iesplan.services.package", "result"),
     ("iesplan.services.audit", "audit"),
     ("iesplan.services.audit", "identity"),
-    ("iesplan.services.dataset", "dataset"),
-    ("iesplan.services.dataset", "identity"),
-    ("iesplan.services.dataset", "project"),
+    # (切片 4: services.dataset 经 dataset/identity/project 域 repository, 移除 3 项)
     ("iesplan.services.project", "audit"),
     ("iesplan.services.project", "calc"),
     ("iesplan.services.project", "identity"),
