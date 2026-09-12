@@ -22,13 +22,12 @@ from iesplan.assembly.canonicalizer import (
 )
 from iesplan.assembly.checker import (
     AssemblyCheckError,
-    BusSummary,
-    CheckContext,
     CheckResult,
     check_assembly,
     check_assembly_text,
     check_graph_inputs,
 )
+from iesplan.assembly.context import BusSummary, CheckContext
 from iesplan.assembly.contracts import (
     ASSEMBLY_SCHEMA_PATH,
     CANON_ALGORITHM_ID,

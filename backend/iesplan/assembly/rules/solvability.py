@@ -20,12 +20,13 @@ fixed_supply_max, demand_max, has_storage}。
 
 from __future__ import annotations
 
-from iesplan.assembly.checker import (
-    _PEAK_PARAM_BY_LOAD,
+from iesplan.assembly.context import (
+    AssemblySpec,
     BusSummary,
-    _to_watts,
+    PEAK_PARAM_BY_LOAD,
     ensure_ports,
     resolve_model,
+    to_watts,
 )
 from iesplan.assembly.diags import (
     ASM_EDGE_LOOSE_BIDI,
@@ -38,7 +39,6 @@ from iesplan.assembly.diags import (
     ASM_SOLV_OVER_CONSTRAINED,
 )
 from iesplan.assembly.diags import make_asm_diag as make_diag
-from iesplan.assembly.schema import AssemblySpec
 from iesplan.core.diagnostics import Diagnostic
 
 # ---------------------------------------------------------------------------
@@ -222,7 +222,7 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
         is_grid = {"electricity_import", "electricity_export"}.issubset(interfaces)
         is_controllable = _is_adjustable_source(interfaces)
         if is_grid:
-            val = _to_watts(_float_param(device.params, "max_import_power_kw"), "kW")
+            val = to_watts(_float_param(device.params, "max_import_power_kw"), "kW")
             if val is not None:
                 fixed_supply += val
                 has_fixed_supply = True
@@ -240,9 +240,9 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
         type_spec, _ = resolve_model(ctx, device.model)
         if type_spec is not None and any(i.type == "predefined" for i in type_spec.interfaces.values()):
             assert type_spec.device is not None
-            peak_key = _PEAK_PARAM_BY_LOAD.get(type_spec.device.id)
+            peak_key = PEAK_PARAM_BY_LOAD.get(type_spec.device.id)
             if peak_key is not None:
-                val = _to_watts(_float_param(device.params, peak_key), "kW")
+                val = to_watts(_float_param(device.params, peak_key), "kW")
                 if val is not None:
                     demand += val
                     has_demand = True
