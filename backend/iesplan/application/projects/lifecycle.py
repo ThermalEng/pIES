@@ -1,31 +1,16 @@
 """项目生命周期用例(Wave 2 W2-A: application/projects)。
 
-从 ``iesplan.services.project`` 复制的项目增删改查/启用归档/状态设置编排，
-旧服务保留未删（待 Wave 3 接入、Wave 5 删除）。
-
-复制来源（基线 5c40b01 ``services/project.py``）：
-- 访问控制：``get_role`` / ``ensure_access``（管理员判定改经 identity 域门面
-  ``user_roles``，语义不变：全局 admin 角色）；
-- 生命周期：``create_project`` / ``get_project_view`` / ``list_visible_projects``
-  / ``list_all_projects`` / ``project_count_by_owner`` / ``archive_project``
-  / ``unarchive_project`` / ``delete_project``；
-- 草稿修订：``update_draft``（含全部语义命令分派与幂等逻辑）；
-- 序列化与内容载体：``project_to_dict`` / ``draft_to_dict`` /
-  ``version_to_dict`` / 内容对象经 content_objects 用例读写
-  （storage 公开门面 + project 域纯函数）。
-
-未复制（仍在旧服务，属版本编排，待后续波次处理）：
-``create_version`` / ``restore_version`` / ``apply_result`` /
-``current_version_matches_draft`` / ``replace_project_model_refs``。
+项目增删改查/启用归档/状态设置/草稿修订编排（旧 ``services.project`` 已删除）：
+访问控制、错误类型、序列化与 require_* 读取经 project 域公开门面
+（``iesplan.project`` 唯一实现，本模块不保留复制）；版本编排见
+``application.projects.versions``。
 
 事务：写用例顶层函数拥有提交/回滚（``db.commit`` 收尾，失败 ``db.rollback``）；
-内部步骤只 ``flush``（旧服务中 ``create_dataset`` 式内层 ``rollback``、
-``_commit_version`` 式内层 ``commit`` 在此层一律取消，由顶层统一）。
-读用例不提交事务。
+内部步骤只 ``flush``，由顶层统一。读用例不提交事务。
 
 调用方向：``api → application.projects.lifecycle → {project, identity,
-tasks, audit, storage} 域公开门面 + finance/core 值对象``；不导入 ORM、
-不导入其他域内部模块、不调用 ``services.*``。
+tasks, audit} 域公开门面 + content_objects 用例``；不导入 ORM、不导入
+其他域内部模块、不调用 ``services.*``。
 """
 
 from __future__ import annotations
@@ -39,87 +24,43 @@ from iesplan import audit as audit_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.projects.content_objects import load_content_object, store_content_object
+from iesplan.application.projects.content_objects import (
+    load_content_object,
+    merge_patch,
+    store_content_object,
+)
 from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
-from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
-from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
+from iesplan.core.errors import ConflictError, ForbiddenError
 from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
+from iesplan.project import (
+    InvalidRequestError,
+    OWNER_CAPABILITIES,
+    draft_to_dict,
+    ensure_access,
+    get_role,
+    project_to_dict,
+    require_current_draft,
+    require_project,
+    version_to_dict,
+)
 from iesplan.project.contracts import (
     DraftRecord,
     ProjectConflictError,
     ProjectRecord,
-    ProjectVersionRecord,
 )
 
 # ---------------------------------------------------------------------------
-# 错误类型（复制自 services.project：请求/草稿命令校验失败 HTTP 400）
+# 访问控制（唯一实现归属 project 域 access 模块；本模块只消费公开门面）
 # ---------------------------------------------------------------------------
-
-
-class InvalidRequestError(AppError):
-    """请求/草稿命令校验失败(HTTP 400)。
-
-    code 为项目域内稳定标识(前端按 message_key 渲染文案，见 contracts §成功与错误)。
-    """
-
-    code = "PROJ-CMD-001"
-    http_status = 400
-    severity = SEVERITY_ERROR
-    message_key = "ies.diag.param.invalid"
-
-
-# ---------------------------------------------------------------------------
-# 访问控制（复制自 services.project；管理员判定经 identity 域门面组合）
-# ---------------------------------------------------------------------------
-
-#: 所有者能力集(项目权限以 projects.owner_id 为唯一权威；共享走“导出项目包 → 他人导入”流程，包内不携带账号权限，见 domain-model §项目聚合/§对象生命周期)。
-OWNER_CAPABILITIES: frozenset[str] = frozenset(
-    {"view", "edit", "manage_lifecycle", "export_package", "export_excel"}
-)
-
-
-def get_role(db: Session, user: UserRecord, project_id: int) -> str | None:
-    """返回用户在项目中的角色: 'owner'(项目所有者) | None(非所有者)。
-
-    项目权限以 owner_id 为唯一权威，非所有者无项目访问能力（管理员除外，见 ensure_access；依据 domain-model §身份、权限和审计、架构宪法 §16）。
-    """
-    project = project_domain.get_project(db, project_id)
-    if project is None:
-        return None
-    return "owner" if project.owner_id == user.id else None
-
-
-def _is_admin(db: Session, user: UserRecord) -> bool:
-    """用户是否持有全局 admin 角色(经 identity 域公开门面判定，不直接查表)。"""
-    return "admin" in identity_domain.user_roles(db, user.id)
 
 
 def is_admin(db: Session, user: UserRecord) -> bool:
-    """用户是否持有全局 admin 角色(公开包装，供管理端整体视图入口使用)。"""
-    return _is_admin(db, user)
+    """用户是否持有全局 admin 角色(经 identity 域公开门面判定，不直接查表)。
 
-
-def ensure_access(db: Session, user: UserRecord, project_id: int, *capabilities: str) -> None:
-    """访问判定(架构宪法 §16、domain-model §身份、权限和审计)：用户必须同时具备全部请求能力，否则 ForbiddenError。
-
-    - 仅项目所有者具备全部业务能力;
-    - 管理员(全局 admin 角色)始终可查看项目细节与管理生命周期(删除/归档),
-      不得业务编辑;
-    - 项目不存在或已删除一律按 NotFoundError(不泄露项目存在性细节)。
+    供管理端整体视图入口使用（API 迁移 Wave 3 后直调 identity 域门面）。
     """
-    _get_project(db, project_id)  # 存在性检查: 不存在/已删除 → 404
-    granted = set(OWNER_CAPABILITIES) if get_role(db, user, project_id) == "owner" else set()
-    if _is_admin(db, user):
-        # 管理员始终可管理项目整体生命周期(删除/归档), 无需授权
-        granted |= {"view", "manage_lifecycle"}
-    missing = [cap for cap in capabilities if cap not in granted]
-    if missing:
-        raise ForbiddenError(
-            "缺少所需项目权限",
-            params={"required": list(capabilities), "missing": missing, "project_id": project_id},
-            location={"object_type": "project", "object_id": project_id},
-        )
+    return "admin" in identity_domain.user_roles(db, user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +91,7 @@ def _create_project(
     (1h/非闰年/single)只用于迁移对存量项目的回填, 不用于新项目创建。
     基线创建后无任何更新入口, 数据库层另有不可变触发器(Postgres)。
     """
-    if _is_admin(db, user):
+    if is_admin(db, user):
         raise ForbiddenError(
             "管理员不持有项目, 不可创建项目",
             params={"role": "admin"},
@@ -247,8 +188,8 @@ def create_project(
 def get_project_view(db: Session, user: UserRecord, project_id: int) -> dict:
     """项目视图: 项目 + 草稿摘要(含内容) + 版本列表(domain-model §项目聚合)。"""
     ensure_access(db, user, project_id, "view")
-    project = _get_project(db, project_id)
-    draft = _get_current_draft(db, project)
+    project = require_project(db, project_id)
+    draft = require_current_draft(db, project)
     content = _load_draft_content(db, draft)
     content.pop("applied_commands", None)  # 命令簿记不外泄
     versions = project_domain.list_versions(db, project_id)
@@ -268,7 +209,7 @@ def list_visible_projects(db: Session, user: UserRecord, status: str | None = No
     普通工程师可按状态筛选(status: 'active' 进行中 / 'archived' 已归档 /
     None 全部未删除), 筛选在数据库查询中完成。
     """
-    if _is_admin(db, user):
+    if is_admin(db, user):
         return []
     statuses = [status] if status in ("active", "archived") else ["active", "archived"]
     page = project_domain.list_projects(db, owner_id=user.id, statuses=statuses)
@@ -299,7 +240,7 @@ def project_count_by_owner(db: Session, owner_ids: Sequence[int]) -> dict[int, i
 def _archive_project(db: Session, user: UserRecord, project_id: int) -> ProjectRecord:
     """归档项目(归档后不可编辑/提交计算, 只读，domain-model §项目聚合)。"""
     ensure_access(db, user, project_id, "manage_lifecycle")
-    project = _get_project(db, project_id)
+    project = require_project(db, project_id)
     if project.status != "archived":
         project = project_domain.set_project_status(db, project_id, "archived")
         _audit(db, "project", project_id, "project.archived", user.id, after={"status": "archived"})
@@ -320,7 +261,7 @@ def archive_project(db: Session, user: UserRecord, project_id: int) -> ProjectRe
 def _unarchive_project(db: Session, user: UserRecord, project_id: int) -> ProjectRecord:
     """撤销归档(恢复为 active，domain-model §项目聚合)。"""
     ensure_access(db, user, project_id, "manage_lifecycle")
-    project = _get_project(db, project_id)
+    project = require_project(db, project_id)
     if project.status != "active":
         project = project_domain.set_project_status(db, project_id, "active")
         _audit(db, "project", project_id, "project.unarchived", user.id, after={"status": "active"})
@@ -357,7 +298,7 @@ def _delete_project(
       记录保留, 对象清理由存储运维重试执行（架构宪法 §10/§12）。
     """
     ensure_access(db, user, project_id, "manage_lifecycle")
-    project = _get_project(db, project_id)
+    project = require_project(db, project_id)
     if not confirm:
         raise InvalidRequestError(
             "删除项目必须显式确认", code="PROJ-DEL-001", params={"project_id": project_id}
@@ -414,7 +355,7 @@ def delete_project(
 
 
 # ---------------------------------------------------------------------------
-# 项目用例: 草稿修订（复制自 services.project，唯一写入：项目草稿）
+# 项目用例: 草稿修订（唯一写入：项目草稿）
 # ---------------------------------------------------------------------------
 
 #: 草稿命令类型 → 处理函数(语义命令，见架构宪法 §4.4/§12、domain-model §项目聚合)
@@ -439,7 +380,7 @@ def _update_draft(
     返回 {"revision": 新修订号, "results": [每命令结果]}。
     """
     ensure_access(db, user, project_id, "edit")
-    project = _get_project(db, project_id)
+    project = require_project(db, project_id)
     if project.status != "active":
         raise ConflictError(
             "项目已归档或已删除, 不能编辑",
@@ -447,7 +388,7 @@ def _update_draft(
         )
     if not isinstance(commands, list):
         raise InvalidRequestError("commands 必须是数组", code="PROJ-CMD-001")
-    draft = _get_current_draft(db, project)
+    draft = require_current_draft(db, project)
     content = _load_draft_content(db, draft)
     applied = content.setdefault("applied_commands", {})
 
@@ -659,7 +600,7 @@ def _cmd_model_remove_connection(content: dict, payload: dict) -> dict:
 
 def _cmd_layout_patch(content: dict, payload: dict) -> dict:
     """布局补丁(布局是显示事实, 不改变工程语义，架构宪法 §4.4)。"""
-    _deep_merge(content["layout"], payload)
+    merge_patch(content["layout"], payload)
     return {"stored": True}
 
 
@@ -693,7 +634,7 @@ def _cmd_dataset_unbind(content: dict, payload: dict) -> dict:
 
 def _cmd_config_patch(content: dict, payload: dict) -> dict:
     """计算配置补丁(参数/目标/约束/容差等，domain-model §规划、财务与计算配置)。"""
-    _deep_merge(content["calc_config"], payload)
+    merge_patch(content["calc_config"], payload)
     return {"stored": True}
 
 
@@ -725,7 +666,7 @@ def _cmd_project_set_extensions(content: dict, payload: dict) -> dict:
     ext = payload.get("extensions")
     if not isinstance(ext, dict):
         raise InvalidRequestError("project.set_extensions 需要 extensions 对象", code="PROJ-CMD-005")
-    _deep_merge(content["extensions"], ext)
+    merge_patch(content["extensions"], ext)
     return {"stored": True}
 
 
@@ -746,79 +687,9 @@ _COMMAND_HANDLERS.update(
 )
 
 
-def _deep_merge(base: dict, patch: dict) -> None:
-    """递归合并补丁到基础字典(值为 dict 时继续下钻, 其余覆盖)。"""
-    for key, value in patch.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_merge(base[key], value)
-        else:
-            base[key] = value
-
-
 # ---------------------------------------------------------------------------
-# 序列化与内部工具（复制自 services.project）
+# 内容读取（序列化唯一实现归属 project 域 versions 模块，经公开门面消费）
 # ---------------------------------------------------------------------------
-
-
-def project_to_dict(project: ProjectRecord) -> dict:
-    """项目序列化(API 展示；时间已为 ISO 字符串，与既有 JSON 输出一致)。"""
-    return {
-        "id": project.id,
-        "name": project.name,
-        "description": project.description,
-        "status": project.status,
-        "owner_id": project.owner_id,
-        "currency": project.currency,
-        "project_baseline": {
-            "resolution": project.baseline_resolution,
-            "leap_year": project.baseline_leap_year,
-            "scenario_mode": project.baseline_scenario_mode,
-        },
-        "schema_version": project.schema_version,
-        "current_draft_id": project.current_draft_id,
-        "current_version_id": project.current_version_id,
-        "created_at": project.created_at,
-        "updated_at": project.updated_at,
-        "created_by": project.created_by,
-    }
-
-
-def draft_to_dict(draft: DraftRecord) -> dict:
-    """草稿摘要序列化。"""
-    return {
-        "id": draft.id,
-        "revision": draft.revision,
-        "content_object_id": draft.content_object_id,
-        "parent_draft_id": draft.parent_draft_id,
-        "updated_by": draft.updated_by,
-        "updated_at": draft.updated_at,
-        "created_at": draft.created_at,
-    }
-
-
-def version_to_dict(version: ProjectVersionRecord) -> dict:
-    """版本序列化(API 展示；时间已为 ISO 字符串，与既有 JSON 输出一致)。"""
-    return {
-        "id": version.id,
-        "project_id": version.project_id,
-        "version_no": version.version_no,
-        "name": version.name,
-        "description": version.description,
-        "created_by": version.created_by,
-        "created_at": version.created_at,
-        "parent_version_id": version.parent_version_id,
-        "source_draft_id": version.source_draft_id,
-        "source_draft_revision": version.source_draft_revision,
-        "reason": version.reason,
-        "project_baseline": {
-            "resolution": version.baseline_resolution,
-            "leap_year": version.baseline_leap_year,
-            "scenario_mode": version.baseline_scenario_mode,
-        },
-        "currency": version.currency,
-        "schema_version": version.schema_version,
-        "content_object_id": version.content_object_id,
-    }
 
 
 def get_current_draft_content(db: Session, project_id: int) -> dict:
@@ -826,42 +697,11 @@ def get_current_draft_content(db: Session, project_id: int) -> dict:
 
     项目不存在抛 NotFoundError; 缺少当前草稿视为数据损坏。
     """
-    project = _get_project(db, project_id)
-    draft = _get_current_draft(db, project)
+    project = require_project(db, project_id)
+    draft = require_current_draft(db, project)
     content = _load_draft_content(db, draft)
     content.pop("applied_commands", None)
     return content
-
-
-def initial_content(language: str = "zh-CN") -> dict:
-    """初始草稿内容骨架(空模型/布局/绑定/配置 + 空受控扩展清单，实现归属 project 域)。"""
-    return project_domain.initial_content(language)
-
-
-def _get_project(db: Session, project_id: int) -> ProjectRecord:
-    """按 id 取项目; 不存在或已删除(软删)一律 404(无回收站语义)。"""
-    project = project_domain.get_project(db, project_id)
-    if project is None:
-        raise NotFoundError(
-            "项目不存在",
-            params={"project_id": project_id},
-            location={"object_type": "project", "object_id": project_id},
-        )
-    return project
-
-
-def _get_current_draft(db: Session, project: ProjectRecord) -> DraftRecord:
-    """取项目当前草稿(is_current=true 且修订最大者); 缺失视为数据损坏。"""
-    draft = project_domain.get_current_draft(db, project.id)
-    if draft is None:
-        raise AppError(
-            "项目缺少当前草稿(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "project", "object_id": project.id},
-        )
-    return draft
 
 
 def _load_draft_content(db: Session, draft: DraftRecord) -> dict:
@@ -910,5 +750,4 @@ __all__ = [
     "draft_to_dict",
     "version_to_dict",
     "get_current_draft_content",
-    "initial_content",
 ]

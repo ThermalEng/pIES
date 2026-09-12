@@ -1,24 +1,21 @@
 """项目校验用例(Wave 2 W2-A: application/validations)。
 
-从 ``iesplan.services.validation`` 复制的 U07 项目校验流程（计算前完整预检
-与财务基准确认），旧服务保留未删（待 Wave 3 接入、Wave 5 删除）。
-
-复制来源（基线 5c40b01 ``services/validation.py``）：
+U07 项目校验流程（旧 ``iesplan.services.validation`` 已删除；计算前完整预检
+与财务基准确认）：
 - ``validate_project``（聚合模型完整性/参数变量/数据绑定与质量/配置兼容与
   IRR 硬约束/财务基准确认/计算就绪，一次返回全部诊断）；
 - ``mark_baseline_confirmed``（财务基准确认审计追加）；
 - ``store_validation_report`` / ``get_latest_validation_report``
   （校验报告对象存储持久化与读取）。
 
-改接说明（行为一致，仅换调用方向）：
-- 旧 ``dataset_service.put_object/add_object_ref/get_object_bytes`` 改经
-  storage 公开门面（``put_object`` / ``add_ref`` / ``get_object``）；
-- 旧 ``project_service.get_current_draft_content`` 改经 project 域公开门面
- （``get_current_draft``）+ storage 门面读内容文档；
-- 其余 project / dataset / audit 域调用本就经域公开门面，保持不变。
+调用方向：
+- 对象读写经 storage 公开门面（``put_object`` / ``add_ref`` / ``get_object``）；
+- 项目/草稿读取与内容解析经 project 域公开门面（``require_project`` /
+  ``require_current_draft`` / ``parse_content_object``）；
+- 模型能力经 application.models、计算配置能力经 application.configuration
+  用例改接；其余 project / dataset / audit 域调用经域公开门面。
 
-遗留 services 调用：无（``LEGACY_SERVICE_CALLS`` 为空；模型能力经
-application.models、计算配置能力经 application.configuration 改接）。
+遗留 services 调用：无（``LEGACY_SERVICE_CALLS`` 为空）。
 
 事务：写用例（``mark_baseline_confirmed`` / ``store_validation_report``）
 顶层函数拥有提交/回滚；``validate_project`` 与读取函数为只读，不提交事务。
@@ -57,11 +54,7 @@ from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord
 from iesplan.application.configuration import (
     get_config as _app_get_config,
-)
-from iesplan.application.configuration import (
     load_work_graph as _app_load_work_graph,
-)
-from iesplan.application.configuration import (
     validate_config as _app_validate_config,
 )
 from iesplan.storage import add_ref, find_refs_by_owner, get_object, put_object
@@ -148,11 +141,11 @@ BASELINE_ACTION: str = "project.baseline_confirmed"
 #: 电网连接注册表类型 id(模型完整性检查)
 GRID_TYPE_ID: str = "ies.device.grid_connection"
 
-#: 载体 → 端口类型(与 application.models.CARRIER_PORT_TYPE 同值，本地声明避免跨层导入)
+#: 预检覆盖的载体 → 端口类型（取值唯一归属 application.models
+#: ``CARRIER_PORT_TYPE``；本单元仅圈定电/热/冷检查范围，不自持映射值）
 _CARRIER_PORT_TYPE: dict[str, str] = {
-    "electricity": "electric",
-    "heat": "thermal",
-    "cool": "cooling",
+    carrier: model_service.CARRIER_PORT_TYPE[carrier]
+    for carrier in ("electricity", "heat", "cool")
 }
 
 #: 校验报告对象媒体类型(01 §10.1)
@@ -178,7 +171,7 @@ class ValidationReport:
     blocks_submit: bool
     project_id: str = ""
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
-    source: str = "iesplan.services.validation"
+    source: str = "iesplan.application.validations.precheck"
 
     def to_dict(self) -> dict:
         """序列化为 JSON 兼容字典(诊断字段与 04 §5.4 对齐)。"""
@@ -223,7 +216,7 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
         ValidationReport: 诊断一次返回全部; error/blocking 级阻断提交,
         warning 不降级阻断。
     """
-    project = _require_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     # 配置与设备图各只读一次(未保存时配置为生成的默认配置), 供检查项共用
     config_data = _app_get_config(db, project_id)
     graph = _app_load_work_graph(db, project_id)
@@ -256,18 +249,6 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
         blocks_submit=bool(blockers),
         project_id=str(project_id),
     )
-
-
-def _require_project(db: Session, project_id: int) -> ProjectRecord:
-    """按 id 取项目; 不存在或已删除(软删)一律 404(与 U03 语义一致)。"""
-    project = project_domain.get_project(db, project_id)
-    if project is None:
-        raise NotFoundError(
-            f"项目不存在: {project_id}",
-            params={"project_id": project_id},
-            location={"object_type": "project", "object_id": str(project_id)},
-        )
-    return project
 
 
 def _device_spec(dev: dict) -> DeviceTypeSpec | None:
@@ -486,35 +467,12 @@ def _check_data(db: Session, project: ProjectRecord, diags: list[Diagnostic]) ->
 
 
 def _current_draft_content(db: Session, project_id: int) -> dict:
-    """当前草稿内容文档(经 project 域公开门面取草稿 + storage 门面读对象)。
-
-    旧 services.project.get_current_draft_content 的同语义改接实现；
-    命令簿记不外泄。
-    """
-    project = _require_project(db, project_id)
-    draft = project_domain.get_current_draft(db, project.id)
-    if draft is None:
-        raise AppError(
-            "项目缺少当前草稿(数据损坏)",
-            code="SYS-STORE-001",
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "project", "object_id": project.id},
-        )
+    """当前草稿内容文档(经 project 域公开门面取草稿 + storage 门面读对象，
+    内容解析经 project 域 ``parse_content_object``；命令簿记不外泄)。"""
+    project = project_domain.require_project(db, project_id)
+    draft = project_domain.require_current_draft(db, project)
     raw = get_object(db, draft.content_object_id)
-    try:
-        content = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise AppError(
-            "内容对象解析失败(数据损坏)",
-            code="SYS-STORE-001",
-            message_key="ies.diag.store.corrupt",
-        ) from exc
-    if not isinstance(content, dict):
-        raise AppError(
-            "内容对象结构非法(数据损坏)",
-            code="SYS-STORE-001",
-            message_key="ies.diag.store.corrupt",
-        )
+    content = project_domain.parse_content_object(raw)
     content.pop("applied_commands", None)
     return content
 
@@ -689,7 +647,7 @@ def _mark_baseline_confirmed(
     返回:
         新增的审计记录。
     """
-    project = _require_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     now = datetime.now(UTC)
     return audit_domain.append_entry(
         db,

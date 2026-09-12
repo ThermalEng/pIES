@@ -26,17 +26,12 @@ from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
 from iesplan.application.configuration.revisions import (
     get_effective_finance_config as _read_effective,
-)
-from iesplan.application.configuration.revisions import (
     get_planning_config as _read_planning,
 )
 from iesplan.application.projects.content_objects import (
     load_content_bytes as _load_content_bytes,
-)
-from iesplan.application.projects.content_objects import (
     load_content_object as _load_content_object,
-)
-from iesplan.application.projects.content_objects import (
+    merge_patch,
     store_content_object as _store_content_object,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
@@ -65,15 +60,6 @@ def _audit(
         before=before,
         extra=after,
     )
-
-
-def _deep_merge(base: dict, patch: dict) -> None:
-    """递归合并补丁到基础字典(值为 dict 时继续下钻, 其余覆盖)。"""
-    for key, value in patch.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_merge(base[key], value)
-        else:
-            base[key] = value
 
 
 def _current_refs(db: Session, project_id: int) -> tuple[tuple[str, int] | None, int | None]:
@@ -414,7 +400,7 @@ def apply_result(
         patch = inner if isinstance(inner, dict) else diff_patch
         if not isinstance(patch, dict):
             raise project_domain.InvalidRequestError("diff_patch 内容非法", code="PROJ-CMD-005")
-        _deep_merge(content["calc_config"], patch)
+        merge_patch(content["calc_config"], patch)
         content.pop("applied_commands", None)
         content_object_id = _store_content_object(db, content)
         new_draft = project_domain.create_draft(

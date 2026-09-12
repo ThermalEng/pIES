@@ -732,7 +732,7 @@ def _create_builtin_sample(
     dataset = _get_or_create_sample_dataset(db, project_id, region, resolution, dataset_id=dataset_id)
     provenance = {
         "source_category": "builtin_sample",
-        "generator": "iesplan.services.dataset.create_builtin_sample",
+        "generator": "iesplan.application.datasets.lifecycle.create_builtin_sample",
         "region": region,
         "region_name": _sample_params(region)["name"],
         "resolution": resolution,

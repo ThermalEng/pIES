@@ -58,9 +58,10 @@ from iesplan.finance import (
     FinanceTripletError,
     merge_effective,
 )
+from iesplan.core.yamlmini import dump as yaml_dump
 from iesplan.planning.contracts import validate_planning_domain
 from iesplan.project.contracts import ProjectRecord
-from iesplan.storage import put_object
+from iesplan.storage import add_ref, put_object
 
 
 class InvalidRequestError(AppError):
@@ -70,17 +71,6 @@ class InvalidRequestError(AppError):
     http_status = 400
     severity = SEVERITY_ERROR
     message_key = "ies.diag.param.invalid"
-
-
-def _get_project(db: Session, project_id: int):
-    project = project_domain.get_project(db, project_id)
-    if project is None:
-        raise NotFoundError(
-            "项目不存在",
-            params={"project_id": project_id},
-            location={"object_type": "project", "object_id": project_id},
-        )
-    return project
 
 
 def _diag_params(diags: Sequence) -> dict:
@@ -113,8 +103,6 @@ def _profile_yaml_bytes(profile: FinanceProfile) -> bytes:
 
     使用 core.yamlmini.dump(block 风格, 与 load 互逆)。文本文件只校验字头。
     """
-    from iesplan.core.yamlmini import dump as yaml_dump
-
     return yaml_dump(profile.to_dict()).encode("utf-8")
 
 
@@ -160,8 +148,6 @@ def _register_finance_profile(
         created_by=user_id,
     )
     # 建立稳定 owner 引用, 防止对象被当作 orphan 清理(宪法 10.3)
-    from iesplan.storage import add_ref
-
     add_ref(
         db,
         obj.id,
@@ -224,7 +210,7 @@ def list_finance_profiles(db: Session) -> list[dict]:
 
 def get_project_profile(db: Session, project_id: int) -> tuple[FinanceProfile, dict]:
     """读项目当前引用的注册 Profile(未引用 → 404)。"""
-    project = _get_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     if project.finance_profile_id is None:
         raise NotFoundError(
             "项目尚未引用 FinanceProfile",
@@ -342,8 +328,6 @@ def _attach_config_receipt(
     purpose: str,
 ) -> None:
     """回执对象建 owner 引用(引用清单为权威, 防 orphan 清理误回收)。"""
-    from iesplan.storage import add_ref  # 延迟导入避免环(与 register 一致)
-
     add_ref(
         db,
         object_id,
@@ -365,7 +349,7 @@ def _set_project_finance_profile(
     用户不能直接 author Effective, 引用 Profile 即触发合并器生成
     (空覆盖 → Effective == Profile 内容)。
     """
-    project = _get_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     profile_row, _ = get_finance_profile_by_ref(db, profile_id)
     # 失效旧 Planning 由 _set_project_profile + save_finance_overrides_empty 共同保证
     project = _set_project_profile(db, project, profile_row)
@@ -417,7 +401,7 @@ def _save_finance_overrides(
 
     返回 (overrides_revision, effective_row, effective)。
     """
-    project = _get_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     if project.finance_profile_id is None:
         raise InvalidRequestError(
             "项目尚未引用已注册 FinanceProfile(请先选择地区 Profile)",
@@ -547,7 +531,7 @@ def _save_finance_overrides_empty(
     user_id: int,
 ) -> tuple[int, EffectiveRevisionRecord, EffectiveFinanceConfig]:
     """无覆盖保存: 显式空 Overrides 文档 → 合并结果等于 Profile（只 flush，不提交）。"""
-    project = _get_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     profile_row = configuration_domain.get_profile_row(db, project.finance_profile_id)
     if profile_row is None:
         raise InvalidRequestError(
@@ -609,7 +593,7 @@ def get_effective_finance_config(
     db: Session, project_id: int
 ) -> tuple[EffectiveFinanceConfig, int, EffectiveRevisionRecord]:
     """读取项目当前生效 EffectiveFinanceConfig; 未生成 → 404(无静默默认)。"""
-    project = _get_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     current = _current_effective(db, project)
     if current is None:
         raise NotFoundError(
@@ -622,7 +606,7 @@ def get_effective_finance_config(
 
 def get_finance_overrides(db: Session, project_id: int) -> tuple[FinanceOverrides | None, int | None]:
     """读项目当前 Overrides(无覆盖 → (None, None); 有 → (obj, revision))。"""
-    project = _get_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     current = _current_overrides(db, project)
     if current is None:
         return None, None
@@ -636,7 +620,7 @@ def get_finance_overrides(db: Session, project_id: int) -> tuple[FinanceOverride
 
 def get_planning_config(db: Session, project_id: int) -> tuple[PlanningConfig, int, PlanningRevisionRecord]:
     """读取项目当前生效规划配置; 未保存过 → 404。"""
-    project = _get_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     if project.planning_revision is None:
         raise NotFoundError(
             "项目尚未保存规划配置",
@@ -666,7 +650,7 @@ def _save_planning_config(
     - 项目未生成 EffectiveFinanceConfig → 400;
     - 乐观锁同前。
     """
-    project = _get_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     try:
         config = PlanningConfig.from_dict(payload)
     except PlanningConfigError as exc:

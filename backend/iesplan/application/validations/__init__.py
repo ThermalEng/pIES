@@ -1,6 +1,7 @@
 """校验用例族(application/validations)。
 
-从 services.validation 复制的 U07 项目校验流程（完整预检与财务基准确认）。
+U07 项目校验流程（完整预检与财务基准确认；旧 services.validation 已删除，
+载体/端口映射取值与 application.models 唯一实现一致）。
 """
 
 from __future__ import annotations
