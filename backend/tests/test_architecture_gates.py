@@ -774,12 +774,15 @@ def _is_contract_target(target: str) -> bool:
 #: Wave 3-B: 四维评估规则归 results 域所有, 其状态词汇与 IRR 分类仍以
 #: 无状态的 iesplan.metrics.validity / iesplan.metrics.financial 为唯一权威
 #: (收口 §六“领域公开纯函数”复用, 不复制枚举值)。仅豁免 results 域对该两
-#: 模块的导入; results 对 metrics 其他子模块、其他域对 metrics 的导入仍记
-#: 债务(Wave 4 的 engines/analysis 债务不受影响)。调用方按需传入, 缺省为空。
+#: 模块的导入; results 对 metrics 其他子模块的导入仍记债务。
+#: Wave 5: engines/planning 对 metrics.financial 的复用同属此类
+#: (metrics.financial 仅依赖标准库/numpy 的纯计算; planning 取现金流/NPV/IRR
+#: 纯函数与 IRRStatus 做候选评分, 引擎内评估, 非跨域业务组合)。
 _WAVE0_STATE_MODEL_REUSE: frozenset[tuple[str, str]] = frozenset(
     {
         ("iesplan.results", "iesplan.metrics.validity"),
         ("iesplan.results", "iesplan.metrics.financial"),
+        ("iesplan.engines", "iesplan.metrics.financial"),
     }
 )
 
@@ -915,13 +918,10 @@ def _find_cross_domain_behavior_imports(pkg_root: Path = _PKG_ROOT) -> set[tuple
     return found
 
 
-#: 门禁 14 临时债务: 禁止的领域间依赖(Wave 2-B 已消除 project→identity, 剩 1 对; Wave 4 归零)。
-#: Wave 3-B 起 results 域对 metrics 状态模型的复用属常设豁免(见 _WAVE0_STATE_MODEL_REUSE),
-#: 不记入本债务集合。
-TEMP_DEBT_CROSS_DOMAIN: set[tuple[str, str]] = {
-    # engines/planning.py:34 直调 metrics.financial(计算方向收敛时一并处理)。
-    ("iesplan.engines.planning", "metrics"),
-}
+#: 门禁 14 临时债务: 禁止的领域间依赖(归零)。
+#: results/engines 对 metrics 纯函数与状态词汇的复用属常设豁免
+#: (见 _WAVE0_STATE_MODEL_REUSE), 不记入本债务集合。
+TEMP_DEBT_CROSS_DOMAIN: set[tuple[str, str]] = set()
 
 
 def test_no_forbidden_cross_domain_deps():
