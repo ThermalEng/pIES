@@ -14,7 +14,6 @@ from iesplan.dataset.contracts import (
     DatasetRecord,
     DatasetVersionRecord,
 )
-from iesplan.dataset.repository import DatasetRepository
 from iesplan.dataset.tables import (
     DATA_FILE_DECODE,
     DATA_FILE_EMPTY,
@@ -76,7 +75,6 @@ __all__ = [
     "DatasetFileRecord",
     "DatasetNotFoundError",
     "DatasetRecord",
-    "DatasetRepository",
     "DatasetVersionRecord",
     "FieldSpec",
     "add_file",

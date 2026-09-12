@@ -23,7 +23,6 @@ from iesplan.tasks.contracts import (
     TaskRecord,
     UncertaintySnapshotRecord,
 )
-from iesplan.tasks.repository import TasksRepository
 
 acquire_lease = persistence.acquire_lease
 acquire_slot = persistence.acquire_slot
@@ -107,7 +106,6 @@ __all__ = [
     "TaskNotFoundError",
     "TaskProgressRecord",
     "TaskRecord",
-    "TasksRepository",
     "UncertaintySnapshotRecord",
     "acquire_lease",
     "acquire_slot",

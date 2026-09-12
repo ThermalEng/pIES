@@ -13,7 +13,6 @@ from iesplan.package.contracts import (
     PackageConflictError,
     PackageNotFoundError,
 )
-from iesplan.package.repository import PackageRepository
 from iesplan.package.transfers import (
     DOWNLOAD_TOKEN_TTL_SECONDS,
     EXCEL_MEDIA_TYPE,
@@ -55,7 +54,6 @@ __all__ = [
     "PackageConflictError",
     "PackageExport",
     "PackageNotFoundError",
-    "PackageRepository",
     "PackageSizeError",
     "DownloadTokenError",
     "bound_dataset_ids",

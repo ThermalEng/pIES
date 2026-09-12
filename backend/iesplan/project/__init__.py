@@ -24,7 +24,6 @@ from iesplan.project.contracts import (
     ProjectVersionRecord,
     VersionRefRecord,
 )
-from iesplan.project.repository import ProjectRepository
 from iesplan.project.versions import (
     build_version_content,
     draft_to_dict,
@@ -68,7 +67,6 @@ __all__ = [
     "ProjectNotFoundError",
     "ProjectPage",
     "ProjectRecord",
-    "ProjectRepository",
     "ProjectVersionRecord",
     "VersionRefRecord",
     "add_version_ref",

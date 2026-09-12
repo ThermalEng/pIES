@@ -16,7 +16,6 @@ from iesplan.results.contracts import (
     ResultNotFoundError,
     ResultSelectionRecord,
 )
-from iesplan.results.repository import ResultsRepository
 
 count_reports = persistence.count_reports
 create_evidence = persistence.create_evidence
@@ -51,7 +50,6 @@ __all__ = [
     "ResultIndexRecord",
     "ResultNotFoundError",
     "ResultSelectionRecord",
-    "ResultsRepository",
     "count_reports",
     "create_evidence",
     "create_human_assessment",

@@ -26,7 +26,6 @@ from iesplan.model.contracts import (
     ProjectModelRecord,
     TemplateDraftRevisionRecord,
 )
-from iesplan.model.repository import ModelRepository
 
 allocate_project_model_suffix = persistence.allocate_project_model_suffix
 create_connection = persistence.create_connection
@@ -79,7 +78,6 @@ __all__ = [
     "MODEL_SOURCE_TEMPLATE",
     "ModelConflictError",
     "ModelNotFoundError",
-    "ModelRepository",
     "ModelTemplateRecord",
     "ModelTemplateRevisionRecord",
     "PortRecord",
