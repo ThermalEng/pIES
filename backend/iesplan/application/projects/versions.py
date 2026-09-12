@@ -28,6 +28,7 @@ from iesplan.application.configuration.revisions import (
     get_effective_finance_config as _read_effective,
     get_planning_config as _read_planning,
 )
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.application.projects.content_objects import (
     load_content_bytes as _load_content_bytes,
     load_content_object as _load_content_object,
@@ -133,7 +134,7 @@ def replace_project_model_refs(
     refs: list[dict[str, object]],
 ) -> DraftRecord:
     """以项目模型清单的权威快照推进草稿修订(乐观锁；调用方拥有事务)。"""
-    project_domain.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     project = project_domain.require_project(db, project_id)
     draft = project_domain.require_current_draft(db, project)
     if draft.revision != expected_revision:
@@ -174,7 +175,7 @@ def _do_create_version(
     source_result_id: str | None = None,
 ) -> ProjectVersionRecord:
     """创建版本内核(无提交；调用方拥有事务)：当前草稿 → 组装 → 版本行 + 审计。"""
-    project_domain.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     project = project_domain.require_project(db, project_id)
     if project.status != "active":
         raise ConflictError(
@@ -316,7 +317,7 @@ def restore_version(
 ) -> dict[str, Any]:
     """事务型恢复历史版本(新版本 + 新草稿，不倒写历史)；统一提交或回滚。"""
     try:
-        project_domain.ensure_access(db, user, project_id, "edit")
+        ensure_access(db, user, project_id, "edit")
         project = project_domain.require_project(db, project_id)
         if project.status != "active":
             raise ConflictError(
@@ -378,7 +379,7 @@ def apply_result(
 ) -> dict[str, Any]:
     """事务型应用选定结果(参数差异补丁→新草稿+新版本)；统一提交或回滚。"""
     try:
-        project_domain.ensure_access(db, user, project_id, "edit")
+        ensure_access(db, user, project_id, "edit")
         project = project_domain.require_project(db, project_id)
         if project.status != "active":
             raise ConflictError(

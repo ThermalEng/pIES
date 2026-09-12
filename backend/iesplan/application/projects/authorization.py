@@ -1,13 +1,11 @@
-"""项目授权用例(application/projects/authorization.py)。
+"""项目授权用例（application/projects/authorization，Wave 2 切片 B）。
 
-跨领域授权缝合契约（Wave 2 切片 A 先行最小实现；切片 2B 落地后以其
-实现为准，模块名/函数名/签名/语义保持一致）：
-project 只回答项目自身事实（get_project/get_role/OWNER_CAPABILITIES），
-identity 只回答身份/角色事实（user_roles），本模块组合两者判定访问。
+跨领域组合授权唯一实现：project 只回答项目自身事实（项目行、所有者角色、
+所有者能力集），identity 只回答身份/角色事实（全局 admin 角色），本用例
+组合两者完成访问判定。语义与旧 ``project.access.ensure_access`` 逐行一致。
 
-API 路由只调本契约，不再直调 ``project.ensure_access`` 自组织授权。
-签名与语义与 ``project.ensure_access`` 完全一致：
-``(db, user, project_id, *capabilities)``。
+调用方向：``application.projects.authorization → {project, identity} 领域
+公开门面``；不导入 ORM、不导入领域内部模块。兄弟切片 2A 按本契约消费。
 """
 
 from __future__ import annotations

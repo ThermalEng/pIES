@@ -11,7 +11,6 @@ from iesplan.project import persistence
 from iesplan.project.access import (
     OWNER_CAPABILITIES,
     InvalidRequestError,
-    ensure_access,
     get_role,
 )
 from iesplan.project.contracts import (
@@ -78,7 +77,6 @@ __all__ = [
     "create_project",
     "create_version",
     "draft_to_dict",
-    "ensure_access",
     "get_current_draft",
     "get_draft",
     "get_draft_revision",

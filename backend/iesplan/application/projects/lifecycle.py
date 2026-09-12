@@ -24,6 +24,7 @@ from iesplan import audit as audit_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.application.projects.content_objects import (
     load_content_object,
     merge_patch,
@@ -37,7 +38,6 @@ from iesplan.project import (
     OWNER_CAPABILITIES,
     InvalidRequestError,
     draft_to_dict,
-    ensure_access,
     get_role,
     project_to_dict,
     require_current_draft,
@@ -51,7 +51,8 @@ from iesplan.project.contracts import (
 )
 
 # ---------------------------------------------------------------------------
-# 访问控制（唯一实现归属 project 域 access 模块；本模块只消费公开门面）
+# 访问控制（跨域组合授权唯一实现归属 application.projects.authorization；
+# 项目自身事实经 project 域公开门面）
 # ---------------------------------------------------------------------------
 
 
