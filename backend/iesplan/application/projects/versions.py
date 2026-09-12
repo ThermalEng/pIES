@@ -1,7 +1,7 @@
 """项目版本用例(application/projects/versions.py, W3-A)。
 
-版本编排薄封装(组合 ``services.project`` 版本函数；旧服务只读保留，
-待 Wave 5 由协调者删除)：
+版本编排薄封装(组合 ``iesplan.project`` 领域公开门面版本编排；旧服务
+``services.project`` 已删除，见纠偏 Wave 1 切片 D)：
 
 - 创建版本 / 版本列表 / 版本详情；
 - 恢复版本 / 应用结果(返回 ``{"version", "draft"}`` 展示字典，序列化
@@ -11,8 +11,8 @@
 ``db.rollback``)；读用例不提交事务。本层不新增校验/hash/完整性
 复核/防御分支。
 
-调用方向：``api → application.projects.versions → services.project``；
-不导入 ORM、不导入领域内部模块。
+调用方向：``api → application.projects.versions → iesplan.project``；
+不导入 ORM、不导入领域内部模块、不调用 ``services.*``。
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from iesplan import project as project_domain
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectVersionRecord
-from iesplan.services import project as project_service
 
 
 def create_version(
@@ -38,7 +38,7 @@ def create_version(
 ) -> ProjectVersionRecord:
     """事务型从当前草稿创建不可变项目版本；application 层统一提交或回滚。"""
     try:
-        version = project_service.create_version(
+        version = project_domain.create_project_version(
             db,
             user,
             project_id,
@@ -57,12 +57,12 @@ def create_version(
 
 def list_versions(db: Session, project_id: int) -> list[ProjectVersionRecord]:
     """版本列表(新版本在前；只读，不提交事务)。"""
-    return project_service.list_versions(db, project_id)
+    return project_domain.list_versions(db, project_id)
 
 
 def get_version(db: Session, project_id: int, version_id: int) -> ProjectVersionRecord:
     """按 id 获取项目版本(须属于该项目，否则 404；只读，不提交事务)。"""
-    return project_service.get_version(db, project_id, version_id)
+    return project_domain.require_version(db, project_id, version_id)
 
 
 def restore_version(
@@ -75,7 +75,7 @@ def restore_version(
 ) -> dict[str, Any]:
     """事务型恢复历史版本(新版本 + 新草稿，不倒写历史)；统一提交或回滚。"""
     try:
-        result = project_service.restore_version(
+        result = project_domain.restore_version(
             db,
             user,
             project_id,
@@ -103,7 +103,7 @@ def apply_result(
 ) -> dict[str, Any]:
     """事务型应用选定结果(参数差异补丁→新草稿+新版本)；统一提交或回滚。"""
     try:
-        result = project_service.apply_result(
+        result = project_domain.apply_result(
             db,
             user,
             project_id,

@@ -45,7 +45,6 @@ from iesplan.results.contracts import (
     ResultIndexRecord,
     ResultSelectionRecord,
 )
-from iesplan.services import project as project_service
 from iesplan.services import tasks as tasks_service
 from iesplan.storage import add_ref, get_object, object_info, put_object
 from iesplan.tasks.contracts import TaskAttemptRecord, TaskRecord
@@ -963,7 +962,7 @@ def select_result(
             params={"selection_type": selection_type, "allowed": list(SELECTION_TYPES)},
         )
     task = _get_task(db, task_id)
-    project_service.ensure_access(db, user, task.project_id, "edit")
+    project_domain.ensure_access(db, user, task.project_id, "edit")
     index = latest_index(db, task)
     if index is None:
         raise NotFoundError("该任务尚无结果索引, 无法选择结果", params={"task_id": task_id})
@@ -1174,7 +1173,7 @@ def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) ->
     一律为 None。调用方须据 evidence_status 分支;available 态下某段内容缺失
     (如任务类型不含 hourly_refs)同样返回 None, 不应按字段存在性推导状态。
     """
-    project_service.ensure_access(db, user, project_id, "view")
+    project_domain.ensure_access(db, user, project_id, "view")
     task = tasks_service.ensure_task_belongs(db, project_id, task_id)
     package = latest_evidence(db, task_id)
     assessment = latest_assessment(db, package.id) if package is not None else None

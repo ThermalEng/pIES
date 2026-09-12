@@ -51,7 +51,6 @@ from iesplan.identity.contracts import UserRecord
 from iesplan.models.common import IDEMPOTENCY_KEY_RE
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.application import identity as identity_service
-from iesplan.services import project as project_service
 from iesplan.services import queue
 from iesplan.storage import object_info, orphaned_stats, usage_summary
 from iesplan.tasks.contracts import (
@@ -222,16 +221,16 @@ def _resolve_project_inputs(
                 message_key="ies.diag.store.corrupt",
                 location={"object_type": "project", "object_id": project.id},
             )
-        if not project_service.current_version_matches_draft(db, project):
+        if not project_domain.current_version_matches_draft(db, project):
             version = None  # 草稿已变更: 需重新固化(首次提交自动固化后亦然)
     if version is not None:
-        return version, project_service.load_content_object(db, version.content_object_id)
-    draft = project_service.get_current_draft(db, project)
-    content = project_service.load_content_object(db, draft.content_object_id)
+        return version, project_domain.load_content_object(db, version.content_object_id)
+    draft = project_domain.require_current_draft(db, project)
+    content = project_domain.load_content_object(db, draft.content_object_id)
     if not freeze:
         return None, content
     # 草稿固化: 借项目版本服务创建不可变项目版本（计算输入固定，宪法 §12 + domain-model §项目聚合）
-    version = project_service.create_version(
+    version = project_domain.create_project_version(
         db, actor, project.id, name="计算任务自动固化", description=None, reason="snapshot_freeze"
     )
     return version, content
@@ -299,7 +298,7 @@ def assemble_snapshot(
     相同输入复用既有快照(快照内容字段逐项相等判定, 快照不可变故复用安全)。
     任务级 config 并入快照的 calc_config_snapshot.task_params。
     """
-    project = project_service.require_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     actor = user or identity_domain.get_user(db, project.owner_id)
     if actor is None:
         raise InvalidRequestError("无法确定快照创建者", params={"project_id": project_id})
@@ -498,7 +497,7 @@ def estimate_storage(
     S_avail = min(Σ quota_bytes − Σ size_bytes, 卷空闲空间);
     配额未配置(Σ quota = 0)时仅以卷空闲空间为准。
     """
-    project = project_service.require_project(db, project_id)
+    project = project_domain.require_project(db, project_id)
     actor = identity_domain.get_user(db, project.owner_id)
     if actor is None:
         raise NotFoundError("项目所有者不存在", params={"project_id": project_id})
@@ -613,8 +612,8 @@ def create_task(
       (duplicate=True, 规格"短时间重复 → 复用并提示");
     - 入队: 按类型进入 compute/io 逻辑队列(Redis, 可重建视图)。
     """
-    project_service.ensure_access(db, user, project_id, "edit")
-    project = project_service.require_project(db, project_id)
+    project_domain.ensure_access(db, user, project_id, "edit")
+    project = project_domain.require_project(db, project_id)
     if project.status != "active":
         raise ConflictError("项目已归档或已删除, 不能提交任务", params={"project_id": project_id})
     if task_type not in TASK_TYPES:
@@ -1018,7 +1017,7 @@ def retry_task(db: Session, user: UserRecord, task_id: int) -> TaskRecord:
     (attempt_no 递增, 新租约新 token)。
     """
     task = _get_task(db, task_id)
-    project_service.ensure_access(db, user, task.project_id, "edit")
+    project_domain.ensure_access(db, user, task.project_id, "edit")
     if task.status not in TERMINAL_STATUSES:
         raise TaskStateError(
             "仅终态任务可手动重试",
@@ -1196,8 +1195,8 @@ def list_tasks(
     limit: int = 20,
 ) -> dict[str, Any]:
     """任务列表(规格 9.1: 状态/结局过滤 + 游标分页, requested_at 倒序)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    project_service.require_project(db, project_id)
+    project_domain.ensure_access(db, user, project_id, "view")
+    project_domain.require_project(db, project_id)
     rows = tasks_domain.list_tasks(
         db,
         project_id,
@@ -1248,7 +1247,7 @@ def _sanitize_diag_context(context: dict[str, Any] | None) -> dict[str, Any] | N
 
 def task_detail(db: Session, user: UserRecord, project_id: int, task_id: int) -> dict[str, Any]:
     """任务详情(规格 9.2: 尝试/租约/进度/诊断/快照/批量关系; 不暴露 lease_token)。"""
-    project_service.ensure_access(db, user, project_id, "view")
+    project_domain.ensure_access(db, user, project_id, "view")
     task = _get_task(db, task_id)
     if task.project_id != project_id:
         raise NotFoundError(

@@ -48,7 +48,6 @@ from iesplan.model import (
     ModelConflictError,
     ProjectModelRecord,
 )
-from iesplan.services import project as project_service
 from iesplan.storage import (
     attach,
     detach,
@@ -266,8 +265,8 @@ def validate_candidate(
     权威规范字节, 不信任客户端自带的模板字节); 未携带模板引用时为旧契约
     路径(model_yaml 即模板 YAML, 校验用, 正式保存仍以权威内容为准)。文本文件只校验字头。
     """
-    project_service.ensure_access(db, user, project_id, "view")
-    project_service.require_project(db, project_id)
+    project_domain.ensure_access(db, user, project_id, "view")
+    project_domain.require_project(db, project_id)
     if source not in (MODEL_SOURCE_DIRECT, MODEL_SOURCE_TEMPLATE):
         return CandidateValidation(
             ok=False,
@@ -411,7 +410,7 @@ def _save_project_model(
     保存用例。返回 ``{project_model, receipt, project_revision, duplicate}``;
     公共 application 用例拥有提交/回滚边界。文本文件只校验字头。
     """
-    project_service.ensure_access(db, user, project_id, "edit")
+    project_domain.ensure_access(db, user, project_id, "edit")
     project = project_domain.get_project(db, project_id)
     if project is None or project.status == "deleted":
         raise NotFoundError(
@@ -434,7 +433,7 @@ def _save_project_model(
                 "project_revision": existing.project_revision,
                 "duplicate": True,
             }
-    current_draft = project_service.get_current_draft(db, project)
+    current_draft = project_domain.require_current_draft(db, project)
     if current_draft.revision != expected_revision:
         raise ConflictError(
             "项目草稿已被其他操作更新",
@@ -536,7 +535,7 @@ def _save_project_model(
             "template_revision": template_revision,
         },
     )
-    new_draft = project_service.replace_project_model_refs(
+    new_draft = project_domain.replace_project_model_refs(
         db,
         user,
         project_id,
@@ -617,7 +616,7 @@ def _delete_project_model(
     - 对象解除引用后进入 orphaned, 由存储运维 safe_cleanup/purge 物理回收;
     - 编号计数器不回落: 之后保存的新模型取得更大的 _N, 已删除编号不复用。
     """
-    project_service.ensure_access(db, user, project_id, "edit")
+    project_domain.ensure_access(db, user, project_id, "edit")
     model = _get_project_model(db, project_id, model_id)
     refs = find_refs_by_owner(db, FINAL_OWNER_NAMESPACE, model.id, FINAL_OWNER_NAMESPACE)
     for ref in refs:
@@ -637,7 +636,7 @@ def _delete_project_model(
         },
     )
     model_domain.delete_project_model(db, model.id)
-    new_draft = project_service.replace_project_model_refs(
+    new_draft = project_domain.replace_project_model_refs(
         db,
         user,
         project_id,
@@ -678,7 +677,7 @@ def delete_project_model(
 
 def get_project_models(db: Session, user, project_id: int) -> list[dict]:
     """项目模型清单(最新在前; 编号对用户可见, 不存在"不可见已占编号")。"""
-    project_service.ensure_access(db, user, project_id, "view")
+    project_domain.ensure_access(db, user, project_id, "view")
     rows = model_domain.list_project_models(db, project_id, newest_first=True)
     return [project_model_to_dict(m) for m in rows]
 

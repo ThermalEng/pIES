@@ -1147,11 +1147,10 @@ def _sync_draft_config(
     draft = project_domain.get_draft(db, proj.current_draft_id)
     if draft is None:
         return
-    from iesplan.services import project as project_service  # 延迟导入避免环
 
     # 内容对象缺失或损坏时直接抛出加载原错误, 不回退初始骨架
     # (宪法 §13: 对象缺失或不可读返回实际错误, 禁止旧副本回退)。
-    content = project_service.load_content_object(db, draft.content_object_id)
+    content = project_domain.load_content_object(db, draft.content_object_id)
     old_calc = content.get("calc_config") or {}
     content["calc_config"] = {
         "params": dict(config.get("parameters") or {}),
@@ -1166,7 +1165,7 @@ def _sync_draft_config(
     }
     if isinstance(old_calc.get("task_params"), dict):
         content["calc_config"]["task_params"] = old_calc["task_params"]
-    content_object_id = project_service.store_content_object(db, content)
+    content_object_id = project_domain.store_content_object(db, content)
     project_domain.update_draft_content_ref(db, draft.id, content_object_id)
 
 

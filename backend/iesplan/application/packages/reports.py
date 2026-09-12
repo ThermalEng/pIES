@@ -6,9 +6,10 @@
   提交 → 签发下载 token)整体下移, 提交由本用例拥有;
 - ``authorize_download``/``load_export_download``: 路由原下载授权校验
   (项目/用户绑定 + 对象归属)与对象读取整体下移;
-- 常量与 ``DownloadTokenError`` 直接重导出 ``services.package`` 同名符号。
+- 常量与 ``DownloadTokenError`` 取自 ``iesplan.package`` 领域公开门面同名符号
+  (旧服务 ``services.package`` 已删除，见纠偏 Wave 1 切片 D)。
 
-依赖方向: api → application → (services/storage)。
+依赖方向: api → application → (package/storage 域公开门面)。
 """
 
 from __future__ import annotations
@@ -17,14 +18,14 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from iesplan import package as package_domain
 from iesplan.identity.contracts import UserRecord
-from iesplan.services import package as package_service
-from iesplan.services.package import DownloadTokenError
+from iesplan.package import DownloadTokenError
 from iesplan.storage import add_ref, get_object, list_refs, put_object
 
-EXCEL_MEDIA_TYPE = package_service.EXCEL_MEDIA_TYPE
-PACKAGE_MEDIA_TYPE = package_service.PACKAGE_MEDIA_TYPE
-DOWNLOAD_TOKEN_TTL_SECONDS = package_service.DOWNLOAD_TOKEN_TTL_SECONDS
+EXCEL_MEDIA_TYPE = package_domain.EXCEL_MEDIA_TYPE
+PACKAGE_MEDIA_TYPE = package_domain.PACKAGE_MEDIA_TYPE
+DOWNLOAD_TOKEN_TTL_SECONDS = package_domain.DOWNLOAD_TOKEN_TTL_SECONDS
 
 __all__ = [
     "DOWNLOAD_TOKEN_TTL_SECONDS",
@@ -46,7 +47,7 @@ def export_excel_report(
     lang: str = "zh",
 ) -> dict[str, Any]:
     """生成 Excel 报告并登记对象/引用, 返回短期单对象下载授权(路由原顺序)。"""
-    excel_bytes = package_service.export_excel(
+    excel_bytes = package_domain.export_excel(
         db, user, project_id, evidence_package_id, assessment_id, lang=lang
     )
     try:
@@ -61,7 +62,7 @@ def export_excel_report(
     except Exception:
         db.rollback()
         raise
-    token = package_service.create_download_token(
+    token = package_domain.create_download_token(
         obj.id, "excel", project_id=project_id, user_id=user.id
     )
     return {
@@ -99,7 +100,7 @@ def load_export_download(
     expected_kind: str,
 ) -> tuple[bytes, str, str]:
     """校验下载授权并读取对象字节, 返回 (内容, 媒体类型, 文件名)。"""
-    info = package_service.verify_download_token(token, expected_kind=expected_kind)
+    info = package_domain.verify_download_token(token, expected_kind=expected_kind)
     authorize_download(db, info, project_id, user.id)
     content = get_object(db, info["object_id"])
     if expected_kind == "excel":

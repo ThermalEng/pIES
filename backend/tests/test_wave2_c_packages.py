@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan import identity as identity_domain  # noqa: E402
+from iesplan import package as package_domain  # noqa: E402
 from iesplan import project as project_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.application import packages as packages_uc  # noqa: E402
@@ -39,8 +40,6 @@ from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, Task  # noqa: E402
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
-from iesplan.services import package as package_service  # noqa: E402
-from iesplan.services import queue  # noqa: E402
 from iesplan.storage import get_object, put_object  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -62,7 +61,7 @@ def engine() -> Iterator[Engine]:
 
 @pytest.fixture(autouse=True)
 def _clean_state(engine: Engine, db: Session) -> Iterator[None]:
-    queue.force_memory()
+    # 内存队列由 IESPLAN_QUEUE=memory 固定(模块顶部)，包流程不触队列，无需重置。
     yield
     with engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
@@ -207,7 +206,7 @@ def test_export_package_usecase_commits_and_matches_old(
         assert manifest["package_type"] == "project"
 
     # 行为对照: 旧服务导出同项目, 清单同形
-    old = package_service.export_package(db, user, pid)
+    old = package_domain.export_package(db, user, pid)
     db.commit()
     assert old.manifest["format_version"] == result.manifest["format_version"]
     assert old.file_name == result.file_name
@@ -254,12 +253,12 @@ def test_import_rejects_bad_package_matches_old(client: TestClient, db: Session)
     user = identity_domain.get_user(db, owner.id)
     assert user is not None
 
-    with pytest.raises(package_service.ImportValidationError) as e1:
+    with pytest.raises(package_domain.ImportValidationError) as e1:
         packages_uc.propose_import(db, user, b"not a zip at all")
     assert e1.value.code == "PKG-IMP-001"
     db.rollback()
-    with pytest.raises(package_service.ImportValidationError) as e2:
-        package_service.import_proposal(db, user, b"not a zip at all")
+    with pytest.raises(package_domain.ImportValidationError) as e2:
+        package_domain.import_proposal(db, user, b"not a zip at all")
     db.rollback()
     assert e2.value.code == "PKG-IMP-001"
 
@@ -279,7 +278,7 @@ def test_export_excel_usecase_matches_old(client: TestClient, db: Session) -> No
 
     new_bytes = exports_uc.export_excel(db, user, pid, ep_id, a_id, lang="zh")
     assert new_bytes[:2] == b"PK"
-    old_bytes = package_service.export_excel(db, user, pid, ep_id, a_id, lang="zh")
+    old_bytes = package_domain.export_excel(db, user, pid, ep_id, a_id, lang="zh")
     assert old_bytes[:2] == b"PK"
 
     new_title = load_workbook(io.BytesIO(new_bytes))["报告总览"].cell(row=1, column=1).value
@@ -292,5 +291,5 @@ def test_download_token_helpers_match_old() -> None:
     token = packages_uc.create_download_token(7, "package", project_id=3, user_id=5)
     parsed = packages_uc.verify_download_token(token, expected_kind="package")
     assert parsed == {"object_id": 7, "kind": "package", "project_id": 3, "user_id": 5}
-    old_parsed = package_service.verify_download_token(token, expected_kind="package")
+    old_parsed = package_domain.verify_download_token(token, expected_kind="package")
     assert old_parsed == parsed

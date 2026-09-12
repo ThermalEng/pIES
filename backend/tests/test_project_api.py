@@ -589,12 +589,12 @@ def test_admin_cannot_create_project_via_api(client: TestClient, db_session: Ses
 
 def test_admin_cannot_create_project_via_service(db_session: Session) -> None:
     """直接调用项目应用服务创建管理员项目同样被拒(规则位于应用服务)。"""
+    from iesplan.application.projects import lifecycle as lifecycle_uc
     from iesplan.core.errors import ForbiddenError
-    from iesplan.services import project as project_service
 
     admin = make_user(db_session, "admin_nosvc", role="admin")
     with pytest.raises(ForbiddenError):
-        project_service.create_project(
+        lifecycle_uc.create_project(
             db_session, admin, name="管理员服务项目",
             baseline_resolution="1h",
             baseline_leap_year=False,
@@ -705,7 +705,7 @@ def test_project_count_uses_aggregate_query(client: TestClient, db_session: Sess
     """用户列表项目数经单次 GROUP BY 聚合查询取得(防 N+1 结构)。"""
     from unittest.mock import patch
 
-    from iesplan.services import project as project_service
+    from iesplan import project as project_domain
 
     # 造数: 两个普通用户各持项目
     u1 = make_user(db_session, "agg_user1")
@@ -723,7 +723,7 @@ def test_project_count_uses_aggregate_query(client: TestClient, db_session: Sess
 
     # 公开 read model 一次调用 → 恰好一条聚合 SQL(owner_id GROUP BY)
     with patch.object(db_session, "execute", side_effect=spy_execute) as mock_exec:
-        counts = project_service.project_count_by_owner(db_session, [u1.id, u2.id])
+        counts = project_domain.count_projects_by_owner(db_session, [u1.id, u2.id])
     assert mock_exec.call_count == 1
     assert counts[u1.id] == 2
     assert counts[u2.id] == 1
