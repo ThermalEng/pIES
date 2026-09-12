@@ -21,8 +21,6 @@ from iesplan import identity as identity_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.tasks.submissions import (
-    POOL_BY_TYPE,
-    TERMINAL_STATUSES,
     cancel_task,
     ensure_project_access,
     ensure_task_belongs,
@@ -68,7 +66,7 @@ def _progress_summary(
             percent = float(row.progress_percent)
             stage = row.stage
             detail = row.detail
-    if task.status in TERMINAL_STATUSES and stage is None:
+    if task.status in tasks_domain.TERMINAL_STATUSES and stage is None:
         # 终态无进度行: 完成定格 100, 其余 0
         percent = 100.0 if task.status == "completed" else percent
         stage = "done" if task.status == "completed" else None
@@ -91,7 +89,7 @@ def task_summary(db: Session, task: TaskRecord) -> dict[str, Any]:
     attempt_no, percent, stage, _detail = _progress_summary(db, task)
     queue_position: int | None = None
     if task.status == "queued":
-        queue_position = tasks_domain.queue_position(task.id, POOL_BY_TYPE[task.type])
+        queue_position = tasks_domain.queue_position(task.id, tasks_domain.POOL_BY_TYPE[task.type])
     evidence_exists = _evidence_available(db, task)
     summary: dict[str, Any] = {
         "id": task.id,

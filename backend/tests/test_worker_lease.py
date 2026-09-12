@@ -397,7 +397,7 @@ class TestTerminal:
     def test_cancel_denied_when_running(self, db: Session, env: dict[str, Any]):
         """取消竞态: 任务未进入 cancelling 时收拢 → TaskStateError(以终态为准)。"""
         claim = _claim(db, env)
-        from iesplan.application.tasks import TaskStateError
+        from iesplan.tasks import TaskStateError
 
         with pytest.raises(TaskStateError):
             lease.cancel_attempt(db, claim)

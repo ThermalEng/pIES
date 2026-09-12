@@ -32,11 +32,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from iesplan.application.tasks.submissions import (
-    LEASE_TTL_SECONDS,
-    Claim,
-    TaskStateError,
-)
+from iesplan.application.tasks.submissions import Claim
 from iesplan.application.worker.lease_cases import (
     LeaseRejectedError,
     acquire_task,
@@ -58,7 +54,7 @@ from iesplan.application.worker.lease_cases import (
     write_diagnostic,
 )
 from iesplan.core.diagnostics import SEVERITY_ERROR, SEVERITY_INFO, TASK_QUEUED
-from iesplan.tasks import TaskRecord
+from iesplan.tasks import LEASE_TTL_SECONDS, TaskRecord, TaskStateError
 
 __all__ = [
     "LeaseRejectedError",

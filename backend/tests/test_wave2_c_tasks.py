@@ -230,14 +230,14 @@ def test_cancel_terminal_denied_matches_old(client: TestClient, db: Session) -> 
 
     t1, _ = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-d1")
     tasks_uc.cancel_task(db, t1.id)
-    with pytest.raises(tasks_uc.CancelDeniedError) as e1:
+    with pytest.raises(tasks_domain.CancelDeniedError) as e1:
         tasks_uc.cancel_task(db, t1.id)
     assert e1.value.code == "TASK-CANCEL-001"
     db.rollback()
 
     t2, _ = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-d2")
     tasks_uc.cancel_task(db, t2.id)
-    with pytest.raises(tasks_uc.CancelDeniedError) as e2:
+    with pytest.raises(tasks_domain.CancelDeniedError) as e2:
         tasks_uc.cancel_task(db, t2.id)
     assert e2.value.code == "TASK-CANCEL-001"
     db.rollback()
@@ -275,11 +275,11 @@ def test_retry_terminal_task_matches_old(client: TestClient, db: Session, engine
     assert (old_retried.status, old_retried.calc_snapshot_id) == ("queued", t2.calc_snapshot_id)
 
     t3, _ = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-t3")
-    with pytest.raises(tasks_uc.TaskStateError) as e1:
+    with pytest.raises(tasks_domain.TaskStateError) as e1:
         tasks_uc.retry_task(db, owner, t3.id)
     assert e1.value.code == "TASK-STATE-001"
     db.rollback()
-    with pytest.raises(tasks_uc.TaskStateError) as e2:
+    with pytest.raises(tasks_domain.TaskStateError) as e2:
         tasks_uc.retry_task(db, owner, t3.id)
     assert e2.value.code == "TASK-STATE-001"
     db.rollback()
