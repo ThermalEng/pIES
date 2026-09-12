@@ -10,7 +10,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from iesplan.core.errors import ConflictError, NotFoundError
+from iesplan.core.errors import AppError, ConflictError, NotFoundError
+
+
+class ExternalAuthError(AppError):
+    """外部认证失败(配置/提供方/令牌校验错误)。
+
+    由 services/external_auth.py 收敛至本域(纠偏 Wave 1 切片 C);
+    语义与旧实现一致(HTTP 400, 前端经 message_key 渲染)。
+    """
+
+    code = "AUTH-OIDC-001"
+    http_status = 400
+    severity = "error"
+    message_key = "ies.diag.auth.external_failed"
+
+    def __init__(self, message: str = "外部认证失败", **params: Any) -> None:
+        # http_status 为类属性, 不得传给 AppError 构造函数
+        super().__init__(
+            message, code=self.code, severity=self.severity,
+            message_key=self.message_key, params=params,
+        )
 
 
 class UserNotFoundError(NotFoundError):

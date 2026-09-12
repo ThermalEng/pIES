@@ -829,8 +829,8 @@ def test_oidc_state_roundtrip(client: TestClient, db_session: Session) -> None:
     import time as _time
     from unittest.mock import patch
 
-    from iesplan.services import external_auth
-    from iesplan.services.external_auth import ExternalAuthError
+    from iesplan import identity as external_auth
+    from iesplan.identity import ExternalAuthError
 
     state = external_auth.build_state(nonce="n1", code_verifier="v1")
     payload = external_auth.verify_state(state)
@@ -862,7 +862,7 @@ def test_oidc_provision_user_jit(
 
     同一 subject 再次登录返回同一用户(不重复建号); 绑定关系落库。
     """
-    from iesplan.services import external_auth
+    from iesplan import identity as external_auth
 
     # 即使随机部分碰巧不含大小写/数字，内部凭证也必须稳定通过复杂度门禁。
     monkeypatch.setattr(external_auth.secrets, "token_urlsafe", lambda _size: "_" * 24)

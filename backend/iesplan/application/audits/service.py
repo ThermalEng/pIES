@@ -1,8 +1,8 @@
 """管理端审计用例(application/audits/service.py, W3-A)。
 
-组合 ``services.audit`` 现有函数的薄封装(旧服务只读保留，待 Wave 5
-由协调者删除)。只做参数透传与审计行装配，不新增校验/hash/完整性
-复核/防御分支。
+组合 ``iesplan.audit`` 域公开门面现有能力的薄封装(纠偏 Wave 1 切片 C,
+旧 services.audit 已删除, 唯一实现归 audit 域)。只做参数透传与审计行
+装配，不新增校验/hash/完整性复核/防御分支。
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
 from iesplan.audit.contracts import AuditRecord
-from iesplan.services import audit as audit_service
 
 
 def query_audit(
@@ -30,7 +30,7 @@ def query_audit(
     limit: int = 50,
 ) -> dict[str, Any]:
     """审计查询(过滤 + 游标分页，按时间倒序；只读，不提交事务)。"""
-    return audit_service.query_audit(
+    return audit_domain.query_audit(
         db,
         entity_type=entity_type,
         entity_id=entity_id,
@@ -52,10 +52,10 @@ def record_unlock_audit(
     task_type: str,
 ) -> AuditRecord:
     """记录管理员解锁任务审计(只 INSERT，不提交；加入调用方事务)。"""
-    return audit_service.audit(
+    return audit_domain.audit(
         db,
         admin_id,
-        audit_service.AUDIT_MAINTENANCE_UNLOCK_TASK,
+        audit_domain.AUDIT_MAINTENANCE_UNLOCK_TASK,
         "task",
         task_id,
         actor_type="admin",
