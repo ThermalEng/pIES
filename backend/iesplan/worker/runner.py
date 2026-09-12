@@ -11,6 +11,9 @@
 
 写入资格: 本模块不直接写任务状态/结果, 统一由 lease.submit_result /
 fail_attempt / cancel_attempt 带 token 完成(03 §4.4 硬约束)。
+
+行级读取全部经 application.worker 用例(db 会话 + id/参数进, 记录/id 出),
+本模块不直接引用 ``iesplan.models.*`` 做查询(仅用例返回类型做注解)。
 """
 
 from __future__ import annotations
@@ -21,17 +24,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
-import sqlalchemy as sa
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan.application import worker as worker_app
 from iesplan.core.diagnostics import SEVERITY_BLOCKING, TASK_DATA_SNAPSHOT_MISSING
 from iesplan.core.errors import AppError
 from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis
-from iesplan.models.calc import CalcSnapshot, Task
-from iesplan.models.dataset import DatasetFile, DatasetVersion
-from iesplan.models.project import ProjectVersion
 from iesplan.worker import executors, lease
 from iesplan.worker.executors import EngineRunError, RunContext, TaskCancelled
 
@@ -63,27 +61,29 @@ class InvalidTaskTypeError(AppError):
 # ---------------------------------------------------------------------------
 
 
-def load_inputs(db: Session, snapshot: CalcSnapshot) -> tuple[dict, dict, TimeAxis]:
+def load_inputs(
+    db: Session, snapshot: worker_app.CalcSnapshotRecord
+) -> tuple[dict, dict, TimeAxis]:
     """装配计算输入(03 §2.2): (项目版本内容, 逐时 data dict, 时间轴)。
 
     输入全部来自不可变快照: 项目版本内容对象、数据集逐时数据与时间轴。
     """
     if snapshot is None:
         raise SnapshotInputError("计算快照缺失", location={"object_type": "calc_snapshot"})
-    version = db.get(ProjectVersion, snapshot.project_version_id)
-    if version is None:
+    content_object_id = worker_app.get_project_content_id(db, snapshot.project_version_id)
+    if content_object_id is None:
         raise SnapshotInputError(
             "快照绑定的项目版本缺失",
             params={"calc_snapshot_id": snapshot.id},
             location={"object_type": "project_versions", "object_id": snapshot.project_version_id},
         )
     try:
-        content = worker_app.load_version_content(db, version.content_object_id)
+        content = worker_app.load_version_content(db, content_object_id)
     except AppError as exc:
         raise SnapshotInputError(
             f"项目版本内容不可用: {exc}",
             params={"calc_snapshot_id": snapshot.id,
-                    "content_object_id": version.content_object_id},
+                    "content_object_id": content_object_id},
         ) from exc
 
     # 任务级参数权威来源 = 快照 calc_config_snapshot.task_params(03 规格 2.2:
@@ -129,19 +129,15 @@ def _load_dataset_data(
     resolution = fallback_resolution
     utc_offset = 480
     for dvid in dataset_version_ids:
-        version = db.get(DatasetVersion, dvid)
+        version = worker_app.get_dataset_version_record(db, dvid)
         if version is None:
             raise SnapshotInputError("快照绑定的数据集版本缺失", params={"dataset_version_id": dvid})
         resolution = version.resolution or resolution
         utc_offset = version.fixed_utc_offset_minutes
-        data_file = db.execute(
-            select(DatasetFile)
-            .where(DatasetFile.dataset_version_id == dvid, DatasetFile.file_kind == "data")
-            .order_by(DatasetFile.id)
-        ).scalars().first()
-        if data_file is None:
+        data_object_id = worker_app.get_dataset_data_object(db, dvid)
+        if data_object_id is None:
             continue
-        raw = worker_app.load_dataset_blob(db, data_file.object_id)
+        raw = worker_app.load_dataset_blob(db, data_object_id)
         rows, diags = worker_app.parse_dataset_csv(raw, resolution)
         diags_dicts = [d.to_dict() for d in diags]
         diagnostics.extend(diags_dicts)
@@ -288,10 +284,10 @@ def run_task(
         终态状态: completed / failed / cancelled / lease_rejected。
     本函数负责提交事务(run_task 是尝试的单一事务边界)。
     """
-    task = db.get(Task, claim.task_id)
+    task = worker_app.get_task_record(db, claim.task_id)
     if task is None:
         raise SnapshotInputError("任务不存在", params={"task_id": claim.task_id})
-    snapshot = db.get(CalcSnapshot, task.calc_snapshot_id) if task.calc_snapshot_id else None
+    snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
     ctx = RunContext(
         db=db, task=task, claim=claim, worker_id=worker_id, isolate=isolate,
         stop_event=stop_event, snapshot=snapshot,
@@ -320,17 +316,14 @@ def run_task(
         return _handle_failure(db, ctx, claim, RuntimeError(f"内部错误: {exc}"))
 
 
-def _handle_cancel(db: Session, ctx: RunContext, claim: lease.Claim, task: Task, stage: str) -> str:
+def _handle_cancel(
+    db: Session, ctx: RunContext, claim: lease.Claim, task: worker_app.TaskRecord, stage: str,
+) -> str:
     """取消收拢(03 §6.1): 部分完成的批量子任务 → partial_batch。"""
     logger.info("任务取消: task=%s stage=%s", task.id, stage)
     outcome = None
     if task.type == "uncertainty":
-        from iesplan.models.uncertainty import SampleTask
-
-        completed = db.execute(
-            sa.select(sa.func.count()).select_from(SampleTask)
-            .where(SampleTask.parent_task_id == task.id, SampleTask.status == "completed")
-        ).scalar() or 0
+        completed = worker_app.count_completed_samples(db, task.id)
         if completed > 0:
             outcome = "partial_batch"
     try:
