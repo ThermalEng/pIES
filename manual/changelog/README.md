@@ -15,6 +15,24 @@
 
 ## Unreleased
 
+### 2026-09-13 — `0.8` 开发前，后端解耦纠偏完成
+
+**完成时间**：2026-09-13
+
+**版本进展**：补完 `fe3d83b` 审查指出的解耦偏离并合入 `master`；不改变产品版本，下一开发目标仍为 `0.8.0`。
+
+#### 更新了什么
+
+- application 对 `iesplan.services` 零导入；旧 `services` 包删除；application 无裸表/裸 SQL；Worker 不再调用 commit/rollback，完整任务尝试事务由 `application.worker` 用例拥有。
+- 各领域纵向收敛到唯一所有者：任务/结果/队列、项目/模型/包、配置/数据集、身份/审计的规则与 persistence 经领域公开门面消费，application 只做跨域编排与事务。
+- 计算未实现时显式返回结构化失败（`failed` + `TASK-SOLVE-001`），不再误判为 `lease_rejected`；`test_full_business_chain` 已按此拆分。
+- storage 不再反向依赖 audit，对象管理审计由 `application.objects` 用例在成功路径记录；幂等键正则收归 `iesplan.core.patterns`，API 的 `models.common` 豁免删除。
+- Docker 全量测试 1454 通过、零失败。
+
+#### 解决了什么问题
+
+- `fe3d83b` 时 application 直调旧 service、裸表穿透、Worker 持有事务、双实现并存、计算失败被租约错误遮蔽等偏离全部消除；`0.8` 计算只需实现新计算边界，不再穿透旧代码。
+
 ### 2026-09-11 — `0.6.5` 组装前置契约与装配输入口径
 
 **完成时间**：2026-09-11

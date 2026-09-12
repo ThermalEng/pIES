@@ -380,11 +380,10 @@ def provision_user(
         user_agent=user_agent,
         detail={"action": "grant", "role": "engineer", "granted_by": None},
     )
-    # 绑定外部主体(唯一约束; 冲突回滚并明确报错;
-    # flush 失败后会话不可继续, 调用方须回滚, 与旧 services 契约一致)
+    # 绑定外部主体(唯一约束; 冲突明确报错, 由调用方回滚;
+    # 域门面不拥有事务, 不调用 commit/rollback)
     try:
         user = persistence.bind_auth_subject(db, user.id, subject)
     except IdentityConflictError as exc:
-        db.rollback()
         raise ExternalAuthError(reason="subject_conflict") from exc
     return user

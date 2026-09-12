@@ -2,7 +2,8 @@
 
 - application.projects.archive 审计经 audit 域写入；
 - application.validations 基准确认写入与证据回读(经公开预检能力)；
-- storage put_object 的对象创建审计经 audit 域写入；
+- storage put_object 不再直接写审计（反向依赖已移除；对象管理审计由
+  application.objects 用例在成功路径记录）；
 - results 选中解读取经 audit 域（由切片 5 选中流程覆盖，此处直测读面）。
 运行环境与切片 8 一致：SQLite 内存库 + 临时 data_dir（对象存储）。
 """
@@ -98,8 +99,8 @@ def test_validation_confirm_and_evidence_through_domain(db: Session, data_dir: P
     assert "VALID-FIN-001" not in [d.code for d in report.diagnostics]
 
 
-def test_storage_put_object_audit_through_domain(db: Session, data_dir: Path) -> None:
+def test_storage_put_object_no_direct_audit(db: Session, data_dir: Path) -> None:
+    """存储层不直接写审计(反向依赖已移除); 需要审计的公开业务用例在成功路径记录。"""
     obj = put_object(db, b"{}", "application/json", source_category="test")
     rows = audit_domain.list_entries(db, entity_type="objects", entity_id=obj.id, action="object_created")
-    assert len(rows) == 1
-    assert rows[0].after["oid"] == obj.oid
+    assert rows == []
