@@ -17,6 +17,8 @@
 数据访问只经领域公开门面(tasks/project/dataset/audit/storage/identity/
 configuration, 含 tasks 域队列可重建视图); 不导入 ``models.*``。
 幂等键格式改接核心常量唯一权威(``iesplan.core.patterns.IDEMPOTENCY_KEY_RE``)。
+任务类型/状态机/业务结局映射与任务错误唯一权威归 tasks 域
+(``iesplan.tasks`` 门面), 本模块只做提交/幂等/快照/事务编排, 直接复用。
 快照固化时的版本内容规则(含财务/规划引用闭合)复制自
 ``services.project``(W2-A 项目用例落地后由协调者改接)。
 """
@@ -53,7 +55,6 @@ from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     SEVERITY_INFO,
     SYS_STORE_CORRUPT,
-    SYS_STORE_QUOTA_EXCEEDED,
     TASK_DATA_SNAPSHOT_MISSING,
     TASK_QUEUED,
 )
@@ -69,54 +70,24 @@ from iesplan.storage import (
     usage_summary,
 )
 from iesplan.tasks.contracts import (
+    COMPUTE_TYPES,
+    IO_SLOT_CAPACITY,
+    LEASE_TTL_SECONDS,
+    POOL_BY_TYPE,
+    TASK_TYPES,
+    TERMINAL_STATUSES,
     CalcSnapshotRecord,
+    CancelDeniedError,
     ComputeSlotRecord,
+    InvalidRequestError,
+    StorageQuotaError,
     TaskAttemptRecord,
     TaskRecord,
+    TaskStateError,
 )
 
-# ---------------------------------------------------------------------------
-# 常量: 任务类型 / 池 / 状态机(与 services.tasks 同值, 复制不改语义)
-# ---------------------------------------------------------------------------
-
-#: 全部任务类型
-TASK_TYPES: tuple[str, ...] = (
-    "calc",
-    "optimization",
-    "uncertainty",
-    "analysis",
-    "import",
-    "export",
-    "report",
-    "dataset_build",
-)
-#: 计算类任务(必须绑定 calc_snapshot_id)
-COMPUTE_TYPES: tuple[str, ...] = ("calc", "optimization", "uncertainty", "analysis")
-#: 任务类型 → 队列池
-POOL_BY_TYPE: dict[str, str] = {
-    "calc": "compute",
-    "optimization": "compute",
-    "uncertainty": "compute",
-    "analysis": "compute",
-    "report": "io",
-    "dataset_build": "io",
-    "export": "io",
-    "import": "io",
-}
-#: 终态(终态不可再迁移)
-TERMINAL_STATUSES: tuple[str, ...] = ("completed", "cancelled", "timed_out", "failed")
-#: 状态机合法迁移
-VALID_TRANSITIONS: dict[str, frozenset[str]] = {
-    "queued": frozenset({"running", "cancelled"}),
-    "running": frozenset({"completed", "cancelling", "queued", "timed_out", "failed"}),
-    # cancelling → cancelled 由 acknowledge_cancel 完成; → completed 为取消竞态
-    # 下先落终态者为准的异常路径
-    "cancelling": frozenset({"cancelled", "completed", "timed_out", "failed"}),
-}
-#: 租约 TTL(秒, 默认 60 s)
-LEASE_TTL_SECONDS = 60
-#: io 池默认并发槽
-IO_SLOT_CAPACITY = 2
+#: 任务类型/池/状态机/结局映射与任务错误唯一权威见 tasks 域
+#: (``iesplan.tasks`` 门面, 本模块顶层导入复用); 此处不复制。
 #: 逐时结果每行估算字节(~1 KB)
 _HOURLY_BYTES_PER_ROW = 1024
 #: 中间文件系数(默认 0.5)
@@ -125,65 +96,7 @@ _INTERMEDIATE_FACTOR = 0.5
 _EVIDENCE_FACTOR = 0.1
 #: 幂等键格式唯一权威见 core.patterns(顶层导入 _IDEMPOTENCY_KEY_RE)。
 
-#: 求解器状态 → 业务结局映射
-_SOLVER_OUTCOME: dict[str, str] = {
-    "OPTIMAL": "normal_completion",
-    "TIME_LIMIT_WITH_INCUMBENT": "restricted_results",
-    "NO_FEASIBLE_FOUND": "no_recommendation",
-    "INFEASIBLE_BY_IRR_FLOOR": "no_recommendation",
-    "BASE_INFEASIBLE": "no_recommendation",
-    "MODEL_AUDIT_FAIL": "insufficient_evidence",
-    "NO_PARETO_FEASIBLE": "no_feasible_multi_objective",
-    "PARTIAL_BATCH": "partial_batch",
-}
-
-
-def map_business_outcome(solver_status: str) -> str:
-    """求解器状态 → 业务结局(未知状态保守视为 normal_completion)。"""
-    return _SOLVER_OUTCOME.get(solver_status, "normal_completion")
-
 #: 项目所有者能力集唯一权威: iesplan.project.OWNER_CAPABILITIES(经 project_domain 取用, 此处不复制)。
-
-
-# ---------------------------------------------------------------------------
-# 错误类型(与 services.tasks 同 code/HTTP 状态, 复制不改语义)
-# ---------------------------------------------------------------------------
-
-
-class InvalidRequestError(AppError):
-    """请求/参数校验失败(HTTP 400)。"""
-
-    code = "TASK-REQ-001"
-    http_status = 400
-    severity = SEVERITY_ERROR
-    message_key = "ies.diag.param.invalid"
-
-
-class TaskStateError(AppError):
-    """任务状态机非法迁移(HTTP 409)。"""
-
-    code = "TASK-STATE-001"
-    http_status = 409
-    severity = SEVERITY_ERROR
-    message_key = "ies.diag.task.state_conflict"
-
-
-class CancelDeniedError(AppError):
-    """终态任务不可取消(HTTP 409)。"""
-
-    code = "TASK-CANCEL-001"
-    http_status = 409
-    severity = SEVERITY_ERROR
-    message_key = "ies.diag.task.cancel_denied"
-
-
-class StorageQuotaError(AppError):
-    """存储门禁未通过(HTTP 409; blocking 级 SYS-STORE-003)。"""
-
-    code = SYS_STORE_QUOTA_EXCEEDED
-    http_status = 409
-    severity = SEVERITY_BLOCKING
-    message_key = "ies.diag.store.quota_exceeded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -893,24 +806,6 @@ def _finish_attempt(
         )
     release_slot(db, attempt.id)
     return finished
-
-
-def _check_transition(task: TaskRecord, new_status: str) -> None:
-    """状态机校验: 终态不可迁移; 非法跳转抛 TaskStateError。"""
-    if task.status in TERMINAL_STATUSES:
-        raise TaskStateError(
-            "终态任务不可迁移状态",
-            code="TASK-STATE-002",
-            params={"task_id": task.id, "status": task.status},
-            location={"object_type": "task", "object_id": task.id},
-        )
-    if new_status not in VALID_TRANSITIONS.get(task.status, frozenset()):
-        raise TaskStateError(
-            "非法状态迁移",
-            code="TASK-STATE-003",
-            params={"task_id": task.id, "from": task.status, "to": new_status},
-            location={"object_type": "task", "object_id": task.id},
-        )
 
 
 # ---------------------------------------------------------------------------

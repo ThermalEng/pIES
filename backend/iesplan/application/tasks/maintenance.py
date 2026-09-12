@@ -35,7 +35,6 @@ from iesplan import audit as audit_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.audits import record_unlock_audit
-from iesplan.application.tasks.submissions import POOL_BY_TYPE
 from iesplan.core.diagnostics import SEVERITY_INFO
 from iesplan.storage import storage_stats as _storage_stats
 from iesplan.tasks.contracts import TaskRecord
@@ -130,7 +129,7 @@ def _unlock_task(db: Session, *, task_id: int, admin_id: int) -> dict[str, Any]:
     )
     clear_task_cancel(task_id)
     enqueue_task(
-        task_id, POOL_BY_TYPE.get(record.type, "compute"),
+        task_id, tasks_domain.POOL_BY_TYPE.get(record.type, "compute"),
         task_type=record.type, snapshot_id=record.calc_snapshot_id,
     )
     project_domain.record_maintenance_action(

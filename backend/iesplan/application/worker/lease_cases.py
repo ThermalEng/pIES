@@ -11,8 +11,9 @@
 - 租约失效错误 ``LeaseRejectedError`` 由本模块拥有(码 TASK-LEASE-001),
   worker 层仅复出, 不自建错误语义。
 
-``Claim`` / ``TaskStateError`` / ``LEASE_TTL_SECONDS`` 复用任务提交用例
-同名公开符号, worker 层经本模块取用, 不再直连 ``services.*`` 与 ``models.*``。
+任务类型/状态机/业务结局映射与任务错误唯一权威归 tasks 域
+(``iesplan.tasks`` 门面直接复用); ``Claim`` 提交结果类型仍由
+任务提交用例拥有, worker 层经本模块取用, 不再直连 ``services.*`` 与 ``models.*``。
 
 本模块不拥有事务(只经领域公开门面写入 + flush); 完整尝试事务的提交/
 回滚由同包 ``attempt_cases`` 用例拥有。
@@ -29,16 +30,7 @@ from sqlalchemy.orm import Session
 
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.tasks.submissions import (
-    IO_SLOT_CAPACITY,
-    LEASE_TTL_SECONDS,
-    POOL_BY_TYPE,
-    TERMINAL_STATUSES,
-    VALID_TRANSITIONS,
-    Claim,
-    TaskStateError,
-    map_business_outcome,
-)
+from iesplan.application.tasks.submissions import Claim
 from iesplan.config import settings
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
@@ -51,12 +43,17 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.storage import add_ref, put_object
 from iesplan.tasks import (
+    IO_SLOT_CAPACITY,
+    LEASE_TTL_SECONDS,
+    POOL_BY_TYPE,
     CalcSnapshotRecord,
     TaskAttemptRecord,
     TaskDiagnosticRecord,
     TaskLeaseRecord,
     TaskNotFoundError,
     TaskRecord,
+    check_transition,
+    map_business_outcome,
 )
 
 
@@ -82,24 +79,6 @@ def _get_task(db: Session, task_id: int) -> TaskRecord:
             location={"object_type": "task", "object_id": task_id},
         )
     return task
-
-
-def _check_transition(task: TaskRecord, new_status: str) -> None:
-    """状态机校验: 终态不可迁移; 非法跳转抛 TaskStateError。"""
-    if task.status in TERMINAL_STATUSES:
-        raise TaskStateError(
-            "终态任务不可迁移状态",
-            code="TASK-STATE-002",
-            params={"task_id": task.id, "status": task.status},
-            location={"object_type": "task", "object_id": task.id},
-        )
-    if new_status not in VALID_TRANSITIONS.get(task.status, frozenset()):
-        raise TaskStateError(
-            "非法状态迁移",
-            code="TASK-STATE-003",
-            params={"task_id": task.id, "from": task.status, "to": new_status},
-            location={"object_type": "task", "object_id": task.id},
-        )
 
 
 def _finish_attempt(
@@ -216,7 +195,7 @@ def complete_task(
     task = _get_task(db, task_id)
     if task.status == "completed":
         return task
-    _check_transition(task, "completed")
+    check_transition(task, "completed")
     if outcome is None:
         outcome = map_business_outcome(solver_status) if solver_status else "normal_completion"
     attempt = _finish_attempt(db, task, status="succeeded", stop_reason=None)
@@ -248,7 +227,7 @@ def fail_task(
     task = _get_task(db, task_id)
     if task.status == "failed":
         return task
-    _check_transition(task, "failed")
+    check_transition(task, "failed")
     if outcome is None:
         # 快照/数据校验失败 → insufficient_evidence
         outcome = (
