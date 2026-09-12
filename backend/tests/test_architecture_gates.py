@@ -464,8 +464,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     ("iesplan.services.tasks", "common"),  # 仅幂等键正则基元(无业务表)
     # (切片 5: services.tasks 改经领域门面, 移除 calc/dataset/identity/result/uncertainty)
     ("iesplan.services.validation", "audit"),
-    ("iesplan.services.validation", "dataset"),
-    ("iesplan.services.validation", "identity"),
+    # (切片 6: services.validation 经 dataset 域门面, 移除 dataset/identity)
     ("iesplan.services.results", "audit"),
     # (切片 5: services.results 经 results/tasks/project 域门面, 移除 calc/identity/result)
     # ---- project 域 repository 实现（切片 3；唯一允许访问 projects 系表的实现） ----
@@ -480,8 +479,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     ("iesplan.services.audit", "identity"),
     # (切片 4: services.dataset 经 dataset/identity/project 域 repository, 移除 3 项)
     ("iesplan.services.project", "audit"),
-    ("iesplan.services.project", "calc"),
-    ("iesplan.services.project", "identity"),
+    # (切片 6: services.project 经 tasks 域门面, 移除 calc/identity)
     # ---- worker ----
     ("iesplan.worker.lease", "calc"),
     ("iesplan.worker.lease", "result"),

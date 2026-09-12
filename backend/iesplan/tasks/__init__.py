@@ -27,8 +27,10 @@ acquire_lease = persistence.acquire_lease
 acquire_slot = persistence.acquire_slot
 append_diagnostic = persistence.append_diagnostic
 bind_slot_attempt = persistence.bind_slot_attempt
+cancel_pending_tasks = persistence.cancel_pending_tasks
 count_tasks_by_statuses = persistence.count_tasks_by_statuses
 create_attempt = persistence.create_attempt
+has_running_tasks = persistence.has_running_tasks
 create_sample_task = persistence.create_sample_task
 get_sample_task = persistence.get_sample_task
 create_snapshot = persistence.create_snapshot
@@ -80,8 +82,10 @@ __all__ = [
     "acquire_slot",
     "append_diagnostic",
     "bind_slot_attempt",
+    "cancel_pending_tasks",
     "count_tasks_by_statuses",
     "create_attempt",
+    "has_running_tasks",
     "create_sample_task",
     "create_snapshot",
     "create_task",

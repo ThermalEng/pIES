@@ -31,6 +31,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
 from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
@@ -43,9 +44,8 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 from iesplan.devices import get_device as get_device_type
+from iesplan.identity.contracts import UserRecord
 from iesplan.models.audit import AuditLog
-from iesplan.models.dataset import Dataset, DatasetVersion
-from iesplan.models.identity import User
 from iesplan.project.contracts import ProjectRecord
 from iesplan.services import config as config_service
 from iesplan.services import dataset as dataset_service
@@ -396,9 +396,9 @@ def _check_data(db: Session, project: ProjectRecord, diags: list[Diagnostic]) ->
         )
         return
     version_ids = [b["dataset_version_id"] for b in bindings if isinstance(b, dict)]
-    rows = db.scalars(select(DatasetVersion).where(DatasetVersion.id.in_(version_ids))).all()
-    by_id: dict[int, DatasetVersion] = {v.id: v for v in rows}
-    project_dataset_ids = set(db.scalars(select(Dataset.id).where(Dataset.project_id == project.id)).all())
+    rows = dataset_domain.list_versions_by_ids(db, version_ids)
+    by_id = {v.id: v for v in rows}
+    project_dataset_ids = set(dataset_domain.list_dataset_ids(db, project.id))
     for binding in bindings:
         if not isinstance(binding, dict) or not isinstance(binding.get("dataset_version_id"), int):
             continue  # 内容损坏的绑定条目由草稿内容校验负责, 不在此重复报
@@ -625,7 +625,7 @@ def _bad_assumptions(**params: Any) -> AppError:
 def mark_baseline_confirmed(
     db: Session,
     project_id: int,
-    user: User,
+    user: UserRecord,
     assumptions: dict | None = None,
 ) -> AuditLog:
     """记录财务基准确认(架构宪法 §16 安全与审计: 确认人/确认时间)。

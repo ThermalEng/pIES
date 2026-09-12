@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -353,6 +353,27 @@ def find_active_duplicate(
 def count_tasks_by_statuses(db: Session, statuses: Collection[str]) -> int:
     """按状态集合计数任务。"""
     return int(db.execute(select(func.count(Task.id)).where(Task.status.in_(statuses))).scalar() or 0)
+
+
+def cancel_pending_tasks(db: Session, project_id: int) -> int:
+    """取消项目排队/取消中任务（删除协调用）；返回取消行数。"""
+    result = db.execute(
+        update(Task)
+        .where(Task.project_id == project_id, Task.status.in_(("queued", "cancelling")))
+        .values(status="cancelled", updated_at=_now())
+    )
+    db.flush()
+    return int(result.rowcount or 0)
+
+
+def has_running_tasks(db: Session, project_id: int) -> bool:
+    """项目是否存在运行中任务（删除一致性检查用）。"""
+    return (
+        db.execute(
+            select(Task.id).where(Task.project_id == project_id, Task.status == "running").limit(1)
+        ).first()
+        is not None
+    )
 
 
 def list_child_tasks(db: Session, parent_task_id: int) -> list[TaskRecord]:

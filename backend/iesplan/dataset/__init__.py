@@ -23,9 +23,11 @@ get_dataset = persistence.get_dataset
 get_latest_version = persistence.get_latest_version
 get_version = persistence.get_version
 get_version_by_no = persistence.get_version_by_no
+list_dataset_ids = persistence.list_dataset_ids
 list_datasets = persistence.list_datasets
 list_files = persistence.list_files
 list_versions = persistence.list_versions
+list_versions_by_ids = persistence.list_versions_by_ids
 set_dataset_status = persistence.set_dataset_status
 
 __all__ = [
@@ -42,8 +44,10 @@ __all__ = [
     "get_latest_version",
     "get_version",
     "get_version_by_no",
+    "list_dataset_ids",
     "list_datasets",
     "list_files",
     "list_versions",
+    "list_versions_by_ids",
     "set_dataset_status",
 ]

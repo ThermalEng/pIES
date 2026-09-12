@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
 
@@ -146,6 +147,25 @@ def get_version(db: Session, version_id: int) -> DatasetVersionRecord | None:
     """按 id 取版本；不存在返回 None。"""
     row = db.get(DatasetVersion, version_id)
     return _row_to_version(row) if row is not None else None
+
+
+def list_versions_by_ids(db: Session, version_ids: Collection[int]) -> list[DatasetVersionRecord]:
+    """按 id 批量取版本；空输入返回空清单（绑定校验用）。"""
+    if not version_ids:
+        return []
+    rows = (
+        db.execute(select(DatasetVersion).where(DatasetVersion.id.in_(version_ids))).scalars().all()
+    )
+    return [_row_to_version(row) for row in rows]
+
+
+def list_dataset_ids(db: Session, project_id: int) -> list[int]:
+    """项目自有数据集 id（严格归属，不含共享数据集；绑定归属校验用）。"""
+    return list(
+        db.execute(
+            select(Dataset.id).where(Dataset.project_id == project_id).order_by(Dataset.id)
+        ).scalars()
+    )
 
 
 def list_versions(db: Session, dataset_id: int) -> list[DatasetVersionRecord]:

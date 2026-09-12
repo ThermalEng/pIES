@@ -22,20 +22,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan import project as project_domain
+from iesplan import tasks as tasks_domain
 from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
 from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.jsonutil import canonical_json, jsonable
+from iesplan.identity.contracts import UserRecord
 from iesplan.models.audit import AuditLog
-from iesplan.models.calc import Task
-from iesplan.models.identity import User
 from iesplan.project.contracts import (
     DraftRecord,
     ProjectConflictError,
@@ -70,7 +68,7 @@ OWNER_CAPABILITIES: frozenset[str] = frozenset(
 )
 
 
-def get_role(db: Session, user: User, project_id: int) -> str | None:
+def get_role(db: Session, user: UserRecord, project_id: int) -> str | None:
     """返回用户在项目中的角色: 'owner'(项目所有者) | None(非所有者)。
 
     项目权限以 owner_id 为唯一权威，非所有者无项目访问能力（管理员除外，见 ensure_access；依据 domain-model §身份、权限和审计、架构宪法 §16）。
@@ -81,14 +79,14 @@ def get_role(db: Session, user: User, project_id: int) -> str | None:
     return "owner" if project.owner_id == user.id else None
 
 
-def _is_admin(db: Session, user: User) -> bool:
+def _is_admin(db: Session, user: UserRecord) -> bool:
     """用户是否持有全局 admin 角色(委托 identity 的权威判定)。"""
     from iesplan.services import identity
 
     return identity.has_role(db, user, "admin")
 
 
-def ensure_access(db: Session, user: User, project_id: int, *capabilities: str) -> None:
+def ensure_access(db: Session, user: UserRecord, project_id: int, *capabilities: str) -> None:
     """访问判定(架构宪法 §16、domain-model §身份、权限和审计)：用户必须同时具备全部请求能力，否则 ForbiddenError。
 
     - 仅项目所有者具备全部业务能力;
@@ -117,7 +115,7 @@ def ensure_access(db: Session, user: User, project_id: int, *capabilities: str) 
 
 def create_project(
     db: Session,
-    user: User,
+    user: UserRecord,
     name: str,
     currency: str = "CNY",
     *,
@@ -200,7 +198,7 @@ def create_project(
     return project
 
 
-def get_project_view(db: Session, user: User, project_id: int) -> dict:
+def get_project_view(db: Session, user: UserRecord, project_id: int) -> dict:
     """项目视图: 项目 + 草稿摘要(含内容) + 版本列表(domain-model §项目聚合)。"""
     ensure_access(db, user, project_id, "view")
     project = _get_project(db, project_id)
@@ -216,7 +214,7 @@ def get_project_view(db: Session, user: User, project_id: int) -> dict:
     }
 
 
-def list_visible_projects(db: Session, user: User, status: str | None = None) -> list[dict]:
+def list_visible_projects(db: Session, user: UserRecord, status: str | None = None) -> list[dict]:
     """我的项目列表(仅所有者, 不含已删除; 支持按状态筛选)。
 
     项目只属于所有者；共享通过项目包导出/导入完成（domain-model §项目聚合/§对象生命周期）。
@@ -252,7 +250,7 @@ def project_count_by_owner(db: Session, owner_ids: Sequence[int]) -> dict[int, i
     return project_domain.count_projects_by_owner(db, owner_ids)
 
 
-def archive_project(db: Session, user: User, project_id: int) -> ProjectRecord:
+def archive_project(db: Session, user: UserRecord, project_id: int) -> ProjectRecord:
     """归档项目(归档后不可编辑/提交计算, 只读，domain-model §项目聚合)。"""
     ensure_access(db, user, project_id, "manage_lifecycle")
     project = _get_project(db, project_id)
@@ -262,7 +260,7 @@ def archive_project(db: Session, user: User, project_id: int) -> ProjectRecord:
     return project
 
 
-def unarchive_project(db: Session, user: User, project_id: int) -> ProjectRecord:
+def unarchive_project(db: Session, user: UserRecord, project_id: int) -> ProjectRecord:
     """撤销归档(恢复为 active，domain-model §项目聚合)。"""
     ensure_access(db, user, project_id, "manage_lifecycle")
     project = _get_project(db, project_id)
@@ -274,7 +272,7 @@ def unarchive_project(db: Session, user: User, project_id: int) -> ProjectRecord
 
 def delete_project(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     confirm: bool = False,
     name: str | None = None,
@@ -309,26 +307,10 @@ def delete_project(
             code="PROJ-DEL-003",
             params={"project_id": project_id},
         )
-    now = datetime.now(UTC)
-    # 取消排队/取消中的任务(删除协调；tasks 表归属 tasks 域，切片 5 收敛)
-    cancellable = (
-        db.execute(
-            select(Task).where(
-                Task.project_id == project_id,
-                Task.status.in_(("queued", "cancelling")),
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for task in cancellable:
-        task.status = "cancelled"
-        task.updated_at = now
+    # 取消排队/取消中的任务(删除协调；tasks 表归属 tasks 域)
+    tasks_domain.cancel_pending_tasks(db, project_id)
     # 一致性检查: 运行中任务阻断删除
-    running = db.execute(
-        select(Task.id).where(Task.project_id == project_id, Task.status == "running").limit(1)
-    ).first()
-    if running is not None:
+    if tasks_domain.has_running_tasks(db, project_id):
         raise ConflictError("项目存在运行中的计算任务, 无法删除", params={"project_id": project_id})
     # 置 deleted(软删，无回收站语义)
     project_domain.set_project_status(db, project_id, "deleted")
@@ -356,7 +338,7 @@ _COMMAND_HANDLERS: dict[str, Any] = {}
 
 def update_draft(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     commands: list[dict],
     expected_revision: int,
@@ -678,7 +660,7 @@ def _deep_merge(base: dict, patch: dict) -> None:
 
 def create_version(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     name: str,
     description: str | None = None,
@@ -782,7 +764,7 @@ def list_versions(db: Session, project_id: int) -> list[ProjectVersionRecord]:
 
 def restore_version(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     version_id: int,
     name: str | None = None,
@@ -838,7 +820,7 @@ def restore_version(
 
 def apply_result(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     diff_patch: dict,
     *,
@@ -1037,7 +1019,7 @@ def get_current_draft(db: Session, project: ProjectRecord) -> DraftRecord:
 
 def replace_project_model_refs(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     expected_revision: int,
     refs: list[dict[str, object]],
