@@ -32,6 +32,7 @@ from iesplan.application.configuration.revisions import (
     save_planning_config as _save_planning_config,
     set_project_finance_profile as _set_project_finance_profile,
 )
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.application.projects.content_objects import (
     load_content_object as _load_content_object,
     store_content_object as _store_content_object,
@@ -446,7 +447,7 @@ def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExp
 
     包内不含: 账号/权限与查看者名单/会话/全局系统配置/部署环境密钥。
     """
-    project_domain.ensure_access(db, user, project_id, "export_package")
+    ensure_access(db, user, project_id, "export_package")
     project = project_domain.require_project(db, project_id)
     draft = project_domain.require_current_draft(db, project)
     draft_content = _load_content_object(db, draft.content_object_id)
@@ -1147,7 +1148,7 @@ def export_excel(
       适用范围与限制;
     - 注明适用单位与数据来源(数据集版本/溯源/许可证/内容校验值)。
     """
-    project_domain.ensure_access(db, user, project_id, "export_excel")
+    ensure_access(db, user, project_id, "export_excel")
     project = project_domain.require_project(db, project_id)
     evidence = results_domain.get_evidence(db, evidence_package_id)
     if evidence is None:

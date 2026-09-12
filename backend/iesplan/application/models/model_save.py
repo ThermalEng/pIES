@@ -27,6 +27,7 @@ from iesplan import model as model_domain
 from iesplan import project as project_domain
 from iesplan.application.model_templates import resolve_template_revision
 from iesplan.application.projects import versions as project_versions
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     Diagnostic,
@@ -286,7 +287,7 @@ def validate_candidate(
     权威规范字节, 不信任客户端自带的模板字节); 未携带模板引用时为旧契约
     路径(model_yaml 即模板 YAML, 校验用, 正式保存仍以权威内容为准)。文本文件只校验字头。
     """
-    project_domain.ensure_access(db, user, project_id, "view")
+    ensure_access(db, user, project_id, "view")
     project_domain.require_project(db, project_id)
     if source not in (MODEL_SOURCE_DIRECT, MODEL_SOURCE_TEMPLATE):
         return CandidateValidation(
@@ -455,7 +456,7 @@ def _save_project_model(
     保存用例。返回 ``{project_model, receipt, project_revision, duplicate}``;
     公共 application 用例拥有提交/回滚边界。文本文件只校验字头。
     """
-    project_domain.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     project = project_domain.get_project(db, project_id)
     if project is None or project.status == "deleted":
         raise NotFoundError(
@@ -676,7 +677,7 @@ def _delete_project_model(
     - 对象解除引用后进入 orphaned, 由存储运维 safe_cleanup/purge 物理回收;
     - 编号计数器不回落: 之后保存的新模型取得更大的 _N, 已删除编号不复用。
     """
-    project_domain.ensure_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     model = _get_project_model(db, project_id, model_id)
     refs = find_refs_by_owner(db, FINAL_OWNER_NAMESPACE, model.id, FINAL_OWNER_NAMESPACE)
     for ref in refs:
@@ -736,7 +737,7 @@ def delete_project_model(
 
 def get_project_models(db: Session, user, project_id: int) -> list[dict]:
     """项目模型清单(最新在前; 编号对用户可见, 不存在"不可见已占编号")。"""
-    project_domain.ensure_access(db, user, project_id, "view")
+    ensure_access(db, user, project_id, "view")
     rows = model_domain.list_project_models(db, project_id, newest_first=True)
     return [project_model_to_dict(m) for m in rows]
 
