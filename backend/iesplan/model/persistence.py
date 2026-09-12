@@ -13,7 +13,7 @@ from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,9 +23,16 @@ from iesplan.model.contracts import (
     GraphRecord,
     ModelConflictError,
     ModelNotFoundError,
+    ModelTemplateRecord,
+    ModelTemplateRevisionRecord,
     PortRecord,
+    ProjectModelRecord,
+    TemplateDraftRevisionRecord,
 )
+from iesplan.models.draft_revision import ModelTemplateDraftRevision
 from iesplan.models.model import Connection, Device, Port, SystemGraph
+from iesplan.models.model_template import ModelTemplate, ModelTemplateRevision
+from iesplan.models.project_model import ProjectModel
 
 
 def _now() -> datetime:
@@ -420,3 +427,457 @@ def delete_connection(db: Session, conn_id: int) -> None:
         raise ModelNotFoundError("连接不存在", params={"connection_id": conn_id})
     db.delete(row)
     db.flush()
+
+
+# ---------------------------------------------------------------------------
+# 模板主表
+# ---------------------------------------------------------------------------
+
+
+def _row_to_template(row: ModelTemplate) -> ModelTemplateRecord:
+    return ModelTemplateRecord(
+        id=row.id,
+        template_id=row.template_id,
+        owner_id=row.owner_id,
+        status=row.status,
+        description=row.description,
+        slug=row.slug,
+        public_namespace=row.public_namespace,
+        draft_yaml_object_id=row.draft_yaml_object_id,
+        draft_diagnostics_object_id=row.draft_diagnostics_object_id,
+        draft_has_inputs=row.draft_has_inputs,
+        draft_revision=row.draft_revision,
+        draft_updated_at=_iso(row.draft_updated_at),
+        current_draft_revision_id=row.current_draft_revision_id,
+        current_published_revision_id=row.current_published_revision_id,
+        published_revision=row.published_revision,
+        published_at=_iso(row.published_at),
+        created_at=_iso(row.created_at),
+        updated_at=_iso(row.updated_at),
+    )
+
+
+def _row_to_template_revision(row: ModelTemplateRevision) -> ModelTemplateRevisionRecord:
+    return ModelTemplateRevisionRecord(
+        id=row.id,
+        template_id=row.template_id,
+        revision=row.revision,
+        schema_version=row.schema_version,
+        input_count=row.input_count,
+        diagnostics_object_id=row.diagnostics_object_id,
+        idempotency_key=row.idempotency_key,
+        yaml_object_id=row.yaml_object_id,
+        receipt_object_id=row.receipt_object_id,
+        summary_object_id=row.summary_object_id,
+        published_by=row.published_by,
+        published_at=_iso(row.published_at),
+    )
+
+
+def _row_to_draft_revision(row: ModelTemplateDraftRevision) -> TemplateDraftRevisionRecord:
+    return TemplateDraftRevisionRecord(
+        id=row.id,
+        entry_id=row.entry_id,
+        revision=row.revision,
+        yaml_object_id=row.yaml_object_id,
+        source=row.source,
+        created_by=row.created_by,
+        created_at=_iso(row.created_at),
+        diagnostics_object_id=row.diagnostics_object_id,
+    )
+
+
+def _row_to_project_model(row: ProjectModel) -> ProjectModelRecord:
+    return ProjectModelRecord(
+        id=row.id,
+        project_id=row.project_id,
+        suffix=row.suffix,
+        base_device_id=row.base_device_id,
+        device_id=row.device_id,
+        revision=row.revision,
+        project_revision=row.project_revision,
+        model_object_id=row.model_object_id,
+        receipt_object_id=row.receipt_object_id,
+        source=row.source,
+        template_id=row.template_id,
+        template_revision=row.template_revision,
+        idempotency_key=row.idempotency_key,
+        created_by=row.created_by,
+        created_at=_iso(row.created_at),
+    )
+
+
+def get_owned_template(db: Session, owner_id: int, template_id: str) -> ModelTemplateRecord | None:
+    """按稳定模板 ID 取当前用户的模板；无/非属返回 None。"""
+    row = db.execute(
+        select(ModelTemplate).where(
+            ModelTemplate.owner_id == owner_id,
+            ModelTemplate.template_id == template_id,
+        )
+    ).scalar_one_or_none()
+    return _row_to_template(row) if row is not None else None
+
+
+def list_owned_templates(db: Session, owner_id: int) -> list[ModelTemplateRecord]:
+    """当前用户模板（更新时间降序，id 降序）。"""
+    rows = (
+        db.execute(
+            select(ModelTemplate)
+            .where(ModelTemplate.owner_id == owner_id)
+            .order_by(ModelTemplate.updated_at.desc(), ModelTemplate.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return [_row_to_template(row) for row in rows]
+
+
+def list_owned_templates_by_status(
+    db: Session, owner_id: int, status: str
+) -> list[ModelTemplateRecord]:
+    """当前用户指定状态模板（更新时间降序，id 降序）。"""
+    rows = (
+        db.execute(
+            select(ModelTemplate)
+            .where(ModelTemplate.owner_id == owner_id, ModelTemplate.status == status)
+            .order_by(ModelTemplate.updated_at.desc(), ModelTemplate.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return [_row_to_template(row) for row in rows]
+
+
+def create_template(
+    db: Session,
+    *,
+    template_id: str,
+    slug: str,
+    public_namespace: str,
+    owner_id: int,
+    status: str,
+    description: str | None,
+    draft_yaml_object_id: int,
+    draft_has_inputs: bool,
+    draft_revision: int,
+    draft_updated_at: Any,
+) -> ModelTemplateRecord:
+    """创建模板主表行；稳定 ID/用户 slug 冲突抛 ModelConflictError。"""
+    row = ModelTemplate(
+        template_id=template_id,
+        slug=slug,
+        public_namespace=public_namespace,
+        owner_id=owner_id,
+        status=status,
+        description=description,
+        draft_yaml_object_id=draft_yaml_object_id,
+        draft_has_inputs=draft_has_inputs,
+        draft_revision=draft_revision,
+        draft_updated_at=draft_updated_at,
+        published_revision=0,
+    )
+    try:
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError as exc:
+        raise ModelConflictError(
+            "模板已存在(同一用户模板 ID 唯一)",
+            params={"template_id": template_id},
+        ) from exc
+    return _row_to_template(row)
+
+
+def update_template(db: Session, template_row_id: int, **fields: Any) -> ModelTemplateRecord:
+    """更新模板主表字段（仅提供字段）并返回新视图；缺失抛 ModelNotFoundError。"""
+    row = db.get(ModelTemplate, template_row_id)
+    if row is None:
+        raise ModelNotFoundError("模板不存在", params={"template_row_id": template_row_id})
+    for name, value in fields.items():
+        setattr(row, name, value)
+    db.flush()
+    return _row_to_template(row)
+
+
+def delete_template(db: Session, template_row_id: int) -> None:
+    """硬删除模板主表行；缺失抛 ModelNotFoundError。"""
+    row = db.get(ModelTemplate, template_row_id)
+    if row is None:
+        raise ModelNotFoundError("模板不存在", params={"template_row_id": template_row_id})
+    db.delete(row)
+    db.flush()
+
+
+# ---------------------------------------------------------------------------
+# 模板草稿/发布 revision
+# ---------------------------------------------------------------------------
+
+
+def create_draft_revision(
+    db: Session,
+    *,
+    entry_id: int,
+    revision: int,
+    yaml_object_id: int,
+    source: str,
+    created_by: int,
+    diagnostics_object_id: int | None,
+) -> TemplateDraftRevisionRecord:
+    """新增不可变草稿 revision 行；冲突抛 ModelConflictError。"""
+    row = ModelTemplateDraftRevision(
+        entry_id=entry_id,
+        revision=revision,
+        yaml_object_id=yaml_object_id,
+        source=source,
+        created_by=created_by,
+        diagnostics_object_id=diagnostics_object_id,
+    )
+    try:
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError as exc:
+        raise ModelConflictError(
+            "草稿 revision 冲突",
+            params={"entry_id": entry_id, "revision": revision},
+        ) from exc
+    return _row_to_draft_revision(row)
+
+
+def list_draft_revisions(db: Session, entry_id: int) -> list[TemplateDraftRevisionRecord]:
+    """模板草稿 revision 历史（revision 升序）。"""
+    rows = (
+        db.execute(
+            select(ModelTemplateDraftRevision)
+            .where(ModelTemplateDraftRevision.entry_id == entry_id)
+            .order_by(ModelTemplateDraftRevision.revision)
+        )
+        .scalars()
+        .all()
+    )
+    return [_row_to_draft_revision(row) for row in rows]
+
+
+def get_draft_revision(
+    db: Session, entry_id: int, revision: int
+) -> TemplateDraftRevisionRecord | None:
+    """取精确草稿 revision；无返回 None。"""
+    row = db.execute(
+        select(ModelTemplateDraftRevision).where(
+            ModelTemplateDraftRevision.entry_id == entry_id,
+            ModelTemplateDraftRevision.revision == revision,
+        )
+    ).scalar_one_or_none()
+    return _row_to_draft_revision(row) if row is not None else None
+
+
+def get_published_revision(
+    db: Session, template_row_id: int, revision: int
+) -> ModelTemplateRevisionRecord | None:
+    """取精确发布 revision；无返回 None。"""
+    row = db.execute(
+        select(ModelTemplateRevision).where(
+            ModelTemplateRevision.template_id == template_row_id,
+            ModelTemplateRevision.revision == revision,
+        )
+    ).scalar_one_or_none()
+    return _row_to_template_revision(row) if row is not None else None
+
+
+def find_revision_by_idempotency(
+    db: Session, template_row_id: int, idempotency_key: str
+) -> ModelTemplateRevisionRecord | None:
+    """按幂等键取发布 revision（重放用）；无返回 None。"""
+    row = db.execute(
+        select(ModelTemplateRevision).where(
+            ModelTemplateRevision.template_id == template_row_id,
+            ModelTemplateRevision.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
+    return _row_to_template_revision(row) if row is not None else None
+
+
+def create_published_revision(
+    db: Session,
+    *,
+    template_row_id: int,
+    revision: int,
+    schema_version: str,
+    input_count: int,
+    yaml_object_id: int,
+    receipt_object_id: int,
+    summary_object_id: int,
+    diagnostics_object_id: int | None,
+    idempotency_key: str | None,
+    published_by: int,
+) -> ModelTemplateRevisionRecord:
+    """新增不可变发布 revision 行；冲突抛 ModelConflictError。"""
+    row = ModelTemplateRevision(
+        template_id=template_row_id,
+        revision=revision,
+        schema_version=schema_version,
+        input_count=input_count,
+        yaml_object_id=yaml_object_id,
+        receipt_object_id=receipt_object_id,
+        summary_object_id=summary_object_id,
+        diagnostics_object_id=diagnostics_object_id,
+        idempotency_key=idempotency_key,
+        published_by=published_by,
+    )
+    try:
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError as exc:
+        raise ModelConflictError(
+            "模板发布冲突(并发)",
+            params={"template_row_id": template_row_id, "revision": revision},
+        ) from exc
+    return _row_to_template_revision(row)
+
+
+# ---------------------------------------------------------------------------
+# 项目模型清单
+# ---------------------------------------------------------------------------
+
+
+def get_project_model(db: Session, model_id: int) -> ProjectModelRecord | None:
+    """按主键取清单行；不存在返回 None。"""
+    row = db.get(ProjectModel, model_id)
+    return _row_to_project_model(row) if row is not None else None
+
+
+def find_project_model_by_idempotency(
+    db: Session, project_id: int, idempotency_key: str
+) -> ProjectModelRecord | None:
+    """按幂等键取清单行（重放用）；无返回 None。"""
+    row = db.execute(
+        select(ProjectModel).where(
+            ProjectModel.project_id == project_id,
+            ProjectModel.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
+    return _row_to_project_model(row) if row is not None else None
+
+
+def create_project_model(
+    db: Session,
+    *,
+    project_id: int,
+    suffix: int,
+    base_device_id: str,
+    device_id: str,
+    project_revision: int,
+    model_object_id: int,
+    receipt_object_id: int,
+    source: str,
+    template_id: str | None,
+    template_revision: int | None,
+    idempotency_key: str | None,
+    created_by: int,
+) -> ProjectModelRecord:
+    """新增清单行；编号/最终 ID 冲突抛 ModelConflictError。"""
+    row = ProjectModel(
+        project_id=project_id,
+        suffix=suffix,
+        base_device_id=base_device_id,
+        device_id=device_id,
+        revision=1,
+        project_revision=project_revision,
+        model_object_id=model_object_id,
+        receipt_object_id=receipt_object_id,
+        source=source,
+        template_id=template_id,
+        template_revision=template_revision,
+        idempotency_key=idempotency_key,
+        created_by=created_by,
+    )
+    try:
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError as exc:
+        raise ModelConflictError(
+            "项目模型保存冲突(编号或最终 ID 唯一性)",
+            params={"project_id": project_id, "device_id": device_id},
+        ) from exc
+    return _row_to_project_model(row)
+
+
+def update_project_model(db: Session, model_id: int, **fields: Any) -> ProjectModelRecord:
+    """更新清单行字段（仅提供字段）并返回新视图；缺失抛 ModelNotFoundError。"""
+    row = db.get(ProjectModel, model_id)
+    if row is None:
+        raise ModelNotFoundError("项目模型不存在", params={"model_id": model_id})
+    for name, value in fields.items():
+        setattr(row, name, value)
+    db.flush()
+    return _row_to_project_model(row)
+
+
+def delete_project_model(db: Session, model_id: int) -> ProjectModelRecord:
+    """硬删除清单行并返回删除前视图；缺失抛 ModelNotFoundError。"""
+    row = db.get(ProjectModel, model_id)
+    if row is None:
+        raise ModelNotFoundError("项目模型不存在", params={"model_id": model_id})
+    snapshot = _row_to_project_model(row)
+    db.delete(row)
+    db.flush()
+    return snapshot
+
+
+def list_project_models(
+    db: Session, project_id: int, *, newest_first: bool = False
+) -> list[ProjectModelRecord]:
+    """项目清单行（默认编号升序；newest_first 时编号降序）。"""
+    order = (
+        (ProjectModel.suffix.desc(), ProjectModel.id.desc())
+        if newest_first
+        else (ProjectModel.suffix, ProjectModel.id)
+    )
+    rows = (
+        db.execute(
+            select(ProjectModel).where(ProjectModel.project_id == project_id).order_by(*order)
+        )
+        .scalars()
+        .all()
+    )
+    return [_row_to_project_model(row) for row in rows]
+
+
+def allocate_project_model_suffix(db: Session, project_id: int) -> int:
+    """项目内分配下一个 _N 编号（只递增、删除不复用）。
+
+    ``UPDATE ... RETURNING`` 在数据库内原子完成（PostgreSQL 行锁 +
+    SQLite 写锁串行化）；计数器行缺失时以 savepoint 插入并重查；
+    重试耗尽抛 ModelConflictError（即 ConflictError，由调用方决定重试）。
+    """
+
+    for _attempt in range(3):
+        row = db.execute(
+            text(
+                "UPDATE project_model_sequences SET next_suffix = next_suffix + 1 "
+                "WHERE project_id = :pid RETURNING next_suffix - 1"
+            ),
+            {"pid": project_id},
+        ).first()
+        if row is not None:
+            return int(row[0])
+        try:
+            with db.begin_nested():  # 只回滚嵌套 savepoint, 不触调用方外层事务
+                db.execute(
+                    text(
+                        "INSERT INTO project_model_sequences (project_id, next_suffix) "
+                        "VALUES (:pid, 2)"
+                    ),
+                    {"pid": project_id},
+                )
+                db.flush()
+            return 1
+        except IntegrityError:
+            continue  # 并发竞争者已插入计数器行: 下一轮 UPDATE 原子重试
+    raise ModelConflictError(
+        "项目模型编号分配失败(并发冲突), 请重试",
+        params={"project_id": project_id},
+        location={"object_type": "project_model", "project_id": str(project_id)},
+    )

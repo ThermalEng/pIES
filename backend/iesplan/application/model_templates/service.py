@@ -25,10 +25,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
+from iesplan import model as model_domain
 from iesplan.core.diagnostics import SEVERITY_ERROR, Diagnostic, make_diag
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.namespace import (
@@ -46,13 +46,13 @@ from iesplan.devices import (
     canonical_receipt,
     parse_device_model_v2,
 )
-from iesplan.models.audit import AuditLog
-from iesplan.models.model_template import (
+from iesplan.model import (
     TEMPLATE_STATUS_DISABLED,
     TEMPLATE_STATUS_DRAFT,
     TEMPLATE_STATUS_PUBLISHED,
-    ModelTemplate,
-    ModelTemplateRevision,
+    ModelConflictError,
+    ModelTemplateRecord,
+    ModelTemplateRevisionRecord,
 )
 from iesplan.storage import (
     ReferenceNotFoundError,
@@ -315,42 +315,37 @@ def _build_summary(document: DeviceModelDocument) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _get_owned_template(db: Session, user, template_id: str) -> ModelTemplate:
+def _get_owned_template(db: Session, user, template_id: str) -> ModelTemplateRecord:
     """按模板 ID 读取当前用户的模板(不存在或不属于 → 404)。"""
-    row = db.execute(
-        sa.select(ModelTemplate).where(
-            ModelTemplate.owner_id == user.id,
-            ModelTemplate.template_id == template_id,
-        )
-    ).scalar_one_or_none()
-    if row is None:
+    record = model_domain.get_owned_template(db, user.id, template_id)
+    if record is None:
         raise TemplateNotFoundError(
             "模板不存在",
             params={"template_id": template_id},
             location={"object_type": "model_template", "template_id": template_id},
         )
-    return row
+    return record
 
 
-def _template_to_dict(template: ModelTemplate) -> dict[str, Any]:
+def _template_to_dict(template: ModelTemplateRecord) -> dict[str, Any]:
     """模板主表行 → 公开视图。"""
     return {
         "id": str(template.id),
         "template_id": template.template_id,
-        "slug": getattr(template, "slug", None),
-        "public_namespace": getattr(template, "public_namespace", None),
+        "slug": template.slug,
+        "public_namespace": template.public_namespace,
         "status": template.status,
         "description": template.description,
         "draft_revision": template.draft_revision,
         "draft_has_inputs": template.draft_has_inputs,
         "published_revision": template.published_revision,
-        "published_at": template.published_at.isoformat() if template.published_at else None,
-        "created_at": template.created_at.isoformat() if template.created_at else None,
-        "updated_at": template.updated_at.isoformat() if template.updated_at else None,
+        "published_at": template.published_at,
+        "created_at": template.created_at,
+        "updated_at": template.updated_at,
     }
 
 
-def _revision_to_dict(revision: ModelTemplateRevision) -> dict[str, Any]:
+def _revision_to_dict(revision: ModelTemplateRevisionRecord) -> dict[str, Any]:
     """发布 revision 行 → 公开视图(精确 revision)。文本文件只校验字头。"""
     return {
         "id": str(revision.id),
@@ -361,7 +356,7 @@ def _revision_to_dict(revision: ModelTemplateRevision) -> dict[str, Any]:
         "receipt_object_id": str(revision.receipt_object_id),
         "summary_object_id": str(revision.summary_object_id),
         "published_by": str(revision.published_by),
-        "published_at": revision.published_at.isoformat() if revision.published_at else None,
+        "published_at": revision.published_at,
     }
 
 
@@ -500,53 +495,55 @@ def _save_draft(
     handle = put_object(db, validation.canonical_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
                         source_category="model_template_draft")
     old_diags = template.draft_diagnostics_object_id
-    template.draft_yaml_object_id = handle.id
-    template.draft_has_inputs = validation.has_inputs
-    template.draft_revision += 1
-    template.draft_updated_at = datetime.now(UTC)
-    template.draft_diagnostics_object_id = None
+    new_revision = template.draft_revision + 1
+    fields: dict[str, Any] = {
+        "draft_yaml_object_id": handle.id,
+        "draft_has_inputs": validation.has_inputs,
+        "draft_revision": new_revision,
+        "draft_updated_at": datetime.now(UTC),
+        "draft_diagnostics_object_id": None,
+    }
     if description is not None:
-        template.description = description
+        fields["description"] = description
+    template = model_domain.update_template(db, template.id, **fields)
     attach(db, handle.id, TEMPLATE_OWNER_NAMESPACE, template.id,
            ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_yaml")
     # 旧 revision 不覆盖、不 detach（不可变草稿历史，任务书 §四）
     # 仅当需要清理时由存储运维处理，不在保存时 detach
     # 新增不可变草稿 revision 行
-    from iesplan.models.draft_revision import ModelTemplateDraftRevision as _DraftRev
     diag_handle2 = _put_json(db, [], "model_template_draft_diagnostics")
-    draft_rev = _DraftRev(
+    draft_rev = model_domain.create_draft_revision(
+        db,
         entry_id=template.id,
-        revision=template.draft_revision,
+        revision=new_revision,
         yaml_object_id=handle.id,
         source="yaml_editor",
         created_by=user.id,
         diagnostics_object_id=diag_handle2.id,
     )
-    db.add(draft_rev)
-    db.flush()
     attach(db, diag_handle2.id, TEMPLATE_OWNER_NAMESPACE, template.id,
            ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_revision")
-    template.current_draft_revision_id = draft_rev.id
+    template = model_domain.update_template(
+        db, template.id, current_draft_revision_id=draft_rev.id
+    )
     if old_diags is not None:
         try:
             detach(db, old_diags, TEMPLATE_OWNER_NAMESPACE, template.id,
                    ref_entity_type=TEMPLATE_OWNER_NAMESPACE)
         except ReferenceNotFoundError:
             pass
-    db.add(
-        AuditLog(
-            entity_type="model_template",
-            entity_id=template.id,
-            action="model_template.draft_saved",
-            actor_id=user.id,
-            actor_type="user",
-            after={
-                "template_id": template.template_id,
-                "draft_revision": template.draft_revision,
-            },
-        )
+    audit_domain.append_entry(
+        db,
+        entity_type="model_template",
+        entity_id=template.id,
+        action="model_template.draft_saved",
+        actor_id=user.id,
+        actor_type="user",
+        extra={
+            "template_id": template.template_id,
+            "draft_revision": template.draft_revision,
+        },
     )
-    db.flush()
     return _template_to_dict(template)
 
 
@@ -607,7 +604,8 @@ def create_template_draft(
     handle = put_object(db, validation.canonical_text.encode("utf-8"), TEMPLATE_MEDIA_TYPE,
                         source_category="model_template_draft")
     try:
-        template = ModelTemplate(
+        template = model_domain.create_template(
+            db,
             template_id=template_id,
             slug=slug,
             public_namespace=namespace,
@@ -618,11 +616,8 @@ def create_template_draft(
             draft_has_inputs=validation.has_inputs,
             draft_revision=1,
             draft_updated_at=datetime.now(UTC),
-            published_revision=0,
         )
-        db.add(template)
-        db.flush()
-    except IntegrityError as exc:
+    except ModelConflictError as exc:
         # 事务整体回滚; 已写盘对象未建立 owner 引用, 进入孤儿生命周期
         # 由存储运维 safe_cleanup/purge 回收(与 model_save 冲突路径同模式)
         db.rollback()
@@ -634,9 +629,9 @@ def create_template_draft(
     attach(db, handle.id, TEMPLATE_OWNER_NAMESPACE, template.id,
            ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_yaml")
     # 初始不可变草稿 revision
-    from iesplan.models.draft_revision import ModelTemplateDraftRevision as _DraftRev2
     _diag_h = _put_json(db, [], "model_template_draft_diagnostics")
-    _dr = _DraftRev2(
+    _dr = model_domain.create_draft_revision(
+        db,
         entry_id=template.id,
         revision=1,
         yaml_object_id=handle.id,
@@ -644,20 +639,19 @@ def create_template_draft(
         created_by=user.id,
         diagnostics_object_id=_diag_h.id,
     )
-    db.add(_dr)
-    db.flush()
     attach(db, _diag_h.id, TEMPLATE_OWNER_NAMESPACE, template.id,
            ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="draft_revision")
-    template.current_draft_revision_id = _dr.id
-    db.add(
-        AuditLog(
-            entity_type="model_template",
-            entity_id=template.id,
-            action="model_template.created",
-            actor_id=user.id,
-            actor_type="user",
-            after={"template_id": template_id, "draft_revision": 1},
-        )
+    template = model_domain.update_template(
+        db, template.id, current_draft_revision_id=_dr.id
+    )
+    audit_domain.append_entry(
+        db,
+        entity_type="model_template",
+        entity_id=template.id,
+        action="model_template.created",
+        actor_id=user.id,
+        actor_type="user",
+        extra={"template_id": template_id, "draft_revision": 1},
     )
     db.commit()
     return _template_to_dict(template)
@@ -665,12 +659,7 @@ def create_template_draft(
 
 def list_my_templates(db: Session, user) -> list[dict[str, Any]]:
     """当前用户模板列表(全部状态, 最新在前)。"""
-    rows = db.execute(
-        sa.select(ModelTemplate)
-        .where(ModelTemplate.owner_id == user.id)
-        .order_by(ModelTemplate.updated_at.desc(), ModelTemplate.id.desc())
-    ).scalars()
-    return [_template_to_dict(t) for t in rows]
+    return [_template_to_dict(t) for t in model_domain.list_owned_templates(db, user.id)]
 
 
 def get_template_detail(db: Session, user, template_id: str) -> dict[str, Any]:
@@ -685,12 +674,7 @@ def get_template_detail(db: Session, user, template_id: str) -> dict[str, Any]:
         document = _read_template_document_mapping(db, template.draft_yaml_object_id)
     item = _template_to_dict(template)
     if template.published_revision > 0:
-        rev = db.execute(
-            sa.select(ModelTemplateRevision).where(
-                ModelTemplateRevision.template_id == template.id,
-                ModelTemplateRevision.revision == template.published_revision,
-            )
-        ).scalar_one_or_none()
+        rev = model_domain.get_published_revision(db, template.id, template.published_revision)
         if rev is not None:
             item["revision"] = _revision_to_dict(rev)
     return {
@@ -707,12 +691,7 @@ def get_template_revision(db: Session, user, template_id: str, revision: int) ->
     不读取当前草稿(模板更新不改变历史 revision)。
     """
     template = _get_owned_template(db, user, template_id)
-    row = db.execute(
-        sa.select(ModelTemplateRevision).where(
-            ModelTemplateRevision.template_id == template.id,
-            ModelTemplateRevision.revision == revision,
-        )
-    ).scalar_one_or_none()
+    row = model_domain.get_published_revision(db, template.id, revision)
     if row is None:
         raise TemplateNotFoundError(
             "模板 revision 不存在",
@@ -802,12 +781,7 @@ def _publish(
 
     # 幂等键重放: 返回同一逻辑结果, 不新增 revision
     if idempotency_key:
-        existing = db.execute(
-            sa.select(ModelTemplateRevision).where(
-                ModelTemplateRevision.template_id == template.id,
-                ModelTemplateRevision.idempotency_key == idempotency_key,
-            )
-        ).scalar_one_or_none()
+        existing = model_domain.find_revision_by_idempotency(db, template.id, idempotency_key)
         if existing is not None:
             return {"revision": _revision_to_dict(existing), "duplicate": True}
 
@@ -860,8 +834,9 @@ def _publish(
     diag_handle = _put_json(db, [], "model_template_diagnostics")
 
     try:
-        row = ModelTemplateRevision(
-            template_id=template.id,
+        row = model_domain.create_published_revision(
+            db,
+            template_row_id=template.id,
             revision=template.published_revision + 1,
             schema_version=SCHEMA_VERSION,
             input_count=validation.input_count,
@@ -872,28 +847,18 @@ def _publish(
             idempotency_key=idempotency_key,
             published_by=user.id,
         )
-        db.add(row)
-        db.flush()
-    except IntegrityError as exc:
+    except ModelConflictError as exc:
         db.rollback()
         # 并发幂等: 以 (template_id, revision) 或 idempotency_key 幂等，文本只校验字头
         if idempotency_key:
-            same = db.execute(
-                sa.select(ModelTemplateRevision).where(
-                    ModelTemplateRevision.template_id == template.id,
-                    ModelTemplateRevision.idempotency_key == idempotency_key,
-                )
-            ).scalar_one_or_none()
+            same = model_domain.find_revision_by_idempotency(db, template.id, idempotency_key)
             if same is not None:
                 return {"revision": _revision_to_dict(same), "duplicate": True}
         else:
             # 无幂等键时，按 revision 幂等（同一 revision 重放）
-            same = db.execute(
-                sa.select(ModelTemplateRevision).where(
-                    ModelTemplateRevision.template_id == template.id,
-                    ModelTemplateRevision.revision == template.published_revision + 1,
-                )
-            ).scalar_one_or_none()
+            same = model_domain.get_published_revision(
+                db, template.id, template.published_revision + 1
+            )
             if same is not None:
                 return {"revision": _revision_to_dict(same), "duplicate": True}
         raise ConflictError(
@@ -905,21 +870,23 @@ def _publish(
     for handle in (yaml_handle, receipt_handle, summary_handle, diag_handle):
         attach(db, handle.id, TEMPLATE_OWNER_NAMESPACE, template.id,
                ref_entity_type=TEMPLATE_OWNER_NAMESPACE, purpose="revision")
-    template.published_revision = row.revision
-    template.current_published_revision_id = row.id
-    template.published_at = datetime.now(UTC)
-    template.status = TEMPLATE_STATUS_PUBLISHED
-    db.add(
-        AuditLog(
-            entity_type="model_template",
-            entity_id=template.id,
-            action="model_template.published",
-            actor_id=user.id,
-            actor_type="user",
-            after={"template_id": template.template_id, "revision": row.revision},
-        )
+    template = model_domain.update_template(
+        db,
+        template.id,
+        published_revision=row.revision,
+        current_published_revision_id=row.id,
+        published_at=datetime.now(UTC),
+        status=TEMPLATE_STATUS_PUBLISHED,
     )
-    db.flush()
+    audit_domain.append_entry(
+        db,
+        entity_type="model_template",
+        entity_id=template.id,
+        action="model_template.published",
+        actor_id=user.id,
+        actor_type="user",
+        extra={"template_id": template.template_id, "revision": row.revision},
+    )
     return {"revision": _revision_to_dict(row), "duplicate": False}
 
 
@@ -967,22 +934,24 @@ def set_template_status(
     if enabled:
         if template.status == TEMPLATE_STATUS_PUBLISHED:
             return _template_to_dict(template)  # 已启用: 幂等返回
-        template.status = TEMPLATE_STATUS_PUBLISHED
+        template = model_domain.update_template(
+            db, template.id, status=TEMPLATE_STATUS_PUBLISHED
+        )
     else:
         if template.status == TEMPLATE_STATUS_DISABLED:
             return _template_to_dict(template)  # 已停用: 幂等返回
-        template.status = TEMPLATE_STATUS_DISABLED
-    db.add(
-        AuditLog(
-            entity_type="model_template",
-            entity_id=template.id,
-            action="model_template.enabled" if enabled else "model_template.disabled",
-            actor_id=user.id,
-            actor_type="user",
-            after={"template_id": template.template_id, "status": template.status},
+        template = model_domain.update_template(
+            db, template.id, status=TEMPLATE_STATUS_DISABLED
         )
+    audit_domain.append_entry(
+        db,
+        entity_type="model_template",
+        entity_id=template.id,
+        action="model_template.enabled" if enabled else "model_template.disabled",
+        actor_id=user.id,
+        actor_type="user",
+        extra={"template_id": template.template_id, "status": template.status},
     )
-    db.flush()
     return _template_to_dict(template)
 
 
@@ -1008,18 +977,16 @@ def delete_template_draft(
                    ref_entity_type=TEMPLATE_OWNER_NAMESPACE)
         except ReferenceNotFoundError:
             continue
-    db.add(
-        AuditLog(
-            entity_type="model_template",
-            entity_id=template.id,
-            action="model_template.deleted",
-            actor_id=user.id,
-            actor_type="user",
-            after={"template_id": template.template_id},
-        )
+    audit_domain.append_entry(
+        db,
+        entity_type="model_template",
+        entity_id=template.id,
+        action="model_template.deleted",
+        actor_id=user.id,
+        actor_type="user",
+        extra={"template_id": template.template_id},
     )
-    db.delete(template)
-    db.flush()
+    model_domain.delete_template(db, template.id)
     return {"deleted": template_id, "ok": True}
 
 
@@ -1035,12 +1002,7 @@ def list_available_templates(db: Session, user) -> list[dict[str, Any]]:
     不出现在目录中(停用只影响后续选择)。
     未完成显式迁移的旧 ID 不进入新的选择结果（任务书 §三）。
     """
-    rows = db.execute(
-        sa.select(ModelTemplate)
-        .where(ModelTemplate.owner_id == user.id,
-               ModelTemplate.status == TEMPLATE_STATUS_PUBLISHED)
-        .order_by(ModelTemplate.updated_at.desc(), ModelTemplate.id.desc())
-    ).scalars()
+    rows = model_domain.list_owned_templates_by_status(db, user.id, TEMPLATE_STATUS_PUBLISHED)
     out: list[dict[str, Any]] = []
     for t in rows:
         # 旧 ID 未迁移的不进入选择结果
@@ -1048,12 +1010,7 @@ def list_available_templates(db: Session, user) -> list[dict[str, Any]]:
             continue
         item = _template_to_dict(t)
         if t.published_revision > 0:
-            rev = db.execute(
-                sa.select(ModelTemplateRevision).where(
-                    ModelTemplateRevision.template_id == t.id,
-                    ModelTemplateRevision.revision == t.published_revision,
-                )
-            ).scalar_one_or_none()
+            rev = model_domain.get_published_revision(db, t.id, t.published_revision)
             if rev is not None:
                 item["revision"] = _revision_to_dict(rev)
         out.append(item)
@@ -1074,12 +1031,7 @@ def resolve_template_revision(
             params={"template_id": template_id, "status": template.status},
             location={"object_type": "model_template", "template_id": template_id},
         )
-    row = db.execute(
-        sa.select(ModelTemplateRevision).where(
-            ModelTemplateRevision.template_id == template.id,
-            ModelTemplateRevision.revision == revision,
-        )
-    ).scalar_one_or_none()
+    row = model_domain.get_published_revision(db, template.id, revision)
     if row is None:
         raise TemplateNotFoundError(
             "模板 revision 不存在",
@@ -1097,13 +1049,8 @@ def resolve_template_revision(
 
 def list_draft_revisions(db: Session, user, template_id: str) -> list[dict[str, Any]]:
     """列出模板的不可变草稿 revision 历史（旧 revision 可读，对象引用保留）。"""
-    from iesplan.models.draft_revision import ModelTemplateDraftRevision
     template = _get_owned_template(db, user, template_id)
-    rows = db.execute(
-        sa.select(ModelTemplateDraftRevision)
-        .where(ModelTemplateDraftRevision.entry_id == template.id)
-        .order_by(ModelTemplateDraftRevision.revision)
-    ).scalars().all()
+    rows = model_domain.list_draft_revisions(db, template.id)
     return [
         {
             "id": str(r.id),
@@ -1111,7 +1058,7 @@ def list_draft_revisions(db: Session, user, template_id: str) -> list[dict[str, 
             "yaml_object_id": str(r.yaml_object_id),
             "source": r.source,
             "created_by": str(r.created_by),
-            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "created_at": r.created_at,
         }
         for r in rows
     ]
@@ -1119,14 +1066,8 @@ def list_draft_revisions(db: Session, user, template_id: str) -> list[dict[str, 
 
 def get_draft_revision(db: Session, user, template_id: str, revision: int) -> dict[str, Any]:
     """读取精确草稿 revision（不可变，对象引用保留）。"""
-    from iesplan.models.draft_revision import ModelTemplateDraftRevision
     template = _get_owned_template(db, user, template_id)
-    row = db.execute(
-        sa.select(ModelTemplateDraftRevision).where(
-            ModelTemplateDraftRevision.entry_id == template.id,
-            ModelTemplateDraftRevision.revision == revision,
-        )
-    ).scalar_one_or_none()
+    row = model_domain.get_draft_revision(db, template.id, revision)
     if row is None:
         raise TemplateNotFoundError("草稿 revision 不存在",
                                     params={"template_id": template_id, "revision": revision})
@@ -1136,6 +1077,6 @@ def get_draft_revision(db: Session, user, template_id: str, revision: int) -> di
         "yaml_object_id": str(row.yaml_object_id),
         "source": row.source,
         "created_by": str(row.created_by),
-        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "created_at": row.created_at,
         "document": _read_template_document_mapping(db, row.yaml_object_id),
     }
