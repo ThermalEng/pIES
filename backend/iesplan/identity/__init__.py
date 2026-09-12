@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from iesplan.config import settings
 from iesplan.core.namespace import generate_namespace
+from iesplan.core.patterns import USERNAME_RE
 from iesplan.core.security import hash_password
 from iesplan.identity import persistence
 from iesplan.identity.contracts import (
@@ -129,8 +130,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: 用户名规则(与应用层 USERNAME_RE 同值, 用于外部主体 → 本地用户名映射)
-_USERNAME_RE = re.compile(r"^[a-z0-9_]{3,32}$")
+#: 用户名规则(唯一权威: iesplan.core.patterns.USERNAME_RE, 用于外部主体 → 本地用户名映射)
+_USERNAME_RE = re.compile(USERNAME_RE)
 #: Discovery/令牌请求超时(秒)
 _PROVIDER_TIMEOUT = 10.0
 #: 回调安全窗口(授权码/state 有效性): 360 秒(行业惯例 5-10 分钟)

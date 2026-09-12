@@ -46,12 +46,11 @@ from iesplan.identity.contracts import (
     UserRecord,
     WindowSessionRecord,
 )
-#: 用户名格式(与 models.common.USERNAME_RE 同值; 应用层不得导入
-#: iesplan.models.*, 此处本地声明保持行为一致, 值一致性由
-#: tests/test_wave2_b_identity.py 锁定)。
-USERNAME_RE: str = "^[a-z0-9_]{3,32}$"
-#: 邮箱格式(同上, 与 models.common.EMAIL_RE 同值)。
-EMAIL_RE: str = r"^[^@\s]+@[^@\s]+$"
+#: 用户名/邮箱格式唯一权威: iesplan.core.patterns(应用层不得导入
+#: iesplan.models.*, 改接无 framework/ORM 依赖的 core 基元; 用户输入
+#: 边界校验行为不变)。
+from iesplan.core.patterns import EMAIL_RE as EMAIL_RE
+from iesplan.core.patterns import USERNAME_RE as USERNAME_RE
 
 logger = logging.getLogger(__name__)
 
