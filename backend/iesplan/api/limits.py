@@ -33,6 +33,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from iesplan.application.datasets.quotas import (
+    QuotaError as QuotaError,
+)
+from iesplan.application.datasets.quotas import (
+    check_upload_quota as check_upload_quota,
+)
 from iesplan.config import settings
 from iesplan.core.errors import error_envelope
 
@@ -234,93 +240,13 @@ def _check_and_count(ip: str) -> bool:
 # ---------------------------------------------------------------------------
 # 上传配额(每用户/每项目)
 # ---------------------------------------------------------------------------
-
-class QuotaError(Exception):
-    """上传配额超限(API 层转换为 413 标准错误信封)。"""
-
-    def __init__(self, *, used_bytes: int, quota_bytes: int, scope: str, owner_id: int) -> None:
-        super().__init__(f"上传配额超限: used={used_bytes} quota={quota_bytes}")
-        self.used_bytes = used_bytes
-        self.quota_bytes = quota_bytes
-        self.scope = scope
-        self.owner_id = owner_id
-
-
-def _dataset_files_bytes(db, project_ids: list[int]) -> int:
-    """项目集合内数据集版本文件占用之和(dataset_files.size_bytes)。
-
-    统计口径 = 逻辑分配量: 按 dataset_file 行累计 size_bytes(同一对象被
-    多行引用时重复计列) —— 门禁目的(防重复上传刷存储)由逻辑累计即满足,
-    且语义清晰、无跨表 join。
-    """
-    if not project_ids:
-        return 0
-    import sqlalchemy as sa
-
-    from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
-
-    total = (
-        sa.select(sa.func.coalesce(sa.func.sum(DatasetFile.size_bytes), 0))
-        .select_from(DatasetFile)
-        .join(DatasetVersion, DatasetVersion.id == DatasetFile.dataset_version_id)
-        .join(Dataset, Dataset.id == DatasetVersion.dataset_id)
-        .where(Dataset.project_id.in_(project_ids))
-    )
-    return int(db.execute(total).scalar_one() or 0)
-
-
-def _project_ids_for_user(db, user_id: int) -> list[int]:
-    """用户拥有的未删除项目 id 列表(0.8.0: 已剔除共享成员)。"""
-    import sqlalchemy as sa
-
-    from iesplan.models.project import Project
-
-    owned = sa.select(Project.id).where(Project.owner_id == user_id, Project.status != "deleted")
-    rows = db.execute(owned).scalars().all()
-    return list(rows)
-
-
-def check_upload_quota(
-    db,
-    *,
-    user_id: int,
-    project_id: int | None = None,
-    incoming_bytes: int = 0,
-) -> None:
-    """上传配额门禁: 用户已用(所属项目数据集文件) + 本次请求大小 > 配额即拒绝。
-
-    只启用显式配置的配额(0 = 不限):
-    - ``upload_quota_bytes``: 每用户配额(全局);
-    - ``project_quota_bytes``: 每项目配额(叠加)。
-    本地开发默认双 0(不限), 不误伤 e2e/本地开发。
-    项目包导入无目标项目(新项目身份), 此时 project_id=None 只应用用户级配额。
-
-    参数:
-        db: 数据库会话(请求级; 只读统计, 不提交)。
-        user_id: 当前用户。
-        project_id: 目标项目(可为 None, 如项目包导入)。
-        incoming_bytes: 本次上传数据字节数(配额判断包含本次请求, 防逐次小额
-            上传逐步逼近上限; 已知大小时传入)。
-    异常:
-        QuotaError: 超过任一配额(API 层转换为 413)。
-    """
-    if settings.upload_quota_bytes <= 0 and settings.project_quota_bytes <= 0:
-        return
-
-    if settings.upload_quota_bytes > 0:
-        used = _dataset_files_bytes(db, _project_ids_for_user(db, user_id))
-        if used + incoming_bytes > settings.upload_quota_bytes:
-            raise QuotaError(
-                used_bytes=used, quota_bytes=settings.upload_quota_bytes,
-                scope="user", owner_id=user_id,
-            )
-    if settings.project_quota_bytes > 0 and project_id is not None:
-        project_used = _dataset_files_bytes(db, [project_id])
-        if project_used + incoming_bytes > settings.project_quota_bytes:
-            raise QuotaError(
-                used_bytes=project_used, quota_bytes=settings.project_quota_bytes,
-                scope="project", owner_id=project_id,
-            )
+# Wave 4: 判定与统计已上收至 application/datasets/quotas 用例(ORM 经
+# dataset/project 域门面); 本模块只转发公开契约(QuotaError/check_upload_quota,
+# 见文件头导入), 既有调用方(datasets/projects/project_models)与测试导入
+# 路径不变, HTTP 行为(413 信封字段)不变。
+#
+# (原函数内局部 ORM 导入 _dataset_files_bytes/_project_ids_for_user 已删除,
+#  职责由 quotas.dataset_files_bytes/quotas.project_ids_for_user 接管。)
 
 
 # ---------------------------------------------------------------------------
