@@ -935,18 +935,10 @@ def test_no_forbidden_cross_domain_deps():
     )
 
 
-#: 门禁 15 临时债务: Worker 计算穿透(全仓实测 4 对, 全在 executors; Wave 4 归零)。
+#: 门禁 15 临时债务: Worker 计算穿透(Wave 4-A 已删除 executors 旧计算链,
+#: engines/metrics/finance/analysis 穿透归零)。
 #: worker→application.worker 用例与 main 进程启停属正确形状, 不在债务之列。
-TEMP_DEBT_WORKER_COMPUTE: set[tuple[str, str]] = {
-    # worker/executors.py:218,262,762 直调 analysis.wrapper(计算结果反向流入执行器)。
-    ("iesplan.worker.executors", "analysis"),
-    # worker/executors.py:40-41 直引 engines.eval_run/planning 结果类型。
-    ("iesplan.worker.executors", "engines"),
-    # worker/executors.py:219-220 直调 finance.hourly/params(执行器内拼财务计算)。
-    ("iesplan.worker.executors", "finance"),
-    # worker/executors.py:42-43 直调 metrics.engineering/environmental。
-    ("iesplan.worker.executors", "metrics"),
-}
+TEMP_DEBT_WORKER_COMPUTE: set[tuple[str, str]] = set()
 
 
 def test_worker_no_compute_penetration():
