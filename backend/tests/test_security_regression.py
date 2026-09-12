@@ -32,7 +32,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.services import identity  # noqa: E402
+from iesplan.application import identity  # noqa: E402
 from iesplan.services import package as package_service  # noqa: E402
 
 PASSWORD = "Test12345"

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from iesplan.services import identity
+from iesplan.application import identity
 
 #: 测试用户统一密码(与 make_user 创建的凭证一致)
 DEFAULT_PASSWORD = "Test12345"

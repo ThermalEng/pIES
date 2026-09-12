@@ -35,7 +35,7 @@ from iesplan.application.model_templates import (  # noqa: E402
     list_draft_revisions,
     publish_template,
 )
-from iesplan.application.projects import save_project_model  # noqa: E402
+from iesplan.application.models import save_project_model  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
 from iesplan.services import project as project_service  # noqa: E402

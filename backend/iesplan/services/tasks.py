@@ -50,7 +50,7 @@ from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.models.common import IDEMPOTENCY_KEY_RE
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
-from iesplan.services import identity as identity_service
+from iesplan.application import identity as identity_service
 from iesplan.services import project as project_service
 from iesplan.services import queue
 from iesplan.storage import object_info, orphaned_stats, usage_summary

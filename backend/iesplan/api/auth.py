@@ -26,7 +26,7 @@ from iesplan.config import settings
 from iesplan.core.errors import ForbiddenError, NotFoundError
 from iesplan.db import get_db
 from iesplan.models.identity import User, WindowSession
-from iesplan.services import identity
+from iesplan.application import identity
 from iesplan.services import project as project_service
 from iesplan.services.external_auth import ExternalAuthError
 

@@ -27,6 +27,7 @@ from typing import Any, Final
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan.config import settings
@@ -44,7 +45,12 @@ from iesplan.identity.contracts import (
     UserRecord,
     WindowSessionRecord,
 )
-from iesplan.models.common import EMAIL_RE, USERNAME_RE
+#: 用户名格式(与 models.common.USERNAME_RE 同值; 应用层不得导入
+#: iesplan.models.*, 此处本地声明保持行为一致, 值一致性由
+#: tests/test_wave2_b_identity.py 锁定)。
+USERNAME_RE: str = "^[a-z0-9_]{3,32}$"
+#: 邮箱格式(同上, 与 models.common.EMAIL_RE 同值)。
+EMAIL_RE: str = r"^[^@\s]+@[^@\s]+$"
 
 logger = logging.getLogger(__name__)
 
@@ -804,7 +810,6 @@ def delete_user(
     if not confirm:
         raise DeleteConfirmRequiredError("", params={"reason": "confirm_required", "user_id": user.id})
     verify_delete_confirm_token(db, user, confirm_token)
-    from iesplan.services import project as project_service
 
     now = utcnow()
     # 该用户拥有的项目 → 软删(级联，状态写入经 project 域 repository)
@@ -813,13 +818,17 @@ def delete_user(
     for project in owned:
         project_domain.set_project_status(db, project.id, "deleted")
         deleted_projects += 1
-        project_service._audit(
+        # 审计经 audit 域公开门面(与原 services.project._audit 同语义,
+        # 其本体即 audit_domain.append_entry 的薄封装, 此处直调避免跨模块私有访问)。
+        audit_domain.append_entry(
             db,
-            "project",
-            project.id,
-            "project.deleted_by_account",
-            admin.id,
-            after={"reason": "account_deleted", "account_id": user.id},
+            actor_id=admin.id,
+            action="project.deleted_by_account",
+            entity_type="project",
+            entity_id=project.id,
+            actor_type="user",
+            before=None,
+            extra={"reason": "account_deleted", "account_id": user.id},
         )
     # 账号停用 + 会话/凭证撤销
     identity_domain.set_user_status(db, user.id, "disabled")

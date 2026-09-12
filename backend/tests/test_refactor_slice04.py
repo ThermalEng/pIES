@@ -28,7 +28,7 @@ from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.db import Base
 from iesplan.identity.contracts import IdentityConflictError, UserNotFoundError
 from iesplan.services import dataset as dataset_service
-from iesplan.services import identity as identity_service
+from iesplan.application import identity as identity_service
 
 
 @pytest.fixture()

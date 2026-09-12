@@ -28,8 +28,8 @@ from iesplan.core.diagnostics import (
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
 from iesplan.models import Device, Port, Project, SystemGraph
-from iesplan.services import identity
-from iesplan.services import model as svc
+from iesplan.application import identity
+from iesplan.application.models import service as svc
 
 GRID = "ies.device.grid_connection"
 PV = "ies.device.pv"

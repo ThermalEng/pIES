@@ -126,7 +126,7 @@ def test_config_load_work_graph_through_model_domain(db: Session, data_dir: Path
     project = project_domain.create_project(db, name="slice8-proj", owner_id=7, created_by=7)
     assert config_service.load_work_graph(db, project.id) == {"devices": []}
 
-    from iesplan.services import model as model_service
+    from iesplan.application import models as model_service
 
     graph = model_service.get_or_create_working_graph(db, project.id, created_by=7)
     dev = model_domain.create_device(
