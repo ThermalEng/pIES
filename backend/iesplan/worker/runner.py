@@ -25,15 +25,13 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan.application import worker as worker_app
 from iesplan.core.diagnostics import SEVERITY_BLOCKING, TASK_DATA_SNAPSHOT_MISSING
 from iesplan.core.errors import AppError
 from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis
 from iesplan.models.calc import CalcSnapshot, Task
 from iesplan.models.dataset import DatasetFile, DatasetVersion
 from iesplan.models.project import ProjectVersion
-from iesplan.services import dataset as dataset_service
-from iesplan.services import project as project_service
-from iesplan.storage import get_object
 from iesplan.worker import executors, lease
 from iesplan.worker.executors import EngineRunError, RunContext, TaskCancelled
 
@@ -80,7 +78,7 @@ def load_inputs(db: Session, snapshot: CalcSnapshot) -> tuple[dict, dict, TimeAx
             location={"object_type": "project_versions", "object_id": snapshot.project_version_id},
         )
     try:
-        content = project_service.load_content_object(db, version.content_object_id)
+        content = worker_app.load_version_content(db, version.content_object_id)
     except AppError as exc:
         raise SnapshotInputError(
             f"项目版本内容不可用: {exc}",
@@ -143,8 +141,8 @@ def _load_dataset_data(
         ).scalars().first()
         if data_file is None:
             continue
-        raw = get_object(db, data_file.object_id)
-        rows, diags = dataset_service.parse_csv(raw, resolution)
+        raw = worker_app.load_dataset_blob(db, data_file.object_id)
+        rows, diags = worker_app.parse_dataset_csv(raw, resolution)
         diags_dicts = [d.to_dict() for d in diags]
         diagnostics.extend(diags_dicts)
         if any(d.get("blocking") for d in diags_dicts):

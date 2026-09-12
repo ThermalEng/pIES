@@ -4,7 +4,7 @@
 为可重建视图。本模块是 Worker 端的唯一租约入口:
 
 - acquire_attempt: 领取任务 = 占槽 + 建尝试 + 建租约(发 UUID token) + 任务
-  running, 复用 U07 服务(tasks_service.claim_and_run)同事务完成(03 §4.1 ①);
+  running, 经 application.worker 用例同事务完成(03 §4.1 ①);
 - renew_lease: 续租(15 s 周期); 影响行数 = 0 → 租约失效 → 调用方必须立即
   自毁(终止子进程、停止一切写回, 03 §4.4);
 - report_progress: 带 fencing 的进度回写(PG UPSERT + Redis 秒级进度);
@@ -14,7 +14,7 @@
 - slot_available: 槽门禁查询(领取前确认 compute_slots 有空位, 03 §5.2)。
 
 一致性与 03 §1.3 对齐: PG 是权威; 一任务一租约一 token; 写回必带 token;
-终态即封闭(状态迁移校验复用 tasks_service)。
+终态即封闭(状态迁移校验经 application.worker 用例复用任务服务)。
 """
 
 from __future__ import annotations
@@ -29,18 +29,16 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan.application import worker as worker_app
 from iesplan.core.diagnostics import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARNING, TASK_QUEUED
 from iesplan.core.errors import AppError
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex
-from iesplan.services import queue
-from iesplan.services import tasks as tasks_service
-from iesplan.storage import add_ref, put_object
 
 logger = logging.getLogger(__name__)
 
-#: 租约 TTL(秒, 03 §4.2 默认 60 s; 与 tasks_service.LEASE_TTL_SECONDS 一致)
-LEASE_TTL_SECONDS = tasks_service.LEASE_TTL_SECONDS
+#: 租约 TTL(秒, 03 §4.2 默认 60 s; 经 application.worker 用例取用)
+LEASE_TTL_SECONDS = worker_app.LEASE_TTL_SECONDS
 
 
 class LeaseRejectedError(AppError):
@@ -62,8 +60,8 @@ class SlotUnavailableError(AppError):
     message_key = "ies.diag.task.queue_failed"
 
 
-# 与 tasks_service.Claim 同构(避免跨模块重复定义, 直接复用其类型)
-Claim = tasks_service.Claim
+# 与 tasks_service.Claim 同构(经 application.worker 用例复用其类型)
+Claim = worker_app.Claim
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +84,7 @@ def acquire_attempt(db: Session, task_id: int, worker_id: str) -> Claim | None:
 
     同一 U07 事务内完成(03 §4.1 ①); 无空槽或任务非 queued 返回 None。
     """
-    return tasks_service.claim_and_run(db, task_id, worker_id)
+    return worker_app.acquire_task(db, task_id, worker_id)
 
 
 def slot_available(db: Session, pool: str) -> bool:
@@ -154,7 +152,7 @@ def report_progress(
     """
     if verify_lease(db, attempt_id, token) is None:
         return False
-    tasks_service.record_progress(db, task_id, stage, percent, detail, attempt_id=attempt_id)
+    worker_app.record_task_progress(db, task_id, stage, percent, detail, attempt_id=attempt_id)
     return True
 
 
@@ -202,19 +200,15 @@ def submit_result(
     snapshot = db.get(CalcSnapshot, task.calc_snapshot_id) if task.calc_snapshot_id else None
     if snapshot is not None:
         blob = _payload_bytes(payload)
-        obj = put_object(
-            db, blob, "application/json", source_category="evidence",
-            purpose="evidence_package", actor_id=who,
-        )
+        object_id = worker_app.store_result_blob(db, blob, actor_id=who)
         evidence = EvidencePackage(
             task_id=task.id, attempt_id=attempt_id, calc_snapshot_id=snapshot.id,
-            object_id=obj.id, status="complete", created_by=who,
+            object_id=object_id, status="complete", created_by=who,
         )
         db.add(evidence)
         db.flush()
         evidence_id = evidence.id
-        add_ref(db, obj.id, "evidence_package", evidence.id, purpose="evidence_package",
-                        actor_id=who)
+        worker_app.attach_result_ref(db, object_id, evidence.id, actor_id=who)
 
         assessment = payload.get("assessment") or {}
         assess = ResultAssessment(
@@ -258,7 +252,7 @@ def submit_result(
     # 任务终态 + 业务结局(正交保存, 03 §3.2)
     if task.status == "completed":  # 幂等: 取消竞态下已由他方完成
         return SubmitReceipt(evidence_id, assessment_id, index_id, outcome)
-    tasks_service.complete_task(db, task.id, outcome=outcome)
+    worker_app.complete_task(db, task.id, outcome=outcome)
     _write_diagnostic(
         db, task.id, attempt_id, level=SEVERITY_INFO, code=TASK_QUEUED, message="任务完成",
         context={"business_outcome": outcome, "evidence_package_id": evidence_id,
@@ -295,7 +289,7 @@ def release_attempt(
     attempt.status = attempt_status
     attempt.stop_reason = stop_reason
     attempt.finished_at = datetime.now(UTC)
-    tasks_service.release_slot(db, attempt_id)
+    worker_app.release_slot(db, attempt_id)
     return attempt
 
 
@@ -320,7 +314,7 @@ def fail_attempt(
             "租约失效, 失败收拢被拒绝", params={"task_id": claim.task_id, "attempt_id": claim.attempt_id}
         )
     release_attempt(db, claim.attempt_id, claim.lease_token, attempt_status="failed", stop_reason=code)
-    task = tasks_service.fail_task(
+    task = worker_app.fail_task(
         db, claim.task_id, code=code, message=message, stack_trace=stack_trace,
         level=level, outcome=outcome,
     )
@@ -341,11 +335,11 @@ def cancel_attempt(
     """
     task = db.get(Task, claim.task_id)
     if task is None:
-        raise tasks_service.TaskStateError("任务不存在", params={"task_id": claim.task_id})
+        raise worker_app.TaskStateError("任务不存在", params={"task_id": claim.task_id})
     if task.status == "cancelled":
         return task  # 幂等
     if task.status != "cancelling":
-        raise tasks_service.TaskStateError(
+        raise worker_app.TaskStateError(
             "任务不在取消中", params={"task_id": claim.task_id, "status": task.status},
             location={"object_type": "task", "object_id": claim.task_id},
         )
@@ -358,7 +352,7 @@ def cancel_attempt(
     task.status = "cancelled"
     task.business_outcome = outcome
     task.updated_at = datetime.now(UTC)
-    queue.clear_cancel(task.id)
+    worker_app.clear_cancel_signal(task.id)
     _write_diagnostic(
         db, task.id, claim.attempt_id, level=SEVERITY_INFO, code=TASK_QUEUED, message="任务已取消",
         context={"business_outcome": outcome},
