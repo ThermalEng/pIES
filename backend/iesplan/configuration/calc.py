@@ -1,36 +1,15 @@
-"""计算配置服务: 默认配置生成、保存、校验与读取。
+"""计算配置领域规则（校验/默认生成/元数据/序列化，归属 configuration）。
 
-依据 架构宪法 §4 后端模块与职责(modeling/assembly) + 领域模型 §规划、财务与计算配置。
+本模块是计算配置权威规则的唯一实现（由 ``services.config`` 收敛而来，
+旧服务已删除）：
+- 默认配置生成（纯构造部分）、输入归一化与全量校验；
+- 参数元数据（单位/范围/默认值/帮助键，供前端渲染）；
+- 算法注册表元数据；
+- 计算配置行 ↔ 配置字典的序列化（``row_to_config``）。
 
-本模块是计算配置域的唯一写入单元:
-
-- 默认配置基于系统模型(当前工作图)设备清单与受控注册表生成:
-  设备参数取注册表默认值(叠加设备行参数), 新建设备的容量类参数
-  (is_optimizable)生成 continuous 优化变量, 存量设备容量固定不生成变量;
-- 默认目标 = 税后项目投资 IRR 最大化; 默认最低 IRR 硬约束 0.08
-  (最低税后项目投资 IRR 是不可被目标权重抵消的硬约束,
-  与折现率是两个独立字段);
-- 保存与草稿修订绑定(乐观锁): expected_revision 与当前草稿修订不一致抛
-  ConflictError;
-- 校验: 变量类型/初始值在界内、目标合法、约束表达式用 expression.parse_expr
-  做解析+量纲+范围校验、IRR 硬约束与折现率独立、算法能力兼容
-  (mode=auto 不做能力检查)。
-
-计算配置结构(JSON):
-{
-  "parameters": {
-    "devices": {<device_id>: {<param>: <value>}},     # 设备参数当前值
-    "economic": {discount_rate, tax_rate, ...},       # 经济参数
-    "environmental": {emission_factor_grid, ...},     # 环境参数
-  },
-  "variables": [{name, type, initial, min, max, device_ref, param, unit}],
-  "objectives": [{metric, direction, weight}],
-  "constraints": [{type: predefined|expression, payload}],
-  "algorithm": {"mode": "auto"|"manual", "name": <注册表算法 id>},
-  "irr_floor": Decimal,          # 最低税后 IRR 硬约束(0..1, 独立顶层字段)
-  "tolerances": {...},           # 容差(兼容输入键 "tolerance")
-  "random_seed": int | None,
-}
+本模块为纯规则：不持有会话、不做提交、不读写对象存储；需要数据库的
+编排（工作图加载、配置读写、保存事务）由
+``application.configuration.calc_config`` 经领域公开门面完成。
 """
 
 from __future__ import annotations
@@ -39,40 +18,34 @@ import re
 from collections import Counter
 from typing import Final
 
-from sqlalchemy.orm import Session
-
-from iesplan import audit as audit_domain
-from iesplan import configuration as configuration_domain
-from iesplan import model as model_domain
-from iesplan import project as project_domain
 from iesplan.configuration.contracts import CalcConfigRecord
+from iesplan.core.contracts import ParameterSpec
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     SEVERITY_WARNING,
     Diagnostic,
     make_diag,
 )
-from iesplan.core.errors import ConflictError, NotFoundError
+from iesplan.core.errors import NotFoundError
 from iesplan.core.expression import (
     Dimensions,
     ExpressionError,
     parse_expr,
 )
-from iesplan.core.contracts import ParameterSpec
+from iesplan.core.units import UnitError, dims_of
+from iesplan.devices import (
+    DeviceModelDocument as DeviceTypeSpec,
+)
+from iesplan.devices import (
+    get_device as get_device_type,
+)
+from iesplan.devices.contracts2 import PropertySpec
 from iesplan.engines.registry import (
     DEFAULT_ALGORITHM,
     AlgorithmSpec,
     get_algorithm,
     list_algorithms,
 )
-from iesplan.devices import (
-    DeviceModelDocument as DeviceTypeSpec,
-    get_device as get_device_type,
-)
-from iesplan.devices.contracts2 import PropertySpec
-from iesplan.core.units import UnitError, dims_of
-from iesplan.db import SessionLocal
-from iesplan.project.contracts import ProjectRecord
 
 # ---------------------------------------------------------------------------
 # 常量: 配置结构 / 目标 / 预定义约束
@@ -222,38 +195,8 @@ def normalize_devices(graph: dict) -> list[dict]:
     return devices
 
 
-def load_work_graph(db: Session, project_id: int) -> dict:
-    """加载项目当前工作图(设备清单)。
-
-    优先取 current_draft_id 关联的工作图; 未关联时取该项目最近一张工作图;
-    无任何图返回空设备清单(默认配置仍可生成)。
-    """
-    graph = None
-    if project_id is not None:
-        proj = project_domain.get_project(db, project_id)
-        if proj is not None and proj.current_draft_id is not None:
-            graph = model_domain.find_graph_by_draft(db, project_id, proj.current_draft_id)
-        if graph is None:
-            graph = model_domain.find_latest_working_graph(db, project_id)
-    if graph is None:
-        return {"devices": []}
-    rows = model_domain.list_devices(db, graph.id)
-    return {
-        "devices": [
-            {
-                "id": d.id,
-                "device_type": d.device_type,
-                "kind": d.kind,
-                "name": d.name,
-                "params": dict(d.params or {}),
-            }
-            for d in rows
-        ]
-    }
-
-
 # ---------------------------------------------------------------------------
-# 默认配置生成
+# 默认配置生成(纯构造: 调用方先备好工作图与币种)
 # ---------------------------------------------------------------------------
 
 
@@ -286,14 +229,15 @@ def _default_variables(graph: dict) -> list[dict]:
     return []
 
 
-def _build_default_config(db: Session, project_id: int) -> dict:
-    """生成默认计算配置(见模块 docstring 的结构说明)。"""
-    graph = load_work_graph(db, project_id)
+def build_default_config(graph: dict, currency: str = "CNY") -> dict:
+    """生成默认计算配置(见 services 收敛前的模块 docstring 结构说明)。
+
+    参数:
+        graph: 系统模型图 dict(与 validate_config 同构的设备清单)。
+        currency: 经济参数币种(调用方按项目币种传入, 缺省 CNY)。
+    """
     params = _default_parameters(graph)
-    params["economic"]["currency"] = "CNY"
-    proj = project_domain.get_project(db, project_id)
-    if proj is not None:
-        params["economic"]["currency"] = proj.currency or "CNY"
+    params["economic"]["currency"] = currency or "CNY"
     algo = get_algorithm(DEFAULT_ALGORITHM)
     return {
         "parameters": params,
@@ -310,19 +254,6 @@ def _build_default_config(db: Session, project_id: int) -> dict:
         },
         "random_seed": 42,
     }
-
-
-def get_default_config(project_id: int, db: Session | None = None) -> dict:
-    """生成默认计算配置(基于系统模型设备清单)。
-
-    参数:
-        project_id: 项目 id。
-        db: 数据库会话; 为 None 时自行打开会话(兼容单参数调用)。
-    """
-    if db is None:
-        with SessionLocal() as session:
-            return _build_default_config(session, project_id)
-    return _build_default_config(db, project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1109,169 +1040,8 @@ def validate_config(
 
 
 # ---------------------------------------------------------------------------
-# 保存与读取
+# 序列化: 计算配置行 ↔ 配置字典
 # ---------------------------------------------------------------------------
-
-
-def _current_draft_revision(db: Session, project_id: int) -> int:
-    """当前草稿修订号; 项目尚无草稿时按 1 处理(领域模型 §项目聚合 初始草稿 revision=1)。"""
-    proj = project_domain.get_project(db, project_id)
-    if proj is None:
-        raise NotFoundError(
-            f"项目不存在: {project_id}",
-            code="RES-MISS-003",
-            message_key="ies.diag.res.not_found",
-            params={"project_id": project_id},
-        )
-    if proj.current_draft_id is not None:
-        draft = project_domain.get_draft(db, proj.current_draft_id)
-        if draft is not None:
-            return draft.revision
-    return 1
-
-
-def _sync_draft_config(
-    db: Session,
-    proj: ProjectRecord,
-    config: dict,
-    row: CalcConfigRecord,
-) -> None:
-    """把已保存配置同步进当前草稿内容的 calc_config 节(不递增草稿修订)。
-
-    计算快照装配(services/tasks.assemble_snapshot)与项目包导出以草稿内容为
-    权威输入; 若不同步, 保存的配置不会进入快照/导出包(配置语义丢失)。
-    任务级参数(task_params)属于任务提交时的覆盖项, 原样保留不覆盖。
-    """
-    if proj.current_draft_id is None:
-        return
-    draft = project_domain.get_draft(db, proj.current_draft_id)
-    if draft is None:
-        return
-    from iesplan.services import project as project_service  # 延迟导入避免环
-
-    # 内容对象缺失或损坏时直接抛出加载原错误, 不回退初始骨架
-    # (宪法 §13: 对象缺失或不可读返回实际错误, 禁止旧副本回退)。
-    content = project_service.load_content_object(db, draft.content_object_id)
-    old_calc = content.get("calc_config") or {}
-    content["calc_config"] = {
-        "params": dict(config.get("parameters") or {}),
-        "variables": list(config.get("variables") or []),
-        "objectives": list(config.get("objectives") or []),
-        "constraints": list(config.get("constraints") or []),
-        "algorithm": dict(config.get("algorithm") or {}),
-        "solver": row.solver,
-        "tolerances": dict(config.get("tolerances") or {}),
-        "random_seed": config.get("random_seed"),
-        "irr_floor": config.get("irr_floor"),
-    }
-    if isinstance(old_calc.get("task_params"), dict):
-        content["calc_config"]["task_params"] = old_calc["task_params"]
-    content_object_id = project_service.store_content_object(db, content)
-    project_domain.update_draft_content_ref(db, draft.id, content_object_id)
-
-
-def save_config(
-    db: Session,
-    project_id: int,
-    config: dict,
-    expected_revision: int,
-    *,
-    user_id: int | None = None,
-) -> CalcConfigRecord:
-    """保存计算配置(与草稿修订绑定, 乐观锁; 冻结行则新建版本行, 经 configuration 域)。
-
-    参数:
-        db: 数据库会话。
-        project_id: 项目 id。
-        config: 计算配置 dict。
-        expected_revision: 期望的草稿修订号; 与实际修订不符抛 ConflictError。
-        user_id: 修改者; None 时回退到项目 owner(认证接线前的兼容路径)。
-
-    返回:
-        保存后的 CalcConfig 行。
-    """
-    proj = project_domain.get_project(db, project_id)
-    if proj is None:
-        raise NotFoundError(
-            f"项目不存在: {project_id}",
-            code="RES-MISS-003",
-            message_key="ies.diag.res.not_found",
-            params={"project_id": project_id},
-        )
-    current_revision = _current_draft_revision(db, project_id)
-    if expected_revision != current_revision:
-        raise ConflictError(
-            f"草稿修订冲突: 期望 {expected_revision}, 当前 {current_revision}",
-            params={
-                "expected_revision": expected_revision,
-                "current_revision": current_revision,
-            },
-        )
-    config = normalize_config(config)
-    existing = [
-        c for c in configuration_domain.list_calc_configs(db, project_id) if c.name == DEFAULT_CONFIG_NAME
-    ]
-    latest = max(existing, key=lambda c: c.version, default=None)
-    if latest is not None and latest.status == "frozen":
-        latest = None  # 冻结行不可修改(01 §6.1 触发器语义), 新建版本行
-    algo_mode = config.get("algorithm", {}).get("mode", "auto")
-    algo_name = config.get("algorithm", {}).get("name")
-    values = {
-        "params": config["parameters"],
-        "variables": config["variables"],
-        "objectives": config["objectives"],
-        "constraints": config["constraints"],
-        "min_irr": config.get("irr_floor"),
-        "algorithm": None if algo_mode == "auto" else ALGO_DB_CLASS.get(algo_name or "", algo_name),
-        "solver": SOLVER_ID,
-        "tolerances": config.get("tolerances", {}),
-        "random_seed": config.get("random_seed"),
-    }
-    actor = user_id or proj.owner_id
-    if latest is None:
-        row = configuration_domain.create_calc_config(
-            db,
-            project_id=project_id,
-            name=DEFAULT_CONFIG_NAME,
-            params=values["params"],
-            variables=values["variables"],
-            objectives=values["objectives"],
-            constraints=values["constraints"],
-            tolerances=values["tolerances"],
-            updated_by=actor,
-            min_irr=values["min_irr"],
-            algorithm=values["algorithm"],
-            solver=values["solver"],
-            random_seed=values["random_seed"],
-        )
-    else:
-        row = configuration_domain.update_calc_config(db, latest.id, values=values, updated_by=actor)
-    # 0.2.0 B4: 配置保存属"项目/数据/计算配置"关键变更(宪法 §16), 保留不可变
-    # 最小化脱敏审计(只记版本/变量数/目标/算法, 不复制完整配置)
-    audit_domain.append_entry(
-        db,
-        actor_id=user_id or proj.owner_id,
-        action="config.saved",
-        entity_type="calc_config",
-        entity_id=row.id,
-        actor_type="user",
-        extra={
-            "project_id": project_id,
-            "version": row.version,
-            "status": row.status,
-            "variables": len(config.get("variables") or []),
-            "objectives": len(config.get("objectives") or []),
-            "constraints": len(config.get("constraints") or []),
-            "algorithm": row.algorithm,
-            "random_seed": config.get("random_seed"),
-        },
-    )
-    # 同步当前草稿内容的 calc_config 节(快照装配/项目包导出以草稿内容为
-    # 权威输入, 不更新则保存的配置不进入计算快照与导出包)
-    _sync_draft_config(db, proj, config, row)
-    db.commit()
-    # row 为 configuration 域记录(已物化值对象), 无需 ORM refresh。
-    return row
 
 
 def _row_to_algorithm(row: CalcConfigRecord) -> dict:
@@ -1286,8 +1056,12 @@ def _row_to_algorithm(row: CalcConfigRecord) -> dict:
     return {"mode": "manual", "name": algo_id}
 
 
-def _row_to_config(row: CalcConfigRecord) -> dict:
-    """CalcConfig 行 -> 计算配置 dict（ORM 行与域记录同形，统一经记录消费）。"""
+def row_to_config(row: CalcConfigRecord) -> dict:
+    """CalcConfig 行 -> 计算配置 dict（公开序列化，与旧私有函数同形）。
+
+    DB 算法列 → 配置算法段：NULL 为 auto 模式；其余映射回注册表算法 id，
+    未注册短名原样返回 manual。
+    """
     return {
         "parameters": row.params or {},
         "variables": row.variables or [],
@@ -1298,6 +1072,11 @@ def _row_to_config(row: CalcConfigRecord) -> dict:
         "tolerances": row.tolerances or {},
         "random_seed": row.random_seed,
     }
+
+
+# ---------------------------------------------------------------------------
+# 元数据: 参数规格与算法注册表
+# ---------------------------------------------------------------------------
 
 
 def _param_meta(p: ParameterSpec) -> dict:
@@ -1348,49 +1127,6 @@ def parameter_metadata(graph: dict) -> dict:
                 name: {k: v for k, v in spec.items()} for name, spec in ENVIRONMENTAL_PARAM_SPECS.items()
             },
         },
-    }
-
-
-def get_config(project_id: int, db: Session | None = None) -> dict:
-    """读取当前计算配置(未保存时返回生成的默认配置, 不带版本)。
-
-    返回:
-        {"config": dict, "meta": dict, "version": int|None, "status": str, "updated_at": str|None}
-    """
-    if db is None:
-        with SessionLocal() as session:
-            return _read_config(session, project_id)
-    return _read_config(db, project_id)
-
-
-def _read_config(db: Session, project_id: int) -> dict:
-    if project_domain.get_project(db, project_id) is None:
-        raise NotFoundError(
-            f"项目不存在: {project_id}",
-            code="RES-MISS-003",
-            message_key="ies.diag.res.not_found",
-            params={"project_id": project_id},
-        )
-    graph = load_work_graph(db, project_id)
-    meta = parameter_metadata(graph)
-    configs = [
-        c for c in configuration_domain.list_calc_configs(db, project_id) if c.name == DEFAULT_CONFIG_NAME
-    ]
-    row = max(configs, key=lambda c: c.version, default=None)
-    if row is None:
-        return {
-            "config": _build_default_config(db, project_id),
-            "meta": meta,
-            "version": None,
-            "status": "draft",
-            "updated_at": None,
-        }
-    return {
-        "config": _row_to_config(row),
-        "meta": meta,
-        "version": row.version,
-        "status": row.status,
-        "updated_at": row.updated_at,
     }
 
 

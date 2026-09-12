@@ -364,8 +364,16 @@ def test_overrides_scope_violations_rejected(client: TestClient, db_session: Ses
     base = _overrides(_profile()).to_dict()
 
     cases: list[dict] = [
-        {**base, "finance_types": {**base["finance_types"], "new_tech": {"upfront_capex": {"fixed": {"value": "1", "unit": "CNY"}}}}},  # 新增 finance_type
-        {**base, "energy_prices": {**base["energy_prices"], "new_price": {"kind": "constant", "value": {"value": "1", "unit": "CNY/kWh"}}}},  # 新增 price_id
+        # 新增 finance_type
+        {**base, "finance_types": {
+            **base["finance_types"],
+            "new_tech": {"upfront_capex": {"fixed": {"value": "1", "unit": "CNY"}}},
+        }},
+        # 新增 price_id
+        {**base, "energy_prices": {
+            **base["energy_prices"],
+            "new_price": {"kind": "constant", "value": {"value": "1", "unit": "CNY/kWh"}},
+        }},
         {
             **base,
             "finance_types": {
@@ -376,8 +384,15 @@ def test_overrides_scope_violations_rejected(client: TestClient, db_session: Ses
                 },
             },
         },
-        {**base, "energy_prices": {"grid_import": {"carrier": "heat", "direction": "purchase", "kind": "constant", "value": {"value": "1", "unit": "CNY/kWh"}}}},  # 改写 carrier
-        {**base, "profile_ref": {"id": "cn-north-demo", "revision": 1}},  # profile_ref 非精确 {id} 形态
+        # 改写 carrier
+        {**base, "energy_prices": {
+            "grid_import": {
+                "carrier": "heat", "direction": "purchase", "kind": "constant",
+                "value": {"value": "1", "unit": "CNY/kWh"},
+            },
+        }},
+        # profile_ref 非精确 {id} 形态
+        {**base, "profile_ref": {"id": "cn-north-demo", "revision": 1}},
     ]
     for i, bad in enumerate(cases):
         resp = client.put(

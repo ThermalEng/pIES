@@ -1,7 +1,8 @@
-"""财务三件套与规划配置 revision 用例(Wave 2 W2-A: application/configuration)。
+"""财务三件套与规划配置 revision 用例(application/configuration)。
 
-从 ``iesplan.services.config_revisions`` 复制的 finance profile / overrides /
-planning 读写编排，旧服务保留未删（待 Wave 3 接入、Wave 5 删除）。
+finance profile / overrides / planning 读写编排（旧
+``iesplan.services.config_revisions`` 已删除），经 configuration/project
+域公开门面 + finance 值对象 + planning 域规则 + storage 公开门面实现。
 
 复制来源（基线 5c40b01 ``services/config_revisions.py``，0.6.5 条目 1-2）：
 - Profile 登记：``register_finance_profile`` / ``get_finance_profile_by_ref``

@@ -6,7 +6,25 @@
 
 from __future__ import annotations
 
-from iesplan.configuration import persistence
+from iesplan.configuration import calc, persistence
+from iesplan.configuration.calc import (
+    ALGO_DB_CLASS,
+    DEFAULT_CONFIG_NAME,
+    ECONOMIC_PARAM_SPECS,
+    ENVIRONMENTAL_PARAM_SPECS,
+    OBJECTIVE_METRICS,
+    PREDEFINED_CONSTRAINT_KINDS,
+    SOLVER_ID,
+    VARIABLE_TYPES,
+    build_default_config,
+    list_algorithms_meta,
+    normalize_config,
+    normalize_devices,
+    parameter_metadata,
+    resolve_device_type,
+    row_to_config,
+    validate_config,
+)
 from iesplan.configuration.contracts import (
     CalcConfigRecord,
     ConfigurationConflictError,
@@ -41,6 +59,14 @@ register_profile = persistence.register_profile
 update_calc_config = persistence.update_calc_config
 
 __all__ = [
+    "ALGO_DB_CLASS",
+    "DEFAULT_CONFIG_NAME",
+    "ECONOMIC_PARAM_SPECS",
+    "ENVIRONMENTAL_PARAM_SPECS",
+    "OBJECTIVE_METRICS",
+    "PREDEFINED_CONSTRAINT_KINDS",
+    "SOLVER_ID",
+    "VARIABLE_TYPES",
     "CalcConfigRecord",
     "ConfigurationConflictError",
     "ConfigurationNotFoundError",
@@ -52,6 +78,8 @@ __all__ = [
     "append_effective",
     "append_overrides",
     "append_planning",
+    "build_default_config",
+    "calc",
     "create_calc_config",
     "freeze_calc_config",
     "get_calc_config",
@@ -63,11 +91,18 @@ __all__ = [
     "get_planning_revision",
     "get_profile",
     "get_profile_row",
+    "list_algorithms_meta",
     "list_calc_configs",
     "list_profiles",
     "next_effective_revision",
     "next_overrides_revision",
     "next_planning_revision",
+    "normalize_config",
+    "normalize_devices",
+    "parameter_metadata",
     "register_profile",
+    "resolve_device_type",
+    "row_to_config",
     "update_calc_config",
+    "validate_config",
 ]

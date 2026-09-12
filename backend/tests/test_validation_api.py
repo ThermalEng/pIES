@@ -18,15 +18,15 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from iesplan.application import identity
+from iesplan.application.configuration import calc_config
+from iesplan.application.projects import lifecycle as project_ops
+from iesplan.application.validations import precheck as validation_ops
 from iesplan.config import settings
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
 from iesplan.models.identity import User
 from iesplan.models.project import Project
-from iesplan.services import config as config_service
-from iesplan.application import identity
-from iesplan.services import project as project_service
-from iesplan.services import validation as validation_service
 
 #: 设备类型常量
 GRID = "ies.device.grid_connection"
@@ -137,10 +137,10 @@ def client(factory: sessionmaker, data_dir: Path) -> Iterator[TestClient]:
 
 
 def _create_project(factory: sessionmaker, name: str = "校验测试项目") -> int:
-    """经项目服务创建项目(工程师种子创建; 管理员不持有项目), 返回项目 id。"""
+    """经项目用例创建项目(工程师种子创建; 管理员不持有项目), 返回项目 id。"""
     with factory() as session:
         engineer = session.get(User, 2)
-        project = project_service.create_project(
+        project = project_ops.create_project(
             session, engineer, name,
             baseline_resolution="1h", baseline_leap_year=False, baseline_scenario_mode="single",
         )
@@ -250,8 +250,8 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     bind_result = _bind_version(client, pid, version_id)
     # 3) 保存计算配置(消除未保存警告; 绑定后草稿修订已推进)
     with factory() as session:
-        current = config_service.get_config(pid, session)
-        config_service.save_config(session, pid, current["config"], bind_result["revision"])
+        current = calc_config.get_config(session, pid)
+        calc_config.save_config(session, pid, current["config"], bind_result["revision"])
         session.commit()
     # 4) 财务基准确认
     resp = client.post(
@@ -323,7 +323,7 @@ def test_baseline_nondefault_config_confirm_not_stale(
     pid = _create_project(factory)
     # 1) 保存非默认经济参数(贴现 0.05 / 税率 0.2 / 年限 15 / 折旧 5)
     with factory() as session:
-        current = config_service.get_config(pid, session)
+        current = calc_config.get_config(session, pid)
         cfg = current["config"]
         cfg["parameters"]["economic"] = {
             "discount_rate": 0.05,
@@ -333,14 +333,14 @@ def test_baseline_nondefault_config_confirm_not_stale(
             "currency": "CNY",
         }
         cfg["irr_floor"] = 0.06
-        revision = config_service._current_draft_revision(session, pid)
-        config_service.save_config(session, pid, cfg, revision)
+        revision = calc_config._current_draft_revision(session, pid)
+        calc_config.save_config(session, pid, cfg, revision)
         session.commit()
     # 2) 按 _current_assumptions 同源键集确认
     with factory() as session:
-        current = config_service.get_config(pid, session)
+        current = calc_config.get_config(session, pid)
         project = session.get(Project, pid)
-        assumptions = validation_service._current_assumptions(project, current["config"])
+        assumptions = validation_ops._current_assumptions(project, current["config"])
     resp = client.post(
         f"/api/projects/{pid}/validation/baseline-confirm",
         json={"assumptions": assumptions},

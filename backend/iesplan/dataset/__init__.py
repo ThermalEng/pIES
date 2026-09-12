@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from iesplan.dataset import persistence
+from iesplan.dataset import persistence, tables
 from iesplan.dataset.contracts import (
     DatasetConflictError,
     DatasetFileRecord,
@@ -15,6 +15,31 @@ from iesplan.dataset.contracts import (
     DatasetVersionRecord,
 )
 from iesplan.dataset.repository import DatasetRepository
+from iesplan.dataset.tables import (
+    DATA_FILE_DECODE,
+    DATA_FILE_EMPTY,
+    DATA_FILE_ROW_WIDTH,
+    DATA_FILE_TS_PARSE,
+    DATA_TS_OUT_CALENDAR,
+    DATA_TS_OUT_OF_ORDER,
+    DATA_TS_ROW_COUNT,
+    DATA_TS_STEP_MISALIGNED,
+    DEFAULT_SOURCE_CATEGORY,
+    REQUIRED_COLUMNS,
+    REQUIRED_FIELDS,
+    SAMPLE_LICENSE,
+    STANDARD_FIELDS,
+    TIMELINE_MAP,
+    TIMESTAMP_COL,
+    DataValidationError,
+    FieldSpec,
+    build_quality_report,
+    get_template,
+    normalized_to_csv_bytes,
+    parse_csv,
+    unit_matches,
+    validate_dataset,
+)
 
 add_file = persistence.add_file
 create_dataset = persistence.create_dataset
@@ -31,17 +56,36 @@ list_versions_by_ids = persistence.list_versions_by_ids
 set_dataset_status = persistence.set_dataset_status
 
 __all__ = [
+    "DATA_FILE_DECODE",
+    "DATA_FILE_EMPTY",
+    "DATA_FILE_ROW_WIDTH",
+    "DATA_FILE_TS_PARSE",
+    "DATA_TS_OUT_CALENDAR",
+    "DATA_TS_OUT_OF_ORDER",
+    "DATA_TS_ROW_COUNT",
+    "DATA_TS_STEP_MISALIGNED",
+    "DEFAULT_SOURCE_CATEGORY",
+    "REQUIRED_COLUMNS",
+    "REQUIRED_FIELDS",
+    "SAMPLE_LICENSE",
+    "STANDARD_FIELDS",
+    "TIMELINE_MAP",
+    "TIMESTAMP_COL",
+    "DataValidationError",
     "DatasetConflictError",
     "DatasetFileRecord",
     "DatasetNotFoundError",
     "DatasetRecord",
     "DatasetRepository",
     "DatasetVersionRecord",
+    "FieldSpec",
     "add_file",
+    "build_quality_report",
     "create_dataset",
     "create_version",
     "get_dataset",
     "get_latest_version",
+    "get_template",
     "get_version",
     "get_version_by_no",
     "list_dataset_ids",
@@ -49,5 +93,10 @@ __all__ = [
     "list_files",
     "list_versions",
     "list_versions_by_ids",
+    "normalized_to_csv_bytes",
+    "parse_csv",
     "set_dataset_status",
+    "tables",
+    "unit_matches",
+    "validate_dataset",
 ]

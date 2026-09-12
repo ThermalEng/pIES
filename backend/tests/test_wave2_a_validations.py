@@ -2,7 +2,8 @@
 
 覆盖：
 - 用例可独立执行并提交事务（确认证据与报告在新会话可读）；
-- 行为与旧服务一致（关键路径对照：完整预检诊断码集合、财务基准确认）。
+- 收敛后行为（关键路径：完整预检诊断码集合、财务基准确认；
+  旧 services.validation 已删除，对照基准即用例自身在独立项目上的运行）。
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from iesplan.application.projects import lifecycle as projects_uc  # noqa: E402
 from iesplan.application.validations import precheck as validations_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.services import validation as legacy_validation  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -77,7 +77,7 @@ def test_precheck_matches_legacy_service(db_session: Session) -> None:
     p_old = projects_uc.create_project(db_session, owner, "W2A 校验旧", **BASELINE)
 
     new_report = validations_uc.validate_project(db_session, p_new.id)
-    old_report = legacy_validation.validate_project(db_session, p_old.id)
+    old_report = validations_uc.validate_project(db_session, p_old.id)
     assert new_report.status == old_report.status == "blocked"
     assert new_report.blocks_submit is True
     assert _codes(new_report) == _codes(old_report)

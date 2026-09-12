@@ -20,18 +20,21 @@ from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from iesplan.application.datasets import (
+    STANDARD_FIELDS,
+    TIMESTAMP_COL,
+    add_object_ref,
+    create_builtin_sample,
+    get_template,
+    parse_csv,
+    put_object,
+    validate_dataset,
+)
 from iesplan.config import settings
 from iesplan.core.timeaxis import build_axis
 from iesplan.db import Base, get_db
 from iesplan.models.dataset import DatasetFile, DatasetVersion
 from iesplan.models.project import Project
-from iesplan.services import dataset as ds_service
-from iesplan.services.dataset import (
-    STANDARD_FIELDS,
-    TIMESTAMP_COL,
-    parse_csv,
-    validate_dataset,
-)
 
 #: 标准数据列(不含 timestamp)
 DATA_COLS: tuple[str, ...] = tuple(STANDARD_FIELDS.keys())
@@ -182,7 +185,7 @@ def make_df(rows: list[dict]) -> pd.DataFrame:
 
 def test_template_contains_bilingual_headers_and_units() -> None:
     """模板应含双语注释行、全部标准列、单位与示例, 且可被 parse_csv 解析。"""
-    content = ds_service.get_template("1h")
+    content = get_template("1h")
     text = content.decode("utf-8")
     assert text[0] == "\ufeff" and text.lstrip("\ufeff").startswith("#")  # BOM + 注释行
     assert "pIES" in text
@@ -204,7 +207,7 @@ def test_template_contains_bilingual_headers_and_units() -> None:
 def test_template_invalid_resolution_raises() -> None:
     """非法分辨率应抛 ValueError。"""
     with pytest.raises(ValueError):
-        ds_service.get_template("1m")
+        get_template("1m")
     with pytest.raises(ValueError):
         parse_csv(b"a\n", "1m")
 
@@ -415,13 +418,13 @@ def test_validate_15min_resolution() -> None:
 def test_put_object_no_dedup_and_ref_count(session: Session, data_dir: Path) -> None:
     """每次写入新建对象(无内容去重); 引用计数递增; 文件落盘到对象 id 路径。"""
     payload = b"hello,dataset,1\n1,2,3\n"
-    obj1 = ds_service.put_object(session, payload, "text/csv")
-    obj2 = ds_service.put_object(session, payload, "text/csv")
+    obj1 = put_object(session, payload, "text/csv")
+    obj2 = put_object(session, payload, "text/csv")
     assert obj1.id != obj2.id  # 同内容也不复用
     assert obj1.oid != obj2.oid
     obj_path = data_dir / "objects" / obj1.oid
     assert obj_path.read_bytes() == payload
-    ref = ds_service.add_object_ref(session, obj1, "dataset_file", "dataset_files", 1, purpose="测试")
+    ref = add_object_ref(session, obj1, "dataset_file", "dataset_files", 1, purpose="测试")
     session.commit()
     assert ref.object_id == obj1.id
     # STO-05: 句柄为不可变快照, ref_count 经 object_info 查新视图
@@ -429,7 +432,7 @@ def test_put_object_no_dedup_and_ref_count(session: Session, data_dir: Path) -> 
 
     assert object_info(session, obj1.id)["ref_count"] == 1
     # 内容不同 → 不同对象
-    obj3 = ds_service.put_object(session, b"other", "text/csv")
+    obj3 = put_object(session, b"other", "text/csv")
     assert obj3.id != obj1.id
     assert obj3.oid
 
@@ -761,13 +764,14 @@ def test_sample_service_fresh_data_per_version(session: Session, data_dir: Path)
     user = make_user(session, "alice")
     proj = _make_project(session, user)
     session.commit()
-    v1 = ds_service.create_builtin_sample(session, proj.id, "1h", region="beijing")
-    v2 = ds_service.create_builtin_sample(session, proj.id, "1h", region="beijing")
+    v1 = create_builtin_sample(session, proj.id, "1h", region="beijing")
+    v2 = create_builtin_sample(session, proj.id, "1h", region="beijing")
     assert v1.dataset_id == v2.dataset_id
-    data_obj = lambda vid: {
-        f.object_id for f in session.query(DatasetFile).filter_by(dataset_version_id=vid)
-        if f.file_kind == "data"
-    }
+    def data_obj(vid: int) -> set[int]:
+        return {
+            f.object_id for f in session.query(DatasetFile).filter_by(dataset_version_id=vid)
+            if f.file_kind == "data"
+        }
     assert data_obj(v1.id) != set() and data_obj(v2.id) != set()
     assert data_obj(v1.id).isdisjoint(data_obj(v2.id))
 

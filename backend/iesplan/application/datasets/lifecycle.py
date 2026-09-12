@@ -1,26 +1,15 @@
-"""数据集生命周期用例(Wave 2 W2-A: application/datasets)。
+"""数据集生命周期用例(application/datasets)。
 
-从 ``iesplan.services.dataset`` 复制的数据集全生命周期编排，旧服务保留未删
-（待 Wave 3 接入、Wave 5 删除）。CSV 解析/校验纯函数见 ``csv_validation``
-（同源复制，无语义改动）。
-
-复制来源（基线 5c40b01 ``services/dataset.py``）：
-- 对象存储薄封装：``put_object`` / ``get_object_bytes`` / ``add_object_ref``
-  （委托 storage 公开门面）；
-- 数据集/版本服务：``create_dataset`` / ``upload_dataset_version`` /
-  ``get_dataset`` / ``require_project`` / ``version_files_summary`` /
-  ``list_dataset_versions`` / ``get_dataset_version`` /
-  ``list_datasets_with_latest``；
-- 内置样例数据：``create_builtin_sample``（含确定性合成行生成）。
+数据集全生命周期编排（旧 ``services.dataset`` 已删除，权威 CSV 规则与
+persistence 归 dataset 域）。CSV 解析/校验纯函数直用 dataset 域唯一实现
+（``iesplan.dataset.tables``，经领域公开门面）。
 
 事务：写用例顶层函数拥有提交/回滚（``db.commit`` 收尾，失败 ``db.rollback``）；
-内部步骤只 ``flush``（旧 ``_commit_version`` 的内层 ``commit`` 与
-``create_dataset`` 冲突分支的内层 ``rollback`` 在此层取消，由顶层统一）。
-读用例不提交事务。
+内部步骤只 ``flush``，由顶层统一。读用例不提交事务。
 
 调用方向：``api → application.datasets.lifecycle → {dataset, project,
-identity, storage} 域公开门面 + csv_validation 纯函数``；不导入 ORM、
-不导入其他域内部模块、不调用 ``services.*``。
+identity, storage} 域公开门面``；不导入 ORM、不导入其他域内部模块、
+不调用 ``services.*``。
 """
 
 from __future__ import annotations
@@ -36,7 +25,16 @@ from sqlalchemy.orm import Session
 from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
-from iesplan.application.datasets.csv_validation import (
+from iesplan.core.diagnostics import (
+    DATA_COL_UNIT_UNKNOWN,
+    PARAM_UNIT_MISMATCH,
+    SEVERITY_ERROR,
+    Diagnostic,
+    make_diag,
+)
+from iesplan.core.errors import ConflictError, NotFoundError
+from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis
+from iesplan.dataset import (
     DEFAULT_SOURCE_CATEGORY,
     SAMPLE_LICENSE,
     STANDARD_FIELDS,
@@ -50,14 +48,6 @@ from iesplan.application.datasets.csv_validation import (
     unit_matches,
     validate_dataset,
 )
-from iesplan.core.diagnostics import (
-    DATA_COL_UNIT_UNKNOWN,
-    SEVERITY_ERROR,
-    Diagnostic,
-    make_diag,
-)
-from iesplan.core.errors import ConflictError, NotFoundError
-from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis
 from iesplan.dataset.contracts import (
     DatasetConflictError,
     DatasetRecord,
@@ -261,7 +251,7 @@ def _build_fields_info(
 
 
 def _field_location(field: str, rows: list[int] | None = None) -> dict:
-    """构造字段定位字典（与 csv_validation 同构，版本写入路径本地复用）。"""
+    """构造字段定位字典（与 dataset 域 tables 同构，版本写入路径本地复用）。"""
     loc = {"object_type": "time_series", "object_id": "", "field": field}
     if rows:
         loc["row"] = rows[:5]
