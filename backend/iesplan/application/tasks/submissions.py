@@ -142,10 +142,7 @@ def map_business_outcome(solver_status: str) -> str:
     """求解器状态 → 业务结局(未知状态保守视为 normal_completion)。"""
     return _SOLVER_OUTCOME.get(solver_status, "normal_completion")
 
-#: 项目所有者能力集(与 services.project.OWNER_CAPABILITIES 同值, 复制不改语义)
-_OWNER_CAPABILITIES: frozenset[str] = frozenset(
-    {"view", "edit", "manage_lifecycle", "export_package", "export_excel"}
-)
+#: 项目所有者能力集唯一权威: iesplan.project.OWNER_CAPABILITIES(经 project_domain 取用, 此处不复制)。
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +239,7 @@ def ensure_project_access(db: Session, user: UserRecord, project_id: int, *capab
     """
     require_project(db, project_id)
     project = project_domain.get_project(db, project_id)
-    granted = set(_OWNER_CAPABILITIES) if project is not None and project.owner_id == user.id else set()
+    granted = set(project_domain.OWNER_CAPABILITIES) if project is not None and project.owner_id == user.id else set()
     if "admin" in identity_domain.user_roles(db, user.id):
         granted |= {"view", "manage_lifecycle"}
     missing = [cap for cap in capabilities if cap not in granted]
