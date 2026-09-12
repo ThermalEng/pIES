@@ -1,11 +1,11 @@
 """运维健康只读探针(application/health.py, W4-health)。
 
 api/health.py 的取数门面: 存活 ping、任务/项目按状态计数、用户总数、
-队列状态、存储用量与抽样校验, 全部只读透传领域/服务/存储公开门面。
+队列状态、存储用量与抽样校验, 全部只读透传领域/存储公开门面。
 本层不导入 iesplan.models.*、不提交事务, 不新增校验/hash/回退。
 
 调用方向: api.health → application.health → {tasks/project/identity
-领域门面, services.queue, storage}。
+领域门面(含 tasks 域队列视图), storage}。
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
-from iesplan.services import queue
 from iesplan.storage import sample_verify as _sample_verify
 from iesplan.storage import storage_stats as _storage_stats
 
@@ -77,7 +76,7 @@ def count_users(db: Session) -> int:
 
 def queue_status() -> dict[str, Any]:
     """队列服务状态(后端类型/降级标记/各池深度；无 DB 写)。"""
-    return queue.queue_status()
+    return tasks_domain.queue_status()
 
 
 def storage_stats(db: Session) -> dict[str, Any]:

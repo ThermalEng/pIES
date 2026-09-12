@@ -7,7 +7,7 @@ running 经 cancelling)→ 重试同快照 → 槽限制(2 并发)→ 存储门�
 - 数据库: SQLite :memory:(models 全部表 create_all, StaticPool 共享连接);
 - 队列: IESPLAN_QUEUE=memory 强制内存后端(单进程, 无外部 Redis 依赖);
 - 应用: create_app() + include_router(projects/tasks), dependency_overrides 替换 get_db;
-- 假执行器: 测试直接调用 tasks_service.claim_and_run / record_progress /
+- 假执行器: 测试直接调用 tasks 用例 claim_task / worker 用例 record_task_progress /
   complete_task 等服务入口模拟 Worker 行为(Worker 消费端在下一波次实现)。
 """
 
@@ -33,6 +33,8 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan.application import tasks as tasks_uc  # noqa: E402
+from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.assembly import ValidatedAssemblyArtifact  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
@@ -40,9 +42,8 @@ from iesplan.main import create_app  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
-from iesplan.services import queue  # noqa: E402
-from iesplan.services import tasks as tasks_service
 from iesplan.storage.persistence import StoredObject  # noqa: E402
+from iesplan.tasks import queue  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -207,7 +208,7 @@ def _submit_task(
 
 def _claim(db: Session, task_id: int, worker_id: str = "fake-exec-1") -> Any:
     """假执行器: 领取任务(占槽 + 建尝试 + 建租约 + running)。"""
-    claim = tasks_service.claim_and_run(db, task_id, worker_id)
+    claim = tasks_uc.claim_task(db, task_id, worker_id)
     db.commit()
     return claim
 
@@ -217,8 +218,8 @@ def _run_task(
 ) -> Task:
     """假执行器: 完整推进一次任务(领取 → 进度 → 完成)。"""
     _claim(db, task_id, worker_id)
-    tasks_service.record_progress(db, task_id, "solve", 50.0, {"iterations": 1})
-    task = tasks_service.complete_task(db, task_id, solver_status=solver_status)
+    worker_app.record_task_progress(db, task_id, "solve", 50.0, {"iterations": 1})
+    task = worker_app.complete_task(db, task_id, solver_status=solver_status)
     db.commit()
     return task
 
@@ -396,7 +397,7 @@ def test_state_advance_with_fake_executor(client: TestClient, db: Session) -> No
     assert slot.in_use == 1
 
     # 进度: PG 持久进度 + Redis 秒级进度
-    tasks_service.record_progress(db, task_id, "solve", 45.5, {"iterations": 120})
+    worker_app.record_task_progress(db, task_id, "solve", 45.5, {"iterations": 120})
     db.commit()
     row = db.execute(select(TaskProgress).where(TaskProgress.attempt_id == claim.attempt_id)).scalar_one()
     assert float(row.progress_percent) == 45.5
@@ -404,14 +405,14 @@ def test_state_advance_with_fake_executor(client: TestClient, db: Session) -> No
     assert float(live["percent"]) == 45.5
 
     # 完成: OPTIMAL → normal_completion; 尝试 succeeded; 租约 released; 槽释放
-    completed = tasks_service.complete_task(db, task_id, solver_status="OPTIMAL")
+    completed = worker_app.complete_task(db, task_id, solver_status="OPTIMAL")
     db.commit()
     assert completed.status == "completed"
     assert completed.business_outcome == "normal_completion"
     assert db.get(TaskLease, lease.id).status == "released"
     assert db.execute(select(ComputeSlot)).scalars().all()[0].in_use == 0
     # 重复完成幂等
-    again = tasks_service.complete_task(db, task_id, solver_status="OPTIMAL")
+    again = worker_app.complete_task(db, task_id, solver_status="OPTIMAL")
     db.commit()
     assert again.status == "completed"
 
@@ -436,10 +437,10 @@ def test_state_machine_guards(client: TestClient, db: Session) -> None:
     task_id = body["task"]["id"]
     _run_task(db, task_id)
     with pytest.raises(Exception) as exc_info:
-        tasks_service.cancel_task(db, task_id, reason="late-cancel")
+        tasks_uc.cancel_task(db, task_id, reason="late-cancel")
     assert exc_info.value.http_status == 409  # CancelDeniedError
     with pytest.raises(Exception) as exc_info:
-        tasks_service.fail_task(db, task_id, code="TASK-SOLVE-001", message="late-fail")
+        worker_app.fail_task(db, task_id, code="TASK-SOLVE-001", message="late-fail")
     assert exc_info.value.http_status == 409
 
 
@@ -474,7 +475,7 @@ def test_cancel_flow(client: TestClient, db: Session) -> None:
     resp = client.post(f"/api/projects/{pid}/tasks/{running_id}/cancel", headers=_h(client, owner))
     assert resp.status_code == 200 and resp.json()["cancel_status"] == "cancelling"
     # Worker 收拢确认
-    task = tasks_service.acknowledge_cancel(db, running_id)
+    task = tasks_uc.acknowledge_cancel(db, running_id)
     db.commit()
     assert task.status == "cancelled"
     assert queue.get_cancel(running_id) is None
@@ -517,7 +518,7 @@ def test_retry_reuses_same_snapshot(client: TestClient, db: Session) -> None:
     task = db.get(Task, task_id)
     assert task.attempt_count == 2
     # 第二次完成
-    tasks_service.complete_task(db, task_id, solver_status="TIME_LIMIT_WITH_INCUMBENT")
+    worker_app.complete_task(db, task_id, solver_status="TIME_LIMIT_WITH_INCUMBENT")
     db.commit()
     assert db.get(Task, task_id).status == "completed"
     assert db.get(Task, task_id).business_outcome == "restricted_results"
@@ -560,13 +561,13 @@ def test_slot_limit_two_concurrent(client: TestClient, db: Session) -> None:
     assert db.get(Task, task_ids[1]).status == "running"
 
     # 第 3 个: 无空槽 → 领取失败, 保持 queued
-    c3 = tasks_service.claim_and_run(db, task_ids[2], "fake-w3")
+    c3 = tasks_uc.claim_task(db, task_ids[2], "fake-w3")
     db.commit()
     assert c3 is None
     assert db.get(Task, task_ids[2]).status == "queued"
 
     # 释放一槽(完成 t1)后第 3 个可领取; 池总占用回到 1
-    tasks_service.complete_task(db, task_ids[0], solver_status="OPTIMAL")
+    worker_app.complete_task(db, task_ids[0], solver_status="OPTIMAL")
     db.commit()
     slots = db.execute(select(ComputeSlot)).scalars().all()
     assert sum(s.in_use for s in slots) == 1

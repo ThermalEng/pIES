@@ -1,6 +1,6 @@
 """任务用例族(application/tasks): 提交/取消/重试/租约。
 
-复制自 ``services.tasks`` + ``services.queue`` 的编排, 旧服务只读保留。
+任务编排的唯一实现(已收敛原 ``services.tasks`` + ``services.queue`` 语义)。
 顶层用例拥有事务提交/回滚, 内部步骤只 flush。
 """
 
@@ -28,10 +28,13 @@ from iesplan.application.tasks.submissions import (
     acquire_slot,
     cancel_task,
     claim_task,
+    ensure_project_access,
     ensure_task_belongs,
     estimate_storage,
     list_cleanup_suggestions,
+    map_business_outcome,
     release_slot,
+    require_project,
     retry_task,
     submit_task,
 )
@@ -56,11 +59,14 @@ __all__ = [
     "claim_task",
     "clear_task_cancel",
     "enqueue_task",
+    "ensure_project_access",
     "ensure_task_belongs",
     "estimate_storage",
     "list_cleanup_suggestions",
+    "map_business_outcome",
     "queue_status",
     "release_slot",
+    "require_project",
     "retry_task",
     "storage_stats",
     "submit_task",

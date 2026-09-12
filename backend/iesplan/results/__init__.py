@@ -25,9 +25,11 @@ create_report = persistence.create_report
 create_system_assessment = persistence.create_system_assessment
 current_selection = persistence.current_selection
 evidence_statuses_for_tasks = persistence.evidence_statuses_for_tasks
+flip_index_for_version = persistence.flip_index_for_version
 get_assessment = persistence.get_assessment
 get_evidence = persistence.get_evidence
 get_index = persistence.get_index
+insert_index = persistence.insert_index
 latest_assessment = persistence.latest_assessment
 latest_evidence_for_task = persistence.latest_evidence_for_task
 latest_index_for_version = persistence.latest_index_for_version
@@ -37,6 +39,7 @@ list_evidence_for_tasks = persistence.list_evidence_for_tasks
 list_package_assessments = persistence.list_package_assessments
 list_package_index = persistence.list_package_index
 list_reports = persistence.list_reports
+point_index_assessment = persistence.point_index_assessment
 point_index_latest = persistence.point_index_latest
 select_result = persistence.select_result
 
@@ -56,9 +59,11 @@ __all__ = [
     "create_system_assessment",
     "current_selection",
     "evidence_statuses_for_tasks",
+    "flip_index_for_version",
     "get_assessment",
     "get_evidence",
     "get_index",
+    "insert_index",
     "latest_assessment",
     "latest_evidence_for_task",
     "latest_index_for_version",
@@ -68,6 +73,7 @@ __all__ = [
     "list_package_assessments",
     "list_package_index",
     "list_reports",
+    "point_index_assessment",
     "point_index_latest",
     "select_result",
 ]

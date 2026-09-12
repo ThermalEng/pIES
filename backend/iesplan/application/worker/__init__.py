@@ -1,8 +1,8 @@
 """Worker 边界用例包(application/worker): 薄 re-export, 无实现。
 
-本包收拢 Worker 对 services/storage/领域门面与行级读写的直接调用,
+本包收拢 Worker 对 storage/领域门面与行级读写的直接调用,
 worker 层只经本包推进, 不再直连 ``services.*`` 与 ``models.*``;
-依赖方向: worker → application → (services/storage/领域门面)。
+依赖方向: worker → application → (storage/领域门面)。
 
 子模块:
 - lease_cases: 领取/进度/完成/失败/槽释放/队列视图/证据存取转调与
@@ -115,6 +115,7 @@ __all__ = [
     "lease_cases",
     "load_dataset_blob",
     "load_version_content",
+    "map_business_outcome",
     "parse_dataset_csv",
     "point_result_assessment",
     "publish_heartbeat",
@@ -131,19 +132,14 @@ __all__ = [
 
 from sqlalchemy.orm import Session
 
-from iesplan.services import queue as queue_service
-from iesplan.services import tasks as tasks_service
+from iesplan import tasks as tasks_domain
+from iesplan.application.tasks.submissions import map_business_outcome
 from iesplan.storage import get_object, put_object
 
 
 def cancel_requested(task_id: int) -> bool:
     """任务是否存在取消信号(可重建视图)。"""
-    return queue_service.get_cancel(task_id) is not None
-
-
-def map_business_outcome(solver_status: str) -> str:
-    """求解器状态 → 业务结局(转调任务域映射)。"""
-    return tasks_service.map_business_outcome(solver_status)
+    return tasks_domain.get_cancel(task_id) is not None
 
 
 def store_worker_object(

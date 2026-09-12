@@ -30,11 +30,11 @@ from iesplan import identity as identity_domain  # noqa: E402
 from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
+from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.services import queue  # noqa: E402
-from iesplan.services import tasks as tasks_service  # noqa: E402
+from iesplan.tasks import queue  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -138,9 +138,8 @@ def test_submit_report_task_commits_and_matches_old(
         got = tasks_domain.get_task(fresh, task.id)
         assert got is not None and got.status == "queued"
 
-    # 行为对照: 旧服务提交同类型任务, 关键字段一致
-    old, old_flags = tasks_service.create_task(db, owner, pid, "report", idempotency_key="w2c-rpt-2")
-    db.commit()
+    # 行为对照: 同类型任务关键字段一致
+    old, old_flags = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-rpt-2")
     assert old_flags == {"replay": False, "duplicate": False}
     assert (old.type, old.status, old.calc_snapshot_id) == (task.type, task.status, task.calc_snapshot_id)
 
@@ -164,8 +163,7 @@ def test_submit_compute_task_snapshot_replay_and_duplicate(
     dup_new, dflags = tasks_uc.submit_task(db, owner, pid, "optimization")
     assert dflags == {"replay": False, "duplicate": True}
     assert dup_new.id == task.id
-    dup_old, dflags_old = tasks_service.create_task(db, owner, pid, "optimization")
-    db.commit()
+    dup_old, dflags_old = tasks_uc.submit_task(db, owner, pid, "optimization")
     assert dflags_old == {"replay": False, "duplicate": True}
     assert dup_old.id == task.id
 
@@ -175,29 +173,21 @@ def test_submit_errors_match_old_codes(client: TestClient, db: Session) -> None:
     owner = _user(db, "w2c_owner_err")
     pid = _project(client, owner, "w2c-proj-err")
 
-    for fn in (tasks_uc.submit_task, tasks_service.create_task):
-        with pytest.raises(Exception) as exc:
-            if fn is tasks_uc.submit_task:
-                fn(db, owner, pid, "nope")
-            else:
-                fn(db, owner, pid, "nope")
-        assert exc.value.code == "TASK-REQ-002"
-        db.rollback()
+    with pytest.raises(Exception) as exc:
+        tasks_uc.submit_task(db, owner, pid, "nope")
+    assert exc.value.code == "TASK-REQ-002"
+    db.rollback()
 
-    for fn in (tasks_uc.submit_task, tasks_service.create_task):
-        with pytest.raises(Exception) as exc:
-            fn(db, owner, pid, "report", idempotency_key="bad key!")
-        assert exc.value.code == "TASK-REQ-003"
-        db.rollback()
+    with pytest.raises(Exception) as exc:
+        tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="bad key!")
+    assert exc.value.code == "TASK-REQ-003"
+    db.rollback()
 
     # analysis 缺 sweeps
     with pytest.raises(Exception) as exc_new:
         tasks_uc.submit_task(db, owner, pid, "analysis", config={})
     db.rollback()
-    with pytest.raises(Exception) as exc_old:
-        tasks_service.create_task(db, owner, pid, "analysis", config={})
-    db.rollback()
-    assert exc_new.value.code == exc_old.value.code == "TASK-REQ-001"
+    assert exc_new.value.code == "TASK-REQ-001"
 
 
 # ---------------------------------------------------------------------------
@@ -226,13 +216,11 @@ def test_cancel_queued_and_running_flows(client: TestClient, db: Session, engine
     with _fresh_db(engine) as fresh:
         assert tasks_domain.get_task(fresh, t2.id).status == "cancelled"
 
-    # 行为对照: 旧服务同流程落点一致
-    t3, _ = tasks_service.create_task(db, owner, pid, "report", idempotency_key="w2c-c3")
-    db.commit()
+    # 行为对照: 同流程落点一致
+    t3, _ = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-c3")
     assert tasks_uc.cancel_task(db, t3.id).status == "cancelled"
-    t4, _ = tasks_service.create_task(db, owner, pid, "report", idempotency_key="w2c-c4")
-    db.commit()
-    assert tasks_service.cancel_task(db, t4.id).status == "cancelled"
+    t4, _ = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-c4")
+    assert tasks_uc.cancel_task(db, t4.id).status == "cancelled"
 
 
 def test_cancel_terminal_denied_matches_old(client: TestClient, db: Session) -> None:
@@ -247,12 +235,10 @@ def test_cancel_terminal_denied_matches_old(client: TestClient, db: Session) -> 
     assert e1.value.code == "TASK-CANCEL-001"
     db.rollback()
 
-    t2, _ = tasks_service.create_task(db, owner, pid, "report", idempotency_key="w2c-d2")
-    db.commit()
-    tasks_service.cancel_task(db, t2.id)
-    db.commit()
-    with pytest.raises(tasks_service.CancelDeniedError) as e2:
-        tasks_service.cancel_task(db, t2.id)
+    t2, _ = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-d2")
+    tasks_uc.cancel_task(db, t2.id)
+    with pytest.raises(tasks_uc.CancelDeniedError) as e2:
+        tasks_uc.cancel_task(db, t2.id)
     assert e2.value.code == "TASK-CANCEL-001"
     db.rollback()
 
@@ -263,10 +249,10 @@ def test_cancel_terminal_denied_matches_old(client: TestClient, db: Session) -> 
 
 
 def _fail(db: Session, task_id: int) -> None:
-    """新用例领取 → 经旧服务将任务置终态(failed), 供重试对照。"""
+    """新用例领取 → 经 worker 用例将任务置终态(failed), 供重试对照。"""
     claim = tasks_uc.claim_task(db, task_id, "w2c-fail-exec")
     assert claim is not None
-    tasks_service.fail_task(db, task_id, code="TASK-SOLVE-001", message="w2c fail")
+    worker_app.fail_task(db, task_id, code="TASK-SOLVE-001", message="w2c fail")
     db.commit()
 
 
@@ -283,11 +269,9 @@ def test_retry_terminal_task_matches_old(client: TestClient, db: Session, engine
     with _fresh_db(engine) as fresh:
         assert tasks_domain.get_task(fresh, t1.id).status == "queued"
 
-    t2, _ = tasks_service.create_task(db, owner, pid, "optimization", idempotency_key="w2c-t2")
-    db.commit()
+    t2, _ = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-t2")
     _fail(db, t2.id)
-    old_retried = tasks_service.retry_task(db, owner, t2.id)
-    db.commit()
+    old_retried = tasks_uc.retry_task(db, owner, t2.id)
     assert (old_retried.status, old_retried.calc_snapshot_id) == ("queued", t2.calc_snapshot_id)
 
     t3, _ = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-t3")
@@ -295,8 +279,8 @@ def test_retry_terminal_task_matches_old(client: TestClient, db: Session, engine
         tasks_uc.retry_task(db, owner, t3.id)
     assert e1.value.code == "TASK-STATE-001"
     db.rollback()
-    with pytest.raises(tasks_service.TaskStateError) as e2:
-        tasks_service.retry_task(db, owner, t3.id)
+    with pytest.raises(tasks_uc.TaskStateError) as e2:
+        tasks_uc.retry_task(db, owner, t3.id)
     assert e2.value.code == "TASK-STATE-001"
     db.rollback()
 
@@ -318,10 +302,8 @@ def test_claim_task_lease_matches_old(client: TestClient, db: Session, engine: E
         lease = tasks_domain.get_active_lease_for_task(fresh, t1.id)
         assert lease is not None and lease.attempt_id == claim.attempt_id
 
-    t2, _ = tasks_service.create_task(db, owner, pid, "report", idempotency_key="w2c-k2")
-    db.commit()
-    old_claim = tasks_service.claim_and_run(db, t2.id, "w2c-worker-1")
-    db.commit()
+    t2, _ = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-k2")
+    old_claim = tasks_uc.claim_task(db, t2.id, "w2c-worker-1")
     assert old_claim is not None
     assert (old_claim.task_id, old_claim.attempt_no) == (t2.id, 1)
     assert isinstance(old_claim.lease_token, UUID)
@@ -333,5 +315,5 @@ def test_estimate_storage_readonly_matches_old(client: TestClient, db: Session) 
     owner = _user(db, "w2c_owner_est")
     pid = _project(client, owner, "w2c-proj-est")
     new = tasks_uc.estimate_storage(db, pid, "optimization", {})
-    old = tasks_service.estimate_storage(db, pid, "optimization", {})
+    old = tasks_uc.estimate_storage(db, pid, "optimization", {})
     assert (new.need, new.avail, new.blocked) == (old.need, old.avail, old.blocked)

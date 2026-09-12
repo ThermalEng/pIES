@@ -25,7 +25,7 @@ from worker_testkit import setup_environment  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
-from iesplan.services import queue  # noqa: E402
+from iesplan.tasks import queue  # noqa: E402
 from iesplan.worker import lease  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -397,7 +397,7 @@ class TestTerminal:
     def test_cancel_denied_when_running(self, db: Session, env: dict[str, Any]):
         """取消竞态: 任务未进入 cancelling 时收拢 → TaskStateError(以终态为准)。"""
         claim = _claim(db, env)
-        from iesplan.services.tasks import TaskStateError
+        from iesplan.application.tasks import TaskStateError
 
         with pytest.raises(TaskStateError):
             lease.cancel_attempt(db, claim)

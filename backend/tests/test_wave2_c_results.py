@@ -36,9 +36,8 @@ from iesplan.application import tasks as tasks_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.services import queue  # noqa: E402
-from iesplan.services import results as results_service  # noqa: E402
 from iesplan.storage import put_object  # noqa: E402
+from iesplan.tasks import queue  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -224,21 +223,24 @@ def test_submit_evidence_commits_and_matches_old(
         got = results_domain.get_evidence(fresh, pkg.id)
         assert got is not None and got.status == "complete"
 
-    # 行为对照: 旧服务同任务追加提交, 同为 complete 且行数 +1
+    # 行为对照: 同任务追加提交, 同为 complete 且行数 +1
     before = len(results_domain.list_evidence_for_tasks(db, [task_id]))
-    old = results_service.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
-    db.commit()
+    old = results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
     assert old.status == pkg.status == "complete"
     after = len(results_domain.list_evidence_for_tasks(db, [task_id]))
     assert after == before + 1
 
     # fencing 对照: 错误 token 新旧同为 EVID-FENCE-001
     with pytest.raises(results_uc.EvidenceWriteDeniedError) as e1:
-        results_uc.submit_evidence(db, task_id, claim.attempt_id, "00000000-0000-0000-0000-000000000000", payload)
+        results_uc.submit_evidence(
+            db, task_id, claim.attempt_id, "00000000-0000-0000-0000-000000000000", payload
+        )
     assert e1.value.code == "EVID-FENCE-001"
     db.rollback()
-    with pytest.raises(results_service.EvidenceWriteDeniedError) as e2:
-        results_service.submit_evidence(db, task_id, claim.attempt_id, "00000000-0000-0000-0000-000000000000", payload)
+    with pytest.raises(results_uc.EvidenceWriteDeniedError) as e2:
+        results_uc.submit_evidence(
+            db, task_id, claim.attempt_id, "00000000-0000-0000-0000-000000000000", payload
+        )
     assert e2.value.code == "EVID-FENCE-001"
     db.rollback()
 
@@ -267,9 +269,8 @@ def test_run_assessment_commits_and_matches_old(
         got = results_domain.get_assessment(fresh, asm.id)
         assert got is not None
 
-    # 行为对照: 旧服务评估同证据包, 维度与得分一致, 且为追加新行
-    old = results_service.run_assessment(db, pkg.id, "full", user=owner)
-    db.commit()
+    # 行为对照: 同证据包评估, 维度与得分一致, 且为追加新行
+    old = results_uc.run_assessment(db, pkg.id, "full", user=owner)
     assert old.detail["dimensions"] == asm.detail["dimensions"]
     assert old.overall_score == asm.overall_score
     assert old.id != asm.id
@@ -301,22 +302,18 @@ def test_update_result_index_pointer_and_handover(
         assert results_domain.get_index(fresh, idx1.id) is not None
 
     # 同证据新评估 → 只更新指针(行数不变)
-    asm2 = results_service.run_assessment(db, pkg1.id, "physical", user=owner)
-    db.commit()
+    asm2 = results_uc.run_assessment(db, pkg1.id, "physical", user=owner)
     idx2 = results_uc.update_result_index(db, task_id, asm2.id)
     assert idx2.id == idx1.id and idx2.assessment_id == asm2.id
 
     # 新证据 → 转交 latest(旧行翻转 + 新行)
-    pkg2 = results_service.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
-    db.commit()
+    pkg2 = results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
     asm3 = results_uc.run_assessment(db, pkg2.id, "full", user=owner)
     idx3 = results_uc.update_result_index(db, task_id, asm3.id)
     assert idx3.id != idx1.id and idx3.is_latest is True
     assert results_domain.get_index(db, idx1.id).is_latest is False
 
-    # 旧服务同语义: 同证据更新指针返回同行
-    asm4 = results_service.run_assessment(db, pkg2.id, "physical", user=owner)
-    db.commit()
-    idx4 = results_service.update_result_index(db, task_id, asm4.id)
-    db.commit()
+    # 同语义: 同证据更新指针返回同行
+    asm4 = results_uc.run_assessment(db, pkg2.id, "physical", user=owner)
+    idx4 = results_uc.update_result_index(db, task_id, asm4.id)
     assert idx4.id == idx3.id and idx4.assessment_id == asm4.id

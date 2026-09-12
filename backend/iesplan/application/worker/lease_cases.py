@@ -1,36 +1,50 @@
 """Worker 租约/队列/结果提交用例(application/worker.lease_cases): 领取与收拢转调。
 
-本模块收拢 ``iesplan.worker.lease`` 原先对可重建视图、任务服务与 ORM
+本模块收拢 ``iesplan.worker.lease`` 原先对可重建视图、任务编排与 ORM
 行的直接访问, 只做转调与行级读写搬运, 不新增校验/hash/回退:
 
-- 领取/进度/完成/失败/槽释放 → ``services.tasks``;
-- 出队/心跳/取消信号清除 → ``services.queue``(可重建视图);
+- 领取/进度/完成/失败/槽释放 → tasks 域门面 + 队列可重建视图;
+- 出队/心跳/取消信号清除 → tasks 域队列视图;
 - 证据对象写入/引用 → ``storage.put_object`` / ``storage.add_ref``;
-- 任务/快照/尝试/诊断读与租约 fencing 写 → tasks/results 域门面;
-- 域门面未覆盖的行级 fencing(槽门禁计数、租约续租/释放行数、
-  结果索引翻转/插入)经 SQLAlchemy Core 表视图直写直读(表名 + 列引用),
-  不导入 ``iesplan.models.*``(门禁 8 只扫描 models 导入)。
+- 任务/快照/尝试/诊断读与租约 fencing 写 → tasks/results 域门面。
 
-``Claim`` / ``TaskStateError`` / ``LEASE_TTL_SECONDS`` 由旧服务原样重导出,
-worker 层经本模块取用, 不再直连 ``services.*`` 与 ``models.*``。
+``Claim`` / ``TaskStateError`` / ``LEASE_TTL_SECONDS`` 复用任务提交用例
+同名公开符号, worker 层经本模块取用, 不再直连 ``services.*`` 与 ``models.*``。
 
-依赖方向: worker → application → (services/storage/领域门面)。
+本模块不拥有事务(提交/回滚由 worker 层负责); 内部步骤只经领域公开门面
+写入 + flush。
+
+依赖方向: worker → application → (storage/领域门面)。
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.core.diagnostics import SEVERITY_ERROR
-from iesplan.services import queue as queue_service
-from iesplan.services import tasks as tasks_service
+from iesplan.application.tasks.submissions import (
+    IO_SLOT_CAPACITY,
+    LEASE_TTL_SECONDS,
+    POOL_BY_TYPE,
+    TERMINAL_STATUSES,
+    VALID_TRANSITIONS,
+    Claim,
+    TaskStateError,
+    map_business_outcome,
+)
+from iesplan.config import settings
+from iesplan.core.diagnostics import (
+    SEVERITY_ERROR,
+    SEVERITY_INFO,
+    TASK_DATA_HASH_MISMATCH,
+    TASK_DATA_SNAPSHOT_MISSING,
+    TASK_QUEUED,
+)
+from iesplan.core.errors import NotFoundError
 from iesplan.storage import add_ref, put_object
 from iesplan.tasks import (
     CalcSnapshotRecord,
@@ -41,17 +55,113 @@ from iesplan.tasks import (
     TaskRecord,
 )
 
-#: 与 tasks_service.Claim 同构(worker 经本模块取用, 不直连 services)
-Claim = tasks_service.Claim
-#: 任务状态机错误(worker 经本模块取用)
-TaskStateError = tasks_service.TaskStateError
-#: 租约 TTL(秒, 与 tasks_service.LEASE_TTL_SECONDS 同值)
-LEASE_TTL_SECONDS = tasks_service.LEASE_TTL_SECONDS
+
+def _get_task(db: Session, task_id: int) -> TaskRecord:
+    """按 id 取任务; 不存在 404。"""
+    task = tasks_domain.get_task(db, task_id)
+    if task is None:
+        raise NotFoundError(
+            "任务不存在",
+            params={"task_id": task_id},
+            location={"object_type": "task", "object_id": task_id},
+        )
+    return task
+
+
+def _check_transition(task: TaskRecord, new_status: str) -> None:
+    """状态机校验: 终态不可迁移; 非法跳转抛 TaskStateError。"""
+    if task.status in TERMINAL_STATUSES:
+        raise TaskStateError(
+            "终态任务不可迁移状态",
+            code="TASK-STATE-002",
+            params={"task_id": task.id, "status": task.status},
+            location={"object_type": "task", "object_id": task.id},
+        )
+    if new_status not in VALID_TRANSITIONS.get(task.status, frozenset()):
+        raise TaskStateError(
+            "非法状态迁移",
+            code="TASK-STATE-003",
+            params={"task_id": task.id, "from": task.status, "to": new_status},
+            location={"object_type": "task", "object_id": task.id},
+        )
+
+
+def _finish_attempt(
+    db: Session, task: TaskRecord, status: str, stop_reason: str | None
+) -> TaskAttemptRecord | None:
+    """收尾当前运行尝试: 尝试终态 + 租约释放/吊销 + 槽释放。只 flush, 不提交。"""
+    attempt = tasks_domain.get_running_attempt(db, task.id)
+    if attempt is None:
+        return None
+    finished = tasks_domain.finish_attempt(db, attempt.id, status, stop_reason=stop_reason)
+    lease = tasks_domain.get_active_lease_for_attempt(db, attempt.id)
+    if lease is not None:
+        tasks_domain.release_lease(
+            db,
+            attempt.id,
+            lease.lease_token,
+            status="released" if status == "succeeded" else "revoked",
+        )
+    tasks_domain.release_slot(db, attempt.id)
+    return finished
+
+
+def _write_task_diagnostic(
+    db: Session,
+    task_id: int,
+    *,
+    level: str,
+    code: str,
+    message: str,
+    attempt_id: int | None = None,
+    stack_trace: str | None = None,
+    context: dict[str, Any] | None = None,
+) -> None:
+    """写入任务诊断(不可变, 只 INSERT; 经 tasks 域)。"""
+    tasks_domain.append_diagnostic(
+        db,
+        task_id=task_id,
+        level=level,
+        message=message,
+        attempt_id=attempt_id,
+        code=code,
+        stack_trace=stack_trace,
+        context=context,
+    )
 
 
 def acquire_task(db: Session, task_id: int, worker_id: str) -> Claim | None:
-    """领取任务: 占槽 + 建尝试 + 建租约(fencing token) + 任务 running。"""
-    return tasks_service.claim_and_run(db, task_id, worker_id)
+    """领取任务: 占槽 + 建尝试 + 建租约(fencing token) + 任务 running。
+
+    尝试/租约/任务状态/槽占用同批 flush; 无空槽或任务非 queued 时返回 None
+    (任务保持排队)。不提交事务。
+    """
+    tasks_domain.ensure_slots(db, {"compute": settings.compute_slots, "io": IO_SLOT_CAPACITY})
+    task = _get_task(db, task_id)
+    if task.status != "queued":
+        return None
+    pool = POOL_BY_TYPE.get(task.type, "compute")
+    slot = tasks_domain.acquire_slot(db, pool)
+    if slot is None:
+        return None
+    attempt = tasks_domain.create_attempt(db, task_id=task.id, worker_id=worker_id)
+    token = uuid4()
+    tasks_domain.acquire_lease(
+        db,
+        attempt_id=attempt.id,
+        lease_token=str(token),
+        acquired_by=worker_id,
+        ttl_seconds=LEASE_TTL_SECONDS,
+    )
+    tasks_domain.set_task_status(db, task.id, "running")
+    tasks_domain.bind_slot_attempt(db, slot.id, attempt.id)
+    tasks_domain.remove(task.id, pool)  # 领取后出队(视图)
+    return Claim(
+        task_id=task.id,
+        attempt_id=attempt.id,
+        attempt_no=attempt.attempt_no,
+        lease_token=token,
+    )
 
 
 def record_task_progress(
@@ -63,15 +173,49 @@ def record_task_progress(
     *,
     attempt_id: int | None = None,
 ) -> Any:
-    """记录任务进度(PG UPSERT + Redis 秒级进度, 转调 tasks 服务)。"""
-    return tasks_service.record_progress(
-        db, task_id, stage, percent, detail, attempt_id=attempt_id
+    """记录任务进度(PG UPSERT + 队列秒级进度)。
+
+    attempt_id 缺省取该任务当前尝试; percent 收敛到 0-100。不提交事务。
+    """
+    task = _get_task(db, task_id)
+    attempt = tasks_domain.get_latest_attempt(db, task.id, attempt_id)
+    if attempt is None:
+        return None
+    percent = round(min(max(float(percent), 0.0), 100.0), 2)
+    tasks_domain.upsert_progress(
+        db, attempt_id=attempt.id, progress_percent=percent, stage=stage, detail=detail
     )
+    tasks_domain.set_queue_progress(task.id, attempt.attempt_no, percent, stage, detail)
+    return attempt
 
 
-def complete_task(db: Session, task_id: int, *, outcome: str | None = None) -> Any:
-    """任务正常完成(转调 tasks 服务, 含取消竞态幂等)。"""
-    return tasks_service.complete_task(db, task_id, outcome=outcome)
+def complete_task(
+    db: Session, task_id: int, *, outcome: str | None = None, solver_status: str | None = None
+) -> Any:
+    """任务正常完成(running → completed; 取消竞态下 cancelling → completed)。
+
+    business_outcome 与技术状态正交: 未显式给定时按求解器状态映射,
+    缺省 normal_completion。重复调用幂等(已 completed 直接返回)。不提交事务。
+    """
+    task = _get_task(db, task_id)
+    if task.status == "completed":
+        return task
+    _check_transition(task, "completed")
+    if outcome is None:
+        outcome = map_business_outcome(solver_status) if solver_status else "normal_completion"
+    attempt = _finish_attempt(db, task, status="succeeded", stop_reason=None)
+    task = tasks_domain.set_task_status(db, task.id, "completed", business_outcome=outcome)
+    tasks_domain.clear_cancel(task.id)
+    _write_task_diagnostic(
+        db,
+        task.id,
+        level=SEVERITY_INFO,
+        code=TASK_QUEUED,
+        message="任务完成",
+        attempt_id=attempt.id if attempt else None,
+        context={"business_outcome": outcome},
+    )
+    return task
 
 
 def fail_task(
@@ -84,21 +228,39 @@ def fail_task(
     level: str = SEVERITY_ERROR,
     outcome: str | None = None,
 ) -> Any:
-    """任务确定性失败收拢(转调 tasks 服务)。"""
-    return tasks_service.fail_task(
-        db, task_id, code=code, message=message, stack_trace=stack_trace,
-        level=level, outcome=outcome,
+    """任务确定性失败收拢(确定性失败不可自动重试; 写 error/blocking 诊断)。不提交事务。"""
+    task = _get_task(db, task_id)
+    if task.status == "failed":
+        return task
+    _check_transition(task, "failed")
+    if outcome is None:
+        # 快照/数据校验失败 → insufficient_evidence
+        outcome = (
+            "insufficient_evidence" if code in (TASK_DATA_SNAPSHOT_MISSING, TASK_DATA_HASH_MISMATCH) else None
+        )
+    attempt = _finish_attempt(db, task, status="failed", stop_reason=code or "error")
+    task = tasks_domain.set_task_status(db, task.id, "failed", business_outcome=outcome)
+    _write_task_diagnostic(
+        db,
+        task.id,
+        level=level,
+        code=code or "TASK-SOLVE-001",
+        message=message,
+        attempt_id=attempt.id if attempt else None,
+        stack_trace=stack_trace,
+        context={"outcome": outcome},
     )
+    return task
 
 
 def release_slot(db: Session, attempt_id: int) -> None:
-    """释放尝试占用的并发槽(转调 tasks 服务)。"""
-    tasks_service.release_slot(db, attempt_id)
+    """释放尝试占用的并发槽。不提交事务。"""
+    tasks_domain.release_slot(db, attempt_id)
 
 
 def clear_cancel_signal(task_id: int) -> None:
-    """清除任务取消信号(可重建视图, 转调 queue 服务)。"""
-    queue_service.clear_cancel(task_id)
+    """清除任务取消信号(可重建视图)。"""
+    tasks_domain.clear_cancel(task_id)
 
 
 def store_result_blob(db: Session, blob: bytes, *, actor_id: int | None) -> int:
@@ -121,69 +283,17 @@ def attach_result_ref(
 
 def dequeue_task(pool: str) -> int | None:
     """按入队序(FIFO)领取一个任务, 返回 task_id; 队列空返回 None。"""
-    return queue_service.dequeue(pool)
+    return tasks_domain.dequeue(pool)
 
 
 def publish_heartbeat(worker_id: str, payload: dict[str, Any], ttl: int) -> None:
-    """写 Worker 心跳(可重建视图, 转调 queue 服务)。"""
-    queue_service.set_heartbeat(worker_id, payload, ttl)
-
-
-# ---------------------------------------------------------------------------
-# 槽门禁 / 租约 fencing(由 worker.lease 搬入, 语义逐行一致)
-# ---------------------------------------------------------------------------
-
-#: compute_slots 表 Core 视图(列名与 models.calc.ComputeSlot 属性同名)。
-_slots_table = sa.table(
-    "compute_slots",
-    sa.column("id"),
-    sa.column("pool_name"),
-    sa.column("status"),
-    sa.column("capacity"),
-    sa.column("in_use"),
-)
-
-#: task_leases 表 Core 视图(列名与 models.calc.TaskLease 属性同名;
-#: lease_token/时间列声明类型做绑定)。
-_leases_table = sa.table(
-    "task_leases",
-    sa.column("id"),
-    sa.column("attempt_id"),
-    sa.column("lease_token", sa.Uuid),
-    sa.column("status"),
-    sa.column("renewed_at", sa.DateTime(timezone=True)),
-    sa.column("expires_at", sa.DateTime(timezone=True)),
-)
-
-#: result_index 表 Core 视图(列名与 models.result.ResultIndex 属性同名;
-#: id 声明主键以便 INSERT 后取回新行 id)。
-_index_table = sa.table(
-    "result_index",
-    sa.Column("id", sa.BigInteger, primary_key=True),
-    sa.column("project_id"),
-    sa.column("project_version_id"),
-    sa.column("evidence_package_id"),
-    sa.column("assessment_id"),
-    sa.column("is_latest", sa.Boolean),
-)
-
-
-def _as_uuid(token: UUID | str) -> UUID:
-    """fencing token 归一化为 UUID(绑定 Uuid 列用; 与 tasks 域门面同口径)。"""
-    return token if isinstance(token, UUID) else UUID(str(token))
+    """写 Worker 心跳(可重建视图)。"""
+    tasks_domain.set_heartbeat(worker_id, payload, ttl)
 
 
 def slot_available(db: Session, pool: str) -> bool:
     """槽门禁: 池内是否存在可用槽(领取前确认; 槽行未初始化视为有空位)。"""
-    rows = db.execute(
-        sa.select(_slots_table).where(
-            _slots_table.c.pool_name == pool,
-            _slots_table.c.status.in_(("free", "busy")),
-        )
-    ).all()
-    if not rows:
-        return True
-    return any(row.in_use < row.capacity for row in rows)
+    return tasks_domain.pool_has_free_slot(db, pool)
 
 
 def verify_lease(db: Session, attempt_id: int, token: UUID | str) -> TaskLeaseRecord | None:
@@ -198,35 +308,18 @@ def renew_lease_once(
     db: Session, attempt_id: int, token: UUID | str, *, ttl_seconds: int
 ) -> int:
     """续租行级更新(renewed_at/expires_at 推进; 返回影响行数, 不提交事务)。"""
-    now = datetime.now(UTC)
-    return db.execute(
-        sa.update(_leases_table)
-        .where(
-            _leases_table.c.attempt_id == attempt_id,
-            _leases_table.c.lease_token == _as_uuid(token),
-            _leases_table.c.status == "active",
-        )
-        .values(renewed_at=now, expires_at=now + timedelta(seconds=ttl_seconds))
-    ).rowcount
+    return tasks_domain.fence_renew_lease(db, attempt_id, token, ttl_seconds=ttl_seconds)
 
 
 def fence_release_lease(
     db: Session, attempt_id: int, token: UUID | str, *, status: str
 ) -> int:
     """带 fencing 的租约收尾(0 行表示租约不匹配; 返回影响行数, 不提交事务)。"""
-    return db.execute(
-        sa.update(_leases_table)
-        .where(
-            _leases_table.c.attempt_id == attempt_id,
-            _leases_table.c.lease_token == _as_uuid(token),
-            _leases_table.c.status == "active",
-        )
-        .values(status=status)
-    ).rowcount
+    return tasks_domain.fence_release_lease(db, attempt_id, token, status=status)
 
 
 # ---------------------------------------------------------------------------
-# 任务/快照/尝试/诊断行读(由 worker.lease/worker.runner 搬入)
+# 任务/快照/尝试/诊断行读
 # ---------------------------------------------------------------------------
 
 
@@ -280,7 +373,7 @@ def cancel_task_record(
 
 
 # ---------------------------------------------------------------------------
-# 结果提交行写(证据包 + 四维评估 + 结果索引, 由 worker.lease 搬入)
+# 结果提交行写(证据包 + 四维评估 + 结果索引)
 # ---------------------------------------------------------------------------
 
 
@@ -318,14 +411,7 @@ def create_assessment_record(
 
 def flip_result_index(db: Session, *, project_version_id: int) -> int:
     """结果索引翻转: 同版本旧 is_latest 行置 false(返回影响行数, 不提交)。"""
-    return db.execute(
-        sa.update(_index_table)
-        .where(
-            _index_table.c.project_version_id == project_version_id,
-            _index_table.c.is_latest.is_(True),
-        )
-        .values(is_latest=False)
-    ).rowcount
+    return results_domain.flip_index_for_version(db, project_version_id)
 
 
 def insert_result_index(
@@ -337,26 +423,19 @@ def insert_result_index(
     assessment_id: int,
 ) -> int:
     """插入新结果索引行(is_latest=true; 返回新行 id, 不提交事务)。"""
-    result = db.execute(
-        sa.insert(_index_table)
-        .values(
-            project_id=project_id,
-            project_version_id=project_version_id,
-            evidence_package_id=evidence_package_id,
-            assessment_id=assessment_id,
-            is_latest=True,
-        )
-        .returning(_index_table.c.id)
+    return results_domain.insert_index(
+        db,
+        project_id=project_id,
+        project_version_id=project_version_id,
+        evidence_package_id=evidence_package_id,
+        assessment_id=assessment_id,
     )
-    return int(result.scalar_one())
 
 
 def point_result_assessment(
     db: Session, *, evidence_package_id: int, assessment_id: int
 ) -> int:
     """挂接最新评估引用(同证据包索引行 assessment_id 可 UPDATE; 返回行数)。"""
-    return db.execute(
-        sa.update(_index_table)
-        .where(_index_table.c.evidence_package_id == evidence_package_id)
-        .values(assessment_id=assessment_id)
-    ).rowcount
+    return results_domain.point_index_assessment(
+        db, evidence_package_id=evidence_package_id, assessment_id=assessment_id
+    )

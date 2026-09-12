@@ -133,3 +133,23 @@ class ResultsRepository(Protocol):
     def evidence_statuses_for_tasks(self, db: Session, task_ids: Collection[int]) -> dict[int, str]:
         """批量取任务的证据包状态（每个任务取最新一个；无证据的任务不在返回中）。"""
         ...
+
+    def flip_index_for_version(self, db: Session, project_version_id: int) -> int:
+        """结果索引翻转：同版本旧 is_latest 行置 false（返回影响行数）。"""
+        ...
+
+    def insert_index(
+        self,
+        db: Session,
+        *,
+        project_id: int,
+        project_version_id: int,
+        evidence_package_id: int,
+        assessment_id: int,
+    ) -> int:
+        """插入新结果索引行（is_latest=true；返回新行 id）。"""
+        ...
+
+    def point_index_assessment(self, db: Session, evidence_package_id: int, assessment_id: int) -> int:
+        """挂接最新评估引用（同证据包索引行 assessment_id 可 UPDATE；返回行数）。"""
+        ...
