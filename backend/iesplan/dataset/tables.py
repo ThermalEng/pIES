@@ -683,7 +683,7 @@ def build_quality_report(
     missing_total = sum(missing_by_field.values())
     range_total = sum(range_by_field.values())
     report = {
-        "tool": "iesplan.services.dataset",
+        "tool": "iesplan.dataset",
         "generated_at": datetime.now(UTC).isoformat(),
         "resolution": axis.resolution,
         "timeline": TIMELINE_MAP[axis.resolution],
