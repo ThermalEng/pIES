@@ -23,10 +23,16 @@ import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
+from iesplan.configuration.contracts import (
+    EffectiveRevisionRecord,
+    FinanceProfileRecord,
+    OverridesRevisionRecord,
+    PlanningRevisionRecord,
+)
 from iesplan.core.contracts import PlanningConfig, PlanningConfigError
 from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
@@ -36,12 +42,6 @@ from iesplan.finance import (
     FinanceProfile,
     FinanceTripletError,
     merge_effective,
-)
-from iesplan.models.config_revision import (
-    EffectiveFinanceRevision,
-    FinanceOverridesRevision,
-    FinanceProfile as FinanceProfileRow,
-    PlanningConfigRevision,
 )
 from iesplan.planning.contracts import validate_planning_domain
 from iesplan.project.contracts import ProjectRecord
@@ -107,7 +107,7 @@ def register_finance_profile(
     db: Session,
     payload: object,
     user_id: int,
-) -> tuple[FinanceProfileRow, FinanceProfile]:
+) -> tuple[FinanceProfileRecord, FinanceProfile]:
     """登记地区 FinanceProfile 到注册表。
 
     - 严格恢复(FinanceProfile.from_dict: 拒未知/缺失字段);
@@ -123,12 +123,7 @@ def register_finance_profile(
             code=_triplet_error_code(exc),
             params={"detail": str(exc)},
         ) from exc
-    existing = db.execute(
-        select(FinanceProfileRow)
-        .where(FinanceProfileRow.profile_id == profile.profile_id)
-        .order_by(FinanceProfileRow.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    existing = configuration_domain.get_profile(db, profile.profile_id)
     # 注册表按 profile_id 唯一(0007 起): 同 id 已存在即复用既有行, 不改写
     # 内容(文本文件只校验字头, 不做内容摘要去重); 返回既有行规范内容。
     if existing is not None:
@@ -139,15 +134,17 @@ def register_finance_profile(
         "application/yaml",
         source_category="finance_profile",
     )
-    row = FinanceProfileRow(
+    # profile_id 重复 → ConfigurationConflictError(409)直接抛给调用方;
+    # 不在此处 rollback/回读复用: 回滚会丢弃调用方事务的其余待写入,
+    # 事务归属按宪法由上层(application/请求事务)拥有。
+    row = configuration_domain.register_profile(
+        db,
         profile_id=profile.profile_id,
         region=profile.profile.get("region", ""),
         content=profile.to_dict(),
         object_id=obj.id,
         created_by=user_id,
     )
-    db.add(row)
-    db.flush()
     # 建立稳定 owner 引用, 防止对象被当作 orphan 清理(宪法 10.3)
     from iesplan.storage import add_ref
 
@@ -163,14 +160,9 @@ def register_finance_profile(
     return row, profile
 
 
-def get_finance_profile_by_ref(db: Session, profile_id: str) -> tuple[FinanceProfileRow, FinanceProfile]:
+def get_finance_profile_by_ref(db: Session, profile_id: str) -> tuple[FinanceProfileRecord, FinanceProfile]:
     """按 {id} 取注册 Profile(同 id 多次登记取最新行; 不存在 → 404)。文本文件只校验字头。"""
-    row = db.execute(
-        select(FinanceProfileRow)
-        .where(FinanceProfileRow.profile_id == profile_id)
-        .order_by(FinanceProfileRow.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    row = configuration_domain.get_profile(db, profile_id)
     if row is None:
         raise NotFoundError(
             "FinanceProfile 未登记",
@@ -181,7 +173,7 @@ def get_finance_profile_by_ref(db: Session, profile_id: str) -> tuple[FinancePro
     return row, profile
 
 
-def profile_row_dict(row: FinanceProfileRow) -> dict:
+def profile_row_dict(row: FinanceProfileRecord) -> dict:
     """注册 Profile 行 → 公开字典(API/审计用; 不含 ORM 内部字段)。"""
     return {
         "id": row.id,
@@ -193,14 +185,8 @@ def profile_row_dict(row: FinanceProfileRow) -> dict:
 
 def list_finance_profiles(db: Session) -> list[dict]:
     """列出已登记地区 Profile(按 profile_id 去重取最新登记, 跨库确定性)。"""
-    rows = (
-        db.execute(
-            select(FinanceProfileRow).order_by(FinanceProfileRow.profile_id, FinanceProfileRow.id.desc())
-        )
-        .scalars()
-        .all()
-    )
-    seen: dict[str, FinanceProfileRow] = {}
+    rows = configuration_domain.list_profiles(db)
+    seen: dict[str, FinanceProfileRecord] = {}
     for row in rows:
         if row.profile_id not in seen:
             seen[row.profile_id] = row
@@ -216,7 +202,7 @@ def get_project_profile(db: Session, project_id: int) -> tuple[FinanceProfile, d
             params={"project_id": project_id},
             location={"object_type": "finance_profile", "object_id": project_id},
         )
-    row = db.get(FinanceProfileRow, project.finance_profile_id)
+    row = configuration_domain.get_profile_row(db, project.finance_profile_id)
     if row is None:
         raise NotFoundError("项目引用的 FinanceProfile 不存在")
     profile = FinanceProfile.from_dict(row.content)
@@ -229,7 +215,7 @@ def get_project_profile(db: Session, project_id: int) -> tuple[FinanceProfile, d
 
 
 def _set_project_profile(
-    db: Session, project: ProjectRecord, profile_row: FinanceProfileRow
+    db: Session, project: ProjectRecord, profile_row: FinanceProfileRecord
 ) -> ProjectRecord:
     """项目引用已注册 Profile(更新当前 Profile 指针; Overrides/Effective/Planning 一并失效)。"""
     if project.finance_profile_id != profile_row.id:
@@ -248,16 +234,11 @@ def _set_project_profile(
 
 def _current_effective(
     db: Session, project: ProjectRecord
-) -> tuple[EffectiveFinanceRevision, EffectiveFinanceConfig] | None:
+) -> tuple[EffectiveRevisionRecord, EffectiveFinanceConfig] | None:
     """读项目当前 Effective revision(无 → None)。"""
     if project.effective_finance_revision is None:
         return None
-    row = db.execute(
-        select(EffectiveFinanceRevision).where(
-            EffectiveFinanceRevision.project_id == project.id,
-            EffectiveFinanceRevision.revision == project.effective_finance_revision,
-        )
-    ).scalar_one_or_none()
+    row = configuration_domain.get_effective_revision(db, project.id, project.effective_finance_revision)
     if row is None:
         raise AppError(
             "项目 Effective 财务快照指针损坏(指向不存在的 revision)",
@@ -270,16 +251,11 @@ def _current_effective(
 
 def _current_overrides(
     db: Session, project: ProjectRecord
-) -> tuple[FinanceOverridesRevision, FinanceOverrides] | None:
+) -> tuple[OverridesRevisionRecord, FinanceOverrides] | None:
     """读项目当前 Overrides revision(无 → None)。"""
     if project.overrides_revision is None:
         return None
-    row = db.execute(
-        select(FinanceOverridesRevision).where(
-            FinanceOverridesRevision.project_id == project.id,
-            FinanceOverridesRevision.revision == project.overrides_revision,
-        )
-    ).scalar_one_or_none()
+    row = configuration_domain.get_overrides_revision(db, project.id, project.overrides_revision)
     if row is None:
         raise AppError(
             "项目 Overrides 指针损坏(指向不存在的 revision)",
@@ -349,25 +325,12 @@ def _attach_config_receipt(
     )
 
 
-def _next_revision(db: Session, model: type, project_id: int, project_field: str) -> int:
-    """下一个 revision 序号(表内 max+1)。
-
-    revision 序号由 append-only 表内已有行决定(Profile 切换会清空项目指针,
-    指针不复位计数; 避免清空后从 1 重新计数撞唯一约束)。并发下唯一约束
-    (project_id, revision)兜底。
-    """
-    current = db.execute(
-        select(func.max(getattr(model, "revision"))).where(getattr(model, "project_id") == project_id)
-    ).scalar()
-    return int(current or 0) + 1
-
-
 def set_project_finance_profile(
     db: Session,
     project_id: int,
     profile_id: str,
     user_id: int,
-) -> tuple[int, EffectiveFinanceRevision, EffectiveFinanceConfig]:
+) -> tuple[int, EffectiveRevisionRecord, EffectiveFinanceConfig]:
     """项目引用已登记 Profile 并原子生成空覆盖 Effective。
 
     供项目配置 API 与项目包导入确认共用: 用户不能直接 author Effective,
@@ -390,7 +353,7 @@ def save_finance_overrides(
     payload: object,
     expected_revision: int | None,
     user_id: int,
-) -> tuple[int, EffectiveFinanceRevision, EffectiveFinanceConfig]:
+) -> tuple[int, EffectiveRevisionRecord, EffectiveFinanceConfig]:
     """保存 FinanceOverrides: 追加 revision → 重新合并生成 Effective。
 
     流程(失败原子, 任一失败不落任何行):
@@ -416,7 +379,7 @@ def save_finance_overrides(
             code="PROJ-FIN-002",
             params={"detail": "项目未设置 Profile"},
         )
-    profile_row = db.get(FinanceProfileRow, project.finance_profile_id)
+    profile_row = configuration_domain.get_profile_row(db, project.finance_profile_id)
     if profile_row is None:
         raise AppError(
             "项目 Profile 指针损坏",
@@ -441,16 +404,10 @@ def save_finance_overrides(
                 "current": project.overrides_revision,
             },
         )
-    # 追加 Overrides revision(表内 max+1; Profile 切换后指针清空不重置计数)
-    next_overrides_rev = _next_revision(db, FinanceOverridesRevision, project_id, "overrides_revision")
-    overrides_row = FinanceOverridesRevision(
-        project_id=project_id,
-        revision=next_overrides_rev,
-        content=overrides.to_dict(),
-        profile_id=overrides.profile_ref["id"],
-        created_by=user_id,
-    )
-    overrides_row.receipt_object_id = _store_config_receipt(
+    # 追加 Overrides revision(序号经域预读表内 max+1; Profile 切换后指针清空
+    # 不重置计数; 回执对象先于行落盘, 故序号显式传入, 唯一约束兜底并发)
+    next_overrides_rev = configuration_domain.next_overrides_revision(db, project_id)
+    overrides_receipt_id = _store_config_receipt(
         db,
         kind="finance_overrides",
         project_id=project_id,
@@ -458,8 +415,15 @@ def save_finance_overrides(
         refs={"profile_id": overrides.profile_ref["id"]},
         created_by=user_id,
     )
-    db.add(overrides_row)
-    db.flush()
+    overrides_row = configuration_domain.append_overrides(
+        db,
+        project_id=project_id,
+        revision=next_overrides_rev,
+        content=overrides.to_dict(),
+        profile_id=overrides.profile_ref["id"],
+        created_by=user_id,
+        receipt_object_id=overrides_receipt_id,
+    )
     _attach_config_receipt(
         db,
         object_id=overrides_row.receipt_object_id,
@@ -471,15 +435,8 @@ def save_finance_overrides(
     # 合并生成 Effective(from_dict 已按 Profile 完成全部结构校验, 合并失败即
     # 内部错误, 不吞异常, 事务回滚后以 500 可见)
     effective = merge_effective(profile, overrides)
-    next_eff_rev = _next_revision(db, EffectiveFinanceRevision, project_id, "effective_finance_revision")
-    eff_row = EffectiveFinanceRevision(
-        project_id=project_id,
-        revision=next_eff_rev,
-        content=effective.to_dict(),
-        profile_id=effective.profile_id,
-        created_by=user_id,
-    )
-    eff_row.receipt_object_id = _store_config_receipt(
+    next_eff_rev = configuration_domain.next_effective_revision(db, project_id)
+    eff_receipt_id = _store_config_receipt(
         db,
         kind="effective_finance",
         project_id=project_id,
@@ -490,8 +447,15 @@ def save_finance_overrides(
         },
         created_by=user_id,
     )
-    db.add(eff_row)
-    db.flush()
+    eff_row = configuration_domain.append_effective(
+        db,
+        project_id=project_id,
+        revision=next_eff_rev,
+        content=effective.to_dict(),
+        profile_id=effective.profile_id,
+        created_by=user_id,
+        receipt_object_id=eff_receipt_id,
+    )
     _attach_config_receipt(
         db,
         object_id=eff_row.receipt_object_id,
@@ -519,10 +483,10 @@ def save_finance_overrides_empty(
     project_id: int,
     expected_revision: int | None,
     user_id: int,
-) -> tuple[int, EffectiveFinanceRevision, EffectiveFinanceConfig]:
+) -> tuple[int, EffectiveRevisionRecord, EffectiveFinanceConfig]:
     """无覆盖保存: 显式空 Overrides 文档 → 合并结果等于 Profile。"""
     project = _get_project(db, project_id)
-    profile_row = db.get(FinanceProfileRow, project.finance_profile_id)
+    profile_row = configuration_domain.get_profile_row(db, project.finance_profile_id)
     if profile_row is None:
         raise InvalidRequestError(
             "项目尚未引用已注册 FinanceProfile",
@@ -539,7 +503,7 @@ def delete_finance_overrides(
     project_id: int,
     expected_revision: int | None,
     user_id: int,
-) -> tuple[int, EffectiveFinanceRevision, EffectiveFinanceConfig]:
+) -> tuple[int, EffectiveRevisionRecord, EffectiveFinanceConfig]:
     """清空覆盖: 追加显式空 Overrides + 新 Effective, 失效旧 Planning。
 
     不是删除历史, 而是追加空文档 revision(宪法 11 不可变追加)。
@@ -549,7 +513,7 @@ def delete_finance_overrides(
 
 def get_effective_finance_config(
     db: Session, project_id: int
-) -> tuple[EffectiveFinanceConfig, int, EffectiveFinanceRevision]:
+) -> tuple[EffectiveFinanceConfig, int, EffectiveRevisionRecord]:
     """读取项目当前生效 EffectiveFinanceConfig; 未生成 → 404(无静默默认)。"""
     project = _get_project(db, project_id)
     current = _current_effective(db, project)
@@ -576,7 +540,7 @@ def get_finance_overrides(db: Session, project_id: int) -> tuple[FinanceOverride
 # ---------------------------------------------------------------------------
 
 
-def get_planning_config(db: Session, project_id: int) -> tuple[PlanningConfig, int, PlanningConfigRevision]:
+def get_planning_config(db: Session, project_id: int) -> tuple[PlanningConfig, int, PlanningRevisionRecord]:
     """读取项目当前生效规划配置; 未保存过 → 404。"""
     project = _get_project(db, project_id)
     if project.planning_revision is None:
@@ -585,12 +549,7 @@ def get_planning_config(db: Session, project_id: int) -> tuple[PlanningConfig, i
             params={"project_id": project_id},
             location={"object_type": "planning_config", "object_id": project_id},
         )
-    row = db.execute(
-        select(PlanningConfigRevision).where(
-            PlanningConfigRevision.project_id == project_id,
-            PlanningConfigRevision.revision == project.planning_revision,
-        )
-    ).scalar_one_or_none()
+    row = configuration_domain.get_planning_revision(db, project_id, project.planning_revision)
     if row is None:
         raise AppError(
             "项目规划配置指针损坏(指向不存在的 revision)",
@@ -607,7 +566,7 @@ def save_planning_config(
     payload: object,
     expected_revision: int | None,
     user_id: int,
-) -> tuple[PlanningConfigRevision, int]:
+) -> tuple[PlanningRevisionRecord, int]:
     """保存规划配置。
 
     - 项目未生成 EffectiveFinanceConfig → 400;
@@ -639,14 +598,8 @@ def save_planning_config(
             code="SYS-STORE-004",
             params={"expected_revision": expected_revision, "current": project.planning_revision},
         )
-    next_revision = _next_revision(db, PlanningConfigRevision, project_id, "planning_revision")
-    row = PlanningConfigRevision(
-        project_id=project_id,
-        revision=next_revision,
-        content=config.to_dict(),
-        created_by=user_id,
-    )
-    row.receipt_object_id = _store_config_receipt(
+    next_revision = configuration_domain.next_planning_revision(db, project_id)
+    receipt_object_id = _store_config_receipt(
         db,
         kind="planning_config",
         project_id=project_id,
@@ -654,7 +607,14 @@ def save_planning_config(
         refs={"effective_revision": project.effective_finance_revision},
         created_by=user_id,
     )
-    db.add(row)
+    row = configuration_domain.append_planning(
+        db,
+        project_id=project_id,
+        revision=next_revision,
+        content=config.to_dict(),
+        created_by=user_id,
+        receipt_object_id=receipt_object_id,
+    )
     project_domain.update_revision_pointers(
         db,
         project_id,

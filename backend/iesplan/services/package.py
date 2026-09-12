@@ -36,7 +36,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan import __version__
+from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
+from iesplan import results as results_domain
+from iesplan import tasks as tasks_domain
 from iesplan.config import settings
 from iesplan.core.contracts import (
     PlanningConfig,
@@ -56,11 +59,9 @@ from iesplan.finance import (
 )
 from iesplan.models.audit import ImportProposal
 from iesplan.models.calc import CalcSnapshot, Task
-from iesplan.models.config_revision import FinanceProfile as FinanceProfileRow
 from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion
 from iesplan.models.identity import User
 from iesplan.models.project import Draft, Project, ProjectVersion, VersionRef
-from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex
 from iesplan.planning.contracts import validate_planning_domain
 from iesplan.services import audit as audit_service
 from iesplan.services import config_revisions as config_service
@@ -305,32 +306,13 @@ def _collect_datasets(db: Session, dataset_version_ids: list[int]) -> list[dict]
 
 def _collect_evidence(db: Session, project_id: int) -> list[dict]:
     """收集项目历史结果证据与评估引用(经任务归属项目，domain-model §快照、任务和结果)。"""
-    packages = (
-        db.execute(
-            select(EvidencePackage)
-            .join(Task, Task.id == EvidencePackage.task_id)
-            .where(Task.project_id == project_id)
-            .order_by(EvidencePackage.id)
-        )
-        .scalars()
-        .all()
-    )
+    packages = results_domain.list_evidence_for_tasks(db, tasks_domain.list_task_ids(db, project_id))
     out: list[dict] = []
     for pkg in packages:
         task = db.get(Task, pkg.task_id)
         snapshot = db.get(CalcSnapshot, pkg.calc_snapshot_id) if pkg.calc_snapshot_id else None
-        assessments = (
-            db.execute(
-                select(ResultAssessment)
-                .where(ResultAssessment.evidence_package_id == pkg.id)
-                .order_by(ResultAssessment.id)
-            )
-            .scalars()
-            .all()
-        )
-        index = (
-            db.execute(select(ResultIndex).where(ResultIndex.evidence_package_id == pkg.id)).scalars().all()
-        )
+        assessments = results_domain.list_package_assessments(db, pkg.id)
+        index = results_domain.list_package_index(db, pkg.id)
         content: bytes | None = None
         obj: dict | None = None
         try:
@@ -435,7 +417,7 @@ def _build_package_zip(
         # 产物, 导入时从精确来源重新合并(finance-yaml.md)。
         configs_meta: dict[str, str] = {}
         if project.finance_profile_id is not None:
-            profile_row = db.get(FinanceProfileRow, project.finance_profile_id)
+            profile_row = configuration_domain.get_profile_row(db, project.finance_profile_id)
             if profile_row is None:
                 raise AppError(
                     "项目 FinanceProfile 指针损坏",
@@ -1505,7 +1487,7 @@ def export_excel(
     """
     project_service.ensure_access(db, user, project_id, "export_excel")
     project = project_service.require_project(db, project_id)
-    evidence = db.get(EvidencePackage, evidence_package_id)
+    evidence = results_domain.get_evidence(db, evidence_package_id)
     if evidence is None:
         raise NotFoundError(
             "证据包不存在",
@@ -1518,7 +1500,7 @@ def export_excel(
             "证据包不属于该项目",
             params={"evidence_package_id": evidence_package_id},
         )
-    assessment = db.get(ResultAssessment, assessment_id)
+    assessment = results_domain.get_assessment(db, assessment_id)
     if assessment is None or assessment.evidence_package_id != evidence.id:
         raise NotFoundError(
             "结果评估不存在或与证据包不匹配",

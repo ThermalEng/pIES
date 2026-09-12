@@ -82,14 +82,14 @@ def create_task_endpoint(
 
     幂等/去重复用 → 200(附 replayed/duplicate 标记与提示); 新建 → 201。
     """
-    task = tasks_service.create_task(
+    task, flags = tasks_service.create_task(
         db, user, project_id, payload.task_type,
         config=payload.config,
         idempotency_key=payload.idempotency_key,
         parent_task_id=payload.parent_task_id,
     )
-    replayed = bool(getattr(task, "replay", False))
-    duplicate = bool(getattr(task, "duplicate", False))
+    replayed = bool(flags.get("replay", False))
+    duplicate = bool(flags.get("duplicate", False))
     db.commit()
     if replayed or duplicate:
         response.status_code = 200

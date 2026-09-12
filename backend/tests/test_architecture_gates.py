@@ -132,7 +132,7 @@ WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
     ("iesplan.api.health", 27): frozenset({"User"}),
     ("iesplan.api.health", 28): frozenset({"Project"}),
     # ---- results.py: 结果查询任务状态与校验正则 ----
-    ("iesplan.api.results", 29): frozenset({"Task"}),
+    # (切片 5: assess 端点经 tasks_service.ensure_task_belongs 取任务, 移除 Task)
     ("iesplan.api.results", 30): frozenset({"HASH64_RE"}),
     # ---- limits.py: 配额统计函数内局部导入(非模块顶层) ----
     ("iesplan.api.limits", 260): frozenset({"Dataset", "DatasetFile", "DatasetVersion"}),
@@ -372,9 +372,9 @@ WHITELIST_API_COMMIT: set[tuple[str, int]] = {
     ("iesplan.api.config_revisions", 274),
     ("iesplan.api.exports", 68),
     ("iesplan.api.exports", 134),
-    ("iesplan.api.results", 123),
-    ("iesplan.api.results", 147),
-    ("iesplan.api.results", 223),
+    ("iesplan.api.results", 121),
+    ("iesplan.api.results", 145),
+    ("iesplan.api.results", 221),
 }
 
 # ---------------------------------------------------------------------------
@@ -456,33 +456,26 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     # ---- services ----
     # (切片 4: services.external_auth 经 identity 域, 移除本项)
     ("iesplan.services.config", "audit"),
-    ("iesplan.services.config", "calc"),
+    # (切片 5: services.config CalcConfig 改经 configuration 域, 移除 calc)
     ("iesplan.services.config", "model"),
     ("iesplan.services.model", "model"),
     ("iesplan.services.identity", "common"),  # 仅正则基元(无业务表); 切片 4 已移除 identity 表访问
-    ("iesplan.services.config_revisions", "config_revision"),
-    ("iesplan.services.tasks", "calc"),
-    ("iesplan.services.tasks", "common"),
-    ("iesplan.services.tasks", "dataset"),
-    ("iesplan.services.tasks", "identity"),
-    ("iesplan.services.tasks", "result"),
-    ("iesplan.services.tasks", "uncertainty"),
+    # (切片 5: services.config_revisions 经 configuration 域, 移除本项)
+    ("iesplan.services.tasks", "common"),  # 仅幂等键正则基元(无业务表)
+    # (切片 5: services.tasks 改经领域门面, 移除 calc/dataset/identity/result/uncertainty)
     ("iesplan.services.validation", "audit"),
     ("iesplan.services.validation", "dataset"),
     ("iesplan.services.validation", "identity"),
     ("iesplan.services.results", "audit"),
-    ("iesplan.services.results", "calc"),
-    ("iesplan.services.results", "identity"),
-    ("iesplan.services.results", "result"),
+    # (切片 5: services.results 经 results/tasks/project 域门面, 移除 calc/identity/result)
     # ---- project 域 repository 实现（切片 3；唯一允许访问 projects 系表的实现） ----
     ("iesplan.project.persistence", "project"),
     ("iesplan.services.package", "audit"),
     ("iesplan.services.package", "calc"),
-    ("iesplan.services.package", "config_revision"),
+    # (切片 5: services.package 经 configuration/results 域门面, 移除 config_revision/result)
     ("iesplan.services.package", "dataset"),
     ("iesplan.services.package", "identity"),
     ("iesplan.services.package", "project"),
-    ("iesplan.services.package", "result"),
     ("iesplan.services.audit", "audit"),
     ("iesplan.services.audit", "identity"),
     # (切片 4: services.dataset 经 dataset/identity/project 域 repository, 移除 3 项)

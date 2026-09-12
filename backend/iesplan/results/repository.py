@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any, Protocol
 
 from sqlalchemy.orm import Session
@@ -48,8 +49,22 @@ class ResultsRepository(Protocol):
         dimensions: dict[str, str],
         overall_score: float | None = None,
         detail: dict[str, Any] | None = None,
+        assessed_by: int | None = None,
+        comment: str | None = None,
     ) -> ResultAssessmentRecord:
-        """写入系统评估（assessor='system'）。"""
+        """写入系统评估（assessor='system'；触发评估的用户可选记录）。"""
+        ...
+
+    def get_assessment(self, db: Session, assessment_id: int) -> ResultAssessmentRecord | None:
+        """按主键取评估；不存在返回 None。"""
+        ...
+
+    def get_index(self, db: Session, index_id: int) -> ResultIndexRecord | None:
+        """按主键取结果索引；不存在返回 None。"""
+        ...
+
+    def list_assessments_for_task(self, db: Session, task_id: int) -> list[ResultAssessmentRecord]:
+        """任务全部证据包上的评估历史（id 倒序）。"""
         ...
 
     def create_human_assessment(
@@ -87,7 +102,13 @@ class ResultsRepository(Protocol):
     def current_selection(self, db: Session, project_id: int) -> ResultSelectionRecord | None: ...
 
     def select_result(
-        self, db: Session, *, project_id: int, result_index_id: int, selected_by: int
+        self,
+        db: Session,
+        *,
+        project_id: int,
+        result_index_id: int,
+        selected_by: int,
+        reason: str | None = None,
     ) -> ResultSelectionRecord:
         """选中结果（旧 current 翻转，savepoint 内完成）。"""
         ...
@@ -104,3 +125,11 @@ class ResultsRepository(Protocol):
     ) -> ReportRecord: ...
 
     def list_reports(self, db: Session, project_id: int) -> list[ReportRecord]: ...
+
+    def count_reports(self, db: Session) -> int:
+        """报告总数（清理建议等聚合读）。"""
+        ...
+
+    def evidence_statuses_for_tasks(self, db: Session, task_ids: Collection[int]) -> dict[int, str]:
+        """批量取任务的证据包状态（每个任务取最新一个；无证据的任务不在返回中）。"""
+        ...

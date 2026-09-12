@@ -31,18 +31,25 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan import project as project_domain
+from iesplan import results as results_domain
+from iesplan import tasks as tasks_domain
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.jsonutil import canonical_json
 from iesplan.engines.planning import CAPACITY_PARAM
+from iesplan.identity.contracts import UserRecord
 from iesplan.metrics import validity
 from iesplan.metrics.financial import IRRStatus
 from iesplan.models.audit import AuditLog
-from iesplan.models.calc import CalcSnapshot, Task, TaskAttempt, TaskLease
-from iesplan.models.identity import User
-from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex, ResultSelection
+from iesplan.results.contracts import (
+    EvidencePackageRecord,
+    ResultAssessmentRecord,
+    ResultIndexRecord,
+    ResultSelectionRecord,
+)
 from iesplan.services import project as project_service
 from iesplan.services import tasks as tasks_service
 from iesplan.storage import add_ref, get_object, object_info, put_object
+from iesplan.tasks.contracts import TaskAttemptRecord, TaskRecord
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -145,9 +152,9 @@ class ResultInvalidRequestError(AppError):
 # ---------------------------------------------------------------------------
 
 
-def _get_task(db: Session, task_id: int) -> Task:
-    """按 id 取任务; 不存在 404。"""
-    task = db.get(Task, task_id)
+def _get_task(db: Session, task_id: int) -> TaskRecord:
+    """按 id 取任务(经 tasks 域); 不存在 404。"""
+    task = tasks_domain.get_task(db, task_id)
     if task is None:
         raise NotFoundError(
             "任务不存在",
@@ -181,10 +188,10 @@ def _audit(
     )
 
 
-def _evidence_project_version(db: Session, task: Task) -> int | None:
+def _evidence_project_version(db: Session, task: TaskRecord) -> int | None:
     """证据/结果索引对应的项目版本 id: 优先任务快照版本, 回退项目当前版本。"""
     if task.calc_snapshot_id is not None:
-        snapshot = db.get(CalcSnapshot, task.calc_snapshot_id)
+        snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
         if snapshot is not None:
             return snapshot.project_version_id
     project = project_domain.get_project(db, task.project_id)
@@ -196,7 +203,9 @@ def _evidence_project_version(db: Session, task: Task) -> int | None:
 # ---------------------------------------------------------------------------
 
 
-def _verify_write_eligibility(db: Session, task: Task, attempt_id: int, token: str | UUID) -> TaskAttempt:
+def _verify_write_eligibility(
+    db: Session, task: TaskRecord, attempt_id: int, token: str | UUID
+) -> TaskAttemptRecord:
     """校验当前尝试的证据写入资格(规格 4.1/4.2 租约 + fencing)。
 
     要求:
@@ -205,7 +214,7 @@ def _verify_write_eligibility(db: Session, task: Task, attempt_id: int, token: s
       3. 租约未过期(expires_at > now)。
     任一不满足抛 EvidenceWriteDeniedError(409)。
     """
-    attempt = db.get(TaskAttempt, attempt_id)
+    attempt = tasks_domain.get_attempt(db, attempt_id)
     if attempt is None:
         raise EvidenceWriteDeniedError(
             "尝试不存在",
@@ -231,27 +240,27 @@ def _verify_write_eligibility(db: Session, task: Task, attempt_id: int, token: s
             "fencing token 格式非法",
             params={"task_id": task.id, "attempt_id": attempt_id},
         ) from exc
-    lease = db.execute(select(TaskLease).where(TaskLease.lease_token == token_uuid)).scalar_one_or_none()
+    lease = tasks_domain.get_lease_by_token(db, str(token_uuid))
     if lease is None or lease.status != "active" or lease.attempt_id != attempt_id:
         raise EvidenceWriteDeniedError(
             "租约不匹配或已失效(fencing 拒绝)",
             params={"task_id": task.id, "attempt_id": attempt_id},
             location={"object_type": "task_lease", "object_id": attempt_id},
         )
-    expires = lease.expires_at
-    if expires.tzinfo is None:
-        expires = expires.replace(tzinfo=UTC)
-    if datetime.now(UTC) > expires:
+    expires_dt = datetime.fromisoformat(lease.expires_at)
+    if expires_dt.tzinfo is None:
+        expires_dt = expires_dt.replace(tzinfo=UTC)
+    if datetime.now(UTC) > expires_dt:
         raise EvidenceWriteDeniedError(
             "租约已过期, 证据写入被拒绝(fencing)",
-            params={"task_id": task.id, "attempt_id": attempt_id, "expires_at": expires.isoformat()},
+            params={"task_id": task.id, "attempt_id": attempt_id, "expires_at": expires_dt.isoformat()},
             location={"object_type": "task_lease", "object_id": attempt_id},
         )
     return attempt
 
 
 def _validate_evidence_payload(
-    db: Session, task: Task, payload: dict[str, Any]
+    db: Session, task: TaskRecord, payload: dict[str, Any]
 ) -> tuple[dict[str, Any], list[str]]:
     """校验证据载荷(清单校验), 返回 (content, 问题清单)。
 
@@ -314,7 +323,7 @@ def submit_evidence(
     attempt_id: int,
     token: str | UUID,
     payload: dict[str, Any],
-) -> EvidencePackage:
+) -> EvidencePackageRecord:
     """提交证据包（不可变；见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果 与 manual/developer-guide/zh-CN/modules/worker.md《Worker》#租约/提交结果：由 Worker 在 attempt 内经 fencing 提交）。
 
     流程: 写入资格校验(尝试 running + 租约 active + fencing token 未过期) →
@@ -342,16 +351,15 @@ def submit_evidence(
         actor_id=payload.get("created_by") or task.requested_by,
         actor_type="system",
     )
-    package = EvidencePackage(
+    package = results_domain.create_evidence(
+        db,
         task_id=task.id,
-        attempt_id=attempt_id,
         calc_snapshot_id=task.calc_snapshot_id,
         object_id=obj.id,
         status=status,
+        attempt_id=attempt_id,
         created_by=int(payload.get("created_by") or task.requested_by),
     )
-    db.add(package)
-    db.flush()
     # 对象引用: 证据包引用对象 → 禁止进入清理候选(23.2 双保险)
     add_ref(
         db,
@@ -379,9 +387,9 @@ def submit_evidence(
     return package
 
 
-def get_evidence(db: Session, package_id: int) -> EvidencePackage:
+def get_evidence(db: Session, package_id: int) -> EvidencePackageRecord:
     """按 id 读取证据包; 不存在 404。"""
-    package = db.get(EvidencePackage, package_id)
+    package = results_domain.get_evidence(db, package_id)
     if package is None:
         raise NotFoundError(
             "证据包不存在",
@@ -391,7 +399,7 @@ def get_evidence(db: Session, package_id: int) -> EvidencePackage:
     return package
 
 
-def evidence_content(db: Session, package: EvidencePackage) -> dict[str, Any]:
+def evidence_content(db: Session, package: EvidencePackageRecord) -> dict[str, Any]:
     """读取证据包内容(对象引用定位; 对象缺失/损坏抛数据损坏错误)。
 
     返回证据载荷完整 dict。
@@ -425,36 +433,19 @@ def _evidence_inner(payload: dict[str, Any]) -> dict[str, Any]:
     return inner if isinstance(inner, dict) else payload
 
 
-def latest_evidence(db: Session, task_id: int) -> EvidencePackage | None:
+def latest_evidence(db: Session, task_id: int) -> EvidencePackageRecord | None:
     """任务最新证据包(按创建时间倒序取最新一条)。"""
-    return db.execute(
-        select(EvidencePackage)
-        .where(EvidencePackage.task_id == task_id)
-        .order_by(EvidencePackage.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    return results_domain.latest_evidence_for_task(db, task_id)
 
 
-def latest_assessment(db: Session, evidence_package_id: int) -> ResultAssessment | None:
+def latest_assessment(db: Session, evidence_package_id: int) -> ResultAssessmentRecord | None:
     """证据包最新评估记录(追加式, 历史通过查询 8.2 获取)。"""
-    return db.execute(
-        select(ResultAssessment)
-        .where(ResultAssessment.evidence_package_id == evidence_package_id)
-        .order_by(ResultAssessment.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    return results_domain.latest_assessment(db, evidence_package_id)
 
 
-def list_assessments(db: Session, task_id: int) -> list[ResultAssessment]:
+def list_assessments(db: Session, task_id: int) -> list[ResultAssessmentRecord]:
     """任务全部证据包上的评估历史(不可变, 时间倒序)。"""
-    return list(
-        db.execute(
-            select(ResultAssessment)
-            .join(EvidencePackage, EvidencePackage.id == ResultAssessment.evidence_package_id)
-            .where(EvidencePackage.task_id == task_id)
-            .order_by(ResultAssessment.id.desc())
-        ).scalars()
-    )
+    return results_domain.list_assessments_for_task(db, task_id)
 
 
 # ---------------------------------------------------------------------------
@@ -630,8 +621,8 @@ def run_assessment(
     db: Session,
     evidence_package_id: int,
     assessment_type: str = "full",
-    user: User | None = None,
-) -> ResultAssessment:
+    user: UserRecord | None = None,
+) -> ResultAssessmentRecord:
     """执行四维有效性检查并创建新评估记录（追加式，不覆盖原记录，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：评估记录不可变追加）。
 
     assessment_type: full=四维全查; physical/optimality/financial/reliability=
@@ -704,7 +695,7 @@ def run_assessment(
 
 def _build_assessment(
     db: Session,
-    package: EvidencePackage,
+    package: EvidencePackageRecord,
     *,
     checked: list[str],
     physical: validity.PhysicalValidity,
@@ -715,8 +706,8 @@ def _build_assessment(
     optimality_checks: dict[str, Any],
     financial_checks: dict[str, Any],
     reliability_checks: dict[str, Any],
-    user: User | None,
-) -> ResultAssessment:
+    user: UserRecord | None,
+) -> ResultAssessmentRecord:
     """构造评估记录: 细粒度状态入 detail, 粗粒度枚举入列, 追加 INSERT。"""
     detail: dict[str, Any] = {
         "definition_version": ASSESSMENT_RULE_VERSION,
@@ -741,14 +732,15 @@ def _build_assessment(
             "reliability": reliability_checks,
         },
     }
-    assessment = ResultAssessment(
+    return results_domain.create_system_assessment(
+        db,
         evidence_package_id=package.id,
-        assessor="system",
-        assessed_by=user.id if user is not None else None,
-        dimension_physical=_fine_to_db("physical", physical),
-        dimension_optimality=_fine_to_db("optimality", optimality),
-        dimension_financial=_fine_to_db("financial", financial),
-        dimension_reliability=_fine_to_db("reliability", reliability),
+        dimensions={
+            "physical": _fine_to_db("physical", physical),
+            "optimality": _fine_to_db("optimality", optimality),
+            "financial": _fine_to_db("financial", financial),
+            "reliability": _fine_to_db("reliability", reliability),
+        },
         overall_score=_overall_score(
             {
                 "physical": physical,
@@ -757,12 +749,10 @@ def _build_assessment(
                 "reliability": reliability,
             }
         ),
-        comment=f"系统自动评估(规则版本 {ASSESSMENT_RULE_VERSION}, 维度: {', '.join(checked)})",
         detail=detail,
+        assessed_by=user.id if user is not None else None,
+        comment=f"系统自动评估(规则版本 {ASSESSMENT_RULE_VERSION}, 维度: {', '.join(checked)})",
     )
-    db.add(assessment)
-    db.flush()
-    return assessment
 
 
 def _coerce_fine(dimension: str, value: object) -> Any:
@@ -779,7 +769,7 @@ def _coerce_fine(dimension: str, value: object) -> Any:
         return validity.ValidityLevel.na
 
 
-def _fine_states(assessment: ResultAssessment) -> dict[str, Any]:
+def _fine_states(assessment: ResultAssessmentRecord) -> dict[str, Any]:
     """评估细粒度状态: 优先 detail 内独立记录的细粒度值(权威), 否则由粗粒度列回退。"""
     detail = assessment.detail or {}
     dims = detail.get("dimensions")
@@ -800,7 +790,7 @@ def _fine_states(assessment: ResultAssessment) -> dict[str, Any]:
     }
 
 
-def assessment_to_dict(db: Session, assessment: ResultAssessment) -> dict[str, Any]:
+def assessment_to_dict(db: Session, assessment: ResultAssessmentRecord) -> dict[str, Any]:
     """评估序列化(含只读派生摘要, 绝不覆盖原始维度)。"""
     states = _fine_states(assessment)
     summary = validity.summarize_four_dimensions(
@@ -816,7 +806,7 @@ def assessment_to_dict(db: Session, assessment: ResultAssessment) -> dict[str, A
         "evidence_package_id": assessment.evidence_package_id,
         "assessor": assessment.assessor,
         "assessed_by": assessment.assessed_by,
-        "created_at": assessment.created_at.isoformat() if assessment.created_at else None,
+        "created_at": assessment.created_at,
         "dimensions": {
             "physical": assessment.dimension_physical,
             "optimality": assessment.dimension_optimality,
@@ -841,7 +831,7 @@ def update_result_index(
     task_id: int,
     assessment_id: int,
     business_outcome: str | None = None,
-) -> ResultIndex:
+) -> ResultIndexRecord:
     """更新结果索引(仅最新引用)。
 
     - 同证据包挂接新评估: 只更新最新索引行的 assessment_id 指针(历史评估仍可
@@ -849,14 +839,14 @@ def update_result_index(
     - 新证据包发布：旧行 is_latest=false，插入新行（见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果：同一事务转交最新标记）；
     - 索引行经外键可追溯至快照/证据包/评估(稳定 ID 定位, 不存储内容摘要)。
     """
-    assessment = db.get(ResultAssessment, assessment_id)
+    assessment = results_domain.get_assessment(db, assessment_id)
     if assessment is None:
         raise NotFoundError(
             "评估记录不存在",
             params={"assessment_id": assessment_id},
             location={"object_type": "result_assessment", "object_id": assessment_id},
         )
-    package = db.get(EvidencePackage, assessment.evidence_package_id)
+    package = results_domain.get_evidence(db, assessment.evidence_package_id)
     if package is None:
         raise AppError(
             "评估引用的证据包缺失(数据损坏)",
@@ -872,26 +862,14 @@ def update_result_index(
             "项目尚无版本, 结果无法建立索引",
             params={"task_id": task_id, "project_id": task.project_id},
         )
-    existing = db.execute(
-        select(ResultIndex).where(
-            ResultIndex.project_version_id == project_version_id, ResultIndex.is_latest.is_(True)
-        )
-    ).scalar_one_or_none()
-    if existing is not None and existing.evidence_package_id == package.id:
-        existing.assessment_id = assessment.id  # 挂接新评估, 不新增索引行
-        index = existing
-    else:
-        if existing is not None:
-            existing.is_latest = False  # 新结果发布: 转交最新标记
-        index = ResultIndex(
-            project_id=task.project_id,
-            project_version_id=project_version_id,
-            evidence_package_id=package.id,
-            assessment_id=assessment.id,
-            is_latest=True,
-        )
-        db.add(index)
-    db.flush()
+    # 同证据只更新评估指针, 新证据则转交最新标记并插入新行(01 §8.3 同一事务)
+    index = results_domain.point_index_latest(
+        db,
+        project_id=task.project_id,
+        project_version_id=project_version_id,
+        evidence_package_id=package.id,
+        assessment_id=assessment.id,
+    )
     _audit(
         db,
         "result_index",
@@ -907,16 +885,12 @@ def update_result_index(
     return index
 
 
-def latest_index(db: Session, task: Task) -> ResultIndex | None:
+def latest_index(db: Session, task: TaskRecord) -> ResultIndexRecord | None:
     """任务当前版本的“最新”结果索引行（is_latest，见 manual/developer-guide/zh-CN/domain-model.md#快照、任务和结果）。"""
     project_version_id = _evidence_project_version(db, task)
     if project_version_id is None:
         return None
-    return db.execute(
-        select(ResultIndex).where(
-            ResultIndex.project_version_id == project_version_id, ResultIndex.is_latest.is_(True)
-        )
-    ).scalar_one_or_none()
+    return results_domain.latest_index_for_version(db, project_version_id)
 
 
 # ---------------------------------------------------------------------------
@@ -957,7 +931,7 @@ def build_diff_patch(content: dict[str, Any], solution_id: int) -> dict[str, Any
     }
 
 
-def _selection_solution(db: Session, selection: ResultSelection) -> int | None:
+def _selection_solution(db: Session, selection: ResultSelectionRecord) -> int | None:
     """当前选中的解标识: 从该选中的不可变审计记录读取(01 §10.3)。"""
     row = db.execute(
         select(AuditLog)
@@ -976,13 +950,13 @@ def _selection_solution(db: Session, selection: ResultSelection) -> int | None:
 
 def select_result(
     db: Session,
-    user: User,
+    user: UserRecord,
     task_id: int,
     solution_id: int,
     selection_type: str,
     reference_rule: str | None = None,
     reason: str | None = None,
-) -> ResultSelection:
+) -> ResultSelectionRecord:
     """选择结果(01 §8.4: 追加式, 换选=新行 + 旧行 is_current=false)。
 
     保存: 所选解标识/选择人/类型/参考规则/理由 + 参数差异补丁(所选解标识与补丁承载于不可变审计日志, 供 diff 预览与结果应用追溯)。
@@ -1019,22 +993,13 @@ def select_result(
     diff_patch = build_diff_patch(content, solution_id)
 
     # 换选: 旧当前选中置 false, 插入新选中行(01 §8.4 同一事务)
-    old = db.execute(
-        select(ResultSelection).where(
-            ResultSelection.project_id == task.project_id, ResultSelection.is_current.is_(True)
-        )
-    ).scalar_one_or_none()
-    if old is not None:
-        old.is_current = False
-    selection = ResultSelection(
+    selection = results_domain.select_result(
+        db,
         project_id=task.project_id,
         result_index_id=index.id,
         selected_by=user.id,
         reason=reason,
-        is_current=True,
     )
-    db.add(selection)
-    db.flush()
     _audit(
         db,
         "result_selections",
@@ -1054,13 +1019,9 @@ def select_result(
     return selection
 
 
-def current_selection(db: Session, project_id: int) -> ResultSelection | None:
+def current_selection(db: Session, project_id: int) -> ResultSelectionRecord | None:
     """项目当前采用结果(01 §8.4 is_current)。"""
-    return db.execute(
-        select(ResultSelection).where(
-            ResultSelection.project_id == project_id, ResultSelection.is_current.is_(True)
-        )
-    ).scalar_one_or_none()
+    return results_domain.current_selection(db, project_id)
 
 
 def selection_diff(db: Session, project_id: int) -> dict[str, Any] | None:
@@ -1080,7 +1041,7 @@ def selection_diff(db: Session, project_id: int) -> dict[str, Any] | None:
             message_key="ies.diag.store.corrupt",
             params={"selection_id": selection.id},
         )
-    index = db.get(ResultIndex, selection.result_index_id)
+    index = results_domain.get_index(db, selection.result_index_id)
     package = get_evidence(db, index.evidence_package_id) if index is not None else None
     if package is None:
         raise AppError(
@@ -1098,7 +1059,7 @@ def selection_diff(db: Session, project_id: int) -> dict[str, Any] | None:
         "result_index_id": index.id,
         "evidence_package_id": package.id,
         "project_version_id": index.project_version_id,
-        "selected_at": selection.selected_at.isoformat() if selection.selected_at else None,
+        "selected_at": selection.selected_at,
         "reason": selection.reason,
     }
 
@@ -1209,7 +1170,7 @@ def read_hourly(
 # ---------------------------------------------------------------------------
 
 
-def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[str, Any]:
+def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) -> dict[str, Any]:
     """结果视图: 四维结论/业务结局/指标摘要/逐时结果引用/当前选中。
 
     四维结论以评估记录为准(细粒度 + 派生摘要), 不做任何重新计算(domain-model §快照、任务和结果)。
@@ -1242,7 +1203,7 @@ def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[
                 "status": package.status,
                 "object_id": package.object_id,
                 "attempt_id": package.attempt_id,
-                "created_at": package.created_at.isoformat() if package.created_at else None,
+                "created_at": package.created_at,
             }
             if package is not None
             else None
@@ -1261,7 +1222,7 @@ def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[
                 "id": selection.id,
                 "result_index_id": selection.result_index_id,
                 "selected_by": selection.selected_by,
-                "selected_at": selection.selected_at.isoformat() if selection.selected_at else None,
+                "selected_at": selection.selected_at,
                 "reason": selection.reason,
             }
             if selection is not None
@@ -1272,11 +1233,11 @@ def result_view(db: Session, user: User, project_id: int, task_id: int) -> dict[
 
 def run_check_task(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     task_id: int,
     evidence_package_id: int | None = None,
-) -> Task:
+) -> TaskRecord:
     """对已有证据包创建检查任务(report 类型, io 池, 03 规格 2.1)。
 
     evidence_package_id 缺省取该任务最新证据包; 检查任务配置携带证据包引用,
@@ -1294,10 +1255,11 @@ def run_check_task(
                 "证据包不属于该任务",
                 params={"evidence_package_id": evidence_package_id, "task_id": task_id},
             )
-    return tasks_service.create_task(
+    task, _flags = tasks_service.create_task(
         db,
         user,
         project_id,
         "report",
         config={"action": "check", "evidence_package_id": package.id, "source_task_id": task_id},
     )
+    return task

@@ -55,9 +55,13 @@ class TaskRecord:
     idempotency_key: str | None = None
     calc_snapshot_id: int | None = None
     priority: int = 0
+    deadline: str | None = None
     attempt_count: int = 0
     max_attempts: int = 3
     superseded_by_task_id: int | None = None
+    requested_at: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +74,8 @@ class TaskAttemptRecord:
     status: str
     worker_id: str | None = None
     stop_reason: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +88,7 @@ class TaskLeaseRecord:
     status: str
     acquired_by: str | None = None
     expires_at: str | None = None
+    renewed_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +100,7 @@ class TaskProgressRecord:
     progress_percent: float
     stage: str | None = None
     detail: dict[str, Any] | None = None
+    updated_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +113,9 @@ class TaskDiagnosticRecord:
     message: str
     attempt_id: int | None = None
     code: str | None = None
+    stack_trace: str | None = None
     context: dict[str, Any] | None = None
+    created_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

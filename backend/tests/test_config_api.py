@@ -29,6 +29,7 @@ from iesplan.db import Base, get_db
 from iesplan.main import _register_exception_handlers
 from iesplan.models.identity import User
 from iesplan.models.audit import AuditLog
+from iesplan.models.calc import CalcConfig
 from iesplan.models.model import Device, SystemGraph
 from iesplan.models.project import Draft, Project
 from iesplan.services import config as config_service
@@ -669,8 +670,8 @@ def test_saved_config_row_frozen_creates_new_version(client: TestClient, db: Ses
     )
     # 冻结当前行
     row = db.scalar(
-        select(config_service.CalcConfig).where(
-            config_service.CalcConfig.project_id == project.id
+        select(CalcConfig).where(
+            CalcConfig.project_id == project.id
         )
     )
     row.status = "frozen"

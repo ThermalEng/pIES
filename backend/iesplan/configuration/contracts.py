@@ -97,3 +97,4 @@ class CalcConfigRecord:
     status: str = "draft"
     version: int = 1
     updated_by: int = 0
+    updated_at: str | None = None

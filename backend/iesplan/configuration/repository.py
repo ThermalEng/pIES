@@ -26,6 +26,10 @@ class ConfigurationRepository(Protocol):
 
     def get_profile(self, db: Session, profile_id: str) -> FinanceProfileRecord | None: ...
 
+    def get_profile_row(self, db: Session, row_id: int) -> FinanceProfileRecord | None:
+        """按注册行主键取 Profile（项目指针解引用，指针损坏由调用方判定）。"""
+        ...
+
     def list_profiles(self, db: Session) -> list[FinanceProfileRecord]: ...
 
     def register_profile(
@@ -47,17 +51,22 @@ class ConfigurationRepository(Protocol):
 
     def get_current_overrides(self, db: Session, project_id: int) -> OverridesRevisionRecord | None: ...
 
+    def next_overrides_revision(self, db: Session, project_id: int) -> int:
+        """表内 max(revision)+1（指针清空不重置计数；调用方存回执后用显式号追加）。"""
+        ...
+
     def append_overrides(
         self,
         db: Session,
         *,
         project_id: int,
+        revision: int,
         content: dict[str, Any],
         profile_id: str,
         created_by: int,
         receipt_object_id: int | None = None,
     ) -> OverridesRevisionRecord:
-        """追加覆盖 revision（含 revision 号分配）。"""
+        """追加覆盖 revision（序号由调用方经 next_* 预读后显式传入，唯一约束兜底并发）。"""
         ...
 
     def get_effective_revision(
@@ -66,17 +75,22 @@ class ConfigurationRepository(Protocol):
 
     def get_current_effective(self, db: Session, project_id: int) -> EffectiveRevisionRecord | None: ...
 
+    def next_effective_revision(self, db: Session, project_id: int) -> int:
+        """表内 max(revision)+1（用法同 next_overrides_revision）。"""
+        ...
+
     def append_effective(
         self,
         db: Session,
         *,
         project_id: int,
+        revision: int,
         content: dict[str, Any],
         profile_id: str,
         created_by: int,
         receipt_object_id: int | None = None,
     ) -> EffectiveRevisionRecord:
-        """追加有效快照 revision（内容由领域合并器先算好再传入）。"""
+        """追加有效快照 revision（内容由领域合并器先算好再传入，序号显式传入）。"""
         ...
 
     def get_planning_revision(
@@ -85,11 +99,16 @@ class ConfigurationRepository(Protocol):
 
     def get_current_planning(self, db: Session, project_id: int) -> PlanningRevisionRecord | None: ...
 
+    def next_planning_revision(self, db: Session, project_id: int) -> int:
+        """表内 max(revision)+1（用法同 next_overrides_revision）。"""
+        ...
+
     def append_planning(
         self,
         db: Session,
         *,
         project_id: int,
+        revision: int,
         content: dict[str, Any],
         created_by: int,
         receipt_object_id: int | None = None,
@@ -112,7 +131,9 @@ class ConfigurationRepository(Protocol):
         tolerances: dict[str, Any],
         updated_by: int,
         description: str | None = None,
-    ) -> CalcConfigRecord: ...
+    ) -> CalcConfigRecord:
+        """创建配置行（同项目同名 version 自动取表内 max+1；并发冲突抛 ConfigurationConflictError）。"""
+        ...
 
     def update_calc_config(
         self, db: Session, config_id: int, *, values: dict[str, Any], updated_by: int

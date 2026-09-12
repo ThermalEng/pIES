@@ -37,13 +37,14 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from datetime import UTC, datetime
 from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
+from iesplan.configuration.contracts import CalcConfigRecord
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     SEVERITY_WARNING,
@@ -71,7 +72,6 @@ from iesplan.devices.contracts2 import PropertySpec
 from iesplan.core.units import UnitError, dims_of
 from iesplan.db import SessionLocal
 from iesplan.models.audit import AuditLog
-from iesplan.models.calc import CalcConfig
 from iesplan.models.model import Device, SystemGraph
 from iesplan.project.contracts import ProjectRecord
 
@@ -1145,7 +1145,7 @@ def _sync_draft_config(
     db: Session,
     proj: ProjectRecord,
     config: dict,
-    row: CalcConfig,
+    row: CalcConfigRecord,
 ) -> None:
     """把已保存配置同步进当前草稿内容的 calc_config 节(不递增草稿修订)。
 
@@ -1188,8 +1188,8 @@ def save_config(
     expected_revision: int,
     *,
     user_id: int | None = None,
-) -> CalcConfig:
-    """保存计算配置(与草稿修订绑定, 乐观锁; 冻结行则新建版本行)。
+) -> CalcConfigRecord:
+    """保存计算配置(与草稿修订绑定, 乐观锁; 冻结行则新建版本行, 经 configuration 域)。
 
     参数:
         db: 数据库会话。
@@ -1219,53 +1219,44 @@ def save_config(
             },
         )
     config = normalize_config(config)
-    row = db.scalar(
-        select(CalcConfig)
-        .where(
-            CalcConfig.project_id == project_id,
-            CalcConfig.name == DEFAULT_CONFIG_NAME,
-        )
-        .order_by(CalcConfig.version.desc())
-        .limit(1)
-    )
-    if row is not None and row.status == "frozen":
-        row = None  # 冻结行不可修改(01 §6.1 触发器语义), 新建版本行
-    if row is None:
-        max_version = (
-            db.scalar(
-                select(CalcConfig.version)
-                .where(
-                    CalcConfig.project_id == project_id,
-                    CalcConfig.name == DEFAULT_CONFIG_NAME,
-                )
-                .order_by(CalcConfig.version.desc())
-                .limit(1)
-            )
-            or 0
-        )
-        row = CalcConfig(
-            project_id=project_id,
-            name=DEFAULT_CONFIG_NAME,
-            version=max_version + 1,
-            status="draft",
-            updated_by=user_id or proj.owner_id,
-        )
-        db.add(row)
-    params = config["parameters"]
-    row.params = params
-    row.variables = config["variables"]
-    row.objectives = config["objectives"]
-    row.constraints = config["constraints"]
-    row.min_irr = config.get("irr_floor")
+    existing = [
+        c for c in configuration_domain.list_calc_configs(db, project_id) if c.name == DEFAULT_CONFIG_NAME
+    ]
+    latest = max(existing, key=lambda c: c.version, default=None)
+    if latest is not None and latest.status == "frozen":
+        latest = None  # 冻结行不可修改(01 §6.1 触发器语义), 新建版本行
     algo_mode = config.get("algorithm", {}).get("mode", "auto")
     algo_name = config.get("algorithm", {}).get("name")
-    row.algorithm = None if algo_mode == "auto" else ALGO_DB_CLASS.get(algo_name or "", algo_name)
-    row.solver = SOLVER_ID
-    row.tolerances = config.get("tolerances", {})
-    row.random_seed = config.get("random_seed")
-    row.updated_at = datetime.now(UTC)
-    # 确保新行的 id 已分配(audit_log.entity_id 非空约束)
-    db.flush()
+    values = {
+        "params": config["parameters"],
+        "variables": config["variables"],
+        "objectives": config["objectives"],
+        "constraints": config["constraints"],
+        "min_irr": config.get("irr_floor"),
+        "algorithm": None if algo_mode == "auto" else ALGO_DB_CLASS.get(algo_name or "", algo_name),
+        "solver": SOLVER_ID,
+        "tolerances": config.get("tolerances", {}),
+        "random_seed": config.get("random_seed"),
+    }
+    actor = user_id or proj.owner_id
+    if latest is None:
+        row = configuration_domain.create_calc_config(
+            db,
+            project_id=project_id,
+            name=DEFAULT_CONFIG_NAME,
+            params=values["params"],
+            variables=values["variables"],
+            objectives=values["objectives"],
+            constraints=values["constraints"],
+            tolerances=values["tolerances"],
+            updated_by=actor,
+            min_irr=values["min_irr"],
+            algorithm=values["algorithm"],
+            solver=values["solver"],
+            random_seed=values["random_seed"],
+        )
+    else:
+        row = configuration_domain.update_calc_config(db, latest.id, values=values, updated_by=actor)
     # 0.2.0 B4: 配置保存属"项目/数据/计算配置"关键变更(宪法 §16), 保留不可变
     # 最小化脱敏审计(只记版本/变量数/目标/算法, 不复制完整配置)
     db.add(
@@ -1292,11 +1283,11 @@ def save_config(
     # 权威输入, 不更新则保存的配置不进入计算快照与导出包)
     _sync_draft_config(db, proj, config, row)
     db.commit()
-    db.refresh(row)
+    # row 为 configuration 域记录(已物化值对象), 无需 ORM refresh。
     return row
 
 
-def _row_to_algorithm(row: CalcConfig) -> dict:
+def _row_to_algorithm(row: CalcConfigRecord) -> dict:
     """DB 算法列 -> 配置算法段(auto 模式存储为 NULL)。"""
     if row.algorithm is None:
         return {"mode": "auto", "name": DEFAULT_ALGORITHM}
@@ -1308,8 +1299,8 @@ def _row_to_algorithm(row: CalcConfig) -> dict:
     return {"mode": "manual", "name": algo_id}
 
 
-def _row_to_config(row: CalcConfig) -> dict:
-    """CalcConfig 行 -> 计算配置 dict。"""
+def _row_to_config(row: CalcConfigRecord) -> dict:
+    """CalcConfig 行 -> 计算配置 dict（ORM 行与域记录同形，统一经记录消费）。"""
     return {
         "parameters": row.params or {},
         "variables": row.variables or [],
@@ -1395,15 +1386,10 @@ def _read_config(db: Session, project_id: int) -> dict:
         )
     graph = load_work_graph(db, project_id)
     meta = parameter_metadata(graph)
-    row = db.scalar(
-        select(CalcConfig)
-        .where(
-            CalcConfig.project_id == project_id,
-            CalcConfig.name == DEFAULT_CONFIG_NAME,
-        )
-        .order_by(CalcConfig.version.desc())
-        .limit(1)
-    )
+    configs = [
+        c for c in configuration_domain.list_calc_configs(db, project_id) if c.name == DEFAULT_CONFIG_NAME
+    ]
+    row = max(configs, key=lambda c: c.version, default=None)
     if row is None:
         return {
             "config": _build_default_config(db, project_id),
@@ -1417,7 +1403,7 @@ def _read_config(db: Session, project_id: int) -> dict:
         "meta": meta,
         "version": row.version,
         "status": row.status,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "updated_at": row.updated_at,
     }
 
 

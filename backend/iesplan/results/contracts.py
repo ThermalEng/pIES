@@ -32,6 +32,7 @@ class EvidencePackageRecord:
     status: str
     attempt_id: int | None = None
     created_by: int = 0
+    created_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,7 @@ class ResultAssessmentRecord:
     overall_score: float | None = None
     comment: str | None = None
     detail: dict[str, Any] | None = None
+    created_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +63,7 @@ class ResultIndexRecord:
     evidence_package_id: int
     assessment_id: int | None = None
     is_latest: bool = True
+    created_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +76,7 @@ class ResultSelectionRecord:
     selected_by: int
     reason: str | None = None
     is_current: bool = True
+    selected_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

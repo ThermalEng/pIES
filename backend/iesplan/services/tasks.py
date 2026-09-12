@@ -20,16 +20,18 @@ from __future__ import annotations
 import re
 import shutil
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-import sqlalchemy as sa
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan import __version__
+from iesplan import dataset as dataset_domain
+from iesplan import identity as identity_domain
 from iesplan import project as project_domain
+from iesplan import results as results_domain
+from iesplan import tasks as tasks_domain
 from iesplan.config import settings
 from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
@@ -45,25 +47,19 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import new_id
 from iesplan.core.jsonutil import jsonable
-from iesplan.models.calc import (
-    CalcSnapshot,
-    ComputeSlot,
-    Task,
-    TaskAttempt,
-    TaskDiagnostic,
-    TaskLease,
-    TaskProgress,
-)
+from iesplan.identity.contracts import UserRecord
 from iesplan.models.common import IDEMPOTENCY_KEY_RE
-from iesplan.models.dataset import DatasetFile
-from iesplan.models.identity import User
-from iesplan.models.result import EvidencePackage, Report
-from iesplan.models.uncertainty import SampleTask
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.services import identity as identity_service
 from iesplan.services import project as project_service
 from iesplan.services import queue
 from iesplan.storage import object_info, orphaned_stats, usage_summary
+from iesplan.tasks.contracts import (
+    CalcSnapshotRecord,
+    ComputeSlotRecord,
+    TaskAttemptRecord,
+    TaskRecord,
+)
 
 if TYPE_CHECKING:
     from iesplan.assembly import ValidatedAssemblyArtifact
@@ -205,7 +201,7 @@ class StorageEstimate:
 
 
 def _resolve_project_inputs(
-    db: Session, project: ProjectRecord, actor: User, *, freeze: bool
+    db: Session, project: ProjectRecord, actor: UserRecord, *, freeze: bool
 ) -> tuple[ProjectVersionRecord | None, dict]:
     """解析任务输入: 项目版本(或当前草稿内容, 需要时固化)。
 
@@ -265,7 +261,7 @@ def _derive_random_seed(version_id: int) -> int:
 
 
 def _snapshot_inputs_equal(
-    snapshot: CalcSnapshot,
+    snapshot: CalcSnapshotRecord,
     *,
     dataset_ids: list[int],
     calc_config: dict,
@@ -294,8 +290,8 @@ def assemble_snapshot(
     project_id: int,
     task_type: str,
     config: dict[str, Any] | None = None,
-    user: User | None = None,
-) -> CalcSnapshot:
+    user: UserRecord | None = None,
+) -> CalcSnapshotRecord:
     """组装不可变计算快照(相同输入复用, 规格 2.2)。
 
     绑定: 项目版本(无版本时固化当前草稿)、数据集版本 id 清单、计算配置全文、
@@ -304,7 +300,7 @@ def assemble_snapshot(
     任务级 config 并入快照的 calc_config_snapshot.task_params。
     """
     project = project_service.require_project(db, project_id)
-    actor = user or db.get(User, project.owner_id)
+    actor = user or identity_domain.get_user(db, project.owner_id)
     if actor is None:
         raise InvalidRequestError("无法确定快照创建者", params={"project_id": project_id})
     version, content = _resolve_project_inputs(db, project, actor, freeze=True)
@@ -324,11 +320,7 @@ def assemble_snapshot(
     # 文本仅校验字头（header-only）。
     artifact = _assembly_gate(db, project_id, content, task_type)
     receipt = artifact.receipt.to_dict()
-    for candidate in db.execute(
-        select(CalcSnapshot)
-        .where(CalcSnapshot.project_version_id == version.id)
-        .order_by(CalcSnapshot.id.desc())
-    ).scalars():
+    for candidate in tasks_domain.list_snapshots_for_version(db, version.id):
         if _snapshot_inputs_equal(
             candidate,
             dataset_ids=dataset_ids,
@@ -342,21 +334,19 @@ def assemble_snapshot(
         ):
             return candidate  # 相同输入复用既有快照(不可变, 复用安全)
 
-    snapshot = CalcSnapshot(
+    return tasks_domain.create_snapshot(
+        db,
         project_version_id=version.id,
         dataset_version_ids=dataset_ids,
         calc_config_snapshot=calc_config,
+        random_seed=random_seed,
+        created_by=actor.id,
         program_version=__version__,
         extension_versions=extensions,
-        random_seed=random_seed,
         tolerances=tolerances,
         canonical_assembly_text=artifact.canonical_text,
         assembly_receipt=receipt,
-        created_by=actor.id,
     )
-    db.add(snapshot)
-    db.flush()
-    return snapshot
 
 
 def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) -> ValidatedAssemblyArtifact:
@@ -382,12 +372,10 @@ def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) 
 def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
     """项目绑定数据集版本 → 装配公开元信息（含数据对象元信息：列/单位/分辨率/媒体类型）。
 
-    只通过 storage 公开门面读取对象元信息，不跨模块访问对象 ORM。每个版本
-    选择 ``file_kind=data`` 的权威数据本体；缺文件/对象时不伪造元信息，由统一
-    装配入口给出阻断诊断。
+    只通过 dataset 域与 storage 公开门面读取版本/对象元信息，不跨模块访问
+    对象 ORM。每个版本选择 ``file_kind=data`` 的权威数据本体；缺文件/对象时
+    不伪造元信息，由统一装配入口给出阻断诊断。
     """
-    from iesplan.models.dataset import DatasetVersion
-
     meta: dict[int, dict] = {}
     for binding in content.get("dataset_bindings", []) or []:
         vid = binding.get("dataset_version_id")
@@ -397,7 +385,7 @@ def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
             vid = int(vid)
         except (TypeError, ValueError):
             continue
-        version = db.get(DatasetVersion, vid)
+        version = dataset_domain.get_version(db, vid)
         if version is None:
             continue
         fields = version.fields if isinstance(version.fields, dict) else {}
@@ -410,15 +398,10 @@ def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
             if isinstance(unit, str) and unit:
                 columns[col] = unit
 
-        data_file = db.execute(
-            select(DatasetFile)
-            .where(
-                DatasetFile.dataset_version_id == vid,
-                DatasetFile.file_kind == "data",
-            )
-            .order_by(DatasetFile.id)
-            .limit(1)
-        ).scalar_one_or_none()
+        data_file = next(
+            (f for f in dataset_domain.list_files(db, vid) if f.file_kind == "data"),
+            None,
+        )
         object_meta: dict = {}
         if data_file is not None:
             object_meta = object_info(db, data_file.object_id)
@@ -446,7 +429,7 @@ def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
 
 
 def _resolve_storage_estimate_inputs(
-    db: Session, project: ProjectRecord, actor: User
+    db: Session, project: ProjectRecord, actor: UserRecord
 ) -> tuple[dict, list[int]]:
     """只读解析估算输入(版本或草稿内容, 不固化不写库)。"""
     _version, content = _resolve_project_inputs(db, project, actor, freeze=False)
@@ -467,7 +450,7 @@ def list_cleanup_suggestions(db: Session) -> list[dict[str, Any]]:
         }
     )
 
-    report_count = db.execute(sa.select(sa.func.count(Report.id))).scalar() or 0
+    report_count = results_domain.count_reports(db)
     suggestions.append(
         {
             "action": "archive_old_reports",
@@ -477,9 +460,7 @@ def list_cleanup_suggestions(db: Session) -> list[dict[str, Any]]:
         }
     )
 
-    terminal_tasks = (
-        db.execute(sa.select(sa.func.count(Task.id)).where(Task.status.in_(TERMINAL_STATUSES))).scalar() or 0
-    )
+    terminal_tasks = tasks_domain.count_tasks_by_statuses(db, TERMINAL_STATUSES)
     suggestions.append(
         {
             "action": "cleanup_terminal_task_files",
@@ -518,7 +499,7 @@ def estimate_storage(
     配额未配置(Σ quota = 0)时仅以卷空闲空间为准。
     """
     project = project_service.require_project(db, project_id)
-    actor = db.get(User, project.owner_id)
+    actor = identity_domain.get_user(db, project.owner_id)
     if actor is None:
         raise NotFoundError("项目所有者不存在", params={"project_id": project_id})
     content, dataset_ids = _resolve_storage_estimate_inputs(db, project, actor)
@@ -527,12 +508,7 @@ def estimate_storage(
     # 快照与输入: 数据集版本对象大小之和
     snap_bytes = 0
     for dvid in dataset_ids:
-        total = db.execute(
-            sa.select(sa.func.coalesce(sa.func.sum(DatasetFile.size_bytes), 0)).where(
-                DatasetFile.dataset_version_id == dvid
-            )
-        ).scalar()
-        snap_bytes += int(total or 0)
+        snap_bytes += sum(f.size_bytes or 0 for f in dataset_domain.list_files(db, dvid))
 
     # 逐时结果: 行数 × ~1 KB(Y = 规划年数; 多目标解点 × 解点数)
     years = int(params.get("horizon_years", 1) or 1)
@@ -568,9 +544,9 @@ def estimate_storage(
 # ---------------------------------------------------------------------------
 
 
-def _get_task(db: Session, task_id: int) -> Task:
+def _get_task(db: Session, task_id: int) -> TaskRecord:
     """按 id 取任务; 不存在 404。"""
-    task = db.get(Task, task_id)
+    task = tasks_domain.get_task(db, task_id)
     if task is None:
         raise NotFoundError(
             "任务不存在",
@@ -580,7 +556,7 @@ def _get_task(db: Session, task_id: int) -> Task:
     return task
 
 
-def ensure_task_belongs(db: Session, project_id: int, task_id: int) -> Task:
+def ensure_task_belongs(db: Session, project_id: int, task_id: int) -> TaskRecord:
     """任务必须属于该项目(否则 404, 不泄露其他项目任务存在性)。"""
     task = _get_task(db, task_id)
     if task.project_id != project_id:
@@ -602,32 +578,33 @@ def _write_diagnostic(
     attempt_id: int | None = None,
     stack_trace: str | None = None,
     context: dict[str, Any] | None = None,
-) -> TaskDiagnostic:
-    """写入任务诊断(不可变, 只 INSERT; 01 §7.6)。"""
-    diag = TaskDiagnostic(
+) -> None:
+    """写入任务诊断(不可变, 只 INSERT; 01 §7.6, 经 tasks 域)。"""
+    tasks_domain.append_diagnostic(
+        db,
         task_id=task_id,
-        attempt_id=attempt_id,
         level=level,
-        code=code,
         message=message,
+        attempt_id=attempt_id,
+        code=code,
         stack_trace=stack_trace,
         context=context,
     )
-    db.add(diag)
-    db.flush()
-    return diag
 
 
 def create_task(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     task_type: str,
     config: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
     parent_task_id: int | None = None,
-) -> Task:
+) -> tuple[TaskRecord, dict[str, bool]]:
     """创建任务(规格 2.2 流程: 幂等检查 → 门禁 → 快照 → INSERT → 入队)。
+
+    返回 (任务记录, 标记): 标记含 replay/duplicate, 复用既有任务时为 True
+    （记录不可变，复用标记不再以瞬态属性携带）。
 
     - 幂等键命中: 返回既有任务(replay=True), 不重复创建、不重复扣配额;
     - 存储门禁(仅计算类): 估算不足 → 409 + SYS-STORE-003 blocking 诊断 + 清理建议;
@@ -670,17 +647,11 @@ def create_task(
     #    本项目的列表为空、详情 404。唯一索引 uq_tasks_idempotency_key 同步
     #    改为 (project_id, idempotency_key) 复合)
     if idempotency_key is not None:
-        existing = db.execute(
-            select(Task).where(
-                Task.project_id == project_id,
-                Task.idempotency_key == idempotency_key,
-            )
-        ).scalar_one_or_none()
+        existing = tasks_domain.get_task_by_idempotency(db, project_id, idempotency_key)
         if existing is not None:
-            existing.replay = True  # 返回标记(非列属性, 供 API 呈现)
-            return existing
+            return existing, {"replay": True, "duplicate": False}
 
-    snapshot: CalcSnapshot | None = None
+    snapshot: CalcSnapshotRecord | None = None
     if task_type in COMPUTE_TYPES:
         # 2) 存储门禁(门禁失败不创建快照不创建任务, 规格 8.2)
         estimate = estimate_storage(db, project_id, task_type, config)
@@ -701,20 +672,9 @@ def create_task(
         #    任务复用(规格 2.2"短时间重复 → 复用并提示"); 携带幂等键的提交以
         #    幂等键为去重机制, 不参与快照去重(允许用户刻意提交同类任务)
         if idempotency_key is None:
-            duplicate = db.execute(
-                select(Task)
-                .where(
-                    Task.project_id == project_id,
-                    Task.type == task_type,
-                    Task.calc_snapshot_id == snapshot.id,
-                    Task.status.in_(("queued", "running", "cancelling")),
-                )
-                .order_by(Task.id.desc())
-                .limit(1)
-            ).scalar_one_or_none()
+            duplicate = tasks_domain.find_active_duplicate(db, project_id, task_type, snapshot.id)
             if duplicate is not None:
-                duplicate.duplicate = True
-                return duplicate
+                return duplicate, {"replay": False, "duplicate": True}
     # io 类任务(report/export/import/dataset_build): 无快照, 以幂等键去重为主
 
     priority = 0
@@ -733,18 +693,16 @@ def create_task(
 
     pool = POOL_BY_TYPE[task_type]
     trace_id = new_id("trc-")
-    task = Task(
+    task = tasks_domain.create_task(
+        db,
         project_id=project_id,
         type=task_type,
-        status="queued",
+        requested_by=user.id,
         idempotency_key=idempotency_key,
         calc_snapshot_id=snapshot.id if snapshot is not None else None,
-        requested_by=user.id,
         priority=priority,
         deadline=deadline,
     )
-    db.add(task)
-    db.flush()
     _write_diagnostic(
         db,
         task.id,
@@ -767,7 +725,7 @@ def create_task(
         priority=priority,
         trace_id=trace_id,
     )
-    return task
+    return task, {"replay": False, "duplicate": False}
 
 
 # ---------------------------------------------------------------------------
@@ -783,44 +741,18 @@ def _ensure_slots(db: Session) -> None:
     覆盖第一个的绑定, 释放时无法按 current_attempt_id 定位。故按并发额度拆为
     capacity 行、每行 capacity=1, 池并发度 = 行数, 槽行与尝试一一对应。
     """
-    for pool, capacity in (("compute", settings.compute_slots), ("io", IO_SLOT_CAPACITY)):
-        existing = (
-            db.execute(select(sa.func.count(ComputeSlot.id)).where(ComputeSlot.pool_name == pool)).scalar()
-            or 0
-        )
-        for _ in range(max(capacity - int(existing), 0)):
-            db.add(ComputeSlot(pool_name=pool, status="free", capacity=1, in_use=0))
-    db.flush()
+    tasks_domain.ensure_slots(db, {"compute": settings.compute_slots, "io": IO_SLOT_CAPACITY})
 
 
-def acquire_slot(db: Session, pool_name: str) -> ComputeSlot | None:
+def acquire_slot(db: Session, pool_name: str) -> ComputeSlotRecord | None:
     """占用一个并发槽(in_use+1, FOR UPDATE 行锁防并发争抢); 无空槽返回 None。"""
     _ensure_slots(db)
-    slots = (
-        db.execute(
-            select(ComputeSlot)
-            .where(ComputeSlot.pool_name == pool_name, ComputeSlot.status.in_(("free", "busy")))
-            .order_by(ComputeSlot.id)
-            .with_for_update()
-        )
-        .scalars()
-        .all()
-    )
-    for slot in slots:
-        if slot.in_use < slot.capacity:
-            slot.in_use += 1
-            return slot
-    return None  # 无空槽: 任务保持 queued, 等待下一轮调度
+    return tasks_domain.acquire_slot(db, pool_name)
 
 
 def release_slot(db: Session, attempt_id: int) -> None:
     """释放绑定的并发槽(in_use-1, current_attempt_id 清空; 规格 5.2 释放路径)。"""
-    slot = db.execute(
-        select(ComputeSlot).where(ComputeSlot.current_attempt_id == attempt_id)
-    ).scalar_one_or_none()
-    if slot is not None:
-        slot.in_use = max(slot.in_use - 1, 0)
-        slot.current_attempt_id = None
+    tasks_domain.release_slot(db, attempt_id)
 
 
 # ---------------------------------------------------------------------------
@@ -844,60 +776,47 @@ def claim_and_run(db: Session, task_id: int, worker_id: str) -> Claim | None:
     slot = acquire_slot(db, pool)
     if slot is None:
         return None
-    attempt_no = task.attempt_count + 1
-    now = datetime.now(UTC)
-    attempt = TaskAttempt(
-        task_id=task.id,
-        attempt_no=attempt_no,
-        worker_id=worker_id,
-        status="running",
-        started_at=now,
-    )
-    db.add(attempt)
-    db.flush()
+    attempt = tasks_domain.create_attempt(db, task_id=task.id, worker_id=worker_id)
     token = uuid4()
-    db.add(
-        TaskLease(
-            attempt_id=attempt.id,
-            lease_token=token,
-            acquired_by=worker_id,
-            acquired_at=now,
-            renewed_at=now,
-            expires_at=now + timedelta(seconds=LEASE_TTL_SECONDS),
-            status="active",
-        )
+    tasks_domain.acquire_lease(
+        db,
+        attempt_id=attempt.id,
+        lease_token=str(token),
+        acquired_by=worker_id,
+        ttl_seconds=LEASE_TTL_SECONDS,
     )
-    task.status = "running"
-    task.attempt_count = attempt_no
-    task.updated_at = now
-    slot.current_attempt_id = attempt.id
+    tasks_domain.set_task_status(db, task.id, "running")
+    tasks_domain.bind_slot_attempt(db, slot.id, attempt.id)
     queue.remove(task.id, pool)  # 领取后出队(视图)
-    return Claim(task_id=task.id, attempt_id=attempt.id, attempt_no=attempt_no, lease_token=token)
+    return Claim(
+        task_id=task.id,
+        attempt_id=attempt.id,
+        attempt_no=attempt.attempt_no,
+        lease_token=token,
+    )
 
 
-def _finish_attempt(db: Session, task: Task, status: str, stop_reason: str | None) -> TaskAttempt | None:
+def _finish_attempt(
+    db: Session, task: TaskRecord, status: str, stop_reason: str | None
+) -> TaskAttemptRecord | None:
     """收尾当前运行尝试: 尝试终态 + 租约释放/吊销 + 槽释放(规格 4.1 ③)。"""
-    attempt = db.execute(
-        select(TaskAttempt)
-        .where(TaskAttempt.task_id == task.id, TaskAttempt.status == "running")
-        .order_by(TaskAttempt.attempt_no.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    attempt = tasks_domain.get_running_attempt(db, task.id)
     if attempt is None:
         return None
-    attempt.status = status
-    attempt.stop_reason = stop_reason
-    attempt.finished_at = datetime.now(UTC)
-    lease = db.execute(
-        select(TaskLease).where(TaskLease.attempt_id == attempt.id, TaskLease.status == "active")
-    ).scalar_one_or_none()
+    finished = tasks_domain.finish_attempt(db, attempt.id, status, stop_reason=stop_reason)
+    lease = tasks_domain.get_active_lease_for_attempt(db, attempt.id)
     if lease is not None:
-        lease.status = "released" if status == "succeeded" else "revoked"
+        tasks_domain.release_lease(
+            db,
+            attempt.id,
+            lease.lease_token,
+            status="released" if status == "succeeded" else "revoked",
+        )
     release_slot(db, attempt.id)
-    return attempt
+    return finished
 
 
-def _check_transition(task: Task, new_status: str) -> None:
+def _check_transition(task: TaskRecord, new_status: str) -> None:
     """状态机校验: 终态不可迁移; 非法跳转抛 TaskStateError(规格 3.1)。"""
     if task.status in TERMINAL_STATUSES:
         raise TaskStateError(
@@ -917,7 +836,7 @@ def _check_transition(task: Task, new_status: str) -> None:
 
 def complete_task(
     db: Session, task_id: int, *, outcome: str | None = None, solver_status: str | None = None
-) -> Task:
+) -> TaskRecord:
     """任务正常完成(规格 3.1: running → completed; 取消竞态下 cancelling → completed)。
 
     business_outcome 与技术状态正交(规格 3.2): 未显式给定时按求解器状态映射,
@@ -930,9 +849,7 @@ def complete_task(
     if outcome is None:
         outcome = map_business_outcome(solver_status) if solver_status else "normal_completion"
     attempt = _finish_attempt(db, task, status="succeeded", stop_reason=None)
-    task.status = "completed"
-    task.business_outcome = outcome
-    task.updated_at = datetime.now(UTC)
+    task = tasks_domain.set_task_status(db, task.id, "completed", business_outcome=outcome)
     queue.clear_cancel(task.id)
     _write_diagnostic(
         db,
@@ -955,7 +872,7 @@ def fail_task(
     stack_trace: str | None = None,
     level: str = SEVERITY_ERROR,
     outcome: str | None = None,
-) -> Task:
+) -> TaskRecord:
     """任务失败(规格 3.1/6.3: 确定性失败不可自动重试; 写 error/blocking 诊断)。"""
     task = _get_task(db, task_id)
     if task.status == "failed":
@@ -967,9 +884,7 @@ def fail_task(
             "insufficient_evidence" if code in (TASK_DATA_SNAPSHOT_MISSING, TASK_DATA_HASH_MISMATCH) else None
         )
     attempt = _finish_attempt(db, task, status="failed", stop_reason=code or "error")
-    task.status = "failed"
-    task.business_outcome = outcome
-    task.updated_at = datetime.now(UTC)
+    task = tasks_domain.set_task_status(db, task.id, "failed", business_outcome=outcome)
     _write_diagnostic(
         db,
         task.id,
@@ -983,16 +898,19 @@ def fail_task(
     return task
 
 
-def timeout_task(db: Session, task_id: int, *, has_incumbent: bool = False) -> Task:
+def timeout_task(db: Session, task_id: int, *, has_incumbent: bool = False) -> TaskRecord:
     """任务硬超时(规格 6.2: 默认 8 h; 有 incumbent → restricted_results)。"""
     task = _get_task(db, task_id)
     if task.status == "timed_out":
         return task
     _check_transition(task, "timed_out")
     attempt = _finish_attempt(db, task, status="stopped", stop_reason="timeout")
-    task.status = "timed_out"
-    task.business_outcome = "restricted_results" if has_incumbent else "no_recommendation"
-    task.updated_at = datetime.now(UTC)
+    task = tasks_domain.set_task_status(
+        db,
+        task.id,
+        "timed_out",
+        business_outcome="restricted_results" if has_incumbent else "no_recommendation",
+    )
     _write_diagnostic(
         db,
         task.id,
@@ -1010,7 +928,9 @@ def timeout_task(db: Session, task_id: int, *, has_incumbent: bool = False) -> T
 # ---------------------------------------------------------------------------
 
 
-def cancel_task(db: Session, task_id: int, reason: str = "user_cancel", actor_id: int | None = None) -> Task:
+def cancel_task(
+    db: Session, task_id: int, reason: str = "user_cancel", actor_id: int | None = None
+) -> TaskRecord:
     """取消任务(规格 6.1)。
 
     - 终态 → 409 CancelDeniedError;
@@ -1026,44 +946,30 @@ def cancel_task(db: Session, task_id: int, reason: str = "user_cancel", actor_id
             params={"task_id": task_id, "status": task.status},
             location={"object_type": "task", "object_id": task_id},
         )
-    now = datetime.now(UTC)
     if task.status == "queued":
-        task.status = "cancelled"
-        task.updated_at = now
+        task = tasks_domain.set_task_status(db, task.id, "cancelled")
         queue.remove(task.id, POOL_BY_TYPE[task.type])
         return task
     if task.status == "cancelling":
         return task  # 取消已发起, 幂等
 
-    task.status = "cancelling"
-    task.updated_at = now
+    task = tasks_domain.set_task_status(db, task.id, "cancelling")
     queue.set_cancel(task.id, reason)
     # 批量传播: uncertainty 父任务 → 未完成子任务(规格 5.4/6.1)
-    child_ids = (
-        db.execute(
-            select(Task.id)
-            .join(SampleTask, SampleTask.id == Task.id)
-            .where(
-                SampleTask.parent_task_id == task_id,
-                Task.status.not_in(TERMINAL_STATUSES),
-            )
-        )
-        .scalars()
-        .all()
-    )
-    for child_id in child_ids:
-        child = _get_task(db, child_id)
+    children = tasks_domain.list_child_tasks(db, task_id)
+    for child in children:
+        if child.status in TERMINAL_STATUSES:
+            continue
         if child.status == "queued":
-            child.status = "cancelled"  # 未运行的子任务直接取消
+            tasks_domain.set_task_status(db, child.id, "cancelled")  # 未运行的子任务直接取消
             queue.remove(child.id, POOL_BY_TYPE[child.type])
         else:
-            child.status = "cancelling"  # 运行中子任务由 Worker 收拢
+            tasks_domain.set_task_status(db, child.id, "cancelling")  # 运行中子任务由 Worker 收拢
             queue.set_cancel(child.id, reason)
-        child.updated_at = now
     return task
 
 
-def acknowledge_cancel(db: Session, task_id: int) -> Task:
+def acknowledge_cancel(db: Session, task_id: int) -> TaskRecord:
     """确认取消(规格 6.1 收拢: Worker 终止子进程后调用; cancelling → cancelled)。
 
     已产出的样本/证据保留不回滚; 批量父任务在部分子任务已完成时记
@@ -1081,19 +987,12 @@ def acknowledge_cancel(db: Session, task_id: int) -> Task:
     attempt = _finish_attempt(db, task, status="stopped", stop_reason="cancelled")
     outcome: str | None = None
     if task.type == "uncertainty":
-        completed_children = (
-            db.execute(
-                sa.select(sa.func.count(Task.id))
-                .join(SampleTask, SampleTask.id == Task.id)
-                .where(SampleTask.parent_task_id == task.id, Task.status == "completed")
-            ).scalar()
-            or 0
+        completed_children = sum(
+            1 for child in tasks_domain.list_child_tasks(db, task.id) if child.status == "completed"
         )
         if completed_children > 0:
             outcome = "partial_batch"
-    task.status = "cancelled"
-    task.business_outcome = outcome
-    task.updated_at = datetime.now(UTC)
+    task = tasks_domain.set_task_status(db, task.id, "cancelled", business_outcome=outcome)
     queue.clear_cancel(task.id)
     _write_diagnostic(
         db,
@@ -1112,7 +1011,7 @@ def acknowledge_cancel(db: Session, task_id: int) -> Task:
 # ---------------------------------------------------------------------------
 
 
-def retry_task(db: Session, user: User, task_id: int) -> Task:
+def retry_task(db: Session, user: UserRecord, task_id: int) -> TaskRecord:
     """手动重试(仅终态任务; 计算类须存在快照, 缺失 → TASK-DATA-001 blocking)。
 
     重试不改变 idempotency_key 语义、不改变快照; 新尝试在下次领取时创建
@@ -1137,10 +1036,7 @@ def retry_task(db: Session, user: User, task_id: int) -> Task:
         )
     pool = POOL_BY_TYPE[task.type]
     trace_id = new_id("trc-")
-    task.status = "queued"
-    task.business_outcome = None
-    task.updated_at = datetime.now(UTC)
-    db.flush()
+    task = tasks_domain.set_task_status(db, task.id, "queued", business_outcome=None)
     _write_diagnostic(
         db,
         task.id,
@@ -1172,39 +1068,19 @@ def record_progress(
     percent: float,
     detail: dict[str, Any] | None = None,
     attempt_id: int | None = None,
-) -> TaskAttempt | None:
+) -> TaskAttemptRecord | None:
     """记录任务进度(PG UPSERT + Redis 秒级进度, 规格 7.1)。
 
     attempt_id 缺省取该任务当前尝试(attempt_no 最大者); percent 收敛到 0-100。
     """
     task = _get_task(db, task_id)
-    stmt = select(TaskAttempt).where(TaskAttempt.task_id == task.id).order_by(TaskAttempt.attempt_no.desc())
-    if attempt_id is not None:
-        stmt = stmt.where(TaskAttempt.id == attempt_id)
-    attempt = db.execute(stmt.limit(1)).scalars().first()
+    attempt = tasks_domain.get_latest_attempt(db, task.id, attempt_id)
     if attempt is None:
         return None
     percent = round(min(max(float(percent), 0.0), 100.0), 2)
-    existing = db.execute(
-        select(TaskProgress).where(TaskProgress.attempt_id == attempt.id)
-    ).scalar_one_or_none()
-    now = datetime.now(UTC)
-    if existing is None:
-        db.add(
-            TaskProgress(
-                attempt_id=attempt.id,
-                progress_percent=percent,
-                stage=stage,
-                detail=detail,
-                updated_at=now,
-            )
-        )
-    else:
-        existing.progress_percent = percent
-        existing.stage = stage
-        existing.detail = detail
-        existing.updated_at = now
-    db.flush()
+    tasks_domain.upsert_progress(
+        db, attempt_id=attempt.id, progress_percent=percent, stage=stage, detail=detail
+    )
     queue.set_progress(task.id, attempt.attempt_no, percent, stage, detail)
     return attempt
 
@@ -1214,28 +1090,19 @@ def record_progress(
 # ---------------------------------------------------------------------------
 
 
-def _task_trace_id(db: Session, task: Task) -> str | None:
+def _task_trace_id(db: Session, task: TaskRecord) -> str | None:
     """任务 trace_id(取自入队诊断 context; 规格 10.3 关联标识)。"""
-    diag = db.execute(
-        select(TaskDiagnostic)
-        .where(TaskDiagnostic.task_id == task.id, TaskDiagnostic.code == TASK_QUEUED)
-        .order_by(TaskDiagnostic.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    diag = tasks_domain.latest_diagnostic(db, task.id, TASK_QUEUED)
     if diag is not None and diag.context:
         return diag.context.get("trace_id")
     return None
 
 
-def _progress_summary(db: Session, task: Task) -> tuple[int | None, float, str | None, dict[str, Any] | None]:
+def _progress_summary(
+    db: Session, task: TaskRecord
+) -> tuple[int | None, float, str | None, dict[str, Any] | None]:
     """当前进度摘要 (attempt_no, percent, stage, detail): running 优先读 Redis 秒级进度。"""
-    attempt = (
-        db.execute(
-            select(TaskAttempt).where(TaskAttempt.task_id == task.id).order_by(TaskAttempt.attempt_no.desc())
-        )
-        .scalars()
-        .first()
-    )
+    attempt = tasks_domain.get_latest_attempt(db, task.id)
     if attempt is None:
         return None, 0.0, "queued" if task.status == "queued" else None, None
     percent: float = 0.0
@@ -1251,9 +1118,7 @@ def _progress_summary(db: Session, task: Task) -> tuple[int | None, float, str |
             stage = live.get("stage")
             detail = live.get("detail")
     if stage is None:
-        row = db.execute(
-            select(TaskProgress).where(TaskProgress.attempt_id == attempt.id)
-        ).scalar_one_or_none()
+        row = tasks_domain.get_progress(db, attempt.id)
         if row is not None:
             percent = float(row.progress_percent)
             stage = row.stage
@@ -1265,7 +1130,7 @@ def _progress_summary(db: Session, task: Task) -> tuple[int | None, float, str |
     return attempt.attempt_no, percent, stage, detail
 
 
-def _evidence_available(db: Session, task: Task) -> bool:
+def _evidence_available(db: Session, task: TaskRecord) -> bool:
     """结果可用性: 存在**可展示**的证据包(RR-P1-05)。
 
     契约: 只有任务 completed 且证据包状态为 complete/partial 才算结果可用;
@@ -1273,16 +1138,11 @@ def _evidence_available(db: Session, task: Task) -> bool:
     """
     if task.status != "completed":
         return False
-    evidence_status = db.execute(
-        select(EvidencePackage.status)
-        .where(EvidencePackage.task_id == task.id)
-        .order_by(EvidencePackage.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    return evidence_status in ("complete", "partial")
+    evidence = results_domain.latest_evidence_for_task(db, task.id)
+    return evidence is not None and evidence.status in ("complete", "partial")
 
 
-def task_summary(db: Session, task: Task) -> dict[str, Any]:
+def task_summary(db: Session, task: TaskRecord) -> dict[str, Any]:
     """任务列表项摘要(规格 9.1 字段)。
 
     RR-P1-05: 增加 ``result_available`` —— 结果可用性是任务元数据的一部分,
@@ -1326,7 +1186,7 @@ def task_summary(db: Session, task: Task) -> dict[str, Any]:
 
 def list_tasks(
     db: Session,
-    user: User,
+    user: UserRecord,
     project_id: int,
     *,
     task_type: str | None = None,
@@ -1338,30 +1198,24 @@ def list_tasks(
     """任务列表(规格 9.1: 状态/结局过滤 + 游标分页, requested_at 倒序)。"""
     project_service.ensure_access(db, user, project_id, "view")
     project_service.require_project(db, project_id)
-    stmt = select(Task).where(Task.project_id == project_id)
-    if task_type is not None:
-        stmt = stmt.where(Task.type == task_type)
-    if status is not None:
-        stmt = stmt.where(Task.status == status)
-    if outcome is not None:
-        stmt = stmt.where(Task.business_outcome == outcome)
-    if cursor is not None:
-        stmt = stmt.where(Task.id < cursor)
-    rows = db.execute(stmt.order_by(Task.id.desc()).limit(limit + 1)).scalars().all()
+    rows = tasks_domain.list_tasks(
+        db,
+        project_id,
+        task_type=task_type,
+        status=status,
+        outcome=outcome,
+        cursor=cursor,
+        limit=limit + 1,
+    )
     page_tasks = list(rows[:limit])
     # RR-P1-05: result_available 批量预取(避免 list_tasks 逐任务 N+1 查询
-    # EvidencePackage): 仅 completed 任务需要判定, 一次 EXISTS 批量取回。
+    # EvidencePackage): 仅 completed 任务需要判定, 一次批量取回。
     if page_tasks:
         completed_ids = [t.id for t in page_tasks if t.status == "completed"]
         available_ids: set[int] = set()
         if completed_ids:
-            statuses = db.execute(
-                select(EvidencePackage.task_id, EvidencePackage.status).where(
-                    EvidencePackage.task_id.in_(completed_ids),
-                    EvidencePackage.status.in_(("complete", "partial")),
-                )
-            ).all()
-            available_ids = {tid for tid, _ in statuses}
+            statuses = results_domain.evidence_statuses_for_tasks(db, completed_ids)
+            available_ids = {tid for tid, st in statuses.items() if st in ("complete", "partial")}
         _result_available_batch = available_ids
         items = [_task_summary_prefetched(db, task, _result_available_batch) for task in page_tasks]
     else:
@@ -1370,7 +1224,7 @@ def list_tasks(
     return {"items": items, "next_cursor": next_cursor}
 
 
-def _task_summary_prefetched(db: Session, task: Task, available_ids: set[int]) -> dict[str, Any]:
+def _task_summary_prefetched(db: Session, task: TaskRecord, available_ids: set[int]) -> dict[str, Any]:
     """列表项摘要: 复用 task_summary, 但结果可用性来自批量预取集合。"""
     summary = task_summary(db, task)
     if task.status == "completed":
@@ -1392,7 +1246,7 @@ def _sanitize_diag_context(context: dict[str, Any] | None) -> dict[str, Any] | N
     return {k: v for k, v in context.items() if k in _DIAG_CONTEXT_ALLOWLIST} or None
 
 
-def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[str, Any]:
+def task_detail(db: Session, user: UserRecord, project_id: int, task_id: int) -> dict[str, Any]:
     """任务详情(规格 9.2: 尝试/租约/进度/诊断/快照/批量关系; 不暴露 lease_token)。"""
     project_service.ensure_access(db, user, project_id, "view")
     task = _get_task(db, task_id)
@@ -1404,18 +1258,14 @@ def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[
         )
     detail = task_summary(db, task)
     if task.calc_snapshot_id is not None:
-        snapshot = db.get(CalcSnapshot, task.calc_snapshot_id)
+        snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
         detail["calc_snapshot"] = (
             {"id": snapshot.id, "random_seed": snapshot.random_seed} if snapshot is not None else None
         )
     else:
         detail["calc_snapshot"] = None
 
-    attempts = (
-        db.execute(select(TaskAttempt).where(TaskAttempt.task_id == task.id).order_by(TaskAttempt.attempt_no))
-        .scalars()
-        .all()
-    )
+    attempts = tasks_domain.list_attempts(db, task.id)
     detail["attempts"] = [
         {
             "id": a.id,
@@ -1428,20 +1278,11 @@ def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[
         }
         for a in attempts
     ]
-    attempt_ids = [a.id for a in attempts] or [0]
-    lease = (
-        db.execute(
-            select(TaskLease)
-            .where(TaskLease.attempt_id.in_(attempt_ids), TaskLease.status == "active")
-            .order_by(TaskLease.id.desc())
-        )
-        .scalars()
-        .first()
-    )
+    lease = tasks_domain.get_active_lease_for_task(db, task.id)
     detail["current_lease"] = None
     if lease is not None:
         # 只暴露 acquired_by/renewed_at/expires_at, 不暴露 lease_token(规格 9.2)
-        attempt = db.get(TaskAttempt, lease.attempt_id)
+        attempt = tasks_domain.get_attempt(db, lease.attempt_id)
         detail["current_lease"] = {
             "attempt_no": attempt.attempt_no if attempt else None,
             "acquired_by": lease.acquired_by,
@@ -1458,26 +1299,11 @@ def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[
         "updated_at": None,
         "source": "pg",
     }
-    progress_row = (
-        db.execute(
-            select(TaskProgress)
-            .join(TaskAttempt, TaskAttempt.id == TaskProgress.attempt_id)
-            .where(TaskAttempt.task_id == task.id)
-            .order_by(TaskAttempt.attempt_no.desc())
-        )
-        .scalars()
-        .first()
-    )
+    progress_row = tasks_domain.latest_progress_for_task(db, task.id)
     if progress_row is not None:
         detail["progress"]["updated_at"] = progress_row.updated_at
 
-    diagnostics = (
-        db.execute(
-            select(TaskDiagnostic).where(TaskDiagnostic.task_id == task.id).order_by(TaskDiagnostic.id)
-        )
-        .scalars()
-        .all()
-    )
+    diagnostics = tasks_domain.list_diagnostics(db, task.id)
     # M-03: stack_trace 与完整 context 仅对全局管理员返回(受控审计视角);
     # viewer/owner 一律返回 stack_trace=null, context 仅保留白名单字段
     is_admin = identity_service.has_role(db, user, "admin")
@@ -1495,22 +1321,10 @@ def task_detail(db: Session, user: User, project_id: int, task_id: int) -> dict[
         for d in diagnostics
     ]
 
-    child_ids = (
-        db.execute(
-            select(Task.id)
-            .join(SampleTask, SampleTask.id == Task.id)
-            .where(SampleTask.parent_task_id == task.id)
-        )
-        .scalars()
-        .all()
-    )
-    children = []
-    if child_ids:
-        child_rows = db.execute(select(Task).where(Task.id.in_(child_ids))).scalars().all()
-        children = [{"id": c.id, "status": c.status} for c in child_rows]
-    parent_id = db.execute(
-        select(SampleTask.parent_task_id).where(SampleTask.id == task.id).limit(1)
-    ).scalar_one_or_none()
+    child_rows = tasks_domain.list_child_tasks(db, task.id)
+    children = [{"id": c.id, "status": c.status} for c in child_rows]
+    parent_sample = tasks_domain.get_sample_task(db, task.id)
+    parent_id = parent_sample.parent_task_id if parent_sample is not None else None
     detail["batch"] = {"parent_task_id": parent_id, "child_task_count": len(children), "children": children}
     return detail
 

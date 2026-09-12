@@ -230,7 +230,7 @@ def run_sensitivity_analysis(
             code="ANA-TASK-002",
             message_key="ies.diag.analysis.missing_user",
         )
-    task = tasks_service.create_task(
+    task, _flags = tasks_service.create_task(
         db,
         user,
         project_id,

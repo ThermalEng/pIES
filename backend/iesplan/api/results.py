@@ -26,7 +26,6 @@ from sqlalchemy.orm import Session
 from iesplan.api.auth import CurrentUser
 from iesplan.core.errors import NotFoundError
 from iesplan.db import get_db
-from iesplan.models.calc import Task
 from iesplan.services import project as project_service
 from iesplan.services import results as results_service
 from iesplan.services import tasks as tasks_service
@@ -104,7 +103,7 @@ def assess_endpoint(
 ) -> dict[str, Any]:
     """触发新评估(domain-model §快照任务结果/§对象生命周期): 对任务最新证据包执行四维(或单维)检查, 创建新评估记录
     不覆盖历史; 随后更新结果索引的最新引用(同证据包只挂接指针)。"""
-    tasks_service.ensure_task_belongs(db, project_id, task_id)
+    task = tasks_service.ensure_task_belongs(db, project_id, task_id)
     package = results_service.latest_evidence(db, task_id)
     if package is None:
         raise NotFoundError(
@@ -116,9 +115,8 @@ def assess_endpoint(
     assessment = results_service.run_assessment(
         db, package.id, payload.assessment_type, user=user
     )
-    task = db.get(Task, task_id)
     results_service.update_result_index(
-        db, task_id, assessment.id, business_outcome=task.business_outcome if task else None
+        db, task_id, assessment.id, business_outcome=task.business_outcome
     )
     db.commit()
     return {"assessment": results_service.assessment_to_dict(db, assessment)}
@@ -152,7 +150,7 @@ def select_result_endpoint(
             "project_id": selection.project_id,
             "result_index_id": selection.result_index_id,
             "selected_by": selection.selected_by,
-            "selected_at": selection.selected_at.isoformat() if selection.selected_at else None,
+            "selected_at": selection.selected_at,
             "reason": selection.reason,
             "is_current": selection.is_current,
         },
