@@ -7,7 +7,7 @@
 - 自助注册开关默认关闭, 持久化到数据库(app_settings, 修复 M-12 多 Worker
   不一致), 由管理员 PUT /api/auth/settings 切换;
 - 外部认证(OIDC/SSO): IESPLAN_AUTH_PROVIDER=oidc 时登录页展示 SSO 入口,
-  回调经 application.identity 用例门面(底经 services.external_auth,
+  回调经 application.identity 用例门面(底经 identity 域 OIDC 能力,
   标准实现 Authlib)完成令牌交换与账号绑定。
 """
 

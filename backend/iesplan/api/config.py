@@ -42,7 +42,7 @@ registry_router = APIRouter(prefix="/api/registry", tags=["registry"])
 class ConfigSaveRequest(BaseModel):
     """保存请求: 计算配置 + 期望草稿修订(乐观锁)。"""
 
-    config: dict = Field(description="计算配置(结构见 services/config.py)")
+    config: dict = Field(description="计算配置(结构见 application/configuration)")
     expected_revision: int = Field(ge=1, description="期望的草稿修订号")
 
 

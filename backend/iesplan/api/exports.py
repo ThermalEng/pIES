@@ -10,7 +10,7 @@
 - GET  /package/download?token= 下载项目包 zip
 
 下载授权: 短期单对象授权(签名 token 含 object_id + 过期, 过期 5 分钟,
-services/package.py create_download_token/verify_download_token)。
+application/packages create_download_token/verify_download_token)。
 """
 
 from __future__ import annotations

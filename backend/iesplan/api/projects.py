@@ -324,7 +324,7 @@ def import_package_endpoint(
 
     大小门禁(H-07): 以 (上限+1) 字节封顶流式读取, 超限立即拒绝
     (压缩包字节上限 MAX_PACKAGE_BYTES, 与 Nginx client_max_body_size 对齐),
-    完整解压前的条目/单文件/总解压大小预检在 application/packages(组合 services.package)。
+    完整解压前的条目/单文件/总解压大小预检在 application/packages 编排内完成。
     相同源文件同一提议人幂等返回既有提案; 校验失败 400 + 校验报告。
     """
     # 封顶流式读取: 最多读 (上限+1) 字节, 超出即拒绝(内存占用有界)
