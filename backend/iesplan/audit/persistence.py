@@ -13,9 +13,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from iesplan.audit.contracts import AuditRecord
+from iesplan.audit.contracts import AuditRecord, RetentionRuleRecord
 from iesplan.core.jsonutil import jsonable
-from iesplan.models.audit import AuditLog
+from iesplan.models.audit import AuditLog, RetentionRule
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -114,3 +114,25 @@ def list_entries(
         stmt = stmt.where(AuditLog.id < cursor)
     rows = db.execute(stmt.order_by(AuditLog.id.desc()).limit(limit)).scalars().all()
     return [_row_to_audit(row) for row in rows]
+
+
+def _row_to_retention_rule(row: RetentionRule) -> RetentionRuleRecord:
+    return RetentionRuleRecord(
+        id=row.id,
+        entity_type=row.entity_type,
+        object_kind=row.object_kind,
+        retention_days=row.retention_days,
+        apply_to=row.apply_to,
+    )
+
+
+def list_active_retention_rules(db: Session) -> list[RetentionRuleRecord]:
+    """列出全部 active 保留规则（id 升序；运维诊断消费，只读）。"""
+    rows = (
+        db.execute(
+            select(RetentionRule).where(RetentionRule.status == "active").order_by(RetentionRule.id)
+        )
+        .scalars()
+        .all()
+    )
+    return [_row_to_retention_rule(row) for row in rows]

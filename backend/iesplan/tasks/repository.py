@@ -19,8 +19,6 @@ from sqlalchemy.orm import Session
 from iesplan.tasks.contracts import (
     CalcSnapshotRecord,
     ComputeSlotRecord,
-    MaintenanceActionRecord,
-    RetentionRuleRecord,
     SampleRecordRecord,
     SampleTaskRecord,
     TaskAttemptRecord,
@@ -316,29 +314,4 @@ class TasksRepository(Protocol):
         self, db: Session, attempt_id: int, lease_token: str, *, status: str
     ) -> int:
         """带 fencing 的租约收尾（0 行表示租约不匹配；返回影响行数）。"""
-        ...
-
-    def get_project_version_content_id(self, db: Session, version_id: int) -> int | None:
-        """按主键取项目版本的内容对象 id；版本缺失返回 None。"""
-        ...
-
-    def list_active_retention_rules(self, db: Session) -> list[RetentionRuleRecord]:
-        """列出全部 active 保留规则（id 升序；任务运维诊断消费）。"""
-        ...
-
-    def list_maintenance_actions(self, db: Session, limit: int = 10) -> list[MaintenanceActionRecord]:
-        """维护记录（id 倒序；任务运维诊断消费）。"""
-        ...
-
-    def record_maintenance_action(
-        self,
-        db: Session,
-        *,
-        action_type: str,
-        performed_by: int,
-        status: str,
-        params: dict[str, Any] | None = None,
-        result: dict[str, Any] | None = None,
-    ) -> MaintenanceActionRecord:
-        """记录管理员维护操作（不可变，只 INSERT）。"""
         ...

@@ -7,7 +7,7 @@
 - 数据集对象字节读取 → ``storage.get_object``;
 - 数据集 CSV 解析 → ``application.datasets.parse_csv``;
 - 快照/任务行读 → ``lease_cases`` 共享读(同包复用);
-- 项目版本内容指针 → tasks 域门面; 数据集版本/数据文件指针 →
+- 项目版本内容指针 → project 域门面; 数据集版本/数据文件指针 →
   dataset 域门面; 样本计数 → tasks 域门面。
 
 本模块不导入 ``models.*``。
@@ -20,6 +20,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from iesplan import dataset as dataset_domain
+from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.datasets import parse_csv as _parse_dataset_csv
 from iesplan.application.projects.content_objects import load_content_object
@@ -57,7 +58,7 @@ def parse_dataset_csv(raw: bytes, resolution: str) -> tuple[list[dict], list]:
 
 def get_project_content_id(db: Session, version_id: int) -> int | None:
     """按主键取项目版本的内容对象 id; 版本缺失返回 None。"""
-    return tasks_domain.get_project_version_content_id(db, version_id)
+    return project_domain.get_project_version_content_id(db, version_id)
 
 
 def get_dataset_version_record(db: Session, version_id: int) -> DatasetVersionRecord | None:

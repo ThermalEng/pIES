@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from iesplan.core.errors import ConflictError, NotFoundError
 
@@ -95,6 +96,20 @@ class VersionRefRecord:
     ref_type: str
     object_id: int
     ref_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceActionRecord:
+    """管理员维护操作（admin_maintenance_actions 表公开视图，不可变）。"""
+
+    id: int
+    action_type: str
+    performed_by: int
+    status: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    params: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,15 +1,16 @@
-"""计算配置领域规则（校验/默认生成/元数据/序列化，归属 configuration）。
+"""计算配置领域纯规则（结构校验/归一化/行序列化，归属 configuration）。
 
-本模块是计算配置权威规则的唯一实现（由 ``services.config`` 收敛而来，
-旧服务已删除）：
-- 默认配置生成（纯构造部分）、输入归一化与全量校验；
-- 参数元数据（单位/范围/默认值/帮助键，供前端渲染）；
-- 算法注册表元数据；
+本模块是计算配置纯规则的唯一实现（由 ``services.config`` 收敛而来，
+旧服务已删除），仅依赖标准库与 ``iesplan.core``：
+- 输入归一化与结构/参数（经济/环境）/变量/目标/约束/IRR 校验；
 - 计算配置行 ↔ 配置字典的序列化（``row_to_config``）。
 
-本模块为纯规则：不持有会话、不做提交、不读写对象存储；需要数据库的
-编排（工作图加载、配置读写、保存事务）由
-``application.configuration.calc_config`` 经领域公开门面完成。
+设备注册表相关（设备类型解析、默认配置生成、设备参数元数据）与算法
+注册表相关（算法校验/容差/算法元数据）归属
+``application.configuration.calc_config``（域源码纯度门禁）；需要数据库的
+编排（工作图加载、配置读写、保存事务）同样由该用例经领域公开门面完成。
+
+本模块为纯规则：不持有会话、不做提交、不读写对象存储。
 """
 
 from __future__ import annotations
@@ -19,33 +20,17 @@ from collections import Counter
 from typing import Final
 
 from iesplan.configuration.contracts import CalcConfigRecord
-from iesplan.core.contracts import ParameterSpec
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
-    SEVERITY_WARNING,
     Diagnostic,
     make_diag,
 )
-from iesplan.core.errors import NotFoundError
 from iesplan.core.expression import (
     Dimensions,
     ExpressionError,
     parse_expr,
 )
 from iesplan.core.units import UnitError, dims_of
-from iesplan.devices import (
-    DeviceModelDocument as DeviceTypeSpec,
-)
-from iesplan.devices import (
-    get_device as get_device_type,
-)
-from iesplan.devices.contracts2 import PropertySpec
-from iesplan.engines.registry import (
-    DEFAULT_ALGORITHM,
-    AlgorithmSpec,
-    get_algorithm,
-    list_algorithms,
-)
 
 # ---------------------------------------------------------------------------
 # 常量: 配置结构 / 目标 / 预定义约束
@@ -73,6 +58,10 @@ PREDEFINED_CONSTRAINT_KINDS: Final[dict[str, str]] = {
     "co2_cap": "年碳排放上限",
     "energy_cost_cap": "年购能费用上限",
 }
+
+#: 默认算法（与 engines 注册表 DEFAULT_ALGORITHM 同值；领域内仅作回退
+#: 默认名，不导入注册表；注册表能力查询归 application 层）。
+DEFAULT_ALGORITHM: Final[str] = "ies.algo.milp_hybrid"
 
 #: 算法注册表 id -> calc_configs.algorithm 列短名
 #: mc_sampling 属采样/不确定性类而非求解类, 归入 'custom'。
@@ -158,108 +147,11 @@ ENVIRONMENTAL_PARAM_SPECS: Final[dict[str, dict]] = {
 # 设备类型解析: 优先设备行 params['type_detail'](完整 2.0 注册表 ID),
 # 回退 device_type 列(粗分类短名, 需 CHECK 约束兼容); 注册表 id 可直接使用,
 # 未注册的短名视为无注册表规格(调用方跳过)
-# ---------------------------------------------------------------------------
-# 图/设备类型解析
-# ---------------------------------------------------------------------------
-
-
-def resolve_device_type(device_type: str) -> DeviceTypeSpec | None:
-    """按 2.0 稳定设备 ID 解析设备规格；未注册返回 None。"""
-    try:
-        return get_device_type(device_type)
-    except NotFoundError:
-        return None
-
-
-def normalize_devices(graph: dict) -> list[dict]:
-    """把系统图 dict 归一化为设备清单(兼容 DB 行与规划模板两种形态)。
-
-    graph: {"devices": [{id, device_type|type, kind|is_new, name, params}, ...]}
-    """
-    devices: list[dict] = []
-    for dev in graph.get("devices", []) or []:
-        if not isinstance(dev, dict):
-            continue
-        kind = dev.get("kind")
-        if kind is None:
-            kind = "new" if dev.get("is_new") else "existing"
-        devices.append(
-            {
-                "id": dev.get("id") or dev.get("device_id"),
-                "device_type": dev.get("device_type") or dev.get("type") or "",
-                "kind": kind,
-                "name": dev.get("name") or "",
-                "params": dict(dev.get("params") or {}),
-            }
-        )
-    return devices
-
-
-# ---------------------------------------------------------------------------
-# 默认配置生成(纯构造: 调用方先备好工作图与币种)
-# ---------------------------------------------------------------------------
-
-
-def _default_parameters(graph: dict) -> dict:
-    """设备参数当前值 = 注册表默认值叠加设备行参数(设备行参数优先)。
-
-    解析优先使用设备行 params['type_detail'](模型服务写入的完整 2.0 注册表
-    ID), 回退到 device_type 短名; 未注册返回 None 的设备跳过。存量与新增
-    设备均以注册表 property value 打底, 设备行参数覆盖。
-    """
-    devices: dict = {}
-    for dev in normalize_devices(graph):
-        params = dev["params"] or {}
-        type_id = params.get("type_detail") or dev["device_type"]
-        spec = resolve_device_type(type_id)
-        if spec is None:
-            continue
-        merged = {name: p.value for name, p in spec.properties.items()}
-        merged.update(dev["params"])  # 设备行参数覆盖注册表默认
-        devices[str(dev["id"]) if dev["id"] is not None else dev["name"]] = merged
-    return {
-        "devices": devices,
-        "economic": {k: v["default"] for k, v in ECONOMIC_PARAM_SPECS.items()},
-        "environmental": {k: v["default"] for k, v in ENVIRONMENTAL_PARAM_SPECS.items()},
-    }
-
-
-def _default_variables(graph: dict) -> list[dict]:
-    """默认不从设备技术常量猜测规划变量；规划配置必须显式声明。"""
-    return []
-
-
-def build_default_config(graph: dict, currency: str = "CNY") -> dict:
-    """生成默认计算配置(见 services 收敛前的模块 docstring 结构说明)。
-
-    参数:
-        graph: 系统模型图 dict(与 validate_config 同构的设备清单)。
-        currency: 经济参数币种(调用方按项目币种传入, 缺省 CNY)。
-    """
-    params = _default_parameters(graph)
-    params["economic"]["currency"] = currency or "CNY"
-    algo = get_algorithm(DEFAULT_ALGORITHM)
-    return {
-        "parameters": params,
-        "variables": _default_variables(graph),
-        "objectives": [{"metric": "irr_after_tax", "direction": "max", "weight": 1.0}],
-        # 默认不允许未满足负荷(领域模型 §规划、财务与计算配置)
-        "constraints": [
-            {"type": "predefined", "payload": {"kind": "load_satisfaction", "allow_shed": False}}
-        ],
-        "algorithm": {"mode": "auto", "name": DEFAULT_ALGORITHM},
-        "irr_floor": 0.08,  # 最低税后项目投资 IRR 硬约束(默认 8%)
-        "tolerances": {
-            name: p.default for name, p in algo.parameters.items() if name in ("gap_rel", "time_limit_s")
-        },
-        "random_seed": 42,
-    }
 
 
 # ---------------------------------------------------------------------------
 # 校验
 # ---------------------------------------------------------------------------
-
 
 def _dims_for_unit(unit: str) -> Dimensions:
     """变量单位 -> 表达式量纲(统一走 core/units.dims_of, 宪法 §4)。
@@ -274,11 +166,9 @@ def _dims_for_unit(unit: str) -> Dimensions:
     except UnitError:
         return Counter()
 
-
 def _is_number(value: object) -> bool:
     """数值检查(int/float, 布尔除外)。"""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
-
 
 def _validate_structure(config: dict, diags: list[Diagnostic]) -> None:
     """顶层结构校验(必需段、算法模式、随机种子、容差)。"""
@@ -328,9 +218,13 @@ def _validate_structure(config: dict, diags: list[Diagnostic]) -> None:
             )
         )
 
+def _validate_parameters(config: dict, diags: list[Diagnostic]) -> None:
+    """参数校验: 经济/环境参数按固定规格（纯规则，不依赖设备注册表）。
 
-def _validate_parameters(config: dict, graph: dict, devices_by_key: dict, diags: list[Diagnostic]) -> None:
-    """参数校验: 设备参数按注册表规格(类型/范围/枚举); 经济/环境参数按固定规格。"""
+    设备参数按注册表规格的类型/范围校验与设备引用校验归属
+    ``application.configuration.calc_config``（域源码纯度门禁），由应用层
+    在本函数之后追加诊断。
+    """
     params = config["parameters"]
     if not isinstance(params, dict):
         diags.append(
@@ -342,49 +236,6 @@ def _validate_parameters(config: dict, graph: dict, devices_by_key: dict, diags:
             )
         )
         return
-    device_params = params.get("devices", {})
-    for dev in normalize_devices(graph):
-        dev_params = dev["params"] or {}
-        type_id = dev_params.get("type_detail") or dev["device_type"]
-        spec = resolve_device_type(type_id)
-        key = str(dev["id"]) if dev["id"] is not None else dev["name"]
-        devices_by_key[key] = dev
-        if spec is None:
-            continue
-        cur = device_params.get(key, {})
-        if not isinstance(cur, dict):
-            diags.append(
-                make_diag(
-                    "SYS-CFG-001",
-                    SEVERITY_ERROR,
-                    params={"device": key, "reason": "设备参数必须是对象"},
-                    location={"object_type": "device", "object_id": key, "field": "params"},
-                )
-            )
-            continue
-        for pname, pspec in spec.properties.items():
-            value = cur.get(pname, pspec.value)
-            if isinstance(pspec.value, (int, float)) and not isinstance(pspec.value, bool):
-                if not _is_number(value):
-                    diags.append(
-                        make_diag(
-                            "PARAM-UNIT-002",
-                            SEVERITY_ERROR,
-                            params={"param": pname, "value": repr(value), "expected": "数值"},
-                            location={"object_type": "device", "object_id": key, "field": pname},
-                        )
-                    )
-                else:
-                    lo, hi = pspec.minimum, pspec.maximum
-                    if (lo is not None and value < lo) or (hi is not None and value > hi):
-                        diags.append(
-                            make_diag(
-                                "PARAM-RNG-003",
-                                SEVERITY_ERROR,
-                                params={"param": pname, "value": value, "min": lo, "max": hi},
-                                location={"object_type": "device", "object_id": key, "field": pname},
-                            )
-                        )
     # 经济/环境参数(固定规格表)
     for section, specs in (
         ("economic", ECONOMIC_PARAM_SPECS),
@@ -435,9 +286,12 @@ def _validate_parameters(config: dict, graph: dict, devices_by_key: dict, diags:
                         )
                     )
 
+def _validate_variables(config: dict, diags: list[Diagnostic]) -> None:
+    """变量校验: 类型/初始值在界内/枚举取值(宪法 §4 + 领域模型 §规划、财务与计算配置)。
 
-def _validate_variables(config: dict, devices_by_key: dict, diags: list[Diagnostic]) -> None:
-    """变量校验: 类型/初始值在界内/枚举取值/设备引用(宪法 §4 + 领域模型 §规划、财务与计算配置)。"""
+    变量 device_ref 指向图中设备的存在性校验归属
+    ``application.configuration.calc_config``（设备分支，随设备参数校验追加）。
+    """
     variables = config["variables"]
     if not isinstance(variables, list):
         return
@@ -583,18 +437,6 @@ def _validate_variables(config: dict, devices_by_key: dict, diags: list[Diagnost
                         location=loc,
                     )
                 )
-        # 设备引用: 必须指向图中存在的设备
-        dev_ref = v.get("device_ref")
-        if dev_ref is not None and str(dev_ref) not in devices_by_key:
-            diags.append(
-                make_diag(
-                    "CONN-TYPE-002",
-                    SEVERITY_ERROR,
-                    params={"device_id": str(dev_ref), "type_id": ""},
-                    location=loc,
-                )
-            )
-
 
 def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
     """目标校验: 至少一个目标, 指标/方向/权重合法(宪法 §4 + 领域模型 §规划、财务与计算配置)。"""
@@ -665,7 +507,6 @@ def _validate_objectives(config: dict, diags: list[Diagnostic]) -> None:
                 )
             )
 
-
 def _validate_expression_constraint(
     payload: dict, variables: list[dict], idx: int, diags: list[Diagnostic]
 ) -> None:
@@ -716,7 +557,6 @@ def _validate_expression_constraint(
                 location=loc,
             )
         )
-
 
 def _validate_constraints(config: dict, variables: list[dict], diags: list[Diagnostic]) -> None:
     """约束校验: predefined 种类合法; expression 走受限表达式引擎。"""
@@ -798,7 +638,6 @@ def _validate_constraints(config: dict, variables: list[dict], diags: list[Diagn
                 )
             )
 
-
 def _validate_irr_and_discount(config: dict, diags: list[Diagnostic]) -> None:
     """IRR 硬约束与折现率独立字段检查(宪法 §4 + 领域模型 §规划、财务与计算配置)。
 
@@ -867,106 +706,6 @@ def _validate_irr_and_discount(config: dict, diags: list[Diagnostic]) -> None:
                 )
             )
 
-
-def _validate_algorithm(config: dict, diags: list[Diagnostic]) -> None:
-    """算法校验: 手动模式检查注册与能力兼容; auto 不查能力(宪法 §4 + 领域模型 §规划、财务与计算配置)。"""
-    algo = config["algorithm"]
-    mode = algo.get("mode", "auto")
-    if mode == "auto":
-        return
-    name = algo.get("name") or DEFAULT_ALGORITHM
-    loc = {"object_type": "algorithm", "object_id": name, "field": "algorithm.name"}
-    try:
-        spec = get_algorithm(name)
-    except NotFoundError:
-        diags.append(
-            make_diag(
-                "CONN-TYPE-002",
-                SEVERITY_ERROR,
-                params={"device_id": "", "type_id": name},
-                location=loc,
-            )
-        )
-        return
-    # 能力需求推导
-    needs: set[str] = set()
-    if config.get("irr_floor") is not None:
-        needs.add("irr_hard_constraint")  # 最低 IRR 硬约束
-    objectives = config.get("objectives") or []
-    if len(objectives) > 1:
-        needs.add("multi_objective")
-    variables = config.get("variables") or []
-    if any(isinstance(v, dict) and v.get("type") in ("integer", "boolean", "enum") for v in variables):
-        needs.add("milp")  # 离散变量需要 MILP 求解能力
-    if any(isinstance(v, dict) and v.get("type") == "continuous" for v in variables):
-        needs.add("capacity_design")  # 容量设计
-    missing = sorted(needs - set(spec.capabilities))
-    if missing:
-        diags.append(
-            make_diag(
-                "SYS-CFG-001",
-                SEVERITY_ERROR,
-                params={
-                    "algorithm": name,
-                    "missing_capabilities": missing,
-                    "reason": "算法不支持当前配置所需能力",
-                },
-                location=loc,
-            )
-        )
-
-
-def _validate_tolerances(config: dict, diags: list[Diagnostic]) -> None:
-    """容差校验: 键必须是算法注册参数, 数值在其界内; 未知键给警告。"""
-    tolerances = config.get("tolerances", {})
-    if not isinstance(tolerances, dict):
-        diags.append(
-            make_diag(
-                "SYS-CFG-001",
-                SEVERITY_ERROR,
-                params={"field": "tolerances", "reason": "容差必须是对象"},
-                location={"object_type": "config", "object_id": "", "field": "tolerances"},
-            )
-        )
-        return
-    name = config.get("algorithm", {}).get("name") or DEFAULT_ALGORITHM
-    try:
-        spec: AlgorithmSpec = get_algorithm(name)
-    except NotFoundError:
-        spec = get_algorithm(DEFAULT_ALGORITHM)  # 算法非法时按默认算法规格兜底
-    for key, value in tolerances.items():
-        loc = {"object_type": "config", "object_id": "", "field": f"tolerances.{key}"}
-        p = spec.parameters.get(key)
-        if p is None:
-            diags.append(
-                make_diag(
-                    "SYS-CFG-001",
-                    SEVERITY_WARNING,
-                    params={"param": key, "reason": "非当前算法注册参数, 将被忽略"},
-                    location=loc,
-                )
-            )
-            continue
-        if not _is_number(value):
-            diags.append(
-                make_diag(
-                    "PARAM-UNIT-002",
-                    SEVERITY_ERROR,
-                    params={"param": key, "value": repr(value), "expected": "数值"},
-                    location=loc,
-                )
-            )
-        elif (p.min is not None and value < p.min) or (p.max is not None and value > p.max):
-            diags.append(
-                make_diag(
-                    "PARAM-RNG-003",
-                    SEVERITY_ERROR,
-                    params={"param": key, "value": value, "min": p.min, "max": p.max},
-                    location=loc,
-                )
-            )
-
-
 def normalize_config(config: dict) -> dict:
     """输入归一化: 补齐缺失段默认值, "tolerance" -> "tolerances"。"""
     normalized = dict(config)
@@ -984,17 +723,22 @@ def normalize_config(config: dict) -> dict:
             normalized[key] = default
     return normalized
 
-
 def validate_config(
     config: dict,
     graph: dict,
     data_version_ref: list[int] | None = None,
 ) -> list[Diagnostic]:
-    """校验计算配置(配置校验门禁; 宪法 §4 + 领域模型 §规划、财务与计算配置)。
+    """校验计算配置的纯规则部分(配置校验门禁; 宪法 §4 + 领域模型 §规划、财务与计算配置)。
+
+    只含不依赖设备/算法注册表的检查：归一化、数据版本引用形状、顶层结构、
+    经济/环境参数、变量（类型/初值/枚举）、目标、约束、IRR/折现率。
+    设备参数注册表校验、变量设备引用校验、算法能力与容差校验归属
+    ``application.configuration.calc_config.validate_config``，由应用层在
+    本函数返回的诊断之后追加（完整校验请经应用层入口）。
 
     参数:
         config: 计算配置 dict(结构见模块 docstring)。
-        graph: 系统模型图 dict: {"devices": [{id, device_type, kind, name, params}]}。
+        graph: 系统模型图 dict（纯规则部分不消费，仅为接口稳定保留）。
         data_version_ref: 数据版本引用(list[int] | None, 仅做形状检查;
             内容校验属于 U05 数据单元)。
 
@@ -1028,14 +772,11 @@ def validate_config(
     _validate_structure(config, diags)
     if any(d.severity == SEVERITY_ERROR for d in diags):
         return diags  # 结构损坏, 不继续避免级联噪声
-    devices_by_key: dict[str, dict] = {}
-    _validate_parameters(config, graph, devices_by_key, diags)
-    _validate_variables(config, devices_by_key, diags)
+    _validate_parameters(config, diags)
+    _validate_variables(config, diags)
     _validate_objectives(config, diags)
     _validate_constraints(config, config["variables"], diags)
     _validate_irr_and_discount(config, diags)
-    _validate_algorithm(config, diags)
-    _validate_tolerances(config, diags)
     return diags
 
 
@@ -1043,18 +784,16 @@ def validate_config(
 # 序列化: 计算配置行 ↔ 配置字典
 # ---------------------------------------------------------------------------
 
-
 def _row_to_algorithm(row: CalcConfigRecord) -> dict:
-    """DB 算法列 -> 配置算法段(auto 模式存储为 NULL)。"""
+    """DB 算法列 -> 配置算法段(auto 模式存储为 NULL)。
+
+    纯映射（不查注册表）：NULL 为 auto；短名按 ALGO_DB_CLASS 映射回注册表
+    算法 id，未映射值原样返回 manual。映射目标均为静态注册算法 id，
+    与原注册表存在性检查结论一致。
+    """
     if row.algorithm is None:
         return {"mode": "auto", "name": DEFAULT_ALGORITHM}
-    algo_id = _DB_CLASS_TO_ALGO.get(row.algorithm, row.algorithm)
-    try:
-        get_algorithm(algo_id)
-    except NotFoundError:
-        return {"mode": "manual", "name": row.algorithm}
-    return {"mode": "manual", "name": algo_id}
-
+    return {"mode": "manual", "name": _DB_CLASS_TO_ALGO.get(row.algorithm, row.algorithm)}
 
 def row_to_config(row: CalcConfigRecord) -> dict:
     """CalcConfig 行 -> 计算配置 dict（公开序列化，与旧私有函数同形）。
@@ -1073,74 +812,3 @@ def row_to_config(row: CalcConfigRecord) -> dict:
         "random_seed": row.random_seed,
     }
 
-
-# ---------------------------------------------------------------------------
-# 元数据: 参数规格与算法注册表
-# ---------------------------------------------------------------------------
-
-
-def _param_meta(p: ParameterSpec) -> dict:
-    """参数规格 -> 元数据(单位/范围/默认/帮助键/枚举)。"""
-    return {
-        "unit": p.unit,
-        "min": p.min,
-        "max": p.max,
-        "default": p.default,
-        "enum": list(p.enum) if p.enum else None,
-        "is_optimizable": p.is_optimizable,
-        "stock_or_addition": p.stock_or_addition,
-        "help_key": p.help_key,
-    }
-
-
-def _property_meta(p: PropertySpec) -> dict:
-    """设备 2.0 技术常量元数据。"""
-    return {
-        "unit": p.unit,
-        "min": p.minimum,
-        "max": p.maximum,
-        "default": p.value,
-    }
-
-
-def parameter_metadata(graph: dict) -> dict:
-    """生成参数元数据(每个参数的单位/范围/默认值/帮助键, 供前端渲染)。
-
-    graph: 与 validate_config 同构的设备清单 dict。
-    """
-    device_meta: dict[str, dict] = {}
-    for dev in normalize_devices(graph):
-        params = dev["params"] or {}
-        type_id = params.get("type_detail") or dev["device_type"]
-        spec = resolve_device_type(type_id)
-        if spec is None:
-            continue
-        key = str(dev["id"]) if dev["id"] is not None else dev["name"]
-        device_meta[key] = {name: _property_meta(p) for name, p in spec.properties.items()}
-    return {
-        "parameters": {
-            "devices": device_meta,
-            "economic": {
-                name: {k: v for k, v in spec.items()} for name, spec in ECONOMIC_PARAM_SPECS.items()
-            },
-            "environmental": {
-                name: {k: v for k, v in spec.items()} for name, spec in ENVIRONMENTAL_PARAM_SPECS.items()
-            },
-        },
-    }
-
-
-def list_algorithms_meta() -> list[dict]:
-    """算法注册表列表(含参数规格元数据), 供 /api/registry/algorithms。"""
-    return [
-        {
-            "algo_id": spec.algo_id,
-            "version": spec.version,
-            "name_zh": spec.name_zh,
-            "name_en": spec.name_en,
-            "capabilities": list(spec.capabilities),
-            "help_topic": spec.help_topic,
-            "parameters": [_param_meta(p) | {"name": n} for n, p in spec.parameters.items()],
-        }
-        for spec in list_algorithms()
-    ]

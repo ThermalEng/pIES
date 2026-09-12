@@ -21,7 +21,7 @@ storage_stats 为只读诊断):
 数据访问只经领域公开门面(tasks 域、application.audits、storage)，
 不新增校验/hash/完整性复核/防御分支。
 
-调用方向：``api → application.tasks.maintenance → {tasks 域门面,
+调用方向：``api → application.tasks.maintenance → {tasks/audit/project 域门面,
 application.audits, storage}``；不导入 ORM、不导入领域内部模块。
 """
 
@@ -31,6 +31,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
+from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.audits import record_unlock_audit
 from iesplan.application.tasks.submissions import POOL_BY_TYPE
@@ -75,8 +77,8 @@ def get_diagnostics(db: Session) -> dict[str, Any]:
     tasks_by_status = tasks_domain.count_tasks_by_status(db)
     tasks_by_type = tasks_domain.count_tasks_by_type(db)
     recent_failed = tasks_domain.list_recent_failed_tasks(db, limit=5)
-    rules = tasks_domain.list_active_retention_rules(db)
-    actions = tasks_domain.list_maintenance_actions(db, limit=10)
+    rules = audit_domain.list_active_retention_rules(db)
+    actions = project_domain.list_maintenance_actions(db, limit=10)
     storage = storage_stats(db)
     queue_view = queue_status()
     return {
@@ -131,7 +133,7 @@ def _unlock_task(db: Session, *, task_id: int, admin_id: int) -> dict[str, Any]:
         task_id, POOL_BY_TYPE.get(record.type, "compute"),
         task_type=record.type, snapshot_id=record.calc_snapshot_id,
     )
-    tasks_domain.record_maintenance_action(
+    project_domain.record_maintenance_action(
         db,
         action_type="user_override",
         performed_by=admin_id,

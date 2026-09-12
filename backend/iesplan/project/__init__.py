@@ -16,6 +16,7 @@ from iesplan.project.access import (
 )
 from iesplan.project.contracts import (
     DraftRecord,
+    MaintenanceActionRecord,
     ProjectConflictError,
     ProjectNotFoundError,
     ProjectPage,
@@ -47,17 +48,21 @@ get_current_draft = persistence.get_current_draft
 get_draft = persistence.get_draft
 get_draft_revision = persistence.get_draft_revision
 get_project = persistence.get_project
+get_project_version_content_id = persistence.get_project_version_content_id
 get_version = persistence.get_version
+list_maintenance_actions = persistence.list_maintenance_actions
 list_projects = persistence.list_projects
 list_version_refs = persistence.list_version_refs
 list_versions = persistence.list_versions
 project_name_exists = persistence.project_name_exists
+record_maintenance_action = persistence.record_maintenance_action
 set_project_status = persistence.set_project_status
 update_draft_content_ref = persistence.update_draft_content_ref
 update_revision_pointers = persistence.update_revision_pointers
 
 __all__ = [
     "DraftRecord",
+    "MaintenanceActionRecord",
     "OWNER_CAPABILITIES",
     "ProjectConflictError",
     "ProjectNotFoundError",
@@ -80,16 +85,19 @@ __all__ = [
     "get_draft",
     "get_draft_revision",
     "get_project",
+    "get_project_version_content_id",
     "get_role",
     "get_version",
     "initial_content",
     "InvalidRequestError",
+    "list_maintenance_actions",
     "list_projects",
     "list_version_refs",
     "list_versions",
     "parse_content_object",
     "project_name_exists",
     "project_to_dict",
+    "record_maintenance_action",
     "require_current_draft",
     "require_project",
     "require_version",

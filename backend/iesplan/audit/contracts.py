@@ -32,3 +32,14 @@ class AuditRecord:
     after: dict[str, Any] | None = None
     request_id: str | None = None
     trace_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionRuleRecord:
+    """保留规则（retention_rules 表公开视图；运维诊断消费，只读）。"""
+
+    id: int
+    entity_type: str
+    object_kind: str
+    retention_days: int
+    apply_to: str

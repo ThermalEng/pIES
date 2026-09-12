@@ -12,8 +12,6 @@ from iesplan.tasks.contracts import (
     IDEMPOTENCY_KEY_RE,
     CalcSnapshotRecord,
     ComputeSlotRecord,
-    MaintenanceActionRecord,
-    RetentionRuleRecord,
     SampleRecordRecord,
     SampleTaskRecord,
     TaskAttemptRecord,
@@ -54,7 +52,6 @@ get_attempt = persistence.get_attempt
 get_latest_attempt = persistence.get_latest_attempt
 get_lease_by_token = persistence.get_lease_by_token
 get_progress = persistence.get_progress
-get_project_version_content_id = persistence.get_project_version_content_id
 get_running_attempt = persistence.get_running_attempt
 get_sample_task = persistence.get_sample_task
 get_snapshot = persistence.get_snapshot
@@ -62,17 +59,14 @@ get_task = persistence.get_task
 get_task_by_idempotency = persistence.get_task_by_idempotency
 latest_diagnostic = persistence.latest_diagnostic
 latest_progress_for_task = persistence.latest_progress_for_task
-list_active_retention_rules = persistence.list_active_retention_rules
 list_attempts = persistence.list_attempts
 list_child_tasks = persistence.list_child_tasks
 list_diagnostics = persistence.list_diagnostics
-list_maintenance_actions = persistence.list_maintenance_actions
 list_recent_failed_tasks = persistence.list_recent_failed_tasks
 list_snapshots_for_version = persistence.list_snapshots_for_version
 list_task_ids = persistence.list_task_ids
 list_tasks = persistence.list_tasks
 pool_has_free_slot = persistence.pool_has_free_slot
-record_maintenance_action = persistence.record_maintenance_action
 record_sample = persistence.record_sample
 release_lease = persistence.release_lease
 release_slot = persistence.release_slot
@@ -104,8 +98,6 @@ __all__ = [
     "IDEMPOTENCY_KEY_RE",
     "CalcSnapshotRecord",
     "ComputeSlotRecord",
-    "MaintenanceActionRecord",
-    "RetentionRuleRecord",
     "SampleRecordRecord",
     "SampleTaskRecord",
     "TaskAttemptRecord",
@@ -150,7 +142,6 @@ __all__ = [
     "get_latest_attempt",
     "get_lease_by_token",
     "get_progress",
-    "get_project_version_content_id",
     "get_queue_progress",
     "get_running_attempt",
     "get_sample_task",
@@ -159,11 +150,9 @@ __all__ = [
     "get_task_by_idempotency",
     "latest_diagnostic",
     "latest_progress_for_task",
-    "list_active_retention_rules",
     "list_attempts",
     "list_child_tasks",
     "list_diagnostics",
-    "list_maintenance_actions",
     "list_recent_failed_tasks",
     "list_snapshots_for_version",
     "list_task_ids",
@@ -171,7 +160,6 @@ __all__ = [
     "pool_has_free_slot",
     "queue_position",
     "queue_status",
-    "record_maintenance_action",
     "record_sample",
     "release_lease",
     "release_slot",
