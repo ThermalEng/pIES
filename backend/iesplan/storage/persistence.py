@@ -20,10 +20,11 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from iesplan.db import Base
 from iesplan.models.common import HASH64_RE, bigint_pk, regex_check
+from iesplan.storage.contracts import RetentionPolicy
 
 #: 对象状态(01 §10.1 CHECK 枚举)
 OBJ_STATUS_STORED = "stored"
@@ -102,3 +103,51 @@ class ObjectRef(Base):
         Index("idx_object_refs_entity", "ref_entity_type", "ref_entity_id"),
         Index("idx_object_refs_object", "object_id"),
     )
+
+
+#: 保留规则表 Core 视图(01 §10.5)。
+#:
+#: retention_rules 行仍由 models.audit.RetentionRule 建表(定义位置不变,
+#: 迁移中的 admin/测试调用方不受影响); storage 侧不再导入 models.audit,
+#: 只以表名 + 列引用经本视图查询, 行经 contracts.RetentionPolicy 公开。
+_retention_rules_table = sa.table(
+    "retention_rules",
+    sa.column("id"),
+    sa.column("entity_type"),
+    sa.column("object_kind"),
+    sa.column("retention_days"),
+    sa.column("apply_to"),
+    sa.column("status"),
+)
+
+
+def list_active_retention_rules(db: Session) -> list[RetentionPolicy]:
+    """列出全部 active 保留规则(存储内部持久化函数, 供 safe_cleanup 消费)。
+
+    只读 retention_rules 表的匹配列, 返回 contracts.RetentionPolicy
+    不可变值对象; 调用方不得接触保留规则 ORM。
+    """
+    t = _retention_rules_table
+    rows = db.execute(
+        sa.select(
+            t.c.id,
+            t.c.entity_type,
+            t.c.object_kind,
+            t.c.retention_days,
+            t.c.apply_to,
+            t.c.status,
+        )
+        .where(t.c.status == "active")
+        .order_by(t.c.id)
+    ).all()
+    return [
+        RetentionPolicy(
+            id=row[0],
+            entity_type=row[1],
+            object_kind=row[2],
+            retention_days=row[3],
+            apply_to=row[4],
+            status=row[5],
+        )
+        for row in rows
+    ]

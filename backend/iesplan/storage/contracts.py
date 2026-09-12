@@ -51,6 +51,23 @@ class ObjectOwner:
 
 
 @dataclass(frozen=True, slots=True)
+class RetentionPolicy:
+    """保留规则公开视图(不可变值对象, 01 §10.5)。
+
+    存储清理仅消费本视图, 不接触保留规则 ORM: 规则行经
+    ``persistence.list_active_retention_rules`` 读出并转换为本类型,
+    再由 ``service._match_retention_rule`` 匹配。
+    """
+
+    id: int
+    entity_type: str
+    object_kind: str
+    retention_days: int
+    apply_to: str = "all"
+    status: str = "active"
+
+
+@dataclass(frozen=True, slots=True)
 class RefInfo:
     """对象引用公开视图(不可变值对象; ref_entity_type 为稳定标识字符串)。"""
 

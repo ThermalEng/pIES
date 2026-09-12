@@ -26,6 +26,7 @@ from iesplan.storage.contracts import (
     ObjectStore,
     RefInfo,
     ReferenceNotFoundError,
+    RetentionPolicy,
     StorageQuotaError,
 )
 from iesplan.storage.service import (
@@ -64,6 +65,7 @@ __all__ = [
     "ObjectStore",
     "RefInfo",
     "ReferenceNotFoundError",
+    "RetentionPolicy",
     "StorageQuotaError",
     "add_ref",
     "attach",

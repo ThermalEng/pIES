@@ -39,7 +39,6 @@ from sqlalchemy.orm import Session
 from iesplan import audit as audit_domain
 from iesplan.config import settings
 from iesplan.core.errors import AppError, NotFoundError
-from iesplan.models.audit import RetentionRule
 from iesplan.storage.adapters.filesystem import FileSystemBlobStore
 from iesplan.storage.contracts import (
     BlobMissingError,
@@ -49,6 +48,7 @@ from iesplan.storage.contracts import (
     ObjectOwner,
     RefInfo,
     ReferenceNotFoundError,
+    RetentionPolicy,
     StorageQuotaError,
 )
 from iesplan.storage.persistence import (
@@ -58,6 +58,7 @@ from iesplan.storage.persistence import (
     OBJ_STATUS_STORED,
     ObjectRef,
     StoredObject,
+    list_active_retention_rules,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,13 +191,14 @@ def _audit(
     )
 
 
-def _match_retention_rule(rules: list[RetentionRule], obj: StoredObject) -> RetentionRule | None:
+def _match_retention_rule(rules: list[RetentionPolicy], obj: StoredObject) -> RetentionPolicy | None:
     """匹配对象保留规则(01 §10.5)。
 
     仅匹配 entity_type='objects' 且 object_kind 为 '*' 或与对象媒体类型一致的
-    active 规则; 取最小保留天数(最严格先满足)。
+    active 规则; 取最小保留天数(最严格先满足)。规则为 storage 公开契约值对象,
+    不接触保留规则 ORM。
     """
-    matched: RetentionRule | None = None
+    matched: RetentionPolicy | None = None
     for rule in rules:
         if rule.status != "active" or rule.entity_type != "objects":
             continue
@@ -704,7 +706,9 @@ def safe_cleanup(
         (dry_run=False 时) marked_count / marked / errors。
     """
     candidates = _candidate_objects(db, limit=limit)
-    rules = list(db.execute(sa.select(RetentionRule).where(RetentionRule.status == "active")).scalars())
+    # W1-Storage: 保留规则经 storage 内部持久化读取(公开契约值对象),
+    # 不再直接查询 models.audit.RetentionRule。
+    rules = list_active_retention_rules(db)
     now = utcnow()
 
     deletable: list[StoredObject] = []
