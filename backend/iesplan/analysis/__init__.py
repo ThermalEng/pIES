@@ -11,35 +11,18 @@
   - sensitivity.py: 指标对参数的变化率与影响排序(rank_indicators/rank_parameters)
     + 任务命令定义(build_sensitivity_task_config,纯 dict)+ 证据载荷
     (build_analysis_payload);
-  - indicators.py: 能效/排放指标门面(自 metrics.engineering/environmental 迁入);
-  - assessment.py: 四维评估门面 + check_financial(读 evidence financial 块);
-  - _minfinance.py: 财务依赖(finance 包 M5 落地前的最小实现,接口 03 §7.2)。
 
-依赖(Wave 4-B 后): wrapper 只消费计算结果、回执和声明输出,只经 core
-聚合,不导入 engines/services/assembly.plan/finance/metrics/worker;
-assessment/indicators/_minfinance 的 metrics 门面转发为残余债务,随门面
-归属收尾。门面: summarize_sweep / summarize_batch /
+依赖(Wave 4-C 后): wrapper/sensitivity 只消费计算结果、回执和声明输出,
+只经 core 聚合,不导入 engines/services/assembly.plan/finance/metrics/worker。
+四维评估规则归 results 域,指标实现归 metrics 域,财务计算归 finance 包,
+analysis 不设转发门面(门禁 16 归零)。
+
+门面: summarize_sweep / summarize_batch /
 build_analysis_payload / build_sensitivity_task_config。
 """
 
 from __future__ import annotations
 
-from iesplan.analysis.assessment import (
-    FinancialValidity,
-    OptimalityValidity,
-    PhysicalValidity,
-    ReliabilityStatus,
-    ValidityLevel,
-    check_financial,
-    summarize_four_dimensions,
-)
-from iesplan.analysis.indicators import (
-    capacity_utilization,
-    energy_balance_summary,
-    load_met_ratio,
-    operational_emissions,
-    peak_demand,
-)
 from iesplan.analysis.sensitivity import (
     build_analysis_payload,
     build_sensitivity_task_config,
@@ -62,28 +45,16 @@ from iesplan.analysis.wrapper import (
 __all__ = [
     "AnalysisError",
     "BatchResult",
-    "FinancialValidity",
-    "OptimalityValidity",
-    "PhysicalValidity",
-    "ReliabilityStatus",
     "SweepResult",
     "SweepSpec",
-    "ValidityLevel",
     "apply_param",
     "build_analysis_payload",
     "build_sensitivity_task_config",
-    "capacity_utilization",
     "change_rate",
     "financial_to_dict",
     "jsonable_kpi",
-    "check_financial",
-    "energy_balance_summary",
-    "load_met_ratio",
-    "operational_emissions",
-    "peak_demand",
     "rank_indicators",
     "rank_parameters",
     "summarize_batch",
-    "summarize_four_dimensions",
     "summarize_sweep",
 ]
