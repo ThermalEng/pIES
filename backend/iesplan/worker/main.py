@@ -27,9 +27,9 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+from iesplan.application import worker as worker_app
 from iesplan.config import settings
 from iesplan.db import SessionLocal
-from iesplan.services import queue
 from iesplan.worker import lease, runner
 
 logger = logging.getLogger(__name__)
@@ -120,7 +120,7 @@ class Worker:
         # 槽门禁(03 §5.2 第 1 步): 无空槽则等待
         if not self._slot_gate():
             return
-        task_id = queue.dequeue(self.pool)
+        task_id = worker_app.dequeue_task(self.pool)
         if task_id is None:
             return
         self._claim_and_run(task_id)
@@ -140,11 +140,11 @@ class Worker:
             ),
             "load": {"cpu": None, "mem_mb": None},
         }
-        queue.set_heartbeat(self.worker_id, payload, ttl=int(self.heartbeat_interval * 3))
+        worker_app.publish_heartbeat(self.worker_id, payload, ttl=int(self.heartbeat_interval * 3))
 
     def _clear_heartbeat(self) -> None:
         """退出时清除心跳(供管理界面判定失联)。"""
-        queue.set_heartbeat(self.worker_id, {}, ttl=1)
+        worker_app.publish_heartbeat(self.worker_id, {}, ttl=1)
 
     def _renew_or_cancel(self) -> None:
         """续租; 失败(0 行) → 租约失效 → 立即取消当前任务(03 §4.4 自毁契约)。"""
