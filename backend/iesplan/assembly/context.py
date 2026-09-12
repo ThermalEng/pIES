@@ -31,7 +31,7 @@ from iesplan.core.expression import Dimensions
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 
 # ---------------------------------------------------------------------------
-# 常量与业务表(与 services/model.py 同约定;本模块独立声明,不依赖 services)
+# 常量与业务表(与 application/models 同约定;本模块独立声明,不依赖 services)
 # ---------------------------------------------------------------------------
 
 #: 管道设备模型(RR-P2-05: 管道为合法业务设备, 在 iesplan.devices YAML 目录

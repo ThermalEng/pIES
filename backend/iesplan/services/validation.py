@@ -49,7 +49,7 @@ from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord
 from iesplan.services import config as config_service
 from iesplan.services import dataset as dataset_service
-from iesplan.services import model as model_service
+from iesplan.application import models as model_service
 from iesplan.services import project as project_service
 from iesplan.storage import find_refs_by_owner
 

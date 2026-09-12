@@ -33,7 +33,7 @@ from iesplan.models.calc import CalcConfig
 from iesplan.models.model import Device, SystemGraph
 from iesplan.models.project import Draft, Project
 from iesplan.services import config as config_service
-from iesplan.services import identity
+from iesplan.application import identity
 from iesplan.services import project as project_service
 
 #: 配置域测试所有者(经窗口会话登录)

@@ -81,7 +81,7 @@ def get_role(db: Session, user: UserRecord, project_id: int) -> str | None:
 
 def _is_admin(db: Session, user: UserRecord) -> bool:
     """用户是否持有全局 admin 角色(委托 identity 的权威判定)。"""
-    from iesplan.services import identity
+    from iesplan.application import identity
 
     return identity.has_role(db, user, "admin")
 

@@ -24,7 +24,7 @@ from iesplan.config import settings
 from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.db import Base
 from iesplan.model.contracts import ModelConflictError
-from iesplan.services import model as model_service
+from iesplan.application import models as model_service
 
 LOAD = "ies.device.electric_load"
 HP = "ies.device.heat_pump"

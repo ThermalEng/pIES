@@ -241,7 +241,7 @@ def provision_user(
     user = find_by_subject(db, subject)
     if user is not None:
         return user
-    from iesplan.services import identity
+    from iesplan.application import identity
 
     username = _subject_username(subject)
     base, index = username, 2

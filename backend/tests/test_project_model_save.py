@@ -32,7 +32,7 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from iesplan.application.projects import (
+from iesplan.application.models import (
     save_project_model,
     validate_candidate,
 )
@@ -43,7 +43,7 @@ from iesplan.models.audit import AuditLog  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
 from iesplan.models.project import Project  # noqa: E402
 from iesplan.models.project_model import ProjectModel, ProjectModelSequence  # noqa: E402
-from iesplan.services import identity  # noqa: E402
+from iesplan.application import identity  # noqa: E402
 from iesplan.services import project as project_service  # noqa: E402
 from iesplan.storage import find_refs_by_entity_type  # noqa: E402
 
@@ -659,7 +659,7 @@ def test_save_failure_midway_no_half_state(
     client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     headers, pid = _make_owner(client, db_session, "sv_crash")
-    import iesplan.application.projects.model_save as ms
+    import iesplan.application.models.model_save as ms
 
     calls = {"n": 0}
     real_put = ms.put_object

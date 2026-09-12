@@ -10,7 +10,7 @@ check_graph_inputs 保留为旧 AssemblySpec 格式的兼容检查入口；生�
 validator.validate_project_export，并只消费 ValidatedAssemblyArtifact。
 
 端口解析(注册表推导 + 显式声明覆盖)在 context 完成并缓存到 CheckContext.resolved_ports:
-- 设备端口:按设备类型业务方向表(services/model.py 同约定)推导,载体→(物理量, 标准单位);
+- 设备端口:按设备类型业务方向表(application/models 同约定)推导,载体→(物理量, 标准单位);
 - 管道端口:入端 instantaneous / 出端 delayed(延迟步数取 params.delay_steps);
 - 显式 `ports:` 声明仅覆盖 capacity(与推导不一致按 ASM-REF-005 告警,注册表为准)。
 """

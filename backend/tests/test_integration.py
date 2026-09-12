@@ -35,7 +35,8 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
-from iesplan.services import identity, queue  # noqa: E402
+from iesplan.application import identity  # noqa: E402
+from iesplan.services import queue  # noqa: E402
 from iesplan.services import package as package_service  # noqa: E402
 from iesplan.services import tasks as tasks_service  # noqa: E402
 from iesplan.worker import runner  # noqa: E402

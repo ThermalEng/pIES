@@ -24,7 +24,7 @@ from iesplan.main import create_app
 from iesplan.models.identity import User
 from iesplan.models.project import Project
 from iesplan.services import config as config_service
-from iesplan.services import identity
+from iesplan.application import identity
 from iesplan.services import project as project_service
 from iesplan.services import validation as validation_service
 

@@ -21,7 +21,7 @@ from iesplan.api.auth import router as auth_router
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
 from iesplan.models.identity import AuthEvent, User, WindowSession
-from iesplan.services import identity
+from iesplan.application import identity
 
 ADMIN_PASSWORD = "Admin12345"
 USER_PASSWORD = "Alice12345"

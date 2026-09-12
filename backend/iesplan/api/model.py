@@ -31,7 +31,7 @@ from iesplan.api.auth import CurrentUser
 from iesplan.db import get_db
 from iesplan.devices import DeviceModelDocument, list_devices
 from iesplan.devices.contracts2 import PropertySpec
-from iesplan.services import model as svc
+from iesplan.application import models as svc
 from iesplan.services import project as project_service
 
 #: 设备类型注册表(公开, 前端画布取设备面板与参数表单 schema)
