@@ -458,7 +458,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     ("iesplan.services.config", "audit"),
     # (切片 5: services.config CalcConfig 改经 configuration 域, 移除 calc)
     ("iesplan.services.config", "model"),
-    ("iesplan.services.model", "model"),
+    # (切片 7: services.model 经 model 域门面, 移除本项)
     ("iesplan.services.identity", "common"),  # 仅正则基元(无业务表); 切片 4 已移除 identity 表访问
     # (切片 5: services.config_revisions 经 configuration 域, 移除本项)
     ("iesplan.services.tasks", "common"),  # 仅幂等键正则基元(无业务表)

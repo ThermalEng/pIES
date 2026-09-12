@@ -19,6 +19,7 @@ from pathlib import Path
 import iesplan.configuration as configuration
 import iesplan.dataset as dataset
 import iesplan.identity as identity
+import iesplan.model as model
 import iesplan.package as package
 import iesplan.project as project
 import iesplan.results as results
@@ -27,6 +28,7 @@ from iesplan.configuration.repository import ConfigurationRepository
 from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.dataset.repository import DatasetRepository
 from iesplan.identity.repository import IdentityRepository
+from iesplan.model.repository import ModelRepository
 from iesplan.package.repository import PackageRepository
 from iesplan.project.repository import ProjectRepository
 from iesplan.results.repository import ResultsRepository
@@ -43,6 +45,7 @@ _DOMAIN_FACADES = {
     "tasks": tasks,
     "results": results,
     "package": package,
+    "model": model,
 }
 
 _DOMAIN_REPOSITORIES = {
@@ -53,6 +56,7 @@ _DOMAIN_REPOSITORIES = {
     "tasks": TasksRepository,
     "results": ResultsRepository,
     "package": PackageRepository,
+    "model": ModelRepository,
 }
 
 _ERROR_BASES = {
@@ -153,6 +157,7 @@ OWNED_MODELS: dict[str, frozenset[str]] = {
     "tasks": frozenset({"calc", "uncertainty"}),
     "results": frozenset({"result"}),
     "package": frozenset({"audit"}),
+    "model": frozenset({"model"}),
 }
 
 

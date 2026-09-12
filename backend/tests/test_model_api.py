@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from iesplan import model as model_domain
 from iesplan.api import model as model_api
 from iesplan.core.diagnostics import (
     CONN_NODE_ORPHAN,
@@ -364,7 +365,7 @@ def test_sync_ports_preserves_same_carrier_multi_port(
         assert ports_after["electric_b"].id == electric_b_id
 
         # 连接仍保留(未裁剪端口不被误删连接)
-        conns = svc._load_connections(session, dst.graph_id) if hasattr(svc, "_load_connections") else []
+        conns = model_domain.list_connections(session, dst.graph_id)
         assert any(c.id == conn.id for c in conns)
 
         # 裁剪: 期望集合移除 electric_b(同载能但名称不同) → 只有 electric_b 被删,
@@ -381,7 +382,7 @@ def test_sync_ports_preserves_same_carrier_multi_port(
         assert set(ports_final) == {"electric_a", "heat_out"}
         assert ports_final["electric_a"].id == electric_a_id  # 保留端口 id 不变
         # electric_a 的连接未被裁剪删除
-        conn_after = svc._load_connections(session, dst.graph_id)
+        conn_after = model_domain.list_connections(session, dst.graph_id)
         assert any(c.id == conn.id for c in conn_after)
 
         # 补建: 期望集合重新包含 electric_b → 按 name 补建新端口
@@ -605,8 +606,8 @@ def test_connect_attrs_and_update_connection(
         )
         assert conn.capacity == 500
         assert conn.loss_rate == 0.05
-        # 仅更新损耗率: 容量保留
-        svc.update_connection(session, project_id, conn.id, {"loss_rate": 0.1})
+        # 仅更新损耗率: 容量保留(值对象语义: 以返回记录为准, 不依赖 ORM 原地变更)
+        conn = svc.update_connection(session, project_id, conn.id, {"loss_rate": 0.1})
         assert conn.capacity == 500
         assert conn.loss_rate == 0.1
 

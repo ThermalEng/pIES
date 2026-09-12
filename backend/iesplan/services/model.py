@@ -17,15 +17,13 @@
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-import sqlalchemy as sa
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from iesplan import model as model_domain
 from iesplan import project as project_domain
 from iesplan.core.diagnostics import (
     CONN_NODE_ORPHAN,
@@ -42,7 +40,13 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.devices import DeviceModelDocument, get_device
 from iesplan.devices.contracts2 import PropertySpec
-from iesplan.models.model import Connection, Device, Port, SystemGraph
+from iesplan.model.contracts import (
+    ConnectionRecord,
+    DeviceRecord,
+    GraphRecord,
+    ModelConflictError,
+    PortRecord,
+)
 from iesplan.project.contracts import DraftRecord, ProjectConflictError
 from iesplan.services import project as project_service
 
@@ -176,7 +180,9 @@ def _descriptor_ports(spec: DeviceModelDocument, params: dict | None = None) -> 
     return ports
 
 
-def _sync_ports_for_params(db: Session, device: Device, spec: DeviceModelDocument, params: dict) -> None:
+def _sync_ports_for_params(
+    db: Session, device: DeviceRecord, spec: DeviceModelDocument, params: dict
+) -> None:
     """按设备参数(热泵 mode)重同步端口: 补齐应存在但缺失的端口, 删除被裁剪的端口。
 
     以 YAML 端口声明为唯一权威(与创建设备路径一致): 期望端口集合按端口名
@@ -196,25 +202,14 @@ def _sync_ports_for_params(db: Session, device: Device, spec: DeviceModelDocumen
             port["name"],
             {"carrier": port["carrier"], "direction": port["direction"], "ptype": ptype},
         )
-    existing = {p.name: p for p in db.scalars(select(Port).where(Port.device_id == device.id))}
-    # 删除不再需要的端口(及其连接): 现有端口名不在期望集合内
-    for name, port in existing.items():
-        if name not in wanted:
-            db.execute(sa.delete(Connection).where(Connection.from_port_id == port.id))
-            db.execute(sa.delete(Connection).where(Connection.to_port_id == port.id))
-            db.delete(port)
-    # 补回应有但缺失的端口(名称取自 YAML 端口声明)
-    for name, want in wanted.items():
-        if name not in existing:
-            db.add(
-                Port(
-                    device_id=device.id,
-                    port_type=want["ptype"],
-                    direction=want["direction"],
-                    name=name,
-                    params={},
-                )
-            )
+    model_domain.resync_device_ports(
+        db,
+        device.id,
+        [
+            {"name": name, "port_type": want["ptype"], "direction": want["direction"]}
+            for name, want in wanted.items()
+        ],
+    )
 
 
 def _coarse_category(type_id: str) -> str:
@@ -242,7 +237,7 @@ def _coarse_category(type_id: str) -> str:
     return "other"
 
 
-def _resolve_type_id(device: Device) -> str:
+def _resolve_type_id(device: DeviceRecord) -> str:
     """从设备行解析完整注册表类型 id(params.type_detail 优先, 回退粗分类别)。"""
     detail = device.params.get(_TYPE_DETAIL_KEY)
     return detail if isinstance(detail, str) and detail else device.device_type
@@ -256,7 +251,7 @@ def _try_get_device_type(type_id: str) -> DeviceModelDocument | None:
         return None
 
 
-def _ensure_mutable(graph: SystemGraph) -> None:
+def _ensure_mutable(graph: GraphRecord) -> None:
     """版本图不可修改(01 §4.1 冻结规则, 应用层判定)。"""
     if graph.project_version_id is not None:
         raise ConflictError(
@@ -283,16 +278,12 @@ def _raise_diagnostics(diags: list[Diagnostic]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _find_working_graph(db: Session, project_id: int) -> SystemGraph | None:
+def _find_working_graph(db: Session, project_id: int) -> GraphRecord | None:
     """项目的工作图(挂草稿即工作图, 01 §4.1; 按 id 升序取最早一张, 保证确定性)。"""
-    return db.scalar(
-        select(SystemGraph)
-        .where(SystemGraph.project_id == project_id, SystemGraph.draft_id.is_not(None))
-        .order_by(SystemGraph.id)
-    )
+    return model_domain.find_working_graph(db, project_id)
 
 
-def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 1) -> SystemGraph:
+def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 1) -> GraphRecord:
     """取项目工作图; 不存在则连同工作草稿一起创建(幂等)。
 
     草稿为工作图的内容载体(01 §3.2/§4.1): 图内容同步进草稿内容文档(对象引用)。
@@ -323,18 +314,17 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
                     content_object_id=content_object_id,
                     updated_by=created_by,
                 )
-            graph = SystemGraph(
+            graph = model_domain.create_graph(
+                db,
                 project_id=project_id,
                 draft_id=draft.id,
                 name="工作图",
                 created_by=created_by,
             )
-            db.add(graph)
-            db.flush()
             sync_draft_content(db, graph)
             db.commit()
             return graph
-        except (IntegrityError, ProjectConflictError):
+        except (ModelConflictError, ProjectConflictError):
             # 并发竞争者已提交建图/建草稿: 放弃本事务半成品, 下一轮重查胜方结果
             db.rollback()
     raise ConflictError(
@@ -343,28 +333,7 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
     )
 
 
-def _load_devices(db: Session, graph_id: int) -> list[Device]:
-    """图内设备(按 id 升序, 保证同步内容确定性)。"""
-    return list(db.scalars(select(Device).where(Device.graph_id == graph_id).order_by(Device.id)))
-
-
-def _load_ports(db: Session, graph_id: int) -> list[Port]:
-    """图内端口(按 id 升序)。"""
-    stmt = (
-        select(Port)
-        .join(Device, Port.device_id == Device.id)
-        .where(Device.graph_id == graph_id)
-        .order_by(Port.id)
-    )
-    return list(db.scalars(stmt))
-
-
-def _load_connections(db: Session, graph_id: int) -> list[Connection]:
-    """图内连接(按 id 升序)。"""
-    return list(db.scalars(select(Connection).where(Connection.graph_id == graph_id).order_by(Connection.id)))
-
-
-def _device_content_payload(device: Device) -> dict:
+def _device_content_payload(device: DeviceRecord) -> dict:
     """设备的内容载荷(排除布局等内部保留键; 服务端默认值兜底, 保证行内/库内一致)。"""
     params = {k: v for k, v in device.params.items() if not _is_internal_key(k)}
     return {
@@ -378,16 +347,16 @@ def _device_content_payload(device: Device) -> dict:
     }
 
 
-def sync_draft_content(db: Session, graph: SystemGraph) -> None:
+def sync_draft_content(db: Session, graph: GraphRecord) -> None:
     """把图内容同步进草稿内容文档(对象引用)。
 
     内容 = 设备/端口/连接(含行 id 与参数, 排除布局与项目/图/名称等易变元数据),
     规范化 = 列表按 id 排序 + json sort_keys。历史定位使用项目 + 草稿 revision。
     """
     db.flush()  # 先落盘挂起的新增/删除, 保证同步覆盖当前事务内的完整图内容
-    devices = _load_devices(db, graph.id)
-    ports = _load_ports(db, graph.id)
-    conns = _load_connections(db, graph.id)
+    devices = model_domain.list_devices(db, graph.id)
+    ports = model_domain.list_ports(db, graph.id)
+    conns = model_domain.list_connections(db, graph.id)
     payload = {
         "devices": [_device_content_payload(d) for d in devices],
         "ports": [
@@ -547,7 +516,7 @@ def create_device(
     model_precision: str = "medium",
     position: dict | None = None,
     created_by: int = 1,
-) -> Device:
+) -> DeviceRecord:
     """创建设备: 校验类型/参数, 按载体生成端口, 同步草稿内容。
 
     参数:
@@ -590,13 +559,14 @@ def create_device(
     _raise_diagnostics(diags)
     graph = get_or_create_working_graph(db, project_id, created_by)
     _ensure_mutable(graph)
-    if db.scalar(select(Device.id).where(Device.graph_id == graph.id, Device.name == name)) is not None:
+    if model_domain.find_device_by_name(db, graph.id, name) is not None:
         raise ConflictError(
             f"设备名称重复: {name}",
             params={"device_id": "", "name": name},
             location={"object_type": "device", "field": "name"},
         )
-    device = Device(
+    device = model_domain.create_device(
+        db,
         graph_id=graph.id,
         device_type=_coarse_category(device_type),
         kind="existing" if is_existing else "new",
@@ -605,37 +575,35 @@ def create_device(
         model_fidelity=model_precision,
         status="active",
     )
-    db.add(device)
-    db.flush()
     # 按设备类型 YAML 端口声明生成端口(RR-P1-04: 端口名/方向/载能来自公开
     # descriptor, 不再使用静态方向表; 热泵按 mode 参数裁剪未启用的冷/热端口)
-    for port in _descriptor_ports(spec, params):
-        carrier = port["carrier"]
-        if carrier not in CARRIER_PORT_TYPE:
-            continue  # solar 等环境侧载体不生成可连接端口
-        db.add(
-            Port(
-                device_id=device.id,
-                port_type=CARRIER_PORT_TYPE[carrier],
-                direction=port["direction"],
-                name=port["name"],
-                params={},
-            )
-        )
+    model_domain.create_ports(
+        db,
+        device.id,
+        [
+            {
+                "name": port["name"],
+                "port_type": CARRIER_PORT_TYPE[port["carrier"]],
+                "direction": port["direction"],
+            }
+            for port in _descriptor_ports(spec, params)
+            if port["carrier"] in CARRIER_PORT_TYPE  # solar 等环境侧载体不生成可连接端口
+        ],
+    )
     sync_draft_content(db, graph)
     db.commit()
     return device
 
 
-def _get_project_device(db: Session, project_id: int, device_id: int) -> tuple[Device, SystemGraph]:
+def _get_project_device(db: Session, project_id: int, device_id: int) -> tuple[DeviceRecord, GraphRecord]:
     """取项目工作图内的设备(不存在/跨项目抛 NotFoundError)。"""
-    device = db.get(Device, device_id)
+    device = model_domain.get_device(db, device_id)
     if device is None:
         raise NotFoundError(
             f"设备不存在: {device_id}",
             location={"object_type": "device", "object_id": str(device_id)},
         )
-    graph = db.get(SystemGraph, device.graph_id)
+    graph = model_domain.get_graph(db, device.graph_id)
     if graph is None or graph.project_id != project_id:
         raise NotFoundError(
             f"设备不属于该项目: {device_id}",
@@ -652,7 +620,7 @@ def update_device(
     name: str | None = None,
     params: dict | None = None,
     position: dict | None = None,
-) -> Device:
+) -> DeviceRecord:
     """更新设备名称/参数/位置(仅更新提供的字段; 参数重新按注册表校验)。"""
     device, graph = _get_project_device(db, project_id, device_id)
     _ensure_mutable(graph)
@@ -665,16 +633,14 @@ def update_device(
                 params={"param": "name", "value": name, "min": None, "max": None},
                 location={"object_type": "device", "object_id": str(device_id), "field": "name"},
             )
-        dup = db.scalar(
-            select(Device.id).where(Device.graph_id == graph.id, Device.name == name, Device.id != device_id)
-        )
+        dup = model_domain.find_device_by_name(db, graph.id, name, exclude_id=device_id)
         if dup is not None:
             raise ConflictError(
                 f"设备名称重复: {name}",
                 params={"device_id": str(device_id), "name": name},
                 location={"object_type": "device", "object_id": str(device_id), "field": "name"},
             )
-        device.name = name
+        device = model_domain.update_device(db, device.id, name=name)
     if params is not None:
         new_params = dict(params)
         old_layout = device.params.get(_LAYOUT_KEY)
@@ -690,12 +656,11 @@ def update_device(
         spec = _try_get_device_type(_resolve_type_id(device))
         if spec is not None:
             _sync_ports_for_params(db, device, spec, new_params)
-        device.params = new_params
+        device = model_domain.update_device(db, device.id, params=new_params)
     elif position is not None:
         new_params = dict(device.params)
         new_params[_LAYOUT_KEY] = _normalize_position(position)
-        device.params = new_params
-    device.updated_at = datetime.now(UTC)
+        device = model_domain.update_device(db, device.id, params=new_params)
     sync_draft_content(db, graph)
     db.commit()
     return device
@@ -703,21 +668,16 @@ def update_device(
 
 def delete_device(db: Session, project_id: int, device_id: int) -> None:
     """删除设备(级联删除其端口与连接, 01 §4.2-4.4 归属语义)。"""
-    device, graph = _get_project_device(db, project_id, device_id)
+    _device, graph = _get_project_device(db, project_id, device_id)
     _ensure_mutable(graph)
-    port_ids = list(db.scalars(select(Port.id).where(Port.device_id == device_id)))
-    if port_ids:
-        db.execute(sa.delete(Connection).where(Connection.from_port_id.in_(port_ids)))
-        db.execute(sa.delete(Connection).where(Connection.to_port_id.in_(port_ids)))
-        db.execute(sa.delete(Port).where(Port.id.in_(port_ids)))
-    db.delete(device)
+    model_domain.delete_device_cascade(db, device_id)
     sync_draft_content(db, graph)
     db.commit()
 
 
-def get_device_ports(db: Session, device_id: int) -> list[Port]:
+def get_device_ports(db: Session, device_id: int) -> list[PortRecord]:
     """按设备取端口(按 id 排序, 供创建/更新响应返回)。"""
-    return list(db.scalars(select(Port).where(Port.device_id == device_id).order_by(Port.id)))
+    return model_domain.list_ports_by_device(db, device_id)
 
 
 # ---------------------------------------------------------------------------
@@ -777,7 +737,7 @@ def connect(
     from_port_id: int,
     to_port_id: int,
     attrs: dict | None = None,
-) -> Connection:
+) -> ConnectionRecord:
     """创建连接(源端口 → 汇端口)。
 
     校验(失败抛校验错误并定位到端口):
@@ -786,22 +746,22 @@ def connect(
     - 方向兼容: 源 direction ∈ {out, bidirectional}, 汇 ∈ {in, bidirectional}(CONN-PORT-002);
     - 禁止自环(CONN-DUP-002)与重复连接(同图同两端同类型, CONN-DUP-001)。
     """
-    from_port = db.get(Port, from_port_id)
+    from_port = model_domain.get_port(db, from_port_id)
     if from_port is None:
         raise NotFoundError(
             f"起点端口不存在: {from_port_id}",
             location={"object_type": "port", "object_id": str(from_port_id)},
         )
-    to_port = db.get(Port, to_port_id)
+    to_port = model_domain.get_port(db, to_port_id)
     if to_port is None:
         raise NotFoundError(
             f"终点端口不存在: {to_port_id}",
             location={"object_type": "port", "object_id": str(to_port_id)},
         )
-    from_dev = db.get(Device, from_port.device_id)
-    to_dev = db.get(Device, to_port.device_id)
-    from_graph = db.get(SystemGraph, from_dev.graph_id) if from_dev else None
-    to_graph = db.get(SystemGraph, to_dev.graph_id) if to_dev else None
+    from_dev = model_domain.get_device(db, from_port.device_id)
+    to_dev = model_domain.get_device(db, to_port.device_id)
+    from_graph = model_domain.get_graph(db, from_dev.graph_id) if from_dev else None
+    to_graph = model_domain.get_graph(db, to_dev.graph_id) if to_dev else None
     loc = {
         "object_type": "connection",
         "from_port_id": from_port_id,
@@ -863,13 +823,12 @@ def connect(
             location=loc,
         )
     conn_type = CONN_TYPE_BY_PORT[from_port.port_type]
-    dup = db.scalar(
-        select(Connection.id).where(
-            Connection.graph_id == from_graph.id,
-            Connection.from_port_id == from_port_id,
-            Connection.to_port_id == to_port_id,
-            Connection.conn_type == conn_type,
-        )
+    dup = model_domain.find_connection(
+        db,
+        graph_id=from_graph.id,
+        from_port_id=from_port_id,
+        to_port_id=to_port_id,
+        conn_type=conn_type,
     )
     if dup is not None:
         raise ModelValidationError(
@@ -877,14 +836,15 @@ def connect(
             code=CONN_DUPLICATE,
             message_key="ies.diag.conn.duplicate",
             params={
-                "connection_id": dup,
+                "connection_id": dup.id,
                 "from_port_id": from_port_id,
                 "to_port_id": to_port_id,
             },
             location=loc,
         )
     capacity, loss_rate, extra = _check_connection_attrs(attrs or {})
-    conn = Connection(
+    conn = model_domain.create_connection(
+        db,
         graph_id=from_graph.id,
         from_port_id=from_port_id,
         to_port_id=to_port_id,
@@ -893,22 +853,22 @@ def connect(
         loss_rate=loss_rate,
         params=extra,
     )
-    db.add(conn)
-    db.flush()
     sync_draft_content(db, from_graph)
     db.commit()
     return conn
 
 
-def _get_project_connection(db: Session, project_id: int, conn_id: int) -> tuple[Connection, SystemGraph]:
+def _get_project_connection(
+    db: Session, project_id: int, conn_id: int
+) -> tuple[ConnectionRecord, GraphRecord]:
     """取项目工作图内的连接(不存在/跨项目抛 NotFoundError)。"""
-    conn = db.get(Connection, conn_id)
+    conn = model_domain.get_connection(db, conn_id)
     if conn is None:
         raise NotFoundError(
             f"连接不存在: {conn_id}",
             location={"object_type": "connection", "object_id": str(conn_id)},
         )
-    graph = db.get(SystemGraph, conn.graph_id)
+    graph = model_domain.get_graph(db, conn.graph_id)
     if graph is None or graph.project_id != project_id:
         raise NotFoundError(
             f"连接不属于该项目: {conn_id}",
@@ -919,14 +879,14 @@ def _get_project_connection(db: Session, project_id: int, conn_id: int) -> tuple
 
 def disconnect(db: Session, project_id: int, conn_id: int) -> None:
     """断开连接(删除连接行并同步草稿内容)。"""
-    conn, graph = _get_project_connection(db, project_id, conn_id)
+    _conn, graph = _get_project_connection(db, project_id, conn_id)
     _ensure_mutable(graph)
-    db.delete(conn)
+    model_domain.delete_connection(db, conn_id)
     sync_draft_content(db, graph)
     db.commit()
 
 
-def update_connection(db: Session, project_id: int, conn_id: int, attrs: dict) -> Connection:
+def update_connection(db: Session, project_id: int, conn_id: int, attrs: dict) -> ConnectionRecord:
     """更新连接属性(capacity/loss_rate/params, 仅更新提供的字段)。"""
     conn, graph = _get_project_connection(db, project_id, conn_id)
     _ensure_mutable(graph)
@@ -937,9 +897,9 @@ def update_connection(db: Session, project_id: int, conn_id: int, attrs: dict) -
         merged.setdefault("loss_rate", _json_clean(conn.loss_rate))
         merged.setdefault("params", conn.params)
         capacity, loss_rate, extra = _check_connection_attrs(merged)
-        conn.capacity = capacity
-        conn.loss_rate = loss_rate
-        conn.params = extra
+        conn = model_domain.update_connection(
+            db, conn.id, capacity=capacity, loss_rate=loss_rate, params=extra
+        )
     sync_draft_content(db, graph)
     db.commit()
     return conn
@@ -950,7 +910,7 @@ def update_connection(db: Session, project_id: int, conn_id: int, attrs: dict) -
 # ---------------------------------------------------------------------------
 
 
-def serialize_device(device: Device) -> dict:
+def serialize_device(device: DeviceRecord) -> dict:
     """设备响应结构(device_type 返回完整注册表类型 id, category 为粗分类别)。"""
     return {
         "id": device.id,
@@ -965,7 +925,7 @@ def serialize_device(device: Device) -> dict:
     }
 
 
-def serialize_port(port: Port) -> dict:
+def serialize_port(port: PortRecord) -> dict:
     """端口响应结构。"""
     return {
         "id": port.id,
@@ -978,7 +938,7 @@ def serialize_port(port: Port) -> dict:
     }
 
 
-def serialize_connection(conn: Connection) -> dict:
+def serialize_connection(conn: ConnectionRecord) -> dict:
     """连接响应结构。"""
     return {
         "id": conn.id,
@@ -1014,9 +974,9 @@ def get_graph(db: Session, project_id: int) -> dict:
             "connections": [],
             "layout": {"devices": {}},
         }
-    devices = _load_devices(db, graph.id)
-    ports = _load_ports(db, graph.id)
-    conns = _load_connections(db, graph.id)
+    devices = model_domain.list_devices(db, graph.id)
+    ports = model_domain.list_ports(db, graph.id)
+    conns = model_domain.list_connections(db, graph.id)
     layout_devices: dict[str, dict] = {}
     for d in devices:
         pos = (d.params.get(_LAYOUT_KEY) or {}).get("position")
