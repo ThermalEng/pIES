@@ -27,10 +27,11 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.api.limits import QUOTA_CODE, QUOTA_MESSAGE_KEY, QuotaError, check_upload_quota
+from iesplan.application import packages as package_ops
+from iesplan.application.projects import lifecycle as project_ops
+from iesplan.application.projects import versions as project_versions
 from iesplan.core.errors import ForbiddenError, http_error
 from iesplan.db import get_db
-from iesplan.services import package as package_service
-from iesplan.services import project as project_service
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -120,7 +121,7 @@ def create_project_endpoint(
     项目计算基线三字段(baseline_resolution/baseline_leap_year/
     baseline_scenario_mode)为必填, 创建时一次性固定且创建后不可修改。
     """
-    project = project_service.create_project(
+    project = project_ops.create_project(
         db, user,
         name=payload.name,
         currency=payload.currency,
@@ -129,8 +130,7 @@ def create_project_endpoint(
         baseline_scenario_mode=payload.baseline_scenario_mode,
         description=payload.description,
     )
-    db.commit()
-    return {"project": project_service.project_to_dict(project), "my_role": "owner"}
+    return {"project": project_ops.project_to_dict(project), "my_role": "owner"}
 
 
 @router.get("", summary="我可见的项目列表")
@@ -145,7 +145,7 @@ def list_projects_endpoint(
     非法 status 由参数校验返回标准 422 错误信封(API-REQ-001)。
     管理员不持有业务项目: 应用服务对其返回空列表。
     """
-    return {"projects": project_service.list_visible_projects(db, user, status=status)}
+    return {"projects": project_ops.list_visible_projects(db, user, status=status)}
 
 
 @router.get("/admin-visible", summary="全部项目整体视图(管理员)")
@@ -158,9 +158,9 @@ def list_all_projects_endpoint(
     未获项目所有者授权的项目只暴露整体管理字段(name/status/owner), 供删除管理;
     细节(草稿内容)与管理员隔离, 经 GET /projects/{id} 访问未授权项目返回 403。
     """
-    if not project_service._is_admin(db, admin):
+    if not project_ops.is_admin(db, admin):
         raise ForbiddenError()
-    projects = project_service.list_all_projects(db)
+    projects = project_ops.list_all_projects(db)
     return {"projects": projects}
 
 
@@ -171,7 +171,7 @@ def get_project_endpoint(
     user: CurrentUser,
 ) -> dict:
     """项目视图: 项目 + 草稿摘要(含内容) + 版本列表。"""
-    return project_service.get_project_view(db, user, project_id)
+    return project_ops.get_project_view(db, user, project_id)
 
 
 @router.put("/{project_id}/draft", summary="草稿语义命令批量")
@@ -182,10 +182,9 @@ def update_draft_endpoint(
     user: CurrentUser,
 ) -> dict:
     """应用草稿语义命令(乐观锁: 预期修订不符 → 409; 整批重试幂等)。"""
-    result = project_service.update_draft(
+    result = project_ops.update_draft(
         db, user, project_id, payload.commands, payload.expected_revision
     )
-    db.commit()
     return result
 
 
@@ -197,11 +196,10 @@ def create_version_endpoint(
     user: CurrentUser,
 ) -> dict:
     """从当前草稿创建不可变项目版本。"""
-    version = project_service.create_version(
+    version = project_versions.create_version(
         db, user, project_id, payload.name, payload.description, payload.reason
     )
-    db.commit()
-    return {"version": project_service.version_to_dict(version)}
+    return {"version": project_ops.version_to_dict(version)}
 
 
 @router.get("/{project_id}/versions", summary="版本列表")
@@ -211,9 +209,9 @@ def list_versions_endpoint(
     user: CurrentUser,
 ) -> dict:
     """版本列表(新版本在前)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    versions = project_service.list_versions(db, project_id)
-    return {"versions": [project_service.version_to_dict(v) for v in versions]}
+    project_ops.ensure_access(db, user, project_id, "view")
+    versions = project_versions.list_versions(db, project_id)
+    return {"versions": [project_ops.version_to_dict(v) for v in versions]}
 
 
 @router.get("/{project_id}/versions/{version_id}", summary="版本详情")
@@ -224,9 +222,9 @@ def get_version_endpoint(
     user: CurrentUser,
 ) -> dict:
     """版本详情。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    version = project_service.get_version(db, project_id, version_id)
-    return {"version": project_service.version_to_dict(version)}
+    project_ops.ensure_access(db, user, project_id, "view")
+    version = project_versions.get_version(db, project_id, version_id)
+    return {"version": project_ops.version_to_dict(version)}
 
 
 @router.post("/{project_id}/versions/{version_id}/restore", summary="恢复历史版本")
@@ -238,12 +236,11 @@ def restore_version_endpoint(
     payload: RestoreRequest | None = None,
 ) -> dict:
     """恢复历史版本: 创建新版本 + 新草稿, 不倒写历史(REQ-PROJ-002)。"""
-    result = project_service.restore_version(
+    result = project_versions.restore_version(
         db, user, project_id, version_id,
         name=payload.name if payload else None,
         description=payload.description if payload else None,
     )
-    db.commit()
     return result
 
 
@@ -255,14 +252,13 @@ def apply_result_endpoint(
     user: CurrentUser,
 ) -> dict:
     """应用选定结果: 参数差异补丁应用到新草稿并创建新版本, 来源版本不变。"""
-    result = project_service.apply_result(
+    result = project_versions.apply_result(
         db, user, project_id, payload.diff_patch,
         version_id=payload.version_id,
         name=payload.name,
         description=payload.description,
         source_result_id=payload.source_result_id,
     )
-    db.commit()
     return result
 
 
@@ -273,11 +269,10 @@ def archive_project_endpoint(
     user: CurrentUser,
 ) -> dict:
     """归档项目(归档后只读, 不能编辑/提交计算)。"""
-    project = project_service.archive_project(db, user, project_id)
-    db.commit()
+    project = project_ops.archive_project(db, user, project_id)
     return {
-        "project": project_service.project_to_dict(project),
-        "my_role": project_service.get_role(db, user, project_id),
+        "project": project_ops.project_to_dict(project),
+        "my_role": project_ops.get_role(db, user, project_id),
     }
 
 
@@ -288,11 +283,10 @@ def unarchive_project_endpoint(
     user: CurrentUser,
 ) -> dict:
     """撤销归档(恢复为 active)。"""
-    project = project_service.unarchive_project(db, user, project_id)
-    db.commit()
+    project = project_ops.unarchive_project(db, user, project_id)
     return {
-        "project": project_service.project_to_dict(project),
-        "my_role": project_service.get_role(db, user, project_id),
+        "project": project_ops.project_to_dict(project),
+        "my_role": project_ops.get_role(db, user, project_id),
     }
 
 
@@ -308,11 +302,10 @@ def delete_project_endpoint(
     0.2.0 B4: 空布尔 confirm 不再足以确认; 须 name(项目名精确匹配)或
     reason(非空删除原因)之一。
     """
-    project_service.delete_project(
+    project_ops.delete_project(
         db, user, project_id, confirm=payload.confirm,
         name=payload.name, reason=payload.reason,
     )
-    db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -331,17 +324,17 @@ def import_package_endpoint(
 
     大小门禁(H-07): 以 (上限+1) 字节封顶流式读取, 超限立即拒绝
     (压缩包字节上限 MAX_PACKAGE_BYTES, 与 Nginx client_max_body_size 对齐),
-    完整解压前的条目/单文件/总解压大小预检在 services/package._parse_package。
+    完整解压前的条目/单文件/总解压大小预检在 application/packages(组合 services.package)。
     相同源文件同一提议人幂等返回既有提案; 校验失败 400 + 校验报告。
     """
     # 封顶流式读取: 最多读 (上限+1) 字节, 超出即拒绝(内存占用有界)
-    data = file.file.read(package_service.MAX_PACKAGE_BYTES + 1)
+    data = file.file.read(package_ops.MAX_PACKAGE_BYTES + 1)
     if not data:
         raise http_error(400, "API-REQ-001", "ies.error.empty_file", filename=file.filename or "")
-    if len(data) > package_service.MAX_PACKAGE_BYTES:
+    if len(data) > package_ops.MAX_PACKAGE_BYTES:
         raise http_error(
             413, "PKG-SIZE-001", "ies.diag.pkg.too_large",
-            reason="package_too_large", max_bytes=package_service.MAX_PACKAGE_BYTES,
+            reason="package_too_large", max_bytes=package_ops.MAX_PACKAGE_BYTES,
         )
     # 0.2.0 A4: 用户上传配额门禁(项目包导入计入; 导入创建新项目身份, 无目标
     # 项目, 故只应用用户级配额; 默认不启用, 本地开发宽松)
@@ -355,10 +348,9 @@ def import_package_endpoint(
             used_bytes=exc.used_bytes, quota_bytes=exc.quota_bytes,
             scope=exc.scope, owner_id=exc.owner_id,
         ) from exc
-    proposal = package_service.import_proposal(
+    proposal = package_ops.propose_import(
         db, user, data, idempotency_key=idempotency_key
     )
-    db.commit()
     return {"proposal": _proposal_to_dict(proposal)}
 
 
@@ -369,11 +361,10 @@ def confirm_import_endpoint(
     user: CurrentUser,
 ) -> dict:
     """确认导入: 创建新项目身份(导入者即所有者), 历史结果作为证据来源保留。"""
-    project = package_service.confirm_import(db, user, proposal_id)
-    db.commit()
+    project = package_ops.confirm_import(db, user, proposal_id)
     return {
-        "project": project_service.project_to_dict(project),
-        "my_role": project_service.get_role(db, user, project_id=project.id),
+        "project": project_ops.project_to_dict(project),
+        "my_role": project_ops.get_role(db, user, project_id=project.id),
     }
 
 

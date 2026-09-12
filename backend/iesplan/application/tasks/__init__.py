@@ -4,6 +4,12 @@
 顶层用例拥有事务提交/回滚, 内部步骤只 flush。
 """
 
+from iesplan.application.tasks.maintenance import (
+    clear_task_cancel,
+    enqueue_task,
+    queue_status,
+    storage_stats,
+)
 from iesplan.application.tasks.submissions import (
     COMPUTE_TYPES,
     IO_SLOT_CAPACITY,
@@ -48,10 +54,14 @@ __all__ = [
     "acquire_slot",
     "cancel_task",
     "claim_task",
+    "clear_task_cancel",
+    "enqueue_task",
     "ensure_task_belongs",
     "estimate_storage",
     "list_cleanup_suggestions",
+    "queue_status",
     "release_slot",
     "retry_task",
+    "storage_stats",
     "submit_task",
 ]

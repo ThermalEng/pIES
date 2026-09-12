@@ -23,6 +23,10 @@ from iesplan.package.contracts import ImportProposalRecord
 from iesplan.project.contracts import ProjectRecord
 from iesplan.services import package as package_service
 
+#: 项目包字节上限(透传 services.package 常量；路由层流式读取封顶用，
+#: 本层不新增校验)。
+MAX_PACKAGE_BYTES: int = package_service.MAX_PACKAGE_BYTES
+
 # ---------------------------------------------------------------------------
 # 包导出(组合 services.package.export_package; 顶层拥有事务)
 # ---------------------------------------------------------------------------

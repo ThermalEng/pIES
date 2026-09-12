@@ -16,7 +16,7 @@
 admin_maintenance_actions(domain-model §快照任务结果/对象生命周期 + modules/persistence.md)。
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001 - application 导入须置于 models 之后，门禁 ORM 行号(33-36)要求
 
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -34,10 +34,14 @@ from iesplan.models.audit import RetentionRule
 from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease
 from iesplan.models.identity import User
 from iesplan.models.project import AdminMaintenanceAction
-from iesplan.services import audit as audit_service
-from iesplan.services import queue
-from iesplan.services import tasks as tasks_service
-from iesplan.storage import storage_stats
+from iesplan.application.audits import query_audit, record_unlock_audit
+from iesplan.application.tasks import (
+    POOL_BY_TYPE,
+    clear_task_cancel,
+    enqueue_task,
+    queue_status,
+    storage_stats,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -86,7 +90,7 @@ def query_audit_endpoint(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     """审计查询(domain-model §身份权限审计 + contracts §HTTP语义): 过滤 + 游标分页, 按时间倒序。"""
-    return audit_service.query_audit(
+    return query_audit(
         db, entity_type=entity_type, entity_id=entity_id, action=action,
         actor_id=actor_id, actor_type=actor_type, since=since, until=until,
         cursor=cursor, limit=limit,
@@ -118,7 +122,7 @@ def diagnostics_endpoint(
         select(AdminMaintenanceAction).order_by(AdminMaintenanceAction.id.desc()).limit(10)
     ).scalars().all()
     storage = storage_stats(db)
-    queue_view = queue.queue_status()
+    queue_view = queue_status()
     return {
         "tasks": {
             "by_status": {str(k): int(v) for k, v in tasks_by_status.items()},
@@ -235,9 +239,9 @@ def unlock_task_endpoint(
             context={"unlocked_by": admin.id},
         )
     )
-    queue.clear_cancel(task.id)
-    queue.enqueue(
-        task.id, tasks_service.POOL_BY_TYPE.get(task.type, "compute"),
+    clear_task_cancel(task.id)
+    enqueue_task(
+        task.id, POOL_BY_TYPE.get(task.type, "compute"),
         task_type=task.type, snapshot_id=task.calc_snapshot_id,
     )
     _record_maintenance(
@@ -245,10 +249,6 @@ def unlock_task_endpoint(
         params={"task_id": task.id, "task_type": task.type, "from": "running/cancelling"},
         result={"to": "queued"},
     )
-    audit_service.audit(
-        db, admin.id, audit_service.AUDIT_MAINTENANCE_UNLOCK_TASK, "task", task.id,
-        actor_type="admin",
-        result={"from": "running/cancelling", "to": "queued", "task_type": task.type},
-    )
+    record_unlock_audit(db, admin_id=admin.id, task_id=task.id, task_type=task.type)
     db.commit()
     return {"task_id": task.id, "unlocked": True, "status": "queued"}
