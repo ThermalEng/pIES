@@ -52,7 +52,7 @@ from iesplan.core.contracts import (
 )
 from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
-from iesplan.core.jsonutil import canonical_json, jsonable
+from iesplan.core.jsonutil import jsonable
 from iesplan.core.yamlmini import dump as yaml_dump
 from iesplan.finance import (
     EffectiveFinanceConfig,
@@ -221,11 +221,13 @@ def _ensure_access(db: Session, user: UserRecord, project_id: int, *capabilities
 
 
 def _store_content_object(db: Session, content: dict) -> int:
-    """内容字典 → 对象存储对象并建立草稿内容引用,返回对象 id(每次写入新行)。"""
-    raw = canonical_json(content)
+    """内容字典 → 对象存储对象并建立草稿内容引用,返回对象 id(每次写入新行)。
+
+    编码经 project 域纯函数，IO 经 storage 公开门面。
+    """
     handle = put_object(
         db,
-        raw.encode("utf-8"),
+        project_domain.content_to_bytes(content),
         "application/json",
         source_category="project_content",
     )
@@ -241,42 +243,21 @@ def _store_content_object(db: Session, content: dict) -> int:
 
 
 def _load_content_object(db: Session, content_object_id: int) -> dict:
-    """按对象 id 读取内容对象(缺失/损坏/结构非法一律按数据损坏明确报错)。"""
+    """按对象 id 读取内容对象(缺失/损坏/结构非法一律按数据损坏明确报错)。
+
+    IO 经 storage 公开门面，解析与错误构造经 project 域纯函数。
+    """
     try:
         raw = get_object(db, content_object_id)
     except NotFoundError as exc:
-        raise AppError(
-            "内容对象缺失(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_object_id},
+        raise project_domain.corrupt_error(
+            "内容对象缺失(数据损坏)", object_id=content_object_id
         ) from exc
     except ObjectCorruptError as exc:
-        raise AppError(
-            "内容对象读取失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_object_id},
+        raise project_domain.corrupt_error(
+            "内容对象读取失败(数据损坏)", object_id=content_object_id
         ) from exc
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise AppError(
-            "内容对象解析失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise AppError(
-            "内容对象结构非法(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-        )
-    return parsed
+    return project_domain.parse_content_object(raw)
 
 
 # ---------------------------------------------------------------------------

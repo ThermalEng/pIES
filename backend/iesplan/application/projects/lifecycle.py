@@ -11,7 +11,8 @@
   / ``unarchive_project`` / ``delete_project``；
 - 草稿修订：``update_draft``（含全部语义命令分派与幂等逻辑）；
 - 序列化与内容载体：``project_to_dict`` / ``draft_to_dict`` /
-  ``version_to_dict`` / 内容对象经 storage 公开门面读写。
+  ``version_to_dict`` / 内容对象经 content_objects 用例读写
+  （storage 公开门面 + project 域纯函数）。
 
 未复制（仍在旧服务，属版本编排，待后续波次处理）：
 ``create_version`` / ``restore_version`` / ``apply_result`` /
@@ -29,7 +30,6 @@ tasks, audit, storage} 域公开门面 + finance/core 值对象``；不导入 OR
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -39,10 +39,11 @@ from iesplan import audit as audit_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.projects.content_objects import load_content_object, store_content_object
 from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
 from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
-from iesplan.core.jsonutil import canonical_json, jsonable
+from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import (
     DraftRecord,
@@ -50,7 +51,6 @@ from iesplan.project.contracts import (
     ProjectRecord,
     ProjectVersionRecord,
 )
-from iesplan.storage import ObjectCorruptError, attach, get_object, put_object
 
 # ---------------------------------------------------------------------------
 # 错误类型（复制自 services.project：请求/草稿命令校验失败 HTTP 400）
@@ -188,11 +188,11 @@ def _create_project(
         baseline_leap_year=baseline.leap_year,
         baseline_scenario_mode=baseline.scenario_mode,
     )
-    content_handle = _store_content(db, _initial_content(lang))
+    content_object_id = store_content_object(db, project_domain.initial_content(lang))
     project_domain.create_draft(
         db,
         project_id=project.id,
-        content_object_id=content_handle.id,
+        content_object_id=content_object_id,
         updated_by=user.id,
     )
     _audit(
@@ -491,12 +491,12 @@ def _update_draft(
     if not changed:
         return {"revision": draft.revision, "results": results}
 
-    content_handle = _store_content(db, content)
+    content_object_id = store_content_object(db, content)
     try:
         new_draft = project_domain.create_draft(
             db,
             project_id=project.id,
-            content_object_id=content_handle.id,
+            content_object_id=content_object_id,
             updated_by=user.id,
         )
     except ProjectConflictError as exc:
@@ -834,8 +834,8 @@ def get_current_draft_content(db: Session, project_id: int) -> dict:
 
 
 def initial_content(language: str = "zh-CN") -> dict:
-    """初始草稿内容骨架(空模型/布局/绑定/配置 + 空受控扩展清单)。"""
-    return _initial_content(language)
+    """初始草稿内容骨架(空模型/布局/绑定/配置 + 空受控扩展清单，实现归属 project 域)。"""
+    return project_domain.initial_content(language)
 
 
 def _get_project(db: Session, project_id: int) -> ProjectRecord:
@@ -864,104 +864,9 @@ def _get_current_draft(db: Session, project: ProjectRecord) -> DraftRecord:
     return draft
 
 
-def _initial_content(language: str = "zh-CN") -> dict:
-    """初始草稿内容(空模型/布局/绑定/配置 + 空受控扩展清单)。"""
-    return {
-        "schema_version": 1,
-        "language": language,
-        "unit_system": "si",
-        "extensions": {},
-        "model": {"devices": [], "ports": [], "connections": []},
-        "layout": {},
-        "dataset_bindings": [],
-        "calc_config": {
-            "params": {},
-            "variables": [],
-            "objectives": [],
-            "constraints": [],
-            "algorithm": None,
-            "solver": None,
-            "tolerances": {},
-            "random_seed": None,
-        },
-        "applied_commands": {},
-    }
-
-
-def _store_content(db: Session, content: dict):
-    """规范化 JSON → 对象存储对象(架构宪法 §10/§12、domain-model §对象生命周期)，返回对象句柄。
-
-    每次写入新建对象行(无内容去重)。
-    storage_path 的解释/分桶/临时文件全部由 iesplan.storage 内部实现,
-    本模块不拼路径、不导入 StoredObject ORM。
-    """
-    raw = canonical_json(content)
-    handle = put_object(
-        db,
-        raw.encode("utf-8"),
-        "application/json",
-        source_category="project_content",
-    )
-    # owner 引用(对象生命周期权威事实): 草稿/版本内容对象不可清理;
-    # 引用键为稳定的对象 id(重复写入幂等复用同一引用行)。
-    attach(
-        db,
-        handle.id,
-        "draft_content",
-        handle.id,
-        ref_entity_type="drafts",
-        purpose="草稿内容文档",
-    )
-    return handle
-
-
-def _load_content_bytes(db: Session, content_object_id: int) -> bytes:
-    """按对象 id 读取内容字节(对象缺失/损坏抛 AppError)。"""
-    try:
-        return get_object(db, content_object_id)
-    except NotFoundError as exc:
-        raise AppError(
-            "内容对象缺失(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_object_id},
-        ) from exc
-    except ObjectCorruptError as exc:
-        raise AppError(
-            "内容对象读取失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "object", "object_id": content_object_id},
-        ) from exc
-
-
-def _load_content_by_object_id(db: Session, content_object_id: int) -> dict:
-    """按对象 id 读取内容对象。"""
-    raw = _load_content_bytes(db, content_object_id)
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise AppError(
-            "内容对象解析失败(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise AppError(
-            "内容对象结构非法(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-        )
-    return parsed
-
-
 def _load_draft_content(db: Session, draft: DraftRecord) -> dict:
-    """读取草稿内容文档(按草稿 content_object_id 取内容对象)。"""
-    return _load_content_by_object_id(db, draft.content_object_id)
+    """读取草稿内容文档(按草稿 content_object_id 取内容对象，经 content_objects 用例)。"""
+    return load_content_object(db, draft.content_object_id)
 
 
 def _audit(
