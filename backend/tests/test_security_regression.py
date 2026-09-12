@@ -32,8 +32,9 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
+from iesplan import package as package_domain  # noqa: E402
 from iesplan.application import identity  # noqa: E402
-from iesplan.services import package as package_service  # noqa: E402
+from iesplan.application import packages as packages_uc  # noqa: E402
 
 PASSWORD = "Test12345"
 
@@ -310,31 +311,31 @@ def _make_zip(entries: list[tuple[str, bytes]]) -> bytes:
 
 def test_zip_bomb_too_many_entries_rejected(client: TestClient, db: Session, monkeypatch) -> None:
     """条目数超限拒绝(PKG-SIZE-001), 不进入解压。"""
-    monkeypatch.setattr(package_service, "MAX_PACKAGE_ENTRIES", 10)
+    monkeypatch.setattr("iesplan.package.transfers.MAX_PACKAGE_ENTRIES", 10)
     importer = make_user(db, "importer_bomb1")
     zip_bytes = _make_zip([(f"e{i}.json", b"{}") for i in range(20)])
-    with pytest.raises(package_service.PackageSizeError) as exc:
-        package_service.import_proposal(db, importer, zip_bytes)
+    with pytest.raises(package_domain.PackageSizeError) as exc:
+        packages_uc.propose_import(db, importer, zip_bytes)
     assert exc.value.code == "PKG-SIZE-001"
 
 
 def test_zip_bomb_single_entry_too_large_rejected(client: TestClient, db: Session, monkeypatch) -> None:
     """单条目解压大小超限拒绝(PKG-SIZE-001)。"""
-    monkeypatch.setattr(package_service, "MAX_PACKAGE_ENTRY_BYTES", 32)
+    monkeypatch.setattr("iesplan.package.transfers.MAX_PACKAGE_ENTRY_BYTES", 32)
     importer = make_user(db, "importer_bomb2")
     zip_bytes = _make_zip([("big.bin", b"x" * 64)])
-    with pytest.raises(package_service.PackageSizeError) as exc:
-        package_service.import_proposal(db, importer, zip_bytes)
+    with pytest.raises(package_domain.PackageSizeError) as exc:
+        packages_uc.propose_import(db, importer, zip_bytes)
     assert exc.value.code == "PKG-SIZE-001"
 
 
 def test_zip_bomb_total_uncompressed_rejected(client: TestClient, db: Session, monkeypatch) -> None:
     """总解压大小超限拒绝(PKG-SIZE-001)。"""
-    monkeypatch.setattr(package_service, "MAX_PACKAGE_TOTAL_BYTES", 64)
+    monkeypatch.setattr("iesplan.package.transfers.MAX_PACKAGE_TOTAL_BYTES", 64)
     importer = make_user(db, "importer_bomb3")
     zip_bytes = _make_zip([("a.bin", b"a" * 48), ("b.bin", b"b" * 48)])
-    with pytest.raises(package_service.PackageSizeError) as exc:
-        package_service.import_proposal(db, importer, zip_bytes)
+    with pytest.raises(package_domain.PackageSizeError) as exc:
+        packages_uc.propose_import(db, importer, zip_bytes)
     assert exc.value.code == "PKG-SIZE-001"
 
 

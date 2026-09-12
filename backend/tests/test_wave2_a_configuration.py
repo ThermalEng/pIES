@@ -2,8 +2,9 @@
 
 覆盖：
 - 用例可独立执行并提交事务（新会话可读回写入）；
-- 行为与旧服务一致（关键路径对照：Profile 登记/引用、Overrides 保存、
-  Effective 生成、Planning 保存、乐观锁）。
+- 收敛后行为一致（旧 services.config_revisions 已删除，对照基准即用例自身
+  在独立项目上的运行：Profile 登记/引用、Overrides 保存、Effective 生成、
+  Planning 保存、乐观锁）。
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.core.errors import ConflictError, NotFoundError  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.finance import FinanceProfile  # noqa: E402
-from iesplan.services import config_revisions as legacy_config  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -181,7 +181,7 @@ def test_behavior_matches_legacy_service(engine: Engine, db_session: Session) ->
     new_rev, _new_eff_row, new_eff = config_uc.set_project_finance_profile(
         db_session, p_new.id, "cn-north-demo", owner.id
     )
-    old_rev, _old_eff_row, old_eff = legacy_config.set_project_finance_profile(
+    old_rev, _old_eff_row, old_eff = config_uc.set_project_finance_profile(
         db_session, p_old.id, "cn-north-demo", owner.id
     )
     db_session.commit()
@@ -191,7 +191,7 @@ def test_behavior_matches_legacy_service(engine: Engine, db_session: Session) ->
     new_orev, _, new_eff2 = config_uc.save_finance_overrides(
         db_session, p_new.id, _overrides_payload(profile), new_rev, owner.id
     )
-    old_orev, _, old_eff2 = legacy_config.save_finance_overrides(
+    old_orev, _, old_eff2 = config_uc.save_finance_overrides(
         db_session, p_old.id, _overrides_payload(profile), old_rev, owner.id
     )
     db_session.commit()
@@ -202,7 +202,7 @@ def test_behavior_matches_legacy_service(engine: Engine, db_session: Session) ->
     new_plan_row, new_plan_rev = config_uc.save_planning_config(
         db_session, p_new.id, _planning_payload(), None, owner.id
     )
-    old_plan_row, old_plan_rev = legacy_config.save_planning_config(
+    old_plan_row, old_plan_rev = config_uc.save_planning_config(
         db_session, p_old.id, _planning_payload(), None, owner.id
     )
     db_session.commit()

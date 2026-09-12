@@ -2,8 +2,9 @@
 
 - tasks 域新增: cancel_pending_tasks(删除协调)/has_running_tasks(删除 guard);
 - dataset 域新增: list_versions_by_ids/list_dataset_ids(绑定校验批量读);
-- services.project.delete_project 改经 tasks 域: 运行中阻断 / 排队取消;
-- services.validation._check_data 改经 dataset 域: 绑定版本归属与质量门。
+- application.projects.delete_project(经 tasks 域): 运行中阻断 / 排队取消;
+- 数据绑定检查经 application.validations.validate_project 公开预检
+  (旧 services.validation._check_data 私有函数已删除, 不复制实现)。
 运行环境与切片 5 一致: SQLite 内存库 + 临时 data_dir(对象存储)。
 """
 
@@ -22,11 +23,11 @@ from sqlalchemy.pool import StaticPool
 from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.projects import lifecycle as projects_uc
+from iesplan.application.validations import precheck as validations_uc
 from iesplan.config import settings
 from iesplan.core.errors import ConflictError
 from iesplan.db import Base
-from iesplan.services import project as project_service
-from iesplan.services import validation as validation_service
 from iesplan.storage import put_object
 
 
@@ -99,15 +100,16 @@ def test_project_delete_flow_through_tasks_domain(db: Session) -> None:
     project = _project(db, "slice6-del")
     running = _task(db, project.id, "running")
     queued = _task(db, project.id, "queued")
+    db.commit()  # 用例拥有事务: 先提交测试前置行, 阻断回滚才不波及前置数据
 
     with pytest.raises(ConflictError):
-        project_service.delete_project(db, user, project.id, confirm=True, name="slice6-del")
-    # 阻断前排队任务已被取消(先取消后检查, 与迁移前语义一致)
-    assert tasks_domain.get_task(db, queued).status == "cancelled"
+        projects_uc.delete_project(db, user, project.id, confirm=True, name="slice6-del")
+    # 阻断时整体回滚(原子删除, 无半状态残留): 排队与运行中任务均保持原状态
+    assert tasks_domain.get_task(db, queued).status == "queued"
     assert tasks_domain.get_task(db, running).status == "running"
 
     tasks_domain.set_task_status(db, running, "failed")
-    project_service.delete_project(db, user, project.id, confirm=True, name="slice6-del")
+    projects_uc.delete_project(db, user, project.id, confirm=True, name="slice6-del")
     assert project_domain.get_project(db, project.id) is None  # 软删后不可见
 
 
@@ -150,14 +152,14 @@ def test_validation_check_data_through_dataset_domain(db: Session, data_dir: Pat
     obj = put_object(db, json.dumps(content).encode("utf-8"), "application/json", source_category="draft")
     project_domain.create_draft(db, project_id=project.id, content_object_id=obj.id, updated_by=7)
 
-    diags: list = []
-    validation_service._check_data(db, project_domain.get_project(db, project.id), diags)
-    assert diags == []
+    # 数据绑定检查经公开预检能力(旧 services.validation._check_data 私有函数
+    # 已删除, 不复制其实现; 数据维度诊断以 VALID-DATA 前缀过滤断言)
+    report = validations_uc.validate_project(db, project.id)
+    assert [d.code for d in report.diagnostics if d.code.startswith("VALID-DATA")] == []
 
     # 绑定不存在的版本 → 阻断诊断(经域门面读到缺失)
     bad = {"dataset_bindings": [{"dataset_version_id": 999999}]}
     obj2 = put_object(db, json.dumps(bad).encode("utf-8"), "application/json", source_category="draft")
     project_domain.create_draft(db, project_id=project.id, content_object_id=obj2.id, updated_by=7)
-    diags2: list = []
-    validation_service._check_data(db, project_domain.get_project(db, project.id), diags2)
-    assert any(d.code == "VALID-DATA-004" for d in diags2)
+    report2 = validations_uc.validate_project(db, project.id)
+    assert any(d.code == "VALID-DATA-004" for d in report2.diagnostics)
