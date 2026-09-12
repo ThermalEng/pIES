@@ -43,12 +43,12 @@ from iesplan.api.limits import (
     validate_upload_fields,
     validate_upload_meta,
 )
+from iesplan.application import datasets as dataset_ops
+from iesplan.application.datasets import DataValidationError
+from iesplan.application.projects import lifecycle as project_ops
 from iesplan.core.errors import NotFoundError, error_envelope, http_error
 from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.db import get_db
-from iesplan.services import dataset as dataset_service
-from iesplan.services import project as project_service
-from iesplan.services.dataset import DataValidationError
 
 #: 路由: 统一前缀 /api, 各端点自带路径
 router = APIRouter(prefix="/api", tags=["datasets"])
@@ -81,7 +81,7 @@ class DatasetCreate(BaseModel):
 
 def _require_dataset(db: Session, project_id: int, dataset_id: int):
     """校验项目与数据集存在且归属正确, 否则 NotFoundError。"""
-    ds = dataset_service.get_dataset(db, dataset_id)
+    ds = dataset_ops.get_dataset(db, dataset_id)
     if ds is None or ds.project_id != project_id:
         raise NotFoundError(
             params={"entity_type": "dataset", "entity_id": dataset_id, "project_id": project_id}
@@ -173,7 +173,7 @@ def download_template(resolution: str = Query(default="1h")) -> Response:
     """下载标准 CSV 模板(字段说明/单位/示例, 双语注释行, REQ-DATA-002)。"""
     if resolution not in RESOLUTIONS:
         raise http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
-    content = dataset_service.get_template(resolution)
+    content = dataset_ops.get_template(resolution)
     headers = {"Content-Disposition": f'attachment; filename="iesplan_dataset_template_{resolution}.csv"'}
     return Response(content=content, media_type="text/csv; charset=utf-8", headers=headers)
 
@@ -191,8 +191,8 @@ def create_dataset(
     user: CurrentUser,
 ) -> dict:
     """创建数据集元数据(名称在项目内唯一, 冲突返回 409; 需项目 edit 能力)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
-    ds = dataset_service.create_dataset(
+    project_ops.ensure_access(db, user, project_id, "edit")
+    ds = dataset_ops.create_dataset(
         db,
         project_id,
         body.name,
@@ -201,16 +201,15 @@ def create_dataset(
         provenance=body.provenance,
         description=body.description,
     )
-    db.commit()
     return {"dataset": _dataset_dict(ds)}
 
 
 @router.get("/projects/{project_id}/datasets", summary="数据集列表+最新版本")
 def list_datasets(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """项目数据集列表, 每个附带最新版本摘要(含质量报告; 需项目 view 能力)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    dataset_service.require_project(db, project_id)
-    items = dataset_service.list_datasets_with_latest(db, project_id)
+    project_ops.ensure_access(db, user, project_id, "view")
+    dataset_ops.require_project(db, project_id)
+    items = dataset_ops.list_datasets_with_latest(db, project_id)
     return {
         "datasets": [
             {
@@ -225,13 +224,13 @@ def list_datasets(project_id: int, db: DbSession, user: CurrentUser) -> dict:
 @router.get("/projects/{project_id}/datasets/{dataset_id}", summary="数据集详情(版本列表+质量报告)")
 def get_dataset(project_id: int, dataset_id: int, db: DbSession, user: CurrentUser) -> dict:
     """数据集详情: 元数据 + 全部版本(含质量报告与文件摘要; 需项目 view 能力)。"""
-    project_service.ensure_access(db, user, project_id, "view")
+    project_ops.ensure_access(db, user, project_id, "view")
     ds = _require_dataset(db, project_id, dataset_id)
-    versions = dataset_service.list_dataset_versions(db, dataset_id)
+    versions = dataset_ops.list_dataset_versions(db, dataset_id)
     return {
         "dataset": _dataset_dict(ds),
         "versions": [
-            {**_version_dict(v), "files": dataset_service.version_files_summary(db, v.id)} for v in versions
+            {**_version_dict(v), "files": dataset_ops.version_files_summary(db, v.id)} for v in versions
         ],
     }
 
@@ -268,7 +267,7 @@ def upload_version(
     存在阻断性诊断(行数/时间戳/缺失/范围等): 400 + 标准错误信封
     (诊断明细入 params.diagnostics, 字段/行号定位)。
     """
-    project_service.ensure_access(db, user, project_id, "edit")
+    project_ops.ensure_access(db, user, project_id, "edit")
     _require_dataset(db, project_id, dataset_id)
     if resolution not in RESOLUTIONS:
         raise http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
@@ -315,7 +314,7 @@ def upload_version(
         ) from exc
 
     try:
-        version = dataset_service.upload_dataset_version(
+        version = dataset_ops.upload_dataset_version(
             db, dataset_id, resolution, utc_offset_minutes, fields_dict, data, meta_dict
         )
     except DataValidationError as exc:
@@ -338,9 +337,9 @@ def upload_version(
 )
 def get_version(project_id: int, dataset_id: int, version_no: int, db: DbSession, user: CurrentUser) -> dict:
     """版本详情: 元数据 + 溯源 + 许可证 + 文件引用(对象哈希/大小), 不返回数据本体。"""
-    project_service.ensure_access(db, user, project_id, "view")
+    project_ops.ensure_access(db, user, project_id, "view")
     _require_dataset(db, project_id, dataset_id)
-    result = dataset_service.get_dataset_version(db, dataset_id, version_no)
+    result = dataset_ops.get_dataset_version(db, dataset_id, version_no)
     version = result["version"]
     return {
         "dataset_version": _version_dict(version),
@@ -370,11 +369,11 @@ def create_sample(
     region: Annotated[str, Query(description="地区: shanghai | beijing | guangzhou")] = "shanghai",
 ) -> dict:
     """为目标数据集生成确定性内置样例数据版本(REQ-DATA-003/004; 需项目 edit 能力)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
+    project_ops.ensure_access(db, user, project_id, "edit")
     _require_dataset(db, project_id, dataset_id)
     if resolution not in RESOLUTIONS:
         raise http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
-    version = dataset_service.create_builtin_sample(
+    version = dataset_ops.create_builtin_sample(
         db, project_id, resolution, region=region, user_id=user.id, dataset_id=dataset_id
     )
     return {

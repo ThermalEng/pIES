@@ -4,6 +4,7 @@
 """
 
 from iesplan.application.packages.operations import (
+    MAX_PACKAGE_BYTES,
     confirm_import,
     create_download_token,
     export_package,
@@ -12,6 +13,7 @@ from iesplan.application.packages.operations import (
 )
 
 __all__ = [
+    "MAX_PACKAGE_BYTES",
     "confirm_import",
     "create_download_token",
     "export_package",

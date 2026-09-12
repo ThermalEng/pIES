@@ -33,10 +33,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.application import configuration as config_ops
+from iesplan.application.projects import lifecycle as project_ops
 from iesplan.core.errors import NotFoundError, http_error
 from iesplan.db import get_db
-from iesplan.services import config_revisions as config_service
-from iesplan.services import project as project_service
 
 #: FastAPI 依赖注入的数据库会话
 DbSession = Annotated[Session, Depends(get_db)]
@@ -109,8 +109,8 @@ def get_project_profile_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取项目当前引用的注册 Profile(未引用 → 404)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    profile, row = config_service.get_project_profile(db, project_id)
+    project_ops.ensure_access(db, user, project_id, "view")
+    profile, row = config_ops.get_project_profile(db, project_id)
     return {"finance_profile": profile.to_dict(), "row": _profile_row_response(row)}
 
 
@@ -122,7 +122,7 @@ def set_project_profile_endpoint(
     user: CurrentUser,
 ) -> dict:
     """项目引用已登记 Profile: 引用 {id}, 原子生成空覆盖 Effective。"""
-    project_service.ensure_access(db, user, project_id, "edit")
+    project_ops.ensure_access(db, user, project_id, "edit")
     ref = payload.profile_ref
     profile_id = str(ref.get("id", ""))
     if not profile_id:
@@ -132,12 +132,10 @@ def set_project_profile_endpoint(
             "ies.diag.param.invalid",
             detail="profile_ref 必须包含 {id}",
         )
-    overrides_rev, eff_row, effective = config_service.set_project_finance_profile(
+    overrides_rev, eff_row, effective = config_ops.set_project_finance_profile(
         db, project_id, profile_id, user.id
     )
-    # 提交事务: 指针/空覆盖/Effective/planning 失效一次性持久化
-    db.commit()
-    _, profile = config_service.get_finance_profile_by_ref(db, profile_id)
+    _, profile = config_ops.get_finance_profile_by_ref(db, profile_id)
     return {
         "finance_profile": profile.to_dict(),
         "overrides_revision": overrides_rev,
@@ -152,8 +150,8 @@ def get_finance_overrides_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取项目当前 FinanceOverrides(无覆盖 → 404, 不静默返回空文档)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    overrides, revision = config_service.get_finance_overrides(db, project_id)
+    project_ops.ensure_access(db, user, project_id, "view")
+    overrides, revision = config_ops.get_finance_overrides(db, project_id)
     if overrides is None or revision is None:
         raise NotFoundError(
             "项目尚未保存 FinanceOverrides",
@@ -171,12 +169,11 @@ def save_finance_overrides_endpoint(
     user: CurrentUser,
 ) -> dict:
     """保存覆盖: 追加 Overrides revision → 重新合并生成新 Effective(失败原子)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
-    overrides_rev, eff_row, effective = config_service.save_finance_overrides(
+    project_ops.ensure_access(db, user, project_id, "edit")
+    overrides_rev, eff_row, effective = config_ops.save_finance_overrides(
         db, project_id, payload.finance_overrides, payload.expected_revision, user.id
     )
-    db.commit()
-    overrides, _ = config_service.get_finance_overrides(db, project_id)
+    overrides, _ = config_ops.get_finance_overrides(db, project_id)
     assert overrides is not None
     return {
         **_overrides_response(overrides, overrides_rev),
@@ -192,12 +189,11 @@ def delete_finance_overrides_endpoint(
     user: CurrentUser,
 ) -> dict:
     """清空覆盖: 追加显式空 Overrides + 新 Effective, 失效旧 Planning(409 乐观锁)。"""
-    project_service.ensure_access(db, user, project_id, "edit")
-    overrides_rev, eff_row, effective = config_service.delete_finance_overrides(
+    project_ops.ensure_access(db, user, project_id, "edit")
+    overrides_rev, eff_row, effective = config_ops.delete_finance_overrides(
         db, project_id, payload.expected_revision, user.id
     )
-    db.commit()
-    overrides, _ = config_service.get_finance_overrides(db, project_id)
+    overrides, _ = config_ops.get_finance_overrides(db, project_id)
     assert overrides is not None
     return {
         **_overrides_response(overrides, overrides_rev),
@@ -212,8 +208,8 @@ def get_effective_finance_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取项目当前 EffectiveFinanceConfig(未生成 → 404)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    effective, revision, _ = config_service.get_effective_finance_config(db, project_id)
+    project_ops.ensure_access(db, user, project_id, "view")
+    effective, revision, _ = config_ops.get_effective_finance_config(db, project_id)
     return _effective_response(effective, revision)
 
 
@@ -224,8 +220,8 @@ def get_planning_config_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取项目当前生效规划配置(未保存 → 404)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    config, revision, _ = config_service.get_planning_config(db, project_id)
+    project_ops.ensure_access(db, user, project_id, "view")
+    config, revision, _ = config_ops.get_planning_config(db, project_id)
     return _planning_response(config, revision)
 
 
@@ -237,12 +233,11 @@ def save_planning_config_endpoint(
     user: CurrentUser,
 ) -> dict:
     """保存规划配置: 乐观锁 409。"""
-    project_service.ensure_access(db, user, project_id, "edit")
-    _, revision = config_service.save_planning_config(
+    project_ops.ensure_access(db, user, project_id, "edit")
+    _, revision = config_ops.save_planning_config(
         db, project_id, payload.planning_config, payload.expected_revision, user.id
     )
-    db.commit()
-    config, _, _ = config_service.get_planning_config(db, project_id)
+    config, _, _ = config_ops.get_planning_config(db, project_id)
     return _planning_response(config, revision)
 
 
@@ -257,7 +252,7 @@ def list_finance_profiles_endpoint(
     user: CurrentUser,
 ) -> dict:
     """列出已登记地区 Profile(按 profile_id 去重取最新登记)。"""
-    items = config_service.list_finance_profiles(db)
+    items = config_ops.list_finance_profiles(db)
     return {"items": items, "count": len(items)}
 
 
@@ -268,13 +263,12 @@ def register_finance_profile_endpoint(
     user: CurrentUser,
 ) -> dict:
     """登记地区 Profile。"""
-    row, profile = config_service.register_finance_profile(
+    row, profile = config_ops.register_finance_profile(
         db, payload.finance_profile, user.id
     )
-    db.commit()
     return {
         "finance_profile": profile.to_dict(),
-        "row": config_service.profile_row_dict(row),
+        "row": config_ops.profile_row_dict(row),
     }
 
 
@@ -285,8 +279,8 @@ def get_finance_profile_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取已登记 Profile(按 profile_id 最新登记; 不存在 → 404)。"""
-    row, profile = config_service.get_finance_profile_by_ref(db, profile_id)
+    row, profile = config_ops.get_finance_profile_by_ref(db, profile_id)
     return {
         "finance_profile": profile.to_dict(),
-        "row": config_service.profile_row_dict(row),
+        "row": config_ops.profile_row_dict(row),
     }

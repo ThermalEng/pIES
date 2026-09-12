@@ -95,6 +95,11 @@ def _is_admin(db: Session, user: UserRecord) -> bool:
     return "admin" in identity_domain.user_roles(db, user.id)
 
 
+def is_admin(db: Session, user: UserRecord) -> bool:
+    """用户是否持有全局 admin 角色(公开包装，供管理端整体视图入口使用)。"""
+    return _is_admin(db, user)
+
+
 def ensure_access(db: Session, user: UserRecord, project_id: int, *capabilities: str) -> None:
     """访问判定(架构宪法 §16、domain-model §身份、权限和审计)：用户必须同时具备全部请求能力，否则 ForbiddenError。
 
@@ -986,6 +991,7 @@ __all__ = [
     "OWNER_CAPABILITIES",
     "ensure_access",
     "get_role",
+    "is_admin",
     "create_project",
     "get_project_view",
     "list_visible_projects",
