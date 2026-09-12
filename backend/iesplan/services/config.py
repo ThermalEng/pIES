@@ -39,10 +39,11 @@ import re
 from collections import Counter
 from typing import Final
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
+from iesplan import model as model_domain
 from iesplan import project as project_domain
 from iesplan.configuration.contracts import CalcConfigRecord
 from iesplan.core.diagnostics import (
@@ -71,8 +72,6 @@ from iesplan.devices import (
 from iesplan.devices.contracts2 import PropertySpec
 from iesplan.core.units import UnitError, dims_of
 from iesplan.db import SessionLocal
-from iesplan.models.audit import AuditLog
-from iesplan.models.model import Device, SystemGraph
 from iesplan.project.contracts import ProjectRecord
 
 # ---------------------------------------------------------------------------
@@ -233,22 +232,12 @@ def load_work_graph(db: Session, project_id: int) -> dict:
     if project_id is not None:
         proj = project_domain.get_project(db, project_id)
         if proj is not None and proj.current_draft_id is not None:
-            graph = db.scalar(
-                select(SystemGraph).where(
-                    SystemGraph.project_id == project_id,
-                    SystemGraph.draft_id == proj.current_draft_id,
-                )
-            )
+            graph = model_domain.find_graph_by_draft(db, project_id, proj.current_draft_id)
         if graph is None:
-            graph = db.scalar(
-                select(SystemGraph)
-                .where(SystemGraph.project_id == project_id, SystemGraph.draft_id.is_not(None))
-                .order_by(SystemGraph.id.desc())
-                .limit(1)
-            )
+            graph = model_domain.find_latest_working_graph(db, project_id)
     if graph is None:
         return {"devices": []}
-    rows = db.scalars(select(Device).where(Device.graph_id == graph.id)).all()
+    rows = model_domain.list_devices(db, graph.id)
     return {
         "devices": [
             {
@@ -1259,25 +1248,23 @@ def save_config(
         row = configuration_domain.update_calc_config(db, latest.id, values=values, updated_by=actor)
     # 0.2.0 B4: 配置保存属"项目/数据/计算配置"关键变更(宪法 §16), 保留不可变
     # 最小化脱敏审计(只记版本/变量数/目标/算法, 不复制完整配置)
-    db.add(
-        AuditLog(
-            entity_type="calc_config",
-            entity_id=row.id,
-            action="config.saved",
-            actor_id=user_id or proj.owner_id,
-            actor_type="user",
-            before=None,
-            after={
-                "project_id": project_id,
-                "version": row.version,
-                "status": row.status,
-                "variables": len(config.get("variables") or []),
-                "objectives": len(config.get("objectives") or []),
-                "constraints": len(config.get("constraints") or []),
-                "algorithm": row.algorithm,
-                "random_seed": config.get("random_seed"),
-            },
-        )
+    audit_domain.append_entry(
+        db,
+        actor_id=user_id or proj.owner_id,
+        action="config.saved",
+        entity_type="calc_config",
+        entity_id=row.id,
+        actor_type="user",
+        extra={
+            "project_id": project_id,
+            "version": row.version,
+            "status": row.status,
+            "variables": len(config.get("variables") or []),
+            "objectives": len(config.get("objectives") or []),
+            "constraints": len(config.get("constraints") or []),
+            "algorithm": row.algorithm,
+            "random_seed": config.get("random_seed"),
+        },
     )
     # 同步当前草稿内容的 calc_config 节(快照装配/项目包导出以草稿内容为
     # 权威输入, 不更新则保存的配置不进入计算快照与导出包)

@@ -16,6 +16,7 @@ import dataclasses
 import inspect
 from pathlib import Path
 
+import iesplan.audit as audit
 import iesplan.configuration as configuration
 import iesplan.dataset as dataset
 import iesplan.identity as identity
@@ -24,6 +25,7 @@ import iesplan.package as package
 import iesplan.project as project
 import iesplan.results as results
 import iesplan.tasks as tasks
+from iesplan.audit.repository import AuditRepository
 from iesplan.configuration.repository import ConfigurationRepository
 from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.dataset.repository import DatasetRepository
@@ -38,6 +40,7 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _PKG_ROOT = _BACKEND_DIR / "iesplan"
 
 _DOMAIN_FACADES = {
+    "audit": audit,
     "project": project,
     "identity": identity,
     "dataset": dataset,
@@ -49,6 +52,7 @@ _DOMAIN_FACADES = {
 }
 
 _DOMAIN_REPOSITORIES = {
+    "audit": AuditRepository,
     "project": ProjectRepository,
     "identity": IdentityRepository,
     "dataset": DatasetRepository,
@@ -150,6 +154,7 @@ def test_repository_methods_take_caller_session_first():
 #: 各域 persistence 实现允许访问的归属 models 子模块（对应 TABLE_OWNERS；
 #: configuration 的 calc_configs 与 tasks 表同文件，tasks 读快照不写配置表）
 OWNED_MODELS: dict[str, frozenset[str]] = {
+    "audit": frozenset({"audit"}),
     "project": frozenset({"project"}),
     "identity": frozenset({"identity"}),
     "dataset": frozenset({"dataset"}),

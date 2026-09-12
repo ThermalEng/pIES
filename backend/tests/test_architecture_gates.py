@@ -455,9 +455,8 @@ TABLE_OWNERS: dict[str, str] = {
 WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     # ---- services ----
     # (切片 4: services.external_auth 经 identity 域, 移除本项)
-    ("iesplan.services.config", "audit"),
+    # (切片 8: services.config 经 audit/model 域门面, 移除 audit/model)
     # (切片 5: services.config CalcConfig 改经 configuration 域, 移除 calc)
-    ("iesplan.services.config", "model"),
     # (切片 7: services.model 经 model 域门面, 移除本项)
     ("iesplan.services.identity", "common"),  # 仅正则基元(无业务表); 切片 4 已移除 identity 表访问
     # (切片 5: services.config_revisions 经 configuration 域, 移除本项)
@@ -475,8 +474,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     ("iesplan.services.package", "dataset"),
     ("iesplan.services.package", "identity"),
     ("iesplan.services.package", "project"),
-    ("iesplan.services.audit", "audit"),
-    ("iesplan.services.audit", "identity"),
+    # (切片 8: services.audit 经 audit 域门面, 移除本两项)
     # (切片 4: services.dataset 经 dataset/identity/project 域 repository, 移除 3 项)
     ("iesplan.services.project", "audit"),
     # (切片 6: services.project 经 tasks 域门面, 移除 calc/identity)

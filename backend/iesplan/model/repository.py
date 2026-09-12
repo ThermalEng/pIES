@@ -32,6 +32,14 @@ class ModelRepository(Protocol):
         """按主键取图；不存在返回 None。"""
         ...
 
+    def find_graph_by_draft(self, db: Session, project_id: int, draft_id: int) -> GraphRecord | None:
+        """取挂指定草稿的工作图；无返回 None。"""
+        ...
+
+    def find_latest_working_graph(self, db: Session, project_id: int) -> GraphRecord | None:
+        """项目最近一张工作图（id 降序）；无返回 None。"""
+        ...
+
     def create_graph(
         self,
         db: Session,

@@ -17,12 +17,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from iesplan.core.jsonutil import jsonable
-from iesplan.models.audit import AuditLog
-from iesplan.models.identity import User
+from iesplan import audit as audit_domain
+from iesplan.audit.contracts import AuditRecord
+from iesplan.identity.contracts import UserRecord
 
 # ---------------------------------------------------------------------------
 # 审计事件清单(审计范围, 宪法 §16 + 领域模型 §身份、权限和审计; 命名约定 <域>.<动作>)
@@ -104,14 +103,14 @@ def audit(
     ip: str | None = None,
     request_id: str | None = None,
     trace_id: str | None = None,
-) -> AuditLog:
+) -> AuditRecord:
     """统一审计入口(写不可变 audit_log, 只 INSERT, 宪法 §16 + 领域模型 §对象生命周期 / 领域模型 §身份、权限和审计)。
 
     只保存身份/时间/动作/对象标识/修订号/结果; 不复制密码、
     令牌、完整模型、完整数据集或原始求解日志(敏感与大体量内容一概不入库, 宪法 §16)。
 
     参数:
-        db: 数据库会话(本函数只 add, 提交由调用方控制)。
+        db: 数据库会话(本函数只经域门面写入, 提交由调用方控制)。
         actor_id: 操作者用户 id; 系统动作传 None。
         action: 审计动作(建议取自 AUDIT_ACTION_CATALOG)。
         object_type: 对象类型(实体表名, 如 project/task/object)。
@@ -123,44 +122,38 @@ def audit(
         actor_type: 操作者类型 user/system/admin(领域模型 §对象生命周期 CHECK)。
         ip/request_id/trace_id: 请求追踪信息。
     返回:
-        AuditLog 记录(未提交)。
+        AuditRecord 记录(未提交)。
     """
-    after: dict[str, Any] = {}
-    if revision is not None:
-        after["revision"] = revision
-    if result is not None:
-        after["result"] = result
-    if extra:
-        after.update(extra)
-    row = AuditLog(
+    return audit_domain.append_entry(
+        db,
+        actor_id=actor_id,
+        action=action,
         entity_type=object_type,
         entity_id=object_id,
-        action=action,
-        actor_id=actor_id,
+        revision=revision,
+        result=result,
+        extra=extra,
+        before=before,
         actor_type=actor_type,
         ip=ip,
-        before=jsonable(before) if before else None,
-        after=jsonable(after) or None,
         request_id=request_id,
         trace_id=trace_id,
     )
-    db.add(row)
-    return row
 
 
 def audit_user_action(
     db: Session,
-    user: User,
+    user: UserRecord,
     action: str,
     object_type: str,
     object_id: int,
     **kwargs: Any,
-) -> AuditLog:
+) -> AuditRecord:
     """便捷入口: 以用户身份写审计(actor_type 自动取 user)。"""
     return audit(db, user.id, action, object_type, object_id, **kwargs)
 
 
-def entry_to_dict(row: AuditLog) -> dict[str, Any]:
+def entry_to_dict(row: AuditRecord) -> dict[str, Any]:
     """审计记录序列化(管理端展示)。"""
     return {
         "id": row.id,
@@ -169,7 +162,7 @@ def entry_to_dict(row: AuditLog) -> dict[str, Any]:
         "action": row.action,
         "actor_id": row.actor_id,
         "actor_type": row.actor_type,
-        "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
+        "occurred_at": row.occurred_at,
         "ip": row.ip,
         "before": row.before,
         "after": row.after,
@@ -202,26 +195,18 @@ def query_audit(
         {"items": [...], "next_cursor": id|None}。
     """
     limit = min(max(int(limit), 1), 200)
-    stmt = select(AuditLog)
-    if entity_type is not None:
-        stmt = stmt.where(AuditLog.entity_type == entity_type)
-    if entity_id is not None:
-        stmt = stmt.where(AuditLog.entity_id == entity_id)
-    if action is not None:
-        stmt = stmt.where(AuditLog.action == action)
-    if actor_id is not None:
-        stmt = stmt.where(AuditLog.actor_id == actor_id)
-    if actor_type is not None:
-        stmt = stmt.where(AuditLog.actor_type == actor_type)
-    if since is not None:
-        stmt = stmt.where(AuditLog.occurred_at >= since)
-    if until is not None:
-        stmt = stmt.where(AuditLog.occurred_at <= until)
-    if cursor is not None:
-        stmt = stmt.where(AuditLog.id < cursor)
-    rows = db.execute(
-        stmt.order_by(AuditLog.id.desc()).limit(limit + 1)
-    ).scalars().all()
+    rows = audit_domain.list_entries(
+        db,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        action=action,
+        actor_id=actor_id,
+        actor_type=actor_type,
+        since=since,
+        until=until,
+        cursor=cursor,
+        limit=limit + 1,
+    )
     items = [entry_to_dict(row) for row in rows[:limit]]
     next_cursor = rows[-1].id if len(rows) > limit else None
     return {"items": items, "next_cursor": next_cursor}

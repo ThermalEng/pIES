@@ -115,6 +115,25 @@ def get_graph(db: Session, graph_id: int) -> GraphRecord | None:
     return _row_to_graph(row) if row is not None else None
 
 
+def find_graph_by_draft(db: Session, project_id: int, draft_id: int) -> GraphRecord | None:
+    """取挂指定草稿的工作图；无返回 None。"""
+    row = db.execute(
+        select(SystemGraph).where(SystemGraph.project_id == project_id, SystemGraph.draft_id == draft_id)
+    ).scalar_one_or_none()
+    return _row_to_graph(row) if row is not None else None
+
+
+def find_latest_working_graph(db: Session, project_id: int) -> GraphRecord | None:
+    """项目最近一张工作图（id 降序）；无返回 None。"""
+    row = db.execute(
+        select(SystemGraph)
+        .where(SystemGraph.project_id == project_id, SystemGraph.draft_id.is_not(None))
+        .order_by(SystemGraph.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return _row_to_graph(row) if row is not None else None
+
+
 def create_graph(db: Session, *, project_id: int, draft_id: int, name: str, created_by: int) -> GraphRecord:
     """创建工作图；唯一冲突抛 ModelConflictError。"""
     row = SystemGraph(

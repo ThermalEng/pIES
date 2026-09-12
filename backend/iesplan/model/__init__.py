@@ -25,6 +25,8 @@ delete_connection = persistence.delete_connection
 delete_device_cascade = persistence.delete_device_cascade
 find_connection = persistence.find_connection
 find_device_by_name = persistence.find_device_by_name
+find_graph_by_draft = persistence.find_graph_by_draft
+find_latest_working_graph = persistence.find_latest_working_graph
 find_working_graph = persistence.find_working_graph
 get_connection = persistence.get_connection
 get_device = persistence.get_device
@@ -54,6 +56,8 @@ __all__ = [
     "delete_device_cascade",
     "find_connection",
     "find_device_by_name",
+    "find_graph_by_draft",
+    "find_latest_working_graph",
     "find_working_graph",
     "get_connection",
     "get_device",
