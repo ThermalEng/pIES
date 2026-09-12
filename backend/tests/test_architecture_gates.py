@@ -26,6 +26,15 @@ docs/development/development-workflow.md「架构门禁」): 禁止 core 依赖�
      storage/application 对 iesplan.models.* 的跨表访问收敛到
      WHITELIST_CROSS_MODEL_IMPORTS, 表归属见 TABLE_OWNERS。
 
+纠偏 Wave 0(临时指导 architecture-refactor-workflow.md 纠偏波次)追加:
+
+  9. test_application_no_direct_services — application 禁止导入
+     iesplan.services(临时债务集合须与检测精确相等, 最终归零);
+  10. test_application_no_bare_sql — application 禁止 sa.table/Table/text 与
+     sa insert/update/delete(表真相只归领域 persistence);
+  11. test_worker_no_transactions — Worker 禁止 .commit()/.rollback()
+     (事务归 application.worker 用例)。
+
 策略: 现有违规列入文件头部的 WHITELIST_* 常量(白名单基线, 注释写明
 整改 TODO), 新增违规直接断言失败。后续切片按注释逐条整改后移除白名单条目,
 白名单清空后门禁转为硬强制。
@@ -46,6 +55,7 @@ _PKG_ROOT = _BACKEND_DIR / "iesplan"
 _CORE_DIR = _PKG_ROOT / "core"
 _API_DIR = _PKG_ROOT / "api"
 _WORKER_DIR = _PKG_ROOT / "worker"
+_APPLICATION_DIR = _PKG_ROOT / "application"
 
 #: 架构门禁中视为"业务模块"的 iesplan 顶层子包(core 一律禁止依赖)。
 #: 判定规则见 _is_business_import: 允许根包 iesplan(仅 __version__)与
@@ -554,6 +564,175 @@ def test_table_ownership_no_new_cross_imports():
     detected = _find_cross_model_imports()
     new = sorted((m, t) for (m, t) in detected if (m, t) not in WHITELIST_CROSS_MODEL_IMPORTS)
     assert not new, f"新增跨表 ORM 访问(需收敛到归属领域 repository): {new}"
+
+
+# ---------------------------------------------------------------------------
+# 纠偏 Wave 0 门禁: application/services 残留、application 裸表/SQL、Worker 事务
+# ---------------------------------------------------------------------------
+# 审查裁决(fe3d83b): application 直调旧 services、application 内重声明表/裸 SQL、
+# Worker 持有 commit/rollback。以下三门禁检测真实形态, 临时债务集合必须与检测
+# 结果精确相等(漏报与过期项都失败); 纠偏波次逐项归零, 最终验收时全部为空。
+
+
+def _find_app_service_imports(
+    scan_root: Path = _APPLICATION_DIR, pkg_root: Path = _PKG_ROOT
+) -> list[tuple[str, int, str]]:
+    """门禁 9: 扫描 application 下 iesplan.services.* 导入。返回 (模块, 行号, 目标)。"""
+    found: list[tuple[str, int, str]] = []
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module == "iesplan.services":
+                    found.extend((mod, node.lineno, f"iesplan.services:{a.name}") for a in node.names)
+                elif node.module.startswith("iesplan.services."):
+                    found.append((mod, node.lineno, node.module))
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name == "iesplan.services" or a.name.startswith("iesplan.services."):
+                        found.append((mod, node.lineno, a.name))
+    return sorted(found)
+
+
+#: 门禁 9 临时债务: application → services 直调(纠偏 Wave 1/2 按纵向切片归零)。
+TEMP_DEBT_APP_SERVICES: set[tuple[str, int, str]] = {
+    ("iesplan.application.audits.service", 16, "iesplan.services:audit"),
+    ("iesplan.application.configuration.calc_config", 27, "iesplan.services:config"),
+    ("iesplan.application.configuration.calc_config", 28, "iesplan.services.config"),
+    ("iesplan.application.health", 21, "iesplan.services:queue"),
+    ("iesplan.application.identity.auth_cases", 31, "iesplan.services:external_auth"),
+    ("iesplan.application.identity.auth_cases", 32, "iesplan.services.external_auth"),
+    ("iesplan.application.models.model_save", 51, "iesplan.services:project"),
+    ("iesplan.application.packages.operations", 24, "iesplan.services:package"),
+    ("iesplan.application.packages.reports", 21, "iesplan.services:package"),
+    ("iesplan.application.packages.reports", 22, "iesplan.services.package"),
+    ("iesplan.application.projects.exports", 18, "iesplan.services:package"),
+    ("iesplan.application.projects.versions", 26, "iesplan.services:project"),
+    ("iesplan.application.results.endpoint_cases", 27, "iesplan.services:project"),
+    ("iesplan.application.results.endpoint_cases", 28, "iesplan.services:results"),
+    ("iesplan.application.tasks.maintenance", 44, "iesplan.services:queue"),
+    ("iesplan.application.tasks.submissions", 64, "iesplan.services:queue"),
+    ("iesplan.application.tasks.views", 27, "iesplan.services:project"),
+    ("iesplan.application.tasks.views", 28, "iesplan.services:tasks"),
+    ("iesplan.application.worker", 134, "iesplan.services:queue"),
+    ("iesplan.application.worker", 135, "iesplan.services:tasks"),
+    ("iesplan.application.worker.lease_cases", 32, "iesplan.services:queue"),
+    ("iesplan.application.worker.lease_cases", 33, "iesplan.services:tasks"),
+    ("iesplan.application.worker.runner_cases", 27, "iesplan.services:dataset"),
+}
+
+
+def _find_app_bare_sql(
+    scan_root: Path = _APPLICATION_DIR, pkg_root: Path = _PKG_ROOT
+) -> list[tuple[str, int, str]]:
+    """门禁 10: 扫描 application 下 sa.table/Table/text 与 sa insert/update/delete。
+
+    领域 persistence 实现不受该禁止(仅扫描 application/)。返回 (模块, 行号, 形态)。
+    """
+    found: list[tuple[str, int, str]] = []
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "sa"
+                and node.func.attr in ("table", "Table", "text", "insert", "update", "delete")
+            ):
+                found.append((mod, node.lineno, f"sa.{node.func.attr}"))
+    return sorted(found)
+
+
+#: 门禁 10 临时债务: application 裸表/裸 SQL(纠偏 Wave 1 按纵向切片归零)。
+TEMP_DEBT_APP_BARE_SQL: set[tuple[str, int, str]] = {
+    ("iesplan.application.tasks.maintenance", 76, "sa.table"),
+    ("iesplan.application.tasks.maintenance", 86, "sa.table"),
+    ("iesplan.application.tasks.maintenance", 94, "sa.table"),
+    ("iesplan.application.tasks.maintenance", 105, "sa.table"),
+    ("iesplan.application.tasks.maintenance", 190, "sa.update"),
+    ("iesplan.application.tasks.maintenance", 216, "sa.insert"),
+    ("iesplan.application.worker.evidence_cases", 44, "sa.table"),
+    ("iesplan.application.worker.evidence_cases", 132, "sa.insert"),
+    ("iesplan.application.worker.lease_cases", 137, "sa.table"),
+    ("iesplan.application.worker.lease_cases", 148, "sa.table"),
+    ("iesplan.application.worker.lease_cases", 160, "sa.table"),
+    ("iesplan.application.worker.lease_cases", 203, "sa.update"),
+    ("iesplan.application.worker.lease_cases", 218, "sa.update"),
+    ("iesplan.application.worker.lease_cases", 322, "sa.update"),
+    ("iesplan.application.worker.lease_cases", 341, "sa.insert"),
+    ("iesplan.application.worker.lease_cases", 359, "sa.update"),
+    ("iesplan.application.worker.runner_cases", 63, "sa.table"),
+    ("iesplan.application.worker.runner_cases", 70, "sa.table"),
+}
+
+
+def _find_worker_transactions(
+    scan_root: Path = _WORKER_DIR, pkg_root: Path = _PKG_ROOT
+) -> list[tuple[str, int, str]]:
+    """门禁 11: 扫描 worker 下 .commit()/.rollback() 调用。返回 (模块, 行号, 形态)。"""
+    found: list[tuple[str, int, str]] = []
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("commit", "rollback")
+            ):
+                found.append((mod, node.lineno, f".{node.func.attr}()"))
+    return sorted(found)
+
+
+#: 门禁 11 临时债务: Worker 事务调用(纠偏 Wave 3 上收 application.worker 后归零)。
+TEMP_DEBT_WORKER_TX: set[tuple[str, int, str]] = {
+    ("iesplan.worker.lease", 116, ".commit()"),
+    ("iesplan.worker.lease", 118, ".rollback()"),
+    ("iesplan.worker.lease", 166, ".rollback()"),
+    ("iesplan.worker.lease", 270, ".rollback()"),
+    ("iesplan.worker.lease", 305, ".rollback()"),
+    ("iesplan.worker.main", 175, ".commit()"),
+    ("iesplan.worker.runner", 303, ".commit()"),
+    ("iesplan.worker.runner", 308, ".rollback()"),
+    ("iesplan.worker.runner", 311, ".rollback()"),
+    ("iesplan.worker.runner", 314, ".rollback()"),
+    ("iesplan.worker.runner", 331, ".commit()"),
+    ("iesplan.worker.runner", 335, ".rollback()"),
+    ("iesplan.worker.runner", 354, ".commit()"),
+    ("iesplan.worker.runner", 356, ".rollback()"),
+    ("iesplan.worker.runner", 365, ".commit()"),
+    ("iesplan.worker.runner", 367, ".rollback()"),
+}
+
+
+def test_application_no_direct_services():
+    """架构门禁 9: application 禁止导入 iesplan.services(纠偏最终零导入)。
+
+    临时债务集合必须与检测结果精确相等: 新增直调失败, 已整改未移除条目也失败。
+    """
+    detected = set(_find_app_service_imports())
+    assert detected == TEMP_DEBT_APP_SERVICES, (
+        f"application→services 债务漂移(新增: {sorted(detected - TEMP_DEBT_APP_SERVICES)}, "
+        f"过期: {sorted(TEMP_DEBT_APP_SERVICES - detected)})"
+    )
+
+
+def test_application_no_bare_sql():
+    """架构门禁 10: application 禁止裸表/SQL(表真相只归领域 persistence)。"""
+    detected = set(_find_app_bare_sql())
+    assert detected == TEMP_DEBT_APP_BARE_SQL, (
+        f"application 裸表/SQL 债务漂移(新增: {sorted(detected - TEMP_DEBT_APP_BARE_SQL)}, "
+        f"过期: {sorted(TEMP_DEBT_APP_BARE_SQL - detected)})"
+    )
+
+
+def test_worker_no_transactions():
+    """架构门禁 11: Worker 禁止 commit/rollback(事务归 application.worker 用例)。"""
+    detected = set(_find_worker_transactions())
+    assert detected == TEMP_DEBT_WORKER_TX, (
+        f"Worker 事务债务漂移(新增: {sorted(detected - TEMP_DEBT_WORKER_TX)}, "
+        f"过期: {sorted(TEMP_DEBT_WORKER_TX - detected)})"
+    )
 
 
 # ---------------------------------------------------------------------------
