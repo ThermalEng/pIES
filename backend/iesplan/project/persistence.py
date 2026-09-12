@@ -13,14 +13,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from iesplan.models.project import Draft, Project, ProjectVersion, VersionRef
+from iesplan.models.project import AdminMaintenanceAction, Draft, Project, ProjectVersion, VersionRef
 from iesplan.project.contracts import (
     DraftRecord,
+    MaintenanceActionRecord,
     ProjectConflictError,
     ProjectPage,
     ProjectRecord,
@@ -421,3 +423,57 @@ def list_version_refs(db: Session, project_version_id: int) -> list[VersionRefRe
         .all()
     )
     return [_row_to_ref(row) for row in rows]
+
+
+def get_project_version_content_id(db: Session, version_id: int) -> int | None:
+    """按主键取项目版本的内容对象 id；版本缺失返回 None。"""
+    row = db.get(ProjectVersion, version_id)
+    return int(row.content_object_id) if row is not None else None
+
+
+def _row_to_maintenance_action(row: AdminMaintenanceAction) -> MaintenanceActionRecord:
+    return MaintenanceActionRecord(
+        id=row.id,
+        action_type=row.action_type,
+        performed_by=row.performed_by,
+        status=row.status,
+        started_at=_iso(row.started_at),
+        finished_at=_iso(row.finished_at),
+        params=row.params,
+        result=row.result,
+    )
+
+
+def list_maintenance_actions(db: Session, limit: int = 10) -> list[MaintenanceActionRecord]:
+    """维护记录（id 倒序；运维诊断消费，只读）。"""
+    rows = (
+        db.execute(select(AdminMaintenanceAction).order_by(AdminMaintenanceAction.id.desc()).limit(limit))
+        .scalars()
+        .all()
+    )
+    return [_row_to_maintenance_action(row) for row in rows]
+
+
+def record_maintenance_action(
+    db: Session,
+    *,
+    action_type: str,
+    performed_by: int,
+    status: str,
+    params: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+) -> MaintenanceActionRecord:
+    """记录管理员维护操作（不可变，只 INSERT）。"""
+    now = _now()
+    row = AdminMaintenanceAction(
+        action_type=action_type,
+        performed_by=performed_by,
+        status=status,
+        started_at=now,
+        finished_at=now,
+        params=params,
+        result=result,
+    )
+    db.add(row)
+    db.flush()
+    return _row_to_maintenance_action(row)

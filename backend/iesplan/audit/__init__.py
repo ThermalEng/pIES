@@ -17,13 +17,14 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy.orm import Session
 
 from iesplan.audit import persistence
-from iesplan.audit.contracts import AuditError, AuditRecord
+from iesplan.audit.contracts import AuditError, AuditRecord, RetentionRuleRecord
 from iesplan.audit.repository import AuditRepository
 
 if TYPE_CHECKING:
     from iesplan.identity.contracts import UserRecord
 
 append_entry = persistence.append_entry
+list_active_retention_rules = persistence.list_active_retention_rules
 list_entries = persistence.list_entries
 
 __all__ = [
@@ -56,11 +57,13 @@ __all__ = [
     "AuditError",
     "AuditRecord",
     "AuditRepository",
+    "RetentionRuleRecord",
     "append_entry",
     "audit",
     "audit_user_action",
     "entry_to_dict",
     "list_actions",
+    "list_active_retention_rules",
     "list_entries",
     "query_audit",
     "utcnow",

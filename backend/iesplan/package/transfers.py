@@ -36,19 +36,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from iesplan.config import settings
-from iesplan.core.contracts import (
-    PlanningConfig,
-    PlanningConfigError,
-)
 from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError
-from iesplan.finance import (
-    EffectiveFinanceConfig,
-    FinanceOverrides,
-    FinanceProfile,
-    FinanceTripletError,
-)
-from iesplan.planning.contracts import validate_planning_domain
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -419,111 +408,6 @@ def parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
     return manifest, entries
 
 
-
-
-def parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
-    """解析包内财务三件套/规划配置 YAML(0.6.5 条目 1-2), 严格校验。
-
-    返回 {"profile": FinanceProfile, "overrides": FinanceOverrides,
-          "effective": EffectiveFinanceConfig, "planning": PlanningConfig | None};
-    包未携带配置时返回 {}(导入后项目无配置, 不静默默认)。
-
-    校验(任一失败 → ImportValidationError, 拒绝整个导入):
-    - files.configs 声明的路径必须存在且为合法安全 YAML(yamlmini 子集);
-    - 三件套必须齐全(Profile + Overrides + Effective 一并导入, 缺一拒绝);
-    - 内容严格恢复(FinanceProfile/FinanceOverrides/EffectiveFinanceConfig/
-      PlanningConfig.from_dict: 拒未知/缺失字段);
-    - Overrides 对 Profile 结构校验(profile_ref 匹配、只许既有叶子、
-      禁改单位/carrier/direction/tax、禁新增 finance_type/price_id);
-    对象字节完整性由 _parse_package 的对象清单一一对应 + 大小校验承担
-    (外部包入口边界); 领域层不做本地内容重算比对(2.6)。
-    """
-    files_meta = manifest.get("files") or {}
-    configs_meta = files_meta.get("configs") or {}
-    if not configs_meta:
-        return {}
-    if not isinstance(configs_meta, dict):
-        raise ImportValidationError(["清单 files.configs 结构非法(期望映射)"])
-    reasons: list[str] = []
-
-    profile_path = configs_meta.get("finance_profile")
-    overrides_path = configs_meta.get("finance_overrides")
-    effective_path = configs_meta.get("effective_finance")
-    planning_path = configs_meta.get("planning_config")
-    required = {
-        "finance_profile": profile_path,
-        "finance_overrides": overrides_path,
-        "effective_finance": effective_path,
-    }
-    for field, path in required.items():
-        if path is None:
-            reasons.append(f"清单 files.configs 缺少 {field} 条目")
-    if planning_path is not None and profile_path is None:
-        reasons.append("包内携带规划配置但缺少财务三件套(规划必须引用已生成的有效财务快照)")
-    if reasons:
-        raise ImportValidationError(reasons)
-
-    def _load_yaml(package_field: str, path: str) -> dict:
-        if not isinstance(path, str) or path not in entries:
-            raise ImportValidationError([f"清单 files.configs.{package_field} 指向的包内文件缺失: {path}"])
-        try:
-            from iesplan.core.yamlmini import load as yaml_load
-
-            doc = yaml_load(entries[path].decode("utf-8"))
-        except Exception as exc:
-            raise ImportValidationError([f"包内 {path} 无法解析为安全 YAML: {exc}"]) from exc
-        if not isinstance(doc, dict):
-            raise ImportValidationError([f"包内 {path} 结构非法(期望对象)"])
-        return doc
-
-    profile: FinanceProfile | None = None
-    overrides: FinanceOverrides | None = None
-    effective: EffectiveFinanceConfig | None = None
-    try:
-        profile = FinanceProfile.from_dict(_load_yaml("finance_profile", profile_path))
-    except FinanceTripletError as exc:
-        reasons.append(f"包内 FinanceProfile 非法: {exc}")
-    try:
-        overrides = FinanceOverrides.from_dict(
-            _load_yaml("finance_overrides", overrides_path), profile=profile
-        )
-    except FinanceTripletError as exc:
-        reasons.append(f"包内 FinanceOverrides 非法: {exc}")
-    try:
-        effective = EffectiveFinanceConfig.from_dict(_load_yaml("effective_finance", effective_path))
-    except FinanceTripletError as exc:
-        reasons.append(f"包内 EffectiveFinanceConfig 非法: {exc}")
-
-    planning: PlanningConfig | None = None
-    if planning_path is not None:
-        planning_doc = _load_yaml("planning_config", planning_path)
-        try:
-            planning = PlanningConfig.from_dict(planning_doc)
-        except PlanningConfigError as exc:
-            reasons.append(f"包内规划配置非法: {exc}")
-        else:
-            for d in validate_planning_domain(planning):
-                reasons.append(f"包内规划配置领域校验失败: {d.params.get('detail') or d.code}")
-    if reasons:
-        raise ImportValidationError(reasons)
-    result: dict = {
-        "profile": profile,
-        "overrides": overrides,
-        "effective": effective,
-    }
-    if planning is not None:
-        result["planning"] = planning
-    return result
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Excel 报告导出(U15/U14, domain-model §快照、任务和结果 /
 # contracts §公共文件契约 / REQ-EXPORT-001: 固定模板, 固定引用, 不重新求解)
@@ -562,7 +446,6 @@ __all__ = [
     "create_download_token",
     "verify_download_token",
     "parse_package",
-    "parse_config_files",
     "parse_evidence_content",
     "bound_dataset_ids",
     "media_file_kind",
