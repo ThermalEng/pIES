@@ -13,6 +13,11 @@
 
 全系统健康聚合(/health)由独立运维聚合层调用各模块公开 health provider;
 本路由不查询 Task/Project/User, 不调用队列(STO-07 边界)。
+
+Wave 4: 存储编排与事务边界整体下沉至 application.objects 用例; 本路由只做
+HTTP 适配(请求模型/依赖注入/响应信封), 不直调 storage, 不提交/回滚事务,
+不直接导入 ORM(管理员身份经 api.auth CurrentAdmin, 其角色判定由
+application.identity 门面完成)。
 """
 
 from __future__ import annotations
@@ -23,24 +28,14 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from iesplan.api.auth import get_current_admin
+from iesplan.api.auth import CurrentAdmin
+from iesplan.application.objects import service as objects_app
 from iesplan.db import get_db
-from iesplan.models.identity import User
-from iesplan.storage import (
-    list_pending_deleted,
-    purge_expired,
-    reconcile,
-    safe_cleanup,
-    sample_verify,
-    storage_stats,
-    undelete_object,
-)
 
 #: 对象域管理路由: 挂载前缀 /api/admin(仅管理员)
 router = APIRouter(prefix="/api/admin", tags=["admin-storage"])
 
 DbSession = Annotated[Session, Depends(get_db)]
-CurrentAdmin = Annotated[User, Depends(get_current_admin)]
 
 
 class CleanupRequest(BaseModel):
@@ -88,18 +83,7 @@ def admin_storage(db: DbSession, _admin: CurrentAdmin) -> dict:
           refs{count,referenced_objects} / capacity{free_bytes,safe_threshold,
           ok,message,reason?} / corrupt_count / cleanup_candidates / healthy。
     """
-    stats = storage_stats(db)
-    verify = sample_verify(db, limit=10)
-    cleanup = safe_cleanup(db, dry_run=True, limit=100)
-    return {
-        "objects": stats["objects"],
-        "refs": stats["refs"],
-        "capacity": stats["capacity"],
-        "corrupt_count": len(verify["failed"]),
-        "cleanup_candidates": cleanup["count"],
-        "pending_deletion_count": stats["objects"]["pending_deletion_count"],
-        "healthy": stats["healthy"] and len(verify["failed"]) == 0,
-    }
+    return objects_app.get_storage_view(db)
 
 
 @router.post("/objects/cleanup", summary="对象清理: 先计划后执行(管理员, 软删/保留期)")
@@ -114,30 +98,21 @@ def admin_cleanup(
     确认后携带 plan_id 以 dry_run=false 执行: 事务内重新验证引用与候选集合,
     候选变化则拒绝执行并要求重新预览。执行把候选对象标记为待物理回收
     (默认保留 7 天), 保留期内可经 restore / 重新 attach 恢复; 到期由
-    purge(或 reconcile 巡检)物理删文件 + 删记录。提交/回滚由本用例统一决定
+    purge(或 reconcile 巡检)物理删文件 + 删记录。提交/回滚由应用用例统一决定
     (RR-P1-03: 存储服务只 flush)。
     """
-    pending_delete_days = req.pending_delete_days
     if req.dry_run:
-        return safe_cleanup(
-            db, dry_run=True, actor_id=_admin.id, actor_type="admin",
-            pending_delete_days=pending_delete_days if pending_delete_days is not None else 7,
+        return objects_app.preview_cleanup(
+            db,
+            actor_id=_admin.id,
+            pending_delete_days=req.pending_delete_days,
         )
-    if not req.plan_id:
-        from iesplan.core.errors import ConflictError
-
-        raise ConflictError(
-            "执行清理必须携带 dry-run 返回的 plan_id",
-            code="OBJ-CLEAN-001",
-            message_key="ies.diag.obj.cleanup_plan_required",
-        )
-    result = safe_cleanup(
-        db, dry_run=False, actor_id=_admin.id, actor_type="admin",
-        expected_plan_id=req.plan_id,
-        pending_delete_days=pending_delete_days if pending_delete_days is not None else 7,
+    return objects_app.execute_cleanup(
+        db,
+        actor_id=_admin.id,
+        pending_delete_days=req.pending_delete_days,
+        plan_id=req.plan_id,
     )
-    db.commit()  # 应用用例拥有事务边界(软删标记 + 引用变更同事务提交)
-    return result
 
 
 @router.get("/objects/pending", summary="已删除待回收对象清单(管理员)")
@@ -152,7 +127,7 @@ def admin_pending_objects(
     只列出已过保留期、可由 purge 物理回收的对象。
     """
     return {
-        "data": list_pending_deleted(db, expired_only=expired_only),
+        "data": objects_app.list_pending(db, expired_only=expired_only),
         "meta": {"expired_only": expired_only},
     }
 
@@ -168,8 +143,7 @@ def admin_restore_object(
     只允许恢复仍在保留期内的待回收对象; 恢复后对象回到可用状态
     (有引用 restored / 无引用 orphaned), 文件保留在磁盘上立即可访问。
     """
-    result = undelete_object(db, req.object_id, actor_id=_admin.id, actor_type="admin")
-    db.commit()
+    result = objects_app.restore_object(db, object_id=req.object_id, actor_id=_admin.id)
     return {"data": result, "meta": {}}
 
 
@@ -184,9 +158,7 @@ def admin_purge_objects(
     dry_run=true 先出清单(不删); false 执行物理删除文件 + 删除记录。
     只处理已过保留期的 pending_deletion 对象, 保留期内对象绝不物理删除。
     """
-    result = purge_expired(db, dry_run=req.dry_run, actor_id=_admin.id, actor_type="admin")
-    db.commit()
-    return result
+    return objects_app.purge(db, dry_run=req.dry_run, actor_id=_admin.id)
 
 
 @router.get("/storage/health", summary="存储模块健康(管理员)")
@@ -195,14 +167,4 @@ def admin_storage_health(db: DbSession, _admin: CurrentAdmin) -> dict:
 
     字段: {ok, capacity, corrupt_count, orphan_count, reconcile}。
     """
-    stats = storage_stats(db)
-    verify = sample_verify(db, limit=10)
-    return {
-        "ok": stats["healthy"] and len(verify["failed"]) == 0,
-        "capacity": stats["capacity"],
-        "corrupt_count": len(verify["failed"]),
-        "orphan_count": stats["objects"]["orphan_count"],
-        "object_count": stats["objects"]["count"],
-        "pending_deletion_count": stats["objects"]["pending_deletion_count"],
-        "reconcile": reconcile(db, dry_run=True),
-    }
+    return objects_app.get_storage_health(db)
