@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from iesplan.core.errors import ConflictError, NotFoundError
+from iesplan.core.patterns import IDEMPOTENCY_KEY_RE as IDEMPOTENCY_KEY_RE
 
 
 class TaskNotFoundError(NotFoundError):

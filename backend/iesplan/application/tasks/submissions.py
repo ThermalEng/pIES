@@ -16,8 +16,7 @@
 
 数据访问只经领域公开门面(tasks/project/dataset/audit/storage/identity/
 configuration, 含 tasks 域队列可重建视图); 不导入 ``models.*``。
-幂等键格式沿用旧 ``IDEMPOTENCY_KEY_RE`` 语义(本地内联, 门禁 8 不允许新增
-``models.common`` 导入, 待协调者提升为共享常量后改接)。
+幂等键格式改接核心常量唯一权威(``iesplan.core.patterns.IDEMPOTENCY_KEY_RE``)。
 快照固化时的版本内容规则(含财务/规划引用闭合)复制自
 ``services.project``(W2-A 项目用例落地后由协调者改接)。
 """
@@ -61,6 +60,7 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.idgen import new_id
 from iesplan.core.jsonutil import jsonable
+from iesplan.core.patterns import IDEMPOTENCY_KEY_RE as _IDEMPOTENCY_KEY_RE
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.storage import (
@@ -123,8 +123,7 @@ _HOURLY_BYTES_PER_ROW = 1024
 _INTERMEDIATE_FACTOR = 0.5
 #: 证据包系数(默认 0.1)
 _EVIDENCE_FACTOR = 0.1
-#: 幂等键格式(与 models.common.IDEMPOTENCY_KEY_RE 同语义, 本地内联见模块 docstring)
-_IDEMPOTENCY_KEY_RE = r"^[A-Za-z0-9._:-]{1,128}$"
+#: 幂等键格式唯一权威见 core.patterns(顶层导入 _IDEMPOTENCY_KEY_RE)。
 
 #: 求解器状态 → 业务结局映射
 _SOLVER_OUTCOME: dict[str, str] = {

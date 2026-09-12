@@ -9,6 +9,7 @@ from __future__ import annotations
 from iesplan.tasks import persistence
 from iesplan.tasks import queue as _queue
 from iesplan.tasks.contracts import (
+    IDEMPOTENCY_KEY_RE,
     CalcSnapshotRecord,
     ComputeSlotRecord,
     MaintenanceActionRecord,
@@ -100,6 +101,7 @@ set_queue_progress = _queue.set_progress
 __all__ = [
     "QUEUE_COMPUTE",
     "QUEUE_IO",
+    "IDEMPOTENCY_KEY_RE",
     "CalcSnapshotRecord",
     "ComputeSlotRecord",
     "MaintenanceActionRecord",

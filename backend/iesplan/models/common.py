@@ -15,15 +15,15 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import MappedColumn, mapped_column
 
+#: 幂等键正则复出(唯一权威: iesplan.core.patterns; DDL 经此处取用)。
+from iesplan.core.patterns import IDEMPOTENCY_KEY_RE as IDEMPOTENCY_KEY_RE
+
 #: 64 位小写十六进制(对象 id 等随机标识格式)
 HASH64_RE: str = "^[0-9a-f]{64}$"
 #: 用户名(小写字母/数字/下划线, 3-32 位)
 USERNAME_RE: str = "^[a-z0-9_]{3,32}$"
 #: 邮箱格式
 EMAIL_RE: str = r"^[^@\s]+@[^@\s]+$"
-#: 幂等键(字母/数字/._:-)
-IDEMPOTENCY_KEY_RE: str = "^[A-Za-z0-9._:-]{1,128}$"
-
 
 class JSONB(sa.types.TypeDecorator):
     """JSONB 类型: PostgreSQL 原生 JSONB, SQLite 回退 JSON(仅测试)。"""

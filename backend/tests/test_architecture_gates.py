@@ -105,9 +105,7 @@ WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
     # (Wave 3 集成: results.py 改经 application 用例, HASH64_RE 直引已消除)
     # (Wave 4 集成: limits 配额统计收敛到 datasets.quotas, auth 会话取数收敛到
     #  identity 门面, objects 归属校验收敛到 application.objects, 移除 4 项)
-    # ---- tasks.py: 幂等键校验正则常量 ----
-    ("iesplan.api.tasks", 26): frozenset({"IDEMPOTENCY_KEY_RE"}),
-    # (Wave 3 集成: import 排序归位, 该行由 25 移至 26)
+    # (Wave 4 集成: tasks.py 幂等键正则改接 tasks 域门面, 豁免删除)
 }
 
 #: iesplan.db 中禁止 api 直接导入的 ORM 会话符号(get_db 依赖注入本身合法, 不在列)
