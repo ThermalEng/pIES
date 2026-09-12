@@ -36,9 +36,10 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
 from iesplan.config import settings
 from iesplan.core.errors import AppError, NotFoundError
-from iesplan.models.audit import AuditLog, RetentionRule
+from iesplan.models.audit import RetentionRule
 from iesplan.storage.adapters.filesystem import FileSystemBlobStore
 from iesplan.storage.contracts import (
     BlobMissingError,
@@ -177,16 +178,15 @@ def _audit(
     after: dict | None = None,
 ) -> None:
     """写入不可变审计日志(01 §10.3; 本模块只 INSERT 不修改)。"""
-    db.add(
-        AuditLog(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            action=action,
-            actor_id=actor_id,
-            actor_type=actor_type,
-            before=before,
-            after=after,
-        )
+    audit_domain.append_entry(
+        db,
+        actor_id=actor_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        actor_type=actor_type,
+        before=before,
+        extra=after,
     )
 
 

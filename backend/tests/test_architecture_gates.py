@@ -462,9 +462,9 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     # (切片 5: services.config_revisions 经 configuration 域, 移除本项)
     ("iesplan.services.tasks", "common"),  # 仅幂等键正则基元(无业务表)
     # (切片 5: services.tasks 改经领域门面, 移除 calc/dataset/identity/result/uncertainty)
-    ("iesplan.services.validation", "audit"),
+    # (切片 9: services.validation 经 audit 域门面读写审计, 移除本项)
     # (切片 6: services.validation 经 dataset 域门面, 移除 dataset/identity)
-    ("iesplan.services.results", "audit"),
+    # (切片 9: services.results 经 audit 域门面读写审计, 移除本项)
     # (切片 5: services.results 经 results/tasks/project 域门面, 移除 calc/identity/result)
     # ---- project 域 repository 实现（切片 3；唯一允许访问 projects 系表的实现） ----
     ("iesplan.project.persistence", "project"),
@@ -476,7 +476,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     ("iesplan.services.package", "project"),
     # (切片 8: services.audit 经 audit 域门面, 移除本两项)
     # (切片 4: services.dataset 经 dataset/identity/project 域 repository, 移除 3 项)
-    ("iesplan.services.project", "audit"),
+    # (切片 9: services.project 经 audit 域门面写审计, 移除本项)
     # (切片 6: services.project 经 tasks 域门面, 移除 calc/identity)
     # ---- worker ----
     ("iesplan.worker.lease", "calc"),
@@ -489,7 +489,8 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     ("iesplan.worker.runner", "project"),
     ("iesplan.worker.runner", "uncertainty"),
     # ---- storage ----
-    # service 直接写 AuditLog/RetentionRule, 切片 11 改由 audit facade/application 记录。
+    # service 的 AuditLog 直写已改由 audit facade(切片 9); 本项仅因 RetentionRule
+    # 仍从 models.audit 导入而保留, 待 storage 域收敛保留规则表后移除。
     ("iesplan.storage.service", "audit"),
     # persistence 仅用 common 基元, 无业务表访问, 保留。
     ("iesplan.storage.persistence", "common"),

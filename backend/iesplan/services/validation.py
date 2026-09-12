@@ -28,11 +28,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
 from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
+from iesplan.audit.contracts import AuditRecord
 from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
     SEVERITY_ERROR,
@@ -45,7 +46,6 @@ from iesplan.core.errors import AppError, NotFoundError
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 from iesplan.devices import get_device as get_device_type
 from iesplan.identity.contracts import UserRecord
-from iesplan.models.audit import AuditLog
 from iesplan.project.contracts import ProjectRecord
 from iesplan.services import config as config_service
 from iesplan.services import dataset as dataset_service
@@ -498,18 +498,16 @@ def _quality_blocking_codes(report: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _latest_baseline_evidence(db: Session, project_id: int) -> AuditLog | None:
+def _latest_baseline_evidence(db: Session, project_id: int) -> AuditRecord | None:
     """最近一次财务基准确认证据(追加式审计, 按 id 倒序取最新)。"""
-    return db.scalar(
-        select(AuditLog)
-        .where(
-            AuditLog.entity_type == "project",
-            AuditLog.entity_id == project_id,
-            AuditLog.action == BASELINE_ACTION,
-        )
-        .order_by(AuditLog.id.desc())
-        .limit(1)
+    rows = audit_domain.list_entries(
+        db,
+        entity_type="project",
+        entity_id=project_id,
+        action=BASELINE_ACTION,
+        limit=1,
     )
+    return rows[0] if rows else None
 
 
 def _current_assumptions(project: ProjectRecord, config: dict) -> dict:
@@ -627,7 +625,7 @@ def mark_baseline_confirmed(
     project_id: int,
     user: UserRecord,
     assumptions: dict | None = None,
-) -> AuditLog:
+) -> AuditRecord:
     """记录财务基准确认(架构宪法 §16 安全与审计: 确认人/确认时间)。
 
     证据以审计事件追加式记录(不可覆盖, 架构宪法 §16 + domain-model §对象生命周期), 供 U11 指标单元与校验门禁读取。
@@ -642,22 +640,20 @@ def mark_baseline_confirmed(
     """
     project = _require_project(db, project_id)
     now = datetime.now(UTC)
-    record = AuditLog(
+    return audit_domain.append_entry(
+        db,
+        actor_id=user.id if user is not None else None,
+        action=BASELINE_ACTION,
         entity_type="project",
         entity_id=project_id,
-        action=BASELINE_ACTION,
-        actor_id=user.id if user is not None else None,
         actor_type="user",
-        after={
+        extra={
             "assumptions": dict(assumptions or {}),
             "confirmed_by": user.id if user is not None else None,
             "confirmed_at": now.isoformat(),
             "project_version_id": project.current_version_id,
         },
     )
-    db.add(record)
-    db.flush()
-    return record
 
 
 # ---------------------------------------------------------------------------

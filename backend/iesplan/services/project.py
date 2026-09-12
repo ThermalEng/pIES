@@ -26,6 +26,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
 from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
@@ -33,7 +34,6 @@ from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.identity.contracts import UserRecord
-from iesplan.models.audit import AuditLog
 from iesplan.project.contracts import (
     DraftRecord,
     ProjectConflictError,
@@ -1240,16 +1240,15 @@ def _audit(
     after: dict | None = None,
 ) -> None:
     """审计事件写入(与业务写入同事务，架构宪法 §16/domain-model §身份、权限和审计；只含脱敏元数据)。"""
-    db.add(
-        AuditLog(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            action=action,
-            actor_id=actor_id,
-            actor_type="user",
-            before=jsonable(before) if before else None,
-            after=jsonable(after) if after else None,
-        )
+    audit_domain.append_entry(
+        db,
+        actor_id=actor_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        actor_type="user",
+        before=before,
+        extra=after,
     )
 
 

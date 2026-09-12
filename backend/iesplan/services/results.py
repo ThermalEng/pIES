@@ -27,9 +27,9 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
@@ -39,7 +39,6 @@ from iesplan.engines.planning import CAPACITY_PARAM
 from iesplan.identity.contracts import UserRecord
 from iesplan.metrics import validity
 from iesplan.metrics.financial import IRRStatus
-from iesplan.models.audit import AuditLog
 from iesplan.results.contracts import (
     EvidencePackageRecord,
     ResultAssessmentRecord,
@@ -175,16 +174,15 @@ def _audit(
     after: dict | None = None,
 ) -> None:
     """写入不可变审计日志（见 manual/developer-guide/zh-CN/domain-model.md#身份、权限和审计：关键变更留不可变审计，本模块只 INSERT）。"""
-    db.add(
-        AuditLog(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            action=action,
-            actor_id=actor_id,
-            actor_type="user" if actor_id is not None else "system",
-            before=before,
-            after=after,
-        )
+    audit_domain.append_entry(
+        db,
+        actor_id=actor_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        actor_type="user" if actor_id is not None else "system",
+        before=before,
+        extra=after,
     )
 
 
@@ -933,18 +931,15 @@ def build_diff_patch(content: dict[str, Any], solution_id: int) -> dict[str, Any
 
 def _selection_solution(db: Session, selection: ResultSelectionRecord) -> int | None:
     """当前选中的解标识: 从该选中的不可变审计记录读取(01 §10.3)。"""
-    row = db.execute(
-        select(AuditLog)
-        .where(
-            AuditLog.entity_type == "result_selections",
-            AuditLog.entity_id == selection.id,
-            AuditLog.action == "result_selected",
-        )
-        .order_by(AuditLog.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if row is not None and isinstance(row.after, dict):
-        return row.after.get("solution_id")
+    rows = audit_domain.list_entries(
+        db,
+        entity_type="result_selections",
+        entity_id=selection.id,
+        action="result_selected",
+        limit=1,
+    )
+    if rows and isinstance(rows[0].after, dict):
+        return rows[0].after.get("solution_id")
     return None
 
 
