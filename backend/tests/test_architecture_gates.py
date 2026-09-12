@@ -884,10 +884,8 @@ def _find_cross_domain_behavior_imports(pkg_root: Path = _PKG_ROOT) -> set[tuple
     return found
 
 
-#: 门禁 14 临时债务: 禁止的领域间依赖(全仓实测 2 对; Wave 2-B/3 归零)。
+#: 门禁 14 临时债务: 禁止的领域间依赖(Wave 2-B 已消除 project→identity, 剩 1 对; Wave 4 归零)。
 TEMP_DEBT_CROSS_DOMAIN: set[tuple[str, str]] = {
-    # project/access.py:15 经根包调用 identity.user_roles, 跨域组合管理员授权(上收 application)。
-    ("iesplan.project.access", "identity"),
     # engines/planning.py:34 直调 metrics.financial(计算方向收敛时一并处理)。
     ("iesplan.engines.planning", "metrics"),
 }
