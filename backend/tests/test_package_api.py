@@ -43,6 +43,7 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan import package as package_domain  # noqa: E402
+from iesplan import project as project_domain  # noqa: E402
 from iesplan.api import admin as admin_api  # noqa: E402
 from iesplan.api import exports as exports_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
@@ -59,9 +60,6 @@ from iesplan.models.project import (  # noqa: E402
     Project,
 )
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
-from iesplan.services import package as package_service  # noqa: E402
-from iesplan.services import project as project_service  # noqa: E402
-from iesplan.services import queue  # noqa: E402
 from iesplan.storage import put_object
 from iesplan.storage.persistence import ObjectRef  # noqa: E402
 
@@ -85,8 +83,7 @@ def engine() -> Iterator[Engine]:
 
 @pytest.fixture(autouse=True)
 def _clean_state(engine: Engine) -> Iterator[None]:
-    """每个测试前重置内存队列, 结束后清空全部表(避免测试间串扰)。"""
-    queue.force_memory()
+    """每个测试前清空全部表(避免测试间串扰；内存队列由 IESPLAN_QUEUE=memory 固定，包流程不触队列)。"""
     yield
     with engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
@@ -450,16 +447,16 @@ def test_import_creates_new_identity_owner_and_evidence_source(
         db.execute(select(ObjectRef).where(ObjectRef.ref_type == "imported_evidence")).scalars().all()
     )
 
-    proposal = package_service.import_proposal(
+    proposal = package_domain.import_proposal(
         db, importer, zip_bytes, idempotency_key="idem-import-1"
     )
     assert proposal.status == "proposed"
     assert proposal.review_summary["checks"]["integrity_ok"] is True
     # 幂等: 相同源文件重复提案返回同一提案
-    again = package_service.import_proposal(db, importer, zip_bytes, idempotency_key="idem-import-1")
+    again = package_domain.import_proposal(db, importer, zip_bytes, idempotency_key="idem-import-1")
     assert again.id == proposal.id
 
-    new_project = package_service.confirm_import(db, importer, proposal.id)
+    new_project = package_domain.confirm_import(db, importer, proposal.id)
     db.commit()
 
     # 新项目身份: 与源项目不同, 名称不覆盖(自动去重后缀)
@@ -474,7 +471,7 @@ def test_import_creates_new_identity_owner_and_evidence_source(
     # (projects.owner_id == importer.id, 见上); 项目包内不携带账号权限。
 
     # 草稿内容迁移(模型/配置)且修订从 1 开始
-    draft_content = project_service.get_current_draft_content(db, new_project.id)
+    draft_content = project_domain.get_current_draft_content(db, new_project.id)
     assert draft_content["calc_config"]["algorithm"] == "milp" or draft_content["model"]["devices"] == []
 
     # 历史结果作为证据来源保留(不伪造本地任务)
@@ -494,21 +491,21 @@ def test_import_creates_new_identity_owner_and_evidence_source(
     assert proposal.status == "applied"
     assert proposal.decided_by == importer.id
     # 幂等重放: 已导入提案再次确认返回同一项目
-    same = package_service.confirm_import(db, importer, proposal.id)
+    same = package_domain.confirm_import(db, importer, proposal.id)
     assert same.id == new_project.id
 
     # 非提案人确认 → 403
     other = make_user(db, "other")
     with pytest.raises(ForbiddenError):
-        package_service.confirm_import(db, other, proposal.id)
+        package_domain.confirm_import(db, other, proposal.id)
 
 
 def test_import_rejects_corrupt_and_non_zip(client: TestClient, db: Session) -> None:
     """导入校验失败拒绝: 仅校验外部包格式（非 zip 拒绝，不做内部重算比对）。"""
     importer = make_user(db, "importer")
     # 非 zip → 格式校验失败（用户输入边界）
-    with pytest.raises(package_service.ImportValidationError):
-        package_service.import_proposal(db, importer, b"not a zip at all")
+    with pytest.raises(package_domain.ImportValidationError):
+        package_domain.import_proposal(db, importer, b"not a zip at all")
 
     # 校验失败不创建任何提案/项目
     proposals = db.execute(select(ImportProposal)).scalars().all()
@@ -538,8 +535,8 @@ def test_import_proposal_rejects_forbidden_sections(client: TestClient, db: Sess
                 manifest["permissions"] = {"owner": 1}
                 data = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
             zout.writestr(info.filename, data)
-    with pytest.raises(package_service.ImportValidationError) as exc:
-        package_service.import_proposal(db, importer, buf.getvalue())
+    with pytest.raises(package_domain.ImportValidationError) as exc:
+        package_domain.import_proposal(db, importer, buf.getvalue())
     assert any("禁止内容" in r for r in exc.value.reasons)
 
 
@@ -557,8 +554,8 @@ def test_download_token_expired_and_tampered(client: TestClient, db: Session) ->
 
     # 过期 token(exp 在过去)→ 服务层拒绝
     expired = _expired_token(object_id)
-    with pytest.raises(package_service.DownloadTokenError):
-        package_service.verify_download_token(expired, expected_kind="package")
+    with pytest.raises(package_domain.DownloadTokenError):
+        package_domain.verify_download_token(expired, expected_kind="package")
     status, _content, _ct = _download(
         client, f"/api/projects/{pid}/exports/package/download", expired,
         headers=_h(client, owner),
@@ -568,8 +565,8 @@ def test_download_token_expired_and_tampered(client: TestClient, db: Session) ->
     # 篡改签名 → 拒绝
     valid = resp.json()["token"]
     tampered_token = valid[:-1] + ("0" if valid[-1] != "0" else "1")
-    with pytest.raises(package_service.DownloadTokenError):
-        package_service.verify_download_token(tampered_token, expected_kind="package")
+    with pytest.raises(package_domain.DownloadTokenError):
+        package_domain.verify_download_token(tampered_token, expected_kind="package")
     status, _content, _ct = _download(
         client, f"/api/projects/{pid}/exports/package/download", tampered_token,
         headers=_h(client, owner),
@@ -577,14 +574,14 @@ def test_download_token_expired_and_tampered(client: TestClient, db: Session) ->
     assert status == 400
 
     # 类型不符(excel token 用于包下载)→ 拒绝
-    excel_token = package_service.create_download_token(
+    excel_token = package_domain.create_download_token(
         object_id, "excel", project_id=pid, user_id=owner.id
     )
-    with pytest.raises(package_service.DownloadTokenError):
-        package_service.verify_download_token(excel_token, expected_kind="package")
+    with pytest.raises(package_domain.DownloadTokenError):
+        package_domain.verify_download_token(excel_token, expected_kind="package")
 
     # 正常 token 校验通过(5 分钟窗口内)
-    info = package_service.verify_download_token(valid, expected_kind="package")
+    info = package_domain.verify_download_token(valid, expected_kind="package")
     assert info["object_id"] == object_id
     assert info["project_id"] == pid and info["user_id"] == owner.id
     assert info["object_id"] == object_id
@@ -616,7 +613,7 @@ def test_download_rejects_object_not_in_project(client: TestClient, db: Session)
     assert status == 200, f"项目 A 下载应成功, got {status}"
 
     # 用「项目 B 的 URL + 自签 project_id=B 的 token」请求下载项目 A 的对象 → 400
-    forged = package_service.create_download_token(
+    forged = package_domain.create_download_token(
         object_id, "package", project_id=pid_b, user_id=owner.id
     )
     status, _content, _ct = _download(

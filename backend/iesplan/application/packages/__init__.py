@@ -1,6 +1,7 @@
 """项目包用例族(application/packages): 包导出/导入。
 
-经 ``services.package`` 现有函数组合 + 本层拥有事务提交/回滚, 旧服务只读保留。
+经 ``iesplan.package`` 领域公开门面组合 + 本层拥有事务提交/回滚
+(旧服务 ``services.package`` 已删除，见纠偏 Wave 1 切片 D)。
 """
 
 from iesplan.application.packages.operations import (

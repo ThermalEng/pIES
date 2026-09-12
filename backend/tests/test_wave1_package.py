@@ -1,6 +1,7 @@
-"""Wave 1 W1-Package 聚焦测试: package 域收敛与 services.package 去直访。
+"""Wave 1 W1-Package 聚焦测试: package 域收敛与旧 services.package 删除。
 
-- services/package.py 不再导入 iesplan.models.*（5 项门禁白名单消除对象）,
+- 传输编排归属 package 域（package/transfers.py，旧 services/package.py 已删除）:
+  零 iesplan.models.* 导入（5 项门禁白名单消除对象保持）,
   不再跨服务调用 services.audit/project（仅保留 Wave 2 的 config 编排）;
 - import_proposals 读写经 package 域 repository（状态机 + 记录视图）;
 - project_name_exists 供导入命名去重。
@@ -32,7 +33,7 @@ from iesplan.db import Base  # noqa: E402
 from iesplan.package.contracts import PackageConflictError  # noqa: E402
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-PACKAGE_SERVICE_SRC = (BACKEND_DIR / "iesplan" / "services" / "package.py").read_text(encoding="utf-8")
+PACKAGE_SERVICE_SRC = (BACKEND_DIR / "iesplan" / "package" / "transfers.py").read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="session")
@@ -64,7 +65,7 @@ def db(engine: Engine, tmp_path: Path) -> Iterator[Session]:
 
 
 def _model_and_service_imports() -> tuple[set[str], set[str]]:
-    """解析 services/package.py 的跨表 ORM 与跨服务导入。"""
+    """解析 package/transfers.py 的跨表 ORM 与跨服务导入。"""
     tree = ast.parse(PACKAGE_SERVICE_SRC)
     models: set[str] = set()
     services: set[str] = set()
@@ -80,20 +81,20 @@ def _model_and_service_imports() -> tuple[set[str], set[str]]:
 
 
 def test_no_cross_model_imports_in_package_service() -> None:
-    """services.package 零 iesplan.models.* 导入（门禁 5 项消除对象）。"""
+    """package 域传输编排零 iesplan.models.* 导入（门禁 5 项消除对象）。"""
     models, _ = _model_and_service_imports()
-    assert models == set(), f"services.package 仍有跨表 ORM 导入: {sorted(models)}"
+    assert models == set(), f"package 域传输编排仍有跨表 ORM 导入: {sorted(models)}"
 
 
 def test_no_cross_service_calls_except_config_orchestration() -> None:
-    """services.package 不再调用 services.audit/project。
+    """package 域传输编排不再调用 services.audit/project。
 
     财务配置读写编排（register/set/save/get）归 Wave 2 application 用例，
     本波次仅保留 services.config_revisions 调用。
     """
     _, services = _model_and_service_imports()
     assert services == {"iesplan.services.config_revisions"}, (
-        f"services.package 仍有非预期跨服务调用: {sorted(services)}"
+        f"package 域传输编排仍有非预期跨服务调用: {sorted(services)}"
     )
 
 

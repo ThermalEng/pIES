@@ -1,4 +1,12 @@
-"""项目包服务与结果 Excel 导出。
+"""项目包域传输编排（包导出/导入提案与确认、下载授权、Excel 报告，归属 package）。
+
+收敛自旧服务 ``services.package``（纠偏 Wave 1 切片 D）：
+实现与旧服务逐行同义，仅做收敛必需的机械调整——项目存在性/
+当前草稿/访问判定/内容对象读写不再经本模块私有复刻，一律经项目域公开门面
+（``require_project`` / ``require_current_draft`` / ``ensure_access`` /
+``store_content_object`` / ``load_content_object``）；导入提案行经本域
+``persistence``；财务/规划配置读写仍经 ``services.config_revisions``
+（归属 config 切片后续收敛）。
 
 依据架构宪法 §10/§12 与 domain-model §快照、任务和结果/§对象生命周期 及 contracts §公共文件契约：
 
@@ -38,8 +46,6 @@ from iesplan import __version__
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
 from iesplan import dataset as dataset_domain
-from iesplan import identity as identity_domain
-from iesplan import package as package_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
@@ -50,7 +56,7 @@ from iesplan.core.contracts import (
     ProjectBaseline,
     ProjectBaselineError,
 )
-from iesplan.core.diagnostics import SEVERITY_ERROR, SYS_STORE_CORRUPT
+from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.jsonutil import jsonable
 from iesplan.core.yamlmini import dump as yaml_dump
@@ -62,10 +68,16 @@ from iesplan.finance import (
 )
 from iesplan.identity.contracts import UserRecord
 from iesplan.package.contracts import ImportProposalRecord
+from iesplan.package.persistence import (
+    create_proposal,
+    get_proposal,
+    list_proposals_for_proposer,
+    set_proposal_review,
+)
 from iesplan.planning.contracts import validate_planning_domain
 from iesplan.project.contracts import DraftRecord, ProjectRecord, ProjectVersionRecord
 from iesplan.services import config_revisions as config_service
-from iesplan.storage import ObjectCorruptError, add_ref, attach, get_object, object_info, put_object
+from iesplan.storage import add_ref, get_object, object_info, put_object
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -144,13 +156,6 @@ AUDIT_PROJECT_EXPORTED = "project.exported"
 AUDIT_PROJECT_IMPORT_PROPOSED = "import.proposal_created"
 AUDIT_PROJECT_IMPORTED = "project.imported"
 
-#: 项目所有者能力集(与 services.project.OWNER_CAPABILITIES 同值; 权限判定
-#: 组合收敛到 Wave 2 application 用例前, 以本集合为过渡判定口径)。
-OWNER_CAPABILITIES: frozenset[str] = frozenset(
-    {"view", "edit", "manage_lifecycle", "export_package", "export_excel"}
-)
-
-
 def _audit_entry(
     db: Session,
     actor_id: int | None,
@@ -173,91 +178,6 @@ def _audit_entry(
         result=result,
         extra=extra,
     )
-
-
-def _require_project(db: Session, project_id: int) -> ProjectRecord:
-    """按 id 取项目; 不存在或已删除一律 404。"""
-    project = project_domain.get_project(db, project_id)
-    if project is None:
-        raise NotFoundError(
-            "项目不存在",
-            params={"project_id": project_id},
-            location={"object_type": "project", "object_id": project_id},
-        )
-    return project
-
-
-def _get_current_draft(db: Session, project: ProjectRecord) -> DraftRecord:
-    """取项目当前草稿; 缺失视为数据损坏。"""
-    draft = project_domain.get_current_draft(db, project.id)
-    if draft is None:
-        raise AppError(
-            "项目缺少当前草稿(数据损坏)",
-            code=SYS_STORE_CORRUPT,
-            severity=SEVERITY_ERROR,
-            message_key="ies.diag.store.corrupt",
-            location={"object_type": "project", "object_id": project.id},
-        )
-    return draft
-
-
-def _ensure_access(db: Session, user: UserRecord, project_id: int, *capabilities: str) -> None:
-    """访问判定: 仅项目所有者具备全部业务能力, 管理员仅可查看/管理生命周期。
-
-    语义与 services.project.ensure_access 一致(存在性 → 所有者 → 管理员 →
-    缺失能力 403); 权限组合收敛到 Wave 2 application 用例后由用例层统一拥有。
-    """
-    project = _require_project(db, project_id)
-    granted = set(OWNER_CAPABILITIES) if project.owner_id == user.id else set()
-    if "admin" in identity_domain.user_roles(db, user.id):
-        granted |= {"view", "manage_lifecycle"}
-    missing = [cap for cap in capabilities if cap not in granted]
-    if missing:
-        raise ForbiddenError(
-            "缺少所需项目权限",
-            params={"required": list(capabilities), "missing": missing, "project_id": project_id},
-            location={"object_type": "project", "object_id": project_id},
-        )
-
-
-def _store_content_object(db: Session, content: dict) -> int:
-    """内容字典 → 对象存储对象并建立草稿内容引用,返回对象 id(每次写入新行)。
-
-    编码经 project 域纯函数，IO 经 storage 公开门面。
-    """
-    handle = put_object(
-        db,
-        project_domain.content_to_bytes(content),
-        "application/json",
-        source_category="project_content",
-    )
-    attach(
-        db,
-        handle.id,
-        "draft_content",
-        handle.id,
-        ref_entity_type="drafts",
-        purpose="草稿内容文档",
-    )
-    return handle.id
-
-
-def _load_content_object(db: Session, content_object_id: int) -> dict:
-    """按对象 id 读取内容对象(缺失/损坏/结构非法一律按数据损坏明确报错)。
-
-    IO 经 storage 公开门面，解析与错误构造经 project 域纯函数。
-    """
-    try:
-        raw = get_object(db, content_object_id)
-    except NotFoundError as exc:
-        raise project_domain.corrupt_error(
-            "内容对象缺失(数据损坏)", object_id=content_object_id
-        ) from exc
-    except ObjectCorruptError as exc:
-        raise project_domain.corrupt_error(
-            "内容对象读取失败(数据损坏)", object_id=content_object_id
-        ) from exc
-    return project_domain.parse_content_object(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +397,7 @@ def _build_package_zip(
     dataset_ids: list[int] = list(_bound_dataset_ids(draft_content))
     version_contents: dict[int, dict] = {}
     for version in versions:
-        content = _load_content_object(db, version.content_object_id)
+        content = project_domain.load_content_object(db, version.content_object_id)
         version_contents[version.version_no] = content
         dataset_ids.extend(_bound_dataset_ids(content))
     evidence_list = _collect_evidence(db, project.id)
@@ -746,10 +666,10 @@ def export_package(db: Session, user: UserRecord, project_id: int) -> PackageExp
 
     包内不含: 账号/权限与查看者名单/会话/全局系统配置/部署环境密钥。
     """
-    _ensure_access(db, user, project_id, "export_package")
-    project = _require_project(db, project_id)
-    draft = _get_current_draft(db, project)
-    draft_content = _load_content_object(db, draft.content_object_id)
+    project_domain.ensure_access(db, user, project_id, "export_package")
+    project = project_domain.require_project(db, project_id)
+    draft = project_domain.require_current_draft(db, project)
+    draft_content = project_domain.load_content_object(db, draft.content_object_id)
     zip_bytes, manifest = _build_package_zip(db, project, draft, draft_content)
 
     obj = put_object(
@@ -1059,7 +979,7 @@ def import_proposal(
     manifest, entries = _parse_package(file_bytes)
     # 幂等: 同一提议人 + 同一幂等键的未确认提案 → 直接返回(校验已通过, 不重复暂存)
     if idempotency_key:
-        for cand in package_domain.list_proposals_for_proposer(db, user.id):
+        for cand in list_proposals_for_proposer(db, user.id):
             if (
                 cand.status == "proposed"
                 and (cand.review_summary or {}).get("idempotency_key") == idempotency_key
@@ -1129,14 +1049,14 @@ def import_proposal(
     # §11 内部路径, 不得进入审计记录; 可追溯性由 source_object_id
     # (对象存储对象外键)承担。提案行经 package 域 repository 创建,
     # 不直接访问提案表。
-    proposal = package_domain.create_proposal(
+    proposal = create_proposal(
         db,
         project_id=project.id,
         proposer_id=user.id,
         source_type="json",
         source_object_id=source_obj.id,
     )
-    proposal = package_domain.set_proposal_review(
+    proposal = set_proposal_review(
         db,
         proposal.id,
         status="proposed",
@@ -1194,7 +1114,7 @@ def import_proposal(
 
 def _create_draft_row(db: Session, project_id: int, content: dict, user: UserRecord):
     """新项目身份创建初始草稿(revision=1, 经 project 域 repository)。"""
-    content_object_id = _store_content_object(db, content)
+    content_object_id = project_domain.store_content_object(db, content)
     return project_domain.create_draft(
         db,
         project_id=project_id,
@@ -1232,7 +1152,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
     导入约束: 不得静默覆盖(名称去重 + 新项目身份); 账号/权限/会话不随包导入;
     导入者成为新项目所有者; 原授权关系不迁移。
     """
-    proposal = package_domain.get_proposal(db, proposal_id)
+    proposal = get_proposal(db, proposal_id)
     if proposal is None:
         raise NotFoundError(
             "导入提案不存在",
@@ -1388,7 +1308,8 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
                     for a in assessments
                 ],
                 "objects": [
-                    {"path": e.get("path"), "object_id": oid} for e, oid in zip(ref_objects, object_ids)
+                    {"path": e.get("path"), "object_id": oid}
+                    for e, oid in zip(ref_objects, object_ids, strict=False)
                 ],
             }
         )
@@ -1439,7 +1360,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
                 ]
             )
         version_content = _remap(dict(doc.get("content") or {}))
-        content_object_id = _store_content_object(db, version_content)
+        content_object_id = project_domain.store_content_object(db, version_content)
         version = project_domain.create_version(
             db,
             project_id=project.id,
@@ -1478,7 +1399,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             ) from exc
 
     # 6) 提案收尾 + 审计(提案状态经 package 域状态机推进)
-    package_domain.set_proposal_review(
+    set_proposal_review(
         db,
         proposal.id,
         status="applied",
@@ -1500,11 +1421,12 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         },
     )
     # 重读项目行: 版本/草稿创建已移动 current 指针, 入口快照已过期
-    return _require_project(db, project.id)
+    return project_domain.require_project(db, project.id)
 
 
 # ---------------------------------------------------------------------------
-# Excel 报告导出(U15/U14, domain-model §快照、任务和结果 / contracts §公共文件契约 / REQ-EXPORT-001: 固定模板, 固定引用, 不重新求解)
+# Excel 报告导出(U15/U14, domain-model §快照、任务和结果 /
+# contracts §公共文件契约 / REQ-EXPORT-001: 固定模板, 固定引用, 不重新求解)
 # ---------------------------------------------------------------------------
 
 
@@ -1587,7 +1509,8 @@ def export_excel(
     assessment_id: int,
     lang: str = "zh",
 ) -> bytes:
-    """导出固定模板 Excel 报告(查看者可导出, domain-model §快照、任务和结果 / contracts §公共文件契约 / REQ-EXPORT-001)。
+    """导出固定模板 Excel 报告(查看者可导出,
+    domain-model §快照、任务和结果 / contracts §公共文件契约 / REQ-EXPORT-001)。
 
     - 固定引用给定证据包与结果评估, 导出时不重新求解(11.2);
     - 标题中英双语(默认简体中文); 内容: 项目版本/计算快照/数据版本/计算配置/
@@ -1595,8 +1518,8 @@ def export_excel(
       适用范围与限制;
     - 注明适用单位与数据来源(数据集版本/溯源/许可证/内容校验值)。
     """
-    _ensure_access(db, user, project_id, "export_excel")
-    project = _require_project(db, project_id)
+    project_domain.ensure_access(db, user, project_id, "export_excel")
+    project = project_domain.require_project(db, project_id)
     evidence = results_domain.get_evidence(db, evidence_package_id)
     if evidence is None:
         raise NotFoundError(
@@ -1625,7 +1548,7 @@ def export_excel(
     )
     version_content: dict = {}
     if version is not None:
-        version_content = _load_content_object(db, version.content_object_id)
+        version_content = project_domain.load_content_object(db, version.content_object_id)
     evidence_content = _parse_evidence_content(get_object(db, evidence.object_id))
 
     # 数据版本(计算快照绑定的数据集版本 + 溯源/许可证)
