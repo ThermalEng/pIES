@@ -24,7 +24,8 @@ from iesplan.application.projects import lifecycle as lifecycle_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.errors import ConflictError, ForbiddenError, NotFoundError  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.services import project as legacy_project  # noqa: E402
+
+# 旧 services.project 已删除, 等价对照测试已随之删除; 仅保留新用例行为测试。
 
 
 @pytest.fixture(scope="session")
@@ -95,37 +96,6 @@ def test_create_commits_and_view(engine: Engine, db_session: Session) -> None:
     assert view["my_role"] == "owner"
 
 
-def test_behavior_matches_legacy_service(engine: Engine, db_session: Session) -> None:
-    owner = make_user(db_session, "w2a_owner2")
-    new_proj = lifecycle_uc.create_project(db_session, owner, "W2A 新用例", **BASELINE)
-    legacy_proj = legacy_project.create_project(db_session, owner, "W2A 旧服务", **BASELINE)
-    db_session.commit()
-
-    with _new_session(engine) as fresh:
-        new_view = _norm_view(lifecycle_uc.get_project_view(fresh, owner, new_proj.id))
-        legacy_view = lifecycle_uc.get_project_view(fresh, owner, legacy_proj.id)
-    legacy_view = _norm_view(
-        {"project": {**legacy_view["project"], "name": "W2A 新用例"},
-         "draft": legacy_view["draft"], "versions": [], "my_role": legacy_view["my_role"]}
-    )
-    assert new_view == legacy_view
-
-    # 草稿修订对照：同一命令在两侧产生同一结果
-    cmd = lambda cid: {
-        "id": cid, "project_id": None, "unit": "model",
-        "type": "model.upsert_device", "payload": {"name": "pv1", "kind": "new"},
-    }
-    new_res = lifecycle_uc.update_draft(db_session, owner, new_proj.id, [cmd("c1")], 1)
-    legacy_res = legacy_project.update_draft(db_session, owner, legacy_proj.id, [cmd("c1")], 1)
-    db_session.commit()
-    assert new_res["revision"] == legacy_res["revision"] == 2
-    assert new_res["results"] == legacy_res["results"]
-    with _new_session(engine) as fresh:
-        new_content = lifecycle_uc.get_current_draft_content(fresh, new_proj.id)
-        legacy_content = legacy_project.get_current_draft_content(fresh, legacy_proj.id)
-    assert new_content == legacy_content
-
-
 def test_archive_unarchive_delete_flow(engine: Engine, db_session: Session) -> None:
     owner = make_user(db_session, "w2a_owner3")
     stranger = make_user(db_session, "w2a_stranger3")
@@ -159,8 +129,11 @@ def test_update_draft_idempotent_and_conflict(db_session: Session) -> None:
     project = lifecycle_uc.create_project(db_session, owner, "W2A 草稿", **BASELINE)
     pid = project.id
     cmd = {
-        "id": "c1", "project_id": pid, "unit": "model",
-        "type": "model.upsert_device", "payload": {"name": "pv1", "kind": "new"},
+        "id": "c1",
+        "project_id": pid,
+        "unit": "model",
+        "type": "model.upsert_device",
+        "payload": {"name": "pv1", "kind": "new"},
     }
     first = lifecycle_uc.update_draft(db_session, owner, pid, [cmd], 1)
     assert first["revision"] == 2

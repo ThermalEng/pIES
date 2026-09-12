@@ -2,9 +2,9 @@
 
 - 直接覆盖 `iesplan.identity.persistence`(经 `iesplan.identity` 门面):
   用户/凭证/角色/会话/应用设置/认证事件/第三方 subject 绑定;
-- 覆盖迁移后的 `iesplan.services.identity` 身份写入面:
+- 覆盖 `iesplan.application.identity` 身份用例写入面:
   建用户/登录/改密/重置/窗口会话接管/撤销/续期/过期/停用/删除;
-- 覆盖迁移后的 `iesplan.services.dataset` 数据集写入面(经 dataset 域):
+- 覆盖 `iesplan.application.datasets` 数据集用例写入面(经 dataset 域):
   建集/取数/列表/版本上传/版本详情/样例生成/冲突与缺失语义;
 - 运行环境与切片 3 一致:SQLite 内存库 + 临时 data_dir(对象存储)。
 """
@@ -23,12 +23,12 @@ from test_dataset_api import make_csv
 from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
+from iesplan.application import identity as identity_service
+from iesplan.application.datasets import lifecycle as datasets_uc
 from iesplan.config import settings
 from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.db import Base
 from iesplan.identity.contracts import IdentityConflictError, UserNotFoundError
-from iesplan.services import dataset as dataset_service
-from iesplan.application import identity as identity_service
 
 
 @pytest.fixture()
@@ -236,7 +236,7 @@ def test_identity_session_lifecycle(db: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# services.identity 写入面回归
+# application.identity 用例回归
 # ---------------------------------------------------------------------------
 
 _ADMIN_PASSWORD = "Admin12345"
@@ -381,7 +381,7 @@ def test_service_user_admin_lifecycle(db: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# services.dataset 写入面回归(经 dataset 域)
+# application.datasets 用例回归(经 dataset 域)
 # ---------------------------------------------------------------------------
 
 
@@ -397,74 +397,74 @@ def _upload_meta() -> dict:
 def test_service_dataset_crud_and_conflicts(db: Session, data_dir: Path) -> None:
     proj = _make_project(db)
     db.commit()  # 请求边界: 后续冲突路径的回滚不得抹掉已提交的建置
-    created = dataset_service.create_dataset(db, proj.id, "ds1", license="CC-BY-4.0", description="d1")
+    created = datasets_uc.create_dataset(db, proj.id, "ds1", license="CC-BY-4.0", description="d1")
     db.commit()
     assert created.id > 0 and created.status == "draft"
     assert created.default_license == "CC-BY-4.0"
     assert created.created_at is not None
-    found = dataset_service.get_dataset(db, created.id)
+    found = datasets_uc.get_dataset(db, created.id)
     assert found is not None and found.id == created.id and found.name == "ds1"
-    assert dataset_service.get_dataset(db, 999999) is None
+    assert datasets_uc.get_dataset(db, 999999) is None
 
     with pytest.raises(ConflictError):
-        dataset_service.create_dataset(db, proj.id, "ds1")
+        datasets_uc.create_dataset(db, proj.id, "ds1")
     with pytest.raises(NotFoundError):
-        dataset_service.create_dataset(db, 999999, "ghost")
+        datasets_uc.create_dataset(db, 999999, "ghost")
     with pytest.raises(NotFoundError):
-        dataset_service.require_project(db, 999999)
-    dataset_service.require_project(db, proj.id)
+        datasets_uc.require_project(db, 999999)
+    datasets_uc.require_project(db, proj.id)
 
-    items = dataset_service.list_datasets_with_latest(db, proj.id)
+    items = datasets_uc.list_datasets_with_latest(db, proj.id)
     assert [item["dataset"].id for item in items] == [created.id]
     assert items[0]["latest_version"] is None
     with pytest.raises(NotFoundError):
-        dataset_service.list_dataset_versions(db, 999999)
-    assert dataset_service.list_dataset_versions(db, created.id) == []
+        datasets_uc.list_dataset_versions(db, 999999)
+    assert datasets_uc.list_dataset_versions(db, created.id) == []
 
 
 def test_service_dataset_upload_and_version_detail(db: Session, data_dir: Path) -> None:
     proj = _make_project(db)
     db.commit()
-    created = dataset_service.create_dataset(db, proj.id, "ds-upload")
+    created = datasets_uc.create_dataset(db, proj.id, "ds-upload")
     db.commit()
     csv_bytes = make_csv("1h", n=8760)
 
-    v1 = dataset_service.upload_dataset_version(db, created.id, "1h", 480, {}, csv_bytes, _upload_meta())
+    v1 = datasets_uc.upload_dataset_version(db, created.id, "1h", 480, {}, csv_bytes, _upload_meta())
     assert v1.version_no == 1 and v1.created_at is not None
-    v2 = dataset_service.upload_dataset_version(db, created.id, "1h", 480, {}, csv_bytes, _upload_meta())
+    v2 = datasets_uc.upload_dataset_version(db, created.id, "1h", 480, {}, csv_bytes, _upload_meta())
     assert v2.version_no == 2
 
-    versions = dataset_service.list_dataset_versions(db, created.id)
+    versions = datasets_uc.list_dataset_versions(db, created.id)
     assert [v.version_no for v in versions] == [2, 1]
 
-    summary = dataset_service.version_files_summary(db, v2.id)
+    summary = datasets_uc.version_files_summary(db, v2.id)
     assert {f["file_kind"] for f in summary} == {"data", "metadata"}
 
-    detail = dataset_service.get_dataset_version(db, created.id, None)
+    detail = datasets_uc.get_dataset_version(db, created.id, None)
     assert detail["version"].version_no == 2
     assert {f["file_kind"] for f in detail["files"]} == {"data", "metadata"}
     assert detail["data"]["row_count"] == 8760
-    detail_v1 = dataset_service.get_dataset_version(db, created.id, 1)
+    detail_v1 = datasets_uc.get_dataset_version(db, created.id, 1)
     assert detail_v1["version"].id == v1.id
     with pytest.raises(NotFoundError):
-        dataset_service.get_dataset_version(db, created.id, 99)
+        datasets_uc.get_dataset_version(db, created.id, 99)
 
-    items = dataset_service.list_datasets_with_latest(db, proj.id)
+    items = datasets_uc.list_datasets_with_latest(db, proj.id)
     assert items[0]["latest_version"] is not None
     assert items[0]["latest_version"].version_no == 2
 
     dataset_domain.set_dataset_status(db, created.id, "deprecated")
     with pytest.raises(ConflictError):
-        dataset_service.upload_dataset_version(db, created.id, "1h", 480, {}, csv_bytes, _upload_meta())
+        datasets_uc.upload_dataset_version(db, created.id, "1h", 480, {}, csv_bytes, _upload_meta())
 
 
 def test_service_dataset_builtin_sample(db: Session, data_dir: Path) -> None:
     proj = _make_project(db, "slice4-sample-proj")
     db.commit()
-    v1 = dataset_service.create_builtin_sample(db, proj.id, "1h", region="beijing")
+    v1 = datasets_uc.create_builtin_sample(db, proj.id, "1h", region="beijing")
     assert v1.version_no == 1
     assert v1.provenance is not None and v1.provenance["region"] == "beijing"
-    v2 = dataset_service.create_builtin_sample(db, proj.id, "1h", region="beijing")
+    v2 = datasets_uc.create_builtin_sample(db, proj.id, "1h", region="beijing")
     assert v2.version_no == 2
-    items = dataset_service.list_datasets_with_latest(db, proj.id)
+    items = datasets_uc.list_datasets_with_latest(db, proj.id)
     assert len(items) == 1 and items[0]["latest_version"].version_no == 2

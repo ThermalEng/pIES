@@ -34,17 +34,14 @@ from uuid import UUID, uuid4
 from sqlalchemy.orm import Session
 
 from iesplan import __version__
-from iesplan import audit as audit_domain
-from iesplan import configuration as configuration_domain
 from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.projects import versions as project_versions
 from iesplan.application.projects.content_objects import (
-    load_content_bytes,
     load_content_object,
-    store_content_object,
 )
 from iesplan.config import settings
 from iesplan.core.diagnostics import (
@@ -58,7 +55,7 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.idgen import new_id
-from iesplan.core.jsonutil import canonical_json, jsonable
+from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.storage import (
@@ -270,69 +267,8 @@ def _get_current_draft(db: Session, project: ProjectRecord):
     return draft
 
 
-def _version_content_for_freeze(db: Session, project: ProjectRecord, content: dict) -> dict:
-    """版本内容 = 草稿领域内容(去命令簿记) + 项目固化字段(复制 services.project 规则)。
-
-    固化字段: 币种、项目计算基线、财务三件套/规划配置引用(指针解析,
-    无配置时省略, 不静默默认)。内部已固化数据信任已通过边界的类型化内容,
-    不做重算比对。
-    """
-    version_content = {k: v for k, v in content.items() if k != "applied_commands"}
-    version_content["currency"] = project.currency
-    version_content["project_baseline"] = {
-        "resolution": project.baseline_resolution,
-        "leap_year": project.baseline_leap_year,
-        "scenario_mode": project.baseline_scenario_mode,
-    }
-    if project.effective_finance_revision is not None:
-        row = configuration_domain.get_effective_revision(
-            db, project.id, project.effective_finance_revision
-        )
-        if row is None:
-            raise AppError(
-                "项目 Effective 财务快照指针损坏(指向不存在的 revision)",
-                code="PROJ-FIN-003",
-                params={"project_id": project.id, "revision": project.effective_finance_revision},
-            )
-        version_content["effective_finance"] = {
-            "profile_id": row.profile_id,
-            "revision": row.revision,
-        }
-    if project.planning_revision is not None:
-        row = configuration_domain.get_planning_revision(db, project.id, project.planning_revision)
-        if row is None:
-            raise AppError(
-                "项目规划配置指针损坏(指向不存在的 revision)",
-                code="PROJ-PLAN-004",
-                params={"project_id": project.id, "revision": project.planning_revision},
-            )
-        version_content["planning_config"] = {"revision": row.revision}
-    return version_content
 
 
-def _audit_version_created(
-    db: Session, actor_id: int, version: ProjectVersionRecord, project_id: int,
-    name: str, reason: str, draft_revision: int,
-) -> None:
-    """版本创建审计(复制 services.project.create_version 的审计语义)。"""
-    audit_domain.append_entry(
-        db,
-        actor_id=actor_id,
-        action="project.version_created",
-        entity_type="project_version",
-        entity_id=version.id,
-        actor_type="user",
-        before=None,
-        extra={
-            "project_id": project_id,
-            "version_no": version.version_no,
-            "name": name,
-            "reason": reason,
-            "parent_version_id": version.parent_version_id,
-            "source_draft_revision": draft_revision,
-            "source_result_id": None,
-        },
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +296,7 @@ def _resolve_project_inputs(
                 message_key="ies.diag.store.corrupt",
                 location={"object_type": "project", "object_id": project.id},
             )
-        if not _current_version_matches_draft(db, project):
+        if not project_versions.current_version_matches_draft(db, project):
             version = None  # 草稿已变更: 需重新固化
     if version is not None:
         return version, load_content_object(db, version.content_object_id)
@@ -369,53 +305,12 @@ def _resolve_project_inputs(
     if not freeze:
         return None, content
     # 草稿固化: 创建不可变项目版本(计算输入固定)
-    version = _freeze_snapshot_version(db, actor, project, draft)
+    version = project_versions.freeze_snapshot_version(db, actor, project, draft)
     return version, content
 
 
-def _current_version_matches_draft(db: Session, project: ProjectRecord) -> bool:
-    """当前版本内容是否与当前草稿一致(复制 services.project 规则)。
-
-    无当前版本返回 False(需固化)。
-    """
-    if project.current_version_id is None:
-        return False
-    version = project_domain.get_version(db, project.id, project.current_version_id)
-    if version is None:
-        return False
-    draft = _get_current_draft(db, project)
-    content = load_content_object(db, draft.content_object_id)
-    expected = canonical_json(_version_content_for_freeze(db, project, content)).encode("utf-8")
-    stored = load_content_bytes(db, version.content_object_id)
-    return stored == expected
 
 
-def _freeze_snapshot_version(db: Session, actor: UserRecord, project, draft) -> ProjectVersionRecord:
-    """为快照装配固化草稿为不可变版本(复制 services.project.create_version 路径)。"""
-    if project.status != "active":
-        raise ConflictError(
-            "项目已归档或已删除, 不能创建版本",
-            location={"object_type": "project", "object_id": project.id},
-        )
-    content = load_content_object(db, draft.content_object_id)
-    version_content = _version_content_for_freeze(db, project, content)
-    content_object_id = store_content_object(db, version_content)
-    version = project_domain.create_version(
-        db,
-        project_id=project.id,
-        name="计算任务自动固化",
-        reason="snapshot_freeze",
-        created_by=actor.id,
-        content_object_id=content_object_id,
-        source_draft_id=draft.id,
-        source_draft_revision=draft.revision,
-        description=None,
-        parent_version_id=None,
-    )
-    _audit_version_created(
-        db, actor.id, version, project.id, "计算任务自动固化", "snapshot_freeze", draft.revision
-    )
-    return version
 
 
 def _bound_dataset_ids(content: dict) -> list[int]:

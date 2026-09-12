@@ -1,8 +1,8 @@
 """Wave 2 W2-A: application/datasets 用例测试。
 
-覆盖：
-- 用例可独立执行并提交事务（新会话可读回写入）；
-- 行为与旧服务一致（关键路径对照：创建/上传版本/内置样例/拒绝回滚）。
+覆盖：用例可独立执行并提交事务（新会话可读回写入）；
+关键路径：创建/上传版本/内置样例/拒绝回滚。
+（旧 services.dataset 已删除，等价对照测试已随之删除。）
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from iesplan.application.projects import lifecycle as projects_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.services import dataset as legacy_dataset  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -83,12 +82,6 @@ def _make_project(db: Session, owner, name: str) -> int:
     return project.id
 
 
-def _norm_report(report: dict) -> dict:
-    report = dict(report)
-    report.pop("generated_at", None)
-    return report
-
-
 def test_create_upload_commits(engine: Engine, db_session: Session) -> None:
     owner = make_user(db_session, "w2a_ds_owner1")
     pid = _make_project(db_session, owner, "W2A 数据集项目")
@@ -108,34 +101,6 @@ def test_create_upload_commits(engine: Engine, db_session: Session) -> None:
         assert {f["file_kind"] for f in files} == {"data", "metadata"}
 
 
-def test_behavior_matches_legacy_service(engine: Engine, db_session: Session) -> None:
-    owner = make_user(db_session, "w2a_ds_owner2")
-    pid = _make_project(db_session, owner, "W2A 数据集对照")
-    payload = _make_csv()
-
-    ds_new = datasets_uc.create_dataset(db_session, pid, "新用例集", user_id=owner.id)
-    v_new = datasets_uc.upload_dataset_version(
-        db_session, ds_new.id, "1h", 480, {}, payload, {}, user_id=owner.id
-    )
-    ds_old = legacy_dataset.create_dataset(db_session, pid, "旧服务集", user_id=owner.id)
-    v_old = legacy_dataset.upload_dataset_version(
-        db_session, ds_old.id, "1h", 480, {}, payload, {}, user_id=owner.id
-    )
-    db_session.commit()
-
-    assert v_new.version_no == v_old.version_no == 1
-    assert _norm_report(v_new.quality_report) == _norm_report(v_old.quality_report)
-    with _new_session(engine) as fresh:
-        new_info = datasets_uc.get_dataset_version(fresh, ds_new.id)
-        old_info = datasets_uc.get_dataset_version(fresh, ds_old.id)
-    assert new_info["data"] == old_info["data"]
-    assert [f["file_kind"] for f in new_info["files"]] == [f["file_kind"] for f in old_info["files"]]
-
-    latest = datasets_uc.list_datasets_with_latest(db_session, pid)
-    assert {entry["dataset"].name for entry in latest} == {"新用例集", "旧服务集"}
-    assert all(entry["latest_version"] is not None for entry in latest)
-
-
 def test_builtin_sample(engine: Engine, db_session: Session) -> None:
     owner = make_user(db_session, "w2a_ds_owner3")
     pid = _make_project(db_session, owner, "W2A 样例项目")
@@ -148,7 +113,7 @@ def test_builtin_sample(engine: Engine, db_session: Session) -> None:
 
 
 def test_invalid_csv_rejected_and_rolled_back(engine: Engine, db_session: Session) -> None:
-    from iesplan.application.datasets.csv_validation import DataValidationError
+    from iesplan.application.datasets import DataValidationError
 
     owner = make_user(db_session, "w2a_ds_owner4")
     pid = _make_project(db_session, owner, "W2A 拒绝项目")

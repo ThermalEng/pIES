@@ -103,7 +103,6 @@ WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
     # ---- results.py: 结果查询任务状态与校验正则 ----
     # (切片 5: assess 端点经 tasks_service.ensure_task_belongs 取任务, 移除 Task)
     # (Wave 3 集成: results.py 改经 application 用例, HASH64_RE 直引已消除)
-
     # (Wave 4 集成: limits 配额统计收敛到 datasets.quotas, auth 会话取数收敛到
     #  identity 门面, objects 归属校验收敛到 application.objects, 移除 4 项)
     # ---- tasks.py: 幂等键校验正则常量 ----
@@ -594,32 +593,8 @@ def _find_app_service_imports(
     return sorted(found)
 
 
-#: 门禁 9 临时债务: application → services 直调(纠偏 Wave 1/2 按纵向切片归零)。
-TEMP_DEBT_APP_SERVICES: set[tuple[str, int, str]] = {
-    ("iesplan.application.audits.service", 16, "iesplan.services:audit"),
-    ("iesplan.application.configuration.calc_config", 27, "iesplan.services:config"),
-    ("iesplan.application.configuration.calc_config", 28, "iesplan.services.config"),
-    ("iesplan.application.health", 21, "iesplan.services:queue"),
-    ("iesplan.application.identity.auth_cases", 31, "iesplan.services:external_auth"),
-    ("iesplan.application.identity.auth_cases", 32, "iesplan.services.external_auth"),
-    ("iesplan.application.models.model_save", 51, "iesplan.services:project"),
-    ("iesplan.application.packages.operations", 24, "iesplan.services:package"),
-    ("iesplan.application.packages.reports", 21, "iesplan.services:package"),
-    ("iesplan.application.packages.reports", 22, "iesplan.services.package"),
-    ("iesplan.application.projects.exports", 18, "iesplan.services:package"),
-    ("iesplan.application.projects.versions", 26, "iesplan.services:project"),
-    ("iesplan.application.results.endpoint_cases", 27, "iesplan.services:project"),
-    ("iesplan.application.results.endpoint_cases", 28, "iesplan.services:results"),
-    ("iesplan.application.tasks.maintenance", 44, "iesplan.services:queue"),
-    ("iesplan.application.tasks.submissions", 64, "iesplan.services:queue"),
-    ("iesplan.application.tasks.views", 27, "iesplan.services:project"),
-    ("iesplan.application.tasks.views", 28, "iesplan.services:tasks"),
-    ("iesplan.application.worker", 134, "iesplan.services:queue"),
-    ("iesplan.application.worker", 135, "iesplan.services:tasks"),
-    ("iesplan.application.worker.lease_cases", 32, "iesplan.services:queue"),
-    ("iesplan.application.worker.lease_cases", 33, "iesplan.services:tasks"),
-    ("iesplan.application.worker.runner_cases", 27, "iesplan.services:dataset"),
-}
+#: 门禁 9 临时债务: application → services 直调(C1-A/B/C/D 已全部归零)。
+TEMP_DEBT_APP_SERVICES: set[tuple[str, int, str]] = set()
 
 
 def _find_app_bare_sql(
@@ -644,27 +619,8 @@ def _find_app_bare_sql(
     return sorted(found)
 
 
-#: 门禁 10 临时债务: application 裸表/裸 SQL(纠偏 Wave 1 按纵向切片归零)。
-TEMP_DEBT_APP_BARE_SQL: set[tuple[str, int, str]] = {
-    ("iesplan.application.tasks.maintenance", 76, "sa.table"),
-    ("iesplan.application.tasks.maintenance", 86, "sa.table"),
-    ("iesplan.application.tasks.maintenance", 94, "sa.table"),
-    ("iesplan.application.tasks.maintenance", 105, "sa.table"),
-    ("iesplan.application.tasks.maintenance", 190, "sa.update"),
-    ("iesplan.application.tasks.maintenance", 216, "sa.insert"),
-    ("iesplan.application.worker.evidence_cases", 44, "sa.table"),
-    ("iesplan.application.worker.evidence_cases", 132, "sa.insert"),
-    ("iesplan.application.worker.lease_cases", 137, "sa.table"),
-    ("iesplan.application.worker.lease_cases", 148, "sa.table"),
-    ("iesplan.application.worker.lease_cases", 160, "sa.table"),
-    ("iesplan.application.worker.lease_cases", 203, "sa.update"),
-    ("iesplan.application.worker.lease_cases", 218, "sa.update"),
-    ("iesplan.application.worker.lease_cases", 322, "sa.update"),
-    ("iesplan.application.worker.lease_cases", 341, "sa.insert"),
-    ("iesplan.application.worker.lease_cases", 359, "sa.update"),
-    ("iesplan.application.worker.runner_cases", 63, "sa.table"),
-    ("iesplan.application.worker.runner_cases", 70, "sa.table"),
-}
+#: 门禁 10 临时债务: application 裸表/裸 SQL(C1-A 已随领域收敛归零)。
+TEMP_DEBT_APP_BARE_SQL: set[tuple[str, int, str]] = set()
 
 
 def _find_worker_transactions(

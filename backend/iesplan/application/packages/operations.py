@@ -18,6 +18,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import package as package_domain
+from iesplan.application.packages.transfers import confirm_import as _confirm_import
+from iesplan.application.packages.transfers import export_package as _export_package
+from iesplan.application.packages.transfers import import_proposal as _import_proposal
 from iesplan.identity.contracts import UserRecord
 from iesplan.package.contracts import ImportProposalRecord
 from iesplan.project.contracts import ProjectRecord
@@ -33,7 +36,7 @@ MAX_PACKAGE_BYTES: int = package_domain.MAX_PACKAGE_BYTES
 def export_package(db: Session, user: UserRecord, project_id: int):
     """导出完整项目包用例(仅所有者); 本层拥有事务提交/回滚。"""
     try:
-        result = package_domain.export_package(db, user, project_id)
+        result = _export_package(db, user, project_id)
         db.commit()
         return result
     except Exception:
@@ -54,7 +57,7 @@ def propose_import(
 ) -> ImportProposalRecord:
     """创建导入提案用例(校验 → 暂存 → 拟创建项目快照); 本层拥有事务提交/回滚。"""
     try:
-        result = package_domain.import_proposal(
+        result = _import_proposal(
             db, user, file_bytes, idempotency_key=idempotency_key
         )
         db.commit()
@@ -67,7 +70,7 @@ def propose_import(
 def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRecord:
     """确认导入用例(分区提交 + 提案收尾 + 审计); 本层拥有事务提交/回滚。"""
     try:
-        result = package_domain.confirm_import(db, user, proposal_id)
+        result = _confirm_import(db, user, proposal_id)
         db.commit()
         return result
     except Exception:

@@ -1,7 +1,8 @@
-"""项目包域公开门面（import_proposals 表读写 + 包传输编排，归属 package）。
+"""项目包域公开门面（import_proposals 表读写 + 包格式纯函数，归属 package）。
 
-外部只允许经本门面消费 contract、repository 协议与 repository 实现函数；
-不得导入 `iesplan.models`、services 或其他域的内部模块。
+跨域传输编排归属 ``application.packages.transfers``。外部只允许经本门面
+消费 contract、repository 协议与 repository 实现函数；不得导入
+`iesplan.models`、services 或其他域的内部模块。
 """
 
 from __future__ import annotations
@@ -26,11 +27,12 @@ from iesplan.package.transfers import (
     ImportValidationError,
     PackageExport,
     PackageSizeError,
-    confirm_import,
+    bound_dataset_ids,
     create_download_token,
-    export_excel,
-    export_package,
-    import_proposal,
+    media_file_kind,
+    parse_config_files,
+    parse_evidence_content,
+    parse_package,
     verify_download_token,
 )
 
@@ -57,15 +59,16 @@ __all__ = [
     "PackageRepository",
     "PackageSizeError",
     "DownloadTokenError",
-    "confirm_import",
+    "bound_dataset_ids",
     "create_download_token",
+    "media_file_kind",
     "create_proposal",
-    "export_excel",
-    "export_package",
     "get_proposal",
-    "import_proposal",
     "list_proposals",
     "list_proposals_for_proposer",
+    "parse_config_files",
+    "parse_evidence_content",
+    "parse_package",
     "set_proposal_review",
     "verify_download_token",
 ]

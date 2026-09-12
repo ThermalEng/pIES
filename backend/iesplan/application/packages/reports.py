@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import package as package_domain
+from iesplan.application.packages.transfers import export_excel as _export_excel
 from iesplan.identity.contracts import UserRecord
 from iesplan.package import DownloadTokenError
 from iesplan.storage import add_ref, get_object, list_refs, put_object
@@ -47,7 +48,7 @@ def export_excel_report(
     lang: str = "zh",
 ) -> dict[str, Any]:
     """生成 Excel 报告并登记对象/引用, 返回短期单对象下载授权(路由原顺序)。"""
-    excel_bytes = package_domain.export_excel(
+    excel_bytes = _export_excel(
         db, user, project_id, evidence_package_id, assessment_id, lang=lang
     )
     try:

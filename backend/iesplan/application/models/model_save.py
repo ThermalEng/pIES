@@ -25,6 +25,8 @@ from sqlalchemy.orm import Session
 from iesplan import audit as audit_domain
 from iesplan import model as model_domain
 from iesplan import project as project_domain
+from iesplan.application.model_templates import resolve_template_revision
+from iesplan.application.projects import versions as project_versions
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     Diagnostic,
@@ -54,10 +56,6 @@ from iesplan.storage import (
     find_refs_by_owner,
     get_object,
     put_object,
-)
-from iesplan.application.model_templates import (
-    TEMPLATE_OWNER_NAMESPACE,
-    resolve_template_revision,
 )
 
 #: 最终 owner 命名空间(项目模型清单行持有者)
@@ -136,8 +134,10 @@ def _diag(
     if field is not None:
         location["field"] = field
     return make_diag(
-        code, severity=SEVERITY_ERROR,
-        params=dict(params or {"detail": detail}), location=location,
+        code,
+        severity=SEVERITY_ERROR,
+        params=dict(params or {"detail": detail}),
+        location=location,
     )
 
 
@@ -151,29 +151,47 @@ def _parse_candidate_yaml(model_yaml: str) -> tuple[Mapping[str, Any] | None, li
     diags: list[Diagnostic] = []
     if not model_yaml or not model_yaml.strip():
         diags.append(
-            _diag(PROJ_MDL_YAML_PARSE, "候选模型 YAML 不能为空", field="model_yaml",
-                  params={"expected": "非空 ies.device-model YAML", "actual": "空"})
+            _diag(
+                PROJ_MDL_YAML_PARSE,
+                "候选模型 YAML 不能为空",
+                field="model_yaml",
+                params={"expected": "非空 ies.device-model YAML", "actual": "空"},
+            )
         )
         return None, diags
     if len(model_yaml.encode("utf-8")) > MAX_MODEL_YAML_BYTES:
         diags.append(
-            _diag(PROJ_MDL_YAML_PARSE, f"候选模型 YAML 超过上限 {MAX_MODEL_YAML_BYTES} 字节",
-                  field="model_yaml", params={"expected": f"≤ {MAX_MODEL_YAML_BYTES} 字节",
-                                              "actual": len(model_yaml.encode("utf-8"))})
+            _diag(
+                PROJ_MDL_YAML_PARSE,
+                f"候选模型 YAML 超过上限 {MAX_MODEL_YAML_BYTES} 字节",
+                field="model_yaml",
+                params={
+                    "expected": f"≤ {MAX_MODEL_YAML_BYTES} 字节",
+                    "actual": len(model_yaml.encode("utf-8")),
+                },
+            )
         )
         return None, diags
     try:
         raw = yaml_load(model_yaml)
     except YamlParseError as exc:
         diags.append(
-            _diag(PROJ_MDL_YAML_PARSE, str(exc), field="model_yaml",
-                  params={"expected": "YAML 1.2 安全子集", "actual": str(exc), "line": exc.line})
+            _diag(
+                PROJ_MDL_YAML_PARSE,
+                str(exc),
+                field="model_yaml",
+                params={"expected": "YAML 1.2 安全子集", "actual": str(exc), "line": exc.line},
+            )
         )
         return None, diags
     if not isinstance(raw, Mapping):
         diags.append(
-            _diag(PROJ_MDL_YAML_PARSE, "候选模型顶层必须是 mapping",
-                  field="<root>", params={"expected": "mapping", "actual": type(raw).__name__})
+            _diag(
+                PROJ_MDL_YAML_PARSE,
+                "候选模型顶层必须是 mapping",
+                field="<root>",
+                params={"expected": "mapping", "actual": type(raw).__name__},
+            )
         )
         return None, diags
     return raw, diags
@@ -233,7 +251,9 @@ def _parse_candidate_document(
         if result is None:
             return None, diags, "", None
         return (
-            result.document, [], result.canonical_text,
+            result.document,
+            [],
+            result.canonical_text,
             result.receipt,
         )
     parse_result = parse_device_model_v2(raw, file=file)
@@ -243,6 +263,7 @@ def _parse_candidate_document(
     assert doc is not None
     text = canonical_bytes(doc).decode("utf-8")
     return doc, [], text, canonical_receipt(doc)
+
 
 def validate_candidate(
     db: Session,
@@ -270,8 +291,14 @@ def validate_candidate(
     if source not in (MODEL_SOURCE_DIRECT, MODEL_SOURCE_TEMPLATE):
         return CandidateValidation(
             ok=False,
-            diagnostics=[_diag(PROJ_MDL_YAML_PARSE, f"未知来源: {source!r}", field="source",
-                               params={"expected": "direct_yaml|template", "actual": source})],
+            diagnostics=[
+                _diag(
+                    PROJ_MDL_YAML_PARSE,
+                    f"未知来源: {source!r}",
+                    field="source",
+                    params={"expected": "direct_yaml|template", "actual": source},
+                )
+            ],
         )
     raw: Mapping[str, Any] | None = None
     provenance: dict[str, Any] | None = None
@@ -283,11 +310,18 @@ def validate_candidate(
         except (AppError, ConflictError, NotFoundError) as exc:
             return CandidateValidation(
                 ok=False,
-                diagnostics=[_diag(
-                    exc.code, exc.message_key or str(exc), field="template_id",
-                    params={"template_id": template_id, "template_revision": template_revision,
-                            "detail": str(exc)},
-                )],
+                diagnostics=[
+                    _diag(
+                        exc.code,
+                        exc.message_key or str(exc),
+                        field="template_id",
+                        params={
+                            "template_id": template_id,
+                            "template_revision": template_revision,
+                            "detail": str(exc),
+                        },
+                    )
+                ],
             )
         # 权威模板字节为规范 JSON: 直接 json.loads(跳过 yamlmini, 避免 JSON
         # 与 YAML 安全子集解析差异)
@@ -336,12 +370,24 @@ def _rebuild_with_final_id(
     raw.setdefault("device", {})
     raw["device"]["id"] = final_id
     if not is_valid_id(final_id):
-        return None, [
-            _diag(PROJ_MDL_IDENTITY_FAILED, f"最终设备 ID 非法: {final_id!r}",
-                  field="device.id", params={"base_device_id": document.device.id if document.device else "",
-                                              "final_id": final_id, "expected": "小写命名空间 ID",
-                                              "actual": final_id})
-        ], "", {}
+        return (
+            None,
+            [
+                _diag(
+                    PROJ_MDL_IDENTITY_FAILED,
+                    f"最终设备 ID 非法: {final_id!r}",
+                    field="device.id",
+                    params={
+                        "base_device_id": document.device.id if document.device else "",
+                        "final_id": final_id,
+                        "expected": "小写命名空间 ID",
+                        "actual": final_id,
+                    },
+                )
+            ],
+            "",
+            {},
+        )
     result = parse_device_model_v2(raw, file="<candidate>")
     if not result.ok:
         return None, result.diagnostics, "", {}
@@ -351,15 +397,14 @@ def _rebuild_with_final_id(
     return doc, [], text, canonical_receipt(doc)
 
 
-def _find_idempotent_model(
-    db: Session, project_id: int, idempotency_key: str
-) -> ProjectModelRecord | None:
+def _find_idempotent_model(db: Session, project_id: int, idempotency_key: str) -> ProjectModelRecord | None:
     return model_domain.find_project_model_by_idempotency(db, project_id, idempotency_key)
 
 
 def _receipt_bytes(receipt: Mapping[str, Any]) -> bytes:
-    return json.dumps(dict(receipt), ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":")).encode("utf-8")
+    return json.dumps(dict(receipt), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
 
 
 def _load_stored_receipt(db: Session, model: ProjectModelRecord) -> dict[str, Any]:
@@ -442,8 +487,11 @@ def _save_project_model(
         )
 
     validation = validate_candidate(
-        db, user, project_id,
-        model_yaml=model_yaml, source=source,
+        db,
+        user,
+        project_id,
+        model_yaml=model_yaml,
+        source=source,
         template_id=template_id,
         template_revision=template_revision,
         template_inputs=template_inputs,
@@ -464,9 +512,7 @@ def _save_project_model(
     # 编号分配与文件/清单/审计同事务: 失败整体回滚, 编号不占号
     suffix = _allocate_suffix(db, project_id)
     final_id = f"{base_device_id}_{suffix}"
-    final_doc, identity_diags, canonical_text, final_receipt = _rebuild_with_final_id(
-        document, final_id
-    )
+    final_doc, identity_diags, canonical_text, final_receipt = _rebuild_with_final_id(document, final_id)
     if final_doc is None:
         raise ModelCandidateRejectedError(
             "",
@@ -483,11 +529,15 @@ def _save_project_model(
 
     # 写入模型与回执对象，清单行建立后统一 attach 最终 owner。
     model_handle = put_object(
-        db, canonical_text.encode("utf-8"), MODEL_MEDIA_TYPE,
+        db,
+        canonical_text.encode("utf-8"),
+        MODEL_MEDIA_TYPE,
         source_category="project_model",
     )
     receipt_handle = put_object(
-        db, _receipt_bytes(final_receipt), MODEL_MEDIA_TYPE,
+        db,
+        _receipt_bytes(final_receipt),
+        MODEL_MEDIA_TYPE,
         source_category="project_model_receipt",
     )
 
@@ -515,10 +565,22 @@ def _save_project_model(
         ) from exc
 
     # 模型与回执对象登记最终 owner 引用。
-    attach(db, model_handle.id, FINAL_OWNER_NAMESPACE, model.id,
-           ref_entity_type=FINAL_OWNER_NAMESPACE, purpose="model_yaml")
-    attach(db, receipt_handle.id, FINAL_OWNER_NAMESPACE, model.id,
-           ref_entity_type=FINAL_OWNER_NAMESPACE, purpose="receipt")
+    attach(
+        db,
+        model_handle.id,
+        FINAL_OWNER_NAMESPACE,
+        model.id,
+        ref_entity_type=FINAL_OWNER_NAMESPACE,
+        purpose="model_yaml",
+    )
+    attach(
+        db,
+        receipt_handle.id,
+        FINAL_OWNER_NAMESPACE,
+        model.id,
+        ref_entity_type=FINAL_OWNER_NAMESPACE,
+        purpose="receipt",
+    )
     audit_domain.append_entry(
         db,
         entity_type="project_model",
@@ -535,22 +597,22 @@ def _save_project_model(
             "template_revision": template_revision,
         },
     )
-    new_draft = project_domain.replace_project_model_refs(
+    new_draft = project_versions.replace_project_model_refs(
         db,
         user,
         project_id,
         expected_revision,
         _project_model_draft_refs(db, project_id),
     )
-    model = model_domain.update_project_model(
-        db, model.id, project_revision=new_draft.revision
-    )
+    model = model_domain.update_project_model(db, model.id, project_revision=new_draft.revision)
     return {
         "project_model": project_model_to_dict(model),
         "receipt": final_receipt,
         "project_revision": new_draft.revision,
         "duplicate": False,
     }
+
+
 def save_project_model(
     db: Session,
     user,
@@ -590,9 +652,7 @@ def save_project_model(
 # ---------------------------------------------------------------------------
 
 
-def _get_project_model(
-    db: Session, project_id: int, model_id: int
-) -> ProjectModelRecord:
+def _get_project_model(db: Session, project_id: int, model_id: int) -> ProjectModelRecord:
     model = model_domain.get_project_model(db, model_id)
     if model is None or model.project_id != project_id:
         raise ProjectModelNotFoundError(
@@ -620,8 +680,7 @@ def _delete_project_model(
     model = _get_project_model(db, project_id, model_id)
     refs = find_refs_by_owner(db, FINAL_OWNER_NAMESPACE, model.id, FINAL_OWNER_NAMESPACE)
     for ref in refs:
-        detach(db, ref["object_id"], FINAL_OWNER_NAMESPACE, model.id,
-               ref_entity_type=FINAL_OWNER_NAMESPACE)
+        detach(db, ref["object_id"], FINAL_OWNER_NAMESPACE, model.id, ref_entity_type=FINAL_OWNER_NAMESPACE)
     audit_domain.append_entry(
         db,
         entity_type="project_model",
@@ -636,7 +695,7 @@ def _delete_project_model(
         },
     )
     model_domain.delete_project_model(db, model.id)
-    new_draft = project_domain.replace_project_model_refs(
+    new_draft = project_versions.replace_project_model_refs(
         db,
         user,
         project_id,
