@@ -2,10 +2,10 @@
 
 - 直接覆盖 `iesplan.audit` 门面：追加写入（after 由 revision/result/extra
   组装）与过滤 + 游标分页查询；
-- 覆盖迁移后的 `iesplan.services.audit`：统一入口返回记录、查询信封、
-  序列化形状（时间为 ISO 字符串）；
-- 覆盖迁移后的 `services.config.load_work_graph`（经 model 域取草稿图/
-  最近工作图/设备清单）。
+- 覆盖 `iesplan.audit` 域门面（旧 services.audit 已删除）：统一入口返回记录、
+  查询信封、序列化形状（时间为 ISO 字符串）；
+- 覆盖 `application.configuration.load_work_graph`（旧 services.config 已删除；
+  经 model 域取草稿图/最近工作图/设备清单）。
 运行环境与切片 7 一致：SQLite 内存库 + 临时 data_dir（对象存储）。
 """
 
@@ -23,10 +23,9 @@ from sqlalchemy.pool import StaticPool
 from iesplan import audit as audit_domain
 from iesplan import model as model_domain
 from iesplan import project as project_domain
+from iesplan.application import configuration as configuration_uc
 from iesplan.config import settings
 from iesplan.db import Base
-from iesplan.services import audit as audit_service
-from iesplan.services import config as config_service
 
 
 @pytest.fixture()
@@ -93,11 +92,11 @@ def test_audit_domain_append_and_list(db: Session) -> None:
 
 def test_audit_service_envelope_and_serialization(db: Session) -> None:
     user = SimpleNamespace(id=7)
-    rec = audit_service.audit_user_action(db, user, "task.submitted", "task", 9, result={"status": "ok"})
+    rec = audit_domain.audit_user_action(db, user, "task.submitted", "task", 9, result={"status": "ok"})
     assert rec.actor_id == 7 and rec.after == {"result": {"status": "ok"}}
 
-    audit_service.audit(db, None, "auth.login", "user", 7, actor_type="system")
-    envelope = audit_service.query_audit(db, limit=1)
+    audit_domain.audit(db, None, "auth.login", "user", 7, actor_type="system")
+    envelope = audit_domain.query_audit(db, limit=1)
     assert len(envelope["items"]) == 1 and envelope["next_cursor"] is not None
     item = envelope["items"][0]
     assert set(item) == {
@@ -117,14 +116,14 @@ def test_audit_service_envelope_and_serialization(db: Session) -> None:
     assert isinstance(item["occurred_at"], str)
 
     # next_cursor 指向页外末条：再取一页为空且无后续游标
-    tail = audit_service.query_audit(db, cursor=envelope["next_cursor"], limit=1)
+    tail = audit_domain.query_audit(db, cursor=envelope["next_cursor"], limit=1)
     assert tail["items"] == [] and tail["next_cursor"] is None
-    assert audit_service.query_audit(db, action="no.such.action")["items"] == []
+    assert audit_domain.query_audit(db, action="no.such.action")["items"] == []
 
 
 def test_config_load_work_graph_through_model_domain(db: Session, data_dir: Path) -> None:
     project = project_domain.create_project(db, name="slice8-proj", owner_id=7, created_by=7)
-    assert config_service.load_work_graph(db, project.id) == {"devices": []}
+    assert configuration_uc.load_work_graph(db, project.id) == {"devices": []}
 
     from iesplan.application import models as model_service
 
@@ -133,7 +132,7 @@ def test_config_load_work_graph_through_model_domain(db: Session, data_dir: Path
         db, graph_id=graph.id, device_type="load", kind="new", name="L1", params={"a": 1}
     )
     db.commit()
-    got = config_service.load_work_graph(db, project.id)
+    got = configuration_uc.load_work_graph(db, project.id)
     assert got == {
         "devices": [
             {
@@ -145,4 +144,4 @@ def test_config_load_work_graph_through_model_domain(db: Session, data_dir: Path
             }
         ]
     }
-    assert config_service.load_work_graph(db, 999999) == {"devices": []}
+    assert configuration_uc.load_work_graph(db, 999999) == {"devices": []}

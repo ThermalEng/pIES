@@ -423,16 +423,16 @@ def test_migration_0004_idempotent_on_fresh_schema() -> None:
 
 def test_service_requires_explicit_baseline(db_session: Session) -> None:
     """create_project 基线三字段为必填关键字参数: 缺省调用直接 TypeError。"""
+    from iesplan.application.projects import lifecycle as projects_uc
     from iesplan.models.identity import User
-    from iesplan.services import project as project_service
 
     user = User(username="baseline-required", display_name="必填测试")
     db_session.add(user)
     db_session.flush()
     with pytest.raises(TypeError):
-        project_service.create_project(db_session, user, name="缺省基线项目")
+        projects_uc.create_project(db_session, user, name="缺省基线项目")
     # 显式基线: 创建成功
-    project = project_service.create_project(
+    project = projects_uc.create_project(
         db_session, user, name="显式基线项目",
         baseline_resolution="1h",
         baseline_leap_year=False,

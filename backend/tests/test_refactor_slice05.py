@@ -3,9 +3,9 @@
 - 直接覆盖 `iesplan.configuration` 门面:
   Profile 登记/按行读取、Overrides/Effective/Planning revision 追加与当前值;
 - 直接覆盖 `iesplan.tasks` 门面: 快照/任务/尝试/租约创建与读取(含 fencing 取租约);
-- 覆盖迁移后的 `iesplan.services.config_revisions` 读面(经 configuration 域);
-- 覆盖迁移后的 `iesplan.services.tasks` 归属校验(经 tasks 域);
-- 覆盖迁移后的 `iesplan.services.results` 结果写入面(经 results/tasks 域):
+- 覆盖 `application.configuration` 读面(旧 services.config_revisions 已删除);
+- 覆盖 `application.tasks` 归属校验(旧 services.tasks 已删除);
+- 覆盖 `application.results` 结果写入面(旧 services.results 已删除):
   证据提交(fencing)→四维评估→索引转交(同证据挂接/新证据转交)→选中→归档读取;
 - package 归档读取经 results/configuration 域门面(证据清单/评估清单/索引清单/Profile 行)。
 运行环境与切片 4 一致: SQLite 内存库 + 临时 data_dir(对象存储)。
@@ -28,12 +28,12 @@ from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application import configuration as configuration_uc
+from iesplan.application import results as results_uc
+from iesplan.application import tasks as tasks_uc
 from iesplan.config import settings
 from iesplan.core.errors import NotFoundError
 from iesplan.db import Base
-from iesplan.services import config_revisions as config_service
-from iesplan.services import results as results_service
-from iesplan.services import tasks as tasks_service
 from iesplan.storage import put_object
 
 
@@ -193,9 +193,9 @@ def test_config_service_lists_profiles_through_domain(db: Session) -> None:
     configuration_domain.register_profile(
         db, profile_id="p9", region="R9", content={}, object_id=obj_id, created_by=7
     )
-    items = config_service.list_finance_profiles(db)
+    items = configuration_uc.list_finance_profiles(db)
     assert any(item["profile_id"] == "p9" and item["region"] == "R9" for item in items)
-    assert config_service.get_finance_overrides(db, _make_project(db, "slice5-empty").id) == (
+    assert configuration_uc.get_finance_overrides(db, _make_project(db, "slice5-empty").id) == (
         None,
         None,
     )
@@ -229,16 +229,16 @@ def test_tasks_service_belongs_through_domain(db: Session) -> None:
     project = _make_project(db)
     other = _make_project(db, "slice5-other")
     task_id = _make_task(db, project.id)
-    task = tasks_service.ensure_task_belongs(db, project.id, task_id)
+    task = tasks_uc.ensure_task_belongs(db, project.id, task_id)
     assert task.id == task_id
     with pytest.raises(NotFoundError):
-        tasks_service.ensure_task_belongs(db, other.id, task_id)
+        tasks_uc.ensure_task_belongs(db, other.id, task_id)
     with pytest.raises(NotFoundError):
-        tasks_service.ensure_task_belongs(db, project.id, 999999)
+        tasks_uc.ensure_task_belongs(db, project.id, 999999)
 
 
 # ---------------------------------------------------------------------------
-# results 域 + services.results 写入面
+# results 域 + application.results 写入面
 # ---------------------------------------------------------------------------
 
 
@@ -246,7 +246,7 @@ def _submit(db: Session, task_id: int, snapshot_id: int):
     hourly_id = _store(db, {"hourly": True}, "hourly")
     attempt_id, token = _claim(db, task_id)
     payload = _evidence_payload(snapshot_id, hourly_id)
-    package = results_service.submit_evidence(db, task_id, attempt_id, token, payload)
+    package = results_uc.submit_evidence(db, task_id, attempt_id, token, payload)
     assert package.status == "complete"
     assert package.task_id == task_id and package.attempt_id == attempt_id
     return package
@@ -261,45 +261,45 @@ def test_results_submit_assess_index_select_flow(db: Session, data_dir: Path) ->
     package = _submit(db, task_id, snapshot_id)
     assert results_domain.get_evidence(db, package.id) is not None
     assert results_domain.latest_evidence_for_task(db, task_id).id == package.id
-    assert results_service.latest_evidence(db, task_id).id == package.id
+    assert results_uc.latest_evidence(db, task_id).id == package.id
 
-    assessment = results_service.run_assessment(db, package.id)
+    assessment = results_uc.run_assessment(db, package.id)
     assert assessment.evidence_package_id == package.id
     assert assessment.assessor == "system"
     assert assessment.detail["checked"] == ["physical", "optimality", "financial", "reliability"]
     assert results_domain.latest_assessment(db, package.id).id == assessment.id
 
-    view = results_service.assessment_to_dict(db, assessment)
+    view = results_uc.assessment_to_dict(db, assessment)
     assert view["id"] == assessment.id and view["evidence_package_id"] == package.id
     assert set(view["dimensions"]) == {"physical", "optimality", "financial", "reliability"}
     assert view["created_at"] == assessment.created_at
 
-    history = results_service.list_assessments(db, task_id)
+    history = results_uc.list_assessments(db, task_id)
     assert [a.id for a in history] == [assessment.id]
 
     # 同证据挂接: 不新增索引行, 只更新评估指针
-    index = results_service.update_result_index(db, task_id, assessment.id)
+    index = results_uc.update_result_index(db, task_id, assessment.id)
     assert index.evidence_package_id == package.id and index.assessment_id == assessment.id
-    assert results_service.latest_index(db, tasks_domain.get_task(db, task_id)).id == index.id
+    assert results_uc.latest_index(db, tasks_domain.get_task(db, task_id)).id == index.id
 
-    assessment2 = results_service.run_assessment(db, package.id, assessment_type="physical")
-    index2 = results_service.update_result_index(db, task_id, assessment2.id)
+    assessment2 = results_uc.run_assessment(db, package.id, assessment_type="physical")
+    index2 = results_uc.update_result_index(db, task_id, assessment2.id)
     assert index2.id == index.id and index2.assessment_id == assessment2.id
 
     # 新证据发布: 转交最新标记并插入新行
     package2 = _submit(db, task_id, snapshot_id)
-    assessment3 = results_service.run_assessment(db, package2.id)
-    index3 = results_service.update_result_index(db, task_id, assessment3.id)
+    assessment3 = results_uc.run_assessment(db, package2.id)
+    index3 = results_uc.update_result_index(db, task_id, assessment3.id)
     assert index3.id != index.id and index3.evidence_package_id == package2.id
     assert results_domain.get_index(db, index.id).is_latest is False
     assert results_domain.latest_index_for_version(db, index3.project_version_id).id == index3.id
 
     # 选中追加式(仅消费 user.id; 归属与角色判定经 project/identity 域)
     user = SimpleNamespace(id=7)
-    selection = results_service.select_result(db, user, task_id, 0, "adopt", reason="slice5")
+    selection = results_uc.select_result(db, user, task_id, 0, "adopt", reason="slice5")
     assert selection.is_current is True
-    assert results_service.current_selection(db, project.id).id == selection.id
-    diff = results_service.selection_diff(db, project.id)
+    assert results_uc.current_selection(db, project.id).id == selection.id
+    diff = results_uc.selection_diff(db, project.id)
     assert diff is not None and diff["solution_id"] == 0
 
 
@@ -309,8 +309,8 @@ def test_results_package_archive_reads_through_domain(db: Session, data_dir: Pat
     snapshot_id = _make_snapshot(db, version_id)
     task_id = _make_task(db, project.id, snapshot_id)
     package = _submit(db, task_id, snapshot_id)
-    assessment = results_service.run_assessment(db, package.id)
-    results_service.update_result_index(db, task_id, assessment.id)
+    assessment = results_uc.run_assessment(db, package.id)
+    results_uc.update_result_index(db, task_id, assessment.id)
 
     packages = results_domain.list_evidence_for_tasks(db, tasks_domain.list_task_ids(db, project.id))
     assert [p.id for p in packages] == [package.id]

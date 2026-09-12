@@ -43,8 +43,9 @@ from iesplan.models.audit import AuditLog  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
 from iesplan.models.project import Project  # noqa: E402
 from iesplan.models.project_model import ProjectModel, ProjectModelSequence  # noqa: E402
+from iesplan import project as project_domain  # noqa: E402
 from iesplan.application import identity  # noqa: E402
-from iesplan.services import project as project_service  # noqa: E402
+from iesplan.application.projects import lifecycle as projects_uc  # noqa: E402
 from iesplan.storage import find_refs_by_entity_type  # noqa: E402
 
 PASSWORD = "Test12345"
@@ -717,7 +718,7 @@ def test_concurrent_numbering_unique(tmp_path: Path) -> None:
         s.commit()
     with factory() as s:
         u = s.get(User, user.id)
-        project = project_service.create_project(
+        project = projects_uc.create_project(
             s, u, "并发项目",
             baseline_resolution="1h", baseline_leap_year=False,
             baseline_scenario_mode="single",
@@ -736,7 +737,7 @@ def test_concurrent_numbering_unique(tmp_path: Path) -> None:
                 with factory() as s:
                     u = s.get(User, user.id)
                     project = s.get(Project, pid)
-                    revision = project_service.get_current_draft(s, project).revision
+                    revision = project_domain.get_current_draft(s, project.id).revision
                     try:
                         result = save_project_model(
                             s,

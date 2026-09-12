@@ -37,9 +37,9 @@ from iesplan.application.model_templates import (  # noqa: E402
     publish_template,
 )
 from iesplan.application.models import save_project_model  # noqa: E402
+from iesplan.application.projects import lifecycle as projects_uc  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.models.identity import User  # noqa: E402
-from iesplan.services import project as project_service  # noqa: E402
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 
@@ -214,7 +214,7 @@ def test_template_lifecycle_reads_writes_via_model_repository(db_session: Sessio
 
 def test_project_model_save_reads_writes_via_model_repository(db_session: Session, user):
     """项目模型保存经 model 域 repository 落盘, 审计经 audit 域门面。"""
-    project = project_service.create_project(
+    project = projects_uc.create_project(
         db_session,
         user,
         "w1 项目",
