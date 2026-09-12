@@ -1,18 +1,16 @@
-"""单因素敏感性分析与任务编排(03 §8.2/§8.3,审查意见第 7 条)。
+"""单因素敏感性分析与命令定义(03 §8.2/§8.3,审查意见第 7 条)。
 
-纯计算(无 DB):
+纯计算(无 DB,无 services 依赖):
   - `rank_indicators`: 单参数扫描内,各指标对参数的影响度排序(按最大 |变化率|);
   - `rank_parameters`: 多参数单因素扫描之间,参数对结果的影响度排序
-    (指标对参数的变化率/影响排序,任务范围)。
-
-编排(DB 层,懒导入):
-  - `run_sensitivity_analysis`: 创建 'analysis' 类型任务(任务参数含 sweeps),
-    返回 task_id(03 §8.2);'analysis' 任务类型注册与 ck_tasks_type CHECK 迁移
-    属里程碑 M5(03 §9.7),未注册时抛 AnalysisError 给出明确前置条件(不静默降级);
+    (指标对参数的变化率/影响排序,任务范围);
   - `build_analysis_payload`: SweepResult[] → evidence 载荷
-    (result_kind='analysis_result' + sweeps 表 + summary + financial 块,03 §8.3)。
+    (result_kind='analysis_result' + sweeps 表 + summary + financial 块,03 §8.3);
+  - `build_sensitivity_task_config`: SweepSpec[] → 任务配置 dict(纯命令定义,
+    任务创建与执行编排归 application/Worker,不经 services)。
 
-analysis 包导入本身无 DB 依赖(类型注解经 TYPE_CHECKING)。
+Wave 1 解耦: 原 `run_sensitivity_analysis`(经 services.tasks/identity 创建
+DB 任务)已删除;任务编排归 application 层,analysis 只定义命令与聚合公开结果。
 """
 
 from __future__ import annotations
@@ -29,8 +27,6 @@ from iesplan.analysis.wrapper import (
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
-
     from iesplan.analysis.wrapper import SweepSpec
 
 __all__ = [
@@ -38,7 +34,6 @@ __all__ = [
     "build_sensitivity_task_config",
     "rank_indicators",
     "rank_parameters",
-    "run_sensitivity_analysis",
 ]
 
 
@@ -177,7 +172,7 @@ def build_analysis_payload(sweep_results: Sequence[SweepResult]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 任务编排(DB 层,03 §8.2 run_sensitivity_analysis)
+# 任务命令定义(纯 dict 构造,无 DB;创建与执行编排归 application/Worker)
 # ---------------------------------------------------------------------------
 
 
@@ -197,44 +192,3 @@ def build_sensitivity_task_config(
     if base_config:
         config["base_config"] = dict(base_config)
     return config
-
-
-def run_sensitivity_analysis(
-    db: Session,
-    project_id: int,
-    base_config: dict,
-    sweeps: list[SweepSpec],
-) -> int:
-    """创建 'analysis' 类型任务(任务参数含 sweeps)并返回 task_id(03 §8.2)。
-
-    编排层: 懒导入 services.tasks/identity(analysis 包导入无 DB 依赖)。
-    前置条件: 'analysis' 任务类型已注册(里程碑 M5: TASK_TYPES/POOL_BY_TYPE 增加
-    'analysis' + ck_tasks_type CHECK 迁移,03 §9.7),未注册时抛 AnalysisError。
-    请求用户: base_config['requested_by'](API 路由注入的认证用户 id,03 §10.3)。
-    """
-    from iesplan.services import tasks as tasks_service  # noqa: PLC0415
-    from iesplan.services.identity import get_user_by_id  # noqa: PLC0415
-
-    if "analysis" not in getattr(tasks_service, "TASK_TYPES", ()):
-        raise AnalysisError(
-            "analysis 任务类型未注册: 需里程碑 M5 将 'analysis' 加入 TASK_TYPES/POOL_BY_TYPE"
-            " 并迁移 ck_tasks_type CHECK(03 §9.7)",
-            code="ANA-TASK-001",
-            message_key="ies.diag.analysis.task_type_unregistered",
-        )
-    user_id = (base_config or {}).get("requested_by")
-    user = get_user_by_id(db, int(user_id)) if user_id is not None else None
-    if user is None:
-        raise AnalysisError(
-            "缺少请求用户(base_config.requested_by 须为认证用户 id)",
-            code="ANA-TASK-002",
-            message_key="ies.diag.analysis.missing_user",
-        )
-    task, _flags = tasks_service.create_task(
-        db,
-        user,
-        project_id,
-        "analysis",
-        config=build_sensitivity_task_config(sweeps, base_config),
-    )
-    return int(task.id)
