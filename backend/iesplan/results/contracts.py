@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from iesplan.core.errors import ConflictError, NotFoundError
+from iesplan.core.errors import AppError, ConflictError, NotFoundError
 
 
 class ResultNotFoundError(NotFoundError):
@@ -19,6 +19,31 @@ class ResultNotFoundError(NotFoundError):
 
 class ResultConflictError(ConflictError):
     """结果索引/选中并发冲突（沿用基类诊断码，不新增码）。"""
+
+
+class EvidenceWriteDeniedError(ConflictError):
+    """证据写入资格校验失败(尝试状态/租约/fencing), HTTP 409。"""
+
+    code = "EVID-FENCE-001"
+    message_key = "ies.diag.evidence.write_denied"
+
+
+class EvidenceInvalidError(AppError):
+    """证据载荷结构非法(无法打包), HTTP 400。"""
+
+    code = "EVID-DATA-001"
+    http_status = 400
+    severity = "error"
+    message_key = "ies.diag.evidence.invalid"
+
+
+class ResultInvalidRequestError(AppError):
+    """结果域请求参数非法, HTTP 400。"""
+
+    code = "RES-REQ-001"
+    http_status = 400
+    severity = "error"
+    message_key = "ies.diag.param.invalid"
 
 
 @dataclass(frozen=True, slots=True)
