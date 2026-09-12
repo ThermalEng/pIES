@@ -39,6 +39,25 @@ docs/development/development-workflow.md「架构门禁」): 禁止 core 依赖�
 整改 TODO), 新增违规直接断言失败。后续切片按注释逐条整改后移除白名单条目,
 白名单清空后门禁转为硬强制。
 
+最终收口 Wave 0(临时指导 docs/development/backend-decoupling-finalization.md
+§五, 基线 1a07146)追加:
+
+  12. test_application_no_models_orm — application 禁止直引 iesplan.models/ORM
+     (表真相只归领域 persistence; 现状 1 项债务, Wave 1-A 归零);
+  13. test_api_no_direct_domain_behavior — API 禁止直接调用领域行为组织业务
+     (只调完整 application 用例, contracts DTO 复用除外; 现状 5 对, Wave 2-A/B 归零);
+  14. test_no_forbidden_cross_domain_deps — 禁止领域间直接业务依赖
+     (跨域组合只归 application, 他域 contracts 复用除外; 现状 2 对, Wave 2-B/3 归零);
+  15. test_worker_no_compute_penetration — Worker 禁止计算穿透
+     (engines/metrics/finance/analysis/assembly; 现状 4 对, Wave 4 归零);
+  16. test_analysis_no_engine_driving — analysis 禁止驱动 engine
+     (不自装 plan、不调用引擎, 只消费统一计算结果; 现状 4 对, Wave 4 归零)。
+
+Wave 0 门禁 8 改为精确相等: WHITELIST_CROSS_MODEL_IMPORTS 已按实测裁剪
+(删除 services/project/Worker 11 项过期条目, 仅剩 namespace→identity 与
+storage→common)。门禁 12–16 债务集合 TEMP_DEBT_* 亦与检测精确相等
+(新增与过期都失败); 整改由 Wave 1–4 在对应切片落地, 本文件只建门禁。
+
 实现约束: 纯标准库(ast/pathlib)读取源码文本, 绝不 import 业务模块。
 """
 
@@ -373,43 +392,14 @@ TABLE_OWNERS: dict[str, str] = {
 }
 
 WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
-    # ---- services ----
-    # (切片 4: services.external_auth 经 identity 域, 移除本项)
-    # (切片 8: services.config 经 audit/model 域门面, 移除 audit/model)
-    # (切片 5: services.config CalcConfig 改经 configuration 域, 移除 calc)
-    # (切片 7: services.model 经 model 域门面, 移除本项)
-    # (Wave 2 集成: services.identity 已删除, 移除本项)
-    # (切片 5: services.config_revisions 经 configuration 域, 移除本项)
-    ("iesplan.services.tasks", "common"),  # 仅幂等键正则基元(无业务表)
-    # (切片 5: services.tasks 改经领域门面, 移除 calc/dataset/identity/result/uncertainty)
-    # (切片 9: services.validation 经 audit 域门面读写审计, 移除本项)
-    # (切片 6: services.validation 经 dataset 域门面, 移除 dataset/identity)
-    # (切片 9: services.results 经 audit 域门面读写审计, 移除本项)
-    # (切片 5: services.results 经 results/tasks/project 域门面, 移除 calc/identity/result)
-    # ---- project 域 repository 实现（切片 3；唯一允许访问 projects 系表的实现） ----
-    ("iesplan.project.persistence", "project"),
-    # (Wave 1 集成: services.package 跨领域读写收敛到域公开门面, 移除 5 项)
-    # (切片 8: services.audit 经 audit 域门面, 移除本两项)
-    # (切片 4: services.dataset 经 dataset/identity/project 域 repository, 移除 3 项)
-    # (切片 9: services.project 经 audit 域门面写审计, 移除本项)
-    # (切片 6: services.project 经 tasks 域门面, 移除 calc/identity)
-    # ---- worker ----
-    ("iesplan.worker.lease", "calc"),
-    ("iesplan.worker.lease", "result"),
-    ("iesplan.worker.executors", "calc"),
-    ("iesplan.worker.executors", "result"),
-    ("iesplan.worker.executors", "uncertainty"),
-    ("iesplan.worker.runner", "calc"),
-    ("iesplan.worker.runner", "dataset"),
-    ("iesplan.worker.runner", "project"),
-    ("iesplan.worker.runner", "uncertainty"),
-    # ---- storage ----
-    # (Wave 1 集成: RetentionRule 经 storage 内部持久化读取, 移除本项)
-    # persistence 仅用 common 基元, 无业务表访问, 保留。
-    ("iesplan.storage.persistence", "common"),
-    # ---- application(目标编排层, 先登记现状; 切片 6 改调领域公开接口) ----
-    # (Wave 1 集成: model_templates/model_save 改经 model/audit 域门面, 移除 6 项)
+    # Wave 0 收口(基线 1a07146, 全仓 AST 实测): 检测仅剩以下 2 项, 白名单与之精确相等。
+    # 过期删除 11 项: services.tasks→common(services 包已删, 不可达);
+    # project.persistence→project(project/ 不在 _SCAN_OWNERSHIP_DIRS, 永不可达);
+    # worker 9 项(lease/executors/runner 跨表直引已收敛, 实测为零)。
+    # Wave 1-A 债务: application.namespace.get_or_allocate_namespace 直引 identity ORM, 无生产调用。
     ("iesplan.application.namespace", "identity"),
+    # 永久允许: models.common 仅共享基元(bigint_pk/正则, 无业务表), 非跨域业务访问。
+    ("iesplan.storage.persistence", "common"),
 }
 
 #: 门禁 8 扫描范围(api 由门禁 3 覆盖, models 自身与 core 不参评)
@@ -557,10 +547,15 @@ def test_analysis_no_direct_engine_or_services():
 
 
 def test_table_ownership_no_new_cross_imports():
-    """架构门禁: 跨表 ORM 访问不得新增, 只能按 TABLE_OWNERS 收敛后从白名单移除。"""
+    """架构门禁: 跨表 ORM 访问白名单必须与检测精确相等(新增与过期都失败)。
+
+    Wave 0 收口: 白名单已按基线实测裁剪, 后续波次逐项归零(仅 models.common 共享基元永久允许)。
+    """
     detected = _find_cross_model_imports()
-    new = sorted((m, t) for (m, t) in detected if (m, t) not in WHITELIST_CROSS_MODEL_IMPORTS)
-    assert not new, f"新增跨表 ORM 访问(需收敛到归属领域 repository): {new}"
+    assert detected == WHITELIST_CROSS_MODEL_IMPORTS, (
+        f"跨表 ORM 访问债务漂移(新增: {sorted(detected - WHITELIST_CROSS_MODEL_IMPORTS)}, "
+        f"过期: {sorted(WHITELIST_CROSS_MODEL_IMPORTS - detected)})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -715,3 +710,258 @@ def test_gate_relative_target_levels():
     for src, expected in cases.items():
         (node,) = [n for n in ast.walk(_parse_src(src)) if isinstance(n, ast.ImportFrom)]
         assert _relative_target("iesplan.api.config", node) == expected
+
+
+# ---------------------------------------------------------------------------
+# 最终收口 Wave 0 门禁 12–16: 依赖方向债务(全仓 AST 实测建档, 精确相等)
+# ---------------------------------------------------------------------------
+# 临时指导 docs/development/backend-decoupling-finalization.md §五 Wave 0:
+# 记录真实生产依赖图, 把债务集合改为与检测精确相等, 删除过期条目, 并新增
+# application→models/ORM、API 直接调用领域行为、禁止的领域间依赖、Worker
+# 计算穿透、analysis 驱动 engine 五类门禁。每项门禁与对应整改在同一可通过
+# 切片落地: 本文件只建门禁并如实记录现状债务(全绿), 整改由 Wave 1–4 执行。
+#
+# 设计约束(同 §五 Wave 0): 门禁只查依赖事实(AST import), 不绑定私有文件名
+# 与行号(键为 (模块, 目标域), 同一模块多行合并为一项), 不强迫多一层包装,
+# 不复制被测实现。sqlalchemy Session 类型注解属事务管道, 不在 ORM 门禁之列;
+# 他域 *.contracts/contracts2 属不可变 contract 复用, 始终允许。
+
+#: Wave 0 门禁 12–16 共用的业务域包集合(均有 __init__ 公开门面; core/config/db/models 不在列)。
+_WAVE0_DOMAIN_PKGS: frozenset[str] = frozenset(
+    {
+        "audit",
+        "configuration",
+        "dataset",
+        "devices",
+        "engines",
+        "finance",
+        "identity",
+        "metrics",
+        "model",
+        "modeling",
+        "package",
+        "planning",
+        "project",
+        "results",
+        "storage",
+        "tasks",
+    }
+)
+
+#: Wave 0 门禁 15/16 的计算执行包集合(Worker/analysis 禁止穿透)。
+_WAVE0_COMPUTE_PKGS: frozenset[str] = frozenset({"engines", "metrics", "finance", "analysis", "assembly"})
+
+#: Wave 0 门禁 16 的 analysis 禁止驱动集合(计算执行 + 旧链 services + 任务执行 worker)。
+_WAVE0_ANALYSIS_FORBIDDEN_PKGS: frozenset[str] = frozenset(
+    {"engines", "assembly", "services", "finance", "metrics", "worker"}
+)
+
+
+def _top_pkg_of(target: str) -> str:
+    """取 iesplan 导入目标的顶层子包名(如 iesplan.metrics.financial → metrics)。"""
+    parts = target.split(".")
+    return parts[1] if len(parts) > 1 else ""
+
+
+def _is_contract_target(target: str) -> bool:
+    """不可变 contract 复用判定: 他域 contracts/contracts2 子模块一律允许。"""
+    return ".contracts" in target or "contracts2" in target
+
+
+def _iter_domain_imports(
+    scan_root: Path,
+    forbidden: frozenset[str],
+    own_top: str | None = None,
+    pkg_root: Path = _PKG_ROOT,
+) -> set[tuple[str, str]]:
+    """通用依赖事实扫描: 返回 (模块, 目标顶层包) 集合。
+
+    覆盖三种绝对导入形态: import iesplan.X[.Y]、from iesplan[.X…] import …、
+    from iesplan import X(含根包直引领域形态, 如 project/access 经根包调用 identity)。
+    contract 目标与包外目标自动排除; own_top 指定时排除自身域。
+    """
+    found: set[tuple[str, str]] = set()
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            targets: list[str] = []
+            if isinstance(node, ast.Import):
+                targets.extend(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module == "iesplan":
+                    targets.extend(f"iesplan.{a.name}" for a in node.names if a.name != "*")
+                else:
+                    targets.append(node.module)
+            for target in targets:
+                if not target.startswith("iesplan."):
+                    continue
+                if _is_contract_target(target):
+                    continue
+                top = _top_pkg_of(target)
+                if top not in forbidden:
+                    continue
+                if own_top is not None and top == own_top:
+                    continue
+                found.add((mod, top))
+    return found
+
+
+def _find_application_orm_imports(
+    scan_root: Path = _APPLICATION_DIR, pkg_root: Path = _PKG_ROOT
+) -> set[tuple[str, str]]:
+    """门禁 12: 扫描 application 下 iesplan.models.* 与 iesplan.db 导入。
+
+    返回 (模块, 目标) 集合, 目标为 models 子模块名或 db。sqlalchemy 类型注解
+    不在扫描范围(事务管道, 非 ORM 表依赖)。
+    """
+    found: set[tuple[str, str]] = set()
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module == "iesplan.models" or node.module.startswith("iesplan.models."):
+                    found.add((mod, node.module.split(".")[2] if "." in node.module[8:] else "models"))
+                elif node.module == "iesplan.db" or node.module.startswith("iesplan.db."):
+                    found.add((mod, "db"))
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name == "iesplan.models" or a.name.startswith("iesplan.models."):
+                        found.add((mod, a.name.split(".")[2] if a.name.count(".") > 1 else "models"))
+                    elif a.name == "iesplan.db" or a.name.startswith("iesplan.db."):
+                        found.add((mod, "db"))
+    return found
+
+
+#: 门禁 12 临时债务: application → models/ORM(全仓实测 1 项; Wave 1-A 归零)。
+TEMP_DEBT_APP_ORM: set[tuple[str, str]] = {
+    # application/namespace.py:get_or_allocate_namespace 直引 identity ORM, 无生产调用。
+    ("iesplan.application.namespace", "identity"),
+}
+
+
+def test_application_no_models_orm():
+    """架构门禁 12: application 禁止直引 iesplan.models/ORM(表真相只归领域 persistence)。
+
+    临时债务集合必须与检测结果精确相等: 新增穿透失败, 已整改未移除条目也失败。
+    """
+    detected = _find_application_orm_imports()
+    assert detected == TEMP_DEBT_APP_ORM, (
+        f"application→models/ORM 债务漂移(新增: {sorted(detected - TEMP_DEBT_APP_ORM)}, "
+        f"过期: {sorted(TEMP_DEBT_APP_ORM - detected)})"
+    )
+
+
+#: 门禁 13 临时债务: API 直接调用领域行为(全仓实测 5 对; Wave 2-A/B 收进 application 用例后归零)。
+#: api/auth 经 identity.contracts 属 DTO 传输映射, 不在债务之列。
+TEMP_DEBT_API_DOMAIN_BEHAVIOR: set[tuple[str, str]] = {
+    # api/config.py:30 授权自组织(project.ensure_access)。
+    ("iesplan.api.config", "project"),
+    # api/model.py:33 devices.list_devices 直调; DeviceModelDocument 仅类型注解。
+    ("iesplan.api.model", "devices"),
+    # api/model.py:35 授权自组织(project.ensure_access)。
+    ("iesplan.api.model", "project"),
+    # api/tasks.py:26 越过 application.tasks 直引 tasks.IDEMPOTENCY_KEY_RE。
+    ("iesplan.api.tasks", "tasks"),
+    # api/validation.py:30 授权自组织(project.ensure_access)。
+    ("iesplan.api.validation", "project"),
+}
+
+
+def test_api_no_direct_domain_behavior():
+    """架构门禁 13: API 禁止直接调用领域行为组织业务(只调完整 application 用例)。
+
+    领域 *.contracts DTO 复用允许; 其余领域根包/行为子模块导入即记债务。
+    临时债务集合必须与检测结果精确相等。
+    """
+    detected = _iter_domain_imports(_API_DIR, _WAVE0_DOMAIN_PKGS)
+    assert detected == TEMP_DEBT_API_DOMAIN_BEHAVIOR, (
+        f"API→领域行为债务漂移(新增: {sorted(detected - TEMP_DEBT_API_DOMAIN_BEHAVIOR)}, "
+        f"过期: {sorted(TEMP_DEBT_API_DOMAIN_BEHAVIOR - detected)})"
+    )
+
+
+def _find_cross_domain_behavior_imports(pkg_root: Path = _PKG_ROOT) -> set[tuple[str, str]]:
+    """门禁 14: 扫描各业务域对他域行为的直接依赖。返回 (模块, 他域) 集合。
+
+    领域间不得直接组合业务: 他域根包/行为子模块导入即违规; 他域 contracts
+    属不可变 contract 复用, 允许。跨领域授权与工作流归 application。
+    """
+    found: set[tuple[str, str]] = set()
+    for domain in sorted(_WAVE0_DOMAIN_PKGS):
+        scan_root = pkg_root / domain
+        if not scan_root.is_dir():
+            continue
+        found |= _iter_domain_imports(scan_root, _WAVE0_DOMAIN_PKGS, own_top=domain)
+    return found
+
+
+#: 门禁 14 临时债务: 禁止的领域间依赖(全仓实测 2 对; Wave 2-B/3 归零)。
+TEMP_DEBT_CROSS_DOMAIN: set[tuple[str, str]] = {
+    # project/access.py:15 经根包调用 identity.user_roles, 跨域组合管理员授权(上收 application)。
+    ("iesplan.project.access", "identity"),
+    # engines/planning.py:34 直调 metrics.financial(计算方向收敛时一并处理)。
+    ("iesplan.engines.planning", "metrics"),
+}
+
+
+def test_no_forbidden_cross_domain_deps():
+    """架构门禁 14: 禁止领域间直接业务依赖(跨域组合只归 application)。
+
+    临时债务集合必须与检测结果精确相等。
+    """
+    detected = _find_cross_domain_behavior_imports()
+    assert detected == TEMP_DEBT_CROSS_DOMAIN, (
+        f"领域间依赖债务漂移(新增: {sorted(detected - TEMP_DEBT_CROSS_DOMAIN)}, "
+        f"过期: {sorted(TEMP_DEBT_CROSS_DOMAIN - detected)})"
+    )
+
+
+#: 门禁 15 临时债务: Worker 计算穿透(全仓实测 4 对, 全在 executors; Wave 4 归零)。
+#: worker→application.worker 用例与 main 进程启停属正确形状, 不在债务之列。
+TEMP_DEBT_WORKER_COMPUTE: set[tuple[str, str]] = {
+    # worker/executors.py:218,262,762 直调 analysis.wrapper(计算结果反向流入执行器)。
+    ("iesplan.worker.executors", "analysis"),
+    # worker/executors.py:40-41 直引 engines.eval_run/planning 结果类型。
+    ("iesplan.worker.executors", "engines"),
+    # worker/executors.py:219-220 直调 finance.hourly/params(执行器内拼财务计算)。
+    ("iesplan.worker.executors", "finance"),
+    # worker/executors.py:42-43 直调 metrics.engineering/environmental。
+    ("iesplan.worker.executors", "metrics"),
+}
+
+
+def test_worker_no_compute_penetration():
+    """架构门禁 15: Worker 禁止计算穿透(不拼 solver 命令、不解释装配、不承担结果分析)。
+
+    Worker 只保留任务领取、租约、调用 application.worker 与隔离执行壳。
+    临时债务集合必须与检测结果精确相等。
+    """
+    detected = _iter_domain_imports(_WORKER_DIR, _WAVE0_COMPUTE_PKGS)
+    assert detected == TEMP_DEBT_WORKER_COMPUTE, (
+        f"Worker 计算穿透债务漂移(新增: {sorted(detected - TEMP_DEBT_WORKER_COMPUTE)}, "
+        f"过期: {sorted(TEMP_DEBT_WORKER_COMPUTE - detected)})"
+    )
+
+
+#: 门禁 16 临时债务: analysis 驱动 engine(全仓实测 4 对; Wave 4 改为消费统一计算结果后归零)。
+TEMP_DEBT_ANALYSIS_ENGINE_DRIVING: set[tuple[str, str]] = {
+    # analysis/wrapper.py:33 直调 finance 计算＋_local_plan 自装 plan＋run_* 注 engine 执行。
+    ("iesplan.analysis.wrapper", "finance"),
+    # analysis/_minfinance.py:23、assessment.py:14-15、indicators.py:14,20 直调 metrics 行为。
+    ("iesplan.analysis._minfinance", "metrics"),
+    ("iesplan.analysis.assessment", "metrics"),
+    ("iesplan.analysis.indicators", "metrics"),
+}
+
+
+def test_analysis_no_engine_driving():
+    """架构门禁 16: analysis 禁止驱动 engine(不构造 plan、不调用引擎, 只消费统一计算结果)。
+
+    门禁 7 已覆盖 engines/services/assembly.plan 直接导入(当前为零); 本门禁覆盖
+    finance/metrics/worker 等计算执行穿透。临时债务集合必须与检测结果精确相等。
+    """
+    detected = _iter_domain_imports(_PKG_ROOT / "analysis", _WAVE0_ANALYSIS_FORBIDDEN_PKGS)
+    assert detected == TEMP_DEBT_ANALYSIS_ENGINE_DRIVING, (
+        f"analysis 驱动 engine 债务漂移(新增: {sorted(detected - TEMP_DEBT_ANALYSIS_ENGINE_DRIVING)}, "
+        f"过期: {sorted(TEMP_DEBT_ANALYSIS_ENGINE_DRIVING - detected)})"
+    )
