@@ -37,3 +37,4 @@ class ImportProposalRecord:
     review_errors: dict[str, Any] | None = None
     decided_by: int | None = None
     decided_at: str | None = None
+    created_at: str | None = None

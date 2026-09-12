@@ -31,6 +31,7 @@ get_version = persistence.get_version
 list_projects = persistence.list_projects
 list_version_refs = persistence.list_version_refs
 list_versions = persistence.list_versions
+project_name_exists = persistence.project_name_exists
 set_project_status = persistence.set_project_status
 update_draft_content_ref = persistence.update_draft_content_ref
 update_revision_pointers = persistence.update_revision_pointers
@@ -57,6 +58,7 @@ __all__ = [
     "list_projects",
     "list_version_refs",
     "list_versions",
+    "project_name_exists",
     "set_project_status",
     "update_draft_content_ref",
     "update_revision_pointers",

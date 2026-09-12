@@ -378,7 +378,10 @@ def confirm_import_endpoint(
 
 
 def _proposal_to_dict(proposal) -> dict:
-    """导入提案序列化(API 展示)。"""
+    """导入提案序列化(API 展示; 提案为 package 域记录时时间为 ISO 字符串)。"""
+    created_at = proposal.created_at
+    if created_at is not None and hasattr(created_at, "isoformat"):
+        created_at = created_at.isoformat()
     return {
         "id": proposal.id,
         "project_id": proposal.project_id,
@@ -387,5 +390,5 @@ def _proposal_to_dict(proposal) -> dict:
         "source_object_id": proposal.source_object_id,
         "review_summary": proposal.review_summary,
         "review_errors": proposal.review_errors,
-        "created_at": proposal.created_at.isoformat() if proposal.created_at else None,
+        "created_at": created_at,
     }
