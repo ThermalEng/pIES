@@ -5,6 +5,7 @@
 
 from iesplan.assembly.rules.connection import run_phase_b
 from iesplan.assembly.rules.completeness import run_phase_c
+from iesplan.assembly.rules.constraints import run_constraint_checks
 from iesplan.assembly.rules.solvability import build_buses, run_phase_d
 
-__all__ = ["run_phase_b", "run_phase_c", "run_phase_d", "build_buses"]
+__all__ = ["run_phase_b", "run_phase_c", "run_phase_d", "build_buses", "run_constraint_checks"]

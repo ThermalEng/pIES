@@ -15,7 +15,7 @@ import math
 from iesplan.core.errors import NotFoundError
 from typing import Any
 
-from iesplan.assembly.checker import PORT_TYPE_TO_CARRIER
+from iesplan.assembly.context import PORT_TYPE_TO_CARRIER
 from iesplan.assembly.schema import (
     CARRIER_DEFAULT_QUANTITY_UNIT,
     FORMAT_VERSION,

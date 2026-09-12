@@ -74,7 +74,8 @@ CARRIER_DEFAULT_QUANTITY_UNIT: dict[str, tuple[str, str]] = {
 }
 
 #: 标准单位 → 表达式引擎量纲标签(core/expression.py DIM_* 同构)
-_QUANTITY_DIMS: dict[str, dict[str, int]] = {
+#: 公开名称(供 assembly 上下文/规则层消费;旧下划线别名保留兼容)。
+QUANTITY_DIMS: dict[str, dict[str, int]] = {
     QUANTITY_POWER: {"power": 1},
     QUANTITY_ENERGY: {"energy": 1},
     QUANTITY_FLOW: {"flow": 1},
@@ -84,6 +85,9 @@ _QUANTITY_DIMS: dict[str, dict[str, int]] = {
     QUANTITY_PRICE: {"currency": 1, "energy": -1},
     QUANTITY_SIGNAL: {},
 }
+
+#: 旧下划线别名(兼容历史导入;新代码一律使用 QUANTITY_DIMS)。
+_QUANTITY_DIMS: dict[str, dict[str, int]] = QUANTITY_DIMS
 
 
 @dataclass(slots=True, frozen=True)

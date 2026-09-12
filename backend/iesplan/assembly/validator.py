@@ -11,9 +11,9 @@
    资源路径、calculation.mode 枚举、outputs/refs、extensions 命名空间;
 2. 模型与数据:设备模型精确版本注册、参数只允许已声明字段、必填参数非空、
    数据绑定(dataset/column/单位/分辨率)、负荷类设备必带 data、相对资源解析;
-3. 图与系统:复用 iesplan.assembly.checker 端口推导 + rules.connection
+3. 图与系统:复用 iesplan.assembly.context 端口推导 + rules.connection
    (run_phase_b) + rules.solvability (run_phase_d) + 约束表达式检查
-   (run_constraint_checks);端口不可达与悬空输入由本模块独立补充;
+   (rules.constraints.run_constraint_checks);端口不可达与悬空输入由本模块独立补充;
 4. 计算兼容:generator/solver 精确版本(随 schema 严格)、options 标量键值、
    outputs series/metrics 引用设备存在;GeneratorProvider/SolverRuntime 注册
    表能力核对在 0.8.0 引入。
@@ -23,7 +23,7 @@
 
 模块边界:
 - 跨模块仅消费 devices 公开门面(get_device/list_devices);
-- 复用 assembly 域内 checker/rules/canonicalizer/parser10/contracts;
+- 复用 assembly 域内 context/rules/canonicalizer/parser10/contracts;
 - 不导入 services/ORM/存储私有路径。
 """
 
@@ -416,7 +416,7 @@ def _check_data_bindings(
                 if isinstance(meta.get("column_units"), Mapping):
                     declared_unit = str(meta["column_units"].get(column) or "")
                     if declared_unit:
-                        from iesplan.assembly.checker import units_compatible
+                        from iesplan.assembly.context import units_compatible
 
                         descriptor = _descriptor_for(registry, dev.get("model"))
                         if descriptor is not None:
@@ -555,11 +555,8 @@ def _phase3_graph_system(
     """复用 check_assembly 的核心机制:转换 doc → AssemblySpec + CheckContext,
     调用 run_phase_b + 自己的输入完备检查 + run_phase_d + run_constraint_checks。
     """
-    from iesplan.assembly.checker import (
-        CheckContext,
-        run_constraint_checks,
-    )
-    from iesplan.assembly.rules import run_phase_b, run_phase_d
+    from iesplan.assembly.context import CheckContext
+    from iesplan.assembly.rules import run_constraint_checks, run_phase_b, run_phase_d
 
     spec = _spec_from_doc(resolved_doc, datasets_meta)
     resolution = (resolved_doc.get("time_axis") or {}).get("resolution", "1h")
@@ -662,7 +659,7 @@ def _check_undefined_ports(spec: AssemblySpec, ctx, diags: list[Diagnostic]) -> 
 
 
 def _check_input_unfed(spec: AssemblySpec, ctx, diags: list[Diagnostic]) -> None:
-    from iesplan.assembly.checker import (
+    from iesplan.assembly.context import (
         EXOGENOUS_SUPPLY_CARRIERS,
         GRID_SIDE_PORTS,
         grid_side_used,
@@ -698,7 +695,7 @@ def _check_input_unfed(spec: AssemblySpec, ctx, diags: list[Diagnostic]) -> None
 
 
 def ensure_ports_ctx(spec: AssemblySpec, ctx):
-    from iesplan.assembly.checker import ensure_ports
+    from iesplan.assembly.context import ensure_ports
 
     return ensure_ports(spec, ctx)
 

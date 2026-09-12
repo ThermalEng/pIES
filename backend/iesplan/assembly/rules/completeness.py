@@ -17,10 +17,15 @@
 
 from __future__ import annotations
 
-from iesplan.assembly.checker import (
-    _split_model,
+from iesplan.assembly.context import (
+    AssemblySpec,
+    EXOGENOUS_SUPPLY_CARRIERS,
+    GRID_SIDE_PORTS,
+    PORT_DECL_OVERRIDE_FIELDS,
     ensure_ports,
+    grid_side_used,
     resolve_model,
+    split_model,
     units_compatible,
 )
 from iesplan.assembly.diags import (
@@ -37,9 +42,6 @@ from iesplan.assembly.diags import (
     ASM_REF_PORT_UNDEF,
 )
 from iesplan.assembly.diags import make_asm_diag as make_diag
-from iesplan.assembly.parser import PORT_DECL_OVERRIDE_FIELDS
-from iesplan.assembly.checker import EXOGENOUS_SUPPLY_CARRIERS, GRID_SIDE_PORTS, grid_side_used
-from iesplan.assembly.schema import AssemblySpec
 from iesplan.core.diagnostics import Diagnostic
 
 
@@ -67,7 +69,7 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
             seen_ids[dev.id] = dev.id
 
     for dev in spec.devices:
-        type_id, version = _split_model(dev.model)
+        type_id, version = split_model(dev.model)
         type_spec, is_pipeline = resolve_model(ctx, dev.model)
         if type_spec is None:
             diags.append(

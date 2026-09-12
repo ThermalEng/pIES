@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from iesplan.assembly.checker import ensure_ports, units_compatible
+from iesplan.assembly.context import AssemblySpec, ensure_ports, units_compatible
 from iesplan.assembly.diags import (
     ASM_EDGE_BAD_SINK,
     ASM_EDGE_BAD_SOURCE,
@@ -26,7 +26,6 @@ from iesplan.assembly.diags import (
     ASM_EDGE_ZERO_CAP,
 )
 from iesplan.assembly.diags import make_asm_diag as make_diag
-from iesplan.assembly.schema import AssemblySpec
 from iesplan.core.diagnostics import Diagnostic
 
 OUTPUT_DIRECTIONS = ("out", "bidirectional")
