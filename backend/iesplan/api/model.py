@@ -28,11 +28,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.application import models as svc
+from iesplan.application.projects.lifecycle import ensure_access
 from iesplan.db import get_db
 from iesplan.devices import DeviceModelDocument, list_devices
 from iesplan.devices.contracts2 import PropertySpec
-from iesplan.application import models as svc
-from iesplan.application.projects.lifecycle import ensure_access
 
 #: 设备类型注册表(公开, 前端画布取设备面板与参数表单 schema)
 registry_router = APIRouter(prefix="/api", tags=["registry"])

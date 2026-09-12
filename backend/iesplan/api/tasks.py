@@ -21,9 +21,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.application.tasks import views as tasks_app
 from iesplan.db import get_db
 from iesplan.models.common import IDEMPOTENCY_KEY_RE
-from iesplan.application.tasks import views as tasks_app
 
 router = APIRouter(prefix="/api/projects/{project_id}/tasks", tags=["tasks"])
 

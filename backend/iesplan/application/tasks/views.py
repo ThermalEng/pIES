@@ -21,7 +21,7 @@ from iesplan.application.tasks.submissions import (
     cancel_task,
     ensure_task_belongs,
     retry_task,
-    submit_task,
+    submit_task,  # noqa: F401 (经本模块再导出, 调用方以 tasks_app.submit_task 取用)
 )
 from iesplan.identity.contracts import UserRecord
 from iesplan.services import project as project_service

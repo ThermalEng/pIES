@@ -83,15 +83,8 @@ WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
     ): "engines 域内 planning 复用 eval_run 私有运行参数读取; TODO: 提升公开。",
     # worker → analysis 私有穿透已整改(0.6.5): 符号提升为 analysis 公开 API。
     # ---- api → services: API 层直接访问服务私有函数 ----
-    (
-        "iesplan.api.config",
-        "config_service._row_to_config",
-    ): "API 层访问 services.config 私有配置序列化(现状违规); "
-    "TODO: services.config 提供公开 serializer 后移除。",
-    (
-        "iesplan.api.projects",
-        "project_service._is_admin",
-    ): "API 层访问 services.project 私有权限判定(现状违规); TODO: 提升公开权限 API 后移除。",
+    # (Wave 3 集成: config._row_to_config 私有访问随 calc_config 用例消除;
+    #  projects._is_admin 私有访问随 application 迁移消除, 移除两项)
     # (Wave 2 集成: services.identity 已删除，delete_user 改经 audit 域门面，移除本项)
 }
 
@@ -114,7 +107,8 @@ WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
     ("iesplan.api.health", 28): frozenset({"Project"}),
     # ---- results.py: 结果查询任务状态与校验正则 ----
     # (切片 5: assess 端点经 tasks_service.ensure_task_belongs 取任务, 移除 Task)
-    ("iesplan.api.results", 30): frozenset({"HASH64_RE"}),
+    # (Wave 3 集成: results.py 改经 application 用例, HASH64_RE 直引已消除)
+
     # ---- limits.py: 配额统计函数内局部导入(非模块顶层) ----
     ("iesplan.api.limits", 260): frozenset({"Dataset", "DatasetFile", "DatasetVersion"}),
     ("iesplan.api.limits", 276): frozenset({"Project"}),
@@ -322,40 +316,16 @@ def test_api_no_direct_orm_imports():
 # 所有权落在路由层, 违反"事务只由 application 提交/回滚"(宪法 §5.4)。
 # 后续切片按资源域迁移到 application 用例后逐条移除; 白名单清空后硬强制。
 WHITELIST_API_COMMIT: set[tuple[str, int]] = {
-    ("iesplan.api.tasks", 93),
-    ("iesplan.api.tasks", 148),
-    ("iesplan.api.tasks", 169),
     ("iesplan.api.admin", 253),
     # (切片 4: get_auth_context 会话写入收敛到 services, 移除 230/240/249 三处提交)
     ("iesplan.api.auth", 568),
     ("iesplan.api.auth", 639),
     ("iesplan.api.auth", 647),
-    ("iesplan.api.datasets", 204),
     ("iesplan.api.objects", 139),
     ("iesplan.api.objects", 172),
     ("iesplan.api.objects", 188),
-    ("iesplan.api.validation", 62),
-    ("iesplan.api.validation", 78),
-    ("iesplan.api.projects", 132),
-    ("iesplan.api.projects", 188),
-    ("iesplan.api.projects", 203),
-    ("iesplan.api.projects", 246),
-    ("iesplan.api.projects", 265),
-    ("iesplan.api.projects", 277),
-    ("iesplan.api.projects", 292),
-    ("iesplan.api.projects", 315),
-    ("iesplan.api.projects", 361),
-    ("iesplan.api.projects", 373),
-    ("iesplan.api.config_revisions", 139),
-    ("iesplan.api.config_revisions", 178),
-    ("iesplan.api.config_revisions", 199),
-    ("iesplan.api.config_revisions", 244),
-    ("iesplan.api.config_revisions", 274),
-    ("iesplan.api.exports", 68),
-    ("iesplan.api.exports", 134),
-    ("iesplan.api.results", 121),
-    ("iesplan.api.results", 145),
-    ("iesplan.api.results", 221),
+    # (Wave 3 集成: tasks/datasets/validation/projects/config_revisions/
+    #  exports/results 的路由层提交已随 application 迁移消除, 移除 26 条)
 }
 
 # ---------------------------------------------------------------------------
@@ -365,16 +335,9 @@ WHITELIST_API_COMMIT: set[tuple[str, int]] = {
 # 即在路由层组织跨 service 业务流程。目标是每个端点只调用一个 application 用例
 # (model_templates/project_models 已示范该方向)。迁移一个模块就从本集合移除一项。
 WHITELIST_API_FANOUT: set[str] = {
-    "iesplan.api.tasks",  # services.project + services.tasks
-    "iesplan.api.model",  # application.models + services.project
-    "iesplan.api.config",  # services.config + services.project
-    "iesplan.api.admin",  # services.audit + services.queue + services.tasks
     "iesplan.api.auth",  # application.identity + services.project + services.external_auth
-    "iesplan.api.datasets",  # services.dataset + services.project
-    "iesplan.api.validation",  # services.project + services.validation
-    "iesplan.api.projects",  # services.package + services.project
-    "iesplan.api.config_revisions",  # services.config_revisions + services.project
-    "iesplan.api.results",  # services.project + services.results + services.tasks
+    # (Wave 3 集成: tasks/model/config/admin/datasets/validation/projects/
+    #  config_revisions/results 已只经 application 门面, 移除 9 项)
 }
 
 # ---------------------------------------------------------------------------
@@ -383,15 +346,9 @@ WHITELIST_API_FANOUT: set[str] = {
 # 基线核查(2026-09-11, 切片 1): Worker 直接读取业务 service, 任务执行边界锁死
 # 在领域实现上。目标是业务快照读取与跨模块编排移入 application.worker, worker
 # 只保留领取任务、租约、取消、分派和结果提交。迁移后逐项移除。
-WHITELIST_WORKER_SERVICES: set[tuple[str, str]] = {
-    ("iesplan.worker.lease", "iesplan.services.queue"),
-    ("iesplan.worker.lease", "iesplan.services.tasks"),
-    ("iesplan.worker.main", "iesplan.services.queue"),
-    ("iesplan.worker.runner", "iesplan.services.dataset"),
-    ("iesplan.worker.runner", "iesplan.services.project"),
-    ("iesplan.worker.executors", "iesplan.services.queue"),
-    ("iesplan.worker.executors", "iesplan.services.tasks"),
-}
+WHITELIST_WORKER_SERVICES: set[tuple[str, str]] = set()
+# (Wave 3 集成: lease/runner/main/executors 的 services 直引已上收至
+#  application.worker 用例, 白名单清空。)
 
 # ---------------------------------------------------------------------------
 # 门禁 7 白名单: analysis → 计算执行直接依赖 (键 = (analysis 模块, 目标))
