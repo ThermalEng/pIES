@@ -8,8 +8,8 @@ pIES Wave 4(api/auth.py 迁移): 路由层不得直接依赖 iesplan.services.*�
 - 公开设置三元组: 注册开关 + OIDC 入口状态;
 - 管理员用户列表项目数: project 域 read model 单次聚合(防 N+1);
 - 安全设置更新: 注册开关持久化 + 维护审计, 单事务提交;
-- OIDC 登录入口/回调: services.external_auth 薄封装(标准实现 Authlib),
-  会话写入与事务提交上收至此。
+- OIDC 登录入口/回调: identity 域外部认证能力(标准实现 Authlib),
+  会话写入与事务提交上收至此(纠偏 Wave 1 切片 C, 不再直调 services)。
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from collections.abc import Sequence
 
 from sqlalchemy.orm import Session
 
+from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan.application.identity.service import (
     create_window_session,
@@ -27,9 +28,8 @@ from iesplan.application.identity.service import (
     set_registration_enabled,
 )
 from iesplan.core.errors import NotFoundError
+from iesplan.identity import ExternalAuthError
 from iesplan.identity.contracts import UserRecord
-from iesplan.services import external_auth
-from iesplan.services.external_auth import ExternalAuthError
 
 __all__ = [
     "ExternalAuthError",
@@ -45,7 +45,7 @@ __all__ = [
 
 def is_oidc_enabled() -> bool:
     """外部认证(SSO)是否启用(登录页入口与回调门禁共用)。"""
-    return external_auth.is_oidc_enabled()
+    return identity_domain.is_oidc_enabled()
 
 
 def get_public_auth_settings(db: Session) -> tuple[bool, bool, str]:
@@ -53,7 +53,7 @@ def get_public_auth_settings(db: Session) -> tuple[bool, bool, str]:
 
     无需认证(登录页渲染前置条件); 仅返回登录页需要的布尔与显示名。
     """
-    sso_enabled = external_auth.is_oidc_enabled()
+    sso_enabled = identity_domain.is_oidc_enabled()
     return registration_enabled(db), sso_enabled, "OIDC" if sso_enabled else ""
 
 
@@ -98,12 +98,12 @@ def begin_oidc_login() -> str:
     state 为签名令牌(含 nonce 与 PKCE verifier, 360s 窗口), 回调时校验;
     回调完成前由签名 state 携带 nonce/verifier(无状态, 多 Worker 可用)。
     """
-    if not external_auth.is_oidc_enabled():
+    if not identity_domain.is_oidc_enabled():
         raise NotFoundError("", params={"object_type": "auth_provider"})
     nonce = secrets.token_urlsafe(24)
     verifier = secrets.token_urlsafe(48)[:64]
-    state = external_auth.build_state(nonce, verifier)
-    return external_auth.build_authorization_url(state)
+    state = identity_domain.build_state(nonce, verifier)
+    return identity_domain.build_authorization_url(state)
 
 
 def complete_oidc_login(
@@ -120,9 +120,9 @@ def complete_oidc_login(
     返回 (user, token, displaced), displaced 为 True 表示存在旧活动窗口
     被取代(前端据此提示确认接管)。
     """
-    payload = external_auth.verify_state(state)
-    claims = external_auth.exchange_code(code, payload["verifier"])
-    user = external_auth.provision_user(db, claims, ip=ip, user_agent=user_agent)
+    payload = identity_domain.verify_state(state)
+    claims = identity_domain.exchange_code(code, payload["verifier"])
+    user = identity_domain.provision_user(db, claims, ip=ip, user_agent=user_agent)
     db.flush()
     _session, token, displaced = create_window_session(db, user, "oidc", ip=ip, user_agent=user_agent)
     return user, token, displaced

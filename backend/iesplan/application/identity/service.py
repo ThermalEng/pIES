@@ -818,8 +818,8 @@ def delete_user(
     for project in owned:
         project_domain.set_project_status(db, project.id, "deleted")
         deleted_projects += 1
-        # 审计经 audit 域公开门面(与原 services.project._audit 同语义,
-        # 其本体即 audit_domain.append_entry 的薄封装, 此处直调避免跨模块私有访问)。
+        # 级联软删逐项目写审计(经 audit 域公开门面; 项目状态写入经
+        # project 域公开门面, 本模块不直调任何 services 实现)。
         audit_domain.append_entry(
             db,
             actor_id=admin.id,
