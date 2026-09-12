@@ -769,17 +769,42 @@ def _is_contract_target(target: str) -> bool:
     return ".contracts" in target or "contracts2" in target
 
 
+#: 常设复用豁免(非临时债务): (导入方模块前缀, 目标模块前缀)。
+#: Wave 3-B: 四维评估规则归 results 域所有, 其状态词汇与 IRR 分类仍以
+#: 无状态的 iesplan.metrics.validity / iesplan.metrics.financial 为唯一权威
+#: (收口 §六“领域公开纯函数”复用, 不复制枚举值)。仅豁免 results 域对该两
+#: 模块的导入; results 对 metrics 其他子模块、其他域对 metrics 的导入仍记
+#: 债务(Wave 4 的 engines/analysis 债务不受影响)。调用方按需传入, 缺省为空。
+_WAVE0_STATE_MODEL_REUSE: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("iesplan.results", "iesplan.metrics.validity"),
+        ("iesplan.results", "iesplan.metrics.financial"),
+    }
+)
+
+
+def _is_exempt_reuse(mod: str, target: str, exempt: frozenset[tuple[str, str]]) -> bool:
+    """常设复用豁免判定: 导入方与目标同时命中同一豁免条目前缀即豁免。"""
+    return any(
+        (mod == importer or mod.startswith(importer + "."))
+        and (target == allowed or target.startswith(allowed + "."))
+        for importer, allowed in exempt
+    )
+
+
 def _iter_domain_imports(
     scan_root: Path,
     forbidden: frozenset[str],
     own_top: str | None = None,
     pkg_root: Path = _PKG_ROOT,
+    exempt: frozenset[tuple[str, str]] = frozenset(),
 ) -> set[tuple[str, str]]:
     """通用依赖事实扫描: 返回 (模块, 目标顶层包) 集合。
 
     覆盖三种绝对导入形态: import iesplan.X[.Y]、from iesplan[.X…] import …、
     from iesplan import X(含根包直引领域形态, 如 project/access 经根包调用 identity)。
-    contract 目标与包外目标自动排除; own_top 指定时排除自身域。
+    contract 目标与包外目标自动排除; own_top 指定时排除自身域;
+    exempt 命中(_WAVE0_STATE_MODEL_REUSE)时排除常设复用。
     """
     found: set[tuple[str, str]] = set()
     for path, mod in _iter_modules(scan_root, pkg_root):
@@ -797,6 +822,8 @@ def _iter_domain_imports(
                 if not target.startswith("iesplan."):
                     continue
                 if _is_contract_target(target):
+                    continue
+                if _is_exempt_reuse(mod, target, exempt):
                     continue
                 top = _top_pkg_of(target)
                 if top not in forbidden:
@@ -873,18 +900,23 @@ def _find_cross_domain_behavior_imports(pkg_root: Path = _PKG_ROOT) -> set[tuple
     """门禁 14: 扫描各业务域对他域行为的直接依赖。返回 (模块, 他域) 集合。
 
     领域间不得直接组合业务: 他域根包/行为子模块导入即违规; 他域 contracts
-    属不可变 contract 复用, 允许。跨领域授权与工作流归 application。
+    属不可变 contract 复用, 允许; _WAVE0_STATE_MODEL_REUSE 属常设复用, 允许。
+    跨领域授权与工作流归 application。
     """
     found: set[tuple[str, str]] = set()
     for domain in sorted(_WAVE0_DOMAIN_PKGS):
         scan_root = pkg_root / domain
         if not scan_root.is_dir():
             continue
-        found |= _iter_domain_imports(scan_root, _WAVE0_DOMAIN_PKGS, own_top=domain)
+        found |= _iter_domain_imports(
+            scan_root, _WAVE0_DOMAIN_PKGS, own_top=domain, exempt=_WAVE0_STATE_MODEL_REUSE
+        )
     return found
 
 
 #: 门禁 14 临时债务: 禁止的领域间依赖(Wave 2-B 已消除 project→identity, 剩 1 对; Wave 4 归零)。
+#: Wave 3-B 起 results 域对 metrics 状态模型的复用属常设豁免(见 _WAVE0_STATE_MODEL_REUSE),
+#: 不记入本债务集合。
 TEMP_DEBT_CROSS_DOMAIN: set[tuple[str, str]] = {
     # engines/planning.py:34 直调 metrics.financial(计算方向收敛时一并处理)。
     ("iesplan.engines.planning", "metrics"),

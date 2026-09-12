@@ -1,13 +1,17 @@
 """结果用例族(application/results): 证据/评估/index/选中/视图/逐时/检查。
 
-结果编排的唯一实现(已收敛原 ``services.results`` 语义, 旧服务已删除):
+跨域编排的唯一实现(已收敛原 ``services.results`` 语义, 旧服务已删除):
 
 - 证据写入: 写入资格校验(尝试 running + 租约 active + fencing token 未过期)
   → 载荷清单校验 → 打包落盘 → 证据包行 → 对象引用 → 审计(证据包只 INSERT);
-- 评估写入: 四维有效性检查(物理/最优性/财务/可靠性) → 新评估记录追加,
-  不覆盖原记录; 汇总只在读取时派生;
+- 评估写入: 经 results 域四维规则评估 → 新评估记录追加, 不覆盖原记录;
+  汇总只在读取时派生;
 - index 重建: 同证据挂接新评估只更新 assessment_id 指针; 新证据发布转交
   最新标记并插入新行。
+
+单领域规则(证据/评估状态、结果错误、状态映射、四维评估规则)归 results 域
+所有(``iesplan.results.rules``/``contracts``), 本层直接复用, 不复制。
+本层只拥有事务、步骤顺序与 tasks/project/storage/audit/results 跨域协调。
 
 事务: 顶层用例拥有提交/回滚(``db.commit`` 收尾, 失败 ``db.rollback``);
 内部步骤只经领域公开门面写入 + flush, 不提交。
@@ -39,110 +43,33 @@ from iesplan.core.jsonutil import canonical_json
 from iesplan.engines.eval_run import CAPACITY_PARAM
 from iesplan.identity.contracts import UserRecord
 from iesplan.metrics import validity
-from iesplan.metrics.financial import IRRStatus
 from iesplan.results.contracts import (
+    EvidenceInvalidError,
     EvidencePackageRecord,
+    EvidenceWriteDeniedError,
     ResultAssessmentRecord,
     ResultIndexRecord,
+    ResultInvalidRequestError,
     ResultSelectionRecord,
 )
 from iesplan.storage import add_ref, get_object, object_info, put_object
 from iesplan.tasks.contracts import TaskAttemptRecord, TaskRecord
 
-# ---------------------------------------------------------------------------
-# 常量(与 services.results 同值, 复制不改语义)
-# ---------------------------------------------------------------------------
+# 领域规则复导出(application 公开面保持稳定, 权威归 results 域):
+# 证据/评估状态、评估/选中类型、规则版本、评估阈值、结果错误。
+EVIDENCE_COMPLETE = results_domain.EVIDENCE_COMPLETE
+EVIDENCE_PARTIAL = results_domain.EVIDENCE_PARTIAL
+EVIDENCE_INVALID = results_domain.EVIDENCE_INVALID
+ASSESSMENT_TYPES = results_domain.ASSESSMENT_TYPES
+SELECTION_TYPES = results_domain.SELECTION_TYPES
+ASSESSMENT_RULE_VERSION = results_domain.ASSESSMENT_RULE_VERSION
+EVIDENCE_SCHEMA_VERSION = results_domain.EVIDENCE_SCHEMA_VERSION
+DEFAULT_MIN_VALID_SAMPLES = results_domain.DEFAULT_MIN_VALID_SAMPLES
+DEFAULT_GAP_THRESHOLD_PCT = results_domain.DEFAULT_GAP_THRESHOLD_PCT
 
-#: 证据包状态
-EVIDENCE_COMPLETE = "complete"
-EVIDENCE_PARTIAL = "partial"
-EVIDENCE_INVALID = "invalid"
-
-#: 评估类型(full=四维全查; 单维=只查该维, 其余记 unknown)
-ASSESSMENT_TYPES: tuple[str, ...] = ("full", "physical", "optimality", "financial", "reliability")
-
-#: 结果选中类型
-SELECTION_TYPES: tuple[str, ...] = ("adopt", "reference")
-
-#: 逐时查询默认/上限分页大小
+#: 逐时查询默认/上限分页大小(存储读取编排的分页护栏, 归本层)
 DEFAULT_HOURLY_LIMIT = 5000
 MAX_HOURLY_LIMIT = 50000
-
-#: 评估规则版本(规则变更时递增, 随每次评估记录保存)
-ASSESSMENT_RULE_VERSION = "1.0.0"
-#: 证据内容 schema 版本
-EVIDENCE_SCHEMA_VERSION = "1.0.0"
-
-#: 可靠性有效样本下限
-DEFAULT_MIN_VALID_SAMPLES = 30
-
-#: 最优性 gap 阈值(%)(默认 0.1%)
-DEFAULT_GAP_THRESHOLD_PCT = 0.1
-
-#: 证据载荷必需字段(清单部分)
-_REQUIRED_EVIDENCE_KEYS: tuple[str, ...] = (
-    "snapshot_id",
-    "algorithm",
-    "seed",
-    "stop_condition",
-    "solve",
-    "candidate_indices",
-    "metrics",
-    "hourly_refs",
-    "content",
-)
-
-#: 求解器状态 → 最优性细粒度状态
-_OPTIMALITY_BY_SOLVER: dict[str, str] = {
-    "OPTIMAL": "passed",
-    "TIME_LIMIT_WITH_INCUMBENT": "restricted",
-    "PARTIAL_BATCH": "restricted",
-    "NO_FEASIBLE_FOUND": "failed",
-    "INFEASIBLE": "failed",
-    "INFEASIBLE_BY_IRR_FLOOR": "failed",
-    "BASE_INFEASIBLE": "failed",
-    "MODEL_AUDIT_FAIL": "failed",
-    "NO_PARETO_FEASIBLE": "failed",
-}
-
-#: 引擎内部状态码 → 最优性细粒度状态
-_ENGINE_STATUS_TO_OPTIMALITY: dict[str, str] = {
-    "ok": "passed",
-    "time_limit": "restricted",
-    "infeasible": "failed",
-    "unbounded": "failed",
-    "numerical_failure": "failed",
-}
-
-
-# ---------------------------------------------------------------------------
-# 错误类型(与 services.results 同 code/HTTP 状态, 复制不改语义)
-# ---------------------------------------------------------------------------
-
-
-class EvidenceWriteDeniedError(ConflictError):
-    """证据写入资格校验失败(尝试状态/租约/fencing), HTTP 409。"""
-
-    code = "EVID-FENCE-001"
-    message_key = "ies.diag.evidence.write_denied"
-
-
-class EvidenceInvalidError(AppError):
-    """证据载荷结构非法(无法打包), HTTP 400。"""
-
-    code = "EVID-DATA-001"
-    http_status = 400
-    severity = "error"
-    message_key = "ies.diag.evidence.invalid"
-
-
-class ResultInvalidRequestError(AppError):
-    """结果域请求参数非法, HTTP 400。"""
-
-    code = "RES-REQ-001"
-    http_status = 400
-    severity = "error"
-    message_key = "ies.diag.param.invalid"
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +191,7 @@ def _validate_evidence_payload(
     校验不通过不抛错, 以问题清单返回 —— 由调用方落库为 status='invalid'。
     """
     problems: list[str] = []
-    missing = [key for key in _REQUIRED_EVIDENCE_KEYS if key not in payload]
+    missing = [key for key in results_domain.REQUIRED_EVIDENCE_KEYS if key not in payload]
     if missing:
         problems.append(f"缺少必需字段: {','.join(missing)}")
     try:
@@ -445,311 +372,32 @@ def list_assessments(db: Session, task_id: int) -> list[ResultAssessmentRecord]:
     return results_domain.list_assessments_for_task(db, task_id)
 
 
-def _evidence_inner(payload: dict[str, Any]) -> dict[str, Any]:
-    """证据载荷 → 内容文档: 载荷以 {"content": {...}} 打包,
-    评估消费内容文档(residuals/financial/reliability/candidates)。"""
-    inner = payload.get("content")
-    return inner if isinstance(inner, dict) else payload
-
-
-# ---------------------------------------------------------------------------
-# 四维有效性检查(复制 services.results 语义)
-# ---------------------------------------------------------------------------
-
-
-def _check_physical(content: dict[str, Any], evidence_status: str) -> tuple[validity.PhysicalValidity, dict]:
-    """物理有效性: 能量守恒残差 + 容量约束 + 边界条件。
-
-    缺少所需证据时不得判定通过。
-    """
-    if evidence_status != EVIDENCE_COMPLETE:
-        return validity.PhysicalValidity.insufficient, {"reason": "evidence_status_invalid"}
-    residuals = content.get("residuals")
-    if not isinstance(residuals, dict):
-        return validity.PhysicalValidity.insufficient, {"reason": "missing_residuals"}
-    items = residuals.get("items")
-    if not isinstance(items, list) or not items:
-        return validity.PhysicalValidity.insufficient, {"reason": "no_residual_items"}
-    failed_items = [
-        {
-            "name": item.get("name"),
-            "normalized": item.get("normalized"),
-            "tol": item.get("tol"),
-            "residual": item.get("residual"),
-            "scale": item.get("scale"),
-            "tau": item.get("tau"),
-        }
-        for item in items
-        if isinstance(item, dict) and not item.get("passed", False)
-    ]
-    constraints = content.get("constraints") or {}
-    capacity_violations = constraints.get("capacity_violations") or []
-    boundary_violations = constraints.get("boundary_violations") or []
-    checks: dict[str, Any] = {
-        "residuals_all_passed": bool(residuals.get("all_passed")) and not failed_items,
-        "max_normalized": residuals.get("max_normalized"),
-        "capacity_violations": len(capacity_violations),
-        "boundary_violations": len(boundary_violations),
-        "failed_items": failed_items[:10],
-    }
-    if failed_items:
-        return validity.PhysicalValidity.failed, checks
-    if capacity_violations or boundary_violations:
-        return validity.PhysicalValidity.failed, checks
-    return validity.PhysicalValidity.passed, checks
-
-
-def _check_optimality(content: dict[str, Any]) -> tuple[validity.OptimalityValidity, dict]:
-    """最优性有效性: 求解状态/Gap/停止原因。
-
-    记录原始求解状态、目标值、界、相对 Gap 与停止原因; Gap 只在求解器
-    给出数学上有效的 Gap 时参与判定。
-    """
-    solve = content.get("solve") or {}
-    stop = content.get("stop_condition") or {}
-    solver_status = str(solve.get("solver_status") or stop.get("status") or "")
-    gap = solve.get("gap")
-    if gap is None:
-        gap = stop.get("gap")
-    gap_threshold = float(stop.get("gap_threshold_pct", DEFAULT_GAP_THRESHOLD_PCT))
-    checks: dict[str, Any] = {
-        "solver_status": solver_status,
-        "objective": solve.get("objective"),
-        "gap": gap,
-        "stop_reason": stop.get("stop_reason") or solve.get("stop_reason"),
-        "gap_threshold_pct": gap_threshold,
-        "feasible": solve.get("feasible", solve.get("x_available")),
-    }
-    fine = _OPTIMALITY_BY_SOLVER.get(solver_status) or _ENGINE_STATUS_TO_OPTIMALITY.get(solver_status)
-    if fine is None:
-        # 无法证明最优性: 无依据不判通过
-        return validity.OptimalityValidity.insufficient, checks
-    if fine == "passed" and gap is not None:
-        try:
-            if float(gap) > gap_threshold:
-                fine = "restricted"  # 相对 gap 未达标
-                checks["gap_violated"] = True
-        except (TypeError, ValueError):
-            pass
-    return validity.OptimalityValidity(fine), checks
-
-
-def _check_financial(content: dict[str, Any]) -> tuple[validity.FinancialValidity, dict]:
-    """财务有效性: 现金流与 IRR 状态细分。"""
-    fin = content.get("financial")
-    if not isinstance(fin, dict):
-        return validity.FinancialValidity.insufficient, {"reason": "missing_financial"}
-    irr_status: IRRStatus | None = None
-    raw_status = fin.get("irr_status")
-    if raw_status is not None:
-        try:
-            irr_status = IRRStatus(str(raw_status))
-        except ValueError:
-            irr_status = None
-    fine = validity.financial_validity_from_irr(irr_status)
-    checks: dict[str, Any] = {
-        "irr": fin.get("irr"),
-        "irr_status": irr_status.value if irr_status is not None else None,
-        "irr_message": fin.get("irr_message"),
-        "npv": fin.get("npv"),
-        "investment": fin.get("investment"),
-        "baseline_cost": fin.get("baseline_cost"),
-        "cashflows_len": len(fin.get("cashflows") or []),
-    }
-    return fine, checks
-
-
-def _check_reliability(content: dict[str, Any]) -> tuple[validity.ReliabilityStatus, dict]:
-    """可靠性状态: 样本统计(未执行/部分/不足/有效)。
-
-    无效样本单独统计不静默计入有效分布; 有效样本低于下限视为证据不足。
-    """
-    rel = content.get("reliability")
-    if not isinstance(rel, dict) or not rel.get("executed"):
-        return validity.ReliabilityStatus.not_executed, {"executed": False}
-    total = int(rel.get("total_samples") or 0)
-    valid = int(rel.get("valid_samples") or 0)
-    invalid = int(rel.get("invalid_samples") or max(total - valid, 0))
-    required = int(rel.get("required_valid_samples") or DEFAULT_MIN_VALID_SAMPLES)
-    checks: dict[str, Any] = {
-        "executed": True,
-        "mode": rel.get("mode"),
-        "total_samples": total,
-        "valid_samples": valid,
-        "invalid_samples": invalid,
-        "required_valid_samples": required,
-        "failure_reasons": rel.get("failure_reasons") or [],
-        "scope": rel.get("scope"),
-        "metrics": rel.get("metrics"),
-    }
-    if total <= 0 or valid <= 0:
-        return validity.ReliabilityStatus.insufficient, checks
-    if valid < required:
-        return validity.ReliabilityStatus.insufficient, checks
-    if invalid > 0 or valid < total:
-        return validity.ReliabilityStatus.partial, checks
-    return validity.ReliabilityStatus.ok, checks
-
-
-def _fine_to_db(dimension: str, fine: Any) -> str:
-    """细粒度状态 → 数据库粗粒度枚举(pass/fail/unknown)。
-
-    数据库三值无法表达 restricted/na/insufficient, 归入 unknown; 权威细粒度
-    状态与理由保存于 detail JSONB。
-    """
-    if dimension == "reliability":
-        return {"ok": "pass", "insufficient": "fail"}.get(str(fine), "unknown")
-    return {"passed": "pass", "failed": "fail"}.get(str(fine), "unknown")
-
-
-def _overall_score(states: dict[str, Any]) -> float | None:
-    """综合得分(0-100): 四维各 25 分; 全部未评估返回 None。"""
-    score = 0.0
-    any_checked = False
-    for name in ("physical", "optimality", "financial"):
-        if states[name] == validity.ValidityLevel.passed:
-            score += 25.0
-            any_checked = True
-    if states["reliability"] == validity.ReliabilityStatus.ok:
-        score += 25.0
-        any_checked = True
-    return round(score, 2) if any_checked else None
-
-
 def assess_evidence(
     db: Session,
     evidence_package_id: int,
     assessment_type: str = "full",
     user: UserRecord | None = None,
 ) -> ResultAssessmentRecord:
-    """执行四维有效性检查并创建新评估记录(追加式, 不覆盖原记录)。
+    """执行评估并创建新评估记录(追加式, 不覆盖原记录)。
 
-    assessment_type: full=四维全查; physical/optimality/financial/reliability=
-    只查单维(其余维度记 unknown)。内部步骤只 flush, 由顶层 run_assessment 提交。
+    跨域编排: 取证据包(tasks/results)→读内容对象(storage)→经 results 域
+    四维规则评估→追加落库(results)。内部步骤只 flush, 由顶层 run_assessment 提交。
     """
-    if assessment_type not in ASSESSMENT_TYPES:
-        raise ResultInvalidRequestError(
-            "未知评估类型",
-            code="RES-REQ-002",
-            params={"assessment_type": assessment_type, "allowed": list(ASSESSMENT_TYPES)},
-        )
     package = get_evidence(db, evidence_package_id)
-    content = _evidence_inner(evidence_content(db, package))
-
-    if package.status == EVIDENCE_INVALID:
-        # 校验失败不可用: 缺少可信证据, 不得判定任一维度通过
-        return _build_assessment(
-            db,
-            package,
-            checked=["physical", "optimality", "financial", "reliability"],
-            physical=validity.PhysicalValidity.insufficient,
-            optimality=validity.OptimalityValidity.insufficient,
-            financial=validity.FinancialValidity.insufficient,
-            reliability=validity.ReliabilityStatus.not_executed,
-            physical_checks={"reason": "evidence_status_invalid"},
-            optimality_checks={"reason": "evidence_status_invalid"},
-            financial_checks={"reason": "evidence_status_invalid", "irr_status": None},
-            reliability_checks={"executed": False},
-            user=user,
-        )
-
-    checked: list[str] = []
-    if assessment_type in ("full", "physical"):
-        physical, physical_checks = _check_physical(content, package.status)
-        checked.append("physical")
-    else:
-        physical, physical_checks = validity.PhysicalValidity.na, {}
-    if assessment_type in ("full", "optimality"):
-        optimality, optimality_checks = _check_optimality(content)
-        checked.append("optimality")
-    else:
-        optimality, optimality_checks = validity.OptimalityValidity.na, {}
-    if assessment_type in ("full", "financial"):
-        financial, financial_checks = _check_financial(content)
-        checked.append("financial")
-    else:
-        financial, financial_checks = validity.FinancialValidity.na, {}
-    if assessment_type in ("full", "reliability"):
-        reliability, reliability_checks = _check_reliability(content)
-        checked.append("reliability")
-    else:
-        reliability, reliability_checks = validity.ReliabilityStatus.not_executed, {}
-
-    return _build_assessment(
-        db,
-        package,
-        checked=checked,
-        physical=physical,
-        optimality=optimality,
-        financial=financial,
-        reliability=reliability,
-        physical_checks=physical_checks,
-        optimality_checks=optimality_checks,
-        financial_checks=financial_checks,
-        reliability_checks=reliability_checks,
-        user=user,
+    content = results_domain.evidence_inner(evidence_content(db, package))
+    draft = results_domain.evaluate_evidence(
+        content,
+        evidence_status=package.status,
+        assessment_type=assessment_type,
     )
-
-
-def _build_assessment(
-    db: Session,
-    package: EvidencePackageRecord,
-    *,
-    checked: list[str],
-    physical: validity.PhysicalValidity,
-    optimality: validity.OptimalityValidity,
-    financial: validity.FinancialValidity,
-    reliability: validity.ReliabilityStatus,
-    physical_checks: dict[str, Any],
-    optimality_checks: dict[str, Any],
-    financial_checks: dict[str, Any],
-    reliability_checks: dict[str, Any],
-    user: UserRecord | None,
-) -> ResultAssessmentRecord:
-    """构造评估记录: 细粒度状态入 detail, 粗粒度枚举入列, 追加 INSERT。"""
-    detail: dict[str, Any] = {
-        "definition_version": ASSESSMENT_RULE_VERSION,
-        "rule_versions": {
-            "physical": ASSESSMENT_RULE_VERSION,
-            "optimality": ASSESSMENT_RULE_VERSION,
-            "financial": ASSESSMENT_RULE_VERSION,
-            "reliability": ASSESSMENT_RULE_VERSION,
-        },
-        "checked": checked,
-        "dimensions": {
-            "physical": physical.value,
-            "optimality": optimality.value,
-            "financial": financial.value,
-            "financial_irr_status": financial_checks.get("irr_status"),
-            "reliability": reliability.value,
-        },
-        "checks": {
-            "physical": physical_checks,
-            "optimality": optimality_checks,
-            "financial": financial_checks,
-            "reliability": reliability_checks,
-        },
-    }
     return results_domain.create_system_assessment(
         db,
         evidence_package_id=package.id,
-        dimensions={
-            "physical": _fine_to_db("physical", physical),
-            "optimality": _fine_to_db("optimality", optimality),
-            "financial": _fine_to_db("financial", financial),
-            "reliability": _fine_to_db("reliability", reliability),
-        },
-        overall_score=_overall_score(
-            {
-                "physical": physical,
-                "optimality": optimality,
-                "financial": financial,
-                "reliability": reliability,
-            }
-        ),
-        detail=detail,
+        dimensions=draft.dimensions,
+        overall_score=draft.overall_score,
+        detail=draft.detail,
         assessed_by=user.id if user is not None else None,
-        comment=f"系统自动评估(规则版本 {ASSESSMENT_RULE_VERSION}, 维度: {', '.join(checked)})",
+        comment=draft.comment,
     )
 
 
@@ -854,44 +502,9 @@ def update_result_index(
 # ---------------------------------------------------------------------------
 
 
-def _coerce_fine(dimension: str, value: object) -> Any:
-    """detail 细粒度字符串 → 状态枚举(非法值保守回退, 不静默吞并到通过)。"""
-    raw = str(value)
-    if dimension == "reliability":
-        try:
-            return validity.ReliabilityStatus(raw)
-        except ValueError:
-            return validity.ReliabilityStatus.not_executed
-    try:
-        return validity.ValidityLevel(raw)
-    except ValueError:
-        return validity.ValidityLevel.na
-
-
-def _fine_states(assessment: ResultAssessmentRecord) -> dict[str, Any]:
-    """评估细粒度状态: 优先 detail 内独立记录的细粒度值(权威), 否则由粗粒度列回退。"""
-    detail = assessment.detail or {}
-    dims = detail.get("dimensions")
-    if isinstance(dims, dict) and "physical" in dims and "reliability" in dims:
-        return {
-            "physical": _coerce_fine("physical", dims.get("physical")),
-            "optimality": _coerce_fine("optimality", dims.get("optimality")),
-            "financial": _coerce_fine("financial", dims.get("financial")),
-            "financial_irr_status": dims.get("financial_irr_status"),
-            "reliability": _coerce_fine("reliability", dims.get("reliability")),
-        }
-    return {
-        "physical": validity.from_db_value(assessment.dimension_physical, "physical"),
-        "optimality": validity.from_db_value(assessment.dimension_optimality, "optimality"),
-        "financial": validity.from_db_value(assessment.dimension_financial, "financial"),
-        "financial_irr_status": None,
-        "reliability": validity.from_db_value(assessment.dimension_reliability, "reliability"),
-    }
-
-
 def assessment_to_dict(db: Session, assessment: ResultAssessmentRecord) -> dict[str, Any]:
     """评估序列化(含只读派生摘要, 绝不覆盖原始维度)。"""
-    states = _fine_states(assessment)
+    states = results_domain.fine_states(assessment)
     summary = validity.summarize_four_dimensions(
         states["physical"],
         states["optimality"],
@@ -1007,7 +620,7 @@ def select_result(
     if index is None:
         raise NotFoundError("该任务尚无结果索引, 无法选择结果", params={"task_id": task_id})
     package = get_evidence(db, index.evidence_package_id)
-    content = _evidence_inner(evidence_content(db, package))
+    content = results_domain.evidence_inner(evidence_content(db, package))
 
     # 校验所选解标识在证据候选范围内
     candidate_indices = content.get("candidate_indices") or []
@@ -1080,7 +693,7 @@ def selection_diff(db: Session, project_id: int) -> dict[str, Any] | None:
             message_key="ies.diag.store.corrupt",
             params={"selection_id": selection.id},
         )
-    content = _evidence_inner(evidence_content(db, package))
+    content = results_domain.evidence_inner(evidence_content(db, package))
     diff_patch = build_diff_patch(content, solution_id)
     return {
         "solution_id": solution_id,
