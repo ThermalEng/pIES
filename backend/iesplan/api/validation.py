@@ -20,7 +20,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application.projects.lifecycle import ensure_access
 from iesplan.application.validations import (
     get_latest_validation_report,
     mark_baseline_confirmed,
@@ -28,6 +27,7 @@ from iesplan.application.validations import (
     validate_project,
 )
 from iesplan.db import get_db
+from iesplan.project import ensure_access
 
 #: FastAPI 路由(挂载前缀 /api/projects/{project_id}/validation, 由集成阶段追加)
 router = APIRouter(prefix="/api/projects/{project_id}/validation", tags=["validation"])

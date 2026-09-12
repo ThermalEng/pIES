@@ -24,12 +24,13 @@ from iesplan.storage.contracts import (
     ObjectOwner,
     ObjectQuotaError,
     ObjectStore,
-    RefInfo,
     ReferenceNotFoundError,
+    RefInfo,
     RetentionPolicy,
     StorageQuotaError,
 )
 from iesplan.storage.service import (
+    DEFAULT_PENDING_DELETE_DAYS,
     add_ref,
     attach,
     check_capacity,
@@ -44,8 +45,8 @@ from iesplan.storage.service import (
     orphaned_stats,
     purge_expired,
     put_object,
-    remove_ref,
     reconcile,
+    remove_ref,
     safe_cleanup,
     sample_verify,
     storage_stats,
@@ -56,6 +57,7 @@ from iesplan.storage.service import (
 
 __all__ = [
     "BlobStore",
+    "DEFAULT_PENDING_DELETE_DAYS",
     "ObjectCorruptError",
     "ObjectHandle",
     "ObjectId",

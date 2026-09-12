@@ -34,8 +34,8 @@ from iesplan.core.errors import ConflictError, ForbiddenError
 from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.project import (
-    InvalidRequestError,
     OWNER_CAPABILITIES,
+    InvalidRequestError,
     draft_to_dict,
     ensure_access,
     get_role,

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from iesplan.core.errors import ConflictError
 from iesplan.storage import (
+    DEFAULT_PENDING_DELETE_DAYS,
     list_pending_deleted,
     purge_expired,
     reconcile,
@@ -22,10 +23,10 @@ from iesplan.storage import (
     storage_stats,
     undelete_object,
 )
-#: 软删保留期默认天数唯一所有者为 storage 域
-#: (iesplan.storage.service.DEFAULT_PENDING_DELETE_DAYS); 本用例只复用,
+
+#: 软删保留期默认天数唯一所有者为 storage 域公开门面
+#: (iesplan.storage.DEFAULT_PENDING_DELETE_DAYS); 本用例只复用,
 #: 不再本地复述字面量, 避免两处缺省漂移。
-from iesplan.storage.service import DEFAULT_PENDING_DELETE_DAYS
 
 
 def get_storage_view(db: Session) -> dict:

@@ -25,9 +25,9 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.application.configuration import calc_config
-from iesplan.application.projects.lifecycle import ensure_access
 from iesplan.core.errors import error_envelope
 from iesplan.db import get_db
+from iesplan.project import ensure_access
 
 #: FastAPI 依赖注入的数据库会话
 DbSession = Annotated[Session, Depends(get_db)]
