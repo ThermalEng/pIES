@@ -73,19 +73,17 @@ from iesplan.package import (
 from iesplan.package import (
     bound_dataset_ids as _bound_dataset_ids,
 )
+from iesplan.package import create_proposal as _create_proposal
+from iesplan.package import get_proposal as _get_proposal
+from iesplan.package import list_proposals_for_proposer as _list_proposals_for_proposer
 from iesplan.package import (
     media_file_kind as _media_file_kind,
 )
 from iesplan.package import parse_config_files as _parse_config_files
 from iesplan.package import parse_evidence_content as _parse_evidence_content
 from iesplan.package import parse_package as _parse_package
+from iesplan.package import set_proposal_review as _set_proposal_review
 from iesplan.package.contracts import ImportProposalRecord
-from iesplan.package.persistence import (
-    create_proposal,
-    get_proposal,
-    list_proposals_for_proposer,
-    set_proposal_review,
-)
 from iesplan.project.contracts import DraftRecord, ProjectRecord, ProjectVersionRecord
 from iesplan.storage import add_ref, get_object, object_info, put_object
 
@@ -542,7 +540,7 @@ def import_proposal(
     manifest, entries = _parse_package(file_bytes)
     # 幂等: 同一提议人 + 同一幂等键的未确认提案 → 直接返回(校验已通过, 不重复暂存)
     if idempotency_key:
-        for cand in list_proposals_for_proposer(db, user.id):
+        for cand in _list_proposals_for_proposer(db, user.id):
             if (
                 cand.status == "proposed"
                 and (cand.review_summary or {}).get("idempotency_key") == idempotency_key
@@ -612,14 +610,14 @@ def import_proposal(
     # §11 内部路径, 不得进入审计记录; 可追溯性由 source_object_id
     # (对象存储对象外键)承担。提案行经 package 域 repository 创建,
     # 不直接访问提案表。
-    proposal = create_proposal(
+    proposal = _create_proposal(
         db,
         project_id=project.id,
         proposer_id=user.id,
         source_type="json",
         source_object_id=source_obj.id,
     )
-    proposal = set_proposal_review(
+    proposal = _set_proposal_review(
         db,
         proposal.id,
         status="proposed",
@@ -715,7 +713,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
     导入约束: 不得静默覆盖(名称去重 + 新项目身份); 账号/权限/会话不随包导入;
     导入者成为新项目所有者; 原授权关系不迁移。
     """
-    proposal = get_proposal(db, proposal_id)
+    proposal = _get_proposal(db, proposal_id)
     if proposal is None:
         raise NotFoundError(
             "导入提案不存在",
@@ -956,7 +954,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             ) from exc
 
     # 6) 提案收尾 + 审计(提案状态经 package 域状态机推进)
-    set_proposal_review(
+    _set_proposal_review(
         db,
         proposal.id,
         status="applied",

@@ -36,6 +36,7 @@ from iesplan import package as package_domain  # noqa: E402
 from iesplan.api import config_revisions as config_api  # noqa: E402
 from iesplan.api import exports as exports_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.application.packages import operations as packages_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.core.yamlmini import dump as yaml_dump  # noqa: E402
@@ -354,12 +355,12 @@ def test_export_and_import_roundtrip_with_configs(client: TestClient, db: Sessio
         )
         assert e.profile_id == profile.profile_id
 
-    proposal = package_domain.import_proposal(db, importer, zip_bytes)
+    proposal = packages_uc.propose_import(db, importer, zip_bytes)
     summary_configs = proposal.review_summary["configs"]
     assert summary_configs["finance_triplet"]["present"] is True
     assert summary_configs["finance_triplet"]["profile_id"] == profile.profile_id
     assert summary_configs["finance_triplet"]["present"] is True
-    new_project = package_domain.confirm_import(db, importer, proposal.id)
+    new_project = packages_uc.confirm_import(db, importer, proposal.id)
     db.commit()
 
     # 新项目身份, 配置重建: Effective 血缘一致, 规划引用一致
@@ -389,9 +390,9 @@ def test_export_without_configs(client: TestClient, db: Session) -> None:
         assert manifest["files"]["configs"] == {}
         assert "finance_profile.yaml" not in zf.namelist()
 
-    proposal = package_domain.import_proposal(db, importer, zip_bytes)
+    proposal = packages_uc.propose_import(db, importer, zip_bytes)
     assert proposal.review_summary["configs"]["finance_triplet"]["present"] is False
-    new_project = package_domain.confirm_import(db, importer, proposal.id)
+    new_project = packages_uc.confirm_import(db, importer, proposal.id)
     db.commit()
     resp = client.get(
         f"/api/projects/{new_project.id}/effective-finance", headers=_h(client, importer)
@@ -412,7 +413,7 @@ def test_import_rejects_incomplete_triplet(client: TestClient, db: Session) -> N
     configs_meta = {k: v for k, v in configs_meta.items() if k != "effective_finance"}
     zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_domain.ImportValidationError) as excinfo:
-        package_domain.import_proposal(db, importer, zip_bytes)
+        packages_uc.propose_import(db, importer, zip_bytes)
     assert any("effective_finance" in r for r in excinfo.value.reasons)
 
 
@@ -431,7 +432,7 @@ def test_import_rejects_planning_domain_violation(client: TestClient, db: Sessio
     configs_meta = {**configs_meta, "planning_config": "planning_config.yaml"}
     zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_domain.ImportValidationError) as excinfo:
-        package_domain.import_proposal(db, importer, zip_bytes)
+        packages_uc.propose_import(db, importer, zip_bytes)
     assert any("领域校验失败" in r for r in excinfo.value.reasons)
 
 
@@ -448,5 +449,5 @@ def test_import_rejects_override_scope_violation(client: TestClient, db: Session
     entries["finance_overrides.yaml"] = yaml_dump(overrides_doc).encode("utf-8")
     zip_bytes = _build_package(entries, configs_meta)
     with pytest.raises(package_domain.ImportValidationError) as excinfo:
-        package_domain.import_proposal(db, importer, zip_bytes)
+        packages_uc.propose_import(db, importer, zip_bytes)
     assert any("FinanceOverrides" in r for r in excinfo.value.reasons)

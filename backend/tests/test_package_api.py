@@ -43,10 +43,11 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan import package as package_domain  # noqa: E402
-from iesplan import project as project_domain  # noqa: E402
 from iesplan.api import admin as admin_api  # noqa: E402
 from iesplan.api import exports as exports_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.application.packages import operations as packages_uc  # noqa: E402
+from iesplan.application.projects import lifecycle as projects_lifecycle  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.errors import ForbiddenError  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
@@ -447,16 +448,16 @@ def test_import_creates_new_identity_owner_and_evidence_source(
         db.execute(select(ObjectRef).where(ObjectRef.ref_type == "imported_evidence")).scalars().all()
     )
 
-    proposal = package_domain.import_proposal(
+    proposal = packages_uc.propose_import(
         db, importer, zip_bytes, idempotency_key="idem-import-1"
     )
     assert proposal.status == "proposed"
     assert proposal.review_summary["checks"]["integrity_ok"] is True
     # 幂等: 相同源文件重复提案返回同一提案
-    again = package_domain.import_proposal(db, importer, zip_bytes, idempotency_key="idem-import-1")
+    again = packages_uc.propose_import(db, importer, zip_bytes, idempotency_key="idem-import-1")
     assert again.id == proposal.id
 
-    new_project = package_domain.confirm_import(db, importer, proposal.id)
+    new_project = packages_uc.confirm_import(db, importer, proposal.id)
     db.commit()
 
     # 新项目身份: 与源项目不同, 名称不覆盖(自动去重后缀)
@@ -471,7 +472,7 @@ def test_import_creates_new_identity_owner_and_evidence_source(
     # (projects.owner_id == importer.id, 见上); 项目包内不携带账号权限。
 
     # 草稿内容迁移(模型/配置)且修订从 1 开始
-    draft_content = project_domain.get_current_draft_content(db, new_project.id)
+    draft_content = projects_lifecycle.get_current_draft_content(db, new_project.id)
     assert draft_content["calc_config"]["algorithm"] == "milp" or draft_content["model"]["devices"] == []
 
     # 历史结果作为证据来源保留(不伪造本地任务)
@@ -491,13 +492,13 @@ def test_import_creates_new_identity_owner_and_evidence_source(
     assert proposal.status == "applied"
     assert proposal.decided_by == importer.id
     # 幂等重放: 已导入提案再次确认返回同一项目
-    same = package_domain.confirm_import(db, importer, proposal.id)
+    same = packages_uc.confirm_import(db, importer, proposal.id)
     assert same.id == new_project.id
 
     # 非提案人确认 → 403
     other = make_user(db, "other")
     with pytest.raises(ForbiddenError):
-        package_domain.confirm_import(db, other, proposal.id)
+        packages_uc.confirm_import(db, other, proposal.id)
 
 
 def test_import_rejects_corrupt_and_non_zip(client: TestClient, db: Session) -> None:
@@ -505,7 +506,7 @@ def test_import_rejects_corrupt_and_non_zip(client: TestClient, db: Session) -> 
     importer = make_user(db, "importer")
     # 非 zip → 格式校验失败（用户输入边界）
     with pytest.raises(package_domain.ImportValidationError):
-        package_domain.import_proposal(db, importer, b"not a zip at all")
+        packages_uc.propose_import(db, importer, b"not a zip at all")
 
     # 校验失败不创建任何提案/项目
     proposals = db.execute(select(ImportProposal)).scalars().all()
@@ -536,7 +537,7 @@ def test_import_proposal_rejects_forbidden_sections(client: TestClient, db: Sess
                 data = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
             zout.writestr(info.filename, data)
     with pytest.raises(package_domain.ImportValidationError) as exc:
-        package_domain.import_proposal(db, importer, buf.getvalue())
+        packages_uc.propose_import(db, importer, buf.getvalue())
     assert any("禁止内容" in r for r in exc.value.reasons)
 
 

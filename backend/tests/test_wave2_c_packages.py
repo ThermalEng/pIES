@@ -1,8 +1,7 @@
-"""Wave 2 W2-C: application/packages + projects/exports 用例测试(包导出/导入/Excel)。
+"""Wave 2 W2-C: application/packages 用例测试(包导出/导入/Excel)。
 
-覆盖要求:
-- 用例可独立执行并提交事务(新会话可见, 无需调用方 commit);
-- 行为与旧服务一致(关键路径对照: 清单/提案/导入落点逐项对比)。
+覆盖要求: 用例可独立执行并提交事务(新会话可见, 无需调用方 commit)。
+（旧 services.package 已删除，等价对照测试已随之删除。）
 
 环境: SQLite :memory:(StaticPool) + 内存队列 + 临时对象存储目录。
 """
@@ -34,7 +33,7 @@ from iesplan import package as package_domain  # noqa: E402
 from iesplan import project as project_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.application import packages as packages_uc  # noqa: E402
-from iesplan.application.projects import exports as exports_uc  # noqa: E402
+from iesplan.application.packages import transfers as transfers_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
@@ -181,11 +180,11 @@ def _seed_evidence(
 
 
 # ---------------------------------------------------------------------------
-# 包导出: 独立提交 + 与旧服务一致
+# 包导出: 独立提交
 # ---------------------------------------------------------------------------
 
 
-def test_export_package_usecase_commits_and_matches_old(
+def test_export_package_usecase_commits(
     client: TestClient, db: Session, engine: Engine
 ) -> None:
     owner = _user(db, "w2c_pkg_owner")
@@ -205,15 +204,11 @@ def test_export_package_usecase_commits_and_matches_old(
         manifest = json.loads(zipfile.ZipFile(io.BytesIO(raw)).read("manifest.json"))
         assert manifest["package_type"] == "project"
 
-    # 行为对照: 旧服务导出同项目, 清单同形
-    old = package_domain.export_package(db, user, pid)
-    db.commit()
-    assert old.manifest["format_version"] == result.manifest["format_version"]
-    assert old.file_name == result.file_name
+    assert result.file_name.endswith(".zip")
 
 
 # ---------------------------------------------------------------------------
-# 包导入: 提案幂等 + 确认建新身份 + 与旧服务一致
+# 包导入: 提案幂等 + 确认建新身份
 # ---------------------------------------------------------------------------
 
 
@@ -248,7 +243,7 @@ def test_import_roundtrip_via_usecases(client: TestClient, db: Session, engine: 
     assert same.id == new_project.id
 
 
-def test_import_rejects_bad_package_matches_old(client: TestClient, db: Session) -> None:
+def test_import_rejects_bad_package(client: TestClient, db: Session) -> None:
     owner = _user(db, "w2c_pkg_owner3")
     user = identity_domain.get_user(db, owner.id)
     assert user is not None
@@ -256,19 +251,14 @@ def test_import_rejects_bad_package_matches_old(client: TestClient, db: Session)
     with pytest.raises(package_domain.ImportValidationError) as e1:
         packages_uc.propose_import(db, user, b"not a zip at all")
     assert e1.value.code == "PKG-IMP-001"
-    db.rollback()
-    with pytest.raises(package_domain.ImportValidationError) as e2:
-        package_domain.import_proposal(db, user, b"not a zip at all")
-    db.rollback()
-    assert e2.value.code == "PKG-IMP-001"
 
 
 # ---------------------------------------------------------------------------
-# Excel 导出用例: 与旧服务同形
+# Excel 导出用例
 # ---------------------------------------------------------------------------
 
 
-def test_export_excel_usecase_matches_old(client: TestClient, db: Session) -> None:
+def test_export_excel_usecase(client: TestClient, db: Session) -> None:
     owner = _user(db, "w2c_xls_owner")
     pid = _project(client, owner, "w2c-Excel项目")
     vid = _version(client, owner, pid)
@@ -276,14 +266,10 @@ def test_export_excel_usecase_matches_old(client: TestClient, db: Session) -> No
     user = identity_domain.get_user(db, owner.id)
     assert user is not None
 
-    new_bytes = exports_uc.export_excel(db, user, pid, ep_id, a_id, lang="zh")
+    new_bytes = transfers_uc.export_excel(db, user, pid, ep_id, a_id, lang="zh")
     assert new_bytes[:2] == b"PK"
-    old_bytes = package_domain.export_excel(db, user, pid, ep_id, a_id, lang="zh")
-    assert old_bytes[:2] == b"PK"
 
     new_title = load_workbook(io.BytesIO(new_bytes))["报告总览"].cell(row=1, column=1).value
-    old_title = load_workbook(io.BytesIO(old_bytes))["报告总览"].cell(row=1, column=1).value
-    assert new_title == old_title
     assert "pIES 项目结果报告" in new_title
 
 

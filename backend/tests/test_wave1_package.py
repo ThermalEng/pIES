@@ -1,8 +1,8 @@
 """Wave 1 W1-Package 聚焦测试: package 域收敛与旧 services.package 删除。
 
-- 传输编排归属 package 域（package/transfers.py，旧 services/package.py 已删除）:
-  零 iesplan.models.* 导入（5 项门禁白名单消除对象保持）,
-  不再跨服务调用 services.audit/project（仅保留 Wave 2 的 config 编排）;
+- 跨域传输编排归属 application.packages.transfers（旧 services/package.py 已删除）,
+  package/transfers.py 仅保留纯函数与下载令牌能力:
+  零 iesplan.models.* 导入, 零 services.* 调用;
 - import_proposals 读写经 package 域 repository（状态机 + 记录视图）;
 - project_name_exists 供导入命名去重。
 """
@@ -86,14 +86,14 @@ def test_no_cross_model_imports_in_package_service() -> None:
     assert models == set(), f"package 域传输编排仍有跨表 ORM 导入: {sorted(models)}"
 
 
-def test_no_cross_service_calls_except_config_orchestration() -> None:
-    """package 域传输编排不再调用 services.audit/project。
+def test_no_cross_service_calls() -> None:
+    """package 域传输编排零 services.* 调用。
 
-    财务配置读写编排（register/set/save/get）归 Wave 2 application 用例，
-    本波次仅保留 services.config_revisions 调用。
+    财务配置读写编排已收敛到 application.configuration 用例
+    （旧 services.config_revisions 已删除），跨服务调用归零。
     """
     _, services = _model_and_service_imports()
-    assert services == {"iesplan.services.config_revisions"}, (
+    assert services == set(), (
         f"package 域传输编排仍有非预期跨服务调用: {sorted(services)}"
     )
 

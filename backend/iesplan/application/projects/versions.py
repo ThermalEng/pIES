@@ -132,7 +132,7 @@ def _assemble(
         currency=project.currency,
         baseline_resolution=project.baseline_resolution,
         baseline_leap_year=project.baseline_leap_year,
-        scenario_mode=project.scenario_mode,
+        scenario_mode=project.baseline_scenario_mode,
         effective_profile_id=eff_id,
         effective_revision=eff_rev,
         planning_revision=plan_rev,
