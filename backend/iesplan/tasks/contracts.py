@@ -166,3 +166,28 @@ class SampleRecordRecord:
     variable_name: str
     value: float
     unit: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionRuleRecord:
+    """保留规则（retention_rules 表公开视图；任务运维诊断消费，只读）。"""
+
+    id: int
+    entity_type: str
+    object_kind: str
+    retention_days: int
+    apply_to: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceActionRecord:
+    """管理员维护操作（admin_maintenance_actions 表公开视图，不可变）。"""
+
+    id: int
+    action_type: str
+    performed_by: int
+    status: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    params: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None

@@ -1,7 +1,7 @@
 """任务用例族(application/tasks): 提交/取消/重试/租约。
 
-复制自 ``services.tasks`` + ``services.queue`` 的跨模块编排(旧服务只读保留,
-见 Wave 2 W2-C; 旧入口待 Wave 3 API/Worker 迁移后由协调者删除):
+任务提交与状态机编排的唯一实现(已收敛原 ``services.tasks`` +
+``services.queue`` 语义，旧服务已删除):
 
 - 提交: 权限 → 项目状态 → 类型/幂等键/父任务校验 → 幂等命中 → 存储门禁 →
   快照装配(含草稿固化) → 重复提交去重 → 任务行 → 诊断 → 入队；
@@ -15,7 +15,7 @@
 出队/信号与旧服务同一位置触发, 行为一致。
 
 数据访问只经领域公开门面(tasks/project/dataset/audit/storage/identity/
-configuration)与 ``services.queue`` 可重建视图; 不导入 ``models.*``。
+configuration, 含 tasks 域队列可重建视图); 不导入 ``models.*``。
 幂等键格式沿用旧 ``IDEMPOTENCY_KEY_RE`` 语义(本地内联, 门禁 8 不允许新增
 ``models.common`` 导入, 待协调者提升为共享常量后改接)。
 快照固化时的版本内容规则(含财务/规划引用闭合)复制自
@@ -61,7 +61,6 @@ from iesplan.core.idgen import new_id
 from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
-from iesplan.services import queue
 from iesplan.storage import (
     object_info,
     orphaned_stats,
@@ -139,6 +138,11 @@ _SOLVER_OUTCOME: dict[str, str] = {
     "NO_PARETO_FEASIBLE": "no_feasible_multi_objective",
     "PARTIAL_BATCH": "partial_batch",
 }
+
+
+def map_business_outcome(solver_status: str) -> str:
+    """求解器状态 → 业务结局(未知状态保守视为 normal_completion)。"""
+    return _SOLVER_OUTCOME.get(solver_status, "normal_completion")
 
 #: 项目所有者能力集(与 services.project.OWNER_CAPABILITIES 同值, 复制不改语义)
 _OWNER_CAPABILITIES: frozenset[str] = frozenset(
@@ -220,7 +224,7 @@ class StorageEstimate:
 # ---------------------------------------------------------------------------
 
 
-def _require_project(db: Session, project_id: int) -> ProjectRecord:
+def require_project(db: Session, project_id: int) -> ProjectRecord:
     """按 id 取项目; 不存在一律 404。"""
     project = project_domain.get_project(db, project_id)
     if project is None:
@@ -232,13 +236,13 @@ def _require_project(db: Session, project_id: int) -> ProjectRecord:
     return project
 
 
-def _ensure_access(db: Session, user: UserRecord, project_id: int, *capabilities: str) -> None:
+def ensure_project_access(db: Session, user: UserRecord, project_id: int, *capabilities: str) -> None:
     """访问判定(复制 services.project.ensure_access 语义)。
 
     仅项目所有者具备全部业务能力; 全局 admin 额外可查看/管理生命周期;
     项目不存在一律 404; 缺失能力 403。
     """
-    _require_project(db, project_id)
+    require_project(db, project_id)
     project = project_domain.get_project(db, project_id)
     granted = set(_OWNER_CAPABILITIES) if project is not None and project.owner_id == user.id else set()
     if "admin" in identity_domain.user_roles(db, user.id):
@@ -476,7 +480,7 @@ def _assemble_snapshot(
     相同输入复用既有快照(快照内容字段逐项相等判定)。任务级 config 并入快照
     的 calc_config_snapshot.task_params。
     """
-    project = _require_project(db, project_id)
+    project = require_project(db, project_id)
     actor = user or identity_domain.get_user(db, project.owner_id)
     if actor is None:
         raise InvalidRequestError("无法确定快照创建者", params={"project_id": project_id})
@@ -672,7 +676,7 @@ def estimate_storage(
     S_avail = min(配额余额, 卷空闲空间); 配额未配置时仅以卷空闲空间为准。
     只读, 不拥有事务。
     """
-    project = _require_project(db, project_id)
+    project = require_project(db, project_id)
     actor = identity_domain.get_user(db, project.owner_id)
     if actor is None:
         raise NotFoundError("项目所有者不存在", params={"project_id": project_id})
@@ -780,8 +784,8 @@ def _submit_task(
     返回 (任务记录, 标记): 标记含 replay/duplicate。内部步骤只 flush,
     由顶层 submit_task 提交。
     """
-    _ensure_access(db, user, project_id, "edit")
-    project = _require_project(db, project_id)
+    ensure_project_access(db, user, project_id, "edit")
+    project = require_project(db, project_id)
     if project.status != "active":
         raise ConflictError("项目已归档或已删除, 不能提交任务", params={"project_id": project_id})
     if task_type not in TASK_TYPES:
@@ -880,7 +884,7 @@ def _submit_task(
         },
     )
     # 5) 入队(可重建视图; 权威事实 = tasks.status='queued')
-    queue.enqueue(
+    tasks_domain.enqueue(
         task.id,
         pool,
         task_type=task_type,
@@ -960,7 +964,7 @@ def _claim_task(db: Session, task_id: int, worker_id: str) -> Claim | None:
     )
     tasks_domain.set_task_status(db, task.id, "running")
     tasks_domain.bind_slot_attempt(db, slot.id, attempt.id)
-    queue.remove(task.id, pool)  # 领取后出队(视图)
+    tasks_domain.remove(task.id, pool)  # 领取后出队(视图)
     return Claim(
         task_id=task.id,
         attempt_id=attempt.id,
@@ -1043,13 +1047,13 @@ def _cancel_task(
         )
     if task.status == "queued":
         task = tasks_domain.set_task_status(db, task.id, "cancelled")
-        queue.remove(task.id, POOL_BY_TYPE[task.type])
+        tasks_domain.remove(task.id, POOL_BY_TYPE[task.type])
         return task
     if task.status == "cancelling":
         return task  # 取消已发起, 幂等
 
     task = tasks_domain.set_task_status(db, task.id, "cancelling")
-    queue.set_cancel(task.id, reason)
+    tasks_domain.set_cancel(task.id, reason)
     # 批量传播: uncertainty 父任务 → 未完成子任务
     children = tasks_domain.list_child_tasks(db, task_id)
     for child in children:
@@ -1057,10 +1061,10 @@ def _cancel_task(
             continue
         if child.status == "queued":
             tasks_domain.set_task_status(db, child.id, "cancelled")  # 未运行的子任务直接取消
-            queue.remove(child.id, POOL_BY_TYPE[child.type])
+            tasks_domain.remove(child.id, POOL_BY_TYPE[child.type])
         else:
             tasks_domain.set_task_status(db, child.id, "cancelling")  # 运行中子任务由 Worker 收拢
-            queue.set_cancel(child.id, reason)
+            tasks_domain.set_cancel(child.id, reason)
     return task
 
 
@@ -1101,7 +1105,7 @@ def _acknowledge_cancel(db: Session, task_id: int) -> TaskRecord:
         if completed_children > 0:
             outcome = "partial_batch"
     task = tasks_domain.set_task_status(db, task.id, "cancelled", business_outcome=outcome)
-    queue.clear_cancel(task.id)
+    tasks_domain.clear_cancel(task.id)
     _write_diagnostic(
         db,
         task.id,
@@ -1137,7 +1141,7 @@ def _retry_task(db: Session, user: UserRecord, task_id: int) -> TaskRecord:
     (attempt_no 递增, 新租约新 token)。
     """
     task = _get_task(db, task_id)
-    _ensure_access(db, user, task.project_id, "edit")
+    ensure_project_access(db, user, task.project_id, "edit")
     if task.status not in TERMINAL_STATUSES:
         raise TaskStateError(
             "仅终态任务可手动重试",
@@ -1164,7 +1168,7 @@ def _retry_task(db: Session, user: UserRecord, task_id: int) -> TaskRecord:
         message="手动重试已排队",
         context={"trace_id": trace_id, "queue": pool, "snapshot_id": task.calc_snapshot_id, "retry": True},
     )
-    queue.enqueue(
+    tasks_domain.enqueue(
         task.id,
         pool,
         task_type=task.type,

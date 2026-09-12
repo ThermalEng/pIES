@@ -1,7 +1,6 @@
-"""结果用例族(application/results): 证据写入/评估写入/index 重建。
+"""结果用例族(application/results): 证据/评估/index/选中/视图/逐时/检查。
 
-复制自 ``services.results`` 的跨模块编排(旧服务只读保留, 见 Wave 2 W2-C;
-旧入口待 Wave 3 API 迁移后由协调者删除):
+结果编排的唯一实现(已收敛原 ``services.results`` 语义, 旧服务已删除):
 
 - 证据写入: 写入资格校验(尝试 running + 租约 active + fencing token 未过期)
   → 载荷清单校验 → 打包落盘 → 证据包行 → 对象引用 → 审计(证据包只 INSERT);
@@ -14,8 +13,7 @@
 内部步骤只经领域公开门面写入 + flush, 不提交。
 
 数据访问只经领域公开门面(tasks/results/project/audit/storage)与公开
-metrics 状态模型; 不导入 ``models.*``。选中/差异/视图/检查任务流程不在
-本波次范围, 保留在旧服务中。
+metrics 状态模型; 不导入 ``models.*``。
 """
 
 from __future__ import annotations
@@ -31,8 +29,14 @@ from iesplan import audit as audit_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.tasks.submissions import (
+    ensure_project_access,
+    ensure_task_belongs,
+    submit_task,
+)
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.jsonutil import canonical_json
+from iesplan.engines.planning import CAPACITY_PARAM
 from iesplan.identity.contracts import UserRecord
 from iesplan.metrics import validity
 from iesplan.metrics.financial import IRRStatus
@@ -40,6 +44,7 @@ from iesplan.results.contracts import (
     EvidencePackageRecord,
     ResultAssessmentRecord,
     ResultIndexRecord,
+    ResultSelectionRecord,
 )
 from iesplan.storage import add_ref, get_object, object_info, put_object
 from iesplan.tasks.contracts import TaskAttemptRecord, TaskRecord
@@ -55,6 +60,13 @@ EVIDENCE_INVALID = "invalid"
 
 #: 评估类型(full=四维全查; 单维=只查该维, 其余记 unknown)
 ASSESSMENT_TYPES: tuple[str, ...] = ("full", "physical", "optimality", "financial", "reliability")
+
+#: 结果选中类型
+SELECTION_TYPES: tuple[str, ...] = ("adopt", "reference")
+
+#: 逐时查询默认/上限分页大小
+DEFAULT_HOURLY_LIMIT = 5000
+MAX_HOURLY_LIMIT = 50000
 
 #: 评估规则版本(规则变更时递增, 随每次评估记录保存)
 ASSESSMENT_RULE_VERSION = "1.0.0"
@@ -604,7 +616,7 @@ def _overall_score(states: dict[str, Any]) -> float | None:
     return round(score, 2) if any_checked else None
 
 
-def _run_assessment(
+def assess_evidence(
     db: Session,
     evidence_package_id: int,
     assessment_type: str = "full",
@@ -749,7 +761,7 @@ def run_assessment(
 ) -> ResultAssessmentRecord:
     """执行评估用例; 本层拥有事务提交/回滚。"""
     try:
-        result = _run_assessment(db, evidence_package_id, assessment_type, user=user)
+        result = assess_evidence(db, evidence_package_id, assessment_type, user=user)
         db.commit()
         return result
     except Exception:
@@ -762,7 +774,7 @@ def run_assessment(
 # ---------------------------------------------------------------------------
 
 
-def _update_result_index(
+def refresh_result_index(
     db: Session,
     task_id: int,
     assessment_id: int,
@@ -829,9 +841,442 @@ def update_result_index(
 ) -> ResultIndexRecord:
     """更新结果索引用例; 本层拥有事务提交/回滚。"""
     try:
-        result = _update_result_index(db, task_id, assessment_id, business_outcome=business_outcome)
+        result = refresh_result_index(db, task_id, assessment_id, business_outcome=business_outcome)
         db.commit()
         return result
     except Exception:
         db.rollback()
         raise
+
+
+# ---------------------------------------------------------------------------
+# 评估序列化/结果索引读/选中/差异/逐时/视图/检查任务(原 services.results 语义)
+# ---------------------------------------------------------------------------
+
+
+def _coerce_fine(dimension: str, value: object) -> Any:
+    """detail 细粒度字符串 → 状态枚举(非法值保守回退, 不静默吞并到通过)。"""
+    raw = str(value)
+    if dimension == "reliability":
+        try:
+            return validity.ReliabilityStatus(raw)
+        except ValueError:
+            return validity.ReliabilityStatus.not_executed
+    try:
+        return validity.ValidityLevel(raw)
+    except ValueError:
+        return validity.ValidityLevel.na
+
+
+def _fine_states(assessment: ResultAssessmentRecord) -> dict[str, Any]:
+    """评估细粒度状态: 优先 detail 内独立记录的细粒度值(权威), 否则由粗粒度列回退。"""
+    detail = assessment.detail or {}
+    dims = detail.get("dimensions")
+    if isinstance(dims, dict) and "physical" in dims and "reliability" in dims:
+        return {
+            "physical": _coerce_fine("physical", dims.get("physical")),
+            "optimality": _coerce_fine("optimality", dims.get("optimality")),
+            "financial": _coerce_fine("financial", dims.get("financial")),
+            "financial_irr_status": dims.get("financial_irr_status"),
+            "reliability": _coerce_fine("reliability", dims.get("reliability")),
+        }
+    return {
+        "physical": validity.from_db_value(assessment.dimension_physical, "physical"),
+        "optimality": validity.from_db_value(assessment.dimension_optimality, "optimality"),
+        "financial": validity.from_db_value(assessment.dimension_financial, "financial"),
+        "financial_irr_status": None,
+        "reliability": validity.from_db_value(assessment.dimension_reliability, "reliability"),
+    }
+
+
+def assessment_to_dict(db: Session, assessment: ResultAssessmentRecord) -> dict[str, Any]:
+    """评估序列化(含只读派生摘要, 绝不覆盖原始维度)。"""
+    states = _fine_states(assessment)
+    summary = validity.summarize_four_dimensions(
+        states["physical"],
+        states["optimality"],
+        states["financial"],
+        states["reliability"],
+        states["financial_irr_status"],
+    )
+    score = assessment.overall_score
+    return {
+        "id": assessment.id,
+        "evidence_package_id": assessment.evidence_package_id,
+        "assessor": assessment.assessor,
+        "assessed_by": assessment.assessed_by,
+        "created_at": assessment.created_at,
+        "dimensions": {
+            "physical": assessment.dimension_physical,
+            "optimality": assessment.dimension_optimality,
+            "financial": assessment.dimension_financial,
+            "reliability": assessment.dimension_reliability,
+        },
+        "fine_states": {k: v.value if hasattr(v, "value") else v for k, v in states.items()},
+        "summary": summary,
+        "overall_score": float(score) if score is not None else None,
+        "comment": assessment.comment,
+        "detail": assessment.detail,
+    }
+
+
+def latest_index(db: Session, task: TaskRecord) -> ResultIndexRecord | None:
+    """任务当前版本的“最新”结果索引行(is_latest)。"""
+    project_version_id = _evidence_project_version(db, task)
+    if project_version_id is None:
+        return None
+    return results_domain.latest_index_for_version(db, project_version_id)
+
+
+def current_selection(db: Session, project_id: int) -> ResultSelectionRecord | None:
+    """项目当前采用结果(is_current)。"""
+    return results_domain.current_selection(db, project_id)
+
+
+def build_diff_patch(content: dict[str, Any], solution_id: int) -> dict[str, Any]:
+    """生成参数差异补丁(供项目单元 apply_result 应用)。
+
+    补丁形状: {"params": {"result_adoption": {...}}}, apply_result 深合并进
+    calc_config.params。容量同时给出设备类型粒度(type_id → 容量)与
+    注册表参数名粒度(capacity_params)。
+    """
+    candidates = content.get("candidates")
+    selected: dict[str, Any] | None = None
+    if isinstance(candidates, list):
+        for cand in candidates:
+            if isinstance(cand, dict) and int(cand.get("index", -1)) == solution_id:
+                selected = cand
+                break
+    capacities = selected.get("capacities") if isinstance(selected, dict) else {}
+    if not isinstance(capacities, dict):
+        capacities = {}
+    capacity_params = {
+        CAPACITY_PARAM.get(str(type_id), str(type_id)): value for type_id, value in capacities.items()
+    }
+    return {
+        "params": {
+            "result_adoption": {
+                "solution_index": solution_id,
+                "capacities": capacities,
+                "capacity_params": capacity_params,
+                "irr": selected.get("irr") if isinstance(selected, dict) else None,
+                "npv": selected.get("npv") if isinstance(selected, dict) else None,
+            }
+        }
+    }
+
+
+def _selection_solution(db: Session, selection: ResultSelectionRecord) -> int | None:
+    """当前选中的解标识: 从该选中的不可变审计记录读取。"""
+    rows = audit_domain.list_entries(
+        db,
+        entity_type="result_selections",
+        entity_id=selection.id,
+        action="result_selected",
+        limit=1,
+    )
+    if rows and isinstance(rows[0].after, dict):
+        return rows[0].after.get("solution_id")
+    return None
+
+
+def select_result(
+    db: Session,
+    user: UserRecord,
+    task_id: int,
+    solution_id: int,
+    selection_type: str,
+    reference_rule: str | None = None,
+    reason: str | None = None,
+) -> ResultSelectionRecord:
+    """选择结果(追加式, 换选=新行 + 旧行 is_current=false)。
+
+    保存: 所选解标识/选择人/类型/参考规则/理由 + 参数差异补丁(所选解标识与
+    补丁承载于不可变审计日志, 供 diff 预览与结果应用追溯)。内部步骤只 flush,
+    由调用方提交。
+    """
+    if selection_type not in SELECTION_TYPES:
+        raise ResultInvalidRequestError(
+            "未知选择类型",
+            code="RES-REQ-003",
+            params={"selection_type": selection_type, "allowed": list(SELECTION_TYPES)},
+        )
+    task = _get_task(db, task_id)
+    ensure_project_access(db, user, task.project_id, "edit")
+    index = latest_index(db, task)
+    if index is None:
+        raise NotFoundError("该任务尚无结果索引, 无法选择结果", params={"task_id": task_id})
+    package = get_evidence(db, index.evidence_package_id)
+    content = _evidence_inner(evidence_content(db, package))
+
+    # 校验所选解标识在证据候选范围内
+    candidate_indices = content.get("candidate_indices") or []
+    candidates = content.get("candidates") or []
+    valid_ids: list[int] = []
+    if isinstance(candidates, list) and candidates:
+        valid_ids = [int(cand.get("index", i)) for i, cand in enumerate(candidates) if isinstance(cand, dict)]
+    else:
+        valid_ids = [int(i) for i in candidate_indices if isinstance(i, int)]
+    if solution_id not in valid_ids:
+        raise ResultInvalidRequestError(
+            "solution_id 不在证据候选解范围内",
+            code="RES-REQ-004",
+            params={"solution_id": solution_id, "candidate_indices": valid_ids},
+        )
+
+    diff_patch = build_diff_patch(content, solution_id)
+
+    # 换选: 旧当前选中置 false, 插入新选中行(同一事务)
+    selection = results_domain.select_result(
+        db,
+        project_id=task.project_id,
+        result_index_id=index.id,
+        selected_by=user.id,
+        reason=reason,
+    )
+    _audit(
+        db,
+        "result_selections",
+        selection.id,
+        "result_selected",
+        actor_id=user.id,
+        after={
+            "task_id": task_id,
+            "solution_id": solution_id,
+            "selection_type": selection_type,
+            "reference_rule": reference_rule,
+            "result_index_id": index.id,
+            "evidence_package_id": package.id,
+            "diff_patch": diff_patch,
+        },
+    )
+    return selection
+
+
+def selection_diff(db: Session, project_id: int) -> dict[str, Any] | None:
+    """当前选中结果的参数差异预览(补丁 + 校验值 + 来源信息)。
+
+    无选中时返回 None; 选中但无法解析所选解(审计缺失)抛 409 数据不一致。
+    """
+    selection = current_selection(db, project_id)
+    if selection is None:
+        return None
+    solution_id = _selection_solution(db, selection)
+    if solution_id is None:
+        raise AppError(
+            "选中记录缺少所选解标识(审计缺失, 数据不一致)",
+            code="SYS-STORE-004",
+            severity="error",
+            message_key="ies.diag.store.corrupt",
+            params={"selection_id": selection.id},
+        )
+    index = results_domain.get_index(db, selection.result_index_id)
+    package = get_evidence(db, index.evidence_package_id) if index is not None else None
+    if package is None:
+        raise AppError(
+            "选中结果引用的结果索引缺失(数据损坏)",
+            code="SYS-STORE-004",
+            severity="error",
+            message_key="ies.diag.store.corrupt",
+            params={"selection_id": selection.id},
+        )
+    content = _evidence_inner(evidence_content(db, package))
+    diff_patch = build_diff_patch(content, solution_id)
+    return {
+        "solution_id": solution_id,
+        "diff_patch": diff_patch,
+        "result_index_id": index.id,
+        "evidence_package_id": package.id,
+        "project_version_id": index.project_version_id,
+        "selected_at": selection.selected_at,
+        "reason": selection.reason,
+    }
+
+
+def _pick_hourly_ref(refs: list[dict[str, Any]], solution_id: int | None) -> dict[str, Any]:
+    """选取逐时结果引用: 显式 solution_id 优先, 缺省第一份。"""
+    if solution_id is not None:
+        for ref in refs:
+            if int(ref.get("solution_id", -1)) == solution_id:
+                return ref
+        raise ResultInvalidRequestError(
+            "solution_id 无对应逐时结果引用",
+            code="RES-REQ-006",
+            params={"solution_id": solution_id},
+        )
+    return refs[0]
+
+
+def read_hourly(
+    db: Session,
+    content: dict[str, Any],
+    field: str,
+    start: int = 0,
+    end: int | None = None,
+    limit: int = DEFAULT_HOURLY_LIMIT,
+    solution_id: int | None = None,
+) -> dict[str, Any]:
+    """逐时结果查询(从对象存储按对象 id 读取; 行号分页)。
+
+    返回: {field, unit, start, end, values, next_start, total_rows}。
+    """
+    refs = content.get("hourly_refs")
+    if not isinstance(refs, list) or not refs:
+        raise NotFoundError("证据包无逐时结果引用", params={"reason": "no_hourly_refs"})
+    ref = _pick_hourly_ref(refs, solution_id)
+    fields = ref.get("fields") or []
+    if field not in fields:
+        raise ResultInvalidRequestError(
+            "未知逐时字段",
+            code="RES-REQ-007",
+            params={"field": field, "available": fields},
+        )
+    raw = get_object(db, int(ref["object_id"]))
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise AppError(
+            "逐时结果对象解析失败(数据损坏)",
+            code="SYS-STORE-004",
+            severity="error",
+            message_key="ies.diag.store.corrupt",
+            params={"object_id": ref["object_id"]},
+        ) from exc
+    if not isinstance(doc, dict):
+        raise AppError(
+            "逐时结果对象结构非法(数据损坏)",
+            code="SYS-STORE-004",
+            severity="error",
+            message_key="ies.diag.store.corrupt",
+            params={"object_id": ref["object_id"]},
+        )
+    data = doc.get("data")
+    values = data.get(field) if isinstance(data, dict) else None
+    if not isinstance(values, list):
+        raise AppError(
+            f"逐时结果对象缺少字段 {field}(数据损坏)",
+            code="SYS-STORE-004",
+            severity="error",
+            message_key="ies.diag.store.corrupt",
+            params={"object_id": ref["object_id"], "field": field},
+        )
+    total = len(values)
+    start_i = max(int(start), 0)
+    end_i = total if end is None else min(max(int(end), start_i), total)
+    if start_i >= total:
+        return {
+            "field": field,
+            "unit": None,
+            "start": start_i,
+            "end": start_i,
+            "values": [],
+            "next_start": None,
+            "total_rows": total,
+        }
+    limit = max(1, min(int(limit), MAX_HOURLY_LIMIT))
+    chunk_end = min(end_i, start_i + limit)
+    meta = doc.get("meta") or {}
+    units = meta.get("units") if isinstance(meta, dict) else None
+    unit = units.get(field) if isinstance(units, dict) else None
+    return {
+        "field": field,
+        "unit": unit,
+        "start": start_i,
+        "end": chunk_end,
+        "values": values[start_i:chunk_end],
+        "next_start": chunk_end if chunk_end < end_i else None,
+        "total_rows": total,
+    }
+
+
+def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) -> dict[str, Any]:
+    """结果视图: 四维结论/业务结局/指标摘要/逐时结果引用/当前选中。
+
+    四维结论以评估记录为准(细粒度 + 派生摘要), 不做任何重新计算。
+    任务存在但尚无证据包是可查询的正常状态(任务未完成), evidence_status="no_evidence"
+    显式声明; 此时各内容字段一律为 None。只读, 不拥有事务。
+    """
+    ensure_project_access(db, user, project_id, "view")
+    task = ensure_task_belongs(db, project_id, task_id)
+    package = latest_evidence(db, task_id)
+    assessment = latest_assessment(db, package.id) if package is not None else None
+    selection = current_selection(db, project_id)
+    content: dict[str, Any] = {}
+    if package is not None:
+        content = evidence_content(db, package)
+    return {
+        "task": {
+            "id": task.id,
+            "type": task.type,
+            "status": task.status,
+            "business_outcome": task.business_outcome,
+            "calc_snapshot_id": task.calc_snapshot_id,
+        },
+        # no_evidence=任务尚无证据包(未完成); available=已提交证据包
+        "evidence_status": "no_evidence" if package is None else "available",
+        "evidence": (
+            {
+                "id": package.id,
+                "status": package.status,
+                "object_id": package.object_id,
+                "attempt_id": package.attempt_id,
+                "created_at": package.created_at,
+            }
+            if package is not None
+            else None
+        ),
+        "assessment": assessment_to_dict(db, assessment) if assessment is not None else None,
+        "metrics_summary": content.get("metrics") if content else None,
+        # 证据内容中的候选解列表(方案评价单解 / 规划候选列表, 含 IRR/NPV)
+        "candidates": (
+            content.get("candidates") if content and isinstance(content.get("candidates"), list) else None
+        ),
+        "best": content.get("best") if content else None,
+        "plan_summary": content.get("summary") if content else None,
+        "hourly_refs": content.get("hourly_refs") if content else None,
+        "selection": (
+            {
+                "id": selection.id,
+                "result_index_id": selection.result_index_id,
+                "selected_by": selection.selected_by,
+                "selected_at": selection.selected_at,
+                "reason": selection.reason,
+            }
+            if selection is not None
+            else None
+        ),
+    }
+
+
+def run_check_task(
+    db: Session,
+    user: UserRecord,
+    project_id: int,
+    task_id: int,
+    evidence_package_id: int | None = None,
+) -> TaskRecord:
+    """对已有证据包创建检查任务(report 类型, io 池)。
+
+    evidence_package_id 缺省取该任务最新证据包; 检查任务配置携带证据包引用,
+    io Worker 消费后执行四维复查(本阶段仅创建任务)。提交由任务提交用例拥有。
+    """
+    ensure_task_belongs(db, project_id, task_id)
+    if evidence_package_id is None:
+        package = latest_evidence(db, task_id)
+        if package is None:
+            raise NotFoundError("任务尚无证据包, 无法创建检查任务", params={"task_id": task_id})
+    else:
+        package = get_evidence(db, evidence_package_id)
+        if package.task_id != task_id:
+            raise NotFoundError(
+                "证据包不属于该任务",
+                params={"evidence_package_id": evidence_package_id, "task_id": task_id},
+            )
+    task, _flags = submit_task(
+        db,
+        user,
+        project_id,
+        "report",
+        config={"action": "check", "evidence_package_id": package.id, "source_task_id": task_id},
+    )
+    return task

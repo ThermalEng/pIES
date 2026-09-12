@@ -463,3 +463,53 @@ def list_reports(db: Session, project_id: int) -> list[ReportRecord]:
 def count_reports(db: Session) -> int:
     """报告总数。"""
     return int(db.execute(select(func.count(Report.id))).scalar() or 0)
+
+
+def flip_index_for_version(db: Session, project_version_id: int) -> int:
+    """结果索引翻转：同版本旧 is_latest 行置 false（返回影响行数，不提交）。"""
+    result = db.execute(
+        select(ResultIndex).where(
+            ResultIndex.project_version_id == project_version_id,
+            ResultIndex.is_latest.is_(True),
+        ))
+    rows = result.scalars().all()
+    for row in rows:
+        row.is_latest = False
+    db.flush()
+    return len(rows)
+
+
+def insert_index(
+    db: Session,
+    *,
+    project_id: int,
+    project_version_id: int,
+    evidence_package_id: int,
+    assessment_id: int,
+) -> int:
+    """插入新结果索引行（is_latest=true；返回新行 id，不提交）。"""
+    row = ResultIndex(
+        project_id=project_id,
+        project_version_id=project_version_id,
+        evidence_package_id=evidence_package_id,
+        assessment_id=assessment_id,
+        is_latest=True,
+    )
+    db.add(row)
+    db.flush()
+    return int(row.id)
+
+
+def point_index_assessment(db: Session, evidence_package_id: int, assessment_id: int) -> int:
+    """挂接最新评估引用（同证据包索引行 assessment_id 可 UPDATE；返回行数）。"""
+    rows = (
+        db.execute(
+            select(ResultIndex).where(ResultIndex.evidence_package_id == evidence_package_id)
+        )
+        .scalars()
+        .all()
+    )
+    for row in rows:
+        row.assessment_id = assessment_id
+    db.flush()
+    return len(rows)

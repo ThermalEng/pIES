@@ -4,13 +4,10 @@
 转调与行级读写搬运, 不新增校验/hash/回退:
 
 - 证据包查询 → results 域门面(任务最新/项目最新/主键);
-- 结果检查评估追加 + 索引评估指针 → results 域门面 + ``lease_cases``
-  索引 Core 视图;
-- 不确定性快照/样本取值 → tasks 域门面(口径一致);
-- 样本行创建(含执行态 status 直写, 域门面仅支持 queued 初始态)经
-  SQLAlchemy Core 表视图直写(表名 + 列引用)。
+- 结果检查评估追加 + 索引评估指针 → results 域门面;
+- 不确定性快照/样本取值/样本行创建(含执行态 status 直写) → tasks 域门面。
 
-本模块不导入 ``models.*``(门禁 8 只扫描 models 导入)。
+本模块不导入 ``models.*``。
 
 依赖方向: worker → application → (results/tasks 领域门面)。
 """
@@ -19,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from iesplan import results as results_domain
@@ -38,20 +34,6 @@ __all__ = [
     "point_result_assessment",
     "record_sample_value",
 ]
-
-#: sample_tasks 表 Core 视图(列名与 models.uncertainty.SampleTask 属性同名;
-#: id 声明主键以便 INSERT 后取回新行 id)。
-_sample_tasks_table = sa.table(
-    "sample_tasks",
-    sa.Column("id", sa.BigInteger, primary_key=True),
-    sa.column("uncertainty_snapshot_id"),
-    sa.column("parent_task_id"),
-    sa.column("parent_sample_id"),
-    sa.column("sample_index"),
-    sa.column("depth"),
-    sa.column("params", sa.JSON),
-    sa.column("status"),
-)
 
 
 def get_latest_evidence_for_task(db: Session, task_id: int) -> EvidencePackageRecord | None:
@@ -128,22 +110,14 @@ def create_sample_row(
     params: dict[str, Any] | None,
 ) -> SampleTaskRecord:
     """创建样本行(执行态 status 直写; 返回公开视图, 只 flush 不提交)。"""
-    result = db.execute(
-        sa.insert(_sample_tasks_table)
-        .values(
-            uncertainty_snapshot_id=uncertainty_snapshot_id,
-            parent_task_id=parent_task_id,
-            parent_sample_id=None,
-            sample_index=sample_index,
-            depth=0,
-            params=params,
-            status=status,
-        )
-        .returning(_sample_tasks_table.c.id)
+    return tasks_domain.create_sample_row(
+        db,
+        uncertainty_snapshot_id=uncertainty_snapshot_id,
+        parent_task_id=parent_task_id,
+        sample_index=sample_index,
+        status=status,
+        params=params,
     )
-    record = tasks_domain.get_sample_task(db, int(result.scalar_one()))
-    assert record is not None
-    return record
 
 
 def record_sample_value(

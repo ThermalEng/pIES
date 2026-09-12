@@ -10,7 +10,7 @@
 - 应用: create_app() + include_router(projects/tasks/results),
   dependency_overrides 替换 get_db;
 - 对象存储: settings.data_dir 指向 pytest tmp_path, 证据/逐时对象真实落盘;
-- 证据提交无 HTTP 端点(Worker 通道), 测试直接调用 services.results.submit_evidence,
+- 证据提交无 HTTP 端点(Worker 通道), 测试直接调用 results 用例 submit_evidence,
   评估/选择/差异/逐时/检查走 HTTP。
 """
 
@@ -38,15 +38,16 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import results as results_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan.application import results as results_uc  # noqa: E402
+from iesplan.application import tasks as tasks_uc  # noqa: E402
+from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.calc import Task, TaskLease  # noqa: E402
 from iesplan.models.result import EvidencePackage, ResultSelection  # noqa: E402
-from iesplan.services import queue  # noqa: E402
-from iesplan.services import results as results_service  # noqa: E402
-from iesplan.services import tasks as tasks_service  # noqa: E402
 from iesplan.storage import put_object
+from iesplan.tasks import queue  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -157,7 +158,7 @@ def _submit_task(
 
 def _claim(db: Session, task_id: int, worker_id: str = "fake-exec-1") -> Any:
     """假执行器: 领取任务(占槽 + 建尝试 + 建租约 + running), 返回 Claim(token)。"""
-    claim = tasks_service.claim_and_run(db, task_id, worker_id)
+    claim = tasks_uc.claim_task(db, task_id, worker_id)
     assert claim is not None
     db.commit()
     return claim
@@ -264,7 +265,7 @@ def _submit_evidence(
     db: Session, task_id: int, claim: Any, payload: dict[str, Any]
 ) -> EvidencePackage:
     """假 Worker 通道: 提交证据包并提交事务。"""
-    pkg = results_service.submit_evidence(
+    pkg = results_uc.submit_evidence(
         db, task_id, claim.attempt_id, claim.lease_token, payload
     )
     db.commit()
@@ -289,7 +290,7 @@ def _prepare_task_with_evidence(
     payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], user.id)
     pkg = _submit_evidence(db, task_id, claim, payload)
     if complete:
-        tasks_service.complete_task(db, task_id, solver_status="OPTIMAL")
+        worker_app.complete_task(db, task_id, solver_status="OPTIMAL")
         db.commit()
     return pid, task_id, claim, pkg, [obj_a, obj_b]
 
@@ -320,7 +321,7 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
     assert pkg.created_by == owner.id
 
     # 2) 读取内容校验: 字段齐全（不做内部摘要重算比对）
-    loaded = results_service.evidence_content(db, results_service.get_evidence(db, pkg.id))
+    loaded = results_uc.evidence_content(db, results_uc.get_evidence(db, pkg.id))
     assert loaded["content"] == payload["content"]
     assert loaded["content"]["algorithm"] == "milp"
     assert loaded["content"]["seed"] == 42
@@ -338,8 +339,8 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
     assert [r.id for r in rows] == [pkg.id, pkg2.id]
 
     # 4) fencing: 伪造/失效 token 拒绝
-    with pytest.raises(results_service.EvidenceWriteDeniedError) as exc:
-        results_service.submit_evidence(db, task_id, claim.attempt_id, uuid4(), payload)
+    with pytest.raises(results_uc.EvidenceWriteDeniedError) as exc:
+        results_uc.submit_evidence(db, task_id, claim.attempt_id, uuid4(), payload)
     assert exc.value.http_status == 409
 
     # 5) fencing: 租约过期拒绝
@@ -348,15 +349,15 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
     ).scalar_one()
     lease.expires_at = lease.expires_at.replace(year=2020)
     db.commit()
-    with pytest.raises(results_service.EvidenceWriteDeniedError) as exc:
-        results_service.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
+    with pytest.raises(results_uc.EvidenceWriteDeniedError) as exc:
+        results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
     assert exc.value.http_status == 409
 
     # 6) fencing: 尝试已结束(任务完成, 租约吊销)拒绝
-    tasks_service.complete_task(db, task_id, solver_status="OPTIMAL")
+    worker_app.complete_task(db, task_id, solver_status="OPTIMAL")
     db.commit()
-    with pytest.raises(results_service.EvidenceWriteDeniedError):
-        results_service.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
+    with pytest.raises(results_uc.EvidenceWriteDeniedError):
+        results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)
 
 
 
@@ -399,7 +400,7 @@ def test_assessment_four_dimensions_and_index(client: TestClient, db: Session) -
     assert a1["detail"]["checks"]["financial"]["irr_status"] == "unique"
 
     # 3) 结果索引: 指向该评估, 业务哈希 64 位
-    index = results_service.latest_index(db, db.get(Task, task_id))
+    index = results_uc.latest_index(db, db.get(Task, task_id))
     assert index is not None
     assert index.assessment_id == a1["id"]
     assert index.evidence_package_id == pkg.id
@@ -418,9 +419,9 @@ def test_assessment_four_dimensions_and_index(client: TestClient, db: Session) -
     assert resp.status_code == 201
     a2 = resp.json()["assessment"]
     assert a2["id"] != a1["id"]
-    history = results_service.list_assessments(db, task_id)
+    history = results_uc.list_assessments(db, task_id)
     assert [a.id for a in history] == [a2["id"], a1["id"]]
-    index2 = results_service.latest_index(db, db.get(Task, task_id))
+    index2 = results_uc.latest_index(db, db.get(Task, task_id))
     assert index2.id == index.id  # 索引行未新增
     assert index2.assessment_id == a2["id"]  # 引用指针已更新
 
@@ -511,7 +512,7 @@ def test_assessment_dimension_variants(client: TestClient, db: Session) -> None:
     assert a["dimensions"]["reliability"] == "fail"
     assert a["fine_states"]["reliability"] == "insufficient"
 
-    # 8) 可靠性未执行：结果不要求可靠性评估 → not_executed（不判通过，见 manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）
+    # 8) 可靠性未执行：结果不要求可靠性评估 → not_executed（不判通过）
     a = assess({"reliability": {"executed": False}})
     assert a["dimensions"]["reliability"] == "unknown"
     assert a["fine_states"]["reliability"] == "not_executed"
@@ -563,9 +564,9 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
     assert resp.status_code == 404
 
     # 2) 选择结果（不做内部预览摘要校验）
-    payload = results_service.evidence_content(db, pkg)
+    payload = results_uc.evidence_content(db, pkg)
     content = payload["content"]
-    expected_diff = results_service.build_diff_patch(content, 0)
+    expected_diff = results_uc.build_diff_patch(content, 0)
     resp = client.post(
         f"/api/projects/{pid}/tasks/{task_id}/result/select",
         json={"solution_id": 0, "selection_type": "adopt", "reason": "IRR 最高"},

@@ -19,6 +19,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from iesplan.models.audit import RetentionRule
 from iesplan.models.calc import (
     CalcSnapshot,
     ComputeSlot,
@@ -28,10 +29,13 @@ from iesplan.models.calc import (
     TaskLease,
     TaskProgress,
 )
+from iesplan.models.project import AdminMaintenanceAction, ProjectVersion
 from iesplan.models.uncertainty import SampleRecord, SampleTask, UncertaintySnapshot
 from iesplan.tasks.contracts import (
     CalcSnapshotRecord,
     ComputeSlotRecord,
+    MaintenanceActionRecord,
+    RetentionRuleRecord,
     SampleRecordRecord,
     SampleTaskRecord,
     TaskAttemptRecord,
@@ -814,3 +818,212 @@ def record_sample(
     db.add(row)
     db.flush()
     return _row_to_sample_record(row)
+
+
+def create_sample_row(
+    db: Session,
+    *,
+    uncertainty_snapshot_id: int,
+    parent_task_id: int,
+    sample_index: int,
+    status: str,
+    params: dict[str, Any] | None = None,
+) -> SampleTaskRecord:
+    """创建样本行（执行态 status 直写；顶层单样本，非批量子节点）。"""
+    row = SampleTask(
+        uncertainty_snapshot_id=uncertainty_snapshot_id,
+        parent_task_id=parent_task_id,
+        parent_sample_id=None,
+        sample_index=sample_index,
+        depth=0,
+        params=params,
+        status=status,
+    )
+    db.add(row)
+    db.flush()
+    return _row_to_sample_task(row)
+
+
+def count_completed_samples(db: Session, parent_task_id: int) -> int:
+    """已完成样本数（父任务部分完成判定用；无返回 0）。"""
+    return int(
+        db.execute(
+            select(func.count(SampleTask.id)).where(
+                SampleTask.parent_task_id == parent_task_id,
+                SampleTask.status == "completed",
+            )
+        ).scalar()
+        or 0
+    )
+
+
+def count_tasks_by_status(db: Session) -> dict[str, int]:
+    """任务按状态分组计数（运维诊断视图用）。"""
+    return {
+        str(status): int(count)
+        for status, count in db.execute(select(Task.status, func.count()).group_by(Task.status)).all()
+    }
+
+
+def count_tasks_by_type(db: Session) -> dict[str, int]:
+    """任务按类型分组计数（运维诊断视图用）。"""
+    return {
+        str(task_type): int(count)
+        for task_type, count in db.execute(select(Task.type, func.count()).group_by(Task.type)).all()
+    }
+
+
+def list_recent_failed_tasks(db: Session, limit: int = 5) -> list[TaskRecord]:
+    """最近失败任务（updated_at 倒序；运维诊断视图用）。"""
+    rows = (
+        db.execute(select(Task).where(Task.status == "failed").order_by(Task.updated_at.desc()).limit(limit))
+        .scalars()
+        .all()
+    )
+    return [_row_to_task(row) for row in rows]
+
+
+def revoke_leases_for_attempts(db: Session, attempt_ids: Collection[int]) -> int:
+    """吊销尝试清单上全部 active 租约（管理员解锁用；返回吊销行数）。"""
+    ids = list(attempt_ids)
+    if not ids:
+        return 0
+    result = db.execute(
+        update(TaskLease)
+        .where(TaskLease.attempt_id.in_(ids), TaskLease.status == "active")
+        .values(status="revoked")
+    )
+    db.flush()
+    return int(result.rowcount or 0)
+
+
+def pool_has_free_slot(db: Session, pool_name: str) -> bool:
+    """槽门禁：池内是否存在可用槽（领取前确认；槽行未初始化视为有空位）。"""
+    rows = (
+        db.execute(
+            select(ComputeSlot).where(
+                ComputeSlot.pool_name == pool_name,
+                ComputeSlot.status.in_(("free", "busy")),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return True
+    return any(row.in_use < row.capacity for row in rows)
+
+
+def fence_renew_lease(
+    db: Session, attempt_id: int, lease_token: UUID | str, *, ttl_seconds: int
+) -> int:
+    """带 fencing 的租约续期（renewed_at/expires_at 推进；返回影响行数）。"""
+    token = lease_token if isinstance(lease_token, UUID) else UUID(str(lease_token))
+    now = _now()
+    return int(
+        db.execute(
+            update(TaskLease)
+            .where(
+                TaskLease.attempt_id == attempt_id,
+                TaskLease.lease_token == token,
+                TaskLease.status == "active",
+            )
+            .values(renewed_at=now, expires_at=now + timedelta(seconds=ttl_seconds))
+        ).rowcount
+        or 0
+    )
+
+
+def fence_release_lease(
+    db: Session, attempt_id: int, lease_token: UUID | str, *, status: str
+) -> int:
+    """带 fencing 的租约收尾（0 行表示租约不匹配；返回影响行数）。"""
+    token = lease_token if isinstance(lease_token, UUID) else UUID(str(lease_token))
+    return int(
+        db.execute(
+            update(TaskLease)
+            .where(
+                TaskLease.attempt_id == attempt_id,
+                TaskLease.lease_token == token,
+                TaskLease.status == "active",
+            )
+            .values(status=status)
+        ).rowcount
+        or 0
+    )
+
+
+def get_project_version_content_id(db: Session, version_id: int) -> int | None:
+    """按主键取项目版本的内容对象 id；版本缺失返回 None。"""
+    row = db.get(ProjectVersion, version_id)
+    return int(row.content_object_id) if row is not None else None
+
+
+def _row_to_retention_rule(row: RetentionRule) -> RetentionRuleRecord:
+    return RetentionRuleRecord(
+        id=row.id,
+        entity_type=row.entity_type,
+        object_kind=row.object_kind,
+        retention_days=row.retention_days,
+        apply_to=row.apply_to,
+    )
+
+
+def list_active_retention_rules(db: Session) -> list[RetentionRuleRecord]:
+    """列出全部 active 保留规则（id 升序；任务运维诊断消费，只读）。"""
+    rows = (
+        db.execute(
+            select(RetentionRule).where(RetentionRule.status == "active").order_by(RetentionRule.id)
+        )
+        .scalars()
+        .all()
+    )
+    return [_row_to_retention_rule(row) for row in rows]
+
+
+def _row_to_maintenance_action(row: AdminMaintenanceAction) -> MaintenanceActionRecord:
+    return MaintenanceActionRecord(
+        id=row.id,
+        action_type=row.action_type,
+        performed_by=row.performed_by,
+        status=row.status,
+        started_at=_iso(row.started_at),
+        finished_at=_iso(row.finished_at),
+        params=row.params,
+        result=row.result,
+    )
+
+
+def list_maintenance_actions(db: Session, limit: int = 10) -> list[MaintenanceActionRecord]:
+    """维护记录（id 倒序；任务运维诊断消费，只读）。"""
+    rows = (
+        db.execute(select(AdminMaintenanceAction).order_by(AdminMaintenanceAction.id.desc()).limit(limit))
+        .scalars()
+        .all()
+    )
+    return [_row_to_maintenance_action(row) for row in rows]
+
+
+def record_maintenance_action(
+    db: Session,
+    *,
+    action_type: str,
+    performed_by: int,
+    status: str,
+    params: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+) -> MaintenanceActionRecord:
+    """记录管理员维护操作（不可变，只 INSERT）。"""
+    now = _now()
+    row = AdminMaintenanceAction(
+        action_type=action_type,
+        performed_by=performed_by,
+        status=status,
+        started_at=now,
+        finished_at=now,
+        params=params,
+        result=result,
+    )
+    db.add(row)
+    db.flush()
+    return _row_to_maintenance_action(row)

@@ -25,8 +25,8 @@ from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa:
 from iesplan.models.identity import User  # noqa: E402
 from iesplan.models.project import Project, ProjectVersion  # noqa: E402
 from iesplan.services import project as project_service
-from iesplan.services import queue
 from iesplan.storage import put_object
+from iesplan.tasks import queue
 
 #: 环境序号(保证同库内用户名/项目名唯一, 避免跨环境 UNIQUE 冲突)
 _env_seq = 0

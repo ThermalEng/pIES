@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session
 from iesplan.tasks.contracts import (
     CalcSnapshotRecord,
     ComputeSlotRecord,
+    MaintenanceActionRecord,
+    RetentionRuleRecord,
     SampleRecordRecord,
     SampleTaskRecord,
     TaskAttemptRecord,
@@ -266,3 +268,77 @@ class TasksRepository(Protocol):
         value: float,
         unit: str | None = None,
     ) -> SampleRecordRecord: ...
+
+    def create_sample_row(
+        self,
+        db: Session,
+        *,
+        uncertainty_snapshot_id: int,
+        parent_task_id: int,
+        sample_index: int,
+        status: str,
+        params: dict[str, Any] | None = None,
+    ) -> SampleTaskRecord:
+        """创建样本行（执行态 status 直写；顶层单样本）。"""
+        ...
+
+    def count_completed_samples(self, db: Session, parent_task_id: int) -> int:
+        """已完成样本数（父任务部分完成判定用；无返回 0）。"""
+        ...
+
+    def count_tasks_by_status(self, db: Session) -> dict[str, int]:
+        """任务按状态分组计数（运维诊断视图用）。"""
+        ...
+
+    def count_tasks_by_type(self, db: Session) -> dict[str, int]:
+        """任务按类型分组计数（运维诊断视图用）。"""
+        ...
+
+    def list_recent_failed_tasks(self, db: Session, limit: int = 5) -> list[TaskRecord]:
+        """最近失败任务（updated_at 倒序；运维诊断视图用）。"""
+        ...
+
+    def revoke_leases_for_attempts(self, db: Session, attempt_ids: Collection[int]) -> int:
+        """吊销尝试清单上全部 active 租约（管理员解锁用；返回吊销行数）。"""
+        ...
+
+    def pool_has_free_slot(self, db: Session, pool_name: str) -> bool:
+        """槽门禁：池内是否存在可用槽（槽行未初始化视为有空位）。"""
+        ...
+
+    def fence_renew_lease(
+        self, db: Session, attempt_id: int, lease_token: str, *, ttl_seconds: int
+    ) -> int:
+        """带 fencing 的租约续期（返回影响行数）。"""
+        ...
+
+    def fence_release_lease(
+        self, db: Session, attempt_id: int, lease_token: str, *, status: str
+    ) -> int:
+        """带 fencing 的租约收尾（0 行表示租约不匹配；返回影响行数）。"""
+        ...
+
+    def get_project_version_content_id(self, db: Session, version_id: int) -> int | None:
+        """按主键取项目版本的内容对象 id；版本缺失返回 None。"""
+        ...
+
+    def list_active_retention_rules(self, db: Session) -> list[RetentionRuleRecord]:
+        """列出全部 active 保留规则（id 升序；任务运维诊断消费）。"""
+        ...
+
+    def list_maintenance_actions(self, db: Session, limit: int = 10) -> list[MaintenanceActionRecord]:
+        """维护记录（id 倒序；任务运维诊断消费）。"""
+        ...
+
+    def record_maintenance_action(
+        self,
+        db: Session,
+        *,
+        action_type: str,
+        performed_by: int,
+        status: str,
+        params: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> MaintenanceActionRecord:
+        """记录管理员维护操作（不可变，只 INSERT）。"""
+        ...

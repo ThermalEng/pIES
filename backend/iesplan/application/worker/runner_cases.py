@@ -5,26 +5,26 @@
 
 - 项目版本内容读取 → ``application.projects.content_objects.load_content_object``;
 - 数据集对象字节读取 → ``storage.get_object``;
-- 数据集 CSV 解析 → ``services.dataset.parse_csv``;
+- 数据集 CSV 解析 → ``application.datasets.parse_csv``;
 - 快照/任务行读 → ``lease_cases`` 共享读(同包复用);
-- 项目版本内容指针/数据集版本/数据文件指针/样本计数 →
-  project/dataset 域门面与 Core 表视图直读。
+- 项目版本内容指针 → tasks 域门面; 数据集版本/数据文件指针 →
+  dataset 域门面; 样本计数 → tasks 域门面。
 
-本模块不导入 ``models.*``(门禁 8 只扫描 models 导入)。
+本模块不导入 ``models.*``。
 
-依赖方向: worker → application → (services/storage/领域门面)。
+依赖方向: worker → application → (storage/领域门面)。
 """
 
 from __future__ import annotations
 
-import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from iesplan import dataset as dataset_domain
+from iesplan import tasks as tasks_domain
+from iesplan.application.datasets import parse_csv as _parse_dataset_csv
 from iesplan.application.projects.content_objects import load_content_object
 from iesplan.application.worker.lease_cases import get_snapshot_record, get_task_record
 from iesplan.dataset import DatasetVersionRecord
-from iesplan.services import dataset as dataset_service
 from iesplan.storage import get_object
 
 __all__ = [
@@ -51,38 +51,13 @@ def load_dataset_blob(db: Session, object_id: int) -> bytes:
 
 
 def parse_dataset_csv(raw: bytes, resolution: str) -> tuple[list[dict], list]:
-    """解析数据集 CSV(转调 dataset 服务, 返回 (rows, diagnostics) 原样)。"""
-    return dataset_service.parse_csv(raw, resolution)
-
-
-# ---------------------------------------------------------------------------
-# 输入装配行读(由 worker.runner 搬入, 语义逐行一致)
-# ---------------------------------------------------------------------------
-
-#: project_versions 表 Core 视图(只取内容对象指针)。
-_project_versions_table = sa.table(
-    "project_versions",
-    sa.column("id"),
-    sa.column("content_object_id"),
-)
-
-#: sample_tasks 表 Core 视图(只取父任务归属与状态计数)。
-_sample_tasks_table = sa.table(
-    "sample_tasks",
-    sa.column("id"),
-    sa.column("parent_task_id"),
-    sa.column("status"),
-)
+    """解析数据集 CSV(转调 datasets 用例, 返回 (rows, diagnostics) 原样)。"""
+    return _parse_dataset_csv(raw, resolution)
 
 
 def get_project_content_id(db: Session, version_id: int) -> int | None:
     """按主键取项目版本的内容对象 id; 版本缺失返回 None。"""
-    row = db.execute(
-        sa.select(_project_versions_table.c.content_object_id).where(
-            _project_versions_table.c.id == version_id
-        )
-    ).scalar_one_or_none()
-    return int(row) if row is not None else None
+    return tasks_domain.get_project_version_content_id(db, version_id)
 
 
 def get_dataset_version_record(db: Session, version_id: int) -> DatasetVersionRecord | None:
@@ -101,9 +76,4 @@ def get_dataset_data_object(db: Session, version_id: int) -> int | None:
 
 def count_completed_samples(db: Session, parent_task_id: int) -> int:
     """已完成样本数(父任务部分完成判定用; 无返回 0)。"""
-    return db.execute(
-        sa.select(sa.func.count()).select_from(_sample_tasks_table).where(
-            _sample_tasks_table.c.parent_task_id == parent_task_id,
-            _sample_tasks_table.c.status == "completed",
-        )
-    ).scalar() or 0
+    return tasks_domain.count_completed_samples(db, parent_task_id)
