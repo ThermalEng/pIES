@@ -1,6 +1,8 @@
 """配置用例族(application/configuration)。
 
-从 services.config_revisions 复制的财务三件套与规划配置 revision 读写编排。
+计算配置用例（calc_config）与财务三件套/规划配置 revision 读写编排
+（revisions），经 configuration/project/model/audit 域公开门面实现；
+旧 services.config/config_revisions 已删除。
 """
 
 from __future__ import annotations

@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -23,18 +22,20 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from iesplan import project as project_domain
 from iesplan.api.auth import router as auth_router
 from iesplan.api.config import config_router, registry_router
+from iesplan.application import identity
+from iesplan.application.configuration import calc_config
+from iesplan.application.projects.content_objects import store_content_object
+from iesplan.application.tasks import submit_task
 from iesplan.db import Base, get_db
 from iesplan.main import _register_exception_handlers
-from iesplan.models.identity import User
 from iesplan.models.audit import AuditLog
 from iesplan.models.calc import CalcConfig
+from iesplan.models.identity import User
 from iesplan.models.model import Device, SystemGraph
 from iesplan.models.project import Draft, Project
-from iesplan.services import config as config_service
-from iesplan.application import identity
-from iesplan.services import project as project_service
 
 #: 配置域测试所有者(经窗口会话登录)
 OWNER_USERNAME = "config_owner"
@@ -80,8 +81,8 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
     )
     db.add(proj)
     db.flush()
-    content_object_id = project_service.store_content_object(
-        db, project_service.initial_content()
+    content_object_id = store_content_object(
+        db, project_domain.initial_content()
     )
     draft = Draft(
         project_id=proj.id,
@@ -154,8 +155,8 @@ def client(db: Session) -> Iterator[TestClient]:
 
 
 def _default_config(db: Session, project: Project) -> dict:
-    """直接调用服务生成默认配置(避免 API 层干扰)。"""
-    return config_service.get_default_config(project.id, db)
+    """直接调用用例生成默认配置(避免 API 层干扰)。"""
+    return calc_config.get_default_config(db, project.id)
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +191,7 @@ def test_default_config_device_params_use_registry_defaults(db: Session) -> None
     """设备参数当前值 = 2.0 注册表 property value(设备行参数叠加)。"""
     project = seed_project(db)
     cfg = _default_config(db, project)
-    devices = config_service.load_work_graph(db, project.id)["devices"]
+    devices = calc_config.load_work_graph(db, project.id)["devices"]
     pv_dev = next(d for d in devices if d["kind"] == "new" and d["device_type"] == "pv")
     params = cfg["parameters"]["devices"][str(pv_dev["id"])]
     assert params["rated_capacity_kwp"] == 100
@@ -509,16 +510,15 @@ def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Ses
     assert eco["project_years"] == 15
     assert eco["depreciation_years"] == 5
     # 提交任务 → 快照 calc_config_snapshot 携带同值
-    # (service 层直接调用: config 测试 app 已登录过 owner, 再次登录会触发
+    # (用例层直接调用: config 测试 app 已登录过 owner, 再次登录会触发
     # 窗口接管; 快照装配不依赖认证会话)
     from iesplan.models.calc import CalcSnapshot
     from iesplan.models.identity import User
-    from iesplan.services import tasks as tasks_service
 
     owner_user = db.execute(
         select(User).where(User.username == OWNER_USERNAME)
     ).scalar_one()
-    task = tasks_service.create_task(db, owner_user, project.id, "calc", config={})
+    task, _ = submit_task(db, owner_user, project.id, "calc", config={})
     db.commit()
     snap = db.query(CalcSnapshot).order_by(CalcSnapshot.id.desc()).first()
     assert snap is not None
@@ -726,7 +726,7 @@ def test_validate_config_with_dict_graph() -> None:
         "tolerances": {"gap_rel": 0.001, "time_limit_s": 600},
         "random_seed": 42,
     }
-    diags = config_service.validate_config(cfg, graph)
+    diags = calc_config.validate_config(cfg, graph)
     assert diags == []
 
 
@@ -751,7 +751,7 @@ def test_variable_device_ref_unknown_diagnostic() -> None:
         "tolerances": {},
         "random_seed": 42,
     }
-    diags = config_service.validate_config(cfg, graph)
+    diags = calc_config.validate_config(cfg, graph)
     assert any(d.code == "CONN-TYPE-002" for d in diags)
 
 
