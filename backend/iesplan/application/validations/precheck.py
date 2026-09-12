@@ -17,12 +17,8 @@
  （``get_current_draft``）+ storage 门面读内容文档；
 - 其余 project / dataset / audit 域调用本就经域公开门面，保持不变。
 
-遗留 services 调用（待协调者统一改接，见模块末尾 ``LEGACY_SERVICE_CALLS``）：
-- ``services.model.validate_project_model`` / ``services.model.get_graph``
-  （模型能力，W2-B 搬入 application/models 后改接）；
-- ``services.config.get_config`` / ``services.config.load_work_graph`` /
-  ``services.config.validate_config``（计算配置读写与校验能力，仍在旧
-  services.config，为避免在应用层重复实现其领域校验逻辑，待后续波次搬移后改接）。
+遗留 services 调用：无（``LEGACY_SERVICE_CALLS`` 为空；模型能力经
+application.models、计算配置能力经 application.configuration 改接）。
 
 事务：写用例（``mark_baseline_confirmed`` / ``store_validation_report``）
 顶层函数拥有提交/回滚；``validate_project`` 与读取函数为只读，不提交事务。
@@ -59,18 +55,20 @@ from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 from iesplan.devices import get_device as get_device_type
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord
-from iesplan.services import config as config_service
+from iesplan.application.configuration import (
+    get_config as _app_get_config,
+)
+from iesplan.application.configuration import (
+    load_work_graph as _app_load_work_graph,
+)
+from iesplan.application.configuration import (
+    validate_config as _app_validate_config,
+)
 from iesplan.storage import add_ref, find_refs_by_owner, get_object, put_object
 
-#: 遗留 services 调用点：
-#: - services.config.get_config / services.config.load_work_graph /
-#:   services.config.validate_config → 待计算配置能力搬移（后续波次）。
-#: （模型能力已改接 application.models，见 Wave 2 集成。）
-LEGACY_SERVICE_CALLS: tuple[str, ...] = (
-    "iesplan.services.config.get_config",
-    "iesplan.services.config.load_work_graph",
-    "iesplan.services.config.validate_config",
-)
+#: 遗留 services 调用点：无（Wave 5 集成：配置能力经 application.configuration
+#: 用例改接，模型能力已于 Wave 2 改接 application.models）。
+LEGACY_SERVICE_CALLS: tuple[str, ...] = ()
 
 # ---------------------------------------------------------------------------
 # 诊断码(本单元新增, 导入时登记; 04 目录未登记, 见 NEW_DIAG_CODES 扩展模式)
@@ -227,8 +225,8 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
     """
     project = _require_project(db, project_id)
     # 配置与设备图各只读一次(未保存时配置为生成的默认配置), 供检查项共用
-    config_data = config_service.get_config(project_id, db)
-    graph = config_service.load_work_graph(db, project_id)
+    config_data = _app_get_config(db, project_id)
+    graph = _app_load_work_graph(db, project_id)
     diags: list[Diagnostic] = []
     _check_model(db, project_id, diags)
     _check_config(project_id, config_data, graph, diags)
@@ -384,7 +382,7 @@ def _check_config(project_id: int, config_data: dict, graph: dict, diags: list[D
             )
         )
     # 参数/变量/目标/约束/算法能力(REQ-CALC-002/004/005: 错误级阻断)
-    diags.extend(config_service.validate_config(config, graph))
+    diags.extend(_app_validate_config(config, graph))
 
 
 # ---------------------------------------------------------------------------
