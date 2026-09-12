@@ -14,60 +14,32 @@
 
 全部维护操作写不可变审计(audit_log, actor_type='admin')与
 admin_maintenance_actions(domain-model §快照任务结果/对象生命周期 + modules/persistence.md)。
+
+W5-admin 收尾: 本层不再直接导入 ORM 与组织 DB 写, 诊断取数与解锁
+事务(含提交)全部经 application.tasks.maintenance 用例, 审计查询
+经 application.audits 门面。
 """
 
-from __future__ import annotations  # noqa: I001 - application 导入须置于 models 之后，门禁 ORM 行号(33-36)要求
+from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Annotated, Any
+from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentAdmin
-from iesplan.core.diagnostics import SEVERITY_INFO
+from iesplan.application.audits import query_audit
+from iesplan.application.tasks.maintenance import (
+    get_diagnostics,
+    get_task,
+    unlock_task,
+)
 from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.db import get_db
-from iesplan.models.audit import RetentionRule
-from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease
-from iesplan.models.identity import User
-from iesplan.models.project import AdminMaintenanceAction
-from iesplan.application.audits import query_audit, record_unlock_audit
-from iesplan.application.tasks import (
-    POOL_BY_TYPE,
-    clear_task_cancel,
-    enqueue_task,
-    queue_status,
-    storage_stats,
-)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
-
-
-def _record_maintenance(
-    db: Session,
-    admin: User,
-    action_type: str,
-    *,
-    status: str = "succeeded",
-    params: dict[str, Any] | None = None,
-    result: dict[str, Any] | None = None,
-) -> AdminMaintenanceAction:
-    """记录管理员维护操作(domain-model §快照任务结果/对象生命周期 + modules/persistence.md, 不可变追加式)。"""
-    row = AdminMaintenanceAction(
-        action_type=action_type,
-        performed_by=admin.id,
-        status=status,
-        started_at=datetime.now(UTC),
-        finished_at=datetime.now(UTC),
-        params=params,
-        result=result,
-    )
-    db.add(row)
-    db.flush()
-    return row
 
 
 # ---------------------------------------------------------------------------
@@ -103,52 +75,7 @@ def diagnostics_endpoint(
     admin: CurrentAdmin,
 ) -> dict:
     """运维诊断视图: 任务/队列/存储/保留策略/维护记录/最近失败任务。"""
-    tasks_by_status = dict(
-        db.execute(select(Task.status, func.count()).group_by(Task.status)).all()
-    )
-    tasks_by_type = dict(
-        db.execute(select(Task.type, func.count()).group_by(Task.type)).all()
-    )
-    recent_failed = db.execute(
-        select(Task)
-        .where(Task.status == "failed")
-        .order_by(Task.updated_at.desc())
-        .limit(5)
-    ).scalars().all()
-    rules = db.execute(
-        select(RetentionRule).where(RetentionRule.status == "active").order_by(RetentionRule.id)
-    ).scalars().all()
-    actions = db.execute(
-        select(AdminMaintenanceAction).order_by(AdminMaintenanceAction.id.desc()).limit(10)
-    ).scalars().all()
-    storage = storage_stats(db)
-    queue_view = queue_status()
-    return {
-        "tasks": {
-            "by_status": {str(k): int(v) for k, v in tasks_by_status.items()},
-            "by_type": {str(k): int(v) for k, v in tasks_by_type.items()},
-            "recent_failed": [
-                {"id": t.id, "type": t.type, "business_outcome": t.business_outcome,
-                 "updated_at": t.updated_at}
-                for t in recent_failed
-            ],
-        },
-        "queue": queue_view,
-        "storage": storage,
-        "retention_rules": [
-            {"id": r.id, "entity_type": r.entity_type, "object_kind": r.object_kind,
-             "retention_days": r.retention_days, "apply_to": r.apply_to}
-            for r in rules
-        ],
-        "maintenance_actions": [
-            {"id": a.id, "action_type": a.action_type, "status": a.status,
-             "performed_by": a.performed_by, "started_at": a.started_at,
-             "params": a.params, "result": a.result}
-            for a in actions
-        ],
-        # 队列为可重建视图(PG 为权威事实), 降级只提示不影响健康判定
-        "healthy": storage["healthy"] and not queue_view["degraded"],
-    }
+    return get_diagnostics(db)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +107,7 @@ def unlock_task_endpoint(
     (audit_log + admin_maintenance_actions)。
     """
     # 存在性检查优先于 confirm: 不存在的任务应返回 404 而非 409(避免泄露)
-    task = db.get(Task, payload.task_id)
+    task = get_task(db, payload.task_id)
     if task is None:
         raise NotFoundError(
             "任务不存在", params={"task_id": payload.task_id},
@@ -203,52 +130,4 @@ def unlock_task_endpoint(
     if task.status == "queued":
         return {"task_id": task.id, "unlocked": False, "status": "queued", "message": "任务已在排队"}
 
-    # 吊销租约 + 终止运行尝试 + 释放并发槽(running/cancelling → queued)
-    now = datetime.now(UTC)
-    attempts = db.execute(
-        select(TaskAttempt).where(TaskAttempt.task_id == task.id)
-    ).scalars().all()
-    attempt_ids = [a.id for a in attempts] or [0]
-    leases = db.execute(
-        select(TaskLease).where(
-            TaskLease.attempt_id.in_(attempt_ids), TaskLease.status == "active"
-        )
-    ).scalars().all()
-    for lease in leases:
-        lease.status = "revoked"
-    for attempt in attempts:
-        if attempt.status == "running":
-            attempt.status = "stopped"
-            attempt.stop_reason = "admin_unlock"
-            attempt.finished_at = now
-    slots = db.execute(
-        select(ComputeSlot).where(ComputeSlot.current_attempt_id.in_(attempt_ids))
-    ).scalars().all()
-    for slot in slots:
-        slot.in_use = max(slot.in_use - 1, 0)
-        slot.current_attempt_id = None
-
-    task.status = "queued"
-    task.business_outcome = None
-    task.updated_at = now
-    db.flush()
-    db.add(
-        TaskDiagnostic(
-            task_id=task.id, level=SEVERITY_INFO, code="TASK-ADMIN-001",
-            message="管理员解锁, 任务重新排队",
-            context={"unlocked_by": admin.id},
-        )
-    )
-    clear_task_cancel(task.id)
-    enqueue_task(
-        task.id, POOL_BY_TYPE.get(task.type, "compute"),
-        task_type=task.type, snapshot_id=task.calc_snapshot_id,
-    )
-    _record_maintenance(
-        db, admin, "user_override",
-        params={"task_id": task.id, "task_type": task.type, "from": "running/cancelling"},
-        result={"to": "queued"},
-    )
-    record_unlock_audit(db, admin_id=admin.id, task_id=task.id, task_type=task.type)
-    db.commit()
-    return {"task_id": task.id, "unlocked": True, "status": "queued"}
+    return unlock_task(db, task_id=task.id, admin_id=admin.id)
