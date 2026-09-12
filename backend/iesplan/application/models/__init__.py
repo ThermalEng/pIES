@@ -8,13 +8,13 @@ model/project/audit/storage 域公开门面。
 
 from iesplan.application.models.model_save import (
     FINAL_OWNER_NAMESPACE,
-    ModelCandidateRejectedError,
     delete_project_model,
     get_project_models,
     project_model_to_dict,
     save_project_model,
     validate_candidate,
 )
+from iesplan.model import ModelCandidateRejectedError
 from iesplan.application.models.service import (
     CARRIER_PORT_TYPE,
     CONN_CROSS_PROJECT,
