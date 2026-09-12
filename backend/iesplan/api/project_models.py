@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.api.limits import QuotaError  # 2.0: temp-files 已退役，仅保留 QuotaError 占位
-from iesplan.application.projects import (
+from iesplan.application.models.model_save import (
     delete_project_model,
     get_project_models,
     save_project_model,

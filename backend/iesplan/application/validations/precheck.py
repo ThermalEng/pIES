@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 from iesplan import audit as audit_domain
 from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
+from iesplan.application import models as model_service
 from iesplan.audit.contracts import AuditRecord
 from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
@@ -59,17 +60,13 @@ from iesplan.devices import get_device as get_device_type
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord
 from iesplan.services import config as config_service
-from iesplan.services import model as model_service
 from iesplan.storage import add_ref, find_refs_by_owner, get_object, put_object
 
-#: 遗留 services 调用点（协调者集成时统一改接）：
-#: - services.model.validate_project_model / services.model.get_graph
-#:   → 待 W2-B application/models；
+#: 遗留 services 调用点：
 #: - services.config.get_config / services.config.load_work_graph /
 #:   services.config.validate_config → 待计算配置能力搬移（后续波次）。
+#: （模型能力已改接 application.models，见 Wave 2 集成。）
 LEGACY_SERVICE_CALLS: tuple[str, ...] = (
-    "iesplan.services.model.validate_project_model",
-    "iesplan.services.model.get_graph",
     "iesplan.services.config.get_config",
     "iesplan.services.config.load_work_graph",
     "iesplan.services.config.validate_config",
@@ -153,7 +150,7 @@ BASELINE_ACTION: str = "project.baseline_confirmed"
 #: 电网连接注册表类型 id(模型完整性检查)
 GRID_TYPE_ID: str = "ies.device.grid_connection"
 
-#: 载体 → 端口类型(与 services.model.CARRIER_PORT_TYPE 一致)
+#: 载体 → 端口类型(与 application.models.CARRIER_PORT_TYPE 同值，本地声明避免跨层导入)
 _CARRIER_PORT_TYPE: dict[str, str] = {
     "electricity": "electric",
     "heat": "thermal",

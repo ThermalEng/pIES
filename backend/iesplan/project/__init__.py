@@ -6,6 +6,7 @@ repository 实现（切片 3 落实）、`iesplan.models` 或 services。
 
 from __future__ import annotations
 
+from iesplan.project import content as _content
 from iesplan.project import persistence
 from iesplan.project.contracts import (
     DraftRecord,
@@ -23,6 +24,10 @@ count_projects_by_owner = persistence.count_projects_by_owner
 create_draft = persistence.create_draft
 create_project = persistence.create_project
 create_version = persistence.create_version
+initial_content = _content.initial_content
+load_content_bytes = _content.load_content_bytes
+load_content_object = _content.load_content_object
+store_content_object = _content.store_content_object
 get_current_draft = persistence.get_current_draft
 get_draft = persistence.get_draft
 get_draft_revision = persistence.get_draft_revision
@@ -55,11 +60,15 @@ __all__ = [
     "get_draft_revision",
     "get_project",
     "get_version",
+    "initial_content",
     "list_projects",
     "list_version_refs",
     "list_versions",
+    "load_content_bytes",
+    "load_content_object",
     "project_name_exists",
     "set_project_status",
+    "store_content_object",
     "update_draft_content_ref",
     "update_revision_pointers",
 ]

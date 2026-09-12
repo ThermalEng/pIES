@@ -185,13 +185,13 @@ def test_device_connection_flow_via_new_home(db: Session, data_dir: Path) -> Non
     assert models_uc.get_graph(db, project.id)["connections"] == []
 
 
-def test_model_save_new_home_and_transitional_projects_export() -> None:
-    """model_save 归属 models; projects 旧导出过渡性可用(Wave 3 移除)。"""
+def test_model_save_new_home_and_no_legacy_export() -> None:
+    """model_save 归属 models；projects 旧导出已删除（无兼容垫片）。"""
     from iesplan.application.models import save_project_model as new_home
     from iesplan.application.models.model_save import save_project_model as direct
 
     assert new_home is direct
 
-    from iesplan.application.projects import save_project_model as legacy
+    import iesplan.application.projects as projects_pkg
 
-    assert legacy is direct
+    assert not hasattr(projects_pkg, "save_project_model")

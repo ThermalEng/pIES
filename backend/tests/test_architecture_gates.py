@@ -92,11 +92,7 @@ WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
         "iesplan.api.projects",
         "project_service._is_admin",
     ): "API 层访问 services.project 私有权限判定(现状违规); TODO: 提升公开权限 API 后移除。",
-    # ---- services 域内部: identity 复用 project 私有审计写入 ----
-    (
-        "iesplan.services.identity",
-        "project_service._audit",
-    ): "服务层间复用 project 私有审计写入; TODO: 提升公开审计 API。",
+    # (Wave 2 集成: services.identity 已删除，delete_user 改经 audit 域门面，移除本项)
 }
 
 # ---------------------------------------------------------------------------
@@ -370,10 +366,10 @@ WHITELIST_API_COMMIT: set[tuple[str, int]] = {
 # (model_templates/project_models 已示范该方向)。迁移一个模块就从本集合移除一项。
 WHITELIST_API_FANOUT: set[str] = {
     "iesplan.api.tasks",  # services.project + services.tasks
-    "iesplan.api.model",  # services.model + services.project
+    "iesplan.api.model",  # application.models + services.project
     "iesplan.api.config",  # services.config + services.project
     "iesplan.api.admin",  # services.audit + services.queue + services.tasks
-    "iesplan.api.auth",  # services.identity + services.project + services.external_auth
+    "iesplan.api.auth",  # application.identity + services.project + services.external_auth
     "iesplan.api.datasets",  # services.dataset + services.project
     "iesplan.api.validation",  # services.project + services.validation
     "iesplan.api.projects",  # services.package + services.project
@@ -440,7 +436,7 @@ WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
     # (切片 8: services.config 经 audit/model 域门面, 移除 audit/model)
     # (切片 5: services.config CalcConfig 改经 configuration 域, 移除 calc)
     # (切片 7: services.model 经 model 域门面, 移除本项)
-    ("iesplan.services.identity", "common"),  # 仅正则基元(无业务表); 切片 4 已移除 identity 表访问
+    # (Wave 2 集成: services.identity 已删除, 移除本项)
     # (切片 5: services.config_revisions 经 configuration 域, 移除本项)
     ("iesplan.services.tasks", "common"),  # 仅幂等键正则基元(无业务表)
     # (切片 5: services.tasks 改经领域门面, 移除 calc/dataset/identity/result/uncertainty)

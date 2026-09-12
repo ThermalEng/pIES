@@ -48,7 +48,6 @@ from iesplan.model.contracts import (
     PortRecord,
 )
 from iesplan.project.contracts import DraftRecord, ProjectConflictError
-from iesplan.services import project as project_service
 
 # ---------------------------------------------------------------------------
 # 常量: 载体/端口/连接类型映射(01 §4.3/§4.4 枚举约束)
@@ -305,8 +304,8 @@ def get_or_create_working_graph(db: Session, project_id: int, created_by: int = 
             # 复用既有当前草稿, 否则新建(修订号顺延, 经 project 域 repository)
             draft = project_domain.get_current_draft(db, project_id)
             if draft is None:
-                content_object_id = project_service.store_content_object(
-                    db, project_service.initial_content()
+                content_object_id = project_domain.store_content_object(
+                    db, project_domain.initial_content()
                 )
                 draft = project_domain.create_draft(
                     db,
@@ -391,7 +390,7 @@ def sync_draft_content(db: Session, graph: GraphRecord) -> None:
             # 对象存储对象(对象引用, 校验/草稿命令经草稿 revision 定位);
             # 既有内容节(dataset_bindings/calc_config 等)原样保留。
             content = _draft_content_with_model(db, draft, payload)
-            content_object_id = project_service.store_content_object(db, content)
+            content_object_id = project_domain.store_content_object(db, content)
             project_domain.update_draft_content_ref(db, draft.id, content_object_id)
     db.flush()
 
@@ -402,14 +401,14 @@ def _draft_content_with_model(db: Session, draft: DraftRecord, payload: dict) ->
     草稿内容对象缺失或损坏时直接抛出加载原错误, 不回退初始骨架
     (宪法 §13: 对象缺失或不可读返回实际错误, 禁止旧副本回退)。
     """
-    content = project_service.load_content_object(db, draft.content_object_id)
+    content = project_domain.load_content_object(db, draft.content_object_id)
     content["model"] = {
         "devices": payload.get("devices", []),
         "ports": payload.get("ports", []),
         "connections": payload.get("connections", []),
     }
     # 补齐骨架节(既有内容对象可能缺少非模型节), 保证草稿命令/只读聚合可安全访问
-    skeleton = project_service.initial_content()
+    skeleton = project_domain.initial_content()
     for key, default in skeleton.items():
         if key not in content:
             content[key] = default

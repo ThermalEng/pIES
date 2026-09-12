@@ -113,9 +113,8 @@ def test_baseline_confirm_flow_and_commit(engine: Engine, db_session: Session) -
 
 
 def test_legacy_service_calls_declared() -> None:
+    """遗留调用显式声明（模型能力已改接 application.models，仅剩配置能力待后续波次）。"""
     assert set(validations_uc.LEGACY_SERVICE_CALLS) == {
-        "iesplan.services.model.validate_project_model",
-        "iesplan.services.model.get_graph",
         "iesplan.services.config.get_config",
         "iesplan.services.config.load_work_graph",
         "iesplan.services.config.validate_config",
