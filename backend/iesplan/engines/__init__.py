@@ -25,6 +25,12 @@ from iesplan.engines.devices import (
 )
 from iesplan.engines.eval_run import EvalResult, evaluate_plan, param
 from iesplan.engines.planning import PlanCandidate, PlanningResult, run_planning
+from iesplan.engines.registry import (
+    DEFAULT_ALGORITHM,
+    AlgorithmSpec,
+    get_algorithm,
+    list_algorithms,
+)
 from iesplan.engines.solver import SolveResult, solve_lp, solve_milp
 
 __all__ = [
@@ -48,4 +54,8 @@ __all__ = [
     "run_planning",
     "PlanCandidate",
     "PlanningResult",
+    "DEFAULT_ALGORITHM",
+    "AlgorithmSpec",
+    "get_algorithm",
+    "list_algorithms",
 ]
