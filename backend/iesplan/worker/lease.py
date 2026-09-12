@@ -15,6 +15,9 @@
 
 一致性与 03 §1.3 对齐: PG 是权威; 一任务一租约一 token; 写回必带 token;
 终态即封闭(状态迁移校验经 application.worker 用例复用任务服务)。
+
+行级读写全部经 application.worker 用例(db 会话 + id/参数进, 记录/id 出),
+本模块不直接引用 ``iesplan.models.*`` 做查询(仅用例返回类型做注解)。
 """
 
 from __future__ import annotations
@@ -22,18 +25,14 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from uuid import UUID
 
-import sqlalchemy as sa
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from iesplan.application import worker as worker_app
 from iesplan.core.diagnostics import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARNING, TASK_QUEUED
 from iesplan.core.errors import AppError
-from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskDiagnostic, TaskLease
-from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex
 
 logger = logging.getLogger(__name__)
 
@@ -89,15 +88,7 @@ def acquire_attempt(db: Session, task_id: int, worker_id: str) -> Claim | None:
 
 def slot_available(db: Session, pool: str) -> bool:
     """槽门禁: 池内是否存在可用槽(领取前确认, 03 §5.2 分配流程第 1 步)。"""
-    rows = db.execute(
-        select(ComputeSlot).where(
-            ComputeSlot.pool_name == pool, ComputeSlot.status.in_(("free", "busy"))
-        )
-    ).scalars().all()
-    if not rows:
-        # 槽行尚未初始化(惰性建表由领取路径完成): 视为有空位, 领取时创建
-        return True
-    return any(slot.in_use < slot.capacity for slot in rows)
+    return worker_app.slot_available(db, pool)
 
 
 # ---------------------------------------------------------------------------
@@ -105,18 +96,14 @@ def slot_available(db: Session, pool: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def verify_lease(db: Session, attempt_id: int, token: UUID) -> TaskLease | None:
+def verify_lease(
+    db: Session, attempt_id: int, token: UUID
+) -> worker_app.TaskLeaseRecord | None:
     """校验租约有效性: 该尝试 + token 匹配 + status='active'。
 
     返回 None 表示租约已失效(过期/撤销/释放), 任何写回必须被拒绝(03 §4.4)。
     """
-    return db.execute(
-        select(TaskLease).where(
-            TaskLease.attempt_id == attempt_id,
-            TaskLease.lease_token == token,
-            TaskLease.status == "active",
-        )
-    ).scalar_one_or_none()
+    return worker_app.verify_lease(db, attempt_id, token)
 
 
 def renew_lease(db: Session, attempt_id: int, token: UUID) -> bool:
@@ -124,16 +111,7 @@ def renew_lease(db: Session, attempt_id: int, token: UUID) -> bool:
 
     返回 False = 租约已失效, 调用方必须立即自毁(终止子进程、停止写回)。
     """
-    now = datetime.now(UTC)
-    n = db.execute(
-        sa.update(TaskLease)
-        .where(
-            TaskLease.attempt_id == attempt_id,
-            TaskLease.lease_token == token,
-            TaskLease.status == "active",
-        )
-        .values(renewed_at=now, expires_at=now + timedelta(seconds=LEASE_TTL_SECONDS))
-    ).rowcount
+    n = worker_app.renew_lease_once(db, attempt_id, token, ttl_seconds=LEASE_TTL_SECONDS)
     if n == 1:
         db.commit()  # 续租即独立事务(与执行路径隔离, 失败不影响执行)
         return True
@@ -181,7 +159,7 @@ def submit_result(
         7) 任务 completed + business_outcome(技术状态与业务结局正交, 03 §3.2)。
     """
     attempt_id, token = claim.attempt_id, claim.lease_token
-    task = db.get(Task, claim.task_id)
+    task = worker_app.get_task_record(db, claim.task_id)
     if task is None:
         raise LeaseRejectedError("任务不存在", params={"task_id": claim.task_id})
     if verify_lease(db, attempt_id, token) is None:
@@ -197,54 +175,40 @@ def submit_result(
     evidence_id: int | None = None
     assessment_id: int | None = None
     index_id: int | None = None
-    snapshot = db.get(CalcSnapshot, task.calc_snapshot_id) if task.calc_snapshot_id else None
+    snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
     if snapshot is not None:
         blob = _payload_bytes(payload)
         object_id = worker_app.store_result_blob(db, blob, actor_id=who)
-        evidence = EvidencePackage(
-            task_id=task.id, attempt_id=attempt_id, calc_snapshot_id=snapshot.id,
-            object_id=object_id, status="complete", created_by=who,
+        evidence_id = worker_app.create_evidence_record(
+            db, task_id=task.id, attempt_id=attempt_id, snapshot_id=snapshot.id,
+            object_id=object_id, created_by=who,
         )
-        db.add(evidence)
-        db.flush()
-        evidence_id = evidence.id
-        worker_app.attach_result_ref(db, object_id, evidence.id, actor_id=who)
+        worker_app.attach_result_ref(db, object_id, evidence_id, actor_id=who)
 
         assessment = payload.get("assessment") or {}
-        assess = ResultAssessment(
-            evidence_package_id=evidence.id,
-            assessor="system",
-            dimension_physical=_dim(assessment.get("dimension_physical")),
-            dimension_optimality=_dim(assessment.get("dimension_optimality")),
-            dimension_financial=_dim(assessment.get("dimension_financial")),
-            dimension_reliability=_dim(assessment.get("dimension_reliability")),
+        assessment_id = worker_app.create_assessment_record(
+            db,
+            evidence_package_id=evidence_id,
+            dimensions={
+                "physical": _dim(assessment.get("dimension_physical")),
+                "optimality": _dim(assessment.get("dimension_optimality")),
+                "financial": _dim(assessment.get("dimension_financial")),
+                "reliability": _dim(assessment.get("dimension_reliability")),
+            },
             overall_score=assessment.get("overall_score"),
             comment=assessment.get("comment"),
             detail=assessment.get("detail"),
         )
-        db.add(assess)
-        db.flush()
-        assessment_id = assess.id
 
         # 结果索引: 每项目版本至多一条 is_latest(01 §8.3; 先置旧行 false 再插新行)
-        db.execute(
-            sa.update(ResultIndex)
-            .where(
-                ResultIndex.project_version_id == snapshot.project_version_id,
-                ResultIndex.is_latest.is_(True),
-            )
-            .values(is_latest=False)
-        )
-        index = ResultIndex(
+        worker_app.flip_result_index(db, project_version_id=snapshot.project_version_id)
+        index_id = worker_app.insert_result_index(
+            db,
             project_id=task.project_id,
             project_version_id=snapshot.project_version_id,
-            evidence_package_id=evidence.id,
-            assessment_id=assess.id,
-            is_latest=True,
+            evidence_package_id=evidence_id,
+            assessment_id=assessment_id,
         )
-        db.add(index)
-        db.flush()
-        index_id = index.id
 
     # 释放(带 token 校验, 0 行 → 整笔回滚)
     release_attempt(db, attempt_id, token, attempt_status="succeeded", stop_reason=None)
@@ -253,7 +217,7 @@ def submit_result(
     if task.status == "completed":  # 幂等: 取消竞态下已由他方完成
         return SubmitReceipt(evidence_id, assessment_id, index_id, outcome)
     worker_app.complete_task(db, task.id, outcome=outcome)
-    _write_diagnostic(
+    worker_app.write_diagnostic(
         db, task.id, attempt_id, level=SEVERITY_INFO, code=TASK_QUEUED, message="任务完成",
         context={"business_outcome": outcome, "evidence_package_id": evidence_id,
                  "assessment_id": assessment_id},
@@ -263,34 +227,28 @@ def submit_result(
 
 def release_attempt(
     db: Session, attempt_id: int, token: UUID, *, attempt_status: str, stop_reason: str | None,
-) -> TaskAttempt:
+) -> worker_app.TaskAttemptRecord:
     """带 fencing 的尝试收尾: 租约 released/revoked + 尝试终态 + 槽释放(03 §4.1 ③)。
 
     租约不匹配(0 行)抛 LeaseRejectedError —— 调用方须整体回滚。
     """
     lease_status = "released" if attempt_status == "succeeded" else "revoked"
-    n = db.execute(
-        sa.update(TaskLease)
-        .where(
-            TaskLease.attempt_id == attempt_id,
-            TaskLease.lease_token == token,
-            TaskLease.status == "active",
-        )
-        .values(status=lease_status)
-    ).rowcount
+    n = worker_app.fence_release_lease(db, attempt_id, token, status=lease_status)
     if n != 1:
         raise LeaseRejectedError(
             "租约失效, 尝试收尾被拒绝",
             params={"attempt_id": attempt_id},
         )
-    attempt = db.get(TaskAttempt, attempt_id)
+    attempt = worker_app.get_attempt_record(db, attempt_id)
     if attempt is None or attempt.status in ("succeeded", "failed", "stopped"):
         raise LeaseRejectedError("尝试已终态, 不可重复收尾", params={"attempt_id": attempt_id})
-    attempt.status = attempt_status
-    attempt.stop_reason = stop_reason
-    attempt.finished_at = datetime.now(UTC)
+    finished = worker_app.finish_attempt_record(
+        db, attempt_id, status=attempt_status, stop_reason=stop_reason
+    )
+    if finished is None:
+        raise LeaseRejectedError("尝试已终态, 不可重复收尾", params={"attempt_id": attempt_id})
     worker_app.release_slot(db, attempt_id)
-    return attempt
+    return finished
 
 
 def fail_attempt(
@@ -302,7 +260,7 @@ def fail_attempt(
     stack_trace: str | None = None,
     outcome: str | None = None,
     level: str = SEVERITY_ERROR,
-) -> Task:
+) -> worker_app.TaskRecord:
     """确定性失败收拢(带 fencing): 尝试 failed + 租约 revoked + 槽释放 + 任务 failed。
 
     03 §6.3: 快照/数据校验失败(TASK-DATA-001/002)自动映射 insufficient_evidence,
@@ -318,7 +276,7 @@ def fail_attempt(
         db, claim.task_id, code=code, message=message, stack_trace=stack_trace,
         level=level, outcome=outcome,
     )
-    _write_diagnostic(
+    worker_app.write_diagnostic(
         db, task.id, claim.attempt_id, level=level, code=code, message=message,
         context={"outcome": outcome or task.business_outcome},
     )
@@ -327,13 +285,13 @@ def fail_attempt(
 
 def cancel_attempt(
     db: Session, claim: Claim, *, reason: str = "cancelled", outcome: str | None = None,
-) -> Task:
+) -> worker_app.TaskRecord:
     """确认取消收拢(03 §6.1): 尝试 stopped + 租约 revoked + 槽释放 + 任务 cancelled。
 
     任务不在 cancelling(取消竞态下已终态)时抛 tasks_service.TaskStateError,
     调用方以"先落终态者为准"忽略。
     """
-    task = db.get(Task, claim.task_id)
+    task = worker_app.get_task_record(db, claim.task_id)
     if task is None:
         raise worker_app.TaskStateError("任务不存在", params={"task_id": claim.task_id})
     if task.status == "cancelled":
@@ -349,15 +307,13 @@ def cancel_attempt(
             "租约失效, 取消收拢被拒绝", params={"task_id": claim.task_id, "attempt_id": claim.attempt_id}
         )
     release_attempt(db, claim.attempt_id, claim.lease_token, attempt_status="stopped", stop_reason=reason)
-    task.status = "cancelled"
-    task.business_outcome = outcome
-    task.updated_at = datetime.now(UTC)
+    cancelled = worker_app.cancel_task_record(db, task.id, outcome=outcome)
     worker_app.clear_cancel_signal(task.id)
-    _write_diagnostic(
+    worker_app.write_diagnostic(
         db, task.id, claim.attempt_id, level=SEVERITY_INFO, code=TASK_QUEUED, message="任务已取消",
         context={"business_outcome": outcome},
     )
-    return task
+    return cancelled
 
 
 # ---------------------------------------------------------------------------
@@ -384,20 +340,3 @@ def _json_default(value: object) -> object:
 def _dim(value: object) -> str:
     """四维评估值规范化(01 §8.2 CHECK: pass/fail/unknown)。"""
     return str(value) if value in ("pass", "fail", "unknown") else "unknown"
-
-
-def _write_diagnostic(
-    db: Session,
-    task_id: int,
-    attempt_id: int | None,
-    *,
-    level: str,
-    code: str,
-    message: str,
-    context: dict | None = None,
-) -> None:
-    """写入任务诊断(不可变表, 只 INSERT)。"""
-    db.add(TaskDiagnostic(
-        task_id=task_id, attempt_id=attempt_id, level=level, code=code,
-        message=message, context=context,
-    ))

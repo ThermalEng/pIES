@@ -32,7 +32,6 @@ from decimal import Decimal
 from typing import Any
 
 import numpy as np
-import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from iesplan.application import worker as worker_app
@@ -42,9 +41,6 @@ from iesplan.engines.eval_run import EvalResult
 from iesplan.engines.planning import PlanningResult
 from iesplan.metrics.engineering import energy_balance_summary
 from iesplan.metrics.environmental import operational_emissions
-from iesplan.models.calc import Task, TaskDiagnostic
-from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex
-from iesplan.models.uncertainty import SampleRecord, SampleTask, UncertaintySnapshot
 from iesplan.worker.lease import Claim
 from iesplan.worker.solver_process import run_solver_isolated
 
@@ -80,16 +76,20 @@ class EngineRunError(Exception):
 
 @dataclass(slots=True)
 class RunContext:
-    """一次任务执行上下文(执行器/进度/取消检查共用)。"""
+    """一次任务执行上下文(执行器/进度/取消检查共用)。
+
+    task/snapshot 为 application.worker 用例返回的公开记录(计算类任务
+    快照由 runner 装配); 本模块不直接引用 ``iesplan.models.*``。
+    """
 
     db: Session
-    task: Task
+    task: worker_app.TaskRecord
     claim: Claim
     worker_id: str = ""
     isolate: bool = True
     stop_event: threading.Event | None = None
     progress_fn: Callable[[float, str, dict | None], None] | None = None
-    snapshot: Any = None  # CalcSnapshot(计算类任务); runner 装配
+    snapshot: worker_app.CalcSnapshotRecord | None = None  # 计算类任务快照; runner 装配
     axis_resolution: str = "1h"
     axis_n: int = 8760
     io_params: dict[str, Any] = field(default_factory=dict)  # io 任务参数(队列消息扩展)
@@ -574,13 +574,12 @@ def execute_uncertainty(
     planning_opts.setdefault("max_combinations", 40)
 
     # 不可变不确定性快照（记录方法/分布/种子，见 domain-model §快照任务和结果）
-    unc_snapshot = UncertaintySnapshot(
+    unc_snapshot = worker_app.create_uncertainty_snapshot_record(
+        ctx.db,
         calc_snapshot_id=ctx.task.calc_snapshot_id, method=method, n_samples=n_samples,
         random_seed=seed, distributions=distributions,
         created_by=ctx.task.requested_by,
     )
-    ctx.db.add(unc_snapshot)
-    ctx.db.flush()
     ctx.progress(5, "sampling", {"n_samples": n_samples, "method": method, "mode": mode})
     ctx.checkpoint("sampling")
 
@@ -621,19 +620,19 @@ def execute_uncertainty(
             reason = type(exc).__name__
             invalid_reasons[reason] = invalid_reasons.get(reason, 0) + 1
             metric = {"status": "failed", "reason": str(exc)[:200]}
-        sample_row = SampleTask(
+        sample_row = worker_app.create_sample_row(
+            ctx.db,
             uncertainty_snapshot_id=unc_snapshot.id, parent_task_id=ctx.task.id,
-            parent_sample_id=None, sample_index=i, depth=0, status=status,
+            sample_index=i, status=status,
             params={"mode": mode, "multipliers": metric.get("multipliers")},
         )
-        ctx.db.add(sample_row)
-        ctx.db.flush()
         for name, unit in (("annual_op_cost", "元"), ("co2_total_kg", "kg"), ("irr", None)):
             value = metric.get(name)
             if value is not None:
-                ctx.db.add(SampleRecord(
+                worker_app.record_sample_value(
+                    ctx.db,
                     sample_task_id=sample_row.id, variable_name=name, value=float(value), unit=unit,
-                ))
+                )
         samples.append({"sample_index": i, "status": status, "metric": metric})
 
     valid_ratio = valid / n_samples
@@ -902,20 +901,15 @@ def execute_check(ctx: RunContext) -> dict:
     if msg_params.get("evidence_package_id"):
         evidence_id = int(msg_params["evidence_package_id"])
     elif msg_params.get("task_id"):
-        row = ctx.db.execute(
-            sa.select(EvidencePackage).where(
-                EvidencePackage.task_id == int(msg_params["task_id"])
-            ).order_by(EvidencePackage.id.desc())
-        ).scalars().first()
-        evidence_id = row.id if row else None
+        package_row = worker_app.get_latest_evidence_for_task(
+            ctx.db, int(msg_params["task_id"])
+        )
+        evidence_id = package_row.id if package_row else None
     if evidence_id is None:
-        row = ctx.db.execute(
-            sa.select(EvidencePackage)
-            .join(Task, Task.id == EvidencePackage.task_id)
-            .where(Task.project_id == ctx.task.project_id)
-            .order_by(EvidencePackage.id.desc())
-        ).scalars().first()
-        evidence_id = row.id if row else None
+        package_row = worker_app.get_latest_evidence_for_project(
+            ctx.db, ctx.task.project_id
+        )
+        evidence_id = package_row.id if package_row else None
 
     ctx.progress(20, "load_evidence", {"evidence_package_id": evidence_id})
     ctx.checkpoint("load_evidence")
@@ -926,29 +920,17 @@ def execute_check(ctx: RunContext) -> dict:
             "outcome": "insufficient_evidence",
             "summary": {"assessed": False, "reason": "项目无证据包可检查"},
         }
-    package = ctx.db.get(EvidencePackage, evidence_id)
+    package = worker_app.get_evidence_record(ctx.db, evidence_id)
     payload = _load_evidence_payload(ctx.db, package)
     assessment = _assess_payload(payload)
 
-    assess = ResultAssessment(
-        evidence_package_id=package.id, assessor="system",
-        dimension_physical=assessment["dimension_physical"],
-        dimension_optimality=assessment["dimension_optimality"],
-        dimension_financial=assessment["dimension_financial"],
-        dimension_reliability=assessment["dimension_reliability"],
-        overall_score=assessment["overall_score"], comment=assessment["comment"],
-        detail=assessment["detail"],
-    )
-    ctx.db.add(assess)
-    ctx.db.flush()
-    # 挂接最新评估引用（assessment_id 可 UPDATE）
-    ctx.db.execute(
-        sa.update(ResultIndex).where(ResultIndex.evidence_package_id == package.id)
-        .values(assessment_id=assess.id)
+    # 追加评估记录(assessor='system', 不覆盖原记录)并挂接最新评估引用
+    assessment_id = worker_app.append_check_assessment(
+        ctx.db, evidence_package_id=package.id, assessment=assessment
     )
     has_fail = any(assessment[d] == "fail" for d in (
         "dimension_physical", "dimension_optimality", "dimension_financial", "dimension_reliability"))
-    ctx.progress(100, "done", {"assessment_id": assess.id, "has_fail": has_fail})
+    ctx.progress(100, "done", {"assessment_id": assessment_id, "has_fail": has_fail})
     return {
         "schema_version": 1,
         "result_kind": "assessment_report",
@@ -958,11 +940,11 @@ def execute_check(ctx: RunContext) -> dict:
         "assessment": assessment,
         "outcome": "insufficient_evidence" if has_fail else "normal_completion",
         "summary": {"assessed": True, "evidence_package_id": package.id,
-                    "assessment_id": assess.id},
+                    "assessment_id": assessment_id},
     }
 
 
-def _load_evidence_payload(db: Session, package: EvidencePackage) -> dict:
+def _load_evidence_payload(db: Session, package: worker_app.EvidencePackageRecord) -> dict:
     """读取证据包对象内容并解析（按对象 id 读取，解析失败抛错）。"""
     raw = worker_app.load_worker_object(db, package.object_id)
     try:
@@ -1081,13 +1063,14 @@ def _write_engine_diags(ctx: RunContext, diags: list[dict]) -> None:
         severity = str(d.get("severity") or "info")
         if severity not in ("error", "warning", "blocking"):
             continue
-        ctx.db.add(TaskDiagnostic(
-            task_id=ctx.task.id, attempt_id=ctx.claim.attempt_id,
+        worker_app.write_diagnostic(
+            ctx.db,
+            ctx.task.id, ctx.claim.attempt_id,
             level="blocking" if severity == "blocking" else severity,
             code=d.get("code") or TASK_SOLVE_FAILED,
             message=d.get("message_key") or "ies.diag.eng.generic",
             context={"params": d.get("params") or {}, "location": d.get("location")},
-        ))
+        )
 
 
 def _jsonable(value: Any) -> Any:
