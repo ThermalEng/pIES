@@ -20,9 +20,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.application.projects.lifecycle import ensure_access
+from iesplan.application.validations import (
+    get_latest_validation_report,
+    mark_baseline_confirmed,
+    store_validation_report,
+    validate_project,
+)
 from iesplan.db import get_db
-from iesplan.services import project as project_service
-from iesplan.services import validation as validation_service
 
 #: FastAPI 路由(挂载前缀 /api/projects/{project_id}/validation, 由集成阶段追加)
 router = APIRouter(prefix="/api/projects/{project_id}/validation", tags=["validation"])
@@ -56,10 +61,9 @@ def run_validation(project_id: int, db: DbSession, user: CurrentUser) -> dict:
 
     报告持久化为对象存储对象(ref_type='report'), GET /validation 可读取最近报告。
     """
-    project_service.ensure_access(db, user, project_id, "view")
-    report = validation_service.validate_project(db, project_id)
-    stored = validation_service.store_validation_report(db, project_id, report)
-    db.commit()
+    ensure_access(db, user, project_id, "view")
+    report = validate_project(db, project_id)
+    stored = store_validation_report(db, project_id, report)
     return {"report": report.to_dict(), "stored": stored}
 
 
@@ -71,11 +75,8 @@ def baseline_confirm(
     user: CurrentUser,
 ) -> dict:
     """记录财务基准确认(确认人/时间, 追加式审计, 不可覆盖)."""
-    project_service.ensure_access(db, user, project_id, "edit")
-    record = validation_service.mark_baseline_confirmed(
-        db, project_id, user, assumptions=body.assumptions
-    )
-    db.commit()
+    ensure_access(db, user, project_id, "edit")
+    record = mark_baseline_confirmed(db, project_id, user, assumptions=body.assumptions)
     return {
         "confirmed": True,
         "confirmed_by": (record.after or {}).get("confirmed_by"),
@@ -86,9 +87,9 @@ def baseline_confirm(
 @router.get("", summary="最近校验报告")
 def get_validation_report(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """最近一次持久化的校验报告; 尚无记录时现场执行并返回(不落库)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    stored = validation_service.get_latest_validation_report(db, project_id)
+    ensure_access(db, user, project_id, "view")
+    stored = get_latest_validation_report(db, project_id)
     if stored is not None:
         return {"report": stored, "stored": True}
-    report = validation_service.validate_project(db, project_id)
+    report = validate_project(db, project_id)
     return {"report": report.to_dict(), "stored": False}

@@ -24,10 +24,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.application.configuration import calc_config
+from iesplan.application.projects.lifecycle import ensure_access
 from iesplan.core.errors import error_envelope
 from iesplan.db import get_db
-from iesplan.services import config as config_service
-from iesplan.services import project as project_service
 
 #: FastAPI 依赖注入的数据库会话
 DbSession = Annotated[Session, Depends(get_db)]
@@ -65,8 +65,8 @@ def _has_errors(diags: list) -> bool:
 @config_router.get("", summary="读取当前计算配置")
 def get_config_endpoint(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """当前配置 + 参数元数据; 未保存过返回生成的默认配置(version=None)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    return config_service.get_config(project_id, db)
+    ensure_access(db, user, project_id, "view")
+    return calc_config.get_config(db, project_id)
 
 
 @config_router.put("", summary="保存计算配置")
@@ -77,9 +77,9 @@ def save_config_endpoint(
     user: CurrentUser,
 ) -> JSONResponse:
     """保存配置(与草稿修订绑定); 校验不通过返回 422 + 标准错误信封, 不落库。"""
-    project_service.ensure_access(db, user, project_id, "edit")
-    graph = config_service.load_work_graph(db, project_id)
-    diags = config_service.validate_config(body.config, graph)
+    ensure_access(db, user, project_id, "edit")
+    graph = calc_config.load_work_graph(db, project_id)
+    diags = calc_config.validate_config(body.config, graph)
     if _has_errors(diags):
         return JSONResponse(
             status_code=422,
@@ -89,12 +89,12 @@ def save_config_endpoint(
                 params={"diagnostics": _diagnostics(diags), "count": len(diags)},
             ),
         )
-    row = config_service.save_config(db, project_id, body.config, body.expected_revision)
+    row = calc_config.save_config(db, project_id, body.config, body.expected_revision)
     return JSONResponse(
         status_code=200,
         content={
-            "config": config_service._row_to_config(row),
-            "meta": config_service.parameter_metadata(graph),
+            "config": calc_config.row_to_config(row),
+            "meta": calc_config.parameter_metadata(graph),
             "version": row.version,
             "status": row.status,
             "diagnostics": [],
@@ -110,24 +110,24 @@ def validate_config_endpoint(
     user: CurrentUser,
 ) -> dict:
     """只校验不保存; 始终返回 200 + diagnostics(前端实时校验用)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    graph = config_service.load_work_graph(db, project_id)
-    diags = config_service.validate_config(body.config, graph)
+    ensure_access(db, user, project_id, "view")
+    graph = calc_config.load_work_graph(db, project_id)
+    diags = calc_config.validate_config(body.config, graph)
     return {"diagnostics": _diagnostics(diags), "count": len(diags)}
 
 
 @config_router.get("/default", summary="重新生成默认计算配置")
 def default_config_endpoint(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """基于系统模型设备清单重新生成默认配置(不保存)。"""
-    project_service.ensure_access(db, user, project_id, "view")
-    graph = config_service.load_work_graph(db, project_id)
+    ensure_access(db, user, project_id, "view")
+    graph = calc_config.load_work_graph(db, project_id)
     return {
-        "config": config_service.get_default_config(project_id, db),
-        "meta": config_service.parameter_metadata(graph),
+        "config": calc_config.get_default_config(db, project_id),
+        "meta": calc_config.parameter_metadata(graph),
     }
 
 
 @registry_router.get("/algorithms", summary="算法注册表列表")
 def algorithms_endpoint() -> dict:
     """算法列表 + 能力清单 + 参数规格(供算法选择与能力检查)。"""
-    return {"algorithms": config_service.list_algorithms_meta()}
+    return {"algorithms": calc_config.list_algorithms_meta()}
