@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from iesplan import audit as audit_domain
 from iesplan.core.errors import ConflictError
 from iesplan.storage import (
     DEFAULT_PENDING_DELETE_DAYS,
@@ -27,6 +28,28 @@ from iesplan.storage import (
 #: 软删保留期默认天数唯一所有者为 storage 域公开门面
 #: (iesplan.storage.DEFAULT_PENDING_DELETE_DAYS); 本用例只复用,
 #: 不再本地复述字面量, 避免两处缺省漂移。
+
+
+def _audit_entry(
+    db: Session,
+    *,
+    action: str,
+    object_id: int,
+    actor_id: int | None,
+    before: dict | None = None,
+    after: dict | None = None,
+) -> None:
+    """对象管理审计(成功路径, 与业务写入同事务, 只 INSERT)。"""
+    audit_domain.append_entry(
+        db,
+        actor_id=actor_id,
+        action=action,
+        entity_type="objects",
+        entity_id=object_id,
+        actor_type="admin",
+        before=before,
+        extra=after,
+    )
 
 
 def get_storage_view(db: Session) -> dict:
@@ -96,7 +119,16 @@ def execute_cleanup(
             expected_plan_id=plan_id,
             pending_delete_days=days,
         )
-        db.commit()  # 应用用例拥有事务边界(软删标记 + 引用变更同事务提交)
+        for item in result.get("marked", []):
+            _audit_entry(
+                db,
+                action="object_marked_pending_deletion",
+                object_id=item["id"],
+                actor_id=actor_id,
+                before={"oid": item["oid"], "size_bytes": item["size_bytes"]},
+                after={"status": "pending_deletion"},
+            )
+        db.commit()  # 应用用例拥有事务边界(软删标记 + 审计同事务提交)
         return result
     except Exception:
         db.rollback()
@@ -119,6 +151,14 @@ def restore_object(db: Session, *, object_id: int, actor_id: int) -> dict:
     """
     try:
         result = undelete_object(db, object_id, actor_id=actor_id, actor_type="admin")
+        _audit_entry(
+            db,
+            action="object_restored",
+            object_id=result["id"],
+            actor_id=actor_id,
+            before={"status": "pending_deletion"},
+            after={"status": result["status"], "reason": "undelete"},
+        )
         db.commit()
         return result
     except Exception:
@@ -134,6 +174,19 @@ def purge(db: Session, *, dry_run: bool = True, actor_id: int) -> dict:
     """
     try:
         result = purge_expired(db, dry_run=dry_run, actor_id=actor_id, actor_type="admin")
+        if not dry_run:
+            for item in result.get("purged", []):
+                _audit_entry(
+                    db,
+                    action="object_purged",
+                    object_id=item["id"],
+                    actor_id=actor_id,
+                    before={
+                        "oid": item["oid"],
+                        "size_bytes": item["size_bytes"],
+                        "status": "pending_deletion",
+                    },
+                )
         db.commit()
         return result
     except Exception:

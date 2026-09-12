@@ -36,7 +36,6 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from iesplan import audit as audit_domain
 from iesplan.config import settings
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.storage.adapters.filesystem import FileSystemBlobStore
@@ -167,30 +166,6 @@ def _resolve_object(db: Session, object_id: int | str) -> StoredObject:
     return obj
 
 
-def _audit(
-    db: Session,
-    entity_type: str,
-    entity_id: int,
-    action: str,
-    *,
-    actor_id: int | None = None,
-    actor_type: str = "system",
-    before: dict | None = None,
-    after: dict | None = None,
-) -> None:
-    """写入不可变审计日志(01 §10.3; 本模块只 INSERT 不修改)。"""
-    audit_domain.append_entry(
-        db,
-        actor_id=actor_id,
-        action=action,
-        entity_type=entity_type,
-        entity_id=entity_id,
-        actor_type=actor_type,
-        before=before,
-        extra=after,
-    )
-
-
 def _match_retention_rule(rules: list[RetentionPolicy], obj: StoredObject) -> RetentionPolicy | None:
     """匹配对象保留规则(01 §10.5)。
 
@@ -261,7 +236,7 @@ def put_object(
         content: 对象字节内容。
         content_type: 媒体类型(MIME, 记入 objects.media_type)。
         source_category: 来源类别(如 user_upload/evidence/report/export;
-            记入创建审计事件的 after.source_category)。
+            记入对象行来源字段, 需要审计的业务用例自行记录)。
         ref_type/ref_id/ref_entity_type/purpose: 可选初始业务引用(见 attach)。
     返回:
         ObjectHandle(新建对象)。
@@ -289,24 +264,7 @@ def put_object(
     db.add(obj)
     db.flush()
 
-    # 5. 审计: 对象创建(承载来源类别等元信息, 01 §10.3)
-    _audit(
-        db,
-        "objects",
-        obj.id,
-        "object_created",
-        actor_id=actor_id,
-        actor_type=actor_type,
-        after={
-            "oid": obj.oid,
-            "size_bytes": obj.size_bytes,
-            "media_type": obj.media_type,
-            "source_category": source_category,
-            # 0.4.0: 不再记录 storage_path(§11 内部路径不得进入日志/审计);
-            # 对象 id 即为可追溯标识
-        },
-    )
-
+    # 5. 对象创建审计由需要的公开业务用例在成功路径记录; 存储层不反向依赖 audit。
     # 6. 初始业务引用(对象已完整, 此时才允许建立引用)
     if ref_type is not None and ref_id is not None:
         attach(
@@ -430,15 +388,6 @@ def attach(
         obj.status = OBJ_STATUS_STORED
         obj.pending_deleted_at = None
         obj.pending_delete_until = None
-        _audit(
-            db,
-            "objects",
-            obj.id,
-            "object_restored",
-            actor_id=actor_id,
-            actor_type=actor_type,
-            after={"reason": "re-attached", "ref_type": ref_type, "ref_entity_id": str(ref_id)},
-        )
     # 幂等: 既有引用直接返回(不重复计数)
     existing = db.execute(
         sa.select(ObjectRef).where(
@@ -477,15 +426,6 @@ def attach(
         if existing is None:
             raise
         return _to_refinfo(existing)
-    _audit(
-        db,
-        "objects",
-        obj.id,
-        "object_ref_add",
-        actor_id=actor_id,
-        actor_type=actor_type,
-        after={"ref_type": ref_type, "ref_entity_type": entity_type, "ref_entity_id": str(ref_id)},
-    )
     return _to_refinfo(ref)
 
 
@@ -524,15 +464,6 @@ def detach(
     if obj.ref_count == 0:
         obj.status = OBJ_STATUS_ORPHANED
         obj.last_referenced_at = None
-    _audit(
-        db,
-        "objects",
-        obj.id,
-        "object_ref_remove",
-        actor_id=actor_id,
-        actor_type=actor_type,
-        before={"ref_type": ref_type, "ref_entity_type": entity_type, "ref_entity_id": str(ref_id)},
-    )
 
 
 def add_ref(
@@ -696,7 +627,7 @@ def safe_cleanup(
       pending_deletion(记 pending_deleted_at 与保留截止 pending_delete_until),
       保留期默认 pending_delete_days 天(默认 7); 保留期内对象可经
       undelete_object / 重新 attach 恢复, 物理回收由 purge_expired 负责
-      (到期后删除文件 + 删除记录 + 审计)。文件已缺失的待回收对象同样
+      (到期后删除文件 + 删除记录)。文件已缺失的待回收对象同样
       标记软删(保留期内仍可恢复), 由 purge 统一收尾。
       只 flush(提交/回滚由应用用例统一决定, RR-P1-03)。
 
@@ -774,20 +705,6 @@ def safe_cleanup(
         obj.status = OBJ_STATUS_PENDING_DELETION
         obj.pending_deleted_at = now
         obj.pending_delete_until = until
-        _audit(
-            db,
-            "objects",
-            obj.id,
-            "object_marked_pending_deletion",
-            actor_id=actor_id,
-            actor_type=actor_type,
-            before={"oid": obj.oid, "size_bytes": obj.size_bytes},
-            after={
-                "status": OBJ_STATUS_PENDING_DELETION,
-                "pending_delete_until": until.isoformat(),
-                "pending_delete_days": pending_delete_days,
-            },
-        )
         marked.append(_object_summary(obj))
     db.flush()  # RR-P1-03: 存储只 flush, 提交/回滚由应用用例(API 层)统一决定
     result["dry_run"] = False
@@ -843,7 +760,7 @@ def purge_expired(
     - 只处理 status = pending_deletion 且 pending_delete_until 已过期的对象;
     - 保留期内对象绝不物理删除(为误操作保留恢复路径);
     - dry_run=True: 只列出可回收对象与预计释放字节, 不删任何数据;
-    - dry_run=False: 删除文件(缺失则仅删记录并审计损坏) + 删记录 + 审计,
+    - dry_run=False: 删除文件(缺失则仅删记录) + 删记录,
       只 flush(提交/回滚由应用用例统一决定, RR-P1-03);
     - 文件删除失败的对象跳过并记录 errors(保留记录, 下次重试)。
 
@@ -886,19 +803,6 @@ def purge_expired(
             except OSError as exc:
                 errors.append({"id": obj.id, "oid": obj.oid, "reason": str(exc)})
                 continue
-        _audit(
-            db,
-            "objects",
-            obj.id,
-            "object_purged",
-            actor_id=actor_id,
-            actor_type=actor_type,
-            before={
-                "oid": obj.oid,
-                "size_bytes": obj.size_bytes,
-                "status": obj.status,
-            },
-        )
         db.delete(obj)
         purged.append(_object_summary(obj))
     db.flush()
@@ -935,16 +839,6 @@ def undelete_object(
     obj.status = OBJ_STATUS_ORPHANED if (obj.ref_count or 0) == 0 else OBJ_STATUS_STORED
     obj.pending_deleted_at = None
     obj.pending_delete_until = None
-    _audit(
-        db,
-        "objects",
-        obj.id,
-        "object_restored",
-        actor_id=actor_id,
-        actor_type=actor_type,
-        before={"status": "pending_deletion"},
-        after={"status": obj.status, "reason": "undelete"},
-    )
     db.flush()
     return object_info(db, obj.id)
 
@@ -1154,10 +1048,6 @@ def reconcile(db: Session, *, dry_run: bool = True) -> dict:
             )
             db.add(obj)
             db.flush()
-            # §11: 内部路径不入审计; 只记对象 id + 大小(可追溯且不泄适配器细节)
-            _audit(db, "objects", obj.id, "object_reconciled",
-                   after={"oid": oid, "size_bytes": len(content),
-                          "source": "orphan_file"})
             orphan_registered.append(path)
     else:
         # dry-run 只报告文件名(即认领后的对象 id)与大小, 不泄内部路径(§11)

@@ -20,13 +20,14 @@ from sqlalchemy.pool import StaticPool
 
 from iesplan.api.auth import router as auth_router
 from iesplan.api.objects import router as objects_router
+from iesplan.application import identity
+from iesplan.application.objects import service as objects_app
 from iesplan.config import settings
 from iesplan.core.errors import AppError
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
 from iesplan.models.audit import AuditLog, RetentionRule
 from iesplan.models.identity import User
-from iesplan.application import identity
 from iesplan.storage import (
     ObjectCorruptError,
     ObjectHandle,
@@ -197,14 +198,8 @@ def test_put_object_writes_file_and_record(session: Session, data_dir) -> None:
     path = data_dir / "objects" / obj.oid
     assert path.read_bytes() == content
     assert list((data_dir / "objects" / "tmp").iterdir()) == []
-    # 来源类别记入创建审计
-    assert _count_audit(session, "object_created") == 1
-    audit = session.execute(
-        sa.select(AuditLog).where(AuditLog.action == "object_created")
-    ).scalar_one()
-    assert audit.after["source_category"] == "user_upload"
-    # 0.4.0: 审计不记录内部路径(§11)
-    assert "storage_path" not in audit.after
+    # 存储层不再记录对象创建审计(反向依赖已移除); 需要审计的公开业务用例
+    # 在成功路径自行记录。
     # object_info 与行一致
     info = object_info(session, obj.id)
     assert info["oid"] and info["size_bytes"] == len(content)
@@ -346,8 +341,7 @@ def test_safe_cleanup_execute_marks_pending_deletion(session: Session, data_dir)
     session.commit()
 
     plan = safe_cleanup(session, dry_run=True)
-    result = safe_cleanup(session, dry_run=False, expected_plan_id=plan["plan_id"])
-    session.commit()  # 应用用例拥有事务，存储服务只 flush（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §5.4 事务）
+    result = objects_app.execute_cleanup(session, actor_id=7, plan_id=plan["plan_id"])
     assert result["marked_count"] == 1
     assert result["errors"] == []
     assert result["pending_delete_days"] == 7
@@ -465,8 +459,7 @@ def test_pending_deleted_list_and_restore(session: Session, data_dir) -> None:
     assert pending[0]["pending_delete_until"] is not None
 
     # 恢复: 回到可用状态, 文件仍在
-    info = undelete_object(session, orphan.id)
-    session.commit()
+    info = objects_app.restore_object(session, object_id=orphan.id, actor_id=7)
     assert info["status"] == "orphaned"
     assert info["pending_deleted_at"] is None
     assert (data_dir / "objects" / orphan.oid).exists()
@@ -530,8 +523,7 @@ def test_purge_expired_after_retention(session: Session, data_dir) -> None:
     assert pre2["count"] == 1 and pre2["total_bytes"] == orphan.size_bytes
 
     # 执行物理回收
-    done = purge_expired(session, dry_run=False)
-    session.commit()
+    done = objects_app.purge(session, dry_run=False, actor_id=7)
     assert done["purged_count"] == 1
     assert done["errors"] == []
     assert not (data_dir / "objects" / orphan.oid).exists()
@@ -875,13 +867,8 @@ class TestReconcile:
         (data_dir / "objects" / file_oid).write_bytes(b"orphan-content")
         report = reconcile(session, dry_run=False)
         assert report["orphan_registered"] == [f"objects/{file_oid}"]
-        # 登记行的 oid 即文件名(不做内容摘要)
-        # 登记审计只记对象 id, 不含内部路径(§11)
-        reconcil_audit = session.execute(
-            sa.select(AuditLog).where(AuditLog.action == "object_reconciled")
-        ).scalar_one()
-        assert reconcil_audit.after["oid"] == file_oid
-        assert "storage_path" not in reconcil_audit.after
+        # 登记行的 oid 即文件名(不做内容摘要); 存储层不再记录登记审计
+        # (反向依赖已移除, reconcile 执行无生产调用方, 仅巡检 dry-run 对外)。
         row = session.execute(
             sa.select(StoredObject).where(StoredObject.oid == file_oid)
         ).scalar_one()
