@@ -51,6 +51,8 @@ __all__ = [
     "SweepSpec",
     "apply_param",
     "change_rate",
+    "financial_to_dict",
+    "jsonable_kpi",
     "project_financial_inputs",
     "run_batch",
     "run_sweep",
@@ -139,7 +141,7 @@ class SweepResult:
     属性:
         param_path / param_value / unit: 本次扫描点;
         status: 'ok' | 'infeasible' | 'error'(引擎异常/求解失败);
-        kpi: 引擎 KPI dict(Decimal 金额键保留,落库前经 _jsonable_kpi);
+        kpi: 引擎 KPI dict(Decimal 金额键保留,落库前经 jsonable_kpi);
         financial: FinancialResult | None(仅 status='ok' 时计算);
         solver_status: 引擎原始停止原因(如 'optimal'/'infeasible')。
     """
@@ -567,7 +569,7 @@ def _extremum(points: Sequence[Mapping[str, Any]], *, label_key: str = "param_va
     }
 
 
-def _jsonable_kpi(kpi: dict | None) -> dict | None:
+def jsonable_kpi(kpi: dict | None) -> dict | None:
     """KPI → 可 JSON 落库(Decimal 金额 → float;shed_events 等列表原样)。"""
     if not isinstance(kpi, dict):
         return kpi
@@ -582,7 +584,7 @@ def _jsonable_kpi(kpi: dict | None) -> dict | None:
     return out
 
 
-def _financial_to_dict(fin: FinancialResult | None) -> dict | None:
+def financial_to_dict(fin: FinancialResult | None) -> dict | None:
     """FinancialResult → 可 JSON 落库 dict(evidence financial 块,03 §7.4)。"""
     if fin is None:
         return None
@@ -644,8 +646,8 @@ def summarize_sweep(results: Sequence[SweepResult]) -> dict:
             {
                 "param_value": r.param_value,
                 "status": r.status,
-                "kpi": _jsonable_kpi(r.kpi),
-                "financial": _financial_to_dict(r.financial),
+                "kpi": jsonable_kpi(r.kpi),
+                "financial": financial_to_dict(r.financial),
                 "solver_status": r.solver_status,
             }
             for r in result_list

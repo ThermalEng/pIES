@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING
 from iesplan.analysis.wrapper import (
     AnalysisError,
     SweepResult,
-    _financial_to_dict,
-    _jsonable_kpi,
+    financial_to_dict,
+    jsonable_kpi,
     summarize_sweep,
 )
 
@@ -159,15 +159,15 @@ def build_analysis_payload(sweep_results: Sequence[SweepResult]) -> dict:
                 "param_value": r.param_value,
                 "unit": r.unit,
                 "status": r.status,
-                "kpi": _jsonable_kpi(r.kpi),
-                "financial": _financial_to_dict(r.financial),
+                "kpi": jsonable_kpi(r.kpi),
+                "financial": financial_to_dict(r.financial),
                 "solver_status": r.solver_status,
             }
             for r in results
         ],
         "summary": summarize_sweep(results),
         "sensitivity": {"rank_indicators": rank_indicators(results)},
-        "financial": _financial_to_dict(base_fin),
+        "financial": financial_to_dict(base_fin),
     }
 
 
