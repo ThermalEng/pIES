@@ -31,13 +31,13 @@ from iesplan.analysis import (
     build_analysis_payload,
     build_sensitivity_task_config,
     change_rate,
-    check_financial,
     rank_indicators,
     rank_parameters,
     summarize_batch,
     summarize_sweep,
 )
-from iesplan.analysis.assessment import FinancialValidity
+from iesplan.metrics.validity import FinancialValidity
+from iesplan.results import check_financial
 from iesplan.finance import (
     FinanceParams,
     compute_financials,
@@ -479,15 +479,17 @@ class TestCheckFinancial:
 # ---------------------------------------------------------------------------
 
 
-class TestIndicatorsFacade:
+# Wave 4-C: analysis 指标转发门面已删除,实现唯一归属 metrics 域;
+# 此处直接消费 metrics 权威实现,不再经 analysis 转发。
+class TestIndicatorsMetricsAuthority:
     def test_energy_balance_summary(self):
-        from iesplan.analysis import energy_balance_summary
+        from iesplan.metrics.engineering import energy_balance_summary
 
         summary = energy_balance_summary({"e_load": 1000.0, "p_grid_buy": 1000.0})
         assert summary["electric"]["residual_kwh"] == 0.0
 
     def test_operational_emissions(self):
-        from iesplan.analysis import operational_emissions
+        from iesplan.metrics.environmental import operational_emissions
 
         result = operational_emissions(
             {"grid_purchase": 100.0, "gas": 10.0},

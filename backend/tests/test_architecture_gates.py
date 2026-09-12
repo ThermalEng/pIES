@@ -52,7 +52,7 @@ docs/development/development-workflow.md「架构门禁」): 禁止 core 依赖�
      (engines/metrics/finance/analysis/assembly; 现状 4 对, Wave 4 归零);
   16. test_analysis_no_engine_driving — analysis 禁止驱动 engine
      (不自装 plan、不调用引擎, 只消费统一计算结果; Wave 0 基线 4 对,
-     Wave 4-B 清除 wrapper 驱动后剩 3 对门面转发, 随门面归属收尾归零)。
+     Wave 4-B 清除 wrapper 驱动后剩 3 对门面转发, Wave 4-C 随门面归属收尾归零)。
   17. test_whitelists_have_no_stale_entries — 旧式“只查新增”门禁的白名单条目
      必须仍被命中, 过期即失败。
 
@@ -955,17 +955,14 @@ def test_worker_no_compute_penetration():
     )
 
 
-#: 门禁 16 临时债务: analysis 驱动 engine(Wave 4-B 后剩 3 对门面转发, 随门面归属收尾归零)。
+#: 门禁 16 临时债务: analysis 驱动 engine(Wave 4-C 门面归属收尾后归零)。
 #: Wave 4-B 已清除 wrapper 引擎驱动: _local_plan/run_sweep/run_batch/逐点财务
 #: 执行删除, wrapper 只消费不可变扫描点结果并做纯分析, 不再导入 finance。
-#: 剩余 3 对为 assessment/indicators/_minfinance 对 metrics 的门面转发,
-#: 非执行穿透, 由门面归属切片收尾(不得为清零而复制实现)。
-TEMP_DEBT_ANALYSIS_ENGINE_DRIVING: set[tuple[str, str]] = {
-    # analysis/_minfinance.py:23、assessment.py:14-15、indicators.py:14,20 直调 metrics 行为。
-    ("iesplan.analysis._minfinance", "metrics"),
-    ("iesplan.analysis.assessment", "metrics"),
-    ("iesplan.analysis.indicators", "metrics"),
-}
+#: Wave 4-C 消费者证据裁决: summarize_four_dimensions 唯一生产消费者经
+#: metrics.validity 直调(application/results/writes), 指标实现经 metrics 域
+#: 直调, 财务计算经 finance 包直调; analysis 侧 assessment/indicators/
+#: _minfinance 三转发零生产消费者, 整体删除(未复制实现, 未新增校验)。
+TEMP_DEBT_ANALYSIS_ENGINE_DRIVING: set[tuple[str, str]] = set()
 
 
 def test_analysis_no_engine_driving():
