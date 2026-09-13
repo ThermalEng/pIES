@@ -25,6 +25,8 @@ from sqlalchemy.orm import Session
 from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
+from iesplan.application.datasets.quotas import check_upload_quota
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.core.diagnostics import (
     DATA_COL_UNIT_UNKNOWN,
     PARAM_UNIT_MISMATCH,
@@ -781,17 +783,148 @@ __all__ = [
     "add_object_ref",
     "create_builtin_sample",
     "create_dataset",
+    "create_dataset_case",
+    "create_sample_case",
     "default_user",
     "get_dataset",
+    "get_dataset_case",
     "get_dataset_version",
+    "get_dataset_version_case",
     "get_object_bytes",
     "get_template",
     "list_dataset_versions",
+    "list_datasets_case",
     "list_datasets_with_latest",
     "parse_csv",
     "put_object",
     "require_project",
     "upload_dataset_version",
+    "upload_dataset_version_case",
     "validate_dataset",
     "version_files_summary",
 ]
+
+
+# ---------------------------------------------------------------------------
+# HTTP 完整用例(第二轮纠偏 Wave 1 切片 3: 上传与 quota)
+#
+# 每个 HTTP 业务动作只转交其中一个完整用例; 用例内部按原路由顺序完成
+# 授权 → 归属 → 配额 → 保存/读取, 返回与 HTTP 无关的结果(API 只做 DTO、
+# 一次调用和错误/响应映射)。传输适配(封顶读取、JSON 字段解析)与输入
+# DTO 校验(分辨率/偏移/白名单/大小门禁)仍在 API 层, 本层不新增校验。
+# 归因口径保持原调用一致: 创建数据集沿用默认操作者, 上传版本不指定
+# 操作者, 样例版本沿用调用者(与原路由传参一致)。
+# ---------------------------------------------------------------------------
+
+
+def _require_project_dataset(db: Session, project_id: int, dataset_id: int) -> DatasetRecord:
+    """项目下数据集归属校验(口径与原路由一致: 不存在或跨项目一律 404, 含 project_id)。"""
+    ds = dataset_domain.get_dataset(db, dataset_id)
+    if ds is None or ds.project_id != project_id:
+        raise NotFoundError(
+            params={"entity_type": "dataset", "entity_id": dataset_id, "project_id": project_id}
+        )
+    return ds
+
+
+def create_dataset_case(
+    db: Session,
+    user: UserRecord,
+    *,
+    project_id: int,
+    name: str,
+    source_category: str | None = None,
+    license: str | None = None,
+    provenance: dict | None = None,
+    description: str | None = None,
+) -> DatasetRecord:
+    """创建数据集完整用例: edit 授权 → 创建(提交/回滚由创建步骤拥有)。"""
+    ensure_access(db, user, project_id, "edit")
+    return create_dataset(
+        db,
+        project_id,
+        name,
+        source_category=source_category,
+        license=license,
+        provenance=provenance,
+        description=description,
+    )
+
+
+def list_datasets_case(db: Session, user: UserRecord, *, project_id: int) -> list[dict]:
+    """数据集列表完整用例: view 授权 → 项目存在 → 列表+最新版本。"""
+    ensure_access(db, user, project_id, "view")
+    require_project(db, project_id)
+    return list_datasets_with_latest(db, project_id)
+
+
+def get_dataset_case(
+    db: Session, user: UserRecord, *, project_id: int, dataset_id: int
+) -> dict:
+    """数据集详情完整用例: view 授权 → 归属 → 版本列表+文件摘要(与 HTTP 无关)。"""
+    ensure_access(db, user, project_id, "view")
+    dataset = _require_project_dataset(db, project_id, dataset_id)
+    return {
+        "dataset": dataset,
+        "versions": [
+            {"version": v, "files": version_files_summary(db, v.id)}
+            for v in list_dataset_versions(db, dataset_id)
+        ],
+    }
+
+
+def upload_dataset_version_case(
+    db: Session,
+    user: UserRecord,
+    *,
+    project_id: int,
+    dataset_id: int,
+    resolution: str,
+    utc_offset_minutes: int,
+    fields: dict,
+    data: bytes,
+    meta: dict,
+) -> DatasetVersionRecord:
+    """上传版本完整用例: edit 授权 → 归属 → 配额 → 校验保存(提交/回滚由保存步骤拥有)。
+
+    异常:
+        QuotaError: 配额超限(API 层转换为 413)。
+        DataValidationError: 存在阻断性诊断(API 层转换为 400 信封响应)。
+    """
+    ensure_access(db, user, project_id, "edit")
+    _require_project_dataset(db, project_id, dataset_id)
+    check_upload_quota(db, user_id=user.id, project_id=project_id, incoming_bytes=len(data))
+    return upload_dataset_version(
+        db, dataset_id, resolution, utc_offset_minutes, fields, data, meta
+    )
+
+
+def get_dataset_version_case(
+    db: Session,
+    user: UserRecord,
+    *,
+    project_id: int,
+    dataset_id: int,
+    version_no: int,
+) -> dict:
+    """版本详情完整用例: view 授权 → 归属 → 版本+文件+数据引用(与 HTTP 无关)。"""
+    ensure_access(db, user, project_id, "view")
+    _require_project_dataset(db, project_id, dataset_id)
+    return get_dataset_version(db, dataset_id, version_no)
+
+
+def create_sample_case(
+    db: Session,
+    user: UserRecord,
+    *,
+    project_id: int,
+    dataset_id: int,
+    resolution: str,
+    region: str = "shanghai",
+) -> DatasetVersionRecord:
+    """内置样例完整用例: edit 授权 → 归属 → 生成保存(提交/回滚由保存步骤拥有)。"""
+    ensure_access(db, user, project_id, "edit")
+    _require_project_dataset(db, project_id, dataset_id)
+    return create_builtin_sample(
+        db, project_id, resolution, region=region, user_id=user.id, dataset_id=dataset_id
+    )
