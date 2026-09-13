@@ -9,9 +9,15 @@
   ``create_check_task``)把路由原来的“多次服务调用 + 一次提交”整体下移为
   单个用例拥有的一次事务(失败回滚), 路由层不再提交;
 - 读编排(``get_selection_diff``/``read_task_hourly``)把路由原来的
-  “归属/权限/缺失处理”整体下移, 行为与原路由一致。
+  “归属/权限/缺失处理”整体下移, 行为与原路由一致;
+- 端点完整用例(``list_assessments_case``/``create_check_task_case``)把路由
+  原来的“业务调用 + 序列化/跨包摘要”收进单个 handler, 路由层每个动作只
+  转交其中一个(``assess`` 端点的纯序列化与 ``select`` 端点的内联选择字典
+  经复核为纯映射, 保留在 API)。
 
-依赖方向: api → application → 领域门面。
+依赖方向: api → application → 领域门面。application 内跨域组合允许:
+``create_check_task_case`` 复用 ``application.tasks`` 的任务摘要, 不在
+API 跨包二次调用。
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from sqlalchemy.orm import Session
 from iesplan.application.projects.authorization import ensure_access
 from iesplan.application.results import writes as results_writes
 from iesplan.application.tasks.submissions import ensure_task_belongs
+from iesplan.application.tasks.views import task_summary
 from iesplan.core.errors import NotFoundError
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import ResultAssessmentRecord, ResultSelectionRecord
@@ -164,3 +171,39 @@ def create_check_task(
     return results_writes.run_check_task(
         db, user, project_id, task_id, evidence_package_id=evidence_package_id
     )
+
+
+def list_assessments_case(
+    db: Session, user: UserRecord, project_id: int, task_id: int
+) -> dict[str, Any]:
+    """评估历史完整用例(路由原顺序: view 权限 + 归属 → 列表 → 逐项序列化)。
+
+    原路由借 ``result_view`` 做权限 + 归属校验(其证据/评估聚合结果被丢弃);
+    本用例保留相同的校验顺序与错误语义(ensure_access → ensure_task_belongs),
+    直接列表并逐项序列化。只读, 不拥有事务。返回响应就绪字典。
+    """
+    ensure_access(db, user, project_id, "view")
+    ensure_task_belongs(db, project_id, task_id)
+    items = [
+        results_writes.assessment_to_dict(db, a)
+        for a in results_writes.list_assessments(db, task_id)
+    ]
+    return {"items": items, "total": len(items)}
+
+
+def create_check_task_case(
+    db: Session,
+    user: UserRecord,
+    project_id: int,
+    task_id: int,
+    evidence_package_id: int | None = None,
+) -> dict[str, Any]:
+    """创建检查任务完整用例(路由原顺序: 创建检查任务 → 跨包任务摘要)。
+
+    application 内跨域组合: 复用 ``application.tasks`` 的任务摘要实现,
+    API 层不再跨包二次调用。提交由任务提交用例拥有。返回响应就绪字典。
+    """
+    task = results_writes.run_check_task(
+        db, user, project_id, task_id, evidence_package_id=evidence_package_id
+    )
+    return {"task": task_summary(db, task)}

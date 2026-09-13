@@ -1,7 +1,7 @@
 """运维健康聚合 API(STO-07: 独立聚合层, 不驻留在存储路由)。
 
 - GET /api/admin/health: 全系统运维健康视图(存活/就绪/任务/队列/存储),
-  由本聚合层调用 application 健康门面(application.health 只读探针,
+  由本端点一次转交完整用例 ``application.health.health_view``(只读探针,
   再透传各域/服务/存储公开函数):
   - 存储 → 门面 storage_stats/sample_verify(容量 + 抽样校验);
   - 队列 → 门面 queue_status();
@@ -14,13 +14,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from iesplan import __version__
 from iesplan.api.auth import CurrentAdmin
 from iesplan.application import health as health_ops
 from iesplan.db import get_db
@@ -31,62 +29,10 @@ router = APIRouter(prefix="/api/admin", tags=["admin-health"])
 DbSession = Annotated[Session, Depends(get_db)]
 
 
-def ops_health_view(db: Session) -> dict:
-    """运维健康视图(架构宪法 §13 故障与健康语义): 存活/就绪/任务指标/队列指标/存储容量。
-
-    STO-07: 本聚合层只编排 application 健康门面, 不实现任何模块内部逻辑;
-    存储健康取门面 storage_stats/sample_verify(容量 + 抽样校验),
-    队列取门面 queue_status。
-    """
-    db_ok = health_ops.check_db(db)
-    tasks_by_status = health_ops.tasks_by_status(db)
-    projects_by_status = health_ops.projects_by_status(db)
-    users_count = health_ops.count_users(db)
-    storage = storage_health_view(db)
-    queue_view = health_ops.queue_status()
-    # 健康判定: 存活 + 就绪 + 存储门禁; 队列为可重建视图(Redis 可重建),
-    # 其降级状态在 queue 节单独上报, 不影响整体状态
-    healthy = db_ok and storage["capacity"]["ok"]
-    return {
-        "status": "ok" if healthy else "degraded",
-        "service": "iesplan",
-        "version": __version__,
-        "time": datetime.now(UTC).isoformat(),
-        "liveness": {"ok": True, "process": "alive"},
-        "readiness": {"db": db_ok},
-        "metrics": {
-            "tasks_by_status": {str(k): int(v) for k, v in tasks_by_status.items()},
-            "projects_by_status": {str(k): int(v) for k, v in projects_by_status.items()},
-            "users": int(users_count),
-        },
-        "queue": queue_view,
-        "storage": storage,
-    }
-
-
-def storage_health_view(db: Session) -> dict:
-    """存储模块公开 health provider(单一形状, 供聚合层与其他调用方使用)。
-
-    字段: {capacity, corrupt_count, orphan_count, object_count, ok,
-    verify{checked, ok_count, failed}}。
-    """
-    stats = health_ops.storage_stats(db)
-    verify = health_ops.sample_verify(db, limit=10)
-    return {
-        "capacity": stats["capacity"],
-        "corrupt_count": len(verify["failed"]),
-        "orphan_count": stats["objects"]["orphan_count"],
-        "object_count": stats["objects"]["count"],
-        "ok": stats["healthy"] and len(verify["failed"]) == 0,
-        "verify": {
-            "checked": verify["checked"],
-            "ok_count": verify["ok_count"],
-            "failed": verify["failed"],
-        },
-    }
-
-
 @router.get("/health", summary="运维健康视图(管理员)")
 def admin_health(db: DbSession, _admin: CurrentAdmin) -> dict:
-    """运维健康(存活/就绪/指标/队列/存储)——独立聚合层, 非存储路由。"""
-    return ops_health_view(db)
+    """运维健康(存活/就绪/指标/队列/存储)——独立聚合层, 非存储路由。
+
+    本端点只做传输适配, 一次转交完整用例 ``health_view``。
+    """
+    return health_ops.health_view(db)

@@ -114,6 +114,19 @@ def confirm_import_case(db: Session, user: UserRecord, *, proposal_id: int) -> d
     return {"project": project, "role": project_domain.get_role(db, user, project.id)}
 
 
+def confirm_import_case_result(db: Session, user: UserRecord, *, proposal_id: int) -> dict:
+    """确认导入响应就绪用例(路由原顺序: 确认导入 → 序列化; 提交由确认用例拥有)。
+
+    ``confirm_import_case`` 的记录契约保持不变; 本用例在其上追加项目序列化,
+    供确认导入端点一次转交。返回响应就绪字典。
+    """
+    result = confirm_import_case(db, user, proposal_id=proposal_id)
+    return {
+        "project": project_domain.project_to_dict(result["project"]),
+        "my_role": result["role"],
+    }
+
+
 def create_download_token(
     object_id: int,
     kind: str,

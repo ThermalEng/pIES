@@ -25,7 +25,6 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.application.results import endpoint_cases as results_app
-from iesplan.application.tasks import views as tasks_app
 from iesplan.db import get_db
 
 router = APIRouter(
@@ -86,9 +85,7 @@ def list_assessments_endpoint(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """评估历史: 全部证据包上的评估记录(追加式不可变, 时间倒序)。"""
-    results_app.result_view(db, user, project_id, task_id)  # 权限 + 归属校验
-    items = [results_app.assessment_to_dict(db, a) for a in results_app.list_assessments(db, task_id)]
-    return {"items": items, "total": len(items)}
+    return results_app.list_assessments_case(db, user, project_id, task_id)
 
 
 @router.post("/assess", status_code=201, summary="触发新评估")
@@ -183,5 +180,4 @@ def check_task_endpoint(
 ) -> dict[str, Any]:
     """对已有证据包创建检查任务(report 类型, io 池); Worker 消费后执行四维复查。"""
     package_id = payload.evidence_package_id if payload else None
-    task = results_app.create_check_task(db, user, project_id, task_id, package_id)
-    return {"task": tasks_app.task_summary(db, task)}
+    return results_app.create_check_task_case(db, user, project_id, task_id, package_id)

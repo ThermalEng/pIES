@@ -30,7 +30,7 @@ from iesplan.api.limits import QUOTA_CODE, QUOTA_MESSAGE_KEY, QuotaError
 from iesplan.application import packages as package_ops
 from iesplan.application.projects import lifecycle as project_ops
 from iesplan.application.projects import versions as project_versions
-from iesplan.core.errors import ForbiddenError, http_error
+from iesplan.core.errors import http_error
 from iesplan.db import get_db
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -158,10 +158,7 @@ def list_all_projects_endpoint(
     未获项目所有者授权的项目只暴露整体管理字段(name/status/owner), 供删除管理;
     细节(草稿内容)与管理员隔离, 经 GET /projects/{id} 访问未授权项目返回 403。
     """
-    if not project_ops.is_admin(db, admin):
-        raise ForbiddenError()
-    projects = project_ops.list_all_projects(db)
-    return {"projects": projects}
+    return project_ops.list_all_projects_case(db, admin)
 
 
 @router.get("/{project_id}", summary="项目视图")
@@ -267,11 +264,7 @@ def archive_project_endpoint(
     user: CurrentUser,
 ) -> dict:
     """归档项目(归档后只读, 不能编辑/提交计算)。"""
-    project = project_ops.archive_project(db, user, project_id)
-    return {
-        "project": project_ops.project_to_dict(project),
-        "my_role": project_ops.get_role(db, user, project_id),
-    }
+    return project_ops.archive_project_case(db, user, project_id)
 
 
 @router.post("/{project_id}/unarchive", summary="撤销归档")
@@ -281,11 +274,7 @@ def unarchive_project_endpoint(
     user: CurrentUser,
 ) -> dict:
     """撤销归档(恢复为 active)。"""
-    project = project_ops.unarchive_project(db, user, project_id)
-    return {
-        "project": project_ops.project_to_dict(project),
-        "my_role": project_ops.get_role(db, user, project_id),
-    }
+    return project_ops.unarchive_project_case(db, user, project_id)
 
 
 @router.delete("/{project_id}", status_code=204, summary="删除项目")
@@ -359,11 +348,7 @@ def confirm_import_endpoint(
     user: CurrentUser,
 ) -> dict:
     """确认导入: 创建新项目身份(导入者即所有者), 历史结果作为证据来源保留。"""
-    result = package_ops.confirm_import_case(db, user, proposal_id=proposal_id)
-    return {
-        "project": project_ops.project_to_dict(result["project"]),
-        "my_role": result["role"],
-    }
+    return package_ops.confirm_import_case_result(db, user, proposal_id=proposal_id)
 
 
 def _proposal_to_dict(proposal) -> dict:

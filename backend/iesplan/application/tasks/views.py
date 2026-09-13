@@ -4,9 +4,10 @@
 
 - 查询(``task_summary``/``list_tasks``/``task_detail``)只读装配 tasks/results
   域门面与队列可重建视图, 不拥有事务;
-- 用户级写(``cancel_user_task``/``retry_user_task``)按路由原顺序组合已有
-  公开用例(权限 → 归属 → 取消/重试), 事务由 ``submissions`` 顶层用例提交/
-  回滚, 路由层不再提交。
+- 用户级写完整用例(``submit_task_case``/``cancel_user_task``/
+  ``retry_user_task``)按路由原顺序组合已有公开用例(权限 → 归属 →
+  提交/取消/重试 → 摘要), 事务由 ``submissions`` 顶层用例提交/回滚,
+  路由层每个动作只转交其中一个完整用例, 不再二次调用 ``task_summary``。
 
 依赖方向: api → application → 领域门面。不新增校验/hash/回退。
 """
@@ -26,7 +27,7 @@ from iesplan.application.tasks.submissions import (
     ensure_task_belongs,
     require_project,
     retry_task,
-    submit_task,  # noqa: F401 (经本模块再导出, 调用方以 tasks_app.submit_task 取用)
+    submit_task,
 )
 from iesplan.core.diagnostics import TASK_QUEUED
 from iesplan.identity.contracts import UserRecord
@@ -260,18 +261,62 @@ def task_detail(
     return detail
 
 
+def submit_task_case(
+    db: Session,
+    user: UserRecord,
+    project_id: int,
+    task_type: str,
+    config: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+    parent_task_id: int | None = None,
+) -> dict[str, Any]:
+    """提交任务完整用例(路由原顺序: 提交 → 摘要; 幂等/去重复用标记与提示同组装)。
+
+    ``submissions.submit_task`` 的 (任务记录, 标记) 元组契约保持不变(测试与
+    ``results`` 检查任务编排继续使用); 本用例在其上追加摘要组装, 供提交端点
+    一次转交。返回与 HTTP 无关的响应就绪字典; 幂等/去重复用 → 200 的状态码
+    映射仍由 API 传输层按 ``replayed``/``duplicate`` 字段决定。
+    """
+    task, flags = submit_task(
+        db, user, project_id, task_type,
+        config=config, idempotency_key=idempotency_key, parent_task_id=parent_task_id,
+    )
+    replayed = bool(flags.get("replay", False))
+    duplicate = bool(flags.get("duplicate", False))
+    return {
+        "task": task_summary(db, task),
+        "replayed": replayed,
+        "duplicate": duplicate,
+        "hint": "已复用既有任务(输入相同, 未重复计算)" if replayed or duplicate else None,
+    }
+
+
 def cancel_user_task(
     db: Session, user: UserRecord, project_id: int, task_id: int, reason: str = "user_cancel",
-) -> TaskRecord:
-    """取消任务(路由原顺序: edit 权限 → 归属 → 取消; 提交由用例层拥有)。"""
+) -> dict[str, Any]:
+    """取消任务完整用例(路由原顺序: edit 权限 → 归属 → 取消 → 摘要; 提交由用例层拥有)。
+
+    原返回任务记录, 现返回响应就绪字典(含摘要/取消状态/诊断); 唯一调用方为
+    取消端点, 无其他生产/测试调用者。
+    """
     ensure_access(db, user, project_id, "edit")
     ensure_task_belongs(db, project_id, task_id)
-    return cancel_task(db, task_id, reason=reason, actor_id=user.id)
+    task = cancel_task(db, task_id, reason=reason, actor_id=user.id)
+    return {
+        "task": task_summary(db, task),
+        "cancel_status": task.status,
+        "diagnostic": "cancel_ok",
+    }
 
 
 def retry_user_task(
     db: Session, user: UserRecord, project_id: int, task_id: int
-) -> TaskRecord:
-    """手动重试(路由原顺序: 归属 → 重试; 权限与提交由用例层拥有)。"""
+) -> dict[str, Any]:
+    """手动重试完整用例(路由原顺序: 归属 → 重试 → 摘要; 权限与提交由用例层拥有)。
+
+    原返回任务记录, 现返回响应就绪字典(含摘要); 唯一调用方为重试端点,
+    无其他生产/测试调用者。
+    """
     ensure_task_belongs(db, project_id, task_id)
-    return retry_task(db, user, task_id)
+    task = retry_task(db, user, task_id)
+    return {"task": task_summary(db, task)}
