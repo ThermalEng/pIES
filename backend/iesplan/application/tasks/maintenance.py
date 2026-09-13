@@ -11,12 +11,8 @@ storage_stats 为只读诊断):
 
 管理端收尾(``iesplan.api.admin`` 全部取数与解锁事务上收):
 
-- ``get_task``：解锁前任务存在性/状态预检读(透传 tasks 域门面)；
 - ``get_diagnostics``：运维诊断视图(任务分组计数/最近失败/保留规则/
   维护记录/存储/队列；只读，不提交事务)；
-- ``unlock_task``：管理员解锁卡死任务(吊销租约、终止运行尝试、释放
-  并发槽、任务回 queued、追加诊断、维护记录与解锁审计；本层拥有
-  事务提交/回滚，内部步骤只 flush)；
 - ``unlock_task_case``：解锁完整用例(存在性 → 危险确认 → 终态/已排队
   预检 → 解锁执行；返回 UnlockDecision，错误/响应映射归 API)。
 
@@ -67,11 +63,6 @@ def enqueue_task(
 def storage_stats(db: Session) -> dict[str, Any]:
     """对象存储健康与用量(只读诊断，不提交事务)。"""
     return _storage_stats(db)
-
-
-def get_task(db: Session, task_id: int) -> TaskRecord | None:
-    """按主键取任务公开视图(解锁前存在性/状态预检读；不存在返回 None)。"""
-    return tasks_domain.get_task(db, task_id)
 
 
 def get_diagnostics(db: Session) -> dict[str, Any]:
@@ -147,17 +138,6 @@ def _unlock_task(db: Session, *, task_id: int, admin_id: int) -> dict[str, Any]:
     return {"task_id": task_id, "unlocked": True, "status": "queued"}
 
 
-def unlock_task(db: Session, *, task_id: int, admin_id: int) -> dict[str, Any]:
-    """管理员解锁卡死任务(本层拥有事务提交/回滚；调用前须经存在性/确认/终态预检)。"""
-    try:
-        result = _unlock_task(db, task_id=task_id, admin_id=admin_id)
-        db.commit()
-        return result
-    except Exception:
-        db.rollback()
-        raise
-
-
 #: 解锁预检与执行结局: not_found/confirm_required/terminal 由 API 映射为
 #: 404/409 错误, already_queued/unlocked 映射为 200 响应
 UnlockOutcome = Literal["not_found", "confirm_required", "terminal", "already_queued", "unlocked"]
@@ -207,9 +187,7 @@ __all__ = [
     "clear_task_cancel",
     "enqueue_task",
     "get_diagnostics",
-    "get_task",
     "queue_status",
     "storage_stats",
-    "unlock_task",
     "unlock_task_case",
 ]
