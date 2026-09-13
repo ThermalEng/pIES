@@ -9,7 +9,6 @@ from __future__ import annotations
 import copy
 
 from iesplan.assembly.validator2 import (
-    NetworkReceipt,
     ValidatedInterfaceNetwork,
     validate_interface_network2,
 )
@@ -187,8 +186,6 @@ class TestValidNetwork:
         assert r.ok, [d.params.get("detail") for d in r.diagnostics]
         artifact = r.artifact
         assert isinstance(artifact, ValidatedInterfaceNetwork)
-        # 产物和回执契约一致
-        assert artifact.verify()
         assert artifact.receipt.diagnostics == ()
         # 规范文本确定性形态
         assert '"schema":"ies.assembly"' in artifact.canonical_text
@@ -244,28 +241,6 @@ class TestValidNetwork:
         changed2["devices"]["load"]["asset_origin"] = "new"
         e = validate_interface_network2(changed2, documents)
         assert e.artifact.canonical_text != a.artifact.canonical_text
-
-    def test_receipt_roundtrip(self):
-        documents = {"grid": GRID_DOC, "load": LOAD_DOC}
-        doc = _assembly_doc(
-            documents,
-            devices={"load": {"predefined_interfaces": {"electric_demand": {"data_ref": "campus_load"}}}},
-            connections={"c1": {"from": "grid.electricity_out", "to": "load.electricity_in"}},
-        )
-        artifact = validate_interface_network2(doc, documents).artifact
-        receipt = NetworkReceipt.from_dict(artifact.receipt.to_dict())
-        assert receipt.to_dict() == artifact.receipt.to_dict()
-
-    def test_receipt_rejects_malformed(self):
-        import pytest
-
-        documents = {"grid": GRID_DOC}
-        artifact = validate_interface_network2(_assembly_doc(documents), documents).artifact
-        payload = artifact.receipt.to_dict()
-        # 缺少 schema 的回执必须拒绝。
-        del payload["schema"]
-        with pytest.raises(ValueError):
-            NetworkReceipt.from_dict(payload)
 
 
 class TestInvalidConnections:

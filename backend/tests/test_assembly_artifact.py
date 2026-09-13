@@ -3,7 +3,7 @@
 覆盖:
 - 手写 YAML 与 GUI 项目导出进入同一校验入口(validate_assembly_text /
   validate_project_export);
-- 成功路径:签发不可变 ValidatedAssemblyArtifact(二件套一致 + 校验回执);
+- 成功路径:签发不可变 ValidatedAssemblyArtifact(规范文本 + 校验回执);
 - 失败路径:阻断诊断 → 无 artifact,结构/模型/数据/图系统/计算兼容各阶段诊断定位;
 - 资源解析(relative_file → 内容寻址对象);
 - 严格精确版本(不匹配版本号 → 阻断)。
@@ -74,8 +74,6 @@ class TestHappyPath:
         assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
         artifact = result.artifact
         assert artifact is not None
-        assert artifact.verify()
-        assert artifact.verify_or_raise() is artifact
         # 回执依赖锁包含全部设备与计算引用
         deps = artifact.receipt.dependencies
         devices_lock = deps["devices"]
@@ -267,7 +265,6 @@ class TestProjectExport:
         assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
         artifact = result.artifact
         assert artifact is not None
-        assert artifact.verify()
         # loss_rate 0 → 直接连接;无管道设备
         canonical = artifact.canonical_text
         assert "transport_pipe" not in canonical

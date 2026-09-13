@@ -35,7 +35,7 @@ from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
-from iesplan.assembly import ValidatedAssemblyArtifact  # noqa: E402
+from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
@@ -275,11 +275,11 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     # 文本仅校验字头，快照去重使用内容字段逐项相等判定（header-only）
     assert isinstance(persisted.assembly_receipt, dict)
     assert "issued_at" not in persisted.assembly_receipt
-    artifact = ValidatedAssemblyArtifact.from_persisted(
+    artifact = ValidatedAssemblyArtifact(
         persisted.canonical_assembly_text,
-        persisted.assembly_receipt,
+        ValidationReceipt.from_dict(persisted.assembly_receipt),
     )
-    assert artifact.verify()
+    assert artifact.to_dict()["receipt"] == persisted.assembly_receipt
 
     # 6) 列表可见 2 个任务(步骤 2/3 均为既有任务复用; 含摘要与排队位次)
     resp = client.get(f"/api/projects/{pid}/tasks", headers=_h(client, owner))

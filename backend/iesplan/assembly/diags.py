@@ -35,7 +35,6 @@ ASM_RES_INVALID = "ASM-RES-001"  # 资源文件不可读(不产生可执行产�
 ASM_CALC_MODE = "ASM-CALC-001"  # calculation.mode 非法
 ASM_CALC_OPTIONS = "ASM-CALC-002"  # calculation.options 非法(未知键/非标量/非有限值)
 ASM_OUTPUT_REF = "ASM-OUT-001"  # outputs 引用未定义设备/端口
-ASM_ART_MISMATCH = "ASM-ART-001"  # 产物一致性校验失败(规范文本/摘要/回执不一致)
 ASM_CONV_UNMAPPABLE = "ASM-CONV-001"  # 旧形态无法映射到 ies.assembly 1.0.0(迁移/导出阻断)
 ASM_INPUT_UNDECLARED = "ASM-INPUT-006"  # 参数未在设备模型声明(ies.assembly 1.0.0: 只允许已声明字段)
 
@@ -141,8 +140,6 @@ ASM_MESSAGE_KEYS: dict[str, str] = {
     ASM_CALC_OPTIONS: "ies.diag.asm.calc.options",
     # out.*
     ASM_OUTPUT_REF: "ies.diag.asm.out.ref_undefined",
-    # artifact.*
-    ASM_ART_MISMATCH: "ies.diag.asm.artifact.mismatch",
     # conv.*
     ASM_CONV_UNMAPPABLE: "ies.diag.asm.conv.unmappable",
     # pipe.*
@@ -239,7 +236,6 @@ __all__ = [
     "ASM_CALC_MODE",
     "ASM_CALC_OPTIONS",
     "ASM_OUTPUT_REF",
-    "ASM_ART_MISMATCH",
     "ASM_CONV_UNMAPPABLE",
     "ASM_INPUT_UNDECLARED",
     "ASM_EDGE_BAD_SOURCE",

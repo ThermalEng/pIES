@@ -207,7 +207,6 @@ NEW_DIAG_CODES: dict[str, str] = {
     "ASM-CALC-001": "calculation.mode 非法",
     "ASM-CALC-002": "calculation.options 非法",
     "ASM-OUT-001": "输出引用未定义设备或端口",
-    "ASM-ART-001": "规范文本、摘要与校验回执不一致",
     "ASM-CONV-001": "旧装配形态无法唯一迁移到 ies.assembly 1.0.0",
     # 装配 2.0.0 接口网络纯协议校验(0.8.0 切片): 值域冲突/预定义绑定/内容锁
     "ASM-EDGE-010": "连接两端有效区间无交集(值域冲突)",

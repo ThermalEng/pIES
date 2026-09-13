@@ -5,8 +5,8 @@
 - 合法样例通过结构阶段,非法样例产出稳定结构诊断;
 - 唯一规范化:相同语义 → 相同规范文本(键序无关、时间换算 UTC、
   数值唯一有限表示、未解析资源拒绝、非有限值拒绝);
-- ValidatedAssemblyArtifact 二件套一致性校验与回执结构;
-- 新增诊断码登记(ASM-SYN-006..009 / ASM-RES / ASM-CALC / ASM-OUT / ASM-ART / ASM-CONV)。
+- ValidatedAssemblyArtifact 不可变二件套与回执结构;
+- 新增诊断码登记(ASM-SYN-006..009 / ASM-RES / ASM-CALC / ASM-OUT / ASM-CONV)。
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from iesplan.assembly import (
 )
 from iesplan.assembly.diags import (
     ASM_ALL_CODES,
-    ASM_ART_MISMATCH,
     ASM_CALC_MODE,
     ASM_CALC_OPTIONS,
     ASM_CONV_UNMAPPABLE,
@@ -345,11 +344,6 @@ class TestArtifact:
         )
         return ValidatedAssemblyArtifact(canonical_text=text, receipt=receipt)
 
-    def test_verify_passes(self):
-        artifact = self._artifact()
-        assert artifact.verify()
-        assert artifact.verify_or_raise() is artifact
-
     def test_receipt_structure(self):
         artifact = self._artifact()
         receipt = artifact.receipt.to_dict()
@@ -381,26 +375,6 @@ class TestArtifact:
         )
         assert first.to_dict() == second.to_dict()
 
-    def test_tampered_receipt_contract_fails_verify(self):
-        artifact = self._artifact()
-        bad_receipt = ValidationReceipt(
-            canonical_algorithm_version="9.9.9",
-        )
-        bad = ValidatedAssemblyArtifact(
-            canonical_text=artifact.canonical_text,
-            receipt=bad_receipt,
-        )
-        assert not bad.verify()
-
-    def test_persisted_round_trip_verifies(self):
-        artifact = self._artifact()
-        restored = ValidatedAssemblyArtifact.from_persisted(
-            artifact.canonical_text,
-            artifact.receipt.to_dict(),
-        )
-        assert restored.to_dict() == artifact.to_dict()
-
-
 # ---------------------------------------------------------------------------
 # 诊断码登记
 # ---------------------------------------------------------------------------
@@ -417,7 +391,6 @@ class TestDiagRegistration:
             ASM_CALC_MODE,
             ASM_CALC_OPTIONS,
             ASM_OUTPUT_REF,
-            ASM_ART_MISMATCH,
             ASM_CONV_UNMAPPABLE,
             ASM_INPUT_UNDECLARED,
         ):

@@ -163,7 +163,7 @@ def setup_environment(
         artifact = ValidatedAssemblyArtifact(
             canonical_text=canonical_text,
             receipt=ValidationReceipt(),
-        ).verify_or_raise()
+        )
         snapshot = CalcSnapshot(
             project_version_id=version.id,
             dataset_version_ids=[dver_id] if dver_id is not None else [],
