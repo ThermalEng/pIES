@@ -40,7 +40,6 @@ from iesplan.application.tasks.submissions import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.jsonutil import canonical_json
-from iesplan.engines import CAPACITY_PARAM
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import (
     EvidenceInvalidError,
@@ -522,8 +521,9 @@ def build_diff_patch(content: dict[str, Any], solution_id: int) -> dict[str, Any
     """生成参数差异补丁(供项目单元 apply_result 应用)。
 
     补丁形状: {"params": {"result_adoption": {...}}}, apply_result 深合并进
-    calc_config.params。容量同时给出设备类型粒度(type_id → 容量)与
-    注册表参数名粒度(capacity_params)。
+    calc_config.params。容量只给证据原生契约粒度(type_id → 容量);
+    注册表参数名解释不得经旧 engines 静态映射, 有消费方时经 devices
+    公开能力解析。
     """
     candidates = content.get("candidates")
     selected: dict[str, Any] | None = None
@@ -535,15 +535,11 @@ def build_diff_patch(content: dict[str, Any], solution_id: int) -> dict[str, Any
     capacities = selected.get("capacities") if isinstance(selected, dict) else {}
     if not isinstance(capacities, dict):
         capacities = {}
-    capacity_params = {
-        CAPACITY_PARAM.get(str(type_id), str(type_id)): value for type_id, value in capacities.items()
-    }
     return {
         "params": {
             "result_adoption": {
                 "solution_index": solution_id,
                 "capacities": capacities,
-                "capacity_params": capacity_params,
                 "irr": selected.get("irr") if isinstance(selected, dict) else None,
                 "npv": selected.get("npv") if isinstance(selected, dict) else None,
             }
