@@ -946,28 +946,106 @@ def test_auth_view_fields_consistent_across_endpoints(
     assert by_name["alice"]["project_count"] == 0
 
 
-def test_users_list_assembles_views_in_single_batch_call(
+def test_users_list_view_queries_do_not_grow_with_user_count(
     client: TestClient, db_session: Session
 ) -> None:
-    """用户列表一次批量组装全部视图: user_views 恰调用一次。
+    """用户列表身份视图取数不随用户数线性增长(2 用户与 6 用户 SQL 条数一致)。
 
-    禁 API 逐用户回调用例(N+1 扇出); 批量函数内部组装细节变化不影响本断言。
+    行为证据(SQLAlchemy 查询计数, 非包装调用次数): 角色/凭证经 identity
+    域批量能力固定条数取数, 用户数增长不增加查询; 并验证角色优先级
+    (admin 优先)与 force_password_change 正确。
     """
-    from unittest.mock import patch
+    from sqlalchemy import event
 
-    from iesplan.application.identity import auth_cases
+    from iesplan import identity as identity_domain
 
     seed_admin(db_session, force_change=False)
     seed_engineer(db_session, "alice")
-    seed_engineer(db_session, "bob")
-    seed_engineer(db_session, "carol")
+    # admin 兼任 engineer: 主角色仍为 admin(优先级证据)
+    admin = identity_domain.get_user_by_username(db_session, "admin")
+    assert admin is not None
+    engineer = identity_domain.ensure_role(db_session, "engineer", "工程师")
+    identity_domain.grant_role(
+        db_session, user_id=admin.id, role_id=engineer.id, granted_by=admin.id
+    )
+    db_session.commit()
     admin_h = bearer(login(client, "admin", ADMIN_PASSWORD).json()["token"])
 
-    with patch.object(auth_cases, "user_views", wraps=auth_cases.user_views) as spy:
-        resp = client.get("/api/auth/users", headers=admin_h)
-    assert resp.status_code == 200
-    assert spy.call_count == 1
-    by_name = {u["username"]: u for u in resp.json()["users"]}
-    assert set(by_name) == {"admin", "alice", "bob", "carol"}
+    engine = db_session.bind
+    assert engine is not None
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    def _list_users() -> tuple[int, list]:
+        statements.clear()
+        event.listen(engine, "before_cursor_execute", _record)
+        try:
+            resp = client.get("/api/auth/users", headers=admin_h)
+        finally:
+            event.remove(engine, "before_cursor_execute", _record)
+        assert resp.status_code == 200
+        return len(statements), resp.json()["users"]
+
+    query_count_2, _ = _list_users()
+
+    seed_engineer(db_session, "bob")
+    seed_engineer(db_session, "carol")
+    seed_engineer(db_session, "dave")
+    identity.create_user(
+        db_session, "mallory", "Mallory12345", role="engineer",
+        force_password_change=True, display_name="Mallory",
+    )
+    query_count_6, users = _list_users()
+
+    assert query_count_6 == query_count_2
+    by_name = {u["username"]: u for u in users}
+    assert set(by_name) == {"admin", "alice", "bob", "carol", "dave", "mallory"}
     assert by_name["admin"]["role"] == "admin"
     assert by_name["bob"]["role"] == "engineer"
+    assert by_name["mallory"]["force_password_change"] is True
+    assert by_name["alice"]["force_password_change"] is False
+    assert by_name["admin"]["force_password_change"] is False
+
+
+def test_identity_batch_read_matches_single_and_empty_issues_no_queries(
+    db_session: Session,
+) -> None:
+    """域批量能力与单发口径一致; 空输入不发查询。"""
+    from sqlalchemy import event
+
+    from iesplan import identity as identity_domain
+
+    seed_admin(db_session, force_change=False)
+    seed_engineer(db_session, "alice")
+    users = identity_domain.list_users(db_session)
+    ids = [u.id for u in users]
+
+    roles_map = identity_domain.roles_by_user(db_session, ids)
+    creds_map = identity_domain.active_credentials_by_user(db_session, ids)
+    for user in users:
+        assert roles_map.get(user.id, []) == identity_domain.user_roles(
+            db_session, user.id
+        )
+        single = identity_domain.get_active_credential(db_session, user.id)
+        batched = creds_map.get(user.id)
+        assert (batched is None) == (single is None)
+        if single is not None:
+            assert batched is not None
+            assert batched.requires_change == single.requires_change
+
+    engine = db_session.bind
+    assert engine is not None
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        assert identity_domain.roles_by_user(db_session, []) == {}
+        assert identity_domain.active_credentials_by_user(db_session, []) == {}
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+    assert statements == []

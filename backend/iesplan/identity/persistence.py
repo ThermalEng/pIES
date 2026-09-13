@@ -282,6 +282,34 @@ def get_active_credential(db: Session, user_id: int) -> CredentialRecord | None:
     return _row_to_credential(row) if row is not None else None
 
 
+def active_credentials_by_user(db: Session, user_ids: list[int]) -> dict[int, CredentialRecord]:
+    """多用户当前有效 password 凭证元数据（无哈希），单条 SQL。
+
+    取数口径与单发 get_active_credential 一致（password 类型、未撤销、
+    创建时间倒序取首条）；空输入直接返回空映射，不发查询。
+    """
+    if not user_ids:
+        return {}
+    rows = (
+        db.execute(
+            select(Credential)
+            .where(
+                Credential.user_id.in_(user_ids),
+                Credential.credential_type == "password",
+                Credential.revoked_at.is_(None),
+            )
+            .order_by(Credential.created_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    grouped: dict[int, CredentialRecord] = {}
+    for row in rows:
+        if row.user_id not in grouped:
+            grouped[row.user_id] = _row_to_credential(row)
+    return grouped
+
+
 def get_active_password_secret(db: Session, user_id: int) -> str | None:
     """用户当前有效密码哈希（仅供验算；永不装入 DTO、不落日志）。"""
     row = db.execute(
@@ -368,6 +396,25 @@ def user_roles(db: Session, user_id: int) -> list[str]:
         .order_by(Role.id)
     ).scalars()
     return list(rows)
+
+
+def roles_by_user(db: Session, user_ids: list[int]) -> dict[int, list[str]]:
+    """多用户当前有效角色 code（按角色 id 升序），单条 SQL。
+
+    空输入直接返回空映射，不发查询。
+    """
+    if not user_ids:
+        return {}
+    rows = db.execute(
+        select(UserRole.user_id, Role.code, Role.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(UserRole.user_id.in_(user_ids), UserRole.revoked_at.is_(None))
+        .order_by(Role.id)
+    ).all()
+    grouped: dict[int, list[str]] = {}
+    for user_id, code, _role_id in rows:
+        grouped.setdefault(user_id, []).append(code)
+    return grouped
 
 
 def grant_role(
