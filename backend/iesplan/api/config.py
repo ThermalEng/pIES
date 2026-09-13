@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application.configuration import config_cases
+from iesplan.application import configuration as config_cases
 from iesplan.core.errors import error_envelope
 from iesplan.db import get_db
 

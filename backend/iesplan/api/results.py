@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application.results import endpoint_cases as results_app
+from iesplan.application import results as results_app
 from iesplan.db import get_db
 
 router = APIRouter(

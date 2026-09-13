@@ -39,6 +39,9 @@ from iesplan.application.models.cases import (
     validate_model as validate_model_case,
 )
 from iesplan.model import ModelCandidateRejectedError
+from iesplan.application.models.selector import (
+    list_device_types,
+)
 from iesplan.application.models.service import (
     CARRIER_PORT_TYPE,
     CONN_CROSS_PROJECT,
@@ -93,6 +96,7 @@ __all__ = [
     "get_model_graph_case",
     "get_or_create_working_graph",
     "get_project_models",
+    "list_device_types",
     "project_model_to_dict",
     "save_project_model",
     "serialize_connection",

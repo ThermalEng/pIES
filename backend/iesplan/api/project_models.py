@@ -1,4 +1,4 @@
-"""项目模型 API(切片 dm2-A: 候选校验 / 临时数据文件 / 正式保存 / 清单 / 删除)。
+"""项目模型 API: 候选校验、正式保存、清单查询与删除。
 
 路由清单(prefix /api/projects/{project_id}/models):
 - POST   /api/projects/{project_id}/models/validate   候选模型门禁(不保存);
@@ -29,14 +29,12 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.api.limits import QuotaError  # 2.0: temp-files 已退役，仅保留 QuotaError 占位
-from iesplan.application.models.model_save import (
+from iesplan.application.models import (
     delete_project_model,
     get_project_models,
     save_project_model,
     validate_candidate,
 )
-from iesplan.core.errors import http_error
 from iesplan.db import get_db
 
 router = APIRouter(prefix="/api/projects/{project_id}/models", tags=["project-models"])

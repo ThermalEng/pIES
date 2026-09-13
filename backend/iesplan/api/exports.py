@@ -22,8 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application.packages import operations as packages_app
-from iesplan.application.packages import reports as reports_app
+from iesplan.application import packages as packages_app
 from iesplan.db import get_db
 
 router = APIRouter(prefix="/api/projects/{project_id}/exports", tags=["exports"])
@@ -55,7 +54,7 @@ def export_excel_endpoint(
     user: CurrentUser,
 ) -> dict:
     """生成固定模板 Excel 报告, 返回短期单对象下载授权 token(5 分钟)。"""
-    return reports_app.export_excel_report(
+    return packages_app.export_excel_report(
         db, user, project_id, payload.evidence_package_id, payload.assessment_id,
         lang=payload.lang,
     )
@@ -69,7 +68,7 @@ def download_excel_endpoint(
     token: str = Query(..., description="短期下载授权 token"),
 ) -> Response:
     """凭短期授权 token 下载 Excel 报告字节(校验签名/过期 + 项目与用户绑定)。"""
-    content, media_type, file_name = reports_app.load_export_download(
+    content, media_type, file_name = packages_app.load_export_download(
         db, user, project_id, token, "excel"
     )
     return Response(
@@ -98,7 +97,7 @@ def download_package_endpoint(
     token: str = Query(..., description="短期下载授权 token"),
 ) -> Response:
     """凭短期授权 token 下载项目包 zip(校验签名/过期 + 项目与用户绑定)。"""
-    content, media_type, file_name = reports_app.load_export_download(
+    content, media_type, file_name = packages_app.load_export_download(
         db, user, project_id, token, "package"
     )
     return Response(

@@ -749,3 +749,71 @@ def test_whitelists_have_no_stale_entries():
         f"稳定允许项已消失(须同步更新 ALLOWED_SHARED_PRIMITIVE_IMPORTS): "
         f"{sorted(ALLOWED_SHARED_PRIMITIVE_IMPORTS - detected)}"
     )
+
+
+def _is_application_impl_module_import(
+    target: str, imported_name: str, *, pkg_root: Path = _PKG_ROOT
+) -> bool:
+    """Return whether an imported name resolves to an application implementation module.
+
+    ``from iesplan.application.<family> import <name>`` has a three-segment
+    import target, so checking only the target depth misses module objects such
+    as ``maintenance`` or ``views``.  Resolve only names backed by a real
+    ``.py`` module or package directory; ordinary public functions with the
+    same import shape remain allowed.
+    """
+    parts = target.split(".")
+    if len(parts) != 3 or parts[:2] != ["iesplan", "application"]:
+        return False
+    family_dir = pkg_root / "application" / parts[2]
+    return (family_dir / f"{imported_name}.py").is_file() or (
+        family_dir / imported_name / "__init__.py"
+    ).is_file()
+
+
+def _find_application_impl_imports() -> set[tuple[str, str]]:
+    """扫描 api/worker 对 application 子包实现文件的直接导入。
+
+    只允许 ``iesplan.application`` 根与 ``iesplan.application.<族>``
+    用例族公开门面(深度 ≤ 3); ``iesplan.application.<族>.<实现文件>``
+    (深度 > 3)一律记录, 不设例外表。
+    """
+    found: set[tuple[str, str]] = set()
+    for scan_root in (_API_DIR, _WORKER_DIR):
+        for path, mod in _iter_modules(scan_root, _PKG_ROOT):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                targets: list[str] = []
+                if isinstance(node, ast.Import):
+                    targets.extend(a.name for a in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    # Keep the imported names so a three-segment family import
+                    # can distinguish a module object from a public symbol.
+                    if node.module.startswith("iesplan.application."):
+                        for alias in node.names:
+                            if _is_application_impl_module_import(node.module, alias.name):
+                                found.add((mod, f"{node.module}.{alias.name}"))
+                    targets.append(node.module)
+                for target in targets:
+                    parts = target.split(".")
+                    if len(parts) > 3 and parts[:2] == ["iesplan", "application"]:
+                        found.add((mod, target))
+    return found
+
+
+def test_api_worker_use_application_public_facades():
+    """架构门禁: api/worker 只经 application 用例族公开门面, 不穿透实现文件。
+
+    跨模块只调用 ``iesplan.application.<族>`` 门面; 实现文件
+    (auth_cases/views/maintenance/quotas/endpoint_cases/lifecycle/…)只由
+    各族 __init__ 选择性重导出。本门禁只查依赖形态(模块深度), 不锁定
+    函数名、行号, 不设白名单/债务表。
+    """
+    detected = _find_application_impl_imports()
+    assert not detected, f"api/worker 穿透 application 实现文件: {sorted(detected)}"
+
+
+def test_application_gate_detects_family_module_object_import():
+    """三段式族导入中的实现模块对象必须被门禁识别。"""
+    assert _is_application_impl_module_import("iesplan.application.tasks", "maintenance")
+    assert not _is_application_impl_module_import("iesplan.application.tasks", "enqueue_task")
