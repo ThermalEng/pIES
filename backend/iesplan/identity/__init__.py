@@ -71,6 +71,7 @@ from iesplan.identity.contracts import (
 #: 用户名/邮箱/DDL 正则的唯一权威在 contracts, DDL 经本包引用)。
 #: 首次属性访问时装载, 此后常驻 sys.modules。
 _PERSISTENCE_EXPORTS: frozenset[str] = frozenset({
+    "active_credentials_by_user",
     "add_credential",
     "bind_auth_subject",
     "bump_credential_version",
@@ -96,6 +97,7 @@ _PERSISTENCE_EXPORTS: frozenset[str] = frozenset({
     "record_auth_event",
     "revoke_credentials",
     "revoke_role",
+    "roles_by_user",
     "set_app_setting",
     "set_public_namespace",
     "set_session_status",
@@ -148,6 +150,7 @@ __all__ = [
     "UserRoleRecord",
     "WeakPasswordError",
     "WindowSessionRecord",
+    "active_credentials_by_user",
     "add_credential",
     "bind_auth_subject",
     "build_authorization_url",
@@ -189,6 +192,7 @@ __all__ = [
     "reset_login_rate_limit",
     "revoke_credentials",
     "revoke_role",
+    "roles_by_user",
     "set_app_setting",
     "set_public_namespace",
     "set_session_status",
