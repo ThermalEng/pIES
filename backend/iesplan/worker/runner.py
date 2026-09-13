@@ -5,9 +5,12 @@
   绑定数据集逐时数据 + 时间轴), 重试复用同一快照, 输入含义不变;
 - dispatch: 按 task.type 分派到 executors(calc/optimization/uncertainty 走
   快照输入; report 走证据包; io 任务走占位执行器);
-- run_task: 一次尝试的完整执行闭环 —— 装配输入 → 执行 → 提交(证据包/
-  四维评估/结果索引/业务结局)或失败/取消收拢, 全部经由 lease 的 fencing
-  协议(03 §4.4: 迟到的写回永远不入权威库)。
+- run_task: 一次尝试的完整执行闭环 —— 短会话装配输入 → 无事务执行 →
+  短事务提交(证据包/四维评估/结果索引/业务结局)或失败/取消收拢, 全部经由
+  lease 的 fencing 协议(03 §4.4: 迟到的写回永远不入权威库)。一次长时
+  attempt 不是一个事务: 输入加载完即关闭读取会话, 求解/分析/导出在无
+  数据库事务状态下运行, 领取/进度/续租/评估写入/提交/失败/取消各自使用
+  新的短会话与 application.worker 短事务用例。
 
 写入资格: 本模块不直接写任务状态/结果, 统一由 lease.submit_result /
 fail_attempt / cancel_attempt 带 token 完成(03 §4.4 硬约束)。
@@ -20,11 +23,12 @@ from __future__ import annotations
 
 import logging
 import traceback
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from iesplan.application import worker as worker_app
 from iesplan.core.diagnostics import (
@@ -254,11 +258,13 @@ def dispatch(ctx: RunContext) -> dict:
     """按任务类型分派到执行器(返回结果 payload, 含显式 outcome)。
 
     未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
-    未知任务类型抛 InvalidTaskTypeError。
+    未知任务类型抛 InvalidTaskTypeError。计算类输入在短读会话内装配,
+    会话关闭后才进入执行器(执行期无打开的数据库事务)。
     """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:
-        content, data, axis = load_inputs(ctx.db, ctx.snapshot)
+        with ctx.session_factory() as db:
+            content, data, axis = load_inputs(db, ctx.snapshot)
         ctx.axis_resolution = axis.resolution
         ctx.axis_n = int(axis.n)
         if task_type == "calc":
@@ -287,74 +293,124 @@ def dispatch(ctx: RunContext) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_factory(
+    db_or_factory: Session | Callable[[], Session],
+    session_factory: Callable[[], Session] | None,
+) -> Callable[[], Session]:
+    """解析会话工厂: 显式工厂优先; Session 则按其绑定引擎派生短会话工厂。
+
+    Worker 只持有 session factory, 不把跨阶段的长寿命 Session 传入执行闭环。
+    """
+    if session_factory is not None:
+        return session_factory
+    if isinstance(db_or_factory, Session):
+        bind = db_or_factory.get_bind()
+        return sessionmaker(bind=bind, autoflush=False, expire_on_commit=False)
+    if callable(db_or_factory):
+        return db_or_factory
+    raise ValueError(f"非法会话来源: {type(db_or_factory)!r}(需 Session 或会话工厂)")
+
+
 def run_task(
-    db: Session,
+    db_or_factory: Session | Callable[[], Session],
     claim: lease.Claim,
     *,
     worker_id: str = "",
     isolate: bool = True,
     stop_event: Any = None,
+    session_factory: Callable[[], Session] | None = None,
 ) -> str:
     """执行已领取的任务并落终态(带 fencing 提交/失败/取消收拢)。
 
     参数:
+        db_or_factory: 会话工厂(Worker 持有)或既有 Session(兼容旧调用;
+            仅用于派生同绑定引擎的短会话工厂, 本函数不在其上持有跨阶段
+            状态, 结束时使其缓存失效以便调用方读到最新终态)。
         claim: acquire_attempt 的领取结果(尝试 + 租约 + token)。
         isolate: 计算引擎是否运行在隔离子进程(生产 True; 测试可关闭)。
         stop_event: 取消/优雅退出事件(透传给执行器检查点与隔离子进程)。
+        session_factory: 显式会话工厂(优先于首参派生)。
     返回:
         终态状态: completed / failed / cancelled / lease_rejected。
-    事务边界: 本函数不调用 commit/rollback; 领取/提交/失败/取消各自的完整
-    事务由 application.worker 用例拥有并提交(领取已在执行前提交, 故执行期
-    回滚不会丢失租约; 失败收拢不再误判为 lease_rejected)。
+    事务边界: 本函数不调用 commit/rollback, 不持有跨阶段的 Session; 任务/
+    快照读完即关闭读取会话, 求解/分析/导出在无数据库事务状态下运行,
+    领取/进度/续租/评估写入/提交/失败/取消各自的新短会话短事务由
+    application.worker 用例拥有并提交(领取已在执行前提交, 故执行期回滚
+    不会丢失租约; 失败收拢不再误判为 lease_rejected)。
     """
-    task = worker_app.get_task_record(db, claim.task_id)
-    if task is None:
-        raise SnapshotInputError("任务不存在", params={"task_id": claim.task_id})
-    snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
-    ctx = RunContext(
-        db=db, task=task, claim=claim, worker_id=worker_id, isolate=isolate,
-        stop_event=stop_event, snapshot=snapshot,
-        progress_fn=lambda p, s, d: lease.report_progress(
-            db, claim.attempt_id, claim.lease_token, task.id, p, s, d,
-        ),
-    )
+    factory = _resolve_factory(db_or_factory, session_factory)
+    caller_session = db_or_factory if isinstance(db_or_factory, Session) else None
     try:
-        payload = dispatch(ctx)
-        # 完成路径要求显式合法 outcome: 缺字段默认成功已删除, 缺失/非法
-        # 即确定性失败, 绝不落成功(合法集合归 tasks 域所有)。
-        outcome = payload.get("outcome")
-        if outcome not in worker_app.BUSINESS_OUTCOMES:
-            raise EngineRunError(f"执行器未返回显式合法 outcome: {outcome!r}")
-        lease.submit_result(db, claim, payload=payload, outcome=outcome,
-                            actor_id=task.requested_by)
-        return "completed"
-    except TaskCancelled as exc:
-        return _handle_cancel(db, ctx, claim, task, exc.stage)
-    except (lease.LeaseRejectedError, SnapshotInputError, EngineRunError, AppError) as exc:
-        return _handle_failure(db, ctx, claim, exc)
-    except NotImplementedError as exc:
-        # 旧计算链已删除、0.8 未实现: 显式不可用, 保留原始原因收拢为失败
-        return _handle_failure(db, ctx, claim, ComputeUnavailableError(str(exc)))
-    except Exception as exc:  # noqa: BLE001 - 尝试边界: 任何未预期异常落确定性失败
-        logger.exception("任务执行内部错误: task=%s", task.id)
-        return _handle_failure(db, ctx, claim, RuntimeError(f"内部错误: {exc}"))
+        # 输入加载: 短读会话, 读完即关(task/snapshot 为脱离会话的值对象)
+        with factory() as db:
+            task = worker_app.get_task_record(db, claim.task_id)
+            snapshot = (
+                worker_app.get_snapshot_record(db, task.calc_snapshot_id)
+                if task is not None and task.calc_snapshot_id else None
+            )
+        if task is None:
+            raise SnapshotInputError("任务不存在", params={"task_id": claim.task_id})
+
+        def _report_progress(percent: float, stage: str, detail: dict | None) -> None:
+            # 每次进度各自新短会话短事务, 提交后即刻对其他会话可见
+            with factory() as progress_db:
+                lease.report_progress(
+                    progress_db, claim.attempt_id, claim.lease_token,
+                    task.id, percent, stage, detail,
+                )
+
+        ctx = RunContext(
+            task=task, claim=claim, session_factory=factory, worker_id=worker_id,
+            isolate=isolate, stop_event=stop_event, snapshot=snapshot,
+            progress_fn=_report_progress,
+        )
+        try:
+            payload = dispatch(ctx)
+            # 完成路径要求显式合法 outcome: 缺字段默认成功已删除, 缺失/非法
+            # 即确定性失败, 绝不落成功(合法集合归 tasks 域所有)。
+            outcome = payload.get("outcome")
+            if outcome not in worker_app.BUSINESS_OUTCOMES:
+                raise EngineRunError(f"执行器未返回显式合法 outcome: {outcome!r}")
+            with factory() as db:
+                lease.submit_result(db, claim, payload=payload, outcome=outcome,
+                                    actor_id=task.requested_by)
+            return "completed"
+        except TaskCancelled as exc:
+            return _handle_cancel(factory, ctx, claim, exc.stage)
+        except (lease.LeaseRejectedError, SnapshotInputError, EngineRunError, AppError) as exc:
+            return _handle_failure(factory, ctx, claim, exc)
+        except NotImplementedError as exc:
+            # 旧计算链已删除、0.8 未实现: 显式不可用, 保留原始原因收拢为失败
+            return _handle_failure(factory, ctx, claim, ComputeUnavailableError(str(exc)))
+        except Exception as exc:  # noqa: BLE001 - 尝试边界: 任何未预期异常落确定性失败
+            logger.exception("任务执行内部错误: task=%s", task.id)
+            return _handle_failure(factory, ctx, claim, RuntimeError(f"内部错误: {exc}"))
+    finally:
+        # 兼容旧调用: 调用方会话缓存可能因本函数内短会话提交而过期,
+        # 使其失效以便后续读取拿到最新终态(非 commit/rollback)。
+        if caller_session is not None:
+            caller_session.expire_all()
 
 
 def _handle_cancel(
-    db: Session, ctx: RunContext, claim: lease.Claim, task: worker_app.TaskRecord, stage: str,
+    factory: Callable[[], Session], ctx: RunContext, claim: lease.Claim, stage: str,
 ) -> str:
     """取消收拢(03 §6.1): 部分完成的批量子任务 → partial_batch。
 
-    收拢事务由 application.worker 用例提交, 本函数不调用 commit/rollback。
+    样本计数读与取消收拢写各自新短会话; 收拢事务由 application.worker
+    用例提交, 本函数不调用 commit/rollback。
     """
+    task = ctx.task
     logger.info("任务取消: task=%s stage=%s", task.id, stage)
     outcome = None
     if task.type == "uncertainty":
-        completed = worker_app.count_completed_samples(db, task.id)
+        with factory() as db:
+            completed = worker_app.count_completed_samples(db, task.id)
         if completed > 0:
             outcome = "partial_batch"
     try:
-        lease.cancel_attempt(db, claim, outcome=outcome)
+        with factory() as db:
+            lease.cancel_attempt(db, claim, outcome=outcome)
         return "cancelled"
     except AppError as exc:
         # 取消竞态: 任务已终态(以先落终态者为准, 03 §6.1 规则 4)
@@ -362,22 +418,26 @@ def _handle_cancel(
         return "cancelled"
 
 
-def _handle_failure(db: Session, ctx: RunContext, claim: lease.Claim, exc: Exception) -> str:
+def _handle_failure(
+    factory: Callable[[], Session], ctx: RunContext, claim: lease.Claim, exc: Exception,
+) -> str:
     """失败收拢(03 §6.3): 快照/输入问题 → blocking insufficient_evidence。
 
-    收拢事务由 application.worker 用例提交, 本函数不调用 commit/rollback。
-    返回失败终态; 真正的租约失效类错误不写终态(由调度器守护回收, 03 §4.3),
-    执行失败本身绝不误判为 lease_rejected。
+    每次收拢写各自新短会话; 收拢事务由 application.worker 用例提交, 本函数
+    不调用 commit/rollback。返回失败终态; 真正的租约失效类错误不写终态
+    (由调度器守护回收, 03 §4.3), 执行失败本身绝不误判为 lease_rejected。
+    已提交的进度/评估不受本次收拢回滚影响(各短事务互不包揽)。
     """
     if isinstance(exc, lease.LeaseRejectedError):
         logger.warning("租约失效, 停止一切写回: task=%s (%s)", claim.task_id, exc)
         return "lease_rejected"
     if isinstance(exc, SnapshotInputError):
         try:
-            lease.fail_attempt(
-                db, claim, code=exc.code, message=str(exc), level=exc.severity,
-                outcome="insufficient_evidence",
-            )
+            with factory() as db:
+                lease.fail_attempt(
+                    db, claim, code=exc.code, message=str(exc), level=exc.severity,
+                    outcome="insufficient_evidence",
+                )
         except lease.LeaseRejectedError:
             return "lease_rejected"
         return "failed"
@@ -387,10 +447,11 @@ def _handle_failure(db: Session, ctx: RunContext, claim: lease.Claim, exc: Excep
     # 包络; 原始原因保留在 message 中。
     code = exc.code if isinstance(exc, AppError) else TASK_SOLVE_FAILED
     try:
-        lease.fail_attempt(
-            db, claim, code=code, message=str(exc),
-            stack_trace=traceback.format_exc(limit=10),
-        )
+        with factory() as db:
+            lease.fail_attempt(
+                db, claim, code=code, message=str(exc),
+                stack_trace=traceback.format_exc(limit=10),
+            )
     except lease.LeaseRejectedError:
         return "lease_rejected"
     return "failed"

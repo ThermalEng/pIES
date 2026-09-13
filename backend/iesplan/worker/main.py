@@ -191,13 +191,18 @@ class Worker:
         logger.info("任务领取: task=%s attempt=%s worker=%s", task_id, claim.attempt_id, self.worker_id)
 
     def _execute_task(self, claim: lease.Claim) -> None:
-        """任务执行线程: runner.run_task 完成提交/失败/取消收拢(自带事务边界)。"""
+        """任务执行线程: runner.run_task 完成提交/失败/取消收拢(自带事务边界)。
+
+        Worker 只持有 session factory, 不持有跨阶段的长寿命 Session: 输入
+        加载读完即关, 求解/分析/导出在无数据库事务状态下运行, 领取/进度/
+        续租/评估写入/提交/失败/取消各自新短会话短事务(由 application.worker
+        用例提交, 本层不调用 commit/rollback)。
+        """
         try:
-            with self.session_factory() as db:
-                runner.run_task(
-                    db, claim, worker_id=self.worker_id, isolate=self.isolate,
-                    stop_event=self._cancel_event,
-                )
+            runner.run_task(
+                self.session_factory, claim, worker_id=self.worker_id,
+                isolate=self.isolate, stop_event=self._cancel_event,
+            )
         except Exception:  # noqa: BLE001 - 线程边界兜底, 防止静默死亡
             logger.exception("任务线程异常: task=%s", claim.task_id)
 

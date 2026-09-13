@@ -15,8 +15,8 @@
 (``iesplan.tasks`` 门面直接复用); ``Claim`` 提交结果类型仍由
 任务提交用例拥有, worker 层经本模块取用, 不再直连 ``services.*`` 与 ``models.*``。
 
-本模块不拥有事务(只经领域公开门面写入 + flush); 完整尝试事务的提交/
-回滚由同包 ``attempt_cases`` 用例拥有。
+本模块不拥有事务(只经领域公开门面写入 + flush); 各原子步骤短事务的提交/
+回滚由同包 ``attempt_cases`` 用例拥有(一次长时 attempt 不是一个事务)。
 
 依赖方向: worker → application → (storage/领域门面)。
 """
@@ -36,7 +36,6 @@ from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     SEVERITY_INFO,
     SEVERITY_WARNING,
-    TASK_DATA_HASH_MISMATCH,
     TASK_DATA_SNAPSHOT_MISSING,
     TASK_QUEUED,
 )
@@ -233,9 +232,9 @@ def fail_task(
         return task
     check_transition(task, "failed")
     if outcome is None:
-        # 快照/数据校验失败 → insufficient_evidence
+        # 快照缺失 → insufficient_evidence
         outcome = (
-            "insufficient_evidence" if code in (TASK_DATA_SNAPSHOT_MISSING, TASK_DATA_HASH_MISMATCH) else None
+            "insufficient_evidence" if code == TASK_DATA_SNAPSHOT_MISSING else None
         )
     attempt = _finish_attempt(db, task, status="failed", stop_reason=code or "error")
     task = tasks_domain.set_task_status(db, task.id, "failed", business_outcome=outcome)
