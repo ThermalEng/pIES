@@ -8,8 +8,9 @@ worker 层只经本包推进, 不再直连 ``services.*`` 与 ``models.*``;
 - lease_cases: 领取/进度/完成/失败/槽释放/队列视图/证据存取转调与
   租约 fencing/任务行/结果提交行读写(flush-only,不拥有事务)及
   LeaseRejectedError 错误语义;
-- attempt_cases: 完整尝试事务所有者(领取/续租/提交/失败/取消各自
-  同事务提交; worker 层不 commit/rollback);
+- attempt_cases: 各原子步骤短事务用例(领取/续租/进度/评估/提交/失败/
+  取消各自只提交自己的短事务, 长时 attempt 不是一个事务;
+  worker 层不 commit/rollback);
 - runner_cases: 快照输入读取转调与输入装配行读;
 - evidence_cases: 证据包查询/检查单步评估(公开能力评估追加 +
   results 域 outcome 规则, flush-only)/不确定性行写。
@@ -30,9 +31,11 @@ from iesplan.application.worker import attempt_cases, evidence_cases, lease_case
 from iesplan.application.worker.attempt_cases import (
     SubmitReceipt,
     acquire_attempt,
+    assess_report_evidence,
     cancel_attempt,
     fail_attempt,
     renew_attempt_lease,
+    report_attempt_progress,
     submit_attempt_result,
 )
 from iesplan.application.worker.evidence_cases import (
@@ -123,6 +126,7 @@ __all__ = [
     "UncertaintySnapshotRecord",
     "acquire_attempt",
     "acquire_task",
+    "assess_report_evidence",
     "assess_check_evidence",
     "attempt_cases",
     "attach_result_ref",
@@ -165,6 +169,7 @@ __all__ = [
     "release_slot",
     "renew_attempt_lease",
     "renew_lease_once",
+    "report_attempt_progress",
     "runner_cases",
     "slot_available",
     "store_result_blob",

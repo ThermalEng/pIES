@@ -49,12 +49,15 @@ class RunContext:
     """一次任务执行上下文(执行器/进度/取消检查共用)。
 
     task/snapshot 为 application.worker 用例返回的公开记录(计算类任务
-    快照由 runner 装配); 本模块不直接引用 ``iesplan.models.*``。
+    快照由 runner 装配, 均为脱离会话的不可变值对象); 本模块不直接引用
+    ``iesplan.models.*``。需要权威状态读写时, 经 ``session_factory`` 开
+    新短会话调用 application.worker 短事务用例, 长时运算期间不持有打开
+    的会话或数据库事务。
     """
 
-    db: Session
     task: worker_app.TaskRecord
     claim: Claim
+    session_factory: Callable[[], Session]
     worker_id: str = ""
     isolate: bool = True
     stop_event: threading.Event | None = None
@@ -135,14 +138,16 @@ def execute_check(ctx: RunContext) -> dict:
     raw_evidence_id = msg_params.get("evidence_package_id")
     raw_task_id = msg_params.get("task_id")
     evidence_id = int(raw_evidence_id) if raw_evidence_id is not None else None
-    if evidence_id is None and raw_task_id is not None:
-        package_row = worker_app.get_latest_evidence_for_task(ctx.db, int(raw_task_id))
-        evidence_id = package_row.id if package_row else None
-    if evidence_id is None:
-        package_row = worker_app.get_latest_evidence_for_project(
-            ctx.db, ctx.task.project_id
-        )
-        evidence_id = package_row.id if package_row else None
+    # 证据定位读: 短会话, 读完即关, 不跨越后续检查点与评估写入
+    with ctx.session_factory() as db:
+        if evidence_id is None and raw_task_id is not None:
+            package_row = worker_app.get_latest_evidence_for_task(db, int(raw_task_id))
+            evidence_id = package_row.id if package_row else None
+        if evidence_id is None:
+            package_row = worker_app.get_latest_evidence_for_project(
+                db, ctx.task.project_id
+            )
+            evidence_id = package_row.id if package_row else None
 
     ctx.progress(20, "load_evidence", {"evidence_package_id": evidence_id})
     ctx.checkpoint("load_evidence")
@@ -153,7 +158,11 @@ def execute_check(ctx: RunContext) -> dict:
             "outcome": "insufficient_evidence",
             "summary": {"assessed": False, "reason": "项目无证据包可检查"},
         }
-    result = worker_app.assess_check_evidence(ctx.db, evidence_package_id=evidence_id)
+    # 单步评估写入: 独立短事务(内含 fencing 校验), 提交后即关
+    with ctx.session_factory() as db:
+        result = worker_app.assess_report_evidence(
+            db, ctx.claim, evidence_package_id=evidence_id
+        )
     assessment = result.assessment
     ctx.progress(100, "done", {"assessment_id": assessment.id})
     return {

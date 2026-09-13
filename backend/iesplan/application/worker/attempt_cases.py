@@ -1,12 +1,19 @@
-"""Worker 尝试级事务用例(application/worker.attempt_cases): 完整尝试事务所有者。
+"""Worker 尝试级短事务用例(application/worker.attempt_cases)。
 
-纠偏 Wave 3: ``iesplan.worker`` 层不调用 commit/rollback; 领取/续租/提交/
-失败/取消各自的完整事务由本模块用例拥有:
+纠偏 Wave 3 + 会话生命周期补正: ``iesplan.worker`` 层不调用 commit/rollback;
+本模块每个用例只拥有自己那一个原子步骤的短事务(提交自己的写入, 不包揽
+其他步骤)。一次原子状态变更可以是一个事务, 但一次长时 attempt 不是一个
+事务: 长时 attempt 由多个独立短事务与其中间的无事务执行阶段组成, 数据库
+事务不得跨越求解/分析/导出过程:
 
 - acquire_attempt: 占槽 + 建尝试 + 建租约(fencing token) + 任务 running,
   同事务提交 —— 领取先形成正确可见的租约/尝试状态, 后续执行回滚不再
   丢失租约(旧链路回滚后租约丢失曾被误判为 lease_rejected);
 - renew_attempt_lease: 续租行级更新, 独立事务(与执行路径隔离);
+- report_attempt_progress: 带 fencing 的进度回写, 独立短事务提交, 提交后
+  即刻对其他会话可见, 不随终态事务一并提交;
+- assess_report_evidence: report 单步评估写入, 独立短事务提交(内含 fencing
+  校验; 迟到评估整笔回滚并抛 LeaseRejectedError);
 - submit_attempt_result: 结果提交全序列(证据包 + 四维评估 + 结果索引 +
   尝试成功 + 任务完成), 同事务提交; fencing 失败整笔回滚并抛
   LeaseRejectedError(迟到结果永远不入权威库);
@@ -15,8 +22,8 @@
 - cancel_attempt: 取消收拢(尝试 stopped + 租约 revoked + 槽释放 +
   任务 cancelled), 同事务提交。
 
-行级读写全部经 lease_cases(flush-only 步骤)与 tasks/results/dataset/
-project/storage 领域公开门面, 不声明裸表, 不导入 ``iesplan.services``
+行级读写全部经 lease_cases(flush-only 步骤)/evidence_cases 与 tasks/results/
+dataset/project/storage 领域公开门面, 不声明裸表, 不导入 ``iesplan.services``
 与 ``iesplan.models``。
 
 依赖方向: worker → application → (storage/领域门面)。
@@ -33,6 +40,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from iesplan.application.tasks.submissions import Claim
+from iesplan.application.worker.evidence_cases import CheckAssessment, assess_check_evidence
 from iesplan.application.worker.lease_cases import (
     LeaseRejectedError,
     acquire_task,
@@ -48,6 +56,7 @@ from iesplan.application.worker.lease_cases import (
     get_snapshot_record,
     get_task_record,
     insert_result_index,
+    record_task_progress,
     renew_lease_once,
     store_result_blob,
     verify_lease,
@@ -57,12 +66,15 @@ from iesplan.core.diagnostics import SEVERITY_ERROR, SEVERITY_INFO, TASK_QUEUED
 from iesplan.tasks import LEASE_TTL_SECONDS, TaskRecord, TaskStateError
 
 __all__ = [
+    "CheckAssessment",
     "LeaseRejectedError",
     "SubmitReceipt",
     "acquire_attempt",
+    "assess_report_evidence",
     "cancel_attempt",
     "fail_attempt",
     "renew_attempt_lease",
+    "report_attempt_progress",
     "submit_attempt_result",
 ]
 
@@ -126,6 +138,67 @@ def renew_attempt_lease(
     db.rollback()
     logger.warning("续租失败(租约已失效): attempt=%s token=%s", attempt_id, token)
     return False
+
+
+# ---------------------------------------------------------------------------
+# 进度回写(独立短事务, 提交后即刻对其他会话可见)
+# ---------------------------------------------------------------------------
+
+
+def report_attempt_progress(
+    db: Session,
+    attempt_id: int,
+    token: UUID | str,
+    task_id: int,
+    percent: float,
+    stage: str,
+    detail: dict | None = None,
+) -> bool:
+    """带 fencing 的进度回写(PG UPSERT + 队列秒级进度, 03 §7.1)。
+
+    只提交本步骤自己的写入: 租约有效 → 记录进度并提交, 返回 True;
+    租约无效(0 行) → 回滚并返回 False, 调用方停止写回。失败/取消收拢
+    不得把已提交的进度意外回滚, 未提交的进度也不得随终态一并提交。
+    """
+    try:
+        if verify_lease(db, attempt_id, token) is None:
+            db.rollback()
+            return False
+        record_task_progress(
+            db, task_id, stage, percent, detail, attempt_id=attempt_id
+        )
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+
+
+# ---------------------------------------------------------------------------
+# report 单步评估写入(独立短事务, 内含 fencing 校验)
+# ---------------------------------------------------------------------------
+
+
+def assess_report_evidence(
+    db: Session, claim: Claim, *, evidence_package_id: int
+) -> CheckAssessment:
+    """执行一次检查评估并提交(公开能力评估追加 + 索引指针挂接 + 显式 outcome)。
+
+    只提交本步骤自己的写入: 先 fencing 校验(租约无效 → 回滚并抛
+    LeaseRejectedError, 迟到评估不入权威库), 再评估写入并提交。
+    """
+    try:
+        if verify_lease(db, claim.attempt_id, claim.lease_token) is None:
+            raise LeaseRejectedError(
+                "租约失效, 评估写入被拒绝",
+                params={"task_id": claim.task_id, "attempt_id": claim.attempt_id},
+            )
+        result = assess_check_evidence(db, evidence_package_id=evidence_package_id)
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +316,7 @@ def fail_attempt(
 ) -> TaskRecord:
     """确定性失败收拢(带 fencing): 尝试 failed + 租约 revoked + 槽释放 + 任务 failed。
 
-    03 §6.3: 快照/数据校验失败(TASK-DATA-001/002)自动映射 insufficient_evidence,
+    03 §6.3: 快照缺失(TASK-DATA-001)自动映射 insufficient_evidence,
     确定性失败不自动重试。租约已失效 → 整笔回滚并抛 LeaseRejectedError。
     """
     try:

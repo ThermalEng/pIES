@@ -4,7 +4,7 @@
 为可重建视图。本模块是 Worker 端的唯一租约入口, 自身为薄门面:
 
 - 领取/续租/进度/提交/失败/取消全部转调 application.worker 事务用例;
-- 完整尝试事务(提交/回滚)由 application.worker 用例拥有(03 §4.1);
+- 每个原子步骤的短事务(提交/回滚)由 application.worker 用例拥有(03 §4.1);
 - 本模块不调用 commit/rollback, 不接收或操作领域记录, 不直连
   ``iesplan.services`` / ``iesplan.models`` / 裸 SQL。
 
@@ -96,12 +96,13 @@ def report_progress(
 ) -> bool:
     """带 fencing 的进度回写(PG UPSERT + Redis 秒级进度, 03 §7.1)。
 
-    租约无效(0 行)返回 False, 调用方停止写回。写入随尝试终态事务一并提交。
+    本函数只转调 application.worker 短事务用例: 租约有效则记录进度并提交,
+    提交后即刻对其他会话可见; 租约无效(0 行)返回 False, 调用方停止写回。
+    本模块不调用 commit/rollback。
     """
-    if worker_app.verify_lease(db, attempt_id, token) is None:
-        return False
-    worker_app.record_task_progress(db, task_id, stage, percent, detail, attempt_id=attempt_id)
-    return True
+    return worker_app.report_attempt_progress(
+        db, attempt_id, token, task_id, percent, stage, detail
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +140,8 @@ def fail_attempt(
 ) -> worker_app.TaskRecord:
     """确定性失败收拢(带 fencing): 尝试 failed + 租约 revoked + 槽释放 + 任务 failed。
 
-    收拢全序列由 application.worker 用例同事务提交。03 §6.3: 快照/数据校验
-    失败(TASK-DATA-001/002)自动映射 insufficient_evidence, 确定性失败不自动重试。
+    收拢全序列由 application.worker 用例同事务提交。03 §6.3: 快照缺失
+    (TASK-DATA-001)自动映射 insufficient_evidence, 确定性失败不自动重试。
     """
     return worker_app.fail_attempt(
         db, claim, code=code, message=message, stack_trace=stack_trace,
