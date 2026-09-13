@@ -6,8 +6,9 @@
 - 未实现的 I/O 任务(dataset_build/export/import)不得返回成功 outcome;
   占位成功与缺字段默认成功必须失败闭环, 且不得借用求解失败码描述 I/O 不可用;
 - 完成路径必须要求显式、合法的业务 outcome, 缺字段不得默认成功;
-- report 检查由 application.worker 用例完成: 证据解释/评分与业务 outcome
-  归 results 公开能力所有, Worker 只传递不可变输入并消费显式结果契约。
+- report 检查由 Worker 编排并经 application.worker 分阶段命令完成:
+  证据解释/评分与业务 outcome 归 results 公开能力所有, Worker 只传递
+  不可变输入并消费显式结果契约, 进度/取消回调不出 Worker 层。
 
 本文件分两组:
 
@@ -245,19 +246,24 @@ class TestCompletionRequiresExplicitOutcome:
 
 
 # ---------------------------------------------------------------------------
-# 契约组三: report 检查由 application.worker 用例完成
+# 契约组三: report 检查由 Worker 编排、分阶段命令完成
 # ---------------------------------------------------------------------------
 
 
 def _divergent_evidence_payload() -> dict[str, Any]:
-    """分歧证据: 载荷自带全通过评估, 但内容空无可评估依据。
+    """分歧证据: 载荷自带全通过评估, 但内容文档残差失败。
 
     Worker 本地解释(透传载荷评估)与 results 公开能力(评估内容文档)在此分歧:
-    前者判全通过, 后者判证据不足。纠偏后 Worker 必须以后者为准。
+    前者判全通过, 后者物理维判失败。纠偏后 Worker 必须以后者为准。
     """
     return {
         "result_kind": "external_check",
-        "content": {},
+        "content": {
+            "residuals": {
+                "all_passed": False,
+                "items": [{"name": "energy_balance", "passed": False}],
+            },
+        },
         "assessment": {
             "dimension_physical": "pass",
             "dimension_optimality": "pass",
