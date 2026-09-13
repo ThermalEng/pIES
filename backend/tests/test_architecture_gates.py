@@ -15,8 +15,9 @@ docs/development/development-workflow.md「架构门禁」): 禁止 core 依赖�
 
   4. test_api_no_transaction_commit     — api 不允许调用 .commit()/.rollback(),
      事务只由 application 提交/回滚;
-  5. test_api_no_multi_service_fanout   — 每个 api 模块至多依赖一个
-     iesplan.services.* 子模块(目标: 单个 application 用例);
+  5. test_api_no_multi_service_fanout   — 已删除(该门禁只扫描已删除
+     services 包的导入扇出, 无法检出同一端点对多个 application 用例的调用;
+     指南 F 否决此类形态, 不再保留);
   6. test_worker_no_direct_domain_services — worker 不允许直接 import
      iesplan.services.*(业务快照读取与编排归 application.worker);
   7. test_analysis_no_direct_engine_or_services — analysis 不允许直接 import
@@ -339,15 +340,6 @@ WHITELIST_API_COMMIT: set[tuple[str, int]] = set()
 # (Wave 5 集成: admin 运维解锁提交已上收至 application 用例, 白名单清空。)
 
 # ---------------------------------------------------------------------------
-# 门禁 5 白名单: api 跨 service 编排 (值为现状多 service 依赖的模块路径)
-# ---------------------------------------------------------------------------
-# 基线核查(2026-09-11, 切片 1): 以下 api 模块同时依赖 2~3 个 services 子模块,
-# 即在路由层组织跨 service 业务流程。目标是每个端点只调用一个 application 用例
-# (model_templates/project_models 已示范该方向)。迁移一个模块就从本集合移除一项。
-WHITELIST_API_FANOUT: set[str] = set()
-# (Wave 4 集成: auth 改经 application.identity 单门面, 白名单清空。)
-
-# ---------------------------------------------------------------------------
 # 门禁 6 白名单: worker → services 直接依赖 (键 = (worker 模块, services 目标))
 # ---------------------------------------------------------------------------
 # 基线核查(2026-09-11, 切片 1): Worker 直接读取业务 service, 任务执行边界锁死
@@ -421,27 +413,6 @@ def _find_api_commit_calls(scan_root: Path = _API_DIR, pkg_root: Path = _PKG_ROO
             ):
                 found.append((mod, node.lineno))
     return found
-
-
-def _find_api_service_fanout(scan_root: Path = _API_DIR, pkg_root: Path = _PKG_ROOT) -> dict[str, set[str]]:
-    """门禁 5: 统计每个 api 模块依赖的 iesplan.services.* 子模块集合。"""
-    fanout: dict[str, set[str]] = {}
-    for path, mod in _iter_modules(scan_root, pkg_root):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        leaves: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                if node.module == "iesplan.services":
-                    leaves.update(f"services.{a.name}" for a in node.names if a.name != "*")
-                elif node.module.startswith("iesplan.services."):
-                    leaves.add(node.module[len("iesplan.") :])
-            elif isinstance(node, ast.Import):
-                for a in node.names:
-                    if a.name.startswith("iesplan.services."):
-                        leaves.add(a.name[len("iesplan.") :])
-        if leaves:
-            fanout[mod] = leaves
-    return fanout
 
 
 def _find_worker_service_imports(
@@ -523,15 +494,6 @@ def test_api_no_transaction_commit():
     detected = _find_api_commit_calls()
     new = [(m, line) for (m, line) in detected if (m, line) not in WHITELIST_API_COMMIT]
     assert not new, f"API 层新增事务提交/回滚(需迁移到 application 用例): {new}"
-
-
-def test_api_no_multi_service_fanout():
-    """架构门禁: 每个 API 模块至多依赖一个 services 子模块。现状多依赖在白名单。"""
-    fanout = _find_api_service_fanout()
-    new = {
-        m: sorted(leaves) for m, leaves in fanout.items() if len(leaves) > 1 and m not in WHITELIST_API_FANOUT
-    }
-    assert not new, f"API 模块新增跨 service 编排(需收敛为单个 application 用例): {new}"
 
 
 def test_worker_no_direct_domain_services():
@@ -983,7 +945,7 @@ def test_whitelists_have_no_stale_entries():
     """架构门禁 17: 旧式白名单条目必须仍被对应扫描器命中(过期即失败)。
 
     精确相等门禁(8/9/10/11/12/13/14/15/16)已自带过期检查; 本门禁覆盖仍用
-    “只查新增”形态的门禁 1/2/3/4/5/6/7, 防止全绿掩盖残留。
+    “只查新增”形态的门禁 1/2/3/4/6/7(门禁 5 已删除), 防止全绿掩盖残留。
     """
     stale: list[str] = []
     for key in WHITELIST_CORE_BUSINESS_DEPS:
@@ -998,10 +960,6 @@ def test_whitelists_have_no_stale_entries():
     for key in WHITELIST_API_COMMIT:
         if key not in {tuple(item) for item in _find_api_commit_calls()}:
             stale.append(f"api-commit: {key!r}")
-    fanout = _find_api_service_fanout()
-    for key in WHITELIST_API_FANOUT:
-        if len(fanout.get(key, set())) < 2:
-            stale.append(f"api-fanout: {key!r}")
     for key in WHITELIST_WORKER_SERVICES:
         if key not in set(_find_worker_service_imports()):
             stale.append(f"worker-services: {key!r}")
@@ -1011,119 +969,13 @@ def test_whitelists_have_no_stale_entries():
     assert not stale, f"白名单存在过期条目(检测已无命中, 须删除): {stale}"
 
 
-# ---------------------------------------------------------------------------
-# R2 Wave 4: 职责回流门禁(指南 F; 构造反例可检出, 见各测试说明)
-# ---------------------------------------------------------------------------
+"""R2 Wave 4 职责回流门禁(18/19/20)与门禁 5 已按指南 F/H 删除, 不再保留:
 
-#: 门禁 18: core 不得拥有的领域业务规则名(用户名/邮箱/幂等键格式)。
-#: 唯一权威归 identity/tasks contracts; core 仅保留无领域语义的共同语言。
-_DOMAIN_RULE_NAMES_IN_CORE: frozenset[str] = frozenset({
-    "USERNAME_RE",
-    "EMAIL_RE",
-    "IDEMPOTENCY_KEY_RE",
-})
-
-
-def _find_core_domain_rules() -> set[tuple[str, str]]:
-    """门禁 18 扫描: core 树下定义/导入领域业务规则名。返回 (模块, 规则名)。"""
-    found: set[tuple[str, str]] = set()
-    for path, mod in _iter_modules(_CORE_DIR, _PKG_ROOT):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in tree.body:
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                for target in targets:
-                    if isinstance(target, ast.Name) and target.id in _DOMAIN_RULE_NAMES_IN_CORE:
-                        found.add((mod, target.id))
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                if node.name in _DOMAIN_RULE_NAMES_IN_CORE:
-                    found.add((mod, node.name))
-            elif isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    name = alias.asname or alias.name
-                    if name in _DOMAIN_RULE_NAMES_IN_CORE:
-                        found.add((mod, name))
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    name = (alias.asname or alias.name).split(".")[-1]
-                    if name in _DOMAIN_RULE_NAMES_IN_CORE:
-                        found.add((mod, name))
-    return found
-
-
-def test_core_no_domain_business_rules():
-    """架构门禁 18: core 不得拥有 identity/tasks 业务规则(指南 D/F)。
-
-    反例验证: 在 core 下任一模块顶层补一句 ``USERNAME_RE = "..."``,
-    本门禁即失败(已用临时反例验证后移除, 不留残留)。
-    """
-    assert _find_core_domain_rules() == set(), (
-        f"core 收容领域业务规则(须回归 identity/tasks contracts): "
-        f"{sorted(_find_core_domain_rules())}"
-    )
-
-
-#: 门禁 19: 项目组合授权的生产实现名(唯一实现, 不得复制)。
-_AUTH_IMPL_NAMES: frozenset[str] = frozenset({"ensure_access", "ensure_project_access"})
-
-
-def _find_auth_impls() -> set[str]:
-    """门禁 19 扫描: application/api/worker 下组合授权生产实现所在模块。"""
-    found: set[str] = set()
-    for scan_root in (_APPLICATION_DIR, _API_DIR, _WORKER_DIR):
-        for path, mod in _iter_modules(scan_root, _PKG_ROOT):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if node.name in _AUTH_IMPL_NAMES:
-                        found.add(mod)
-    return found
-
-
-def test_single_authorization_impl():
-    """架构门禁 19: 组合授权只有一个生产实现(指南 B/F)。
-
-    反例验证: 在 application 下任一模块补一句 ``def ensure_project_access(...)``,
-    本门禁即失败(已用临时反例验证后移除, 不留残留)。
-    """
-    assert _find_auth_impls() == {"iesplan.application.projects.authorization"}, (
-        f"组合授权实现漂移(须唯一归 application.projects.authorization): "
-        f"{sorted(_find_auth_impls())}"
-    )
-
-
-#: 门禁 20: 未实现 I/O 执行器(必须抛执行不可用错误, 不得返回成功载荷)。
-_UNIMPLEMENTED_EXECUTORS: frozenset[str] = frozenset({
-    "execute_dataset_process",
-    "execute_export",
-    "execute_package_import",
-})
-
-
-def _find_unimplemented_executor_shapes() -> set[tuple[str, str, bool, bool]]:
-    """门禁 20 扫描: 未实现执行器形态。返回 (模块, 函数, 有抛错, 有返回)。"""
-    found: set[tuple[str, str, bool, bool]] = set()
-    for path, mod in _iter_modules(_WORKER_DIR, _PKG_ROOT):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.name in _UNIMPLEMENTED_EXECUTORS:
-                    raises = any(isinstance(child, ast.Raise) for child in ast.walk(node))
-                    returns = any(isinstance(child, ast.Return) for child in ast.walk(node))
-                    found.add((mod, node.name, raises, returns))
-    return found
-
-
-def test_unimplemented_executors_never_succeed():
-    """架构门禁 20: 未实现执行器必须抛错、不得返回成功载荷(指南 C/F)。
-
-    行为闭环另由 tests/test_worker_outcome.py 契约组一覆盖; 本门禁锁定
-    结构形态(有 Raise、无 Return)。反例验证: 把任一函数体改为返回占位
-    载荷, 本门禁即失败(已用临时反例验证后移除, 不留残留)。
-    """
-    shapes = _find_unimplemented_executor_shapes()
-    assert {name for _, name, _, _ in shapes} == set(_UNIMPLEMENTED_EXECUTORS), (
-        f"未实现执行器缺失: {sorted(set(_UNIMPLEMENTED_EXECUTORS) - {name for _, name, _, _ in shapes})}"
-    )
-    bad = sorted(f"{mod}.{name}" for mod, name, raises, returns in shapes if not raises or returns)
-    assert not bad, f"未实现执行器须抛错且无返回(不得伪造成功): {bad}"
+- 门禁 18/19 按 USERNAME_RE/ensure_access 等私有符号名锁定所在模块,
+  改名即失效, 也无法检出换名复制的规则;
+- 门禁 20 要求三个未实现执行器函数永久存在、有 raise 且无 return,
+  阻止未来正式实现;
+- 门禁 5 只扫描已删 services 导入的 API fanout, 无法检出同一端点对多个
+  application 用例的调用。
+语义行为由行为测试证明; 静态门禁只保留稳定的依赖方向和通用禁止形态。
+"""

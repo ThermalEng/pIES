@@ -15,8 +15,6 @@ U07 项目校验流程（旧 ``iesplan.services.validation`` 已删除；计算�
 - 模型能力经 application.models、计算配置能力经 application.configuration
   用例改接；其余 project / dataset / audit 域调用经域公开门面。
 
-遗留 services 调用：无（``LEGACY_SERVICE_CALLS`` 为空）。
-
 事务：写用例（``mark_baseline_confirmed`` / ``store_validation_report``）
 顶层函数拥有提交/回滚；``validate_project`` 与读取函数为只读，不提交事务。
 
@@ -58,10 +56,6 @@ from iesplan.application.configuration import (
     validate_config as _app_validate_config,
 )
 from iesplan.storage import add_ref, find_refs_by_owner, get_object, put_object
-
-#: 遗留 services 调用点：无（Wave 5 集成：配置能力经 application.configuration
-#: 用例改接，模型能力已于 Wave 2 改接 application.models）。
-LEGACY_SERVICE_CALLS: tuple[str, ...] = ()
 
 # ---------------------------------------------------------------------------
 # 诊断码(本单元新增, 导入时登记; 04 目录未登记, 见 NEW_DIAG_CODES 扩展模式)
@@ -740,7 +734,6 @@ def get_latest_validation_report(db: Session, project_id: int) -> dict | None:
 
 __all__ = [
     "BASELINE_ACTION",
-    "LEGACY_SERVICE_CALLS",
     "ValidationReport",
     "get_latest_validation_report",
     "mark_baseline_confirmed",

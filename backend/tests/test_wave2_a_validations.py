@@ -110,8 +110,3 @@ def test_baseline_confirm_flow_and_commit(engine: Engine, db_session: Session) -
         assert latest is not None
         assert latest["project_id"] == str(project.id)
         assert latest["status"] == after.status
-
-
-def test_no_legacy_service_calls() -> None:
-    """遗留调用显式声明（Wave 5 集成：配置能力已改接 application.configuration，元组清空）。"""
-    assert set(validations_uc.LEGACY_SERVICE_CALLS) == set()

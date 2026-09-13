@@ -15,7 +15,7 @@
 
 ## Unreleased
 
-### 2026-09-13 — 后端依赖架构第二次验收纠偏（实现完成，等待独立验收）
+### 2026-09-13 — 后端依赖架构第二次验收纠偏（再次修正完成，等待 Codex 独立验收）
 
 **完成时间**：2026-09-13（实现合并到 `master`，未 push；独立验收未执行，不得视为最终完成）
 
@@ -31,9 +31,10 @@
   runner 与完成路径删除默认成功；I/O 占位成功删除。
 - Wave 3：用户名/邮箱规则归 `identity.contracts`，幂等键规则归 `tasks.contracts`，删除 `core/patterns`；
   证据结构校验与四维摘要归 `results` 公开能力；结果采用补丁只给证据原生契约，不经 engines 静态映射。
-- Wave 4：新增职责回流门禁 18/19/20（core 业务规则、单一授权实现、未实现执行器；构造反例已验证可检出）；
-  测试与手册去“旧服务/迁移中”表述；重生成 `docs/development/backend-decoupling-duty-inventory.md`。
-- 静态架构门禁 23 项通过，临时债务集合为空。
+- Wave 4：删除指南否决形态的职责回流门禁 18/19/20（符号名锁定、未实现执行器形态锁）与失效门禁 5
+  （只扫描已删 services 导入的 API fanout，未新增替代计数门禁）；删除 `LEGACY_SERVICE_CALLS` 空哨兵
+  及其空集合测试；删除 `docs/development/backend-decoupling-duty-inventory.md`。
+- 静态架构门禁 19 项通过，临时债务集合为空。
 
 #### 尚未确认（待独立验收）
 

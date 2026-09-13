@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from iesplan.application.validations.precheck import (
     BASELINE_ACTION,
-    LEGACY_SERVICE_CALLS,
     ValidationReport,
     get_latest_validation_report,
     mark_baseline_confirmed,
@@ -27,7 +26,6 @@ from iesplan.application.validations.cases import (
 
 __all__ = [
     "BASELINE_ACTION",
-    "LEGACY_SERVICE_CALLS",
     "ValidationReport",
     "confirm_baseline_case",
     "get_latest_validation_report",
