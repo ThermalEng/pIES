@@ -15,13 +15,25 @@ from iesplan.application.validations.precheck import (
     store_validation_report,
     validate_project,
 )
+from iesplan.application.validations.cases import (
+    confirm_baseline as confirm_baseline_case,
+)
+from iesplan.application.validations.cases import (
+    get_validation_report as get_validation_report_case,
+)
+from iesplan.application.validations.cases import (
+    run_validation as run_validation_case,
+)
 
 __all__ = [
     "BASELINE_ACTION",
     "LEGACY_SERVICE_CALLS",
     "ValidationReport",
+    "confirm_baseline_case",
     "get_latest_validation_report",
+    "get_validation_report_case",
     "mark_baseline_confirmed",
+    "run_validation_case",
     "store_validation_report",
     "validate_project",
 ]

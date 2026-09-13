@@ -14,6 +14,30 @@ from iesplan.application.models.model_save import (
     save_project_model,
     validate_candidate,
 )
+from iesplan.application.models.cases import (
+    create_connection as create_connection_case,
+)
+from iesplan.application.models.cases import (
+    create_device as create_device_case,
+)
+from iesplan.application.models.cases import (
+    delete_connection as delete_connection_case,
+)
+from iesplan.application.models.cases import (
+    delete_device as delete_device_case,
+)
+from iesplan.application.models.cases import (
+    get_model_graph as get_model_graph_case,
+)
+from iesplan.application.models.cases import (
+    update_connection as update_connection_case,
+)
+from iesplan.application.models.cases import (
+    update_device as update_device_case,
+)
+from iesplan.application.models.cases import (
+    validate_model as validate_model_case,
+)
 from iesplan.model import ModelCandidateRejectedError
 from iesplan.application.models.service import (
     CARRIER_PORT_TYPE,
@@ -56,12 +80,17 @@ __all__ = [
     "ModelValidationError",
     "NotFoundError",
     "connect",
+    "create_connection_case",
     "create_device",
+    "create_device_case",
+    "delete_connection_case",
     "delete_device",
+    "delete_device_case",
     "delete_project_model",
     "disconnect",
     "get_device_ports",
     "get_graph",
+    "get_model_graph_case",
     "get_or_create_working_graph",
     "get_project_models",
     "project_model_to_dict",
@@ -71,9 +100,12 @@ __all__ = [
     "serialize_port",
     "sync_draft_content",
     "update_connection",
+    "update_connection_case",
     "update_device",
+    "update_device_case",
     "validate_candidate",
     "validate_device_params",
+    "validate_model_case",
     "validate_project_model",
     "validate_topology",
 ]
