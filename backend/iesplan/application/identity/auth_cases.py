@@ -29,6 +29,7 @@ from iesplan import project as project_domain
 from iesplan.application.identity.service import (
     as_utc,
     authenticate,
+    confirm_takeover,
     create_user,
     create_window_session,
     deactivate_user,
@@ -48,6 +49,7 @@ from iesplan.application.identity.service import (
     touch_session,
     utcnow,
 )
+from iesplan.application.identity.views import UserView, user_view, user_views
 from iesplan.core.errors import NotFoundError
 from iesplan.identity import ExternalAuthError
 from iesplan.identity.contracts import (
@@ -69,10 +71,12 @@ __all__ = [
     "UserWithProjectCount",
     "begin_oidc_login",
     "complete_oidc_login",
+    "confirm_takeover_case",
     "deactivate_user_case",
     "delete_user_case",
     "get_public_auth_settings",
     "get_security_settings",
+    "get_user_view_case",
     "is_oidc_enabled",
     "list_users_case",
     "login_case",
@@ -258,13 +262,14 @@ def login_case(
     device: str | None = None,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> tuple[UserRecord, str, bool]:
+) -> tuple[UserView, str, bool]:
     """登录完整用例: 密码校验 + 登录限速 → 创建单活动窗口会话。
 
     若该账号已有活动窗口, 旧窗口被撤销、新会话以 takeover_pending 创建
     (确认接管前无业务权限), displaced=True(前端提示确认接管)。
     失败按 error_code 映射为 LockedError/LoginFailedError(语义与原路由一致)。
-    返回 (user, token, displaced); Cookie 写入与响应组装归 API。
+    返回 (view, token, displaced), view 为身份展示视图(用例内一次组装,
+    API 只做纯 DTO 映射); Cookie 写入与响应组装归 API。
     """
     user, error_code = authenticate(
         db, username, password, ip=ip, user_agent=user_agent, device=device
@@ -277,7 +282,7 @@ def login_case(
     _session, token, displaced = create_window_session(
         db, user, device, ip=ip, user_agent=user_agent
     )
-    return user, token, displaced
+    return user_view(db, user), token, displaced
 
 
 def register_case(
@@ -289,14 +294,15 @@ def register_case(
     email: str | None = None,
     ip: str | None = None,
     user_agent: str | None = None,
-) -> UserRecord:
+) -> UserView:
     """自助注册完整用例: 注册开关 → 仅创建 engineer 角色。
 
     开关关闭时抛 RegistrationDisabledError(语义与原路由一致)。
+    返回身份展示视图(用例内一次组装, API 只做纯 DTO 映射)。
     """
     if not registration_enabled(db):
         raise RegistrationDisabledError()
-    return create_user(
+    user = create_user(
         db,
         username,
         password,
@@ -307,25 +313,53 @@ def register_case(
         ip=ip,
         user_agent=user_agent,
     )
+    return user_view(db, user)
 
 
 @dataclass(frozen=True)
 class UserWithProjectCount:
-    """管理员用户列表行: 用户记录 + 其拥有的未删除项目数。"""
+    """管理员用户列表行: 身份展示视图 + 其拥有的未删除项目数。"""
 
-    user: UserRecord
+    view: UserView
     project_count: int = 0
 
 
 def list_users_case(db: Session) -> list[UserWithProjectCount]:
-    """用户列表完整用例: 全部用户(含停用) + 项目计数一次聚合(防 N+1)。
+    """用户列表完整用例: 全部用户(含停用, 一次批量组装视图) + 项目计数一次聚合。
 
+    展示视图经 user_views 一次公开调用组装(禁 API 逐用户回调用例);
     数据库故障沿用统一错误处理(异常向上传播, 不转为 0)。
-    响应字段组装(角色/改密状态)归 API。
+    API 只做 view→DTO 纯映射与 project_count 拼装。
     """
     users = list_users(db)
     counts = project_counts_by_owner(db, [u.id for u in users])
-    return [UserWithProjectCount(user=u, project_count=counts.get(u.id, 0)) for u in users]
+    views = user_views(db, users)
+    return [
+        UserWithProjectCount(view=view, project_count=counts.get(user.id, 0))
+        for user, view in zip(users, views, strict=True)
+    ]
+
+
+def confirm_takeover_case(
+    db: Session,
+    *,
+    user: UserRecord,
+    session: WindowSessionRecord,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> UserView:
+    """确认接管完整用例: 当前待接管会话转 active(不轮换凭证) → 身份展示视图。
+
+    用例内一次组装视图, API 只做传输映射(凭证提取/Cookie 写入归 API,
+    不二次查询身份状态)。
+    """
+    confirm_takeover(db, user, session, ip=ip, user_agent=user_agent)
+    return user_view(db, user)
+
+
+def get_user_view_case(db: Session, *, user_id: int) -> UserView:
+    """本人视图完整用例(/me): 目标预检 → 身份展示视图(认证依赖链已确权)。"""
+    return user_view(db, _require_target(db, user_id))
 
 
 def _require_target(db: Session, target_id: int) -> UserRecord:

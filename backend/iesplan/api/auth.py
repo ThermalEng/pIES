@@ -29,10 +29,12 @@ from sqlalchemy.orm import Session
 from iesplan.application import identity
 from iesplan.application.identity.auth_cases import (
     begin_oidc_login,
+    confirm_takeover_case,
     deactivate_user_case,
     delete_user_case,
     get_public_auth_settings,
     get_security_settings,
+    get_user_view_case,
     list_users_case,
     login_case,
     oidc_callback_case,
@@ -43,6 +45,7 @@ from iesplan.application.identity.auth_cases import (
     resolve_auth_context,
     update_security_settings,
 )
+from iesplan.application.identity.views import UserView
 from iesplan.config import settings
 from iesplan.core.errors import ForbiddenError
 from iesplan.db import get_db
@@ -233,24 +236,17 @@ CurrentUser = Annotated[UserRecord, Depends(get_current_user)]
 CurrentAdmin = Annotated[UserRecord, Depends(get_current_admin)]
 
 
-def _require_admin(ctx: AuthContext) -> UserRecord:
-    """便捷校验: 当前用户须为管理员, 否则抛 403(与 get_current_admin 同逻辑)。"""
-    return get_current_admin(ctx)
-
-
-def _user_out(db: Session, user: UserRecord) -> UserOut:
-    """构造用户响应(角色取 admin 优先; force_password_change 来自有效凭证)。"""
-    roles = identity.user_roles(db, user)
-    cred = identity.get_active_password_credential(db, user)
+def _user_out(view: UserView) -> UserOut:
+    """纯映射: 身份展示视图 → 用户响应 DTO(无 Session、无查询、无业务)。"""
     return UserOut(
-        id=user.id,
-        username=user.username,
-        display_name=user.display_name,
-        role="admin" if "admin" in roles else (roles[0] if roles else ""),
-        status=user.status,
-        force_password_change=bool(cred is not None and cred.requires_change),
-        credential_version=user.credential_version,
-        last_login_at=user.last_login_at,
+        id=view.id,
+        username=view.username,
+        display_name=view.display_name,
+        role=view.role,
+        status=view.status,
+        force_password_change=view.force_password_change,
+        credential_version=view.credential_version,
+        last_login_at=view.last_login_at,
     )
 
 
@@ -285,17 +281,17 @@ def login(
     (确认接管前无业务权限), 响应 needs_takeover_confirm=True,
     前端提示确认接管(domain-model §身份权限审计)。
 
-    本端点只做传输适配: 一次转交 ``login_case`` 完整用例, Cookie 写入与
-    响应组装归本层。
+    本端点只做传输适配: 一次转交 ``login_case`` 完整用例(返回身份展示
+    视图), Cookie 写入与响应组装归本层。
     """
     ip = _client_ip(request)
     ua = request.headers.get("user-agent")
-    user, token, displaced = login_case(
+    view, token, displaced = login_case(
         db, username=req.username, password=req.password, device=req.device,
         ip=ip, user_agent=ua,
     )
     _set_session_cookie(response, request, token)
-    return AuthResponse(token=token, user=_user_out(db, user), needs_takeover_confirm=displaced)
+    return AuthResponse(token=token, user=_user_out(view), needs_takeover_confirm=displaced)
 
 
 @router.post("/logout", summary="登出(撤销当前窗口会话)")
@@ -343,8 +339,12 @@ def refresh(request: Request, ctx: AuthCtx) -> dict:
 
 @router.get("/me", response_model=UserOut, summary="当前登录用户(页面刷新恢复会话)")
 def me(ctx: AuthCtx) -> UserOut:
-    """返回当前会话对应的用户信息(前端刷新后恢复登录态)。"""
-    return _user_out(ctx.db, ctx.user)
+    """返回当前会话对应的用户信息(前端刷新后恢复登录态)。
+
+    认证依赖确权后, 一次转交 ``get_user_view_case`` 完整视图用例,
+    本层只做纯 DTO 映射。
+    """
+    return _user_out(get_user_view_case(ctx.db, user_id=ctx.user.id))
 
 
 @router.post("/confirm-takeover", response_model=AuthResponse, summary="确认接管")
@@ -357,26 +357,30 @@ def confirm_takeover(
 
     不轮换凭证: 客户端既有 Cookie/Bearer 凭证即为最终凭证, 确认后立即
     拥有业务权限(其余 pending/active 会话被撤销)。返回当前窗口凭证。
+
+    本端点一次转交 ``confirm_takeover_case`` 完整用例(确认 → 展示视图),
+    凭证提取/Cookie 写入归本层。
     """
     token = _extract_token(request) or ""
-    identity.confirm_takeover(
+    view = confirm_takeover_case(
         ctx.db,
-        ctx.user,
-        ctx.session,
+        user=ctx.user,
+        session=ctx.session,
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     _set_session_cookie(response, request, token)
-    return AuthResponse(token=token, user=_user_out(ctx.db, ctx.user), needs_takeover_confirm=False)
+    return AuthResponse(token=token, user=_user_out(view), needs_takeover_confirm=False)
 
 
 @router.post("/register", response_model=UserOut, summary="自助注册(默认关闭, 仅工程师)")
 def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
     """自助注册: 注册开关开启时可用, 只能创建 engineer 角色(domain-model §身份权限审计)。
 
-    本端点一次转交 ``register_case`` 完整用例(开关 → 建账号), 响应组装归本层。
+    本端点一次转交 ``register_case`` 完整用例(开关 → 建账号 → 展示视图),
+    本层只做纯 DTO 映射。
     """
-    user = register_case(
+    view = register_case(
         db,
         username=req.username,
         password=req.password,
@@ -385,7 +389,7 @@ def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
-    return _user_out(db, user)
+    return _user_out(view)
 
 
 # ---------------------------------------------------------------------------
@@ -397,15 +401,15 @@ def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
 def list_users(db: DbSession, admin: CurrentAdmin) -> UsersListResponse:
     """用户列表(管理员): 含停用账号, 返回角色与强制改密状态与项目数。
 
-    本端点一次转交 ``list_users_case`` 完整用例(用户 + 项目计数一次聚合,
-    防 N+1); 数据库故障沿用统一错误处理(异常向上传播, 不转为 0)。
-    响应字段组装归本层。
+    本端点一次转交 ``list_users_case`` 完整用例(视图一次批量组装 +
+    项目计数一次聚合, 禁逐用户回调用例); 数据库故障沿用统一错误处理
+    (异常向上传播, 不转为 0)。本层只做纯 DTO 映射与 project_count 拼装。
     """
     entries = list_users_case(db)
     return UsersListResponse(
         users=[
             AdminUserOut(
-                **_user_out(db, e.user).model_dump(),
+                **_user_out(e.view).model_dump(),
                 project_count=e.project_count,
             )
             for e in entries
@@ -418,16 +422,17 @@ def admin_reset_password(
     user_id: int,
     req: ResetPasswordRequest,
     request: Request,
-    ctx: AuthCtx,
+    db: DbSession,
+    admin: CurrentAdmin,
 ) -> dict:
     """管理员重置密码: 签发临时密码(强制改密), 使目标用户全部会话失效。
 
+    管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``reset_password_case`` 完整用例(目标预检 → 重置)。
     """
-    _require_admin(ctx)
     reset_password_case(
-        ctx.db,
-        admin=ctx.user,
+        db,
+        admin=admin,
         target_id=user_id,
         new_password=req.new_password,
         ip=_client_ip(request),
@@ -437,15 +442,17 @@ def admin_reset_password(
 
 
 @router.post("/users/{user_id}/deactivate", summary="停用用户(管理员)")
-def admin_deactivate_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
+def admin_deactivate_user(
+    user_id: int, request: Request, db: DbSession, admin: CurrentAdmin
+) -> dict:
     """停用用户(管理员): 账号禁止登录, 全部会话立即失效。
 
+    管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``deactivate_user_case`` 完整用例(目标预检 → 停用)。
     """
-    _require_admin(ctx)
     deactivate_user_case(
-        ctx.db,
-        admin=ctx.user,
+        db,
+        admin=admin,
         target_id=user_id,
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -454,15 +461,17 @@ def admin_deactivate_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
 
 
 @router.post("/users/{user_id}/reactivate", summary="重新启用用户(管理员)")
-def admin_reactivate_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
+def admin_reactivate_user(
+    user_id: int, request: Request, db: DbSession, admin: CurrentAdmin
+) -> dict:
     """重新启用用户(管理员)。
 
+    管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``reactivate_user_case`` 完整用例(目标预检 → 启用)。
     """
-    _require_admin(ctx)
     reactivate_user_case(
-        ctx.db,
-        admin=ctx.user,
+        db,
+        admin=admin,
         target_id=user_id,
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
@@ -474,24 +483,27 @@ def admin_reactivate_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
     "/users/{user_id}/delete-preview",
     summary="删除账号预告(管理员): 返回将受影响项目清单 + 确认令牌",
 )
-def admin_delete_user_preview(user_id: int, request: Request, ctx: AuthCtx) -> dict:
+def admin_delete_user_preview(
+    user_id: int, request: Request, db: DbSession, admin: CurrentAdmin
+) -> dict:
     """删除账号预告(管理员, 0.2.0 B1 误操作防护)。
 
     返回该账号拥有的项目清单(名称/id/数量)并签发签名确认令牌(10 分钟窗口),
     供管理员确认影响范围后再执行 DELETE /users/{user_id}。执行删除必须携带
     confirm=true + 该令牌; 预览后清单变化则拒绝执行(需重新预览)。
 
+    管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``preview_user_delete_case`` 完整用例(目标预检 → 预览)。
     """
-    _require_admin(ctx)
-    return preview_user_delete_case(ctx.db, admin=ctx.user, target_id=user_id)
+    return preview_user_delete_case(db, admin=admin, target_id=user_id)
 
 
 @router.delete("/users/{user_id}", summary="删除账号(管理员, 需确认+预告, 级联删除其项目)")
 def admin_delete_user(
     user_id: int,
     request: Request,
-    ctx: AuthCtx,
+    db: DbSession,
+    admin: CurrentAdmin,
     payload: UserDeleteConfirmRequest | None = None,
 ) -> dict:
     """删除账号(管理员): 该账号拥有的项目一并删除(0.2.0 B1 误操作防护)。
@@ -503,12 +515,12 @@ def admin_delete_user(
     - 不能删除自己 / 系统账号;
     - 目标账号置 disabled, 全部会话/凭证撤销, 其拥有的项目全部软删。
 
+    管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``delete_user_case`` 完整用例(目标预检 → 确认 → 级联删除)。
     """
-    _require_admin(ctx)
     result = delete_user_case(
-        ctx.db,
-        admin=ctx.user,
+        db,
+        admin=admin,
         target_id=user_id,
         confirm=bool(payload and payload.confirm),
         confirm_token=(payload.confirm_token if payload else ""),
@@ -519,16 +531,18 @@ def admin_delete_user(
 
 
 @router.put("/settings", summary="更新安全设置(管理员)")
-def update_settings(payload: SettingsUpdate, request: Request, ctx: AuthCtx) -> dict:
+def update_settings(
+    payload: SettingsUpdate, request: Request, db: DbSession, admin: CurrentAdmin
+) -> dict:
     """更新安全设置: 自助注册开关(默认关闭, 持久化到数据库, 多 Worker 一致)。
 
+    管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     开关写入与维护审计经 application.identity 用例单事务提交。
     """
-    _require_admin(ctx)
     registration_enabled = update_security_settings(
-        ctx.db,
+        db,
         enabled=payload.registration_enabled,
-        updated_by=ctx.user.id,
+        updated_by=admin.id,
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -536,10 +550,12 @@ def update_settings(payload: SettingsUpdate, request: Request, ctx: AuthCtx) -> 
 
 
 @router.get("/settings", summary="读取安全设置(管理员)")
-def read_settings(ctx: AuthCtx) -> dict:
-    """读取安全设置(管理员): 一次转交 ``get_security_settings`` 完整用例。"""
-    _require_admin(ctx)
-    return get_security_settings(ctx.db)
+def read_settings(db: DbSession, admin: CurrentAdmin) -> dict:
+    """读取安全设置(管理员): 一次转交 ``get_security_settings`` 完整用例。
+
+    管理员身份由依赖链确权(CurrentAdmin, 参数仅确权), 体内不再二次校验。
+    """
+    return get_security_settings(db)
 
 
 # ---------------------------------------------------------------------------

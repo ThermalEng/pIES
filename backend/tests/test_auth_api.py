@@ -890,3 +890,84 @@ def test_oidc_callback_disabled(client: TestClient, db_session: Session) -> None
     """回调在 OIDC 未启用时返回 404。"""
     resp = client.get("/api/auth/oidc/callback?code=x&state=y")
     assert resp.status_code == 404
+
+
+def test_auth_view_fields_consistent_across_endpoints(
+    client: TestClient, db_session: Session
+) -> None:
+    """展示视图一致性: login/me/register/confirm-takeover/list 返回同一视图字段。
+
+    各端点经完整用例一次组装视图 + API 纯映射, 同一用户在各端点的
+    role/status/force_password_change/credential_version 必须一致。
+    """
+    seed_admin(db_session, force_change=False)
+    seed_engineer(db_session, "alice")
+    admin_h = bearer(login(client, "admin", ADMIN_PASSWORD).json()["token"])
+    alice_login = login(client, "alice", USER_PASSWORD).json()
+    alice_h = bearer(alice_login["token"])
+
+    login_user = alice_login["user"]
+    me_user = client.get("/api/auth/me", headers=alice_h).json()
+    assert me_user["role"] == login_user["role"] == "engineer"
+    assert me_user["status"] == login_user["status"] == "active"
+    assert me_user["force_password_change"] is login_user["force_password_change"] is False
+    assert me_user["credential_version"] == login_user["credential_version"]
+
+    # 注册开关打开后自助注册返回同一视图形状
+    assert client.put(
+        "/api/auth/settings", json={"registration_enabled": True}, headers=admin_h
+    ).status_code == 200
+    reg = client.post(
+        "/api/auth/register", json={"username": "erin", "password": "Erin12345"}
+    ).json()
+    assert reg["role"] == "engineer"
+    assert reg["force_password_change"] is False
+    assert reg["status"] == "active"
+
+    # 第二窗口登录 → 确认接管返回同一视图(凭证不变)
+    pending = login(client, "alice", USER_PASSWORD, device="window-B").json()
+    assert pending["needs_takeover_confirm"] is True
+    took = client.post(
+        "/api/auth/confirm-takeover", headers=bearer(pending["token"])
+    ).json()
+    assert took["token"] == pending["token"]
+    assert took["user"]["role"] == "engineer"
+    assert took["user"]["force_password_change"] is False
+    assert took["user"]["credential_version"] == login_user["credential_version"]
+
+    # 管理员列表同用户视图一致(含改密状态与项目数)
+    by_name = {
+        u["username"]: u
+        for u in client.get("/api/auth/users", headers=admin_h).json()["users"]
+    }
+    assert by_name["alice"]["role"] == "engineer"
+    assert by_name["alice"]["force_password_change"] is False
+    assert by_name["admin"]["role"] == "admin"
+    assert by_name["alice"]["project_count"] == 0
+
+
+def test_users_list_assembles_views_in_single_batch_call(
+    client: TestClient, db_session: Session
+) -> None:
+    """用户列表一次批量组装全部视图: user_views 恰调用一次。
+
+    禁 API 逐用户回调用例(N+1 扇出); 批量函数内部组装细节变化不影响本断言。
+    """
+    from unittest.mock import patch
+
+    from iesplan.application.identity import auth_cases
+
+    seed_admin(db_session, force_change=False)
+    seed_engineer(db_session, "alice")
+    seed_engineer(db_session, "bob")
+    seed_engineer(db_session, "carol")
+    admin_h = bearer(login(client, "admin", ADMIN_PASSWORD).json()["token"])
+
+    with patch.object(auth_cases, "user_views", wraps=auth_cases.user_views) as spy:
+        resp = client.get("/api/auth/users", headers=admin_h)
+    assert resp.status_code == 200
+    assert spy.call_count == 1
+    by_name = {u["username"]: u for u in resp.json()["users"]}
+    assert set(by_name) == {"admin", "alice", "bob", "carol"}
+    assert by_name["admin"]["role"] == "admin"
+    assert by_name["bob"]["role"] == "engineer"
