@@ -140,7 +140,7 @@ def _iter_domain_files():
 #: 纯函数复用豁免(与 test_architecture_gates.ALLOWED_STATE_MODEL_REUSE 同义，
 #: 此处独立声明以免测试间相互导入)：metrics.validity/financial 仅依赖标准库
 #: 与 numpy 的纯词汇/纯函数，results 复用其枚举与纯函数而不是复制第二份
-#: 事实源（收口 §六“领域公开纯函数”复用；复制枚举值才是本测试要防的）。
+#: 事实源（复用领域公开纯函数，避免复制第二份事实源；复制枚举值才是本测试要防的）。
 _PURE_METRICS_REUSE: frozenset[tuple[str, str]] = frozenset(
     {
         ("results", "iesplan.metrics.validity"),
