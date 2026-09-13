@@ -22,6 +22,10 @@
 DTO 契约(宪法 8.1): 请求/响应字段与 core/finance 契约一一对应;
 finance_profile / finance_overrides / effective_finance / planning_config
 为完整字典形态(由服务层严格恢复，文本文件只校验字头)。
+
+传输适配说明: 每个业务动作只转交 application.configuration.revision_cases
+中的一个完整用例(授权、业务步骤与事务均在用例内); 本模块只做 DTO、
+一次调用和错误/响应映射。
 """
 
 from __future__ import annotations
@@ -33,9 +37,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application import configuration as config_ops
-from iesplan.application.projects import lifecycle as project_ops
-from iesplan.core.errors import NotFoundError, http_error
+from iesplan.application.configuration import revision_cases
 from iesplan.db import get_db
 
 #: FastAPI 依赖注入的数据库会话
@@ -77,26 +79,6 @@ class ProfileRegistrationRequest(BaseModel):
     finance_profile: dict[str, Any]
 
 
-def _finance_response(config: Any, revision: int) -> dict:
-    return {"finance_config": config.to_dict(), "revision": revision}
-
-
-def _effective_response(effective: Any, revision: int) -> dict:
-    return {"effective_finance_config": effective.to_dict(), "revision": revision}
-
-
-def _overrides_response(overrides: Any, revision: int) -> dict:
-    return {"finance_overrides": overrides.to_dict(), "revision": revision}
-
-
-def _planning_response(config: Any, revision: int) -> dict:
-    return {"planning_config": config.to_dict(), "revision": revision}
-
-
-def _profile_row_response(row: dict) -> dict:
-    return row
-
-
 # ---------------------------------------------------------------------------
 # 项目侧: Profile 引用 / Overrides / Effective / Planning
 # ---------------------------------------------------------------------------
@@ -109,9 +91,7 @@ def get_project_profile_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取项目当前引用的注册 Profile(未引用 → 404)。"""
-    project_ops.ensure_access(db, user, project_id, "view")
-    profile, row = config_ops.get_project_profile(db, project_id)
-    return {"finance_profile": profile.to_dict(), "row": _profile_row_response(row)}
+    return revision_cases.get_project_profile_case(db, user, project_id)
 
 
 @router.put("/finance-profile", summary="引用/切换已登记的地区 FinanceProfile")
@@ -122,25 +102,9 @@ def set_project_profile_endpoint(
     user: CurrentUser,
 ) -> dict:
     """项目引用已登记 Profile: 引用 {id}, 原子生成空覆盖 Effective。"""
-    project_ops.ensure_access(db, user, project_id, "edit")
-    ref = payload.profile_ref
-    profile_id = str(ref.get("id", ""))
-    if not profile_id:
-        raise http_error(
-            400,
-            "PROJ-FIN-001",
-            "ies.diag.param.invalid",
-            detail="profile_ref 必须包含 {id}",
-        )
-    overrides_rev, eff_row, effective = config_ops.set_project_finance_profile(
-        db, project_id, profile_id, user.id
+    return revision_cases.set_project_profile_case(
+        db, user, project_id, payload.profile_ref
     )
-    _, profile = config_ops.get_finance_profile_by_ref(db, profile_id)
-    return {
-        "finance_profile": profile.to_dict(),
-        "overrides_revision": overrides_rev,
-        **dict(_effective_response(effective, eff_row.revision)),
-    }
 
 
 @router.get("/finance-overrides", summary="当前 FinanceOverrides")
@@ -150,15 +114,7 @@ def get_finance_overrides_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取项目当前 FinanceOverrides(无覆盖 → 404, 不静默返回空文档)。"""
-    project_ops.ensure_access(db, user, project_id, "view")
-    overrides, revision = config_ops.get_finance_overrides(db, project_id)
-    if overrides is None or revision is None:
-        raise NotFoundError(
-            "项目尚未保存 FinanceOverrides",
-            params={"project_id": project_id},
-            location={"object_type": "finance_overrides", "object_id": project_id},
-        )
-    return _overrides_response(overrides, revision)
+    return revision_cases.get_finance_overrides_case(db, user, project_id)
 
 
 @router.put("/finance-overrides", summary="保存 FinanceOverrides(自动重合并 Effective)")
@@ -169,16 +125,9 @@ def save_finance_overrides_endpoint(
     user: CurrentUser,
 ) -> dict:
     """保存覆盖: 追加 Overrides revision → 重新合并生成新 Effective(失败原子)。"""
-    project_ops.ensure_access(db, user, project_id, "edit")
-    overrides_rev, eff_row, effective = config_ops.save_finance_overrides(
-        db, project_id, payload.finance_overrides, payload.expected_revision, user.id
+    return revision_cases.save_finance_overrides_case(
+        db, user, project_id, payload.finance_overrides, payload.expected_revision
     )
-    overrides, _ = config_ops.get_finance_overrides(db, project_id)
-    assert overrides is not None
-    return {
-        **_overrides_response(overrides, overrides_rev),
-        **dict(_effective_response(effective, eff_row.revision)),
-    }
 
 
 @router.delete("/finance-overrides", summary="清空 FinanceOverrides(追加空文档, 失效旧 Planning)")
@@ -189,16 +138,9 @@ def delete_finance_overrides_endpoint(
     user: CurrentUser,
 ) -> dict:
     """清空覆盖: 追加显式空 Overrides + 新 Effective, 失效旧 Planning(409 乐观锁)。"""
-    project_ops.ensure_access(db, user, project_id, "edit")
-    overrides_rev, eff_row, effective = config_ops.delete_finance_overrides(
-        db, project_id, payload.expected_revision, user.id
+    return revision_cases.delete_finance_overrides_case(
+        db, user, project_id, payload.expected_revision
     )
-    overrides, _ = config_ops.get_finance_overrides(db, project_id)
-    assert overrides is not None
-    return {
-        **_overrides_response(overrides, overrides_rev),
-        **dict(_effective_response(effective, eff_row.revision)),
-    }
 
 
 @router.get("/effective-finance", summary="当前 EffectiveFinanceConfig")
@@ -208,9 +150,7 @@ def get_effective_finance_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取项目当前 EffectiveFinanceConfig(未生成 → 404)。"""
-    project_ops.ensure_access(db, user, project_id, "view")
-    effective, revision, _ = config_ops.get_effective_finance_config(db, project_id)
-    return _effective_response(effective, revision)
+    return revision_cases.get_effective_finance_case(db, user, project_id)
 
 
 @router.get("/planning-config", summary="当前规划配置")
@@ -220,9 +160,7 @@ def get_planning_config_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取项目当前生效规划配置(未保存 → 404)。"""
-    project_ops.ensure_access(db, user, project_id, "view")
-    config, revision, _ = config_ops.get_planning_config(db, project_id)
-    return _planning_response(config, revision)
+    return revision_cases.get_planning_config_case(db, user, project_id)
 
 
 @router.put("/planning-config", summary="保存规划配置(新 revision)")
@@ -233,12 +171,9 @@ def save_planning_config_endpoint(
     user: CurrentUser,
 ) -> dict:
     """保存规划配置: 乐观锁 409。"""
-    project_ops.ensure_access(db, user, project_id, "edit")
-    _, revision = config_ops.save_planning_config(
-        db, project_id, payload.planning_config, payload.expected_revision, user.id
+    return revision_cases.save_planning_config_case(
+        db, user, project_id, payload.planning_config, payload.expected_revision
     )
-    config, _, _ = config_ops.get_planning_config(db, project_id)
-    return _planning_response(config, revision)
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +187,7 @@ def list_finance_profiles_endpoint(
     user: CurrentUser,
 ) -> dict:
     """列出已登记地区 Profile(按 profile_id 去重取最新登记)。"""
-    items = config_ops.list_finance_profiles(db)
-    return {"items": items, "count": len(items)}
+    return revision_cases.list_finance_profiles_case(db, user)
 
 
 @profile_router.post("", summary="登记地区 FinanceProfile(注册表按 id 唯一)")
@@ -263,13 +197,9 @@ def register_finance_profile_endpoint(
     user: CurrentUser,
 ) -> dict:
     """登记地区 Profile。"""
-    row, profile = config_ops.register_finance_profile(
-        db, payload.finance_profile, user.id
+    return revision_cases.register_finance_profile_case(
+        db, user, payload.finance_profile
     )
-    return {
-        "finance_profile": profile.to_dict(),
-        "row": config_ops.profile_row_dict(row),
-    }
 
 
 @profile_router.get("/{profile_id}", summary="按稳定 id 取地区 FinanceProfile")
@@ -279,8 +209,4 @@ def get_finance_profile_endpoint(
     user: CurrentUser,
 ) -> dict:
     """读取已登记 Profile(按 profile_id 最新登记; 不存在 → 404)。"""
-    row, profile = config_ops.get_finance_profile_by_ref(db, profile_id)
-    return {
-        "finance_profile": profile.to_dict(),
-        "row": config_ops.profile_row_dict(row),
-    }
+    return revision_cases.get_finance_profile_case(db, user, profile_id)
