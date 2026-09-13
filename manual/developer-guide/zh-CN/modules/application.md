@@ -1,6 +1,6 @@
 # 应用用例
 
-> 文档状态：生效蓝图；目标代码边界：`backend/iesplan/application/`；迁移边界：`backend/iesplan/services/`
+> 文档状态：生效蓝图；目标代码边界：`backend/iesplan/application/`；旧 `services/` 包已删除，不再是阅读起点
 
 ## 作用
 
@@ -152,6 +152,6 @@ Application 不生成 Solver Bundle。计算 Worker 在同一冻结快照上把 
 - 事务中没有下层全局 rollback；
 - 对象引用、审计和业务资源生命周期同步；
 - 一个同步用例可以被 HTTP 或命令行适配复用；Worker 依赖任务 contract 与 `application.worker` 的分阶段命令，不要求一个 handler 包住整个长任务；
-- 当前 `services/` 中的职责迁移有明确归属，新增代码不继续形成无边界杂物层。
+- 各职责有明确归属（领域公开门面或 application 用例），新增代码不继续形成无边界杂物层。
 
-阅读当前代码时，从对应业务 service 的公开函数与 API 调用关系入手，并按本章判断它最终应归属的 application 用例；迁移完成后从 `application/<use-case>/` 的命令、结果和 handler 开始。
+阅读当前代码时，从 `application/<use-case>/` 的命令、结果和 handler 开始，并按本章判断其归属是否正确。

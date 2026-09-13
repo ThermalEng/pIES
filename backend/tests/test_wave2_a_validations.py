@@ -71,7 +71,7 @@ def _codes(report) -> list[str]:
     return sorted(d.code for d in report.diagnostics)
 
 
-def test_precheck_matches_legacy_service(db_session: Session) -> None:
+def test_precheck_repeatable_consistent(db_session: Session) -> None:
     owner = make_user(db_session, "w2a_val_owner1")
     p_new = projects_uc.create_project(db_session, owner, "W2A 校验新", **BASELINE)
     p_old = projects_uc.create_project(db_session, owner, "W2A 校验旧", **BASELINE)
@@ -112,6 +112,6 @@ def test_baseline_confirm_flow_and_commit(engine: Engine, db_session: Session) -
         assert latest["status"] == after.status
 
 
-def test_legacy_service_calls_declared() -> None:
+def test_no_legacy_service_calls() -> None:
     """遗留调用显式声明（Wave 5 集成：配置能力已改接 application.configuration，元组清空）。"""
     assert set(validations_uc.LEGACY_SERVICE_CALLS) == set()

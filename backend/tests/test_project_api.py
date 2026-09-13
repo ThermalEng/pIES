@@ -364,6 +364,32 @@ def test_restore_version(client: TestClient, db_session: Session) -> None:
     assert v1_now["content_object_id"] == v1["content_object_id"]
 
 
+def test_versions_reads_authorize_inside_usecase(client: TestClient, db_session: Session) -> None:
+    """版本读端点单次转交完整用例: 授权在用例内, 所有者可读、非成员 403。"""
+    owner = make_user(db_session, "owner_verread")
+    stranger = make_user(db_session, "stranger_verread")
+    owner_h = _h(client, owner)
+    stranger_h = _h(client, stranger)
+    pid = _create_project(client, owner, "版本读授权")
+    v1 = client.post(
+        f"/api/projects/{pid}/versions",
+        json={"name": "V1", "reason": "milestone"},
+        headers=owner_h,
+    ).json()["version"]
+
+    resp = client.get(f"/api/projects/{pid}/versions", headers=owner_h)
+    assert resp.status_code == 200
+    assert [v["id"] for v in resp.json()["versions"]] == [v1["id"]]
+    resp = client.get(f"/api/projects/{pid}/versions/{v1['id']}", headers=owner_h)
+    assert resp.status_code == 200
+    assert resp.json()["version"]["id"] == v1["id"]
+
+    assert client.get(f"/api/projects/{pid}/versions", headers=stranger_h).status_code == 403
+    assert client.get(
+        f"/api/projects/{pid}/versions/{v1['id']}", headers=stranger_h
+    ).status_code == 403
+
+
 def test_apply_result(client: TestClient, db_session: Session) -> None:
     """应用选定结果: 参数差异补丁→新草稿+新版本, 来源版本不变。"""
     owner = make_user(db_session, "owner_apply")

@@ -2,7 +2,7 @@
 
 覆盖要求:
 - 用例可独立执行并提交事务(新会话可见, 无需调用方 commit);
-- 行为与旧服务一致(关键路径对照: 状态/维度/index 落点逐项对比)。
+- 行为由现行用例拥有(关键路径对照: 状态/维度/index 落点逐项对比)。
 
 环境: SQLite :memory:(StaticPool) + 内存队列 + 临时对象存储目录。
 """
@@ -202,11 +202,11 @@ def _prepare_running(
 
 
 # ---------------------------------------------------------------------------
-# 证据写入: 独立提交 + 与旧服务一致
+# 证据写入: 独立提交 + 重复提交一致
 # ---------------------------------------------------------------------------
 
 
-def test_submit_evidence_commits_and_matches_old(
+def test_submit_evidence_commits_and_repeatable(
     client: TestClient, db: Session, engine: Engine
 ) -> None:
     owner = _user(db, "w2c_res_owner")
@@ -250,7 +250,7 @@ def test_submit_evidence_commits_and_matches_old(
 # ---------------------------------------------------------------------------
 
 
-def test_run_assessment_commits_and_matches_old(
+def test_run_assessment_commits_and_repeatable(
     client: TestClient, db: Session, engine: Engine
 ) -> None:
     owner = _user(db, "w2c_res_owner2")

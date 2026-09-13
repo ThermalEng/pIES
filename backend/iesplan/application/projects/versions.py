@@ -444,13 +444,17 @@ def apply_result(
         raise
 
 
-def list_versions(db: Session, project_id: int) -> list[ProjectVersionRecord]:
-    """版本列表(新版本在前；只读，不提交事务)。"""
+def list_versions(db: Session, user: UserRecord, project_id: int) -> list[ProjectVersionRecord]:
+    """版本列表(新版本在前；含 view 授权，只读，不提交事务)。"""
+    ensure_access(db, user, project_id, "view")
     return project_domain.list_versions(db, project_id)
 
 
-def get_version(db: Session, project_id: int, version_id: int) -> ProjectVersionRecord:
-    """按 id 获取项目版本(须属于该项目，否则 404；只读，不提交事务)。"""
+def get_version(
+    db: Session, user: UserRecord, project_id: int, version_id: int
+) -> ProjectVersionRecord:
+    """按 id 获取项目版本(须属于该项目，否则 404；含 view 授权，只读，不提交事务)。"""
+    ensure_access(db, user, project_id, "view")
     return project_domain.require_version(db, project_id, version_id)
 
 

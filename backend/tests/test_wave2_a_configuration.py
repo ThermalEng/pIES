@@ -170,7 +170,7 @@ def test_register_set_profile_and_commit(engine: Engine, db_session: Session) ->
         assert [p["profile_id"] for p in profiles] == ["cn-north-demo"]
 
 
-def test_behavior_matches_legacy_service(engine: Engine, db_session: Session) -> None:
+def test_behavior_repeatable_consistent(engine: Engine, db_session: Session) -> None:
     owner = make_user(db_session, "w2a_cfg_owner2")
     p_new = projects_uc.create_project(db_session, owner, "W2A 配置新", **BASELINE)
     p_old = projects_uc.create_project(db_session, owner, "W2A 配置旧", **BASELINE)

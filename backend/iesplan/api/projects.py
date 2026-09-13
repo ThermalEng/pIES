@@ -209,8 +209,7 @@ def list_versions_endpoint(
     user: CurrentUser,
 ) -> dict:
     """版本列表(新版本在前)。"""
-    project_ops.ensure_access(db, user, project_id, "view")
-    versions = project_versions.list_versions(db, project_id)
+    versions = project_versions.list_versions(db, user, project_id)
     return {"versions": [project_ops.version_to_dict(v) for v in versions]}
 
 
@@ -222,8 +221,7 @@ def get_version_endpoint(
     user: CurrentUser,
 ) -> dict:
     """版本详情。"""
-    project_ops.ensure_access(db, user, project_id, "view")
-    version = project_versions.get_version(db, project_id, version_id)
+    version = project_versions.get_version(db, user, project_id, version_id)
     return {"version": project_ops.version_to_dict(version)}
 
 

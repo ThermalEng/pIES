@@ -2,7 +2,7 @@
 
 覆盖要求:
 - 用例可独立执行并提交事务(新会话可见, 无需调用方 commit);
-- 行为与旧服务一致(关键路径对照: 状态/标记/快照/错误码逐项对比)。
+- 行为由现行用例拥有(关键路径对照: 状态/标记/快照/错误码逐项对比)。
 
 环境与既有任务测试一致: SQLite :memory:(StaticPool) + 内存队列。
 """
@@ -118,14 +118,14 @@ def _fresh_db(engine: Engine) -> Session:
 
 
 # ---------------------------------------------------------------------------
-# 提交: 独立执行 + 事务提交 + 与旧服务一致
+# 提交: 独立执行 + 事务提交 + 重复提交一致
 # ---------------------------------------------------------------------------
 
 
-def test_submit_report_task_commits_and_matches_old(
+def test_submit_report_task_commits_and_repeatable(
     client: TestClient, db: Session, engine: Engine
 ) -> None:
-    """io 任务提交: 新用例独立提交(新会话可见), 关键字段与旧服务一致。"""
+    """io 任务提交: 用例独立提交(新会话可见), 重复提交关键字段一致。"""
     owner = _user(db, "w2c_owner_report")
     pid = _project(client, owner, "w2c-proj-report")
 
@@ -147,7 +147,7 @@ def test_submit_report_task_commits_and_matches_old(
 def test_submit_compute_task_snapshot_replay_and_duplicate(
     client: TestClient, db: Session
 ) -> None:
-    """计算任务提交: 快照装配 + 幂等重放 + 快照去重, 与旧服务同语义。"""
+    """计算任务提交: 快照装配 + 幂等重放 + 快照去重。"""
     owner = _user(db, "w2c_owner_opt")
     pid = _project(client, owner, "w2c-proj-opt")
 
@@ -159,7 +159,7 @@ def test_submit_compute_task_snapshot_replay_and_duplicate(
     assert rflags == {"replay": True, "duplicate": False}
     assert replay.id == task.id
 
-    # 无幂等键重复提交同快照 → 去重对照旧服务
+    # 无幂等键重复提交同快照 → 去重对照
     dup_new, dflags = tasks_uc.submit_task(db, owner, pid, "optimization")
     assert dflags == {"replay": False, "duplicate": True}
     assert dup_new.id == task.id
@@ -191,7 +191,7 @@ def test_submit_errors_match_old_codes(client: TestClient, db: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 取消/确认取消: 状态机 + 事务提交 + 与旧服务一致
+# 取消/确认取消: 状态机 + 事务提交 + 重复调用一致
 # ---------------------------------------------------------------------------
 
 
@@ -223,8 +223,8 @@ def test_cancel_queued_and_running_flows(client: TestClient, db: Session, engine
     assert tasks_uc.cancel_task(db, t4.id).status == "cancelled"
 
 
-def test_cancel_terminal_denied_matches_old(client: TestClient, db: Session) -> None:
-    """终态任务不可取消: 新旧同为 TASK-CANCEL-001。"""
+def test_cancel_terminal_denied_consistent(client: TestClient, db: Session) -> None:
+    """终态任务不可取消: 重复取消同为 TASK-CANCEL-001。"""
     owner = _user(db, "w2c_owner_denied")
     pid = _project(client, owner, "w2c-proj-denied")
 
@@ -244,7 +244,7 @@ def test_cancel_terminal_denied_matches_old(client: TestClient, db: Session) -> 
 
 
 # ---------------------------------------------------------------------------
-# 重试/租约: 与旧服务一致
+# 重试/租约: 重复调用落点一致
 # ---------------------------------------------------------------------------
 
 
@@ -256,8 +256,8 @@ def _fail(db: Session, task_id: int) -> None:
     db.commit()
 
 
-def test_retry_terminal_task_matches_old(client: TestClient, db: Session, engine: Engine) -> None:
-    """重试: 终态 → queued(快照不变, 已提交); 新旧落点一致; 非终态拒绝同码。"""
+def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine: Engine) -> None:
+    """重试: 终态 → queued(快照不变, 已提交); 重复落点一致; 非终态拒绝同码。"""
     owner = _user(db, "w2c_owner_retry")
     pid = _project(client, owner, "w2c-proj-retry")
 
@@ -285,8 +285,8 @@ def test_retry_terminal_task_matches_old(client: TestClient, db: Session, engine
     db.rollback()
 
 
-def test_claim_task_lease_matches_old(client: TestClient, db: Session, engine: Engine) -> None:
-    """租约: 领取建尝试+租约+running(已提交); 重复领取 None; 与旧服务同形。"""
+def test_claim_task_lease_shape(client: TestClient, db: Session, engine: Engine) -> None:
+    """租约: 领取建尝试+租约+running(已提交); 重复领取 None。"""
     owner = _user(db, "w2c_owner_claim")
     pid = _project(client, owner, "w2c-proj-claim")
 
@@ -310,8 +310,8 @@ def test_claim_task_lease_matches_old(client: TestClient, db: Session, engine: E
     assert tasks_domain.get_task(db, t2.id).status == "running"
 
 
-def test_estimate_storage_readonly_matches_old(client: TestClient, db: Session) -> None:
-    """存储门禁估算: 新用例与旧服务数值一致(只读, 不写库)。"""
+def test_estimate_storage_readonly_stable(client: TestClient, db: Session) -> None:
+    """存储门禁估算: 重复估算数值一致(只读, 不写库)。"""
     owner = _user(db, "w2c_owner_est")
     pid = _project(client, owner, "w2c-proj-est")
     new = tasks_uc.estimate_storage(db, pid, "optimization", {})

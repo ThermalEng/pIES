@@ -1009,3 +1009,121 @@ def test_whitelists_have_no_stale_entries():
         if key not in set(_find_analysis_engine_imports()):
             stale.append(f"analysis-engine: {key!r}")
     assert not stale, f"白名单存在过期条目(检测已无命中, 须删除): {stale}"
+
+
+# ---------------------------------------------------------------------------
+# R2 Wave 4: 职责回流门禁(指南 F; 构造反例可检出, 见各测试说明)
+# ---------------------------------------------------------------------------
+
+#: 门禁 18: core 不得拥有的领域业务规则名(用户名/邮箱/幂等键格式)。
+#: 唯一权威归 identity/tasks contracts; core 仅保留无领域语义的共同语言。
+_DOMAIN_RULE_NAMES_IN_CORE: frozenset[str] = frozenset({
+    "USERNAME_RE",
+    "EMAIL_RE",
+    "IDEMPOTENCY_KEY_RE",
+})
+
+
+def _find_core_domain_rules() -> set[tuple[str, str]]:
+    """门禁 18 扫描: core 树下定义/导入领域业务规则名。返回 (模块, 规则名)。"""
+    found: set[tuple[str, str]] = set()
+    for path, mod in _iter_modules(_CORE_DIR, _PKG_ROOT):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id in _DOMAIN_RULE_NAMES_IN_CORE:
+                        found.add((mod, target.id))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if node.name in _DOMAIN_RULE_NAMES_IN_CORE:
+                    found.add((mod, node.name))
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    name = alias.asname or alias.name
+                    if name in _DOMAIN_RULE_NAMES_IN_CORE:
+                        found.add((mod, name))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = (alias.asname or alias.name).split(".")[-1]
+                    if name in _DOMAIN_RULE_NAMES_IN_CORE:
+                        found.add((mod, name))
+    return found
+
+
+def test_core_no_domain_business_rules():
+    """架构门禁 18: core 不得拥有 identity/tasks 业务规则(指南 D/F)。
+
+    反例验证: 在 core 下任一模块顶层补一句 ``USERNAME_RE = "..."``,
+    本门禁即失败(已用临时反例验证后移除, 不留残留)。
+    """
+    assert _find_core_domain_rules() == set(), (
+        f"core 收容领域业务规则(须回归 identity/tasks contracts): "
+        f"{sorted(_find_core_domain_rules())}"
+    )
+
+
+#: 门禁 19: 项目组合授权的生产实现名(唯一实现, 不得复制)。
+_AUTH_IMPL_NAMES: frozenset[str] = frozenset({"ensure_access", "ensure_project_access"})
+
+
+def _find_auth_impls() -> set[str]:
+    """门禁 19 扫描: application/api/worker 下组合授权生产实现所在模块。"""
+    found: set[str] = set()
+    for scan_root in (_APPLICATION_DIR, _API_DIR, _WORKER_DIR):
+        for path, mod in _iter_modules(scan_root, _PKG_ROOT):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if node.name in _AUTH_IMPL_NAMES:
+                        found.add(mod)
+    return found
+
+
+def test_single_authorization_impl():
+    """架构门禁 19: 组合授权只有一个生产实现(指南 B/F)。
+
+    反例验证: 在 application 下任一模块补一句 ``def ensure_project_access(...)``,
+    本门禁即失败(已用临时反例验证后移除, 不留残留)。
+    """
+    assert _find_auth_impls() == {"iesplan.application.projects.authorization"}, (
+        f"组合授权实现漂移(须唯一归 application.projects.authorization): "
+        f"{sorted(_find_auth_impls())}"
+    )
+
+
+#: 门禁 20: 未实现 I/O 执行器(必须抛执行不可用错误, 不得返回成功载荷)。
+_UNIMPLEMENTED_EXECUTORS: frozenset[str] = frozenset({
+    "execute_dataset_process",
+    "execute_export",
+    "execute_package_import",
+})
+
+
+def _find_unimplemented_executor_shapes() -> set[tuple[str, str, bool, bool]]:
+    """门禁 20 扫描: 未实现执行器形态。返回 (模块, 函数, 有抛错, 有返回)。"""
+    found: set[tuple[str, str, bool, bool]] = set()
+    for path, mod in _iter_modules(_WORKER_DIR, _PKG_ROOT):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name in _UNIMPLEMENTED_EXECUTORS:
+                    raises = any(isinstance(child, ast.Raise) for child in ast.walk(node))
+                    returns = any(isinstance(child, ast.Return) for child in ast.walk(node))
+                    found.add((mod, node.name, raises, returns))
+    return found
+
+
+def test_unimplemented_executors_never_succeed():
+    """架构门禁 20: 未实现执行器必须抛错、不得返回成功载荷(指南 C/F)。
+
+    行为闭环另由 tests/test_worker_outcome.py 契约组一覆盖; 本门禁锁定
+    结构形态(有 Raise、无 Return)。反例验证: 把任一函数体改为返回占位
+    载荷, 本门禁即失败(已用临时反例验证后移除, 不留残留)。
+    """
+    shapes = _find_unimplemented_executor_shapes()
+    assert {name for _, name, _, _ in shapes} == set(_UNIMPLEMENTED_EXECUTORS), (
+        f"未实现执行器缺失: {sorted(set(_UNIMPLEMENTED_EXECUTORS) - {name for _, name, _, _ in shapes})}"
+    )
+    bad = sorted(f"{mod}.{name}" for mod, name, raises, returns in shapes if not raises or returns)
+    assert not bad, f"未实现执行器须抛错且无返回(不得伪造成功): {bad}"

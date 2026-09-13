@@ -15,6 +15,30 @@
 
 ## Unreleased
 
+### 2026-09-13 — 后端依赖架构第二次验收纠偏（实现完成，等待独立验收）
+
+**完成时间**：2026-09-13（实现合并到 `master`，未 push；独立验收未执行，不得视为最终完成）
+
+**版本进展**：按 `docs/development/backend-decoupling-finalization.md` 指南 A～G 推进 Wave 1～4 的代码实现；
+最终完成结论由 Codex 独立复审后写入；不改变产品版本，下一开发目标仍为 `0.8.0`。
+
+#### 更新了什么（实现事实，待复审）
+
+- Wave 1：config/config-revisions、model/validation、上传与 quota 收敛为完整 application 用例；删除重复
+  `ensure_project_access`，组合授权唯一归 `application.projects.authorization`；版本读端点授权收入用例内。
+- Wave 2：Worker 对 report/check 按运行时序调用 `application.worker` 分阶段命令（删除单大 handler 与回调倒置）；
+  `TASK-EXEC-001`/`ExecutionUnavailableError`/`BUSINESS_OUTCOMES`/`check_outcome` 归各自所有者；
+  runner 与完成路径删除默认成功；I/O 占位成功删除。
+- Wave 3：用户名/邮箱规则归 `identity.contracts`，幂等键规则归 `tasks.contracts`，删除 `core/patterns`；
+  证据结构校验与四维摘要归 `results` 公开能力；结果采用补丁只给证据原生契约，不经 engines 静态映射。
+- Wave 4：新增职责回流门禁 18/19/20（core 业务规则、单一授权实现、未实现执行器；构造反例已验证可检出）；
+  测试与手册去“旧服务/迁移中”表述；重生成 `docs/development/backend-decoupling-duty-inventory.md`。
+- 静态架构门禁 23 项通过，临时债务集合为空。
+
+#### 尚未确认（待独立验收）
+
+- 本轮实现是否完全关闭指南 A～G；门禁与行为测试是否充分；以 Codex 独立复审结论为准。
+
 ### 2026-09-13 — 后端依赖架构收口（实现完成，等待独立验收）
 
 **完成时间**：2026-09-13（实现合并；独立验收未通过，不得视为最终完成）
