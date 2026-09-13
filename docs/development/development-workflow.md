@@ -42,12 +42,14 @@
   ↓
 application 集成
   ↓
-API / Worker / 前端适配
+API / 前端适配，或 Worker 按任务 contract 编排长时执行
   ↓
 系统验收与文档同步
 ```
 
 每一步只依赖前一步的公开输出。这样出现问题时可以判断是 contract、模块实现还是集成错误，而不是在端到端测试失败后跨层猜测。
+
+API 的一次业务动作应转交一个完整 application 用例。Worker 不套用这条形式约束：它是长时后台运算的守护进程，一个 attempt 可按公开任务 contract 调用多个 `application.worker` 阶段命令，由 application 依赖领域公开能力；Worker 不得穿透领域私有实现或复制领域规则。
 
 ## 测试层次
 

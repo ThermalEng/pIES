@@ -42,7 +42,7 @@
 
 #### 更新了什么
 
-- application 对 `iesplan.services` 零导入；旧 `services` 包删除；application 无裸表/裸 SQL；Worker 不再调用 commit/rollback，完整任务尝试事务由 `application.worker` 用例拥有。
+- application 对 `iesplan.services` 零导入；旧 `services` 包删除；application 无裸表/裸 SQL；Worker 不再调用 commit/rollback，领取、续租、进度和提交等每次短事务由 `application.worker` 命令拥有，长时 attempt 的运行编排由 Worker 拥有。
 - 各领域纵向收敛到唯一所有者：任务/结果/队列、项目/模型/包、配置/数据集、身份/审计的规则与 persistence 经领域公开门面消费，application 只做跨域编排与事务。
 - 计算未实现时显式返回结构化失败（`failed` + `TASK-SOLVE-001`），不再误判为 `lease_rejected`；`test_full_business_chain` 已按此拆分。
 - storage 不再反向依赖 audit，对象管理审计由 `application.objects` 用例在成功路径记录；幂等键正则收归 `iesplan.core.patterns`，API 的 `models.common` 豁免删除。

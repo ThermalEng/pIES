@@ -23,24 +23,27 @@ selector、命令注册与不可达计算主体已删除，analysis 已停止构
 ## 二、必须保持的最终方向
 
 ```text
-API / Worker
-    ↓ 每个外部动作只转交一个完整 application 用例
-application（授权组合、事务、步骤顺序、跨领域协调）
-    ↓
-领域公开门面 / 不可变 contract
-    ↓
-各领域自己的 persistence
-    ↓
-ORM / storage adapter
+HTTP → API → 一个完整 application 用例
+                    └→ 领域公开门面 / 各领域 persistence
+
+任务提示 → Worker 常驻守护进程（长任务运行编排与状态机）
+                 └→ application.worker 分阶段命令
+                           ├→ 权威状态短事务
+                           └→ 领域公开任务 handler / 计算执行协议
 ```
 
 0.8 计算仍未实现，本轮只保证不会从旧路径偏航：
 
 ```text
-application.worker
-    → GeneratorProvider → Solver Bundle → SolverRuntime → ResultAdapter
-    → ComputeResult → analysis / metrics
+Worker
+    └→ application.worker 分阶段命令
+         ├→ 领取/续租/进度/写入资格/提交的短事务
+         └→ GeneratorProvider → Solver Bundle → SolverRuntime → ResultAdapter
+                                                         └→ ComputeResult → analysis / metrics
 ```
+
+API 的“一个动作转交一个完整 application 用例”不得套用到 Worker。一个 Worker attempt
+本来就跨越多个短事务和执行阶段，数据库事务不得跨越长时运算。
 
 “复用”必须发生在稳定公开契约、无状态公共基元或领域公开能力上；复制规则、测试锁相等、换目录的转发层、
 把领域规则塞进 core、以及占位成功都不属于复用。
@@ -87,8 +90,10 @@ API 是纯传输适配层。
 
 整改要求：
 
-- Worker 只做领取、租约、取消检查点、调用一个 application.worker 用例、上报结果；
-- 证据读取、解析、评估、评分和业务 outcome 全部由 application 编排 results/analysis 公开能力完成；
+- Worker 保持为长时后台运算的守护进程，拥有领取、租约、心跳、取消、超时、重试、资源隔离、任务阶段编排和结果上报；
+- Worker 按运行时序调用多个 `application.worker` 阶段命令；由 application 调用注册的领域公开任务 handler、GeneratorProvider、SolverRuntime 和 ResultAdapter，继续保持宪法规定的 `worker → application → 领域模块` 依赖方向；
+- `execute_check` 所需的证据结构解释、评估维度、评分和业务 outcome 由 results/analysis 公开能力唯一拥有；application.worker 阶段命令调用该能力，Worker 根据显式结果 contract 驱动任务状态，不在本地复制规则；
+- 不得为了形式上“只调用一个用例”而新建包装整个长任务的 application handler，也不得让一个数据库事务持续到后台运算结束；
 - 尚未实现的 I/O 任务不得产生成功回执：删除未实现分派入口，或使用语义正确的结构化 unavailable/failure；
 - 若现有错误码没有适合 I/O 未实现的语义，先检查正式错误契约，再由 tasks 领域增加一个明确执行不可用错误并
   同步契约/测试；不得用 `TASK-SOLVE-001` 假装所有 I/O 都是求解错误；
@@ -170,8 +175,9 @@ API 可引用不可变公开 contract 做输入 DTO，ORM/DDL 可引用相应领
 
 ### Wave 2：Worker 职责与失败语义（串行集成，可分实现/测试两切片）
 
-- 把 report 检查下沉为 application.worker 完整用例，Worker 只调用；
-- 删除本地评估/评分/证据解释；
+- 保持 Worker 对 report/check 长任务的运行编排，把本地评估、评分和证据业务解释提升为 results/analysis 公开能力，并由 application.worker 阶段命令调用；
+- Worker 只传递不可变输入、调用该阶段命令并消费显式结果 contract，不复制其业务规则；
+- 领取、续租、进度和提交继续使用 application.worker 短事务命令，不建立包住整个 report/check 的长事务用例；
 - 删除 I/O placeholder success 和默认成功路径；
 - 保持计算类 0.8 未实现的结构化失败，不实现 Generator/Solver。
 
@@ -228,7 +234,7 @@ Muse 只能报告“实现完成，等待独立验收”，不得报告“最终
 
 1. API 每个业务动作只调用一个完整 application 用例，不组织授权、校验、配额与保存顺序；
 2. owner/admin 项目授权只有一个生产实现；
-3. Worker 不解释证据、不计算评估、不拥有业务 outcome 规则，未实现功能不会成功；
+3. Worker 是长时后台运算的守护进程并拥有运行编排；它不复制证据解释、评估计算或业务 outcome 规则，不穿透 ORM/persistence，未实现功能不会成功；
 4. identity/tasks/results 规则由各自领域公开能力唯一拥有，core 无领域业务规则；
 5. application 只保留跨域一致性、事务与步骤顺序，不依赖旧 engine 静态映射；
 6. 门禁能检出 import 穿透和本地职责复制，白名单/豁免准确且不形成第二份政策；

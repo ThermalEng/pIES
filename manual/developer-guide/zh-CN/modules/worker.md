@@ -4,9 +4,9 @@
 
 ## 作用
 
-`worker` 可靠地执行不能在 HTTP 请求中完成的工作，包括计算、规划、分析、数据处理和导出。它保证一个任务在重复领取、进程退出、超时和迟到提交等情况下仍只有可解释的权威结果。
+`worker` 是常驻后台守护进程，可靠地执行不能在 HTTP 请求中完成的长时工作，包括计算、规划、分析、数据处理和导出。它保证一个任务在重复领取、进程退出、超时和迟到提交等情况下仍只有可解释的权威结果。
 
-Worker 负责“可靠执行”，领域模块负责“怎样计算”。
+Worker 拥有长任务的运行编排和执行状态机；领域模块和计算 provider 负责“怎样计算”。Worker 不是只把任务转交给单个 application 用例的薄适配器。
 
 ## 边界
 
@@ -20,6 +20,13 @@ Worker 负责“可靠执行”，领域模块负责“怎样计算”。
 - 在租约仍有效时提交证据、结果或明确失败。
 
 模块不修改项目草稿、不补快照缺失输入、不选择最新数据、不实现设备公式，也不绕过 application/result 的写入资格检查。
+
+Worker 与 application 的边界是：
+
+- Worker 持续编排一次 attempt 的全部运行阶段，但代码依赖遵循 `worker → application → 领域模块`；
+- `application.worker` 分别为领取、续租、进度、写入资格、生成、执行、适配、领域任务运算、证据与终态提交提供公开阶段命令；
+- 数据库事务不跨越求解、分析或导出过程，Worker 也不直接 `commit/rollback` 或访问 ORM/persistence；
+- application 阶段命令通过领域公开门面完成业务计算，Worker 只根据公开结果 contract 驱动运行状态，不复制评分、结果解释或其他领域规则。
 
 用户算法插件是特例化执行载荷，不是 Worker 进程插件。普通 Worker 固定插件包与环境，仍依次调用通用沙箱 GeneratorProvider、SolverRuntime/ExecutorProvider 和 ResultAdapterProvider；这些 provider 通过公开内部协议分阶段调用独立 `plugin_runner`。Worker 不得把 ZIP 解压到自身代码目录、加入 `sys.path`、import 入口或向 runner 传递数据库/对象存储凭证。
 
@@ -61,13 +68,15 @@ ExecutionReceipt + 原始输出
 提交证据和终态
 ```
 
+上述是一个长运行状态机，不是一个持有数据库事务直到计算结束的 application 用例。每个权威状态读写由短事务命令完成，两次命令之间的长时计算由 Worker 持有租约并负责取消、超时和资源隔离。
+
 心跳和秒级进度可以是可重建状态；attempt、租约资格、任务终态和证据索引必须在权威数据库中。
 
 ## 增加任务类型
 
 1. 定义任务命令、快照输入、结果 contract 和幂等作用域；
 2. 确定属于 compute 还是 I/O 资源池；
-3. 注册公开任务 handler；计算任务只编排 generator/runtime/result adapter，并让 Worker 启动时验证精确版本可解析；
+3. 在 application 公开边界注册分阶段任务命令；Worker 编排计算任务的 generator/runtime/result adapter 顺序，各阶段由 application 调用领域公开能力，并在 Worker 启动时确认精确版本可解析；
 4. 明确取消检查点、超时、资源限制和可重试错误；
 5. 通过公开模块门面执行，不在 Worker 复制领域逻辑；
 6. 定义证据提交及迟到写入拒绝；
@@ -86,7 +95,7 @@ ExecutionReceipt + 原始输出
 
 - Worker 只消费不可变快照，不读取当前草稿；
 - 队列、心跳和缓存可重建，不是权威事实；
-- 结果提交必须校验 task、attempt、token 和状态；
+- 结果提交必须按任务领域的公开状态转换确认 task、attempt、token 和状态；这是租约与权威写入规则，不是文件完整性复核；
 - 重试沿用同一逻辑输入，输入改变必须新建任务；
 - 资源隔离、超时和取消不能依赖求解器自觉返回；
 - Worker 不解释装配字段、不拼命令字符串、不根据 solver 名称添加分支；

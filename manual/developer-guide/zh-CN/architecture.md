@@ -22,16 +22,18 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
      应用用例层 ──────→ 权威数据库
         │       └─────→ 对象存储
         ├──→ 领域模块
-        └──→ 任务与快照 ──→ Worker ──→ 生成器 ──→ Solver Bundle
-                                  └──→ 求解运行时 ──→ 结果适配/分析
-                                                └──→ 证据与结果
+        └──→ 任务与冻结快照 ──→ Worker 守护进程
+                                      └──→ application.worker 分阶段命令
+                                                ├──→ GeneratorProvider ──→ Solver Bundle
+                                                ├──→ SolverRuntime ──→ ResultAdapter
+                                                └──→ analysis / 任务 handler / 证据与结果
 ```
 
 - 浏览器拥有展示状态和未提交表单，不拥有业务事实；
 - API 负责传输，application 负责一次业务动作；
 - 领域模块拥有各自规则和公开输入输出；
 - 数据库保存事务事实，对象存储保存不可变大内容；
-- Worker 只消费冻结快照，不能回读变化中的草稿；
+- Worker 是执行长时后台运算的常驻守护进程，拥有任务运行编排与执行状态机；它只消费冻结快照，不能回读变化中的草稿；
 - 帮助中心由正式文档静态生成，不依赖业务服务可用。
 
 ## 核心业务流
@@ -126,18 +128,19 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 ## 依赖方向
 
 ```text
-外部请求 / Worker 触发
-          ↓
-      api / worker
-          ↓
-      application
-          ↓
-devices · modeling · assembly · computation · finance · analysis · storage
-          ↓
-         core
+外部请求 → api → application 用例 → 领域公开能力
+
+任务提示 → worker 守护进程
+                 └→ application.worker 命令
+                           ├→ 领取、租约、进度、提交等短事务
+                           └→ 分阶段调用领域任务 handler / GeneratorProvider / SolverRuntime / ResultAdapter
+
+application · worker · 领域模块 → core
 ```
 
-业务模块只能调用对方公开门面、实现公开 provider、传递不可变契约或发布版本化事件。跨模块不得读取私有符号、内部注册表、文件路径 helper、持久化实现或对方 ORM。
+API 以一个完整 application 用例表达一次同步业务动作。Worker 不是 application 的薄适配器：它跨越多个短事务和执行阶段，持有长任务的租约、取消、超时、重试与资源隔离状态。Worker 按运行时序多次调用 `application.worker` 的公开阶段命令，由后者依赖领域公开能力；不得把整个长运算包进一个数据库事务或单一 application handler。
+
+各调用方只能调用对方公开门面、实现公开 provider、传递不可变契约或发布版本化事件。跨模块不得读取私有符号、内部注册表、文件路径 helper、持久化实现或对方 ORM。
 
 组合根是唯一选择具体 provider、完成注入和启动校验的位置。各业务模块拥有自己的注册状态，组合根不能把它们合并成新的全局权威表。
 
@@ -154,7 +157,7 @@ devices · modeling · assembly · computation · finance · analysis · storage
 7. 新增的是求解器输出解释吗？进入 result adapter；
 8. 新增的是财务口径或结果比较吗？分别进入 finance 或 analysis；
 9. 新增的是一次跨模块用户动作吗？由 application 编排；
-10. HTTP、后台执行和页面只分别适配已有用例、任务 contract 和公开 DTO。
+10. HTTP 与页面只适配已有用例和公开 DTO；后台长任务由 Worker 守护进程按任务 contract 编排公开执行能力。
 
 网页属性配置、在线 YAML 编辑和 YAML 上传必须汇合为同一个规范设备内容；设备发布只以统一 schema 版本和发布修订固定，不产生独立设备语义版本。算法插件 ZIP 可以在运行期进入用户目录，但只能作为任务载荷由通用隔离运行器执行；这不是把用户模块加入 API/Worker 的 Python 环境或模块注册表。
 

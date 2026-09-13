@@ -21,6 +21,8 @@
 
 应用层不实现设备公式、单位换算、求解算法或 BlobStore 路径，也不接触 HTTP Cookie、React 状态和模块私有 ORM。
 
+Application 不拥有长时后台运算的执行状态机。它在提交阶段完成授权、校验、快照冻结和任务创建；任务被领取后，Worker 守护进程负责长时运行编排。`application.worker` 向 Worker 提供权威状态读写的短事务命令，以及分别调用生成、执行、结果适配和其他领域任务能力的阶段命令；它不把整个求解、分析、导出或插件运行包装成单一 application handler。调用长时计算阶段时不持有数据库事务。
+
 ## 输入与输出
 
 | 输入 | 说明 |
@@ -106,7 +108,7 @@
 4. 画出事务内写入、对象操作和异步任务的顺序；
 5. 为已明确发生的跨数据库/对象系统中断设计幂等重试；
 6. 先写 application 测试，覆盖成功、权限、冲突和中途失败；
-7. 再由 API 或 Worker 适配，不让传输细节回流。
+7. 同步用例由 API 适配；若该动作只是长任务的一个权威状态操作，由 Worker 调用相应短事务命令，不让传输或守护进程细节回流。
 
 ## 典型示例：提交计算
 
@@ -137,7 +139,7 @@ Application 不生成 Solver Bundle。计算 Worker 在同一冻结快照上把 
 
 ## 必须遵循的规范
 
-- application 是事务唯一所有者；
+- application 是每次业务数据库事务的唯一所有者；长时 Worker attempt 由多个独立短事务和中间执行阶段组成；
 - 授权必须发生在后端用例中，不能信任前端隐藏按钮；
 - 不直接导入其他模块私有 repository、persistence 或 ORM；
 - 长任务只创建任务和快照，不在请求线程执行；
@@ -149,7 +151,7 @@ Application 不生成 Solver Bundle。计算 Worker 在同一冻结快照上把 
 - 成功、无权限、不存在、冲突、幂等重复和中途失败均有用例测试；
 - 事务中没有下层全局 rollback；
 - 对象引用、审计和业务资源生命周期同步；
-- 一个用例可以被 HTTP、Worker 或命令行适配复用；
+- 一个同步用例可以被 HTTP 或命令行适配复用；Worker 依赖任务 contract 与 `application.worker` 的分阶段命令，不要求一个 handler 包住整个长任务；
 - 当前 `services/` 中的职责迁移有明确归属，新增代码不继续形成无边界杂物层。
 
 阅读当前代码时，从对应业务 service 的公开函数与 API 调用关系入手，并按本章判断它最终应归属的 application 用例；迁移完成后从 `application/<use-case>/` 的命令、结果和 handler 开始。
