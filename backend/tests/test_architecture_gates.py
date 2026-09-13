@@ -11,8 +11,9 @@
 (AST import 与调用点), 不锁定私有符号名, 不阻止未来正式实现;
 语义行为由行为测试证明。
 
-债务语义: 现有违规收敛到 WHITELIST_* / TEMP_DEBT_* 常量, 集合须与实测
-精确相等(新增与过期都失败); 整改后移除条目, 清空后转为硬强制。
+稳定允许项只有三类(各见对应门禁注释): models.common 共享基元复用、
+无状态领域公开纯函数复用、不可变 contract 复用; 其余门禁均为硬强制,
+检出即失败。
 
 实现约束: 纯标准库(ast/pathlib)读取源码文本, 绝不 import 业务模块。
 """
@@ -34,54 +35,27 @@ _APPLICATION_DIR = _PKG_ROOT / "application"
 
 #: 架构门禁中视为"业务模块"的 iesplan 顶层子包(core 一律禁止依赖)。
 #: 判定规则见 _is_business_import: 允许根包 iesplan(仅 __version__)与
-#: iesplan.core 子树, 其余 iesplan.* 子包(services/api/models/storage/worker/
+#: iesplan.core 子树, 其余 iesplan.* 子包(api/models/storage/worker/
 #: engines/analysis/…)均视为业务模块。
 
 # ---------------------------------------------------------------------------
-# 门禁 1 白名单: core → 业务模块 依赖
+# 门禁 1: core → 业务模块依赖(硬强制)
 # ---------------------------------------------------------------------------
-# 基线核查(2026-08-23): backend/iesplan/core/ 全部 .py 仅 import 标准库、第三方
-# 与 iesplan.core.*, 无业务模块依赖, 基线全绿。
-# 若未来确需豁免, 需人工评审架构影响后在此登记 {(模块路径, 行号): 理由}。
-WHITELIST_CORE_BUSINESS_DEPS: dict[tuple[str, int], str] = {}
+# core 不得依赖任何业务模块, 检出即失败。
 
 # ---------------------------------------------------------------------------
-# 门禁 2 白名单: 跨模块私有符号导入 (键 = (模块路径, 符号))
+# 门禁 2: 跨模块私有符号导入(硬强制)
 # ---------------------------------------------------------------------------
-# 符号形式:
+# 覆盖形式:
 #   - 导入语句: from X import _y / import X._y(imported 名字以下划线开头,
 #     排除 __dunder__(如 __version__ 属公开约定));
-#   - 属性访问: 模块别名上的私有属性, 如 config_service._row_to_config。
-# 每条目均需整改: 提升为公开 API 或改为公开等价调用, 整改后移除条目。
-WHITELIST_PRIVATE_IMPORTS: dict[tuple[str, str], str] = {
-    # (Wave 5 集成: analysis 两 wrapper 辅助与 engines eval_run 取参函数已提升
-    #  为公开 API, 移除 3 项; 白名单清空。)
-    # (Wave 1 集成: assembly 收敛为 parser→context→rules→validator→artifact,
-    #  共享能力经 context 公开, 4 项私有复用已消除, 移除本组。)
-    # worker → analysis 私有穿透已整改(0.6.5): 符号提升为 analysis 公开 API。
-    # ---- api → services: API 层直接访问服务私有函数 ----
-    # (Wave 3 集成: config._row_to_config 私有访问随 calc_config 用例消除;
-    #  projects._is_admin 私有访问随 application 迁移消除, 移除两项)
-    # (Wave 2 集成: services.identity 已删除，delete_user 改经 audit 域门面，移除本项)
-}
+#   - 属性访问: 已导入模块别名上的私有属性(如 svc._helper)。
 
 # ---------------------------------------------------------------------------
-# 门禁 3 白名单: api → ORM 直接导入 (键 = (模块路径, 行号), 值为该行豁免的符号集)
+# 门禁 3: api → ORM 直接导入(硬强制)
 # ---------------------------------------------------------------------------
-# 仅豁免导入语句本身及其列出的符号: 同文件新行导入新 ORM 符号仍会报错。
-# 每条目均需整改: 经 services 公开面访问数据, 整改后移除条目。
-WHITELIST_API_ORM: dict[tuple[str, int], frozenset[str]] = {
-    # ---- admin.py: 管理端运维直接查询 ORM ----
-    # (Wave 5 集成: admin 改经 application 用例取数, 移除 4 项)
-    # ---- health.py: 健康检查直接计数 ORM ----
-    # (Wave 4 集成: health 改经 application.health 只读探针, 移除 3 项)
-    # ---- results.py: 结果查询任务状态与校验正则 ----
-    # (切片 5: assess 端点经 tasks_service.ensure_task_belongs 取任务, 移除 Task)
-    # (Wave 3 集成: results.py 改经 application 用例, HASH64_RE 直引已消除)
-    # (Wave 4 集成: limits 配额统计收敛到 datasets.quotas, auth 会话取数收敛到
-    #  identity 门面, objects 归属校验收敛到 application.objects, 移除 4 项)
-    # (Wave 4 集成: tasks.py 幂等键正则改接 tasks 域门面, 豁免删除)
-}
+# 扫描 api 下 iesplan.models.* 与 iesplan.db 会话符号导入, 检出即失败。
+# get_db 依赖注入合法, 不在扫描范围。
 
 #: iesplan.db 中禁止 api 直接导入的 ORM 会话符号(get_db 依赖注入本身合法, 不在列)
 _DB_ORM_NAMES = frozenset({"Base", "Session", "sessionmaker", "session"})
@@ -136,7 +110,7 @@ def _is_business_import(module: str) -> bool:
     """门禁 1 判定: module 是否为 core 禁止依赖的业务模块。
 
     允许: 根包 iesplan(仅 __version__)与 iesplan.core 子树;
-    其余 iesplan.* 子包(services/api/models/storage/worker/engines/…)均禁止。
+    其余 iesplan.* 子包(api/models/storage/worker/engines/…)均禁止。
     """
     if not module.startswith("iesplan."):
         return False
@@ -244,81 +218,55 @@ def _find_api_orm_imports(
 
 
 def test_core_no_business_dependencies():
-    """架构门禁: 禁止 core 依赖业务模块(宪法 §14.2)。基线全绿, 新增即报错。"""
+    """架构门禁: 禁止 core 依赖业务模块(宪法 §14.2)。"""
     detected = _find_core_business_imports()
-    new = [(m, line, src) for (m, line, src) in detected if (m, line) not in WHITELIST_CORE_BUSINESS_DEPS]
-    assert not new, f"core 依赖业务模块(新增违规, 需整改或登记白名单): {new}"
+    assert not detected, f"core 依赖业务模块: {detected}"
 
 
 def test_no_cross_module_private_imports():
-    """架构门禁: 禁止跨模块导入私有符号(宪法 §14.2)。现状违规在白名单, 新增即报错。"""
+    """架构门禁: 禁止跨模块导入私有符号(宪法 §14.2)。"""
     detected = _find_private_symbol_imports()
-    new = [(m, s) for (m, s) in detected if (m, s) not in WHITELIST_PRIVATE_IMPORTS]
-    assert not new, f"跨模块私有符号导入(新增违规, 需整改或登记白名单): {new}"
+    assert not detected, f"跨模块私有符号导入: {detected}"
 
 
 def test_api_no_direct_orm_imports():
-    """架构门禁: 禁止 API 直接导入 ORM(宪法 §14.2, get_db 依赖注入合法)。
-
-    白名单按 (模块, 行号) 豁免, 并校验该行导入符号 ⊆ 白名单符号集,
-    同文件新行或白名单行新增符号都会报错。
-    """
+    """架构门禁: 禁止 API 直接导入 ORM(宪法 §14.2, get_db 依赖注入合法)。"""
     detected = _find_api_orm_imports()
-    new: list[tuple[str, int, list[str]]] = []
-    for mod, line, symbols in detected:
-        allowed = WHITELIST_API_ORM.get((mod, line))
-        if allowed is None or not symbols.issubset(allowed):
-            new.append((mod, line, sorted(symbols)))
-    assert not new, f"API 直接导入 ORM(新增违规, 需整改或登记白名单): {new}"
+    assert not detected, f"API 直接导入 ORM: {detected}"
 
 
 def test_worker_no_direct_orm_imports():
-    """架构门禁: 禁止 Worker 直接导入 ORM(最终验收矩阵, ORM 查询归 application.worker)。
+    """架构门禁: 禁止 Worker 直接导入 ORM(ORM 查询归 application.worker)。
 
-    无白名单, 硬强制: worker 下出现 iesplan.models.* 或 iesplan.db 会话符号
-    导入即失败。
+    硬强制: worker 下出现 iesplan.models.* 或 iesplan.db 会话符号导入即失败。
     """
     detected = _find_api_orm_imports(scan_root=_WORKER_DIR)
     assert not detected, f"Worker 直接导入 ORM(需上收至 application.worker 用例): {detected}"
 
 
 # ---------------------------------------------------------------------------
-# 门禁 4 白名单: api → 事务提交 (键 = (模块路径, 行号))
+# 门禁 4: api → 事务提交(硬强制)
 # ---------------------------------------------------------------------------
-# 基线核查(2026-09-11, 解耦重构切片 1): API 层共 36 处 .commit() 调用, 事务
-# 所有权落在路由层, 违反"事务只由 application 提交/回滚"(宪法 §5.4)。
-# 后续切片按资源域迁移到 application 用例后逐条移除; 白名单清空后硬强制。
-WHITELIST_API_COMMIT: set[tuple[str, int]] = set()
-# (Wave 5 集成: admin 运维解锁提交已上收至 application 用例, 白名单清空。)
+# 事务只由 application 提交/回滚(宪法 §5.4); api 下出现 .commit()/.rollback()
+# 调用即失败。
 
 # ---------------------------------------------------------------------------
-# 门禁 6 白名单: worker → services 直接依赖 (键 = (worker 模块, services 目标))
+# 门禁 6: worker → services 直接依赖(硬强制)
 # ---------------------------------------------------------------------------
-# 基线核查(2026-09-11, 切片 1): Worker 直接读取业务 service, 任务执行边界锁死
-# 在领域实现上。目标是业务快照读取与跨模块编排移入 application.worker, worker
-# 只保留领取任务、租约、取消、分派和结果提交。迁移后逐项移除。
-WHITELIST_WORKER_SERVICES: set[tuple[str, str]] = set()
-# (Wave 3 集成: lease/runner/main/executors 的 services 直引已上收至
-#  application.worker 用例, 白名单清空。)
+# 业务快照读取与跨模块编排归 application.worker; worker 下出现
+# iesplan.services.* 导入即失败。
 
 # ---------------------------------------------------------------------------
-# 门禁 7 白名单: analysis → 计算执行直接依赖 (键 = (analysis 模块, 目标))
+# 门禁 7: analysis → 计算执行直接依赖(硬强制)
 # ---------------------------------------------------------------------------
-# 基线核查(2026-09-11, 切片 1): analysis 直接驱动旧计算引擎/拼装 plan/调用
-# services, 结果分析与计算执行无法分别演进。目标是 analysis 只消费 ComputeResult、
-# ExecutionReceipt 与声明输出。0.8 计算链实现前计算入口保持显式未实现, 不恢复
-# 旧命令注册表或旧机理函数。迁移后逐项移除。
-# (Wave 1 集成: analysis 只消费计算结果/回执/声明输出, engines/services/
-#  assembly.plan 直接依赖已删除, 白名单清空。Worker 侧调用归 Wave 4。)
-WHITELIST_ANALYSIS_ENGINE: set[tuple[str, str]] = set()
+# analysis 只消费 ComputeResult、ExecutionReceipt 与声明输出; 出现
+# engines/services/assembly.plan 导入即失败。
 
 # ---------------------------------------------------------------------------
-# 门禁 8: 表归属清单 + 跨表访问白名单 (键 = (访问方模块, models 子模块))
+# 门禁 8: 表归属清单 + 跨表访问允许项 (键 = (访问方模块, models 子模块))
 # ---------------------------------------------------------------------------
-# TABLE_OWNERS 声明每张业务表(以 models 子模块计)的唯一领域归属; 跨归属访问
-# 必须登记在 WHITELIST_CROSS_MODEL_IMPORTS, 新增跨表访问直接失败。后续切片按
-# project → identity → dataset → config → task → result → package 顺序把 ORM 查询
-# 收敛到归属领域 repository, 每收敛一条就从白名单移除一项。
+# TABLE_OWNERS 声明每张业务表(以 models 子模块计)的唯一领域归属; 除下述
+# 稳定允许项外, 跨归属访问直接失败。
 # 说明: models.common 仅为共享基元(bigint_pk/正则, 无业务表); models.__init__
 # 为兼容重导出, 不视为领域归属。
 TABLE_OWNERS: dict[str, str] = {
@@ -338,13 +286,9 @@ TABLE_OWNERS: dict[str, str] = {
     "uncertainty": "uncertainty",
 }
 
-WHITELIST_CROSS_MODEL_IMPORTS: set[tuple[str, str]] = {
-    # Wave 0 收口(基线 1a07146, 全仓 AST 实测): 检测仅剩以下 2 项, 白名单与之精确相等。
-    # 过期删除 11 项: services.tasks→common(services 包已删, 不可达);
-    # project.persistence→project(project/ 不在 _SCAN_OWNERSHIP_DIRS, 永不可达);
-    # worker 9 项(lease/executors/runner 跨表直引已收敛, 实测为零)。
-    # (Wave 1-A 已删除穿透 helper, 债务归零, 移除本项)
-    # 永久允许: models.common 仅共享基元(bigint_pk/正则, 无业务表), 非跨域业务访问。
+#: 稳定允许项: models.common 仅含无业务表的共享基元(bigint_pk/
+#: 正则), 引用它不构成跨域业务访问, 故 storage.persistence 对其复用始终允许。
+ALLOWED_SHARED_PRIMITIVE_IMPORTS: set[tuple[str, str]] = {
     ("iesplan.storage.persistence", "common"),
 }
 
@@ -442,44 +386,37 @@ def _find_cross_model_imports(pkg_root: Path = _PKG_ROOT) -> set[tuple[str, str]
 
 
 def test_api_no_transaction_commit():
-    """架构门禁: API 不得提交/回滚事务(宪法 §5.4)。现状 36 处在白名单, 新增即报错。"""
+    """架构门禁: API 不得提交/回滚事务(宪法 §5.4, 事务只归 application)。"""
     detected = _find_api_commit_calls()
-    new = [(m, line) for (m, line) in detected if (m, line) not in WHITELIST_API_COMMIT]
-    assert not new, f"API 层新增事务提交/回滚(需迁移到 application 用例): {new}"
+    assert not detected, f"API 层事务提交/回滚(须迁移到 application 用例): {detected}"
 
 
 def test_worker_no_direct_domain_services():
-    """架构门禁: Worker 不得直接依赖 services(切片 1 基线, 迁移后逐项移除白名单)。"""
+    """架构门禁: Worker 不得直接依赖 services(业务快照读取与编排归 application.worker)。"""
     detected = _find_worker_service_imports()
-    new = sorted((m, t) for (m, t) in detected if (m, t) not in WHITELIST_WORKER_SERVICES)
-    assert not new, f"Worker 新增 services 直接依赖(需经 application.worker 边界): {new}"
+    assert not detected, f"Worker 直接依赖 services(须经 application.worker 边界): {sorted(detected)}"
 
 
 def test_analysis_no_direct_engine_or_services():
-    """架构门禁: analysis 不得直接驱动引擎/services/拼装 plan(切片 1 基线)。"""
+    """架构门禁: analysis 不得直接驱动引擎/services/拼装 plan(只消费统一计算结果与声明输出)。"""
     detected = _find_analysis_engine_imports()
-    new = sorted((m, t) for (m, t) in detected if (m, t) not in WHITELIST_ANALYSIS_ENGINE)
-    assert not new, f"analysis 新增计算执行直接依赖(目标只消费 ComputeResult/回执/声明输出): {new}"
+    assert not detected, f"analysis 计算执行直接依赖: {sorted(detected)}"
 
 
 def test_table_ownership_no_new_cross_imports():
-    """架构门禁: 跨表 ORM 访问白名单必须与检测精确相等(新增与过期都失败)。
-
-    Wave 0 收口: 白名单已按基线实测裁剪, 后续波次逐项归零(仅 models.common 共享基元永久允许)。
-    """
+    """架构门禁: 跨表 ORM 访问只允许稳定允许项(见 ALLOWED_SHARED_PRIMITIVE_IMPORTS)。"""
     detected = _find_cross_model_imports()
-    assert detected == WHITELIST_CROSS_MODEL_IMPORTS, (
-        f"跨表 ORM 访问债务漂移(新增: {sorted(detected - WHITELIST_CROSS_MODEL_IMPORTS)}, "
-        f"过期: {sorted(WHITELIST_CROSS_MODEL_IMPORTS - detected)})"
+    assert detected == ALLOWED_SHARED_PRIMITIVE_IMPORTS, (
+        f"跨表 ORM 访问变化(新增: {sorted(detected - ALLOWED_SHARED_PRIMITIVE_IMPORTS)}, "
+        f"缺失: {sorted(ALLOWED_SHARED_PRIMITIVE_IMPORTS - detected)})"
     )
 
 
 # ---------------------------------------------------------------------------
-# 纠偏 Wave 0 门禁: application/services 残留、application 裸表/SQL、Worker 事务
+# 门禁 9–11: application/services 残留、application 裸表/SQL、Worker 事务(硬强制)
 # ---------------------------------------------------------------------------
-# 审查裁决(fe3d83b): application 直调旧 services、application 内重声明表/裸 SQL、
-# Worker 持有 commit/rollback。以下三门禁检测真实形态, 临时债务集合必须与检测
-# 结果精确相等(漏报与过期项都失败); 纠偏波次逐项归零, 最终验收时全部为空。
+# application 不得导入 iesplan.services, 不得在应用层重声明表/裸 SQL;
+# Worker 不得持有 commit/rollback。检出即失败。
 
 
 def _find_app_service_imports(
@@ -500,10 +437,6 @@ def _find_app_service_imports(
                     if a.name == "iesplan.services" or a.name.startswith("iesplan.services."):
                         found.append((mod, node.lineno, a.name))
     return sorted(found)
-
-
-#: 门禁 9 临时债务: application → services 直调(C1-A/B/C/D 已全部归零)。
-TEMP_DEBT_APP_SERVICES: set[tuple[str, int, str]] = set()
 
 
 def _find_app_bare_sql(
@@ -528,10 +461,6 @@ def _find_app_bare_sql(
     return sorted(found)
 
 
-#: 门禁 10 临时债务: application 裸表/裸 SQL(C1-A 已随领域收敛归零)。
-TEMP_DEBT_APP_BARE_SQL: set[tuple[str, int, str]] = set()
-
-
 def _find_worker_transactions(
     scan_root: Path = _WORKER_DIR, pkg_root: Path = _PKG_ROOT
 ) -> list[tuple[str, int, str]]:
@@ -549,38 +478,22 @@ def _find_worker_transactions(
     return sorted(found)
 
 
-#: 门禁 11 临时债务: Worker 事务调用(纠偏 Wave 3 已上收 application.worker, 归零)。
-TEMP_DEBT_WORKER_TX: set[tuple[str, int, str]] = set()
-
-
 def test_application_no_direct_services():
-    """架构门禁 9: application 禁止导入 iesplan.services(纠偏最终零导入)。
-
-    临时债务集合必须与检测结果精确相等: 新增直调失败, 已整改未移除条目也失败。
-    """
+    """架构门禁 9: application 禁止导入 iesplan.services。"""
     detected = set(_find_app_service_imports())
-    assert detected == TEMP_DEBT_APP_SERVICES, (
-        f"application→services 债务漂移(新增: {sorted(detected - TEMP_DEBT_APP_SERVICES)}, "
-        f"过期: {sorted(TEMP_DEBT_APP_SERVICES - detected)})"
-    )
+    assert not detected, f"application→services 直调: {sorted(detected)}"
 
 
 def test_application_no_bare_sql():
     """架构门禁 10: application 禁止裸表/SQL(表真相只归领域 persistence)。"""
     detected = set(_find_app_bare_sql())
-    assert detected == TEMP_DEBT_APP_BARE_SQL, (
-        f"application 裸表/SQL 债务漂移(新增: {sorted(detected - TEMP_DEBT_APP_BARE_SQL)}, "
-        f"过期: {sorted(TEMP_DEBT_APP_BARE_SQL - detected)})"
-    )
+    assert not detected, f"application 裸表/SQL: {sorted(detected)}"
 
 
 def test_worker_no_transactions():
     """架构门禁 11: Worker 禁止 commit/rollback(事务归 application.worker 用例)。"""
     detected = set(_find_worker_transactions())
-    assert detected == TEMP_DEBT_WORKER_TX, (
-        f"Worker 事务债务漂移(新增: {sorted(detected - TEMP_DEBT_WORKER_TX)}, "
-        f"过期: {sorted(TEMP_DEBT_WORKER_TX - detected)})"
-    )
+    assert not detected, f"Worker 事务调用: {sorted(detected)}"
 
 
 # ---------------------------------------------------------------------------
@@ -629,20 +542,13 @@ def test_gate_relative_target_levels():
 
 
 # ---------------------------------------------------------------------------
-# 最终收口 Wave 0 门禁 12–16: 依赖方向债务(全仓 AST 实测建档, 精确相等)
+# 门禁 12–16: 依赖方向门禁(硬强制)
 # ---------------------------------------------------------------------------
-# 临时指导 docs/development/backend-decoupling-finalization.md §五 Wave 0:
-# 记录真实生产依赖图, 把债务集合改为与检测精确相等, 删除过期条目, 并新增
-# application→models/ORM、API 直接调用领域行为、禁止的领域间依赖、Worker
-# 计算穿透、analysis 驱动 engine 五类门禁。每项门禁与对应整改在同一可通过
-# 切片落地: 本文件只建门禁并如实记录现状债务(全绿), 整改由 Wave 1–4 执行。
-#
-# 设计约束(同 §五 Wave 0): 门禁只查依赖事实(AST import), 不绑定私有文件名
-# 与行号(键为 (模块, 目标域), 同一模块多行合并为一项), 不强迫多一层包装,
-# 不复制被测实现。sqlalchemy Session 类型注解属事务管道, 不在 ORM 门禁之列;
-# 他域 *.contracts/contracts2 属不可变 contract 复用, 始终允许。
+# 门禁只查依赖事实(AST import), 键为 (模块, 目标域)(同一模块多行合并为一项),
+# 不绑定私有文件名与行号。sqlalchemy Session 类型注解属事务管道, 不在 ORM
+# 门禁之列; 他域 contracts/contracts2 属不可变 contract 复用, 始终允许。
 
-#: Wave 0 门禁 12–16 共用的业务域包集合(均有 __init__ 公开门面; core/config/db/models 不在列)。
+#: 门禁 12–16 共用的业务域包集合(均有 __init__ 公开门面; core/config/db/models 不在列)。
 _WAVE0_DOMAIN_PKGS: frozenset[str] = frozenset(
     {
         "audit",
@@ -664,10 +570,10 @@ _WAVE0_DOMAIN_PKGS: frozenset[str] = frozenset(
     }
 )
 
-#: Wave 0 门禁 15/16 的计算执行包集合(Worker/analysis 禁止穿透)。
+#: 门禁 15/16 的计算执行包集合(Worker/analysis 禁止穿透)。
 _WAVE0_COMPUTE_PKGS: frozenset[str] = frozenset({"engines", "metrics", "finance", "analysis", "assembly"})
 
-#: Wave 0 门禁 16 的 analysis 禁止驱动集合(计算执行 + 旧链 services + 任务执行 worker)。
+#: 门禁 16 的 analysis 禁止驱动集合(计算执行包 + services + 任务执行 worker)。
 _WAVE0_ANALYSIS_FORBIDDEN_PKGS: frozenset[str] = frozenset(
     {"engines", "assembly", "services", "finance", "metrics", "worker"}
 )
@@ -684,14 +590,14 @@ def _is_contract_target(target: str) -> bool:
     return ".contracts" in target or "contracts2" in target
 
 
-#: 常设复用豁免(非临时债务): (导入方模块前缀, 目标模块前缀)。
-#: Wave 3-B: 四维评估规则归 results 域所有, 其状态词汇与 IRR 分类仍以
-#: 无状态的 iesplan.metrics.validity / iesplan.metrics.financial 为唯一权威
-#: (收口 §六“领域公开纯函数”复用, 不复制枚举值)。仅豁免 results 域对该两
-#: 模块的导入; results 对 metrics 其他子模块的导入仍记债务。
-#: Wave 5: engines/planning 对 metrics.financial 的复用同属此类
-#: (metrics.financial 仅依赖标准库/numpy 的纯计算; planning 取现金流/NPV/IRR
-#: 纯函数与 IRRStatus 做候选评分, 引擎内评估, 非跨域业务组合)。
+#: 常设复用豁免: (导入方模块前缀, 目标模块前缀)。
+#: 四维评估规则归 results 域所有, 其状态词汇与 IRR 分类仍以无状态的
+#: iesplan.metrics.validity / iesplan.metrics.financial 为唯一权威(领域公开
+#: 纯函数复用, 不复制枚举值)。仅豁免 results 域对该两模块的导入; results
+#: 对 metrics 其他子模块的导入仍属违规。
+#: engines 内评估对 metrics.financial 的复用同属此类(metrics.financial 仅依赖
+#: 标准库/numpy 的纯计算; 取现金流/NPV/IRR 纯函数与 IRRStatus 做候选评分,
+#: 引擎内评估, 非跨域业务组合)。
 _WAVE0_STATE_MODEL_REUSE: frozenset[tuple[str, str]] = frozenset(
     {
         ("iesplan.results", "iesplan.metrics.validity"),
@@ -778,41 +684,19 @@ def _find_application_orm_imports(
     return found
 
 
-#: 门禁 12 临时债务: application → models/ORM(Wave 1-A 已删除穿透 helper, 归零)。
-TEMP_DEBT_APP_ORM: set[tuple[str, str]] = set()
-
-
 def test_application_no_models_orm():
-    """架构门禁 12: application 禁止直引 iesplan.models/ORM(表真相只归领域 persistence)。
-
-    临时债务集合必须与检测结果精确相等: 新增穿透失败, 已整改未移除条目也失败。
-    """
+    """架构门禁 12: application 禁止直引 iesplan.models/ORM(表真相只归领域 persistence)。"""
     detected = _find_application_orm_imports()
-    assert detected == TEMP_DEBT_APP_ORM, (
-        f"application→models/ORM 债务漂移(新增: {sorted(detected - TEMP_DEBT_APP_ORM)}, "
-        f"过期: {sorted(TEMP_DEBT_APP_ORM - detected)})"
-    )
-
-
-#: 门禁 13 临时债务: API 直接调用领域行为(归零)。
-#: Wave 2-A: config/model/validation 的授权与设备选择器收进 application 用例
-#: (authorization/selector); Wave 2-C: tasks 幂等键正则改接 core.patterns 权威;
-#: R2 Wave 3-D: 用户名/邮箱/幂等键规则回归 identity/tasks contracts, core.patterns 删除。
-#: api/auth 经 identity.contracts 属 DTO 传输映射, 不在债务之列。
-TEMP_DEBT_API_DOMAIN_BEHAVIOR: set[tuple[str, str]] = set()
+    assert not detected, f"application→models/ORM 穿透: {sorted(detected)}"
 
 
 def test_api_no_direct_domain_behavior():
     """架构门禁 13: API 禁止直接调用领域行为组织业务(只调完整 application 用例)。
 
-    领域 *.contracts DTO 复用允许; 其余领域根包/行为子模块导入即记债务。
-    临时债务集合必须与检测结果精确相等。
+    领域 *.contracts DTO 复用允许; 其余领域根包/行为子模块导入即违规。
     """
     detected = _iter_domain_imports(_API_DIR, _WAVE0_DOMAIN_PKGS)
-    assert detected == TEMP_DEBT_API_DOMAIN_BEHAVIOR, (
-        f"API→领域行为债务漂移(新增: {sorted(detected - TEMP_DEBT_API_DOMAIN_BEHAVIOR)}, "
-        f"过期: {sorted(TEMP_DEBT_API_DOMAIN_BEHAVIOR - detected)})"
-    )
+    assert not detected, f"API→领域行为直调: {sorted(detected)}"
 
 
 def _find_cross_domain_behavior_imports(pkg_root: Path = _PKG_ROOT) -> set[tuple[str, str]]:
@@ -833,101 +717,35 @@ def _find_cross_domain_behavior_imports(pkg_root: Path = _PKG_ROOT) -> set[tuple
     return found
 
 
-#: 门禁 14 临时债务: 禁止的领域间依赖(归零)。
-#: results/engines 对 metrics 纯函数与状态词汇的复用属常设豁免
-#: (见 _WAVE0_STATE_MODEL_REUSE), 不记入本债务集合。
-TEMP_DEBT_CROSS_DOMAIN: set[tuple[str, str]] = set()
-
-
 def test_no_forbidden_cross_domain_deps():
-    """架构门禁 14: 禁止领域间直接业务依赖(跨域组合只归 application)。
-
-    临时债务集合必须与检测结果精确相等。
-    """
+    """架构门禁 14: 禁止领域间直接业务依赖(跨域组合只归 application)。"""
     detected = _find_cross_domain_behavior_imports()
-    assert detected == TEMP_DEBT_CROSS_DOMAIN, (
-        f"领域间依赖债务漂移(新增: {sorted(detected - TEMP_DEBT_CROSS_DOMAIN)}, "
-        f"过期: {sorted(TEMP_DEBT_CROSS_DOMAIN - detected)})"
-    )
-
-
-#: 门禁 15 临时债务: Worker 计算穿透(Wave 4-A 已删除 executors 旧计算链,
-#: engines/metrics/finance/analysis 穿透归零)。
-#: worker→application.worker 用例与 main 进程启停属正确形状, 不在债务之列。
-TEMP_DEBT_WORKER_COMPUTE: set[tuple[str, str]] = set()
+    assert not detected, f"领域间直接业务依赖: {sorted(detected)}"
 
 
 def test_worker_no_compute_penetration():
     """架构门禁 15: Worker 禁止计算穿透(不拼 solver 命令、不解释装配、不承担结果分析)。
 
     Worker 只保留任务领取、租约、调用 application.worker 与隔离执行壳。
-    临时债务集合必须与检测结果精确相等。
     """
     detected = _iter_domain_imports(_WORKER_DIR, _WAVE0_COMPUTE_PKGS)
-    assert detected == TEMP_DEBT_WORKER_COMPUTE, (
-        f"Worker 计算穿透债务漂移(新增: {sorted(detected - TEMP_DEBT_WORKER_COMPUTE)}, "
-        f"过期: {sorted(TEMP_DEBT_WORKER_COMPUTE - detected)})"
-    )
-
-
-#: 门禁 16 临时债务: analysis 驱动 engine(Wave 4-C 门面归属收尾后归零)。
-#: Wave 4-B 已清除 wrapper 引擎驱动: _local_plan/run_sweep/run_batch/逐点财务
-#: 执行删除, wrapper 只消费不可变扫描点结果并做纯分析, 不再导入 finance。
-#: Wave 4-C 消费者证据裁决: summarize_four_dimensions 唯一生产消费者经
-#: metrics.validity 直调(application/results/writes), 指标实现经 metrics 域
-#: 直调, 财务计算经 finance 包直调; analysis 侧 assessment/indicators/
-#: _minfinance 三转发零生产消费者, 整体删除(未复制实现, 未新增校验)。
-TEMP_DEBT_ANALYSIS_ENGINE_DRIVING: set[tuple[str, str]] = set()
+    assert not detected, f"Worker 计算穿透: {sorted(detected)}"
 
 
 def test_analysis_no_engine_driving():
     """架构门禁 16: analysis 禁止驱动 engine(不构造 plan、不调用引擎, 只消费统一计算结果)。
 
-    门禁 7 已覆盖 engines/services/assembly.plan 直接导入(当前为零); 本门禁覆盖
-    finance/metrics/worker 等计算执行穿透。临时债务集合必须与检测结果精确相等。
+    门禁 7 已覆盖 engines/services/assembly.plan 直接导入; 本门禁覆盖
+    finance/metrics/worker 等计算执行穿透。
     """
     detected = _iter_domain_imports(_PKG_ROOT / "analysis", _WAVE0_ANALYSIS_FORBIDDEN_PKGS)
-    assert detected == TEMP_DEBT_ANALYSIS_ENGINE_DRIVING, (
-        f"analysis 驱动 engine 债务漂移(新增: {sorted(detected - TEMP_DEBT_ANALYSIS_ENGINE_DRIVING)}, "
-        f"过期: {sorted(TEMP_DEBT_ANALYSIS_ENGINE_DRIVING - detected)})"
-    )
+    assert not detected, f"analysis 驱动 engine: {sorted(detected)}"
 
 
 def test_whitelists_have_no_stale_entries():
-    """架构门禁 17: 旧式白名单条目必须仍被对应扫描器命中(过期即失败)。
-
-    精确相等门禁(8/9/10/11/12/13/14/15/16)已自带过期检查; 本门禁覆盖仍用
-    “只查新增”形态的门禁 1/2/3/4/6/7(门禁 5 已删除), 防止全绿掩盖残留。
-    """
-    stale: list[str] = []
-    for key in WHITELIST_CORE_BUSINESS_DEPS:
-        if key not in {(m, line) for (m, line, _src) in _find_core_business_imports()}:
-            stale.append(f"core-business-deps: {key!r}")
-    for key in WHITELIST_PRIVATE_IMPORTS:
-        if key not in {(m, s) for (m, s) in _find_private_symbol_imports()}:
-            stale.append(f"private-imports: {key!r}")
-    for key in WHITELIST_API_ORM:
-        if key not in {(mod, line) for (mod, line, _symbols) in _find_api_orm_imports()}:
-            stale.append(f"api-orm: {key!r}")
-    for key in WHITELIST_API_COMMIT:
-        if key not in {tuple(item) for item in _find_api_commit_calls()}:
-            stale.append(f"api-commit: {key!r}")
-    for key in WHITELIST_WORKER_SERVICES:
-        if key not in set(_find_worker_service_imports()):
-            stale.append(f"worker-services: {key!r}")
-    for key in WHITELIST_ANALYSIS_ENGINE:
-        if key not in set(_find_analysis_engine_imports()):
-            stale.append(f"analysis-engine: {key!r}")
-    assert not stale, f"白名单存在过期条目(检测已无命中, 须删除): {stale}"
-
-
-"""R2 Wave 4 职责回流门禁(18/19/20)与门禁 5 已按指南 F/H 删除, 不再保留:
-
-- 门禁 18/19 按 USERNAME_RE/ensure_access 等私有符号名锁定所在模块,
-  改名即失效, 也无法检出换名复制的规则;
-- 门禁 20 要求三个未实现执行器函数永久存在、有 raise 且无 return,
-  阻止未来正式实现;
-- 门禁 5 只扫描已删 services 导入的 API fanout, 无法检出同一端点对多个
-  application 用例的调用。
-语义行为由行为测试证明; 静态门禁只保留稳定的依赖方向和通用禁止形态。
-"""
+    """架构门禁 17: 稳定允许项必须仍被对应扫描器命中(消失即失败)。"""
+    detected = _find_cross_model_imports()
+    assert ALLOWED_SHARED_PRIMITIVE_IMPORTS <= detected, (
+        f"稳定允许项已消失(须同步更新 ALLOWED_SHARED_PRIMITIVE_IMPORTS): "
+        f"{sorted(ALLOWED_SHARED_PRIMITIVE_IMPORTS - detected)}"
+    )
