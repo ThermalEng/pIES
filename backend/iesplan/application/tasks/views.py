@@ -270,24 +270,21 @@ def submit_task_case(
     idempotency_key: str | None = None,
     parent_task_id: int | None = None,
 ) -> dict[str, Any]:
-    """提交任务完整用例(路由原顺序: 提交 → 摘要; 幂等/去重复用标记与提示同组装)。
+    """提交任务完整用例(路由原顺序: 提交 → 摘要; 幂等/去重复用标记同返回)。
 
     ``submissions.submit_task`` 的 (任务记录, 标记) 元组契约保持不变(测试与
     ``results`` 检查任务编排继续使用); 本用例在其上追加摘要组装, 供提交端点
-    一次转交。返回与 HTTP 无关的响应就绪字典; 幂等/去重复用 → 200 的状态码
-    映射仍由 API 传输层按 ``replayed``/``duplicate`` 字段决定。
+    一次转交。返回与 HTTP 无关的应用结果(摘要 + 标记); 幂等/去重复用 → 200
+    的状态码映射与中文提示由 API 传输层按 ``replayed``/``duplicate`` 决定。
     """
     task, flags = submit_task(
         db, user, project_id, task_type,
         config=config, idempotency_key=idempotency_key, parent_task_id=parent_task_id,
     )
-    replayed = bool(flags.get("replay", False))
-    duplicate = bool(flags.get("duplicate", False))
     return {
         "task": task_summary(db, task),
-        "replayed": replayed,
-        "duplicate": duplicate,
-        "hint": "已复用既有任务(输入相同, 未重复计算)" if replayed or duplicate else None,
+        "replayed": bool(flags.get("replay", False)),
+        "duplicate": bool(flags.get("duplicate", False)),
     }
 
 
@@ -296,17 +293,13 @@ def cancel_user_task(
 ) -> dict[str, Any]:
     """取消任务完整用例(路由原顺序: edit 权限 → 归属 → 取消 → 摘要; 提交由用例层拥有)。
 
-    原返回任务记录, 现返回响应就绪字典(含摘要/取消状态/诊断); 唯一调用方为
-    取消端点, 无其他生产/测试调用者。
+    返回与 HTTP 无关的应用结果(含任务摘要); 取消状态字段与固定诊断标记
+    由 API 传输层映射。唯一调用方为取消端点, 无其他生产/测试调用者。
     """
     ensure_access(db, user, project_id, "edit")
     ensure_task_belongs(db, project_id, task_id)
     task = cancel_task(db, task_id, reason=reason, actor_id=user.id)
-    return {
-        "task": task_summary(db, task),
-        "cancel_status": task.status,
-        "diagnostic": "cancel_ok",
-    }
+    return {"task": task_summary(db, task)}
 
 
 def retry_user_task(

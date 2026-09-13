@@ -17,7 +17,8 @@ admin_maintenance_actions(domain-model §快照任务结果/对象生命周期 +
 
 W5-admin 收尾: 本层不再直接导入 ORM 与组织 DB 写, 诊断取数与解锁
 事务(含提交)全部经 application.tasks.maintenance 用例, 审计查询
-经 application.audits 门面。
+经 application.audits 门面。解锁端点一次转交 unlock_task_case 完整
+用例(存在性/确认/状态规则归用例), 本层只留请求 DTO 与错误/响应映射。
 """
 
 from __future__ import annotations
@@ -31,11 +32,7 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentAdmin
 from iesplan.application.audits import query_audit
-from iesplan.application.tasks.maintenance import (
-    get_diagnostics,
-    get_task,
-    unlock_task,
-)
+from iesplan.application.tasks.maintenance import get_diagnostics, unlock_task_case
 from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.db import get_db
 
@@ -105,15 +102,19 @@ def unlock_task_endpoint(
     适用范围: running/cancelling 状态且租约已失活的任务; 执行: 吊销租约、
     释放并发槽、终止当前尝试, 任务回到 queued 重新排队。全程审计
     (audit_log + admin_maintenance_actions)。
+
+    本端点只做请求 DTO 与错误/响应映射: 一次转交完整用例
+    ``unlock_task_case``(存在性 → 确认 → 状态规则 → 解锁执行归用例)。
     """
-    # 存在性检查优先于 confirm: 不存在的任务应返回 404 而非 409(避免泄露)
-    task = get_task(db, payload.task_id)
-    if task is None:
+    decision = unlock_task_case(
+        db, task_id=payload.task_id, confirm=payload.confirm, admin_id=admin.id
+    )
+    if decision.outcome == "not_found":
         raise NotFoundError(
             "任务不存在", params={"task_id": payload.task_id},
             location={"object_type": "task", "object_id": payload.task_id},
         )
-    if not payload.confirm:
+    if decision.outcome == "confirm_required":
         raise ConflictError(
             "解锁为危险维护操作, 须携带 confirm=true 确认后执行",
             code="ADMIN-CONFIRM-REQUIRED",
@@ -121,13 +122,15 @@ def unlock_task_endpoint(
             params={"hint": "解锁会把 running 任务推回 queued, 确认后重新提交"},
             location={"object_type": "task", "object_id": payload.task_id},
         )
-    if task.status in ("completed", "cancelled", "timed_out", "failed"):
+    if decision.outcome == "terminal":
         raise ConflictError(
             "终态任务无需解锁(可手动重试)",
-            params={"task_id": task.id, "status": task.status},
-            location={"object_type": "task", "object_id": task.id},
+            params={"task_id": decision.task_id, "status": decision.status},
+            location={"object_type": "task", "object_id": decision.task_id},
         )
-    if task.status == "queued":
-        return {"task_id": task.id, "unlocked": False, "status": "queued", "message": "任务已在排队"}
-
-    return unlock_task(db, task_id=task.id, admin_id=admin.id)
+    if decision.outcome == "already_queued":
+        return {
+            "task_id": decision.task_id, "unlocked": False, "status": "queued",
+            "message": "任务已在排队",
+        }
+    return {"task_id": decision.task_id, "unlocked": True, "status": "queued"}

@@ -9,6 +9,10 @@
 - 外部认证(OIDC/SSO): IESPLAN_AUTH_PROVIDER=oidc 时登录页展示 SSO 入口,
   回调经 application.identity 用例门面(底经 identity 域 OIDC 能力,
   标准实现 Authlib)完成令牌交换与账号绑定。
+
+传输适配说明(S7): 每个业务动作只转交 application.identity 中的一个完整
+用例; Cookie/token 提取、FastAPI dependency、HTTP 重定向/Cookie 写入归
+本层, 身份状态机、账号读写、跨域计数与事务归用例。
 """
 
 from __future__ import annotations
@@ -24,32 +28,28 @@ from sqlalchemy.orm import Session
 
 from iesplan.application import identity
 from iesplan.application.identity.auth_cases import (
-    ExternalAuthError,
     begin_oidc_login,
-    complete_oidc_login,
+    deactivate_user_case,
+    delete_user_case,
     get_public_auth_settings,
-    is_oidc_enabled,
-    project_counts_by_owner,
-    record_oidc_login_failure,
+    get_security_settings,
+    list_users_case,
+    login_case,
+    oidc_callback_case,
+    preview_user_delete_case,
+    reactivate_user_case,
+    register_case,
+    reset_password_case,
+    resolve_auth_context,
     update_security_settings,
 )
 from iesplan.config import settings
-from iesplan.core.errors import ForbiddenError, NotFoundError
+from iesplan.core.errors import ForbiddenError
 from iesplan.db import get_db
 from iesplan.identity.contracts import UserRecord, WindowSessionRecord
 
 #: 会话 Cookie 名
 SESSION_COOKIE_NAME = "ies_session"
-
-#: 强制改密门禁(C-02)豁免路径: 仅允许改密/登出/本人信息
-_FPC_ALLOWED_PATHS: frozenset[str] = frozenset(
-    {"/api/auth/change-password", "/api/auth/logout", "/api/auth/me"}
-)
-#: 待接管(pending)会话允许的路径(H-01): 确认接管 + 强制改密门禁豁免路径
-#: (避免强制改密用户被 pending 状态卡死: 可先改密或登出, 再重新登录)
-_PENDING_ALLOWED_PATHS: frozenset[str] = frozenset(
-    _FPC_ALLOWED_PATHS | {"/api/auth/confirm-takeover"}
-)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -204,49 +204,14 @@ def _client_ip(request: Request) -> str | None:
 
 
 def get_auth_context(request: Request, db: DbSession) -> AuthContext:
-    """解析窗口凭证并校验: 哈希匹配 + 状态 + 未过期 + 凭证版本一致 + 用户有效。
+    """解析窗口凭证并校验: HTTP 凭证提取归本层, 身份业务校验归 application 用例。
 
-    安全门禁(校验失败抛对应异常):
-    - H-01: takeover_pending 会话仅允许确认接管/改密/登出/本人信息路径,
-      其余业务请求一律 401(SessionInvalidError, params.reason=takeover_pending);
-    - C-02: 有效密码凭证 requires_change=True 时, 除改密/登出/本人信息外
-      全部业务请求返回 403(AUTH-FPC-001, 强制改密未解除前无业务权限)。
-
-    任一次校验通过都会顺带刷新 last_seen_at(会话活跃时间)。
+    本层只从 Authorization 头/Cookie 提取凭证原文; 哈希匹配、状态、
+    过期、凭证版本、用户有效、H-01 接管门禁、C-02 强制改密门禁与
+    last_seen_at 刷新全部经 ``resolve_auth_context`` 完整用例。
     """
     token = _extract_token(request)
-    if not token:
-        raise identity.AuthRequiredError()
-    session = identity.get_session_by_token(db, token)
-    if session is None:
-        raise identity.SessionInvalidError()
-    now = identity.utcnow()
-    path = request.url.path
-    if session.status == "takeover_pending":
-        # H-01: 接管确认前新会话不拥有业务权限; 仅放行接管/改密/登出/本人信息
-        if path not in _PENDING_ALLOWED_PATHS:
-            raise identity.SessionInvalidError(params={"reason": "takeover_pending"})
-    elif session.status != "active":
-        raise identity.SessionInvalidError()
-    expires_at = identity.as_utc(session.expires_at)
-    if expires_at is not None and expires_at < now:
-        # 已过期: 置终态(系统自动过期, 无操作者; 会话写入经 application 身份用例)
-        identity.expire_session(db, session.id)
-        raise identity.SessionInvalidError()
-    user = identity.get_user_by_id(db, session.user_id)
-    if user is None or user.status != "active":
-        raise identity.SessionInvalidError()
-    if session.credential_version_at_issue != user.credential_version:
-        # 凭证已轮换(改密/重置): 旧会话立即失效(domain-model §身份权限审计 凭证失效机制)
-        identity.revoke_session_after_credential_change(db, session.id, user.id)
-        raise identity.SessionInvalidError()
-    # C-02: 强制改密门禁(服务端统一执行, 不依赖前端配合)
-    cred = identity.get_active_password_credential(db, user)
-    if cred is not None and cred.requires_change and path not in _FPC_ALLOWED_PATHS:
-        raise identity.ForcePasswordChangeError(
-            params={"hint": "首次登录请先修改初始密码, 未改密前仅可使用改密/登出/本人信息接口"}
-        )
-    identity.touch_session(db, session.id)
+    user, session = resolve_auth_context(db, token=token, path=request.url.path)
     return AuthContext(db=db, user=user, session=session)
 
 
@@ -319,17 +284,16 @@ def login(
     若该账号已有活动窗口, 旧窗口被撤销、新会话以 takeover_pending 创建
     (确认接管前无业务权限), 响应 needs_takeover_confirm=True,
     前端提示确认接管(domain-model §身份权限审计)。
+
+    本端点只做传输适配: 一次转交 ``login_case`` 完整用例, Cookie 写入与
+    响应组装归本层。
     """
     ip = _client_ip(request)
     ua = request.headers.get("user-agent")
-    user, error_code = identity.authenticate(
-        db, req.username, req.password, ip=ip, user_agent=ua, device=req.device
+    user, token, displaced = login_case(
+        db, username=req.username, password=req.password, device=req.device,
+        ip=ip, user_agent=ua,
     )
-    if error_code is not None:
-        if error_code == "locked":
-            raise identity.LockedError()
-        raise identity.LoginFailedError()
-    session, token, displaced = identity.create_window_session(db, user, req.device, ip=ip, user_agent=ua)
     _set_session_cookie(response, request, token)
     return AuthResponse(token=token, user=_user_out(db, user), needs_takeover_confirm=displaced)
 
@@ -408,15 +372,14 @@ def confirm_takeover(
 
 @router.post("/register", response_model=UserOut, summary="自助注册(默认关闭, 仅工程师)")
 def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
-    """自助注册: 注册开关开启时可用, 只能创建 engineer 角色(domain-model §身份权限审计)。"""
-    if not identity.registration_enabled(db):
-        raise identity.RegistrationDisabledError()
-    user = identity.create_user(
+    """自助注册: 注册开关开启时可用, 只能创建 engineer 角色(domain-model §身份权限审计)。
+
+    本端点一次转交 ``register_case`` 完整用例(开关 → 建账号), 响应组装归本层。
+    """
+    user = register_case(
         db,
-        req.username,
-        req.password,
-        role="engineer",
-        force_password_change=False,
+        username=req.username,
+        password=req.password,
         display_name=req.display_name,
         email=req.email,
         ip=_client_ip(request),
@@ -434,19 +397,18 @@ def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
 def list_users(db: DbSession, admin: CurrentAdmin) -> UsersListResponse:
     """用户列表(管理员): 含停用账号, 返回角色与强制改密状态与项目数。
 
-    project_count 经 application.identity 薄封装用例(project_counts_by_owner,
-    底为项目领域公开 read model)一次 GROUP BY 聚合查询取得, 防 N+1;
-    数据库故障沿用统一错误处理(异常向上传播, 不转为 0)。
+    本端点一次转交 ``list_users_case`` 完整用例(用户 + 项目计数一次聚合,
+    防 N+1); 数据库故障沿用统一错误处理(异常向上传播, 不转为 0)。
+    响应字段组装归本层。
     """
-    users = identity.list_users(db)
-    counts = project_counts_by_owner(db, [u.id for u in users])
+    entries = list_users_case(db)
     return UsersListResponse(
         users=[
             AdminUserOut(
-                **_user_out(db, u).model_dump(),
-                project_count=counts.get(u.id, 0),
+                **_user_out(db, e.user).model_dump(),
+                project_count=e.project_count,
             )
-            for u in users
+            for e in entries
         ]
     )
 
@@ -458,16 +420,16 @@ def admin_reset_password(
     request: Request,
     ctx: AuthCtx,
 ) -> dict:
-    """管理员重置密码: 签发临时密码(强制改密), 使目标用户全部会话失效。"""
+    """管理员重置密码: 签发临时密码(强制改密), 使目标用户全部会话失效。
+
+    本端点一次转交 ``reset_password_case`` 完整用例(目标预检 → 重置)。
+    """
     _require_admin(ctx)
-    target = identity.get_user_by_id(ctx.db, user_id)
-    if target is None:
-        raise NotFoundError("", params={"object_type": "user", "id": user_id})
-    identity.reset_password(
+    reset_password_case(
         ctx.db,
-        ctx.user,
-        target,
-        req.new_password,
+        admin=ctx.user,
+        target_id=user_id,
+        new_password=req.new_password,
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -476,15 +438,15 @@ def admin_reset_password(
 
 @router.post("/users/{user_id}/deactivate", summary="停用用户(管理员)")
 def admin_deactivate_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
-    """停用用户(管理员): 账号禁止登录, 全部会话立即失效。"""
+    """停用用户(管理员): 账号禁止登录, 全部会话立即失效。
+
+    本端点一次转交 ``deactivate_user_case`` 完整用例(目标预检 → 停用)。
+    """
     _require_admin(ctx)
-    target = identity.get_user_by_id(ctx.db, user_id)
-    if target is None:
-        raise NotFoundError("", params={"object_type": "user", "id": user_id})
-    identity.deactivate_user(
+    deactivate_user_case(
         ctx.db,
-        ctx.user,
-        target,
+        admin=ctx.user,
+        target_id=user_id,
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -493,15 +455,15 @@ def admin_deactivate_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
 
 @router.post("/users/{user_id}/reactivate", summary="重新启用用户(管理员)")
 def admin_reactivate_user(user_id: int, request: Request, ctx: AuthCtx) -> dict:
-    """重新启用用户(管理员)。"""
+    """重新启用用户(管理员)。
+
+    本端点一次转交 ``reactivate_user_case`` 完整用例(目标预检 → 启用)。
+    """
     _require_admin(ctx)
-    target = identity.get_user_by_id(ctx.db, user_id)
-    if target is None:
-        raise NotFoundError("", params={"object_type": "user", "id": user_id})
-    identity.reactivate_user(
+    reactivate_user_case(
         ctx.db,
-        ctx.user,
-        target,
+        admin=ctx.user,
+        target_id=user_id,
         ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -518,12 +480,11 @@ def admin_delete_user_preview(user_id: int, request: Request, ctx: AuthCtx) -> d
     返回该账号拥有的项目清单(名称/id/数量)并签发签名确认令牌(10 分钟窗口),
     供管理员确认影响范围后再执行 DELETE /users/{user_id}。执行删除必须携带
     confirm=true + 该令牌; 预览后清单变化则拒绝执行(需重新预览)。
+
+    本端点一次转交 ``preview_user_delete_case`` 完整用例(目标预检 → 预览)。
     """
     _require_admin(ctx)
-    target = identity.get_user_by_id(ctx.db, user_id)
-    if target is None:
-        raise NotFoundError("", params={"object_type": "user", "id": user_id})
-    return identity.preview_user_delete(ctx.db, ctx.user, target)
+    return preview_user_delete_case(ctx.db, admin=ctx.user, target_id=user_id)
 
 
 @router.delete("/users/{user_id}", summary="删除账号(管理员, 需确认+预告, 级联删除其项目)")
@@ -541,15 +502,14 @@ def admin_delete_user(
       与预览时的项目清单; 缺失/过期/篡改/清单变化均拒绝执行;
     - 不能删除自己 / 系统账号;
     - 目标账号置 disabled, 全部会话/凭证撤销, 其拥有的项目全部软删。
+
+    本端点一次转交 ``delete_user_case`` 完整用例(目标预检 → 确认 → 级联删除)。
     """
     _require_admin(ctx)
-    target = identity.get_user_by_id(ctx.db, user_id)
-    if target is None:
-        raise NotFoundError("", params={"object_type": "user", "id": user_id})
-    result = identity.delete_user(
+    result = delete_user_case(
         ctx.db,
-        ctx.user,
-        target,
+        admin=ctx.user,
+        target_id=user_id,
         confirm=bool(payload and payload.confirm),
         confirm_token=(payload.confirm_token if payload else ""),
         ip=_client_ip(request),
@@ -577,9 +537,9 @@ def update_settings(payload: SettingsUpdate, request: Request, ctx: AuthCtx) -> 
 
 @router.get("/settings", summary="读取安全设置(管理员)")
 def read_settings(ctx: AuthCtx) -> dict:
-    """读取安全设置(管理员)。"""
+    """读取安全设置(管理员): 一次转交 ``get_security_settings`` 完整用例。"""
     _require_admin(ctx)
-    return {"registration_enabled": identity.registration_enabled(ctx.db)}
+    return get_security_settings(ctx.db)
 
 
 # ---------------------------------------------------------------------------
@@ -620,16 +580,14 @@ def oidc_callback(
 
     成功: 建立浏览器会话并 302 回首页(带 ies_session Cookie);
     失败: 302 回登录页并携带 error 提示(不泄露提供方细节)。
-    令牌交换/账号绑定/会话签发经 application.identity 用例(含事务提交)。
+    本端点一次转交 ``oidc_callback_case`` 完整用例(含启用判断、失败记录
+    与事务提交), 只做 Cookie 写入与重定向映射。
     """
-    if not is_oidc_enabled():
-        raise NotFoundError("", params={"object_type": "auth_provider"})
     ip = _client_ip(request)
     ua = request.headers.get("user-agent")
-    try:
-        _, token, _ = complete_oidc_login(db, code=code, state=state, ip=ip, user_agent=ua)
-    except ExternalAuthError as exc:
-        record_oidc_login_failure(db, reason=exc.params.get("reason", "oidc_failed"), ip=ip, user_agent=ua)
+    result = oidc_callback_case(db, code=code, state=state, ip=ip, user_agent=ua)
+    if not result.ok:
         return RedirectResponse("/login?error=oidc_failed", status_code=302)
-    _set_session_cookie(response, request, token)
+    assert result.token is not None
+    _set_session_cookie(response, request, result.token)
     return RedirectResponse("/", status_code=302)

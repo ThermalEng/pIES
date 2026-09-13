@@ -80,6 +80,7 @@ def create_task_endpoint(
     """提交任务(规格 2.2): 幂等键命中或同快照去重复用返回既有任务并附标记。
 
     幂等/去重复用 → 200(附 replayed/duplicate 标记与提示); 新建 → 201。
+    本端点一次转交 ``submit_task_case`` 完整用例; 状态码与中文提示映射归本层。
     """
     result = tasks_app.submit_task_case(
         db, user, project_id, payload.task_type,
@@ -89,6 +90,9 @@ def create_task_endpoint(
     )
     if result["replayed"] or result["duplicate"]:
         response.status_code = 200
+        result["hint"] = "已复用既有任务(输入相同, 未重复计算)"
+    else:
+        result["hint"] = None
     return result
 
 
@@ -131,9 +135,12 @@ def cancel_task_endpoint(
     payload: CancelRequest | None = None,
 ) -> dict[str, Any]:
     """取消任务(规格 6.1): queued 直接取消; running → cancelling 并传播批量子任务;
-    终态 → 409(ies.diag.task.cancel_denied)。取消为写操作, 要求项目 edit 能力(H-05)。"""
+    终态 → 409(ies.diag.task.cancel_denied)。取消为写操作, 要求项目 edit 能力(H-05)。
+    本端点一次转交 ``cancel_user_task`` 完整用例; 取消状态与诊断标记映射归本层。"""
     reason = payload.reason if payload and payload.reason else "user_cancel"
-    return tasks_app.cancel_user_task(db, user, project_id, task_id, reason)
+    result = tasks_app.cancel_user_task(db, user, project_id, task_id, reason)
+    task = result["task"]
+    return {"task": task, "cancel_status": task["status"], "diagnostic": "cancel_ok"}
 
 
 @router.post("/{task_id}/retry", summary="手动重试任务")

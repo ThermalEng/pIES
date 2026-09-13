@@ -16,7 +16,9 @@ storage_stats 为只读诊断):
   维护记录/存储/队列；只读，不提交事务)；
 - ``unlock_task``：管理员解锁卡死任务(吊销租约、终止运行尝试、释放
   并发槽、任务回 queued、追加诊断、维护记录与解锁审计；本层拥有
-  事务提交/回滚，内部步骤只 flush)。
+  事务提交/回滚，内部步骤只 flush)；
+- ``unlock_task_case``：解锁完整用例(存在性 → 危险确认 → 终态/已排队
+  预检 → 解锁执行；返回 UnlockDecision，错误/响应映射归 API)。
 
 数据访问只经领域公开门面(tasks 域、application.audits、storage)，
 不新增校验/hash/完整性复核/防御分支。
@@ -27,7 +29,8 @@ application.audits, storage}``；不导入 ORM、不导入领域内部模块。
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from sqlalchemy.orm import Session
 
@@ -145,7 +148,7 @@ def _unlock_task(db: Session, *, task_id: int, admin_id: int) -> dict[str, Any]:
 
 
 def unlock_task(db: Session, *, task_id: int, admin_id: int) -> dict[str, Any]:
-    """管理员解锁卡死任务(本层拥有事务提交/回滚；路由层只做存在性/确认/终态预检)。"""
+    """管理员解锁卡死任务(本层拥有事务提交/回滚；调用前须经存在性/确认/终态预检)。"""
     try:
         result = _unlock_task(db, task_id=task_id, admin_id=admin_id)
         db.commit()
@@ -155,7 +158,52 @@ def unlock_task(db: Session, *, task_id: int, admin_id: int) -> dict[str, Any]:
         raise
 
 
+#: 解锁预检与执行结局: not_found/confirm_required/terminal 由 API 映射为
+#: 404/409 错误, already_queued/unlocked 映射为 200 响应
+UnlockOutcome = Literal["not_found", "confirm_required", "terminal", "already_queued", "unlocked"]
+
+
+@dataclass(frozen=True)
+class UnlockDecision:
+    """解锁完整用例结果(与 HTTP 无关): 状态规则由本层拥有, 错误/响应映射归 API。"""
+
+    outcome: UnlockOutcome
+    task_id: int
+    status: str | None = None
+
+
+def unlock_task_case(
+    db: Session, *, task_id: int, confirm: bool, admin_id: int
+) -> UnlockDecision:
+    """管理员解锁完整用例: 存在性 → 危险确认 → 终态/已排队预检 → 解锁执行。
+
+    原 ``api/admin.py::unlock_task_endpoint`` 的业务顺序整体下收:
+    不存在的任务 → not_found(404, 优先于 confirm, 避免泄露);
+    未确认 → confirm_required(409); 终态 → terminal(409);
+    已在排队 → already_queued(200 短路, 不推进状态);
+    其余 running/cancelling 卡死任务执行解锁并提交事务。
+    """
+    task = tasks_domain.get_task(db, task_id)
+    if task is None:
+        return UnlockDecision("not_found", task_id)
+    if not confirm:
+        return UnlockDecision("confirm_required", task.id, task.status)
+    if task.status in tasks_domain.TERMINAL_STATUSES:
+        return UnlockDecision("terminal", task.id, task.status)
+    if task.status == "queued":
+        return UnlockDecision("already_queued", task.id, "queued")
+    try:
+        _unlock_task(db, task_id=task.id, admin_id=admin_id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return UnlockDecision("unlocked", task.id, "queued")
+
+
 __all__ = [
+    "UnlockDecision",
+    "UnlockOutcome",
     "clear_task_cancel",
     "enqueue_task",
     "get_diagnostics",
@@ -163,4 +211,5 @@ __all__ = [
     "queue_status",
     "storage_stats",
     "unlock_task",
+    "unlock_task_case",
 ]
