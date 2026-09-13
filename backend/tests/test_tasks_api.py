@@ -35,7 +35,7 @@ from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
-from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
+from iesplan.assembly import CANON_ALGORITHM_ID, CANON_ALGORITHM_VERSION, SCHEMA_ID, SCHEMA_VERSION, VALIDATOR_ID, VALIDATOR_VERSION  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
@@ -258,7 +258,7 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     assert body["task"]["id"] == task_a["id"]
     assert body["hint"]
 
-    # 4) 不同输入(config 不同 → 快照哈希不同) → 201 新任务新快照
+    # 4) 不同输入(config 不同 → 快照输入不同) → 201 新任务新快照
     status, body = _submit_task(client, pid, owner, config={"horizon_years": 3})
     assert status == 201
     assert body["task"]["id"] != task_a["id"]
@@ -274,12 +274,16 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     assert persisted.canonical_assembly_text
     # 文本仅校验字头，快照去重使用内容字段逐项相等判定（header-only）
     assert isinstance(persisted.assembly_receipt, dict)
-    assert "issued_at" not in persisted.assembly_receipt
-    artifact = ValidatedAssemblyArtifact(
-        persisted.canonical_assembly_text,
-        ValidationReceipt.from_dict(persisted.assembly_receipt),
-    )
-    assert artifact.to_dict()["receipt"] == persisted.assembly_receipt
+    receipt = persisted.assembly_receipt
+    assert "issued_at" not in receipt
+    assert receipt["schema"] == SCHEMA_ID
+    assert receipt["schema_version"] == SCHEMA_VERSION
+    assert receipt["validator"] == {"id": VALIDATOR_ID, "version": VALIDATOR_VERSION}
+    assert receipt["canonical_algorithm"] == {"id": CANON_ALGORITHM_ID, "version": CANON_ALGORITHM_VERSION}
+    assert isinstance(receipt["dependencies"], dict)
+    assert isinstance(receipt["resources"], dict)
+    assert isinstance(receipt["diagnostics"], list)
+    assert all(not item.get("blocking", False) for item in receipt["diagnostics"])
 
     # 6) 列表可见 2 个任务(步骤 2/3 均为既有任务复用; 含摘要与排队位次)
     resp = client.get(f"/api/projects/{pid}/tasks", headers=_h(client, owner))

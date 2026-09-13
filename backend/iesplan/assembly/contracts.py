@@ -136,105 +136,6 @@ class ValidationReceipt:
             "diagnostics": [_stable_diagnostic_dict(diag) for diag in self.diagnostics],
         }
 
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, object]) -> ValidationReceipt:
-        """从持久化 JSON 严格恢复回执；畸形字段直接拒绝，不做兼容回退。"""
-        if not isinstance(payload, Mapping):
-            raise TypeError("receipt 须为 Mapping")
-        expected_keys = {
-            "schema",
-            "schema_version",
-            "validator",
-            "canonical_algorithm",
-            "dependencies",
-            "resources",
-            "diagnostics",
-        }
-        if set(payload) != expected_keys:
-            raise ValueError("receipt 字段集合与当前契约不一致")
-        validator = payload.get("validator")
-        canonical = payload.get("canonical_algorithm")
-        if not isinstance(validator, Mapping) or not isinstance(canonical, Mapping):
-            raise TypeError("receipt.validator/canonical_algorithm 须为 Mapping")
-        if set(validator) != {"id", "version"} or set(canonical) != {"id", "version"}:
-            raise ValueError("receipt validator/canonical_algorithm 字段集合不一致")
-        dependencies = payload.get("dependencies", {})
-        resources = payload.get("resources", {})
-        raw_diags = payload.get("diagnostics", [])
-        if not isinstance(dependencies, Mapping) or not isinstance(resources, Mapping):
-            raise TypeError("receipt dependencies/resources 须为 Mapping")
-        if not isinstance(raw_diags, (list, tuple)):
-            raise TypeError("receipt diagnostics 须为数组")
-        diagnostics: list[Diagnostic] = []
-        for raw in raw_diags:
-            if not isinstance(raw, Mapping):
-                raise TypeError("receipt diagnostic 须为 Mapping")
-            expected_diag_keys = {
-                "code",
-                "severity",
-                "blocking",
-                "message_key",
-                "params",
-                "location",
-                "fix_hint_key",
-                "ref_ids",
-                "suppressed",
-            }
-            if set(raw) != expected_diag_keys:
-                raise ValueError("receipt diagnostic 字段集合不一致")
-            params = raw["params"]
-            location = raw["location"]
-            ref_ids = raw["ref_ids"]
-            if not isinstance(params, Mapping):
-                raise TypeError("receipt diagnostic.params 须为 Mapping")
-            if location is not None and not isinstance(location, Mapping):
-                raise TypeError("receipt diagnostic.location 须为 Mapping 或 null")
-            if not isinstance(ref_ids, (list, tuple)):
-                raise TypeError("receipt diagnostic.ref_ids 须为数组")
-            if not isinstance(raw["blocking"], bool) or not isinstance(raw["suppressed"], bool):
-                raise TypeError("receipt diagnostic 布尔字段类型非法")
-            for key in ("code", "severity", "message_key", "fix_hint_key"):
-                if not isinstance(raw[key], str) or not raw[key]:
-                    raise TypeError(f"receipt diagnostic.{key} 须为非空字符串")
-            if not all(isinstance(item, str) for item in ref_ids):
-                raise TypeError("receipt diagnostic.ref_ids 仅允许字符串")
-            diagnostics.append(
-                Diagnostic(
-                    code=raw["code"],
-                    severity=raw["severity"],
-                    blocking=raw["blocking"],
-                    message_key=raw["message_key"],
-                    params=params,
-                    location=location,
-                    fix_hint_key=raw["fix_hint_key"],
-                    ref_ids=tuple(ref_ids),
-                    suppressed=raw["suppressed"],
-                )
-            )
-        string_fields = {
-            "schema": payload["schema"],
-            "schema_version": payload["schema_version"],
-            "validator.id": validator["id"],
-            "validator.version": validator["version"],
-            "canonical_algorithm.id": canonical["id"],
-            "canonical_algorithm.version": canonical["version"],
-        }
-        for name, value in string_fields.items():
-            if not isinstance(value, str) or not value:
-                raise TypeError(f"receipt.{name} 须为非空字符串")
-        return cls(
-            schema_id=payload["schema"],
-            schema_version=payload["schema_version"],
-            validator_id=validator["id"],
-            validator_version=validator["version"],
-            canonical_algorithm_id=canonical["id"],
-            canonical_algorithm_version=canonical["version"],
-            dependencies=dependencies,
-            resources=resources,
-            diagnostics=tuple(diagnostics),
-        )
-
-
 # ---------------------------------------------------------------------------
 # 成功产物
 # ---------------------------------------------------------------------------
@@ -254,7 +155,7 @@ class ValidatedAssemblyArtifact:
     receipt: ValidationReceipt = None  # type: ignore
 
     def to_dict(self) -> dict:
-        """序列化(供审计/持久化;内容与 verify 结果一致)。"""
+        """序列化(供审计/持久化)。"""
         return {
             "schema": SCHEMA_ID,
             "schema_version": SCHEMA_VERSION,
