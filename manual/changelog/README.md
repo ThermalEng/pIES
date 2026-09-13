@@ -15,23 +15,24 @@
 
 ## Unreleased
 
-### 2026-09-13 — 后端依赖架构最终收口完成
+### 2026-09-13 — 后端依赖架构收口（实现完成，等待独立验收）
 
-**完成时间**：2026-09-13
+**完成时间**：2026-09-13（实现合并；独立验收未通过，不得视为最终完成）
 
-**版本进展**：完成后端依赖架构最终收口并合入 `master`；不改变产品版本，下一开发目标仍为 `0.8.0`。
+**版本进展**：完成第一轮收口的代码实现并合入 `master`；独立验收发现“导入边消失不等于职责归位”（见 `docs/development/backend-decoupling-finalization.md`
+第二次验收纠偏），已撤回此前“最终收口完成”“全部问题关闭”表述；不改变产品版本，下一开发目标仍为 `0.8.0`。
 
-#### 更新了什么
+#### 更新了什么（实现事实，待复审）
 
-- 依赖方向收敛：API 只做路由/认证/DTO/错误映射并调用完整 application 用例；application 只拥有事务与跨域编排；单领域规则下沉唯一所有者（identity/results/tasks/model/devices/package）；领域间组合只在 application；外部调用只经公开门面或不可变 contract。
-- 组合授权上收 `application.projects.authorization`（project/identity 只回答各自事实）；API 授权自组织与 devices 直调消除；幂等键正则等常量权威唯一。
-- 删除 Repository 虚假抽象（无生产消费者的 Protocol）、Worker 未实现入口 `raise` 后旧计算链（旧 selector/命令注册/plan 构造）与 analysis 自装 plan 及引擎直调（`_local_plan/run_sweep/run_batch`）；analysis 转发门面与财务 interim 副本删除，归属 metrics/finance 权威。
-- 计算未实现保持结构化可见失败（`failed` + `TASK-SOLVE-001`），不 fallback 旧引擎。
-- 静态架构门禁 20 项全绿，全部临时债务集合为空；Docker 全量测试（见下）通过。
+- 导入方向收敛：API 不再直调领域行为（门禁 13 为空）；`project → identity` 上收 application（门禁 14 为空）；
+  Worker 旧计算链与 analysis 引擎直调删除（门禁 15/16 为空）。
+- 组合授权权威实现位于 `application.projects.authorization`；单领域规则下沉各自领域；常量权威唯一。
+- 静态架构门禁 20 项通过，临时债务集合为空；Docker 全量测试 1448 通过。
 
-#### 解决了什么问题
+#### 尚未确认（待独立验收）
 
-- 收口指南第三节 10 项已知问题全部关闭：门禁精确相等无过期白名单；API/跨域绕行消除；领域规则回归所有者；旧计算残体与 analysis 反向清除；本条目替代此前“纠偏完成”的阶段性表述。
+- API 是否仍在路由内组织“授权 + 多业务调用”；授权是否仍有第二实现；Worker 是否仍本地解释结果或伪造成功；
+  core/engines 映射与 results 摘要归属；门禁能否检出上述职责回流。
 
 ### 2026-09-13 — `0.8` 开发前，后端解耦第一阶段收口
 
