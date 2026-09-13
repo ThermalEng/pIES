@@ -128,9 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_mtr_idem_key
 def _migrate_0002(conn: sa.Connection) -> None:
     """创建用户模型模板主表与不可变发布 revision 表(0002)。
 
-    全新数据库与已执行 0001 的存量数据库同一路径: 迁移按版本在台账登记,
-    幂等执行; 存量库已有 model_templates 时 IF NOT EXISTS 跳过(仅防重复
-    执行, 正常路径由台账版本控制)。
+    迁移按版本在台账登记并幂等执行，重复建表由 IF NOT EXISTS 跳过。
     """
     ddl = (
         _MIGRATION_0002_POSTGRES
@@ -217,11 +215,10 @@ def _ensure_columns(
     table: str,
     columns: dict[str, str],
 ) -> None:
-    """按方言为存量表补充缺失列(幂等)。
+    """按方言为当前 schema 补充缺失列(幂等)。
 
     Postgres: ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``;
     SQLite(<3.35 无 IF NOT EXISTS): 先查 pragma table_info 再逐列 ADD。
-    全新库随建表语句已含全部列, 本函数仅覆盖「已执行旧迁移的存量库」。
     """
     if conn.dialect.name == "postgresql":
         for name, ddl in columns.items():
@@ -239,8 +236,7 @@ def _ensure_columns(
 def _migrate_0001(conn: sa.Connection) -> None:
     """创建项目模型清单表与编号序列表(0001, 切片 dm2-A)。
 
-    FK 依赖 projects/objects/users —— 基线表由 init_db 的 create_all 先行
-    建立(既有发布机制), 迁移在其后执行; 对仅缺本表的存量库同样成立。
+    FK 依赖 projects/objects/users；初始化流程先建立基线表，再执行本迁移。
     """
     ddl = (
         _MIGRATION_0001_POSTGRES
@@ -251,12 +247,6 @@ def _migrate_0001(conn: sa.Connection) -> None:
         stripped = stmt.strip()
         if stripped:
             conn.execute(sa_text(stripped))
-    # 切片 dm2: 存量库(已执行 0001)补充模板来源列; 全新库建表语句已含
-    _ensure_columns(
-        conn,
-        "project_models",
-        {"template_id": "TEXT", "template_revision": "BIGINT"},
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +265,7 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_public_namespace
     ON users (public_namespace) WHERE public_namespace IS NOT NULL;
 
--- 模板公开身份：存量 0002 表没有 slug/命名空间快照，必须显式补列。
+-- 模板公开身份与命名空间快照。
 ALTER TABLE model_templates ADD COLUMN IF NOT EXISTS slug TEXT;
 ALTER TABLE model_templates ADD COLUMN IF NOT EXISTS public_namespace TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_model_templates_template_id
@@ -320,8 +310,10 @@ CREATE TABLE IF NOT EXISTS model_template_draft_revisions (
 );
 CREATE INDEX IF NOT EXISTS idx_mtdr_entry ON model_template_draft_revisions (entry_id);
 
-ALTER TABLE model_templates ADD COLUMN current_draft_revision_id INTEGER REFERENCES model_template_draft_revisions(id);
-ALTER TABLE model_templates ADD COLUMN current_published_revision_id INTEGER REFERENCES model_template_revisions(id);
+ALTER TABLE model_templates ADD COLUMN current_draft_revision_id INTEGER
+    REFERENCES model_template_draft_revisions(id);
+ALTER TABLE model_templates ADD COLUMN current_published_revision_id INTEGER
+    REFERENCES model_template_revisions(id);
 """
 
 
@@ -337,7 +329,7 @@ def _migrate_0003(conn: sa.Connection) -> None:
     """
     if conn.dialect.name == "postgresql":
         # DO 块含内部分号, 需整块执行; 但必须保持文本顺序(DO 块依赖前面的
-        # ADD COLUMN, 先提 DO 块会在新库/旧库上因列缺失而失败)
+        # ADD COLUMN, 先提 DO 块会因列缺失而失败)
         import re
         pg_sql = _MIGRATION_0003_POSTGRES
         for part in re.split(r"(DO \$\$.*?END \$\$;)", pg_sql, flags=re.DOTALL):
@@ -364,8 +356,7 @@ def _migrate_0003(conn: sa.Connection) -> None:
             stripped = stmt.strip()
             if stripped and "ALTER TABLE" not in stripped:
                 conn.execute(sa_text(stripped))
-        # 0002 的存量 SQLite 表只有 (owner_id, template_id) 唯一约束；
-        # 新 ORM 契约要求稳定 ID 全局唯一、同一用户 slug 唯一。
+        # 稳定 ID 全局唯一、同一用户 slug 唯一。
         conn.execute(sa_text(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_model_templates_template_id "
             "ON model_templates (template_id)"
@@ -374,145 +365,19 @@ def _migrate_0003(conn: sa.Connection) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_model_templates_owner_slug "
             "ON model_templates (owner_id, slug) WHERE slug IS NOT NULL"
         ))
-    # 既有用户一次性分配 namespace（CSPRNG + 碰撞重试，任务书 §三）
-    _allocate_namespaces_for_existing_users(conn)
-
-
-def _allocate_namespaces_for_existing_users(conn: sa.Connection) -> None:
-    """为既有用户一次性分配 public_namespace（全局唯一，碰撞重试）。"""
-    from iesplan.core.namespace import generate_namespace
-
-    # 检查 users 表是否存在（全新库可能尚未 create_all）
-    try:
-        rows = conn.execute(sa_text("SELECT id FROM users WHERE public_namespace IS NULL")).all()
-    except Exception:
-        return
-    for (uid,) in rows:
-        for _ in range(10):
-            ns = generate_namespace()
-            try:
-                conn.execute(
-                    sa_text("UPDATE users SET public_namespace = :ns WHERE id = :uid AND public_namespace IS NULL"),
-                    {"ns": ns, "uid": uid},
-                )
-                break
-            except Exception:
-                continue
-
-
 # ---------------------------------------------------------------------------
 # 迁移 0004: 项目计算基线(0.6.5 前置阶段事项 1)
 # ---------------------------------------------------------------------------
 
-#: 旧库回填语句: 仅填充 NULL 行, 幂等(重复执行不覆盖已回填值)。
-_BACKFILL_SQL = """
-UPDATE projects SET baseline_resolution='1h' WHERE baseline_resolution IS NULL;
-UPDATE projects SET baseline_leap_year=false WHERE baseline_leap_year IS NULL;
-UPDATE projects SET baseline_scenario_mode='single' WHERE baseline_scenario_mode IS NULL;
-UPDATE project_versions SET baseline_resolution='1h' WHERE baseline_resolution IS NULL;
-UPDATE project_versions SET baseline_leap_year=false WHERE baseline_leap_year IS NULL;
-UPDATE project_versions SET baseline_scenario_mode='single' WHERE baseline_scenario_mode IS NULL;
-"""
-
 
 def _migrate_0004(conn: sa.Connection) -> None:
-    """项目计算基线(0004, 0.6.5 事项 1)。
+    """登记项目计算基线契约版本。
 
-    - projects / project_versions 增加基线三列(resolution/leap_year/
-      scenario_mode); 存量行按默认基线(1h/非闰年/single)回填;
-      回填后 SET NOT NULL 并补 CHECK 约束;
-    - 删除旧 ``fixed_utc_offset_minutes`` 列(projects / project_versions):
-      时区语义随项目计算基线废除(宪法 7.5), 不保留兼容别名;
-    - 幂等: 全新库由 create_all 先行建列, 本迁移仅处理存量库
-      (ADD COLUMN IF NOT EXISTS / PRAGMA 守卫 + NULL 行回填)。
-
-    SQLite 测试库: 全新库经 create_all 重建(无旧列), 本迁移基本为 no-op;
-    对含旧列且无 CHECK 引用约束的存量 SQLite 库执行真实 DROP COLUMN。
+    当前基线字段及数据库约束由项目模型的 schema 定义创建；该版本保留在
+    迁移台账中，确保当前迁移链的版本语义稳定。初始化流程在此版本不执行
+    数据转换或结构清理。
     """
-    if conn.dialect.name == "postgresql":
-        _migrate_0004_postgres(conn)
-    else:
-        _migrate_0004_sqlite(conn)
-
-
-def _migrate_0004_postgres(conn: sa.Connection) -> None:
-    """Postgres 分支: 加列 → 锁表回填 → NOT NULL → CHECK → 删旧列。"""
-    for table in ("projects", "project_versions"):
-        _ensure_columns(
-            conn, table,
-            {
-                "baseline_resolution": "TEXT",
-                "baseline_leap_year": "BOOLEAN",
-                "baseline_scenario_mode": "TEXT",
-            },
-        )
-    # 存量库可能已按旧版本部署 project_versions 不可变触发器(BEFORE UPDATE →
-    # RAISE), 回填 UPDATE 会被阻断; 先临时卸下(新旧命名), 清理后由 init_db 的
-    # _deploy_immutable_triggers 按当前 IMMUTABLE_TABLES 重建(0006 财务迁移同模式)。
-    conn.execute(sa_text("DROP FUNCTION IF EXISTS tg_project_versions_immutable() CASCADE"))
-    conn.execute(sa_text("DROP TRIGGER IF EXISTS tg_project_versions_no_update ON project_versions"))
-    conn.execute(sa_text("DROP TRIGGER IF EXISTS tg_project_versions_no_delete ON project_versions"))
-    # 回填与 SET NOT NULL 之间锁表, 杜绝并发插入 NULL 与
-    # 回填/加约束之间的原子性窗口。
-    conn.execute(sa_text("LOCK TABLE projects IN EXCLUSIVE MODE"))
-    conn.execute(sa_text("LOCK TABLE project_versions IN EXCLUSIVE MODE"))
-    for stmt in _BACKFILL_SQL.split(";"):
-        stripped = stmt.strip()
-        if stripped:
-            conn.execute(sa_text(stripped))
-    for table in ("projects", "project_versions"):
-        for column in (
-            "baseline_resolution",
-            "baseline_leap_year",
-            "baseline_scenario_mode",
-        ):
-            conn.execute(sa_text(f"ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL"))
-        conn.execute(
-            sa_text(
-                f"DO $$ BEGIN "
-                f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_{table}_baseline_resolution') THEN "
-                f"ALTER TABLE {table} ADD CONSTRAINT ck_{table}_baseline_resolution "
-                f"CHECK (baseline_resolution IN ('15min','30min','1h')); END IF; END $$;"
-            )
-        )
-        conn.execute(
-            sa_text(
-                f"DO $$ BEGIN "
-                f"IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='ck_{table}_baseline_scenario') THEN "
-                f"ALTER TABLE {table} ADD CONSTRAINT ck_{table}_baseline_scenario "
-                f"CHECK (baseline_scenario_mode IN ('single')); END IF; END $$;"
-            )
-        )
-        # 旧时区列: DROP COLUMN 自动级联删除其 CHECK 约束(pg)。
-        conn.execute(
-            sa_text(f"ALTER TABLE {table} DROP COLUMN IF EXISTS fixed_utc_offset_minutes")
-        )
-
-
-def _migrate_0004_sqlite(conn: sa.Connection) -> None:
-    """SQLite 分支: PRAGMA 守卫加列(带默认值) → 删旧列。
-
-    全新库(create_all 已含基线列、无旧列)为 no-op; 存量库按旧布局补列。
-    SQLite ``ADD COLUMN ... NOT NULL`` 必须带 DEFAULT, 存量行即默认值。
-    """
-    defaults = {
-        "baseline_resolution": "TEXT NOT NULL DEFAULT '1h'",
-        "baseline_leap_year": "BOOLEAN NOT NULL DEFAULT 0",
-        "baseline_scenario_mode": "TEXT NOT NULL DEFAULT 'single'",
-    }
-    for table in ("projects", "project_versions"):
-        _ensure_columns(conn, table, defaults)
-        existing = {
-            row[1]
-            for row in conn.execute(sa_text(f"PRAGMA table_info({table})")).all()
-        }
-        if "fixed_utc_offset_minutes" in existing:
-            # SQLite 3.35+ 支持 DROP COLUMN; 列被 CHECK 约束引用时失败并
-            # 抛出 DBAPIError(SQLite 测试库由 create_all 全量重建, 实际
-            # 不存在含旧 CHECK 的存量库; 生产为 Postgres, 自动级联删除)。
-            conn.execute(
-                sa_text(f"ALTER TABLE {table} DROP COLUMN fixed_utc_offset_minutes")
-            )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +386,7 @@ def _migrate_0004_sqlite(conn: sa.Connection) -> None:
 
 _MIGRATION_0005_POSTGRES = """
 -- 规划配置 revision 表(仅 INSERT, 不可变; 修订号 revision 标识版本,
--- 与 ORM PlanningConfigRevision 同形, 无内容摘要列)
+-- 与 ORM PlanningConfigRevision 同形)
 CREATE TABLE IF NOT EXISTS planning_configs (
     id BIGSERIAL PRIMARY KEY,
     project_id BIGINT NOT NULL REFERENCES projects(id),
@@ -555,10 +420,7 @@ def _migrate_0005(conn: sa.Connection) -> None:
 
     - planning_configs: 仅 INSERT 的 revision 追加表(修订号 revision 标识版本;
       不可变性由 immutable_triggers 部署的禁 UPDATE/DELETE 触发器保证);
-    - 旧单体 finance_configs 表不再创建(0006 直接退役; 存量库由 0006 删除);
-    - 旧 finance_revision 列不再创建;
-    - projects 增加 planning_revision 当前生效指针(_ensure_columns 守卫:
-      全新库随 ORM create_all 已含列时为 no-op, 存量库按需补列; 与 0004 同模式);
+    - projects 增加 planning_revision 当前生效指针;
     - 幂等: IF NOT EXISTS + 列守卫。
     """
     ddl = (
@@ -579,12 +441,12 @@ def _migrate_0005(conn: sa.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 迁移 0006: 财务三件套持久化替换旧单体 FinanceConfig(0.6.5 条目 1-2)
+# 迁移 0006: 财务三件套持久化(0.6.5 条目 1-2)
 # ---------------------------------------------------------------------------
 
 _MIGRATION_0006_CREATE_POSTGRES = """
 -- 地区 FinanceProfile 注册表(已注册、可复用, Profile 主键 + 对象引用追溯;
--- 与 ORM FinanceProfile 同形, 无内容摘要列)
+-- 与 ORM FinanceProfile 同形)
 CREATE TABLE IF NOT EXISTS finance_profiles (
     id BIGSERIAL PRIMARY KEY,
     profile_id TEXT NOT NULL,
@@ -626,23 +488,55 @@ CREATE INDEX IF NOT EXISTS idx_effective_finance_revisions_project
     ON effective_finance_revisions (project_id, revision DESC);
 """
 
+_MIGRATION_0006_CREATE_SQLITE = """
+CREATE TABLE IF NOT EXISTS finance_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id TEXT NOT NULL,
+    region TEXT NOT NULL,
+    content TEXT NOT NULL,
+    object_id INTEGER NOT NULL REFERENCES objects(id),
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_finance_profiles_id UNIQUE (profile_id)
+);
+CREATE INDEX IF NOT EXISTS idx_finance_profiles_id ON finance_profiles (profile_id);
+
+CREATE TABLE IF NOT EXISTS finance_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    content TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_finance_overrides_revision UNIQUE (project_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_finance_overrides_project
+    ON finance_overrides (project_id, revision DESC);
+
+CREATE TABLE IF NOT EXISTS effective_finance_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    content TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_effective_finance_revisions_revision UNIQUE (project_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_effective_finance_revisions_project
+    ON effective_finance_revisions (project_id, revision DESC);
+"""
+
 
 def _migrate_0006(conn: sa.Connection) -> None:
     """财务三件套持久化(0006, 0.6.5 条目 1-2)。
 
     - 新建 finance_profiles / finance_overrides / effective_finance_revisions
-      (修订号 revision + 对象引用追溯, 与 ORM 同形, 无内容摘要列);
-    - planning_configs 旧 0005 摘要列(finance_revision hash)直接删除,
-      同时兼容 fresh(无旧列)与 legacy(0005 旧列)两种基线, 幂等;
-    - 按正确性优先清理无效旧 planning revisions(旧 FinanceConfig 摘要链已失效,
-      因无法迁移而删除)与项目 planning 指针清空;
-    - projects: 删除旧 finance_revision 指针, 新增 finance_profile_id /
-      overrides_revision / effective_finance_revision 指针;
-    - 删除旧 finance_configs 单体表(0.6.5 纯契约先行, 无运行期消费;
-      不保留新旧双轨)。
-    确保新列 NOT NULL/check/索引/不可变触发器正确, 迁移幂等。
-    全新 SQLite 测试库经 ORM create_all 重建(无旧列/旧表), 本迁移基本 no-op;
-    存量库按需补列/删表/清理。
+      (修订号 revision + 对象引用追溯, 与 ORM 同形);
+    - projects 增加 finance_profile_id / overrides_revision /
+      effective_finance_revision 当前指针;
+    - 迁移幂等，结构由当前 schema 定义固定。
     """
     if conn.dialect.name == "postgresql":
         _migrate_0006_postgres(conn)
@@ -651,34 +545,12 @@ def _migrate_0006(conn: sa.Connection) -> None:
 
 
 def _migrate_0006_postgres(conn: sa.Connection) -> None:
-    """Postgres 分支: 仅支持两种真实输入, 幂等, B 清理失效规划。"""
-    # 1) 新三件套表
+    """Postgres: 创建三件套表并增加项目当前指针。"""
     for stmt in _MIGRATION_0006_CREATE_POSTGRES.split(";"):
         stripped = stmt.strip()
         if stripped:
             conn.execute(sa_text(stripped))
-    # 2) planning_configs: 旧 0005 摘要列直接删除(不改名、不制造 hash 列)
-    cols = {
-        r[0]
-        for r in conn.execute(
-            sa_text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name='planning_configs'"
-            )
-        ).all()
-    }
-    if "finance_revision" in cols:
-        # B) legacy 0005 schema: 旧规划 revision 因旧 FinanceConfig 摘要链失效
-        # 无法迁移, 直接删除旧行并清空项目指针; 旧摘要列直接删除。
-        # 旧库已按 0005 部署 planning_configs 不可变触发器(BEFORE DELETE → RAISE),
-        # 必须先临时卸下, 清理后由 init_db 的 _deploy_immutable_triggers
-        # 按当前 IMMUTABLE_TABLES 重建。
-        conn.execute(sa_text("DROP FUNCTION IF EXISTS tg_planning_configs_immutable() CASCADE"))
-        conn.execute(sa_text("DELETE FROM planning_configs"))
-        conn.execute(sa_text("UPDATE projects SET planning_revision = NULL WHERE planning_revision IS NOT NULL"))
-        conn.execute(sa_text("ALTER TABLE planning_configs DROP COLUMN IF EXISTS finance_revision"))
-    # A) fresh schema: 无旧摘要列, 保持现状。
-    # 3) projects: 新指针列 + 删旧列
+    # 项目当前财务指针
     _ensure_columns(
         conn,
         "projects",
@@ -688,32 +560,14 @@ def _migrate_0006_postgres(conn: sa.Connection) -> None:
             "effective_finance_revision": "BIGINT",
         },
     )
-    conn.execute(sa_text("ALTER TABLE projects DROP COLUMN IF EXISTS finance_revision"))
-    # 4) 旧单体表退役(旧库可能带 finance_configs 不可变触发器函数)
-    conn.execute(sa_text("DROP FUNCTION IF EXISTS tg_finance_configs_immutable() CASCADE"))
-    conn.execute(sa_text("DROP TABLE IF EXISTS finance_configs"))
 
 
 def _migrate_0006_sqlite(conn: sa.Connection) -> None:
-    """SQLite 分支: 仅支持两种真实输入, B 清理失效规划。"""
-    cols = {
-        "planning_configs": {
-            r[1]
-            for r in conn.execute(sa_text("PRAGMA table_info(planning_configs)")).all()
-        },
-        "projects": {
-            r[1]
-            for r in conn.execute(sa_text("PRAGMA table_info(projects)")).all()
-        },
-    }
-    if "finance_revision" in cols["planning_configs"]:
-        # B) legacy 0005 schema: 旧规划 revision 因无法迁移而删除, 项目指针清空;
-        conn.execute(sa_text("DELETE FROM planning_configs"))
-        conn.execute(sa_text("UPDATE projects SET planning_revision = NULL WHERE planning_revision IS NOT NULL"))
-        conn.execute(sa_text("ALTER TABLE planning_configs DROP COLUMN finance_revision"))
-    # A) fresh schema: 无旧摘要列, 保持现状(不重复修改)
-    if "finance_revision" in cols["projects"]:
-        conn.execute(sa_text("ALTER TABLE projects DROP COLUMN finance_revision"))
+    """SQLite: 创建三件套表并增加项目当前指针。"""
+    for stmt in _MIGRATION_0006_CREATE_SQLITE.split(";"):
+        stripped = stmt.strip()
+        if stripped:
+            conn.execute(sa_text(stripped))
     _ensure_columns(
         conn,
         "projects",
@@ -723,7 +577,6 @@ def _migrate_0006_sqlite(conn: sa.Connection) -> None:
             "effective_finance_revision": "INTEGER",
         },
     )
-    conn.execute(sa_text("DROP TABLE IF EXISTS finance_configs"))
 
 
 def _migrate_0007(conn: sa.Connection) -> None:
@@ -731,13 +584,8 @@ def _migrate_0007(conn: sa.Connection) -> None:
 
     为 finance_overrides / effective_finance_revisions / planning_configs
     增加 receipt_object_id 列(对象引用, 指向回执 JSON 对象)。
-    新建 revision 行由服务层必备回执; 存量开发行保持 NULL(读取容忍:
-    空回执不破坏任何加载路径, 与内容引用缺失有本质区别)。
-    全新库经 ORM create_all 已含本列, 本迁移幂等 no-op; 存量库按需加列。
+    新建 revision 行由服务层必备回执；迁移幂等补充当前 schema 列。
     迁移失败直接抛出(同一事务回滚, 台账不记录)。
-
-    编号说明: 旧 0007-0010(SHA 清理系)已在合并中整体退役(开发库重建),
-    本编号复用 0007, 版本字符串区分。
     """
     _ensure_columns(
         conn,
@@ -761,9 +609,9 @@ MIGRATIONS: list[tuple[str, str, Callable[[sa.Connection], None]]] = [
     ("0001_project_model_manifest", "项目模型清单与编号序列表", _migrate_0001),
     ("0002_model_template_lifecycle", "用户模型模板主表与不可变发布 revision 表", _migrate_0002),
     ("0003_public_namespace_and_draft_history", "公开命名空间与不可变草稿历史", _migrate_0003),
-    ("0004_project_baseline", "项目计算基线固定与旧时区列删除", _migrate_0004),
+    ("0004_project_baseline", "项目计算基线契约", _migrate_0004),
     ("0005_finance_planning_configs", "公共财务与规划配置不可变 revision 表", _migrate_0005),
-    ("0006_finance_triplet_persistence", "财务三件套持久化替换旧单体 FinanceConfig", _migrate_0006),
+    ("0006_finance_triplet_persistence", "财务三件套持久化", _migrate_0006),
     ("0007_config_revision_receipts", "配置 revision 可审计回执列", _migrate_0007),
 ]
 
