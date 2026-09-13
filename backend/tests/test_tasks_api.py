@@ -8,7 +8,7 @@ running 经 cancelling)→ 重试同快照 → 槽限制(2 并发)→ 存储门�
 - 队列: IESPLAN_QUEUE=memory 强制内存后端(单进程, 无外部 Redis 依赖);
 - 应用: create_app() + include_router(projects/tasks), dependency_overrides 替换 get_db;
 - 假执行器: 测试直接调用 tasks 用例 claim_task / worker 用例 record_task_progress /
-  complete_task 等服务入口模拟 Worker 行为(Worker 消费端在下一波次实现)。
+  complete_task 等服务入口模拟 Worker 行为(本文件只覆盖任务 API 与应用层用例的集成边界，不启动真实 Worker 进程)。
 """
 
 from __future__ import annotations

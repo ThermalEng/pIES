@@ -1,12 +1,11 @@
 """身份用例族(application/identity)。
 
-W2-B 由 services/identity.py 搬入: 用户管理/窗口会话/登录限速/认证审计/
-应用级设置的全部编排(用例顶层函数拥有事务提交, 数据读写只经
-identity/project/audit 域公开门面, 不导入 iesplan.models.*)。
+本包提供用户、窗口会话、登录限速、认证审计和应用设置用例，负责跨域
+审计与项目编排及事务边界；数据读写只经 identity/project/audit 域公开门面。
 
-Wave 3-A: 输入规则、身份错误与身份状态归 identity 域所有(定义见
-iesplan.identity 门面与 iesplan.identity.contracts); 本包只保留审计/
-项目等跨域编排与事务, 域所有名称经此重导出(调用方表面不变)。
+输入规则、身份错误与身份状态归 identity 域所有(定义见
+iesplan.identity 门面与 iesplan.identity.contracts)。本包对外重导出身份
+用例、审计与项目编排能力，作为应用层稳定门面。
 """
 
 from iesplan.application.identity.service import (

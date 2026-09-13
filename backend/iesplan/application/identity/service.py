@@ -12,7 +12,7 @@
 - 业务错误统一抛 AppError(+ 诊断 message_key, 前缀 ies.diag.auth.*),
   响应不泄露堆栈/哈希/明文。
 - 输入规则、身份错误与身份状态归 identity 域所有(经 identity 门面复用);
-  本模块只保留审计/项目等跨域编排与事务(后端解耦 Wave 3-A)。
+  本模块负责身份用例以及审计、项目等跨域编排与事务。
 """
 
 from __future__ import annotations
