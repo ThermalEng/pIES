@@ -31,14 +31,14 @@ from sqlalchemy.orm import Session
 
 from iesplan.config import settings
 from iesplan.core.namespace import generate_namespace
-from iesplan.core.patterns import EMAIL_RE, USERNAME_RE
 from iesplan.core.security import check_password_strength, hash_password
-from iesplan.identity import persistence
 from iesplan.identity.contracts import (
+    EMAIL_RE,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_EXPIRED,
     SESSION_STATUS_REVOKED,
     SESSION_STATUS_TAKEOVER_PENDING,
+    USERNAME_RE,
     USER_STATUS_ACTIVE,
     USER_STATUS_DISABLED,
     AppSettingRecord,
@@ -66,37 +66,51 @@ from iesplan.identity.contracts import (
     WindowSessionRecord,
 )
 
-add_credential = persistence.add_credential
-bind_auth_subject = persistence.bind_auth_subject
-bump_credential_version = persistence.bump_credential_version
-create_session = persistence.create_session
-create_user = persistence.create_user
-ensure_role = persistence.ensure_role
-expire_sessions = persistence.expire_sessions
-extend_session = persistence.extend_session
-get_active_credential = persistence.get_active_credential
-get_active_password_secret = persistence.get_active_password_secret
-get_app_setting = persistence.get_app_setting
-get_session = persistence.get_session
-get_session_by_token_hash = persistence.get_session_by_token_hash
-get_user = persistence.get_user
-get_user_by_auth_subject = persistence.get_user_by_auth_subject
-get_user_by_namespace = persistence.get_user_by_namespace
-get_user_by_email = persistence.get_user_by_email
-get_user_by_username = persistence.get_user_by_username
-grant_role = persistence.grant_role
-heartbeat_session = persistence.heartbeat_session
-list_active_sessions = persistence.list_active_sessions
-list_users = persistence.list_users
-record_auth_event = persistence.record_auth_event
-revoke_credentials = persistence.revoke_credentials
-revoke_role = persistence.revoke_role
-set_app_setting = persistence.set_app_setting
-set_public_namespace = persistence.set_public_namespace
-set_session_status = persistence.set_session_status
-set_user_status = persistence.set_user_status
-touch_login = persistence.touch_login
-user_roles = persistence.user_roles
+#: persistence 延迟导出名: 本包 __init__ 不得在导入期装载 persistence
+#: (persistence 直连 models, eager 导入会与 ORM 初始化形成循环;
+#: 用户名/邮箱/DDL 正则的唯一权威在 contracts, DDL 经本包引用)。
+#: 首次属性访问时装载, 此后常驻 sys.modules。
+_PERSISTENCE_EXPORTS: frozenset[str] = frozenset({
+    "add_credential",
+    "bind_auth_subject",
+    "bump_credential_version",
+    "create_session",
+    "create_user",
+    "ensure_role",
+    "expire_sessions",
+    "extend_session",
+    "get_active_credential",
+    "get_active_password_secret",
+    "get_app_setting",
+    "get_session",
+    "get_session_by_token_hash",
+    "get_user",
+    "get_user_by_auth_subject",
+    "get_user_by_namespace",
+    "get_user_by_email",
+    "get_user_by_username",
+    "grant_role",
+    "heartbeat_session",
+    "list_active_sessions",
+    "list_users",
+    "record_auth_event",
+    "revoke_credentials",
+    "revoke_role",
+    "set_app_setting",
+    "set_public_namespace",
+    "set_session_status",
+    "set_user_status",
+    "touch_login",
+    "user_roles",
+})
+
+
+def __getattr__(name: str) -> Any:
+    """延迟导出 persistence 函数(首次访问时装载, 打破 models 初始化循环)。"""
+    if name in _PERSISTENCE_EXPORTS:
+        from iesplan.identity import persistence
+        return getattr(persistence, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "AUTH_CODE_WINDOW_SECONDS",
@@ -189,7 +203,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: 用户名规则(唯一权威: iesplan.core.patterns.USERNAME_RE, 用于外部主体 → 本地用户名映射)
+#: 用户名规则(唯一权威: iesplan.identity.contracts.USERNAME_RE, 用于外部主体 → 本地用户名映射)
 _USERNAME_RE = re.compile(USERNAME_RE)
 #: Discovery/令牌请求超时(秒)
 _PROVIDER_TIMEOUT = 10.0
@@ -336,7 +350,8 @@ def exchange_code(code: str, code_verifier: str) -> dict[str, Any]:
 
 def find_by_subject(db: Session, subject: str) -> UserRecord | None:
     """按外部主体(sub)查找已绑定的本地用户(经本域 repository)。"""
-    return persistence.get_user_by_auth_subject(db, subject)
+    from iesplan.identity import persistence as _persistence
+    return _persistence.get_user_by_auth_subject(db, subject)
 
 
 def _subject_username(subject: str) -> str:
@@ -389,13 +404,14 @@ def provision_user(
     一并提交)控制; 邮箱仅做去空格转小写规范化(与本域查询语义一致),
     邮箱唯一检查仍归调用方(见 persistence.create_user 约定)。
     """
+    from iesplan.identity import persistence as _persistence
     subject = claims["sub"]
     user = find_by_subject(db, subject)
     if user is not None:
         return user
     username = _subject_username(subject)
     base, index = username, 2
-    while persistence.get_user_by_username(db, username) is not None:
+    while _persistence.get_user_by_username(db, username) is not None:
         username = f"{base}_{index}"
         index += 1
         if index > 100:
@@ -404,7 +420,7 @@ def provision_user(
     ns = None
     for _ in range(20):
         candidate = generate_namespace()
-        if persistence.get_user_by_namespace(db, candidate) is None:
+        if _persistence.get_user_by_namespace(db, candidate) is None:
             ns = candidate
             break
     if ns is None:
@@ -414,7 +430,7 @@ def provision_user(
         email = email.strip().lower() or None
     else:
         email = None
-    user = persistence.create_user(
+    user = _persistence.create_user(
         db,
         username=username,
         display_name=(str(claims.get("name") or claims.get("preferred_username") or username)).strip()
@@ -422,7 +438,7 @@ def provision_user(
         email=email,
         public_namespace=ns,
     )
-    persistence.add_credential(
+    _persistence.add_credential(
         db,
         user_id=user.id,
         credential_type="password",
@@ -434,9 +450,9 @@ def provision_user(
         requires_change=False,
         created_by=None,
     )
-    role_row = persistence.ensure_role(db, "engineer", "工程师")
-    persistence.grant_role(db, user_id=user.id, role_id=role_row.id, granted_by=user.id)
-    persistence.record_auth_event(
+    role_row = _persistence.ensure_role(db, "engineer", "工程师")
+    _persistence.grant_role(db, user_id=user.id, role_id=role_row.id, granted_by=user.id)
+    _persistence.record_auth_event(
         db,
         event_type="role_change",
         user_id=user.id,
@@ -447,7 +463,7 @@ def provision_user(
     # 绑定外部主体(唯一约束; 冲突明确报错, 由调用方回滚;
     # 域门面不拥有事务, 不调用 commit/rollback)
     try:
-        user = persistence.bind_auth_subject(db, user.id, subject)
+        user = _persistence.bind_auth_subject(db, user.id, subject)
     except IdentityConflictError as exc:
         raise ExternalAuthError(reason="subject_conflict") from exc
     return user
@@ -463,7 +479,7 @@ ROLE_ENGINEER: Final[str] = "engineer"
 
 
 def validate_username(username: str) -> str:
-    """用户名输入规则: 去空格转小写后须匹配 ^[a-z0-9_]{3,32}$(core.patterns 权威)。
+    """用户名输入规则: 去空格转小写后须匹配 ^[a-z0-9_]{3,32}$(identity.contracts 权威)。
 
     不满足抛 BadRequestError(AUTH-USER-003); 返回规范化后的用户名。
     """
@@ -479,7 +495,7 @@ def validate_username(username: str) -> str:
 
 
 def validate_email(email: str | None) -> str | None:
-    """邮箱输入规则: 去空格转小写后须匹配邮箱格式(core.patterns 权威)。
+    """邮箱输入规则: 去空格转小写后须匹配邮箱格式(identity.contracts 权威)。
 
     为空(None/空串)保持原样返回(调用方按可选字段处理); 非法抛
     BadRequestError(AUTH-USER-004)。

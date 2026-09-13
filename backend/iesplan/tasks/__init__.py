@@ -6,7 +6,71 @@
 
 from __future__ import annotations
 
-from iesplan.tasks import persistence
+#: persistence 延迟导出名: 本包 __init__ 不得在导入期装载 persistence
+#: (persistence 直连 models, eager 导入会与 ORM 初始化形成循环;
+#: 幂等键格式的唯一权威在 contracts, DDL 经本包引用)。
+#: 首次属性访问时装载, 此后常驻 sys.modules。
+_PERSISTENCE_EXPORTS: frozenset[str] = frozenset({
+    "acquire_lease",
+    "acquire_slot",
+    "append_diagnostic",
+    "bind_slot_attempt",
+    "cancel_pending_tasks",
+    "count_completed_samples",
+    "count_tasks_by_status",
+    "count_tasks_by_statuses",
+    "count_tasks_by_type",
+    "create_attempt",
+    "has_running_tasks",
+    "create_sample_row",
+    "create_sample_task",
+    "create_snapshot",
+    "create_task",
+    "create_uncertainty_snapshot",
+    "ensure_slots",
+    "fence_release_lease",
+    "fence_renew_lease",
+    "find_active_duplicate",
+    "finish_attempt",
+    "get_active_lease_for_attempt",
+    "get_active_lease_for_task",
+    "get_attempt",
+    "get_latest_attempt",
+    "get_lease_by_token",
+    "get_progress",
+    "get_running_attempt",
+    "get_sample_task",
+    "get_snapshot",
+    "get_task",
+    "get_task_by_idempotency",
+    "latest_diagnostic",
+    "latest_progress_for_task",
+    "list_attempts",
+    "list_child_tasks",
+    "list_diagnostics",
+    "list_recent_failed_tasks",
+    "list_snapshots_for_version",
+    "list_task_ids",
+    "list_tasks",
+    "pool_has_free_slot",
+    "record_sample",
+    "release_lease",
+    "release_slot",
+    "renew_lease",
+    "revoke_leases_for_attempts",
+    "set_task_status",
+    "upsert_progress",
+})
+
+
+def __getattr__(name: str) -> object:
+    """延迟导出 persistence 函数(首次访问时装载, 打破 models 初始化循环)。"""
+    if name in _PERSISTENCE_EXPORTS:
+        from iesplan.tasks import persistence
+        return getattr(persistence, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 from iesplan.tasks import queue as _queue
 from iesplan.tasks.contracts import (
     BUSINESS_OUTCOMES,
@@ -39,55 +103,6 @@ from iesplan.tasks.contracts import (
     map_business_outcome,
 )
 
-acquire_lease = persistence.acquire_lease
-acquire_slot = persistence.acquire_slot
-append_diagnostic = persistence.append_diagnostic
-bind_slot_attempt = persistence.bind_slot_attempt
-cancel_pending_tasks = persistence.cancel_pending_tasks
-count_completed_samples = persistence.count_completed_samples
-count_tasks_by_status = persistence.count_tasks_by_status
-count_tasks_by_statuses = persistence.count_tasks_by_statuses
-count_tasks_by_type = persistence.count_tasks_by_type
-create_attempt = persistence.create_attempt
-has_running_tasks = persistence.has_running_tasks
-create_sample_row = persistence.create_sample_row
-create_sample_task = persistence.create_sample_task
-create_snapshot = persistence.create_snapshot
-create_task = persistence.create_task
-create_uncertainty_snapshot = persistence.create_uncertainty_snapshot
-ensure_slots = persistence.ensure_slots
-fence_release_lease = persistence.fence_release_lease
-fence_renew_lease = persistence.fence_renew_lease
-find_active_duplicate = persistence.find_active_duplicate
-finish_attempt = persistence.finish_attempt
-get_active_lease_for_attempt = persistence.get_active_lease_for_attempt
-get_active_lease_for_task = persistence.get_active_lease_for_task
-get_attempt = persistence.get_attempt
-get_latest_attempt = persistence.get_latest_attempt
-get_lease_by_token = persistence.get_lease_by_token
-get_progress = persistence.get_progress
-get_running_attempt = persistence.get_running_attempt
-get_sample_task = persistence.get_sample_task
-get_snapshot = persistence.get_snapshot
-get_task = persistence.get_task
-get_task_by_idempotency = persistence.get_task_by_idempotency
-latest_diagnostic = persistence.latest_diagnostic
-latest_progress_for_task = persistence.latest_progress_for_task
-list_attempts = persistence.list_attempts
-list_child_tasks = persistence.list_child_tasks
-list_diagnostics = persistence.list_diagnostics
-list_recent_failed_tasks = persistence.list_recent_failed_tasks
-list_snapshots_for_version = persistence.list_snapshots_for_version
-list_task_ids = persistence.list_task_ids
-list_tasks = persistence.list_tasks
-pool_has_free_slot = persistence.pool_has_free_slot
-record_sample = persistence.record_sample
-release_lease = persistence.release_lease
-release_slot = persistence.release_slot
-renew_lease = persistence.renew_lease
-revoke_leases_for_attempts = persistence.revoke_leases_for_attempts
-set_task_status = persistence.set_task_status
-upsert_progress = persistence.upsert_progress
 
 QUEUE_COMPUTE = _queue.QUEUE_COMPUTE
 QUEUE_IO = _queue.QUEUE_IO

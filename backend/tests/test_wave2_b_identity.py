@@ -2,7 +2,7 @@
 
 覆盖:
 - 新家公开面完整(services/identity.py 全部公开函数/常量/异常可经新包导入);
-- USERNAME_RE/EMAIL_RE 唯一权威归 iesplan.core.patterns, 应用层与 models 经其复用(无复制);
+- USERNAME_RE/EMAIL_RE 唯一权威归 iesplan.identity.contracts, 应用层与 models 经其复用(无复制);
 - 新模块无 iesplan.models.* 导入、无跨模块私有符号导入;
 - 行为抽查: 创建/认证/会话/系统设置往返;
 - delete_user 级联审计经 audit 域公开门面(原 services.project._audit 直调替换);

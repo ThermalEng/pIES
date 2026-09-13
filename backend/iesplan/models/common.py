@@ -15,12 +15,12 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import MappedColumn, mapped_column
 
-#: 幂等键正则复出(唯一权威: iesplan.core.patterns; DDL 经此处取用)。
-from iesplan.core.patterns import IDEMPOTENCY_KEY_RE as IDEMPOTENCY_KEY_RE
+#: 幂等键正则复出(唯一权威: iesplan.tasks.contracts; DDL 经此处取用)。
+from iesplan.tasks.contracts import IDEMPOTENCY_KEY_RE as IDEMPOTENCY_KEY_RE
 
-#: 用户名/邮箱正则唯一权威: iesplan.core.patterns; DDL 经此处取用。
-from iesplan.core.patterns import EMAIL_RE as EMAIL_RE
-from iesplan.core.patterns import USERNAME_RE as USERNAME_RE
+#: 用户名/邮箱正则唯一权威: iesplan.identity.contracts; DDL 经此处取用。
+from iesplan.identity.contracts import EMAIL_RE as EMAIL_RE
+from iesplan.identity.contracts import USERNAME_RE as USERNAME_RE
 
 #: 64 位小写十六进制(对象 id 等随机标识格式)
 HASH64_RE: str = "^[0-9a-f]{64}$"

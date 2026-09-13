@@ -12,6 +12,13 @@ from typing import Any
 
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 
+#: 用户名格式(小写字母/数字/下划线, 3-32 位)。身份域唯一权威:
+#: 用户输入边界校验、外部主体 → 本地用户名映射与 DDL 均引用此处,
+#: 不得各自复述字面量, 不得上提 core。
+USERNAME_RE: str = "^[a-z0-9_]{3,32}$"
+#: 邮箱格式。身份域唯一权威(用户输入边界校验与 DDL 引用)。
+EMAIL_RE: str = r"^[^@\s]+@[^@\s]+$"
+
 
 class ExternalAuthError(AppError):
     """外部认证失败(配置/提供方/令牌校验错误)。

@@ -16,7 +16,7 @@
 
 数据访问只经领域公开门面(tasks/project/dataset/audit/storage/identity/
 configuration, 含 tasks 域队列可重建视图); 不导入 ``models.*``。
-幂等键格式改接核心常量唯一权威(``iesplan.core.patterns.IDEMPOTENCY_KEY_RE``)。
+幂等键格式改接任务域常量唯一权威(``iesplan.tasks.contracts.IDEMPOTENCY_KEY_RE``)。
 任务类型/状态机/业务结局映射与任务错误唯一权威归 tasks 域
 (``iesplan.tasks`` 门面), 本模块只做提交/幂等/快照/事务编排, 直接复用。
 快照固化时的版本内容规则(含财务/规划引用闭合)复制自
@@ -62,7 +62,6 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import new_id
 from iesplan.core.jsonutil import jsonable
-from iesplan.core.patterns import IDEMPOTENCY_KEY_RE as _IDEMPOTENCY_KEY_RE
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.storage import (
@@ -72,6 +71,7 @@ from iesplan.storage import (
 )
 from iesplan.tasks.contracts import (
     COMPUTE_TYPES,
+    IDEMPOTENCY_KEY_RE as _IDEMPOTENCY_KEY_RE,
     IO_SLOT_CAPACITY,
     LEASE_TTL_SECONDS,
     POOL_BY_TYPE,
@@ -95,7 +95,7 @@ _HOURLY_BYTES_PER_ROW = 1024
 _INTERMEDIATE_FACTOR = 0.5
 #: 证据包系数(默认 0.1)
 _EVIDENCE_FACTOR = 0.1
-#: 幂等键格式唯一权威见 core.patterns(顶层导入 _IDEMPOTENCY_KEY_RE)。
+#: 幂等键格式唯一权威见 tasks.contracts(顶层导入 _IDEMPOTENCY_KEY_RE)。
 
 #: 项目所有者能力集唯一权威: iesplan.project.OWNER_CAPABILITIES(经 project_domain 取用, 此处不复制)。
 

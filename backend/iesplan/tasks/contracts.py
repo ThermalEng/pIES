@@ -21,7 +21,11 @@ from iesplan.core.diagnostics import (
     TASK_EXEC_UNAVAILABLE,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
-from iesplan.core.patterns import IDEMPOTENCY_KEY_RE as IDEMPOTENCY_KEY_RE
+
+#: 幂等键格式(字母/数字/._:-, 1-128 位)。任务域唯一权威:
+#: 任务提交 API/用例与 DDL 均引用此处, 不得各自复述字面量,
+#: 不得上提 core。
+IDEMPOTENCY_KEY_RE: str = "^[A-Za-z0-9._:-]{1,128}$"
 
 
 class TaskNotFoundError(NotFoundError):
