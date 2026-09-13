@@ -578,10 +578,10 @@ def test_result_selection_diff_and_preview(client: TestClient, db: Session) -> N
     assert body["diff"]["solution_id"] == 0
     assert body["diff"]["diff_patch"] == expected_diff
     assert body["diff"]["project_version_id"] is not None
-    # 补丁含容量参数名映射与财务摘要（见 manual/developer-guide/zh-CN/domain-model.md §规划、财务与计算配置）
+    # 补丁含证据原生容量契约与财务摘要（容量只给 type_id 粒度，不经旧 engines 静态映射解释）
     patch = body["diff"]["diff_patch"]["params"]["result_adoption"]
     assert patch["capacities"]["ies.device.pv"] == 500.0
-    assert patch["capacity_params"]["rated_capacity_kwp"] == 500.0
+    assert "capacity_params" not in patch
     assert patch["irr"] == 0.12
 
     # 3) 越界解标识 → 400

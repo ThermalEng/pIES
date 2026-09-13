@@ -40,9 +40,7 @@ from iesplan.application.tasks.submissions import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.jsonutil import canonical_json
-from iesplan.engines import CAPACITY_PARAM
 from iesplan.identity.contracts import UserRecord
-from iesplan.metrics import validity
 from iesplan.results.contracts import (
     EvidenceInvalidError,
     EvidencePackageRecord,
@@ -189,49 +187,28 @@ def _validate_evidence_payload(
     """校验证据载荷(清单校验), 返回 (content, 问题清单)。
 
     校验不通过不抛错, 以问题清单返回 —— 由调用方落库为 status='invalid'。
+    纯结构规则归 results 公开能力; 本函数只保留跨域一致性:
+    证据 snapshot 与任务 snapshot 一致性、hourly object 引用存在性
+    (组合 storage/tasks/results)。
     """
-    problems: list[str] = []
-    missing = [key for key in results_domain.REQUIRED_EVIDENCE_KEYS if key not in payload]
-    if missing:
-        problems.append(f"缺少必需字段: {','.join(missing)}")
+    problems = results_domain.validate_evidence_structure(payload)
     try:
         snapshot_id = int(payload["snapshot_id"])
     except (TypeError, ValueError, KeyError):
         snapshot_id = None
-        problems.append("snapshot_id 须为整数")
     if snapshot_id is not None and snapshot_id != task.calc_snapshot_id:
         problems.append(f"快照不一致: 证据 {snapshot_id} != 任务输入 {task.calc_snapshot_id}")
     content = payload.get("content")
-    if not isinstance(content, dict):
-        problems.append("content 必须是对象")
-    if not isinstance(payload.get("seed"), int):
-        problems.append("seed 必须是整数")
-    for key in ("stop_condition", "solve", "metrics"):
-        if not isinstance(payload.get(key), dict):
-            problems.append(f"{key} 必须是对象")
-    indices = payload.get("candidate_indices")
-    if not isinstance(indices, list) or not all(isinstance(i, int) for i in indices):
-        problems.append("candidate_indices 必须是整数数组")
-    hourly_refs = payload.get("hourly_refs")
-    if not isinstance(hourly_refs, list) or not hourly_refs:
-        problems.append("hourly_refs 必须是非空数组(逐时结果对象引用)")
-    else:
-        for ref in hourly_refs:
-            if not isinstance(ref, dict):
-                problems.append("hourly_refs 元素必须是对象")
-                continue
-            obj_id = ref.get("object_id")
-            if not isinstance(obj_id, int):
-                problems.append("hourly_refs 元素缺少 object_id")
-                continue
-            try:
-                object_info(db, obj_id)
-            except NotFoundError:
-                problems.append(f"hourly_refs 引用的对象不存在: object_id={obj_id}")
-            if not isinstance(ref.get("fields"), list) or not ref["fields"]:
-                problems.append("hourly_refs 元素缺少 fields 清单")
-            if not isinstance(ref.get("rows"), int) or ref["rows"] <= 0:
-                problems.append("hourly_refs 元素缺少 rows 数")
+    for ref in payload.get("hourly_refs") or []:
+        if not isinstance(ref, dict):
+            continue
+        obj_id = ref.get("object_id")
+        if not isinstance(obj_id, int):
+            continue
+        try:
+            object_info(db, obj_id)
+        except NotFoundError:
+            problems.append(f"hourly_refs 引用的对象不存在: object_id={obj_id}")
     return content if isinstance(content, dict) else {}, problems
 
 
@@ -504,14 +481,8 @@ def update_result_index(
 
 def assessment_to_dict(db: Session, assessment: ResultAssessmentRecord) -> dict[str, Any]:
     """评估序列化(含只读派生摘要, 绝不覆盖原始维度)。"""
+    summary = results_domain.summarize_assessment(assessment)
     states = results_domain.fine_states(assessment)
-    summary = validity.summarize_four_dimensions(
-        states["physical"],
-        states["optimality"],
-        states["financial"],
-        states["reliability"],
-        states["financial_irr_status"],
-    )
     score = assessment.overall_score
     return {
         "id": assessment.id,
@@ -550,8 +521,9 @@ def build_diff_patch(content: dict[str, Any], solution_id: int) -> dict[str, Any
     """生成参数差异补丁(供项目单元 apply_result 应用)。
 
     补丁形状: {"params": {"result_adoption": {...}}}, apply_result 深合并进
-    calc_config.params。容量同时给出设备类型粒度(type_id → 容量)与
-    注册表参数名粒度(capacity_params)。
+    calc_config.params。容量只给证据原生契约粒度(type_id → 容量);
+    注册表参数名解释不得经旧 engines 静态映射, 有消费方时经 devices
+    公开能力解析。
     """
     candidates = content.get("candidates")
     selected: dict[str, Any] | None = None
@@ -563,15 +535,11 @@ def build_diff_patch(content: dict[str, Any], solution_id: int) -> dict[str, Any
     capacities = selected.get("capacities") if isinstance(selected, dict) else {}
     if not isinstance(capacities, dict):
         capacities = {}
-    capacity_params = {
-        CAPACITY_PARAM.get(str(type_id), str(type_id)): value for type_id, value in capacities.items()
-    }
     return {
         "params": {
             "result_adoption": {
                 "solution_index": solution_id,
                 "capacities": capacities,
-                "capacity_params": capacity_params,
                 "irr": selected.get("irr") if isinstance(selected, dict) else None,
                 "npv": selected.get("npv") if isinstance(selected, dict) else None,
             }

@@ -19,8 +19,9 @@ configuration, 含 tasks 域队列可重建视图); 不导入 ``models.*``。
 幂等键格式改接任务域常量唯一权威(``iesplan.tasks.contracts.IDEMPOTENCY_KEY_RE``)。
 任务类型/状态机/业务结局映射与任务错误唯一权威归 tasks 域
 (``iesplan.tasks`` 门面), 本模块只做提交/幂等/快照/事务编排, 直接复用。
-快照固化时的版本内容规则(含财务/规划引用闭合)复制自
-``services.project``(W2-A 项目用例落地后由协调者改接)。
+快照固化时的版本内容规则(含财务/规划引用闭合)经
+``application.projects.versions.freeze_snapshot_version`` 项目用例拥有
+(语义与旧 services.project 一致), 本模块只编排提交/幂等/快照/事务。
 """
 
 from __future__ import annotations
