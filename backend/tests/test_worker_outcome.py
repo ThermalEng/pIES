@@ -1,23 +1,16 @@
-"""R2 Wave 2 切片 B: Worker 职责纠偏行为测试。
+"""Worker 执行结局与 report 检查行为测试。
 
 契约依据: docs/development/backend-decoupling-finalization.md §C / Wave 2。
 只断言公共行为、权限与错误语义, 不复制实现常量、不绑定行号与私有布局:
 
-- 未实现的 I/O 任务(dataset_build/export/import)不得返回成功 outcome;
-  占位成功与缺字段默认成功必须失败闭环, 且不得借用求解失败码描述 I/O 不可用;
+- 未实现的 I/O 任务(dataset_build/export/import)不得返回成功 outcome,
+  且不得借用求解失败码描述 I/O 不可用;
 - 完成路径必须要求显式、合法的业务 outcome, 缺字段不得默认成功;
-- report 检查由 Worker 编排并经 application.worker 分阶段命令完成:
-  证据解释/评分与业务 outcome 归 results 公开能力所有, Worker 只传递
-  不可变输入并消费显式结果契约, 进度/取消回调不出 Worker 层。
-
-本文件分两组:
-
-- 契约组(TestUnimplementedIoNeverSucceeds / TestCompletionRequiresExplicitOutcome /
-  TestReportCheckDelegatedToResultsCapability): 新语义断言, 在纠偏前生产上
-  主要以违规形式失败(TDD 红), 实现切片(correction/r2w2-worker)落地后转绿;
-  其中非法 outcome 值一例已由任务结局 CHECK 约束失败闭环, 同为回归;
-- 回归组(TestReportNoEvidencePath / TestWorkerExecutionGuards): 纠偏前后
-  均应通过, 锁定运行编排(领取/租约/取消/收拢)不被本轮改动破坏。
+- report 检查由 Worker 编排并经 application.worker report 阶段命令完成:
+  证据定位/解释/评分与业务 outcome 归 results 公开能力所有, Worker 只安排
+  定位 → 检查点 → 评估 → 上报时序并消费显式结果契约, 进度/取消回调不出
+  Worker 层; 失败/取消后不得提交未完成的评估;
+- 运行编排回归: 租约 fencing 与取消收拢不受职责归位破坏。
 
 数据库: SQLite :memory:(StaticPool 共享连接); 队列: IESPLAN_QUEUE=memory;
 对象存储: settings.data_dir → tmp_path(均见 worker_testkit)。
@@ -49,6 +42,7 @@ from iesplan.models.calc import Task, TaskDiagnostic, TaskLease  # noqa: E402
 from iesplan.results import (  # noqa: E402
     ASSESSMENT_RULE_VERSION,
     EVIDENCE_COMPLETE,
+    check_outcome,
     create_evidence,
     evaluate_evidence,
     evidence_inner,
@@ -131,10 +125,17 @@ def _add_task(db: Session, env: dict[str, Any], task_type: str) -> Task:
 
 def _store_evidence(db: Session, env: dict[str, Any], payload: dict[str, Any]):
     """经 application.worker 对象写入 + results 域门面存一条 complete 证据包。"""
+    return _store_evidence_for(db, env, env["task"].id, payload)
+
+
+def _store_evidence_for(
+    db: Session, env: dict[str, Any], task_id: int, payload: dict[str, Any],
+):
+    """为指定任务存一条 complete 证据包(定位优先级测试用)。"""
     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     object_id = worker_app.store_result_blob(db, blob, actor_id=env["user"].id)
     package = create_evidence(
-        db, task_id=env["task"].id, calc_snapshot_id=env["snapshot"].id,
+        db, task_id=task_id, calc_snapshot_id=env["snapshot"].id,
         object_id=object_id, status=EVIDENCE_COMPLETE, created_by=env["user"].id,
     )
     db.commit()
@@ -159,11 +160,7 @@ def _task_diagnostics(db: Session, task_id: int) -> list[TaskDiagnostic]:
 
 
 class TestUnimplementedIoNeverSucceeds:
-    """未实现 I/O 失败闭环: 三种 io 任务都不得完成为成功。
-
-    纠偏前生产经占位执行器返回成功回执, 以下断言以违规形式失败;
-    纠偏后(删除分派入口或结构化不可用失败)应全部通过。
-    """
+    """未实现 I/O 失败闭环: 三种 io 任务都不得完成为成功。"""
 
     @pytest.mark.parametrize("task_type", IO_TASK_TYPES)
     def test_unimplemented_io_fails_closed(self, db: Session, env: dict[str, Any], task_type: str):
@@ -192,9 +189,7 @@ class TestUnimplementedIoNeverSucceeds:
 class TestCompletionRequiresExplicitOutcome:
     """缺 outcome 不得默认成功, 非法 outcome 不得完成。
 
-    缺字段/缺参在纠偏前默认成功, 对应用例以违规形式失败,
-    纠偏后(显式校验 + 失败闭环 / 调用方错误)应通过;
-    非法 outcome 值已由任务结局 CHECK 约束失败闭环, 此处锁定为回归。
+    非法 outcome 值由任务结局 CHECK 约束失败闭环, 此处锁定为回归。
     """
 
     def test_outcome_less_handler_result_fails_closed(
@@ -276,8 +271,7 @@ def _divergent_evidence_payload() -> dict[str, Any]:
 class TestReportCheckDelegatedToResultsCapability:
     """report 检查的证据解释/评分/业务 outcome 归 results 公开能力所有。
 
-    Worker 只传递不可变输入并消费显式结果契约, 不在本地复制规则。
-    纠偏前 Worker 本地透传载荷评估并自算综合得分, 以下断言以违规形式失败。
+    Worker 只安排运行时序并消费显式结果契约, 不在本地复制规则。
     """
 
     def test_report_verdict_matches_results_capability(self, db: Session, env: dict[str, Any]):
@@ -308,7 +302,7 @@ class TestReportCheckDelegatedToResultsCapability:
 
 
 class TestReportNoEvidencePath:
-    """回归: 项目无证据包时 report 显式判证据不足(纠偏前后均成立)。"""
+    """项目无证据包时 report 显式判证据不足。"""
 
     def test_report_without_evidence_is_insufficient(self, db: Session, env: dict[str, Any]):
         task = _add_task(db, env, "report")
@@ -320,6 +314,121 @@ class TestReportNoEvidencePath:
         view = _task_view(db, task.id)
         assert view is not None and view.status == "completed", view
         assert view.business_outcome == "insufficient_evidence", view.business_outcome
+
+
+# ---------------------------------------------------------------------------
+# report 阶段命令: 只读定位与原子评估写分离, 显式结果契约
+# ---------------------------------------------------------------------------
+
+
+class TestReportStageCommands:
+    """report 阶段命令行为(经 application.worker 公开命令推进)。
+
+    锁定新形态: 证据选择优先级、无证据业务 outcome/payload 口径、
+    assessment DTO 组装与失败原子性全部归 application 所有, 只断言公开契约。
+    """
+
+    def test_locate_evidence_priority(self, db: Session, env: dict[str, Any]):
+        """定位优先级: 显式 id → 任务最新 → 项目最新; 均无返回 None。"""
+        first = _store_evidence(db, env, _divergent_evidence_payload())
+        bare = _add_task(db, env, "report")  # 本任务无证据, 回落到项目最新
+        assert worker_app.locate_report_evidence(
+            db, project_id=env["project"].id, task_id=env["task"].id
+        ) == first.id
+        assert worker_app.locate_report_evidence(
+            db, project_id=env["project"].id, task_id=bare.id
+        ) == first.id
+
+        other = _add_task(db, env, "calc")
+        second = _store_evidence_for(db, env, other.id, _divergent_evidence_payload())
+        assert second.id > first.id
+        # 显式 id 优先于更新的项目最新; 任务最新优先于项目最新; 缺省取项目最新
+        assert worker_app.locate_report_evidence(
+            db, project_id=env["project"].id, evidence_package_id=first.id
+        ) == first.id
+        assert worker_app.locate_report_evidence(
+            db, project_id=env["project"].id, task_id=env["task"].id
+        ) == first.id
+        assert worker_app.locate_report_evidence(
+            db, project_id=env["project"].id
+        ) == second.id
+        # 全无证据的项目返回 None(调用方走无证据口径)
+        assert worker_app.locate_report_evidence(db, project_id=999999) is None
+
+    def test_assess_stage_without_evidence_writes_nothing(
+        self, db: Session, env: dict[str, Any]
+    ):
+        """无证据阶段: 返回无证据口径契约, 且不产生任何待提交写库。"""
+        task = _add_task(db, env, "report")
+        claim = _claim_task(db, task.id)
+
+        result = worker_app.assess_report_stage(db, claim, evidence_id=None)
+
+        assert result.evidence_id is None
+        assert result.assessment is None
+        assert result.status == "no_evidence"
+        assert result.outcome == "insufficient_evidence"
+        assert result.outcome in worker_app.BUSINESS_OUTCOMES
+        assert result.payload["status"] == "no_evidence"
+        assert result.payload["evidence_package_id"] is None
+        assert result.payload["assessment"] == {}
+        assert result.payload["outcome"] == "insufficient_evidence"
+        assert not db.new, "无证据阶段不得产生写库"
+
+    def test_assess_stage_payload_matches_results_capability(
+        self, db: Session, env: dict[str, Any]
+    ):
+        """有证据阶段: 载荷 DTO 与 outcome 与 results 公开能力一致。"""
+        payload_in = _divergent_evidence_payload()
+        package = _store_evidence(db, env, payload_in)
+        task = _add_task(db, env, "report")
+        claim = _claim_task(db, task.id)
+
+        result = worker_app.assess_report_stage(db, claim, evidence_id=package.id)
+
+        assert result.evidence_id == package.id
+        assert result.status == "assessed"
+        assert result.assessment is not None
+        dims = {
+            "physical": result.assessment.dimension_physical,
+            "optimality": result.assessment.dimension_optimality,
+            "financial": result.assessment.dimension_financial,
+            "reliability": result.assessment.dimension_reliability,
+        }
+        assert result.outcome == check_outcome(dims)
+        assert result.outcome in worker_app.BUSINESS_OUTCOMES
+        payload = result.payload
+        assert payload["status"] == "assessed"
+        assert payload["evidence_package_id"] == package.id
+        assert payload["outcome"] == result.outcome
+        dto = payload["assessment"]
+        assert set(dto) == {
+            "dimension_physical", "dimension_optimality", "dimension_financial",
+            "dimension_reliability", "overall_score", "comment", "detail",
+        }, dto
+        assert dto["dimension_physical"] == dims["physical"]
+        persisted = latest_assessment(db, package.id)
+        assert persisted is not None and persisted.id == result.assessment.id
+
+    def test_rejected_assess_stage_commits_nothing(
+        self, db: Session, env: dict[str, Any]
+    ):
+        """租约失效时评估阶段被拒绝: 迟到评估不入权威库。"""
+        package = _store_evidence(db, env, _divergent_evidence_payload())
+        task = _add_task(db, env, "report")
+        claim = _claim_task(db, task.id)
+        row = db.execute(
+            select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
+        ).scalars().first()
+        assert row is not None
+        row.status = "expired"  # 模拟守护进程过期回收
+        db.commit()
+
+        with pytest.raises(worker_app.LeaseRejectedError):
+            worker_app.assess_report_stage(db, claim, evidence_id=package.id)
+        db.rollback()
+
+        assert latest_assessment(db, package.id) is None
 
 
 # ---------------------------------------------------------------------------

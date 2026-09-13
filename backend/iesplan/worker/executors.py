@@ -12,11 +12,11 @@ TASK-EXEC-001），不得借用 TASK-SOLVE-001 充数，更不伪造成功。
 本模块仅保留：
 - 任务执行上下文（进度/取消检查点，经 application.worker 用例）；
 - 计算/I/O 入口的明确未实现错误；
-- 结果检查（report）运行编排：按运行时序调用多个 application.worker
-  分阶段命令（证据定位读 → 单步评估 → 显式结果契约组装），证据读取/
-  解析/评估/评分/outcome 由 application 经 results/analysis 公开能力与
-  领域规则完成，本模块不解释证据、不复制评分规则，不把回调传入
-  application。
+- 结果检查（report）运行编排：按运行时序调用 application.worker
+  report 阶段命令（只读定位 → 进度/检查点 → 原子评估 → 上报），证据
+  定位/解析/评估/评分/outcome 与 payload 组装由 application 经
+  results/analysis 公开能力与领域规则完成，本模块不解释证据、不复制
+  评分规则，不把回调传入 application。
 """
 
 from __future__ import annotations
@@ -123,67 +123,39 @@ def execute_analysis(
 
 
 def execute_check(ctx: RunContext) -> dict:
-    """结果检查运行编排: Worker 按运行时序调用分阶段命令。
+    """结果检查运行编排: Worker 只安排定位 → 检查点 → 评估 → 上报时序。
 
-    定位(显式 id → 任务最新 → 项目最新)→ 进度/取消检查点(Worker 所有)
-    → 单步评估阶段命令(``assess_check_evidence``: 公开能力评估追加 +
-    results 域 outcome 规则) → 组装显式 outcome 载荷。证据解释/评分/
-    outcome 规则不复制, 只消费阶段命令返回的显式结果契约; 进度与取消
-    回调不出本层, 不传入 application。
+    定位与评估均为 application.worker 阶段命令(短会话由本层开, 短事务由
+    application 提交; 只读定位与原子评估写分离): ``locate_report_evidence``
+    做证据定位读, ``assess_report_stage`` 做评估写/无证据口径并返回不可变
+    阶段结果契约。本函数只调阶段命令、自有 progress/checkpoint、消费显式
+    契约的 payload 上报; 证据选择优先级、无证据业务 outcome/payload、
+    assessment DTO 组装全部归 application, 本层不复制。进度与取消回调不
+    出本层, 不传入 application。
 
     任务参数(存储待 tasks.params 落地): io_params 支持
     evidence_package_id / task_id; 缺省检查本项目最新证据包。
     """
     msg_params = ctx.io_params or {}
-    raw_evidence_id = msg_params.get("evidence_package_id")
-    raw_task_id = msg_params.get("task_id")
-    evidence_id = int(raw_evidence_id) if raw_evidence_id is not None else None
-    # 证据定位读: 短会话, 读完即关, 不跨越后续检查点与评估写入
+    # 定位阶段: 短会话只读, 读完即关, 不跨越后续检查点与评估写入
     with ctx.session_factory() as db:
-        if evidence_id is None and raw_task_id is not None:
-            package_row = worker_app.get_latest_evidence_for_task(db, int(raw_task_id))
-            evidence_id = package_row.id if package_row else None
-        if evidence_id is None:
-            package_row = worker_app.get_latest_evidence_for_project(
-                db, ctx.task.project_id
-            )
-            evidence_id = package_row.id if package_row else None
+        evidence_id = worker_app.locate_report_evidence(
+            db,
+            project_id=ctx.task.project_id,
+            evidence_package_id=msg_params.get("evidence_package_id"),
+            task_id=msg_params.get("task_id"),
+        )
 
     ctx.progress(20, "load_evidence", {"evidence_package_id": evidence_id})
     ctx.checkpoint("load_evidence")
-    if evidence_id is None:
-        return {
-            "schema_version": 1, "result_kind": "assessment_report", "task_type": "report",
-            "status": "no_evidence", "evidence_package_id": None, "assessment": {},
-            "outcome": "insufficient_evidence",
-            "summary": {"assessed": False, "reason": "项目无证据包可检查"},
-        }
-    # 单步评估写入: 独立短事务(内含 fencing 校验), 提交后即关
+    # 评估阶段: 独立短会话, 短事务由阶段命令提交后即关
     with ctx.session_factory() as db:
-        result = worker_app.assess_report_evidence(
-            db, ctx.claim, evidence_package_id=evidence_id
+        result = worker_app.assess_report_stage(
+            db, ctx.claim, evidence_id=evidence_id
         )
-    assessment = result.assessment
-    ctx.progress(100, "done", {"assessment_id": assessment.id})
-    return {
-        "schema_version": 1,
-        "result_kind": "assessment_report",
-        "task_type": "report",
-        "status": "assessed",
-        "evidence_package_id": evidence_id,
-        "assessment": {
-            "dimension_physical": assessment.dimension_physical,
-            "dimension_optimality": assessment.dimension_optimality,
-            "dimension_financial": assessment.dimension_financial,
-            "dimension_reliability": assessment.dimension_reliability,
-            "overall_score": assessment.overall_score,
-            "comment": assessment.comment,
-            "detail": assessment.detail,
-        },
-        "outcome": result.outcome,
-        "summary": {"assessed": True, "evidence_package_id": evidence_id,
-                    "assessment_id": assessment.id},
-    }
+    if result.assessment is not None:
+        ctx.progress(100, "done", {"assessment_id": result.assessment.id})
+    return result.payload
 
 
 # ---------------------------------------------------------------------------

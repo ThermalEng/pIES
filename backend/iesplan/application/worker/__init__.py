@@ -14,6 +14,8 @@ worker 层只经本包推进, 不再直连 ``services.*`` 与 ``models.*``;
 - runner_cases: 快照输入读取转调与输入装配行读;
 - evidence_cases: 证据包查询/检查单步评估(公开能力评估追加 +
   results 域 outcome 规则, flush-only)/不确定性行写。
+- report_cases: report 检查分阶段命令(只读证据定位与原子评估写分离,
+  返回不可变阶段结果契约, 含无证据口径与上报 payload 组装)。
   report 检查的跨步顺序(定位 → 评估 → 上报)由 Worker 编排,
   不设包住长任务的单一完整用例。
 
@@ -27,7 +29,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from iesplan import tasks as tasks_domain
-from iesplan.application.worker import attempt_cases, evidence_cases, lease_cases, runner_cases
+from iesplan.application.worker import attempt_cases, evidence_cases, lease_cases, report_cases, runner_cases
 from iesplan.application.worker.attempt_cases import (
     SubmitReceipt,
     acquire_attempt,
@@ -84,6 +86,14 @@ from iesplan.application.worker.lease_cases import (
     verify_lease,
     write_diagnostic,
 )
+from iesplan.application.worker.report_cases import (
+    NO_EVIDENCE_OUTCOME,
+    NO_EVIDENCE_STATUS,
+    REPORT_ASSESSED_STATUS,
+    ReportCheckResult,
+    assess_report_stage,
+    locate_report_evidence,
+)
 from iesplan.application.worker.runner_cases import (
     count_completed_samples,
     get_dataset_data_object,
@@ -115,6 +125,10 @@ __all__ = [
     "ExecutionUnavailableError",
     "LEASE_TTL_SECONDS",
     "LeaseRejectedError",
+    "NO_EVIDENCE_OUTCOME",
+    "NO_EVIDENCE_STATUS",
+    "REPORT_ASSESSED_STATUS",
+    "ReportCheckResult",
     "ResultAssessmentRecord",
     "SampleTaskRecord",
     "SubmitReceipt",
@@ -127,6 +141,7 @@ __all__ = [
     "acquire_attempt",
     "acquire_task",
     "assess_report_evidence",
+    "assess_report_stage",
     "assess_check_evidence",
     "attempt_cases",
     "attach_result_ref",
@@ -159,6 +174,7 @@ __all__ = [
     "insert_result_index",
     "lease_cases",
     "load_dataset_blob",
+    "locate_report_evidence",
     "load_version_content",
     "map_business_outcome",
     "parse_dataset_csv",
@@ -167,6 +183,7 @@ __all__ = [
     "record_sample_value",
     "record_task_progress",
     "release_slot",
+    "report_cases",
     "renew_attempt_lease",
     "renew_lease_once",
     "report_attempt_progress",
