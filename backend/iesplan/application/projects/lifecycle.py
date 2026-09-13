@@ -89,7 +89,7 @@ def _create_project(
     项目计算基线(0.6.5 事项 1): 创建时必须显式提供 resolution/leap_year/
     scenario_mode 三字段, 缺失或非法一律拒绝(PROJ-BASE-001), 不静默使用
     默认值; 摘要经 ``core.contracts.ProjectBaseline`` 确定性计算。默认值
-    (1h/非闰年/single)只用于迁移对存量项目的回填, 不用于新项目创建。
+    基线字段不提供默认值，必须由创建用例显式传入。
     基线创建后无任何更新入口, 数据库层另有不可变触发器(Postgres)。
     """
     if is_admin(db, user):

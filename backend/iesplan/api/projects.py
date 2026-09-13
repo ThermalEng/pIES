@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
@@ -47,9 +47,10 @@ class ProjectCreateRequest(BaseModel):
     - baseline_resolution: '15min' | '30min' | '1h'(全项目统一计算分辨率);
     - baseline_leap_year: 是否按 366 天(闰年)生成全周期序列;
     - baseline_scenario_mode: 当前仅 'single'。
-    基线创建后不可修改(无任何更新入口); 默认值仅用于迁移存量项目回填,
-    新项目创建必须显式提供, 不静默补齐。
+    基线创建后不可修改(无任何更新入口); 新项目创建必须显式提供。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=200)
     currency: Literal["CNY", "USD"] = "CNY"

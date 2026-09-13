@@ -11,8 +11,7 @@
 - 持久化: 不可变 revision 追加、乐观锁 409、未保存 404;
 - Planning: 必须先生成 Effective(400); 保存后返回 revision 指针;
   任何 Profile 切换/Overrides 保存/清空生成新 Effective 时当前指针失效;
-- 迁移 0006: 新表/指针列创建、旧 finance_configs 表与旧指针退役、幂等,
-  兼容 fresh 与 legacy 0005 两种输入。
+- 迁移 0006: 当前三件套表与项目指针创建、幂等。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录。
 """
@@ -37,7 +36,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from iesplan.api import config_revisions as config_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.core.contracts import PlanningConfig, PlanningConfigError  # noqa: E402
+from iesplan.core.contracts import PlanningConfig  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.finance import (  # noqa: E402
     EffectiveFinanceConfig,
@@ -264,7 +263,7 @@ def test_list_finance_profiles_dedup_latest(client: TestClient, db_session: Sess
     """列表按 profile_id 去重取最新登记, 跨库确定性(SQLite 与 PG 语义一致)。"""
     headers, _ = _owner(client, db_session)
     _register_profile(client, headers)
-    # 同 id 登记不同内容(新摘要, 内容寻址新行)
+    # 同 id 登记不同内容(新内容写入新行)
     profile2_payload = {
         **PROFILE_PAYLOAD,
         "energy_prices": {
@@ -437,7 +436,7 @@ def test_overrides_stale_revision_conflict(client: TestClient, db_session: Sessi
 
 
 def test_profile_switch_invalidates_chain(client: TestClient, db_session: Session) -> None:
-    """切换 Profile 后旧覆盖摘要链失效: 清空旧指针并以新 Profile 重建空覆盖。"""
+    """切换 Profile 后当前覆盖链失效: 清空当前指针并重建空覆盖。"""
     headers, pid = _owner(client, db_session)
     _register_profile(client, headers)
     client.put(
@@ -463,10 +462,10 @@ def test_profile_switch_invalidates_chain(client: TestClient, db_session: Sessio
         headers=headers,
     )
     assert resp.status_code == 200
-    # 切换后: 新空覆盖 revision(表内 max+1, 不撞旧行); Effective 血缘指向新 Profile
+    # 切换后: 新空覆盖 revision(表内 max+1); Effective 血缘指向新 Profile
     body = resp.json()
     assert body["overrides_revision"] == 3  # 空覆盖(1) + 真实覆盖(2) + 切换重建(3)
-    # 新覆盖为空覆盖文档(旧覆盖不残留)
+    # 新覆盖为空覆盖文档(此前覆盖不残留)
     resp = client.get(f"/api/projects/{pid}/finance-overrides", headers=headers)
     assert resp.status_code == 200
     doc = resp.json()["finance_overrides"]
@@ -512,8 +511,6 @@ def test_planning_requires_current_effective(client: TestClient, db_session: Ses
 def test_planning_config_contract() -> None:
     config = PlanningConfig.from_dict(_planning_payload())
     assert PlanningConfig.from_dict(config.to_dict()) == config
-    with pytest.raises(PlanningConfigError):
-        PlanningConfig.from_dict({**_planning_payload(), "finance_revision": 1})
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +518,7 @@ def test_planning_config_contract() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_migration_0006_retires_old_tables_and_pointers() -> None:
+def test_migration_0006_creates_current_schema() -> None:
     eng = create_engine("sqlite+pysqlite://", connect_args={"check_same_thread": False})
     Base.metadata.create_all(eng)
     with eng.begin() as conn:
@@ -534,60 +531,10 @@ def test_migration_0006_retires_old_tables_and_pointers() -> None:
             ).all()
         }
         assert {"finance_profiles", "finance_overrides", "effective_finance_revisions"} <= tables
-        assert "finance_configs" not in tables  # 旧单体表退役
         proj_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(projects)")).all()}
-        assert "finance_revision" not in proj_cols
         assert {"finance_profile_id", "overrides_revision", "effective_finance_revision"} <= proj_cols
         planning_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(planning_configs)")).all()}
-        assert "finance_revision" not in planning_cols
-    eng.dispose()
-
-
-def test_migration_0006_legacy_0005_schema_cleans_invalid_planning() -> None:
-    """B) 模拟正常完成 0005 的 legacy schema: 0006 清理失效规划行/指针并退役旧表。"""
-    eng = create_engine("sqlite+pysqlite://", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(eng)
-    with eng.begin() as conn:
-        # 造 0005 legacy 形态: 旧 finance_configs 表、旧 planning_configs.finance_revision、
-        # projects.finance_revision 指针与无效历史行
-        conn.execute(text(
-            "CREATE TABLE finance_configs ("
-            " id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL REFERENCES projects(id),"
-            " revision INTEGER NOT NULL, content TEXT NOT NULL,"
-            " created_by INTEGER NOT NULL REFERENCES users(id),"
-            " created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(project_id, revision))"
-        ))
-        conn.execute(text(
-            "ALTER TABLE planning_configs ADD COLUMN finance_revision INTEGER"
-        ))
-        conn.execute(text("ALTER TABLE projects ADD COLUMN finance_revision INTEGER"))
-        # 旧行: 指向将被删除的旧 FinanceConfig(旧引用失效)
-        conn.execute(text(
-            "INSERT INTO projects (name, status, owner_id, currency, baseline_resolution,"
-            " baseline_leap_year, baseline_scenario_mode, schema_version,"
-            " created_by, planning_revision, finance_revision)"
-            " VALUES ('legacy', 'active', 1, 'CNY', '1h', 0, 'single', 1, 1, 7, 3)"
-        ))
-        conn.execute(text(
-            "INSERT INTO planning_configs (project_id, revision, content,"
-            " finance_revision, created_by)"
-            " VALUES (1, 7, '{}', 3, 1)"
-        ))
-        _migrate_0006(conn)
-        _migrate_0006(conn)  # 幂等
-        # 旧 planning 行被清理, 项目 planning 指针清空
-        cnt = conn.execute(text("SELECT COUNT(*) FROM planning_configs")).scalar()
-        assert cnt == 0
-        ptr = conn.execute(text("SELECT planning_revision FROM projects WHERE id=1")).scalar()
-        assert ptr is None
-        # 旧 finance_revision 指针退役
-        proj_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(projects)")).all()}
-        assert "finance_revision" not in proj_cols
-        planning_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(planning_configs)")).all()}
-        assert "finance_revision" not in planning_cols
-        # 旧单体表退役
-        tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).all()}
-        assert "finance_configs" not in tables
+        assert {"project_id", "revision", "content", "created_by"} <= planning_cols
     eng.dispose()
 
 
@@ -597,7 +544,7 @@ def test_migration_0006_legacy_0005_schema_cleans_invalid_planning() -> None:
 
 
 def _set_profile_and_planning(client: TestClient, headers: dict, pid: int) -> int:
-    """设置 Profile + 保存规划, 返回 planning_revision(显式 revision 引用, 非摘要)。"""
+    """设置 Profile + 保存规划, 返回显式 planning revision 引用。"""
     _register_profile(client, headers)
     client.put(f"/api/projects/{pid}/finance-profile", json=_profile_ref(_profile()), headers=headers)
     eff = client.get(f"/api/projects/{pid}/effective-finance", headers=headers).json()
@@ -715,7 +662,7 @@ def test_profile_reregister_reuses_row_no_drift(
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    old_row_id = client.get(f"/api/projects/{pid}/finance-profile", headers=headers).json()["row"]["id"]
+    previous_row_id = client.get(f"/api/projects/{pid}/finance-profile", headers=headers).json()["row"]["id"]
     # 同 profile_id 登记不同内容 → 200 复用既有行(不改写内容)
     profile2_payload = {
         **PROFILE_PAYLOAD,
@@ -727,11 +674,11 @@ def test_profile_reregister_reuses_row_no_drift(
     }
     resp = client.post("/api/finance-profiles", json={"finance_profile": profile2_payload}, headers=headers)
     assert resp.status_code == 200
-    assert resp.json()["row"]["id"] == old_row_id
+    assert resp.json()["row"]["id"] == previous_row_id
     assert resp.json()["finance_profile"]["energy_prices"]["grid_import"]["value"]["value"] == "0.7"
     # 已绑定项目不漂移: 仍指向既有行与既有内容
     body = client.get(f"/api/projects/{pid}/finance-profile", headers=headers).json()
-    assert body["row"]["id"] == old_row_id
+    assert body["row"]["id"] == previous_row_id
     assert body["finance_profile"]["energy_prices"]["grid_import"]["value"]["value"] == "0.7"
     # 引用未登记 id → 404(不静默回退)
     resp = client.put(
@@ -756,13 +703,13 @@ def test_set_profile_commits_transaction_for_new_session(
     assert resp.status_code == 200, resp.text
     # 独立新会话读取(expire_on_commit=False 语义下仍应从库读到已提交数据)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
-    with factory() as fresh:
+    with factory() as new_session:
         from iesplan.models.project import Project
 
-        proj = fresh.get(Project, pid)
+        proj = new_session.get(Project, pid)
         assert proj is not None and proj.finance_profile_id is not None
         assert proj.effective_finance_revision is not None
-        row = fresh.execute(
+        row = new_session.execute(
             text("SELECT COUNT(*) FROM effective_finance_revisions WHERE project_id=:p"),
             {"p": pid},
         ).scalar()

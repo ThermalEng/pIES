@@ -5,11 +5,10 @@
   canonical payload 只含三字段/严格恢复(未知字段/缺失字段拒绝)/
   validate 结构化诊断/from_dict(to_dict(x)) 自洽;
 - 项目创建 API: 基线三字段必填(缺失 422)、响应携带 project_baseline、
-  无旧 utc 字段;
+  基线字段仅使用当前契约;
 - 版本固化: 版本字典与版本内容均携带 project_baseline;
 - 不可变: 无任何基线更新入口(API 面)+ Postgres 触发器 DDL 常量存在;
-- 迁移 0004: 旧布局 SQLite 库补列回填(1h/false/single)并删除
-  fixed_utc_offset_minutes 列。
+- 迁移 0004: 当前项目基线迁移版本可重复执行。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录。
 """
@@ -27,7 +26,7 @@ os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
 import pytest  # noqa: E402
 from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine, select, text  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
@@ -41,7 +40,6 @@ from iesplan.core.contracts import (  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.migrations import _migrate_0004  # noqa: E402
-from iesplan.models.project import Project  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境(与 test_project_api.py 同构)
@@ -244,17 +242,16 @@ def test_create_project_returns_baseline(
         resolution="30min", leap_year=True, scenario_mode="single"
     )
     assert project["project_baseline"] == expected.to_dict()
-    assert "fixed_utc_offset_minutes" not in project
 
 
-def test_create_project_ignores_legacy_utc_offset_field(
+def test_create_project_rejects_unknown_baseline_field(
     client: TestClient, db_session: Session
 ) -> None:
     headers, _ = _owner_headers(client, db_session)
     resp = client.post(
         "/api/projects",
         json={
-            "name": "旧字段项目",
+            "name": "未知字段项目",
             "utc_offset_minutes": 480,
             "baseline_resolution": "1h",
             "baseline_leap_year": False,
@@ -262,10 +259,7 @@ def test_create_project_ignores_legacy_utc_offset_field(
         },
         headers=headers,
     )
-    assert resp.status_code == 201, resp.text
-    project = resp.json()["project"]
-    assert project["project_baseline"]["resolution"] == "1h"
-    assert "fixed_utc_offset_minutes" not in project
+    assert resp.status_code == 422
 
 
 def test_project_view_and_version_freeze_baseline(
@@ -319,95 +313,10 @@ def test_baseline_immutable_trigger_ddl_exists() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 迁移 0004: 存量库回填默认基线 + 删除旧时区列
+# 迁移 0004: 当前项目基线迁移版本
 # ---------------------------------------------------------------------------
-
-
-_OLD_PROJECTS_DDL = """
-CREATE TABLE projects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    owner_id INTEGER NOT NULL,
-    currency TEXT NOT NULL DEFAULT 'CNY',
-    fixed_utc_offset_minutes INTEGER NOT NULL DEFAULT 480,
-    schema_version INTEGER NOT NULL DEFAULT 1,
-    current_draft_id INTEGER,
-    current_version_id INTEGER,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP,
-    created_by INTEGER NOT NULL
-);
-"""
-
-_OLD_PROJECT_VERSIONS_DDL = """
-CREATE TABLE project_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id INTEGER NOT NULL,
-    version_no INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT,
-    created_by INTEGER NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    parent_version_id INTEGER,
-    source_draft_id INTEGER,
-    source_draft_revision INTEGER,
-    reason TEXT NOT NULL,
-    fixed_utc_offset_minutes INTEGER NOT NULL DEFAULT 480,
-    currency TEXT,
-    schema_version INTEGER NOT NULL,
-    content_hash TEXT NOT NULL
-);
-"""
-
-
-def test_migration_0004_backfills_default_baseline_and_drops_utc_column() -> None:
-    """旧布局 SQLite 库: 补列 → 回填 1h/false/single → 删旧列。"""
-    eng = create_engine("sqlite+pysqlite://", connect_args={"check_same_thread": False})
-    with eng.begin() as conn:
-        conn.execute(text(_OLD_PROJECTS_DDL))
-        conn.execute(text(_OLD_PROJECT_VERSIONS_DDL))
-        conn.execute(
-            text("INSERT INTO projects (name, owner_id, created_by) VALUES ('存量项目', 1, 1)")
-        )
-        conn.execute(
-            text(
-                "INSERT INTO project_versions (project_id, version_no, name, created_by,"
-                " reason, fixed_utc_offset_minutes, currency, schema_version, content_hash)"
-                " VALUES (1, 1, 'v1', 1, 'snapshot_freeze', 480, 'CNY', 1,"
-                " 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')"
-            )
-        )
-    with eng.begin() as conn:
-        _migrate_0004(conn)
-    with eng.begin() as conn:
-        row = conn.execute(
-            text(
-                "SELECT baseline_resolution, baseline_leap_year, baseline_scenario_mode"
-                " FROM projects WHERE id = 1"
-            )
-        ).one()
-        assert row.baseline_resolution == "1h"
-        assert row.baseline_leap_year == 0
-        assert row.baseline_scenario_mode == "single"
-        vrow = conn.execute(
-            text(
-                "SELECT baseline_resolution FROM project_versions WHERE id = 1"
-            )
-        ).one()
-        assert vrow.baseline_resolution == "1h"
-        for table in ("projects", "project_versions"):
-            cols = {
-                r[1] for r in conn.execute(text(f"PRAGMA table_info({table})")).all()
-            }
-            assert "fixed_utc_offset_minutes" not in cols, table
-            assert {"baseline_resolution", "baseline_leap_year", "baseline_scenario_mode"} <= cols
-    eng.dispose()
-
-
-def test_migration_0004_idempotent_on_fresh_schema() -> None:
-    """全新库(create_all 已含基线列、无旧列): 迁移为 no-op 且可重复执行。"""
+def test_migration_0004_idempotent_on_current_schema() -> None:
+    """当前 schema 上迁移版本可重复执行。"""
     eng = create_engine("sqlite+pysqlite://", connect_args={"check_same_thread": False})
     Base.metadata.create_all(eng)
     with eng.begin() as conn:

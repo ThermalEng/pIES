@@ -670,7 +670,7 @@ def import_proposal(
     if currency not in ("CNY", "USD"):
         raise ImportValidationError([f"包内币种非法: {currency}"])
     # 项目计算基线(0.6.5 事项 1): 包必须携带完整基线, 缺失/非法一律拒绝导入
-    # (不静默默认; 默认基线只用于数据库迁移对存量项目的回填)。
+    # (不静默默认; 导入内容必须携带完整项目基线)。
     baseline_errors = ProjectBaseline.validate(project_meta.get("project_baseline"))
     if baseline_errors:
         raise ImportValidationError(
