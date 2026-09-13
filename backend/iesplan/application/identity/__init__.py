@@ -49,6 +49,7 @@ from iesplan.application.identity.service import (
     utcnow,
     verify_delete_confirm_token,
 )
+from iesplan.application.identity.views import UserView, user_view, user_views
 from iesplan.core.security import token_hash
 from iesplan.identity import (
     LOCKOUT_SECONDS,
@@ -93,6 +94,7 @@ __all__ = [
     "SamePasswordError",
     "SessionInvalidError",
     "UserDisabledError",
+    "UserView",
     "WeakPasswordError",
     "as_utc",
     "authenticate",
@@ -129,6 +131,8 @@ __all__ = [
     "token_hash",
     "touch_session",
     "user_roles",
+    "user_view",
+    "user_views",
     "utcnow",
     "verify_delete_confirm_token",
 ]
