@@ -4,17 +4,22 @@ api/health.py 的取数门面: 存活 ping、任务/项目按状态计数、用�
 队列状态、存储用量与抽样校验, 全部只读透传领域/存储公开门面。
 本层不导入 iesplan.models.*、不提交事务, 不新增校验/hash/回退。
 
+``health_view`` 是运维健康端点的唯一完整 handler: 原 api/health.py 本地
+helper 的全部健康门面调用收进本用例, 端点只转交一次。
+
 调用方向: api.health → application.health → {tasks/project/identity
 领域门面(含 tasks 域队列视图), storage}。
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from iesplan import __version__
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
@@ -89,9 +94,58 @@ def sample_verify(db: Session, limit: int = 10) -> dict[str, Any]:
     return _sample_verify(db, limit=limit)
 
 
+def health_view(db: Session) -> dict[str, Any]:
+    """运维健康完整视图(架构宪法 §13 故障与健康语义): 存活/就绪/任务指标/队列指标/存储容量。
+
+    原 api/health.py 本地 helper 的 6 次健康门面调用
+    (check_db/tasks_by_status/projects_by_status/count_users/queue_status +
+    storage_stats/sample_verify 组成存储视图)并入本完整 handler;
+    存储健康取 storage_stats/sample_verify(容量 + 抽样校验), 队列取
+    queue_status。健康判定: 存活 + 就绪 + 存储门禁; 队列为可重建视图
+    (Redis 可重建), 其降级状态在 queue 节单独上报, 不影响整体状态。
+    只读, 不提交事务。端点只转交本用例一次。
+    """
+    db_ok = check_db(db)
+    task_counts = tasks_by_status(db)
+    project_counts = projects_by_status(db)
+    users_count = count_users(db)
+    stats = storage_stats(db)
+    verify = sample_verify(db, limit=10)
+    storage = {
+        "capacity": stats["capacity"],
+        "corrupt_count": len(verify["failed"]),
+        "orphan_count": stats["objects"]["orphan_count"],
+        "object_count": stats["objects"]["count"],
+        "ok": stats["healthy"] and len(verify["failed"]) == 0,
+        "verify": {
+            "checked": verify["checked"],
+            "ok_count": verify["ok_count"],
+            "failed": verify["failed"],
+        },
+    }
+    queue_view = queue_status()
+    healthy = db_ok and storage["capacity"]["ok"]
+    return {
+        "status": "ok" if healthy else "degraded",
+        "service": "iesplan",
+        "version": __version__,
+        "time": datetime.now(UTC).isoformat(),
+        "liveness": {"ok": True, "process": "alive"},
+        "readiness": {"db": db_ok},
+        "metrics": {
+            "tasks_by_status": {str(k): int(v) for k, v in task_counts.items()},
+            "projects_by_status": {str(k): int(v) for k, v in project_counts.items()},
+            "users": int(users_count),
+        },
+        "queue": queue_view,
+        "storage": storage,
+    }
+
+
 __all__ = [
     "check_db",
     "count_users",
+    "health_view",
     "projects_by_status",
     "queue_status",
     "sample_verify",

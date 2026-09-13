@@ -81,22 +81,15 @@ def create_task_endpoint(
 
     幂等/去重复用 → 200(附 replayed/duplicate 标记与提示); 新建 → 201。
     """
-    task, flags = tasks_app.submit_task(
+    result = tasks_app.submit_task_case(
         db, user, project_id, payload.task_type,
         config=payload.config,
         idempotency_key=payload.idempotency_key,
         parent_task_id=payload.parent_task_id,
     )
-    replayed = bool(flags.get("replay", False))
-    duplicate = bool(flags.get("duplicate", False))
-    if replayed or duplicate:
+    if result["replayed"] or result["duplicate"]:
         response.status_code = 200
-    return {
-        "task": tasks_app.task_summary(db, task),
-        "replayed": replayed,
-        "duplicate": duplicate,
-        "hint": "已复用既有任务(输入相同, 未重复计算)" if replayed or duplicate else None,
-    }
+    return result
 
 
 @router.get("", summary="任务列表")
@@ -140,12 +133,7 @@ def cancel_task_endpoint(
     """取消任务(规格 6.1): queued 直接取消; running → cancelling 并传播批量子任务;
     终态 → 409(ies.diag.task.cancel_denied)。取消为写操作, 要求项目 edit 能力(H-05)。"""
     reason = payload.reason if payload and payload.reason else "user_cancel"
-    task = tasks_app.cancel_user_task(db, user, project_id, task_id, reason)
-    return {
-        "task": tasks_app.task_summary(db, task),
-        "cancel_status": task.status,
-        "diagnostic": "cancel_ok",
-    }
+    return tasks_app.cancel_user_task(db, user, project_id, task_id, reason)
 
 
 @router.post("/{task_id}/retry", summary="手动重试任务")
@@ -158,5 +146,4 @@ def retry_task_endpoint(
 ) -> dict[str, Any]:
     """手动重试(规格 6.4): 仅终态任务; 复用同一 calc_snapshot_id(输入含义不变);
     计算类快照缺失 → 409(TASK-DATA-001)。重试为写操作, 要求项目 edit 能力(H-05)。"""
-    task = tasks_app.retry_user_task(db, user, project_id, task_id)
-    return {"task": tasks_app.task_summary(db, task)}
+    return tasks_app.retry_user_task(db, user, project_id, task_id)

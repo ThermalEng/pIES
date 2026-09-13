@@ -226,6 +226,16 @@ def list_all_projects(db: Session) -> list[dict]:
     return [project_to_dict(p) for p in page.items]
 
 
+def list_all_projects_case(db: Session, admin: UserRecord) -> dict:
+    """管理员整体管理入口完整用例(路由原顺序: admin 判定 → 全部项目整体视图)。
+
+    未获授权一律 403; 返回响应就绪字典。读用例, 不提交事务。
+    """
+    if not is_admin(db, admin):
+        raise ForbiddenError()
+    return {"projects": list_all_projects(db)}
+
+
 def project_count_by_owner(db: Session, owner_ids: Sequence[int]) -> dict[int, int]:
     """项目数量 read model: owner_id -> 未删除项目数(admin 用户列表等跨领域消费)。
 
@@ -278,6 +288,32 @@ def unarchive_project(db: Session, user: UserRecord, project_id: int) -> Project
     except Exception:
         db.rollback()
         raise
+
+
+def archive_project_case(db: Session, user: UserRecord, project_id: int) -> dict:
+    """归档项目完整用例(路由原顺序: 归档 → 序列化 → 当前角色; 提交由归档用例拥有)。
+
+    ``archive_project`` 的事务型记录契约保持不变(测试继续使用); 本用例在其上
+    追加序列化与角色查询, 供归档端点一次转交。返回响应就绪字典。
+    """
+    project = archive_project(db, user, project_id)
+    return {
+        "project": project_to_dict(project),
+        "my_role": get_role(db, user, project_id),
+    }
+
+
+def unarchive_project_case(db: Session, user: UserRecord, project_id: int) -> dict:
+    """撤销归档完整用例(路由原顺序: 撤销归档 → 序列化 → 当前角色; 提交由用例拥有)。
+
+    ``unarchive_project`` 的事务型记录契约保持不变(测试继续使用); 本用例在其上
+    追加序列化与角色查询, 供撤销归档端点一次转交。返回响应就绪字典。
+    """
+    project = unarchive_project(db, user, project_id)
+    return {
+        "project": project_to_dict(project),
+        "my_role": get_role(db, user, project_id),
+    }
 
 
 def _delete_project(
@@ -742,9 +778,12 @@ __all__ = [
     "get_project_view",
     "list_visible_projects",
     "list_all_projects",
+    "list_all_projects_case",
     "project_count_by_owner",
     "archive_project",
+    "archive_project_case",
     "unarchive_project",
+    "unarchive_project_case",
     "delete_project",
     "update_draft",
     "project_to_dict",
