@@ -391,7 +391,7 @@ def cancel_attempt(
 
 
 def _payload_bytes(payload: dict) -> bytes:
-    """结果 payload 规范序列化(键排序, 紧凑 JSON; 与快照哈希约定一致)。"""
+    """将结果 payload 确定性序列化为紧凑 JSON 字节。"""
     return json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=_json_default
     ).encode("utf-8")

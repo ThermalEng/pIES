@@ -6,7 +6,7 @@
 3. 校验五类 interface、carrier、单位、source 组合与连接资格；
 4. 校验 equations 标识符、内部变量、单位、时间索引引用与循环引用；
 5. 解析模板顶层 ``inputs`` 为扁平叶子声明（供表单生成与实例化校验）；
-6. 生成不可变 ``DeviceModelDocument``，规范化并生成回执。
+6. 生成不可变 ``DeviceModelDocument``；规范字节与回执由公开 contract 生成。
 
 诊断语义：同阶段互不依赖的问题尽量聚合；结构不足以安全解释后续字段时
 才停止后续阶段。非法类型不得变成 null、默认值或空模型。解析失败不产出部分文档。
@@ -362,7 +362,7 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
     """解析 2.0.0 设备模型（或模板）原始映射 → 不可变文档。
 
     ``raw`` 必须已由安全 YAML 解析（重复键已在解析层拒绝）。
-    返回结果要么包含文档（含规范摘要），要么包含聚合诊断列表。
+    返回结果要么包含解析后的文档，要么包含聚合诊断列表。
     """
     file = file or "<device-model>"
     diags: list[Diagnostic] = []
@@ -602,15 +602,3 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
         inputs=inputs,
     )
     return DeviceModelParseResult(document=document, diagnostics=[])
-
-
-def canonicalize_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceModelParseResult:
-    """解析 + 规范化 + 摘要：成功返回带 ``receipt`` 的文档（``document.receipt`` 属性）。"""
-    result = parse_device_model_v2(raw, file=file)
-    if not result.ok:
-        return result
-    doc = result.document
-    assert doc is not None
-    # 挂载回执（不可变文档使用 MappingProxyType 包装，回执单独存放于结果）
-    result.diagnostics = []
-    return DeviceModelParseResult(document=doc, diagnostics=[])

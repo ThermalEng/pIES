@@ -144,7 +144,7 @@ def save_project_model_endpoint(
     db: DbSession,
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """正式保存: 完整校验 → 分配 _N 编号 → 规范化/摘要/回执 → 原子保存。
+    """正式保存: 完整校验 → 分配 _N 编号 → 规范化/回执 → 原子保存。
 
     校验失败 400 + PROJ-MDL-005 信封(聚合诊断); 幂等键重放返回同一逻辑结果
     (duplicate: true), 不重复占号。事务由本端点统一提交(application 拥有

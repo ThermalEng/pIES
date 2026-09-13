@@ -4,7 +4,7 @@
 「ValidatedAssemblyArtifact」节):
 1. 规范装配文本(canonical_text):时间统一 UTC、资源为内容 ID、字段稳定排序;
 2. 校验回执(ValidationReceipt):校验器 ID/版本、schema、规范化算法 ID/版本、
-   依赖锁、资源摘要与零阻断诊断。
+   依赖锁、资源记录与零阻断诊断。
 
 产物深度不可变，构造后禁止修改。
 
@@ -88,7 +88,7 @@ def _stable_diagnostic_dict(diag: Diagnostic) -> dict:
 
 @dataclass(frozen=True, slots=True)
 class ValidationReceipt:
-    """校验回执:校验器/规范化算法/schema/依赖锁/资源摘要/零阻断诊断。
+    """校验回执:校验器/规范化算法/schema/依赖锁/资源记录/零阻断诊断。
 
     字段顺序固定，``to_dict()`` 输出确定性 JSON 兼容字典。回执是输入内容的
     可复现证明，不包含签发时间或 trace/task 上下文；运行审计时间由快照/任务表

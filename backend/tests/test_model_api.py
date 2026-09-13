@@ -450,7 +450,7 @@ def test_update_device_name_and_params(client: TestClient, project_id: int) -> N
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == PARAM_RNG_OUT
-    # 仅更新位置(布局不动内容哈希)
+    # 仅更新位置，布局与模型内容分别保持正确
     resp = client.put(
         f"/api/projects/{project_id}/model/devices/{device_id}",
         json={"position": {"x": 5, "y": 6}},
@@ -613,7 +613,7 @@ def test_connect_attrs_and_update_connection(
 
 
 def test_disconnect(client: TestClient, project_id: int) -> None:
-    """断开连接: 删除连接行并刷新哈希。"""
+    """断开连接并删除连接行。"""
     grid, grid_out, _load, load_in = _grid_and_load(client, project_id)
     conn = _connect(client, project_id, grid_out["id"], load_in["id"])
     conn_id = conn["connection"]["id"]
@@ -779,7 +779,7 @@ def test_validate_unregistered_type_diagnostic(
 
 
 # ---------------------------------------------------------------------------
-# 图序列化与内容哈希
+# 图序列化
 # ---------------------------------------------------------------------------
 
 

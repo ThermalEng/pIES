@@ -38,7 +38,7 @@ class TaskCreateRequest(BaseModel):
 
     task_type: calc(方案评价)/optimization(规划)/uncertainty(不确定性)/
         analysis(批量分析)/report(结果检查);
-    config: 任务级参数(存储估算、快照内容哈希; 如 horizon_years/n_samples/priority/deadline);
+    config: 任务级参数(如 horizon_years/n_samples/priority/deadline);
     idempotency_key: 客户端重试去重(格式 ^[A-Za-z0-9._:-]{1,128}$, 规格 2.2);
     parent_task_id: 批量父任务(uncertainty 样本子任务, 规格 5.4)。
     """

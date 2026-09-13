@@ -46,7 +46,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 
 
 class Position(BaseModel):
-    """画布坐标(布局信息, 不入图内容哈希)。"""
+    """画布坐标（独立于模型技术内容的布局信息）。"""
 
     x: float
     y: float

@@ -139,7 +139,7 @@ def _overrides(profile: FinanceProfile) -> FinanceOverrides:
 # ---------------------------------------------------------------------------
 
 
-def test_profile_roundtrip_and_content_sha():
+def test_profile_roundtrip_preserves_identity():
     profile = _profile()
     # 文本文件只校验字头，不做内容摘要
     recomputed = FinanceProfile.from_dict(profile.to_dict())
@@ -147,7 +147,7 @@ def test_profile_roundtrip_and_content_sha():
     assert recomputed.profile_id == profile.profile_id
 
 
-def test_profile_sha_changes_with_semantics():
+def test_profile_content_changes_with_semantics():
     base = _profile_payload()
     p1 = FinanceProfile.from_dict(base)
     base2 = {**base, "energy_prices": {**base["energy_prices"],
@@ -265,7 +265,7 @@ def test_finance_type_component_requirements():
 # ---------------------------------------------------------------------------
 
 
-def test_overrides_roundtrip_and_sha():
+def test_overrides_roundtrip_preserves_content():
     profile = _profile()
     ov = _overrides(profile)
     assert FinanceOverrides.from_dict(ov.to_dict(), profile=profile).to_dict() == ov.to_dict()
@@ -418,7 +418,7 @@ def test_merge_sparse_overrides_only_replaces_leaf():
     assert effective.taxes.keys() == profile.taxes.keys()
 
 
-def test_merge_triple_sha_closed():
+def test_merge_is_deterministic():
     profile = _profile()
     overrides = _overrides(profile)
     effective = merge_effective(profile, overrides)

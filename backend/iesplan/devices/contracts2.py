@@ -268,7 +268,7 @@ def canonical_bytes(document: DeviceModelDocument) -> bytes:
 
 
 def canonical_receipt(document: DeviceModelDocument) -> dict[str, Any]:
-    """校验回执：schema、规范化器版本与结构摘要。文本文件只校验字头。"""
+    """校验回执：schema、规范化器版本与结构统计。文本文件只校验字头。"""
     return {
         "schema": SCHEMA_ID,
         "schema_version": document.schema_version,
