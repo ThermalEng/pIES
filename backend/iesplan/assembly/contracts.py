@@ -19,8 +19,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from iesplan.assembly.diags import ASM_ART_MISMATCH
-from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.core.errors import AppError
 
@@ -249,51 +247,11 @@ class ValidatedAssemblyArtifact:
     - canonical_text: 规范装配文本(UTF-8, LF;JSON 规范形态);
     - receipt: 校验回执。
 
-    ``verify()`` 校验回执契约与产物元数据，不对可信流程生成的文本重复计算摘要。
+    产物由签发边界一次性校验后构造，调用方直接消费，不做重复复核。
     """
 
     canonical_text: str
     receipt: ValidationReceipt = None  # type: ignore
-
-    def verify(self) -> bool:
-        """核对回执与产物元数据及其 schema/算法/校验器版本。"""
-        return (
-            self.receipt.schema_id == SCHEMA_ID
-            and self.receipt.schema_version == SCHEMA_VERSION
-            and self.receipt.validator_id == VALIDATOR_ID
-            and self.receipt.validator_version == VALIDATOR_VERSION
-            and self.receipt.canonical_algorithm_id == CANON_ALGORITHM_ID
-            and self.receipt.canonical_algorithm_version == CANON_ALGORITHM_VERSION
-            and not any(diag.blocking for diag in self.receipt.diagnostics)
-        )
-
-    @classmethod
-    def from_persisted(
-        cls,
-        canonical_text: str,
-        receipt: Mapping[str, object],
-    ) -> ValidatedAssemblyArtifact:
-        """严格恢复并验证持久化二件套，供 Worker/审计入口使用。"""
-        artifact = cls(
-            canonical_text=canonical_text,
-            receipt=ValidationReceipt.from_dict(receipt),  # type: ignore
-        )
-        return artifact.verify_or_raise()
-
-    def verify_or_raise(self) -> ValidatedAssemblyArtifact:
-        """一致性校验失败抛 AssemblyValidationError(阻断计算),成功返回自身。"""
-        if not self.verify():
-            diag = make_diag(
-                ASM_ART_MISMATCH,
-                severity="error",
-                blocking=True,
-                params={
-                    "reason": "artifact_or_receipt_contract_mismatch",
-                },
-                location={"object_type": "assembly", "field": "artifact"},
-            )
-            raise AssemblyValidationError([diag])
-        return self
 
     def to_dict(self) -> dict:
         """序列化(供审计/持久化;内容与 verify 结果一致)。"""

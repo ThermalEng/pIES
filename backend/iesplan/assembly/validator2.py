@@ -158,85 +158,6 @@ class NetworkReceipt:
             "diagnostics": [_stable_diagnostic_dict(diag) for diag in self.diagnostics],
         }
 
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, object]) -> NetworkReceipt:
-        """从持久化 JSON 严格恢复。"""
-        if not isinstance(payload, Mapping):
-            raise TypeError("receipt 须为 Mapping")
-        allowed_keys = {
-            "schema", "schema_version", "validator", "canonical_algorithm",
-            "diagnostics",
-        }
-        if not set(payload).issubset(allowed_keys) or "schema" not in payload:
-            raise ValueError("receipt 字段集合与当前契约不一致")
-        validator = payload.get("validator")
-        canonical = payload.get("canonical_algorithm")
-        if not isinstance(validator, Mapping) or not isinstance(canonical, Mapping):
-            raise TypeError("receipt.validator/canonical_algorithm 须为 Mapping")
-        if set(validator) != {"id", "version"} or set(canonical) != {"id", "version"}:
-            raise ValueError("receipt validator/canonical_algorithm 字段集合不一致")
-        raw_diags = payload.get("diagnostics", [])
-        if not isinstance(raw_diags, (list, tuple)):
-            raise TypeError("receipt diagnostics 类型非法")
-        diagnostics = tuple(
-            _restore_diagnostic(raw) for raw in raw_diags
-        )
-        string_fields = {
-            "schema": payload["schema"],
-            "schema_version": payload["schema_version"],
-            "validator.id": validator["id"],
-            "validator.version": validator["version"],
-            "canonical_algorithm.id": canonical["id"],
-            "canonical_algorithm.version": canonical["version"],
-        }
-        for name, value in string_fields.items():
-            if not isinstance(value, str) or not value:
-                raise TypeError(f"receipt.{name} 须为非空字符串")
-        return cls(
-            schema=payload["schema"],
-            schema_version=payload["schema_version"],
-            validator_id=validator["id"],
-            validator_version=validator["version"],
-            canonical_algorithm_id=canonical["id"],
-            canonical_algorithm_version=canonical["version"],
-            diagnostics=diagnostics,
-        )
-
-
-def _restore_diagnostic(raw: object) -> Diagnostic:
-    """严格恢复持久化诊断(与 1.0 回执同构的字段集合)。"""
-    if not isinstance(raw, Mapping):
-        raise TypeError("receipt diagnostic 须为 Mapping")
-    expected_keys = {
-        "code", "severity", "blocking", "message_key", "params", "location",
-        "fix_hint_key", "ref_ids", "suppressed",
-    }
-    if set(raw) != expected_keys:
-        raise ValueError("receipt diagnostic 字段集合不一致")
-    params = raw["params"]
-    location = raw["location"]
-    ref_ids = raw["ref_ids"]
-    if not isinstance(params, Mapping):
-        raise TypeError("receipt diagnostic.params 须为 Mapping")
-    if location is not None and not isinstance(location, Mapping):
-        raise TypeError("receipt diagnostic.location 须为 Mapping 或 null")
-    if not isinstance(ref_ids, (list, tuple)):
-        raise TypeError("receipt diagnostic.ref_ids 须为数组")
-    for key in ("code", "severity", "message_key", "fix_hint_key"):
-        if not isinstance(raw[key], str) or not raw[key]:
-            raise TypeError(f"receipt diagnostic.{key} 须为非空字符串")
-    return Diagnostic(
-        code=raw["code"],
-        severity=raw["severity"],
-        blocking=raw["blocking"],
-        message_key=raw["message_key"],
-        params=params,
-        location=location,
-        fix_hint_key=raw["fix_hint_key"],
-        ref_ids=tuple(ref_ids),
-        suppressed=raw["suppressed"],
-    )
-
 
 @dataclass(frozen=True, slots=True)
 class ValidatedInterfaceNetwork:
@@ -244,6 +165,8 @@ class ValidatedInterfaceNetwork:
 
     - canonical_text: 规范网络文本(确定性 JSON 形态);
     - receipt: 校验回执。
+
+    产物由签发边界一次性校验后构造，调用方直接消费，不做重复复核。
     """
 
     canonical_text: str
@@ -252,25 +175,6 @@ class ValidatedInterfaceNetwork:
     def __post_init__(self):
         if self.receipt is None:
             raise TypeError("receipt 不能为空")
-
-    def verify(self) -> bool:
-        return (
-            self.receipt.schema == SCHEMA2_ID
-            and self.receipt.schema_version == SCHEMA2_VERSION
-            and self.receipt.validator_id == VALIDATOR2_ID
-            and self.receipt.validator_version == VALIDATOR2_VERSION
-            and self.receipt.canonical_algorithm_id == CANON2_ALGORITHM_ID
-            and self.receipt.canonical_algorithm_version == CANON2_ALGORITHM_VERSION
-            and not any(diag.blocking for diag in self.receipt.diagnostics)
-        )
-
-    def verify_or_raise(self) -> ValidatedInterfaceNetwork:
-        """一致性校验失败抛 ValueError(阻断计算);成功返回自身。"""
-        if not self.verify():
-            raise ValueError(
-                "接口网络产物二件套不一致: canonical_text/receipt 字头与业务校验必须同时验证"
-            )
-        return self
 
     def to_dict(self) -> dict:
         return {

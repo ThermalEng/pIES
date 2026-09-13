@@ -318,9 +318,9 @@ def _assemble_snapshot(
 
 
 def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) -> ValidatedAssemblyArtifact:
-    """计算任务统一装配闸门: 完整四阶段校验后签发规范三件套。
+    """计算任务统一装配闸门: 完整四阶段校验后签发规范二件套。
 
-    阻断诊断抛 AssemblyValidationError(HTTP 422)。
+    阻断诊断抛 AssemblyValidationError(HTTP 422)。签发即受信，不做重复复核。
     """
     if task_type not in COMPUTE_TYPES:
         raise InvalidRequestError("仅计算类任务可装配计算快照", params={"task_type": task_type})
@@ -330,7 +330,7 @@ def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) 
     result = validate_project_export(export_content, datasets=_dataset_meta_for(db, content))
     if result.artifact is None:
         raise AssemblyValidationError(result.diagnostics)
-    return result.artifact.verify_or_raise()
+    return result.artifact
 
 
 def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
