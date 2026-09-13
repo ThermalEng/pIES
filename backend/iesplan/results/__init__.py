@@ -60,6 +60,7 @@ SELECTION_TYPES = rules.SELECTION_TYPES
 SystemAssessmentDraft = rules.SystemAssessmentDraft
 check_financial = rules.check_financial
 check_optimality = rules.check_optimality
+check_outcome = rules.check_outcome
 check_physical = rules.check_physical
 check_reliability = rules.check_reliability
 coerce_fine = rules.coerce_fine
@@ -95,6 +96,7 @@ __all__ = [
     "ResultSelectionRecord",
     "check_financial",
     "check_optimality",
+    "check_outcome",
     "check_physical",
     "check_reliability",
     "coerce_fine",

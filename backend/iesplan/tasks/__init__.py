@@ -9,6 +9,7 @@ from __future__ import annotations
 from iesplan.tasks import persistence
 from iesplan.tasks import queue as _queue
 from iesplan.tasks.contracts import (
+    BUSINESS_OUTCOMES,
     COMPUTE_TYPES,
     IDEMPOTENCY_KEY_RE,
     IO_SLOT_CAPACITY,
@@ -20,6 +21,7 @@ from iesplan.tasks.contracts import (
     CalcSnapshotRecord,
     CancelDeniedError,
     ComputeSlotRecord,
+    ExecutionUnavailableError,
     InvalidRequestError,
     SampleRecordRecord,
     SampleTaskRecord,
@@ -107,6 +109,7 @@ set_queue_progress = _queue.set_progress
 __all__ = [
     "QUEUE_COMPUTE",
     "QUEUE_IO",
+    "BUSINESS_OUTCOMES",
     "COMPUTE_TYPES",
     "IDEMPOTENCY_KEY_RE",
     "IO_SLOT_CAPACITY",
@@ -118,6 +121,7 @@ __all__ = [
     "CalcSnapshotRecord",
     "CancelDeniedError",
     "ComputeSlotRecord",
+    "ExecutionUnavailableError",
     "InvalidRequestError",
     "SampleRecordRecord",
     "SampleTaskRecord",

@@ -263,6 +263,18 @@ def overall_score(states: dict[str, Any]) -> float | None:
     return round(score, 2) if any_checked else None
 
 
+def check_outcome(dimensions: dict[str, str]) -> str:
+    """检查评估 → 业务结局: 任一维 fail → insufficient_evidence, 否则 normal_completion。
+
+    输入为数据库粗粒度枚举(pass/fail/unknown); 本规则为检查类任务业务结局
+    的唯一权威, Worker 与 application 只消费不复制。
+    """
+    for name in ("physical", "optimality", "financial", "reliability"):
+        if dimensions.get(name) == "fail":
+            return "insufficient_evidence"
+    return "normal_completion"
+
+
 def coerce_fine(dimension: str, value: object) -> Any:
     """detail 细粒度字符串 → 状态枚举(非法值保守回退, 不静默吞并到通过)。"""
     raw = str(value)

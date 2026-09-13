@@ -219,7 +219,7 @@ def _run_task(
     """假执行器: 完整推进一次任务(领取 → 进度 → 完成)。"""
     _claim(db, task_id, worker_id)
     worker_app.record_task_progress(db, task_id, "solve", 50.0, {"iterations": 1})
-    task = worker_app.complete_task(db, task_id, solver_status=solver_status)
+    task = worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome(solver_status))
     db.commit()
     return task
 
@@ -405,14 +405,14 @@ def test_state_advance_with_fake_executor(client: TestClient, db: Session) -> No
     assert float(live["percent"]) == 45.5
 
     # 完成: OPTIMAL → normal_completion; 尝试 succeeded; 租约 released; 槽释放
-    completed = worker_app.complete_task(db, task_id, solver_status="OPTIMAL")
+    completed = worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("OPTIMAL"))
     db.commit()
     assert completed.status == "completed"
     assert completed.business_outcome == "normal_completion"
     assert db.get(TaskLease, lease.id).status == "released"
     assert db.execute(select(ComputeSlot)).scalars().all()[0].in_use == 0
     # 重复完成幂等
-    again = worker_app.complete_task(db, task_id, solver_status="OPTIMAL")
+    again = worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("OPTIMAL"))
     db.commit()
     assert again.status == "completed"
 
@@ -518,7 +518,7 @@ def test_retry_reuses_same_snapshot(client: TestClient, db: Session) -> None:
     task = db.get(Task, task_id)
     assert task.attempt_count == 2
     # 第二次完成
-    worker_app.complete_task(db, task_id, solver_status="TIME_LIMIT_WITH_INCUMBENT")
+    worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("TIME_LIMIT_WITH_INCUMBENT"))
     db.commit()
     assert db.get(Task, task_id).status == "completed"
     assert db.get(Task, task_id).business_outcome == "restricted_results"
@@ -567,7 +567,7 @@ def test_slot_limit_two_concurrent(client: TestClient, db: Session) -> None:
     assert db.get(Task, task_ids[2]).status == "queued"
 
     # 释放一槽(完成 t1)后第 3 个可领取; 池总占用回到 1
-    worker_app.complete_task(db, task_ids[0], solver_status="OPTIMAL")
+    worker_app.complete_task(db, task_ids[0], outcome=worker_app.map_business_outcome("OPTIMAL"))
     db.commit()
     slots = db.execute(select(ComputeSlot)).scalars().all()
     assert sum(s.in_use for s in slots) == 1

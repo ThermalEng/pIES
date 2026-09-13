@@ -251,7 +251,11 @@ def _build_axis(resolution: str, utc_offset: int, data: dict) -> TimeAxis:
 
 
 def dispatch(ctx: RunContext) -> dict:
-    """按任务类型分派到执行器(返回结果 payload, 含 outcome/assessment)。"""
+    """按任务类型分派到执行器(返回结果 payload, 含显式 outcome)。
+
+    未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
+    未知任务类型抛 InvalidTaskTypeError。
+    """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:
         content, data, axis = load_inputs(ctx.db, ctx.snapshot)
@@ -316,7 +320,11 @@ def run_task(
     )
     try:
         payload = dispatch(ctx)
-        outcome = str(payload.get("outcome") or "normal_completion")
+        # 完成路径要求显式合法 outcome: 缺字段默认成功已删除, 缺失/非法
+        # 即确定性失败, 绝不落成功(合法集合归 tasks 域所有)。
+        outcome = payload.get("outcome")
+        if outcome not in worker_app.BUSINESS_OUTCOMES:
+            raise EngineRunError(f"执行器未返回显式合法 outcome: {outcome!r}")
         lease.submit_result(db, claim, payload=payload, outcome=outcome,
                             actor_id=task.requested_by)
         return "completed"
@@ -373,9 +381,10 @@ def _handle_failure(db: Session, ctx: RunContext, claim: lease.Claim, exc: Excep
         except lease.LeaseRejectedError:
             return "lease_rejected"
         return "failed"
-    # 计算不可用/引擎/内部失败: 确定性失败落 failed, 不自动重试。
-    # 错误码取结构化错误自带码(计算入口显式不可用为 TASK-SOLVE-001),
-    # 未预期异常沿用 TASK-SOLVE-001 包络; 原始原因保留在 message 中。
+    # 计算不可用/执行不可用/引擎/内部失败: 确定性失败落 failed, 不自动重试。
+    # 错误码取结构化错误自带码(计算入口显式不可用为 TASK-SOLVE-001,
+    # 未实现 I/O 执行入口为 TASK-EXEC-001), 未预期异常沿用 TASK-SOLVE-001
+    # 包络; 原始原因保留在 message 中。
     code = exc.code if isinstance(exc, AppError) else TASK_SOLVE_FAILED
     try:
         lease.fail_attempt(

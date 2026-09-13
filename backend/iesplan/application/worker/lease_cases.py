@@ -43,17 +43,18 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.storage import add_ref, put_object
 from iesplan.tasks import (
+    BUSINESS_OUTCOMES,
     IO_SLOT_CAPACITY,
     LEASE_TTL_SECONDS,
     POOL_BY_TYPE,
     CalcSnapshotRecord,
+    InvalidRequestError,
     TaskAttemptRecord,
     TaskDiagnosticRecord,
     TaskLeaseRecord,
     TaskNotFoundError,
     TaskRecord,
     check_transition,
-    map_business_outcome,
 )
 
 
@@ -184,20 +185,23 @@ def record_task_progress(
     return attempt
 
 
-def complete_task(
-    db: Session, task_id: int, *, outcome: str | None = None, solver_status: str | None = None
-) -> Any:
+def complete_task(db: Session, task_id: int, *, outcome: str) -> Any:
     """任务正常完成(running → completed; 取消竞态下 cancelling → completed)。
 
-    business_outcome 与技术状态正交: 未显式给定时按求解器状态映射,
-    缺省 normal_completion。重复调用幂等(已 completed 直接返回)。不提交事务。
+    business_outcome 与技术状态正交: outcome 必需且必须合法
+    (``tasks.BUSINESS_OUTCOMES``); 缺字段默认成功已删除, 缺失/非法直接
+    抛错, 绝不落成功。重复调用幂等(已 completed 直接返回)。不提交事务。
     """
+    if outcome not in BUSINESS_OUTCOMES:
+        raise InvalidRequestError(
+            "任务完成缺少显式合法 outcome",
+            params={"task_id": task_id, "outcome": outcome, "allowed": list(BUSINESS_OUTCOMES)},
+            location={"object_type": "task", "object_id": task_id},
+        )
     task = _get_task(db, task_id)
     if task.status == "completed":
         return task
     check_transition(task, "completed")
-    if outcome is None:
-        outcome = map_business_outcome(solver_status) if solver_status else "normal_completion"
     attempt = _finish_attempt(db, task, status="succeeded", stop_reason=None)
     task = tasks_domain.set_task_status(db, task.id, "completed", business_outcome=outcome)
     tasks_domain.clear_cancel(task.id)
