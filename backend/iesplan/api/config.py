@@ -1,7 +1,8 @@
 """计算配置 API(U06): /api/projects/{id}/config 与 /api/registry/algorithms。
 
 - GET    /api/projects/{id}/config          当前配置 + 参数元数据(单位/范围/帮助键)
-- PUT    /api/projects/{id}/config          保存 {config, expected_revision}; 校验不通过返回 422 + 标准错误信封
+- PUT    /api/projects/{id}/config          保存 {config, expected_revision};
+  校验不通过返回 422 + 标准错误信封
 - POST   /api/projects/{id}/config/validate 只校验不保存
 - GET    /api/projects/{id}/config/default  重新生成默认配置
 - GET    /api/registry/algorithms           算法列表 + 能力
@@ -12,6 +13,10 @@ main.py 通过 include_router 挂载(get_db 依赖见 iesplan/db.py)。
 认证与权限: 配置域全部端点要求窗口会话认证(iesplan.api.auth.CurrentUser,
 未认证 401); 读/校验接口要求项目 view, 保存要求项目 edit(403);
 算法注册表(/api/registry/algorithms)公开。
+
+传输适配说明: 每个业务动作只转交 application.configuration.config_cases
+中的一个完整用例(授权、业务步骤与事务均在用例内); 本模块只做 DTO、
+一次调用和错误/响应映射。
 """
 
 from __future__ import annotations
@@ -24,8 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application.configuration import calc_config
-from iesplan.application.projects.authorization import ensure_access
+from iesplan.application.configuration import config_cases
 from iesplan.core.errors import error_envelope
 from iesplan.db import get_db
 
@@ -52,21 +56,10 @@ class ConfigValidateRequest(BaseModel):
     config: dict = Field(description="计算配置")
 
 
-def _diagnostics(diags: list) -> list[dict]:
-    """诊断对象列表序列化为 dict 列表(04 §5.4 JSON 结构)。"""
-    return [d.to_dict() for d in diags]
-
-
-def _has_errors(diags: list) -> bool:
-    """是否存在阻断保存的诊断(error/blocking 任一即阻断)。"""
-    return any(d.severity in ("error", "blocking") or d.blocking for d in diags)
-
-
 @config_router.get("", summary="读取当前计算配置")
 def get_config_endpoint(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """当前配置 + 参数元数据; 未保存过返回生成的默认配置(version=None)。"""
-    ensure_access(db, user, project_id, "view")
-    return calc_config.get_config(db, project_id)
+    return config_cases.get_config_case(db, user, project_id)
 
 
 @config_router.put("", summary="保存计算配置")
@@ -77,26 +70,25 @@ def save_config_endpoint(
     user: CurrentUser,
 ) -> JSONResponse:
     """保存配置(与草稿修订绑定); 校验不通过返回 422 + 标准错误信封, 不落库。"""
-    ensure_access(db, user, project_id, "edit")
-    graph = calc_config.load_work_graph(db, project_id)
-    diags = calc_config.validate_config(body.config, graph)
-    if _has_errors(diags):
+    result = config_cases.save_config_case(
+        db, user, project_id, body.config, body.expected_revision
+    )
+    if not result.saved:
         return JSONResponse(
             status_code=422,
             content=error_envelope(
                 code="CONFIG-VAL-001",
                 message_key="ies.error.data_validation_failed",
-                params={"diagnostics": _diagnostics(diags), "count": len(diags)},
+                params={"diagnostics": result.diagnostics, "count": result.count},
             ),
         )
-    row = calc_config.save_config(db, project_id, body.config, body.expected_revision)
     return JSONResponse(
         status_code=200,
         content={
-            "config": calc_config.row_to_config(row),
-            "meta": calc_config.parameter_metadata(graph),
-            "version": row.version,
-            "status": row.status,
+            "config": result.config,
+            "meta": result.meta,
+            "version": result.version,
+            "status": result.status,
             "diagnostics": [],
         },
     )
@@ -110,24 +102,16 @@ def validate_config_endpoint(
     user: CurrentUser,
 ) -> dict:
     """只校验不保存; 始终返回 200 + diagnostics(前端实时校验用)。"""
-    ensure_access(db, user, project_id, "view")
-    graph = calc_config.load_work_graph(db, project_id)
-    diags = calc_config.validate_config(body.config, graph)
-    return {"diagnostics": _diagnostics(diags), "count": len(diags)}
+    return config_cases.validate_config_case(db, user, project_id, body.config)
 
 
 @config_router.get("/default", summary="重新生成默认计算配置")
 def default_config_endpoint(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """基于系统模型设备清单重新生成默认配置(不保存)。"""
-    ensure_access(db, user, project_id, "view")
-    graph = calc_config.load_work_graph(db, project_id)
-    return {
-        "config": calc_config.get_default_config(db, project_id),
-        "meta": calc_config.parameter_metadata(graph),
-    }
+    return config_cases.default_config_case(db, user, project_id)
 
 
 @registry_router.get("/algorithms", summary="算法注册表列表")
 def algorithms_endpoint() -> dict:
     """算法列表 + 能力清单 + 参数规格(供算法选择与能力检查)。"""
-    return {"algorithms": calc_config.list_algorithms_meta()}
+    return config_cases.list_algorithms_case()
