@@ -10,7 +10,7 @@
   回调经 application.identity 用例门面(底经 identity 域 OIDC 能力,
   标准实现 Authlib)完成令牌交换与账号绑定。
 
-传输适配说明(S7): 每个业务动作只转交 application.identity 中的一个完整
+传输适配说明: 每个业务动作只转交 application.identity 中的一个完整
 用例; Cookie/token 提取、FastAPI dependency、HTTP 重定向/Cookie 写入归
 本层, 身份状态机、账号读写、跨域计数与事务归用例。
 """
