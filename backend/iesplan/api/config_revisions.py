@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application.configuration import revision_cases
+from iesplan.application import configuration as revision_cases
 from iesplan.db import get_db
 
 #: FastAPI 依赖注入的数据库会话

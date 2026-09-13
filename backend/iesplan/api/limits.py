@@ -33,10 +33,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from iesplan.application.datasets.quotas import (
+from iesplan.application.datasets import (
     QuotaError as QuotaError,
-)
-from iesplan.application.datasets.quotas import (
     check_upload_quota as check_upload_quota,
 )
 from iesplan.config import settings
@@ -240,7 +238,7 @@ def _check_and_count(ip: str) -> bool:
 # ---------------------------------------------------------------------------
 # 上传配额(每用户/每项目)
 # ---------------------------------------------------------------------------
-# Wave 4: 判定与统计已上收至 application/datasets/quotas 用例(ORM 经
+# 判定与统计由 application/datasets/quotas 用例负责(ORM 经
 # dataset/project 域门面); 本模块只转发公开契约(QuotaError/check_upload_quota,
 # 见文件头导入), 既有调用方(datasets/projects/project_models)与测试导入
 # 路径不变, HTTP 行为(413 信封字段)不变。

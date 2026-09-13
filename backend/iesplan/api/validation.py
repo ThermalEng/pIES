@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application.validations import cases as validation_cases
+from iesplan.application import validations as validation_cases
 from iesplan.db import get_db
 
 #: FastAPI 路由(挂载前缀 /api/projects/{project_id}/validation, 由集成阶段追加)
@@ -55,7 +55,7 @@ def run_validation(project_id: int, db: DbSession, user: CurrentUser) -> dict:
 
     报告持久化为对象存储对象(ref_type='report'), GET /validation 可读取最近报告。
     """
-    return validation_cases.run_validation(db, user, project_id)
+    return validation_cases.run_validation_case(db, user, project_id)
 
 
 @router.post("/baseline-confirm", summary="记录财务基准确认")
@@ -66,10 +66,10 @@ def baseline_confirm(
     user: CurrentUser,
 ) -> dict:
     """记录财务基准确认(确认人/时间, 追加式审计, 不可覆盖)."""
-    return validation_cases.confirm_baseline(db, user, project_id, assumptions=body.assumptions)
+    return validation_cases.confirm_baseline_case(db, user, project_id, assumptions=body.assumptions)
 
 
 @router.get("", summary="最近校验报告")
 def get_validation_report(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """最近一次持久化的校验报告; 尚无记录时现场执行并返回(不落库)。"""
-    return validation_cases.get_validation_report(db, user, project_id)
+    return validation_cases.get_validation_report_case(db, user, project_id)

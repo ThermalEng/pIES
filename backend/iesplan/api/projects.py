@@ -28,8 +28,7 @@ from sqlalchemy.orm import Session
 from iesplan.api.auth import CurrentUser
 from iesplan.api.limits import QUOTA_CODE, QUOTA_MESSAGE_KEY, QuotaError
 from iesplan.application import packages as package_ops
-from iesplan.application.projects import lifecycle as project_ops
-from iesplan.application.projects import versions as project_versions
+from iesplan.application import projects as project_ops
 from iesplan.core.errors import http_error
 from iesplan.db import get_db
 
@@ -193,7 +192,7 @@ def create_version_endpoint(
     user: CurrentUser,
 ) -> dict:
     """从当前草稿创建不可变项目版本。"""
-    version = project_versions.create_version(
+    version = project_ops.create_version(
         db, user, project_id, payload.name, payload.description, payload.reason
     )
     return {"version": project_ops.version_to_dict(version)}
@@ -206,7 +205,7 @@ def list_versions_endpoint(
     user: CurrentUser,
 ) -> dict:
     """版本列表(新版本在前)。"""
-    versions = project_versions.list_versions(db, user, project_id)
+    versions = project_ops.list_versions(db, user, project_id)
     return {"versions": [project_ops.version_to_dict(v) for v in versions]}
 
 
@@ -218,7 +217,7 @@ def get_version_endpoint(
     user: CurrentUser,
 ) -> dict:
     """版本详情。"""
-    version = project_versions.get_version(db, user, project_id, version_id)
+    version = project_ops.get_version(db, user, project_id, version_id)
     return {"version": project_ops.version_to_dict(version)}
 
 
@@ -231,7 +230,7 @@ def restore_version_endpoint(
     payload: RestoreRequest | None = None,
 ) -> dict:
     """恢复历史版本: 创建新版本 + 新草稿, 不倒写历史(REQ-PROJ-002)。"""
-    result = project_versions.restore_version(
+    result = project_ops.restore_version(
         db, user, project_id, version_id,
         name=payload.name if payload else None,
         description=payload.description if payload else None,
@@ -247,7 +246,7 @@ def apply_result_endpoint(
     user: CurrentUser,
 ) -> dict:
     """应用选定结果: 参数差异补丁应用到新草稿并创建新版本, 来源版本不变。"""
-    result = project_versions.apply_result(
+    result = project_ops.apply_result(
         db, user, project_id, payload.diff_patch,
         version_id=payload.version_id,
         name=payload.name,

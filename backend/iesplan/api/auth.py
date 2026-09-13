@@ -27,25 +27,6 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from iesplan.application import identity
-from iesplan.application.identity.auth_cases import (
-    begin_oidc_login,
-    confirm_takeover_case,
-    deactivate_user_case,
-    delete_user_case,
-    get_public_auth_settings,
-    get_security_settings,
-    get_user_view_case,
-    list_users_case,
-    login_case,
-    oidc_callback_case,
-    preview_user_delete_case,
-    reactivate_user_case,
-    register_case,
-    reset_password_case,
-    resolve_auth_context,
-    update_security_settings,
-)
-from iesplan.application.identity.views import UserView
 from iesplan.config import settings
 from iesplan.core.errors import ForbiddenError
 from iesplan.db import get_db
@@ -71,7 +52,7 @@ class PublicSettings(BaseModel):
 
 def public_settings(db: Session) -> PublicSettings:
     """公开设置: 注册开关(数据库权威值) + 外部认证入口(经 application 门面)。"""
-    registration_enabled, sso_enabled, sso_provider_name = get_public_auth_settings(db)
+    registration_enabled, sso_enabled, sso_provider_name = identity.get_public_auth_settings(db)
     return PublicSettings(
         registration_enabled=registration_enabled,
         sso_enabled=sso_enabled,
@@ -214,7 +195,7 @@ def get_auth_context(request: Request, db: DbSession) -> AuthContext:
     last_seen_at 刷新全部经 ``resolve_auth_context`` 完整用例。
     """
     token = _extract_token(request)
-    user, session = resolve_auth_context(db, token=token, path=request.url.path)
+    user, session = identity.resolve_auth_context(db, token=token, path=request.url.path)
     return AuthContext(db=db, user=user, session=session)
 
 
@@ -236,7 +217,7 @@ CurrentUser = Annotated[UserRecord, Depends(get_current_user)]
 CurrentAdmin = Annotated[UserRecord, Depends(get_current_admin)]
 
 
-def _user_out(view: UserView) -> UserOut:
+def _user_out(view: identity.UserView) -> UserOut:
     """纯映射: 身份展示视图 → 用户响应 DTO(无 Session、无查询、无业务)。"""
     return UserOut(
         id=view.id,
@@ -286,7 +267,7 @@ def login(
     """
     ip = _client_ip(request)
     ua = request.headers.get("user-agent")
-    view, token, displaced = login_case(
+    view, token, displaced = identity.login_case(
         db, username=req.username, password=req.password, device=req.device,
         ip=ip, user_agent=ua,
     )
@@ -344,7 +325,7 @@ def me(ctx: AuthCtx) -> UserOut:
     认证依赖确权后, 一次转交 ``get_user_view_case`` 完整视图用例,
     本层只做纯 DTO 映射。
     """
-    return _user_out(get_user_view_case(ctx.db, user_id=ctx.user.id))
+    return _user_out(identity.get_user_view_case(ctx.db, user_id=ctx.user.id))
 
 
 @router.post("/confirm-takeover", response_model=AuthResponse, summary="确认接管")
@@ -362,7 +343,7 @@ def confirm_takeover(
     凭证提取/Cookie 写入归本层。
     """
     token = _extract_token(request) or ""
-    view = confirm_takeover_case(
+    view = identity.confirm_takeover_case(
         ctx.db,
         user=ctx.user,
         session=ctx.session,
@@ -380,7 +361,7 @@ def register(req: RegisterRequest, request: Request, db: DbSession) -> UserOut:
     本端点一次转交 ``register_case`` 完整用例(开关 → 建账号 → 展示视图),
     本层只做纯 DTO 映射。
     """
-    view = register_case(
+    view = identity.register_case(
         db,
         username=req.username,
         password=req.password,
@@ -405,7 +386,7 @@ def list_users(db: DbSession, admin: CurrentAdmin) -> UsersListResponse:
     项目计数一次聚合, 禁逐用户回调用例); 数据库故障沿用统一错误处理
     (异常向上传播, 不转为 0)。本层只做纯 DTO 映射与 project_count 拼装。
     """
-    entries = list_users_case(db)
+    entries = identity.list_users_case(db)
     return UsersListResponse(
         users=[
             AdminUserOut(
@@ -430,7 +411,7 @@ def admin_reset_password(
     管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``reset_password_case`` 完整用例(目标预检 → 重置)。
     """
-    reset_password_case(
+    identity.reset_password_case(
         db,
         admin=admin,
         target_id=user_id,
@@ -450,7 +431,7 @@ def admin_deactivate_user(
     管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``deactivate_user_case`` 完整用例(目标预检 → 停用)。
     """
-    deactivate_user_case(
+    identity.deactivate_user_case(
         db,
         admin=admin,
         target_id=user_id,
@@ -469,7 +450,7 @@ def admin_reactivate_user(
     管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``reactivate_user_case`` 完整用例(目标预检 → 启用)。
     """
-    reactivate_user_case(
+    identity.reactivate_user_case(
         db,
         admin=admin,
         target_id=user_id,
@@ -495,7 +476,7 @@ def admin_delete_user_preview(
     管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``preview_user_delete_case`` 完整用例(目标预检 → 预览)。
     """
-    return preview_user_delete_case(db, admin=admin, target_id=user_id)
+    return identity.preview_user_delete_case(db, admin=admin, target_id=user_id)
 
 
 @router.delete("/users/{user_id}", summary="删除账号(管理员, 需确认+预告, 级联删除其项目)")
@@ -518,7 +499,7 @@ def admin_delete_user(
     管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     本端点一次转交 ``delete_user_case`` 完整用例(目标预检 → 确认 → 级联删除)。
     """
-    result = delete_user_case(
+    result = identity.delete_user_case(
         db,
         admin=admin,
         target_id=user_id,
@@ -539,7 +520,7 @@ def update_settings(
     管理员身份由依赖链确权(CurrentAdmin), 体内不再二次校验;
     开关写入与维护审计经 application.identity 用例单事务提交。
     """
-    registration_enabled = update_security_settings(
+    registration_enabled = identity.update_security_settings(
         db,
         enabled=payload.registration_enabled,
         updated_by=admin.id,
@@ -555,7 +536,7 @@ def read_settings(db: DbSession, admin: CurrentAdmin) -> dict:
 
     管理员身份由依赖链确权(CurrentAdmin, 参数仅确权), 体内不再二次校验。
     """
-    return get_security_settings(db)
+    return identity.get_security_settings(db)
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +562,7 @@ def oidc_login(request: Request, db: DbSession) -> RedirectResponse:
     授权 URL 构造经 application.identity 用例(未启用抛 404)。
     """
     # 回调完成前由签名 state 携带 nonce/verifier(无状态, 多 Worker 可用)
-    return RedirectResponse(begin_oidc_login())
+    return RedirectResponse(identity.begin_oidc_login())
 
 
 @router.get("/oidc/callback", summary="OIDC 回调(令牌交换)")
@@ -601,7 +582,7 @@ def oidc_callback(
     """
     ip = _client_ip(request)
     ua = request.headers.get("user-agent")
-    result = oidc_callback_case(db, code=code, state=state, ip=ip, user_agent=ua)
+    result = identity.oidc_callback_case(db, code=code, state=state, ip=ip, user_agent=ua)
     if not result.ok:
         return RedirectResponse("/login?error=oidc_failed", status_code=302)
     assert result.token is not None

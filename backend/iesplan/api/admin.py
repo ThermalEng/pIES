@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentAdmin
 from iesplan.application.audits import query_audit
-from iesplan.application.tasks.maintenance import get_diagnostics, unlock_task_case
+from iesplan.application.tasks import get_diagnostics, unlock_task_case
 from iesplan.core.errors import ConflictError, NotFoundError
 from iesplan.db import get_db
 

@@ -27,6 +27,10 @@ from iesplan.application.datasets.lifecycle import (
     upload_dataset_version_case,
     version_files_summary,
 )
+from iesplan.application.datasets.quotas import (
+    QuotaError,
+    check_upload_quota,
+)
 from iesplan.dataset import (
     STANDARD_FIELDS,
     TIMESTAMP_COL,
@@ -43,8 +47,10 @@ __all__ = [
     "TIMESTAMP_COL",
     "DataValidationError",
     "FieldSpec",
+    "QuotaError",
     "add_object_ref",
     "build_quality_report",
+    "check_upload_quota",
     "create_builtin_sample",
     "create_dataset",
     "create_dataset_case",

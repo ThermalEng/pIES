@@ -28,8 +28,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application.models import cases as model_cases
-from iesplan.application.models import selector
+from iesplan.application import models as model_cases
 from iesplan.db import get_db
 
 #: 设备类型注册表(公开, 前端画布取设备面板与参数表单 schema)
@@ -103,10 +102,10 @@ class ConnectionUpdate(BaseModel):
 def device_types_public() -> dict[str, Any]:
     """公开设备类型清单 + 参数 schema + 真实端口(RR-P1-04: 供前端画布渲染)。
 
-    数据路径归 application 用例(application/models/selector.py)；
+    数据路径归 application 用例(application.models 门面)；
     端口/方向/载能来自 YAML 设备目录(公开 descriptor)，路由只做转交。
     """
-    return selector.list_device_types()
+    return model_cases.list_device_types()
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +116,7 @@ def device_types_public() -> dict[str, Any]:
 @model_router.get("", summary="获取项目系统图(设备+端口+连接+布局)")
 def get_model_graph(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """读取项目工作图: 拓扑(设备/端口/连接)与画布布局对象(需项目 view 能力)。"""
-    return model_cases.get_model_graph(db, user, project_id)
+    return model_cases.get_model_graph_case(db, user, project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +132,7 @@ def create_device(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """创建设备: 校验注册表类型与参数, 按载体生成端口, 返回设备与端口(需 edit)。"""
-    return model_cases.create_device(
+    return model_cases.create_device_case(
         db,
         user,
         project_id,
@@ -155,7 +154,7 @@ def update_device(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """更新设备名称/参数/位置(仅更新提供的字段; 参数重新按注册表校验; 需 edit)。"""
-    return model_cases.update_device(
+    return model_cases.update_device_case(
         db,
         user,
         project_id,
@@ -174,7 +173,7 @@ def delete_device(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """删除设备及其端口与关联连接(需项目 edit 能力)。"""
-    return model_cases.delete_device(db, user, project_id, device_id)
+    return model_cases.delete_device_case(db, user, project_id, device_id)
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +189,7 @@ def create_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """创建连接: 校验能源类型一致/方向兼容/同项目/无重复, 失败返回带定位的诊断(需 edit)。"""
-    return model_cases.create_connection(
+    return model_cases.create_connection_case(
         db, user, project_id, body.from_port_id, body.to_port_id, attrs=body.attrs
     )
 
@@ -204,7 +203,7 @@ def update_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """更新连接属性(capacity/loss_rate/params; 需项目 edit 能力)。"""
-    return model_cases.update_connection(db, user, project_id, conn_id, body.attrs)
+    return model_cases.update_connection_case(db, user, project_id, conn_id, body.attrs)
 
 
 @model_router.delete("/connections/{conn_id}", summary="断开连接")
@@ -215,7 +214,7 @@ def delete_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """删除连接(需项目 edit 能力)。"""
-    return model_cases.delete_connection(db, user, project_id, conn_id)
+    return model_cases.delete_connection_case(db, user, project_id, conn_id)
 
 
 # ---------------------------------------------------------------------------
@@ -226,4 +225,4 @@ def delete_connection(
 @model_router.get("/validate", summary="模型校验(拓扑+参数诊断)")
 def validate_model(project_id: int, db: DbSession, user: CurrentUser) -> dict[str, Any]:
     """返回拓扑与参数诊断列表(错误/警告, 含对象定位, 04 §5.4 结构; 需项目 view 能力)。"""
-    return model_cases.validate_model(db, user, project_id)
+    return model_cases.validate_model_case(db, user, project_id)

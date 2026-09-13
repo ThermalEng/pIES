@@ -14,7 +14,7 @@
 全系统健康聚合(/health)由独立运维聚合层调用各模块公开 health provider;
 本路由不查询 Task/Project/User, 不调用队列(STO-07 边界)。
 
-Wave 4: 存储编排与事务边界整体下沉至 application.objects 用例; 本路由只做
+存储编排与事务边界由 application.objects 用例负责; 本路由只做
 HTTP 适配(请求模型/依赖注入/响应信封), 不直调 storage, 不提交/回滚事务,
 不直接导入 ORM(管理员身份经 api.auth CurrentAdmin, 其角色判定由
 application.identity 门面完成)。
@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentAdmin
-from iesplan.application.objects import service as objects_app
+from iesplan.application import objects as objects_app
 from iesplan.db import get_db
 
 #: 对象域管理路由: 挂载前缀 /api/admin(仅管理员)
