@@ -20,9 +20,9 @@ from sqlalchemy.orm import Session
 from iesplan import identity as identity_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.application.tasks.submissions import (
     cancel_task,
-    ensure_project_access,
     ensure_task_belongs,
     require_project,
     retry_task,
@@ -132,7 +132,7 @@ def list_tasks(
     limit: int = 20,
 ) -> dict[str, Any]:
     """任务列表(状态/结局过滤 + 游标分页)。"""
-    ensure_project_access(db, user, project_id, "view")
+    ensure_access(db, user, project_id, "view")
     require_project(db, project_id)
     rows = tasks_domain.list_tasks(
         db,
@@ -185,7 +185,7 @@ def task_detail(
     db: Session, user: UserRecord, project_id: int, task_id: int
 ) -> dict[str, Any]:
     """任务详情(尝试/租约/进度/诊断/快照/批量关系; 不暴露 lease_token)。"""
-    ensure_project_access(db, user, project_id, "view")
+    ensure_access(db, user, project_id, "view")
     task = ensure_task_belongs(db, project_id, task_id)
     detail = task_summary(db, task)
     if task.calc_snapshot_id is not None:
@@ -264,7 +264,7 @@ def cancel_user_task(
     db: Session, user: UserRecord, project_id: int, task_id: int, reason: str = "user_cancel",
 ) -> TaskRecord:
     """取消任务(路由原顺序: edit 权限 → 归属 → 取消; 提交由用例层拥有)。"""
-    ensure_project_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     ensure_task_belongs(db, project_id, task_id)
     return cancel_task(db, task_id, reason=reason, actor_id=user.id)
 
