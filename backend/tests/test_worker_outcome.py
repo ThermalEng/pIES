@@ -92,6 +92,12 @@ def db(engine: Engine) -> Iterator[Session]:
 
 
 @pytest.fixture()
+def factory(engine: Engine):
+    """会话工厂(runner.run_task 唯一接受的会话来源)。"""
+    return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
+@pytest.fixture()
 def env(db: Session, tmp_path: Path) -> dict[str, Any]:
     """迷你任务环境(calc 任务, 含快照与数据集; 项目下可挂 I/O 与 report 任务)。"""
     return setup_environment(db, tmp_path, task_type="calc")
@@ -163,11 +169,12 @@ class TestUnimplementedIoNeverSucceeds:
     """未实现 I/O 失败闭环: 三种 io 任务都不得完成为成功。"""
 
     @pytest.mark.parametrize("task_type", IO_TASK_TYPES)
-    def test_unimplemented_io_fails_closed(self, db: Session, env: dict[str, Any], task_type: str):
+    def test_unimplemented_io_fails_closed(self, db: Session, env: dict[str, Any], task_type: str, factory):
         task = _add_task(db, env, task_type)
         claim = _claim_task(db, task.id)
 
-        status = runner.run_task(db, claim, worker_id="w-io", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-io", isolate=False)
+        db.expire_all()
 
         assert status == "failed", (task_type, status)
         view = _task_view(db, task.id)
@@ -193,7 +200,7 @@ class TestCompletionRequiresExplicitOutcome:
     """
 
     def test_outcome_less_handler_result_fails_closed(
-        self, db: Session, env: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+        self, db: Session, env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, factory,
     ):
         """公开执行器返回缺 outcome 载荷 → runner 不得默认成功完成。"""
         task = _add_task(db, env, "report")
@@ -203,7 +210,8 @@ class TestCompletionRequiresExplicitOutcome:
             lambda ctx: {"result_kind": "external", "status": "ok"},
         )
 
-        status = runner.run_task(db, claim, worker_id="w-outcome", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-outcome", isolate=False)
+        db.expire_all()
 
         assert status == "failed", status
         view = _task_view(db, task.id)
@@ -211,7 +219,7 @@ class TestCompletionRequiresExplicitOutcome:
         assert view.business_outcome != "normal_completion", view.business_outcome
 
     def test_unknown_outcome_value_fails_closed(
-        self, db: Session, env: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+        self, db: Session, env: dict[str, Any], monkeypatch: pytest.MonkeyPatch, factory,
     ):
         """公开执行器返回非法 outcome → 不得以该值完成(结局 CHECK 约束兜底)。"""
         task = _add_task(db, env, "report")
@@ -221,7 +229,8 @@ class TestCompletionRequiresExplicitOutcome:
             lambda ctx: {"result_kind": "external", "status": "ok", "outcome": "not_a_real_outcome"},
         )
 
-        status = runner.run_task(db, claim, worker_id="w-outcome", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-outcome", isolate=False)
+        db.expire_all()
 
         assert status == "failed", status
         view = _task_view(db, task.id)
@@ -274,13 +283,14 @@ class TestReportCheckDelegatedToResultsCapability:
     Worker 只安排运行时序并消费显式结果契约, 不在本地复制规则。
     """
 
-    def test_report_verdict_matches_results_capability(self, db: Session, env: dict[str, Any]):
+    def test_report_verdict_matches_results_capability(self, db: Session, env: dict[str, Any], factory):
         payload = _divergent_evidence_payload()
         package = _store_evidence(db, env, payload)
         task = _add_task(db, env, "report")
         claim = _claim_task(db, task.id)
 
-        status = runner.run_task(db, claim, worker_id="w-report", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-report", isolate=False)
+        db.expire_all()
 
         # 证据不足是显式、合法的业务结局, 不得判成功。
         assert status == "completed", status
@@ -304,11 +314,12 @@ class TestReportCheckDelegatedToResultsCapability:
 class TestReportNoEvidencePath:
     """项目无证据包时 report 显式判证据不足。"""
 
-    def test_report_without_evidence_is_insufficient(self, db: Session, env: dict[str, Any]):
+    def test_report_without_evidence_is_insufficient(self, db: Session, env: dict[str, Any], factory):
         task = _add_task(db, env, "report")
         claim = _claim_task(db, task.id)
 
-        status = runner.run_task(db, claim, worker_id="w-report", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-report", isolate=False)
+        db.expire_all()
 
         assert status == "completed", status
         view = _task_view(db, task.id)
@@ -439,7 +450,7 @@ class TestReportStageCommands:
 class TestWorkerExecutionGuards:
     """权限与错误语义回归: 非持有者写回被拒、取消信号中止执行。"""
 
-    def test_expired_lease_rejects_run(self, db: Session, env: dict[str, Any]):
+    def test_expired_lease_rejects_run(self, db: Session, env: dict[str, Any], factory):
         """租约过期后执行: 迟到写回整笔拒绝, 任务保持 running。"""
         task = _add_task(db, env, "report")
         claim = _claim_task(db, task.id)
@@ -450,14 +461,15 @@ class TestWorkerExecutionGuards:
         row.status = "expired"  # 模拟守护进程过期回收
         db.commit()
 
-        status = runner.run_task(db, claim, worker_id="w-report", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-report", isolate=False)
+        db.expire_all()
 
         assert status == "lease_rejected", status
         assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is None
         view = _task_view(db, task.id)
         assert view is not None and view.status == "running", view
 
-    def test_cancel_signal_closes_run_as_cancelled(self, db: Session, env: dict[str, Any]):
+    def test_cancel_signal_closes_run_as_cancelled(self, db: Session, env: dict[str, Any], factory):
         """取消信号 + cancelling 状态下执行: 收拢为 cancelled。"""
         task = _add_task(db, env, "report")
         claim = _claim_task(db, task.id)
@@ -465,7 +477,8 @@ class TestWorkerExecutionGuards:
         queue.set_cancel(task.id, "test-cancel")
         db.commit()
 
-        status = runner.run_task(db, claim, worker_id="w-report", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-report", isolate=False)
+        db.expire_all()
 
         assert status == "cancelled", status
         view = _task_view(db, task.id)

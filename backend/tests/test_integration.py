@@ -504,7 +504,7 @@ def test_task_submit_snapshot_preguard(client: TestClient, db: Session) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_compute_entry_explicitly_unavailable(client: TestClient, db: Session) -> None:
+def test_compute_entry_explicitly_unavailable(client: TestClient, db: Session, engine: Engine) -> None:
     """旧计算链已删除、0.8 计算未实现: 执行收拢为显式结构化失败。
 
     领取先形成正确可见的租约/尝试状态; 执行器 NotImplementedError 经 runner
@@ -524,7 +524,9 @@ def test_compute_entry_explicitly_unavailable(client: TestClient, db: Session) -
     assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is not None
 
     # 执行: 计算入口显式不可用 → failed, 绝非 lease_rejected
-    status = runner.run_task(db, claim, worker_id="it-worker-1", isolate=False)
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    status = runner.run_task(factory, claim, worker_id="it-worker-1", isolate=False)
+    db.expire_all()
     assert status == "failed", status
     assert status != "lease_rejected", status
 
