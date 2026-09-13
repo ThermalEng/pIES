@@ -20,8 +20,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.application.results import writes as results_writes
-from iesplan.application.tasks.submissions import ensure_project_access, ensure_task_belongs
+from iesplan.application.tasks.submissions import ensure_task_belongs
 from iesplan.core.errors import NotFoundError
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import ResultAssessmentRecord, ResultSelectionRecord
@@ -71,7 +72,7 @@ def assess_task_evidence(
             params={"task_id": task_id},
             location={"object_type": "evidence_package", "object_id": None},
         )
-    ensure_project_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     try:
         assessment = results_writes.assess_evidence(
             db, package.id, assessment_type, user=user
@@ -115,7 +116,7 @@ def get_selection_diff(
 ) -> dict[str, Any]:
     """选中差异预览(路由原顺序: 归属 → view 权限 → 差异; 无选中 → 404)。"""
     ensure_task_belongs(db, project_id, task_id)
-    ensure_project_access(db, user, project_id, "view")
+    ensure_access(db, user, project_id, "view")
     diff = results_writes.selection_diff(db, project_id)
     if diff is None:
         raise NotFoundError(
@@ -137,7 +138,7 @@ def read_task_hourly(
     solution_id: int | None = None,
 ) -> dict[str, Any]:
     """逐时查询(路由原顺序: view 权限 → 归属 → 最新证据包 → 内容 → 分页读)。"""
-    ensure_project_access(db, user, project_id, "view")
+    ensure_access(db, user, project_id, "view")
     ensure_task_belongs(db, project_id, task_id)
     package = results_writes.latest_evidence(db, task_id)
     if package is None:

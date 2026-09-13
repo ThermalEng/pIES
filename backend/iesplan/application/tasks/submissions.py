@@ -41,6 +41,7 @@ from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.projects import versions as project_versions
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.application.projects.content_objects import (
     load_content_object,
 )
@@ -58,7 +59,7 @@ from iesplan.core.diagnostics import (
     TASK_DATA_SNAPSHOT_MISSING,
     TASK_QUEUED,
 )
-from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
+from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.idgen import new_id
 from iesplan.core.jsonutil import jsonable
 from iesplan.core.patterns import IDEMPOTENCY_KEY_RE as _IDEMPOTENCY_KEY_RE
@@ -142,26 +143,6 @@ def require_project(db: Session, project_id: int) -> ProjectRecord:
             location={"object_type": "project", "object_id": project_id},
         )
     return project
-
-
-def ensure_project_access(db: Session, user: UserRecord, project_id: int, *capabilities: str) -> None:
-    """访问判定(复制 services.project.ensure_access 语义)。
-
-    仅项目所有者具备全部业务能力; 全局 admin 额外可查看/管理生命周期;
-    项目不存在一律 404; 缺失能力 403。
-    """
-    require_project(db, project_id)
-    project = project_domain.get_project(db, project_id)
-    granted = set(project_domain.OWNER_CAPABILITIES) if project is not None and project.owner_id == user.id else set()
-    if "admin" in identity_domain.user_roles(db, user.id):
-        granted |= {"view", "manage_lifecycle"}
-    missing = [cap for cap in capabilities if cap not in granted]
-    if missing:
-        raise ForbiddenError(
-            "缺少所需项目权限",
-            params={"required": list(capabilities), "missing": missing, "project_id": project_id},
-            location={"object_type": "project", "object_id": project_id},
-        )
 
 
 def _get_current_draft(db: Session, project: ProjectRecord):
@@ -588,7 +569,7 @@ def _submit_task(
     返回 (任务记录, 标记): 标记含 replay/duplicate。内部步骤只 flush,
     由顶层 submit_task 提交。
     """
-    ensure_project_access(db, user, project_id, "edit")
+    ensure_access(db, user, project_id, "edit")
     project = require_project(db, project_id)
     if project.status != "active":
         raise ConflictError("项目已归档或已删除, 不能提交任务", params={"project_id": project_id})
@@ -927,7 +908,7 @@ def _retry_task(db: Session, user: UserRecord, task_id: int) -> TaskRecord:
     (attempt_no 递增, 新租约新 token)。
     """
     task = _get_task(db, task_id)
-    ensure_project_access(db, user, task.project_id, "edit")
+    ensure_access(db, user, task.project_id, "edit")
     if task.status not in TERMINAL_STATUSES:
         raise TaskStateError(
             "仅终态任务可手动重试",

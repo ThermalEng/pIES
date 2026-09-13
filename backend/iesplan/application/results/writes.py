@@ -33,8 +33,8 @@ from iesplan import audit as audit_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.projects.authorization import ensure_access
 from iesplan.application.tasks.submissions import (
-    ensure_project_access,
     ensure_task_belongs,
     submit_task,
 )
@@ -615,7 +615,7 @@ def select_result(
             params={"selection_type": selection_type, "allowed": list(SELECTION_TYPES)},
         )
     task = _get_task(db, task_id)
-    ensure_project_access(db, user, task.project_id, "edit")
+    ensure_access(db, user, task.project_id, "edit")
     index = latest_index(db, task)
     if index is None:
         raise NotFoundError("该任务尚无结果索引, 无法选择结果", params={"task_id": task_id})
@@ -809,7 +809,7 @@ def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) ->
     任务存在但尚无证据包是可查询的正常状态(任务未完成), evidence_status="no_evidence"
     显式声明; 此时各内容字段一律为 None。只读, 不拥有事务。
     """
-    ensure_project_access(db, user, project_id, "view")
+    ensure_access(db, user, project_id, "view")
     task = ensure_task_belongs(db, project_id, task_id)
     package = latest_evidence(db, task_id)
     assessment = latest_assessment(db, package.id) if package is not None else None
