@@ -39,14 +39,12 @@ from iesplan.api.limits import (
     QUOTA_CODE,
     QUOTA_MESSAGE_KEY,
     QuotaError,
-    check_upload_quota,
     validate_upload_fields,
     validate_upload_meta,
 )
 from iesplan.application import datasets as dataset_ops
 from iesplan.application.datasets import DataValidationError
-from iesplan.application.projects import lifecycle as project_ops
-from iesplan.core.errors import NotFoundError, error_envelope, http_error
+from iesplan.core.errors import error_envelope, http_error
 from iesplan.core.timeaxis import RESOLUTIONS
 from iesplan.db import get_db
 
@@ -77,16 +75,6 @@ class DatasetCreate(BaseModel):
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
-
-
-def _require_dataset(db: Session, project_id: int, dataset_id: int):
-    """校验项目与数据集存在且归属正确, 否则 NotFoundError。"""
-    ds = dataset_ops.get_dataset(db, dataset_id)
-    if ds is None or ds.project_id != project_id:
-        raise NotFoundError(
-            params={"entity_type": "dataset", "entity_id": dataset_id, "project_id": project_id}
-        )
-    return ds
 
 
 def _iso_ts(value):
@@ -191,11 +179,11 @@ def create_dataset(
     user: CurrentUser,
 ) -> dict:
     """创建数据集元数据(名称在项目内唯一, 冲突返回 409; 需项目 edit 能力)。"""
-    project_ops.ensure_access(db, user, project_id, "edit")
-    ds = dataset_ops.create_dataset(
+    ds = dataset_ops.create_dataset_case(
         db,
-        project_id,
-        body.name,
+        user,
+        project_id=project_id,
+        name=body.name,
         source_category=body.source_category,
         license=body.license,
         provenance=body.provenance,
@@ -207,9 +195,7 @@ def create_dataset(
 @router.get("/projects/{project_id}/datasets", summary="数据集列表+最新版本")
 def list_datasets(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """项目数据集列表, 每个附带最新版本摘要(含质量报告; 需项目 view 能力)。"""
-    project_ops.ensure_access(db, user, project_id, "view")
-    dataset_ops.require_project(db, project_id)
-    items = dataset_ops.list_datasets_with_latest(db, project_id)
+    items = dataset_ops.list_datasets_case(db, user, project_id=project_id)
     return {
         "datasets": [
             {
@@ -224,13 +210,12 @@ def list_datasets(project_id: int, db: DbSession, user: CurrentUser) -> dict:
 @router.get("/projects/{project_id}/datasets/{dataset_id}", summary="数据集详情(版本列表+质量报告)")
 def get_dataset(project_id: int, dataset_id: int, db: DbSession, user: CurrentUser) -> dict:
     """数据集详情: 元数据 + 全部版本(含质量报告与文件摘要; 需项目 view 能力)。"""
-    project_ops.ensure_access(db, user, project_id, "view")
-    ds = _require_dataset(db, project_id, dataset_id)
-    versions = dataset_ops.list_dataset_versions(db, dataset_id)
+    result = dataset_ops.get_dataset_case(db, user, project_id=project_id, dataset_id=dataset_id)
     return {
-        "dataset": _dataset_dict(ds),
+        "dataset": _dataset_dict(result["dataset"]),
         "versions": [
-            {**_version_dict(v), "files": dataset_ops.version_files_summary(db, v.id)} for v in versions
+            {**_version_dict(item["version"]), "files": item["files"]}
+            for item in result["versions"]
         ],
     }
 
@@ -266,9 +251,10 @@ def upload_version(
     校验通过: 201 + {dataset_version, quality_report, diagnostics};
     存在阻断性诊断(行数/时间戳/缺失/范围等): 400 + 标准错误信封
     (诊断明细入 params.diagnostics, 字段/行号定位)。
+
+    授权 → 归属 → 配额 → 保存的业务顺序由完整用例拥有; 本路由只做传输适配、
+    输入 DTO 校验与错误/响应映射。
     """
-    project_ops.ensure_access(db, user, project_id, "edit")
-    _require_dataset(db, project_id, dataset_id)
     if resolution not in RESOLUTIONS:
         raise http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
     if not isinstance(utc_offset_minutes, int) or not (-720 <= utc_offset_minutes <= 840):
@@ -301,10 +287,14 @@ def upload_version(
             errors=meta_errors + fields_errors,
         )
 
-    # 0.2.0 A4: 用户/项目上传配额门禁(超配额 413; 默认不启用, 本地开发宽松)
+    # 完整用例(授权 → 归属 → 配额 → 保存); 配额超限 413, 阻断性诊断 400 信封。
+    # 0.2.0 A4 配额门禁语义不变(超配额 413; 默认不启用, 本地开发宽松)。
     try:
-        check_upload_quota(
-            db, user_id=user.id, project_id=project_id, incoming_bytes=len(data)
+        version = dataset_ops.upload_dataset_version_case(
+            db, user,
+            project_id=project_id, dataset_id=dataset_id,
+            resolution=resolution, utc_offset_minutes=utc_offset_minutes,
+            fields=fields_dict, data=data, meta=meta_dict,
         )
     except QuotaError as exc:
         raise http_error(
@@ -312,11 +302,6 @@ def upload_version(
             used_bytes=exc.used_bytes, quota_bytes=exc.quota_bytes,
             scope=exc.scope, owner_id=exc.owner_id,
         ) from exc
-
-    try:
-        version = dataset_ops.upload_dataset_version(
-            db, dataset_id, resolution, utc_offset_minutes, fields_dict, data, meta_dict
-        )
     except DataValidationError as exc:
         return _validation_response(exc)
     return {
@@ -337,9 +322,9 @@ def upload_version(
 )
 def get_version(project_id: int, dataset_id: int, version_no: int, db: DbSession, user: CurrentUser) -> dict:
     """版本详情: 元数据 + 溯源 + 许可证 + 文件引用(对象哈希/大小), 不返回数据本体。"""
-    project_ops.ensure_access(db, user, project_id, "view")
-    _require_dataset(db, project_id, dataset_id)
-    result = dataset_ops.get_dataset_version(db, dataset_id, version_no)
+    result = dataset_ops.get_dataset_version_case(
+        db, user, project_id=project_id, dataset_id=dataset_id, version_no=version_no
+    )
     version = result["version"]
     return {
         "dataset_version": _version_dict(version),
@@ -369,12 +354,11 @@ def create_sample(
     region: Annotated[str, Query(description="地区: shanghai | beijing | guangzhou")] = "shanghai",
 ) -> dict:
     """为目标数据集生成确定性内置样例数据版本(REQ-DATA-003/004; 需项目 edit 能力)。"""
-    project_ops.ensure_access(db, user, project_id, "edit")
-    _require_dataset(db, project_id, dataset_id)
     if resolution not in RESOLUTIONS:
         raise http_error(400, "API-REQ-001", "ies.error.invalid_resolution", resolution=resolution)
-    version = dataset_ops.create_builtin_sample(
-        db, project_id, resolution, region=region, user_id=user.id, dataset_id=dataset_id
+    version = dataset_ops.create_sample_case(
+        db, user, project_id=project_id, dataset_id=dataset_id,
+        resolution=resolution, region=region,
     )
     return {
         "dataset_version": _version_dict(version),

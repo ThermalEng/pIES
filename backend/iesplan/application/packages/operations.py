@@ -18,6 +18,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import package as package_domain
+from iesplan import project as project_domain
+from iesplan.application.datasets.quotas import check_upload_quota
 from iesplan.application.packages.transfers import (
     confirm_import as _confirm_import,
     export_package as _export_package,
@@ -78,6 +80,38 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
     except Exception:
         db.rollback()
         raise
+
+
+# ---------------------------------------------------------------------------
+# HTTP 完整用例(第二轮纠偏 Wave 1 切片 3: 上传与 quota)
+#
+# 每个 HTTP 业务动作只转交其中一个完整用例; 配额 → 保存/导入的顺序收进
+# 同一用例, API 只做传输适配(封顶读取)、DTO 与错误/响应映射, 本层不新增校验。
+# ---------------------------------------------------------------------------
+
+
+def propose_import_case(
+    db: Session,
+    user: UserRecord,
+    *,
+    file_bytes: bytes,
+    idempotency_key: str | None = None,
+) -> ImportProposalRecord:
+    """导入提案完整用例: 用户级配额 → 校验暂存(提交/回滚由提案步骤拥有)。
+
+    项目包导入创建新项目身份、无目标项目, 故只应用用户级配额(口径与原路由一致)。
+
+    异常:
+        QuotaError: 配额超限(API 层转换为 413)。
+    """
+    check_upload_quota(db, user_id=user.id, project_id=None, incoming_bytes=len(file_bytes))
+    return propose_import(db, user, file_bytes, idempotency_key=idempotency_key)
+
+
+def confirm_import_case(db: Session, user: UserRecord, *, proposal_id: int) -> dict:
+    """确认导入完整用例: 分区提交 → 返回新项目与导入者角色(与 HTTP 无关, 供 API 组装响应)。"""
+    project = confirm_import(db, user, proposal_id)
+    return {"project": project, "role": project_domain.get_role(db, user, project.id)}
 
 
 def create_download_token(
