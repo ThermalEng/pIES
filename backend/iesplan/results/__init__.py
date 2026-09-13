@@ -69,6 +69,8 @@ evidence_inner = rules.evidence_inner
 fine_states = rules.fine_states
 fine_to_db = rules.fine_to_db
 overall_score = rules.overall_score
+summarize_assessment = rules.summarize_assessment
+validate_evidence_structure = rules.validate_evidence_structure
 
 __all__ = [
     "ASSESSMENT_RULE_VERSION",
@@ -129,4 +131,6 @@ __all__ = [
     "point_index_assessment",
     "point_index_latest",
     "select_result",
+    "summarize_assessment",
+    "validate_evidence_structure",
 ]
