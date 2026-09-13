@@ -28,9 +28,8 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
-from iesplan.application import models as svc
+from iesplan.application.models import cases as model_cases
 from iesplan.application.models import selector
-from iesplan.application.projects.authorization import ensure_access
 from iesplan.db import get_db
 
 #: 设备类型注册表(公开, 前端画布取设备面板与参数表单 schema)
@@ -118,8 +117,7 @@ def device_types_public() -> dict[str, Any]:
 @model_router.get("", summary="获取项目系统图(设备+端口+连接+布局)")
 def get_model_graph(project_id: int, db: DbSession, user: CurrentUser) -> dict:
     """读取项目工作图: 拓扑(设备/端口/连接)与画布布局对象(需项目 view 能力)。"""
-    ensure_access(db, user, project_id, "view")
-    return svc.get_graph(db, project_id)
+    return model_cases.get_model_graph(db, user, project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -135,20 +133,17 @@ def create_device(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """创建设备: 校验注册表类型与参数, 按载体生成端口, 返回设备与端口(需 edit)。"""
-    ensure_access(db, user, project_id, "edit")
-    device = svc.create_device(
+    return model_cases.create_device(
         db,
+        user,
         project_id,
-        body.device_type,
-        body.name,
+        device_type=body.device_type,
+        name=body.name,
         params=body.params,
         is_existing=body.is_existing,
         model_precision=body.model_precision,
         position=body.position.model_dump() if body.position else None,
-        created_by=user.id,
     )
-    ports = svc.get_device_ports(db, device.id)
-    return {"device": svc.serialize_device(device), "ports": [svc.serialize_port(p) for p in ports]}
 
 
 @model_router.put("/devices/{device_id}", summary="更新设备(参数/位置/名称)")
@@ -160,16 +155,15 @@ def update_device(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """更新设备名称/参数/位置(仅更新提供的字段; 参数重新按注册表校验; 需 edit)。"""
-    ensure_access(db, user, project_id, "edit")
-    device = svc.update_device(
+    return model_cases.update_device(
         db,
+        user,
         project_id,
         device_id,
         name=body.name,
         params=body.params,
         position=body.position.model_dump() if body.position else None,
     )
-    return {"device": svc.serialize_device(device)}
 
 
 @model_router.delete("/devices/{device_id}", summary="删除设备(级联端口与连接)")
@@ -180,9 +174,7 @@ def delete_device(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """删除设备及其端口与关联连接(需项目 edit 能力)。"""
-    ensure_access(db, user, project_id, "edit")
-    svc.delete_device(db, project_id, device_id)
-    return {"ok": True, "deleted": device_id}
+    return model_cases.delete_device(db, user, project_id, device_id)
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +190,9 @@ def create_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """创建连接: 校验能源类型一致/方向兼容/同项目/无重复, 失败返回带定位的诊断(需 edit)。"""
-    ensure_access(db, user, project_id, "edit")
-    conn = svc.connect(db, project_id, body.from_port_id, body.to_port_id, attrs=body.attrs)
-    return {"connection": svc.serialize_connection(conn)}
+    return model_cases.create_connection(
+        db, user, project_id, body.from_port_id, body.to_port_id, attrs=body.attrs
+    )
 
 
 @model_router.put("/connections/{conn_id}", summary="更新连接(容量/损耗率/扩展参数)")
@@ -212,9 +204,7 @@ def update_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """更新连接属性(capacity/loss_rate/params; 需项目 edit 能力)。"""
-    ensure_access(db, user, project_id, "edit")
-    conn = svc.update_connection(db, project_id, conn_id, body.attrs)
-    return {"connection": svc.serialize_connection(conn)}
+    return model_cases.update_connection(db, user, project_id, conn_id, body.attrs)
 
 
 @model_router.delete("/connections/{conn_id}", summary="断开连接")
@@ -225,9 +215,7 @@ def delete_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     """删除连接(需项目 edit 能力)。"""
-    ensure_access(db, user, project_id, "edit")
-    svc.disconnect(db, project_id, conn_id)
-    return {"ok": True, "deleted": conn_id}
+    return model_cases.delete_connection(db, user, project_id, conn_id)
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +226,4 @@ def delete_connection(
 @model_router.get("/validate", summary="模型校验(拓扑+参数诊断)")
 def validate_model(project_id: int, db: DbSession, user: CurrentUser) -> dict[str, Any]:
     """返回拓扑与参数诊断列表(错误/警告, 含对象定位, 04 §5.4 结构; 需项目 view 能力)。"""
-    ensure_access(db, user, project_id, "view")
-    diags = svc.validate_project_model(db, project_id)
-    return {"diagnostics": [d.to_dict() for d in diags]}
+    return model_cases.validate_model(db, user, project_id)
