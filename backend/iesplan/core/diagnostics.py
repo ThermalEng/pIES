@@ -56,7 +56,6 @@ TASK_INFEASIBLE = "TASK-SOLVE-002"  # 无可行解
 TASK_BASE_INFEASIBLE = "TASK-SOLVE-003"  # 基准方案无可行解(02 §5.3)
 TASK_TIMEOUT = "TASK-TIMEOUT-001"  # 超时
 TASK_DATA_SNAPSHOT_MISSING = "TASK-DATA-001"  # 计算快照缺失
-TASK_DATA_HASH_MISMATCH = "TASK-DATA-002"  # 快照哈希校验失败
 
 # RES 域:结果
 RES_MISSING = "RES-MISS-002"  # 结果缺失
@@ -106,11 +105,11 @@ NEW_DIAG_CODES: dict[str, str] = {
     # 公共财务配置与规划配置(0.6.5 前置阶段事项 3): 不可变 revision 契约
     "PROJ-FIN-001": "公共财务配置非法: {detail}",
     "PROJ-FIN-002": "公共财务配置领域校验失败: {detail}",
-    "PROJ-FIN-003": "公共财务配置持久化摘要不一致: {detail}",
+    "PROJ-FIN-003": "公共财务配置引用不存在或已失效: {detail}",
     "PROJ-PLAN-001": "规划配置非法: {detail}",
     "PROJ-PLAN-002": "规划配置错误: {detail}",
     "PROJ-PLAN-003": "规划配置领域校验失败: {detail}",
-    "PROJ-PLAN-004": "规划配置持久化摘要不一致: {detail}",
+    "PROJ-PLAN-004": "规划配置引用不存在或已失效: {detail}",
     # ies.device-data 1.0.0 契约(0.6.0): CSV 元数据/方言/列/时间/数值契约诊断
     "DATA-META-001": "元数据行缺失或重复: {key}(每个元数据键只能出现一次, 且只能在表头之前)",
     "DATA-META-002": "必需的 ies.device-data 元数据缺失: {key}",
@@ -124,9 +123,6 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-META-011": (
         "ies.device-data 2.0.0 文件 source_mode 与设备接口声明的预定义来源模式"
         "不匹配: {column} 声明 {mode}, 文件 {source_mode}"
-    ),
-    "DATA-META-012": (
-        "计算序列绑定的项目基线摘要不匹配: 声明 {declared}, 期望 {expected}"
     ),
     "DATA-DIAL-001": "CSV 方言不符合 ies.device-data 契约: {detail}",
     "DATA-COL-003": "CSV 列未在设备模型 predefined interfaces 中声明: {column}",
@@ -207,7 +203,7 @@ NEW_DIAG_CODES: dict[str, str] = {
     "ASM-CONST-001": "装配约束表达式语法错误",
     "ASM-CONST-002": "装配约束表达式量纲不一致",
     "ASM-CONST-003": "装配约束引用未定义符号",
-    "ASM-RES-001": "装配资源不可读或摘要不一致",
+    "ASM-RES-001": "装配资源文件不可读",
     "ASM-CALC-001": "calculation.mode 非法",
     "ASM-CALC-002": "calculation.options 非法",
     "ASM-OUT-001": "输出引用未定义设备或端口",
@@ -275,7 +271,6 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
     TASK_BASE_INFEASIBLE: "ies.diag.task.base_infeasible",
     TASK_TIMEOUT: "ies.diag.task.timeout",
     TASK_DATA_SNAPSHOT_MISSING: "ies.diag.task.snapshot_missing",
-    TASK_DATA_HASH_MISMATCH: "ies.diag.task.snapshot_hash_mismatch",
     RES_MISSING: "ies.diag.res.metric_missing",
     RES_NUM_INVALID: "ies.diag.res.invalid_nan",
     RES_RANGE_OUT: "ies.diag.res.out_of_range",
@@ -317,7 +312,6 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-META-008": "meta_model_mismatch",
             "DATA-META-009": "meta_model_unregistered",
             "DATA-META-011": "meta_source_mode_mismatch",
-            "DATA-META-012": "meta_project_baseline_mismatch",
             "DATA-DIAL-001": "dialect_invalid",
             "DATA-COL-003": "col_undeclared",
             "DATA-COL-004": "col_duplicate",
@@ -388,7 +382,6 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     TASK_BASE_INFEASIBLE: "ies.fix.task.base_infeasible",
     TASK_TIMEOUT: "ies.fix.task.timeout",
     TASK_DATA_SNAPSHOT_MISSING: "ies.fix.task.snapshot_missing",
-    TASK_DATA_HASH_MISMATCH: "ies.fix.task.snapshot_hash_mismatch",
     RES_MISSING: "ies.fix.res.metric_missing",
     RES_NUM_INVALID: "ies.fix.res.invalid_nan",
     RES_RANGE_OUT: "ies.fix.res.out_of_range",
@@ -423,7 +416,6 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
             "DATA-META-008",
             "DATA-META-009",
             "DATA-META-011",
-            "DATA-META-012",
             "DATA-DIAL-001",
             "DATA-COL-003",
             "DATA-COL-004",
