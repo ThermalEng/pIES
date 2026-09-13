@@ -20,7 +20,7 @@ finance profile / overrides / planning 读写编排（旧
   重新合并并完整校验后追加; 用户不能直接 author Effective；
 - Planning 保存: 规划与结果财务计算固定同一有效快照(由项目指针保证);
 - 并发保护: 保存必须携带 expected_revision(当前指针值), 不匹配 → 409；
-- 失败原子: 任一校验/合并/摘要不一致失败 → 不落任何行。
+- 失败原子: 任一校验/合并/引用完整性失败 → 不落任何行。
 
 事务：写用例顶层函数拥有提交/回滚（``db.commit`` 收尾，失败 ``db.rollback``）；
 内部实现只 ``flush``（旧服务本就只 flush，由 API 层提交；此处改由用例顶层提交）。
