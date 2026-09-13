@@ -99,6 +99,19 @@ API 是纯传输适配层。
   同步契约/测试；不得用 `TASK-SOLVE-001` 假装所有 I/O 都是求解错误；
 - 完成路径必须要求显式、合法的业务 outcome，不得以缺字段默认成功。
 
+独立验收又发现：把函数拆成“分阶段命令”后，执行线程仍从读取任务到最终提交
+持有同一 SQLAlchemy Session，读取触发的事务可跨越整个长时运算；进度也只 flush 而没有独立提交。
+`execute_check` 仍自己决定证据定位优先级、无证据时的业务 outcome/payload，并组装评估 DTO。
+这些不是 Worker 的运行时序，而是 results/tasks 业务规则。
+
+补正要求：
+
+- 长时 attempt 不得持有跨阶段的 Session 或数据库事务；输入加载完即关闭读取会话，求解/分析/导出在无数据库事务状态下运行；
+- 领取、进度、续租、评估写入和最终提交各自使用新的短会话/短事务；Worker 可持有会话工厂或注入的 application gateway，不持有长寿命 Session；
+- 进度在短事务提交后对其他会话可见；失败或取消不得把之前未提交的评估/进度意外一并提交；
+- report 证据定位和无证据结果由 application 编排 results/tasks 公开能力完成；Worker 只安排“定位→检查点→评估→上报”时序；
+- 增加跨会话行为测试，证明进度中途可见、执行阶段无开启事务、失败不提交别的阶段副作用。
+
 ### D. 业务规则被错误放入 core
 
 `core/patterns.py` 当前拥有 identity 的用户名/邮箱格式和 tasks 的幂等键格式。它们虽无状态，但具有明确
@@ -140,6 +153,15 @@ API 可引用不可变公开 contract 做输入 DTO，ORM/DDL 可引用相应领
 门禁应验证真实禁止形态，不应依赖固定行号，也不能强迫无意义包装。常设豁免必须证明是稳定、无状态、由唯一
 所有者公开的复用；相同豁免不要在多个测试文件复制成可能漂移的两份政策。
 
+独立验收否决以下门禁形态：
+
+- 按 `USERNAME_RE`/`ensure_access` 等私有符号名搜索并锁定精确所在模块；改名即失效，也无法检出换名复制的规则；
+- 要求当前三个“未实现执行器”函数必须永久存在、有 `raise` 且无 `return`；这会阻止未来正式实现；
+- 只扫描已删除 `services` 导入的 API fanout 门禁；它无法检出同一端点对多个 application 能力的调用。
+
+语义行为用行为测试证明；静态门禁只保留稳定的依赖方向和通用禁止形态。API 门禁可按函数调用图
+检查“一个 API 动作至多转交一个 application handler”，不得锁定具体端点、函数名或当前未实现状态。
+
 ### G. 现行文档和更新日志与事实不一致
 
 - `manual/developer-guide/zh-CN/modules/application.md` 仍把 `services/` 写作迁移边界，并指导从 service
@@ -152,6 +174,18 @@ API 可引用不可变公开 contract 做输入 DTO，ORM/DDL 可引用相应领
 整改要求：先撤回不真实的完成表述。Muse 本轮完成后只提交准确的实施事实，不得自行再次宣布“最终验收通过”；
 最终完成结论由 Codex 独立复审后写入。稳定手册只描述职责、公开边界和结果，不写本轮文件名、行号、agent、
 波次或迁移过程。
+
+依赖计数和当前豁免是审查证据，不是长期文档。不得把无可重现生成器的“后端依赖/职责清单”提交到
+`docs/development/`；依赖事实在完成报告中给出即可，稳定边界只由 `manual/` 正文表达。
+
+### H. 第二次独立验收的其他残留
+
+- `api/projects.py` 的管理列表、归档/撤销归档、导入确认，`api/results.py` 的评估列表/检查任务，
+  `api/tasks.py` 的提交/取消/重试，以及 `api/health.py` 仍在单个 API 动作中多次调用 application 能力；
+- `LEGACY_SERVICE_CALLS = ()` 及其空集合测试只是已删历史的实现哨兵，应删除，不作为永久公开面；
+- `TASK_DATA_HASH_MISMATCH`/`TASK-DATA-002` 和对应前端文案仍假定快照 hash 复核，与宪法 §2.6 冲突，应连同无生产者的诊断分支删除；
+- `docs/development/backend-decoupling-duty-inventory.md` 是会立即过期的第二份架构清单，应删除；
+- `capacity_params` 无任何生产或前端消费者，且属旧 engines 设备参数映射，本轮删除可接受，不得恢复。
 
 ## 四、实施波次
 
