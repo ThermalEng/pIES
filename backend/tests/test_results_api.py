@@ -290,7 +290,7 @@ def _prepare_task_with_evidence(
     payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], user.id)
     pkg = _submit_evidence(db, task_id, claim, payload)
     if complete:
-        worker_app.complete_task(db, task_id, solver_status="OPTIMAL")
+        worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("OPTIMAL"))
         db.commit()
     return pid, task_id, claim, pkg, [obj_a, obj_b]
 
@@ -354,7 +354,7 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
     assert exc.value.http_status == 409
 
     # 6) fencing: 尝试已结束(任务完成, 租约吊销)拒绝
-    worker_app.complete_task(db, task_id, solver_status="OPTIMAL")
+    worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("OPTIMAL"))
     db.commit()
     with pytest.raises(results_uc.EvidenceWriteDeniedError):
         results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)

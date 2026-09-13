@@ -18,6 +18,7 @@ from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
     SEVERITY_ERROR,
     SYS_STORE_QUOTA_EXCEEDED,
+    TASK_EXEC_UNAVAILABLE,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.patterns import IDEMPOTENCY_KEY_RE as IDEMPOTENCY_KEY_RE
@@ -65,6 +66,18 @@ class StorageQuotaError(AppError):
     http_status = 409
     severity = SEVERITY_BLOCKING
     message_key = "ies.diag.store.quota_exceeded"
+
+
+class ExecutionUnavailableError(AppError):
+    """任务执行入口未实现/不可用(未实现的 I/O 执行器等, 非求解失败)。
+
+    确定性失败: 经失败收拢落 failed + TASK-EXEC-001, 不得借用
+    TASK-SOLVE-001 充数, 更不得伪造成功。
+    """
+
+    code = TASK_EXEC_UNAVAILABLE
+    severity = SEVERITY_ERROR
+    message_key = "ies.diag.task.exec_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +287,16 @@ def check_transition(task: TaskRecord, new_status: str) -> None:
             location={"object_type": "task", "object_id": task.id},
         )
 
+
+#: 合法业务结局(与 tasks 表 ck_tasks_outcome 约束一致, 本域为唯一权威)
+BUSINESS_OUTCOMES: tuple[str, ...] = (
+    "normal_completion",
+    "no_recommendation",
+    "no_feasible_multi_objective",
+    "partial_batch",
+    "restricted_results",
+    "insufficient_evidence",
+)
 
 #: 求解器状态 → 业务结局映射
 _SOLVER_OUTCOME: dict[str, str] = {

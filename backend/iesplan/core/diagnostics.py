@@ -50,6 +50,7 @@ PARAM_CONFLICT = "PARAM-CONF-001"  # 参数相互冲突
 
 # TASK 域:任务
 TASK_QUEUED = "TASK-QUEUE-001"  # 已加入队列
+TASK_EXEC_UNAVAILABLE = "TASK-EXEC-001"  # 任务执行入口未实现/不可用(非求解失败)
 TASK_SOLVE_FAILED = "TASK-SOLVE-001"  # 求解失败
 TASK_INFEASIBLE = "TASK-SOLVE-002"  # 无可行解
 TASK_BASE_INFEASIBLE = "TASK-SOLVE-003"  # 基准方案无可行解(02 §5.3)
@@ -268,6 +269,7 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
     PARAM_UNIT_INCONSISTENT: "ies.diag.param.unit_mismatch",
     PARAM_CONFLICT: "ies.diag.param.conflict",
     TASK_QUEUED: "ies.diag.task.queued",
+    TASK_EXEC_UNAVAILABLE: "ies.diag.task.exec_unavailable",
     TASK_SOLVE_FAILED: "ies.diag.task.solve_failed",
     TASK_INFEASIBLE: "ies.diag.task.infeasible",
     TASK_BASE_INFEASIBLE: "ies.diag.task.base_infeasible",
@@ -380,6 +382,7 @@ DIAG_FIX_HINT_KEYS: dict[str, str] = {
     PARAM_UNIT_MISMATCH: "ies.fix.param.unit_mismatch",
     PARAM_UNIT_INCONSISTENT: "ies.fix.param.unit_mismatch",
     PARAM_CONFLICT: "ies.fix.param.conflict",
+    TASK_EXEC_UNAVAILABLE: "ies.fix.task.exec_unavailable",
     TASK_SOLVE_FAILED: "ies.fix.task.solve_failed",
     TASK_INFEASIBLE: "ies.fix.task.infeasible",
     TASK_BASE_INFEASIBLE: "ies.fix.task.base_infeasible",

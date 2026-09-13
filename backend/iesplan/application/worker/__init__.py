@@ -11,7 +11,10 @@ worker 层只经本包推进, 不再直连 ``services.*`` 与 ``models.*``;
 - attempt_cases: 完整尝试事务所有者(领取/续租/提交/失败/取消各自
   同事务提交; worker 层不 commit/rollback);
 - runner_cases: 快照输入读取转调与输入装配行读;
-- evidence_cases: 证据包查询/检查评估追加/不确定性行写。
+- evidence_cases: 证据包查询/检查单步评估(公开能力评估追加 +
+  results 域 outcome 规则, flush-only)/不确定性行写。
+  report 检查的跨步顺序(定位 → 评估 → 上报)由 Worker 编排,
+  不设包住长任务的单一完整用例。
 
 包级直接提供三个 worker 层消费的边界辅助(非转调, 有独立调用方):
 - cancel_requested: 取消信号读(可重建视图);
@@ -33,7 +36,8 @@ from iesplan.application.worker.attempt_cases import (
     submit_attempt_result,
 )
 from iesplan.application.worker.evidence_cases import (
-    append_check_assessment,
+    CheckAssessment,
+    assess_check_evidence,
     create_sample_row,
     create_uncertainty_snapshot_record,
     get_evidence_record,
@@ -89,13 +93,23 @@ from iesplan.application.worker.runner_cases import (
 from iesplan.dataset import DatasetVersionRecord
 from iesplan.results import EvidencePackageRecord, ResultAssessmentRecord
 from iesplan.storage import get_object, put_object
-from iesplan.tasks import SampleTaskRecord, TaskStateError, UncertaintySnapshotRecord, map_business_outcome
+from iesplan.tasks import (
+    BUSINESS_OUTCOMES,
+    ExecutionUnavailableError,
+    SampleTaskRecord,
+    TaskStateError,
+    UncertaintySnapshotRecord,
+    map_business_outcome,
+)
 
 __all__ = [
+    "BUSINESS_OUTCOMES",
     "CalcSnapshotRecord",
+    "CheckAssessment",
     "Claim",
     "DatasetVersionRecord",
     "EvidencePackageRecord",
+    "ExecutionUnavailableError",
     "LEASE_TTL_SECONDS",
     "LeaseRejectedError",
     "ResultAssessmentRecord",
@@ -109,8 +123,8 @@ __all__ = [
     "UncertaintySnapshotRecord",
     "acquire_attempt",
     "acquire_task",
+    "assess_check_evidence",
     "attempt_cases",
-    "append_check_assessment",
     "attach_result_ref",
     "cancel_attempt",
     "cancel_task_record",
