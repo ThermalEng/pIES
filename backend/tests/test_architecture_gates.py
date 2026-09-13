@@ -549,7 +549,7 @@ def test_gate_relative_target_levels():
 # 门禁之列; 他域 contracts/contracts2 属不可变 contract 复用, 始终允许。
 
 #: 门禁 12–16 共用的业务域包集合(均有 __init__ 公开门面; core/config/db/models 不在列)。
-_WAVE0_DOMAIN_PKGS: frozenset[str] = frozenset(
+_BUSINESS_DOMAIN_PACKAGES: frozenset[str] = frozenset(
     {
         "audit",
         "configuration",
@@ -571,10 +571,10 @@ _WAVE0_DOMAIN_PKGS: frozenset[str] = frozenset(
 )
 
 #: 门禁 15/16 的计算执行包集合(Worker/analysis 禁止穿透)。
-_WAVE0_COMPUTE_PKGS: frozenset[str] = frozenset({"engines", "metrics", "finance", "analysis", "assembly"})
+_COMPUTE_PACKAGES: frozenset[str] = frozenset({"engines", "metrics", "finance", "analysis", "assembly"})
 
 #: 门禁 16 的 analysis 禁止驱动集合(计算执行包 + services + 任务执行 worker)。
-_WAVE0_ANALYSIS_FORBIDDEN_PKGS: frozenset[str] = frozenset(
+_ANALYSIS_FORBIDDEN_PACKAGES: frozenset[str] = frozenset(
     {"engines", "assembly", "services", "finance", "metrics", "worker"}
 )
 
@@ -598,7 +598,7 @@ def _is_contract_target(target: str) -> bool:
 #: engines 内评估对 metrics.financial 的复用同属此类(metrics.financial 仅依赖
 #: 标准库/numpy 的纯计算; 取现金流/NPV/IRR 纯函数与 IRRStatus 做候选评分,
 #: 引擎内评估, 非跨域业务组合)。
-_WAVE0_STATE_MODEL_REUSE: frozenset[tuple[str, str]] = frozenset(
+ALLOWED_STATE_MODEL_REUSE: frozenset[tuple[str, str]] = frozenset(
     {
         ("iesplan.results", "iesplan.metrics.validity"),
         ("iesplan.results", "iesplan.metrics.financial"),
@@ -628,7 +628,7 @@ def _iter_domain_imports(
     覆盖三种绝对导入形态: import iesplan.X[.Y]、from iesplan[.X…] import …、
     from iesplan import X(含根包直引领域形态, 如 project/access 经根包调用 identity)。
     contract 目标与包外目标自动排除; own_top 指定时排除自身域;
-    exempt 命中(_WAVE0_STATE_MODEL_REUSE)时排除常设复用。
+    exempt 命中(ALLOWED_STATE_MODEL_REUSE)时排除常设复用。
     """
     found: set[tuple[str, str]] = set()
     for path, mod in _iter_modules(scan_root, pkg_root):
@@ -695,7 +695,7 @@ def test_api_no_direct_domain_behavior():
 
     领域 *.contracts DTO 复用允许; 其余领域根包/行为子模块导入即违规。
     """
-    detected = _iter_domain_imports(_API_DIR, _WAVE0_DOMAIN_PKGS)
+    detected = _iter_domain_imports(_API_DIR, _BUSINESS_DOMAIN_PACKAGES)
     assert not detected, f"API→领域行为直调: {sorted(detected)}"
 
 
@@ -703,16 +703,16 @@ def _find_cross_domain_behavior_imports(pkg_root: Path = _PKG_ROOT) -> set[tuple
     """门禁 14: 扫描各业务域对他域行为的直接依赖。返回 (模块, 他域) 集合。
 
     领域间不得直接组合业务: 他域根包/行为子模块导入即违规; 他域 contracts
-    属不可变 contract 复用, 允许; _WAVE0_STATE_MODEL_REUSE 属常设复用, 允许。
+    属不可变 contract 复用, 允许; ALLOWED_STATE_MODEL_REUSE 属常设复用, 允许。
     跨领域授权与工作流归 application。
     """
     found: set[tuple[str, str]] = set()
-    for domain in sorted(_WAVE0_DOMAIN_PKGS):
+    for domain in sorted(_BUSINESS_DOMAIN_PACKAGES):
         scan_root = pkg_root / domain
         if not scan_root.is_dir():
             continue
         found |= _iter_domain_imports(
-            scan_root, _WAVE0_DOMAIN_PKGS, own_top=domain, exempt=_WAVE0_STATE_MODEL_REUSE
+            scan_root, _BUSINESS_DOMAIN_PACKAGES, own_top=domain, exempt=ALLOWED_STATE_MODEL_REUSE
         )
     return found
 
@@ -728,7 +728,7 @@ def test_worker_no_compute_penetration():
 
     Worker 只保留任务领取、租约、调用 application.worker 与隔离执行壳。
     """
-    detected = _iter_domain_imports(_WORKER_DIR, _WAVE0_COMPUTE_PKGS)
+    detected = _iter_domain_imports(_WORKER_DIR, _COMPUTE_PACKAGES)
     assert not detected, f"Worker 计算穿透: {sorted(detected)}"
 
 
@@ -738,11 +738,11 @@ def test_analysis_no_engine_driving():
     门禁 7 已覆盖 engines/services/assembly.plan 直接导入; 本门禁覆盖
     finance/metrics/worker 等计算执行穿透。
     """
-    detected = _iter_domain_imports(_PKG_ROOT / "analysis", _WAVE0_ANALYSIS_FORBIDDEN_PKGS)
+    detected = _iter_domain_imports(_PKG_ROOT / "analysis", _ANALYSIS_FORBIDDEN_PACKAGES)
     assert not detected, f"analysis 驱动 engine: {sorted(detected)}"
 
 
-def test_whitelists_have_no_stale_entries():
+def test_stable_allowed_items_still_present():
     """架构门禁 17: 稳定允许项必须仍被对应扫描器命中(消失即失败)。"""
     detected = _find_cross_model_imports()
     assert ALLOWED_SHARED_PRIMITIVE_IMPORTS <= detected, (
