@@ -1,66 +1,18 @@
-"""0.3.0 C5: 静态架构门禁测试(宪法 §14.2 原则)。
+"""静态架构门禁(宪法 §14.2 原则): 依赖只能指向公开门面, 禁止反向与穿透依赖。
 
-架构门禁要求 CI 逐步加入并最终强制(宪法 §14.2 原则，门禁细则见
-docs/development/development-workflow.md「架构门禁」): 禁止 core 依赖业务模块、
-禁止跨模块导入私有符号、禁止 API 直接导入 ORM。本文件建立 0.3.0 基线门禁:
+依赖方向: core 不依赖任何业务模块; application 只做跨域编排与事务,
+不直引 models/ORM 与裸表; api 只调完整 application 用例, 不直引 ORM、
+领域行为, 不持有事务提交; worker/analysis 只消费统一计算结果、回执与
+声明输出, 不穿透计算执行, 不驱动引擎; 领域间直接业务依赖禁止,
+跨域组合只归 application, 表真相只归领域 persistence。
 
-  1. test_core_no_business_dependencies  — core 不允许 import 任何业务模块;
-  2. test_no_cross_module_private_imports — 禁止 from X import _y / import X._y
-     以及模块对象上的私有属性访问(如 config_service._row_to_config);
-  3. test_api_no_direct_orm_imports      — api 不允许直接 import iesplan.models.*
-     与 iesplan.db 的 Session/Base 等(get_db 依赖注入除外)。
+通用禁止形态: 跨模块私有符号导入与私有属性访问、直接导入 ORM、裸表与
+裸 SQL、非所有者持有事务提交、未登记的跨表访问。静态门禁只查依赖事实
+(AST import 与调用点), 不锁定私有符号名, 不阻止未来正式实现;
+语义行为由行为测试证明。
 
-解耦重构切片 1(2026-09-11, 临时指导 docs/reviews/architecture-refactor-workflow.md
-§1)在不改变业务行为的前提下追加基线门禁:
-
-  4. test_api_no_transaction_commit     — api 不允许调用 .commit()/.rollback(),
-     事务只由 application 提交/回滚;
-  5. test_api_no_multi_service_fanout   — 已删除(该门禁只扫描已删除
-     services 包的导入扇出, 无法检出同一端点对多个 application 用例的调用;
-     指南 F 否决此类形态, 不再保留);
-  6. test_worker_no_direct_domain_services — worker 不允许直接 import
-     iesplan.services.*(业务快照读取与编排归 application.worker);
-  7. test_analysis_no_direct_engine_or_services — analysis 不允许直接 import
-     iesplan.engines.* / iesplan.services.* / iesplan.assembly.plan
-     (目标: 只消费 ComputeResult、回执与声明输出);
-  8. test_table_ownership_no_new_cross_imports — services/worker/analysis/
-     storage/application 对 iesplan.models.* 的跨表访问收敛到
-     WHITELIST_CROSS_MODEL_IMPORTS, 表归属见 TABLE_OWNERS。
-
-纠偏 Wave 0(临时指导 architecture-refactor-workflow.md 纠偏波次)追加:
-
-  9. test_application_no_direct_services — application 禁止导入
-     iesplan.services(临时债务集合须与检测精确相等, 最终归零);
-  10. test_application_no_bare_sql — application 禁止 sa.table/Table/text 与
-     sa insert/update/delete(表真相只归领域 persistence);
-  11. test_worker_no_transactions — Worker 禁止 .commit()/.rollback()
-     (事务归 application.worker 用例)。
-
-策略: 现有违规列入文件头部的 WHITELIST_* 常量(白名单基线, 注释写明
-整改 TODO), 新增违规直接断言失败。后续切片按注释逐条整改后移除白名单条目,
-白名单清空后门禁转为硬强制。
-
-最终收口 Wave 0(临时指导 docs/development/backend-decoupling-finalization.md
-§五, 基线 1a07146)追加:
-
-  12. test_application_no_models_orm — application 禁止直引 iesplan.models/ORM
-     (表真相只归领域 persistence; 现状 1 项债务, Wave 1-A 归零);
-  13. test_api_no_direct_domain_behavior — API 禁止直接调用领域行为组织业务
-     (只调完整 application 用例, contracts DTO 复用除外; 现状 5 对, Wave 2-A/B 归零);
-  14. test_no_forbidden_cross_domain_deps — 禁止领域间直接业务依赖
-     (跨域组合只归 application, 他域 contracts 复用除外; 现状 2 对, Wave 2-B/3 归零);
-  15. test_worker_no_compute_penetration — Worker 禁止计算穿透
-     (engines/metrics/finance/analysis/assembly; 现状 4 对, Wave 4 归零);
-  16. test_analysis_no_engine_driving — analysis 禁止驱动 engine
-     (不自装 plan、不调用引擎, 只消费统一计算结果; Wave 0 基线 4 对,
-     Wave 4-B 清除 wrapper 驱动后剩 3 对门面转发, Wave 4-C 随门面归属收尾归零)。
-  17. test_whitelists_have_no_stale_entries — 旧式“只查新增”门禁的白名单条目
-     必须仍被命中, 过期即失败。
-
-Wave 0 门禁 8 改为精确相等: WHITELIST_CROSS_MODEL_IMPORTS 已按实测裁剪
-(删除 services/project/Worker 11 项过期条目, 仅剩 namespace→identity 与
-storage→common)。门禁 12–16 债务集合 TEMP_DEBT_* 亦与检测精确相等
-(新增与过期都失败); 整改由 Wave 1–4 在对应切片落地, 本文件只建门禁。
+债务语义: 现有违规收敛到 WHITELIST_* / TEMP_DEBT_* 常量, 集合须与实测
+精确相等(新增与过期都失败); 整改后移除条目, 清空后转为硬强制。
 
 实现约束: 纯标准库(ast/pathlib)读取源码文本, 绝不 import 业务模块。
 """
