@@ -177,7 +177,7 @@ class TestLongPhaseHoldsNoSession:
         tracker = SessionTracker(factory)
         marks: dict[str, Any] = {}
 
-        def _slow_calc(ctx, content, data, axis):
+        def _slow_calc(ctx):
             marks["start"] = time.monotonic()
             marks["open_during"] = tracker.open_count()
             time.sleep(0.3)  # 长时求解窗口: 期间不得有打开的会话
@@ -213,7 +213,7 @@ class TestFailureDoesNotTakeCommittedProgress:
         """
         claim = _claim(factory, env["task"].id)
 
-        def _progress_then_expire(ctx, content, data, axis):
+        def _progress_then_expire(ctx):
             ctx.progress(50.0, "solve", {"it": 2})
             # 模拟守护进程过期回收(独立会话提交, 执行线程不可见旧状态)
             with factory() as killer:
@@ -240,7 +240,7 @@ class TestFailureDoesNotTakeCommittedProgress:
         """执行失败 → failed 终态落库, 之前已提交进度仍在且不被改写。"""
         claim = _claim(factory, env["task"].id)
 
-        def _progress_then_fail(ctx, content, data, axis):
+        def _progress_then_fail(ctx):
             ctx.progress(30.0, "generate", {"step": 1})
             raise EngineRunError("求解失败")
 

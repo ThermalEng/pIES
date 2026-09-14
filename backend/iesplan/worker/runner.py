@@ -1,16 +1,19 @@
-"""任务执行分派与快照输入装配(计算 Worker / I/O Worker 共用)。
+"""任务执行分派与状态机收拢(计算 Worker / I/O Worker 共用)。
 
 职责:
-- load_inputs: 从不可变 calc_snapshots 装配输入(03 §2.2/§9.4: 项目版本内容 +
-  绑定数据集逐时数据 + 时间轴), 重试复用同一快照, 输入含义不变;
-- dispatch: 按 task.type 分派(calc/optimization/uncertainty 走快照输入 +
-  计算阶段网关; report 走证据包; io 任务走占位执行器);
-- run_task: 一次尝试的完整执行闭环 —— 短会话装配输入 → 无事务执行 →
-  短事务提交(证据包/四维评估/结果索引/业务结局)或失败/取消收拢, 全部经由
-  application.worker 阶段网关的 fencing 协议(03 §4.4: 迟到的写回永远不入
-  权威库)。一次长时 attempt 不是一个事务: 输入加载完即关闭读取会话,
-  求解/分析/导出在无数据库事务状态下运行, 领取/进度/续租/评估写入/
-  提交/失败/取消各自使用新的短会话与 application.worker 短事务用例。
+- dispatch: 按 task.type 分派(calc/optimization/uncertainty 走计算阶段
+  网关; report 走证据包; io 任务走占位执行器);
+- run_task: 一次尝试的完整执行闭环 —— 阶段网关读任务/快照记录 → 无事务
+  执行 → 短事务提交(证据包/四维评估/结果索引/业务结局)或失败/取消收拢,
+  全部经由 application.worker 阶段网关的 fencing 协议(03 §4.4: 迟到的写回
+  永远不入权威库)。一次长时 attempt 不是一个事务: 任务/快照记录读完即
+  关闭读取会话, 求解/分析/导出在无数据库事务状态下运行, 领取/进度/续租/
+  评估写入/提交/失败/取消各自使用新的短会话与 application.worker 短事务
+  用例。
+
+Worker 只按 application.worker 阶段网关结果驱动状态机, 不解释数据集
+字段、不补缺省值、不做 SI 换算、不物化时间轴、不解释装配内容与任务
+参数; 计算输入解释归 computation provider 所有。
 
 写入资格: 本模块不直接写任务状态/结果, 统一由 application.worker 的
 submit_attempt_result / fail_attempt / cancel_attempt 带 token 完成
@@ -25,10 +28,8 @@ from __future__ import annotations
 import logging
 import traceback
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import Any
 
-import numpy as np
 from sqlalchemy.orm import Session
 
 from iesplan.application import worker as worker_app
@@ -39,7 +40,6 @@ from iesplan.core.diagnostics import (
     TASK_SOLVE_FAILED,
 )
 from iesplan.core.errors import AppError
-from iesplan.core.timeaxis import RESOLUTIONS, TimeAxis, build_axis
 from iesplan.worker import executors
 from iesplan.worker.executors import EngineRunError, RunContext, TaskCancelled
 
@@ -51,10 +51,13 @@ COMPUTE_TASK_TYPES: tuple[str, ...] = ("calc", "optimization", "uncertainty", "a
 IO_TASK_TYPES: tuple[str, ...] = ("report", "dataset_build", "export", "import")
 
 #: 计算执行网关(Worker 消费的计算阶段边界; Wave4 computation 公开协议交接点)。
-#: None = 无可用 provider → 显式不可用失败(ComputeUnavailableError →
-#: failed + TASK-SOLVE-001)，不伪造成功、不回退旧引擎。测试经此公开属性
-#: 注入假网关；生产由 Wave4 computation provider 接管。
-compute_gateway: Callable[[RunContext, dict, dict, Any], dict] | None = None
+#: 网关只收 RunContext(含经 application.worker 阶段网关读出的任务/快照
+#: 记录与进度/取消检查点), 输入解释归 provider 内部; Worker 不装配
+#: (content, data, axis)。None = 无可用 provider → 显式不可用失败
+#: (ComputeUnavailableError → failed + TASK-SOLVE-001)，不伪造成功、
+#: 不回退旧引擎。测试经此公开属性注入假网关；生产由 Wave4
+#: computation provider 接管。
+compute_gateway: Callable[[RunContext], dict] | None = None
 
 
 class SnapshotInputError(AppError):
@@ -85,178 +88,6 @@ class ComputeUnavailableError(AppError):
 
 
 # ---------------------------------------------------------------------------
-# 输入装配(快照不可变: 版本内容 + 数据集逐时数据 + 时间轴)
-# ---------------------------------------------------------------------------
-
-
-def load_inputs(
-    db: Session, snapshot: worker_app.CalcSnapshotRecord
-) -> tuple[dict, dict, TimeAxis]:
-    """装配计算输入(03 §2.2): (项目版本内容, 逐时 data dict, 时间轴)。
-
-    输入全部来自不可变快照: 项目版本内容对象、数据集逐时数据与时间轴。
-    """
-    if snapshot is None:
-        raise SnapshotInputError("计算快照缺失", location={"object_type": "calc_snapshot"})
-    content_object_id = worker_app.get_project_content_id(db, snapshot.project_version_id)
-    if content_object_id is None:
-        raise SnapshotInputError(
-            "快照绑定的项目版本缺失",
-            params={"calc_snapshot_id": snapshot.id},
-            location={"object_type": "project_versions", "object_id": snapshot.project_version_id},
-        )
-    try:
-        content = worker_app.load_version_content(db, content_object_id)
-    except AppError as exc:
-        raise SnapshotInputError(
-            f"项目版本内容不可用: {exc}",
-            params={"calc_snapshot_id": snapshot.id,
-                    "content_object_id": content_object_id},
-        ) from exc
-
-    # 任务级参数权威来源 = 快照 calc_config_snapshot.task_params(03 规格 2.2:
-    # 任务创建时任务级 config 并入快照输入, 版本内容不含任务参数)
-    snapshot_config = snapshot.calc_config_snapshot or {}
-    task_params = dict(snapshot_config.get("task_params") or {})
-    cfg = content.setdefault("calc_config", {})
-    cfg["task_params"] = task_params
-    resolution = str(task_params.get("resolution") or "1h")
-    if resolution not in RESOLUTIONS:
-        raise SnapshotInputError(f"非法时间分辨率: {resolution!r}", params={"resolution": resolution})
-
-    data, diags, actual_resolution, utc_offset = _load_dataset_data(
-        db, list(snapshot.dataset_version_ids or []), resolution
-    )
-    if not data:
-        raise SnapshotInputError(
-            "快照绑定的数据集缺失或为空(输入不可复现)",
-            params={"calc_snapshot_id": snapshot.id, "dataset_version_ids": snapshot.dataset_version_ids},
-        )
-    _data_to_si(data, actual_resolution)  # 声明单位 → SI(唯一换算边界, 01 §5.2)
-    axis = _build_axis(actual_resolution, utc_offset, data)
-    return content, data, axis
-
-
-
-
-
-
-def _load_dataset_data(
-    db: Session, dataset_version_ids: list[int], fallback_resolution: str,
-) -> tuple[dict, list[dict], str, int]:
-    """装配绑定数据集的逐时数据(多版本按序合并, 先到先得)。
-
-    返回 (data dict, 数据集诊断列表, 实际分辨率, 固定 UTC 偏移分钟)。
-    列名映射(数据集标准字段 → 引擎字段, 单位换算 kWh/步 → W):
-        e_load/h_load/c_load → 功率 W(= kWh × 1000 / 步长小时);
-        t_ambient → temperature(°C); ghi → ghi(W/m²);
-        electricity_price → tariff_buy(元/kWh); grid_emission_factor → kg/kWh。
-    """
-    data: dict[str, np.ndarray] = {}
-    diagnostics: list[dict] = []
-    resolution = fallback_resolution
-    utc_offset = 480
-    for dvid in dataset_version_ids:
-        version = worker_app.get_dataset_version_record(db, dvid)
-        if version is None:
-            raise SnapshotInputError("快照绑定的数据集版本缺失", params={"dataset_version_id": dvid})
-        resolution = version.resolution or resolution
-        utc_offset = version.fixed_utc_offset_minutes
-        data_object_id = worker_app.get_dataset_data_object(db, dvid)
-        if data_object_id is None:
-            continue
-        raw = worker_app.load_dataset_blob(db, data_object_id)
-        rows, diags = worker_app.parse_dataset_csv(raw, resolution)
-        diags_dicts = [d.to_dict() for d in diags]
-        diagnostics.extend(diags_dicts)
-        if any(d.get("blocking") for d in diags_dicts):
-            raise SnapshotInputError(
-                "数据集解析存在阻断性错误(输入不可用)",
-                params={"dataset_version_id": dvid, "blocking": len(diags_dicts)},
-            )
-        if not rows:
-            continue
-        _merge_rows(data, rows, resolution)
-    return data, diagnostics, resolution, utc_offset
-
-
-def _merge_rows(data: dict[str, np.ndarray], rows: list[dict], resolution: str) -> None:
-    """数据行列表 → 引擎字段数组(缺失字段置 0; 多版本只补空缺, 先到先得)。
-
-    单位换算统一在计算边界完成(_data_to_si): 本函数只做"声明单位数值 →
-    引擎字段"的搬运与缺失补零, 不在解析层做 kWh→W 等手写换算(01 §5.3)。
-    """
-    n = len(rows)
-    mapping = {
-        "e_load": "e_load", "h_load": "h_load", "c_load": "c_load",
-        "t_ambient": "temperature", "ghi": "ghi",
-        "electricity_price": "tariff_buy", "grid_emission_factor": "emission_factor_grid",
-    }
-    for col, engine_key in mapping.items():
-        if engine_key in data:
-            continue  # 已有版本提供该字段
-        values = [row.get(col) for row in rows]
-        if all(v is None for v in values):
-            continue
-        arr = np.asarray([0.0 if v is None else float(v) for v in values], dtype=np.float64)
-        if arr.size != n:
-            raise SnapshotInputError("数据集行数不一致", params={"field": col, "rows": arr.size})
-        if col == "grid_emission_factor":
-            # 引擎约定: 排放因子为标量(kg/kWh); 逐时列取均值(缺省 0.581)
-            data[engine_key] = float(np.mean(arr))
-        else:
-            data[engine_key] = arr
-    # 缺失的负荷字段置 0(引擎约定: 热/冷缺省为 0)
-    for key in ("e_load", "h_load", "c_load"):
-        data.setdefault(key, np.zeros(n, dtype=np.float64))
-
-
-def _data_to_si(data: dict[str, np.ndarray], resolution: str) -> None:
-    """引擎输入逐时数据 → SI 功率边界(01 §5.2 data_to_si 语义, 唯一换算点)。
-
-    本波次只换算能量型字段: e_load/h_load/c_load 声明 kWh/步 → 引擎功率 W
-    (= J/步长秒 = kWh × 3.6e6 / (step_min × 60)), 去除 runner 内手写
-    `*1000.0/step_hours`(01 §4.1: 换算经 core/units, 禁止自建换算表)。
-    温度/电价/排放因子保持引擎声明单位(°C / CNY/kWh / kg/kWh), 配套引擎
-    SI 化(P4)不在本波次范围。
-    """
-    from iesplan.core.units import to_si
-
-    step_seconds = RESOLUTIONS[resolution][1] * 60.0
-    for key in ("e_load", "h_load", "c_load"):
-        arr = data.get(key)
-        if isinstance(arr, np.ndarray):
-            # kWh/步 → J/步 → W(引擎约定逐时功率)
-            data[key] = arr * to_si(1.0, "kWh") / step_seconds
-
-
-def _build_axis(resolution: str, utc_offset: int, data: dict) -> TimeAxis:
-    """按数据集构建时间轴: 标准年步数 → 标准日历; 迷你行数 → 按行数构造。"""
-    n_expected = RESOLUTIONS[resolution][0]
-    first = next(iter(data.values()))
-    n = int(first.size)
-    if n == n_expected:
-        return build_axis(resolution, utc_offset_minutes=utc_offset)
-    # 非标准步数(迷你/分段算例): 复用标准非闰年日历的月/季节表
-    step_min = RESOLUTIONS[resolution][1]
-    idx = np.arange(n, dtype=np.int64)
-    day_of_year = idx // (1440 // step_min)
-    # 每月起始的年内天偏移(非闰年, 0 基; 与 iesplan.core.timeaxis 同表)
-    month_start = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
-    season = np.asarray([
-        0 if m in (12, 1, 2) else 1 if m in (3, 4, 5) else 2 if m in (6, 7, 8) else 3
-        for d in day_of_year
-        for m in (max(m_i for m_i, start in enumerate(month_start, 1) if d >= start),)
-    ], dtype=np.int64)
-    return TimeAxis(
-        resolution=resolution, n=n, step_minutes=step_min,
-        utc_offset_minutes=utc_offset,
-        t0_utc=datetime(2025, 1, 1, tzinfo=UTC),
-        hour_of_year=idx // (60 // step_min), day_of_year=day_of_year, season=season,
-    )
-
-
-# ---------------------------------------------------------------------------
 # 分派
 # ---------------------------------------------------------------------------
 
@@ -265,22 +96,22 @@ def dispatch(ctx: RunContext) -> dict:
     """按任务类型分派到执行器(返回结果 payload, 含显式 outcome)。
 
     未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
-    未知任务类型抛 InvalidTaskTypeError。计算类输入在短读会话内装配,
-    会话关闭后才进入执行器(执行期无打开的数据库事务)。
+    未知任务类型抛 InvalidTaskTypeError。计算类任务只按 application.worker
+    阶段网关结果驱动: 任务/快照记录缺失即确定性失败, 不解释任何输入字段;
+    网关执行期无打开的数据库事务。
     """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:
-        with ctx.session_factory() as db:
-            content, data, axis = load_inputs(db, ctx.snapshot)
-        ctx.axis_resolution = axis.resolution
-        ctx.axis_n = int(axis.n)
-        # 计算执行经可注入的阶段网关(输入会话已关闭, 执行期无打开会话)。
+        if ctx.snapshot is None:
+            raise SnapshotInputError(
+                "计算快照缺失", location={"object_type": "calc_snapshot"})
+        # 计算执行经可注入的阶段网关(只收 RunContext; 输入解释归 provider)。
         gateway = compute_gateway
         if gateway is None:
             raise ComputeUnavailableError(
                 "计算执行网关无可用 provider, 等待 GeneratorProvider/Solver Bundle 接入"
             )
-        return gateway(ctx, content, data, axis)
+        return gateway(ctx)
     if task_type == "report":
         return executors.execute_check(ctx)
     if task_type == "dataset_build":

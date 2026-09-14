@@ -536,8 +536,7 @@ def test_catalog_available_templates(client: TestClient, db_session: Session) ->
 
 
 def test_migrations_fresh_and_upgrade(tmp_path: Path) -> None:
-    """全链迁移: 全新空库直接建立当前 schema 并跑到最新迁移(W2-B 起不再保留
-    旧库 legacy.db 兼容升级路径, 当前 schema 从空库直接建立)。"""
+    """全链迁移: 全新空库直接建立当前 schema 并跑到最新迁移(不测试旧库升级)。"""
     from iesplan.migrations import MIGRATION_VERSIONS, apply_migrations
 
     # 全新库：需先建基表（users 等由 create_all 创建），再跑迁移

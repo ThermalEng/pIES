@@ -3,8 +3,8 @@
 链路: 注册/登录(管理员+工程师) → 创建项目 → 添加设备(电网/光伏/热泵/锅炉/
 制冷机/电池/负荷)与连接 → 生成内置样例数据集 → 绑定数据集 → 保存计算配置 +
 财务基准确认 → 提交方案评价任务 → Worker 领取(租约/尝试状态先行可见) →
-执行收拢为显式结构化失败（旧计算链已删除，0.8 计算未实现：failed +
-TASK-SOLVE-001，绝非 lease_rejected；不期待 1.0 真实求解）。
+执行收拢为显式结构化失败（计算入口显式不可用：failed +
+TASK-SOLVE-001，绝非 lease_rejected；不期待真实求解）。
 
 另抽查核心语义：草稿乐观锁(409)、归档后禁止编辑、删除需显式确认、任务同快照去重、导出权限门禁、存储视图权限、财务基准校验门禁（见 manual/developer-guide/zh-CN/contracts.md §HTTP 语义； manual/developer-guide/zh-CN/domain-model.md §项目聚合/对象生命周期； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §8/§10/§16）。
 
@@ -462,7 +462,7 @@ def test_task_submit_snapshot_preguard(client: TestClient, db: Session) -> None:
     """注册/登录 → 项目 → 设备/连接 → 数据集 → 配置/基线 → 提交方案评价任务。
 
     断言: 未确认基线时预检阻断提交; 提交后任务 queued 且计算快照已固化。
-    （旧计算链已删除，0.8 计算未实现：本测试止于提交，不期待真实求解；
+    （计算入口显式不可用：本测试止于提交，不期待真实求解；
     执行语义见测试 1b。）
     """
     admin_id = _seed_admin(db)
