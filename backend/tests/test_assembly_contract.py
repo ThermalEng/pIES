@@ -44,6 +44,7 @@ from iesplan.assembly.diags import (
     ASM_SYN_TYPE,
     ASM_SYN_VERSION_PIN,
 )
+from iesplan.assembly.parser import run_structure_checks
 from iesplan.core.diagnostics import DIAG_FIX_HINT_KEYS, DIAG_MESSAGE_KEYS, NEW_DIAG_CODES
 
 ASSEMBLY_DIR = Path(__file__).resolve().parent.parent / "iesplan" / "assembly"
@@ -56,14 +57,27 @@ def _load(name: str) -> str:
     return (VALID_DIR / name).read_text(encoding="utf-8")
 
 
+def _structure(text: str, **kwargs):
+    """单管线结构判定:安全解析一次 + 结构校验一次。
+
+    返回 (doc|None, diagnostics)。样例均为合法 YAML,解析必成功;
+    结构非法时 doc 为 None,诊断由唯一一次结构校验产出。
+    """
+    parsed = parse_assembly_doc(text, **kwargs)
+    assert parsed.doc is not None, [d.to_dict() for d in parsed.diagnostics]
+    diags = []
+    doc = run_structure_checks(parsed.doc, diags=diags)
+    return doc, diags
+
+
 def _resolved_doc(name: str) -> dict:
     """解析合法样例并把所有 relative_file 解析为 object(模拟校验器资源解析)。
 
     规范化器对未解析资源确定性拒绝;规范形态测试仅需对象形态占位。
     """
-    result = parse_assembly_doc(_load(name))
-    assert result.ok, [d.to_dict() for d in result.diagnostics]
-    doc = {k: v for k, v in result.doc.items()}
+    doc, diags = _structure(_load(name))
+    assert doc is not None, [d.to_dict() for d in diags]
+    doc = {k: v for k, v in doc.items()}
     resources = {k: dict(v) for k, v in doc["resources"].items()}
     datasets = {
         ds_id: {
@@ -132,10 +146,10 @@ class TestSchemaFile:
         assert not re.match(path_pattern, "../data/x.csv")
 
     def test_invalid_sample_diagnostics_located(self):
-        result = parse_assembly_doc(
+        _, diags = _structure(
             (INVALID_DIR / "bad.forbidden-field.assembly.yaml").read_text(encoding="utf-8")
         )
-        diag = next(d for d in result.diagnostics if d.code == ASM_SYN_FORBIDDEN)
+        diag = next(d for d in diags if d.code == ASM_SYN_FORBIDDEN)
         # 顶层扫描路径前缀 + 设备/参数路径
         assert diag.location["field"].endswith("devices.hp1.parameters.command")
         assert diag.blocking is True
@@ -160,10 +174,9 @@ class TestSchemaFile:
 
 class TestSamples:
     def test_valid_sample_passes_structure(self):
-        result = parse_assembly_doc(_load("campus.assembly.yaml"), source_name="campus.assembly.yaml")
-        assert result.ok, [d.to_dict() for d in result.diagnostics]
-        assert result.doc is not None
-        doc = result.doc
+        doc, diags = _structure(_load("campus.assembly.yaml"), source_name="campus.assembly.yaml")
+        assert doc is not None, [d.to_dict() for d in diags]
+        assert not any(d.blocking for d in diags)
         assert doc["schema"] == SCHEMA_ID
         assert doc["schema_version"] == SCHEMA_VERSION
         assert doc["assembly"]["id"] == "campus_demo"
@@ -184,32 +197,31 @@ class TestSamples:
         ],
     )
     def test_invalid_samples_block_with_stable_code(self, fname, expected_code):
-        result = parse_assembly_doc((INVALID_DIR / fname).read_text(encoding="utf-8"))
-        assert not result.ok
-        assert result.doc is None
-        codes = [d.code for d in result.diagnostics]
+        doc, diags = _structure((INVALID_DIR / fname).read_text(encoding="utf-8"))
+        assert doc is None
+        codes = [d.code for d in diags]
         assert expected_code in codes, f"{fname}: {codes}"
 
     def test_invalid_sample_diagnostics_located(self):
-        result = parse_assembly_doc(
+        _, diags = _structure(
             (INVALID_DIR / "bad.forbidden-field.assembly.yaml").read_text(encoding="utf-8")
         )
-        diag = next(d for d in result.diagnostics if d.code == ASM_SYN_FORBIDDEN)
+        diag = next(d for d in diags if d.code == ASM_SYN_FORBIDDEN)
         # 位置路径以禁止键所在的设备/参数路径结尾(扫描起点不影响定位)
         assert diag.location["field"].endswith("devices.hp1.parameters.command")
         assert diag.blocking is True
 
     def test_unknown_section_rejected(self):
         text = _load("campus.assembly.yaml") + "\npipelines: []\n"
-        result = parse_assembly_doc(text)
-        assert not result.ok
-        assert any(d.code == "ASM-SYN-002" for d in result.diagnostics)
+        doc, diags = _structure(text)
+        assert doc is None
+        assert any(d.code == "ASM-SYN-002" for d in diags)
 
     def test_missing_section_rejected(self):
         text = _load("campus.assembly.yaml").replace("extensions: {}\n", "")
-        result = parse_assembly_doc(text)
-        assert not result.ok
-        fields = {d.params.get("section") for d in result.diagnostics if d.code == ASM_SYN_FIELD}
+        doc, diags = _structure(text)
+        assert doc is None
+        fields = {d.params.get("section") for d in diags if d.code == ASM_SYN_FIELD}
         assert "extensions" in fields
 
     def test_unknown_device_key_rejected(self):
@@ -217,34 +229,34 @@ class TestSamples:
             "    parameters:\n      rated_heat_kw: 600",
             "    magic: 1\n    parameters:\n      rated_heat_kw: 600",
         )
-        result = parse_assembly_doc(text)
-        assert not result.ok
+        doc, diags = _structure(text)
+        assert doc is None
         assert any(
-            d.code == "ASM-SYN-001" and d.location["field"] == "devices.hp1.magic" for d in result.diagnostics
+            d.code == "ASM-SYN-001" and d.location["field"] == "devices.hp1.magic" for d in diags
         )
 
     def test_naive_timestamp_rejected(self):
         text = _load("campus.assembly.yaml").replace(
             'start: "2025-01-01T00:00:00+08:00"', 'start: "2025-01-01T00:00:00"'
         )
-        result = parse_assembly_doc(text)
-        assert not result.ok
-        assert any("timestamp_must_have_zone" in str(d.params) for d in result.diagnostics)
+        doc, diags = _structure(text)
+        assert doc is None
+        assert any("timestamp_must_have_zone" in str(d.params) for d in diags)
 
     def test_nested_parameters_must_be_scalar(self):
         text = _load("campus.assembly.yaml").replace("      cop: 3.5", "      cop: {a: 1}")
-        result = parse_assembly_doc(text)
-        assert not result.ok
+        doc, diags = _structure(text)
+        assert doc is None
         assert any(
             d.code == ASM_SYN_TYPE and d.location["field"] == "devices.hp1.parameters.cop"
-            for d in result.diagnostics
+            for d in diags
         )
 
     def test_extensions_must_be_namespaced(self):
         text = _load("campus.assembly.yaml").replace("extensions: {}", "extensions:\n  meta: 1")
-        result = parse_assembly_doc(text)
-        assert not result.ok
-        assert any("extensions_key_not_namespaced" in str(d.params) for d in result.diagnostics)
+        doc, diags = _structure(text)
+        assert doc is None
+        assert any("extensions_key_not_namespaced" in str(d.params) for d in diags)
 
 
 # ---------------------------------------------------------------------------

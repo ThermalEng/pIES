@@ -66,10 +66,10 @@ SAMPLE_DATASETS = {
     },
 }
 
-#: 已移除的旧管线模块(单实现收敛后不得存在)
+#: 已移除的旧管线模块(实现史正典名收敛后不得存在)
 REMOVED_MODULES = (
-    "iesplan.assembly.parser",
-    "iesplan.assembly.builder",
+    "iesplan.assembly.parser10",
+    "iesplan.assembly.builder10",
     "iesplan.assembly.checker",
     "iesplan.assembly.plan",
     "iesplan.assembly.validator2",
@@ -137,7 +137,12 @@ def _export_content() -> dict:
                 {"id": 101, "from_port_id": 11, "to_port_id": 21, "loss_rate": 0},
             ],
         },
-        "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+        "calc_config": {
+            "mode": "fixed_operation",
+            "generator": "ies.algo.milp_hybrid@1.0.0",
+            "solver": "ies.solver.highs@1.7.2",
+            "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+        },
     }
 
 

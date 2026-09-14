@@ -23,7 +23,7 @@ from iesplan.assembly.schema import (
     AssemblySpec,
 )
 from iesplan.core import units
-from iesplan.core.errors import AppError, NotFoundError
+from iesplan.core.errors import AppError
 from iesplan.core.expression import Dimensions
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 
@@ -223,26 +223,18 @@ def yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPort
     return ports
 
 
-def derive_device_ports(spec: AssemblySpec, ctx: CheckContext, device: AssemblyDevice, *, port_source=None) -> list[AssemblyPort]:
-    """设备端口推导(RR-P2-05: YAML 公开 descriptor 端口为唯一权威, 无静态回退)。
+def derive_device_ports(spec: AssemblySpec, ctx: CheckContext, device: AssemblyDevice) -> list[AssemblyPort]:
+    """设备端口推导(RR-P2-05: devices 2.0 正式注册端口为唯一权威,无回退)。
 
-    已注册设备取 YAML 端口声明; 未注册设备(测试注入的自定义类型)按
-    装配文本显式 ``ports:`` 声明转换。显式声明的 capacity 在两条路径
-    之后统一合并覆盖。
-
-    ``port_source`` 为兼容注入口:缺省使用本模块 ``yaml_device_ports``;
-    checker 兼容包装经此传入其命名空间钩子(存量测试 monkeypatch 点)。
+    已注册设备取注册表端口声明并合并显式 capacity 覆盖;未注册设备
+    (含未走 2.0 正式注册的自定义类型)端口无从推导,返回空列表
+    (REF-002 由校验器报告),不再按显式端口声明回退。
     """
     type_spec, _ = resolve_model(ctx, device.model)
     if type_spec is None:
         return []  # 模型未注册,端口无从推导(REF-002 已报)
-    source = port_source if port_source is not None else yaml_device_ports
-    try:
-        assert type_spec.device is not None
-        derived = source(device, type_spec.device.id)
-    except NotFoundError:
-        # 测试注入/外部自定义类型(不在 YAML 目录): 按显式声明转换
-        derived = list(device.ports)
+    assert type_spec.device is not None
+    derived = yaml_device_ports(device, type_spec.device.id)
     # 显式声明覆盖(仅 capacity;载体/方向以注册表推导为准,不一致由阶段 C 报 REF-005)
     explicit_by_name = {ep.name: ep for ep in device.ports}
     merged: list[AssemblyPort] = []

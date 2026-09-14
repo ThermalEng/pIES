@@ -1,18 +1,20 @@
-"""ies.assembly 1.0.0 GUI 项目导出构造器(roadmap 0.7.0 事项 2)。
+"""ies.assembly 1.0.0 GUI 项目导出构造器(正典名,原 builder10)。
 
 将项目内容(设备/端口/连接/数据集绑定/计算配置)映射为 ies.assembly 1.0.0
-文档;损耗/延迟的连接自动包裹为 transport_pipe 设备实例,与手写 YAML
+文档;损耗的连接自动包裹为 transport_pipe 设备实例,与手写 YAML
 进入同一校验入口(validator.validate_project_export)。
 
-不与 builder.py 共享私有符号(避免跨模块私有导入与隐式耦合);本模块提供
-独立的 _device_ref / _model_ref / _resolve_data_bindings 辅助。
+无静默默认:time_axis.resolution/start、calculation.mode/generator/solver
+均须显式声明,缺字段/非法值一律返回 ASM-CONV-001 阻断诊断,不回退、不
+猜测、不吞错。旧 algorithm/solver 别名迁移与默认引用已删除。
 
 依赖: devices 公开门面(get_device)、core 公共契约、
-assembly.canonicalizer 公开纯函数、core.units;不依赖 services 与 ORM。
+assembly.canonicalizer 公开纯函数;不依赖 services 与 ORM。
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -33,10 +35,6 @@ _INTERNAL_PARAM_KEYS: tuple[str, ...] = (
     "data_refs",
     "__layout",
 )
-
-#: 旧链推导的求解器引用(legacy scipy.optimize.milp / HiGHS);
-#: 0.8.0 GeneratorProvider/SolverRuntime 注册表建立后由注册表能力核对取代。
-LEGACY_SOLVER_REF = "ies.solver.highs@1.7.2"
 
 #: 年步数 / 步长秒数(与 core/timeaxis.py RESOLUTIONS 对齐)
 _STEPS_PER_YEAR: dict[str, int] = {"15min": 35040, "30min": 17520, "1h": 8760}
@@ -65,7 +63,7 @@ def build_assembly_doc_from_content(
     solver: str | None = None,
     generator: str | None = None,
 ) -> BuildDocResult:
-    """项目内容 → ies.assembly 1.0.0 文档(roadmap 0.7.0 事项 2)。
+    """项目内容 → ies.assembly 1.0.0 文档(无静默默认)。
 
     输入结构(现行模型字段, 无 1.0 兼容):
       content = {"model": {"devices": [...], "ports": [...], "connections": [...]},
@@ -74,14 +72,18 @@ def build_assembly_doc_from_content(
 
     字段映射:
     - assembly.id/name: 内容 name(必填, 缺失阻断; id 为其 slug);
-    - time_axis: calc_config.time_axis 派生(start/end/endpoint/resolution);
+    - time_axis: calc_config.time_axis 显式声明(resolution/start 必填, 缺失/
+      非法阻断; end 由 start + 年步长确定性派生, endpoint 固定);
     - resources.datasets: 从 dataset_bindings + datasets 元信息
       构造为对象形态引用;
     - devices: 每个实例 → {model: <id>@<version>, parameters: 已清洗参数, data: ...};
       data 绑定只接受与模型 data_inputs 列精确匹配的显式绑定;
     - connections: 每个图连接必须有 id 且端口可解析, 否则阻断;
-      loss_rate > 0 自动包裹 transport_pipe 设备实例;
-    - calculation: mode/generator/solver/options/random_seed, 均须显式声明。
+      loss_rate > 0 自动包裹 transport_pipe 设备实例;loss_rate 非数值阻断
+      (缺省键视为无损耗 0);
+    - calculation: mode/generator/solver 均须显式声明(精确版本引用,
+      缺失阻断;旧 algorithm 别名与无版本 solver 别名不再迁移);
+      options/random_seed 透传(仅数值 options 进入文档)。
 
     返回 (doc, diagnostics)。任一阻断错误 → doc=None(不进入校验器)。
     """
@@ -122,10 +124,56 @@ def build_assembly_doc_from_content(
         )
         return BuildDocResult(doc=None, diagnostics=diags)
 
-    # 1) 时间轴(start 带偏移则换算为 UTC Z;end 旧形态未声明,从 start + 年步长推导)
-    axis_raw = calc_cfg.get("time_axis") if isinstance(calc_cfg.get("time_axis"), Mapping) else {}
-    resolution = str(axis_raw.get("resolution", "1h"))
-    start_raw = str(axis_raw.get("start", "2025-01-01T00:00:00Z"))
+    # 1) 时间轴(resolution/start 必须显式声明,无静默默认;end 由
+    #    start + 年步长确定性派生,endpoint 固定左闭右开)
+    axis_raw = calc_cfg.get("time_axis")
+    if not isinstance(axis_raw, Mapping):
+        diags.append(
+            make_diag(
+                ASM_CONV_UNMAPPABLE,
+                severity="error",
+                blocking=True,
+                params={"reason": "time_axis_missing"},
+                location={"object_type": "assembly", "field": "time_axis"},
+            )
+        )
+        return BuildDocResult(doc=None, diagnostics=diags)
+    resolution_raw = axis_raw.get("resolution")
+    if not isinstance(resolution_raw, str) or not resolution_raw:
+        diags.append(
+            make_diag(
+                ASM_CONV_UNMAPPABLE,
+                severity="error",
+                blocking=True,
+                params={"reason": "time_axis_resolution_missing", "value": resolution_raw},
+                location={"object_type": "assembly", "field": "time_axis.resolution"},
+            )
+        )
+        return BuildDocResult(doc=None, diagnostics=diags)
+    resolution = resolution_raw
+    if resolution not in _STEPS_PER_YEAR:
+        diags.append(
+            make_diag(
+                ASM_CONV_UNMAPPABLE,
+                severity="error",
+                blocking=True,
+                params={"reason": "time_axis_resolution_unknown", "value": resolution},
+                location={"object_type": "assembly", "field": "time_axis.resolution"},
+            )
+        )
+        return BuildDocResult(doc=None, diagnostics=diags)
+    start_raw = axis_raw.get("start")
+    if not isinstance(start_raw, str) or not start_raw:
+        diags.append(
+            make_diag(
+                ASM_CONV_UNMAPPABLE,
+                severity="error",
+                blocking=True,
+                params={"reason": "time_axis_start_missing", "value": start_raw},
+                location={"object_type": "assembly", "field": "time_axis.start"},
+            )
+        )
+        return BuildDocResult(doc=None, diagnostics=diags)
     try:
         start_utc = parse_iso8601_utc(start_raw)
     except ValueError:
@@ -139,8 +187,8 @@ def build_assembly_doc_from_content(
             )
         )
         return BuildDocResult(doc=None, diagnostics=diags)
-    steps = _STEPS_PER_YEAR.get(resolution, 8760)
-    seconds = _STEP_SECONDS.get(resolution, 3600)
+    steps = _STEPS_PER_YEAR[resolution]
+    seconds = _STEP_SECONDS[resolution]
     from datetime import timedelta
 
     end_utc = start_utc + timedelta(seconds=seconds * steps)
@@ -215,7 +263,10 @@ def build_assembly_doc_from_content(
             continue
         from_ref = f"{device_ref_of.get(from_p.get('device_id'), '?')}.{from_p.get('name')}"
         to_ref = f"{device_ref_of.get(to_p.get('device_id'), '?')}.{to_p.get('name')}"
-        loss_rate = _num_or_zero(c.get("loss_rate"))
+        loss_rate, loss_diag = _parse_loss_rate(c.get("loss_rate"), raw_id)
+        if loss_diag is not None:
+            diags.append(loss_diag)
+            continue
         if loss_rate > 0:
             pipe_id = f"{edge_id}_pipe"
             # transport_pipe 仅声明 loss_rate
@@ -492,22 +543,54 @@ def _build_resources(
 def _build_calculation(
     calc_cfg: Mapping, *, generator: str | None, solver: str | None
 ) -> tuple[dict, list[Diagnostic]]:
+    """calculation 节构造:mode/generator/solver 必须显式声明,无静默默认。
+
+    旧 ``algorithm`` 字段与无版本 solver 别名不再迁移;缺字段一律阻断。
+    精确版本形状由结构阶段复核,此处只判定缺失/空值。
+    """
     diags: list[Diagnostic] = []
-    mode = str(calc_cfg.get("mode") or "fixed_operation")
-    gen = _generator_ref(calc_cfg, override=generator)
-    sol = _solver_ref(calc_cfg, override=solver)
+
+    def _missing(reason: str, field: str, value) -> None:
+        diags.append(
+            make_diag(
+                ASM_CONV_UNMAPPABLE,
+                severity="error",
+                blocking=True,
+                params={"reason": reason, "value": value},
+                location={"object_type": "assembly", "field": field},
+            )
+        )
+
+    mode_raw = calc_cfg.get("mode")
+    if not isinstance(mode_raw, str) or not mode_raw:
+        _missing("calculation_mode_missing", "calculation.mode", mode_raw)
+        mode = ""
+    else:
+        mode = mode_raw
+    gen = generator if generator is not None else calc_cfg.get("generator")
+    if not isinstance(gen, str) or not gen:
+        _missing("calculation_generator_missing", "calculation.generator", gen)
+        gen = ""
+    else:
+        gen = str(gen)
+    sol = solver if solver is not None else calc_cfg.get("solver")
+    if not isinstance(sol, str) or not sol:
+        _missing("calculation_solver_missing", "calculation.solver", sol)
+        sol = ""
+    else:
+        sol = str(sol)
     tolerances = calc_cfg.get("tolerances") if isinstance(calc_cfg.get("tolerances"), Mapping) else {}
     options: dict[str, float] = {}
     if isinstance(tolerances, Mapping):
         rel_gap = tolerances.get("mip_rel_gap")
         time_lim = tolerances.get("time_limit_s")
-        if isinstance(rel_gap, (int, float)):
+        if isinstance(rel_gap, (int, float)) and not isinstance(rel_gap, bool):
             options["relative_gap"] = float(rel_gap)
-        if isinstance(time_lim, (int, float)):
+        if isinstance(time_lim, (int, float)) and not isinstance(time_lim, bool):
             options["time_limit_seconds"] = float(time_lim)
     if isinstance(calc_cfg.get("options"), Mapping):
         for k, v in calc_cfg["options"].items():
-            if isinstance(v, (int, float)):
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
                 options[str(k)] = float(v)
     seed = calc_cfg.get("random_seed")
     out = {
@@ -519,50 +602,6 @@ def _build_calculation(
     if isinstance(seed, int) and not isinstance(seed, bool):
         out["random_seed"] = int(seed)
     return out, diags
-
-
-def _generator_ref(calc_cfg: Mapping, *, override: str | None) -> str:
-    """把 0.2-0.4 配置算法形态转换为 1.0.0 精确生成器引用。
-
-    新字段 ``generator`` 与显式 override 必须自行提供精确版本；旧字段
-    ``algorithm`` 可以是 ``{mode, name}`` 或未带版本的注册算法 id，此时只
-    根据现有算法注册表签发其已声明版本。未知 id 原样保留，交给结构校验
-    阻断，禁止静默回退到默认算法。
-    """
-    if override is not None:
-        return str(override)
-    explicit = calc_cfg.get("generator")
-    if explicit not in (None, ""):
-        return str(explicit)
-
-    legacy = calc_cfg.get("algorithm")
-    if isinstance(legacy, Mapping):
-        legacy = legacy.get("name")
-    candidate = str(legacy or "ies.algo.milp_hybrid")
-    if "@" in candidate:
-        return candidate
-
-    from iesplan.computation import get_algorithm
-
-    try:
-        spec = get_algorithm(candidate)
-    except NotFoundError:
-        return candidate
-    return f"{spec.algo_id}@{spec.version}"
-
-
-def _solver_ref(calc_cfg: Mapping, *, override: str | None) -> str:
-    """把 0.2-0.4 的 ``highs`` 标识迁移为装配契约精确求解器引用。
-
-    仅迁移项目现有且唯一受支持的 legacy HiGHS 别名；其他未版本化值原样
-    进入结构校验并阻断，避免推测或静默替换求解器。
-    """
-    if override is not None:
-        return str(override)
-    candidate = str(calc_cfg.get("solver") or LEGACY_SOLVER_REF)
-    if candidate in {"highs", "ies.solver.highs"}:
-        return LEGACY_SOLVER_REF
-    return candidate
 
 
 def _format_utc(dt) -> str:
@@ -582,15 +621,34 @@ def _slugify_id(text: str) -> str:
     return cleaned
 
 
-def _num_or_zero(value) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+def _parse_loss_rate(value, connection_id: str) -> tuple[float, Diagnostic | None]:
+    """连接 loss_rate 严格解析:缺省键视为无损耗 0,非数值/非有限/负值阻断。
+
+    替代已删除的吞错回退:非法值不再静默按 0 处理。
+    """
+    if value is None:
+        return 0.0, None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0, make_diag(
+            ASM_CONV_UNMAPPABLE,
+            severity="error",
+            blocking=True,
+            params={"reason": "connection_loss_rate_invalid", "connection": connection_id, "value": value},
+            location={"object_type": "connection", "object_id": connection_id, "field": "loss_rate"},
+        )
+    rate = float(value)
+    if not math.isfinite(rate) or rate < 0:
+        return 0.0, make_diag(
+            ASM_CONV_UNMAPPABLE,
+            severity="error",
+            blocking=True,
+            params={"reason": "connection_loss_rate_invalid", "connection": connection_id, "value": value},
+            location={"object_type": "connection", "object_id": connection_id, "field": "loss_rate"},
+        )
+    return rate, None
 
 
 __all__ = [
     "BuildDocResult",
     "build_assembly_doc_from_content",
-    "LEGACY_SOLVER_REF",
 ]

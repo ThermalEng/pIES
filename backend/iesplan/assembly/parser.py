@@ -1,18 +1,16 @@
-"""ies.assembly 1.0.0 结构阶段解析器(roadmap 0.7.0 事项 1)。
+"""ies.assembly 1.0.0 安全解析与结构校验(正典名,原 parser10)。
 
-四阶段校验第 1 阶段(结构校验)在此完成:
-- YAML 1.2 安全子集解析(复用 core.yamlmini 安全解析器,拒绝重复键/
-  锚点/别名/合并键/任意对象构造);
-- schema 标识与版本识别(schema=ies.assembly, schema_version="1.0.0");
-- 顶层章节与各节字段、类型、ID、枚举、引用形状;
-- 引用必须固定精确版本(拒绝 latest/范围版本/未版本化别名);
-- 资源来源与路径安全(relative_file 包内相对路径,禁止绝对路径/.. /宿主机路径;
-  object 为对象形态引用(按对象 id 寻址));
-- 禁止字段扫描(shell/command/executable/函数模块路径/环境变量/凭证);
-- extensions 命名空间规则。
+单管线职责切分:
+- ``parse_assembly_doc`` 只做 YAML 1.2 安全子集解析(复用 core.yamlmini
+  安全解析器,拒绝重复键/锚点/别名/合并键/任意对象构造),产出原始文档树,
+  不做任何结构语义判定;
+- ``run_structure_checks`` 做唯一一次结构阶段校验(schema 标识与版本、
+  顶层章节与各节字段/类型/ID/枚举/引用形状、精确版本引用、资源来源与
+  路径安全、禁止字段扫描、extensions 命名空间规则),由校验器在
+  ``validate_assembly_doc`` 内调用一次。
 
-存在阻断诊断时 doc 为 None,不进入模型/数据阶段。本模块只消费结构信息,
-不读取设备注册表、数据集与计算能力(由 validator.py 第 2-4 阶段完成)。
+本模块只消费结构信息,不读取设备注册表、数据集与计算能力(由
+validator.py 领域阶段完成)。
 """
 
 from __future__ import annotations
@@ -101,22 +99,24 @@ _FORBIDDEN_KEYS: frozenset[str] = frozenset(
 
 @dataclass(slots=True)
 class ParseDocResult:
-    """结构阶段解析结果:原始文档树(doc)与诊断列表。"""
+    """安全解析结果:原始文档树(doc)与解析诊断列表(无结构判定)。"""
 
     doc: dict[str, Any] | None
     diagnostics: list[Diagnostic]
 
     @property
     def ok(self) -> bool:
-        """无阻断诊断(结构足以支撑后续阶段)。"""
+        """无阻断诊断(解析成功;结构判定由校验器完成)。"""
         return self.doc is not None and not any(d.blocking for d in self.diagnostics)
 
 
 def parse_assembly_doc(text: str, *, source_name: str = "assembly.yaml") -> ParseDocResult:
-    """ies.assembly 1.0.0 文本 → 原始文档树(结构阶段)。
+    """ies.assembly 1.0.0 文本 → 原始文档树(仅安全解析,无结构判定)。
 
-    产出 ASM-SYN-* / ASM-CALC-* 结构诊断;存在阻断诊断时 doc 为 None。
-    资源(relative_file)不在本阶段读取,由校验器解析为对象形态引用。
+    产出 YAML 安全解析诊断(ASM-SYN-PARSE);解析失败时 doc 为 None。
+    结构语义判定只在 ``run_structure_checks`` 做一次,由校验器经
+    ``validate_assembly_doc`` 调用。资源(relative_file)不在本阶段读取,
+    由校验器解析为对象形态引用。
     """
     diags: list[Diagnostic] = []
     try:
@@ -143,10 +143,7 @@ def parse_assembly_doc(text: str, *, source_name: str = "assembly.yaml") -> Pars
             )
         )
         return ParseDocResult(doc=None, diagnostics=diags)
-
-    doc = run_structure_checks(tree, source_name=source_name, diags=diags)
-    has_blocking = any(d.blocking for d in diags)
-    return ParseDocResult(doc=None if has_blocking else doc, diagnostics=diags)
+    return ParseDocResult(doc=dict(tree), diagnostics=diags)
 
 
 def run_structure_checks(
@@ -155,7 +152,7 @@ def run_structure_checks(
     source_name: str = "<doc>",
     diags: list[Diagnostic] | None = None,
 ) -> dict[str, Any] | None:
-    """结构阶段复检入口(供校验器对已解析文档再次走结构阶段)。
+    """唯一一次结构阶段校验入口(仅由校验器 ``validate_assembly_doc`` 调用)。
 
     返回 normalized 文档树(已浅拷贝);存在阻断诊断时返回 None,诊断写入
     ``diags``(调用方传入的容器)或内部容器。
