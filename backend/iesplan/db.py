@@ -3,7 +3,6 @@
 - engine / SessionLocal: 全局单例(连接池 + 预检)。
 - Base: 全部 ORM 模型的声明基类 + 共享列基元(JSONB/正则 CHECK/主键构造)。
 - 通用触发器 DDL 构造与部署执行(纯函数, 不拥有任何业务表名与规则)。
-- get_db(): FastAPI 请求级依赖。
 - init_db(): 幂等建表(create_all) + 部署调用方传入的触发器语句
   (未发布前无版本化迁移, 当前 schema 从空库直接建立;
   种子身份数据归 application.identity.seed_builtin_admin, 本模块不留业务种子)。
@@ -24,7 +23,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator, Iterable
+from collections.abc import Iterable
 
 from sqlalchemy import create_engine
 from sqlalchemy import text as sa_text
@@ -195,15 +194,6 @@ def deploy_trigger_statements(statements: Iterable[str]) -> None:
     with engine.begin() as conn:
         for stmt in pending:
             conn.execute(sa_text(stmt))
-
-
-def get_db() -> Generator[Session, None, None]:
-    """FastAPI 依赖: 提供请求级数据库会话, 请求结束自动关闭。"""
-    session = SessionLocal()
-    try:
-        yield session
-    finally:
-        session.close()
 
 
 def init_db(trigger_statements: Iterable[str] | None = None) -> None:
