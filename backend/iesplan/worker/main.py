@@ -29,7 +29,6 @@ from typing import Any
 
 from iesplan.application import worker as worker_app
 from iesplan.config import settings
-from iesplan.db import SessionLocal
 from iesplan.worker import runner
 
 logger = logging.getLogger(__name__)
@@ -40,6 +39,16 @@ RENEW_INTERVAL = 15.0
 POLL_INTERVAL = 1.0
 #: 优雅退出等待当前任务的最长秒数
 SHUTDOWN_GRACE = 30.0
+
+
+def _default_session_factory() -> Any:
+    """直接构造 Worker 时的会话工厂回退(生产经 bootstrap 上下文显式传入)。
+
+    惰性导入: worker 包不持有顶层 iesplan.db 会话符号, 数据库装配只归 bootstrap。
+    """
+    from iesplan.db import SessionLocal
+
+    return SessionLocal
 
 
 class Worker:
@@ -61,7 +70,9 @@ class Worker:
         self.worker_type = worker_type
         self.pool = "compute" if worker_type == "compute" else "io"
         self.worker_id = worker_id or self._default_worker_id()
-        self.session_factory = session_factory or SessionLocal
+        # 会话工厂缺省由 bootstrap 装配的 ApplicationContext 提供(main 显式
+        # 传入 ctx.session_factory); 直接构造(测试/嵌入场景)回退 SessionLocal。
+        self.session_factory = session_factory or _default_session_factory()
         self.poll_interval = poll_interval
         self.heartbeat_interval = heartbeat_interval
         self.renew_interval = renew_interval
@@ -231,7 +242,13 @@ class Worker:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Worker 进程入口(python -m iesplan.worker.main)。"""
+    """Worker 进程入口(python -m iesplan.worker.main)。
+
+    全部运行时能力经 bootstrap 组合根装配: 按 worker_type 选择
+    assemble_compute_worker()/assemble_io_worker(), Daemon 的会话工厂取自
+    装配好的 ApplicationContext。必需 provider 缺失时 assemble_* 抛异常,
+    本入口直接传播(启动失败, 不发布半初始化状态, 不做任何 fallback)。
+    """
     parser = argparse.ArgumentParser(description="pIES 计算/I/O Worker")
     parser.add_argument(
         "--worker-type", choices=("compute", "io"), default=None,
@@ -245,18 +262,17 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    # 幂等建表(与 API 启动一致; Worker 可能先于 API 启动, 保证权威表就绪)
-    # 种子身份数据归 application.identity(db.py 不再保留业务种子)
-    from iesplan.application.identity import seed_builtin_admin
-    from iesplan.db import SessionLocal, init_db
-
-    init_db()
-    with SessionLocal() as session:
-        seed_builtin_admin(session)
     worker_type = args.worker_type or os.environ.get("IESPLAN_WORKER_TYPE") or settings.worker_type
+    if worker_type not in ("compute", "io"):
+        raise ValueError(f"非法 worker_type: {worker_type!r}(可选 compute/io)")
+    from iesplan.bootstrap import assemble_compute_worker, assemble_io_worker
+
+    assemble = assemble_compute_worker if worker_type == "compute" else assemble_io_worker
+    ctx = assemble()
     Worker(
         worker_type=worker_type,
         worker_id=args.worker_id,
+        session_factory=ctx.session_factory,
         isolate=not args.no_isolation,
     ).run()
     return 0

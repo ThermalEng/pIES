@@ -80,15 +80,36 @@ _rate_redis_client: Any = None
 _RATE_WINDOWS: dict[str, list[float]] = {}
 _RATE_LOCK = threading.RLock()
 
+#: bootstrap 传入的队列模式覆盖(None = 未配置, 回退环境变量默认行为)。
+#: 后端实现选择只归 bootstrap; 本模块只接收传入配置, 不自行解释环境选型。
+_queue_mode_override: str | None = None
+
+
+def configure_queue_mode(mode: str | None) -> None:
+    """接收 bootstrap 传入的队列模式(memory 时限速直接走进程内存)。
+
+    由 bootstrap 在装配期调用; 默认行为不变(未配置时仍读 IESPLAN_QUEUE)。
+    """
+    global _queue_mode_override, _rate_redis_client
+    _queue_mode_override = mode.lower() if isinstance(mode, str) else None
+    _rate_redis_client = None
+
+
+def _queue_mode_is_memory() -> bool:
+    """队列是否为内存模式: bootstrap 传入配置优先, 否则环境变量(默认 auto)。"""
+    if _queue_mode_override is not None:
+        return _queue_mode_override == "memory"
+    return os.environ.get("IESPLAN_QUEUE", "auto").lower() == "memory"
+
 
 def _rate_redis() -> Any | None:
     """尝试获取 Redis 客户端用于跨 Worker 限速; 不可用返回 None(降级内存)。
 
-    与登录限速同策略: IESPLAN_QUEUE=memory(测试/单机模式)时直接跳过 Redis,
+    与登录限速同策略: 内存队列模式(测试/单机)时直接跳过 Redis,
     避免测试环境共享 Redis 键造成跨测试/跨进程状态污染。
     """
     global _rate_redis_client
-    if os.environ.get("IESPLAN_QUEUE", "auto").lower() == "memory":
+    if _queue_mode_is_memory():
         return None
     if _rate_redis_client is not None:
         return _rate_redis_client
