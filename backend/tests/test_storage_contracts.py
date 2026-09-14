@@ -40,7 +40,21 @@ def _put(db, content: bytes = b"hello-storage"):
     return put_object(db, content, "text/plain", source_category="test")
 
 def test_capacity_unknown_or_low_rejects_write(monkeypatch=None):
-    """容量不可测或低于阈值时 put 拒绝（SYS-STORE-003）。"""
+    """容量不可测或低于阈值时 put 拒绝（SYS-STORE-003）。
+
+    阈值显式固定为默认 2G: worker_testkit 等会将 storage_min_free_bytes 改为 0
+    (进程级单例, 全套件运行时污染“低于阈值”分支), 此处不依赖全局状态。
+    """
+    from iesplan.config import settings as _settings
+    _old_threshold = _settings.storage_min_free_bytes
+    _settings.storage_min_free_bytes = 2000000000
+    try:
+        _run_capacity_cases()
+    finally:
+        _settings.storage_min_free_bytes = _old_threshold
+
+
+def _run_capacity_cases():
     import shutil
     from unittest.mock import patch
     from iesplan.storage.contracts import StorageQuotaError

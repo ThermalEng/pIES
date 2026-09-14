@@ -513,8 +513,35 @@ def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Ses
     # 提交任务 → 快照 calc_config_snapshot 携带同值
     # (用例层直接调用: config 测试 app 已登录过 owner, 再次登录会触发
     # 窗口接管; 快照装配不依赖认证会话)
+    #
+    # 现行装配边界要求显式计算声明(无静默默认): mode/generator/solver/
+    # time_axis 缺一即阻断(ASM-CONV-001)。legacy PUT /config 改写草稿
+    # calc_config 全文(不保留 config.patch 增量), 故在此直接以 config.patch
+    # 同义语义(merge_patch, 与 test_tasks_api.EXPLICIT_CALC_PATCH 同值)声明。
     from iesplan.tasks.persistence import CalcSnapshot
     from iesplan.identity.persistence import User
+    from iesplan.application.projects.content_objects import (
+        load_content_object,
+        merge_patch,
+    )
+
+    draft = db.execute(
+        select(Draft).where(
+            Draft.project_id == project.id, Draft.is_current.is_(True)
+        )
+    ).scalar_one()
+    content = load_content_object(db, draft.content_object_id)
+    merge_patch(content["calc_config"], {
+        "mode": "fixed_operation",
+        "generator": "ies.algo.milp_hybrid@1.0.0",
+        "solver": "ies.solver.highs@1.7.2",
+        "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+    })
+    content.setdefault("applied_commands", {})
+    project_domain.update_draft_content_ref(
+        db, draft.id, store_content_object(db, content)
+    )
+    db.commit()
 
     owner_user = db.execute(
         select(User).where(User.username == OWNER_USERNAME)

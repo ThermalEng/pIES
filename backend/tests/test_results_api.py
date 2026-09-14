@@ -123,8 +123,32 @@ def _canonical(doc: dict[str, Any]) -> str:
 
 
 
+#: 现行装配边界要求的显式计算声明(无静默默认): mode/generator/solver/
+#: time_axis 缺一即阻断(ASM-CONV-001)。与 test_tasks_api.EXPLICIT_CALC_PATCH
+#: 同值, 经 config.patch 草稿命令显式声明, 不得依赖回退。
+EXPLICIT_CALC_PATCH = {
+    "mode": "fixed_operation",
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+}
+
+
+def _set_explicit_calc(client: TestClient, pid: int, user) -> None:
+    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1)。"""
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": 1, "commands": [{
+            "id": "c-calc", "unit": "config", "type": "config.patch",
+            "payload": EXPLICIT_CALC_PATCH,
+        }]},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+
+
 def _prepare_project(client: TestClient, db: Session, user, name: str = "结果测试项目") -> int:
-    """准备项目: 创建 + 固化不可变版本(计算任务快照装配的前提)。"""
+    """准备项目: 创建 + 显式计算声明 + 固化不可变版本(计算任务快照装配的前提)。"""
     resp = client.post(
         "/api/projects",
         json={
@@ -137,6 +161,7 @@ def _prepare_project(client: TestClient, db: Session, user, name: str = "结果�
     )
     assert resp.status_code == 201, resp.text
     pid = resp.json()["project"]["id"]
+    _set_explicit_calc(client, pid, user)
     resp = client.post(
         f"/api/projects/{pid}/versions",
         json={"name": "结果基线", "reason": "snapshot_freeze"},

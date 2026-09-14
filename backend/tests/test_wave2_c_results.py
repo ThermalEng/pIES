@@ -190,11 +190,36 @@ def _build_payload(snapshot_id: int, hourly_object_ids: list[int], created_by: i
     }
 
 
+#: 现行装配边界要求的显式计算声明(无静默默认): mode/generator/solver/
+#: time_axis 缺一即阻断(ASM-CONV-001)。与 test_tasks_api.EXPLICIT_CALC_PATCH
+#: 同值, 经 config.patch 草稿命令显式声明, 不得依赖回退。
+EXPLICIT_CALC_PATCH = {
+    "mode": "fixed_operation",
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+}
+
+
+def _declare_explicit_calc(client: TestClient, user, pid: int) -> None:
+    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1)。"""
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": 1, "commands": [{
+            "id": "c-calc", "unit": "config", "type": "config.patch",
+            "payload": EXPLICIT_CALC_PATCH,
+        }]},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+
+
 def _prepare_running(
     client: TestClient, db: Session, user, name: str, key: str
 ) -> tuple[int, int, Any, int]:
-    """项目 → 新用例提交计算任务 → 新用例领取。返回 (pid, task_id, claim, snapshot_id)。"""
+    """项目 → 显式计算声明 → 新用例提交计算任务 → 新用例领取。返回 (pid, task_id, claim, snapshot_id)。"""
     pid = _project(client, user, name)
+    _declare_explicit_calc(client, user, pid)
     task, _ = tasks_uc.submit_task(db, user, pid, "optimization", idempotency_key=key)
     claim = tasks_uc.claim_task(db, task.id, "w2c-fake-exec")
     assert claim is not None

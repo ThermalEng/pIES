@@ -1,4 +1,4 @@
-"""ies.assembly 1.0.0 安全解析与结构校验(正典名,原 parser10)。
+"""ies.assembly 1.0.0 安全解析与结构校验。
 
 单管线职责切分:
 - ``parse_assembly_doc`` 只做 YAML 1.2 安全子集解析(复用 core.yamlmini
