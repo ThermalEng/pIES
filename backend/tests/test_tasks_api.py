@@ -168,12 +168,39 @@ def _seed_dataset(db: Session, *, size_bytes: int = 0, quota_bytes: int = 0, tag
     return version.id
 
 
-def _bind_and_freeze(client: TestClient, pid: int, user, dataset_version_id: int | None) -> None:
+#: 现行装配边界要求的显式计算声明(无静默默认): mode/generator/solver/
+#: time_axis 缺一即阻断(ASM-CONV-001)。夹具必须显式声明, 不得依赖回退。
+EXPLICIT_CALC_PATCH = {
+    "mode": "fixed_operation",
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+}
+
+
+def _set_explicit_calc(client: TestClient, pid: int, user, revision: int) -> int:
+    """经 config.patch 显式声明计算装配字段, 返回新修订号。"""
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": [{
+            "id": "c-calc", "unit": "config", "type": "config.patch",
+            "payload": EXPLICIT_CALC_PATCH,
+        }]},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _bind_and_freeze(
+    client: TestClient, pid: int, user, dataset_version_id: int | None,
+    revision: int = 1,
+) -> None:
     """绑定数据集版本(如给定)并从当前草稿创建不可变项目版本。"""
     if dataset_version_id is not None:
         resp = client.put(
             f"/api/projects/{pid}/draft",
-            json={"expected_revision": 1, "commands": [{
+            json={"expected_revision": revision, "commands": [{
                 "id": "c-bind", "unit": "dataset", "type": "dataset.bind",
                 "payload": {"dataset_version_id": dataset_version_id, "role": "main"},
             }]},
@@ -192,12 +219,13 @@ def _prepare_project(
     client: TestClient, db: Session, user, *,
     dataset_size: int = 0, quota_bytes: int = 0, name: str = "任务测试项目",
 ) -> int:
-    """准备可提交计算任务的项目: 建项目 + (可选)数据集 + 绑定 + 固化版本。"""
+    """准备可提交计算任务的项目: 建项目 + 显式计算声明 + (可选)数据集 + 绑定 + 固化版本。"""
     pid = _create_project(client, user, name)
     dvid = None
     if dataset_size > 0:
         dvid = _seed_dataset(db, size_bytes=dataset_size, quota_bytes=quota_bytes, tag=f"ds{pid}")
-    _bind_and_freeze(client, pid, user, dvid)
+    revision = _set_explicit_calc(client, pid, user, 1)
+    _bind_and_freeze(client, pid, user, dvid, revision=revision)
     return pid
 
 
@@ -414,6 +442,9 @@ def test_compute_submission_uses_unified_assembly_gate(
         headers=_h(client, owner),
     )
     assert resp.status_code == 200, resp.text
+    # 显式计算声明(修订 1→2 后为 2): 反例只测未注册模型, 计算字段必须合法,
+    # 否则装配在 time_axis 缺失处提前阻断, 掩盖模型闸门诊断。
+    _set_explicit_calc(client, pid, owner, 2)
     _bind_and_freeze(client, pid, owner, None)
 
     status, body = _submit_task(client, pid, owner, idempotency_key="bad-assembly")
