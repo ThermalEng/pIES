@@ -1,4 +1,4 @@
-"""ies.assembly 1.0.0 安全解析与结构校验。
+"""ies.assembly 2.0.0 安全解析与结构校验。
 
 单管线职责切分:
 - ``parse_assembly_doc`` 只做 YAML 1.2 安全子集解析(复用 core.yamlmini
@@ -7,7 +7,8 @@
 - ``run_structure_checks`` 做唯一一次结构阶段校验(schema 标识与版本、
   顶层章节与各节字段/类型/ID/枚举/引用形状、精确版本引用、资源来源与
   路径安全、禁止字段扫描、extensions 命名空间规则),由校验器在
-  ``validate_assembly_doc`` 内调用一次。
+  ``validate_assembly_doc`` 内调用一次。装配不包含 ``calculation``:
+  含该章节的文档以未知章节结构诊断拒绝。
 
 本模块只消费结构信息,不读取设备注册表、数据集与计算能力(由
 validator.py 领域阶段完成)。
@@ -19,11 +20,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from iesplan.assembly.canonicalizer import parse_iso8601_utc
 from iesplan.assembly.contracts import SCHEMA_ID, SCHEMA_VERSION
 from iesplan.assembly.diags import (
-    ASM_CALC_MODE,
-    ASM_CALC_OPTIONS,
     ASM_SYN_FIELD,
     ASM_SYN_FORBIDDEN,
     ASM_SYN_PARSE,
@@ -44,31 +42,30 @@ TOP_SECTIONS: tuple[str, ...] = (
     "schema",
     "schema_version",
     "assembly",
-    "time_axis",
+    "project_baseline",
     "resources",
     "devices",
     "connections",
     "constraints",
-    "calculation",
     "outputs",
     "extensions",
 )
 
 _ASSEMBLY_KEYS: tuple[str, ...] = ("id", "name")
-_TIME_AXIS_KEYS: tuple[str, ...] = ("start", "end", "resolution", "endpoint")
+_BASELINE_KEYS: tuple[str, ...] = ("resolution", "leap_year", "scenario_mode")
 _RESOURCES_KEYS: tuple[str, ...] = ("datasets",)
 _SOURCE_KINDS: tuple[str, ...] = ("relative_file", "object")
 _DEVICE_KEYS: tuple[str, ...] = ("model", "parameters", "data")
 _DATA_BINDING_KEYS: tuple[str, ...] = ("dataset", "column")
 _CONNECTION_KEYS: tuple[str, ...] = ("from", "to")
 _CONSTRAINT_KEYS: tuple[str, ...] = ("type", "expr", "enabled")
-_CALCULATION_KEYS: tuple[str, ...] = ("mode", "generator", "solver", "options", "random_seed")
 _OUTPUTS_KEYS: tuple[str, ...] = ("series", "metrics")
 
+#: 全项目统一计算分辨率(均能确定性切分一天:96/48/24 步)
 _RESOLUTIONS: tuple[str, ...] = ("15min", "30min", "1h")
-_ENDPOINTS: tuple[str, ...] = ("left_closed_right_open",)
+#: 场景模式(当前固定为 single)
+_SCENARIO_MODES: tuple[str, ...] = ("single",)
 _CONSTRAINT_TYPES: tuple[str, ...] = ("ratio", "capacity", "schedule", "generic")
-_MODES: tuple[str, ...] = ("fixed_operation", "capacity_planning", "scenario_evaluation")
 
 #: 局部 ID(lower_snake_case 或短横线;同一文件内保持一致)
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -111,7 +108,7 @@ class ParseDocResult:
 
 
 def parse_assembly_doc(text: str, *, source_name: str = "assembly.yaml") -> ParseDocResult:
-    """ies.assembly 1.0.0 文本 → 原始文档树(仅安全解析,无结构判定)。
+    """ies.assembly 2.0.0 文本 → 原始文档树(仅安全解析,无结构判定)。
 
     产出 YAML 安全解析诊断(ASM-SYN-PARSE);解析失败时 doc 为 None。
     结构语义判定只在 ``run_structure_checks`` 做一次,由校验器经
@@ -218,12 +215,6 @@ class _DocBuilder:
         self._diag(ASM_SYN_TYPE, field, {"reason": "expected_string", "actual": type(val).__name__})
         return None
 
-    def _int(self, val: Any, field: str) -> int | None:
-        if isinstance(val, bool) or not isinstance(val, int):
-            self._diag(ASM_SYN_TYPE, field, {"reason": "expected_integer", "actual": type(val).__name__})
-            return None
-        return val
-
     def _bool(self, val: Any, field: str) -> bool | None:
         if isinstance(val, bool):
             return val
@@ -296,12 +287,11 @@ class _DocBuilder:
             )
 
         self._build_assembly(tree.get("assembly"), "assembly")
-        self._build_time_axis(tree.get("time_axis"), "time_axis")
+        self._build_project_baseline(tree.get("project_baseline"), "project_baseline")
         self._build_resources(tree.get("resources"), "resources")
         self._build_devices(tree.get("devices"), "devices")
         self._build_connections(tree.get("connections"), "connections")
         self._build_constraints(tree.get("constraints"), "constraints")
-        self._build_calculation(tree.get("calculation"), "calculation")
         self._build_outputs(tree.get("outputs"), "outputs")
         self._build_extensions(tree.get("extensions"), "extensions")
         self._scan_forbidden(tree, "assembly")
@@ -321,43 +311,31 @@ class _DocBuilder:
             if key not in _ASSEMBLY_KEYS:
                 self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
 
-    def _build_time_axis(self, value: Any, field: str) -> None:
+    def _build_project_baseline(self, value: Any, field: str) -> None:
+        """项目计算基线:resolution/leap_year/scenario_mode 均须显式声明。
+
+        基线不保存时区与起止时间;含 start/end/endpoint 等旧键以未知键拒绝。
+        """
         m = self._require_map(value, field)
         if m is None:
             return
-        self._enum(m.get("resolution"), _RESOLUTIONS, f"{field}.resolution")
-        self._enum(m.get("endpoint"), _ENDPOINTS, f"{field}.endpoint")
-        self._check_timestamp(m.get("start"), f"{field}.start", required=True)
-        self._check_timestamp(m.get("end"), f"{field}.end", required=True)
-        for key in m:
-            if key not in _TIME_AXIS_KEYS:
-                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
-        # 区间语义:end 必须晚于 start
-        start = m.get("start")
-        end = m.get("end")
-        if isinstance(start, str) and isinstance(end, str):
-            try:
-                if parse_iso8601_utc(end) <= parse_iso8601_utc(start):
-                    self._diag(ASM_SYN_TYPE, f"{field}.end", {"reason": "end_not_after_start"})
-            except ValueError:
-                pass  # 时间戳本身非法已由 _check_timestamp 报
-
-    def _check_timestamp(self, val: Any, field: str, *, required: bool = False) -> None:
-        if val is None:
-            if required:
-                self._diag(ASM_SYN_FIELD, field, {"reason": "missing_field", "key": field.rsplit(".", 1)[-1]})
-            return
-        if not isinstance(val, str):
-            self._diag(ASM_SYN_TYPE, field, {"reason": "expected_string", "actual": type(val).__name__})
-            return
-        try:
-            parse_iso8601_utc(val)
-        except ValueError:
+        if "resolution" not in m:
+            self._diag(ASM_SYN_FIELD, f"{field}.resolution", {"reason": "missing_field", "key": "resolution"})
+        else:
+            self._enum(m.get("resolution"), _RESOLUTIONS, f"{field}.resolution")
+        if "leap_year" not in m:
+            self._diag(ASM_SYN_FIELD, f"{field}.leap_year", {"reason": "missing_field", "key": "leap_year"})
+        else:
+            self._bool(m.get("leap_year"), f"{field}.leap_year")
+        if "scenario_mode" not in m:
             self._diag(
-                ASM_SYN_TYPE,
-                field,
-                {"reason": "timestamp_must_have_zone", "value": val},
+                ASM_SYN_FIELD, f"{field}.scenario_mode", {"reason": "missing_field", "key": "scenario_mode"}
             )
+        else:
+            self._enum(m.get("scenario_mode"), _SCENARIO_MODES, f"{field}.scenario_mode")
+        for key in m:
+            if key not in _BASELINE_KEYS:
+                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
 
     def _build_resources(self, value: Any, field: str) -> None:
         m = self._require_map(value, field)
@@ -497,42 +475,6 @@ class _DocBuilder:
             for key in c:
                 if key not in _CONSTRAINT_KEYS:
                     self._diag(ASM_SYN_PARSE, f"{field}.{cid}.{key}", {"reason": "unknown_key", "key": key})
-
-    def _build_calculation(self, value: Any, field: str) -> None:
-        m = self._require_map(value, field)
-        if m is None:
-            return
-        mode = m.get("mode")
-        if mode is None:
-            self._diag(ASM_SYN_FIELD, f"{field}.mode", {"reason": "missing_field", "key": "mode"})
-        elif not isinstance(mode, str) or mode not in _MODES:
-            self._diag(
-                ASM_CALC_MODE,
-                f"{field}.mode",
-                {"reason": "invalid_mode", "value": repr(mode), "allowed": list(_MODES)},
-            )
-        self._exact_ref(m.get("generator"), f"{field}.generator")
-        self._exact_ref(m.get("solver"), f"{field}.solver")
-        options = self._require_map(m.get("options"), f"{field}.options")
-        if options is not None:
-            for name, oval in options.items():
-                if not isinstance(name, str) or not _ID_RE.match(name):
-                    self._diag(
-                        ASM_CALC_OPTIONS,
-                        f"{field}.options.{name}",
-                        {"reason": "invalid_option_key", "value": repr(name)},
-                    )
-                if isinstance(oval, (dict, list)):
-                    self._diag(
-                        ASM_CALC_OPTIONS,
-                        f"{field}.options.{name}",
-                        {"reason": "expected_scalar", "actual": type(oval).__name__},
-                    )
-        if m.get("random_seed") is not None:
-            self._int(m["random_seed"], f"{field}.random_seed")
-        for key in m:
-            if key not in _CALCULATION_KEYS:
-                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
 
     def _build_outputs(self, value: Any, field: str) -> None:
         m = self._require_map(value, field)

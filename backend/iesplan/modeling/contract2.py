@@ -10,9 +10,7 @@ devices.parser2 校验),输出与求解器无关的公共数学贡献 contract: 
 modeling 共用同一实现,不复制);本模块只在其上叠加建模语义(输出唯一性、
 property 非时变、blind 不可引用、状态初值)与版本化公共 AST 的树构建。
 
-**迁移边界**: 本模块是 modeling 2.0 切片的纯协议实现,不导入、不消费旧 1.0
-的 ``ModelCommand``/``DeviceSpec``(modeling/command.py、devspec.py)与全局
-命令注册表;旧 1.0 代码保持原样,由后续整体迁移切片删除。本模块不建立任何
+**迁移边界**: 本模块是 modeling 2.0 纯协议实现,旧 1.0 命令注册表实现已删除。本模块不建立任何
 设备 ID 分支或私有命令映射,方程语义随设备内容确定。
 
 依赖边界: 只消费 core(diagnostics/units/equation_grammar)与 devices 公开

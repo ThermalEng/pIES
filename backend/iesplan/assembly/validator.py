@@ -1,21 +1,20 @@
-"""ies.assembly 1.0.0 统一校验入口(单管线:一次安全解析 + 一次结构/领域校验)。
+"""ies.assembly 2.0.0 统一校验入口(单管线:一次安全解析 + 一次结构/领域校验)。
 
 手写装配 YAML(text)与 GUI 项目导出(content)进入同一校验入口,
 成功只签发由规范文本与校验回执组成的不可变二件套
 ``ValidatedAssemblyArtifact``;校验失败不产生可执行产物,返回结构化
-诊断列表。
+诊断列表。装配不包含 ``calculation``(计算配置在计算包生成时固定)。
 
 阶段:
 1. 结构(仅 ``validate_assembly_doc`` 内调用 ``run_structure_checks`` 一次):
-   schema/schema_version、顶层节、字段类型、ID/版本/引用形状、禁止字段、
-   资源路径、calculation.mode 枚举、outputs/refs、extensions 命名空间;
+   schema/schema_version、顶层节(含项目计算基线)、字段类型、ID/版本/
+   引用形状、禁止字段、资源路径、outputs/refs、extensions 命名空间;
 2. 模型与数据:设备模型精确版本注册、参数只允许已声明字段、必填参数非空、
    数据绑定(dataset/column/单位/分辨率)、负荷类设备必带 data、相对资源解析;
 3. 图与系统:复用 iesplan.assembly.context 端口推导 + rules.connection
    (run_phase_b) + rules.solvability (run_phase_d) + 约束表达式检查
    (rules.constraints.run_constraint_checks);端口不可达与悬空输入由本模块独立补充;
-4. 计算兼容:generator/solver 精确版本(随 schema 严格)、options 标量键值、
-   outputs series/metrics 引用设备存在。
+4. 输出引用:outputs series/metrics 引用设备存在。
 
 输出格式:
   AssemblyValidationResult(diagnostics, artifact) — artifact 为 None 时校验失败。
@@ -42,7 +41,6 @@ from iesplan.assembly.contracts import (
     ValidationReceipt,
 )
 from iesplan.assembly.diags import (
-    ASM_CALC_OPTIONS,
     ASM_INPUT_DATA_UNIT,
     ASM_INPUT_PARAM,
     ASM_INPUT_RANGE,
@@ -102,7 +100,7 @@ def validate_assembly_doc(
     package_dir: str | Path | None = None,
     datasets: Mapping[str, Mapping] | None = None,
 ) -> AssemblyValidationResult:
-    """ies.assembly 1.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
+    """ies.assembly 2.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
 
     doc 为安全解析后的 plain dict(手写文本经 ``parse_assembly_doc`` 产生,
     GUI 导出经构造器产生);本入口做唯一一次结构校验,随后进入资源/模型/
@@ -120,17 +118,14 @@ def validate_project_export(
     content: Mapping,
     *,
     datasets: Mapping[int, Mapping] | None = None,
-    solver: str | None = None,
-    generator: str | None = None,
 ) -> AssemblyValidationResult:
     """GUI 项目导出入口:
 
-    项目内容 → 构造器构造 ies.assembly 1.0.0 文档 → 与手写文件同一校验
+    项目内容 → 构造器构造 ies.assembly 2.0.0 文档 → 与手写文件同一校验
     入口(结构一次 + 领域阶段)。datasets 为 int 索引的元信息
-    {vid: {columns, column_units, resolution, media_type}};
-    solver/generator 为显式引用覆盖(无静默默认)。
+    {vid: {columns, column_units, resolution, media_type}}。
     """
-    built = build_assembly_doc_from_content(content, datasets=datasets, solver=solver, generator=generator)
+    built = build_assembly_doc_from_content(content, datasets=datasets)
     if built.doc is None:
         return AssemblyValidationResult(diagnostics=list(built.diagnostics), artifact=None)
     # builder 内部产生的阻断诊断合并
@@ -216,7 +211,7 @@ def _check_devices(doc: dict, registry, diags: list[Diagnostic]) -> None:
         descriptor = registry[type_id]
         declared_version = descriptor.schema_version
         if version != declared_version:
-            # ies.assembly 1.0.0 强制精确版本:版本不一致阻断
+            # ies.assembly 2.0.0 强制精确版本:版本不一致阻断
             diags.append(
                 make_diag(
                     ASM_REF_MODEL_UNREG,
@@ -391,7 +386,7 @@ def _check_data_bindings(
                     )
                 ds_resolution = meta.get("resolution")
                 if isinstance(ds_resolution, str) and ds_resolution:
-                    axis_res = (doc.get("time_axis") or {}).get("resolution")
+                    axis_res = (doc.get("project_baseline") or {}).get("resolution")
                     if isinstance(axis_res, str) and axis_res and ds_resolution != axis_res:
                         diags.append(
                             make_diag(
@@ -403,7 +398,7 @@ def _check_data_bindings(
                                     "ref": str(col_key),
                                     "reason": "resolution_mismatch",
                                     "declared": ds_resolution,
-                                    "time_axis": axis_res,
+                                    "project_baseline": axis_res,
                                 },
                                 location={
                                     "object_type": "device",
@@ -559,7 +554,7 @@ def _phase3_graph_system(
     from iesplan.assembly.rules import run_constraint_checks, run_phase_b, run_phase_d
 
     spec = _spec_from_doc(resolved_doc, datasets_meta)
-    resolution = (resolved_doc.get("time_axis") or {}).get("resolution", "1h")
+    resolution = (resolved_doc.get("project_baseline") or {}).get("resolution", "1h")
     ctx = CheckContext(registry=registry, time_axis={"resolution": resolution})
     # run_phase_b 内部 ensure_ports(spec, ctx)
     b_diags = run_phase_b(spec, ctx)
@@ -628,12 +623,11 @@ def _spec_from_doc(doc: dict, datasets_meta: Mapping[str, Mapping]) -> AssemblyS
                 enabled=bool(c.get("enabled", True)),
             )
         )
-    time_axis_raw = doc.get("time_axis") or {}
+    baseline_raw = doc.get("project_baseline") or {}
     return AssemblySpec(
         name=str((doc.get("assembly") or {}).get("name") or ""),
         time_axis=TimeAxisRef(
-            resolution=str(time_axis_raw.get("resolution") or "1h"),
-            start=str(time_axis_raw.get("start") or "2025-01-01T00:00:00Z"),
+            resolution=str(baseline_raw.get("resolution") or "1h"),
         ),
         devices=devices,
         edges=edges,
@@ -701,7 +695,7 @@ def ensure_ports_ctx(spec: AssemblySpec, ctx):
 
 
 # ---------------------------------------------------------------------------
-# 阶段 4:计算兼容
+# 阶段 4:输出引用
 # ---------------------------------------------------------------------------
 
 
@@ -739,20 +733,6 @@ def _phase4_outputs(doc: dict, diags: list[Diagnostic]) -> None:
                         location={"object_type": "assembly", "field": f"outputs.{list_key}[{i}]"},
                     )
                 )
-    # options 标量(结构已校验,此处仅做非有限浮点检查)
-    calc = doc.get("calculation") or {}
-    options = calc.get("options") or {}
-    for k, v in options.items():
-        if isinstance(v, float) and not math.isfinite(v):
-            diags.append(
-                make_diag(
-                    ASM_CALC_OPTIONS,
-                    severity="error",
-                    blocking=True,
-                    params={"option": str(k), "reason": "non_finite", "value": str(v)},
-                    location={"object_type": "assembly", "field": f"calculation.options.{k}"},
-                )
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -770,14 +750,8 @@ def _dependency_lock(doc: dict, registry) -> dict:
         if not version:
             continue
         devices_lock[type_id] = version
-    calculation = doc.get("calculation") or {}
     return {
         "devices": dict(sorted(devices_lock.items())),
-        "calculation": {
-            "mode": str(calculation.get("mode") or ""),
-            "generator": str(calculation.get("generator") or ""),
-            "solver": str(calculation.get("solver") or ""),
-        },
     }
 
 

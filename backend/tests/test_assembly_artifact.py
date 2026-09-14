@@ -1,10 +1,10 @@
-"""ies.assembly 1.0.0 校验入口测试(roadmap 0.7.0 事项 2)。
+"""ies.assembly 2.0.0 校验入口测试(roadmap 0.8.0 切片 S2a)。
 
 覆盖:
 - 手写 YAML 与 GUI 项目导出进入同一校验入口(validate_assembly_text /
   validate_project_export);
 - 成功路径:签发不可变 ValidatedAssemblyArtifact(规范文本 + 校验回执);
-- 失败路径:阻断诊断 → 无 artifact,结构/模型/数据/图系统/计算兼容各阶段诊断定位;
+- 失败路径:阻断诊断 → 无 artifact,结构/模型/数据/图系统/输出引用各阶段诊断定位;
 - 资源解析(relative_file → 内容寻址对象);
 - 严格精确版本(不匹配版本号 → 阻断)。
 """
@@ -24,7 +24,7 @@ from iesplan.assembly import (
     validate_project_export,
 )
 from iesplan.assembly.diags import (
-    ASM_CALC_OPTIONS,
+    ASM_INPUT_RANGE,
     ASM_INPUT_UNDECLARED,
     ASM_INPUT_UNFED,
     ASM_OUTPUT_REF,
@@ -65,13 +65,12 @@ def init_registry():
     yield
 
 
-def _export_calc(**overrides):
-    """GUI 导出 calc_config(显式声明,无静默默认)。"""
+def _export_baseline(**overrides):
+    """GUI 导出 project_baseline(显式声明,无静默默认)。"""
     cfg = {
-        "mode": "fixed_operation",
-        "generator": "ies.algo.milp_hybrid@1.0.0",
-        "solver": "ies.solver.highs@1.7.2",
-        "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+        "resolution": "1h",
+        "leap_year": False,
+        "scenario_mode": "single",
     }
     cfg.update(overrides)
     return cfg
@@ -85,12 +84,16 @@ class TestHappyPath:
         assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
         artifact = result.artifact
         assert artifact is not None
-        # 回执依赖锁包含全部设备与计算引用
+        # 回执依赖锁包含全部设备
         deps = artifact.receipt.dependencies
         devices_lock = deps["devices"]
         assert "ies.device.heat_pump" in devices_lock
         assert "ies.device.grid_connection" in devices_lock
-        assert deps["calculation"]["solver"].endswith("@1.7.2")
+        assert "calculation" not in deps
+        # 规范文本携带项目基线,不含 calculation/time_axis
+        assert '"project_baseline"' in artifact.canonical_text
+        assert "calculation" not in artifact.canonical_text
+        assert "time_axis" not in artifact.canonical_text
         # 资源媒体类型
         resources = artifact.receipt.resources
         assert "campus_load" in resources
@@ -154,10 +157,9 @@ class TestUnhappyPath:
         # (预定义数据接口不参与边连接, 用真实 in 端口覆盖该规则)
         text = (
             "schema: ies.assembly\n"
-            'schema_version: "1.0.0"\n'
+            'schema_version: "2.0.0"\n'
             "assembly:\n  id: bad\n  name: bad\n"
-            'time_axis:\n  start: "2025-01-01T00:00:00Z"\n'
-            '  end: "2025-01-02T00:00:00Z"\n  resolution: 1h\n  endpoint: left_closed_right_open\n'
+            "project_baseline:\n  resolution: 1h\n  leap_year: false\n  scenario_mode: single\n"
             "resources:\n  datasets: {}\n"
             "devices:\n"
             "  hp1:\n"
@@ -165,10 +167,6 @@ class TestUnhappyPath:
             "    parameters: {rated_heat_kw: 600, cop: 3.5}\n"
             "connections: {}\n"
             "constraints: {}\n"
-            "calculation:\n"
-            "  mode: fixed_operation\n"
-            "  generator: acme.generator.highs_milp@1.0.0\n"
-            "  solver: ies.solver.highs@1.7.2\n"
             "outputs:\n  series: []\n  metrics: []\n"
             "extensions: {}\n"
         )
@@ -177,15 +175,15 @@ class TestUnhappyPath:
         assert result.artifact is None
         assert any(d.code == ASM_INPUT_UNFED for d in result.diagnostics)
 
-    def test_nonfinite_option_blocks(self, init_registry):
+    def test_nonfinite_parameter_blocks(self, init_registry):
         parsed = parse_assembly_doc((VALID_DIR / "campus.assembly.yaml").read_text())
         assert parsed.doc is not None
-        parsed.doc["calculation"]["options"]["relative_gap"] = float("inf")
+        parsed.doc["devices"]["pv1"]["parameters"]["rated_capacity_kwp"] = float("inf")
         result = validate_assembly_doc(parsed.doc, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
         assert result.artifact is None
         # 资源已经全部解析为 object 形态,不会触发 resource 诊断;
-        # 非有限值进入计算兼容阶段(ASM-CALC-002)
-        assert any(d.code == ASM_CALC_OPTIONS for d in result.diagnostics)
+        # 非有限值进入模型参数阶段(ASM-INPUT-003)
+        assert any(d.code == ASM_INPUT_RANGE for d in result.diagnostics)
 
 
 class TestProjectExport:
@@ -261,7 +259,7 @@ class TestProjectExport:
                     {"id": 102, "from_port_id": 11, "to_port_id": 31, "loss_rate": 0},
                 ],
             },
-            "calc_config": _export_calc(tolerances={"mip_rel_gap": 0.001}),
+            "project_baseline": _export_baseline(),
             "dataset_bindings": [{"dataset_version_id": 17}],
         }
         datasets = {
@@ -280,46 +278,35 @@ class TestProjectExport:
         canonical = artifact.canonical_text
         assert "transport_pipe" not in canonical
 
-    def test_project_export_rejects_legacy_algorithm_and_solver_aliases(self, init_registry):
-        # 旧 algorithm/solver 别名迁移已删除:旧字段不再被读取,缺显式
-        # generator 以现行装配边界阻断诊断(ASM-CONV-001)返回,不猜测、不回退
+    def test_project_export_rejects_missing_baseline(self, init_registry):
+        # 缺失项目基线不再静默默认:阻断诊断返回
         content = {
-            "graph_id": 7,
-            "name": "legacy_config",
+            "graph_id": 9,
+            "name": "no_baseline",
             "model": {"devices": [], "ports": [], "connections": []},
-            "calc_config": {
-                "mode": "fixed_operation",
-                "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
-                "algorithm": {"mode": "auto", "name": "ies.algo.milp_hybrid"},
-                "solver": "highs",
-            },
         }
         result = validate_project_export(content)
         assert result.artifact is None
         assert any(
             d.code == "ASM-CONV-001"
-            and d.params.get("reason") == "calculation_generator_missing"
+            and d.params.get("reason") == "project_baseline_missing"
             and d.blocking
             for d in result.diagnostics
         )
 
-    def test_project_export_rejects_missing_time_axis(self, init_registry):
-        # 缺失时间轴不再静默默认:阻断诊断返回
+    def test_project_export_rejects_unknown_resolution(self, init_registry):
+        # 非法分辨率(不能确定性切分一天):阻断诊断返回
         content = {
-            "graph_id": 9,
-            "name": "no_axis",
+            "graph_id": 7,
+            "name": "bad_resolution",
             "model": {"devices": [], "ports": [], "connections": []},
-            "calc_config": {
-                "mode": "fixed_operation",
-                "generator": "ies.algo.milp_hybrid@1.0.0",
-                "solver": "ies.solver.highs@1.7.2",
-            },
+            "project_baseline": _export_baseline(resolution="5min"),
         }
         result = validate_project_export(content)
         assert result.artifact is None
         assert any(
             d.code == "ASM-CONV-001"
-            and d.params.get("reason") == "time_axis_missing"
+            and d.params.get("reason") == "project_baseline_resolution_unknown"
             and d.blocking
             for d in result.diagnostics
         )
@@ -342,7 +329,7 @@ class TestProjectExport:
                 ],
                 "connections": [{"id": 9, "from_port_id": 11, "to_port_id": 11, "loss_rate": "lots"}],
             },
-            "calc_config": _export_calc(),
+            "project_baseline": _export_baseline(),
         }
         result = validate_project_export(content)
         assert result.artifact is None
@@ -351,18 +338,24 @@ class TestProjectExport:
             for d in result.diagnostics
         )
 
-    def test_project_export_does_not_guess_unknown_algorithm_version(self, init_registry):
-        content = {
-            "graph_id": 8,
-            "name": "unknown_algorithm",
-            "model": {"devices": [], "ports": [], "connections": []},
-            "calc_config": _export_calc(generator="ies.algo.unknown"),
-        }
-        result = validate_project_export(content)
-        assert result.artifact is None
-        assert any(
-            d.location.get("field") == "calculation.generator" and d.blocking for d in result.diagnostics
-        )
+    def test_project_export_rejects_invalid_baseline_members(self, init_registry):
+        # leap_year 非布尔 / scenario_mode 非 single:阻断诊断返回,不猜测、不回退
+        for baseline, reason in [
+            (_export_baseline(leap_year=1), "project_baseline_leap_year_invalid"),
+            (_export_baseline(scenario_mode="multi"), "project_baseline_scenario_mode_invalid"),
+        ]:
+            content = {
+                "graph_id": 8,
+                "name": "bad_baseline",
+                "model": {"devices": [], "ports": [], "connections": []},
+                "project_baseline": baseline,
+            }
+            result = validate_project_export(content)
+            assert result.artifact is None, baseline
+            assert any(
+                d.code == "ASM-CONV-001" and d.params.get("reason") == reason and d.blocking
+                for d in result.diagnostics
+            ), (baseline, reason)
 
     def test_project_export_loss_rate_wraps_pipe(self, init_registry):
         content = {
@@ -432,7 +425,7 @@ class TestProjectExport:
                     },
                 ],
             },
-            "calc_config": _export_calc(),
+            "project_baseline": _export_baseline(),
             "dataset_bindings": [{"dataset_version_id": 18}],
         }
         datasets = {
@@ -467,7 +460,7 @@ class TestProjectExport:
                 "ports": [],
                 "connections": [],
             },
-            "calc_config": _export_calc(),
+            "project_baseline": _export_baseline(),
             "dataset_bindings": [{"dataset_version_id": 17}],
         }
         datasets = {
@@ -504,7 +497,7 @@ class TestProjectExport:
                 "ports": [],
                 "connections": [],
             },
-            "calc_config": _export_calc(),
+            "project_baseline": _export_baseline(),
             "dataset_bindings": [{"dataset_version_id": 17}],
         }
         datasets = {
@@ -526,7 +519,7 @@ class TestProjectExport:
         # 装配名必填: 缺失不再回退 legacy_export
         content = {
             "model": {"devices": [], "ports": [], "connections": []},
-            "calc_config": _export_calc(),
+            "project_baseline": _export_baseline(),
         }
         result = validate_project_export(content)
         assert result.artifact is None
@@ -553,7 +546,7 @@ class TestProjectExport:
                 "graph_id": 45,
                 "name": "bad_conn",
                 "model": {"devices": base_devices, "ports": base_ports, **conn},
-                "calc_config": _export_calc(),
+                "project_baseline": _export_baseline(),
             }
             result = validate_project_export(content)
             assert result.artifact is None, conn
@@ -564,6 +557,13 @@ class TestProjectExport:
 
 
 class TestArtifactTriple:
+    def test_same_semantics_same_canonical_text(self, init_registry):
+        text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
+        first = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS).artifact
+        second = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS).artifact
+        assert first is not None and second is not None
+        assert first.canonical_text == second.canonical_text
+
     def test_artifact_invariants(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
         result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
