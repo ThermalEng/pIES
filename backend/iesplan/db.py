@@ -9,7 +9,8 @@
   种子身份数据归 application.identity.seed_builtin_admin, 本模块不留业务种子。
 
 本模块只保留连接 / Session / Base 基础设施;ORM 表定义归各领域 persistence 所有,
-init_db 集中导入注册(过渡位, Wave3 迁入 bootstrap)。
+``register_domain_metadata`` 集中导入注册(由组合根 ``iesplan.bootstrap``
+在 ``assemble_*`` 中显式调用, ``init_db`` 内部亦调用以兼容直接调用)。
 """
 
 from __future__ import annotations
@@ -289,20 +290,15 @@ def get_db() -> Generator[Session, None, None]:
         session.close()
 
 
-def init_db() -> None:
-    """幂等初始化数据库: 建表 + 版本化迁移 + 不可变触发器。
+def register_domain_metadata() -> None:
+    """基础设施函数: 导入各领域 persistence, 完成 Base.metadata 注册。
 
-    - 先导入模型模块, 确保全部表注册到 Base.metadata;
-    - create_all 只建不存在的表, 重复调用无副作用;
-    - apply_migrations: 在基础 schema 之上执行版本化 schema 迁移(宪法 §11,
-      台账幂等)，由各版本明确登记并补充其拥有的当前结构与约束;
-    - _deploy_immutable_triggers: 不可变表(01 §11)部署"禁 UPDATE/DELETE"触发器
-      与 REVOKE(仅 PostgreSQL; SQLite 测试库跳过)。
-    - 旧库 ALTER/DROP/回填分支已删除, 当前 schema 从空库直接建立;
-      种子管理员改由 application.identity.seed_builtin_admin 负责。
+    只做导入注册, 不建表、不迁移、不种子。由组合根(``iesplan.bootstrap``)
+    在 ``assemble_*`` 中显式调用后再做 create_all/迁移/种子;
+    ``init_db`` 内部亦调用本函数(测试兼容: 直接调 ``init_db`` 仍全量建表)。
     """
-    # Wave2A: ORM 表真相收归各领域 persistence, 此处集中导入以完成
-    # Base.metadata 注册(空库 create_all 全量建表)。过渡位: Wave3 迁入 bootstrap 集中装配。
+    # ORM 表真相收归各领域 persistence, 此处集中导入以完成
+    # Base.metadata 注册(空库 create_all 全量建表)。
     from iesplan.audit import persistence as _audit_tables  # noqa: F401
     from iesplan.configuration import persistence as _configuration_tables  # noqa: F401
     from iesplan.dataset import persistence as _dataset_tables  # noqa: F401
@@ -313,6 +309,21 @@ def init_db() -> None:
     from iesplan.results import persistence as _results_tables  # noqa: F401
     from iesplan.storage import persistence as _storage_tables  # noqa: F401
     from iesplan.tasks import persistence as _tasks_tables  # noqa: F401
+
+
+def init_db() -> None:
+    """幂等初始化数据库: 建表 + 版本化迁移 + 不可变触发器。
+
+    - 先经 ``register_domain_metadata`` 确保全部表注册到 Base.metadata;
+    - create_all 只建不存在的表, 重复调用无副作用;
+    - apply_migrations: 在基础 schema 之上执行版本化 schema 迁移(宪法 §11,
+      台账幂等)，由各版本明确登记并补充其拥有的当前结构与约束;
+    - _deploy_immutable_triggers: 不可变表(01 §11)部署"禁 UPDATE/DELETE"触发器
+      与 REVOKE(仅 PostgreSQL; SQLite 测试库跳过)。
+    - 旧库 ALTER/DROP/回填分支已删除, 当前 schema 从空库直接建立;
+      种子管理员改由 application.identity.seed_builtin_admin 负责。
+    """
+    register_domain_metadata()
     from iesplan.migrations import apply_migrations
 
     Base.metadata.create_all(bind=engine)

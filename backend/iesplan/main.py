@@ -15,16 +15,13 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.cors import CORSMiddleware
 
 from iesplan import __version__
+from iesplan.bootstrap import assemble_api
 
 logger = logging.getLogger(__name__)
-
-#: 建模命令注册表启动状态("ok" 或错误描述; 就绪探针上报, 03 §5.2)
-_registry_status: str = "pending"
 
 APP_NAME = "iesplan"
 
@@ -54,47 +51,16 @@ def _app_error_response(exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status, content=body)
 
 
-def _db_available() -> bool:
-    """最小数据库连通性检查: 建立会话并执行 SELECT 1。"""
-    try:
-        from iesplan.db import SessionLocal
-    except Exception:
-        logger.warning("iesplan.db 模块不可用, 数据库视为不可用")
-        return False
-    try:
-        with SessionLocal() as session:
-            session.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        logger.exception("数据库连通性检查失败")
-        return False
-
-
-def _init_database() -> None:
-    """启动时幂等初始化数据库: init_db() + 身份种子。
-
-    种子身份数据归 application.identity(W2-B 起 db.py 不再保留业务种子):
-    建表/迁移成功后再经用例层幂等确保内置管理员。
-    并行阶段 db 模块可能尚未就绪或数据库暂不可用, 仅记录日志不阻断启动,
-    数据库状态由 /api/readyz 上报。
-    """
-    try:
-        from iesplan.db import SessionLocal, init_db
-
-        init_db()
-        from iesplan.application.identity import seed_builtin_admin
-
-        with SessionLocal() as session:
-            seed_builtin_admin(session)
-    except Exception:
-        logger.exception("启动时数据库初始化失败, 应用继续运行, 就绪检查将返回 503")
-
-
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """应用生命周期: 启动时初始化数据库, 关闭时记录日志。"""
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """应用生命周期: 启动时经组合根装配, 关闭时记录日志。
+
+    ``assemble_api`` 失败即启动失败: 不捕获、不发布半初始化状态、
+    不设 fallback(就绪探针只读已装配上下文的公开健康状态)。
+    """
     logger.info("pIES API 启动, 版本=%s", __version__)
-    _init_database()
+    context = assemble_api()
+    app.state.bootstrap_context = context
     yield
     logger.info("pIES API 关闭")
 
@@ -114,25 +80,34 @@ def _build_health_router() -> APIRouter:
         }
 
     @router.get("/readyz", summary="就绪探针")
-    async def readyz() -> JSONResponse:
-        """就绪探针: 数据库与建模命令注册表均可用返回 200, 否则 503。"""
-        if not _db_available():
+    async def readyz(request: Request) -> JSONResponse:
+        """就绪探针: 已装配上下文的 db 与 registry 两项均就绪返回 200, 缺一 503。
+
+        健康状态只读组合根 ``ApplicationContext.health()/ready()`` 的公开值;
+        未装配(启动失败则进程根本不起 serving, 此处为防御)同样 503, 不 fallback。
+        """
+        context = getattr(request.app.state, "bootstrap_context", None)
+        health: dict[str, str] = context.health() if context is not None else {}
+        if health.get("db") != "ok":
             body = _error_envelope(
                 code="API-RZ-001",
                 message_key="ies.error.db_unavailable",
                 params={"service": "db"},
             )
             return JSONResponse(status_code=503, content=body)
-        if _registry_status != "ok":
-            # A3 脱敏: 注册表初始化失败的原始异常串(可能含内部路径/凭证/堆栈)
-            # 只进日志(_init_modeling_registry 已记录), 探针响应只给服务标识, 不泄详情
+        if health.get("registry") != "ok":
+            # A3 脱敏: 注册表探活失败的原始异常串(可能含内部路径/凭证/堆栈)
+            # 只进日志(bootstrap._check_registry 已记录), 探针响应只给服务标识, 不泄详情
             body = _error_envelope(
                 code="API-RZ-002",
                 message_key="ies.error.registry_unavailable",
                 params={"service": "modeling_registry", "detail": "unavailable"},
             )
             return JSONResponse(status_code=503, content=body)
-        return JSONResponse(status_code=200, content={"status": "ok", "service": APP_NAME, "db": "ok"})
+        return JSONResponse(
+            status_code=200,
+            content={"status": "ok", "service": APP_NAME, "db": "ok", "registry": "ok"},
+        )
 
     return router
 
