@@ -48,11 +48,11 @@ class EngineRunError(Exception):
 class RunContext:
     """一次任务执行上下文(执行器/进度/取消检查共用)。
 
-    task/snapshot 为 application.worker 用例返回的公开记录(计算类任务
-    快照由 runner 装配, 均为脱离会话的不可变值对象); 本模块不直接引用
-    ``iesplan.models.*``。需要权威状态读写时, 经 ``session_factory`` 开
-    新短会话调用 application.worker 短事务用例, 长时运算期间不持有打开
-    的会话或数据库事务。
+    task/snapshot 为 application.worker 用例返回的公开记录(均为脱离会话
+    的不可变值对象); 本模块不直接引用 ``iesplan.models.*``。需要权威
+    状态读写时, 经 ``session_factory`` 开新短会话调用 application.worker
+    短事务用例, 长时运算期间不持有打开的会话或数据库事务。本层不解释
+    数据集字段、不物化时间轴(无 axis 字段), 输入解释归 provider 所有。
     """
 
     task: worker_app.TaskRecord
@@ -62,9 +62,7 @@ class RunContext:
     isolate: bool = True
     stop_event: threading.Event | None = None
     progress_fn: Callable[[float, str, dict | None], None] | None = None
-    snapshot: worker_app.CalcSnapshotRecord | None = None  # 计算类任务快照; runner 装配
-    axis_resolution: str = "1h"
-    axis_n: int = 8760
+    snapshot: worker_app.CalcSnapshotRecord | None = None  # 计算类任务快照记录; 网关读出
     io_params: dict[str, Any] = field(default_factory=dict)  # io 任务参数(队列消息扩展)
 
     def progress(self, percent: float, stage: str, detail: dict | None = None) -> None:

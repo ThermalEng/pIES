@@ -1,10 +1,10 @@
 """Worker 测试共用工具: 迷你环境构建(用户/项目/版本/快照/数据集/任务/队列)。
 
-供 tests/test_worker_lease.py 与 tests/test_worker_runner.py 复用:
+供 worker 系测试复用:
 - SQLite :memory:(StaticPool 共享连接) + IESPLAN_QUEUE=memory 内存队列;
-- 迷你数据集: 4 行 1h CSV(电负荷 1 kW 峰谷电价), 行数 < 标准年步数,
-  runner._build_axis 按行数构造迷你时间轴;
-- 迷你方案: 电网 + 电池(同 test_eval_run 迷你算例, 便于手算校验)。
+- 迷你数据集: 4 行 1h CSV(电负荷 1 kW 峰谷电价), 仅作快照绑定存在性之用,
+  Worker 不解释其字段与时间轴;
+- 迷你方案: 电网 + 电池(与项目内容同构的最小设备清单)。
 """
 
 from __future__ import annotations
