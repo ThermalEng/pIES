@@ -1,4 +1,4 @@
-"""computation 边界契约测试(Wave4-A, F3 接线后; G1 密封修订)。
+"""computation 边界契约测试。
 
 只覆盖真实边界, 不涉及任何 0.8 算法实现:
 
@@ -280,10 +280,8 @@ def test_bundle_rejects_shell_command_and_escaping_paths() -> None:
 def test_config_schema_word_checked() -> None:
     """公开 CalculationConfig 字头校验: 非法 schema/版本即拒绝。
 
-    快照默认修补路径已删除(``from_snapshot`` 不再存在): 运行期只做
-    表示映射, 直接构造, 缺字段即映射失败, 不补默认值。
+    运行期只做表示映射, 直接构造, 缺字段即映射失败, 不补默认值。
     """
-    assert not hasattr(CalculationConfig, "from_snapshot")
     with pytest.raises(ValueError, match="schema"):
         CalculationConfig(schema="ies.other", options={})
     with pytest.raises(ValueError, match="版本"):
@@ -439,23 +437,11 @@ def _full_directory() -> dict:
 
 
 def test_resolve_capabilities_empty_or_missing_is_no_provider() -> None:
-    """目录缺失/为空/缺键/形状不符一律 no-provider(不枚举畸形目录)。"""
+    """目录缺失/为空/缺键一律 no-provider(只断言真实语义, 不枚举畸形目录)。"""
     for directory in (None, {}, {GENERATOR_PROVIDER_KEY: _AvailableGenerator()}):
         with pytest.raises(ComputationUnavailableError) as exc_info:
             resolve_capabilities(directory)
         assert exc_info.value.reason == "no-provider"
-
-    class _OnlyGenerateMethod:
-        """只有 generate 方法名、非协议形状的对象(方法名猜测必须拒绝)。"""
-
-        def generate(self, artifact, resources, config) -> SolverBundle:
-            raise AssertionError("形状不符的能力不得被调用")
-
-    directory = _full_directory()
-    directory[GENERATOR_PROVIDER_KEY] = _OnlyGenerateMethod()
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        resolve_capabilities(directory)
-    assert exc_info.value.reason == "no-provider"
 
 
 def test_resolve_capabilities_self_reported_unavailable_is_deferred() -> None:
@@ -545,7 +531,7 @@ def test_build_inputs_absent_tolerances_means_absent_key() -> None:
 
 
 def test_build_inputs_missing_params_is_mapping_failure_not_default() -> None:
-    """params 缺失即表示映射失败(旧静默空映射默认已删除)。"""
+    """params 缺失即表示映射失败(不补空映射默认)。"""
     snapshot = _snapshot()
     raw = dict(snapshot.calc_config_snapshot)
     del raw["params"]

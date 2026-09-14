@@ -35,8 +35,8 @@ _APPLICATION_DIR = _PKG_ROOT / "application"
 
 #: 架构门禁中视为"业务模块"的 iesplan 顶层子包(core 一律禁止依赖)。
 #: 判定规则见 _is_business_import: 允许根包 iesplan(仅 __version__)与
-#: iesplan.core 子树, 其余 iesplan.* 子包(api/models/storage/worker/
-#: engines/analysis/…)均视为业务模块。
+#: iesplan.core 子树, 其余 iesplan.* 子包(api/storage/worker/
+#: analysis/…)均视为业务模块。
 
 # ---------------------------------------------------------------------------
 # 门禁 1: core → 业务模块依赖(硬强制)
@@ -54,16 +54,17 @@ _APPLICATION_DIR = _PKG_ROOT / "application"
 # ---------------------------------------------------------------------------
 # 门禁 3: api/worker → ORM/连接直接导入(硬强制)
 # ---------------------------------------------------------------------------
-# 扫描 api/worker 下 iesplan.models.* 与 iesplan.db 连接符号导入, 检出即失败。
-# 合法会话只来自组合根装配的 session_factory(api 见 iesplan.api.deps,
-# worker 见调用方注入); 直引 SessionLocal/engine/get_db 等一律违规。
+# 扫描 api/worker 下 iesplan.db 连接符号导入, 检出即失败(另含已删除的
+# iesplan.models.* 形态, 保留检查防重现)。合法会话只来自组合根装配的
+# session_factory(api 见 iesplan.api.deps, worker 见调用方注入); 直引
+# SessionLocal/engine 等一律违规。
 
 #: iesplan.db 中禁止 api/worker 直接导入的连接/ORM 符号。
 #: 会话与引擎只归 bootstrap 装配: api 经组合根装配的 session_factory
 #: (见 iesplan.api.deps.get_request_db)获取请求会话, worker 经调用方
 #: 传入的 session_factory 获取会话; 任何绕开 bootstrap 直取引擎/会话
-#: 工厂/会话依赖的行为一律违规。注意旧 get_db 已删除, 此处仍将其列入
-#: 禁止名, 防止以旧名重建全局请求依赖绕开装配。
+#: 工厂/会话依赖的行为一律违规。禁止名含已移除的 get_db, 防止以旧名
+#: 重建全局请求依赖绕开装配。
 _DB_ORM_NAMES = frozenset(
     {"Base", "Session", "SessionLocal", "sessionmaker", "session", "engine", "get_db"}
 )
@@ -118,7 +119,7 @@ def _is_business_import(module: str) -> bool:
     """门禁 1 判定: module 是否为 core 禁止依赖的业务模块。
 
     允许: 根包 iesplan(仅 __version__)与 iesplan.core 子树;
-    其余 iesplan.* 子包(api/models/storage/worker/engines/…)均禁止。
+    其余 iesplan.* 子包(api/storage/worker/analysis/…)均禁止。
     """
     if not module.startswith("iesplan."):
         return False
@@ -324,7 +325,7 @@ ALLOWED_SHARED_PRIMITIVE_IMPORTS: set[tuple[str, str]] = set()
 
 #: 门禁 8 扫描范围: 各表所有者域的 persistence.py/tables.py。
 #: 非表所有者(application/api/worker/migrations 等)由其他门禁覆盖;
-#: db.py 的集中 metadata 注册是 Wave3 迁入 bootstrap 前的过渡位, 不参评。
+#: db.py 只提供声明基元与建表入口, 不集中注册领域 metadata, 不参评。
 _NON_OWNER_DIRS = frozenset(
     {
         "application",
@@ -958,7 +959,7 @@ def test_application_no_cross_family_impl_imports():
 # 门禁 19–21: 稳定依赖规则收敛(硬强制)
 # ---------------------------------------------------------------------------
 # - 门禁 19: 顶层混合 models/ 与 engines/ 包不得存在(表真相归各领域
-#   persistence/tables 所有; 计算边界归 computation, 旧 engines 已删除)。
+#   persistence/tables 所有; 计算边界归 computation)。
 #   只查顶层包目录存在形态, 不锁文件清单。
 # - 门禁 20: Worker 不得导入 computation(Worker 只经可注入计算网关与
 #   application.worker 阶段网关消费计算, 不持有计算业务)。
