@@ -26,7 +26,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from iesplan.application.tasks.submissions import Claim
+from iesplan.application.tasks import Claim
 from iesplan.application.worker import attempt_cases, evidence_cases
 from iesplan.results import ResultAssessmentRecord
 

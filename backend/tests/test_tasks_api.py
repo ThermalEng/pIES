@@ -7,8 +7,8 @@ running 经 cancelling)→ 重试同快照 → 槽限制(2 并发)→ 存储门�
 - 数据库: SQLite :memory:(models 全部表 create_all, StaticPool 共享连接);
 - 队列: IESPLAN_QUEUE=memory 强制内存后端(单进程, 无外部 Redis 依赖);
 - 应用: create_app() + include_router(projects/tasks), dependency_overrides 替换 get_db;
-- 假执行器: 测试直接调用 tasks 用例 claim_task / worker 用例 record_task_progress /
-  complete_task 等服务入口模拟 Worker 行为(本文件只覆盖任务 API 与应用层用例的集成边界，不启动真实 Worker 进程)。
+- 假执行器: 测试直接调用 tasks 用例 claim_task / tasks 域门面进度·完成·失败推进
+  等正典入口模拟 Worker 行为(本文件只覆盖任务 API 与应用层用例的集成边界，不启动真实 Worker 进程)。
 """
 
 from __future__ import annotations
@@ -33,10 +33,18 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
-from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.assembly import CANON_ALGORITHM_ID, CANON_ALGORITHM_VERSION, SCHEMA_ID, SCHEMA_VERSION, VALIDATOR_ID, VALIDATOR_VERSION  # noqa: E402
 from iesplan.config import settings  # noqa: E402
+from iesplan.core.diagnostics import (  # noqa: E402
+    SEVERITY_ERROR,
+    SEVERITY_INFO,
+    TASK_DATA_SNAPSHOT_MISSING,
+    TASK_QUEUED,
+    TASK_SOLVE_FAILED,
+)
+from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
@@ -213,13 +221,98 @@ def _claim(db: Session, task_id: int, worker_id: str = "fake-exec-1") -> Any:
     return claim
 
 
+def _get_task(db: Session, task_id: int) -> Any:
+    """按 id 取任务行; 不存在 404(同原 worker 边界语义)。"""
+    task = tasks_domain.get_task(db, task_id)
+    if task is None:
+        raise NotFoundError(
+            "任务不存在",
+            params={"task_id": task_id},
+            location={"object_type": "task", "object_id": task_id},
+        )
+    return task
+
+
+def _finish_attempt(db: Session, task: Any, status: str, stop_reason: str | None) -> Any:
+    """收尾当前运行尝试: 尝试终态 + 租约释放/吊销 + 槽释放(经 tasks 域门面)。"""
+    attempt = tasks_domain.get_running_attempt(db, task.id)
+    if attempt is None:
+        return None
+    finished = tasks_domain.finish_attempt(db, attempt.id, status, stop_reason=stop_reason)
+    lease = tasks_domain.get_active_lease_for_attempt(db, attempt.id)
+    if lease is not None:
+        tasks_domain.release_lease(
+            db, attempt.id, lease.lease_token,
+            status="released" if status == "succeeded" else "revoked",
+        )
+    tasks_domain.release_slot(db, attempt.id)
+    return finished
+
+
+def _record_task_progress(
+    db: Session, task_id: int, stage: str, percent: float, detail: dict[str, Any] | None = None
+) -> Any:
+    """假执行器进度: PG UPSERT + 队列秒级进度(经 tasks 域门面)。"""
+    task = _get_task(db, task_id)
+    attempt = tasks_domain.get_latest_attempt(db, task.id)
+    if attempt is None:
+        return None
+    percent = round(min(max(float(percent), 0.0), 100.0), 2)
+    tasks_domain.upsert_progress(
+        db, attempt_id=attempt.id, progress_percent=percent, stage=stage, detail=detail
+    )
+    tasks_domain.set_queue_progress(task.id, attempt.attempt_no, percent, stage, detail)
+    return attempt
+
+
+def _complete_task(db: Session, task_id: int, *, outcome: str) -> Any:
+    """假执行器完成: running → completed(幂等), 结局正交保存(经 tasks 域门面)。"""
+    if outcome not in tasks_domain.BUSINESS_OUTCOMES:
+        raise tasks_domain.InvalidRequestError(
+            "任务完成缺少显式合法 outcome",
+            params={"task_id": task_id, "outcome": outcome,
+                    "allowed": list(tasks_domain.BUSINESS_OUTCOMES)},
+            location={"object_type": "task", "object_id": task_id},
+        )
+    task = _get_task(db, task_id)
+    if task.status == "completed":
+        return task
+    tasks_domain.check_transition(task, "completed")
+    attempt = _finish_attempt(db, task, status="succeeded", stop_reason=None)
+    task = tasks_domain.set_task_status(db, task.id, "completed", business_outcome=outcome)
+    tasks_domain.clear_cancel(task.id)
+    tasks_domain.append_diagnostic(
+        db, task_id=task.id, level=SEVERITY_INFO, message="任务完成",
+        attempt_id=attempt.id if attempt else None, code=TASK_QUEUED,
+        context={"business_outcome": outcome},
+    )
+    return task
+
+
+def _fail_task(db: Session, task_id: int, *, code: str | None = None, message: str = "") -> Any:
+    """假执行器失败: running → failed, 确定性失败不可自动重试(经 tasks 域门面)。"""
+    task = _get_task(db, task_id)
+    if task.status == "failed":
+        return task
+    tasks_domain.check_transition(task, "failed")
+    outcome = "insufficient_evidence" if code == TASK_DATA_SNAPSHOT_MISSING else None
+    attempt = _finish_attempt(db, task, status="failed", stop_reason=code or "error")
+    task = tasks_domain.set_task_status(db, task.id, "failed", business_outcome=outcome)
+    tasks_domain.append_diagnostic(
+        db, task_id=task.id, level=SEVERITY_ERROR, message=message,
+        attempt_id=attempt.id if attempt else None, code=code or TASK_SOLVE_FAILED,
+        context={"outcome": outcome},
+    )
+    return task
+
+
 def _run_task(
     db: Session, task_id: int, worker_id: str = "fake-exec-1", solver_status: str = "OPTIMAL"
 ) -> Task:
     """假执行器: 完整推进一次任务(领取 → 进度 → 完成)。"""
     _claim(db, task_id, worker_id)
-    worker_app.record_task_progress(db, task_id, "solve", 50.0, {"iterations": 1})
-    task = worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome(solver_status))
+    _record_task_progress(db, task_id, "solve", 50.0, {"iterations": 1})
+    task = _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome(solver_status))
     db.commit()
     return task
 
@@ -401,7 +494,7 @@ def test_state_advance_with_fake_executor(client: TestClient, db: Session) -> No
     assert slot.in_use == 1
 
     # 进度: PG 持久进度 + Redis 秒级进度
-    worker_app.record_task_progress(db, task_id, "solve", 45.5, {"iterations": 120})
+    _record_task_progress(db, task_id, "solve", 45.5, {"iterations": 120})
     db.commit()
     row = db.execute(select(TaskProgress).where(TaskProgress.attempt_id == claim.attempt_id)).scalar_one()
     assert float(row.progress_percent) == 45.5
@@ -409,14 +502,14 @@ def test_state_advance_with_fake_executor(client: TestClient, db: Session) -> No
     assert float(live["percent"]) == 45.5
 
     # 完成: OPTIMAL → normal_completion; 尝试 succeeded; 租约 released; 槽释放
-    completed = worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("OPTIMAL"))
+    completed = _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome("OPTIMAL"))
     db.commit()
     assert completed.status == "completed"
     assert completed.business_outcome == "normal_completion"
     assert db.get(TaskLease, lease.id).status == "released"
     assert db.execute(select(ComputeSlot)).scalars().all()[0].in_use == 0
     # 重复完成幂等
-    again = worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("OPTIMAL"))
+    again = _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome("OPTIMAL"))
     db.commit()
     assert again.status == "completed"
 
@@ -444,7 +537,7 @@ def test_state_machine_guards(client: TestClient, db: Session) -> None:
         tasks_uc.cancel_task(db, task_id, reason="late-cancel")
     assert exc_info.value.http_status == 409  # CancelDeniedError
     with pytest.raises(Exception) as exc_info:
-        worker_app.fail_task(db, task_id, code="TASK-SOLVE-001", message="late-fail")
+        _fail_task(db, task_id, code="TASK-SOLVE-001", message="late-fail")
     assert exc_info.value.http_status == 409
 
 
@@ -522,7 +615,7 @@ def test_retry_reuses_same_snapshot(client: TestClient, db: Session) -> None:
     task = db.get(Task, task_id)
     assert task.attempt_count == 2
     # 第二次完成
-    worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("TIME_LIMIT_WITH_INCUMBENT"))
+    _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome("TIME_LIMIT_WITH_INCUMBENT"))
     db.commit()
     assert db.get(Task, task_id).status == "completed"
     assert db.get(Task, task_id).business_outcome == "restricted_results"
@@ -571,7 +664,7 @@ def test_slot_limit_two_concurrent(client: TestClient, db: Session) -> None:
     assert db.get(Task, task_ids[2]).status == "queued"
 
     # 释放一槽(完成 t1)后第 3 个可领取; 池总占用回到 1
-    worker_app.complete_task(db, task_ids[0], outcome=worker_app.map_business_outcome("OPTIMAL"))
+    _complete_task(db, task_ids[0], outcome=tasks_domain.map_business_outcome("OPTIMAL"))
     db.commit()
     slots = db.execute(select(ComputeSlot)).scalars().all()
     assert sum(s.in_use for s in slots) == 1

@@ -3,7 +3,7 @@
 本模块收拢 ``iesplan.worker.runner`` 原先对领域服务与 ORM 行的直接
 访问, 只做转调与行级读取搬运, 不新增校验/hash/回退:
 
-- 项目版本内容读取 → ``application.projects.content_objects.load_content_object``;
+- 项目版本内容读取 → ``application.projects`` 门面 ``load_content_object``;
 - 数据集对象字节读取 → ``storage.get_object``;
 - 数据集 CSV 解析 → ``application.datasets.parse_csv``;
 - 快照/任务行读 → ``lease_cases`` 共享读(同包复用);
@@ -23,7 +23,7 @@ from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.datasets import parse_csv as _parse_dataset_csv
-from iesplan.application.projects.content_objects import load_content_object
+from iesplan.application.projects import load_content_object
 from iesplan.application.worker.lease_cases import get_snapshot_record, get_task_record
 from iesplan.dataset import DatasetVersionRecord
 from iesplan.storage import get_object

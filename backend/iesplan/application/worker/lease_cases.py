@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.tasks.submissions import Claim
+from iesplan.application.tasks import Claim
 from iesplan.config import settings
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,

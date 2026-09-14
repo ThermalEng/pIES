@@ -30,8 +30,9 @@ from iesplan import identity as identity_domain  # noqa: E402
 from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
-from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.config import settings  # noqa: E402
+from iesplan.core.diagnostics import SEVERITY_ERROR, TASK_DATA_SNAPSHOT_MISSING, TASK_SOLVE_FAILED  # noqa: E402
+from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
@@ -248,11 +249,40 @@ def test_cancel_terminal_denied_consistent(client: TestClient, db: Session) -> N
 # ---------------------------------------------------------------------------
 
 
+def _fail_task(db: Session, task_id: int, *, code: str | None = None, message: str = "") -> None:
+    """假执行器失败: running → failed(经 tasks 域门面: 尝试收尾 + 租约吊销 + 槽释放)。"""
+    task = tasks_domain.get_task(db, task_id)
+    if task is None:
+        raise NotFoundError(
+            "任务不存在",
+            params={"task_id": task_id},
+            location={"object_type": "task", "object_id": task_id},
+        )
+    if task.status == "failed":
+        return
+    tasks_domain.check_transition(task, "failed")
+    outcome = "insufficient_evidence" if code == TASK_DATA_SNAPSHOT_MISSING else None
+    attempt = tasks_domain.get_running_attempt(db, task.id)
+    finished_attempt_id = attempt.id if attempt is not None else None
+    if attempt is not None:
+        tasks_domain.finish_attempt(db, attempt.id, "failed", stop_reason=code or "error")
+        lease = tasks_domain.get_active_lease_for_attempt(db, attempt.id)
+        if lease is not None:
+            tasks_domain.release_lease(db, attempt.id, lease.lease_token, status="revoked")
+        tasks_domain.release_slot(db, attempt.id)
+    tasks_domain.set_task_status(db, task.id, "failed", business_outcome=outcome)
+    tasks_domain.append_diagnostic(
+        db, task_id=task.id, level=SEVERITY_ERROR, message=message,
+        attempt_id=finished_attempt_id, code=code or TASK_SOLVE_FAILED,
+        context={"outcome": outcome},
+    )
+
+
 def _fail(db: Session, task_id: int) -> None:
-    """新用例领取 → 经 worker 用例将任务置终态(failed), 供重试对照。"""
+    """新用例领取 → 经 tasks 域门面将任务置终态(failed), 供重试对照。"""
     claim = tasks_uc.claim_task(db, task_id, "w2c-fail-exec")
     assert claim is not None
-    worker_app.fail_task(db, task_id, code="TASK-SOLVE-001", message="w2c fail")
+    _fail_task(db, task_id, code="TASK-SOLVE-001", message="w2c fail")
     db.commit()
 
 
