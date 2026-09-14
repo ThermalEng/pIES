@@ -71,15 +71,21 @@ def _db_available() -> bool:
 
 
 def _init_database() -> None:
-    """启动时幂等初始化数据库: init_db() + seed_admin()。
+    """启动时幂等初始化数据库: init_db() + 身份种子。
 
+    种子身份数据归 application.identity(W2-B 起 db.py 不再保留业务种子):
+    建表/迁移成功后再经用例层幂等确保内置管理员。
     并行阶段 db 模块可能尚未就绪或数据库暂不可用, 仅记录日志不阻断启动,
     数据库状态由 /api/readyz 上报。
     """
     try:
-        from iesplan.db import init_db
+        from iesplan.db import SessionLocal, init_db
 
         init_db()
+        from iesplan.application.identity import seed_builtin_admin
+
+        with SessionLocal() as session:
+            seed_builtin_admin(session)
     except Exception:
         logger.exception("启动时数据库初始化失败, 应用继续运行, 就绪检查将返回 503")
 

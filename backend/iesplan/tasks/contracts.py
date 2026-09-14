@@ -1,8 +1,8 @@
 """任务域公开契约(快照/任务/尝试/租约/进度/诊断/槽位/不确定性表，归属 tasks)。
 
 - 任务执行只消费不可变快照；快照一经创建不得修改；
-- 0.7.0 前非规范 assembly_text 字段不在本契约中（旧快照审计残留，
-  新快照不得写入/消费）；
+- 快照装配产物只含规范二件套(canonical_assembly_text + assembly_receipt)，
+  旧 assembly_text 列已删除(W2-B, 不做升级回填)；
 - 只含不可变值对象、领域错误与无状态纯规则（类型/状态机/结局映射）；
   不导入 ORM、Session、services 或 application。
 - 任务状态、业务结局映射与任务错误唯一权威归 tasks 域；

@@ -169,6 +169,42 @@ def ensure_role(db: Session, code: str, name: str):
     return identity_domain.ensure_role(db, code, name)
 
 
+def seed_builtin_admin(db: Session, password: str | None = None) -> None:
+    """幂等创建内置管理员(admin, 首登强制改密)。
+
+    种子身份数据的唯一归属(原 iesplan.db.seed_admin 整体迁移至此;
+    db.py 只负责建表/迁移/触发器, 不再保留业务种子逻辑):
+    - 已有 admin 角色有效授权则直接返回;
+    - 否则补齐 admin 系统角色, 建 admin 用户 + password 凭证
+      (requires_change=True), 初始密码取参数, 缺省取配置默认值,
+      强度不足只记低分不断言(沿用旧种子语义);
+    - 管理员自授权(授权人即本人), 完成后提交(调用方拥有事务时由调用方提交
+      亦可, 此处提交与 create_user 一致)。
+    """
+    users = identity_domain.list_users(db)
+    if users:
+        roles = identity_domain.roles_by_user(db, [u.id for u in users])
+        if any(identity_domain.ROLE_ADMIN in r for r in roles.values()):
+            return
+    role = ensure_role(db, identity_domain.ROLE_ADMIN, "管理员")
+    pwd = password or settings.default_admin_password
+    ok, _ = identity_domain.validate_new_password(pwd)
+    user = identity_domain.create_user(
+        db, username="admin", display_name="管理员"
+    )
+    identity_domain.add_credential(
+        db,
+        user_id=user.id,
+        credential_type="password",
+        secret_hash=hash_password(pwd),
+        algorithm="bcrypt",
+        strength_score=100 if ok else 0,
+        requires_change=True,
+    )
+    identity_domain.grant_role(db, user_id=user.id, role_id=role.id, granted_by=user.id)
+    db.commit()
+
+
 def user_roles(db: Session, user: UserRecord) -> list[str]:
     """返回用户当前(未撤销)的角色编码列表, 按角色 id 升序。"""
     return identity_domain.user_roles(db, user.id)
