@@ -552,8 +552,8 @@ def _phase3_graph_system(
     registry,
     diags: list[Diagnostic],
 ) -> dict:
-    """复用 check_assembly 的核心机制:转换 doc → AssemblySpec + CheckContext,
-    调用 run_phase_b + 自己的输入完备检查 + run_phase_d + run_constraint_checks。
+    """转换 doc → AssemblySpec + CheckContext,调用 run_phase_b +
+    输入完备检查 + run_phase_d + run_constraint_checks。
     """
     from iesplan.assembly.context import CheckContext
     from iesplan.assembly.rules import run_constraint_checks, run_phase_b, run_phase_d

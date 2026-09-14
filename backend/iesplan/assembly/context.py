@@ -1,19 +1,16 @@
-"""装配共享上下文层(parser → context → rules → validator → artifact 中的 context)。
+"""装配共享上下文层:端口/模型解析、单位量纲、电网识别、母线汇总类型、检查上下文。
 
-W1-Assembly 收敛:rules/checker 真正需要的共享能力(端口/模型解析、
-单位量纲、电网识别、母线汇总类型、检查上下文)在此集中定义并以公开
-命名导出,逻辑与搬迁前 checker.py 完全一致,不重写业务。
+校验器图与系统阶段经 ``iesplan.assembly.rules`` 消费本模块公开接口;
+端口推导结果缓存到 ``CheckContext.resolved_ports``。
 
-依赖方向:context → parser/schema/diags + core + devices 公开门面
-(``iesplan.devices`` 的 ``__init__`` 门面);rules 只依赖 context,
-checker/validator 作为编排层消费 context/rules,不反转。
+依赖方向:context → schema/diags + core + devices 公开门面
+(``iesplan.devices`` 的 ``__init__`` 门面);不依赖 services/engines/worker。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from iesplan.assembly.parser import PORT_DECL_OVERRIDE_FIELDS
 from iesplan.assembly.schema import (
     CARRIER_DEFAULT_QUANTITY_UNIT,
     NATURE_DELAYED,
@@ -29,6 +26,10 @@ from iesplan.core import units
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.core.expression import Dimensions
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
+
+#: 显式端口声明中须与注册表推导一致的字段(不一致按 ASM-REF-005 告警,
+#: 以注册表为准)
+PORT_DECL_OVERRIDE_FIELDS: tuple[str, ...] = ("carrier", "direction", "quantity", "unit", "nature")
 
 # ---------------------------------------------------------------------------
 # 常量与业务表(与 application/models 同约定;本模块独立声明,不依赖 services)
