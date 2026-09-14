@@ -49,9 +49,29 @@ def test_readyz_shape(client: TestClient) -> None:
         assert body["error"]["code"]
 
 
-def test_readyz_503_when_db_unavailable(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+class _StubContext:
+    """组合根 ApplicationContext 替身: health() 决定 readyz 结果。"""
+
+    def __init__(self, health: dict[str, str]) -> None:
+        self._health = dict(health)
+
+    def health(self) -> dict[str, str]:
+        """返回预设的依赖健康状态。"""
+        return dict(self._health)
+
+    def ready(self) -> bool:
+        """全部已上报依赖均为 ok 才就绪。"""
+        return bool(self._health) and all(v == "ok" for v in self._health.values())
+
+
+def _stub_context(client: TestClient, health: dict[str, str]) -> None:
+    """用替身替换已装配的组合根上下文(每个测试应用实例独立, 无跨测试泄漏)。"""
+    client.app.state.bootstrap_context = _StubContext(health)
+
+
+def test_readyz_503_when_db_unavailable(client: TestClient) -> None:
     """数据库不可用时就绪探针应返回 503 及标准错误体。"""
-    monkeypatch.setattr("iesplan.main._db_available", lambda: False)
+    _stub_context(client, {"db": "unavailable", "storage": "ok", "registry": "ok"})
     resp = client.get("/api/readyz")
     assert resp.status_code == 503
     body = resp.json()
@@ -59,24 +79,26 @@ def test_readyz_503_when_db_unavailable(client: TestClient, monkeypatch: pytest.
     assert body["error"]["message_key"] == "ies.error.db_unavailable"
 
 
-def test_readyz_200_when_db_available(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """数据库与建模命令注册表均可用时就绪探针应返回 200。"""
-    monkeypatch.setattr("iesplan.main._db_available", lambda: True)
-    monkeypatch.setattr("iesplan.main._registry_status", "ok")
+def test_readyz_200_when_db_available(client: TestClient) -> None:
+    """数据库与设备注册表均可用时就绪探针应返回 200。"""
+    _stub_context(client, {"db": "ok", "storage": "ok", "registry": "ok"})
     resp = client.get("/api/readyz")
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["db"] == "ok"
+    assert body["registry"] == "ok"
 
 
-def test_readyz_503_when_registry_unavailable(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """建模命令注册表初始化失败时就绪探针应返回 503(High-6 修复)。
+def test_readyz_503_when_registry_unavailable(client: TestClient) -> None:
+    """设备注册表不可用时就绪探针应返回 503(High-6 修复)。
 
     A3 脱敏: 响应不得泄露原始异常串(内部路径/细节只进日志)。
     """
-    monkeypatch.setattr("iesplan.main._db_available", lambda: True)
-    monkeypatch.setattr("iesplan.main._registry_status", "error: boom")
+    _stub_context(
+        client,
+        {"db": "ok", "storage": "ok", "registry": "error: boom-secret-detail"},
+    )
     resp = client.get("/api/readyz")
     assert resp.status_code == 503
     body = resp.json()
@@ -84,8 +106,30 @@ def test_readyz_503_when_registry_unavailable(
     assert body["error"]["message_key"] == "ies.error.registry_unavailable"
     # 脱敏断言: 响应不含原始异常详情
     assert body["error"]["params"]["detail"] == "unavailable"
-    assert "boom" not in resp.text
-    assert "error: boom" not in resp.text
+    assert "boom-secret-detail" not in resp.text
+    assert "error: boom-secret-detail" not in resp.text
+
+
+def test_readyz_503_when_context_missing(client: TestClient) -> None:
+    """未装配组合根上下文时就绪探针应返回 503(缺一即 503, 不 fallback)。"""
+    if hasattr(client.app.state, "bootstrap_context"):
+        del client.app.state.bootstrap_context
+    resp = client.get("/api/readyz")
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "API-RZ-001"
+
+
+def test_startup_fails_when_assemble_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """组合根装配失败即启动失败: lifespan 抛异常, 不发布半初始化状态。"""
+    import iesplan.main as main_module
+
+    def _boom() -> None:
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr(main_module, "assemble_api", _boom)
+    with pytest.raises(RuntimeError, match="db unreachable"):
+        with TestClient(create_app(), raise_server_exceptions=False):
+            pass
 
 
 def test_cors_allows_local_origin_with_credentials(client: TestClient) -> None:
