@@ -130,23 +130,6 @@ def test_domain_errors_reuse_base_codes():
     assert checked >= 7, f"领域错误过少({checked})"
 
 
-#: 各域 persistence 实现允许访问的归属 models 子模块（对应 TABLE_OWNERS；
-#: configuration 的 calc_configs 与 tasks 表同文件，tasks 读快照不写配置表）
-OWNED_MODELS: dict[str, frozenset[str]] = {
-    "audit": frozenset({"audit"}),
-    "project": frozenset({"project"}),
-    "identity": frozenset({"identity"}),
-    "dataset": frozenset({"dataset"}),
-    "configuration": frozenset({"config_revision", "calc"}),
-    "tasks": frozenset({"calc", "uncertainty"}),
-    "results": frozenset({"result"}),
-    "package": frozenset({"audit"}),
-    "model": frozenset({"model", "draft_revision", "model_template", "project_model"}),
-    # (Wave 5 集成: 切片 7 起模板/草稿/项目模型三表归 model 域持久化实现，
-    #  门禁 TABLE_OWNERS 划归 model 系且仅 model/persistence.py 使用，补齐。)
-}
-
-
 def _iter_domain_files():
     for domain in _DOMAIN_FACADES:
         for path in sorted((_PKG_ROOT / domain).rglob("*.py")):
@@ -175,15 +158,16 @@ def _is_pure_reuse(domain: str, mod: str) -> bool:
 def test_domain_source_purity():
     """域源码纯度：无 ORM/跨层导入，无 commit/rollback；contracts 只靠标准库+core。
 
-    唯一例外是各域 persistence.py（领域持久化实现），它只允许访问本域归属表
-    （OWNED_MODELS），且同样禁跨层导入与 commit/rollback；另一例外是
-    _PURE_METRICS_REUSE 的纯词汇/纯函数复用（复用而非复制，不记违规）。
+    顶层混合 models/ 已删除，任何对 iesplan.models.* 的导入（含各域
+    persistence.py）一律经 _BANNED_PREFIXES 记违规，不再维护归属表清单；
+    表归属事实由门禁 8 从当前目录推导（见 test_architecture_gates）。
+    另一例外是 _PURE_METRICS_REUSE 的纯词汇/纯函数复用（复用而非复制，
+    不记违规）。
     """
     violations: list[str] = []
     for domain, path in _iter_domain_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         own_contracts = f"iesplan.{domain}.contracts"
-        is_persistence = path.name == "persistence.py"
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 mod = node.module
@@ -198,12 +182,6 @@ def test_domain_source_purity():
                     if mod == own_contracts or mod.startswith("iesplan.core."):
                         continue
                     if mod.split(".")[0] == "sqlalchemy":
-                        continue
-                    if is_persistence and mod.startswith("iesplan.models."):
-                        leaf = mod.split(".")[2]
-                        if leaf in OWNED_MODELS[domain]:
-                            continue
-                        violations.append(f"{domain}/{path.name}:{node.lineno}: 非归属表 {mod}")
                         continue
                 if _is_pure_reuse(domain, mod):
                     continue
