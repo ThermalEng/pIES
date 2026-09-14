@@ -172,7 +172,7 @@ class ValidatedAssemblyArtifact:
 class AssemblyValidationError(AppError):
     """装配校验未通过(存在阻断诊断),携带完整诊断列表,供任务闸门抛 HTTP 422。
 
-    与 AssemblyCheckError 同构:不产生任何可执行产物,调用方只能看到诊断。
+    不产生任何可执行产物,调用方只能看到诊断。
     """
 
     code = "ASM-VALIDATE-FAILED"

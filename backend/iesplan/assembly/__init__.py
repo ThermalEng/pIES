@@ -1,31 +1,24 @@
-"""装配与检查模块(设计蓝图见开发者指南 architecture.md 与 contracts.md)。
+"""装配域公共入口:ies.assembly 1.0.0 唯一生产管线。
 
-边-端(edge-node)模型:节点 = 设备实例,端 = 端口,边 = 输出→输入链接
-(两端参数同一时间步严格相等;损耗/延迟必须经管道设备建模,体现非同时性)。
+生产调用(``application.tasks.submissions._assembly_gate``)只消费
+``validator.validate_project_export`` 并持有其签发的
+``ValidatedAssemblyArtifact``(规范文本 + 校验回执二件套);签发即受信,
+不做重复复核。
 
-公共 API:
-- parse_assembly / load_assembly_file:文本 → AssemblySpec(阶段 A 语法/结构);
-- build_assembly / dumps_assembly / build_assembly_text:项目图 → 规范文本(确定性);
-- check_assembly / check_assembly_text / check_graph_inputs:旧格式四阶段检查(语法 A →
-  连接合法性 B → 模型可解性 C → 整体可解性 D),输出结构化 ASM 域诊断;
-- validate_assembly_text / validate_project_export:ies.assembly 1.0.0 唯一校验入口；
-  计算任务只消费成功签发的 ValidatedAssemblyArtifact。
+管线:
+- 手写文本 → ``parse_assembly_doc``(结构边界) → ``validate_assembly_text``;
+- 项目内容 → ``build_assembly_doc_from_content``(构造边界) →
+  ``validate_project_export``;
+- 成功签发 ``ValidatedAssemblyArtifact``,失败返回结构化诊断,无可执行产物。
 
-依赖方向:assembly → core(diagnostics/units/registry/expression)+ models(仅常量),
-不依赖 services/engines/worker。
+依赖方向:assembly → core(diagnostics/units/expression/yamlmini)+ devices
+公开门面(设备描述符),不依赖 services/engines/worker。
 """
 
-from iesplan.assembly.builder import build_assembly, build_assembly_text, dumps_assembly
+from iesplan.assembly.builder10 import BuildDocResult, build_assembly_doc_from_content
 from iesplan.assembly.canonicalizer import (
     canonical_algorithm_ref,
     canonicalize_assembly_doc,
-)
-from iesplan.assembly.checker import (
-    AssemblyCheckError,
-    CheckResult,
-    check_assembly,
-    check_assembly_text,
-    check_graph_inputs,
 )
 from iesplan.assembly.context import BusSummary, CheckContext
 from iesplan.assembly.contracts import (
@@ -41,47 +34,16 @@ from iesplan.assembly.contracts import (
     ValidationReceipt,
 )
 from iesplan.assembly.diags import ASM_ALL_CODES
-from iesplan.assembly.parser import ParseResult, load_assembly_file, parse_assembly
 from iesplan.assembly.parser10 import ParseDocResult, parse_assembly_doc
-from iesplan.assembly.schema import FORMAT_VERSION, AssemblySpec
 from iesplan.assembly.validator import (
     AssemblyValidationResult,
     validate_assembly_doc,
     validate_assembly_text,
     validate_project_export,
 )
-from iesplan.assembly.validator2 import (
-    CANON2_ALGORITHM_ID,
-    CANON2_ALGORITHM_VERSION,
-    PREDEFINED_SOURCE_MODES,
-    SCHEMA2_ID,
-    SCHEMA2_VERSION,
-    VALIDATOR2_ID,
-    VALIDATOR2_VERSION,
-    InterfaceNetworkResult,
-    NetworkReceipt,
-    ValidatedInterfaceNetwork,
-    validate_interface_network2,
-)
 
 __all__ = [
-    "parse_assembly",
-    "load_assembly_file",
-    "build_assembly",
-    "dumps_assembly",
-    "build_assembly_text",
-    "check_assembly",
-    "check_assembly_text",
-    "check_graph_inputs",
-    "CheckContext",
-    "CheckResult",
-    "BusSummary",
-    "AssemblyCheckError",
-    "AssemblySpec",
-    "ParseResult",
-    "ASM_ALL_CODES",
-    "FORMAT_VERSION",
-    # ies.assembly 1.0.0(roadmap 0.7.0)
+    # ies.assembly 1.0.0 契约
     "SCHEMA_ID",
     "SCHEMA_VERSION",
     "ASSEMBLY_SCHEMA_PATH",
@@ -92,24 +54,20 @@ __all__ = [
     "ValidationReceipt",
     "ValidatedAssemblyArtifact",
     "AssemblyValidationError",
-    "canonicalize_assembly_doc",
-    "canonical_algorithm_ref",
+    # 用户输入边界:文本结构解析 / 项目内容构造
     "parse_assembly_doc",
     "ParseDocResult",
+    "build_assembly_doc_from_content",
+    "BuildDocResult",
+    # 校验入口与产物签发
     "AssemblyValidationResult",
     "validate_assembly_text",
     "validate_assembly_doc",
     "validate_project_export",
-    # 2.0 接口网络纯协议校验(ies.assembly 2.0.0 切片)
-    "SCHEMA2_ID",
-    "SCHEMA2_VERSION",
-    "VALIDATOR2_ID",
-    "VALIDATOR2_VERSION",
-    "CANON2_ALGORITHM_ID",
-    "CANON2_ALGORITHM_VERSION",
-    "PREDEFINED_SOURCE_MODES",
-    "NetworkReceipt",
-    "ValidatedInterfaceNetwork",
-    "InterfaceNetworkResult",
-    "validate_interface_network2",
+    # 规范化与共享上下文/诊断码
+    "canonicalize_assembly_doc",
+    "canonical_algorithm_ref",
+    "CheckContext",
+    "BusSummary",
+    "ASM_ALL_CODES",
 ]
