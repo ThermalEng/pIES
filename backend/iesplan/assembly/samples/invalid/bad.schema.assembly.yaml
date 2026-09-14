@@ -11,11 +11,16 @@ project_baseline:
   leap_year: false
   scenario_mode: single
 
-resources:
-  datasets: {}
-
-devices: {}
-
+devices:
+  hp1:
+    definition:
+      id: ies.device.heat_pump
+    asset_origin: new
+    properties:
+      rated_heat_kw:
+        value: 600
+        unit: kW
+    predefined_interfaces: {}
 connections: {}
 
 constraints: {}

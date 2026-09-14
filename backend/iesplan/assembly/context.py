@@ -230,7 +230,7 @@ def derive_device_ports(spec: AssemblySpec, ctx: CheckContext, device: AssemblyD
     (含未走 2.0 正式注册的自定义类型)端口无从推导,返回空列表
     (REF-002 由校验器报告),不再按显式端口声明回退。
     """
-    type_spec, _ = resolve_model(ctx, device.model)
+    type_spec, _ = resolve_model(ctx, device.definition_id)
     if type_spec is None:
         return []  # 模型未注册,端口无从推导(REF-002 已报)
     assert type_spec.device is not None

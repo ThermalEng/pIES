@@ -67,6 +67,8 @@ from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.storage import (
+    ObjectCorruptError,
+    get_object,
     object_info,
     orphaned_stats,
     usage_summary,
@@ -328,20 +330,30 @@ def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) 
     export_content = dict(content)
     export_content.setdefault("graph_id", project_id)
     export_content.setdefault("name", f"project_{project_id}")
-    result = validate_project_export(export_content, datasets=_dataset_meta_for(db, content))
+    contents, modes = _dataset_contents_for(db, content)
+    result = validate_project_export(
+        export_content, predefined_modes=modes, dataset_contents=contents
+    )
     if result.artifact is None:
         raise AssemblyValidationError(result.diagnostics)
     return result.artifact
 
 
-def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
-    """项目绑定数据集版本 → 装配公开元信息。
+def _dataset_contents_for(
+    db: Session, content: dict,
+) -> tuple[dict[str, dict], dict[int, str]]:
+    """项目绑定数据集版本 → 装配显式注入({合成路径: 对象字节}，{vid: 来源模式})。
 
-    只通过 dataset 域与 storage 公开门面读取版本/对象元信息。每个版本选择
-    ``file_kind=data`` 的权威数据本体; 缺文件/对象时不伪造元信息, 由统一
-    装配入口给出阻断诊断。
+    只通过 dataset 域与 storage/devices 公开门面读取。每个版本选择
+    ``file_kind=data`` 的权威数据本体；来源模式取文件自身声明的
+    ``source_mode``（CSV 作者在导入边界的显式声明，非猜测）；缺文件、
+    不可读或模式非法时不伪造，由统一装配入口给出阻断诊断。
     """
-    meta: dict[int, dict] = {}
+    from iesplan.assembly import dataset_export_path
+    from iesplan.devices import parse_data_file_v2
+
+    contents: dict[str, dict] = {}
+    modes: dict[int, str] = {}
     for binding in content.get("dataset_bindings", []) or []:
         vid = binding.get("dataset_version_id")
         if vid is None:
@@ -350,42 +362,35 @@ def _dataset_meta_for(db: Session, content: dict) -> dict[int, dict]:
             vid = int(vid)
         except (TypeError, ValueError):
             continue
-        version = dataset_domain.get_version(db, vid)
-        if version is None:
-            continue
-        fields = version.fields if isinstance(version.fields, dict) else {}
-        units = version.units if isinstance(version.units, dict) else {}
-        columns: dict[str, str] = {}
-        for col, field in fields.items():
-            if not isinstance(field, dict):
-                continue
-            unit = field.get("unit") or units.get(col) or ""
-            if isinstance(unit, str) and unit:
-                columns[col] = unit
-
         data_file = next(
             (f for f in dataset_domain.list_files(db, vid) if f.file_kind == "data"),
             None,
         )
-        object_meta: dict = {}
-        if data_file is not None:
-            object_meta = object_info(db, data_file.object_id)
+        if data_file is None:
+            continue
+        try:
+            raw = get_object(db, data_file.object_id)
+        except ObjectCorruptError:
+            continue
+        object_meta: dict = object_info(db, data_file.object_id)
         media_type = object_meta.get("media_type")
-        if not media_type and data_file is not None:
+        if not media_type:
             media_type = {
                 "csv": "text/csv; charset=utf-8",
                 "parquet": "application/vnd.apache.parquet",
                 "json": "application/json",
-            }.get(data_file.format)
-        meta[vid] = {
-            "id": vid,
-            "name": f"ds{vid}",
-            "columns": list(columns.keys()),
-            "column_units": columns,
-            "resolution": version.resolution or "",
-            "media_type": media_type or "",
+            }.get(data_file.format, "application/octet-stream")
+        path = dataset_export_path(vid)
+        contents[path] = {
+            "object_id": str(data_file.object_id),
+            "media_type": media_type,
+            "data": raw,
         }
-    return meta
+        parsed, parse_diags = parse_data_file_v2(bytes(raw))
+        if parsed is not None and not any(d.blocking for d in parse_diags):
+            if parsed.meta.source_mode in ("data_repeat", "data_predict"):
+                modes[vid] = parsed.meta.source_mode
+    return contents, modes
 
 
 # ---------------------------------------------------------------------------

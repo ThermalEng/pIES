@@ -1,0 +1,32 @@
+# 非法样例: asset_origin 非法枚举 → ASM-SYN-005
+schema: ies.assembly
+schema_version: "2.0.0"
+
+assembly:
+  id: bad_asset_origin
+  name: 非法身份
+
+project_baseline:
+  resolution: 1h
+  leap_year: false
+  scenario_mode: single
+
+devices:
+  hp1:
+    definition:
+      id: ies.device.heat_pump
+    asset_origin: legacy
+    properties:
+      rated_heat_kw:
+        value: 600
+        unit: kW
+    predefined_interfaces: {}
+connections: {}
+
+constraints: {}
+
+outputs:
+  series: []
+  metrics: []
+
+extensions: {}

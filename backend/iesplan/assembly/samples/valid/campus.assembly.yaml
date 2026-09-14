@@ -10,46 +10,82 @@ project_baseline:
   leap_year: false
   scenario_mode: single
 
-resources:
-  datasets:
-    campus_load:
-      source:
-        kind: relative_file
-        path: data/campus_load.data.csv
-    campus_heat:
-      source:
-        kind: relative_file
-        path: data/campus_heat.data.csv
-
 devices:
   grid:
-    model: ies.device.grid_connection@2.0.0
+    definition:
+      id: ies.device.grid_connection
+    asset_origin: existing
+    properties:
+      max_import_power_kw:
+        value: 800
+        unit: kW
+      max_export_power_kw:
+        value: 200
+        unit: kW
+    predefined_interfaces: {}
   pv1:
-    model: ies.device.pv@2.0.0
-    parameters:
-      rated_capacity_kwp: 300
+    definition:
+      id: ies.device.pv
+    asset_origin: new
+    properties:
+      rated_capacity_kwp:
+        value: 300
+        unit: kWp
+    predefined_interfaces:
+      solar_irradiance:
+        mode: data_repeat
+        path: data/pv_irradiance.data.csv
+      ambient_temperature:
+        mode: constant
+        value: 25
   bat1:
-    model: ies.device.battery@2.0.0
-    parameters:
-      capacity_kwh: 400
-      rated_power_kw: 200
+    definition:
+      id: ies.device.battery
+    asset_origin: new
+    properties:
+      capacity_kwh:
+        value: 400
+        unit: kWh
+      rated_power_kw:
+        value: 200
+        unit: kW
+    predefined_interfaces: {}
   hp1:
-    model: ies.device.heat_pump@2.0.0
-    parameters:
-      rated_heat_kw: 600
-      cop: 3.5
+    definition:
+      id: ies.device.heat_pump
+    asset_origin: new
+    properties:
+      rated_heat_kw:
+        value: 600
+        unit: kW
+      cop:
+        value: 3.5
+        unit: "1"
+    predefined_interfaces: {}
   elec_load:
-    model: ies.device.electric_load@2.0.0
-    data:
+    definition:
+      id: ies.device.electric_load
+    asset_origin: existing
+    properties:
+      peak_power_kw:
+        value: 100
+        unit: kW
+    predefined_interfaces:
       electricity_demand:
-        dataset: campus_load
-        column: e_load
+        mode: data_repeat
+        path: data/campus_load.data.csv
   heat_load:
-    model: ies.device.heat_load@2.0.0
-    data:
+    definition:
+      id: ies.device.heat_load
+    asset_origin: existing
+    properties:
+      peak_heat_kw:
+        value: 150
+        unit: kW
+    predefined_interfaces:
       heat_demand:
-        dataset: campus_heat
-        column: h_load
+        mode: data_repeat
+        path: data/campus_heat.data.csv
 
 connections:
   e_grid_pv:
@@ -61,12 +97,6 @@ connections:
   e_hp_elec:
     from: grid.electricity_import
     to: hp1.electricity_in
-  e_load:
-    from: grid.electricity_import
-    to: elec_load.electricity_demand
-  e_heat:
-    from: hp1.heat_out
-    to: heat_load.heat_demand
 
 constraints:
   c1:

@@ -28,7 +28,6 @@ from iesplan.assembly.diags import (
     ASM_INPUT_UNDECLARED,
     ASM_INPUT_UNFED,
     ASM_OUTPUT_REF,
-    ASM_REF_DATASET,
     ASM_REF_MODEL_UNREG,
     ASM_RES_INVALID,
 )
@@ -40,21 +39,20 @@ VALID_DIR = SAMPLES_DIR / "valid"
 DATA_DIR = SAMPLES_DIR / "data"
 
 
-#: 样例数据集元信息(供四阶段校验;注入到 validate_xxx 的 datasets 参数)
-SAMPLE_DATASETS = {
-    "campus_load": {
-        "columns": ["e_load"],
-        "column_units": {"e_load": "kWh"},
-        "resolution": "1h",
-        "media_type": "text/csv",
-    },
-    "campus_heat": {
-        "columns": ["h_load"],
-        "column_units": {"h_load": "kWh"},
-        "resolution": "1h",
-        "media_type": "text/csv",
-    },
-}
+#: 导出合成路径 → 样例 CSV(调用方显式注入对象字节；模式显式传入，不猜测)
+_EXPORT_CSV = {17: "campus_load.data.csv", 18: "campus_heat.data.csv"}
+
+
+def _export_contents(*vids: int) -> dict:
+    """合成路径到对象字节的显式注入 {path: {object_id, media_type, data}}。"""
+    return {
+        f"data/ds{vid}.data.csv": {
+            "object_id": f"object:{vid}",
+            "media_type": "text/csv",
+            "data": (DATA_DIR / _EXPORT_CSV[vid]).read_bytes(),
+        }
+        for vid in vids
+    }
 
 
 @pytest.fixture
@@ -79,65 +77,73 @@ def _export_baseline(**overrides):
 class TestHappyPath:
     def test_handwritten_sample_issues_artifact(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
+        result = validate_assembly_text(text, package_dir=SAMPLES_DIR)
         assert isinstance(result, AssemblyValidationResult)
         assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
         artifact = result.artifact
         assert artifact is not None
-        # 回执依赖锁包含全部设备
+        # 回执依赖锁包含全部设备(裸 ID → 统一 schema 版本)
         deps = artifact.receipt.dependencies
         devices_lock = deps["devices"]
-        assert "ies.device.heat_pump" in devices_lock
-        assert "ies.device.grid_connection" in devices_lock
+        assert devices_lock.get("ies.device.heat_pump") == "2.0.0"
+        assert devices_lock.get("ies.device.grid_connection") == "2.0.0"
         assert "calculation" not in deps
-        # 规范文本携带项目基线,不含 calculation/time_axis
+        # 规范文本携带项目基线,不含 calculation/time_axis/resources;
+        # 文件绑定保留 path 与 content 身份
         assert '"project_baseline"' in artifact.canonical_text
         assert "calculation" not in artifact.canonical_text
         assert "time_axis" not in artifact.canonical_text
-        # 资源媒体类型
+        assert "resources" not in artifact.canonical_text
+        assert '"path":"data/campus_load.data.csv"' in artifact.canonical_text
+        assert '"media_type":"text/csv"' in artifact.canonical_text
+        # 资源媒体类型(按绑定路径记录)
         resources = artifact.receipt.resources
-        assert "campus_load" in resources
-        assert resources["campus_load"]["media_type"] == "text/csv"
+        assert resources["data/campus_load.data.csv"]["media_type"] == "text/csv"
 
 
 class TestUnhappyPath:
     def test_unknown_device_blocks_with_stable_code(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        text = text.replace("ies.device.heat_pump@2.0.0", "ies.device.unknown@2.0.0")
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
+        text = text.replace("id: ies.device.heat_pump", "id: ies.device.unknown")
+        result = validate_assembly_text(text, package_dir=SAMPLES_DIR)
         assert not result.ok and result.artifact is None
         assert any(d.code == ASM_REF_MODEL_UNREG for d in result.diagnostics)
 
-    def test_version_mismatch_blocks(self, init_registry):
+    def test_definition_version_pin_blocked(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        # heat_pump 2.0.0 → 1.0.0 触发精确版本不匹配
-        text = text.replace("ies.device.heat_pump@2.0.0", "ies.device.heat_pump@1.0.0")
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
+        # definition.id 禁止 @版本钉选(结构阶段拒绝)
+        text = text.replace("id: ies.device.heat_pump", "id: ies.device.heat_pump@2.0.0")
+        result = validate_assembly_text(text, package_dir=SAMPLES_DIR)
         assert result.artifact is None
-        diag = next(d for d in result.diagnostics if d.code == ASM_REF_MODEL_UNREG)
-        assert diag.params["reason"] == "version_mismatch"
-        assert diag.blocking is True
+        assert any(d.code == "ASM-SYN-007" and d.blocking for d in result.diagnostics)
 
     def test_undeclared_parameter_blocks(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        text = text.replace("      cop: 3.5\n", "      cop: 3.5\n      magic: 1\n")
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
+        text = text.replace(
+            "      cop:\n        value: 3.5\n        unit: \"1\"\n",
+            "      cop:\n        value: 3.5\n        unit: \"1\"\n      magic:\n        value: 1\n        unit: \"1\"\n",
+        )
+        result = validate_assembly_text(text, package_dir=SAMPLES_DIR)
         assert result.artifact is None
         assert any(d.code == ASM_INPUT_UNDECLARED for d in result.diagnostics)
 
-    def test_dataset_column_mismatch_blocks(self, init_registry):
+    def test_binding_to_non_predefined_slot_blocks(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        text = text.replace("column: e_load\n", "column: nope\n")
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
+        text = text.replace(
+            "    predefined_interfaces: {}",
+            "    predefined_interfaces:\n      electricity_import:\n        mode: constant\n        value: 1\n",
+            1,
+        )
+        result = validate_assembly_text(text, package_dir=SAMPLES_DIR)
         assert result.artifact is None
-        diag = next(d for d in result.diagnostics if d.code == ASM_REF_DATASET)
-        assert diag.params["reason"] == "column_not_in_dataset"
+        diag = next(d for d in result.diagnostics if d.code == "ASM-BIND-001")
+        assert diag.params["reason"] == "not_predefined_slot"
 
     def test_resource_file_unreadable_blocks(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
         # 指向不存在的相对文件
         text = text.replace("data/campus_load.data.csv", "data/missing.csv")
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
+        result = validate_assembly_text(text, package_dir=SAMPLES_DIR)
         assert result.artifact is None
         assert any(d.code == ASM_RES_INVALID for d in result.diagnostics)
 
@@ -147,7 +153,7 @@ class TestUnhappyPath:
             "  series:\n    - grid.electricity_import\n",
             "  series:\n    - ghost.electricity_import\n",
         )
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
+        result = validate_assembly_text(text, package_dir=SAMPLES_DIR)
         assert result.artifact is None
         diag = next(d for d in result.diagnostics if d.code == ASM_OUTPUT_REF)
         assert diag.params["scope"] == "ghost"
@@ -160,30 +166,36 @@ class TestUnhappyPath:
             'schema_version: "2.0.0"\n'
             "assembly:\n  id: bad\n  name: bad\n"
             "project_baseline:\n  resolution: 1h\n  leap_year: false\n  scenario_mode: single\n"
-            "resources:\n  datasets: {}\n"
             "devices:\n"
             "  hp1:\n"
-            "    model: ies.device.heat_pump@2.0.0\n"
-            "    parameters: {rated_heat_kw: 600, cop: 3.5}\n"
+            "    definition:\n"
+            "      id: ies.device.heat_pump\n"
+            "    asset_origin: new\n"
+            "    properties:\n"
+            "      rated_heat_kw:\n"
+            "        value: 600\n"
+            "        unit: kW\n"
+            "      cop:\n"
+            "        value: 3.5\n"
+            '        unit: "1"\n'
+            "    predefined_interfaces: {}\n"
             "connections: {}\n"
             "constraints: {}\n"
             "outputs:\n  series: []\n  metrics: []\n"
             "extensions: {}\n"
         )
-        datasets = {"ds": {"columns": ["e_load"], "column_units": {"e_load": "kWh"}, "resolution": "1h"}}
-        result = validate_assembly_text(text, datasets=datasets)
+        result = validate_assembly_text(text)
         assert result.artifact is None
         assert any(d.code == ASM_INPUT_UNFED for d in result.diagnostics)
 
     def test_nonfinite_parameter_blocks(self, init_registry):
         parsed = parse_assembly_doc((VALID_DIR / "campus.assembly.yaml").read_text())
         assert parsed.doc is not None
-        parsed.doc["devices"]["pv1"]["parameters"]["rated_capacity_kwp"] = float("inf")
-        result = validate_assembly_doc(parsed.doc, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
+        parsed.doc["devices"]["pv1"]["properties"]["rated_capacity_kwp"]["value"] = float("inf")
+        result = validate_assembly_doc(parsed.doc, package_dir=SAMPLES_DIR)
         assert result.artifact is None
-        # 资源已经全部解析为 object 形态,不会触发 resource 诊断;
-        # 非有限值进入模型参数阶段(ASM-INPUT-003)
-        assert any(d.code == ASM_INPUT_RANGE for d in result.diagnostics)
+        # 非有限值在结构阶段即拒绝(非合法标量,阻断)
+        assert any(d.code == "ASM-SYN-005" and d.blocking for d in result.diagnostics)
 
 
 class TestProjectExport:
@@ -246,37 +258,27 @@ class TestProjectExport:
                         "port_type": "thermal",
                         "direction": "out",
                     },
-                    {
-                        "id": 31,
-                        "device_id": 3,
-                        "name": "electricity_demand",
-                        "port_type": "electric",
-                        "direction": "in",
-                    },
                 ],
+                # predefined 接口不进入 connections(需求序列由来源声明提供)
                 "connections": [
                     {"id": 101, "from_port_id": 11, "to_port_id": 21, "loss_rate": 0},
-                    {"id": 102, "from_port_id": 11, "to_port_id": 31, "loss_rate": 0},
                 ],
             },
             "project_baseline": _export_baseline(),
             "dataset_bindings": [{"dataset_version_id": 17}],
         }
-        datasets = {
-            17: {
-                "columns": ["electricity_demand"],
-                "column_units": {"electricity_demand": "kWh"},
-                "resolution": "1h",
-                "media_type": "text/csv",
-            },
-        }
-        result = validate_project_export(content, datasets=datasets)
+        result = validate_project_export(
+            content,
+            predefined_modes={17: "data_repeat"},
+            dataset_contents=_export_contents(17),
+        )
         assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
         artifact = result.artifact
         assert artifact is not None
         # loss_rate 0 → 直接连接;无管道设备
         canonical = artifact.canonical_text
         assert "transport_pipe" not in canonical
+        assert '"mode":"data_repeat"' in canonical
 
     def test_project_export_rejects_missing_baseline(self, init_registry):
         # 缺失项目基线不再静默默认:阻断诊断返回
@@ -321,6 +323,7 @@ class TestProjectExport:
                     {
                         "id": 1,
                         "device_type": "ies.device.grid_connection",
+                        "kind": "existing",
                         "params": {"type_detail": "ies.device.grid_connection"},
                     },
                 ],
@@ -357,7 +360,9 @@ class TestProjectExport:
                 for d in result.diagnostics
             ), (baseline, reason)
 
-    def test_project_export_loss_rate_wraps_pipe(self, init_registry):
+    def test_project_export_lossy_edge_to_predefined_blocked(self, init_registry):
+        # 2.0 下 predefined 接口永不进入 connections:损耗边指向需求接口时，
+        # 即使经管道包裹也不会静默改道，必须阻断(ASM-EDGE-011)
         content = {
             "graph_id": 43,
             "name": "campus_pipe",
@@ -428,21 +433,18 @@ class TestProjectExport:
             "project_baseline": _export_baseline(),
             "dataset_bindings": [{"dataset_version_id": 18}],
         }
-        datasets = {
-            18: {
-                "columns": ["heat_demand"],
-                "column_units": {"heat_demand": "kWh"},
-                "resolution": "1h",
-                "media_type": "text/csv",
-            },
-        }
-        result = validate_project_export(content, datasets=datasets)
-        assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
-        canonical = result.artifact.canonical_text
-        assert "transport_pipe@2.0.0" in canonical
+        result = validate_project_export(
+            content,
+            predefined_modes={18: "data_repeat"},
+            dataset_contents=_export_contents(18),
+        )
+        assert result.artifact is None
+        assert any(
+            d.code == "ASM-EDGE-011" and d.blocking for d in result.diagnostics
+        )
 
     def test_project_export_rejects_unmappable_binding_without_heuristics(self, init_registry):
-        # 无启发式映射: 声明列与模型列不一致 → 阻断(旧 xxx_profile/单列兜底已删除)
+        # 无启发式映射: 声明列与模型 predefined 列不一致 → 阻断
         content = {
             "graph_id": 44,
             "name": "bad_binding",
@@ -451,6 +453,7 @@ class TestProjectExport:
                     {
                         "id": 3,
                         "device_type": "ies.device.electric_load",
+                        "kind": "existing",
                         "params": {
                             "type_detail": "ies.device.electric_load",
                             "load_profile": {"dataset_version_id": 17, "columns": ["nope"], "unit": "kW"},
@@ -463,34 +466,35 @@ class TestProjectExport:
             "project_baseline": _export_baseline(),
             "dataset_bindings": [{"dataset_version_id": 17}],
         }
-        datasets = {
-            17: {
-                "columns": ["nope"],
-                "column_units": {"nope": "kWh"},
-                "resolution": "1h",
-                "media_type": "text/csv",
-            },
-        }
-        result = validate_project_export(content, datasets=datasets)
+        result = validate_project_export(
+            content,
+            predefined_modes={17: "data_repeat"},
+            dataset_contents=_export_contents(17),
+        )
         assert result.artifact is None
         assert any(
             d.params.get("reason") == "data_binding_unmappable" and d.blocking
             for d in result.diagnostics
         )
 
-    def test_project_export_rejects_binding_without_columns(self, init_registry):
-        # 绑定缺 columns 不再回退数据集首列, 直接阻断
+    def test_project_export_rejects_missing_predefined_mode(self, init_registry):
+        # 数据集绑定缺显式来源模式 → 阻断，不猜测 data_repeat/data_predict
         content = {
             "graph_id": 46,
-            "name": "no_columns",
+            "name": "no_mode",
             "model": {
                 "devices": [
                     {
                         "id": 3,
                         "device_type": "ies.device.electric_load",
+                        "kind": "existing",
                         "params": {
                             "type_detail": "ies.device.electric_load",
-                            "load_profile": {"dataset_version_id": 17, "unit": "kW"},
+                            "load_profile": {
+                                "dataset_version_id": 17,
+                                "columns": ["electricity_demand"],
+                                "unit": "kW",
+                            },
                         },
                     },
                 ],
@@ -500,18 +504,13 @@ class TestProjectExport:
             "project_baseline": _export_baseline(),
             "dataset_bindings": [{"dataset_version_id": 17}],
         }
-        datasets = {
-            17: {
-                "columns": ["electricity_demand"],
-                "column_units": {"electricity_demand": "kWh"},
-                "resolution": "1h",
-                "media_type": "text/csv",
-            },
-        }
-        result = validate_project_export(content, datasets=datasets)
+        result = validate_project_export(
+            content,
+            dataset_contents=_export_contents(17),
+        )
         assert result.artifact is None
         assert any(
-            d.params.get("reason") == "data_binding_columns_missing" and d.blocking
+            d.params.get("reason") == "predefined_mode_missing" and d.blocking
             for d in result.diagnostics
         )
 
@@ -532,7 +531,7 @@ class TestProjectExport:
         # 无 id / 端口不可解析 / 1.0 独有 delay_steps 一律阻断, 无静默丢弃;
         # 阻断统一使用 ASM-CONV-001 并携带对应 reason
         base_ports = [{"id": 11, "device_id": 1, "name": "p", "port_type": "electric", "direction": "out"}]
-        base_devices = [{"id": 1, "device_type": "ies.device.grid_connection", "params": {}}]
+        base_devices = [{"id": 1, "device_type": "ies.device.grid_connection", "kind": "existing", "params": {}}]
         cases = [
             ({"connections": [{"from_port_id": 11, "to_port_id": 11}]}, "connection_id_missing"),
             ({"connections": [{"id": 9, "from_port_id": 11, "to_port_id": 99}]}, "connection_port_unresolved"),
@@ -559,14 +558,14 @@ class TestProjectExport:
 class TestArtifactTriple:
     def test_same_semantics_same_canonical_text(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        first = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS).artifact
-        second = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS).artifact
+        first = validate_assembly_text(text, package_dir=SAMPLES_DIR).artifact
+        second = validate_assembly_text(text, package_dir=SAMPLES_DIR).artifact
         assert first is not None and second is not None
         assert first.canonical_text == second.canonical_text
 
     def test_artifact_invariants(self, init_registry):
         text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
-        result = validate_assembly_text(text, package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS)
+        result = validate_assembly_text(text, package_dir=SAMPLES_DIR)
         artifact = result.artifact
         # 不可变(校验尝试修改失败)
         with pytest.raises(FrozenInstanceError):

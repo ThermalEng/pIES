@@ -35,19 +35,21 @@ from typing import Any
 
 from iesplan.assembly.builder import build_assembly_doc_from_content
 from iesplan.assembly.canonicalizer import canonicalize_assembly_doc
+from iesplan.assembly.context import units_compatible
 from iesplan.assembly.contracts import (
     AssemblyValidationError,
     ValidatedAssemblyArtifact,
     ValidationReceipt,
 )
 from iesplan.assembly.diags import (
-    ASM_INPUT_DATA_UNIT,
+    ASM_BIND_INVALID,
+    ASM_EDGE_BAD_ENDPOINT,
     ASM_INPUT_PARAM,
+    ASM_INPUT_PROP_UNIT,
     ASM_INPUT_RANGE,
     ASM_INPUT_UNDECLARED,
     ASM_INPUT_UNFED,
     ASM_OUTPUT_REF,
-    ASM_REF_DATASET,
     ASM_REF_MODEL_UNREG,
     ASM_RES_INVALID,
 )
@@ -58,7 +60,6 @@ from iesplan.assembly.schema import (
     AssemblyDevice,
     AssemblyEdge,
     AssemblySpec,
-    DataRef,
     TimeAxisRef,
 )
 from iesplan.core.diagnostics import Diagnostic
@@ -85,51 +86,60 @@ def validate_assembly_text(
     *,
     source_name: str = "assembly.yaml",
     package_dir: str | Path | None = None,
-    datasets: Mapping[str, Mapping] | None = None,
+    dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> AssemblyValidationResult:
-    """手写装配 YAML 文本 → 单管线校验(安全解析一次 + 结构/领域校验一次)。"""
+    """手写装配 YAML 文本 → 单管线校验(安全解析一次 + 结构/领域校验一次)。
+
+    dataset_contents 为显式注入的预定义文件内容 {path: {object_id,
+    media_type, data}}，供包外调用方(项目导出)提供对象存储字节；
+    包内相对路径缺省从 package_dir 读取。
+    """
     parsed = parse_assembly_doc(text, source_name=source_name)
     if parsed.doc is None:
         return AssemblyValidationResult(diagnostics=list(parsed.diagnostics), artifact=None)
-    return validate_assembly_doc(parsed.doc, package_dir=package_dir, datasets=datasets)
+    return validate_assembly_doc(
+        parsed.doc, package_dir=package_dir, dataset_contents=dataset_contents
+    )
 
 
 def validate_assembly_doc(
     doc: Mapping[str, Any],
     *,
     package_dir: str | Path | None = None,
-    datasets: Mapping[str, Mapping] | None = None,
+    dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> AssemblyValidationResult:
     """ies.assembly 2.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
 
     doc 为安全解析后的 plain dict(手写文本经 ``parse_assembly_doc`` 产生,
-    GUI 导出经构造器产生);本入口做唯一一次结构校验,随后进入资源/模型/
-    数据 + 图/系统 + 计算兼容领域校验。手写与 GUI 共用同一管线,不重复
-    结构校验。
+    GUI 导出经构造器产生);本入口做唯一一次结构校验,随后进入模型/
+    属性/预定义来源 + 图/系统 + 输出引用领域校验。手写与 GUI 共用同一
+    管线,不重复结构校验。
     """
     diags: list[Diagnostic] = []
     tree = run_structure_checks(dict(doc), source_name="<doc>", diags=diags)
     if tree is None:
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
-    return _run_validation(tree, package_dir=package_dir, datasets=datasets)
+    return _run_validation(tree, package_dir=package_dir, dataset_contents=dataset_contents)
 
 
 def validate_project_export(
     content: Mapping,
     *,
-    datasets: Mapping[int, Mapping] | None = None,
+    predefined_modes: Mapping[int, str] | None = None,
+    dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> AssemblyValidationResult:
     """GUI 项目导出入口:
 
     项目内容 → 构造器构造 ies.assembly 2.0.0 文档 → 与手写文件同一校验
-    入口(结构一次 + 领域阶段)。datasets 为 int 索引的元信息
-    {vid: {columns, column_units, resolution, media_type}}。
+    入口(结构一次 + 领域阶段)。predefined_modes 为数据集版本到预定义
+    来源模式的显式映射 {vid: constant|data_repeat|data_predict}，缺失不
+    猜测；dataset_contents 为合成路径到对象字节的显式注入。
     """
-    built = build_assembly_doc_from_content(content, datasets=datasets)
+    built = build_assembly_doc_from_content(content, predefined_modes=predefined_modes)
     if built.doc is None:
         return AssemblyValidationResult(diagnostics=list(built.diagnostics), artifact=None)
     # builder 内部产生的阻断诊断合并
-    return validate_assembly_doc(built.doc, datasets=_string_keyed_datasets(datasets))
+    return validate_assembly_doc(built.doc, dataset_contents=dataset_contents)
 
 
 # ---------------------------------------------------------------------------
@@ -141,39 +151,35 @@ def _run_validation(
     doc: dict[str, Any],
     *,
     package_dir: str | Path | None,
-    datasets: Mapping[str, Mapping] | None,
+    dataset_contents: Mapping[str, Mapping[str, Any]] | None,
 ) -> AssemblyValidationResult:
     diags: list[Diagnostic] = []
-    datasets_meta = dict(datasets or {})
     registry = _device_registry()
 
-    # --- 阶段 2:模型与数据(严格精确版本) --------------------------------
+    # --- 阶段 2:模型 / 属性 / 预定义来源 --------------------------------
     _check_devices(doc, registry, diags)
-    _check_data_bindings(doc, datasets_meta, registry, diags)
-    _check_required_parameters(doc, registry, diags)
+    _check_properties(doc, registry, diags)
+    resource_media = _check_predefined(doc, registry, package_dir, dataset_contents, diags)
 
-    if _any_blocking(diags):
-        return AssemblyValidationResult(diagnostics=diags, artifact=None)
-
-    # --- 资源解析(相对路径 → 对象形态引用) -------------------------------
-    resolved_doc, resource_media, res_diags = _resolve_resources(doc, package_dir)
-    diags.extend(res_diags)
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
 
     # --- 阶段 3:图与系统(端口 / 边 / 母线 / 约束) -----------------------
-    _phase3_graph_system(resolved_doc, datasets_meta, registry, diags)
+    _check_connection_endpoints(doc, registry, diags)
+    if _any_blocking(diags):
+        return AssemblyValidationResult(diagnostics=diags, artifact=None)
+    _phase3_graph_system(doc, registry, diags)
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
 
-    # --- 阶段 4:计算兼容 --------------------------------------------------
+    # --- 阶段 4:输出引用 --------------------------------------------------
     _phase4_outputs(doc, diags)
 
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
 
     # --- 规范化与产物签发 --------------------------------------------------
-    canonical_text = canonicalize_assembly_doc(resolved_doc)
+    canonical_text = canonicalize_assembly_doc(doc)
     dependency_lock = _dependency_lock(doc, registry)
     receipt = ValidationReceipt(
         dependencies=dependency_lock,
@@ -191,56 +197,48 @@ def _run_validation(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 阶段 2:模型 / 属性 / 预定义来源
+# ---------------------------------------------------------------------------
+
+
+def _definition_id(dev: Mapping) -> str:
+    """实例 definition.id(裸稳定设备 ID；结构阶段已拒绝 @钉选)。"""
+    definition = dev.get("definition")
+    if isinstance(definition, Mapping):
+        raw = definition.get("id")
+        if isinstance(raw, str):
+            return raw
+    return ""
+
+
 def _check_devices(doc: dict, registry, diags: list[Diagnostic]) -> None:
     for dev_id, dev in (doc.get("devices") or {}).items():
         if not isinstance(dev, Mapping):
             continue
-        model = dev.get("model")
-        type_id, version = _split_ref(model) if isinstance(model, str) else ("", None)
+        type_id = _definition_id(dev)
         if type_id not in registry:
             diags.append(
                 make_diag(
                     ASM_REF_MODEL_UNREG,
                     severity="error",
                     blocking=True,
-                    params={"device": dev_id, "model": model, "type_id": type_id},
-                    location={"object_type": "device", "object_id": dev_id, "field": "model"},
-                )
-            )
-            continue
-        descriptor = registry[type_id]
-        declared_version = descriptor.schema_version
-        if version != declared_version:
-            # ies.assembly 2.0.0 强制精确版本:版本不一致阻断
-            diags.append(
-                make_diag(
-                    ASM_REF_MODEL_UNREG,
-                    severity="error",
-                    blocking=True,
-                    params={
-                        "device": dev_id,
-                        "model": model,
-                        "type_id": type_id,
-                        "registered": f"{type_id}@{declared_version}",
-                        "reason": "version_mismatch",
-                    },
-                    location={"object_type": "device", "object_id": dev_id, "field": "model"},
+                    params={"device": dev_id, "definition": type_id},
+                    location={"object_type": "device", "object_id": dev_id, "field": "definition.id"},
                 )
             )
 
 
-def _check_required_parameters(doc: dict, registry, diags: list[Diagnostic]) -> None:
+def _check_properties(doc: dict, registry, diags: list[Diagnostic]) -> None:
+    """properties: 只允许已声明字段；数值有限；单位与模型量纲兼容；值域越界非阻断。"""
     for dev_id, dev in (doc.get("devices") or {}).items():
         if not isinstance(dev, Mapping):
             continue
-        model = dev.get("model")
-        type_id, _ = _split_ref(model) if isinstance(model, str) else ("", None)
-        descriptor = registry.get(type_id)
+        descriptor = registry.get(_definition_id(dev))
         if descriptor is None:
             continue
-        # 参数只允许已声明字段
-        params_raw = dev.get("parameters") or {}
-        for name, value in params_raw.items():
+        props = dev.get("properties") or {}
+        for name, entry in props.items():
             if name not in descriptor.properties:
                 diags.append(
                     make_diag(
@@ -251,31 +249,35 @@ def _check_required_parameters(doc: dict, registry, diags: list[Diagnostic]) -> 
                         location={
                             "object_type": "device",
                             "object_id": dev_id,
-                            "field": f"parameters.{name}",
+                            "field": f"properties.{name}",
                         },
                     )
                 )
                 continue
             ps = descriptor.properties[name]
-            # 非有限值阻断(不依赖本地约定;宪法定量契约)
-            if isinstance(value, float) and not math.isfinite(value):
-                diags.append(
-                    make_diag(
-                        ASM_INPUT_RANGE,
-                        severity="error",
-                        blocking=True,
-                        params={"device": dev_id, "param": name, "value": str(value), "reason": "non_finite"},
-                        location={
-                            "object_type": "device",
-                            "object_id": dev_id,
-                            "field": f"parameters.{name}",
-                        },
+            value = entry.get("value") if isinstance(entry, Mapping) else None
+            unit = entry.get("unit") if isinstance(entry, Mapping) else ""
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if not math.isfinite(float(value)):
+                    diags.append(
+                        make_diag(
+                            ASM_INPUT_RANGE,
+                            severity="error",
+                            blocking=True,
+                            params={
+                                "device": dev_id,
+                                "param": name,
+                                "value": str(value),
+                                "reason": "non_finite",
+                            },
+                            location={
+                                "object_type": "device",
+                                "object_id": dev_id,
+                                "field": f"properties.{name}.value",
+                            },
+                        )
                     )
-                )
-                continue
-            if isinstance(value, bool) or value is None:
-                continue
-            if isinstance(value, (int, float)):
+                    continue
                 if ps.minimum is not None and float(value) < ps.minimum:
                     diags.append(
                         make_diag(
@@ -286,7 +288,7 @@ def _check_required_parameters(doc: dict, registry, diags: list[Diagnostic]) -> 
                             location={
                                 "object_type": "device",
                                 "object_id": dev_id,
-                                "field": f"parameters.{name}",
+                                "field": f"properties.{name}.value",
                             },
                         )
                     )
@@ -300,240 +302,321 @@ def _check_required_parameters(doc: dict, registry, diags: list[Diagnostic]) -> 
                             location={
                                 "object_type": "device",
                                 "object_id": dev_id,
-                                "field": f"parameters.{name}",
+                                "field": f"properties.{name}.value",
                             },
                         )
                     )
+            if isinstance(unit, str) and unit and not units_compatible(unit, ps.unit):
+                diags.append(
+                    make_diag(
+                        ASM_INPUT_PROP_UNIT,
+                        severity="error",
+                        blocking=True,
+                        params={"device": dev_id, "param": name, "unit": unit, "expected": ps.unit},
+                        location={
+                            "object_type": "device",
+                            "object_id": dev_id,
+                            "field": f"properties.{name}.unit",
+                        },
+                    )
+                )
 
 
-def _check_data_bindings(
+def _check_predefined(
     doc: dict,
-    datasets_meta: Mapping[str, Mapping],
     registry,
+    package_dir: str | Path | None,
+    dataset_contents: Mapping[str, Mapping[str, Any]] | None,
     diags: list[Diagnostic],
-) -> None:
-    declared_datasets = set((doc.get("resources") or {}).get("datasets") or {})
+) -> dict[str, dict]:
+    """预定义来源声明: 槽覆盖 + 槽类型 + 文件内容确认。
+
+    每个 predefined 接口必须恰好有一个显式绑定，缺失/多余/绑到非
+    predefined 接口均阻断；不得回退到设备文件自带来源。文件绑定读取
+    字节并按绑定上下文确认(device_id/mode/分辨率/step/列/单位/值域)。
+    返回资源记录 {path: {"media_type"}}；文件绑定的 content 身份就地
+    写入绑定映射(规范文本保留 path 与 content)。
+    """
+    resources: dict[str, dict] = {}
+    contents = dict(dataset_contents or {})
+    baseline = doc.get("project_baseline") or {}
+    resolution = baseline.get("resolution")
+    leap_year = baseline.get("leap_year", False)
     for dev_id, dev in (doc.get("devices") or {}).items():
         if not isinstance(dev, Mapping):
             continue
-        data_block = dev.get("data") or {}
-        # 注:predefined 接口缺显式数据绑定不阻断 —— 接口 source.data_ref
-        # 自带默认数据路径(2.0 唯一数据路径);设备参数关键字直接引用项目相对
-        # CSV, 无 data_refs/对象绑定机制。此处只校验已给出绑定的引用完整性。
-        for col_key, binding in data_block.items():
-            if not isinstance(binding, Mapping):
-                continue
-            ds_id = binding.get("dataset")
-            column = binding.get("column")
-            if not isinstance(ds_id, str) or ds_id not in declared_datasets:
+        type_id = _definition_id(dev)
+        descriptor = registry.get(type_id)
+        if descriptor is None:
+            continue
+        bindings = dev.get("predefined_interfaces") or {}
+        for iface_id, binding in bindings.items():
+            iface = descriptor.interfaces.get(iface_id)
+            if iface is None:
                 diags.append(
                     make_diag(
-                        ASM_REF_DATASET,
+                        ASM_BIND_INVALID,
                         severity="error",
                         blocking=True,
-                        params={
-                            "device": dev_id,
-                            "ref": str(col_key),
-                            "reason": "dataset_not_in_resources",
-                            "dataset_id": str(ds_id),
+                        params={"device": dev_id, "interface": str(iface_id), "reason": "unknown_interface"},
+                        location={
+                            "object_type": "device",
+                            "object_id": dev_id,
+                            "field": f"predefined_interfaces.{iface_id}",
                         },
-                        location={"object_type": "device", "object_id": dev_id, "field": f"data.{col_key}"},
                     )
                 )
                 continue
-            if not isinstance(column, str) or not column:
+            if iface.type != "predefined":
                 diags.append(
                     make_diag(
-                        ASM_REF_DATASET,
+                        ASM_BIND_INVALID,
                         severity="error",
                         blocking=True,
                         params={
                             "device": dev_id,
-                            "ref": str(col_key),
-                            "reason": "column_undeclared",
-                            "dataset_id": str(ds_id),
+                            "interface": iface_id,
+                            "reason": "not_predefined_slot",
+                            "actual_type": iface.type,
                         },
                         location={
                             "object_type": "device",
                             "object_id": dev_id,
-                            "field": f"data.{col_key}.column",
+                            "field": f"predefined_interfaces.{iface_id}",
                         },
                     )
                 )
                 continue
-            meta = datasets_meta.get(ds_id) if datasets_meta else None
-            if isinstance(meta, Mapping) and meta:
-                ds_cols = meta.get("columns") or []
-                if isinstance(ds_cols, list) and ds_cols and column not in ds_cols:
-                    diags.append(
-                        make_diag(
-                            ASM_REF_DATASET,
-                            severity="error",
-                            blocking=True,
-                            params={
-                                "device": dev_id,
-                                "ref": str(col_key),
-                                "reason": "column_not_in_dataset",
-                                "dataset_id": str(ds_id),
-                                "column": column,
-                            },
-                            location={
-                                "object_type": "device",
-                                "object_id": dev_id,
-                                "field": f"data.{col_key}.column",
-                            },
-                        )
-                    )
-                ds_resolution = meta.get("resolution")
-                if isinstance(ds_resolution, str) and ds_resolution:
-                    axis_res = (doc.get("project_baseline") or {}).get("resolution")
-                    if isinstance(axis_res, str) and axis_res and ds_resolution != axis_res:
-                        diags.append(
-                            make_diag(
-                                ASM_REF_DATASET,
-                                severity="error",
-                                blocking=True,
-                                params={
-                                    "device": dev_id,
-                                    "ref": str(col_key),
-                                    "reason": "resolution_mismatch",
-                                    "declared": ds_resolution,
-                                    "project_baseline": axis_res,
-                                },
-                                location={
-                                    "object_type": "device",
-                                    "object_id": dev_id,
-                                    "field": f"data.{col_key}",
-                                },
-                            )
-                        )
-                # 单位量纲一致(数据列单位 vs 模型 data_inputs 列单位)
-                if isinstance(meta.get("column_units"), Mapping):
-                    declared_unit = str(meta["column_units"].get(column) or "")
-                    if declared_unit:
-                        from iesplan.assembly.context import units_compatible
-
-                        descriptor = _descriptor_for(registry, dev.get("model"))
-                        if descriptor is not None:
-                            target_unit = next(
-                                (
-                                    d.unit
-                                    for d in descriptor.interfaces.values()
-                                    if d.type == "predefined" and d.id == col_key
-                                ),
-                                "",
-                            )
-                            if target_unit and not units_compatible(declared_unit, target_unit):
-                                diags.append(
-                                    make_diag(
-                                        ASM_INPUT_DATA_UNIT,
-                                        severity="error",
-                                        blocking=True,
-                                        params={
-                                            "device": dev_id,
-                                            "ref": str(col_key),
-                                            "unit": declared_unit,
-                                            "expected": target_unit,
-                                        },
-                                        location={
-                                            "object_type": "device",
-                                            "object_id": dev_id,
-                                            "field": f"data.{col_key}",
-                                        },
-                                    )
-                                )
-
-
-# ---------------------------------------------------------------------------
-# 资源解析
-# ---------------------------------------------------------------------------
-
-
-def _resolve_resources(
-    doc: dict,
-    package_dir: str | Path | None,
-) -> tuple[dict, dict, list[Diagnostic]]:
-    """resources.datasets 声明规范化为 object 形态引用。
-
-    返回(resolved_doc, resource_media, diagnostics)。
-    resource_media = {dataset_id: {"media_type"}} → 回执 resources 字段。
-    失败 → diag ASM_RES_INVALID 阻断。
-    """
-    diags: list[Diagnostic] = []
-    resources = doc.get("resources") or {}
-    datasets = dict(resources.get("datasets") or {})
-    resource_media: dict[str, dict] = {}
-    for ds_id, entry in datasets.items():
-        if not isinstance(entry, Mapping):
-            continue
-        src = entry.get("source") or {}
-        kind = src.get("kind")
-        if kind == "object":
-            media = str(src.get("media_type") or "")
-            object_id = str(src.get("object_id") or "")
-            entry["source"] = {
-                "kind": "object",
-                "object_id": object_id,
-                "media_type": media,
-            }
-            resource_media[str(ds_id)] = {"media_type": media}
-            continue
-        if kind == "relative_file":
-            if package_dir is None:
-                diags.append(
-                    make_diag(
-                        ASM_RES_INVALID,
-                        severity="error",
-                        blocking=True,
-                        params={"reason": "package_dir_required", "dataset_id": str(ds_id)},
-                        location={"object_type": "assembly", "field": f"resources.datasets.{ds_id}.source"},
-                    )
-                )
+            if not isinstance(binding, Mapping):
                 continue
-            rel_path = src.get("path") or ""
-            full_path = Path(package_dir) / rel_path
-            try:
-                data = full_path.read_bytes()
-            except OSError as exc:
+            mode = binding.get("mode")
+            if mode == "constant":
+                continue
+            path = binding.get("path")
+            payload = contents.get(path) if isinstance(path, str) else None
+            if payload is None and isinstance(path, str) and package_dir is not None:
+                payload = _read_package_csv(package_dir, path, dev_id, iface_id, diags)
+            if payload is None:
                 diags.append(
                     make_diag(
                         ASM_RES_INVALID,
                         severity="error",
                         blocking=True,
                         params={
-                            "reason": "file_unreadable",
-                            "dataset_id": str(ds_id),
-                            "path": str(full_path),
-                            "detail": str(exc),
+                            "reason": "content_unavailable",
+                            "device": dev_id,
+                            "interface": iface_id,
+                            "path": str(path),
                         },
                         location={
-                            "object_type": "assembly",
-                            "field": f"resources.datasets.{ds_id}.source.path",
+                            "object_type": "device",
+                            "object_id": dev_id,
+                            "field": f"predefined_interfaces.{iface_id}.path",
                         },
                     )
                 )
                 continue
-            media = _infer_media_type(rel_path)
-            entry["source"] = {
-                "kind": "object",
-                "object_id": f"file:{rel_path}",
-                "media_type": media,
-            }
-            resource_media[str(ds_id)] = {"media_type": media}
-            continue
-        # 未知 kind 已被结构阶段拒绝,此处忽略
-    out = dict(doc)
-    out["resources"] = {"datasets": datasets}
-    return out, resource_media, diags
+            if _check_csv_binding(
+                dev_id, type_id, iface_id, iface, binding, payload, resolution, leap_year, diags
+            ):
+                object_id = payload.get("object_id", "")
+                media_type = payload.get("media_type", "") or "text/csv"
+                binding["content"] = {"object_id": object_id, "media_type": media_type}
+                resources[str(path)] = {"media_type": media_type}
+        for iface_id, iface in descriptor.interfaces.items():
+            if iface.type == "predefined" and iface_id not in bindings:
+                diags.append(
+                    make_diag(
+                        ASM_BIND_INVALID,
+                        severity="error",
+                        blocking=True,
+                        params={"device": dev_id, "interface": iface_id, "reason": "missing_binding"},
+                        location={
+                            "object_type": "device",
+                            "object_id": dev_id,
+                            "field": f"predefined_interfaces.{iface_id}",
+                        },
+                    )
+                )
+    return resources
 
 
-def _infer_media_type(path: str) -> str:
-    lower = path.lower()
-    if lower.endswith(".csv"):
-        return "text/csv"
-    if lower.endswith((".yaml", ".yml")):
-        return "application/yaml"
-    return "application/octet-stream"
+def _read_package_csv(
+    package_dir: str | Path,
+    path: str,
+    dev_id: object,
+    iface_id: object,
+    diags: list[Diagnostic],
+) -> Mapping[str, Any] | None:
+    """包内相对 CSV 读取为 {object_id, media_type, data}；不可读返回 None(已记诊断)。"""
+    full_path = Path(package_dir) / path
+    try:
+        data = full_path.read_bytes()
+    except OSError as exc:
+        diags.append(
+            make_diag(
+                ASM_RES_INVALID,
+                severity="error",
+                blocking=True,
+                params={
+                    "reason": "file_unreadable",
+                    "device": str(dev_id),
+                    "interface": str(iface_id),
+                    "path": str(full_path),
+                    "detail": str(exc),
+                },
+                location={
+                    "object_type": "device",
+                    "object_id": str(dev_id),
+                    "field": f"predefined_interfaces.{iface_id}.path",
+                },
+            )
+        )
+        return None
+    return {"object_id": f"file:{path}", "media_type": "text/csv", "data": data}
+
+
+def _bind_fail(
+    diags: list[Diagnostic],
+    dev_id: str,
+    iface_id: str,
+    reason: str,
+    extra: dict | None = None,
+) -> None:
+    params = {"device": dev_id, "interface": iface_id, "reason": reason}
+    if extra:
+        params.update(extra)
+    diags.append(
+        make_diag(
+            ASM_BIND_INVALID,
+            severity="error",
+            blocking=True,
+            params=params,
+            location={
+                "object_type": "device",
+                "object_id": dev_id,
+                "field": f"predefined_interfaces.{iface_id}",
+            },
+        )
+    )
+
+
+def _check_csv_binding(
+    dev_id: str,
+    type_id: str,
+    iface_id: str,
+    iface,
+    binding: Mapping,
+    payload: Mapping[str, Any],
+    resolution: object,
+    leap_year: object,
+    diags: list[Diagnostic],
+) -> bool:
+    """绑定 CSV 内容确认(device_id/mode/分辨率/step/列/单位/值域)。"""
+    from iesplan.devices import parse_data_file_v2, repeat_cycle_lengths
+
+    data = payload.get("data")
+    if not isinstance(data, (bytes, bytearray)):
+        _bind_fail(diags, dev_id, iface_id, "content_unavailable")
+        return False
+    parsed, parse_diags = parse_data_file_v2(bytes(data))
+    diags.extend(parse_diags)
+    if parsed is None or any(d.blocking for d in parse_diags):
+        return False
+    meta = parsed.meta
+    mode = binding.get("mode")
+    if meta.device_id != type_id:
+        _bind_fail(
+            diags, dev_id, iface_id, "csv_device_mismatch",
+            {"expected": type_id, "actual": meta.device_id},
+        )
+        return False
+    if meta.source_mode != mode:
+        _bind_fail(
+            diags, dev_id, iface_id, "csv_mode_mismatch",
+            {"expected": mode, "actual": meta.source_mode},
+        )
+        return False
+    if meta.resolution != resolution:
+        _bind_fail(
+            diags, dev_id, iface_id, "csv_resolution_mismatch",
+            {"expected": resolution, "actual": meta.resolution},
+        )
+        return False
+    header = [str(cell) for cell in parsed.header]
+    col = iface_id.lower()
+    if col not in header:
+        _bind_fail(
+            diags, dev_id, iface_id, "csv_column_missing",
+            {"column": iface_id, "header": header},
+        )
+        return False
+    col_idx = header.index(col)
+    steps: list[int] = []
+    for row_no, row in enumerate(parsed.rows):
+        cell = row[0].strip() if len(row) > 0 else ""
+        try:
+            step = int(cell)
+        except (TypeError, ValueError):
+            _bind_fail(
+                diags, dev_id, iface_id, "csv_step_gap",
+                {"row": row_no + 1, "value": cell},
+            )
+            return False
+        if step != len(steps):
+            _bind_fail(
+                diags, dev_id, iface_id, "csv_step_gap",
+                {"row": row_no + 1, "expected": len(steps), "actual": step},
+            )
+            return False
+        steps.append(step)
+        if col_idx >= len(row):
+            _bind_fail(diags, dev_id, iface_id, "csv_empty_value", {"row": row_no + 1})
+            return False
+        raw_val = row[col_idx].strip()
+        if not raw_val:
+            _bind_fail(diags, dev_id, iface_id, "csv_empty_value", {"row": row_no + 1})
+            return False
+        try:
+            number = float(raw_val)
+        except ValueError:
+            _bind_fail(
+                diags, dev_id, iface_id, "csv_bad_number",
+                {"row": row_no + 1, "value": raw_val},
+            )
+            return False
+        if not math.isfinite(number):
+            _bind_fail(
+                diags, dev_id, iface_id, "csv_bad_number",
+                {"row": row_no + 1, "value": raw_val, "detail": "non_finite"},
+            )
+            return False
+        minimum, maximum = iface.valid_range or (None, None)
+        if (minimum is not None and number < minimum) or (maximum is not None and number > maximum):
+            _bind_fail(
+                diags, dev_id, iface_id, "csv_out_of_range",
+                {"row": row_no + 1, "value": number, "min": minimum, "max": maximum},
+            )
+            return False
+    unit = meta.units.get(iface_id, meta.units.get(col, ""))
+    if not unit:
+        _bind_fail(diags, dev_id, iface_id, "csv_unit_missing", {"column": iface_id})
+        return False
+    if not units_compatible(unit, iface.unit):
+        _bind_fail(
+            diags, dev_id, iface_id, "csv_unit_mismatch",
+            {"unit": unit, "expected": iface.unit},
+        )
+        return False
+    if mode == "data_repeat":
+        day, week, year = repeat_cycle_lengths(str(resolution), leap_year=bool(leap_year))
+        if len(steps) not in (day, week, year):
+            _bind_fail(
+                diags, dev_id, iface_id, "csv_repeat_length",
+                {"actual": len(steps), "expected": [day, week, year]},
+            )
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -541,9 +624,42 @@ def _infer_media_type(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _check_connection_endpoints(doc: dict, registry, diags: list[Diagnostic]) -> None:
+    """connections 端点类型: predefined/blind 永不进入 connections。"""
+    dev_type: dict[str, str] = {}
+    for dev_id, dev in (doc.get("devices") or {}).items():
+        if isinstance(dev, Mapping):
+            dev_type[str(dev_id)] = _definition_id(dev)
+    for edge_id, conn in (doc.get("connections") or {}).items():
+        if not isinstance(conn, Mapping):
+            continue
+        for side in ("from", "to"):
+            ref = conn.get(side)
+            if not isinstance(ref, str) or "." not in ref:
+                continue
+            dev_id, _, iface_id = ref.partition(".")
+            descriptor = registry.get(dev_type.get(dev_id, ""))
+            if descriptor is None:
+                continue
+            iface = descriptor.interfaces.get(iface_id)
+            if iface is not None and iface.type in ("predefined", "blind"):
+                diags.append(
+                    make_diag(
+                        ASM_EDGE_BAD_ENDPOINT,
+                        severity="error",
+                        blocking=True,
+                        params={"edge": edge_id, "side": side, "ref": ref, "type": iface.type},
+                        location={
+                            "object_type": "edge",
+                            "object_id": edge_id,
+                            "field": side,
+                        },
+                    )
+                )
+
+
 def _phase3_graph_system(
-    resolved_doc: dict,
-    datasets_meta: Mapping[str, Mapping],
+    doc: dict,
     registry,
     diags: list[Diagnostic],
 ) -> dict:
@@ -553,8 +669,8 @@ def _phase3_graph_system(
     from iesplan.assembly.context import CheckContext
     from iesplan.assembly.rules import run_constraint_checks, run_phase_b, run_phase_d
 
-    spec = _spec_from_doc(resolved_doc, datasets_meta)
-    resolution = (resolved_doc.get("project_baseline") or {}).get("resolution", "1h")
+    spec = _spec_from_doc(doc)
+    resolution = (doc.get("project_baseline") or {}).get("resolution", "1h")
     ctx = CheckContext(registry=registry, time_axis={"resolution": resolution})
     # run_phase_b 内部 ensure_ports(spec, ctx)
     b_diags = run_phase_b(spec, ctx)
@@ -572,32 +688,20 @@ def _phase3_graph_system(
     return {}
 
 
-def _spec_from_doc(doc: dict, datasets_meta: Mapping[str, Mapping]) -> AssemblySpec:
+def _spec_from_doc(doc: dict) -> AssemblySpec:
     devices: list[AssemblyDevice] = []
     for dev_id, dev in (doc.get("devices") or {}).items():
-        data_block = dev.get("data") or {}
-        data_refs: list[DataRef] = []
-        for col_key, binding in data_block.items():
-            ds_id = str((binding or {}).get("dataset") or "")
-            column = str((binding or {}).get("column") or "")
-            meta = datasets_meta.get(ds_id) if isinstance(datasets_meta, Mapping) else None
-            units = meta.get("column_units") if isinstance(meta, Mapping) else None
-            data_refs.append(
-                DataRef(
-                    key=str(col_key),
-                    dataset_version_id=0,
-                    dataset_name=ds_id,
-                    columns=[column] if column else [],
-                    unit=str(units.get(column) or "") if isinstance(units, Mapping) else "",
-                    resolution=str(meta.get("resolution") or "") if isinstance(meta, Mapping) else "",
-                )
-            )
+        if not isinstance(dev, Mapping):
+            continue
+        properties = dev.get("properties") or {}
+        predefined = dev.get("predefined_interfaces") or {}
         devices.append(
             AssemblyDevice(
                 id=str(dev_id),
-                model=str(dev.get("model") or ""),
-                params=dict(dev.get("parameters") or {}),
-                data_refs=data_refs,
+                definition_id=_definition_id(dev),
+                kind=str(dev.get("asset_origin") or "existing"),
+                properties={str(k): dict(v) for k, v in properties.items() if isinstance(v, Mapping)},
+                predefined={str(k): dict(v) for k, v in predefined.items() if isinstance(v, Mapping)},
             )
         )
     edges: list[AssemblyEdge] = []
@@ -664,7 +768,7 @@ def _check_input_unfed(spec: AssemblySpec, ctx, diags: list[Diagnostic]) -> None
     in_edges: dict[str, list[str]] = {}
     for edge in spec.edges:
         in_edges.setdefault(edge.to_port, []).append(edge.id)
-    model_of = {d.id: d.model for d in spec.devices}
+    model_of = {d.id: d.definition_id for d in spec.devices}
     grid_used_cache: dict[str, bool] = {}
     for port_ref, port in ports.items():
         if port.direction != "in" or port.carrier in EXOGENOUS_SUPPLY_CARRIERS:
@@ -741,25 +845,18 @@ def _phase4_outputs(doc: dict, diags: list[Diagnostic]) -> None:
 
 
 def _dependency_lock(doc: dict, registry) -> dict:
+    """设备内容锁: {稳定设备 ID: 统一 schema 版本}(裸 ID，无 @钉选)。"""
     devices_lock: dict[str, str] = {}
     for dev in (doc.get("devices") or {}).values():
-        model = dev.get("model")
-        if not isinstance(model, str):
+        if not isinstance(dev, Mapping):
             continue
-        type_id, version = _split_ref(model)
-        if not version:
-            continue
-        devices_lock[type_id] = version
+        type_id = _definition_id(dev)
+        descriptor = registry.get(type_id)
+        if descriptor is not None:
+            devices_lock[type_id] = descriptor.schema_version
     return {
         "devices": dict(sorted(devices_lock.items())),
     }
-
-
-def _descriptor_for(registry, model: Any):
-    if not isinstance(model, str):
-        return None
-    type_id, _ = _split_ref(model)
-    return registry.get(type_id)
 
 
 def _device_registry() -> dict:
@@ -769,21 +866,8 @@ def _device_registry() -> dict:
     return {desc.device.id: desc for desc in list_devices() if desc.device is not None}
 
 
-def _split_ref(ref: str) -> tuple[str, str | None]:
-    if "@" in ref:
-        type_id, _, version = ref.rpartition("@")
-        return type_id, version or None
-    return ref, None
-
-
 def _any_blocking(diags: list[Diagnostic]) -> bool:
     return any(d.blocking for d in diags)
-
-
-def _string_keyed_datasets(datasets: Mapping[int, Mapping] | None) -> dict[str, Mapping]:
-    if not datasets:
-        return {}
-    return {f"ds{int(vid)}": meta for vid, meta in datasets.items()}
 
 
 __all__ = [

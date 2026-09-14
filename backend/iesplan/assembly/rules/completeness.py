@@ -26,11 +26,8 @@ from iesplan.assembly.context import (
     grid_side_used,
     resolve_model,
     split_model,
-    units_compatible,
 )
 from iesplan.assembly.diags import (
-    ASM_INPUT_DATA_UNIT,
-    ASM_INPUT_RANGE,
     ASM_INPUT_UNFED,
     ASM_PIPE_DELAY_MISSING,
     ASM_PIPE_DELAY_RANGE,
@@ -69,33 +66,16 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
             seen_ids[dev.id] = dev.id
 
     for dev in spec.devices:
-        type_id, version = split_model(dev.model)
-        type_spec, is_pipeline = resolve_model(ctx, dev.model)
+        type_id, _ = split_model(dev.definition_id)
+        type_spec, is_pipeline = resolve_model(ctx, dev.definition_id)
         if type_spec is None:
             diags.append(
                 make_diag(
                     ASM_REF_MODEL_UNREG,
                     severity="error",
                     blocking=True,
-                    params={"device": dev.id, "model": dev.model, "type_id": type_id},
-                    location={"object_type": "device", "object_id": dev.id, "field": "model"},
-                )
-            )
-        elif version is not None and version != type_spec.schema_version:
-            # 类型已注册但版本陈旧(设备创建时固化的注册表快照版本 ≠ 当前版本):
-            # 非阻断 —— 引擎按当前注册版本运行, 拒绝会破坏既有项目在目录升级后的提交
-            diags.append(
-                make_diag(
-                    ASM_REF_MODEL_UNREG,
-                    severity="warning",
-                    blocking=False,
-                    params={
-                        "device": dev.id,
-                        "model": dev.model,
-                        "type_id": type_id,
-                        "registered": f"{type_id}@{type_spec.schema_version}",
-                    },
-                    location={"object_type": "device", "object_id": dev.id, "field": "model"},
+                    params={"device": dev.id, "definition": dev.definition_id, "type_id": type_id},
+                    location={"object_type": "device", "object_id": dev.id, "field": "definition.id"},
                 )
             )
 
@@ -237,7 +217,7 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
         in_edges.setdefault(edge.to_port, []).append(edge.id)
 
     for dev in spec.devices:
-        type_spec, _ = resolve_model(ctx, dev.model)
+        type_spec, _ = resolve_model(ctx, dev.definition_id)
         dev_ports = [p for p in ports.values() if p.device == dev.id]
         # 电网进出口为替代运行模式:任一侧已连接时,另一未连接侧视为单侧运行,
         # 不报输入不完备(未用侧由进出口互斥方程钳零,与 1.0 单端口电网同语义)
@@ -260,71 +240,10 @@ def run_phase_c(spec: AssemblySpec, ctx) -> list[Diagnostic]:
                 )
         if type_spec is None:
             continue
-        # 注:2.0 properties 均带默认值(value), 无"必填参数"概念;
-        # 旧 ASM-INPUT-002(必填缺失)已废止;缺显式数据绑定不阻断, 接口
-        # source.data_ref 自带默认数据路径(设备参数关键字直接引用项目相对 CSV)。
-        # 参数值越界/枚举不符(非阻断;复用 PARAM-RNG-003 语义)
-        for name, value in dev.params.items():
-            if isinstance(value, (dict, list)) or value is None:
-                continue
-            ps = type_spec.properties.get(name)
-            if ps is None:
-                continue
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                minimum, maximum = ps.valid_range or (None, None)
-                if minimum is not None and value < minimum:
-                    diags.append(
-                        make_diag(
-                            ASM_INPUT_RANGE,
-                            severity="error",
-                            blocking=False,
-                            params={"device": dev.id, "param": name, "value": value, "min": minimum},
-                            location={
-                                "object_type": "device",
-                                "object_id": dev.id,
-                                "field": f"params.{name}",
-                            },
-                        )
-                    )
-                elif maximum is not None and value > maximum:
-                    diags.append(
-                        make_diag(
-                            ASM_INPUT_RANGE,
-                            severity="error",
-                            blocking=False,
-                            params={"device": dev.id, "param": name, "value": value, "max": maximum},
-                            location={
-                                "object_type": "device",
-                                "object_id": dev.id,
-                                "field": f"params.{name}",
-                            },
-                        )
-                    )
-        # data_refs 单位与端口单位量纲不可换算(数据绑定挂在 predefined 需求接口上,
-        # 与装配入口 INPUT-005 同口径)
-        in_ports = [p for p in dev_ports if p.direction in ("in", "bidirectional", "predefined")]
-        for ref in dev.data_refs:
-            if not ref.unit:
-                continue
-            if in_ports and not any(units_compatible(ref.unit, p.unit) for p in in_ports):
-                diags.append(
-                    make_diag(
-                        ASM_INPUT_DATA_UNIT,
-                        severity="error",
-                        blocking=True,
-                        params={
-                            "device": dev.id,
-                            "ref": ref.key,
-                            "unit": ref.unit,
-                            "port_units": sorted({p.unit for p in in_ports}),
-                        },
-                        location={
-                            "object_type": "device",
-                            "object_id": dev.id,
-                            "field": f"data_refs.{ref.key}.unit",
-                        },
-                    )
-                )
+        # 注:属性值域(properties valid_range)由校验器阶段 2 唯一判定
+        # (非阻断 ASM-INPUT-003)；预定义来源声明的槽覆盖、模式、路径与
+        # 文件内容由校验器确认；本阶段不重复判定，只做图与系统检查。
+        # 缺显式预定义绑定阻断，且不得回退到设备文件自带来源。
 
     # -- 管道设备:延迟声明 / 延迟范围 / 通路 -----------------------------------
     for pipe in spec.pipelines:

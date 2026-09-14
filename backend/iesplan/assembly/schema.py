@@ -135,17 +135,41 @@ class DataRef:
 
 @dataclass(slots=True, frozen=True)
 class AssemblyDevice:
-    """设备实例(节点)。"""
+    """设备实例(节点，ies.assembly 2.0.0 纯技术契约形态)。
+
+    definition_id 为裸稳定设备 ID(无 @版本钉选)；kind 即 asset_origin；
+    properties 为 {prop: {value, unit}} 非时变技术常量覆盖；
+    predefined 为 {iface: {mode, ...}} 预定义来源声明(路径/值/目标类型)，
+    data_repeat/data_predict 的文件内容由校验器另行解析确认。
+    """
 
     id: str
-    model: str  # "ies.device.heat_pump@2.0.0"
-    kind: str = DEVICE_KIND_EXISTING  # existing | new
+    definition_id: str  # 稳定设备模型 ID(裸 ID，如 ies.device.heat_pump)
+    kind: str = DEVICE_KIND_EXISTING  # existing | new(装配 asset_origin)
     model_method: str = MODEL_METHOD_MECHANISM  # 建模方法标志(05 §7.1)
     stateful: bool = False  # 有/无状态模型标志
-    params: dict[str, object] = field(default_factory=dict)
+    properties: dict[str, dict[str, object]] = field(default_factory=dict)
+    predefined: dict[str, dict[str, object]] = field(default_factory=dict)
     data_refs: list[DataRef] = field(default_factory=list)
     ports: list[AssemblyPort] = field(default_factory=list)  # 从模型注册表推导,可覆盖 capacity
     meta: dict[str, object] = field(default_factory=dict)  # 布局等,不参与语义/哈希
+
+
+def prop_value(device: AssemblyDevice, name: str) -> object:
+    """属性标量取值(properties.<name>.value；缺失返回 None)。"""
+    entry = device.properties.get(name)
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("value")
+
+
+def prop_map(device: AssemblyDevice) -> dict[str, object]:
+    """属性标量映射({name: value}，供规则层数值读取)。"""
+    out: dict[str, object] = {}
+    for name, entry in device.properties.items():
+        if isinstance(entry, dict) and "value" in entry:
+            out[name] = entry["value"]
+    return out
 
 
 @dataclass(slots=True, frozen=True)

@@ -1,0 +1,32 @@
+# 非法样例: 未注册设备 → ASM-REF-002
+schema: ies.assembly
+schema_version: "2.0.0"
+
+assembly:
+  id: bad_definition_unknown
+  name: 未知设备
+
+project_baseline:
+  resolution: 1h
+  leap_year: false
+  scenario_mode: single
+
+devices:
+  hp1:
+    definition:
+      id: ies.device.nope
+    asset_origin: new
+    properties:
+      rated_heat_kw:
+        value: 600
+        unit: kW
+    predefined_interfaces: {}
+connections: {}
+
+constraints: {}
+
+outputs:
+  series: []
+  metrics: []
+
+extensions: {}

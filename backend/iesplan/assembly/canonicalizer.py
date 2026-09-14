@@ -4,8 +4,8 @@
 - 映射键按格式规则稳定排序;有业务顺序的列表(series/metrics)保留声明顺序;
 - 项目计算基线(resolution/leap_year/scenario_mode)按规范形态透传,
   不做时区换算与起止时间派生;
-- relative_file 已由校验器解析为对象形态引用(kind: object);本模块对仍为
-  relative_file 的输入确定性拒绝,不允许未解析资源进入规范字节;
+- 预定义文件绑定的 content 身份由校验器就地写入(与 path 一并保留);
+  无 content 的文件绑定不得进入规范字节(校验器已阻断);
 - 数值使用唯一有限十进制表示(整数与整值浮点同语义 → 同文本,不依赖 locale);
 - 注释/显示空白/YAML 表示差异不影响规范文本(解析期已丢失);
 - 规范文本为紧凑 JSON + LF,UTF-8。
@@ -37,18 +37,12 @@ _TOP_ORDER = (
     "schema_version",
     "assembly",
     "project_baseline",
-    "resources",
     "devices",
     "connections",
     "constraints",
     "outputs",
     "extensions",
 )
-
-_SOURCE_ORDER = ("kind", "object_id", "media_type")
-
-#: 规范形态下禁止出现的资源来源(校验器必须先行解析为 object)
-_UNRESOLVED_KIND = "relative_file"
 
 # ---------------------------------------------------------------------------
 # 时间
@@ -155,39 +149,15 @@ def _ordered(value: Any, order: tuple[str, ...] = ()) -> Any:
 
 
 def _normalize_doc(doc: Mapping) -> dict:
-    """规范形态预处理:时间 → UTC Z;数值 → 唯一有限 JSON 形态。
+    """规范形态预处理:数值 → 唯一有限 JSON 形态。
 
-    返回深度复制的 plain dict(JSON 可序列化);任何不可换算/非有限值确定性拒绝。
+    返回深度复制的 plain dict(JSON 可序列化);任何非有限值确定性拒绝。
+    预定义文件绑定的 content 身份由校验器就地写入，与 path 一并保留。
     """
     out: dict[str, Any] = {}
     for key, value in doc.items():
-        if key == "resources" and isinstance(value, Mapping):
-            out[key] = _normalize_resources(value)
-        else:
-            out[key] = _normalize_value(value)
+        out[key] = _normalize_value(value)
     return out
-
-
-def _normalize_resources(resources: Mapping) -> dict:
-    """resources 规范形态:datasets 内 dataset_id 键排序,source 固定键序。"""
-    datasets_raw = resources.get("datasets", {})
-    datasets: dict[str, Any] = {}
-    if isinstance(datasets_raw, Mapping):
-        for ds_id in sorted(datasets_raw):
-            entry = datasets_raw[ds_id]
-            if not isinstance(entry, Mapping):
-                raise ValueError(f"资源数据集条目必须为映射: {ds_id!r}")
-            src = entry.get("source")
-            if not isinstance(src, Mapping):
-                raise ValueError(f"资源数据集 {ds_id!r} 缺少 source 映射")
-            if src.get("kind") == _UNRESOLVED_KIND:
-                raise ValueError(
-                    f"资源数据集 {ds_id!r} 仍是 relative_file: 未解析的资源不得进入规范字节"
-                )
-            datasets[str(ds_id)] = {
-                "source": _ordered({str(k): _normalize_value(v) for k, v in src.items()}, _SOURCE_ORDER)
-            }
-    return {"datasets": datasets}
 
 
 def _normalize_value(value: Any) -> Any:
@@ -210,8 +180,8 @@ def _normalize_value(value: Any) -> Any:
 def canonicalize_assembly_doc(doc: Mapping) -> str:
     """唯一规范化:已解析文档 → 规范文本。
 
-    - doc 必须是已完成结构/模型/数据/资源解析的 ies.assembly 2.0.0 文档
-      (resources.datasets.source 均为 object 形态;未知核心字段已在结构阶段拒绝);
+    - doc 必须是已完成结构/模型/属性/预定义来源解析的 ies.assembly 2.0.0
+      文档(文件绑定均已写入 content 身份;未知核心字段已在结构阶段拒绝);
     - 规范文本:紧凑 JSON(ensure_ascii=False, separators=(',', ':'), 拒绝 NaN),
       末尾 LF。
     """
