@@ -391,7 +391,8 @@ def units_compatible(u1: str | None, u2: str | None) -> bool:
         return True
     except Exception:
         pass
-    # 能量↔功率: 数据列按步能量声明, 端口按功率; 引擎按步长换算(见 _merge_rows)
+    # 能量↔功率: 数据列按步能量声明, 端口按功率; 业务单位到求解器内部单位的换算
+    # 只发生在 GeneratorProvider 边界(宪法 §4.5/§7.4)。
     cats = {unit_category(a), unit_category(b)}
     if cats == {"energy", "power"}:
         return True

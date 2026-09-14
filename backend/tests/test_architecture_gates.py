@@ -626,14 +626,10 @@ def _is_contract_target(target: str) -> bool:
 #: iesplan.metrics.validity / iesplan.metrics.financial 为唯一权威(领域公开
 #: 纯函数复用, 不复制枚举值)。仅豁免 results 域对该两模块的导入; results
 #: 对 metrics 其他子模块的导入仍属违规。
-#: engines 内评估对 metrics.financial 的复用同属此类(metrics.financial 仅依赖
-#: 标准库/numpy 的纯计算; 取现金流/NPV/IRR 纯函数与 IRRStatus 做候选评分,
-#: 引擎内评估, 非跨域业务组合)。
 ALLOWED_STATE_MODEL_REUSE: frozenset[tuple[str, str]] = frozenset(
     {
         ("iesplan.results", "iesplan.metrics.validity"),
         ("iesplan.results", "iesplan.metrics.financial"),
-        ("iesplan.engines", "iesplan.metrics.financial"),
     }
 )
 

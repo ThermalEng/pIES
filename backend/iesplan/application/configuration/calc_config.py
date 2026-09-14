@@ -72,7 +72,7 @@ __all__ = [
 # 设备/算法注册表规则（归属 application.configuration.calc_config）
 # ---------------------------------------------------------------------------
 #
-# 以下规则依赖 iesplan.devices / iesplan.engines 注册表，不得下沉
+# 以下规则依赖 iesplan.devices / iesplan.computation 注册表，不得下沉
 # configuration 域（域源码纯度门禁）；行为与原领域实现一致。
 
 

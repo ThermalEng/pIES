@@ -16,7 +16,7 @@
 
 调用示例:
     resp = run_solver_isolated(
-        "iesplan.engines.eval_run.evaluate_plan",
+        "my_package.my_module.my_function",
         (plan, data, axis, options), timeout_sec=600.0,
     )
     if not resp["ok"]:
