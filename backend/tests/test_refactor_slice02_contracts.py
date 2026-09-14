@@ -7,9 +7,9 @@
 - 源码纯度：不导入 ORM/services/application/api/worker/engines，
   无 commit/rollback 调用；contracts.py 只依赖标准库与 core。
 
-说明（Wave 1 切片 C）：各域 `*Repository` Protocol 已删除——生产代码中
-无真实端口注入消费（仅门面 re-export 与存在性断言引用），按复用裁决
-直接删除，不再保留无消费者抽象。
+说明：各域 `*Repository` Protocol 已删除——生产代码中
+无真实端口注入消费（仅门面 re-export 与存在性断言引用），
+不再保留无消费者抽象。
 """
 
 from __future__ import annotations

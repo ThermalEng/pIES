@@ -1,9 +1,9 @@
-"""computation 接线测试(F3; G1 密封修订): 真实最小调用链与 unavailable 语义。
+"""computation 接线测试: 真实最小调用链与 unavailable 语义。
 
-覆盖(生产代码 + 测试一并修改, 不恢复静默默认):
+覆盖(现行契约):
 
-- 无模块全局网关: ``iesplan.worker.runner`` 与阶段网关不再持有任何
-  全局可赋值计算入口; 阶段网关不知 provider 键(键与组合解析只归
+- 依赖方向: ``iesplan.worker.runner`` 与阶段网关只接受调用参数显式
+  注入; 阶段网关不知 provider 键(键与组合解析只归
   ``iesplan.computation``, 经 ``resolve_capabilities`` 收拢);
 - 真实阶段顺序: 三个独立最小替身分别验证三协议, 记录调用
   generate → run → adapt, 且 Bundle/回执对象在段间原样透传(非重造);
@@ -223,31 +223,8 @@ def _recording_providers(
 
 
 # ---------------------------------------------------------------------------
-# 1. 无模块全局网关, 且网关不知键
+# 1. 三协议正确关系(依赖方向见 test_computation_boundary 中不知键断言)
 # ---------------------------------------------------------------------------
-
-
-def test_no_module_global_compute_gateway() -> None:
-    """runner 与计算阶段网关均无模块全局计算入口(只能调用参数注入)。
-
-    键与组合解析只归 computation: 阶段网关无键常量、无解析器、无重建器。
-    """
-    assert not hasattr(runner, "compute_gateway")
-    assert not hasattr(runner, "ComputeUnavailableError")
-    assert not hasattr(compute_gateway, "compute_gateway")
-    assert not hasattr(compute_gateway, "providers")
-    assert not hasattr(compute_gateway, "provider")
-    for name in (
-        "GENERATOR_PROVIDER_KEY",
-        "SOLVER_RUNTIME_KEY",
-        "RESULT_ADAPTER_KEY",
-        "_resolve_providers",
-        "_rebuild_artifact",
-    ):
-        assert not hasattr(compute_gateway, name), name
-    assert not hasattr(worker_app, "GENERATOR_PROVIDER_KEY")
-    assert not hasattr(worker_app, "SOLVER_RUNTIME_KEY")
-    assert not hasattr(worker_app, "RESULT_ADAPTER_KEY")
 
 
 def test_independent_doubles_cover_each_protocol() -> None:
