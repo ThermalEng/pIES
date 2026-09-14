@@ -1,12 +1,12 @@
-"""ies.assembly 1.0.0 统一校验入口(roadmap 0.7.0 事项 2)。
+"""ies.assembly 1.0.0 统一校验入口(单管线:一次安全解析 + 一次结构/领域校验)。
 
-四阶段校验 → 唯一签名成功产物 ``ValidatedAssemblyArtifact``。
-- 手写装配 YAML(text)与 GUI 项目导出(content)进入同一校验入口,
-  成功只签发由规范文本与校验回执组成的不可变二件套;
-- 校验失败不产生可执行产物,返回结构化诊断列表。
+手写装配 YAML(text)与 GUI 项目导出(content)进入同一校验入口,
+成功只签发由规范文本与校验回执组成的不可变二件套
+``ValidatedAssemblyArtifact``;校验失败不产生可执行产物,返回结构化
+诊断列表。
 
-四阶段:
-1. 结构(parser10.parse_assembly_doc + parser10 暴露的 _structure_checks):
+阶段:
+1. 结构(仅 ``validate_assembly_doc`` 内调用 ``run_structure_checks`` 一次):
    schema/schema_version、顶层节、字段类型、ID/版本/引用形状、禁止字段、
    资源路径、calculation.mode 枚举、outputs/refs、extensions 命名空间;
 2. 模型与数据:设备模型精确版本注册、参数只允许已声明字段、必填参数非空、
@@ -15,15 +15,14 @@
    (run_phase_b) + rules.solvability (run_phase_d) + 约束表达式检查
    (rules.constraints.run_constraint_checks);端口不可达与悬空输入由本模块独立补充;
 4. 计算兼容:generator/solver 精确版本(随 schema 严格)、options 标量键值、
-   outputs series/metrics 引用设备存在;GeneratorProvider/SolverRuntime 注册
-   表能力核对在 0.8.0 引入。
+   outputs series/metrics 引用设备存在。
 
 输出格式:
   AssemblyValidationResult(diagnostics, artifact) — artifact 为 None 时校验失败。
 
 模块边界:
 - 跨模块仅消费 devices 公开门面(get_device/list_devices);
-- 复用 assembly 域内 context/rules/canonicalizer/parser10/contracts;
+- 复用 assembly 域内 context/rules/canonicalizer/parser/contracts;
 - 不导入 services/ORM/存储私有路径。
 """
 
@@ -35,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from iesplan.assembly.builder10 import build_assembly_doc_from_content
+from iesplan.assembly.builder import build_assembly_doc_from_content
 from iesplan.assembly.canonicalizer import canonicalize_assembly_doc
 from iesplan.assembly.contracts import (
     AssemblyValidationError,
@@ -55,7 +54,7 @@ from iesplan.assembly.diags import (
     ASM_RES_INVALID,
 )
 from iesplan.assembly.diags import make_asm_diag as make_diag
-from iesplan.assembly.parser10 import parse_assembly_doc, run_structure_checks
+from iesplan.assembly.parser import parse_assembly_doc, run_structure_checks
 from iesplan.assembly.schema import (
     AssemblyConstraint,
     AssemblyDevice,
@@ -90,11 +89,11 @@ def validate_assembly_text(
     package_dir: str | Path | None = None,
     datasets: Mapping[str, Mapping] | None = None,
 ) -> AssemblyValidationResult:
-    """手写装配 YAML 文本 → 四阶段校验(roadmap 0.7.0 事项 2)。"""
+    """手写装配 YAML 文本 → 单管线校验(安全解析一次 + 结构/领域校验一次)。"""
     parsed = parse_assembly_doc(text, source_name=source_name)
     if parsed.doc is None:
         return AssemblyValidationResult(diagnostics=list(parsed.diagnostics), artifact=None)
-    return _run_validation(parsed.doc, package_dir=package_dir, datasets=datasets)
+    return validate_assembly_doc(parsed.doc, package_dir=package_dir, datasets=datasets)
 
 
 def validate_assembly_doc(
@@ -103,14 +102,14 @@ def validate_assembly_doc(
     package_dir: str | Path | None = None,
     datasets: Mapping[str, Mapping] | None = None,
 ) -> AssemblyValidationResult:
-    """已校验的 ies.assembly 1.0.0 文档 → 四阶段校验。
+    """ies.assembly 1.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
 
-    doc 必须已是安全解析后的 plain dict(由 parser10 产生或 builder10 构造);
-    本入口补做结构阶段复检 + 资源/模型/数据 + 图/系统 + 计算兼容校验。
+    doc 为安全解析后的 plain dict(手写文本经 ``parse_assembly_doc`` 产生,
+    GUI 导出经构造器产生);本入口做唯一一次结构校验,随后进入资源/模型/
+    数据 + 图/系统 + 计算兼容领域校验。手写与 GUI 共用同一管线,不重复
+    结构校验。
     """
     diags: list[Diagnostic] = []
-    # 结构阶段复检:parser10 暴露的公开复检入口(避免跨模块私有符号);
-    # 复检诊断并入本入口的诊断列表
     tree = run_structure_checks(dict(doc), source_name="<doc>", diags=diags)
     if tree is None:
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
@@ -124,11 +123,12 @@ def validate_project_export(
     solver: str | None = None,
     generator: str | None = None,
 ) -> AssemblyValidationResult:
-    """GUI 项目导出入口(roadmap 0.7.0 事项 2):
+    """GUI 项目导出入口:
 
-    项目内容 → builder10 构造 ies.assembly 1.0.0 文档 → 与手写文件同一校验
-    入口。datasets 为 int 视频索引的元信息{vid: {columns, column_units,
-    resolution, media_type}};solver/generator 显式覆盖旧链推导。
+    项目内容 → 构造器构造 ies.assembly 1.0.0 文档 → 与手写文件同一校验
+    入口(结构一次 + 领域阶段)。datasets 为 int 索引的元信息
+    {vid: {columns, column_units, resolution, media_type}};
+    solver/generator 为显式引用覆盖(无静默默认)。
     """
     built = build_assembly_doc_from_content(content, datasets=datasets, solver=solver, generator=generator)
     if built.doc is None:

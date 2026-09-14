@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -64,6 +63,18 @@ def init_registry():
 
     init_registry()
     yield
+
+
+def _export_calc(**overrides):
+    """GUI 导出 calc_config(显式声明,无静默默认)。"""
+    cfg = {
+        "mode": "fixed_operation",
+        "generator": "ies.algo.milp_hybrid@1.0.0",
+        "solver": "ies.solver.highs@1.7.2",
+        "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+    }
+    cfg.update(overrides)
+    return cfg
 
 
 class TestHappyPath:
@@ -250,7 +261,7 @@ class TestProjectExport:
                     {"id": 102, "from_port_id": 11, "to_port_id": 31, "loss_rate": 0},
                 ],
             },
-            "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0", "tolerances": {"mip_rel_gap": 0.001}},
+            "calc_config": _export_calc(tolerances={"mip_rel_gap": 0.001}),
             "dataset_bindings": [{"dataset_version_id": 17}],
         }
         datasets = {
@@ -269,32 +280,79 @@ class TestProjectExport:
         canonical = artifact.canonical_text
         assert "transport_pipe" not in canonical
 
-    def test_project_export_pins_legacy_config_algorithm_and_solver(self, init_registry):
+    def test_project_export_rejects_legacy_algorithm_and_solver_aliases(self, init_registry):
+        # 旧 algorithm/solver 别名迁移已删除:旧字段不再被读取,缺显式
+        # generator 以阻断诊断返回,不猜测、不回退
         content = {
             "graph_id": 7,
             "name": "legacy_config",
             "model": {"devices": [], "ports": [], "connections": []},
             "calc_config": {
+                "mode": "fixed_operation",
+                "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
                 "algorithm": {"mode": "auto", "name": "ies.algo.milp_hybrid"},
                 "solver": "highs",
             },
         }
         result = validate_project_export(content)
-        assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
-        assert result.artifact is not None
-        calculation = json.loads(result.artifact.canonical_text)["calculation"]
-        assert calculation["generator"] == "ies.algo.milp_hybrid@1.0.0"
-        assert calculation["solver"] == "ies.solver.highs@1.7.2"
+        assert result.artifact is None
+        assert any(
+            d.params.get("reason") == "calculation_generator_missing" and d.blocking
+            for d in result.diagnostics
+        )
+
+    def test_project_export_rejects_missing_time_axis(self, init_registry):
+        # 缺失时间轴不再静默默认:阻断诊断返回
+        content = {
+            "graph_id": 9,
+            "name": "no_axis",
+            "model": {"devices": [], "ports": [], "connections": []},
+            "calc_config": {
+                "mode": "fixed_operation",
+                "generator": "ies.algo.milp_hybrid@1.0.0",
+                "solver": "ies.solver.highs@1.7.2",
+            },
+        }
+        result = validate_project_export(content)
+        assert result.artifact is None
+        assert any(
+            d.params.get("reason") == "time_axis_missing" and d.blocking
+            for d in result.diagnostics
+        )
+
+    def test_project_export_rejects_invalid_loss_rate(self, init_registry):
+        # loss_rate 非数值不再吞错按 0 处理:阻断诊断返回
+        content = {
+            "graph_id": 10,
+            "name": "bad_loss",
+            "model": {
+                "devices": [
+                    {
+                        "id": 1,
+                        "device_type": "ies.device.grid_connection",
+                        "params": {"type_detail": "ies.device.grid_connection"},
+                    },
+                ],
+                "ports": [
+                    {"id": 11, "device_id": 1, "name": "p", "port_type": "electric", "direction": "out"},
+                ],
+                "connections": [{"id": 9, "from_port_id": 11, "to_port_id": 11, "loss_rate": "lots"}],
+            },
+            "calc_config": _export_calc(),
+        }
+        result = validate_project_export(content)
+        assert result.artifact is None
+        assert any(
+            d.params.get("reason") == "connection_loss_rate_invalid" and d.blocking
+            for d in result.diagnostics
+        )
 
     def test_project_export_does_not_guess_unknown_algorithm_version(self, init_registry):
         content = {
             "graph_id": 8,
             "name": "unknown_algorithm",
             "model": {"devices": [], "ports": [], "connections": []},
-            "calc_config": {
-                "algorithm": {"mode": "manual", "name": "ies.algo.unknown"},
-                "solver": "highs",
-            },
+            "calc_config": _export_calc(generator="ies.algo.unknown"),
         }
         result = validate_project_export(content)
         assert result.artifact is None
@@ -370,7 +428,7 @@ class TestProjectExport:
                     },
                 ],
             },
-            "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+            "calc_config": _export_calc(),
             "dataset_bindings": [{"dataset_version_id": 18}],
         }
         datasets = {
@@ -405,7 +463,7 @@ class TestProjectExport:
                 "ports": [],
                 "connections": [],
             },
-            "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+            "calc_config": _export_calc(),
             "dataset_bindings": [{"dataset_version_id": 17}],
         }
         datasets = {
@@ -442,7 +500,7 @@ class TestProjectExport:
                 "ports": [],
                 "connections": [],
             },
-            "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+            "calc_config": _export_calc(),
             "dataset_bindings": [{"dataset_version_id": 17}],
         }
         datasets = {
@@ -464,7 +522,7 @@ class TestProjectExport:
         # 装配名必填: 缺失不再回退 legacy_export
         content = {
             "model": {"devices": [], "ports": [], "connections": []},
-            "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+            "calc_config": _export_calc(),
         }
         result = validate_project_export(content)
         assert result.artifact is None
@@ -491,7 +549,7 @@ class TestProjectExport:
                 "graph_id": 45,
                 "name": "bad_conn",
                 "model": {"devices": base_devices, "ports": base_ports, **conn},
-                "calc_config": {"algorithm": "ies.algo.milp_hybrid@1.0.0"},
+                "calc_config": _export_calc(),
             }
             result = validate_project_export(content)
             assert result.artifact is None, conn

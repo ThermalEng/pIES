@@ -15,7 +15,7 @@
 公开门面(设备描述符),不依赖 services/engines/worker。
 """
 
-from iesplan.assembly.builder10 import BuildDocResult, build_assembly_doc_from_content
+from iesplan.assembly.builder import BuildDocResult, build_assembly_doc_from_content
 from iesplan.assembly.canonicalizer import (
     canonical_algorithm_ref,
     canonicalize_assembly_doc,
@@ -34,7 +34,7 @@ from iesplan.assembly.contracts import (
     ValidationReceipt,
 )
 from iesplan.assembly.diags import ASM_ALL_CODES
-from iesplan.assembly.parser10 import ParseDocResult, parse_assembly_doc
+from iesplan.assembly.parser import ParseDocResult, parse_assembly_doc
 from iesplan.assembly.validator import (
     AssemblyValidationResult,
     validate_assembly_doc,
