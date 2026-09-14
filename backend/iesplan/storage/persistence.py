@@ -22,8 +22,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from iesplan.db import Base
-from iesplan.models.common import HASH64_RE, bigint_pk, regex_check
+from iesplan.db import HASH64_RE, Base, bigint_pk, regex_check
 from iesplan.storage.contracts import RetentionPolicy
 
 #: 对象状态(01 §10.1 CHECK 枚举)

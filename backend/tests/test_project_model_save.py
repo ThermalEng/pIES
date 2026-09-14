@@ -39,10 +39,10 @@ from iesplan.application.models import (
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.audit import AuditLog  # noqa: E402
-from iesplan.models.identity import User  # noqa: E402
-from iesplan.models.project import Project  # noqa: E402
-from iesplan.models.project_model import ProjectModel, ProjectModelSequence  # noqa: E402
+from iesplan.audit.persistence import AuditLog  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402
+from iesplan.project.persistence import Project  # noqa: E402
+from iesplan.model.persistence import ProjectModel, ProjectModelSequence  # noqa: E402
 from iesplan import project as project_domain  # noqa: E402
 from iesplan.application import identity  # noqa: E402
 from iesplan.application.projects import lifecycle as projects_uc  # noqa: E402
@@ -646,7 +646,7 @@ def test_template_and_direct_yaml_converge(client: TestClient, db_session: Sessi
 
 
 def identity_user(db_session: Session, username: str):
-    from iesplan.models.identity import User
+    from iesplan.identity.persistence import User
 
     return db_session.execute(select(User).where(User.username == username)).scalar_one()
 

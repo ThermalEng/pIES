@@ -1,7 +1,7 @@
 """项目域 SQL repository 实现（projects/drafts/project_versions/version_refs）。
 
 - 本模块是 `ProjectRepository` 协议的唯一实现，可经 `iesplan.project` 门面调用；
-- 只访问 `iesplan.models.project` 的表；绝不 commit/rollback（调用方事务拥有）；
+- 表真相收归本模块（Wave2A 由 iesplan.models.project 迁入）；绝不 commit/rollback（调用方事务拥有）；
 - 唯一冲突转 `ProjectConflictError`；冲突后调用方须回滚会话（与旧 services
   契约一致；实测 SA 2.0 下 flush 失败后会话不可继续，savepoint 保不住可用性）；
 - 时间以 `datetime.isoformat()` 原样映射为记录字符串（与 FastAPI 既有
@@ -15,11 +15,24 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+import sqlalchemy as sa
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+    func,
+    select,
+)
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from iesplan.models.project import AdminMaintenanceAction, Draft, Project, ProjectVersion, VersionRef
+from iesplan.db import Base, JSONB, bigint_pk
 from iesplan.project.contracts import (
     DraftRecord,
     MaintenanceActionRecord,
@@ -477,3 +490,192 @@ def record_maintenance_action(
     db.add(row)
     db.flush()
     return _row_to_maintenance_action(row)
+
+
+# ---------------------------------------------------------------------------
+# ORM 表定义: Wave2A 由 iesplan.models.project 迁入, 表真相归本域所有。
+# ---------------------------------------------------------------------------
+
+class Project(Base):
+    """项目主表(生命周期状态, 01 §3.1)。"""
+
+    __tablename__ = "projects"
+
+    id: Mapped[int] = bigint_pk()
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    currency: Mapped[str] = mapped_column(Text, nullable=False, server_default="CNY")
+    # 项目计算基线(0.6.5 事项 1): 创建时一次性固定, 创建后不可修改
+    # (宪法 7.5: 计算序列不使用时间戳或时区, 统一从 0 开始的连续 step)。
+    baseline_resolution: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline_leap_year: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
+    # 当前生效财务三件套/规划配置 revision 指针(0.6.5 条目 1-2):
+    # finance_profiles / finance_overrides / effective_finance_revisions /
+    # planning_configs 均仅 INSERT, 指针指向当前生效 revision(指针可移动);
+    # finance_profile_id 指向项目引用的已注册 Profile 主键,
+    # overrides_revision 指向当前覆盖 revision(空 = 无覆盖, 空覆盖文档),
+    # effective_finance_revision 指向合并器产出的有效快照 revision,
+    # planning_revision 指向当前规划配置 revision。
+    finance_profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("finance_profiles.id")
+    )
+    overrides_revision: Mapped[int | None] = mapped_column(BigInteger)
+    effective_finance_revision: Mapped[int | None] = mapped_column(BigInteger)
+    planning_revision: Mapped[int | None] = mapped_column(BigInteger)
+    # 循环依赖指针: 先建表, 后补外键(use_alter)
+    current_draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id", use_alter=True))
+    current_version_id: Mapped[int | None] = mapped_column(ForeignKey("project_versions.id", use_alter=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('active','archived','deleted')", name="ck_projects_status"),
+        CheckConstraint("currency IN ('CNY','USD')", name="ck_projects_currency"),
+        CheckConstraint(
+            "baseline_resolution IN ('15min','30min','1h')",
+            name="ck_projects_baseline_resolution",
+        ),
+        CheckConstraint(
+            "baseline_scenario_mode IN ('single')",
+            name="ck_projects_baseline_scenario",
+        ),
+        UniqueConstraint("name", name="uq_projects_name"),
+        Index("idx_projects_status", "status"),
+        Index("idx_projects_owner", "owner_id"),
+    )
+
+
+class Draft(Base):
+    """工作草稿(综合修订号, 可改, 01 §3.2)。"""
+
+    __tablename__ = "drafts"
+
+    id: Mapped[int] = bigint_pk()
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+    parent_draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id"))
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=sa.text("false"))
+    updated_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "revision", name="uq_drafts_revision"),
+        Index(
+            "uq_drafts_current",
+            "project_id",
+            unique=True,
+            postgresql_where=sa.text("is_current"),
+            sqlite_where=sa.text("is_current"),
+        ),
+        Index("idx_drafts_project", "project_id", sa.text("revision DESC")),
+    )
+
+
+class ProjectVersion(Base):
+    """项目版本(不可变, 追加式, 01 §3.3)。"""
+
+    __tablename__ = "project_versions"
+
+    id: Mapped[int] = bigint_pk()
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    parent_version_id: Mapped[int | None] = mapped_column(ForeignKey("project_versions.id"))
+    source_draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id"))
+    source_draft_revision: Mapped[int | None] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # 项目计算基线(版本固化, 自包含; 创建后不可修改)
+    baseline_resolution: Mapped[str] = mapped_column(Text, nullable=False)
+    baseline_leap_year: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    currency: Mapped[str | None] = mapped_column(Text)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "baseline_resolution IN ('15min','30min','1h')",
+            name="ck_project_versions_baseline_resolution",
+        ),
+        CheckConstraint(
+            "baseline_scenario_mode IN ('single')",
+            name="ck_project_versions_baseline_scenario",
+        ),
+        CheckConstraint("currency IS NULL OR currency IN ('CNY','USD')", name="ck_project_versions_currency"),
+        UniqueConstraint("project_id", "version_no", name="uq_project_versions_version"),
+        Index("idx_project_versions_parent", "parent_version_id"),
+        Index("idx_project_versions_project", "project_id", sa.text("version_no DESC")),
+    )
+
+
+class VersionRef(Base):
+    """版本引用清单(不可变, 版本自包含, 01 §3.4)。"""
+
+    __tablename__ = "version_refs"
+
+    id: Mapped[int] = bigint_pk()
+    project_version_id: Mapped[int] = mapped_column(ForeignKey("project_versions.id"), nullable=False)
+    ref_type: Mapped[str] = mapped_column(Text, nullable=False)
+    object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+    ref_key: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "ref_type IN ('dataset_version','system_graph','calc_config','calc_snapshot',"
+            "'evidence_package','report','object')",
+            name="ck_version_refs_type",
+        ),
+        UniqueConstraint("project_version_id", "ref_type", "object_id", name="uq_version_refs_ref"),
+        Index("idx_version_refs_object", "object_id"),
+    )
+
+
+class AdminMaintenanceAction(Base):
+    """管理员维护操作审计(不可变, 01 §2.3)。"""
+
+    __tablename__ = "admin_maintenance_actions"
+
+    id: Mapped[int] = bigint_pk()
+    action_type: Mapped[str] = mapped_column(Text, nullable=False)
+    performed_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    params: Mapped[dict | None] = mapped_column(JSONB)
+    result: Mapped[dict | None] = mapped_column(JSONB)
+
+    __table_args__ = (
+        CheckConstraint(
+            "action_type IN ('backup','restore','purge','reindex','config_change',"
+            "'object_quota_change','retention_change','user_override')",
+            name="ck_admin_actions_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending','running','succeeded','failed')", name="ck_admin_actions_status"
+        ),
+        Index("idx_admin_actions_time", sa.text("started_at DESC")),
+        Index("idx_admin_actions_by", "performed_by"),
+    )

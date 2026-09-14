@@ -12,9 +12,22 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+import sqlalchemy as sa
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    SmallInteger,
+    Text,
+    func,
+    select,
+)
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from iesplan.configuration.contracts import (
     CalcConfigRecord,
@@ -25,13 +38,7 @@ from iesplan.configuration.contracts import (
     OverridesRevisionRecord,
     PlanningRevisionRecord,
 )
-from iesplan.models.calc import CalcConfig
-from iesplan.models.config_revision import (
-    EffectiveFinanceRevision,
-    FinanceOverridesRevision,
-    FinanceProfile,
-    PlanningConfigRevision,
-)
+from iesplan.db import Base, JSONB, bigint_pk
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -477,3 +484,157 @@ def freeze_calc_config(db: Session, config_id: int) -> CalcConfigRecord:
     row.updated_at = _now()
     db.flush()
     return _row_to_calc_config(row)
+
+
+# ---------------------------------------------------------------------------
+# ORM 表定义: Wave2A 由 iesplan.models.calc(CalcConfig) 迁入, 表真相归本域所有。
+# ---------------------------------------------------------------------------
+
+class CalcConfig(Base):
+    """计算配置(参数/变量/目标/约束/算法/容差/种子, 01 §6.1)。"""
+
+    __tablename__ = "calc_configs"
+
+    id: Mapped[int] = bigint_pk()
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
+    variables: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'[]'"))
+    objectives: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'[]'"))
+    constraints: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'[]'"))
+    min_irr: Mapped[float | None] = mapped_column(Numeric(6, 4))
+    algorithm: Mapped[str | None] = mapped_column(Text)
+    solver: Mapped[str | None] = mapped_column(Text)
+    tolerances: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
+    random_seed: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="draft")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
+    updated_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "min_irr IS NULL OR min_irr BETWEEN 0 AND 1", name="ck_calc_configs_min_irr"
+        ),
+        CheckConstraint(
+            "algorithm IS NULL OR algorithm IN ('milp','lp','heuristic','ga','exhaustive','custom')",
+            name="ck_calc_configs_algorithm",
+        ),
+        CheckConstraint("status IN ('draft','frozen')", name="ck_calc_configs_status"),
+        Index(
+            "uq_calc_configs_name_version", "project_id", "name", "version", unique=True
+        ),
+        Index("idx_calc_configs_project", "project_id", "name"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ORM 表定义: Wave2A 由 iesplan.models.config_revision 迁入, 表真相归本域所有。
+# ---------------------------------------------------------------------------
+
+class FinanceProfile(Base):
+    """地区 FinanceProfile 注册表(已注册、可复用的地区财务基准)。
+
+    每次登记写入新行; content 存内容 JSON(FinanceProfile.to_dict 形态);
+    object_id 指向 YAML 对象。文本文件只校验字头，不做内容摘要。
+    """
+
+    __tablename__ = "finance_profiles"
+
+    id: Mapped[int] = bigint_pk()
+    profile_id: Mapped[str] = mapped_column(Text, nullable=False)
+    region: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("profile_id", name="uq_finance_profiles_id"),
+        Index("idx_finance_profiles_id", "profile_id"),
+    )
+
+class FinanceOverridesRevision(Base):
+    """项目 FinanceOverrides 不可变 revision(仅 INSERT, 追加式)。"""
+
+    __tablename__ = "finance_overrides"
+
+    id: Mapped[int] = bigint_pk()
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    profile_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 可审计回执对象引用(objects.id; 0011 起新行必备, 存量开发行可空)
+    receipt_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_finance_overrides_revision"),
+        UniqueConstraint("project_id", "revision", name="uq_finance_overrides_revision"),
+        Index("idx_finance_overrides_project", "project_id", sa.text("revision DESC")),
+    )
+
+class EffectiveFinanceRevision(Base):
+    """项目 EffectiveFinanceConfig 不可变 revision(仅 INSERT, 合并器产物)。
+
+    装配/规划/财务计算只消费当前 Effective revision 指向的快照。
+    """
+
+    __tablename__ = "effective_finance_revisions"
+
+    id: Mapped[int] = bigint_pk()
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    profile_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 可审计回执对象引用(objects.id; 0011 起新行必备, 存量开发行可空)
+    receipt_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_effective_finance_revisions_revision"),
+        UniqueConstraint(
+            "project_id", "revision", name="uq_effective_finance_revisions_revision"
+        ),
+        Index(
+            "idx_effective_finance_revisions_project",
+            "project_id", sa.text("revision DESC"),
+        ),
+    )
+
+class PlanningConfigRevision(Base):
+    """规划配置不可变 revision(仅 INSERT, 追加式)。
+
+    规划与结果财务计算必须消费同一有效快照(宪法 4.6)。
+    """
+
+    __tablename__ = "planning_configs"
+
+    id: Mapped[int] = bigint_pk()
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    #: 可审计回执对象引用(objects.id; 0011 起新行必备, 存量开发行可空)
+    receipt_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_planning_configs_revision"),
+        UniqueConstraint("project_id", "revision", name="uq_planning_configs_revision"),
+        Index("idx_planning_configs_project", "project_id", sa.text("revision DESC")),
+    )

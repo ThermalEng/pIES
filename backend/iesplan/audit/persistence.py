@@ -1,4 +1,4 @@
-"""审计域 repository SQL 实现（audit_log，归属 audit）。
+"""审计域 repository SQL 实现（audit_log/retention_rules，归属 audit）。
 
 实现规则：
 - 只追加写入与过滤查询；不提供修改/删除；
@@ -10,12 +10,23 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+import sqlalchemy as sa
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+    select,
+)
+from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from iesplan.audit.contracts import AuditRecord, RetentionRuleRecord
 from iesplan.core.jsonutil import jsonable
-from iesplan.models.audit import AuditLog, RetentionRule
+from iesplan.db import Base, JSONB, InetType, bigint_pk
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -136,3 +147,60 @@ def list_active_retention_rules(db: Session) -> list[RetentionRuleRecord]:
         .all()
     )
     return [_row_to_retention_rule(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# ORM 表定义: Wave2A 由 iesplan.models.audit(AuditLog/RetentionRule) 迁入, 表真相归本域所有。
+# ---------------------------------------------------------------------------
+
+class AuditLog(Base):
+    """通用审计日志(不可变, 01 §10.3)。"""
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = bigint_pk()
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    actor_type: Mapped[str] = mapped_column(Text, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    ip: Mapped[str | None] = mapped_column(InetType)
+    before: Mapped[dict | None] = mapped_column(JSONB)
+    after: Mapped[dict | None] = mapped_column(JSONB)
+    request_id: Mapped[str | None] = mapped_column(Text)
+    trace_id: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint("actor_type IN ('user','system','admin')", name="ck_audit_log_actor_type"),
+        Index("idx_audit_log_entity", "entity_type", "entity_id", sa.text("occurred_at DESC")),
+        Index("idx_audit_log_time", "occurred_at"),
+        Index("idx_audit_log_actor", "actor_id", sa.text("occurred_at DESC")),
+    )
+
+
+class RetentionRule(Base):
+    """保留策略(01 §10.5)。"""
+
+    __tablename__ = "retention_rules"
+
+    id: Mapped[int] = bigint_pk()
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    object_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    retention_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    apply_to: Mapped[str] = mapped_column(Text, nullable=False, server_default="all")
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("retention_days BETWEEN 1 AND 36500", name="ck_retention_rules_days"),
+        CheckConstraint("apply_to IN ('all','orphaned','referenced')", name="ck_retention_rules_apply"),
+        CheckConstraint("status IN ('active','paused')", name="ck_retention_rules_status"),
+        UniqueConstraint("entity_type", "object_kind", "apply_to", name="uq_retention_rules_key"),
+    )
