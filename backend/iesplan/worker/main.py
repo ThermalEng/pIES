@@ -50,6 +50,7 @@ class Worker:
         worker_id: str | None = None,
         *,
         session_factory: Any,
+        computation_providers: Any | None = None,
         poll_interval: float = POLL_INTERVAL,
         heartbeat_interval: float = HEARTBEAT_INTERVAL,
         renew_interval: float = RENEW_INTERVAL,
@@ -65,6 +66,10 @@ class Worker:
         # 会话工厂只能由 bootstrap 装配的 ApplicationContext 显式提供(main 传入
         # ctx.session_factory); 无缺省、无回退, 缺失即构造失败。
         self.session_factory = session_factory
+        # 计算公共能力同样由组合根装配显式注入(main 传入
+        # ctx.computation_providers); 缺省 None 即无可用能力, 计算类任务经
+        # application.worker 阶段网关收拢为结构化 unavailable, 不伪造成功。
+        self.computation_providers = computation_providers
         self.poll_interval = poll_interval
         self.heartbeat_interval = heartbeat_interval
         self.renew_interval = renew_interval
@@ -205,6 +210,7 @@ class Worker:
             runner.run_task(
                 self.session_factory, claim, worker_id=self.worker_id,
                 isolate=self.isolate, stop_event=self._cancel_event,
+                computation_providers=self.computation_providers,
             )
         except Exception:  # noqa: BLE001 - 线程边界兜底, 防止静默死亡
             logger.exception("任务线程异常: task=%s", claim.task_id)
@@ -237,9 +243,10 @@ def main(argv: list[str] | None = None) -> int:
     """Worker 进程入口(python -m iesplan.worker.main)。
 
     全部运行时能力经 bootstrap 组合根装配: 按 worker_type 选择
-    assemble_compute_worker()/assemble_io_worker(), Daemon 的会话工厂取自
-    装配好的 ApplicationContext。必需 provider 缺失时 assemble_* 抛异常,
-    本入口直接传播(启动失败, 不发布半初始化状态, 不做任何 fallback)。
+    assemble_compute_worker()/assemble_io_worker(), Daemon 的会话工厂与
+    computation provider 目录取自装配好的 ApplicationContext。必需 provider
+    缺失时 assemble_* 抛异常, 本入口直接传播(启动失败, 不发布半初始化状态,
+    不做任何 fallback)。
     """
     parser = argparse.ArgumentParser(description="pIES 计算/I/O Worker")
     parser.add_argument(
@@ -265,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
         worker_type=worker_type,
         worker_id=args.worker_id,
         session_factory=ctx.session_factory,
+        computation_providers=ctx.computation_providers,
         isolate=not args.no_isolation,
     ).run()
     return 0
