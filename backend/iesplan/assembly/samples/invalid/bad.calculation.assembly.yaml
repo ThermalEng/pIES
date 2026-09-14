@@ -1,16 +1,15 @@
-# 非法样例: calculation.mode 不在契约枚举内 → ASM-CALC-001
+# 非法样例: 装配携带 calculation 章节(计算配置在计算包生成时固定)→ ASM-SYN-002
 schema: ies.assembly
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 
 assembly:
-  id: bad_mode
-  name: 非法计算模式
+  id: bad_calculation
+  name: 非法计算章节
 
-time_axis:
-  start: "2025-01-01T00:00:00Z"
-  end: "2025-01-02T00:00:00Z"
+project_baseline:
   resolution: 1h
-  endpoint: left_closed_right_open
+  leap_year: false
+  scenario_mode: single
 
 resources:
   datasets: {}
@@ -22,7 +21,7 @@ connections: {}
 constraints: {}
 
 calculation:
-  mode: wizardry
+  mode: fixed_operation
   generator: acme.generator.highs_milp@1.0.0
   solver: ies.solver.highs@1.7.2
 

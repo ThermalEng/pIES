@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.assembly/2.0.0",
+  "title": "ies.assembly 2.0.0 装配 YAML 契约",
+  "description": "装配 YAML 是系统模型与规划意图的完整、可审查文本:固定项目计算基线,实例化设备模型、绑定数据、连接真实端口、给出约束。装配不包含 calculation(计算配置在计算包生成时固定)。禁止 shell/command/executable/函数模块路径/环境变量/凭证。各节均必需,无内容写空 {} 或 []。",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "assembly",
+    "project_baseline",
+    "resources",
+    "devices",
+    "connections",
+    "constraints",
+    "outputs",
+    "extensions"
+  ],
+  "properties": {
+    "schema": { "const": "ies.assembly" },
+    "schema_version": { "const": "2.0.0" },
+    "assembly": {
+      "type": "object",
+      "required": ["id", "name"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "description": "本装配的稳定 ID(lower_snake_case 或短横线形式)"
+        },
+        "name": { "type": "string", "description": "人类可读名称" }
+      },
+      "additionalProperties": false
+    },
+    "project_baseline": {
+      "type": "object",
+      "required": ["resolution", "leap_year", "scenario_mode"],
+      "properties": {
+        "resolution": {
+          "type": "string",
+          "enum": ["15min", "30min", "1h"],
+          "description": "全项目统一计算分辨率,必须能确定性切分一天"
+        },
+        "leap_year": {
+          "type": "boolean",
+          "description": "是否按 366 天生成全周期序列"
+        },
+        "scenario_mode": {
+          "type": "string",
+          "const": "single",
+          "description": "场景模式,当前固定为 single"
+        }
+      },
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "object",
+      "required": ["datasets"],
+      "properties": {
+        "datasets": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["source"],
+            "properties": {
+              "source": {
+                "type": "object",
+                "oneOf": [
+                  {
+                    "required": ["kind", "path"],
+                    "properties": {
+                      "kind": { "const": "relative_file" },
+                      "path": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]*$",
+                        "description": "包内相对路径;禁止绝对路径、..、~、盘符与反斜杠"
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "required": ["kind", "object_id", "media_type"],
+                    "properties": {
+                      "kind": { "const": "object" },
+                      "object_id": {
+                        "type": "string",
+                        "description": "对象存储对象 id(不透明标识, 非内容摘要)"
+                      },
+                      "media_type": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "devices": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["model"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]*@[0-9]+\\.[0-9]+\\.[0-9]+$",
+            "description": "精确设备模型引用 <device-id>@<exact-version>;禁止 latest/范围版本"
+          },
+          "parameters": {
+            "type": "object",
+            "description": "参数只能使用模型已声明字段;必填参数不得由生成器补默认",
+            "additionalProperties": {
+              "type": ["number", "string", "boolean", "null"]
+            }
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["dataset", "column"],
+              "properties": {
+                "dataset": { "type": "string", "description": "resources.datasets 中声明的 dataset_id" },
+                "column": { "type": "string", "description": "数据集中已校验的列" }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "connections": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["from", "to"],
+        "properties": {
+          "from": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$",
+            "description": "端点 <device-instance>.<port-id>"
+          },
+          "to": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type", "expr"],
+        "properties": {
+          "type": { "type": "string", "enum": ["ratio", "capacity", "schedule", "generic"] },
+          "expr": { "type": "string", "minLength": 1, "description": "表达式引擎语法,引用 <dev>.<port>/<dev>.<param> 符号" },
+          "enabled": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "required": ["series", "metrics"],
+      "properties": {
+        "series": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$"
+          },
+          "description": "希望发布的序列引用 <device>.<output>(声明顺序保留)"
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_][a-z0-9_.-]*\\.[a-z0-9_][a-z0-9_.-]*$"
+          },
+          "description": "希望发布的指标引用 <scope>.<metric>(scope 为设备或 system)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "extensions": {
+      "type": "object",
+      "description": "命名空间化扩展(键须含 '.');不得改变核心字段语义或安全规则"
+    }
+  },
+  "additionalProperties": false
+}

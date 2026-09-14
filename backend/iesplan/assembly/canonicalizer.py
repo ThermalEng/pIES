@@ -1,8 +1,9 @@
-"""ies.assembly 1.0.0 唯一规范化器(roadmap 0.7.0 事项 1)。
+"""ies.assembly 2.0.0 唯一规范化器。
 
 规范化是公开纯过程(file-formats.md「人工编写与规范化」):
 - 映射键按格式规则稳定排序;有业务顺序的列表(series/metrics)保留声明顺序;
-- 时间换算为带 Z 的 UTC(解析失败抛 ValueError,结构阶段已先行拒绝无偏移形态);
+- 项目计算基线(resolution/leap_year/scenario_mode)按规范形态透传,
+  不做时区换算与起止时间派生;
 - relative_file 已由校验器解析为对象形态引用(kind: object);本模块对仍为
   relative_file 的输入确定性拒绝,不允许未解析资源进入规范字节;
 - 数值使用唯一有限十进制表示(整数与整值浮点同语义 → 同文本,不依赖 locale);
@@ -35,26 +36,16 @@ _TOP_ORDER = (
     "schema",
     "schema_version",
     "assembly",
-    "time_axis",
+    "project_baseline",
     "resources",
     "devices",
     "connections",
     "constraints",
-    "calculation",
     "outputs",
     "extensions",
 )
 
-_ASSEMBLY_ORDER = ("id", "name")
-_TIME_AXIS_ORDER = ("start", "end", "resolution", "endpoint")
 _SOURCE_ORDER = ("kind", "object_id", "media_type")
-_DATASET_ORDER = ("source",)
-_DEVICE_ORDER = ("model", "parameters", "data")
-_DATA_BINDING_ORDER = ("dataset", "column")
-_CONNECTION_ORDER = ("from", "to")
-_CONSTRAINT_ORDER = ("type", "expr", "enabled")
-_CALCULATION_ORDER = ("mode", "generator", "solver", "options", "random_seed")
-_OUTPUTS_ORDER = ("series", "metrics")
 
 #: 规范形态下禁止出现的资源来源(校验器必须先行解析为 object)
 _UNRESOLVED_KIND = "relative_file"
@@ -170,32 +161,8 @@ def _normalize_doc(doc: Mapping) -> dict:
     """
     out: dict[str, Any] = {}
     for key, value in doc.items():
-        if key == "time_axis" and isinstance(value, Mapping):
-            axis: dict[str, Any] = {}
-            for k, v in value.items():
-                if k in ("start", "end"):
-                    axis[k] = _to_utc_z(v)
-                elif k == "resolution" and isinstance(v, str):
-                    axis[k] = v
-                elif k == "endpoint" and isinstance(v, str):
-                    axis[k] = v
-                else:
-                    axis[k] = _normalize_value(v)
-            out[key] = axis
-        elif key == "resources" and isinstance(value, Mapping):
+        if key == "resources" and isinstance(value, Mapping):
             out[key] = _normalize_resources(value)
-        elif key == "calculation" and isinstance(value, Mapping):
-            calc: dict[str, Any] = {}
-            for k, v in value.items():
-                if k == "options" and isinstance(v, Mapping):
-                    calc[k] = {
-                        str(ok): _normalize_number(ov) for ok, ov in v.items()
-                    }
-                elif k == "random_seed":
-                    calc[k] = _normalize_number(v)
-                else:
-                    calc[k] = _normalize_value(v)
-            out[key] = calc
         else:
             out[key] = _normalize_value(value)
     return out
@@ -243,7 +210,7 @@ def _normalize_value(value: Any) -> Any:
 def canonicalize_assembly_doc(doc: Mapping) -> str:
     """唯一规范化:已解析文档 → 规范文本。
 
-    - doc 必须是已完成结构/模型/数据/资源解析的 ies.assembly 1.0.0 文档
+    - doc 必须是已完成结构/模型/数据/资源解析的 ies.assembly 2.0.0 文档
       (resources.datasets.source 均为 object 形态;未知核心字段已在结构阶段拒绝);
     - 规范文本:紧凑 JSON(ensure_ascii=False, separators=(',', ':'), 拒绝 NaN),
       末尾 LF。

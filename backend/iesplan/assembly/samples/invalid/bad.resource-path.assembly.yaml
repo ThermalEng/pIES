@@ -1,16 +1,15 @@
 # 非法样例: 资源路径为宿主机绝对路径 → ASM-SYN-009
 schema: ies.assembly
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 
 assembly:
   id: bad_resource_path
   name: 资源路径逃逸
 
-time_axis:
-  start: "2025-01-01T00:00:00Z"
-  end: "2025-01-02T00:00:00Z"
+project_baseline:
   resolution: 1h
-  endpoint: left_closed_right_open
+  leap_year: false
+  scenario_mode: single
 
 resources:
   datasets:
@@ -24,11 +23,6 @@ devices: {}
 connections: {}
 
 constraints: {}
-
-calculation:
-  mode: fixed_operation
-  generator: acme.generator.highs_milp@1.0.0
-  solver: ies.solver.highs@1.7.2
 
 outputs:
   series: []

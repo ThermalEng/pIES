@@ -1,15 +1,14 @@
 schema: ies.assembly
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 
 assembly:
   id: campus_demo
   name: 园区最小算例
 
-time_axis:
-  start: "2025-01-01T00:00:00+08:00"
-  end: "2025-01-02T00:00:00+08:00"
+project_baseline:
   resolution: 1h
-  endpoint: left_closed_right_open
+  leap_year: false
+  scenario_mode: single
 
 resources:
   datasets:
@@ -73,15 +72,6 @@ constraints:
   c1:
     type: ratio
     expr: "hp1.electricity_in <= 0.8 * grid.electricity_import"
-
-calculation:
-  mode: fixed_operation
-  generator: acme.generator.highs_milp@1.0.0
-  solver: ies.solver.highs@1.7.2
-  options:
-    relative_gap: 0.0001
-    time_limit_seconds: 600
-  random_seed: 42
 
 outputs:
   series:

@@ -1,15 +1,14 @@
-"""ies.assembly 1.0.0 GUI 项目导出构造器。
+"""ies.assembly 2.0.0 GUI 项目导出构造器。
 
-将项目内容(设备/端口/连接/数据集绑定/计算配置)映射为 ies.assembly 1.0.0
+将项目内容(设备/端口/连接/数据集绑定/项目基线)映射为 ies.assembly 2.0.0
 文档;损耗的连接自动包裹为 transport_pipe 设备实例,与手写 YAML
 进入同一校验入口(validator.validate_project_export)。
 
-无静默默认:time_axis.resolution/start、calculation.mode/generator/solver
+无静默默认:project_baseline.resolution/leap_year/scenario_mode
 均须显式声明,缺字段/非法值一律返回 ASM-CONV-001 阻断诊断,不回退、不
-猜测、不吞错。旧 algorithm/solver 别名迁移与默认引用已删除。
+猜测、不吞错。装配不包含 calculation(计算配置在计算包生成时固定)。
 
-依赖: devices 公开门面(get_device)、core 公共契约、
-assembly.canonicalizer 公开纯函数;不依赖 services 与 ORM。
+依赖: devices 公开门面(get_device)、core 公共契约;不依赖 services 与 ORM。
 """
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from iesplan.assembly.canonicalizer import parse_iso8601_utc
 from iesplan.assembly.diags import (
     ASM_CONV_UNMAPPABLE,
 )
@@ -36,9 +34,8 @@ _INTERNAL_PARAM_KEYS: tuple[str, ...] = (
     "__layout",
 )
 
-#: 年步数 / 步长秒数(与 core/timeaxis.py RESOLUTIONS 对齐)
-_STEPS_PER_YEAR: dict[str, int] = {"15min": 35040, "30min": 17520, "1h": 8760}
-_STEP_SECONDS: dict[str, int] = {"15min": 900, "30min": 1800, "1h": 3600}
+#: 全项目统一计算分辨率(均能确定性切分一天:96/48/24 步)
+_BASELINE_RESOLUTIONS: tuple[str, ...] = ("15min", "30min", "1h")
 
 #: 管道模型与端口名(与 devices/catalog/transport_pipe.yaml 一致)
 _PIPE_MODEL = "ies.device.transport_pipe@2.0.0"
@@ -60,30 +57,26 @@ def build_assembly_doc_from_content(
     content: Mapping,
     *,
     datasets: Mapping[int, Mapping] | None = None,
-    solver: str | None = None,
-    generator: str | None = None,
 ) -> BuildDocResult:
-    """项目内容 → ies.assembly 1.0.0 文档(无静默默认)。
+    """项目内容 → ies.assembly 2.0.0 文档(无静默默认)。
 
-    输入结构(现行模型字段, 无 1.0 兼容):
+    输入结构(现行模型字段):
       content = {"model": {"devices": [...], "ports": [...], "connections": [...]},
-                 "calc_config": {...}, "name": ...}
+                 "project_baseline": {...}, "name": ...}
       或 content 直接含 devices/ports/connections(扁平图)。
 
     字段映射:
     - assembly.id/name: 内容 name(必填, 缺失阻断; id 为其 slug);
-    - time_axis: calc_config.time_axis 显式声明(resolution/start 必填, 缺失/
-      非法阻断; end 由 start + 年步长确定性派生, endpoint 固定);
+    - project_baseline: 内容 project_baseline 显式声明
+      (resolution/leap_year/scenario_mode 必填, 缺失/非法阻断;
+      不保存时区与起止时间);
     - resources.datasets: 从 dataset_bindings + datasets 元信息
       构造为对象形态引用;
     - devices: 每个实例 → {model: <id>@<version>, parameters: 已清洗参数, data: ...};
       data 绑定只接受与模型 data_inputs 列精确匹配的显式绑定;
     - connections: 每个图连接必须有 id 且端口可解析, 否则阻断;
       loss_rate > 0 自动包裹 transport_pipe 设备实例;loss_rate 非数值阻断
-      (缺省键视为无损耗 0);
-    - calculation: mode/generator/solver 均须显式声明(精确版本引用,
-      缺失阻断;旧 algorithm 别名与无版本 solver 别名不再迁移);
-      options/random_seed 透传(仅数值 options 进入文档)。
+      (缺省键视为无损耗 0)。
 
     返回 (doc, diagnostics)。任一阻断错误 → doc=None(不进入校验器)。
     """
@@ -92,7 +85,6 @@ def build_assembly_doc_from_content(
     devices_raw = (model_part.get("devices") or []) if isinstance(model_part, Mapping) else []
     ports_raw = (model_part.get("ports") or []) if isinstance(model_part, Mapping) else []
     conns_raw = (model_part.get("connections") or []) if isinstance(model_part, Mapping) else []
-    calc_cfg = content.get("calc_config") if isinstance(content.get("calc_config"), Mapping) else {}
 
     graph_id = content.get("graph_id")
     name_raw = content.get("name")
@@ -124,74 +116,70 @@ def build_assembly_doc_from_content(
         )
         return BuildDocResult(doc=None, diagnostics=diags)
 
-    # 1) 时间轴(resolution/start 必须显式声明,无静默默认;end 由
-    #    start + 年步长确定性派生,endpoint 固定左闭右开)
-    axis_raw = calc_cfg.get("time_axis")
-    if not isinstance(axis_raw, Mapping):
+    # 1) 项目计算基线(resolution/leap_year/scenario_mode 必须显式声明,
+    #    无静默默认;不保存时区与起止时间)
+    baseline_raw = content.get("project_baseline")
+    if not isinstance(baseline_raw, Mapping):
         diags.append(
             make_diag(
                 ASM_CONV_UNMAPPABLE,
                 severity="error",
                 blocking=True,
-                params={"reason": "time_axis_missing"},
-                location={"object_type": "assembly", "field": "time_axis"},
+                params={"reason": "project_baseline_missing"},
+                location={"object_type": "assembly", "field": "project_baseline"},
             )
         )
         return BuildDocResult(doc=None, diagnostics=diags)
-    resolution_raw = axis_raw.get("resolution")
+    resolution_raw = baseline_raw.get("resolution")
     if not isinstance(resolution_raw, str) or not resolution_raw:
         diags.append(
             make_diag(
                 ASM_CONV_UNMAPPABLE,
                 severity="error",
                 blocking=True,
-                params={"reason": "time_axis_resolution_missing", "value": resolution_raw},
-                location={"object_type": "assembly", "field": "time_axis.resolution"},
+                params={"reason": "project_baseline_resolution_missing", "value": resolution_raw},
+                location={"object_type": "assembly", "field": "project_baseline.resolution"},
             )
         )
         return BuildDocResult(doc=None, diagnostics=diags)
     resolution = resolution_raw
-    if resolution not in _STEPS_PER_YEAR:
+    if resolution not in _BASELINE_RESOLUTIONS:
         diags.append(
             make_diag(
                 ASM_CONV_UNMAPPABLE,
                 severity="error",
                 blocking=True,
-                params={"reason": "time_axis_resolution_unknown", "value": resolution},
-                location={"object_type": "assembly", "field": "time_axis.resolution"},
+                params={"reason": "project_baseline_resolution_unknown", "value": resolution},
+                location={"object_type": "assembly", "field": "project_baseline.resolution"},
             )
         )
         return BuildDocResult(doc=None, diagnostics=diags)
-    start_raw = axis_raw.get("start")
-    if not isinstance(start_raw, str) or not start_raw:
+    leap_year_raw = baseline_raw.get("leap_year")
+    if not isinstance(leap_year_raw, bool):
         diags.append(
             make_diag(
                 ASM_CONV_UNMAPPABLE,
                 severity="error",
                 blocking=True,
-                params={"reason": "time_axis_start_missing", "value": start_raw},
-                location={"object_type": "assembly", "field": "time_axis.start"},
+                params={"reason": "project_baseline_leap_year_invalid", "value": leap_year_raw},
+                location={"object_type": "assembly", "field": "project_baseline.leap_year"},
             )
         )
         return BuildDocResult(doc=None, diagnostics=diags)
-    try:
-        start_utc = parse_iso8601_utc(start_raw)
-    except ValueError:
+    leap_year = leap_year_raw
+    scenario_raw = baseline_raw.get("scenario_mode")
+    if scenario_raw != "single":
         diags.append(
             make_diag(
                 ASM_CONV_UNMAPPABLE,
                 severity="error",
                 blocking=True,
-                params={"reason": "time_axis_start_invalid", "value": start_raw},
-                location={"object_type": "assembly", "field": "time_axis.start"},
+                params={"reason": "project_baseline_scenario_mode_invalid", "value": scenario_raw},
+                location={"object_type": "assembly", "field": "project_baseline.scenario_mode"},
             )
         )
         return BuildDocResult(doc=None, diagnostics=diags)
-    steps = _STEPS_PER_YEAR[resolution]
-    seconds = _STEP_SECONDS[resolution]
-    from datetime import timedelta
-
-    end_utc = start_utc + timedelta(seconds=seconds * steps)
+    scenario_mode = scenario_raw
 
     # 2) 数据集 → resources.datasets (object 形态)
     datasets_map = dict(datasets or {})
@@ -290,32 +278,26 @@ def build_assembly_doc_from_content(
     # 5) 约束(旧形态无显式约束节 → 空映射;保持新格式"无内容写空 {}"约束)
     constraints_out: dict[str, dict] = {}
 
-    # 6) calculation
-    calc_out, calc_diags = _build_calculation(calc_cfg, generator=generator, solver=solver)
-    diags.extend(calc_diags)
-
-    # 7) outputs(派生为空列表;后续 GUI 入口可补充)
+    # 6) outputs(派生为空列表;后续 GUI 入口可补充)
     outputs_out = {"series": [], "metrics": []}
 
-    # 8) extensions(空映射)
+    # 7) extensions(空映射)
     extensions_out: dict = {}
 
-    # 9) 组装
+    # 8) 组装(装配不包含 calculation)
     doc = {
         "schema": "ies.assembly",
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "assembly": {"id": slug, "name": name},
-        "time_axis": {
-            "start": _format_utc(start_utc),
-            "end": _format_utc(end_utc),
+        "project_baseline": {
             "resolution": resolution,
-            "endpoint": "left_closed_right_open",
+            "leap_year": leap_year,
+            "scenario_mode": scenario_mode,
         },
         "resources": {"datasets": resources_datasets},
         "devices": devices_out,
         "connections": connections_out,
         "constraints": constraints_out,
-        "calculation": calc_out,
         "outputs": outputs_out,
         "extensions": extensions_out,
     }
@@ -538,77 +520,6 @@ def _build_resources(
     if any(d.blocking for d in diags):
         return {}, diags
     return out, diags
-
-
-def _build_calculation(
-    calc_cfg: Mapping, *, generator: str | None, solver: str | None
-) -> tuple[dict, list[Diagnostic]]:
-    """calculation 节构造:mode/generator/solver 必须显式声明,无静默默认。
-
-    旧 ``algorithm`` 字段与无版本 solver 别名不再迁移;缺字段一律阻断。
-    精确版本形状由结构阶段复核,此处只判定缺失/空值。
-    """
-    diags: list[Diagnostic] = []
-
-    def _missing(reason: str, field: str, value) -> None:
-        diags.append(
-            make_diag(
-                ASM_CONV_UNMAPPABLE,
-                severity="error",
-                blocking=True,
-                params={"reason": reason, "value": value},
-                location={"object_type": "assembly", "field": field},
-            )
-        )
-
-    mode_raw = calc_cfg.get("mode")
-    if not isinstance(mode_raw, str) or not mode_raw:
-        _missing("calculation_mode_missing", "calculation.mode", mode_raw)
-        mode = ""
-    else:
-        mode = mode_raw
-    gen = generator if generator is not None else calc_cfg.get("generator")
-    if not isinstance(gen, str) or not gen:
-        _missing("calculation_generator_missing", "calculation.generator", gen)
-        gen = ""
-    else:
-        gen = str(gen)
-    sol = solver if solver is not None else calc_cfg.get("solver")
-    if not isinstance(sol, str) or not sol:
-        _missing("calculation_solver_missing", "calculation.solver", sol)
-        sol = ""
-    else:
-        sol = str(sol)
-    tolerances = calc_cfg.get("tolerances") if isinstance(calc_cfg.get("tolerances"), Mapping) else {}
-    options: dict[str, float] = {}
-    if isinstance(tolerances, Mapping):
-        rel_gap = tolerances.get("mip_rel_gap")
-        time_lim = tolerances.get("time_limit_s")
-        if isinstance(rel_gap, (int, float)) and not isinstance(rel_gap, bool):
-            options["relative_gap"] = float(rel_gap)
-        if isinstance(time_lim, (int, float)) and not isinstance(time_lim, bool):
-            options["time_limit_seconds"] = float(time_lim)
-    if isinstance(calc_cfg.get("options"), Mapping):
-        for k, v in calc_cfg["options"].items():
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                options[str(k)] = float(v)
-    seed = calc_cfg.get("random_seed")
-    out = {
-        "mode": mode,
-        "generator": gen,
-        "solver": sol,
-        "options": options,
-    }
-    if isinstance(seed, int) and not isinstance(seed, bool):
-        out["random_seed"] = int(seed)
-    return out, diags
-
-
-def _format_utc(dt) -> str:
-    """datetime → 带 Z 的 ISO 8601 UTC 字符串。"""
-    from datetime import UTC
-
-    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _slugify_id(text: str) -> str:

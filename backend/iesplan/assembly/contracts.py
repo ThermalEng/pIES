@@ -1,8 +1,9 @@
-"""ies.assembly 1.0.0 契约:ValidatedAssemblyArtifact 与校验回执(roadmap 0.7.0)。
+"""ies.assembly 2.0.0 契约:ValidatedAssemblyArtifact 与校验回执(roadmap 0.8.0)。
 
 成功产物是不可变二件套(见 manual/developer-guide/zh-CN/formats/assembly-yaml.md
 「ValidatedAssemblyArtifact」节):
-1. 规范装配文本(canonical_text):时间统一 UTC、资源为内容 ID、字段稳定排序;
+1. 规范装配文本(canonical_text):项目基线固定分辨率/闰年/场景模式、
+   资源为内容 ID、字段稳定排序;
 2. 校验回执(ValidationReceipt):校验器 ID/版本、schema、规范化算法 ID/版本、
    依赖锁、资源记录与零阻断诊断。
 
@@ -27,18 +28,18 @@ from iesplan.core.errors import AppError
 # ---------------------------------------------------------------------------
 
 SCHEMA_ID = "ies.assembly"
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "2.0.0"
 
 #: 机器可读 schema 路径(相对本包;与 devices 的 schema/ 布局一致)
-ASSEMBLY_SCHEMA_PATH = "schema/assembly-1.0.0.schema.json"
+ASSEMBLY_SCHEMA_PATH = "schema/assembly-2.0.0.schema.json"
 
 #: 规范化算法 ID 与版本(写入回执;语义变化必须升版本并保留历史解释能力)
 CANON_ALGORITHM_ID = "ies.assembly.canonical"
-CANON_ALGORITHM_VERSION = "1.0.0"
+CANON_ALGORITHM_VERSION = "2.0.0"
 
 #: 四阶段校验器 ID 与版本(写入回执)
 VALIDATOR_ID = "ies.assembly.validator"
-VALIDATOR_VERSION = "1.0.0"
+VALIDATOR_VERSION = "2.0.0"
 
 
 # ---------------------------------------------------------------------------
