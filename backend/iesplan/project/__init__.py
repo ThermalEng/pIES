@@ -58,6 +58,20 @@ set_project_status = persistence.set_project_status
 update_draft_content_ref = persistence.update_draft_content_ref
 update_revision_pointers = persistence.update_revision_pointers
 
+#: 领域不可变表清单(唯一真相归 persistence 所有, 本门面只做引用重导出)。
+IMMUTABLE_TABLES = persistence.IMMUTABLE_TABLES
+
+
+def install_tables() -> None:
+    """公开生命周期钩子: 导入本域 persistence 即完成 Base.metadata 表注册(幂等, 无其他副作用)。"""
+    persistence.install_tables()
+
+
+def install_triggers() -> tuple[str, ...]:
+    """公开生命周期钩子: 返回本域触发器部署语句(按执行序, 供组合根编排收集)。"""
+    return persistence.install_triggers()
+
+
 __all__ = [
     "DraftRecord",
     "MaintenanceActionRecord",
@@ -101,4 +115,7 @@ __all__ = [
     "update_draft_content_ref",
     "update_revision_pointers",
     "version_to_dict",
+    "IMMUTABLE_TABLES",
+    "install_tables",
+    "install_triggers",
 ]

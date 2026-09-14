@@ -19,10 +19,12 @@
 本包只做装配与健康聚合, 不实现业务规则, 不新增全局 registry(装配结果
 由调用方持有, API 进程挂在 ``app.state.bootstrap_context``)。
 
-领域表与触发器规则由拥有者领域 persistence 的公开钩子定义
-(``install_tables`` / ``install_triggers``), 本包只做显式编排调用
-(``install_domain_tables`` / ``collect_trigger_statements``), 不集中
-拥有跨领域表名与规则, 亦不定义多余的钩子协议。
+领域表与触发器规则由拥有者领域公开门面导出(``install_tables`` /
+``install_triggers`` / ``IMMUTABLE_TABLES``, 唯一真相仍归各域
+persistence 所有), 本包静态导入各域公开门面并显式编排调用钩子
+(``install_domain_tables`` / ``collect_trigger_statements`` /
+``collect_immutable_tables``), 不集中拥有跨领域表名与规则, 亦不定义
+多余的钩子协议, 不做字符串表驱动的动态导入。
 """
 
 from __future__ import annotations
@@ -30,6 +32,17 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+from iesplan import audit as audit_domain
+from iesplan import configuration as configuration_domain
+from iesplan import dataset as dataset_domain
+from iesplan import identity as identity_domain
+from iesplan import model as model_domain
+from iesplan import package as package_domain
+from iesplan import project as project_domain
+from iesplan import results as results_domain
+from iesplan import storage as storage_domain
+from iesplan import tasks as tasks_domain
 
 logger = logging.getLogger(__name__)
 
@@ -140,69 +153,58 @@ def _configure_queue_mode(mode: str) -> None:
     identity_module.configure_queue_mode(mode)
 
 
-#: 领域表安装钩子所属模块(拥有者领域 persistence.install_tables, 显式顺序编排)。
-_DOMAIN_TABLE_HOOKS: tuple[str, ...] = (
-    "iesplan.audit.persistence",
-    "iesplan.configuration.persistence",
-    "iesplan.dataset.persistence",
-    "iesplan.identity.persistence",
-    "iesplan.model.persistence",
-    "iesplan.package.persistence",
-    "iesplan.project.persistence",
-    "iesplan.results.persistence",
-    "iesplan.storage.persistence",
-    "iesplan.tasks.persistence",
-)
-
-#: 触发器规则钩子所属模块(拥有者领域 persistence.install_triggers, 显式顺序编排)。
-_TRIGGER_HOOKS: tuple[str, ...] = (
-    "iesplan.identity.persistence",
-    "iesplan.project.persistence",
-    "iesplan.dataset.persistence",
-    "iesplan.tasks.persistence",
-    "iesplan.results.persistence",
-    "iesplan.audit.persistence",
-    "iesplan.configuration.persistence",
-    "iesplan.model.persistence",
-)
-
-
 def install_domain_tables() -> None:
-    """显式编排各领域表安装钩子: 按顺序调用拥有者 persistence.install_tables()。
+    """显式编排各领域表安装钩子: 按顺序调用拥有者公开门面 install_tables()。
 
-    只做导入注册(导入即完成 Base.metadata 注册), 不建表、不迁移、不种子;
-    建表与触发器部署由 ``_assemble`` 经 ``db.init_db`` 完成。
+    只做导入注册(装载各域 persistence 即完成 Base.metadata 注册), 不建表、
+    不迁移、不种子; 建表与触发器部署由 ``_assemble`` 经 ``db.init_db`` 完成。
     """
-    import importlib
-
-    for module_name in _DOMAIN_TABLE_HOOKS:
-        module = importlib.import_module(module_name)
-        module.install_tables()
+    audit_domain.install_tables()
+    configuration_domain.install_tables()
+    dataset_domain.install_tables()
+    identity_domain.install_tables()
+    model_domain.install_tables()
+    package_domain.install_tables()
+    project_domain.install_tables()
+    results_domain.install_tables()
+    storage_domain.install_tables()
+    tasks_domain.install_tables()
 
 
 def collect_trigger_statements() -> tuple[str, ...]:
-    """编排收集各领域触发器部署语句: 按顺序拼接拥有者 install_triggers() 结果。
+    """编排收集各领域触发器部署语句: 按顺序拼接拥有者公开门面 install_triggers() 结果。
 
     返回可直接传给 ``db.init_db(trigger_statements=...)`` 的执行序语句序列
-    (各域自带幂等 DROP, 语句内不含业务规则解释, 只做拼接)。
+    (各域自带幂等 DROP, 语句内不含业务规则解释, 只做拼接; 无触发器的域
+    不参评, 按能力缺席而非空函数占位)。
     """
-    import importlib
-
     statements: list[str] = []
-    for module_name in _TRIGGER_HOOKS:
-        module = importlib.import_module(module_name)
-        statements.extend(module.install_triggers())
+    statements.extend(identity_domain.install_triggers())
+    statements.extend(project_domain.install_triggers())
+    statements.extend(dataset_domain.install_triggers())
+    statements.extend(tasks_domain.install_triggers())
+    statements.extend(results_domain.install_triggers())
+    statements.extend(audit_domain.install_triggers())
+    statements.extend(configuration_domain.install_triggers())
+    statements.extend(model_domain.install_triggers())
     return tuple(statements)
 
 
 def collect_immutable_tables() -> tuple[str, ...]:
-    """编排收集各领域不可变表清单(各拥有者 persistence.IMMUTABLE_TABLES 之和)。"""
-    import importlib
+    """编排收集各领域不可变表清单(各拥有者公开门面 IMMUTABLE_TABLES 之和, 按触发器编排序)。
 
+    清单唯一真相仍归各域 persistence 所有(门面只做引用重导出), 本包不建
+    第二份表名清单; 无 IMMUTABLE_TABLES 的域按能力缺席。
+    """
     tables: list[str] = []
-    for module_name in _TRIGGER_HOOKS:
-        module = importlib.import_module(module_name)
-        tables.extend(getattr(module, "IMMUTABLE_TABLES", ()))
+    tables.extend(getattr(identity_domain, "IMMUTABLE_TABLES", ()))
+    tables.extend(getattr(project_domain, "IMMUTABLE_TABLES", ()))
+    tables.extend(getattr(dataset_domain, "IMMUTABLE_TABLES", ()))
+    tables.extend(getattr(tasks_domain, "IMMUTABLE_TABLES", ()))
+    tables.extend(getattr(results_domain, "IMMUTABLE_TABLES", ()))
+    tables.extend(getattr(audit_domain, "IMMUTABLE_TABLES", ()))
+    tables.extend(getattr(configuration_domain, "IMMUTABLE_TABLES", ()))
+    tables.extend(getattr(model_domain, "IMMUTABLE_TABLES", ()))
     return tuple(tables)
 
 
@@ -222,9 +224,9 @@ def _assemble(
     # 0. 队列/限速后端选型(组合根唯一环境解释点): 一次解析部署环境,
     #    扇出给各接收模块; 业务模块只接收传入配置, 不再自行解释环境选型。
     _configure_queue_mode(_resolve_queue_mode())
-    # 1. 各领域表安装(显式编排拥有者 persistence.install_tables() 钩子)
+    # 1. 各领域表安装(显式编排拥有者公开门面 install_tables() 钩子)
     install_domain_tables()
-    # 2. 建表 + 不可变触发器(规则由各领域 install_triggers() 钩子所有, 此处只编排收集)
+    # 2. 建表 + 不可变触发器(规则由各领域公开门面 install_triggers() 所有, 此处只编排收集)
     db_module.init_db(trigger_statements=collect_trigger_statements())
     # 3. 内置身份种子(幂等)
     if seed_admin:

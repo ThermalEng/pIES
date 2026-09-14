@@ -1086,3 +1086,104 @@ def test_gate_provider_selection_detection(tmp_path):
     )
     detected = _find_non_bootstrap_provider_imports(pkg_root=pkg)
     assert detected == {("iesplan.api.bad", "iesplan.computation.providers")}
+
+
+# ---------------------------------------------------------------------------
+# 门禁 22: bootstrap 不得直引 persistence 与动态导入(硬强制)
+# ---------------------------------------------------------------------------
+# 领域表/触发器的唯一真相归拥有者领域 persistence 所有, 公开出口只归各领域
+# 公开门面 install_tables/install_triggers/IMMUTABLE_TABLES; 组合根只做显式
+# 编排调用。bootstrap 下出现 *.persistence 导入(绝对/相对/整模块)或
+# importlib.import_module/__import__ 字符串加载即失败。
+# 本门禁只查依赖形态(模块路径含 persistence 段、动态加载调用), 不维护固定
+# 文件清单与白名单, 不锁定函数名与行号。
+
+#: bootstrap 扫描根目录(组合根包)。
+_BOOTSTRAP_DIR = _PKG_ROOT / "bootstrap"
+
+
+def _has_persistence_segment(module: str) -> bool:
+    """persistence 段判定: 点号路径中含恰好为 persistence 的段。"""
+    return "persistence" in module.split(".")
+
+
+def _find_bootstrap_persistence_imports(
+    scan_root: Path = _BOOTSTRAP_DIR, pkg_root: Path = _PKG_ROOT
+) -> set[tuple[str, str]]:
+    """门禁 22a: 扫描 bootstrap 下模块路径含 persistence 段的导入。
+
+    覆盖绝对与相对导入(相对经 _relative_target 归一化判定)以及整模块导入
+    (如 import iesplan.audit.persistence); 返回 (模块, 目标) 集合。
+    """
+    found: set[tuple[str, str]] = set()
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or node.level):
+                target = _relative_target(mod, node)
+                if target.startswith("iesplan") and _has_persistence_segment(target):
+                    found.add((mod, target))
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name.startswith("iesplan") and _has_persistence_segment(a.name):
+                        found.add((mod, a.name))
+    return found
+
+
+def _find_bootstrap_dynamic_imports(
+    scan_root: Path = _BOOTSTRAP_DIR, pkg_root: Path = _PKG_ROOT
+) -> set[tuple[str, int]]:
+    """门禁 22b: 扫描 bootstrap 下字符串动态加载调用。
+
+    覆盖 importlib.import_module(...)、from importlib import import_module 后的
+    import_module(...) 直调与 __import__(...) 调用形态; 返回 (模块, 行号) 集合。
+    """
+    found: set[tuple[str, int]] = set()
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "import_module":
+                found.add((mod, node.lineno))
+            elif isinstance(func, ast.Name) and func.id in ("import_module", "__import__"):
+                found.add((mod, node.lineno))
+    return found
+
+
+def test_bootstrap_no_persistence_or_dynamic_imports():
+    """架构门禁 22: bootstrap 只经领域公开门面编排, 不得直引 persistence 与动态导入。"""
+    persistence_hits = _find_bootstrap_persistence_imports()
+    assert not persistence_hits, f"bootstrap 直引 persistence(须经领域公开门面): {sorted(persistence_hits)}"
+    dynamic_hits = _find_bootstrap_dynamic_imports()
+    assert not dynamic_hits, f"bootstrap 动态导入(须静态导入领域公开门面): {sorted(dynamic_hits)}"
+
+
+def test_gate_bootstrap_import_detection(tmp_path):
+    """门禁 22 自校验: persistence 段导入与字符串动态加载必须被检出, 门面编排不检出。
+
+    样例全部写 tmp_path, 不落地正式源码。
+    """
+    pkg = tmp_path / "iesplan"
+    boot = pkg / "bootstrap"
+    boot.mkdir(parents=True)
+    (boot / "__init__.py").write_text("from iesplan.audit import install_tables\n")
+    (boot / "bad_direct.py").write_text("from iesplan.audit.persistence import install_tables\n")
+    (boot / "bad_module.py").write_text("import iesplan.tasks.persistence\n")
+    (boot / "bad_relative.py").write_text("from ..audit.persistence import install_triggers\n")
+    (boot / "bad_importlib.py").write_text(
+        "import importlib\nimportlib.import_module('iesplan.audit.persistence')\n"
+    )
+    (boot / "bad_dunder.py").write_text("__import__('iesplan.audit.persistence')\n")
+    persistence_hits = _find_bootstrap_persistence_imports(scan_root=boot, pkg_root=pkg)
+    assert {mod for mod, _ in persistence_hits} == {
+        "iesplan.bootstrap.bad_direct",
+        "iesplan.bootstrap.bad_module",
+        "iesplan.bootstrap.bad_relative",
+    }, sorted(persistence_hits)
+    dynamic_hits = _find_bootstrap_dynamic_imports(scan_root=boot, pkg_root=pkg)
+    assert {mod for mod, _ in dynamic_hits} == {
+        "iesplan.bootstrap.bad_importlib",
+        "iesplan.bootstrap.bad_dunder",
+    }, sorted(dynamic_hits)
