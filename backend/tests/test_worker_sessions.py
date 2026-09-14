@@ -35,6 +35,9 @@ from worker_testkit import setup_environment  # noqa: E402
 from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.computation import (  # noqa: E402
+    GENERATOR_PROVIDER_KEY,
+    RESULT_ADAPTER_KEY,
+    SOLVER_RUNTIME_KEY,
     ComputeResult,
     ExecutionReceipt,
     SolverBundle,
@@ -162,9 +165,9 @@ def _providers(
 ) -> dict[str, Any]:
     """按组合根目录稳定键组装三段式假能力。"""
     return {
-        worker_app.GENERATOR_PROVIDER_KEY: generator or _PassthroughGenerator(),
-        worker_app.SOLVER_RUNTIME_KEY: runtime or _PassthroughRuntime(),
-        worker_app.RESULT_ADAPTER_KEY: adapter or _PassthroughAdapter(),
+        GENERATOR_PROVIDER_KEY: generator or _PassthroughGenerator(),
+        SOLVER_RUNTIME_KEY: runtime or _PassthroughRuntime(),
+        RESULT_ADAPTER_KEY: adapter or _PassthroughAdapter(),
     }
 
 
