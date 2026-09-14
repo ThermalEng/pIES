@@ -31,15 +31,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from iesplan.db import (
-    EMAIL_RE,
-    USERNAME_RE,
     Base,
     JSONB,
     InetType,
     bigint_pk,
+    drop_trigger_function_sql,
+    immutable_revoke_sql,
+    immutable_trigger_sql,
     regex_check,
 )
 from iesplan.identity.contracts import (
+    EMAIL_RE,
+    USERNAME_RE,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_EXPIRED,
     SESSION_STATUS_REVOKED,
@@ -866,3 +869,20 @@ class AuthEvent(Base):
         Index("idx_auth_events_type", "event_type", sa.text("occurred_at DESC")),
         Index("idx_auth_events_time", "occurred_at"),
     )
+
+
+#: 本域拥有的不可变表(仅 INSERT, 禁止 UPDATE/DELETE)
+IMMUTABLE_TABLES: tuple[str, ...] = ("auth_events",)
+
+
+def install_tables() -> None:
+    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
+    return None
+
+
+def install_triggers() -> tuple[str, ...]:
+    """公开钩子: 返回本域触发器部署语句(按执行序, 含幂等 DROP, 供组合根编排收集)。"""
+    statements = [drop_trigger_function_sql(f"tg_{table}_immutable") for table in IMMUTABLE_TABLES]
+    statements.extend(immutable_trigger_sql(table) for table in IMMUTABLE_TABLES)
+    statements.extend(immutable_revoke_sql(table) for table in IMMUTABLE_TABLES)
+    return tuple(statements)

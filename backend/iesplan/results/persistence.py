@@ -27,7 +27,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from iesplan.db import Base, JSONB, bigint_pk
+from iesplan.db import (
+    Base,
+    JSONB,
+    bigint_pk,
+    drop_trigger_function_sql,
+    immutable_revoke_sql,
+    immutable_trigger_sql,
+)
 from iesplan.results.contracts import (
     EvidencePackageRecord,
     ReportRecord,
@@ -676,3 +683,23 @@ class Report(Base):
         CheckConstraint("status IN ('generating','ready','failed')", name="ck_reports_status"),
         Index("idx_reports_project", "project_id", sa.text("generated_at DESC")),
     )
+
+
+#: 本域拥有的不可变表(仅 INSERT, 禁止 UPDATE/DELETE)
+IMMUTABLE_TABLES: tuple[str, ...] = (
+    "evidence_packages",
+    "result_assessments",
+)
+
+
+def install_tables() -> None:
+    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
+    return None
+
+
+def install_triggers() -> tuple[str, ...]:
+    """公开钩子: 返回本域触发器部署语句(按执行序, 含幂等 DROP, 供组合根编排收集)。"""
+    statements = [drop_trigger_function_sql(f"tg_{table}_immutable") for table in IMMUTABLE_TABLES]
+    statements.extend(immutable_trigger_sql(table) for table in IMMUTABLE_TABLES)
+    statements.extend(immutable_revoke_sql(table) for table in IMMUTABLE_TABLES)
+    return tuple(statements)

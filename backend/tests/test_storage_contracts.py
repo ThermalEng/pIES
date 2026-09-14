@@ -20,7 +20,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from iesplan.db import Base
-from iesplan.db import IMMUTABLE_TABLES
+from iesplan.bootstrap import collect_immutable_tables as _collect_immutable_tables
+
+IMMUTABLE_TABLES = _collect_immutable_tables()
 from iesplan.identity.persistence import User  # noqa: F401 (注册 users 表, 闭合 datasets 等外键)
 
 # 复用 conftest 的 sqlite 内存库 helpers
@@ -118,4 +120,7 @@ def test_audit_log_immutable():
     assert "audit_log" in IMMUTABLE_TABLES
     # 额外断言：SQLite 下重复部署不报错（幂等）
     import iesplan.db as db_mod
-    db_mod._deploy_immutable_triggers()
+
+    from iesplan.bootstrap import collect_trigger_statements
+
+    db_mod.deploy_trigger_statements(collect_trigger_statements())

@@ -18,6 +18,11 @@
 
 本包只做装配与健康聚合, 不实现业务规则, 不新增全局 registry(装配结果
 由调用方持有, API 进程挂在 ``app.state.bootstrap_context``)。
+
+领域表与触发器规则由拥有者领域 persistence 的公开钩子定义
+(``install_tables`` / ``install_triggers``), 本包只做显式编排调用
+(``install_domain_tables`` / ``collect_trigger_statements``), 不集中
+拥有跨领域表名与规则, 亦不定义多余的钩子协议。
 """
 
 from __future__ import annotations
@@ -64,10 +69,20 @@ class ApplicationContext:
             result["registry"] = "ok" if _check_registry(self.device_registry) else "unavailable"
         return result
 
+    def readiness(self) -> dict[str, Any]:
+        """公开就绪结果: ``{"ready": 是否全部就绪, "health": 各能力健康}``。
+
+        就绪探针(``iesplan.main`` readyz)只消费本结果, 不直接探活依赖;
+        ``health`` 的键为已装配能力(``db`` / ``storage`` / ``registry``),
+        值仅为 ``"ok"`` 或 ``"unavailable"``。
+        """
+        health = self.health()
+        ready = bool(health) and all(v == "ok" for v in health.values())
+        return {"ready": ready, "health": health}
+
     def ready(self) -> bool:
         """已装配的依赖是否全部就绪(任一 ``unavailable`` 即 False)。"""
-        states = self.health()
-        return bool(states) and all(v == "ok" for v in states.values())
+        return bool(self.readiness()["ready"])
 
 
 def _check_database(session_factory: Any) -> bool:
@@ -125,13 +140,79 @@ def _configure_queue_mode(mode: str) -> None:
     identity_module.configure_queue_mode(mode)
 
 
+#: 领域表安装钩子所属模块(拥有者领域 persistence.install_tables, 显式顺序编排)。
+_DOMAIN_TABLE_HOOKS: tuple[str, ...] = (
+    "iesplan.audit.persistence",
+    "iesplan.configuration.persistence",
+    "iesplan.dataset.persistence",
+    "iesplan.identity.persistence",
+    "iesplan.model.persistence",
+    "iesplan.package.persistence",
+    "iesplan.project.persistence",
+    "iesplan.results.persistence",
+    "iesplan.storage.persistence",
+    "iesplan.tasks.persistence",
+)
+
+#: 触发器规则钩子所属模块(拥有者领域 persistence.install_triggers, 显式顺序编排)。
+_TRIGGER_HOOKS: tuple[str, ...] = (
+    "iesplan.identity.persistence",
+    "iesplan.project.persistence",
+    "iesplan.dataset.persistence",
+    "iesplan.tasks.persistence",
+    "iesplan.results.persistence",
+    "iesplan.audit.persistence",
+    "iesplan.configuration.persistence",
+    "iesplan.model.persistence",
+)
+
+
+def install_domain_tables() -> None:
+    """显式编排各领域表安装钩子: 按顺序调用拥有者 persistence.install_tables()。
+
+    只做导入注册(导入即完成 Base.metadata 注册), 不建表、不迁移、不种子;
+    建表与触发器部署由 ``_assemble`` 经 ``db.init_db`` 完成。
+    """
+    import importlib
+
+    for module_name in _DOMAIN_TABLE_HOOKS:
+        module = importlib.import_module(module_name)
+        module.install_tables()
+
+
+def collect_trigger_statements() -> tuple[str, ...]:
+    """编排收集各领域触发器部署语句: 按顺序拼接拥有者 install_triggers() 结果。
+
+    返回可直接传给 ``db.init_db(trigger_statements=...)`` 的执行序语句序列
+    (各域自带幂等 DROP, 语句内不含业务规则解释, 只做拼接)。
+    """
+    import importlib
+
+    statements: list[str] = []
+    for module_name in _TRIGGER_HOOKS:
+        module = importlib.import_module(module_name)
+        statements.extend(module.install_triggers())
+    return tuple(statements)
+
+
+def collect_immutable_tables() -> tuple[str, ...]:
+    """编排收集各领域不可变表清单(各拥有者 persistence.IMMUTABLE_TABLES 之和)。"""
+    import importlib
+
+    tables: list[str] = []
+    for module_name in _TRIGGER_HOOKS:
+        module = importlib.import_module(module_name)
+        tables.extend(getattr(module, "IMMUTABLE_TABLES", ()))
+    return tuple(tables)
+
+
 def _assemble(
     *,
     with_storage: bool,
     with_registry: bool,
     seed_admin: bool,
 ) -> ApplicationContext:
-    """通用装配: 显式注册 metadata → 建表/迁移/种子 → 装配能力子集。
+    """通用装配: 显式安装领域表 → 建表/触发器/种子 → 装配能力子集。
 
     异常直接抛给调用方(启动失败, 不发布半初始化状态)。
     """
@@ -141,10 +222,10 @@ def _assemble(
     # 0. 队列/限速后端选型(组合根唯一环境解释点): 一次解析部署环境,
     #    扇出给各接收模块; 业务模块只接收传入配置, 不再自行解释环境选型。
     _configure_queue_mode(_resolve_queue_mode())
-    # 1. 各领域 metadata 注册(assemble 显式调用; init_db 内部为测试兼容亦调用)
-    db_module.register_domain_metadata()
-    # 2. 建表 + 版本化迁移 + 不可变触发器
-    db_module.init_db()
+    # 1. 各领域表安装(显式编排拥有者 persistence.install_tables() 钩子)
+    install_domain_tables()
+    # 2. 建表 + 不可变触发器(规则由各领域 install_triggers() 钩子所有, 此处只编排收集)
+    db_module.init_db(trigger_statements=collect_trigger_statements())
     # 3. 内置身份种子(幂等)
     if seed_admin:
         from iesplan.application.identity import seed_builtin_admin
@@ -212,4 +293,7 @@ __all__ = [
     "assemble_api",
     "assemble_compute_worker",
     "assemble_io_worker",
+    "collect_immutable_tables",
+    "collect_trigger_statements",
+    "install_domain_tables",
 ]

@@ -30,7 +30,12 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from iesplan.db import Base, JSONB, bigint_pk
+from iesplan.db import (
+    Base,
+    JSONB,
+    bigint_pk,
+    drop_trigger_function_sql,
+)
 
 from iesplan.model.contracts import (
     ConnectionRecord,
@@ -1241,4 +1246,35 @@ class ProjectModelSequence(Base):
 
     __table_args__ = (
         CheckConstraint("next_suffix >= 1", name="ck_project_model_sequences_next"),
+    )
+
+
+#: 本域拥有的不可变表(无; system_graphs 为版本图冻结专项触发器, 见下)
+IMMUTABLE_TABLES: tuple[str, ...] = ()
+
+#: system_graphs: 版本图(project_version_id 非空)禁止任何 UPDATE(01 §4.1)
+SYSTEM_GRAPHS_FROZEN_TRIGGER_SQL: str = """\
+-- system_graphs: 版本图不可修改(工作图可改)
+CREATE FUNCTION tg_system_graphs_version_frozen() RETURNS trigger AS $$
+BEGIN
+  IF OLD.project_version_id IS NOT NULL THEN
+    RAISE EXCEPTION '版本图不可修改';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER tg_system_graphs_frozen BEFORE UPDATE ON system_graphs
+  FOR EACH ROW EXECUTE FUNCTION tg_system_graphs_version_frozen();
+"""
+
+
+def install_tables() -> None:
+    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
+    return None
+
+
+def install_triggers() -> tuple[str, ...]:
+    """公开钩子: 返回本域触发器部署语句(按执行序, 含幂等 DROP, 供组合根编排收集)。"""
+    return (
+        drop_trigger_function_sql("tg_system_graphs_version_frozen"),
+        SYSTEM_GRAPHS_FROZEN_TRIGGER_SQL,
     )

@@ -50,7 +50,7 @@ def test_readyz_shape(client: TestClient) -> None:
 
 
 class _StubContext:
-    """组合根 ApplicationContext 替身: health() 决定 readyz 结果。"""
+    """组合根 ApplicationContext 替身: readiness() 公开结果决定 readyz。"""
 
     def __init__(self, health: dict[str, str]) -> None:
         self._health = dict(health)
@@ -59,9 +59,14 @@ class _StubContext:
         """返回预设的依赖健康状态。"""
         return dict(self._health)
 
+    def readiness(self) -> dict[str, object]:
+        """返回公开就绪结果(与 ApplicationContext.readiness 同构)。"""
+        health = self.health()
+        return {"ready": bool(health) and all(v == "ok" for v in health.values()), "health": health}
+
     def ready(self) -> bool:
         """全部已上报依赖均为 ok 才就绪。"""
-        return bool(self._health) and all(v == "ok" for v in self._health.values())
+        return bool(self.readiness()["ready"])
 
 
 def _stub_context(client: TestClient, health: dict[str, str]) -> None:
@@ -80,14 +85,33 @@ def test_readyz_503_when_db_unavailable(client: TestClient) -> None:
 
 
 def test_readyz_200_when_db_available(client: TestClient) -> None:
-    """数据库与设备注册表均可用时就绪探针应返回 200。"""
+    """数据库、存储与设备注册表均可用时就绪探针应返回 200。"""
     _stub_context(client, {"db": "ok", "storage": "ok", "registry": "ok"})
     resp = client.get("/api/readyz")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
     assert body["db"] == "ok"
+    assert body["storage"] == "ok"
     assert body["registry"] == "ok"
+
+
+def test_readyz_503_when_storage_unavailable(client: TestClient) -> None:
+    """存储能力不可用时就绪探针应返回 503(覆盖 API 实际必需的已装配能力)。"""
+    _stub_context(client, {"db": "ok", "storage": "unavailable", "registry": "ok"})
+    resp = client.get("/api/readyz")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["error"]["code"] == "API-RZ-003"
+    assert body["error"]["message_key"] == "ies.error.storage_unavailable"
+
+
+def test_readyz_503_when_storage_missing(client: TestClient) -> None:
+    """已装配上下文缺存储能力键时就绪探针应返回 503(缺一即 503, 不 fallback)。"""
+    _stub_context(client, {"db": "ok", "registry": "ok"})
+    resp = client.get("/api/readyz")
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "API-RZ-003"
 
 
 def test_readyz_503_when_registry_unavailable(client: TestClient) -> None:

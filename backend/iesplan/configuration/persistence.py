@@ -39,7 +39,14 @@ from iesplan.configuration.contracts import (
     OverridesRevisionRecord,
     PlanningRevisionRecord,
 )
-from iesplan.db import Base, JSONB, bigint_pk
+from iesplan.db import (
+    Base,
+    JSONB,
+    bigint_pk,
+    drop_trigger_function_sql,
+    immutable_revoke_sql,
+    immutable_trigger_sql,
+)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -639,3 +646,41 @@ class PlanningConfigRevision(Base):
         UniqueConstraint("project_id", "revision", name="uq_planning_configs_revision"),
         Index("idx_planning_configs_project", "project_id", sa.text("revision DESC")),
     )
+
+
+#: 本域拥有的不可变表(仅 INSERT, 禁止 UPDATE/DELETE)
+IMMUTABLE_TABLES: tuple[str, ...] = (
+    "finance_profiles",
+    "finance_overrides",
+    "effective_finance_revisions",
+    "planning_configs",
+)
+
+#: calc_configs: status='frozen' 的行禁止 UPDATE(01 §6.1);DELETE 由应用层约束
+CALC_CONFIGS_FROZEN_TRIGGER_SQL: str = """\
+-- calc_configs: 冻结的计算配置不可修改
+CREATE FUNCTION tg_calc_configs_frozen() RETURNS trigger AS $$
+BEGIN
+  IF OLD.status = 'frozen' THEN
+    RAISE EXCEPTION '冻结的计算配置不可修改';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER tg_calc_configs_no_update BEFORE UPDATE ON calc_configs
+  FOR EACH ROW EXECUTE FUNCTION tg_calc_configs_frozen();
+"""
+
+
+def install_tables() -> None:
+    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
+    return None
+
+
+def install_triggers() -> tuple[str, ...]:
+    """公开钩子: 返回本域触发器部署语句(按执行序, 含幂等 DROP, 供组合根编排收集)。"""
+    statements = [drop_trigger_function_sql(f"tg_{table}_immutable") for table in IMMUTABLE_TABLES]
+    statements.extend(immutable_trigger_sql(table) for table in IMMUTABLE_TABLES)
+    statements.extend(immutable_revoke_sql(table) for table in IMMUTABLE_TABLES)
+    statements.append(drop_trigger_function_sql("tg_calc_configs_frozen"))
+    statements.append(CALC_CONFIGS_FROZEN_TRIGGER_SQL)
+    return tuple(statements)
