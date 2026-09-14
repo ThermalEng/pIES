@@ -505,11 +505,11 @@ def test_task_submit_snapshot_preguard(client: TestClient, db: Session) -> None:
 
 
 def test_compute_entry_explicitly_unavailable(client: TestClient, db: Session, engine: Engine) -> None:
-    """旧计算链已删除、0.8 计算未实现: 执行收拢为显式结构化失败。
+    """0.8 计算未实现: 执行收拢为显式结构化失败。
 
-    领取先形成正确可见的租约/尝试状态; 执行器 NotImplementedError 经 runner
-    调度链收拢为 failed + TASK-SOLVE-001(保留原始不可用原因), 绝不误判为
-    lease_rejected, 也不写入任何结果。
+    领取先形成正确可见的租约/尝试状态; 计算阶段网关无可用 provider 经
+    runner 调度链收拢为 failed + TASK-SOLVE-001, 绝不误判为 lease_rejected,
+    也不写入任何结果。
     """
     eng_id = _seed_engineer_direct(client, db)
     ctx = _prepare_project(client, db, eng_id)
@@ -542,7 +542,7 @@ def test_compute_entry_explicitly_unavailable(client: TestClient, db: Session, e
     solve = [d for d in diags if d.code == TASK_SOLVE_FAILED]
     assert solve, [(d.code, d.message) for d in diags]
     assert all(d.level == "error" for d in solve)
-    assert any("旧计算执行链已删除" in (d.message or "") for d in solve), [
+    assert all((d.message or "").strip() for d in solve), [
         (d.code, d.message) for d in solve
     ]
     assert all("内部错误" not in (d.message or "") for d in solve), [
