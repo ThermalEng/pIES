@@ -542,7 +542,7 @@ def _generator_ref(calc_cfg: Mapping, *, override: str | None) -> str:
     if "@" in candidate:
         return candidate
 
-    from iesplan.engines.registry import get_algorithm
+    from iesplan.computation import get_algorithm
 
     try:
         spec = get_algorithm(candidate)
