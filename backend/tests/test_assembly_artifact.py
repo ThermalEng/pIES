@@ -282,7 +282,7 @@ class TestProjectExport:
 
     def test_project_export_rejects_legacy_algorithm_and_solver_aliases(self, init_registry):
         # 旧 algorithm/solver 别名迁移已删除:旧字段不再被读取,缺显式
-        # generator 以阻断诊断返回,不猜测、不回退
+        # generator 以现行装配边界阻断诊断(ASM-CONV-001)返回,不猜测、不回退
         content = {
             "graph_id": 7,
             "name": "legacy_config",
@@ -297,7 +297,9 @@ class TestProjectExport:
         result = validate_project_export(content)
         assert result.artifact is None
         assert any(
-            d.params.get("reason") == "calculation_generator_missing" and d.blocking
+            d.code == "ASM-CONV-001"
+            and d.params.get("reason") == "calculation_generator_missing"
+            and d.blocking
             for d in result.diagnostics
         )
 
@@ -316,7 +318,9 @@ class TestProjectExport:
         result = validate_project_export(content)
         assert result.artifact is None
         assert any(
-            d.params.get("reason") == "time_axis_missing" and d.blocking
+            d.code == "ASM-CONV-001"
+            and d.params.get("reason") == "time_axis_missing"
+            and d.blocking
             for d in result.diagnostics
         )
 

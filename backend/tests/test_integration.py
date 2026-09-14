@@ -288,6 +288,34 @@ def _bind_dataset(client: TestClient, user_id: int, project_id: int, revision: i
     return body["revision"]
 
 
+#: 现行装配边界要求的显式计算声明(无静默默认): mode/generator/solver/
+#: time_axis 缺一即阻断(ASM-CONV-001)。PUT /config 同步的 calc_config 节不含
+#: 这些字段, 夹具必须经 config.patch 显式声明, 不得依赖回退。
+EXPLICIT_CALC_PATCH = {
+    "mode": "fixed_operation",
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+}
+
+
+def _set_explicit_calc(client: TestClient, user_id: int, project_id: int, revision: int) -> int:
+    """经 config.patch 显式声明计算装配字段, 返回新修订号。"""
+    resp = client.put(
+        f"/api/projects/{project_id}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [
+                {"id": "calc-explicit", "project_id": project_id, "unit": "config",
+                 "type": "config.patch", "payload": EXPLICIT_CALC_PATCH}
+            ],
+        },
+        headers=_h(client, user_id),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
 def _save_config(client: TestClient, user_id: int, project_id: int, revision: int) -> dict[str, Any]:
     """读取默认配置并保存(带乐观锁修订), 返回 {config, version}。"""
     resp = client.get(f"/api/projects/{project_id}/config", headers=_h(client, user_id))
@@ -440,8 +468,9 @@ def _prepare_project(
     dataset_id, version_id = _create_sample_dataset(client, user_id, pid)
     revision = _bind_dataset(client, user_id, pid, 1, version_id)
 
-    # 保存配置(乐观锁修订) + 财务基准确认
+    # 保存配置(乐观锁修订, 不递增草稿修订) + 显式计算声明 + 财务基准确认
     config_body = _save_config(client, user_id, pid, revision)
+    _set_explicit_calc(client, user_id, pid, revision)
     if confirm_baseline:
         _baseline_confirm(client, user_id, pid, config_body["config"])
 

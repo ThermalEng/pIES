@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import ast
-import importlib.util
 import json
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -66,32 +65,13 @@ SAMPLE_DATASETS = {
     },
 }
 
-#: 已移除的旧管线模块(实现史正典名收敛后不得存在)
-REMOVED_MODULES = (
-    "iesplan.assembly.parser10",
-    "iesplan.assembly.builder10",
-    "iesplan.assembly.checker",
-    "iesplan.assembly.plan",
-    "iesplan.assembly.validator2",
-)
-
-#: 已移除的旧管线入口(不得再经公共门面暴露)
-REMOVED_ENTRIES = (
-    "parse_assembly",
-    "load_assembly_file",
-    "build_assembly",
-    "build_assembly_text",
-    "dumps_assembly",
-    "check_assembly",
-    "check_assembly_text",
-    "check_graph_inputs",
-    "plan_from_assembly",
-    "plan_from_content",
-    "validate_interface_network2",
-    "ParseResult",
-    "CheckResult",
-    "AssemblyCheckError",
-    "ValidatedInterfaceNetwork",
+#: 现行公共入口面(ies.assembly 1.0.0): 历史名单不断言, 只稳定现行契约。
+CURRENT_ENTRIES = (
+    parse_assembly_doc,
+    build_assembly_doc_from_content,
+    validate_assembly_text,
+    validate_project_export,
+    canonicalize_assembly_doc,
 )
 
 
@@ -148,14 +128,14 @@ def _export_content() -> dict:
 
 class TestPublicEntries:
     def test_pipeline_entries_callable(self):
-        for entry in (
-            parse_assembly_doc,
-            build_assembly_doc_from_content,
-            validate_assembly_text,
-            validate_project_export,
-            canonicalize_assembly_doc,
-        ):
+        for entry in CURRENT_ENTRIES:
             assert callable(entry)
+
+    def test_public_surface_resolves(self):
+        """__all__ 声明的每个公共名都可解析为真实属性(表面完整性)。"""
+        for name in assembly.__all__:
+            assert hasattr(assembly, name), f"公共入口不可解析: {name}"
+            assert not name.startswith("_"), f"公共入口不得为私有符号: {name}"
 
     def test_contract_names_exposed(self):
         for name in (
@@ -168,16 +148,6 @@ class TestPublicEntries:
             "CheckContext", "BusSummary", "ASM_ALL_CODES",
         ):
             assert name in assembly.__all__, f"公共入口缺失: {name}"
-
-    def test_removed_entries_absent(self):
-        for name in REMOVED_ENTRIES:
-            assert not hasattr(assembly, name), f"旧管线入口残留: {name}"
-            assert name not in assembly.__all__
-
-    def test_removed_modules_absent(self):
-        for mod in REMOVED_MODULES:
-            assert importlib.util.find_spec(mod) is None, f"旧管线模块残留: {mod}"
-
 
 class TestContract:
     def test_schema_identity(self):
@@ -297,15 +267,15 @@ class TestDependencyDirection:
                 assert top in allowed_tops, f"{mod} 出现未知顶层依赖: {target}"
         assert not violations, f"存在穿透业务执行层的依赖: {sorted(set(violations))}"
 
-    def test_removed_modules_not_referenced(self):
-        removed = {m.rsplit(".", 1)[-1] for m in REMOVED_MODULES}
-        violations = []
+    def test_allowed_dependency_tops_stable(self):
+        """现行允许依赖方向稳定: assembly 只引用自身与 core/devices/
+        computation 公开面, 无其他顶层依赖。"""
+        allowed_tops = {"assembly", "core", "devices", "computation"}
         for mod, path in _iter_asm_modules():
             for target, _name in _iesplan_targets(path):
-                leaf = target.rsplit(".", 1)[-1]
-                if leaf in removed:
-                    violations.append((mod, target))
-        assert not violations, f"仍引用已移除模块: {sorted(set(violations))}"
+                parts = target.split(".")
+                top = parts[1] if len(parts) > 1 else ""
+                assert top in allowed_tops, f"{mod} 出现非允许顶层依赖: {target}"
 
 
 class TestProductionPipeline:
