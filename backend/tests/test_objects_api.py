@@ -631,7 +631,12 @@ def test_estimate_storage_unknown_type_raises() -> None:
 
 
 def test_check_capacity(session: Session, data_dir, monkeypatch: pytest.MonkeyPatch) -> None:
-    """容量检查: free > 阈值 → ok; 不足 → ok=False 并给出提示。"""
+    """容量检查: free > 阈值 → ok; 不足 → ok=False 并给出提示。
+
+    阈值显式固定为默认 2G: worker_testkit 等会将 settings.storage_min_free_bytes
+    改为 0(进程级单例, 全套件运行时污染本断言), 此处不依赖全局状态。
+    """
+    monkeypatch.setattr(settings, "storage_min_free_bytes", 2_000_000_000)
     stub = SimpleNamespace(
         disk_usage=lambda _p: SimpleNamespace(free=settings.storage_min_free_bytes + 1_000_000)
     )

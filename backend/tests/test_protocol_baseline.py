@@ -142,6 +142,30 @@ def _create_project(client: TestClient, token: str, name: str) -> int:
     return resp.json()["project"]["id"]
 
 
+def _declare_explicit_calc(client: TestClient, token: str, pid: int) -> None:
+    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1)。
+
+    现行装配边界要求无静默默认: mode/generator/solver/time_axis 缺一即
+    阻断(ASM-CONV-001)。与 test_tasks_api.EXPLICIT_CALC_PATCH 同值。
+    仅需提交计算任务的用例调用;  legacy PUT /config 期望修订号的用例
+    不得调用(会推进草稿修订号)。
+    """
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": 1, "commands": [{
+            "id": "c-calc", "unit": "config", "type": "config.patch",
+            "payload": {
+                "mode": "fixed_operation",
+                "generator": "ies.algo.milp_hybrid@1.0.0",
+                "solver": "ies.solver.highs@1.7.2",
+                "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+            },
+        }]},
+        headers=_bearer(token),
+    )
+    assert resp.status_code == 200, resp.text
+
+
 def _add_device(client: TestClient, token: str, pid: int) -> None:
     """添加一台光伏设备(使默认配置产生可校验的容量变量)。"""
     resp = client.post(
@@ -315,6 +339,7 @@ def test_error_envelope_shape_all_error_paths(
     # 任务须在无设备的空项目上提交: 含 PV 无汇的项目会被装配检查
     # ASM-CHECK-FAILED(ASM-SOLV-002 no_sink)拦截, 无法进入队列
     pid2 = _create_project(client, owner_tok, "解锁任务项目")
+    _declare_explicit_calc(client, owner_tok, pid2)
     resp = client.post(f"/api/projects/{pid2}/tasks", json={"task_type": "optimization"}, headers=_bearer(owner_tok))
     assert resp.status_code == 201, resp.text
     task_id = resp.json()["task"]["id"]
@@ -375,6 +400,7 @@ def test_success_wrappers_tasks_results_domain(client: TestClient, db: Session) 
     user = make_user(db, "wrap_task")
     tok = _login(client, "wrap_task")
     pid = _create_project(client, tok, "任务包装项目")
+    _declare_explicit_calc(client, tok, pid)
     resp = client.post(f"/api/projects/{pid}/tasks", json={"task_type": "calc"}, headers=_bearer(tok))
     body = _assert_wrapper(resp, {"task", "replayed", "duplicate", "hint"})
     task_id = body["task"]["id"]
@@ -593,6 +619,7 @@ def test_frontend_contract_adapters_consistent(client: TestClient, db: Session) 
     user = make_user(db, "wrap_fe")
     tok = _login(client, "wrap_fe")
     pid = _create_project(client, tok, "前端契约项目")
+    _declare_explicit_calc(client, tok, pid)
 
     # (1) 任务列表 {"items", "next_cursor"} ↔ asItems(body, 'tasks')(client.ts:1483)
     resp = client.post(f"/api/projects/{pid}/tasks", json={"task_type": "calc"}, headers=_bearer(tok))

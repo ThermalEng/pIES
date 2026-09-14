@@ -264,6 +264,24 @@ def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) 
     owner_token = _login(client, "owner_c05")
     pid = _create_project(client, owner_token, "任务权限项目")
 
+    # 现行装配边界要求显式计算声明(无静默默认): mode/generator/solver/
+    # time_axis 缺一即阻断(ASM-CONV-001)。与 test_tasks_api.EXPLICIT_CALC_PATCH
+    # 同值, 经 config.patch 草稿命令显式声明。
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": 1, "commands": [{
+            "id": "c-calc", "unit": "config", "type": "config.patch",
+            "payload": {
+                "mode": "fixed_operation",
+                "generator": "ies.algo.milp_hybrid@1.0.0",
+                "solver": "ies.solver.highs@1.7.2",
+                "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+            },
+        }]},
+        headers=_bearer(owner_token),
+    )
+    assert resp.status_code == 200, resp.text
+
     # 所有者提交任务
     resp = client.post(
         f"/api/projects/{pid}/tasks",

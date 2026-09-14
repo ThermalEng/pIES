@@ -1,4 +1,4 @@
-"""ies.assembly 1.0.0 GUI 项目导出构造器(正典名,原 builder10)。
+"""ies.assembly 1.0.0 GUI 项目导出构造器。
 
 将项目内容(设备/端口/连接/数据集绑定/计算配置)映射为 ies.assembly 1.0.0
 文档;损耗的连接自动包裹为 transport_pipe 设备实例,与手写 YAML

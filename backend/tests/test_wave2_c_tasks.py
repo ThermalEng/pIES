@@ -146,12 +146,37 @@ def test_submit_report_task_commits_and_repeatable(
     assert (old.type, old.status, old.calc_snapshot_id) == (task.type, task.status, task.calc_snapshot_id)
 
 
+#: 现行装配边界要求的显式计算声明(无静默默认): mode/generator/solver/
+#: time_axis 缺一即阻断(ASM-CONV-001)。与 test_tasks_api.EXPLICIT_CALC_PATCH
+#: 同值, 经 config.patch 草稿命令显式声明, 不得依赖回退。
+EXPLICIT_CALC_PATCH = {
+    "mode": "fixed_operation",
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
+}
+
+
+def _declare_explicit_calc(client: TestClient, user, pid: int) -> None:
+    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1)。"""
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": 1, "commands": [{
+            "id": "c-calc", "unit": "config", "type": "config.patch",
+            "payload": EXPLICIT_CALC_PATCH,
+        }]},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+
+
 def test_submit_compute_task_snapshot_replay_and_duplicate(
     client: TestClient, db: Session
 ) -> None:
     """计算任务提交: 快照装配 + 幂等重放 + 快照去重。"""
     owner = _user(db, "w2c_owner_opt")
     pid = _project(client, owner, "w2c-proj-opt")
+    _declare_explicit_calc(client, owner, pid)
 
     task, flags = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-opt-1")
     assert flags == {"replay": False, "duplicate": False}
@@ -291,6 +316,7 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
     """重试: 终态 → queued(快照不变, 已提交); 重复落点一致; 非终态拒绝同码。"""
     owner = _user(db, "w2c_owner_retry")
     pid = _project(client, owner, "w2c-proj-retry")
+    _declare_explicit_calc(client, owner, pid)
 
     t1, _ = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-t1")
     snap = t1.calc_snapshot_id
