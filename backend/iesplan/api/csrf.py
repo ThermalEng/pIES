@@ -92,6 +92,11 @@ def cors_origin_list() -> list[str]:
     单一事实源: ``main._setup_cors`` 与本模块都引用它, 保证「允许跨域携带
     凭据的来源」与「CSRF 信任的来源」一致 —— 被 CORS 放行携带 Cookie 的
     跨源页面同样能通过同源校验, 不产生配置漂移。
+
+    Wave3 说明: 本读取保留在传输适配层, 不收敛进 bootstrap —— CORS 来源是
+    HTTP 传输层部署配置(中间件构造期消费), 不是 provider/后端实现选择;
+    经本单一函数收敛后已无漂移, 并入装配上下文只会把请求传输耦合进
+    ApplicationContext, 无收益。
     """
     raw = os.environ.get("IESPLAN_CORS_ORIGINS", "")
     origins = [origin.strip() for origin in raw.split(",") if origin.strip()]

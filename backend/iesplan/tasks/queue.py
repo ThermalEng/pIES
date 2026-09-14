@@ -238,6 +238,30 @@ _backend: _MemoryBackend | _RedisBackend | None = None
 _degraded = False
 _degraded_logged = False
 
+#: bootstrap 传入的队列模式覆盖(None = 未配置, 回退环境变量默认行为)。
+#: 只有 bootstrap 选择 provider/后端实现; 本模块只接收传入配置, 不自行
+#: 解释部署环境做实现选择。
+_queue_mode_override: str | None = None
+
+
+def configure_queue_mode(mode: str | None) -> None:
+    """接收 bootstrap 传入的队列模式(memory/auto/redis; None 恢复环境变量默认)。
+
+    由 bootstrap 在装配期调用; 默认行为不变(未配置时仍读 IESPLAN_QUEUE)。
+    已缓存的后端失效, 下次调用重新按新配置选择。
+    """
+    global _queue_mode_override, _backend, _degraded
+    _queue_mode_override = mode.lower() if isinstance(mode, str) else None
+    _backend = None
+    _degraded = False
+
+
+def _resolve_queue_mode() -> str:
+    """队列模式: bootstrap 传入配置优先, 否则环境变量 IESPLAN_QUEUE(默认 auto)。"""
+    if _queue_mode_override is not None:
+        return _queue_mode_override
+    return os.environ.get("IESPLAN_QUEUE", "auto").lower()
+
 
 def _degrade() -> None:
     """降级为内存后端并记录降级状态(Redis 连接失败或运行期错误)。"""
@@ -250,11 +274,14 @@ def _degrade() -> None:
 
 
 def _get_backend() -> _MemoryBackend | _RedisBackend:
-    """惰性选择后端: IESPLAN_QUEUE=memory 强制内存; 其余先试 Redis, 失败降级。"""
+    """惰性选择后端: memory 强制内存; 其余先试 Redis, 失败降级。
+
+    模式来源见 _resolve_queue_mode(bootstrap 传入优先, 默认环境变量)。
+    """
     global _backend, _degraded
     if _backend is not None:
         return _backend
-    mode = os.environ.get("IESPLAN_QUEUE", "auto").lower()
+    mode = _resolve_queue_mode()
     if mode == "memory":
         _backend = _MemoryBackend()
         return _backend
