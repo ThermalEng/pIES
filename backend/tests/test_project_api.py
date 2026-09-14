@@ -33,7 +33,7 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.audit import AuditLog  # noqa: E402
+from iesplan.audit.persistence import AuditLog  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境

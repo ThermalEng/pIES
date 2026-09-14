@@ -46,8 +46,8 @@ from iesplan.core.diagnostics import SEVERITY_INFO, TASK_QUEUED  # noqa: E402
 from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.calc import Task, TaskLease  # noqa: E402
-from iesplan.models.result import EvidencePackage, ResultSelection  # noqa: E402
+from iesplan.tasks.persistence import Task, TaskLease  # noqa: E402
+from iesplan.results.persistence import EvidencePackage, ResultSelection  # noqa: E402
 from iesplan.storage import put_object
 from iesplan.tasks import queue  # noqa: E402
 

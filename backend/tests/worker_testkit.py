@@ -21,10 +21,10 @@ from sqlalchemy.orm import Session  # noqa: E402
 from iesplan.application.projects.content_objects import store_content_object
 from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.models.calc import CalcSnapshot, Task  # noqa: E402
-from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
-from iesplan.models.identity import User  # noqa: E402
-from iesplan.models.project import Project, ProjectVersion  # noqa: E402
+from iesplan.tasks.persistence import CalcSnapshot, Task  # noqa: E402
+from iesplan.dataset.persistence import Dataset, DatasetFile, DatasetVersion  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402
+from iesplan.project.persistence import Project, ProjectVersion  # noqa: E402
 from iesplan.storage import put_object
 from iesplan.tasks import queue
 

@@ -34,7 +34,7 @@ from worker_testkit import setup_environment  # noqa: E402
 from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.models.calc import Task, TaskLease  # noqa: E402
+from iesplan.tasks.persistence import Task, TaskLease  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
 from iesplan.worker import runner  # noqa: E402
 from iesplan.worker.executors import EngineRunError  # noqa: E402

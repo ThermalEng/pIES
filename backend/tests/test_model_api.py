@@ -27,7 +27,8 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
-from iesplan.models import Device, Port, Project, SystemGraph
+from iesplan.model.persistence import Device, Port, SystemGraph
+from iesplan.project.persistence import Project
 from iesplan.application import identity
 from iesplan.application.models import service as svc
 

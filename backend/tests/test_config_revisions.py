@@ -704,7 +704,7 @@ def test_set_profile_commits_transaction_for_new_session(
     # 独立新会话读取(expire_on_commit=False 语义下仍应从库读到已提交数据)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as new_session:
-        from iesplan.models.project import Project
+        from iesplan.project.persistence import Project
 
         proj = new_session.get(Project, pid)
         assert proj is not None and proj.finance_profile_id is not None

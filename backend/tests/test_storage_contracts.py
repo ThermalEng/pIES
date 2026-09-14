@@ -20,7 +20,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from iesplan.db import Base
-from iesplan.models.immutable_triggers import IMMUTABLE_TABLES
+from iesplan.db import IMMUTABLE_TABLES
 
 # 复用 conftest 的 sqlite 内存库 helpers
 def _engine():

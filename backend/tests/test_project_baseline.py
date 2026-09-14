@@ -300,7 +300,7 @@ def test_no_baseline_update_endpoint(client: TestClient, db_session: Session) ->
 
 def test_baseline_immutable_trigger_ddl_exists() -> None:
     """Postgres 层不可变触发器 DDL 存在且覆盖基线四列(生产库经 db.init_db 部署)。"""
-    from iesplan.models.immutable_triggers import PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL
+    from iesplan.db import PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL
 
     assert "tg_projects_baseline_immutable" in PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL
     assert "tg_project_versions_baseline_immutable" in PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL
@@ -333,7 +333,7 @@ def test_migration_0004_idempotent_on_current_schema() -> None:
 def test_service_requires_explicit_baseline(db_session: Session) -> None:
     """create_project 基线三字段为必填关键字参数: 缺省调用直接 TypeError。"""
     from iesplan.application.projects import lifecycle as projects_uc
-    from iesplan.models.identity import User
+    from iesplan.identity.persistence import User
 
     user = User(username="baseline-required", display_name="必填测试")
     db_session.add(user)

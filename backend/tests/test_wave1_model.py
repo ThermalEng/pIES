@@ -39,7 +39,7 @@ from iesplan.application.model_templates import (  # noqa: E402
 from iesplan.application.models import save_project_model  # noqa: E402
 from iesplan.application.projects import lifecycle as projects_uc  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.models.identity import User  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 

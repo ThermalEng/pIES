@@ -20,7 +20,7 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from iesplan.models.immutable_triggers import (  # noqa: E402
+from iesplan.db import (  # noqa: E402
     ALL_IMMUTABLE_REVOKE_DDL,
     ALL_IMMUTABLE_TRIGGER_DDL,
     IMMUTABLE_TABLES,

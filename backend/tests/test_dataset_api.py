@@ -33,8 +33,8 @@ from iesplan.application.datasets import (
 from iesplan.config import settings
 from iesplan.core.timeaxis import build_axis
 from iesplan.db import Base, get_db
-from iesplan.models.dataset import DatasetFile, DatasetVersion
-from iesplan.models.project import Project
+from iesplan.dataset.persistence import DatasetFile, DatasetVersion
+from iesplan.project.persistence import Project
 
 #: 标准数据列(不含 timestamp)
 DATA_COLS: tuple[str, ...] = tuple(STANDARD_FIELDS.keys())

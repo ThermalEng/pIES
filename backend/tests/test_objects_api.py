@@ -26,8 +26,8 @@ from iesplan.config import settings
 from iesplan.core.errors import AppError
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
-from iesplan.models.audit import AuditLog, RetentionRule
-from iesplan.models.identity import User
+from iesplan.audit.persistence import AuditLog, RetentionRule
+from iesplan.identity.persistence import User
 from iesplan.storage import (
     ObjectCorruptError,
     ObjectHandle,

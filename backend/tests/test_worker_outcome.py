@@ -37,7 +37,7 @@ from worker_testkit import setup_environment  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.core.diagnostics import TASK_SOLVE_FAILED  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.models.calc import Task, TaskDiagnostic, TaskLease  # noqa: E402
+from iesplan.tasks.persistence import Task, TaskDiagnostic, TaskLease  # noqa: E402
 from iesplan.results import (  # noqa: E402
     ASSESSMENT_RULE_VERSION,
     EVIDENCE_COMPLETE,
