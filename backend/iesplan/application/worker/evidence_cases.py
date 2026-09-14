@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.results import writes as results_writes
+from iesplan.application.results import assess_evidence as results_assess_evidence
 from iesplan.application.worker.lease_cases import point_result_assessment
 from iesplan.results import EvidencePackageRecord, ResultAssessmentRecord
 from iesplan.tasks import SampleTaskRecord, UncertaintySnapshotRecord
@@ -58,7 +58,7 @@ def assess_check_evidence(db: Session, *, evidence_package_id: int) -> CheckAsse
 
     只做本步行写(flush, 不提交); 进度/取消与跨步顺序由 Worker 编排。
     """
-    assessment = results_writes.assess_evidence(db, evidence_package_id)
+    assessment = results_assess_evidence(db, evidence_package_id)
     point_result_assessment(
         db, evidence_package_id=evidence_package_id, assessment_id=assessment.id
     )

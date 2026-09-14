@@ -286,14 +286,26 @@ TABLE_OWNERS: dict[str, str] = {
     "uncertainty": "uncertainty",
 }
 
-#: 稳定允许项: models.common 仅含无业务表的共享基元(bigint_pk/
-#: 正则), 引用它不构成跨域业务访问, 故 storage.persistence 对其复用始终允许。
-ALLOWED_SHARED_PRIMITIVE_IMPORTS: set[tuple[str, str]] = {
-    ("iesplan.storage.persistence", "common"),
-}
+#: 稳定允许项: 跨域表访问必须为零。无业务表的共享列基元(bigint_pk/
+#: 正则等)经 iesplan.db 基础设施复用, 不构成跨域业务访问, 故不计入;
+#: 允许集保持为空, 任何新增跨域表访问都会使门禁 8 失败。
+ALLOWED_SHARED_PRIMITIVE_IMPORTS: set[tuple[str, str]] = set()
 
-#: 门禁 8 扫描范围(api 由门禁 3 覆盖, models 自身与 core 不参评)
-_SCAN_OWNERSHIP_DIRS = ("services", "worker", "analysis", "storage", "application")
+#: 门禁 8 扫描范围: 各表所有者域的 persistence.py/tables.py。
+#: 非表所有者(application/api/worker/migrations 等)由其他门禁覆盖;
+#: db.py 的集中 metadata 注册是 Wave3 迁入 bootstrap 前的过渡位, 不参评。
+_NON_OWNER_DIRS = frozenset(
+    {
+        "application",
+        "api",
+        "worker",
+        "core",
+        "migrations",
+        "cli",
+        "engines",
+        "__pycache__",
+    }
+)
 
 
 def _find_api_commit_calls(scan_root: Path = _API_DIR, pkg_root: Path = _PKG_ROOT) -> list[tuple[str, int]]:
@@ -363,25 +375,44 @@ def _find_analysis_engine_imports(
     return found
 
 
+def _owner_domains(pkg_root: Path = _PKG_ROOT) -> set[str]:
+    """返回表所有者候选域: 含 __init__.py 的顶级包目录, 去掉非所有者。"""
+    domains: set[str] = set()
+    for child in pkg_root.iterdir():
+        if child.is_dir() and (child / "__init__.py").is_file():
+            if child.name not in _NON_OWNER_DIRS:
+                domains.add(child.name)
+    return domains
+
+
 def _find_cross_model_imports(pkg_root: Path = _PKG_ROOT) -> set[tuple[str, str]]:
-    """门禁 8: 扫描领域目录下所有 iesplan.models.* 导入, 返回 (访问方, models 子模块)。"""
+    """门禁 8: 扫描各表所有者域的 persistence/tables 对他域同类模块的直接导入,
+    返回 (访问方, 目标)。顶层混合 models/ 已删除, 故不再扫描 iesplan.models.*。
+    """
     found: set[tuple[str, str]] = set()
-    for dirname in _SCAN_OWNERSHIP_DIRS:
-        scan_root = pkg_root / dirname
-        if not scan_root.is_dir():
-            continue
-        for path, mod in _iter_modules(scan_root, pkg_root):
+    domains = _owner_domains(pkg_root)
+    for domain in sorted(domains):
+        for fname in ("persistence.py", "tables.py"):
+            path = pkg_root / domain / fname
+            if not path.is_file():
+                continue
+            mod = f"iesplan.{domain}.{fname[:-3]}"
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
+                targets: list[str] = []
                 if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                    if node.module == "iesplan.models":
-                        found.update((mod, a.name) for a in node.names if a.name != "*")
-                    elif node.module.startswith("iesplan.models."):
-                        found.add((mod, node.module.split(".")[2]))
+                    targets.append(node.module)
                 elif isinstance(node, ast.Import):
-                    for a in node.names:
-                        if a.name.startswith("iesplan.models."):
-                            found.add((mod, a.name.split(".")[2]))
+                    targets.extend(a.name for a in node.names)
+                for target in targets:
+                    parts = target.split(".")
+                    if (
+                        len(parts) == 3
+                        and parts[0] == "iesplan"
+                        and parts[2] in ("persistence", "tables")
+                        and parts[1] != domain
+                    ):
+                        found.add((mod, target))
     return found
 
 

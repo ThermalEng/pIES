@@ -21,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 
 from iesplan.db import Base
 from iesplan.db import IMMUTABLE_TABLES
+from iesplan.identity.persistence import User  # noqa: F401 (注册 users 表, 闭合 datasets 等外键)
 
 # 复用 conftest 的 sqlite 内存库 helpers
 def _engine():

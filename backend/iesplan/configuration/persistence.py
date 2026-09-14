@@ -23,6 +23,7 @@ from sqlalchemy import (
     Numeric,
     SmallInteger,
     Text,
+    UniqueConstraint,
     func,
     select,
 )
