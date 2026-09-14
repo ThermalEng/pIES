@@ -32,12 +32,13 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import (  # noqa: E402
     ProjectBaseline,
     ProjectBaselineError,
 )
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
     settings.data_dir = tmp_path
     app = create_app()
     app.include_router(projects_api.router)
-    app.dependency_overrides[get_db] = lambda: db_session
+    app.dependency_overrides[get_request_db] = lambda: db_session
     with TestClient(app) as c:
         yield c
 

@@ -35,9 +35,10 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import config_revisions as config_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import PlanningConfig  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.finance import (  # noqa: E402
     EffectiveFinanceConfig,
     FinanceOverrides,
@@ -189,7 +190,7 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
     app.include_router(projects_api.router)
     app.include_router(config_api.router)
     app.include_router(config_api.profile_router)
-    app.dependency_overrides[get_db] = lambda: db_session
+    app.dependency_overrides[get_request_db] = lambda: db_session
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 

@@ -31,10 +31,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentAdmin
+from iesplan.api.deps import get_request_db
 from iesplan.application.audits import query_audit
 from iesplan.application.tasks import get_diagnostics, unlock_task_case
 from iesplan.core.errors import ConflictError, NotFoundError
-from iesplan.db import get_db
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -46,7 +46,7 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 @router.get("/audit", summary="审计查询(管理员)")
 def query_audit_endpoint(
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     admin: CurrentAdmin,
     entity_type: str | None = Query(default=None, description="对象类型过滤"),
     entity_id: int | None = Query(default=None, description="对象标识过滤"),
@@ -68,7 +68,7 @@ def query_audit_endpoint(
 
 @router.get("/diagnostics", summary="运维诊断视图(管理员)")
 def diagnostics_endpoint(
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     admin: CurrentAdmin,
 ) -> dict:
     """运维诊断视图: 任务/队列/存储/保留策略/维护记录/最近失败任务。"""
@@ -94,7 +94,7 @@ class UnlockTaskRequest(BaseModel):
 @router.post("/unlock-task", summary="管理员解锁任务")
 def unlock_task_endpoint(
     payload: UnlockTaskRequest,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     admin: CurrentAdmin,
 ) -> dict:
     """管理员解锁卡死任务(宪法 §16 + domain-model §身份权限审计 维护入口)。

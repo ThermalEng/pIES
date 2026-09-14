@@ -5,7 +5,7 @@
 
 - 数据库: SQLite :memory:(models 全部表 create_all);
 - 应用: 独立 FastAPI 实例挂载 config_router + registry_router,
-  用 dependency_overrides 替换 get_db;
+  用 dependency_overrides 替换 get_request_db;
 - 设备类型使用 devices.device_type 的 CHECK 短名(pv/storage/load),
   完整 2.0 注册表 ID 经设备行 params.type_detail 传递, 默认参数解析优先使用它。
 """
@@ -25,11 +25,12 @@ from sqlalchemy.pool import StaticPool
 from iesplan import project as project_domain
 from iesplan.api.auth import router as auth_router
 from iesplan.api.config import config_router, registry_router
+from iesplan.api.deps import get_request_db
 from iesplan.application import identity
 from iesplan.application.configuration import calc_config
 from iesplan.application.projects.content_objects import store_content_object
 from iesplan.application.tasks import submit_task
-from iesplan.db import Base, get_db
+from iesplan.db import Base
 from iesplan.main import _register_exception_handlers
 from iesplan.audit.persistence import AuditLog
 from iesplan.configuration.persistence import CalcConfig
@@ -123,13 +124,13 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
 
 
 def make_app(db: Session) -> FastAPI:
-    """挂载配置路由的测试应用(get_db 覆盖为传入会话)。"""
+    """挂载配置路由的测试应用(get_request_db 覆盖为传入会话)。"""
     application = FastAPI(title="pIES Config API Test")
     application.include_router(auth_router)
     application.include_router(config_router)
     application.include_router(registry_router)
     _register_exception_handlers(application)
-    application.dependency_overrides[get_db] = lambda: db
+    application.dependency_overrides[get_request_db] = lambda: db
     return application
 
 

@@ -24,8 +24,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.application import results as results_app
-from iesplan.db import get_db
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/tasks/{task_id}/result", tags=["results"]
@@ -67,7 +67,7 @@ class CheckRequest(BaseModel):
 def get_result_endpoint(
     project_id: int,
     task_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict[str, Any]:
     """结果视图: 四维结论(细粒度 + 派生摘要)/业务结局/指标摘要/逐时结果引用/当前选中。
@@ -81,7 +81,7 @@ def get_result_endpoint(
 def list_assessments_endpoint(
     project_id: int,
     task_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict[str, Any]:
     """评估历史: 全部证据包上的评估记录(追加式不可变, 时间倒序)。"""
@@ -93,7 +93,7 @@ def assess_endpoint(
     project_id: int,
     task_id: int,
     payload: AssessRequest,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict[str, Any]:
     """触发新评估(domain-model §快照任务结果/§对象生命周期): 对任务最新证据包执行四维(或单维)检查, 创建新评估记录
@@ -109,7 +109,7 @@ def select_result_endpoint(
     project_id: int,
     task_id: int,
     payload: SelectRequest,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict[str, Any]:
     """选择结果(01 §8.4 追加式): 保存所选解标识/类型/理由 + 差异补丁审计;
@@ -141,7 +141,7 @@ def select_result_endpoint(
 def diff_endpoint(
     project_id: int,
     task_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict[str, Any]:
     """选中结果的参数差异预览(补丁 + 校验值 + 来源版本), 应用前要求用户确认
@@ -154,7 +154,7 @@ def diff_endpoint(
 def hourly_endpoint(
     project_id: int,
     task_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     field: str = Query(description="逐时字段名(如 p_grid_buy)"),
     solution_id: int | None = Query(default=None, description="逐时结果引用所属解(缺省第一份)"),
@@ -174,7 +174,7 @@ def hourly_endpoint(
 def check_task_endpoint(
     project_id: int,
     task_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     payload: CheckRequest | None = None,
 ) -> dict[str, Any]:

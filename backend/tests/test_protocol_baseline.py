@@ -20,7 +20,7 @@
    (业务 bug 记录, 本切片不修)。
 
 运行方式: 与 test_security_regression 同构 —— create_app() 挂载全部业务路由,
-SQLite :memory:(StaticPool) + dependency_overrides 替换 get_db,
+SQLite :memory:(StaticPool) + dependency_overrides 替换 get_request_db,
 raise_server_exceptions=False(500 路径断言需要)。
 """
 
@@ -42,7 +42,8 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.application import identity  # noqa: E402
 
@@ -88,17 +89,17 @@ def db(engine: Engine) -> Iterator[Session]:
 
 @pytest.fixture()
 def client(db: Session) -> Iterator[TestClient]:
-    """挂载全部业务路由的应用测试客户端(get_db 替换为内存 SQLite)。
+    """挂载全部业务路由的应用测试客户端(get_request_db 替换为内存 SQLite)。
 
     raise_server_exceptions=False: 500 未捕获异常路径以 HTTP 响应断言,
     不向上抛异常。
     """
     app = create_app()
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     identity.reset_login_rate_limit()
     # 全局限流状态为进程级共享: 同时清空, 防止本文件残留计数影响后续
     # 文件的 401 断言(或反之被前序高频文件打成 429)

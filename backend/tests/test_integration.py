@@ -30,8 +30,9 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402
 from iesplan.tasks.persistence import TaskDiagnostic  # noqa: E402
@@ -102,14 +103,14 @@ def db(db_session: Session) -> Session:
 
 @pytest.fixture()
 def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[TestClient]:
-    """测试客户端: create_app() 全量路由, 替换 get_db, 对象存储指向临时目录。"""
+    """测试客户端: create_app() 全量路由, 替换 get_request_db, 对象存储指向临时目录。"""
     settings.data_dir = tmp_path
     app = create_app()
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db_session
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
         test_client._test_db = db_session  # type: ignore[attr-defined]  # 供 _h 登录辅助使用
         test_client._auth_tokens = {}  # type: ignore[attr-defined]  # 窗口凭证缓存

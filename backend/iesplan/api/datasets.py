@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.api.limits import (
     META_CODE,
     META_MESSAGE_KEY,
@@ -46,7 +47,6 @@ from iesplan.application import datasets as dataset_ops
 from iesplan.application.datasets import DataValidationError
 from iesplan.core.errors import error_envelope, http_error
 from iesplan.core.timeaxis import RESOLUTIONS
-from iesplan.db import get_db
 
 #: 路由: 统一前缀 /api, 各端点自带路径
 router = APIRouter(prefix="/api", tags=["datasets"])
@@ -55,7 +55,7 @@ router = APIRouter(prefix="/api", tags=["datasets"])
 _MAX_UPLOAD_BYTES: int = 512 * 1024 * 1024
 
 #: 会话依赖(Annotated 风格, 规避 B008)
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 # ---------------------------------------------------------------------------
 # 请求模型

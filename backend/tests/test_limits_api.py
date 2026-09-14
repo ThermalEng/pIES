@@ -18,8 +18,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from iesplan.api.deps import get_request_db
 from iesplan.config import settings
-from iesplan.db import Base, get_db
+from iesplan.db import Base
 from iesplan.main import create_app
 
 # ---------------------------------------------------------------------------
@@ -55,14 +56,14 @@ def _clean_tables(engine) -> Iterator[None]:
 
 @pytest.fixture()
 def client(db: Session, tmp_path, monkeypatch) -> Iterator[TestClient]:
-    """完整应用客户端(含限流中间件), 替换 get_db 依赖, data_dir 指向临时目录。"""
+    """完整应用客户端(含限流中间件), 替换 get_request_db 依赖, data_dir 指向临时目录。"""
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     app = create_app()
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 

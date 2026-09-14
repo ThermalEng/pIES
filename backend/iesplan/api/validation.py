@@ -20,14 +20,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.application import validations as validation_cases
-from iesplan.db import get_db
 
 #: FastAPI 路由(挂载前缀 /api/projects/{project_id}/validation, 由集成阶段追加)
 router = APIRouter(prefix="/api/projects/{project_id}/validation", tags=["validation"])
 
 #: FastAPI 依赖注入的数据库会话
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 
 # ---------------------------------------------------------------------------

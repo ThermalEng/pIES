@@ -26,11 +26,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.api.limits import QUOTA_CODE, QUOTA_MESSAGE_KEY, QuotaError
 from iesplan.application import packages as package_ops
 from iesplan.application import projects as project_ops
 from iesplan.core.errors import http_error
-from iesplan.db import get_db
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -113,7 +113,7 @@ class ApplyResultRequest(BaseModel):
 @router.post("", status_code=201, summary="创建项目")
 def create_project_endpoint(
     payload: ProjectCreateRequest,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """创建项目: 创建者即所有者, 并创建初始草稿(revision=1)。
@@ -135,7 +135,7 @@ def create_project_endpoint(
 
 @router.get("", summary="我可见的项目列表")
 def list_projects_endpoint(
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     status: Literal["active", "archived"] | None = None,
 ) -> dict:
@@ -150,7 +150,7 @@ def list_projects_endpoint(
 
 @router.get("/admin-visible", summary="全部项目整体视图(管理员)")
 def list_all_projects_endpoint(
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     admin: CurrentUser,
 ) -> dict:
     """管理员整体管理入口: 全部项目(含已删除), 不含项目内容细节(草稿/版本)。
@@ -164,7 +164,7 @@ def list_all_projects_endpoint(
 @router.get("/{project_id}", summary="项目视图")
 def get_project_endpoint(
     project_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """项目视图: 项目 + 草稿摘要(含内容) + 版本列表。"""
@@ -175,7 +175,7 @@ def get_project_endpoint(
 def update_draft_endpoint(
     project_id: int,
     payload: DraftUpdateRequest,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """应用草稿语义命令(乐观锁: 预期修订不符 → 409; 整批重试幂等)。"""
@@ -189,7 +189,7 @@ def update_draft_endpoint(
 def create_version_endpoint(
     project_id: int,
     payload: VersionCreateRequest,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """从当前草稿创建不可变项目版本。"""
@@ -202,7 +202,7 @@ def create_version_endpoint(
 @router.get("/{project_id}/versions", summary="版本列表")
 def list_versions_endpoint(
     project_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """版本列表(新版本在前)。"""
@@ -214,7 +214,7 @@ def list_versions_endpoint(
 def get_version_endpoint(
     project_id: int,
     version_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """版本详情。"""
@@ -226,7 +226,7 @@ def get_version_endpoint(
 def restore_version_endpoint(
     project_id: int,
     version_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     payload: RestoreRequest | None = None,
 ) -> dict:
@@ -243,7 +243,7 @@ def restore_version_endpoint(
 def apply_result_endpoint(
     project_id: int,
     payload: ApplyResultRequest,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """应用选定结果: 参数差异补丁应用到新草稿并创建新版本, 来源版本不变。"""
@@ -260,7 +260,7 @@ def apply_result_endpoint(
 @router.post("/{project_id}/archive", summary="归档项目")
 def archive_project_endpoint(
     project_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """归档项目(归档后只读, 不能编辑/提交计算)。"""
@@ -270,7 +270,7 @@ def archive_project_endpoint(
 @router.post("/{project_id}/unarchive", summary="撤销归档")
 def unarchive_project_endpoint(
     project_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """撤销归档(恢复为 active)。"""
@@ -281,7 +281,7 @@ def unarchive_project_endpoint(
 def delete_project_endpoint(
     project_id: int,
     payload: DeleteConfirmRequest,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> None:
     """删除项目(domain-model §项目聚合): 必须输入项目名或删除原因以确认误操作防护。
@@ -302,7 +302,7 @@ def delete_project_endpoint(
 
 @router.post("/import", status_code=201, summary="导入项目包(创建导入提案)")
 def import_package_endpoint(
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     file: Annotated[UploadFile, File(description="项目包 zip")],
     idempotency_key: str | None = None,
@@ -344,7 +344,7 @@ def import_package_endpoint(
 @router.post("/import/{proposal_id}/confirm", status_code=201, summary="确认导入提案")
 def confirm_import_endpoint(
     proposal_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """确认导入: 创建新项目身份(导入者即所有者), 历史结果作为证据来源保留。"""

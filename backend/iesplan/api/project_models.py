@@ -29,17 +29,17 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.application.models import (
     delete_project_model,
     get_project_models,
     save_project_model,
     validate_candidate,
 )
-from iesplan.db import get_db
 
 router = APIRouter(prefix="/api/projects/{project_id}/models", tags=["project-models"])
 
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 
 class ModelCandidateRequest(BaseModel):

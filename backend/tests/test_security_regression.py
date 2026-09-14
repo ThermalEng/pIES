@@ -9,7 +9,7 @@
 - H-07: ZIP Bomb 拒绝(PKG-SIZE-001)。
 
 运行方式: SQLite :memory:(StaticPool 共享连接) + IESPLAN_QUEUE=memory,
-create_app() 挂载全部业务路由, dependency_overrides 替换 get_db。
+create_app() 挂载全部业务路由, dependency_overrides 替换 get_request_db。
 """
 
 from __future__ import annotations
@@ -30,7 +30,8 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan import package as package_domain  # noqa: E402
 from iesplan.application import identity  # noqa: E402
@@ -61,13 +62,13 @@ def db(engine: Engine) -> Iterator[Session]:
 
 @pytest.fixture()
 def client(db: Session) -> Iterator[TestClient]:
-    """挂载全部业务路由的应用测试客户端(get_db 替换为内存 SQLite)。"""
+    """挂载全部业务路由的应用测试客户端(get_request_db 替换为内存 SQLite)。"""
     app = create_app()
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     identity.reset_login_rate_limit()
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c

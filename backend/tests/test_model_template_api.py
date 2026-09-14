@@ -28,8 +28,9 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.audit.persistence import AuditLog  # noqa: E402
 from iesplan.model.persistence import ModelTemplateRevision  # noqa: E402
@@ -106,10 +107,10 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
     settings.data_dir = tmp_path
     app = create_app()
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db_session
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     from iesplan.api.limits import reset_rate_limit
 
     reset_rate_limit()

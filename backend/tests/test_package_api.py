@@ -11,7 +11,7 @@
 - 管理端点: 审计查询/解锁任务/停用所有者转移/健康/存储(管理员 403 边界)。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录 + 内存队列,
-不依赖部署 Postgres/Redis; 通过 app.dependency_overrides 替换 get_db。
+不依赖部署 Postgres/Redis; 通过 app.dependency_overrides 替换 get_request_db。
 """
 
 from __future__ import annotations
@@ -46,11 +46,12 @@ from iesplan import package as package_domain  # noqa: E402
 from iesplan.api import admin as admin_api  # noqa: E402
 from iesplan.api import exports as exports_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application.packages import operations as packages_uc  # noqa: E402
 from iesplan.application.projects import lifecycle as projects_lifecycle  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.errors import ForbiddenError  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.audit.persistence import AuditLog
 from iesplan.package.persistence import ImportProposal
@@ -103,17 +104,17 @@ def db(engine: Engine, tmp_path: Path) -> Iterator[Session]:
 
 @pytest.fixture()
 def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
-    """测试客户端: 挂载项目/导出/管理路由, 替换 get_db 依赖。"""
+    """测试客户端: 挂载项目/导出/管理路由, 替换 get_request_db 依赖。"""
     settings.data_dir = tmp_path
     app = create_app()
     app.include_router(projects_api.router)
     app.include_router(exports_api.router)
     app.include_router(admin_api.router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 

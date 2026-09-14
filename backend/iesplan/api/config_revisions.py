@@ -37,11 +37,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.application import configuration as revision_cases
-from iesplan.db import get_db
 
 #: FastAPI 依赖注入的数据库会话
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["config-revisions"])
 profile_router = APIRouter(prefix="/api/finance-profiles", tags=["finance-profiles"])

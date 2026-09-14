@@ -29,13 +29,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentAdmin
+from iesplan.api.deps import get_request_db
 from iesplan.application import objects as objects_app
-from iesplan.db import get_db
 
 #: 对象域管理路由: 挂载前缀 /api/admin(仅管理员)
 router = APIRouter(prefix="/api/admin", tags=["admin-storage"])
 
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 
 class CleanupRequest(BaseModel):

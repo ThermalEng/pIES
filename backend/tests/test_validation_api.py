@@ -18,12 +18,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from iesplan.api.deps import get_request_db
 from iesplan.application import identity
 from iesplan.application.configuration import calc_config
 from iesplan.application.projects import lifecycle as project_ops
 from iesplan.application.validations import precheck as validation_ops
 from iesplan.config import settings
-from iesplan.db import Base, get_db
+from iesplan.db import Base
 from iesplan.main import create_app
 from iesplan.identity.persistence import User
 from iesplan.project.persistence import Project
@@ -122,11 +123,11 @@ def client(factory: sessionmaker, data_dir: Path) -> Iterator[TestClient]:
     app.include_router(project_api.router)
     app.include_router(validation_api.router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         with factory() as session:
             yield session
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 

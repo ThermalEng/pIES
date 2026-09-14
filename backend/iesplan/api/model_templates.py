@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.application.model_templates import (
     create_template_draft,
     delete_template_draft,
@@ -52,11 +53,10 @@ from iesplan.application.model_templates import (
     validate_template_revision,
     validate_template_yaml,
 )
-from iesplan.db import get_db
 
 router = APIRouter(prefix="/api/model-templates", tags=["model-templates"])
 
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 _TEMPLATE_ID_PATTERN = r"^[a-z0-9]+([._-][a-z0-9]+)*$"
 
