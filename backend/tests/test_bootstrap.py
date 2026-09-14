@@ -7,6 +7,9 @@ from iesplan.bootstrap import (
     assemble_api,
     assemble_compute_worker,
     assemble_io_worker,
+    collect_immutable_tables,
+    collect_trigger_statements,
+    install_domain_tables,
 )
 
 
@@ -60,13 +63,25 @@ def test_assemble_configures_queue_mode_from_environment(monkeypatch) -> None:
         identity_module.configure_queue_mode(None)
 
 
-def test_register_domain_metadata_registers_tables() -> None:
-    """register_domain_metadata 只做导入注册: Base.metadata 含各领域表, 无建表副作用断言。"""
-    from iesplan.db import Base, register_domain_metadata
+def test_install_domain_tables_registers_all_domains() -> None:
+    """install_domain_tables 只做导入注册: Base.metadata 含各领域表, 无建表副作用断言。"""
+    from iesplan.db import Base
 
-    register_domain_metadata()
+    install_domain_tables()
     names = set(Base.metadata.tables)
     assert "users" in names
     assert "projects" in names
     assert "tasks" in names
     assert "objects" in names
+
+
+def test_collect_trigger_statements_covers_immutable_tables() -> None:
+    """触发器语句由各领域钩子编排收集: 每张不可变表都有函数/两触发器/REVOKE 片段。"""
+    statements = collect_trigger_statements()
+    assert statements
+    ddl = "\n\n".join(statements)
+    for table in collect_immutable_tables():
+        assert f"CREATE FUNCTION tg_{table}_immutable() RETURNS trigger" in ddl
+        assert f"CREATE TRIGGER tg_{table}_no_update BEFORE UPDATE ON {table}" in ddl
+        assert f"CREATE TRIGGER tg_{table}_no_delete BEFORE DELETE ON {table}" in ddl
+        assert f"REVOKE UPDATE, DELETE ON {table} FROM PUBLIC;" in ddl

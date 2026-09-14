@@ -150,3 +150,8 @@ def list_active_retention_rules(db: Session) -> list[RetentionPolicy]:
         )
         for row in rows
     ]
+
+
+def install_tables() -> None:
+    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
+    return None

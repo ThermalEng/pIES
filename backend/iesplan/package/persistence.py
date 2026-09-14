@@ -192,3 +192,8 @@ class ImportProposal(Base):
         ),
         Index("idx_import_proposals_project", "project_id", "status"),
     )
+
+
+def install_tables() -> None:
+    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
+    return None

@@ -37,7 +37,14 @@ from iesplan.dataset.contracts import (
     DatasetRecord,
     DatasetVersionRecord,
 )
-from iesplan.db import Base, JSONB, bigint_pk
+from iesplan.db import (
+    Base,
+    JSONB,
+    bigint_pk,
+    drop_trigger_function_sql,
+    immutable_revoke_sql,
+    immutable_trigger_sql,
+)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -391,3 +398,23 @@ class DatasetFile(Base):
         UniqueConstraint("dataset_version_id", "object_id", name="uq_dataset_files_object"),
         Index("idx_dataset_files_object", "object_id"),
     )
+
+
+#: 本域拥有的不可变表(仅 INSERT, 禁止 UPDATE/DELETE)
+IMMUTABLE_TABLES: tuple[str, ...] = (
+    "dataset_versions",
+    "dataset_files",
+)
+
+
+def install_tables() -> None:
+    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
+    return None
+
+
+def install_triggers() -> tuple[str, ...]:
+    """公开钩子: 返回本域触发器部署语句(按执行序, 含幂等 DROP, 供组合根编排收集)。"""
+    statements = [drop_trigger_function_sql(f"tg_{table}_immutable") for table in IMMUTABLE_TABLES]
+    statements.extend(immutable_trigger_sql(table) for table in IMMUTABLE_TABLES)
+    statements.extend(immutable_revoke_sql(table) for table in IMMUTABLE_TABLES)
+    return tuple(statements)

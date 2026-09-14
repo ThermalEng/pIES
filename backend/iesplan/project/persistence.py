@@ -32,7 +32,14 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from iesplan.db import Base, JSONB, bigint_pk
+from iesplan.db import (
+    Base,
+    JSONB,
+    bigint_pk,
+    drop_trigger_function_sql,
+    immutable_revoke_sql,
+    immutable_trigger_sql,
+)
 from iesplan.project.contracts import (
     DraftRecord,
     MaintenanceActionRecord,
@@ -679,3 +686,59 @@ class AdminMaintenanceAction(Base):
         Index("idx_admin_actions_time", sa.text("started_at DESC")),
         Index("idx_admin_actions_by", "performed_by"),
     )
+
+
+#: 本域拥有的不可变表(仅 INSERT, 禁止 UPDATE/DELETE)
+IMMUTABLE_TABLES: tuple[str, ...] = (
+    "admin_maintenance_actions",
+    "project_versions",
+    "version_refs",
+)
+
+#: projects / project_versions: 项目计算基线(0.6.5 事项 1)创建时一次性固定,
+#: 创建后不可修改。行级 UPDATE 若改变任一基线列(含摘要)即拒绝 —— 基线是
+#: 序列预备、装配与历史任务解释的权威事实, 不允许运行期篡改。
+PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL: str = """\
+-- projects: 基线列不可修改(0.6.5 事项 1)
+CREATE FUNCTION tg_projects_baseline_immutable() RETURNS trigger AS $$
+BEGIN
+  IF OLD.baseline_resolution IS DISTINCT FROM NEW.baseline_resolution
+     OR OLD.baseline_leap_year IS DISTINCT FROM NEW.baseline_leap_year
+     OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode THEN
+    RAISE EXCEPTION '项目计算基线创建后不可修改';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER tg_projects_baseline_immutable BEFORE UPDATE ON projects
+  FOR EACH ROW EXECUTE FUNCTION tg_projects_baseline_immutable();
+-- project_versions: 版本固化基线同样不可修改(版本表整体只 INSERT)
+CREATE FUNCTION tg_project_versions_baseline_immutable() RETURNS trigger AS $$
+BEGIN
+  IF OLD.baseline_resolution IS DISTINCT FROM NEW.baseline_resolution
+     OR OLD.baseline_leap_year IS DISTINCT FROM NEW.baseline_leap_year
+     OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode THEN
+    RAISE EXCEPTION '项目版本基线固化后不可修改';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER tg_project_versions_baseline_immutable BEFORE UPDATE ON project_versions
+  FOR EACH ROW EXECUTE FUNCTION tg_project_versions_baseline_immutable();
+"""
+
+
+def install_tables() -> None:
+    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
+    return None
+
+
+def install_triggers() -> tuple[str, ...]:
+    """公开钩子: 返回本域触发器部署语句(按执行序, 含幂等 DROP, 供组合根编排收集)。"""
+    statements = [drop_trigger_function_sql(f"tg_{table}_immutable") for table in IMMUTABLE_TABLES]
+    statements.extend(immutable_trigger_sql(table) for table in IMMUTABLE_TABLES)
+    statements.extend(immutable_revoke_sql(table) for table in IMMUTABLE_TABLES)
+    statements.extend(
+        drop_trigger_function_sql(func)
+        for func in ("tg_projects_baseline_immutable", "tg_project_versions_baseline_immutable")
+    )
+    statements.append(PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL)
+    return tuple(statements)

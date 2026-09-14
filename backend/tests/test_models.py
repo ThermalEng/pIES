@@ -14,12 +14,8 @@ import sqlalchemy as sa
 from sqlalchemy import CheckConstraint, Index, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 
-from iesplan.db import (
-    ALL_IMMUTABLE_REVOKE_DDL,
-    ALL_IMMUTABLE_TRIGGER_DDL,
-    Base,
-    IMMUTABLE_TABLES,
-)
+from iesplan.bootstrap import collect_immutable_tables, collect_trigger_statements
+from iesplan.db import Base
 # Wave2A: ORM 表真相收归各领域 persistence;测试直引领域内部 persistence,不经公开门面。
 from iesplan.identity import persistence as identity_tables
 from iesplan.storage import persistence as storage_tables
@@ -285,19 +281,19 @@ def test_enum_check_constraints() -> None:
 
 
 def test_immutable_tables_and_triggers() -> None:
-    """不可变表清单与触发器 DDL 常量完整。"""
-    assert set(IMMUTABLE_TABLES) == EXPECTED_IMMUTABLE_TABLES
-    for table in IMMUTABLE_TABLES:
-        assert f"CREATE TRIGGER tg_{table}_no_update BEFORE UPDATE ON {table}" in ALL_IMMUTABLE_TRIGGER_DDL
-        assert f"CREATE TRIGGER tg_{table}_no_delete BEFORE DELETE ON {table}" in ALL_IMMUTABLE_TRIGGER_DDL
-        assert f"CREATE FUNCTION tg_{table}_immutable()" in ALL_IMMUTABLE_TRIGGER_DDL
-        assert f"REVOKE UPDATE, DELETE ON {table} FROM PUBLIC;" in ALL_IMMUTABLE_REVOKE_DDL
-    # 专项触发器(版本图冻结 / 配置冻结 / 任务终态)
-    from iesplan.db import (
-        CALC_CONFIGS_FROZEN_TRIGGER_SQL,
-        SYSTEM_GRAPHS_FROZEN_TRIGGER_SQL,
-        TASKS_TERMINAL_TRIGGER_SQL,
-    )
+    """不可变表清单与触发器 DDL 常量完整(规则归拥有者领域所有, 组合根编排收集)。"""
+    immutable_tables = collect_immutable_tables()
+    trigger_ddl = "\n\n".join(collect_trigger_statements())
+    assert set(immutable_tables) == EXPECTED_IMMUTABLE_TABLES
+    for table in immutable_tables:
+        assert f"CREATE TRIGGER tg_{table}_no_update BEFORE UPDATE ON {table}" in trigger_ddl
+        assert f"CREATE TRIGGER tg_{table}_no_delete BEFORE DELETE ON {table}" in trigger_ddl
+        assert f"CREATE FUNCTION tg_{table}_immutable()" in trigger_ddl
+        assert f"REVOKE UPDATE, DELETE ON {table} FROM PUBLIC;" in trigger_ddl
+    # 专项触发器(版本图冻结 / 配置冻结 / 任务终态, 归拥有者领域 persistence 所有)
+    from iesplan.configuration.persistence import CALC_CONFIGS_FROZEN_TRIGGER_SQL
+    from iesplan.model.persistence import SYSTEM_GRAPHS_FROZEN_TRIGGER_SQL
+    from iesplan.tasks.persistence import TASKS_TERMINAL_TRIGGER_SQL
 
     assert "BEFORE UPDATE ON system_graphs" in SYSTEM_GRAPHS_FROZEN_TRIGGER_SQL
     assert "BEFORE UPDATE ON calc_configs" in CALC_CONFIGS_FROZEN_TRIGGER_SQL

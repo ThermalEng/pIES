@@ -36,14 +36,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from iesplan.db import (
-    IDEMPOTENCY_KEY_RE,
     Base,
     BigIntArray,
     JSONB,
     bigint_pk,
+    drop_trigger_function_sql,
+    immutable_revoke_sql,
+    immutable_trigger_sql,
     regex_check,
 )
 from iesplan.tasks.contracts import (
+    IDEMPOTENCY_KEY_RE,
     CalcSnapshotRecord,
     ComputeSlotRecord,
     SampleRecordRecord,
@@ -1291,3 +1294,40 @@ class SampleRecord(Base):
         UniqueConstraint("sample_task_id", "variable_name", name="uq_sample_records_variable"),
         Index("idx_sample_records_task", "sample_task_id"),
     )
+
+
+#: 本域拥有的不可变表(仅 INSERT, 禁止 UPDATE/DELETE)
+IMMUTABLE_TABLES: tuple[str, ...] = (
+    "calc_snapshots",
+    "task_diagnostics",
+    "uncertainty_snapshots",
+)
+
+#: tasks: 终态(completed/cancelled/timed_out/failed)禁止再迁移状态(01 §7.2)
+TASKS_TERMINAL_TRIGGER_SQL: str = """\
+-- tasks: 终态任务不可迁移状态
+CREATE FUNCTION tg_tasks_terminal() RETURNS trigger AS $$
+BEGIN
+  IF OLD.status IN ('completed','cancelled','timed_out','failed') AND NEW.status <> OLD.status THEN
+    RAISE EXCEPTION '终态任务不可迁移状态';
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER tg_tasks_terminal BEFORE UPDATE ON tasks
+  FOR EACH ROW EXECUTE FUNCTION tg_tasks_terminal();
+"""
+
+
+def install_tables() -> None:
+    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
+    return None
+
+
+def install_triggers() -> tuple[str, ...]:
+    """公开钩子: 返回本域触发器部署语句(按执行序, 含幂等 DROP, 供组合根编排收集)。"""
+    statements = [drop_trigger_function_sql(f"tg_{table}_immutable") for table in IMMUTABLE_TABLES]
+    statements.extend(immutable_trigger_sql(table) for table in IMMUTABLE_TABLES)
+    statements.extend(immutable_revoke_sql(table) for table in IMMUTABLE_TABLES)
+    statements.append(drop_trigger_function_sql("tg_tasks_terminal"))
+    statements.append(TASKS_TERMINAL_TRIGGER_SQL)
+    return tuple(statements)

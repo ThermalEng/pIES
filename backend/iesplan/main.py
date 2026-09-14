@@ -81,32 +81,46 @@ def _build_health_router() -> APIRouter:
 
     @router.get("/readyz", summary="就绪探针")
     async def readyz(request: Request) -> JSONResponse:
-        """就绪探针: 已装配上下文的 db 与 registry 两项均就绪返回 200, 缺一 503。
+        """就绪探针: API 实际必需的已装配能力(db/storage/registry)均就绪返回 200, 缺一 503。
 
-        健康状态只读组合根 ``ApplicationContext.health()/ready()`` 的公开值;
+        只消费组合根 ``ApplicationContext.readiness()`` 的公开结果, 不直接探活依赖;
         未装配(启动失败则进程根本不起 serving, 此处为防御)同样 503, 不 fallback。
         """
         context = getattr(request.app.state, "bootstrap_context", None)
-        health: dict[str, str] = context.health() if context is not None else {}
-        if health.get("db") != "ok":
-            body = _error_envelope(
-                code="API-RZ-001",
-                message_key="ies.error.db_unavailable",
-                params={"service": "db"},
-            )
-            return JSONResponse(status_code=503, content=body)
-        if health.get("registry") != "ok":
-            # A3 脱敏: 注册表探活失败的原始异常串(可能含内部路径/凭证/堆栈)
-            # 只进日志(bootstrap._check_registry 已记录), 探针响应只给服务标识, 不泄详情
-            body = _error_envelope(
-                code="API-RZ-002",
-                message_key="ies.error.registry_unavailable",
-                params={"service": "modeling_registry", "detail": "unavailable"},
-            )
-            return JSONResponse(status_code=503, content=body)
+        readiness: dict[str, Any] = (
+            context.readiness() if context is not None else {"ready": False, "health": {}}
+        )
+        health: dict[str, str] = dict(readiness.get("health", {}))
+        # API 进程实际必需的已装配能力(与 assemble_api 装配子集一致): 缺一即 503
+        required: tuple[tuple[str, str, str, dict[str, str]], ...] = (
+            ("db", "API-RZ-001", "ies.error.db_unavailable", {"service": "db"}),
+            ("storage", "API-RZ-003", "ies.error.storage_unavailable", {"service": "storage"}),
+            (
+                "registry",
+                "API-RZ-002",
+                "ies.error.registry_unavailable",
+                {"service": "modeling_registry", "detail": "unavailable"},
+            ),
+        )
+        for capability, code, message_key, params in required:
+            if health.get(capability) != "ok":
+                # A3 脱敏: 探活失败的原始异常串(可能含内部路径/凭证/堆栈)
+                # 只进日志(bootstrap 侧 _check_* 已记录), 探针响应只给服务标识, 不泄详情
+                body = _error_envelope(
+                    code=code,
+                    message_key=message_key,
+                    params=params,
+                )
+                return JSONResponse(status_code=503, content=body)
         return JSONResponse(
             status_code=200,
-            content={"status": "ok", "service": APP_NAME, "db": "ok", "registry": "ok"},
+            content={
+                "status": "ok",
+                "service": APP_NAME,
+                "db": "ok",
+                "storage": "ok",
+                "registry": "ok",
+            },
         )
 
     return router
