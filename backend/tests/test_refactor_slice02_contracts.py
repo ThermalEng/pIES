@@ -50,7 +50,10 @@ _ERROR_BASES = {
     "Conflict": ConflictError,
 }
 
-#: 域源码中禁止出现的跨层导入前缀（本域 contracts 模块自身除外，见纯度测试）
+#: 域源码中禁止出现的跨层导入前缀（本域 contracts 模块自身除外，见纯度测试）。
+#: iesplan.db 不在此列：它是 Base/无状态列基元的基础设施宿主（Wave 2 起顶层
+#: 混合 models/ 已删除），域 persistence 复用其声明基元不构成跨域访问；
+#: 连接获取（下 _DB_CONNECTION_NAMES）另行禁止。
 _BANNED_PREFIXES = (
     "iesplan.models",
     "iesplan.services",
@@ -65,8 +68,21 @@ _BANNED_PREFIXES = (
     "iesplan.storage",
     "iesplan.metrics",
     "iesplan.planning",
-    "iesplan.db",
 )
+
+#: 域源码禁止从 iesplan.db 获取连接/会话/引擎（连接只归 bootstrap 装配与
+#: 调用方传入的 session_factory；声明基元 Base/列类型允许）。
+_DB_CONNECTION_NAMES = frozenset({"SessionLocal", "get_db", "init_db", "engine"})
+
+
+def _db_connection_violation(mod: str, names: list[str]) -> str | None:
+    """判定对 iesplan.db 的导入是否为连接获取；返回违规名或 None。"""
+    if mod != "iesplan.db":
+        return None
+    for name in names:
+        if name in _DB_CONNECTION_NAMES:
+            return name
+    return None
 
 
 def _public_names(module) -> dict[str, object]:
@@ -191,6 +207,10 @@ def test_domain_source_purity():
                         continue
                 if _is_pure_reuse(domain, mod):
                     continue
+                bad = _db_connection_violation(mod, [a.name for a in node.names])
+                if bad is not None:
+                    violations.append(f"{domain}/{path.name}:{node.lineno}: iesplan.db.{bad}")
+                    continue
                 for prefix in _BANNED_PREFIXES:
                     if mod == prefix or mod.startswith(prefix + "."):
                         violations.append(f"{domain}/{path.name}:{node.lineno}: {mod}")
@@ -198,6 +218,11 @@ def test_domain_source_purity():
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     if _is_pure_reuse(domain, alias.name):
+                        continue
+                    if alias.name == "iesplan.db":
+                        violations.append(
+                            f"{domain}/{path.name}:{node.lineno}: import iesplan.db(整模块, 含连接)"
+                        )
                         continue
                     for prefix in _BANNED_PREFIXES:
                         if alias.name == prefix or alias.name.startswith(prefix + "."):
