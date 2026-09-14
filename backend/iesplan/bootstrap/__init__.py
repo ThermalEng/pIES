@@ -107,6 +107,24 @@ def _check_registry(registry: Any) -> bool:
         return False
 
 
+def _resolve_queue_mode() -> str:
+    """解析队列模式: 组合根唯一读取 IESPLAN_QUEUE 的位置(默认 auto)。"""
+    import os
+
+    return os.environ.get("IESPLAN_QUEUE", "auto").lower()
+
+
+def _configure_queue_mode(mode: str) -> None:
+    """把队列模式扇出给各接收模块(backend 实现选择只归组合根)。"""
+    from iesplan import identity as identity_module
+    from iesplan.api import limits as limits_module
+    from iesplan.tasks import queue as queue_module
+
+    queue_module.configure_queue_mode(mode)
+    limits_module.configure_queue_mode(mode)
+    identity_module.configure_queue_mode(mode)
+
+
 def _assemble(
     *,
     with_storage: bool,
@@ -120,6 +138,9 @@ def _assemble(
     from iesplan import db as db_module
     from iesplan.config import settings
 
+    # 0. 队列/限速后端选型(组合根唯一环境解释点): 一次解析部署环境,
+    #    扇出给各接收模块; 业务模块只接收传入配置, 不再自行解释环境选型。
+    _configure_queue_mode(_resolve_queue_mode())
     # 1. 各领域 metadata 注册(assemble 显式调用; init_db 内部为测试兼容亦调用)
     db_module.register_domain_metadata()
     # 2. 建表 + 版本化迁移 + 不可变触发器

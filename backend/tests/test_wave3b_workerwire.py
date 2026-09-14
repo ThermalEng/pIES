@@ -253,7 +253,7 @@ def test_healthz_independent_of_readiness_deps(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """数据库不可用时存活探针仍 200, 就绪探针 503(两者不耦合)。"""
-    monkeypatch.setattr("iesplan.main._db_available", lambda: False)
+    monkeypatch.setattr("iesplan.bootstrap._check_database", lambda factory: False)
     assert client.get("/api/healthz").status_code == 200
     resp = client.get("/api/readyz")
     assert resp.status_code == 503
