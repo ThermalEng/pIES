@@ -163,8 +163,11 @@ def _assemble(
         from iesplan.devices import init_registry
 
         device_registry = init_registry()
-    # 6. computation provider 目录(0.8 未实现: 明确为空, 无可用 provider)
-    computation_providers: dict[str, object] = {}
+    # 6. computation provider 目录(0.8 未实现: 明确为空, 无可用 provider;
+    #    目录唯一来源为 computation 门面, 此处只取不建)
+    from iesplan.computation import available_providers
+
+    computation_providers: dict[str, object] = dict(available_providers())
     missing = [name for name in REQUIRED_COMPUTATION_PROVIDERS if name not in computation_providers]
     if missing:
         raise RuntimeError(f"必需 computation provider 缺失: {missing}, 启动失败")
