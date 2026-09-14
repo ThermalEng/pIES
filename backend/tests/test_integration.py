@@ -33,9 +33,9 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.identity import User  # noqa: E402
-from iesplan.models.calc import TaskDiagnostic  # noqa: E402
-from iesplan.models.result import EvidencePackage  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402
+from iesplan.tasks.persistence import TaskDiagnostic  # noqa: E402
+from iesplan.results.persistence import EvidencePackage  # noqa: E402
 from iesplan.application import identity  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.core.diagnostics import TASK_SOLVE_FAILED  # noqa: E402

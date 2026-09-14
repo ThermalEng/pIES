@@ -31,11 +31,11 @@ from iesplan.application.projects.content_objects import store_content_object
 from iesplan.application.tasks import submit_task
 from iesplan.db import Base, get_db
 from iesplan.main import _register_exception_handlers
-from iesplan.models.audit import AuditLog
-from iesplan.models.calc import CalcConfig
-from iesplan.models.identity import User
-from iesplan.models.model import Device, SystemGraph
-from iesplan.models.project import Draft, Project
+from iesplan.audit.persistence import AuditLog
+from iesplan.configuration.persistence import CalcConfig
+from iesplan.identity.persistence import User
+from iesplan.model.persistence import Device, SystemGraph
+from iesplan.project.persistence import Draft, Project
 
 #: 配置域测试所有者(经窗口会话登录)
 OWNER_USERNAME = "config_owner"
@@ -512,8 +512,8 @@ def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Ses
     # 提交任务 → 快照 calc_config_snapshot 携带同值
     # (用例层直接调用: config 测试 app 已登录过 owner, 再次登录会触发
     # 窗口接管; 快照装配不依赖认证会话)
-    from iesplan.models.calc import CalcSnapshot
-    from iesplan.models.identity import User
+    from iesplan.tasks.persistence import CalcSnapshot
+    from iesplan.identity.persistence import User
 
     owner_user = db.execute(
         select(User).where(User.username == OWNER_USERNAME)

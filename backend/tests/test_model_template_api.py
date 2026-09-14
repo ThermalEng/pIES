@@ -31,8 +31,8 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.audit import AuditLog  # noqa: E402
-from iesplan.models.model_template import ModelTemplateRevision  # noqa: E402
+from iesplan.audit.persistence import AuditLog  # noqa: E402
+from iesplan.model.persistence import ModelTemplateRevision  # noqa: E402
 
 PASSWORD = "Test12345"
 

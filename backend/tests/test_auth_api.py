@@ -20,7 +20,7 @@ from iesplan.api.auth import SESSION_COOKIE_NAME
 from iesplan.api.auth import router as auth_router
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
-from iesplan.models.identity import AuthEvent, User, WindowSession
+from iesplan.identity.persistence import AuthEvent, User, WindowSession
 from iesplan.application import identity
 
 ADMIN_PASSWORD = "Admin12345"
@@ -681,7 +681,7 @@ def test_register_toggle(client: TestClient, db_session: Session) -> None:
     # 公开设置同步生效(登录页无需登录即可见注册按钮)
     assert client.get("/api/auth/public-settings").json()["registration_enabled"] is True
     # 持久化: app_settings 表已写入
-    from iesplan.models.identity import AppSetting
+    from iesplan.identity.persistence import AppSetting
 
     row = db_session.execute(
         select(AppSetting).where(AppSetting.key == "registration_enabled")

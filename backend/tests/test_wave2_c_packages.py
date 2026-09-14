@@ -37,8 +37,8 @@ from iesplan.application.packages import transfers as transfers_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.calc import CalcSnapshot, Task  # noqa: E402
-from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
+from iesplan.tasks.persistence import CalcSnapshot, Task  # noqa: E402
+from iesplan.results.persistence import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.storage import get_object, put_object  # noqa: E402
 
 # ---------------------------------------------------------------------------

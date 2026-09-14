@@ -47,9 +47,9 @@ from iesplan.core.diagnostics import (  # noqa: E402
 from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
-from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
-from iesplan.models.identity import User  # noqa: E402
+from iesplan.tasks.persistence import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
+from iesplan.dataset.persistence import Dataset, DatasetFile, DatasetVersion  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402
 from iesplan.storage.persistence import StoredObject  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
 

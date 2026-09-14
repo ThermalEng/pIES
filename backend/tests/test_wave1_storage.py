@@ -21,8 +21,8 @@ from sqlalchemy.pool import StaticPool
 
 from iesplan.config import settings
 from iesplan.db import Base
-from iesplan.models.audit import RetentionRule
-from iesplan.models.identity import User
+from iesplan.audit.persistence import RetentionRule
+from iesplan.identity.persistence import User
 from iesplan.storage import RetentionPolicy, put_object, safe_cleanup
 from iesplan.storage.persistence import StoredObject, list_active_retention_rules
 from iesplan.storage.service import _match_retention_rule

@@ -25,8 +25,8 @@ from iesplan.application.validations import precheck as validation_ops
 from iesplan.config import settings
 from iesplan.db import Base, get_db
 from iesplan.main import create_app
-from iesplan.models.identity import User
-from iesplan.models.project import Project
+from iesplan.identity.persistence import User
+from iesplan.project.persistence import Project
 
 #: 设备类型常量
 GRID = "ies.device.grid_connection"
@@ -424,7 +424,7 @@ def test_corrupt_quality_report_blocked(
     version_id = _create_sample_version(client, pid)
     _bind_version(client, pid, version_id)
     # 直接破坏质控报告结构(模拟数据损坏)
-    from iesplan.models.dataset import DatasetVersion
+    from iesplan.dataset.persistence import DatasetVersion
 
     with factory() as session:
         version = session.get(DatasetVersion, version_id)
@@ -482,7 +482,7 @@ def test_baseline_confirm_records_assumptions_verbatim(
     client: TestClient, factory: sessionmaker
 ) -> None:
     """确认假设逐字落审计 after.assumptions(可复核与前端回显), 不做摘要。"""
-    from iesplan.models.audit import AuditLog
+    from iesplan.audit.persistence import AuditLog
 
     pid = _create_project(factory)
     assumptions = {"target_irr": 0.08, "note": "基准确认"}

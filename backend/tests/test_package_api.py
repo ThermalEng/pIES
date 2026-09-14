@@ -52,15 +52,16 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.core.errors import ForbiddenError  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.models.audit import AuditLog, ImportProposal
-from iesplan.models.calc import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
-from iesplan.models.dataset import Dataset, DatasetFile, DatasetVersion  # noqa: E402
-from iesplan.models.identity import User  # noqa: E402
-from iesplan.models.project import (  # noqa: E402
+from iesplan.audit.persistence import AuditLog
+from iesplan.package.persistence import ImportProposal
+from iesplan.tasks.persistence import CalcSnapshot, ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
+from iesplan.dataset.persistence import Dataset, DatasetFile, DatasetVersion  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402
+from iesplan.project.persistence import (  # noqa: E402
     AdminMaintenanceAction,
     Project,
 )
-from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
+from iesplan.results.persistence import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.storage import put_object
 from iesplan.storage.persistence import ObjectRef  # noqa: E402
 

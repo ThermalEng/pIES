@@ -24,8 +24,8 @@ from worker_testkit import setup_environment  # noqa: E402
 
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.db import Base  # noqa: E402
-from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
-from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
+from iesplan.tasks.persistence import ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
+from iesplan.results.persistence import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
 
 # ---------------------------------------------------------------------------
