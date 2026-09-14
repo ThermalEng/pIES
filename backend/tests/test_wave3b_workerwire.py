@@ -32,28 +32,43 @@ from iesplan.main import create_app
 
 @pytest.fixture()
 def stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """向 sys.modules 注入桩 iesplan.bootstrap, 记录各 assemble 调用次数。"""
+    """向 sys.modules 注入桩 iesplan.bootstrap, 记录各 assemble 调用次数。
+
+    桩上下文与真实 ``ApplicationContext`` 同形(含 ``computation_providers``,
+    计算公共能力由组合根装配并注入 Daemon, 无可用能力即空目录)。
+    """
     calls: dict[str, int] = {"compute": 0, "io": 0}
     failures: dict[str, Exception] = {}
     sentinel_factory = object()
+    sentinel_providers: dict[str, Any] = {}
 
     def _compute() -> SimpleNamespace:
         calls["compute"] += 1
         if "compute" in failures:
             raise failures["compute"]
-        return SimpleNamespace(session_factory=sentinel_factory)
+        return SimpleNamespace(
+            session_factory=sentinel_factory,
+            computation_providers=sentinel_providers,
+        )
 
     def _io() -> SimpleNamespace:
         calls["io"] += 1
         if "io" in failures:
             raise failures["io"]
-        return SimpleNamespace(session_factory=sentinel_factory)
+        return SimpleNamespace(
+            session_factory=sentinel_factory, computation_providers={},
+        )
 
     module = types.ModuleType("iesplan.bootstrap")
     module.assemble_compute_worker = _compute  # type: ignore[attr-defined]
     module.assemble_io_worker = _io  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "iesplan.bootstrap", module)
-    return {"calls": calls, "failures": failures, "session_factory": sentinel_factory}
+    return {
+        "calls": calls,
+        "failures": failures,
+        "session_factory": sentinel_factory,
+        "computation_providers": sentinel_providers,
+    }
 
 
 @pytest.fixture()
@@ -121,6 +136,14 @@ def test_main_session_factory_comes_from_context(
     """Daemon 会话工厂必须取自装配好的 context, 不再直连 SessionLocal。"""
     _run_main(["--worker-type", "compute"])
     assert fake_worker["kwargs"]["session_factory"] is stub_bootstrap["session_factory"]
+
+
+def test_main_computation_providers_come_from_context(
+    stub_bootstrap: dict[str, Any], fake_worker: dict[str, Any]
+) -> None:
+    """Daemon 计算公共能力必须取自装配好的 context(原样注入, 无全局赋值)。"""
+    _run_main(["--worker-type", "compute"])
+    assert fake_worker["kwargs"]["computation_providers"] is stub_bootstrap["computation_providers"]
 
 
 def test_main_isolation_flag_passthrough(

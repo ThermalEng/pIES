@@ -1,8 +1,8 @@
 """任务执行分派与状态机收拢(计算 Worker / I/O Worker 共用)。
 
 职责:
-- dispatch: 按 task.type 分派(calc/optimization/uncertainty 走计算阶段
-  网关; report 走证据包; io 任务走占位执行器);
+- dispatch: 按 task.type 分派(calc/optimization/uncertainty/analysis 走
+  application.worker 计算阶段网关; report 走证据包; io 任务走占位执行器);
 - run_task: 一次尝试的完整执行闭环 —— 阶段网关读任务/快照记录 → 无事务
   执行 → 短事务提交(证据包/四维评估/结果索引/业务结局)或失败/取消收拢,
   全部经由 application.worker 阶段网关的 fencing 协议(03 §4.4: 迟到的写回
@@ -13,7 +13,10 @@
 
 Worker 只按 application.worker 阶段网关结果驱动状态机, 不解释数据集
 字段、不补缺省值、不做 SI 换算、不物化时间轴、不解释装配内容与任务
-参数; 计算输入解释归 computation provider 所有。
+参数; 计算输入解释归 computation provider 所有。计算公共能力由组合根
+装配并经调用参数显式注入(``computation_providers``), 本模块不持有模块
+全局网关, 不做全局赋值; 无可用能力时阶段网关抛结构化 unavailable,
+经失败收拢落 failed + TASK-SOLVE-001, 不伪造成功、不回退旧引擎。
 
 写入资格: 本模块不直接写任务状态/结果, 统一由 application.worker 的
 submit_attempt_result / fail_attempt / cancel_attempt 带 token 完成
@@ -27,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -50,15 +53,6 @@ COMPUTE_TASK_TYPES: tuple[str, ...] = ("calc", "optimization", "uncertainty", "a
 #: io 队列任务类型
 IO_TASK_TYPES: tuple[str, ...] = ("report", "dataset_build", "export", "import")
 
-#: 计算执行网关(Worker 消费的计算阶段边界; Wave4 computation 公开协议交接点)。
-#: 网关只收 RunContext(含经 application.worker 阶段网关读出的任务/快照
-#: 记录与进度/取消检查点), 输入解释归 provider 内部; Worker 不装配
-#: (content, data, axis)。None = 无可用 provider → 显式不可用失败
-#: (ComputeUnavailableError → failed + TASK-SOLVE-001)，不伪造成功、
-#: 不回退旧引擎。测试经此公开属性注入假网关；生产由 Wave4
-#: computation provider 接管。
-compute_gateway: Callable[[RunContext], dict] | None = None
-
 
 class SnapshotInputError(AppError):
     """快照/数据集输入不可用(03 §6.3: TASK-DATA-001 blocking, 不可复现)。"""
@@ -75,43 +69,34 @@ class InvalidTaskTypeError(AppError):
     message_key = "ies.diag.param.invalid"
 
 
-class ComputeUnavailableError(AppError):
-    """计算执行入口显式不可用(旧计算链已删除, 0.8 计算未实现)。
-
-    确定性失败: 经失败收拢落 failed + TASK-SOLVE-001, 保留执行器原始原因,
-    不得包成"内部错误", 更不得误判为 lease_rejected。
-    """
-
-    code = TASK_SOLVE_FAILED
-    severity = SEVERITY_ERROR
-    message_key = "ies.diag.task.solve_failed"
-
-
 # ---------------------------------------------------------------------------
 # 分派
 # ---------------------------------------------------------------------------
 
 
-def dispatch(ctx: RunContext) -> dict:
+def dispatch(
+    ctx: RunContext,
+    *,
+    computation_providers: Mapping[str, object] | None = None,
+) -> dict:
     """按任务类型分派到执行器(返回结果 payload, 含显式 outcome)。
 
     未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
     未知任务类型抛 InvalidTaskTypeError。计算类任务只按 application.worker
-    阶段网关结果驱动: 任务/快照记录缺失即确定性失败, 不解释任何输入字段;
-    网关执行期无打开的数据库事务。
+    计算阶段网关结果驱动: 任务/快照记录缺失即确定性失败, 不解释任何输入
+    字段; 计算公共能力经调用参数显式注入(组合根装配来源), 无可用能力时
+    阶段网关抛结构化 unavailable; 网关执行期无打开的数据库事务。
     """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:
         if ctx.snapshot is None:
             raise SnapshotInputError(
                 "计算快照缺失", location={"object_type": "calc_snapshot"})
-        # 计算执行经可注入的阶段网关(只收 RunContext; 输入解释归 provider)。
-        gateway = compute_gateway
-        if gateway is None:
-            raise ComputeUnavailableError(
-                "计算执行网关无可用 provider, 等待 GeneratorProvider/Solver Bundle 接入"
-            )
-        return gateway(ctx)
+        return worker_app.run_compute_stage(
+            ctx.snapshot,
+            providers=computation_providers,
+            progress_fn=ctx.progress,
+        )
     if task_type == "report":
         return executors.execute_check(ctx)
     if task_type == "dataset_build":
@@ -138,6 +123,7 @@ def run_task(
     worker_id: str = "",
     isolate: bool = True,
     stop_event: Any = None,
+    computation_providers: Mapping[str, object] | None = None,
 ) -> str:
     """执行已领取的任务并落终态(带 fencing 提交/失败/取消收拢)。
 
@@ -147,6 +133,10 @@ def run_task(
         claim: acquire_attempt 的领取结果(尝试 + 租约 + token)。
         isolate: 计算引擎是否运行在隔离子进程(生产 True; 测试可关闭)。
         stop_event: 取消/优雅退出事件(透传给执行器检查点与隔离子进程)。
+        computation_providers: 组合根装配的 computation provider 目录
+            (Worker daemon 由 ``ApplicationContext`` 显式传入; 缺省 None
+            即无可用能力, 计算类任务经阶段网关收拢为结构化 unavailable
+            失败, 不伪造成功)。
     返回:
         终态状态: completed / failed / cancelled / lease_rejected。
     事务边界: 本函数不调用 commit/rollback, 不持有跨阶段的 Session; 任务/
@@ -180,7 +170,7 @@ def run_task(
         progress_fn=_report_progress,
     )
     try:
-        payload = dispatch(ctx)
+        payload = dispatch(ctx, computation_providers=computation_providers)
         # 完成路径要求显式合法 outcome: 缺字段默认成功已删除, 缺失/非法
         # 即确定性失败, 绝不落成功(合法集合归 tasks 域所有)。
         outcome = payload.get("outcome")
@@ -192,7 +182,10 @@ def run_task(
         return "completed"
     except TaskCancelled as exc:
         return _handle_cancel(factory, ctx, claim, exc.stage)
-    except (worker_app.LeaseRejectedError, SnapshotInputError, EngineRunError, AppError) as exc:
+    except (
+        worker_app.LeaseRejectedError, SnapshotInputError, EngineRunError,
+        AppError, worker_app.ComputationUnavailableError,
+    ) as exc:
         return _handle_failure(factory, ctx, claim, exc)
     except Exception as exc:  # noqa: BLE001 - 尝试边界: 任何未预期异常落确定性失败
         logger.exception("任务执行内部错误: task=%s", task.id)
@@ -238,6 +231,23 @@ def _handle_failure(
     if isinstance(exc, worker_app.LeaseRejectedError):
         logger.warning("租约失效, 停止一切写回: task=%s (%s)", claim.task_id, exc)
         return "lease_rejected"
+    if isinstance(exc, worker_app.ComputationUnavailableError):
+        # 计算阶段网关结构化 unavailable(无可用 provider/能力延期):
+        # 错误类型经 application.worker 门面消费(门禁 20: Worker 不直引
+        # computation), 失败语义与 computation 边界同源。
+        # 确定性失败落 failed + TASK-SOLVE-001, 保留原始原因(含 reason),
+        # 不得包成"内部错误", 更不得误判为 lease_rejected。
+        try:
+            with factory() as db:
+                worker_app.fail_attempt(
+                    db, claim, code=TASK_SOLVE_FAILED,
+                    message=f"{exc} (reason={exc.reason})",
+                    level=SEVERITY_ERROR,
+                    stack_trace=traceback.format_exc(limit=10),
+                )
+        except worker_app.LeaseRejectedError:
+            return "lease_rejected"
+        return "failed"
     if isinstance(exc, SnapshotInputError):
         try:
             with factory() as db:
