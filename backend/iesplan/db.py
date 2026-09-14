@@ -4,7 +4,7 @@
 - Base: 全部 ORM 模型的声明基类 + 共享列基元(JSONB/正则 CHECK/主键构造)。
 - 不可变表触发器 DDL 常量(部署见 _deploy_immutable_triggers)。
 - get_db(): FastAPI 请求级依赖。
-- init_db(): 幂等建表(create_all) + 版本化迁移 + 不可变触发器。
+- init_db(): 幂等建表(create_all) + 不可变触发器(未发布前无版本化迁移)。
   当前 schema 从空库直接建立, 不保留旧库 ALTER/DROP/回填分支;
   种子身份数据归 application.identity.seed_builtin_admin, 本模块不留业务种子。
 
@@ -312,22 +312,19 @@ def register_domain_metadata() -> None:
 
 
 def init_db() -> None:
-    """幂等初始化数据库: 建表 + 版本化迁移 + 不可变触发器。
+    """幂等初始化数据库: 建表 + 不可变触发器。
 
     - 先经 ``register_domain_metadata`` 确保全部表注册到 Base.metadata;
     - create_all 只建不存在的表, 重复调用无副作用;
-    - apply_migrations: 在基础 schema 之上执行版本化 schema 迁移(宪法 §11,
-      台账幂等)，由各版本明确登记并补充其拥有的当前结构与约束;
     - _deploy_immutable_triggers: 不可变表(01 §11)部署"禁 UPDATE/DELETE"触发器
       与 REVOKE(仅 PostgreSQL; SQLite 测试库跳过)。
-    - 旧库 ALTER/DROP/回填分支已删除, 当前 schema 从空库直接建立;
+    - 项目未发布, 无版本化迁移: 当前 schema 从空库直接建立,
+      不保留旧库 ALTER/DROP/回填分支与 schema_migrations 台账;
+      正式发布后的 schema 变更走版本化 migration(宪法 §11);
       种子管理员改由 application.identity.seed_builtin_admin 负责。
     """
     register_domain_metadata()
-    from iesplan.migrations import apply_migrations
-
     Base.metadata.create_all(bind=engine)
-    apply_migrations(engine)
     _deploy_immutable_triggers()
 
 

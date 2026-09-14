@@ -8,7 +8,7 @@
   读取视图一致;
 - 审计写入走 audit 域公开门面, after 载荷与旧直写一致。
 
-测试环境: SQLite 内存 + 全表建表 + 版本化迁移(与 test_project_model_save 同构)。
+测试环境: SQLite 内存 + 全表建表(空库 create_all, 无版本化迁移; 与 test_project_model_save 同构)。
 """
 
 from __future__ import annotations
@@ -126,9 +126,6 @@ def engine() -> Iterator[Engine]:
         poolclass=StaticPool,
     )
     Base.metadata.create_all(eng)
-    from iesplan.migrations import apply_migrations
-
-    apply_migrations(eng)
     yield eng
     eng.dispose()
 

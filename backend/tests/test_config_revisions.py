@@ -11,7 +11,7 @@
 - 持久化: 不可变 revision 追加、乐观锁 409、未保存 404;
 - Planning: 必须先生成 Effective(400); 保存后返回 revision 指针;
   任何 Profile 切换/Overrides 保存/清空生成新 Effective 时当前指针失效;
-- 迁移 0006: 当前三件套表与项目指针创建、幂等。
+- 空库建表: 现行三件套表、项目指针列与回执列直接建立、无迁移台账。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录。
 """
@@ -44,7 +44,6 @@ from iesplan.finance import (  # noqa: E402
     FinanceProfile,
 )
 from iesplan.main import create_app  # noqa: E402
-from iesplan.migrations import _migrate_0006  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 样例(权威拼写 CNY/kW/a 与 CNY/kWh/a, 验证单位解析器连续除法集成)
@@ -514,16 +513,16 @@ def test_planning_config_contract() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 迁移 0006
+# 空库建表: 现行 schema/约束(未发布, 无版本化迁移)
 # ---------------------------------------------------------------------------
 
 
-def test_migration_0006_creates_current_schema() -> None:
+def test_empty_db_builds_current_finance_schema() -> None:
+    """空库 create_all 直接建立现行财务三件套表与项目指针列。"""
     eng = create_engine("sqlite+pysqlite://", connect_args={"check_same_thread": False})
     Base.metadata.create_all(eng)
+    Base.metadata.create_all(eng)  # 重复建表幂等
     with eng.begin() as conn:
-        _migrate_0006(conn)
-        _migrate_0006(conn)  # 幂等
         tables = {
             r[0]
             for r in conn.execute(
@@ -531,6 +530,7 @@ def test_migration_0006_creates_current_schema() -> None:
             ).all()
         }
         assert {"finance_profiles", "finance_overrides", "effective_finance_revisions"} <= tables
+        assert "schema_migrations" not in tables
         proj_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(projects)")).all()}
         assert {"finance_profile_id", "overrides_revision", "effective_finance_revision"} <= proj_cols
         planning_cols = {r[1] for r in conn.execute(text("PRAGMA table_info(planning_configs)")).all()}
@@ -784,22 +784,16 @@ def test_revision_rows_carry_receipt_objects(
         assert receipt["refs"] == refs
 
 
-def test_migration_0007_adds_receipt_columns_idempotent() -> None:
-    """0007 为三表补 receipt_object_id 列; 重跑幂等(0.6.5 条目 1)。"""
-    from iesplan.migrations import _migrate_0007
-
+def test_empty_db_builds_current_receipt_columns() -> None:
+    """空库 create_all 直接建立现行 revision 回执列(0.6.5 条目 1)。"""
     tables = (
         "finance_overrides",
         "effective_finance_revisions",
         "planning_configs",
     )
     engine = create_engine("sqlite+pysqlite://")
+    Base.metadata.create_all(engine)
     with engine.begin() as conn:
-        for table in tables:
-            conn.execute(text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
-    with engine.begin() as conn:
-        _migrate_0007(conn)
-        _migrate_0007(conn)
         for table in tables:
             cols = {
                 r[1]
