@@ -20,13 +20,13 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentAdmin
+from iesplan.api.deps import get_request_db
 from iesplan.application import health as health_ops
-from iesplan.db import get_db
 
 #: 运维健康聚合路由: 挂载前缀 /api/admin(仅管理员)
 router = APIRouter(prefix="/api/admin", tags=["admin-health"])
 
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 
 @router.get("/health", summary="运维健康视图(管理员)")

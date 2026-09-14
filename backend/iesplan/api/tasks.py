@@ -21,9 +21,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.application import tasks as tasks_app
 from iesplan.tasks.contracts import IDEMPOTENCY_KEY_RE
-from iesplan.db import get_db
 
 router = APIRouter(prefix="/api/projects/{project_id}/tasks", tags=["tasks"])
 
@@ -74,7 +74,7 @@ def create_task_endpoint(
     project_id: int,
     payload: TaskCreateRequest,
     response: Response,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict[str, Any]:
     """提交任务(规格 2.2): 幂等键命中或同快照去重复用返回既有任务并附标记。
@@ -99,7 +99,7 @@ def create_task_endpoint(
 @router.get("", summary="任务列表")
 def list_tasks_endpoint(
     project_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     task_type: str | None = Query(default=None, alias="type"),
     status: str | None = Query(default=None),
@@ -118,7 +118,7 @@ def list_tasks_endpoint(
 def get_task_endpoint(
     project_id: int,
     task_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict[str, Any]:
     """任务详情(规格 9.2): 状态/结局 + 尝试历史 + 当前租约(不含 token) + 进度 +
@@ -130,7 +130,7 @@ def get_task_endpoint(
 def cancel_task_endpoint(
     project_id: int,
     task_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     payload: CancelRequest | None = None,
 ) -> dict[str, Any]:
@@ -147,7 +147,7 @@ def cancel_task_endpoint(
 def retry_task_endpoint(
     project_id: int,
     task_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     payload: RetryRequest | None = None,
 ) -> dict[str, Any]:

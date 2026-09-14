@@ -36,11 +36,12 @@ from iesplan import package as package_domain  # noqa: E402
 from iesplan.api import config_revisions as config_api  # noqa: E402
 from iesplan.api import exports as exports_api  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application.packages import operations as packages_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.core.yamlmini import dump as yaml_dump  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.finance import (  # noqa: E402
     EffectiveFinanceConfig,
     FinanceOverrides,
@@ -167,10 +168,10 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
     app.include_router(config_api.profile_router)
     app.include_router(exports_api.router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 

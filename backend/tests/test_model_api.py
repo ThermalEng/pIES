@@ -17,6 +17,7 @@ from sqlalchemy.pool import StaticPool
 
 from iesplan import model as model_domain
 from iesplan.api import model as model_api
+from iesplan.api.deps import get_request_db
 from iesplan.core.diagnostics import (
     CONN_NODE_ORPHAN,
     CONN_TYPE_UNREGISTERED,
@@ -25,7 +26,7 @@ from iesplan.core.diagnostics import (
     PARAM_UNIT_INCONSISTENT,
     PARAM_UNIT_MISMATCH,
 )
-from iesplan.db import Base, get_db
+from iesplan.db import Base
 from iesplan.main import create_app
 from iesplan.model.persistence import Device, Port, SystemGraph
 from iesplan.project.persistence import Project
@@ -104,11 +105,11 @@ def client(db_factory: tuple[sessionmaker, int]) -> Iterator[TestClient]:
     app.include_router(model_api.registry_router)
     app.include_router(model_api.model_router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         with factory() as session:
             yield session
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 
@@ -771,7 +772,7 @@ def test_validate_unregistered_type_diagnostic(
         with factory() as session:
             yield session
 
-    client_app.dependency_overrides[get_db] = _override
+    client_app.dependency_overrides[get_request_db] = _override
     with TestClient(client_app, raise_server_exceptions=False) as test_client:
         resp = test_client.get(f"/api/projects/{project_id}/model/validate", headers=_headers(test_client))
         assert resp.status_code == 200

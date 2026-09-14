@@ -11,7 +11,7 @@
 设备预定义数据引用为项目包内相对 CSV 路径(不上传), 由装配入口解析校验。
 
 测试环境: SQLite 文件/内存 + tmp 对象存储目录, 不依赖部署 Postgres;
-create_app() 挂载全部业务路由(含 project_models), get_db 依赖替换。
+create_app() 挂载全部业务路由(含 project_models), get_request_db 依赖替换。
 """
 
 from __future__ import annotations
@@ -32,12 +32,13 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from iesplan.api.deps import get_request_db
 from iesplan.application.models import (
     save_project_model,
     validate_candidate,
 )
 from iesplan.config import settings  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.audit.persistence import AuditLog  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402
@@ -219,10 +220,10 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
     settings.data_dir = tmp_path
     app = create_app()
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db_session
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     from iesplan.api.limits import reset_rate_limit
 
     reset_rate_limit()

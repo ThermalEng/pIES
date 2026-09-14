@@ -20,6 +20,7 @@ from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from iesplan.api.deps import get_request_db
 from iesplan.application.datasets import (
     STANDARD_FIELDS,
     TIMESTAMP_COL,
@@ -32,7 +33,7 @@ from iesplan.application.datasets import (
 )
 from iesplan.config import settings
 from iesplan.core.timeaxis import build_axis
-from iesplan.db import Base, get_db
+from iesplan.db import Base
 from iesplan.dataset.persistence import DatasetFile, DatasetVersion
 from iesplan.project.persistence import Project
 
@@ -98,10 +99,10 @@ def client(session: Session, data_dir: Path) -> Iterator[TestClient]:
     app = create_app()
     app.include_router(datasets_router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield session
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
 

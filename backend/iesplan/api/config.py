@@ -8,7 +8,7 @@
 - GET    /api/registry/algorithms           算法列表 + 能力
 
 注意: 本模块导出 config_router / registry_router 两个路由, 由集成阶段在
-main.py 通过 include_router 挂载(get_db 依赖见 iesplan/db.py)。
+main.py 通过 include_router 挂载(请求会话依赖见 iesplan/api/deps)。
 
 认证与权限: 配置域全部端点要求窗口会话认证(iesplan.api.auth.CurrentUser,
 未认证 401); 读/校验接口要求项目 view, 保存要求项目 edit(403);
@@ -29,12 +29,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.application import configuration as config_cases
 from iesplan.core.errors import error_envelope
-from iesplan.db import get_db
 
 #: FastAPI 依赖注入的数据库会话
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 #: 配置域路由: 挂载前缀 /api/projects/{project_id}/config
 config_router = APIRouter(prefix="/api/projects/{project_id}/config", tags=["config"])

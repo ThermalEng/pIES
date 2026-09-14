@@ -5,7 +5,7 @@
 另覆盖: 恢复版本、应用结果、管理员维护只读、可见列表与无效命令。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录,
-不依赖部署 Postgres; 通过 app.dependency_overrides 替换 get_db。
+不依赖部署 Postgres; 通过 app.dependency_overrides 替换 get_request_db。
 """
 
 from __future__ import annotations
@@ -29,9 +29,10 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import ProjectBaseline  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.audit.persistence import AuditLog  # noqa: E402
 
@@ -72,15 +73,15 @@ def db_session(engine: Engine) -> Iterator[Session]:
 
 @pytest.fixture()
 def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[TestClient]:
-    """测试客户端: 挂载项目路由, 替换 get_db 依赖, 对象存储指向临时目录。"""
+    """测试客户端: 挂载项目路由, 替换 get_request_db 依赖, 对象存储指向临时目录。"""
     settings.data_dir = tmp_path
     app = create_app()
     app.include_router(projects_api.router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db_session
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 

@@ -22,8 +22,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.application import packages as packages_app
-from iesplan.db import get_db
 
 router = APIRouter(prefix="/api/projects/{project_id}/exports", tags=["exports"])
 
@@ -50,7 +50,7 @@ class ExcelExportRequest(BaseModel):
 def export_excel_endpoint(
     project_id: int,
     payload: ExcelExportRequest,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """生成固定模板 Excel 报告, 返回短期单对象下载授权 token(5 分钟)。"""
@@ -63,7 +63,7 @@ def export_excel_endpoint(
 @router.get("/excel/download", summary="下载 Excel 报告")
 def download_excel_endpoint(
     project_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     token: str = Query(..., description="短期下载授权 token"),
 ) -> Response:
@@ -81,7 +81,7 @@ def download_excel_endpoint(
 @router.post("/package", summary="导出完整项目包(仅所有者)")
 def export_package_endpoint(
     project_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
     """导出完整项目包(模型/配置/版本/数据集/历史证据, 仅所有者), 返回下载授权。"""
@@ -92,7 +92,7 @@ def export_package_endpoint(
 @router.get("/package/download", summary="下载项目包")
 def download_package_endpoint(
     project_id: int,
-    db: Annotated[Session, Depends(get_db)],
+    db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
     token: str = Query(..., description="短期下载授权 token"),
 ) -> Response:

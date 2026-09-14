@@ -1,7 +1,7 @@
 """对象存储服务与 API 集成测试(U11): 写入/引用/清理/巡检/门禁/管理接口。
 
 运行方式: 内存 SQLite(StaticPool, 跨线程共享) + 临时 data_dir +
-app.dependency_overrides 替换 get_db 依赖(不触碰真实数据库)。
+app.dependency_overrides 替换 get_request_db 依赖(不触碰真实数据库)。
 覆盖: 写入与落盘(每次写入新建对象, 按对象 id 寻址, 无内容去重)、
 引用计数、无引用清理、被引用不可清理、存在性巡检、容量估算与管理 API(仅管理员)。
 """
@@ -19,12 +19,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from iesplan.api.auth import router as auth_router
+from iesplan.api.deps import get_request_db
 from iesplan.api.objects import router as objects_router
 from iesplan.application import identity
 from iesplan.application.objects import service as objects_app
 from iesplan.config import settings
 from iesplan.core.errors import AppError
-from iesplan.db import Base, get_db
+from iesplan.db import Base
 from iesplan.main import create_app
 from iesplan.audit.persistence import AuditLog, RetentionRule
 from iesplan.identity.persistence import User
@@ -90,15 +91,15 @@ def data_dir(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture()
 def client(session: Session, data_dir) -> Iterator[TestClient]:
-    """测试客户端: 挂载认证 + 对象管理路由, 替换 get_db 依赖。"""
+    """测试客户端: 挂载认证 + 对象管理路由, 替换 get_request_db 依赖。"""
     app = create_app()
     app.include_router(auth_router)
     app.include_router(objects_router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield session
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     identity.reset_login_rate_limit()
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c

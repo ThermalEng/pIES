@@ -8,7 +8,7 @@
 - 数据库: SQLite :memory:(models 全部表 create_all, StaticPool 共享连接);
 - 队列: IESPLAN_QUEUE=memory 强制内存后端(单进程, 无外部 Redis 依赖);
 - 应用: create_app() + include_router(projects/tasks/results),
-  dependency_overrides 替换 get_db;
+  dependency_overrides 替换 get_request_db;
 - 对象存储: settings.data_dir 指向 pytest tmp_path, 证据/逐时对象真实落盘;
 - 证据提交无 HTTP 端点(Worker 通道), 测试直接调用 results 用例 submit_evidence,
   评估/选择/差异/逐时/检查走 HTTP。
@@ -39,12 +39,13 @@ from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import results as results_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import results as results_uc  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.diagnostics import SEVERITY_INFO, TASK_QUEUED  # noqa: E402
 from iesplan.core.errors import NotFoundError  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.tasks.persistence import Task, TaskLease  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultSelection  # noqa: E402
@@ -89,17 +90,17 @@ def db(engine: Engine) -> Iterator[Session]:
 
 @pytest.fixture()
 def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
-    """测试客户端: 挂载项目+任务+结果路由, 替换 get_db 依赖, 对象存储指向临时目录。"""
+    """测试客户端: 挂载项目+任务+结果路由, 替换 get_request_db 依赖, 对象存储指向临时目录。"""
     settings.data_dir = tmp_path
     app = create_app()
     app.include_router(projects_api.router)
     app.include_router(tasks_api.router)
     app.include_router(results_api.router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 

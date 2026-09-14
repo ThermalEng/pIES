@@ -26,10 +26,10 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from iesplan.api.deps import get_request_db
 from iesplan.application import identity
 from iesplan.config import settings
 from iesplan.core.errors import ForbiddenError
-from iesplan.db import get_db
 from iesplan.identity.contracts import UserRecord, WindowSessionRecord
 
 #: 会话 Cookie 名
@@ -171,7 +171,7 @@ class AuthContext:
 
 
 #: 数据库会话依赖别名(Annotated 风格, 规避 B008)
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 
 def _extract_token(request: Request) -> str | None:

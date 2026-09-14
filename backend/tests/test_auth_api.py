@@ -1,6 +1,6 @@
 """身份认证 API 集成测试(U01): 登录/限速/改密/接管/登出/管理员操作/注册。
 
-运行方式: 内存 SQLite + app.dependency_overrides 替换 get_db 依赖
+运行方式: 内存 SQLite + app.dependency_overrides 替换 get_request_db 依赖
 (不触碰真实数据库, 与 CONTRACT 第 4 节一致)。
 """
 
@@ -18,7 +18,8 @@ from sqlalchemy.pool import StaticPool
 
 from iesplan.api.auth import SESSION_COOKIE_NAME
 from iesplan.api.auth import router as auth_router
-from iesplan.db import Base, get_db
+from iesplan.api.deps import get_request_db
+from iesplan.db import Base
 from iesplan.main import create_app
 from iesplan.identity.persistence import AuthEvent, User, WindowSession
 from iesplan.application import identity
@@ -48,14 +49,14 @@ def db_session() -> Iterator[Session]:
 
 @pytest.fixture()
 def client(db_session: Session) -> Iterator[TestClient]:
-    """挂载 /api/auth 路由的应用测试客户端(get_db 替换为内存 SQLite)。"""
+    """挂载 /api/auth 路由的应用测试客户端(get_request_db 替换为内存 SQLite)。"""
     app = create_app()
     app.include_router(auth_router)
 
-    def override_get_db() -> Iterator[Session]:
+    def override_request_db() -> Iterator[Session]:
         yield db_session
 
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_request_db] = override_request_db
     identity.reset_login_rate_limit()
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client

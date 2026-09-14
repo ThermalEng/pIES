@@ -32,10 +32,11 @@ from iesplan import identity as identity_domain  # noqa: E402
 from iesplan import package as package_domain  # noqa: E402
 from iesplan import project as project_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import packages as packages_uc  # noqa: E402
 from iesplan.application.packages import transfers as transfers_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.tasks.persistence import CalcSnapshot, Task  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
@@ -80,10 +81,10 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
     app = create_app()
     app.include_router(projects_api.router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 

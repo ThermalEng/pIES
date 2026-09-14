@@ -29,11 +29,12 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from iesplan import identity as identity_domain  # noqa: E402
 from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.diagnostics import SEVERITY_ERROR, TASK_DATA_SNAPSHOT_MISSING, TASK_SOLVE_FAILED  # noqa: E402
 from iesplan.core.errors import NotFoundError  # noqa: E402
-from iesplan.db import Base, get_db  # noqa: E402
+from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
 
@@ -76,10 +77,10 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
     app = create_app()
     app.include_router(projects_api.router)
 
-    def _override_get_db() -> Iterator[Session]:
+    def _override_request_db() -> Iterator[Session]:
         yield db
 
-    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_request_db] = _override_request_db
     with TestClient(app, raise_server_exceptions=False) as test_client:
         yield test_client
 

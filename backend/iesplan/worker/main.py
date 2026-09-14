@@ -41,16 +41,6 @@ POLL_INTERVAL = 1.0
 SHUTDOWN_GRACE = 30.0
 
 
-def _default_session_factory() -> Any:
-    """直接构造 Worker 时的会话工厂回退(生产经 bootstrap 上下文显式传入)。
-
-    惰性导入: worker 包不持有顶层 iesplan.db 会话符号, 数据库装配只归 bootstrap。
-    """
-    from iesplan.db import SessionLocal
-
-    return SessionLocal
-
-
 class Worker:
     """Worker 主循环(compute/io 共用框架; 03 §1.1 计算与 I/O Worker 职责)。"""
 
@@ -58,8 +48,8 @@ class Worker:
         self,
         worker_type: str = "compute",
         worker_id: str | None = None,
-        session_factory: Any = None,
         *,
+        session_factory: Any,
         poll_interval: float = POLL_INTERVAL,
         heartbeat_interval: float = HEARTBEAT_INTERVAL,
         renew_interval: float = RENEW_INTERVAL,
@@ -67,12 +57,14 @@ class Worker:
     ) -> None:
         if worker_type not in ("compute", "io"):
             raise ValueError(f"非法 worker_type: {worker_type!r}(可选 compute/io)")
+        if session_factory is None:
+            raise TypeError("Worker 缺少必需的 session_factory(由组合根装配显式传入)")
         self.worker_type = worker_type
         self.pool = "compute" if worker_type == "compute" else "io"
         self.worker_id = worker_id or self._default_worker_id()
-        # 会话工厂缺省由 bootstrap 装配的 ApplicationContext 提供(main 显式
-        # 传入 ctx.session_factory); 直接构造(测试/嵌入场景)回退 SessionLocal。
-        self.session_factory = session_factory or _default_session_factory()
+        # 会话工厂只能由 bootstrap 装配的 ApplicationContext 显式提供(main 传入
+        # ctx.session_factory); 无缺省、无回退, 缺失即构造失败。
+        self.session_factory = session_factory
         self.poll_interval = poll_interval
         self.heartbeat_interval = heartbeat_interval
         self.renew_interval = renew_interval

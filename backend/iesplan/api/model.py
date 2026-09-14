@@ -28,8 +28,8 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
+from iesplan.api.deps import get_request_db
 from iesplan.application import models as model_cases
-from iesplan.db import get_db
 
 #: 设备类型注册表(公开, 前端画布取设备面板与参数表单 schema)
 registry_router = APIRouter(prefix="/api", tags=["registry"])
@@ -37,7 +37,7 @@ registry_router = APIRouter(prefix="/api", tags=["registry"])
 #: 项目系统图操作(工作图)
 model_router = APIRouter(prefix="/api/projects/{project_id}/model", tags=["model"])
 
-DbSession = Annotated[Session, Depends(get_db)]
+DbSession = Annotated[Session, Depends(get_request_db)]
 
 
 # ---------------------------------------------------------------------------
