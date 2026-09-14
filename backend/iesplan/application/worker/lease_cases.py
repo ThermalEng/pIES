@@ -1,7 +1,7 @@
 """Worker 租约/队列/结果提交用例(application/worker.lease_cases): 领取与收拢转调。
 
-本模块收拢 ``iesplan.worker.lease`` 原先对可重建视图、任务编排与 ORM
-行的直接访问, 只做转调与行级读写搬运, 不新增校验/hash/回退:
+本模块收拢 Worker 原先对可重建视图、任务编排与 ORM 行的直接访问,
+只做转调与行级读写搬运, 不新增校验/hash/回退:
 
 - 领取/进度/完成/失败/槽释放 → tasks 域门面 + 队列可重建视图;
 - 出队/心跳/取消信号清除 → tasks 域队列视图;
@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.tasks.submissions import Claim
+from iesplan.application.tasks import Claim
 from iesplan.config import settings
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
@@ -61,7 +61,7 @@ class LeaseRejectedError(AppError):
     """租约失效/过期后的迟到写回(03 §6.3 建议登记 TASK-LEASE-001, warning 不阻断)。
 
     Worker 收到本异常必须立即: 终止子进程 → 停止一切 PG/对象存储写入。
-    本类由 application.worker 拥有; ``iesplan.worker.lease`` 仅复出同名符号。
+    本类由 application.worker 拥有; Worker 经阶段网关复用同一错误语义。
     """
 
     code = "TASK-LEASE-001"

@@ -35,13 +35,15 @@ from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import results as results_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.application import results as results_uc  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
-from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.config import settings  # noqa: E402
+from iesplan.core.diagnostics import SEVERITY_INFO, TASK_QUEUED  # noqa: E402
+from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.models.calc import Task, TaskLease  # noqa: E402
@@ -162,6 +164,47 @@ def _claim(db: Session, task_id: int, worker_id: str = "fake-exec-1") -> Any:
     assert claim is not None
     db.commit()
     return claim
+
+
+def _complete_task(db: Session, task_id: int, *, outcome: str) -> Any:
+    """假执行器完成: running → completed(幂等), 结局正交保存(经 tasks 域门面)。
+
+    只推进任务/尝试/租约/槽与诊断, 不写证据包·评估·索引(结果域断言以
+    _submit_evidence 显式提交的证据包为准)。
+    """
+    if outcome not in tasks_domain.BUSINESS_OUTCOMES:
+        raise tasks_domain.InvalidRequestError(
+            "任务完成缺少显式合法 outcome",
+            params={"task_id": task_id, "outcome": outcome,
+                    "allowed": list(tasks_domain.BUSINESS_OUTCOMES)},
+            location={"object_type": "task", "object_id": task_id},
+        )
+    task = tasks_domain.get_task(db, task_id)
+    if task is None:
+        raise NotFoundError(
+            "任务不存在",
+            params={"task_id": task_id},
+            location={"object_type": "task", "object_id": task_id},
+        )
+    if task.status == "completed":
+        return task
+    tasks_domain.check_transition(task, "completed")
+    attempt = tasks_domain.get_running_attempt(db, task.id)
+    finished_attempt_id = attempt.id if attempt is not None else None
+    if attempt is not None:
+        tasks_domain.finish_attempt(db, attempt.id, "succeeded", stop_reason=None)
+        lease = tasks_domain.get_active_lease_for_attempt(db, attempt.id)
+        if lease is not None:
+            tasks_domain.release_lease(db, attempt.id, lease.lease_token, status="released")
+        tasks_domain.release_slot(db, attempt.id)
+    task = tasks_domain.set_task_status(db, task.id, "completed", business_outcome=outcome)
+    tasks_domain.clear_cancel(task.id)
+    tasks_domain.append_diagnostic(
+        db, task_id=task.id, level=SEVERITY_INFO, message="任务完成",
+        attempt_id=finished_attempt_id, code=TASK_QUEUED,
+        context={"business_outcome": outcome},
+    )
+    return task
 
 
 def _store_hourly(db: Session, rows: int, fields: list[str] | None = None) -> int:
@@ -290,7 +333,7 @@ def _prepare_task_with_evidence(
     payload = _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], user.id)
     pkg = _submit_evidence(db, task_id, claim, payload)
     if complete:
-        worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("OPTIMAL"))
+        _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome("OPTIMAL"))
         db.commit()
     return pid, task_id, claim, pkg, [obj_a, obj_b]
 
@@ -354,7 +397,7 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
     assert exc.value.http_status == 409
 
     # 6) fencing: 尝试已结束(任务完成, 租约吊销)拒绝
-    worker_app.complete_task(db, task_id, outcome=worker_app.map_business_outcome("OPTIMAL"))
+    _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome("OPTIMAL"))
     db.commit()
     with pytest.raises(results_uc.EvidenceWriteDeniedError):
         results_uc.submit_evidence(db, task_id, claim.attempt_id, claim.lease_token, payload)

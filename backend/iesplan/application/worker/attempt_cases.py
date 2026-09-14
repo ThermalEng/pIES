@@ -39,7 +39,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from iesplan.application.tasks.submissions import Claim
+from iesplan.application.tasks import Claim
 from iesplan.application.worker.evidence_cases import CheckAssessment, assess_check_evidence
 from iesplan.application.worker.lease_cases import (
     LeaseRejectedError,

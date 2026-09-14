@@ -1,7 +1,8 @@
 """任务类型执行函数（计算 Worker 职责，见宪法 §4.5/§12 与 architecture §核心业务流）。
 
-0.8 计算未实现：计算类任务（calc/optimization/uncertainty/analysis）入口显式
-抛 NotImplementedError，经 runner 收拢为结构化可见失败（failed +
+0.8 计算未实现：计算类任务（calc/optimization/uncertainty/analysis）经
+runner 计算阶段网关执行；网关无可用 provider 时显式抛
+ComputeUnavailableError，经 runner 收拢为结构化可见失败（failed +
 TASK-SOLVE-001），不伪造成功、不 fallback 旧引擎。旧 plan 装配、旧算法选择器、
 旧命令注册与旧求解/评估代码已删除，等待 GeneratorProvider/Solver Bundle 接入。
 
@@ -29,7 +30,6 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan.application import worker as worker_app
-from iesplan.worker.lease import Claim
 
 
 class TaskCancelled(Exception):
@@ -56,7 +56,7 @@ class RunContext:
     """
 
     task: worker_app.TaskRecord
-    claim: Claim
+    claim: worker_app.Claim
     session_factory: Callable[[], Session]
     worker_id: str = ""
     isolate: bool = True
@@ -86,35 +86,6 @@ class RunContext:
 def _cancel_signal(task_id: int) -> bool:
     """读取取消信号(Redis cancel:{task_id}, 可重建视图; 经 application.worker 用例)。"""
     return worker_app.cancel_requested(task_id)
-
-
-# ---------------------------------------------------------------------------
-# 计算类任务入口（0.8 未实现，显式失败；旧计算链已删除）
-# ---------------------------------------------------------------------------
-
-
-def execute_calc(ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None) -> dict:
-    """旧计算原型已删除；待 0.8 GeneratorProvider 接入。"""
-    raise NotImplementedError("旧计算执行链已删除，等待 GeneratorProvider/Solver Bundle")
-
-
-def execute_plan(ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None) -> dict:
-    """旧规划链已删除；待 0.8 GeneratorProvider/Solver Bundle 接入。"""
-    raise NotImplementedError("旧规划执行链已删除，等待 GeneratorProvider/Solver Bundle")
-
-
-def execute_uncertainty(
-    ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None,
-) -> dict:
-    """旧不确定性分析链已删除；待 0.8 GeneratorProvider/Solver Bundle 接入。"""
-    raise NotImplementedError("旧不确定性执行链已删除，等待 GeneratorProvider/Solver Bundle")
-
-
-def execute_analysis(
-    ctx: RunContext, content: dict, data: dict, axis: Any, options: dict | None = None
-) -> dict:
-    """旧批量分析链已删除；待 0.8 GeneratorProvider/Solver Bundle 接入。"""
-    raise NotImplementedError("旧批量分析执行链已删除，等待 GeneratorProvider/Solver Bundle")
 
 
 # ---------------------------------------------------------------------------

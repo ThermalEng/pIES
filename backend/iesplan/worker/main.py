@@ -30,7 +30,7 @@ from typing import Any
 from iesplan.application import worker as worker_app
 from iesplan.config import settings
 from iesplan.db import SessionLocal
-from iesplan.worker import lease, runner
+from iesplan.worker import runner
 
 logger = logging.getLogger(__name__)
 
@@ -156,14 +156,14 @@ class Worker:
         if attempt_id is None or token is None:
             return
         with self.session_factory() as db:
-            if not lease.renew_lease(db, attempt_id, token):
+            if not worker_app.renew_attempt_lease(db, attempt_id, token):
                 logger.warning("租约失效, 取消当前任务: task=%s", task_id)
                 self._cancel_event.set()  # 执行器检查点抛 TaskCancelled → 收拢
 
     def _slot_gate(self) -> bool:
         """槽门禁(03 §5.2): 池内存在可用槽才尝试领取。"""
         with self.session_factory() as db:
-            available = lease.slot_available(db, self.pool)
+            available = worker_app.slot_available(db, self.pool)
         if not available:
             time.sleep(self.poll_interval)  # 无空槽: 保持排队, 等待下一轮
         return available
@@ -175,7 +175,7 @@ class Worker:
         可见; 本层不调用 commit/rollback。
         """
         with self.session_factory() as db:
-            claim = lease.acquire_attempt(db, task_id, self.worker_id)
+            claim = worker_app.acquire_attempt(db, task_id, self.worker_id)
         if claim is None:
             logger.info("领取失败(无槽/非 queued): task=%s", task_id)
             return
@@ -190,7 +190,7 @@ class Worker:
         self._task_thread.start()
         logger.info("任务领取: task=%s attempt=%s worker=%s", task_id, claim.attempt_id, self.worker_id)
 
-    def _execute_task(self, claim: lease.Claim) -> None:
+    def _execute_task(self, claim: worker_app.Claim) -> None:
         """任务执行线程: runner.run_task 完成提交/失败/取消收拢(自带事务边界)。
 
         Worker 只持有 session factory, 不持有跨阶段的长寿命 Session: 输入

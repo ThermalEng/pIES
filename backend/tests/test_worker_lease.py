@@ -22,11 +22,11 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 from worker_testkit import setup_environment  # noqa: E402
 
+from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.models.calc import ComputeSlot, Task, TaskAttempt, TaskLease  # noqa: E402
 from iesplan.models.result import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
-from iesplan.worker import lease  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -75,20 +75,20 @@ def env(db: Session, tmp_path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _claim(db: Session, env: dict[str, Any], worker_id: str = "cw-test") -> lease.Claim:
+def _claim(db: Session, env: dict[str, Any], worker_id: str = "cw-test") -> worker_app.Claim:
     """领取任务并提交事务(模拟 Worker 领取动作)。"""
     return _claim_task(db, env["task"].id, worker_id)
 
 
-def _claim_task(db: Session, task_id: int, worker_id: str = "cw-test") -> lease.Claim:
+def _claim_task(db: Session, task_id: int, worker_id: str = "cw-test") -> worker_app.Claim:
     """按任务 id 领取并提交事务。"""
-    claim = lease.acquire_attempt(db, task_id, worker_id)
+    claim = worker_app.acquire_attempt(db, task_id, worker_id)
     assert claim is not None
     db.commit()
     return claim
 
 
-def _lease_row(db: Session, claim: lease.Claim) -> TaskLease:
+def _lease_row(db: Session, claim: worker_app.Claim) -> TaskLease:
     row = db.execute(
         select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
     ).scalars().first()
@@ -96,7 +96,7 @@ def _lease_row(db: Session, claim: lease.Claim) -> TaskLease:
     return row
 
 
-def _slot(db: Session, claim: lease.Claim) -> ComputeSlot:
+def _slot(db: Session, claim: worker_app.Claim) -> ComputeSlot:
     """当前绑定尝试的槽(领取后未释放时使用)。"""
     row = db.execute(
         select(ComputeSlot).where(ComputeSlot.current_attempt_id == claim.attempt_id)
@@ -167,10 +167,10 @@ class TestAcquire:
         """双 Worker 竞争同一任务: 仅第一个领取成功(03 §1.3 一任务一租约一 token)。"""
         first = _claim(db, env, worker_id="cw-01")
         assert first is not None
-        second = lease.acquire_attempt(db, env["task"].id, "cw-02")
+        second = worker_app.acquire_attempt(db, env["task"].id, "cw-02")
         assert second is None  # 任务已 running, 第二个 Worker 领不到
         # 第一个 Worker 的租约仍有效
-        assert lease.verify_lease(db, first.attempt_id, first.lease_token) is not None
+        assert worker_app.verify_lease(db, first.attempt_id, first.lease_token) is not None
 
     def test_claim_when_slots_full(self, db: Session, env: dict[str, Any], tmp_path: Path):
         """槽满: 第三个任务保持 queued(03 §5.2 排队等待)。"""
@@ -179,20 +179,20 @@ class TestAcquire:
         c1 = _claim(db, env)
         c2 = _claim(db, env2)
         assert c1 and c2  # 默认 2 个计算槽
-        assert lease.acquire_attempt(db, env3["task"].id, "cw-03") is None
+        assert worker_app.acquire_attempt(db, env3["task"].id, "cw-03") is None
         assert db.get(Task, env3["task"].id).status == "queued"
 
     def test_claim_non_queued_returns_none(self, db: Session, env: dict[str, Any]):
         task = env["task"]
         task.status = "cancelling"
         db.commit()
-        assert lease.acquire_attempt(db, task.id, "cw-01") is None
+        assert worker_app.acquire_attempt(db, task.id, "cw-01") is None
 
     def test_slot_gate(self, db: Session, env: dict[str, Any]):
-        assert lease.slot_available(db, "compute") is True
+        assert worker_app.slot_available(db, "compute") is True
         _claim(db, env)
-        assert lease.slot_available(db, "compute") is True  # 2 槽, 用 1 仍可领取
-        assert lease.slot_available(db, "io") is True
+        assert worker_app.slot_available(db, "compute") is True  # 2 槽, 用 1 仍可领取
+        assert worker_app.slot_available(db, "io") is True
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ class TestRenew:
         claim = _claim(db, env)
         lease_row = _lease_row(db, claim)
         old_expires = lease_row.expires_at
-        assert lease.renew_lease(db, claim.attempt_id, claim.lease_token) is True
+        assert worker_app.renew_attempt_lease(db, claim.attempt_id, claim.lease_token) is True
         db.refresh(lease_row)
         assert lease_row.expires_at > old_expires  # 续租延长 TTL
 
@@ -215,7 +215,7 @@ class TestRenew:
         claim = _claim(db, env)
         from uuid import uuid4
 
-        assert lease.renew_lease(db, claim.attempt_id, uuid4()) is False
+        assert worker_app.renew_attempt_lease(db, claim.attempt_id, uuid4()) is False
 
     def test_renew_after_expiry_rejected(self, db: Session, env: dict[str, Any]):
         """租约过期(守护进程置 expired): 旧 token 永久失效, 续租被拒(03 §4.3)。"""
@@ -223,23 +223,23 @@ class TestRenew:
         lease_row = _lease_row(db, claim)
         lease_row.status = "expired"  # 模拟守护进程过期回收
         db.commit()
-        assert lease.renew_lease(db, claim.attempt_id, claim.lease_token) is False
+        assert worker_app.renew_attempt_lease(db, claim.attempt_id, claim.lease_token) is False
 
     def test_verify_lease_invalid(self, db: Session, env: dict[str, Any]):
         claim = _claim(db, env)
         from uuid import uuid4
 
-        assert lease.verify_lease(db, claim.attempt_id, claim.lease_token) is not None
-        assert lease.verify_lease(db, claim.attempt_id, uuid4()) is None
+        assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is not None
+        assert worker_app.verify_lease(db, claim.attempt_id, uuid4()) is None
 
     def test_report_progress_fenced(self, db: Session, env: dict[str, Any]):
         claim = _claim(db, env)
-        assert lease.report_progress(db, claim.attempt_id, claim.lease_token,
+        assert worker_app.report_attempt_progress(db, claim.attempt_id, claim.lease_token,
                                      env["task"].id, 45.0, "solve", {"it": 1}) is True
         # 错误 token: 拒绝写进度
         from uuid import uuid4
 
-        assert lease.report_progress(db, claim.attempt_id, uuid4(),
+        assert worker_app.report_attempt_progress(db, claim.attempt_id, uuid4(),
                                      env["task"].id, 50.0, "solve") is False
 
 
@@ -253,7 +253,7 @@ class TestSubmit:
 
     def test_submit_completes_task_with_evidence(self, db: Session, env: dict[str, Any]):
         claim = _claim(db, env)
-        receipt = lease.submit_result(db, claim, payload=_payload(), outcome="normal_completion",
+        receipt = worker_app.submit_attempt_result(db, claim, payload=_payload(), outcome="normal_completion",
                                       actor_id=env["user"].id)
         db.commit()
         assert receipt.evidence_package_id is not None
@@ -288,7 +288,7 @@ class TestSubmit:
 
     def test_submit_outcome_recorded(self, db: Session, env: dict[str, Any]):
         claim = _claim(db, env)
-        lease.submit_result(db, claim, payload=_payload(), outcome="restricted_results")
+        worker_app.submit_attempt_result(db, claim, payload=_payload(), outcome="restricted_results")
         db.commit()
         task = db.get(Task, env["task"].id)
         assert task.status == "completed"
@@ -300,8 +300,8 @@ class TestSubmit:
         lease_row = _lease_row(db, claim)
         lease_row.status = "expired"  # 守护进程已回收
         db.commit()
-        with pytest.raises(lease.LeaseRejectedError):
-            lease.submit_result(db, claim, payload=_payload(), outcome="normal_completion")
+        with pytest.raises(worker_app.LeaseRejectedError):
+            worker_app.submit_attempt_result(db, claim, payload=_payload(), outcome="normal_completion")
         task = db.get(Task, env["task"].id)
         assert task.status == "running"  # 状态未被篡改
         assert db.execute(select(EvidencePackage)).scalars().first() is None
@@ -309,15 +309,15 @@ class TestSubmit:
     def test_double_submit_rejected(self, db: Session, env: dict[str, Any]):
         """提交后租约已 released: 同一 token 再次提交 → 拒绝(0 行回滚)。"""
         claim = _claim(db, env)
-        lease.submit_result(db, claim, payload=_payload(), outcome="normal_completion")
+        worker_app.submit_attempt_result(db, claim, payload=_payload(), outcome="normal_completion")
         db.commit()
-        with pytest.raises(lease.LeaseRejectedError):
-            lease.submit_result(db, claim, payload=_payload(), outcome="normal_completion")
+        with pytest.raises(worker_app.LeaseRejectedError):
+            worker_app.submit_attempt_result(db, claim, payload=_payload(), outcome="normal_completion")
 
     def test_new_result_flips_old_latest(self, db: Session, env: dict[str, Any]):
         """新结果发布: 旧 result_index 置 is_latest=false(01 §8.3 同事务)。"""
         claim = _claim(db, env)
-        lease.submit_result(db, claim, payload=_payload(), outcome="normal_completion")
+        worker_app.submit_attempt_result(db, claim, payload=_payload(), outcome="normal_completion")
         db.commit()
         # 同项目版本再提交一个任务(新结果)
         task2 = Task(
@@ -329,7 +329,7 @@ class TestSubmit:
         queue.enqueue(task2.id, "compute", task_type="calc", snapshot_id=env["snapshot"].id)
         db.commit()
         claim2 = _claim_task(db, task2.id, worker_id="cw-02")
-        lease.submit_result(db, claim2, payload=_payload(), outcome="normal_completion")
+        worker_app.submit_attempt_result(db, claim2, payload=_payload(), outcome="normal_completion")
         db.commit()
         latest = db.execute(
             select(ResultIndex).where(
@@ -357,7 +357,7 @@ class TestTerminal:
 
     def test_fail_attempt(self, db: Session, env: dict[str, Any]):
         claim = _claim(db, env)
-        lease.fail_attempt(db, claim, code="TASK-SOLVE-001", message="求解失败",
+        worker_app.fail_attempt(db, claim, code="TASK-SOLVE-001", message="求解失败",
                            outcome="no_recommendation")
         db.commit()
         task = db.get(Task, env["task"].id)
@@ -372,7 +372,7 @@ class TestTerminal:
     def test_fail_snapshot_missing_outcome(self, db: Session, env: dict[str, Any]):
         """快照/数据校验失败 → insufficient_evidence(03 §3.2 表)。"""
         claim = _claim(db, env)
-        lease.fail_attempt(db, claim, code="TASK-DATA-001", message="快照缺失")
+        worker_app.fail_attempt(db, claim, code="TASK-DATA-001", message="快照缺失")
         db.commit()
         task = db.get(Task, env["task"].id)
         assert task.status == "failed"
@@ -384,7 +384,7 @@ class TestTerminal:
         task = env["task"]
         task.status = "cancelling"  # 模拟 API 已发起取消(权威状态变更)
         db.commit()
-        lease.cancel_attempt(db, claim, outcome="partial_batch")
+        worker_app.cancel_attempt(db, claim, outcome="partial_batch")
         db.commit()
         assert task.status == "cancelled"
         assert task.business_outcome == "partial_batch"
@@ -400,4 +400,4 @@ class TestTerminal:
         from iesplan.tasks import TaskStateError
 
         with pytest.raises(TaskStateError):
-            lease.cancel_attempt(db, claim)
+            worker_app.cancel_attempt(db, claim)
