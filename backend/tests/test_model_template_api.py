@@ -7,7 +7,7 @@
 - 停用 / 重新启用(只影响后续选择, 不破坏已保存项目模型);
 - 删除未发布草稿 / 已发布模板禁止删除;
 - 权限与用户隔离(他人模板 404, 不泄露存在性);
-- 版本化迁移(全新空库直接建表 + migrations, 无旧库升级路径)。
+- 空库建表(全新空库直接建表, 无版本化迁移与旧库升级路径)。
 
 测试环境: 与 test_project_model_save 同构 —— SQLite + tmp 对象存储目录。
 """
@@ -82,9 +82,6 @@ def engine() -> Iterator[Engine]:
         poolclass=StaticPool,
     )
     Base.metadata.create_all(eng)
-    from iesplan.migrations import apply_migrations
-
-    apply_migrations(eng)
     yield eng
     eng.dispose()
 
@@ -531,22 +528,22 @@ def test_catalog_available_templates(client: TestClient, db_session: Session) ->
 
 
 # ---------------------------------------------------------------------------
-# 7. 迁移(全新空库直接建表 + 全链迁移)
+# 7. 空库建表(全新空库直接建表, 无版本化迁移)
 # ---------------------------------------------------------------------------
 
 
-def test_migrations_fresh_and_upgrade(tmp_path: Path) -> None:
-    """全链迁移: 全新空库直接建立当前 schema 并跑到最新迁移(不测试旧库升级)。"""
-    from iesplan.migrations import MIGRATION_VERSIONS, apply_migrations
-
-    # 全新库：需先建基表（users 等由 create_all 创建），再跑迁移
+def test_empty_db_builds_current_schema(tmp_path: Path) -> None:
+    """空库 create_all 直接建立现行 schema 与约束, 无迁移台账。"""
     fresh = create_engine(f"sqlite+pysqlite:///{tmp_path / 'fresh.db'}")
     from iesplan.db import Base as _Base
     _Base.metadata.create_all(fresh)
-    applied = apply_migrations(fresh)
-    assert applied == list(MIGRATION_VERSIONS)
-    tables = {t.name for t in fresh.connect().exec_driver_sql(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
+    _Base.metadata.create_all(fresh)  # 重复建表幂等
+    with fresh.connect() as conn:
+        tables = {r[0] for r in conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "model_templates" in tables
     assert "model_template_revisions" in tables
+    assert "model_template_draft_revisions" in tables
+    assert "project_models" in tables
+    assert "schema_migrations" not in tables
     fresh.dispose()

@@ -195,10 +195,6 @@ def engine() -> Iterator[Engine]:
         poolclass=StaticPool,
     )
     Base.metadata.create_all(eng)
-    # 版本化迁移(宪法 §11; 与 init_db 发布路径一致, 台账幂等)
-    from iesplan.migrations import apply_migrations
-
-    apply_migrations(eng)
     yield eng
     eng.dispose()
 
@@ -705,9 +701,6 @@ def test_concurrent_numbering_unique(tmp_path: Path) -> None:
         connect_args={"check_same_thread": False, "timeout": 30},
     )
     Base.metadata.create_all(eng)
-    from iesplan.migrations import apply_migrations
-
-    apply_migrations(eng)
     factory = _sessionmaker(bind=eng, autoflush=False, expire_on_commit=False)
 
     with factory() as s:

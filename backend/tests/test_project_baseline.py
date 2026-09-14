@@ -1,4 +1,4 @@
-"""项目计算基线(0.6.5 前置阶段事项 1)契约/API/迁移测试。
+"""项目计算基线(0.6.5 前置阶段事项 1)契约/API/建表测试。
 
 覆盖:
 - ``core.contracts.ProjectBaseline``: 合法构造/非法枚举/点数推导(普通年/闰年)/
@@ -8,7 +8,7 @@
   基线字段仅使用当前契约;
 - 版本固化: 版本字典与版本内容均携带 project_baseline;
 - 不可变: 无任何基线更新入口(API 面)+ Postgres 触发器 DDL 常量存在;
-- 迁移 0004: 当前项目基线迁移版本可重复执行。
+- 空库建表: 现行基线列直接建立、重复建表幂等、无迁移台账。
 
 测试环境: SQLite :memory:(StaticPool 共享连接) + tmp 对象存储目录。
 """
@@ -39,7 +39,6 @@ from iesplan.core.contracts import (  # noqa: E402
 )
 from iesplan.db import Base, get_db  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-from iesplan.migrations import _migrate_0004  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境(与 test_project_api.py 同构)
@@ -313,15 +312,25 @@ def test_baseline_immutable_trigger_ddl_exists() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 迁移 0004: 当前项目基线迁移版本
+# 空库建表: 项目计算基线列(未发布, 无版本化迁移)
 # ---------------------------------------------------------------------------
-def test_migration_0004_idempotent_on_current_schema() -> None:
-    """当前 schema 上迁移版本可重复执行。"""
+def test_empty_db_builds_current_baseline_columns() -> None:
+    """空库 create_all 直接建立现行项目基线列; 重复建表幂等。"""
+    from sqlalchemy import text as _text
+
     eng = create_engine("sqlite+pysqlite://", connect_args={"check_same_thread": False})
     Base.metadata.create_all(eng)
+    Base.metadata.create_all(eng)  # 重复建表幂等
     with eng.begin() as conn:
-        _migrate_0004(conn)
-        _migrate_0004(conn)  # 重复执行幂等
+        cols = {
+            r[1]
+            for r in conn.execute(_text("PRAGMA table_info(projects)")).all()
+        }
+        assert {
+            "baseline_resolution",
+            "baseline_leap_year",
+            "baseline_scenario_mode",
+        } <= cols
     eng.dispose()
 
 
