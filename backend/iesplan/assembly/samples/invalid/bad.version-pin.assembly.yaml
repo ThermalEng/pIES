@@ -1,25 +1,26 @@
-# 非法样例: 设备模型未固定精确版本(未版本化别名)→ ASM-SYN-007
+# 非法样例: definition.id 携带 @版本钉选 → ASM-SYN-007
 schema: ies.assembly
 schema_version: "2.0.0"
 
 assembly:
   id: bad_version_pin
-  name: 引用未固定版本
+  name: 版本钉选
 
 project_baseline:
   resolution: 1h
   leap_year: false
   scenario_mode: single
 
-resources:
-  datasets: {}
-
 devices:
   hp1:
-    model: ies.device.heat_pump
-    parameters:
-      rated_heat_kw: 600
-
+    definition:
+      id: ies.device.heat_pump@2.0.0
+    asset_origin: new
+    properties:
+      rated_heat_kw:
+        value: 600
+        unit: kW
+    predefined_interfaces: {}
 connections: {}
 
 constraints: {}

@@ -6,6 +6,8 @@
 - 2.0 合同类型与规范化：``SCHEMA_ID`` / ``SCHEMA_VERSION`` / ``canonical_bytes``
   等来自 ``contracts2``；
 - 发现/加载通过 ``loader`` 公开函数完成，不暴露 pricing/csv/1.0 spec 路径；
+- 设备数据 CSV 解析(``parse_data_file_v2``)与重复基线长度
+  (``repeat_cycle_lengths``)经本门面消费，不直引 ``datacontract2``；
 - 候选 YAML 文本入口门禁（``parse_candidate_text``）归属 ``candidate``，
   供项目模型候选与模板草稿共用；
 - 不保留旧 registry/兼容层，不暴露 migration；未注册设备经 ``get_device``
@@ -16,6 +18,11 @@ from iesplan.devices.candidate import (
     MAX_CANDIDATE_YAML_BYTES,
     CandidateTextFailure,
     parse_candidate_text,
+)
+from iesplan.devices.datacontract2 import (
+    ParsedDataFile2,
+    parse_data_file_v2,
+    repeat_cycle_lengths,
 )
 from iesplan.devices.contracts2 import (
     SCHEMA_ID,
@@ -63,6 +70,9 @@ __all__ = [
     "MAX_CANDIDATE_YAML_BYTES",
     "CanonicalModel",
     "parse_candidate_text",
+    "ParsedDataFile2",
+    "parse_data_file_v2",
+    "repeat_cycle_lengths",
     "DeviceRegistry",
     "DEFAULT_CATALOG_DIR",
     "discover_device_dirs",

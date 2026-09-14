@@ -1,0 +1,35 @@
+# 非法样例: 预定义路径为宿主机绝对路径 → ASM-SYN-009
+schema: ies.assembly
+schema_version: "2.0.0"
+
+assembly:
+  id: bad_predefined_path
+  name: 路径逃逸
+
+project_baseline:
+  resolution: 1h
+  leap_year: false
+  scenario_mode: single
+
+devices:
+  elec_load:
+    definition:
+      id: ies.device.electric_load
+    asset_origin: existing
+    properties:
+      peak_power_kw:
+        value: 100
+        unit: kW
+    predefined_interfaces:
+      electricity_demand:
+        mode: data_repeat
+        path: /etc/campus_load.data.csv
+connections: {}
+
+constraints: {}
+
+outputs:
+  series: []
+  metrics: []
+
+extensions: {}

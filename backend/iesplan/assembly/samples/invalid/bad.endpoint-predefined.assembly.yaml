@@ -1,0 +1,44 @@
+# 非法样例: 连接端点为 predefined 接口 → ASM-EDGE-011
+schema: ies.assembly
+schema_version: "2.0.0"
+
+assembly:
+  id: bad_endpoint_predefined
+  name: 非法端点
+
+project_baseline:
+  resolution: 1h
+  leap_year: false
+  scenario_mode: single
+
+devices:
+  grid:
+    definition:
+      id: ies.device.grid_connection
+    asset_origin: existing
+    properties: {}
+    predefined_interfaces: {}
+  elec_load:
+    definition:
+      id: ies.device.electric_load
+    asset_origin: existing
+    properties:
+      peak_power_kw:
+        value: 100
+        unit: kW
+    predefined_interfaces:
+      electricity_demand:
+        mode: data_repeat
+        path: data/campus_load.data.csv
+connections:
+  e_bad:
+    from: grid.electricity_import
+    to: elec_load.electricity_demand
+
+constraints: {}
+
+outputs:
+  series: []
+  metrics: []
+
+extensions: {}

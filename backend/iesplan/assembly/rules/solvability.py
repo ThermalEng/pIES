@@ -38,6 +38,7 @@ from iesplan.assembly.diags import (
     ASM_SOLV_ORPHAN,
     ASM_SOLV_OVER_CONSTRAINED,
 )
+from iesplan.assembly.schema import prop_map
 from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.core.diagnostics import Diagnostic
 
@@ -46,11 +47,18 @@ from iesplan.core.diagnostics import Diagnostic
 # ---------------------------------------------------------------------------
 
 
+#: 可接入母线平衡的端口方向(predefined 为外生序列边界，由阶段 2 确认，
+#: 不参与边连接与母线供需分析；blind 亦不连接)
+BUS_DIRECTIONS: tuple[str, ...] = ("in", "out", "bidirectional")
+
+
 def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
     """载体 × 无向连通分量 → 母线字典列表(内部表示,阶段 D 与外部审计共用)。
 
     连通性:同一载体下经边连通的设备集合;边载体取 from 端端口载体(未定义端口的边跳过)。
     无任何边的设备也构成单设备母线(便于统一告警)。
+    predefined/blind 端口不进入母线端口/源汇集合(外生边界，阶段 2 已确认
+    其槽覆盖与文件内容；需求侧能量平衡由生成器在数学问题中表达)。
     返回 [{carrier, device_ids, port_refs, source_refs, sink_refs, edge_ids}]。
     """
     ports = ensure_ports(spec, ctx)
@@ -84,7 +92,11 @@ def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
                         frontier.append(nb)
             visited |= component
             bus_ports = sorted(
-                p.ref for p in ports.values() if p.device in component and p.carrier == carrier
+                p.ref
+                for p in ports.values()
+                if p.device in component
+                and p.carrier == carrier
+                and p.direction in BUS_DIRECTIONS
             )
             edge_ids = sorted(
                 e.id
@@ -101,21 +113,23 @@ def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
                         for r in bus_ports
                         if ports[r].direction in ("out", "bidirectional")
                     ],
-                    # predefined 数据接口(负荷需求侧)计入汇;环境侧 solar 不进入端口解析
                     "sink_refs": [
-                        r
-                        for r in bus_ports
-                        if ports[r].direction in ("in", "bidirectional", "predefined")
+                        r for r in bus_ports if ports[r].direction in ("in", "bidirectional")
                     ],
                     "edge_ids": edge_ids,
                 }
             )
-    # 无任何边的设备 → 单设备母线(孤立)
+    # 无任何边的设备 → 单设备母线(孤立)；仅可连接端口参与，无可连接端口
+    # (如纯 predefined 需求设备)不构成母线，仅由 ORPHAN 告警覆盖
     connected = {d for bus in buses for d in bus["device_ids"]}
     for dev in [*spec.devices, *spec.pipelines]:
         if dev.id in connected:
             continue
-        dev_port_refs = sorted(p.ref for p in ports.values() if p.device == dev.id)
+        dev_port_refs = sorted(
+            p.ref
+            for p in ports.values()
+            if p.device == dev.id and p.direction in BUS_DIRECTIONS
+        )
         if not dev_port_refs:
             continue
         carrier = ports[dev_port_refs[0]].carrier
@@ -128,9 +142,7 @@ def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
                     r for r in dev_port_refs if ports[r].direction in ("out", "bidirectional")
                 ],
                 "sink_refs": [
-                    r
-                    for r in dev_port_refs
-                    if ports[r].direction in ("in", "bidirectional", "predefined")
+                    r for r in dev_port_refs if ports[r].direction in ("in", "bidirectional")
                 ],
                 "edge_ids": [],
             }
@@ -144,18 +156,22 @@ def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
 
 
 def _float_param(params: dict, key: str) -> float | None:
-    """参数数值化(字典/布尔/缺失 → None)。"""
+    """参数数值化(字典/布尔/缺失/非有限 → None)。"""
+    import math as _math
+
     val = params.get(key)
     if isinstance(val, bool) or val is None:
         return None
     if isinstance(val, (int, float)):
-        return float(val)
-    if isinstance(val, dict):
+        result = float(val)
+    elif isinstance(val, dict):
         return None
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
+    else:
+        try:
+            result = float(val)
+        except (TypeError, ValueError):
+            return None
+    return result if _math.isfinite(result) else None
 
 
 def _grid_caps(spec: AssemblySpec, bus_device_ids: list[str], ctx) -> tuple[bool, bool, bool]:
@@ -168,18 +184,18 @@ def _grid_caps(spec: AssemblySpec, bus_device_ids: list[str], ctx) -> tuple[bool
             d
             for d in spec.devices
             if d.id in bus_device_ids
-            and resolve_model(ctx, d.model)[0] is not None
+            and resolve_model(ctx, d.definition_id)[0] is not None
             and {
                 "electricity_import", "electricity_export"
-            }.issubset(resolve_model(ctx, d.model)[0].interfaces)
+            }.issubset(resolve_model(ctx, d.definition_id)[0].interfaces)
         ),
         None,
     )
     if grid_dev is None:
         return False, False, False
-    max_import = _float_param(grid_dev.params, "max_import_power_kw")
-    max_export = _float_param(grid_dev.params, "max_export_power_kw")
-    export_tariff = _float_param(grid_dev.params, "export_tariff")
+    max_import = _float_param(prop_map(grid_dev), "max_import_power_kw")
+    max_export = _float_param(prop_map(grid_dev), "max_export_power_kw")
+    export_tariff = _float_param(prop_map(grid_dev), "export_tariff")
     can_import = max_import is None or max_import > 0
     can_export = (max_export is not None and max_export > 0) or (
         export_tariff is not None and export_tariff > 0
@@ -215,14 +231,14 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
         device = by_device.get(port.device)
         if device is None:
             continue
-        type_spec, _ = resolve_model(ctx, device.model)
+        type_spec, _ = resolve_model(ctx, device.definition_id)
         interfaces = type_spec.interfaces if type_spec is not None else {}
         variables = type_spec.equations.variables if type_spec is not None else {}
         is_storage = "soc" in variables and any(i.type == "bidirectional" for i in interfaces.values())
         is_grid = {"electricity_import", "electricity_export"}.issubset(interfaces)
         is_controllable = _is_adjustable_source(interfaces)
         if is_grid:
-            val = to_watts(_float_param(device.params, "max_import_power_kw"), "kW")
+            val = to_watts(_float_param(prop_map(device), "max_import_power_kw"), "kW")
             if val is not None:
                 fixed_supply += val
                 has_fixed_supply = True
@@ -237,12 +253,12 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
         device = by_device.get(port.device)
         if device is None:
             continue
-        type_spec, _ = resolve_model(ctx, device.model)
+        type_spec, _ = resolve_model(ctx, device.definition_id)
         if type_spec is not None and any(i.type == "predefined" for i in type_spec.interfaces.values()):
             assert type_spec.device is not None
             peak_key = PEAK_PARAM_BY_LOAD.get(type_spec.device.id)
             if peak_key is not None:
-                val = to_watts(_float_param(device.params, peak_key), "kW")
+                val = to_watts(_float_param(prop_map(device), peak_key), "kW")
                 if val is not None:
                     demand += val
                     has_demand = True
@@ -260,7 +276,7 @@ def _bus_controllable(spec: AssemblySpec, ctx, bus: dict) -> int:
         device = by_device.get(dev_id)
         if device is None:
             continue
-        type_spec, _ = resolve_model(ctx, device.model)
+        type_spec, _ = resolve_model(ctx, device.definition_id)
         interfaces = type_spec.interfaces if type_spec is not None else {}
         variables = type_spec.equations.variables if type_spec is not None else {}
         if "soc" in variables and any(i.type == "bidirectional" for i in interfaces.values()):
@@ -344,7 +360,7 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
         loc = {"object_type": "bus", "field": f"carrier:{carrier}"}
         has_grid, can_import, can_export = _grid_caps(spec, bus["device_ids"], ctx)
         devices = [d for d in spec.devices if d.id in bus["device_ids"]]
-        type_specs = {d.id: resolve_model(ctx, d.model)[0] for d in devices}
+        type_specs = {d.id: resolve_model(ctx, d.definition_id)[0] for d in devices}
         has_storage = any(
             ts is not None and "soc" in ts.equations.variables
             for ts in type_specs.values()
@@ -369,9 +385,9 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
                 d.id
                 for d in spec.devices
                 if d.id in bus["device_ids"]
-                and resolve_model(ctx, d.model)[0] is not None
+                and resolve_model(ctx, d.definition_id)[0] is not None
                 and {"electricity_import", "electricity_export"}.issubset(
-                    resolve_model(ctx, d.model)[0].interfaces
+                    resolve_model(ctx, d.definition_id)[0].interfaces
                 )
             }
             grid_port_refs = [r for r in bus["port_refs"] if r.partition(".")[0] in grid_dev_ids]

@@ -1,0 +1,35 @@
+# 非法样例: predefined 槽缺显式绑定 → ASM-BIND-001
+schema: ies.assembly
+schema_version: "2.0.0"
+
+assembly:
+  id: bad_predefined_missing
+  name: 缺绑定
+
+project_baseline:
+  resolution: 1h
+  leap_year: false
+  scenario_mode: single
+
+devices:
+  pv1:
+    definition:
+      id: ies.device.pv
+    asset_origin: new
+    properties:
+      rated_capacity_kwp:
+        value: 300
+        unit: kWp
+    predefined_interfaces:
+      ambient_temperature:
+        mode: constant
+        value: 25
+connections: {}
+
+constraints: {}
+
+outputs:
+  series: []
+  metrics: []
+
+extensions: {}

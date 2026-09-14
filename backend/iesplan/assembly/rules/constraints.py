@@ -11,6 +11,7 @@ import re
 
 from iesplan.assembly.context import AssemblySpec, ensure_ports, resolve_model, unit_dims
 from iesplan.assembly.diags import ASM_CONST_DIM, ASM_CONST_SYNTAX, ASM_CONST_UNDEF
+from iesplan.assembly.schema import prop_map
 from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.core.expression import (
@@ -56,10 +57,10 @@ def _defined_symbols(spec: AssemblySpec, ctx) -> dict[str, Dimensions]:
     for ref, port in resolved.items():
         symbols[ref] = unit_dims(port.unit, port.quantity)
     for device in spec.devices:
-        type_spec, _ = resolve_model(ctx, device.model)
+        type_spec, _ = resolve_model(ctx, device.definition_id)
         if type_spec is None:
             continue
-        for name, value in device.params.items():
+        for name, value in prop_map(device).items():
             if isinstance(value, (dict, list)):
                 continue
             pspec = type_spec.properties.get(name)

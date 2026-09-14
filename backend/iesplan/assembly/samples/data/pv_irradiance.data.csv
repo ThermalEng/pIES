@@ -1,0 +1,32 @@
+# schema: ies.device-data
+# schema_version: 2.0.0
+# dataset_id: campus_irradiance_2025
+# device_id: ies.device.pv
+# source_mode: data_repeat
+# resolution: 1h
+# unit.solar_irradiance: W/m2
+step,solar_irradiance
+0,0
+1,0
+2,0
+3,0
+4,0
+5,12
+6,85
+7,210
+8,360
+9,520
+10,660
+11,770
+12,830
+13,840
+14,800
+15,710
+16,580
+17,410
+18,230
+19,80
+20,5
+21,0
+22,0
+23,0

@@ -212,6 +212,8 @@ NEW_DIAG_CODES: dict[str, str] = {
     "ASM-EDGE-010": "连接两端有效区间无交集(值域冲突)",
     "ASM-BIND-001": "预定义接口绑定非法(来源模式/数据引用/接口类型不匹配)",
     "ASM-LOCK-001": "设备实例 definition 与提供的 descriptor 内容锁不一致",
+    "ASM-INPUT-007": "设备属性单位与模型量纲不可换算",
+    "ASM-EDGE-011": "连接端点不可连接(predefined/blind 永不进入 connections)",
     # 技术方程建模 2.0.0 contract(0.8.0 切片): 公共 AST 与数学贡献诊断
     "MOD-EQ-001": "方程表达式语法非法: {detail}",
     "MOD-EQ-002": "方程引用了未声明的标识符: {name}(只允许 properties/interfaces/equations.variables)",

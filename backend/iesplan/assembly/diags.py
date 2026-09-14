@@ -36,7 +36,8 @@ ASM_CALC_MODE = "ASM-CALC-001"  # calculation.mode 非法
 ASM_CALC_OPTIONS = "ASM-CALC-002"  # calculation.options 非法(未知键/非标量/非有限值)
 ASM_OUTPUT_REF = "ASM-OUT-001"  # outputs 引用未定义设备/端口
 ASM_CONV_UNMAPPABLE = "ASM-CONV-001"  # 旧形态无法映射到 ies.assembly 1.0.0(迁移/导出阻断)
-ASM_INPUT_UNDECLARED = "ASM-INPUT-006"  # 参数未在设备模型声明(ies.assembly 1.0.0: 只允许已声明字段)
+ASM_INPUT_UNDECLARED = "ASM-INPUT-006"  # 参数未在设备模型声明(ies.assembly 2.0.0: 只允许已声明字段)
+ASM_INPUT_PROP_UNIT = "ASM-INPUT-007"  # 属性单位与设备模型量纲不可换算
 
 # ---------------------------------------------------------------------------
 # 阶段 B:连接合法性(输入对输出、参数性质一致)
@@ -55,6 +56,7 @@ ASM_EDGE_ZERO_CAP = "ASM-EDGE-009"  # 边容量为 0 或负值(警告)
 # 装配 2.0.0 接口网络纯协议校验(0.8.0 切片): 连接/绑定/内容锁
 # ---------------------------------------------------------------------------
 ASM_EDGE_RANGE_CONFLICT = "ASM-EDGE-010"  # 连接两端有效区间无交集(值域冲突)
+ASM_EDGE_BAD_ENDPOINT = "ASM-EDGE-011"  # 连接端点不可连接(predefined/blind 永不进入 connections)
 ASM_BIND_INVALID = "ASM-BIND-001"  # 预定义绑定非法(接口类型/来源模式/数据引用不匹配)
 ASM_LOCK_MISMATCH = "ASM-LOCK-001"  # 设备实例 definition 与 descriptor 内容锁不一致
 
@@ -119,6 +121,7 @@ ASM_MESSAGE_KEYS: dict[str, str] = {
     ASM_EDGE_LOOSE_BIDI: "ies.diag.asm.edge.loose_bidi",
     ASM_EDGE_ZERO_CAP: "ies.diag.asm.edge.zero_capacity",
     ASM_EDGE_RANGE_CONFLICT: "ies.diag.asm.edge.range_conflict",
+    ASM_EDGE_BAD_ENDPOINT: "ies.diag.asm.edge.bad_endpoint",
     ASM_BIND_INVALID: "ies.diag.asm.bind.invalid",
     ASM_LOCK_MISMATCH: "ies.diag.asm.lock.mismatch",
     # ref.*
@@ -133,6 +136,7 @@ ASM_MESSAGE_KEYS: dict[str, str] = {
     ASM_INPUT_RANGE: "ies.diag.asm.input.param_range",
     ASM_INPUT_DATA_UNIT: "ies.diag.asm.input.data_unit_dim",
     ASM_INPUT_UNDECLARED: "ies.diag.asm.input.param_undeclared",
+    ASM_INPUT_PROP_UNIT: "ies.diag.asm.input.prop_unit_dim",
     # res.*
     ASM_RES_INVALID: "ies.diag.asm.res.invalid",
     # calc.*
@@ -238,6 +242,7 @@ __all__ = [
     "ASM_OUTPUT_REF",
     "ASM_CONV_UNMAPPABLE",
     "ASM_INPUT_UNDECLARED",
+    "ASM_INPUT_PROP_UNIT",
     "ASM_EDGE_BAD_SOURCE",
     "ASM_EDGE_BAD_SINK",
     "ASM_EDGE_CARRIER",
@@ -248,6 +253,7 @@ __all__ = [
     "ASM_EDGE_LOOSE_BIDI",
     "ASM_EDGE_ZERO_CAP",
     "ASM_EDGE_RANGE_CONFLICT",
+    "ASM_EDGE_BAD_ENDPOINT",
     "ASM_BIND_INVALID",
     "ASM_LOCK_MISMATCH",
     "ASM_REF_DUP_DEVICE",

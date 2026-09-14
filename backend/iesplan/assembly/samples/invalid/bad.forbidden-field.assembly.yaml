@@ -11,16 +11,17 @@ project_baseline:
   leap_year: false
   scenario_mode: single
 
-resources:
-  datasets: {}
-
 devices:
   hp1:
-    model: ies.device.heat_pump@1.3.0
-    parameters:
-      rated_heat_kw: 600
-      command: "/bin/sh -c solver"
-
+    definition:
+      id: ies.device.heat_pump
+    asset_origin: new
+    properties:
+      rated_heat_kw:
+        value: 600
+        unit: kW
+    predefined_interfaces: {}
+    command: "/bin/sh -c solver"
 connections: {}
 
 constraints: {}

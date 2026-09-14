@@ -9,7 +9,6 @@
     "schema_version",
     "assembly",
     "project_baseline",
-    "resources",
     "devices",
     "connections",
     "constraints",
@@ -53,80 +52,56 @@
       },
       "additionalProperties": false
     },
-    "resources": {
-      "type": "object",
-      "required": ["datasets"],
-      "properties": {
-        "datasets": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "object",
-            "required": ["source"],
-            "properties": {
-              "source": {
-                "type": "object",
-                "oneOf": [
-                  {
-                    "required": ["kind", "path"],
-                    "properties": {
-                      "kind": { "const": "relative_file" },
-                      "path": {
-                        "type": "string",
-                        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]*$",
-                        "description": "包内相对路径;禁止绝对路径、..、~、盘符与反斜杠"
-                      }
-                    },
-                    "additionalProperties": false
-                  },
-                  {
-                    "required": ["kind", "object_id", "media_type"],
-                    "properties": {
-                      "kind": { "const": "object" },
-                      "object_id": {
-                        "type": "string",
-                        "description": "对象存储对象 id(不透明标识, 非内容摘要)"
-                      },
-                      "media_type": { "type": "string" }
-                    },
-                    "additionalProperties": false
-                  }
-                ]
-              }
-            },
-            "additionalProperties": false
-          }
-        }
-      },
-      "additionalProperties": false
-    },
     "devices": {
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["model"],
+        "required": ["definition", "asset_origin"],
         "properties": {
-          "model": {
+          "definition": {
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "稳定设备模型 ID(裸 ID，禁止 @版本钉选)"
+              }
+            },
+            "additionalProperties": false
+          },
+          "asset_origin": {
             "type": "string",
-            "pattern": "^[a-z0-9][a-z0-9._-]*@[0-9]+\\.[0-9]+\\.[0-9]+$",
-            "description": "精确设备模型引用 <device-id>@<exact-version>;禁止 latest/范围版本"
+            "enum": ["existing", "new"],
+            "description": "存量/新增身份，不得推断"
           },
-          "parameters": {
+          "properties": {
             "type": "object",
-            "description": "参数只能使用模型已声明字段;必填参数不得由生成器补默认",
-            "additionalProperties": {
-              "type": ["number", "string", "boolean", "null"]
-            }
-          },
-          "data": {
-            "type": "object",
+            "description": "非时变技术常量覆盖，只允许模型已声明字段",
             "additionalProperties": {
               "type": "object",
-              "required": ["dataset", "column"],
+              "required": ["value", "unit"],
               "properties": {
-                "dataset": { "type": "string", "description": "resources.datasets 中声明的 dataset_id" },
-                "column": { "type": "string", "description": "数据集中已校验的列" }
+                "value": {
+                  "type": ["number", "string", "boolean"],
+                  "description": "有限标量"
+                },
+                "unit": { "type": "string", "minLength": 1 }
               },
               "additionalProperties": false
+            }
+          },
+          "predefined_interfaces": {
+            "type": "object",
+            "description": "每个 predefined 槽恰好一个显式来源声明",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["mode"],
+              "properties": {
+                "mode": { "type": "string", "enum": ["constant", "data_repeat", "data_predict"] },
+                "value": { "type": "number" },
+                "path": { "type": "string", "description": "项目目录内 CSV 相对路径" },
+                "target_type": { "type": "string", "minLength": 1 }
+              }
             }
           }
         },

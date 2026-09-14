@@ -1,4 +1,4 @@
-# 非法样例: 装配携带 calculation 章节(计算配置在计算包生成时固定)→ ASM-SYN-002
+# 非法样例: 装配携带 calculation 章节 → ASM-SYN-002
 schema: ies.assembly
 schema_version: "2.0.0"
 
@@ -11,22 +11,16 @@ project_baseline:
   leap_year: false
   scenario_mode: single
 
-resources:
-  datasets: {}
-
 devices: {}
 
 connections: {}
 
 constraints: {}
 
-calculation:
-  mode: fixed_operation
-  generator: acme.generator.highs_milp@1.0.0
-  solver: ies.solver.highs@1.7.2
-
 outputs:
   series: []
   metrics: []
 
 extensions: {}
+calculation:
+  mode: fixed_operation

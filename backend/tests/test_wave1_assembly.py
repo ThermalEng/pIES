@@ -49,22 +49,6 @@ ASSEMBLY_DIR = ASM_DIR
 SAMPLES_DIR = ASSEMBLY_DIR / "samples"
 VALID_DIR = SAMPLES_DIR / "valid"
 
-#: 样例数据集元信息(供校验入口 datasets 参数)
-SAMPLE_DATASETS = {
-    "campus_load": {
-        "columns": ["e_load"],
-        "column_units": {"e_load": "kWh"},
-        "resolution": "1h",
-        "media_type": "text/csv",
-    },
-    "campus_heat": {
-        "columns": ["h_load"],
-        "column_units": {"h_load": "kWh"},
-        "resolution": "1h",
-        "media_type": "text/csv",
-    },
-}
-
 #: 现行公共入口面(ies.assembly 2.0.0): 历史名单不断言, 只稳定现行契约。
 CURRENT_ENTRIES = (
     parse_assembly_doc,
@@ -165,7 +149,7 @@ class TestContract:
 
     def test_sample_issues_immutable_artifact(self):
         result = validate_assembly_text(
-            _sample_text(), package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS
+            _sample_text(), package_dir=SAMPLES_DIR
         )
         assert isinstance(result, AssemblyValidationResult)
         assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
@@ -182,10 +166,10 @@ class TestContract:
 
     def test_canonical_text_deterministic(self):
         first = validate_assembly_text(
-            _sample_text(), package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS
+            _sample_text(), package_dir=SAMPLES_DIR
         )
         second = validate_assembly_text(
-            _sample_text(), package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS
+            _sample_text(), package_dir=SAMPLES_DIR
         )
         assert first.ok and second.ok
         assert first.artifact.canonical_text == second.artifact.canonical_text
@@ -281,7 +265,7 @@ class TestProductionPipeline:
     def test_text_and_export_share_pipeline(self):
         """手写文本与项目导出进入同一校验入口,签发同一产物形态。"""
         text_result = validate_assembly_text(
-            _sample_text(), package_dir=SAMPLES_DIR, datasets=SAMPLE_DATASETS
+            _sample_text(), package_dir=SAMPLES_DIR
         )
         assert text_result.ok and text_result.artifact is not None
         export_result = validate_project_export(_export_content())

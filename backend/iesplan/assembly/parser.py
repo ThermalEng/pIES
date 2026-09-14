@@ -37,13 +37,13 @@ from iesplan.core.diagnostics import Diagnostic
 from iesplan.core.yamlmini import YamlParseError as _YamlParseError
 from iesplan.core.yamlmini import load as _load_yaml
 
-#: 顶层章节(各节均必需,无内容写空 {} 或 [])
+#: 顶层章节(各节均必需,无内容写空 {} 或 [];resources 数据集注册表已删除,
+#: 预定义来源直接在设备 predefined_interfaces 中声明路径/值/目标类型)
 TOP_SECTIONS: tuple[str, ...] = (
     "schema",
     "schema_version",
     "assembly",
     "project_baseline",
-    "resources",
     "devices",
     "connections",
     "constraints",
@@ -53,10 +53,20 @@ TOP_SECTIONS: tuple[str, ...] = (
 
 _ASSEMBLY_KEYS: tuple[str, ...] = ("id", "name")
 _BASELINE_KEYS: tuple[str, ...] = ("resolution", "leap_year", "scenario_mode")
-_RESOURCES_KEYS: tuple[str, ...] = ("datasets",)
 _SOURCE_KINDS: tuple[str, ...] = ("relative_file", "object")
-_DEVICE_KEYS: tuple[str, ...] = ("model", "parameters", "data")
-_DATA_BINDING_KEYS: tuple[str, ...] = ("dataset", "column")
+#: 设备实例键(ies.device-model 2.0 纯技术契约):定义引用/存量新增身份/
+#: 非时变技术常量覆盖/预定义接口来源声明；旧 model/parameters/data 一律未知键拒绝
+_DEVICE_KEYS: tuple[str, ...] = ("definition", "asset_origin", "properties", "predefined_interfaces")
+#: 存量/新增身份(不得推断，缺失阻断)
+_ASSET_ORIGINS: tuple[str, ...] = ("existing", "new")
+#: 预定义来源模式判别联合
+_PREDEFINED_MODES: tuple[str, ...] = ("constant", "data_repeat", "data_predict")
+#: 各模式允许的精确键集合(缺少/多余一律拒绝，无默认)
+_PREDEFINED_KEYS: dict[str, frozenset] = {
+    "constant": frozenset({"mode", "value"}),
+    "data_repeat": frozenset({"mode", "path"}),
+    "data_predict": frozenset({"mode", "path", "target_type"}),
+}
 _CONNECTION_KEYS: tuple[str, ...] = ("from", "to")
 _CONSTRAINT_KEYS: tuple[str, ...] = ("type", "expr", "enabled")
 _OUTPUTS_KEYS: tuple[str, ...] = ("series", "metrics")
@@ -71,9 +81,15 @@ _CONSTRAINT_TYPES: tuple[str, ...] = ("ratio", "capacity", "schedule", "generic"
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 #: 端点/输出引用 <device-instance>.<port-id> / <device>.<output>
 _REF_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]*\.[a-z0-9_][a-z0-9_.-]*$")
-#: 精确版本引用 <id>@<semver>;禁止 latest/范围版本/未版本化别名
-_EXACT_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
-_EXACT_REF_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*@[0-9]+\.[0-9]+\.[0-9]+$")
+
+def _is_finite_number(val: object) -> bool:
+    """有限数值判定(bool 永假；NaN/Inf 假；其余 int/float 真)。"""
+    import math as _math
+
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return False
+    return _math.isfinite(float(val))
+
 
 #: 禁止出现在装配 YAML 中的键(宪法 §7.8:shell/command/executable/函数模块路径/
 #: 环境变量/凭证);source 映射内的 path 等资源字段除外
@@ -241,24 +257,6 @@ class _DocBuilder:
             return None
         return val
 
-    def _exact_ref(self, val: Any, field: str) -> str | None:
-        """精确版本引用 <id>@<semver>(latest/范围版本/未版本化一律拒绝)。"""
-        if isinstance(val, str) and _EXACT_REF_RE.match(val):
-            return val
-        detail = "latest"
-        if isinstance(val, str):
-            _id, _, version = val.rpartition("@")
-            if _id and not version:
-                detail = "missing_version"
-            elif version and not _EXACT_VERSION_RE.match(version):
-                detail = f"non_exact_version:{version}"
-        self._diag(
-            ASM_SYN_VERSION_PIN,
-            field,
-            {"reason": "exact_version_required", "value": repr(val), "detail": detail},
-        )
-        return None
-
     def _ref_shape(self, val: Any, field: str) -> str | None:
         if isinstance(val, str) and _REF_RE.match(val):
             return val
@@ -288,7 +286,6 @@ class _DocBuilder:
 
         self._build_assembly(tree.get("assembly"), "assembly")
         self._build_project_baseline(tree.get("project_baseline"), "project_baseline")
-        self._build_resources(tree.get("resources"), "resources")
         self._build_devices(tree.get("devices"), "devices")
         self._build_connections(tree.get("connections"), "connections")
         self._build_constraints(tree.get("constraints"), "constraints")
@@ -337,43 +334,6 @@ class _DocBuilder:
             if key not in _BASELINE_KEYS:
                 self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
 
-    def _build_resources(self, value: Any, field: str) -> None:
-        m = self._require_map(value, field)
-        if m is None:
-            return
-        for key in m:
-            if key not in _RESOURCES_KEYS:
-                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
-        datasets = m.get("datasets")
-        dm = self._require_map(datasets, f"{field}.datasets")
-        if dm is None:
-            return
-        for ds_id in dm:
-            self._local_id(ds_id, f"{field}.datasets.{ds_id}")
-            self._build_dataset_source(dm[ds_id], f"{field}.datasets.{ds_id}")
-
-    def _build_dataset_source(self, value: Any, field: str) -> None:
-        entry = self._require_map(value, field)
-        if entry is None:
-            return
-        for key in entry:
-            if key not in ("source",):
-                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
-        src = self._require_map(entry.get("source"), f"{field}.source")
-        if src is None:
-            return
-        kind = self._enum(src.get("kind"), _SOURCE_KINDS, f"{field}.source.kind")
-        if kind == "relative_file":
-            path = self._str(src, "path", f"{field}.source.path", required=True)
-            if path is not None:
-                self._check_package_path(path, f"{field}.source.path")
-        elif kind == "object":
-            self._str(src, "object_id", f"{field}.source.object_id", required=True)
-            self._str(src, "media_type", f"{field}.source.media_type", required=True)
-        for key in src:
-            if key not in ("kind", "path", "object_id", "media_type"):
-                self._diag(ASM_SYN_PARSE, f"{field}.source.{key}", {"reason": "unknown_key", "key": key})
-
     def _check_package_path(self, path: str, field: str) -> None:
         """包内相对路径:禁止绝对路径、..、~、盘符、反斜杠与空段。"""
         reasons: list[str] = []
@@ -409,36 +369,124 @@ class _DocBuilder:
         m = self._require_map(value, field)
         if m is None:
             return
-        self._exact_ref(m.get("model"), f"{field}.model")
+        self._build_definition(m.get("definition"), f"{field}.definition")
+        if "asset_origin" not in m:
+            self._diag(ASM_SYN_FIELD, f"{field}.asset_origin", {"reason": "missing_field", "key": "asset_origin"})
+        else:
+            self._enum(m.get("asset_origin"), _ASSET_ORIGINS, f"{field}.asset_origin")
         for key in m:
             if key not in _DEVICE_KEYS:
                 self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
-        params = self._require_map(m.get("parameters"), f"{field}.parameters")
-        if params is not None:
-            for name, pval in params.items():
-                if isinstance(pval, (dict, list)):
+        props = m.get("properties")
+        if props is not None:
+            pmap = self._require_map(props, f"{field}.properties")
+            if pmap is not None:
+                for name, entry in pmap.items():
+                    self._build_property(entry, f"{field}.properties.{name}")
+        predef = m.get("predefined_interfaces")
+        if predef is not None:
+            pmap = self._require_map(predef, f"{field}.predefined_interfaces")
+            if pmap is not None:
+                for iface_id, binding in pmap.items():
+                    if not isinstance(iface_id, str) or not _ID_RE.match(iface_id):
+                        self._diag(
+                            ASM_SYN_TYPE,
+                            f"{field}.predefined_interfaces.{iface_id}",
+                            {"reason": "invalid_local_id"},
+                        )
+                        continue
+                    self._build_predefined_binding(binding, f"{field}.predefined_interfaces.{iface_id}")
+
+    def _build_definition(self, value: Any, field: str) -> None:
+        """definition.id: 稳定设备 ID(裸 ID，禁止 @版本钉选与 latest 别名)。"""
+        m = self._require_map(value, field)
+        if m is None:
+            self._diag(ASM_SYN_FIELD, field, {"reason": "missing_field", "key": "definition"})
+            return
+        for key in m:
+            if key != "id":
+                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
+        raw_id = m.get("id")
+        if not isinstance(raw_id, str) or not raw_id:
+            self._diag(ASM_SYN_TYPE, f"{field}.id", {"reason": "expected_non_empty_string"})
+            return
+        if "@" in raw_id:
+            self._diag(
+                ASM_SYN_VERSION_PIN,
+                f"{field}.id",
+                {"reason": "version_pin_forbidden", "value": raw_id},
+            )
+
+    def _build_property(self, value: Any, field: str) -> None:
+        """properties.<name>: {value: 有限标量, unit: 非空单位}，精确键集合。"""
+        m = self._require_map(value, field)
+        if m is None:
+            return
+        for key in m:
+            if key not in ("value", "unit"):
+                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
+        if "value" not in m:
+            self._diag(ASM_SYN_FIELD, f"{field}.value", {"reason": "missing_field", "key": "value"})
+        else:
+            val = m["value"]
+            if isinstance(val, bool) or not isinstance(val, (int, float, str)):
+                self._diag(
+                    ASM_SYN_TYPE,
+                    f"{field}.value",
+                    {"reason": "expected_scalar", "actual": type(val).__name__},
+                )
+            elif not _is_finite_number(val):
+                self._diag(ASM_SYN_TYPE, f"{field}.value", {"reason": "non_finite_value"})
+        unit = m.get("unit")
+        if not isinstance(unit, str) or not unit.strip():
+            self._diag(ASM_SYN_TYPE, f"{field}.unit", {"reason": "expected_non_empty_unit"})
+
+    def _build_predefined_binding(self, value: Any, field: str) -> None:
+        """predefined_interfaces.<iface>: 严格判别联合，无默认无多余键。"""
+        m = self._require_map(value, field)
+        if m is None:
+            return
+        mode = m.get("mode")
+        if mode not in _PREDEFINED_MODES:
+            self._diag(
+                ASM_SYN_TYPE,
+                f"{field}.mode",
+                {"reason": "invalid_enum", "value": repr(mode), "allowed": list(_PREDEFINED_MODES)},
+            )
+            return
+        allowed = _PREDEFINED_KEYS[mode]
+        for key in m:
+            if key not in allowed:
+                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
+        for key in allowed:
+            if key not in m:
+                self._diag(ASM_SYN_FIELD, f"{field}.{key}", {"reason": "missing_field", "key": key})
+        if mode == "constant":
+            val = m.get("value")
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                self._diag(
+                    ASM_SYN_TYPE,
+                    f"{field}.value",
+                    {"reason": "expected_finite_number", "actual": type(val).__name__},
+                )
+            elif not _is_finite_number(val):
+                self._diag(ASM_SYN_TYPE, f"{field}.value", {"reason": "non_finite_value"})
+        else:
+            path = m.get("path")
+            if isinstance(path, str) and path:
+                self._check_package_path(path, f"{field}.path")
+                if not path.lower().endswith(".csv"):
+                    self._diag(
+                        ASM_SYN_TYPE, f"{field}.path", {"reason": "expected_csv_path", "path": path}
+                    )
+            if mode == "data_predict":
+                target = m.get("target_type")
+                if not isinstance(target, str) or not target.strip():
                     self._diag(
                         ASM_SYN_TYPE,
-                        f"{field}.parameters.{name}",
-                        {"reason": "expected_scalar", "actual": type(pval).__name__},
+                        f"{field}.target_type",
+                        {"reason": "expected_non_empty_string"},
                     )
-        data = self._require_map(m.get("data"), f"{field}.data")
-        if data is not None:
-            for col_key in data:
-                if not isinstance(col_key, str) or not _ID_RE.match(col_key):
-                    self._diag(ASM_SYN_TYPE, f"{field}.data.{col_key}", {"reason": "invalid_local_id"})
-                binding = self._require_map(data[col_key], f"{field}.data.{col_key}")
-                if binding is None:
-                    continue
-                self._str(binding, "dataset", f"{field}.data.{col_key}.dataset", required=True)
-                self._str(binding, "column", f"{field}.data.{col_key}.column", required=True)
-                for key in binding:
-                    if key not in _DATA_BINDING_KEYS:
-                        self._diag(
-                            ASM_SYN_PARSE,
-                            f"{field}.data.{col_key}.{key}",
-                            {"reason": "unknown_key", "key": key},
-                        )
 
     def _build_connections(self, value: Any, field: str) -> None:
         m = self._require_map(value, field)

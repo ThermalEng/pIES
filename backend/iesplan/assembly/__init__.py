@@ -15,7 +15,11 @@
 公开门面(设备描述符),不依赖 services/engines/worker。
 """
 
-from iesplan.assembly.builder import BuildDocResult, build_assembly_doc_from_content
+from iesplan.assembly.builder import (
+    BuildDocResult,
+    build_assembly_doc_from_content,
+    dataset_export_path,
+)
 from iesplan.assembly.canonicalizer import (
     canonical_algorithm_ref,
     canonicalize_assembly_doc,
@@ -59,6 +63,7 @@ __all__ = [
     "ParseDocResult",
     "build_assembly_doc_from_content",
     "BuildDocResult",
+    "dataset_export_path",
     # 校验入口与产物签发
     "AssemblyValidationResult",
     "validate_assembly_text",
