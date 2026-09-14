@@ -1,13 +1,15 @@
-"""computation 接线测试(F3): 真实最小调用链与 unavailable 语义。
+"""computation 接线测试(F3; G1 密封修订): 真实最小调用链与 unavailable 语义。
 
 覆盖(生产代码 + 测试一并修改, 不恢复静默默认):
 
 - 无模块全局网关: ``iesplan.worker.runner`` 与阶段网关不再持有任何
-  全局可赋值计算入口;
+  全局可赋值计算入口; 阶段网关不知 provider 键(键与组合解析只归
+  ``iesplan.computation``, 经 ``resolve_capabilities`` 收拢);
 - 真实阶段顺序: 三个独立最小替身分别验证三协议, 记录调用
   generate → run → adapt, 且 Bundle/回执对象在段间原样透传(非重造);
 - unavailable 语义矩阵: None/空目录/缺键/自报不可用, reason 结构化;
-- 输入形状错误(快照缺失/未签发装配/非法结局)为调用方错误, 绝不成功;
+- 输入形状错误(快照缺失/未签发装配/封存缺字段/非法结局)为调用方错误,
+  绝不成功; 封存回执含阻断诊断不复判(签发即事实);
 - bootstrap 真实装配注入路径: 真实 ``assemble_compute_worker()`` 的
   ``computation_providers`` 经阶段网关收拢为 unavailable, 经执行闭环
   落 failed(非 lease_rejected); main 入口把装配目录原样注入 Daemon;
@@ -19,6 +21,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -37,8 +40,12 @@ from worker_testkit import setup_environment  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.application.worker import compute_cases as compute_gateway  # noqa: E402
 from iesplan.computation import (  # noqa: E402
+    GENERATOR_PROVIDER_KEY,
+    RESULT_ADAPTER_KEY,
+    SOLVER_RUNTIME_KEY,
     CalculationConfig,
     ComputationUnavailableError,
+    ComputeResources,
     ComputeResult,
     ExecutionReceipt,
     GeneratorProvider,
@@ -46,7 +53,12 @@ from iesplan.computation import (  # noqa: E402
     SolverBundle,
     SolverRuntime,
 )
-from iesplan.core.diagnostics import TASK_SOLVE_FAILED  # noqa: E402
+from iesplan.core.diagnostics import (  # noqa: E402
+    DATA_TS_DUP,
+    SEVERITY_WARNING,
+    TASK_SOLVE_FAILED,
+    make_diag,
+)
 from iesplan.db import Base  # noqa: E402
 from iesplan.tasks import (  # noqa: E402
     CalcSnapshotRecord,  # noqa: E402
@@ -145,6 +157,7 @@ class _GeneratorFake:
     def generate(self, artifact, resources, config) -> SolverBundle:
         assert artifact.canonical_text
         assert isinstance(resources, Mapping)
+        assert isinstance(resources, ComputeResources)
         assert isinstance(config, CalculationConfig)
         self._calls.append("generate")
         return _test_bundle()
@@ -201,25 +214,40 @@ class _AdapterFake:
 def _recording_providers(
     calls: list[str], outcome: str = "normal_completion"
 ) -> dict[str, Any]:
+    """按 computation 稳定键组装三段式记录能力(测试侧组合, 生产侧为空)。"""
     return {
-        worker_app.GENERATOR_PROVIDER_KEY: _GeneratorFake(calls),
-        worker_app.SOLVER_RUNTIME_KEY: _RuntimeFake(calls),
-        worker_app.RESULT_ADAPTER_KEY: _AdapterFake(calls, outcome),
+        GENERATOR_PROVIDER_KEY: _GeneratorFake(calls),
+        SOLVER_RUNTIME_KEY: _RuntimeFake(calls),
+        RESULT_ADAPTER_KEY: _AdapterFake(calls, outcome),
     }
 
 
 # ---------------------------------------------------------------------------
-# 1. 无模块全局网关
+# 1. 无模块全局网关, 且网关不知键
 # ---------------------------------------------------------------------------
 
 
 def test_no_module_global_compute_gateway() -> None:
-    """runner 与计算阶段网关均无模块全局计算入口(只能调用参数注入)。"""
+    """runner 与计算阶段网关均无模块全局计算入口(只能调用参数注入)。
+
+    键与组合解析只归 computation: 阶段网关无键常量、无解析器、无重建器。
+    """
     assert not hasattr(runner, "compute_gateway")
     assert not hasattr(runner, "ComputeUnavailableError")
     assert not hasattr(compute_gateway, "compute_gateway")
     assert not hasattr(compute_gateway, "providers")
     assert not hasattr(compute_gateway, "provider")
+    for name in (
+        "GENERATOR_PROVIDER_KEY",
+        "SOLVER_RUNTIME_KEY",
+        "RESULT_ADAPTER_KEY",
+        "_resolve_providers",
+        "_rebuild_artifact",
+    ):
+        assert not hasattr(compute_gateway, name), name
+    assert not hasattr(worker_app, "GENERATOR_PROVIDER_KEY")
+    assert not hasattr(worker_app, "SOLVER_RUNTIME_KEY")
+    assert not hasattr(worker_app, "RESULT_ADAPTER_KEY")
 
 
 def test_independent_doubles_cover_each_protocol() -> None:
@@ -258,8 +286,8 @@ def test_stage_order_generate_run_adapt(db: Session, env: dict[str, Any]) -> Non
 
     assert calls == ["generate", "run", "adapt"]
     assert [stage for _, stage in stages] == ["generate", "solve", "adapt"]
-    runtime = providers[worker_app.SOLVER_RUNTIME_KEY]
-    adapter = providers[worker_app.RESULT_ADAPTER_KEY]
+    runtime = providers[SOLVER_RUNTIME_KEY]
+    adapter = providers[RESULT_ADAPTER_KEY]
     assert isinstance(runtime, _RuntimeFake) and isinstance(adapter, _AdapterFake)
     seen_bundle, seen_receipt, seen_outputs = adapter.seen or (None, None, None)
     assert seen_bundle is runtime.seen_bundle
@@ -312,9 +340,9 @@ def _unavailable_variant(
 ) -> dict[str, Any]:
     """把指定键替换为自报不可用的能力, 其余透传。"""
     providers = _recording_providers(calls)
-    if key == worker_app.GENERATOR_PROVIDER_KEY:
+    if key == GENERATOR_PROVIDER_KEY:
         providers[key] = _UnavailableGenerator()
-    elif key == worker_app.SOLVER_RUNTIME_KEY:
+    elif key == SOLVER_RUNTIME_KEY:
         runtime = providers[key]
         assert isinstance(runtime, _RuntimeFake)
         runtime.available = lambda: False  # type: ignore[method-assign]
@@ -333,7 +361,6 @@ def test_unavailable_matrix(db: Session, env: dict[str, Any]) -> None:
         None,
         {},
         {"generator": _GeneratorFake(calls)},
-        ["not-a-mapping"],
     ]
     for providers in no_provider_cases:
         with pytest.raises(ComputationUnavailableError) as exc_info:
@@ -341,9 +368,9 @@ def test_unavailable_matrix(db: Session, env: dict[str, Any]) -> None:
         assert exc_info.value.reason == "no-provider"
     assert calls == []
     for key in (
-        worker_app.GENERATOR_PROVIDER_KEY,
-        worker_app.SOLVER_RUNTIME_KEY,
-        worker_app.RESULT_ADAPTER_KEY,
+        GENERATOR_PROVIDER_KEY,
+        SOLVER_RUNTIME_KEY,
+        RESULT_ADAPTER_KEY,
     ):
         with pytest.raises(ComputationUnavailableError) as exc_info:
             worker_app.run_compute_stage(
@@ -353,12 +380,12 @@ def test_unavailable_matrix(db: Session, env: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. 输入形状错误(调用方错误, 绝不成功)
+# 4. 输入形状错误(调用方错误, 绝不成功); 已签发事实不复判
 # ---------------------------------------------------------------------------
 
 
 def test_stage_input_shape_errors(db: Session, env: dict[str, Any]) -> None:
-    """快照缺失/未签发装配/非法结局均为调用方错误, 不得落成功。"""
+    """快照缺失/未签发装配/封存缺字段/非法结局均为调用方错误, 不得落成功。"""
     calls: list[str] = []
     providers = _recording_providers(calls)
     with pytest.raises(ValueError, match="缺快照"):
@@ -378,9 +405,34 @@ def test_stage_input_shape_errors(db: Session, env: dict[str, Any]) -> None:
         worker_app.run_compute_stage(unsigned, providers=providers)
     assert calls == []
 
+    raw_config = dict(snapshot.calc_config_snapshot)
+    del raw_config["params"]
+    no_params = dataclasses.replace(snapshot, calc_config_snapshot=raw_config)
+    with pytest.raises(ValueError, match="表示映射失败"):
+        worker_app.run_compute_stage(no_params, providers=providers)
+    assert calls == []
+
     bad_outcome = _recording_providers(calls, outcome="not_a_real_outcome")
     with pytest.raises(ValueError, match="非法业务结局"):
         worker_app.run_compute_stage(snapshot, providers=bad_outcome)
+
+
+def test_stage_does_not_rejudge_blocking_receipt(
+    db: Session, env: dict[str, Any]
+) -> None:
+    """封存回执含阻断诊断仍真实执行(密封: 签发即事实, 不复判阻断)。"""
+    calls: list[str] = []
+    snapshot = _snapshot_of(db, env)
+    stored = dict(snapshot.assembly_receipt)
+    stored["diagnostics"] = [
+        make_diag(DATA_TS_DUP, severity=SEVERITY_WARNING, blocking=True).to_dict()
+    ]
+    sealed = dataclasses.replace(snapshot, assembly_receipt=stored)
+    payload = worker_app.run_compute_stage(
+        sealed, providers=_recording_providers(calls),
+    )
+    assert calls == ["generate", "run", "adapt"]
+    assert payload["outcome"] == "normal_completion"
 
 
 # ---------------------------------------------------------------------------

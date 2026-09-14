@@ -175,32 +175,6 @@ class CalculationConfig:
             raise TypeError("options 须为 Mapping")
         object.__setattr__(self, "options", _freeze_json(self.options))
 
-    @classmethod
-    def from_snapshot(
-        cls,
-        calc_config_snapshot: Mapping[str, Any],
-        *,
-        seed: int | None,
-        tolerances: Mapping[str, Any] | None,
-    ) -> CalculationConfig:
-        """由快照已固定值显式构造(无猜测、无静默默认)。
-
-        ``params`` 取自快照 ``calc_config_snapshot["params"]``(缺失即空映射,
-        非 Mapping 即拒绝); ``tolerances`` 为快照独立固定字段, 显式并入
-        options(快照未固定时不出现该键, 不猜默认值)。
-        """
-        if not isinstance(calc_config_snapshot, Mapping):
-            raise ValueError("快照计算配置须为 Mapping")
-        params = calc_config_snapshot.get("params", {})
-        if not isinstance(params, Mapping):
-            raise ValueError("快照计算配置 params 须为 Mapping")
-        options: dict[str, object] = dict(params)
-        if tolerances is not None:
-            if not isinstance(tolerances, Mapping):
-                raise ValueError("快照 tolerances 须为 Mapping 或 None")
-            options["tolerances"] = dict(tolerances)
-        return cls(seed=seed, options=options)
-
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
         return {
