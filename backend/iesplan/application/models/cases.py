@@ -27,7 +27,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan.application.models import service as model_service
-from iesplan.application.projects.authorization import ensure_access
+from iesplan.application.projects import ensure_access
 from iesplan.identity.contracts import UserRecord
 
 

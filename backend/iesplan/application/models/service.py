@@ -25,10 +25,8 @@ from sqlalchemy.orm import Session
 
 from iesplan import model as model_domain
 from iesplan import project as project_domain
-from iesplan.application.projects.content_objects import (
+from iesplan.application.projects import (
     load_content_object as _load_content_object,
-)
-from iesplan.application.projects.content_objects import (
     store_content_object as _store_content_object,
 )
 from iesplan.core.diagnostics import (

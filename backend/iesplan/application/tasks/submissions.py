@@ -41,9 +41,10 @@ from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.projects import versions as project_versions
-from iesplan.application.projects.authorization import ensure_access
-from iesplan.application.projects.content_objects import (
+from iesplan.application.projects import (
+    current_version_matches_draft as _current_version_matches_draft,
+    ensure_access,
+    freeze_snapshot_version as _freeze_snapshot_version,
     load_content_object,
 )
 from iesplan.assembly import (
@@ -189,7 +190,7 @@ def _resolve_project_inputs(
                 message_key="ies.diag.store.corrupt",
                 location={"object_type": "project", "object_id": project.id},
             )
-        if not project_versions.current_version_matches_draft(db, project):
+        if not _current_version_matches_draft(db, project):
             version = None  # 草稿已变更: 需重新固化
     if version is not None:
         return version, load_content_object(db, version.content_object_id)
@@ -198,7 +199,7 @@ def _resolve_project_inputs(
     if not freeze:
         return None, content
     # 草稿固化: 创建不可变项目版本(计算输入固定)
-    version = project_versions.freeze_snapshot_version(db, actor, project, draft)
+    version = _freeze_snapshot_version(db, actor, project, draft)
     return version, content
 
 

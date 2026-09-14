@@ -26,10 +26,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from iesplan.application.projects.authorization import ensure_access
+from iesplan.application.projects import ensure_access
 from iesplan.application.results import writes as results_writes
-from iesplan.application.tasks.submissions import ensure_task_belongs
-from iesplan.application.tasks.views import task_summary
+from iesplan.application.tasks import ensure_task_belongs, task_summary
 from iesplan.core.errors import NotFoundError
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import ResultAssessmentRecord, ResultSelectionRecord

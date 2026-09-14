@@ -26,8 +26,10 @@ from iesplan import audit as audit_domain
 from iesplan import model as model_domain
 from iesplan import project as project_domain
 from iesplan.application.model_templates import resolve_template_revision
-from iesplan.application.projects import versions as project_versions
-from iesplan.application.projects.authorization import ensure_access
+from iesplan.application.projects import (
+    ensure_access,
+    replace_project_model_refs as _replace_project_model_refs,
+)
 from iesplan.core.diagnostics import (
     SEVERITY_ERROR,
     Diagnostic,
@@ -580,7 +582,7 @@ def _save_project_model(
             "template_revision": template_revision,
         },
     )
-    new_draft = project_versions.replace_project_model_refs(
+    new_draft = _replace_project_model_refs(
         db,
         user,
         project_id,
@@ -678,7 +680,7 @@ def _delete_project_model(
         },
     )
     model_domain.delete_project_model(db, model.id)
-    new_draft = project_versions.replace_project_model_refs(
+    new_draft = _replace_project_model_refs(
         db,
         user,
         project_id,

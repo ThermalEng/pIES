@@ -7,16 +7,8 @@
 
 from __future__ import annotations
 
-from iesplan.application.configuration.calc_config import (
-    get_config,
-    get_default_config,
-    list_algorithms_meta,
-    load_work_graph,
-    parameter_metadata,
-    row_to_config,
-    save_config,
-    validate_config,
-)
+# 注: revisions 为叶模块(无 application 内依赖)，置于 calc_config 之前，
+# 使 projects.versions 经本门面回引财务/规划读能力时不形成导入环。
 from iesplan.application.configuration.revisions import (
     InvalidRequestError,
     delete_finance_overrides,
@@ -32,6 +24,16 @@ from iesplan.application.configuration.revisions import (
     save_finance_overrides_empty,
     save_planning_config,
     set_project_finance_profile,
+)
+from iesplan.application.configuration.calc_config import (
+    get_config,
+    get_default_config,
+    list_algorithms_meta,
+    load_work_graph,
+    parameter_metadata,
+    row_to_config,
+    save_config,
+    validate_config,
 )
 from iesplan.application.configuration.config_cases import (
     default_config_case,

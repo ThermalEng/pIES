@@ -24,11 +24,11 @@ from sqlalchemy.orm import Session
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
-from iesplan.application.configuration.revisions import (
+from iesplan.application.configuration import (
     get_effective_finance_config as _read_effective,
     get_planning_config as _read_planning,
 )
-from iesplan.application.projects.authorization import ensure_access
+from iesplan.application.projects import ensure_access
 from iesplan.application.projects.content_objects import (
     load_content_bytes as _load_content_bytes,
     load_content_object as _load_content_object,

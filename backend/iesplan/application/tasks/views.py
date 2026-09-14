@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from iesplan import identity as identity_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.projects.authorization import ensure_access
+from iesplan.application.projects import ensure_access
 from iesplan.application.tasks.submissions import (
     cancel_task,
     ensure_task_belongs,

@@ -26,7 +26,7 @@ from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan.application.datasets.quotas import check_upload_quota
-from iesplan.application.projects.authorization import ensure_access
+from iesplan.application.projects import ensure_access
 from iesplan.core.diagnostics import (
     DATA_COL_UNIT_UNKNOWN,
     PARAM_UNIT_MISMATCH,
