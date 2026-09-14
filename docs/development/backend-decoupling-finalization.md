@@ -1,277 +1,229 @@
-# 后端依赖架构最终收口：第二次验收纠偏
+# 后端依赖架构最终收口：第三次验收与结构归位
 
-> 文档类型：临时实施指导；状态：执行中、待独立验收；基线：`b8e136e`；日期：2026-09-13。
+> 文档类型：临时实施指导；状态：执行中、待 Codex 独立验收；基线：`16c8911`；日期：2026-09-14。
 >
-> 本文件不是长期架构规范，不改变产品版本，也不替代正式手册。权威要求以
-> [架构宪法](../../manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)、各模块手册和
-> Roadmap 为准。Muse 完成代码后必须保留本文件供 Codex 逐项复审；只有复审通过后，才由 Codex
-> 删除本文件并确认更新日志的“最终完成”表述。
+> 本文件只服务本次长程重构，不是长期架构规范。权威要求依次来自
+> `manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md`、生效模块手册和 Roadmap。
+> 实现完成后必须保留本文件供 Codex 逐项复审；只有全局验收通过后才删除并更新 changelog。
 
-## 一、为什么需要第二次纠偏
+## 一、为什么上一轮仍不能称为完成
 
-`b8e136e` 已完成第一轮指南中的大量实质工作：无消费者 Repository Protocol 已删除，
-application 的 ORM 穿透已消除，project 对 identity 的领域直依赖已上收，Worker 中旧 solver
-selector、命令注册与不可达计算主体已删除，analysis 已停止构造 plan 和调用 engine，Docker 全量
-测试为 1448 通过。
+上一轮确实删除了 `services/`，消除了 API/Worker/application 的主要 ORM 穿透，收回了事务，统一了
+项目授权并修正了 Worker 的结果解释与占位成功。但验收把“违规 import 归零、当轮清单关闭、测试全绿”
+错误地当成了“最终职责和所有权已归位”。因此出现了以下仍未解决的结构事实：
 
-但独立验收发现，完成报告把“导入边消失”误当成“职责已经归位”。当前门禁主要扫描 import，无法发现
-路由依次调用多个 application 函数组装业务、相同授权规则在 application 内复制、Worker 在本地解释
-结果、或占位执行器伪造成功。因此更新日志中的“最终收口完成”和“全部问题关闭”仍早于事实。
+- Worker 仍解析和合并数据、映射引擎字段、补默认数组、完成 SI 换算和时间轴构造；
+- 没有 `bootstrap/` 组合根，API readiness 的注册状态没有生产初始化路径；
+- ORM 仍集中在 `models/`，`models/calc.py`、`models/audit.py` 等混放多个领域所有者的表；
+- application 用例族之间继续导入彼此的实现文件；
+- `worker/lease.py` 等层次仍是无业务增量的转发；
+- 旧 `engines/` 已无生产计算入口，却因直接单测仍被保留；
+- 旧数据库兼容、旧快照字段和临时实施文档仍有残留。
 
-本轮只修正剩余边界，不重做已正确部分，不提前实现 0.8。
+本轮不再以问题清单、测试数量或文件移动为完成依据，只以最终调用图和事实所有权验收。
 
-## 二、必须保持的最终方向
+## 二、本轮必须得到的结果
+
+本轮完成的是“0.8 功能开发前的依赖架构基础”。允许定义 0.8 所需的稳定计算边界 contract，但不实现真实
+generator、solver 算法或计算功能；没有 provider 时必须明确不可用，不得恢复旧引擎或制造假成功。
 
 ```text
+API 进程入口 ─┐
+               ├→ bootstrap 组合根 → ApplicationContext / readiness
+Worker 入口 ───┘
+
 HTTP → API → 一个完整 application 用例
-                    └→ 领域公开门面 / 各领域 persistence
+                    └→ 领域公开门面 → 本领域 persistence/ORM
 
-任务提示 → Worker 常驻守护进程（长任务运行编排与状态机）
-                 └→ application.worker 分阶段命令
-                           ├→ 权威状态短事务
-                           └→ 领域公开任务 handler / 计算执行协议
+任务提示 → Worker daemon（领取、租约、心跳、取消、超时、阶段编排）
+                 └→ application.worker 阶段命令
+                        └→ computation 公开协议
+                              GeneratorProvider
+                                → SolverBundle
+                                → SolverRuntime
+                                → ResultAdapter
+                                → ComputeResult
+
+devices 2.0 → modeling 2.0 → assembly 当前契约 → computation
+ComputeResult → analysis/results/metrics
 ```
 
-0.8 计算仍未实现，本轮只保证不会从旧路径偏航：
+最终生产代码必须满足：
 
-```text
-Worker
-    └→ application.worker 分阶段命令
-         ├→ 领取/续租/进度/写入资格/提交的短事务
-         └→ GeneratorProvider → Solver Bundle → SolverRuntime → ResultAdapter
-                                                         └→ ComputeResult → analysis / metrics
-```
+1. `api/worker → application → 领域公开门面 → 本领域 persistence → core`；
+2. application 同族内部可以拆文件，跨用例族不得穿透实现文件；
+3. 每张 ORM 表只有一个领域所有者，顶层集中式 `models/` 不再作为混合表仓库；
+4. 只有 bootstrap 选择并装配数据库、storage、devices 和 computation provider；
+5. Worker 不解释装配、数据字段、业务单位和结果，不拥有 generator 职责；
+6. 没有生产消费者的旧 engine、兼容字段、兼容迁移和测试专用抽象全部删除；
+7. 复用只发生在稳定 contract、领域公开纯能力和无状态公共基元上。
 
-API 的“一个动作转交一个完整 application 用例”不得套用到 Worker。一个 Worker attempt
-本来就跨越多个短事务和执行阶段，数据库事务不得跨越长时运算。
+## 三、版本身份裁决：不得看到 `1.0` 就删除
 
-“复用”必须发生在稳定公开契约、无状态公共基元或领域公开能力上；复制规则、测试锁相等、换目录的转发层、
-把领域规则塞进 core、以及占位成功都不属于复用。
+版本号属于各自独立契约，必须先识别身份。
 
-## 三、第二次验收发现（必须逐项关闭）
+当前有效，必须保留并按公开行为测试：
 
-### A. API 仍在组织业务流程
+- `ies.device-model 2.0.0`：当前设备模型契约；
+- `ies.assembly 1.0.0`：当前 0.7 装配契约，不是旧设备模型 1.0；
+- finance YAML `1.0.0`：当前财务契约；
+- 项目包 manifest `1.0`：当前项目包契约；
+- device-model instantiator `1.0.0`：若仍是现行公开 instantiator 版本则保留。
 
-以下只是把 `project.ensure_access` 换成 `application.projects.authorization.ensure_access`，路由依旧执行
-“授权 + 一个或多个业务调用”，未做到一次转交完整用例：
+应删除：
 
-- `api/config.py`：授权、加载工作图、校验、诊断判断、保存、元数据拼装；
-- `api/validation.py`：授权、执行校验、保存/读取报告、现场回退执行；
-- `api/model.py`：授权、设备/连接操作、二次查询和序列化；
-- `api/config_revisions.py`、`api/datasets.py` 等仍直接调用 application 中的授权与其他用例；
-- 上传流程仍可能由 API 先调用 quota 用例、再调用保存/导入用例。
+- 已由 device-model 2.0 替代的旧设备命令、旧 `DeviceSpec`、旧注册/机理调用路径；
+- 仅为未发布数据库升级准备的旧列、旧表、回填、ALTER/DROP 兼容流程与 `legacy.db` 测试；
+- `CalcSnapshot` 中“旧 `assembly_text` + 新 `canonical_assembly_text`”双字段兼容；当前 schema 只保留一个
+  含义明确的规范装配字段和必要回执；
+- 仅被测试直接调用、没有生产消费者的旧 `iesplan.engines.*` 计算原型；
+- 仅锁定 `parser10`/`builder10` 等实现文件名的装配测试。装配 1.0 公共 contract 保留，但实现收敛成一条
+  parser/builder/validator 管线，不保留双实现或版本迁移包装。
 
-门禁 13 只禁止 API 导入领域包，完全没有检测“API 对多个 application 能力扇出”。所以门禁绿色不能证明
-API 是纯传输适配层。
+## 四、测试裁决：测试不得反向决定保留旧实现
+
+效力顺序固定为：宪法 → 生效公开契约/模块手册 → 本轮目标结构 → 当前代码 → 当前测试。
+测试与目标冲突时修改或删除测试，不为测试恢复旧代码、兼容别名、转发层或占位实现。
 
-整改要求：每个 HTTP 业务动作调用一个完整 application handler。handler 接收已认证主体、业务命令和
-事务会话，完成授权、业务步骤与事务，返回与 HTTP 无关的结果；API 只做 DTO、调用和错误/响应映射。
-不要创建只改函数名的转发层；新 handler 必须真正吸收原路由里的业务顺序。
+### 4.1 直接删除或迁移的旧实现测试
 
-### B. 组合授权仍有两套实现
+以下测试直接把旧 `iesplan.engines.*` 当成现行公共实现；若生产调用图确认没有消费者，应随旧 engine 删除，
+不得因此保留原实现：
 
-权威实现已经存在于 `application/projects/authorization.py`，但
-`application/tasks/submissions.py::ensure_project_access` 仍逐行复制 owner/admin/能力合并与错误语义，
-并被 tasks、results、worker 路径继续复用。
-
-整改要求：删除复制实现及导出，所有 application 用例统一调用一个授权能力。项目自身事实仍归 project，
-身份角色仍归 identity，组合只在 application。不得再复制一份“专用于任务”的等价授权。
-
-### C. Worker 仍解释结果并伪造成功
-
-`worker/executors.py` 仍有两个职责违规：
-
-1. `execute_check` 本地读取/解析证据 JSON、补齐四维字段、计算 `overall_score`、决定 outcome；
-2. dataset/export/package-import 三个未实现 I/O 执行器返回 `status=placeholder`、
-   `outcome=normal_completion`。
-
-同时 `worker/runner.py` 与 `application/worker/lease_cases.py` 存在缺少明确 outcome 时默认
-`normal_completion` 的路径，需要一起裁决，禁止未知结果被默认为成功。
-
-整改要求：
-
-- Worker 保持为长时后台运算的守护进程，拥有领取、租约、心跳、取消、超时、重试、资源隔离、任务阶段编排和结果上报；
-- Worker 按运行时序调用多个 `application.worker` 阶段命令；由 application 调用注册的领域公开任务 handler、GeneratorProvider、SolverRuntime 和 ResultAdapter，继续保持宪法规定的 `worker → application → 领域模块` 依赖方向；
-- `execute_check` 所需的证据结构解释、评估维度、评分和业务 outcome 由 results/analysis 公开能力唯一拥有；application.worker 阶段命令调用该能力，Worker 根据显式结果 contract 驱动任务状态，不在本地复制规则；
-- 不得为了形式上“只调用一个用例”而新建包装整个长任务的 application handler，也不得让一个数据库事务持续到后台运算结束；
-- 尚未实现的 I/O 任务不得产生成功回执：删除未实现分派入口，或使用语义正确的结构化 unavailable/failure；
-- 若现有错误码没有适合 I/O 未实现的语义，先检查正式错误契约，再由 tasks 领域增加一个明确执行不可用错误并
-  同步契约/测试；不得用 `TASK-SOLVE-001` 假装所有 I/O 都是求解错误；
-- 完成路径必须要求显式、合法的业务 outcome，不得以缺字段默认成功。
-
-独立验收又发现：把函数拆成“分阶段命令”后，执行线程仍从读取任务到最终提交
-持有同一 SQLAlchemy Session，读取触发的事务可跨越整个长时运算；进度也只 flush 而没有独立提交。
-`execute_check` 仍自己决定证据定位优先级、无证据时的业务 outcome/payload，并组装评估 DTO。
-这些不是 Worker 的运行时序，而是 results/tasks 业务规则。
-
-补正要求：
-
-- 长时 attempt 不得持有跨阶段的 Session 或数据库事务；输入加载完即关闭读取会话，求解/分析/导出在无数据库事务状态下运行；
-- 领取、进度、续租、评估写入和最终提交各自使用新的短会话/短事务；Worker 可持有会话工厂或注入的 application gateway，不持有长寿命 Session；
-- 进度在短事务提交后对其他会话可见；失败或取消不得把之前未提交的评估/进度意外一并提交；
-- report 证据定位和无证据结果由 application 编排 results/tasks 公开能力完成；Worker 只安排“定位→检查点→评估→上报”时序；
-- 增加跨会话行为测试，证明进度中途可见、执行阶段无开启事务、失败不提交别的阶段副作用。
-
-### D. 业务规则被错误放入 core
-
-`core/patterns.py` 当前拥有 identity 的用户名/邮箱格式和 tasks 的幂等键格式。它们虽无状态，但具有明确
-领域语义，不是“不知道具体业务也成立”的 core 共同语言。
-
-整改要求：用户名/邮箱规则归 identity 的公开 contract/rules；幂等键规则归 tasks 的公开 contract/rules。
-API 可引用不可变公开 contract 做输入 DTO，ORM/DDL 可引用相应领域常量，不得为了避免循环依赖把业务规则
-上提 core。若 `core/patterns.py` 不再有真正通用内容则删除。
-
-### E. results 规则尚未完全回归所有者
-
-`application/results/writes.py::_validate_evidence_payload` 同时包含：
-
-- 证据公开输出的字段、类型、rows/fields 结构规则；
-- hourly object 引用存在性；
-- 证据 snapshot 与任务 snapshot 的跨领域一致性。
-
-此外 application 仍直接调用 metrics 的四维摘要，并通过 engines 的 `CAPACITY_PARAM` 解释结果容量。
-
-整改要求：
-
-- 证据/用户自定义输出的结构校验是必要边界校验，必须保留，但纯结构规则归 results 公开能力；
-- object 引用和 task/snapshot 一致性由 application 组合 storage/tasks/results；
-- 四维摘要经 results 或 analysis 的公开能力消费，application 不直接拥有/拼接单领域状态规则；
-- application 不得依赖旧 engines 静态设备容量映射解释业务结果。结果采用规则必须基于稳定公开结果契约；
-  若该映射只服务已删除的旧计算链，应删除并同步测试，不得仅从 engines 子模块提升到 facade；
-- 不在内部交接重新校验 hash、内容摘要或已过边界的相同字段。
-
-### F. 门禁只检查 import，没有检查职责回流
-
-现有门禁没有发现 A、B、C。需要补充可维护的事实门禁或结构测试：
-
-- API 业务端点不得先调用独立授权再调用业务函数，也不得对多个 application 用例扇出；
-- 组合授权只能有一个生产实现；
-- Worker 不得出现证据 JSON 解释、评估维度/评分规则或 placeholder success；
-- 未实现执行器不得返回成功 outcome；
-- core 不得拥有 identity/tasks 的业务规则。
-
-门禁应验证真实禁止形态，不应依赖固定行号，也不能强迫无意义包装。常设豁免必须证明是稳定、无状态、由唯一
-所有者公开的复用；相同豁免不要在多个测试文件复制成可能漂移的两份政策。
-
-独立验收否决以下门禁形态：
-
-- 按 `USERNAME_RE`/`ensure_access` 等私有符号名搜索并锁定精确所在模块；改名即失效，也无法检出换名复制的规则；
-- 要求当前三个“未实现执行器”函数必须永久存在、有 `raise` 且无 `return`；这会阻止未来正式实现；
-- 只扫描已删除 `services` 导入的 API fanout 门禁；它无法检出同一端点对多个 application 能力的调用。
-
-语义行为用行为测试证明；静态门禁只保留稳定的依赖方向和通用禁止形态。API 门禁可按函数调用图
-检查“一个 API 动作至多转交一个 application handler”，不得锁定具体端点、函数名或当前未实现状态。
-
-### G. 现行文档和更新日志与事实不一致
-
-- `manual/developer-guide/zh-CN/modules/application.md` 仍把 `services/` 写作迁移边界，并指导从 service
-  开始阅读；
-- 若干 production docstring/persistence 说明仍声称实现某个已删除 Repository Protocol，或写着以后再迁移；
-- 测试中有大量 `matches_old`、`legacy_service` 和已删除路径说明。仅“确保旧模块不可导入”的回归测试可以
-  保留历史路径，其余当前职责说明必须改为现行所有者；
-- changelog 顶部“最终收口完成”“API 只调用完整 application 用例”“10 项全部关闭”不符合当前事实。
-
-整改要求：先撤回不真实的完成表述。Muse 本轮完成后只提交准确的实施事实，不得自行再次宣布“最终验收通过”；
-最终完成结论由 Codex 独立复审后写入。稳定手册只描述职责、公开边界和结果，不写本轮文件名、行号、agent、
-波次或迁移过程。
-
-依赖计数和当前豁免是审查证据，不是长期文档。不得把无可重现生成器的“后端依赖/职责清单”提交到
-`docs/development/`；依赖事实在完成报告中给出即可，稳定边界只由 `manual/` 正文表达。
-
-### H. 第二次独立验收的其他残留
-
-- `api/projects.py` 的管理列表、归档/撤销归档、导入确认，`api/results.py` 的评估列表/检查任务，
-  `api/tasks.py` 的提交/取消/重试，以及 `api/health.py` 仍在单个 API 动作中多次调用 application 能力；
-- `LEGACY_SERVICE_CALLS = ()` 及其空集合测试只是已删历史的实现哨兵，应删除，不作为永久公开面；
-- `TASK_DATA_HASH_MISMATCH`/`TASK-DATA-002` 和对应前端文案仍假定快照 hash 复核，与宪法 §2.6 冲突，应连同无生产者的诊断分支删除；
-- `docs/development/backend-decoupling-duty-inventory.md` 是会立即过期的第二份架构清单，应删除；
-- `capacity_params` 无任何生产或前端消费者，且属旧 engines 设备参数映射，本轮删除可接受，不得恢复。
-
-## 四、实施波次
-
-使用“波次内并行、波次间串行集成”。各子 agent 必须使用独立工作树和独立分支；协调者逐项 review 后合并，
-禁止共享工作树并发编辑。
-
-### Wave 0：真实基线与验收测试（串行）
-
-- 逐项确认 A～G 的所有生产调用者和行为测试；
-- 设计能抓到职责回流的门禁，但不先在集成分支提交故意失败状态；
-- 记录现有 HTTP 行为、权限、事务和错误语义，重构不得无意改变它们。
-
-### Wave 1：API 完整用例与单一授权（可按业务域并行）
-
-- 切片 1：config/config-revisions；
-- 切片 2：model/validation；
-- 切片 3：datasets/projects/package 上传与 quota；
-- 切片 4：删除重复 `ensure_project_access`，统一 application 授权入口，并迁移 results/tasks/worker 消费者。
-
-集成后逐个端点确认：路由内没有授权+业务调用链，一个动作只转交一个完整用例。
-
-### Wave 2：Worker 职责与失败语义（串行集成，可分实现/测试两切片）
-
-- 保持 Worker 对 report/check 长任务的运行编排，把本地评估、评分和证据业务解释提升为 results/analysis 公开能力，并由 application.worker 阶段命令调用；
-- Worker 只传递不可变输入、调用该阶段命令并消费显式结果 contract，不复制其业务规则；
-- 领取、续租、进度和提交继续使用 application.worker 短事务命令，不建立包住整个 report/check 的长事务用例；
-- 删除 I/O placeholder success 和默认成功路径；
-- 保持计算类 0.8 未实现的结构化失败，不实现 Generator/Solver。
-
-### Wave 3：领域所有权收尾（可并行）
-
-- identity/tasks 业务 pattern 从 core 回归领域；
-- results 证据结构规则与摘要回归公开领域能力，application 只保留跨域一致性和对象协调；
-- 删除 application 对旧 engine 容量映射的依赖；
-- 审计同类“复制自 services”“以后迁移”代码，不按文件大小机械重构。
-
-### Wave 4：门禁、文档与集成验收（串行）
-
-- 补齐 F 的门禁并用构造样例证明能检出违规；
-- 清理 G 的过期文档和测试说明；
-- 重新生成真实依赖/职责清单；
-- 在最终集成 HEAD 运行一次 Docker 全量测试并清理本轮非基础镜像、孤儿容器；
-- 保留本指南，提交所有修改，等待 Codex 独立验收。
-
-## 五、明确排除
-
-- 不修改架构宪法；发现规范冲突立即停止并报告；
-- 不实现 0.8 GeneratorProvider、Bundle、SolverRuntime、ResultAdapter 或真实 solver；
-- 不恢复旧计算链、旧 services、1.0 兼容、fallback 或静默默认；
-- 不增加内部 hash、重复校验、冗余诊断、假想安全加固或备用分支；
-- 不为通过门禁建立只转发、无生产消费者的抽象；
-- 不顺便修改数据库结构、前端或无关业务功能。
-
-## 六、测试与提交
-
-- 所有编译、格式化和测试只在 Docker；主机只做源码/依赖静态检查和 Git 操作；
-- 每个切片运行最小相关测试与架构门禁，每波集成运行相关测试，最终 HEAD 只运行一次全量测试；
-- 测试公共行为、权限、事务和错误语义，不测试复制常量、文件行号、空转包装或私有布局；
-- 每个独立切片 review 后单独提交，协调者按依赖顺序合并；
-- Docker 测试后删除本轮生成的非基础镜像和孤儿容器，不删除基础镜像与项目正常基础设施；
-- 不重写或压缩用户既有无关提交，不强推，不 push。
-
-## 七、Muse 完成报告要求
-
-Muse 只能报告“实现完成，等待独立验收”，不得报告“最终验收通过”或“残余为零”。报告必须包含：
-
-1. A～G 每项的代码落点和行为证据；
-2. 每个 API 端点如何收敛为一次完整用例调用；
-3. 唯一授权实现及所有旧调用者迁移结果；
-4. Worker 删除的解释/评分/placeholder success 与新的失败语义；
-5. identity/tasks/results 规则最终所有者；
-6. 新门禁如何主动检出构造的违规，而不只是当前树为零；
-7. 各切片和集成提交；
-8. Docker 测试命令、结果、镜像/容器清理结果；
-9. 仍需 Codex 裁决的任何事项。
-
-## 八、独立验收完成定义
-
-只有 Codex 复审确认以下全部成立，才算真正完成：
-
-1. API 每个业务动作只调用一个完整 application 用例，不组织授权、校验、配额与保存顺序；
-2. owner/admin 项目授权只有一个生产实现；
-3. Worker 是长时后台运算的守护进程并拥有运行编排；它不复制证据解释、评估计算或业务 outcome 规则，不穿透 ORM/persistence，未实现功能不会成功；
-4. identity/tasks/results 规则由各自领域公开能力唯一拥有，core 无领域业务规则；
-5. application 只保留跨域一致性、事务与步骤顺序，不依赖旧 engine 静态映射；
-6. 门禁能检出 import 穿透和本地职责复制，白名单/豁免准确且不形成第二份政策；
-7. 生效手册、代码注释、测试说明和 changelog 与真实现状一致；
-8. Docker 相关测试和最终全量测试通过，工作树干净，非基础测试资源已清理；
-9. 未修改宪法、未提前实现 0.8、未恢复兼容或新增多余校验。
+- `backend/tests/test_balance.py`
+- `backend/tests/test_devices.py`（这里测试的是 `engines.devices`，不是 devices 2.0 目录）
+- `backend/tests/test_eval_run.py`
+- `backend/tests/test_planning.py`
+- `backend/tests/test_solver.py`
+
+其中仍有价值的算法样例只能在新 computation provider 真正实现时迁入相应 provider 测试；本轮不得先造
+无生产消费者的包装器来继续运行这些测试。
+
+### 4.2 必须改写的过渡测试
+
+- Worker session/lease 测试不得 monkeypatch `worker.executors.execute_calc` 来锁定旧执行器形状；改为注入公开
+  application.worker/computation 阶段 gateway，验证 daemon 的租约、短事务、取消和阶段顺序；
+- integration 中“0.8 未实现”可暂时验证稳定的结构化 unavailable 结果，但不得断言
+  “旧计算链已删除”等实现文案、旧函数名或旧 engine 入口；
+- 删除 `assembly_text is None`、双列兼容和旧快照升级断言；只验证当前快照 schema；
+- 删除创建 `legacy.db` 后运行兼容迁移的测试；项目未发布，不测试旧数据库升级；
+- `test_wave1_assembly.py` 不得锁定 `parser10`/`builder10` 内部模块图；改测公共装配入口、现行 contract 和
+  依赖方向；
+- 测试名、注释中的“0.8 起”“旧服务一致”“matches_old”等实施史改成当前行为描述。
+
+### 4.3 必须保留的测试
+
+- devices 2.0 用户输入、方程、参数、接口和 CSV 关键字实例化边界测试；
+- assembly 1.0 当前公共契约、用户输入诊断和 `ValidatedAssemblyArtifact` 测试；
+- finance 1.0、项目包 1.0 等各自现行契约测试；
+- API 权限、事务、幂等、错误语义和关键业务值测试；
+- Worker 租约、fencing、取消、迟到写回和短事务行为测试；
+- 架构门禁，但门禁只检查稳定依赖规则，不锁函数名、行号、当前内部文件布局或临时未实现函数。
+
+### 4.4 全量测试原则
+
+“全量通过”是最终结果，不是保留过时测试的前提。每个切片必须同时修改生产代码和与新权威行为对应的测试；
+删除测试时说明它锁定了哪条已废弃行为，以及由哪个当前 contract/行为测试覆盖。禁止单纯为提高通过数量保留
+旧实现，也禁止在没有替代行为证明时机械删测。
+
+## 五、实施波次
+
+Muse 使用动态工作流。各子 agent 必须独立工作树、独立分支；波次内可并发，波次之间必须串行集成并审查。
+每个切片单独提交。不得在主工作树并发编辑。
+
+### Wave 0：事实调用图与测试裁决
+
+- 以生产代码为准生成 API、application、领域、persistence、Worker、bootstrap、engines 的实际调用图；
+- 标出每张 ORM 表的唯一领域所有者；
+- 列出旧 engines、旧 snapshot 字段、旧 migration、装配双实现的生产消费者和测试消费者；
+- 测试是唯一消费者的旧实现直接判定为死代码；
+- 提交测试裁决清单和最小门禁调整，不提交会长期漂移的第二份架构清单。
+
+### Wave 1：application 内部边界与 Worker 去转发
+
+- 同族内部实现可直接组合；跨用例族改为稳定公开能力，或把事实重新归给正确领域；
+- 不允许通过扩大 `__init__.__all__` 把所有内部函数都变成“公开”来掩盖穿透；
+- 删除无业务增量的 `worker/lease.py` 式转发层，Worker 直接消费 `application.worker` 的阶段 gateway；
+- 缩小 `application.worker` 公开面，只导出 Worker 真正消费的阶段命令和不可变结果，不导出实现模块对象和
+  repository 级原子操作；
+- 补跨 application 用例族实现穿透门禁，避免循环依赖和实现布局泄漏。
+
+### Wave 2：ORM 与数据库所有权归位
+
+- 把 ORM 类移动到各领域 `persistence.py` 或明确的本领域 `tables.py`；
+- 拆开 `models/calc.py` 中 configuration/tasks，拆开 `models/audit.py` 中 audit/package/retention；
+- 测试造数可以导入领域内部 persistence，但不得为测试创建生产公开 ORM 大门面；
+- `db.py` 只保留连接、Session/Base 等基础设施；种子身份数据归 identity/application/bootstrap；
+- 删除顶层混合 `models/`，由 bootstrap 显式注册各领域 metadata；
+- 删除旧库 ALTER/DROP/回填分支、旧 snapshot 字段和 legacy migration 测试；当前 schema 从空库直接建立。
+
+### Wave 3：bootstrap 组合根
+
+- 新建单一 `bootstrap/`，分别装配 API、compute Worker、I/O Worker 所需能力；
+- 统一初始化 database、storage、devices 2.0 registry 和 computation provider 目录；
+- 删除 `main.py` 中无法被生产设置的 `_registry_status`，readiness 从已装配 context 的公开健康状态得出；
+- 业务模块不自行读取环境并选择 provider；允许基础 adapter 接收由 bootstrap 传入的配置；
+- 启动失败不发布半初始化状态，不增加 fallback。
+
+### Wave 4：Worker 与 computation 空槽归位
+
+- 从 Worker 删除数据集字段解释、缺省补值、SI 换算、时间轴物化和装配解释；
+- 定义最小稳定的 computation 公共 contract：`GeneratorProvider`、`SolverBundle`、`SolverRuntime`、
+  `ResultAdapter`、`ComputeResult` 及明确 unavailable；只定义真实边界，不实现 solver 功能；
+- Worker 只按公开阶段结果驱动状态机；没有 provider 时明确失败或不 ready；
+- 生产调用图无消费者的旧 `engines/` 整包删除，旧 engine 单测同步删除；
+- 不把旧函数包进新类，不保留 compatibility facade，不让测试替代生产消费者。
+
+### Wave 5：装配实现收敛、门禁与全局验收
+
+- 保留当前 `ies.assembly 1.0.0` 公共契约，合并 parser/builder/validator 双实现；
+- 删除实现史命名、旧版本转换和同一结构的重复复检；只在用户输入/公开自定义输出边界验证；
+- 门禁验证：无顶层混合 models、无旧 engines、无跨 application 实现穿透、Worker 无 computation 业务、
+  provider 只由 bootstrap 选择；
+- 门禁不得锁定具体函数名、文件行号或为了当前树设置白名单；
+- 修正 changelog 过早的“最终完成”表述；稳定手册只描述最终职责，不写本轮波次和实现文件清单；
+- 在最终集成 HEAD 只运行一次 Docker 全量测试，随后删除本轮生成的非基础镜像与孤儿容器。
+
+## 六、独立验收矩阵
+
+Muse 只能报告“实现完成，等待 Codex 验收”。Codex 逐项确认全部成立后才能宣布完成：
+
+| 边界 | 完成条件 |
+| --- | --- |
+| API | 每个业务动作只转交一个完整 application 用例；API 只做 DTO/响应/错误映射 |
+| application | 只负责用例、事务和跨域顺序；跨族不穿透实现；无大范围公开内部函数 |
+| 领域 | 每项规则、contract 和表有唯一所有者；跨域只走公开门面 |
+| persistence | ORM 位于所有者领域；无顶层混合 models；无跨领域表读取 |
+| bootstrap | API/Worker 的实现选择、初始化和 readiness 只有一个组合根 |
+| Worker | 只负责 daemon、租约、资源隔离和阶段编排；无输入/单位/结果业务解释 |
+| computation | 稳定边界 contract 存在；旧 engines 不存在；未实现能力明确不可用 |
+| assembly | 当前 1.0 contract 保留；只有一条实现管线；无重复内部复检 |
+| tests | 不以旧实现为真相；删除项有现行行为覆盖；门禁不形成第二份代码 |
+| docs | 临时指南仍待 Codex 删除；changelog 不提前宣布完成 |
+
+任一行未满足，都不得使用“彻底完成”“最终收口”或“残余为零”。
+
+## 七、禁止事项
+
+- 不修改架构宪法；发现冲突立即停止并报告；
+- 不实现真实 0.8 solver/generator 算法，不恢复旧计算链；
+- 不因测试失败保留旧实现、旧字段、旧迁移、兼容别名或纯转发层；
+- 不新增内部 hash、文件完整性复核、重复解析校验、冗余诊断或假想防御；
+- 不把领域规则搬进 core，也不建立新的全局 registry；
+- 不通过修改测试去掩盖真实行为回归；
+- 不在未完成全局矩阵时修改 changelog 宣告最终完成；
+- 所有编译、格式化和测试只在 Docker，完成后只清理非基础测试镜像。
+
+## 八、Muse 报告要求
+
+报告必须逐行对应第六节矩阵，并提供：
+
+1. 每波各独立分支、提交与集成顺序；
+2. 删除的旧生产路径及其真实生产消费者为零的证据；
+3. 删除/改写的测试、旧行为和替代覆盖；
+4. ORM 表到领域所有者的最终映射；
+5. bootstrap 对 API/Worker 的实际装配和 readiness 证据；
+6. Worker 最终调用图及不再承担的数据/单位/结果职责；
+7. 主动构造违规样例证明门禁确实能失败；
+8. Docker 局部、波次与最终全量测试结果及非基础镜像清理结果；
+9. 任何仍未满足的矩阵项，不得隐瞒或改称后续优化。
