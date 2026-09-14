@@ -36,7 +36,6 @@ from worker_testkit import setup_environment  # noqa: E402
 
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.core.diagnostics import TASK_SOLVE_FAILED  # noqa: E402
-from iesplan.core.errors import AppError  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.models.calc import Task, TaskDiagnostic, TaskLease  # noqa: E402
 from iesplan.results import (  # noqa: E402
@@ -48,8 +47,9 @@ from iesplan.results import (  # noqa: E402
     evidence_inner,
     latest_assessment,
 )
+from iesplan.storage import put_object  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
-from iesplan.worker import lease, runner  # noqa: E402
+from iesplan.worker import runner  # noqa: E402
 
 #: 未实现的 I/O 任务类型(0.8 真实实现落地前不得产生成功回执)。
 IO_TASK_TYPES: tuple[str, ...] = ("dataset_build", "export", "import")
@@ -108,9 +108,9 @@ def env(db: Session, tmp_path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _claim_task(db: Session, task_id: int, worker_id: str = "w-outcome") -> lease.Claim:
+def _claim_task(db: Session, task_id: int, worker_id: str = "w-outcome") -> worker_app.Claim:
     """领取任务(占槽 + 建尝试 + 建租约 + running, 事务已提交)。"""
-    claim = lease.acquire_attempt(db, task_id, worker_id)
+    claim = worker_app.acquire_attempt(db, task_id, worker_id)
     assert claim is not None
     db.commit()
     return claim
@@ -139,7 +139,10 @@ def _store_evidence_for(
 ):
     """为指定任务存一条 complete 证据包(定位优先级测试用)。"""
     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    object_id = worker_app.store_result_blob(db, blob, actor_id=env["user"].id)
+    object_id = put_object(
+        db, blob, "application/json", source_category="evidence",
+        purpose="evidence_package", actor_id=env["user"].id,
+    ).id
     package = create_evidence(
         db, task_id=task_id, calc_snapshot_id=env["snapshot"].id,
         object_id=object_id, status=EVIDENCE_COMPLETE, created_by=env["user"].id,
@@ -237,13 +240,13 @@ class TestCompletionRequiresExplicitOutcome:
         assert view is not None and view.status == "failed", view
         assert view.business_outcome != "not_a_real_outcome", view.business_outcome
 
-    def test_complete_task_without_outcome_raises(self, db: Session, env: dict[str, Any]):
-        """application.worker 完成用例缺结局参数 → 调用方错误, 不得静默成功。"""
+    def test_submit_without_outcome_raises(self, db: Session, env: dict[str, Any]):
+        """阶段网关提交缺结局参数 → 调用方错误, 不得静默成功。"""
         claim = _claim_task(db, env["task"].id)
         assert claim is not None
 
-        with pytest.raises((AppError, ValueError, TypeError)):
-            worker_app.complete_task(db, env["task"].id)
+        with pytest.raises(TypeError):
+            worker_app.submit_attempt_result(db, claim, payload={})
         db.rollback()
         view = _task_view(db, env["task"].id)
         assert view is not None and view.business_outcome != "normal_completion", view

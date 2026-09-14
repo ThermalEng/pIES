@@ -1,7 +1,8 @@
 """Worker 会话生命周期跨会话行为测试(补正 C: 长时 attempt 不是一个事务)。
 
-只经公共入口推进(``iesplan.worker.lease`` 门面 / ``iesplan.worker.runner``
-执行闭环 / tasks 域公开读取), 不绑定私有函数名与源码文本:
+只经公开阶段网关推进(``iesplan.application.worker`` 阶段命令 /
+``iesplan.worker.runner`` 执行闭环 / tasks 域公开读取), 计算执行经
+``runner.compute_gateway`` 注入假网关, 不绑定私有函数名与源码文本:
 
 - 进度短事务提交后即刻对其他会话可见, 调用方回滚不影响已提交进度;
 - 长执行阶段(求解/分析/导出)不持有打开的会话或数据库事务;
@@ -31,10 +32,11 @@ from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from worker_testkit import setup_environment  # noqa: E402
 
 from iesplan import tasks as tasks_domain  # noqa: E402
+from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.models.calc import Task, TaskLease  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
-from iesplan.worker import executors, lease, runner  # noqa: E402
+from iesplan.worker import runner  # noqa: E402
 from iesplan.worker.executors import EngineRunError  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -70,10 +72,10 @@ def env(factory, tmp_path: Path) -> dict[str, Any]:
         return setup_environment(db, tmp_path, task_type="calc")
 
 
-def _claim(factory, task_id: int, worker_id: str = "cw-sess") -> lease.Claim:
-    """经公共领取门面领取(领取事务已提交, 租约即刻可见)。"""
+def _claim(factory, task_id: int, worker_id: str = "cw-sess") -> worker_app.Claim:
+    """经公开阶段网关领取(领取事务已提交, 租约即刻可见)。"""
     with factory() as db:
-        claim = lease.acquire_attempt(db, task_id, worker_id)
+        claim = worker_app.acquire_attempt(db, task_id, worker_id)
     assert claim is not None
     return claim
 
@@ -136,7 +138,7 @@ class TestProgressVisibleAcrossSessions:
     ):
         claim = _claim(factory, env["task"].id)
         with factory() as db:
-            assert lease.report_progress(
+            assert worker_app.report_attempt_progress(
                 db, claim.attempt_id, claim.lease_token,
                 env["task"].id, 45.0, "solve", {"it": 1},
             ) is True
@@ -156,7 +158,7 @@ class TestProgressVisibleAcrossSessions:
 
         claim = _claim(factory, env["task"].id)
         with factory() as db:
-            assert lease.report_progress(
+            assert worker_app.report_attempt_progress(
                 db, claim.attempt_id, uuid4(), env["task"].id, 50.0, "solve",
             ) is False
         with factory() as other:
@@ -185,7 +187,7 @@ class TestLongPhaseHoldsNoSession:
                 "outcome": "normal_completion",
             }
 
-        monkeypatch.setattr(executors, "execute_calc", _slow_calc)
+        monkeypatch.setattr(runner, "compute_gateway", _slow_calc)
         claim = _claim(tracker, env["task"].id)
 
         status = runner.run_task(tracker, claim, worker_id="w-sess", isolate=False)
@@ -222,7 +224,7 @@ class TestFailureDoesNotTakeCommittedProgress:
                 killer.commit()
             raise EngineRunError("求解中租约失效")
 
-        monkeypatch.setattr(executors, "execute_calc", _progress_then_expire)
+        monkeypatch.setattr(runner, "compute_gateway", _progress_then_expire)
 
         status = runner.run_task(factory, claim, worker_id="w-sess", isolate=False)
 
@@ -242,7 +244,7 @@ class TestFailureDoesNotTakeCommittedProgress:
             ctx.progress(30.0, "generate", {"step": 1})
             raise EngineRunError("求解失败")
 
-        monkeypatch.setattr(executors, "execute_calc", _progress_then_fail)
+        monkeypatch.setattr(runner, "compute_gateway", _progress_then_fail)
 
         status = runner.run_task(factory, claim, worker_id="w-sess", isolate=False)
 
@@ -275,7 +277,7 @@ class TestRenewIndependentSession:
             row.priority = 999  # 调用方未提交的脏写
             # 续租走独立会话(Worker 心跳线程形态), 提交自己的短事务
             with factory() as renew_db:
-                assert lease.renew_lease(
+                assert worker_app.renew_attempt_lease(
                     renew_db, claim.attempt_id, claim.lease_token
                 ) is True
             caller.rollback()  # 调用方回滚不得连带续租
