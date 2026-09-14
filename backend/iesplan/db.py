@@ -4,8 +4,9 @@
 - Base: 全部 ORM 模型的声明基类 + 共享列基元(JSONB/正则 CHECK/主键构造)。
 - 不可变表触发器 DDL 常量(部署见 _deploy_immutable_triggers)。
 - get_db(): FastAPI 请求级依赖。
-- init_db(): 幂等建表(create_all) + 种子管理员。
-- seed_admin(): 幂等创建内置管理员(首登强制改密)。
+- init_db(): 幂等建表(create_all) + 版本化迁移 + 不可变触发器。
+  当前 schema 从空库直接建立, 不保留旧库 ALTER/DROP/回填分支;
+  种子身份数据归 application.identity.seed_builtin_admin, 本模块不留业务种子。
 
 本模块只保留连接 / Session / Base 基础设施;ORM 表定义归各领域 persistence 所有,
 init_db 集中导入注册(过渡位, Wave3 迁入 bootstrap)。
@@ -15,8 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-import sqlalchemy as sa
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 from sqlalchemy import text as sa_text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.compiler import compiles
@@ -290,16 +290,16 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """幂等初始化数据库: 建表 + 版本化迁移 + 约束迁移 + 不可变触发器 + 种子管理员。
+    """幂等初始化数据库: 建表 + 版本化迁移 + 不可变触发器。
 
     - 先导入模型模块, 确保全部表注册到 Base.metadata;
     - create_all 只建不存在的表, 重复调用无副作用;
     - apply_migrations: 在基础 schema 之上执行版本化 schema 迁移(宪法 §11,
       台账幂等)，由各版本明确登记并补充其拥有的当前结构与约束;
-    - _migrate_constraints: 既有表约束随模型演进做幂等 ALTER
-      (如 ck_tasks_type 增补 'analysis', 03 §9.7);
     - _deploy_immutable_triggers: 不可变表(01 §11)部署"禁 UPDATE/DELETE"触发器
       与 REVOKE(仅 PostgreSQL; SQLite 测试库跳过)。
+    - 旧库 ALTER/DROP/回填分支已删除, 当前 schema 从空库直接建立;
+      种子管理员改由 application.identity.seed_builtin_admin 负责。
     """
     # Wave2A: ORM 表真相收归各领域 persistence, 此处集中导入以完成
     # Base.metadata 注册(空库 create_all 全量建表)。过渡位: Wave3 迁入 bootstrap 集中装配。
@@ -317,121 +317,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     apply_migrations(engine)
-    _migrate_constraints()
     _deploy_immutable_triggers()
-    seed_admin()
-
-
-def _migrate_constraints() -> None:
-    """既有表约束幂等迁移(Postgres; SQLite 测试库由 create_all 全量重建)。
-
-    处理两类演进:
-    1. 新增枚举取值类约束(如 ck_tasks_type 增补 'analysis', 03 §9.7);
-    2. 唯一索引语义变化(RR-P1-05: uq_tasks_idempotency_key 由全局唯一改为
-       (project_id, idempotency_key) 复合 —— 幂等键由前端 config+params 哈希
-       生成, 跨项目相同, 全局唯一会让另一项目同键提交命中他项目任务)。
-    约束完全不存在(旧库手工删过/从未建过)也补建, 不能放任 CHECK 约束缺失。
-    """
-    if not settings.db_url.startswith("postgresql"):
-        return
-    with engine.begin() as conn:
-        row = conn.execute(
-            sa_text(
-                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                "WHERE conname = 'ck_tasks_type' AND conrelid = 'tasks'::regclass"
-            )
-        ).first()
-        if row is not None and "'analysis'" in row[0]:
-            pass  # 已含新值, 无需迁移
-        else:
-            # 缺失或旧定义: 先删后建(缺失时 DROP IF EXISTS 幂等)
-            conn.execute(sa_text("ALTER TABLE tasks DROP CONSTRAINT IF EXISTS ck_tasks_type"))
-            conn.execute(
-                sa_text(
-                    "ALTER TABLE tasks ADD CONSTRAINT ck_tasks_type CHECK "
-                    "(type IN ('calc','optimization','uncertainty','analysis','import',"
-                    "'export','report','dataset_build'))"
-                )
-            )
-        # RR-P1-05: 幂等键唯一索引改为项目复合(旧全局唯一约束名相同, 先删后建)
-        # Postgres 唯一约束由 backing index 实现, 约束的索引不能直接 DROP INDEX
-        # (报 "cannot drop index ... because constraint ... requires it"),
-        # 必须先用 ALTER TABLE DROP CONSTRAINT(索引随之删除); 若旧库是手工
-        # 建的独立索引则再补 DROP INDEX IF EXISTS(幂等)。
-        idx = conn.execute(
-            sa_text(
-                "SELECT indexdef FROM pg_indexes "
-                "WHERE indexname = 'uq_tasks_idempotency_key' AND tablename = 'tasks'"
-            )
-        ).first()
-        needs_rebuild = (
-            idx is None
-            or "project_id" not in idx[0]
-            or "idempotency_key" not in idx[0]
-        )
-        if needs_rebuild:
-            conn.execute(sa_text("ALTER TABLE tasks DROP CONSTRAINT IF EXISTS uq_tasks_idempotency_key"))
-            conn.execute(sa_text("DROP INDEX IF EXISTS uq_tasks_idempotency_key"))
-            conn.execute(
-                sa_text(
-                    "CREATE UNIQUE INDEX uq_tasks_idempotency_key ON tasks "
-                    "(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
-                )
-            )
-        # 0.2.0-B3: objects 新增软删/保留期列(pending_deleted_at / pending_delete_until),
-        # 旧库 create_all 不会为既有表补列, 这里幂等 ALTER 补列并建到期索引。
-        # 0.7.0: 计算快照持久化规范装配产物二件套(文本仅校验字头，不做 SHA)。
-        # 旧快照不能伪造回执，因此升级列保持可空；Worker 对缺失成员执行阻断，新快照始终完整写入。
-        _add_column_if_missing(conn, "calc_snapshots", "canonical_assembly_text", "TEXT")
-        _add_column_if_missing(conn, "calc_snapshots", "assembly_receipt", "JSONB")
-
-        _add_column_if_missing(conn, "objects", "pending_deleted_at", "TIMESTAMPTZ")
-        _add_column_if_missing(conn, "objects", "pending_delete_until", "TIMESTAMPTZ")
-        conn.execute(
-            sa_text(
-                "CREATE INDEX IF NOT EXISTS idx_objects_pending_until "
-                "ON objects (pending_delete_until)"
-            )
-        )
-        # 既有库补建软删日期 CHECK 约束(新库由 create_all 建, 旧库升级需幂等补):
-        # pending 状态必须同时有 de/until 且 until >= deleted_at, 防负保留期等畸形数据。
-        exists = conn.execute(
-            sa_text(
-                "SELECT 1 FROM pg_constraint WHERE conname = 'ck_objects_pending_deletion_dates'"
-            )
-        ).first()
-        if exists is None:
-            conn.execute(
-                sa_text(
-                    "ALTER TABLE objects ADD CONSTRAINT ck_objects_pending_deletion_dates "
-                    "CHECK (status <> 'pending_deletion' OR (pending_deleted_at IS NOT NULL "
-                    "AND pending_delete_until IS NOT NULL "
-                    "AND pending_delete_until >= pending_deleted_at))"
-                )
-            )
-        # 0.8.0: 剔除过度设计(复制项目/转移所有权/共享成员/管理员访问授权)后,
-        # projects.admin_access 列不再有语义, 幂等删列(旧库已删则跳过);
-        # project_members / ownership_transfers 两张废弃表一并删除
-        # (项目权限以 projects.owner_id 为唯一权威, 无历史消费方)。
-        conn.execute(sa_text("ALTER TABLE projects DROP COLUMN IF EXISTS admin_access"))
-        conn.execute(sa_text("DROP TABLE IF EXISTS project_members"))
-        conn.execute(sa_text("DROP TABLE IF EXISTS ownership_transfers"))
-
-
-def _add_column_if_missing(
-    conn: sa.Connection, table: str, column: str, col_type: str
-) -> None:
-    """Postgres 幂等补列: 列不存在才 ALTER TABLE ADD COLUMN(IF NOT EXISTS 不支持
-    ADD COLUMN, 故先查 information_schema 再执行)。"""
-    exists = conn.execute(
-        sa_text(
-            "SELECT 1 FROM information_schema.columns "
-            "WHERE table_name = :t AND column_name = :c"
-        ),
-        {"t": table, "c": column},
-    ).first()
-    if exists is None:
-        conn.execute(sa_text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
 
 
 def _deploy_immutable_triggers() -> None:
@@ -470,57 +356,3 @@ def _deploy_immutable_triggers() -> None:
         for stmt in PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL.split("\n\n"):
             if stmt.strip():
                 conn.execute(sa_text(stmt))
-
-
-def seed_admin(password: str | None = None) -> None:
-    """幂等创建内置管理员(admin)。
-
-    - 若用户表中已存在 admin 角色授权则直接返回;
-    - 确保 ``roles`` 中存在 code='admin' 的系统角色;
-    - 创建 admin 用户 + password 凭证(requires_change=True, 首登强制改密),
-      初始密码取参数, 缺省用 settings.default_admin_password。
-
-    参数:
-        password: 初始密码;为 None 时使用配置默认值。
-    """
-    from iesplan.core.security import check_password_strength, hash_password
-    from iesplan.identity.persistence import Credential, Role, User, UserRole
-
-    with SessionLocal() as session:
-        # 已有管理员则跳过(幂等)
-        has_admin = session.execute(
-            select(User.id)
-            .join(UserRole, UserRole.user_id == User.id)
-            .join(Role, Role.id == UserRole.role_id)
-            .where(Role.code == "admin", UserRole.revoked_at.is_(None))
-            .limit(1)
-        ).first()
-        if has_admin is not None:
-            return
-
-        # 确保 admin 系统角色存在
-        role = session.execute(select(Role).where(Role.code == "admin")).scalar_one_or_none()
-        if role is None:
-            role = Role(code="admin", name="管理员", description="系统内置管理员", is_system=True)
-            session.add(role)
-            session.flush()
-
-        # 创建管理员用户与密码凭证
-        pwd = password or settings.default_admin_password
-        admin = User(username="admin", display_name="管理员")
-        session.add(admin)
-        session.flush()
-        ok, _ = check_password_strength(pwd)
-        session.add(
-            Credential(
-                user_id=admin.id,
-                credential_type="password",
-                secret_hash=hash_password(pwd),
-                algorithm="bcrypt",
-                strength_score=100 if ok else 0,
-                requires_change=True,
-            )
-        )
-        # 管理员自授权(种子场景, 授权人即本人)
-        session.add(UserRole(user_id=admin.id, role_id=role.id, granted_by=admin.id))
-        session.commit()

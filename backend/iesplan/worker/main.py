@@ -246,9 +246,13 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     # 幂等建表(与 API 启动一致; Worker 可能先于 API 启动, 保证权威表就绪)
-    from iesplan.db import init_db
+    # 种子身份数据归 application.identity(db.py 不再保留业务种子)
+    from iesplan.application.identity import seed_builtin_admin
+    from iesplan.db import SessionLocal, init_db
 
     init_db()
+    with SessionLocal() as session:
+        seed_builtin_admin(session)
     worker_type = args.worker_type or os.environ.get("IESPLAN_WORKER_TYPE") or settings.worker_type
     Worker(
         worker_type=worker_type,

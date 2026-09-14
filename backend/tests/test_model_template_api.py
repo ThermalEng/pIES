@@ -7,7 +7,7 @@
 - 停用 / 重新启用(只影响后续选择, 不破坏已保存项目模型);
 - 删除未发布草稿 / 已发布模板禁止删除;
 - 权限与用户隔离(他人模板 404, 不泄露存在性);
-- 版本化迁移(全新库与存量库双路径由 migrations 测试覆盖)。
+- 版本化迁移(全新空库直接建表 + migrations, 无旧库升级路径)。
 
 测试环境: 与 test_project_model_save 同构 —— SQLite + tmp 对象存储目录。
 """
@@ -531,12 +531,13 @@ def test_catalog_available_templates(client: TestClient, db_session: Session) ->
 
 
 # ---------------------------------------------------------------------------
-# 7. 迁移双路径(全新库 + 存量库)
+# 7. 迁移(全新空库直接建表 + 全链迁移)
 # ---------------------------------------------------------------------------
 
 
 def test_migrations_fresh_and_upgrade(tmp_path: Path) -> None:
-    """0001→0002 全链迁移: 全新库直接到最新; 存量库(已执行 0001)增量升级。"""
+    """全链迁移: 全新空库直接建立当前 schema 并跑到最新迁移(W2-B 起不再保留
+    旧库 legacy.db 兼容升级路径, 当前 schema 从空库直接建立)。"""
     from iesplan.migrations import MIGRATION_VERSIONS, apply_migrations
 
     # 全新库：需先建基表（users 等由 create_all 创建），再跑迁移
@@ -550,22 +551,3 @@ def test_migrations_fresh_and_upgrade(tmp_path: Path) -> None:
     assert "model_templates" in tables
     assert "model_template_revisions" in tables
     fresh.dispose()
-    # 存量库: 先模拟只执行 0001(手动建表 + 台账), 再跑完整迁移
-    legacy = create_engine(f"sqlite+pysqlite:///{tmp_path / 'legacy.db'}")
-    from iesplan.db import Base as _Base2
-    _Base2.metadata.create_all(legacy)
-    with legacy.begin() as conn:
-        conn.exec_driver_sql(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
-        )
-        conn.exec_driver_sql(
-            "DELETE FROM schema_migrations"
-        )
-        conn.exec_driver_sql(
-            "INSERT INTO schema_migrations (version, name) VALUES ('0001_project_model_manifest', '项目模型清单与编号序列表')"
-        )
-    applied2 = apply_migrations(legacy)
-    # 0003 也应被应用（公开命名空间与草稿历史）
-    assert "0002_model_template_lifecycle" in applied2
-    assert "0003_public_namespace_and_draft_history" in applied2
-    legacy.dispose()

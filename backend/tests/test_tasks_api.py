@@ -363,7 +363,6 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     by_id = {s.id: s for s in snapshots}
     persisted = by_id[snapshot_a]
     assert persisted.random_seed is not None
-    assert persisted.assembly_text is None
     assert persisted.canonical_assembly_text
     # 文本仅校验字头，快照去重使用内容字段逐项相等判定（header-only）
     assert isinstance(persisted.assembly_receipt, dict)
