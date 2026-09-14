@@ -817,3 +817,80 @@ def test_application_gate_detects_family_module_object_import():
     """三段式族导入中的实现模块对象必须被门禁识别。"""
     assert _is_application_impl_module_import("iesplan.application.tasks", "maintenance")
     assert not _is_application_impl_module_import("iesplan.application.tasks", "enqueue_task")
+
+
+# ---------------------------------------------------------------------------
+# 门禁 18: application 用例族之间禁止穿透他族实现文件(硬强制)
+# ---------------------------------------------------------------------------
+# 各 application 子包(用例族)之间只经对方 ``iesplan.application.<族>``
+# 公开门面组合; 直接导入他族实现文件即失败。覆盖两种形态:
+#   - ``iesplan.application.<他族>.<实现...>``(深度 > 3, 含 import 与 from);
+#   - 三段式族导入中的实现模块对象
+#     (``from iesplan.application.<他族> import <实现模块>``, 以文件系统判定,
+#     复用 _is_application_impl_module_import)。
+# 允许: 同族内部导入、族公开门面导入(``iesplan.application.<族>``)、
+# application 根直属模块(族外共享核, 如 namespace)不参评。
+# 本门禁只查依赖形态(导入方模块, 目标实现), 不锁定函数名/行号, 不设白名单。
+
+
+def _application_family_of(path: Path, scan_root: Path = _APPLICATION_DIR) -> str | None:
+    """取 application 下源码文件所属用例族名(首级子包目录名)。
+
+    仅首级为包目录(含 __init__.py)时返回族名; application 根直属模块
+    返回 None(不参评)。
+    """
+    try:
+        rel = path.relative_to(scan_root)
+    except ValueError:
+        return None
+    if len(rel.parts) < 2:
+        return None
+    family_dir = scan_root / rel.parts[0]
+    if family_dir.is_dir() and (family_dir / "__init__.py").is_file():
+        return rel.parts[0]
+    return None
+
+
+def _find_cross_application_family_impl_imports(
+    scan_root: Path = _APPLICATION_DIR, pkg_root: Path = _PKG_ROOT
+) -> set[tuple[str, str]]:
+    """门禁 18: 扫描 application 各子包对他族实现文件的直接导入。
+
+    返回 (模块, 目标实现) 集合, 同一模块多行合并为一项。
+    """
+    found: set[tuple[str, str]] = set()
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        family = _application_family_of(path, scan_root)
+        if family is None:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    parts = a.name.split(".")
+                    if len(parts) > 3 and parts[:2] == ["iesplan", "application"]:
+                        if parts[2] != family:
+                            found.add((mod, a.name))
+            elif isinstance(node, ast.ImportFrom) and (node.module or node.level):
+                target = _relative_target(mod, node)
+                if not target.startswith("iesplan.application."):
+                    continue
+                parts = target.split(".")
+                if len(parts) == 3:
+                    # 族门面导入: 仅实现模块对象属穿透, 公开符号允许。
+                    for a in node.names:
+                        if a.name == "*":
+                            continue
+                        if _is_application_impl_module_import(
+                            target, a.name, pkg_root=pkg_root
+                        ) and parts[2] != family:
+                            found.add((mod, f"{target}.{a.name}"))
+                elif len(parts) > 3 and parts[2] != family:
+                    found.add((mod, target))
+    return found
+
+
+def test_application_no_cross_family_impl_imports():
+    """架构门禁 18: application 用例族之间禁止穿透他族实现文件(只经对方族公开门面组合)。"""
+    detected = _find_cross_application_family_impl_imports()
+    assert not detected, f"application 用例族实现文件穿透: {sorted(detected)}"
