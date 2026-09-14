@@ -27,7 +27,7 @@ from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
 from iesplan import model as model_domain
 from iesplan import project as project_domain
-from iesplan.application.projects.content_objects import (
+from iesplan.application.projects import (
     load_content_object,
     store_content_object,
 )

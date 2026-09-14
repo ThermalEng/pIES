@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from iesplan import package as package_domain
 from iesplan import project as project_domain
-from iesplan.application.datasets.quotas import check_upload_quota
+from iesplan.application.datasets import check_upload_quota
 from iesplan.application.packages.transfers import (
     confirm_import as _confirm_import,
     export_package as _export_package,

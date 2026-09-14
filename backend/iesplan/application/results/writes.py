@@ -33,8 +33,8 @@ from iesplan import audit as audit_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.projects.authorization import ensure_access
-from iesplan.application.tasks.submissions import (
+from iesplan.application.projects import ensure_access
+from iesplan.application.tasks import (
     ensure_task_belongs,
     submit_task,
 )

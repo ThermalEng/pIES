@@ -23,7 +23,7 @@ from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
-from iesplan.application.configuration.revisions import (
+from iesplan.application.configuration import (
     get_effective_finance_config as _get_effective_finance_config,
     get_finance_overrides as _get_finance_overrides,
     get_planning_config as _get_planning_config,
@@ -32,8 +32,8 @@ from iesplan.application.configuration.revisions import (
     save_planning_config as _save_planning_config,
     set_project_finance_profile as _set_project_finance_profile,
 )
-from iesplan.application.projects.authorization import ensure_access
-from iesplan.application.projects.content_objects import (
+from iesplan.application.projects import (
+    ensure_access,
     load_content_object as _load_content_object,
     store_content_object as _store_content_object,
 )
