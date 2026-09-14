@@ -52,13 +52,21 @@ _APPLICATION_DIR = _PKG_ROOT / "application"
 #   - 属性访问: 已导入模块别名上的私有属性(如 svc._helper)。
 
 # ---------------------------------------------------------------------------
-# 门禁 3: api → ORM 直接导入(硬强制)
+# 门禁 3: api/worker → ORM/连接直接导入(硬强制)
 # ---------------------------------------------------------------------------
-# 扫描 api 下 iesplan.models.* 与 iesplan.db 会话符号导入, 检出即失败。
-# get_db 依赖注入合法, 不在扫描范围。
+# 扫描 api/worker 下 iesplan.models.* 与 iesplan.db 连接符号导入, 检出即失败。
+# 合法会话只来自组合根装配的 session_factory(api 见 iesplan.api.deps,
+# worker 见调用方注入); 直引 SessionLocal/engine/get_db 等一律违规。
 
-#: iesplan.db 中禁止 api 直接导入的 ORM 会话符号(get_db 依赖注入本身合法, 不在列)
-_DB_ORM_NAMES = frozenset({"Base", "Session", "sessionmaker", "session"})
+#: iesplan.db 中禁止 api/worker 直接导入的连接/ORM 符号。
+#: 会话与引擎只归 bootstrap 装配: api 经组合根装配的 session_factory
+#: (见 iesplan.api.deps.get_request_db)获取请求会话, worker 经调用方
+#: 传入的 session_factory 获取会话; 任何绕开 bootstrap 直取引擎/会话
+#: 工厂/会话依赖的行为一律违规。注意旧 get_db 已删除, 此处仍将其列入
+#: 禁止名, 防止以旧名重建全局请求依赖绕开装配。
+_DB_ORM_NAMES = frozenset(
+    {"Base", "Session", "SessionLocal", "sessionmaker", "session", "engine", "get_db"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -188,25 +196,32 @@ def _find_private_symbol_imports(
 def _find_api_orm_imports(
     scan_root: Path = _API_DIR, pkg_root: Path = _PKG_ROOT
 ) -> list[tuple[str, int, frozenset[str]]]:
-    """门禁 3: 扫描 api 下 iesplan.models.* 与 iesplan.db 会话符号导入。
+    """门禁 3: 扫描 api/worker 下 iesplan.models.* 与 iesplan.db 连接/ORM 符号导入。
 
-    返回 (模块, 行号, 该行导入的违规符号集合)。get_db 依赖注入不在扫描范围。
+    返回 (模块, 行号, 该行导入的违规符号集合)。覆盖绝对与相对导入
+    (如 ``from ..db import SessionLocal`` 经 _relative_target 归一化判定),
+    以及 ``import iesplan.db`` 整模块导入(持有模块即持有全部连接符号,
+    同属绕开 bootstrap)。合法会话来源只有组合根装配的 session_factory,
+    不在扫描豁免之列。
     """
     found: list[tuple[str, int, frozenset[str]]] = []
     for path, mod in _iter_modules(scan_root, pkg_root):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         by_line: dict[int, set[str]] = {}
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                if node.module == "iesplan.models" or node.module.startswith("iesplan.models."):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                target = _relative_target(mod, node) if node.level else node.module
+                if target == "iesplan.models" or target.startswith("iesplan.models."):
                     by_line.setdefault(node.lineno, set()).update(a.name for a in node.names if a.name != "*")
-                elif node.module.startswith("iesplan.db"):
+                elif target == "iesplan.db" or target.startswith("iesplan.db."):
                     bad = {a.name for a in node.names if a.name in _DB_ORM_NAMES}
                     if bad:
                         by_line.setdefault(node.lineno, set()).update(bad)
             elif isinstance(node, ast.Import):
                 for a in node.names:
                     if a.name == "iesplan.models" or a.name.startswith("iesplan.models."):
+                        by_line.setdefault(node.lineno, set()).add(a.name)
+                    elif a.name == "iesplan.db" or a.name.startswith("iesplan.db."):
                         by_line.setdefault(node.lineno, set()).add(a.name)
         found.extend((mod, line, frozenset(names)) for line, names in sorted(by_line.items()))
     return found
@@ -230,7 +245,7 @@ def test_no_cross_module_private_imports():
 
 
 def test_api_no_direct_orm_imports():
-    """架构门禁: 禁止 API 直接导入 ORM(宪法 §14.2, get_db 依赖注入合法)。"""
+    """架构门禁: 禁止 API 直接导入 ORM/连接(会话只来自组合根装配的 session_factory)。"""
     detected = _find_api_orm_imports()
     assert not detected, f"API 直接导入 ORM: {detected}"
 
@@ -238,10 +253,42 @@ def test_api_no_direct_orm_imports():
 def test_worker_no_direct_orm_imports():
     """架构门禁: 禁止 Worker 直接导入 ORM(ORM 查询归 application.worker)。
 
-    硬强制: worker 下出现 iesplan.models.* 或 iesplan.db 会话符号导入即失败。
+    硬强制: worker 下出现 iesplan.models.* 或 iesplan.db 连接符号导入即失败。
     """
     detected = _find_api_orm_imports(scan_root=_WORKER_DIR)
     assert not detected, f"Worker 直接导入 ORM(需上收至 application.worker 用例): {detected}"
+
+
+def test_gate_db_connection_detection(tmp_path):
+    """门禁 3 自校验: 绕开 bootstrap 直取连接的形态必须被检出。
+
+    覆盖: from 导入 SessionLocal/engine/get_db、相对导入、整模块导入;
+    合法的组合根 session_factory 注入形态不检出。
+    """
+    pkg = tmp_path / "iesplan"
+    api_dir = pkg / "api"
+    api_dir.mkdir(parents=True)
+    (api_dir / "__init__.py").write_text("")
+    (api_dir / "bad_session.py").write_text("from iesplan.db import SessionLocal\n")
+    (api_dir / "bad_engine.py").write_text("from iesplan.db import engine\n")
+    (api_dir / "bad_getdb.py").write_text("from iesplan.db import get_db\n")
+    (api_dir / "bad_module.py").write_text("import iesplan.db\n")
+    (api_dir / "bad_relative.py").write_text("from ..db import SessionLocal\n")
+    (api_dir / "ok.py").write_text(
+        "from iesplan.api.deps import DbSession\n"
+        "from sqlalchemy.orm import Session\n"
+    )
+    detected = _find_api_orm_imports(scan_root=api_dir, pkg_root=pkg)
+    mods = {mod for mod, _, _ in detected}
+    assert mods == {
+        "iesplan.api.bad_session",
+        "iesplan.api.bad_engine",
+        "iesplan.api.bad_getdb",
+        "iesplan.api.bad_module",
+        "iesplan.api.bad_relative",
+    }, sorted(mods)
+    names = {name for _, _, ns in detected for name in ns}
+    assert {"SessionLocal", "engine", "get_db", "iesplan.db"} <= names, sorted(names)
 
 
 # ---------------------------------------------------------------------------
@@ -263,28 +310,12 @@ def test_worker_no_direct_orm_imports():
 # engines/services/assembly.plan 导入即失败。
 
 # ---------------------------------------------------------------------------
-# 门禁 8: 表归属清单 + 跨表访问允许项 (键 = (访问方模块, models 子模块))
+# 门禁 8: 表归属 + 跨表访问允许项
 # ---------------------------------------------------------------------------
-# TABLE_OWNERS 声明每张业务表(以 models 子模块计)的唯一领域归属; 除下述
-# 稳定允许项外, 跨归属访问直接失败。
-# 说明: models.common 仅为共享基元(bigint_pk/正则, 无业务表); models.__init__
-# 为兼容重导出, 不视为领域归属。
-TABLE_OWNERS: dict[str, str] = {
-    "audit": "audit",
-    "calc": "task",
-    "common": "shared(无业务表, 仅基元)",
-    "config_revision": "config",
-    "dataset": "dataset",
-    "draft_revision": "model-template-draft",
-    "identity": "identity",
-    "immutable_triggers": "infra(无业务表, 触发器常量)",
-    "model": "model",
-    "model_template": "model-template",
-    "project": "project",
-    "project_model": "project-model",
-    "result": "result",
-    "uncertainty": "uncertainty",
-}
+# 顶层混合 models/ 已删除, 表真相归各领域 persistence/tables 所有; 所有者
+# 集合不再维护代码式表清单, 一律从当前目录事实推导(见 _owner_domains:
+# 含 __init__.py 的顶层包目录去掉 _NON_OWNER_DIRS)。历史上的 TABLE_OWNERS
+# 手工清单已删除, 不得恢复第二份表清单。
 
 #: 稳定允许项: 跨域表访问必须为零。无业务表的共享列基元(bigint_pk/
 #: 正则等)经 iesplan.db 基础设施复用, 不构成跨域业务访问, 故不计入;
