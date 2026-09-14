@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from iesplan.core.diagnostics import (
@@ -84,9 +86,52 @@ class ExecutionUnavailableError(AppError):
     message_key = "ies.diag.task.exec_unavailable"
 
 
+class _FrozenSeq(tuple):
+    """冻结后的快照封存序列(不可变, 与 JSON 列表结构相等)。
+
+    快照去重(``_snapshot_inputs_equal``)把已冻结记录与新鲜封存 JSON 逐项
+    ``==`` 比较: 普通 ``tuple`` 永不等于 ``list``, 会把复用误判为新增。
+    本类型保持元组不可变语义, 仅让相等性按 JSON 结构值判定, 既不断复用,
+    也不共享可变 ``list``。
+    """
+
+    __slots__ = ()
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (list, tuple)):
+            return list(self) == list(other)
+        return NotImplemented
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        return result if result is NotImplemented else not result
+
+    __hash__ = tuple.__hash__
+
+
+def _freeze_snapshot_value(value: object) -> object:
+    """递归冻结快照封存值(dict → MappingProxy, list/tuple → 不可变序列)。
+
+    只做表示冻结, 不校验内容: 快照创建边界已签发, 运行期不再复核。
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_snapshot_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return _FrozenSeq(_freeze_snapshot_value(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class CalcSnapshotRecord:
-    """计算快照（calc_snapshots 表公开视图，不可变，任务唯一输入）。"""
+    """计算快照（calc_snapshots 表公开视图，不可变，任务唯一输入）。
+
+    长期快照字段深度不可变: 构造时把封存 ``dict``/``list`` 递归冻结为
+    只读 ``MappingProxy``/不可变序列(先复制再冻结), 不与任何模块共享
+    可变 ``dict``/``list``; 冻结序列与 JSON 列表结构相等, 快照去重的
+    逐项 ``==`` 比较不受影响。
+    """
 
     id: int
     project_version_id: int
@@ -102,6 +147,15 @@ class CalcSnapshotRecord:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dataset_version_ids", tuple(self.dataset_version_ids))
+        for name in (
+            "calc_config_snapshot",
+            "extension_versions",
+            "tolerances",
+            "assembly_receipt",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _freeze_snapshot_value(value))
 
 
 @dataclass(frozen=True, slots=True)
