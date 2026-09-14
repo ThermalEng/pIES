@@ -921,3 +921,137 @@ def test_application_no_cross_family_impl_imports():
     """架构门禁 18: application 用例族之间禁止穿透他族实现文件(只经对方族公开门面组合)。"""
     detected = _find_cross_application_family_impl_imports()
     assert not detected, f"application 用例族实现文件穿透: {sorted(detected)}"
+
+
+# ---------------------------------------------------------------------------
+# 门禁 19–21: 稳定依赖规则收敛(硬强制)
+# ---------------------------------------------------------------------------
+# - 门禁 19: 顶层混合 models/ 与 engines/ 包不得存在(表真相归各领域
+#   persistence/tables 所有; 计算边界归 computation, 旧 engines 已删除)。
+#   只查顶层包目录存在形态, 不锁文件清单。
+# - 门禁 20: Worker 不得导入 computation(Worker 只经可注入计算网关与
+#   application.worker 阶段网关消费计算, 不持有计算业务)。
+#   只查 worker → computation 导入形态, 不锁函数名/行号, 不设白名单。
+# - 门禁 21: computation provider 目录只由 bootstrap 选择(业务模块不得
+#   自行导入 provider 目录实现选择点; 注册表算法元数据查询走 computation
+#   门面, 不属 provider 选择)。
+#   只查 iesplan.computation.providers 导入形态(bootstrap/computation
+#   之外出现即失败), 不锁函数名/行号, 不设白名单。
+# - 门禁 18(跨 application 实现穿透)已存在, 本轮仅验证其通过, 不新增。
+
+
+def _find_removed_top_packages(pkg_root: Path = _PKG_ROOT) -> list[str]:
+    """门禁 19: 检查已删除的顶层包(models/engines)是否重现。返回存在的包名。"""
+    return [name for name in ("models", "engines") if (pkg_root / name).exists()]
+
+
+def _find_worker_computation_imports(
+    scan_root: Path = _WORKER_DIR, pkg_root: Path = _PKG_ROOT
+) -> set[tuple[str, str]]:
+    """门禁 20: 扫描 worker 下所有 iesplan.computation 导入。返回 (模块, 目标) 集合。"""
+    found: set[tuple[str, str]] = set()
+    for path, mod in _iter_modules(scan_root, pkg_root):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            targets: list[str] = []
+            if isinstance(node, ast.Import):
+                targets.extend(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module == "iesplan":
+                    targets.extend(f"iesplan.{a.name}" for a in node.names if a.name != "*")
+                else:
+                    targets.append(node.module)
+            for target in targets:
+                if target == "iesplan.computation" or target.startswith("iesplan.computation."):
+                    found.add((mod, target))
+    return found
+
+
+def _find_non_bootstrap_provider_imports(
+    pkg_root: Path = _PKG_ROOT,
+) -> set[tuple[str, str]]:
+    """门禁 21: 扫描 bootstrap/computation 之外对 provider 目录的选择点。
+
+    覆盖两种形态: import iesplan.computation.providers[.X] 与
+    from iesplan.computation import providers。返回 (模块, 目标) 集合。
+    """
+    found: set[tuple[str, str]] = set()
+    for path, mod in _iter_modules(pkg_root, pkg_root):
+        if mod == "iesplan.bootstrap" or mod.startswith("iesplan.bootstrap."):
+            continue
+        if mod == "iesplan.computation" or mod.startswith("iesplan.computation."):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name == "iesplan.computation.providers" or a.name.startswith(
+                        "iesplan.computation.providers."
+                    ):
+                        found.add((mod, a.name))
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                if node.module == "iesplan.computation.providers" or (
+                    node.module and node.module.startswith("iesplan.computation.providers.")
+                ):
+                    found.add((mod, node.module))
+                elif node.module == "iesplan.computation":
+                    for a in node.names:
+                        if a.name == "providers":
+                            found.add((mod, "iesplan.computation.providers"))
+    return found
+
+
+def test_no_mixed_models_or_engines_packages():
+    """架构门禁 19: 顶层混合 models/ 与 engines/ 包不得重现。"""
+    detected = _find_removed_top_packages()
+    assert not detected, f"已删除顶层包重现(表真相归领域/computation): {detected}"
+
+
+def test_worker_no_computation_business():
+    """架构门禁 20: Worker 不得导入 computation(计算业务只归 provider)。"""
+    detected = _find_worker_computation_imports()
+    assert not detected, f"Worker 计算业务导入(须经计算网关消费): {sorted(detected)}"
+
+
+def test_provider_selection_only_by_bootstrap():
+    """架构门禁 21: provider 目录只由 bootstrap 选择。"""
+    detected = _find_non_bootstrap_provider_imports()
+    assert not detected, f"业务模块自行选择 provider: {sorted(detected)}"
+
+
+def test_gate_removed_packages_detection(tmp_path):
+    """门禁 19 自校验: 重现的顶层包必须被检出, 不存在时为零。"""
+    assert _find_removed_top_packages(pkg_root=tmp_path) == []
+    (tmp_path / "engines").mkdir()
+    assert _find_removed_top_packages(pkg_root=tmp_path) == ["engines"]
+
+
+def test_gate_worker_computation_detection(tmp_path):
+    """门禁 20 自校验: worker 对 computation 的导入必须被检出。"""
+    worker_dir = tmp_path / "iesplan" / "worker"
+    worker_dir.mkdir(parents=True)
+    (worker_dir / "__init__.py").write_text("")
+    (worker_dir / "bad.py").write_text("from iesplan.computation import registry\n")
+    detected = _find_worker_computation_imports(
+        scan_root=worker_dir, pkg_root=tmp_path / "iesplan"
+    )
+    assert detected == {("iesplan.worker.bad", "iesplan.computation")}
+
+
+def test_gate_provider_selection_detection(tmp_path):
+    """门禁 21 自校验: 非 bootstrap 的 provider 目录导入必须被检出。
+
+    bootstrap/computation 自身导入不参评; computation 门面导入
+    (如 get_algorithm)不属 provider 选择, 不检出。
+    """
+    pkg = tmp_path / "iesplan"
+    for sub in ("api", "bootstrap", "computation"):
+        (pkg / sub).mkdir(parents=True)
+        (pkg / sub / "__init__.py").write_text("")
+    (pkg / "api" / "bad.py").write_text("import iesplan.computation.providers\n")
+    (pkg / "api" / "facade_ok.py").write_text("from iesplan.computation import get_algorithm\n")
+    (pkg / "bootstrap" / "__init__.py").write_text(
+        "from iesplan.computation import available_providers\n"
+    )
+    detected = _find_non_bootstrap_provider_imports(pkg_root=pkg)
+    assert detected == {("iesplan.api.bad", "iesplan.computation.providers")}
