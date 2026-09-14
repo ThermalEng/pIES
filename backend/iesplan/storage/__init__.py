@@ -55,6 +55,18 @@ from iesplan.storage.service import (
     verify_object,
 )
 
+
+def install_tables() -> None:
+    """公开生命周期钩子: 装载本域 persistence 即完成 Base.metadata 表注册(幂等, 无其他副作用)。
+
+    本域无触发器, 故只导出 install_tables(不造空 install_triggers 占位)。
+    延迟装载: 本门面导入期不装载 persistence, 首次调用本钩子时装载。
+    """
+    from iesplan.storage import persistence as _persistence
+
+    _persistence.install_tables()
+
+
 __all__ = [
     "BlobStore",
     "DEFAULT_PENDING_DELETE_DAYS",
@@ -91,4 +103,5 @@ __all__ = [
     "undelete_object",
     "usage_summary",
     "verify_object",
+    "install_tables",
 ]
