@@ -41,14 +41,6 @@ list_proposals_for_proposer = persistence.list_proposals_for_proposer
 set_proposal_review = persistence.set_proposal_review
 
 
-def install_tables() -> None:
-    """公开生命周期钩子: 导入本域 persistence 即完成 Base.metadata 表注册(幂等, 无其他副作用)。
-
-    本域无触发器, 故只导出 install_tables(不造空 install_triggers 占位)。
-    """
-    persistence.install_tables()
-
-
 __all__ = [
     "DOWNLOAD_TOKEN_TTL_SECONDS",
     "EXCEL_MEDIA_TYPE",
@@ -76,5 +68,4 @@ __all__ = [
     "parse_package",
     "set_proposal_review",
     "verify_download_token",
-    "install_tables",
 ]

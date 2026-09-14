@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from iesplan.bootstrap import (
     ApplicationContext,
     assemble_api,
@@ -9,19 +11,17 @@ from iesplan.bootstrap import (
     assemble_io_worker,
     collect_immutable_tables,
     collect_trigger_statements,
-    install_domain_tables,
 )
+from iesplan.computation import ComputationUnavailableError
 
 
 def test_assemble_api_full_context() -> None:
-    """assemble_api 装配 database+storage+registry, provider 目录为空且明确无可用项。"""
+    """assemble_api 装配 database、storage 与 registry。"""
     ctx = assemble_api()
     assert isinstance(ctx, ApplicationContext)
     assert ctx.session_factory is not None
     assert ctx.storage is not None
     assert ctx.device_registry is not None
-    assert ctx.computation_providers == {}
-    assert ctx.settings is not None
     health = ctx.health()
     assert health["db"] == "ok"
     assert health["registry"] == "ok"
@@ -30,13 +30,9 @@ def test_assemble_api_full_context() -> None:
 
 
 def test_assemble_worker_subsets() -> None:
-    """computeWorker 装配计算子集(含 registry, 不含 storage); ioWorker 装配 I/O 子集(含 storage)。"""
-    compute = assemble_compute_worker()
-    assert compute.device_registry is not None
-    assert compute.storage is None
-    assert compute.computation_providers == {}
-    assert compute.health()["registry"] == "ok"
-    assert "storage" not in compute.health()
+    """0.8 前计算 Worker 拒绝启动；I/O Worker 正常装配。"""
+    with pytest.raises(ComputationUnavailableError):
+        assemble_compute_worker()
 
     io = assemble_io_worker()
     assert io.storage is not None
@@ -63,11 +59,10 @@ def test_assemble_configures_queue_mode_from_environment(monkeypatch) -> None:
         identity_module.configure_queue_mode(None)
 
 
-def test_install_domain_tables_registers_all_domains() -> None:
-    """install_domain_tables 只做导入注册: Base.metadata 含各领域表, 无建表副作用断言。"""
+def test_public_facades_register_domain_metadata() -> None:
+    """组合根加载领域公开门面后，metadata 已包含各领域表。"""
     from iesplan.db import Base
 
-    install_domain_tables()
     names = set(Base.metadata.tables)
     assert "users" in names
     assert "projects" in names

@@ -956,19 +956,13 @@ def test_application_no_cross_family_impl_imports():
 
 
 # ---------------------------------------------------------------------------
-# 门禁 19–21: 稳定依赖规则收敛(硬强制)
+# 门禁 19–20: 稳定依赖规则收敛(硬强制)
 # ---------------------------------------------------------------------------
 # - 门禁 19: 顶层混合 models/ 与 engines/ 包不得存在(表真相归各领域
 #   persistence/tables 所有; 计算边界归 computation)。
 #   只查顶层包目录存在形态, 不锁文件清单。
-# - 门禁 20: Worker 不得导入 computation(Worker 只经可注入计算网关与
-#   application.worker 阶段网关消费计算, 不持有计算业务)。
+# - 门禁 20: Worker 不得导入 computation（计算能力在 0.8 由组合根接入）。
 #   只查 worker → computation 导入形态, 不锁函数名/行号, 不设白名单。
-# - 门禁 21: computation provider 目录只由 bootstrap 选择(业务模块不得
-#   自行导入 provider 目录实现选择点; 注册表算法元数据查询走 computation
-#   门面, 不属 provider 选择)。
-#   只查 iesplan.computation.providers 导入形态(bootstrap/computation
-#   之外出现即失败), 不锁函数名/行号, 不设白名单。
 # - 门禁 18(跨 application 实现穿透)已存在, 本轮仅验证其通过, 不新增。
 
 
@@ -999,40 +993,6 @@ def _find_worker_computation_imports(
     return found
 
 
-def _find_non_bootstrap_provider_imports(
-    pkg_root: Path = _PKG_ROOT,
-) -> set[tuple[str, str]]:
-    """门禁 21: 扫描 bootstrap/computation 之外对 provider 目录的选择点。
-
-    覆盖两种形态: import iesplan.computation.providers[.X] 与
-    from iesplan.computation import providers。返回 (模块, 目标) 集合。
-    """
-    found: set[tuple[str, str]] = set()
-    for path, mod in _iter_modules(pkg_root, pkg_root):
-        if mod == "iesplan.bootstrap" or mod.startswith("iesplan.bootstrap."):
-            continue
-        if mod == "iesplan.computation" or mod.startswith("iesplan.computation."):
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for a in node.names:
-                    if a.name == "iesplan.computation.providers" or a.name.startswith(
-                        "iesplan.computation.providers."
-                    ):
-                        found.add((mod, a.name))
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                if node.module == "iesplan.computation.providers" or (
-                    node.module and node.module.startswith("iesplan.computation.providers.")
-                ):
-                    found.add((mod, node.module))
-                elif node.module == "iesplan.computation":
-                    for a in node.names:
-                        if a.name == "providers":
-                            found.add((mod, "iesplan.computation.providers"))
-    return found
-
-
 def test_no_mixed_models_or_engines_packages():
     """架构门禁 19: 顶层混合 models/ 与 engines/ 包不得重现。"""
     detected = _find_removed_top_packages()
@@ -1040,15 +1000,9 @@ def test_no_mixed_models_or_engines_packages():
 
 
 def test_worker_no_computation_business():
-    """架构门禁 20: Worker 不得导入 computation(计算业务只归 provider)。"""
+    """架构门禁 20：Worker 不得直接导入 computation。"""
     detected = _find_worker_computation_imports()
-    assert not detected, f"Worker 计算业务导入(须经计算网关消费): {sorted(detected)}"
-
-
-def test_provider_selection_only_by_bootstrap():
-    """架构门禁 21: provider 目录只由 bootstrap 选择。"""
-    detected = _find_non_bootstrap_provider_imports()
-    assert not detected, f"业务模块自行选择 provider: {sorted(detected)}"
+    assert not detected, f"Worker 直接导入 computation: {sorted(detected)}"
 
 
 def test_gate_removed_packages_detection(tmp_path):
@@ -1070,30 +1024,11 @@ def test_gate_worker_computation_detection(tmp_path):
     assert detected == {("iesplan.worker.bad", "iesplan.computation")}
 
 
-def test_gate_provider_selection_detection(tmp_path):
-    """门禁 21 自校验: 非 bootstrap 的 provider 目录导入必须被检出。
-
-    bootstrap/computation 自身导入不参评; computation 门面导入
-    (如 get_algorithm)不属 provider 选择, 不检出。
-    """
-    pkg = tmp_path / "iesplan"
-    for sub in ("api", "bootstrap", "computation"):
-        (pkg / sub).mkdir(parents=True)
-        (pkg / sub / "__init__.py").write_text("")
-    (pkg / "api" / "bad.py").write_text("import iesplan.computation.providers\n")
-    (pkg / "api" / "facade_ok.py").write_text("from iesplan.computation import get_algorithm\n")
-    (pkg / "bootstrap" / "__init__.py").write_text(
-        "from iesplan.computation import available_providers\n"
-    )
-    detected = _find_non_bootstrap_provider_imports(pkg_root=pkg)
-    assert detected == {("iesplan.api.bad", "iesplan.computation.providers")}
-
-
 # ---------------------------------------------------------------------------
-# 门禁 22: bootstrap 不得直引 persistence 与动态导入(硬强制)
+# 门禁 21: bootstrap 不得直引 persistence 与动态导入(硬强制)
 # ---------------------------------------------------------------------------
 # 领域表/触发器的唯一真相归拥有者领域 persistence 所有, 公开出口只归各领域
-# 公开门面 install_tables/install_triggers/IMMUTABLE_TABLES; 组合根只做显式
+# 公开门面 install_triggers/IMMUTABLE_TABLES; 组合根只做显式
 # 编排调用。bootstrap 下出现 *.persistence 导入(绝对/相对/整模块)或
 # importlib.import_module/__import__ 字符串加载即失败。
 # 本门禁只查依赖形态(模块路径含 persistence 段、动态加载调用), 不维护固定
@@ -1111,7 +1046,7 @@ def _has_persistence_segment(module: str) -> bool:
 def _find_bootstrap_persistence_imports(
     scan_root: Path = _BOOTSTRAP_DIR, pkg_root: Path = _PKG_ROOT
 ) -> set[tuple[str, str]]:
-    """门禁 22a: 扫描 bootstrap 下模块路径含 persistence 段的导入。
+    """门禁 21a: 扫描 bootstrap 下模块路径含 persistence 段的导入。
 
     覆盖绝对与相对导入(相对经 _relative_target 归一化判定)以及整模块导入
     (如 import iesplan.audit.persistence); 返回 (模块, 目标) 集合。
@@ -1134,7 +1069,7 @@ def _find_bootstrap_persistence_imports(
 def _find_bootstrap_dynamic_imports(
     scan_root: Path = _BOOTSTRAP_DIR, pkg_root: Path = _PKG_ROOT
 ) -> set[tuple[str, int]]:
-    """门禁 22b: 扫描 bootstrap 下字符串动态加载调用。
+    """门禁 21b: 扫描 bootstrap 下字符串动态加载调用。
 
     覆盖 importlib.import_module(...)、from importlib import import_module 后的
     import_module(...) 直调与 __import__(...) 调用形态; 返回 (模块, 行号) 集合。
@@ -1154,7 +1089,7 @@ def _find_bootstrap_dynamic_imports(
 
 
 def test_bootstrap_no_persistence_or_dynamic_imports():
-    """架构门禁 22: bootstrap 只经领域公开门面编排, 不得直引 persistence 与动态导入。"""
+    """架构门禁 21: bootstrap 只经领域公开门面编排, 不得直引 persistence 与动态导入。"""
     persistence_hits = _find_bootstrap_persistence_imports()
     assert not persistence_hits, f"bootstrap 直引 persistence(须经领域公开门面): {sorted(persistence_hits)}"
     dynamic_hits = _find_bootstrap_dynamic_imports()
@@ -1162,14 +1097,14 @@ def test_bootstrap_no_persistence_or_dynamic_imports():
 
 
 def test_gate_bootstrap_import_detection(tmp_path):
-    """门禁 22 自校验: persistence 段导入与字符串动态加载必须被检出, 门面编排不检出。
+    """门禁 21 自校验: persistence 段导入与字符串动态加载必须被检出, 门面编排不检出。
 
     样例全部写 tmp_path, 不落地正式源码。
     """
     pkg = tmp_path / "iesplan"
     boot = pkg / "bootstrap"
     boot.mkdir(parents=True)
-    (boot / "__init__.py").write_text("from iesplan.audit import install_tables\n")
+    (boot / "__init__.py").write_text("from iesplan.audit import install_triggers\n")
     (boot / "bad_direct.py").write_text("from iesplan.audit.persistence import install_tables\n")
     (boot / "bad_module.py").write_text("import iesplan.tasks.persistence\n")
     (boot / "bad_relative.py").write_text("from ..audit.persistence import install_triggers\n")

@@ -4,7 +4,7 @@ main() 职责:
 - 按 worker_type(compute|io) 订阅对应队列(Redis 可重建视图; 不可用自动降级
   内存后端, 单进程模式);
 - 循环: 槽门禁 → 出队 → 领取(acquire_attempt: 建尝试 + 租约 + fencing token)
-  → 执行(runner.run_task, 计算引擎在隔离子进程)→ 提交/失败/取消收拢;
+  → 执行(runner.run_task)→ 提交/失败/取消收拢;
 - 心跳(Redis heartbeat:{worker_id}, 5 s)与租约续期(PG, 15 s; 0 行 → 立即
   取消当前任务并停止一切写回, 03 §4.4 自毁契约);
 - 信号处理: SIGTERM/SIGINT 优雅退出(置停止事件 → 取消当前任务 → 等待退出)。
@@ -42,7 +42,7 @@ SHUTDOWN_GRACE = 30.0
 
 
 class Worker:
-    """Worker 主循环(compute/io 共用框架; 03 §1.1 计算与 I/O Worker 职责)。"""
+    """后台任务 Worker 主循环；当前部署只启动 I/O Worker。"""
 
     def __init__(
         self,
@@ -50,11 +50,9 @@ class Worker:
         worker_id: str | None = None,
         *,
         session_factory: Any,
-        computation_providers: Any | None = None,
         poll_interval: float = POLL_INTERVAL,
         heartbeat_interval: float = HEARTBEAT_INTERVAL,
         renew_interval: float = RENEW_INTERVAL,
-        isolate: bool = True,
     ) -> None:
         if worker_type not in ("compute", "io"):
             raise ValueError(f"非法 worker_type: {worker_type!r}(可选 compute/io)")
@@ -66,14 +64,9 @@ class Worker:
         # 会话工厂只能由 bootstrap 装配的 ApplicationContext 显式提供(main 传入
         # ctx.session_factory); 无缺省、无回退, 缺失即构造失败。
         self.session_factory = session_factory
-        # 计算公共能力同样由组合根装配显式注入(main 传入
-        # ctx.computation_providers); 缺省 None 即无可用能力, 计算类任务经
-        # application.worker 阶段网关收拢为结构化 unavailable, 不伪造成功。
-        self.computation_providers = computation_providers
         self.poll_interval = poll_interval
         self.heartbeat_interval = heartbeat_interval
         self.renew_interval = renew_interval
-        self.isolate = isolate
         self._stop = threading.Event()
         self._task_thread: threading.Thread | None = None
         self._cancel_event: threading.Event | None = None
@@ -209,8 +202,7 @@ class Worker:
         try:
             runner.run_task(
                 self.session_factory, claim, worker_id=self.worker_id,
-                isolate=self.isolate, stop_event=self._cancel_event,
-                computation_providers=self.computation_providers,
+                stop_event=self._cancel_event,
             )
         except Exception:  # noqa: BLE001 - 线程边界兜底, 防止静默死亡
             logger.exception("任务线程异常: task=%s", claim.task_id)
@@ -244,9 +236,8 @@ def main(argv: list[str] | None = None) -> int:
 
     全部运行时能力经 bootstrap 组合根装配: 按 worker_type 选择
     assemble_compute_worker()/assemble_io_worker(), Daemon 的会话工厂与
-    computation provider 目录取自装配好的 ApplicationContext。必需 provider
-    缺失时 assemble_* 抛异常, 本入口直接传播(启动失败, 不发布半初始化状态,
-    不做任何 fallback)。
+    能力取自装配好的 ApplicationContext。计算能力尚未实现时
+    assemble_compute_worker 直接抛异常，Daemon 不启动、不领取任务。
     """
     parser = argparse.ArgumentParser(description="pIES 计算/I/O Worker")
     parser.add_argument(
@@ -254,7 +245,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Worker 类型(缺省取 IESPLAN_WORKER_TYPE 环境变量或配置)",
     )
     parser.add_argument("--worker-id", default=None, help="Worker 标识(缺省自动生成)")
-    parser.add_argument("--no-isolation", action="store_true", help="禁用求解器子进程隔离(调试)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -272,8 +262,6 @@ def main(argv: list[str] | None = None) -> int:
         worker_type=worker_type,
         worker_id=args.worker_id,
         session_factory=ctx.session_factory,
-        computation_providers=ctx.computation_providers,
-        isolate=not args.no_isolation,
     ).run()
     return 0
 

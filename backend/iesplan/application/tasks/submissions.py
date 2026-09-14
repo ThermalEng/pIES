@@ -245,13 +245,13 @@ def _snapshot_inputs_equal(
     """快照输入一致判定: 全部快照内容字段逐项相等(不使用内容摘要)。"""
     return (
         list(snapshot.dataset_version_ids or []) == list(dataset_ids)
-        and (snapshot.calc_config_snapshot or {}) == calc_config
+        and jsonable(snapshot.calc_config_snapshot or {}) == jsonable(calc_config)
         and (snapshot.program_version or "") == program_version
-        and (snapshot.extension_versions or {}) == extensions
+        and jsonable(snapshot.extension_versions or {}) == jsonable(extensions)
         and snapshot.random_seed == random_seed
-        and (snapshot.tolerances or {}) == tolerances
+        and jsonable(snapshot.tolerances or {}) == jsonable(tolerances)
         and (snapshot.canonical_assembly_text or "") == (canonical_text or "")
-        and (snapshot.assembly_receipt or {}) == receipt
+        and jsonable(snapshot.assembly_receipt or {}) == jsonable(receipt)
     )
 
 

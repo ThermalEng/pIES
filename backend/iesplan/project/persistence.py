@@ -726,11 +726,6 @@ CREATE TRIGGER tg_project_versions_baseline_immutable BEFORE UPDATE ON project_v
 """
 
 
-def install_tables() -> None:
-    """公开安装钩子: 导入本模块即完成 Base.metadata 表注册; 幂等, 无其他副作用。"""
-    return None
-
-
 def install_triggers() -> tuple[str, ...]:
     """公开钩子: 返回本域触发器部署语句(按执行序, 含幂等 DROP, 供组合根编排收集)。"""
     statements = [drop_trigger_function_sql(f"tg_{table}_immutable") for table in IMMUTABLE_TABLES]

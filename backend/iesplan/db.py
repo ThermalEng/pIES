@@ -9,9 +9,8 @@
 
 本模块只保留连接 / Session / Base 无业务状态基础设施:
 
-- 不集中注册任何领域 metadata: 各领域 persistence 暴露公开安装钩子
-  ``install_tables()``(由拥有者领域定义), 由组合根 ``iesplan.bootstrap``
-  显式编排调用; ``init_db`` 不再自行注册领域, 调用前须先完成安装。
+- 不集中注册任何领域 metadata: 组合根静态导入各领域公开门面，门面加载
+  自己的 persistence 后自然完成声明注册；不设无行为的安装钩子。
 - 不拥有跨领域表名与触发器规则: 规则归各自领域 persistence 的
   ``install_triggers()`` 钩子所有, 本模块只提供无业务状态的 DDL 构造
   (``immutable_trigger_sql`` / ``immutable_revoke_sql`` /
@@ -25,11 +24,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import sqlalchemy as sa
 from sqlalchemy import create_engine
 from sqlalchemy import text as sa_text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import DeclarativeBase, MappedColumn, Session, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, MappedColumn, mapped_column, sessionmaker
 
 from iesplan.config import settings
 
@@ -52,11 +52,6 @@ class Base(DeclarativeBase):
 # 正则 CHECK(``~`` 运算符)用 ``PgRegexCheck`` 包装: PostgreSQL 按文档原样输出,
 # SQLite 编译为恒真 ``CHECK (1=1)``;正则语义校验由应用层保证。
 # ---------------------------------------------------------------------------
-
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import MappedColumn, mapped_column
 
 #: 64 位小写十六进制(对象 id 等随机标识格式; 无业务归属的通用格式)
 HASH64_RE: str = "^[0-9a-f]{64}$"
@@ -200,9 +195,7 @@ def init_db(trigger_statements: Iterable[str] | None = None) -> None:
     """幂等初始化数据库: 建表 + 部署触发器。
 
     - create_all 只建不存在的表, 重复调用无副作用;
-    - 本函数不再注册任何领域 metadata: 调用前须由组合根经各领域
-      persistence 的 ``install_tables()`` 公开钩子显式完成安装
-      (``iesplan.bootstrap.install_domain_tables``);
+    - 本函数不注册领域 metadata；调用前须已由组合根加载领域公开门面；
     - ``trigger_statements`` 为各领域 ``install_triggers()`` 钩子收集的
       部署语句(组合根编排收集后传入); 为空时只建表, 不部署触发器。
     - 项目未发布, 无版本化迁移: 当前 schema 从空库直接建立,

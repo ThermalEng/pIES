@@ -34,30 +34,23 @@ from iesplan.main import create_app
 def stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """向 sys.modules 注入桩 iesplan.bootstrap, 记录各 assemble 调用次数。
 
-    桩上下文与真实 ``ApplicationContext`` 同形(含 ``computation_providers``,
-    计算公共能力由组合根装配并注入 Daemon, 无可用能力即空目录)。
+    桩上下文只提供 Daemon 启动所需的会话工厂。
     """
     calls: dict[str, int] = {"compute": 0, "io": 0}
     failures: dict[str, Exception] = {}
     sentinel_factory = object()
-    sentinel_providers: dict[str, Any] = {}
 
     def _compute() -> SimpleNamespace:
         calls["compute"] += 1
         if "compute" in failures:
             raise failures["compute"]
-        return SimpleNamespace(
-            session_factory=sentinel_factory,
-            computation_providers=sentinel_providers,
-        )
+        return SimpleNamespace(session_factory=sentinel_factory)
 
     def _io() -> SimpleNamespace:
         calls["io"] += 1
         if "io" in failures:
             raise failures["io"]
-        return SimpleNamespace(
-            session_factory=sentinel_factory, computation_providers={},
-        )
+        return SimpleNamespace(session_factory=sentinel_factory)
 
     module = types.ModuleType("iesplan.bootstrap")
     module.assemble_compute_worker = _compute  # type: ignore[attr-defined]
@@ -67,7 +60,6 @@ def stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "calls": calls,
         "failures": failures,
         "session_factory": sentinel_factory,
-        "computation_providers": sentinel_providers,
     }
 
 
@@ -138,21 +130,6 @@ def test_main_session_factory_comes_from_context(
     assert fake_worker["kwargs"]["session_factory"] is stub_bootstrap["session_factory"]
 
 
-def test_main_computation_providers_come_from_context(
-    stub_bootstrap: dict[str, Any], fake_worker: dict[str, Any]
-) -> None:
-    """Daemon 计算公共能力必须取自装配好的 context(原样注入, 无全局赋值)。"""
-    _run_main(["--worker-type", "compute"])
-    assert fake_worker["kwargs"]["computation_providers"] is stub_bootstrap["computation_providers"]
-
-
-def test_main_isolation_flag_passthrough(
-    stub_bootstrap: dict[str, Any], fake_worker: dict[str, Any]
-) -> None:
-    _run_main(["--worker-type", "compute", "--no-isolation"])
-    assert fake_worker["kwargs"]["isolate"] is False
-
-
 # ---------------------------------------------------------------------------
 # 启动失败: 无 fallback, 无半初始化
 # ---------------------------------------------------------------------------
@@ -161,7 +138,7 @@ def test_main_isolation_flag_passthrough(
 def test_main_assemble_failure_propagates_without_half_init(
     stub_bootstrap: dict[str, Any], fake_worker: dict[str, Any]
 ) -> None:
-    """必需 provider 缺失(assemble 抛异常)时启动失败, Daemon 永不运行。"""
+    """组合根拒绝装配时启动失败，Daemon 永不运行。"""
     stub_bootstrap["failures"]["compute"] = RuntimeError("db unavailable")
     with pytest.raises(RuntimeError, match="db unavailable"):
         _run_main(["--worker-type", "compute"])

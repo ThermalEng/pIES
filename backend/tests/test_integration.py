@@ -1,10 +1,8 @@
-"""集成测试：核心业务链（提交/快照/预检）与计算入口显式不可用（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §14.2 必需测试 及 §12 快照、任务与结果； manual/developer-guide/zh-CN/domain-model.md §快照、任务和结果）。
+"""集成测试：核心业务链（提交、快照与预检）。
 
 链路: 注册/登录(管理员+工程师) → 创建项目 → 添加设备(电网/光伏/热泵/锅炉/
 制冷机/电池/负荷)与连接 → 生成内置样例数据集 → 绑定数据集 → 保存计算配置 +
-财务基准确认 → 提交方案评价任务 → Worker 领取(租约/尝试状态先行可见) →
-执行收拢为显式结构化失败（计算入口显式不可用：failed +
-TASK-SOLVE-001，绝非 lease_rejected；不期待真实求解）。
+财务基准确认 → 提交方案评价任务 → Worker 领取(租约/尝试状态先行可见)。
 
 另抽查核心语义：草稿乐观锁(409)、归档后禁止编辑、删除需显式确认、任务同快照去重、导出权限门禁、存储视图权限、财务基准校验门禁（见 manual/developer-guide/zh-CN/contracts.md §HTTP 语义； manual/developer-guide/zh-CN/domain-model.md §项目聚合/对象生命周期； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §8/§10/§16）。
 
@@ -35,13 +33,9 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402
-from iesplan.tasks.persistence import TaskDiagnostic  # noqa: E402
-from iesplan.results.persistence import EvidencePackage  # noqa: E402
 from iesplan.application import identity  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
-from iesplan.core.diagnostics import TASK_SOLVE_FAILED  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
-from iesplan.worker import runner  # noqa: E402
 
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "Admin12345"
@@ -365,8 +359,6 @@ def _submit_calc_task(
         payload["idempotency_key"] = idempotency_key
     resp = client.post(f"/api/projects/{project_id}/tasks", json=payload, headers=_h(client, user_id))
     if "task" not in resp.json():
-        body = resp.json()
-        diags = (body.get("error") or {}).get("detail") or body.get("error")
         raise AssertionError(f"任务创建失败: {resp.status_code} {resp.text[:1500]}")
     task = resp.json()["task"]
     return task["id"], resp.status_code
@@ -527,60 +519,6 @@ def test_task_submit_snapshot_preguard(client: TestClient, db: Session) -> None:
     task = _get_task(client, eng_id, ctx["project_id"], task_id)
     assert task["status"] == "running", task
     assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is not None
-
-
-# ---------------------------------------------------------------------------
-# 测试 1b: 当前计算入口显式不可用且错误码正确
-# ---------------------------------------------------------------------------
-
-
-def test_compute_entry_explicitly_unavailable(client: TestClient, db: Session, engine: Engine) -> None:
-    """0.8 计算未实现: 执行收拢为显式结构化失败。
-
-    领取先形成正确可见的租约/尝试状态; 计算阶段网关无可用 provider 经
-    runner 调度链收拢为 failed + TASK-SOLVE-001, 绝不误判为 lease_rejected,
-    也不写入任何结果。
-    """
-    eng_id = _seed_engineer_direct(client, db)
-    ctx = _prepare_project(client, db, eng_id)
-
-    task_id, status_code = _submit_calc_task(client, eng_id, ctx["project_id"])
-    assert status_code == 201
-
-    # 领取: 租约/尝试状态先行可见(领取事务已提交), 任务 running
-    claim = _acquire_task(db, task_id)
-    task = _get_task(client, eng_id, ctx["project_id"], task_id)
-    assert task["status"] == "running", task
-    assert worker_app.verify_lease(db, claim.attempt_id, claim.lease_token) is not None
-
-    # 执行: 计算入口显式不可用 → failed, 绝非 lease_rejected
-    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    status = runner.run_task(factory, claim, worker_id="it-worker-1", isolate=False)
-    db.expire_all()
-    assert status == "failed", status
-    assert status != "lease_rejected", status
-
-    task = _get_task(client, eng_id, ctx["project_id"], task_id)
-    assert task["status"] == "failed", task
-
-    # 失败诊断: 有 TASK-SOLVE-001 且保留原始不可用原因, 无租约类诊断
-    diags = db.query(TaskDiagnostic).filter(TaskDiagnostic.task_id == task_id).all()
-    assert diags, "失败诊断缺失"
-    assert not any(d.code == "TASK-LEASE-001" for d in diags), [
-        (d.code, d.message) for d in diags
-    ]
-    solve = [d for d in diags if d.code == TASK_SOLVE_FAILED]
-    assert solve, [(d.code, d.message) for d in diags]
-    assert all(d.level == "error" for d in solve)
-    assert all((d.message or "").strip() for d in solve), [
-        (d.code, d.message) for d in solve
-    ]
-    assert all("内部错误" not in (d.message or "") for d in solve), [
-        (d.code, d.message) for d in solve
-    ]
-
-    # 无结果写入: 证据包为空
-    assert db.query(EvidencePackage).filter(EvidencePackage.task_id == task_id).all() == []
 
 
 # ---------------------------------------------------------------------------

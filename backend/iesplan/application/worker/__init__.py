@@ -11,8 +11,6 @@ Worker(``iesplan.worker``)只经本包推进, 不再直连 ``services.*`` 与
 commit/rollback)。
 
 阶段命令:
-- 计算三段式: ``run_compute_stage``(经组合根注入的 computation 公开能力
-  执行 generate → solve → adapt, 无可用能力即结构化 unavailable);
 - 领取/续租/进度/提交/失败/取消: ``acquire_attempt``/
   ``renew_attempt_lease``/``report_attempt_progress``/
   ``submit_attempt_result``/``fail_attempt``/``cancel_attempt``;
@@ -27,8 +25,7 @@ commit/rollback)。
 不可变结果与错误语义: ``Claim``/``SubmitReceipt``/``ReportCheckResult``/
 ``TaskRecord``/``CalcSnapshotRecord``/``BUSINESS_OUTCOMES``/
 ``LeaseRejectedError``/``ExecutionUnavailableError``/
-``ComputationUnavailableError``(计算阶段网关 unavailable, Worker 经本门面
-消费, 不直引 computation)。
+``ComputationUnavailableError``（0.8 前用于明确拒绝计算 Worker 启动）。
 """
 
 from __future__ import annotations
@@ -43,10 +40,7 @@ from iesplan.application.worker.attempt_cases import (
     report_attempt_progress,
     submit_attempt_result,
 )
-from iesplan.application.worker.compute_cases import (
-    ComputationUnavailableError,
-    run_compute_stage,
-)
+from iesplan.computation import ComputationUnavailableError
 from iesplan.application.worker.lease_cases import (
     CalcSnapshotRecord,
     Claim,
@@ -107,7 +101,6 @@ __all__ = [
     "publish_heartbeat",
     "renew_attempt_lease",
     "report_attempt_progress",
-    "run_compute_stage",
     "slot_available",
     "submit_attempt_result",
     "verify_lease",

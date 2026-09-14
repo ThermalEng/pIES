@@ -13,10 +13,7 @@
 
 Worker 只按 application.worker 阶段网关结果驱动状态机, 不解释数据集
 字段、不补缺省值、不做 SI 换算、不物化时间轴、不解释装配内容与任务
-参数; 计算输入解释归 computation provider 所有。计算公共能力由组合根
-装配并经调用参数显式注入(``computation_providers``), 本模块不持有模块
-全局网关, 不做全局赋值; 无可用能力时阶段网关抛结构化 unavailable,
-经失败收拢落 failed + TASK-SOLVE-001, 不伪造成功、不回退旧引擎。
+参数。计算能力将在 0.8 接入；当前计算 Worker 不会通过组合根启动。
 
 写入资格: 本模块不直接写任务状态/结果, 统一由 application.worker 的
 submit_attempt_result / fail_attempt / cancel_attempt 带 token 完成
@@ -30,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -76,27 +73,21 @@ class InvalidTaskTypeError(AppError):
 
 def dispatch(
     ctx: RunContext,
-    *,
-    computation_providers: Mapping[str, object] | None = None,
 ) -> dict:
     """按任务类型分派到执行器(返回结果 payload, 含显式 outcome)。
 
     未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
     未知任务类型抛 InvalidTaskTypeError。计算类任务只按 application.worker
     计算阶段网关结果驱动: 任务/快照记录缺失即确定性失败, 不解释任何输入
-    字段; 计算公共能力经调用参数显式注入(组合根装配来源), 无可用能力时
-    阶段网关抛结构化 unavailable; 网关执行期无打开的数据库事务。
+    字段。计算能力尚未实现时明确 unavailable；生产计算 Worker 会在组合根
+    阶段拒绝启动，因此不会领取后再走到这里。
     """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:
         if ctx.snapshot is None:
             raise SnapshotInputError(
                 "计算快照缺失", location={"object_type": "calc_snapshot"})
-        return worker_app.run_compute_stage(
-            ctx.snapshot,
-            providers=computation_providers,
-            progress_fn=ctx.progress,
-        )
+        raise worker_app.ComputationUnavailableError(reason="no-provider")
     if task_type == "report":
         return executors.execute_check(ctx)
     if task_type == "dataset_build":
@@ -121,9 +112,7 @@ def run_task(
     claim: worker_app.Claim,
     *,
     worker_id: str = "",
-    isolate: bool = True,
     stop_event: Any = None,
-    computation_providers: Mapping[str, object] | None = None,
 ) -> str:
     """执行已领取的任务并落终态(带 fencing 提交/失败/取消收拢)。
 
@@ -131,12 +120,7 @@ def run_task(
         session_factory: 会话工厂(Worker 持有的唯一会话来源; 各阶段按需
             开短会话, 本函数不持有跨阶段的 Session)。
         claim: acquire_attempt 的领取结果(尝试 + 租约 + token)。
-        isolate: 计算引擎是否运行在隔离子进程(生产 True; 测试可关闭)。
         stop_event: 取消/优雅退出事件(透传给执行器检查点与隔离子进程)。
-        computation_providers: 组合根装配的 computation provider 目录
-            (Worker daemon 由 ``ApplicationContext`` 显式传入; 缺省 None
-            即无可用能力, 计算类任务经阶段网关收拢为结构化 unavailable
-            失败, 不伪造成功)。
     返回:
         终态状态: completed / failed / cancelled / lease_rejected。
     事务边界: 本函数不调用 commit/rollback, 不持有跨阶段的 Session; 任务/
@@ -166,11 +150,11 @@ def run_task(
 
     ctx = RunContext(
         task=task, claim=claim, session_factory=factory, worker_id=worker_id,
-        isolate=isolate, stop_event=stop_event, snapshot=snapshot,
+        stop_event=stop_event, snapshot=snapshot,
         progress_fn=_report_progress,
     )
     try:
-        payload = dispatch(ctx, computation_providers=computation_providers)
+        payload = dispatch(ctx)
         # 完成路径要求显式合法 outcome: 缺字段默认成功已删除, 缺失/非法
         # 即确定性失败, 绝不落成功(合法集合归 tasks 域所有)。
         outcome = payload.get("outcome")

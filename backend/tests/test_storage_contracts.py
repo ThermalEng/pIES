@@ -1,7 +1,6 @@
 """存储公开门面与审计不可变契约测试（切片 C 回归）。
 
 覆盖切片 C 发现缺口（宪法 §10–§13 + persistence/storage 手册）：
-- 容量未知或低于安全阈值拒绝写入（put 时 SYS-STORE-003 语义）；
 - 对象配额拒绝写入（OBJ-QUOTA）；
 - attach/detach/list_owners 引用语义与幂等；
 - reconcile/safe_cleanup 幂等且不误删有引用对象；
@@ -15,7 +14,7 @@ from __future__ import annotations
 import os
 os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -39,57 +38,12 @@ def _put(db, content: bytes = b"hello-storage"):
     from iesplan.storage.service import put_object
     return put_object(db, content, "text/plain", source_category="test")
 
-def test_capacity_unknown_or_low_rejects_write(monkeypatch=None):
-    """容量不可测或低于阈值时 put 拒绝（SYS-STORE-003）。
-
-    阈值显式固定为默认 2G: worker_testkit 等会将 storage_min_free_bytes 改为 0
-    (进程级单例, 全套件运行时污染“低于阈值”分支), 此处不依赖全局状态。
-    """
-    from iesplan.config import settings as _settings
-    _old_threshold = _settings.storage_min_free_bytes
-    _settings.storage_min_free_bytes = 2000000000
-    try:
-        _run_capacity_cases()
-    finally:
-        _settings.storage_min_free_bytes = _old_threshold
-
-
-def _run_capacity_cases():
-    import shutil
-    from unittest.mock import patch
-    from iesplan.storage.contracts import StorageQuotaError
-    eng = _engine()
-    db = _db(eng)
-    # 1) 容量不可测：shutil.disk_usage 抛 OSError
-    with patch("iesplan.storage.service.shutil.disk_usage", side_effect=OSError("unknown")):
-        try:
-            _put(db, b"x")
-            assert False, "应因容量未知拒绝写入"
-        except StorageQuotaError as exc:
-            assert exc.code == "SYS-STORE-003"
-    db.close()
-    # 2) 容量低于阈值：free < threshold
-    class DU:
-        free = 1
-        total = 10
-        used = 9
-    with patch("iesplan.storage.service.shutil.disk_usage", return_value=DU()):
-        eng2 = _engine()
-        db2 = _db(eng2)
-        try:
-            # storage_min_free_bytes 默认 2G，free=1 必低于阈值
-            _put(db2, b"y")
-            assert False, "应因容量不足拒绝写入"
-        except StorageQuotaError as exc:
-            assert exc.code == "SYS-STORE-003"
-        db2.close()
-
 def test_attach_detach_list_owners():
     """attach/detach/list_owners 语义与幂等。"""
     eng = _engine()
     db = _db(eng)
     h = _put(db, b"owner-test")
-    from iesplan.storage.service import attach, detach, find_refs_by_owner, list_refs
+    from iesplan.storage.service import attach, detach, find_refs_by_owner
     # attach 幂等
     r1 = attach(db, h.id, "projects", 1, ref_entity_type="projects")
     r2 = attach(db, h.id, "projects", 1, ref_entity_type="projects")
@@ -110,7 +64,7 @@ def test_reconcile_and_safe_cleanup_do_not_delete_referenced():
     eng = _engine()
     db = _db(eng)
     h1 = _put(db, b"keep-me")
-    h2 = _put(db, b"delete-me")
+    _put(db, b"delete-me")
     from iesplan.storage.service import attach, reconcile, safe_cleanup
     attach(db, h1.id, "project", 10, ref_entity_type="projects")
     db.flush()

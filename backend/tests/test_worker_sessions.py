@@ -1,13 +1,9 @@
 """Worker 会话生命周期跨会话行为测试(补正 C: 长时 attempt 不是一个事务)。
 
-只经公开阶段网关推进(``iesplan.application.worker`` 阶段命令 /
-``iesplan.worker.runner`` 执行闭环 / tasks 域公开读取), 计算执行经
-``run_task(computation_providers=...)`` 调用参数注入三段式假能力
-(generate → run → adapt 真实阶段顺序), 不绑定私有函数名与源码文本:
+只经公开阶段网关推进（``iesplan.application.worker`` 阶段命令与
+tasks 域公开读取），不涉及尚未实现的 0.8 计算链：
 
 - 进度短事务提交后即刻对其他会话可见, 调用方回滚不影响已提交进度;
-- 长执行阶段(求解/分析/导出)不持有打开的会话或数据库事务;
-- 阶段失败/租约失效不连带回滚已提交进度, 也不把未提交副作用一并提交;
 - 续租在独立会话短事务中提交, 与调用方会话状态隔离。
 
 数据库: 文件 SQLite(默认连接池: 不同会话即不同连接, 真实跨会话语义);
@@ -17,8 +13,6 @@
 from __future__ import annotations
 
 import os
-import threading
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -29,24 +23,14 @@ os.environ.setdefault("IESPLAN_QUEUE", "memory")
 import pytest  # noqa: E402
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
-from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
 from worker_testkit import setup_environment  # noqa: E402
 
 from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
-from iesplan.computation import (  # noqa: E402
-    GENERATOR_PROVIDER_KEY,
-    RESULT_ADAPTER_KEY,
-    SOLVER_RUNTIME_KEY,
-    ComputeResult,
-    ExecutionReceipt,
-    SolverBundle,
-)
 from iesplan.db import Base  # noqa: E402
 from iesplan.tasks.persistence import Task, TaskLease  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
-from iesplan.worker import runner  # noqa: E402
-from iesplan.worker.executors import EngineRunError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境(函数级文件库: 跨会话可见性按提交判定, 非同一连接假象)
@@ -89,128 +73,6 @@ def _claim(factory, task_id: int, worker_id: str = "cw-sess") -> worker_app.Clai
     return claim
 
 
-def _task_status(factory, task_id: int) -> str:
-    with factory() as db:
-        row = db.get(Task, task_id)
-        assert row is not None
-        return row.status
-
-
-# ---------------------------------------------------------------------------
-# 三段式假能力(调用参数注入, generate → run → adapt 真实阶段顺序)
-# ---------------------------------------------------------------------------
-
-
-def _test_bundle() -> SolverBundle:
-    """最小合法求解包(结构化命令, Bundle 内相对声明输出)。"""
-    return SolverBundle(
-        bundle_id="sess-bundle-1",
-        generator_ref="test.generator@0.0.0",
-        solver_ref="test.solver@0.0.0",
-        config_id="test-config",
-        inputs={"input/problem.mps": "mps-bytes"},
-        command={"executor": "test.executor@0.0.0", "arguments": ["input/problem.mps"]},
-        declared_outputs=("output/solution.json",),
-        result_adapter_ref="test.result-adapter@0.0.0",
-    )
-
-
-class _PassthroughGenerator:
-    """透传生成器(固定返回最小 Bundle; 子类覆写 generate 注入行为)。"""
-
-    @property
-    def ref(self) -> str:
-        return "test.generator@0.0.0"
-
-    def available(self) -> bool:
-        return True
-
-    def generate(self, artifact, resources, config) -> SolverBundle:
-        return _test_bundle()
-
-
-class _PassthroughRuntime:
-    """透传求解运行时(固定返回成功回执与空原始输出)。"""
-
-    @property
-    def ref(self) -> str:
-        return "test.solver@0.0.0"
-
-    def available(self) -> bool:
-        return True
-
-    def run(self, bundle: SolverBundle):
-        receipt = ExecutionReceipt(
-            bundle_id=bundle.bundle_id, generator_ref=bundle.generator_ref,
-            solver_ref=bundle.solver_ref, status="succeeded", exit_code=0,
-        )
-        return receipt, {}
-
-
-class _PassthroughAdapter:
-    """透传结果适配器(固定映射为正常完成)。"""
-
-    def available(self) -> bool:
-        return True
-
-    def adapt(self, bundle: SolverBundle, receipt, outputs) -> ComputeResult:
-        return ComputeResult(
-            bundle_id=bundle.bundle_id, status="succeeded",
-            business_outcome="normal_completion", outputs={},
-        )
-
-
-def _providers(
-    generator=None, runtime=None, adapter=None
-) -> dict[str, Any]:
-    """按组合根目录稳定键组装三段式假能力。"""
-    return {
-        GENERATOR_PROVIDER_KEY: generator or _PassthroughGenerator(),
-        SOLVER_RUNTIME_KEY: runtime or _PassthroughRuntime(),
-        RESULT_ADAPTER_KEY: adapter or _PassthroughAdapter(),
-    }
-
-
-# ---------------------------------------------------------------------------
-# 会话追踪工厂(只观测会话开关区间, 不介入业务)
-# ---------------------------------------------------------------------------
-
-
-class SessionTracker:
-    """记录每个会话的打开/关闭时刻, 回答“某时间窗内是否有会话处于打开态”。"""
-
-    def __init__(self, maker) -> None:
-        self._maker = maker
-        self.spans: list[list[float | None]] = []
-        self._lock = threading.Lock()
-
-    def __call__(self) -> Session:
-        sess = self._maker()
-        rec: list[float | None] = [time.monotonic(), None]
-        with self._lock:
-            self.spans.append(rec)
-        orig_close = sess.close
-
-        def _close(*args: Any, **kwargs: Any):
-            rec[1] = time.monotonic()
-            return orig_close(*args, **kwargs)
-
-        sess.close = _close  # type: ignore[method-assign]
-        return sess
-
-    def open_count(self) -> int:
-        with self._lock:
-            return sum(1 for opened, closed in self.spans if closed is None)
-
-    def spans_window(self, start: float, end: float) -> bool:
-        """是否有会话的生命周期覆盖整个 [start, end] 窗口(长寿命会话)。"""
-        with self._lock:
-            return any(
-                opened is not None and opened < start and (closed is None or closed > end)
-                for opened, closed in self.spans
-            )
-
-
 # ---------------------------------------------------------------------------
 # 1. 进度提交后即刻对其他会话可见
 # ---------------------------------------------------------------------------
@@ -250,112 +112,7 @@ class TestProgressVisibleAcrossSessions:
 
 
 # ---------------------------------------------------------------------------
-# 2. 长执行阶段无打开会话/无活动数据库事务
-# ---------------------------------------------------------------------------
-
-
-class TestLongPhaseHoldsNoSession:
-    def test_execute_window_has_no_open_session(
-        self, factory, env: dict[str, Any]
-    ):
-        tracker = SessionTracker(factory)
-        marks: dict[str, Any] = {}
-
-        class _SlowGenerator(_PassthroughGenerator):
-            def generate(self, artifact, resources, config) -> SolverBundle:
-                marks["start"] = time.monotonic()
-                marks["open_during"] = tracker.open_count()
-                time.sleep(0.3)  # 长时求解窗口: 期间不得有打开的会话
-                marks["end"] = time.monotonic()
-                return _test_bundle()
-
-        providers = _providers(generator=_SlowGenerator())
-        claim = _claim(tracker, env["task"].id)
-
-        status = runner.run_task(
-            tracker, claim, worker_id="w-sess", isolate=False,
-            computation_providers=providers,
-        )
-
-        assert status == "completed", status
-        assert marks["open_during"] == 0
-        assert tracker.spans_window(marks["start"], marks["end"]) is False
-        assert _task_status(factory, env["task"].id) == "completed"
-
-
-# ---------------------------------------------------------------------------
-# 3. 阶段失败不连带回滚已提交进度; 迟到收拢不写终态
-# ---------------------------------------------------------------------------
-
-
-class TestFailureDoesNotTakeCommittedProgress:
-    def test_rejected_terminal_keeps_committed_progress(
-        self, factory, env: dict[str, Any]
-    ):
-        """执行中进度已提交 → 租约中途失效 → 失败收拢被 fencing 拒绝:
-
-        已提交进度仍在, 任务保持 running(收拢回滚不连带已提交事务)。
-        阶段网关在 generate 前已上报 20% 进度(独立短事务已提交); 生成器
-        内模拟守护进程过期回收后抛错, 收拢被 fencing 拒绝。
-        """
-        claim = _claim(factory, env["task"].id)
-
-        class _ExpireGenerator(_PassthroughGenerator):
-            def generate(self, artifact, resources, config) -> SolverBundle:
-                # 模拟守护进程过期回收(独立会话提交, 执行线程不可见旧状态)
-                with factory() as killer:
-                    row = killer.execute(
-                        select(TaskLease).where(TaskLease.attempt_id == claim.attempt_id)
-                    ).scalars().one()
-                    row.status = "expired"
-                    killer.commit()
-                raise EngineRunError("求解中租约失效")
-
-        providers = _providers(generator=_ExpireGenerator())
-
-        status = runner.run_task(
-            factory, claim, worker_id="w-sess", isolate=False,
-            computation_providers=providers,
-        )
-
-        assert status == "lease_rejected", status
-        with factory() as other:
-            progress = tasks_domain.get_progress(other, claim.attempt_id)
-            assert progress is not None and progress.progress_percent == 20.0
-            assert progress.stage == "generate"
-        assert _task_status(factory, env["task"].id) == "running"
-
-    def test_failed_terminal_keeps_committed_progress(
-        self, factory, env: dict[str, Any]
-    ):
-        """执行失败 → failed 终态落库, 之前已提交进度仍在且不被改写。
-
-        阶段网关在 generate/solve 边界已上报 20%/60% 进度(各独立短事务
-        已提交); 求解运行时抛错后失败收拢落终态, 进度不受影响。
-        """
-        claim = _claim(factory, env["task"].id)
-
-        class _FailingRuntime(_PassthroughRuntime):
-            def run(self, bundle: SolverBundle):
-                raise EngineRunError("求解失败")
-
-        providers = _providers(runtime=_FailingRuntime())
-
-        status = runner.run_task(
-            factory, claim, worker_id="w-sess", isolate=False,
-            computation_providers=providers,
-        )
-
-        assert status == "failed", status
-        with factory() as other:
-            progress = tasks_domain.get_progress(other, claim.attempt_id)
-            assert progress is not None and progress.progress_percent == 60.0
-            assert progress.stage == "solve"
-        assert _task_status(factory, env["task"].id) == "failed"
-
-
-# ---------------------------------------------------------------------------
-# 4. 续租在独立会话短事务中提交
+# 2. 续租在独立会话短事务中提交
 # ---------------------------------------------------------------------------
 
 

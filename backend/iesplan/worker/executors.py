@@ -1,10 +1,6 @@
-"""任务类型执行函数（计算 Worker 职责，见宪法 §4.5/§12 与 architecture §核心业务流）。
+"""I/O 与结果检查任务的执行上下文和入口。
 
-0.8 计算未实现：计算类任务（calc/optimization/uncertainty/analysis）经
-runner 计算阶段网关执行；网关无可用 provider 时显式抛
-ComputeUnavailableError，经 runner 收拢为结构化可见失败（failed +
-TASK-SOLVE-001），不伪造成功、不 fallback 旧引擎。旧 plan 装配、旧算法选择器、
-旧命令注册与旧求解/评估代码已删除，等待 GeneratorProvider/Solver Bundle 接入。
+计算 Worker 在 0.8 前由组合根拒绝启动；本模块不保留求解执行占位或旧引擎。
 
 I/O 任务（dataset_build/export/import）执行入口同样未实现：抛 tasks 域
 明确执行不可用错误，经 runner 收拢为结构化失败（failed +
@@ -52,14 +48,13 @@ class RunContext:
     的不可变值对象); 本模块不直接引用 ``iesplan.models.*``。需要权威
     状态读写时, 经 ``session_factory`` 开新短会话调用 application.worker
     短事务用例, 长时运算期间不持有打开的会话或数据库事务。本层不解释
-    数据集字段、不物化时间轴(无 axis 字段), 输入解释归 provider 所有。
+    数据集字段或计算输入。
     """
 
     task: worker_app.TaskRecord
     claim: worker_app.Claim
     session_factory: Callable[[], Session]
     worker_id: str = ""
-    isolate: bool = True
     stop_event: threading.Event | None = None
     progress_fn: Callable[[float, str, dict | None], None] | None = None
     snapshot: worker_app.CalcSnapshotRecord | None = None  # 计算类任务快照记录; 网关读出

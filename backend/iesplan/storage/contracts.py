@@ -137,13 +137,6 @@ class ObjectCorruptError(AppError):
     http_status = 500
 
 
-class StorageQuotaError(ConflictError):
-    """磁盘剩余空间低于安全阈值(或容量不可测), 拒绝写入(STO-06)。"""
-
-    code = "SYS-STORE-003"
-    message_key = "ies.error.storage_quota"
-
-
 class ObjectQuotaError(ConflictError):
     """对象配额(quota_bytes)超限, 拒绝写入(01 §10.1)。"""
 

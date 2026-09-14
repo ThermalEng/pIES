@@ -86,31 +86,8 @@ class ExecutionUnavailableError(AppError):
     message_key = "ies.diag.task.exec_unavailable"
 
 
-class _FrozenSeq(tuple):
-    """冻结后的快照封存序列(不可变, 与 JSON 列表结构相等)。
-
-    快照去重(``_snapshot_inputs_equal``)把已冻结记录与新鲜封存 JSON 逐项
-    ``==`` 比较: 普通 ``tuple`` 永不等于 ``list``, 会把复用误判为新增。
-    本类型保持元组不可变语义, 仅让相等性按 JSON 结构值判定, 既不断复用,
-    也不共享可变 ``list``。
-    """
-
-    __slots__ = ()
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, (list, tuple)):
-            return list(self) == list(other)
-        return NotImplemented
-
-    def __ne__(self, other: object) -> bool:
-        result = self.__eq__(other)
-        return result if result is NotImplemented else not result
-
-    __hash__ = tuple.__hash__
-
-
 def _freeze_snapshot_value(value: object) -> object:
-    """递归冻结快照封存值(dict → MappingProxy, list/tuple → 不可变序列)。
+    """递归冻结快照封存值(dict → MappingProxy, list/tuple → tuple)。
 
     只做表示冻结, 不校验内容: 快照创建边界已签发, 运行期不再复核。
     """
@@ -119,7 +96,7 @@ def _freeze_snapshot_value(value: object) -> object:
             {key: _freeze_snapshot_value(item) for key, item in value.items()}
         )
     if isinstance(value, (list, tuple)):
-        return _FrozenSeq(_freeze_snapshot_value(item) for item in value)
+        return tuple(_freeze_snapshot_value(item) for item in value)
     return value
 
 
@@ -128,21 +105,21 @@ class CalcSnapshotRecord:
     """计算快照（calc_snapshots 表公开视图，不可变，任务唯一输入）。
 
     长期快照字段深度不可变: 构造时把封存 ``dict``/``list`` 递归冻结为
-    只读 ``MappingProxy``/不可变序列(先复制再冻结), 不与任何模块共享
-    可变 ``dict``/``list``; 冻结序列与 JSON 列表结构相等, 快照去重的
-    逐项 ``==`` 比较不受影响。
+    只读 ``MappingProxy``/``tuple``（先复制再冻结），不与任何模块共享
+    可变 ``dict``/``list``。需要与 JSON 输入比较或序列化时，由调用边界
+    统一转回普通 JSON 值。
     """
 
     id: int
     project_version_id: int
     dataset_version_ids: tuple[int, ...]
-    calc_config_snapshot: dict[str, Any]
+    calc_config_snapshot: Mapping[str, Any]
     random_seed: int
     program_version: str | None = None
-    extension_versions: dict[str, Any] | None = None
-    tolerances: dict[str, Any] | None = None
+    extension_versions: Mapping[str, Any] | None = None
+    tolerances: Mapping[str, Any] | None = None
     canonical_assembly_text: str | None = None
-    assembly_receipt: dict[str, Any] | None = None
+    assembly_receipt: Mapping[str, Any] | None = None
     created_by: int = 0
 
     def __post_init__(self) -> None:

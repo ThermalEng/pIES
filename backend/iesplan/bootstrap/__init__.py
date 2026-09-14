@@ -4,54 +4,44 @@
 (API / compute Worker / I/O Worker)装配所需能力子集, 输出完整
 ``ApplicationContext`` 或明确启动失败。
 
-- ``assemble_api``: 装配 database + storage + devices 2.0 注册表 +
-  空 computation provider 目录(0.8 未实现, 明确无可用 provider);
-- ``assemble_compute_worker``: 计算所需子集(database + devices 注册表 +
-  空 computation provider 目录, 不含 storage);
+- ``assemble_api``: 装配 database + storage + devices 2.0 注册表;
+- ``assemble_compute_worker``: 0.8 前明确拒绝启动;
 - ``assemble_io_worker``: I/O 所需子集(database + storage, 不含 devices
-  注册表与 computation provider)。
+  注册表)。
 
 失败语义: 任一必需依赖装配失败即抛异常(启动失败), 不发布半初始化
-状态, 不设 fallback。``computation_providers`` 当前允许为空(0.8 延期),
-必需 provider 清单见 ``REQUIRED_COMPUTATION_PROVIDERS``(当前为空, 故
-不触发缺失异常; 未来登记必需 provider 后缺失即启动失败)。
+状态, 不设 fallback。计算能力将在 0.8 实现；当前计算 Worker 组合根
+明确拒绝启动，因而不会领取无法执行的计算任务。
 
 本包只做装配与健康聚合, 不实现业务规则, 不新增全局 registry(装配结果
 由调用方持有, API 进程挂在 ``app.state.bootstrap_context``)。
 
-领域表与触发器规则由拥有者领域公开门面导出(``install_tables`` /
-``install_triggers`` / ``IMMUTABLE_TABLES``, 唯一真相仍归各域
-persistence 所有), 本包静态导入各域公开门面并显式编排调用钩子
-(``install_domain_tables`` / ``collect_trigger_statements`` /
-``collect_immutable_tables``), 不集中拥有跨领域表名与规则, 亦不定义
-多余的钩子协议, 不做字符串表驱动的动态导入。
+领域 ORM 在拥有者领域公开门面加载时完成 metadata 注册；触发器规则由
+各领域公开门面导出。本包只静态导入公开门面并收集真实触发器语句，不设
+无行为的表安装钩子，也不做字符串驱动的动态导入。
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Never
 
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
 from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import model as model_domain
-from iesplan import package as package_domain
+from iesplan import package as package_domain  # noqa: F401 - 加载本域 ORM 声明
 from iesplan import project as project_domain
 from iesplan import results as results_domain
-from iesplan import storage as storage_domain
+from iesplan import storage as storage_domain  # noqa: F401 - 加载本域 ORM 声明
 from iesplan import tasks as tasks_domain
 
 logger = logging.getLogger(__name__)
 
-#: computation 必需 provider 名单(当前为空: 0.8 未实现, 允许无可用 provider)。
-#: 未来在此登记必需 provider 后, ``assemble_*`` 在缺失时抛异常(启动失败)。
-REQUIRED_COMPUTATION_PROVIDERS: tuple[str, ...] = ()
 
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ApplicationContext:
     """一次装配的完整应用上下文(只暴露模块公开门面与健康能力)。"""
 
@@ -61,10 +51,6 @@ class ApplicationContext:
     storage: Any | None = None
     #: devices 2.0 注册状态对象(未装配该能力时为 None)
     device_registry: Any | None = None
-    #: computation provider 目录(当前可为空, 明确无可用 provider)
-    computation_providers: dict[str, object] = field(default_factory=dict)
-    #: 进程配置单例
-    settings: Any | None = None
 
     def health(self) -> dict[str, str]:
         """各已装配依赖的健康状态(值仅为 ``"ok"`` 或 ``"unavailable"``)。
@@ -153,24 +139,6 @@ def _configure_queue_mode(mode: str) -> None:
     identity_module.configure_queue_mode(mode)
 
 
-def install_domain_tables() -> None:
-    """显式编排各领域表安装钩子: 按顺序调用拥有者公开门面 install_tables()。
-
-    只做导入注册(装载各域 persistence 即完成 Base.metadata 注册), 不建表、
-    不迁移、不种子; 建表与触发器部署由 ``_assemble`` 经 ``db.init_db`` 完成。
-    """
-    audit_domain.install_tables()
-    configuration_domain.install_tables()
-    dataset_domain.install_tables()
-    identity_domain.install_tables()
-    model_domain.install_tables()
-    package_domain.install_tables()
-    project_domain.install_tables()
-    results_domain.install_tables()
-    storage_domain.install_tables()
-    tasks_domain.install_tables()
-
-
 def collect_trigger_statements() -> tuple[str, ...]:
     """编排收集各领域触发器部署语句: 按顺序拼接拥有者公开门面 install_triggers() 结果。
 
@@ -214,88 +182,74 @@ def _assemble(
     with_registry: bool,
     seed_admin: bool,
 ) -> ApplicationContext:
-    """通用装配: 显式安装领域表 → 建表/触发器/种子 → 装配能力子集。
+    """通用装配：加载领域门面后建表、部署触发器并装配能力子集。
 
     异常直接抛给调用方(启动失败, 不发布半初始化状态)。
     """
     from iesplan import db as db_module
-    from iesplan.config import settings
 
     # 0. 队列/限速后端选型(组合根唯一环境解释点): 一次解析部署环境,
     #    扇出给各接收模块; 业务模块只接收传入配置, 不再自行解释环境选型。
     _configure_queue_mode(_resolve_queue_mode())
-    # 1. 各领域表安装(显式编排拥有者公开门面 install_tables() 钩子)
-    install_domain_tables()
-    # 2. 建表 + 不可变触发器(规则由各领域公开门面 install_triggers() 所有, 此处只编排收集)
+    # 1. 领域公开门面已在模块加载时注册各自 ORM；此处建表并部署触发器。
     db_module.init_db(trigger_statements=collect_trigger_statements())
-    # 3. 内置身份种子(幂等)
+    # 2. 内置身份种子(幂等)
     if seed_admin:
         from iesplan.application.identity import seed_builtin_admin
 
         with db_module.SessionLocal() as session:
             seed_builtin_admin(session)
-    # 4. 存储适配能力(公开句柄)
+    # 3. 存储适配能力(公开句柄)
     storage: Any | None = None
     if with_storage:
         from iesplan.storage.service import get_blob_store
 
         storage = get_blob_store()
-    # 5. devices 2.0 注册表(任一设备校验失败即整体拒绝, 原子发布)
+    # 4. devices 2.0 注册表(任一设备校验失败即整体拒绝, 原子发布)
     device_registry: Any | None = None
     if with_registry:
         from iesplan.devices import init_registry
 
         device_registry = init_registry()
-    # 6. computation provider 目录(0.8 未实现: 明确为空, 无可用 provider;
-    #    目录唯一来源为 computation 门面, 此处只取不建)
-    from iesplan.computation import available_providers
-
-    computation_providers: dict[str, object] = dict(available_providers())
-    missing = [name for name in REQUIRED_COMPUTATION_PROVIDERS if name not in computation_providers]
-    if missing:
-        raise RuntimeError(f"必需 computation provider 缺失: {missing}, 启动失败")
     context = ApplicationContext(
         session_factory=db_module.SessionLocal,
         storage=storage,
         device_registry=device_registry,
-        computation_providers=computation_providers,
-        settings=settings,
     )
     logger.info(
-        "组合根装配完成: storage=%s registry=%s computation_providers=%s",
+        "组合根装配完成: storage=%s registry=%s",
         "assembled" if storage is not None else "skipped",
         (
             f"assembled({len(device_registry.snapshot())} devices)"
             if device_registry is not None
             else "skipped"
         ),
-        "none-available(0.8 deferred)" if not computation_providers else sorted(computation_providers),
     )
     return context
 
 
 def assemble_api() -> ApplicationContext:
-    """装配 API 进程: database + storage + devices 2.0 注册表 + 空 provider 目录。"""
+    """装配 API 进程：database、storage 与 devices 2.0 注册表。"""
     return _assemble(with_storage=True, with_registry=True, seed_admin=True)
 
 
-def assemble_compute_worker() -> ApplicationContext:
-    """装配计算 Worker: database + devices 注册表 + 空 provider 目录(不含 storage)。"""
-    return _assemble(with_storage=False, with_registry=True, seed_admin=True)
+def assemble_compute_worker() -> Never:
+    """计算能力将在 0.8 提供；当前拒绝启动，避免领取后再失败。"""
+    from iesplan.computation import ComputationUnavailableError
+
+    raise ComputationUnavailableError(reason="no-provider")
 
 
 def assemble_io_worker() -> ApplicationContext:
-    """装配 I/O Worker: database + storage(不含 devices 注册表与 provider 目录)。"""
+    """装配 I/O Worker：database 与 storage，不含 devices 注册表。"""
     return _assemble(with_storage=True, with_registry=False, seed_admin=True)
 
 
 __all__ = [
-    "REQUIRED_COMPUTATION_PROVIDERS",
     "ApplicationContext",
     "assemble_api",
     "assemble_compute_worker",
     "assemble_io_worker",
     "collect_immutable_tables",
     "collect_trigger_statements",
-    "install_domain_tables",
 ]

@@ -12,6 +12,7 @@ JSON 工具:递归安全化 + 规范化序列化。
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -24,7 +25,7 @@ except ImportError:  # pragma: no cover
 
 def jsonable(value: Any) -> Any:
     """递归转换为 JSON 安全值。"""
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {key: jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [jsonable(item) for item in value]

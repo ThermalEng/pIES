@@ -1,4 +1,4 @@
-"""对象存储服务(STO-01~07): 按对象 id 寻址的写入/读取/引用/清理/门禁/恢复。
+"""对象存储服务(STO-01~07): 按对象 id 寻址的写入/读取/引用/清理/恢复。
 
 对应架构宪法 §10 存储与数据生命周期 / §13 故障与健康语义、modules/storage §对象清理恢复路径 与 domain-model §对象生命周期。本模块是对象域唯一写入单元:
 
@@ -16,7 +16,7 @@
   pending_delete_until), 保留期内可 undelete / 重新 attach 恢复;
   purge_expired 只对已过保留期的对象物理删文件 + 删记录(管理员可显式调用,
   reconcile 巡检时兜底调用), 从而为明显危险误操作保留延迟删除与恢复路径;
-- 存储门禁(STO-06): 磁盘容量不可测时拒绝新写入并降级 readiness;
+- 健康观测(STO-06): 管理面报告磁盘余量，不用容量猜测替代真实写入结果;
 - 恢复(STO-04): reconcile 幂等清理超龄临时文件、登记或删除无元数据最终文件、
   报告有元数据但缺文件的损坏。
 
@@ -44,11 +44,9 @@ from iesplan.storage.contracts import (
     ObjectCorruptError,
     ObjectHandle,
     ObjectNotPendingDeletionError,
-    ObjectOwner,
     RefInfo,
     ReferenceNotFoundError,
     RetentionPolicy,
-    StorageQuotaError,
 )
 from iesplan.storage.persistence import (
     OBJ_STATUS_DELETED,
@@ -184,26 +182,6 @@ def _match_retention_rule(rules: list[RetentionPolicy], obj: StoredObject) -> Re
     return matched
 
 
-def _check_disk_capacity() -> None:
-    """磁盘余量门禁(STO-06): 低于安全阈值**或容量不可测**拒绝写入。
-
-    容量状态未知不再静默放行: 拒绝新写入并使 readiness 降级, 保留只读能力。
-    """
-    try:
-        free = shutil.disk_usage(settings.data_dir).free
-    except OSError as exc:
-        raise StorageQuotaError(
-            "",
-            params={"free": -1, "safe_threshold": settings.storage_min_free_bytes,
-                    "reason": "capacity_unknown"},
-        ) from exc
-    if free < settings.storage_min_free_bytes:
-        raise StorageQuotaError(
-            "",
-            params={"free": free, "safe_threshold": settings.storage_min_free_bytes},
-        )
-
-
 # ---------------------------------------------------------------------------
 # 写入(STO-01/03: 公开门面, 原子落盘 + savepoint 竞争处理)
 # ---------------------------------------------------------------------------
@@ -224,7 +202,7 @@ def put_object(
 ) -> ObjectHandle:
     """写入新对象(架构宪法 §10 存储与数据生命周期), 返回公开句柄。
 
-    流程: 门禁 → 生成对象 id → BlobStore 原子落盘 → 新增元数据行 →
+    流程: 生成对象 id → BlobStore 原子落盘 → 新增元数据行 →
     (可选)建立 owner 引用。文件完整落盘后才建对象行, 对象行 flush 后才建引用。
 
     每次写入新建对象行(无内容去重); 寻址键为对象 id(oid 随机生成,
@@ -241,17 +219,14 @@ def put_object(
     返回:
         ObjectHandle(新建对象)。
     """
-    # 1. 门禁: 磁盘余量(23.3, 含容量不可测拒绝; 新对象无配额, quota 检查无意义)
-    _check_disk_capacity()
-
-    # 2. 对象 id(随机 64 位 hex, 满足 ck_objects_oid; 文件名即 oid)
+    # 1. 对象 id(随机 64 位 hex, 满足 ck_objects_oid; 文件名即 oid)
     oid = secrets.token_hex(32)
 
-    # 3. BlobStore 原子落盘(临时区 → fsync → rename)
+    # 2. BlobStore 原子落盘(临时区 → fsync → rename)
     store = get_blob_store()
     storage_path = store.put_blob(content, oid)
 
-    # 4. 元数据行(本函数只 flush, 提交/回滚由调用方负责)
+    # 3. 元数据行(本函数只 flush, 提交/回滚由调用方负责)
     obj = StoredObject(
         oid=oid,
         size_bytes=len(content),
@@ -264,8 +239,8 @@ def put_object(
     db.add(obj)
     db.flush()
 
-    # 5. 对象创建审计由需要的公开业务用例在成功路径记录; 存储层不反向依赖 audit。
-    # 6. 初始业务引用(对象已完整, 此时才允许建立引用)
+    # 4. 对象创建审计由需要的公开业务用例在成功路径记录; 存储层不反向依赖 audit。
+    # 5. 初始业务引用(对象已完整, 此时才允许建立引用)
     if ref_type is not None and ref_id is not None:
         attach(
             db, obj.id, ref_type, ref_id,
@@ -877,9 +852,10 @@ def estimate_storage(task_type: str, n_hours: int, samples: int) -> int:
 
 
 def check_capacity(db: Session) -> dict:
-    """存储门禁检查: 磁盘剩余空间 vs 安全阈值(23.3)。
+    """管理面容量观测: 磁盘剩余空间 vs 安全阈值(23.3)。
 
-    STO-06: 容量不可测(free < 0)时 ok=False 并显式标记 reason, 不静默放行。
+    容量不可测时标记健康降级；此观测不参与写入前判断，实际写入失败由
+    BlobStore 原样报告。
     返回: {free_bytes, safe_threshold, ok, message, reason?}。
     """
     try:
@@ -890,7 +866,7 @@ def check_capacity(db: Session) -> dict:
     ok = free > threshold
     result: dict = {"free_bytes": free, "safe_threshold": threshold, "ok": ok}
     if free < 0:
-        result["message"] = "无法读取磁盘剩余空间, 新写入将被拒绝"
+        result["message"] = "无法读取磁盘剩余空间"
         result["reason"] = "capacity_unknown"
     elif ok:
         result["message"] = f"可用空间充足: {free / (1 << 30):.2f} GiB > 安全阈值 {threshold / (1 << 30):.2f} GiB"

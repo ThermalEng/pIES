@@ -12,8 +12,8 @@
 ## 运行
 
 ```bash
-# 1. 构建并启动应用(web + backend + worker + io_worker + postgres + redis)
-docker compose up -d --build web backend worker io_worker
+# 1. 构建并启动当前应用（计算 Worker 随 0.8 接入）
+docker compose up -d --build web backend io_worker
 
 # 2. 等待 backend 就绪(首次启动会自动 seed admin + 初始化数据库)
 #    管理员初始密码: iesplan-admin-initial(首次运行 global-setup 自动完成首登改密)

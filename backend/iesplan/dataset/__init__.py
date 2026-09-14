@@ -58,11 +58,6 @@ set_dataset_status = persistence.set_dataset_status
 IMMUTABLE_TABLES = persistence.IMMUTABLE_TABLES
 
 
-def install_tables() -> None:
-    """公开生命周期钩子: 导入本域 persistence 即完成 Base.metadata 表注册(幂等, 无其他副作用)。"""
-    persistence.install_tables()
-
-
 def install_triggers() -> tuple[str, ...]:
     """公开生命周期钩子: 返回本域触发器部署语句(按执行序, 供组合根编排收集)。"""
     return persistence.install_triggers()
@@ -112,6 +107,5 @@ __all__ = [
     "unit_matches",
     "validate_dataset",
     "IMMUTABLE_TABLES",
-    "install_tables",
     "install_triggers",
 ]

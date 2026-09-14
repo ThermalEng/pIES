@@ -176,7 +176,7 @@ class TestUnimplementedIoNeverSucceeds:
         task = _add_task(db, env, task_type)
         claim = _claim_task(db, task.id)
 
-        status = runner.run_task(factory, claim, worker_id="w-io", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-io")
         db.expire_all()
 
         assert status == "failed", (task_type, status)
@@ -213,7 +213,7 @@ class TestCompletionRequiresExplicitOutcome:
             lambda ctx: {"result_kind": "external", "status": "ok"},
         )
 
-        status = runner.run_task(factory, claim, worker_id="w-outcome", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-outcome")
         db.expire_all()
 
         assert status == "failed", status
@@ -232,7 +232,7 @@ class TestCompletionRequiresExplicitOutcome:
             lambda ctx: {"result_kind": "external", "status": "ok", "outcome": "not_a_real_outcome"},
         )
 
-        status = runner.run_task(factory, claim, worker_id="w-outcome", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-outcome")
         db.expire_all()
 
         assert status == "failed", status
@@ -292,7 +292,7 @@ class TestReportCheckDelegatedToResultsCapability:
         task = _add_task(db, env, "report")
         claim = _claim_task(db, task.id)
 
-        status = runner.run_task(factory, claim, worker_id="w-report", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-report")
         db.expire_all()
 
         # 证据不足是显式、合法的业务结局, 不得判成功。
@@ -321,7 +321,7 @@ class TestReportNoEvidencePath:
         task = _add_task(db, env, "report")
         claim = _claim_task(db, task.id)
 
-        status = runner.run_task(factory, claim, worker_id="w-report", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-report")
         db.expire_all()
 
         assert status == "completed", status
@@ -464,7 +464,7 @@ class TestWorkerExecutionGuards:
         row.status = "expired"  # 模拟守护进程过期回收
         db.commit()
 
-        status = runner.run_task(factory, claim, worker_id="w-report", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-report")
         db.expire_all()
 
         assert status == "lease_rejected", status
@@ -480,7 +480,7 @@ class TestWorkerExecutionGuards:
         queue.set_cancel(task.id, "test-cancel")
         db.commit()
 
-        status = runner.run_task(factory, claim, worker_id="w-report", isolate=False)
+        status = runner.run_task(factory, claim, worker_id="w-report")
         db.expire_all()
 
         assert status == "cancelled", status

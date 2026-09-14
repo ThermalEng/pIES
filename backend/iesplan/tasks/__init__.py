@@ -72,16 +72,6 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def install_tables() -> None:
-    """公开生命周期钩子: 装载本域 persistence 即完成 Base.metadata 表注册(幂等, 无其他副作用)。
-
-    延迟装载: 本门面导入期不装载 persistence, 首次调用本钩子时装载。
-    """
-    from iesplan.tasks import persistence as _persistence
-
-    _persistence.install_tables()
-
-
 def install_triggers() -> tuple[str, ...]:
     """公开生命周期钩子: 返回本域触发器部署语句(按执行序, 供组合根编排收集)。"""
     from iesplan.tasks import persistence as _persistence
@@ -234,6 +224,5 @@ __all__ = [
     "set_task_status",
     "upsert_progress",
     "IMMUTABLE_TABLES",
-    "install_tables",
     "install_triggers",
 ]

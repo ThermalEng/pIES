@@ -19,6 +19,8 @@ import dataclasses
 import inspect
 from pathlib import Path
 
+import pytest
+
 import iesplan.audit as audit
 import iesplan.configuration as configuration
 import iesplan.dataset as dataset
@@ -112,6 +114,22 @@ def test_contract_records_are_frozen():
             assert obj.__dataclass_params__.frozen, f"{domain}.{name} 必须 frozen"
             checked += 1
     assert checked >= 20, f"公开记录过少({checked})，契约疑似缺失"
+
+
+def test_calc_snapshot_record_freezes_nested_values():
+    """任务快照公开记录不与调用方共享可变容器。"""
+    raw = {"params": {"series": [1, 2]}}
+    record = tasks.CalcSnapshotRecord(
+        id=1,
+        project_version_id=2,
+        dataset_version_ids=(3,),
+        calc_config_snapshot=raw,
+        random_seed=4,
+    )
+    raw["params"]["series"].append(5)
+    assert record.calc_config_snapshot["params"]["series"] == (1, 2)
+    with pytest.raises(TypeError):
+        record.calc_config_snapshot["params"] = {}  # type: ignore[index]
 
 
 def test_domain_errors_reuse_base_codes():

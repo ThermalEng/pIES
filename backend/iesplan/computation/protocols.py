@@ -13,10 +13,8 @@
 反向只在 ResultAdapter 发生; 求解选项在计算包生成时固定。SolverRuntime
 不读取装配语义、不判断设备类型、不补数据或切换 solver。
 
-本模块只声明边界形状与不可变数据载体, 不实现任何 0.8 算法。当前无任何
-可用 provider(见 ``iesplan.computation.providers``), 任何实际计算请求都
-必须以 ``ComputationUnavailableError`` 明确失败, 禁止静默回退、禁止猜测
-默认结果。
+本模块只声明边界形状与不可变数据载体，不实现任何 0.8 算法。当前计算
+Worker 在组合根明确拒绝启动。
 
 深度不可变: 所有跨越边界的载体均为 frozen dataclass, 容器字段在构造时
 递归冻结(映射 → ``MappingProxyType``, 序列 → ``tuple``); ``to_dict()``
