@@ -1,4 +1,4 @@
-"""模型域 repository SQL 实现（system_graphs/devices/ports/connections，归属 model）。
+"""模型域 repository SQL 实现（system_graphs/devices/ports/connections + 模板/项目模型表，归属 model）。
 
 实现规则：
 - 查询、写入、flush 由本模块完成；绝不 commit/rollback；
@@ -13,9 +13,24 @@ from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select, text
+import sqlalchemy as sa
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    delete,
+    select,
+    text,
+)
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Mapped, Session, mapped_column
+
+from iesplan.db import Base, JSONB, bigint_pk
 
 from iesplan.model.contracts import (
     ConnectionRecord,
@@ -29,10 +44,6 @@ from iesplan.model.contracts import (
     ProjectModelRecord,
     TemplateDraftRevisionRecord,
 )
-from iesplan.models.draft_revision import ModelTemplateDraftRevision
-from iesplan.models.model import Connection, Device, Port, SystemGraph
-from iesplan.models.model_template import ModelTemplate, ModelTemplateRevision
-from iesplan.models.project_model import ProjectModel
 
 
 def _now() -> datetime:
@@ -880,4 +891,354 @@ def allocate_project_model_suffix(db: Session, project_id: int) -> int:
         "项目模型编号分配失败(并发冲突), 请重试",
         params={"project_id": project_id},
         location={"object_type": "project_model", "project_id": str(project_id)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# ORM 表定义: Wave2A 由 iesplan.models.model 迁入, 表真相归本域所有。
+# ---------------------------------------------------------------------------
+
+class SystemGraph(Base):
+    """系统图(工作图可改, 版本图不可变, 01 §4.1)。"""
+
+    __tablename__ = "system_graphs"
+
+    id: Mapped[int] = bigint_pk()
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    draft_id: Mapped[int | None] = mapped_column(ForeignKey("drafts.id"))
+    project_version_id: Mapped[int | None] = mapped_column(ForeignKey("project_versions.id"))
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        # 互斥: 一张图要么是工作图, 要么是版本图
+        CheckConstraint(
+            "(draft_id IS NULL) <> (project_version_id IS NULL)", name="ck_system_graphs_exclusive"
+        ),
+        Index("idx_system_graphs_draft", "draft_id"),
+        Index("idx_system_graphs_version", "project_version_id"),
+        # 每项目至多一张工作图(并发建图防重, 01 §4.1; 与草稿 uq_drafts_current 配套)
+        Index(
+            "uq_system_graphs_working",
+            "project_id",
+            unique=True,
+            postgresql_where=sa.text("draft_id IS NOT NULL"),
+            sqlite_where=sa.text("draft_id IS NOT NULL"),
+        ),
+    )
+
+
+class Device(Base):
+    """设备(类型、存量/新增、参数、模型精度, 01 §4.2)。"""
+
+    __tablename__ = "devices"
+
+    id: Mapped[int] = bigint_pk()
+    graph_id: Mapped[int] = mapped_column(ForeignKey("system_graphs.id"), nullable=False)
+    device_type: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
+    model_fidelity: Mapped[str] = mapped_column(Text, nullable=False, server_default="medium")
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "device_type IN ('generator','boiler','chiller','pv','wind','storage','load',"
+            "'source','sink','converter','network','other')",
+            name="ck_devices_type",
+        ),
+        CheckConstraint("kind IN ('existing','new')", name="ck_devices_kind"),
+        CheckConstraint("model_fidelity IN ('low','medium','high')", name="ck_devices_fidelity"),
+        CheckConstraint("status IN ('active','retired')", name="ck_devices_status"),
+        UniqueConstraint("graph_id", "name", name="uq_devices_graph_name"),
+        Index("idx_devices_graph", "graph_id", "device_type"),
+        Index("idx_devices_kind", "graph_id", "kind"),
+    )
+
+
+class Port(Base):
+    """端口(01 §4.3)。"""
+
+    __tablename__ = "ports"
+
+    id: Mapped[int] = bigint_pk()
+    device_id: Mapped[int] = mapped_column(ForeignKey("devices.id"), nullable=False)
+    port_type: Mapped[str] = mapped_column(Text, nullable=False)
+    direction: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    capacity: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "port_type IN ('electric','thermal','cooling','fuel','water','data')",
+            name="ck_ports_type",
+        ),
+        CheckConstraint("direction IN ('in','out','bidirectional')", name="ck_ports_direction"),
+        UniqueConstraint("device_id", "name", name="uq_ports_device_name"),
+        Index("idx_ports_device", "device_id"),
+        Index("idx_ports_type", "port_type"),
+    )
+
+
+class Connection(Base):
+    """连接(01 §4.4)。"""
+
+    __tablename__ = "connections"
+
+    id: Mapped[int] = bigint_pk()
+    graph_id: Mapped[int] = mapped_column(ForeignKey("system_graphs.id"), nullable=False)
+    from_port_id: Mapped[int] = mapped_column(ForeignKey("ports.id"), nullable=False)
+    to_port_id: Mapped[int] = mapped_column(ForeignKey("ports.id"), nullable=False)
+    conn_type: Mapped[str] = mapped_column(Text, nullable=False)
+    capacity: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    loss_rate: Mapped[float] = mapped_column(Numeric(6, 4), nullable=False, server_default=sa.text("0"))
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "conn_type IN ('electric_line','thermal_pipe','cooling_pipe','fuel_pipe','data_link')",
+            name="ck_connections_type",
+        ),
+        CheckConstraint("loss_rate BETWEEN 0 AND 1", name="ck_connections_loss_rate"),
+        CheckConstraint("from_port_id <> to_port_id", name="ck_connections_no_self_loop"),
+        UniqueConstraint(
+            "graph_id", "from_port_id", "to_port_id", "conn_type", name="uq_connections_ends"
+        ),
+        Index("idx_connections_from", "from_port_id"),
+        Index("idx_connections_to", "to_port_id"),
+        Index("idx_connections_graph", "graph_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ORM 表定义: Wave2A 由 iesplan.models.model_template 迁入, 表真相归本域所有。
+# ---------------------------------------------------------------------------
+
+class ModelTemplate(Base):
+    """用户模型模板主表(草稿区 + 生命周期状态)。
+
+    ``template_id`` 为稳定公开 ID(模板 YAML 声明的 ``device.id``), 同一
+    用户内唯一; 创建后不可变更。``draft_*`` 列保存未发布的草稿内容
+    (对象引用 + 规范摘要 + 乐观锁 revision); ``published_revision`` 为
+    最新已发布 revision(0 表示尚未发布)。
+    """
+
+    __tablename__ = "model_templates"
+
+    id: Mapped[int] = bigint_pk()
+    #: 稳定模板 ID(命名空间字符串, 同一用户内唯一; 不可变更)
+    template_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 所有者(只有所有者可见/可编辑自己的模板)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    #: 生命周期状态: draft(未发布) / published(已发布且启用) / disabled(已发布但停用)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=sa.text("'draft'"))
+    #: 简短说明(用户自述, 不参与引用与计算)
+    description: Mapped[str | None] = mapped_column(Text)
+    #: 客户端提交的 slug（与稳定 ID 的 slug 部分一致）
+    slug: Mapped[str | None] = mapped_column(Text)
+    #: 公开命名空间快照（分配时命名空间，终身不变）
+    public_namespace: Mapped[str | None] = mapped_column(Text)
+    #: 草稿 YAML 对象引用(objects.id; 无草稿时 NULL) — 兼容字段，权威为 draft_revisions
+    draft_yaml_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
+    #: 草稿最近一次校验的聚合诊断 JSON 对象引用(objects.id; 无草稿时 NULL)
+    draft_diagnostics_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
+    #: 草稿内容是否声明顶层 inputs(列表/表单生成依据)
+    draft_has_inputs: Mapped[bool | None] = mapped_column(sa.Boolean)
+    #: 草稿乐观锁修订(每次保存草稿 +1; 并发编辑以 expected_revision 拒绝)
+    draft_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("0"))
+    draft_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: 当前草稿 revision 行指针（不可变历史）
+    current_draft_revision_id: Mapped[int | None] = mapped_column(ForeignKey("model_template_draft_revisions.id"))
+    #: 最新发布 revision 行指针
+    current_published_revision_id: Mapped[int | None] = mapped_column(ForeignKey("model_template_revisions.id"))
+    #: 最新已发布 revision(0 = 尚未发布)
+    published_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("0"))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('draft','published','disabled')", name="ck_model_templates_status"),
+        CheckConstraint("draft_revision >= 0", name="ck_model_templates_draft_revision"),
+        CheckConstraint("published_revision >= 0", name="ck_model_templates_published_revision"),
+        #: 稳定 ID 全局唯一（新命名空间全局唯一）
+        UniqueConstraint("template_id", name="uq_model_templates_template_id"),
+        #: 同一用户 slug 唯一（避免重复）
+        UniqueConstraint("owner_id", "slug", name="uq_model_templates_owner_slug"),
+        Index("idx_model_templates_owner", "owner_id"),
+    )
+
+class ModelTemplateRevision(Base):
+    """不可变模板发布 revision(每次发布一行; 永不修改或删除)。
+
+    相同规范内容幂等返回同一 revision
+    兜底并发)。``yaml_object_id`` 保存规范 YAML 字节, ``receipt_object_id``
+    保存校验回执, ``summary_object_id`` 保存结构摘要 JSON。
+    """
+
+    __tablename__ = "model_template_revisions"
+
+    id: Mapped[int] = bigint_pk()
+    #: 模板主表行(模板删除草稿时 revision 不删除; 引用保留)
+    template_id: Mapped[int] = mapped_column(ForeignKey("model_templates.id"), nullable=False)
+    #: 单调递增发布序号(从 1 开始; 同模板内唯一)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 顶层 inputs 叶子数量(表单生成规模提示; 无 inputs 为 0)
+    input_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("0"))
+    #: 校验诊断 JSON 对象引用(objects.id; 发布前最后校验的聚合诊断)
+    diagnostics_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
+    #: 幂等键(发布重复提交返回同一逻辑结果; 同模板内唯一)
+    idempotency_key: Mapped[str | None] = mapped_column(Text)
+    #: 规范 YAML 对象引用(objects.id)
+    yaml_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+    #: 校验回执对象引用(objects.id)
+    receipt_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+    #: 结构摘要 JSON 对象引用(objects.id)
+    summary_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+    published_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_model_template_revisions_revision"),
+        CheckConstraint("input_count >= 0", name="ck_model_template_revisions_input_count"),
+
+        UniqueConstraint("template_id", "revision", name="uq_model_template_revisions_revision"),
+        #: 同内容幂等(重复发布相同规范内容返回同一 revision)
+
+        Index("idx_mtr_template", "template_id"),
+        Index("idx_mtr_idem_key", "template_id", "idempotency_key"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ORM 表定义: Wave2A 由 iesplan.models.draft_revision 迁入, 表真相归本域所有。
+# ---------------------------------------------------------------------------
+
+class ModelTemplateDraftRevision(Base):
+    """不可变草稿 revision（每次保存草稿新增一行，永不覆盖）。
+
+    - entry_id：模板主表行
+    - revision：严格递增（1 开始）
+    - yaml_object_id：规范 YAML 对象引用（按对象 id 寻址）
+    - 规范文本与回执
+    - source：创建来源（form/yaml_editor/upload/derived/migration）
+    - created_by/created_at：创建者与时间
+    - diagnostics_object_id：校验报告/诊断对象引用
+    """
+
+    __tablename__ = "model_template_draft_revisions"
+
+    id: Mapped[int] = bigint_pk()
+    entry_id: Mapped[int] = mapped_column(ForeignKey("model_templates.id"), nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    yaml_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    diagnostics_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
+
+    __table_args__ = (
+        CheckConstraint("revision >= 1", name="ck_mtdr_revision"),
+
+        CheckConstraint(
+            "source IN ('form','yaml_editor','upload','derived','migration')",
+            name="ck_mtdr_source",
+        ),
+        UniqueConstraint("entry_id", "revision", name="uq_mtdr_entry_revision"),
+        Index("idx_mtdr_entry", "entry_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ORM 表定义: Wave2A 由 iesplan.models.project_model 迁入, 表真相归本域所有。
+# ---------------------------------------------------------------------------
+
+class ProjectModel(Base):
+    """项目模型清单表(项目内每个已保存模型实例一行)。
+
+    device_id 为最终带 ``_N`` 后缀的 ID(与模型 YAML 文件一致);
+    receipt_object_id 指向校验回执 JSON 对象。文本文件只校验字头。
+    """
+
+    __tablename__ = "project_models"
+
+    id: Mapped[int] = bigint_pk()
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    #: 项目内编号(_1、_2……; 只递增, 删除不复用)
+    suffix: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    #: 基础设备 ID(无后缀, 如 acme.device.heat_pump)
+    base_device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 最终设备 ID(带后缀, 如 acme.device.heat_pump_1)
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 清单修订号(模型实例被重新保存时递增; 本切片恒为 1)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("1"))
+    #: 本次保存产生的项目草稿 revision（用于幂等重放返回同一结果）
+    project_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    #: 模型规范 YAML/JSON 文件对象引用(objects.id)
+    model_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+    #: 校验回执对象引用(objects.id)
+    receipt_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
+    #: 来源(direct_yaml | template)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 模板稳定 ID(模板来源时非空; 固定精确 revision 解释历史项目模型)
+    template_id: Mapped[str | None] = mapped_column(Text)
+    #: 模板发布 revision(模板来源时非空; 模板更新不影响已保存项目模型)
+    template_revision: Mapped[int | None] = mapped_column(BigInteger)
+    #: 模板追溯: 模板来源时非空
+    #: 幂等键(项目内唯一, 重试返回同一逻辑结果)
+    idempotency_key: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("suffix >= 1", name="ck_project_models_suffix"),
+        CheckConstraint("revision >= 1", name="ck_project_models_revision"),
+        CheckConstraint("project_revision >= 2", name="ck_project_models_project_revision"),
+
+        CheckConstraint(
+            "source IN ('direct_yaml','template')", name="ck_project_models_source"
+        ),
+        #: 编号并发唯一兜底(行锁主路径 + 唯一约束兜底)
+        UniqueConstraint("project_id", "suffix", name="uq_project_models_suffix"),
+        UniqueConstraint("project_id", "device_id", name="uq_project_models_device_id"),
+        Index("idx_project_models_project", "project_id"),
+        Index("idx_project_models_object", "model_object_id"),
+    )
+
+class ProjectModelSequence(Base):
+    """项目模型编号计数器(每项目一行, 只递增不复用)。
+
+    行锁(``SELECT ... FOR UPDATE`` / ``UPDATE ... RETURNING``)串行化同项目
+    并发分配; 行不存在时插入 ``next_suffix=2`` 并返回 1。
+    """
+
+    __tablename__ = "project_model_sequences"
+
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), primary_key=True)
+    next_suffix: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=sa.text("1"))
+
+    __table_args__ = (
+        CheckConstraint("next_suffix >= 1", name="ck_project_model_sequences_next"),
     )

@@ -14,15 +14,17 @@ import sqlalchemy as sa
 from sqlalchemy import CheckConstraint, Index, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 
-from iesplan import models
-from iesplan.db import Base
-from iesplan.models.immutable_triggers import (
+from iesplan.db import (
     ALL_IMMUTABLE_REVOKE_DDL,
     ALL_IMMUTABLE_TRIGGER_DDL,
+    Base,
     IMMUTABLE_TABLES,
 )
+# Wave2A: ORM 表真相收归各领域 persistence;测试直引领域内部 persistence,不经公开门面。
+from iesplan.identity import persistence as identity_tables
+from iesplan.storage import persistence as storage_tables
 
-#: 全量表清单（以 models/__init__.py 与 migrations 为准，含 app_settings 身份域扩展）
+#: 全量表清单（以各领域 persistence + db.py 注册为准，含 app_settings 身份域扩展）
 #: (0.8.0 剔除共享成员/所有权转移: project_members / ownership_transfers 已移除)
 ALL_TABLES: tuple[str, ...] = (
     "users", "roles", "user_roles", "credentials", "window_sessions", "auth_events",
@@ -291,7 +293,7 @@ def test_immutable_tables_and_triggers() -> None:
         assert f"CREATE FUNCTION tg_{table}_immutable()" in ALL_IMMUTABLE_TRIGGER_DDL
         assert f"REVOKE UPDATE, DELETE ON {table} FROM PUBLIC;" in ALL_IMMUTABLE_REVOKE_DDL
     # 专项触发器(版本图冻结 / 配置冻结 / 任务终态)
-    from iesplan.models.immutable_triggers import (
+    from iesplan.db import (
         CALC_CONFIGS_FROZEN_TRIGGER_SQL,
         SYSTEM_GRAPHS_FROZEN_TRIGGER_SQL,
         TASKS_TERMINAL_TRIGGER_SQL,
@@ -370,17 +372,17 @@ def test_orm_insert_roundtrip() -> None:
     engine = sa.create_engine("sqlite://")
     Base.metadata.create_all(engine)
     with sa.orm.Session(engine) as session:
-        user = models.User(username="bob", display_name="Bob")
+        user = identity_tables.User(username="bob", display_name="Bob")
         session.add(user)
         session.flush()
-        obj = models.StoredObject(
+        obj = storage_tables.StoredObject(
             oid="c" * 64,
             size_bytes=1,
             media_type="application/json",
         )
         session.add(obj)
         session.flush()
-        event = models.AuthEvent(
+        event = identity_tables.AuthEvent(
             user_id=user.id,
             event_type="login_success",
             ip="127.0.0.1",
@@ -390,10 +392,10 @@ def test_orm_insert_roundtrip() -> None:
         session.add(event)
         session.commit()
         # 回读校验
-        fetched = session.get(models.User, user.id)
+        fetched = session.get(identity_tables.User, user.id)
         assert fetched is not None and fetched.username == "bob"
         assert fetched.created_at is not None
-        events = session.query(models.AuthEvent).filter_by(user_id=user.id).all()
+        events = session.query(identity_tables.AuthEvent).filter_by(user_id=user.id).all()
         assert len(events) == 1
         assert events[0].detail == {"ok": True}
 

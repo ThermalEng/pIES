@@ -12,11 +12,19 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+import sqlalchemy as sa
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Text,
+    select,
+)
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from iesplan.models.audit import ImportProposal
+from iesplan.db import Base, JSONB, bigint_pk
 from iesplan.package.contracts import (
     ImportProposalRecord,
     PackageConflictError,
@@ -147,3 +155,40 @@ def set_proposal_review(
         row.decided_at = datetime.now(UTC)
     db.flush()
     return _row_to_proposal(row)
+
+
+# ---------------------------------------------------------------------------
+# ORM 表定义: Wave2A 由 iesplan.models.audit(ImportProposal) 迁入, 表真相归本域所有。
+# ---------------------------------------------------------------------------
+
+class ImportProposal(Base):
+    """导入提议(外部数据入库前的评审记录, 01 §10.4)。"""
+
+    __tablename__ = "import_proposals"
+
+    id: Mapped[int] = bigint_pk()
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    proposer_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
+    source_path: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="proposed")
+    review_summary: Mapped[dict | None] = mapped_column(JSONB)
+    review_errors: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+    )
+    decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "source_type IN ('excel','csv','json','dxf','gis','other')",
+            name="ck_import_proposals_source_type",
+        ),
+        CheckConstraint(
+            "status IN ('proposed','validated','approved','rejected','applied')",
+            name="ck_import_proposals_status",
+        ),
+        Index("idx_import_proposals_project", "project_id", "status"),
+    )
