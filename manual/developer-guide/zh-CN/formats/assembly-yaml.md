@@ -95,10 +95,17 @@ planning:
   objective:
     sense: minimize
     expression: "1 year * pv_1__annual_fixed_om + pv_1__period_variable_om + import_meter__period_energy_purchase + export_meter__period_energy_sale"
-  variables: {}
+  variables:
+    pv_capacity:
+      device_ref: pv_1
+      parameter: rated_capacity_kwp
+      lower_bound: "0"
+      upper_bound: "1000"
+      unit: kWp
   constraints:
-    capex_budget:
-      expression: "pv_1__upfront_capex <= 900000 CNY"
+    annual_purchase_cap:
+      type: annual_purchase_cost_limit
+      expression: "import_meter__period_energy_purchase <= 900000 CNY"
 
 extensions: {}
 ```
@@ -121,7 +128,7 @@ extensions: {}
 | `planning` | 目标函数、规划变量、上下界和规划/系统约束；目标逐项引用设备成本或能源计费分量（见上方规划示例），不依赖隐式总成本 |
 | `extensions` | 命名空间化扩展 |
 
-`planning.constraints` 为命名映射；表达式只能使用受限声明式语法（语法、运算符与变量声明由规划配置契约定义；解析器只接受普通标识符 `Name`）。预算型约束示例见上方最小结构示例的 `capex_budget`：一次性 `upfront_capex` 经预算上限显式处理，不混入年度运行目标加和；把一次性投资转换为可与运行期成本比较的规划分量属于 `PlanningConfig` 的版本化规则，本财务 Profile 不隐式定义或默认选择（见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。数值常量规则：**有维度的常量必须带单位字面量**（金额如 `900000 CNY`、时间跨度如 `1 year`），单位必须与 `EffectiveFinanceConfig.currency` 一致，量纲不一致阻断；**纯无量纲系数可写裸数字**（如 `0.5 * pv_1__period_variable_om` 中的 `0.5`），不需要也不允许编造单位。财务分量引用的合法标识符与单位字面量规则见下文「规划表达式中的财务分量标识符」。
+`planning.constraints` 为命名映射；每项必须显式声明约束 `type` 与 `expression`，表达式只能使用受限声明式语法（语法、运算符与变量声明由规划配置契约定义；解析器只接受普通标识符 `Name`）。上方示例用 `annual_purchase_cost_limit` 限制运行窗口内的购能成本；一次性 `upfront_capex` 不会被系统隐式并入该约束或目标。把一次性投资转换为可与运行期成本比较的规划分量属于 `PlanningConfig` 的版本化规则，本财务 Profile 不隐式定义或默认选择（见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。数值常量规则：**有维度的常量必须带单位字面量**（金额如 `900000 CNY`、时间跨度如 `1 year`），单位必须与 `EffectiveFinanceConfig.currency` 一致，量纲不一致阻断；**纯无量纲系数可写裸数字**（如 `0.5 * pv_1__period_variable_om` 中的 `0.5`），不需要也不允许编造单位。财务分量引用的合法标识符与单位字面量规则见下文「规划表达式中的财务分量标识符」。
 
 ## 设备内容固定与实例
 
