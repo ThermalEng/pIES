@@ -35,7 +35,30 @@ connections:
     from: grid.electricity_import
     to: elec_load.electricity_demand
 
-constraints: {}
+finance:
+  ref:
+    kind: relative_file
+    path: finance/campus.effective-finance.yaml
+  profile_id: cn-north-demo
+
+finance_binding:
+  instances:
+    grid:
+      type: none
+    elec_load:
+      type: none
+
+tariff_bindings: {}
+
+planning:
+  objective:
+    sense: minimize
+    expression: "0"
+  variables:
+    v_struct:
+      device_ref: any_device
+      parameter: any_param
+  constraints: {}
 
 outputs:
   series: []

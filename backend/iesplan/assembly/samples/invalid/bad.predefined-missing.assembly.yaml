@@ -26,7 +26,28 @@ devices:
         value: 25
 connections: {}
 
-constraints: {}
+finance:
+  ref:
+    kind: relative_file
+    path: finance/campus.effective-finance.yaml
+  profile_id: cn-north-demo
+
+finance_binding:
+  instances:
+    pv1:
+      type: none
+
+tariff_bindings: {}
+
+planning:
+  objective:
+    sense: minimize
+    expression: "0"
+  variables:
+    v_struct:
+      device_ref: any_device
+      parameter: any_param
+  constraints: {}
 
 outputs:
   series: []

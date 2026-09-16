@@ -98,10 +98,75 @@ connections:
     from: grid.electricity_import
     to: hp1.electricity_in
 
-constraints:
-  c1:
-    type: ratio
-    expr: "hp1.electricity_in <= 0.8 * grid.electricity_import"
+finance:
+  ref:
+    kind: relative_file
+    path: finance/campus.effective-finance.yaml
+  profile_id: cn-north-demo
+
+finance_binding:
+  instances:
+    grid:
+      type: none
+    pv1:
+      type: costed
+      finance_type: pv_system
+      drivers:
+        capacity_kw:
+          property: rated_capacity_kwp
+        generated_kwh:
+          interface: electric_out
+          aggregation: integrate_positive
+    bat1:
+      type: costed
+      finance_type: battery_system
+      drivers:
+        energy_kwh:
+          property: capacity_kwh
+        cycled_kwh:
+          interface: electricity
+          aggregation: integrate_positive
+    hp1:
+      type: costed
+      finance_type: heat_pump_system
+      drivers:
+        heat_kw:
+          property: rated_heat_kw
+        consumed_kwh:
+          interface: electricity_in
+          aggregation: integrate_positive
+    elec_load:
+      type: none
+    heat_load:
+      type: none
+
+tariff_bindings:
+  import_meter:
+    price: grid_import
+    instance: grid
+    interface: electricity_import
+    aggregation: integrate_positive
+  export_meter:
+    price: pv_export
+    instance: grid
+    interface: electricity_export
+    aggregation: integrate_positive
+
+planning:
+  objective:
+    sense: minimize
+    expression: pv1__upfront_capex + 1 year * pv1__annual_fixed_om + pv1__period_variable_om + import_meter__period_energy_purchase
+  variables:
+    pv_cap:
+      device_ref: pv1
+      parameter: rated_capacity_kwp
+      lower_bound: "0"
+      upper_bound: "500"
+      unit: kWp
+  constraints:
+    annual_purchase_cap:
+      type: annual_purchase_cost_limit
+      expression: "import_meter__period_energy_purchase <= 900000 CNY"
 
 outputs:
   series:

@@ -37,6 +37,11 @@ from iesplan.configuration.persistence import CalcConfig
 from iesplan.identity.persistence import User
 from iesplan.model.persistence import Device, SystemGraph
 from iesplan.project.persistence import Draft, Project
+# 注册任务侧表(tasks/task_attempts/calc_snapshots): 结果域 persistence 在导入期
+# 即登记 evidence_packages(外键指向任务侧表), 而任务域 persistence 为延迟装载;
+# 建表前必须显式导入, 否则 create_all 报 NoReferencedTableError(与其他挂载
+# tasks 路由的测试模块行为一致)。
+from iesplan.tasks.persistence import CalcSnapshot as _CalcSnapshotForDDL  # noqa: F401
 
 #: 配置域测试所有者(经窗口会话登录)
 OWNER_USERNAME = "config_owner"
@@ -537,6 +542,20 @@ def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Ses
         "solver": "ies.solver.highs@1.7.2",
         "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
     })
+    # 装配闸门要求显式装配声明(无静默默认): 与 assembly.* 起草命令同义,
+    # 直接写入内容对象(机械测试用；真实项目经起草命令声明)。planning 草稿
+    # 副本已删除，改为冻结规划修订的确定性投影(见下 save_planning_config)。
+    content["model"]["devices"].append({
+        "id": 1,
+        "device_type": "ies.device.battery",
+        "kind": "new",
+        "name": "bat1",
+        "params": {"capacity_kwh": 200, "rated_power_kw": 100},
+    })
+    content["finance_binding"] = {"instances": {"d1": {"type": "none"}}}
+    # tariff_bindings 本体即条目映射(空映射 = 无计费绑定；起草命令 payload
+    # 的 {"bindings": X} 外层由命令处理器解包，此处直接写入解包后形态)。
+    content["tariff_bindings"] = {}
     content.setdefault("applied_commands", {})
     project_domain.update_draft_content_ref(
         db, draft.id, store_content_object(db, content)
@@ -546,6 +565,33 @@ def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Ses
     owner_user = db.execute(
         select(User).where(User.username == OWNER_USERNAME)
     ).scalar_one()
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan.application import configuration as config_cases
+
+    config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), owner_user.id)
+    config_cases.set_project_finance_profile(
+        db, project.id, PROFILE_PAYLOAD["profile"]["id"], owner_user.id
+    )
+    config_cases.save_planning_config(
+        db,
+        project.id,
+        {
+            "objective": {"sense": "minimize", "expression": "0"},
+            "variables": {
+                "cap": {
+                    "device_ref": "d1",
+                    "parameter": "capacity_kwh",
+                    "lower_bound": "0",
+                    "upper_bound": "1000",
+                    "unit": "kWh",
+                },
+            },
+            "constraints": {},
+        },
+        None,
+        owner_user.id,
+    )
     task, _ = submit_task(db, owner_user, project.id, "calc", config={})
     db.commit()
     snap = db.query(CalcSnapshot).order_by(CalcSnapshot.id.desc()).first()

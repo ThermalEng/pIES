@@ -481,3 +481,30 @@ def test_series_meta_rejects_invalid_resolution_or_point_count():
         SeriesMeta.from_dict({"resolution": "1h", "leap_year": False, "point_count": 0, "unit": "CNY/kWh"})
     with pytest.raises(FinanceTripletError, match="leap_year"):
         SeriesMeta.from_dict({"resolution": "1h", "leap_year": "no", "point_count": 8760, "unit": "CNY/kWh"})
+
+
+# ---------------------------------------------------------------------------
+# YAML 文本出入(公开边界: effective_from_yaml / effective_to_yaml)
+# ---------------------------------------------------------------------------
+
+
+def test_effective_yaml_roundtrip_is_stable_and_deterministic():
+    from iesplan.finance.yaml_io import effective_from_yaml, effective_to_yaml
+
+    effective = merge_effective(_profile(), None)
+    first = effective_to_yaml(effective)
+    assert first.endswith("\n")
+    assert effective_to_yaml(effective) == first
+    recovered = effective_from_yaml(first)
+    assert recovered.to_dict() == effective.to_dict()
+    assert recovered.profile_id == "cn-north-demo"
+    assert recovered.currency == "CNY"
+
+
+def test_effective_from_yaml_rejects_non_effective_document():
+    from iesplan.finance.yaml_io import effective_from_yaml
+
+    with pytest.raises(FinanceTripletError):
+        effective_from_yaml("schema: ies.finance-profile\nschema_version: \"1.0.0\"\n")
+    with pytest.raises(FinanceTripletError):
+        effective_from_yaml("not: a-mapping-with-schema\n")

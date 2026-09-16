@@ -89,6 +89,7 @@ def _row_to_effective(row: EffectiveFinanceRevision) -> EffectiveRevisionRecord:
         content=row.content,
         profile_id=row.profile_id,
         receipt_object_id=row.receipt_object_id,
+        content_object_id=row.content_object_id,
         created_by=row.created_by,
     )
 
@@ -289,6 +290,7 @@ def append_effective(
     content: dict[str, Any],
     profile_id: str,
     created_by: int,
+    content_object_id: int,
     receipt_object_id: int | None = None,
 ) -> EffectiveRevisionRecord:
     """追加 Effective revision 行；(project_id, revision) 冲突抛 ConfigurationConflictError。"""
@@ -299,6 +301,7 @@ def append_effective(
         profile_id=profile_id,
         created_by=created_by,
         receipt_object_id=receipt_object_id,
+        content_object_id=content_object_id,
     )
     db.add(row)
     try:
@@ -606,6 +609,11 @@ class EffectiveFinanceRevision(Base):
     profile_id: Mapped[str] = mapped_column(Text, nullable=False)
     #: 可审计回执对象引用(objects.id; 0011 起新行必备, 存量开发行可空)
     receipt_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))
+    #: 快照内容对象引用(objects.id; 有效快照 YAML 内容对象, 装配精确引用
+    #: 的真实对象身份来源; receipt 只存校验回执, 不冒充内容对象。
+    #: 新鲜建表即非空: 签发流程先创建内容对象再创建 revision，不保留
+    #: 签发前旧行，不加旧库迁移)
+    content_object_id: Mapped[int] = mapped_column(ForeignKey("objects.id"), nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()

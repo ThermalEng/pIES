@@ -173,6 +173,24 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert resp.status_code == 403
 
     # 3. 所有者编辑(语义命令, 乐观锁, 幂等)
+    # dataset.bind 输入边界要求版本真实存在且归属本项目: 先建真实数据集版本
+    from test_dataset_api import make_csv
+
+    ds_resp = client.post(
+        f"/api/projects/{pid}/datasets",
+        json={"name": "负荷数据", "source_category": "user_upload", "license": "CC-BY-4.0"},
+        headers=owner_h,
+    )
+    assert ds_resp.status_code == 201, ds_resp.text
+    ds_id = ds_resp.json()["dataset"]["id"]
+    ver_resp = client.post(
+        f"/api/projects/{pid}/datasets/{ds_id}/versions",
+        data={"resolution": "1h", "utc_offset_minutes": "480"},
+        files={"file": ("data.csv", make_csv("1h", n=8760), "text/csv")},
+        headers=owner_h,
+    )
+    assert ver_resp.status_code == 201, ver_resp.text
+    dvid = ver_resp.json()["dataset_version"]["id"]
     commands = [
         {
             "id": "cmd-1", "project_id": pid, "expected_revision": 1, "session": "win-1",
@@ -186,7 +204,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
         },
         {
             "id": "cmd-3", "unit": "dataset", "type": "dataset.bind",
-            "payload": {"dataset_version_id": 1001, "role": "main"},
+            "payload": {"dataset_version_id": dvid, "role": "main"},
         },
     ]
     resp = client.put(
@@ -228,7 +246,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert view["draft"]["revision"] == 2
     assert view["draft"]["content"]["calc_config"]["params"]["tariff"] == 0.6
     assert view["draft"]["content"]["model"]["devices"][0]["name"] == "热泵1"
-    assert view["draft"]["content"]["dataset_bindings"][0]["dataset_version_id"] == 1001
+    assert view["draft"]["content"]["dataset_bindings"][0]["dataset_version_id"] == dvid
 
     # 5. 版本创建(不可变快照)
     resp = client.post(
@@ -538,6 +556,79 @@ def test_invalid_commands(client: TestClient, db_session: Session) -> None:
         headers=owner_h,
     )
     assert resp.status_code == 409
+
+
+@pytest.mark.parametrize("extra", [
+    {"conn_type": "electric_line"},
+    {"capacity": 100},
+    {"loss_rate": 0.05},
+])
+def test_upsert_connection_rejects_extra_fields(
+    client: TestClient, db_session: Session, extra: dict
+) -> None:
+    """model.upsert_connection 额外字段 → 400 PROJ-CMD-005，无状态改变。
+
+    2.0 连接只允许 name/from_device/from_port/to_device/to_port；
+    旧 1.0 属性(conn_type/capacity/loss_rate)接受后静默丢弃仍是兼容语义，
+    必须当场拒绝。拒绝不推进草稿修订，不改 connections 与 applied_commands。
+    """
+    owner = make_user(db_session, "owner_conn_extra")
+    owner_h = _h(client, owner)
+    pid = _create_project(client, owner, "连接边界测试")
+    view = client.get(f"/api/projects/{pid}", headers=owner_h).json()
+    revision = view["draft"]["revision"]
+    connections = view["draft"]["content"]["model"]["connections"]
+    applied = view["draft"]["content"].get("applied_commands", {})
+    payload = {
+        "name": "c1", "from_device": "d1", "from_port": "p1",
+        "to_device": "d2", "to_port": "p2", **extra,
+    }
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": [
+            {
+                "id": "conn-bad-1", "unit": "model",
+                "type": "model.upsert_connection", "payload": payload,
+            },
+        ]},
+        headers=owner_h,
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-CMD-005"
+    again = client.get(f"/api/projects/{pid}", headers=owner_h).json()
+    assert again["draft"]["revision"] == revision
+    assert again["draft"]["content"]["model"]["connections"] == connections
+    assert again["draft"]["content"].get("applied_commands", {}) == applied
+
+
+def test_upsert_connection_legal_shape_passes(
+    client: TestClient, db_session: Session
+) -> None:
+    """合法 2.0 连接(端点+名称)仍按现有行为通过。"""
+    owner = make_user(db_session, "owner_conn_ok")
+    owner_h = _h(client, owner)
+    pid = _create_project(client, owner, "连接合法测试")
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": 1, "commands": [
+            {
+                "id": "conn-ok-1", "unit": "model",
+                "type": "model.upsert_connection",
+                "payload": {
+                    "name": "c1", "from_device": "d1", "from_port": "p1",
+                    "to_device": "d2", "to_port": "p2",
+                },
+            },
+        ]},
+        headers=owner_h,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["revision"] == 2
+    view = client.get(f"/api/projects/{pid}", headers=owner_h).json()
+    assert view["draft"]["content"]["model"]["connections"] == [{
+        "name": "c1", "from_device": "d1", "from_port": "p1",
+        "to_device": "d2", "to_port": "p2",
+    }]
 
 
 def test_delete_requires_name_or_reason(client: TestClient, db_session: Session) -> None:

@@ -17,6 +17,7 @@ validator.py 领域阶段完成)。
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,7 +47,10 @@ TOP_SECTIONS: tuple[str, ...] = (
     "project_baseline",
     "devices",
     "connections",
-    "constraints",
+    "finance",
+    "finance_binding",
+    "tariff_bindings",
+    "planning",
     "outputs",
     "extensions",
 )
@@ -67,15 +71,31 @@ _PREDEFINED_KEYS: dict[str, frozenset] = {
     "data_repeat": frozenset({"mode", "path"}),
     "data_predict": frozenset({"mode", "path", "target_type"}),
 }
+
+#: finance.ref kind 判别联合(object 精确对象引用 / 包内 relative_file)
+_FINANCE_REF_KINDS: tuple[str, ...] = ("object", "relative_file")
+#: finance_binding 实例类别判别联合
+_COST_BIND_TYPES: tuple[str, ...] = ("costed", "none")
+#: driver 聚合(时序 interface 必需；property 禁止写)
+_DRIVER_AGGREGATIONS: tuple[str, ...] = ("integrate_positive", "sum_positive")
 _CONNECTION_KEYS: tuple[str, ...] = ("from", "to")
-_CONSTRAINT_KEYS: tuple[str, ...] = ("type", "expr", "enabled")
 _OUTPUTS_KEYS: tuple[str, ...] = ("series", "metrics")
+#: 计费聚合白名单(时序接口必需；scalar 不用于能源计价)
+_TARIFF_AGGREGATIONS: tuple[str, ...] = ("integrate_positive", "sum_positive")
+#: 计费绑定条目键
+_TARIFF_BINDING_KEYS: tuple[str, ...] = ("price", "instance", "interface", "aggregation")
+#: planning 章节键(objective 必需；variables/constraints 缺席视为空)
+_PLANNING_KEYS: tuple[str, ...] = ("objective", "variables", "constraints")
+
+#: planning 变量条目允许键(公共 PlanningVariable 契约的结构侧)
+_VARIABLE_KEYS: tuple[str, ...] = (
+    "device_ref", "parameter", "lower_bound", "upper_bound", "unit",
+)
 
 #: 全项目统一计算分辨率(均能确定性切分一天:96/48/24 步)
 _RESOLUTIONS: tuple[str, ...] = ("15min", "30min", "1h")
 #: 场景模式(当前固定为 single)
 _SCENARIO_MODES: tuple[str, ...] = ("single",)
-_CONSTRAINT_TYPES: tuple[str, ...] = ("ratio", "capacity", "schedule", "generic")
 
 #: 局部 ID(lower_snake_case 或短横线;同一文件内保持一致)
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -287,8 +307,11 @@ class _DocBuilder:
         self._build_assembly(tree.get("assembly"), "assembly")
         self._build_project_baseline(tree.get("project_baseline"), "project_baseline")
         self._build_devices(tree.get("devices"), "devices")
+        self._build_finance(tree.get("finance"), "finance")
+        self._build_finance_binding(tree.get("finance_binding"), "finance_binding")
         self._build_connections(tree.get("connections"), "connections")
-        self._build_constraints(tree.get("constraints"), "constraints")
+        self._build_tariff_bindings(tree.get("tariff_bindings"), "tariff_bindings")
+        self._build_planning(tree.get("planning"), "planning")
         self._build_outputs(tree.get("outputs"), "outputs")
         self._build_extensions(tree.get("extensions"), "extensions")
         self._scan_forbidden(tree, "assembly")
@@ -488,6 +511,147 @@ class _DocBuilder:
                         {"reason": "expected_non_empty_string"},
                     )
 
+    def _build_finance(self, value: Any, field: str) -> None:
+        """finance: {ref: {kind, object_id?/path?}, profile_id, revision?} 精确引用。
+
+        只固定有效快照身份，不内联完整财务配置。revision 为应用装配闸门
+        填写的冻结血缘(手写文件可缺席)；出现时须为正整数。
+        """
+        m = self._require_map(value, field)
+        if m is None:
+            return
+        for key in m:
+            if key not in ("ref", "profile_id", "revision"):
+                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
+        if m.get("revision") is not None:
+            rev = m.get("revision")
+            if isinstance(rev, bool) or not isinstance(rev, int) or rev < 1:
+                self._diag(
+                    ASM_SYN_TYPE, f"{field}.revision",
+                    {"reason": "wrong_type", "actual": type(rev).__name__},
+                )
+        ref = self._require_map(m.get("ref"), f"{field}.ref")
+        if ref is not None:
+            kind = self._enum(ref.get("kind"), _FINANCE_REF_KINDS, f"{field}.ref.kind")
+            for key in ref:
+                if key not in ("kind", "object_id", "media_type", "path"):
+                    self._diag(
+                        ASM_SYN_PARSE, f"{field}.ref.{key}", {"reason": "unknown_key", "key": key}
+                    )
+            if kind == "object":
+                object_id = self._str(ref, "object_id", f"{field}.ref.object_id", required=True)
+                if object_id is not None and not object_id:
+                    self._diag(
+                        ASM_SYN_FIELD,
+                        f"{field}.ref.object_id",
+                        {"reason": "missing_field", "key": "object_id"},
+                    )
+                if "path" in ref:
+                    self._diag(
+                        ASM_SYN_FIELD,
+                        f"{field}.ref.path",
+                        {"reason": "unexpected_field", "key": "path"},
+                    )
+            elif kind == "relative_file":
+                path = self._str(ref, "path", f"{field}.ref.path", required=True)
+                if path is not None:
+                    self._check_package_path(path, f"{field}.ref.path")
+                if "object_id" in ref:
+                    self._diag(
+                        ASM_SYN_FIELD,
+                        f"{field}.ref.object_id",
+                        {"reason": "unexpected_field", "key": "object_id"},
+                    )
+        self._str(m, "profile_id", f"{field}.profile_id", required=True)
+
+    def _build_finance_binding(self, value: Any, field: str) -> None:
+        """finance_binding.instances: 每个设备实例显式 costed/none 判别联合。"""
+        m = self._require_map(value, field)
+        if m is None:
+            return
+        for key in m:
+            if key != "instances":
+                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
+        instances = self._require_map(m.get("instances"), f"{field}.instances")
+        if instances is None:
+            return
+        for inst_id, entry in instances.items():
+            if not isinstance(inst_id, str) or not _ID_RE.match(inst_id):
+                self._diag(
+                    ASM_SYN_TYPE,
+                    f"{field}.instances.{inst_id}",
+                    {"reason": "invalid_local_id"},
+                )
+                continue
+            self._build_cost_binding(entry, f"{field}.instances.{inst_id}")
+
+    def _build_cost_binding(self, value: Any, field: str) -> None:
+        entry = self._require_map(value, field)
+        if entry is None:
+            return
+        bind_type = self._enum(entry.get("type"), _COST_BIND_TYPES, f"{field}.type")
+        for key in entry:
+            if key not in ("type", "finance_type", "drivers"):
+                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
+        if bind_type == "none":
+            for forbidden in ("finance_type", "drivers"):
+                if forbidden in entry:
+                    self._diag(
+                        ASM_SYN_TYPE,
+                        f"{field}.{forbidden}",
+                        {"reason": "forbidden_for_type_none"},
+                    )
+            return
+        if bind_type != "costed":
+            return
+        self._str(entry, "finance_type", f"{field}.finance_type", required=True)
+        drivers = entry.get("drivers")
+        if drivers is None:
+            return
+        dmap = self._require_map(drivers, f"{field}.drivers")
+        if dmap is None:
+            return
+        for driver, target in dmap.items():
+            if not isinstance(driver, str) or not _ID_RE.match(driver):
+                self._diag(
+                    ASM_SYN_TYPE,
+                    f"{field}.drivers.{driver}",
+                    {"reason": "invalid_local_id"},
+                )
+                continue
+            self._build_driver_target(target, f"{field}.drivers.{driver}")
+
+    def _build_driver_target(self, value: Any, field: str) -> None:
+        """driver 映射: {property: <prop>} XOR {interface: <iface>, aggregation}。"""
+        m = self._require_map(value, field)
+        if m is None:
+            return
+        has_property = "property" in m
+        has_interface = "interface" in m
+        if has_property == has_interface:
+            self._diag(
+                ASM_SYN_TYPE,
+                field,
+                {"reason": "property_interface_xor", "keys": sorted(m)},
+            )
+            return
+        for key in m:
+            if key not in ("property", "interface", "aggregation"):
+                self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
+        if has_property:
+            self._str(m, "property", f"{field}.property", required=True)
+            if "aggregation" in m:
+                self._diag(
+                    ASM_SYN_TYPE,
+                    f"{field}.aggregation",
+                    {"reason": "forbidden_for_property_driver"},
+                )
+        else:
+            self._str(m, "interface", f"{field}.interface", required=True)
+            self._enum(
+                m.get("aggregation"), _DRIVER_AGGREGATIONS, f"{field}.aggregation"
+            )
+
     def _build_connections(self, value: Any, field: str) -> None:
         m = self._require_map(value, field)
         if m is None:
@@ -505,24 +669,155 @@ class _DocBuilder:
                         ASM_SYN_PARSE, f"{field}.{conn_id}.{key}", {"reason": "unknown_key", "key": key}
                     )
 
-    def _build_constraints(self, value: Any, field: str) -> None:
+    def _build_tariff_bindings(self, value: Any, field: str) -> None:
+        """tariff_bindings: {binding_id: {price, instance, interface, aggregation}}。"""
         m = self._require_map(value, field)
         if m is None:
             return
-        for cid in m:
-            self._local_id(cid, f"{field}.{cid}")
-            c = self._require_map(m[cid], f"{field}.{cid}")
-            if c is None:
+        for binding_id in m:
+            self._local_id(binding_id, f"{field}.{binding_id}")
+            entry = self._require_map(m[binding_id], f"{field}.{binding_id}")
+            if entry is None:
                 continue
-            self._enum(c.get("type"), _CONSTRAINT_TYPES, f"{field}.{cid}.type")
-            expr = self._str(c, "expr", f"{field}.{cid}.expr", required=True)
+            self._str(entry, "price", f"{field}.{binding_id}.price", required=True)
+            self._str(entry, "instance", f"{field}.{binding_id}.instance", required=True)
+            self._str(entry, "interface", f"{field}.{binding_id}.interface", required=True)
+            self._enum(
+                entry.get("aggregation"), _TARIFF_AGGREGATIONS,
+                f"{field}.{binding_id}.aggregation",
+            )
+            for key in entry:
+                if key not in _TARIFF_BINDING_KEYS:
+                    self._diag(
+                        ASM_SYN_PARSE, f"{field}.{binding_id}.{key}",
+                        {"reason": "unknown_key", "key": key},
+                    )
+
+    def _build_planning(self, value: Any, field: str) -> None:
+        """planning: {objective: {sense, expression}, variables?, constraints?}。
+
+        结构只消费形态(键存在性/字符串非空)；sense 枚举归属、表达式语义
+        与量纲由阶段 4 经核心契约与公共引擎判定。
+        """
+        m = self._require_map(value, field)
+        if m is None:
+            return
+        for key in m:
+            if key not in _PLANNING_KEYS:
+                self._diag(
+                    ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key}
+                )
+        objective = self._require_map(m.get("objective"), f"{field}.objective")
+        if objective is not None:
+            self._str(objective, "sense", f"{field}.objective.sense", required=True)
+            expr = self._str(
+                objective, "expression", f"{field}.objective.expression", required=True
+            )
             if expr is not None and not expr.strip():
-                self._diag(ASM_SYN_FIELD, f"{field}.{cid}.expr", {"reason": "empty_expr"})
-            if c.get("enabled") is not None:
-                self._bool(c["enabled"], f"{field}.{cid}.enabled")
-            for key in c:
-                if key not in _CONSTRAINT_KEYS:
-                    self._diag(ASM_SYN_PARSE, f"{field}.{cid}.{key}", {"reason": "unknown_key", "key": key})
+                self._diag(
+                    ASM_SYN_FIELD, f"{field}.objective.expression", {"reason": "empty_expr"}
+                )
+        variables = m.get("variables")
+        if variables is None:
+            # 公共 PlanningConfig 要求至少一个规划变量：缺席与空映射一致阻断
+            self._diag(
+                ASM_SYN_FIELD, f"{field}.variables",
+                {"reason": "missing_field", "key": "variables"},
+            )
+        else:
+            vm = self._require_map(variables, f"{field}.variables")
+            if vm is not None:
+                if not vm:
+                    # 公共 PlanningConfig 要求至少一个规划变量(空映射结构阻断)
+                    self._diag(
+                        ASM_SYN_FIELD, f"{field}.variables",
+                        {"reason": "empty_variables"},
+                    )
+                for var_name in vm:
+                    self._local_id(var_name, f"{field}.variables.{var_name}")
+                    entry = self._require_map(
+                        vm[var_name], f"{field}.variables.{var_name}"
+                    )
+                    if entry is not None:
+                        self._variable_entry(entry, f"{field}.variables.{var_name}")
+        constraints = m.get("constraints")
+        if constraints is not None:
+            cm = self._require_map(constraints, f"{field}.constraints")
+            if cm is not None:
+                for const_name in cm:
+                    self._local_id(const_name, f"{field}.constraints.{const_name}")
+                    entry = self._require_map(cm[const_name], f"{field}.constraints.{const_name}")
+                    if entry is None:
+                        continue
+                    kind = self._str(
+                        entry, "type", f"{field}.constraints.{const_name}.type",
+                        required=True,
+                    )
+                    if kind is not None and not kind.strip():
+                        self._diag(
+                            ASM_SYN_FIELD, f"{field}.constraints.{const_name}.type",
+                            {"reason": "empty_string", "key": "type"},
+                        )
+                    expr = self._str(
+                        entry, "expression", f"{field}.constraints.{const_name}.expression",
+                        required=True,
+                    )
+                    if expr is not None and not expr.strip():
+                        self._diag(
+                            ASM_SYN_FIELD, f"{field}.constraints.{const_name}.expression",
+                            {"reason": "empty_expr"},
+                        )
+                    if entry.get("enabled") is not None:
+                        self._bool(entry["enabled"], f"{field}.constraints.{const_name}.enabled")
+                    for key in entry:
+                        if key not in ("type", "expression", "enabled"):
+                            self._diag(
+                                ASM_SYN_PARSE, f"{field}.constraints.{const_name}.{key}",
+                                {"reason": "unknown_key", "key": key},
+                            )
+
+    def _variable_entry(self, entry: Mapping, field: str) -> None:
+        """规划变量条目形态(公共 PlanningVariable 契约的结构侧)。
+
+        只判定形态(required/允许键/标量类型);界区间/设备存在性等语义由
+        阶段 4 经核心契约判定。
+        """
+        for key in entry:
+            if key not in _VARIABLE_KEYS:
+                self._diag(
+                    ASM_SYN_PARSE, f"{field}.{key}",
+                    {"reason": "unknown_key", "key": key},
+                )
+        for req in ("device_ref", "parameter"):
+            if req not in entry:
+                self._diag(
+                    ASM_SYN_FIELD, field,
+                    {"reason": "missing_field", "key": req},
+                )
+            else:
+                val = self._str(entry, req, f"{field}.{req}", required=True)
+                if val is not None and not val.strip():
+                    self._diag(
+                        ASM_SYN_FIELD, f"{field}.{req}", {"reason": "empty_string"},
+                    )
+        for bound in ("lower_bound", "upper_bound"):
+            # 公共契约界为十进制: 确定性投影输出规范字符串，int 同样接受；
+            # float/bool 与其他类型结构阻断(与 schema 接受集合一致)。
+            val = entry.get(bound)
+            if val is not None and (
+                isinstance(val, bool) or not isinstance(val, (int, str))
+            ):
+                self._diag(
+                    ASM_SYN_TYPE, f"{field}.{bound}",
+                    {"reason": "wrong_type", "actual": type(val).__name__},
+                )
+        unit = entry.get("unit")
+        if unit is not None:
+            val = self._str(entry, "unit", f"{field}.unit", required=True)
+            if val is not None and not val.strip():
+                self._diag(
+                    ASM_SYN_FIELD, f"{field}.unit", {"reason": "empty_string"},
+                )
 
     def _build_outputs(self, value: Any, field: str) -> None:
         m = self._require_map(value, field)

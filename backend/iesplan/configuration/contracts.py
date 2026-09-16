@@ -57,6 +57,7 @@ class EffectiveRevisionRecord:
     revision: int
     content: dict[str, Any]
     profile_id: str
+    content_object_id: int
     receipt_object_id: int | None = None
     created_by: int = 0
 

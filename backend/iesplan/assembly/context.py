@@ -13,12 +13,9 @@ from dataclasses import dataclass, field
 
 from iesplan.assembly.schema import (
     CARRIER_DEFAULT_QUANTITY_UNIT,
-    NATURE_DELAYED,
-    NATURE_INSTANT,
     QUANTITY_DIMS,
     QUANTITY_SIGNAL,
     AssemblyDevice,
-    AssemblyPipeline,
     AssemblyPort,
     AssemblySpec,
 )
@@ -27,26 +24,9 @@ from iesplan.core.errors import AppError
 from iesplan.core.expression import Dimensions
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 
-#: 显式端口声明中须与注册表推导一致的字段(不一致按 ASM-REF-005 告警,
-#: 以注册表为准)
-PORT_DECL_OVERRIDE_FIELDS: tuple[str, ...] = ("carrier", "direction", "quantity", "unit", "nature")
-
 # ---------------------------------------------------------------------------
 # 常量与业务表(与 application/models 同约定;本模块独立声明,不依赖 services)
 # ---------------------------------------------------------------------------
-
-#: 管道设备模型(RR-P2-05: 管道为合法业务设备, 在 iesplan.devices YAML 目录
-#: 与其他设备一并注册, 装配模块直接消费 descriptor, 不再维护白名单/内置兜底)。
-PIPELINE_MODEL_IDS: tuple[str, ...] = ("ies.device.transport_pipe",)
-
-#: 载体 → 端口名后缀规则(in/out 为 "{载体}_{方向}",双向为 "{载体}";与 services 一致)
-PORT_TYPE_TO_CARRIER: dict[str, str] = {
-    "electric": "electricity",
-    "thermal": "heat",
-    "cooling": "cool",
-    "fuel": "gas",
-    "data": "data",
-}
 
 #: 设备参数单位 → W 的换算键(母线固定供给/需求上限估算用)
 PEAK_PARAM_BY_LOAD: dict[str, str] = {
@@ -68,38 +48,55 @@ EXOGENOUS_SUPPLY_CARRIERS = frozenset({"solar", "gas"})
 # ---------------------------------------------------------------------------
 
 
+#: 分辨率 → 每日步数(全项目统一计算分辨率, 均能确定性切分一天)
+_STEPS_PER_DAY: dict[str, int] = {"15min": 96, "30min": 48, "1h": 24}
+
+
+def steps_for_baseline(resolution: str, leap_year: bool) -> int:
+    """项目计算基线 → 年步数(分辨率 × 365/366 天; 未知分辨率抛错, 不猜测)。"""
+    per_day = _STEPS_PER_DAY.get(resolution)
+    if per_day is None:
+        raise AppError(
+            f"未知计算分辨率: {resolution!r}",
+            code="SYS-CFG-001",
+            message_key="ies.diag.store.config_invalid",
+            params={"resolution": resolution},
+        )
+    return per_day * (366 if leap_year else 365)
+
+
 @dataclass(slots=True)
 class CheckContext:
-    """检查上下文:注册表快照/时间轴/数据集元信息(缺省时内部按需惰性加载)。"""
+    """检查上下文:注册表快照/基线步数/数据集元信息。
+
+    年步数与基线分辨率由调用方(校验器)从项目计算基线显式推导后传入;
+    上下文不保存时间轴、不做默认推导。
+    """
 
     registry: dict[str, DeviceTypeSpec] | None = None  # type_id → 设备模型命令规格
-    time_axis: object | None = None  # core/timeaxis.TimeAxis(取 .n)或 {"n": int};None 按分辨率推导
-    datasets: dict[int, dict] | None = None  # dataset_version_id → 元信息
+    baseline_resolution: str | None = None  # 项目基线 resolution(15min/30min/1h)
+    period_steps: int | None = None  # 基线年步数(分辨率 × 365/366)
     seed: int | None = None
     max_diags: int = 200  # 单次检查诊断上限(防风暴)
-    resolved_ports: dict[str, AssemblyPort] | None = None  # 内部缓存:ref → 端口(注册表推导+显式覆盖)
+    resolved_ports: dict[str, AssemblyPort] | None = None  # 内部缓存:ref → 端口(注册表推导)
 
     def steps_per_year(self, spec: AssemblySpec) -> int:
-        """年步数(用于 PIPE-002 延迟范围判定):时间轴 → spec → 默认 8760。"""
-        axis = self.time_axis
-        if axis is not None:
-            n = getattr(axis, "n", None)
-            if isinstance(n, int) and n > 0:
-                return n
-            if isinstance(axis, dict):
-                n = axis.get("n")
-                if isinstance(n, int) and n > 0:
-                    return n
-        if spec.time_axis is not None:
-            return spec.time_axis.steps_per_year
-        return 8760
+        """年步数: 必须由调用方显式传入。"""
+        if self.period_steps is None or self.period_steps <= 0:
+            raise AppError(
+                "检查上下文缺少年步数(调用方必须从项目基线显式推导传入)",
+                code="SYS-CFG-001",
+                message_key="ies.diag.store.config_invalid",
+                params={},
+            )
+        return self.period_steps
 
 
 @dataclass(slots=True)
 class BusSummary:
     """母线汇总(阶段 D 产物,随 CheckResult 返回供 UI/审计)。
 
-    母线 = 载体 × 无向连通分量(边连通;双向端口视为双向连通,管道设备的两条边同属一个分量)。
+    母线 = 载体 × 无向连通分量(边连通;双向端口视为双向连通)。
     """
 
     carrier: str
@@ -120,36 +117,25 @@ class BusSummary:
 # ---------------------------------------------------------------------------
 
 
-def split_model(model: str) -> tuple[str, str | None]:
-    """模型引用 → (type_id, version|None)("ies.device.pv@2.0.0" → ("ies.device.pv", "2.0.0"))。"""
-    if "@" in model:
-        type_id, _, version = model.rpartition("@")
-        return type_id, version or None
-    return model, None
+def resolve_model(ctx: CheckContext, model: str) -> DeviceTypeSpec | None:
+    """解析模型引用:按裸 device id 返回类型规格(2.0 已拒绝 @ 钉选，无版本拆分)。
 
-
-def resolve_model(ctx: CheckContext, model: str) -> tuple[DeviceTypeSpec | None, bool]:
-    """解析模型引用:返回 (类型规格 | None, 是否管道模型)。
-
-    未注册返回 (None, False): 装配禁止用合成/兜底规格伪装可装配视图,
-    未注册类型必须被装配显式阻断(RR-P2-05)。
+    未注册返回 None: 装配禁止用合成/兜底规格伪装可装配视图,
+    未注册类型必须被装配显式阻断。transport_pipe 为普通 2.0 设备，
+    不再单独判别。
     """
-    type_id, _ = split_model(model)
     registry = ctx.registry
     if registry is None:
         registry = default_registry()
         ctx.registry = registry
-    spec = registry.get(type_id)
-    if spec is None:
-        return None, False
-    return spec, type_id in PIPELINE_MODEL_IDS
+    return registry.get(model)
 
 
 def grid_side_used(type_spec, device_id: str, edges) -> bool:
     """电网设备任一进出口侧是否已连接(单侧运行判定)。
 
-    电网进出口为替代运行模式:单侧使用合法,未用侧由进出口互斥方程钳零,
-    与 1.0 单端口电网同语义;INPUT-001 不得因此阻断。
+    电网进出口为替代运行模式:单侧使用合法,未用侧由进出口互斥方程钳零;
+    INPUT-001 不得因此阻断。
     """
     if (
         type_spec is None
@@ -196,7 +182,7 @@ def yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPort
     """从 YAML 设备注册表取端口定义 → AssemblyPort 列表(权威来源)。
 
     yaml 端口(DeviceYamlSpec.ports: 端口名/载体/方向/容量引用)为唯一权威,
-    装配检查据此做连接合法性(REF-004/REF-005)与可解性检查。
+    装配检查据此做连接合法性与可解性检查。
     注册表未初始化或端口数据错误一律向上阻断(RR-P2-05: 无静态回退)。
     """
     from iesplan.devices import get_device
@@ -216,8 +202,6 @@ def yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPort
                 direction=interface.type,
                 quantity=qty,
                 unit=unit,
-                nature=NATURE_INSTANT,
-                capacity=None,
             )
         )
     return ports
@@ -226,119 +210,27 @@ def yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPort
 def derive_device_ports(spec: AssemblySpec, ctx: CheckContext, device: AssemblyDevice) -> list[AssemblyPort]:
     """设备端口推导(RR-P2-05: devices 2.0 正式注册端口为唯一权威,无回退)。
 
-    已注册设备取注册表端口声明并合并显式 capacity 覆盖;未注册设备
-    (含未走 2.0 正式注册的自定义类型)端口无从推导,返回空列表
-    (REF-002 由校验器报告),不再按显式端口声明回退。
+    已注册设备取注册表端口声明;未注册设备(含未走 2.0 正式注册的
+    自定义类型)端口无从推导,返回空列表(未注册由校验器阻断),
+    不再按显式端口声明回退。端口载体/方向/量纲一律以注册表为准，
+    2.0 无显式覆盖入口。
     """
-    type_spec, _ = resolve_model(ctx, device.definition_id)
+    type_spec = resolve_model(ctx, device.definition_id)
     if type_spec is None:
         return []  # 模型未注册,端口无从推导(REF-002 已报)
     assert type_spec.device is not None
-    derived = yaml_device_ports(device, type_spec.device.id)
-    # 显式声明覆盖(仅 capacity;载体/方向以注册表推导为准,不一致由阶段 C 报 REF-005)
-    explicit_by_name = {ep.name: ep for ep in device.ports}
-    merged: list[AssemblyPort] = []
-    for port in derived:
-        explicit = explicit_by_name.get(port.name)
-        if explicit is not None and explicit.capacity is not None:
-            port = AssemblyPort(
-                device=port.device,
-                name=port.name,
-                carrier=port.carrier,
-                direction=port.direction,
-                quantity=port.quantity,
-                unit=port.unit,
-                nature=port.nature,
-                delay_steps=port.delay_steps,
-                capacity=explicit.capacity,
-            )
-        merged.append(port)
-    return merged
-
-
-def derive_pipeline_ports(pipe: AssemblyPipeline) -> list[AssemblyPort]:
-    """管道端口推导(从 YAML descriptor 读取真实端口, 不再内置常量)。
-
-    入端 instantaneous / 出端 delayed(延迟取 params.delay_steps, 缺省 1)。
-    """
-    from iesplan.devices import get_device
-
-    spec = get_device(pipe.model.split("@", 1)[0])
-    in_port = next(((name, p) for name, p in spec.interfaces.items() if p.type == "in"), None)
-    out_port = next(((name, p) for name, p in spec.interfaces.items() if p.type == "out"), None)
-    if in_port is None or out_port is None:
-        # 未声明输入/输出端口 → 装配阻断, 不再兜底合成(RR-P2-05)。
-        raise AppError(
-            f"管道模型 {pipe.model} 必须声明 in/out 端口, 装配不可用",
-            code="SYS-CFG-001",
-            message_key="ies.diag.store.config_invalid",
-            params={"model": pipe.model},
-        )
-    delay = int(pipe.params.get("delay_steps", 1) or 1)
-    in_name, in_spec = in_port
-    out_name, out_spec = out_port
-    in_carrier = in_spec.carrier
-    in_qty, in_unit = CARRIER_DEFAULT_QUANTITY_UNIT[in_carrier]
-    out_carrier = out_spec.carrier
-    out_qty, out_unit = CARRIER_DEFAULT_QUANTITY_UNIT[out_carrier]
-    return [
-        AssemblyPort(
-            device=pipe.id,
-            name=in_name,
-            carrier=in_carrier,
-            direction="in",
-            quantity=in_qty,
-            unit=in_unit,
-            nature=NATURE_INSTANT,
-        ),
-        AssemblyPort(
-            device=pipe.id,
-            name=out_name,
-            carrier=out_carrier,
-            direction="out",
-            quantity=out_qty,
-            unit=out_unit,
-            nature=NATURE_DELAYED,
-            delay_steps=delay,
-        ),
-    ]
+    return yaml_device_ports(device, type_spec.device.id)
 
 
 def resolve_ports(spec: AssemblySpec, ctx: CheckContext) -> dict[str, AssemblyPort]:
     """全量端口解析(ref → AssemblyPort),结果缓存到 ctx.resolved_ports。
 
-    显式声明与注册表推导不一致的字段交由阶段 C 的 ASM-REF-005 处理,此处按"注册表为准"合并。
+    端口唯一来自注册表推导(transport_pipe 为普通 2.0 设备,同列 devices)。
     """
     resolved: dict[str, AssemblyPort] = {}
     for device in spec.devices:
         for port in derive_device_ports(spec, ctx, device):
             resolved[port.ref] = port
-    for pipe in spec.pipelines:
-        for port in derive_pipeline_ports(pipe):
-            resolved[port.ref] = port
-    # 管道端口的显式覆盖声明(容量等)
-    explicit_by_ref: dict[str, AssemblyPort] = {}
-    for ep in spec.explicit_pipeline_ports:
-        existing = explicit_by_ref.get(ep.ref)
-        if existing is None or ep.capacity is not None:
-            explicit_by_ref[ep.ref] = ep
-    for ref, ep in explicit_by_ref.items():
-        base = resolved.get(ref)
-        if base is None:
-            resolved[ref] = ep
-            continue
-        merged = AssemblyPort(
-            device=base.device,
-            name=base.name,
-            carrier=base.carrier,
-            direction=base.direction,
-            quantity=base.quantity,
-            unit=base.unit,
-            nature=base.nature,
-            delay_steps=base.delay_steps,
-            capacity=ep.capacity if ep.capacity is not None else base.capacity,
-        )
-        resolved[ref] = merged
     ctx.resolved_ports = resolved
     return resolved
 
@@ -430,9 +322,7 @@ def to_watts(value: float | None, unit: str | None) -> float | None:
 
 
 __all__ = [
-    "PORT_DECL_OVERRIDE_FIELDS",
-    "PORT_TYPE_TO_CARRIER",
-    "PIPELINE_MODEL_IDS",
+    "steps_for_baseline",
     "PEAK_PARAM_BY_LOAD",
     "GRID_SIDE_PORTS",
     "EXOGENOUS_SUPPLY_CARRIERS",
@@ -441,16 +331,13 @@ __all__ = [
     "BusSummary",
     "AssemblySpec",
     "AssemblyDevice",
-    "AssemblyPipeline",
     "AssemblyPort",
     "DeviceTypeSpec",
-    "split_model",
     "resolve_model",
     "grid_side_used",
     "default_registry",
     "yaml_device_ports",
     "derive_device_ports",
-    "derive_pipeline_ports",
     "resolve_ports",
     "ensure_ports",
     "unit_category",

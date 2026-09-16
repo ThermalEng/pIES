@@ -36,6 +36,10 @@ from iesplan.identity.persistence import User  # noqa: E402
 from iesplan.application import identity  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
+# 注册任务侧表: 结果域 persistence 在导入期即登记 evidence_packages(外键指向
+# 任务侧表), 而任务域 persistence 为延迟装载; 建表前必须显式导入, 否则
+# create_all 报 NoReferencedTableError(单文件运行时必现)。
+from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
 
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "Admin12345"
@@ -310,6 +314,97 @@ def _set_explicit_calc(client: TestClient, user_id: int, project_id: int, revisi
     return resp.json()["revision"]
 
 
+def _declare_finance(db: Session, user_id: int, pid: int) -> None:
+    """装配闸门要求项目固定有效财务快照: 登记地区 Profile 并引用。"""
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan.application import configuration as config_cases
+
+    config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), user_id)
+    config_cases.set_project_finance_profile(
+        db, pid, PROFILE_PAYLOAD["profile"]["id"], user_id
+    )
+
+
+def _assembly_commands(instances: dict[str, Any]) -> list[dict[str, Any]]:
+    """装配两节起草命令: finance_binding 实例全覆盖(机械测试声明无成本,
+    真实项目按成本逐实例声明 costed；tariff 无计费绑定；
+    均为显式声明而非系统默认；planning 改走冻结规划修订投影)。"""
+    return [
+        {
+            "id": "c-finbind", "unit": "assembly",
+            "type": "assembly.set_finance_binding",
+            "payload": {"instances": instances},
+        },
+        {
+            "id": "c-tariff", "unit": "assembly",
+            "type": "assembly.set_tariff_bindings",
+            "payload": {"bindings": {}},
+        },
+    ]
+
+
+def _declare_assembly_sections(
+    client: TestClient, user_id: int, project_id: int, revision: int,
+    instances: dict[str, Any] | None = None,
+) -> int:
+    """经 assembly.* 起草命令显式声明装配节, 返回新修订号。"""
+    resp = client.put(
+        f"/api/projects/{project_id}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": _assembly_commands(instances or {}),
+        },
+        headers=_h(client, user_id),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _finance_instances(devices: dict[str, Any]) -> dict[str, Any]:
+    """设备行 id → 装配实例引用(d{id})全覆盖, 显式声明无成本(type:none)。"""
+    return {
+        f"d{entry['device']['id']}": {"type": "none"}
+        for entry in devices.values()
+    }
+
+
+#: 设备预定义接口的显式常量边界(机械测试用；真实项目绑定实测数据文件)。
+#: 2.0 契约要求每个 predefined 接口必须声明来源；constant 为一等来源模式，
+#: 经与 GUI 同构的 model.upsert_device 起草命令显式声明(非静默默认)。
+CONSTANT_BINDINGS = {
+    "屋顶光伏": {"solar_irradiance": 800.0, "ambient_temperature": 25.0},
+    "电负荷": {"electricity_demand": 800.0},
+    "热负荷": {"heat_demand": 800.0},
+    "冷负荷": {"cool_demand": 800.0},
+}
+
+
+def _declare_constant_bindings(
+    client: TestClient, user_id: int, project_id: int, revision: int,
+) -> int:
+    """经 model.upsert_device 显式声明设备预定义接口常量来源, 返回新修订号。"""
+    resp = client.put(
+        f"/api/projects/{project_id}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [
+                {
+                    "id": f"bind-const-{idx}",
+                    "project_id": project_id,
+                    "unit": "model",
+                    "type": "model.upsert_device",
+                    "payload": {"name": name, "params": dict(params)},
+                }
+                for idx, (name, params) in enumerate(CONSTANT_BINDINGS.items())
+            ],
+        },
+        headers=_h(client, user_id),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
 def _save_config(client: TestClient, user_id: int, project_id: int, revision: int) -> dict[str, Any]:
     """读取默认配置并保存(带乐观锁修订), 返回 {config, version}。"""
     resp = client.get(f"/api/projects/{project_id}/config", headers=_h(client, user_id))
@@ -422,33 +517,27 @@ def _prepare_project(
         client, user_id, pid, D_CLOAD, "冷负荷", {"peak_cooling_kw": 800}
     )
 
-    # 连接(电/热/冷 总线拓扑; 电池双向端口作源或汇;
-    # 2.0 热泵无制冷接口, 冷负荷仅由制冷机供冷)
+    # 连接(2.0 语义: 只有 out/in/bidirectional 端口可进入 connections;
+    # predefined 为数据入口永不连边, blind 不得连接。负荷需求经数据绑定,
+    # 不经图边；光伏余电经电网出口消纳，与有效样例 campus 同构；
+    # 2.0 热泵无制冷接口)
     grid_e = _port(devices["grid"], "electricity_import")
-    eload_e = _port(devices["eload"], "electricity_demand")
+    grid_export = _port(devices["grid"], "electricity_export")
     pv_e = _port(devices["pv"], "electric_out")
     bat_e = _port(devices["battery"], "electricity")
     hp_e = _port(devices["hp"], "electricity_in")
     ch_e = _port(devices["chiller"], "electricity_in")
-    _add_connection(client, user_id, pid, grid_e, eload_e)
     _add_connection(client, user_id, pid, grid_e, bat_e)
-    _add_connection(client, user_id, pid, bat_e, eload_e)
-    _add_connection(client, user_id, pid, pv_e, eload_e)
     _add_connection(client, user_id, pid, grid_e, hp_e)
     _add_connection(client, user_id, pid, grid_e, ch_e)
-    _add_connection(client, user_id, pid, _port(devices["hp"], "heat_out"),
-                    _port(devices["hload"], "heat_demand"))
-    _add_connection(client, user_id, pid, _port(devices["boiler"], "heat_out"),
-                    _port(devices["hload"], "heat_demand"))
-    _add_connection(client, user_id, pid, _port(devices["chiller"], "cool_out"),
-                    _port(devices["cload"], "cool_demand"))
+    _add_connection(client, user_id, pid, pv_e, grid_export)
 
-    # 系统图断言: 设备 9 台(含 3 负荷), 连接 9 条
+    # 系统图断言: 设备 9 台(含 3 负荷), 连接 4 条(负荷经数据供给,不连边)
     resp = client.get(f"/api/projects/{pid}/model", headers=_h(client, user_id))
     assert resp.status_code == 200, resp.text
     graph = resp.json()
     assert len(graph["devices"]) == 9
-    assert len(graph["connections"]) == 9
+    assert len(graph["connections"]) == 4
 
     # 模型校验: 无 error/blocking(拓扑完整)
     resp = client.get(f"/api/projects/{pid}/model/validate", headers=_h(client, user_id))
@@ -460,9 +549,39 @@ def _prepare_project(
     dataset_id, version_id = _create_sample_dataset(client, user_id, pid)
     revision = _bind_dataset(client, user_id, pid, 1, version_id)
 
-    # 保存配置(乐观锁修订, 不递增草稿修订) + 显式计算声明 + 财务基准确认
+    # 保存配置(乐观锁修订, 不递增草稿修订) + 显式财务引用 + 显式计算声明 +
+    # 显式装配两节 + 最小规划修订(储能容量单变量) + 财务基准确认
+    # (草稿修订链式递增, 不得复用旧修订号)
+    from iesplan.application import configuration as config_cases
+
     config_body = _save_config(client, user_id, pid, revision)
-    _set_explicit_calc(client, user_id, pid, revision)
+    _declare_finance(db, user_id, pid)
+    bat_ref = f"d{devices['battery']['device']['id']}"
+    config_cases.save_planning_config(
+        db,
+        pid,
+        {
+            "objective": {"sense": "minimize", "expression": "0"},
+            "variables": {
+                "cap": {
+                    "device_ref": bat_ref,
+                    "parameter": "capacity_kwh",
+                    "lower_bound": "0",
+                    "upper_bound": "1000",
+                    "unit": "kWh",
+                },
+            },
+            "constraints": {},
+        },
+        None,
+        user_id,
+    )
+    revision = _set_explicit_calc(client, user_id, pid, revision)
+    revision = _declare_assembly_sections(
+        client, user_id, pid, revision,
+        instances=_finance_instances(devices),
+    )
+    revision = _declare_constant_bindings(client, user_id, pid, revision)
     if confirm_baseline:
         _baseline_confirm(client, user_id, pid, config_body["config"])
 

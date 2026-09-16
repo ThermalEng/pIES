@@ -24,7 +24,6 @@ from iesplan.assembly import (
     validate_project_export,
 )
 from iesplan.assembly.diags import (
-    ASM_INPUT_RANGE,
     ASM_INPUT_UNDECLARED,
     ASM_INPUT_UNFED,
     ASM_OUTPUT_REF,
@@ -39,20 +38,55 @@ VALID_DIR = SAMPLES_DIR / "valid"
 DATA_DIR = SAMPLES_DIR / "data"
 
 
-#: 导出合成路径 → 样例 CSV(调用方显式注入对象字节；模式显式传入，不猜测)
-_EXPORT_CSV = {17: "campus_load.data.csv", 18: "campus_heat.data.csv"}
+def _campus_snapshot():
+    """园区样例有效快照：样例 YAML 经 finance 唯一公开边界解析为密封对象。"""
+    from iesplan.finance import effective_from_yaml
+
+    text = (SAMPLES_DIR / "finance" / "campus.effective-finance.yaml").read_text(encoding="utf-8")
+    return effective_from_yaml(text)
 
 
-def _export_contents(*vids: int) -> dict:
-    """合成路径到对象字节的显式注入 {path: {object_id, media_type, data}}。"""
-    return {
-        f"data/ds{vid}.data.csv": {
-            "object_id": f"object:{vid}",
-            "media_type": "text/csv",
-            "data": (DATA_DIR / _EXPORT_CSV[vid]).read_bytes(),
-        }
-        for vid in vids
-    }
+#: 导出 finance 精确引用(object 种，调用方显式注入快照)
+_EXPORT_FINANCE = {
+    "ref": {"kind": "object", "object_id": "fin:campus", "media_type": "application/yaml"},
+    "profile_id": "cn-north-demo",
+}
+
+
+def _finance_snapshots():
+    return {"fin:campus": _campus_snapshot()}
+
+
+#: 热泵成本绑定(driver 按增量语义齐全：new 全量)
+_HP_BINDING = {
+    "type": "costed",
+    "finance_type": "heat_pump_system",
+    "drivers": {
+        "heat_kw": {"property": "rated_heat_kw"},
+        "consumed_kwh": {"interface": "electricity_in", "aggregation": "integrate_positive"},
+    },
+}
+
+#: 导出计费绑定(空：样例项目无能源计费声明)
+_EXPORT_TARIFF = {}
+
+#: 导出规划(d2 热泵三项分量齐全的目标；单变量无约束)
+_EXPORT_PLANNING = {
+    "objective": {
+        "sense": "minimize",
+        "expression": "d2__upfront_capex + 1 year * d2__annual_fixed_om + d2__period_variable_om",
+    },
+    "variables": {
+        "hp_cap": {
+            "device_ref": "d2",
+            "parameter": "rated_heat_kw",
+            "lower_bound": "0",
+            "upper_bound": "1000",
+            "unit": "kW",
+        },
+    },
+    "constraints": {},
+}
 
 
 @pytest.fixture
@@ -180,11 +214,32 @@ class TestUnhappyPath:
             '        unit: "1"\n'
             "    predefined_interfaces: {}\n"
             "connections: {}\n"
-            "constraints: {}\n"
+            "finance:\n"
+            "  ref:\n"
+            "    kind: object\n"
+            '    object_id: "fin:campus"\n'
+            "  profile_id: cn-north-demo\n"
+            "finance_binding:\n"
+            "  instances:\n"
+            "    hp1:\n"
+            "      type: none\n"
+            "tariff_bindings: {}\n"
+            "planning:\n"
+            "  objective:\n"
+            "    sense: minimize\n"
+            '    expression: "0"\n'
+            "  variables:\n"
+            "    hp_cap:\n"
+            "      device_ref: hp1\n"
+            "      parameter: rated_heat_kw\n"
+            '      lower_bound: "0"\n'
+            '      upper_bound: "1000"\n'
+            "      unit: kW\n"
+            "  constraints: {}\n"
             "outputs:\n  series: []\n  metrics: []\n"
             "extensions: {}\n"
         )
-        result = validate_assembly_text(text)
+        result = validate_assembly_text(text, finance_snapshots=_finance_snapshots())
         assert result.artifact is None
         assert any(d.code == ASM_INPUT_UNFED for d in result.diagnostics)
 
@@ -210,7 +265,6 @@ class TestProjectExport:
                         "device_type": "ies.device.grid_connection",
                         "kind": "existing",
                         "params": {
-                            "type_detail": "ies.device.grid_connection",
                             "max_import_power_kw": 800,
                             "max_export_power_kw": 200,
                         },
@@ -220,7 +274,6 @@ class TestProjectExport:
                         "device_type": "ies.device.heat_pump",
                         "kind": "new",
                         "params": {
-                            "type_detail": "ies.device.heat_pump",
                             "rated_heat_kw": 600,
                             "cop": 3.5,
                         },
@@ -230,9 +283,9 @@ class TestProjectExport:
                         "device_type": "ies.device.electric_load",
                         "kind": "existing",
                         "params": {
-                            "type_detail": "ies.device.electric_load",
                             "peak_power_kw": 100,
-                            "load_profile": {"dataset_version_id": 17, "columns": ["electricity_demand"], "unit": "kW"},
+                            # 2.0 显式来源声明:常量需求(数据序列来源由 S2c 独立入口提供)
+                            "electricity_demand": 100.0,
                         },
                     },
                 ],
@@ -261,24 +314,32 @@ class TestProjectExport:
                 ],
                 # predefined 接口不进入 connections(需求序列由来源声明提供)
                 "connections": [
-                    {"id": 101, "from_port_id": 11, "to_port_id": 21, "loss_rate": 0},
+                    {"id": 101, "from_port_id": 11, "to_port_id": 21},
                 ],
             },
             "project_baseline": _export_baseline(),
-            "dataset_bindings": [{"dataset_version_id": 17}],
         }
         result = validate_project_export(
             content,
-            predefined_modes={17: "data_repeat"},
-            dataset_contents=_export_contents(17),
+            finance=_EXPORT_FINANCE,
+            finance_binding={
+                "instances": {
+                    "d1": {"type": "none"},
+                    "d2": _HP_BINDING,
+                    "d3": {"type": "none"},
+                }
+            },
+            tariff_bindings=_EXPORT_TARIFF,
+            planning=_EXPORT_PLANNING,
+            finance_snapshots=_finance_snapshots(),
         )
         assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
         artifact = result.artifact
         assert artifact is not None
-        # loss_rate 0 → 直接连接;无管道设备
+        # 连接只映射显式端点;构造器不自动合成管道设备
         canonical = artifact.canonical_text
         assert "transport_pipe" not in canonical
-        assert '"mode":"data_repeat"' in canonical
+        assert '"mode":"constant"' in canonical
 
     def test_project_export_rejects_missing_baseline(self, init_registry):
         # 缺失项目基线不再静默默认:阻断诊断返回
@@ -313,34 +374,6 @@ class TestProjectExport:
             for d in result.diagnostics
         )
 
-    def test_project_export_rejects_invalid_loss_rate(self, init_registry):
-        # loss_rate 非数值不再吞错按 0 处理:阻断诊断返回
-        content = {
-            "graph_id": 10,
-            "name": "bad_loss",
-            "model": {
-                "devices": [
-                    {
-                        "id": 1,
-                        "device_type": "ies.device.grid_connection",
-                        "kind": "existing",
-                        "params": {"type_detail": "ies.device.grid_connection"},
-                    },
-                ],
-                "ports": [
-                    {"id": 11, "device_id": 1, "name": "p", "port_type": "electric", "direction": "out"},
-                ],
-                "connections": [{"id": 9, "from_port_id": 11, "to_port_id": 11, "loss_rate": "lots"}],
-            },
-            "project_baseline": _export_baseline(),
-        }
-        result = validate_project_export(content)
-        assert result.artifact is None
-        assert any(
-            d.params.get("reason") == "connection_loss_rate_invalid" and d.blocking
-            for d in result.diagnostics
-        )
-
     def test_project_export_rejects_invalid_baseline_members(self, init_registry):
         # leap_year 非布尔 / scenario_mode 非 single:阻断诊断返回,不猜测、不回退
         for baseline, reason in [
@@ -360,9 +393,9 @@ class TestProjectExport:
                 for d in result.diagnostics
             ), (baseline, reason)
 
-    def test_project_export_lossy_edge_to_predefined_blocked(self, init_registry):
-        # 2.0 下 predefined 接口永不进入 connections:损耗边指向需求接口时，
-        # 即使经管道包裹也不会静默改道，必须阻断(ASM-EDGE-011)
+    def test_project_export_edge_to_predefined_blocked(self, init_registry):
+        # 2.0 下 predefined 接口永不进入 connections:直接边指向需求接口
+        # 时必须阻断(ASM-EDGE-011)，不静默改道、不合成管道
         content = {
             "graph_id": 43,
             "name": "campus_pipe",
@@ -373,7 +406,6 @@ class TestProjectExport:
                         "device_type": "ies.device.grid_connection",
                         "kind": "existing",
                         "params": {
-                            "type_detail": "ies.device.grid_connection",
                         },
                     },
                     {
@@ -381,7 +413,6 @@ class TestProjectExport:
                         "device_type": "ies.device.heat_pump",
                         "kind": "new",
                         "params": {
-                            "type_detail": "ies.device.heat_pump",
                             "rated_heat_kw": 600,
                             "cop": 3.5,
                         },
@@ -391,8 +422,8 @@ class TestProjectExport:
                         "device_type": "ies.device.heat_load",
                         "kind": "existing",
                         "params": {
-                            "type_detail": "ies.device.heat_load",
-                            "heat_profile": {"dataset_version_id": 18, "columns": ["heat_demand"], "unit": "kW"},
+                            # 2.0 显式来源声明:常量需求(需求接口本身永不连边)
+                            "heat_demand": 800.0,
                         },
                     },
                 ],
@@ -421,96 +452,66 @@ class TestProjectExport:
                     {"id": 31, "device_id": 3, "name": "heat_demand", "port_type": "heat", "direction": "in"},
                 ],
                 "connections": [
-                    {"id": 101, "from_port_id": 11, "to_port_id": 21, "loss_rate": 0},
+                    {"id": 101, "from_port_id": 11, "to_port_id": 21},
                     {
                         "id": 102,
                         "from_port_id": 22,
                         "to_port_id": 31,
-                        "loss_rate": 0.05,
                     },
                 ],
             },
             "project_baseline": _export_baseline(),
-            "dataset_bindings": [{"dataset_version_id": 18}],
         }
         result = validate_project_export(
             content,
-            predefined_modes={18: "data_repeat"},
-            dataset_contents=_export_contents(18),
+            finance=_EXPORT_FINANCE,
+            finance_binding={
+                "instances": {
+                    "d1": {"type": "none"},
+                    "d2": _HP_BINDING,
+                    "d3": {"type": "none"},
+                }
+            },
+            tariff_bindings=_EXPORT_TARIFF,
+            planning=_EXPORT_PLANNING,
+            finance_snapshots=_finance_snapshots(),
         )
         assert result.artifact is None
         assert any(
             d.code == "ASM-EDGE-011" and d.blocking for d in result.diagnostics
         )
 
-    def test_project_export_rejects_unmappable_binding_without_heuristics(self, init_registry):
-        # 无启发式映射: 声明列与模型 predefined 列不一致 → 阻断
-        content = {
-            "graph_id": 44,
-            "name": "bad_binding",
-            "model": {
-                "devices": [
-                    {
-                        "id": 3,
-                        "device_type": "ies.device.electric_load",
-                        "kind": "existing",
-                        "params": {
-                            "type_detail": "ies.device.electric_load",
-                            "load_profile": {"dataset_version_id": 17, "columns": ["nope"], "unit": "kW"},
-                        },
-                    },
-                ],
-                "ports": [],
-                "connections": [],
-            },
-            "project_baseline": _export_baseline(),
-            "dataset_bindings": [{"dataset_version_id": 17}],
-        }
-        result = validate_project_export(
-            content,
-            predefined_modes={17: "data_repeat"},
-            dataset_contents=_export_contents(17),
-        )
+    def test_project_export_rejects_unknown_predefined_mode_without_heuristics(self, init_registry):
+        # 无启发式映射: 预定义来源未知模式不猜测 → 结构阶段即阻断
+        text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
+        parsed = parse_assembly_doc(text)
+        assert parsed.ok, parsed.diagnostics
+        assert parsed.doc is not None
+        heat = parsed.doc["devices"]["heat_load"]["predefined_interfaces"]["heat_demand"]
+        heat["mode"] = "data_guess"
+        result = validate_assembly_doc(parsed.doc, package_dir=SAMPLES_DIR)
         assert result.artifact is None
         assert any(
-            d.params.get("reason") == "data_binding_unmappable" and d.blocking
+            d.code == "ASM-SYN-005"
+            and d.params.get("reason") == "invalid_enum"
+            and d.blocking
             for d in result.diagnostics
         )
 
     def test_project_export_rejects_missing_predefined_mode(self, init_registry):
-        # 数据集绑定缺显式来源模式 → 阻断，不猜测 data_repeat/data_predict
-        content = {
-            "graph_id": 46,
-            "name": "no_mode",
-            "model": {
-                "devices": [
-                    {
-                        "id": 3,
-                        "device_type": "ies.device.electric_load",
-                        "kind": "existing",
-                        "params": {
-                            "type_detail": "ies.device.electric_load",
-                            "load_profile": {
-                                "dataset_version_id": 17,
-                                "columns": ["electricity_demand"],
-                                "unit": "kW",
-                            },
-                        },
-                    },
-                ],
-                "ports": [],
-                "connections": [],
-            },
-            "project_baseline": _export_baseline(),
-            "dataset_bindings": [{"dataset_version_id": 17}],
-        }
-        result = validate_project_export(
-            content,
-            dataset_contents=_export_contents(17),
-        )
+        # 预定义来源缺显式模式字段 → 阻断，不猜测 data_repeat/data_predict
+        text = (VALID_DIR / "campus.assembly.yaml").read_text(encoding="utf-8")
+        parsed = parse_assembly_doc(text)
+        assert parsed.ok, parsed.diagnostics
+        assert parsed.doc is not None
+        heat = parsed.doc["devices"]["heat_load"]["predefined_interfaces"]["heat_demand"]
+        del heat["mode"]
+        result = validate_assembly_doc(parsed.doc, package_dir=SAMPLES_DIR)
         assert result.artifact is None
         assert any(
-            d.params.get("reason") == "predefined_mode_missing" and d.blocking
+            d.code == "ASM-SYN-005"
+            and d.params.get("reason") == "invalid_enum"
+            and d.blocking
             for d in result.diagnostics
         )
 
@@ -528,17 +529,13 @@ class TestProjectExport:
         )
 
     def test_project_export_rejects_bad_connections(self, init_registry):
-        # 无 id / 端口不可解析 / 1.0 独有 delay_steps 一律阻断, 无静默丢弃;
+        # 无 id / 端口不可解析一律阻断, 无静默丢弃;
         # 阻断统一使用 ASM-CONV-001 并携带对应 reason
         base_ports = [{"id": 11, "device_id": 1, "name": "p", "port_type": "electric", "direction": "out"}]
         base_devices = [{"id": 1, "device_type": "ies.device.grid_connection", "kind": "existing", "params": {}}]
         cases = [
             ({"connections": [{"from_port_id": 11, "to_port_id": 11}]}, "connection_id_missing"),
             ({"connections": [{"id": 9, "from_port_id": 11, "to_port_id": 99}]}, "connection_port_unresolved"),
-            (
-                {"connections": [{"id": 9, "from_port_id": 11, "to_port_id": 11, "delay_steps": 2}]},
-                "connection_delay_unsupported",
-            ),
         ]
         for conn, reason in cases:
             content = {

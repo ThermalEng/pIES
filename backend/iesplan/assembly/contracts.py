@@ -89,7 +89,7 @@ def _stable_diagnostic_dict(diag: Diagnostic) -> dict:
 
 @dataclass(frozen=True, slots=True)
 class ValidationReceipt:
-    """校验回执:校验器/规范化算法/schema/依赖锁/资源记录/零阻断诊断。
+    """校验回执:校验器/规范化算法/schema/依赖锁/资源记录/有效财务快照引用/零阻断诊断。
 
     字段顺序固定，``to_dict()`` 输出确定性 JSON 兼容字典。回执是输入内容的
     可复现证明，不包含签发时间或 trace/task 上下文；运行审计时间由快照/任务表
@@ -105,6 +105,8 @@ class ValidationReceipt:
     canonical_algorithm_version: str = CANON_ALGORITHM_VERSION
     dependencies: Mapping[str, object] = field(default_factory=dict)
     resources: Mapping[str, object] = field(default_factory=dict)
+    finance_snapshot: Mapping[str, object] = field(default_factory=dict)
+    planning: Mapping[str, object] = field(default_factory=dict)
     diagnostics: tuple[Diagnostic, ...] = ()
 
     def __post_init__(self) -> None:
@@ -112,11 +114,17 @@ class ValidationReceipt:
             raise TypeError("dependencies 须为 Mapping")
         if not isinstance(self.resources, Mapping):
             raise TypeError("resources 须为 Mapping")
+        if not isinstance(self.finance_snapshot, Mapping):
+            raise TypeError("finance_snapshot 须为 Mapping")
+        if not isinstance(self.planning, Mapping):
+            raise TypeError("planning 须为 Mapping")
         diagnostics = tuple(self.diagnostics)
         if not all(isinstance(diag, Diagnostic) for diag in diagnostics):
             raise TypeError("diagnostics 须仅包含 Diagnostic")
         object.__setattr__(self, "dependencies", _freeze_value(self.dependencies))
         object.__setattr__(self, "resources", _freeze_value(self.resources))
+        object.__setattr__(self, "finance_snapshot", _freeze_value(self.finance_snapshot))
+        object.__setattr__(self, "planning", _freeze_value(self.planning))
         object.__setattr__(self, "diagnostics", diagnostics)
 
     def to_dict(self) -> dict:
@@ -134,6 +142,8 @@ class ValidationReceipt:
             },
             "dependencies": _thaw_value(self.dependencies),
             "resources": _thaw_value(self.resources),
+            "finance_snapshot": _thaw_value(self.finance_snapshot),
+            "planning": _thaw_value(self.planning),
             "diagnostics": [_stable_diagnostic_dict(diag) for diag in self.diagnostics],
         }
 

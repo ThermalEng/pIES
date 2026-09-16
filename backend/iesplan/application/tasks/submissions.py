@@ -28,14 +28,19 @@ from __future__ import annotations
 
 import re
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from iesplan.finance import EffectiveFinanceConfig
 
 from sqlalchemy.orm import Session
 
 from iesplan import __version__
+from iesplan import configuration as configuration_domain
 from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
@@ -43,9 +48,13 @@ from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
 from iesplan.application.projects import (
     current_version_matches_draft as _current_version_matches_draft,
+)
+from iesplan.application.projects import (
     ensure_access,
-    freeze_snapshot_version as _freeze_snapshot_version,
     load_content_object,
+)
+from iesplan.application.projects import (
+    freeze_snapshot_version as _freeze_snapshot_version,
 )
 from iesplan.assembly import (
     AssemblyValidationError,
@@ -67,7 +76,6 @@ from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.storage import (
-    ObjectCorruptError,
     get_object,
     object_info,
     orphaned_stats,
@@ -75,7 +83,6 @@ from iesplan.storage import (
 )
 from iesplan.tasks.contracts import (
     COMPUTE_TYPES,
-    IDEMPOTENCY_KEY_RE as _IDEMPOTENCY_KEY_RE,
     IO_SLOT_CAPACITY,
     LEASE_TTL_SECONDS,
     POOL_BY_TYPE,
@@ -89,6 +96,9 @@ from iesplan.tasks.contracts import (
     TaskAttemptRecord,
     TaskRecord,
     TaskStateError,
+)
+from iesplan.tasks.contracts import (
+    IDEMPOTENCY_KEY_RE as _IDEMPOTENCY_KEY_RE,
 )
 
 #: 任务类型/池/状态机/结局映射与任务错误唯一权威见 tasks 域
@@ -200,9 +210,11 @@ def _resolve_project_inputs(
     content = load_content_object(db, draft.content_object_id)
     if not freeze:
         return None, content
-    # 草稿固化: 创建不可变项目版本(计算输入固定)
+    # 草稿固化: 创建不可变项目版本(计算输入固定)。闸门必须消费密封后
+    # 的版本内容(含 project_baseline 等项目固化字段), 不得直接使用原始
+    # 草稿内容, 否则与已有版本路径的输入口径不一致。
     version = _freeze_snapshot_version(db, actor, project, draft)
-    return version, content
+    return version, load_content_object(db, version.content_object_id)
 
 
 
@@ -320,19 +332,123 @@ def _assemble_snapshot(
     )
 
 
+def _export_finance_for(
+    db: Session, project_id: int, *, profile_id: str, revision: int
+) -> tuple[dict[str, Any], dict[str, EffectiveFinanceConfig]]:
+    """项目当前 Effective 快照 → (finance 精确引用节, 密封快照显式注入)。
+
+    只解析传入的精确引用 {profile_id, revision}；不读项目当前指针，
+    不 fallback。引用身份为签发时写入对象存储的真实内容对象 oid(经行
+    content_object_id 非空列解析)；密封对象由行内容类型化恢复后注入，
+    装配直接消费，不重验字段。钉选 revision 不存在/档案不符 →
+    AppError(与配置域 PROJ-FIN-003 同语义，可见失败，不回退)。
+    finance 节携带 revision，装配回执记录冻结血缘(oid/profile/revision)。
+    """
+    from iesplan.finance import EffectiveFinanceConfig
+    from iesplan.storage import object_info
+
+    row = configuration_domain.get_effective_revision(db, project_id, revision)
+    if row is None or row.profile_id != profile_id:
+        raise AppError(
+            "冻结版本引用的 Effective 财务快照不存在(先引用财务 Profile 后提交计算)",
+            code="PROJ-FIN-003",
+            params={"project_id": project_id, "profile_id": profile_id, "revision": revision},
+        )
+    effective = EffectiveFinanceConfig.from_dict(row.content)
+    object_id = str(object_info(db, row.content_object_id)["oid"])
+    finance = {
+        "ref": {
+            "kind": "object",
+            "object_id": object_id,
+            "media_type": "application/yaml",
+        },
+        "profile_id": row.profile_id,
+        "revision": row.revision,
+    }
+    return finance, {object_id: effective}
+
+
+def _project_planning_for(db: Session, project_id: int, *, revision: int) -> dict[str, Any]:
+    """冻结版本钉选的 planning_config revision → 确定性投影。
+
+    经 configuration 公开门面取对应不可变行，PlanningConfig.from_dict
+    类型化恢复(持久化反序列化边界)后 to_dict() 序列化即装配 planning 节；
+    装配不查库、不重验可信内容。钉选 revision 不存在 → AppError
+    (与配置域 PROJ-PLAN-004 同语义，可见失败，不回退)。
+    """
+    from iesplan.core.contracts import PlanningConfig
+
+    row = configuration_domain.get_planning_revision(db, project_id, revision)
+    if row is None:
+        raise AppError(
+            "冻结版本引用的规划配置不存在(先保存规划配置后提交计算)",
+            code="PROJ-PLAN-004",
+            params={"project_id": project_id, "revision": revision},
+        )
+    return PlanningConfig.from_dict(row.content).to_dict()
+
+
+def _frozen_ref(content: Mapping, project_id: int, key: str, field: str) -> Mapping:
+    """版本内容冻结引用块(缺失/形态非法 → InvalidRequestError，不读当前指针)。"""
+    block = content.get(key)
+    if not isinstance(block, Mapping) or field not in block:
+        raise InvalidRequestError(
+            f"版本内容缺少冻结引用 {key}.{field}(先固定对应配置后提交计算)",
+            params={"project_id": project_id},
+        )
+    return block
+
+
 def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) -> ValidatedAssemblyArtifact:
     """计算任务统一装配闸门: 完整四阶段校验后签发规范二件套。
 
     阻断诊断抛 AssemblyValidationError(HTTP 422)。签发即受信，不做重复复核。
+    finance/planning 只消费传入版本内容已冻结的精确引用
+    (effective_finance {profile_id, overrides_revision, revision} /
+    planning_config {revision})，
+    按钉选 revision 经公开门面取不可变行；不读项目 latest/current 指针，
+    不 fallback，缺席/档案不符明确失败。finance_binding/tariff_bindings
+    只透传项目内容已声明的节(起草命令写入)，缺席即对应装配节缺失阻断，
+    不猜测、不补默认。
     """
     if task_type not in COMPUTE_TYPES:
         raise InvalidRequestError("仅计算类任务可装配计算快照", params={"task_type": task_type})
+    frozen_finance = _frozen_ref(content, project_id, "effective_finance", "revision")
+    profile_id = frozen_finance.get("profile_id")
+    revision = frozen_finance.get("revision")
+    if (
+        not isinstance(profile_id, str)
+        or not profile_id
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+    ):
+        raise InvalidRequestError(
+            "版本内容冻结财务引用非法(先引用财务 Profile 后提交计算)",
+            params={"project_id": project_id},
+        )
+    frozen_planning = _frozen_ref(content, project_id, "planning_config", "revision")
+    planning_revision = frozen_planning.get("revision")
+    if not isinstance(planning_revision, int) or isinstance(planning_revision, bool):
+        raise InvalidRequestError(
+            "版本内容冻结规划引用非法(先保存规划配置后提交计算)",
+            params={"project_id": project_id},
+        )
+    finance, finance_snapshots = _export_finance_for(
+        db, project_id, profile_id=profile_id, revision=revision
+    )
+    planning = _project_planning_for(db, project_id, revision=planning_revision)
     export_content = dict(content)
     export_content.setdefault("graph_id", project_id)
     export_content.setdefault("name", f"project_{project_id}")
-    contents, modes = _dataset_contents_for(db, content)
+    contents = _dataset_contents_for(db, content)
     result = validate_project_export(
-        export_content, predefined_modes=modes, dataset_contents=contents
+        export_content,
+        dataset_contents=contents,
+        finance=finance,
+        finance_binding=content.get("finance_binding"),
+        tariff_bindings=content.get("tariff_bindings"),
+        planning=planning,
+        finance_snapshots=finance_snapshots,
     )
     if result.artifact is None:
         raise AssemblyValidationError(result.diagnostics)
@@ -341,37 +457,30 @@ def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) 
 
 def _dataset_contents_for(
     db: Session, content: dict,
-) -> tuple[dict[str, dict], dict[int, str]]:
-    """项目绑定数据集版本 → 装配显式注入({合成路径: 对象字节}，{vid: 来源模式})。
+) -> dict[str, dict]:
+    """项目绑定数据集版本 → 装配显式注入({合成路径: 对象字节})。
 
-    只通过 dataset 域与 storage/devices 公开门面读取。每个版本选择
-    ``file_kind=data`` 的权威数据本体；来源模式取文件自身声明的
-    ``source_mode``（CSV 作者在导入边界的显式声明，非猜测）；缺文件、
-    不可读或模式非法时不伪造，由统一装配入口给出阻断诊断。
+    只通过 dataset 域与 storage 公开门面读取。绑定由 dataset.bind
+    输入边界写入类型化整数 id(不存在/跨项目当场拒绝)，此处直接信任：
+    每个版本选择 ``file_kind=data`` 的权威数据本体；缺数据本体或
+    对象不可读是门面的真实错误(直接透传)，一律不跳过、不伪装成
+    装配引用缺失。
     """
     from iesplan.assembly import dataset_export_path
-    from iesplan.devices import parse_data_file_v2
 
     contents: dict[str, dict] = {}
-    modes: dict[int, str] = {}
     for binding in content.get("dataset_bindings", []) or []:
-        vid = binding.get("dataset_version_id")
-        if vid is None:
-            continue
-        try:
-            vid = int(vid)
-        except (TypeError, ValueError):
-            continue
+        vid = binding["dataset_version_id"]
         data_file = next(
             (f for f in dataset_domain.list_files(db, vid) if f.file_kind == "data"),
             None,
         )
         if data_file is None:
-            continue
-        try:
-            raw = get_object(db, data_file.object_id)
-        except ObjectCorruptError:
-            continue
+            raise AppError(
+                "数据集版本缺少权威数据本体(file_kind=data)",
+                params={"dataset_version_id": vid},
+            )
+        raw = get_object(db, data_file.object_id)
         object_meta: dict = object_info(db, data_file.object_id)
         media_type = object_meta.get("media_type")
         if not media_type:
@@ -386,11 +495,7 @@ def _dataset_contents_for(
             "media_type": media_type,
             "data": raw,
         }
-        parsed, parse_diags = parse_data_file_v2(bytes(raw))
-        if parsed is not None and not any(d.blocking for d in parse_diags):
-            if parsed.meta.source_mode in ("data_repeat", "data_predict"):
-                modes[vid] = parsed.meta.source_mode
-    return contents, modes
+    return contents
 
 
 # ---------------------------------------------------------------------------

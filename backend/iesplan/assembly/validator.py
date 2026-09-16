@@ -12,9 +12,11 @@
 2. 模型与数据:设备模型精确版本注册、参数只允许已声明字段、必填参数非空、
    数据绑定(dataset/column/单位/分辨率)、负荷类设备必带 data、相对资源解析;
 3. 图与系统:复用 iesplan.assembly.context 端口推导 + rules.connection
-   (run_phase_b) + rules.solvability (run_phase_d) + 约束表达式检查
-   (rules.constraints.run_constraint_checks);端口不可达与悬空输入由本模块独立补充;
-4. 输出引用:outputs series/metrics 引用设备存在。
+   (run_phase_b) + rules.solvability (run_phase_d);端口不可达与悬空输入
+   由本模块独立补充;年步数由项目计算基线显式推导后传入上下文;
+4. 输出引用 + 财务完整性:outputs 引用存在；finance 精确引用(对象注入
+   或包内文件经 finance 公开边界解析)；finance_binding 实例全覆盖；
+   tariff_bindings 计费绑定；planning 目标/变量/约束(公共表达式引擎)。
 
 输出格式:
   AssemblyValidationResult(diagnostics, artifact) — artifact 为 None 时校验失败。
@@ -35,7 +37,7 @@ from typing import Any
 
 from iesplan.assembly.builder import build_assembly_doc_from_content
 from iesplan.assembly.canonicalizer import canonicalize_assembly_doc
-from iesplan.assembly.context import units_compatible
+from iesplan.assembly.context import steps_for_baseline, units_compatible
 from iesplan.assembly.contracts import (
     AssemblyValidationError,
     ValidatedAssemblyArtifact,
@@ -44,7 +46,6 @@ from iesplan.assembly.contracts import (
 from iesplan.assembly.diags import (
     ASM_BIND_INVALID,
     ASM_EDGE_BAD_ENDPOINT,
-    ASM_INPUT_PARAM,
     ASM_INPUT_PROP_UNIT,
     ASM_INPUT_RANGE,
     ASM_INPUT_UNDECLARED,
@@ -56,13 +57,12 @@ from iesplan.assembly.diags import (
 from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.assembly.parser import parse_assembly_doc, run_structure_checks
 from iesplan.assembly.schema import (
-    AssemblyConstraint,
     AssemblyDevice,
     AssemblyEdge,
     AssemblySpec,
-    TimeAxisRef,
 )
 from iesplan.core.diagnostics import Diagnostic
+from iesplan.finance import EffectiveFinanceConfig
 
 
 @dataclass(slots=True)
@@ -87,18 +87,23 @@ def validate_assembly_text(
     source_name: str = "assembly.yaml",
     package_dir: str | Path | None = None,
     dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
+    finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
 ) -> AssemblyValidationResult:
     """手写装配 YAML 文本 → 单管线校验(安全解析一次 + 结构/领域校验一次)。
 
     dataset_contents 为显式注入的预定义文件内容 {path: {object_id,
     media_type, data}}，供包外调用方(项目导出)提供对象存储字节；
-    包内相对路径缺省从 package_dir 读取。
+    包内相对路径缺省从 package_dir 读取。finance_snapshots 为显式注入
+    的有效财务快照 {object_id: EffectiveFinanceConfig}，供 object 引用解析。
     """
     parsed = parse_assembly_doc(text, source_name=source_name)
     if parsed.doc is None:
         return AssemblyValidationResult(diagnostics=list(parsed.diagnostics), artifact=None)
     return validate_assembly_doc(
-        parsed.doc, package_dir=package_dir, dataset_contents=dataset_contents
+        parsed.doc,
+        package_dir=package_dir,
+        dataset_contents=dataset_contents,
+        finance_snapshots=finance_snapshots,
     )
 
 
@@ -107,39 +112,60 @@ def validate_assembly_doc(
     *,
     package_dir: str | Path | None = None,
     dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
+    finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
 ) -> AssemblyValidationResult:
     """ies.assembly 2.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
 
     doc 为安全解析后的 plain dict(手写文本经 ``parse_assembly_doc`` 产生,
     GUI 导出经构造器产生);本入口做唯一一次结构校验,随后进入模型/
-    属性/预定义来源 + 图/系统 + 输出引用领域校验。手写与 GUI 共用同一
-    管线,不重复结构校验。
+    属性/预定义来源 + 图/系统 + 输出引用/财务完整性领域校验。手写与 GUI
+    共用同一管线,不重复结构校验。
     """
     diags: list[Diagnostic] = []
     tree = run_structure_checks(dict(doc), source_name="<doc>", diags=diags)
     if tree is None:
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
-    return _run_validation(tree, package_dir=package_dir, dataset_contents=dataset_contents)
+    return _run_validation(
+        tree,
+        package_dir=package_dir,
+        dataset_contents=dataset_contents,
+        finance_snapshots=finance_snapshots,
+    )
 
 
 def validate_project_export(
     content: Mapping,
     *,
-    predefined_modes: Mapping[int, str] | None = None,
     dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
+    finance: Mapping[str, Any] | None = None,
+    finance_binding: Mapping[str, Any] | None = None,
+    tariff_bindings: Mapping[str, Any] | None = None,
+    planning: Mapping[str, Any] | None = None,
+    finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
 ) -> AssemblyValidationResult:
     """GUI 项目导出入口:
 
     项目内容 → 构造器构造 ies.assembly 2.0.0 文档 → 与手写文件同一校验
-    入口(结构一次 + 领域阶段)。predefined_modes 为数据集版本到预定义
-    来源模式的显式映射 {vid: constant|data_repeat|data_predict}，缺失不
-    猜测；dataset_contents 为合成路径到对象字节的显式注入。
+    入口(结构一次 + 领域阶段)。dataset_contents 为合成路径到对象字节的
+    显式注入(供文档内 data 绑定消费)；finance /
+    finance_binding / tariff_bindings / planning 为调用方显式提供的财务
+    引用、成本绑定、计费绑定与规划(缺席则对应装配节缺失阻断，不猜测)；
+    finance_snapshots 为密封快照显式注入(kind=object 用)。设备数据序列
+    来源声明由独立入口提供(S2c)，构造器不做数据集列映射。
     """
-    built = build_assembly_doc_from_content(content, predefined_modes=predefined_modes)
+    built = build_assembly_doc_from_content(
+        content,
+        finance=finance,
+        finance_binding=finance_binding,
+        tariff_bindings=tariff_bindings,
+        planning=planning,
+    )
     if built.doc is None:
         return AssemblyValidationResult(diagnostics=list(built.diagnostics), artifact=None)
     # builder 内部产生的阻断诊断合并
-    return validate_assembly_doc(built.doc, dataset_contents=dataset_contents)
+    return validate_assembly_doc(
+        built.doc, dataset_contents=dataset_contents, finance_snapshots=finance_snapshots
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +178,15 @@ def _run_validation(
     *,
     package_dir: str | Path | None,
     dataset_contents: Mapping[str, Mapping[str, Any]] | None,
+    finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None,
 ) -> AssemblyValidationResult:
+    from iesplan.assembly.rules.finance import (
+        check_finance_binding,
+        resolve_finance_snapshot,
+    )
+    from iesplan.assembly.rules.planning import check_planning
+    from iesplan.assembly.rules.tariff import check_tariff_bindings
+
     diags: list[Diagnostic] = []
     registry = _device_registry()
 
@@ -172,8 +206,31 @@ def _run_validation(
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
 
-    # --- 阶段 4:输出引用 --------------------------------------------------
+    # --- 阶段 4:输出引用 + 财务完整性 ------------------------------------
     _phase4_outputs(doc, diags)
+    if _any_blocking(diags):
+        return AssemblyValidationResult(diagnostics=diags, artifact=None)
+    snapshot = resolve_finance_snapshot(doc, package_dir, finance_snapshots, diags)
+    if _any_blocking(diags):
+        return AssemblyValidationResult(diagnostics=diags, artifact=None)
+    assert snapshot is not None
+    baseline = doc.get("project_baseline") or {}
+    resolution = baseline.get("resolution")
+    leap_year = baseline.get("leap_year")
+    steps = steps_for_baseline(resolution, leap_year)
+    check_tariff_bindings(
+        doc, snapshot, registry,
+        baseline_resolution=resolution,
+        baseline_leap_year=leap_year,
+        baseline_steps=steps,
+        diags=diags,
+    )
+    if _any_blocking(diags):
+        return AssemblyValidationResult(diagnostics=diags, artifact=None)
+    check_finance_binding(doc, snapshot, registry, diags)
+    if _any_blocking(diags):
+        return AssemblyValidationResult(diagnostics=diags, artifact=None)
+    check_planning(doc, snapshot, registry, diags)
 
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
@@ -181,9 +238,31 @@ def _run_validation(
     # --- 规范化与产物签发 --------------------------------------------------
     canonical_text = canonicalize_assembly_doc(doc)
     dependency_lock = _dependency_lock(doc, registry)
+    finance_section = doc.get("finance") or {}
+    finance_ref = finance_section.get("ref") or {}
+    planning = doc.get("planning") or {}
+    objective = planning.get("objective") or {}
     receipt = ValidationReceipt(
         dependencies=dependency_lock,
         resources=resource_media,
+        finance_snapshot={
+            "ref": {
+                "kind": finance_ref.get("kind"),
+                "object_id": finance_ref.get("object_id"),
+                "media_type": finance_ref.get("media_type"),
+                "path": finance_ref.get("path"),
+            },
+            "profile_id": snapshot.profile_id,
+            "revision": finance_section.get("revision"),
+            "schema": snapshot.schema,
+            "schema_version": snapshot.schema_version,
+            "currency": snapshot.currency,
+        },
+        planning={
+            "objective_sense": objective.get("sense"),
+            "variables": sorted(planning.get("variables") or {}),
+            "constraints": sorted(planning.get("constraints") or {}),
+        },
         diagnostics=tuple(d for d in diags if not d.blocking),
     )
     artifact = ValidatedAssemblyArtifact(
@@ -664,14 +743,20 @@ def _phase3_graph_system(
     diags: list[Diagnostic],
 ) -> dict:
     """转换 doc → AssemblySpec + CheckContext,调用 run_phase_b +
-    输入完备检查 + run_phase_d + run_constraint_checks。
+    输入完备检查 + run_phase_d。年步数由项目计算基线显式推导后传入。
     """
-    from iesplan.assembly.context import CheckContext
-    from iesplan.assembly.rules import run_constraint_checks, run_phase_b, run_phase_d
+    from iesplan.assembly.context import CheckContext, steps_for_baseline
+    from iesplan.assembly.rules import run_phase_b, run_phase_d
 
     spec = _spec_from_doc(doc)
-    resolution = (doc.get("project_baseline") or {}).get("resolution", "1h")
-    ctx = CheckContext(registry=registry, time_axis={"resolution": resolution})
+    baseline = doc.get("project_baseline") or {}
+    resolution = baseline.get("resolution")
+    leap_year = baseline.get("leap_year")
+    ctx = CheckContext(
+        registry=registry,
+        baseline_resolution=resolution,
+        period_steps=steps_for_baseline(resolution, leap_year),
+    )
     # run_phase_b 内部 ensure_ports(spec, ctx)
     b_diags = run_phase_b(spec, ctx)
     diags.extend(b_diags)
@@ -682,9 +767,6 @@ def _phase3_graph_system(
     # 阶段 D:母线/可解性
     d_diags, _buses = run_phase_d(spec, ctx)
     diags.extend(d_diags)
-    # 约束表达式
-    c_diags = run_constraint_checks(spec, ctx)
-    diags.extend(c_diags)
     return {}
 
 
@@ -715,27 +797,10 @@ def _spec_from_doc(doc: dict) -> AssemblySpec:
                 to_port=str(conn.get("to") or ""),
             )
         )
-    constraints: list[AssemblyConstraint] = []
-    for cid, c in (doc.get("constraints") or {}).items():
-        if not isinstance(c, Mapping):
-            continue
-        constraints.append(
-            AssemblyConstraint(
-                id=str(cid),
-                type=str(c.get("type") or "generic"),
-                expr=str(c.get("expr") or ""),
-                enabled=bool(c.get("enabled", True)),
-            )
-        )
-    baseline_raw = doc.get("project_baseline") or {}
     return AssemblySpec(
         name=str((doc.get("assembly") or {}).get("name") or ""),
-        time_axis=TimeAxisRef(
-            resolution=str(baseline_raw.get("resolution") or "1h"),
-        ),
         devices=devices,
         edges=edges,
-        constraints=constraints,
     )
 
 
@@ -775,7 +840,7 @@ def _check_input_unfed(spec: AssemblySpec, ctx, diags: list[Diagnostic]) -> None
             continue
         if port.name in GRID_SIDE_PORTS:
             if port.device not in grid_used_cache:
-                type_spec, _ = resolve_model(ctx, model_of.get(port.device, ""))
+                type_spec = resolve_model(ctx, model_of.get(port.device, ""))
                 grid_used_cache[port.device] = grid_side_used(type_spec, port.device, spec.edges)
             if grid_used_cache[port.device]:
                 continue
@@ -845,7 +910,17 @@ def _phase4_outputs(doc: dict, diags: list[Diagnostic]) -> None:
 
 
 def _dependency_lock(doc: dict, registry) -> dict:
-    """设备内容锁: {稳定设备 ID: 统一 schema 版本}(裸 ID，无 @钉选)。"""
+    """依赖锁定: 设备内容锁 + 项目基线 + 方程契约身份。
+
+    方程契约版本取 modeling 公开门面(本回执固定的方程语义版本)。
+    """
+    from iesplan.modeling import (
+        CONTRACT_SCHEMA_ID,
+        CONTRACT_SCHEMA_VERSION,
+        EQUATION_AST_ID,
+        EQUATION_AST_VERSION,
+    )
+
     devices_lock: dict[str, str] = {}
     for dev in (doc.get("devices") or {}).values():
         if not isinstance(dev, Mapping):
@@ -854,8 +929,18 @@ def _dependency_lock(doc: dict, registry) -> dict:
         descriptor = registry.get(type_id)
         if descriptor is not None:
             devices_lock[type_id] = descriptor.schema_version
+    baseline = doc.get("project_baseline") or {}
     return {
         "devices": dict(sorted(devices_lock.items())),
+        "baseline": {
+            "resolution": baseline.get("resolution"),
+            "leap_year": baseline.get("leap_year"),
+            "scenario_mode": baseline.get("scenario_mode"),
+        },
+        "equations": {
+            "contract": f"{CONTRACT_SCHEMA_ID}@{CONTRACT_SCHEMA_VERSION}",
+            "ast": f"{EQUATION_AST_ID}@{EQUATION_AST_VERSION}",
+        },
     }
 
 

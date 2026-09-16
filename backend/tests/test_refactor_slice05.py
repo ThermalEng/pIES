@@ -175,11 +175,14 @@ def test_configuration_domain_profile_and_revisions(db: Session) -> None:
     assert current is not None and current.revision == 1
     assert configuration_domain.next_overrides_revision(db, project.id) == 2
 
+    eff_obj_id = _store(db, {"e": 1}, "effective_finance")
     configuration_domain.append_effective(
-        db, project_id=project.id, revision=1, content={"e": 1}, profile_id="p1", created_by=7
+        db, project_id=project.id, revision=1, content={"e": 1}, profile_id="p1",
+        created_by=7, content_object_id=eff_obj_id,
     )
     effective = configuration_domain.get_current_effective(db, project.id)
     assert effective is not None and effective.revision == 1
+    assert effective.content_object_id == eff_obj_id
 
     configuration_domain.append_planning(
         db, project_id=project.id, revision=1, content={"pl": 1}, created_by=7

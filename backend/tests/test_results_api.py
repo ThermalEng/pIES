@@ -46,6 +46,7 @@ from iesplan.config import settings  # noqa: E402
 from iesplan.core.diagnostics import SEVERITY_INFO, TASK_QUEUED  # noqa: E402
 from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
 from iesplan.tasks.persistence import Task, TaskLease  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultSelection  # noqa: E402
@@ -134,8 +135,8 @@ EXPLICIT_CALC_PATCH = {
 }
 
 
-def _set_explicit_calc(client: TestClient, pid: int, user) -> None:
-    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1)。"""
+def _set_explicit_calc(client: TestClient, pid: int, user) -> int:
+    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1), 返回新修订号。"""
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={"expected_revision": 1, "commands": [{
@@ -145,10 +146,55 @@ def _set_explicit_calc(client: TestClient, pid: int, user) -> None:
         headers=_h(client, user),
     )
     assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+#: 无意图结果任务的装配声明占位(机械测试用；真实项目声明真实目标/绑定)。
+#: finance_binding/tariff_bindings 经起草命令显式声明；planning 为冻结规划
+#: 修订的确定性投影(见 assembly_fixture)，不再经草稿声明。
+def _assembly_commands(instances: dict) -> list:
+    return [
+        {
+            "id": "c-finbind", "unit": "assembly",
+            "type": "assembly.set_finance_binding",
+            "payload": {"instances": instances},
+        },
+        {
+            "id": "c-tariff", "unit": "assembly",
+            "type": "assembly.set_tariff_bindings",
+            "payload": {"bindings": {}},
+        },
+    ]
+
+
+def _declare_assembly_sections(
+    client: TestClient, pid: int, user, revision: int, instances: dict,
+) -> int:
+    """经 assembly.* 起草命令显式声明装配节, 返回新修订号。"""
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": _assembly_commands(instances)},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _declare_finance(db: Session, user, pid: int) -> None:
+    """装配闸门要求项目固定有效财务快照: 登记地区 Profile 并引用
+    (原子生成空覆盖 Effective)。夹具必须显式声明, 不得依赖回退。"""
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan.application import configuration as config_cases
+
+    config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), user.id)
+    config_cases.set_project_finance_profile(
+        db, pid, PROFILE_PAYLOAD["profile"]["id"], user.id
+    )
 
 
 def _prepare_project(client: TestClient, db: Session, user, name: str = "结果测试项目") -> int:
-    """准备项目: 创建 + 显式计算声明 + 固化不可变版本(计算任务快照装配的前提)。"""
+    """准备项目: 创建 + 显式财务声明 + 显式计算声明 + 固化不可变版本(计算任务快照装配的前提)。"""
     resp = client.post(
         "/api/projects",
         json={
@@ -161,7 +207,13 @@ def _prepare_project(client: TestClient, db: Session, user, name: str = "结果�
     )
     assert resp.status_code == 201, resp.text
     pid = resp.json()["project"]["id"]
-    _set_explicit_calc(client, pid, user)
+    _declare_finance(db, user, pid)
+    from assembly_fixture import declare_compute_device, save_compute_planning
+
+    device_ref = declare_compute_device(client, pid, _h(client, user))
+    save_compute_planning(db, pid, user.id, device_ref)
+    revision = _set_explicit_calc(client, pid, user)
+    _declare_assembly_sections(client, pid, user, revision, {device_ref: {"type": "none"}})
     resp = client.post(
         f"/api/projects/{pid}/versions",
         json={"name": "结果基线", "reason": "snapshot_freeze"},

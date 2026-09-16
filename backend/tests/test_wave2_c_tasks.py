@@ -34,9 +34,13 @@ from iesplan.application import tasks as tasks_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.diagnostics import SEVERITY_ERROR, TASK_DATA_SNAPSHOT_MISSING, TASK_SOLVE_FAILED  # noqa: E402
 from iesplan.core.errors import NotFoundError  # noqa: E402
+from iesplan.dataset.persistence import DatasetVersion  # noqa: E402,F401
 from iesplan.db import Base  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
+from iesplan.storage.persistence import StoredObject  # noqa: E402,F401
 from iesplan.tasks import queue  # noqa: E402
+from iesplan.tasks.persistence import Task  # noqa: E402,F401
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -157,17 +161,82 @@ EXPLICIT_CALC_PATCH = {
 }
 
 
-def _declare_explicit_calc(client: TestClient, user, pid: int) -> None:
-    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1)。"""
+def _declare_explicit_calc(client: TestClient, user, pid: int, revision: int = 1) -> int:
+    """经 config.patch 显式声明计算装配字段, 返回新修订号。"""
     resp = client.put(
         f"/api/projects/{pid}/draft",
-        json={"expected_revision": 1, "commands": [{
+        json={"expected_revision": revision, "commands": [{
             "id": "c-calc", "unit": "config", "type": "config.patch",
             "payload": EXPLICIT_CALC_PATCH,
         }]},
         headers=_h(client, user),
     )
     assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _declare_finance(db: Session, user, pid: int) -> None:
+    """装配闸门要求项目固定有效财务快照: 登记地区 Profile 并引用。"""
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan.application import configuration as config_cases
+
+    config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), user.id)
+    config_cases.set_project_finance_profile(
+        db, pid, PROFILE_PAYLOAD["profile"]["id"], user.id
+    )
+
+
+#: 无意图计算任务的装配声明占位(机械测试用；真实项目声明真实目标/绑定)。
+#: finance_binding/tariff_bindings 经起草命令显式声明；planning 已改为冻结
+#: PlanningConfig 修订的确定性投影(见 assembly_fixture)，不再经草稿声明。
+def _assembly_commands(instances: dict) -> list:
+    return [
+        {
+            "id": "c-finbind",
+            "unit": "assembly",
+            "type": "assembly.set_finance_binding",
+            "payload": {"instances": instances},
+        },
+        {
+            "id": "c-tariff",
+            "unit": "assembly",
+            "type": "assembly.set_tariff_bindings",
+            "payload": {"bindings": {}},
+        },
+    ]
+
+
+def _declare_assembly_sections(
+    client: TestClient, user, pid: int, revision: int, instances: dict,
+) -> int:
+    """经 assembly.* 起草命令显式声明装配节, 返回新修订号。"""
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": _assembly_commands(instances)},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _declare_optimization_ready(
+    client: TestClient, db: Session, user, pid: int,
+) -> tuple:
+    """计算任务提交前置: 显式财务引用 + 夹具设备/规划 + 显式计算声明 + 显式装配两节。
+
+    返回(夹具设备装配实例引用, 草稿当前修订号)(调用方按需复用)。
+    """
+    from assembly_fixture import declare_compute_device, save_compute_planning
+
+    _declare_finance(db, user, pid)
+    device_ref = declare_compute_device(client, pid, _h(client, user))
+    save_compute_planning(db, pid, user.id, device_ref)
+    revision = _declare_explicit_calc(client, user, pid)
+    revision = _declare_assembly_sections(
+        client, user, pid, revision, {device_ref: {"type": "none"}}
+    )
+    return device_ref, revision
 
 
 def test_submit_compute_task_snapshot_replay_and_duplicate(
@@ -176,7 +245,7 @@ def test_submit_compute_task_snapshot_replay_and_duplicate(
     """计算任务提交: 快照装配 + 幂等重放 + 快照去重。"""
     owner = _user(db, "w2c_owner_opt")
     pid = _project(client, owner, "w2c-proj-opt")
-    _declare_explicit_calc(client, owner, pid)
+    _declare_optimization_ready(client, db, owner, pid)
 
     task, flags = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-opt-1")
     assert flags == {"replay": False, "duplicate": False}
@@ -193,6 +262,239 @@ def test_submit_compute_task_snapshot_replay_and_duplicate(
     dup_old, dflags_old = tasks_uc.submit_task(db, owner, pid, "optimization")
     assert dflags_old == {"replay": False, "duplicate": True}
     assert dup_old.id == task.id
+
+
+def test_submit_without_frozen_refs_fails_explicitly(
+    client: TestClient, db: Session
+) -> None:
+    """无冻结引用即明确失败(公开提交路径)：缺财务块 → 缺规划块，各自 400。
+
+    不读当前指针、不 fallback；与“静默默认/猜测”行为对立。
+    """
+    from iesplan.tasks.contracts import InvalidRequestError
+
+    owner = _user(db, "w2c_owner_noref")
+    pid = _project(client, owner, "w2c-proj-noref")
+    with pytest.raises(InvalidRequestError):
+        tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-noref-1")
+
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan.application import configuration as config_cases
+
+    config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), owner.id)
+    config_cases.set_project_finance_profile(
+        db, pid, PROFILE_PAYLOAD["profile"]["id"], owner.id
+    )
+    # 仅财务就绪、规划缺席 → 仍明确失败(规划引用缺失)
+    with pytest.raises(InvalidRequestError):
+        tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-noref-2")
+
+
+def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> None:
+    """A→B→恢复 A：恢复版本内容、项目当前指针、新快照回执均为 A。
+
+    全公开流程：公开提交冻结 v1(A)→公开移动指针到 B→公开恢复端点恢复 v1
+    →公开读取与再次提交断言。不导入 application 下划线私有函数。
+    恢复必须搬回完整 lineage：当前 Profile 行、Overrides、Effective、
+    Planning 四个公开读数与项目四个指针全部属于 A，杜绝
+    Profile B + Overrides B + Effective A 的自相矛盾状态。
+    """
+    import copy
+
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan import project as project_domain
+    from iesplan.application import configuration as config_cases
+    from iesplan.application import projects as projects_uc
+    from iesplan.core.jsonutil import jsonable
+
+    owner = _user(db, "w2c_owner_restore")
+    pid = _project(client, owner, "w2c-proj-restore")
+    device_ref, _ = _declare_optimization_ready(client, db, owner, pid)
+    task, _ = tasks_uc.submit_task(
+        db, owner, pid, "optimization", idempotency_key="w2c-restore-1"
+    )
+    assert task.calc_snapshot_id is not None
+    snap1 = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
+    assert snap1 is not None
+    v1 = snap1.project_version_id
+
+    profile_a = PROFILE_PAYLOAD["profile"]["id"]
+    payload_b = copy.deepcopy(dict(PROFILE_PAYLOAD))
+    payload_b["profile"] = dict(PROFILE_PAYLOAD["profile"], id="cn-north-demo-b")
+    config_cases.register_finance_profile(db, payload_b, owner.id)
+    eff_rev2, _, _ = config_cases.set_project_finance_profile(
+        db, pid, "cn-north-demo-b", owner.id
+    )
+    assert eff_rev2 == 2
+    _, plan_rev2 = config_cases.save_planning_config(
+        db, pid,
+        {
+            "objective": {"sense": "minimize", "expression": "0"},
+            "variables": {
+                "cap2": {
+                    "device_ref": device_ref,
+                    "parameter": "rated_power_kw",
+                    "lower_bound": "0",
+                    "upper_bound": "100",
+                    "unit": "kW",
+                },
+            },
+            "constraints": {},
+        },
+        None, owner.id,
+    )
+    assert plan_rev2 == 2
+
+    resp = client.post(
+        f"/api/projects/{pid}/versions/{v1}/restore", headers=_h(client, owner)
+    )
+    assert resp.status_code == 200, resp.text
+    restored = resp.json()["version"]
+    assert restored["reason"] == "restore"
+    assert restored["parent_version_id"] == v1
+
+    ver = projects_uc.get_version(db, owner, pid, restored["id"])
+    content = projects_uc.load_content_object(db, ver.content_object_id)
+    assert content["effective_finance"] == {
+        "profile_id": profile_a, "overrides_revision": 1, "revision": 1,
+    }
+    assert content["planning_config"] == {"revision": 1}
+
+    # 公开读数: Profile 行 / Overrides / Effective / Planning 全部属于 A
+    profile_row_a, _ = config_cases.get_finance_profile_by_ref(db, profile_a)
+    assert profile_row_a.profile_id == profile_a
+    _, ovr_rev = config_cases.get_finance_overrides(db, pid)
+    assert ovr_rev == 1
+    eff, eff_rev, _ = config_cases.get_effective_finance_config(db, pid)
+    assert eff_rev == 1
+    assert eff.profile_id == profile_a
+    _, plan_rev, _ = config_cases.get_planning_config(db, pid)
+    assert plan_rev == 1
+
+    # 项目四个指针全部属于 A(无 B 残留)
+    proj = project_domain.require_project(db, pid)
+    assert proj.finance_profile_id == profile_row_a.id
+    assert proj.overrides_revision == 1
+    assert proj.effective_finance_revision == 1
+    assert proj.planning_revision == 1
+
+    task2, _ = tasks_uc.submit_task(db, owner, pid, "optimization")
+    assert task2.calc_snapshot_id is not None
+    snap2 = tasks_domain.get_snapshot(db, task2.calc_snapshot_id)
+    assert snap2 is not None
+    receipt = jsonable(snap2.assembly_receipt)
+    assert receipt["finance_snapshot"]["revision"] == 1
+    assert receipt["finance_snapshot"]["profile_id"] == profile_a
+    assert receipt["planning"]["variables"] == ["cap"]
+
+
+def test_restore_version_without_finance_clears_pointers(
+    client: TestClient, db: Session
+) -> None:
+    """恢复无财务/规划配置的早期版本 → 四指针全空，不残留 B。
+
+    全公开流程：裸草稿固化 v_early(无配置块)→配置 A→移到 B(四指针非空)
+    →公开恢复端点恢复 v_early→公开断言四指针全 None、恢复版本内容无
+    配置块→公开提交按既有明确错误失败。不导入私有函数。
+    """
+    import copy
+
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan import project as project_domain
+    from iesplan.application import configuration as config_cases
+    from iesplan.application import projects as projects_uc
+    from iesplan.tasks.contracts import InvalidRequestError
+
+    owner = _user(db, "w2c_owner_restore_empty")
+    pid = _project(client, owner, "w2c-proj-restore-empty")
+
+    early = client.post(
+        f"/api/projects/{pid}/versions",
+        json={"name": "早期空白", "reason": "milestone"},
+        headers=_h(client, owner),
+    )
+    assert early.status_code == 201, early.text
+    v_early = early.json()["version"]["id"]
+
+    device_ref, _ = _declare_optimization_ready(client, db, owner, pid)
+    payload_b = copy.deepcopy(dict(PROFILE_PAYLOAD))
+    payload_b["profile"] = dict(PROFILE_PAYLOAD["profile"], id="cn-north-demo-b2")
+    config_cases.register_finance_profile(db, payload_b, owner.id)
+    config_cases.set_project_finance_profile(db, pid, "cn-north-demo-b2", owner.id)
+    _, plan_rev2 = config_cases.save_planning_config(
+        db, pid,
+        {
+            "objective": {"sense": "minimize", "expression": "0"},
+            "variables": {
+                "cap2": {
+                    "device_ref": device_ref,
+                    "parameter": "rated_power_kw",
+                    "lower_bound": "0",
+                    "upper_bound": "100",
+                    "unit": "kW",
+                },
+            },
+            "constraints": {},
+        },
+        None, owner.id,
+    )
+    assert plan_rev2 == 2
+    before = project_domain.require_project(db, pid)
+    assert before.finance_profile_id is not None
+    assert before.overrides_revision is not None
+    assert before.effective_finance_revision is not None
+    assert before.planning_revision is not None
+
+    resp = client.post(
+        f"/api/projects/{pid}/versions/{v_early}/restore", headers=_h(client, owner)
+    )
+    assert resp.status_code == 200, resp.text
+    restored = resp.json()["version"]
+    assert restored["reason"] == "restore"
+    assert restored["parent_version_id"] == v_early
+
+    after = project_domain.require_project(db, pid)
+    assert after.finance_profile_id is None
+    assert after.overrides_revision is None
+    assert after.effective_finance_revision is None
+    assert after.planning_revision is None
+
+    ver = projects_uc.get_version(db, owner, pid, restored["id"])
+    content = projects_uc.load_content_object(db, ver.content_object_id)
+    assert "effective_finance" not in content
+    assert "planning_config" not in content
+
+    with pytest.raises(InvalidRequestError):
+        tasks_uc.submit_task(db, owner, pid, "optimization")
+
+
+def test_bind_unknown_dataset_version_fails_at_input(
+    client: TestClient, db: Session
+) -> None:
+    """dataset.bind 不存在的版本 → PUT /draft 当场业务错误，不建新草稿。
+
+    存在性与归属确认在命令输入边界经 dataset 公开门面完成；失败不推进
+    草稿修订、不写入绑定。
+    """
+    owner = _user(db, "w2c_owner_badvid")
+    pid = _project(client, owner, "w2c-proj-badvid")
+    _, revision = _declare_optimization_ready(client, db, owner, pid)
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": [{
+            "id": "c-bind-bogus", "unit": "dataset", "type": "dataset.bind",
+            "payload": {"dataset_version_id": 999999, "role": "main"},
+        }]},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-CMD-005"
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()
+    assert view["draft"]["revision"] == revision
+    assert view["draft"]["content"].get("dataset_bindings", []) == []
 
 
 def test_submit_errors_match_old_codes(client: TestClient, db: Session) -> None:
@@ -316,7 +618,7 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
     """重试: 终态 → queued(快照不变, 已提交); 重复落点一致; 非终态拒绝同码。"""
     owner = _user(db, "w2c_owner_retry")
     pid = _project(client, owner, "w2c-proj-retry")
-    _declare_explicit_calc(client, owner, pid)
+    _declare_optimization_ready(client, db, owner, pid)
 
     t1, _ = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-t1")
     snap = t1.calc_snapshot_id

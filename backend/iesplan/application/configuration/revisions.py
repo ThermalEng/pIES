@@ -56,6 +56,7 @@ from iesplan.finance import (
     FinanceOverrides,
     FinanceProfile,
     FinanceTripletError,
+    effective_to_yaml,
     merge_effective,
 )
 from iesplan.core.yamlmini import dump as yaml_dump
@@ -464,6 +465,14 @@ def _save_finance_overrides(
     # 合并生成 Effective(from_dict 已按 Profile 完成全部结构校验, 合并失败即
     # 内部错误, 不吞异常, 事务回滚后以 500 可见)
     effective = merge_effective(profile, overrides)
+    # 签发内容对象: 已签发快照的确定性 YAML 字节写入对象存储(真实对象身份),
+    # revision 精确引用其身份; receipt 只存校验回执, 不冒充内容对象。
+    content_handle = put_object(
+        db,
+        effective_to_yaml(effective).encode("utf-8"),
+        "application/yaml",
+        source_category="effective_finance",
+    )
     next_eff_rev = configuration_domain.next_effective_revision(db, project_id)
     eff_receipt_id = _store_config_receipt(
         db,
@@ -484,6 +493,7 @@ def _save_finance_overrides(
         profile_id=effective.profile_id,
         created_by=user_id,
         receipt_object_id=eff_receipt_id,
+        content_object_id=content_handle.id,
     )
     _attach_config_receipt(
         db,
@@ -492,6 +502,14 @@ def _save_finance_overrides(
         row_id=eff_row.id,
         ref_entity_type="effective_finance_revisions",
         purpose="effective_finance_receipt",
+    )
+    _attach_config_receipt(
+        db,
+        object_id=content_handle.id,
+        ref_type="effective_finance_revision",
+        row_id=eff_row.id,
+        ref_entity_type="effective_finance_revisions",
+        purpose="effective_finance_content",
     )
     # 任何新 Effective 生成即失效旧 Planning(历史行保留, 指针清空)；
     # 指针移动经 project 域 repository 一次完成。

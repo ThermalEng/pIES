@@ -259,7 +259,7 @@ def test_pending_session_rejected_until_confirm(client: TestClient, db: Session)
 
 def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) -> None:
     """非所有者取消/重试任务 → 403(要求项目 edit 能力, 仅所有者具备)。"""
-    make_user(db, "owner_c05")
+    owner = make_user(db, "owner_c05")
     other = make_user(db, "other_c05")
     owner_token = _login(client, "owner_c05")
     pid = _create_project(client, owner_token, "任务权限项目")
@@ -278,6 +278,39 @@ def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) 
                 "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
             },
         }]},
+        headers=_bearer(owner_token),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+
+    # 装配闸门要求显式财务引用、夹具设备/规划与装配两节(无静默默认):
+    # 先登记地区 Profile 并引用, 再建夹具电池设备、保存最小规划修订，
+    # 最后经 assembly.* 命令显式声明两节。
+    from assembly_fixture import declare_compute_device, save_compute_planning
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan.application import configuration as config_cases
+
+    config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), owner.id)
+    config_cases.set_project_finance_profile(
+        db, pid, PROFILE_PAYLOAD["profile"]["id"], owner.id
+    )
+    device_ref = declare_compute_device(client, pid, _bearer(owner_token))
+    save_compute_planning(db, pid, owner.id, device_ref)
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": [
+            {
+                "id": "c-finbind", "unit": "assembly",
+                "type": "assembly.set_finance_binding",
+                "payload": {"instances": {device_ref: {"type": "none"}}},
+            },
+            {
+                "id": "c-tariff", "unit": "assembly",
+                "type": "assembly.set_tariff_bindings",
+                "payload": {"bindings": {}},
+            },
+        ]},
         headers=_bearer(owner_token),
     )
     assert resp.status_code == 200, resp.text

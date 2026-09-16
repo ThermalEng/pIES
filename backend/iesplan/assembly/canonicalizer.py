@@ -39,7 +39,10 @@ _TOP_ORDER = (
     "project_baseline",
     "devices",
     "connections",
-    "constraints",
+    "finance",
+    "finance_binding",
+    "tariff_bindings",
+    "planning",
     "outputs",
     "extensions",
 )

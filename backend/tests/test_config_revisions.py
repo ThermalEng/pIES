@@ -28,7 +28,7 @@ os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
 import pytest  # noqa: E402
 from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine, text  # noqa: E402
+from sqlalchemy import create_engine, select, text  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
@@ -44,7 +44,13 @@ from iesplan.finance import (  # noqa: E402
     FinanceOverrides,
     FinanceProfile,
 )
+
+# 建表前显式注册延迟装载的表(users/tasks 域 persistence 为延迟装载,
+# 结果域/审计域在导入期即登记外键指向它们的表；否则单文件运行时
+# create_all 报 NoReferencedTableError)。
+from iesplan.identity.persistence import User as _UserForDDL  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
+from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
 
 # ---------------------------------------------------------------------------
 # 样例(权威拼写 CNY/kW/a 与 CNY/kWh/a, 验证单位解析器连续除法集成)
@@ -736,8 +742,12 @@ def test_version_freezes_effective_and_planning_revisions(
     assert resp.status_code == 201, resp.text
     raw = get_object(db_session, resp.json()["version"]["content_object_id"])
     content = json.loads(raw.decode("utf-8"))
+    from iesplan.application import configuration as config_cases
+
+    _, ovr_rev = config_cases.get_finance_overrides(db_session, pid)
     assert content["effective_finance"] == {
         "profile_id": "cn-north-demo",
+        "overrides_revision": ovr_rev,
         "revision": eff["revision"],
     }
     assert content["planning_config"] == {"revision": planning_revision}
@@ -801,3 +811,107 @@ def test_empty_db_builds_current_receipt_columns() -> None:
                 for r in conn.execute(text(f"PRAGMA table_info({table})")).all()
             }
             assert "receipt_object_id" in cols, table
+
+
+# ---------------------------------------------------------------------------
+# Effective 内容对象(签发真实 YAML 对象身份、引用 attach、事务回滚、读取一致)
+# ---------------------------------------------------------------------------
+
+
+def test_empty_db_builds_effective_content_object_column() -> None:
+    """空库 create_all 直接建立非空 content_object_id 列(新鲜建表, 无旧库迁移)。"""
+    engine = create_engine("sqlite+pysqlite://")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        info = {
+            r[1]: r[3]
+            for r in conn.execute(text("PRAGMA table_info(effective_finance_revisions)")).all()
+        }
+        assert info.get("content_object_id") == 1
+        assert "receipt_object_id" in info
+
+
+def test_effective_issuance_writes_real_content_object_and_attaches_refs(
+    client: TestClient, db_session: Session,
+) -> None:
+    """签发写真实 YAML 内容对象: 行 content_object_id 非空, 对象字节可读回
+    同一快照, receipt/内容引用均已 attach(防 orphan 清理)。"""
+    from iesplan.application import configuration as config_cases
+    from iesplan.configuration.persistence import EffectiveFinanceRevision
+    from iesplan.storage import get_object, list_refs, object_info
+
+    headers, pid = _owner(client, db_session)
+    owner = make_user(db_session, "eff_owner")
+    _register_profile(client, headers)
+    profile = _profile()
+    config_cases.register_finance_profile(db_session, dict(PROFILE_PAYLOAD), owner.id)
+    config_cases.set_project_finance_profile(
+        db_session, pid, profile.profile_id, owner.id
+    )
+
+    row = db_session.execute(
+        select(EffectiveFinanceRevision).where(
+            EffectiveFinanceRevision.project_id == pid
+        )
+    ).scalar_one()
+    assert row.content_object_id is not None
+    meta = object_info(db_session, row.content_object_id)
+    assert meta["media_type"] == "application/yaml"
+    raw = get_object(db_session, row.content_object_id)
+    assert "ies.effective-finance-config" in raw.decode("utf-8")
+
+    # 读取一致: 公开类型反序列化行内容 == 对象字节内容
+    from iesplan.finance import EffectiveFinanceConfig, effective_from_yaml
+
+    assert (
+        EffectiveFinanceConfig.from_dict(row.content).to_dict()
+        == effective_from_yaml(raw.decode("utf-8")).to_dict()
+    )
+
+    # 引用 attach: receipt 与内容对象均有 owner 引用
+    purposes = {r.purpose for r in list_refs(db_session, row.receipt_object_id)}
+    assert "effective_finance_receipt" in purposes
+    content_purposes = {r.purpose for r in list_refs(db_session, row.content_object_id)}
+    assert "effective_finance_content" in content_purposes
+
+
+def test_invalid_overrides_input_rejected_before_write(
+    client: TestClient, db_session: Session,
+) -> None:
+    """非法覆盖输入在用户输入校验层即被拒绝: 拒绝发生在任何写入之前，
+    故无新 revision 行、无新对象行。本用例证明的是“写前拒绝”，
+    不声称证明写后事务回滚。"""
+    from iesplan.application import configuration as config_cases
+    from iesplan.configuration.persistence import (
+        EffectiveFinanceRevision,
+        FinanceOverridesRevision,
+    )
+    from iesplan.storage.persistence import StoredObject
+
+    headers, pid = _owner(client, db_session, name="eff_rollback")
+    owner = make_user(db_session, "eff_rollback_owner")
+    _register_profile(client, headers)
+    profile = _profile()
+    config_cases.register_finance_profile(db_session, dict(PROFILE_PAYLOAD), owner.id)
+    config_cases.set_project_finance_profile(
+        db_session, pid, profile.profile_id, owner.id
+    )
+
+    def _counts() -> tuple[int, int, int]:
+        return (
+            db_session.query(FinanceOverridesRevision).count(),
+            db_session.query(EffectiveFinanceRevision).count(),
+            db_session.query(StoredObject).count(),
+        )
+
+    before = _counts()
+    assert before[0] >= 1 and before[1] >= 1 and before[2] >= 1
+    bad = _overrides_payload(profile)
+    bad["energy_prices"] = {"no_such_price": {"kind": "constant", "value": {"value": "1", "unit": "CNY/kWh"}}}
+    from iesplan.application.configuration.revisions import InvalidRequestError
+
+    with pytest.raises(InvalidRequestError):
+        config_cases.save_finance_overrides(
+            db_session, pid, bad, expected_revision=None, user_id=owner.id,
+        )
+    assert _counts() == before

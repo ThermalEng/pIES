@@ -10,7 +10,6 @@ fixed_supply_max, demand_max, has_storage}。
                 grid 端口语义上可进口可反送,但 grid 禁反送时不算汇);
 - ASM-SOLV-003  必然不可行:无任何可调手段且 Σ固定供给上限 < Σ需求最大值;
 - ASM-SOLV-004  约束过度:互斥固定约束(无调节手段且供给>需求;grid 禁反送与可再生过剩并存);
-- ASM-SOLV-005  因果环:有状态设备(管道/延迟输出)构成闭环(时间不一致);
 - ASM-SOLV-006  孤立设备(无任何边,告警);
 - ASM-SOLV-007  自由度提示(可控变量数 vs 平衡方程数,info);
 - ASM-EDGE-008  双向-双向母线悬空风险(母线无任何确定方向端口,告警)。
@@ -21,16 +20,15 @@ fixed_supply_max, demand_max, has_storage}。
 from __future__ import annotations
 
 from iesplan.assembly.context import (
+    PEAK_PARAM_BY_LOAD,
     AssemblySpec,
     BusSummary,
-    PEAK_PARAM_BY_LOAD,
     ensure_ports,
     resolve_model,
     to_watts,
 )
 from iesplan.assembly.diags import (
     ASM_EDGE_LOOSE_BIDI,
-    ASM_SOLV_CAUSAL_CYCLE,
     ASM_SOLV_DOF,
     ASM_SOLV_INFEASIBLE,
     ASM_SOLV_NO_SINK,
@@ -38,8 +36,8 @@ from iesplan.assembly.diags import (
     ASM_SOLV_ORPHAN,
     ASM_SOLV_OVER_CONSTRAINED,
 )
-from iesplan.assembly.schema import prop_map
 from iesplan.assembly.diags import make_asm_diag as make_diag
+from iesplan.assembly.schema import prop_map
 from iesplan.core.diagnostics import Diagnostic
 
 # ---------------------------------------------------------------------------
@@ -122,7 +120,7 @@ def build_buses(spec: AssemblySpec, ctx) -> list[dict]:
     # 无任何边的设备 → 单设备母线(孤立)；仅可连接端口参与，无可连接端口
     # (如纯 predefined 需求设备)不构成母线，仅由 ORPHAN 告警覆盖
     connected = {d for bus in buses for d in bus["device_ids"]}
-    for dev in [*spec.devices, *spec.pipelines]:
+    for dev in spec.devices:
         if dev.id in connected:
             continue
         dev_port_refs = sorted(
@@ -184,10 +182,10 @@ def _grid_caps(spec: AssemblySpec, bus_device_ids: list[str], ctx) -> tuple[bool
             d
             for d in spec.devices
             if d.id in bus_device_ids
-            and resolve_model(ctx, d.definition_id)[0] is not None
+            and resolve_model(ctx, d.definition_id) is not None
             and {
                 "electricity_import", "electricity_export"
-            }.issubset(resolve_model(ctx, d.definition_id)[0].interfaces)
+            }.issubset(resolve_model(ctx, d.definition_id).interfaces)
         ),
         None,
     )
@@ -217,8 +215,9 @@ def _is_adjustable_source(interfaces) -> bool:
 def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float | None]:
     """母线固定供给上限(W)与需求上限(W)(可调/可控设备不计入固定侧)。
 
-    供给侧:非可控源端口 capacity + 电网 max_import_power_kw(kW→W);
-    需求侧:负荷 peak 参数 + 端口 capacity。未知数值不参与(返回 None 表示不可估算)。
+    供给侧:电网 max_import_power_kw(kW→W);需求侧:负荷 peak 参数。
+    端口无 capacity 字段(2.0 无数据来源，已删除)。未知数值不参与
+    (返回 None 表示不可估算)。
     """
     ports = ensure_ports(spec, ctx)
     by_device = {d.id: d for d in spec.devices}
@@ -231,7 +230,7 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
         device = by_device.get(port.device)
         if device is None:
             continue
-        type_spec, _ = resolve_model(ctx, device.definition_id)
+        type_spec = resolve_model(ctx, device.definition_id)
         interfaces = type_spec.interfaces if type_spec is not None else {}
         variables = type_spec.equations.variables if type_spec is not None else {}
         is_storage = "soc" in variables and any(i.type == "bidirectional" for i in interfaces.values())
@@ -245,15 +244,12 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
             continue
         if is_controllable or is_storage:
             continue  # 可调源不计入固定供给
-        if port.capacity is not None:
-            fixed_supply += port.capacity
-            has_fixed_supply = True
     for ref in bus["sink_refs"]:
         port = ports[ref]
         device = by_device.get(port.device)
         if device is None:
             continue
-        type_spec, _ = resolve_model(ctx, device.definition_id)
+        type_spec = resolve_model(ctx, device.definition_id)
         if type_spec is not None and any(i.type == "predefined" for i in type_spec.interfaces.values()):
             assert type_spec.device is not None
             peak_key = PEAK_PARAM_BY_LOAD.get(type_spec.device.id)
@@ -262,9 +258,6 @@ def _bus_caps(spec: AssemblySpec, ctx, bus: dict) -> tuple[float | None, float |
                 if val is not None:
                     demand += val
                     has_demand = True
-        if port.capacity is not None:
-            demand += port.capacity
-            has_demand = True
     return (fixed_supply if has_fixed_supply else None), (demand if has_demand else None)
 
 
@@ -276,7 +269,7 @@ def _bus_controllable(spec: AssemblySpec, ctx, bus: dict) -> int:
         device = by_device.get(dev_id)
         if device is None:
             continue
-        type_spec, _ = resolve_model(ctx, device.definition_id)
+        type_spec = resolve_model(ctx, device.definition_id)
         interfaces = type_spec.interfaces if type_spec is not None else {}
         variables = type_spec.equations.variables if type_spec is not None else {}
         if "soc" in variables and any(i.type == "bidirectional" for i in interfaces.values()):
@@ -287,60 +280,6 @@ def _bus_controllable(spec: AssemblySpec, ctx, bus: dict) -> int:
         elif any(i.type in ("out", "bidirectional") for i in interfaces.values()):
             n += 1
     return n
-
-
-def _causal_cycles(spec: AssemblySpec, ctx) -> list[tuple[str, ...]]:
-    """有状态设备(管道/延迟输出)构成的有向环(设备级;边方向 from→to)。
-
-    任意时刻输入依赖未来输出即时间不一致;返回含延迟设备的环(去重,按字典序稳定)。
-    """
-    ports = ensure_ports(spec, ctx)
-    delayed: set[str] = set()
-    for pipe in spec.pipelines:
-        delayed.add(pipe.id)
-    for dev in spec.devices:
-        if dev.stateful or any(
-            p.nature == "delayed" for p in ports.values() if p.device == dev.id
-        ):
-            delayed.add(dev.id)
-    if not delayed:
-        return []
-    device_ids = sorted({d.id for d in [*spec.devices, *spec.pipelines]})
-    adj: dict[str, list[str]] = {d: [] for d in device_ids}
-    for edge in spec.edges:
-        from_dev, _, _ = edge.from_port.partition(".")
-        to_dev, _, _ = edge.to_port.partition(".")
-        if from_dev in adj and to_dev in adj and from_dev != to_dev:
-            adj[from_dev].append(to_dev)
-    cycles: list[tuple[str, ...]] = []
-    seen: set[frozenset] = set()
-    path: list[str] = []
-    on_path: set[str] = set()
-    done: set[str] = set()
-
-    def dfs(node: str) -> None:
-        if node in done:
-            return
-        if node in on_path:
-            idx = path.index(node)
-            cycle = tuple(path[idx:])
-            if any(d in cycle for d in delayed):
-                key = frozenset(cycle)
-                if key not in seen:
-                    seen.add(key)
-                    cycles.append(cycle)
-            return
-        on_path.add(node)
-        path.append(node)
-        for nb in adj.get(node, ()):
-            dfs(nb)
-        path.pop()
-        on_path.discard(node)
-        done.add(node)
-
-    for node in device_ids:
-        dfs(node)
-    return cycles
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +299,7 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
         loc = {"object_type": "bus", "field": f"carrier:{carrier}"}
         has_grid, can_import, can_export = _grid_caps(spec, bus["device_ids"], ctx)
         devices = [d for d in spec.devices if d.id in bus["device_ids"]]
-        type_specs = {d.id: resolve_model(ctx, d.definition_id)[0] for d in devices}
+        type_specs = {d.id: resolve_model(ctx, d.definition_id) for d in devices}
         has_storage = any(
             ts is not None and "soc" in ts.equations.variables
             for ts in type_specs.values()
@@ -385,9 +324,9 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
                 d.id
                 for d in spec.devices
                 if d.id in bus["device_ids"]
-                and resolve_model(ctx, d.definition_id)[0] is not None
+                and resolve_model(ctx, d.definition_id) is not None
                 and {"electricity_import", "electricity_export"}.issubset(
-                    resolve_model(ctx, d.definition_id)[0].interfaces
+                    resolve_model(ctx, d.definition_id).interfaces
                 )
             }
             grid_port_refs = [r for r in bus["port_refs"] if r.partition(".")[0] in grid_dev_ids]
@@ -546,17 +485,4 @@ def run_phase_d(spec: AssemblySpec, ctx) -> tuple[list[Diagnostic], list[BusSumm
                 )
             )
 
-    # ASM-SOLV-005:因果环(有状态设备构成闭环)
-    for cycle in _causal_cycles(spec, ctx):
-        pipeline_ids = {p.id for p in spec.pipelines}
-        delayed_member = next((d for d in cycle if d in pipeline_ids), cycle[0])
-        diags.append(
-            make_diag(
-                ASM_SOLV_CAUSAL_CYCLE,
-                severity="error",
-                blocking=True,
-                params={"cycle": list(cycle), "delayed_member": delayed_member},
-                location={"object_type": "pipeline", "object_id": delayed_member},
-            )
-        )
     return diags, buses

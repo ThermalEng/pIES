@@ -1,23 +1,27 @@
 """ies.assembly 2.0.0 GUI 项目导出构造器。
 
 将项目内容(设备/端口/连接/数据集绑定/项目基线)映射为 ies.assembly 2.0.0
-纯技术实例形态(definition/asset_origin/properties/predefined_interfaces);
-损耗的连接自动包裹为 transport_pipe 设备实例,与手写 YAML
-进入同一校验入口(validator.validate_project_export)。
+纯技术实例形态(definition/asset_origin/properties/predefined_interfaces),
+与手写 YAML 进入同一校验入口(validator.validate_project_export)。
+
+连接只映射显式 from/to 端点引用；损耗由用户在项目图中显式实例化的
+普通设备方程或约束表达，本构造器不按设备类型分支、不合成设备、
+不猜测经济绑定。
 
 无静默默认:project_baseline.resolution/leap_year/scenario_mode、
-设备 kind、数据集绑定来源模式均须显式声明,缺字段/非法值一律返回
+设备 kind 均须显式声明,缺字段/非法值一律返回
 ASM-CONV-001 阻断诊断,不回退、不猜测、不吞错。装配不包含 calculation
-(计算配置在计算包生成时固定)。
+(计算配置在计算包生成时固定)。设备数据绑定(CSV 序列来源)由独立
+声明入口提供(S2c),本构造器只处理标量参数,不做数据集列映射。
 
 依赖: devices 公开门面(get_device)、core 公共契约;不依赖 services 与 ORM。
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from iesplan.assembly.diags import (
     ASM_CONV_UNMAPPABLE,
@@ -26,23 +30,8 @@ from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.core.errors import NotFoundError
 
-#: 不进入 parameters 的内部键(data_refs 由绑定器显式消费;
-#: type_detail/model_method/stateful/__layout 为现行内容键, 其余 1.0 键已删除)
-_INTERNAL_PARAM_KEYS: tuple[str, ...] = (
-    "type_detail",
-    "model_method",
-    "stateful",
-    "data_refs",
-    "__layout",
-)
-
 #: 全项目统一计算分辨率(均能确定性切分一天:96/48/24 步)
 _BASELINE_RESOLUTIONS: tuple[str, ...] = ("15min", "30min", "1h")
-
-#: 管道模型与端口名(与 devices/catalog/transport_pipe.yaml 一致)
-_PIPE_MODEL_ID = "ies.device.transport_pipe"
-_PIPE_IN_NAME = "heat_in"
-_PIPE_OUT_NAME = "heat_out"
 
 #: 导出合成路径(数据集版本 → 包内相对 CSV；字节由调用方显式注入)
 _EXPORT_DATA_PATH = "data/ds{vid}.data.csv"
@@ -66,11 +55,14 @@ class BuildDocResult:
 def build_assembly_doc_from_content(
     content: Mapping,
     *,
-    predefined_modes: Mapping[int, str] | None = None,
+    finance: Mapping[str, Any] | None = None,
+    finance_binding: Mapping[str, Any] | None = None,
+    tariff_bindings: Mapping[str, Any] | None = None,
+    planning: Mapping[str, Any] | None = None,
 ) -> BuildDocResult:
     """项目内容 → ies.assembly 2.0.0 文档(无静默默认)。
 
-    输入结构(现行模型字段):
+    输入结构(2.0 内容字段):
       content = {"model": {"devices": [...], "ports": [...], "connections": [...]},
                  "project_baseline": {...}, "name": ...}
       或 content 直接含 devices/ports/connections(扁平图)。
@@ -84,16 +76,15 @@ def build_assembly_doc_from_content(
       asset_origin: 内容 kind(existing/new, 缺失/非法阻断),
       properties: {name: {value, unit(以注册 descriptor 单位为准)}},
       predefined_interfaces: {iface: 来源声明}};
-      与模型 data_inputs 列精确匹配的数据集绑定按 predefined_modes[vid]
-      决定 data_repeat/data_predict(缺失阻断，不猜测)；标量参数若命中
+      设备类型只消费明确 2.0 输入: definition.id 优先, 否则 device_type
+      必须本身就是裸稳定 ID(无 params.type_detail 回退);标量参数若命中
       predefined 接口名则为 constant 绑定，命中 property 名则为属性覆盖，
-      其余原样透传由校验器判未声明；
+      其余原样透传由校验器判未声明；数据序列来源由独立声明入口提供，
+      本构造器不做数据集列映射；
     - connections: 每个图连接必须有 id 且端口可解析, 否则阻断;
-      loss_rate > 0 自动包裹 transport_pipe 设备实例;loss_rate 非数值阻断
-      (缺省键视为无损耗 0)。
-
-    数据集字节由调用方经 validate_project_export(dataset_contents) 显式
-    注入(合成路径 data/ds{vid}.data.csv)；本构造器不读文件、不猜测模式。
+      只映射显式 from/to 端点引用，不解释、不合成、不补绑定。
+    - finance/finance_binding/tariff_bindings/planning: 调用方显式提供,
+      原样透传进文档(缺席则结构阶段按节缺失阻断)。
 
     返回 (doc, diagnostics)。任一阻断错误 → doc=None(不进入校验器)。
     """
@@ -199,7 +190,6 @@ def build_assembly_doc_from_content(
     scenario_mode = scenario_raw
 
     # 2) 设备实例(2.0 纯技术形态)
-    modes = dict(predefined_modes or {})
     refs = _device_refs(devices_raw)
     device_ref_of = {d.get("id"): ref for d, ref in zip(devices_raw, refs)}
     port_index = {p.get("id"): p for p in ports_raw}
@@ -230,15 +220,15 @@ def build_assembly_doc_from_content(
                 )
             )
             continue
-        instance, inst_diags = _build_instance(d, type_id, dev_id, kind_raw, modes)
+        instance, inst_diags = _build_instance(d, type_id, dev_id, kind_raw)
         diags.extend(inst_diags)
         if inst_diags and any(x.blocking for x in inst_diags):
             continue
         devices_out[dev_id] = instance
 
-    # 4) 连接(loss_rate > 0 → 包裹管道设备;管道名 = "e<id>_pipe");
+    # 4) 连接(只映射显式 from/to 端点引用);
     #    边 id 统一加 e 前缀,满足新格式局部 ID(lower_snake)约束;
-    #    无 id / 端口不可解析 / 含 1.0 独有字段一律阻断(无静默丢弃)
+    #    无 id / 端口不可解析一律阻断(无静默丢弃)
     connections_out: dict[str, dict] = {}
     for c in sorted(conns_raw, key=lambda x: str(x.get("id") or "")):
         raw_id = str(c.get("id") or "")
@@ -267,55 +257,24 @@ def build_assembly_doc_from_content(
                 )
             )
             continue
-        if "delay_steps" in c:
-            diags.append(
-                make_diag(
-                    ASM_CONV_UNMAPPABLE,
-                    severity="error",
-                    blocking=True,
-                    params={"reason": "connection_delay_unsupported", "connection": raw_id},
-                    location={"object_type": "connection", "object_id": raw_id, "field": "delay_steps"},
-                )
-            )
-            continue
         from_ref = f"{device_ref_of.get(from_p.get('device_id'), '?')}.{from_p.get('name')}"
         to_ref = f"{device_ref_of.get(to_p.get('device_id'), '?')}.{to_p.get('name')}"
-        loss_rate, loss_diag = _parse_loss_rate(c.get("loss_rate"), raw_id)
-        if loss_diag is not None:
-            diags.append(loss_diag)
-            continue
-        if loss_rate > 0:
-            pipe_id = f"{edge_id}_pipe"
-            # transport_pipe 仅声明 loss_rate(单位以注册 descriptor 为准)
-            devices_out[pipe_id] = {
-                "definition": {"id": _PIPE_MODEL_ID},
-                "asset_origin": "new",
-                "properties": {
-                    "loss_rate": {"value": loss_rate, "unit": _descriptor_unit("ies.device.transport_pipe", "loss_rate")},
-                },
-                "predefined_interfaces": {},
-            }
-            connections_out[edge_id] = {
-                "from": from_ref,
-                "to": f"{pipe_id}.{_PIPE_IN_NAME}",
-            }
-            connections_out[f"{edge_id}_out"] = {
-                "from": f"{pipe_id}.{_PIPE_OUT_NAME}",
-                "to": to_ref,
-            }
-        else:
-            connections_out[edge_id] = {"from": from_ref, "to": to_ref}
+        connections_out[edge_id] = {"from": from_ref, "to": to_ref}
 
-    # 5) 约束(旧形态无显式约束节 → 空映射;保持新格式"无内容写空 {}"约束)
-    constraints_out: dict[str, dict] = {}
-
-    # 6) outputs(派生为空列表;后续 GUI 入口可补充)
+    # 5) outputs(派生为空列表;后续 GUI 入口可补充)
     outputs_out = {"series": [], "metrics": []}
 
-    # 7) extensions(空映射)
+    # 6) extensions(空映射)
     extensions_out: dict = {}
 
-    # 8) 组装(装配不包含 calculation；resources 注册表已删除，来源直挂设备)
+    # 7) finance_binding 由调用方显式提供，原样透传，不增补、不猜测
+    merged_binding: dict | None = None
+    if finance_binding is not None:
+        merged_binding = dict(finance_binding)
+
+    # 8) 组装(装配不包含 calculation；resources 注册表已删除，来源直挂设备；
+    # finance/finance_binding/tariff_bindings/planning 由调用方显式提供，
+    # 不猜测；缺席则结构阶段阻断)
     doc = {
         "schema": "ies.assembly",
         "schema_version": "2.0.0",
@@ -327,10 +286,21 @@ def build_assembly_doc_from_content(
         },
         "devices": devices_out,
         "connections": connections_out,
-        "constraints": constraints_out,
-        "outputs": outputs_out,
-        "extensions": extensions_out,
     }
+    if finance is not None:
+        doc["finance"] = dict(finance)
+    if merged_binding is not None:
+        doc["finance_binding"] = merged_binding
+    if tariff_bindings is not None:
+        doc["tariff_bindings"] = dict(tariff_bindings)
+    if planning is not None:
+        doc["planning"] = dict(planning)
+    doc.update(
+        {
+            "outputs": outputs_out,
+            "extensions": extensions_out,
+        }
+    )
 
     if any(d.blocking for d in diags):
         return BuildDocResult(doc=None, diagnostics=diags)
@@ -343,9 +313,16 @@ def build_assembly_doc_from_content(
 
 
 def _resolve_type_id(device: dict) -> str:
-    params = device.get("params") or {}
-    detail = params.get("type_detail")
-    return detail if isinstance(detail, str) and detail else str(device.get("device_type", ""))
+    """2.0 设备类型: definition.id 优先, 否则 device_type 本身必须为裸稳定 ID。
+
+    无 params.type_detail 回退；未知值原样返回，由校验器判未注册。
+    """
+    definition = device.get("definition")
+    if isinstance(definition, Mapping):
+        raw = definition.get("id")
+        if isinstance(raw, str) and raw:
+            return raw
+    return str(device.get("device_type", ""))
 
 
 def _device_refs(devices: list) -> list[str]:
@@ -403,14 +380,12 @@ def _build_instance(
     type_id: str,
     dev_id: str,
     asset_origin: str,
-    modes: Mapping[int, str],
 ) -> tuple[dict | None, list[Diagnostic]]:
     """项目设备 → 2.0 实例形态(属性覆盖 + 预定义来源声明)。
 
-    数据集绑定(显式 {dataset_version_id, columns})按 modes[vid] 落为
-    data_repeat/data_predict(缺模式/缺 target_type 载体时阻断)；命中
-    predefined 接口名的标量参数落为 constant；命中 property 名的标量落为
-    属性覆盖(单位取 descriptor)；其余标量透传由校验器判未声明。
+    命中 predefined 接口名的标量参数落为 constant；命中 property 名的
+    标量落为属性覆盖(单位取 descriptor)；其余标量透传由校验器判未声明。
+    数据序列来源由独立声明入口提供(S2c)，此处不做数据集列映射。
     未注册设备仅发射 definition，由校验器阻断。
     """
     diags: list[Diagnostic] = []
@@ -426,42 +401,7 @@ def _build_instance(
     predefined_out: dict[str, dict] = {}
     params = device.get("params") or {}
     for key, value in params.items():
-        if key in _INTERNAL_PARAM_KEYS or key.startswith("_"):
-            continue
-        if isinstance(value, dict) and value.get("dataset_version_id") is not None:
-            try:
-                vid = int(value["dataset_version_id"])
-            except (TypeError, ValueError):
-                diags.append(_conv_fail(dev_id, f"params.{key}", "data_binding_vid_invalid", {"param": key}))
-                continue
-            columns = [c for c in (value.get("columns") or []) if isinstance(c, str)]
-            target = next((c for c in columns if c in predefined_ids), None)
-            if target is None:
-                diags.append(
-                    _conv_fail(
-                        dev_id, f"params.{key}", "data_binding_unmappable",
-                        {"param": key, "columns": columns},
-                    )
-                )
-                continue
-            mode = modes.get(vid)
-            if mode not in ("data_repeat", "data_predict"):
-                diags.append(
-                    _conv_fail(
-                        dev_id, f"params.{key}", "predefined_mode_missing",
-                        {"param": key, "interface": target, "dataset_version_id": vid},
-                    )
-                )
-                continue
-            if mode == "data_predict":
-                diags.append(
-                    _conv_fail(
-                        dev_id, f"params.{key}", "predict_target_type_missing",
-                        {"param": key, "interface": target, "dataset_version_id": vid},
-                    )
-                )
-                continue
-            predefined_out[target] = {"mode": mode, "path": _EXPORT_DATA_PATH.format(vid=vid)}
+        if key.startswith("_"):
             continue
         if isinstance(value, dict):
             continue
@@ -471,43 +411,6 @@ def _build_instance(
             properties_out[key] = {"value": value, "unit": _descriptor_unit(type_id, key)}
         else:
             properties_out[key] = {"value": value, "unit": "1"}
-
-    # 显式 data_refs 列表(与上相同的列解析)
-    for item in params.get("data_refs") or []:
-        if not isinstance(item, Mapping) or item.get("dataset_version_id") is None:
-            continue
-        try:
-            vid = int(item["dataset_version_id"])
-        except (TypeError, ValueError):
-            diags.append(_conv_fail(dev_id, "params.data_refs", "data_binding_vid_invalid", {}))
-            continue
-        columns = [c for c in (item.get("columns") or []) if isinstance(c, str)]
-        target = next((c for c in columns if c in predefined_ids), None)
-        if target is None:
-            diags.append(
-                _conv_fail(
-                    dev_id, "params.data_refs", "data_binding_unmappable", {"columns": columns}
-                )
-            )
-            continue
-        mode = modes.get(vid)
-        if mode not in ("data_repeat", "data_predict"):
-            diags.append(
-                _conv_fail(
-                    dev_id, "params.data_refs", "predefined_mode_missing",
-                    {"interface": target, "dataset_version_id": vid},
-                )
-            )
-            continue
-        if mode == "data_predict":
-            diags.append(
-                _conv_fail(
-                    dev_id, "params.data_refs", "predict_target_type_missing",
-                    {"interface": target, "dataset_version_id": vid},
-                )
-            )
-            continue
-        predefined_out[target] = {"mode": mode, "path": _EXPORT_DATA_PATH.format(vid=vid)}
 
     if any(d.blocking for d in diags):
         return None, diags
@@ -530,33 +433,6 @@ def _slugify_id(text: str) -> str:
     if not re.match(r"^[a-z][a-z0-9_-]*$", cleaned):
         return ""
     return cleaned
-
-
-def _parse_loss_rate(value, connection_id: str) -> tuple[float, Diagnostic | None]:
-    """连接 loss_rate 严格解析:缺省键视为无损耗 0,非数值/非有限/负值阻断。
-
-    替代已删除的吞错回退:非法值不再静默按 0 处理。
-    """
-    if value is None:
-        return 0.0, None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0.0, make_diag(
-            ASM_CONV_UNMAPPABLE,
-            severity="error",
-            blocking=True,
-            params={"reason": "connection_loss_rate_invalid", "connection": connection_id, "value": value},
-            location={"object_type": "connection", "object_id": connection_id, "field": "loss_rate"},
-        )
-    rate = float(value)
-    if not math.isfinite(rate) or rate < 0:
-        return 0.0, make_diag(
-            ASM_CONV_UNMAPPABLE,
-            severity="error",
-            blocking=True,
-            params={"reason": "connection_loss_rate_invalid", "connection": connection_id, "value": value},
-            location={"object_type": "connection", "object_id": connection_id, "field": "loss_rate"},
-        )
-    return rate, None
 
 
 __all__ = [

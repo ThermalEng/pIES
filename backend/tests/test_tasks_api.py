@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -49,8 +48,8 @@ from iesplan.core.errors import NotFoundError  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.tasks.persistence import CalcSnapshot, ComputeSlot, Task, TaskLease, TaskProgress  # noqa: E402
-from iesplan.dataset.persistence import Dataset, DatasetFile, DatasetVersion  # noqa: E402
-from iesplan.identity.persistence import User  # noqa: E402
+from iesplan.dataset.persistence import DatasetVersion  # noqa: E402,F401
+from iesplan.identity.persistence import User  # noqa: E402,F401
 from iesplan.storage.persistence import StoredObject  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
 
@@ -133,38 +132,22 @@ def _create_project(client: TestClient, user, name: str) -> int:
     return resp.json()["project"]["id"]
 
 
-def _seed_dataset(db: Session, *, size_bytes: int = 0, quota_bytes: int = 0, tag: str = "ds") -> int:
-    """直接建数据集版本 + 内容寻址对象 + 文件行, 返回 dataset_version_id。
+def _seed_dataset(db: Session, user, pid: int, *, quota_bytes: int = 0) -> int:
+    """经公开用例生成内置样例数据版本(真实数据本体 + 可读对象), 返回 version id。
 
-    size_bytes 参与存储门禁的 S_snap 估算; quota_bytes 参与可用空间(配额)估算,
-    模拟项目配额/空间不足。
+    手造对象行(无 blob)会制造门面必然报错的不可能状态，本函数不用。
+    quota_bytes 模拟配额不足：写到真实对象行配额字段(配额管理同语义)。
     """
-    user = db.execute(select(User).order_by(User.id)).scalars().first()
-    assert user is not None
-    dataset = Dataset(name=f"{tag}_数据集", created_by=user.id)
-    db.add(dataset)
-    db.flush()
-    version = DatasetVersion(
-        dataset_id=dataset.id, version_no=1, timeline="hourly", resolution="1h",
-        fixed_utc_offset_minutes=480, fields={}, units={},
-        created_by=user.id,
-    )
-    db.add(version)
-    db.flush()
-    obj = StoredObject(
-        oid=sha256(f"{tag}-obj".encode()).hexdigest(),
-        size_bytes=size_bytes,
-        quota_bytes=quota_bytes,
-        status="stored",
-        ref_count=1,
-    )
-    db.add(obj)
-    db.flush()
-    db.add(DatasetFile(
-        dataset_version_id=version.id, object_id=obj.id, file_kind="data",
-        format="csv", row_count=8760, size_bytes=size_bytes,
-    ))
-    db.commit()
+    from iesplan import dataset as dataset_domain
+    from iesplan.application.datasets import lifecycle as datasets_uc
+
+    version = datasets_uc.create_builtin_sample(db, pid, "1h", user_id=user.id)
+    if quota_bytes:
+        for f in dataset_domain.list_files(db, version.id):
+            obj = db.get(StoredObject, f.object_id)
+            assert obj is not None
+            obj.quota_bytes = quota_bytes
+        db.commit()
     return version.id
 
 
@@ -176,6 +159,61 @@ EXPLICIT_CALC_PATCH = {
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }
+
+
+def _declare_finance(db: Session, user, pid: int) -> None:
+    """装配闸门要求项目固定有效财务快照: 登记地区 Profile 并引用
+    (原子生成空覆盖 Effective)。夹具必须显式声明, 不得依赖回退。"""
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan.application import configuration as config_cases
+
+    config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), user.id)
+    config_cases.set_project_finance_profile(
+        db, pid, PROFILE_PAYLOAD["profile"]["id"], user.id
+    )
+
+
+#: 无意图项目的装配声明占位(任务机械测试用；真实项目声明真实目标/绑定)。
+#: finance_binding/tariff_bindings 经起草命令显式声明；planning 为冻结规划
+#: 修订的确定性投影(见 assembly_fixture)，不再经草稿声明。
+def _assembly_commands(instances: dict) -> list:
+    return [
+        {
+            "id": "c-finbind",
+            "unit": "assembly",
+            "type": "assembly.set_finance_binding",
+            "payload": {"instances": instances},
+        },
+        {
+            "id": "c-tariff",
+            "unit": "assembly",
+            "type": "assembly.set_tariff_bindings",
+            "payload": {"bindings": {}},
+        },
+    ]
+
+
+def _declare_assembly_sections(
+    client: TestClient, pid: int, user, revision: int, instances: dict,
+) -> int:
+    """经 assembly.* 起草命令显式声明装配节, 返回新修订号。"""
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": _assembly_commands(instances)},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _declare_device_and_planning(client: TestClient, db: Session, user, pid: int) -> str:
+    """夹具电池设备 + 最小规划修订(计算提交前置)，返回装配实例引用。"""
+    from assembly_fixture import declare_compute_device, save_compute_planning
+
+    device_ref = declare_compute_device(client, pid, _h(client, user))
+    save_compute_planning(db, pid, user.id, device_ref)
+    return device_ref
 
 
 def _set_explicit_calc(client: TestClient, pid: int, user, revision: int) -> int:
@@ -207,9 +245,14 @@ def _bind_and_freeze(
             headers=_h(client, user),
         )
         assert resp.status_code == 200, resp.text
+    body: dict[str, Any] = {"name": "计算基线", "reason": "snapshot_freeze"}
+    if revision != 1:
+        # 固化门禁按当前草稿修订校验: 携带显式 expected_revision,
+        # 否则 409(上游测试用 _bind_and_freeze 默认 1 即代表无中间修订)。
+        body["expected_revision"] = revision
     resp = client.post(
         f"/api/projects/{pid}/versions",
-        json={"name": "计算基线", "reason": "snapshot_freeze"},
+        json=body,
         headers=_h(client, user),
     )
     assert resp.status_code == 201, resp.text
@@ -219,12 +262,17 @@ def _prepare_project(
     client: TestClient, db: Session, user, *,
     dataset_size: int = 0, quota_bytes: int = 0, name: str = "任务测试项目",
 ) -> int:
-    """准备可提交计算任务的项目: 建项目 + 显式计算声明 + (可选)数据集 + 绑定 + 固化版本。"""
+    """准备可提交计算任务的项目: 建项目 + 显式财务/装配声明 + 显式计算声明 + (可选)数据集 + 绑定 + 固化版本。"""
     pid = _create_project(client, user, name)
+    _declare_finance(db, user, pid)
+    device_ref = _declare_device_and_planning(client, db, user, pid)
     dvid = None
     if dataset_size > 0:
-        dvid = _seed_dataset(db, size_bytes=dataset_size, quota_bytes=quota_bytes, tag=f"ds{pid}")
+        dvid = _seed_dataset(db, user, pid, quota_bytes=quota_bytes)
     revision = _set_explicit_calc(client, pid, user, 1)
+    revision = _declare_assembly_sections(
+        client, pid, user, revision, {device_ref: {"type": "none"}}
+    )
     _bind_and_freeze(client, pid, user, dvid, revision=revision)
     return pid
 
@@ -422,6 +470,7 @@ def test_compute_submission_uses_unified_assembly_gate(
     """未注册模型必须由 0.7.0 统一入口阻断，且不得留下任务或快照。"""
     owner = make_user(db, "owner_assembly_gate")
     pid = _create_project(client, owner, "装配闸门反例")
+    _declare_finance(db, owner, pid)
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={
@@ -442,10 +491,16 @@ def test_compute_submission_uses_unified_assembly_gate(
         headers=_h(client, owner),
     )
     assert resp.status_code == 200, resp.text
-    # 显式计算声明(修订 1→2 后为 2): 反例只测未注册模型, 计算字段必须合法,
-    # 否则装配在 time_axis 缺失处提前阻断, 掩盖模型闸门诊断。
-    _set_explicit_calc(client, pid, owner, 2)
-    _bind_and_freeze(client, pid, owner, None)
+    revision = resp.json()["revision"]
+    # 显式计算/装配声明: 反例只测未注册模型, 计算与装配节必须显式完整,
+    # 否则装配在缺失节处提前阻断, 掩盖模型闸门诊断。规划修订只需形状合法
+    # (阶段 2 未注册模型先阻断, 变量设备存在性不可达)。
+    from assembly_fixture import save_compute_planning
+
+    save_compute_planning(db, pid, owner.id, "ghost")
+    revision = _set_explicit_calc(client, pid, owner, revision)
+    revision = _declare_assembly_sections(client, pid, owner, revision, {})
+    _bind_and_freeze(client, pid, owner, None, revision=revision)
 
     status, body = _submit_task(client, pid, owner, idempotency_key="bad-assembly")
     assert status == 422
@@ -731,8 +786,10 @@ def test_storage_gate_blocks_and_suggests(client: TestClient, db: Session) -> No
     assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
 
     # 配额放大后同输入可提交(门禁放行; 快照新建)
-    obj = db.execute(select(StoredObject).where(StoredObject.quota_bytes == 1)).scalar_one()
-    obj.quota_bytes = 10**18
+    objs = db.execute(select(StoredObject).where(StoredObject.quota_bytes == 1)).scalars().all()
+    assert objs, "种子样例对象缺失"
+    for obj in objs:
+        obj.quota_bytes = 10**18
     db.commit()
     status, body = _submit_task(client, pid, owner, idempotency_key="gate-1")
     assert status == 201

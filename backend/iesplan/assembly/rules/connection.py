@@ -6,10 +6,10 @@
   即母线汇合点(04 §2.3.4,如 e_grid_pv: grid.electric_out → pv1.electric_out);
   "输入对输出"(from=in)才是方向倒挂,报 ASM-EDGE-002;
 - 两端载体/物理量/单位量纲必须一致(ASM-EDGE-003/004/005);
-- 自环(ASM-EDGE-006)、同两端重复边(ASM-EDGE-007)、零/负容量(ASM-EDGE-009);
+- 自环(ASM-EDGE-006)、同两端重复边(ASM-EDGE-007);
 - 双向-双向直连的母线悬空风险(ASM-EDGE-008)在阶段 D 母线构造后统一检查。
 
-未定义端口(ASM-REF-003)由阶段 C 报,本阶段跳过无法判定的检查。
+未定义端口(ASM-REF-003)由校验器报,本阶段跳过无法判定的检查。
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from iesplan.assembly.diags import (
     ASM_EDGE_QUANTITY,
     ASM_EDGE_SELF_LOOP,
     ASM_EDGE_UNIT_DIM,
-    ASM_EDGE_ZERO_CAP,
 )
 from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.core.diagnostics import Diagnostic
@@ -146,15 +145,4 @@ def run_phase_b(spec: AssemblySpec, ctx) -> list[Diagnostic]:
             )
         else:
             seen_ends[key] = edge.id
-        # 边容量为 0 或负值
-        if edge.capacity is not None and edge.capacity <= 0:
-            diags.append(
-                make_diag(
-                    ASM_EDGE_ZERO_CAP,
-                    severity="warning",
-                    blocking=False,
-                    params={"edge": edge.id, "capacity": edge.capacity},
-                    location={**loc, "field": "capacity"},
-                )
-            )
     return diags

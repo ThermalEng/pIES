@@ -21,8 +21,9 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 import pytest
+from worker_testkit import fixture_artifact
 
-from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt
+from iesplan.assembly import ValidatedAssemblyArtifact
 from iesplan.computation import (
     CALCULATION_CONFIG_SCHEMA,
     CALCULATION_CONFIG_VERSION,
@@ -46,11 +47,18 @@ from iesplan.computation import (
 from iesplan.core.errors import NotFoundError
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _devices_registry():
+    """机械产物依赖锁取设备公开门面实时版本: 初始化设备注册表。"""
+    from iesplan.devices import init_registry
+
+    init_registry()
+    yield
+
+
 def _artifact() -> ValidatedAssemblyArtifact:
-    return ValidatedAssemblyArtifact(
-        canonical_text='{"schema":"ies.assembly","schema_version":"1.0.0"}\n',
-        receipt=ValidationReceipt(),
-    )
+    """计算边界机械产物: 非空且内部一致的 2.0 二件套(不跑装配校验)。"""
+    return fixture_artifact()
 
 
 def _bundle() -> SolverBundle:

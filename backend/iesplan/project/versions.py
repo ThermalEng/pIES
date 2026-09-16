@@ -128,6 +128,7 @@ def build_version_content(
     baseline_leap_year: bool,
     scenario_mode: str,
     effective_profile_id: str | None = None,
+    overrides_revision: int | None = None,
     effective_revision: int | None = None,
     planning_revision: int | None = None,
 ) -> dict:
@@ -135,17 +136,33 @@ def build_version_content(
 
     纯函数: 调用方(application)负责解析财务/规划引用来源(当前值或行指针),
     本函数只做组装。未提供引用时对应块省略(不静默默认)。
+    effective_finance 块冻结恢复所需的完整财务 lineage
+    (稳定 profile_id + overrides_revision + effective revision 三元组)。
     """
-    version_content = {k: v for k, v in content.items() if k != "applied_commands"}
+    # 组装前明确移除输入中的旧引用与已删除的草稿副本，再写入本次选定
+    # 引用；缺席就真正缺席，不继承、不合并：
+    # - applied_commands: 命令簿记；
+    # - planning: 已删除的 assembly.set_planning 草稿副本；
+    # - effective_finance/planning_config: 上次冻结的引用(本次重写)。
+    version_content = {
+        k: v
+        for k, v in content.items()
+        if k not in ("applied_commands", "planning", "effective_finance", "planning_config")
+    }
     version_content["currency"] = currency
     version_content["project_baseline"] = {
         "resolution": baseline_resolution,
         "leap_year": baseline_leap_year,
         "scenario_mode": scenario_mode,
     }
-    if effective_profile_id is not None and effective_revision is not None:
+    if (
+        effective_profile_id is not None
+        and overrides_revision is not None
+        and effective_revision is not None
+    ):
         version_content["effective_finance"] = {
             "profile_id": effective_profile_id,
+            "overrides_revision": overrides_revision,
             "revision": effective_revision,
         }
     if planning_revision is not None:

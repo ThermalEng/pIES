@@ -17,6 +17,7 @@ audit 领域公开门面, storage 经 content_objects)``；不导入 ORM、不�
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -26,6 +27,7 @@ from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
 from iesplan.application.configuration import (
     get_effective_finance_config as _read_effective,
+    get_finance_profile_by_ref as _profile_by_ref,
     get_planning_config as _read_planning,
 )
 from iesplan.application.projects import ensure_access
@@ -121,6 +123,7 @@ def _assemble(
         baseline_leap_year=project.baseline_leap_year,
         scenario_mode=project.baseline_scenario_mode,
         effective_profile_id=eff_id,
+        overrides_revision=project.overrides_revision,
         effective_revision=eff_rev,
         planning_revision=plan_rev,
     )
@@ -307,6 +310,58 @@ def freeze_snapshot_version(
     return version
 
 
+def _source_pins(
+    db: Session, project_id: int, src_content: Mapping
+) -> tuple[tuple[int, str, int, int] | None, int | None]:
+    """历史版本冻结 lineage → ((profile行id, profile_id, overrides_rev, eff_rev)|None, plan_rev|None)。
+
+    只读 source 版本已冻结的精确引用并解析真实依赖行；引用行缺失 →
+    AppError(配置域 PROJ-FIN-003/PROJ-PLAN-004 同语义；Profile 行缺失由
+    公开门面透传 404)，不 fallback，不改历史 revision 行。版本内容由
+    可信构造器写入，不做字段形态防御。
+    """
+    eff_lineage: tuple[int, str, int, int] | None = None
+    plan_rev: int | None = None
+    eff = src_content.get("effective_finance")
+    if eff is not None:
+        profile_row, _ = _profile_by_ref(db, eff.get("profile_id"))
+        ovr_row = configuration_domain.get_overrides_revision(
+            db, project_id, eff.get("overrides_revision")
+        )
+        if ovr_row is None:
+            raise AppError(
+                "历史版本引用的财务覆盖不存在",
+                code="PROJ-FIN-003",
+                params={
+                    "project_id": project_id,
+                    "overrides_revision": eff.get("overrides_revision"),
+                },
+            )
+        row = configuration_domain.get_effective_revision(db, project_id, eff.get("revision"))
+        if row is None or row.profile_id != eff.get("profile_id"):
+            raise AppError(
+                "历史版本引用的 Effective 财务快照不存在",
+                code="PROJ-FIN-003",
+                params={
+                    "project_id": project_id,
+                    "profile_id": eff.get("profile_id"),
+                    "revision": eff.get("revision"),
+                },
+            )
+        eff_lineage = (profile_row.id, profile_row.profile_id, ovr_row.revision, row.revision)
+    plan = src_content.get("planning_config")
+    if plan is not None:
+        row = configuration_domain.get_planning_revision(db, project_id, plan.get("revision"))
+        if row is None:
+            raise AppError(
+                "历史版本引用的规划配置不存在",
+                code="PROJ-PLAN-004",
+                params={"project_id": project_id, "revision": plan.get("revision")},
+            )
+        plan_rev = row.revision
+    return eff_lineage, plan_rev
+
+
 def restore_version(
     db: Session,
     user: UserRecord,
@@ -315,7 +370,15 @@ def restore_version(
     name: str | None = None,
     description: str | None = None,
 ) -> dict[str, Any]:
-    """事务型恢复历史版本(新版本 + 新草稿，不倒写历史)；统一提交或回滚。"""
+    """事务型恢复历史版本(新版本 + 新草稿，不倒写历史)；统一提交或回滚。
+
+    新草稿与新版本保留 source 版本冻结的完整配置 lineage（财务三元组 +
+    规划 revision，不重读项目当前指针）；项目四个当前指针
+    (finance_profile_id/overrides/effective/planning)原子移动到恢复后的
+    业务状态：source 缺 effective_finance 块则三个财务指针全空，缺
+    planning_config 块则规划指针为空，不 fallback 到当前指针。
+    历史 revision 行只读不改。
+    """
     try:
         ensure_access(db, user, project_id, "edit")
         project = project_domain.require_project(db, project_id)
@@ -325,23 +388,68 @@ def restore_version(
                 location={"object_type": "project", "object_id": project_id},
             )
         source = project_domain.require_version(db, project_id, version_id)
-        content = _load_content_object(db, source.content_object_id)
-        content.pop("applied_commands", None)
-        content_object_id = _store_content_object(db, content)
+        src_content = _load_content_object(db, source.content_object_id)
+        eff_lineage, plan_rev = _source_pins(db, project_id, src_content)
+        draft_content = {
+            k: v for k, v in src_content.items() if k != "applied_commands"
+        }
+        content_object_id = _store_content_object(db, draft_content)
         new_draft = project_domain.create_draft(
             db,
             project_id=project.id,
             content_object_id=content_object_id,
             updated_by=user.id,
         )
-        version = _do_create_version(
+        project_domain.update_revision_pointers(
             db,
-            user,
-            project_id,
-            name=name or f"恢复: {source.name}",
-            description=description,
+            project.id,
+            finance_profile_id=eff_lineage[0] if eff_lineage is not None else None,
+            overrides_revision=eff_lineage[2] if eff_lineage is not None else None,
+            effective_finance_revision=eff_lineage[3] if eff_lineage is not None else None,
+            planning_revision=plan_rev,
+        )
+        version_name = (name or f"恢复: {source.name}").strip()
+        if not version_name:
+            raise project_domain.InvalidRequestError("版本名称不能为空", code="PROJ-CMD-001")
+        version_content = project_domain.build_version_content(
+            draft_content,
+            currency=project.currency,
+            baseline_resolution=project.baseline_resolution,
+            baseline_leap_year=project.baseline_leap_year,
+            scenario_mode=project.baseline_scenario_mode,
+            effective_profile_id=eff_lineage[1] if eff_lineage is not None else None,
+            overrides_revision=eff_lineage[2] if eff_lineage is not None else None,
+            effective_revision=eff_lineage[3] if eff_lineage is not None else None,
+            planning_revision=plan_rev,
+        )
+        version_object_id = _store_content_object(db, version_content)
+        version = project_domain.create_version(
+            db,
+            project_id=project.id,
+            name=version_name,
             reason="restore",
+            created_by=user.id,
+            content_object_id=version_object_id,
+            source_draft_id=new_draft.id,
+            source_draft_revision=new_draft.revision,
+            description=description,
             parent_version_id=source.id,
+        )
+        _audit(
+            db,
+            "project_version",
+            version.id,
+            "project.version_created",
+            user.id,
+            after={
+                "project_id": project.id,
+                "version_no": version.version_no,
+                "name": version_name,
+                "reason": "restore",
+                "parent_version_id": version.parent_version_id,
+                "source_draft_revision": new_draft.revision,
+                "source_result_id": None,
+            },
         )
         _audit(
             db,

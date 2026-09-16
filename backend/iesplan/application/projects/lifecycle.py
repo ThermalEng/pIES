@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from iesplan import audit as audit_domain
+from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan import tasks as tasks_domain
@@ -454,6 +455,8 @@ def _update_draft(
             results.append(_idempotent_result(cid, applied[cid]))
             continue
         _validate_command_scope(cmd, project_id)
+        if cmd.get("type") == "dataset.bind" and isinstance(cmd.get("payload"), dict):
+            _validate_dataset_bind(db, project_id, cmd["payload"])
         result = _apply_command(content, cmd)
         applied[cid] = {"revision": draft.revision + 1, "result": jsonable(result)}
         changed = True
@@ -601,12 +604,20 @@ def _cmd_model_remove_device(content: dict, payload: dict) -> dict:
 
 
 def _cmd_model_upsert_connection(content: dict, payload: dict) -> dict:
-    """upsert 连接(端点引用设备与端口)。"""
+    """upsert 连接(只允许端点与名称；额外字段当场拒绝，不静默丢弃)。"""
     required = ("from_device", "from_port", "to_device", "to_port")
     if not all(isinstance(payload.get(k), str) and payload[k] for k in required):
         raise InvalidRequestError(
             "model.upsert_connection 需要 from_device/from_port/to_device/to_port",
             code="PROJ-CMD-005",
+        )
+    allowed = ("name", *required)
+    extra = sorted(k for k in payload if k not in allowed)
+    if extra:
+        raise InvalidRequestError(
+            "model.upsert_connection 不接受额外字段",
+            code="PROJ-CMD-005",
+            params={"extra": extra},
         )
     name = payload.get("name") or (
         f"{payload['from_device']}.{payload['from_port']}->{payload['to_device']}.{payload['to_port']}"
@@ -616,12 +627,8 @@ def _cmd_model_upsert_connection(content: dict, payload: dict) -> dict:
     if conn is None:
         conn = {"name": name}
         connections.append(conn)
-    for key in required + ("conn_type",):
-        if key in payload:
-            conn[key] = payload[key]
-    for key in ("capacity", "loss_rate"):
-        if key in payload:
-            conn[key] = payload[key]
+    for key in required:
+        conn[key] = payload[key]
     return {"connection": name, "stored": True}
 
 
@@ -639,6 +646,30 @@ def _cmd_layout_patch(content: dict, payload: dict) -> dict:
     """布局补丁(布局是显示事实, 不改变工程语义，架构宪法 §4.4)。"""
     merge_patch(content["layout"], payload)
     return {"stored": True}
+
+
+def _validate_dataset_bind(db: Session, project_id: int, payload: dict) -> None:
+    """dataset.bind 输入边界: 版本必须存在且归属本项目(宪法 §2.6)。
+
+    在命令应用前经 dataset 域公开门面确认；失败当场返回业务错误，
+    不创建新草稿、不写入绑定。非整数 id 交由内容命令守卫报错。
+    """
+    dvid = payload.get("dataset_version_id")
+    if not isinstance(dvid, int):
+        return
+    version = dataset_domain.get_version(db, dvid)
+    if version is None:
+        raise InvalidRequestError(
+            "绑定的数据集版本不存在",
+            code="PROJ-CMD-005",
+            params={"dataset_version_id": dvid},
+        )
+    if version.dataset_id not in dataset_domain.list_dataset_ids(db, project_id):
+        raise InvalidRequestError(
+            "数据集版本不属于本项目，不可绑定",
+            code="PROJ-CMD-005",
+            params={"dataset_version_id": dvid, "project_id": project_id},
+        )
 
 
 def _cmd_dataset_bind(content: dict, payload: dict) -> dict:
@@ -707,6 +738,40 @@ def _cmd_project_set_extensions(content: dict, payload: dict) -> dict:
     return {"stored": True}
 
 
+def _cmd_assembly_set_finance_binding(content: dict, payload: dict) -> dict:
+    """声明设备成本绑定节(装配 finance_binding 原样存入)。
+
+    只做容器形态守卫(实例映射)，类别/driver/量纲由装配闸门判定；
+    起草阶段不复制财务校验(宪法 §2.6)。
+    """
+    instances = payload.get("instances")
+    if not isinstance(instances, dict):
+        raise InvalidRequestError(
+            "assembly.set_finance_binding 需要 instances 对象", code="PROJ-CMD-005"
+        )
+    content["finance_binding"] = {"instances": instances}
+    return {"stored": True, "instances": sorted(instances)}
+
+
+def _cmd_assembly_set_tariff_bindings(content: dict, payload: dict) -> dict:
+    """声明能源计费绑定节(装配 tariff_bindings 原样存入)。
+
+    只做容器形态守卫(条目映射)，价格/载体/方向/序列元数据由装配闸门判定。
+    """
+    bindings = payload.get("bindings")
+    if not isinstance(bindings, dict):
+        raise InvalidRequestError(
+            "assembly.set_tariff_bindings 需要 bindings 对象", code="PROJ-CMD-005"
+        )
+    content["tariff_bindings"] = dict(bindings)
+    return {"stored": True, "bindings": sorted(bindings)}
+
+
+# assembly.set_planning 已删除: 装配 planning 是冻结 PlanningConfig 修订的
+# 确定性投影(任务提交闸门按版本内容 planning_config.revision 经公开门面
+# 读取)，项目不再保存第二份 planning 草稿副本。
+
+
 _COMMAND_HANDLERS.update(
     {
         "model.upsert_device": _cmd_model_upsert_device,
@@ -720,6 +785,8 @@ _COMMAND_HANDLERS.update(
         "config.set_variable": _cmd_config_set_variable,
         "project.set_language": _cmd_project_set_language,
         "project.set_extensions": _cmd_project_set_extensions,
+        "assembly.set_finance_binding": _cmd_assembly_set_finance_binding,
+        "assembly.set_tariff_bindings": _cmd_assembly_set_tariff_bindings,
     }
 )
 

@@ -1,6 +1,6 @@
 """装配域公共入口:ies.assembly 2.0.0 唯一生产管线。
 
-生产调用(``application.tasks.submissions._assembly_gate``)只消费
+生产调用(计算任务提交用例的统一装配闸门)只消费
 ``validator.validate_project_export`` 并持有其签发的
 ``ValidatedAssemblyArtifact``(规范文本 + 校验回执二件套);签发即受信,
 不做重复复核。

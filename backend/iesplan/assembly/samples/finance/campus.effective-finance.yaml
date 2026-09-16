@@ -1,0 +1,95 @@
+# 园区样例有效快照(合并器 merge_effective 产物, 非人工 authoring; profile cn-north-demo)
+schema: ies.effective-finance-config
+schema_version: 1.0.0
+profile_id: cn-north-demo
+currency: CNY
+base_year: 2025
+price_basis: tax_inclusive
+cost_method: fixed_plus_linear
+finance_types:
+  battery_system:
+    upfront_capex:
+      linear:
+        energy_kwh:
+          unit_cost:
+            value: '900'
+            unit: CNY/kWh
+    annual_fixed_om:
+      linear:
+        energy_kwh:
+          unit_cost:
+            value: '18'
+            unit: CNY/kWh·a
+    period_variable_om:
+      linear:
+        cycled_kwh:
+          unit_cost:
+            value: '0.002'
+            unit: CNY/kWh
+  heat_pump_system:
+    upfront_capex:
+      linear:
+        heat_kw:
+          unit_cost:
+            value: '2800'
+            unit: CNY/kW
+    annual_fixed_om:
+      linear:
+        heat_kw:
+          unit_cost:
+            value: '28'
+            unit: CNY/kW·a
+    period_variable_om:
+      linear:
+        consumed_kwh:
+          unit_cost:
+            value: '0.008'
+            unit: CNY/kWh
+  pv_system:
+    upfront_capex:
+      fixed:
+        value: '0'
+        unit: CNY
+      linear:
+        capacity_kw:
+          unit_cost:
+            value: '3500'
+            unit: CNY/kW
+    annual_fixed_om:
+      linear:
+        capacity_kw:
+          unit_cost:
+            value: '35'
+            unit: CNY/kW·a
+    period_variable_om:
+      linear:
+        generated_kwh:
+          unit_cost:
+            value: '0.01'
+            unit: CNY/kWh
+energy_prices:
+  grid_import:
+    carrier: electricity
+    direction: purchase
+    kind: constant
+    value:
+      value: '0.7'
+      unit: CNY/kWh
+  grid_import_tou:
+    carrier: electricity
+    direction: purchase
+    kind: time_series
+    ref: a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90
+    series_meta:
+      resolution: 1h
+      leap_year: false
+      point_count: 8760
+      unit: CNY/kWh
+  pv_export:
+    carrier: electricity
+    direction: sale
+    kind: constant
+    value:
+      value: '0.4'
+      unit: CNY/kWh
+taxes: {}

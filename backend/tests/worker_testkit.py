@@ -19,14 +19,20 @@ os.environ.setdefault("IESPLAN_QUEUE", "memory")
 from sqlalchemy.orm import Session  # noqa: E402
 
 from iesplan.application.projects.content_objects import store_content_object
-from iesplan.assembly import ValidatedAssemblyArtifact, ValidationReceipt  # noqa: E402
+from iesplan.assembly import (  # noqa: E402
+    SCHEMA_ID,
+    SCHEMA_VERSION,
+    ValidatedAssemblyArtifact,
+    ValidationReceipt,
+    canonicalize_assembly_doc,
+)
 from iesplan.config import settings  # noqa: E402
-from iesplan.tasks.persistence import CalcSnapshot, Task  # noqa: E402
 from iesplan.dataset.persistence import Dataset, DatasetFile, DatasetVersion  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402
 from iesplan.project.persistence import Project, ProjectVersion  # noqa: E402
 from iesplan.storage import put_object
 from iesplan.tasks import queue
+from iesplan.tasks.persistence import CalcSnapshot, Task  # noqa: E402
 
 #: 环境序号(保证同库内用户名/项目名唯一, 避免跨环境 UNIQUE 冲突)
 _env_seq = 0
@@ -54,8 +60,8 @@ def mini_content(
             {
                 "id": 1, "device_type": "ies.device.grid_connection", "kind": "existing",
                 "name": "电网",
-                "params": {"max_import_power_kw": 5000, "max_export_power_kw": 0,
-                           "export_tariff": 0.35, "demand_charge": 0},
+                # 2.0 电价归 tariff_bindings，设备 params 只保留注册属性。
+                "params": {"max_import_power_kw": 5000, "max_export_power_kw": 0},
             },
             {
                 "id": 2, "device_type": "ies.device.battery", "kind": "existing",
@@ -89,6 +95,121 @@ def mini_content(
         },
         "applied_commands": {},
     }
+
+
+#: 机械夹具装配文档的财务引用身份(与回执 finance_snapshot.ref 一致)。
+_FIXTURE_FINANCE_OBJECT_ID = "fixture-effective-object"
+_FIXTURE_FINANCE_PROFILE_ID = "cn-fixture-demo"
+
+
+#: 机械夹具依赖锁固定版本(非实时设备目录值；夹具只保证二件套非空、
+#: schema 2.0、文本与回执相互一致，不代表真实签发时的内容锁)。
+_FIXTURE_DEVICE_LOCK = {
+    "ies.device.battery": "2.0.0",
+    "ies.device.grid_connection": "2.0.0",
+}
+_FIXTURE_EQUATION_LOCK = {
+    "contract": "ies.modeling.contribution@2.0.0",
+    "ast": "ies.equation.ast@2.0.0",
+}
+
+
+def fixture_artifact() -> ValidatedAssemblyArtifact:
+    """机械 2.0 装配二件套(不跑装配校验)。
+
+    规范文本由规范化纯函数生成(非校验);回执字段与同一文档一致:
+    schema 2.0.0、固定机械依赖锁、财务引用、规划摘要、零阻断诊断。
+    调用方(worker 机械测试/计算边界测试)只消费二件套形状,不代表真实签发。
+    """
+    from iesplan.finance import SCHEMA_EFFECTIVE
+    from iesplan.finance import SCHEMA_VERSION as FINANCE_SCHEMA_VERSION
+
+    doc = {
+        "schema": SCHEMA_ID,
+        "schema_version": SCHEMA_VERSION,
+        "assembly": {"id": "fixture", "name": "机械夹具装配"},
+        "project_baseline": {
+            "resolution": "1h", "leap_year": False, "scenario_mode": "single",
+        },
+        "devices": {
+            "d1": {
+                "definition": {"id": "ies.device.grid_connection"},
+                "asset_origin": "existing",
+                "properties": {
+                    "max_import_power_kw": {"value": 5000, "unit": "kW"},
+                    "max_export_power_kw": {"value": 0, "unit": "kW"},
+                },
+                "predefined_interfaces": {},
+            },
+            "d2": {
+                "definition": {"id": "ies.device.battery"},
+                "asset_origin": "existing",
+                "properties": {
+                    "capacity_kwh": {"value": 2, "unit": "kWh"},
+                    "rated_power_kw": {"value": 2, "unit": "kW"},
+                },
+                "predefined_interfaces": {},
+            },
+        },
+        "connections": {},
+        "finance": {
+            "ref": {
+                "kind": "object",
+                "object_id": _FIXTURE_FINANCE_OBJECT_ID,
+                "media_type": "application/yaml",
+            },
+            "profile_id": _FIXTURE_FINANCE_PROFILE_ID,
+        },
+        "finance_binding": {
+            "instances": {"d1": {"type": "none"}, "d2": {"type": "none"}},
+        },
+        "tariff_bindings": {},
+        "planning": {
+            "objective": {"sense": "minimize", "expression": "0"},
+            "variables": {
+                "cap": {
+                    "device_ref": "d2",
+                    "parameter": "capacity_kwh",
+                    "lower_bound": "0",
+                    "upper_bound": "1000",
+                    "unit": "kWh",
+                },
+            },
+            "constraints": {},
+        },
+        "outputs": {"series": [], "metrics": []},
+        "extensions": {},
+    }
+    receipt = ValidationReceipt(
+        dependencies={
+            "devices": dict(_FIXTURE_DEVICE_LOCK),
+            "baseline": {
+                "resolution": "1h", "leap_year": False, "scenario_mode": "single",
+            },
+            "equations": dict(_FIXTURE_EQUATION_LOCK),
+        },
+        resources={},
+        finance_snapshot={
+            "ref": {
+                "kind": "object",
+                "object_id": _FIXTURE_FINANCE_OBJECT_ID,
+                "media_type": "application/yaml",
+                "path": None,
+            },
+            "profile_id": _FIXTURE_FINANCE_PROFILE_ID,
+            "revision": None,
+            "schema": SCHEMA_EFFECTIVE,
+            "schema_version": FINANCE_SCHEMA_VERSION,
+            "currency": "CNY",
+        },
+        planning={
+            "objective_sense": "minimize", "variables": ["cap"], "constraints": [],
+        },
+        diagnostics=(),
+    )
+    return ValidatedAssemblyArtifact(
+        canonical_text=canonicalize_assembly_doc(doc), receipt=receipt
+    )
 
 
 def setup_environment(
@@ -159,11 +280,9 @@ def setup_environment(
 
     snapshot = None
     if task_type in COMPUTE_TYPES:
-        canonical_text = '{"schema":"ies.assembly","schema_version":"1.0.0"}\n'
-        artifact = ValidatedAssemblyArtifact(
-            canonical_text=canonical_text,
-            receipt=ValidationReceipt(),
-        )
+        # 机械快照行(Worker 队列/租约 mechanics 用): 保存非空且内部一致的
+        # 2.0 二件套形状(不跑装配校验);真实签发只走任务提交闸门。
+        artifact = fixture_artifact()
         snapshot = CalcSnapshot(
             project_version_id=version.id,
             dataset_version_ids=[dver_id] if dver_id is not None else [],

@@ -43,8 +43,12 @@ from sqlalchemy.orm import Session  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api.deps import get_request_db  # noqa: E402
+from iesplan.dataset.persistence import DatasetVersion  # noqa: E402,F401
 from iesplan.db import Base  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
+from iesplan.storage.persistence import StoredObject  # noqa: E402,F401
+from iesplan.tasks.persistence import Task  # noqa: E402,F401
 from iesplan.application import identity  # noqa: E402
 
 PASSWORD = "Test12345"
@@ -142,12 +146,17 @@ def _create_project(client: TestClient, token: str, name: str) -> int:
     return resp.json()["project"]["id"]
 
 
-def _declare_explicit_calc(client: TestClient, token: str, pid: int) -> None:
-    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1)。
+def _declare_explicit_calc(
+    client: TestClient, db: Session, token: str, pid: int, user_id: int,
+) -> None:
+    """计算任务提交前置: 显式计算声明 + 显式财务引用 + 夹具设备/规划 + 显式装配两节。
 
     现行装配边界要求无静默默认: mode/generator/solver/time_axis 缺一即
-    阻断(ASM-CONV-001)。与 test_tasks_api.EXPLICIT_CALC_PATCH 同值。
-    仅需提交计算任务的用例调用;  legacy PUT /config 期望修订号的用例
+    阻断(ASM-CONV-001), finance_binding/tariff_bindings 缺节即阻断；
+    planning 为冻结规划修订的确定性投影(公共契约要求至少一个变量，
+    故需一台夹具电池设备承载变量 device_ref；PV 无汇会被 ASM-SOLV-002
+    拦截，此处不用)。与 test_tasks_api.EXPLICIT_CALC_PATCH 同值。
+    仅需提交计算任务的用例调用; legacy PUT /config 期望修订号的用例
     不得调用(会推进草稿修订号)。
     """
     resp = client.put(
@@ -161,6 +170,37 @@ def _declare_explicit_calc(client: TestClient, token: str, pid: int) -> None:
                 "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
             },
         }]},
+        headers=_bearer(token),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+
+    from assembly_fixture import declare_compute_device, save_compute_planning
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan.application import configuration as config_cases
+
+    config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), user_id)
+    config_cases.set_project_finance_profile(
+        db, pid, PROFILE_PAYLOAD["profile"]["id"], user_id
+    )
+    device_ref = declare_compute_device(client, pid, _bearer(token))
+    save_compute_planning(db, pid, user_id, device_ref)
+    # 无意图计算任务的装配声明占位(机械测试用；真实项目声明真实目标/绑定)。
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": [
+            {
+                "id": "c-finbind", "unit": "assembly",
+                "type": "assembly.set_finance_binding",
+                "payload": {"instances": {device_ref: {"type": "none"}}},
+            },
+            {
+                "id": "c-tariff", "unit": "assembly",
+                "type": "assembly.set_tariff_bindings",
+                "payload": {"bindings": {}},
+            },
+        ]},
         headers=_bearer(token),
     )
     assert resp.status_code == 200, resp.text
@@ -336,10 +376,10 @@ def test_error_envelope_shape_all_error_paths(
     assert_error_envelope(resp, 404, code="RES-MISS-003")
 
     # --- 11) 业务错误 C: 管理员解锁缺确认 409(ADMIN-CONFIRM-REQUIRED) ---
-    # 任务须在无设备的空项目上提交: 含 PV 无汇的项目会被装配检查
-    # ASM-CHECK-FAILED(ASM-SOLV-002 no_sink)拦截, 无法进入队列
+    # 任务须在最小夹具项目(单电池, 无汇问题)上提交: 含 PV 无汇的项目会被
+    # 装配检查 ASM-CHECK-FAILED(ASM-SOLV-002 no_sink)拦截, 无法进入队列
     pid2 = _create_project(client, owner_tok, "解锁任务项目")
-    _declare_explicit_calc(client, owner_tok, pid2)
+    _declare_explicit_calc(client, db, owner_tok, pid2, owner.id)
     resp = client.post(f"/api/projects/{pid2}/tasks", json={"task_type": "optimization"}, headers=_bearer(owner_tok))
     assert resp.status_code == 201, resp.text
     task_id = resp.json()["task"]["id"]
@@ -400,7 +440,7 @@ def test_success_wrappers_tasks_results_domain(client: TestClient, db: Session) 
     user = make_user(db, "wrap_task")
     tok = _login(client, "wrap_task")
     pid = _create_project(client, tok, "任务包装项目")
-    _declare_explicit_calc(client, tok, pid)
+    _declare_explicit_calc(client, db, tok, pid, user.id)
     resp = client.post(f"/api/projects/{pid}/tasks", json={"task_type": "calc"}, headers=_bearer(tok))
     body = _assert_wrapper(resp, {"task", "replayed", "duplicate", "hint"})
     task_id = body["task"]["id"]
@@ -619,7 +659,7 @@ def test_frontend_contract_adapters_consistent(client: TestClient, db: Session) 
     user = make_user(db, "wrap_fe")
     tok = _login(client, "wrap_fe")
     pid = _create_project(client, tok, "前端契约项目")
-    _declare_explicit_calc(client, tok, pid)
+    _declare_explicit_calc(client, db, tok, pid, user.id)
 
     # (1) 任务列表 {"items", "next_cursor"} ↔ asItems(body, 'tasks')(client.ts:1483)
     resp = client.post(f"/api/projects/{pid}/tasks", json={"task_type": "calc"}, headers=_bearer(tok))

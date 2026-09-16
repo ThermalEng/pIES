@@ -201,14 +201,51 @@ EXPLICIT_CALC_PATCH = {
 }
 
 
-def _declare_explicit_calc(client: TestClient, user, pid: int) -> None:
-    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1)。"""
+def _declare_explicit_calc(client: TestClient, user, pid: int) -> int:
+    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1), 返回新修订号。"""
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={"expected_revision": 1, "commands": [{
             "id": "c-calc", "unit": "config", "type": "config.patch",
             "payload": EXPLICIT_CALC_PATCH,
         }]},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _declare_optimization_ready(
+    client: TestClient, db: Session, user, pid: int,
+) -> None:
+    """计算任务提交前置: 显式财务引用 + 夹具设备/规划 + 显式计算声明 + 显式装配两节
+    (无静默默认；planning 为冻结规划修订的确定性投影)。"""
+    from assembly_fixture import declare_compute_device, save_compute_planning
+    from test_config_revisions import PROFILE_PAYLOAD
+
+    from iesplan.application import configuration as config_cases
+
+    config_cases.register_finance_profile(db, dict(PROFILE_PAYLOAD), user.id)
+    config_cases.set_project_finance_profile(
+        db, pid, PROFILE_PAYLOAD["profile"]["id"], user.id
+    )
+    device_ref = declare_compute_device(client, pid, _h(client, user))
+    save_compute_planning(db, pid, user.id, device_ref)
+    revision = _declare_explicit_calc(client, user, pid)
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": [
+            {
+                "id": "c-finbind", "unit": "assembly",
+                "type": "assembly.set_finance_binding",
+                "payload": {"instances": {device_ref: {"type": "none"}}},
+            },
+            {
+                "id": "c-tariff", "unit": "assembly",
+                "type": "assembly.set_tariff_bindings",
+                "payload": {"bindings": {}},
+            },
+        ]},
         headers=_h(client, user),
     )
     assert resp.status_code == 200, resp.text
@@ -219,7 +256,7 @@ def _prepare_running(
 ) -> tuple[int, int, Any, int]:
     """项目 → 显式计算声明 → 新用例提交计算任务 → 新用例领取。返回 (pid, task_id, claim, snapshot_id)。"""
     pid = _project(client, user, name)
-    _declare_explicit_calc(client, user, pid)
+    _declare_optimization_ready(client, db, user, pid)
     task, _ = tasks_uc.submit_task(db, user, pid, "optimization", idempotency_key=key)
     claim = tasks_uc.claim_task(db, task.id, "w2c-fake-exec")
     assert claim is not None

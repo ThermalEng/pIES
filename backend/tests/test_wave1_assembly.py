@@ -75,7 +75,6 @@ def _export_content() -> dict:
                     "device_type": "ies.device.grid_connection",
                     "kind": "existing",
                     "params": {
-                        "type_detail": "ies.device.grid_connection",
                         "max_import_power_kw": 800,
                         "max_export_power_kw": 200,
                     },
@@ -85,7 +84,6 @@ def _export_content() -> dict:
                     "device_type": "ies.device.heat_pump",
                     "kind": "new",
                     "params": {
-                        "type_detail": "ies.device.heat_pump",
                         "rated_heat_kw": 600,
                         "cop": 3.5,
                     },
@@ -98,7 +96,7 @@ def _export_content() -> dict:
                  "port_type": "electric", "direction": "in"},
             ],
             "connections": [
-                {"id": 101, "from_port_id": 11, "to_port_id": 21, "loss_rate": 0},
+                {"id": 101, "from_port_id": 11, "to_port_id": 21},
             ],
         },
         "project_baseline": {
@@ -197,7 +195,7 @@ class TestDiagCodes:
 
     def test_codes_unique(self):
         assert len(ASM_ALL_CODES) == len(set(ASM_ALL_CODES))
-        assert "ASM-SYN-001" in ASM_ALL_CODES and "ASM-CONST-003" in ASM_ALL_CODES
+        assert "ASM-SYN-001" in ASM_ALL_CODES and "ASM-PLAN-003" in ASM_ALL_CODES
 
 
 def _iter_asm_modules():
@@ -234,31 +232,96 @@ class TestDependencyDirection:
         assert not violations, f"assembly 内部仍有私有符号导入: {violations}"
 
     def test_no_outward_or_penetrating_deps(self):
-        """assembly 只依赖 core/devices/computation 公开面与域内模块,不穿透业务执行层。"""
+        """assembly 只依赖 core/devices/computation 公开面、域内模块与
+        finance/modeling 门面根(密封不可变契约与版本身份),不穿透业务执行层。
+
+        宪法 §5.1.1: 跨模块只消费对方 __init__ 门面。finance/modeling 仅
+        允许门面根导入(``from iesplan.finance import X``), 子模块直引
+        (``iesplan.finance.triplet`` 等)仍视为穿透。
+        """
         allowed_tops = {"assembly", "core", "devices", "computation"}
+        facade_roots = {"iesplan.finance", "iesplan.modeling"}
         forbidden_tops = {
             "services", "engines", "worker", "api", "application",
-            "models", "storage", "tasks", "analysis", "finance", "metrics",
+            "models", "storage", "tasks", "analysis", "metrics",
+            "planning", "results", "package", "project", "dataset",
+            "identity", "configuration", "model", "modeling", "audit",
         }
         violations = []
         for mod, path in _iter_asm_modules():
             for target, _name in _iesplan_targets(path):
                 parts = target.split(".")
                 top = parts[1] if len(parts) > 1 else ""
+                if target in facade_roots:
+                    continue
                 if top in forbidden_tops:
                     violations.append((mod, target))
                 assert top in allowed_tops, f"{mod} 出现未知顶层依赖: {target}"
         assert not violations, f"存在穿透业务执行层的依赖: {sorted(set(violations))}"
 
     def test_allowed_dependency_tops_stable(self):
-        """现行允许依赖方向稳定: assembly 只引用自身与 core/devices/
-        computation 公开面, 无其他顶层依赖。"""
+        """现行允许依赖方向稳定: assembly 只引用自身、core/devices/
+        computation 公开面与 finance/modeling 门面根, 无其他顶层依赖。"""
         allowed_tops = {"assembly", "core", "devices", "computation"}
+        facade_roots = {"iesplan.finance", "iesplan.modeling"}
         for mod, path in _iter_asm_modules():
             for target, _name in _iesplan_targets(path):
                 parts = target.split(".")
                 top = parts[1] if len(parts) > 1 else ""
+                if target in facade_roots:
+                    continue
                 assert top in allowed_tops, f"{mod} 出现非允许顶层依赖: {target}"
+
+
+def _export_finance():
+    """导出 finance 显式输入(引用 + 成本绑定 + 快照密封注入)。"""
+    from iesplan.finance import effective_from_yaml
+
+    snapshot_text = (SAMPLES_DIR / "finance" / "campus.effective-finance.yaml").read_text(
+        encoding="utf-8"
+    )
+    snapshot = effective_from_yaml(snapshot_text)
+    finance = {
+        "ref": {"kind": "object", "object_id": "fin:campus"},
+        "profile_id": "cn-north-demo",
+    }
+    binding = {
+        "instances": {
+            "d1": {"type": "none"},
+            "d2": {
+                "type": "costed",
+                "finance_type": "heat_pump_system",
+                "drivers": {
+                    "heat_kw": {"property": "rated_heat_kw"},
+                    "consumed_kwh": {
+                        "interface": "electricity_in",
+                        "aggregation": "integrate_positive",
+                    },
+                },
+            },
+        }
+    }
+    tariff = {}
+    planning = {
+        "objective": {
+            "sense": "minimize",
+            "expression": (
+                "d2__upfront_capex + 1 year * d2__annual_fixed_om"
+                " + d2__period_variable_om"
+            ),
+        },
+        "variables": {
+            "hp_cap": {
+                "device_ref": "d2",
+                "parameter": "rated_heat_kw",
+                "lower_bound": "0",
+                "upper_bound": "1000",
+                "unit": "kW",
+            },
+        },
+        "constraints": {},
+    }
+    return finance, binding, tariff, planning, {"fin:campus": snapshot}
 
 
 class TestProductionPipeline:
@@ -268,17 +331,26 @@ class TestProductionPipeline:
             _sample_text(), package_dir=SAMPLES_DIR
         )
         assert text_result.ok and text_result.artifact is not None
-        export_result = validate_project_export(_export_content())
+        finance, binding, tariff, planning, snapshots = _export_finance()
+        export_result = validate_project_export(
+            _export_content(),
+            finance=finance,
+            finance_binding=binding,
+            tariff_bindings=tariff,
+            planning=planning,
+            finance_snapshots=snapshots,
+        )
         assert export_result.ok, [
             (d.code, d.params) for d in export_result.diagnostics if d.blocking
         ]
         for artifact in (text_result.artifact, export_result.artifact):
             assert artifact.receipt.schema_version == "2.0.0"
             assert json.loads(artifact.canonical_text)["schema"] == "ies.assembly"
+            assert artifact.receipt.to_dict()["finance_snapshot"]["profile_id"] == "cn-north-demo"
 
     def test_export_failure_blocks_without_artifact(self):
         content = _export_content()
-        content["model"]["devices"][1]["params"]["type_detail"] = "ies.device.unknown"
+        content["model"]["devices"][1]["device_type"] = "ies.device.unknown"
         result = validate_project_export(content)
         assert result.artifact is None
         assert any(d.blocking for d in result.diagnostics)
