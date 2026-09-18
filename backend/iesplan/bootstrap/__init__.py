@@ -4,14 +4,17 @@
 (API / compute Worker / I/O Worker)装配所需能力子集, 输出完整
 ``ApplicationContext`` 或明确启动失败。
 
-- ``assemble_api``: 装配 database + storage + devices 2.0 注册表;
-- ``assemble_compute_worker``: 0.8 前明确拒绝启动;
+- ``assemble_api``: 装配 database + storage + devices 2.0 注册表 +
+  生成器目录(当前空表);
+- ``assemble_compute_worker``: 显式构建生成器目录, 空表即明确拒绝启动;
 - ``assemble_io_worker``: I/O 所需子集(database + storage, 不含 devices
-  注册表)。
+  注册表与生成器目录)。
 
 失败语义: 任一必需依赖装配失败即抛异常(启动失败), 不发布半初始化
-状态, 不设 fallback。计算能力将在 0.8 实现；当前计算 Worker 组合根
-明确拒绝启动，因而不会领取无法执行的计算任务。
+状态, 不设 fallback。真实 generator 随 0.8 后续切片实现；当前目录为
+空，计算 Worker 在组合根明确拒绝启动，因而不会领取无法执行的计算任务。
+provider 选择与装配只归本组合根；API/Worker 不得自行发现或动态加载
+provider。
 
 本包只做装配与健康聚合, 不实现业务规则, 不新增全局 registry(装配结果
 由调用方持有, API 进程挂在 ``app.state.bootstrap_context``)。
@@ -51,13 +54,19 @@ class ApplicationContext:
     storage: Any | None = None
     #: devices 2.0 注册状态对象(未装配该能力时为 None)
     device_registry: Any | None = None
+    #: 已发布的生成器目录(未装配该能力时为 None; 当前尚无真实 provider
+    #: 实现, 装配结果为空表, 选择时即明确不可用)
+    generator_registry: Any | None = None
 
     def health(self) -> dict[str, str]:
         """各已装配依赖的健康状态(值仅为 ``"ok"`` 或 ``"unavailable"``)。
 
         - ``db``: 始终上报(会话 SELECT 1 探活);
-        - ``storage`` / ``registry``: 仅在装配了该能力时上报; 未装配
-          (能力子集, 如 Worker 上下文)时不出现该键, 不伪装健康。
+        - ``storage`` / ``registry`` / ``generators``: 仅在装配了该能力时
+          上报; 未装配(能力子集, 如 Worker 上下文)时不出现该键, 不伪装健康。
+        - ``generators`` 只探针目录本身可确定性快照(装配健康), 空表仍为
+          ``"ok"``; 空表不可用语义在选择时表达(``get``/``resolve`` 抛
+          ``ComputationUnavailableError``), 不污染就绪状态。
         探针失败原因只进日志, 不进入返回值(避免内部细节外泄)。
         """
         result: dict[str, str] = {}
@@ -66,14 +75,18 @@ class ApplicationContext:
             result["storage"] = "ok" if _check_storage(self.storage) else "unavailable"
         if self.device_registry is not None:
             result["registry"] = "ok" if _check_registry(self.device_registry) else "unavailable"
+        if self.generator_registry is not None:
+            result["generators"] = (
+                "ok" if _check_generator_registry(self.generator_registry) else "unavailable"
+            )
         return result
 
     def readiness(self) -> dict[str, Any]:
         """公开就绪结果: ``{"ready": 是否全部就绪, "health": 各能力健康}``。
 
         就绪探针(``iesplan.main`` readyz)只消费本结果, 不直接探活依赖;
-        ``health`` 的键为已装配能力(``db`` / ``storage`` / ``registry``),
-        值仅为 ``"ok"`` 或 ``"unavailable"``。
+        ``health`` 的键为已装配能力(``db`` / ``storage`` / ``registry`` /
+        ``generators``), 值仅为 ``"ok"`` 或 ``"unavailable"``。
         """
         health = self.health()
         ready = bool(health) and all(v == "ok" for v in health.values())
@@ -118,6 +131,20 @@ def _check_registry(registry: Any) -> bool:
         return True
     except Exception:
         logger.exception("组合根设备注册表探活失败")
+        return False
+
+
+def _check_generator_registry(registry: Any) -> bool:
+    """生成器目录装配检查: 已发布目录可给出确定性快照。
+
+    只验证目录本身装配健康；空表仍健康，空表不可用语义由选择时
+    ``ComputationUnavailableError`` 表达，不在此污染就绪状态。
+    """
+    try:
+        registry.snapshot()
+        return True
+    except Exception:
+        logger.exception("组合根生成器目录探活失败")
         return False
 
 
@@ -179,6 +206,7 @@ def _assemble(
     *,
     with_storage: bool,
     with_registry: bool,
+    with_generators: bool,
     seed_admin: bool,
 ) -> ApplicationContext:
     """通用装配：加载领域门面后建表、部署触发器并装配能力子集。
@@ -210,17 +238,30 @@ def _assemble(
         from iesplan.devices import init_registry
 
         device_registry = init_registry()
+    # 5. 生成器目录(原子发布; 当前尚无真实 provider 实现, 显式装配空表,
+    #    不做任何动态发现或扫描, 选择时即明确不可用)
+    generator_registry: Any | None = None
+    if with_generators:
+        from iesplan.computation.generators import build_registry
+
+        generator_registry = build_registry(())
     context = ApplicationContext(
         session_factory=db_module.SessionLocal,
         storage=storage,
         device_registry=device_registry,
+        generator_registry=generator_registry,
     )
     logger.info(
-        "组合根装配完成: storage=%s registry=%s",
+        "组合根装配完成: storage=%s registry=%s generators=%s",
         "assembled" if storage is not None else "skipped",
         (
             f"assembled({len(device_registry.snapshot())} devices)"
             if device_registry is not None
+            else "skipped"
+        ),
+        (
+            f"assembled({len(generator_registry.snapshot())} generators)"
+            if generator_registry is not None
             else "skipped"
         ),
     )
@@ -228,20 +269,28 @@ def _assemble(
 
 
 def assemble_api() -> ApplicationContext:
-    """装配 API 进程：database、storage 与 devices 2.0 注册表。"""
-    return _assemble(with_storage=True, with_registry=True, seed_admin=True)
+    """装配 API 进程：database、storage、devices 2.0 注册表与生成器目录。"""
+    return _assemble(with_storage=True, with_registry=True, with_generators=True, seed_admin=True)
 
 
 def assemble_compute_worker() -> Never:
-    """计算能力将在 0.8 提供；当前拒绝启动，避免领取后再失败。"""
-    from iesplan.computation import ComputationUnavailableError
+    """装配计算 Worker：显式构建生成器目录；空表即明确拒绝启动。
 
+    真实 provider 随 0.8 后续切片由组合根装配；当前目录为空，直接拒绝，
+    避免领取后再失败。
+    """
+    from iesplan.computation import ComputationUnavailableError
+    from iesplan.computation.generators import build_registry
+
+    generators = build_registry(())
+    if len(generators) > 0:
+        pass  # 后续切片: 已发布非空目录后在此接线 Worker 上下文
     raise ComputationUnavailableError(reason="no-provider")
 
 
 def assemble_io_worker() -> ApplicationContext:
-    """装配 I/O Worker：database 与 storage，不含 devices 注册表。"""
-    return _assemble(with_storage=True, with_registry=False, seed_admin=True)
+    """装配 I/O Worker：database 与 storage，不含 devices 注册表与生成器目录。"""
+    return _assemble(with_storage=True, with_registry=False, with_generators=False, seed_admin=True)
 
 
 __all__ = [

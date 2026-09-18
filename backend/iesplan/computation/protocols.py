@@ -23,6 +23,7 @@ Worker 在组合根明确拒绝启动。
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -62,6 +63,19 @@ def _thaw_json(value: object) -> object:
         return {str(key): _thaw_json(item) for key, item in value.items()}
     if isinstance(value, tuple):
         return [_thaw_json(item) for item in value]
+    return value
+
+
+_SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def check_provider_ref(value: object, name: str) -> str:
+    """校验公开 provider 选择引用(``<稳定ID>@<语义化版本>`` 形态)。"""
+    if not isinstance(value, str) or value.count("@") != 1:
+        raise ValueError(f"计算配置 {name} 须为 <稳定ID>@<语义化版本> 形态: {value!r}")
+    stable_id, version = value.split("@")
+    if not stable_id or not _SEMVER_PATTERN.match(version):
+        raise ValueError(f"计算配置 {name} 非法: {value!r}")
     return value
 
 
@@ -153,33 +167,49 @@ class ResultAdapter(Protocol):
 class CalculationConfig:
     """公开计算配置(进入业务事实前已校验字头的求解选项)。
 
-    携带生成器/求解器选择无关的固定求解选项: 随机种子与算法选项(含精度)。
-    generator/solver 身份由 provider 自身 ``ref`` 表达, 不在此重复声明。
+    固定一次计算的全部选择: ``generator`` / ``solver`` 精确引用
+    (``<稳定ID>@<语义化版本>``), 随机种子、算法选项(含精度)与输出请求。
+    精度与算法选项进入 ``options``, 由各生成器的 options schema 在生成
+    边界校验。版本与依赖引用由本字头、ref 内嵌精确版本表达; 方程贡献与
+    设备内容锁随装配产物与固定资源传入, 不进本配置。
     """
 
     schema: str = CALCULATION_CONFIG_SCHEMA
     schema_version: str = CALCULATION_CONFIG_VERSION
+    generator: str = ""
+    solver: str = ""
     seed: int | None = None
     options: Mapping[str, object] = field(default_factory=dict)
+    outputs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.schema != CALCULATION_CONFIG_SCHEMA:
             raise ValueError(f"计算配置 schema 非法: {self.schema!r}")
         if self.schema_version != CALCULATION_CONFIG_VERSION:
             raise ValueError(f"计算配置版本非法: {self.schema_version!r}")
+        check_provider_ref(self.generator, "generator")
+        check_provider_ref(self.solver, "solver")
         if self.seed is not None and not isinstance(self.seed, int):
             raise TypeError("seed 须为整数或 None")
         if not isinstance(self.options, Mapping):
             raise TypeError("options 须为 Mapping")
+        outputs = tuple(self.outputs)
+        for name in outputs:
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"输出请求须为非空字符串: {name!r}")
         object.__setattr__(self, "options", _freeze_json(self.options))
+        object.__setattr__(self, "outputs", outputs)
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
+            "generator": self.generator,
+            "solver": self.solver,
             "seed": self.seed,
             "options": _thaw_json(self.options),
+            "outputs": list(self.outputs),
         }
 
 
@@ -331,6 +361,7 @@ __all__ = [
     "ComputeResult",
     "ExecutionReceipt",
     "GeneratorProvider",
+    "check_provider_ref",
     "ResultAdapter",
     "SolverBundle",
     "SolverRuntime",

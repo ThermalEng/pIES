@@ -10,6 +10,8 @@
   统一结果;
 - unavailable 错误语义: ``ComputationUnavailableError`` 为
   ``RuntimeError``, 默认 reason 为 ``"no-provider"``;
+- 计算配置: ``CalculationConfig`` 固定 generator/solver 精确引用、种子、
+  算法选项(含精度)与输出请求；非法引用形态即拒绝；
 - 注册表门面: ``iesplan.computation`` 选择性重导出注册表符号,
   ``get_algorithm`` / ``list_algorithms`` 行为与搬迁前一致。
 """
@@ -59,6 +61,17 @@ def _devices_registry():
 def _artifact() -> ValidatedAssemblyArtifact:
     """计算边界机械产物: 非空且内部一致的 2.0 二件套(不跑装配校验)。"""
     return fixture_artifact()
+
+
+_GENERATOR = "acme.generator@1.0.0"
+_SOLVER = "ies.solver.highs@1.7.2"
+
+
+def _config(**kwargs) -> CalculationConfig:
+    """最小合法计算配置(默认固定 generator/solver 精确引用)。"""
+    kwargs.setdefault("generator", _GENERATOR)
+    kwargs.setdefault("solver", _SOLVER)
+    return CalculationConfig(**kwargs)
 
 
 def _bundle() -> SolverBundle:
@@ -166,7 +179,7 @@ def test_unavailable_error_semantics() -> None:
     assert err.reason == "no-provider"
     assert "0.8" in str(err)
     gen, runtime, adapter = _GeneratorOnly(), _RuntimeOnly(), _AdapterOnly()
-    config = CalculationConfig(seed=42)
+    config = _config(seed=42)
     with pytest.raises(ComputationUnavailableError):
         gen.generate(_artifact(), {}, config)
     with pytest.raises(ComputationUnavailableError):
@@ -185,7 +198,8 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
         bundle_id="bundle-1", status="succeeded",
         business_outcome="normal_completion", outputs={"k": {"nested": [1]}},
     )
-    config = CalculationConfig(seed=7, options={"gap": 0.01, "tags": ["a"]})
+    config = _config(seed=7, options={"gap": 0.01, "tags": ["a"]}, outputs=["out"])
+    assert config.outputs == ("out",)
     receipt = ExecutionReceipt(
         bundle_id="bundle-1", generator_ref="g", solver_ref="s",
         status="succeeded", exit_code=0, detail={"stdout": "ok"},
@@ -246,19 +260,35 @@ def test_bundle_rejects_shell_command_and_escaping_paths() -> None:
 
 
 def test_config_schema_word_checked() -> None:
-    """公开 CalculationConfig 字头校验: 非法 schema/版本即拒绝。
+    """公开 CalculationConfig 字头与选择校验: 非法字头/引用即拒绝。
 
     运行期只做表示映射, 直接构造, 缺字段即映射失败, 不补默认值。
     """
     with pytest.raises(ValueError, match="schema"):
-        CalculationConfig(schema="ies.other", options={})
+        CalculationConfig(schema="ies.other", generator=_GENERATOR, solver=_SOLVER)
     with pytest.raises(ValueError, match="版本"):
-        CalculationConfig(schema_version="9.9.9", options={})
-    good = CalculationConfig(seed=42, options={"gap_rel": 0.01})
+        CalculationConfig(schema_version="9.9.9", generator=_GENERATOR, solver=_SOLVER)
+    good = _config(seed=42, options={"gap_rel": 0.01}, outputs=["solution"])
     assert good.seed == 42
-    assert good.to_dict()["options"] == {"gap_rel": 0.01}
+    assert good.to_dict() == {
+        "schema": CALCULATION_CONFIG_SCHEMA,
+        "schema_version": CALCULATION_CONFIG_VERSION,
+        "generator": _GENERATOR,
+        "solver": _SOLVER,
+        "seed": 42,
+        "options": {"gap_rel": 0.01},
+        "outputs": ["solution"],
+    }
     with pytest.raises(TypeError):
-        CalculationConfig(seed="42", options={})  # type: ignore[arg-type]
+        _config(seed="42")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="generator"):
+        CalculationConfig(solver=_SOLVER)
+    with pytest.raises(ValueError, match="generator"):
+        CalculationConfig(generator="acme.generator", solver=_SOLVER)
+    with pytest.raises(ValueError, match="solver"):
+        CalculationConfig(generator=_GENERATOR, solver="ies.solver.highs@1.7")
+    with pytest.raises(ValueError, match="输出请求"):
+        CalculationConfig(generator=_GENERATOR, solver=_SOLVER, outputs=[""])
 
 
 def test_registry_facade_from_computation() -> None:
