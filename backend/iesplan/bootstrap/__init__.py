@@ -154,7 +154,6 @@ def collect_trigger_statements() -> tuple[str, ...]:
     statements.extend(results_domain.install_triggers())
     statements.extend(audit_domain.install_triggers())
     statements.extend(configuration_domain.install_triggers())
-    statements.extend(model_domain.install_triggers())
     return tuple(statements)
 
 

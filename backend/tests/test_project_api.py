@@ -33,6 +33,8 @@ from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.db import Base  # noqa: E402
+from iesplan.identity.persistence import User as _UserForDDL  # noqa: E402,F401
+from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
 from iesplan.audit.persistence import AuditLog  # noqa: E402
 
@@ -110,7 +112,7 @@ def _create_project(client: TestClient, user, name: str, **kw: Any) -> int:
     return resp.json()["project"]["id"]
 
 
-def _device_cmd(cid: str, name: str, device_type: str = "heat_pump", kind: str = "new") -> dict:
+def _device_cmd(cid: str, name: str, device_type: str = "ies.device.heat_pump", kind: str = "new") -> dict:
     """构造设备 upsert 命令。"""
     return {
         "id": cid,
@@ -195,7 +197,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
         {
             "id": "cmd-1", "project_id": pid, "expected_revision": 1, "session": "win-1",
             "unit": "model", "type": "model.upsert_device",
-            "payload": {"name": "热泵1", "device_type": "heat_pump", "kind": "new",
+            "payload": {"name": "热泵1", "device_type": "ies.device.heat_pump", "kind": "new",
                         "params": {"capacity_kw": 1200}, "position": {"x": 100, "y": 200}},
         },
         {
@@ -223,7 +225,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
         f"/api/projects/{pid}/draft",
         json={
             "expected_revision": 1,
-            "commands": [_device_cmd("cmd-4", "电制冷机1", "chiller", "existing")],
+            "commands": [_device_cmd("cmd-4", "电制冷机1", "ies.device.electric_chiller", "existing")],
         },
         headers=owner_h,
     )
@@ -335,7 +337,7 @@ def test_restore_version(client: TestClient, db_session: Session) -> None:
     pid = _create_project(client, owner, "恢复测试")
 
     commands = [
-        _device_cmd("r-cmd-1", "光伏1", "pv", "new"),
+        _device_cmd("r-cmd-1", "光伏1", "ies.device.pv", "new"),
         {
             "id": "r-cmd-2", "unit": "config", "type": "config.patch",
             "payload": {"params": {"tariff": 0.5}},
@@ -356,7 +358,7 @@ def test_restore_version(client: TestClient, db_session: Session) -> None:
     # 继续编辑(修订 3): 追加锅炉
     resp = client.put(
         f"/api/projects/{pid}/draft",
-        json={"expected_revision": 2, "commands": [_device_cmd("r-cmd-3", "锅炉1", "boiler", "existing")]},
+        json={"expected_revision": 2, "commands": [_device_cmd("r-cmd-3", "锅炉1", "ies.device.gas_boiler", "existing")]},
         headers=owner_h,
     )
     assert resp.status_code == 200 and resp.json()["revision"] == 3
@@ -629,6 +631,105 @@ def test_upsert_connection_legal_shape_passes(
         "name": "c1", "from_device": "d1", "from_port": "p1",
         "to_device": "d2", "to_port": "p2",
     }]
+
+
+@pytest.mark.parametrize("extra", [
+    {"model_fidelity": "medium"},
+    {"description": "x"},
+    {"status": "active"},
+])
+def test_upsert_device_rejects_extra_fields(
+    client: TestClient, db_session: Session, extra: dict
+) -> None:
+    """model.upsert_device 额外字段 → 400 PROJ-CMD-005，无状态改变。
+
+    2.0 设备只允许 name/device_type/kind/params/position；无 2.0 去向的
+    旧字段(如 model_fidelity)必须当场拒绝，不静默丢弃。拒绝不推进草稿修订。
+    """
+    owner = make_user(db_session, "owner_dev_extra")
+    owner_h = _h(client, owner)
+    pid = _create_project(client, owner, "设备边界测试")
+    view = client.get(f"/api/projects/{pid}", headers=owner_h).json()
+    revision = view["draft"]["revision"]
+    payload = {
+        "name": "d1", "device_type": "ies.device.pv", "kind": "new",
+        "params": {}, **extra,
+    }
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": [
+            {
+                "id": "dev-bad-1", "unit": "model",
+                "type": "model.upsert_device", "payload": payload,
+            },
+        ]},
+        headers=owner_h,
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-CMD-005"
+    again = client.get(f"/api/projects/{pid}", headers=owner_h).json()
+    assert again["draft"]["revision"] == revision
+    assert again["draft"]["content"]["model"]["devices"] == []
+
+
+def test_upsert_device_params_full_replace_and_strict(client: TestClient, db_session: Session) -> None:
+    """upsert params 完整替换: 后写覆盖全部旧值, 清空后旧值消失。
+
+    非对象 params、未注册 device_type、新建缺 device_type 一律 400
+    PROJ-CMD-005 且不推进修订, 不静默忽略。
+    """
+    owner = make_user(db_session, "owner_dev_replace")
+    owner_h = _h(client, owner)
+    pid = _create_project(client, owner, "参数替换测试")
+
+    def revision() -> int:
+        return client.get(f"/api/projects/{pid}", headers=owner_h).json()["draft"]["revision"]
+
+    def put(payload: dict, rev: int):
+        return client.put(
+            f"/api/projects/{pid}/draft",
+            json={"expected_revision": rev, "commands": [
+                {"id": f"dev-replace-{rev}", "unit": "model", "type": "model.upsert_device", "payload": payload},
+            ]},
+            headers=owner_h,
+        )
+
+    def devices():
+        view = client.get(f"/api/projects/{pid}", headers=owner_h).json()
+        return view["draft"]["content"]["model"]["devices"]
+
+    rev = revision()
+    resp = put({"name": "PV1", "device_type": "ies.device.pv", "kind": "new",
+                "params": {"a": 1, "b": 2}}, rev)
+    assert resp.status_code == 200, resp.text
+    rev = resp.json()["revision"]
+    # 只传子集 → 整体替换, 未出现的旧键消失
+    resp = put({"name": "PV1", "params": {"b": 3}}, rev)
+    assert resp.status_code == 200, resp.text
+    rev = resp.json()["revision"]
+    assert devices() == [{"name": "PV1", "device_type": "ies.device.pv",
+                          "kind": "new", "params": {"b": 3}}]
+    # 传空对象 → 清空
+    resp = put({"name": "PV1", "params": {}}, rev)
+    assert resp.status_code == 200, resp.text
+    rev = resp.json()["revision"]
+    assert devices() == [{"name": "PV1", "device_type": "ies.device.pv",
+                          "kind": "new", "params": {}}]
+    # 非对象 params 拒绝, 修订不推进
+    resp = put({"name": "PV1", "params": [1]}, rev)
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-CMD-005"
+    assert revision() == rev
+    # 未注册 device_type 拒绝
+    resp = put({"name": "PV2", "device_type": "ies.device.nope", "kind": "new"}, rev)
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-CMD-005"
+    assert revision() == rev
+    # 新建缺 device_type 拒绝
+    resp = put({"name": "PV3", "kind": "new"}, rev)
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-CMD-005"
+    assert revision() == rev
 
 
 def test_delete_requires_name_or_reason(client: TestClient, db_session: Session) -> None:

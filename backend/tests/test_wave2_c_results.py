@@ -201,11 +201,11 @@ EXPLICIT_CALC_PATCH = {
 }
 
 
-def _declare_explicit_calc(client: TestClient, user, pid: int) -> int:
-    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1), 返回新修订号。"""
+def _declare_explicit_calc(client: TestClient, user, pid: int, revision: int) -> int:
+    """经 config.patch 显式声明计算装配字段, 返回新修订号。"""
     resp = client.put(
         f"/api/projects/{pid}/draft",
-        json={"expected_revision": 1, "commands": [{
+        json={"expected_revision": revision, "commands": [{
             "id": "c-calc", "unit": "config", "type": "config.patch",
             "payload": EXPLICIT_CALC_PATCH,
         }]},
@@ -229,9 +229,9 @@ def _declare_optimization_ready(
     config_cases.set_project_finance_profile(
         db, pid, PROFILE_PAYLOAD["profile"]["id"], user.id
     )
-    device_ref = declare_compute_device(client, pid, _h(client, user))
+    device_ref, revision = declare_compute_device(client, pid, _h(client, user))
     save_compute_planning(db, pid, user.id, device_ref)
-    revision = _declare_explicit_calc(client, user, pid)
+    revision = _declare_explicit_calc(client, user, pid, revision)
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={"expected_revision": revision, "commands": [

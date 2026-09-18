@@ -261,9 +261,8 @@ def _register_business_routers(application: FastAPI) -> None:
     application.include_router(project_models.router)
     # 用户自定义模型模板(切片 dm2: 完整生命周期 + 项目模板目录)
     application.include_router(model_templates.router)
-    # 系统模型(U04) + 设备类型注册表(公开)
+    # 设备类型注册表(公开; 项目建模写入走项目草稿语义命令)
     application.include_router(model.registry_router)
-    application.include_router(model.model_router)
     # 数据集(U05) + 模板
     application.include_router(datasets.router)
     # 计算配置(U06) + 算法注册表

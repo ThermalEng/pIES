@@ -76,18 +76,8 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     ),  # services.package.PackageExport.to_dict
     # ---- health.py ----
     "admin_health": frozenset({"components", "status"}),
-    # ---- model.py ----
+    # ---- model.py (旧 1.0 系统图端点已删除, 只保留设备类型注册表) ----
     "device_types_public": frozenset({"items"}),
-    "get_model_graph": frozenset(
-        {"has_graph", "graph_id", "name", "devices", "ports", "connections", "layout"}
-    ),  # services.model.get_graph
-    "create_device": frozenset({"device", "ports"}),
-    "update_device": frozenset({"device"}),
-    "delete_device": frozenset({"deleted", "ok"}),
-    "create_connection": frozenset({"connection"}),
-    "update_connection": frozenset({"connection"}),
-    "delete_connection": frozenset({"deleted", "ok"}),
-    "validate_model": frozenset({"diagnostics"}),
     # ---- objects.py ----
     "admin_storage": frozenset(
         {"capacity", "cleanup_candidates", "corrupt_count", "healthy", "objects", "pending_deletion_count", "refs"}

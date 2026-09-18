@@ -438,8 +438,10 @@ def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) 
     )
     planning = _project_planning_for(db, project_id, revision=planning_revision)
     export_content = dict(content)
-    export_content.setdefault("graph_id", project_id)
-    export_content.setdefault("name", f"project_{project_id}")
+    # 装配名使用确定性项目标识（slug 要求 ASCII，项目名可能是中文）；
+    # 不设 graph_id 兼容键。项目不存在即 404，不编造。
+    require_project(db, project_id)
+    export_content["name"] = f"project_{project_id}"
     contents = _dataset_contents_for(db, content)
     result = validate_project_export(
         export_content,

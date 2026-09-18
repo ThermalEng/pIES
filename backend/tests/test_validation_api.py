@@ -110,7 +110,7 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture()
 def client(factory: sessionmaker, data_dir: Path) -> Iterator[TestClient]:
-    """挂载校验/模型/数据集/项目路由的测试客户端(DB 依赖覆盖为 SQLite 会话)。"""
+    """挂载校验/注册表/数据集/项目路由的测试客户端(DB 依赖覆盖为 SQLite 会话)。"""
     from iesplan.api import model as model_api
     from iesplan.api import projects as project_api
     from iesplan.api import validation as validation_api
@@ -118,7 +118,6 @@ def client(factory: sessionmaker, data_dir: Path) -> Iterator[TestClient]:
 
     app = create_app()
     app.include_router(model_api.registry_router)
-    app.include_router(model_api.model_router)
     app.include_router(datasets_router)
     app.include_router(project_api.router)
     app.include_router(validation_api.router)
@@ -149,12 +148,36 @@ def _create_project(factory: sessionmaker, name: str = "校验测试项目") -> 
         return project.id
 
 
-def _bind_version(client: TestClient, project_id: int, version_id: int, cmd_id: str = "bind-1") -> dict:
+def _declare_device(
+    client: TestClient, project_id: int, device_type: str, name: str, cmd_id: str
+) -> int:
+    """经草稿语义命令声明 2.0 名键设备实例, 返回新修订号。"""
+    view = client.get(f"/api/projects/{project_id}", headers=_headers(client)).json()
+    resp = client.put(
+        f"/api/projects/{project_id}/draft",
+        json={
+            "expected_revision": view["draft"]["revision"],
+            "commands": [
+                {
+                    "id": cmd_id,
+                    "unit": "model",
+                    "type": "model.upsert_device",
+                    "payload": {"name": name, "device_type": device_type, "kind": "new"},
+                }
+            ],
+        },
+        headers=_headers(client),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _bind_version(client: TestClient, project_id: int, version_id: int, revision: int, cmd_id: str = "bind-1") -> dict:
     """经草稿语义命令绑定数据集版本(dataset.bind), 返回响应体。"""
     resp = client.put(
         f"/api/projects/{project_id}/draft",
         json={
-            "expected_revision": 1,
+            "expected_revision": revision,
             "commands": [
                 {
                     "id": cmd_id,
@@ -220,21 +243,8 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     """
     pid = _create_project(factory)
     # 1) 设备: 电网 + 负荷(连接不再是完整性条件)
-    grid = client.post(
-        f"/api/projects/{pid}/model/devices",
-        json={"device_type": GRID, "name": "电网连接"},
-        headers=_headers(client),
-    )
-    assert grid.status_code == 201, grid.text
-    load = client.post(
-        f"/api/projects/{pid}/model/devices",
-        json={
-            "device_type": ELECTRIC_LOAD,
-            "name": "电负荷",
-        },
-        headers=_headers(client),
-    )
-    assert load.status_code == 201, load.text
+    _declare_device(client, pid, GRID, "电网连接", "cand-grid-1")
+    revision = _declare_device(client, pid, ELECTRIC_LOAD, "电负荷", "cand-load-1")
     # 2) 数据: 内置样例(1h, 上海) + 绑定到草稿(权威绑定来源为 dataset_bindings)
     resp = client.post(
         f"/api/projects/{pid}/datasets", json={"name": "样例数据"}, headers=_headers(client)
@@ -248,7 +258,7 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     )
     assert resp.status_code == 201, resp.text
     version_id = resp.json()["dataset_version"]["id"]
-    bind_result = _bind_version(client, pid, version_id)
+    bind_result = _bind_version(client, pid, version_id, revision)
     # 3) 保存计算配置(消除未保存警告; 绑定后草稿修订已推进)
     with factory() as session:
         current = calc_config.get_config(session, pid)
@@ -405,16 +415,32 @@ def test_dataset_without_binding_blocked(client: TestClient, factory: sessionmak
 def test_foreign_dataset_version_binding_blocked(
     client: TestClient, factory: sessionmaker
 ) -> None:
-    """绑定不属于本项目的版本 → VALID-DATA-004 阻断。"""
+    """绑定不属于本项目的版本 → 输入边界当场拒绝(400 PROJ-CMD-005)，不建草稿。
+
+    跨项目绑定在 dataset.bind 命令边界经 dataset 门面确认归属后拒绝，
+    不会进入预检；预检 VALID-DATA-004 覆盖直接写入的坏绑定(见 slice06)。
+    """
     pid_a = _create_project(factory, "项目A")
     pid_b = _create_project(factory, "项目B")
     version_b = _create_sample_version(client, pid_b, "B的样例")
-    _bind_version(client, pid_a, version_b)
-    report = _run_report(client, pid_a)
-    codes = _diag_codes(report["diagnostics"])
-    assert "VALID-DATA-004" in codes
-    assert "VALID-DATA-001" not in codes
-    assert report["blocks_submit"] is True
+    resp = client.put(
+        f"/api/projects/{pid_a}/draft",
+        json={
+            "expected_revision": 1,
+            "commands": [
+                {
+                    "id": "bind-foreign", "unit": "dataset", "type": "dataset.bind",
+                    "payload": {"dataset_version_id": version_b, "role": "main"},
+                }
+            ],
+        },
+        headers=_headers(client),
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-CMD-005"
+    view = client.get(f"/api/projects/{pid_a}", headers=_headers(client)).json()
+    assert view["draft"]["revision"] == 1
+    assert view["draft"]["content"].get("dataset_bindings", []) == []
 
 
 def test_corrupt_quality_report_blocked(
@@ -423,7 +449,7 @@ def test_corrupt_quality_report_blocked(
     """绑定版本的质控报告缺失/结构损坏 → fail-closed 阻断, 不产生 500。"""
     pid = _create_project(factory)
     version_id = _create_sample_version(client, pid)
-    _bind_version(client, pid, version_id)
+    _bind_version(client, pid, version_id, 1)
     # 直接破坏质控报告结构(模拟数据损坏)
     from iesplan.dataset.persistence import DatasetVersion
 
@@ -451,12 +477,7 @@ def test_blocking_errors_not_downgraded_by_warnings(
     阻断仅剩缺负荷(VALID-MODEL-002)。
     """
     pid = _create_project(factory)
-    resp = client.post(
-        f"/api/projects/{pid}/model/devices",
-        json={"device_type": GRID, "name": "孤立的电网连接"},
-        headers=_headers(client),
-    )
-    assert resp.status_code == 201
+    _declare_device(client, pid, GRID, "孤立的电网连接", "cand-grid-lone")
     report = _run_report(client, pid)
     assert report["status"] == "blocked"
     assert report["blocks_submit"] is True

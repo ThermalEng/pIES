@@ -32,7 +32,6 @@ import type {
   ConfigVariable,
   Connection,
   ConnectionInput,
-  ConnType,
   Currency,
   Dataset,
   DatasetField,
@@ -47,16 +46,13 @@ import type {
   Diagnostic,
   EnergyCarrier,
   ExcelExportInput,
-  Fidelity,
-  GraphModel,
+  DraftModelSection,
   HealthStatus,
   LoginRequest,
   MetricValue,
   Objective,
   PackageExportInput,
   PageResult,
-  Port,
-  PortDirection,
   Project,
   ProjectCreateInput,
   ProjectListParams,
@@ -229,7 +225,7 @@ function toApiError(status: number, body: unknown): ApiError {
   // 0.3.0 C3: 全部错误路径已迁移标准 {error} 信封(宪法 §8.3), 诊断明细在
   // params.diagnostics(parseErrorEnvelope 已透传)。此裸 {diagnostics} fallback 仅作
   // 防御性兜底(未来回归/非标准错误体), 成功响应的 diagnostics 兄弟字段
-  // (model/validate 200、dataset 上传 201)不经由此处, 由 unwrapBody 直接返回。
+  // (validation/run 200、dataset 上传 201)不经由此处, 由 unwrapBody 直接返回。
   const raw = body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : {}
   if (Array.isArray(raw.diagnostics)) {
     return new ApiError(status, {
@@ -718,72 +714,54 @@ function datasetVersionFromServer(v: Record<string, unknown>): DatasetVersion {
   }
 }
 
-/** 后端设备 dict → 前端 Device(补齐 graph_id/时间等缺省字段)。 */
-function deviceFromServer(d: Record<string, unknown>, graphId: number): Device {
+/** 草稿内容设备条目 → 前端 Device(2.0 名键, 无 id/状态/时间字段)。 */
+function deviceFromDraft(d: Record<string, unknown>): Device {
   return {
-    id: Number(d.id),
-    graph_id: graphId,
+    name: String(d.name ?? ''),
     device_type: String(d.device_type ?? ''),
     kind: (d.kind as DeviceKind) ?? 'new',
-    name: String(d.name ?? ''),
-    description: d.description === null || d.description === undefined ? null : String(d.description),
     params: asRecord(d.params),
-    model_fidelity: (d.model_fidelity as Fidelity) ?? 'medium',
-    status: (d.status as Device['status']) ?? 'active',
-    created_at: String(d.created_at ?? ''),
-    updated_at: d.updated_at === null || d.updated_at === undefined ? null : String(d.updated_at),
   }
 }
 
-/** 后端连接 dict → 前端 Connection(补齐 graph_id)。 */
-function connFromServer(c: Record<string, unknown>, graphId: number): Connection {
+/** 草稿内容连接条目 → 前端 Connection(2.0 名键端点, 无类型/容量/损耗)。 */
+function connFromDraft(c: Record<string, unknown>): Connection {
   return {
-    id: Number(c.id),
-    graph_id: graphId,
-    from_port_id: Number(c.from_port_id ?? 0),
-    to_port_id: Number(c.to_port_id ?? 0),
-    conn_type: (c.conn_type as ConnType) ?? 'electric_line',
-    capacity: c.capacity === null || c.capacity === undefined ? null : Number(c.capacity),
-    loss_rate: Number(c.loss_rate ?? 0),
-    params: asRecord(c.params),
+    name: String(c.name ?? ''),
+    from_device: String(c.from_device ?? ''),
+    from_port: String(c.from_port ?? ''),
+    to_device: String(c.to_device ?? ''),
+    to_port: String(c.to_port ?? ''),
   }
 }
 
-/** 后端系统图 dict(has_graph/graph_id/name/devices/ports/connections) → 前端 GraphModel。
- *  has_graph=false 为后端显式空态(项目尚未建模), 不再从 graph_id==null 猜测。 */
-function graphFromServer(body: unknown, projectId: number): GraphModel {
-  const g = asRecord(body)
-  const hasGraph = g.has_graph !== false && g.graph_id !== null && g.graph_id !== undefined
-  const graphId = hasGraph ? Number(g.graph_id) : 0
+/** 项目视图 draft.content.model → 前端 DraftModelSection(2.0 唯一项目建模事实)。 */
+function modelSectionFromView(body: unknown): { revision: number; model: DraftModelSection } {
+  const view = asRecord(body)
+  const draft = asRecord(view.draft)
+  const content = asRecord(draft.content)
+  const model = asRecord(content.model)
   return {
-    has_graph: hasGraph,
-    graph: {
-      id: graphId,
-      project_id: projectId,
-      draft_id: null,
-      project_version_id: null,
-      name: String(g.name ?? ''),
-      created_by: 0,
-      created_at: '',
+    revision: Number(draft.revision ?? 1),
+    model: {
+      devices: Array.isArray(model.devices)
+        ? (model.devices as Record<string, unknown>[]).map(deviceFromDraft)
+        : [],
+      connections: Array.isArray(model.connections)
+        ? (model.connections as Record<string, unknown>[]).map(connFromDraft)
+        : [],
     },
-    devices: Array.isArray(g.devices)
-      ? (g.devices as Record<string, unknown>[]).map((d) => deviceFromServer(d, graphId))
-      : [],
-    ports: Array.isArray(g.ports)
-      ? (g.ports as Record<string, unknown>[]).map((p) => ({
-          id: Number(p.id),
-          device_id: Number(p.device_id ?? 0),
-          port_type: (p.port_type as Port['port_type']) ?? 'electric',
-          direction: (p.direction as PortDirection) ?? 'in',
-          name: String(p.name ?? ''),
-          capacity: p.capacity === null || p.capacity === undefined ? null : Number(p.capacity),
-          params: asRecord(p.params),
-        }))
-      : [],
-    connections: Array.isArray(g.connections)
-      ? (g.connections as Record<string, unknown>[]).map((c) => connFromServer(c, graphId))
-      : [],
   }
+}
+
+/** 2.0 连接默认命名(与后端 upsert_connection 缺省名公式一致)。 */
+export function connectionName(
+  fromDevice: string,
+  fromPort: string,
+  toDevice: string,
+  toPort: string,
+): string {
+  return `${fromDevice}.${fromPort}->${toDevice}.${toPort}`
 }
 
 /** 参数默认值适配:后端枚举参数(如 mode='both')默认值为字符串,数值参数为 number,
@@ -854,9 +832,6 @@ function algorithmFromServer(a: Record<string, unknown>): { name: string; label:
 // ---------------------------------------------------------------------------
 // 跨方法模块级缓存(后端路由以 project/task 为键, 前端方法以业务对象为键)
 // ---------------------------------------------------------------------------
-
-/** 最近一次成功保存的模型语义内容(按项目), 供 updateDraft 差量生成命令。 */
-const graphSaveCache = new Map<number, { devices: Array<{ name: string }>; connections: Array<{ name: string }> }>()
 
 /** 证据包 id → 任务 id(由任务详情填充; 结果/导出 API 以任务为路由键)。 */
 const pkgTaskCache = new Map<number, number>()
@@ -979,8 +954,6 @@ export interface ProjectsApi {
   list(params?: ProjectListParams): Promise<PageResult<Project>>
   create(input: ProjectCreateInput): Promise<Project>
   get(id: number): Promise<Project>
-  /** 草稿语义命令(前端命令形状 → 后端命令清单, 返回新修订号)。 */
-  updateDraft(id: number, input: Record<string, unknown>): Promise<{ revision: number }>
   versions(id: number): Promise<ProjectVersion[]>
   archive(id: number): Promise<Project>
   unarchive(id: number): Promise<Project>
@@ -989,12 +962,25 @@ export interface ProjectsApi {
 }
 
 export interface ModelApi {
-  getGraph(projectId: number): Promise<GraphModel>
-  addDevice(projectId: number, input: DeviceInput): Promise<Device>
-  updateDevice(projectId: number, deviceId: number, input: Partial<DeviceInput>): Promise<Device>
-  deleteDevice(projectId: number, deviceId: number): Promise<void>
-  connect(projectId: number, input: ConnectionInput): Promise<Connection>
-  disconnect(projectId: number, connectionId: number): Promise<void>
+  /** 读项目视图草稿内容 model 节(2.0 名键设备与端点连接, 附带草稿修订号)。 */
+  getModel(projectId: number): Promise<{ revision: number; model: DraftModelSection }>
+  /** 写单个设备(upsert 语义; 改名经 remove+upsert, 由调用方组批)。
+   * 调用方传入已加载的草稿修订号, 成功后以后端返回修订号为准, 409 自行处理。 */
+  upsertDevice(projectId: number, input: DeviceInput, expectedRevision: number): Promise<{ revision: number }>
+  removeDevice(projectId: number, name: string, expectedRevision: number): Promise<{ revision: number }>
+  /** 写单条连接(名键端点; 未显式命名时按默认公式命名并返回)。 */
+  upsertConnection(
+    projectId: number,
+    input: ConnectionInput,
+    expectedRevision: number,
+  ): Promise<{ revision: number; name: string }>
+  removeConnection(projectId: number, name: string, expectedRevision: number): Promise<{ revision: number }>
+  /** 批量草稿语义命令(改名等需多命令原子推进的场景), 返回新修订号。 */
+  sendCommands(
+    projectId: number,
+    commands: Array<{ type: string; payload: Record<string, unknown> }>,
+    expectedRevision: number,
+  ): Promise<{ revision: number }>
   validate(projectId: number): Promise<ValidationResult>
   deviceTypes(): Promise<DeviceTypeSpec[]>
 }
@@ -1172,82 +1158,6 @@ export const api = {
       // 后端返回 {project, draft, versions, my_role}: 解包 project + role
       return request<unknown>(`/projects/${id}`).then((body) => projectFromServer(body))
     },
-    async updateDraft(id: number, input: Record<string, unknown>): Promise<{ revision: number }> {
-      // 前端单条语义命令 {command, revision, graph} → 后端命令清单:
-      // 按名称差量生成 model.upsert_device/remove_device/upsert_connection/remove_connection
-      const graph = asRecord(input.graph)
-      const devices = Array.isArray(graph.devices) ? (graph.devices as Record<string, unknown>[]) : []
-      const connections = Array.isArray(graph.connections) ? (graph.connections as Record<string, unknown>[]) : []
-      let expectedRevision = typeof input.revision === 'number' ? (input.revision as number) : null
-      if (expectedRevision === null || expectedRevision < 1) {
-        // revision 缺省 = 接受服务器当前修订(首次保存/冲突后强制覆盖)
-        const view = asRecord(await request<unknown>(`/projects/${id}`))
-        expectedRevision = Number(asRecord(view.draft).revision ?? 1)
-      }
-      const nameByDevice = new Map<string, string>()
-      for (const d of devices) nameByDevice.set(String(d.id), String(d.name ?? ''))
-      const portStr = (p: unknown): string => {
-        const pr = asRecord(p)
-        return pr.carrier !== undefined ? `${String(pr.carrier)}:${String(pr.direction ?? '')}` : String(p ?? '')
-      }
-      const connName = (c: Record<string, unknown>): string => {
-        const from = nameByDevice.get(String(c.from_device_id)) ?? String(c.from_device_id ?? '')
-        const to = nameByDevice.get(String(c.to_device_id)) ?? String(c.to_device_id ?? '')
-        return `${from}.${portStr(c.from_port)}->${to}.${portStr(c.to_port)}`
-      }
-      const prev = graphSaveCache.get(id)
-      const newDevNames = new Set(devices.map((d) => String(d.name ?? '')))
-      const newConnNames = new Set(connections.map(connName))
-      const commands: Array<Record<string, unknown>> = []
-      // 1) 已删除的设备/连接 → remove 命令(按名称匹配, 与后端内容模型一致)
-      for (const old of prev?.devices ?? []) {
-        if (!newDevNames.has(old.name)) {
-          commands.push(makeCommand(id, expectedRevision, 'model.remove_device', { name: old.name }))
-        }
-      }
-      for (const old of prev?.connections ?? []) {
-        if (!newConnNames.has(old.name)) {
-          commands.push(makeCommand(id, expectedRevision, 'model.remove_connection', { name: old.name }))
-        }
-      }
-      // 2) 全量 upsert(后端按名称 upsert, 覆盖/新建语义天然幂等)
-      for (const d of devices) {
-        commands.push(
-          makeCommand(id, expectedRevision, 'model.upsert_device', {
-            name: String(d.name ?? ''),
-            device_type: String(d.device_type ?? ''),
-            kind: String(d.kind ?? 'new'),
-            model_fidelity: String(d.model_fidelity ?? 'medium'),
-            params: asRecord(d.params),
-          }),
-        )
-      }
-      for (const c of connections) {
-        commands.push(
-          makeCommand(id, expectedRevision, 'model.upsert_connection', {
-            name: connName(c),
-            from_device: nameByDevice.get(String(c.from_device_id)) ?? String(c.from_device_id ?? ''),
-            from_port: portStr(c.from_port),
-            to_device: nameByDevice.get(String(c.to_device_id)) ?? String(c.to_device_id ?? ''),
-            to_port: portStr(c.to_port),
-            conn_type: String(c.conn_type ?? 'electric_line'),
-            loss_rate: typeof c.loss_rate === 'number' ? (c.loss_rate as number) : 0,
-          }),
-        )
-      }
-      const body = asRecord(
-        await request<unknown>(`/projects/${id}/draft`, {
-          method: 'PUT',
-          body: { expected_revision: expectedRevision, commands },
-        }),
-      )
-      // 记录差量基线(下次保存据此生成 remove 命令)
-      graphSaveCache.set(id, {
-        devices: devices.map((d) => ({ name: String(d.name ?? '') })),
-        connections: connections.map((c) => ({ name: connName(c) })),
-      })
-      return { revision: Number(body.revision ?? expectedRevision) }
-    },
     versions(id: number): Promise<ProjectVersion[]> {
       return request<unknown>(`/projects/${id}/versions`).then((body) => asList<ProjectVersion>(body, 'versions'))
     },
@@ -1264,54 +1174,86 @@ export const api = {
   } satisfies ProjectsApi,
 
   model: {
-    getGraph(projectId: number): Promise<GraphModel> {
-      return request<unknown>(`/projects/${projectId}/model`).then((body) => graphFromServer(body, projectId))
+    async getModel(projectId: number): Promise<{ revision: number; model: DraftModelSection }> {
+      const body = await request<unknown>(`/projects/${projectId}`)
+      return modelSectionFromView(body)
     },
-    addDevice(projectId: number, input: DeviceInput): Promise<Device> {
-      return request<unknown>(`/projects/${projectId}/model/devices`, {
-        method: 'POST',
-        body: {
-          device_type: input.device_type,
-          name: input.name,
-          params: input.params ?? {},
-          is_existing: input.kind === 'existing',
-          model_precision: input.model_fidelity ?? 'medium',
-        },
-      }).then((res) => deviceFromServer(asRecord(oneOf<Record<string, unknown>>(res, 'device')), 0))
+    async sendCommands(
+      projectId: number,
+      commands: Array<{ type: string; payload: Record<string, unknown> }>,
+      expectedRevision: number,
+    ): Promise<{ revision: number }> {
+      // 修订号由调用方(ModelPage 已加载值)传入, 写前不 GET; 成功以后端返回为准。
+      const body = asRecord(
+        await request<unknown>(`/projects/${projectId}/draft`, {
+          method: 'PUT',
+          body: {
+            expected_revision: expectedRevision,
+            commands: commands.map((c) =>
+              makeCommand(projectId, expectedRevision, c.type, c.payload, c.type.split('.')[0] ?? 'model'),
+            ),
+          },
+        }),
+      )
+      return { revision: Number(body.revision ?? expectedRevision) }
     },
-    updateDevice(projectId: number, deviceId: number, input: Partial<DeviceInput>): Promise<Device> {
-      const body: Record<string, unknown> = {}
-      if (input.name !== undefined) body.name = input.name
-      if (input.params !== undefined) body.params = input.params
-      return request<unknown>(`/projects/${projectId}/model/devices/${deviceId}`, { method: 'PUT', body }).then(
-        (res) => deviceFromServer(asRecord(oneOf<Record<string, unknown>>(res, 'device')), 0),
+    async upsertDevice(
+      projectId: number,
+      input: DeviceInput,
+      expectedRevision: number,
+    ): Promise<{ revision: number }> {
+      return api.model.sendCommands(
+        projectId,
+        [
+          {
+            type: 'model.upsert_device',
+            payload: {
+              name: input.name,
+              device_type: input.device_type,
+              kind: input.kind,
+              ...(input.params !== undefined ? { params: input.params } : {}),
+            },
+          },
+        ],
+        expectedRevision,
       )
     },
-    deleteDevice(projectId: number, deviceId: number): Promise<void> {
-      return request<void>(`/projects/${projectId}/model/devices/${deviceId}`, { method: 'DELETE' })
+    async removeDevice(projectId: number, name: string, expectedRevision: number): Promise<{ revision: number }> {
+      return api.model.sendCommands(projectId, [{ type: 'model.remove_device', payload: { name } }], expectedRevision)
     },
-    connect(projectId: number, input: ConnectionInput): Promise<Connection> {
-      return request<unknown>(`/projects/${projectId}/model/connections`, {
-        method: 'POST',
-        body: {
-          from_port_id: input.from_port_id,
-          to_port_id: input.to_port_id,
-          attrs: {
-            conn_type: input.conn_type,
-            ...(input.capacity !== undefined ? { capacity: input.capacity } : {}),
-            ...(input.loss_rate !== undefined ? { loss_rate: input.loss_rate } : {}),
-            ...(input.params !== undefined ? { params: input.params } : {}),
+    async upsertConnection(
+      projectId: number,
+      input: ConnectionInput,
+      expectedRevision: number,
+    ): Promise<{ revision: number; name: string }> {
+      const name =
+        input.name ?? connectionName(input.from_device, input.from_port, input.to_device, input.to_port)
+      const { revision } = await api.model.sendCommands(
+        projectId,
+        [
+          {
+            type: 'model.upsert_connection',
+            payload: {
+              name,
+              from_device: input.from_device,
+              from_port: input.from_port,
+              to_device: input.to_device,
+              to_port: input.to_port,
+            },
           },
-        },
-      }).then((res) => connFromServer(asRecord(oneOf<Record<string, unknown>>(res, 'connection')), 0))
+        ],
+        expectedRevision,
+      )
+      return { revision, name }
     },
-    disconnect(projectId: number, connectionId: number): Promise<void> {
-      return request<void>(`/projects/${projectId}/model/connections/${connectionId}`, { method: 'DELETE' })
+    async removeConnection(projectId: number, name: string, expectedRevision: number): Promise<{ revision: number }> {
+      return api.model.sendCommands(projectId, [{ type: 'model.remove_connection', payload: { name } }], expectedRevision)
     },
     validate(projectId: number): Promise<ValidationResult> {
-      return request<unknown>(`/projects/${projectId}/model/validate`).then((body) => {
-        const diags = asList<Diagnostic>(body, 'diagnostics')
-        return { valid: !diags.some((d) => d.blocking || d.severity === 'blocking'), diagnostics: diags }
+      return request<unknown>(`/projects/${projectId}/validation/run`, { method: 'POST' }).then((body) => {
+        const report = asRecord(oneOf<Record<string, unknown>>(body, 'report'))
+        const diags = asList<Diagnostic>(report, 'diagnostics')
+        return { valid: report.blocks_submit !== true, diagnostics: diags }
       })
     },
     deviceTypes(): Promise<DeviceTypeSpec[]> {

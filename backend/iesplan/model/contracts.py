@@ -1,6 +1,8 @@
-"""模型域公开契约（系统图/设备/端口/连接，归属 model）。
+"""模型域公开契约（用户模型模板/项目模型候选门禁，归属 model）。
 
-- 图/设备/端口/连接一经写入的不可变语义由调用方保证；版本图不可修改；
+项目建模事实只在项目草稿内容 model 节（归属 project 域），本域不再拥有
+系统图/设备/端口/连接表。
+
 - 只含不可变值对象与领域错误；不导入 ORM、Session、services 或 application。
 """
 
@@ -14,11 +16,11 @@ from iesplan.core.errors import AppError, ConflictError, NotFoundError
 
 
 class ModelNotFoundError(NotFoundError):
-    """图/设备/端口/连接不存在（沿用基类诊断码，不新增码）。"""
+    """模板/项目模型行不存在（沿用基类诊断码，不新增码）。"""
 
 
 class ModelConflictError(ConflictError):
-    """名称重复/并发建图冲突（沿用基类诊断码，不新增码）。"""
+    """模板稳定 ID/用户 slug 重复等唯一冲突（沿用基类诊断码，不新增码）。"""
 
 
 #: 项目模型候选诊断码（集中登记于 core/diagnostics.py NEW_DIAG_CODES；
@@ -42,66 +44,6 @@ class ModelCandidateRejectedError(AppError):
 
 class ProjectModelNotFoundError(NotFoundError):
     """项目模型清单行不存在或不属于该项目。"""
-
-
-@dataclass(frozen=True, slots=True)
-class GraphRecord:
-    """系统图（system_graphs 表公开视图）。
-
-    工作图挂 draft_id；版本图挂 project_version_id（二者互斥）。
-    """
-
-    id: int
-    project_id: int
-    name: str
-    draft_id: int | None = None
-    project_version_id: int | None = None
-    created_by: int = 0
-    created_at: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DeviceRecord:
-    """设备（devices 表公开视图）。"""
-
-    id: int
-    graph_id: int
-    device_type: str
-    kind: str
-    name: str
-    params: dict[str, Any]
-    model_fidelity: str = "medium"
-    status: str = "active"
-    description: str | None = None
-    created_at: str | None = None
-    updated_at: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PortRecord:
-    """端口（ports 表公开视图）。"""
-
-    id: int
-    device_id: int
-    port_type: str
-    direction: str
-    name: str
-    capacity: float | None = None
-    params: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ConnectionRecord:
-    """连接（connections 表公开视图）。"""
-
-    id: int
-    graph_id: int
-    from_port_id: int
-    to_port_id: int
-    conn_type: str
-    loss_rate: float = 0.0
-    capacity: float | None = None
-    params: dict[str, Any] | None = None
 
 
 #: 模板生命周期状态（与 model_templates 表 CHECK 约束同语义）。

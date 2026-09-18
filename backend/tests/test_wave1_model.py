@@ -1,9 +1,10 @@
 """Wave 1 W1-Model: model 域 persistence 收敛验证。
 
 覆盖:
-- application/model_templates/service.py、application/models/model_save.py 与
-  application/models/service.py 不再直接导入 iesplan.models.* ORM
-  (顶层与函数内均不允许; W2-B 搬迁后路径，旧 services/model.py 已删除);
+- application/model_templates/service.py、application/models/model_save.py、
+  application/validations/precheck.py 与 application/configuration/calc_config.py
+  不再直接导入 iesplan.models.* ORM(顶层与函数内均不允许;
+  S2c 已删除旧系统图编排 services/model.py);
 - 模板草稿创建/发布与项目模型保存经 model 域 repository 读写, 行级结果与
   读取视图一致;
 - 审计写入走 audit 域公开门面, after 载荷与旧直写一致。
@@ -43,12 +44,14 @@ from iesplan.identity.persistence import User  # noqa: E402
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 
-#: 本波次收敛的三个文件: 应用层不得直接导入 iesplan.models.* ORM。
-#: (W2-B 搬迁后路径; 旧 services/model.py 已删除。)
+#: S2c 切换后应用层不得直接导入 iesplan.models.* ORM 的文件
+#: (旧 services/model.py 与 application/models/service.py 已删除;
+#: 预检与计算配置只消费草稿内容 2.0 名键事实)。
 _NO_ORM_MODULES = (
     "iesplan/application/model_templates/service.py",
     "iesplan/application/models/model_save.py",
-    "iesplan/application/models/service.py",
+    "iesplan/application/validations/precheck.py",
+    "iesplan/application/configuration/calc_config.py",
 )
 
 TEMPLATE_YAML = """

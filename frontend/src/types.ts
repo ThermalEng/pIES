@@ -230,98 +230,54 @@ export interface ProjectListParams {
 }
 
 // ---------------------------------------------------------------------------
-// 系统模型(U04 模型写入单元)
+// 系统模型(设备模型 2.0: 项目草稿内容 model 节, 名键唯一事实)
 // ---------------------------------------------------------------------------
 
-export interface SystemGraph {
-  id: EntityId
-  project_id: EntityId
-  draft_id: EntityId | null
-  project_version_id: EntityId | null
-  name: string
-  created_by: EntityId
-  created_at: ISO8601
-}
+/** 注册表端口类型(设备 YAML 公开 descriptor, 画布句柄与服务端端口的共同依据)。 */
+export type PortType = 'electric' | 'thermal' | 'cooling' | 'fuel' | 'water' | 'data'
 
-/** 设备模型精度(04 §7: P1 简化线性 / P2 标准 / P3 详细非线性)。 */
+/** 数值精度标记(算法默认精度 / 指标精度; 建模链 2.0 不再携带模型精度)。 */
 export type Fidelity = 'low' | 'medium' | 'high'
 
 /** 设备属性:存量(existing)或新增(new),规划选型的核心区分。 */
 export type DeviceKind = 'existing' | 'new'
 
+/** 2.0 设备实例(名键; 位置入 layout 节, 不在此处)。 */
 export interface Device {
-  id: EntityId
-  graph_id: EntityId
+  name: string
   device_type: string
   kind: DeviceKind
-  name: string
-  description: string | null
   /** 参数(容量、效率曲线、投资/运维成本等),键与模式版本由 schema_version 约定。 */
   params: Record<string, unknown>
-  model_fidelity: Fidelity
-  status: 'active' | 'retired'
-  created_at: ISO8601
-  updated_at: ISO8601 | null
 }
 
 export interface DeviceInput {
   device_type: string
   kind: DeviceKind
   name: string
-  description?: string
   params?: Record<string, unknown>
-  model_fidelity?: Fidelity
 }
 
-export type PortType = 'electric' | 'thermal' | 'cooling' | 'fuel' | 'water' | 'data'
-
-export type PortDirection = 'in' | 'out' | 'bidirectional'
-
-export interface Port {
-  id: EntityId
-  device_id: EntityId
-  port_type: PortType
-  direction: PortDirection
-  name: string
-  /** 容量(单位由设备类型约定:kW/MW/GJ/h 等)。 */
-  capacity: number | null
-  params: Record<string, unknown>
-}
-
-export type ConnType =
-  | 'electric_line'
-  | 'thermal_pipe'
-  | 'cooling_pipe'
-  | 'fuel_pipe'
-  | 'data_link'
-
+/** 2.0 连接(名键; 只表达真实端点, 无类型/容量/损耗字段)。 */
 export interface Connection {
-  id: EntityId
-  graph_id: EntityId
-  from_port_id: EntityId
-  to_port_id: EntityId
-  conn_type: ConnType
-  capacity: number | null
-  loss_rate: number
-  params: Record<string, unknown>
+  name: string
+  from_device: string
+  from_port: string
+  to_device: string
+  to_port: string
 }
 
 export interface ConnectionInput {
-  from_port_id: EntityId
-  to_port_id: EntityId
-  conn_type: ConnType
-  capacity?: number
-  loss_rate?: number
-  params?: Record<string, unknown>
+  name?: string
+  from_device: string
+  from_port: string
+  to_device: string
+  to_port: string
 }
 
-/** 系统图完整模型(节点/设备/端口/连接)。 */
-export interface GraphModel {
-  /** 后端显式空态: false=项目尚未建模(无工作图), 此时 graph 为空骨架。 */
-  has_graph: boolean
-  graph: SystemGraph
+/** 草稿内容 model 节(2.0 唯一项目建模事实)。 */
+export interface DraftModelSection {
   devices: Device[]
-  ports: Port[]
   connections: Connection[]
 }
 

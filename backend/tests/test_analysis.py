@@ -60,7 +60,6 @@ def _content(**overrides: object) -> dict:
                     "device_type": "ies.device.pv",
                     "name": "pv1",
                     "kind": "new",
-                    "is_new": True,
                     "params": {"rated_capacity_kwp": 500.0, "unit_invest_cost": 3500.0},
                 }
             ]

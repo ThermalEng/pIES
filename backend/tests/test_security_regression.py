@@ -3,7 +3,7 @@
 覆盖本次安全修复的回归场景:
 - C-01: 对象管理 API 拒绝伪造 X-User-Id(仅接受真实窗口会话 + admin 角色);
 - C-02: 强制改密未解除前业务接口一律 403(AUTH-FPC-001), 改密后解除;
-- C-03: 模型 API 项目级权限 —— viewer 只读, 写模型 403;
+- C-03: 模型 API 项目级权限 —— 读经项目视图/校验报告, 写经草稿语义命令, 非所有者一律 403;
 - H-01: takeover_pending 会话业务请求 401, 确认接管后转 active 可用;
 - H-05: viewer 取消任务 403;
 - H-07: ZIP Bomb 拒绝(PKG-SIZE-001)。
@@ -174,7 +174,10 @@ def test_force_password_change_gates_business_api(client: TestClient, db: Sessio
 
 
 def test_model_api_non_owner_denied_and_owner_allowed(client: TestClient, db: Session) -> None:
-    """非所有者读/写模型一律 403(0.8.0 起无共享成员); 所有者可读可写。"""
+    """非所有者读/写模型一律 403(0.8.0 起无共享成员); 所有者可读可写。
+
+    2.0 唯一建模面: 读经项目视图, 写经草稿语义命令(PUT draft)。
+    """
     make_user(db, "owner_c03")
     other = make_user(db, "other_c03")
     make_user(db, "stranger_c03")
@@ -183,36 +186,43 @@ def test_model_api_non_owner_denied_and_owner_allowed(client: TestClient, db: Se
 
     other_token = _login(client, "other_c03")
     # 非所有者读 → 403
-    resp = client.get(f"/api/projects/{pid}/model", headers=_bearer(other_token))
+    resp = client.get(f"/api/projects/{pid}", headers=_bearer(other_token))
     assert resp.status_code == 403, resp.text
-    resp = client.get(f"/api/projects/{pid}/model/validate", headers=_bearer(other_token))
-    assert resp.status_code == 403, resp.text
-
-    # 非所有者写(设备/连接)→ 403
-    body = {"device_type": "ies.device.pv", "name": "PV1", "params": {}}
-    resp = client.post(
-        f"/api/projects/{pid}/model/devices", json=body, headers=_bearer(other_token)
+    resp = client.get(
+        f"/api/projects/{pid}/validation", headers=_bearer(other_token)
     )
     assert resp.status_code == 403, resp.text
-    resp = client.post(
-        f"/api/projects/{pid}/model/connections",
-        json={"from_port_id": 1, "to_port_id": 2},
-        headers=_bearer(other_token),
+
+    # 非所有者写(草稿语义命令)→ 403
+    body = {
+        "expected_revision": 1,
+        "commands": [
+            {
+                "id": "c-c03",
+                "unit": "model",
+                "type": "model.upsert_device",
+                "payload": {"name": "PV1", "device_type": "ies.device.pv", "kind": "new"},
+            }
+        ],
+    }
+    resp = client.put(
+        f"/api/projects/{pid}/draft", json=body, headers=_bearer(other_token)
     )
     assert resp.status_code == 403, resp.text
 
     # 非成员写 → 403(未授权用户不可修改模型)
     stranger_token = _login(client, "stranger_c03")
-    resp = client.post(
-        f"/api/projects/{pid}/model/devices", json=body, headers=_bearer(stranger_token)
+    resp = client.put(
+        f"/api/projects/{pid}/draft", json=body, headers=_bearer(stranger_token)
     )
     assert resp.status_code == 403, resp.text
 
-    # 所有者写 → 201(正例)
-    resp = client.post(
-        f"/api/projects/{pid}/model/devices", json=body, headers=_bearer(owner_token)
+    # 所有者写 → 200(正例)
+    resp = client.put(
+        f"/api/projects/{pid}/draft", json=body, headers=_bearer(owner_token)
     )
-    assert resp.status_code == 201, resp.text
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["revision"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +305,7 @@ def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) 
     config_cases.set_project_finance_profile(
         db, pid, PROFILE_PAYLOAD["profile"]["id"], owner.id
     )
-    device_ref = declare_compute_device(client, pid, _bearer(owner_token))
+    device_ref, revision = declare_compute_device(client, pid, _bearer(owner_token))
     save_compute_planning(db, pid, owner.id, device_ref)
     resp = client.put(
         f"/api/projects/{pid}/draft",

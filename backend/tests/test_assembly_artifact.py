@@ -74,11 +74,11 @@ _EXPORT_TARIFF = {}
 _EXPORT_PLANNING = {
     "objective": {
         "sense": "minimize",
-        "expression": "d2__upfront_capex + 1 year * d2__annual_fixed_om + d2__period_variable_om",
+        "expression": "hp1__upfront_capex + 1 year * hp1__annual_fixed_om + hp1__period_variable_om",
     },
     "variables": {
         "hp_cap": {
-            "device_ref": "d2",
+            "device_ref": "hp1",
             "parameter": "rated_heat_kw",
             "lower_bound": "0",
             "upper_bound": "1000",
@@ -256,12 +256,11 @@ class TestUnhappyPath:
 class TestProjectExport:
     def test_project_export_issues_artifact(self, init_registry):
         content = {
-            "graph_id": 42,
             "name": "campus",
             "model": {
                 "devices": [
                     {
-                        "id": 1,
+                        "name": "grid1",
                         "device_type": "ies.device.grid_connection",
                         "kind": "existing",
                         "params": {
@@ -270,7 +269,7 @@ class TestProjectExport:
                         },
                     },
                     {
-                        "id": 2,
+                        "name": "hp1",
                         "device_type": "ies.device.heat_pump",
                         "kind": "new",
                         "params": {
@@ -279,7 +278,7 @@ class TestProjectExport:
                         },
                     },
                     {
-                        "id": 3,
+                        "name": "load1",
                         "device_type": "ies.device.electric_load",
                         "kind": "existing",
                         "params": {
@@ -289,32 +288,15 @@ class TestProjectExport:
                         },
                     },
                 ],
-                "ports": [
-                    {
-                        "id": 11,
-                        "device_id": 1,
-                        "name": "electricity_import",
-                        "port_type": "electric",
-                        "direction": "out",
-                    },
-                    {
-                        "id": 21,
-                        "device_id": 2,
-                        "name": "electricity_in",
-                        "port_type": "electric",
-                        "direction": "in",
-                    },
-                    {
-                        "id": 22,
-                        "device_id": 2,
-                        "name": "heat_out",
-                        "port_type": "thermal",
-                        "direction": "out",
-                    },
-                ],
                 # predefined 接口不进入 connections(需求序列由来源声明提供)
                 "connections": [
-                    {"id": 101, "from_port_id": 11, "to_port_id": 21},
+                    {
+                        "name": "c1",
+                        "from_device": "grid1",
+                        "from_port": "electricity_import",
+                        "to_device": "hp1",
+                        "to_port": "electricity_in",
+                    },
                 ],
             },
             "project_baseline": _export_baseline(),
@@ -324,9 +306,9 @@ class TestProjectExport:
             finance=_EXPORT_FINANCE,
             finance_binding={
                 "instances": {
-                    "d1": {"type": "none"},
-                    "d2": _HP_BINDING,
-                    "d3": {"type": "none"},
+                    "grid1": {"type": "none"},
+                    "hp1": _HP_BINDING,
+                    "load1": {"type": "none"},
                 }
             },
             tariff_bindings=_EXPORT_TARIFF,
@@ -341,12 +323,113 @@ class TestProjectExport:
         assert "transport_pipe" not in canonical
         assert '"mode":"constant"' in canonical
 
+    def test_project_export_explicit_transport_pipe_assembles(self, init_registry):
+        # 显式声明的 transport_pipe 设备正常参与装配(损耗由设备方程表达):
+        # hp1 热输出 → pipe1 热输入; 构造器不合成隐式管道, 显式设备照常解析。
+        content = {
+            "name": "campus-pipe",
+            "model": {
+                "devices": [
+                    {
+                        "name": "grid1",
+                        "device_type": "ies.device.grid_connection",
+                        "kind": "existing",
+                        "params": {
+                            "max_import_power_kw": 800,
+                            "max_export_power_kw": 200,
+                        },
+                    },
+                    {
+                        "name": "hp1",
+                        "device_type": "ies.device.heat_pump",
+                        "kind": "new",
+                        "params": {
+                            "rated_heat_kw": 600,
+                            "cop": 3.5,
+                        },
+                    },
+                    {
+                        "name": "load1",
+                        "device_type": "ies.device.electric_load",
+                        "kind": "existing",
+                        "params": {
+                            "peak_power_kw": 100,
+                            # 2.0 显式来源声明:常量需求(数据序列来源由 S2c 独立入口提供)
+                            "electricity_demand": 100.0,
+                        },
+                    },
+                    {
+                        "name": "pipe1",
+                        "device_type": "ies.device.transport_pipe",
+                        "kind": "new",
+                        "params": {"loss_rate": 0.03},
+                    },
+                ],
+                # predefined 接口不进入 connections(需求序列由来源声明提供)
+                "connections": [
+                    {
+                        "name": "c1",
+                        "from_device": "grid1",
+                        "from_port": "electricity_import",
+                        "to_device": "hp1",
+                        "to_port": "electricity_in",
+                    },
+                    {
+                        "name": "c2",
+                        "from_device": "hp1",
+                        "from_port": "heat_out",
+                        "to_device": "pipe1",
+                        "to_port": "heat_in",
+                    },
+                ],
+            },
+            "project_baseline": _export_baseline(),
+        }
+        result = validate_project_export(
+            content,
+            finance=_EXPORT_FINANCE,
+            finance_binding={
+                "instances": {
+                    "grid1": {"type": "none"},
+                    "hp1": _HP_BINDING,
+                    "load1": {"type": "none"},
+                    "pipe1": {"type": "none"},
+                }
+            },
+            tariff_bindings=_EXPORT_TARIFF,
+            planning=_EXPORT_PLANNING,
+            finance_snapshots=_finance_snapshots(),
+        )
+        assert result.ok, [(d.code, d.params) for d in result.diagnostics if d.blocking]
+        artifact = result.artifact
+        assert artifact is not None
+        # 显式管道进入设备依赖锁(与手写样例的依赖锁断言同口径)
+        assert artifact.receipt.dependencies["devices"].get("ies.device.transport_pipe") == "2.0.0"
+        # 管道实例与其损耗方程进入规范文本(显式设备非隐式合成)
+        assert "pipe1" in artifact.canonical_text
+        assert "loss_rate" in artifact.canonical_text
+
+    def test_project_export_rejects_graph_id_name_fallback(self, init_registry):
+        # graph_id 不再作为装配名回退: 无显式 name 即阻断, 不静默命名。
+        content = {
+            "graph_id": 99,
+            "model": {"devices": [], "connections": []},
+            "project_baseline": _export_baseline(),
+        }
+        result = validate_project_export(content)
+        assert result.artifact is None
+        assert any(
+            d.code == "ASM-CONV-001"
+            and d.params.get("reason") == "assembly_name_missing"
+            and d.blocking
+            for d in result.diagnostics
+        )
+
     def test_project_export_rejects_missing_baseline(self, init_registry):
         # 缺失项目基线不再静默默认:阻断诊断返回
         content = {
-            "graph_id": 9,
             "name": "no_baseline",
-            "model": {"devices": [], "ports": [], "connections": []},
+            "model": {"devices": [], "connections": []},
         }
         result = validate_project_export(content)
         assert result.artifact is None
@@ -360,9 +443,8 @@ class TestProjectExport:
     def test_project_export_rejects_unknown_resolution(self, init_registry):
         # 非法分辨率(不能确定性切分一天):阻断诊断返回
         content = {
-            "graph_id": 7,
             "name": "bad_resolution",
-            "model": {"devices": [], "ports": [], "connections": []},
+            "model": {"devices": [], "connections": []},
             "project_baseline": _export_baseline(resolution="5min"),
         }
         result = validate_project_export(content)
@@ -381,9 +463,8 @@ class TestProjectExport:
             (_export_baseline(scenario_mode="multi"), "project_baseline_scenario_mode_invalid"),
         ]:
             content = {
-                "graph_id": 8,
                 "name": "bad_baseline",
-                "model": {"devices": [], "ports": [], "connections": []},
+                "model": {"devices": [], "connections": []},
                 "project_baseline": baseline,
             }
             result = validate_project_export(content)
@@ -397,19 +478,18 @@ class TestProjectExport:
         # 2.0 下 predefined 接口永不进入 connections:直接边指向需求接口
         # 时必须阻断(ASM-EDGE-011)，不静默改道、不合成管道
         content = {
-            "graph_id": 43,
             "name": "campus_pipe",
             "model": {
                 "devices": [
                     {
-                        "id": 1,
+                        "name": "grid1",
                         "device_type": "ies.device.grid_connection",
                         "kind": "existing",
                         "params": {
                         },
                     },
                     {
-                        "id": 2,
+                        "name": "hp1",
                         "device_type": "ies.device.heat_pump",
                         "kind": "new",
                         "params": {
@@ -418,7 +498,7 @@ class TestProjectExport:
                         },
                     },
                     {
-                        "id": 3,
+                        "name": "hload1",
                         "device_type": "ies.device.heat_load",
                         "kind": "existing",
                         "params": {
@@ -427,36 +507,20 @@ class TestProjectExport:
                         },
                     },
                 ],
-                "ports": [
-                    {
-                        "id": 11,
-                        "device_id": 1,
-                        "name": "electricity_import",
-                        "port_type": "electricity",
-                        "direction": "out",
-                    },
-                    {
-                        "id": 21,
-                        "device_id": 2,
-                        "name": "electricity_in",
-                        "port_type": "electricity",
-                        "direction": "in",
-                    },
-                    {
-                        "id": 22,
-                        "device_id": 2,
-                        "name": "heat_out",
-                        "port_type": "heat",
-                        "direction": "out",
-                    },
-                    {"id": 31, "device_id": 3, "name": "heat_demand", "port_type": "heat", "direction": "in"},
-                ],
                 "connections": [
-                    {"id": 101, "from_port_id": 11, "to_port_id": 21},
                     {
-                        "id": 102,
-                        "from_port_id": 22,
-                        "to_port_id": 31,
+                        "name": "c1",
+                        "from_device": "grid1",
+                        "from_port": "electricity_import",
+                        "to_device": "hp1",
+                        "to_port": "electricity_in",
+                    },
+                    {
+                        "name": "c2",
+                        "from_device": "hp1",
+                        "from_port": "heat_out",
+                        "to_device": "hload1",
+                        "to_port": "heat_demand",
                     },
                 ],
             },
@@ -467,9 +531,9 @@ class TestProjectExport:
             finance=_EXPORT_FINANCE,
             finance_binding={
                 "instances": {
-                    "d1": {"type": "none"},
-                    "d2": _HP_BINDING,
-                    "d3": {"type": "none"},
+                    "grid1": {"type": "none"},
+                    "hp1": _HP_BINDING,
+                    "hload1": {"type": "none"},
                 }
             },
             tariff_bindings=_EXPORT_TARIFF,
@@ -518,7 +582,7 @@ class TestProjectExport:
     def test_project_export_rejects_missing_name(self, init_registry):
         # 装配名必填: 缺失不再回退 legacy_export
         content = {
-            "model": {"devices": [], "ports": [], "connections": []},
+            "model": {"devices": [], "connections": []},
             "project_baseline": _export_baseline(),
         }
         result = validate_project_export(content)
@@ -529,19 +593,27 @@ class TestProjectExport:
         )
 
     def test_project_export_rejects_bad_connections(self, init_registry):
-        # 无 id / 端口不可解析一律阻断, 无静默丢弃;
+        # 无名 / 端点缺失 / 设备或接口不可解析 / 边 id 重复一律阻断, 无静默丢弃;
         # 阻断统一使用 ASM-CONV-001 并携带对应 reason
-        base_ports = [{"id": 11, "device_id": 1, "name": "p", "port_type": "electric", "direction": "out"}]
-        base_devices = [{"id": 1, "device_type": "ies.device.grid_connection", "kind": "existing", "params": {}}]
+        base_devices = [{"name": "grid1", "device_type": "ies.device.grid_connection", "kind": "existing", "params": {}}]
+        good = {
+            "name": "c1",
+            "from_device": "grid1",
+            "from_port": "electricity_import",
+            "to_device": "grid1",
+            "to_port": "electricity_export",
+        }
         cases = [
-            ({"connections": [{"from_port_id": 11, "to_port_id": 11}]}, "connection_id_missing"),
-            ({"connections": [{"id": 9, "from_port_id": 11, "to_port_id": 99}]}, "connection_port_unresolved"),
+            ({"connections": [{**good, "name": ""}]}, "connection_id_missing"),
+            ({"connections": [{**good, "from_port": ""}]}, "connection_endpoint_missing"),
+            ({"connections": [{**good, "to_device": "ghost"}]}, "connection_device_unresolved"),
+            ({"connections": [{**good, "from_port": "nope"}]}, "connection_port_unresolved"),
+            ({"connections": [good, dict(good)]}, "duplicate_connection"),
         ]
         for conn, reason in cases:
             content = {
-                "graph_id": 45,
                 "name": "bad_conn",
-                "model": {"devices": base_devices, "ports": base_ports, **conn},
+                "model": {"devices": base_devices, **conn},
                 "project_baseline": _export_baseline(),
             }
             result = validate_project_export(content)

@@ -256,29 +256,29 @@ test.describe('场景 3: 建模与连线', () => {
     // 合法连接成功: 画布出现连线
     await expect(page.locator('.react-flow__edge').first()).toBeVisible({ timeout: 10_000 })
 
-    // 3d. 服务端一致性(RR-P1-04): 连接两端必须是 YAML 真实端口
-    // (热泵 heat_out 输出 → 热负荷 heat_in 输入), 而非按类型猜出的端口
+    // 3d. 服务端一致性(RR-P1-04): 2.0 连接只表达真实端点(设备名 + YAML 真实端口名),
+    // 热泵 heat_out 输出 → 热负荷 heat_in 输入 —— 断言名称而非仅类型, 杜绝"端口猜错"
     const projectId = page.url().match(/\/projects\/(\d+)/)![1]
-    const graphResp = await page.request.get(`/api/projects/${projectId}/model`)
-    expect(graphResp.ok()).toBeTruthy()
-    const graph = (await graphResp.json()) as {
-      connections: Array<{ from_port_id: number; to_port_id: number }>
-      ports: Array<{ id: number; name: string; direction: string; port_type: string }>
+    const viewResp = await page.request.get(`/api/projects/${projectId}`)
+    expect(viewResp.ok()).toBeTruthy()
+    const view = (await viewResp.json()) as {
+      draft: { content: { model: { connections: Array<{
+        name: string
+        from_device: string
+        from_port: string
+        to_device: string
+        to_port: string
+      }> } } }
     }
-    expect(graph.connections.length).toBeGreaterThan(0)
-    const conn = graph.connections[graph.connections.length - 1]
-    const fromPort = graph.ports.find((p) => p.id === conn.from_port_id)
-    const toPort = graph.ports.find((p) => p.id === conn.to_port_id)
-    expect(fromPort).toBeTruthy()
-    expect(toPort).toBeTruthy()
-    // 真实端口名来自设备 YAML 目录: 热泵输出 = heat_out(thermal,out),
-    // 热负荷输入 = heat_in(thermal,in) —— 断言名称而非仅类型, 杜绝"端口猜错"
-    expect(fromPort!.name).toBe('heat_out')
-    expect(fromPort!.direction).toBe('out')
-    expect(fromPort!.port_type).toBe('thermal')
-    expect(toPort!.name).toBe('heat_in')
-    expect(toPort!.direction).toBe('in')
-    expect(toPort!.port_type).toBe('thermal')
+    const connections = view.draft.content.model.connections
+    expect(connections.length).toBeGreaterThan(0)
+    const conn = connections[connections.length - 1]
+    expect(conn.from_port).toBe('heat_out')
+    expect(conn.to_port).toBe('heat_in')
+    expect(typeof conn.from_device).toBe('string')
+    expect(conn.from_device.length).toBeGreaterThan(0)
+    expect(typeof conn.to_device).toBe('string')
+    expect(conn.to_device.length).toBeGreaterThan(0)
 
     session.assertNoErrors()
     await context.close()

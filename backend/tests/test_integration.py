@@ -209,36 +209,53 @@ def _create_project(client: TestClient, user_id: int, name: str = "集成测试�
 
 
 def _add_device(
-    client: TestClient, user_id: int, project_id: int, device_type: str, name: str, params: dict
-) -> dict[str, Any]:
-    """创建设备并返回 {device, ports}。"""
-    resp = client.post(
-        f"/api/projects/{project_id}/model/devices",
-        json={"device_type": device_type, "name": name, "params": params, "position": {"x": 1.0, "y": 1.0}},
+    client: TestClient, user_id: int, project_id: int, revision: int,
+    device_type: str, name: str, params: dict,
+) -> int:
+    """经草稿语义命令声明 2.0 名键设备实例(设备名即装配引用)，返回新修订号。"""
+    resp = client.put(
+        f"/api/projects/{project_id}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [
+                {
+                    "id": f"add-{name}", "unit": "model", "type": "model.upsert_device",
+                    "payload": {
+                        "name": name, "device_type": device_type, "kind": "new",
+                        "params": params, "position": {"x": 1.0, "y": 1.0},
+                    },
+                }
+            ],
+        },
         headers=_h(client, user_id),
     )
-    assert resp.status_code == 201, resp.text
-    return resp.json()
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
 
 
 def _add_connection(
-    client: TestClient, user_id: int, project_id: int, from_port_id: int, to_port_id: int
-) -> None:
-    """创建连接(源端口 → 汇端口)。"""
-    resp = client.post(
-        f"/api/projects/{project_id}/model/connections",
-        json={"from_port_id": from_port_id, "to_port_id": to_port_id, "attrs": {}},
+    client: TestClient, user_id: int, project_id: int, revision: int, name: str,
+    from_device: str, from_port: str, to_device: str, to_port: str,
+) -> int:
+    """经草稿语义命令创建 2.0 名键连接(端口名为真实 interface ID)，返回新修订号。"""
+    resp = client.put(
+        f"/api/projects/{project_id}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [
+                {
+                    "id": f"conn-{name}", "unit": "model", "type": "model.upsert_connection",
+                    "payload": {
+                        "name": name, "from_device": from_device, "from_port": from_port,
+                        "to_device": to_device, "to_port": to_port,
+                    },
+                }
+            ],
+        },
         headers=_h(client, user_id),
     )
-    assert resp.status_code == 201, resp.text
-
-
-def _port(entry: dict[str, Any], name: str) -> int:
-    """按 2.0 端口名取设备端口 id(每设备内端口名唯一)。"""
-    for p in entry["ports"]:
-        if p["name"] == name:
-            return p["id"]
-    raise AssertionError(f"设备缺少 {name} 端口: {entry}")
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
 
 
 def _create_sample_dataset(client: TestClient, user_id: int, project_id: int) -> tuple[int, int]:
@@ -361,22 +378,23 @@ def _declare_assembly_sections(
     return resp.json()["revision"]
 
 
-def _finance_instances(devices: dict[str, Any]) -> dict[str, Any]:
-    """设备行 id → 装配实例引用(d{id})全覆盖, 显式声明无成本(type:none)。"""
-    return {
-        f"d{entry['device']['id']}": {"type": "none"}
-        for entry in devices.values()
-    }
+def _finance_instances(names: list[str]) -> dict[str, Any]:
+    """装配实例引用(设备名 slug)全覆盖, 显式声明无成本(type:none)。"""
+    return {name: {"type": "none"} for name in names}
+
+
+#: 全链路设备名(即装配实例引用)
+_ALL_DEVICES = ["grid", "pv", "battery", "hp", "boiler", "chiller", "eload", "hload", "cload"]
 
 
 #: 设备预定义接口的显式常量边界(机械测试用；真实项目绑定实测数据文件)。
 #: 2.0 契约要求每个 predefined 接口必须声明来源；constant 为一等来源模式，
 #: 经与 GUI 同构的 model.upsert_device 起草命令显式声明(非静默默认)。
 CONSTANT_BINDINGS = {
-    "屋顶光伏": {"solar_irradiance": 800.0, "ambient_temperature": 25.0},
-    "电负荷": {"electricity_demand": 800.0},
-    "热负荷": {"heat_demand": 800.0},
-    "冷负荷": {"cool_demand": 800.0},
+    "pv": {"solar_irradiance": 800.0, "ambient_temperature": 25.0},
+    "eload": {"electricity_demand": 800.0},
+    "hload": {"heat_demand": 800.0},
+    "cload": {"cool_demand": 800.0},
 }
 
 
@@ -484,70 +502,77 @@ def _prepare_project(
     """全链路准备: 项目 + 7 类设备 + 连接 + 样例数据集绑定 + 配置保存 + 基准确认。"""
     pid = _create_project(client, user_id)
 
-    devices: dict[str, Any] = {}
-    devices["grid"] = _add_device(
-        client, user_id, pid, D_GRID, "市电电网",
+    # 设备名即装配实例引用(2.0 名键事实); 端口名为注册表真实 interface ID
+    revision = 1
+    revision = _add_device(
+        client, user_id, pid, revision, D_GRID, "grid",
         {"max_import_power_kw": 10000, "max_export_power_kw": 0},
     )
-    devices["pv"] = _add_device(client, user_id, pid, D_PV, "屋顶光伏", {"rated_capacity_kwp": 500})
-    devices["battery"] = _add_device(
-        client, user_id, pid, D_BATTERY, "储能电池",
+    revision = _add_device(client, user_id, pid, revision, D_PV, "pv", {"rated_capacity_kwp": 500})
+    revision = _add_device(
+        client, user_id, pid, revision, D_BATTERY, "battery",
         {"capacity_kwh": 200, "rated_power_kw": 100, "initial_soc": 0.5,
          "min_soc": 0.1, "max_soc": 0.9, "charge_efficiency": 0.95, "discharge_efficiency": 0.95},
     )
-    devices["hp"] = _add_device(
-        client, user_id, pid, D_HP, "热泵",
+    revision = _add_device(
+        client, user_id, pid, revision, D_HP, "hp",
         {"rated_heat_kw": 1000, "cop": 3.0},
     )
-    devices["boiler"] = _add_device(
-        client, user_id, pid, D_BOILER, "燃气锅炉",
+    revision = _add_device(
+        client, user_id, pid, revision, D_BOILER, "boiler",
         {"rated_heat_kw": 1000, "thermal_efficiency": 0.92},
     )
-    devices["chiller"] = _add_device(
-        client, user_id, pid, D_CHILLER, "电制冷机",
+    revision = _add_device(
+        client, user_id, pid, revision, D_CHILLER, "chiller",
         {"rated_cooling_kw": 1000, "cop": 4.0},
     )
-    devices["eload"] = _add_device(
-        client, user_id, pid, D_ELOAD, "电负荷", {"peak_power_kw": 800}
+    revision = _add_device(
+        client, user_id, pid, revision, D_ELOAD, "eload", {"peak_power_kw": 800}
     )
-    devices["hload"] = _add_device(
-        client, user_id, pid, D_HLOAD, "热负荷", {"peak_heat_kw": 800}
+    revision = _add_device(
+        client, user_id, pid, revision, D_HLOAD, "hload", {"peak_heat_kw": 800}
     )
-    devices["cload"] = _add_device(
-        client, user_id, pid, D_CLOAD, "冷负荷", {"peak_cooling_kw": 800}
+    revision = _add_device(
+        client, user_id, pid, revision, D_CLOAD, "cload", {"peak_cooling_kw": 800}
     )
 
-    # 连接(2.0 语义: 只有 out/in/bidirectional 端口可进入 connections;
+    # 连接(2.0 语义: 只有 out/in/bidirectional 接口可进入 connections;
     # predefined 为数据入口永不连边, blind 不得连接。负荷需求经数据绑定,
-    # 不经图边；光伏余电经电网出口消纳，与有效样例 campus 同构；
-    # 2.0 热泵无制冷接口)
-    grid_e = _port(devices["grid"], "electricity_import")
-    grid_export = _port(devices["grid"], "electricity_export")
-    pv_e = _port(devices["pv"], "electric_out")
-    bat_e = _port(devices["battery"], "electricity")
-    hp_e = _port(devices["hp"], "electricity_in")
-    ch_e = _port(devices["chiller"], "electricity_in")
-    _add_connection(client, user_id, pid, grid_e, bat_e)
-    _add_connection(client, user_id, pid, grid_e, hp_e)
-    _add_connection(client, user_id, pid, grid_e, ch_e)
-    _add_connection(client, user_id, pid, pv_e, grid_export)
+    # 不经图边；光伏余电经电网出口消纳，与有效样例 campus 同构)
+    revision = _add_connection(
+        client, user_id, pid, revision, "c1", "grid", "electricity_import", "battery", "electricity",
+    )
+    revision = _add_connection(
+        client, user_id, pid, revision, "c2", "grid", "electricity_import", "hp", "electricity_in",
+    )
+    revision = _add_connection(
+        client, user_id, pid, revision, "c3", "grid", "electricity_import", "chiller", "electricity_in",
+    )
+    revision = _add_connection(
+        client, user_id, pid, revision, "c4", "pv", "electric_out", "grid", "electricity_export",
+    )
 
-    # 系统图断言: 设备 9 台(含 3 负荷), 连接 4 条(负荷经数据供给,不连边)
-    resp = client.get(f"/api/projects/{pid}/model", headers=_h(client, user_id))
-    assert resp.status_code == 200, resp.text
-    graph = resp.json()
-    assert len(graph["devices"]) == 9
-    assert len(graph["connections"]) == 4
+    # 草稿内容断言: 设备 9 台(含 3 负荷), 连接 4 条(负荷经数据供给,不连边)
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user_id)).json()
+    model = view["draft"]["content"]["model"]
+    assert len(model["devices"]) == 9
+    assert len(model["connections"]) == 4
 
-    # 模型校验: 无 error/blocking(拓扑完整)
-    resp = client.get(f"/api/projects/{pid}/model/validate", headers=_h(client, user_id))
+    # 模型校验: 模型/拓扑/参数类无 error/blocking(拓扑完整; 数据/财务门禁
+    # 此时尚未就绪，不在断言范围)
+    resp = client.post(f"/api/projects/{pid}/validation/run", headers=_h(client, user_id))
     assert resp.status_code == 200, resp.text
-    diags = resp.json()["diagnostics"]
-    assert not any(d["severity"] in ("error", "blocking") for d in diags), diags
+    diags = resp.json()["report"]["diagnostics"]
+    model_bad = [
+        d for d in diags
+        if d["severity"] in ("error", "blocking")
+        and (d["code"].startswith("VALID-MODEL") or d["code"].startswith("PARAM") or d["code"].startswith("CONN"))
+    ]
+    assert not model_bad, model_bad
 
     # 数据集: 内置样例(1h, 8760 行) + 绑定
     dataset_id, version_id = _create_sample_dataset(client, user_id, pid)
-    revision = _bind_dataset(client, user_id, pid, 1, version_id)
+    revision = _bind_dataset(client, user_id, pid, revision, version_id)
 
     # 保存配置(乐观锁修订, 不递增草稿修订) + 显式财务引用 + 显式计算声明 +
     # 显式装配两节 + 最小规划修订(储能容量单变量) + 财务基准确认
@@ -556,7 +581,7 @@ def _prepare_project(
 
     config_body = _save_config(client, user_id, pid, revision)
     _declare_finance(db, user_id, pid)
-    bat_ref = f"d{devices['battery']['device']['id']}"
+    bat_ref = "battery"
     config_cases.save_planning_config(
         db,
         pid,
@@ -579,7 +604,7 @@ def _prepare_project(
     revision = _set_explicit_calc(client, user_id, pid, revision)
     revision = _declare_assembly_sections(
         client, user_id, pid, revision,
-        instances=_finance_instances(devices),
+        instances=_finance_instances(_ALL_DEVICES),
     )
     revision = _declare_constant_bindings(client, user_id, pid, revision)
     if confirm_baseline:

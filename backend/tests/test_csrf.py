@@ -33,6 +33,8 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.db import Base  # noqa: E402
+from iesplan.identity.persistence import User as _UserForDDL  # noqa: E402,F401
+from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
 from iesplan.main import create_app  # noqa: E402
 from iesplan.application import identity  # noqa: E402
 
@@ -263,7 +265,8 @@ def test_get_requests_not_protected(client: TestClient, db: Session) -> None:
     token = _login(client, "csrf_get")
     pid = _create_project(client, token, "GET 项目")
 
-    resp = client.get(f"/api/projects/{pid}/model", headers={"Origin": EVIL_ORIGIN})
+    # 2.0 建模面读经项目视图(含草稿内容)
+    resp = client.get(f"/api/projects/{pid}", headers={"Origin": EVIL_ORIGIN})
     assert resp.status_code == 200, resp.text
 
 

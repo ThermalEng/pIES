@@ -135,11 +135,11 @@ EXPLICIT_CALC_PATCH = {
 }
 
 
-def _set_explicit_calc(client: TestClient, pid: int, user) -> int:
-    """经 config.patch 显式声明计算装配字段(新建项目草稿修订号为 1), 返回新修订号。"""
+def _set_explicit_calc(client: TestClient, pid: int, user, revision: int) -> int:
+    """经 config.patch 显式声明计算装配字段, 返回新修订号。"""
     resp = client.put(
         f"/api/projects/{pid}/draft",
-        json={"expected_revision": 1, "commands": [{
+        json={"expected_revision": revision, "commands": [{
             "id": "c-calc", "unit": "config", "type": "config.patch",
             "payload": EXPLICIT_CALC_PATCH,
         }]},
@@ -210,9 +210,9 @@ def _prepare_project(client: TestClient, db: Session, user, name: str = "结果�
     _declare_finance(db, user, pid)
     from assembly_fixture import declare_compute_device, save_compute_planning
 
-    device_ref = declare_compute_device(client, pid, _h(client, user))
+    device_ref, revision = declare_compute_device(client, pid, _h(client, user))
     save_compute_planning(db, pid, user.id, device_ref)
-    revision = _set_explicit_calc(client, pid, user)
+    revision = _set_explicit_calc(client, pid, user, revision)
     _declare_assembly_sections(client, pid, user, revision, {device_ref: {"type": "none"}})
     resp = client.post(
         f"/api/projects/{pid}/versions",

@@ -1,7 +1,7 @@
 """校验用例族(application/validations)。
 
-U07 项目校验流程（完整预检与财务基准确认；旧 services.validation 已删除，
-载体/端口映射取值与 application.models 唯一实现一致）。
+U07 项目校验流程（完整预检与财务基准确认；直接消费草稿内容 2.0 名键设备，
+载体/端口映射由装配构造器按设备名派生）。
 """
 
 from __future__ import annotations

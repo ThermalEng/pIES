@@ -184,7 +184,7 @@ def _declare_explicit_calc(
     config_cases.set_project_finance_profile(
         db, pid, PROFILE_PAYLOAD["profile"]["id"], user_id
     )
-    device_ref = declare_compute_device(client, pid, _bearer(token))
+    device_ref, revision = declare_compute_device(client, pid, _bearer(token))
     save_compute_planning(db, pid, user_id, device_ref)
     # 无意图计算任务的装配声明占位(机械测试用；真实项目声明真实目标/绑定)。
     resp = client.put(
@@ -207,13 +207,33 @@ def _declare_explicit_calc(
 
 
 def _add_device(client: TestClient, token: str, pid: int) -> None:
-    """添加一台光伏设备(使默认配置产生可校验的容量变量)。"""
-    resp = client.post(
-        f"/api/projects/{pid}/model/devices",
-        json={"device_type": "ies.device.pv", "name": "PV1", "params": {}},
+    """添加一台光伏设备(使默认配置产生可校验的容量变量)。
+
+    2.0 唯一建模面: 经草稿语义命令写入名键设备。
+    """
+    view = client.get(f"/api/projects/{pid}", headers=_bearer(token)).json()
+    revision = view["draft"]["revision"]
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [
+                {
+                    "id": "proto-add-pv1",
+                    "unit": "model",
+                    "type": "model.upsert_device",
+                    "payload": {
+                        "name": "PV1",
+                        "device_type": "ies.device.pv",
+                        "kind": "new",
+                        "params": {},
+                    },
+                }
+            ],
+        },
         headers=_bearer(token),
     )
-    assert resp.status_code == 201, resp.text
+    assert resp.status_code == 200, resp.text
 
 
 def _make_small_csv(n: int = 10) -> bytes:
@@ -282,9 +302,10 @@ def test_error_envelope_shape_all_error_paths(
     bad_cfg["variables"] = [
         {"name": "hp_cap", "type": "fuzzy", "min": 0.0, "max": 1000.0, "initial": 0.0}
     ]
+    draft_rev = client.get(f"/api/projects/{pid}", headers=_bearer(owner_tok)).json()["draft"]["revision"]
     resp = client.put(
         f"/api/projects/{pid}/config",
-        json={"config": bad_cfg, "expected_revision": 1},
+        json={"config": bad_cfg, "expected_revision": draft_rev},
         headers=_bearer(owner_tok),
     )
     err = assert_error_envelope(resp, 422, code="CONFIG-VAL-001")
@@ -459,6 +480,7 @@ def test_success_wrappers_config_validation_model_domain(client: TestClient, db:
     差异记录: 任务书期望 config GET → {"config", "meta", "version", "status",
     "diagnostics"}; 实际 GET 为 {"config", "meta", "version", "status",
     "updated_at"}(diagnostics 只在 PUT 保存成功响应中返回)。以实际为准锁定。
+    2.0 建模面: 模型读经项目视图(含草稿内容), 校验读经校验报告。
     """
     user = make_user(db, "wrap_cfg")
     tok = _login(client, "wrap_cfg")
@@ -470,9 +492,10 @@ def test_success_wrappers_config_validation_model_domain(client: TestClient, db:
         {"config", "meta", "version", "status", "updated_at"},
     )
     cfg = _default_config(client, tok, pid)
+    draft_rev = client.get(f"/api/projects/{pid}", headers=_bearer(tok)).json()["draft"]["revision"]
     resp = client.put(
         f"/api/projects/{pid}/config",
-        json={"config": cfg, "expected_revision": 1},
+        json={"config": cfg, "expected_revision": draft_rev},
         headers=_bearer(tok),
     )
     _assert_wrapper(resp, {"config", "meta", "version", "status", "diagnostics"})
@@ -487,8 +510,8 @@ def test_success_wrappers_config_validation_model_domain(client: TestClient, db:
     _assert_wrapper(client.post(f"/api/projects/{pid}/validation/run", headers=_bearer(tok)), {"report", "stored"})
     _assert_wrapper(client.get("/api/registry/device-types"), {"items"})
     _assert_wrapper(client.get("/api/registry/algorithms"), {"algorithms"})
-    _assert_wrapper(client.get(f"/api/projects/{pid}/model", headers=_bearer(tok)), {"has_graph", "graph_id", "name", "devices", "ports", "connections", "layout"})
-    _assert_wrapper(client.get(f"/api/projects/{pid}/model/validate", headers=_bearer(tok)), {"diagnostics"})
+    _assert_wrapper(client.get(f"/api/projects/{pid}", headers=_bearer(tok)), {"project", "draft", "versions", "my_role"})
+    _assert_wrapper(client.get(f"/api/projects/{pid}/validation", headers=_bearer(tok)), {"report", "stored"})
 
 
 def test_success_wrappers_datasets_auth_admin_exports_domain(client: TestClient, db: Session) -> None:

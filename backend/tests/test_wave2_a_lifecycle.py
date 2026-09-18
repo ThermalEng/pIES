@@ -133,7 +133,7 @@ def test_update_draft_idempotent_and_conflict(db_session: Session) -> None:
         "project_id": pid,
         "unit": "model",
         "type": "model.upsert_device",
-        "payload": {"name": "pv1", "kind": "new"},
+        "payload": {"name": "pv1", "device_type": "ies.device.pv", "kind": "new"},
     }
     first = lifecycle_uc.update_draft(db_session, owner, pid, [cmd], 1)
     assert first["revision"] == 2

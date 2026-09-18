@@ -63,9 +63,11 @@ def build_assembly_doc_from_content(
     """项目内容 → ies.assembly 2.0.0 文档(无静默默认)。
 
     输入结构(2.0 内容字段):
-      content = {"model": {"devices": [...], "ports": [...], "connections": [...]},
+      content = {"model": {"devices": [...], "connections": [...]},
                  "project_baseline": {...}, "name": ...}
-      或 content 直接含 devices/ports/connections(扁平图)。
+      设备只收名键条目 {name, device_type, kind, params};连接为名键条目
+      {name, from_device, from_port, to_device, to_port}, 端口名即真实
+      interface ID。无 model 节、无 devices 表即阻断，不读扁平内容。
 
     字段映射:
     - assembly.id/name: 内容 name(必填, 缺失阻断; id 为其 slug);
@@ -76,30 +78,28 @@ def build_assembly_doc_from_content(
       asset_origin: 内容 kind(existing/new, 缺失/非法阻断),
       properties: {name: {value, unit(以注册 descriptor 单位为准)}},
       predefined_interfaces: {iface: 来源声明}};
-      设备类型只消费明确 2.0 输入: definition.id 优先, 否则 device_type
-      必须本身就是裸稳定 ID(无 params.type_detail 回退);标量参数若命中
-      predefined 接口名则为 constant 绑定，命中 property 名则为属性覆盖，
-      其余原样透传由校验器判未声明；数据序列来源由独立声明入口提供，
-      本构造器不做数据集列映射；
-    - connections: 每个图连接必须有 id 且端口可解析, 否则阻断;
-      只映射显式 from/to 端点引用，不解释、不合成、不补绑定。
+      设备类型只消费 device_type 本身(必须就是裸稳定 ID, 无 definition.id
+      与 params.type_detail 回退);标量参数若命中 predefined 接口名则为
+      constant 绑定，命中 property 名则为属性覆盖，其余原样透传由校验器
+      判未声明(下划线键与 dict 值不静默丢弃, 同样透传待判);数据序列来源
+      由独立声明入口提供，本构造器不做数据集列映射;
+    - connections: 2.0 名键形态, 每个连接必须有 name 且 from_device/
+      from_port/to_device/to_port 显式可解析(端口名即真实 interface ID),
+      否则阻断; 只映射显式端点引用，不解释、不合成、不补绑定。
     - finance/finance_binding/tariff_bindings/planning: 调用方显式提供,
       原样透传进文档(缺席则结构阶段按节缺失阻断)。
 
     返回 (doc, diagnostics)。任一阻断错误 → doc=None(不进入校验器)。
     """
     diags: list[Diagnostic] = []
-    model_part = content.get("model") if isinstance(content.get("model"), Mapping) else content
+    model_part = content.get("model")
     devices_raw = (model_part.get("devices") or []) if isinstance(model_part, Mapping) else []
-    ports_raw = (model_part.get("ports") or []) if isinstance(model_part, Mapping) else []
     conns_raw = (model_part.get("connections") or []) if isinstance(model_part, Mapping) else []
 
-    graph_id = content.get("graph_id")
+    # 装配名必须由调用方显式提供（旧 graph_id 回退已删除，无静默命名）。
     name_raw = content.get("name")
     if isinstance(name_raw, str) and name_raw:
         name = name_raw
-    elif graph_id:
-        name = f"graph_{graph_id}"
     else:
         diags.append(
             make_diag(
@@ -191,8 +191,15 @@ def build_assembly_doc_from_content(
 
     # 2) 设备实例(2.0 纯技术形态)
     refs = _device_refs(devices_raw)
-    device_ref_of = {d.get("id"): ref for d, ref in zip(devices_raw, refs)}
-    port_index = {p.get("id"): p for p in ports_raw}
+    name_ref_of: dict[str, str] = {}
+    name_type_of: dict[str, str] = {}
+    for d, ref in zip(devices_raw, refs):
+        if not isinstance(d, Mapping):
+            continue
+        name = d.get("name")
+        if isinstance(name, str) and name and name not in name_ref_of:
+            name_ref_of[name] = ref
+            name_type_of[name] = _resolve_type_id(d)
     devices_out: dict[str, dict] = {}
     seen_refs: set[str] = set()
     for d, dev_id in sorted(zip(devices_raw, refs), key=lambda t: t[1]):
@@ -226,13 +233,15 @@ def build_assembly_doc_from_content(
             continue
         devices_out[dev_id] = instance
 
-    # 4) 连接(只映射显式 from/to 端点引用);
-    #    边 id 统一加 e 前缀,满足新格式局部 ID(lower_snake)约束;
-    #    无 id / 端口不可解析一律阻断(无静默丢弃)
+    # 4) 连接(2.0 名键形态: from_device/from_port/to_device/to_port 显式端点,
+    #    端口名即设备描述的真实 interface ID);
+    #    边 id 由连接 name 确定性派生(slug),满足新格式局部 ID(lower_snake)约束;
+    #    端点缺失 / 设备或接口不可解析 / 边 id 重复一律阻断(无静默丢弃)
     connections_out: dict[str, dict] = {}
-    for c in sorted(conns_raw, key=lambda x: str(x.get("id") or "")):
-        raw_id = str(c.get("id") or "")
-        if not raw_id:
+    for c in sorted(conns_raw, key=lambda x: str(x.get("name") or "")):
+        raw_name = c.get("name") if isinstance(c, Mapping) else None
+        edge_id = _slugify_id(raw_name) if isinstance(raw_name, str) else ""
+        if not edge_id:
             diags.append(
                 make_diag(
                     ASM_CONV_UNMAPPABLE,
@@ -243,23 +252,82 @@ def build_assembly_doc_from_content(
                 )
             )
             continue
-        edge_id = f"e{raw_id}"
-        from_p = port_index.get(c.get("from_port_id"))
-        to_p = port_index.get(c.get("to_port_id"))
-        if from_p is None or to_p is None:
+        ends = (
+            c.get("from_device"),
+            c.get("from_port"),
+            c.get("to_device"),
+            c.get("to_port"),
+        )
+        if not all(isinstance(e, str) and e for e in ends):
             diags.append(
                 make_diag(
                     ASM_CONV_UNMAPPABLE,
                     severity="error",
                     blocking=True,
-                    params={"reason": "connection_port_unresolved", "connection": raw_id},
-                    location={"object_type": "connection", "object_id": raw_id},
+                    params={"reason": "connection_endpoint_missing", "connection": raw_name},
+                    location={"object_type": "connection", "object_id": edge_id},
                 )
             )
             continue
-        from_ref = f"{device_ref_of.get(from_p.get('device_id'), '?')}.{from_p.get('name')}"
-        to_ref = f"{device_ref_of.get(to_p.get('device_id'), '?')}.{to_p.get('name')}"
-        connections_out[edge_id] = {"from": from_ref, "to": to_ref}
+        from_dev, from_port, to_dev, to_port = ends
+        from_ref_base = name_ref_of.get(from_dev)
+        to_ref_base = name_ref_of.get(to_dev)
+        if from_ref_base is None or to_ref_base is None:
+            diags.append(
+                make_diag(
+                    ASM_CONV_UNMAPPABLE,
+                    severity="error",
+                    blocking=True,
+                    params={
+                        "reason": "connection_device_unresolved",
+                        "connection": raw_name,
+                        "from_device": from_dev,
+                        "to_device": to_dev,
+                    },
+                    location={"object_type": "connection", "object_id": edge_id},
+                )
+            )
+            continue
+        bad: tuple[str, str, str] | None = None
+        for side, dev, port in (("from", from_dev, from_port), ("to", to_dev, to_port)):
+            type_id = name_type_of[dev]
+            descriptor = _descriptor_of(type_id) if type_id else None
+            if descriptor is not None and descriptor.interfaces.get(port) is None:
+                bad = (side, dev, port)
+                break
+        if bad is not None:
+            side, dev, port = bad
+            diags.append(
+                make_diag(
+                    ASM_CONV_UNMAPPABLE,
+                    severity="error",
+                    blocking=True,
+                    params={
+                        "reason": "connection_port_unresolved",
+                        "connection": raw_name,
+                        "side": side,
+                        "device": dev,
+                        "port": port,
+                    },
+                    location={"object_type": "connection", "object_id": edge_id},
+                )
+            )
+            continue
+        if edge_id in connections_out:
+            diags.append(
+                make_diag(
+                    ASM_CONV_UNMAPPABLE,
+                    severity="error",
+                    blocking=True,
+                    params={"reason": "duplicate_connection", "connection": raw_name},
+                    location={"object_type": "connection", "object_id": edge_id},
+                )
+            )
+            continue
+        connections_out[edge_id] = {
+            "from": f"{from_ref_base}.{from_port}",
+            "to": f"{to_ref_base}.{to_port}",
+        }
 
     # 5) outputs(派生为空列表;后续 GUI 入口可补充)
     outputs_out = {"series": [], "metrics": []}
@@ -313,32 +381,23 @@ def build_assembly_doc_from_content(
 
 
 def _resolve_type_id(device: dict) -> str:
-    """2.0 设备类型: definition.id 优先, 否则 device_type 本身必须为裸稳定 ID。
+    """2.0 设备类型即 device_type 本身(必须为裸稳定 ID)。
 
-    无 params.type_detail 回退；未知值原样返回，由校验器判未注册。
+    无 definition.id 与 params.type_detail 回退；未知值原样返回，
+    由校验器判未注册。
     """
-    definition = device.get("definition")
-    if isinstance(definition, Mapping):
-        raw = definition.get("id")
-        if isinstance(raw, str) and raw:
-            return raw
     return str(device.get("device_type", ""))
 
 
 def _device_refs(devices: list) -> list[str]:
     """实例引用(与内容一一对应，确定性、唯一、合法本地 id)。
 
-    数字 id → ``d{id}``；冻结前名键设备(id 缺席)用名称 slug；名称无
-    可用字符时按排序位置回退 ``dx{n}``。名称是 upsert 唯一键，slug 对
-    同一内容稳定；回退仅影响无法 slug 化的名称。重复引用由调用方阻断，
-    不静默丢弃、不合并。
+    名键设备用名称 slug；名称无可用字符时按排序位置回退 ``dx{n}``。
+    名称是 upsert 唯一键，slug 对同一内容稳定；回退仅影响无法 slug
+    化的名称。不读数字 id。重复引用由调用方阻断，不静默丢弃、不合并。
     """
     refs: list[str] = []
     for position, device in enumerate(devices):
-        raw = device.get("id") if isinstance(device, dict) else None
-        if raw is not None:
-            refs.append(f"d{raw}")
-            continue
         name = device.get("name") if isinstance(device, dict) else None
         slug = _slugify_id(name) if isinstance(name, str) else ""
         refs.append(slug if slug else f"dx{position}")
@@ -400,11 +459,8 @@ def _build_instance(
     properties_out: dict[str, dict] = {}
     predefined_out: dict[str, dict] = {}
     params = device.get("params") or {}
+    # 下划线键与 dict 值不静默丢弃: 原样透传，由校验器判未声明。
     for key, value in params.items():
-        if key.startswith("_"):
-            continue
-        if isinstance(value, dict):
-            continue
         if key in predefined_ids and isinstance(value, (int, float)) and not isinstance(value, bool):
             predefined_out[key] = {"mode": "constant", "value": value}
         elif key in property_ids:
