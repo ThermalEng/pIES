@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,6 +17,21 @@ from iesplan.computation.protocols import (
     freeze_json_value,
     thaw_json_value,
 )
+
+_ASSEMBLY_SCHEMA_VERSION_PATTERN = re.compile(r"^\d+\.\d+(\.\d+)?$")
+
+
+def _check_assembly_schema_version(value: object) -> str:
+    """校验支持的装配 schema 版本（手册：MAJOR/MINOR）。
+
+    接受裸版本（``1.0``，可带 patch）或完整精确引用
+    （``<稳定ID>@<语义化版本>``）；其他形态一律拒绝。
+    """
+    if isinstance(value, str) and "@" in value:
+        return check_provider_ref(value, "assembly_schema_version")
+    if isinstance(value, str) and _ASSEMBLY_SCHEMA_VERSION_PATTERN.match(value):
+        return value
+    raise ValueError(f"assembly_schema_version 非法: {value!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +46,9 @@ class GeneratorDescriptor:
     默认语义由 schema 内各条目自带；``resource_limits`` 声明硬资源上界；
     ``unit_system`` 固定内部单位体系；``media_types`` 声明生成的输入
     媒体类型；``seed_semantics`` 说明种子语义。映射字段在构造时递归冻结。
+
+    ``assembly_schema_version``、``solvers``、``result_adapter`` 必须为
+    非空有效引用/版本：缺失即发布无效 descriptor，当场拒绝。
     """
 
     generator_id: str
@@ -50,12 +69,16 @@ class GeneratorDescriptor:
 
     def __post_init__(self) -> None:
         check_provider_ref(f"{self.generator_id}@{self.version}", "generator")
-        if not isinstance(self.assembly_schema_version, str):
-            raise TypeError("assembly_schema_version 须为字符串")
+        _check_assembly_schema_version(self.assembly_schema_version)
+        solvers = tuple(self.solvers)
+        if not solvers:
+            raise ValueError("solvers 不得为空：descriptor 必须声明兼容求解器")
+        for solver_ref in solvers:
+            check_provider_ref(solver_ref, "solvers")
+        object.__setattr__(self, "solvers", solvers)
         for attr in (
             "modes",
             "capabilities",
-            "solvers",
             "executors",
             "equation_contracts",
             "media_types",
@@ -65,8 +88,11 @@ class GeneratorDescriptor:
                 if not isinstance(name, str) or not name:
                     raise ValueError(f"{attr} 条目须为非空字符串: {name!r}")
             object.__setattr__(self, attr, items)
-        if self.result_adapter:
-            check_provider_ref(self.result_adapter, "result_adapter")
+        if not self.result_adapter:
+            raise ValueError(
+                "result_adapter 不得为空：descriptor 必须声明配套结果适配器"
+            )
+        check_provider_ref(self.result_adapter, "result_adapter")
         if not isinstance(self.deterministic, bool):
             raise TypeError("deterministic 须为布尔值")
         for attr in ("options_schema", "resource_limits"):

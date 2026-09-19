@@ -39,6 +39,8 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("unit_system", "SI")
     kwargs.setdefault("media_types", ("application/mps",))
     kwargs.setdefault("seed_semantics", "options.seed 为空时使用固定种子 0")
+    kwargs.setdefault("assembly_schema_version", "1.0")
+    kwargs.setdefault("result_adapter", "acme.result-adapter@1.0.0")
     return GeneratorDescriptor(**kwargs)
 
 
@@ -133,6 +135,28 @@ def test_descriptor_rejects_missing_capability_fields() -> None:
         _descriptor(resource_limits={"": 1})
 
 
+def test_descriptor_rejects_missing_required_trio() -> None:
+    """装配契约/求解器/结果适配器缺失即无效 descriptor，当场拒绝。"""
+    with pytest.raises(ValueError, match="assembly_schema_version"):
+        _descriptor(assembly_schema_version="")
+    with pytest.raises(ValueError, match="assembly_schema_version"):
+        _descriptor(assembly_schema_version="1")
+    with pytest.raises(ValueError, match="assembly_schema_version"):
+        _descriptor(assembly_schema_version="v1.0")
+    with pytest.raises(ValueError, match="solvers"):
+        _descriptor(solvers=())
+    with pytest.raises(ValueError, match="solvers"):
+        _descriptor(solvers=("not-a-ref",))
+    with pytest.raises(ValueError, match="result_adapter"):
+        _descriptor(result_adapter="")
+    valid = _descriptor(
+        assembly_schema_version="ies.assembly@1.0.0",
+        solvers=(SOLVER, "other.solver@2.1.0"),
+    )
+    assert valid.assembly_schema_version == "ies.assembly@1.0.0"
+    assert valid.supports_solver("other.solver@2.1.0") is True
+
+
 def test_build_registry_is_atomic() -> None:
     """重复引用/非候选即整体拒绝；空候选发布空表。"""
     with pytest.raises(ValueError, match="重复注册"):
@@ -167,7 +191,7 @@ def test_resolve_checks_solver_compatibility() -> None:
 def test_snapshot_is_deterministic_and_dump_is_copy() -> None:
     """快照按稳定 ID 排序；to_dict 为独立副本。"""
     registry = build_registry([
-        _descriptor(generator_id="zeta.generator", solvers=()),
+        _descriptor(generator_id="zeta.generator", solvers=("zeta.solver@1.0.0",)),
         _descriptor(generator_id="acme.generator", solvers=(SOLVER,)),
     ])
     assert [d.generator_id for d in registry.snapshot()] == [
