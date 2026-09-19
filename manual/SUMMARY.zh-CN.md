@@ -19,6 +19,7 @@
     - [装配 YAML](developer-guide/zh-CN/formats/assembly-yaml.md)
     - [财务 YAML](developer-guide/zh-CN/formats/finance-yaml.md)
     - [Solver Bundle](developer-guide/zh-CN/formats/solver-bundle.md)
+    - [计算配置](developer-guide/zh-CN/formats/calculation-config.md)
     - [算法插件包](developer-guide/zh-CN/formats/algorithm-plugin-package.md)
   - [模块开发手册](developer-guide/zh-CN/module-development.md)
     - [组合根与启动](developer-guide/zh-CN/modules/bootstrap.md)

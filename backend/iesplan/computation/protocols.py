@@ -23,6 +23,7 @@ Worker 在组合根明确拒绝启动。
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -178,19 +179,28 @@ class ResultAdapter(Protocol):
 class CalculationConfig:
     """公开计算配置(进入业务事实前已校验字头的求解选项)。
 
-    固定一次计算的全部选择: ``generator`` / ``solver`` 精确引用
-    (``<稳定ID>@<语义化版本>``), 随机种子、算法选项(含精度)与输出请求。
-    精度与算法选项进入 ``options``, 由各生成器的 options schema 在生成
-    边界校验。版本与依赖引用由本字头、ref 内嵌精确版本表达; 方程贡献与
-    设备内容锁随装配产物与固定资源传入, 不进本配置。
+    固定一次计算的全部选择: ``mode``、``predictions``（预测目标/算法/
+    参数，可空）、``generator`` / ``solver`` 精确引用
+    （``<稳定ID>@<语义化版本>``）、``precision``（low|medium|high）、
+    ``convergence``（阶段二收敛，可空）、``time_limit_seconds``、
+    ``options``（可空）、随机种子与输出请求。
+    计算按项目基线完整连续序列进行，本配置不含离散化字段，也不含规划
+    目标/变量/约束、设备参数、财务配置、资源或装配内容。多个
+    data_predict 时收敛是否必填由后续 application 结合 artifact 判断，
+    本载体不重读装配。
     """
 
     schema: str = CALCULATION_CONFIG_SCHEMA
     schema_version: str = CALCULATION_CONFIG_VERSION
+    mode: str = ""
+    predictions: tuple[Mapping[str, object], ...] | None = None
     generator: str = ""
     solver: str = ""
+    precision: str = ""
+    convergence: Mapping[str, object] | None = None
+    time_limit_seconds: int = 0
+    options: Mapping[str, object] | None = None
     seed: int | None = None
-    options: Mapping[str, object] = field(default_factory=dict)
     outputs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -198,28 +208,62 @@ class CalculationConfig:
             raise ValueError(f"计算配置 schema 非法: {self.schema!r}")
         if self.schema_version != CALCULATION_CONFIG_VERSION:
             raise ValueError(f"计算配置版本非法: {self.schema_version!r}")
+        if not isinstance(self.mode, str) or not self.mode:
+            raise ValueError(f"mode 须为非空字符串: {self.mode!r}")
         check_provider_ref(self.generator, "generator")
         check_provider_ref(self.solver, "solver")
+        if self.precision not in ("low", "medium", "high"):
+            raise ValueError(f"precision 须为 low|medium|high: {self.precision!r}")
+        object.__setattr__(self, "predictions", _freeze_predictions(self.predictions))
+        object.__setattr__(self, "convergence", _freeze_convergence(self.convergence))
+        if (
+            not isinstance(self.time_limit_seconds, int)
+            or isinstance(self.time_limit_seconds, bool)
+            or self.time_limit_seconds <= 0
+        ):
+            raise ValueError(
+                f"time_limit_seconds 须为正整数: {self.time_limit_seconds!r}"
+            )
+        if self.options is None:
+            object.__setattr__(self, "options", None)
+        elif not isinstance(self.options, Mapping):
+            raise TypeError("options 须为 Mapping 或 None")
+        else:
+            object.__setattr__(self, "options", freeze_json_value(dict(self.options)))
         if self.seed is not None and not isinstance(self.seed, int):
             raise TypeError("seed 须为整数或 None")
-        if not isinstance(self.options, Mapping):
-            raise TypeError("options 须为 Mapping")
         outputs = tuple(self.outputs)
+        if not outputs:
+            raise ValueError("outputs 不得为空")
         for name in outputs:
             if not isinstance(name, str) or not name:
                 raise ValueError(f"输出请求须为非空字符串: {name!r}")
-        object.__setattr__(self, "options", freeze_json_value(self.options))
         object.__setattr__(self, "outputs", outputs)
 
     def to_dict(self) -> dict[str, Any]:
-        """序列化为 JSON 兼容独立副本。"""
+        """序列化为 JSON 兼容独立副本（predictions 按目标稳定排序）。"""
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
+            "mode": self.mode,
+            "predictions": (
+                [_thaw_entry(entry) for entry in self.predictions]
+                if self.predictions is not None
+                else None
+            ),
             "generator": self.generator,
             "solver": self.solver,
+            "precision": self.precision,
+            "convergence": (
+                dict(thaw_json_value(self.convergence))
+                if self.convergence is not None
+                else None
+            ),
+            "time_limit_seconds": self.time_limit_seconds,
+            "options": (
+                thaw_json_value(self.options) if self.options is not None else None
+            ),
             "seed": self.seed,
-            "options": thaw_json_value(self.options),
             "outputs": list(self.outputs),
         }
 
@@ -272,6 +316,99 @@ def _freeze_file_entries(entries: object, name: str) -> tuple[Mapping[str, objec
 def _thaw_entry(entry: Mapping[str, object]) -> dict[str, Any]:
     """解冻单个文件条目为独立副本。"""
     return dict(thaw_json_value(entry))
+
+
+def _freeze_prediction_target(target: object) -> Mapping[str, object]:
+    """冻结预测目标（恰为 {instance, interface}，均为非空字符串）。"""
+    if not isinstance(target, Mapping) or set(target) != {"instance", "interface"}:
+        raise ValueError(f"prediction.target 须恰为 instance/interface 二键: {target!r}")
+    for key in ("instance", "interface"):
+        if not isinstance(target[key], str) or not target[key]:
+            raise ValueError(f"prediction.target.{key} 须为非空字符串: {target.get(key)!r}")
+    return freeze_json_value(dict(target))
+
+
+def _freeze_predictions(
+    predictions: object,
+) -> tuple[Mapping[str, object], ...] | None:
+    """冻结预测配置（可空；每项 {target, algorithm, parameters}，目标不重复）。
+
+    algorithm 本切片只校验精确引用形态，不做注册表查找。
+    返回按 (instance, interface) 稳定排序的元组。
+    """
+    if predictions is None:
+        return None
+    if isinstance(predictions, Mapping) or not isinstance(predictions, (list, tuple)):
+        raise TypeError(
+            f"predictions 须为序列或 None，得到 {type(predictions).__name__}"
+        )
+    frozen = []
+    seen: set[tuple[str, str]] = set()
+    for entry in predictions:
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "target",
+            "algorithm",
+            "parameters",
+        }:
+            raise ValueError(
+                "prediction 条目须恰为 target/algorithm/parameters 三键: "
+                f"{entry!r}"
+            )
+        target = _freeze_prediction_target(entry["target"])
+        check_provider_ref(entry["algorithm"], "prediction.algorithm")
+        if not isinstance(entry["parameters"], Mapping):
+            raise TypeError("prediction.parameters 须为 Mapping")
+        key = (target["instance"], target["interface"])
+        if key in seen:
+            raise ValueError(f"prediction.target 不得重复: {key!r}")
+        seen.add(key)
+        frozen.append(
+            freeze_json_value(
+                {
+                    "target": dict(target),
+                    "algorithm": entry["algorithm"],
+                    "parameters": dict(entry["parameters"]),
+                }
+            )
+        )
+    frozen.sort(key=lambda e: (e["target"]["instance"], e["target"]["interface"]))
+    return tuple(frozen)
+
+
+def _freeze_convergence(convergence: object) -> Mapping[str, object] | None:
+    """冻结阶段二收敛配置（可空；{tolerance, max_iterations} 恰二键）。
+
+    tolerance 为正有限数，max_iterations 为正整数。多个 data_predict 时
+    是否必填由后续 application 结合 artifact 判断，本载体不重读装配。
+    """
+    if convergence is None:
+        return None
+    if not isinstance(convergence, Mapping) or set(convergence) != {
+        "tolerance",
+        "max_iterations",
+    }:
+        raise ValueError(
+            "convergence 须恰为 tolerance/max_iterations 二键: "
+            f"{convergence!r}"
+        )
+    tolerance = convergence["tolerance"]
+    if (
+        not isinstance(tolerance, (int, float))
+        or isinstance(tolerance, bool)
+        or not math.isfinite(tolerance)
+        or tolerance <= 0
+    ):
+        raise ValueError(f"convergence.tolerance 须为正有限数: {tolerance!r}")
+    max_iterations = convergence["max_iterations"]
+    if (
+        not isinstance(max_iterations, int)
+        or isinstance(max_iterations, bool)
+        or max_iterations <= 0
+    ):
+        raise ValueError(
+            f"convergence.max_iterations 须为正整数: {max_iterations!r}"
+        )
+    return freeze_json_value(dict(convergence))
 
 
 def _freeze_command(command: object) -> Mapping[str, object]:

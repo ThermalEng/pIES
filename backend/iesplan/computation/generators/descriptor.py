@@ -55,6 +55,7 @@ class GeneratorDescriptor:
     version: str
     assembly_schema_version: str = ""
     modes: tuple[str, ...] = ()
+    precisions: tuple[str, ...] = ()
     capabilities: tuple[str, ...] = ()
     solvers: tuple[str, ...] = ()
     executors: tuple[str, ...] = ()
@@ -77,7 +78,6 @@ class GeneratorDescriptor:
             check_provider_ref(solver_ref, "solvers")
         object.__setattr__(self, "solvers", solvers)
         for attr in (
-            "modes",
             "capabilities",
             "executors",
             "equation_contracts",
@@ -88,6 +88,17 @@ class GeneratorDescriptor:
                 if not isinstance(name, str) or not name:
                     raise ValueError(f"{attr} 条目须为非空字符串: {name!r}")
             object.__setattr__(self, attr, items)
+        modes = tuple(self.modes)
+        if not modes or any(not isinstance(m, str) or not m for m in modes):
+            raise ValueError("modes 须为非空能力集合")
+        object.__setattr__(self, "modes", modes)
+        precisions = tuple(self.precisions)
+        if not precisions or any(p not in ("low", "medium", "high") for p in precisions):
+            raise ValueError(
+                "precisions 须为 low|medium|high 的非空子集: "
+                f"{self.precisions!r}"
+            )
+        object.__setattr__(self, "precisions", precisions)
         if not self.result_adapter:
             raise ValueError(
                 "result_adapter 不得为空：descriptor 必须声明配套结果适配器"
@@ -123,6 +134,7 @@ class GeneratorDescriptor:
             "version": self.version,
             "assembly_schema_version": self.assembly_schema_version,
             "modes": list(self.modes),
+            "precisions": list(self.precisions),
             "capabilities": list(self.capabilities),
             "solvers": list(self.solvers),
             "executors": list(self.executors),

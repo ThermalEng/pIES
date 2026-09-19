@@ -68,9 +68,13 @@ _SOLVER = "ies.solver.highs@1.7.2"
 
 
 def _config(**kwargs) -> CalculationConfig:
-    """最小合法计算配置(默认固定 generator/solver 精确引用)。"""
+    """最小合法计算配置(默认固定 mode/引用/精度/时间限制/输出)。"""
+    kwargs.setdefault("mode", "planning")
     kwargs.setdefault("generator", _GENERATOR)
     kwargs.setdefault("solver", _SOLVER)
+    kwargs.setdefault("precision", "medium")
+    kwargs.setdefault("time_limit_seconds", 600)
+    kwargs.setdefault("outputs", ["solution"])
     return CalculationConfig(**kwargs)
 
 
@@ -281,32 +285,43 @@ def test_config_schema_word_checked() -> None:
     """公开 CalculationConfig 字头与选择校验: 非法字头/引用即拒绝。
 
     运行期只做表示映射, 直接构造, 缺字段即映射失败, 不补默认值。
+    旧形状(无 mode/精度/时间限制)整体删除，不做兼容。
     """
     with pytest.raises(ValueError, match="schema"):
-        CalculationConfig(schema="ies.other", generator=_GENERATOR, solver=_SOLVER)
+        _config(schema="ies.other")
     with pytest.raises(ValueError, match="版本"):
-        CalculationConfig(schema_version="9.9.9", generator=_GENERATOR, solver=_SOLVER)
-    good = _config(seed=42, options={"gap_rel": 0.01}, outputs=["solution"])
+        _config(schema_version="9.9.9")
+    good = _config(seed=42, options={"gap_rel": 0.01})
     assert good.seed == 42
     assert good.to_dict() == {
         "schema": CALCULATION_CONFIG_SCHEMA,
         "schema_version": CALCULATION_CONFIG_VERSION,
+        "mode": "planning",
+        "predictions": None,
         "generator": _GENERATOR,
         "solver": _SOLVER,
-        "seed": 42,
+        "precision": "medium",
+        "convergence": None,
+        "time_limit_seconds": 600,
         "options": {"gap_rel": 0.01},
+        "seed": 42,
         "outputs": ["solution"],
     }
     with pytest.raises(TypeError):
         _config(seed="42")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="generator"):
-        CalculationConfig(solver=_SOLVER)
-    with pytest.raises(ValueError, match="generator"):
-        CalculationConfig(generator="acme.generator", solver=_SOLVER)
+        CalculationConfig(
+            mode="planning", solver=_SOLVER, precision="medium",
+            time_limit_seconds=600, outputs=["solution"],
+        )
     with pytest.raises(ValueError, match="solver"):
-        CalculationConfig(generator=_GENERATOR, solver="ies.solver.highs@1.7")
+        _config(solver="ies.solver.highs@1.7")
     with pytest.raises(ValueError, match="输出请求"):
-        CalculationConfig(generator=_GENERATOR, solver=_SOLVER, outputs=[""])
+        _config(outputs=[""])
+    with pytest.raises(ValueError, match="precision"):
+        _config(precision="ultra")
+    with pytest.raises(ValueError, match="time_limit_seconds"):
+        _config(time_limit_seconds=0)
 
 
 def test_registry_facade_from_computation() -> None:

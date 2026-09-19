@@ -10,6 +10,8 @@
   唯一装配发布, API/Worker 不得自行发现或动态加载);
 - Bundle 契约: ``load_bundle_schema`` / ``normalize_bundle`` /
   ``validate_bundle``(实现见 ``bundle``);
+- 计算配置契约: ``load_calculation_config_schema`` /
+  ``validate_calculation_config``(实现见 ``config``);
 - 边界协议与载体: ``GeneratorProvider`` / ``SolverRuntime`` /
   ``ResultAdapter`` / ``CalculationConfig`` / ``SolverBundle`` /
   ``ExecutionReceipt`` / ``ComputeResult``(宪法 §4.5 三段式边界);
@@ -24,6 +26,10 @@ from iesplan.computation.bundle import (
     load_bundle_schema,
     normalize_bundle,
     validate_bundle,
+)
+from iesplan.computation.config import (
+    load_calculation_config_schema,
+    validate_calculation_config,
 )
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators import (
@@ -78,6 +84,8 @@ __all__ = [
     "get_algorithm",
     "list_algorithms",
     "load_bundle_schema",
+    "load_calculation_config_schema",
     "normalize_bundle",
     "validate_bundle",
+    "validate_calculation_config",
 ]

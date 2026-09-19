@@ -35,7 +35,13 @@ from iesplan.computation import (
     validate_bundle,
 )
 
-SAMPLES = pathlib.Path(__file__).parent.parent / "iesplan" / "computation" / "samples"
+SAMPLES = (
+    pathlib.Path(__file__).parent.parent
+    / "iesplan"
+    / "computation"
+    / "samples"
+    / "solver-bundle"
+)
 VALID = SAMPLES / "valid" / "1.0" / "minimal.json"
 INVALID = SAMPLES / "invalid" / "1.0"
 
@@ -52,6 +58,8 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("generator_id", "acme.generator")
     kwargs.setdefault("version", "1.0.0")
     kwargs.setdefault("assembly_schema_version", "1.0")
+    kwargs.setdefault("modes", ("planning",))
+    kwargs.setdefault("precisions", ("low", "medium", "high"))
     kwargs.setdefault("solvers", (SOLVER,))
     kwargs.setdefault("options_schema", {})
     kwargs.setdefault("resource_limits", {})
@@ -62,8 +70,12 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
 
 
 def _config(**kwargs) -> CalculationConfig:
+    kwargs.setdefault("mode", "planning")
     kwargs.setdefault("generator", GENERATOR)
     kwargs.setdefault("solver", SOLVER)
+    kwargs.setdefault("precision", "medium")
+    kwargs.setdefault("time_limit_seconds", 600)
+    kwargs.setdefault("outputs", ["solution"])
     return CalculationConfig(**kwargs)
 
 

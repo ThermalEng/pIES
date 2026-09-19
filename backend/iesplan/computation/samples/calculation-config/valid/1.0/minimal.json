@@ -1,0 +1,20 @@
+{
+  "schema": "ies.calculation-config",
+  "schema_version": "1.0.0",
+  "mode": "planning",
+  "predictions": [
+    {
+      "target": { "instance": "pv1", "interface": "power_out" },
+      "algorithm": "ies.predictor.naive@1.0.0",
+      "parameters": {}
+    }
+  ],
+  "generator": "acme.generator@1.0.0",
+  "solver": "ies.solver.highs@1.7.2",
+  "precision": "medium",
+  "convergence": { "tolerance": 0.001, "max_iterations": 50 },
+  "time_limit_seconds": 600,
+  "options": { "gap_rel": 0.001 },
+  "seed": 42,
+  "outputs": ["solution", "metrics"]
+}
