@@ -13,17 +13,17 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
 | `schema` | `ies.calculation-config` | 字头 |
 | `schema_version` | `1.0.0` | 字头 |
 | `mode` | 非空字符串 | 计算模式，由 GeneratorDescriptor.modes 声明；首个内置模式为 `planning` |
-| `predictions` | 列表或 null | 预测配置；每项 `{target: {instance, interface}, algorithm, parameters}`，`algorithm` 为精确 provider 引用，`parameters` 为对象；`target` 不得重复 |
+| `predictions` | 列表（可空列表，不接受 null） | 预测配置；每项 `{target: {instance, interface}, algorithm, parameters}`，`algorithm` 为精确 provider 引用，`parameters` 为对象；`target` 不得重复 |
 | `generator` | `<稳定ID>@<语义化版本>` | 所选生成器精确引用 |
 | `solver` | `<稳定ID>@<语义化版本>` | 所选求解器精确引用 |
 | `precision` | `low`、`medium`、`high` | 计算精度（与界面精度语义一致） |
 | `convergence` | null 或 `{tolerance, max_iterations}` | 阶段二收敛：正有限容差与正整数迭代数；多个 `data_predict` 时是否必填由后续 application 结合 artifact 判断 |
 | `time_limit_seconds` | 正整数 | 时间限制（秒） |
-| `options` | 对象或 null | 生成/求解选项 |
-| `seed` | 整数或 null | 随机种子 |
+| `options` | 对象（可空对象，不接受 null） | 生成/求解选项 |
+| `seed` | 整数（不接受布尔值）或 null | 随机种子 |
 | `outputs` | 非空字符串列表 | 输出请求，顺序保留 |
 
-未知字段一律拒绝，不静默丢弃。`NaN`、`Infinity` 不得进入。
+12 个顶层字段全部必需（`convergence` 与 `seed` 允许显式 null，但不得省略）；未知字段一律拒绝，不静默丢弃，不补默认。`NaN`、`Infinity`、`-Infinity` 不得进入（含嵌套值）。
 
 ## 示例
 

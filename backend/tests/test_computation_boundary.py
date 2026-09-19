@@ -297,7 +297,7 @@ def test_config_schema_word_checked() -> None:
         "schema": CALCULATION_CONFIG_SCHEMA,
         "schema_version": CALCULATION_CONFIG_VERSION,
         "mode": "planning",
-        "predictions": None,
+        "predictions": [],
         "generator": _GENERATOR,
         "solver": _SOLVER,
         "precision": "medium",

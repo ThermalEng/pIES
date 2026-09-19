@@ -8,10 +8,14 @@
     "schema",
     "schema_version",
     "mode",
+    "predictions",
     "generator",
     "solver",
     "precision",
+    "convergence",
     "time_limit_seconds",
+    "options",
+    "seed",
     "outputs"
   ],
   "additionalProperties": false,
@@ -20,8 +24,8 @@
     "schema_version": { "const": "1.0.0" },
     "mode": { "type": "string", "minLength": 1 },
     "predictions": {
-      "type": ["array", "null"],
-      "description": "预测配置；target 不得重复（由载体强制）。",
+      "type": "array",
+      "description": "预测配置列表，可空列表，不接受 null；target 不得重复（由载体强制）。",
       "items": {
         "type": "object",
         "required": ["target", "algorithm", "parameters"],
@@ -54,7 +58,7 @@
       }
     },
     "time_limit_seconds": { "type": "integer", "exclusiveMinimum": 0 },
-    "options": { "type": ["object", "null"] },
+    "options": { "type": "object" },
     "seed": { "type": ["integer", "null"] },
     "outputs": {
       "type": "array",

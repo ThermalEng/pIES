@@ -61,9 +61,12 @@ def test_schema_file_meta() -> None:
     assert schema["$id"] == f"{CALCULATION_CONFIG_SCHEMA}/{CALCULATION_CONFIG_VERSION}"
     assert schema["title"] == "ies.calculation-config 1.0.0 计算配置契约"
     assert set(schema["required"]) == {
-        "schema", "schema_version", "mode", "generator", "solver",
-        "precision", "time_limit_seconds", "outputs",
+        "schema", "schema_version", "mode", "predictions", "generator",
+        "solver", "precision", "convergence", "time_limit_seconds",
+        "options", "seed", "outputs",
     }
+    assert schema["properties"]["predictions"]["type"] == "array"
+    assert schema["properties"]["options"] == {"type": "object"}
     assert schema["additionalProperties"] is False
     assert schema["properties"]["schema"] == {"const": CALCULATION_CONFIG_SCHEMA}
     assert schema["properties"]["precision"] == {"enum": ["low", "medium", "high"]}
@@ -90,6 +93,7 @@ EXPECTED_INVALID = {
     "duplicate-target.json": "不得重复",
     "bad-convergence.json": "tolerance",
     "missing-mode.json": "mode",
+    "missing-convergence.json": "convergence",
     "empty-outputs.json": "outputs",
 }
 
@@ -124,8 +128,19 @@ def test_predictions_sorted_unique_and_shape_checked() -> None:
     ]
     with pytest.raises(TypeError):
         config.predictions[0]["parameters"]["p"] = 2  # type: ignore[index]
-    assert _config(predictions=None).predictions is None
+    with pytest.raises(TypeError, match="None"):
+        _config(predictions=None)
     assert _config(predictions=[]).predictions == ()
+    with pytest.raises(ValueError, match="非有限"):
+        _config(
+            predictions=[
+                {
+                    "target": {"instance": "pv1", "interface": "power_out"},
+                    "algorithm": "ies.predictor.naive@1.0.0",
+                    "parameters": {"w": float("inf")},
+                }
+            ]
+        )
     with pytest.raises(ValueError, match="不得重复"):
         _config(
             predictions=[
@@ -185,5 +200,11 @@ def test_scalar_selections() -> None:
         _config(outputs=[])
     ordered = _config(outputs=["b", "a"])
     assert ordered.to_dict()["outputs"] == ["b", "a"]
-    assert _config(options=None).options is None
+    with pytest.raises(TypeError, match="Mapping"):
+        _config(options=None)
+    assert _config(options={}).options == {}
     assert _config(options={"k": [1]}).to_dict()["options"] == {"k": [1]}
+    with pytest.raises(ValueError, match="非有限"):
+        _config(options={"k": float("nan")})
+    with pytest.raises(TypeError, match="布尔"):
+        _config(seed=True)

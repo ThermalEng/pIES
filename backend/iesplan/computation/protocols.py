@@ -180,10 +180,11 @@ class CalculationConfig:
     """公开计算配置(进入业务事实前已校验字头的求解选项)。
 
     固定一次计算的全部选择: ``mode``、``predictions``（预测目标/算法/
-    参数，可空）、``generator`` / ``solver`` 精确引用
-    （``<稳定ID>@<语义化版本>``）、``precision``（low|medium|high）、
+    参数列表，可空列表，不接受 None）、``generator`` / ``solver`` 精确
+    引用（``<稳定ID>@<语义化版本>``）、``precision``（low|medium|high）、
     ``convergence``（阶段二收敛，可空）、``time_limit_seconds``、
-    ``options``（可空）、随机种子与输出请求。
+    ``options``（对象，可空对象，不接受 None）、随机种子与输出请求。
+    同一字段只有一种形态；嵌套非有限浮点当场拒绝。
     计算按项目基线完整连续序列进行，本配置不含离散化字段，也不含规划
     目标/变量/约束、设备参数、财务配置、资源或装配内容。多个
     data_predict 时收敛是否必填由后续 application 结合 artifact 判断，
@@ -193,13 +194,13 @@ class CalculationConfig:
     schema: str = CALCULATION_CONFIG_SCHEMA
     schema_version: str = CALCULATION_CONFIG_VERSION
     mode: str = ""
-    predictions: tuple[Mapping[str, object], ...] | None = None
+    predictions: tuple[Mapping[str, object], ...] = ()
     generator: str = ""
     solver: str = ""
     precision: str = ""
     convergence: Mapping[str, object] | None = None
     time_limit_seconds: int = 0
-    options: Mapping[str, object] | None = None
+    options: Mapping[str, object] = field(default_factory=dict)
     seed: int | None = None
     outputs: tuple[str, ...] = ()
 
@@ -224,14 +225,17 @@ class CalculationConfig:
             raise ValueError(
                 f"time_limit_seconds 须为正整数: {self.time_limit_seconds!r}"
             )
-        if self.options is None:
-            object.__setattr__(self, "options", None)
-        elif not isinstance(self.options, Mapping):
-            raise TypeError("options 须为 Mapping 或 None")
-        else:
-            object.__setattr__(self, "options", freeze_json_value(dict(self.options)))
-        if self.seed is not None and not isinstance(self.seed, int):
-            raise TypeError("seed 须为整数或 None")
+        if not isinstance(self.options, Mapping):
+            raise TypeError(
+                f"options 须为 Mapping（可用空对象，不得为 None），"
+                f"得到 {type(self.options).__name__}"
+            )
+        _check_finite_json(self.options, "options")
+        object.__setattr__(self, "options", freeze_json_value(dict(self.options)))
+        if self.seed is not None and (
+            not isinstance(self.seed, int) or isinstance(self.seed, bool)
+        ):
+            raise TypeError("seed 须为整数或 None（不接受布尔值）")
         outputs = tuple(self.outputs)
         if not outputs:
             raise ValueError("outputs 不得为空")
@@ -246,11 +250,7 @@ class CalculationConfig:
             "schema": self.schema,
             "schema_version": self.schema_version,
             "mode": self.mode,
-            "predictions": (
-                [_thaw_entry(entry) for entry in self.predictions]
-                if self.predictions is not None
-                else None
-            ),
+            "predictions": [_thaw_entry(entry) for entry in self.predictions],
             "generator": self.generator,
             "solver": self.solver,
             "precision": self.precision,
@@ -260,9 +260,7 @@ class CalculationConfig:
                 else None
             ),
             "time_limit_seconds": self.time_limit_seconds,
-            "options": (
-                thaw_json_value(self.options) if self.options is not None else None
-            ),
+            "options": thaw_json_value(self.options),
             "seed": self.seed,
             "outputs": list(self.outputs),
         }
@@ -328,19 +326,32 @@ def _freeze_prediction_target(target: object) -> Mapping[str, object]:
     return freeze_json_value(dict(target))
 
 
+def _check_finite_json(value: object, name: str) -> None:
+    """递归拒绝非有限浮点（仅公开输入载体边界，不扩散为内部复核）。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{name} 禁止非有限数值: {value!r}")
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _check_finite_json(item, f"{name}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _check_finite_json(item, f"{name}[{index}]")
+
+
 def _freeze_predictions(
     predictions: object,
-) -> tuple[Mapping[str, object], ...] | None:
-    """冻结预测配置（可空；每项 {target, algorithm, parameters}，目标不重复）。
+) -> tuple[Mapping[str, object], ...]:
+    """冻结预测配置（列表，可空列表，不接受 None；每项去重并稳定排序）。
 
-    algorithm 本切片只校验精确引用形态，不做注册表查找。
-    返回按 (instance, interface) 稳定排序的元组。
+    每项 {target, algorithm, parameters}，目标不重复；algorithm 本切片
+    只校验精确引用形态，不做注册表查找。返回按 (instance, interface)
+    稳定排序的元组。
     """
     if predictions is None:
-        return None
+        raise TypeError("predictions 不得为 None，使用空列表表示无预测")
     if isinstance(predictions, Mapping) or not isinstance(predictions, (list, tuple)):
         raise TypeError(
-            f"predictions 须为序列或 None，得到 {type(predictions).__name__}"
+            f"predictions 须为序列，得到 {type(predictions).__name__}"
         )
     frozen = []
     seen: set[tuple[str, str]] = set()
@@ -358,6 +369,7 @@ def _freeze_predictions(
         check_provider_ref(entry["algorithm"], "prediction.algorithm")
         if not isinstance(entry["parameters"], Mapping):
             raise TypeError("prediction.parameters 须为 Mapping")
+        _check_finite_json(entry["parameters"], "prediction.parameters")
         key = (target["instance"], target["interface"])
         if key in seen:
             raise ValueError(f"prediction.target 不得重复: {key!r}")
