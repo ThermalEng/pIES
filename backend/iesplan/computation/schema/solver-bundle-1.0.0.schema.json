@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.solver-bundle/1.0.0",
+  "title": "ies.solver-bundle 1.0.0 求解交接包契约",
+  "description": "Solver Bundle 是一次求解的可执行、不可变交接包，由 GeneratorProvider 从已签发装配产物、已校验 CalculationConfig 与固定资源确定性生成，供 SolverRuntime 校验执行。字段与格式页 manifest 一一对应：bundle{generator, solver}、inputs[{path, media_type}]、command、outputs[{path, media_type, required}]、result_adapter、extensions。command 为结构化数据，禁止 shell 字符串；路径一律为 Bundle 内相对路径。未知字段一律拒绝，不静默丢弃。",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "bundle",
+    "inputs",
+    "command",
+    "outputs",
+    "result_adapter",
+    "extensions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ies.solver-bundle" },
+    "schema_version": { "const": "1.0.0" },
+    "bundle": {
+      "type": "object",
+      "description": "所选生成器与求解器精确引用追溯。",
+      "required": ["generator", "solver"],
+      "additionalProperties": false,
+      "properties": {
+        "generator": { "$ref": "#/$defs/provider_ref" },
+        "solver": { "$ref": "#/$defs/provider_ref" }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "description": "只读输入文件声明。",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "media_type"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "$ref": "#/$defs/relative_path" },
+          "media_type": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "description": "结构化命令数据，不是 shell 字符串。",
+      "required": ["executor", "executable", "arguments"],
+      "additionalProperties": false,
+      "properties": {
+        "executor": { "$ref": "#/$defs/provider_ref" },
+        "executable": { "$ref": "#/$defs/provider_ref" },
+        "arguments": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "working_directory": { "$ref": "#/$defs/relative_path" },
+        "environment": {
+          "type": "object",
+          "propertyNames": { "type": "string", "minLength": 1 },
+          "additionalProperties": { "type": "string" }
+        },
+        "timeout_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "memory_mib": { "type": "number", "exclusiveMinimum": 0 },
+        "cpu_cores": { "type": "number", "exclusiveMinimum": 0 },
+        "network": { "type": "boolean" },
+        "success_exit_codes": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 1
+        }
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "description": "允许写入的输出清单。",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "media_type", "required"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "$ref": "#/$defs/relative_path" },
+          "media_type": { "type": "string", "minLength": 1 },
+          "required": { "type": "boolean" }
+        }
+      }
+    },
+    "result_adapter": {
+      "type": "string",
+      "$ref": "#/$defs/provider_ref"
+    },
+    "extensions": {
+      "type": "object",
+      "description": "规范预留的开放扩展点。"
+    }
+  },
+  "$defs": {
+    "provider_ref": {
+      "type": "string",
+      "description": "<稳定ID>@<语义化版本>；稳定 ID 由点号分隔的非空段组成，段内仅字母、数字、下划线与短横线。",
+      "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "relative_path": {
+      "type": "string",
+      "description": "Bundle 内相对路径：非空，不以 / 开头，不含 .. 路径段。",
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+    }
+  }
+}

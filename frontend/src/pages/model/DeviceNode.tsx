@@ -1,7 +1,7 @@
 /**
  * 建模画布自定义节点(ReactFlow Node)。
  *
- * 展示:名称、类型、存量/新增徽章、模型精度(P1/P2/P3)、容量;
+ * 展示:名称、类型、存量/新增徽章、容量;
  * 端口句柄按 载能:方向 推导,左右分布(in 左 / out 右),载能以颜色 + 文字双重编码。
  * 状态不只靠颜色:存量/新增徽章带图标与形状,精度带文字。
  */
@@ -35,12 +35,6 @@ export type DeviceNodeData = {
 const KIND_BADGE: Record<LocalDevice['kind'], { cls: string; icon: 'plus' | 'clock'; labelKey: string }> = {
   new: { cls: 'mp-node__kind--new', icon: 'plus', labelKey: 'node.kind_new' },
   existing: { cls: 'mp-node__kind--existing', icon: 'clock', labelKey: 'node.kind_existing' },
-}
-
-const FIDELITY_LABEL: Record<LocalDevice['fidelity'], string> = {
-  low: 'node.fidelity_low',
-  medium: 'node.fidelity_medium',
-  high: 'node.fidelity_high',
 }
 
 /** 端口句柄样式:in 左 / out 右,竖向按序号分布。 */
@@ -134,9 +128,6 @@ function DeviceNodeView({ data }: NodeProps<Node<DeviceNodeData, 'device'>>) {
       </header>
       <div className="mp-node__type">{typeLabel}</div>
       <div className="mp-node__meta">
-        <span className="mp-node__fidelity" title={t('ies.modeling.fidelity')}>
-          {lt(FIDELITY_LABEL[device.fidelity])}
-        </span>
         <span className="mp-node__capacity" title={capacitySpec?.help_key ?? lt('node.capacity')}>
           {capacityValue !== null
             ? `${t('ies.modeling.capacity')} ${capacityValue}${capacitySpec?.unit ? ` ${capacitySpec.unit}` : ''}`

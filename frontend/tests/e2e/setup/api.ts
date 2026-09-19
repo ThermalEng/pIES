@@ -146,53 +146,69 @@ export async function buildMinimalModel(
   userToken: string,
 ): Promise<void> {
   const deviceTypes = await requestJson(ctx, 'GET', '/api/registry/device-types', undefined, userToken)
-  const typeId = (keyword: string) => {
+  const specOf = (keyword: string) => {
     const t = deviceTypes.items.find((it: any) => it.type_id.includes(keyword))
     if (!t) throw new Error(`未找到设备类型: ${keyword}`)
-    return t.type_id
+    return t
   }
-  const addDevice = async (keyword: string): Promise<number> => {
+  // 2.0 唯一建模面: 草稿语义命令(名键设备 + 名键端点连接, 无类型/容量/损耗字段)。
+  // 端口名取注册表设备 YAML 公开 descriptor(与画布句柄同一来源)。
+  const portNameOf = (keyword: string, carrier: string, direction: string): string => {
+    const spec = specOf(keyword)
+    const p = (spec.ports as any[]).find((it) => it.energy_carrier === carrier && it.direction === direction)
+    if (!p) throw new Error(`未找到端口 ${keyword}/${carrier}/${direction}`)
+    return p.name
+  }
+  const nameOf = (keyword: string) => `E2E ${keyword}`
+  const commands: any[] = []
+  const addDevice = (keyword: string) => {
     // 2.0 无 profile 引用参数(source.data_ref 为唯一数据路径);
     // 负荷数据由运行期按列名合并已绑定数据集, 设备参数只带物理参数。
-    const params: Record<string, unknown> = {}
-    const res = await requestJson(ctx, 'POST', `/api/projects/${projectId}/model/devices`, {
-      device_type: typeId(keyword),
-      name: `E2E ${keyword}`,
-      params,
-      is_existing: false,
-      model_precision: 'medium',
-    }, userToken)
-    return res.device.id
+    commands.push({
+      id: `e2e-dev-${keyword}`,
+      unit: 'model',
+      type: 'model.upsert_device',
+      payload: { name: nameOf(keyword), device_type: specOf(keyword).type_id, kind: 'new', params: {} },
+    })
   }
-  const gridId = await addDevice('grid_connection')
-  const loadId = await addDevice('electric_load')
-  const hpId = await addDevice('heat_pump')
-  const heatLoadId = await addDevice('heat_load')
+  addDevice('grid_connection')
+  addDevice('electric_load')
+  addDevice('heat_pump')
+  addDevice('heat_load')
   // 2.0 热泵无制冷接口, 冷负荷由制冷机供冷(否则冷母线无源阻断任务提交)
-  const chillerId = await addDevice('electric_chiller')
-  const coolLoadId = await addDevice('cooling_load')
+  addDevice('electric_chiller')
+  addDevice('cooling_load')
 
-  // 读取端口映射后按 载能:方向 匹配连接(热泵 electric in / heat out)
-  const graph = await requestJson(ctx, 'GET', `/api/projects/${projectId}/model`, undefined, userToken)
-  const portOf = (deviceId: number, portType: string, direction: string): number => {
-    const p = graph.ports.find(
-      (it: any) => it.device_id === deviceId && it.port_type === portType && it.direction === direction,
-    )
-    if (!p) throw new Error(`未找到端口 ${deviceId}/${portType}/${direction}`)
-    return p.id
+  const connect = (fromKw: string, fromCarrier: string, toKw: string, toCarrier: string) => {
+    const from = nameOf(fromKw)
+    const to = nameOf(toKw)
+    const fromPort = portNameOf(fromKw, fromCarrier, 'out')
+    const toPort = portNameOf(toKw, toCarrier, 'in')
+    commands.push({
+      id: `e2e-conn-${fromKw}-${toKw}`,
+      unit: 'model',
+      type: 'model.upsert_connection',
+      payload: {
+        name: `${from}.${fromPort}->${to}.${toPort}`,
+        from_device: from,
+        from_port: fromPort,
+        to_device: to,
+        to_port: toPort,
+      },
+    })
   }
-  const connect = (from: number, to: number, connType: string): Promise<any> =>
-    requestJson(ctx, 'POST', `/api/projects/${projectId}/model/connections`, {
-      from_port_id: from,
-      to_port_id: to,
-      attrs: { conn_type: connType },
-    }, userToken)
-  await connect(portOf(gridId, 'electric', 'out'), portOf(loadId, 'electric', 'in'), 'electric_line')
-  await connect(portOf(gridId, 'electric', 'out'), portOf(hpId, 'electric', 'in'), 'electric_line')
-  await connect(portOf(gridId, 'electric', 'out'), portOf(chillerId, 'electric', 'in'), 'electric_line')
-  // 热泵热端端口类型为 thermal(注册表热载体), 制冷机冷端为 cooling
-  await connect(portOf(hpId, 'thermal', 'out'), portOf(heatLoadId, 'thermal', 'in'), 'thermal_pipe')
-  await connect(portOf(chillerId, 'cooling', 'out'), portOf(coolLoadId, 'cooling', 'in'), 'cooling_pipe')
+  connect('grid_connection', 'electric', 'electric_load', 'electric')
+  connect('grid_connection', 'electric', 'heat_pump', 'electric')
+  connect('grid_connection', 'electric', 'electric_chiller', 'electric')
+  // 热泵热端为 heat 载体, 制冷机冷端为 cool 载体
+  connect('heat_pump', 'heat', 'heat_load', 'heat')
+  connect('electric_chiller', 'cool', 'cooling_load', 'cool')
+
+  const view = await requestJson(ctx, 'GET', `/api/projects/${projectId}`, undefined, userToken)
+  await requestJson(ctx, 'PUT', `/api/projects/${projectId}/draft`, {
+    expected_revision: view.draft.revision,
+    commands,
+  }, userToken)
 }
 
 /** 会话可用性自检: 未登录访问公开页应可读, 受保护页应跳登录。 */

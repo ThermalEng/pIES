@@ -57,6 +57,12 @@ include = ["iesplan*"]
     "samples/invalid/*.yaml",
     "samples/data/*.csv",
 ]
+# 0.8.0: ies.solver-bundle JSON Schema 与合法/非法样例同为包内资源
+"iesplan.computation" = [
+    "schema/*.json",
+    "samples/valid/*/*.json",
+    "samples/invalid/*/*.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,21 @@
+{
+  "schema": "ies.other-bundle",
+  "schema_version": "1.0.0",
+  "bundle": {
+    "generator": "acme.generator@1.0.0",
+    "solver": "ies.solver.highs@1.7.2"
+  },
+  "inputs": [
+    { "path": "input/problem.mps", "media_type": "application/mps" }
+  ],
+  "command": {
+    "executor": "ies.executor.local_process@1.0.0",
+    "executable": "ies.solver.highs@1.7.2",
+    "arguments": ["input/problem.mps"]
+  },
+  "outputs": [
+    { "path": "output/solution.json", "media_type": "application/json", "required": true }
+  ],
+  "result_adapter": "acme.result-adapter@1.0.0",
+  "extensions": {}
+}

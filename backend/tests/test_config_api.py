@@ -6,8 +6,7 @@
 - 数据库: SQLite :memory:(models 全部表 create_all);
 - 应用: 独立 FastAPI 实例挂载 config_router + registry_router,
   用 dependency_overrides 替换 get_request_db;
-- 设备类型使用 devices.device_type 的 CHECK 短名(pv/storage/load),
-  完整 2.0 注册表 ID 经设备行 params.type_detail 传递, 默认参数解析优先使用它。
+- 设备类型使用完整 2.0 注册表 ID(device_type 直接即裸稳定 ID, 无回退)。
 """
 
 from __future__ import annotations
@@ -35,7 +34,6 @@ from iesplan.main import _register_exception_handlers
 from iesplan.audit.persistence import AuditLog
 from iesplan.configuration.persistence import CalcConfig
 from iesplan.identity.persistence import User
-from iesplan.model.persistence import Device, SystemGraph
 from iesplan.project.persistence import Draft, Project
 # 注册任务侧表(tasks/task_attempts/calc_snapshots): 结果域 persistence 在导入期
 # 即登记 evidence_packages(外键指向任务侧表), 而任务域 persistence 为延迟装载;
@@ -63,10 +61,11 @@ def db() -> Iterator[Session]:
 
 
 def seed_project(db: Session, with_devices: bool = True) -> Project:
-    """种子项目: 所有者 + 草稿(revision=1) + 工作图 + 设备清单。
+    """种子项目: 所有者 + 草稿(revision=1, 2.0 名键设备清单) 。
 
     设备: 存量光伏(kind=existing, 容量固定)、新建光伏(kind=new, 容量变量)、
     新建电池(kind=new, 容量/功率变量)、存量电负荷(kind=existing)。
+    设备类型为裸稳定 ID(无 type_detail 回退)。
     """
     owner = db.execute(
         select(User).where(User.username == OWNER_USERNAME)
@@ -87,9 +86,15 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
     )
     db.add(proj)
     db.flush()
-    content_object_id = store_content_object(
-        db, project_domain.initial_content()
-    )
+    content = project_domain.initial_content()
+    if with_devices:
+        content["model"]["devices"] = [
+            {"name": "存量光伏", "device_type": "ies.device.pv", "kind": "existing", "params": {}},
+            {"name": "新建光伏", "device_type": "ies.device.pv", "kind": "new", "params": {}},
+            {"name": "储能电池", "device_type": "ies.device.battery", "kind": "new", "params": {}},
+            {"name": "电负荷", "device_type": "ies.device.electric_load", "kind": "existing", "params": {}},
+        ]
+    content_object_id = store_content_object(db, content)
     draft = Draft(
         project_id=proj.id,
         revision=1,
@@ -100,29 +105,6 @@ def seed_project(db: Session, with_devices: bool = True) -> Project:
     db.add(draft)
     db.flush()
     proj.current_draft_id = draft.id
-    graph = SystemGraph(
-        project_id=proj.id,
-        draft_id=draft.id,
-        name="工作图",
-        created_by=owner.id,
-    )
-    db.add(graph)
-    db.flush()
-    if with_devices:
-        # 设备行携带完整 2.0 注册表 ID(params.type_detail, 与模型服务写入一致),
-        # device_type 列为粗分类短名(CHECK 约束要求)
-        db.add_all(
-            [
-                Device(graph_id=graph.id, device_type="pv", kind="existing", name="存量光伏",
-                       params={"type_detail": "ies.device.pv"}),
-                Device(graph_id=graph.id, device_type="pv", kind="new", name="新建光伏",
-                       params={"type_detail": "ies.device.pv"}),
-                Device(graph_id=graph.id, device_type="storage", kind="new", name="储能电池",
-                       params={"type_detail": "ies.device.battery"}),
-                Device(graph_id=graph.id, device_type="load", kind="existing", name="电负荷",
-                       params={"type_detail": "ies.device.electric_load"}),
-            ]
-        )
     db.commit()
     db.refresh(proj)
     return proj
@@ -198,14 +180,31 @@ def test_default_config_device_params_use_registry_defaults(db: Session) -> None
     project = seed_project(db)
     cfg = _default_config(db, project)
     devices = calc_config.load_work_graph(db, project.id)["devices"]
-    pv_dev = next(d for d in devices if d["kind"] == "new" and d["device_type"] == "pv")
-    params = cfg["parameters"]["devices"][str(pv_dev["id"])]
+    pv_dev = next(d for d in devices if d["kind"] == "new" and d["device_type"] == "ies.device.pv")
+    params = cfg["parameters"]["devices"][pv_dev["name"]]
     assert params["rated_capacity_kwp"] == 100
     assert params["reference_irradiance"] == 1000
     assert params["temp_coeff"] == -0.004
     # 经济/环境参数默认值
     assert cfg["parameters"]["economic"]["discount_rate"] == 0.08
     assert cfg["parameters"]["environmental"]["emission_factor_grid"] == 0.581
+
+
+def test_parameter_metadata_resolves_by_device_type_only(db: Session) -> None:
+    """计算配置元数据只按 device_type 解析, 不回退 params.type_detail。
+
+    设备行 params 携带 type_detail(电池)时, 光伏设备的元数据仍按
+    device_type(光伏)产出, 且键为设备名(2.0 名键)。
+    """
+    _ = db  # 注册表经 conftest 自动初始化, 本用例无需数据库状态
+    graph = {"devices": [{
+        "name": "PV1", "device_type": "ies.device.pv", "kind": "new",
+        "params": {"type_detail": "ies.device.battery"},
+    }]}
+    meta = calc_config.parameter_metadata(graph)
+    pv_meta = meta["parameters"]["devices"]["PV1"]
+    assert pv_meta["rated_capacity_kwp"]["default"] == 100
+    assert "capacity_kwh" not in pv_meta
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +492,7 @@ def test_discount_rate_misplaced_rejected(client: TestClient, db: Session) -> No
 
 def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Session) -> None:
     """非默认经济参数: 保存 → 重读 → 进入任务快照全链路同值(FE-BE-01)。"""
-    project = seed_project(db)
+    project = seed_project(db, with_devices=False)
     default = _default_config(db, project)
     cfg = dict(default)
     cfg["parameters"]["economic"] = {
@@ -546,13 +545,12 @@ def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Ses
     # 直接写入内容对象(机械测试用；真实项目经起草命令声明)。planning 草稿
     # 副本已删除，改为冻结规划修订的确定性投影(见下 save_planning_config)。
     content["model"]["devices"].append({
-        "id": 1,
         "device_type": "ies.device.battery",
         "kind": "new",
         "name": "bat1",
         "params": {"capacity_kwh": 200, "rated_power_kw": 100},
     })
-    content["finance_binding"] = {"instances": {"d1": {"type": "none"}}}
+    content["finance_binding"] = {"instances": {"bat1": {"type": "none"}}}
     # tariff_bindings 本体即条目映射(空映射 = 无计费绑定；起草命令 payload
     # 的 {"bindings": X} 外层由命令处理器解包，此处直接写入解包后形态)。
     content["tariff_bindings"] = {}
@@ -580,7 +578,7 @@ def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Ses
             "objective": {"sense": "minimize", "expression": "0"},
             "variables": {
                 "cap": {
-                    "device_ref": "d1",
+                    "device_ref": "bat1",
                     "parameter": "capacity_kwh",
                     "lower_bound": "0",
                     "upper_bound": "1000",
@@ -766,12 +764,11 @@ def test_saved_config_row_frozen_creates_new_version(client: TestClient, db: Ses
 
 
 def test_validate_config_with_dict_graph() -> None:
-    """validate_config 直接接受 dict 图(兼容规划模板形态)。"""
+    """validate_config 直接接受 2.0 名键设备清单 dict(草稿 model 节形状)。"""
     graph: dict[str, Any] = {
         "devices": [
-            {"id": 1, "device_type": "ies.device.grid_connection", "kind": "existing", "name": "电网"},
+            {"device_type": "ies.device.grid_connection", "kind": "existing", "name": "电网", "params": {}},
             {
-                "id": 2,
                 "device_type": "ies.device.pv",
                 "kind": "new",
                 "name": "光伏",
@@ -781,14 +778,14 @@ def test_validate_config_with_dict_graph() -> None:
     }
     cfg = {
         "parameters": {
-            "devices": {"2": {"rated_capacity_kwp": 0, "max_capacity_kwp": 1000, "efficiency": 0.2}},
+            "devices": {"光伏": {"rated_capacity_kwp": 0, "max_capacity_kwp": 1000, "efficiency": 0.2}},
             "economic": {"discount_rate": 0.08, "tax_rate": 0.25, "project_years": 20,
                          "depreciation_years": 10, "currency": "CNY"},
             "environmental": {"emission_factor_grid": 0.581, "emission_factor_gas": 2.0},
         },
         "variables": [
             {"name": "pv_cap", "type": "continuous", "initial": 100, "min": 0, "max": 1000,
-             "device_ref": 2, "param": "rated_capacity_kwp", "unit": "kWp"}
+             "device_ref": "光伏", "param": "rated_capacity_kwp", "unit": "kWp"}
         ],
         "objectives": [{"metric": "irr_after_tax", "direction": "max", "weight": 1.0}],
         "constraints": [
@@ -806,7 +803,7 @@ def test_validate_config_with_dict_graph() -> None:
 
 def test_variable_device_ref_unknown_diagnostic() -> None:
     """变量 device_ref 指向图中不存在的设备 → CONN-TYPE-002。"""
-    graph = {"devices": [{"id": 1, "device_type": "ies.device.pv", "kind": "new", "name": "光伏"}]}
+    graph = {"devices": [{"device_type": "ies.device.pv", "kind": "new", "name": "光伏", "params": {}}]}
     cfg = {
         "parameters": {
             "devices": {},

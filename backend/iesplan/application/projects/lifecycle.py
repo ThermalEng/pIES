@@ -32,7 +32,7 @@ from iesplan.application.projects.content_objects import (
     store_content_object,
 )
 from iesplan.core.contracts import ProjectBaseline, ProjectBaselineError
-from iesplan.core.errors import ConflictError, ForbiddenError
+from iesplan.core.errors import ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.project import (
@@ -565,23 +565,69 @@ def _apply_command(content: dict, cmd: dict) -> dict:
     return handler(content, payload)
 
 
+def _require_registered_device_type(type_id: object) -> None:
+    """device_type 必须为已注册 2.0 设备 ID，否则当场拒绝（不静默忽略）。"""
+    if not isinstance(type_id, str) or not type_id:
+        raise InvalidRequestError(
+            "设备 device_type 必须为非空字符串",
+            code="PROJ-CMD-005",
+            params={"device_type": type_id},
+        )
+    from iesplan.devices import get_device
+
+    try:
+        get_device(type_id)
+    except NotFoundError:
+        raise InvalidRequestError(
+            "设备 device_type 未注册",
+            code="PROJ-CMD-005",
+            params={"device_type": type_id},
+        ) from None
+
+
 def _cmd_model_upsert_device(content: dict, payload: dict) -> dict:
-    """upsert 设备实例(模型内容契约表示；布局位置入 layout 节，domain-model §项目聚合)。"""
+    """upsert 设备实例(模型内容契约表示；布局位置入 layout 节，domain-model §项目聚合)。
+
+    2.0 设备契约只允许 name/device_type/kind/params/position；额外字段
+    (如无 2.0 去向的 model_fidelity)当场拒绝，不静默丢弃。
+    params 提供即完整替换（含清空）；非对象 params 当场拒绝。
+    device_type 新建必须提供，提供时必须已注册，否则当场拒绝。
+    """
     name = payload.get("name")
     if not isinstance(name, str) or not name:
         raise InvalidRequestError("model.upsert_device 缺少设备名称", code="PROJ-CMD-005")
+    allowed = ("name", "device_type", "kind", "params", "position")
+    extra = sorted(k for k in payload if k not in allowed)
+    if extra:
+        raise InvalidRequestError(
+            "model.upsert_device 不接受额外字段",
+            code="PROJ-CMD-005",
+            params={"extra": extra},
+        )
     if payload.get("kind") is not None and payload["kind"] not in ("existing", "new"):
         raise InvalidRequestError("设备 kind 仅支持 existing/new", code="PROJ-CMD-005")
     devices = content["model"]["devices"]
     device = next((d for d in devices if d.get("name") == name), None)
     if device is None:
+        if payload.get("device_type") is None:
+            raise InvalidRequestError(
+                "新建设备必须提供 device_type", code="PROJ-CMD-005", params={"name": name}
+            )
         device = {"name": name}
         devices.append(device)
-    for field in ("device_type", "kind", "model_fidelity"):
+    if payload.get("device_type") is not None:
+        _require_registered_device_type(payload["device_type"])
+    for field in ("device_type", "kind"):
         if field in payload:
             device[field] = payload[field]
-    if isinstance(payload.get("params"), dict):
-        device["params"] = {**(device.get("params") or {}), **payload["params"]}
+    if "params" in payload:
+        if not isinstance(payload["params"], dict):
+            raise InvalidRequestError(
+                "设备 params 必须为对象",
+                code="PROJ-CMD-005",
+                params={"name": name},
+            )
+        device["params"] = dict(payload["params"])
     if "position" in payload:
         content["layout"].setdefault("positions", {})[name] = payload["position"]
     return {"device": name, "stored": True}

@@ -230,9 +230,9 @@ def _declare_optimization_ready(
     from assembly_fixture import declare_compute_device, save_compute_planning
 
     _declare_finance(db, user, pid)
-    device_ref = declare_compute_device(client, pid, _h(client, user))
+    device_ref, revision = declare_compute_device(client, pid, _h(client, user))
     save_compute_planning(db, pid, user.id, device_ref)
-    revision = _declare_explicit_calc(client, user, pid)
+    revision = _declare_explicit_calc(client, user, pid, revision)
     revision = _declare_assembly_sections(
         client, user, pid, revision, {device_ref: {"type": "none"}}
     )

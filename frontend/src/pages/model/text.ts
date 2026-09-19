@@ -46,9 +46,6 @@ const TEXTS: Record<string, Entry> = {
     en: 'This project was modified in another session. Local changes were not saved to avoid overwriting them.',
   },
   'save.conflict_reload': { zh: '加载服务器版本', en: 'Load server version' },
-  'save.conflict_force': { zh: '仍要覆盖保存', en: 'Save anyway' },
-  'save.no_revision': { zh: '修订号未知', en: 'Revision unknown' },
-  'save.wait': { zh: '设备正在落库,请稍候再连', en: 'Device is syncing, reconnect shortly' },
 
   // 端口与连接
   'port.solar': { zh: '太阳辐射', en: 'Solar' },
@@ -68,16 +65,13 @@ const TEXTS: Record<string, Entry> = {
   'conn.incompatible_duplicate': { zh: '这两个端口之间已存在相同连接', en: 'A connection already exists between these ports' },
   'conn.incompatible_solar': { zh: '太阳辐射端口为资源输入,不支持连线', en: 'Solar ports are resource inputs and cannot be wired' },
   'conn.port_missing': {
-    zh: '服务器未找到匹配的端口(类型/方向不兼容),请刷新后重试',
-    en: 'No matching server port found (type/direction mismatch); refresh and retry',
+    zh: '注册表中未找到匹配的端口声明(类型/方向不兼容),请刷新后重试',
+    en: 'No matching registry port found (type/direction mismatch); refresh and retry',
   },
 
   // 设备节点
   'node.kind_existing': { zh: '存量', en: 'Existing' },
   'node.kind_new': { zh: '新增', en: 'New' },
-  'node.fidelity_low': { zh: 'P1 简化', en: 'P1 simple' },
-  'node.fidelity_medium': { zh: 'P2 标准', en: 'P2 standard' },
-  'node.fidelity_high': { zh: 'P3 详细', en: 'P3 detailed' },
   'node.capacity': { zh: '容量', en: 'Capacity' },
   'node.capacity_none': { zh: '容量未设置', en: 'Capacity not set' },
 

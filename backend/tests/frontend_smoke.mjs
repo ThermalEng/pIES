@@ -117,15 +117,15 @@ async function main() {
   const vres = await api.config.validate(pid)
   check('config.validate → {valid, diagnostics}', typeof vres.valid === 'boolean' && Array.isArray(vres.diagnostics))
 
-  // 10) model.getGraph → GraphModel(graph/devices/ports/connections)
-  const graph = await api.model.getGraph(pid)
-  check('model.getGraph → GraphModel', Array.isArray(graph.devices) && Array.isArray(graph.ports) && Array.isArray(graph.connections) && 'graph' in graph, `devices=${graph.devices.length} ports=${graph.ports.length} conns=${graph.connections.length}`)
+  // 10) model.getModel → {revision, model{devices, connections}}(2.0 名键, 无端口表)
+  const { revision, model } = await api.model.getModel(pid)
+  check('model.getModel → {revision, model}', typeof revision === 'number' && Array.isArray(model.devices) && Array.isArray(model.connections) && !('ports' in model), `rev=${revision} devices=${model.devices.length} conns=${model.connections.length}`)
 
   // 11) model.deviceTypes → DeviceTypeSpec[](items 解包 + 参数规格映射)
   const specs = await api.model.deviceTypes()
   check('model.deviceTypes → DeviceTypeSpec[]', Array.isArray(specs) && specs.length > 0 && 'parameters' in specs[0], `n=${specs.length} first=${specs[0]?.type_id}`)
 
-  // 12) model.validate → ValidationResult
+  // 12) model.validate → ValidationResult(2.0 经 validation/run)
   const mval = await api.model.validate(pid)
   check('model.validate → {valid, diagnostics}', typeof mval.valid === 'boolean' && Array.isArray(mval.diagnostics))
 
@@ -149,28 +149,22 @@ async function main() {
   const users = await api.admin.users({ limit: 20 })
   check('admin.users → {items: AdminUserRow}', Array.isArray(users.items) && 'roles' in (users.items[0] ?? {}), `n=${users.items.length}`)
 
-  // 17) updateDraft(前端命令 → 后端命令清单翻译, 用真实图内容)
-  const sem = {
-    devices: graph.devices.map((d) => ({
-      id: String(d.id), device_type: d.device_type, kind: d.kind, name: d.name,
-      params: d.params ?? {}, model_fidelity: d.model_fidelity, status: 'active',
+  // 17) sendCommands(2.0 名键命令 + 已加载 revision, 写前不 GET; 回传原文验证往返)
+  const cmds = [
+    ...model.devices.map((d) => ({
+      type: 'model.upsert_device',
+      payload: { name: d.name, device_type: d.device_type, kind: d.kind, params: d.params ?? {} },
     })),
-    connections: graph.connections.map((c) => {
-      const fp = graph.ports.find((p) => p.id === c.from_port_id)
-      const tp = graph.ports.find((p) => p.id === c.to_port_id)
-      const carrier = (pt) => ({ electric: 'electric', thermal: 'heat', cooling: 'cool', fuel: 'gas' })[pt] ?? pt
-      return {
-        id: String(c.id),
-        from_device_id: String(fp?.device_id ?? 0),
-        from_port: fp ? { carrier: carrier(fp.port_type), direction: fp.direction === 'in' ? 'in' : 'out' } : undefined,
-        to_device_id: String(tp?.device_id ?? 0),
-        to_port: tp ? { carrier: carrier(tp.port_type), direction: tp.direction === 'in' ? 'in' : 'out' } : undefined,
-        conn_type: c.conn_type, loss_rate: c.loss_rate,
-      }
-    }),
-  }
-  const saved = await api.projects.updateDraft(pid, { command: 'model.set_graph', revision: null, graph: sem })
-  check('updateDraft → {revision}', typeof saved.revision === 'number' && saved.revision > 0, `revision=${saved.revision}`)
+    ...model.connections.map((c) => ({
+      type: 'model.upsert_connection',
+      payload: {
+        name: c.name, from_device: c.from_device, from_port: c.from_port,
+        to_device: c.to_device, to_port: c.to_port,
+      },
+    })),
+  ]
+  const saved = await api.model.sendCommands(pid, cmds, revision)
+  check('sendCommands → {revision}', typeof saved.revision === 'number' && saved.revision >= revision, `revision=${saved.revision}`)
 
   console.log()
   if (failures > 0) {

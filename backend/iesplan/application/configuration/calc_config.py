@@ -6,7 +6,7 @@ model, audit} 域公开门面 + application.projects.content_objects``；
 不导入 ORM、不导入其他域内部模块、不调用 ``services.*``。
 
 职责（与旧 ``services.config`` 一致）：
-- 工作图加载、默认配置生成、配置读写（读用例不提交）；
+- 草稿 model 节设备清单加载、默认配置生成、配置读写（读用例不提交）；
 - ``save_config`` 为顶层事务拥有者（成功 ``db.commit``，失败
   ``db.rollback``；保存同时同步当前草稿内容的 ``calc_config`` 节，
   任务级参数 ``task_params`` 原样保留）；
@@ -21,11 +21,12 @@ model, audit} 域公开门面 + application.projects.content_objects``；
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from sqlalchemy.orm import Session
 
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
-from iesplan import model as model_domain
 from iesplan import project as project_domain
 from iesplan.application.projects import (
     load_content_object,
@@ -90,22 +91,18 @@ def resolve_device_type(device_type: str) -> DeviceTypeSpec | None:
 
 
 def normalize_devices(graph: dict) -> list[dict]:
-    """把系统图 dict 归一化为设备清单(兼容 DB 行与规划模板两种形态)。
+    """草稿 model 节设备清单 → 类型化设备行（只消费 2.0 实例形状）。
 
-    graph: {"devices": [{id, device_type|type, kind|is_new, name, params}, ...]}
+    graph: {"devices": [{name, device_type, kind, params}, ...]}，唯一来源为
+    load_work_graph（形状由起草命令输入边界守卫）；内部不再兼容
+    id/device_id、device_type/type、kind/is_new 双形状，不做重复校验。
     """
     devices: list[dict] = []
     for dev in graph.get("devices", []) or []:
-        if not isinstance(dev, dict):
-            continue
-        kind = dev.get("kind")
-        if kind is None:
-            kind = "new" if dev.get("is_new") else "existing"
         devices.append(
             {
-                "id": dev.get("id") or dev.get("device_id"),
-                "device_type": dev.get("device_type") or dev.get("type") or "",
-                "kind": kind,
+                "device_type": dev.get("device_type") or "",
+                "kind": dev.get("kind") or "new",
                 "name": dev.get("name") or "",
                 "params": dict(dev.get("params") or {}),
             }
@@ -114,27 +111,25 @@ def normalize_devices(graph: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 默认配置生成(纯构造: 调用方先备好工作图与币种)
+# 默认配置生成(纯构造: 调用方先备好草稿设备清单与币种)
 # ---------------------------------------------------------------------------
 
 
 def _default_parameters(graph: dict) -> dict:
     """设备参数当前值 = 注册表默认值叠加设备行参数(设备行参数优先)。
 
-    解析优先使用设备行 params['type_detail'](模型服务写入的完整 2.0 注册表
-    ID), 回退到 device_type 短名; 未注册返回 None 的设备跳过。存量与新增
-    设备均以注册表 property value 打底, 设备行参数覆盖。
+    设备类型只消费明确 2.0 输入 device_type(裸稳定 ID，无 type_detail 回退);
+    未注册返回 None 的设备跳过。存量与新增设备均以注册表 property value
+    打底, 设备行参数覆盖。
     """
     devices: dict = {}
     for dev in normalize_devices(graph):
-        params = dev["params"] or {}
-        type_id = params.get("type_detail") or dev["device_type"]
-        spec = resolve_device_type(type_id)
+        spec = resolve_device_type(dev["device_type"])
         if spec is None:
             continue
         merged = {name: p.value for name, p in spec.properties.items()}
         merged.update(dev["params"])  # 设备行参数覆盖注册表默认
-        devices[str(dev["id"]) if dev["id"] is not None else dev["name"]] = merged
+        devices[dev["name"]] = merged
     return {
         "devices": devices,
         "economic": {k: v["default"] for k, v in configuration_domain.ECONOMIC_PARAM_SPECS.items()},
@@ -151,7 +146,7 @@ def build_default_config(graph: dict, currency: str = "CNY") -> dict:
     """生成默认计算配置(见 services 收敛前的模块 docstring 结构说明)。
 
     参数:
-        graph: 系统模型图 dict(与 validate_config 同构的设备清单)。
+        graph: 草稿 model 节设备清单 dict(与 validate_config 同构)。
         currency: 经济参数币种(调用方按项目币种传入, 缺省 CNY)。
     """
     params = _default_parameters(graph)
@@ -176,33 +171,20 @@ def build_default_config(graph: dict, currency: str = "CNY") -> dict:
 
 
 def load_work_graph(db: Session, project_id: int) -> dict:
-    """加载项目当前工作图(设备清单)。
+    """加载项目当前草稿内容 model 节设备清单(2.0 唯一项目建模事实)。
 
-    优先取 current_draft_id 关联的工作图; 未关联时取该项目最近一张工作图;
-    无任何图返回空设备清单(默认配置仍可生成)。
+    项目不存在返回空设备清单(默认配置仍可生成); 草稿或内容缺失按实际
+    错误透传，不回退旧图。
     """
-    graph = None
-    if project_id is not None:
-        proj = project_domain.get_project(db, project_id)
-        if proj is not None and proj.current_draft_id is not None:
-            graph = model_domain.find_graph_by_draft(db, project_id, proj.current_draft_id)
-        if graph is None:
-            graph = model_domain.find_latest_working_graph(db, project_id)
-    if graph is None:
+    if project_id is None or project_domain.get_project(db, project_id) is None:
         return {"devices": []}
-    rows = model_domain.list_devices(db, graph.id)
-    return {
-        "devices": [
-            {
-                "id": d.id,
-                "device_type": d.device_type,
-                "kind": d.kind,
-                "name": d.name,
-                "params": dict(d.params or {}),
-            }
-            for d in rows
-        ]
-    }
+    draft = project_domain.require_current_draft(
+        db, project_domain.require_project(db, project_id)
+    )
+    content = load_content_object(db, draft.content_object_id)
+    model = content.get("model")
+    devices = model.get("devices") if isinstance(model, Mapping) else None
+    return {"devices": [dict(d) for d in devices if isinstance(d, dict)] if devices else []}
 
 
 def get_default_config(db: Session, project_id: int) -> dict:
@@ -248,9 +230,8 @@ def _validate_device_parameters(config: dict, devices: list[dict], diags: list[D
     device_params = params.get("devices", {})
     for dev in devices:
         dev_params = dev["params"] or {}
-        type_id = dev_params.get("type_detail") or dev["device_type"]
-        spec = resolve_device_type(type_id)
-        key = str(dev["id"]) if dev["id"] is not None else dev["name"]
+        spec = resolve_device_type(dev["device_type"])
+        key = dev["name"]
         if spec is None:
             continue
         cur = device_params.get(key, {})
@@ -295,7 +276,7 @@ def _validate_device_refs(config: dict, devices: list[dict], diags: list[Diagnos
     仅检查经纯规则类型校验通过的变量（类型非法已报错，不级联引用诊断，
     与原领域实现一致）；由 ``validate_config`` 在纯规则之后调用。
     """
-    devices_by_key = {str(dev["id"]) if dev["id"] is not None else dev["name"]: dev for dev in devices}
+    devices_by_key = {dev["name"]: dev for dev in devices}
     variables = config["variables"]
     if not isinstance(variables, list):
         return
@@ -682,17 +663,15 @@ def _property_meta(p: PropertySpec) -> dict:
 def parameter_metadata(graph: dict) -> dict:
     """生成参数元数据(每个参数的单位/范围/默认值/帮助键, 供前端渲染)。
 
-    graph: 与 validate_config 同构的设备清单 dict。
+    graph: 与 validate_config 同构的草稿 model 节设备清单 dict。
     """
     device_meta: dict[str, dict] = {}
     for dev in normalize_devices(graph):
-        params = dev["params"] or {}
-        type_id = params.get("type_detail") or dev["device_type"]
-        spec = resolve_device_type(type_id)
+        # 设备类型只按 device_type 解析，不回退 params.type_detail。
+        spec = resolve_device_type(dev["device_type"])
         if spec is None:
             continue
-        key = str(dev["id"]) if dev["id"] is not None else dev["name"]
-        device_meta[key] = {name: _property_meta(p) for name, p in spec.properties.items()}
+        device_meta[dev["name"]] = {name: _property_meta(p) for name, p in spec.properties.items()}
     return {
         "parameters": {
             "devices": device_meta,

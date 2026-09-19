@@ -649,7 +649,7 @@ class VersionRef(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "ref_type IN ('dataset_version','system_graph','calc_config','calc_snapshot',"
+            "ref_type IN ('dataset_version','calc_config','calc_snapshot',"
             "'evidence_package','report','object')",
             name="ck_version_refs_type",
         ),

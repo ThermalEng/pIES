@@ -87,9 +87,10 @@ def main():
     s, body = call("POST", f"/projects/{project_id}/config/validate", {"config": (call("GET", f"/projects/{project_id}/config", token=token)[1])["config"]}, token)
     check("config.validate → {diagnostics,count}", s == 200 and isinstance(body.get("diagnostics"), list), str(s))
 
-    # 6) model graph → {graph_id, devices, ports, connections, layout}
-    s, body = call("GET", f"/projects/{project_id}/model", token=token)
-    check("model.getGraph → {graph_id,devices,ports,connections,layout}", s == 200 and isinstance(body.get("devices"), list) and isinstance(body.get("connections"), list), str(list(body.keys())))
+    # 6) 2.0 建模面: 项目视图草稿内容 model 节 → {devices, connections}(名键, 无端口表)
+    s, body = call("GET", f"/projects/{project_id}", token=token)
+    model = (body.get("draft") or {}).get("content", {}).get("model", {}) if isinstance(body, dict) else {}
+    check("model.getModel → content.model{devices,connections}", s == 200 and isinstance(model.get("devices"), list) and isinstance(model.get("connections"), list), str(sorted(model.keys())))
     s, body = call("GET", "/registry/device-types", token=token)
     check("registry.device-types → {items:[{type_id,parameters}]}", s == 200 and isinstance(body.get("items"), list) and "type_id" in body["items"][0], str(list(body.keys())))
 
@@ -99,7 +100,7 @@ def main():
         "commands": [{
             "id": "smoke-1", "project_id": project_id, "expected_revision": revision,
             "session": "browser", "unit": "model", "type": "model.upsert_device",
-            "payload": {"name": "smoke-device", "device_type": body["items"][0]["type_id"] if isinstance(body.get("items"), list) and body.get("items") else "ies.device.pv", "kind": "new", "model_fidelity": "medium", "params": {}},
+            "payload": {"name": "smoke-device", "device_type": body["items"][0]["type_id"] if isinstance(body.get("items"), list) and body.get("items") else "ies.device.pv", "kind": "new", "params": {}},
         }],
     }, token)
     check("draft.updateDraft → {revision,results}", s == 200 and "revision" in body, str(s) + str(body)[:150])

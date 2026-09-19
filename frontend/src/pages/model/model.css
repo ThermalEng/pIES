@@ -282,15 +282,6 @@
   pointer-events: none;
 }
 
-.mp-node__fidelity {
-  flex: none;
-  padding: 1px 6px;
-  border: 1px solid var(--ies-color-border);
-  border-radius: 3px;
-  font-weight: 600;
-  color: var(--ies-color-text-secondary);
-}
-
 .mp-node__capacity {
   min-width: 0;
   overflow: hidden;

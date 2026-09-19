@@ -16,28 +16,33 @@ from iesplan.computation import ComputationUnavailableError
 
 
 def test_assemble_api_full_context() -> None:
-    """assemble_api 装配 database、storage 与 registry。"""
+    """assemble_api 装配 database、storage、registry 与生成器目录。"""
     ctx = assemble_api()
     assert isinstance(ctx, ApplicationContext)
     assert ctx.session_factory is not None
     assert ctx.storage is not None
     assert ctx.device_registry is not None
+    assert ctx.generator_registry is not None
+    assert ctx.generator_registry.snapshot() == ()
     health = ctx.health()
     assert health["db"] == "ok"
     assert health["registry"] == "ok"
+    assert health["generators"] == "ok"
     assert all(isinstance(v, str) for v in health.values())
     assert ctx.ready() is True
 
 
 def test_assemble_worker_subsets() -> None:
-    """0.8 前计算 Worker 拒绝启动；I/O Worker 正常装配。"""
+    """空生成器目录时计算 Worker 拒绝启动；I/O Worker 正常装配。"""
     with pytest.raises(ComputationUnavailableError):
         assemble_compute_worker()
 
     io = assemble_io_worker()
     assert io.storage is not None
     assert io.device_registry is None
+    assert io.generator_registry is None
     assert "registry" not in io.health()
+    assert "generators" not in io.health()
     assert io.health()["db"] == "ok"
 
 

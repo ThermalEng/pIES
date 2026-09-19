@@ -58,13 +58,13 @@ def mini_content(
     if devices is None:
         devices = [
             {
-                "id": 1, "device_type": "ies.device.grid_connection", "kind": "existing",
+                "device_type": "ies.device.grid_connection", "kind": "existing",
                 "name": "电网",
                 # 2.0 电价归 tariff_bindings，设备 params 只保留注册属性。
                 "params": {"max_import_power_kw": 5000, "max_export_power_kw": 0},
             },
             {
-                "id": 2, "device_type": "ies.device.battery", "kind": "existing",
+                "device_type": "ies.device.battery", "kind": "existing",
                 "name": "电池",
                 "params": {"capacity_kwh": 2, "rated_power_kw": 2, "initial_soc": 0.5,
                            "min_soc": 0.1, "max_soc": 0.9,
@@ -78,7 +78,6 @@ def mini_content(
         "extensions": {},
         "model": {
             "devices": devices,
-            "ports": [],
             "connections": [],
         },
         "layout": {},

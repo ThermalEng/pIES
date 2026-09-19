@@ -8,11 +8,11 @@
  *   启发式兜底; 仅热泵按 mode 参数裁剪未启用的冷/热输出, 与后端端口生成
  *   规则一致(保证画布句柄与服务端端口一一对应)。
  * - 连接兼容校验:能源类型一致 且 方向为 out → in;不兼容返回可定位原因。
- * - 语义内容序列化(updateDraft 载荷)与 GraphModel 反序列化。
+ * - 草稿内容(2.0 名键设备/连接)反序列化: 端口名经注册表声明解析为句柄。
  * - 布局(节点坐标)与拓扑分离:坐标独立持久化,不进入语义内容。
  *
- * 本地端口 id 约定:`{carrier}:{direction}`(节点作用域内唯一;bidirectional
- * 端口展开为 in/out 两个句柄, 共享同一服务器端口)。
+ * 句柄 id 约定:`{carrier}:{direction}:{name}`, name 为注册表端口声明名;
+ * bidirectional 端口展开为 in/out 两个句柄。
  */
 
 import type {
@@ -21,8 +21,6 @@ import type {
   DeviceKind,
   DeviceTypeSpec,
   EnergyCarrier,
-  Fidelity,
-  GraphModel,
   ParameterSpec,
 } from '../../types'
 
@@ -31,13 +29,12 @@ import type {
 // ---------------------------------------------------------------------------
 
 export interface LocalDevice {
-  /** 本地 id:服务器设备 id 的字符串形式;新建设备为 d_ 前缀本地 id。 */
+  /** 本地 id 即设备名(2.0 名键唯一事实; 改名即换键, 调用方同步连接引用与布局)。 */
   id: string
   deviceType: string
   kind: DeviceKind
   name: string
   params: Record<string, unknown>
-  fidelity: Fidelity
   position: { x: number; y: number }
 }
 
@@ -49,9 +46,10 @@ export interface PortDef {
 }
 
 export interface LocalConnection {
+  /** 本地 id 即服务端连接名(2.0 名键)。 */
   id: string
   fromDeviceId: string
-  /** 端口句柄 id,形如 `{carrier}:{direction}`。 */
+  /** 端口句柄 id,形如 `{carrier}:{direction}:{name}`。 */
   fromHandle: string
   toDeviceId: string
   toHandle: string
@@ -69,10 +67,6 @@ export function localId(): string {
   return `${LOCAL_PREFIX}${Date.now().toString(36)}_${idCounter.toString(36)}`
 }
 
-export function isLocalId(id: string): boolean {
-  return id.startsWith(LOCAL_PREFIX)
-}
-
 export function handleId(name: string, carrier: EnergyCarrier, direction: 'in' | 'out'): string {
   return `${carrier}:${direction}:${name}`
 }
@@ -80,16 +74,15 @@ export function handleId(name: string, carrier: EnergyCarrier, direction: 'in' |
 export function parseHandle(
   handle: string,
 ): { carrier: EnergyCarrier; direction: 'in' | 'out'; name: string } | null {
-  // 兼容旧句柄 `{carrier}:{direction}`(RR-P1-04 整改前的产物)。
-  // 新句柄格式 `{carrier}:{direction}:{name}`, 旧格式 name 留空, 提交时由
-  // ModelPage 走 carrier+direction 取第一个匹配端口(降级路径, 仅历史存档可触发)。
+  // 句柄格式 `{carrier}:{direction}:{name}`, name 为注册表端口声明名(2.0 连线键)。
   const parts = handle.split(':')
-  if (parts.length < 2) return null
+  if (parts.length < 3) return null
   const carrier = parts[0] as EnergyCarrier
   const direction = parts[1] as 'in' | 'out'
   if (!ENERGY_CARRIERS.includes(carrier)) return null
   if (direction !== 'in' && direction !== 'out') return null
-  const name = parts.slice(2).join(':') || ''
+  const name = parts.slice(2).join(':')
+  if (!name) return null
   return { carrier, direction, name }
 }
 
@@ -178,24 +171,8 @@ export function checkConnection(
 }
 
 // ---------------------------------------------------------------------------
-// 载能 → 连接类型 / 文案映射
+// 载能 → 文案映射
 // ---------------------------------------------------------------------------
-
-/** 载能 → 工程连接类型(ConnectionInput.conn_type);solar 不可连线返回 null。 */
-export function carrierToConnType(carrier: EnergyCarrier): Connection['conn_type'] | null {
-  switch (carrier) {
-    case 'electric':
-      return 'electric_line'
-    case 'heat':
-      return 'thermal_pipe'
-    case 'cool':
-      return 'cooling_pipe'
-    case 'gas':
-      return 'fuel_pipe'
-    case 'solar':
-      return null
-  }
-}
 
 /** 载能 → 展示文案键(全局 i18n 已覆盖的键)。 */
 export function carrierLabelKey(carrier: EnergyCarrier): string {
@@ -274,65 +251,54 @@ export function defaultDeviceName(spec: DeviceTypeSpec, sameTypeCount: number, l
 }
 
 // ---------------------------------------------------------------------------
-// GraphModel(服务器图)反序列化
+// 草稿内容(2.0 名键)反序列化
 // ---------------------------------------------------------------------------
 
-/** 服务器 PortType → 载能(本产品设备集只出现四类能源端口)。 */
-function portTypeToCarrier(portType: string): EnergyCarrier | null {
-  switch (portType) {
-    case 'electric':
-      return 'electric'
-    case 'thermal':
-      return 'heat'
-    case 'cooling':
-      return 'cool'
-    case 'fuel':
-      return 'gas'
-    default:
-      return null
-  }
-}
-
-/** 服务器设备 → 本地设备(坐标取自布局存储,缺省散列摆放)。 */
-export function deviceFromServer(
+/** 草稿设备条目 → 本地设备(id 即设备名; 坐标取自布局存储,缺省散列摆放)。 */
+export function deviceFromDraft(
   device: Device,
   fallbackPosition: { x: number; y: number },
 ): LocalDevice {
   return {
-    id: String(device.id),
+    id: device.name,
     deviceType: device.device_type,
     kind: device.kind,
     name: device.name,
     params: { ...device.params },
-    fidelity: device.model_fidelity,
     position: fallbackPosition,
   }
 }
 
-/** 服务器连接 → 本地连接(经 ports 表把端口 id 映射回 载能:方向:端口名)。 */
-export function connectionFromServer(
+/** 在注册表派生句柄中按端口名找定义(方向须匹配; 双向端口已展开为 in/out)。 */
+function findPortDef(
+  spec: DeviceTypeSpec | null,
+  params: Record<string, unknown>,
+  portName: string,
+  direction: 'in' | 'out',
+): PortDef | null {
+  if (!spec) return null
+  return derivePorts(spec, params).find((p) => p.name === portName && p.direction === direction) ?? null
+}
+
+/** 草稿连接条目 → 本地连接(端点名经注册表端口声明解析为句柄; 解析失败返回 null)。 */
+export function connectionFromDraft(
   conn: Connection,
-  ports: GraphModel['ports'],
-  deviceById: Map<string, LocalDevice>,
+  deviceByName: Map<string, LocalDevice>,
+  specOf: (typeId: string) => DeviceTypeSpec | null,
 ): LocalConnection | null {
-  const fromPort = ports.find((p) => p.id === conn.from_port_id)
-  const toPort = ports.find((p) => p.id === conn.to_port_id)
-  if (!fromPort || !toPort) return null
-  const fromCarrier = portTypeToCarrier(fromPort.port_type)
-  const toCarrier = portTypeToCarrier(toPort.port_type)
-  if (!fromCarrier || !toCarrier || fromCarrier !== toCarrier) return null
-  const fromDirection: 'in' | 'out' = fromPort.direction === 'in' ? 'in' : 'out'
-  const toDirection: 'in' | 'out' = toPort.direction === 'in' ? 'in' : 'out'
-  const fromDeviceId = String(fromPort.device_id)
-  const toDeviceId = String(toPort.device_id)
-  if (!deviceById.has(fromDeviceId) || !deviceById.has(toDeviceId)) return null
+  const fromDevice = deviceByName.get(conn.from_device)
+  const toDevice = deviceByName.get(conn.to_device)
+  if (!fromDevice || !toDevice) return null
+  const fromDef = findPortDef(specOf(fromDevice.deviceType), fromDevice.params, conn.from_port, 'out')
+  const toDef = findPortDef(specOf(toDevice.deviceType), toDevice.params, conn.to_port, 'in')
+  if (!fromDef || !toDef || fromDef.carrier !== toDef.carrier) return null
   return {
-    id: String(conn.id),
-    fromDeviceId,
-    fromHandle: handleId(fromPort.name, fromCarrier, fromDirection),
-    toDeviceId,
-    toHandle: handleId(toPort.name, toCarrier, toDirection),
-    carrier: fromCarrier,
+    id: conn.name,
+    fromDeviceId: fromDevice.id,
+    fromHandle: handleId(fromDef.name, fromDef.carrier, 'out'),
+    toDeviceId: toDevice.id,
+    toHandle: handleId(toDef.name, toDef.carrier, 'in'),
+    carrier: fromDef.carrier,
   }
 }
 

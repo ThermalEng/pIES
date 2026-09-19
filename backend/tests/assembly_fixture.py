@@ -2,9 +2,9 @@
 
 计算任务提交闸门只消费冻结版本内容钉选的精确引用(effective_finance /
 planning_config)，不再接受 assembly.set_planning 草稿副本(已删除)。
-本模块提供各测试复用的最小公共搭建：经模型公共 API 创建单电池设备，
-经规划公共用例保存最小规划修订(常量目标 + 以该设备为 device_ref 的
-单变量)。真实项目按真实拓扑与真实规划声明。
+本模块提供各测试复用的最小公共搭建：经项目草稿语义命令声明单电池
+设备，经规划公共用例保存最小规划修订(常量目标 + 以该设备为
+device_ref 的单变量)。真实项目按真实拓扑与真实规划声明。
 """
 
 from __future__ import annotations
@@ -25,24 +25,38 @@ FIXTURE_BATTERY_PARAMS: dict[str, Any] = {
 
 def declare_compute_device(
     client: TestClient, pid: int, headers: dict[str, str]
-) -> str:
-    """经模型公共 API 创建夹具电池设备，返回装配实例引用(``d{id}``)。
+) -> tuple[str, int]:
+    """经项目草稿语义命令声明夹具电池设备。
 
-    设备行 id 由模型域分配；装配构造器按 ``d{id}`` 规则派生实例引用，
-    finance_binding 与规划变量须使用同一引用。
+    返回(装配实例引用, 声明后草稿修订号)。2.0 唯一项目建模事实：名键设备
+    实例经 ``model.upsert_device`` 写入草稿内容；装配构造器按设备名派生
+    实例引用，finance_binding 与规划变量须使用同一引用。
     """
-    resp = client.post(
-        f"/api/projects/{pid}/model/devices",
+    view = client.get(f"/api/projects/{pid}", headers=headers).json()
+    revision = view["draft"]["revision"]
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
         json={
-            "device_type": FIXTURE_BATTERY_TYPE,
-            "name": FIXTURE_BATTERY_NAME,
-            "params": dict(FIXTURE_BATTERY_PARAMS),
-            "position": {"x": 1.0, "y": 1.0},
+            "expected_revision": revision,
+            "commands": [
+                {
+                    "id": "fixture-declare-battery",
+                    "unit": "model",
+                    "type": "model.upsert_device",
+                    "payload": {
+                        "name": FIXTURE_BATTERY_NAME,
+                        "device_type": FIXTURE_BATTERY_TYPE,
+                        "kind": "new",
+                        "params": dict(FIXTURE_BATTERY_PARAMS),
+                        "position": {"x": 1.0, "y": 1.0},
+                    },
+                }
+            ],
         },
         headers=headers,
     )
-    assert resp.status_code == 201, resp.text
-    return f"d{resp.json()['device']['id']}"
+    assert resp.status_code == 200, resp.text
+    return FIXTURE_BATTERY_NAME, resp.json()["revision"]
 
 
 def save_compute_planning(

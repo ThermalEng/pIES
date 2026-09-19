@@ -60,8 +60,7 @@ import type {
   Device,
   DeviceTypeSpec,
   Diagnostic,
-  GraphModel,
-  Port,
+  DraftModelSection,
   Project,
   Severity,
   VariableType,
@@ -219,17 +218,14 @@ function objOf(params: Record<string, unknown> | undefined, key: string): Record
 }
 
 /** 设备容量:优先 params 容量键,其次端口容量最大值。 */
-function deviceCapacity(device: Device, ports: Port[]): number | null {
+function deviceCapacity(device: Device): number | null {
+  // 2.0 无服务端端口表: 容量只取设备参数(容量、效率曲线等物理参数)。
   const p = device.params ?? {}
   for (const k of ['capacity', 'rated_capacity', 'installed_capacity', 'power']) {
     const v = p[k]
     if (typeof v === 'number' && Number.isFinite(v)) return v
   }
-  const portCaps = ports
-    .filter((pt) => pt.device_id === device.id)
-    .map((pt) => pt.capacity)
-    .filter((c): c is number => c !== null)
-  return portCaps.length > 0 ? Math.max(...portCaps) : null
+  return null
 }
 
 /**
@@ -312,7 +308,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
   const [frozen, setFrozen] = useState(false)
   const [config, setConfig] = useState<CalcConfig | null>(null)
   const [algorithms, setAlgorithms] = useState<Array<{ name: string; label: string; description_key: string }>>([])
-  const [graph, setGraph] = useState<GraphModel | null>(null)
+  const [graph, setGraph] = useState<DraftModelSection | null>(null)
   const [specs, setSpecs] = useState<DeviceTypeSpec[]>([])
 
   const [name, setName] = useState('')
@@ -345,7 +341,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
     cfg: CalcConfig | CalcConfigInput,
     algos: Array<{ name: string; label: string; description_key: string }>,
     proj: Project | null,
-    g: GraphModel | null,
+    g: DraftModelSection | null,
     sp: DeviceTypeSpec[],
   ) {
     setConfig('status' in cfg ? (cfg as CalcConfig) : null)
@@ -398,7 +394,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
     setExistingDevices(
       (g?.devices ?? [])
         .filter((d) => d.kind === 'existing')
-        .map((d) => ({ name: d.name, deviceType: d.device_type, capacity: deviceCapacity(d, g?.ports ?? []) })),
+        .map((d) => ({ name: d.name, deviceType: d.device_type, capacity: deviceCapacity(d) })),
     )
 
     const objectives = cfg.objectives ?? []
@@ -473,7 +469,7 @@ export function ConfigPage({ projectId }: ConfigPageProps) {
           api.config.get(projectIdNum).catch(() => api.config.default(projectIdNum)),
           api.config.algorithms().catch(() => ({ items: [] as Array<{ name: string; label: string; description_key: string }> })),
           wbProject ? Promise.resolve(null) : api.projects.get(projectIdNum).catch(() => null),
-          api.model.getGraph(projectIdNum).catch(() => null),
+          api.model.getModel(projectIdNum).then((r) => r.model).catch(() => null),
           api.model.deviceTypes().catch(() => [] as DeviceTypeSpec[]),
         ])
         if (cancelled) return

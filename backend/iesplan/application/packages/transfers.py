@@ -1313,7 +1313,7 @@ def export_excel(
         r = 3
         for dev in devices:
             params = dev.get("params") or {}
-            type_name = params.get("type_detail") or dev.get("device_type") or "—"
+            type_name = dev.get("device_type") or "—"
             dev_sheet.cell(row=r, column=1, value=_excel_safe(str(dev.get("name") or "")))
             dev_sheet.cell(row=r, column=2, value=_excel_safe(str(type_name)))
             dev_sheet.cell(

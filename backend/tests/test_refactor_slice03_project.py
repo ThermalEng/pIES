@@ -206,6 +206,15 @@ def test_version_lifecycle_refs_and_parent(db_session: Session) -> None:
     assert pointed is not None and pointed.current_version_id == v2.id
 
 
+def test_initial_content_model_has_no_ports_table() -> None:
+    """新草稿权威形状: model 节只有 devices/connections 名键表, 无 ports 持久化表。
+
+    端口由设备 descriptor 实时派生(画布/装配同一来源), 不再持久化空表。
+    """
+    content = project_domain.initial_content()
+    assert content["model"] == {"devices": [], "connections": []}
+
+
 def test_duplicate_version_ref_conflicts(db_session: Session) -> None:
     created = _make_project(db_session, "vr")
     draft = project_domain.create_draft(db_session, project_id=created.id, content_object_id=51, updated_by=7)

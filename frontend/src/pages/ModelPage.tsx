@@ -2,16 +2,17 @@
  * 建模画布页面(/projects/:id/model)。
  *
  * 能力:
- * - 左侧设备面板(注册表 /api/model/device-types),拖拽添加到画布;
- *   节点展示 名称/类型/存量新增徽章/容量(P1 简化 / P2 标准 / P3 详细)。
+ * - 左侧设备面板(注册表 /api/registry/device-types),拖拽添加到画布;
+ *   节点展示 名称/类型/存量新增徽章/容量。
  * - 端口间连线:按 能源类型 + 方向(out 源 → in 汇)校验,不兼容连接被阻止
  *   并生成可定位诊断(可跳转到相关设备)。
  * - 设备参数侧栏:按设备类型 schema 渲染表单(单位/范围/默认值/帮助键),
- *   存量/新增切换(默认值随属性切换),模型精度选择。
- * - 保存:语义命令提交(projects.updateDraft)+ 修订号冲突检测;
- *   自动保存(1.2s 防抖)+ 手动保存按钮;冲突时提示"加载服务器版本/覆盖保存"。
+ *   存量/新增切换(默认值随属性切换)。
+ * - 保存:设备/连接变更即时经草稿语义命令提交
+ *   (PUT /api/projects/{id}/draft, model.upsert_device/remove_device/
+ *   upsert_connection/remove_connection); 设备与连接均以名称为键。
  * - 布局与拓扑分离:节点坐标独立持久化到 localStorage,不进入语义内容。
- * - 工具栏:缩放 / 适应视图 / 校验(调用 graph/validate 显示诊断列表,可定位)。
+ * - 工具栏:缩放 / 适应视图 / 校验(调用 validation/run 显示诊断列表,可定位)。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -31,7 +32,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { ApiError } from '../types'
-import type { Diagnostic, DeviceTypeSpec, Fidelity, Port } from '../types'
+import type { Diagnostic, DeviceTypeSpec } from '../types'
 import { useI18n, translateDiagnostic, translateError } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import {
@@ -50,13 +51,12 @@ import type { DeviceNodeData } from './model/DeviceNode'
 import {
   buildDefaultParams,
   carrierLabelKey,
-  carrierToConnType,
   checkConnection,
-  connectionFromServer,
+  connectionFromDraft,
   defaultDeviceName,
   defaultParamValue,
-  deviceFromServer,
-  isLocalId,
+  derivePorts,
+  deviceFromDraft,
   loadLayout,
   localId,
   parseHandle,
@@ -89,15 +89,6 @@ const CARRIER_COLOR: Record<string, string> = {
   heat: '#c2410c',
   cool: '#0891b2',
   gas: '#8a5a00',
-}
-
-/** 画布载能 → 服务器 port_type(FE-BE-02: 与后端 CARRIER_PORT_TYPE 一致,
- * 连线按真实端口匹配, 不再按方向取第一个端口)。 */
-const CARRIER_TO_PORT_TYPE: Record<string, Port['port_type']> = {
-  electric: 'electric',
-  heat: 'thermal',
-  cool: 'cooling',
-  gas: 'fuel',
 }
 
 /** 任意异常 → ApiError(供 translateError 渲染)。 */
@@ -135,7 +126,6 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const [typesError, setTypesError] = useState(false)
   const [devices, setDevices] = useState<LocalDevice[]>([])
   const [connections, setConnections] = useState<LocalConnection[]>([])
-  const [ports, setPorts] = useState<Port[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -163,6 +153,21 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   // -- 保存 ------------------------------------------------------------
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [lastError, setLastError] = useState<string | null>(null)
+  // 草稿修订(乐观锁): 已加载值, 写操作直接使用, 成功后以后端返回为准;
+  // ref 镜像防连续写之间闭包过期, 写前不再 GET(单 PUT 即原子提交)。
+  const revisionRef = useRef<number>(1)
+  /** 写冲突(409)进冲突态: 提示加载服务器版本(本地画布未动, 与服务端一致)。 */
+  const handleWriteError = useCallback(
+    (err: unknown, onOther: () => void) => {
+      if (toApiError(err).status === 409) {
+        setSaveState('conflict')
+        setAutosave('error')
+      } else {
+        onOther()
+      }
+    },
+    [setAutosave],
+  )
 
   // -- 校验与连接诊断 --------------------------------------------------
   const [issues, setIssues] = useState<IssueItem[]>([])
@@ -183,36 +188,28 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const reloadGraph = useCallback(async () => {
     setLoading(true)
     try {
-      const graph = await api.model.getGraph(projectId)
-      // has_graph=false 为后端显式空态(项目尚未建模): 渲染初始画布, 非错误。
-      if (!graph.has_graph) {
-        setDevices([])
-        setConnections([])
-        setPorts([])
-        setLoadError(null)
-      } else {
-        const layout = loadLayout(projectId)
-        const deviceList = graph.devices.map((d, i) =>
-          // 缺省布局须保证节点互不重叠(节点宽 ≥190px 含端口手柄, 手柄外伸约 7px):
-          // 之前 80px 横距/60px 纵距的密集网格会让相邻节点盖住源端口,
-          // 源端口中心点被邻居节点的 .mp-node__type 命中, 连线手势无法开始。
-          deviceFromServer(d, layout[String(d.id)] ?? { x: 80 + (i % 4) * 260, y: 80 + Math.floor(i / 4) * 180 }),
-        )
-        const deviceById = new Map(deviceList.map((d) => [d.id, d]))
-        const connectionList = graph.connections
-          .map((c) => connectionFromServer(c, graph.ports, deviceById))
-          .filter((c): c is LocalConnection => c !== null)
-        setDevices(deviceList)
-        setConnections(connectionList)
-        setPorts(graph.ports)
-        setLoadError(null)
-      }
+      // 2.0 唯一项目建模事实: 项目视图草稿内容 model 节(名键设备与端点连接)。
+      const { model, revision } = await api.model.getModel(projectId)
+      revisionRef.current = revision
+      const layout = loadLayout(projectId)
+      const deviceList = model.devices.map((d, i) =>
+        // 缺省布局须保证节点互不重叠(节点宽 ≥190px 含端口手柄, 手柄外伸约 7px):
+        // 之前 80px 横距/60px 纵距的密集网格会让相邻节点盖住源端口,
+        // 源端口中心点被邻居节点的 .mp-node__type 命中, 连线手势无法开始。
+        deviceFromDraft(d, layout[d.name] ?? { x: 80 + (i % 4) * 260, y: 80 + Math.floor(i / 4) * 180 }),
+      )
+      const deviceByName = new Map(deviceList.map((d) => [d.name, d]))
+      const connectionList = model.connections
+        .map((c) => connectionFromDraft(c, deviceByName, (typeId) => typeMap[typeId] ?? null))
+        .filter((c): c is LocalConnection => c !== null)
+      setDevices(deviceList)
+      setConnections(connectionList)
+      setLoadError(null)
     } catch (err) {
       // 加载失败(网络/权限等): 显示错误并以空画布继续(可本地编辑,保存时再校验)
       setLoadError(translateError(toApiError(err)))
       setDevices([])
       setConnections([])
-      setPorts([])
     } finally {
       setLoading(false)
       setSelectedDeviceId(null)
@@ -221,9 +218,12 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       setSaveState('saved')
       setAutosave('saved')
     }
-  }, [projectId, setAutosave])
+  }, [projectId, setAutosave, typeMap])
 
+  // 注册表 deviceTypes 全局唯一, 每个会话只加载一次(与草稿加载解耦,
+  // 避免 deviceTypes 更新改变 reloadGraph 身份导致加载 effect 循环请求)。
   useEffect(() => {
+    if (deviceTypes !== null || typesError) return
     let cancelled = false
     void api.model
       .deviceTypes()
@@ -237,77 +237,179 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       .catch(() => {
         if (!cancelled) setTypesError(true)
       })
-    void reloadGraph()
     return () => {
       cancelled = true
     }
-  }, [reloadGraph])
+  }, [projectId, deviceTypes, typesError])
 
-  // -- 设备增删改(写 SystemGraph) -------------------------------------
+  // 草稿加载: 初挂载 / 项目切换 / 手动刷新时取数; 连接解析依赖 descriptor,
+  // 故等待注册表就绪(或失败)后再请求, 之后 deviceTypes 不再变化, 无循环。
+  useEffect(() => {
+    if (deviceTypes === null && !typesError) return
+    void reloadGraph()
+  }, [reloadGraph, deviceTypes, typesError])
+
+  // -- 设备增删改(2.0 草稿语义命令, 名键) --------------------------------
+  /** 默认名与已有效果冲突时追加序号(服务端 upsert 按名覆盖, 不可静默复用)。 */
+  const uniqueDeviceName = useCallback(
+    (base: string, exceptId: string | null = null): string => {
+      const taken = new Set(devices.filter((d) => d.id !== exceptId).map((d) => d.name))
+      if (!taken.has(base)) return base
+      let i = 2
+      while (taken.has(`${base} ${i}`)) i += 1
+      return `${base} ${i}`
+    },
+    [devices],
+  )
+
   const addDevice = useCallback(
     async (spec: ExtendedDeviceTypeSpec, position: { x: number; y: number }) => {
       try {
         const sameTypeCount = devices.filter((d) => d.deviceType === spec.type_id).length
-        const name = defaultDeviceName(spec as DeviceTypeSpec, sameTypeCount, locale)
+        const name = uniqueDeviceName(defaultDeviceName(spec as DeviceTypeSpec, sameTypeCount, locale))
         const params = buildDefaultParams(spec as DeviceTypeSpec, 'new')
-        const created = await api.model.addDevice(projectId, {
-          device_type: spec.type_id,
-          name,
-          params,
-          kind: 'new',
-          model_fidelity: 'medium',
-        })
+        const { revision } = await api.model.upsertDevice(
+          projectId,
+          {
+            device_type: spec.type_id,
+            name,
+            params,
+            kind: 'new',
+          },
+          revisionRef.current,
+        )
+        revisionRef.current = revision
         const device: LocalDevice = {
-          id: String(created.id),
+          id: name,
           deviceType: spec.type_id,
           kind: 'new',
           name,
           params,
-          fidelity: 'medium',
           position,
         }
         setDevices((prev) => [...prev, device])
         setSelectedDeviceId(device.id)
         setSelectedConnId(null)
-        // 重新加载端口映射(新增设备后服务器侧会自动创建端口)
-        const graph = await api.model.getGraph(projectId)
-        setPorts(graph.ports)
         setSaveState('saved')
         setAutosave('saved')
         setFlash(t('ies.modeling.device_added', { name }))
         window.setTimeout(() => setFlash(null), 1800)
       } catch (err) {
-        setLastError(translateError(toApiError(err)))
-        setSaveState('error')
-        setAutosave('error')
+        handleWriteError(err, () => {
+          setLastError(translateError(toApiError(err)))
+          setSaveState('error')
+          setAutosave('error')
+        })
       }
     },
-    [devices, locale, projectId, setAutosave, t],
+    [devices, locale, projectId, setAutosave, t, uniqueDeviceName, handleWriteError],
   )
 
   const patchDevice = useCallback(
-    async (deviceId: string, patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'fidelity' | 'params'>>) => {
+    async (deviceId: string, patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'params'>>) => {
+      const current = devices.find((d) => d.id === deviceId)
+      if (!current) return
+      const nextName = patch.name !== undefined ? patch.name.trim() : current.name
+      if (!nextName) return
+      const renamed = nextName !== current.name
+      const finalName = renamed ? uniqueDeviceName(nextName, deviceId) : current.name
+      const next = {
+        ...current,
+        ...patch,
+        id: finalName,
+        name: finalName,
+        params: patch.params ?? current.params,
+        kind: patch.kind ?? current.kind,
+      }
       try {
-        await api.model.updateDevice(projectId, Number(deviceId), {
-          name: patch.name,
-          params: patch.params,
-        })
-        setDevices((prev) => prev.map((d) => (d.id === deviceId ? { ...d, ...patch } : d)))
+        if (!renamed) {
+          const { revision } = await api.model.upsertDevice(
+            projectId,
+            {
+              device_type: current.deviceType,
+              name: current.name,
+              kind: next.kind,
+              params: next.params,
+            },
+            revisionRef.current,
+          )
+          revisionRef.current = revision
+          setDevices((prev) => prev.map((d) => (d.id === deviceId ? next : d)))
+        } else {
+          // 改名即换键: 单批 remove 旧设备 + upsert 新设备 + 重建受影响连接
+          // (服务端删设备级联移除关联连接, 须随批补回, 否则连线丢失)。
+          const touched = connections.filter(
+            (c) => c.fromDeviceId === deviceId || c.toDeviceId === deviceId,
+          )
+          const { revision } = await api.model.sendCommands(
+            projectId,
+            [
+              { type: 'model.remove_device', payload: { name: current.name } },
+              {
+                type: 'model.upsert_device',
+                payload: {
+                  name: finalName,
+                  device_type: current.deviceType,
+                  kind: next.kind,
+                  params: next.params,
+                },
+              },
+              ...touched.map((c) => ({
+                type: 'model.upsert_connection',
+                payload: {
+                  name: c.id,
+                  from_device: c.fromDeviceId === deviceId ? finalName : devices.find((d) => d.id === c.fromDeviceId)?.name ?? '',
+                  from_port: parseHandle(c.fromHandle)?.name ?? '',
+                  to_device: c.toDeviceId === deviceId ? finalName : devices.find((d) => d.id === c.toDeviceId)?.name ?? '',
+                  to_port: parseHandle(c.toHandle)?.name ?? '',
+                },
+              })),
+            ],
+            revisionRef.current,
+          )
+          revisionRef.current = revision
+          setDevices((prev) => prev.map((d) => (d.id === deviceId ? next : d)))
+          setConnections((prev) =>
+            prev.map((c) =>
+              c.fromDeviceId === deviceId || c.toDeviceId === deviceId
+                ? {
+                    ...c,
+                    fromDeviceId: c.fromDeviceId === deviceId ? finalName : c.fromDeviceId,
+                    toDeviceId: c.toDeviceId === deviceId ? finalName : c.toDeviceId,
+                  }
+                : c,
+            ),
+          )
+          // 布局跟随新键, 旧键清理
+          const layout = loadLayout(projectId)
+          if (layout[deviceId] !== undefined) {
+            layout[finalName] = layout[deviceId]
+            delete layout[deviceId]
+            saveLayout(projectId, layout)
+          }
+          setSelectedDeviceId(finalName)
+        }
         setSaveState('saved')
         setAutosave('saved')
       } catch (err) {
-        setLastError(translateError(toApiError(err)))
-        setSaveState('error')
-        setAutosave('error')
+        handleWriteError(err, () => {
+          setLastError(translateError(toApiError(err)))
+          setSaveState('error')
+          setAutosave('error')
+        })
       }
     },
-    [projectId, setAutosave],
+    [devices, connections, projectId, setAutosave, uniqueDeviceName, handleWriteError],
   )
 
   const deleteDevice = useCallback(
     async (deviceId: string) => {
+      const current = devices.find((d) => d.id === deviceId)
+      if (!current) return
       try {
-        await api.model.deleteDevice(projectId, Number(deviceId))
+        // 服务端删设备级联移除关联连接, 本地同步裁剪。
+        const { revision } = await api.model.removeDevice(projectId, current.name, revisionRef.current)
+        revisionRef.current = revision
         setDevices((prev) => prev.filter((d) => d.id !== deviceId))
         setConnections((prev) => prev.filter((c) => c.fromDeviceId !== deviceId && c.toDeviceId !== deviceId))
         setSelectedDeviceId((cur) => (cur === deviceId ? null : cur))
@@ -315,12 +417,14 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         setSaveState('saved')
         setAutosave('saved')
       } catch (err) {
-        setLastError(translateError(toApiError(err)))
-        setSaveState('error')
-        setAutosave('error')
+        handleWriteError(err, () => {
+          setLastError(translateError(toApiError(err)))
+          setSaveState('error')
+          setAutosave('error')
+        })
       }
     },
-    [projectId, setAutosave],
+    [devices, projectId, setAutosave, handleWriteError],
   )
 
   // -- 连接 ------------------------------------------------------------
@@ -333,33 +437,26 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   )
 
   /**
-   * 画布句柄(carrier:direction:name) → 服务器真实端口(RR-P1-04: 按 YAML 端口名精确匹配)。
+   * 画布句柄(carrier:direction:name) → 注册表端口声明(按 YAML 端口名精确匹配)。
    *
    * 找不到指定名称的端口返回 null(由调用方给出可定位诊断, 不允许静默回退
    * 到 carrier+direction 的首个匹配 —— 宪法 5.3: 正确性优先于兼容)。
    */
-  const findServerPort = useCallback(
+  const findRegistryPort = useCallback(
     (
-      deviceId: number,
-      carrier: LocalConnection['carrier'],
+      device: LocalDevice,
       wantDirection: 'in' | 'out',
       portName: string,
-    ): Port | null => {
+    ): { carrier: LocalConnection['carrier']; name: string } | null => {
       if (!portName) return null
-      const portType = CARRIER_TO_PORT_TYPE[carrier]
-      if (!portType) return null
-      const candidates = ports.filter(
-        (p) => p.device_id === deviceId && p.port_type === portType,
+      const spec = specOf(device.deviceType)
+      if (!spec) return null
+      const hit = derivePorts(spec as DeviceTypeSpec, device.params).find(
+        (p) => p.name === portName && p.direction === wantDirection,
       )
-      if (candidates.length === 0) return null
-      const by_name = candidates.find(
-        (p) =>
-          p.name === portName &&
-          (p.direction === wantDirection || p.direction === 'bidirectional'),
-      )
-      return by_name ?? null
+      return hit ? { carrier: hit.carrier, name: hit.name } : null
     },
-    [ports],
+    [specOf],
   )
 
   const handleConnect = useCallback(
@@ -384,31 +481,11 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         setIssues((prev) => [...prev.slice(-3), item])
         return
       }
-      // 服务器侧必须使用真实 port id;若本地设备为尚未落库的临时 id,先不连线
-      if (isLocalId(fromDevice.id) || isLocalId(toDevice.id)) {
-        const item: IssueItem = {
-          id: localId(),
-          severity: 'warning',
-          message: lt('save.wait'),
-          deviceId: fromDevice.id,
-        }
-        setIssues((prev) => [...prev.slice(-3), item])
-        return
-      }
-      const fromServerPort = findServerPort(
-        Number(fromDevice.id),
-        fromPort.carrier,
-        'out',
-        fromPort.name,
-      )
-      const toServerPort = findServerPort(
-        Number(toDevice.id),
-        toPort.carrier,
-        'in',
-        toPort.name,
-      )
-      if (!fromServerPort || !toServerPort) {
-        // 服务器端口缺失/类型不匹配: 可定位诊断(前端本地检查只是即时提示,
+      // 2.0 设备即时落库(名键), 无临时 id 等待态; 端口名须命中注册表声明
+      const fromReg = findRegistryPort(fromDevice, 'out', fromPort.name)
+      const toReg = findRegistryPort(toDevice, 'in', toPort.name)
+      if (!fromReg || !toReg) {
+        // 注册表端口缺失/类型不匹配: 可定位诊断(前端本地检查只是即时提示,
         // 后端仍为最终权威)
         const item: IssueItem = {
           id: localId(),
@@ -420,13 +497,20 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         return
       }
       try {
-        const created = await api.model.connect(projectId, {
-          from_port_id: fromServerPort.id,
-          to_port_id: toServerPort.id,
-          conn_type: carrierToConnType(fromPort.carrier) ?? 'electric_line',
-        })
+        // 2.0 连接只表达真实端点(设备名 + 注册表端口名), 无类型/容量/损耗字段
+        const { name, revision } = await api.model.upsertConnection(
+          projectId,
+          {
+            from_device: fromDevice.name,
+            from_port: fromReg.name,
+            to_device: toDevice.name,
+            to_port: toReg.name,
+          },
+          revisionRef.current,
+        )
+        revisionRef.current = revision
         const newConn: LocalConnection = {
-          id: String(created.id),
+          id: name,
           fromDeviceId: fromDevice.id,
           fromHandle: conn.sourceHandle,
           toDeviceId: toDevice.id,
@@ -440,45 +524,52 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         setSaveState('saved')
         setAutosave('saved')
       } catch (err) {
-        const item: IssueItem = {
-          id: localId(),
-          severity: 'error',
-          message: translateError(toApiError(err)),
-          deviceId: fromDevice.id,
-        }
-        setIssues((prev) => [...prev.slice(-3), item])
+        handleWriteError(err, () => {
+          const item: IssueItem = {
+            id: localId(),
+            severity: 'error',
+            message: translateError(toApiError(err)),
+            deviceId: fromDevice.id,
+          }
+          setIssues((prev) => [...prev.slice(-3), item])
+        })
       }
     },
-    [devices, connections, ports, projectId, connectionLabel, setAutosave],
+    [devices, connections, projectId, connectionLabel, findRegistryPort, setAutosave, handleWriteError],
   )
 
   const disconnectConn = useCallback(
     async (connId: string) => {
       try {
-        await api.model.disconnect(projectId, Number(connId))
+        const { revision } = await api.model.removeConnection(projectId, connId, revisionRef.current)
+        revisionRef.current = revision
         setConnections((prev) => prev.filter((c) => c.id !== connId))
         setSelectedConnId((cur) => (cur === connId ? null : cur))
         setSaveState('saved')
         setAutosave('saved')
       } catch (err) {
-        setLastError(translateError(toApiError(err)))
-        setSaveState('error')
-        setAutosave('error')
+        handleWriteError(err, () => {
+          setLastError(translateError(toApiError(err)))
+          setSaveState('error')
+          setAutosave('error')
+        })
       }
     },
-    [projectId, setAutosave],
+    [projectId, setAutosave, handleWriteError],
   )
 
-  // -- 布局(与拓扑分离:仅坐标,不触发脏标记) --------------------------
+  // -- 布局(与拓扑分离:仅坐标,不触发脏标记; 按设备名存取, 与 2.0 名键一致) --
   // 注:onNodeDragStop 的 event 为 DOM MouseEvent|TouchEvent(@xyflow/react 类型)。
   const handleNodeDragStop = useCallback(
     (_: MouseEvent | TouchEvent, node: RFNode) => {
+      const device = devices.find((d) => d.id === node.id)
+      if (!device) return
       setDevices((prev) => prev.map((d) => (d.id === node.id ? { ...d, position: node.position } : d)))
       const next = loadLayout(projectId)
-      next[node.id] = node.position
+      next[device.name] = node.position
       saveLayout(projectId, next)
     },
-    [projectId],
+    [devices, projectId],
   )
 
   // -- 定位(选择 + 视野跳转) ------------------------------------------
@@ -527,11 +618,13 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         }
         return
       }
+      // 2.0 诊断定位键为名称(设备名/连接名), 本地 id 与之一致
       if (loc.object_type === 'device') {
-        locateDevice(loc.object_id)
+        const dev = devices.find((d) => d.name === loc.object_id || d.id === loc.object_id)
+        if (dev) locateDevice(dev.id)
       }
     },
-    [connections, fitView, locateDevice],
+    [connections, devices, fitView, locateDevice],
   )
 
   // -- 拖拽放置 --------------------------------------------------------
@@ -648,6 +741,15 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       {saveState === 'error' && lastError ? (
         <Alert variant="error" closable onClose={() => setLastError(null)}>
           {lastError}
+        </Alert>
+      ) : null}
+
+      {saveState === 'conflict' ? (
+        <Alert variant="warning" title={lt('save.conflict')}>
+          {lt('save.conflict_banner')}{' '}
+          <Button variant="secondary" size="sm" onClick={() => void reloadGraph()}>
+            {lt('save.conflict_reload')}
+          </Button>
         </Alert>
       ) : null}
 
@@ -938,10 +1040,6 @@ function ConnectionPanel({
             {to?.name ?? '—'} · {labelOf(conn.carrier)} · {toHandle ? lt(`port.direction_${toHandle.direction}`) : '—'}
           </div>
         </div>
-        <div className="ies-form-field">
-          <span className="ies-form-label">{t('ies.modeling.connection')}</span>
-          <div>{t(`ies.modeling.conn_${carrierToConnType(conn.carrier) ?? 'electric_line'}`)}</div>
-        </div>
       </div>
       <footer className="mp-sidebar__footer">
         <Button variant="danger" size="sm" onClick={onDisconnect}>
@@ -966,7 +1064,7 @@ function DeviceSidebar({
 }: {
   device: LocalDevice
   spec: ExtendedDeviceTypeSpec
-  onPatch: (patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'fidelity' | 'params'>>) => void
+  onPatch: (patch: Partial<Pick<LocalDevice, 'name' | 'kind' | 'params'>>) => void
   onDelete: () => void
   onClose: () => void
 }) {
@@ -1156,22 +1254,6 @@ function DeviceSidebar({
               {t('ies.modeling.kind_new')}
             </button>
           </div>
-        </div>
-
-        {/* 模型精度 */}
-        <div className="ies-form-field">
-          <label className="ies-form-label" htmlFor="mp-fidelity">
-            {t('ies.modeling.fidelity')}
-          </label>
-          <Select
-            id="mp-fidelity"
-            value={device.fidelity}
-            onChange={(event) => onPatch({ fidelity: event.target.value as Fidelity })}
-          >
-            <option value="low">{t('ies.modeling.fidelity_low')}</option>
-            <option value="medium">{t('ies.modeling.fidelity_medium')}</option>
-            <option value="high">{t('ies.modeling.fidelity_high')}</option>
-          </Select>
         </div>
 
         {/* 参数(schema 驱动) */}

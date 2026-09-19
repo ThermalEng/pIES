@@ -207,13 +207,13 @@ def _declare_assembly_sections(
     return resp.json()["revision"]
 
 
-def _declare_device_and_planning(client: TestClient, db: Session, user, pid: int) -> str:
-    """夹具电池设备 + 最小规划修订(计算提交前置)，返回装配实例引用。"""
+def _declare_device_and_planning(client: TestClient, db: Session, user, pid: int) -> tuple:
+    """夹具电池设备 + 最小规划修订(计算提交前置)，返回(装配实例引用, 草稿修订号)。"""
     from assembly_fixture import declare_compute_device, save_compute_planning
 
-    device_ref = declare_compute_device(client, pid, _h(client, user))
+    device_ref, revision = declare_compute_device(client, pid, _h(client, user))
     save_compute_planning(db, pid, user.id, device_ref)
-    return device_ref
+    return device_ref, revision
 
 
 def _set_explicit_calc(client: TestClient, pid: int, user, revision: int) -> int:
@@ -265,11 +265,11 @@ def _prepare_project(
     """准备可提交计算任务的项目: 建项目 + 显式财务/装配声明 + 显式计算声明 + (可选)数据集 + 绑定 + 固化版本。"""
     pid = _create_project(client, user, name)
     _declare_finance(db, user, pid)
-    device_ref = _declare_device_and_planning(client, db, user, pid)
+    device_ref, revision = _declare_device_and_planning(client, db, user, pid)
     dvid = None
     if dataset_size > 0:
         dvid = _seed_dataset(db, user, pid, quota_bytes=quota_bytes)
-    revision = _set_explicit_calc(client, pid, user, 1)
+    revision = _set_explicit_calc(client, pid, user, revision)
     revision = _declare_assembly_sections(
         client, pid, user, revision, {device_ref: {"type": "none"}}
     )
@@ -467,7 +467,7 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
 def test_compute_submission_uses_unified_assembly_gate(
     client: TestClient, db: Session
 ) -> None:
-    """未注册模型必须由 0.7.0 统一入口阻断，且不得留下任务或快照。"""
+    """未注册设备在起草输入边界即被拒绝, 不得进入草稿, 不得留下任务或快照。"""
     owner = make_user(db, "owner_assembly_gate")
     pid = _create_project(client, owner, "装配闸门反例")
     _declare_finance(db, owner, pid)
@@ -490,26 +490,8 @@ def test_compute_submission_uses_unified_assembly_gate(
         },
         headers=_h(client, owner),
     )
-    assert resp.status_code == 200, resp.text
-    revision = resp.json()["revision"]
-    # 显式计算/装配声明: 反例只测未注册模型, 计算与装配节必须显式完整,
-    # 否则装配在缺失节处提前阻断, 掩盖模型闸门诊断。规划修订只需形状合法
-    # (阶段 2 未注册模型先阻断, 变量设备存在性不可达)。
-    from assembly_fixture import save_compute_planning
-
-    save_compute_planning(db, pid, owner.id, "ghost")
-    revision = _set_explicit_calc(client, pid, owner, revision)
-    revision = _declare_assembly_sections(client, pid, owner, revision, {})
-    _bind_and_freeze(client, pid, owner, None, revision=revision)
-
-    status, body = _submit_task(client, pid, owner, idempotency_key="bad-assembly")
-    assert status == 422
-    error = body["error"]
-    assert error["code"] == "ASM-VALIDATE-FAILED"
-    diagnostics = error["params"]["diagnostics"]
-    assert diagnostics
-    assert all(item["blocking"] for item in diagnostics)
-    assert {item["code"] for item in diagnostics} & {"ASM-SYN-007", "ASM-REF-002"}
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-CMD-005"
     assert db.execute(select(func.count(Task.id))).scalar() == 0
     assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
 

@@ -17,13 +17,17 @@ from iesplan.core.jsonutil import canonical_json
 
 
 def initial_content(language: str = "zh-CN") -> dict:
-    """初始草稿内容骨架（空模型/布局/绑定/配置 + 空受控扩展清单）。"""
+    """初始草稿内容骨架（空模型/布局/绑定/配置 + 空受控扩展清单）。
+
+    model 节只有 devices/connections 名键表；端口无持久化表，
+    画布与装配均按设备 descriptor 实时派生（2.0 单一事实源）。
+    """
     return {
         "schema_version": 1,
         "language": language,
         "unit_system": "si",
         "extensions": {},
-        "model": {"devices": [], "ports": [], "connections": []},
+        "model": {"devices": [], "connections": []},
         "layout": {},
         "dataset_bindings": [],
         "calc_config": {

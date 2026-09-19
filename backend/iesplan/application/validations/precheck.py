@@ -26,6 +26,7 @@ audit, storage} 域公开门面 + devices 公开门面``；不导入 ORM、不�
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -35,9 +36,13 @@ from sqlalchemy.orm import Session
 from iesplan import audit as audit_domain
 from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
-from iesplan.application import models as model_service
 from iesplan.audit.contracts import AuditRecord
 from iesplan.core.diagnostics import (
+    CONN_NODE_ORPHAN,
+    PARAM_CONFLICT,
+    PARAM_RNG_OUT,
+    PARAM_UNIT_INCONSISTENT,
+    PARAM_UNIT_MISMATCH,
     SEVERITY_BLOCKING,
     SEVERITY_ERROR,
     SEVERITY_INFO,
@@ -48,6 +53,7 @@ from iesplan.core.diagnostics import (
 from iesplan.core.errors import AppError, NotFoundError
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 from iesplan.devices import get_device as get_device_type
+from iesplan.devices.contracts2 import PropertySpec
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord
 from iesplan.application.configuration import (
@@ -135,12 +141,14 @@ BASELINE_ACTION: str = "project.baseline_confirmed"
 #: 电网连接注册表类型 id(模型完整性检查)
 GRID_TYPE_ID: str = "ies.device.grid_connection"
 
-#: 预检覆盖的载体 → 端口类型（取值唯一归属 application.models
-#: ``CARRIER_PORT_TYPE``；本单元仅圈定电/热/冷检查范围，不自持映射值）
-_CARRIER_PORT_TYPE: dict[str, str] = {
-    carrier: model_service.CARRIER_PORT_TYPE[carrier]
-    for carrier in ("electricity", "heat", "cool")
-}
+#: 预检覆盖的负荷载体集合(电/热/冷；燃气等外生供给载体汇-only 合法，不检查)
+_CHECKED_LOAD_CARRIERS: frozenset[str] = frozenset({"electricity", "heat", "cool"})
+
+#: 拓扑源汇平衡覆盖的载体集合(solar 等环境侧载体无可连接端口，不参与)
+_BALANCE_CARRIERS: frozenset[str] = frozenset({"electricity", "heat", "cool", "gas"})
+
+#: 外生供给载体(平衡豁免：目录内无源设备，汇-only 合法)
+_EXOGENOUS_CARRIERS: frozenset[str] = frozenset({"gas"})
 
 #: 校验报告对象媒体类型(01 §10.1)
 _REPORT_MEDIA_TYPE: str = "application/json"
@@ -261,13 +269,230 @@ def _device_spec(dev: dict) -> DeviceTypeSpec | None:
 # ---------------------------------------------------------------------------
 
 
+def _model_section(db: Session, project_id: int) -> tuple[list[dict], list[dict]]:
+    """当前草稿内容 model 节设备/连接(2.0 唯一项目建模事实)。"""
+    content = _current_draft_content(db, project_id)
+    model = content.get("model")
+    if not isinstance(model, dict):
+        return [], []
+    devices = model.get("devices")
+    conns = model.get("connections")
+    return (
+        [d for d in devices if isinstance(d, dict)] if isinstance(devices, list) else [],
+        [c for c in conns if isinstance(c, dict)] if isinstance(conns, list) else [],
+    )
+
+
+def _validate_device_params(
+    device_type: str | None, params: dict | None, device_name: str = ""
+) -> list[Diagnostic]:
+    """按注册表 schema 校验设备参数(类型/单位/范围/枚举)。
+
+    规则(与旧 U04 参数校验一致):
+    - 类型未注册抛 NotFoundError(CONN-TYPE-002);
+    - 未声明的参数键拒绝(PARAM-UNIT-002, actual=unknown);缺省键不校验, 按注册表默认值解释;
+    - 数值参数校验 min/max(越界 → PARAM-RNG-003), 类型不匹配 → PARAM-UNIT-002。
+    全部传入键均须已在注册表声明，无内部保留键豁免。
+    """
+    spec = get_device_type(device_type)
+    params = dict(params or {})  # 拷贝: 归一缺省键不得改写调用方原字典
+    # 全部传入键必须已在注册表声明(下循环 unknown 即拒)，无豁免
+    provided = dict(params)
+    diags: list[Diagnostic] = []
+    loc = {"object_type": "device", "object_id": str(device_name), "field": ""}
+
+    for name, value in provided.items():
+        pspec = spec.properties.get(name)
+        if pspec is None:
+            diags.append(
+                make_diag(
+                    PARAM_UNIT_MISMATCH,
+                    severity=SEVERITY_ERROR,
+                    params={"param": name, "expected": "registered", "actual": "unknown"},
+                    location={**loc, "field": name},
+                )
+            )
+            continue
+        diags.extend(_check_param_value(name, value, pspec, loc))
+    return diags
+
+
+def _check_param_value(name: str, value: Any, pspec: PropertySpec, loc: dict) -> list[Diagnostic]:
+    """单参数取值校验(枚举/类型/范围), 返回诊断列表。"""
+    # 布尔类参数
+    if isinstance(pspec.value, bool):
+        if not isinstance(value, bool):
+            return [_type_mismatch_diag(name, value, pspec, loc)]
+        return []
+    # 字典类参数(如分时电价 import_tariff)
+    # 数值类参数(带范围或数值默认值)
+    if pspec.minimum is not None or pspec.maximum is not None or isinstance(pspec.value, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return [_type_mismatch_diag(name, value, pspec, loc)]
+        # M-08: 拒绝 NaN/Infinity(非有限值可绕过 min/max 比较, 污染后续求解与哈希)
+        if not math.isfinite(float(value)):
+            return [_type_mismatch_diag(name, value, pspec, loc)]
+        if pspec.minimum is not None and value < pspec.minimum:
+            return [
+                make_diag(
+                    PARAM_RNG_OUT,
+                    severity=SEVERITY_ERROR,
+                    params={"param": name, "value": value, "min": pspec.minimum, "max": pspec.maximum},
+                    location={**loc, "field": name},
+                )
+            ]
+        if pspec.maximum is not None and value > pspec.maximum:
+            return [
+                make_diag(
+                    PARAM_RNG_OUT,
+                    severity=SEVERITY_ERROR,
+                    params={"param": name, "value": value, "min": pspec.minimum, "max": pspec.maximum},
+                    location={**loc, "field": name},
+                )
+            ]
+    return []
+
+
+def _type_mismatch_diag(name: str, value: Any, pspec: PropertySpec, loc: dict) -> Diagnostic:
+    """参数类型/单位不匹配诊断(期望注册单位, 实际为 Python 类型名)。"""
+    return make_diag(
+        PARAM_UNIT_MISMATCH,
+        severity=SEVERITY_ERROR,
+        params={"param": name, "expected": pspec.unit, "actual": type(value).__name__},
+        location={**loc, "field": name},
+    )
+
+
+def _connectable_sides(spec: DeviceTypeSpec, params: dict | None) -> dict[str, set[str]]:
+    """设备声明接口的载体方向集(名键拓扑校验用)。
+
+    predefined 接口视为汇入侧；热泵按 mode 参数裁剪未启用的冷/热载体，
+    避免能源不平衡误报；solar 等环境侧载体无可连接端口，不参与。
+    """
+    sides: dict[str, set[str]] = {}
+    params = params if isinstance(params, dict) else {}
+    for iface in spec.interfaces.values():
+        carrier = iface.carrier
+        if carrier not in _BALANCE_CARRIERS:
+            continue
+        if (
+            spec.device is not None
+            and spec.device.id == "ies.device.heat_pump"
+            and carrier in ("heat", "cool")
+        ):
+            mode = params.get("mode", "both")
+            if mode == "heating" and carrier == "cool":
+                continue
+            if mode == "cooling" and carrier == "heat":
+                continue
+        direction = "in" if iface.type == "predefined" else iface.type
+        if direction not in ("in", "out", "bidirectional"):
+            continue
+        sides.setdefault(carrier, set()).add(direction)
+    return sides
+
+
+def _check_topology(
+    devices: list[dict],
+    conns: list[dict],
+    specs: dict[str, DeviceTypeSpec | None],
+    diags: list[Diagnostic],
+) -> None:
+    """名键拓扑校验(孤立设备警告/负荷汇入警告/能源不平衡/重复连接)。"""
+    touched = {c.get("from_device") for c in conns} | {c.get("to_device") for c in conns}
+
+    # 1) 孤立设备警告
+    for d in devices:
+        name = d.get("name")
+        if name not in touched:
+            diags.append(
+                make_diag(
+                    CONN_NODE_ORPHAN,
+                    severity=SEVERITY_WARNING,
+                    params={"device_name": name},
+                    location={"object_type": "device", "object_id": str(name)},
+                )
+            )
+
+    # 2) 未连接负荷警告(负荷必须有汇入连接)
+    for d in devices:
+        name = d.get("name")
+        spec = specs.get(name)
+        if spec is None or not any(i.type == "predefined" for i in spec.interfaces.values()):
+            continue
+        if name not in touched:
+            continue  # 完全无连接 → 已按孤立设备告警
+        if not any(c.get("to_device") == name for c in conns):
+            diags.append(
+                make_diag(
+                    CONN_NODE_ORPHAN,
+                    severity=SEVERITY_WARNING,
+                    params={"device_name": name},
+                    location={"object_type": "device", "object_id": str(name), "field": "incoming"},
+                )
+            )
+
+    # 3) 能源不平衡: 某载体只有源或只有汇(双向视为源汇兼具;
+    #    外生供给载体如燃气无源设备, 汇-only 合法, 跳过)
+    type_dirs: dict[str, set[str]] = {}
+    for d in devices:
+        spec = specs.get(d.get("name"))
+        if spec is None:
+            continue
+        for carrier, dirs in _connectable_sides(spec, d.get("params")).items():
+            type_dirs.setdefault(carrier, set()).update(dirs)
+    for carrier, dirs in sorted(type_dirs.items()):
+        if carrier in _EXOGENOUS_CARRIERS:
+            continue
+        has_source = any(d in ("out", "bidirectional") for d in dirs)
+        has_sink = any(d in ("in", "bidirectional") for d in dirs)
+        if has_source and has_sink:
+            continue
+        diags.append(
+            make_diag(
+                PARAM_UNIT_INCONSISTENT,
+                severity=SEVERITY_ERROR,
+                params={
+                    "param": carrier,
+                    "expected": "source_and_sink",
+                    "actual": "source_only" if has_source else "sink_only",
+                },
+                location={"object_type": "model", "field": f"carrier:{carrier}"},
+            )
+        )
+
+    # 4) 重复连接(同两端同端口)
+    seen: dict[tuple, str] = {}
+    for c in sorted(conns, key=lambda c: str(c.get("name") or "")):
+        key = (c.get("from_device"), c.get("from_port"), c.get("to_device"), c.get("to_port"))
+        cname = c.get("name")
+        if key in seen:
+            diags.append(
+                make_diag(
+                    PARAM_CONFLICT,
+                    severity=SEVERITY_ERROR,
+                    params={
+                        "p1": f"connection:{seen[key]}",
+                        "p2": f"connection:{cname}",
+                    },
+                    location={
+                        "object_type": "connection",
+                        "field": "ends",
+                    },
+                )
+            )
+        else:
+            seen[key] = cname
+
+
 def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
-    """模型完整性: 拓扑/设备参数(U04 诊断) + 电网连接/负荷/载体供给(本单元检查)。"""
-    # 拓扑 + 每台设备参数校验(复用 U04; error 级即阻断)
-    diags.extend(model_service.validate_project_model(db, project_id))
-    graph = model_service.get_graph(db, project_id)
-    devices = graph.get("devices", [])
-    ports = graph.get("ports", [])
+    """模型完整性: 拓扑/设备参数 + 电网连接/负荷/载体供给(草稿内容 2.0 名键事实)。"""
+    devices, conns = _model_section(db, project_id)
+    by_name = {d.get("name"): d for d in devices if isinstance(d.get("name"), str)}
+    specs = {name: _device_spec(dev) for name, dev in by_name.items()}
+    # 每台设备参数校验(类型未注册抛 NotFoundError，与旧行为一致先行阻断)
+    for name, dev in by_name.items():
+        diags.extend(_validate_device_params(dev.get("device_type"), dev.get("params"), name))
     loc = {"object_type": "project", "object_id": str(project_id)}
     # 至少 1 个电网连接(供能接口, 架构宪法 §12 快照任务与结果 + domain-model §项目聚合)
     if not any(d.get("device_type") == GRID_TYPE_ID for d in devices):
@@ -280,13 +505,12 @@ def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
             )
         )
     # 至少 1 个负荷
-    has_load = False
-    for d in devices:
-        spec = _device_spec(d)
-        if spec is not None and any(i.type == "predefined" for i in spec.interfaces.values()):
-            has_load = True
-            break
-    if not has_load:
+    load_names = [
+        name
+        for name, spec in specs.items()
+        if spec is not None and any(i.type == "predefined" for i in spec.interfaces.values())
+    ]
+    if not load_names:
         diags.append(
             make_diag(
                 VALID_MODEL_NO_LOAD,
@@ -295,29 +519,31 @@ def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
                 location=loc,
             )
         )
-    # 电/热/冷每个有负荷的载体必须有供给设备(出方向端口, 双向不计)
+    # 电/热/冷每个有负荷的载体必须有供给设备(出方向声明接口, 双向不计)
     load_carriers: set[str] = set()
-    for d in devices:
-        spec = _device_spec(d)
-        if spec is not None and any(i.type == "predefined" for i in spec.interfaces.values()):
-            load_carriers.update(
-                i.carrier for i in spec.interfaces.values() if i.carrier in _CARRIER_PORT_TYPE
-            )
+    for name in load_names:
+        spec = specs[name]
+        assert spec is not None
+        load_carriers.update(
+            i.carrier for i in spec.interfaces.values() if i.carrier in _CHECKED_LOAD_CARRIERS
+        )
     supply_carriers: set[str] = set()
-    for p in ports:
-        if p.get("direction") == "out":
-            for carrier, ptype in _CARRIER_PORT_TYPE.items():
-                if p.get("port_type") == ptype:
-                    supply_carriers.add(carrier)
+    for name, spec in specs.items():
+        if spec is None:
+            continue
+        for carrier, dirs in _connectable_sides(spec, by_name[name].get("params")).items():
+            if "out" in dirs:
+                supply_carriers.add(carrier)
     for carrier in sorted(load_carriers - supply_carriers):
         diags.append(
             make_diag(
                 VALID_MODEL_NO_SUPPLY,
                 severity=SEVERITY_ERROR,
                 params={"carrier": carrier, "project_id": project_id},
-                location={"object_type": "system_graph", "field": f"carrier:{carrier}"},
+                location={"object_type": "model", "field": f"carrier:{carrier}"},
             )
         )
+    _check_topology(devices, conns, specs, diags)
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +756,7 @@ def _check_financial_baseline(
     db: Session, project: ProjectRecord, config_data: dict, diags: list[Diagnostic]
 ) -> None:
     """财务基准确认证据检查(架构宪法 §16 安全与审计): 确认人齐全且确认内容
-    与当前配置一致即通过; 不一致 → VALID-FIN-002 警告(直接比对原文, 无摘要)。"""
+    与当前配置一致即通过; 不一致 → VALID-FIN-002 警告(直接比对原文)。"""
     loc = {
         "object_type": "project",
         "object_id": str(project.id),

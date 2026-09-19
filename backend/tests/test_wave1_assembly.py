@@ -66,12 +66,11 @@ def _sample_text() -> str:
 def _export_content() -> dict:
     """最小项目导出内容(电网 → 热泵单边供电)。"""
     return {
-        "graph_id": 90,
         "name": "wave1_pipeline",
         "model": {
             "devices": [
                 {
-                    "id": 1,
+                    "name": "grid1",
                     "device_type": "ies.device.grid_connection",
                     "kind": "existing",
                     "params": {
@@ -80,7 +79,7 @@ def _export_content() -> dict:
                     },
                 },
                 {
-                    "id": 2,
+                    "name": "hp1",
                     "device_type": "ies.device.heat_pump",
                     "kind": "new",
                     "params": {
@@ -89,14 +88,14 @@ def _export_content() -> dict:
                     },
                 },
             ],
-            "ports": [
-                {"id": 11, "device_id": 1, "name": "electricity_import",
-                 "port_type": "electric", "direction": "out"},
-                {"id": 21, "device_id": 2, "name": "electricity_in",
-                 "port_type": "electric", "direction": "in"},
-            ],
             "connections": [
-                {"id": 101, "from_port_id": 11, "to_port_id": 21},
+                {
+                    "name": "c1",
+                    "from_device": "grid1",
+                    "from_port": "electricity_import",
+                    "to_device": "hp1",
+                    "to_port": "electricity_in",
+                },
             ],
         },
         "project_baseline": {
@@ -287,8 +286,8 @@ def _export_finance():
     }
     binding = {
         "instances": {
-            "d1": {"type": "none"},
-            "d2": {
+            "grid1": {"type": "none"},
+            "hp1": {
                 "type": "costed",
                 "finance_type": "heat_pump_system",
                 "drivers": {
@@ -306,13 +305,13 @@ def _export_finance():
         "objective": {
             "sense": "minimize",
             "expression": (
-                "d2__upfront_capex + 1 year * d2__annual_fixed_om"
-                " + d2__period_variable_om"
+                "hp1__upfront_capex + 1 year * hp1__annual_fixed_om"
+                " + hp1__period_variable_om"
             ),
         },
         "variables": {
             "hp_cap": {
-                "device_ref": "d2",
+                "device_ref": "hp1",
                 "parameter": "rated_heat_kw",
                 "lower_bound": "0",
                 "upper_bound": "1000",
