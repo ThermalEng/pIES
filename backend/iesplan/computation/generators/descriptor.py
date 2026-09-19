@@ -7,10 +7,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
-from iesplan.computation.protocols import check_provider_ref
+from iesplan.computation.protocols import (
+    check_provider_ref,
+    freeze_json_value,
+    thaw_json_value,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +25,11 @@ class GeneratorDescriptor:
     ``ref`` 为 ``<稳定ID>@<语义化版本>``；CalculationConfig 的
     ``generator`` 选择与本 ``ref`` 相等才表示选中本 provider，provider
     自身不再另存第二份引用。
+
+    字段覆盖手册“至少声明”清单：``options_schema`` 声明选项 schema，
+    默认语义由 schema 内各条目自带；``resource_limits`` 声明硬资源上界；
+    ``unit_system`` 固定内部单位体系；``media_types`` 声明生成的输入
+    媒体类型；``seed_semantics`` 说明种子语义。映射字段在构造时递归冻结。
     """
 
     generator_id: str
@@ -32,12 +42,24 @@ class GeneratorDescriptor:
     equation_contracts: tuple[str, ...] = ()
     result_adapter: str = ""
     deterministic: bool = True
+    options_schema: Mapping[str, object] = field(default_factory=dict)
+    resource_limits: Mapping[str, object] = field(default_factory=dict)
+    unit_system: str = ""
+    media_types: tuple[str, ...] = ()
+    seed_semantics: str = ""
 
     def __post_init__(self) -> None:
         check_provider_ref(f"{self.generator_id}@{self.version}", "generator")
         if not isinstance(self.assembly_schema_version, str):
             raise TypeError("assembly_schema_version 须为字符串")
-        for attr in ("modes", "capabilities", "solvers", "executors", "equation_contracts"):
+        for attr in (
+            "modes",
+            "capabilities",
+            "solvers",
+            "executors",
+            "equation_contracts",
+            "media_types",
+        ):
             items = tuple(getattr(self, attr))
             for name in items:
                 if not isinstance(name, str) or not name:
@@ -47,6 +69,17 @@ class GeneratorDescriptor:
             check_provider_ref(self.result_adapter, "result_adapter")
         if not isinstance(self.deterministic, bool):
             raise TypeError("deterministic 须为布尔值")
+        for attr in ("options_schema", "resource_limits"):
+            mapping = getattr(self, attr)
+            if not isinstance(mapping, Mapping):
+                raise TypeError(f"{attr} 须为 Mapping")
+            for key in mapping:
+                if not isinstance(key, str) or not key:
+                    raise ValueError(f"{attr} 键须为非空字符串: {key!r}")
+            object.__setattr__(self, attr, freeze_json_value(dict(mapping)))
+        for attr in ("unit_system", "seed_semantics"):
+            if not isinstance(getattr(self, attr), str) or not getattr(self, attr):
+                raise ValueError(f"{attr} 须为非空字符串")
 
     @property
     def ref(self) -> str:
@@ -70,6 +103,11 @@ class GeneratorDescriptor:
             "equation_contracts": list(self.equation_contracts),
             "result_adapter": self.result_adapter,
             "deterministic": self.deterministic,
+            "options_schema": thaw_json_value(self.options_schema),
+            "resource_limits": thaw_json_value(self.resource_limits),
+            "unit_system": self.unit_system,
+            "media_types": list(self.media_types),
+            "seed_semantics": self.seed_semantics,
         }
 
 

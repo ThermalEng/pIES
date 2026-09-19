@@ -44,38 +44,49 @@ COMPUTE_RESULT_SCHEMA = "ies.compute-result"
 COMPUTE_RESULT_VERSION = "1.0.0"
 
 
-def _freeze_json(value: object) -> object:
+def freeze_json_value(value: object) -> object:
     """递归冻结 JSON 值(dict → MappingProxy, list/tuple → tuple)。"""
     if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise TypeError("边界映射键须为字符串")
-        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+        return MappingProxyType({key: freeze_json_value(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze_json(item) for item in value)
+        return tuple(freeze_json_value(item) for item in value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise TypeError(f"边界字段须为 JSON 值, 得到 {type(value).__name__}")
 
 
-def _thaw_json(value: object) -> object:
-    """递归解冻为普通 dict/list(与 ``_freeze_json`` 互逆)。"""
+def thaw_json_value(value: object) -> object:
+    """递归解冻为普通 dict/list(与 ``freeze_json_value`` 互逆)。"""
     if isinstance(value, Mapping):
-        return {str(key): _thaw_json(item) for key, item in value.items()}
+        return {str(key): thaw_json_value(item) for key, item in value.items()}
     if isinstance(value, tuple):
-        return [_thaw_json(item) for item in value]
+        return [thaw_json_value(item) for item in value]
     return value
 
 
 _SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 
 
+_ID_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def check_provider_ref(value: object, name: str) -> str:
-    """校验公开 provider 选择引用(``<稳定ID>@<语义化版本>`` 形态)。"""
+    """校验公开 provider 选择引用(``<稳定ID>@<语义化版本>`` 形态)。
+
+    稳定 ID 由点号分隔的非空段组成，段内只允许字母、数字、下划线与
+    短横线（如 ``ies.device.pv``、``acme.generator.highs_milp``）；
+    空格、空段与其他字符一律拒绝。
+    """
     if not isinstance(value, str) or value.count("@") != 1:
         raise ValueError(f"计算配置 {name} 须为 <稳定ID>@<语义化版本> 形态: {value!r}")
     stable_id, version = value.split("@")
-    if not stable_id or not _SEMVER_PATTERN.match(version):
-        raise ValueError(f"计算配置 {name} 非法: {value!r}")
+    segments = stable_id.split(".")
+    if not segments or any(not _ID_SEGMENT_PATTERN.match(seg) for seg in segments):
+        raise ValueError(f"计算配置 {name} 稳定 ID 非法: {stable_id!r}")
+    if not _SEMVER_PATTERN.match(version):
+        raise ValueError(f"计算配置 {name} 版本非法: {version!r}")
     return value
 
 
@@ -197,7 +208,7 @@ class CalculationConfig:
         for name in outputs:
             if not isinstance(name, str) or not name:
                 raise ValueError(f"输出请求须为非空字符串: {name!r}")
-        object.__setattr__(self, "options", _freeze_json(self.options))
+        object.__setattr__(self, "options", freeze_json_value(self.options))
         object.__setattr__(self, "outputs", outputs)
 
     def to_dict(self) -> dict[str, Any]:
@@ -208,7 +219,7 @@ class CalculationConfig:
             "generator": self.generator,
             "solver": self.solver,
             "seed": self.seed,
-            "options": _thaw_json(self.options),
+            "options": thaw_json_value(self.options),
             "outputs": list(self.outputs),
         }
 
@@ -251,8 +262,8 @@ class SolverBundle:
                 raise ValueError("declared_outputs 须为非空相对路径")
             if path.startswith("/") or ".." in path.split("/"):
                 raise ValueError(f"声明输出路径越界: {path!r}")
-        object.__setattr__(self, "inputs", _freeze_json(self.inputs))
-        object.__setattr__(self, "command", _freeze_json(self.command))
+        object.__setattr__(self, "inputs", freeze_json_value(self.inputs))
+        object.__setattr__(self, "command", freeze_json_value(self.command))
         object.__setattr__(self, "declared_outputs", declared)
 
     def to_dict(self) -> dict[str, Any]:
@@ -264,8 +275,8 @@ class SolverBundle:
             "generator_ref": self.generator_ref,
             "solver_ref": self.solver_ref,
             "config_id": self.config_id,
-            "inputs": _thaw_json(self.inputs),
-            "command": _thaw_json(self.command),
+            "inputs": thaw_json_value(self.inputs),
+            "command": thaw_json_value(self.command),
             "declared_outputs": list(self.declared_outputs),
             "result_adapter_ref": self.result_adapter_ref,
         }
@@ -296,7 +307,7 @@ class ExecutionReceipt:
             raise TypeError("exit_code 须为整数或 None")
         if not isinstance(self.detail, Mapping):
             raise TypeError("detail 须为 Mapping")
-        object.__setattr__(self, "detail", _freeze_json(self.detail))
+        object.__setattr__(self, "detail", freeze_json_value(self.detail))
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
@@ -306,7 +317,7 @@ class ExecutionReceipt:
             "solver_ref": self.solver_ref,
             "status": self.status,
             "exit_code": self.exit_code,
-            "detail": _thaw_json(self.detail),
+            "detail": thaw_json_value(self.detail),
         }
 
 
@@ -336,7 +347,7 @@ class ComputeResult:
                 raise ValueError(f"结果缺必需字段: {name}")
         if not isinstance(self.outputs, Mapping):
             raise TypeError("outputs 须为 Mapping")
-        object.__setattr__(self, "outputs", _freeze_json(self.outputs))
+        object.__setattr__(self, "outputs", freeze_json_value(self.outputs))
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
@@ -346,7 +357,7 @@ class ComputeResult:
             "bundle_id": self.bundle_id,
             "status": self.status,
             "business_outcome": self.business_outcome,
-            "outputs": _thaw_json(self.outputs),
+            "outputs": thaw_json_value(self.outputs),
         }
 
 
@@ -365,4 +376,6 @@ __all__ = [
     "ResultAdapter",
     "SolverBundle",
     "SolverRuntime",
+    "freeze_json_value",
+    "thaw_json_value",
 ]

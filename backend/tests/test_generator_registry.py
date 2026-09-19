@@ -20,6 +20,7 @@ from iesplan.computation import (
     GeneratorDescriptor,
     GeneratorRegistry,
     build_registry,
+    check_provider_ref,
 )
 
 GENERATOR = "acme.generator@1.0.0"
@@ -30,6 +31,14 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("generator_id", "acme.generator")
     kwargs.setdefault("version", "1.0.0")
     kwargs.setdefault("solvers", (SOLVER,))
+    kwargs.setdefault(
+        "options_schema",
+        {"gap_rel": {"type": "number", "default": 0.001}},
+    )
+    kwargs.setdefault("resource_limits", {"timeout_seconds": 600})
+    kwargs.setdefault("unit_system", "SI")
+    kwargs.setdefault("media_types", ("application/mps",))
+    kwargs.setdefault("seed_semantics", "options.seed 为空时使用固定种子 0")
     return GeneratorDescriptor(**kwargs)
 
 
@@ -60,6 +69,68 @@ def test_descriptor_rejects_bad_identity() -> None:
         _descriptor(result_adapter="not-a-ref")
     with pytest.raises(ValueError, match="capabilities"):
         _descriptor(capabilities=("",))
+
+
+def test_check_provider_ref_id_syntax() -> None:
+    """稳定 ID 允许 current 点号/下划线/短横线形态；空格空段非法字符即拒绝。"""
+    for good in (
+        "ies.device.pv@2.0.0",
+        "ies.solver.highs@1.7.2",
+        "acme.generator@1.0.0",
+        "acme.generator.highs_milp@1.0.0",
+        "vendor.device.foo-bar_baz@0.1.0",
+    ):
+        assert check_provider_ref(good, "generator") == good
+    for bad in (
+        "has space@1.0.0",
+        "a..b@1.0.0",
+        ".a@1.0.0",
+        "a.@1.0.0",
+        "@1.0.0",
+        "a/b@1.0.0",
+        "a@1.0.0@2.0.0",
+        "a@1.0",
+        "a",
+    ):
+        with pytest.raises(ValueError):
+            check_provider_ref(bad, "generator")
+
+
+def test_descriptor_capability_fields_are_immutable() -> None:
+    """手册清单字段齐备且跨边界不可变；to_dict 为独立副本。"""
+    desc = _descriptor(media_types=["application/mps"])
+    assert desc.unit_system == "SI"
+    assert desc.seed_semantics.startswith("options.seed")
+    assert desc.media_types == ("application/mps",)
+    with pytest.raises(TypeError):
+        desc.options_schema["gap_rel"] = {}  # type: ignore[index]
+    with pytest.raises(TypeError):
+        desc.resource_limits["timeout_seconds"] = 1  # type: ignore[index]
+    dumped = desc.to_dict()
+    assert dumped["options_schema"] == {"gap_rel": {"type": "number", "default": 0.001}}
+    assert dumped["resource_limits"] == {"timeout_seconds": 600}
+    assert dumped["unit_system"] == "SI"
+    assert dumped["media_types"] == ["application/mps"]
+    dumped["options_schema"]["gap_rel"] = {}
+    dumped["media_types"].append("application/json")
+    assert desc.to_dict()["options_schema"] == {
+        "gap_rel": {"type": "number", "default": 0.001}
+    }
+    assert desc.to_dict()["media_types"] == ["application/mps"]
+
+
+def test_descriptor_rejects_missing_capability_fields() -> None:
+    """缺失手册清单字段的 descriptor 即拒绝。"""
+    with pytest.raises(ValueError, match="unit_system"):
+        _descriptor(unit_system="")
+    with pytest.raises(ValueError, match="seed_semantics"):
+        _descriptor(seed_semantics="")
+    with pytest.raises(ValueError, match="media_types"):
+        _descriptor(media_types=("",))
+    with pytest.raises(TypeError, match="options_schema"):
+        _descriptor(options_schema=[])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="resource_limits"):
+        _descriptor(resource_limits={"": 1})
 
 
 def test_build_registry_is_atomic() -> None:
