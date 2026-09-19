@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.solver-bundle/1.0.0",
+  "title": "ies.solver-bundle 1.0.0 求解交接包契约",
+  "description": "Solver Bundle 是一次求解的可执行、不可变交接包，由 GeneratorProvider 从已签发装配产物、已校验 CalculationConfig 与固定资源确定性生成，供 SolverRuntime 校验执行。command 为结构化数据，禁止 shell 字符串；路径一律为 Bundle 内相对路径。未知字段一律拒绝，不静默丢弃。",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "bundle_id",
+    "generator_ref",
+    "solver_ref",
+    "config_id",
+    "inputs",
+    "command",
+    "declared_outputs",
+    "result_adapter_ref"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ies.solver-bundle" },
+    "schema_version": { "const": "1.0.0" },
+    "bundle_id": { "type": "string", "minLength": 1 },
+    "generator_ref": {
+      "type": "string",
+      "$ref": "#/$defs/provider_ref"
+    },
+    "solver_ref": {
+      "type": "string",
+      "$ref": "#/$defs/provider_ref"
+    },
+    "config_id": { "type": "string", "minLength": 1 },
+    "inputs": {
+      "type": "object",
+      "description": "Bundle 内相对输入路径到文件内容的映射。",
+      "propertyNames": { "$ref": "#/$defs/relative_path" },
+      "minProperties": 1
+    },
+    "command": {
+      "type": "object",
+      "description": "结构化命令数据，不是 shell 字符串。",
+      "required": ["executor", "executable", "arguments"],
+      "additionalProperties": false,
+      "properties": {
+        "executor": {
+          "type": "string",
+          "$ref": "#/$defs/provider_ref"
+        },
+        "executable": {
+          "type": "string",
+          "$ref": "#/$defs/provider_ref"
+        },
+        "arguments": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "working_directory": {
+          "type": "string",
+          "$ref": "#/$defs/relative_path"
+        },
+        "environment": {
+          "type": "object",
+          "propertyNames": { "type": "string", "minLength": 1 },
+          "additionalProperties": { "type": "string" }
+        },
+        "timeout_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "memory_mib": { "type": "number", "exclusiveMinimum": 0 },
+        "cpu_cores": { "type": "number", "exclusiveMinimum": 0 },
+        "network": { "type": "boolean" },
+        "success_exit_codes": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 1
+        }
+      }
+    },
+    "declared_outputs": {
+      "type": "array",
+      "description": "预先声明的 Bundle 内相对输出路径。",
+      "items": { "$ref": "#/$defs/relative_path" },
+      "minItems": 1
+    },
+    "result_adapter_ref": {
+      "type": "string",
+      "$ref": "#/$defs/provider_ref"
+    }
+  },
+  "$defs": {
+    "provider_ref": {
+      "type": "string",
+      "description": "<稳定ID>@<语义化版本>；稳定 ID 由点号分隔的非空段组成，段内仅字母、数字、下划线与短横线。",
+      "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "relative_path": {
+      "type": "string",
+      "description": "Bundle 内相对路径：非空，不以 / 开头，不含 .. 路径段。",
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+    }
+  }
+}

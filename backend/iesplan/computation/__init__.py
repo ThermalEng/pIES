@@ -8,6 +8,8 @@
 - 生成器目录: ``GeneratorDescriptor`` / ``GeneratorRegistry`` /
   ``build_registry``(实现见 ``generators``; 实例由 bootstrap 组合根
   唯一装配发布, API/Worker 不得自行发现或动态加载);
+- Bundle 契约: ``load_bundle_schema`` / ``normalize_bundle`` /
+  ``validate_bundle``(实现见 ``bundle``);
 - 边界协议与载体: ``GeneratorProvider`` / ``SolverRuntime`` /
   ``ResultAdapter`` / ``CalculationConfig`` / ``SolverBundle`` /
   ``ExecutionReceipt`` / ``ComputeResult``(宪法 §4.5 三段式边界);
@@ -18,6 +20,11 @@
 明确不可用，计算 Worker 在组合根明确拒绝启动。
 """
 
+from iesplan.computation.bundle import (
+    load_bundle_schema,
+    normalize_bundle,
+    validate_bundle,
+)
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators import (
     GeneratorDescriptor,
@@ -70,4 +77,7 @@ __all__ = [
     "check_provider_ref",
     "get_algorithm",
     "list_algorithms",
+    "load_bundle_schema",
+    "normalize_bundle",
+    "validate_bundle",
 ]
