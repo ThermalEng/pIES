@@ -79,33 +79,35 @@ def validate_bundle(
         location = "/".join(str(p) for p in first.absolute_path)
         raise ValueError(f"Bundle 契约校验失败[{location or '<root>'}]: {first.message}")
     bundle = SolverBundle(**normalized)
+    bundle_generator = bundle.bundle["generator"]
+    bundle_solver = bundle.bundle["solver"]
     if descriptor is not None:
         if not isinstance(descriptor, GeneratorDescriptor):
             raise TypeError(
                 "descriptor 须为 GeneratorDescriptor，"
                 f"得到 {type(descriptor).__name__}"
             )
-        if bundle.generator_ref != descriptor.ref:
+        if bundle_generator != descriptor.ref:
             raise ValueError(
-                f"Bundle 生成器与 descriptor 不一致: {bundle.generator_ref!r} x {descriptor.ref!r}"
+                f"Bundle 生成器与 descriptor 不一致: {bundle_generator!r} x {descriptor.ref!r}"
             )
-        if bundle.result_adapter_ref != descriptor.result_adapter:
+        if bundle.result_adapter != descriptor.result_adapter:
             raise ValueError(
                 "Bundle 结果适配器与 descriptor 不一致: "
-                f"{bundle.result_adapter_ref!r} x {descriptor.result_adapter!r}"
+                f"{bundle.result_adapter!r} x {descriptor.result_adapter!r}"
             )
     if config is not None:
-        if bundle.generator_ref != config.generator:
+        if bundle_generator != config.generator:
             raise ValueError(
-                f"Bundle 生成器与计算配置不一致: {bundle.generator_ref!r} x {config.generator!r}"
+                f"Bundle 生成器与计算配置不一致: {bundle_generator!r} x {config.generator!r}"
             )
-        if bundle.solver_ref != config.solver:
+        if bundle_solver != config.solver:
             raise ValueError(
-                f"Bundle 求解器与计算配置不一致: {bundle.solver_ref!r} x {config.solver!r}"
+                f"Bundle 求解器与计算配置不一致: {bundle_solver!r} x {config.solver!r}"
             )
-        if descriptor is not None and not descriptor.supports_solver(bundle.solver_ref):
+        if descriptor is not None and not descriptor.supports_solver(bundle_solver):
             raise ValueError(
-                f"descriptor 不兼容 Bundle 求解器: {descriptor.ref!r} x {bundle.solver_ref!r}"
+                f"descriptor 不兼容 Bundle 求解器: {descriptor.ref!r} x {bundle_solver!r}"
             )
     return bundle
 

@@ -76,14 +76,18 @@ def _config(**kwargs) -> CalculationConfig:
 
 def _bundle() -> SolverBundle:
     return SolverBundle(
-        bundle_id="bundle-1",
-        generator_ref="acme.generator@1.0.0",
-        solver_ref="ies.solver.highs@1.7.2",
-        config_id=f"{CALCULATION_CONFIG_SCHEMA}@{CALCULATION_CONFIG_VERSION}",
-        inputs={"input/problem.mps": "mps-bytes"},
-        command={"executor": "ies.executor.local_process@1.0.0", "arguments": ["input/problem.mps"]},
-        declared_outputs=("output/solution.json",),
-        result_adapter_ref="acme.result-adapter@1.0.0",
+        bundle={
+            "generator": "acme.generator@1.0.0",
+            "solver": "ies.solver.highs@1.7.2",
+        },
+        inputs=[{"path": "input/problem.mps", "media_type": "application/mps"}],
+        command={
+            "executor": "ies.executor.local_process@1.0.0",
+            "executable": "ies.solver.highs@1.7.2",
+            "arguments": ["input/problem.mps"],
+        },
+        outputs=[{"path": "output/solution.json", "media_type": "application/json", "required": True}],
+        result_adapter="acme.result-adapter@1.0.0",
     )
 
 
@@ -207,12 +211,14 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
     for obj in (bundle, result, config, receipt):
         assert dataclasses.is_dataclass(obj)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        bundle.bundle_id = "other"  # type: ignore[misc]
+        bundle.result_adapter = "other"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.status = "failed"  # type: ignore[misc]
-    # 嵌套容器只读(映射不可写, 序列不可改)
+    # 嵌套容器只读(映射不可写, 序列不可改, 条目不可写)
     with pytest.raises(TypeError):
-        bundle.inputs["x"] = 1  # type: ignore[index]
+        bundle.inputs[0] = {}  # type: ignore[index]
+    with pytest.raises(TypeError):
+        bundle.inputs[0]["path"] = "x"  # type: ignore[index]
     with pytest.raises(TypeError):
         bundle.command["executor"] = "sh -c"  # type: ignore[index]
     with pytest.raises(TypeError):
@@ -221,41 +227,53 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
         config.options["gap"] = 0.5  # type: ignore[index]
     with pytest.raises(TypeError):
         receipt.detail["stdout"] = "x"  # type: ignore[index]
-    assert isinstance(bundle.inputs, MappingProxyType)
+    assert isinstance(bundle.inputs, tuple)
+    assert isinstance(bundle.bundle, MappingProxyType)
     assert isinstance(result.outputs, MappingProxyType)
 
 
 def test_carriers_ignore_later_caller_mutation() -> None:
-    """构造后调用方改写原始 dict 不影响已冻结载体; to_dict 返回独立副本。"""
-    raw_inputs = {"f": {"deep": [1, 2]}}
+    """构造后调用方改写原始结构不影响已冻结载体; to_dict 返回独立副本。"""
+    raw_entries = [{"path": "input/a.mps", "media_type": "application/mps"}]
     bundle = SolverBundle(
-        bundle_id="b", generator_ref="g", solver_ref="s", config_id="c",
-        inputs=raw_inputs,
-        command={"arguments": ["a"]},
-        declared_outputs=["output/solution.json"],
-        result_adapter_ref="r",
+        bundle={"generator": _GENERATOR, "solver": _SOLVER},
+        inputs=raw_entries,
+        command={"executor": "e@1.0.0", "executable": "s@1.0.0", "arguments": ["a"]},
+        outputs=[{"path": "output/s.json", "media_type": "application/json", "required": True}],
+        result_adapter="r@1.0.0",
     )
-    raw_inputs["f"] = {"deep": [9]}
-    assert bundle.to_dict()["inputs"] == {"f": {"deep": [1, 2]}}
-    assert isinstance(bundle.declared_outputs, tuple)
+    raw_entries[0]["path"] = "input/evil.mps"
+    raw_entries.append({"path": "input/b.mps", "media_type": "application/mps"})
+    assert bundle.to_dict()["inputs"] == [
+        {"path": "input/a.mps", "media_type": "application/mps"}
+    ]
+    assert isinstance(bundle.outputs, tuple)
     dumped = bundle.to_dict()
-    dumped["inputs"]["f"] = {}
-    assert bundle.to_dict()["inputs"] == {"f": {"deep": [1, 2]}}
+    dumped["inputs"][0]["path"] = "x"
+    dumped["outputs"].clear()
+    assert bundle.to_dict()["inputs"] == [
+        {"path": "input/a.mps", "media_type": "application/mps"}
+    ]
+    assert len(bundle.to_dict()["outputs"]) == 1
 
 
 def test_bundle_rejects_shell_command_and_escaping_paths() -> None:
-    """Bundle 只接受结构化命令与 Bundle 内相对声明输出。"""
+    """Bundle 只接受结构化命令与 Bundle 内相对路径。"""
     with pytest.raises(TypeError):
         SolverBundle(
-            bundle_id="b", generator_ref="g", solver_ref="s", config_id="c",
-            inputs={}, command="solver input.mps",  # type: ignore[arg-type]
-            declared_outputs=("output/solution.json",), result_adapter_ref="r",
+            bundle={"generator": _GENERATOR, "solver": _SOLVER},
+            inputs=[{"path": "input/a.mps", "media_type": "application/mps"}],
+            command="solver input.mps",  # type: ignore[arg-type]
+            outputs=[{"path": "output/s.json", "media_type": "application/json", "required": True}],
+            result_adapter="r@1.0.0",
         )
     with pytest.raises(ValueError, match="越界"):
         SolverBundle(
-            bundle_id="b", generator_ref="g", solver_ref="s", config_id="c",
-            inputs={}, command={}, declared_outputs=("../evil.json",),
-            result_adapter_ref="r",
+            bundle={"generator": _GENERATOR, "solver": _SOLVER},
+            inputs=[{"path": "input/a.mps", "media_type": "application/mps"}],
+            command={"executor": "e@1.0.0", "executable": "s@1.0.0", "arguments": ["a"]},
+            outputs=[{"path": "../evil.json", "media_type": "application/json", "required": True}],
+            result_adapter="r@1.0.0",
         )
 
 

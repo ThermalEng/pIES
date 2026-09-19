@@ -224,61 +224,175 @@ class CalculationConfig:
         }
 
 
+def _check_relative_path(path: object, name: str) -> str:
+    """校验 Bundle 内相对路径（非空，不以 ``/`` 开头，不含 ``..`` 段）。"""
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"{name} 须为非空相对路径: {path!r}")
+    if path.startswith("/") or ".." in path.split("/"):
+        raise ValueError(f"{name} 路径越界: {path!r}")
+    return path
+
+
+def _check_media_type(media_type: object, name: str) -> str:
+    """校验媒体类型非空字符串。"""
+    if not isinstance(media_type, str) or not media_type:
+        raise ValueError(f"{name} 须为非空媒体类型: {media_type!r}")
+    return media_type
+
+
+def _freeze_file_entries(entries: object, name: str) -> tuple[Mapping[str, object], ...]:
+    """冻结 inputs/outputs 条目（[{path, media_type(, required)}]，拒绝未知键）。"""
+    if isinstance(entries, Mapping) or not isinstance(entries, (list, tuple)):
+        raise TypeError(f"{name} 须为条目序列，得到 {type(entries).__name__}")
+    frozen = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise TypeError(f"{name} 条目须为 Mapping，得到 {type(entry).__name__}")
+        if name == "outputs":
+            allowed = ("path", "media_type", "required")
+        else:
+            allowed = ("path", "media_type")
+        extra = sorted(k for k in entry if k not in allowed)
+        if extra:
+            raise ValueError(f"{name} 条目不接受额外字段: {extra!r}")
+        for key in ("path", "media_type"):
+            if key not in entry:
+                raise ValueError(f"{name} 条目缺必需字段: {key}")
+        _check_relative_path(entry["path"], f"{name}.path")
+        _check_media_type(entry["media_type"], f"{name}.media_type")
+        if name == "outputs":
+            if "required" not in entry or not isinstance(entry["required"], bool):
+                raise ValueError(f"{name} 条目 required 须为布尔值")
+        frozen.append(freeze_json_value(dict(entry)))
+    if not frozen:
+        raise ValueError(f"{name} 不得为空")
+    return tuple(frozen)
+
+
+def _thaw_entry(entry: Mapping[str, object]) -> dict[str, Any]:
+    """解冻单个文件条目为独立副本。"""
+    return dict(thaw_json_value(entry))
+
+
+def _freeze_command(command: object) -> Mapping[str, object]:
+    """冻结结构化命令（必需 executor/executable/arguments，拒绝未知键）。"""
+    if not isinstance(command, Mapping):
+        raise TypeError("command 须为结构化 Mapping（禁止 shell 字符串）")
+    allowed = (
+        "executor",
+        "executable",
+        "arguments",
+        "working_directory",
+        "environment",
+        "timeout_seconds",
+        "memory_mib",
+        "cpu_cores",
+        "network",
+        "success_exit_codes",
+    )
+    extra = sorted(k for k in command if k not in allowed)
+    if extra:
+        raise ValueError(f"command 不接受额外字段: {extra!r}")
+    for key in ("executor", "executable", "arguments"):
+        if key not in command:
+            raise ValueError(f"command 缺必需字段: {key}")
+    check_provider_ref(command["executor"], "command.executor")
+    check_provider_ref(command["executable"], "command.executable")
+    arguments = command["arguments"]
+    if not isinstance(arguments, (list, tuple)) or any(
+        not isinstance(a, str) for a in arguments
+    ):
+        raise TypeError("command.arguments 须为字符串序列")
+    if "working_directory" in command:
+        _check_relative_path(command["working_directory"], "command.working_directory")
+    if "environment" in command:
+        environment = command["environment"]
+        if not isinstance(environment, Mapping) or any(
+            not isinstance(k, str) or not isinstance(v, str)
+            for k, v in environment.items()
+        ):
+            raise TypeError("command.environment 须为字符串映射")
+    for key in ("timeout_seconds", "memory_mib", "cpu_cores"):
+        if key in command and (
+            not isinstance(command[key], (int, float))
+            or isinstance(command[key], bool)
+            or command[key] <= 0
+        ):
+            raise ValueError(f"command.{key} 须为正数")
+    if "network" in command and not isinstance(command["network"], bool):
+        raise TypeError("command.network 须为布尔值")
+    if "success_exit_codes" in command:
+        codes = command["success_exit_codes"]
+        if (
+            not isinstance(codes, (list, tuple))
+            or not codes
+            or any(not isinstance(c, int) or isinstance(c, bool) for c in codes)
+        ):
+            raise ValueError("command.success_exit_codes 须为非空整数序列")
+    return freeze_json_value(dict(command))
+
+
 @dataclass(frozen=True, slots=True)
 class SolverBundle:
     """一次求解的可执行不可变交接包(生产者 GeneratorProvider)。
 
+    字段与 ``formats/solver-bundle.md`` 的 manifest 一一对应，不增删：
+    ``bundle{generator, solver}`` 追溯所选精确引用；
+    ``inputs[{path, media_type}]`` 声明只读输入文件；
     ``command`` 为结构化命令数据(执行器/可执行文件 ID、逐参数字符串、
-    Bundle 内规范相对路径、硬资源限制), 不是 shell 字符串。
-    ``declared_outputs`` 为预先声明的 Bundle 内相对输出路径。
+    Bundle 内规范相对路径、硬资源限制)，不是 shell 字符串；
+    ``outputs[{path, media_type, required}]`` 为允许写入的输出清单；
+    ``result_adapter`` 为配套结果适配器精确引用；
+    ``extensions`` 为规范预留的开放扩展点。
+    条目与映射在构造时冻结；未知字段当场拒绝，不静默丢弃。
     """
 
     schema: str = SOLVER_BUNDLE_SCHEMA
     schema_version: str = SOLVER_BUNDLE_VERSION
-    bundle_id: str = ""
-    generator_ref: str = ""
-    solver_ref: str = ""
-    config_id: str = ""
-    inputs: Mapping[str, object] = field(default_factory=dict)
+    bundle: Mapping[str, object] = field(default_factory=dict)
+    inputs: tuple[Mapping[str, object], ...] = ()
     command: Mapping[str, object] = field(default_factory=dict)
-    declared_outputs: tuple[str, ...] = ()
-    result_adapter_ref: str = ""
+    outputs: tuple[Mapping[str, object], ...] = ()
+    result_adapter: str = ""
+    extensions: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.schema != SOLVER_BUNDLE_SCHEMA:
             raise ValueError(f"Bundle schema 非法: {self.schema!r}")
         if self.schema_version != SOLVER_BUNDLE_VERSION:
             raise ValueError(f"Bundle 版本非法: {self.schema_version!r}")
-        for name in ("bundle_id", "generator_ref", "solver_ref", "result_adapter_ref"):
-            if not getattr(self, name):
-                raise ValueError(f"Bundle 缺必需引用: {name}")
-        if not isinstance(self.inputs, Mapping):
-            raise TypeError("inputs 须为 Mapping")
-        if not isinstance(self.command, Mapping):
-            raise TypeError("command 须为结构化 Mapping(禁止 shell 字符串)")
-        declared = tuple(self.declared_outputs)
-        for path in declared:
-            if not isinstance(path, str) or not path:
-                raise ValueError("declared_outputs 须为非空相对路径")
-            if path.startswith("/") or ".." in path.split("/"):
-                raise ValueError(f"声明输出路径越界: {path!r}")
-        object.__setattr__(self, "inputs", freeze_json_value(self.inputs))
-        object.__setattr__(self, "command", freeze_json_value(self.command))
-        object.__setattr__(self, "declared_outputs", declared)
+        if not isinstance(self.bundle, Mapping):
+            raise TypeError("bundle 须为 Mapping")
+        if set(self.bundle) != {"generator", "solver"}:
+            raise ValueError(
+                f"bundle 须恰为 generator/solver 二键: {sorted(self.bundle)!r}"
+            )
+        check_provider_ref(self.bundle["generator"], "bundle.generator")
+        check_provider_ref(self.bundle["solver"], "bundle.solver")
+        object.__setattr__(
+            self, "bundle", freeze_json_value(dict(self.bundle))
+        )
+        object.__setattr__(self, "inputs", _freeze_file_entries(self.inputs, "inputs"))
+        object.__setattr__(self, "command", _freeze_command(self.command))
+        object.__setattr__(self, "outputs", _freeze_file_entries(self.outputs, "outputs"))
+        if not self.result_adapter:
+            raise ValueError("Bundle 缺必需引用: result_adapter")
+        check_provider_ref(self.result_adapter, "result_adapter")
+        if not isinstance(self.extensions, Mapping):
+            raise TypeError("extensions 须为 Mapping")
+        object.__setattr__(self, "extensions", freeze_json_value(dict(self.extensions)))
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
-            "bundle_id": self.bundle_id,
-            "generator_ref": self.generator_ref,
-            "solver_ref": self.solver_ref,
-            "config_id": self.config_id,
-            "inputs": thaw_json_value(self.inputs),
+            "bundle": thaw_json_value(self.bundle),
+            "inputs": [_thaw_entry(entry) for entry in self.inputs],
             "command": thaw_json_value(self.command),
-            "declared_outputs": list(self.declared_outputs),
-            "result_adapter_ref": self.result_adapter_ref,
+            "outputs": [_thaw_entry(entry) for entry in self.outputs],
+            "result_adapter": self.result_adapter,
+            "extensions": thaw_json_value(self.extensions),
         }
 
 
