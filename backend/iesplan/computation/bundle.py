@@ -65,9 +65,9 @@ def validate_bundle(
 
     依次执行：规范化 → JSON Schema 校验（未知字段即拒绝）→ frozen
     ``SolverBundle`` 构造。给出 ``descriptor``/``config`` 时额外核对
-    引用绑定：``generator_ref`` 须等于 descriptor/config 的选择，
-    ``solver_ref`` 须等于 config 的选择且被 descriptor 兼容，
-    ``result_adapter_ref`` 须等于 descriptor 声明；不一致即拒绝，
+    引用绑定：``bundle.generator`` 须等于 descriptor/config 的选择，
+    ``bundle.solver`` 须等于 config 的选择且被 descriptor 兼容，
+    ``result_adapter`` 须等于 descriptor 声明；不一致即拒绝，
     不回退到另一 provider。
     """
     normalized = normalize_bundle(data)
