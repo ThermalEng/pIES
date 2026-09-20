@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ies.calculation-config/1.0.0",
+  "title": "ies.calculation-config 1.0.0 计算配置契约",
+  "description": "CalculationConfig 固定一次计算的全部选择：mode、预测目标所用算法与参数、generator、solver、计算精度、阶段二适用时的收敛容差与最大迭代数、时间限制、选项、随机种子和输出选择。计算按项目基线完整连续序列进行，不含离散化字段。未知字段一律拒绝，不静默丢弃。",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "mode",
+    "predictions",
+    "generator",
+    "solver",
+    "precision",
+    "convergence",
+    "time_limit_seconds",
+    "options",
+    "seed",
+    "outputs"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ies.calculation-config" },
+    "schema_version": { "const": "1.0.0" },
+    "mode": { "type": "string", "minLength": 1 },
+    "predictions": {
+      "type": "array",
+      "description": "预测配置列表，可空列表，不接受 null；target 不得重复（由载体强制）。",
+      "items": {
+        "type": "object",
+        "required": ["target", "algorithm", "parameters"],
+        "additionalProperties": false,
+        "properties": {
+          "target": {
+            "type": "object",
+            "required": ["instance", "interface"],
+            "additionalProperties": false,
+            "properties": {
+              "instance": { "type": "string", "minLength": 1 },
+              "interface": { "type": "string", "minLength": 1 }
+            }
+          },
+          "algorithm": { "$ref": "#/$defs/provider_ref" },
+          "parameters": { "type": "object" }
+        }
+      }
+    },
+    "generator": { "$ref": "#/$defs/provider_ref" },
+    "solver": { "$ref": "#/$defs/provider_ref" },
+    "precision": { "enum": ["low", "medium", "high"] },
+    "convergence": {
+      "type": ["object", "null"],
+      "required": ["tolerance", "max_iterations"],
+      "additionalProperties": false,
+      "properties": {
+        "tolerance": { "type": "number", "exclusiveMinimum": 0 },
+        "max_iterations": { "type": "integer", "exclusiveMinimum": 0 }
+      }
+    },
+    "time_limit_seconds": { "type": "integer", "exclusiveMinimum": 0 },
+    "options": { "type": "object" },
+    "seed": { "type": ["integer", "null"] },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "$defs": {
+    "provider_ref": {
+      "type": "string",
+      "description": "<稳定ID>@<语义化版本>；稳定 ID 由点号分隔的非空段组成，段内仅字母、数字、下划线与短横线。",
+      "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    }
+  }
+}

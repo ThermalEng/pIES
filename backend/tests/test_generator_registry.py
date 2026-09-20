@@ -30,6 +30,8 @@ SOLVER = "ies.solver.highs@1.7.2"
 def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("generator_id", "acme.generator")
     kwargs.setdefault("version", "1.0.0")
+    kwargs.setdefault("modes", ("planning",))
+    kwargs.setdefault("precisions", ("low", "medium", "high"))
     kwargs.setdefault("solvers", (SOLVER,))
     kwargs.setdefault(
         "options_schema",
@@ -45,8 +47,12 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
 
 
 def _config(**kwargs) -> CalculationConfig:
+    kwargs.setdefault("mode", "planning")
     kwargs.setdefault("generator", GENERATOR)
     kwargs.setdefault("solver", SOLVER)
+    kwargs.setdefault("precision", "medium")
+    kwargs.setdefault("time_limit_seconds", 600)
+    kwargs.setdefault("outputs", ["solution"])
     return CalculationConfig(**kwargs)
 
 
@@ -186,6 +192,32 @@ def test_resolve_checks_solver_compatibility() -> None:
     with pytest.raises(ComputationUnavailableError) as exc_info:
         registry.resolve(bad_solver)
     assert exc_info.value.reason == "incompatible-solver"
+
+
+def test_resolve_checks_mode_and_precision() -> None:
+    """mode/精度不在 descriptor 能力内即明确不可用，不回退。"""
+    registry = build_registry([_descriptor()])
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        registry.resolve(_config(mode="evaluation"))
+    assert exc_info.value.reason == "incompatible-mode"
+    narrow = build_registry([_descriptor(precisions=("low",))])
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        narrow.resolve(_config(precision="medium"))
+    assert exc_info.value.reason == "incompatible-precision"
+
+
+def test_descriptor_requires_modes_and_precisions() -> None:
+    """modes/precisions 为公开非空能力集合；不接受离散化声明。"""
+    with pytest.raises(ValueError, match="modes"):
+        _descriptor(modes=())
+    with pytest.raises(ValueError, match="precisions"):
+        _descriptor(precisions=())
+    with pytest.raises(ValueError, match="precisions"):
+        _descriptor(precisions=("ultra",))
+    desc = _descriptor()
+    assert desc.to_dict()["modes"] == ["planning"]
+    assert desc.to_dict()["precisions"] == ["low", "medium", "high"]
+    assert "discretizations" not in desc.to_dict()
 
 
 def test_snapshot_is_deterministic_and_dump_is_copy() -> None:

@@ -43,12 +43,22 @@ class GeneratorRegistry:
             ) from None
 
     def resolve(self, config: CalculationConfig) -> GeneratorDescriptor:
-        """按计算配置选中 provider 并校验 solver 兼容性。
+        """按计算配置选中 provider 并核对 mode/精度/solver 兼容性。
 
-        generator 未注册、或 descriptor 不兼容所选 solver 时统一抛
-        ``ComputationUnavailableError``，不回退到另一生成器。
+        generator 未注册，或 descriptor 不支持所选 mode、精度、solver
+        时统一抛 ``ComputationUnavailableError``，不回退到另一生成器。
         """
         descriptor = self.get(config.generator)
+        if config.mode not in descriptor.modes:
+            raise ComputationUnavailableError(
+                f"生成器不支持所选 mode: {config.generator!r} x {config.mode!r}",
+                reason="incompatible-mode",
+            )
+        if config.precision not in descriptor.precisions:
+            raise ComputationUnavailableError(
+                f"生成器不支持所选精度: {config.generator!r} x {config.precision!r}",
+                reason="incompatible-precision",
+            )
         if not descriptor.supports_solver(config.solver):
             raise ComputationUnavailableError(
                 f"生成器不兼容所选求解器: {config.generator!r} x {config.solver!r}",
