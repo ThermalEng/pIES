@@ -27,6 +27,14 @@ from iesplan.core.contracts.planning_config import (
     PlanningConfigError,
     PlanningVariable,
 )
+from iesplan.core.contracts.planning_program import (
+    PlanningExpression,
+    PlanningProgram,
+    PlanningProgramConstraint,
+    PlanningProgramVariable,
+    build_planning_program,
+    compile_planning_expression,
+)
 
 __all__ = [
     "TIMELINE_STEP_DURATION_VAR",
@@ -40,8 +48,14 @@ __all__ = [
     "ParameterSpec",
     "PlanningConfig",
     "PlanningConfigError",
+    "PlanningProgram",
+    "PlanningProgramConstraint",
+    "PlanningProgramVariable",
     "PlanningVariable",
+    "PlanningExpression",
     "ProjectBaseline",
     "ProjectBaselineError",
+    "build_planning_program",
+    "compile_planning_expression",
     "point_count_for_baseline",
 ]

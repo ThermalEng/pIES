@@ -7,13 +7,37 @@ provider 选择与装配只归 bootstrap 组合根；API/Worker 不得自行发�
 """
 
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
+from iesplan.computation.generators.inputs import GenerationInputs
+from iesplan.computation.generators.linear import (
+    LinearConstraint,
+    LinearExpression,
+    LinearModel,
+    LinearVariable,
+    LoweredRelation,
+    LoweringUnsupportedError,
+    lower_expression,
+    lower_planning_constraint,
+    lower_planning_expression,
+    lower_relation,
+)
 from iesplan.computation.generators.registry import (
     GeneratorRegistry,
     build_registry,
 )
 
 __all__ = [
+    "GenerationInputs",
     "GeneratorDescriptor",
     "GeneratorRegistry",
+    "LoweredRelation",
+    "LoweringUnsupportedError",
+    "LinearConstraint",
+    "LinearExpression",
+    "LinearModel",
+    "LinearVariable",
     "build_registry",
+    "lower_expression",
+    "lower_planning_constraint",
+    "lower_planning_expression",
+    "lower_relation",
 ]

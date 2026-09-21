@@ -64,6 +64,7 @@ GeneratorProvider 合并技术贡献、规划配置与 `EffectiveFinanceConfig`
 ## 方程语言约束
 
 - 仅允许公开白名单中的字面量、标识符、索引、算术、比较和受控函数；
+- 时间索引只允许 `[t]` 与 `[t-1]`；`[t-k]`（k>1）在设备发布输入边界拒绝；
 - 名称只能引用当前设备声明的 property、interface 或 equation variable；
 - 禁止函数/模块路径、反射、文件、网络、环境变量、shell 和任意代码；
 - 禁止以显示名、数组位置或设备类型分支决定语义；

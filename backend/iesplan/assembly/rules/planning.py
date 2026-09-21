@@ -1,10 +1,10 @@
 """规划目标与约束校验(ASM-PLAN-001/002/003)。
 
 ``planning`` 的目标与约束表达式只接受普通标识符 ``Name``(财务分量
-标识符与已声明规划变量名), 复用 ``core/expression.py`` 公共引擎,
-不新造第二套解析器。财务标识符含 ``__``(引擎安全边界禁止)：
-校验前把**已知**标识符改写为引擎安全别名(与旧顶层约束的点路径
-改写同模式)，未知 ``__`` 标记先按规范分类阻断，不送入引擎。
+标识符与已声明规划变量名), 别名改写与编译收敛到
+``core.contracts.planning_program`` 公共入口，不新造第二套解析器。
+财务标识符含 ``__``(引擎安全边界禁止)：未知 ``__`` 标记先按规范
+分类阻断，不送入引擎。
 
 标识符映射(assembly-yaml.md §规划表达式)：
 - ``<instance>__<upfront_capex|annual_fixed_om|period_variable_om>``：
@@ -35,6 +35,7 @@ from iesplan.core.contracts import (
     Objective,
     PlanningConfigError,
     PlanningVariable,
+    compile_planning_expression,
 )
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.core.expression import (
@@ -42,7 +43,6 @@ from iesplan.core.expression import (
     ExpressionDimensionError,
     ExpressionError,
     ExpressionSyntaxError,
-    parse_expr,
 )
 from iesplan.core.units import ALIAS_MAP, UNITS, dims_of
 from iesplan.finance import CURRENCIES, EffectiveFinanceConfig, FinanceTypeEntry
@@ -50,9 +50,6 @@ from iesplan.finance import CURRENCIES, EffectiveFinanceConfig, FinanceTypeEntry
 #: 分量后缀族(实例前缀合法)与能源后缀族(绑定前缀合法)
 _COST_SUFFIXES: tuple[str, ...] = ("upfront_capex", "annual_fixed_om", "period_variable_om")
 _ENERGY_SUFFIXES: tuple[str, ...] = ("period_energy_purchase", "period_energy_sale")
-
-#: 别名改写前缀(引擎安全：不含被禁子串；与 qconst 内部名前缀不冲突)
-_ALIAS_PREFIX = "pfin"
 
 #: 标识符词元
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -185,26 +182,10 @@ def _check_expression(
             {"expression": expr, "identifier": token},
         )
         return
-    # 别名改写作用于原始文本(单位字面量原样保留，由引擎内部一次改写；
-    # 调用方预改写会导致引擎二次改写丢失 qconst 上下文)。
-    aliases: dict[str, str] = {}
-    used = set(allowed)
-    counter = 0
-    rewritten = expr
-    for ident in sorted(allowed):
-        if not re.search(r"\b" + re.escape(ident) + r"\b", rewritten):
-            continue
-        counter += 1
-        alias = f"{_ALIAS_PREFIX}{counter}"
-        while alias in used:
-            counter += 1
-            alias = f"{_ALIAS_PREFIX}{counter}"
-        used.add(alias)
-        aliases[ident] = alias
-        rewritten = re.sub(r"\b" + re.escape(ident) + r"\b", alias, rewritten)
-    var_dims = {aliases[ident]: dims for ident, dims in allowed.items() if ident in aliases}
+    # 别名改写与编译收敛到公共规划 IR 入口（币种已在上方先行核对，
+    # 此处传 currency=None 不重复核对；单位字面量由引擎内部一次改写）。
     try:
-        parse_expr(rewritten, set(var_dims), var_dims)
+        compile_planning_expression(expr, allowed, currency=None)
     except ExpressionSyntaxError as exc:
         _plan_fail(
             diags, ASM_PLAN_SYNTAX, field, "expression_syntax",

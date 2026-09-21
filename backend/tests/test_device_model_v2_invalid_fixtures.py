@@ -54,6 +54,11 @@ EXPECTED: dict[str, dict[str, str]] = {
         "field": "interfaces.blind_terminal.source",
         "detail_contains": "禁止声明 source",
     },
+    "past-state-reference.yaml": {
+        "code": "SYS-CFG-001",
+        "field": "equations",
+        "detail_contains": "禁止深层过去引用",
+    },
 }
 
 

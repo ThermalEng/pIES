@@ -84,7 +84,11 @@ def reference_atoms(side: str, relation_id: str) -> tuple[tuple[str, ...], tuple
                     offset = -offset
                 if offset > 0:
                     raise EquationSyntaxError(
-                        f"relation {relation_id!r} 禁止未来引用 {name}[t+{offset}]（跨步只允许过去或当前步）"
+                        f"relation {relation_id!r} 禁止未来引用 {name}[t+{offset}]（跨步只允许 t 与 t-1）"
+                    )
+                if offset < -1:
+                    raise EquationSyntaxError(
+                        f"relation {relation_id!r} 禁止深层过去引用 {name}[t{offset}]（跨步只允许 t 与 t-1）"
                     )
             offsets.append(offset)
             pos = tm.end()

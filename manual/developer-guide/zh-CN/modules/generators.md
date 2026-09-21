@@ -36,6 +36,17 @@
 
 资源必须由调用方显式传入。生成器看到的是只读内容和逻辑 ID，不是 BlobStore、URL 或宿主机路径。
 
+## 生成输入边界（0.8f-A）
+
+调用方把已固定的生成内容一次性装入不可变 `GenerationInputs` 再交给 provider：
+
+- `resources`：内容 ID 到只读字节（含当前阶段已物化的全周期连续序列）；
+- `contributions`：装配实例 ID 到设备数学贡献（键为实例，不是设备类型）；
+- `effective_finance`：不可变有效财务快照（经济参数唯一来源）；
+- `planning_program`：已编译规划 IR（目标、连续变量、已启用约束）。
+
+该边界深度不可变、确定性顺序，只做类型与结构检查，不重新验证已签发的装配、设备、财务或序列，不做内容摘要。`data_predict` 在有已实现预测 provider 前只形成 `pending_predict`，不属于已物化输入，需要它即输入不完整，明确拒绝。
+
 ## 输出
 
 成功输出 [Solver Bundle](../formats/solver-bundle.md)，包含：
@@ -133,6 +144,10 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 7. 用 fake runtime 验证 Bundle contract，用真实 solver 容器做独立集成验证；
 8. 注册 provider 并验证缺依赖、重复 ID 和半失败不会发布。
 
+## 首个内置链（已裁定目标）
+
+首个内置 provider 为 `ies.generator.highs_milp@1.0.0`，兼容求解器 `ies.solver.highs@1.7.2`，结构化命令执行器前向引用 `ies.executor.local_process@1.0.0`，结果适配器前向引用 `ies.result-adapter.highs@1.0.0`。首版只支持可证明的仿射模型，以及有限非负上下界下 `x*y=0` 的确定性二进制 Big-M 转换；设备状态仅允许 `t` 与 `t-1`；规划变量均为连续变量，二进制变量只由受支持的互斥转换内部引入。电池“规划容量参与 SOC 分母”一类双线性本首版明确不支持。
+
 ## 失败语义
 
 | 问题 | 结果 |
@@ -140,6 +155,9 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 | 原始或过期装配 YAML | 入口拒绝，要求新的校验产物 |
 | 固定资源引用缺失 | 输入不完整，不生成 Bundle |
 | 方程 contract 或 solver 能力不匹配 | 兼容诊断，执行前阻断 |
+| 非仿射数学（变量×变量、变量作除数、非常数幂、函数等） | 明确拒绝，不近似、不回退 |
+| 互斥项非负不可证或缺有限上界 | 明确拒绝，不猜测 Big-M |
+| `[t-k]`（k>1）时间引用 | 设备发布输入边界拒绝 |
 | 单位无法换算或出现非有限数 | 数值输入诊断，定位字段/实例 |
 | writer 中途失败 | 临时产物废弃，不发布 Bundle |
 | 相同输入不稳定 | 确定性契约失败，provider 不 ready |

@@ -336,6 +336,14 @@ class TestInvalidEquations:
         )
         assert MOD_EQ_SYNTAX in self._codes(doc)
 
+    def test_syntax_deep_past_reference(self):
+        # 正式状态只允许 t 与 t-1；t-2 在建模边界即拒绝
+        doc = _make_document(
+            interfaces={"a": _out("a")},
+            relations=[("r1", "a[t] = a[t-2]")],
+        )
+        assert MOD_EQ_SYNTAX in self._codes(doc)
+
     def test_syntax_bad_index(self):
         doc = _make_document(
             interfaces={"a": _out("a")},

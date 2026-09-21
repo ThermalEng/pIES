@@ -49,6 +49,11 @@ class TestReferenceAtoms:
             reference_atoms("a[t+1] + b[t]", "r1")
         assert "禁止未来引用" in str(exc.value)
 
+    def test_deep_past_offset_rejected(self):
+        with pytest.raises(EquationSyntaxError) as exc:
+            reference_atoms("a[t] + b[t-2]", "r1")
+        assert "禁止深层过去引用" in str(exc.value)
+
     def test_arbitrary_index_rejected(self):
         with pytest.raises(EquationSyntaxError):
             reference_atoms("a[x] + b", "r1")
