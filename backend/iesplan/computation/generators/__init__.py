@@ -6,13 +6,17 @@ provider 选择与装配只归 bootstrap 组合根；API/Worker 不得自行发�
 ``ComputationUnavailableError``。
 """
 
-from iesplan.computation.generators.descriptor import GeneratorDescriptor
+from iesplan.computation.generators.descriptor import (
+    NO_OPTIONS_SCHEMA,
+    GeneratorDescriptor,
+)
 from iesplan.computation.generators.registry import (
     GeneratorRegistry,
     build_registry,
 )
 
 __all__ = [
+    "NO_OPTIONS_SCHEMA",
     "GeneratorDescriptor",
     "GeneratorRegistry",
     "build_registry",

@@ -19,7 +19,7 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
 | `precision` | `low`、`medium`、`high` | 计算精度（与界面精度语义一致） |
 | `convergence` | null 或 `{tolerance, max_iterations}` | 阶段二收敛：正有限容差与正整数迭代数；多个 `data_predict` 时是否必填由后续 application 结合 artifact 判断 |
 | `time_limit_seconds` | 正整数 | 时间限制（秒） |
-| `options` | 对象（可空对象，不接受 null） | 生成/求解选项 |
+| `options` | 对象（可空对象，不接受 null） | 生成/求解选项；生成前由所选 descriptor 的 options schema 核对，未知字段与类型/范围错误直接拒绝 |
 | `seed` | 整数（不接受布尔值）或 null | 随机种子 |
 | `outputs` | 非空字符串列表 | 输出请求，顺序保留 |
 

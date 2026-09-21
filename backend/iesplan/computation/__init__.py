@@ -33,6 +33,7 @@ from iesplan.computation.config import (
 )
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators import (
+    NO_OPTIONS_SCHEMA,
     GeneratorDescriptor,
     GeneratorRegistry,
     build_registry,
@@ -76,6 +77,7 @@ __all__ = [
     "GeneratorDescriptor",
     "GeneratorProvider",
     "GeneratorRegistry",
+    "NO_OPTIONS_SCHEMA",
     "ResultAdapter",
     "SolverBundle",
     "SolverRuntime",

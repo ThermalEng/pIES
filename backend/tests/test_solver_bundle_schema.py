@@ -25,6 +25,7 @@ import pathlib
 import pytest
 
 from iesplan.computation import (
+    NO_OPTIONS_SCHEMA,
     SOLVER_BUNDLE_SCHEMA,
     SOLVER_BUNDLE_VERSION,
     CalculationConfig,
@@ -61,7 +62,7 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("modes", ("planning",))
     kwargs.setdefault("precisions", ("low", "medium", "high"))
     kwargs.setdefault("solvers", (SOLVER,))
-    kwargs.setdefault("options_schema", {})
+    kwargs.setdefault("options_schema", dict(NO_OPTIONS_SCHEMA))
     kwargs.setdefault("resource_limits", {})
     kwargs.setdefault("unit_system", "SI")
     kwargs.setdefault("seed_semantics", "options.seed 为空时使用固定种子 0")

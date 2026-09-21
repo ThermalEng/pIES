@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 from iesplan.computation.protocols import (
     check_provider_ref,
     freeze_json_value,
@@ -19,6 +21,36 @@ from iesplan.computation.protocols import (
 )
 
 _ASSEMBLY_SCHEMA_VERSION_PATTERN = re.compile(r"^\d+\.\d+(\.\d+)?$")
+
+#: 无选项时的显式完整 schema（不是空 ``{}``，未知字段同样拒绝）。
+NO_OPTIONS_SCHEMA: dict[str, object] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
+
+
+def _check_options_schema(schema: object) -> Mapping[str, object]:
+    """校验 options_schema 为完整 Draft 2020-12 JSON Schema 对象。
+
+    根 schema 必须描述 object，且 ``additionalProperties`` 必须显式为
+    ``false``（未知字段拒绝）；旧 properties 片段、空 ``{}`` 与非法
+    schema 一律拒绝。返回冻结后的 schema 映射。
+    """
+    if not isinstance(schema, Mapping):
+        raise TypeError(
+            f"options_schema 须为完整 JSON Schema 对象，得到 {type(schema).__name__}"
+        )
+    if schema.get("type") != "object":
+        raise ValueError("options_schema 根 schema 必须描述 object")
+    if schema.get("additionalProperties") is not False:
+        raise ValueError("options_schema 必须显式声明 additionalProperties: false")
+    try:
+        Draft202012Validator.check_schema(dict(schema))
+    except Exception as exc:
+        raise ValueError(f"options_schema 自身非法: {exc}") from exc
+    return freeze_json_value(dict(schema))
 
 
 def _check_assembly_schema_version(value: object) -> str:
@@ -42,10 +74,13 @@ class GeneratorDescriptor:
     ``generator`` 选择与本 ``ref`` 相等才表示选中本 provider，provider
     自身不再另存第二份引用。
 
-    字段覆盖手册“至少声明”清单：``options_schema`` 声明选项 schema，
-    默认语义由 schema 内各条目自带；``resource_limits`` 声明硬资源上界；
+    字段覆盖手册“至少声明”清单：``options_schema`` 必须为完整
+    Draft 2020-12 JSON Schema 对象（根描述 object，
+    ``additionalProperties`` 显式 false；无选项用 ``NO_OPTIONS_SCHEMA``，
+    不用空 ``{}``）；``resource_limits`` 声明硬资源上界；
     ``unit_system`` 固定内部单位体系；``media_types`` 声明生成的输入
     媒体类型；``seed_semantics`` 说明种子语义。映射字段在构造时递归冻结。
+    schema 内 ``default`` 只作描述，不据此修改配置。
 
     ``assembly_schema_version``、``solvers``、``result_adapter`` 必须为
     非空有效引用/版本：缺失即发布无效 descriptor，当场拒绝。
@@ -53,6 +88,7 @@ class GeneratorDescriptor:
 
     generator_id: str
     version: str
+    options_schema: Mapping[str, object]
     assembly_schema_version: str = ""
     modes: tuple[str, ...] = ()
     precisions: tuple[str, ...] = ()
@@ -62,7 +98,6 @@ class GeneratorDescriptor:
     equation_contracts: tuple[str, ...] = ()
     result_adapter: str = ""
     deterministic: bool = True
-    options_schema: Mapping[str, object] = field(default_factory=dict)
     resource_limits: Mapping[str, object] = field(default_factory=dict)
     unit_system: str = ""
     media_types: tuple[str, ...] = ()
@@ -106,14 +141,14 @@ class GeneratorDescriptor:
         check_provider_ref(self.result_adapter, "result_adapter")
         if not isinstance(self.deterministic, bool):
             raise TypeError("deterministic 须为布尔值")
-        for attr in ("options_schema", "resource_limits"):
-            mapping = getattr(self, attr)
-            if not isinstance(mapping, Mapping):
-                raise TypeError(f"{attr} 须为 Mapping")
-            for key in mapping:
-                if not isinstance(key, str) or not key:
-                    raise ValueError(f"{attr} 键须为非空字符串: {key!r}")
-            object.__setattr__(self, attr, freeze_json_value(dict(mapping)))
+        object.__setattr__(self, "options_schema", _check_options_schema(self.options_schema))
+        resource_limits = self.resource_limits
+        if not isinstance(resource_limits, Mapping):
+            raise TypeError("resource_limits 须为 Mapping")
+        for key in resource_limits:
+            if not isinstance(key, str) or not key:
+                raise ValueError(f"resource_limits 键须为非空字符串: {key!r}")
+        object.__setattr__(self, "resource_limits", freeze_json_value(dict(resource_limits)))
         for attr in ("unit_system", "seed_semantics"):
             if not isinstance(getattr(self, attr), str) or not getattr(self, attr):
                 raise ValueError(f"{attr} 须为非空字符串")

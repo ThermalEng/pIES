@@ -79,11 +79,11 @@ descriptor 至少声明：
 - 支持的 assembly schema MAJOR/MINOR、计算 mode 和问题能力；
 - 兼容 solver ID/版本及所需 executor 能力；
 - 支持的方程 contract、AST 和数学贡献能力；
-- options schema、默认语义和资源上界；
+- options schema（完整 Draft 2020-12 对象，根描述 object 且 `additionalProperties` 显式 false；无选项用显式空对象 schema，不用空 `{}`）、默认语义和资源上界；
 - 内部单位体系、确定性承诺和种子语义；
 - 生成的媒体类型、ResultAdapter ID 和版本关系。
 
-这些信息必须在生成 Solver Bundle 前可查询并完成兼容校验，不能等 Worker 启动求解后才发现不兼容。装配阶段不选择或锁定 generator 与 solver。
+这些信息必须在生成 Solver Bundle 前可查询并完成兼容校验，不能等 Worker 启动求解后才发现不兼容。装配阶段不选择或锁定 generator 与 solver。生成前用 descriptor 的 options schema 校验计算配置选项：非法选项是用户配置错误，直接拒绝，不回退其他生成器，不删字段、不补默认；schema 内 `default` 只作描述。
 
 ## 设备方程如何参与
 
