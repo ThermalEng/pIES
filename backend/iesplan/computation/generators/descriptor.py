@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 from iesplan.computation.protocols import (
     check_provider_ref,
@@ -21,14 +22,6 @@ from iesplan.computation.protocols import (
 )
 
 _ASSEMBLY_SCHEMA_VERSION_PATTERN = re.compile(r"^\d+\.\d+(\.\d+)?$")
-
-#: 无选项时的显式完整 schema（不是空 ``{}``，未知字段同样拒绝）。
-NO_OPTIONS_SCHEMA: dict[str, object] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {},
-    "additionalProperties": False,
-}
 
 
 def _check_options_schema(schema: object) -> Mapping[str, object]:
@@ -48,7 +41,7 @@ def _check_options_schema(schema: object) -> Mapping[str, object]:
         raise ValueError("options_schema 必须显式声明 additionalProperties: false")
     try:
         Draft202012Validator.check_schema(dict(schema))
-    except Exception as exc:
+    except SchemaError as exc:
         raise ValueError(f"options_schema 自身非法: {exc}") from exc
     return freeze_json_value(dict(schema))
 
@@ -76,8 +69,8 @@ class GeneratorDescriptor:
 
     字段覆盖手册“至少声明”清单：``options_schema`` 必须为完整
     Draft 2020-12 JSON Schema 对象（根描述 object，
-    ``additionalProperties`` 显式 false；无选项用 ``NO_OPTIONS_SCHEMA``，
-    不用空 ``{}``）；``resource_limits`` 声明硬资源上界；
+    ``additionalProperties`` 显式 false；无选项时调用方显式提交完整空
+    对象 schema，不用空 ``{}``）；``resource_limits`` 声明硬资源上界；
     ``unit_system`` 固定内部单位体系；``media_types`` 声明生成的输入
     媒体类型；``seed_semantics`` 说明种子语义。映射字段在构造时递归冻结。
     schema 内 ``default`` 只作描述，不据此修改配置。

@@ -15,7 +15,6 @@ from __future__ import annotations
 import pytest
 
 from iesplan.computation import (
-    NO_OPTIONS_SCHEMA,
     CalculationConfig,
     ComputationUnavailableError,
     GeneratorDescriptor,
@@ -23,6 +22,14 @@ from iesplan.computation import (
     build_registry,
     check_provider_ref,
 )
+
+#: 无选项显式完整 schema（测试私有字面量，不进生产公共 API）。
+_NO_OPTIONS_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
 
 GENERATOR = "acme.generator@1.0.0"
 SOLVER = "ies.solver.highs@1.7.2"
@@ -243,10 +250,19 @@ def test_descriptor_rejects_non_schema_options() -> None:
 
 def test_no_options_schema_explicit() -> None:
     """无选项用显式完整 schema；空 options 通过门禁。"""
-    desc = _descriptor(options_schema=dict(NO_OPTIONS_SCHEMA))
+    desc = _descriptor(options_schema=dict(_NO_OPTIONS_SCHEMA))
     assert desc.to_dict()["options_schema"]["additionalProperties"] is False
     registry = build_registry([desc])
     assert registry.resolve(_config(options={})).ref == GENERATOR
+
+
+def test_schema_default_never_written_back() -> None:
+    """schema 内 default 只作描述：空对象通过后仍为空对象。"""
+    registry = build_registry([_descriptor()])
+    config = _config(options={})
+    assert registry.resolve(config).ref == GENERATOR
+    assert config.options == {}
+    assert config.to_dict()["options"] == {}
 
 
 def test_resolve_options_gate() -> None:
