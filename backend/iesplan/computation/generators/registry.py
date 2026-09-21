@@ -13,9 +13,11 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
-from iesplan.computation.protocols import CalculationConfig
+from iesplan.computation.protocols import CalculationConfig, thaw_json_value
 
 
 class GeneratorRegistry:
@@ -43,10 +45,14 @@ class GeneratorRegistry:
             ) from None
 
     def resolve(self, config: CalculationConfig) -> GeneratorDescriptor:
-        """按计算配置选中 provider 并核对 mode/精度/solver 兼容性。
+        """按计算配置选中 provider 并完成生成前门禁。
 
-        generator 未注册，或 descriptor 不支持所选 mode、精度、solver
-        时统一抛 ``ComputationUnavailableError``，不回退到另一生成器。
+        1. 精确引用选中 provider；未知即 ``ComputationUnavailableError``；
+        2. 核对 mode/精度/solver 兼容性，不兼容即 ``ComputationUnavailableError``；
+        3. 用 descriptor 的 options_schema 校验 ``config.options``：
+           非法选项属于用户计算配置错误，抛明确 ``ValueError``（字段路径/
+           原因），不是不可用；不回退其他 generator，不删字段、不补默认、
+           不忽略未知项（schema 内 ``default`` 只作描述）。
         """
         descriptor = self.get(config.generator)
         if config.mode not in descriptor.modes:
@@ -64,6 +70,7 @@ class GeneratorRegistry:
                 f"生成器不兼容所选求解器: {config.generator!r} x {config.solver!r}",
                 reason="incompatible-solver",
             )
+        _check_options(descriptor, config)
         return descriptor
 
     def to_dict(self) -> dict[str, Any]:
@@ -89,6 +96,25 @@ def build_registry(candidates: Iterable[GeneratorDescriptor]) -> GeneratorRegist
             raise ValueError(f"生成器重复注册: {candidate.ref!r}")
         providers[candidate.ref] = candidate
     return GeneratorRegistry(providers)
+
+
+def _check_options(descriptor: GeneratorDescriptor, config: CalculationConfig) -> None:
+    """生成前 options 门禁：用 descriptor schema 校验配置选项。
+
+    非法选项是用户计算配置错误，抛明确 ``ValueError``（稳定字段路径与
+    原因），不是 ``ComputationUnavailableError``；调用方不得据此回退
+    其他 generator。只校验，不修改配置（schema 内 ``default`` 只作描述）。
+    """
+    schema = thaw_json_value(descriptor.options_schema)
+    options = thaw_json_value(config.options)
+    validator = Draft202012Validator(schema)
+    errors = list(validator.iter_errors(options))
+    if errors:
+        first = errors[0]
+        location = "/".join(str(p) for p in first.absolute_path)
+        raise ValueError(
+            f"计算选项非法[{location or '<root>'}]: {first.message}"
+        )
 
 
 __all__ = ["GeneratorRegistry", "build_registry"]

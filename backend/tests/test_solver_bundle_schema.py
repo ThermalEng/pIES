@@ -61,7 +61,15 @@ def _descriptor(**kwargs) -> GeneratorDescriptor:
     kwargs.setdefault("modes", ("planning",))
     kwargs.setdefault("precisions", ("low", "medium", "high"))
     kwargs.setdefault("solvers", (SOLVER,))
-    kwargs.setdefault("options_schema", {})
+    kwargs.setdefault(
+        "options_schema",
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
     kwargs.setdefault("resource_limits", {})
     kwargs.setdefault("unit_system", "SI")
     kwargs.setdefault("seed_semantics", "options.seed 为空时使用固定种子 0")
