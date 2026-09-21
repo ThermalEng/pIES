@@ -57,13 +57,13 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 3. 让系统装配只组合已固定的项目计算基线、已校验并以对象 ID/revision 固定的模型实例与数据、连接、规划配置和不可变 `EffectiveFinanceConfig`（装配使用精确引用，不内联完整财务配置）；生成 Solver Bundle 时再选择独立 `CalculationConfig`，固定 generator、solver、精度、算法选项、种子和输出请求。
 4. 建立 GeneratorProvider 公开契约、独立原子注册和能力描述。
 5. 发布 `ies.solver-bundle` `1.0.0` 的 schema、规范化规则、结构化命令、输出声明和合法/非法样例。
-6. 将当前 solver 的问题构造迁入 generator；其只从 `ValidatedAssemblyArtifact`、已校验的 `CalculationConfig` 和固定资源生成 Bundle，在此完成 solver 内部单位换算，并按项目基线物化 `constant` / `data_repeat` / `data_predict` 全周期连续 `step` 序列（物化结果只进入 Bundle 与回执，不写回装配或项目引用；预测算法由计算配置选择，不固定唯一实现）。
+6. 从零实现首个 GeneratorProvider 及其求解问题构造；它只从 `ValidatedAssemblyArtifact`、已校验的 `CalculationConfig` 和固定资源生成 Bundle，在此完成 solver 内部单位换算，并按项目基线物化 `constant` / `data_repeat` / `data_predict` 全周期连续 `step` 序列（物化结果只进入 Bundle 与回执，不写回装配或项目引用；预测算法由计算配置选择，不固定唯一实现）。项目当前没有可迁移的 solver 或问题构造实现，不以历史占位、命令拼接或测试替身作为实现基础。
 
 退出标准：所有可选设备均使用纯技术 `2.0.0` 且不依赖旧字段；非法候选不能进入项目正式模型目录、占用正式编号或参与装配；设备参数中的数据关键字只引用项目路径内 CSV，并在用户输入边界校验；项目基线创建后不可修改，装配只固定输入引用，预定义序列按基线在计算阶段生成完整周期连续 `step`；规划与财务计算固定同一 `EffectiveFinanceConfig`，装配中不存在计算选项；相同 artifact、`CalculationConfig`、资源和 provider 版本产生逐字节相同的 Solver Bundle；generator 不访问数据库、网络、对象服务或进程环境，不启动 solver。
 
 ## `0.9.0` — SolverRuntime 与受控执行
 
-目标：用通用 runtime 替代当前按 Python 函数名启动子进程的执行边界。
+目标：从零建立通用受控执行边界，由 runtime 执行 `0.8.0` 首个 GeneratorProvider 产生的 Solver Bundle；项目当前没有需要兼容或替代的既有 solver 执行实现。
 
 1. 建立 ExecutorProvider、SolverRuntime 和 ExecutionReceipt 公开契约及独立原子注册。
 2. runtime 只执行 Bundle 中通过 allowlist 的 executable ID 和参数数组，强制工作目录、路径、环境、网络和资源限制。
@@ -76,8 +76,8 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 目标：在 Bundle 与执行回执稳定后，将 solver 输出解释与业务结果分离。
 
 1. 建立 ResultAdapterProvider 独立原子注册，稳定带 schema/version 的 `ComputeResult` 契约。
-2. 将当前 solver 的状态、输出、非有限值和反向单位换算迁入 result adapter；达到时间限制时报错。
-3. 在不经过 API、数据库或 Worker 的契约测试中，跑通一个当前 solver 的“artifact → Bundle → receipt → result”算例。
+2. 为首个受支持 solver 实现状态、输出、非有限值和反向单位换算适配；达到时间限制时报错。
+3. 在不经过 API、数据库或 Worker 的契约测试中，跑通首个受支持 solver 的“artifact → Bundle → receipt → result”算例。
 4. 按上文“财务输出与附加分析范围”，分切片接入基本财务指标与逐年现金流明细，明确评价输入、计算口径、单位和状态，以可复核算例验证明细与指标一致。
 
 退出标准：result adapter 只凭 Bundle、ExecutionReceipt 和声明输出即可解释结果；不读取当前项目或最新 provider。基本财务评价使用固定输入与结果，指标和逐年现金流通过一致性验收。
@@ -97,10 +97,10 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 目标：基于现有任务幂等、租约、fencing 和迟到写入拒绝，将其执行载荷切换到新计算链。
 
 1. 在已经固定规范文本与校验回执二件套的现有 `CalcSnapshot` 上，继续以对象 ID 固定资源，并固定 generator/solver/executor/result adapter 精确版本、单位、种子、选项和容差。
-2. Worker 启动时验证快照所需依赖，任务执行只编排 generator/runtime/result adapter；删除当前命令拼接、`assembly.plan` 和函数名子进程旁路；实现多 `data_predict` 的阶段二循环（0 或 1 个时阶段一结果即最终结果；多于 1 个时以首轮结果重建预测目标与计算模型并迭代求解，按公开容差与最大迭代数收敛）。
+2. Worker 启动时验证快照所需依赖，任务执行只编排 generator/runtime/result adapter；不得新增命令拼接、`assembly.plan` 或函数名子进程旁路；实现多 `data_predict` 的阶段二循环（0 或 1 个时阶段一结果即最终结果；多于 1 个时以首轮结果重建预测目标与计算模型并迭代求解，按公开容差与最大迭代数收敛）。
 3. 每个 attempt 封存 Solver Bundle、ExecutionReceipt、必要的 stdout/stderr 日志节选、声明输出记录和统一结果；历史结果只按该快照解释。
 
-退出标准：至少一个当前 solver 通过 Docker 任务端到端算例；未校验输入、缺失依赖和旧计算路径都不能进入执行。
+退出标准：至少一个受支持 solver 通过 Docker 任务端到端算例；未校验输入、缺失依赖和任何非新计算链路径都不能进入执行。
 
 ## `0.13.0` — 项目版本与恢复 GUI
 
