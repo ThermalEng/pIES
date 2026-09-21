@@ -401,17 +401,19 @@ def _lower_modeling_node(
             left.scale(1.0 / right.constant)
             return left.checked(where)
         if node.op == "^":
-            if right.coeffs or not left.coeffs:
-                base_is_const = not left.coeffs
-                if base_is_const:
+            if not left.coeffs and not right.coeffs:
+                try:
                     result = math.pow(left.constant, right.constant)
-                    out = _Affine()
-                    out.add_const(_check_number(result, f"{where}常数幂"))
-                    return out
-                raise LoweringUnsupportedError(f"{where}非常数幂超出首版能力")
-            if right.constant == 1:
+                except (ValueError, OverflowError):
+                    raise LoweringUnsupportedError(
+                        f"{where}常数幂定义域/溢出"
+                    ) from None
+                out = _Affine()
+                out.add_const(_check_number(result, f"{where}常数幂"))
+                return out
+            if left.coeffs and not right.coeffs and right.constant == 1:
                 return left
-            if right.constant == 0:
+            if left.coeffs and not right.coeffs and right.constant == 0:
                 out = _Affine()
                 out.add_const(1.0)
                 return out
@@ -568,13 +570,15 @@ def _single_var_product(
 def _mutex_big_m(
     name: str,
     x_key: tuple[str, int],
-    x_coeff: float,
     y_key: tuple[str, int],
-    y_coeff: float,
     symbols: Mapping[str, SymbolEntry],
 ) -> LoweredRelation:
-    """``x*y=0``（非负、有限上界）→ binary + 两条 Big-M 约束。"""
-    bounds: dict[tuple[str, int], tuple[float, float]] = {}
+    """``x*y=0``（非负、有限上界）→ binary + 两条 Big-M 约束。
+
+    互斥语义只依赖两个非负基础变量是否为零：乘积上的非零常数因子
+    不改变可行域，约束一律按基础变量及其上界生成（系数恒为正）。
+    """
+    bounds: dict[tuple[str, int], float] = {}
     for key in (x_key, y_key):
         entry = _resolve_symbol(key[0], symbols)
         if entry[0] != "var":
@@ -588,20 +592,16 @@ def _mutex_big_m(
             raise LoweringUnsupportedError(
                 f"互斥项 {key[0]!r} 缺有限上界（上界 {upper!r}）"
             )
-        bounds[key] = (float(lower), float(upper))
-    for coeff in (x_coeff, y_coeff):
-        if coeff == 0:
-            raise LoweringUnsupportedError(f"{name} 互斥系数为零")
-    # 系数符号不影响 x*y=0 语义（c≠0 时同解），M 取上界绝对值缩放。
-    mx = bounds[x_key][1] * abs(x_coeff)
-    my = bounds[y_key][1] * abs(y_coeff)
+        bounds[key] = float(upper)
+    mx = bounds[x_key]
+    my = bounds[y_key]
     b_var = LinearVariable(name=f"{name}__mutex", lower=0.0, upper=1.0, kind="binary")
     b_key = (b_var.name, 0)
     first = _Affine()
-    first.add_term(x_key, x_coeff)
+    first.add_term(x_key, 1.0)
     first.add_term(b_key, -mx)
     second = _Affine()
-    second.add_term(y_key, y_coeff)
+    second.add_term(y_key, 1.0)
     second.add_term(b_key, my)
     return LoweredRelation(
         constraints=(
@@ -716,6 +716,8 @@ def lower_relation(
     # 一侧仿射失败：仅当另一侧为常数零且本侧为单积 X*Y 时走互斥 Big-M。
     lhs_ok = isinstance(lhs, _Affine)
     rhs_ok = isinstance(rhs, _Affine)
+    if not lhs_ok and not rhs_ok:
+        raise lhs  # 两侧均不可降级，抛左侧异常（确定性优先）
     if (lhs_ok and lhs.coeffs) or (rhs_ok and rhs.coeffs):
         raise rhs if isinstance(rhs, LoweringUnsupportedError) else lhs
     zero_side = lhs if lhs_ok else rhs
@@ -727,12 +729,10 @@ def lower_relation(
     )
     if split is None:
         raise rhs if isinstance(rhs, LoweringUnsupportedError) else lhs
-    factor, (x_key, x_coeff), (y_key, y_coeff) = split
+    factor, (x_key, _), (y_key, _) = split
     if factor == 0:
         return LoweredRelation(constraints=(), variables=())
-    return _mutex_big_m(
-        relation.id, x_key, factor * x_coeff, y_key, y_coeff, checked,
-    )
+    return _mutex_big_m(relation.id, x_key, y_key, checked)
 
 
 def lower_planning_expression(

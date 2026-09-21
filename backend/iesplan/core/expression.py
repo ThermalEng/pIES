@@ -23,6 +23,8 @@ import ast
 import math
 import re
 from collections import Counter
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final
 
 from iesplan.core.errors import AppError
@@ -202,9 +204,11 @@ class CompiledExpr:
         ir: 内部受限 IR(嵌套元组,不含任何 Python 对象访问能力)。
         node_count: 编译后节点数(≤ MAX_NODES)。
         depth: 表达式深度(≤ MAX_DEPTH)。
+        qconst_values: 本次编译的单位字面量常量表(qconst 名 → SI 数值；
+            只读，不可变映射；无字面量时为空)。
     """
 
-    __slots__ = ("text", "allowed_vars", "ir", "node_count", "depth")
+    __slots__ = ("text", "allowed_vars", "ir", "node_count", "depth", "qconst_values")
 
     def __init__(
         self,
@@ -213,12 +217,16 @@ class CompiledExpr:
         ir: tuple,
         node_count: int,
         depth: int,
+        qconst_values: Mapping[str, float] | None = None,
     ) -> None:
         self.text = text
         self.allowed_vars = allowed_vars
         self.ir = ir
         self.node_count = node_count
         self.depth = depth
+        self.qconst_values = (
+            MappingProxyType(dict(qconst_values)) if qconst_values else MappingProxyType({})
+        )
 
     def eval(self, values: dict) -> float:
         """在给定变量值下求值(纯函数,无副作用)。
@@ -662,7 +670,7 @@ def parse_expr(
         )
 
     ir, _ = compile_node(tree, 0)
-    return CompiledExpr(text, allowed, ir, state["nodes"], state["depth"])
+    return CompiledExpr(text, allowed, ir, state["nodes"], state["depth"], qconst_values)
 
 
 def _pow_dims(d: Dimensions, e: float, text: str) -> Dimensions:

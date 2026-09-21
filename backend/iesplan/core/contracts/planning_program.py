@@ -38,7 +38,6 @@ from iesplan.core.expression import (
     ExpressionDimensionError,
     ExpressionSyntaxError,
     parse_expr,
-    rewrite_unit_suffixes,
 )
 
 #: 金额字面量(数值 + 币种词)：只核已知币种词汇（与装配规划闸门同模式）。
@@ -167,9 +166,6 @@ def compile_planning_expression(
                     currency=currency,
                     expr=source,
                 )
-    # 单位字面量数值只做同规则探测取值（引擎内部改写完成真正的
-    # qconst 编号与代入；别名作用于原始文本，与装配原编排一致）。
-    _probe_text, _probe_dims, qconst_values = rewrite_unit_suffixes(source, {})
     # 安全别名改写（与装配规划闸门原编排一致：排序稳定、词边界、
     # 别名与已用名避让；调用方不得预改写，避免引擎二次改写丢失上下文）。
     aliases: dict[str, str] = {}
@@ -197,7 +193,7 @@ def compile_planning_expression(
         aliases=tuple(sorted(aliases.items())),
         ir=compiled.ir,
         symbols=frozen_symbols,
-        constants=tuple(sorted(qconst_values.items())),
+        constants=tuple(sorted(compiled.qconst_values.items())),
     )
 
 

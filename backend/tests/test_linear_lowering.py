@@ -180,6 +180,70 @@ def test_mutex_big_m_with_finite_bounds() -> None:
     assert rows["exclusivity__mutex_y"].rhs == 100.0
 
 
+NEG_MUTEX_YAML = """
+schema: ies.device-model
+schema_version: "2.0.0"
+device: {id: acme.device.hub2, names: {zh-CN: 枢纽二, en-US: Hub2}}
+properties: {}
+interfaces:
+  charge: {type: in, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: 100}}
+  discharge: {type: in, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: 100}}
+equations:
+  variables: {}
+  relations:
+    - id: neg_exclusivity
+      expression: "-charge[t] * discharge[t] = 0"
+"""
+
+PRODUCT_BOTH_SIDES_YAML = """
+schema: ies.device-model
+schema_version: "2.0.0"
+device: {id: acme.device.quad, names: {zh-CN: 四元, en-US: Quad}}
+properties: {}
+interfaces:
+  x: {type: in, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
+  y: {type: in, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
+  a: {type: in, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
+  b: {type: in, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
+equations:
+  variables: {}
+  relations:
+    - id: quad
+      expression: "x[t] * y[t] = a[t] * b[t]"
+"""
+
+
+def test_mutex_negative_factor_uses_base_variables() -> None:
+    # (-x)*y=0 与 x*y=0 同可行域：约束系数恒为正
+    relation = _relation(NEG_MUTEX_YAML, "neg_exclusivity")
+    symbols = {
+        "charge": ("var", 0.0, 100.0),
+        "discharge": ("var", 0.0, 100.0),
+    }
+    lowered = lower_relation(relation, symbols, step=0)
+    rows = {row.name: row for row in lowered.constraints}
+    assert _coeffs(rows["neg_exclusivity__mutex_x"].expression) == {
+        ("charge", 0): 1.0, ("neg_exclusivity__mutex", 0): -100.0,
+    }
+    assert rows["neg_exclusivity__mutex_x"].rhs == 0.0
+    assert _coeffs(rows["neg_exclusivity__mutex_y"].expression) == {
+        ("discharge", 0): 1.0, ("neg_exclusivity__mutex", 0): 100.0,
+    }
+    assert rows["neg_exclusivity__mutex_y"].rhs == 100.0
+
+
+def test_both_sides_non_affine_unsupported() -> None:
+    relation = _relation(PRODUCT_BOTH_SIDES_YAML, "quad")
+    symbols = {
+        "x": ("var", 0.0, 10.0),
+        "y": ("var", 0.0, 10.0),
+        "a": ("var", 0.0, 10.0),
+        "b": ("var", 0.0, 10.0),
+    }
+    with pytest.raises(LoweringUnsupportedError):
+        lower_relation(relation, symbols, step=0)
+
+
 def test_mutex_without_upper_bound_unsupported() -> None:
     relation = _relation(MUTEX_YAML, "exclusivity")
     symbols = {
@@ -223,6 +287,42 @@ def test_deep_past_reference_unsupported_at_lowering() -> None:
     relation = MathRelation(id="r1", output="a", ast=ast)
     with pytest.raises(LoweringUnsupportedError):
         lower_relation(relation, {"a": ("var", 0.0, 1.0)}, step=5)
+
+
+def test_power_const_base_var_exponent_unsupported() -> None:
+    # 2 ^ x 不得静默误编译为常量
+    node = BinaryNode(
+        op="^", left=NumberNode(value=2.0), right=RefNode(name="x", offset=0)
+    )
+    with pytest.raises(LoweringUnsupportedError):
+        lower_expression(node, {"x": ("var", 0.0, 10.0)}, step=0)
+
+
+def test_power_var_base_nontrivial_exponent_unsupported() -> None:
+    node = BinaryNode(
+        op="^", left=RefNode(name="x", offset=0), right=NumberNode(value=2.0)
+    )
+    with pytest.raises(LoweringUnsupportedError):
+        lower_expression(node, {"x": ("var", 0.0, 10.0)}, step=0)
+
+
+def test_power_const_fold_and_unit_exponents() -> None:
+    folded = BinaryNode(
+        op="^", left=NumberNode(value=2.0), right=NumberNode(value=3.0)
+    )
+    assert lower_expression(folded, {}, step=0).constant == 8.0
+    exp_one = BinaryNode(
+        op="^", left=RefNode(name="x", offset=0), right=NumberNode(value=1.0)
+    )
+    assert _coeffs(
+        lower_expression(exp_one, {"x": ("var", 0.0, 10.0)}, step=0)
+    ) == {("x", 0): 1.0}
+    exp_zero = BinaryNode(
+        op="^", left=RefNode(name="x", offset=0), right=NumberNode(value=0.0)
+    )
+    assert (
+        lower_expression(exp_zero, {"x": ("var", 0.0, 10.0)}, step=0).constant == 1.0
+    )
 
 
 def test_expression_division_and_terms_sorted() -> None:
