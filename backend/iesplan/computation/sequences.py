@@ -207,13 +207,13 @@ def _project_column(data: bytes, interface_id: str) -> list[float]:
     归一化规则（去空白小写）定位契约列后逐行 float 转换。无宽容修复；
     内部损坏让实际 decode/csv/索引/float 错误可见。
     """
-    text = data.decode("utf-8-sig").splitlines()
-    lines = [
-        line
-        for line in text
+    lines = data.decode("utf-8-sig").splitlines()
+    header_index = next(
+        index
+        for index, line in enumerate(lines)
         if line.strip() and not line.strip().startswith("#")
-    ]
-    rows = list(csv.reader(lines))
+    )
+    rows = list(csv.reader(lines[header_index:]))
     header = [cell.strip().lower() for cell in rows[0]]
     column = header.index(interface_id.lower())
     return [

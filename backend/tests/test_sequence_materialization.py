@@ -57,7 +57,7 @@ def _const_binding(value: float) -> dict:
     return {"mode": "constant", "value": value}
 
 
-def _repeat_binding(object_id: int) -> dict:
+def _repeat_binding(object_id: str) -> dict:
     return {
         "mode": "data_repeat",
         "path": "/nonexistent/evil.csv",
