@@ -430,13 +430,9 @@ def _lower_modeling_node(
 def _planning_ref(
     alias: str,
     aliases: Mapping[str, str],
-    constants: Mapping[str, float],
     symbols: Mapping[str, SymbolEntry],
 ) -> _Affine:
     out = _Affine()
-    if alias in constants:
-        out.add_const(_check_number(constants[alias], f"常量 {alias!r}"))
-        return out
     original = aliases.get(alias, alias)
     entry = _resolve_symbol(original, symbols)
     if entry[0] == "const":
@@ -449,7 +445,6 @@ def _planning_ref(
 def _lower_planning_node(
     node: object,
     aliases: Mapping[str, str],
-    constants: Mapping[str, float],
     symbols: Mapping[str, SymbolEntry],
     where: str,
 ) -> _Affine:
@@ -461,11 +456,9 @@ def _lower_planning_node(
         out.add_const(_check_number(node[1], f"{where}数值"))
         return out
     if head == "var":
-        return _planning_ref(node[1], aliases, constants, symbols)
+        return _planning_ref(node[1], aliases, symbols)
     if head == "unary":
-        inner = _lower_planning_node(
-            node[2], aliases, constants, symbols, where
-        )
+        inner = _lower_planning_node(node[2], aliases, symbols, where)
         if node[1] == "neg":
             inner.scale(-1.0)
             return inner
@@ -474,8 +467,8 @@ def _lower_planning_node(
         raise LoweringUnsupportedError(f"{where}不支持的一元运算 {node[1]!r}")
     if head == "bin":
         _, op, left_node, right_node = node
-        left = _lower_planning_node(left_node, aliases, constants, symbols, where)
-        right = _lower_planning_node(right_node, aliases, constants, symbols, where)
+        left = _lower_planning_node(left_node, aliases, symbols, where)
+        right = _lower_planning_node(right_node, aliases, symbols, where)
         if op in ("add", "sub"):
             if op == "sub":
                 right.scale(-1.0)
@@ -743,9 +736,8 @@ def lower_planning_expression(
     if not isinstance(expression, PlanningExpression):
         raise TypeError("expression 须为 PlanningExpression")
     aliases = {alias: original for original, alias in expression.aliases}
-    constants = {name: value for name, value in expression.constants}
     lowered = _lower_planning_node(
-        expression.ir, aliases, constants, _check_symbols(symbols), "规划表达式",
+        expression.ir, aliases, _check_symbols(symbols), "规划表达式",
     )
     return lowered.checked("规划表达式").freeze()
 
@@ -767,13 +759,12 @@ def lower_planning_constraint(
         alias: original
         for original, alias in constraint.expression.aliases
     }
-    constants = {name: value for name, value in constraint.expression.constants}
     checked = _check_symbols(symbols)
     left = _lower_planning_node(
-        left_node, aliases, constants, checked, f"约束 {constraint.name!r}"
+        left_node, aliases, checked, f"约束 {constraint.name!r}"
     )
     right = _lower_planning_node(
-        right_node, aliases, constants, checked, f"约束 {constraint.name!r}"
+        right_node, aliases, checked, f"约束 {constraint.name!r}"
     )
     for key, coeff in right.coeffs.items():
         left.add_term(key, -coeff)

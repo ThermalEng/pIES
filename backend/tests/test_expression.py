@@ -245,15 +245,6 @@ class TestRuntimeTraps:
         for t in (273.15, 298.14, 298.15):
             assert expr_c.eval({"t": t}) == expr_k.eval({"t": t})
 
-    def test_compiled_qconst_table_exposed(self):
-        """一次 parse_expr 编译结果公开本次单位常量表（只读、不可变）。"""
-        expr = parse_expr("pv >= 50 kW", {"pv"}, {"pv": _dim_of({"power": 1})})
-        assert expr.qconst_values["qconst1"] == pytest.approx(50000.0)
-        plain = parse_expr("a + 1", {"a"})
-        assert dict(plain.qconst_values) == {}
-        with pytest.raises(TypeError):
-            expr.qconst_values["qconst9"] = 1.0  # type: ignore[index]
-
     def test_unit_suffix_scientific_and_chinese_numeral(self):
         """科学计数/中文数字后缀换算(codex 二次审核 Low-2)。"""
         from iesplan.core.expression import rewrite_unit_suffixes

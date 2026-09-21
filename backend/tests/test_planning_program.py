@@ -62,8 +62,9 @@ def test_compile_currency_mismatch_rejected() -> None:
 
 
 def test_compile_currency_skipped_when_none() -> None:
+    # 单位字面量直接编译为 SI 数值 num 节点，不保留 qconst 变量
     expr = compile_planning_expression("100 USD", {}, currency=None)
-    assert expr.constants == (("qconst1", 100.0),)
+    assert expr.ir == ("num", 100.0)
 
 
 def test_compile_empty_rejected() -> None:

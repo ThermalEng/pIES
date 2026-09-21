@@ -80,15 +80,12 @@ class PlanningExpression:
         aliases: 财务标识符安全别名表（(原名, 别名) 排序元组）。
         ir: 公共表达式引擎编译 IR（嵌套元组；变量引用均为别名）。
         symbols: 原名 → 量纲冻结对（排序元组）。
-        constants: 单位字面量常量（(qconst 名, SI 数值) 排序元组；
-            求值/降级时按常量代入）。
     """
 
     source: str
     aliases: tuple[tuple[str, str], ...] = ()
     ir: tuple = ()
     symbols: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] = ()
-    constants: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, str):
@@ -120,9 +117,6 @@ class PlanningExpression:
                 name: {dim: power for dim, power in dims}
                 for name, dims in self.symbols
             },
-            "constants": [
-                [name, value] for name, value in self.constants
-            ],
         }
 
 
@@ -193,7 +187,6 @@ def compile_planning_expression(
         aliases=tuple(sorted(aliases.items())),
         ir=compiled.ir,
         symbols=frozen_symbols,
-        constants=tuple(sorted(compiled.qconst_values.items())),
     )
 
 
