@@ -17,8 +17,8 @@ import json
 
 import pytest
 
-from iesplan.assembly.contracts import ValidatedAssemblyArtifact
-from iesplan.computation import MaterializedSet, materialize_series
+from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
+from iesplan.computation import MaterializedSet, materialize_non_predictive_series
 
 CSV_META = (
     "# schema: ies.device-data\n"
@@ -49,7 +49,7 @@ def _artifact(
         "devices": devices,
     }
     return ValidatedAssemblyArtifact(
-        canonical_text=json.dumps(doc), receipt=None  # type: ignore[arg-type]
+        canonical_text=json.dumps(doc), receipt=ValidationReceipt()
     )
 
 
@@ -74,7 +74,7 @@ def test_constant_point_counts() -> None:
         ({"resolution": "1h", "leap_year": True}, 8784),
     ]
     for baseline, expected in cases:
-        result = materialize_series(
+        result = materialize_non_predictive_series(
             _artifact(baseline, {"d1": {"predefined_interfaces": {"p": _const_binding(2.5)}}}),
             {},
         )
@@ -94,16 +94,16 @@ def test_repeat_day_week_year() -> None:
     week = [float(i) for i in range(168)]
     year = [float(i % 100) for i in range(8760)]
     resources = {
-        11: _csv_bytes(["p"], [[v] for v in day]),
-        12: _csv_bytes(["p"], [[v] for v in week]),
-        13: _csv_bytes(["p"], [[v] for v in year]),
+        "obj-11": _csv_bytes(["p"], [[v] for v in day]),
+        "obj-12": _csv_bytes(["p"], [[v] for v in week]),
+        "obj-13": _csv_bytes(["p"], [[v] for v in year]),
     }
     devices = {
-        "day": {"predefined_interfaces": {"p": _repeat_binding(11)}},
-        "week": {"predefined_interfaces": {"p": _repeat_binding(12)}},
-        "year": {"predefined_interfaces": {"p": _repeat_binding(13)}},
+        "day": {"predefined_interfaces": {"p": _repeat_binding("obj-11")}},
+        "week": {"predefined_interfaces": {"p": _repeat_binding("obj-12")}},
+        "year": {"predefined_interfaces": {"p": _repeat_binding("obj-13")}},
     }
-    result = materialize_series(_artifact(baseline, devices), resources)
+    result = materialize_non_predictive_series(_artifact(baseline, devices), resources)
     by_device = {s.device: s for s in result.series}
     assert list(by_device) == ["day", "week", "year"]
     assert list(by_device["day"].values) == day * 365
@@ -115,18 +115,18 @@ def test_multi_device_interface_column_selection() -> None:
     """多设备/接口与同文件多列精确选择；source 追溯 object_id。"""
     baseline = {"resolution": "1h", "leap_year": False}
     resources = {
-        21: _csv_bytes(["pa", "pb"], [[1.0, 2.0], [3.0, 4.0]]),
+        "obj-21": _csv_bytes(["pa", "pb"], [[1.0, 2.0], [3.0, 4.0]]),
     }
     devices = {
-        "zeta": {"predefined_interfaces": {"pb": _repeat_binding(21)}},
+        "zeta": {"predefined_interfaces": {"pb": _repeat_binding("obj-21")}},
         "alpha": {
             "predefined_interfaces": {
-                "pa": _repeat_binding(21),
+                "pa": _repeat_binding("obj-21"),
                 "pc": _const_binding(7.0),
             }
         },
     }
-    result = materialize_series(_artifact(baseline, devices), resources)
+    result = materialize_non_predictive_series(_artifact(baseline, devices), resources)
     assert [(s.device, s.interface) for s in result.series] == [
         ("alpha", "pa"),
         ("alpha", "pc"),
@@ -135,25 +135,25 @@ def test_multi_device_interface_column_selection() -> None:
     by_key = {(s.device, s.interface): s for s in result.series}
     assert list(by_key[("alpha", "pa")].values)[:4] == [1.0, 3.0, 1.0, 3.0]
     assert list(by_key[("zeta", "pb")].values)[:4] == [2.0, 4.0, 2.0, 4.0]
-    assert by_key[("zeta", "pb")].source["object_id"] == 21
+    assert by_key[("zeta", "pb")].source["object_id"] == "obj-21"
     assert set(by_key[("alpha", "pc")].values) == {7.0}
 
 
 def test_immutable_and_caller_mutation_ignored() -> None:
     """载体不可变；调用方事后改写输入不影响已物化结果。"""
     baseline = {"resolution": "1h", "leap_year": False}
-    resources = {31: _csv_bytes(["p"], [[9.0], [8.0]])}
+    resources = {"obj-31": _csv_bytes(["p"], [[9.0], [8.0]])}
     artifact = _artifact(
-        baseline, {"d1": {"predefined_interfaces": {"p": _repeat_binding(31)}}}
+        baseline, {"d1": {"predefined_interfaces": {"p": _repeat_binding("obj-31")}}}
     )
-    result = materialize_series(artifact, resources)
+    result = materialize_non_predictive_series(artifact, resources)
     series = result.series[0]
     with pytest.raises(dataclasses.FrozenInstanceError):
         series.values = ()  # type: ignore[misc]
     with pytest.raises(TypeError):
         series.values[0] = 0.0  # type: ignore[index]
-    resources[31] = _csv_bytes(["p"], [[0.0]])
-    resources[99] = b"junk"
+    resources["obj-31"] = _csv_bytes(["p"], [[0.0]])
+    resources["obj-99"] = b"junk"
     assert list(result.series[0].values)[:2] == [9.0, 8.0]
     dumped = result.to_dict()
     dumped["series"][0]["values"][0] = 0.0
@@ -164,14 +164,14 @@ def test_missing_resource_fails_without_path_fallback() -> None:
     """资源缺失明确失败；path 字段永不用于读取（无 fallback）。"""
     baseline = {"resolution": "1h", "leap_year": False}
     artifact = _artifact(
-        baseline, {"d1": {"predefined_interfaces": {"p": _repeat_binding(41)}}}
+        baseline, {"d1": {"predefined_interfaces": {"p": _repeat_binding("obj-41")}}}
     )
     with pytest.raises(ValueError, match="固定资源缺失"):
-        materialize_series(artifact, {})
+        materialize_non_predictive_series(artifact, {})
 
 
 def test_predict_is_pending_not_materialized() -> None:
-    """data_predict 进入待定边界，不被误报为已物化。"""
+    """data_predict 进入待定边界（含资源身份），不被误报为已物化。"""
     baseline = {"resolution": "1h", "leap_year": False}
     devices = {
         "d1": {
@@ -180,19 +180,65 @@ def test_predict_is_pending_not_materialized() -> None:
                     "mode": "data_predict",
                     "path": "future.csv",
                     "target_type": "load",
-                    "content": {"object_id": 51, "media_type": "text/csv"},
+                    "content": {"object_id": "obj-51", "media_type": "text/csv"},
                 },
-                "pr": _repeat_binding(52),
+                "pr": _repeat_binding("obj-52"),
             }
         }
     }
-    resources = {52: _csv_bytes(["pr"], [[1.0]])}
-    result = materialize_series(_artifact(baseline, devices), resources)
+    resources = {
+        "obj-51": _csv_bytes(["pf"], [[1.0]]),
+        "obj-52": _csv_bytes(["pr"], [[1.0]]),
+    }
+    result = materialize_non_predictive_series(_artifact(baseline, devices), resources)
     assert [s.interface for s in result.series] == ["pr"]
     assert result.pending_predict == (
-        {"device": "d1", "interface": "pf", "target_type": "load"},
+        {
+            "device": "d1",
+            "interface": "pf",
+            "target_type": "load",
+            "object_id": "obj-51",
+        },
     )
     dumped = result.to_dict()
     assert dumped["pending_predict"] == [
-        {"device": "d1", "interface": "pf", "target_type": "load"}
+        {
+            "device": "d1",
+            "interface": "pf",
+            "target_type": "load",
+            "object_id": "obj-51",
+        }
     ]
+
+
+def test_predict_missing_resource_fails() -> None:
+    """预测绑定身份缺失同样是必要输入不完整，明确失败。"""
+    baseline = {"resolution": "1h", "leap_year": False}
+    devices = {
+        "d1": {
+            "predefined_interfaces": {
+                "pf": {
+                    "mode": "data_predict",
+                    "path": "future.csv",
+                    "target_type": "load",
+                    "content": {"object_id": "obj-51", "media_type": "text/csv"},
+                },
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="固定资源缺失"):
+        materialize_non_predictive_series(_artifact(baseline, devices), {})
+
+
+def test_quoted_numeric_cells_consumed() -> None:
+    """RFC 4180 引号数值单元格可消费（标准库 csv，非 split 解析）。"""
+    baseline = {"resolution": "1h", "leap_year": False}
+    raw = (
+        CSV_META
+        + 'step,p\n0,"48.3"\n1,"46.7"\n'
+    ).encode("utf-8")
+    devices = {"d1": {"predefined_interfaces": {"p": _repeat_binding("obj-61")}}}
+    result = materialize_non_predictive_series(
+        _artifact(baseline, devices), {"obj-61": raw}
+    )
+    assert list(result.series[0].values)[:2] == [48.3, 46.7]

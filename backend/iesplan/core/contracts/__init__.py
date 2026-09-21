@@ -15,6 +15,7 @@ from iesplan.core.contracts.baseline import (
     TIMELINE_STEP_DURATION_VAR,
     ProjectBaseline,
     ProjectBaselineError,
+    point_count_for_baseline,
 )
 from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.contracts.planning_config import (
@@ -42,4 +43,5 @@ __all__ = [
     "PlanningVariable",
     "ProjectBaseline",
     "ProjectBaselineError",
+    "point_count_for_baseline",
 ]

@@ -13,7 +13,7 @@
 - 计算配置契约: ``load_calculation_config_schema`` /
   ``validate_calculation_config``(实现见 ``config``);
 - 序列物化: ``MaterializedSeries`` / ``MaterializedSet`` /
-  ``materialize_series``(实现见 ``sequences``);
+  ``materialize_non_predictive_series``(实现见 ``sequences``);
 - 边界协议与载体: ``GeneratorProvider`` / ``SolverRuntime`` /
   ``ResultAdapter`` / ``CalculationConfig`` / ``SolverBundle`` /
   ``ExecutionReceipt`` / ``ComputeResult``(宪法 §4.5 三段式边界);
@@ -64,7 +64,7 @@ from iesplan.computation.registry import (
 from iesplan.computation.sequences import (
     MaterializedSeries,
     MaterializedSet,
-    materialize_series,
+    materialize_non_predictive_series,
 )
 
 __all__ = [
@@ -94,7 +94,7 @@ __all__ = [
     "list_algorithms",
     "load_bundle_schema",
     "load_calculation_config_schema",
-    "materialize_series",
+    "materialize_non_predictive_series",
     "normalize_bundle",
     "validate_bundle",
     "validate_calculation_config",

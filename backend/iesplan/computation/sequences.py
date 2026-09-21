@@ -2,21 +2,24 @@
 
 为后续 GeneratorProvider 服务的最小确定性物化逻辑，只处理非预测
 来源（constant/data_repeat）；data_predict 声明式进入
-``MaterializedSet.pending_predict``，不物化、不跳过、不伪装完成。
+``MaterializedSet.pending_predict``（保留固定资源身份），不物化、
+不跳过、不伪装完成。
 
 输入只消费 ``ValidatedAssemblyArtifact``（已签发事实）与调用方按
-canonical 绑定 ``content.object_id`` 显式传入的只读字节；输出 step
-恒为 ``0..point_count-1``，``point_count`` 由基线唯一推导（复用
-core 基线，不自建第二套推导）。
+canonical 绑定 ``content.object_id``（字符串）显式传入的只读字节；
+输出 step 恒为 ``0..point_count-1``，``point_count`` 由基线唯一推导
+（复用 core 权威纯函数，不重建基线对象、不重复校验）。
 
 信任装配已确认的事实，不做任何重复校验：不调用数据解析校验器，
 不复核 schema/单位/范围/step/周期，不产生诊断，不做 hash/摘要。
-CSV 读取只做取数必需的确定性解码与列投影；固定资源缺失明确失败；
-其余违反已签发事实的内部损坏让实际解析/索引错误可见。
+CSV 读取只做取数必需的确定性解码与列投影（标准库 csv 读取，不校验、
+不修复、不 fallback）；固定资源缺失明确失败；其余违反已签发事实的
+内部损坏让实际 decode/csv/索引/float 错误可见。
 """
 
 from __future__ import annotations
 
+import csv
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -24,7 +27,7 @@ from types import MappingProxyType
 from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
-from iesplan.core.contracts.baseline import ProjectBaseline
+from iesplan.core.contracts import point_count_for_baseline
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,11 +79,12 @@ class MaterializedSeries:
 
 @dataclass(frozen=True, slots=True)
 class MaterializedSet:
-    """一次物化的完整返回边界（不可变值对象）。
+    """本阶段物化返回边界（不可变值对象）。
 
-    ``series`` 只含非预测来源（按 device/interface 确定性排序）；
-    ``pending_predict`` 为声明但本切片不物化的预测绑定
-   （{device, interface, target_type}，同序排列），后续 generator 消费。
+    ``series`` 仅含非预测来源（按 device/interface 确定性排序）；
+    ``pending_predict`` 为声明但本阶段不物化的预测绑定
+    （{device, interface, target_type, object_id}，同序排列），后续
+    generator 消费。series 为空且 pending 非空时不代表“已全部完成”。
     """
 
     series: tuple[MaterializedSeries, ...] = ()
@@ -94,6 +98,7 @@ class MaterializedSet:
                 "device",
                 "interface",
                 "target_type",
+                "object_id",
             }:
                 raise ValueError(f"pending_predict 条目形态非法: {entry!r}")
         object.__setattr__(
@@ -110,25 +115,23 @@ class MaterializedSet:
         }
 
 
-def materialize_series(
+def materialize_non_predictive_series(
     artifact: ValidatedAssemblyArtifact,
-    resources: Mapping[Any, bytes],
+    resources: Mapping[str, bytes],
 ) -> MaterializedSet:
     """物化装配产物中全部非预测来源的全周期序列。
 
-    ``resources`` 以 canonical 绑定 ``content.object_id`` 为键显式提供
-    只读字节；缺失即必要输入不完整，明确失败。不按 path 读取宿主机，
-    不用最新数据替换，不改写 artifact 与资源。
+    ``resources`` 以 canonical 绑定 ``content.object_id``（字符串）为键
+    显式提供只读字节（含预测绑定所需身份）；任一所需身份缺失即必要输入
+    不完整，明确失败。不按 path 读取宿主机，不用最新数据替换，不改写
+    artifact 与资源。
     """
     doc = json.loads(artifact.canonical_text)
     baseline_data = doc["project_baseline"]
-    baseline = ProjectBaseline(
-        resolution=baseline_data["resolution"],
-        leap_year=baseline_data["leap_year"],
-        scenario_mode=baseline_data.get("scenario_mode", "single"),
+    point_count = point_count_for_baseline(
+        baseline_data["resolution"], baseline_data["leap_year"]
     )
-    point_count = baseline.point_count
-    resolution = baseline.resolution
+    resolution = baseline_data["resolution"]
     series: list[MaterializedSeries] = []
     pending: list[dict[str, object]] = []
     devices = doc.get("devices") or {}
@@ -156,9 +159,7 @@ def materialize_series(
                         "固定资源缺失（必要输入不完整）: "
                         f"{device_id!r} x {interface_id!r} x object {object_id!r}"
                     )
-                cycle = _project_column(
-                    resources[object_id], interface_id
-                )
+                cycle = _project_column(resources[object_id], interface_id)
                 if not cycle:
                     raise ValueError(
                         "重复基线为空（违反已签发事实）: "
@@ -177,11 +178,18 @@ def materialize_series(
                     )
                 )
             elif mode == "data_predict":
+                object_id = binding["content"]["object_id"]
+                if object_id not in resources:
+                    raise ValueError(
+                        "固定资源缺失（必要输入不完整）: "
+                        f"{device_id!r} x {interface_id!r} x object {object_id!r}"
+                    )
                 pending.append(
                     {
                         "device": device_id,
                         "interface": interface_id,
                         "target_type": binding["target_type"],
+                        "object_id": object_id,
                     }
                 )
             else:
@@ -194,18 +202,29 @@ def materialize_series(
 def _project_column(data: bytes, interface_id: str) -> list[float]:
     """从已确认 CSV 字节投影单列数值（文件顺序即 step 顺序）。
 
-    只做取数必需的确定性解码与列投影：UTF-8 解码，按行取表头定位列，
-    逐行 float 转换。无宽容修复；内部损坏让实际解析/索引错误可见。
+    只读取不校验：UTF-8 解码（BOM 按标准库语义），跳过前置 ``#`` 元数据
+    行与空行（与校验器同一行语义），首个数据行为表头，按校验器同一
+    归一化规则（去空白小写）定位契约列后逐行 float 转换。无宽容修复；
+    内部损坏让实际 decode/csv/索引/float 错误可见。
     """
-    lines = data.decode("utf-8").splitlines()
-    rows = [line for line in lines if line and not line.startswith("#")]
-    header = rows[0].split(",")
-    column = header.index(interface_id)
-    return [float(row.split(",")[column]) for row in rows[1:]]
+    text = data.decode("utf-8-sig").splitlines()
+    lines = [
+        line
+        for line in text
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    rows = list(csv.reader(lines))
+    header = [cell.strip().lower() for cell in rows[0]]
+    column = header.index(interface_id.lower())
+    return [
+        float(cells[column].strip())
+        for cells in rows[1:]
+        if any(cell.strip() for cell in cells)
+    ]
 
 
 __all__ = [
     "MaterializedSeries",
     "MaterializedSet",
-    "materialize_series",
+    "materialize_non_predictive_series",
 ]

@@ -38,6 +38,16 @@ _POINT_COUNTS: Final[dict[str, tuple[int, int]]] = {
     "1h": (365 * 24, 366 * 24),  # 8760 / 8784
 }
 
+
+def point_count_for_baseline(resolution: str, leap_year: bool) -> int:
+    """分辨率 + 闰年 → 全周期点数的权威纯推导。
+
+    供 ``ProjectBaseline.point_count`` 与计算阶段共用；非法可信状态
+    （未知分辨率）让原生 ``KeyError`` 暴露，不包装诊断。
+    """
+    normal, leap = _POINT_COUNTS[resolution]
+    return leap if leap_year else normal
+
 #: 分辨率对应的小时步长。
 _RESOLUTION_HOURS: Final[dict[str, float]] = {
     "15min": 0.25,
@@ -89,8 +99,7 @@ class ProjectBaseline:
     @property
     def point_count(self) -> int:
         """普通年/闰年全周期点数(由 resolution 与 leap_year 唯一推导)。"""
-        normal, leap = _POINT_COUNTS[self.resolution]
-        return leap if self.leap_year else normal
+        return point_count_for_baseline(self.resolution, self.leap_year)
 
     @property
     def initial_step(self) -> int:
