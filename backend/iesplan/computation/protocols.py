@@ -124,7 +124,8 @@ class GeneratorProvider(Protocol):
     ) -> SolverBundle:
         """由五项直接输入生成求解包。
 
-        未签发的装配输入必须拒绝生成, 不产生部分 Bundle; 无可用实现时抛
+        调用方只传入已签发 artifact; provider 信任上游装配与应用边界
+        已完成的签发与内容确认, 不复核。无可用实现时抛
         ``ComputationUnavailableError``。
         """
         ...

@@ -36,7 +36,7 @@ def test_compile_aliases_deterministic() -> None:
         ("om__annual_fixed", "pfin1"),
         ("pv1__upfront_capex", "pfin2"),
     )
-    assert first.to_dict() == second.to_dict()
+    assert first == second
     assert first.ir[0] == "bin"
 
 

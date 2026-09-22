@@ -27,7 +27,7 @@ from iesplan.core.contracts.planning_config import (
     PlanningConfigError,
     PlanningVariable,
 )
-from iesplan.core.contracts.planning_program import (
+from iesplan.core.contracts.planning_expression import (
     PlanningExpression,
     compile_planning_expression,
 )

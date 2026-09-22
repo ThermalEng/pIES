@@ -41,7 +41,7 @@ HTTP API ──→ 应用用例 ──→ 上述领域模块 / 对象存储
 | [devices](modules/devices.md) | 描述系统中有哪些设备能力 | 设备 provider 与规格 | `DeviceDescriptor` |
 | [modeling](modules/modeling.md) | 把受限设备方程变成公共数学贡献 | 设备 descriptor、方程 AST | 变量、关系、状态和结果映射 |
 | [assembly](modules/assembly.md) | 把装配 YAML/项目图变成可信规范产物 | 项目图、绑定、配置、各目录快照 | 诊断或 `ValidatedAssemblyArtifact` |
-| [generators](modules/generators.md) | 生成求解器输入文件和结构化命令 | 规范装配、固定资源、生成器选择 | Solver Bundle |
+| [generators](modules/generators.md) | 生成求解器输入文件和结构化命令 | 装配产物、设备数学贡献、物化序列、有效财务快照、`CalculationConfig` 五项直接输入 | Solver Bundle |
 | [solver runtime](modules/solver-runtime.md) | 在受控环境执行 Bundle 命令 | Solver Bundle、attempt 上下文 | `ExecutionReceipt` 与原始输出 |
 | [computation](modules/engines.md) | 组织生成、执行和结果适配的公共语义 | 装配产物、provider 与执行上下文 | `ComputeResult` 与连续证据 |
 | [finance](modules/finance.md) | 解释方案经济性 | 运行结果、财务参数 | `FinancialResult` |

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ies.solver-bundle/1.0.0",
   "title": "ies.solver-bundle 1.0.0 求解交接包契约",
-  "description": "Solver Bundle 是一次求解的可执行、不可变交接包，由 GeneratorProvider 从已签发装配产物、已校验 CalculationConfig 与固定资源确定性生成，供 SolverRuntime 校验执行。字段与格式页 manifest 一一对应：bundle{generator, solver}、inputs[{path, media_type}]、command、outputs[{path, media_type, required}]、result_adapter、extensions。command 为结构化数据，禁止 shell 字符串；路径一律为 Bundle 内相对路径。未知字段一律拒绝，不静默丢弃。",
+  "description": "Solver Bundle 是一次求解的可执行、不可变交接包，由 GeneratorProvider 从装配产物、设备数学贡献、物化序列、有效财务快照与已校验 CalculationConfig 五项直接输入确定性生成，供 SolverRuntime 校验执行。字段与格式页 manifest 一一对应：bundle{generator, solver}、inputs[{path, media_type}]、command、outputs[{path, media_type, required}]、result_adapter、extensions。command 为结构化数据，禁止 shell 字符串；路径一律为 Bundle 内相对路径。未知字段一律拒绝，不静默丢弃。",
   "type": "object",
   "required": [
     "schema",

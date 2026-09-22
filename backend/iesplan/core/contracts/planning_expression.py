@@ -10,12 +10,11 @@
   用户输入闸门处先行负责）；
 - 含 ``__`` 的财务标识符经确定性安全别名（``pfin<N>``，排序稳定）
   改写后送公共 ``core.expression`` 引擎；
-- 返回冻结 ``PlanningExpression``（源码、别名表、编译 IR）。
+- 返回冻结 ``PlanningExpression``（别名表、编译 IR）。
 
-调用方约定：装配阶段的用户输入闸门（标识符存在性分类、设备引用、
-币种首错等诊断）仍在 ``assembly``；生成器后续只消费已编译 IR，
-不重新解析用户表达式。规划的目标 sense、变量与约束归装配产物，
-不复制成第二份业务输入。本模块不导入任何业务模块。
+调用方约定：装配在用户输入闸门调用本入口做合法性校验；生成器在
+可信 artifact 上调用同一入口完成问题构造，不建立第二 parser，也
+不把这次编译包装成第六项业务输入。本模块不导入任何业务模块。
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from iesplan.core.expression import (
     Dimensions,
@@ -42,30 +40,19 @@ _CURRENCY_LITERAL_RE = re.compile(
 _ALIAS_PREFIX = "pfin"
 
 
-def _thaw_ir(node: object) -> Any:
-    """编译 IR → JSON 兼容结构（元组转列表，确定性）。"""
-    if isinstance(node, tuple):
-        return [_thaw_ir(item) for item in node]
-    return node
-
-
 @dataclass(frozen=True, slots=True)
 class PlanningExpression:
     """已编译的规划表达式（不可变，可直接交生成器降级）。
 
     属性:
-        source: 用户表达式源码。
         aliases: 财务标识符安全别名表（(原名, 别名) 排序元组）。
         ir: 公共表达式引擎编译 IR（嵌套元组；变量引用均为别名）。
     """
 
-    source: str
     aliases: tuple[tuple[str, str], ...] = ()
     ir: tuple = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source, str):
-            raise TypeError("source 须为字符串")
         for pair in self.aliases:
             if (
                 not isinstance(pair, tuple)
@@ -75,13 +62,6 @@ class PlanningExpression:
                 raise TypeError(f"别名条目非法: {pair!r}")
         if not isinstance(self.ir, tuple):
             raise TypeError("ir 须为元组")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "source": self.source,
-            "aliases": [[original, alias] for original, alias in self.aliases],
-            "ir": _thaw_ir(self.ir),
-        }
 
 
 def compile_planning_expression(
@@ -143,7 +123,6 @@ def compile_planning_expression(
     }
     compiled = parse_expr(rewritten, set(var_dims), var_dims)
     return PlanningExpression(
-        source=source,
         aliases=tuple(sorted(aliases.items())),
         ir=compiled.ir,
     )

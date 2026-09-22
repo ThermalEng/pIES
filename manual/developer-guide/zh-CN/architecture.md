@@ -65,7 +65,8 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 | 设备定义 | 设备 YAML 或等价公开规格 | `DeviceDescriptor` | `properties/interfaces/equations` 与单位已校验，发布内容身份已固定 |
 | 方程解析 | 设备 descriptor 与受限表达式语法 | 规范方程 AST/数学贡献 | 变量、关系、单位和接口引用明确，无独立设备命令版本 |
 | 装配与检查 | 装配 YAML/项目图、项目基线、规范数据与固定输入引用、规划配置与 `EffectiveFinanceConfig`、目录快照 | 诊断或 `ValidatedAssemblyArtifact` | 连接、数据来源、规划和财务输入合法，业务单位明确，校验回执完整 |
-| 计算生成 | 装配产物、设备数学贡献、物化序列、有效财务快照、独立 `CalculationConfig` 五项直接输入 | 物化序列与 Solver Bundle | 预定义序列按基线生成，计算能力兼容，求解器输入、结构化命令、输出和适配器声明完整 |
+| 序列物化 | 规范装配、项目基线与计算配置 | 全周期连续序列 | `constant`/`data_repeat`/`data_predict` 按基线生成，`step` 连续对齐 |
+| 计算生成 | 装配产物、设备数学贡献、物化序列、有效财务快照、独立 `CalculationConfig` 五项直接输入 | Solver Bundle | 计算能力兼容，求解器输入、结构化命令、输出和适配器声明完整 |
 | 受控求解 | Solver Bundle、资源与取消上下文 | `ExecutionReceipt` 与原始输出 | 实际命令、限制、日志、退出和输出完整 |
 | 结果适配 | Bundle、执行回执、声明输出 | `ComputeResult` | 技术/数学状态、候选、流量、单位和依赖版本完整 |
 | 财务与分析 | 计算结果、财务参数、分析命令 | 财务/分析结果与证据 | 指标口径、状态、来源和适用范围可追溯 |

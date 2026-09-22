@@ -2,7 +2,7 @@
 
 ``planning`` 的目标与约束表达式只接受普通标识符 ``Name``(财务分量
 标识符与已声明规划变量名), 别名改写与编译收敛到
-``core.contracts.planning_program`` 公共入口，不新造第二套解析器。
+``core.contracts.planning_expression`` 公共入口，不新造第二套解析器。
 财务标识符含 ``__``(引擎安全边界禁止)：未知 ``__`` 标记先按规范
 分类阻断，不送入引擎。
 

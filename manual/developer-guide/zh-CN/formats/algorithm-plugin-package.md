@@ -112,7 +112,7 @@ def solve(request: SolveRequest) -> SolveResult: ...
 
 具体 Python 类型由 SDK 生成，但跨进程事实是版本化 JSON 与文件 manifest：
 
-- `GenerateRequest` 只含规范装配文本、固定资源清单、选项、种子和工作目录内逻辑路径；
+- `GenerateRequest` 只含规范装配文本、固定资源清单、选项、种子和工作目录内逻辑路径（未来 sandbox runner 的包内载荷，不是核心 GeneratorProvider 的五项运行输入）；
 - `GenerateResult` 只含生成文件清单、求解请求和输出声明；系统通用 GeneratorProvider 据此生成标准 Solver Bundle；
 - `SolveRequest` 由 SolverRuntime 的通用 ExecutorProvider 从 Solver Bundle 建立，只含生成结果、规范选项、种子、停止条件和资源限制；
 - `SolveResult` 只含技术状态、业务结局、声明输出、日志引用和资源统计。
@@ -127,7 +127,7 @@ def solve(request: SolveRequest) -> SolveResult: ...
 
 ## 加工阶段规则
 
-加工入口只能消费 `ValidatedAssemblyArtifact` 与已固定资源。它负责：
+加工入口只能消费包内 `GenerateRequest`（规范装配文本与固定资源清单）。它负责：
 
 - 校验插件声明支持的装配 schema、mode 和变量类型；
 - 把业务单位转换到该插件明确声明的内部单位；

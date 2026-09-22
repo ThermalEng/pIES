@@ -205,7 +205,7 @@ def test_protocol_methods_match_constitution_boundaries() -> None:
     """宪法 §4.5 方法形状: generate/run/adapt 的参数与产出符合三段边界。"""
     import inspect
 
-    assert list(inspect.signature(_GeneratorOnly.generate).parameters) == [
+    assert list(inspect.signature(GeneratorProvider.generate).parameters) == [
         "self", "artifact", "models", "series", "finance", "config",
     ]
     assert list(inspect.signature(_RuntimeOnly.run).parameters) == ["self", "bundle"]
