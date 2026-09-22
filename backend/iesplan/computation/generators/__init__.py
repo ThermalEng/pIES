@@ -7,7 +7,6 @@ provider 选择与装配只归 bootstrap 组合根；API/Worker 不得自行发�
 """
 
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
-from iesplan.computation.generators.inputs import GenerationInputs
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
@@ -26,7 +25,6 @@ from iesplan.computation.generators.registry import (
 )
 
 __all__ = [
-    "GenerationInputs",
     "GeneratorDescriptor",
     "GeneratorRegistry",
     "LoweredRelation",

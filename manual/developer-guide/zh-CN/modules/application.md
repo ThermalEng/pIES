@@ -124,7 +124,7 @@ Application 不拥有长时后台运算的执行状态机。它在提交阶段�
 8. 提交后发布可重建队列消息；
 9. 返回任务 ID、状态和实际快照。
 
-Application 不生成 Solver Bundle。计算 Worker 在同一冻结快照上把 `ValidatedAssemblyArtifact` 与计算配置一起交给纯 GeneratorProvider，完成计算配置能力校验并封存 Bundle 后交给 SolverRuntime；这样 HTTP 事务不承担求解器文件生成，也不会让 Worker 回读项目草稿。
+Application 不生成 Solver Bundle。计算 Worker 在同一冻结快照上把装配产物、设备数学贡献、物化序列、有效财务快照与计算配置五项直接输入一起交给纯 GeneratorProvider，完成计算配置能力校验并封存 Bundle 后交给 SolverRuntime；这样 HTTP 事务不承担求解器文件生成，也不会让 Worker 回读项目草稿。
 
 队列发布失败不能让数据库中的任务变成不可解释孤儿；恢复器应能从权威任务状态重新入队。
 

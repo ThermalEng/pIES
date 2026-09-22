@@ -12,7 +12,6 @@
   ``validate_bundle``(实现见 ``bundle``);
 - 计算配置契约: ``load_calculation_config_schema`` /
   ``validate_calculation_config``(实现见 ``config``);
-- 生成输入边界: ``GenerationInputs``(实现见 ``generators.inputs``);
 - 序列物化: ``MaterializedSeries`` / ``MaterializedSet`` /
   ``materialize_non_predictive_series``(实现见 ``sequences``);
 - 边界协议与载体: ``GeneratorProvider`` / ``SolverRuntime`` /
@@ -36,7 +35,6 @@ from iesplan.computation.config import (
 )
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators import (
-    GenerationInputs,
     GeneratorDescriptor,
     GeneratorRegistry,
     build_registry,
@@ -82,7 +80,6 @@ __all__ = [
     "ComputationUnavailableError",
     "ComputeResult",
     "ExecutionReceipt",
-    "GenerationInputs",
     "GeneratorDescriptor",
     "GeneratorProvider",
     "GeneratorRegistry",

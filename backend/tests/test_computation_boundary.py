@@ -5,9 +5,9 @@
 - Protocol 形状: 三个边界协议为运行时可检查的 Protocol, 且拒绝
   不完整实现的结构判定; 三协议用各自独立的最小替身验证(不用一个
   同时实现三协议的假对象证明错误形状);
-- 宪法 §4.5 方法形状: generate 消费装配产物/已固定资源/公开配置产出
-  Bundle; run 消费 Bundle 产出回执与原始输出; adapt 消费三件套产出
-  统一结果;
+- 宪法 §4.5 方法形状: generate 消费装配产物/设备数学贡献/物化序列/
+  有效财务快照/公开配置五项直接输入产出 Bundle; run 消费 Bundle 产出
+  回执与原始输出; adapt 消费三件套产出统一结果;
 - unavailable 错误语义: ``ComputationUnavailableError`` 为
   ``RuntimeError``, 默认 reason 为 ``"no-provider"``;
 - 计算配置: ``CalculationConfig`` 固定 generator/solver 精确引用、种子、
@@ -40,6 +40,7 @@ from iesplan.computation import (
     ComputeResult,
     ExecutionReceipt,
     GeneratorProvider,
+    MaterializedSeries,
     ResultAdapter,
     SolverBundle,
     SolverRuntime,
@@ -47,6 +48,8 @@ from iesplan.computation import (
     list_algorithms,
 )
 from iesplan.core.errors import NotFoundError
+from iesplan.finance import EffectiveFinanceConfig, FinanceProfile, merge_effective
+from iesplan.modeling import DeviceMathContribution
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -100,6 +103,38 @@ def _bundle() -> SolverBundle:
 # ---------------------------------------------------------------------------
 
 
+_FINANCE_PAYLOAD = {
+    "schema": "ies.finance-profile",
+    "schema_version": "1.0.0",
+    "profile": {
+        "id": "cn-north-demo",
+        "region": "CN-North",
+        "currency": "CNY",
+        "base_year": 2025,
+        "price_basis": "tax_inclusive",
+        "cost_method": "fixed_plus_linear",
+    },
+    "finance_types": {
+        "pv_system": {
+            "upfront_capex": {"fixed": {"value": "0", "unit": "CNY"}},
+        }
+    },
+    "energy_prices": {
+        "grid_import": {
+            "carrier": "electricity",
+            "direction": "purchase",
+            "kind": "constant",
+            "value": {"value": "0.7", "unit": "CNY/kWh"},
+        }
+    },
+}
+
+
+def _finance() -> EffectiveFinanceConfig:
+    """最小不可变有效财务快照(与装配引用同一合并语义)。"""
+    return merge_effective(FinanceProfile.from_dict(_FINANCE_PAYLOAD), None)
+
+
 class _GeneratorOnly:
     """仅实现 GeneratorProvider 的最小替身(无任何算法逻辑)。"""
 
@@ -113,7 +148,9 @@ class _GeneratorOnly:
     def generate(
         self,
         artifact: ValidatedAssemblyArtifact,
-        resources: Mapping[str, object],
+        models: Mapping[str, DeviceMathContribution],
+        series: tuple[MaterializedSeries, ...],
+        finance: EffectiveFinanceConfig,
         config: CalculationConfig,
     ) -> SolverBundle:
         raise ComputationUnavailableError(reason="no-provider")
@@ -169,7 +206,7 @@ def test_protocol_methods_match_constitution_boundaries() -> None:
     import inspect
 
     assert list(inspect.signature(_GeneratorOnly.generate).parameters) == [
-        "self", "artifact", "resources", "config",
+        "self", "artifact", "models", "series", "finance", "config",
     ]
     assert list(inspect.signature(_RuntimeOnly.run).parameters) == ["self", "bundle"]
     assert list(inspect.signature(_AdapterOnly.adapt).parameters) == [
@@ -189,7 +226,7 @@ def test_unavailable_error_semantics() -> None:
     gen, runtime, adapter = _GeneratorOnly(), _RuntimeOnly(), _AdapterOnly()
     config = _config(seed=42)
     with pytest.raises(ComputationUnavailableError):
-        gen.generate(_artifact(), {}, config)
+        gen.generate(_artifact(), {}, (), _finance(), config)
     with pytest.raises(ComputationUnavailableError):
         runtime.run(_bundle())
     receipt = ExecutionReceipt(

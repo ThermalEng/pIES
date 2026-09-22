@@ -28,7 +28,7 @@ ResultAdapter → ComputeResult
 | 子模块 | 输入 | 输出 | 不负责 |
 |---|---|---|---|
 | 序列物化 | 装配中的来源声明和固定输入、项目基线、计算配置 | 全周期连续序列与回执 | 改写装配、项目模型或数据版本 |
-| [生成器](generators.md) | 已校验装配、固定资源、生成选项 | Solver Bundle | 启动求解器、读取数据库、提交结果 |
+| [生成器](generators.md) | 装配产物、设备数学贡献、物化序列、有效财务快照、生成选项五项直接输入 | Solver Bundle | 启动求解器、读取数据库、提交结果 |
 | [求解运行时](solver-runtime.md) | Solver Bundle、取消与资源上下文 | ExecutionReceipt、原始输出 | 解释设备、构造数学问题、财务分析 |
 | Result Adapter | Bundle、回执、声明输出 | `ComputeResult` | 重试、重新求解、读取当前项目 |
 | 计算公共契约 | provider descriptor、状态、回执与结果类型 | 稳定跨模块 DTO | provider 发现、HTTP、ORM |

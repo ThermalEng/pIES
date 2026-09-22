@@ -2,8 +2,10 @@
 
 三段式真实边界(宪法 §4.5):
 
-- ``GeneratorProvider`` 只接受 ``ValidatedAssemblyArtifact``、已固定资源与
-  经过公开 schema 校验的 ``CalculationConfig``, 确定性生成 ``SolverBundle``;
+- ``GeneratorProvider`` 只接受已签发的 ``ValidatedAssemblyArtifact``、按装配
+  实例固定的设备数学贡献、已物化的全周期输入序列、不可变
+  ``EffectiveFinanceConfig`` 与经过公开输入校验的 ``CalculationConfig``
+  五项直接输入, 确定性生成 ``SolverBundle``;
 - ``SolverRuntime`` 只校验并执行 Bundle 中的结构化命令, 生成
   ``ExecutionReceipt`` 与原始输出;
 - ``ResultAdapter`` 只把 Bundle、回执和声明输出映射为带 schema/version 的
@@ -31,6 +33,9 @@ from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
+from iesplan.computation.sequences import MaterializedSeries
+from iesplan.finance import EffectiveFinanceConfig
+from iesplan.modeling import DeviceMathContribution
 
 #: 公开计算配置 schema(进入业务事实前须校验字头)。
 CALCULATION_CONFIG_SCHEMA = "ies.calculation-config"
@@ -95,9 +100,9 @@ def check_provider_ref(value: object, name: str) -> str:
 class GeneratorProvider(Protocol):
     """方案生成能力(0.8 未实现: 仅形状, 无实现)。
 
-    纯转换: 直接消费已签发的装配产物, 不得连接数据库/对象服务/网络,
-    不得启动求解器, 不得读环境变量, 不得修改项目或任务状态。资源由
-    调用方显式传入; 同一装配、资源、配置与生成器版本必须产生相同输入字节。
+    纯转换: 直接消费五项已可信输入, 不得连接数据库/对象服务/网络,
+    不得启动求解器, 不得读环境变量, 不得修改项目或任务状态; 不得为
+    五项输入再建包装层。同一五项输入与生成器版本必须产生相同输入字节。
     """
 
     @property
@@ -112,10 +117,12 @@ class GeneratorProvider(Protocol):
     def generate(
         self,
         artifact: ValidatedAssemblyArtifact,
-        resources: Mapping[str, object],
+        models: Mapping[str, DeviceMathContribution],
+        series: tuple[MaterializedSeries, ...],
+        finance: EffectiveFinanceConfig,
         config: CalculationConfig,
     ) -> SolverBundle:
-        """由已签发装配、已固定资源与已校验计算配置生成求解包。
+        """由五项直接输入生成求解包。
 
         未签发的装配输入必须拒绝生成, 不产生部分 Bundle; 无可用实现时抛
         ``ComputationUnavailableError``。

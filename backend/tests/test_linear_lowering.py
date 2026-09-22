@@ -17,10 +17,7 @@ from iesplan.computation.generators.linear import (
     lower_planning_expression,
     lower_relation,
 )
-from iesplan.core.contracts import (
-    PlanningProgramConstraint,
-    compile_planning_expression,
-)
+from iesplan.core.contracts import compile_planning_expression
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.modeling import (
@@ -356,11 +353,8 @@ def test_planning_constraint_lowering() -> None:
         symbols,
         currency="CNY",
     )
-    constraint = PlanningProgramConstraint(
-        name="cap", type="annual_purchase_cost_limit", expression=compiled
-    )
     row = lower_planning_constraint(
-        constraint, {"import_meter__period_energy_purchase": ("var", 0.0, None)}
+        "cap", compiled, {"import_meter__period_energy_purchase": ("var", 0.0, None)}
     )
     assert (row.name, row.sense, row.rhs) == ("cap", "le", 0.0)
     assert _coeffs(row.expression) == {("import_meter__period_energy_purchase", 0): 1.0}
@@ -369,11 +363,8 @@ def test_planning_constraint_lowering() -> None:
 
 def test_planning_strict_comparison_unsupported() -> None:
     compiled = compile_planning_expression("score < 5", {"score": Counter()})
-    constraint = PlanningProgramConstraint(
-        name="strict", type="ratio", expression=compiled
-    )
     with pytest.raises(LoweringUnsupportedError):
-        lower_planning_constraint(constraint, {"score": ("var", 0.0, 10.0)})
+        lower_planning_constraint("strict", compiled, {"score": ("var", 0.0, 10.0)})
 
 
 def test_planning_expression_lowering() -> None:

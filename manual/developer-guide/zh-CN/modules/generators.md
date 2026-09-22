@@ -13,7 +13,7 @@
 模块负责：
 
 - GeneratorDescriptor、Provider protocol、能力查询和独立注册状态；
-- 消费已签发的 `ValidatedAssemblyArtifact`、依赖锁和资源引用；
+- 直接消费五项运行输入（装配产物、设备数学贡献、物化序列、有效财务快照、计算配置），不设包装层；
 - 按规范设备方程贡献收集变量、约束、状态、接口流和索引；
 - 按规划配置形成目标、变量边界和规划约束，并从 `EffectiveFinanceConfig` 取得经济参数；价格或成本不得写回设备技术语义；
 - 将规范业务单位显式转换为求解器内部单位；
@@ -28,24 +28,14 @@
 
 | 输入 | 进入条件 |
 |---|---|
-| `ValidatedAssemblyArtifact` | 已由装配模块签发，零阻断诊断 |
-| 资源映射 | 每项由内容 ID 映射到只读字节；预定义接口已由当前计算阶段物化为全周期连续序列 |
-| 方程贡献与设备内容锁 | 来自装配产物固定的方程 contract、设备内容身份和依赖锁 |
+| `ValidatedAssemblyArtifact` | 已由装配模块签发，零阻断诊断；实例、参数覆盖、连接拓扑、规划、财务/计费绑定、项目基线 |
+| `models` | 装配实例 ID 到设备数学贡献的映射（键为实例，不是设备类型） |
+| `series` | 已物化的全周期输入序列（`MaterializedSeries` 只读序列；`constant`/`data_repeat`/`data_predict` 统一为同一类型） |
+| `finance` | 不可变 `EffectiveFinanceConfig`（经济参数唯一来源） |
 | `CalculationConfig` | 在计算阶段选择，包含预测算法与参数、generator、solver、精度、求解选项、收敛条件、种子和输出请求 |
-| GeneratorDescriptor | 支持装配 schema、所选计算能力和 solver，且与 `CalculationConfig` 一致 |
+| GeneratorDescriptor | 支持装配 schema、所选计算能力和 solver，且与 `CalculationConfig` 一致；属 provider 静态事实，不作为每次生成参数 |
 
-资源必须由调用方显式传入。生成器看到的是只读内容和逻辑 ID，不是 BlobStore、URL 或宿主机路径。
-
-## 生成输入边界（0.8f-A）
-
-调用方把已固定的生成内容一次性装入不可变 `GenerationInputs` 再交给 provider：
-
-- `resources`：内容 ID 到只读字节（含当前阶段已物化的全周期连续序列）；
-- `contributions`：装配实例 ID 到设备数学贡献（键为实例，不是设备类型）；
-- `effective_finance`：不可变有效财务快照（经济参数唯一来源）；
-- `planning_program`：已编译规划 IR（目标、连续变量、已启用约束）。
-
-该边界深度不可变、确定性顺序，只做类型与结构检查，不重新验证已签发的装配、设备、财务或序列，不做内容摘要。`data_predict` 在有已实现预测 provider 前只形成 `pending_predict`，不属于已物化输入，需要它即输入不完整，明确拒绝。
+五项输入均来自可信上游，生成器不重复验证已签发的装配、设备贡献、财务快照或序列，不做内容摘要。`data_predict` 在有已实现预测 provider 前只形成 `pending_predict`，不属于已物化输入，需要它即输入不完整，明确拒绝。不得为五项输入再建包装层。
 
 ## 输出
 

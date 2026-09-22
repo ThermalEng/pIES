@@ -63,7 +63,7 @@ extensions: {}
 
 ## 生成器职责
 
-一个 GeneratorProvider 接收 `ValidatedAssemblyArtifact`、已校验的 `CalculationConfig` 和已固定的资源内容，负责：
+一个 GeneratorProvider 接收已签发的 `ValidatedAssemblyArtifact`、按装配实例固定的设备数学贡献、已物化的全周期输入序列、不可变 `EffectiveFinanceConfig` 与已校验的 `CalculationConfig` 五项直接输入，负责：
 
 1. 直接消费已签发的装配产物，并验证计算配置中的 generator、solver、精度、算法选项、种子和输出请求能力匹配；
 2. 消费已规范化的设备方程贡献，并结合装配中的规划配置与 `EffectiveFinanceConfig` 建立变量、目标、约束和索引；
@@ -74,7 +74,7 @@ extensions: {}
 
 生成器应是确定性的纯转换：不得连接数据库、对象服务或网络，不得启动求解器，不得读环境变量，不得修改项目或任务状态。资源由调用方显式传入。
 
-同一规范装配、`CalculationConfig`、资源和生成器版本必须产生相同输入字节。若底层文件格式本身含非确定字段，生成器必须移除或固定它们。
+同一五项输入与生成器版本必须产生相同输入字节。若底层文件格式本身含非确定字段，生成器必须移除或固定它们。
 
 ## 结构化命令
 

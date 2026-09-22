@@ -35,7 +35,10 @@ class MaterializedSeries:
     """单个预定义接口的全周期计算序列（不可变值对象）。
 
     ``values`` 按 step 0 起连续排列，长度恒等于 ``point_count``；
-    ``source`` 固定追溯（constant 无外部引用，data_repeat 记 object_id）。
+    ``source`` 固定追溯（constant 无外部引用，data_repeat/data_predict
+    记 object_id）。``mode`` 为 constant、data_repeat、data_predict
+    三者之一；本阶段物化仍只产出前两者，data_predict 由后续预测
+    完成值以同一类型进入。
     """
 
     device: str
@@ -51,8 +54,8 @@ class MaterializedSeries:
             raise ValueError(f"device 须为非空字符串: {self.device!r}")
         if not self.interface or not isinstance(self.interface, str):
             raise ValueError(f"interface 须为非空字符串: {self.interface!r}")
-        if self.mode not in ("constant", "data_repeat"):
-            raise ValueError(f"本契约只物化非预测来源: {self.mode!r}")
+        if self.mode not in ("constant", "data_repeat", "data_predict"):
+            raise ValueError(f"未知来源模式: {self.mode!r}")
         if len(self.values) != self.point_count:
             raise ValueError(
                 f"序列长度须等于 point_count: {len(self.values)} x {self.point_count}"

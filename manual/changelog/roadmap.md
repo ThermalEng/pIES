@@ -57,7 +57,7 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 3. 让系统装配只组合已固定的项目计算基线、已校验并以对象 ID/revision 固定的模型实例与数据、连接、规划配置和不可变 `EffectiveFinanceConfig`（装配使用精确引用，不内联完整财务配置）；生成 Solver Bundle 时再选择独立 `CalculationConfig`，固定 generator、solver、精度、算法选项、种子和输出请求。
 4. 建立 GeneratorProvider 公开契约、独立原子注册和能力描述。
 5. 发布 `ies.solver-bundle` `1.0.0` 的 schema、规范化规则、结构化命令、输出声明和合法/非法样例。
-6. 从零实现首个 GeneratorProvider 及其求解问题构造；它只从 `ValidatedAssemblyArtifact`、已校验的 `CalculationConfig` 和固定资源生成 Bundle，在此完成 solver 内部单位换算，并按项目基线物化 `constant` / `data_repeat` / `data_predict` 全周期连续 `step` 序列（物化结果只进入 Bundle 与回执，不写回装配或项目引用；预测算法由计算配置选择，不固定唯一实现）。项目当前没有可迁移的 solver 或问题构造实现，不以历史占位、命令拼接或测试替身作为实现基础。
+6. 从零实现首个 GeneratorProvider 及其求解问题构造；它直接消费装配产物、设备数学贡献、物化序列、有效财务快照与已校验 `CalculationConfig` 五项输入生成 Bundle，在此完成 solver 内部单位换算，并按项目基线物化 `constant` / `data_repeat` / `data_predict` 全周期连续 `step` 序列（物化结果只进入 Bundle 与回执，不写回装配或项目引用；预测算法由计算配置选择，不固定唯一实现）。项目当前没有可迁移的 solver 或问题构造实现，不以历史占位、命令拼接或测试替身作为实现基础。
 
 退出标准：所有可选设备均使用纯技术 `2.0.0` 且不依赖旧字段；非法候选不能进入项目正式模型目录、占用正式编号或参与装配；设备参数中的数据关键字只引用项目路径内 CSV，并在用户输入边界校验；项目基线创建后不可修改，装配只固定输入引用，预定义序列按基线在计算阶段生成完整周期连续 `step`；规划与财务计算固定同一 `EffectiveFinanceConfig`，装配中不存在计算选项；相同 artifact、`CalculationConfig`、资源和 provider 版本产生逐字节相同的 Solver Bundle；generator 不访问数据库、网络、对象服务或进程环境，不启动 solver。
 

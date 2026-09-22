@@ -6,8 +6,7 @@
 
 消费 modeling 公共 AST（``NumberNode``/``RefNode``/``UnaryNode``/
 /// ``BinaryNode``，时间索引经符号表解析）或已编译规划 IR
-（``PlanningExpression``/``PlanningProgramConstraint`` 的
-num/var/bin/unary/cmp 节点）。首版能力（已裁定）：
+（``PlanningExpression`` 的 num/var/bin/unary/cmp 节点）。首版能力（已裁定）：
 
 - 可证明的仿射模型：常量、property、已固定标量/序列系数确定性部分
   求值；加减、常数乘/除降为仿射；
@@ -30,10 +29,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from iesplan.core.contracts import (
-    PlanningExpression,
-    PlanningProgramConstraint,
-)
+from iesplan.core.contracts import PlanningExpression
 from iesplan.modeling import (
     BinaryNode,
     MathRelation,
@@ -743,33 +739,40 @@ def lower_planning_expression(
 
 
 def lower_planning_constraint(
-    constraint: PlanningProgramConstraint,
+    name: str,
+    expression: PlanningExpression,
     symbols: Mapping[str, SymbolEntry],
 ) -> LinearConstraint:
-    """降级已启用规划约束（顶层比较）为单约束行。"""
-    if not isinstance(constraint, PlanningProgramConstraint):
-        raise TypeError("constraint 须为 PlanningProgramConstraint")
-    node = constraint.expression.ir
+    """降级已启用规划约束（顶层比较）为单约束行。
+
+    直接接收约束名与已编译 ``PlanningExpression``；约束是否启用、
+    归属哪个规划由装配产物决定，不另设包装对象。
+    """
+    if not isinstance(name, str) or not name:
+        raise TypeError(f"约束名须为非空字符串: {name!r}")
+    if not isinstance(expression, PlanningExpression):
+        raise TypeError("expression 须为 PlanningExpression")
+    node = expression.ir
     if not isinstance(node, tuple) or not node or node[0] != "cmp":
         raise LoweringUnsupportedError(
-            f"约束 {constraint.name!r} 顶层不是比较，超出首版能力"
+            f"约束 {name!r} 顶层不是比较，超出首版能力"
         )
     _, op, left_node, right_node = node
     aliases = {
         alias: original
-        for original, alias in constraint.expression.aliases
+        for original, alias in expression.aliases
     }
     checked = _check_symbols(symbols)
     left = _lower_planning_node(
-        left_node, aliases, checked, f"约束 {constraint.name!r}"
+        left_node, aliases, checked, f"约束 {name!r}"
     )
     right = _lower_planning_node(
-        right_node, aliases, checked, f"约束 {constraint.name!r}"
+        right_node, aliases, checked, f"约束 {name!r}"
     )
     for key, coeff in right.coeffs.items():
         left.add_term(key, -coeff)
     left.add_const(-right.constant)
-    diff = left.checked(f"约束 {constraint.name!r}")
+    diff = left.checked(f"约束 {name!r}")
     if op == "eq":
         sense = "eq"
     elif op == "le":
@@ -778,8 +781,8 @@ def lower_planning_constraint(
         sense = "ge"
     else:
         raise LoweringUnsupportedError(
-            f"约束 {constraint.name!r} 的 {op!r} 不是 LP 可表示比较"
+            f"约束 {name!r} 的 {op!r} 不是 LP 可表示比较"
         )
     return LinearConstraint(
-        name=constraint.name, expression=diff.freeze(), sense=sense, rhs=0.0,
+        name=name, expression=diff.freeze(), sense=sense, rhs=0.0,
     )

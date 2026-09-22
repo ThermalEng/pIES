@@ -18,7 +18,11 @@ import json
 import pytest
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
-from iesplan.computation import MaterializedSet, materialize_non_predictive_series
+from iesplan.computation import (
+    MaterializedSeries,
+    MaterializedSet,
+    materialize_non_predictive_series,
+)
 
 CSV_META = (
     "# schema: ies.device-data\n"
@@ -242,3 +246,28 @@ def test_quoted_numeric_cells_consumed() -> None:
         _artifact(baseline, devices), {"obj-61": raw}
     )
     assert list(result.series[0].values)[:2] == [48.3, 46.7]
+
+
+def test_predicted_series_uses_same_materialized_type() -> None:
+    """预测完成值以同一 MaterializedSeries 进入（mode=data_predict）。"""
+    predicted = MaterializedSeries(
+        device="d1",
+        interface="pf",
+        mode="data_predict",
+        resolution="1h",
+        point_count=3,
+        values=(1.0, 2.0, 3.0),
+        source={"kind": "data_predict", "object_id": "obj-51"},
+    )
+    assert predicted.to_dict()["mode"] == "data_predict"
+    assert len(predicted.values) == predicted.point_count == 3
+    with pytest.raises(ValueError, match="未知来源模式"):
+        MaterializedSeries(
+            device="d1",
+            interface="pf",
+            mode="data_guess",
+            resolution="1h",
+            point_count=1,
+            values=(1.0,),
+            source={},
+        )
