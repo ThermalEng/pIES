@@ -143,7 +143,7 @@ schema、字段、公式与聚合枚举以 [装配与检查](modules/assembly.md
 
 计算必须拆为三个独立边界：
 
-- `GeneratorProvider` 只接受 `ValidatedAssemblyArtifact`、已固定资源与经过公开 schema 校验的 `CalculationConfig`，在生成计算包时确定性生成 Solver Bundle；
+- `GeneratorProvider` 只接受已签发的 `ValidatedAssemblyArtifact`、按装配实例固定的设备数学贡献、已物化的全周期输入序列、不可变 `EffectiveFinanceConfig` 与经过公开输入校验的 `CalculationConfig`，在生成计算包时确定性生成 Solver Bundle；不得为这些输入再建立包装层或第二份业务事实；
 - `SolverRuntime` 只校验并执行 Bundle 中的结构化命令，生成 `ExecutionReceipt` 与原始输出；
 - `ResultAdapter` 只把 Bundle、回执和声明输出映射为带 schema/version 的 `ComputeResult`。
 
