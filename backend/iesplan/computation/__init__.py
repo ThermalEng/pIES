@@ -37,7 +37,9 @@ from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators import (
     GeneratorDescriptor,
     GeneratorRegistry,
+    build_project_model,
     build_registry,
+    write_mps,
 )
 from iesplan.computation.protocols import (
     CALCULATION_CONFIG_SCHEMA,
@@ -88,6 +90,7 @@ __all__ = [
     "ResultAdapter",
     "SolverBundle",
     "SolverRuntime",
+    "build_project_model",
     "build_registry",
     "check_provider_ref",
     "get_algorithm",
@@ -98,4 +101,5 @@ __all__ = [
     "normalize_bundle",
     "validate_bundle",
     "validate_calculation_config",
+    "write_mps",
 ]

@@ -72,6 +72,10 @@ Bundle 规范化与原子发布
 
 各步骤使用不可变中间 contract。求解器格式 writer 不应重新读取设备模型；command builder 不应重新解释装配业务。
 
+## 项目级线性模型与 MPS writer（0.8f-B）
+
+`build_project_model` 把五项直接输入装配成项目级 `LinearModel`（变量声明、约束行、目标表达式与 min/max 方向）与单位映射，不设包装层：按基线展开全部连续 `step`，实例与时步确定命名；技术关系经现有 lowerer 逐降（`t`/`t-1`、Big-M）；连接逐边守恒；规划目标/变量/约束与财务/计费分量按绑定展开；物理量归 SI、金额守币种。`write_mps` 只序列化已完成的 `LinearModel`（稳定 ROWS/COLUMNS/RHS/BOUNDS/整数标记/OBJSENSE，目标常数以偏移量单独报告），同一模型逐字节相同。
+
 ## GeneratorDescriptor
 
 descriptor 至少声明：

@@ -29,7 +29,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from iesplan.core.contracts import PlanningExpression
+from iesplan.core.contracts import OBJECTIVE_SENSES, PlanningExpression
 from iesplan.modeling import (
     BinaryNode,
     MathRelation,
@@ -183,10 +183,17 @@ class LinearConstraint:
 
 @dataclass(frozen=True, slots=True)
 class LinearModel:
-    """线性模型：变量声明 + 约束行（均稳定排序冻结）。"""
+    """项目级线性模型：变量声明 + 约束行 + 目标（均稳定排序冻结）。
+
+    ``objective`` 为目标仿射式（MPS 无法承载的常数项由 writer 以
+    偏移量单独报告，不影响最优解）；``sense`` 为 minimize/maximize。
+    本模型只服务首个 HiGHS MILP 链的项目级构造，不是通用优化框架。
+    """
 
     variables: tuple[LinearVariable, ...] = ()
     constraints: tuple[LinearConstraint, ...] = ()
+    objective: LinearExpression = LinearExpression()
+    sense: str = "minimize"
 
     def __post_init__(self) -> None:
         for variable in self.variables:
@@ -201,6 +208,10 @@ class LinearModel:
         row_names = [row.name for row in self.constraints]
         if len(set(row_names)) != len(row_names):
             raise ValueError(f"约束名重复: {sorted(row_names)}")
+        if not isinstance(self.objective, LinearExpression):
+            raise TypeError("objective 须为 LinearExpression")
+        if self.sense not in OBJECTIVE_SENSES:
+            raise ValueError(f"目标方向非法: {self.sense!r}")
         object.__setattr__(
             self,
             "variables",
@@ -216,6 +227,8 @@ class LinearModel:
         return {
             "variables": [variable.to_dict() for variable in self.variables],
             "constraints": [row.to_dict() for row in self.constraints],
+            "objective": self.objective.to_dict(),
+            "sense": self.sense,
         }
 
 
