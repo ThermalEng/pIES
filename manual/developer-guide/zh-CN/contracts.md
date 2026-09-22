@@ -162,7 +162,7 @@ Worker 只有在命令可解析、租约有效且写入资格仍成立时才能�
 | feature ↔ API | Request/Response Contract | JSON/文件 | React 状态和显示单位 |
 | API ↔ application | Actor + Command | ApplicationResult | Cookie、Response、ORM |
 | application ↔ domain | 领域命令/值对象 | 领域结果/诊断 | 跨模块私有实现 |
-| assembly ↔ generator | `ValidatedAssemblyArtifact` + 内容资源 | Solver Bundle | 原始 YAML、项目草稿、ORM、存储路径 |
+| assembly/modeling/finance/computation → generator | 装配产物、设备数学贡献、物化序列、有效财务快照、`CalculationConfig` 五项直接输入 | Solver Bundle | 原始 YAML、项目草稿、ORM、存储路径 |
 | generator ↔ runtime | Solver Bundle | `ExecutionReceipt` + 原始输出 | 设备私有实现、数据库、shell 字符串 |
 | runtime ↔ result adapter | 只读 Bundle、回执、声明输出 | `ComputeResult` | 进程句柄、当前项目、隐式重试 |
 | Worker ↔ results | attempt + evidence contract | 写入回执 | 无 fencing 的裸结果 |
