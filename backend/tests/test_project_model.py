@@ -401,6 +401,268 @@ def test_mps_deterministic_bytes() -> None:
     assert "bus__heat__0__t0" in first_text
 
 
+SRC_YAML = """
+schema: ies.device-model
+schema_version: "2.0.0"
+device: {id: acme.device.src, names: {zh-CN: 电源, en-US: Source}}
+properties: {}
+interfaces:
+  power_out: {type: out, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
+equations:
+  variables:
+    dispatch: {unit: kW, valid_range: {minimum: 0, maximum: null}}
+  relations:
+    - id: follow
+      expression: "power_out[t] = dispatch[t]"
+"""
+
+GEN_YAML = """
+schema: ies.device-model
+schema_version: "2.0.0"
+device: {id: acme.device.gen, names: {zh-CN: 机组, en-US: Unit}}
+properties:
+  cap_kw: {value: 60, unit: kW, valid_range: {minimum: 0, maximum: 1000}}
+  floor_kw: {value: 5, unit: kW, valid_range: {minimum: 0, maximum: 1000}}
+  spare_kw: {value: 20, unit: kW, valid_range: {minimum: 0, maximum: 1000}}
+interfaces:
+  power_out: {type: out, carrier: electricity, unit: kW, valid_range: {minimum: {property_ref: floor_kw}, maximum: {property_ref: cap_kw}}}
+equations:
+  variables:
+    dispatch: {unit: kW, valid_range: {minimum: 0, maximum: {property_ref: cap_kw}}}
+    spare: {unit: kW, valid_range: {minimum: 0, maximum: {property_ref: spare_kw}}}
+  relations:
+    - id: follow
+      expression: "power_out[t] = dispatch[t]"
+"""
+
+
+def _island_doc() -> dict:
+    devices = {}
+    for inst, did in (
+        ("srcA", "acme.device.src"), ("srcB", "acme.device.src"),
+        ("heaterA", "acme.device.heater"), ("heaterB", "acme.device.heater"),
+        ("load1", "acme.device.load"),
+    ):
+        devices[inst] = {
+            "definition": {"id": did},
+            "asset_origin": "existing",
+            "properties": {},
+            "predefined_interfaces": (
+                {"heat_demand": {"mode": "constant", "value": 7}}
+                if inst == "load1" else {}
+            ),
+        }
+    return {
+        "schema": "ies.assembly",
+        "schema_version": "2.0.0",
+        "assembly": {"id": "islands", "name": "双电岛共热网"},
+        "project_baseline": {
+            "resolution": "1h", "leap_year": False, "scenario_mode": "single",
+        },
+        "devices": devices,
+        "connections": {
+            "island1": {"from": "srcA.power_out", "to": "heaterA.electricity_in"},
+            "island2": {"from": "srcB.power_out", "to": "heaterB.electricity_in"},
+            "heat1": {"from": "heaterA.heat_out", "to": "load1.heat_in"},
+            "heat2": {"from": "heaterB.heat_out", "to": "load1.heat_in"},
+        },
+        "finance": {
+            "ref": {
+                "kind": "object",
+                "object_id": "obj-finance",
+                "media_type": "application/yaml",
+            },
+            "profile_id": "cn-north-demo",
+        },
+        "finance_binding": {
+            "instances": {inst: {"type": "none"} for inst in devices}
+        },
+        "tariff_bindings": {
+            "import_meter": {
+                "price": "heat_import",
+                "instance": "load1",
+                "interface": "heat_in",
+                "aggregation": "integrate_positive",
+            },
+        },
+        "planning": {
+            "objective": {
+                "sense": "minimize",
+                "expression": "import_meter__period_energy_purchase",
+            },
+            "variables": {},
+            "constraints": {},
+        },
+    }
+
+
+def _island_inputs():
+    doc = _island_doc()
+    artifact = ValidatedAssemblyArtifact(
+        canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
+    )
+    yamls = {
+        "srcA": SRC_YAML, "srcB": SRC_YAML,
+        "heaterA": HEATER_YAML, "heaterB": HEATER_YAML,
+        "load1": LOAD_YAML,
+    }
+    models = {inst: _contribution(text) for inst, text in yamls.items()}
+    finance = merge_effective(FinanceProfile.from_dict(FINANCE_PAYLOAD), None)
+    result = materialize_non_predictive_series(artifact, {})
+    config = CalculationConfig(
+        mode="planning",
+        generator="acme.generator@1.0.0",
+        solver="ies.solver.highs@1.7.2",
+        precision="medium",
+        time_limit_seconds=600,
+        outputs=["solution"],
+    )
+    return artifact, models, result.series, finance, config
+
+
+def test_buses_split_per_carrier_components() -> None:
+    """两电岛经各自转换设备共用热网：electricity 仍两条母线行。
+
+    旧全局连通实现会把五台设备合并，只产生一条 electricity 行。
+    """
+    artifact, models, series, finance, config = _island_inputs()
+    model, _ = build_project_model(artifact, models, series, finance, config)
+    by_name = {row.name: row for row in model.constraints}
+    elec = {
+        name: by_name[name] for name in by_name
+        if name.startswith("bus__electricity__") and name.endswith("__t0")
+    }
+    assert len(elec) == 2
+    varsets = [_coeffs(row.expression) for row in elec.values()]
+    assert set(varsets[0]) & set(varsets[1]) == set()
+    flat = {}
+    for coeffs in varsets:
+        flat.update(coeffs)
+    assert flat["srcA__power_out__t0"] == 1.0
+    assert flat["heaterA__electricity_in__t0"] == -1.0
+    assert flat["srcB__power_out__t0"] == 1.0
+    assert flat["heaterB__electricity_in__t0"] == -1.0
+    heat = {
+        name: by_name[name] for name in by_name
+        if name.startswith("bus__heat__") and name.endswith("__t0")
+    }
+    assert len(heat) == 1
+    assert _coeffs(next(iter(heat.values())).expression) == {
+        "heaterA__heat_out__t0": 1.0,
+        "heaterB__heat_out__t0": 1.0,
+        "load1__heat_in__t0": -1.0,
+    }
+
+
+def _gen_inputs():
+    doc = _island_doc()
+    doc["assembly"] = {"id": "gen", "name": "规划接管容量"}
+    doc["devices"] = {
+        "gen1": {
+            "definition": {"id": "acme.device.gen"},
+            "asset_origin": "new",
+            "properties": {},
+            "predefined_interfaces": {},
+        },
+    }
+    doc["connections"] = {}
+    doc["finance_binding"] = {
+        "instances": {
+            "gen1": {
+                "type": "costed",
+                "finance_type": "tank_sys",
+                "drivers": {
+                    "cap": {"property": "cap_kw"},
+                    "thr": {
+                        "interface": "power_out",
+                        "aggregation": "integrate_positive",
+                    },
+                },
+            }
+        }
+    }
+    doc["tariff_bindings"] = {}
+    doc["planning"] = {
+        "objective": {
+            "sense": "minimize",
+            "expression": (
+                "1 year * gen1__annual_fixed_om"
+                " + gen1__period_variable_om"
+            ),
+        },
+        "variables": {
+            "gen_cap": {
+                "device_ref": "gen1",
+                "parameter": "cap_kw",
+                "lower_bound": "0",
+                "upper_bound": "500",
+                "unit": "kW",
+            },
+            "gen_floor": {
+                "device_ref": "gen1",
+                "parameter": "floor_kw",
+                "lower_bound": "10",
+                "upper_bound": "500",
+                "unit": "kW",
+            },
+            "spare_cap": {
+                "device_ref": "gen1",
+                "parameter": "spare_kw",
+                "lower_bound": "0",
+                "upper_bound": None,
+                "unit": "kW",
+            },
+        },
+        "constraints": {},
+    }
+    artifact = ValidatedAssemblyArtifact(
+        canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
+    )
+    models = {"gen1": _contribution(GEN_YAML)}
+    finance = merge_effective(FinanceProfile.from_dict(FINANCE_PAYLOAD), None)
+    result = materialize_non_predictive_series(artifact, {})
+    config = CalculationConfig(
+        mode="planning",
+        generator="acme.generator@1.0.0",
+        solver="ies.solver.highs@1.7.2",
+        precision="medium",
+        time_limit_seconds=600,
+        outputs=["solution"],
+    )
+    return artifact, models, result.series, finance, config
+
+
+def test_planning_takeover_bounds_follow_planning_var() -> None:
+    """被规划接管的额定界随规划变量：实例 60kW 不得锁死流量。
+
+    旧实现用实例常数作界且无容量行；新行为静态界取规划界，
+    并为每个 step 生成对规划变量的容量约束。缺失安全界保持 None。
+    """
+    artifact, models, series, finance, config = _gen_inputs()
+    model, _ = build_project_model(artifact, models, series, finance, config)
+    by_var = {var.name: var for var in model.variables}
+    assert by_var["gen1__power_out__t0"].upper == pytest.approx(500000.0)
+    assert by_var["gen1__power_out__t0"].lower == pytest.approx(10000.0)
+    assert by_var["gen1__dispatch__t0"].upper == pytest.approx(500000.0)
+    assert by_var["gen1__spare__t0"].upper is None
+    rows = {row.name: row for row in model.constraints}
+    cap = rows["gen1__power_out__plan_max__t0"]
+    assert (cap.sense, cap.rhs) == ("le", 0.0)
+    assert _coeffs(cap.expression) == {
+        "gen1__power_out__t0": 1.0, "gen_cap": -1.0,
+    }
+    floor = rows["gen1__power_out__plan_min__t0"]
+    assert (floor.sense, floor.rhs) == ("ge", 0.0)
+    assert _coeffs(floor.expression) == {
+        "gen1__power_out__t0": 1.0, "gen_floor": -1.0,
+    }
+    inner = rows["gen1__dispatch__plan_max__t0"]
+    assert _coeffs(inner.expression) == {
+        "gen1__dispatch__t0": 1.0, "gen_cap": -1.0,
+    }
+    assert "gen1__spare__plan_max__t0" in rows
+
+
 def test_sale_tariff_sign_flips() -> None:
     """售电方向记账为负（与购电对称）。"""
     artifact, models, series, finance, config = _inputs(tariff_direction="sale")

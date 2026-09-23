@@ -242,14 +242,28 @@ class _ProjectBuilder:
 
     def _limit(
         self, inst: str, unit: str, number: float | None, ref: str | None,
-    ) -> float | None:
-        """值域界内部值（数值直接换算，property 引用按实例解析）。"""
+        side: str,
+    ) -> tuple[float | None, str | None]:
+        """值域界内部值与接管规划变量名。
+
+        数值直接换算；未被接管的 property 引用按实例解析。被规划
+        变量接管的 property 不再用实例旧值：静态安全界取规划变量
+        对应界（maximum 取 upper_bound，minimum 取 lower_bound，
+        缺失则 None），并返回规划变量名供逐时容量行使用。
+        """
+        if ref is not None and (inst, ref) in self.bound_prop:
+            pname = self.bound_prop[(inst, ref)]
+            spec = self.plan_vars[pname]
+            punit = spec.get("unit") or unit
+            raw = spec.get("upper_bound" if side == "upper" else "lower_bound")
+            bound = None if raw is None else _to_internal(float(raw), punit)
+            return bound, pname
         if ref is not None:
             value, punit = self._prop_value_unit(inst, ref)
-            return _to_internal(value, punit)
+            return _to_internal(value, punit), None
         if number is None:
-            return None
-        return _to_internal(number, unit)
+            return None, None
+        return _to_internal(number, unit), None
 
     def _declare_instance_statics(
         self, inst: str, bus_flows: set[str] | frozenset[str] = frozenset(),
@@ -276,6 +290,7 @@ class _ProjectBuilder:
             prop_const[name] = _to_internal(value, unit)
             prop_unit[name] = unit
         symbols: dict[str, tuple] = {}
+        caps: list[tuple[str, str, str]] = []
         for name, var in contribution.variables.items():
             if var.kind == "property":
                 key = (inst, name)
@@ -292,30 +307,40 @@ class _ProjectBuilder:
                 else:
                     symbols[name] = ("const", prop_const[name])
             else:
-                lower = self._limit(
+                lower, pname_lo = self._limit(
                     inst, var.unit,
                     var.valid_range[0] if var.valid_range else None,
-                    var.minimum_property_ref,
+                    var.minimum_property_ref, "lower",
                 )
-                upper = self._limit(
+                upper, pname_hi = self._limit(
                     inst, var.unit,
                     var.valid_range[1] if var.valid_range else None,
-                    var.maximum_property_ref,
+                    var.maximum_property_ref, "upper",
                 )
                 symbols[name] = ("var", lower, upper)
+                if pname_lo is not None:
+                    caps.append((name, pname_lo, "ge"))
+                if pname_hi is not None:
+                    caps.append((name, pname_hi, "le"))
         symbols[TIMELINE_STEP_DURATION_VAR] = ("const", self.step_s)
         flow_names = sorted(
             set(self._referenced_flows(inst, contribution)) | set(bus_flows)
         )
         for iface_name in flow_names:
             flow = contribution.interfaces[iface_name]
-            lower = self._limit(
-                inst, flow.unit, flow.valid_range[0], flow.minimum_property_ref,
+            lower, pname_lo = self._limit(
+                inst, flow.unit, flow.valid_range[0],
+                flow.minimum_property_ref, "lower",
             )
-            upper = self._limit(
-                inst, flow.unit, flow.valid_range[1], flow.maximum_property_ref,
+            upper, pname_hi = self._limit(
+                inst, flow.unit, flow.valid_range[1],
+                flow.maximum_property_ref, "upper",
             )
             symbols[iface_name] = ("var", lower, upper)
+            if pname_lo is not None:
+                caps.append((iface_name, pname_lo, "ge"))
+            if pname_hi is not None:
+                caps.append((iface_name, pname_hi, "le"))
             for step in range(self.point_count):
                 self._declare(
                     self._tech_name(inst, iface_name, step),
@@ -334,6 +359,23 @@ class _ProjectBuilder:
         for state in contribution.states:
             ref = contribution.variables[state].initial_property_ref
             initial[state] = prop_const[ref]  # type: ignore[index]
+        for local, pname, sense in caps:
+            for step in range(self.point_count):
+                vname = self._tech_name(inst, local, step)
+                suffix = "plan_max" if sense == "le" else "plan_min"
+                self.rows.append(
+                    LinearConstraint(
+                        name=f"{inst}__{local}__{suffix}__t{step}",
+                        expression=LinearExpression(
+                            terms=tuple(
+                                sorted((((vname, 0), 1.0), ((pname, 0), -1.0)))
+                            ),
+                            constant=0.0,
+                        ),
+                        sense=sense,
+                        rhs=0.0,
+                    )
+                )
         return {
             "symbols": symbols,
             "initial": initial,
@@ -447,67 +489,60 @@ class _ProjectBuilder:
     ) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]]:
         """母线表：(carrier, 成员实例排序元组, ((实例, 接口, 符号)…))。
 
-        无向连通分量只含带边设备；只有连接边实际使用的 carrier 才建
-        平衡式（无边载体的孤立端口不约束）。out/bidirectional
-        为供给正项，in 为消耗负项；bidirectional 以设备公开符号约定
-        作为有符号净流量。不按设备 ID 分支。
+        先按 carrier 分图、再分别求无向连通分量（与装配
+        ``solvability.build_buses`` 的 ``carrier_adj`` 语义一致；边载体
+        取 from 端端口载体）。跨 carrier 的转换设备不合并对侧同载体
+        子网。out/bidirectional 为供给正项，in 为消耗负项；
+        bidirectional 以设备公开符号约定作为有符号净流量。
+        不按设备 ID 分支。
         """
         connections = self.doc.get("connections") or {}
-        adjacent: dict[str, set[str]] = {}
-        edge_carriers: dict[tuple[str, ...], set[str]] = {}
+        carrier_adj: dict[str, dict[str, set[str]]] = {}
         for conn in connections.values():
             dev_a, _, iface_a = conn["from"].partition(".")
             dev_b, _, _ = conn["to"].partition(".")
-            adjacent.setdefault(dev_a, set()).add(dev_b)
-            adjacent.setdefault(dev_b, set()).add(dev_a)
             carrier = self.models[dev_a].interfaces[iface_a].carrier
-            edge_carriers.setdefault(tuple(sorted((dev_a, dev_b))), set()).add(
-                carrier
-            )
-        seen: set[str] = set()
-        components: list[tuple[str, ...]] = []
-        for root in sorted(adjacent):
-            if root in seen:
-                continue
-            members = set([root])
-            frontier = [root]
-            while frontier:
-                current = frontier.pop()
-                for peer in adjacent.get(current, ()):
-                    if peer not in members:
-                        members.add(peer)
-                        frontier.append(peer)
-            seen |= members
-            components.append(tuple(sorted(members)))
+            adj = carrier_adj.setdefault(carrier, {})
+            adj.setdefault(dev_a, set()).add(dev_b)
+            adj.setdefault(dev_b, set()).add(dev_a)
         buses: list[
             tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]
         ] = []
-        for members in sorted(components):
-            member_set = set(members)
-            wanted: set[str] = set()
-            for pair, carriers in edge_carriers.items():
-                if set(pair) <= member_set:
-                    wanted |= carriers
-            carriers: dict[str, list[tuple[str, str, float]]] = {}
-            for inst in members:
-                contribution = self.models[inst]
-                for iface_name, flow in contribution.interfaces.items():
-                    if flow.carrier not in wanted:
-                        continue
-                    if flow.type == "out" or flow.type == "bidirectional":
-                        sign = 1.0
-                    elif flow.type == "in":
-                        sign = -1.0
-                    else:
-                        continue
-                    carriers.setdefault(flow.carrier, []).append(
-                        (inst, iface_name, sign)
-                    )
-            for carrier in sorted(carriers):
-                ports = tuple(sorted(carriers[carrier]))
-                if not ports:
+        for carrier in sorted(carrier_adj):
+            adj = carrier_adj[carrier]
+            seen: set[str] = set()
+            components: list[tuple[str, ...]] = []
+            for root in sorted(adj):
+                if root in seen:
                     continue
-                buses.append((carrier, members, ports))
+                members = set([root])
+                frontier = [root]
+                while frontier:
+                    current = frontier.pop()
+                    for peer in adj.get(current, ()):
+                        if peer not in members:
+                            members.add(peer)
+                            frontier.append(peer)
+                seen |= members
+                components.append(tuple(sorted(members)))
+            for members in sorted(components):
+                ports: list[tuple[str, str, float]] = []
+                for inst in members:
+                    contribution = self.models[inst]
+                    for iface_name, flow in contribution.interfaces.items():
+                        if flow.carrier != carrier:
+                            continue
+                        if flow.type == "out" or flow.type == "bidirectional":
+                            sign = 1.0
+                        elif flow.type == "in":
+                            sign = -1.0
+                        else:
+                            continue
+                        ports.append((inst, iface_name, sign))
+                ordered = tuple(sorted(ports))
+                if not ordered:
+                    continue
+                buses.append((carrier, members, ordered))
         return buses
 
     def _build_bus_rows(
