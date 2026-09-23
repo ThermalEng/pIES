@@ -97,6 +97,12 @@ connections:
   e_hp_elec:
     from: grid.electricity_import
     to: hp1.electricity_in
+  e_elec_load:
+    from: grid.electricity_import
+    to: elec_load.electricity_in
+  e_heat_load:
+    from: hp1.heat_out
+    to: heat_load.heat_in
 
 finance:
   ref:

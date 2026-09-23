@@ -100,7 +100,10 @@ class SourceSpec:
 
 @dataclass(frozen=True, slots=True)
 class InterfaceSpec:
-    """``interfaces`` 单项：序列接口。"""
+    """``interfaces`` 单项：序列接口。
+
+    值域界可为数值或 ``{property_ref}``（实例额定能力引用，实例级解析）。
+    """
 
     id: str
     type: str  # in/out/bidirectional/predefined/blind
@@ -108,6 +111,8 @@ class InterfaceSpec:
     unit: str
     valid_range: tuple[float | None, float | None]
     source: SourceSpec | None = None
+    minimum_property_ref: str | None = None
+    maximum_property_ref: str | None = None
 
     @property
     def minimum(self) -> float | None:
@@ -120,12 +125,14 @@ class InterfaceSpec:
 
 @dataclass(frozen=True, slots=True)
 class EquationVariable:
-    """``equations.variables`` 内部序列变量。"""
+    """``equations.variables`` 内部序列变量（值域界同接口支持 property 引用）。"""
 
     id: str
     unit: str
     valid_range: tuple[float | None, float | None] | None = None
     initial_property_ref: str | None = None
+    minimum_property_ref: str | None = None
+    maximum_property_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

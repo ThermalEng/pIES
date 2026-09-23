@@ -71,11 +71,12 @@ device: {id: acme.device.load, names: {zh-CN: 负荷, en-US: Load}}
 properties: {}
 interfaces:
   heat_in: {type: in, carrier: heat, unit: kW, valid_range: {minimum: 0, maximum: null}}
+  heat_demand: {type: predefined, carrier: heat, unit: kW, valid_range: {minimum: 0, maximum: null}, source: {mode: constant, value: 7}}
 equations:
   variables: {}
   relations:
-    - id: passthrough
-      expression: "heat_in[t] = heat_in[t]"
+    - id: serve
+      expression: "heat_in[t] = heat_demand[t]"
 """
 
 HUB_YAML = """
@@ -109,36 +110,40 @@ equations:
       expression: "y[t] = x[t] * z[t]"
 """
 
-FINANCE_PAYLOAD = {
-    "schema": "ies.finance-profile",
-    "schema_version": "1.0.0",
-    "profile": {
-        "id": "cn-north-demo",
-        "region": "CN-North",
-        "currency": "CNY",
-        "base_year": 2025,
-        "price_basis": "tax_inclusive",
-        "cost_method": "fixed_plus_linear",
-    },
-    "finance_types": {
-        "tank_sys": {
-            "annual_fixed_om": {
-                "linear": {"cap": {"unit_cost": {"value": "35", "unit": "CNY/kW/a"}}}
-            },
-            "period_variable_om": {
-                "linear": {"thr": {"unit_cost": {"value": "0.01", "unit": "CNY/kWh"}}}
-            },
-        }
-    },
-    "energy_prices": {
-        "heat_import": {
-            "carrier": "heat",
-            "direction": "purchase",
-            "kind": "constant",
-            "value": {"value": "0.7", "unit": "CNY/kWh"},
-        }
-    },
-}
+def _finance_payload(direction: str = "purchase"):
+    return {
+        "schema": "ies.finance-profile",
+        "schema_version": "1.0.0",
+        "profile": {
+            "id": "cn-north-demo",
+            "region": "CN-North",
+            "currency": "CNY",
+            "base_year": 2025,
+            "price_basis": "tax_inclusive",
+            "cost_method": "fixed_plus_linear",
+        },
+        "finance_types": {
+            "tank_sys": {
+                "annual_fixed_om": {
+                    "linear": {"cap": {"unit_cost": {"value": "35", "unit": "CNY/kW/a"}}}
+                },
+                "period_variable_om": {
+                    "linear": {"thr": {"unit_cost": {"value": "0.01", "unit": "CNY/kWh"}}}
+                },
+            }
+        },
+        "energy_prices": {
+            "heat_import": {
+                "carrier": "heat",
+                "direction": direction,
+                "kind": "constant",
+                "value": {"value": "0.7", "unit": "CNY/kWh"},
+            }
+        },
+    }
+
+
+FINANCE_PAYLOAD = _finance_payload()
 
 POINTS = 8760
 
@@ -169,7 +174,9 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
             "definition": {"id": "acme.device.load"},
             "asset_origin": "existing",
             "properties": {},
-            "predefined_interfaces": {},
+            "predefined_interfaces": {
+                "heat_demand": {"mode": "constant", "value": 7}
+            },
         },
     }
     bindings: dict = {
@@ -261,7 +268,7 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
     }
 
 
-def _inputs(*, bilinear: bool = False):
+def _inputs(*, bilinear: bool = False, tariff_direction: str = "purchase"):
     doc = _artifact_doc(bilinear=bilinear)
     artifact = ValidatedAssemblyArtifact(
         canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
@@ -277,7 +284,9 @@ def _inputs(*, bilinear: bool = False):
         for inst, text in yamls.items()
         if inst in doc["devices"]
     }
-    finance = merge_effective(FinanceProfile.from_dict(FINANCE_PAYLOAD), None)
+    finance = merge_effective(
+        FinanceProfile.from_dict(_finance_payload(tariff_direction)), None
+    )
     result = materialize_non_predictive_series(artifact, {})
     config = CalculationConfig(
         mode="planning",
@@ -315,7 +324,7 @@ def _coeffs(expr) -> dict:
 def test_project_inventory_counts(built) -> None:
     model, units = built
     assert len(model.variables) == 61321
-    assert len(model.constraints) == 43801
+    assert len(model.constraints) == 52561
     assert model.sense == "minimize"
     assert "tank_cap" in units
     assert units["tank_cap"] == "kW"
@@ -343,11 +352,14 @@ def test_tech_rows_balance_and_initial(built) -> None:
         "heater1__heat_out__t0": 1.0,
         "heater1__electricity_in__t0": pytest.approx(-0.9),
     }
-    balance = _row(model, "link1__t0")
+    balance = _row(model, "bus__heat__0__t0")
     assert _coeffs(balance.expression) == {
         "heater1__heat_out__t0": 1.0,
         "load1__heat_in__t0": -1.0,
     }
+    serve = _row(model, "load1__serve__t0")
+    assert _coeffs(serve.expression) == {"load1__heat_in__t0": 1.0}
+    assert serve.expression.constant == pytest.approx(-7000.0)
     first = _row(model, "tank1__soc_step__t0")
     assert _coeffs(first.expression) == {"tank1__soc__t0": 1.0}
     assert first.expression.constant == pytest.approx(-5000.5)
@@ -386,7 +398,15 @@ def test_mps_deterministic_bytes() -> None:
     assert first_text.startswith("NAME          IES_MILP\nROWS\n N  OBJ\n")
     assert "\nOBJSENSE\n MIN\nENDATA\n" in first_text
     assert " BV       BND1  hub1__exclusivity__mutex__t5\n" in first_text
-    assert "link1__t0" in first_text
+    assert "bus__heat__0__t0" in first_text
+
+
+def test_sale_tariff_sign_flips() -> None:
+    """售电方向记账为负（与购电对称）。"""
+    artifact, models, series, finance, config = _inputs(tariff_direction="sale")
+    model, _ = build_project_model(artifact, models, series, finance, config)
+    coeffs = _coeffs(model.objective)
+    assert coeffs["load1__heat_in__t0"] == pytest.approx(-0.0007, rel=1e-9)
 
 
 def test_bilinear_unsupported() -> None:

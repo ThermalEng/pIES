@@ -83,8 +83,8 @@
             "additionalProperties": false,
             "required": ["minimum", "maximum"],
             "properties": {
-              "minimum": {"type": ["number", "null"]},
-              "maximum": {"type": ["number", "null"]}
+              "minimum": {"anyOf": [{"type": ["number", "null"]}, {"type": "object", "additionalProperties": false, "required": ["property_ref"], "properties": {"property_ref": {"type": "string", "minLength": 1}}}]},
+              "maximum": {"anyOf": [{"type": ["number", "null"]}, {"type": "object", "additionalProperties": false, "required": ["property_ref"], "properties": {"property_ref": {"type": "string", "minLength": 1}}}]}
             }
           },
           "source": {
@@ -122,8 +122,8 @@
                 "additionalProperties": false,
                 "required": ["minimum", "maximum"],
                 "properties": {
-                  "minimum": {"type": ["number", "null"]},
-                  "maximum": {"type": ["number", "null"]}
+                  "minimum": {"anyOf": [                    {"type": ["number", "null"]}, {"type": "object", "additionalProperties": false, "required": ["property_ref"], "properties": {"property_ref": {"type": "string", "minLength": 1}}}]},
+                  "maximum": {"anyOf": [                    {"type": ["number", "null"]}, {"type": "object", "additionalProperties": false, "required": ["property_ref"], "properties": {"property_ref": {"type": "string", "minLength": 1}}}]}
                 }
               },
               "initial": {

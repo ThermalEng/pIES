@@ -329,7 +329,10 @@ def ast_to_dict(node: object | None) -> Any:
 
 @dataclass(frozen=True, slots=True)
 class MathVariable:
-    """命名数学量: property 常量或 equations 内部变量。"""
+    """命名数学量: property 常量或 equations 内部变量。
+
+    值域界可引用 property（实例额定能力；实例级解析，见 bound refs）。
+    """
 
     name: str
     kind: str  # property | variable
@@ -339,6 +342,8 @@ class MathVariable:
     is_state: bool = False
     # 状态变量首步取值来源；后续 step 使用上一 step 的状态。
     initial_property_ref: str | None = None
+    minimum_property_ref: str | None = None
+    maximum_property_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,6 +355,8 @@ class InterfaceFlow:
     carrier: str
     unit: str
     valid_range: tuple[float | None, float | None]
+    minimum_property_ref: str | None = None
+    maximum_property_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +414,45 @@ class MathContributionResult:
         return self.contribution is not None and not any(d.blocking for d in self.diagnostics)
 
 
+def _check_bound_refs(
+    name: str,
+    unit: str,
+    minimum_ref: str | None,
+    maximum_ref: str | None,
+    properties: Mapping[str, Any],
+    diags: list[Any],
+) -> None:
+    """值域 property 引用校验（存在性、数值性、量纲一致）。"""
+    for side, ref in (("minimum", minimum_ref), ("maximum", maximum_ref)):
+        if ref is None:
+            continue
+        prop = properties.get(ref)
+        if prop is None:
+            diags.append(_diag(
+                MOD_EQ_UNKNOWN_REF,
+                f"{name!r} valid_range.{side}.property_ref 未声明: {ref!r}",
+                name=name,
+            ))
+            continue
+        value, unit_of = prop.value, prop.unit
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            diags.append(_diag(
+                MOD_EQ_UNIT_CONFLICT,
+                f"{name!r} valid_range.{side}.property_ref {ref!r} 非数值",
+                name=name,
+            ))
+            continue
+        try:
+            if dims_of(unit) != dims_of(unit_of):
+                diags.append(_diag(
+                    MOD_EQ_UNIT_CONFLICT,
+                    f"{name!r} 单位 {unit!r} 与界 property {ref!r} 单位 {unit_of!r} 量纲不兼容",
+                    name=name,
+                ))
+        except UnitError as exc:
+            diags.append(_diag(MOD_EQ_UNIT_CONFLICT, str(exc), name=name))
+
+
 def contribution_to_dict(contribution: DeviceMathContribution) -> dict[str, Any]:
     """贡献 → 确定性 dict(规范序列化输入)。"""
     return {
@@ -429,6 +475,8 @@ def contribution_to_dict(contribution: DeviceMathContribution) -> dict[str, Any]
                 **({"value": v.value} if v.kind == "property" and v.value is not None else {}),
                 "is_state": v.is_state,
                 **({"initial_property_ref": v.initial_property_ref} if v.is_state and v.initial_property_ref is not None else {}),
+                **({"minimum_property_ref": v.minimum_property_ref} if v.minimum_property_ref is not None else {}),
+                **({"maximum_property_ref": v.maximum_property_ref} if v.maximum_property_ref is not None else {}),
             }
             for name, v in sorted(contribution.variables.items())
         },
@@ -438,6 +486,8 @@ def contribution_to_dict(contribution: DeviceMathContribution) -> dict[str, Any]
                 "carrier": flow.carrier,
                 "unit": flow.unit,
                 "valid_range": {"minimum": flow.valid_range[0], "maximum": flow.valid_range[1]},
+                **({"minimum_property_ref": flow.minimum_property_ref} if flow.minimum_property_ref is not None else {}),
+                **({"maximum_property_ref": flow.maximum_property_ref} if flow.maximum_property_ref is not None else {}),
             }
             for iid, flow in sorted(contribution.interfaces.items())
         },
@@ -678,6 +728,7 @@ def build_math_contribution(
         )
     for vid, v in sorted(eq_vars.items()):
         is_state = v.initial_property_ref is not None or state_refs.get(vid, False)
+        _check_bound_refs(vid, v.unit, v.minimum_property_ref, v.maximum_property_ref, properties, diags)
         variables[vid] = MathVariable(
             name=vid,
             kind="variable",
@@ -685,17 +736,21 @@ def build_math_contribution(
             valid_range=v.valid_range,
             is_state=is_state,
             initial_property_ref=v.initial_property_ref if is_state else None,
+            minimum_property_ref=v.minimum_property_ref,
+            maximum_property_ref=v.maximum_property_ref,
         )
-    interfaces_out: dict[str, InterfaceFlow] = {
-        iid: InterfaceFlow(
+    interfaces_out: dict[str, InterfaceFlow] = {}
+    for iid, iface in sorted(interfaces.items()):
+        _check_bound_refs(iid, iface.unit, iface.minimum_property_ref, iface.maximum_property_ref, properties, diags)
+        interfaces_out[iid] = InterfaceFlow(
             id=iid,
             type=iface.type,
             carrier=iface.carrier,
             unit=iface.unit,
             valid_range=iface.valid_range,
+            minimum_property_ref=iface.minimum_property_ref,
+            maximum_property_ref=iface.maximum_property_ref,
         )
-        for iid, iface in sorted(interfaces.items())
-    }
     states = tuple(
         vid for vid in sorted(variables)
         if variables[vid].kind == "variable" and variables[vid].is_state

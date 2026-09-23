@@ -140,6 +140,39 @@ def _check_range_bounds(minimum: object, maximum: object, file: str, field: str)
     return lo, hi
 
 
+def _check_range_bounds_ref(
+    minimum: object,
+    maximum: object,
+    properties: Mapping[str, PropertySpec],
+    file: str,
+    field: str,
+) -> tuple[tuple[float | None, float | None], str | None, str | None]:
+    """值域界：数值/null，或 ``{property_ref}``（必须引用已声明 property）。
+
+    返回 ((下界数值, 上界数值), 下界引用, 上界引用)；任一侧为引用时
+    跳过静态 minimum <= maximum 比较（实例值在实例级决定）。
+    """
+    def _bound(v: object, side: str) -> tuple[float | None, str | None]:
+        if v is None:
+            return None, None
+        if isinstance(v, Mapping):
+            if set(v) != {"property_ref"}:
+                raise ParseError(f"{field} valid_range.{side} 引用形式非法（只允许 property_ref）")
+            ref = v["property_ref"]
+            if not isinstance(ref, str) or ref not in properties:
+                raise ParseError(f"{field} valid_range.{side}.property_ref 必须引用已声明的 property: {ref!r}")
+            return None, ref
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ParseError(f"{field} valid_range.{side} 必须是有限数值、null 或 property 引用")
+        return float(v), None
+
+    lo, lo_ref = _bound(minimum, "minimum")
+    hi, hi_ref = _bound(maximum, "maximum")
+    if lo_ref is None and hi_ref is None and lo is not None and hi is not None and lo > hi:
+        raise ParseError(f"{field} valid_range.minimum 大于 maximum")
+    return (lo, hi), lo_ref, hi_ref
+
+
 def _check_interface_source(iface_id: str, type_: str, source: object, file: str) -> None:
     """interface type 与 source 组合规则（2.0: 预定义接口必须携带 source，其余禁止）。
 
@@ -193,11 +226,14 @@ def validate_equations(
         if not _unit_known(unit.strip()):
             raise ParseError(f"equations.variables.{vid}.unit 无法识别: {unit!r}")
         vrange = None
+        lo_ref = hi_ref = None
         if "valid_range" in vraw and vraw.get("valid_range") is not None:
             vr = vraw["valid_range"]
             if not isinstance(vr, Mapping):
                 raise ParseError(f"equations.variables.{vid}.valid_range 必须是 mapping")
-            vrange = _check_range_bounds(vr.get("minimum"), vr.get("maximum"), file, f"equations.variables.{vid}")
+            vrange, lo_ref, hi_ref = _check_range_bounds_ref(
+                vr.get("minimum"), vr.get("maximum"), properties, file, f"equations.variables.{vid}"
+            )
         initial_ref = None
         if "initial" in vraw and vraw.get("initial") is not None:
             init = vraw["initial"]
@@ -209,7 +245,10 @@ def validate_equations(
                     f"equations.variables.{vid}.initial.property_ref 必须引用已声明的 property: {pref!r}"
                 )
             initial_ref = pref
-        var_specs[vid] = EquationVariable(id=vid, unit=unit.strip(), valid_range=vrange, initial_property_ref=initial_ref)
+        var_specs[vid] = EquationVariable(
+            id=vid, unit=unit.strip(), valid_range=vrange, initial_property_ref=initial_ref,
+            minimum_property_ref=lo_ref, maximum_property_ref=hi_ref,
+        )
         allowed.add(vid)
 
     relation_ids: list[str] = []
@@ -497,7 +536,9 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
                                field=f"{fld}.valid_range"))
             continue
         try:
-            vrange = _check_range_bounds(vr.get("minimum"), vr.get("maximum"), file, fld)
+            vrange, lo_ref, hi_ref = _check_range_bounds_ref(
+                vr.get("minimum"), vr.get("maximum"), properties, file, fld
+            )
         except ParseError as exc:
             diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.valid_range"))
             continue
@@ -541,7 +582,8 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
                 diags.append(_diag("SYS-CFG-001", str(exc), file=file, field=f"{fld}.source"))
                 continue
         interfaces[iid] = InterfaceSpec(
-            id=iid, type=type_, carrier=carrier, unit=unit.strip(), valid_range=vrange, source=source
+            id=iid, type=type_, carrier=carrier, unit=unit.strip(), valid_range=vrange, source=source,
+            minimum_property_ref=lo_ref, maximum_property_ref=hi_ref,
         )
 
     # equations
@@ -557,17 +599,29 @@ def parse_device_model_v2(raw: Mapping[str, Any], *, file: str = "") -> DeviceMo
                     id=vid,
                     unit=vraw.get("unit", "").strip(),
                     valid_range=(
-                        _check_range_bounds(
+                        _check_range_bounds_ref(
                             vraw["valid_range"].get("minimum") if isinstance(vraw.get("valid_range"), Mapping) else None,
                             vraw["valid_range"].get("maximum") if isinstance(vraw.get("valid_range"), Mapping) else None,
-                            file, f"equations.variables.{vid}",
-                        )
+                            properties, file, f"equations.variables.{vid}",
+                        )[0]
                         if vraw.get("valid_range") is not None
                         else None
                     ),
                     initial_property_ref=(
                         vraw["initial"].get("property_ref")
                         if isinstance(vraw.get("initial"), Mapping)
+                        else None
+                    ),
+                    minimum_property_ref=(
+                        vraw["valid_range"].get("minimum", {}).get("property_ref")
+                        if isinstance(vraw.get("valid_range"), Mapping)
+                        and isinstance(vraw["valid_range"].get("minimum"), Mapping)
+                        else None
+                    ),
+                    maximum_property_ref=(
+                        vraw["valid_range"].get("maximum", {}).get("property_ref")
+                        if isinstance(vraw.get("valid_range"), Mapping)
+                        and isinstance(vraw["valid_range"].get("maximum"), Mapping)
                         else None
                     ),
                 )

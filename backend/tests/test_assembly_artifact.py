@@ -289,12 +289,20 @@ class TestProjectExport:
                     },
                 ],
                 # predefined 接口不进入 connections(需求序列由来源声明提供)
+                # 可连接负荷输入口必须由供电边 feeding(无来边即输入不完备)
                 "connections": [
                     {
                         "name": "c1",
                         "from_device": "grid1",
                         "from_port": "electricity_import",
                         "to_device": "hp1",
+                        "to_port": "electricity_in",
+                    },
+                    {
+                        "name": "c2",
+                        "from_device": "grid1",
+                        "from_port": "electricity_import",
+                        "to_device": "load1",
                         "to_port": "electricity_in",
                     },
                 ],
@@ -380,6 +388,13 @@ class TestProjectExport:
                         "from_port": "heat_out",
                         "to_device": "pipe1",
                         "to_port": "heat_in",
+                    },
+                    {
+                        "name": "c3",
+                        "from_device": "grid1",
+                        "from_port": "electricity_import",
+                        "to_device": "load1",
+                        "to_port": "electricity_in",
                     },
                 ],
             },

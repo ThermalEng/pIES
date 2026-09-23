@@ -110,13 +110,32 @@ class TestDeviceSpecificContracts:
         assert _no_source_in_interfaces(doc)
 
     def test_loads_predefined_kw_with_source(self):
-        for did in ("ies.device.electric_load", "ies.device.heat_load", "ies.device.cooling_load"):
+        inflow = {
+            "ies.device.electric_load": ("electricity_demand", "electricity_in"),
+            "ies.device.heat_load": ("heat_demand", "heat_in"),
+            "ies.device.cooling_load": ("cool_demand", "cool_in"),
+        }
+        for did, (demand, flow_in) in inflow.items():
             doc = self._doc(did)
-            assert len(doc.interfaces) == 1
-            iface = next(iter(doc.interfaces.values()))
+            assert len(doc.interfaces) == 2
+            iface = doc.interfaces[demand]
             assert iface.type == "predefined" and iface.unit == "kW"
             assert iface.source is not None and iface.source.mode == "data_repeat"
             assert iface.source.data_ref
+            connected = doc.interfaces[flow_in]
+            assert connected.type == "in" and connected.unit == "kW"
+            exprs = {r.id: r.expression for r in doc.equations.relations}
+            assert exprs["serve"] == f"{flow_in}[t] = {demand}[t]"
+
+    def test_rated_bounds_reference_properties(self):
+        doc = self._doc("ies.device.battery")
+        assert doc.equations.variables["charge"].maximum_property_ref == "rated_power_kw"
+        assert doc.equations.variables["discharge"].maximum_property_ref == "rated_power_kw"
+        grid = self._doc("ies.device.grid_connection")
+        assert grid.interfaces["electricity_import"].maximum_property_ref == "max_import_power_kw"
+        assert grid.interfaces["electricity_export"].maximum_property_ref == "max_export_power_kw"
+        pump = self._doc("ies.device.heat_pump")
+        assert pump.interfaces["heat_out"].maximum_property_ref == "rated_heat_kw"
 
     def test_heat_pump_only_heating(self):
         doc = self._doc("ies.device.heat_pump")

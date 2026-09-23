@@ -75,12 +75,12 @@ equations:
       unit: kW
       valid_range:
         minimum: 0
-        maximum: null
+        maximum: {property_ref: rated_power_kw}
     discharge:
       unit: kW
       valid_range:
         minimum: 0
-        maximum: null
+        maximum: {property_ref: rated_power_kw}
   relations:
     - id: power_balance
       expression: "electricity[t] = discharge[t] - charge[t]"

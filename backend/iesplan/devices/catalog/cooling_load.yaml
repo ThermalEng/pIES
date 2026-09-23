@@ -13,6 +13,13 @@ properties:
       minimum: 0
       maximum: 10000000
 interfaces:
+  cool_in:
+    type: in
+    carrier: cool
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
   cool_demand:
     type: predefined
     source:
@@ -25,4 +32,6 @@ interfaces:
       maximum: null
 equations:
   variables: {}
-  relations: []
+  relations:
+    - id: serve
+      expression: "cool_in[t] = cool_demand[t]"

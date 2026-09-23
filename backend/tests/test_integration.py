@@ -538,7 +538,7 @@ def _prepare_project(
 
     # 连接(2.0 语义: 只有 out/in/bidirectional 接口可进入 connections;
     # predefined 为数据入口永不连边, blind 不得连接。负荷需求经数据绑定,
-    # 不经图边；光伏余电经电网出口消纳，与有效样例 campus 同构)
+    # 可连接输入口必须由供电边 feeding；光伏余电经电网出口消纳)
     revision = _add_connection(
         client, user_id, pid, revision, "c1", "grid", "electricity_import", "battery", "electricity",
     )
@@ -551,12 +551,21 @@ def _prepare_project(
     revision = _add_connection(
         client, user_id, pid, revision, "c4", "pv", "electric_out", "grid", "electricity_export",
     )
+    revision = _add_connection(
+        client, user_id, pid, revision, "c5", "grid", "electricity_import", "eload", "electricity_in",
+    )
+    revision = _add_connection(
+        client, user_id, pid, revision, "c6", "boiler", "heat_out", "hload", "heat_in",
+    )
+    revision = _add_connection(
+        client, user_id, pid, revision, "c7", "chiller", "cool_out", "cload", "cool_in",
+    )
 
-    # 草稿内容断言: 设备 9 台(含 3 负荷), 连接 4 条(负荷经数据供给,不连边)
+    # 草稿内容断言: 设备 9 台(含 3 负荷), 连接 7 条(含 3 条负荷供电边)
     view = client.get(f"/api/projects/{pid}", headers=_h(client, user_id)).json()
     model = view["draft"]["content"]["model"]
     assert len(model["devices"]) == 9
-    assert len(model["connections"]) == 4
+    assert len(model["connections"]) == 7
 
     # 模型校验: 模型/拓扑/参数类无 error/blocking(拓扑完整; 数据/财务门禁
     # 此时尚未就绪，不在断言范围)

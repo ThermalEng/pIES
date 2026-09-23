@@ -32,7 +32,7 @@ interfaces:
     unit: kW
     valid_range:
       minimum: 0
-      maximum: null
+      maximum: {property_ref: rated_cooling_kw}
 equations:
   variables: {}
   relations:

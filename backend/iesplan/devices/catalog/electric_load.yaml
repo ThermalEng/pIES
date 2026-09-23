@@ -13,6 +13,13 @@ properties:
       minimum: 0
       maximum: 10000000
 interfaces:
+  electricity_in:
+    type: in
+    carrier: electricity
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
   electricity_demand:
     type: predefined
     source:
@@ -25,4 +32,6 @@ interfaces:
       maximum: null
 equations:
   variables: {}
-  relations: []
+  relations:
+    - id: serve
+      expression: "electricity_in[t] = electricity_demand[t]"

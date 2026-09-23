@@ -20,6 +20,12 @@ MPS-ready 的 ``LinearModel``，并附带结果反向换算所需的最小单位
 ``1 year`` → 31536000）已由公共编译入口换算为同一体系，
 显式时间跨度与按年费率相乘后自然落到窗口金额。
 
+母线：连接只定义连通性，按 carrier + 无向连通分量逐 step 生成一条
+守恒式（out/bidirectional 为供给正项，in 为消耗负项）；孤立端口
+不建平衡式。值域界可引用实例 property（额定能力），实例级解析。
+时变电价序列值不在五项输入内，首个链路只支持 constant tariff，
+能力核对留待 GeneratorDescriptor 切片。
+
 规划变量接管其绑定的设备 property：成本 driver 与技术方程中，
 被规划变量绑定的 property 取变量值（界来自规划变量上下界），
 未绑定的取实例 property 常量。t=0 状态初值取实例 property 常量。
@@ -49,6 +55,7 @@ from iesplan.computation.sequences import MaterializedSeries
 from iesplan.core.contracts import (
     compile_planning_expression,
 )
+from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 from iesplan.core.units import dims_of, to_si
 from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import (
@@ -221,15 +228,37 @@ class _ProjectBuilder:
                 self.unit_map[name] = unit
         return name
 
-    @staticmethod
-    def _bound(value: float | None, unit: str) -> float | None:
-        return None if value is None else _to_internal(value, unit)
-
     def _tech_name(self, inst: str, local: str, step: int) -> str:
         return f"{inst}__{local}__t{step}"
 
-    def _declare_instance_statics(self, inst: str) -> dict[str, Any]:
-        """实例的静态符号与变量声明（property 常量/接管变量、内部变量、流变量）。"""
+    def _prop_value_unit(self, inst: str, prop: str) -> tuple[float, str]:
+        """实例 property 值与单位（装配覆盖优先，否则设备默认值）。"""
+        dev = self.devices[inst]
+        overrides = dev.get("properties") or {}
+        if prop in overrides:
+            return float(overrides[prop]["value"]), overrides[prop]["unit"]
+        var = self.models[inst].variables[prop]
+        return float(var.value), var.unit  # type: ignore[arg-type]
+
+    def _limit(
+        self, inst: str, unit: str, number: float | None, ref: str | None,
+    ) -> float | None:
+        """值域界内部值（数值直接换算，property 引用按实例解析）。"""
+        if ref is not None:
+            value, punit = self._prop_value_unit(inst, ref)
+            return _to_internal(value, punit)
+        if number is None:
+            return None
+        return _to_internal(number, unit)
+
+    def _declare_instance_statics(
+        self, inst: str, bus_flows: set[str] | frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        """实例的静态符号与变量声明（property 常量/接管变量、内部变量、流变量）。
+
+        公开计算原语 ``step_duration`` 以基线导出的 SI 秒值注入符号表，
+        设备不得自行声明。
+        """
         contribution = self.models[inst]
         dev = self.devices[inst]
         overrides = dev.get("properties") or {}
@@ -263,18 +292,29 @@ class _ProjectBuilder:
                 else:
                     symbols[name] = ("const", prop_const[name])
             else:
-                lower = self._bound(
-                    var.valid_range[0] if var.valid_range else None, var.unit,
+                lower = self._limit(
+                    inst, var.unit,
+                    var.valid_range[0] if var.valid_range else None,
+                    var.minimum_property_ref,
                 )
-                upper = self._bound(
-                    var.valid_range[1] if var.valid_range else None, var.unit,
+                upper = self._limit(
+                    inst, var.unit,
+                    var.valid_range[1] if var.valid_range else None,
+                    var.maximum_property_ref,
                 )
                 symbols[name] = ("var", lower, upper)
-        flow_names = self._referenced_flows(inst, contribution)
+        symbols[TIMELINE_STEP_DURATION_VAR] = ("const", self.step_s)
+        flow_names = sorted(
+            set(self._referenced_flows(inst, contribution)) | set(bus_flows)
+        )
         for iface_name in flow_names:
             flow = contribution.interfaces[iface_name]
-            lower = self._bound(flow.valid_range[0], flow.unit)
-            upper = self._bound(flow.valid_range[1], flow.unit)
+            lower = self._limit(
+                inst, flow.unit, flow.valid_range[0], flow.minimum_property_ref,
+            )
+            upper = self._limit(
+                inst, flow.unit, flow.valid_range[1], flow.maximum_property_ref,
+            )
             symbols[iface_name] = ("var", lower, upper)
             for step in range(self.point_count):
                 self._declare(
@@ -399,40 +439,99 @@ class _ProjectBuilder:
             )
 
     # ------------------------------------------------------------------
-    # 连接守恒
+    # 母线守恒（carrier + 无向连通分量；连接只定义连通性）
     # ------------------------------------------------------------------
 
-    def _build_balances(self) -> None:
+    def _compute_buses(
+        self,
+    ) -> list[tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]]:
+        """母线表：(carrier, 成员实例排序元组, ((实例, 接口, 符号)…))。
+
+        无向连通分量只含带边设备；只有连接边实际使用的 carrier 才建
+        平衡式（无边载体的孤立端口不约束）。out/bidirectional
+        为供给正项，in 为消耗负项；bidirectional 以设备公开符号约定
+        作为有符号净流量。不按设备 ID 分支。
+        """
         connections = self.doc.get("connections") or {}
-        for conn_id in sorted(connections):
-            conn = connections[conn_id]
-            from_lp = self._flow_prefix(conn["from"])
-            to_lp = self._flow_prefix(conn["to"])
+        adjacent: dict[str, set[str]] = {}
+        edge_carriers: dict[tuple[str, ...], set[str]] = {}
+        for conn in connections.values():
+            dev_a, _, iface_a = conn["from"].partition(".")
+            dev_b, _, _ = conn["to"].partition(".")
+            adjacent.setdefault(dev_a, set()).add(dev_b)
+            adjacent.setdefault(dev_b, set()).add(dev_a)
+            carrier = self.models[dev_a].interfaces[iface_a].carrier
+            edge_carriers.setdefault(tuple(sorted((dev_a, dev_b))), set()).add(
+                carrier
+            )
+        seen: set[str] = set()
+        components: list[tuple[str, ...]] = []
+        for root in sorted(adjacent):
+            if root in seen:
+                continue
+            members = set([root])
+            frontier = [root]
+            while frontier:
+                current = frontier.pop()
+                for peer in adjacent.get(current, ()):
+                    if peer not in members:
+                        members.add(peer)
+                        frontier.append(peer)
+            seen |= members
+            components.append(tuple(sorted(members)))
+        buses: list[
+            tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]
+        ] = []
+        for members in sorted(components):
+            member_set = set(members)
+            wanted: set[str] = set()
+            for pair, carriers in edge_carriers.items():
+                if set(pair) <= member_set:
+                    wanted |= carriers
+            carriers: dict[str, list[tuple[str, str, float]]] = {}
+            for inst in members:
+                contribution = self.models[inst]
+                for iface_name, flow in contribution.interfaces.items():
+                    if flow.carrier not in wanted:
+                        continue
+                    if flow.type == "out" or flow.type == "bidirectional":
+                        sign = 1.0
+                    elif flow.type == "in":
+                        sign = -1.0
+                    else:
+                        continue
+                    carriers.setdefault(flow.carrier, []).append(
+                        (inst, iface_name, sign)
+                    )
+            for carrier in sorted(carriers):
+                ports = tuple(sorted(carriers[carrier]))
+                if not ports:
+                    continue
+                buses.append((carrier, members, ports))
+        return buses
+
+    def _build_bus_rows(
+        self,
+        buses: list[
+            tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]
+        ],
+    ) -> None:
+        for index, (carrier, _members, ports) in enumerate(buses):
             for step in range(self.point_count):
+                terms = tuple(
+                    (((f"{inst}__{iface}__t{step}", 0), sign))
+                    for inst, iface, sign in ports
+                )
                 self.rows.append(
                     LinearConstraint(
-                        name=f"{conn_id}__t{step}",
+                        name=f"bus__{carrier}__{index}__t{step}",
                         expression=LinearExpression(
-                            terms=(
-                                ((f"{from_lp}__t{step}", 0), 1.0),
-                                ((f"{to_lp}__t{step}", 0), -1.0),
-                            ),
-                            constant=0.0,
+                            terms=tuple(sorted(terms)), constant=0.0,
                         ),
                         sense="eq",
                         rhs=0.0,
                     )
                 )
-
-    def _flow_prefix(self, endpoint: str) -> str:
-        inst, _, iface = endpoint.partition(".")
-        prefix = f"{inst}__{iface}"
-        probe = f"{prefix}__t0"
-        if probe not in self.variables:
-            raise LoweringUnsupportedError(
-                f"连接端点 {endpoint!r} 非已声明时序流接口"
-            )
-        return prefix
 
     # ------------------------------------------------------------------
     # 财务分量仿射式
@@ -481,13 +580,8 @@ class _ProjectBuilder:
         return out
 
     def _prop_const(self, inst: str, prop: str) -> float:
-        contribution = self.models[inst]
-        dev = self.devices[inst]
-        overrides = dev.get("properties") or {}
-        if prop in overrides:
-            return _to_internal(float(overrides[prop]["value"]), overrides[prop]["unit"])
-        var = contribution.variables[prop]
-        return _to_internal(float(var.value), var.unit)  # type: ignore[arg-type]
+        value, unit = self._prop_value_unit(inst, prop)
+        return _to_internal(value, unit)
 
     def _tariff_affine(self, binding_id: str) -> _AffineAcc:
         """单个计费绑定的已带符号记账分量仿射式。"""
@@ -654,10 +748,17 @@ class _ProjectBuilder:
     # ------------------------------------------------------------------
 
     def build(self) -> tuple[LinearModel, Mapping[str, str]]:
+        buses = self._compute_buses()
+        bus_flows: dict[str, set[str]] = {}
+        for _carrier, _members, ports in buses:
+            for inst, iface, _sign in ports:
+                bus_flows.setdefault(inst, set()).add(iface)
         for inst in sorted(self.devices):
-            statics = self._declare_instance_statics(inst)
+            statics = self._declare_instance_statics(
+                inst, bus_flows.get(inst, frozenset())
+            )
             self._build_relations(inst, statics)
-        self._build_balances()
+        self._build_bus_rows(buses)
         self._build_planning_rows()
         objective = self._build_objective()
         model = LinearModel(

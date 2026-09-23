@@ -13,6 +13,13 @@ properties:
       minimum: 0
       maximum: 10000000
 interfaces:
+  heat_in:
+    type: in
+    carrier: heat
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
   heat_demand:
     type: predefined
     source:
@@ -25,4 +32,6 @@ interfaces:
       maximum: null
 equations:
   variables: {}
-  relations: []
+  relations:
+    - id: serve
+      expression: "heat_in[t] = heat_demand[t]"
