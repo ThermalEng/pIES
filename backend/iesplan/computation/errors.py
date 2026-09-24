@@ -11,7 +11,7 @@ class ComputationUnavailableError(RuntimeError):
 
     def __init__(
         self,
-        message: str = "计算能力不可用（0.8 尚未实现）",
+        message: str = "计算能力不可用",
         *,
         reason: str = "no-provider",
     ) -> None:

@@ -17,12 +17,11 @@
 - 序列物化: ``MaterializedSeries`` / ``MaterializedSet`` /
   ``materialize_non_predictive_series``(实现见 ``sequences``);
 - 边界协议与载体: ``GeneratorProvider`` / ``ExecutorProvider`` /
-  ``SolverRuntime`` / ``ResultAdapter`` / ``CalculationConfig`` /
+  ``ResultAdapter`` / ``CalculationConfig`` /
   ``SolverBundleManifest`` / ``SolverBundle`` / ``ExecutionReceipt`` /
   ``ComputeResult``(宪法 §4.5 三段式边界);
 - 执行器独立注册: ``ExecutorDescriptor`` / ``ExecutorRegistry`` /
-  ``build_executor_registry``(实现见 ``runtime``，本切片无真实
-  executor 与执行实现);
+  ``build_executor_registry``(实现见 ``runtime``);
 - 首个真实生成器: ``HighsMilpProvider`` /
   ``HIGHS_MILP_PROVIDER``(实现见 ``generators.highs_milp``);
 - 共享校验: ``check_provider_ref``;
@@ -59,6 +58,8 @@ from iesplan.computation.protocols import (
     CALCULATION_CONFIG_VERSION,
     COMPUTE_RESULT_SCHEMA,
     COMPUTE_RESULT_VERSION,
+    EXECUTION_RECEIPT_SCHEMA,
+    EXECUTION_RECEIPT_VERSION,
     SOLVER_BUNDLE_SCHEMA,
     SOLVER_BUNDLE_VERSION,
     CalculationConfig,
@@ -69,7 +70,6 @@ from iesplan.computation.protocols import (
     ResultAdapter,
     SolverBundle,
     SolverBundleManifest,
-    SolverRuntime,
     check_provider_ref,
 )
 from iesplan.computation.registry import (
@@ -95,6 +95,8 @@ __all__ = [
     "COMPUTE_RESULT_SCHEMA",
     "COMPUTE_RESULT_VERSION",
     "DEFAULT_ALGORITHM",
+    "EXECUTION_RECEIPT_SCHEMA",
+    "EXECUTION_RECEIPT_VERSION",
     "HIGHS_MILP_PROVIDER",
     "SOLVER_BUNDLE_SCHEMA",
     "SOLVER_BUNDLE_VERSION",
@@ -115,7 +117,6 @@ __all__ = [
     "ResultAdapter",
     "SolverBundle",
     "SolverBundleManifest",
-    "SolverRuntime",
     "build_executor_registry",
     "build_project_model",
     "build_registry",

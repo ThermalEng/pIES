@@ -7,10 +7,11 @@
   同时实现三协议的假对象证明错误形状);
 - 宪法 §4.5 方法形状: generate 消费装配产物/设备数学贡献/物化序列/
   有效财务快照/公开配置五项直接输入产出完整 Bundle 聚合(manifest +
-  文件字节); run 消费 Bundle 产出回执与原始输出; adapt 消费三件套产出
-  统一结果; manifest 载体为 ``SolverBundleManifest``;
+  文件字节); adapt 消费三件套产出统一结果; manifest 载体为
+  ``SolverBundleManifest``; 回执载体为 ``ExecutionReceipt``;
 - unavailable 错误语义: ``ComputationUnavailableError`` 为
-  ``RuntimeError``, 默认 reason 为 ``"no-provider"``;
+  ``RuntimeError``, 默认 reason 为 ``"no-provider"``, 默认消息为
+  稳定的“计算能力不可用”;
 - 计算配置: ``CalculationConfig`` 固定 generator/solver 精确引用、种子、
   算法选项(含精度)与输出请求；非法引用形态即拒绝；
 - 注册表门面: ``iesplan.computation`` 选择性重导出注册表符号,
@@ -33,6 +34,8 @@ from iesplan.computation import (
     COMPUTE_RESULT_SCHEMA,
     COMPUTE_RESULT_VERSION,
     DEFAULT_ALGORITHM,
+    EXECUTION_RECEIPT_SCHEMA,
+    EXECUTION_RECEIPT_VERSION,
     SOLVER_BUNDLE_SCHEMA,
     SOLVER_BUNDLE_VERSION,
     AlgorithmSpec,
@@ -48,7 +51,6 @@ from iesplan.computation import (
     ResultAdapter,
     SolverBundle,
     SolverBundleManifest,
-    SolverRuntime,
     get_algorithm,
     list_algorithms,
 )
@@ -200,20 +202,6 @@ class _ExecutorOnly:
     def available(self) -> bool:
         return False
 
-    def execute(
-        self, command: Mapping[str, object], workdir: str
-    ) -> tuple[ExecutionReceipt, Mapping[str, bytes]]:
-        raise ComputationUnavailableError(reason="no-executor")
-
-
-class _RuntimeOnly:
-    """仅实现 SolverRuntime 的最小替身(无任何算法逻辑)。"""
-
-    def run(
-        self, bundle: SolverBundle, executor: ExecutorProvider
-    ) -> tuple[ExecutionReceipt, Mapping[str, bytes]]:
-        raise ComputationUnavailableError(reason="no-provider")
-
 
 class _AdapterOnly:
     """仅实现 ResultAdapter 的最小替身(无任何算法逻辑)。"""
@@ -228,69 +216,56 @@ class _AdapterOnly:
 
 
 def test_protocols_are_runtime_checkable_shapes() -> None:
-    """四协议为运行时 Protocol; 各自独立替身只通过自身结构判定。"""
+    """三协议为运行时 Protocol; 各自独立替身只通过自身结构判定。
+
+    执行调用方法移除后，GeneratorProvider 与 ExecutorProvider 在运行时
+    结构检查下共享 descriptor/ref/available 三成员，生成器替身也会通过
+    ExecutorProvider 的结构判定；两者仍以 generate 成员区分，不在此做
+    该方向的跨协议否定断言。
+    """
     gen = _GeneratorOnly()
     exe = _ExecutorOnly()
-    runtime = _RuntimeOnly()
     adapter = _AdapterOnly()
     assert isinstance(gen, GeneratorProvider)
-    assert not isinstance(gen, ExecutorProvider)
-    assert not isinstance(gen, SolverRuntime)
     assert not isinstance(gen, ResultAdapter)
     assert isinstance(exe, ExecutorProvider)
     assert not isinstance(exe, GeneratorProvider)
-    assert not isinstance(exe, SolverRuntime)
     assert not isinstance(exe, ResultAdapter)
     assert exe.descriptor.ref == exe.ref
-    assert isinstance(runtime, SolverRuntime)
-    assert not isinstance(runtime, GeneratorProvider)
-    assert not isinstance(runtime, ExecutorProvider)
-    assert not isinstance(runtime, ResultAdapter)
     assert isinstance(adapter, ResultAdapter)
     assert not isinstance(adapter, GeneratorProvider)
     assert not isinstance(adapter, ExecutorProvider)
-    assert not isinstance(adapter, SolverRuntime)
     assert not isinstance(object(), GeneratorProvider)
     assert not isinstance(object(), ExecutorProvider)
-    assert not isinstance(object(), SolverRuntime)
     assert not isinstance(object(), ResultAdapter)
 
 
 def test_protocol_methods_match_constitution_boundaries() -> None:
-    """宪法 §4.5 方法形状: generate/execute/run/adapt 的参数与产出符合边界。"""
+    """宪法 §4.5 方法形状: generate/adapt 的参数与产出符合边界。"""
     import inspect
 
     assert list(inspect.signature(GeneratorProvider.generate).parameters) == [
         "self", "artifact", "models", "series", "finance", "config",
-    ]
-    assert list(inspect.signature(ExecutorProvider.execute).parameters) == [
-        "self", "command", "workdir",
-    ]
-    assert list(inspect.signature(_RuntimeOnly.run).parameters) == [
-        "self", "bundle", "executor",
     ]
     assert list(inspect.signature(_AdapterOnly.adapt).parameters) == [
         "self", "bundle", "receipt", "outputs",
     ]
     assert isinstance(_GeneratorOnly(), GeneratorProvider)
     assert isinstance(_ExecutorOnly(), ExecutorProvider)
-    assert isinstance(_RuntimeOnly(), SolverRuntime)
     assert isinstance(_AdapterOnly(), ResultAdapter)
     assert _GeneratorOnly().descriptor.ref == _GeneratorOnly().ref
 
 
 def test_unavailable_error_semantics() -> None:
-    """unavailable 错误语义: RuntimeError, 默认 reason, 调用一律明确失败。"""
+    """unavailable 错误语义: RuntimeError, 默认 reason/消息, 调用一律明确失败。"""
     err = ComputationUnavailableError()
     assert isinstance(err, RuntimeError)
     assert err.reason == "no-provider"
-    assert "0.8" in str(err)
-    gen, runtime, adapter = _GeneratorOnly(), _RuntimeOnly(), _AdapterOnly()
+    assert str(err) == "计算能力不可用"
+    gen, adapter = _GeneratorOnly(), _AdapterOnly()
     config = _config(seed=42)
     with pytest.raises(ComputationUnavailableError):
         gen.generate(_artifact(), {}, (), _finance(), config)
-    with pytest.raises(ComputationUnavailableError):
-        runtime.run(_manifest(), _ExecutorOnly())
     receipt = ExecutionReceipt(
         bundle_id="bundle-1", generator_ref="g", solver_ref="s",
         executor_ref="e", executable_ref="x", status="failed",
@@ -437,7 +412,7 @@ def test_registry_facade_from_computation() -> None:
 
 
 def test_result_and_bundle_schema_words() -> None:
-    """结果/Bundle 字头为公开 schema, 非法字头即拒绝。"""
+    """结果/Bundle/回执字头为公开 schema, 非法字头即拒绝。"""
     assert _manifest().schema == SOLVER_BUNDLE_SCHEMA
     assert _manifest().schema_version == SOLVER_BUNDLE_VERSION
     result = ComputeResult(
@@ -449,4 +424,18 @@ def test_result_and_bundle_schema_words() -> None:
         ComputeResult(
             schema="ies.other", bundle_id="b", status="s",
             business_outcome="normal_completion",
+        )
+    receipt = ExecutionReceipt(
+        bundle_id="b", generator_ref="g", solver_ref="s",
+        executor_ref="e", executable_ref="x", status="succeeded",
+    )
+    assert receipt.schema == EXECUTION_RECEIPT_SCHEMA
+    assert receipt.schema_version == EXECUTION_RECEIPT_VERSION
+    assert receipt.to_dict()["schema"] == "ies.execution-receipt"
+    assert receipt.to_dict()["schema_version"] == "1.0.0"
+    with pytest.raises(ValueError, match="schema"):
+        ExecutionReceipt(
+            schema="ies.other", bundle_id="b", generator_ref="g",
+            solver_ref="s", executor_ref="e", executable_ref="x",
+            status="succeeded",
         )

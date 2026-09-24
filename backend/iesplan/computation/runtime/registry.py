@@ -1,4 +1,4 @@
-"""ExecutorProvider 独立原子注册表(0.9 切片 A)。
+"""ExecutorProvider 独立原子注册表。
 
 - 注册表注册真实 provider 实例，不只是 descriptor；目录快照与
   ``to_dict`` 仍只公开 descriptor 数据；
@@ -6,10 +6,9 @@
   协议不符、重复 ref、descriptor/ref 不一致或不可用即整体拒绝，
   不发布部分状态；
 - ``resolve(executor_ref, executable_ref)`` 精确选择 executor 并确认
-  ``command.executable`` 受支持，返回可调用 provider；
-- 注册表实例由组合根持有并发布（首个真实 executor 与 runtime 可同时
-  工作时再接线）；API/Worker 不得自行发现或动态加载 provider，只消费
-  组合根给定的已发布实例；
+  ``command.executable`` 受支持，返回选中的 provider 实例；
+- 注册表实例由组合根持有并发布；API/Worker 不得自行发现或动态加载
+  provider，只消费组合根给定的已发布实例；
 - 无可用 provider（空表或引用未知）或 executable 不受支持统一抛
   ``ComputationUnavailableError``，不回退、不猜测。
 """
@@ -59,7 +58,7 @@ class ExecutorRegistry:
         1. 精确引用选中 provider；未知即 ``ComputationUnavailableError``；
         2. 用 descriptor 确认 ``executable_ref`` 受支持，不支持即
            ``ComputationUnavailableError``，不回退其他 executor。
-        返回可直接调用 ``execute`` 的 provider 实例。
+        返回选中的 provider 实例。
         """
         provider = self.get(executor_ref)
         if not provider.descriptor.supports_executable(executable_ref):

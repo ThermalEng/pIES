@@ -1,4 +1,4 @@
-"""ExecutorProvider 独立注册 contract 测试(0.9 切片 A)。
+"""ExecutorProvider 独立注册 contract 测试。
 
 只覆盖公开描述符与原子注册表，不涉及真实 executor 实现，不启动进程：
 
@@ -58,9 +58,6 @@ class _FakeProvider:
     def available(self) -> bool:
         return self._available
 
-    def execute(self, command, workdir):
-        raise AssertionError("注册表测试替身不应被调用")
-
 
 def _provider(**kwargs) -> _FakeProvider:
     return _FakeProvider(_descriptor(**kwargs))
@@ -115,7 +112,7 @@ def test_resolve_selects_exact_executor_and_executable() -> None:
     assert resolved is provider
     assert isinstance(resolved, ExecutorProvider)
     assert resolved.descriptor.ref == EXECUTOR
-    assert callable(resolved.execute)
+    assert resolved.available()
     assert registry.get(EXECUTOR) is provider
 
 

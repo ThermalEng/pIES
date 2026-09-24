@@ -1,9 +1,8 @@
 """ExecutorDescriptor：执行器公开能力描述。
 
-只描述 runtime 真正需要的两项：executor 精确引用身份，以及受支持的
-executable 精确引用集合（未来 runtime 核对 ``command.executable`` 的
-唯一依据）。隔离实施、取消语义与参数模式随首个真实 executor 与
-runtime 实现一并声明，不在此预造。跨越边界的容器字段在构造时冻结。
+只描述执行器选择所需的两项：executor 精确引用身份，以及受支持的
+executable 精确引用集合（核对 ``command.executable`` 的唯一依据）。
+不含隔离实施、取消语义与参数模式。跨越边界的容器字段在构造时冻结。
 """
 
 from __future__ import annotations

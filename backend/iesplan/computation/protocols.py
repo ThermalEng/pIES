@@ -6,13 +6,13 @@
   实例固定的设备数学贡献、已物化的全周期输入序列、不可变
   ``EffectiveFinanceConfig`` 与经过公开输入校验的 ``CalculationConfig``
   五项直接输入, 确定性生成 ``SolverBundle``;
-- ``SolverRuntime`` 只校验并执行 Bundle 中的结构化命令, 生成
-  ``ExecutionReceipt`` 与原始输出;
+- 执行层只校验并执行 Bundle 中的结构化命令, 生成 ``ExecutionReceipt``
+  与原始输出;
 - ``ResultAdapter`` 只把 Bundle、回执和声明输出映射为带 schema/version 的
   ``ComputeResult``。
 
 单位换算唯一边界: 业务单位到求解器内部单位只在 GeneratorProvider 发生,
-反向只在 ResultAdapter 发生; 求解选项在计算包生成时固定。SolverRuntime
+反向只在 ResultAdapter 发生; 求解选项在计算包生成时固定。执行层
 不读取装配语义、不判断设备类型、不补数据或切换 solver。
 
 本模块只声明边界形状与不可变数据载体，不实现任何 0.8 算法。当前计算
@@ -45,13 +45,17 @@ if TYPE_CHECKING:
 CALCULATION_CONFIG_SCHEMA = "ies.calculation-config"
 CALCULATION_CONFIG_VERSION = "1.0.0"
 
-#: 求解包 schema(生产者 GeneratorProvider, 消费者 SolverRuntime)。
+#: 求解包 schema(生产者 GeneratorProvider, 消费者执行层)。
 SOLVER_BUNDLE_SCHEMA = "ies.solver-bundle"
 SOLVER_BUNDLE_VERSION = "1.0.0"
 
 #: 统一计算结果 schema。
 COMPUTE_RESULT_SCHEMA = "ies.compute-result"
 COMPUTE_RESULT_VERSION = "1.0.0"
+
+#: 执行回执 schema(后续 ResultAdapter 的公共载体)。
+EXECUTION_RECEIPT_SCHEMA = "ies.execution-receipt"
+EXECUTION_RECEIPT_VERSION = "1.0.0"
 
 
 def freeze_json_value(value: object) -> object:
@@ -145,11 +149,11 @@ class GeneratorProvider(Protocol):
 
 @runtime_checkable
 class ExecutorProvider(Protocol):
-    """受控执行能力(首个真实实现随 0.9-B 落地)。
+    """受控执行能力公开身份。
 
-    把稳定 executable ID 映射到隔离运行方式：消费结构化命令（参数数组，
-    非 shell 字符串）与调用方已准备的运行目录，返回回执与声明输出原始
-    字节。不解释命令业务，不读取装配语义，不启动 shell。
+    只公开精确引用、能力描述符与可用性，供原子注册表精确选择。不签发
+    最终执行回执：回执身份归属执行层，由执行层生成。不解释命令业务，
+    不读取装配语义，不启动 shell。
     """
 
     @property
@@ -164,36 +168,6 @@ class ExecutorProvider(Protocol):
 
     def available(self) -> bool:
         """该 provider 当前是否可用。"""
-        ...
-
-    def execute(
-        self, command: Mapping[str, object], workdir: str
-    ) -> tuple[ExecutionReceipt, Mapping[str, bytes]]:
-        """在已准备运行目录中执行结构化命令，返回 ``(回执, 声明输出字节)``。
-
-        ``command`` 即 manifest 中的结构化命令（含硬资源声明）；
-        ``workdir`` 为调用方已准备的隔离运行目录。成功或失败都尽量形成
-        回执；执行前拒绝不得启动进程。
-        """
-        ...
-
-
-@runtime_checkable
-class SolverRuntime(Protocol):
-    """求解执行交接入口(只固定入口形状，无执行实现)。
-
-    受控执行层：用给定 executor 执行 Bundle 中的结构化命令，不读取装配
-    语义、不构造数学问题、不解释设备类型。实际执行实现随 0.9-B 落地；
-    本切片不提供任何实现，不启动 subprocess。
-    """
-
-    def run(
-        self, bundle: SolverBundle, executor: ExecutorProvider
-    ) -> tuple[ExecutionReceipt, Mapping[str, bytes]]:
-        """用给定 executor 执行 Bundle，返回 ``(回执, 声明输出字节)``。
-
-        成功或失败都尽量形成回执。
-        """
         ...
 
 
@@ -637,9 +611,11 @@ class ExecutionReceipt:
     进程协议结果(退出码/终止)与结构化执行状态; ``detail`` 承载
     stdout/stderr 节选、资源统计等只读执行事实。``success_exit_codes``
     只表示进程协议成功; 不可行/无界等业务状态由结果适配器读取求解器
-    输出后映射, 不在此猜测。
+    输出后映射, 不在此猜测。0.9-B 将随真实 runtime 完成剩余执行事实。
     """
 
+    schema: str = EXECUTION_RECEIPT_SCHEMA
+    schema_version: str = EXECUTION_RECEIPT_VERSION
     bundle_id: str = ""
     generator_ref: str = ""
     solver_ref: str = ""
@@ -650,6 +626,10 @@ class ExecutionReceipt:
     detail: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.schema != EXECUTION_RECEIPT_SCHEMA:
+            raise ValueError(f"回执 schema 非法: {self.schema!r}")
+        if self.schema_version != EXECUTION_RECEIPT_VERSION:
+            raise ValueError(f"回执版本非法: {self.schema_version!r}")
         for name in (
             "bundle_id",
             "generator_ref",
@@ -669,6 +649,8 @@ class ExecutionReceipt:
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
         return {
+            "schema": self.schema,
+            "schema_version": self.schema_version,
             "bundle_id": self.bundle_id,
             "generator_ref": self.generator_ref,
             "solver_ref": self.solver_ref,
@@ -725,6 +707,8 @@ __all__ = [
     "CALCULATION_CONFIG_VERSION",
     "COMPUTE_RESULT_SCHEMA",
     "COMPUTE_RESULT_VERSION",
+    "EXECUTION_RECEIPT_SCHEMA",
+    "EXECUTION_RECEIPT_VERSION",
     "SOLVER_BUNDLE_SCHEMA",
     "SOLVER_BUNDLE_VERSION",
     "CalculationConfig",
@@ -736,7 +720,6 @@ __all__ = [
     "ResultAdapter",
     "SolverBundle",
     "SolverBundleManifest",
-    "SolverRuntime",
     "freeze_json_value",
     "thaw_json_value",
 ]
