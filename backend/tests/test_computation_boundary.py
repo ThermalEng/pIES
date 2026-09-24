@@ -457,7 +457,7 @@ def test_receipt_refs_status_and_executed_consistency() -> None:
     """回执引用形态、状态封闭集与已执行/未执行一致性，无 detail 残留。"""
     assert set(RECEIPT_STATUSES) == {
         "succeeded", "policy_rejected", "process_failed",
-        "output_protocol_failed",
+        "output_protocol_failed", "timed_out",
     }
     dumped = _receipt().to_dict()
     assert "detail" not in dumped

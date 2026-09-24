@@ -80,8 +80,9 @@ class SolverRuntime:
         """执行完整 Bundle，返回 ``(唯一回执, 已核对声明输出字节)``。
 
         状态优先级：输出边界违规（未声明文件/符号链接/不可读）→
-        ``output_protocol_failed``；退出码不在成功集合 → ``process_failed``；
-        必需输出缺失 → ``output_protocol_failed``；否则 ``succeeded``。
+        ``output_protocol_failed``；过程原因为超时 → ``timed_out``；
+        退出码不在成功集合 → ``process_failed``；必需输出缺失 →
+        ``output_protocol_failed``；否则 ``succeeded``。
         成功与失败都尽量形成回执；输出映射只含已核对的声明输出。
         """
         if not isinstance(bundle, SolverBundle):
@@ -212,6 +213,12 @@ class SolverRuntime:
         if boundary_errors:
             status = "output_protocol_failed"
             error = "; ".join(boundary_errors)
+        elif outcome.termination_reason == "timeout":
+            status = "timed_out"
+            error = (
+                f"执行超时终止: exit_code={outcome.exit_code!r} "
+                f"signal={outcome.signal_number!r}"
+            )
         elif outcome.exit_code is None:
             status = "process_failed"
             error = (

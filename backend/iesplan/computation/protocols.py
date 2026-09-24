@@ -619,12 +619,13 @@ class SolverBundle:
         )
 
 
-#: 回执状态封闭集合（本切片真实产生的四种；超时/取消/OOM 等随实现再扩展）。
+#: 回执状态封闭集合（真实产生的五种；取消/OOM 等随实现再扩展）。
 RECEIPT_STATUSES = (
     "succeeded",
     "policy_rejected",
     "process_failed",
     "output_protocol_failed",
+    "timed_out",
 )
 
 
