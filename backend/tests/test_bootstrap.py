@@ -16,14 +16,20 @@ from iesplan.computation import ComputationUnavailableError
 
 
 def test_assemble_api_full_context() -> None:
-    """assemble_api 装配 database、storage、registry 与生成器目录。"""
+    """assemble_api 装配 database、storage、registry 与生成器目录。
+
+    生成器目录显式注册内置真实 provider（非空表、非扫描发现）。
+    """
     ctx = assemble_api()
     assert isinstance(ctx, ApplicationContext)
     assert ctx.session_factory is not None
     assert ctx.storage is not None
     assert ctx.device_registry is not None
     assert ctx.generator_registry is not None
-    assert ctx.generator_registry.snapshot() == ()
+    assert [d.ref for d in ctx.generator_registry.snapshot()] == [
+        "ies.generator.highs_milp@1.0.0"
+    ]
+    assert len(ctx.generator_registry) == 1
     health = ctx.health()
     assert health["db"] == "ok"
     assert health["registry"] == "ok"
@@ -33,9 +39,11 @@ def test_assemble_api_full_context() -> None:
 
 
 def test_assemble_worker_subsets() -> None:
-    """空生成器目录时计算 Worker 拒绝启动；I/O Worker 正常装配。"""
-    with pytest.raises(ComputationUnavailableError):
+    """计算 Worker 即使目录含真实 provider 仍拒绝启动（执行编排属 0.9，
+    不启动 solver）；I/O Worker 正常装配。"""
+    with pytest.raises(ComputationUnavailableError) as exc_info:
         assemble_compute_worker()
+    assert exc_info.value.reason == "worker-not-wired"
 
     io = assemble_io_worker()
     assert io.storage is not None

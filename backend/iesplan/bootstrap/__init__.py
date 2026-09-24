@@ -5,16 +5,17 @@
 ``ApplicationContext`` 或明确启动失败。
 
 - ``assemble_api``: 装配 database + storage + devices 2.0 注册表 +
-  生成器目录(当前空表);
-- ``assemble_compute_worker``: 显式构建生成器目录, 空表即明确拒绝启动;
+  生成器目录(显式注册内置真实 provider);
+- ``assemble_compute_worker``: 显式构建生成器目录(含内置真实
+  provider)，但计算执行编排属于 0.9，本轮仍明确拒绝启动，不启动
+  solver；
 - ``assemble_io_worker``: I/O 所需子集(database + storage, 不含 devices
   注册表与生成器目录)。
 
 失败语义: 任一必需依赖装配失败即抛异常(启动失败), 不发布半初始化
-状态, 不设 fallback。真实 generator 随 0.8 后续切片实现；当前目录为
-空，计算 Worker 在组合根明确拒绝启动，因而不会领取无法执行的计算任务。
-provider 选择与装配只归本组合根；API/Worker 不得自行发现或动态加载
-provider。
+状态, 不设 fallback。计算 Worker 在组合根明确拒绝启动(执行编排属于
+0.9)，因而不会领取无法执行的计算任务。provider 选择与装配只归本组合
+根；API/Worker 不得自行发现或动态加载 provider，不做动态扫描。
 
 本包只做装配与健康聚合, 不实现业务规则, 不新增全局 registry(装配结果
 由调用方持有, API 进程挂在 ``app.state.bootstrap_context``)。
@@ -54,8 +55,8 @@ class ApplicationContext:
     storage: Any | None = None
     #: devices 2.0 注册状态对象(未装配该能力时为 None)
     device_registry: Any | None = None
-    #: 已发布的生成器目录(未装配该能力时为 None; 当前尚无真实 provider
-    #: 实现, 装配结果为空表, 选择时即明确不可用)
+    #: 已发布的生成器目录(未装配该能力时为 None; 内置真实 provider
+    #: 由组合根显式注册，未知引用选择时即明确不可用)
     generator_registry: Any | None = None
 
     def health(self) -> dict[str, str]:
@@ -65,8 +66,8 @@ class ApplicationContext:
         - ``storage`` / ``registry`` / ``generators``: 仅在装配了该能力时
           上报; 未装配(能力子集, 如 Worker 上下文)时不出现该键, 不伪装健康。
         - ``generators`` 只探针目录本身可确定性快照(装配健康), 空表仍为
-          ``"ok"``; 空表不可用语义在选择时表达(``get``/``resolve`` 抛
-          ``ComputationUnavailableError``), 不污染就绪状态。
+          ``"ok"``; 未注册引用不可用语义在选择时表达(``get``/``resolve``
+          抛 ``ComputationUnavailableError``), 不污染就绪状态。
         探针失败原因只进日志, 不进入返回值(避免内部细节外泄)。
         """
         result: dict[str, str] = {}
@@ -137,7 +138,7 @@ def _check_registry(registry: Any) -> bool:
 def _check_generator_registry(registry: Any) -> bool:
     """生成器目录装配检查: 已发布目录可给出确定性快照。
 
-    只验证目录本身装配健康；空表仍健康，空表不可用语义由选择时
+    只验证目录本身装配健康；空表仍健康，未注册引用不可用语义由选择时
     ``ComputationUnavailableError`` 表达，不在此污染就绪状态。
     """
     try:
@@ -238,13 +239,16 @@ def _assemble(
         from iesplan.devices import init_registry
 
         device_registry = init_registry()
-    # 5. 生成器目录(原子发布; 当前尚无真实 provider 实现, 显式装配空表,
-    #    不做任何动态发现或扫描, 选择时即明确不可用)
+    # 5. 生成器目录(原子发布; 显式注册内置真实 provider, 不做任何
+    #    动态发现或扫描; 任一候选不符即整体失败, 不发布半表)
     generator_registry: Any | None = None
     if with_generators:
-        from iesplan.computation.generators import build_registry
+        from iesplan.computation.generators import (
+            HIGHS_MILP_PROVIDER,
+            build_registry,
+        )
 
-        generator_registry = build_registry(())
+        generator_registry = build_registry((HIGHS_MILP_PROVIDER,))
     context = ApplicationContext(
         session_factory=db_module.SessionLocal,
         storage=storage,
@@ -274,18 +278,22 @@ def assemble_api() -> ApplicationContext:
 
 
 def assemble_compute_worker() -> Never:
-    """装配计算 Worker：显式构建生成器目录；空表即明确拒绝启动。
+    """装配计算 Worker：显式构建生成器目录(含内置真实 provider)。
 
-    真实 provider 随 0.8 后续切片由组合根装配；当前目录为空，直接拒绝，
-    避免领取后再失败。
+    计算执行编排属于 0.9：即使目录已含真实 provider，本轮仍明确拒绝
+    启动，不启动 solver，避免领取后再失败。
     """
     from iesplan.computation import ComputationUnavailableError
-    from iesplan.computation.generators import build_registry
+    from iesplan.computation.generators import (
+        HIGHS_MILP_PROVIDER,
+        build_registry,
+    )
 
-    generators = build_registry(())
-    if len(generators) > 0:
-        pass  # 后续切片: 已发布非空目录后在此接线 Worker 上下文
-    raise ComputationUnavailableError(reason="no-provider")
+    build_registry((HIGHS_MILP_PROVIDER,))
+    raise ComputationUnavailableError(
+        "计算 Worker 执行编排属于 0.9，本轮不启动 solver，拒绝启动",
+        reason="worker-not-wired",
+    )
 
 
 def assemble_io_worker() -> ApplicationContext:

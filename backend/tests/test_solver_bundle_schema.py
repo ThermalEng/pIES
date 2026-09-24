@@ -1,19 +1,21 @@
-"""Solver Bundle 契约测试(0.8 切片 B 修正版)。
+"""Solver Bundle 契约测试(0.8 切片 B/C)。
 
-字段唯一依据 ``formats/solver-bundle.md`` 的 manifest，不增删：
-schema/schema_version、bundle{generator, solver}、
+manifest 载体为 ``SolverBundleManifest``（完整聚合为 ``SolverBundle``，
+见 provider 测试）；字段唯一依据 ``formats/solver-bundle.md`` 的
+manifest，不增删：schema/schema_version、bundle{generator, solver}、
 inputs[{path, media_type}]、command、
 outputs[{path, media_type, required}]、result_adapter、extensions。
-只覆盖公开 schema、规范化与校验边界，不涉及真实 generator、
-solver 执行或结果适配：
+只覆盖公开 schema、规范化、校验与规范字节导出边界，不涉及真实
+generator、solver 执行或结果适配：
 
 - schema 文件元信息：$id/标题/必需键/结构化命令/未知字段拒绝，
   且 schema 内无任何 hash/摘要/完整性字段；
-- 发布样例：合法通过并构造 frozen 载体；6 个非法样例各只违一条，
-  逐个被拒绝；
+- 发布样例：合法通过并构造 frozen manifest 载体；6 个非法样例各只违
+  一条，逐个被拒绝；
 - 规范化：键乱序得同一规范形式，序列顺序保持；
 - 引用绑定：descriptor/config 一致通过，不一致（生成器/求解器/
-  适配器）即拒绝，不回退。
+  适配器）即拒绝，不回退；
+- 规范字节：同一 manifest 恒得同一 bundle.yaml 字节，字段顺序固定。
 """
 
 from __future__ import annotations
@@ -29,8 +31,9 @@ from iesplan.computation import (
     SOLVER_BUNDLE_VERSION,
     CalculationConfig,
     GeneratorDescriptor,
-    SolverBundle,
+    SolverBundleManifest,
     load_bundle_schema,
+    manifest_to_yaml_bytes,
     normalize_bundle,
     validate_bundle,
 )
@@ -115,9 +118,9 @@ def test_schema_file_meta() -> None:
 
 
 def test_valid_sample_builds_frozen_bundle() -> None:
-    """合法样例通过校验并构造深层不可变载体；字段与 manifest 一一对应。"""
+    """合法样例通过校验并构造深层不可变 manifest 载体；字段一一对应。"""
     bundle = validate_bundle(_load(VALID))
-    assert isinstance(bundle, SolverBundle)
+    assert isinstance(bundle, SolverBundleManifest)
     assert bundle.bundle["generator"] == GENERATOR
     assert bundle.bundle["solver"] == SOLVER
     assert bundle.inputs[0]["media_type"] == "application/mps"
@@ -158,6 +161,34 @@ def test_normalize_is_order_insensitive() -> None:
         normalize_bundle({"inputs": [{"path": "a", "content": b"bytes"}]})
     with pytest.raises(TypeError):
         validate_bundle([("schema", SOLVER_BUNDLE_SCHEMA)])  # type: ignore[arg-type]
+
+
+def test_manifest_yaml_bytes_are_canonical() -> None:
+    """规范字节：固定字段顺序、末尾换行；同一 manifest 恒得同一字节。"""
+    bundle = validate_bundle(_load(VALID))
+    first = manifest_to_yaml_bytes(bundle)
+    assert manifest_to_yaml_bytes(bundle) == first
+    assert first.endswith(b"\n")
+    text = first.decode("utf-8")
+    lines = text.splitlines()
+    assert lines[0] == "schema: ies.solver-bundle"
+    assert lines[1] == 'schema_version: "1.0.0"'
+
+    def at(prefix: str) -> int:
+        return next(i for i, line in enumerate(lines) if line.startswith(prefix))
+
+    order = [at(prefix) for prefix in (
+        "schema:", "bundle:", "inputs:", "command:", "outputs:",
+        "result_adapter:", "extensions:",
+    )]
+    assert order == sorted(order)
+    assert "extensions: {}" in lines
+    assert "    - input/problem.mps" in lines
+    assert '    - "--solution_file"' in lines
+    assert "    path: input/problem.mps" in lines
+    assert '    OMP_NUM_THREADS: "4"' in lines
+    with pytest.raises(TypeError):
+        manifest_to_yaml_bytes({"schema": "ies.solver-bundle"})  # type: ignore[arg-type]
 
 
 def test_binding_against_descriptor_and_config() -> None:

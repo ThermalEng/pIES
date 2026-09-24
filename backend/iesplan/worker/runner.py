@@ -79,8 +79,9 @@ def dispatch(
     未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
     未知任务类型抛 InvalidTaskTypeError。计算类任务只按 application.worker
     计算阶段网关结果驱动: 任务/快照记录缺失即确定性失败, 不解释任何输入
-    字段。计算能力尚未实现时明确 unavailable；生产计算 Worker 会在组合根
-    阶段拒绝启动，因此不会领取后再走到这里。
+    字段。计算执行编排属于 0.9：即使生成器目录已含真实 provider，此处也
+    不启动 solver，明确 unavailable；生产计算 Worker 会在组合根阶段拒绝
+    启动，因此不会领取后再走到这里。
     """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:

@@ -1,12 +1,14 @@
-"""生成器目录契约测试(0.8 切片 A)。
+"""生成器目录契约测试(0.8 切片 A/C)。
 
-只覆盖公开 descriptor 与原子注册表，不涉及真实 generator 实现：
+覆盖公开 descriptor 与注册真实 provider 实例的原子注册表：
 
 - descriptor 字段校验：非法 ref 形态/版本、空能力条目、非法 adapter
   ref 即拒绝；``ref`` 为 ``<稳定ID>@<语义化版本>`` 唯一身份；
-- 原子发布：重复引用、非 descriptor 候选即整体拒绝，不发布部分表；
+- 原子发布：重复引用、非 provider 候选即整体拒绝，不发布部分表；
 - 选择语义：空表/未知引用统一 ``ComputationUnavailableError``；
   solver 不兼容不回退到另一生成器；
+- resolve 返回真实可调用 provider；快照与 to_dict 只公开 descriptor
+  数据；
 - 快照确定性：按稳定 ID 排序；``to_dict`` 为独立副本。
 """
 
@@ -18,6 +20,7 @@ from iesplan.computation import (
     CalculationConfig,
     ComputationUnavailableError,
     GeneratorDescriptor,
+    GeneratorProvider,
     GeneratorRegistry,
     build_registry,
     check_provider_ref,
@@ -74,6 +77,32 @@ def _config(**kwargs) -> CalculationConfig:
     kwargs.setdefault("time_limit_seconds", 600)
     kwargs.setdefault("outputs", ["solution"])
     return CalculationConfig(**kwargs)
+
+
+class _FakeProvider:
+    """注册表测试替身：符合协议的最小真实形状（引用/描述符/可用性）。"""
+
+    def __init__(self, descriptor: GeneratorDescriptor, available: bool = True):
+        self._descriptor = descriptor
+        self._available = available
+
+    @property
+    def ref(self) -> str:
+        return self._descriptor.ref
+
+    @property
+    def descriptor(self) -> GeneratorDescriptor:
+        return self._descriptor
+
+    def available(self) -> bool:
+        return self._available
+
+    def generate(self, artifact, models, series, finance, config):
+        raise AssertionError("注册表测试替身不应被调用")
+
+
+def _provider(**kwargs) -> _FakeProvider:
+    return _FakeProvider(_descriptor(**kwargs))
 
 
 def test_descriptor_ref_and_solver_support() -> None:
@@ -184,11 +213,11 @@ def test_descriptor_rejects_missing_required_trio() -> None:
 
 
 def test_build_registry_is_atomic() -> None:
-    """重复引用/非候选即整体拒绝；空候选发布空表。"""
+    """重复引用/非 provider 候选即整体拒绝；空候选发布空表。"""
     with pytest.raises(ValueError, match="重复注册"):
-        build_registry([_descriptor(), _descriptor()])
-    with pytest.raises(TypeError, match="GeneratorDescriptor"):
-        build_registry([_descriptor(), object()])  # type: ignore[list-item]
+        build_registry([_provider(), _provider()])
+    with pytest.raises(TypeError, match="GeneratorProvider"):
+        build_registry([_provider(), object()])  # type: ignore[list-item]
     empty = build_registry(())
     assert len(empty) == 0
     assert empty.snapshot() == ()
@@ -204,9 +233,24 @@ def test_empty_or_unknown_generator_is_unavailable() -> None:
         empty.resolve(_config())
 
 
+def test_resolve_returns_callable_provider() -> None:
+    """resolve 返回真实可调用 provider；快照/to_dict 只公开描述符数据。"""
+    provider = _provider()
+    registry = build_registry([provider])
+    resolved = registry.resolve(_config())
+    assert resolved is provider
+    assert isinstance(resolved, GeneratorProvider)
+    assert resolved.ref == GENERATOR
+    assert resolved.descriptor.ref == GENERATOR
+    assert callable(resolved.generate)
+    assert registry.get(GENERATOR) is provider
+    assert [d.ref for d in registry.snapshot()] == [GENERATOR]
+    assert registry.to_dict()["generators"][0]["generator_id"] == "acme.generator"
+
+
 def test_resolve_checks_solver_compatibility() -> None:
     """选中 provider 后 solver 不兼容即失败，不换另一生成器。"""
-    registry = build_registry([_descriptor()])
+    registry = build_registry([_provider()])
     assert registry.resolve(_config()).ref == GENERATOR
     bad_solver = _config(solver="other.solver@9.9.9")
     with pytest.raises(ComputationUnavailableError) as exc_info:
@@ -216,11 +260,11 @@ def test_resolve_checks_solver_compatibility() -> None:
 
 def test_resolve_checks_mode_and_precision() -> None:
     """mode/精度不在 descriptor 能力内即明确不可用，不回退。"""
-    registry = build_registry([_descriptor()])
+    registry = build_registry([_provider()])
     with pytest.raises(ComputationUnavailableError) as exc_info:
         registry.resolve(_config(mode="evaluation"))
     assert exc_info.value.reason == "incompatible-mode"
-    narrow = build_registry([_descriptor(precisions=("low",))])
+    narrow = build_registry([_provider(precisions=("low",))])
     with pytest.raises(ComputationUnavailableError) as exc_info:
         narrow.resolve(_config(precision="medium"))
     assert exc_info.value.reason == "incompatible-precision"
@@ -252,13 +296,13 @@ def test_no_options_schema_explicit() -> None:
     """无选项用显式完整 schema；空 options 通过门禁。"""
     desc = _descriptor(options_schema=dict(_NO_OPTIONS_SCHEMA))
     assert desc.to_dict()["options_schema"]["additionalProperties"] is False
-    registry = build_registry([desc])
+    registry = build_registry([_FakeProvider(desc)])
     assert registry.resolve(_config(options={})).ref == GENERATOR
 
 
 def test_schema_default_never_written_back() -> None:
     """schema 内 default 只作描述：空对象通过后仍为空对象。"""
-    registry = build_registry([_descriptor()])
+    registry = build_registry([_provider()])
     config = _config(options={})
     assert registry.resolve(config).ref == GENERATOR
     assert config.options == {}
@@ -267,7 +311,7 @@ def test_schema_default_never_written_back() -> None:
 
 def test_resolve_options_gate() -> None:
     """合法 options 通过；未知键/类型/范围错误抛 ValueError，不回退。"""
-    registry = build_registry([_descriptor()])
+    registry = build_registry([_provider()])
     assert registry.resolve(_config(options={"gap_rel": 0.01})).ref == GENERATOR
     with pytest.raises(ValueError) as exc_info:
         registry.resolve(_config(options={"unknown_opt": 1}))
@@ -290,7 +334,7 @@ def test_invalid_options_not_unavailable_and_no_fallback() -> None:
         precisions=("medium",),
         result_adapter="other.adapter@1.0.0",
     )
-    registry = build_registry([first, second])
+    registry = build_registry([_FakeProvider(first), _FakeProvider(second)])
     with pytest.raises(ValueError):
         registry.resolve(_config(options={"unknown_opt": 1}))
     assert len(registry) == 2
@@ -313,8 +357,8 @@ def test_descriptor_requires_modes_and_precisions() -> None:
 def test_snapshot_is_deterministic_and_dump_is_copy() -> None:
     """快照按稳定 ID 排序；to_dict 为独立副本。"""
     registry = build_registry([
-        _descriptor(generator_id="zeta.generator", solvers=("zeta.solver@1.0.0",)),
-        _descriptor(generator_id="acme.generator", solvers=(SOLVER,)),
+        _provider(generator_id="zeta.generator", solvers=("zeta.solver@1.0.0",)),
+        _provider(generator_id="acme.generator", solvers=(SOLVER,)),
     ])
     assert [d.generator_id for d in registry.snapshot()] == [
         "acme.generator", "zeta.generator",
@@ -329,7 +373,7 @@ def test_snapshot_is_deterministic_and_dump_is_copy() -> None:
 
 def test_registry_instances_hold_no_global_state() -> None:
     """注册表实例级持有：两次构建互不影响，无模块全局发布状态。"""
-    first = build_registry([_descriptor()])
+    first = build_registry([_provider()])
     second = build_registry(())
     assert len(first) == 1
     assert len(second) == 0

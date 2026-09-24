@@ -1,4 +1,4 @@
-"""计算边界协议(0.8 延期: 只定义真实边界, 无任何算法实现)。
+"""计算边界协议(0.8: 真实边界形状与不可变交接载体)。
 
 三段式真实边界(宪法 §4.5):
 
@@ -98,20 +98,22 @@ def check_provider_ref(value: object, name: str) -> str:
 
 @runtime_checkable
 class GeneratorProvider(Protocol):
-    """方案生成能力(0.8 未实现: 仅形状, 无实现)。
+    """方案生成能力(首个真实实现见 ``generators.highs_milp``)。
 
     纯转换: 直接消费五项已可信输入, 不得连接数据库/对象服务/网络,
     不得启动求解器, 不得读环境变量, 不得修改项目或任务状态; 不得为
     五项输入再建包装层。同一五项输入与生成器版本必须产生相同输入字节。
+    公开 ``descriptor``(``GeneratorDescriptor`` 类型在 generators 包内
+    定义, 此处只按形状引用, 避免循环导入)。
     """
 
     @property
     def ref(self) -> str:
-        """生成器精确引用(``<generator_id>@<version>`` 形态)。"""
+        """生成器精确引用(``<generator_id>@<version>`` 形态，与描述符单一来源)。"""
         ...
 
     def available(self) -> bool:
-        """该 provider 当前是否可用(无实现时恒为 False 语义)。"""
+        """该 provider 当前是否可用(纯内存实现恒为 True 语义)。"""
         ...
 
     def generate(
@@ -122,11 +124,13 @@ class GeneratorProvider(Protocol):
         finance: EffectiveFinanceConfig,
         config: CalculationConfig,
     ) -> SolverBundle:
-        """由五项直接输入生成求解包。
+        """由五项直接输入生成完整求解包(聚合：manifest + 输入文件字节)。
 
         调用方只传入已签发 artifact; provider 信任上游装配与应用边界
-        已完成的签发与内容确认, 不复核。无可用实现时抛
-        ``ComputationUnavailableError``。
+        已完成的签发与内容确认, 不复核。能力不匹配时抛
+        ``ComputationUnavailableError``(不可用/不兼容)或 ``ValueError``
+        (用户计算请求错误); 数学超出降级能力时抛 lowerer 的明确不支持
+        错误。不写临时目录，不返回并列结构。
         """
         ...
 
@@ -490,10 +494,11 @@ def _freeze_command(command: object) -> Mapping[str, object]:
 
 
 @dataclass(frozen=True, slots=True)
-class SolverBundle:
-    """一次求解的可执行不可变交接包(生产者 GeneratorProvider)。
+class SolverBundleManifest:
+    """求解交接包的 manifest 载体(bundle.yaml 内容，生产者 GeneratorProvider)。
 
-    字段与 ``formats/solver-bundle.md`` 的 manifest 一一对应，不增删：
+    只携带 manifest 本体，不携带文件字节；完整可执行包见 ``SolverBundle``
+    聚合。字段与 ``formats/solver-bundle.md`` 的 manifest 一一对应，不增删：
     ``bundle{generator, solver}`` 追溯所选精确引用；
     ``inputs[{path, media_type}]`` 声明只读输入文件；
     ``command`` 为结构化命令数据(执行器/可执行文件 ID、逐参数字符串、
@@ -551,6 +556,44 @@ class SolverBundle:
             "result_adapter": self.result_adapter,
             "extensions": thaw_json_value(self.extensions),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class SolverBundle:
+    """一次求解的完整不可变交接聚合(生产者 GeneratorProvider)。
+
+    唯一完整形态：``manifest`` + 按 Bundle 规范相对路径索引的只读
+    ``files`` 字节映射。``manifest.inputs`` 声明的路径与 ``files`` 的键
+    必须恰好对应(同集合)；``outputs`` 只是运行时可写声明，不在生成包中
+    预建内容。跨越边界后整体不可变(映射只读，字节不可变)。
+    """
+
+    manifest: SolverBundleManifest
+    files: Mapping[str, bytes] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.manifest, SolverBundleManifest):
+            raise TypeError(
+                "manifest 须为 SolverBundleManifest，"
+                f"得到 {type(self.manifest).__name__}"
+            )
+        if not isinstance(self.files, Mapping):
+            raise TypeError(
+                f"files 须为路径到字节的 Mapping，得到 {type(self.files).__name__}"
+            )
+        for path, content in self.files.items():
+            _check_relative_path(path, "files")
+            if not isinstance(content, bytes):
+                raise TypeError(f"files[{path!r}] 须为 bytes，得到 {type(content).__name__}")
+        declared = {entry["path"] for entry in self.manifest.inputs}
+        if set(self.files) != declared:
+            raise ValueError(
+                "manifest.inputs 与 files 必须恰好对应: "
+                f"清单 {sorted(declared)!r} x 文件 {sorted(self.files)!r}"
+            )
+        object.__setattr__(
+            self, "files", MappingProxyType(dict(sorted(self.files.items())))
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -646,6 +689,7 @@ __all__ = [
     "check_provider_ref",
     "ResultAdapter",
     "SolverBundle",
+    "SolverBundleManifest",
     "SolverRuntime",
     "freeze_json_value",
     "thaw_json_value",

@@ -1,7 +1,12 @@
-"""GeneratorProvider 独立原子注册表(0.8 切片 A)。
+"""GeneratorProvider 独立原子注册表(0.8 切片 A/C)。
 
-- 候选 descriptor 必须完整构建并全部校验通过后一次性发布；任一候选
-  非法(重复 ID、坏版本、字段非法)即整体拒绝，不发布部分状态；
+- 注册表注册真实 provider 实例，不只是 descriptor；目录快照与
+  ``to_dict`` 仍只公开 descriptor 数据；
+- 候选 provider 必须完整构建并全部校验通过后一次性发布；任一候选
+  协议不符、重复 ref、descriptor/ref 不一致或不可用即整体拒绝，
+  不发布部分状态；
+- ``resolve(config)`` 完成 descriptor 能力/option 门禁后返回可调用
+  provider；
 - 注册表实例由 bootstrap 组合根持有并发布；API/Worker 不得自行发现
   或动态加载 provider，只消费组合根给定的已发布实例；
 - 无可用 provider（空表或引用未知）统一抛
@@ -17,7 +22,11 @@ from jsonschema import Draft202012Validator
 
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
-from iesplan.computation.protocols import CalculationConfig, thaw_json_value
+from iesplan.computation.protocols import (
+    CalculationConfig,
+    GeneratorProvider,
+    thaw_json_value,
+)
 
 
 class GeneratorRegistry:
@@ -25,18 +34,21 @@ class GeneratorRegistry:
 
     __slots__ = ("_providers",)
 
-    def __init__(self, providers: Mapping[str, GeneratorDescriptor]) -> None:
+    def __init__(self, providers: Mapping[str, GeneratorProvider]) -> None:
         self._providers = dict(providers)
 
     def __len__(self) -> int:
         return len(self._providers)
 
     def snapshot(self) -> tuple[GeneratorDescriptor, ...]:
-        """确定性快照（按稳定 ID 排序，供组合根健康探针与审计使用）。"""
-        return tuple(self._providers[key] for key in sorted(self._providers))
+        """确定性快照（按稳定 ID 排序，只公开 descriptor 数据，供组合根
+        健康探针与审计使用）。"""
+        return tuple(
+            self._providers[key].descriptor for key in sorted(self._providers)
+        )
 
-    def get(self, ref: str) -> GeneratorDescriptor:
-        """按精确引用取 provider；未知引用即明确不可用。"""
+    def get(self, ref: str) -> GeneratorProvider:
+        """按精确引用取真实 provider；未知引用即明确不可用。"""
         try:
             return self._providers[ref]
         except KeyError:
@@ -44,8 +56,8 @@ class GeneratorRegistry:
                 f"生成器不可用（未注册）: {ref!r}", reason="no-provider"
             ) from None
 
-    def resolve(self, config: CalculationConfig) -> GeneratorDescriptor:
-        """按计算配置选中 provider 并完成生成前门禁。
+    def resolve(self, config: CalculationConfig) -> GeneratorProvider:
+        """按计算配置选中真实 provider 并完成生成前门禁。
 
         1. 精确引用选中 provider；未知即 ``ComputationUnavailableError``；
         2. 核对 mode/精度/solver 兼容性，不兼容即 ``ComputationUnavailableError``；
@@ -53,8 +65,10 @@ class GeneratorRegistry:
            非法选项属于用户计算配置错误，抛明确 ``ValueError``（字段路径/
            原因），不是不可用；不回退其他 generator，不删字段、不补默认、
            不忽略未知项（schema 内 ``default`` 只作描述）。
+        返回可直接调用 ``generate`` 的 provider 实例。
         """
-        descriptor = self.get(config.generator)
+        provider = self.get(config.generator)
+        descriptor = provider.descriptor
         if config.mode not in descriptor.modes:
             raise ComputationUnavailableError(
                 f"生成器不支持所选 mode: {config.generator!r} x {config.mode!r}",
@@ -71,26 +85,44 @@ class GeneratorRegistry:
                 reason="incompatible-solver",
             )
         _check_options(descriptor, config)
-        return descriptor
+        return provider
 
     def to_dict(self) -> dict[str, Any]:
-        """序列化为 JSON 兼容独立副本（能力目录公布，不含实现）。"""
+        """序列化为 JSON 兼容独立副本（能力目录公布，只含 descriptor
+        数据，不含实现）。"""
         return {"generators": [d.to_dict() for d in self.snapshot()]}
 
 
-def build_registry(candidates: Iterable[GeneratorDescriptor]) -> GeneratorRegistry:
+def build_registry(candidates: Iterable[GeneratorProvider]) -> GeneratorRegistry:
     """原子构建并发布生成器目录。
 
-    全部候选先校验（类型、ID 唯一、版本形态由 descriptor 自身保证，
-    此处只查重复引用）再一次性发布；任一重复即整体拒绝，不发布部分表。
-    空候选集发布空表（当前尚无真实 provider 实现，选择时即不可用）。
+    全部候选先校验再一次性发布：须符合 ``GeneratorProvider`` 协议、
+    公开 ``GeneratorDescriptor`` 且 ``ref`` 与描述符引用单一来源一致、
+    当前可用、引用唯一；任一候选不符即整体拒绝，不发布部分表。
+    空候选集发布空表（选择时即明确不可用）。
     """
-    providers: dict[str, GeneratorDescriptor] = {}
+    providers: dict[str, GeneratorProvider] = {}
     for candidate in candidates:
-        if not isinstance(candidate, GeneratorDescriptor):
+        if not isinstance(candidate, GeneratorProvider):
             raise TypeError(
-                "生成器候选须为 GeneratorDescriptor, "
+                "生成器候选须符合 GeneratorProvider 协议，"
                 f"得到 {type(candidate).__name__}"
+            )
+        descriptor = getattr(candidate, "descriptor", None)
+        if not isinstance(descriptor, GeneratorDescriptor):
+            raise TypeError(
+                "生成器候选须公开 GeneratorDescriptor，"
+                f"得到 {type(descriptor).__name__}"
+            )
+        if candidate.ref != descriptor.ref:
+            raise ValueError(
+                "生成器 ref 与描述符引用不一致: "
+                f"{candidate.ref!r} x {descriptor.ref!r}"
+            )
+        if not candidate.available():
+            raise ComputationUnavailableError(
+                f"生成器候选当前不可用: {candidate.ref!r}",
+                reason="no-provider",
             )
         if candidate.ref in providers:
             raise ValueError(f"生成器重复注册: {candidate.ref!r}")

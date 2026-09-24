@@ -6,8 +6,9 @@
   不完整实现的结构判定; 三协议用各自独立的最小替身验证(不用一个
   同时实现三协议的假对象证明错误形状);
 - 宪法 §4.5 方法形状: generate 消费装配产物/设备数学贡献/物化序列/
-  有效财务快照/公开配置五项直接输入产出 Bundle; run 消费 Bundle 产出
-  回执与原始输出; adapt 消费三件套产出统一结果;
+  有效财务快照/公开配置五项直接输入产出完整 Bundle 聚合(manifest +
+  文件字节); run 消费 Bundle 产出回执与原始输出; adapt 消费三件套产出
+  统一结果; manifest 载体为 ``SolverBundleManifest``;
 - unavailable 错误语义: ``ComputationUnavailableError`` 为
   ``RuntimeError``, 默认 reason 为 ``"no-provider"``;
 - 计算配置: ``CalculationConfig`` 固定 generator/solver 精确引用、种子、
@@ -43,6 +44,7 @@ from iesplan.computation import (
     MaterializedSeries,
     ResultAdapter,
     SolverBundle,
+    SolverBundleManifest,
     SolverRuntime,
     get_algorithm,
     list_algorithms,
@@ -81,8 +83,8 @@ def _config(**kwargs) -> CalculationConfig:
     return CalculationConfig(**kwargs)
 
 
-def _bundle() -> SolverBundle:
-    return SolverBundle(
+def _manifest() -> SolverBundleManifest:
+    return SolverBundleManifest(
         bundle={
             "generator": "acme.generator@1.0.0",
             "solver": "ies.solver.highs@1.7.2",
@@ -228,17 +230,17 @@ def test_unavailable_error_semantics() -> None:
     with pytest.raises(ComputationUnavailableError):
         gen.generate(_artifact(), {}, (), _finance(), config)
     with pytest.raises(ComputationUnavailableError):
-        runtime.run(_bundle())
+        runtime.run(_manifest())
     receipt = ExecutionReceipt(
         bundle_id="bundle-1", generator_ref="g", solver_ref="s", status="failed",
     )
     with pytest.raises(ComputationUnavailableError):
-        adapter.adapt(_bundle(), receipt, {})
+        adapter.adapt(_manifest(), receipt, {})
 
 
 def test_bundles_are_deeply_immutable_value_objects() -> None:
     """Bundle/回执/结果/配置深层不可变(顶层赋值与嵌套改写一律失败)。"""
-    bundle = _bundle()
+    manifest = _manifest()
     result = ComputeResult(
         bundle_id="bundle-1", status="succeeded",
         business_outcome="normal_completion", outputs={"k": {"nested": [1]}},
@@ -249,34 +251,34 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
         bundle_id="bundle-1", generator_ref="g", solver_ref="s",
         status="succeeded", exit_code=0, detail={"stdout": "ok"},
     )
-    for obj in (bundle, result, config, receipt):
+    for obj in (manifest, result, config, receipt):
         assert dataclasses.is_dataclass(obj)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        bundle.result_adapter = "other"  # type: ignore[misc]
+        manifest.result_adapter = "other"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.status = "failed"  # type: ignore[misc]
     # 嵌套容器只读(映射不可写, 序列不可改, 条目不可写)
     with pytest.raises(TypeError):
-        bundle.inputs[0] = {}  # type: ignore[index]
+        manifest.inputs[0] = {}  # type: ignore[index]
     with pytest.raises(TypeError):
-        bundle.inputs[0]["path"] = "x"  # type: ignore[index]
+        manifest.inputs[0]["path"] = "x"  # type: ignore[index]
     with pytest.raises(TypeError):
-        bundle.command["executor"] = "sh -c"  # type: ignore[index]
+        manifest.command["executor"] = "sh -c"  # type: ignore[index]
     with pytest.raises(TypeError):
         result.outputs["k"] = {}  # type: ignore[index]
     with pytest.raises(TypeError):
         config.options["gap"] = 0.5  # type: ignore[index]
     with pytest.raises(TypeError):
         receipt.detail["stdout"] = "x"  # type: ignore[index]
-    assert isinstance(bundle.inputs, tuple)
-    assert isinstance(bundle.bundle, MappingProxyType)
+    assert isinstance(manifest.inputs, tuple)
+    assert isinstance(manifest.bundle, MappingProxyType)
     assert isinstance(result.outputs, MappingProxyType)
 
 
 def test_carriers_ignore_later_caller_mutation() -> None:
     """构造后调用方改写原始结构不影响已冻结载体; to_dict 返回独立副本。"""
     raw_entries = [{"path": "input/a.mps", "media_type": "application/mps"}]
-    bundle = SolverBundle(
+    manifest = SolverBundleManifest(
         bundle={"generator": _GENERATOR, "solver": _SOLVER},
         inputs=raw_entries,
         command={"executor": "e@1.0.0", "executable": "s@1.0.0", "arguments": ["a"]},
@@ -285,23 +287,23 @@ def test_carriers_ignore_later_caller_mutation() -> None:
     )
     raw_entries[0]["path"] = "input/evil.mps"
     raw_entries.append({"path": "input/b.mps", "media_type": "application/mps"})
-    assert bundle.to_dict()["inputs"] == [
+    assert manifest.to_dict()["inputs"] == [
         {"path": "input/a.mps", "media_type": "application/mps"}
     ]
-    assert isinstance(bundle.outputs, tuple)
-    dumped = bundle.to_dict()
+    assert isinstance(manifest.outputs, tuple)
+    dumped = manifest.to_dict()
     dumped["inputs"][0]["path"] = "x"
     dumped["outputs"].clear()
-    assert bundle.to_dict()["inputs"] == [
+    assert manifest.to_dict()["inputs"] == [
         {"path": "input/a.mps", "media_type": "application/mps"}
     ]
-    assert len(bundle.to_dict()["outputs"]) == 1
+    assert len(manifest.to_dict()["outputs"]) == 1
 
 
 def test_bundle_rejects_shell_command_and_escaping_paths() -> None:
     """Bundle 只接受结构化命令与 Bundle 内相对路径。"""
     with pytest.raises(TypeError):
-        SolverBundle(
+        SolverBundleManifest(
             bundle={"generator": _GENERATOR, "solver": _SOLVER},
             inputs=[{"path": "input/a.mps", "media_type": "application/mps"}],
             command="solver input.mps",  # type: ignore[arg-type]
@@ -309,7 +311,7 @@ def test_bundle_rejects_shell_command_and_escaping_paths() -> None:
             result_adapter="r@1.0.0",
         )
     with pytest.raises(ValueError, match="越界"):
-        SolverBundle(
+        SolverBundleManifest(
             bundle={"generator": _GENERATOR, "solver": _SOLVER},
             inputs=[{"path": "input/a.mps", "media_type": "application/mps"}],
             command={"executor": "e@1.0.0", "executable": "s@1.0.0", "arguments": ["a"]},
@@ -374,8 +376,8 @@ def test_registry_facade_from_computation() -> None:
 
 def test_result_and_bundle_schema_words() -> None:
     """结果/Bundle 字头为公开 schema, 非法字头即拒绝。"""
-    assert _bundle().schema == SOLVER_BUNDLE_SCHEMA
-    assert _bundle().schema_version == SOLVER_BUNDLE_VERSION
+    assert _manifest().schema == SOLVER_BUNDLE_SCHEMA
+    assert _manifest().schema_version == SOLVER_BUNDLE_VERSION
     result = ComputeResult(
         bundle_id="b", status="succeeded", business_outcome="normal_completion",
     )

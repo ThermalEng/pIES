@@ -1,12 +1,16 @@
-"""GeneratorProvider 独立注册(0.8 切片 A)。
+"""GeneratorProvider 独立注册(0.8 切片 A/C)。
 
-只声明公开 descriptor 形状与原子注册表，不实现任何真实 generator。
+公开 descriptor 形状、首个真实 provider(``highs_milp``)与原子注册表。
 provider 选择与装配只归 bootstrap 组合根；API/Worker 不得自行发现或
 动态加载 provider。无可用 provider 时统一抛
 ``ComputationUnavailableError``。
 """
 
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
+from iesplan.computation.generators.highs_milp import (
+    HIGHS_MILP_PROVIDER,
+    HighsMilpProvider,
+)
 from iesplan.computation.generators.linear import (
     LinearConstraint,
     LinearExpression,
@@ -27,8 +31,10 @@ from iesplan.computation.generators.registry import (
 )
 
 __all__ = [
+    "HIGHS_MILP_PROVIDER",
     "GeneratorDescriptor",
     "GeneratorRegistry",
+    "HighsMilpProvider",
     "LoweredRelation",
     "LoweringUnsupportedError",
     "LinearConstraint",
