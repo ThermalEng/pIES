@@ -1,13 +1,14 @@
 """computation 边界契约测试。
 
-只覆盖真实边界, 不涉及任何 0.8 算法实现:
+只覆盖真实边界:
 
 - Protocol 形状: 三个边界协议为运行时可检查的 Protocol, 且拒绝
   不完整实现的结构判定; 三协议用各自独立的最小替身验证(不用一个
   同时实现三协议的假对象证明错误形状);
 - 宪法 §4.5 方法形状: generate 消费装配产物/设备数学贡献/物化序列/
   有效财务快照/公开配置五项直接输入产出完整 Bundle 聚合(manifest +
-  文件字节); adapt 消费三件套产出统一结果; manifest 载体为
+  文件字节); execute 消费结构化命令与运行目录产出最小过程结果;
+  adapt 消费三件套产出统一结果; manifest 载体为
   ``SolverBundleManifest``; 回执载体为 ``ExecutionReceipt``;
 - unavailable 错误语义: ``ComputationUnavailableError`` 为
   ``RuntimeError``, 默认 reason 为 ``"no-provider"``, 默认消息为
@@ -48,6 +49,7 @@ from iesplan.computation import (
     GeneratorDescriptor,
     GeneratorProvider,
     MaterializedSeries,
+    ProcessOutcome,
     ResultAdapter,
     SolverBundle,
     SolverBundleManifest,
@@ -184,6 +186,22 @@ class _GeneratorOnly:
         raise ComputationUnavailableError(reason="no-provider")
 
 
+def _receipt(**kwargs) -> ExecutionReceipt:
+    """最小合法回执(默认补齐身份与引用字段)。"""
+    kwargs.setdefault("receipt_id", "receipt-1")
+    kwargs.setdefault("bundle_id", "bundle-1")
+    kwargs.setdefault("assembly_id", "assembly-1")
+    kwargs.setdefault("calculation_config_id", "config-1")
+    kwargs.setdefault("attempt_id", "attempt-1")
+    kwargs.setdefault("generator_ref", "g")
+    kwargs.setdefault("solver_ref", "s")
+    kwargs.setdefault("executor_ref", "e")
+    kwargs.setdefault("executable_ref", "x")
+    kwargs.setdefault("result_adapter_ref", "r")
+    kwargs.setdefault("status", "succeeded")
+    return ExecutionReceipt(**kwargs)
+
+
 class _ExecutorOnly:
     """仅实现 ExecutorProvider 的最小替身(无任何算法逻辑)。"""
 
@@ -202,6 +220,11 @@ class _ExecutorOnly:
     def available(self) -> bool:
         return False
 
+    def execute(
+        self, command: Mapping[str, object], workdir: str
+    ) -> ProcessOutcome:
+        raise ComputationUnavailableError(reason="no-executor")
+
 
 class _AdapterOnly:
     """仅实现 ResultAdapter 的最小替身(无任何算法逻辑)。"""
@@ -216,17 +239,12 @@ class _AdapterOnly:
 
 
 def test_protocols_are_runtime_checkable_shapes() -> None:
-    """三协议为运行时 Protocol; 各自独立替身只通过自身结构判定。
-
-    执行调用方法移除后，GeneratorProvider 与 ExecutorProvider 在运行时
-    结构检查下共享 descriptor/ref/available 三成员，生成器替身也会通过
-    ExecutorProvider 的结构判定；两者仍以 generate 成员区分，不在此做
-    该方向的跨协议否定断言。
-    """
+    """三协议为运行时 Protocol; 各自独立替身只通过自身结构判定。"""
     gen = _GeneratorOnly()
     exe = _ExecutorOnly()
     adapter = _AdapterOnly()
     assert isinstance(gen, GeneratorProvider)
+    assert not isinstance(gen, ExecutorProvider)
     assert not isinstance(gen, ResultAdapter)
     assert isinstance(exe, ExecutorProvider)
     assert not isinstance(exe, GeneratorProvider)
@@ -241,11 +259,14 @@ def test_protocols_are_runtime_checkable_shapes() -> None:
 
 
 def test_protocol_methods_match_constitution_boundaries() -> None:
-    """宪法 §4.5 方法形状: generate/adapt 的参数与产出符合边界。"""
+    """宪法 §4.5 方法形状: generate/execute/adapt 的参数与产出符合边界。"""
     import inspect
 
     assert list(inspect.signature(GeneratorProvider.generate).parameters) == [
         "self", "artifact", "models", "series", "finance", "config",
+    ]
+    assert list(inspect.signature(ExecutorProvider.execute).parameters) == [
+        "self", "command", "workdir",
     ]
     assert list(inspect.signature(_AdapterOnly.adapt).parameters) == [
         "self", "bundle", "receipt", "outputs",
@@ -266,10 +287,7 @@ def test_unavailable_error_semantics() -> None:
     config = _config(seed=42)
     with pytest.raises(ComputationUnavailableError):
         gen.generate(_artifact(), {}, (), _finance(), config)
-    receipt = ExecutionReceipt(
-        bundle_id="bundle-1", generator_ref="g", solver_ref="s",
-        executor_ref="e", executable_ref="x", status="failed",
-    )
+    receipt = _receipt(status="failed")
     with pytest.raises(ComputationUnavailableError):
         adapter.adapt(_manifest(), receipt, {})
 
@@ -283,10 +301,10 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
     )
     config = _config(seed=7, options={"gap": 0.01, "tags": ["a"]}, outputs=["out"])
     assert config.outputs == ("out",)
-    receipt = ExecutionReceipt(
-        bundle_id="bundle-1", generator_ref="g", solver_ref="s",
-        executor_ref="e", executable_ref="x",
-        status="succeeded", exit_code=0, detail={"stdout": "ok"},
+    receipt = _receipt(
+        status="succeeded", exit_code=0, termination_reason="exited",
+        started_at="2026-09-24T00:00:00Z", ended_at="2026-09-24T00:00:01Z",
+        detail={"stdout": "ok"},
     )
     for obj in (manifest, result, config, receipt):
         assert dataclasses.is_dataclass(obj)
@@ -425,17 +443,10 @@ def test_result_and_bundle_schema_words() -> None:
             schema="ies.other", bundle_id="b", status="s",
             business_outcome="normal_completion",
         )
-    receipt = ExecutionReceipt(
-        bundle_id="b", generator_ref="g", solver_ref="s",
-        executor_ref="e", executable_ref="x", status="succeeded",
-    )
+    receipt = _receipt(bundle_id="b")
     assert receipt.schema == EXECUTION_RECEIPT_SCHEMA
     assert receipt.schema_version == EXECUTION_RECEIPT_VERSION
     assert receipt.to_dict()["schema"] == "ies.execution-receipt"
     assert receipt.to_dict()["schema_version"] == "1.0.0"
     with pytest.raises(ValueError, match="schema"):
-        ExecutionReceipt(
-            schema="ies.other", bundle_id="b", generator_ref="g",
-            solver_ref="s", executor_ref="e", executable_ref="x",
-            status="succeeded",
-        )
+        _receipt(schema="ies.other", bundle_id="b")

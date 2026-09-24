@@ -15,8 +15,7 @@
 反向只在 ResultAdapter 发生; 求解选项在计算包生成时固定。执行层
 不读取装配语义、不判断设备类型、不补数据或切换 solver。
 
-本模块只声明边界形状与不可变数据载体，不实现任何 0.8 算法。当前计算
-Worker 在组合根明确拒绝启动。
+本模块只声明边界形状与不可变数据载体；计算 Worker 在组合根明确拒绝启动。
 
 深度不可变: 所有跨越边界的载体均为 frozen dataclass, 容器字段在构造时
 递归冻结(映射 → ``MappingProxyType``, 序列 → ``tuple``); ``to_dict()``
@@ -29,6 +28,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -149,11 +149,12 @@ class GeneratorProvider(Protocol):
 
 @runtime_checkable
 class ExecutorProvider(Protocol):
-    """受控执行能力公开身份。
+    """受控执行能力公开身份与唯一真实调用。
 
-    只公开精确引用、能力描述符与可用性，供原子注册表精确选择。不签发
-    最终执行回执：回执身份归属执行层，由执行层生成。不解释命令业务，
-    不读取装配语义，不启动 shell。
+    公开精确引用、能力描述符与可用性，供原子注册表精确选择；唯一调用
+    方法 ``execute`` 把已选择的 executable 映射为受控运行方式并返回
+    最小过程结果。不签发最终执行回执：回执身份归属执行层，由执行层
+    生成。不解释命令业务，不读取装配语义，不启动 shell。
     """
 
     @property
@@ -170,10 +171,23 @@ class ExecutorProvider(Protocol):
         """该 provider 当前是否可用。"""
         ...
 
+    def execute(
+        self, command: Mapping[str, object], workdir: str
+    ) -> ProcessOutcome:
+        """在已准备的隔离运行目录中执行结构化命令，返回最小过程结果。
+
+        ``command`` 为 manifest 中的结构化命令（调用前已由执行层完成
+        策略检查）；``workdir`` 为执行层建立的本次调用独立运行目录，
+        输入已只读写入。只把已选择的 executable 映射为受控运行方式，
+        返回实际执行事实；不签发 ``ExecutionReceipt``，不读取装配、
+        配置或任务业务语义。无法建立过程结果的基础设施错误才抛异常。
+        """
+        ...
+
 
 @runtime_checkable
 class ResultAdapter(Protocol):
-    """统一计算结果的声明输出适配(0.8 未实现: 仅形状, 无实现)。
+    """统一计算结果的声明输出适配(仅形状, 无实现)。
 
     只凭只读 Bundle、回执和声明输出解释结果; 不得重新运行求解器、不得
     访问项目草稿、不得按当前最新 provider 改写历史结果。
@@ -603,26 +617,114 @@ class SolverBundle:
         )
 
 
+def _check_timestamp(value: object, name: str) -> str:
+    """校验 ISO 8601 时间戳字符串（可解析，不接受空值与非字符串）。"""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} 须为非空时间戳字符串: {value!r}")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{name} 须为 ISO 8601 时间戳: {value!r}") from None
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessOutcome:
+    """一次受控进程执行的最小实际执行事实（生产者 ExecutorProvider）。
+
+    只含进程真实产生或观测到的事实：退出码/终止信号二者至少其一、
+    终止原因、开始/结束时间（ISO 8601，可解析且开始不晚于结束）、
+    stdout/stderr 原始字节，以及已实施的资源事实映射（本切片无真实
+    资源实施时为空映射，不得伪造）。不含回执身份、业务状态或输出
+    文件字节；输出边界由执行层核对。
+    """
+
+    exit_code: int | None = None
+    signal_number: int | None = None
+    termination_reason: str = ""
+    started_at: str = ""
+    ended_at: str = ""
+    stdout: bytes = b""
+    stderr: bytes = b""
+    resource_usage: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.exit_code is not None and (
+            not isinstance(self.exit_code, int)
+            or isinstance(self.exit_code, bool)
+        ):
+            raise TypeError("exit_code 须为整数或 None（不接受布尔值）")
+        if self.signal_number is not None and (
+            not isinstance(self.signal_number, int)
+            or isinstance(self.signal_number, bool)
+            or self.signal_number < 1
+        ):
+            raise TypeError("signal_number 须为正整数或 None（不接受布尔值）")
+        if self.exit_code is None and self.signal_number is None:
+            raise ValueError("过程结果须含退出码或终止信号至少其一")
+        if not isinstance(self.termination_reason, str) or not self.termination_reason:
+            raise ValueError("termination_reason 须为非空字符串")
+        _check_timestamp(self.started_at, "started_at")
+        _check_timestamp(self.ended_at, "ended_at")
+        if datetime.fromisoformat(self.started_at) > datetime.fromisoformat(
+            self.ended_at
+        ):
+            raise ValueError("started_at 不得晚于 ended_at")
+        if not isinstance(self.stdout, bytes):
+            raise TypeError(
+                f"stdout 须为 bytes，得到 {type(self.stdout).__name__}"
+            )
+        if not isinstance(self.stderr, bytes):
+            raise TypeError(
+                f"stderr 须为 bytes，得到 {type(self.stderr).__name__}"
+            )
+        if not isinstance(self.resource_usage, Mapping):
+            raise TypeError("resource_usage 须为 Mapping")
+        object.__setattr__(
+            self, "resource_usage", freeze_json_value(dict(self.resource_usage))
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionReceipt:
     """求解执行回执(证据, 非可变运行日志索引)。
 
-    记录 Bundle/实现标识（含实际使用的 executor 与 executable 精确引用）、
-    进程协议结果(退出码/终止)与结构化执行状态; ``detail`` 承载
-    stdout/stderr 节选、资源统计等只读执行事实。``success_exit_codes``
-    只表示进程协议成功; 不可行/无界等业务状态由结果适配器读取求解器
-    输出后映射, 不在此猜测。0.9-B 将随真实 runtime 完成剩余执行事实。
+    唯一签发者为执行层。记录回执唯一标识、Bundle/装配/计算配置/
+    attempt 身份、实现标识（含实际使用的 executor 与 executable 精确
+    引用、配套 result adapter 引用）、进程协议结果(退出码/终止信号/
+    原因/起止时间)与结构化执行状态；``stdout``/``stderr`` 为解码文本，
+    ``outputs`` 为已核对的声明输出清单（路径/媒体类型/实际字节数/
+    是否必需），``policy_applied`` 为实际施加的部署策略快照，
+    ``resource_usage`` 为已实施的资源事实（无实施时为空映射）。
+    ``success_exit_codes`` 只表示进程协议成功; 不可行/无界等业务状态
+    由结果适配器读取求解器输出后映射, 不在此猜测。未执行的回执
+    （策略拒绝）起止时间、退出码与终止原因均为空，不伪造。
     """
 
     schema: str = EXECUTION_RECEIPT_SCHEMA
     schema_version: str = EXECUTION_RECEIPT_VERSION
+    receipt_id: str = ""
     bundle_id: str = ""
+    assembly_id: str = ""
+    calculation_config_id: str = ""
+    attempt_id: str = ""
     generator_ref: str = ""
     solver_ref: str = ""
     executor_ref: str = ""
     executable_ref: str = ""
+    result_adapter_ref: str = ""
     status: str = ""
     exit_code: int | None = None
+    signal_number: int | None = None
+    termination_reason: str = ""
+    started_at: str = ""
+    ended_at: str = ""
+    error: str = ""
+    stdout: str = ""
+    stderr: str = ""
+    outputs: tuple[Mapping[str, object], ...] = ()
+    policy_applied: Mapping[str, object] = field(default_factory=dict)
+    resource_usage: Mapping[str, object] = field(default_factory=dict)
     detail: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -631,17 +733,61 @@ class ExecutionReceipt:
         if self.schema_version != EXECUTION_RECEIPT_VERSION:
             raise ValueError(f"回执版本非法: {self.schema_version!r}")
         for name in (
+            "receipt_id",
             "bundle_id",
+            "assembly_id",
+            "calculation_config_id",
+            "attempt_id",
             "generator_ref",
             "solver_ref",
             "executor_ref",
             "executable_ref",
+            "result_adapter_ref",
             "status",
         ):
             if not getattr(self, name):
                 raise ValueError(f"回执缺必需字段: {name}")
-        if self.exit_code is not None and not isinstance(self.exit_code, int):
-            raise TypeError("exit_code 须为整数或 None")
+        if self.exit_code is not None and (
+            not isinstance(self.exit_code, int)
+            or isinstance(self.exit_code, bool)
+        ):
+            raise TypeError("exit_code 须为整数或 None（不接受布尔值）")
+        if self.signal_number is not None and (
+            not isinstance(self.signal_number, int)
+            or isinstance(self.signal_number, bool)
+        ):
+            raise TypeError("signal_number 须为整数或 None（不接受布尔值）")
+        if not isinstance(self.termination_reason, str):
+            raise TypeError("termination_reason 须为字符串")
+        if self.exit_code is not None or self.signal_number is not None:
+            if not self.termination_reason:
+                raise ValueError("已执行回执须给出 termination_reason")
+        for name in ("started_at", "ended_at"):
+            value = getattr(self, name)
+            if value != "":
+                _check_timestamp(value, name)
+        if self.started_at and self.ended_at:
+            if datetime.fromisoformat(self.started_at) > datetime.fromisoformat(
+                self.ended_at
+            ):
+                raise ValueError("started_at 不得晚于 ended_at")
+        if not isinstance(self.error, str):
+            raise TypeError("error 须为字符串")
+        if not isinstance(self.stdout, str):
+            raise TypeError("stdout 须为字符串")
+        if not isinstance(self.stderr, str):
+            raise TypeError("stderr 须为字符串")
+        object.__setattr__(self, "outputs", _freeze_receipt_outputs(self.outputs))
+        if not isinstance(self.policy_applied, Mapping):
+            raise TypeError("policy_applied 须为 Mapping")
+        object.__setattr__(
+            self, "policy_applied", freeze_json_value(dict(self.policy_applied))
+        )
+        if not isinstance(self.resource_usage, Mapping):
+            raise TypeError("resource_usage 须为 Mapping")
+        object.__setattr__(
+            self, "resource_usage", freeze_json_value(dict(self.resource_usage))
+        )
         if not isinstance(self.detail, Mapping):
             raise TypeError("detail 须为 Mapping")
         object.__setattr__(self, "detail", freeze_json_value(self.detail))
@@ -651,15 +797,59 @@ class ExecutionReceipt:
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
+            "receipt_id": self.receipt_id,
             "bundle_id": self.bundle_id,
+            "assembly_id": self.assembly_id,
+            "calculation_config_id": self.calculation_config_id,
+            "attempt_id": self.attempt_id,
             "generator_ref": self.generator_ref,
             "solver_ref": self.solver_ref,
             "executor_ref": self.executor_ref,
             "executable_ref": self.executable_ref,
+            "result_adapter_ref": self.result_adapter_ref,
             "status": self.status,
             "exit_code": self.exit_code,
+            "signal_number": self.signal_number,
+            "termination_reason": self.termination_reason,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "error": self.error,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "outputs": [_thaw_entry(entry) for entry in self.outputs],
+            "policy_applied": thaw_json_value(self.policy_applied),
+            "resource_usage": thaw_json_value(self.resource_usage),
             "detail": thaw_json_value(self.detail),
         }
+
+
+def _freeze_receipt_outputs(
+    outputs: object,
+) -> tuple[Mapping[str, object], ...]:
+    """冻结回执输出清单（[{path, media_type, size_bytes, required}]，拒绝未知键）。"""
+    if isinstance(outputs, Mapping) or not isinstance(outputs, (list, tuple)):
+        raise TypeError(f"outputs 须为条目序列，得到 {type(outputs).__name__}")
+    frozen = []
+    for entry in outputs:
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "path",
+            "media_type",
+            "size_bytes",
+            "required",
+        }:
+            raise ValueError(
+                "回执 outputs 条目须恰为 path/media_type/size_bytes/required "
+                f"四键: {entry!r}"
+            )
+        _check_relative_path(entry["path"], "outputs.path")
+        _check_media_type(entry["media_type"], "outputs.media_type")
+        size = entry["size_bytes"]
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise ValueError(f"outputs.size_bytes 须为非负整数: {size!r}")
+        if not isinstance(entry["required"], bool):
+            raise ValueError("outputs.required 须为布尔值")
+        frozen.append(freeze_json_value(dict(entry)))
+    return tuple(frozen)
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,6 +906,7 @@ __all__ = [
     "ExecutionReceipt",
     "ExecutorProvider",
     "GeneratorProvider",
+    "ProcessOutcome",
     "check_provider_ref",
     "ResultAdapter",
     "SolverBundle",

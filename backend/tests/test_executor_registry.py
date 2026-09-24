@@ -58,6 +58,9 @@ class _FakeProvider:
     def available(self) -> bool:
         return self._available
 
+    def execute(self, command, workdir):
+        raise AssertionError("注册表测试替身不应被调用")
+
 
 def _provider(**kwargs) -> _FakeProvider:
     return _FakeProvider(_descriptor(**kwargs))

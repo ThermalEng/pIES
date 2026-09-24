@@ -1,4 +1,4 @@
-"""计算边界门面（0.8 切片 A：稳定公共协议、算法选择契约与生成器目录）。
+"""计算边界门面（稳定公共协议、算法选择契约与生成器目录）。
 
 公开符号(选择性重导出, 仅此门面为算法注册表、生成器目录与计算组合的
 调用入口):
@@ -18,18 +18,20 @@
   ``materialize_non_predictive_series``(实现见 ``sequences``);
 - 边界协议与载体: ``GeneratorProvider`` / ``ExecutorProvider`` /
   ``ResultAdapter`` / ``CalculationConfig`` /
-  ``SolverBundleManifest`` / ``SolverBundle`` / ``ExecutionReceipt`` /
-  ``ComputeResult``(宪法 §4.5 三段式边界);
-- 执行器独立注册: ``ExecutorDescriptor`` / ``ExecutorRegistry`` /
-  ``build_executor_registry``(实现见 ``runtime``);
+  ``SolverBundleManifest`` / ``SolverBundle`` / ``ProcessOutcome`` /
+  ``ExecutionReceipt`` / ``ComputeResult``(宪法 §4.5 三段式边界);
+- 执行器独立注册与通用运行时: ``ExecutorDescriptor`` /
+  ``ExecutorRegistry`` / ``build_executor_registry`` /
+  ``AttemptContext`` / ``DeploymentPolicy`` / ``SolverRuntime``
+  (实现见 ``runtime``);
 - 首个真实生成器: ``HighsMilpProvider`` /
   ``HIGHS_MILP_PROVIDER``(实现见 ``generators.highs_milp``);
 - 共享校验: ``check_provider_ref``;
 - 不可用语义: ``ComputationUnavailableError``;
 
-首个真实 provider 已实现并由组合根显式注册；运行期接线(0.9)与快照
-转换尚未实现，未注册引用选择时即明确不可用，计算 Worker 在组合根
-明确拒绝启动(执行编排属于 0.9)。
+首个真实 provider 已实现并由组合根显式注册；通用运行时已实现但尚未
+由组合根接线，快照转换尚未实现，未注册引用选择时即明确不可用，计算
+Worker 在组合根明确拒绝启动。
 """
 
 from iesplan.computation.bundle import (
@@ -67,6 +69,7 @@ from iesplan.computation.protocols import (
     ExecutionReceipt,
     ExecutorProvider,
     GeneratorProvider,
+    ProcessOutcome,
     ResultAdapter,
     SolverBundle,
     SolverBundleManifest,
@@ -79,8 +82,11 @@ from iesplan.computation.registry import (
     list_algorithms,
 )
 from iesplan.computation.runtime import (
+    AttemptContext,
+    DeploymentPolicy,
     ExecutorDescriptor,
     ExecutorRegistry,
+    SolverRuntime,
     build_executor_registry,
 )
 from iesplan.computation.sequences import (
@@ -101,9 +107,11 @@ __all__ = [
     "SOLVER_BUNDLE_SCHEMA",
     "SOLVER_BUNDLE_VERSION",
     "AlgorithmSpec",
+    "AttemptContext",
     "CalculationConfig",
     "ComputationUnavailableError",
     "ComputeResult",
+    "DeploymentPolicy",
     "ExecutionReceipt",
     "ExecutorDescriptor",
     "ExecutorProvider",
@@ -114,9 +122,11 @@ __all__ = [
     "HighsMilpProvider",
     "MaterializedSeries",
     "MaterializedSet",
+    "ProcessOutcome",
     "ResultAdapter",
     "SolverBundle",
     "SolverBundleManifest",
+    "SolverRuntime",
     "build_executor_registry",
     "build_project_model",
     "build_registry",
