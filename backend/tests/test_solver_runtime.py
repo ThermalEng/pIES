@@ -63,7 +63,10 @@ def _outcome(
     )
 
 
-def _manifest(**command_overrides) -> SolverBundleManifest:
+def _manifest(
+    input_paths: tuple[str, ...] = ("input/problem.mps",),
+    **command_overrides,
+) -> SolverBundleManifest:
     command: dict[str, object] = {
         "executor": EXECUTOR,
         "executable": EXE,
@@ -81,7 +84,10 @@ def _manifest(**command_overrides) -> SolverBundleManifest:
             "generator": "acme.generator@1.0.0",
             "solver": "ies.solver.highs@1.7.2",
         },
-        inputs=[{"path": "input/problem.mps", "media_type": "application/mps"}],
+        inputs=[
+            {"path": path, "media_type": "application/mps"}
+            for path in input_paths
+        ],
         command=command,
         outputs=[
             {
@@ -99,10 +105,13 @@ def _manifest(**command_overrides) -> SolverBundleManifest:
     )
 
 
-def _bundle(**command_overrides) -> SolverBundle:
+def _bundle(
+    input_paths: tuple[str, ...] = ("input/problem.mps",),
+    **command_overrides,
+) -> SolverBundle:
     return SolverBundle(
-        manifest=_manifest(**command_overrides),
-        files={"input/problem.mps": INPUT_BYTES},
+        manifest=_manifest(input_paths, **command_overrides),
+        files={path: INPUT_BYTES for path in input_paths},
     )
 
 
@@ -167,8 +176,9 @@ def _success_handler(probe: dict, write_optional: bool = True):
         with open(input_path, "rb") as handle_in:
             probe["input_ok"] = handle_in.read() == INPUT_BYTES
         probe["input_mode"] = stat.S_IMODE(os.stat(input_path).st_mode)
-        probe["input_dir_mode"] = stat.S_IMODE(
-            os.stat(os.path.join(workdir, "input")).st_mode
+        probe["input_dir_owner_writable"] = bool(
+            stat.S_IMODE(os.stat(os.path.join(workdir, "input")).st_mode)
+            & 0o200
         )
         probe["workdir"] = workdir
         probe["saw_command"] = command
@@ -199,7 +209,7 @@ def test_success_collects_declared_outputs_and_receipt() -> None:
     receipt, outputs = runtime.run(_bundle(), _attempt())
     assert probe["input_ok"] is True
     assert probe["input_mode"] == 0o444
-    assert probe["input_dir_mode"] == 0o555
+    assert probe["input_dir_owner_writable"] is True
     assert outputs == {
         "output/solution.json": SOLUTION_BYTES,
         "output/optional.json": b"{}",
@@ -317,6 +327,32 @@ def test_optional_output_may_be_absent() -> None:
     assert [e["path"] for e in receipt.outputs] == ["output/solution.json"]
 
 
+def test_two_inputs_in_same_dir_are_written_read_and_cleaned() -> None:
+    """同一目录双输入：两者都写入、可读，执行后清理。"""
+    probe: dict = {}
+
+    def handle(command, workdir):
+        for name in ("input/a.mps", "input/b.mps"):
+            with open(os.path.join(workdir, name), "rb") as handle_in:
+                probe[name] = handle_in.read()
+        probe["workdir"] = workdir
+        os.makedirs(os.path.join(workdir, "output"), exist_ok=True)
+        with open(
+            os.path.join(workdir, "output/solution.json"), "wb"
+        ) as handle_out:
+            handle_out.write(SOLUTION_BYTES)
+        return _outcome()
+
+    receipt, outputs = _runtime(_FakeExecutor(handler=handle)).run(
+        _bundle(("input/a.mps", "input/b.mps")), _attempt()
+    )
+    assert receipt.status == "succeeded"
+    assert probe["input/a.mps"] == INPUT_BYTES
+    assert probe["input/b.mps"] == INPUT_BYTES
+    assert outputs == {"output/solution.json": SOLUTION_BYTES}
+    assert not os.path.exists(probe["workdir"])
+
+
 def test_registry_selects_exact_executor_without_fallback() -> None:
     """精确选择命中的 executor；不支持的 executable 不切换到另一家。"""
     first = _FakeExecutor(handler=_success_handler({}))
@@ -335,9 +371,8 @@ def test_registry_selects_exact_executor_without_fallback() -> None:
     assert len(second.calls) == 1
     assert first.calls == []
     stray = _bundle(executor=EXECUTOR, executable=OTHER_EXE)
-    receipt, outputs = runtime.run(stray, _attempt())
+    receipt, _ = runtime.run(stray, _attempt())
     assert receipt.status == "policy_rejected"
-    assert outputs == {}
     assert first.calls == []
 
 

@@ -37,11 +37,13 @@ _DEFAULT_SUCCESS_EXIT_CODES = (0,)
 
 
 def _normalize_timestamp(value: str) -> str:
-    """把可解析时间戳归一化为 ISO 8601 UTC ``Z`` 字尾（无时区视为 UTC）。"""
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    """把带时区时间戳归一化为 ISO 8601 UTC ``Z`` 字尾。"""
+    return (
+        datetime.fromisoformat(value)
+        .astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 class SolverRuntime:
@@ -162,9 +164,10 @@ class SolverRuntime:
 
         返回 Bundle 根目录（即 executor 可见的 ``workdir``；manifest
         内全部路径均按 Bundle 根定位）。``command`` 声明的子进程工作
-        目录仅预建，不改变输入/输出定位。输入文件置只读（0o444），
-        输入祖先目录（不含根）置只读可遍历（0o555）；该位语义只防误写，
-        不声称为完整安全隔离，不可绕过的只读挂载归生产隔离 provider。
+        目录仅预建，不改变输入/输出定位。全部输入正常写完后，仅把
+        输入文件置只读（0o444）；输入目录保持本进程可写以便清理。
+        该位语义只防误写，不声称为完整安全隔离，不可绕过的只读挂载
+        归生产隔离 provider。
         """
         run_sub = os.path.normpath(
             os.path.join(root, str(command.get("working_directory", ".")))
@@ -175,11 +178,8 @@ class SolverRuntime:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "wb") as handle:
                 handle.write(content)
-            os.chmod(target, 0o444)
-            ancestor = os.path.dirname(target)
-            while ancestor.startswith(root + os.sep):
-                os.chmod(ancestor, 0o555)
-                ancestor = os.path.dirname(ancestor)
+        for path in bundle.files:
+            os.chmod(os.path.join(root, path), 0o444)
         return root
 
     def _finish(
