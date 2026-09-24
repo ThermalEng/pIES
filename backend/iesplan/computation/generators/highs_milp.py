@@ -1,4 +1,4 @@
-"""首个真实 GeneratorProvider：``ies.generator.highs_milp@1.0.0``(0.8 切片 C)。
+"""首个真实 GeneratorProvider：``ies.generator.highs_milp@1.0.0``。
 
 纯内存确定性转换：五项直接输入 → ``SolverBundle`` 完整聚合
 (manifest + 输入文件字节)，不写临时目录，不启动 solver，不访问
@@ -15,8 +15,6 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from typing import Any
-
-from jsonschema import Draft202012Validator
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
@@ -108,11 +106,11 @@ class HighsMilpProvider:
     ) -> SolverBundle:
         """由五项直接输入生成完整 SolverBundle 聚合。
 
-        依次执行：本 provider 能力核对（generator/solver/mode/精度/
-        options/outputs/constant tariff，不兼容即明确拒绝）→
-        ``build_project_model`` + ``write_mps``（数学超出 lowerer 能力即
-        明确不支持）→ manifest + 文件字节原子组装。同一五项输入与本
-        provider 版本恒得逐字节相同的聚合。
+        通用选择门禁已由 ``GeneratorRegistry.resolve`` 完成，此处信任；
+        依次执行本 provider 特有检查（outputs/实际绑定 tariff，不匹配即
+        明确拒绝）→ ``build_project_model`` + ``write_mps``（数学超出
+        lowerer 能力即明确不支持）→ manifest + 文件字节原子组装。
+        同一五项输入与本 provider 版本恒得逐字节相同的聚合。
         """
         self._check_capabilities(artifact, config, finance)
         seed = config.seed if config.seed is not None else FIXED_SEED
@@ -168,42 +166,12 @@ class HighsMilpProvider:
         config: CalculationConfig,
         finance: EffectiveFinanceConfig,
     ) -> None:
-        """本 provider 必需的能力核对（信任五项输入内容，只核对选择）。
+        """本 provider 特有检查（通用门禁已由 registry 完成，此处信任）。
 
-        generator/solver/mode/精度不匹配为不可用/不兼容
-        (``ComputationUnavailableError``)；非法 options 与未知输出请求为
-        用户计算请求错误(``ValueError``)，一律明确拒绝，不回退、不忽略。
+        未知输出请求为用户计算请求错误(``ValueError``)，明确拒绝，不忽略。
         时变电价限制只看装配实际绑定的计费价格：快照中未被绑定的价格条目
         不进入数学，不触发拒绝。
         """
-        if config.generator != self.ref:
-            raise ComputationUnavailableError(
-                f"本 provider 只服务 {self.ref!r}，得到 {config.generator!r}",
-                reason="incompatible-generator",
-            )
-        if config.solver != SOLVER_REF:
-            raise ComputationUnavailableError(
-                f"本 provider 只兼容 {SOLVER_REF!r}，得到 {config.solver!r}",
-                reason="incompatible-solver",
-            )
-        if config.mode not in DESCRIPTOR.modes:
-            raise ComputationUnavailableError(
-                f"本 provider 不支持所选 mode: {config.mode!r}",
-                reason="incompatible-mode",
-            )
-        if config.precision not in DESCRIPTOR.precisions:
-            raise ComputationUnavailableError(
-                f"本 provider 不支持所选精度: {config.precision!r}",
-                reason="incompatible-precision",
-            )
-        validator = Draft202012Validator(dict(DESCRIPTOR.options_schema))
-        errors = list(validator.iter_errors(dict(config.options)))
-        if errors:
-            first = errors[0]
-            location = "/".join(str(p) for p in first.absolute_path)
-            raise ValueError(
-                f"计算选项非法[{location or '<root>'}]: {first.message}"
-            )
         for name in config.outputs:
             if name not in SUPPORTED_OUTPUTS:
                 raise ValueError(

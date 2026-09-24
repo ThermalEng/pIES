@@ -72,17 +72,17 @@ Bundle 规范化与原子发布
 
 各步骤使用不可变中间 contract。求解器格式 writer 不应重新读取设备模型；command builder 不应重新解释装配业务。
 
-## 项目级线性模型与 MPS writer（0.8f-B）
+## 项目级线性模型与 MPS writer
 
-`build_project_model` 把五项直接输入装配成项目级 `LinearModel`（变量声明、约束行、目标表达式与 min/max 方向）与单位映射，不设包装层：按基线展开全部连续 `step`，实例与时步确定命名；技术关系经现有 lowerer 逐降（`t`/`t-1`、Big-M，有限界来自值域数值或实例额定引用）；公开原语 `step_duration` 以基线导出的 SI 秒注入；连接只定义连通性，按 carrier + 无向连通分量逐 step 生成一条母线守恒式（out/bidirectional 为正，in 为负），无边载体不建平衡式；负荷需求经可连接输入口与 serve 方程进入母线；规划目标/变量/约束与财务/计费分量按绑定展开；物理量归 SI、金额守币种；时变电价不在五项输入内，首个链路只支持 constant tariff。`write_mps` 只序列化已完成的 `LinearModel`（稳定 ROWS/COLUMNS/RHS/BOUNDS/整数标记/OBJSENSE，目标常数以偏移量单独报告），同一模型逐字节相同；已用官方 HiGHS 1.7.2 解析验证。
+`build_project_model` 把五项直接输入装配成项目级 `LinearModel`（变量声明、约束行、目标表达式与 min/max 方向）与单位映射，不设包装层：按基线展开全部连续 `step`，实例与时步确定命名；技术关系经现有 lowerer 逐降（`t`/`t-1`、Big-M，有限界来自值域数值或实例额定引用）；公开原语 `step_duration` 以基线导出的 SI 秒注入；连接只定义连通性，按 carrier + 无向连通分量逐 step 生成一条母线守恒式（out/bidirectional 为正，in 为负），无边载体不建平衡式；负荷需求经可连接输入口与 serve 方程进入母线；规划目标/变量/约束与财务/计费分量按绑定展开；物理量归 SI、金额守币种；计费只支持 constant tariff（时变电价不在五项输入内）。`write_mps` 只序列化已完成的 `LinearModel`（稳定 ROWS/COLUMNS/RHS/BOUNDS/整数标记/OBJSENSE，目标常数以偏移量单独报告），同一模型逐字节相同；已用官方 HiGHS 1.7.2 解析验证。
 
-## 首个真实 provider 与完整聚合（0.8f-C）
+## 首个内置 provider 与完整 Bundle 聚合
 
-首个真实 provider 为 `ies.generator.highs_milp@1.0.0`（见“首个内置链”裁定目标）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 首版只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant 计费价格（快照中未绑定的价格条目不触发拒绝），时变电价仍不支持；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
+首个内置 provider 为 `ies.generator.highs_milp@1.0.0`（见“首个内置链”裁定目标）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant 计费价格（快照中未绑定的价格条目不触发拒绝），时变电价不受支持；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
 
 `generate` 返回唯一完整聚合：manifest（即 `bundle.yaml` 内容）加按规范相对路径索引的只读输入文件字节映射（`input/problem.mps` 与 `input/parameters.json`）。`input/parameters.json` 为最小规范 JSON 元数据，只保存 ResultAdapter 后续必需的 `unit_map`、`objective_offset`、请求 outputs、固定 seed、precision 与装配/引用追溯，不复制完整装配、模型与财务，不写 hash。结构化命令按真实 HiGHS CLI 语法逐项存储（非 shell），`time_limit_seconds` 同时进入硬资源声明与求解器选项且语义一致；同一五项输入与 provider 版本逐字节相同，不写临时目录，不启动 solver。
 
-注册表注册真实 provider 实例：`ref` 与描述符引用单一来源；`resolve` 完成门禁后返回可调用 provider，快照与目录只公开描述符数据；任一候选不符即整体构建失败。组合根显式注册内置 provider，不动态扫描；计算执行编排属于 0.9，Worker 本轮不启动 solver。
+注册表注册真实 provider 实例：`ref` 与描述符引用单一来源；`resolve` 完成通用门禁后返回可调用 provider，快照与目录只公开描述符数据；任一候选不符即整体构建失败。组合根显式注册内置 provider，不动态扫描。
 
 ## GeneratorDescriptor
 

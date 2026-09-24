@@ -1,4 +1,4 @@
-"""计算边界协议(0.8: 真实边界形状与不可变交接载体)。
+"""计算边界协议：真实边界形状与不可变交接载体。
 
 三段式真实边界(宪法 §4.5):
 
@@ -30,12 +30,15 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.sequences import MaterializedSeries
 from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import DeviceMathContribution
+
+if TYPE_CHECKING:
+    from iesplan.computation.generators.descriptor import GeneratorDescriptor
 
 #: 公开计算配置 schema(进入业务事实前须校验字头)。
 CALCULATION_CONFIG_SCHEMA = "ies.calculation-config"
@@ -103,9 +106,12 @@ class GeneratorProvider(Protocol):
     纯转换: 直接消费五项已可信输入, 不得连接数据库/对象服务/网络,
     不得启动求解器, 不得读环境变量, 不得修改项目或任务状态; 不得为
     五项输入再建包装层。同一五项输入与生成器版本必须产生相同输入字节。
-    公开 ``descriptor``(``GeneratorDescriptor`` 类型在 generators 包内
-    定义, 此处只按形状引用, 避免循环导入)。
     """
+
+    @property
+    def descriptor(self) -> GeneratorDescriptor:
+        """公开能力描述符(与 ``ref`` 单一来源；类型仅静态引用，避免循环导入)。"""
+        ...
 
     @property
     def ref(self) -> str:
@@ -127,9 +133,10 @@ class GeneratorProvider(Protocol):
         """由五项直接输入生成完整求解包(聚合：manifest + 输入文件字节)。
 
         调用方只传入已签发 artifact; provider 信任上游装配与应用边界
-        已完成的签发与内容确认, 不复核。能力不匹配时抛
-        ``ComputationUnavailableError``(不可用/不兼容)或 ``ValueError``
-        (用户计算请求错误); 数学超出降级能力时抛 lowerer 的明确不支持
+        已完成的签发与内容确认, 不复核。通用选择门禁(generator/mode/
+        精度/solver/options)由 ``GeneratorRegistry.resolve`` 完成，不在此
+        重复；本方法只做 provider 特有检查(outputs/实际绑定 tariff)，
+        不匹配即明确拒绝。数学超出降级能力时抛 lowerer 的明确不支持
         错误。不写临时目录，不返回并列结构。
         """
         ...

@@ -40,6 +40,7 @@ from iesplan.computation import (
     ComputationUnavailableError,
     ComputeResult,
     ExecutionReceipt,
+    GeneratorDescriptor,
     GeneratorProvider,
     MaterializedSeries,
     ResultAdapter,
@@ -141,6 +142,27 @@ class _GeneratorOnly:
     """仅实现 GeneratorProvider 的最小替身(无任何算法逻辑)。"""
 
     @property
+    def descriptor(self):
+        return GeneratorDescriptor(
+            generator_id="acme.generator",
+            version="1.0.0",
+            options_schema={
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            assembly_schema_version="1.0",
+            modes=("planning",),
+            precisions=("medium",),
+            solvers=("ies.solver.highs@1.7.2",),
+            result_adapter="acme.result-adapter@1.0.0",
+            resource_limits={},
+            unit_system="SI",
+            seed_semantics="test-only",
+        )
+
+    @property
     def ref(self) -> str:
         return "acme.generator@1.0.0"
 
@@ -217,6 +239,7 @@ def test_protocol_methods_match_constitution_boundaries() -> None:
     assert isinstance(_GeneratorOnly(), GeneratorProvider)
     assert isinstance(_RuntimeOnly(), SolverRuntime)
     assert isinstance(_AdapterOnly(), ResultAdapter)
+    assert _GeneratorOnly().descriptor.ref == _GeneratorOnly().ref
 
 
 def test_unavailable_error_semantics() -> None:

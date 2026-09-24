@@ -1,4 +1,4 @@
-"""GeneratorProvider 独立原子注册表(0.8 切片 A/C)。
+"""GeneratorProvider 独立原子注册表(0.8 切片 A)。
 
 - 注册表注册真实 provider 实例，不只是 descriptor；目录快照与
   ``to_dict`` 仍只公开 descriptor 数据；
@@ -57,7 +57,8 @@ class GeneratorRegistry:
             ) from None
 
     def resolve(self, config: CalculationConfig) -> GeneratorProvider:
-        """按计算配置选中真实 provider 并完成生成前门禁。
+        """按计算配置选中真实 provider 并完成生成前门禁（通用门禁的唯一
+        真实边界，provider 自身不再重复核对）。
 
         1. 精确引用选中 provider；未知即 ``ComputationUnavailableError``；
         2. 核对 mode/精度/solver 兼容性，不兼容即 ``ComputationUnavailableError``；

@@ -1,12 +1,14 @@
-"""首个真实 GeneratorProvider 测试(0.8f-C)：highs_milp@1.0.0。
+"""首个真实 GeneratorProvider 测试：highs_milp@1.0.0。
 
-只覆盖公开行为，不测私有实现，不启动 solver：
+只覆盖公开行为，不测私有实现，不启动 solver；正常生成一律走
+``registry.resolve(config).generate(...)`` 正式路径：
 
 - 真实 campus 五项输入生成完整 SolverBundle 聚合：manifest、problem.mps
   bytes、元数据 bytes、结构化 command、原始输出声明、unit map/objective
   offset、逐字节确定性、不写工作目录；
-- 能力核对：generator/solver/mode/precision/options/outputs/绑定计费
-  time_series 不兼容即明确拒绝，无 fallback；
+- provider 特有检查：未知 outputs 与实际绑定 time_series 计费即明确
+  拒绝，无 fallback（通用 generator/mode/精度/solver/options 门禁只在
+  registry 侧覆盖，不在此重复证明）；
 - 注册表注册真实 provider 实例：resolve/get 返回可调用 provider，
   快照与 to_dict 只公开 descriptor 数据；重复/协议不符/引用不一致/
   不可用即整体构建失败。
@@ -107,9 +109,20 @@ def _campus_inputs(*, outputs=("solution", "metrics"), seed=None):
     return artifact, models, mat.series, finance, config
 
 
+def _resolved_generate(*args, **kwargs):
+    """正式路径：registry 精确选择 + 通用门禁后调用 generate。"""
+    artifact, models, series, finance, config = _campus_inputs(*args, **kwargs)
+    provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
+    assert provider is HIGHS_MILP_PROVIDER
+    return (
+        provider.generate(artifact, models, series, finance, config),
+        (artifact, models, series, finance, config),
+    )
+
+
 def test_campus_generate_full_bundle() -> None:
     """campus 生成完整聚合：manifest/文件/command/输出声明互相一致。"""
-    bundle = HIGHS_MILP_PROVIDER.generate(*_campus_inputs())
+    bundle, _ = _resolved_generate()
     assert isinstance(bundle, SolverBundle)
     manifest = bundle.manifest
     assert isinstance(manifest, SolverBundleManifest)
@@ -174,14 +187,14 @@ def test_generate_is_byte_deterministic_and_writes_nothing(
     tmp_path, monkeypatch
 ) -> None:
     """同一输入逐字节相同；生成过程不写工作目录。"""
-    first = HIGHS_MILP_PROVIDER.generate(*_campus_inputs(seed=7))
-    second = HIGHS_MILP_PROVIDER.generate(*_campus_inputs(seed=7))
+    first, _ = _resolved_generate(seed=7)
+    second, _ = _resolved_generate(seed=7)
     assert export_bundle_files(first) == export_bundle_files(second)
     meta = json.loads(first.files["input/parameters.json"].decode("utf-8"))
     assert meta["seed"] == 7
     assert first.manifest.command["arguments"][-1] == "7"
     monkeypatch.chdir(tmp_path)
-    HIGHS_MILP_PROVIDER.generate(*_campus_inputs())
+    _resolved_generate()
     assert list(tmp_path.iterdir()) == []
 
 
@@ -195,47 +208,14 @@ def _config_with(**kwargs) -> CalculationConfig:
     return CalculationConfig(**kwargs)
 
 
-def test_generate_rejects_incompatible_selection() -> None:
-    """generator/solver/mode/精度不匹配即不可用/不兼容，不回退。"""
-    inputs = _campus_inputs()
-    artifact, models, series, finance, _ = inputs
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        HIGHS_MILP_PROVIDER.generate(
-            artifact, models, series, finance,
-            _config_with(generator="other.generator@9.9.9"),
-        )
-    assert exc_info.value.reason == "incompatible-generator"
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        HIGHS_MILP_PROVIDER.generate(
-            artifact, models, series, finance,
-            _config_with(solver="other.solver@9.9.9"),
-        )
-    assert exc_info.value.reason == "incompatible-solver"
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        HIGHS_MILP_PROVIDER.generate(
-            artifact, models, series, finance, _config_with(mode="evaluation"),
-        )
-    assert exc_info.value.reason == "incompatible-mode"
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        HIGHS_MILP_PROVIDER.generate(
-            artifact, models, series, finance, _config_with(precision="high"),
-        )
-    assert exc_info.value.reason == "incompatible-precision"
-
-
-def test_generate_rejects_bad_options_and_unknown_outputs() -> None:
-    """非法 options 与未知输出请求是明确的用户请求错误，不忽略。"""
-    artifact, models, series, finance, _ = _campus_inputs()
-    with pytest.raises(ValueError, match="计算选项非法"):
-        HIGHS_MILP_PROVIDER.generate(
-            artifact, models, series, finance,
-            _config_with(options={"gap_rel": 0.01}),
-        )
+def test_generate_rejects_unknown_outputs() -> None:
+    """未知输出请求是明确的用户请求错误，不忽略（门禁后特有检查）。"""
+    artifact, models, series, finance, config = _campus_inputs(
+        outputs=["solution", "trace"]
+    )
+    provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     with pytest.raises(ValueError, match="不支持的输出请求"):
-        HIGHS_MILP_PROVIDER.generate(
-            artifact, models, series, finance,
-            _config_with(outputs=["solution", "trace"]),
-        )
+        provider.generate(artifact, models, series, finance, config)
 
 
 def test_generate_rejects_bound_time_series_tariff() -> None:
@@ -246,8 +226,9 @@ def test_generate_rejects_bound_time_series_tariff() -> None:
     rebound = ValidatedAssemblyArtifact(
         canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
     )
+    provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        HIGHS_MILP_PROVIDER.generate(rebound, models, series, finance, config)
+        provider.generate(rebound, models, series, finance, config)
     assert exc_info.value.reason == "unsupported-tariff"
 
 
@@ -344,7 +325,7 @@ def test_registry_build_fails_atomically() -> None:
 
 def test_bundle_aggregate_requires_exact_manifest_files_match() -> None:
     """聚合检查：清单与文件映射恰好对应；输出只是声明。"""
-    bundle = HIGHS_MILP_PROVIDER.generate(*_campus_inputs())
+    bundle, _ = _resolved_generate()
     manifest = bundle.manifest
     with pytest.raises(ValueError, match="恰好对应"):
         SolverBundle(

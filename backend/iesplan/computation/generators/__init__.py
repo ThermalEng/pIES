@@ -1,4 +1,4 @@
-"""GeneratorProvider 独立注册(0.8 切片 A/C)。
+"""GeneratorProvider 独立注册(0.8 切片 A)。
 
 公开 descriptor 形状、首个真实 provider(``highs_milp``)与原子注册表。
 provider 选择与装配只归 bootstrap 组合根；API/Worker 不得自行发现或

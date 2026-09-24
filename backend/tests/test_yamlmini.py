@@ -131,3 +131,10 @@ class TestDump:
     def test_dump_lf_ending(self) -> None:
         assert dump({"a": 1}).endswith("\n")
         assert "\r" not in dump({"a": 1})
+
+    def test_dump_rejects_non_finite_floats(self) -> None:
+        """非有限数值禁止进入 YAML（宪法数值规则），不静默转字符串。"""
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(YamlParseError):
+                dump({"v": bad})
+        assert load(dump({"v": 0.1})) == {"v": 0.1}

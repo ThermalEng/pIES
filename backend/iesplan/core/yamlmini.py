@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 
 _INT_RE = re.compile(r"[+-]?\d+")
@@ -351,6 +352,8 @@ def _dump_scalar(value: object) -> str:
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
     if isinstance(value, float):
+        if not math.isfinite(value):
+            raise YamlParseError(f"非有限数值禁止进入 YAML: {value!r}", 0)
         return repr(value)
     if isinstance(value, str):
         escaped = (

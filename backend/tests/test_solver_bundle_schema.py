@@ -1,4 +1,4 @@
-"""Solver Bundle 契约测试(0.8 切片 B/C)。
+"""Solver Bundle 契约测试(0.8 切片 B 修正版)。
 
 manifest 载体为 ``SolverBundleManifest``（完整聚合为 ``SolverBundle``，
 见 provider 测试）；字段唯一依据 ``formats/solver-bundle.md`` 的
@@ -164,29 +164,28 @@ def test_normalize_is_order_insensitive() -> None:
 
 
 def test_manifest_yaml_bytes_are_canonical() -> None:
-    """规范字节：固定字段顺序、末尾换行；同一 manifest 恒得同一字节。"""
+    """规范字节：语义回读一致、关键字段齐备、末尾换行、逐字节确定。"""
+    from iesplan.core.yamlmini import load as yaml_load
+
     bundle = validate_bundle(_load(VALID))
     first = manifest_to_yaml_bytes(bundle)
     assert manifest_to_yaml_bytes(bundle) == first
     assert first.endswith(b"\n")
-    text = first.decode("utf-8")
-    lines = text.splitlines()
-    assert lines[0] == "schema: ies.solver-bundle"
-    assert lines[1] == 'schema_version: "1.0.0"'
-
-    def at(prefix: str) -> int:
-        return next(i for i, line in enumerate(lines) if line.startswith(prefix))
-
-    order = [at(prefix) for prefix in (
-        "schema:", "bundle:", "inputs:", "command:", "outputs:",
-        "result_adapter:", "extensions:",
-    )]
-    assert order == sorted(order)
-    assert "extensions: {}" in lines
-    assert "    - input/problem.mps" in lines
-    assert '    - "--solution_file"' in lines
-    assert "    path: input/problem.mps" in lines
-    assert '    OMP_NUM_THREADS: "4"' in lines
+    assert yaml_load(first.decode("utf-8")) == bundle.to_dict()
+    parsed = yaml_load(first.decode("utf-8"))
+    assert parsed["schema"] == SOLVER_BUNDLE_SCHEMA
+    assert parsed["bundle"] == {
+        "generator": GENERATOR, "solver": SOLVER,
+    }
+    assert [e["path"] for e in parsed["inputs"]] == [
+        "input/problem.mps", "input/parameters.json",
+    ]
+    assert parsed["command"]["arguments"] == [
+        "input/problem.mps", "--solution_file", "output/solution.json",
+    ]
+    assert parsed["command"]["environment"] == {"OMP_NUM_THREADS": "4"}
+    assert parsed["outputs"][0]["required"] is True
+    assert parsed["result_adapter"] == ADAPTER
     with pytest.raises(TypeError):
         manifest_to_yaml_bytes({"schema": "ies.solver-bundle"})  # type: ignore[arg-type]
 
