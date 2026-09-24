@@ -2,7 +2,7 @@
 
 ``SolverRuntime`` 是通用实现（非 Protocol/ABC/占位）：消费完整 typed
 ``SolverBundle``、attempt 上下文、部署策略与已发布执行器注册表，拥有
-执行编排全过程——精确选择、策略检查、独立临时工作区、输入写入、
+执行编排全过程——精确选择、策略检查、独立临时工作区、输入只读写入、
 executor 调用、声明输出核对、唯一回执签发与工作区清理。
 
 信任边界：typed ``SolverBundle`` 是可信内部交接，不重跑 JSON schema，
@@ -95,15 +95,17 @@ class SolverRuntime:
         command = manifest.command
         executor_ref = command["executor"]
         executable_ref = command["executable"]
-        provider = self._select(executor_ref, executable_ref)
-        if provider is None:
+        try:
+            provider = self._registry.resolve(
+                str(executor_ref), str(executable_ref)
+            )
+        except ComputationUnavailableError as exc:
             return self._unexecuted(
                 bundle,
                 attempt,
                 str(executor_ref),
                 str(executable_ref),
-                f"执行器未注册或不支持所选可执行文件: "
-                f"{executor_ref!r} x {executable_ref!r}",
+                str(exc),
             ), {}
         gate_error = self._check_policy(command)
         if gate_error is not None:
@@ -112,8 +114,8 @@ class SolverRuntime:
             ), {}
         root = tempfile.mkdtemp(prefix="ies-runtime-")
         try:
-            run_dir = self._prepare_workdir(root, bundle, command)
-            outcome = provider.execute(command, run_dir)
+            self._prepare_workdir(root, bundle, command)
+            outcome = provider.execute(command, root)
             if not isinstance(outcome, ProcessOutcome):
                 raise TypeError(
                     "executor 须返回 ProcessOutcome，"
@@ -124,18 +126,6 @@ class SolverRuntime:
             )
         finally:
             shutil.rmtree(root)
-
-    def _select(
-        self, executor_ref: object, executable_ref: object
-    ) -> ExecutorProvider | None:
-        """精确选择 provider；未知或不支持返回 None（调用方形成拒绝回执）。"""
-        try:
-            provider = self._registry.get(str(executor_ref))
-        except ComputationUnavailableError:
-            return None
-        if not provider.descriptor.supports_executable(str(executable_ref)):
-            return None
-        return provider
 
     def _check_policy(self, command: Mapping[str, object]) -> str | None:
         """部署策略门禁；通过返回 None，否则返回明确拒绝原因。"""
@@ -168,19 +158,29 @@ class SolverRuntime:
         bundle: SolverBundle,
         command: Mapping[str, object],
     ) -> str:
-        """建立运行目录并写入输入字节；返回 executor 可见的运行目录。"""
-        run_dir = os.path.normpath(
+        """建立 Bundle 根工作区：输入只读写入，输出目录保持可写。
+
+        返回 Bundle 根目录（即 executor 可见的 ``workdir``；manifest
+        内全部路径均按 Bundle 根定位）。``command`` 声明的子进程工作
+        目录仅预建，不改变输入/输出定位。输入文件置只读（0o444），
+        输入祖先目录（不含根）置只读可遍历（0o555）；该位语义只防误写，
+        不声称为完整安全隔离，不可绕过的只读挂载归生产隔离 provider。
+        """
+        run_sub = os.path.normpath(
             os.path.join(root, str(command.get("working_directory", ".")))
         )
-        os.makedirs(run_dir, exist_ok=True)
+        os.makedirs(run_sub, exist_ok=True)
         for path, content in bundle.files.items():
             target = os.path.join(root, path)
-            parent = os.path.dirname(target)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "wb") as handle:
                 handle.write(content)
-        return run_dir
+            os.chmod(target, 0o444)
+            ancestor = os.path.dirname(target)
+            while ancestor.startswith(root + os.sep):
+                os.chmod(ancestor, 0o555)
+                ancestor = os.path.dirname(ancestor)
+        return root
 
     def _finish(
         self,
@@ -285,7 +285,7 @@ class SolverRuntime:
             result_adapter_ref=manifest.result_adapter,
             status="policy_rejected",
             error=error,
-            policy_applied=self._policy.to_dict(),
+            policy_evaluated=self._policy.to_dict(),
         )
 
     def _build_receipt(
@@ -335,7 +335,7 @@ class SolverRuntime:
             stdout=outcome.stdout.decode("utf-8", errors="replace"),
             stderr=outcome.stderr.decode("utf-8", errors="replace"),
             outputs=entries,
-            policy_applied=self._policy.to_dict(),
+            policy_evaluated=self._policy.to_dict(),
             resource_usage=dict(outcome.resource_usage),
         )
 

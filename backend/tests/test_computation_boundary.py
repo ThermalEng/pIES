@@ -50,6 +50,7 @@ from iesplan.computation import (
     GeneratorProvider,
     MaterializedSeries,
     ProcessOutcome,
+    RECEIPT_STATUSES,
     ResultAdapter,
     SolverBundle,
     SolverBundleManifest,
@@ -187,18 +188,22 @@ class _GeneratorOnly:
 
 
 def _receipt(**kwargs) -> ExecutionReceipt:
-    """最小合法回执(默认补齐身份与引用字段)。"""
+    """最小合法回执(默认补齐身份、合法引用与已执行事实字段)。"""
     kwargs.setdefault("receipt_id", "receipt-1")
     kwargs.setdefault("bundle_id", "bundle-1")
     kwargs.setdefault("assembly_id", "assembly-1")
     kwargs.setdefault("calculation_config_id", "config-1")
     kwargs.setdefault("attempt_id", "attempt-1")
-    kwargs.setdefault("generator_ref", "g")
-    kwargs.setdefault("solver_ref", "s")
-    kwargs.setdefault("executor_ref", "e")
-    kwargs.setdefault("executable_ref", "x")
-    kwargs.setdefault("result_adapter_ref", "r")
+    kwargs.setdefault("generator_ref", "acme.generator@1.0.0")
+    kwargs.setdefault("solver_ref", "ies.solver.highs@1.7.2")
+    kwargs.setdefault("executor_ref", "t.executor@1.0.0")
+    kwargs.setdefault("executable_ref", "t.exe@1.0.0")
+    kwargs.setdefault("result_adapter_ref", "acme.result-adapter@1.0.0")
     kwargs.setdefault("status", "succeeded")
+    kwargs.setdefault("exit_code", 0)
+    kwargs.setdefault("termination_reason", "exited")
+    kwargs.setdefault("started_at", "2026-09-24T00:00:00Z")
+    kwargs.setdefault("ended_at", "2026-09-24T00:00:01Z")
     return ExecutionReceipt(**kwargs)
 
 
@@ -287,7 +292,7 @@ def test_unavailable_error_semantics() -> None:
     config = _config(seed=42)
     with pytest.raises(ComputationUnavailableError):
         gen.generate(_artifact(), {}, (), _finance(), config)
-    receipt = _receipt(status="failed")
+    receipt = _receipt(status="process_failed")
     with pytest.raises(ComputationUnavailableError):
         adapter.adapt(_manifest(), receipt, {})
 
@@ -301,11 +306,7 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
     )
     config = _config(seed=7, options={"gap": 0.01, "tags": ["a"]}, outputs=["out"])
     assert config.outputs == ("out",)
-    receipt = _receipt(
-        status="succeeded", exit_code=0, termination_reason="exited",
-        started_at="2026-09-24T00:00:00Z", ended_at="2026-09-24T00:00:01Z",
-        detail={"stdout": "ok"},
-    )
+    receipt = _receipt(stdout="ok")
     for obj in (manifest, result, config, receipt):
         assert dataclasses.is_dataclass(obj)
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -324,7 +325,7 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
     with pytest.raises(TypeError):
         config.options["gap"] = 0.5  # type: ignore[index]
     with pytest.raises(TypeError):
-        receipt.detail["stdout"] = "x"  # type: ignore[index]
+        receipt.resource_usage["k"] = 1  # type: ignore[index]
     assert isinstance(manifest.inputs, tuple)
     assert isinstance(manifest.bundle, MappingProxyType)
     assert isinstance(result.outputs, MappingProxyType)
@@ -450,3 +451,38 @@ def test_result_and_bundle_schema_words() -> None:
     assert receipt.to_dict()["schema_version"] == "1.0.0"
     with pytest.raises(ValueError, match="schema"):
         _receipt(schema="ies.other", bundle_id="b")
+
+
+def test_receipt_refs_status_and_executed_consistency() -> None:
+    """回执引用形态、状态封闭集与已执行/未执行一致性，无 detail 残留。"""
+    assert set(RECEIPT_STATUSES) == {
+        "succeeded", "policy_rejected", "process_failed",
+        "output_protocol_failed",
+    }
+    dumped = _receipt().to_dict()
+    assert "detail" not in dumped
+    assert not hasattr(_receipt(), "detail")
+    for field_name in (
+        "generator_ref", "solver_ref", "executor_ref", "executable_ref",
+        "result_adapter_ref",
+    ):
+        with pytest.raises(ValueError, match="形态"):
+            _receipt(**{field_name: "not-a-ref"})
+    with pytest.raises(ValueError, match="状态非法"):
+        _receipt(status="timeout")
+    rejected = _receipt(
+        status="policy_rejected", exit_code=None, termination_reason="",
+        started_at="", ended_at="",
+    )
+    assert rejected.exit_code is None
+    assert rejected.started_at == "" and rejected.ended_at == ""
+    with pytest.raises(ValueError, match="不得携带"):
+        _receipt(status="policy_rejected")
+    with pytest.raises(ValueError, match="恰有一个有值"):
+        _receipt(exit_code=None, signal_number=None)
+    with pytest.raises(ValueError, match="非空时间戳"):
+        _receipt(started_at="", ended_at="")
+    with pytest.raises(ValueError, match="带时区"):
+        _receipt(
+            started_at="2026-09-24T00:00:00", ended_at="2026-09-24T00:00:01Z"
+        )

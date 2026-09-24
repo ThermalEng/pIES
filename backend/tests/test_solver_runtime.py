@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import stat
 from datetime import datetime, timezone
 
 import pytest
@@ -159,11 +160,16 @@ class _FakeExecutor:
 
 
 def _success_handler(probe: dict, write_optional: bool = True):
-    """成功 handler：核对输入字节真实写入，再写声明输出。"""
+    """成功 handler：核对输入字节与只读位语义，再写声明输出。"""
 
     def handle(command, workdir):
-        with open(os.path.join(workdir, "input/problem.mps"), "rb") as handle_in:
+        input_path = os.path.join(workdir, "input/problem.mps")
+        with open(input_path, "rb") as handle_in:
             probe["input_ok"] = handle_in.read() == INPUT_BYTES
+        probe["input_mode"] = stat.S_IMODE(os.stat(input_path).st_mode)
+        probe["input_dir_mode"] = stat.S_IMODE(
+            os.stat(os.path.join(workdir, "input")).st_mode
+        )
         probe["workdir"] = workdir
         probe["saw_command"] = command
         os.makedirs(os.path.join(workdir, "output"), exist_ok=True)
@@ -192,6 +198,8 @@ def test_success_collects_declared_outputs_and_receipt() -> None:
     runtime = _runtime(_FakeExecutor(handler=_success_handler(probe)))
     receipt, outputs = runtime.run(_bundle(), _attempt())
     assert probe["input_ok"] is True
+    assert probe["input_mode"] == 0o444
+    assert probe["input_dir_mode"] == 0o555
     assert outputs == {
         "output/solution.json": SOLUTION_BYTES,
         "output/optional.json": b"{}",
@@ -216,7 +224,8 @@ def test_success_collects_declared_outputs_and_receipt() -> None:
     assert receipt.started_at <= receipt.ended_at
     assert receipt.stdout == "solved"
     assert receipt.stderr == ""
-    assert receipt.to_dict()["policy_applied"] == _policy().to_dict()
+    assert receipt.to_dict()["policy_evaluated"] == _policy().to_dict()
+    assert "policy_applied" not in receipt.to_dict()
     assert receipt.resource_usage == {}
     assert [e["path"] for e in receipt.outputs] == [
         "output/solution.json",
@@ -228,6 +237,72 @@ def test_success_collects_declared_outputs_and_receipt() -> None:
     assert dumped["receipt_id"] == receipt.receipt_id
     assert dumped["outputs"][0]["size_bytes"] == len(SOLUTION_BYTES)
     json.dumps(dumped)
+
+
+def test_non_dot_working_directory_uses_bundle_root() -> None:
+    """非点工作目录：输入/输出仍按 Bundle 根定位，子进程目录已预建。"""
+    probe: dict = {}
+
+    def handle(command, workdir):
+        assert command["working_directory"] == "run"
+        run_dir = os.path.join(workdir, "run")
+        assert os.path.isdir(run_dir)
+        probe["run_owner_writable"] = bool(
+            stat.S_IMODE(os.stat(run_dir).st_mode) & 0o200
+        )
+        with open(
+            os.path.join(workdir, "input/problem.mps"), "rb"
+        ) as handle_in:
+            probe["input_ok"] = handle_in.read() == INPUT_BYTES
+        os.makedirs(os.path.join(workdir, "output"), exist_ok=True)
+        with open(
+            os.path.join(workdir, "output/solution.json"), "wb"
+        ) as handle_out:
+            handle_out.write(SOLUTION_BYTES)
+        return _outcome()
+
+    receipt, outputs = _runtime(_FakeExecutor(handler=handle)).run(
+        _bundle(working_directory="run"), _attempt()
+    )
+    assert receipt.status == "succeeded"
+    assert probe["input_ok"] is True
+    assert probe["run_owner_writable"] is True
+    assert outputs == {"output/solution.json": SOLUTION_BYTES}
+
+
+def test_process_outcome_exclusive_exit_and_tz_aware_times() -> None:
+    """退出码/信号恰有一个；时间戳须带时区且按 UTC 先后比较。"""
+    base = {
+        "termination_reason": "exited",
+        "started_at": "2026-09-24T00:00:00Z",
+        "ended_at": "2026-09-24T00:00:01Z",
+    }
+    assert ProcessOutcome(exit_code=0, **base).exit_code == 0
+    with pytest.raises(ValueError, match="恰有一个有值"):
+        ProcessOutcome(exit_code=0, signal_number=9, **base)
+    with pytest.raises(ValueError, match="恰有一个有值"):
+        ProcessOutcome(exit_code=None, signal_number=None, **base)
+    with pytest.raises(ValueError, match="带时区"):
+        ProcessOutcome(
+            exit_code=0,
+            termination_reason="exited",
+            started_at="2026-09-24T00:00:00",
+            ended_at="2026-09-24T00:00:01Z",
+        )
+    cross = ProcessOutcome(
+        exit_code=0,
+        termination_reason="exited",
+        started_at="2026-09-24T02:00:00+02:00",
+        ended_at="2026-09-24T00:00:01Z",
+    )
+    assert cross.started_at == "2026-09-24T02:00:00+02:00"
+    with pytest.raises(ValueError, match="不得晚于"):
+        ProcessOutcome(
+            exit_code=0,
+            termination_reason="exited",
+            started_at="2026-09-24T00:00:02Z",
+            ended_at="2026-09-24T02:00:00+02:00",
+        )
 
 
 def test_optional_output_may_be_absent() -> None:
@@ -264,7 +339,6 @@ def test_registry_selects_exact_executor_without_fallback() -> None:
     assert receipt.status == "policy_rejected"
     assert outputs == {}
     assert first.calls == []
-    assert len(second.calls) == 1
 
 
 def test_unknown_executor_is_rejected_without_calls() -> None:
@@ -448,7 +522,7 @@ def test_receipts_are_unique_and_immutable() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         first.status = "succeeded"  # type: ignore[misc]
     with pytest.raises(TypeError):
-        first.policy_applied["allow_network"] = True  # type: ignore[index]
+        first.policy_evaluated["allow_network"] = True  # type: ignore[index]
     with pytest.raises(TypeError):
         first.outputs[0]["path"] = "x"  # type: ignore[index]
     with pytest.raises(TypeError):
@@ -474,7 +548,7 @@ def test_constructor_and_input_types_are_checked() -> None:
         )
     with pytest.raises(ValueError, match="attempt 上下文"):
         AttemptContext()
-    with pytest.raises(ValueError, match="至少其一"):
+    with pytest.raises(ValueError, match="恰有一个有值"):
         ProcessOutcome(
             termination_reason="exited",
             started_at=_now(),
