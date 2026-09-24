@@ -48,19 +48,6 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 - 运行计算与财务评价覆盖相同年份、相同年限，逐年现金流使用对应年份的运行结果。
 - 敏感性计算及其附加参数、批量参数扫描、不确定性分析、资本金评价和额外财务指标安排在 `1.2.0`。
 
-## `0.8.0` — 设备纯技术契约、GeneratorProvider 与 Solver Bundle
-
-目标：在已完成的 `0.7.0` 规范装配和 `0.6.5` 组装前置契约基础上，把旧设备目录迁移到纯技术统一契约，再把规范装配到 solver 输入的转换收敛为确定性纯生成边界。
-
-1. 发布 `ies.device-model` `2.0.0` schema、受限方程语法、规范化规则和合法/非法样例；完成模型顶层只保留 `schema/schema_version/device/properties/interfaces/equations`，设备不带独立语义版本、计算精度、价格或成本。
-2. 一次性替换内置设备、解析器、目录 descriptor、设备数据 CSV、装配、API/前端 contract 和测试；建立“候选校验成功后才分配 `_N` 编号并原子保存”的项目模型门禁，五类 interface 与装配中的三种 predefined 来源均有确定校验。设备模型 `1.0.0` 是未发布开发草案，直接删除其 schema、迁移器、迁移回执、兼容路径、旧模板和迁移专用测试，不运行期双读，也不提供离线迁移入口。
-3. 让系统装配只组合已固定的项目计算基线、已校验并以对象 ID/revision 固定的模型实例与数据、连接、规划配置和不可变 `EffectiveFinanceConfig`（装配使用精确引用，不内联完整财务配置）；生成 Solver Bundle 时再选择独立 `CalculationConfig`，固定 generator、solver、精度、算法选项、种子和输出请求。
-4. 建立 GeneratorProvider 公开契约、独立原子注册和能力描述。
-5. 发布 `ies.solver-bundle` `1.0.0` 的 schema、规范化规则、结构化命令、输出声明和合法/非法样例。
-6. 从零实现首个 GeneratorProvider 及其求解问题构造；物化阶段先按项目基线生成 `constant` / `data_repeat` / `data_predict` 全周期连续 `step` 序列（物化结果只进入 Bundle 与回执，不写回装配或项目引用；预测算法由计算配置选择，不固定唯一实现），Provider 只消费最终序列。它直接消费装配产物、设备数学贡献、物化序列、有效财务快照与已校验 `CalculationConfig` 五项输入生成 Bundle，在此完成 solver 内部单位换算。项目当前没有可迁移的 solver 或问题构造实现，不以历史占位、命令拼接或测试替身作为实现基础。
-
-退出标准：所有可选设备均使用纯技术 `2.0.0` 且不依赖旧字段；非法候选不能进入项目正式模型目录、占用正式编号或参与装配；设备参数中的数据关键字只引用项目路径内 CSV，并在用户输入边界校验；项目基线创建后不可修改，装配只固定输入引用，预定义序列按基线在计算阶段生成完整周期连续 `step`；规划与财务计算固定同一 `EffectiveFinanceConfig`，装配中不存在计算选项；相同五项输入（装配产物、设备数学贡献、物化序列、有效财务快照、`CalculationConfig`）与 provider 版本产生逐字节相同的 Solver Bundle；generator 不访问数据库、网络、对象服务或进程环境，不启动 solver。
-
 ## `0.9.0` — SolverRuntime 与受控执行
 
 目标：从零建立通用受控执行边界，由 runtime 执行 `0.8.0` 首个 GeneratorProvider 产生的 Solver Bundle；项目当前没有需要兼容或替代的既有 solver 执行实现。
@@ -97,7 +84,7 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 目标：基于现有任务幂等、租约、fencing 和迟到写入拒绝，将其执行载荷切换到新计算链。
 
 1. 在已经固定规范文本与校验回执二件套的现有 `CalcSnapshot` 上，继续以对象 ID 固定资源，并固定 generator/solver/executor/result adapter 精确版本、单位、种子、选项和容差。
-2. Worker 启动时验证快照所需依赖，任务执行只编排 generator/runtime/result adapter；不得新增命令拼接、`assembly.plan` 或函数名子进程旁路；实现多 `data_predict` 的阶段二循环（0 或 1 个时阶段一结果即最终结果；多于 1 个时以首轮结果重建预测目标与计算模型并迭代求解，按公开容差与最大迭代数收敛）。
+2. Worker 启动时验证快照所需依赖；在调用 Generator 之前，先编排届时已定义的公开预测能力，依据冻结的 `CalculationConfig` 与固定资源生成完整的 `data_predict` `MaterializedSeries`、训练产物引用和回执；Worker 不直接实现训练算法、不解释预测业务；任务执行只编排 generator/runtime/result adapter；不得新增命令拼接、`assembly.plan` 或函数名子进程旁路；实现多 `data_predict` 的阶段二循环（0 或 1 个时阶段一结果即最终结果；多于 1 个时以首轮结果重建预测目标与计算模型并迭代求解，按公开容差与最大迭代数收敛）。
 3. 每个 attempt 封存 Solver Bundle、ExecutionReceipt、必要的 stdout/stderr 日志节选、声明输出记录和统一结果；历史结果只按该快照解释。
 
 退出标准：至少一个受支持 solver 通过 Docker 任务端到端算例；未校验输入、缺失依赖和任何非新计算链路径都不能进入执行。

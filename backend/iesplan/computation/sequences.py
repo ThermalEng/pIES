@@ -1,9 +1,9 @@
 """全周期已物化序列公共契约(0.8 切片 E)。
 
-为后续 GeneratorProvider 服务的最小确定性物化逻辑，只处理非预测
-来源（constant/data_repeat）；data_predict 声明式进入
+为 GeneratorProvider 服务的最小确定性物化逻辑，只处理非预测
+来源（constant/data_repeat）；data_predict 声明式记入
 ``MaterializedSet.pending_predict``（保留固定资源身份），不物化、
-不跳过、不伪装完成。
+不跳过、不伪装完成；预测训练与生成不属于物化阶段。
 
 输入只消费 ``ValidatedAssemblyArtifact``（已签发事实）与调用方按
 canonical 绑定 ``content.object_id``（字符串）显式传入的只读字节；
@@ -37,8 +37,8 @@ class MaterializedSeries:
     ``values`` 按 step 0 起连续排列，长度恒等于 ``point_count``；
     ``source`` 固定追溯（constant 无外部引用，data_repeat/data_predict
     记 object_id）。``mode`` 为 constant、data_repeat、data_predict
-    三者之一；本阶段物化仍只产出前两者，data_predict 由后续预测
-    完成值以同一类型进入。
+    三者之一；物化只产出前两者，data_predict 完成值以同一类型进入
+    （训练与生成不属于物化阶段）。
     """
 
     device: str
@@ -82,12 +82,13 @@ class MaterializedSeries:
 
 @dataclass(frozen=True, slots=True)
 class MaterializedSet:
-    """本阶段物化返回边界（不可变值对象）。
+    """物化返回边界（不可变值对象）。
 
     ``series`` 仅含非预测来源（按 device/interface 确定性排序）；
-    ``pending_predict`` 为声明但本阶段不物化的预测绑定
-    （{device, interface, target_type, object_id}，同序排列），后续
-    generator 消费。series 为空且 pending 非空时不代表“已全部完成”。
+    ``pending_predict`` 为声明但不物化的预测绑定
+    （{device, interface, target_type, object_id}，同序排列），是上游
+    序列准备结果，不传入 Generator。series 为空且 pending 非空时不代表
+    “已全部完成”。
     """
 
     series: tuple[MaterializedSeries, ...] = ()
