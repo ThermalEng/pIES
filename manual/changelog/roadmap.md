@@ -84,7 +84,7 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 目标：基于现有任务幂等、租约、fencing 和迟到写入拒绝，将其执行载荷切换到新计算链。
 
 1. 在已经固定规范文本与校验回执二件套的现有 `CalcSnapshot` 上，继续以对象 ID 固定资源，并固定 generator/solver/executor/result adapter 精确版本、单位、种子、选项和容差。
-2. Worker 启动时验证快照所需依赖；在调用 Generator 之前，先编排届时已定义的公开预测能力，依据冻结的 `CalculationConfig` 与固定资源生成完整的 `data_predict` `MaterializedSeries`、训练产物引用和回执；Worker 不直接实现训练算法、不解释预测业务；任务执行只编排 generator/runtime/result adapter；不得新增命令拼接、`assembly.plan` 或函数名子进程旁路；实现多 `data_predict` 的阶段二循环（0 或 1 个时阶段一结果即最终结果；多于 1 个时以首轮结果重建预测目标与计算模型并迭代求解，按公开容差与最大迭代数收敛）。
+2. Worker 启动时验证快照所需依赖；当需要预测值时，Worker/application 用例先编排公开的预测能力，依据冻结的 `CalculationConfig` 与固定资源生成完整的 `data_predict` `MaterializedSeries`、训练产物引用和回执，再编排 generator/runtime/result adapter；Worker 不自行训练、不解释模型、不绕过公开入口；不得新增命令拼接、`assembly.plan` 或函数名子进程旁路；实现多 `data_predict` 的阶段二循环（0 或 1 个时阶段一结果即最终结果；多于 1 个时以首轮结果重建预测目标与计算模型并迭代求解，按公开容差与最大迭代数收敛）。
 3. 每个 attempt 封存 Solver Bundle、ExecutionReceipt、必要的 stdout/stderr 日志节选、声明输出记录和统一结果；历史结果只按该快照解释。
 
 退出标准：至少一个受支持 solver 通过 Docker 任务端到端算例；未校验输入、缺失依赖和任何非新计算链路径都不能进入执行。

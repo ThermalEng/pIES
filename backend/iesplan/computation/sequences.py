@@ -1,9 +1,9 @@
-"""全周期已物化序列公共契约(0.8 切片 E)。
+"""全周期已物化序列公共契约。
 
-为 GeneratorProvider 服务的最小确定性物化逻辑，只处理非预测
-来源（constant/data_repeat）；data_predict 声明式记入
-``MaterializedSet.pending_predict``（保留固定资源身份），不物化、
-不跳过、不伪装完成；预测训练与生成不属于物化阶段。
+非预测准备器的最小确定性物化逻辑，只处理 constant/data_repeat；
+data_predict 待完成目标记入 ``MaterializedSet.pending_predict``
+（保留固定资源身份），不物化、不跳过、不伪装完成；预测训练与
+完整预测序列生成不属于本函数。
 
 输入只消费 ``ValidatedAssemblyArtifact``（已签发事实）与调用方按
 canonical 绑定 ``content.object_id``（字符串）显式传入的只读字节；
@@ -37,8 +37,8 @@ class MaterializedSeries:
     ``values`` 按 step 0 起连续排列，长度恒等于 ``point_count``；
     ``source`` 固定追溯（constant 无外部引用，data_repeat/data_predict
     记 object_id）。``mode`` 为 constant、data_repeat、data_predict
-    三者之一；物化只产出前两者，data_predict 完成值以同一类型进入
-    （训练与生成不属于物化阶段）。
+    三者之一；本函数只产出前两者，data_predict 完成值以同一类型进入
+    （训练与完整预测序列生成不属于本函数）。
     """
 
     device: str

@@ -35,7 +35,7 @@
 | `CalculationConfig` | 在计算阶段选择，包含预测算法与参数、generator、solver、精度、求解选项、收敛条件、种子和输出请求 |
 | GeneratorDescriptor | 支持装配 schema、所选计算能力和 solver，且与 `CalculationConfig` 一致；属 provider 静态事实，不作为每次生成参数 |
 
-五项输入均来自可信上游，生成器不重复验证已签发的装配、设备贡献、财务快照或序列，不做内容摘要。Generator 只接受完整的 `MaterializedSeries`；`data_predict` 在物化阶段只形成 `pending_predict`（上游序列准备结果，不传入 Generator），需要其值即输入不完整，明确拒绝。不得为五项输入再建包装层。
+五项输入均来自可信上游，生成器不重复验证已签发的装配、设备贡献、财务快照或序列，不做内容摘要。Generator 只接收已完成的 `MaterializedSeries`；上游非预测序列准备若产生待预测目标，它还不是 `MaterializedSeries`，不能传给 Generator，必须由未来公开预测能力完成后再传入；需要其值即输入不完整，明确拒绝。不得为五项输入再建包装层。
 
 ## 输出
 
