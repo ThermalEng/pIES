@@ -40,6 +40,8 @@ from iesplan.computation import (
     ComputationUnavailableError,
     ComputeResult,
     ExecutionReceipt,
+    ExecutorDescriptor,
+    ExecutorProvider,
     GeneratorDescriptor,
     GeneratorProvider,
     MaterializedSeries,
@@ -180,19 +182,36 @@ class _GeneratorOnly:
         raise ComputationUnavailableError(reason="no-provider")
 
 
-class _RuntimeOnly:
-    """仅实现 SolverRuntime 的最小替身(无任何算法逻辑)。"""
+class _ExecutorOnly:
+    """仅实现 ExecutorProvider 的最小替身(无任何算法逻辑)。"""
+
+    @property
+    def descriptor(self) -> ExecutorDescriptor:
+        return ExecutorDescriptor(
+            executor_id="t.executor",
+            version="1.0.0",
+            executables=("t.exe@1.0.0",),
+        )
 
     @property
     def ref(self) -> str:
-        return "ies.solver.highs@1.7.2"
+        return "t.executor@1.0.0"
 
     def available(self) -> bool:
         return False
 
+    def execute(
+        self, command: Mapping[str, object], workdir: str
+    ) -> tuple[ExecutionReceipt, Mapping[str, bytes]]:
+        raise ComputationUnavailableError(reason="no-executor")
+
+
+class _RuntimeOnly:
+    """仅实现 SolverRuntime 的最小替身(无任何算法逻辑)。"""
+
     def run(
-        self, bundle: SolverBundle
-    ) -> tuple[ExecutionReceipt, Mapping[str, object]]:
+        self, bundle: SolverBundle, executor: ExecutorProvider
+    ) -> tuple[ExecutionReceipt, Mapping[str, bytes]]:
         raise ComputationUnavailableError(reason="no-provider")
 
 
@@ -209,34 +228,52 @@ class _AdapterOnly:
 
 
 def test_protocols_are_runtime_checkable_shapes() -> None:
-    """三协议为运行时 Protocol; 各自独立替身只通过自身结构判定。"""
-    gen, runtime, adapter = _GeneratorOnly(), _RuntimeOnly(), _AdapterOnly()
+    """四协议为运行时 Protocol; 各自独立替身只通过自身结构判定。"""
+    gen = _GeneratorOnly()
+    exe = _ExecutorOnly()
+    runtime = _RuntimeOnly()
+    adapter = _AdapterOnly()
     assert isinstance(gen, GeneratorProvider)
+    assert not isinstance(gen, ExecutorProvider)
     assert not isinstance(gen, SolverRuntime)
     assert not isinstance(gen, ResultAdapter)
+    assert isinstance(exe, ExecutorProvider)
+    assert not isinstance(exe, GeneratorProvider)
+    assert not isinstance(exe, SolverRuntime)
+    assert not isinstance(exe, ResultAdapter)
+    assert exe.descriptor.ref == exe.ref
     assert isinstance(runtime, SolverRuntime)
     assert not isinstance(runtime, GeneratorProvider)
+    assert not isinstance(runtime, ExecutorProvider)
     assert not isinstance(runtime, ResultAdapter)
     assert isinstance(adapter, ResultAdapter)
     assert not isinstance(adapter, GeneratorProvider)
+    assert not isinstance(adapter, ExecutorProvider)
     assert not isinstance(adapter, SolverRuntime)
     assert not isinstance(object(), GeneratorProvider)
+    assert not isinstance(object(), ExecutorProvider)
     assert not isinstance(object(), SolverRuntime)
     assert not isinstance(object(), ResultAdapter)
 
 
 def test_protocol_methods_match_constitution_boundaries() -> None:
-    """宪法 §4.5 方法形状: generate/run/adapt 的参数与产出符合三段边界。"""
+    """宪法 §4.5 方法形状: generate/execute/run/adapt 的参数与产出符合边界。"""
     import inspect
 
     assert list(inspect.signature(GeneratorProvider.generate).parameters) == [
         "self", "artifact", "models", "series", "finance", "config",
     ]
-    assert list(inspect.signature(_RuntimeOnly.run).parameters) == ["self", "bundle"]
+    assert list(inspect.signature(ExecutorProvider.execute).parameters) == [
+        "self", "command", "workdir",
+    ]
+    assert list(inspect.signature(_RuntimeOnly.run).parameters) == [
+        "self", "bundle", "executor",
+    ]
     assert list(inspect.signature(_AdapterOnly.adapt).parameters) == [
         "self", "bundle", "receipt", "outputs",
     ]
     assert isinstance(_GeneratorOnly(), GeneratorProvider)
+    assert isinstance(_ExecutorOnly(), ExecutorProvider)
     assert isinstance(_RuntimeOnly(), SolverRuntime)
     assert isinstance(_AdapterOnly(), ResultAdapter)
     assert _GeneratorOnly().descriptor.ref == _GeneratorOnly().ref
@@ -253,9 +290,10 @@ def test_unavailable_error_semantics() -> None:
     with pytest.raises(ComputationUnavailableError):
         gen.generate(_artifact(), {}, (), _finance(), config)
     with pytest.raises(ComputationUnavailableError):
-        runtime.run(_manifest())
+        runtime.run(_manifest(), _ExecutorOnly())
     receipt = ExecutionReceipt(
-        bundle_id="bundle-1", generator_ref="g", solver_ref="s", status="failed",
+        bundle_id="bundle-1", generator_ref="g", solver_ref="s",
+        executor_ref="e", executable_ref="x", status="failed",
     )
     with pytest.raises(ComputationUnavailableError):
         adapter.adapt(_manifest(), receipt, {})
@@ -272,6 +310,7 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
     assert config.outputs == ("out",)
     receipt = ExecutionReceipt(
         bundle_id="bundle-1", generator_ref="g", solver_ref="s",
+        executor_ref="e", executable_ref="x",
         status="succeeded", exit_code=0, detail={"stdout": "ok"},
     )
     for obj in (manifest, result, config, receipt):

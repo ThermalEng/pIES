@@ -39,6 +39,7 @@ from iesplan.modeling import DeviceMathContribution
 
 if TYPE_CHECKING:
     from iesplan.computation.generators.descriptor import GeneratorDescriptor
+    from iesplan.computation.runtime.descriptor import ExecutorDescriptor
 
 #: 公开计算配置 schema(进入业务事实前须校验字头)。
 CALCULATION_CONFIG_SCHEMA = "ies.calculation-config"
@@ -143,30 +144,55 @@ class GeneratorProvider(Protocol):
 
 
 @runtime_checkable
-class SolverRuntime(Protocol):
-    """求解执行能力(0.8 未实现: 仅形状, 无实现)。
+class ExecutorProvider(Protocol):
+    """受控执行能力(首个真实实现随 0.9-B 落地)。
 
-    受控执行层: 只校验 Bundle schema/清单/规范路径并执行其中的结构化命令
-    (数据结构, 非 shell 字符串)。不读取装配语义、不构造数学问题、不解释
-    设备类型、不修正输入文件。
+    把稳定 executable ID 映射到隔离运行方式：消费结构化命令（参数数组，
+    非 shell 字符串）与调用方已准备的运行目录，返回回执与声明输出原始
+    字节。不解释命令业务，不读取装配语义，不启动 shell。
     """
 
     @property
+    def descriptor(self) -> ExecutorDescriptor:
+        """公开能力描述符(与 ``ref`` 单一来源；类型仅静态引用，避免循环导入)。"""
+        ...
+
+    @property
     def ref(self) -> str:
-        """求解器精确引用(``<solver_id>@<version>`` 形态)。"""
+        """执行器精确引用(``<executor_id>@<version>`` 形态，与描述符单一来源)。"""
         ...
 
     def available(self) -> bool:
-        """该 runtime 当前是否可用(无实现时恒为 False 语义)。"""
+        """该 provider 当前是否可用。"""
         ...
 
-    def run(
-        self, bundle: SolverBundle
-    ) -> tuple[ExecutionReceipt, Mapping[str, object]]:
-        """执行 Bundle 中的结构化命令, 返回 ``(回执, 原始输出)``。
+    def execute(
+        self, command: Mapping[str, object], workdir: str
+    ) -> tuple[ExecutionReceipt, Mapping[str, bytes]]:
+        """在已准备运行目录中执行结构化命令，返回 ``(回执, 声明输出字节)``。
 
-        成功或失败都尽量形成回执; 无可用实现时抛
-        ``ComputationUnavailableError``。
+        ``command`` 即 manifest 中的结构化命令（含硬资源声明）；
+        ``workdir`` 为调用方已准备的隔离运行目录。成功或失败都尽量形成
+        回执；执行前拒绝不得启动进程。
+        """
+        ...
+
+
+@runtime_checkable
+class SolverRuntime(Protocol):
+    """求解执行交接入口(只固定入口形状，无执行实现)。
+
+    受控执行层：用给定 executor 执行 Bundle 中的结构化命令，不读取装配
+    语义、不构造数学问题、不解释设备类型。实际执行实现随 0.9-B 落地；
+    本切片不提供任何实现，不启动 subprocess。
+    """
+
+    def run(
+        self, bundle: SolverBundle, executor: ExecutorProvider
+    ) -> tuple[ExecutionReceipt, Mapping[str, bytes]]:
+        """用给定 executor 执行 Bundle，返回 ``(回执, 声明输出字节)``。
+
+        成功或失败都尽量形成回执。
         """
         ...
 
@@ -607,21 +633,31 @@ class SolverBundle:
 class ExecutionReceipt:
     """求解执行回执(证据, 非可变运行日志索引)。
 
-    记录 Bundle/实现标识、进程协议结果(退出码/终止)与结构化执行状态;
-    ``detail`` 承载 stdout/stderr 节选、资源统计等只读执行事实。
-    ``success_exit_codes`` 只表示进程协议成功; 不可行/无界等业务状态由
-    结果适配器读取求解器输出后映射, 不在此猜测。
+    记录 Bundle/实现标识（含实际使用的 executor 与 executable 精确引用）、
+    进程协议结果(退出码/终止)与结构化执行状态; ``detail`` 承载
+    stdout/stderr 节选、资源统计等只读执行事实。``success_exit_codes``
+    只表示进程协议成功; 不可行/无界等业务状态由结果适配器读取求解器
+    输出后映射, 不在此猜测。
     """
 
     bundle_id: str = ""
     generator_ref: str = ""
     solver_ref: str = ""
+    executor_ref: str = ""
+    executable_ref: str = ""
     status: str = ""
     exit_code: int | None = None
     detail: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for name in ("bundle_id", "generator_ref", "solver_ref", "status"):
+        for name in (
+            "bundle_id",
+            "generator_ref",
+            "solver_ref",
+            "executor_ref",
+            "executable_ref",
+            "status",
+        ):
             if not getattr(self, name):
                 raise ValueError(f"回执缺必需字段: {name}")
         if self.exit_code is not None and not isinstance(self.exit_code, int):
@@ -636,6 +672,8 @@ class ExecutionReceipt:
             "bundle_id": self.bundle_id,
             "generator_ref": self.generator_ref,
             "solver_ref": self.solver_ref,
+            "executor_ref": self.executor_ref,
+            "executable_ref": self.executable_ref,
             "status": self.status,
             "exit_code": self.exit_code,
             "detail": thaw_json_value(self.detail),
@@ -692,6 +730,7 @@ __all__ = [
     "CalculationConfig",
     "ComputeResult",
     "ExecutionReceipt",
+    "ExecutorProvider",
     "GeneratorProvider",
     "check_provider_ref",
     "ResultAdapter",

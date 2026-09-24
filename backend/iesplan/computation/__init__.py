@@ -16,10 +16,13 @@
   ``validate_calculation_config``(实现见 ``config``);
 - 序列物化: ``MaterializedSeries`` / ``MaterializedSet`` /
   ``materialize_non_predictive_series``(实现见 ``sequences``);
-- 边界协议与载体: ``GeneratorProvider`` / ``SolverRuntime`` /
-  ``ResultAdapter`` / ``CalculationConfig`` / ``SolverBundleManifest`` /
-  ``SolverBundle`` / ``ExecutionReceipt`` / ``ComputeResult``
-  (宪法 §4.5 三段式边界);
+- 边界协议与载体: ``GeneratorProvider`` / ``ExecutorProvider`` /
+  ``SolverRuntime`` / ``ResultAdapter`` / ``CalculationConfig`` /
+  ``SolverBundleManifest`` / ``SolverBundle`` / ``ExecutionReceipt`` /
+  ``ComputeResult``(宪法 §4.5 三段式边界);
+- 执行器独立注册: ``ExecutorDescriptor`` / ``ExecutorRegistry`` /
+  ``build_executor_registry``(实现见 ``runtime``，本切片无真实
+  executor 与执行实现);
 - 首个真实生成器: ``HighsMilpProvider`` /
   ``HIGHS_MILP_PROVIDER``(实现见 ``generators.highs_milp``);
 - 共享校验: ``check_provider_ref``;
@@ -61,6 +64,7 @@ from iesplan.computation.protocols import (
     CalculationConfig,
     ComputeResult,
     ExecutionReceipt,
+    ExecutorProvider,
     GeneratorProvider,
     ResultAdapter,
     SolverBundle,
@@ -73,6 +77,11 @@ from iesplan.computation.registry import (
     AlgorithmSpec,
     get_algorithm,
     list_algorithms,
+)
+from iesplan.computation.runtime import (
+    ExecutorDescriptor,
+    ExecutorRegistry,
+    build_executor_registry,
 )
 from iesplan.computation.sequences import (
     MaterializedSeries,
@@ -94,6 +103,9 @@ __all__ = [
     "ComputationUnavailableError",
     "ComputeResult",
     "ExecutionReceipt",
+    "ExecutorDescriptor",
+    "ExecutorProvider",
+    "ExecutorRegistry",
     "GeneratorDescriptor",
     "GeneratorProvider",
     "GeneratorRegistry",
@@ -104,6 +116,7 @@ __all__ = [
     "SolverBundle",
     "SolverBundleManifest",
     "SolverRuntime",
+    "build_executor_registry",
     "build_project_model",
     "build_registry",
     "check_provider_ref",
