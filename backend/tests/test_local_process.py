@@ -790,18 +790,18 @@ def test_output_bytes_exact_and_over() -> None:
 
 
 def test_big_file_not_fully_read() -> None:
-    """10MB 超限文件被排除，小文件照常收录（有界读取）。"""
+    """10MB 超限文件耗尽字节预算且不读入；后续小文件无字节资格。"""
     receipt, outputs = _files_run(
         [("output/big.bin", 10 * 1024 * 1024), ("output/small.json", 10)],
         {"max_output_files": 16, "max_output_bytes": 1_048_576},
     )
     assert receipt.status == "output_protocol_failed"
-    assert "超过上限" in receipt.error
-    assert list(outputs) == ["output/small.json"]
+    assert "总字节超过上限" in receipt.error
+    assert outputs == {}
 
 
 def test_big_first_small_later_counts_once() -> None:
-    """超大文件在前：总量按 stat 累计，小文件仍可收录，计数不重置。"""
+    """超大文件排序在前：小文件不得因大文件未收录重获字节预算。"""
     receipt, outputs = _files_run(
         [("output/big.bin", 200), ("output/small.json", 10)],
         {"max_output_files": 2, "max_output_bytes": 100},
@@ -809,16 +809,16 @@ def test_big_first_small_later_counts_once() -> None:
     assert receipt.status == "output_protocol_failed"
     assert "总字节超过上限" in receipt.error
     assert "文件数超过上限" not in receipt.error
-    assert list(outputs) == ["output/small.json"]
+    assert outputs == {}
 
 
 def test_undeclared_file_consumes_count_quota() -> None:
-    """未声明文件同样占文件数配额：1 声明 + 1 未声明在配额 1 下超限。"""
+    """未声明节点排序在前且文件上限为 1：声明节点无槽位不得收录。"""
     bundle = _runtime_bundle(
         outputs=[{"path": "output/a.json", "media_type": "application/json",
                   "required": False}],
         arguments=[HELPER, "write-files",
-                   "output/a.json=10", "output/sneaky.bin=10"],
+                   "output/a.json=10", "output/0sneaky.bin=10"],
     )
     policy = DeploymentPolicy(
         executables=(HELPER_REF,), environment_vars=(),
@@ -831,7 +831,8 @@ def test_undeclared_file_consumes_count_quota() -> None:
     assert receipt.status == "output_protocol_failed"
     assert "文件数超过上限" in receipt.error
     assert "未声明输出" in receipt.error
-    assert list(outputs) == ["output/a.json"]
+    assert "0sneaky.bin" in receipt.error
+    assert outputs == {}
 
 
 def test_total_bytes_over_with_each_under() -> None:

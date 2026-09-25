@@ -372,47 +372,50 @@ class SolverRuntime:
         manifest: SolverBundleManifest,
         nodes: list[tuple[str, str, int]],
     ) -> tuple[dict[str, bytes], list[str]]:
-        """按 manifest 顺序有界收集声明输出。
+        """按节点排序单调分配预算并有界收集声明输出。
 
-        配额按扫描到的实际节点事实判定：文件数覆盖全部非输入、非目录
-        节点，字节总量按全部普通文件的 lstat 大小累计；未声明、不可读
-        或超限未收录的文件同样占配额，不腾出计数。只收集普通文件
-        （符号链接、目录与特殊文件跳过，缺必需项由 ``missing`` 判定）；
+        对扫描到的全部实际节点按相对路径稳定排序，基于同一序列一次
+        性分配预算：节点序号占文件槽位（超 ``max_output_files`` 后无槽
+        位），普通文件按 lstat 大小单调累计字节（累计超
+        ``max_output_bytes`` 后无字节资格）；未声明、特殊、symlink、
+        不可读或过大未收录的节点照样消耗预算，不回退、不腾出。只有同
+        时取得槽位与字节资格的声明普通文件才有界读取进入 outputs；
         每个文件至多按其 stat 大小读取，大文件不读入内存。
         """
         collected: dict[str, bytes] = {}
         errors: list[str] = []
         max_files = self._policy.max_output_files
         budget = self._policy.max_output_bytes
-        by_path = {rel: (kind, size) for rel, kind, size in nodes}
+        ordered = sorted(nodes, key=lambda node: node[0])
+        declared = {str(entry["path"]) for entry in manifest.outputs}
         total_bytes = sum(
-            size for _, kind, size in nodes if kind == "regular"
+            size for _, kind, size in ordered if kind == "regular"
         )
-        if len(nodes) > max_files:
+        if len(ordered) > max_files:
             errors.append(
-                f"输出文件数超过上限 {max_files}（实际 {len(nodes)}）"
+                f"输出文件数超过上限 {max_files}（实际 {len(ordered)}）"
             )
         if total_bytes > budget:
             errors.append(
                 f"输出总字节超过上限 {budget}（实际 {total_bytes}）"
             )
-        remaining = budget
-        for entry in manifest.outputs:
-            path = str(entry["path"])
-            node = by_path.get(path)
-            if node is None or node[0] != "regular":
+        used_bytes = 0
+        for index, (rel, kind, size) in enumerate(ordered):
+            has_slot = index < max_files
+            has_bytes = True
+            if kind == "regular":
+                has_bytes = used_bytes + size <= budget
+                used_bytes += size
+            if not has_slot or not has_bytes:
                 continue
-            if len(collected) >= max_files:
-                continue
-            if node[1] > remaining:
+            if kind != "regular" or rel not in declared:
                 continue
             try:
-                data = self._read_sized(os.path.join(root, path), node[1])
+                data = self._read_sized(os.path.join(root, rel), size)
             except OSError:
-                errors.append(f"声明输出不可读: {path!r}")
+                errors.append(f"声明输出不可读: {rel!r}")
                 continue
-            collected[path] = data
-            remaining -= len(data)
+            collected[rel] = data
         return collected, errors
 
     @staticmethod
