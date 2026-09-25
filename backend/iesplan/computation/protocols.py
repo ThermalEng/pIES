@@ -684,9 +684,9 @@ def _check_timestamp(value: object, name: str) -> datetime:
 class ProcessOutcome:
     """一次受控进程执行的最小实际执行事实（生产者 ExecutorProvider）。
 
-    只含进程真实产生或观测到的事实：退出码与终止信号恰有一个有值
-    （取消/隔离终止除外：停止即无退出事实，两者皆空）、终止原因
-    （封闭集合，与退出事实一致）、开始/结束时间（带时区的
+    只含进程真实产生或观测到的事实：退出码与终止信号恰有一个有值、
+    终止原因（封闭集合，与退出事实一致；取消/隔离终止保留实际回收
+    到的退出码或信号，原因仍记停止）、开始/结束时间（带时区的
     ISO 8601，按 UTC 比较且开始不晚于结束）、stdout/stderr 原始字节
     及其截断事实，以及已实施的资源事实映射（本切片无真实资源实施时
     为空映射，不得伪造）。不含回执身份、业务状态或输出文件字节；
@@ -718,10 +718,7 @@ class ProcessOutcome:
             raise TypeError("signal_number 须为正整数或 None（不接受布尔值）")
         if self.termination_reason not in TERMINATION_REASONS:
             raise ValueError(f"终止原因非法: {self.termination_reason!r}")
-        if self.termination_reason in ("cancelled", "fenced"):
-            if self.exit_code is not None or self.signal_number is not None:
-                raise ValueError("取消/隔离终止不得携带退出码与信号")
-        elif (self.exit_code is None) == (self.signal_number is None):
+        if (self.exit_code is None) == (self.signal_number is None):
             raise ValueError("exit_code 与 signal_number 须恰有一个有值")
         if self.termination_reason == "exited" and self.exit_code is None:
             raise ValueError("exited 须对应 exit_code")
@@ -757,8 +754,9 @@ class ExecutionReceipt:
     唯一签发者为执行层。记录回执唯一标识、Bundle/装配/计算配置/
     attempt 身份（非空不透明字符串）、实现标识（generator/solver/
     executor/executable/result adapter 精确引用，形态见
-    ``check_provider_ref``）、进程协议结果(退出码与终止信号恰有一个有值，
-    取消/隔离停止时两者皆空、封闭终止原因、带时区起止时间)与结构化执行状态；
+    ``check_provider_ref``）、进程协议结果(退出码与终止信号恰有一个有值、
+    取消/隔离停止同样保留实际退出事实、封闭终止原因、带时区起止时间)
+    与结构化执行状态；
     ``stdout``/``stderr`` 为解码文本（``*_truncated`` 记录是否被限长截断），
     ``outputs`` 为已核对的声明输出清单（路径/媒体类型/
     实际字节数/是否必需），``policy_evaluated`` 为本次执行门禁所依据
@@ -767,11 +765,11 @@ class ExecutionReceipt:
     ``success_exit_codes`` 只表示进程协议成功; 不可行/无界等业务状态
     由结果适配器读取求解器输出后映射, 不在此猜测。``status`` 只取
     ``RECEIPT_STATUSES`` 七种；未执行回执（``policy_rejected``）不得
-    携带退出码/信号/起止时间/终止原因，停止回执（``cancelled``/
-    ``fenced``）只带停止原因、不携带退出码与信号（运行中停止保留真实
-    起止时间，启动前停止起止时间为空），已执行回执必须携带合法起止
-    时间与退出事实，不伪造；``timed_out`` 与 ``timeout`` 原因互相蕴含，
-    不得出现自相矛盾事实。
+    携带退出码/信号/起止时间/终止原因；停止回执（``cancelled``/
+    ``fenced``）带停止原因：启动前停止不带退出事实与起止时间，
+    运行中停止保留实际退出码/信号恰一项，且起止时间成对、合法、
+    有序。已执行回执必须携带合法起止时间与退出事实，不伪造；
+    ``timed_out`` 与 ``timeout`` 原因互相蕴含，不得出现自相矛盾事实。
     """
 
     schema: str = EXECUTION_RECEIPT_SCHEMA
@@ -856,8 +854,16 @@ class ExecutionReceipt:
             ):
                 raise ValueError("未执行回执不得携带退出码/信号/起止时间")
         elif self.status in ("cancelled", "fenced"):
-            if self.exit_code is not None or self.signal_number is not None:
-                raise ValueError("取消/隔离回执不得携带退出码与信号")
+            if not self.started_at and not self.ended_at:
+                if self.exit_code is not None or self.signal_number is not None:
+                    raise ValueError("启动前停止回执不得携带退出码与信号")
+            else:
+                started = _check_timestamp(self.started_at, "started_at")
+                ended = _check_timestamp(self.ended_at, "ended_at")
+                if started > ended:
+                    raise ValueError("started_at 不得晚于 ended_at")
+                if (self.exit_code is None) == (self.signal_number is None):
+                    raise ValueError("运行中停止回执须保留退出码与信号恰一项")
         else:
             if (self.exit_code is None) == (self.signal_number is None):
                 raise ValueError("已执行回执的退出码与信号须恰有一个有值")

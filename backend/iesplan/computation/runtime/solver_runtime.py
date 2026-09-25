@@ -58,11 +58,13 @@ class SolverRuntime:
     """通用求解执行编排（组合根持有，Worker 经 application 调用）。
 
     构造依赖已发布的 ``ExecutorRegistry`` 与 ``DeploymentPolicy``；
-    ``run`` 每次调用建立独立临时工作区，结束后清理。执行前拒绝一律
-    返回 ``policy_rejected`` 回执且不调用 executor；executor 调用后
-    的非零退出、必需输出缺失、未声明输出分别形成明确回执，不回退、
-    不切换 executor、不伪造成功；只有无法建立可信回执的基础设施错误
-    （工作区不可建、executor 抛异常、清理失败）才向上传播异常。
+    ``run`` 每次调用建立独立临时工作区，结束后清理。门禁或执行器解析
+    失败返回 ``policy_rejected`` 回执且不调用 executor；启动前停止
+    （含 provider 启动瞬间观测到的停止，此时进程必然未启动）返回
+    ``cancelled``/``fenced`` 未执行回执；executor 调用后的非零退出、
+    必需输出缺失、未声明输出分别形成明确回执，不回退、不切换
+    executor、不伪造成功；只有无法建立可信回执的基础设施错误
+    （工作区不可建、executor 抛非停止异常、清理失败）才向上传播异常。
     """
 
     __slots__ = ("_registry", "_policy")
@@ -92,8 +94,10 @@ class SolverRuntime:
         """执行完整 Bundle，返回 ``(唯一回执, 已核对声明输出字节)``。
 
         ``stop`` 为调用方停止探针：启动前已停止即不启动进程，直接签发
-        ``cancelled``/``fenced`` 回执；运行中停止由 provider 观测并终止
-        进程组。状态优先级：真实超时 → ``timed_out`` 为主状态；主进程
+        ``cancelled``/``fenced`` 回执（含 provider 启动瞬间观测到的停止，
+        此时进程必然未启动，收口为同一未执行回执而非异常）；运行中停止
+        由 provider 观测并终止进程组。状态优先级：真实超时 → ``timed_out``
+        为主状态；主进程
         退出后仍有组成员被强制收口 → ``process_failed``
         （``group_terminated`` 不得签发 ``succeeded``）；运行中停止 →
         ``cancelled``/``fenced`` 为主状态；输出边界问题追加进 ``error``
@@ -155,7 +159,19 @@ class SolverRuntime:
         root = tempfile.mkdtemp(prefix="ies-runtime-")
         try:
             self._prepare_workdir(root, bundle, command)
-            outcome = provider.execute(command, root, stop=stop)
+            try:
+                outcome = provider.execute(command, root, stop=stop)
+            except ComputationUnavailableError as exc:
+                if exc.reason not in ("cancelled", "fenced"):
+                    raise
+                return self._unexecuted(
+                    bundle,
+                    attempt,
+                    provider.ref,
+                    str(executable_ref),
+                    str(exc),
+                    status=exc.reason,
+                ), {}
             if not isinstance(outcome, ProcessOutcome):
                 raise TypeError(
                     "executor 须返回 ProcessOutcome，"
@@ -233,8 +249,13 @@ class SolverRuntime:
         manifest = bundle.manifest
         declared = {entry["path"]: entry for entry in manifest.outputs}
         input_paths = {entry["path"] for entry in manifest.inputs}
-        boundary_errors = self._scan_workdir(root, declared, input_paths)
-        collected, collect_errors = self._collect_declared(root, manifest)
+        nodes, scan_errors = self._scan_output_nodes(
+            root, declared, input_paths
+        )
+        boundary_errors = scan_errors
+        collected, collect_errors = self._collect_declared(
+            root, manifest, nodes
+        )
         boundary_errors.extend(collect_errors)
         success_codes = tuple(
             command.get("success_exit_codes", _DEFAULT_SUCCESS_EXIT_CODES)
@@ -307,107 +328,108 @@ class SolverRuntime:
         )
         return receipt, collected
 
-    def _scan_workdir(
+    def _scan_output_nodes(
         self,
         root: str,
         declared: Mapping[str, object],
         input_paths: set[str],
-    ) -> list[str]:
-        """扫描工作区：符号链接、特殊文件与未声明文件均为输出边界违规。
+    ) -> tuple[list[tuple[str, str, int]], list[str]]:
+        """扫描工作区输出节点事实。
 
-        目录跳过（不计文件数），输入文件跳过（不计输出配额）。
+        返回 ``([(相对路径, 类型, 字节数)], 违规)``；类型为
+        ``"regular"``/``"special"``/``"symlink"``，字节数仅普通文件取
+        lstat 事实。目录与输入跳过（不计配额）。符号链接、特殊文件与
+        未声明文件记违规，但节点仍保留供配额统计。
         """
+        nodes: list[tuple[str, str, int]] = []
         errors: list[str] = []
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             for name in list(dirnames) + filenames:
                 full = os.path.join(dirpath, name)
                 rel = os.path.relpath(full, root)
                 try:
-                    mode = os.lstat(full).st_mode
+                    info = os.lstat(full)
                 except OSError:
                     continue
+                mode = info.st_mode
+                if stat.S_ISDIR(mode) or rel in input_paths:
+                    continue
                 if stat.S_ISLNK(mode):
+                    nodes.append((rel, "symlink", 0))
                     errors.append(f"工作区存在符号链接: {rel!r}")
-                    continue
-                if stat.S_ISDIR(mode):
-                    continue
-                if not stat.S_ISREG(mode):
+                elif not stat.S_ISREG(mode):
+                    nodes.append((rel, "special", 0))
                     errors.append(f"工作区存在特殊文件: {rel!r}")
-                    continue
-                if rel not in declared and rel not in input_paths:
-                    errors.append(f"未声明输出: {rel!r}")
-        return errors
+                else:
+                    nodes.append((rel, "regular", info.st_size))
+                    if rel not in declared:
+                        errors.append(f"未声明输出: {rel!r}")
+        return nodes, errors
 
     def _collect_declared(
         self,
         root: str,
         manifest: SolverBundleManifest,
+        nodes: list[tuple[str, str, int]],
     ) -> tuple[dict[str, bytes], list[str]]:
         """按 manifest 顺序有界收集声明输出。
 
-        只收集普通文件：符号链接、目录与特殊文件跳过（扫描阶段已记录，
-        缺必需项由 ``missing`` 判定）；文件数与总字节受策略配额约束，
-        超限文件不进入 outputs；读取按剩余预算分块，超限部分不读入。
+        配额按扫描到的实际节点事实判定：文件数覆盖全部非输入、非目录
+        节点，字节总量按全部普通文件的 lstat 大小累计；未声明、不可读
+        或超限未收录的文件同样占配额，不腾出计数。只收集普通文件
+        （符号链接、目录与特殊文件跳过，缺必需项由 ``missing`` 判定）；
+        每个文件至多按其 stat 大小读取，大文件不读入内存。
         """
         collected: dict[str, bytes] = {}
         errors: list[str] = []
         max_files = self._policy.max_output_files
         budget = self._policy.max_output_bytes
+        by_path = {rel: (kind, size) for rel, kind, size in nodes}
+        total_bytes = sum(
+            size for _, kind, size in nodes if kind == "regular"
+        )
+        if len(nodes) > max_files:
+            errors.append(
+                f"输出文件数超过上限 {max_files}（实际 {len(nodes)}）"
+            )
+        if total_bytes > budget:
+            errors.append(
+                f"输出总字节超过上限 {budget}（实际 {total_bytes}）"
+            )
         remaining = budget
-        count_limited = False
-        bytes_limited = False
         for entry in manifest.outputs:
             path = str(entry["path"])
-            full = os.path.join(root, path)
-            try:
-                mode = os.lstat(full).st_mode
-            except OSError:
+            node = by_path.get(path)
+            if node is None or node[0] != "regular":
                 continue
-            if not stat.S_ISREG(mode):
+            if len(collected) >= max_files:
                 continue
-            if len(collected) + 1 > max_files:
-                if not count_limited:
-                    errors.append(
-                        f"输出文件数超过上限 {max_files}: {path!r}"
-                    )
-                    count_limited = True
+            if node[1] > remaining:
                 continue
             try:
-                data, over = self._read_bounded(full, remaining)
+                data = self._read_sized(os.path.join(root, path), node[1])
             except OSError:
                 errors.append(f"声明输出不可读: {path!r}")
-                continue
-            if over:
-                if not bytes_limited:
-                    errors.append(
-                        f"输出总字节超过上限 {budget}: {path!r}"
-                    )
-                    bytes_limited = True
                 continue
             collected[path] = data
             remaining -= len(data)
         return collected, errors
 
     @staticmethod
-    def _read_bounded(full: str, remaining: int) -> tuple[bytes | None, bool]:
-        """有界读取文件：返回 ``(数据, 是否超限)``，超限部分不读入。
-
-        至多读取 ``remaining + 1`` 字节用于判定；IO 错误抛 ``OSError``。
-        """
+    def _read_sized(full: str, size: int) -> bytes:
+        """按 stat 大小有界读取文件内容；IO 错误抛 ``OSError``。"""
         chunks: list[bytes] = []
         total = 0
         with open(full, "rb") as handle:
-            while True:
+            while total < size:
                 piece = handle.read(
-                    min(_OUTPUT_READ_CHUNK_BYTES, remaining + 1 - total)
+                    min(_OUTPUT_READ_CHUNK_BYTES, size - total)
                 )
                 if not piece:
                     break
                 chunks.append(piece)
                 total += len(piece)
-                if total > remaining:
-                    return None, True
-        return b"".join(chunks), False
+        return b"".join(chunks)
 
     def _unexecuted(
         self,

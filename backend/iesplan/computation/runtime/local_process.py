@@ -318,9 +318,10 @@ class LocalProcessProvider:
         在启动前拒绝。子进程工作目录为 ``workdir`` 下命令声明目录；
         环境只含显式基线与命令环境键，不继承宿主环境。``stop`` 为调用方
         停止探针：启动前已停止即不启动进程；运行中首次观测到停止即终止
-        整组并记 ``cancelled``/``fenced``（停止优先于超时迟到；回收用
-        的迟到退出码不记录、不覆盖停止原因）。监督单位是完整进程组：
-        主进程退出后仍有成员即
+        整组并记 ``cancelled``/``fenced``（停止优先于超时迟到；实际
+        回收到的退出码或信号如实保留，迟到退出码不改写停止主状态）。
+        无 ``timeout_seconds`` 声明时，有停止探针仍有界轮询等待；
+        监督单位是完整进程组：主进程退出后仍有成员即
         强制收口并记 ``group_terminated``（保留主进程实际退出码，不伪造
         信号）；超时后即使主进程响应 TERM，宽限期内仍观察整个组。二进制
         无法启动、进程组未能终止、排空证据不完整等无法建立可信执行事实
@@ -400,11 +401,13 @@ class LocalProcessProvider:
             if hit is not None:
                 stopped = hit
                 break
-            if deadline is None:
+            if deadline is None and stop is None:
                 returncode = proc.wait()
                 break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = (
+                None if deadline is None else deadline - time.monotonic()
+            )
+            if remaining is not None and remaining <= 0:
                 hit = read_stop_reason(stop)
                 if hit is not None:
                     stopped = hit
@@ -413,7 +416,9 @@ class LocalProcessProvider:
                 break
             try:
                 returncode = proc.wait(
-                    timeout=min(remaining, _STOP_POLL_SECONDS)
+                    timeout=_STOP_POLL_SECONDS
+                    if remaining is None or remaining > _STOP_POLL_SECONDS
+                    else remaining
                 )
                 break
             except subprocess.TimeoutExpired:
@@ -451,9 +456,8 @@ class LocalProcessProvider:
             exit_code = returncode
             signal_number = None
         if stopped is not None:
-            # 停止即无退出事实：回收用的返回码不记录，只记停止原因。
-            exit_code = None
-            signal_number = None
+            # 运行中停止保留实际回收到的退出码或信号，原因仍记停止；
+            # 迟到退出码不改写停止主状态。
             termination_reason = stopped
         elif timed_out:
             termination_reason = "timeout"

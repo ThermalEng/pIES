@@ -486,13 +486,31 @@ def test_receipt_refs_status_and_executed_consistency() -> None:
     assert stopped.started_at == ""
     midrun = _receipt(
         status="cancelled", termination_reason="cancelled", exit_code=None,
+        signal_number=15,
     )
-    assert midrun.started_at != "" and midrun.signal_number is None
-    with pytest.raises(ValueError, match="不得携带退出码与信号"):
-        _receipt(status="cancelled", termination_reason="cancelled")
-    with pytest.raises(ValueError, match="不得携带退出码与信号"):
+    assert midrun.started_at != "" and midrun.exit_code is None
+    with pytest.raises(ValueError, match="启动前停止回执不得携带"):
+        _receipt(status="cancelled", termination_reason="cancelled",
+                 exit_code=0, started_at="", ended_at="")
+    with pytest.raises(ValueError, match="启动前停止回执不得携带"):
         _receipt(status="fenced", termination_reason="fenced",
-                 signal_number=9)
+                 signal_number=9, started_at="", ended_at="")
+    with pytest.raises(ValueError, match="运行中停止回执须保留"):
+        _receipt(status="cancelled", termination_reason="cancelled",
+                 exit_code=None)
+    with pytest.raises(ValueError, match="时间戳"):
+        _receipt(status="cancelled", termination_reason="cancelled",
+                 exit_code=None, signal_number=15, started_at="",
+                 ended_at="2026-09-24T00:00:01Z")
+    with pytest.raises(ValueError, match="时间戳"):
+        _receipt(status="fenced", termination_reason="fenced",
+                 exit_code=None, signal_number=15,
+                 started_at="not-a-time", ended_at="2026-09-24T00:00:01Z")
+    with pytest.raises(ValueError, match="不得晚于"):
+        _receipt(status="cancelled", termination_reason="cancelled",
+                 exit_code=None, signal_number=15,
+                 started_at="2026-09-24T00:00:02Z",
+                 ended_at="2026-09-24T00:00:01Z")
     with pytest.raises(ValueError, match="fenced 状态须与 fenced 原因一致"):
         _receipt(status="fenced", termination_reason="cancelled",
                  exit_code=None)
