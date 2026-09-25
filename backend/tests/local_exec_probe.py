@@ -68,6 +68,45 @@ def _cmd_spawn_child(args: list[str]) -> int:
     return 0
 
 
+def _cmd_spawn_and_exit(args: list[str]) -> int:
+    """派生 sleep 子进程（继承管道）后立即正常退出；监督器须收口残留组。"""
+    child = subprocess.Popen([sys.executable, __file__, "sleep", args[0]])
+    sys.stdout.write(json.dumps({"child_pid": child.pid}))
+    sys.stdout.flush()
+    return 0
+
+
+def _cmd_spawn_trap(args: list[str]) -> int:
+    """派生忽略 TERM 的 sleep 子进程；自己捕获 TERM 立即退出。
+
+    用法：spawn-trap <子秒> <父秒>；监督器超时后父响应 TERM、子须被 KILL。
+    """
+    child = subprocess.Popen(
+        [sys.executable, __file__, "sleep", args[0], "ignore-term"]
+    )
+    sys.stdout.write(json.dumps({"child_pid": child.pid}))
+    sys.stdout.flush()
+
+    def _trap_exit(signum, frame):
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _trap_exit)
+    time.sleep(float(args[1]))
+    return 0
+
+
+def _cmd_sleep_with_extra(args: list[str]) -> int:
+    """先写未声明文件再长睡；超时与输出违规同时发生时的探针。"""
+    target = args[0]
+    parent = os.path.dirname(target)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(target, "wb") as handle:
+        handle.write(b"extra")
+    time.sleep(float(args[1]))
+    return 0
+
+
 def _cmd_big_output(args: list[str]) -> int:
     """向 stdout/stderr 各写指定字节（限长与无死锁探针）。"""
     total = int(args[0])
@@ -105,7 +144,10 @@ _MODES = {
     "exit": _cmd_exit,
     "sigterm-self": _cmd_sigterm_self,
     "sleep": _cmd_sleep,
+    "sleep-with-extra": _cmd_sleep_with_extra,
     "spawn-child": _cmd_spawn_child,
+    "spawn-and-exit": _cmd_spawn_and_exit,
+    "spawn-trap": _cmd_spawn_trap,
     "big-output": _cmd_big_output,
     "env": _cmd_env,
     "cwd": _cmd_cwd,

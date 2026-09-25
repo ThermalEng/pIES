@@ -24,7 +24,8 @@
   ``ExecutorDescriptor`` / ``ExecutorRegistry`` /
   ``build_executor_registry`` / ``AttemptContext`` /
   ``DeploymentPolicy`` / ``SolverRuntime`` / ``LocalProcessProvider`` /
-  ``LocalExecutable`` / ``validate_highs_arguments``(实现见 ``runtime``);
+  ``LocalExecutable``(实现见 ``runtime``; 实现常量与具体参数验证
+  不提升到本门面);
 - 首个真实生成器: ``HighsMilpProvider`` /
   ``HIGHS_MILP_PROVIDER``(实现见 ``generators.highs_milp``);
 - 共享校验: ``check_provider_ref``;
@@ -88,14 +89,10 @@ from iesplan.computation.runtime import (
     DeploymentPolicy,
     ExecutorDescriptor,
     ExecutorRegistry,
-    HIGHS_EXECUTABLE_REF,
-    MAX_STREAM_BYTES,
-    TERMINATE_GRACE_SECONDS,
     LocalExecutable,
     LocalProcessProvider,
     SolverRuntime,
     build_executor_registry,
-    validate_highs_arguments,
 )
 from iesplan.computation.sequences import (
     MaterializedSeries,
@@ -127,9 +124,7 @@ __all__ = [
     "GeneratorDescriptor",
     "GeneratorProvider",
     "GeneratorRegistry",
-    "HIGHS_EXECUTABLE_REF",
     "HighsMilpProvider",
-    "MAX_STREAM_BYTES",
     "MaterializedSeries",
     "MaterializedSet",
     "ProcessOutcome",
@@ -138,11 +133,9 @@ __all__ = [
     "SolverBundle",
     "SolverBundleManifest",
     "SolverRuntime",
-    "TERMINATE_GRACE_SECONDS",
     "LocalExecutable",
     "LocalProcessProvider",
     "build_executor_registry",
-    "validate_highs_arguments",
     "build_project_model",
     "build_registry",
     "check_provider_ref",

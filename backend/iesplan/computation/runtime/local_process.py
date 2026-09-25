@@ -1,10 +1,15 @@
-"""本地进程执行器：受信任 executable 到真实受控进程的映射与监督。
+"""本地进程执行器：受信任 executable 到真实受控进程组的映射与监督。
 
 ``LocalProcessProvider`` 是首个真实 ``ExecutorProvider``：把稳定
 executable 精确引用映射到部署配置给出的固定绝对二进制路径，以参数
-数组启动单个受控进程并监督其结束。职责止于：精确映射、无 shell
-启动、新进程组、空白基线环境、真实超时（TERM 整组→固定宽限→KILL
-整组→回收）、流式限长采集 stdout/stderr、如实返回 ``ProcessOutcome``。
+数组启动单个受控进程并监督其完整进程组直至结束。职责止于：精确映射、
+无 shell 启动、新进程组、空白基线环境、真实超时与组收口（TERM 整组→
+固定宽限轮询→KILL 残留→确认组消失）、流式限长采集 stdout/stderr、
+如实返回 ``ProcessOutcome``（含截断事实）。
+
+监督单位是完整进程组：主进程退出后仍有组成员即立即收口；超时后即使
+主进程响应 TERM，宽限期内仍观察整个组。主动 setsid 逃逸进程组不在
+本层处理范围（网络/容器/cgroup 隔离属后续切片），此处不声称能处理。
 
 明确不实施：网络隔离、容器隔离、CPU/内存/OOM 判定、显式取消与
 Worker 取消/fencing（``resource_usage`` 为空映射，回执与代码均不声称
@@ -18,6 +23,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,17 +32,20 @@ from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.protocols import ProcessOutcome, check_provider_ref
 from iesplan.computation.runtime.descriptor import ExecutorDescriptor
 
-#: 超时后等进程组退出的固定宽限（秒）；到期即强制终止整组。
+#: 超时/收口时等进程组退出的固定宽限（秒）；到期即强制终止整组。
 TERMINATE_GRACE_SECONDS = 2.0
 
 #: stdout/stderr 每流独立字节上限；超限后继续排空丢弃，避免子进程阻塞。
 MAX_STREAM_BYTES = 1_048_576
 
+#: 进程组存活轮询间隔（秒）；组消失即立即继续，非固定等待。
+_GROUP_POLL_SECONDS = 0.01
+
 #: 管道排空单次读取块大小。
 _DRAIN_CHUNK_BYTES = 65_536
 
-#: 排空线程回收等待上限（秒；进程组已终止时排空会立即结束，
-#: 仅逃逸进程组这种本层不支持的情形才会触及该上限）。
+#: 排空线程回收等待上限（秒；进程组收口后排空必读到 EOF，
+#: 触及该上限说明证据不完整，直接抛基础设施异常）。
 _DRAIN_JOIN_TIMEOUT_SECONDS = 10.0
 
 #: 首个 HiGHS executable 精确引用（须与生成器声明一致，测试负责盯防）。
@@ -91,10 +100,15 @@ def validate_highs_arguments(arguments: tuple[str, ...]) -> None:
 
 @dataclass(frozen=True, slots=True)
 class LocalExecutable:
-    """单个 executable 的部署绑定：精确引用到固定绝对二进制路径。"""
+    """单个 executable 的部署绑定：精确引用、固定绝对二进制路径与参数验证。
+
+    三者收敛在同一绑定内，不设平行映射，避免错配；无验证函数即构造
+    拒绝，不默认放行任何形状。
+    """
 
     ref: str = ""
     path: str = ""
+    argv_validator: Callable[[tuple[str, ...]], None] | None = None
 
     def __post_init__(self) -> None:
         check_provider_ref(self.ref, "executable")
@@ -104,10 +118,17 @@ class LocalExecutable:
             raise ValueError(
                 f"二进制路径须为固定绝对路径，禁止 PATH 发现: {self.path!r}"
             )
+        if self.argv_validator is None or not callable(self.argv_validator):
+            raise ValueError(f"executable 缺参数验证绑定: {self.ref!r}")
 
 
-def _drain_pipe(fd: int, chunks: list[bytes], cap: int) -> None:
-    """排空管道：存满上限后继续读取丢弃，避免子进程写阻塞。"""
+def _drain_pipe(
+    fd: int, chunks: list[bytes], cap: int, truncated: list[bool]
+) -> None:
+    """排空管道：存满上限后继续读取丢弃，避免子进程写阻塞。
+
+    实际发生丢弃时置 ``truncated[0]``，调用方如实记录截断事实。
+    """
     total = 0
     while True:
         try:
@@ -120,15 +141,45 @@ def _drain_pipe(fd: int, chunks: list[bytes], cap: int) -> None:
             keep = data[: cap - total]
             chunks.append(keep)
             total += len(keep)
+        else:
+            truncated[0] = True
 
 
-def _signal_group(pid: int, sig: int) -> bool:
-    """向进程组发信号；组已消失返回 False（进程自行退出，无需终止）。"""
+def _signal_group(pgid: int, sig: int) -> bool:
+    """向进程组发信号；组已消失返回 False（自行退出，无需终止）。"""
     try:
-        os.killpg(pid, sig)
+        os.killpg(pgid, sig)
     except ProcessLookupError:
         return False
     return True
+
+
+def _group_alive(pgid: int) -> bool:
+    """进程组是否仍有存活成员（信号 0 探测；无权限即视为存活）。"""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _close_group(pgid: int) -> None:
+    """收口完整进程组：TERM 整组→宽限轮询→KILL 残留→确认组消失。
+
+    组消失即立即返回，不固定等待；KILL 后仍存活（如不可杀状态）则
+    直接返回，调用方按证据完整性决定是否抛异常。
+    """
+    _signal_group(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+    while _group_alive(pgid) and time.monotonic() < deadline:
+        time.sleep(_GROUP_POLL_SECONDS)
+    if _group_alive(pgid):
+        _signal_group(pgid, signal.SIGKILL)
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+        while _group_alive(pgid) and time.monotonic() < deadline:
+            time.sleep(_GROUP_POLL_SECONDS)
 
 
 def _now_iso() -> str:
@@ -139,13 +190,12 @@ def _now_iso() -> str:
 class LocalProcessProvider:
     """本地受信任进程执行器（部署配置持有，组合根注册）。
 
-    构造绑定 ``descriptor``、精确引用到固定二进制的映射、可选空白基线
-    环境与各 executable 的参数验证函数；无验证绑定的引用一律拒绝，
-    默认不放行任何形状。``execute`` 只做本 executable 边界必需的门禁，
-    不重复校验已类型化 Bundle，不解释业务语义。
+    构造绑定 ``descriptor``、精确引用到固定二进制与参数验证的收敛
+    绑定，以及可选空白基线环境。``execute`` 只做本 executable 边界
+    必需的门禁，不重复校验已类型化 Bundle，不解释业务语义。
     """
 
-    __slots__ = ("_descriptor", "_binaries", "_base_environ", "_argv_validators")
+    __slots__ = ("_descriptor", "_bindings", "_base_environ")
 
     def __init__(
         self,
@@ -153,19 +203,20 @@ class LocalProcessProvider:
         executables: tuple[LocalExecutable, ...] = (),
         *,
         base_environ: Mapping[str, str] = {},
-        argv_validators: Mapping[str, Callable[[tuple[str, ...]], None]]
-        | None = None,
     ) -> None:
         if not isinstance(descriptor, ExecutorDescriptor):
             raise TypeError(
                 "descriptor 须为 ExecutorDescriptor，"
                 f"得到 {type(descriptor).__name__}"
             )
-        binaries = {item.ref: item.path for item in executables}
-        if set(binaries) != set(descriptor.executables):
+        refs = [item.ref for item in executables]
+        if len(set(refs)) != len(refs):
+            raise ValueError(f"executable 绑定引用重复: {refs!r}")
+        bindings = {item.ref: item for item in executables}
+        if set(bindings) != set(descriptor.executables):
             raise ValueError(
-                "二进制映射引用须与描述符 executables 恰好一致: "
-                f"映射 {sorted(binaries)!r} x 描述符 "
+                "绑定引用须与描述符 executables 恰好一致: "
+                f"绑定 {sorted(bindings)!r} x 描述符 "
                 f"{sorted(descriptor.executables)!r}"
             )
         if not isinstance(base_environ, Mapping) or any(
@@ -174,11 +225,9 @@ class LocalProcessProvider:
             for key, value in base_environ.items()
         ):
             raise TypeError("base_environ 须为字符串映射")
-        validators = dict(argv_validators) if argv_validators is not None else {}
         self._descriptor = descriptor
-        self._binaries = binaries
+        self._bindings = bindings
         self._base_environ = dict(base_environ)
-        self._argv_validators = validators
 
     @property
     def descriptor(self) -> ExecutorDescriptor:
@@ -191,39 +240,40 @@ class LocalProcessProvider:
         return self._descriptor.ref
 
     def available(self) -> bool:
-        """构造绑定成功即当前可用（版本自检归组合根 readiness）。"""
-        return True
+        """逐项检查绑定二进制为常规可执行文件（精确版本自检归后续）。"""
+        return all(
+            os.path.isfile(item.path) and os.access(item.path, os.X_OK)
+            for item in self._bindings.values()
+        )
 
     def execute(
         self, command: Mapping[str, object], workdir: str
     ) -> ProcessOutcome:
-        """启动受控进程并监督至结束，返回最小过程结果。
+        """启动受控进程组并监督至组消失，返回最小过程结果。
 
-        精确引用查固定二进制（禁止 PATH 发现）；无验证绑定的引用
+        精确引用查固定二进制（禁止 PATH 发现）；参数验证来自绑定，
         在启动前拒绝。子进程工作目录为 ``workdir`` 下命令声明目录；
-        环境只含显式基线与命令环境键，不继承宿主环境。二进制无法
-        启动等无法建立可信执行事实的错误抛基础设施异常，不伪造回执。
+        环境只含显式基线与命令环境键，不继承宿主环境。监督单位是
+        完整进程组：主进程退出后仍有成员即收口；超时后即使主进程
+        响应 TERM，宽限期内仍观察整个组。二进制无法启动、排空证据
+        不完整等无法建立可信执行事实的错误抛基础设施异常，不伪造。
         """
         executable_ref = str(command["executable"])
         try:
-            binary = self._binaries[executable_ref]
+            binding = self._bindings[executable_ref]
         except KeyError:
             raise ComputationUnavailableError(
                 f"executable 未映射到本地二进制: {executable_ref!r}",
                 reason="unknown-executable",
             ) from None
-        validator = self._argv_validators.get(executable_ref)
-        if validator is None:
-            raise ValueError(
-                f"executable 缺参数验证绑定，拒绝启动: {executable_ref!r}"
-            )
-        validator(tuple(command["arguments"]))  # type: ignore[arg-type]
+        assert binding.argv_validator is not None
+        binding.argv_validator(tuple(command["arguments"]))  # type: ignore[arg-type]
         run_cwd = os.path.normpath(
             os.path.join(workdir, str(command.get("working_directory", ".")))
         )
         environ = dict(self._base_environ)
         environ.update(dict(command.get("environment", {})))  # type: ignore[arg-type]
-        argv = [binary, *command["arguments"]]  # type: ignore[misc]
+        argv = [binding.path, *command["arguments"]]  # type: ignore[misc]
         timeout = command.get("timeout_seconds")
         started_at = _now_iso()
         try:
@@ -242,16 +292,19 @@ class LocalProcessProvider:
                 reason="executor-start-failed",
             ) from exc
         assert proc.stdout is not None and proc.stderr is not None
+        pgid = proc.pid
         out_chunks: list[bytes] = []
         err_chunks: list[bytes] = []
+        out_truncated: list[bool] = [False]
+        err_truncated: list[bool] = [False]
         out_drain = threading.Thread(
             target=_drain_pipe,
-            args=(proc.stdout.fileno(), out_chunks, MAX_STREAM_BYTES),
+            args=(proc.stdout.fileno(), out_chunks, MAX_STREAM_BYTES, out_truncated),
             daemon=True,
         )
         err_drain = threading.Thread(
             target=_drain_pipe,
-            args=(proc.stderr.fileno(), err_chunks, MAX_STREAM_BYTES),
+            args=(proc.stderr.fileno(), err_chunks, MAX_STREAM_BYTES, err_truncated),
             daemon=True,
         )
         out_drain.start()
@@ -265,16 +318,27 @@ class LocalProcessProvider:
             )
         except subprocess.TimeoutExpired:
             timed_out = True
-            if _signal_group(proc.pid, signal.SIGTERM):
-                try:
-                    returncode = proc.wait(timeout=TERMINATE_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    _signal_group(proc.pid, signal.SIGKILL)
-                    returncode = proc.wait()
-            else:
-                returncode = proc.wait()
+            _close_group(pgid)
+            returncode = proc.wait()
+        else:
+            if _group_alive(pgid):
+                _close_group(pgid)
         out_drain.join(timeout=_DRAIN_JOIN_TIMEOUT_SECONDS)
         err_drain.join(timeout=_DRAIN_JOIN_TIMEOUT_SECONDS)
+        evidence_complete = not (out_drain.is_alive() or err_drain.is_alive())
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+        try:
+            proc.stderr.close()
+        except OSError:
+            pass
+        if not evidence_complete:
+            raise ComputationUnavailableError(
+                "执行证据不完整：日志排空线程未结束",
+                reason="executor-evidence-incomplete",
+            )
         ended_at = _now_iso()
         if returncode < 0:
             exit_code: int | None = None
@@ -286,12 +350,16 @@ class LocalProcessProvider:
             exit_code=exit_code,
             signal_number=signal_number,
             termination_reason=(
-                "timeout" if timed_out else ("exited" if exit_code is not None else "signaled")
+                "timeout"
+                if timed_out
+                else ("exited" if exit_code is not None else "signaled")
             ),
             started_at=started_at,
             ended_at=ended_at,
             stdout=b"".join(out_chunks),
             stderr=b"".join(err_chunks),
+            stdout_truncated=out_truncated[0],
+            stderr_truncated=err_truncated[0],
         )
 
 

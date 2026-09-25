@@ -628,6 +628,13 @@ RECEIPT_STATUSES = (
     "timed_out",
 )
 
+#: 终止原因封闭集合（当前真实产生的三种；取消/OOM 等随实现再扩展）。
+TERMINATION_REASONS = (
+    "exited",
+    "signaled",
+    "timeout",
+)
+
 
 def _check_timestamp(value: object, name: str) -> datetime:
     """校验带时区的 ISO 8601 时间戳，返回感知时区的解析值。
@@ -650,10 +657,11 @@ class ProcessOutcome:
     """一次受控进程执行的最小实际执行事实（生产者 ExecutorProvider）。
 
     只含进程真实产生或观测到的事实：退出码与终止信号恰有一个有值、
-    终止原因、开始/结束时间（带时区的 ISO 8601，按 UTC 比较且开始
-    不晚于结束）、stdout/stderr 原始字节，以及已实施的资源事实映射
-    （本切片无真实资源实施时为空映射，不得伪造）。不含回执身份、
-    业务状态或输出文件字节；输出边界由执行层核对。
+    终止原因（封闭集合，与退出事实一致）、开始/结束时间（带时区的
+    ISO 8601，按 UTC 比较且开始不晚于结束）、stdout/stderr 原始字节
+    及其截断事实，以及已实施的资源事实映射（本切片无真实资源实施时
+    为空映射，不得伪造）。不含回执身份、业务状态或输出文件字节；
+    输出边界由执行层核对。
     """
 
     exit_code: int | None = None
@@ -663,6 +671,8 @@ class ProcessOutcome:
     ended_at: str = ""
     stdout: bytes = b""
     stderr: bytes = b""
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
     resource_usage: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -679,8 +689,12 @@ class ProcessOutcome:
             raise TypeError("signal_number 须为正整数或 None（不接受布尔值）")
         if (self.exit_code is None) == (self.signal_number is None):
             raise ValueError("exit_code 与 signal_number 须恰有一个有值")
-        if not isinstance(self.termination_reason, str) or not self.termination_reason:
-            raise ValueError("termination_reason 须为非空字符串")
+        if self.termination_reason not in TERMINATION_REASONS:
+            raise ValueError(f"终止原因非法: {self.termination_reason!r}")
+        if self.termination_reason == "exited" and self.exit_code is None:
+            raise ValueError("exited 须对应 exit_code")
+        if self.termination_reason == "signaled" and self.signal_number is None:
+            raise ValueError("signaled 须对应 signal_number")
         started = _check_timestamp(self.started_at, "started_at")
         ended = _check_timestamp(self.ended_at, "ended_at")
         if started > ended:
@@ -693,6 +707,10 @@ class ProcessOutcome:
             raise TypeError(
                 f"stderr 须为 bytes，得到 {type(self.stderr).__name__}"
             )
+        if not isinstance(self.stdout_truncated, bool):
+            raise TypeError("stdout_truncated 须为布尔值")
+        if not isinstance(self.stderr_truncated, bool):
+            raise TypeError("stderr_truncated 须为布尔值")
         if not isinstance(self.resource_usage, Mapping):
             raise TypeError("resource_usage 须为 Mapping")
         object.__setattr__(
@@ -708,8 +726,9 @@ class ExecutionReceipt:
     attempt 身份（非空不透明字符串）、实现标识（generator/solver/
     executor/executable/result adapter 精确引用，形态见
     ``check_provider_ref``）、进程协议结果(退出码与终止信号恰有一个
-    有值、原因、带时区起止时间)与结构化执行状态；``stdout``/``stderr``
-    为解码文本，``outputs`` 为已核对的声明输出清单（路径/媒体类型/
+    有值、封闭终止原因、带时区起止时间)与结构化执行状态；
+    ``stdout``/``stderr`` 为解码文本（``*_truncated`` 记录是否被限长截断），
+    ``outputs`` 为已核对的声明输出清单（路径/媒体类型/
     实际字节数/是否必需），``policy_evaluated`` 为本次执行门禁所依据
     的部署策略（仅比较上限，不表示已实施隔离），``resource_usage``
     为已实施的资源事实（无实施时为空映射）。
@@ -741,6 +760,8 @@ class ExecutionReceipt:
     error: str = ""
     stdout: str = ""
     stderr: str = ""
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
     outputs: tuple[Mapping[str, object], ...] = ()
     policy_evaluated: Mapping[str, object] = field(default_factory=dict)
     resource_usage: Mapping[str, object] = field(default_factory=dict)
@@ -794,8 +815,15 @@ class ExecutionReceipt:
         else:
             if (self.exit_code is None) == (self.signal_number is None):
                 raise ValueError("已执行回执的退出码与信号须恰有一个有值")
-            if not self.termination_reason:
-                raise ValueError("已执行回执须给出 termination_reason")
+            if self.termination_reason not in TERMINATION_REASONS:
+                raise ValueError(f"终止原因非法: {self.termination_reason!r}")
+            if self.termination_reason == "exited" and self.exit_code is None:
+                raise ValueError("exited 须对应 exit_code")
+            if (
+                self.termination_reason == "signaled"
+                and self.signal_number is None
+            ):
+                raise ValueError("signaled 须对应 signal_number")
             started = _check_timestamp(self.started_at, "started_at")
             ended = _check_timestamp(self.ended_at, "ended_at")
             if started > ended:
@@ -806,6 +834,10 @@ class ExecutionReceipt:
             raise TypeError("stdout 须为字符串")
         if not isinstance(self.stderr, str):
             raise TypeError("stderr 须为字符串")
+        if not isinstance(self.stdout_truncated, bool):
+            raise TypeError("stdout_truncated 须为布尔值")
+        if not isinstance(self.stderr_truncated, bool):
+            raise TypeError("stderr_truncated 须为布尔值")
         object.__setattr__(self, "outputs", _freeze_receipt_outputs(self.outputs))
         if not isinstance(self.policy_evaluated, Mapping):
             raise TypeError("policy_evaluated 须为 Mapping")
@@ -842,6 +874,8 @@ class ExecutionReceipt:
             "error": self.error,
             "stdout": self.stdout,
             "stderr": self.stderr,
+            "stdout_truncated": self.stdout_truncated,
+            "stderr_truncated": self.stderr_truncated,
             "outputs": [_thaw_entry(entry) for entry in self.outputs],
             "policy_evaluated": thaw_json_value(self.policy_evaluated),
             "resource_usage": thaw_json_value(self.resource_usage),

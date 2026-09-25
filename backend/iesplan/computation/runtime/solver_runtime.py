@@ -79,11 +79,13 @@ class SolverRuntime:
     ) -> tuple[ExecutionReceipt, dict[str, bytes]]:
         """执行完整 Bundle，返回 ``(唯一回执, 已核对声明输出字节)``。
 
-        状态优先级：输出边界违规（未声明文件/符号链接/不可读）→
-        ``output_protocol_failed``；过程原因为超时 → ``timed_out``；
-        退出码不在成功集合 → ``process_failed``；必需输出缺失 →
-        ``output_protocol_failed``；否则 ``succeeded``。
-        成功与失败都尽量形成回执；输出映射只含已核对的声明输出。
+        状态优先级：真实超时 → ``timed_out`` 为主状态（输出边界问题
+        仍追加进 ``error`` 供解释，不改写主状态）；非超时执行的输出
+        边界违规（未声明文件/符号链接/不可读）→
+        ``output_protocol_failed``；退出码不在成功集合 →
+        ``process_failed``；必需输出缺失 → ``output_protocol_failed``；
+        否则 ``succeeded``。成功与失败都尽量形成回执；输出映射只含
+        已核对的声明输出。
         """
         if not isinstance(bundle, SolverBundle):
             raise TypeError(
@@ -210,15 +212,24 @@ class SolverRuntime:
         success_codes = tuple(
             command.get("success_exit_codes", _DEFAULT_SUCCESS_EXIT_CODES)
         )
-        if boundary_errors:
-            status = "output_protocol_failed"
-            error = "; ".join(boundary_errors)
-        elif outcome.termination_reason == "timeout":
+        missing = sorted(
+            str(entry["path"])
+            for entry in manifest.outputs
+            if entry["required"] and str(entry["path"]) not in collected
+        )
+        if outcome.termination_reason == "timeout":
             status = "timed_out"
-            error = (
+            parts = [
                 f"执行超时终止: exit_code={outcome.exit_code!r} "
                 f"signal={outcome.signal_number!r}"
-            )
+            ]
+            parts.extend(boundary_errors)
+            if missing:
+                parts.append(f"必需输出缺失: {missing!r}")
+            error = "; ".join(parts)
+        elif boundary_errors:
+            status = "output_protocol_failed"
+            error = "; ".join(boundary_errors)
         elif outcome.exit_code is None:
             status = "process_failed"
             error = (
@@ -231,18 +242,12 @@ class SolverRuntime:
                 f"进程未按协议结束: exit_code={outcome.exit_code!r} "
                 f"reason={outcome.termination_reason!r}"
             )
+        elif missing:
+            status = "output_protocol_failed"
+            error = f"必需输出缺失: {missing!r}"
         else:
-            missing = sorted(
-                str(entry["path"])
-                for entry in manifest.outputs
-                if entry["required"] and str(entry["path"]) not in collected
-            )
-            if missing:
-                status = "output_protocol_failed"
-                error = f"必需输出缺失: {missing!r}"
-            else:
-                status = "succeeded"
-                error = ""
+            status = "succeeded"
+            error = ""
         receipt = self._build_receipt(
             bundle, attempt, provider, command, outcome, status, error, collected
         )
@@ -341,6 +346,8 @@ class SolverRuntime:
             error=error,
             stdout=outcome.stdout.decode("utf-8", errors="replace"),
             stderr=outcome.stderr.decode("utf-8", errors="replace"),
+            stdout_truncated=outcome.stdout_truncated,
+            stderr_truncated=outcome.stderr_truncated,
             outputs=entries,
             policy_evaluated=self._policy.to_dict(),
             resource_usage=dict(outcome.resource_usage),

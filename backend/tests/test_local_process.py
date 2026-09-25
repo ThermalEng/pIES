@@ -25,13 +25,11 @@ from iesplan.computation import (
     ExecutorProvider,
     LocalExecutable,
     LocalProcessProvider,
-    MAX_STREAM_BYTES,
+    ProcessOutcome,
     SolverBundle,
     SolverBundleManifest,
     SolverRuntime,
-    TERMINATE_GRACE_SECONDS,
     build_executor_registry,
-    validate_highs_arguments,
 )
 from iesplan.computation.generators.highs_milp import (
     PROBLEM_PATH,
@@ -40,7 +38,13 @@ from iesplan.computation.generators.highs_milp import (
 from iesplan.computation.generators.highs_milp import (
     SOLVER_REF as GENERATOR_SOLVER_REF,
 )
-from iesplan.computation.runtime.local_process import HIGHS_EXECUTABLE_REF
+from iesplan.computation.protocols import TERMINATION_REASONS
+from iesplan.computation.runtime.local_process import (
+    HIGHS_EXECUTABLE_REF,
+    MAX_STREAM_BYTES,
+    TERMINATE_GRACE_SECONDS,
+    validate_highs_arguments,
+)
 
 HELPER = os.path.join(os.path.dirname(__file__), "local_exec_probe.py")
 HELPER_REF = "t.helper.exec@1.0.0"
@@ -59,18 +63,29 @@ def _helper_validator(arguments: tuple[str, ...]) -> None:
             raise ValueError(f"helper 参数须为字符串: {item!r}")
 
 
-def _provider(**kwargs) -> LocalProcessProvider:
-    """测试 provider：helper 引用到当前解释器绝对路径，无生产默认。"""
-    descriptor = ExecutorDescriptor(
+def _binding(path: str = "") -> LocalExecutable:
+    """测试绑定：helper 引用到给定二进制，参数门禁收敛在同一绑定。"""
+    return LocalExecutable(
+        ref=HELPER_REF,
+        path=path or sys.executable,
+        argv_validator=_helper_validator,
+    )
+
+
+def _descriptor() -> ExecutorDescriptor:
+    return ExecutorDescriptor(
         executor_id=EXECUTOR_ID,
         version=EXECUTOR_VERSION,
         executables=(HELPER_REF,),
     )
+
+
+def _provider(**kwargs) -> LocalProcessProvider:
+    """测试 provider：helper 引用到当前解释器绝对路径，无生产默认。"""
     return LocalProcessProvider(
-        descriptor,
-        (LocalExecutable(ref=HELPER_REF, path=sys.executable),),
+        _descriptor(),
+        (_binding(),),
         base_environ=kwargs.get("base_environ", {}),
-        argv_validators={HELPER_REF: _helper_validator},
     )
 
 
@@ -104,26 +119,45 @@ def test_executable_binding_requires_absolute_path() -> None:
     assert isinstance(_provider(), ExecutorProvider)
 
 
-def test_unmapped_or_unvalidated_executable_rejected_before_spawn() -> None:
-    """未映射引用报基础设施不可用；无验证绑定拒绝启动；均不起进程。"""
+def test_unmapped_executable_rejected_before_spawn(tmp_path) -> None:
+    """未映射引用报基础设施不可用，不起进程。"""
     provider = _provider()
     with pytest.raises(ComputationUnavailableError) as exc_info:
         provider.execute(
             {"executor": EXECUTOR_REF, "executable": "t.other@1.0.0",
              "arguments": []},
-            "/tmp",
+            str(tmp_path),
         )
     assert exc_info.value.reason == "unknown-executable"
-    bare = LocalProcessProvider(
-        provider.descriptor,
-        (LocalExecutable(ref=HELPER_REF, path=sys.executable),),
-    )
+
+
+def test_binding_convergence_and_duplicates() -> None:
+    """绑定缺验证函数或引用重复即构造拒绝，不形成错配 provider。"""
     with pytest.raises(ValueError, match="缺参数验证绑定"):
-        bare.execute(
-            {"executor": EXECUTOR_REF, "executable": HELPER_REF,
-             "arguments": [HELPER, "echo"]},
-            "/tmp",
-        )
+        LocalExecutable(ref=HELPER_REF, path=sys.executable)
+    with pytest.raises(ValueError, match="重复"):
+        LocalProcessProvider(_descriptor(), (_binding(), _binding()))
+    assert _provider().available() is True
+
+
+def test_available_checks_bound_binaries(tmp_path) -> None:
+    """available 逐项检查常规可执行文件；缺失/不可执行即不可用。"""
+    missing = LocalProcessProvider(
+        _descriptor(),
+        (LocalExecutable(
+            ref=HELPER_REF, path="/nonexistent/bin-probe",
+            argv_validator=_helper_validator,
+        ),),
+    )
+    assert missing.available() is False
+    plain = tmp_path / "plain-file"
+    plain.write_bytes(b"x")
+    plain.chmod(0o644)
+    nonexec = LocalProcessProvider(
+        _descriptor(),
+        (_binding(path=str(plain)),),
+    )
+    assert nonexec.available() is False
 
 
 def test_highs_argv_shape_matches_generator() -> None:
@@ -214,6 +248,8 @@ def test_normal_exit_captures_streams(tmp_path) -> None:
     assert outcome.termination_reason == "exited"
     assert outcome.stdout == b"o" * 100
     assert outcome.stderr == b"e" * 100
+    assert outcome.stdout_truncated is False
+    assert outcome.stderr_truncated is False
     assert outcome.started_at.endswith("+00:00")
     assert outcome.started_at <= outcome.ended_at
 
@@ -259,6 +295,23 @@ def test_timeout_ignore_term_escalates_to_kill(tmp_path) -> None:
     assert elapsed < 2.0 + TERMINATE_GRACE_SECONDS + 10.0
 
 
+def _assert_pid_gone(pid: int, label: str) -> None:
+    """确认进程已消失（可收割的僵尸由本进程回收后确认）。"""
+    deadline = time.monotonic() + 10.0
+    while True:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() > deadline:
+            pytest.fail(f"{label}未被回收: {pid}")
+        time.sleep(0.05)
+
+
 def test_spawned_child_reaped_with_group(tmp_path) -> None:
     """派生子进程随整组终止被回收，不留孤儿。"""
     outcome = _run(
@@ -267,19 +320,35 @@ def test_spawned_child_reaped_with_group(tmp_path) -> None:
     )
     assert outcome.termination_reason == "timeout"
     child_pid = json.loads(outcome.stdout.decode("utf-8"))["child_pid"]
-    deadline = time.monotonic() + 10.0
-    while True:
-        try:
-            os.waitpid(child_pid, os.WNOHANG)
-        except ChildProcessError:
-            pass
-        try:
-            os.kill(child_pid, 0)
-        except ProcessLookupError:
-            break
-        if time.monotonic() > deadline:
-            pytest.fail(f"子进程未被回收: {child_pid}")
-        time.sleep(0.05)
+    _assert_pid_gone(child_pid, "子进程")
+
+
+def test_parent_exit_leftover_child_closed_before_return(tmp_path) -> None:
+    """父正常退出、同组子进程长睡且持有管道：返回前组已收口，无固定等待。"""
+    start = time.monotonic()
+    outcome = _run(_provider(), ["spawn-and-exit", "30"], tmp_path)
+    elapsed = time.monotonic() - start
+    assert outcome.exit_code == 0
+    assert outcome.termination_reason == "exited"
+    child_pid = json.loads(outcome.stdout.decode("utf-8"))["child_pid"]
+    _assert_pid_gone(child_pid, "遗留子进程")
+    assert elapsed < 15.0
+
+
+def test_timeout_parent_term_child_ignored_closed_before_return(tmp_path) -> None:
+    """超时后父响应 TERM、子忽略 TERM：宽限后子被 KILL，无固定排流等待。"""
+    start = time.monotonic()
+    outcome = _run(
+        _provider(), ["spawn-trap", "30", "60"], tmp_path,
+        timeout_seconds=2,
+    )
+    elapsed = time.monotonic() - start
+    assert outcome.termination_reason == "timeout"
+    assert outcome.exit_code == 0
+    child_pid = json.loads(outcome.stdout.decode("utf-8"))["child_pid"]
+    _assert_pid_gone(child_pid, "忽略 TERM 的子进程")
+    assert elapsed >= 2.0
+    assert elapsed < 2.0 + TERMINATE_GRACE_SECONDS + 10.0
 
 
 def test_stream_cap_without_deadlock(tmp_path) -> None:
@@ -290,26 +359,25 @@ def test_stream_cap_without_deadlock(tmp_path) -> None:
     assert len(outcome.stderr) == MAX_STREAM_BYTES
     assert outcome.stdout == b"o" * MAX_STREAM_BYTES
     assert outcome.stderr == b"e" * MAX_STREAM_BYTES
+    assert outcome.stdout_truncated is True
+    assert outcome.stderr_truncated is True
 
 
 def test_start_failure_is_infrastructure_error(tmp_path) -> None:
     """二进制无法启动抛基础设施异常，不伪造回执。"""
-    descriptor = ExecutorDescriptor(
-        executor_id=EXECUTOR_ID,
-        version=EXECUTOR_VERSION,
-        executables=(HELPER_REF,),
-    )
     provider = LocalProcessProvider(
-        descriptor,
-        (LocalExecutable(ref=HELPER_REF, path="/nonexistent/bin-probe"),),
-        argv_validators={HELPER_REF: _helper_validator},
+        _descriptor(),
+        (LocalExecutable(
+            ref=HELPER_REF, path="/nonexistent/bin-probe",
+            argv_validator=_helper_validator,
+        ),),
     )
     with pytest.raises(ComputationUnavailableError) as exc_info:
         _run(provider, ["echo"], tmp_path)
     assert exc_info.value.reason == "executor-start-failed"
 
 
-def _runtime_bundle(**command_overrides) -> SolverBundle:
+def _runtime_bundle(outputs=None, **command_overrides) -> SolverBundle:
     command: dict[str, object] = {
         "executor": EXECUTOR_REF,
         "executable": HELPER_REF,
@@ -326,7 +394,9 @@ def _runtime_bundle(**command_overrides) -> SolverBundle:
         },
         inputs=[{"path": "input/problem.mps", "media_type": "application/mps"}],
         command=command,
-        outputs=[
+        outputs=outputs
+        if outputs is not None
+        else [
             {
                 "path": "output/solution.json",
                 "media_type": "application/json",
@@ -361,6 +431,26 @@ def _attempt() -> AttemptContext:
     )
 
 
+def test_termination_reasons_are_closed_and_consistent() -> None:
+    """终止原因封闭且与退出事实一致；伪造 timed_out 即拒绝。"""
+    assert set(TERMINATION_REASONS) == {"exited", "signaled", "timeout"}
+    base = {
+        "started_at": "2026-09-24T00:00:00Z",
+        "ended_at": "2026-09-24T00:00:01Z",
+    }
+    with pytest.raises(ValueError, match="终止原因非法"):
+        ProcessOutcome(exit_code=0, termination_reason="cancelled", **base)
+    with pytest.raises(ValueError, match="须对应 exit_code"):
+        ProcessOutcome(
+            exit_code=None, signal_number=9, termination_reason="exited",
+            **base,
+        )
+    with pytest.raises(ValueError, match="须对应 signal_number"):
+        ProcessOutcome(exit_code=3, termination_reason="signaled", **base)
+    timed = ProcessOutcome(exit_code=0, termination_reason="timeout", **base)
+    assert timed.termination_reason == "timeout"
+
+
 def test_runtime_reports_timeout_receipt() -> None:
     """Runtime 基于真实超时过程签发 timed_out 回执。"""
     receipt, outputs = _runtime(_provider()).run(
@@ -373,6 +463,30 @@ def test_runtime_reports_timeout_receipt() -> None:
     assert receipt.executable_ref == HELPER_REF
     assert receipt.attempt_id == "attempt-9"
     assert receipt.started_at.endswith("Z") and receipt.ended_at.endswith("Z")
+    assert receipt.stdout_truncated is False
+    assert receipt.stderr_truncated is False
+    assert outputs == {}
+
+
+def test_runtime_timeout_keeps_priority_over_output_violations() -> None:
+    """超时且遗留未声明文件/缺必需输出：主状态仍为 timed_out，问题追加。"""
+    receipt, outputs = _runtime(_provider()).run(
+        _runtime_bundle(
+            arguments=[HELPER, "sleep-with-extra", "output/sneaky.bin", "30"],
+            outputs=[
+                {
+                    "path": "output/solution.json",
+                    "media_type": "application/json",
+                    "required": True,
+                }
+            ],
+        ),
+        _attempt(),
+    )
+    assert receipt.status == "timed_out"
+    assert "超时" in receipt.error
+    assert "sneaky.bin" in receipt.error
+    assert "必需输出缺失" in receipt.error
     assert outputs == {}
 
 
