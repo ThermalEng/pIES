@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
@@ -147,6 +147,23 @@ class GeneratorProvider(Protocol):
         ...
 
 
+#: 停止探针：调用方提供的实时信号（取消/租约失效由 Worker 侧产生，
+#: 执行层只消费）。每次调用返回 ``None``（继续）、``"cancelled"``
+#: （用户取消）或 ``"fenced"``（租约失效/被隔离）；其他返回值一律
+#: 视为调用方错误。不读取数据库、不延长租约、不解释 Worker 状态。
+StopProbe = Callable[[], "str | None"]
+
+
+def read_stop_reason(stop: StopProbe | None) -> str | None:
+    """读取停止探针一次；无探针返回 None，非约定返回值即调用方错误。"""
+    if stop is None:
+        return None
+    reason = stop()
+    if reason is not None and reason not in ("cancelled", "fenced"):
+        raise ValueError(f"停止探针返回值非法: {reason!r}")
+    return reason
+
+
 @runtime_checkable
 class ExecutorProvider(Protocol):
     """受控执行能力公开身份与唯一真实调用。
@@ -172,7 +189,11 @@ class ExecutorProvider(Protocol):
         ...
 
     def execute(
-        self, command: Mapping[str, object], workdir: str
+        self,
+        command: Mapping[str, object],
+        workdir: str,
+        *,
+        stop: StopProbe | None = None,
     ) -> ProcessOutcome:
         """在已准备的 Bundle 根目录中执行结构化命令，返回最小过程结果。
 
@@ -180,8 +201,10 @@ class ExecutorProvider(Protocol):
         策略检查）；``workdir`` 为执行层建立的本次调用独立 Bundle 根
         目录，输入已只读写入，输出目录可写；子进程工作目录取
         ``command["working_directory"]``（缺省为根，执行层已预建）。
-        只把已选择的 executable 映射为受控运行方式，返回实际执行事实；
-        不签发 ``ExecutionReceipt``，不读取装配、配置或任务业务语义。
+        ``stop`` 为调用方停止探针：启动前已停止即不启动进程，运行中
+        观测到停止即终止完整进程组并如实记录原因。只把已选择的
+        executable 映射为受控运行方式，返回实际执行事实；不签发
+        ``ExecutionReceipt``，不读取装配、配置或任务业务语义。
         无法建立过程结果的基础设施错误才抛异常。
         """
         ...
@@ -619,21 +642,25 @@ class SolverBundle:
         )
 
 
-#: 回执状态封闭集合（真实产生的五种；取消/OOM 等随实现再扩展）。
+#: 回执状态封闭集合（真实产生的七种；OOM 等随实现再扩展）。
 RECEIPT_STATUSES = (
     "succeeded",
     "policy_rejected",
     "process_failed",
     "output_protocol_failed",
     "timed_out",
+    "cancelled",
+    "fenced",
 )
 
-#: 终止原因封闭集合（当前真实产生的四种；取消/OOM 等随实现再扩展）。
+#: 终止原因封闭集合（当前真实产生的六种；OOM 等随实现再扩展）。
 TERMINATION_REASONS = (
     "exited",
     "signaled",
     "timeout",
     "group_terminated",
+    "cancelled",
+    "fenced",
 )
 
 
@@ -657,8 +684,9 @@ def _check_timestamp(value: object, name: str) -> datetime:
 class ProcessOutcome:
     """一次受控进程执行的最小实际执行事实（生产者 ExecutorProvider）。
 
-    只含进程真实产生或观测到的事实：退出码与终止信号恰有一个有值、
-    终止原因（封闭集合，与退出事实一致）、开始/结束时间（带时区的
+    只含进程真实产生或观测到的事实：退出码与终止信号恰有一个有值
+    （取消/隔离终止除外：停止即无退出事实，两者皆空）、终止原因
+    （封闭集合，与退出事实一致）、开始/结束时间（带时区的
     ISO 8601，按 UTC 比较且开始不晚于结束）、stdout/stderr 原始字节
     及其截断事实，以及已实施的资源事实映射（本切片无真实资源实施时
     为空映射，不得伪造）。不含回执身份、业务状态或输出文件字节；
@@ -688,10 +716,13 @@ class ProcessOutcome:
             or self.signal_number < 1
         ):
             raise TypeError("signal_number 须为正整数或 None（不接受布尔值）")
-        if (self.exit_code is None) == (self.signal_number is None):
-            raise ValueError("exit_code 与 signal_number 须恰有一个有值")
         if self.termination_reason not in TERMINATION_REASONS:
             raise ValueError(f"终止原因非法: {self.termination_reason!r}")
+        if self.termination_reason in ("cancelled", "fenced"):
+            if self.exit_code is not None or self.signal_number is not None:
+                raise ValueError("取消/隔离终止不得携带退出码与信号")
+        elif (self.exit_code is None) == (self.signal_number is None):
+            raise ValueError("exit_code 与 signal_number 须恰有一个有值")
         if self.termination_reason == "exited" and self.exit_code is None:
             raise ValueError("exited 须对应 exit_code")
         if self.termination_reason == "signaled" and self.signal_number is None:
@@ -726,8 +757,8 @@ class ExecutionReceipt:
     唯一签发者为执行层。记录回执唯一标识、Bundle/装配/计算配置/
     attempt 身份（非空不透明字符串）、实现标识（generator/solver/
     executor/executable/result adapter 精确引用，形态见
-    ``check_provider_ref``）、进程协议结果(退出码与终止信号恰有一个
-    有值、封闭终止原因、带时区起止时间)与结构化执行状态；
+    ``check_provider_ref``）、进程协议结果(退出码与终止信号恰有一个有值，
+    取消/隔离停止时两者皆空、封闭终止原因、带时区起止时间)与结构化执行状态；
     ``stdout``/``stderr`` 为解码文本（``*_truncated`` 记录是否被限长截断），
     ``outputs`` 为已核对的声明输出清单（路径/媒体类型/
     实际字节数/是否必需），``policy_evaluated`` 为本次执行门禁所依据
@@ -735,8 +766,10 @@ class ExecutionReceipt:
     为已实施的资源事实（无实施时为空映射）。
     ``success_exit_codes`` 只表示进程协议成功; 不可行/无界等业务状态
     由结果适配器读取求解器输出后映射, 不在此猜测。``status`` 只取
-    ``RECEIPT_STATUSES`` 五种；未执行回执（``policy_rejected``）不得
-    携带退出码/信号/起止时间/终止原因，已执行回执必须携带合法起止
+    ``RECEIPT_STATUSES`` 七种；未执行回执（``policy_rejected``）不得
+    携带退出码/信号/起止时间/终止原因，停止回执（``cancelled``/
+    ``fenced``）只带停止原因、不携带退出码与信号（运行中停止保留真实
+    起止时间，启动前停止起止时间为空），已执行回执必须携带合法起止
     时间与退出事实，不伪造；``timed_out`` 与 ``timeout`` 原因互相蕴含，
     不得出现自相矛盾事实。
     """
@@ -807,6 +840,12 @@ class ExecutionReceipt:
             raise TypeError("termination_reason 须为字符串")
         if (self.status == "timed_out") != (self.termination_reason == "timeout"):
             raise ValueError("timed_out 须与 timeout 原因一致")
+        if (self.status == "fenced") != (self.termination_reason == "fenced"):
+            raise ValueError("fenced 状态须与 fenced 原因一致")
+        if (self.status == "cancelled") != (
+            self.termination_reason == "cancelled"
+        ):
+            raise ValueError("cancelled 状态须与 cancelled 原因一致")
         if self.status == "policy_rejected":
             if (
                 self.exit_code is not None
@@ -816,6 +855,9 @@ class ExecutionReceipt:
                 or self.ended_at
             ):
                 raise ValueError("未执行回执不得携带退出码/信号/起止时间")
+        elif self.status in ("cancelled", "fenced"):
+            if self.exit_code is not None or self.signal_number is not None:
+                raise ValueError("取消/隔离回执不得携带退出码与信号")
         else:
             if (self.exit_code is None) == (self.signal_number is None):
                 raise ValueError("已执行回执的退出码与信号须恰有一个有值")
@@ -971,7 +1013,10 @@ __all__ = [
     "GeneratorProvider",
     "ProcessOutcome",
     "RECEIPT_STATUSES",
+    "StopProbe",
+    "TERMINATION_REASONS",
     "check_provider_ref",
+    "read_stop_reason",
     "ResultAdapter",
     "SolverBundle",
     "SolverBundleManifest",

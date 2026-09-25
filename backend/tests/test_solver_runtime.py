@@ -122,6 +122,8 @@ def _policy(**kwargs) -> DeploymentPolicy:
     kwargs.setdefault("max_memory_mib", 4096)
     kwargs.setdefault("max_cpu_cores", 4)
     kwargs.setdefault("allow_network", False)
+    kwargs.setdefault("max_output_files", 16)
+    kwargs.setdefault("max_output_bytes", 1_048_576)
     return DeploymentPolicy(**kwargs)
 
 
@@ -162,7 +164,7 @@ class _FakeExecutor:
     def available(self) -> bool:
         return True
 
-    def execute(self, command, workdir) -> ProcessOutcome:
+    def execute(self, command, workdir, *, stop=None) -> ProcessOutcome:
         snapshot = dict(command)
         self.calls.append((snapshot, workdir))
         return self._handler(snapshot, workdir)
@@ -579,8 +581,13 @@ def test_constructor_and_input_types_are_checked() -> None:
         runtime.run(_bundle(), object())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="executables 不得为空"):
         DeploymentPolicy(
-            max_timeout_seconds=1, max_memory_mib=1, max_cpu_cores=1
+            max_timeout_seconds=1, max_memory_mib=1, max_cpu_cores=1,
+            max_output_files=1, max_output_bytes=1,
         )
+    with pytest.raises(ValueError, match="max_output_files 须为正整数"):
+        _policy(max_output_files=0)
+    with pytest.raises(ValueError, match="max_output_bytes 须为正整数"):
+        _policy(max_output_bytes=-5)
     with pytest.raises(ValueError, match="attempt 上下文"):
         AttemptContext()
     with pytest.raises(ValueError, match="恰有一个有值"):

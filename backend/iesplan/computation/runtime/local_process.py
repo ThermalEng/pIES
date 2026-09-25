@@ -3,18 +3,18 @@
 ``LocalProcessProvider`` 是首个真实 ``ExecutorProvider``：把稳定
 executable 精确引用映射到部署配置给出的固定绝对二进制路径，以参数
 数组启动单个受控进程并监督其完整进程组直至结束。职责止于：精确映射、
-无 shell 启动、新进程组、空白基线环境、真实超时与组收口（TERM 整组→
-固定宽限轮询→KILL 残留→确认组消失）、流式限长采集 stdout/stderr、
-如实返回 ``ProcessOutcome``（含截断事实）。
+无 shell 启动、新进程组、空白基线环境、调用方停止探针、真实超时与组
+收口（TERM 整组→固定宽限轮询→KILL 残留→确认组消失）、流式限长采集
+stdout/stderr、如实返回 ``ProcessOutcome``（含截断事实）。
 
 监督单位是完整进程组：主进程退出后仍有组成员即立即收口；超时后即使
-主进程响应 TERM，宽限期内仍观察整个组。主动 setsid 逃逸进程组不在
-本层处理范围（网络/容器/cgroup 隔离属后续切片），此处不声称能处理。
+主进程响应 TERM，宽限期内仍观察整个组；运行中观测到停止（取消优先
+于超时迟到）即终止整组。主动 setsid 逃逸进程组不在本层处理范围
+（网络/容器/cgroup 隔离属后续切片），此处不声称能处理。
 
-明确不实施：网络隔离、容器隔离、CPU/内存/OOM 判定、显式取消与
-Worker 取消/fencing（``resource_usage`` 为空映射，回执与代码均不声称
-已实施）；输出文件总量/数量上限。超时需求取命令声明值；命令未声明
-超时则不限时等待。
+明确不实施：网络隔离、容器隔离、CPU/内存/OOM 判定（``resource_usage``
+为空映射，回执与代码均不声称已实施）；输出文件总量/数量上限由执行层
+核对。超时需求取命令声明值；命令未声明超时则不限时等待。
 """
 
 from __future__ import annotations
@@ -29,7 +29,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from iesplan.computation.errors import ComputationUnavailableError
-from iesplan.computation.protocols import ProcessOutcome, check_provider_ref
+from iesplan.computation.protocols import (
+    ProcessOutcome,
+    StopProbe,
+    check_provider_ref,
+    read_stop_reason,
+)
 from iesplan.computation.runtime.descriptor import ExecutorDescriptor
 
 #: 超时/收口时等进程组退出的固定宽限（秒）；到期即强制终止整组。
@@ -40,6 +45,9 @@ MAX_STREAM_BYTES = 1_048_576
 
 #: 进程组存活轮询间隔（秒）；组消失即立即继续，非固定等待。
 _GROUP_POLL_SECONDS = 0.01
+
+#: 运行中等候时的停止/超时轮询间隔（秒）；停止优先于超时迟到。
+_STOP_POLL_SECONDS = 0.05
 
 #: 管道排空单次读取块大小。
 _DRAIN_CHUNK_BYTES = 65_536
@@ -284,20 +292,44 @@ class LocalProcessProvider:
             for item in self._bindings.values()
         )
 
+    @staticmethod
+    def _close_or_raise(
+        pgid: int, proc: subprocess.Popen[bytes]
+    ) -> None:
+        """收口进程组并认领主进程状态；组未消失即抛基础设施异常。"""
+        gone, reaped = _close_group(pgid)
+        _adopt_reaped(proc, reaped)
+        if not gone:
+            raise ComputationUnavailableError(
+                "进程组未能终止：KILL 后仍有活动成员",
+                reason="executor-group-not-terminated",
+            )
+
     def execute(
-        self, command: Mapping[str, object], workdir: str
+        self,
+        command: Mapping[str, object],
+        workdir: str,
+        *,
+        stop: StopProbe | None = None,
     ) -> ProcessOutcome:
         """启动受控进程组并监督至组消失，返回最小过程结果。
 
         精确引用查固定二进制（禁止 PATH 发现）；参数验证来自绑定，
         在启动前拒绝。子进程工作目录为 ``workdir`` 下命令声明目录；
-        环境只含显式基线与命令环境键，不继承宿主环境。监督单位是
-        完整进程组：主进程退出后仍有成员即强制收口并记
-        ``group_terminated``（保留主进程实际退出码，不伪造信号）；
-        超时后即使主进程响应 TERM，宽限期内仍观察整个组。二进制无法
-        启动、进程组未能终止、排空证据不完整等无法建立可信执行事实
+        环境只含显式基线与命令环境键，不继承宿主环境。``stop`` 为调用方
+        停止探针：启动前已停止即不启动进程；运行中首次观测到停止即终止
+        整组并记 ``cancelled``/``fenced``（停止优先于超时迟到；回收用
+        的迟到退出码不记录、不覆盖停止原因）。监督单位是完整进程组：
+        主进程退出后仍有成员即
+        强制收口并记 ``group_terminated``（保留主进程实际退出码，不伪造
+        信号）；超时后即使主进程响应 TERM，宽限期内仍观察整个组。二进制
+        无法启动、进程组未能终止、排空证据不完整等无法建立可信执行事实
         的错误抛基础设施异常，不伪造。
         """
+        if stop is not None and not callable(stop):
+            raise TypeError(
+                f"stop 须为停止探针可调用对象，得到 {type(stop).__name__}"
+            )
         executable_ref = str(command["executable"])
         try:
             binding = self._bindings[executable_ref]
@@ -315,6 +347,12 @@ class LocalProcessProvider:
         environ.update(dict(command.get("environment", {})))  # type: ignore[arg-type]
         argv = [binding.path, *command["arguments"]]  # type: ignore[misc]
         timeout = command.get("timeout_seconds")
+        pre_stop = read_stop_reason(stop)
+        if pre_stop is not None:
+            raise ComputationUnavailableError(
+                f"启动前已停止（{pre_stop}），未启动进程",
+                reason=pre_stop,
+            )
         started_at = _now_iso()
         try:
             proc = subprocess.Popen(
@@ -349,34 +387,46 @@ class LocalProcessProvider:
         )
         out_drain.start()
         err_drain.start()
+        stopped: str | None = None
         timed_out = False
         group_closed = False
-        try:
-            returncode = (
-                proc.wait(timeout=timeout)  # type: ignore[arg-type]
-                if timeout is not None
-                else proc.wait()
-            )
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            gone, reaped = _close_group(pgid)
-            _adopt_reaped(proc, reaped)
-            if not gone:
-                raise ComputationUnavailableError(
-                    "进程组未能终止：KILL 后仍有活动成员",
-                    reason="executor-group-not-terminated",
+        deadline = (
+            time.monotonic() + float(timeout)  # type: ignore[arg-type]
+            if timeout is not None
+            else None
+        )
+        while True:
+            hit = read_stop_reason(stop)
+            if hit is not None:
+                stopped = hit
+                break
+            if deadline is None:
+                returncode = proc.wait()
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                hit = read_stop_reason(stop)
+                if hit is not None:
+                    stopped = hit
+                else:
+                    timed_out = True
+                break
+            try:
+                returncode = proc.wait(
+                    timeout=min(remaining, _STOP_POLL_SECONDS)
                 )
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if stopped is not None:
+            self._close_or_raise(pgid, proc)
             returncode = proc.wait()
-        else:
-            if _group_alive(pgid):
-                gone, reaped = _close_group(pgid)
-                _adopt_reaped(proc, reaped)
-                if not gone:
-                    raise ComputationUnavailableError(
-                        "进程组未能终止：KILL 后仍有活动成员",
-                        reason="executor-group-not-terminated",
-                    )
-                group_closed = True
+        elif timed_out:
+            self._close_or_raise(pgid, proc)
+            returncode = proc.wait()
+        elif _group_alive(pgid):
+            self._close_or_raise(pgid, proc)
+            group_closed = True
         out_drain.join(timeout=_DRAIN_JOIN_TIMEOUT_SECONDS)
         err_drain.join(timeout=_DRAIN_JOIN_TIMEOUT_SECONDS)
         evidence_complete = not (out_drain.is_alive() or err_drain.is_alive())
@@ -400,7 +450,12 @@ class LocalProcessProvider:
         else:
             exit_code = returncode
             signal_number = None
-        if timed_out:
+        if stopped is not None:
+            # 停止即无退出事实：回收用的返回码不记录，只记停止原因。
+            exit_code = None
+            signal_number = None
+            termination_reason = stopped
+        elif timed_out:
             termination_reason = "timeout"
         elif group_closed:
             termination_reason = "group_terminated"

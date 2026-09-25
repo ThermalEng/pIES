@@ -4,7 +4,9 @@
 argv 逐项原样传递且 shell 元字符不执行；非点 working_directory；
 空白环境不泄密；正常/非零/信号退出；超时 TERM 后退出与忽略 TERM 后
 KILL；派生子进程整组回收；stdout/stderr 流式限长且大输出不死锁；
-Runtime 超时/信号回执。不注册 bootstrap/Worker，不碰生产隔离断言。
+Runtime 超时/信号回执；调用方取消/fencing（启动前与运行中）与输出
+数量/总字节上限、特殊文件边界。不注册 bootstrap/Worker，不碰生产
+隔离断言。
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 
 import pytest
@@ -89,7 +92,7 @@ def _provider(**kwargs) -> LocalProcessProvider:
     )
 
 
-def _run(provider, arguments, workdir, **command_overrides) -> object:
+def _run(provider, arguments, workdir, stop=None, **command_overrides) -> object:
     command: dict[str, object] = {
         "executor": EXECUTOR_REF,
         "executable": HELPER_REF,
@@ -99,7 +102,7 @@ def _run(provider, arguments, workdir, **command_overrides) -> object:
         "success_exit_codes": [0],
     }
     command.update(command_overrides)
-    return provider.execute(command, str(workdir))
+    return provider.execute(command, str(workdir), stop=stop)
 
 
 def test_executable_binding_requires_absolute_path() -> None:
@@ -452,6 +455,8 @@ def _runtime(provider) -> SolverRuntime:
         max_memory_mib=4096,
         max_cpu_cores=4,
         allow_network=False,
+        max_output_files=16,
+        max_output_bytes=1_048_576,
     )
     return SolverRuntime(build_executor_registry([provider]), policy)
 
@@ -469,13 +474,20 @@ def test_termination_reasons_are_closed_and_consistent() -> None:
     """终止原因封闭且与退出事实一致；伪造 timed_out 即拒绝。"""
     assert set(TERMINATION_REASONS) == {
         "exited", "signaled", "timeout", "group_terminated",
+        "cancelled", "fenced",
     }
     base = {
         "started_at": "2026-09-24T00:00:00Z",
         "ended_at": "2026-09-24T00:00:01Z",
     }
     with pytest.raises(ValueError, match="终止原因非法"):
+        ProcessOutcome(exit_code=0, termination_reason="bogus", **base)
+    with pytest.raises(ValueError, match="不得携带退出码与信号"):
         ProcessOutcome(exit_code=0, termination_reason="cancelled", **base)
+    with pytest.raises(ValueError, match="不得携带退出码与信号"):
+        ProcessOutcome(signal_number=9, termination_reason="fenced", **base)
+    stopped = ProcessOutcome(termination_reason="cancelled", **base)
+    assert stopped.exit_code is None and stopped.signal_number is None
     with pytest.raises(ValueError, match="须对应 exit_code"):
         ProcessOutcome(
             exit_code=None, signal_number=9, termination_reason="exited",
@@ -553,3 +565,328 @@ def test_runtime_group_terminated_is_never_succeeded() -> None:
     assert receipt.exit_code == 0
     assert receipt.signal_number is None
     assert "强制收口" in receipt.error
+
+
+# ---------------- 0.9-D：调用方取消/fencing 与输出配额 ----------------
+
+def _scripted_stop(script: list) -> object:
+    """按调用次数返回的确定性探针；超界后重复最后一项。"""
+    state = {"n": 0}
+
+    def probe():
+        value = script[min(state["n"], len(script) - 1)]
+        state["n"] += 1
+        return value
+
+    return probe
+
+
+def _spy_popen(monkeypatch) -> list:
+    """记录 Popen 调用；预启动拒绝必须零调用。"""
+    import subprocess as subprocess_mod
+
+    calls: list = []
+    real = subprocess_mod.Popen
+
+    def _spy(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _spy)
+    return calls
+
+
+def test_provider_prestart_stop_raises_without_spawn(tmp_path, monkeypatch) -> None:
+    """启动前取消/fenced 即拒绝，不启动进程。"""
+    for reason in ("cancelled", "fenced"):
+        calls = _spy_popen(monkeypatch)
+        with pytest.raises(ComputationUnavailableError) as exc_info:
+            _run(_provider(), ["sleep", "30"], tmp_path,
+                 stop=lambda r=reason: r)
+        assert exc_info.value.reason == reason
+        assert calls == []
+
+
+def test_provider_stop_shape_rejected(tmp_path) -> None:
+    """探针不可调用或返回值非法即调用方错误，不启动进程。"""
+    with pytest.raises(TypeError, match="停止探针"):
+        _run(_provider(), ["echo", "hi"], tmp_path, stop="cancelled")
+    with pytest.raises(ValueError, match="停止探针返回值非法"):
+        _run(_provider(), ["echo", "hi"], tmp_path,
+             stop=lambda: "bogus")
+
+
+def _midrun_stop_outcome(reason: str, tmp_path) -> object:
+    """运行 0.3 秒后触发停止的真实取消；结果必为该原因。"""
+    flag = threading.Event()
+    timer = threading.Timer(0.3, flag.set)
+    timer.start()
+    try:
+        return _run(
+            _provider(), ["sleep", "30"], tmp_path,
+            timeout_seconds=60,
+            stop=lambda: reason if flag.is_set() else None,
+        )
+    finally:
+        timer.cancel()
+
+
+def test_midrun_cancel_kills_group(tmp_path) -> None:
+    """运行中取消终止完整进程组：停止即无退出事实，且远早于超时结束。"""
+    start = time.monotonic()
+    outcome = _midrun_stop_outcome("cancelled", tmp_path)
+    elapsed = time.monotonic() - start
+    assert outcome.termination_reason == "cancelled"
+    assert outcome.exit_code is None
+    assert outcome.signal_number is None
+    assert elapsed < 30.0
+
+
+def test_midrun_fenced_kills_group(tmp_path) -> None:
+    """运行中 fencing 终止完整进程组：停止即无退出事实。"""
+    outcome = _midrun_stop_outcome("fenced", tmp_path)
+    assert outcome.termination_reason == "fenced"
+    assert outcome.exit_code is None
+    assert outcome.signal_number is None
+
+
+def test_stop_beats_timeout_race(tmp_path) -> None:
+    """超时到期瞬间探针已停止：停止优先，确定性裁决为取消。"""
+    outcome = _run(
+        _provider(), ["sleep", "30"], tmp_path,
+        timeout_seconds=0.2,
+        stop=_scripted_stop([None, "cancelled"]),
+    )
+    assert outcome.termination_reason == "cancelled"
+
+
+def test_inert_probe_normal_run(tmp_path) -> None:
+    """永不触发的探针不影响正常执行。"""
+    outcome = _run(_provider(), ["echo", "ok"], tmp_path,
+                   stop=lambda: None)
+    assert outcome.exit_code == 0
+    assert outcome.termination_reason == "exited"
+
+
+def _files_run(specs, policy_kwargs, helper_mode="write-files",
+               helper_extra=(), **cmd_kwargs):
+    """声明输出文件集的一次真实运行；specs 为 [(路径, 字节数|None)]。
+
+    字节数为 None 表示声明但不写（缺失）。``helper_extra`` 为透传给
+    helper 的附加参数（如 ``d:`` 建目录探针）。返回 ``(回执, 输出映射)``。
+    """
+    outputs = [
+        {"path": path, "media_type": "application/json", "required": True}
+        for path, _ in specs
+    ]
+    written = [f"{path}={size}" for path, size in specs if size is not None]
+    bundle = _runtime_bundle(
+        outputs=outputs, arguments=[HELPER, helper_mode, *written,
+                                    *helper_extra],
+        **cmd_kwargs,
+    )
+    policy = DeploymentPolicy(
+        executables=(HELPER_REF,),
+        environment_vars=(),
+        max_timeout_seconds=600,
+        max_memory_mib=4096,
+        max_cpu_cores=4,
+        allow_network=False,
+        **policy_kwargs,
+    )
+    runtime = SolverRuntime(build_executor_registry([_provider()]), policy)
+    return runtime.run(bundle, _attempt())
+
+
+def test_output_count_exact_and_over() -> None:
+    """文件数恰好上限通过，上限+1 拒绝且只收录配额内文件。"""
+    specs = [("output/a.json", 10), ("output/b.json", 10)]
+    receipt, outputs = _files_run(
+        specs, {"max_output_files": 2, "max_output_bytes": 1_048_576}
+    )
+    assert receipt.status == "succeeded"
+    assert sorted(outputs) == ["output/a.json", "output/b.json"]
+    receipt, outputs = _files_run(
+        specs, {"max_output_files": 1, "max_output_bytes": 1_048_576}
+    )
+    assert receipt.status == "output_protocol_failed"
+    assert "超过上限" in receipt.error
+    assert list(outputs) == ["output/a.json"]
+    assert receipt.to_dict()["policy_evaluated"]["max_output_files"] == 1
+
+
+def test_output_bytes_exact_and_over() -> None:
+    """总字节恰好上限通过，上限+1 的文件被排除且不完整读入。"""
+    receipt, outputs = _files_run(
+        [("output/a.json", 100)], {"max_output_files": 16,
+                                   "max_output_bytes": 100}
+    )
+    assert receipt.status == "succeeded"
+    assert len(outputs["output/a.json"]) == 100
+    bundle_specs = [("output/a.json", 100), ("output/b.json", 101)]
+    outputs_decl = [
+        {"path": path, "media_type": "application/json", "required": False}
+        for path, _ in bundle_specs
+    ]
+    bundle = _runtime_bundle(
+        outputs=outputs_decl,
+        arguments=[HELPER, "write-files",
+                   "output/a.json=100", "output/b.json=101"],
+    )
+    policy = DeploymentPolicy(
+        executables=(HELPER_REF,), environment_vars=(),
+        max_timeout_seconds=600, max_memory_mib=4096, max_cpu_cores=4,
+        allow_network=False, max_output_files=16, max_output_bytes=100,
+    )
+    runtime = SolverRuntime(build_executor_registry([_provider()]), policy)
+    receipt, outputs = runtime.run(bundle, _attempt())
+    assert receipt.status == "output_protocol_failed"
+    assert "超过上限" in receipt.error
+    assert list(outputs) == ["output/a.json"]
+
+
+def test_big_file_not_fully_read() -> None:
+    """10MB 超限文件被排除，小文件照常收录（有界读取）。"""
+    receipt, outputs = _files_run(
+        [("output/big.bin", 10 * 1024 * 1024), ("output/small.json", 10)],
+        {"max_output_files": 16, "max_output_bytes": 1_048_576},
+    )
+    assert receipt.status == "output_protocol_failed"
+    assert "超过上限" in receipt.error
+    assert list(outputs) == ["output/small.json"]
+
+
+def test_declared_fifo_excluded() -> None:
+    """声明输出为命名管道即特殊文件违规，不阻塞、不进入 outputs。"""
+    bundle = _runtime_bundle(
+        outputs=[{"path": "output/pipe.json", "media_type": "application/json",
+                  "required": False}],
+        arguments=[HELPER, "mkfifo", "output/pipe.json"],
+    )
+    policy = DeploymentPolicy(
+        executables=(HELPER_REF,), environment_vars=(),
+        max_timeout_seconds=600, max_memory_mib=4096, max_cpu_cores=4,
+        allow_network=False, max_output_files=16, max_output_bytes=1_048_576,
+    )
+    runtime = SolverRuntime(build_executor_registry([_provider()]), policy)
+    receipt, outputs = runtime.run(bundle, _attempt())
+    assert receipt.status == "output_protocol_failed"
+    assert "特殊文件" in receipt.error
+    assert outputs == {}
+
+
+def test_undeclared_socket_excluded() -> None:
+    """未声明 socket 节点即违规；合法声明输出仍可收录。"""
+    bundle = _runtime_bundle(
+        outputs=[{"path": "output/a.json", "media_type": "application/json",
+                  "required": False}],
+        arguments=[HELPER, "write-and-sock",
+                   "output/a.json=10", "output/sneaky.sock"],
+    )
+    policy = DeploymentPolicy(
+        executables=(HELPER_REF,), environment_vars=(),
+        max_timeout_seconds=600, max_memory_mib=4096, max_cpu_cores=4,
+        allow_network=False, max_output_files=16,
+        max_output_bytes=1_048_576,
+    )
+    runtime = SolverRuntime(build_executor_registry([_provider()]), policy)
+    receipt, outputs = runtime.run(bundle, _attempt())
+    assert receipt.status == "output_protocol_failed"
+    assert "特殊文件" in receipt.error
+    assert "sneaky.sock" in receipt.error
+    assert list(outputs) == ["output/a.json"]
+
+
+def test_inputs_and_dirs_not_counted() -> None:
+    """输入文件与空目录不计输出配额；配额 1 下单输出仍成功。
+
+    输入 ``input/problem.mps`` 由 bundle 自带（见 ``_runtime_bundle``），
+    空目录由 helper 建在输出区下；两者都不应占用文件数配额。
+    """
+    receipt, outputs = _files_run(
+        [("output/a.json", 10)],
+        {"max_output_files": 1, "max_output_bytes": 1_048_576},
+        helper_extra=["d:output/emptydir"],
+    )
+    assert receipt.status == "succeeded"
+    assert list(outputs) == ["output/a.json"]
+    assert outputs["output/a.json"] == b"f" * 10
+
+
+@pytest.mark.parametrize("reason", ["cancelled", "fenced"])
+def test_runtime_prestart_stop_receipts(reason, monkeypatch) -> None:
+    """启动前停止签发对应回执且零进程启动，不伪造退出事实。"""
+    calls = _spy_popen(monkeypatch)
+    receipt, outputs = _runtime(_provider()).run(
+        _runtime_bundle(), _attempt(), stop=lambda: reason,
+    )
+    assert receipt.status == reason
+    assert receipt.termination_reason == reason
+    assert receipt.exit_code is None
+    assert receipt.signal_number is None
+    assert receipt.started_at == "" and receipt.ended_at == ""
+    assert outputs == {}
+    assert calls == []
+
+
+def test_runtime_stop_not_callable() -> None:
+    """停止探针不可调用即类型错误。"""
+    with pytest.raises(TypeError, match="停止探针"):
+        _runtime(_provider()).run(
+            _runtime_bundle(), _attempt(), stop="cancelled",
+        )
+
+
+def test_runtime_stop_bad_value() -> None:
+    """停止探针非法返回值即调用方错误。"""
+    with pytest.raises(ValueError, match="停止探针返回值非法"):
+        _runtime(_provider()).run(
+            _runtime_bundle(), _attempt(), stop=lambda: "bogus",
+        )
+
+
+def test_runtime_midrun_cancel_receipt() -> None:
+    """运行中取消：回执为 cancelled、无退出码与信号、保留真实起止时间。"""
+    flag = threading.Event()
+    timer = threading.Timer(0.3, flag.set)
+    timer.start()
+    start = time.monotonic()
+    try:
+        receipt, outputs = _runtime(_provider()).run(
+            _runtime_bundle(arguments=[HELPER, "sleep", "30"],
+                            timeout_seconds=60),
+            _attempt(),
+            stop=lambda: "cancelled" if flag.is_set() else None,
+        )
+    finally:
+        timer.cancel()
+    elapsed = time.monotonic() - start
+    assert receipt.status == "cancelled"
+    assert receipt.status != "succeeded"
+    assert receipt.termination_reason == "cancelled"
+    assert receipt.exit_code is None
+    assert receipt.signal_number is None
+    assert receipt.started_at.endswith("Z")
+    assert receipt.started_at <= receipt.ended_at
+    assert outputs == {}
+    assert elapsed < 30.0
+
+
+def test_runtime_midrun_fenced_receipt() -> None:
+    """运行中 fencing：回执为 fenced、无退出码与信号。"""
+    flag = threading.Event()
+    timer = threading.Timer(0.3, flag.set)
+    timer.start()
+    try:
+        receipt, _ = _runtime(_provider()).run(
+            _runtime_bundle(arguments=[HELPER, "sleep", "30"],
+                            timeout_seconds=60),
+            _attempt(),
+            stop=lambda: "fenced" if flag.is_set() else None,
+        )
+    finally:
+        timer.cancel()
+    assert receipt.status == "fenced"
+    assert receipt.termination_reason == "fenced"
+    assert receipt.exit_code is None
+    assert receipt.signal_number is None

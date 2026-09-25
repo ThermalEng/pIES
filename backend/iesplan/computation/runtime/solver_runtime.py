@@ -1,21 +1,23 @@
 """通用求解运行时：具体、可调用的 Bundle 执行编排。
 
 ``SolverRuntime`` 是通用实现（非 Protocol/ABC/占位）：消费完整 typed
-``SolverBundle``、attempt 上下文、部署策略与已发布执行器注册表，拥有
-执行编排全过程——精确选择、策略检查、独立临时工作区、输入只读写入、
-executor 调用、声明输出核对、唯一回执签发与工作区清理。
+``SolverBundle``、attempt 上下文、部署策略、已发布执行器注册表与调用方
+停止探针，拥有执行编排全过程——启动前停止检查、精确选择、策略检查、
+独立临时工作区、输入只读写入、executor 调用、声明输出核对（含数量/
+总字节上限与特殊文件边界）、唯一回执签发与工作区清理。
 
 信任边界：typed ``SolverBundle`` 是可信内部交接，不重跑 JSON schema，
 不算 hash，不重复装配或文件内容校验；只执行本层拥有的真实外部进程
 边界门禁（精确 executor/executable、环境 allowlist、资源上限、网络
 开关、隔离目录与声明输出范围）。资源需求只做策略上限比对，不做真实
-隔离实施；进程启动、取消、超时与回收归 provider 实现。
+隔离实施；进程启动、运行中停止、超时与回收归 provider 实现。
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import stat
 import tempfile
 import uuid
 from collections.abc import Mapping
@@ -27,6 +29,9 @@ from iesplan.computation.protocols import (
     ExecutorProvider,
     ProcessOutcome,
     SolverBundle,
+    SolverBundleManifest,
+    StopProbe,
+    read_stop_reason,
 )
 from iesplan.computation.runtime.context import AttemptContext
 from iesplan.computation.runtime.policy import DeploymentPolicy
@@ -34,6 +39,9 @@ from iesplan.computation.runtime.registry import ExecutorRegistry
 
 #: 命令未声明 success_exit_codes 时的协议默认（仅判断进程是否按协议结束）。
 _DEFAULT_SUCCESS_EXIT_CODES = (0,)
+
+#: 声明输出单次读取块大小（字节；总预算内分块读，超限不完整读入）。
+_OUTPUT_READ_CHUNK_BYTES = 65_536
 
 
 def _normalize_timestamp(value: str) -> str:
@@ -75,16 +83,24 @@ class SolverRuntime:
         self._policy = policy
 
     def run(
-        self, bundle: SolverBundle, attempt: AttemptContext
+        self,
+        bundle: SolverBundle,
+        attempt: AttemptContext,
+        *,
+        stop: StopProbe | None = None,
     ) -> tuple[ExecutionReceipt, dict[str, bytes]]:
         """执行完整 Bundle，返回 ``(唯一回执, 已核对声明输出字节)``。
 
-        状态优先级：真实超时 → ``timed_out`` 为主状态；主进程退出后
-        仍有组成员被强制收口 → ``process_failed``（``group_terminated``
-        不得签发 ``succeeded``）；输出边界问题追加进 ``error`` 供解释，
-        不改写上述主状态。非超时非收口执行的输出边界违规（未声明文件/
-        符号链接/不可读）→ ``output_protocol_failed``；退出码不在成功
-        集合 → ``process_failed``；必需输出缺失 →
+        ``stop`` 为调用方停止探针：启动前已停止即不启动进程，直接签发
+        ``cancelled``/``fenced`` 回执；运行中停止由 provider 观测并终止
+        进程组。状态优先级：真实超时 → ``timed_out`` 为主状态；主进程
+        退出后仍有组成员被强制收口 → ``process_failed``
+        （``group_terminated`` 不得签发 ``succeeded``）；运行中停止 →
+        ``cancelled``/``fenced`` 为主状态；输出边界问题追加进 ``error``
+        供解释，不改写上述主状态。非停止执行的输出边界违规（未声明文件/
+        特殊文件/符号链接/不可读/数量超限/总量超限）→
+        ``output_protocol_failed``；退出码不在成功集合 →
+        ``process_failed``；必需输出缺失 →
         ``output_protocol_failed``；否则 ``succeeded``。成功与失败都
         尽量形成回执；输出映射只含已核对的声明输出。
         """
@@ -97,10 +113,28 @@ class SolverRuntime:
                 "attempt 须为 AttemptContext，"
                 f"得到 {type(attempt).__name__}"
             )
+        if stop is not None and not callable(stop):
+            raise TypeError(
+                f"stop 须为停止探针可调用对象，得到 {type(stop).__name__}"
+            )
         manifest = bundle.manifest
         command = manifest.command
         executor_ref = command["executor"]
         executable_ref = command["executable"]
+        stop_reason = read_stop_reason(stop)
+        if stop_reason is not None:
+            return self._unexecuted(
+                bundle,
+                attempt,
+                str(executor_ref),
+                str(executable_ref),
+                (
+                    "启动前已取消，未启动进程"
+                    if stop_reason == "cancelled"
+                    else "启动前租约失效，未启动进程"
+                ),
+                status=stop_reason,
+            ), {}
         try:
             provider = self._registry.resolve(
                 str(executor_ref), str(executable_ref)
@@ -121,7 +155,7 @@ class SolverRuntime:
         root = tempfile.mkdtemp(prefix="ies-runtime-")
         try:
             self._prepare_workdir(root, bundle, command)
-            outcome = provider.execute(command, root)
+            outcome = provider.execute(command, root, stop=stop)
             if not isinstance(outcome, ProcessOutcome):
                 raise TypeError(
                     "executor 须返回 ProcessOutcome，"
@@ -200,16 +234,8 @@ class SolverRuntime:
         declared = {entry["path"]: entry for entry in manifest.outputs}
         input_paths = {entry["path"] for entry in manifest.inputs}
         boundary_errors = self._scan_workdir(root, declared, input_paths)
-        collected: dict[str, bytes] = {}
-        for path in declared:
-            full = os.path.join(root, str(path))
-            if not os.path.isfile(full) or os.path.islink(full):
-                continue
-            try:
-                with open(full, "rb") as handle:
-                    collected[str(path)] = handle.read()
-            except OSError:
-                boundary_errors.append(f"声明输出不可读: {path!r}")
+        collected, collect_errors = self._collect_declared(root, manifest)
+        boundary_errors.extend(collect_errors)
         success_codes = tuple(
             command.get("success_exit_codes", _DEFAULT_SUCCESS_EXIT_CODES)
         )
@@ -218,7 +244,8 @@ class SolverRuntime:
             for entry in manifest.outputs
             if entry["required"] and str(entry["path"]) not in collected
         )
-        if outcome.termination_reason == "timeout":
+        reason = outcome.termination_reason
+        if reason == "timeout":
             status = "timed_out"
             parts = [
                 f"执行超时终止: exit_code={outcome.exit_code!r} "
@@ -228,11 +255,26 @@ class SolverRuntime:
             if missing:
                 parts.append(f"必需输出缺失: {missing!r}")
             error = "; ".join(parts)
-        elif outcome.termination_reason == "group_terminated":
+        elif reason == "group_terminated":
             status = "process_failed"
             parts = [
                 "主进程退出后仍有组成员、已强制收口: "
                 f"exit_code={outcome.exit_code!r} "
+                f"signal={outcome.signal_number!r}"
+            ]
+            parts.extend(boundary_errors)
+            if missing:
+                parts.append(f"必需输出缺失: {missing!r}")
+            error = "; ".join(parts)
+        elif reason in ("cancelled", "fenced"):
+            status = reason
+            lead = (
+                "执行被取消"
+                if reason == "cancelled"
+                else "执行被隔离（租约失效）"
+            )
+            parts = [
+                f"{lead}: exit_code={outcome.exit_code!r} "
                 f"signal={outcome.signal_number!r}"
             ]
             parts.extend(boundary_errors)
@@ -271,20 +313,101 @@ class SolverRuntime:
         declared: Mapping[str, object],
         input_paths: set[str],
     ) -> list[str]:
-        """扫描工作区：符号链接与未声明文件均为输出边界违规。"""
+        """扫描工作区：符号链接、特殊文件与未声明文件均为输出边界违规。
+
+        目录跳过（不计文件数），输入文件跳过（不计输出配额）。
+        """
         errors: list[str] = []
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             for name in list(dirnames) + filenames:
                 full = os.path.join(dirpath, name)
                 rel = os.path.relpath(full, root)
-                if os.path.islink(full):
+                try:
+                    mode = os.lstat(full).st_mode
+                except OSError:
+                    continue
+                if stat.S_ISLNK(mode):
                     errors.append(f"工作区存在符号链接: {rel!r}")
                     continue
-                if os.path.isdir(full):
+                if stat.S_ISDIR(mode):
+                    continue
+                if not stat.S_ISREG(mode):
+                    errors.append(f"工作区存在特殊文件: {rel!r}")
                     continue
                 if rel not in declared and rel not in input_paths:
                     errors.append(f"未声明输出: {rel!r}")
         return errors
+
+    def _collect_declared(
+        self,
+        root: str,
+        manifest: SolverBundleManifest,
+    ) -> tuple[dict[str, bytes], list[str]]:
+        """按 manifest 顺序有界收集声明输出。
+
+        只收集普通文件：符号链接、目录与特殊文件跳过（扫描阶段已记录，
+        缺必需项由 ``missing`` 判定）；文件数与总字节受策略配额约束，
+        超限文件不进入 outputs；读取按剩余预算分块，超限部分不读入。
+        """
+        collected: dict[str, bytes] = {}
+        errors: list[str] = []
+        max_files = self._policy.max_output_files
+        budget = self._policy.max_output_bytes
+        remaining = budget
+        count_limited = False
+        bytes_limited = False
+        for entry in manifest.outputs:
+            path = str(entry["path"])
+            full = os.path.join(root, path)
+            try:
+                mode = os.lstat(full).st_mode
+            except OSError:
+                continue
+            if not stat.S_ISREG(mode):
+                continue
+            if len(collected) + 1 > max_files:
+                if not count_limited:
+                    errors.append(
+                        f"输出文件数超过上限 {max_files}: {path!r}"
+                    )
+                    count_limited = True
+                continue
+            try:
+                data, over = self._read_bounded(full, remaining)
+            except OSError:
+                errors.append(f"声明输出不可读: {path!r}")
+                continue
+            if over:
+                if not bytes_limited:
+                    errors.append(
+                        f"输出总字节超过上限 {budget}: {path!r}"
+                    )
+                    bytes_limited = True
+                continue
+            collected[path] = data
+            remaining -= len(data)
+        return collected, errors
+
+    @staticmethod
+    def _read_bounded(full: str, remaining: int) -> tuple[bytes | None, bool]:
+        """有界读取文件：返回 ``(数据, 是否超限)``，超限部分不读入。
+
+        至多读取 ``remaining + 1`` 字节用于判定；IO 错误抛 ``OSError``。
+        """
+        chunks: list[bytes] = []
+        total = 0
+        with open(full, "rb") as handle:
+            while True:
+                piece = handle.read(
+                    min(_OUTPUT_READ_CHUNK_BYTES, remaining + 1 - total)
+                )
+                if not piece:
+                    break
+                chunks.append(piece)
+                total += len(piece)
+                if total > remaining:
+                    return None, True
+        return b"".join(chunks), False
 
     def _unexecuted(
         self,
@@ -293,8 +416,13 @@ class SolverRuntime:
         executor_ref: str,
         executable_ref: str,
         error: str,
+        status: str = "policy_rejected",
     ) -> ExecutionReceipt:
-        """执行前拒绝回执（进程未启动，无执行事实，不伪造）。"""
+        """执行前拒绝回执（进程未启动，无执行事实，不伪造）。
+
+        ``status`` 只取 ``policy_rejected``/``cancelled``/``fenced``；
+        停止类回执只带停止原因，不带退出事实与起止时间。
+        """
         manifest = bundle.manifest
         return ExecutionReceipt(
             receipt_id=uuid.uuid4().hex,
@@ -307,7 +435,10 @@ class SolverRuntime:
             executor_ref=executor_ref,
             executable_ref=executable_ref,
             result_adapter_ref=manifest.result_adapter,
-            status="policy_rejected",
+            status=status,
+            termination_reason=(
+                status if status in ("cancelled", "fenced") else ""
+            ),
             error=error,
             policy_evaluated=self._policy.to_dict(),
         )

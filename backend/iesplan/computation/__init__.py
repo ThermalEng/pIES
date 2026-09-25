@@ -76,7 +76,10 @@ from iesplan.computation.protocols import (
     ResultAdapter,
     SolverBundle,
     SolverBundleManifest,
+    StopProbe,
+    TERMINATION_REASONS,
     check_provider_ref,
+    read_stop_reason,
 )
 from iesplan.computation.registry import (
     DEFAULT_ALGORITHM,
@@ -133,6 +136,8 @@ __all__ = [
     "SolverBundle",
     "SolverBundleManifest",
     "SolverRuntime",
+    "StopProbe",
+    "TERMINATION_REASONS",
     "LocalExecutable",
     "LocalProcessProvider",
     "build_executor_registry",
@@ -147,6 +152,7 @@ __all__ = [
     "manifest_to_yaml_bytes",
     "materialize_non_predictive_series",
     "normalize_bundle",
+    "read_stop_reason",
     "validate_bundle",
     "validate_calculation_config",
     "write_mps",

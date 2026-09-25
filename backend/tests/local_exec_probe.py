@@ -127,6 +127,66 @@ def _cmd_big_output(args: list[str]) -> int:
     return 0
 
 
+def _cmd_write_files(args: list[str]) -> int:
+    """write-files <path=size|d:dir>...：在工作目录写声明输出文件后退出。
+
+    ``d:<dir>`` 只建空目录（输出配额不计目录探针），与文件规格无冲突
+    （文件规格必含 ``=``）。
+    """
+    for spec in args:
+        if spec.startswith("d:"):
+            os.makedirs(spec[2:], exist_ok=True)
+            continue
+        path, size = spec.rsplit("=", 1)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(b"f" * int(size))
+    return 0
+
+
+def _cmd_mkfifo(args: list[str]) -> int:
+    """在工作目录建命名管道后退出（特殊文件边界探针）。"""
+    parent = os.path.dirname(args[0])
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    os.mkfifo(args[0])
+    return 0
+
+
+def _cmd_mksock(args: list[str]) -> int:
+    """在工作目录建 socket 节点后退出（特殊文件边界探针）。"""
+    import socket
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.bind(args[0])
+    finally:
+        sock.close()
+    return 0
+
+
+def _cmd_write_and_sock(args: list[str]) -> int:
+    """写声明文件并建一个未声明 socket 节点后退出（组合边界探针）。"""
+    sockpath = args[-1]
+    for spec in args[:-1]:
+        path, size = spec.rsplit("=", 1)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(b"f" * int(size))
+    import socket
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.bind(sockpath)
+    finally:
+        sock.close()
+    return 0
+
+
 def _cmd_env(args: list[str]) -> int:
     sys.stdout.write(json.dumps(dict(os.environ)))
     sys.stdout.flush()
@@ -149,6 +209,10 @@ _MODES = {
     "spawn-and-exit": _cmd_spawn_and_exit,
     "spawn-trap": _cmd_spawn_trap,
     "big-output": _cmd_big_output,
+    "write-files": _cmd_write_files,
+    "write-and-sock": _cmd_write_and_sock,
+    "mkfifo": _cmd_mkfifo,
+    "mksock": _cmd_mksock,
     "env": _cmd_env,
     "cwd": _cmd_cwd,
 }

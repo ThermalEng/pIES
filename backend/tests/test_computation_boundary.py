@@ -226,7 +226,7 @@ class _ExecutorOnly:
         return False
 
     def execute(
-        self, command: Mapping[str, object], workdir: str
+        self, command: Mapping[str, object], workdir: str, *, stop=None
     ) -> ProcessOutcome:
         raise ComputationUnavailableError(reason="no-executor")
 
@@ -271,7 +271,7 @@ def test_protocol_methods_match_constitution_boundaries() -> None:
         "self", "artifact", "models", "series", "finance", "config",
     ]
     assert list(inspect.signature(ExecutorProvider.execute).parameters) == [
-        "self", "command", "workdir",
+        "self", "command", "workdir", "stop",
     ]
     assert list(inspect.signature(_AdapterOnly.adapt).parameters) == [
         "self", "bundle", "receipt", "outputs",
@@ -457,7 +457,7 @@ def test_receipt_refs_status_and_executed_consistency() -> None:
     """回执引用形态、状态封闭集与已执行/未执行一致性，无 detail 残留。"""
     assert set(RECEIPT_STATUSES) == {
         "succeeded", "policy_rejected", "process_failed",
-        "output_protocol_failed", "timed_out",
+        "output_protocol_failed", "timed_out", "cancelled", "fenced",
     }
     dumped = _receipt().to_dict()
     assert "detail" not in dumped
@@ -478,6 +478,26 @@ def test_receipt_refs_status_and_executed_consistency() -> None:
     assert rejected.started_at == "" and rejected.ended_at == ""
     with pytest.raises(ValueError, match="不得携带"):
         _receipt(status="policy_rejected")
+    stopped = _receipt(
+        status="cancelled", termination_reason="cancelled", exit_code=None,
+        started_at="", ended_at="",
+    )
+    assert stopped.exit_code is None
+    assert stopped.started_at == ""
+    midrun = _receipt(
+        status="cancelled", termination_reason="cancelled", exit_code=None,
+    )
+    assert midrun.started_at != "" and midrun.signal_number is None
+    with pytest.raises(ValueError, match="不得携带退出码与信号"):
+        _receipt(status="cancelled", termination_reason="cancelled")
+    with pytest.raises(ValueError, match="不得携带退出码与信号"):
+        _receipt(status="fenced", termination_reason="fenced",
+                 signal_number=9)
+    with pytest.raises(ValueError, match="fenced 状态须与 fenced 原因一致"):
+        _receipt(status="fenced", termination_reason="cancelled",
+                 exit_code=None)
+    with pytest.raises(ValueError, match="cancelled 状态须与 cancelled 原因一致"):
+        _receipt(status="succeeded", termination_reason="cancelled")
     with pytest.raises(ValueError, match="恰有一个有值"):
         _receipt(exit_code=None, signal_number=None)
     with pytest.raises(ValueError, match="非空时间戳"):
