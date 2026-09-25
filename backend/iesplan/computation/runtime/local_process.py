@@ -127,7 +127,8 @@ def _drain_pipe(
 ) -> None:
     """排空管道：存满上限后继续读取丢弃，避免子进程写阻塞。
 
-    实际发生丢弃时置 ``truncated[0]``，调用方如实记录截断事实。
+    只要当前块有字节被丢弃（``len(keep) < len(data)``）即置
+    ``truncated[0]``，包括随后直接 EOF 的情形，调用方如实记录截断事实。
     """
     total = 0
     while True:
@@ -137,11 +138,11 @@ def _drain_pipe(
             break
         if not data:
             break
-        if total < cap:
-            keep = data[: cap - total]
+        keep = data[: cap - total] if total < cap else b""
+        if keep:
             chunks.append(keep)
             total += len(keep)
-        else:
+        if len(keep) < len(data):
             truncated[0] = True
 
 
@@ -165,21 +166,58 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
-def _close_group(pgid: int) -> None:
-    """收口完整进程组：TERM 整组→宽限轮询→KILL 残留→确认组消失。
+def _reap_group(pgid: int) -> dict[int, int]:
+    """回收已归属本进程的同组成员，返回 ``{pid: 原始等待状态}``。
 
-    组消失即立即返回，不固定等待；KILL 后仍存活（如不可杀状态）则
-    直接返回，调用方按证据完整性决定是否抛异常。
+    只回收本进程的子进程（``waitpid(-pgid)`` 限定该组），不碰其他
+    进程组的进程；无可回收子进程即返回空映射。调用方负责把主进程
+    的状态认领进 ``Popen.returncode``，避免后续 ``wait`` 误报无子进程。
     """
+    reaped: dict[int, int] = {}
+    while True:
+        try:
+            pid, status = os.waitpid(-pgid, os.WNOHANG)
+        except ChildProcessError:
+            return reaped
+        if pid == 0:
+            return reaped
+        reaped[pid] = status
+
+
+def _adopt_reaped(proc: subprocess.Popen[bytes], reaped: dict[int, int]) -> None:
+    """把组回收顺带收割的主进程状态认领进 ``Popen``（仅在其未设置时）。"""
+    if proc.returncode is None and proc.pid in reaped:
+        proc.returncode = os.waitstatus_to_exitcode(reaped[proc.pid])
+
+
+def _close_group(pgid: int) -> tuple[bool, dict[int, int]]:
+    """收口完整进程组，返回 ``(组是否确认无活动成员, 回收状态)``。
+
+    TERM 整组→宽限轮询→KILL 残留→再确认；轮询中同步回收已归属本进程
+    的同组僵尸，避免僵尸撑住存活探测；组消失即立即返回，不固定等待。
+    KILL 后宽限结束仍有活动成员返回 False，调用方须抛基础设施异常，
+    不得静默返回成功。
+    """
+    reaped: dict[int, int] = {}
     _signal_group(pgid, signal.SIGTERM)
     deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
-    while _group_alive(pgid) and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        reaped.update(_reap_group(pgid))
+        if not _group_alive(pgid):
+            return True, reaped
         time.sleep(_GROUP_POLL_SECONDS)
-    if _group_alive(pgid):
-        _signal_group(pgid, signal.SIGKILL)
-        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
-        while _group_alive(pgid) and time.monotonic() < deadline:
-            time.sleep(_GROUP_POLL_SECONDS)
+    reaped.update(_reap_group(pgid))
+    if not _group_alive(pgid):
+        return True, reaped
+    _signal_group(pgid, signal.SIGKILL)
+    deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        reaped.update(_reap_group(pgid))
+        if not _group_alive(pgid):
+            return True, reaped
+        time.sleep(_GROUP_POLL_SECONDS)
+    reaped.update(_reap_group(pgid))
+    return not _group_alive(pgid), reaped
 
 
 def _now_iso() -> str:
@@ -254,9 +292,11 @@ class LocalProcessProvider:
         精确引用查固定二进制（禁止 PATH 发现）；参数验证来自绑定，
         在启动前拒绝。子进程工作目录为 ``workdir`` 下命令声明目录；
         环境只含显式基线与命令环境键，不继承宿主环境。监督单位是
-        完整进程组：主进程退出后仍有成员即收口；超时后即使主进程
-        响应 TERM，宽限期内仍观察整个组。二进制无法启动、排空证据
-        不完整等无法建立可信执行事实的错误抛基础设施异常，不伪造。
+        完整进程组：主进程退出后仍有成员即强制收口并记
+        ``group_terminated``（保留主进程实际退出码，不伪造信号）；
+        超时后即使主进程响应 TERM，宽限期内仍观察整个组。二进制无法
+        启动、进程组未能终止、排空证据不完整等无法建立可信执行事实
+        的错误抛基础设施异常，不伪造。
         """
         executable_ref = str(command["executable"])
         try:
@@ -310,6 +350,7 @@ class LocalProcessProvider:
         out_drain.start()
         err_drain.start()
         timed_out = False
+        group_closed = False
         try:
             returncode = (
                 proc.wait(timeout=timeout)  # type: ignore[arg-type]
@@ -318,11 +359,24 @@ class LocalProcessProvider:
             )
         except subprocess.TimeoutExpired:
             timed_out = True
-            _close_group(pgid)
+            gone, reaped = _close_group(pgid)
+            _adopt_reaped(proc, reaped)
+            if not gone:
+                raise ComputationUnavailableError(
+                    "进程组未能终止：KILL 后仍有活动成员",
+                    reason="executor-group-not-terminated",
+                )
             returncode = proc.wait()
         else:
             if _group_alive(pgid):
-                _close_group(pgid)
+                gone, reaped = _close_group(pgid)
+                _adopt_reaped(proc, reaped)
+                if not gone:
+                    raise ComputationUnavailableError(
+                        "进程组未能终止：KILL 后仍有活动成员",
+                        reason="executor-group-not-terminated",
+                    )
+                group_closed = True
         out_drain.join(timeout=_DRAIN_JOIN_TIMEOUT_SECONDS)
         err_drain.join(timeout=_DRAIN_JOIN_TIMEOUT_SECONDS)
         evidence_complete = not (out_drain.is_alive() or err_drain.is_alive())
@@ -346,14 +400,18 @@ class LocalProcessProvider:
         else:
             exit_code = returncode
             signal_number = None
+        if timed_out:
+            termination_reason = "timeout"
+        elif group_closed:
+            termination_reason = "group_terminated"
+        elif exit_code is not None:
+            termination_reason = "exited"
+        else:
+            termination_reason = "signaled"
         return ProcessOutcome(
             exit_code=exit_code,
             signal_number=signal_number,
-            termination_reason=(
-                "timeout"
-                if timed_out
-                else ("exited" if exit_code is not None else "signaled")
-            ),
+            termination_reason=termination_reason,
             started_at=started_at,
             ended_at=ended_at,
             stdout=b"".join(out_chunks),

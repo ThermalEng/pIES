@@ -628,11 +628,12 @@ RECEIPT_STATUSES = (
     "timed_out",
 )
 
-#: 终止原因封闭集合（当前真实产生的三种；取消/OOM 等随实现再扩展）。
+#: 终止原因封闭集合（当前真实产生的四种；取消/OOM 等随实现再扩展）。
 TERMINATION_REASONS = (
     "exited",
     "signaled",
     "timeout",
+    "group_terminated",
 )
 
 
@@ -734,9 +735,10 @@ class ExecutionReceipt:
     为已实施的资源事实（无实施时为空映射）。
     ``success_exit_codes`` 只表示进程协议成功; 不可行/无界等业务状态
     由结果适配器读取求解器输出后映射, 不在此猜测。``status`` 只取
-    ``RECEIPT_STATUSES`` 四种；未执行回执（``policy_rejected``）不得
+    ``RECEIPT_STATUSES`` 五种；未执行回执（``policy_rejected``）不得
     携带退出码/信号/起止时间/终止原因，已执行回执必须携带合法起止
-    时间与退出事实，不伪造。
+    时间与退出事实，不伪造；``timed_out`` 与 ``timeout`` 原因互相蕴含，
+    不得出现自相矛盾事实。
     """
 
     schema: str = EXECUTION_RECEIPT_SCHEMA
@@ -803,6 +805,8 @@ class ExecutionReceipt:
             raise TypeError("signal_number 须为整数或 None（不接受布尔值）")
         if not isinstance(self.termination_reason, str):
             raise TypeError("termination_reason 须为字符串")
+        if (self.status == "timed_out") != (self.termination_reason == "timeout"):
+            raise ValueError("timed_out 须与 timeout 原因一致")
         if self.status == "policy_rejected":
             if (
                 self.exit_code is not None

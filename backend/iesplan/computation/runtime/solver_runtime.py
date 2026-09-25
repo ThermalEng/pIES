@@ -79,13 +79,14 @@ class SolverRuntime:
     ) -> tuple[ExecutionReceipt, dict[str, bytes]]:
         """执行完整 Bundle，返回 ``(唯一回执, 已核对声明输出字节)``。
 
-        状态优先级：真实超时 → ``timed_out`` 为主状态（输出边界问题
-        仍追加进 ``error`` 供解释，不改写主状态）；非超时执行的输出
-        边界违规（未声明文件/符号链接/不可读）→
-        ``output_protocol_failed``；退出码不在成功集合 →
-        ``process_failed``；必需输出缺失 → ``output_protocol_failed``；
-        否则 ``succeeded``。成功与失败都尽量形成回执；输出映射只含
-        已核对的声明输出。
+        状态优先级：真实超时 → ``timed_out`` 为主状态；主进程退出后
+        仍有组成员被强制收口 → ``process_failed``（``group_terminated``
+        不得签发 ``succeeded``）；输出边界问题追加进 ``error`` 供解释，
+        不改写上述主状态。非超时非收口执行的输出边界违规（未声明文件/
+        符号链接/不可读）→ ``output_protocol_failed``；退出码不在成功
+        集合 → ``process_failed``；必需输出缺失 →
+        ``output_protocol_failed``；否则 ``succeeded``。成功与失败都
+        尽量形成回执；输出映射只含已核对的声明输出。
         """
         if not isinstance(bundle, SolverBundle):
             raise TypeError(
@@ -221,6 +222,17 @@ class SolverRuntime:
             status = "timed_out"
             parts = [
                 f"执行超时终止: exit_code={outcome.exit_code!r} "
+                f"signal={outcome.signal_number!r}"
+            ]
+            parts.extend(boundary_errors)
+            if missing:
+                parts.append(f"必需输出缺失: {missing!r}")
+            error = "; ".join(parts)
+        elif outcome.termination_reason == "group_terminated":
+            status = "process_failed"
+            parts = [
+                "主进程退出后仍有组成员、已强制收口: "
+                f"exit_code={outcome.exit_code!r} "
                 f"signal={outcome.signal_number!r}"
             ]
             parts.extend(boundary_errors)

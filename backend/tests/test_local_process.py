@@ -324,15 +324,32 @@ def test_spawned_child_reaped_with_group(tmp_path) -> None:
 
 
 def test_parent_exit_leftover_child_closed_before_return(tmp_path) -> None:
-    """父正常退出、同组子进程长睡且持有管道：返回前组已收口，无固定等待。"""
+    """父正常退出、同组子进程长睡且持有管道：返回前组已收口，无固定等待。
+
+    收口后记 group_terminated（保留主进程实际退出码，不伪造信号），
+    不得按 exited 成功语义返回。
+    """
     start = time.monotonic()
     outcome = _run(_provider(), ["spawn-and-exit", "30"], tmp_path)
     elapsed = time.monotonic() - start
     assert outcome.exit_code == 0
-    assert outcome.termination_reason == "exited"
+    assert outcome.signal_number is None
+    assert outcome.termination_reason == "group_terminated"
     child_pid = json.loads(outcome.stdout.decode("utf-8"))["child_pid"]
     _assert_pid_gone(child_pid, "遗留子进程")
     assert elapsed < 15.0
+
+
+def test_close_group_failure_raises_without_outcome(tmp_path, monkeypatch) -> None:
+    """组收口失败即抛基础设施异常，不生成成功 outcome。"""
+    import iesplan.computation.runtime.local_process as local_process_mod
+
+    monkeypatch.setattr(
+        local_process_mod, "_close_group", lambda pgid: (False, {})
+    )
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        _run(_provider(), ["spawn-and-exit", "30"], tmp_path)
+    assert exc_info.value.reason == "executor-group-not-terminated"
 
 
 def test_timeout_parent_term_child_ignored_closed_before_return(tmp_path) -> None:
@@ -361,6 +378,23 @@ def test_stream_cap_without_deadlock(tmp_path) -> None:
     assert outcome.stderr == b"e" * MAX_STREAM_BYTES
     assert outcome.stdout_truncated is True
     assert outcome.stderr_truncated is True
+
+
+def test_stream_truncation_boundary_is_exact(tmp_path) -> None:
+    """恰好 cap 不截断；cap+1 截断且长度仍为 cap。"""
+    exact = _run(_provider(), ["big-output", str(MAX_STREAM_BYTES)], tmp_path)
+    assert exact.exit_code == 0
+    assert len(exact.stdout) == MAX_STREAM_BYTES
+    assert exact.stdout_truncated is False
+    assert exact.stderr_truncated is False
+    over = _run(
+        _provider(), ["big-output", str(MAX_STREAM_BYTES + 1)], tmp_path
+    )
+    assert over.exit_code == 0
+    assert len(over.stdout) == MAX_STREAM_BYTES
+    assert len(over.stderr) == MAX_STREAM_BYTES
+    assert over.stdout_truncated is True
+    assert over.stderr_truncated is True
 
 
 def test_start_failure_is_infrastructure_error(tmp_path) -> None:
@@ -433,7 +467,9 @@ def _attempt() -> AttemptContext:
 
 def test_termination_reasons_are_closed_and_consistent() -> None:
     """终止原因封闭且与退出事实一致；伪造 timed_out 即拒绝。"""
-    assert set(TERMINATION_REASONS) == {"exited", "signaled", "timeout"}
+    assert set(TERMINATION_REASONS) == {
+        "exited", "signaled", "timeout", "group_terminated",
+    }
     base = {
         "started_at": "2026-09-24T00:00:00Z",
         "ended_at": "2026-09-24T00:00:01Z",
@@ -449,6 +485,10 @@ def test_termination_reasons_are_closed_and_consistent() -> None:
         ProcessOutcome(exit_code=3, termination_reason="signaled", **base)
     timed = ProcessOutcome(exit_code=0, termination_reason="timeout", **base)
     assert timed.termination_reason == "timeout"
+    closed = ProcessOutcome(
+        exit_code=0, termination_reason="group_terminated", **base
+    )
+    assert closed.signal_number is None
 
 
 def test_runtime_reports_timeout_receipt() -> None:
@@ -499,3 +539,17 @@ def test_runtime_reports_signal_receipt() -> None:
     assert receipt.exit_code is None
     assert receipt.signal_number == signal.SIGTERM
     assert receipt.termination_reason == "signaled"
+
+
+def test_runtime_group_terminated_is_never_succeeded() -> None:
+    """组收口场景 Runtime 签发 process_failed，禁止 succeeded。"""
+    receipt, _ = _runtime(_provider()).run(
+        _runtime_bundle(arguments=[HELPER, "spawn-and-exit", "30"]),
+        _attempt(),
+    )
+    assert receipt.status == "process_failed"
+    assert receipt.status != "succeeded"
+    assert receipt.termination_reason == "group_terminated"
+    assert receipt.exit_code == 0
+    assert receipt.signal_number is None
+    assert "强制收口" in receipt.error
