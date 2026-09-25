@@ -16,6 +16,10 @@ COPY pyproject.toml LICENSE ./
 COPY iesplan ./iesplan
 RUN pip install --upgrade pip && pip install .[dev]
 
+# 0.9-E: HiGHS 适配 executable 固定安装到绝对路径（shebang 指向镜像 python）
+COPY solver-executables/ies-highs-solver /usr/local/bin/ies-highs-solver
+RUN chmod 755 /usr/local/bin/ies-highs-solver
+
 COPY tests ./tests
 
 EXPOSE 8000

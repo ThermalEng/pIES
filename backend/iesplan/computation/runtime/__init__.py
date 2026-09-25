@@ -10,9 +10,12 @@
 from iesplan.computation.runtime.context import AttemptContext
 from iesplan.computation.runtime.descriptor import ExecutorDescriptor
 from iesplan.computation.runtime.local_process import (
+    HIGHS_ADAPTER_PATH,
     HIGHS_EXECUTABLE_REF,
+    HIGHS_VERSION,
     MAX_STREAM_BYTES,
     TERMINATE_GRACE_SECONDS,
+    ExecutableReadiness,
     LocalExecutable,
     LocalProcessProvider,
     validate_highs_arguments,
@@ -29,9 +32,12 @@ __all__ = [
     "DeploymentPolicy",
     "ExecutorDescriptor",
     "ExecutorRegistry",
+    "HIGHS_ADAPTER_PATH",
     "HIGHS_EXECUTABLE_REF",
+    "HIGHS_VERSION",
     "MAX_STREAM_BYTES",
     "TERMINATE_GRACE_SECONDS",
+    "ExecutableReadiness",
     "LocalExecutable",
     "LocalProcessProvider",
     "SolverRuntime",

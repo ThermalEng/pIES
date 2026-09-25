@@ -214,7 +214,7 @@ class SolverRuntime:
         bundle: SolverBundle,
         command: Mapping[str, object],
     ) -> str:
-        """建立 Bundle 根工作区：输入只读写入，输出目录保持可写。
+        """建立 Bundle 根工作区：输入只读写入，声明输出父目录预建为空。
 
         返回 Bundle 根目录（即 executor 可见的 ``workdir``；manifest
         内全部路径均按 Bundle 根定位）。``command`` 声明的子进程工作
@@ -232,6 +232,10 @@ class SolverRuntime:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "wb") as handle:
                 handle.write(content)
+        for entry in bundle.manifest.outputs:
+            parent = os.path.dirname(str(entry["path"]))
+            if parent:
+                os.makedirs(os.path.join(root, parent), exist_ok=True)
         for path in bundle.files:
             os.chmod(os.path.join(root, path), 0o444)
         return root

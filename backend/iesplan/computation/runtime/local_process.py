@@ -20,8 +20,10 @@ stdout/stderr、如实返回 ``ProcessOutcome``（含截断事实）。
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -58,6 +60,18 @@ _DRAIN_JOIN_TIMEOUT_SECONDS = 10.0
 
 #: 首个 HiGHS executable 精确引用（须与生成器声明一致，测试负责盯防）。
 HIGHS_EXECUTABLE_REF = "ies.solver.highs@1.7.2"
+
+#: HiGHS 精确版本（由 executable 精确引用唯一导出，不另存第二份）。
+HIGHS_VERSION = HIGHS_EXECUTABLE_REF.rsplit("@", 1)[1]
+
+#: HiGHS 适配 executable 在镜像内的固定绝对路径（部署约定，测试盯防）。
+HIGHS_ADAPTER_PATH = "/usr/local/bin/ies-highs-solver"
+
+#: 自检在独立临时目录内生成的声明文件名（适配器固定约定）。
+SELF_TEST_OUTPUT = "self-test.sol"
+
+#: readiness 版本上报与离线自检共用超时（秒）。
+_READINESS_TIMEOUT_SECONDS = 120.0
 
 
 def _check_bundle_relative_path(value: object, name: str) -> str:
@@ -107,16 +121,49 @@ def validate_highs_arguments(arguments: tuple[str, ...]) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutableReadiness:
+    """executable 部署就绪探针：精确版本证明 + 最小离线自检。
+
+    ``version`` 为 ``--version`` 必须原样报告的精确版本；``self_test``
+    为独立临时目录运行的自检参数前缀（目录由调用方追加），自检须
+    exit 0 并在该目录生成 ``SELF_TEST_OUTPUT`` 声明文件。不做规则
+    DSL：只表达这两项固定检查，不访问 DB/对象存储/网络/项目草稿。
+    """
+
+    version: str = ""
+    self_test: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.version, str) or not self.version:
+            raise ValueError(
+                f"readiness 精确版本须为非空字符串: {self.version!r}"
+            )
+        if (
+            not isinstance(self.self_test, tuple)
+            or not self.self_test
+            or any(
+                not isinstance(item, str) or not item
+                for item in self.self_test
+            )
+        ):
+            raise ValueError(
+                f"readiness 自检参数须为非空字符串元组: {self.self_test!r}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class LocalExecutable:
     """单个 executable 的部署绑定：精确引用、固定绝对二进制路径与参数验证。
 
-    三者收敛在同一绑定内，不设平行映射，避免错配；无验证函数即构造
-    拒绝，不默认放行任何形状。
+    四者收敛在同一绑定内，不设平行映射，避免错配；无验证函数即构造
+    拒绝，不默认放行任何形状。``readiness`` 为空表示不做版本与自检
+    证明（测试 helper 绑定）；生产求解绑定必须持有真实探针。
     """
 
     ref: str = ""
     path: str = ""
     argv_validator: Callable[[tuple[str, ...]], None] | None = None
+    readiness: ExecutableReadiness | None = None
 
     def __post_init__(self) -> None:
         check_provider_ref(self.ref, "executable")
@@ -128,6 +175,10 @@ class LocalExecutable:
             )
         if self.argv_validator is None or not callable(self.argv_validator):
             raise ValueError(f"executable 缺参数验证绑定: {self.ref!r}")
+        if self.readiness is not None and not isinstance(
+            self.readiness, ExecutableReadiness
+        ):
+            raise ValueError(f"readiness 须为 ExecutableReadiness: {self.ref!r}")
 
 
 def _drain_pipe(
@@ -233,6 +284,45 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _check_readiness(path: str, probe: ExecutableReadiness) -> bool:
+    """运行就绪探针：版本原样报告 + 独立临时目录离线自检。
+
+    任一步骤失败（不可执行、版本不符、自检非零、声明文件缺失）
+    即返回 False，调用方（注册表）原子拒绝，不抛异常。
+    """
+    try:
+        version = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            timeout=_READINESS_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if version.returncode != 0:
+        return False
+    reported = version.stdout.decode("utf-8", errors="replace").strip()
+    if reported != probe.version:
+        return False
+    tmpdir = tempfile.mkdtemp(prefix="ies-readiness-")
+    try:
+        try:
+            proved = subprocess.run(
+                [path, *probe.self_test, tmpdir],
+                capture_output=True,
+                timeout=_READINESS_TIMEOUT_SECONDS,
+                cwd=tmpdir,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if proved.returncode != 0:
+            return False
+        return os.path.isfile(os.path.join(tmpdir, SELF_TEST_OUTPUT))
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 class LocalProcessProvider:
     """本地受信任进程执行器（部署配置持有，组合根注册）。
 
@@ -286,11 +376,20 @@ class LocalProcessProvider:
         return self._descriptor.ref
 
     def available(self) -> bool:
-        """逐项检查绑定二进制为常规可执行文件（精确版本自检归后续）。"""
+        """绑定二进制可执行，且带探针的绑定通过版本与离线自检。"""
         return all(
-            os.path.isfile(item.path) and os.access(item.path, os.X_OK)
-            for item in self._bindings.values()
+            self._binary_ready(item) for item in self._bindings.values()
         )
+
+    @staticmethod
+    def _binary_ready(item: LocalExecutable) -> bool:
+        """单个绑定就绪：固定路径可执行，探针版本与自检通过。"""
+        if not (os.path.isfile(item.path) and os.access(item.path, os.X_OK)):
+            return False
+        probe = item.readiness
+        if probe is None:
+            return True
+        return _check_readiness(item.path, probe)
 
     @staticmethod
     def _close_or_raise(
@@ -481,9 +580,12 @@ class LocalProcessProvider:
 
 
 __all__ = [
+    "HIGHS_ADAPTER_PATH",
     "HIGHS_EXECUTABLE_REF",
+    "HIGHS_VERSION",
     "MAX_STREAM_BYTES",
     "TERMINATE_GRACE_SECONDS",
+    "ExecutableReadiness",
     "LocalExecutable",
     "LocalProcessProvider",
     "validate_highs_arguments",

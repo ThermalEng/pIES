@@ -29,6 +29,8 @@ dependencies = [
     "httpx>=0.27",
     "authlib>=1.3",
     "jsonschema>=4.0",
+    # 0.9-E: HiGHS 求解链精确固定版本（与 ies.solver.highs@1.7.2 同一来源）
+    "highspy==1.7.2",
 ]
 
 [project.optional-dependencies]

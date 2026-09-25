@@ -1,0 +1,180 @@
+#!/usr/local/bin/python
+"""HiGHS 求解适配 executable（固定入口，只接受结构化参数）。
+
+把生成器声明的七项求解参数映射到 highspy 精确版本：真实读 MPS、
+真实求解、写声明 solution 文件。不是通用脚本执行器：除 ``--version``
+与 ``--self-test DIR`` 外，只接受位置固定的七参数 ``[MPS,
+--solution_file, SOL, --time_limit, 秒, --random_seed, 种子]``，其他
+形状一律拒绝。只依赖标准库与精确固定的 highspy，不导入 iesplan，
+不读环境变量，不访问网络/DB/对象存储。
+
+solution 文件格式 ``HIGHS_SOLUTION_V1``（ResultAdapter 按此解析）： ::
+
+    HIGHS_SOLUTION_V1
+    model_status: kOptimal
+    objective_value: 2.5
+    num_columns: 2
+    primal:
+    0: 1.5
+    1: 0.5
+
+退出码：0 表示求解器已执行且声明文件已写出（含不可行等业务状态，
+由 ResultAdapter 解释）；1 表示自检断言失败；2 表示参数形状错误、
+输入不可读或写出失败等基础设施错误。
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+#: 自检在给定目录内使用的输入/声明输出文件名（固定约定）。
+SELF_TEST_MPS = "self-test.mps"
+SELF_TEST_OUTPUT = "self-test.sol"
+
+#: 自检内嵌最小 LP（min x1+2x2, x1+x2>=2, x1<=1.5, x>=0）：
+#: 唯一最优 (1.5, 0.5)，目标值 2.5。
+SELF_TEST_MPS_TEXT = """\
+NAME          SELFTEST
+ROWS
+ N  OBJ
+ G  DEMAND
+COLUMNS
+    X1        OBJ       1.0
+    X1        DEMAND    1.0
+    X2        OBJ       2.0
+    X2        DEMAND    1.0
+RHS
+    R         DEMAND    2.0
+BOUNDS
+ LO BND       X1        0.0
+ UP BND       X1        1.5
+ LO BND       X2        0.0
+ENDATA
+"""
+SELF_TEST_OBJECTIVE = 2.5
+SELF_TEST_TOLERANCE = 1e-6
+
+
+def _fail(message: str) -> int:
+    sys.stderr.write(f"ies-highs-solver: {message}\n")
+    return 2
+
+
+def _check_relative_path(value: str, name: str) -> str:
+    if not value or value.startswith(("/", "-", "@")):
+        raise ValueError(f"{name} 路径形态非法: {value!r}")
+    if ".." in value.split("/"):
+        raise ValueError(f"{name} 路径越界: {value!r}")
+    return value
+
+
+def _cmd_version() -> int:
+    import highspy
+
+    sys.stdout.write(f"{highspy.Highs().version()}\n")
+    return 0
+
+
+def _solve_model(mps_path: str, time_limit: float, seed: int):
+    """读 MPS 并真实求解，返回 ``(h, model_status)``；失败抛异常。"""
+    import highspy
+
+    handle = highspy.Highs()
+    if handle.readModel(mps_path) != highspy.HighsStatus.kOk:
+        raise RuntimeError(f"MPS 读取失败: {mps_path!r}")
+    handle.setOptionValue("time_limit", time_limit)
+    handle.setOptionValue("random_seed", seed)
+    if handle.run() != highspy.HighsStatus.kOk:
+        raise RuntimeError("HiGHS 求解未完成")
+    return handle, handle.getModelStatus()
+
+
+def _solution_text(handle, model_status) -> str:
+    solution = handle.getSolution()
+    try:
+        objective = repr(float(handle.getObjectiveValue()))
+    except Exception:
+        objective = "unknown"
+    lines = [
+        "HIGHS_SOLUTION_V1",
+        f"model_status: {model_status}",
+        f"objective_value: {objective}",
+        f"num_columns: {len(solution.col_value)}",
+        "primal:",
+    ]
+    lines.extend(f"{index}: {value!r}" for index, value in enumerate(solution.col_value))
+    return "\n".join(lines) + "\n"
+
+
+def _cmd_solve(args: list[str]) -> int:
+    if len(args) != 7:
+        return _fail(f"求解参数须恰为七项，得到 {len(args)} 项")
+    mps_path, flag1, sol_path, flag2, limit_text, flag3, seed_text = args
+    try:
+        _check_relative_path(mps_path, "arguments[0]")
+        if flag1 != "--solution_file":
+            raise ValueError("arguments[1] 须为 --solution_file")
+        _check_relative_path(sol_path, "arguments[2]")
+        if flag2 != "--time_limit":
+            raise ValueError("arguments[3] 须为 --time_limit")
+        time_limit = float(limit_text)
+        if not time_limit > 0:
+            raise ValueError("arguments[4] 须为正数秒数")
+        if flag3 != "--random_seed":
+            raise ValueError("arguments[5] 须为 --random_seed")
+        seed = int(seed_text, 10)
+        if seed < 0:
+            raise ValueError("arguments[6] 须为非负整数")
+    except ValueError as exc:
+        return _fail(str(exc))
+    try:
+        handle, model_status = _solve_model(mps_path, time_limit, seed)
+        with open(sol_path, "w", encoding="utf-8") as stream:
+            stream.write(_solution_text(handle, model_status))
+    except Exception as exc:  # 求解链基础设施失败，不伪造输出
+        return _fail(f"求解失败: {exc}")
+    return 0
+
+
+def _cmd_self_test(args: list[str]) -> int:
+    """``--self-test DIR``：在独立目录完成最小离线自检。"""
+    if len(args) != 2:
+        return _fail("--self-test 须恰带一个目录参数")
+    target = args[1]
+    if not os.path.isdir(target):
+        return _fail(f"自检目录不存在: {target!r}")
+    mps_path = os.path.join(target, SELF_TEST_MPS)
+    sol_path = os.path.join(target, SELF_TEST_OUTPUT)
+    try:
+        with open(mps_path, "w", encoding="utf-8") as stream:
+            stream.write(SELF_TEST_MPS_TEXT)
+        handle, model_status = _solve_model(mps_path, 60.0, 0)
+        with open(sol_path, "w", encoding="utf-8") as stream:
+            stream.write(_solution_text(handle, model_status))
+    except Exception as exc:
+        return _fail(f"自检求解失败: {exc}")
+    ok_status = str(model_status) == "HighsModelStatus.kOptimal"
+    try:
+        objective = float(handle.getObjectiveValue())
+    except Exception:
+        objective = float("nan")
+    if not ok_status or abs(objective - SELF_TEST_OBJECTIVE) > (SELF_TEST_TOLERANCE):
+        sys.stderr.write(f"ies-highs-solver: 自检断言失败 (status={model_status}, objective={objective!r})\n")
+        return 1
+    if not os.path.isfile(sol_path):
+        sys.stderr.write("ies-highs-solver: 自检声明文件未生成\n")
+        return 1
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if argv == ["--version"]:
+        return _cmd_version()
+    if len(argv) == 2 and argv[0] == "--self-test":
+        return _cmd_self_test(argv)
+    return _cmd_solve(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
