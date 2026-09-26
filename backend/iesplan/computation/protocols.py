@@ -653,7 +653,7 @@ RECEIPT_STATUSES = (
     "fenced",
 )
 
-#: 终止原因封闭集合（当前真实产生的六种；OOM 等随实现再扩展）。
+#: 终止原因封闭集合（当前真实产生的七种；随实现再扩展）。
 TERMINATION_REASONS = (
     "exited",
     "signaled",
@@ -661,6 +661,7 @@ TERMINATION_REASONS = (
     "group_terminated",
     "cancelled",
     "fenced",
+    "oom",
 )
 
 
@@ -688,8 +689,9 @@ class ProcessOutcome:
     终止原因（封闭集合，与退出事实一致；取消/隔离终止保留实际回收
     到的退出码或信号，原因仍记停止）、开始/结束时间（带时区的
     ISO 8601，按 UTC 比较且开始不晚于结束）、stdout/stderr 原始字节
-    及其截断事实，以及已实施的资源事实映射（本切片无真实资源实施时
-    为空映射，不得伪造）。不含回执身份、业务状态或输出文件字节；
+    及其截断事实，以及已实施的资源事实映射（监督者实测值：子进程
+    峰值 RSS 恒记录，oom_kill 增量仅在大于 0 时记录；无实施时为空
+    映射，不得伪造）。不含回执身份、业务状态或输出文件字节；
     输出边界由执行层核对。
     """
 
@@ -724,6 +726,8 @@ class ProcessOutcome:
             raise ValueError("exited 须对应 exit_code")
         if self.termination_reason == "signaled" and self.signal_number is None:
             raise ValueError("signaled 须对应 signal_number")
+        if self.termination_reason == "oom" and self.signal_number is None:
+            raise ValueError("oom 须对应 signal_number")
         started = _check_timestamp(self.started_at, "started_at")
         ended = _check_timestamp(self.ended_at, "ended_at")
         if started > ended:
@@ -876,6 +880,8 @@ class ExecutionReceipt:
                 and self.signal_number is None
             ):
                 raise ValueError("signaled 须对应 signal_number")
+            if self.termination_reason == "oom" and self.signal_number is None:
+                raise ValueError("oom 须对应 signal_number")
             started = _check_timestamp(self.started_at, "started_at")
             ended = _check_timestamp(self.ended_at, "ended_at")
             if started > ended:

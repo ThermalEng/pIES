@@ -38,6 +38,9 @@ dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    # 0.9-F 隔离 runner 集成测试线束（仅测试驱动宿主 Docker；
+    # 生产 backend/worker 绝不挂载 Docker Socket，SDK 保持惰性）。
+    "docker>=7",
 ]
 
 [tool.setuptools.packages.find]

@@ -30,6 +30,12 @@ def _cmd_sigterm_self(args: list[str]) -> int:
     return 0
 
 
+def _cmd_sigkill_self(args: list[str]) -> int:
+    os.kill(os.getpid(), signal.SIGKILL)
+    time.sleep(30)
+    return 0
+
+
 def _cmd_sleep(args: list[str]) -> int:
     """sleep <秒> [ignore-term|trap-exit=N|exit-code=N]：超时行为探针。"""
     seconds = float(args[0])
@@ -203,6 +209,7 @@ _MODES = {
     "echo": _cmd_echo,
     "exit": _cmd_exit,
     "sigterm-self": _cmd_sigterm_self,
+    "sigkill-self": _cmd_sigkill_self,
     "sleep": _cmd_sleep,
     "sleep-with-extra": _cmd_sleep_with_extra,
     "spawn-child": _cmd_spawn_child,

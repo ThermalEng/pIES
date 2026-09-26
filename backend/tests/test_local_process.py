@@ -273,6 +273,15 @@ def test_signal_termination(tmp_path) -> None:
     assert outcome.termination_reason == "signaled"
 
 
+def test_sigkill_without_oom_evidence_is_signaled(tmp_path) -> None:
+    """无 oom_kill 证据的 SIGKILL 不得标 OOM，一律记 signaled。"""
+    outcome = _run(_provider(), ["sigkill-self"], tmp_path)
+    assert outcome.exit_code is None
+    assert outcome.signal_number == signal.SIGKILL
+    assert outcome.termination_reason == "signaled"
+    assert outcome.resource_usage.get("oom_kill_delta", 0) == 0
+
+
 def test_timeout_term_then_exit_is_still_timeout(tmp_path) -> None:
     """超时后进程自行退出（即使 exit 0）仍记 timeout，不伪装成功。"""
     outcome = _run(
@@ -474,7 +483,7 @@ def test_termination_reasons_are_closed_and_consistent() -> None:
     """终止原因封闭且与退出事实一致；伪造 timed_out 即拒绝。"""
     assert set(TERMINATION_REASONS) == {
         "exited", "signaled", "timeout", "group_terminated",
-        "cancelled", "fenced",
+        "cancelled", "fenced", "oom",
     }
     base = {
         "started_at": "2026-09-24T00:00:00Z",
@@ -499,6 +508,11 @@ def test_termination_reasons_are_closed_and_consistent() -> None:
         )
     with pytest.raises(ValueError, match="须对应 signal_number"):
         ProcessOutcome(exit_code=3, termination_reason="signaled", **base)
+    oomed = ProcessOutcome(signal_number=9, termination_reason="oom",
+                           **base)
+    assert oomed.signal_number == 9 and oomed.exit_code is None
+    with pytest.raises(ValueError, match="oom 须对应 signal_number"):
+        ProcessOutcome(exit_code=3, termination_reason="oom", **base)
     timed = ProcessOutcome(exit_code=0, termination_reason="timeout", **base)
     assert timed.termination_reason == "timeout"
     closed = ProcessOutcome(

@@ -10,16 +10,20 @@ stdout/stderr、如实返回 ``ProcessOutcome``（含截断事实）。
 监督单位是完整进程组：主进程退出后仍有组成员即立即收口；超时后即使
 主进程响应 TERM，宽限期内仍观察整个组；运行中观测到停止（取消优先
 于超时迟到）即终止整组。主动 setsid 逃逸进程组不在本层处理范围
-（网络/容器/cgroup 隔离属后续切片），此处不声称能处理。
+（网络/容器隔离由部署时预配置的 runner 容器提供），此处不声称能处理。
 
-明确不实施：网络隔离、容器隔离、CPU/内存/OOM 判定（``resource_usage``
-为空映射，回执与代码均不声称已实施）；输出文件总量/数量上限由执行层
-核对。超时需求取命令声明值；命令未声明超时则不限时等待。
+OOM 只按本进程 cgroup 的 oom_kill 事件证据标定：被监督者死于 SIGKILL
+且监督期间 oom_kill 计数增加才记 ``oom``，其余 SIGKILL 一律记
+``signaled``，计数不可读时永不标 OOM。``resource_usage`` 只装监督者实
+测值（子进程峰值 RSS、oom_kill 增量）；网络/CPU/容器边界由部署实施，
+输出文件总量/数量上限由执行层核对。超时需求取命令声明值；命令未声明
+超时则不限时等待。
 """
 
 from __future__ import annotations
 
 import os
+import resource
 import shutil
 import signal
 import subprocess
@@ -283,6 +287,35 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _read_oom_kills() -> int | None:
+    """读本进程 cgroup v2 的 oom_kill 计数；不可读即返回 None。
+
+    只读 v2（``memory.events``）；v1 或不可读环境返回 None，调用方
+    永不标 OOM，不做版本猜测。
+    """
+    try:
+        with open(
+            "/sys/fs/cgroup/memory.events", encoding="utf-8"
+        ) as handle:
+            for line in handle:
+                name, _, value = line.partition(" ")
+                if name == "oom_kill":
+                    return int(value.strip())
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _oom_delta(before: int | None) -> int:
+    """监督期间的 oom_kill 增量；不可读或回绕即返回 0（不标 OOM）。"""
+    if before is None:
+        return 0
+    after = _read_oom_kills()
+    if after is None or after < before:
+        return 0
+    return after - before
+
+
 def _check_readiness(path: str, probe: ExecutableReadiness) -> bool:
     """运行就绪探针：版本原样报告 + 独立临时目录离线自检。
 
@@ -489,6 +522,7 @@ class LocalProcessProvider:
         stopped: str | None = None
         timed_out = False
         group_closed = False
+        oom_before = _read_oom_kills()
         deadline = (
             time.monotonic() + float(timeout)  # type: ignore[arg-type]
             if timeout is not None
@@ -547,6 +581,7 @@ class LocalProcessProvider:
                 reason="executor-evidence-incomplete",
             )
         ended_at = _now_iso()
+        oom_delta = _oom_delta(oom_before)
         if returncode < 0:
             exit_code: int | None = None
             signal_number: int | None = -returncode
@@ -563,8 +598,20 @@ class LocalProcessProvider:
             termination_reason = "group_terminated"
         elif exit_code is not None:
             termination_reason = "exited"
+        elif signal_number == signal.SIGKILL and oom_delta > 0:
+            # 仅凭监督期间的 oom_kill 增量标 OOM；其余 SIGKILL 一律
+            # 记 signaled，不猜测。
+            termination_reason = "oom"
         else:
             termination_reason = "signaled"
+        resource_usage: dict[str, object] = {
+            "max_rss_bytes": resource.getrusage(
+                resource.RUSAGE_CHILDREN
+            ).ru_maxrss
+            * 1024,
+        }
+        if oom_delta > 0:
+            resource_usage["oom_kill_delta"] = oom_delta
         return ProcessOutcome(
             exit_code=exit_code,
             signal_number=signal_number,
@@ -575,6 +622,7 @@ class LocalProcessProvider:
             stderr=b"".join(err_chunks),
             stdout_truncated=out_truncated[0],
             stderr_truncated=err_truncated[0],
+            resource_usage=resource_usage,
         )
 
 

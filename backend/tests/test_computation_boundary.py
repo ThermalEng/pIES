@@ -518,6 +518,14 @@ def test_receipt_refs_status_and_executed_consistency() -> None:
         _receipt(status="succeeded", termination_reason="cancelled")
     with pytest.raises(ValueError, match="恰有一个有值"):
         _receipt(exit_code=None, signal_number=None)
+    oomed = _receipt(
+        status="process_failed", termination_reason="oom", exit_code=None,
+        signal_number=9,
+    )
+    assert oomed.signal_number == 9
+    with pytest.raises(ValueError, match="oom 须对应 signal_number"):
+        _receipt(status="process_failed", termination_reason="oom",
+                 exit_code=3)
     with pytest.raises(ValueError, match="非空时间戳"):
         _receipt(started_at="", ended_at="")
     with pytest.raises(ValueError, match="带时区"):

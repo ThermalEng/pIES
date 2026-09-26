@@ -100,7 +100,8 @@ class SolverRuntime:
         为主状态；主进程
         退出后仍有组成员被强制收口 → ``process_failed``
         （``group_terminated`` 不得签发 ``succeeded``）；运行中停止 →
-        ``cancelled``/``fenced`` 为主状态；输出边界问题追加进 ``error``
+        ``cancelled``/``fenced`` 为主状态；凭 cgroup oom_kill 证据标定的
+        OOM → ``process_failed``（``oom``）；输出边界问题追加进 ``error``
         供解释，不改写上述主状态。非停止执行的输出边界违规（未声明文件/
         特殊文件/符号链接/不可读/数量超限/总量超限）→
         ``output_protocol_failed``；退出码不在成功集合 →
@@ -301,6 +302,19 @@ class SolverRuntime:
             parts = [
                 f"{lead}: exit_code={outcome.exit_code!r} "
                 f"signal={outcome.signal_number!r}"
+            ]
+            parts.extend(boundary_errors)
+            if missing:
+                parts.append(f"必需输出缺失: {missing!r}")
+            error = "; ".join(parts)
+        elif reason == "oom":
+            status = "process_failed"
+            usage = outcome.resource_usage
+            parts = [
+                "求解器被 OOM 终结: "
+                f"signal={outcome.signal_number!r} "
+                f"oom_kill_delta={usage.get('oom_kill_delta', 0)!r} "
+                f"max_rss_bytes={usage.get('max_rss_bytes', 0)!r}"
             ]
             parts.extend(boundary_errors)
             if missing:
