@@ -67,9 +67,6 @@ HIGHS_VERSION = HIGHS_EXECUTABLE_REF.rsplit("@", 1)[1]
 #: HiGHS 适配 executable 在镜像内的固定绝对路径（部署约定，测试盯防）。
 HIGHS_ADAPTER_PATH = "/usr/local/bin/ies-highs-solver"
 
-#: 自检在独立临时目录内生成的声明文件名（适配器固定约定）。
-SELF_TEST_OUTPUT = "self-test.sol"
-
 #: readiness 版本上报与离线自检共用超时（秒）。
 _READINESS_TIMEOUT_SECONDS = 120.0
 
@@ -126,12 +123,13 @@ class ExecutableReadiness:
 
     ``version`` 为 ``--version`` 必须原样报告的精确版本；``self_test``
     为独立临时目录运行的自检参数前缀（目录由调用方追加），自检须
-    exit 0 并在该目录生成 ``SELF_TEST_OUTPUT`` 声明文件。不做规则
-    DSL：只表达这两项固定检查，不访问 DB/对象存储/网络/项目草稿。
+    exit 0 并在该目录生成 ``output_path`` 声明文件。不做规则 DSL：
+    只表达这三项固定约定，不访问 DB/对象存储/网络/项目草稿。
     """
 
     version: str = ""
     self_test: tuple[str, ...] = ()
+    output_path: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.version, str) or not self.version:
@@ -149,6 +147,7 @@ class ExecutableReadiness:
             raise ValueError(
                 f"readiness 自检参数须为非空字符串元组: {self.self_test!r}"
             )
+        _check_bundle_relative_path(self.output_path, "output_path")
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,7 +317,7 @@ def _check_readiness(path: str, probe: ExecutableReadiness) -> bool:
             return False
         if proved.returncode != 0:
             return False
-        return os.path.isfile(os.path.join(tmpdir, SELF_TEST_OUTPUT))
+        return os.path.isfile(os.path.join(tmpdir, probe.output_path))
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

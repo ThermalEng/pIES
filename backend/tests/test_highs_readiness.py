@@ -115,6 +115,7 @@ def _campus_bundle():
 def _readiness(**kwargs) -> ExecutableReadiness:
     kwargs.setdefault("version", HIGHS_VERSION)
     kwargs.setdefault("self_test", ("--self-test",))
+    kwargs.setdefault("output_path", "self-test.sol")
     return ExecutableReadiness(**kwargs)
 
 
@@ -169,6 +170,8 @@ def test_refs_single_source_and_exact_version() -> None:
     assert HIGHS_EXECUTABLE_REF == "ies.solver.highs@1.7.2"
     assert HIGHS_VERSION == "1.7.2"
     assert _readiness().version == HIGHS_VERSION
+    assert _readiness().output_path == "self-test.sol"
+    assert _binding().readiness is not None
     assert HIGHS_ADAPTER_PATH.startswith("/") and ".." not in (HIGHS_ADAPTER_PATH)
     pinned = (BACKEND_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert '"highspy==1.7.2"' in pinned
@@ -213,8 +216,12 @@ def test_readiness_available_and_atomic_reject() -> None:
         base_environ={},
     )
     assert bad_version.available() is False
-    with pytest.raises(ComputationUnavailableError):
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        build_executor_registry([bad_version])
+    assert exc_info.value.reason == "no-executor"
+    with pytest.raises(ComputationUnavailableError) as atomic_info:
         build_executor_registry([_provider(), bad_version])
+    assert atomic_info.value.reason == "no-executor"
     bad_path = LocalProcessProvider(
         _descriptor(),
         (
@@ -230,6 +237,43 @@ def test_readiness_available_and_atomic_reject() -> None:
     assert bad_path.available() is False
     with pytest.raises(ComputationUnavailableError):
         build_executor_registry([bad_path])
+
+
+def test_readiness_self_test_failure_rejects() -> None:
+    """版本正确但自检失败即不可用：非零退出与缺声明文件都不回退。"""
+    nonzero = LocalProcessProvider(
+        _descriptor(),
+        (
+            _binding(
+                readiness=_readiness(self_test=("--self-test", "--bogus")),
+            ),
+        ),
+        base_environ={},
+    )
+    assert nonzero.available() is False
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        build_executor_registry([nonzero])
+    assert exc_info.value.reason == "no-executor"
+    missing_output = LocalProcessProvider(
+        _descriptor(),
+        (
+            _binding(
+                readiness=_readiness(output_path="other.sol"),
+            ),
+        ),
+        base_environ={},
+    )
+    assert missing_output.available() is False
+    with pytest.raises(ComputationUnavailableError):
+        build_executor_registry([missing_output])
+
+
+def test_readiness_output_path_must_be_relative() -> None:
+    """自检输出只接受非空规范相对路径。"""
+    with pytest.raises(ValueError, match="非空"):
+        _readiness(output_path="")
+    with pytest.raises(ValueError, match="非法|越界"):
+        _readiness(output_path="/abs.sol")
 
 
 def _parse_solution(text: str) -> dict:
