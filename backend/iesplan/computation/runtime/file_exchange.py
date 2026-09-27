@@ -157,7 +157,8 @@ def write_receipt_envelope(
                 "stderr": base64.b64encode(outcome.stderr).decode("ascii"),
                 "stdout_truncated": outcome.stdout_truncated,
                 "stderr_truncated": outcome.stderr_truncated,
-                "resource_usage": dict(outcome.resource_usage),
+                # 分层映射需递归解冻为普通 dict，信封才可 JSON 序列化。
+                "resource_usage": thaw_json_value(dict(outcome.resource_usage)),
             },
         }
     else:
@@ -204,8 +205,8 @@ def read_receipt_envelope(
                 ended_at=str(outcome_raw.get("ended_at")),
                 stdout=_decode_bytes(outcome_raw.get("stdout"), "stdout"),
                 stderr=_decode_bytes(outcome_raw.get("stderr"), "stderr"),
-                stdout_truncated=bool(outcome_raw.get("stdout_truncated")),
-                stderr_truncated=bool(outcome_raw.get("stderr_truncated")),
+                stdout_truncated=outcome_raw.get("stdout_truncated"),
+                stderr_truncated=outcome_raw.get("stderr_truncated"),
                 resource_usage=dict(usage_raw),
             )
         except (TypeError, ValueError) as exc:
@@ -214,6 +215,17 @@ def read_receipt_envelope(
     if unexecuted not in ("cancelled", "fenced"):
         raise ValueError(f"未执行原因非法: {unexecuted!r}")
     return None, str(unexecuted)
+
+
+def _relative_files(root: str) -> set[str]:
+    """工作区已有相对文件集合（取回时永不覆盖，只搬运新增）。"""
+    found: set[str] = set()
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for filename in filenames:
+            full = os.path.join(dirpath, filename)
+            if os.path.isfile(full) and not os.path.islink(full):
+                found.add(os.path.relpath(full, root))
+    return found
 
 
 def read_heartbeat(exchange_dir: str) -> datetime | None:
@@ -246,9 +258,10 @@ class FileExchangeExecutorProvider:
     """文件交换隔离执行 provider（与本地进程执行器同引用）。
 
     ``ref`` 与 ``LocalProcessProvider`` 相同（同一执行器的隔离部署
-    形态，由组合根二选一注册，不并存）；``available`` 只断言交换目录
-    已配置可写；``execute`` 把命令与文件树递交给 runner 并取回过程
-    结果与输出文件，不解释业务，不回退本地执行。
+    形态，由组合根二选一注册，不并存）；``available`` 同时断言交换
+    目录已配置可写与 runner 心跳新鲜，心跳缺失/过期即不可用，注册
+    表据此原子拒绝；``execute`` 把命令与文件树递交给 runner 并取回
+    过程结果与输出文件，不解释业务，不回退本地执行。
     """
 
     __slots__ = ("_descriptor", "_exchange_dir")
@@ -281,7 +294,11 @@ class FileExchangeExecutorProvider:
         return self._descriptor.ref
 
     def available(self) -> bool:
-        """交换目录存在且可写（部署事实，不探测 runner 存活）。"""
+        """交换目录可用且 runner 心跳新鲜；任一不满足即不可用。"""
+        return self._exchange_ready() and heartbeat_fresh(self._exchange_dir)
+
+    def _exchange_ready(self) -> bool:
+        """交换目录存在且可写（部署事实，不含 runner 存活）。"""
         return os.path.isdir(self._exchange_dir) and os.access(
             self._exchange_dir, os.W_OK | os.X_OK
         )
@@ -300,7 +317,7 @@ class FileExchangeExecutorProvider:
                 f"启动前已停止（{pre_stop}），未递交执行",
                 reason=pre_stop,
             )
-        if not self.available():
+        if not self._exchange_ready():
             raise ComputationUnavailableError(
                 f"交换目录不可用: {self._exchange_dir!r}",
                 reason="no-exchange",
@@ -310,6 +327,7 @@ class FileExchangeExecutorProvider:
                 "runner 心跳失活，不递交执行",
                 reason="runner-unreachable",
             )
+        pre_existing = _relative_files(workdir)
         attempt_id = uuid.uuid4().hex
         attempt_dir = os.path.join(self._exchange_dir, attempt_id)
         staging_dir = os.path.join(
@@ -324,7 +342,7 @@ class FileExchangeExecutorProvider:
                 f"请求装配失败: {exc}", reason="exchange-io-error"
             ) from exc
         outcome = self._await_receipt(attempt_dir, stop)
-        self._fetch_outputs(attempt_dir, workdir)
+        self._fetch_outputs(attempt_dir, workdir, pre_existing)
         # 成功取回即清理交换侧 attempt 目录（异常路径保留现场供诊断，
         # 由部署按卷策略回收；容器死亡不留进程孤儿）。
         shutil.rmtree(attempt_dir, ignore_errors=True)
@@ -370,8 +388,17 @@ class FileExchangeExecutorProvider:
                 )
             time.sleep(POLL_SECONDS)
 
-    def _fetch_outputs(self, attempt_dir: str, workdir: str) -> None:
-        """把 runner 写回的输出文件搬运进本次工作区（核对归执行层）。"""
+    def _fetch_outputs(
+        self,
+        attempt_dir: str,
+        workdir: str,
+        pre_existing: set[str],
+    ) -> None:
+        """把 runner 新产生的文件搬运进本次工作区（核对归执行层）。
+
+        ``pre_existing`` 是递交前工作区已有的相对文件集合，永不覆盖：
+        输入只读语义不依赖 worker 身份，runner 新产生的文件才落盘。
+        """
         for dirpath, dirnames, _filenames in os.walk(attempt_dir):
             for dirname in dirnames:
                 full = os.path.join(dirpath, dirname)
@@ -382,6 +409,8 @@ class FileExchangeExecutorProvider:
                 full = os.path.join(dirpath, filename)
                 rel = os.path.relpath(full, attempt_dir)
                 if rel in (REQUEST_FILE, RECEIPT_FILE, CANCEL_FILE):
+                    continue
+                if rel in pre_existing:
                     continue
                 target = os.path.join(workdir, rel)
                 os.makedirs(os.path.dirname(target) or workdir, exist_ok=True)

@@ -1,14 +1,16 @@
 """隔离 solver runner 服务（运行在部署时预配置的隔离容器内）。
 
 本模块只在 runner 容器内运行：启动时先做隔离自检（非 root 身份、
-真实断网、cgroup 可读）与求解链 readiness（精确版本 + 最小离线自检，
-复用 ``LocalProcessProvider.available``），任一项失败即拒绝服务；
-随后循环处理交换目录中的 attempt 请求，复用 ``LocalProcessProvider``
-监督求解并写回响应信封。
+仅 lo 网卡、根只读、cgroup 三边界有限）与求解链 readiness（精确版本
++ 最小离线自检，复用 ``LocalProcessProvider.available``），任一项失败
+即拒绝服务；随后循环串行处理交换目录中的 attempt 请求，复用
+``LocalProcessProvider`` 监督求解并写回响应信封。
 
-runner 不签发 ``ExecutionReceipt``（归属 worker 侧执行层），不碰
-数据库/队列/对象存储/项目草稿，不创建容器，不访问网络。容器死亡即
-带走被监督进程组，无孤儿。
+单个长驻串行 runner 复用同一容器 cgroup 硬边界，不声称每 attempt
+独立 cgroup：每个 attempt 都受同一部署固定容器硬边界约束，工作目录
+按 attempt 独立，用后清理。runner 不签发 ``ExecutionReceipt``（归属
+worker 侧执行层），不碰数据库/队列/对象存储/项目草稿，不创建容器，
+不访问网络。容器死亡即带走被监督进程组，无孤儿。
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import socket
 import sys
 import threading
 import uuid
@@ -47,31 +48,53 @@ from iesplan.computation.runtime.local_process import (
 #: runner 心跳间隔（秒）；worker 侧失活界限见 ``HEARTBEAT_STALE_AFTER_SECONDS``。
 HEARTBEAT_INTERVAL_SECONDS = 1.0
 
-#: 断网自检的连接目标与超时（秒）：能连上即拒绝服务。
-_ISOLATION_PROBE_HOST = "8.8.8.8"
-_ISOLATION_PROBE_PORT = 53
-_ISOLATION_PROBE_TIMEOUT_SECONDS = 3.0
+#: 自检要求的 cgroup applied 边界键（与 ``applied_limits`` 同源）。
+_REQUIRED_LIMIT_KEYS = (
+    "memory_limit_bytes",
+    "cpu_limit_cores",
+    "pids_limit",
+)
+
+
+def _non_loopback_interfaces() -> list[str]:
+    """本网络命名空间内除 lo 外的网卡；命名空间不可读即抛错。"""
+    try:
+        names = os.listdir("/sys/class/net")
+    except OSError as exc:
+        raise RuntimeError(f"runner 网络命名空间不可读：{exc}") from exc
+    return sorted(name for name in names if name != "lo")
+
+
+def _root_readonly() -> bool:
+    """根挂载是否只读（/proc/mounts 事实；不可读或无根记录即 False）。"""
+    try:
+        with open("/proc/mounts", encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) >= 4 and parts[1] == "/":
+                    return "ro" in parts[3].split(",")
+    except OSError:
+        return False
+    return False
 
 
 def check_isolation() -> None:
-    """隔离自检：非 root、真实断网、cgroup 可读；失败抛错拒绝服务。"""
+    """隔离自检：非 root、仅 lo 网卡、根只读、三 cgroup 边界有限。
+
+    全部基于本命名空间/容器事实，不主动外连；任一事实缺失或不满足
+    即抛错拒绝服务。
+    """
     if os.getuid() == 0:
         raise RuntimeError("runner 不得以 root 身份运行")
-    try:
-        probe = socket.create_connection(
-            (_ISOLATION_PROBE_HOST, _ISOLATION_PROBE_PORT),
-            timeout=_ISOLATION_PROBE_TIMEOUT_SECONDS,
-        )
-    except OSError:
-        pass
-    else:
-        probe.close()
-        raise RuntimeError(f"runner 网络未隔离：可连接 {_ISOLATION_PROBE_HOST}")
-    try:
-        with open("/sys/fs/cgroup/memory.events", encoding="utf-8") as handle:
-            handle.read(1)
-    except OSError as exc:
-        raise RuntimeError(f"runner cgroup 不可读：{exc}") from exc
+    extra = _non_loopback_interfaces()
+    if extra:
+        raise RuntimeError(f"runner 网络未隔离：存在非回环网卡 {extra!r}")
+    if not _root_readonly():
+        raise RuntimeError("runner 根文件系统非只读")
+    applied = applied_limits()
+    for key in _REQUIRED_LIMIT_KEYS:
+        if key not in applied:
+            raise RuntimeError(f"runner cgroup 边界缺失或无上限：{key}")
 
 
 def build_solver_provider() -> LocalProcessProvider:
@@ -168,25 +191,12 @@ def _cancel_probe(attempt_dir: str):
     return probe
 
 
-def _same_file_bytes(first: str, second: str) -> bool:
-    """两文件字节相同即 True；读错即 False（调用方再按写路径处理）。"""
-    try:
-        if os.path.getsize(first) != os.path.getsize(second):
-            return False
-        with open(first, "rb") as left, open(second, "rb") as right:
-            while True:
-                left_chunk = left.read(1 << 20)
-                right_chunk = right.read(1 << 20)
-                if left_chunk != right_chunk:
-                    return False
-                if not left_chunk:
-                    return True
-    except OSError:
-        return False
-
-
 def _materialize(attempt_dir: str, workdir: str) -> None:
-    """把请求文件树铺进本次独立工作区（目录结构原样保留）。"""
+    """把请求文件树铺进本次独立工作区（目录结构原样保留）。
+
+    铺入后请求文件置只读（0o444），求解进程误写即失败，不静默污染
+    输入；不做内容复核。该位只防误写，不声称强制隔离。
+    """
     for dirpath, dirnames, filenames in os.walk(attempt_dir):
         for dirname in dirnames:
             full = os.path.join(dirpath, dirname)
@@ -204,14 +214,15 @@ def _materialize(attempt_dir: str, workdir: str) -> None:
             if parent:
                 os.makedirs(parent, exist_ok=True)
             shutil.copyfile(full, target)
+            os.chmod(target, 0o444)
 
 
 def _collect_back(workdir: str, attempt_dir: str) -> None:
-    """把工作区全部产出搬回 attempt 目录（核对归执行层）。
+    """把工作区产出搬回 attempt 目录（核对归执行层）。
 
-    装配输入字节未变即跳过（worker 侧文件对 runner 只读，不复写）；
-    新增或被求解器改写的文件经同目录临时文件原子替换（只需目录写
-    权限，不触碰属主即可更新 root 属主文件）。
+    只搬运 attempt 目录中尚不存在的文件：装配输入原样保留，永不复
+    写（输入只读不依赖属主关系）；求解器新产生的文件直接落盘。不做
+    字节比对与内容复核。
     """
     for dirpath, dirnames, filenames in os.walk(workdir):
         for dirname in dirnames:
@@ -224,14 +235,12 @@ def _collect_back(workdir: str, attempt_dir: str) -> None:
             if not os.path.isfile(full) or os.path.islink(full):
                 continue
             target = os.path.join(attempt_dir, rel)
+            if os.path.lexists(target):
+                continue
             parent = os.path.dirname(target)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            if os.path.isfile(target) and _same_file_bytes(full, target):
-                continue
-            tmp_path = target + ".collecting"
-            shutil.copyfile(full, tmp_path)
-            os.replace(tmp_path, target)
+            shutil.copyfile(full, target)
 
 
 def serve_attempt(
@@ -256,7 +265,10 @@ def serve_attempt(
         if applied:
             outcome = replace(
                 outcome,
-                resource_usage={**dict(outcome.resource_usage), **applied},
+                resource_usage={
+                    "applied": applied,
+                    **dict(outcome.resource_usage),
+                },
             )
         _collect_back(workdir, attempt_dir)
         write_receipt_envelope(attempt_dir, outcome=outcome)

@@ -14,16 +14,18 @@ stdout/stderr、如实返回 ``ProcessOutcome``（含截断事实）。
 
 OOM 只按本进程 cgroup 的 oom_kill 事件证据标定：被监督者死于 SIGKILL
 且监督期间 oom_kill 计数增加才记 ``oom``，其余 SIGKILL 一律记
-``signaled``，计数不可读时永不标 OOM。``resource_usage`` 只装监督者实
-测值（子进程峰值 RSS、oom_kill 增量）；网络/CPU/容器边界由部署实施，
-输出文件总量/数量上限由执行层核对。超时需求取命令声明值；命令未声明
-超时则不限时等待。
+``signaled``，计数不可读时永不标 OOM。oom_kill 基线在子进程启动前读
+取，极快 OOM 不漏窗口。``resource_usage`` 只装 ``observed`` 层（有
+oom_kill 增量事实才放 ``oom_kill_delta``，无事实即空映射，不伪造任何
+峰值）；容器 ``applied`` 边界由 runner 侧从 cgroup 事实另行合并，部署
+需求已在不可变 Bundle 命令中，不在此重复。网络/CPU/容器边界由部署实
+施，输出文件总量/数量上限由执行层核对。超时需求取命令声明值；命令未
+声明超时则不限时等待。
 """
 
 from __future__ import annotations
 
 import os
-import resource
 import shutil
 import signal
 import subprocess
@@ -486,6 +488,9 @@ class LocalProcessProvider:
                 reason=pre_stop,
             )
         started_at = _now_iso()
+        # oom_kill 基线先于子进程启动读取：极快 OOM 若死在基线之后，
+        # 增量仍可观测；读不到即 None，调用链永不标 OOM。
+        oom_before = _read_oom_kills()
         try:
             proc = subprocess.Popen(
                 argv,
@@ -522,7 +527,6 @@ class LocalProcessProvider:
         stopped: str | None = None
         timed_out = False
         group_closed = False
-        oom_before = _read_oom_kills()
         deadline = (
             time.monotonic() + float(timeout)  # type: ignore[arg-type]
             if timeout is not None
@@ -604,14 +608,9 @@ class LocalProcessProvider:
             termination_reason = "oom"
         else:
             termination_reason = "signaled"
-        resource_usage: dict[str, object] = {
-            "max_rss_bytes": resource.getrusage(
-                resource.RUSAGE_CHILDREN
-            ).ru_maxrss
-            * 1024,
-        }
+        resource_usage: dict[str, object] = {}
         if oom_delta > 0:
-            resource_usage["oom_kill_delta"] = oom_delta
+            resource_usage["observed"] = {"oom_kill_delta": oom_delta}
         return ProcessOutcome(
             exit_code=exit_code,
             signal_number=signal_number,

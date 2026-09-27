@@ -310,11 +310,15 @@ class SolverRuntime:
         elif reason == "oom":
             status = "process_failed"
             usage = outcome.resource_usage
+            applied = usage.get("applied")
+            observed = usage.get("observed")
             parts = [
                 "求解器被 OOM 终结: "
                 f"signal={outcome.signal_number!r} "
-                f"oom_kill_delta={usage.get('oom_kill_delta', 0)!r} "
-                f"max_rss_bytes={usage.get('max_rss_bytes', 0)!r}"
+                "oom_kill_delta="
+                f"{observed.get('oom_kill_delta') if isinstance(observed, Mapping) else None!r} "
+                "memory_limit_bytes="
+                f"{applied.get('memory_limit_bytes') if isinstance(applied, Mapping) else None!r}"
             ]
             parts.extend(boundary_errors)
             if missing:

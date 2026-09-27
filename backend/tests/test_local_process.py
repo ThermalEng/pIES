@@ -279,7 +279,7 @@ def test_sigkill_without_oom_evidence_is_signaled(tmp_path) -> None:
     assert outcome.exit_code is None
     assert outcome.signal_number == signal.SIGKILL
     assert outcome.termination_reason == "signaled"
-    assert outcome.resource_usage.get("oom_kill_delta", 0) == 0
+    assert "observed" not in outcome.resource_usage
 
 
 def test_timeout_term_then_exit_is_still_timeout(tmp_path) -> None:

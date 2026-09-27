@@ -221,6 +221,8 @@ class _Runner:
             mem_limit=memory,
             nano_cpus=2_000_000_000,
             pids_limit=128,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
             volumes={VOLUME_NAME: {"bind": "/exchange", "mode": "rw"}},
         )
         return self
@@ -257,6 +259,12 @@ class _Runner:
 
     def work_empty(self) -> bool:
         return self.exec("ls", "-A", "/work") == ""
+
+
+def _assert_exchange_drained(exchange_dir: str) -> None:
+    """交换根无残留 attempt 目录（成功即清理，异常保留现场）。"""
+    left = [entry for entry in os.listdir(exchange_dir) if os.path.isdir(os.path.join(exchange_dir, entry))]
+    assert left == []
 
 
 def _run_worker(exchange_dir: str, bundle, stop=None, timeout: float = 600.0):
@@ -309,14 +317,18 @@ def test_exchange_envelope_roundtrip_unit(tmp_path) -> None:
         ended_at="2026-09-26T00:00:01Z",
         stdout=b"ok",
         stderr=b"",
-        resource_usage={"max_rss_bytes": 123},
+        resource_usage={
+            "applied": {"memory_limit_bytes": 1},
+            "observed": {"oom_kill_delta": 2},
+        },
     )
     write_receipt_envelope(str(target), outcome=outcome)
     back, unexecuted = read_receipt_envelope(str(target))
     assert unexecuted == ""
     assert back is not None and back.exit_code == 0
     assert back.stdout == b"ok"
-    assert back.resource_usage["max_rss_bytes"] == 123
+    assert back.resource_usage["applied"]["memory_limit_bytes"] == 1
+    assert back.resource_usage["observed"]["oom_kill_delta"] == 2
     write_receipt_envelope(str(target), outcome=None, unexecuted="fenced")
     back, unexecuted = read_receipt_envelope(str(target))
     assert back is None and unexecuted == "fenced"
@@ -347,6 +359,38 @@ def test_exchange_rejects_bad_envelopes_unit(tmp_path) -> None:
         read_receipt_envelope(str(target))
 
 
+def test_receipt_rejects_string_truncated_flags_unit(tmp_path) -> None:
+    """截断标记字符串 "false" 不得 bool() 误转为 True，直传由类型检查拒绝。"""
+    from iesplan.computation.runtime.file_exchange import (
+        read_receipt_envelope,
+    )
+
+    target = tmp_path / "attempt"
+    target.mkdir()
+    (target / "receipt.json").write_text(
+        json.dumps(
+            {
+                "schema": "ies.ipc.exchange.v1",
+                "outcome": {
+                    "exit_code": 0,
+                    "signal_number": None,
+                    "termination_reason": "exited",
+                    "started_at": "2026-09-26T00:00:00Z",
+                    "ended_at": "2026-09-26T00:00:01Z",
+                    "stdout": "",
+                    "stderr": "",
+                    "stdout_truncated": "false",
+                    "stderr_truncated": "false",
+                    "resource_usage": {},
+                },
+            }
+        ),
+        "utf-8",
+    )
+    with pytest.raises(ValueError, match="响应过程结果非法"):
+        read_receipt_envelope(str(target))
+
+
 def test_provider_unavailable_without_exchange(tmp_path) -> None:
     """交换目录缺失即 unavailable，执行明确拒绝（无 Docker）。"""
     provider = _ipc_provider(str(tmp_path / "nope"))
@@ -356,26 +400,62 @@ def test_provider_unavailable_without_exchange(tmp_path) -> None:
     assert exc_info.value.reason == "no-exchange"
 
 
-def test_provider_rejects_stale_heartbeat(tmp_path) -> None:
-    """心跳失活即拒不递交（无 Docker；旧心跳 + 无 runner）。"""
-    exchange = tmp_path / "xchg"
-    exchange.mkdir()
+def _write_heartbeat_file(exchange, updated_at: str) -> None:
     (exchange / "heartbeat.json").write_text(
-        json.dumps(
-            {
-                "schema": "ies.ipc.exchange.v1",
-                "updated_at": "2020-01-01T00:00:00+00:00",
-            }
-        ),
+        json.dumps({"schema": "ies.ipc.exchange.v1", "updated_at": updated_at}),
         "utf-8",
     )
+
+
+def test_provider_rejects_stale_heartbeat(tmp_path) -> None:
+    """心跳过期即 unavailable，注册表原子拒绝，执行拒不递交（无 Docker）。"""
+    exchange = tmp_path / "xchg"
+    exchange.mkdir()
+    _write_heartbeat_file(exchange, "2020-01-01T00:00:00+00:00")
     assert read_heartbeat(str(exchange)) is not None
     assert not heartbeat_fresh(str(exchange))
     provider = _ipc_provider(str(exchange))
-    assert provider.available() is True
+    assert provider.available() is False
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        build_executor_registry([provider])
+    assert exc_info.value.reason == "no-executor"
     with pytest.raises(ComputationUnavailableError) as exc_info:
         provider.execute({"executor": "x"}, str(tmp_path))
     assert exc_info.value.reason == "runner-unreachable"
+
+
+def test_provider_rejects_missing_heartbeat(tmp_path) -> None:
+    """心跳缺失即 unavailable，注册表原子拒绝（无 Docker）。"""
+    exchange = tmp_path / "xchg"
+    exchange.mkdir()
+    provider = _ipc_provider(str(exchange))
+    assert provider.available() is False
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        build_executor_registry([provider])
+    assert exc_info.value.reason == "no-executor"
+
+
+def test_fetch_never_overwrites_pre_existing_unit(tmp_path) -> None:
+    """取回永不覆盖递交前已有文件：0444 输入保留，新文件落盘（无 Docker，
+    不依赖任何特权身份）。"""
+    from iesplan.computation.runtime.file_exchange import _relative_files
+
+    provider = _ipc_provider(str(tmp_path / "xchg-not-used"))
+    workdir = tmp_path / "work"
+    (workdir / "input").mkdir(parents=True)
+    staged = workdir / "input" / "problem.mps"
+    staged.write_bytes(b"staged-bytes")
+    staged.chmod(0o444)
+    pre_existing = _relative_files(str(workdir))
+    assert pre_existing == {"input/problem.mps"}
+    attempt = tmp_path / "attempt"
+    (attempt / "input").mkdir(parents=True)
+    (attempt / "input" / "problem.mps").write_bytes(b"runner-bytes")
+    (attempt / "output").mkdir()
+    (attempt / "output" / "solution.sol").write_bytes(b"sol")
+    provider._fetch_outputs(str(attempt), str(workdir), pre_existing)
+    assert staged.read_bytes() == b"staged-bytes"
+    assert (workdir / "output" / "solution.sol").read_bytes() == b"sol"
 
 
 @needs_docker
@@ -398,12 +478,12 @@ def test_runner_success_end_to_end() -> None:
         assert text.startswith("HIGHS_SOLUTION_V1\n")
         assert "model_status: HighsModelStatus.kOptimal" in text
         usage = dict(receipt.resource_usage)
-        assert usage["max_rss_bytes"] > 0
-        assert usage["memory_limit_bytes"] == 512 * 1024 * 1024
-        assert usage["pids_limit"] == 128
-        assert math.isclose(usage["cpu_limit_cores"], 2.0)
-        assert "oom_kill_delta" not in usage
-        assert [entry for entry in os.listdir(exchange) if os.path.isdir(os.path.join(exchange, entry))] == []
+        assert set(usage) == {"applied"}
+        applied = usage["applied"]
+        assert applied["memory_limit_bytes"] == 512 * 1024 * 1024
+        assert applied["pids_limit"] == 128
+        assert math.isclose(applied["cpu_limit_cores"], 2.0)
+        _assert_exchange_drained(exchange)
     finally:
         runner.stop()
 
@@ -420,8 +500,8 @@ def test_runner_container_config_proves_isolation() -> None:
         host_config = info["HostConfig"]
         assert config["User"] == "65534"
         # network=none 即挂载空网络：键为 none 且无分配 IP；
-        # 叠加命名空间内仅 lo 网卡与 runner 启动期外连探针（能连上
-        # 即拒绝服务），共同证明真实断网而非声明。
+        # 叠加命名空间内仅 lo 网卡与 runner 启动期命名空间自检，
+        # 共同证明真实断网而非声明。
         networks = info["NetworkSettings"]["Networks"]
         assert set(networks) == {"none"}
         assert not networks["none"].get("IPAddress")
@@ -429,6 +509,8 @@ def test_runner_container_config_proves_isolation() -> None:
         assert host_config["ReadonlyRootfs"] is True
         assert host_config["Memory"] == 512 * 1024 * 1024
         assert host_config["PidsLimit"] == 128
+        assert host_config.get("CapDrop") == ["ALL"]
+        assert "no-new-privileges:true" in (host_config.get("SecurityOpt") or [])
         env = config["Env"] or []
         assert not any(
             key.startswith(("IESPLAN_DB_", "IESPLAN_REDIS", "IESPLAN_SECRET"))
@@ -469,10 +551,15 @@ def test_runner_oom_end_to_end() -> None:
         assert receipt.signal_number == 9
         assert "OOM" in receipt.error
         usage = dict(receipt.resource_usage)
-        assert usage["oom_kill_delta"] >= 1
-        assert usage["memory_limit_bytes"] == 160 * 1024 * 1024
+        assert set(usage) == {"applied", "observed"}
+        assert usage["observed"]["oom_kill_delta"] >= 1
+        assert usage["applied"]["memory_limit_bytes"] == 160 * 1024 * 1024
         assert outputs == {}
         assert tuple(receipt.outputs) == ()
+        # runner 存活并可继续服务：心跳新鲜、工作目录清空。
+        assert heartbeat_fresh(exchange)
+        assert runner.work_empty()
+        _assert_exchange_drained(exchange)
     finally:
         runner.stop()
 
@@ -501,6 +588,30 @@ def test_runner_cancel_no_orphans() -> None:
         second, second_outputs = _run_worker(exchange, bundle)
         assert second.status == "succeeded"
         assert set(second_outputs) == {SOLUTION_PATH}
+    finally:
+        runner.stop()
+
+
+@needs_docker
+def test_runner_serves_two_attempts_serially() -> None:
+    """同一长驻 runner 连续两个 attempt：均成功、工作目录清空、无孤儿、
+    resource_usage 各自只有 applied 层。"""
+    exchange = _require_harness()
+    runner = _Runner(exchange, f"pies-09f-reuse-{uuid.uuid4().hex[:8]}")
+    try:
+        runner.start(memory="512m").wait_ready()
+        baseline_pids = runner.pids_current()
+        bundle = _campus_bundle()
+        for _ in range(2):
+            receipt, outputs = _run_worker(exchange, bundle)
+            assert receipt.status == "succeeded"
+            assert receipt.termination_reason == "exited"
+            assert set(outputs) == {SOLUTION_PATH}
+            assert set(dict(receipt.resource_usage)) == {"applied"}
+            assert runner.work_empty()
+            assert runner.pids_current() == baseline_pids
+            assert heartbeat_fresh(exchange)
+            _assert_exchange_drained(exchange)
     finally:
         runner.stop()
 
@@ -627,23 +738,20 @@ def test_heartbeat_fresh_and_stale_unit(tmp_path) -> None:
     assert HEARTBEAT_STALE_AFTER_SECONDS > 0
 
 
-def test_collect_back_skips_identical_replaces_changed_unit(tmp_path) -> None:
-    """回收集语义：输入未变跳过不复写，新增/改写原子落盘无残留。"""
-    from iesplan.computation.runtime.runner_service import _collect_back
+def test_materialize_marks_inputs_readonly_unit(tmp_path) -> None:
+    """materialize 铺入后请求文件只读，求解侧误写即失败（无 Docker）。"""
+    import stat as stat_module
+
+    from iesplan.computation.runtime.runner_service import _materialize
 
     attempt = tmp_path / "attempt"
-    work = tmp_path / "work"
     (attempt / "input").mkdir(parents=True)
-    (work / "input").mkdir(parents=True)
-    (work / "output").mkdir(parents=True)
+    (attempt / "command.json").write_text("{}", "utf-8")
     (attempt / "input" / "problem.mps").write_bytes(b"mps-bytes")
-    (work / "input" / "problem.mps").write_bytes(b"mps-bytes")
-    (work / "output" / "solution.sol").write_bytes(b"sol")
-    _collect_back(str(work), str(attempt))
-    assert (attempt / "input" / "problem.mps").read_bytes() == b"mps-bytes"
-    assert (attempt / "output" / "solution.sol").read_bytes() == b"sol"
-    (work / "output" / "solution.sol").write_bytes(b"sol2")
-    _collect_back(str(work), str(attempt))
-    assert (attempt / "output" / "solution.sol").read_bytes() == b"sol2"
-    leftovers = list(attempt.rglob("*.collecting"))
-    assert leftovers == []
+    work = tmp_path / "work"
+    work.mkdir()
+    _materialize(str(attempt), str(work))
+    assert (work / "input" / "problem.mps").read_bytes() == b"mps-bytes"
+    mode = stat_module.S_IMODE(os.stat(work / "input" / "problem.mps").st_mode)
+    assert mode == 0o444
+    assert not (work / "command.json").exists()
