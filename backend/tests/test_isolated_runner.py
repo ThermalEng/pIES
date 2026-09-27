@@ -716,10 +716,33 @@ def test_provider_pre_stop_raises_without_submit(tmp_path) -> None:
     assert list(exchange.iterdir()) == []
 
 
+def _runner_identity() -> dict:
+    """与线束 provider 描述符匹配的 runner 心跳身份。"""
+    return {
+        "executor_ref": f"{EXECUTOR_ID}@{EXECUTOR_VERSION}",
+        "executable_refs": [HIGHS_EXECUTABLE_REF],
+        "applied": {
+            "memory_limit_bytes": 1,
+            "cpu_limit_cores": 1.0,
+            "pids_limit": 1,
+        },
+    }
+
+
+def _write_fresh_heartbeat(exchange, identity: dict | None = None) -> None:
+    """写新鲜心跳；默认带匹配身份，显式传参可构造错配。"""
+    from datetime import UTC as _UTC
+
+    payload = {"schema": "ies.ipc.exchange.v1", "updated_at": datetime.now(_UTC).isoformat()}
+    payload.update(identity if identity is not None else _runner_identity())
+    (exchange / "heartbeat.json").write_text(json.dumps(payload), "utf-8")
+
+
 def test_heartbeat_fresh_and_stale_unit(tmp_path) -> None:
     """心跳读写与失活判定（无 Docker；时间确定性）。"""
     from iesplan.computation.runtime.file_exchange import (
         HEARTBEAT_STALE_AFTER_SECONDS,
+        read_heartbeat_identity,
     )
     from iesplan.computation.runtime.runner_service import _write_heartbeat
 
@@ -727,7 +750,8 @@ def test_heartbeat_fresh_and_stale_unit(tmp_path) -> None:
     exchange.mkdir()
     assert read_heartbeat(str(exchange)) is None
     assert not heartbeat_fresh(str(exchange))
-    _write_heartbeat(str(exchange))
+    assert read_heartbeat_identity(str(exchange)) is None
+    _write_heartbeat(str(exchange), _runner_identity())
     updated = read_heartbeat(str(exchange))
     assert updated is not None
     assert heartbeat_fresh(str(exchange), now=updated)
@@ -735,7 +759,43 @@ def test_heartbeat_fresh_and_stale_unit(tmp_path) -> None:
         str(exchange),
         now=datetime.fromisoformat("2030-01-01T00:00:00+00:00"),
     )
+    identity = read_heartbeat_identity(str(exchange))
+    assert identity is not None
+    assert identity["executor_ref"] == f"{EXECUTOR_ID}@{EXECUTOR_VERSION}"
+    assert identity["executable_refs"] == [HIGHS_EXECUTABLE_REF]
     assert HEARTBEAT_STALE_AFTER_SECONDS > 0
+
+
+def test_provider_accepts_matching_heartbeat_identity_unit(tmp_path) -> None:
+    """心跳新鲜且身份匹配即 available，注册表发布（无 Docker）。"""
+    exchange = tmp_path / "xchg"
+    exchange.mkdir()
+    _write_fresh_heartbeat(exchange)
+    provider = _ipc_provider(str(exchange))
+    assert provider.available() is True
+    registry = build_executor_registry([provider])
+    assert registry.get(f"{EXECUTOR_ID}@{EXECUTOR_VERSION}") is provider
+
+
+def test_provider_rejects_mismatched_heartbeat_identity_unit(tmp_path) -> None:
+    """心跳新鲜但身份错配（执行器/可执行文件/边界缺一）即不可用（无 Docker）。"""
+    cases = [
+        {**_runner_identity(), "executor_ref": "ies.executor.other@9.9.9"},
+        {**_runner_identity(), "executable_refs": ["ies.solver.other@9.9.9"]},
+        {**_runner_identity(), "applied": {"memory_limit_bytes": 1}},
+    ]
+    for index, identity in enumerate(cases):
+        exchange = tmp_path / f"xchg-{index}"
+        exchange.mkdir()
+        _write_fresh_heartbeat(exchange, identity)
+        provider = _ipc_provider(str(exchange))
+        assert provider.available() is False
+        with pytest.raises(ComputationUnavailableError) as exc_info:
+            build_executor_registry([provider])
+        assert exc_info.value.reason == "no-executor"
+        with pytest.raises(ComputationUnavailableError) as exc_info:
+            provider.execute({"executor": "x"}, str(tmp_path))
+        assert exc_info.value.reason == "runner-unreachable"
 
 
 def test_materialize_marks_inputs_readonly_unit(tmp_path) -> None:

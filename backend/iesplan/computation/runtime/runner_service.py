@@ -21,6 +21,7 @@ import shutil
 import sys
 import threading
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -157,10 +158,17 @@ def applied_limits() -> dict[str, object]:
     return applied
 
 
-def _write_heartbeat(exchange_dir: str) -> None:
+def _write_heartbeat(
+    exchange_dir: str, identity: Mapping[str, object]
+) -> None:
+    """写心跳：新鲜时间戳 + 启动已证明的身份（执行器引用、可执行文件
+    表、应用边界事实），供 worker 侧精确核对。"""
     envelope = {
         "schema": "ies.ipc.exchange.v1",
         "updated_at": datetime.now(UTC).isoformat(),
+        "executor_ref": identity["executor_ref"],
+        "executable_refs": list(identity["executable_refs"]),  # type: ignore[arg-type]
+        "applied": dict(identity["applied"]),  # type: ignore[arg-type]
     }
     tmp_path = os.path.join(exchange_dir, HEARTBEAT_FILE + ".tmp")
     with open(tmp_path, "w", encoding="utf-8") as handle:
@@ -168,10 +176,14 @@ def _write_heartbeat(exchange_dir: str) -> None:
     os.replace(tmp_path, os.path.join(exchange_dir, HEARTBEAT_FILE))
 
 
-def _heartbeat_loop(exchange_dir: str, stop_event: threading.Event) -> None:
+def _heartbeat_loop(
+    exchange_dir: str,
+    stop_event: threading.Event,
+    identity: Mapping[str, object],
+) -> None:
     while not stop_event.is_set():
         try:
-            _write_heartbeat(exchange_dir)
+            _write_heartbeat(exchange_dir, identity)
         except OSError:
             pass
         stop_event.wait(HEARTBEAT_INTERVAL_SECONDS)
@@ -280,15 +292,17 @@ def serve_forever(
     provider: LocalProcessProvider,
     exchange_dir: str,
     work_root: str,
-    *,
-    max_attempts: int | None = None,
+    identity: Mapping[str, object],
 ) -> int:
-    """主循环：认领无收据的 attempt 并处理；返回处理计数。
+    """主循环：串行认领无收据的 attempt 并处理；返回处理计数。
 
-    ``max_attempts`` 只用于测试同步驱动，生产常驻不限次数。
+    单线程串行，一个时刻只处理一个 attempt；``identity`` 为启动已证明
+    的心跳身份，随每次心跳写入供 worker 侧核对。
     """
     stop = threading.Event()
-    heartbeat = threading.Thread(target=_heartbeat_loop, args=(exchange_dir, stop), daemon=True)
+    heartbeat = threading.Thread(
+        target=_heartbeat_loop, args=(exchange_dir, stop, identity), daemon=True
+    )
     heartbeat.start()
     served = 0
     try:
@@ -311,8 +325,6 @@ def serve_forever(
                 serve_attempt(provider, attempt_dir, work_root)
                 served += 1
                 claimed = True
-                if max_attempts is not None and served >= max_attempts:
-                    return served
             if not claimed:
                 stop.wait(POLL_SECONDS)
     finally:
@@ -335,10 +347,17 @@ def main(argv: list[str]) -> int:
         provider = build_solver_provider()
         os.makedirs(exchange_dir, exist_ok=True)
         os.makedirs(work_root, exist_ok=True)
+        # 心跳身份取启动已证明的事实：描述符引用与可执行文件表来自
+        # 通过 readiness 的 provider，应用边界来自刚通过自检的 cgroup。
+        identity: dict[str, object] = {
+            "executor_ref": provider.descriptor.ref,
+            "executable_refs": sorted(provider.descriptor.executables),
+            "applied": applied_limits(),
+        }
         # 启动期心跳可写是 readiness 的一部分：写不出即原子拒绝，
         # 不留无声存活的假就绪（运行期心跳仍由失活界限判定）。
-        _write_heartbeat(exchange_dir)
-        serve_forever(provider, exchange_dir, work_root)
+        _write_heartbeat(exchange_dir, identity)
+        serve_forever(provider, exchange_dir, work_root, identity)
     except (OSError, RuntimeError, ValueError) as exc:
         sys.stderr.write(f"ies-solver-runner: {exc}\n")
         return 1

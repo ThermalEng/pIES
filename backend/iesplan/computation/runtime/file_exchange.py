@@ -254,14 +254,52 @@ def heartbeat_fresh(
     return (current - updated).total_seconds() <= HEARTBEAT_STALE_AFTER_SECONDS
 
 
+#: 心跳身份要求的应用边界键（与 runner 启动自检同源，只核对存在性）。
+HEARTBEAT_APPLIED_KEYS = ("memory_limit_bytes", "cpu_limit_cores", "pids_limit")
+
+
+def read_heartbeat_identity(exchange_dir: str) -> Mapping[str, object] | None:
+    """读 runner 心跳中的启动身份；缺失或形状非法即返回 None。
+
+    身份是 runner 启动隔离自检通过后写入的固定事实：执行器精确引用、
+    支持的可执行文件引用表、已证明有限的三项应用边界。不做能力谈判。
+    """
+    try:
+        with open(
+            os.path.join(exchange_dir, HEARTBEAT_FILE), encoding="utf-8"
+        ) as handle:
+            envelope = _check_envelope(json.load(handle), "心跳")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    executor_ref = envelope.get("executor_ref")
+    executable_refs = envelope.get("executable_refs")
+    applied = envelope.get("applied")
+    if not isinstance(executor_ref, str) or not executor_ref:
+        return None
+    if not isinstance(executable_refs, list) or not all(
+        isinstance(item, str) for item in executable_refs
+    ):
+        return None
+    if not isinstance(applied, Mapping) or not all(
+        key in applied for key in HEARTBEAT_APPLIED_KEYS
+    ):
+        return None
+    return {
+        "executor_ref": executor_ref,
+        "executable_refs": list(executable_refs),
+        "applied": dict(applied),
+    }
+
+
 class FileExchangeExecutorProvider:
     """文件交换隔离执行 provider（与本地进程执行器同引用）。
 
     ``ref`` 与 ``LocalProcessProvider`` 相同（同一执行器的隔离部署
     形态，由组合根二选一注册，不并存）；``available`` 同时断言交换
-    目录已配置可写与 runner 心跳新鲜，心跳缺失/过期即不可用，注册
-    表据此原子拒绝；``execute`` 把命令与文件树递交给 runner 并取回
-    过程结果与输出文件，不解释业务，不回退本地执行。
+    目录已配置可写、runner 心跳新鲜、心跳身份与本描述符精确匹配，
+    任一不满足即不可用，注册表据此原子拒绝；``execute`` 递交前再次
+    核对目录与心跳身份，把命令与文件树递交给 runner 并取回过程结果
+    与输出文件，不解释业务，不回退本地执行。
     """
 
     __slots__ = ("_descriptor", "_exchange_dir")
@@ -294,14 +332,28 @@ class FileExchangeExecutorProvider:
         return self._descriptor.ref
 
     def available(self) -> bool:
-        """交换目录可用且 runner 心跳新鲜；任一不满足即不可用。"""
-        return self._exchange_ready() and heartbeat_fresh(self._exchange_dir)
+        """交换目录可用、心跳新鲜且身份匹配；任一不满足即不可用。"""
+        return (
+            self._exchange_ready()
+            and heartbeat_fresh(self._exchange_dir)
+            and self._runner_identity_ok()
+        )
 
     def _exchange_ready(self) -> bool:
         """交换目录存在且可写（部署事实，不含 runner 存活）。"""
         return os.path.isdir(self._exchange_dir) and os.access(
             self._exchange_dir, os.W_OK | os.X_OK
         )
+
+    def _runner_identity_ok(self) -> bool:
+        """心跳身份与本描述符精确匹配：执行器引用一致、可执行文件全支持。"""
+        identity = read_heartbeat_identity(self._exchange_dir)
+        if identity is None:
+            return False
+        if identity["executor_ref"] != self._descriptor.ref:
+            return False
+        supported = set(identity["executable_refs"])
+        return set(self._descriptor.executables) <= supported
 
     def execute(
         self,
@@ -325,6 +377,11 @@ class FileExchangeExecutorProvider:
         if not heartbeat_fresh(self._exchange_dir):
             raise ComputationUnavailableError(
                 "runner 心跳失活，不递交执行",
+                reason="runner-unreachable",
+            )
+        if not self._runner_identity_ok():
+            raise ComputationUnavailableError(
+                "runner 心跳身份与执行器描述符不匹配，不递交执行",
                 reason="runner-unreachable",
             )
         pre_existing = _relative_files(workdir)
@@ -431,6 +488,7 @@ __all__ = [
     "HEARTBEAT_FILE",
     "POLL_SECONDS",
     "HEARTBEAT_STALE_AFTER_SECONDS",
+    "HEARTBEAT_APPLIED_KEYS",
     "FileExchangeExecutorProvider",
     "build_request_bundle",
     "read_request",
@@ -438,4 +496,5 @@ __all__ = [
     "read_receipt_envelope",
     "read_heartbeat",
     "heartbeat_fresh",
+    "read_heartbeat_identity",
 ]
