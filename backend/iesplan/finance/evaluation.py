@@ -99,21 +99,21 @@ class ProjectEvaluation:
         static_status/dynamic_status: 回收期状态(PaybackStatus)。
     """
 
+    currency: str
+    price_basis: str
+    base_year: int
+    discount_rate: Decimal
+    evaluation_years: int
+    rows: tuple[EvaluationYearRow, ...]
+    npv: Decimal
+    irr: float | None
+    irr_status: IRREvaluationStatus
+    static_payback: float | None
+    static_status: PaybackStatus
+    dynamic_payback: float | None
+    dynamic_status: PaybackStatus
     schema: str = EVALUATION_SCHEMA
     schema_version: str = EVALUATION_VERSION
-    currency: str = ""
-    price_basis: str = ""
-    base_year: int = 0
-    discount_rate: Decimal = Decimal("0")
-    evaluation_years: int = 0
-    rows: tuple[EvaluationYearRow, ...] = ()
-    npv: Decimal = Decimal("0")
-    irr: float | None = None
-    irr_status: IRREvaluationStatus = IRREvaluationStatus.numeric_failure
-    static_payback: float | None = None
-    static_status: PaybackStatus = PaybackStatus.not_recovered
-    dynamic_payback: float | None = None
-    dynamic_status: PaybackStatus = PaybackStatus.not_recovered
 
     def __post_init__(self) -> None:
         if self.schema != EVALUATION_SCHEMA:
@@ -166,6 +166,7 @@ def _as_decimal(value: Decimal | float | int) -> Decimal:
 def evaluate_project_investment(
     annual_net_flows: list[Decimal | float | int] | tuple[Decimal | float | int, ...],
     discount_rate: Decimal | float | int,
+    evaluation_years: int,
     *,
     currency: str,
     price_basis: str,
@@ -175,9 +176,12 @@ def evaluate_project_investment(
 
     参数:
         annual_net_flows: 年净现金流,[0] 为 t=0 投资(通常为负),[1..N]
-            为第 1..N 年净流;至少含 t=0 与 1 个评价年;禁止把单年结果
-            复制多年,调用方必须传入真实固定年份序列。
+            为第 1..N 年净流;长度必须恰为 evaluation_years + 1,不由
+            序列长度推导年限;禁止把单年结果复制多年,调用方必须传入
+            真实固定年份序列。
         discount_rate: 用户显式折现率(无量纲比例,>= 0);r=0 合法。
+        evaluation_years: 用户显式确认的评价年限(年,>= 1,无默认);
+            与流序列长度核对一致,结果回显该固定值。
         currency/price_basis/base_year: 冻结来源的币种、口径与基年标签
             (只回显,不做第二权威读取)。
 
@@ -185,8 +189,18 @@ def evaluate_project_investment(
         ProjectEvaluation;输入缺失/非法时大声失败(ValueError),不返回
         默认现金流或伪指标。
     """
-    if not annual_net_flows or len(annual_net_flows) < 2:
-        raise ValueError("annual_net_flows 至少含 t=0 投资与 1 个评价年")
+    if (
+        not isinstance(evaluation_years, int)
+        or isinstance(evaluation_years, bool)
+        or evaluation_years < 1
+    ):
+        raise ValueError(f"evaluation_years 须为 >= 1 的整数,实际 {evaluation_years!r}")
+    if not annual_net_flows or len(annual_net_flows) != evaluation_years + 1:
+        got = 0 if not annual_net_flows else len(annual_net_flows)
+        raise ValueError(
+            "annual_net_flows 长度须恰为 evaluation_years + 1"
+            f"(评价年 {evaluation_years},实得序列 {got})"
+        )
     if not currency or not price_basis:
         raise ValueError("currency 与 price_basis 不能为空")
     if not isinstance(base_year, int) or isinstance(base_year, bool):

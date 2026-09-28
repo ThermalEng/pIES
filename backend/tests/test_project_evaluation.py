@@ -1,7 +1,8 @@
 """项目投资口径纯评价切片测试(0.10-D)。
 
-手算小样例 + 边界:固定年份净现金流与用户折现率 → 逐年明细行与
-NPV/IRR/静态/动态回收期同源一致。不读取项目、不拼单年为多年。
+手算小样例 + 边界:固定年份净现金流、用户显式折现率与确认年限 →
+逐年明细行与 NPV/IRR/静态/动态回收期同源一致。不读取项目、
+不拼单年为多年。
 """
 
 from __future__ import annotations
@@ -17,11 +18,12 @@ from iesplan.finance import (
     evaluate_project_investment,
 )
 
-CNY = {"currency": "CNY", "price_basis": "含税", "base_year": 2024}
+# 冻结来源标签:币种/口径/基年(口径取 finance YAML 契约规范值)。
+CNY = {"currency": "CNY", "price_basis": "tax_inclusive", "base_year": 2024}
 
 
 def test_known_case_rows_and_indicators_agree():
-    """手算样例 [-100, 60, 60], r=0.1。
+    """手算样例 [-100, 60, 60], r=0.1, 评价年 2。
 
     d1 = 60/1.1 = 54.545454…;d2 = 60/1.21 = 49.586776…;
     NPV = 4.132231…;静态 = 1 + 40/60 = 1.6666…;
@@ -31,6 +33,7 @@ def test_known_case_rows_and_indicators_agree():
     result = evaluate_project_investment(
         [Decimal("-100"), Decimal("60"), Decimal("60")],
         Decimal("0.1"),
+        2,
         **CNY,
     )
     assert result.evaluation_years == 2
@@ -54,7 +57,8 @@ def test_known_case_rows_and_indicators_agree():
 
 def test_zero_rate_dynamic_equals_static():
     """r=0 时贴现流与原始流完全一致,动态回收期与静态相等。"""
-    result = evaluate_project_investment([-200, 80, 80, 80], 0, **CNY)
+    result = evaluate_project_investment([-200, 80, 80, 80], 0, 3, **CNY)
+    assert result.evaluation_years == 3
     assert result.npv == Decimal("40")
     assert result.static_payback == pytest.approx(2.5)
     assert result.dynamic_payback == result.static_payback
@@ -64,7 +68,7 @@ def test_zero_rate_dynamic_equals_static():
 def test_unrecovered_has_explicit_status():
     """[-100, 10, 10], r=0.1:两种回收期均为无值 + 明确未回收状态。"""
     result = evaluate_project_investment(
-        [Decimal("-100"), Decimal("10"), Decimal("10")], Decimal("0.1"), **CNY,
+        [Decimal("-100"), Decimal("10"), Decimal("10")], Decimal("0.1"), 2, **CNY,
     )
     assert result.static_payback is None
     assert result.static_status == PaybackStatus.not_recovered
@@ -76,44 +80,51 @@ def test_unrecovered_has_explicit_status():
 
 def test_irr_abnormal_statuses():
     """IRR 非正常状态:全正无解、全零退化、两次变号多解取最小正根。"""
-    no_solution = evaluate_project_investment([100, 10], Decimal("0.1"), **CNY)
+    no_solution = evaluate_project_investment([100, 10], Decimal("0.1"), 1, **CNY)
     assert no_solution.irr is None
     assert no_solution.irr_status == IRREvaluationStatus.no_solution
 
-    degenerate = evaluate_project_investment([0, 0, 0], Decimal("0.1"), **CNY)
+    degenerate = evaluate_project_investment([0, 0, 0], Decimal("0.1"), 2, **CNY)
     assert degenerate.irr is None
     assert degenerate.irr_status == IRREvaluationStatus.degenerate
 
     # -100 + 250x − 150x^2 = 0 在 x = 1 与 x = 2/3 处为零 → r ∈ {0, 0.5}
-    multiple = evaluate_project_investment([-100, 250, -150], Decimal("0.1"), **CNY)
+    multiple = evaluate_project_investment([-100, 250, -150], Decimal("0.1"), 2, **CNY)
     assert multiple.irr == pytest.approx(0.0)
     assert multiple.irr_status == IRREvaluationStatus.multiple
 
 
 def test_user_input_boundary_rejected():
-    """用户输入边界:空序列、不足两年、负折现率、非有限值、空币种均大声失败。"""
+    """用户输入边界:空序列、年限不符、非正年限、负折现率、非有限值、
+    空币种均大声失败,不复制年份."""
     with pytest.raises(ValueError):
-        evaluate_project_investment([], Decimal("0.1"), **CNY)
+        evaluate_project_investment([], Decimal("0.1"), 2, **CNY)
     with pytest.raises(ValueError):
-        evaluate_project_investment([Decimal("-100")], Decimal("0.1"), **CNY)
+        # 序列 3 个但确认年限为 3(应为 2):长度不符
+        evaluate_project_investment([-100, 60, 60], Decimal("0.1"), 3, **CNY)
     with pytest.raises(ValueError):
-        evaluate_project_investment([-100, 60], Decimal("-0.1"), **CNY)
+        # 序列 2 个但确认年限为 2(应为 1):长度不符
+        evaluate_project_investment([-100, 60], Decimal("0.1"), 2, **CNY)
     with pytest.raises(ValueError):
-        evaluate_project_investment([-100, float("nan")], Decimal("0.1"), **CNY)
+        evaluate_project_investment([-100, 60], Decimal("0.1"), 0, **CNY)
+    with pytest.raises(ValueError):
+        evaluate_project_investment([-100, 60], Decimal("-0.1"), 1, **CNY)
+    with pytest.raises(ValueError):
+        evaluate_project_investment([-100, float("nan")], Decimal("0.1"), 1, **CNY)
     with pytest.raises(ValueError):
         evaluate_project_investment(
-            [-100, 60], Decimal("0.1"),
-            currency="", price_basis="含税", base_year=2024,
+            [-100, 60], Decimal("0.1"), 1,
+            currency="", price_basis="tax_inclusive", base_year=2024,
         )
 
 
 def test_contract_schema_units_and_serialization():
     """版本化 contract:口径回显、单位标注、可 JSON 序列化。"""
-    result = evaluate_project_investment([-100, 60, 60], Decimal("0.1"), **CNY)
+    result = evaluate_project_investment([-100, 60, 60], Decimal("0.1"), 2, **CNY)
     assert result.schema == "ies.project-evaluation"
     assert result.schema_version == "1.0.0"
     assert result.currency == "CNY"
-    assert result.price_basis == "含税"
+    assert result.price_basis == "tax_inclusive"
     assert result.base_year == 2024
     assert result.discount_rate == Decimal("0.1")
     payload = result.to_dict()
