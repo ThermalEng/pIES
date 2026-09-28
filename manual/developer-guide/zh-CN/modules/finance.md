@@ -61,6 +61,10 @@
 
 IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_failure` 等状态一起消费；不能用 `null` 或零模糊这些情况。该蓝图需要的评价期、资金时间价值、折旧等输入不属于本版 Profile 文件契约；落地时按「增加财务指标」流程补入独立契约，不回流为财务文件契约的隐式字段。
 
+### 0.10-D 纯评价切片（`ies.project-evaluation@1.0.0`）
+
+`finance/evaluation.py` 的 `evaluate_project_investment` 为项目投资口径纯评价：输入固定年份净现金流（`[0]` 为 t=0 投资、`[1..N]` 为第 1..N 年净流）与用户显式折现率，输出逐年明细行（原始净流/贴现流/两种累计）与 NPV、IRR、静态/动态回收期，指标与明细同源。动态回收期口径：贴现流 `CF[t]/(1+r)^t` 套用与静态回收期同一规则（累计首次非负、年内线性插值），未回收为无值并附 `not_recovered` 状态，`r=0` 时与静态回收期一致。IRR 状态名采用本页公开语义（`IRREvaluationStatus`），仅在切片边界映射既有求根实现的状态；`metrics` 包与 `finance.metrics` 内既有 `IRRStatus` 枚举（`unique/none/…/numerical_failure`）暂未对齐，改动影响 `results`/`metrics` 既有消费者，需另行裁决。本切片不把单年运行结果复制为多年；逐年财务分量接入真实计算链（`ComputeResult` 现只有目标总值与变量）待上游提供合法年度数据来源。
+
 ## 蓝图设计思路
 
 1. 把输入规范成时间点明确的现金流分量；

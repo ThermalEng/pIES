@@ -15,6 +15,15 @@
 
 from __future__ import annotations
 
+from iesplan.finance.evaluation import (
+    EVALUATION_SCHEMA,
+    EVALUATION_VERSION,
+    EvaluationYearRow,
+    IRREvaluationStatus,
+    PaybackStatus,
+    ProjectEvaluation,
+    evaluate_project_investment,
+)
 from iesplan.finance.hourly import FinancialResult, compute_financials, compute_lcoe, compute_payback
 from iesplan.finance.metrics import (
     IRRStatus,
@@ -27,7 +36,6 @@ from iesplan.finance.metrics import (
     project_npv,
 )
 from iesplan.finance.params import FinanceParams, finance_params_from_config
-from iesplan.finance.yaml_io import effective_from_yaml, effective_to_yaml
 from iesplan.finance.triplet import (
     COST_METHOD_VALUES,
     CURRENCIES,
@@ -50,6 +58,7 @@ from iesplan.finance.triplet import (
     SeriesMeta,
     merge_effective,
 )
+from iesplan.finance.yaml_io import effective_from_yaml, effective_to_yaml
 
 __all__ = [
     # metrics
@@ -66,6 +75,14 @@ __all__ = [
     "compute_financials",
     "compute_lcoe",
     "compute_payback",
+    # evaluation(0.10-D 纯评价切片)
+    "EVALUATION_SCHEMA",
+    "EVALUATION_VERSION",
+    "EvaluationYearRow",
+    "IRREvaluationStatus",
+    "PaybackStatus",
+    "ProjectEvaluation",
+    "evaluate_project_investment",
     # params
     "FinanceParams",
     "finance_params_from_config",
