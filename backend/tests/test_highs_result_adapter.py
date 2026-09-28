@@ -89,7 +89,7 @@ OBJSENSE
 ENDATA
 """
 
-#: 变量跨物理行的 MPS（x、y 各占两行，续行只有行名/数值对）。
+#: 变量跨物理行的 MPS（writer 每行重复列名，同名连续行属同一列）。
 WRAPPED_MPS = """NAME          IES_MILP
 ROWS
  N  OBJ
@@ -97,9 +97,9 @@ ROWS
  G  r2
 COLUMNS
     x  OBJ  1.0  r1  1.0
-         r2  2.0
+    x  r2  2.0
     y  OBJ  2.0  r1  1.0
-         r2  1.0
+    y  r2  1.0
 RHS
     RHS1  r1  3.0
     RHS1  r2  4.0
@@ -345,19 +345,28 @@ def test_time_limit_file_is_explicit_error() -> None:
     assert "时间限制" in str(exc_info.value)
 
 
-def test_mps_continuation_lines_map() -> None:
-    """MPS 变量跨物理行时仍按列序映射（续行不误认为新列）。"""
-    solution = SHIM_OPTIMAL
+def test_mps_repeated_name_lines_map() -> None:
+    """MPS 同名连续行属同一列；非连续列名复现即损坏。"""
     files = {
         PROBLEM_PATH: WRAPPED_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(),
     }
-    result = _adapt(files, _receipt(), solution.encode("utf-8"))
+    result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert result.math_status == "solved"
     assert [dict(item) for item in result.outputs["solution"]["variables"]] == [
         {"name": "x", "value": 3.0, "unit": "kW"},
         {"name": "y", "value": 0.0, "unit": "kW"},
     ]
+    duplicated = WRAPPED_MPS.replace(
+        "    y  r2  1.0\nRHS", "    y  r2  1.0\n    x  r2  9.0\nRHS"
+    )
+    files = {
+        PROBLEM_PATH: duplicated.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(),
+    }
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+    assert exc_info.value.reason == "result-protocol-failure"
 
 
 def test_corrupt_inputs_fail() -> None:

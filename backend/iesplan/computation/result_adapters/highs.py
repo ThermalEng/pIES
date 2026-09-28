@@ -169,8 +169,9 @@ def _parse_solution(raw: bytes) -> dict[str, Any]:
 def _mps_column_names(raw: bytes) -> list[str]:
     """按 MPS COLUMNS 段恢复 LP 变量顺序（V1 主解按索引排列所需）。
 
-    新列行首字段后跟行名/数值对（奇数个字段），续行只有行名/数值对
-    （偶数个字段）；标记行跳过，至 RHS 段结束。
+    配对生成器 writer：每变量块连续，块内每行重复列名，整数标记行
+    只出现在变量之间；同名连续行属同一列，列名切换即新列，至 RHS
+    段结束。列名复现（非连续重复）即文件损坏，明确失败。
     """
     try:
         text = raw.decode("utf-8")
@@ -182,6 +183,8 @@ def _mps_column_names(raw: bytes) -> list[str]:
     except ValueError:
         _fail("problem.mps 缺 COLUMNS 段")
     names: list[str] = []
+    seen: set[str] = set()
+    previous: str | None = None
     for line in lines[start:]:
         parts = line.split()
         if not parts:
@@ -190,14 +193,16 @@ def _mps_column_names(raw: bytes) -> list[str]:
         if head == "RHS":
             break
         if head in _MARKER_FIELDS:
+            previous = None
             continue
-        if len(parts) >= 3 and len(parts) % 2 == 1:
-            names.append(head)
-        elif len(parts) >= 2 and len(parts) % 2 == 0:
-            if not names:
-                _fail(f"problem.mps 续行无所属列: {line!r}")
-        else:
+        if len(parts) < 3 or len(parts) % 2 == 0:
             _fail(f"problem.mps 列行非法: {line!r}")
+        if head != previous:
+            if head in seen:
+                _fail(f"problem.mps 列名复现: {head!r}")
+            names.append(head)
+            seen.add(head)
+            previous = head
     return names
 
 
