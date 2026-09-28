@@ -91,7 +91,7 @@ def chain():
         time_limit_seconds=3600,
         outputs=["solution"],
     )
-    model, units = build_project_model(
+    model, units, _ = build_project_model(
         artifact, models, mat.series, finance, config
     )
     return {
@@ -174,7 +174,7 @@ def test_tariff_and_objective_signs(chain) -> None:
 def test_chain_deterministic_bytes(chain) -> None:
     """真实链确定性：重建重写逐字节相同。"""
     model = chain["model"]
-    rebuilt, _ = build_project_model(*chain["inputs"])
+    rebuilt, _, _ = build_project_model(*chain["inputs"])
     first, first_offset = write_mps(model)
     second, second_offset = write_mps(rebuilt)
     assert first == second

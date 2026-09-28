@@ -5,7 +5,7 @@
 
 - 真实 campus 五项输入生成完整 SolverBundle 聚合：manifest、problem.mps
   bytes、元数据 bytes、结构化 command、原始输出声明、unit map/objective
-  offset、逐字节确定性、不写工作目录；
+  offset/objective unit、逐字节确定性、不写工作目录；
 - provider 特有检查：未知 outputs 与实际绑定 time_series 计费即明确
   拒绝，无 fallback（通用 generator/mode/精度/solver/options 门禁只在
   registry 侧覆盖，不在此重复证明）；
@@ -172,15 +172,18 @@ def test_campus_generate_full_bundle() -> None:
     assert metadata["assembly"]["id"] == "campus_demo"
     assert isinstance(metadata["unit_map"], dict) and metadata["unit_map"]
     assert isinstance(metadata["objective_offset"], float)
+    # campus 目标为金额：目标业务单位取财务币种 CNY。
+    assert metadata["objective_unit"] == "CNY"
     # mps 文件字节即 writer 输出；unit_map/offset 与直接构造一致。
     artifact, models, series, finance, config = _campus_inputs()
-    model, unit_map = build_project_model(
+    model, unit_map, objective_unit = build_project_model(
         artifact, models, series, finance, config
     )
     mps_text, offset = write_mps(model)
     assert bundle.files["input/problem.mps"] == mps_text.encode("utf-8")
     assert metadata["unit_map"] == dict(sorted(unit_map.items()))
     assert metadata["objective_offset"] == pytest.approx(offset)
+    assert metadata["objective_unit"] == objective_unit == "CNY"
 
 
 def test_generate_is_byte_deterministic_and_writes_nothing(

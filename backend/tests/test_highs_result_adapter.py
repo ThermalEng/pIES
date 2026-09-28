@@ -1,12 +1,13 @@
 """ies.result-adapter.highs@1.0.0 聚焦行为测试。
 
-夹具均为 Docker 内 HiGHS 1.7.2 真实产出（highspy 1.7.2 同版本库，
-``writeSolution(path, 0)`` 即 CLI ``--solution_file`` 默认 raw 风格，
-断言前已逐字节核对）：
-- ``REAL_OPTIMAL``：具名 MPS（min x+2y s.t. x+y>=3000）最优解；
-- ``REAL_INFEASIBLE``：``x in [0,1]`` 且 ``x == 2``；
-- ``REAL_UNBOUNDED``：``min -x, x >= 0``；
-- ``REAL_TIME_LIMIT``：同一小模型 ``time_limit=1e-9`` 强制超时。
+V1 夹具为 Docker 内真实求解垫片（``ies-highs-solver``，highspy 1.7.2）
+逐字节产出，断言前已核对：
+- ``SHIM_OPTIMAL``：具名 MPS（min x+2y s.t. x+y>=3000）最优解；
+- ``SHIM_INFEASIBLE``：``x == 2`` 且 ``x <= 1``；
+- ``SHIM_UNBOUNDED``：``min -x, x >= 0``；
+- ``V1_TIME_LIMIT``：垫片真实超时恒 exit 2 且不写文件（走回执失败
+  路径），此夹具仅按同一 V1 文法构造 kTimeLimit 令牌分支，验证已知
+  词汇出现时明确报错而非发布部分解。
 """
 
 from __future__ import annotations
@@ -33,108 +34,95 @@ PROBLEM_PATH = "input/problem.mps"
 PARAMETERS_PATH = "input/parameters.json"
 SOLUTION_PATH = "output/solution.sol"
 
-#: 真实最优解（最优 x=3000, y=0，目标 3000；列名透传 MPS 名）。
-REAL_OPTIMAL = (
-    """Model status
-Optimal
-
-# Primal solution values
-Feasible
-Objective 3000
-# Columns 2
-x 3000
-y 0
-# Rows 1
-demand 3000
-
-# Dual solution values
-Feasible
-# Columns 2
-x 0
-y 1
-# Rows 1
-demand 1
-
-# Basis
-HiGHS v1
-Valid
-# Columns 2
-"""
-    "1 0 \n"
-    """# Rows 1
-"""
-    "0 \n"
-)
-
-#: 真实不可行运行的 solution（无主解、无对偶、无基址）。
-REAL_INFEASIBLE = """Model status
-Infeasible
-
-# Primal solution values
-None
-
-# Dual solution values
-None
-
-# Basis
-HiGHS v1
-None
+#: 真实垫片最优解（最优 x=3000, y=0，目标 3000）。
+SHIM_OPTIMAL = """HIGHS_SOLUTION_V1
+model_status: HighsModelStatus.kOptimal
+objective_value: 3000.0
+num_columns: 2
+primal:
+0: 3000.0
+1: 0.0
 """
 
-#: 真实无界运行的 solution（注意对偶节为 Infeasible，行数为 0）。
-REAL_UNBOUNDED = (
-    """Model status
-Unbounded
-
-# Primal solution values
-Feasible
-Objective 0
-# Columns 1
-C0 0
-# Rows 0
-
-# Dual solution values
-Infeasible
-# Columns 1
-C0 -1
-# Rows 0
-
-# Basis
-HiGHS v1
-Valid
-# Columns 1
+#: 真实垫片不可行解。
+SHIM_INFEASIBLE = """HIGHS_SOLUTION_V1
+model_status: HighsModelStatus.kInfeasible
+objective_value: 0.0
+num_columns: 1
+primal:
+0: 0.0
 """
-    "0 \n"
-    """# Rows 0
 
+#: 真实垫片无界解（注意目标为 -0.0）。
+SHIM_UNBOUNDED = """HIGHS_SOLUTION_V1
+model_status: HighsModelStatus.kUnbounded
+objective_value: -0.0
+num_columns: 1
+primal:
+0: 0.0
 """
-)
 
-#: 真实超时运行的 solution（time_limit=1e-9；无解块）。
-REAL_TIME_LIMIT = """Model status
-Time limit reached
+#: V1 文法内的 kTimeLimit 令牌（垫片真实超时不写文件，此分支守词汇）。
+V1_TIME_LIMIT = """HIGHS_SOLUTION_V1
+model_status: HighsModelStatus.kTimeLimit
+objective_value: 0.0
+num_columns: 1
+primal:
+0: 0.0
+"""
 
-# Primal solution values
-None
+#: 具名 tiny MPS（列序 x, y；每变量单行）。
+TINY_MPS = """NAME          IES_MILP
+ROWS
+ N  OBJ
+ G  demand
+COLUMNS
+    x  OBJ  1.0  demand  1.0
+    y  OBJ  2.0  demand  1.0
+RHS
+    RHS1  demand  3000.0
+BOUNDS
+ LO       BND1  x  0.0
+ LO       BND1  y  0.0
+OBJSENSE
+ MIN
+ENDATA
+"""
 
-# Dual solution values
-None
-
-# Basis
-HiGHS v1
-None
+#: 变量跨物理行的 MPS（x、y 各占两行，续行只有行名/数值对）。
+WRAPPED_MPS = """NAME          IES_MILP
+ROWS
+ N  OBJ
+ G  r1
+ G  r2
+COLUMNS
+    x  OBJ  1.0  r1  1.0
+         r2  2.0
+    y  OBJ  2.0  r1  1.0
+         r2  1.0
+RHS
+    RHS1  r1  3.0
+    RHS1  r2  4.0
+BOUNDS
+ LO       BND1  x  0.0
+ LO       BND1  y  0.0
+OBJSENSE
+ MIN
+ENDATA
 """
 
 
 def _parameters(
     unit_map: dict | None = None,
     offset: object = 1.5,
+    objective_unit: object = "CNY",
     outputs: object = None,
 ) -> bytes:
     doc = {
         "assembly": {"id": "assembly-7", "schema_version": "2.0.0"},
         "generator": "ies.generator.highs_milp@1.0.0",
         "objective_offset": offset,
+        "objective_unit": objective_unit,
         "outputs": ["solution", "metrics"] if outputs is None else outputs,
         "precision": "medium",
         "result_adapter": ADAPTER_REF,
@@ -147,7 +135,10 @@ def _parameters(
 
 def _bundle(files: dict | None = None) -> SolverBundle:
     if files is None:
-        files = {PARAMETERS_PATH: _parameters()}
+        files = {
+            PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+            PARAMETERS_PATH: _parameters(),
+        }
     manifest = SolverBundleManifest(
         bundle={
             "generator": "ies.generator.highs_milp@1.0.0",
@@ -211,9 +202,9 @@ def test_identity_and_registry() -> None:
     assert exc_info.value.reason == "no-result-adapter"
 
 
-def test_optimal_values_units_and_offset() -> None:
-    """真实最优解：列名映射换算到业务单位，目标加回 offset，金额 CNY。"""
-    result = _adapt(None, _receipt(), REAL_OPTIMAL.encode("utf-8"))
+def test_optimal_money_objective_keeps_currency() -> None:
+    """真实最优解：金额目标守币种原值，变量换算，offset 只加一次。"""
+    result = _adapt(None, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert result.execution_status == "completed"
     assert result.math_status == "solved"
     assert result.bundle_id == "bundle-7"
@@ -227,31 +218,69 @@ def test_optimal_values_units_and_offset() -> None:
         {"name": "y", "value": 0.0, "unit": "kW"},
     ]
     metrics = result.outputs["metrics"]
-    assert metrics["model_status"] == "Optimal"
+    assert metrics["model_status"] == "HighsModelStatus.kOptimal"
     assert metrics["objective_value"] == 3001.5
     assert metrics["objective_unit"] == "CNY"
     assert metrics["num_variables"] == 2
 
 
+def test_objective_physical_unit_converts() -> None:
+    """等效契约：物理目标按 objective_unit 反向换算（内部 J→kWh）。"""
+    solution = SHIM_OPTIMAL.replace("objective_value: 3000.0", "objective_value: 7200000.0")
+    solution = solution.replace("0: 3000.0", "0: 3600000.0", 1)
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(
+            unit_map={"x": "kWh", "y": "kWh"},
+            offset=0.0,
+            objective_unit="kWh",
+        ),
+    }
+    result = _adapt(files, _receipt(), solution.encode("utf-8"))
+    assert result.math_status == "solved"
+    out = result.outputs["solution"]
+    assert out["objective_value"] == 2.0
+    assert out["objective_unit"] == "kWh"
+    assert [dict(item) for item in out["variables"]] == [
+        {"name": "x", "value": 1.0, "unit": "kWh"},
+        {"name": "y", "value": 0.0, "unit": "kWh"},
+    ]
+
+
+def test_objective_usd_identity_without_conversion() -> None:
+    """USD 金额目标直接采用原值（from_si 拒绝 USD，不经过折算）。"""
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(offset=0.0, objective_unit="USD"),
+    }
+    result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+    assert result.math_status == "solved"
+    out = result.outputs["solution"]
+    assert out["objective_value"] == 3000.0
+    assert out["objective_unit"] == "USD"
+
+
 def test_requested_subset_only() -> None:
-    """只输出已请求的键；未知请求明确拒绝。"""
-    files = {PARAMETERS_PATH: _parameters(outputs=["solution"])}
-    result = _adapt(files, _receipt(), REAL_OPTIMAL.encode("utf-8"))
+    """只输出已请求的键；未知请求由生成器在 build 侧拒绝，此处忽略。"""
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(outputs=["solution"]),
+    }
+    result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert set(result.outputs) == {"solution"}
-    files = {PARAMETERS_PATH: _parameters(outputs=["metrics"])}
-    result = _adapt(files, _receipt(), REAL_OPTIMAL.encode("utf-8"))
-    assert set(result.outputs) == {"metrics"}
-    files = {PARAMETERS_PATH: _parameters(outputs=["solution", "nope"])}
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(files, _receipt(), REAL_OPTIMAL.encode("utf-8"))
-    assert exc_info.value.reason == "result-protocol-failure"
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(outputs=["solution", "nope"]),
+    }
+    result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+    assert set(result.outputs) == {"solution"}
 
 
 def test_infeasible_and_unbounded_have_no_business_outputs() -> None:
     """真实不可行/无界：数学状态明确，不发布业务输出。"""
     for text, math in (
-        (REAL_INFEASIBLE, "infeasible"),
-        (REAL_UNBOUNDED, "unbounded"),
+        (SHIM_INFEASIBLE, "infeasible"),
+        (SHIM_UNBOUNDED, "unbounded"),
     ):
         result = _adapt(None, _receipt(), text.encode("utf-8"))
         assert result.execution_status == "completed"
@@ -311,27 +340,40 @@ def test_all_receipt_statuses_map() -> None:
 def test_time_limit_file_is_explicit_error() -> None:
     """文件自报时间限制：明确报错，不接受部分解当成功。"""
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(None, _receipt(), REAL_TIME_LIMIT.encode("utf-8"))
+        _adapt(None, _receipt(), V1_TIME_LIMIT.encode("utf-8"))
     assert exc_info.value.reason == "result-protocol-failure"
     assert "时间限制" in str(exc_info.value)
 
 
-def test_corrupt_and_unknown_inputs_fail() -> None:
-    """格式损坏、未知状态、非有限、缺失一律协议失败，不伪成功。"""
+def test_mps_continuation_lines_map() -> None:
+    """MPS 变量跨物理行时仍按列序映射（续行不误认为新列）。"""
+    solution = SHIM_OPTIMAL
+    files = {
+        PROBLEM_PATH: WRAPPED_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(),
+    }
+    result = _adapt(files, _receipt(), solution.encode("utf-8"))
+    assert result.math_status == "solved"
+    assert [dict(item) for item in result.outputs["solution"]["variables"]] == [
+        {"name": "x", "value": 3.0, "unit": "kW"},
+        {"name": "y", "value": 0.0, "unit": "kW"},
+    ]
+
+
+def test_corrupt_inputs_fail() -> None:
+    """关键格式错误一律协议失败，不伪成功。"""
     bad_solutions = [
         b"garbage",
-        # 旧版 V1 格式在 1.7.2 下不存在，出现即拒收。
-        b"HIGHS_SOLUTION_V1\nmodel_status: HighsModelStatus.kOptimal\n",
-        REAL_OPTIMAL.replace("Optimal", "kOptimal").encode(),
-        REAL_OPTIMAL.replace("Objective 3000", "Objective nan").encode(),
-        REAL_OPTIMAL.replace("Objective 3000", "Objective inf").encode(),
-        REAL_OPTIMAL.replace("x 3000", "x inf").encode(),
-        REAL_OPTIMAL.replace("x 3000", "x 0x10").encode(),
-        REAL_OPTIMAL.replace("# Columns 2", "# Columns -2").encode(),
-        REAL_OPTIMAL.replace("x 3000\ny 0", "x 3000").encode(),
-        REAL_OPTIMAL.replace("x 3000\ny 0", "x 3000\nx 1").encode(),
-        "\n".join(REAL_OPTIMAL.splitlines()[:-3]).encode(),
-        (REAL_OPTIMAL + "trailing junk\n").encode(),
+        # 原生 HiGHS raw 文本不是本管道契约，出现即拒收。
+        b"Model status\nOptimal\n",
+        SHIM_OPTIMAL.replace("HIGHS_SOLUTION_V1", "HIGHS_SOLUTION_V2").encode(),
+        SHIM_OPTIMAL.replace("kOptimal", "kTimeTravel").encode(),
+        SHIM_OPTIMAL.replace("objective_value: 3000.0", "objective_value: unknown").encode(),
+        SHIM_OPTIMAL.replace("objective_value: 3000.0", "objective_value: nan").encode(),
+        SHIM_OPTIMAL.replace("0: 3000.0", "0: nan").encode(),
+        SHIM_OPTIMAL.replace("num_columns: 2", "num_columns: 3").encode(),
+        SHIM_OPTIMAL.replace("0: 3000.0\n1: 0.0", "1: 0.0").encode(),
+        "\n".join(SHIM_OPTIMAL.splitlines()[:-1]).encode(),
     ]
     for index, raw in enumerate(bad_solutions):
         with pytest.raises(ComputationUnavailableError) as exc_info:
@@ -340,19 +382,24 @@ def test_corrupt_and_unknown_inputs_fail() -> None:
     with pytest.raises(ComputationUnavailableError) as exc_info:
         _adapt(None, _receipt(), None)
     assert exc_info.value.reason == "result-protocol-failure"
-    files = {PARAMETERS_PATH: _parameters(offset="1.5")}
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(offset=True),
+    }
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(files, _receipt(), REAL_OPTIMAL.encode("utf-8"))
+        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert exc_info.value.reason == "result-protocol-failure"
     files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(unit_map={"x": "kW", "ghost": "kW"}),
     }
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(files, _receipt(), REAL_OPTIMAL.encode("utf-8"))
+        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert exc_info.value.reason == "result-protocol-failure"
     files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(unit_map={"x": "not_a_unit_xyz"}),
     }
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        _adapt(files, _receipt(), REAL_OPTIMAL.encode("utf-8"))
+        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
     assert exc_info.value.reason == "result-protocol-failure"

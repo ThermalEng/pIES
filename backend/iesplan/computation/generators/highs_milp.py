@@ -114,11 +114,13 @@ class HighsMilpProvider:
         """
         self._check_capabilities(artifact, config, finance)
         seed = config.seed if config.seed is not None else FIXED_SEED
-        model, unit_map = build_project_model(
+        model, unit_map, objective_unit = build_project_model(
             artifact, models, series, finance, config
         )
         mps_text, offset = write_mps(model)
-        metadata = self._metadata(artifact, unit_map, offset, seed, config)
+        metadata = self._metadata(
+            artifact, unit_map, offset, objective_unit, seed, config
+        )
         manifest = SolverBundleManifest(
             bundle={"generator": self.ref, "solver": SOLVER_REF},
             inputs=[
@@ -195,14 +197,15 @@ class HighsMilpProvider:
         artifact: ValidatedAssemblyArtifact,
         unit_map: Mapping[str, str],
         offset: float,
+        objective_unit: str,
         seed: int,
         config: CalculationConfig,
     ) -> bytes:
         """ResultAdapter 后续必需的最小规范 JSON 元数据（规范字节）。
 
-        只记录反向换算与追溯必需项（unit_map、目标偏移、请求 outputs、
-        固定 seed、precision、装配/引用追溯），不复制完整 assembly、
-        models、finance，不写 hash。
+        只记录反向换算与追溯必需项（unit_map、目标偏移、目标业务单位、
+        请求 outputs、固定 seed、precision、装配/引用追溯），不复制完整
+        assembly、models、finance，不写 hash。
         """
         doc = json.loads(artifact.canonical_text)
         assembly = doc.get("assembly") or {}
@@ -213,6 +216,7 @@ class HighsMilpProvider:
             },
             "generator": self.ref,
             "objective_offset": offset,
+            "objective_unit": objective_unit,
             "outputs": list(config.outputs),
             "precision": config.precision,
             "result_adapter": ADAPTER_REF,

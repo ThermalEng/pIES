@@ -1,39 +1,42 @@
 """首个真实 ResultAdapterProvider：``ies.result-adapter.highs@1.0.0``。
 
 与 ``ies.generator.highs_milp@1.0.0`` 配套，解释其声明输出
-``output/solution.sol``。该文件由 HiGHS 1.7.2 CLI 经 ``--solution_file``
-写出，风格为 CLI 默认的 raw（``write_solution_style`` 默认 ``0``，
-见 HiGHS 1.7.2 ``HighsOptions`` 与 ``RunHighs.cpp`` 写出路径；
-Docker 内 highspy 1.7.2 同版本库逐字节复现）。只使用传入的只读
-Bundle、ExecutionReceipt 与声明输出；不读项目/数据库/当前 provider，
-不重跑 solver，不做财务评价（0.10-D）。
+``output/solution.sol``。该文件由求解 executable
+``ies.solver.highs@1.7.2``（``ies-highs-solver`` 垫片，0.9-E 已提交
+契约）写出的 ``HIGHS_SOLUTION_V1`` 文本：状态行、目标值、列数与按
+索引的主解行。只使用传入的只读 Bundle、ExecutionReceipt 与声明输出；
+不读项目/数据库/当前 provider，不重跑 solver，不做财务评价（0.10-D）。
 
-语义要点（Docker 真实运行证据，见本包测试夹具）：
-- 成功回执只看 solution 文件的 ``Model status`` 行：求解器退出码
-  在有解/不可行/无界时恒为 0，不可用退出码判断数学状态；
-- ``Optimal`` 须附 ``Feasible`` 主解才发布：目标与业务变量值须有
-  限，变量按 solution 列名对 ``unit_map`` 键映射（内部二进制列不在
-  ``unit_map`` 中，自然忽略；``unit_map`` 缺键、列名重复一律失败）；
-  未知状态、格式损坏、缺失必需段、稀疏风格（``# Columns`` 为负）、
-  非有限数值一律结果协议失败，不发布伪成功；
-- ``Infeasible``/``Unbounded`` 明确映射，不发布业务输出；
-  ``Primal infeasible or unbounded`` 记 ``not_solved``，不发布；
-- 文件自报 ``Time limit reached`` 时明确报错（部分解不当成功）；
-  该错误与监督超时路径的 ``timed_out`` 技术状态无冲突：后者只属于
-  回执 ``timed_out``（进程被监督杀死，根本不读 solution 文件）；
+语义要点（Docker 真实垫片运行证据，见本包测试夹具）：
+- 成功回执只看 solution 文件的 ``model_status`` 令牌：垫片在有解、
+  不可行、无界时均以退出码 0 写出文件，不可用退出码判断数学状态；
+- ``kOptimal`` 须有完整主解才发布：目标与映射变量值须有限，变量按
+  MPS 列序对 ``unit_map`` 键映射（内部二进制列不在 ``unit_map`` 中，
+  自然忽略；缺键、列数不一致一律失败）；
+- 目标值先加回 ``objective_offset``（MPS 无法承载的目标常数项，只加
+  一次），再按 ``objective_unit`` 恢复业务单位：金额量纲守币种原值
+  （财务币种，含 USD，直接采用不折算），物理量经
+  ``core.units.from_si`` 反向换算；单位由生成器编译目标时确定并写入
+  parameters，适配器不猜；
+- ``kInfeasible``/``kUnbounded`` 明确映射，不发布业务输出；
+  ``kUnboundedOrInfeasible`` 记 ``not_solved``，不发布；
+- 文件自报 ``kTimeLimit`` 时明确报错（部分解不当成功解释）；垫片超时
+  恒以非零退出且不写文件，走回执 ``process_failed`` 路径；
   其余非最优数学状态一律明确报错，不猜数值失败；
-- 物理变量经 ``core.units.from_si`` 反向换算到业务单位；金额保持
-  财务币种（SI 金额数值即 CNY，USD 在 build 侧已被拒绝）；目标值
-  加回 ``objective_offset``（MPS 无法承载的目标常数项）；
+- 未知状态、格式损坏、缺失输出、发布值非有限一律结果协议失败；
 - 非成功回执按 0.10-A 映射表返回执行状态，数学状态一律
   ``not_solved``，不发布业务输出。
+
+解析只读状态与所需主解：V1 没有对偶/基址段，不解析不存在的段；
+parameters 由可信生成器产生，直接读取必需事实（缺键、形态错误即
+协议失败），不做第二次输入 schema 校验。
 """
 
 from __future__ import annotations
 
 import json
 import math
-import re
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any, NoReturn
 
@@ -44,7 +47,7 @@ from iesplan.computation.protocols import (
     SolverBundle,
 )
 from iesplan.computation.result_adapter import ResultAdapterDescriptor
-from iesplan.core.units import UnitError, from_si
+from iesplan.core.units import UnitError, dims_of, from_si
 
 ADAPTER_ID = "ies.result-adapter.highs"
 ADAPTER_VERSION = "1.0.0"
@@ -56,215 +59,154 @@ DESCRIPTOR = ResultAdapterDescriptor(
 )
 
 #: 本 provider 消费的 Bundle 内相对路径（与 generator 声明一致）。
-#: 注意：不再需要读 problem.mps——变量映射只凭 solution 列名对
-#: parameters.unit_map 键，顺序无关（unit_map 按名排序，MPS 列按名
-#: 排序，两者顺序今日恰好一致，但适配器不依赖该巧合）。
+#: V1 主解按索引排列，变量映射需 MPS 列序。
 _SOLUTION_PATH = "output/solution.sol"
 _PARAMETERS_PATH = "input/parameters.json"
+_PROBLEM_PATH = "input/problem.mps"
 
-#: 金额业务单位（SI 金额数值即 CNY；USD 在 build 侧已被拒绝）。
-_OBJECTIVE_UNIT = "CNY"
-
-#: 本 provider 正确表达的请求输出（metrics 为后处理摘要，不对应
-#: 求解器第二个原始文件；未知请求明确拒绝）。
+#: 本 provider 发布时只认识的请求输出（未知请求由生成器在 build 侧
+#: 拒绝；此处只按已请求键发布，不重复校验）。
 _SUPPORTED_OUTPUTS = ("solution", "metrics")
 
-#: HiGHS 1.7.2 raw solution 的数学状态全集（utilModelStatusToString
-#: 输出，大小写敏感，逐字匹配；未知字符串即协议失败）。
-_STATUS_OPTIMAL = "Optimal"
-_STATUS_INFEASIBLE = "Infeasible"
-_STATUS_UNBOUNDED = "Unbounded"
-_STATUS_UNBOUNDED_OR_INFEASIBLE = "Primal infeasible or unbounded"
-_STATUS_TIME_LIMIT = "Time limit reached"
+#: 垫片写出的 model_status 令牌（``HighsModelStatus`` 全集，逐字匹配；
+#: 未知令牌即协议失败）。
+_STATUS_PREFIX = "HighsModelStatus."
+_STATUS_SOLVED = "HighsModelStatus.kOptimal"
+_STATUS_INFEASIBLE = "HighsModelStatus.kInfeasible"
+_STATUS_UNBOUNDED = "HighsModelStatus.kUnbounded"
+_STATUS_UNBOUNDED_OR_INFEASIBLE = "HighsModelStatus.kUnboundedOrInfeasible"
+_STATUS_TIME_LIMIT = "HighsModelStatus.kTimeLimit"
 _KNOWN_STATUSES = frozenset(
-    {
-        "Not Set",
-        "Load error",
-        "Model error",
-        "Presolve error",
-        "Solve error",
-        "Postsolve error",
-        "Empty",
-        "Memory limit reached",
-        _STATUS_OPTIMAL,
-        _STATUS_INFEASIBLE,
-        _STATUS_UNBOUNDED_OR_INFEASIBLE,
-        _STATUS_UNBOUNDED,
-        "Bound on objective reached",
-        "Target for objective reached",
-        _STATUS_TIME_LIMIT,
-        "Iteration limit reached",
-        "Solution limit reached",
-        "Interrupted by user",
-        "Unknown",
-    }
+    _STATUS_PREFIX + name
+    for name in (
+        "kNotset",
+        "kLoadError",
+        "kModelError",
+        "kPresolveError",
+        "kSolveError",
+        "kPostsolveError",
+        "kModelEmpty",
+        "kOptimal",
+        "kInfeasible",
+        "kUnboundedOrInfeasible",
+        "kUnbounded",
+        "kObjectiveBound",
+        "kObjectiveTarget",
+        "kTimeLimit",
+        "kIterationLimit",
+        "kSolutionLimit",
+        "kInterrupt",
+        "kUnknown",
+    )
 )
 
-#: HiGHS ``%.Ng`` 数值渲染字母表之外的写法一律视为损坏（float()
-#: 会接受十六进制与下划线，writer 从不产出，先收紧再解析）。
-_NUMBER_RE = re.compile(
-    r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?\Z",
-)
-_NONFINITE_TOKENS = frozenset({"inf", "+inf", "-inf", "infinity", "+infinity", "-infinity", "nan"})
+#: MPS COLUMNS 段内的标记行首字段。
+_MARKER_FIELDS = ("INTORG", "INTEND")
 
 
 def _fail(message: str) -> NoReturn:
     raise ComputationUnavailableError(f"HiGHS 结果解释失败: {message}", reason="result-protocol-failure")
 
 
-def _parse_number(token: str, where: str) -> float:
-    """解析 writer 字母表内的数值；写法越界即协议失败。"""
-    lowered = token.lower()
-    if lowered in _NONFINITE_TOKENS:
-        return float(lowered)
-    if not _NUMBER_RE.match(token):
-        _fail(f"{where} 数值写法非法: {token!r}")
-    return float(token)
-
-
-def _parse_count(token: str, where: str) -> int:
-    """解析 ``# Columns/Rows`` 计数；负数（稀疏风格）明确拒绝。"""
-    try:
-        count = int(token)
-    except ValueError:
-        _fail(f"{where} 计数非法: {token!r}")
-    if count < 0:
-        _fail(f"{where} 为稀疏风格，本适配器只接受 CLI 默认 raw: {token!r}")
-    return count
-
-
-class _Cursor:
-    """行游标：节之间容忍空行，节内逐行严格消费。"""
-
-    def __init__(self, lines: list[str]) -> None:
-        self._lines = lines
-        self._pos = 0
-
-    def next_content(self, where: str) -> str:
-        """取下一非空行；到文件尾即协议失败。"""
-        while self._pos < len(self._lines):
-            line = self._lines[self._pos].strip()
-            self._pos += 1
-            if line:
-                return line
-        _fail(f"{where} 缺失（文件意外结束）")
-
-    def next_physical(self, where: str) -> str:
-        """取下一物理行（含空行，计数为 0 的行组即空行）。"""
-        if self._pos >= len(self._lines):
-            _fail(f"{where} 缺失（文件意外结束）")
-        line = self._lines[self._pos].strip()
-        self._pos += 1
-        return line
-
-    def expect(self, text: str) -> None:
-        """下一非空行必须逐字等于 ``text``。"""
-        got = self.next_content(f"期待 {text!r}")
-        if got != text:
-            _fail(f"期待 {text!r}，得到 {got!r}")
-
-    def end(self) -> None:
-        """基址段之后只允许空行到文件尾。"""
-        while self._pos < len(self._lines):
-            if self._lines[self._pos].strip():
-                _fail(f"文件尾多余内容: {self._lines[self._pos]!r}")
-            self._pos += 1
-
-
-def _parse_named_values(cursor: _Cursor, count: int, where: str) -> list[tuple[str, float]]:
-    """解析 ``<名> <数值>`` 行组；重名、缺行、坏值即协议失败。"""
-    pairs: list[tuple[str, float]] = []
-    seen: set[str] = set()
-    for _ in range(count):
-        line = cursor.next_physical(f"{where} 第 {len(pairs)} 行")
-        name, sep, token = line.rpartition(" ")
-        if not sep or not name:
-            _fail(f"{where} 行非法: {line!r}")
-        if name in seen:
-            _fail(f"{where} 列名重复: {name!r}")
-        seen.add(name)
-        pairs.append((name, _parse_number(token, f"{where} {name!r}")))
-    return pairs
-
-
-def _parse_section(cursor: _Cursor, kind: str) -> tuple[str, float, list, list] | None:
-    """解析 Primal/Dual 节；``None`` 表示无解块。
-
-    返回 ``(可行性, 目标, 列, 行)``；Dual 节无目标行，以 ``nan`` 占位。
-    """
-    cursor.expect(f"# {kind} solution values")
-    feasibility = cursor.next_content(f"{kind} 可行性")
-    if feasibility == "None":
-        return None
-    if feasibility not in ("Feasible", "Infeasible"):
-        _fail(f"{kind} 可行性未知: {feasibility!r}")
-    objective = math.nan
-    if kind == "Primal":
-        line = cursor.next_content("Primal 目标行")
-        head, sep, token = line.partition(" ")
-        if not sep or head != "Objective":
-            _fail(f"Primal 目标行非法: {line!r}")
-        objective = _parse_number(token.strip(), "Objective")
-    line = cursor.next_content(f"{kind} 列数行")
-    head, sep, token = line.partition(" ")
-    if not sep or head != "#" or not token.startswith("Columns "):
-        _fail(f"{kind} 列数行非法: {line!r}")
-    columns = _parse_named_values(
-        cursor, _parse_count(token[len("Columns ") :].strip(), f"{kind} 列数"), kind
-    )
-    line = cursor.next_content(f"{kind} 行数行")
-    head, sep, token = line.partition(" ")
-    if not sep or head != "#" or not token.startswith("Rows "):
-        _fail(f"{kind} 行数行非法: {line!r}")
-    rows = _parse_named_values(cursor, _parse_count(token[len("Rows ") :].strip(), f"{kind} 行数"), kind)
-    return (feasibility, objective, columns, rows)
-
-
-def _parse_basis(cursor: _Cursor) -> None:
-    """消费基址段（形状校验，不发布；计数不对模型断言）。"""
-    cursor.expect("# Basis")
-    cursor.expect("HiGHS v1")
-    validity = cursor.next_content("基址有效性")
-    if validity == "None":
-        return
-    if validity != "Valid":
-        _fail(f"基址有效性未知: {validity!r}")
-    for kind in ("Columns", "Rows"):
-        line = cursor.next_content(f"基址{kind}行")
-        head, sep, token = line.partition(" ")
-        if not sep or head != "#" or not token.startswith(f"{kind} "):
-            _fail(f"基址{kind}行非法: {line!r}")
-        count = _parse_count(token[len(kind) + 1 :].strip(), f"基址{kind}")
-        ints = cursor.next_physical(f"基址{kind}取值").split()
-        if len(ints) != count:
-            _fail(f"基址{kind}个数 {len(ints)} 与声明 {count} 不一致")
-        for token in ints:
-            try:
-                int(token)
-            except ValueError:
-                _fail(f"基址{kind}取值非法: {token!r}")
-
-
 def _parse_solution(raw: bytes) -> dict[str, Any]:
-    """严格解析 HiGHS 1.7.2 CLI 默认 raw solution；任一偏离即协议失败。"""
+    """严格解析垫片 V1 文本；任一偏离即协议失败。
+
+    只读状态与所需主解：数值写法按垫片 ``repr(float)`` 字母表由
+    ``float()`` 直接解析；有限性只在发布处核对。
+    """
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         _fail(f"solution 非 UTF-8 文本: {exc}")
-    cursor = _Cursor(text.splitlines())
-    cursor.expect("Model status")
-    status = cursor.next_content("数学状态")
-    if status not in _KNOWN_STATUSES:
-        _fail(f"未知数学状态: {status!r}")
-    primal = _parse_section(cursor, "Primal")
-    dual = _parse_section(cursor, "Dual")
-    _parse_basis(cursor)
-    cursor.end()
-    return {"model_status": status, "primal": primal, "dual": dual}
+    lines = text.splitlines()
+    if not lines or lines[0] != "HIGHS_SOLUTION_V1":
+        _fail("solution 缺 HIGHS_SOLUTION_V1 首行")
+    facts: dict[str, str] = {}
+    primals: list[float] = []
+    in_primal = False
+    for line in lines[1:]:
+        if line == "primal:":
+            in_primal = True
+            continue
+        key, sep, value = line.partition(":")
+        if not sep or not key.strip():
+            _fail(f"solution 行非法: {line!r}")
+        if not in_primal:
+            facts[key.strip()] = value.strip()
+            continue
+        try:
+            position = int(key.strip())
+        except ValueError:
+            _fail(f"primal 序号非法: {line!r}")
+        if position != len(primals):
+            _fail(f"primal 序号不连续: {line!r}")
+        try:
+            primals.append(float(value.strip()))
+        except ValueError:
+            _fail(f"primal 数值非法: {line!r}")
+    for key in ("model_status", "objective_value", "num_columns"):
+        if key not in facts:
+            _fail(f"solution 缺必需段: {key}")
+    if facts["model_status"] not in _KNOWN_STATUSES:
+        _fail(f"未知 model_status: {facts['model_status']!r}")
+    try:
+        num_columns = int(facts["num_columns"])
+    except ValueError:
+        _fail(f"num_columns 非法: {facts['num_columns']!r}")
+    if num_columns != len(primals):
+        _fail(f"primal 个数 {len(primals)} 与 num_columns {num_columns} 不一致")
+    try:
+        objective = float(facts["objective_value"])
+    except ValueError:
+        _fail(f"objective_value 非法: {facts['objective_value']!r}")
+    return {
+        "model_status": facts["model_status"],
+        "objective": objective,
+        "primals": primals,
+    }
+
+
+def _mps_column_names(raw: bytes) -> list[str]:
+    """按 MPS COLUMNS 段恢复 LP 变量顺序（V1 主解按索引排列所需）。
+
+    新列行首字段后跟行名/数值对（奇数个字段），续行只有行名/数值对
+    （偶数个字段）；标记行跳过，至 RHS 段结束。
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        _fail(f"problem.mps 非 UTF-8 文本: {exc}")
+    lines = text.splitlines()
+    try:
+        start = lines.index("COLUMNS") + 1
+    except ValueError:
+        _fail("problem.mps 缺 COLUMNS 段")
+    names: list[str] = []
+    for line in lines[start:]:
+        parts = line.split()
+        if not parts:
+            _fail("problem.mps 含空行")
+        head = parts[0]
+        if head == "RHS":
+            break
+        if head in _MARKER_FIELDS:
+            continue
+        if len(parts) >= 3 and len(parts) % 2 == 1:
+            names.append(head)
+        elif len(parts) >= 2 and len(parts) % 2 == 0:
+            if not names:
+                _fail(f"problem.mps 续行无所属列: {line!r}")
+        else:
+            _fail(f"problem.mps 列行非法: {line!r}")
+    return names
 
 
 def _parameters(bundle: SolverBundle) -> dict[str, Any]:
-    """读 Bundle 内 generator 规范 parameters；形状非法即协议失败。"""
+    """读 Bundle 内 generator 规范 parameters（可信生成器产物）。
+
+    只取计算必需事实：unit_map、objective_offset、objective_unit、
+    outputs；缺键或形态错误即协议失败，不做 schema 复核。
+    """
     raw = bundle.files.get(_PARAMETERS_PATH)
     if not isinstance(raw, bytes):
         _fail(f"Bundle 缺输入文件: {_PARAMETERS_PATH}")
@@ -275,22 +217,21 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
     if not isinstance(doc, dict):
         _fail("parameters 须为 JSON 对象")
     unit_map = doc.get("unit_map")
-    if not isinstance(unit_map, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in unit_map.items()
-    ):
-        _fail("parameters.unit_map 须为字符串映射")
+    if not isinstance(unit_map, dict):
+        _fail("parameters.unit_map 缺失或非法")
     offset = doc.get("objective_offset")
-    if not isinstance(offset, (int, float)) or isinstance(offset, bool) or not math.isfinite(offset):
-        _fail("parameters.objective_offset 须为有限数")
+    if not isinstance(offset, (int, float)) or isinstance(offset, bool):
+        _fail("parameters.objective_offset 缺失或非法")
+    objective_unit = doc.get("objective_unit")
+    if not isinstance(objective_unit, str):
+        _fail("parameters.objective_unit 缺失或非法")
     requested = doc.get("outputs")
-    if not isinstance(requested, list) or not all(isinstance(item, str) for item in requested):
-        _fail("parameters.outputs 须为字符串数组")
-    unknown = set(requested) - set(_SUPPORTED_OUTPUTS)
-    if unknown:
-        _fail(f"未知请求输出: {sorted(unknown)!r}")
+    if not isinstance(requested, list):
+        _fail("parameters.outputs 缺失或非法")
     return {
         "unit_map": dict(unit_map),
         "offset": float(offset),
+        "objective_unit": objective_unit,
         "requested": list(requested),
     }
 
@@ -340,9 +281,10 @@ class HighsResultAdapter:
     def _execution_status(receipt: ExecutionReceipt) -> str:
         """回执七种状态到技术状态的真实映射（0.10-A 契约规则）。
 
-        监督超时（``timed_out``）由执行器在进程被杀时直接记录，
-        此时根本不读 solution 文件；文件自报时间限制另见
-        ``_adapt_succeeded`` 的明确报错。
+        垫片超时恒以非零退出且不写 solution 文件，走普通
+        ``process_failed``（``failed``）；监督超时（``timed_out``）由
+        执行器在进程被杀时直接记录，根本不读 solution 文件；文件自报
+        时间限制另见 ``_adapt_succeeded`` 的明确报错。
         """
         status = receipt.status
         if status == "succeeded":
@@ -377,7 +319,7 @@ class HighsResultAdapter:
         status = solution["model_status"]
         if status == _STATUS_TIME_LIMIT:
             _fail("求解器自报达到时间限制：部分解不当成功解释")
-        if status != _STATUS_OPTIMAL:
+        if status != _STATUS_SOLVED:
             if status in (_STATUS_INFEASIBLE, _STATUS_UNBOUNDED):
                 math_status = "infeasible" if status == _STATUS_INFEASIBLE else "unbounded"
             elif status == _STATUS_UNBOUNDED_OR_INFEASIBLE:
@@ -391,39 +333,57 @@ class HighsResultAdapter:
                 math_status=math_status,
                 outputs={},
             )
-        primal = solution["primal"]
-        if primal is None or primal[0] != "Feasible":
-            _fail("Optimal 却无可行主解，不发布")
-        objective = primal[1]
+        objective = solution["objective"]
         if not math.isfinite(objective):
-            _fail("有解但 Objective 非有限")
-        by_name = {name: value for name, value in primal[2]}
+            _fail("有解但 objective_value 非有限")
+        problem_raw = bundle.files.get(_PROBLEM_PATH)
+        if not isinstance(problem_raw, bytes):
+            _fail(f"Bundle 缺输入文件: {_PROBLEM_PATH}")
+        names = _mps_column_names(problem_raw)
+        if len(names) != len(solution["primals"]):
+            _fail("MPS 变量数与 solution primal 个数不一致")
         variables: list[dict[str, object]] = []
         for name, unit in params["unit_map"].items():
-            if name not in by_name:
-                _fail(f"unit_map 变量不在 solution 列中: {name!r}")
+            if not isinstance(name, str) or not isinstance(unit, str):
+                _fail("parameters.unit_map 键值须为字符串")
             try:
-                value = from_si(by_name[name], unit)
+                index = names.index(name)
+            except ValueError:
+                _fail(f"unit_map 变量不在 MPS 列中: {name!r}")
+            try:
+                value = from_si(solution["primals"][index], unit)
             except UnitError as exc:
                 _fail(f"反向换算失败 {name!r}→{unit!r}: {exc}")
             if not math.isfinite(value):
                 _fail(f"换算后非有限数值: {name!r}")
             variables.append({"name": name, "value": value, "unit": unit})
         total = objective + params["offset"]
-        if not math.isfinite(total):
-            _fail("加回 objective_offset 后非有限")
+        objective_unit = params["objective_unit"]
+        try:
+            currency = dims_of(objective_unit) == Counter({"currency": 1})
+        except UnitError as exc:
+            _fail(f"目标单位无法解析 {objective_unit!r}: {exc}")
+        if currency:
+            business_total = total
+        else:
+            try:
+                business_total = from_si(total, objective_unit)
+            except UnitError as exc:
+                _fail(f"目标反向换算失败 →{objective_unit!r}: {exc}")
+        if not math.isfinite(business_total):
+            _fail("目标发布值非有限")
         out: dict[str, object] = {}
         if "solution" in params["requested"]:
             out["solution"] = {
-                "objective_value": total,
-                "objective_unit": _OBJECTIVE_UNIT,
+                "objective_value": business_total,
+                "objective_unit": objective_unit,
                 "variables": variables,
             }
         if "metrics" in params["requested"]:
             out["metrics"] = {
                 "model_status": status,
-                "objective_value": total,
-                "objective_unit": _OBJECTIVE_UNIT,
+                "objective_value": business_total,
+                "objective_unit": objective_unit,
                 "num_variables": len(variables),
             }
         return ComputeResult(

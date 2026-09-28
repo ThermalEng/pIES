@@ -322,7 +322,7 @@ def _coeffs(expr) -> dict:
 
 
 def test_project_inventory_counts(built) -> None:
-    model, units = built
+    model, units, _ = built
     assert len(model.variables) == 61321
     assert len(model.constraints) == 52561
     assert model.sense == "minimize"
@@ -333,7 +333,7 @@ def test_project_inventory_counts(built) -> None:
 
 
 def test_objective_finance_and_tariff_terms(built) -> None:
-    model, _ = built
+    model, _, _ = built
     coeffs = _coeffs(model.objective)
     # 年费率 SI 归一后 × 1 year(31536000s) → 0.035 CNY/W
     assert coeffs["tank_cap"] == pytest.approx(0.035, rel=1e-9)
@@ -346,7 +346,7 @@ def test_objective_finance_and_tariff_terms(built) -> None:
 
 
 def test_tech_rows_balance_and_initial(built) -> None:
-    model, _ = built
+    model, _, _ = built
     row = _row(model, "heater1__conversion__t0")
     assert _coeffs(row.expression) == {
         "heater1__heat_out__t0": 1.0,
@@ -376,7 +376,7 @@ def test_tech_rows_balance_and_initial(built) -> None:
 
 
 def test_mutex_binary_and_bounds(built) -> None:
-    model, _ = built
+    model, _, _ = built
     by_name = {var.name: var for var in model.variables}
     binary = by_name["hub1__exclusivity__mutex__t5"]
     assert (binary.lower, binary.upper, binary.kind) == (0.0, 1.0, "binary")
@@ -389,8 +389,8 @@ def test_mutex_binary_and_bounds(built) -> None:
 
 
 def test_mps_deterministic_bytes() -> None:
-    first, _ = _build()
-    second, _ = _build()
+    first, _, _ = _build()
+    second, _, _ = _build()
     first_text, first_offset = write_mps(first)
     second_text, second_offset = write_mps(second)
     assert first_text == second_text
@@ -526,7 +526,7 @@ def test_buses_split_per_carrier_components() -> None:
     旧全局连通实现会把五台设备合并，只产生一条 electricity 行。
     """
     artifact, models, series, finance, config = _island_inputs()
-    model, _ = build_project_model(artifact, models, series, finance, config)
+    model, _, _ = build_project_model(artifact, models, series, finance, config)
     by_name = {row.name: row for row in model.constraints}
     elec = {
         name: by_name[name] for name in by_name
@@ -639,7 +639,7 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
     并为每个 step 生成对规划变量的容量约束。缺失安全界保持 None。
     """
     artifact, models, series, finance, config = _gen_inputs()
-    model, _ = build_project_model(artifact, models, series, finance, config)
+    model, _, _ = build_project_model(artifact, models, series, finance, config)
     by_var = {var.name: var for var in model.variables}
     assert by_var["gen1__power_out__t0"].upper == pytest.approx(500000.0)
     assert by_var["gen1__power_out__t0"].lower == pytest.approx(10000.0)
@@ -666,7 +666,7 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
 def test_sale_tariff_sign_flips() -> None:
     """售电方向记账为负（与购电对称）。"""
     artifact, models, series, finance, config = _inputs(tariff_direction="sale")
-    model, _ = build_project_model(artifact, models, series, finance, config)
+    model, _, _ = build_project_model(artifact, models, series, finance, config)
     coeffs = _coeffs(model.objective)
     assert coeffs["load1__heat_in__t0"] == pytest.approx(-0.0007, rel=1e-9)
 

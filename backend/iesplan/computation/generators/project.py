@@ -56,6 +56,7 @@ from iesplan.core.contracts import (
     compile_planning_expression,
 )
 from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
+from iesplan.core.contracts.planning_expression import _CURRENCY_LITERAL_RE
 from iesplan.core.units import dims_of, to_si
 from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import (
@@ -147,10 +148,12 @@ def build_project_model(
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
 ) -> tuple[LinearModel, Mapping[str, str]]:
-    """由五项直接输入构造项目级线性模型与单位映射。
+    """由五项直接输入构造项目级线性模型、单位映射与目标业务单位。
 
-    返回 ``(LinearModel, unit_map)``：``unit_map`` 为 LP 名 → 业务单位，
-    供后续 ResultAdapter 反向换算（内部 binary 不进入结果，不收录）。
+    返回 ``(LinearModel, unit_map, objective_unit)``：``unit_map`` 为
+    LP 名 → 业务单位，供后续 ResultAdapter 反向换算（内部 binary 不进入
+    结果，不收录）；``objective_unit`` 为目标业务单位（金额取财务币种，
+    物理量取首个非零目标项的业务单位，常数目标无量纲取 ``"1"``）。
     同一五项输入产生同一模型；超出首版降级能力的数学抛
     ``LoweringUnsupportedError``。
     """
@@ -744,16 +747,35 @@ class _ProjectBuilder:
             names.add(f"{binding_id}__period_energy_sale")
         return names
 
-    def _build_objective(self) -> _AffineAcc:
+    def _build_objective(self) -> tuple[_AffineAcc, str]:
         planning = self.doc["planning"]
         raw = planning["objective"]
         symbols, placeholders = self._planning_symbols()
         compiled = compile_planning_expression(
             raw["expression"], symbols, currency=None,
         )
-        return self._substitute(
-            lower_planning_expression(compiled, placeholders),
-        )
+        lowered = lower_planning_expression(compiled, placeholders)
+        return self._substitute(lowered), self._objective_unit(raw, lowered)
+
+    def _objective_unit(self, raw: Mapping[str, Any], lowered: LinearExpression) -> str:
+        """目标业务单位（已编译降级事实直读，不重解析表达式）。
+
+        首个非零降级项决定：规划变量取其业务单位（与 unit_map 同规则），
+        财务标识符均为金额分量，取财务币种；无变量项的常数目标含币种
+        字面量取财务币种，否则为无量纲。降级项按名稳定排序，确定唯一。
+        """
+        for (name, _offset), coeff in lowered.terms:
+            if coeff == 0:
+                continue
+            if name in self.plan_vars:
+                spec = self.plan_vars[name]
+                return spec.get("unit") or self._bound_prop_unit(
+                    spec["device_ref"], spec["parameter"]
+                )
+            return self.finance.currency
+        for _ in _CURRENCY_LITERAL_RE.finditer(raw["expression"]):
+            return self.finance.currency
+        return "1"
 
     def _build_planning_rows(self) -> None:
         """已启用规划约束行（约束 type 标签留装配产物，不进 LP）。"""
@@ -795,14 +817,18 @@ class _ProjectBuilder:
             self._build_relations(inst, statics)
         self._build_bus_rows(buses)
         self._build_planning_rows()
-        objective = self._build_objective()
+        objective, objective_unit = self._build_objective()
         model = LinearModel(
             variables=tuple(self.variables.values()),
             constraints=tuple(self.rows),
             objective=objective.freeze(),
             sense=self.doc["planning"]["objective"]["sense"],
         )
-        return model, MappingProxyType(dict(sorted(self.unit_map.items())))
+        return (
+            model,
+            MappingProxyType(dict(sorted(self.unit_map.items()))),
+            objective_unit,
+        )
 
 
 def _money_to_internal(money: Any) -> float:
