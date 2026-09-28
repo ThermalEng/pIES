@@ -1023,13 +1023,14 @@ class ComputeResult:
     process_failed 且 termination_reason 为 oom→resource_exhausted,
     其余 process_failed→failed; output_protocol_failed→protocol_failed;
     timed_out→timed_out; cancelled→cancelled; fenced→fenced。
-    追溯经 (bundle_id, attempt_id) 定位回执与 Bundle, 不复制回执内容。
+    追溯经 receipt_id 唯一定位一张回执(回执自带 attempt/assembly/
+    config 与 provider 版本, 不复制), bundle_id 指向 Bundle。
     """
 
     schema: str = COMPUTE_RESULT_SCHEMA
     schema_version: str = COMPUTE_RESULT_VERSION
     bundle_id: str = ""
-    attempt_id: str = ""
+    receipt_id: str = ""
     execution_status: str = ""
     math_status: str = ""
     outputs: Mapping[str, object] = field(default_factory=dict)
@@ -1041,8 +1042,8 @@ class ComputeResult:
             raise ValueError(f"结果版本非法: {self.schema_version!r}")
         if not self.bundle_id:
             raise ValueError("结果缺必需字段: 'bundle_id'")
-        if not self.attempt_id:
-            raise ValueError("结果缺必需字段: 'attempt_id'")
+        if not self.receipt_id:
+            raise ValueError("结果缺必需字段: 'receipt_id'")
         if self.execution_status not in EXECUTION_STATUSES:
             raise ValueError(f"execution_status 非法: {self.execution_status!r}")
         if self.math_status not in MATH_STATUSES:
@@ -1057,7 +1058,7 @@ class ComputeResult:
             "schema": self.schema,
             "schema_version": self.schema_version,
             "bundle_id": self.bundle_id,
-            "attempt_id": self.attempt_id,
+            "receipt_id": self.receipt_id,
             "execution_status": self.execution_status,
             "math_status": self.math_status,
             "outputs": thaw_json_value(self.outputs),

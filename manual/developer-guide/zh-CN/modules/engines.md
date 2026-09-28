@@ -103,7 +103,7 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 ### 结果适配器契约与注册
 
 - `ComputeResult` 分两层表达状态：`execution_status` 只解读回执执行事实（`completed`/`rejected`/`failed`/`timed_out`/`cancelled`/`fenced`/`resource_exhausted`/`protocol_failed`，七种回执状态各有准确归属：策略拒绝归 `rejected` 而非协议失败，租约隔离归 `fenced` 而非取消，`process_failed` 按终止原因拆为 OOM 的 `resource_exhausted` 与其余的 `failed`），`math_status`（`solved`/`infeasible`/`unbounded`/`numeric_failure`/`not_solved`）只解读求解器数学结局；`outputs` 为统一业务输出容器。本层不设业务结局字段，不依赖任务域；当前切片只有契约与注册，不含具体求解器输出语义。
-- 追溯经 `(bundle_id, attempt_id)` 定位回执与 Bundle，不复制回执内容。
+- 追溯经 `receipt_id` 唯一定位一张回执（同一 bundle + attempt 可有多张回执），`bundle_id` 指向 Bundle，不复制回执内容。
 - 扩展适配器只需实现 `ResultAdapter` 公开身份（`descriptor`/`ref`/`available`）与唯一业务调用 `adapt(Bundle, receipt, outputs)`，经 `build_result_adapter_registry` 原子发布，按 manifest/回执固定的精确引用解析。
 
 ## 失败语义
