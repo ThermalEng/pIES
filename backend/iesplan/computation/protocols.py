@@ -39,6 +39,7 @@ from iesplan.modeling import DeviceMathContribution
 
 if TYPE_CHECKING:
     from iesplan.computation.generators.descriptor import GeneratorDescriptor
+    from iesplan.computation.result_adapter import ResultAdapterDescriptor
     from iesplan.computation.runtime.descriptor import ExecutorDescriptor
 
 #: 公开计算配置 schema(进入业务事实前须校验字头)。
@@ -217,6 +218,20 @@ class ResultAdapter(Protocol):
     只凭只读 Bundle、回执和声明输出解释结果; 不得重新运行求解器、不得
     访问项目草稿、不得按当前最新 provider 改写历史结果。
     """
+
+    @property
+    def descriptor(self) -> ResultAdapterDescriptor:
+        """公开能力描述符(与 ``ref`` 单一来源；类型仅静态引用，避免循环导入)。"""
+        ...
+
+    @property
+    def ref(self) -> str:
+        """适配器精确引用(``<稳定ID>@<语义化版本>`` 形态，与描述符单一来源)。"""
+        ...
+
+    def available(self) -> bool:
+        """该 provider 当前是否可用。"""
+        ...
 
     def adapt(
         self,
@@ -970,20 +985,42 @@ def _freeze_receipt_outputs(
     return tuple(frozen)
 
 
+#: 技术执行状态封闭集合(回执→结果的技术层解读: 完成/超时/取消/
+#: 资源不足/执行协议失败各恰占其一, 不与数学状态混写)。
+EXECUTION_STATUSES = (
+    "completed",
+    "timed_out",
+    "cancelled",
+    "resource_exhausted",
+    "protocol_failed",
+)
+
+#: 数学状态封闭集合(求解器数学结局: 有解/不可行/无界/数值失败/未求解)。
+MATH_STATUSES = (
+    "solved",
+    "infeasible",
+    "unbounded",
+    "numeric_failure",
+    "not_solved",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ComputeResult:
     """跨越计算边界的统一计算结果(不可变载体, 非算法实现)。
 
-    ``business_outcome`` 为适配器声明的业务结局, 取值必须落在 tasks 域
-    公开 ``BUSINESS_OUTCOMES`` 内(由调用阶段网关校验); ``status`` 为求解
-    层执行状态, ``outputs`` 为统一结果输出。
+    技术执行状态与数学状态分两层正交表达, 不共用一个模糊 ``status``:
+    ``execution_status`` 只解读回执的执行事实, ``math_status`` 只解读
+    求解器数学结局; ``outputs`` 为统一业务输出容器, 具体业务候选字段
+    由后续适配实现按声明输出填充。本层不设业务结局字段, 不依赖 tasks
+    域, 未知状态不得默认映射为正常完成。
     """
 
     schema: str = COMPUTE_RESULT_SCHEMA
     schema_version: str = COMPUTE_RESULT_VERSION
     bundle_id: str = ""
-    status: str = ""
-    business_outcome: str = ""
+    execution_status: str = ""
+    math_status: str = ""
     outputs: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -991,9 +1028,12 @@ class ComputeResult:
             raise ValueError(f"结果 schema 非法: {self.schema!r}")
         if self.schema_version != COMPUTE_RESULT_VERSION:
             raise ValueError(f"结果版本非法: {self.schema_version!r}")
-        for name in ("bundle_id", "status", "business_outcome"):
-            if not getattr(self, name):
-                raise ValueError(f"结果缺必需字段: {name}")
+        if not self.bundle_id:
+            raise ValueError("结果缺必需字段: 'bundle_id'")
+        if self.execution_status not in EXECUTION_STATUSES:
+            raise ValueError(f"execution_status 非法: {self.execution_status!r}")
+        if self.math_status not in MATH_STATUSES:
+            raise ValueError(f"math_status 非法: {self.math_status!r}")
         if not isinstance(self.outputs, Mapping):
             raise TypeError("outputs 须为 Mapping")
         object.__setattr__(self, "outputs", freeze_json_value(self.outputs))
@@ -1004,8 +1044,8 @@ class ComputeResult:
             "schema": self.schema,
             "schema_version": self.schema_version,
             "bundle_id": self.bundle_id,
-            "status": self.status,
-            "business_outcome": self.business_outcome,
+            "execution_status": self.execution_status,
+            "math_status": self.math_status,
             "outputs": thaw_json_value(self.outputs),
         }
 
@@ -1021,9 +1061,11 @@ __all__ = [
     "SOLVER_BUNDLE_VERSION",
     "CalculationConfig",
     "ComputeResult",
+    "EXECUTION_STATUSES",
     "ExecutionReceipt",
     "ExecutorProvider",
     "GeneratorProvider",
+    "MATH_STATUSES",
     "ProcessOutcome",
     "RECEIPT_STATUSES",
     "StopProbe",

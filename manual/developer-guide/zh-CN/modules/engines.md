@@ -100,6 +100,11 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 
 组合根负责发现、校验依赖并原子发布。装配阶段根据 descriptor 校验能力；Worker 按任务快照使用精确版本。任一角色缺失时在执行前失败，不回退到内置实现。
 
+### 结果适配器契约与注册
+
+- `ComputeResult` 分两层表达状态：`execution_status`（`completed`/`timed_out`/`cancelled`/`resource_exhausted`/`protocol_failed`）只解读回执执行事实，`math_status`（`solved`/`infeasible`/`unbounded`/`numeric_failure`/`not_solved`）只解读求解器数学结局；`outputs` 为统一业务输出容器。本层不设业务结局字段，不依赖任务域。
+- 扩展适配器只需实现 `ResultAdapter` 公开身份（`descriptor`/`ref`/`available`）与唯一业务调用 `adapt(Bundle, receipt, outputs)`，经 `build_result_adapter_registry` 原子发布，按 manifest/回执固定的精确引用解析。
+
 ## 失败语义
 
 | 阶段 | 示例 | 结果 |

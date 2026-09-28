@@ -64,6 +64,8 @@ from iesplan.computation.protocols import (
     COMPUTE_RESULT_VERSION,
     EXECUTION_RECEIPT_SCHEMA,
     EXECUTION_RECEIPT_VERSION,
+    EXECUTION_STATUSES,
+    MATH_STATUSES,
     RECEIPT_STATUSES,
     SOLVER_BUNDLE_SCHEMA,
     SOLVER_BUNDLE_VERSION,
@@ -86,6 +88,11 @@ from iesplan.computation.registry import (
     AlgorithmSpec,
     get_algorithm,
     list_algorithms,
+)
+from iesplan.computation.result_adapter import (
+    ResultAdapterDescriptor,
+    ResultAdapterRegistry,
+    build_result_adapter_registry,
 )
 from iesplan.computation.runtime import (
     HIGHS_ADAPTER_PATH,
@@ -116,6 +123,8 @@ __all__ = [
     "DEFAULT_ALGORITHM",
     "EXECUTION_RECEIPT_SCHEMA",
     "EXECUTION_RECEIPT_VERSION",
+    "EXECUTION_STATUSES",
+    "MATH_STATUSES",
     "HIGHS_ADAPTER_PATH",
     "HIGHS_EXECUTABLE_REF",
     "HIGHS_MILP_PROVIDER",
@@ -143,6 +152,8 @@ __all__ = [
     "ProcessOutcome",
     "RECEIPT_STATUSES",
     "ResultAdapter",
+    "ResultAdapterDescriptor",
+    "ResultAdapterRegistry",
     "SolverBundle",
     "SolverBundleManifest",
     "SolverRuntime",
@@ -153,6 +164,7 @@ __all__ = [
     "build_executor_registry",
     "build_project_model",
     "build_registry",
+    "build_result_adapter_registry",
     "check_provider_ref",
     "export_bundle_files",
     "get_algorithm",

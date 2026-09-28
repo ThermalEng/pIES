@@ -234,13 +234,26 @@ class _ExecutorOnly:
 class _AdapterOnly:
     """仅实现 ResultAdapter 的最小替身(无任何算法逻辑)。"""
 
+    @property
+    def descriptor(self):
+        from iesplan.computation import ResultAdapterDescriptor
+
+        return ResultAdapterDescriptor(adapter_id="t.adapter", version="1.0.0")
+
+    @property
+    def ref(self) -> str:
+        return "t.adapter@1.0.0"
+
+    def available(self) -> bool:
+        return True
+
     def adapt(
         self,
         bundle: SolverBundle,
         receipt: ExecutionReceipt,
         outputs: Mapping[str, object],
     ) -> ComputeResult:
-        raise ComputationUnavailableError(reason="no-provider")
+        raise ComputationUnavailableError(reason="no-result-adapter")
 
 
 def test_protocols_are_runtime_checkable_shapes() -> None:
@@ -301,8 +314,8 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
     """Bundle/回执/结果/配置深层不可变(顶层赋值与嵌套改写一律失败)。"""
     manifest = _manifest()
     result = ComputeResult(
-        bundle_id="bundle-1", status="succeeded",
-        business_outcome="normal_completion", outputs={"k": {"nested": [1]}},
+        bundle_id="bundle-1", execution_status="completed",
+        math_status="solved", outputs={"k": {"nested": [1]}},
     )
     config = _config(seed=7, options={"gap": 0.01, "tags": ["a"]}, outputs=["out"])
     assert config.outputs == ("out",)
@@ -312,7 +325,7 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         manifest.result_adapter = "other"  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
-        result.status = "failed"  # type: ignore[misc]
+        result.execution_status = "failed"  # type: ignore[misc]
     # 嵌套容器只读(映射不可写, 序列不可改, 条目不可写)
     with pytest.raises(TypeError):
         manifest.inputs[0] = {}  # type: ignore[index]
@@ -435,14 +448,14 @@ def test_result_and_bundle_schema_words() -> None:
     assert _manifest().schema == SOLVER_BUNDLE_SCHEMA
     assert _manifest().schema_version == SOLVER_BUNDLE_VERSION
     result = ComputeResult(
-        bundle_id="b", status="succeeded", business_outcome="normal_completion",
+        bundle_id="b", execution_status="completed", math_status="solved",
     )
     assert result.schema == COMPUTE_RESULT_SCHEMA
     assert result.schema_version == COMPUTE_RESULT_VERSION
     with pytest.raises(ValueError, match="schema"):
         ComputeResult(
-            schema="ies.other", bundle_id="b", status="s",
-            business_outcome="normal_completion",
+            schema="ies.other", bundle_id="b", execution_status="completed",
+            math_status="solved",
         )
     receipt = _receipt(bundle_id="b")
     assert receipt.schema == EXECUTION_RECEIPT_SCHEMA
