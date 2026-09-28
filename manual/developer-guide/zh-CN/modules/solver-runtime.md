@@ -105,7 +105,7 @@ runtime 不延长业务租约，不在后台留下脱管求解器，也不复用
 - 输出路径、数量和总大小受限；
 - 必需输出缺失即协议失败；
 - 未声明输出按策略拒绝并记录，不能悄悄加入结果；
-- stdout/stderr 独立限长和脱敏；
+- stdout/stderr 独立限长并记录截断事实；凭证不得进入命令环境与日志来源；
 - 输出只读封存后才允许 ResultAdapter 访问。
 
 退出码零只说明命令按进程协议结束；业务求解状态必须读取声明输出。
@@ -126,7 +126,7 @@ runtime 不延长业务租约，不在后台留下脱管求解器，也不复用
 |---|---|
 | Bundle schema、manifest 或输入声明错误 | input_rejected，未执行 |
 | executable 或参数不在 allowlist | policy_rejected，未执行 |
-| 无法建立隔离或资源限制 | infrastructure_failed，未执行 |
+| 无法建立隔离或资源限制 | 向 Worker 返回基础设施错误，不签发伪回执/未执行 |
 | 超时/取消/OOM | 对应终止状态，保存回执 |
 | 非零退出或信号崩溃 | process_failed，保存日志与已有输出 |
 | 输出缺失、越界或超限 | output_protocol_failed |

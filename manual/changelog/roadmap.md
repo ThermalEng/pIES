@@ -48,16 +48,6 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 - 运行计算与财务评价覆盖相同年份、相同年限，逐年现金流使用对应年份的运行结果。
 - 敏感性计算及其附加参数、批量参数扫描、不确定性分析、资本金评价和额外财务指标安排在 `1.2.0`。
 
-## `0.9.0` — SolverRuntime 与受控执行
-
-目标：从零建立通用受控执行边界，由 runtime 执行 `0.8.0` 首个 GeneratorProvider 产生的 Solver Bundle；项目当前没有需要兼容或替代的既有 solver 执行实现。
-
-1. 建立 ExecutorProvider、SolverRuntime 和 ExecutionReceipt 公开契约及独立原子注册。
-2. runtime 只执行 Bundle 中通过 allowlist 的 executable ID 和参数数组，强制工作目录、路径、环境、网络和资源限制。
-3. 覆盖命令注入、路径逃逸、取消、超时、OOM、异常退出、日志和输出边界。
-
-退出标准：runtime 无设备、generator 或 solver 业务分支；被拒绝的 Bundle 不启动进程，每次尝试都产生可解释回执。
-
 ## `0.10.0` — ResultAdapter 与统一结果
 
 目标：在 Bundle 与执行回执稳定后，将 solver 输出解释与业务结果分离。
