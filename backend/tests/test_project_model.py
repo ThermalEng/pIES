@@ -383,8 +383,22 @@ def test_objective_exotic_dimension_rejected() -> None:
         build_project_model(artifact, models, series, finance, config)
 
 
+def test_objective_inverse_power_rejected() -> None:
+    """1 / 1 kW 根量纲为 power^-1（非无量纲），明确拒绝。"""
+    artifact, models, series, finance, config = _inputs(objective="1 / 1 kW")
+    with pytest.raises(LoweringUnsupportedError):
+        build_project_model(artifact, models, series, finance, config)
+
+
+def test_objective_power_per_year_rejected() -> None:
+    """tank_cap / 1 year 根量纲为 power·time^-1（非 power），明确拒绝。"""
+    artifact, models, series, finance, config = _inputs(objective="tank_cap / 1 year")
+    with pytest.raises(LoweringUnsupportedError):
+        build_project_model(artifact, models, series, finance, config)
+
+
 def test_objective_finance_and_tariff_terms(built) -> None:
-    model, _, _ = built
+    model, _, objective_unit = built
     coeffs = _coeffs(model.objective)
     # 年费率 SI 归一后 × 1 year(31536000s) → 0.035 CNY/W
     assert coeffs["tank_cap"] == pytest.approx(0.035, rel=1e-9)
@@ -394,6 +408,8 @@ def test_objective_finance_and_tariff_terms(built) -> None:
     # 周期可变 O&M 全落常数偏移：8760 × 5000W × 3600s × 0.01/3.6e6
     _, offset = write_mps(model)
     assert offset == pytest.approx(438.0, rel=1e-9)
+    # 1 year * annual_fixed_om 与附加金额项合并后仍为金额，取财务币种。
+    assert objective_unit == "CNY"
 
 
 def test_tech_rows_balance_and_initial(built) -> None:

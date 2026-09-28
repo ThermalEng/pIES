@@ -72,6 +72,20 @@ def _dim_of(categories: dict[str, int] | None = None) -> Dimensions:
     return Counter(categories or {})
 
 
+def _combine_dims(left: Dimensions, right: Dimensions, sign: int) -> Dimensions:
+    """有符号量纲合并(乘为加、除为减)。
+
+    Counter 原生算术丢弃非正指数（``1 / 1 kW`` 会误判无量纲），此处
+    保留负指数，仅零指数归零；返回独立 Counter，不别名入参。
+    """
+    merged = Counter(left)
+    for key, value in right.items():
+        merged[key] += sign * value
+        if merged[key] == 0:
+            del merged[key]
+    return merged
+
+
 def _dim_str(d: Dimensions) -> str:
     """量纲可读表示(如 "power^1 time^1")。"""
     if not d:
@@ -574,10 +588,10 @@ def parse_expr(
                         "幂指数超出范围", exponent=e, limit=MAX_POW_EXPONENT, expr=text
                     )
                 return ("bin", op, left, r), _pow_dims(dl, e, text)
-            # 乘除:量纲合并
+            # 乘除:量纲合并(有符号运算，保留负指数)
             if op == "mul":
-                return ("bin", op, left, r), dl + dr
-            return ("bin", op, left, r), dl - dr
+                return ("bin", op, left, r), _combine_dims(dl, dr, 1)
+            return ("bin", op, left, r), _combine_dims(dl, dr, -1)
         if isinstance(node, ast.UnaryOp):
             if not isinstance(node.op, (ast.USub, ast.UAdd)):
                 raise ExpressionSecurityError(

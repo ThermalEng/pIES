@@ -71,6 +71,16 @@ def test_compile_reports_root_dimension() -> None:
     )
 
 
+def test_compile_keeps_signed_exponents() -> None:
+    """乘除保留负指数（Counter 算术丢弃非正指数，此处不许丢）。"""
+    assert compile_planning_expression("1 / 1 kW", {}).dimension == (("power", -1),)
+    assert compile_planning_expression("pv_cap / 1 year", SYMBOLS).dimension == (
+        ("power", 1),
+        ("time", -1),
+    )
+    assert compile_planning_expression("(1 / 1 kW) ** 2", {}).dimension == (("power", -2),)
+
+
 def test_compile_empty_rejected() -> None:
     with pytest.raises(ExpressionSyntaxError):
         compile_planning_expression("  ", SYMBOLS)
