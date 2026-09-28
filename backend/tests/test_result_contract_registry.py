@@ -55,6 +55,7 @@ class _Adapter:
     ) -> ComputeResult:
         return ComputeResult(
             bundle_id=bundle.bundle_id,
+            attempt_id=receipt.attempt_id,
             execution_status="completed",
             math_status="solved",
             outputs={"echo": sorted(outputs)},
@@ -63,17 +64,36 @@ class _Adapter:
 
 def _result(**kwargs) -> ComputeResult:
     kwargs.setdefault("bundle_id", "bundle-1")
+    kwargs.setdefault("attempt_id", "attempt-1")
     kwargs.setdefault("execution_status", "completed")
     kwargs.setdefault("math_status", "solved")
     return ComputeResult(**kwargs)
+
+
+#: 回执→技术状态映射测试数据(与 ComputeResult 契约规则同源; 本层只做
+#: 覆盖断言, 不实现生产映射)。
+RECEIPT_TO_EXECUTION = (
+    ({"status": "succeeded"}, "completed"),
+    ({"status": "policy_rejected"}, "rejected"),
+    ({"status": "process_failed", "termination_reason": "oom"}, "resource_exhausted"),
+    ({"status": "process_failed", "termination_reason": "exited"}, "failed"),
+    ({"status": "process_failed", "termination_reason": ""}, "failed"),
+    ({"status": "output_protocol_failed"}, "protocol_failed"),
+    ({"status": "timed_out"}, "timed_out"),
+    ({"status": "cancelled"}, "cancelled"),
+    ({"status": "fenced"}, "fenced"),
+)
 
 
 def test_status_layers_are_closed_and_orthogonal() -> None:
     """技术/数学状态分层封闭, 互不混写, 非法与缺失一律拒绝。"""
     assert set(EXECUTION_STATUSES) == {
         "completed",
+        "rejected",
+        "failed",
         "timed_out",
         "cancelled",
+        "fenced",
         "resource_exhausted",
         "protocol_failed",
     }
@@ -93,6 +113,8 @@ def test_status_layers_are_closed_and_orthogonal() -> None:
             _result(math_status=bad)
     with pytest.raises(ValueError, match="bundle_id"):
         _result(bundle_id="")
+    with pytest.raises(ValueError, match="attempt_id"):
+        _result(attempt_id="")
     with pytest.raises(ValueError, match="schema"):
         _result(schema="ies.other")
     # 无业务结局字段: 旧模糊形态不再接受。
@@ -100,12 +122,51 @@ def test_status_layers_are_closed_and_orthogonal() -> None:
         ComputeResult(bundle_id="b", status="succeeded")  # type: ignore[call-arg]
 
 
+def test_receipt_statuses_all_have_execution_home() -> None:
+    """七种真实回执状态各有准确技术归属, OOM 归资源耗尽且与其余
+    process_failed 区分, 策略拒绝/租约隔离不误报为协议失败或取消。"""
+    seen_receipts = set()
+    for facts, expected in RECEIPT_TO_EXECUTION:
+        assert expected in EXECUTION_STATUSES
+        seen_receipts.add(facts["status"])
+    assert seen_receipts == {
+        "succeeded",
+        "policy_rejected",
+        "process_failed",
+        "output_protocol_failed",
+        "timed_out",
+        "cancelled",
+        "fenced",
+    }
+    by_receipt = {}
+    for facts, expected in RECEIPT_TO_EXECUTION:
+        by_receipt.setdefault(facts["status"], set()).add(expected)
+    assert by_receipt["process_failed"] == {"resource_exhausted", "failed"}
+    for single in (
+        "succeeded",
+        "policy_rejected",
+        "output_protocol_failed",
+        "timed_out",
+        "cancelled",
+        "fenced",
+    ):
+        assert len(by_receipt[single]) == 1
+    assert by_receipt["policy_rejected"] != {"protocol_failed", "cancelled"}
+    assert by_receipt["fenced"] != {"cancelled"}
+
+
 def test_result_is_deeply_immutable_and_versioned() -> None:
-    """回执式深层不可变与版本字头, to_dict 返回独立副本。"""
+    """回执式深层不可变与版本字头, to_dict 返回独立副本。
+
+    2.0.0 为破坏性 schema 变更(双层状态 + attempt_id 追溯, 无旧字段
+    兼容), 版本号钉死以防无声回退。
+    """
+    assert COMPUTE_RESULT_VERSION == "2.0.0"
     result = _result(outputs={"k": {"nested": [1]}})
     assert dataclasses.is_dataclass(result)
     assert result.schema == COMPUTE_RESULT_SCHEMA
     assert result.schema_version == COMPUTE_RESULT_VERSION
+    assert result.attempt_id == "attempt-1"
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.math_status = "infeasible"  # type: ignore[misc]
     with pytest.raises(TypeError):
@@ -113,6 +174,7 @@ def test_result_is_deeply_immutable_and_versioned() -> None:
     plain = result.to_dict()
     assert plain["execution_status"] == "completed"
     assert plain["math_status"] == "solved"
+    assert plain["attempt_id"] == "attempt-1"
     assert plain["outputs"] == {"k": {"nested": [1]}}
     plain["outputs"]["k"]["nested"].append(2)
     assert result.outputs["k"]["nested"] == (1,)

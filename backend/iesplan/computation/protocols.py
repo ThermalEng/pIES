@@ -52,7 +52,7 @@ SOLVER_BUNDLE_VERSION = "1.0.0"
 
 #: 统一计算结果 schema。
 COMPUTE_RESULT_SCHEMA = "ies.compute-result"
-COMPUTE_RESULT_VERSION = "1.0.0"
+COMPUTE_RESULT_VERSION = "2.0.0"
 
 #: 执行回执 schema(后续 ResultAdapter 的公共载体)。
 EXECUTION_RECEIPT_SCHEMA = "ies.execution-receipt"
@@ -985,12 +985,15 @@ def _freeze_receipt_outputs(
     return tuple(frozen)
 
 
-#: 技术执行状态封闭集合(回执→结果的技术层解读: 完成/超时/取消/
-#: 资源不足/执行协议失败各恰占其一, 不与数学状态混写)。
+#: 技术执行状态封闭集合(回执→结果的技术层解读, 七种回执状态各有
+#: 准确归属, 不与数学状态混写; 回执→技术状态映射见 ComputeResult)。
 EXECUTION_STATUSES = (
     "completed",
+    "rejected",
+    "failed",
     "timed_out",
     "cancelled",
+    "fenced",
     "resource_exhausted",
     "protocol_failed",
 )
@@ -1014,11 +1017,19 @@ class ComputeResult:
     求解器数学结局; ``outputs`` 为统一业务输出容器, 具体业务候选字段
     由后续适配实现按声明输出填充。本层不设业务结局字段, 不依赖 tasks
     域, 未知状态不得默认映射为正常完成。
+
+    回执→技术状态映射规则(适配实现必须遵守, 本层只定义规则不做映射):
+    succeeded→completed; policy_rejected→rejected;
+    process_failed 且 termination_reason 为 oom→resource_exhausted,
+    其余 process_failed→failed; output_protocol_failed→protocol_failed;
+    timed_out→timed_out; cancelled→cancelled; fenced→fenced。
+    追溯经 (bundle_id, attempt_id) 定位回执与 Bundle, 不复制回执内容。
     """
 
     schema: str = COMPUTE_RESULT_SCHEMA
     schema_version: str = COMPUTE_RESULT_VERSION
     bundle_id: str = ""
+    attempt_id: str = ""
     execution_status: str = ""
     math_status: str = ""
     outputs: Mapping[str, object] = field(default_factory=dict)
@@ -1030,6 +1041,8 @@ class ComputeResult:
             raise ValueError(f"结果版本非法: {self.schema_version!r}")
         if not self.bundle_id:
             raise ValueError("结果缺必需字段: 'bundle_id'")
+        if not self.attempt_id:
+            raise ValueError("结果缺必需字段: 'attempt_id'")
         if self.execution_status not in EXECUTION_STATUSES:
             raise ValueError(f"execution_status 非法: {self.execution_status!r}")
         if self.math_status not in MATH_STATUSES:
@@ -1044,6 +1057,7 @@ class ComputeResult:
             "schema": self.schema,
             "schema_version": self.schema_version,
             "bundle_id": self.bundle_id,
+            "attempt_id": self.attempt_id,
             "execution_status": self.execution_status,
             "math_status": self.math_status,
             "outputs": thaw_json_value(self.outputs),

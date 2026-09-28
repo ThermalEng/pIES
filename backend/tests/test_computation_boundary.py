@@ -314,7 +314,8 @@ def test_bundles_are_deeply_immutable_value_objects() -> None:
     """Bundle/回执/结果/配置深层不可变(顶层赋值与嵌套改写一律失败)。"""
     manifest = _manifest()
     result = ComputeResult(
-        bundle_id="bundle-1", execution_status="completed",
+        bundle_id="bundle-1", attempt_id="attempt-1",
+        execution_status="completed",
         math_status="solved", outputs={"k": {"nested": [1]}},
     )
     config = _config(seed=7, options={"gap": 0.01, "tags": ["a"]}, outputs=["out"])
@@ -448,14 +449,15 @@ def test_result_and_bundle_schema_words() -> None:
     assert _manifest().schema == SOLVER_BUNDLE_SCHEMA
     assert _manifest().schema_version == SOLVER_BUNDLE_VERSION
     result = ComputeResult(
-        bundle_id="b", execution_status="completed", math_status="solved",
+        bundle_id="b", attempt_id="a", execution_status="completed",
+        math_status="solved",
     )
     assert result.schema == COMPUTE_RESULT_SCHEMA
     assert result.schema_version == COMPUTE_RESULT_VERSION
     with pytest.raises(ValueError, match="schema"):
         ComputeResult(
-            schema="ies.other", bundle_id="b", execution_status="completed",
-            math_status="solved",
+            schema="ies.other", bundle_id="b", attempt_id="a",
+            execution_status="completed", math_status="solved",
         )
     receipt = _receipt(bundle_id="b")
     assert receipt.schema == EXECUTION_RECEIPT_SCHEMA
