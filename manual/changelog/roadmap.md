@@ -52,10 +52,9 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 
 目标：在 Bundle 与执行回执稳定后，将 solver 输出解释与业务结果分离。
 
-1. 建立 ResultAdapterProvider 独立原子注册，稳定带 schema/version 的 `ComputeResult` 契约。
-2. 为首个受支持 solver 实现状态、输出、非有限值和反向单位换算适配；达到时间限制时报错。
-3. 在不经过 API、数据库或 Worker 的契约测试中，跑通首个受支持 solver 的“artifact → Bundle → receipt → result”算例。
-4. 按上文“财务输出与附加分析范围”，分切片接入基本财务指标与逐年现金流明细，明确评价输入、计算口径、单位和状态，以可复核算例验证明细与指标一致。
+1. 为首个受支持 solver 实现状态、输出、非有限值和反向单位换算适配；达到时间限制时报错。
+2. 在不经过 API、数据库或 Worker 的契约测试中，跑通首个受支持 solver 的“artifact → Bundle → receipt → result”算例。
+3. 按上文“财务输出与附加分析范围”，分切片接入基本财务指标与逐年现金流明细，明确评价输入、计算口径、单位和状态，以可复核算例验证明细与指标一致。
 
 退出标准：result adapter 只凭 Bundle、ExecutionReceipt 和声明输出即可解释结果；不读取当前项目或最新 provider。基本财务评价使用固定输入与结果，指标和逐年现金流通过一致性验收。
 
