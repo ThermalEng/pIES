@@ -778,10 +778,15 @@ def test_provider_accepts_matching_heartbeat_identity_unit(tmp_path) -> None:
 
 
 def test_provider_rejects_mismatched_heartbeat_identity_unit(tmp_path) -> None:
-    """心跳新鲜但身份错配（执行器/可执行文件/边界缺一）即不可用（无 Docker）。"""
+    """心跳新鲜但身份错配即不可用（无 Docker）：执行器不同、可执行文件
+    缺少/不同/多报任一、边界缺键。"""
     cases = [
         {**_runner_identity(), "executor_ref": "ies.executor.other@9.9.9"},
         {**_runner_identity(), "executable_refs": ["ies.solver.other@9.9.9"]},
+        {
+            **_runner_identity(),
+            "executable_refs": [HIGHS_EXECUTABLE_REF, "ies.solver.other@9.9.9"],
+        },
         {**_runner_identity(), "applied": {"memory_limit_bytes": 1}},
     ]
     for index, identity in enumerate(cases):

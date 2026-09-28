@@ -346,14 +346,13 @@ class FileExchangeExecutorProvider:
         )
 
     def _runner_identity_ok(self) -> bool:
-        """心跳身份与本描述符精确匹配：执行器引用一致、可执行文件全支持。"""
+        """心跳身份与本描述符精确匹配：执行器引用一致、可执行文件集合相等。"""
         identity = read_heartbeat_identity(self._exchange_dir)
         if identity is None:
             return False
         if identity["executor_ref"] != self._descriptor.ref:
             return False
-        supported = set(identity["executable_refs"])
-        return set(self._descriptor.executables) <= supported
+        return set(identity["executable_refs"]) == set(self._descriptor.executables)
 
     def execute(
         self,
