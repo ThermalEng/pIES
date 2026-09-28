@@ -147,7 +147,7 @@ def build_project_model(
     series: tuple[MaterializedSeries, ...],
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
-) -> tuple[LinearModel, Mapping[str, str]]:
+) -> tuple[LinearModel, Mapping[str, str], str]:
     """由五项直接输入构造项目级线性模型、单位映射与目标业务单位。
 
     返回 ``(LinearModel, unit_map, objective_unit)``：``unit_map`` 为
@@ -804,7 +804,7 @@ class _ProjectBuilder:
     # 总装
     # ------------------------------------------------------------------
 
-    def build(self) -> tuple[LinearModel, Mapping[str, str]]:
+    def build(self) -> tuple[LinearModel, Mapping[str, str], str]:
         buses = self._compute_buses()
         bus_flows: dict[str, set[str]] = {}
         for _carrier, _members, ports in buses:
