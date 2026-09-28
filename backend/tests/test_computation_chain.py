@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 
 from iesplan.assembly import validate_assembly_text
-from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import (
     HIGHS_ADAPTER_PATH,
     HIGHS_EXECUTABLE_REF,
@@ -279,16 +278,22 @@ def test_chain_infeasible_model_reports_math_status() -> None:
         if spec.get("upper_bound") is not None and spec.get("unit")
     )[0]
     spec = plan_vars[pinned]
-    doc["planning"]["constraints"]["chain_infeasible_pin"] = {
-        "type": "capacity_limit",
-        "expression": f"{pinned} >= {float(spec['upper_bound']) * 10.0} {spec['unit']}",
-    }
-    # 约束表达式经生成路径即时编译（非法即大声失败），此处沿用 mini
-    # 测试同等做法直接构造规范装配，不做第二次装配校验。
-    pinned_artifact = ValidatedAssemblyArtifact(
-        canonical_text=json.dumps(doc, sort_keys=True), receipt=ValidationReceipt(),
+    pin_lines = (
+        "    chain_infeasible_pin:\n"
+        "      type: capacity_limit\n"
+        f"      expression: \"{pinned} >= {float(spec['upper_bound']) * 10.0} {spec['unit']}\"\n"
     )
-    bundle = _generate_bundle((pinned_artifact, models, series, finance, config))
+    # 文本级插入（保留装配 YAML 规范风格，json/yaml 来回倒换会破坏
+    # 风格校验），再走公开装配校验入口得到 artifact。
+    source = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
+    anchor = '      expression: "import_meter__period_energy_purchase <= 900000 CNY"\n'
+    assert anchor in source, "campus 样本约束锚点变化，pin 插入位置需重审"
+    pinned_text = source.replace(anchor, anchor + pin_lines, 1)
+    revalidated = validate_assembly_text(pinned_text, package_dir=SAMPLES)
+    assert revalidated.ok, [
+        (d.code, d.params) for d in revalidated.diagnostics if d.blocking
+    ]
+    bundle = _generate_bundle((revalidated.artifact, models, series, finance, config))
     receipt, collected = _runtime().run(bundle, _attempt("inf"))
     assert receipt.status == "succeeded"
     assert receipt.exit_code == 0
