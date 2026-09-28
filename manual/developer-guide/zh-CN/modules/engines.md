@@ -102,9 +102,10 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 
 ### 结果适配器契约与注册
 
-- `ComputeResult` 分两层表达状态：`execution_status` 只解读回执执行事实（`completed`/`rejected`/`failed`/`timed_out`/`cancelled`/`fenced`/`resource_exhausted`/`protocol_failed`，七种回执状态各有准确归属：策略拒绝归 `rejected` 而非协议失败，租约隔离归 `fenced` 而非取消，`process_failed` 按终止原因拆为 OOM 的 `resource_exhausted` 与其余的 `failed`），`math_status`（`solved`/`infeasible`/`unbounded`/`numeric_failure`/`not_solved`）只解读求解器数学结局；`outputs` 为统一业务输出容器。本层不设业务结局字段，不依赖任务域；当前切片只有契约与注册，不含具体求解器输出语义。
+- `ComputeResult` 分两层表达状态：`execution_status` 只解读回执执行事实（`completed`/`rejected`/`failed`/`timed_out`/`cancelled`/`fenced`/`resource_exhausted`/`protocol_failed`，七种回执状态各有准确归属：策略拒绝归 `rejected` 而非协议失败，租约隔离归 `fenced` 而非取消，`process_failed` 按终止原因拆为 OOM 的 `resource_exhausted` 与其余的 `failed`），`math_status`（`solved`/`infeasible`/`unbounded`/`numeric_failure`/`not_solved`）只解读求解器数学结局；`outputs` 为统一业务输出容器。本层不设业务结局字段，不依赖任务域；首个具体求解器语义见下（`ies.result-adapter.highs@1.0.0`）。
 - 追溯经 `receipt_id` 唯一定位一张回执（同一 bundle + attempt 可有多张回执），`bundle_id` 指向 Bundle，不复制回执内容。
 - 扩展适配器只需实现 `ResultAdapter` 公开身份（`descriptor`/`ref`/`available`）与唯一业务调用 `adapt(Bundle, receipt, outputs)`，经 `build_result_adapter_registry` 原子发布，按 manifest/回执固定的精确引用解析。
+- 首个内置 `ies.result-adapter.highs@1.0.0`（配 `ies.generator.highs_milp@1.0.0`）解释 HiGHS 1.7.2 CLI 经 `--solution_file` 写出的默认 raw 文本。`Optimal` 附可行主解时记 `solved`：变量按 solution 列名对 `unit_map` 键反向换算到业务单位，目标值加回 `objective_offset`，金额为 CNY；只发布 parameters 已请求的 `solution`/`metrics`，未知请求明确拒绝。`Infeasible`/`Unbounded` 映射同名数学状态且无业务输出；`Primal infeasible or unbounded` 记 `not_solved` 且无输出。文件自报时间限制时明确报错（部分解不当成功解释）；监督超时走回执 `timed_out`，此时不读 solution 文件。其余非最优状态、未知状态、格式损坏、缺失输出、非有限数值一律结果协议失败。结果填 `receipt_id` 与 `bundle_id` 追溯，不读取当前项目或最新 provider。
 
 ## 失败语义
 

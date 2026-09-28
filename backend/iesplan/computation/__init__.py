@@ -28,6 +28,8 @@
   不提升到本门面);
 - 首个真实生成器: ``HighsMilpProvider`` /
   ``HIGHS_MILP_PROVIDER``(实现见 ``generators.highs_milp``);
+- 首个真实结果适配器: ``HighsResultAdapter`` /
+  ``HIGHS_ADAPTER``(实现见 ``result_adapters.highs``);
 - 共享校验: ``check_provider_ref``;
 - 不可用语义: ``ComputationUnavailableError``;
 
@@ -89,6 +91,10 @@ from iesplan.computation.registry import (
     get_algorithm,
     list_algorithms,
 )
+from iesplan.computation.result_adapters import (
+    HIGHS_ADAPTER,
+    HighsResultAdapter,
+)
 from iesplan.computation.result_adapter import (
     ResultAdapterDescriptor,
     ResultAdapterRegistry,
@@ -125,6 +131,7 @@ __all__ = [
     "EXECUTION_RECEIPT_VERSION",
     "EXECUTION_STATUSES",
     "MATH_STATUSES",
+    "HIGHS_ADAPTER",
     "HIGHS_ADAPTER_PATH",
     "HIGHS_EXECUTABLE_REF",
     "HIGHS_MILP_PROVIDER",
@@ -147,6 +154,7 @@ __all__ = [
     "GeneratorProvider",
     "GeneratorRegistry",
     "HighsMilpProvider",
+    "HighsResultAdapter",
     "MaterializedSeries",
     "MaterializedSet",
     "ProcessOutcome",
