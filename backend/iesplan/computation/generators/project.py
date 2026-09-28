@@ -56,7 +56,7 @@ from iesplan.core.contracts import (
     compile_planning_expression,
 )
 from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
-from iesplan.core.contracts.planning_expression import _CURRENCY_LITERAL_RE
+from iesplan.core.contracts.planning_expression import PlanningExpression
 from iesplan.core.units import dims_of, to_si
 from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import (
@@ -78,6 +78,14 @@ def _to_internal(value: float, unit: str) -> float:
     if dims_of(unit) == Counter({"currency": 1}):
         return float(value)
     return to_si(float(value), unit)
+
+
+#: 单一物理量纲 → SI 基准单位符号（目标单位报告用；仅公开 dims_of 推导）。
+_SI_UNIT_BY_DIM_KEY: dict[str, str] = {}
+for _si_symbol in ("J", "W", "K", "s", "rad", "kg", "m³", "V", "m²"):
+    _si_dims = dims_of(_si_symbol)
+    if len(_si_dims) == 1:
+        _SI_UNIT_BY_DIM_KEY[next(iter(_si_dims))] = _si_symbol
 
 
 def _refs_of(node: object) -> set[str]:
@@ -153,7 +161,8 @@ def build_project_model(
     返回 ``(LinearModel, unit_map, objective_unit)``：``unit_map`` 为
     LP 名 → 业务单位，供后续 ResultAdapter 反向换算（内部 binary 不进入
     结果，不收录）；``objective_unit`` 为目标业务单位（金额取财务币种，
-    物理量取首个非零目标项的业务单位，常数目标无量纲取 ``"1"``）。
+    无量纲取 ``"1"``，单一物理量纲取 SI 基准单位；复合量纲无可报告业务
+    单位，超出首版能力）。
     同一五项输入产生同一模型；超出首版降级能力的数学抛
     ``LoweringUnsupportedError``。
     """
@@ -755,27 +764,27 @@ class _ProjectBuilder:
             raw["expression"], symbols, currency=None,
         )
         lowered = lower_planning_expression(compiled, placeholders)
-        return self._substitute(lowered), self._objective_unit(raw, lowered)
+        return self._substitute(lowered), self._objective_unit(compiled)
 
-    def _objective_unit(self, raw: Mapping[str, Any], lowered: LinearExpression) -> str:
-        """目标业务单位（已编译降级事实直读，不重解析表达式）。
+    def _objective_unit(self, compiled: PlanningExpression) -> str:
+        """目标业务单位（编译期根量纲直读，不重解析表达式）。
 
-        首个非零降级项决定：规划变量取其业务单位（与 unit_map 同规则），
-        财务标识符均为金额分量，取财务币种；无变量项的常数目标含币种
-        字面量取财务币种，否则为无量纲。降级项按名稳定排序，确定唯一。
+        金额取财务币种，无量纲取 ``"1"``，单一物理量纲取 SI 基准单位；
+        其余复合量纲无可报告业务单位，超出首版能力明确拒绝。报告单位
+        与内部值恒一致（物理内部值即 SI，金额守币种），适配器不再二次
+        判断量纲。
         """
-        for (name, _offset), coeff in lowered.terms:
-            if coeff == 0:
-                continue
-            if name in self.plan_vars:
-                spec = self.plan_vars[name]
-                return spec.get("unit") or self._bound_prop_unit(
-                    spec["device_ref"], spec["parameter"]
-                )
+        dims = dict(compiled.dimension)
+        if not dims:
+            return "1"
+        if dims == {"currency": 1}:
             return self.finance.currency
-        for _ in _CURRENCY_LITERAL_RE.finditer(raw["expression"]):
-            return self.finance.currency
-        return "1"
+        items = sorted(dims.items())
+        if len(items) == 1 and items[0][1] == 1 and items[0][0] in _SI_UNIT_BY_DIM_KEY:
+            return _SI_UNIT_BY_DIM_KEY[items[0][0]]
+        raise LoweringUnsupportedError(
+            f"目标量纲无可报告业务单位，超出首版能力: {items!r}"
+        )
 
     def _build_planning_rows(self) -> None:
         """已启用规划约束行（约束 type 标签留装配产物，不进 LP）。"""

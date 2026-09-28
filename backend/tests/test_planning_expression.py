@@ -61,6 +61,16 @@ def test_compile_currency_skipped_when_none() -> None:
     assert expr.ir == ("num", 100.0)
 
 
+def test_compile_reports_root_dimension() -> None:
+    """编译期根量纲随附（生成器目标单位的唯一真值源，不重解析）。"""
+    assert compile_planning_expression("pv_cap", SYMBOLS).dimension == (("power", 1),)
+    assert compile_planning_expression("pv_cap / 1 kW", SYMBOLS).dimension == ()
+    assert compile_planning_expression("1 kW", {}).dimension == (("power", 1),)
+    assert compile_planning_expression("100 USD", {}, currency=None).dimension == (
+        ("currency", 1),
+    )
+
+
 def test_compile_empty_rejected() -> None:
     with pytest.raises(ExpressionSyntaxError):
         compile_planning_expression("  ", SYMBOLS)

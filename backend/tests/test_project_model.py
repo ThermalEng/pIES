@@ -268,8 +268,15 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
     }
 
 
-def _inputs(*, bilinear: bool = False, tariff_direction: str = "purchase"):
+def _inputs(
+    *,
+    bilinear: bool = False,
+    tariff_direction: str = "purchase",
+    objective: str | None = None,
+):
     doc = _artifact_doc(bilinear=bilinear)
+    if objective is not None:
+        doc["planning"]["objective"]["expression"] = objective
     artifact = ValidatedAssemblyArtifact(
         canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
     )
@@ -330,6 +337,50 @@ def test_project_inventory_counts(built) -> None:
     assert units["tank_cap"] == "kW"
     assert units["heater1__electricity_in__t0"] == "kW"
     assert not any(name.endswith("__mutex") for name in units)
+
+
+def _build_with_objective(expression: str):
+    """以替换目标表达式的真实装配走完整构造（公开行为）。"""
+    artifact, models, series, finance, config = _inputs(objective=expression)
+    return build_project_model(artifact, models, series, finance, config)
+
+
+def test_objective_dimensionless_ratio_reports_unit_one() -> None:
+    """tank_cap / 1 kW：无量纲目标记 "1"，系数为真实降级值。"""
+    model, _, objective_unit = _build_with_objective("tank_cap / 1 kW")
+    assert objective_unit == "1"
+    assert _coeffs(model.objective) == {"tank_cap": pytest.approx(0.001)}
+
+
+def test_objective_constant_power_reports_si() -> None:
+    """纯常量 1 kW：功率取 SI 基准 W，常数即内部值。"""
+    model, _, objective_unit = _build_with_objective("1 kW")
+    assert objective_unit == "W"
+    assert model.objective.terms == ()
+    assert model.objective.constant == pytest.approx(1000.0)
+
+
+def test_objective_power_var_reports_si() -> None:
+    """kW 变量目标：功率取 SI 基准 W，系数为真实降级值。"""
+    model, _, objective_unit = _build_with_objective("tank_cap")
+    assert objective_unit == "W"
+    assert _coeffs(model.objective) == {"tank_cap": pytest.approx(1.0)}
+
+
+def test_objective_scaled_power_keeps_si() -> None:
+    """tank_cap * 2：无量纲常量缩放不改变量纲与报告单位。"""
+    model, _, objective_unit = _build_with_objective("tank_cap * 2")
+    assert objective_unit == "W"
+    assert _coeffs(model.objective) == {"tank_cap": pytest.approx(2.0)}
+
+
+def test_objective_exotic_dimension_rejected() -> None:
+    """复合量纲（CNY/年）无可报告业务单位，超出首版能力明确拒绝。"""
+    artifact, models, series, finance, config = _inputs(
+        objective="tank1__annual_fixed_om"
+    )
+    with pytest.raises(LoweringUnsupportedError):
+        build_project_model(artifact, models, series, finance, config)
 
 
 def test_objective_finance_and_tariff_terms(built) -> None:

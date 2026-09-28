@@ -202,9 +202,10 @@ class CompiledExpr:
         ir: 内部受限 IR(嵌套元组,不含任何 Python 对象访问能力)。
         node_count: 编译后节点数(≤ MAX_NODES)。
         depth: 表达式深度(≤ MAX_DEPTH)。
+        dimension: 根量纲(编译期已算出,调用方自有 Counter 的独立副本)。
     """
 
-    __slots__ = ("text", "allowed_vars", "ir", "node_count", "depth")
+    __slots__ = ("text", "allowed_vars", "ir", "node_count", "depth", "dimension")
 
     def __init__(
         self,
@@ -213,12 +214,14 @@ class CompiledExpr:
         ir: tuple,
         node_count: int,
         depth: int,
+        dimension: Dimensions | None = None,
     ) -> None:
         self.text = text
         self.allowed_vars = allowed_vars
         self.ir = ir
         self.node_count = node_count
         self.depth = depth
+        self.dimension = Counter(dimension) if dimension else Counter()
 
     def eval(self, values: dict) -> float:
         """在给定变量值下求值(纯函数,无副作用)。
@@ -661,8 +664,8 @@ def parse_expr(
             f"不允许的 AST 节点 {type(node).__name__}", node=type(node).__name__, expr=text
         )
 
-    ir, _ = compile_node(tree, 0)
-    return CompiledExpr(text, allowed, ir, state["nodes"], state["depth"])
+    ir, root_dims = compile_node(tree, 0)
+    return CompiledExpr(text, allowed, ir, state["nodes"], state["depth"], root_dims)
 
 
 def _pow_dims(d: Dimensions, e: float, text: str) -> Dimensions:

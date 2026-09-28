@@ -47,10 +47,12 @@ class PlanningExpression:
     属性:
         aliases: 财务标识符安全别名表（(原名, 别名) 排序元组）。
         ir: 公共表达式引擎编译 IR（嵌套元组；变量引用均为别名）。
+        dimension: 根量纲（(键, 指数) 排序元组；空即无量纲）。
     """
 
     aliases: tuple[tuple[str, str], ...] = ()
     ir: tuple = ()
+    dimension: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         for pair in self.aliases:
@@ -62,6 +64,14 @@ class PlanningExpression:
                 raise TypeError(f"别名条目非法: {pair!r}")
         if not isinstance(self.ir, tuple):
             raise TypeError("ir 须为元组")
+        if not isinstance(self.dimension, tuple) or not all(
+            isinstance(item, tuple)
+            and len(item) == 2
+            and isinstance(item[0], str)
+            and isinstance(item[1], int)
+            for item in self.dimension
+        ):
+            raise TypeError(f"dimension 须为 (键, 指数) 元组序列: {self.dimension!r}")
 
 
 def compile_planning_expression(
@@ -125,6 +135,7 @@ def compile_planning_expression(
     return PlanningExpression(
         aliases=tuple(sorted(aliases.items())),
         ir=compiled.ir,
+        dimension=tuple(sorted(compiled.dimension.items())),
     )
 
 
