@@ -54,9 +54,9 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 
 1. 为首个受支持 solver 实现状态、输出、非有限值和反向单位换算适配；达到时间限制时报错。
 2. 在不经过 API、数据库或 Worker 的契约测试中，跑通首个受支持 solver 的“artifact → Bundle → receipt → result”算例。
-3. 按上文“财务输出与附加分析范围”，分切片接入基本财务指标与逐年现金流明细，明确评价输入、计算口径、单位和状态，以可复核算例验证明细与指标一致。
+3. 按上文“财务输出与附加分析范围”，分切片接入基本财务指标与逐年现金流明细：0.10 只做单次求解——评价输入以 finance 独立显式契约接受（评价年限、折现率，无默认；产品级接收与冻结由 0.11/0.12 完成），generator 在 Bundle 中声明精确财务分量表达式，ResultAdapter 用同一次真实解按声明计算并发布每个分量（不支持的财务情况明确不支持）；finance 保持纯计算，以显式评价输入与不同年份固定结果做指标与明细一致性验收。多年实际运行组织与快照同源贯通由 0.11/0.12 承接，不在 0.10 验收。
 
-退出标准：result adapter 只凭 Bundle、ExecutionReceipt 和声明输出即可解释结果；不读取当前项目或最新 provider。基本财务评价使用固定输入与结果，指标和逐年现金流通过一致性验收。
+退出标准：result adapter 只凭 Bundle、ExecutionReceipt 和声明输出即可解释结果（含单次求解的声明财务分量）；不读取当前项目或最新 provider。基本财务评价使用固定输入与结果，指标和逐年现金流通过一致性验收。
 
 ## `0.11.0` — Application 用例与 API 边界
 
@@ -65,6 +65,7 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 1. 按项目、数据、配置、任务、结果和导出顺序，逐个将现有 `services` 编排迁入明确 application 用例。
 2. 事务只由用例层提交或回滚，repository 只 flush、使用 savepoint 或返回错误。
 3. 依次删除 API 中现有的 ORM 与跨模块内部导入；API 只处理传输 DTO、认证/授权和 HTTP 语义。
+4. 多年财务评价的年度运行组织属于用例层：对评价年限内各对应年份编排实际运行、收集各份真实结果并绑定同一评价输入；不复制单年结果，不读取最新配置。
 
 退出标准：每个对外用例都有一个明确事务所有者；API 契约测试不依赖 ORM 或领域模块私有实现。
 
@@ -72,7 +73,7 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 
 目标：基于现有任务幂等、租约、fencing 和迟到写入拒绝，将其执行载荷切换到新计算链。
 
-1. 在已经固定规范文本与校验回执二件套的现有 `CalcSnapshot` 上，继续以对象 ID 固定资源，并固定 generator/solver/executor/result adapter 精确版本、单位、种子、选项和容差。
+1. 在已经固定规范文本与校验回执二件套的现有 `CalcSnapshot` 上，继续以对象 ID 固定资源，并固定 generator/solver/executor/result adapter 精确版本、单位、种子、选项和容差，以及用户确认的评价年限与折现率。
 2. Worker 启动时验证快照所需依赖；当需要预测值时，Worker/application 用例先编排公开的预测能力，依据冻结的 `CalculationConfig` 与固定资源生成完整的 `data_predict` `MaterializedSeries`、训练产物引用和回执，再编排 generator/runtime/result adapter；Worker 不自行训练、不解释模型、不绕过公开入口；不得新增命令拼接、`assembly.plan` 或函数名子进程旁路；实现多 `data_predict` 的阶段二循环（0 或 1 个时阶段一结果即最终结果；多于 1 个时以首轮结果重建预测目标与计算模型并迭代求解，按公开容差与最大迭代数收敛）。
 3. 每个 attempt 封存 Solver Bundle、ExecutionReceipt、必要的 stdout/stderr 日志节选、声明输出记录和统一结果；历史结果只按该快照解释。
 
