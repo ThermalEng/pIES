@@ -418,10 +418,10 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
 
     仅为契约测试数据组织，不是产品级多年编排：第二年用不同冻结财务
     （购电价 0.7→0.5 CNY/kWh，经财务公开解析入口重载；降价不破坏原
-    约束可行性），得真实不同求解结果；两年年净流必须不同，否则即复
-    制单年结果。t=0 取第一年方案的建设投资（测试边界：跨方案投资调
-    和是 0.11 用例层职责，此处不调和）。campus 样例无正净流，如实
-    断言无解/未回收，不虚构收入。
+    约束可行性），运行条件不同但建设方案经断言相同（pv_cap 均为 0，
+    upfront 分项一致），t=0 投资一致才保留两年评价；两年年净流必须
+    不同，否则即复制单年结果。campus 样例无正净流，如实断言无解/
+    未回收，不虚构收入。
     """
     inputs1 = _campus_inputs()
     bundle1 = _generate_bundle(inputs1)
@@ -443,7 +443,13 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
     solution2 = _adapt(bundle2, receipt2, collected2).outputs["solution"]
 
     invest, net1 = _yearly_flows(solution1)
-    _, net2 = _yearly_flows(solution2)
+    invest2, net2 = _yearly_flows(solution2)
+    # 同一建设方案断言：建设决策变量与建设投入跨两次求解一致，
+    # t=0 才可作为同一项目的投资。
+    vars1 = {item["name"]: item for item in solution1["variables"]}
+    vars2 = {item["name"]: item for item in solution2["variables"]}
+    assert vars1["pv_cap"]["value"] == pytest.approx(vars2["pv_cap"]["value"])
+    assert invest == pytest.approx(invest2), "建设投入不一致则不是同一方案"
     assert net1 < 0 and net2 < 0, "campus 样例年净流为负（成本大于售电收益）"
     assert net1 != pytest.approx(net2), "两年须为不同真实解，不得复制"
     result = evaluate_project_investment(
