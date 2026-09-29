@@ -653,25 +653,44 @@ def _is_contract_target(target: str) -> bool:
     return ".contracts" in target or "contracts2" in target
 
 
-#: 常设复用豁免: (导入方模块前缀, 目标模块前缀)。
+#: 常设复用豁免: (导入方模块前缀, 公开入口模块全名)。
 #: 四维评估规则归 results 域所有, 其状态词汇与 IRR 分类仍以无状态的
-#: iesplan.metrics.validity / iesplan.metrics.financial 为唯一权威(领域公开
-#: 纯函数复用, 不复制枚举值)。仅豁免 results 域对该两模块的导入; results
-#: 对 metrics 其他子模块的导入仍属违规。
+#: metrics 公开入口(``iesplan.metrics.__init__``)为唯一权威(公开纯类型/
+#: 纯函数复用, 不复制枚举值)。仅豁免 results 域对该公开入口的导入;
+#: 目标必须精确等于公开入口, 对 metrics 子文件的直接导入仍属违规。
 ALLOWED_STATE_MODEL_REUSE: frozenset[tuple[str, str]] = frozenset(
     {
-        ("iesplan.results", "iesplan.metrics.validity"),
-        ("iesplan.results", "iesplan.metrics.financial"),
+        ("iesplan.results", "iesplan.metrics"),
     }
 )
 
 
 def _is_exempt_reuse(mod: str, target: str, exempt: frozenset[tuple[str, str]]) -> bool:
-    """常设复用豁免判定: 导入方与目标同时命中同一豁免条目前缀即豁免。"""
+    """常设复用豁免判定: 导入方命中豁免条目前缀且目标精确等于公开入口即豁免。
+
+    目标不做前缀匹配: ``iesplan.metrics.validity`` 等子文件穿透不得借
+    公开入口条目放行。
+    """
     return any(
         (mod == importer or mod.startswith(importer + "."))
-        and (target == allowed or target.startswith(allowed + "."))
+        and target == allowed
         for importer, allowed in exempt
+    )
+
+
+def test_public_entry_exemption_is_exact() -> None:
+    """公开入口豁免必须精确命中: 根入口放行, 子文件穿透与域外复用仍拒绝。"""
+    assert _is_exempt_reuse(
+        "iesplan.results.rules", "iesplan.metrics", ALLOWED_STATE_MODEL_REUSE
+    )
+    assert not _is_exempt_reuse(
+        "iesplan.results.rules", "iesplan.metrics.validity", ALLOWED_STATE_MODEL_REUSE
+    )
+    assert not _is_exempt_reuse(
+        "iesplan.results.rules", "iesplan.metrics.financial", ALLOWED_STATE_MODEL_REUSE
+    )
+    assert not _is_exempt_reuse(
+        "iesplan.analysis.foo", "iesplan.metrics", ALLOWED_STATE_MODEL_REUSE
     )
 
 

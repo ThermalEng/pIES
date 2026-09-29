@@ -8,9 +8,10 @@ Wave 3-B 自 ``application.results.writes`` 回归：单领域规则的唯一权
 - 四维有效性检查(物理/最优性/财务/可靠性)与综合得分；
 - 细粒度状态与数据库粗粒度枚举的双向映射、评估草案装配。
 
-四维状态词汇(``PhysicalValidity`` 等)仍以 ``iesplan.metrics.validity`` 为唯一
-权威，本模块直接复用(架构门禁 14 对本域复用无状态 metrics 状态模型豁免)，
-不复制枚举值。跨域编排(任务/项目/对象存储/审计)仍归 application.results。
+四维状态词汇(``PhysicalValidity`` 等)仍以无状态 metrics 公开入口
+(``iesplan.metrics``)为唯一权威，本模块只从该公开入口复用，
+不直引子模块、不复制枚举值。跨域编排(任务/项目/对象存储/审计)
+仍归 application.results。
 """
 
 from __future__ import annotations
@@ -18,9 +19,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from iesplan.metrics.financial import IRRStatus
-from iesplan.metrics.validity import (
+from iesplan.metrics import (
     FinancialValidity,
+    IRRStatus,
     OptimalityValidity,
     PhysicalValidity,
     ReliabilityStatus,
