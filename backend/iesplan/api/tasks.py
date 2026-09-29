@@ -2,7 +2,7 @@
 
 路由清单:
 - POST   /api/projects/{id}/tasks               提交任务(方案评价/规划/不确定性/检查;
-                                                幂等键命中或同快照去重复用 → 200)
+                                                幂等键必填, 命中 → 200)
 - GET    /api/projects/{id}/tasks               任务列表(状态/结局/进度摘要, 游标分页)
 - GET    /api/projects/{id}/tasks/{task_id}     任务详情(进度/尝试/租约/诊断/快照)
 - POST   /api/projects/{id}/tasks/{task_id}/cancel   取消(传播批量子任务)
@@ -39,15 +39,15 @@ class TaskCreateRequest(BaseModel):
     task_type: calc(方案评价)/optimization(规划)/uncertainty(不确定性)/
         analysis(批量分析)/report(结果检查);
     config: 任务级参数(如 horizon_years/n_samples/priority/deadline);
-    idempotency_key: 客户端重试去重(格式 ^[A-Za-z0-9._:-]{1,128}$, 规格 2.2);
+    idempotency_key: 必填, 客户端重试去重(格式 ^[A-Za-z0-9._:-]{1,128}$, 规格 2.2);
     parent_task_id: 批量父任务(uncertainty 样本子任务, 规格 5.4)。
     """
 
     task_type: Literal["calc", "optimization", "uncertainty", "analysis", "report"]
     config: dict[str, Any] | None = Field(default=None, description="任务级参数")
-    idempotency_key: str | None = Field(
-        default=None, min_length=1, max_length=128, pattern=IDEMPOTENCY_KEY_RE,
-        description="幂等键(命中返回既有任务)",
+    idempotency_key: str = Field(
+        min_length=1, max_length=128, pattern=IDEMPOTENCY_KEY_RE,
+        description="幂等键(必填, 项目作用域; 命中返回既有任务)",
     )
     parent_task_id: int | None = Field(default=None, description="批量父任务 id")
 
@@ -77,9 +77,9 @@ def create_task_endpoint(
     db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict[str, Any]:
-    """提交任务(规格 2.2): 幂等键命中或同快照去重复用返回既有任务并附标记。
+    """提交任务(规格 2.2): 幂等键必填, 命中返回既有任务并附标记。
 
-    幂等/去重复用 → 200(附 replayed/duplicate 标记与提示); 新建 → 201。
+    幂等命中 → 200(附 replayed 标记与提示); 新建 → 201。
     本端点一次转交 ``submit_task_case`` 完整用例; 状态码与中文提示映射归本层。
     """
     result = tasks_app.submit_task_case(

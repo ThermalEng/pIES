@@ -242,7 +242,10 @@ def _declare_optimization_ready(
 def test_submit_compute_task_snapshot_replay_and_duplicate(
     client: TestClient, db: Session
 ) -> None:
-    """计算任务提交: 快照装配 + 幂等重放 + 快照去重。"""
+    """计算任务提交: 快照装配 + 幂等重放 + 快照复用(不同键同输入共享快照)。
+
+    无键提交由用户完整用例拒绝(宪法 §5.5), 不再有快照级任务去重。
+    """
     owner = _user(db, "w2c_owner_opt")
     pid = _project(client, owner, "w2c-proj-opt")
     _declare_optimization_ready(client, db, owner, pid)
@@ -255,13 +258,18 @@ def test_submit_compute_task_snapshot_replay_and_duplicate(
     assert rflags == {"replay": True, "duplicate": False}
     assert replay.id == task.id
 
-    # 无幂等键重复提交同快照 → 去重对照
-    dup_new, dflags = tasks_uc.submit_task(db, owner, pid, "optimization")
-    assert dflags == {"replay": False, "duplicate": True}
-    assert dup_new.id == task.id
-    dup_old, dflags_old = tasks_uc.submit_task(db, owner, pid, "optimization")
-    assert dflags_old == {"replay": False, "duplicate": True}
-    assert dup_old.id == task.id
+    # 不同幂等键、同输入 → 新任务, 但复用同一快照(快照去重保留)
+    other, oflags = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-opt-2")
+    assert oflags == {"replay": False, "duplicate": False}
+    assert other.id != task.id
+    assert other.calc_snapshot_id == task.calc_snapshot_id
+
+    # 用户完整用例无键提交 → 拒绝(400, TASK-REQ-003)
+    from iesplan.tasks.contracts import InvalidRequestError
+
+    with pytest.raises(InvalidRequestError) as exc:
+        tasks_uc.submit_task_case(db, owner, pid, "optimization")
+    assert exc.value.code == "TASK-REQ-003"
 
 
 def test_submit_without_frozen_refs_fails_explicitly(
@@ -380,7 +388,7 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
     assert proj.effective_finance_revision == 1
     assert proj.planning_revision == 1
 
-    task2, _ = tasks_uc.submit_task(db, owner, pid, "optimization")
+    task2, _ = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-restore-2")
     assert task2.calc_snapshot_id is not None
     snap2 = tasks_domain.get_snapshot(db, task2.calc_snapshot_id)
     assert snap2 is not None
@@ -468,7 +476,7 @@ def test_restore_version_without_finance_clears_pointers(
     assert "planning_config" not in content
 
     with pytest.raises(InvalidRequestError):
-        tasks_uc.submit_task(db, owner, pid, "optimization")
+        tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-early-1")
 
 
 def test_bind_unknown_dataset_version_fails_at_input(

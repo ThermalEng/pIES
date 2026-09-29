@@ -3,8 +3,8 @@
 任务提交与状态机编排的唯一实现(已收敛原 ``services.tasks`` +
 ``services.queue`` 语义，旧服务已删除):
 
-- 提交: 权限 → 项目状态 → 类型/幂等键/父任务校验 → 幂等命中 → 存储门禁 →
-  快照装配(含草稿固化) → 重复提交去重 → 任务行 → 诊断 → 入队；
+- 提交: 权限 → 项目状态 → 类型/幂等键必填与父任务校验 → 幂等命中 →
+  存储门禁 → 快照装配(含草稿固化, 相同输入复用快照) → 任务行 → 诊断 → 入队；
 - 取消: 终态拒绝 → queued 直接取消 → running 转 cancelling + 取消信号 +
   批量子任务传播；确认取消收拢尝试/租约/槽；
 - 重试: 仅终态可重试(计算类须有快照) → 回 queued + 入队；
@@ -733,15 +733,9 @@ def _submit_task(
                 },
                 location={"object_type": "project", "object_id": project_id},
             )
-        # 3) 快照装配(去重复用)
+        # 3) 快照装配(相同输入复用既有快照, 见 _assemble_snapshot)
         snapshot = _assemble_snapshot(db, project_id, task_type, config=config, user=user)
-        # 4) 重复提交去重(仅无幂等键时生效): 同 (project, type, snapshot) 非终态
-        #    任务复用; 携带幂等键的提交以幂等键为去重机制, 不参与快照去重
-        if idempotency_key is None:
-            duplicate = tasks_domain.find_active_duplicate(db, project_id, task_type, snapshot.id)
-            if duplicate is not None:
-                return duplicate, {"replay": False, "duplicate": True}
-    # io 类任务(report/export/import/dataset_build): 无快照, 以幂等键去重为主
+    # io 类任务(report/export/import/dataset_build): 无快照, 仅幂等键命中复用
 
     priority = 0
     deadline: datetime | None = None

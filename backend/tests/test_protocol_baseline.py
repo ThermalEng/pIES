@@ -401,7 +401,7 @@ def test_error_envelope_shape_all_error_paths(
     # 装配检查 ASM-CHECK-FAILED(ASM-SOLV-002 no_sink)拦截, 无法进入队列
     pid2 = _create_project(client, owner_tok, "解锁任务项目")
     _declare_explicit_calc(client, db, owner_tok, pid2, owner.id)
-    resp = client.post(f"/api/projects/{pid2}/tasks", json={"task_type": "optimization"}, headers=_bearer(owner_tok))
+    resp = client.post(f"/api/projects/{pid2}/tasks", json={"task_type": "optimization", "idempotency_key": "wrap-unlock-1"}, headers=_bearer(owner_tok))
     assert resp.status_code == 201, resp.text
     task_id = resp.json()["task"]["id"]
     resp = client.post(
@@ -462,7 +462,10 @@ def test_success_wrappers_tasks_results_domain(client: TestClient, db: Session) 
     tok = _login(client, "wrap_task")
     pid = _create_project(client, tok, "任务包装项目")
     _declare_explicit_calc(client, db, tok, pid, user.id)
-    resp = client.post(f"/api/projects/{pid}/tasks", json={"task_type": "calc"}, headers=_bearer(tok))
+    resp = client.post(
+        f"/api/projects/{pid}/tasks",
+        json={"task_type": "calc", "idempotency_key": "wrap-task-1"}, headers=_bearer(tok),
+    )
     body = _assert_wrapper(resp, {"task", "replayed", "duplicate", "hint"})
     task_id = body["task"]["id"]
     _assert_wrapper(client.get(f"/api/projects/{pid}/tasks", headers=_bearer(tok)), {"items", "next_cursor"})
@@ -685,7 +688,10 @@ def test_frontend_contract_adapters_consistent(client: TestClient, db: Session) 
     _declare_explicit_calc(client, db, tok, pid, user.id)
 
     # (1) 任务列表 {"items", "next_cursor"} ↔ asItems(body, 'tasks')(client.ts:1483)
-    resp = client.post(f"/api/projects/{pid}/tasks", json={"task_type": "calc"}, headers=_bearer(tok))
+    resp = client.post(
+        f"/api/projects/{pid}/tasks",
+        json={"task_type": "calc", "idempotency_key": "wrap-fe-1"}, headers=_bearer(tok),
+    )
     assert resp.status_code == 201, resp.text
     body = client.get(f"/api/projects/{pid}/tasks", headers=_bearer(tok)).json()
     assert set(body) == {"items", "next_cursor"}, "asItems(body,'tasks') 依赖 rec.items"

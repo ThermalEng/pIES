@@ -780,16 +780,28 @@ def test_project_semantics(client: TestClient, db: Session) -> None:
 
 
 def test_task_semantics(client: TestClient, db: Session) -> None:
-    """同快照重复提交 → 200 duplicate; 幂等键命中 → 200 replayed; 任务可取消。"""
+    """无键提交 → 422; 幂等键命中 → 200 replayed; 不同键同输入建新任务; 任务可取消。"""
     eng_id = _seed_engineer_direct(client, db)
     ctx = _prepare_project(client, db, eng_id)
 
-    task_id, status_code = _submit_calc_task(client, eng_id, ctx["project_id"])
+    # 无键提交直接拒绝(宪法 §5.5)
+    resp = client.post(
+        f"/api/projects/{ctx['project_id']}/tasks",
+        json={"task_type": "calc", "config": {"horizon_years": 1}},
+        headers=_h(client, eng_id),
+    )
+    assert resp.status_code == 422
+
+    task_id, status_code = _submit_calc_task(
+        client, eng_id, ctx["project_id"], idempotency_key="it-sem-0"
+    )
     assert status_code == 201
 
-    # 同快照非终态去重: 返回既有任务并标记 duplicate
-    task_id2, status_code2 = _submit_calc_task(client, eng_id, ctx["project_id"])
-    assert task_id2 == task_id and status_code2 == 200
+    # 不同键、同输入 → 新任务(不再有快照级去重)
+    task_id2, status_code2 = _submit_calc_task(
+        client, eng_id, ctx["project_id"], idempotency_key="it-sem-1"
+    )
+    assert task_id2 != task_id and status_code2 == 201
 
     # 幂等键: 同键命中返回既有任务并标记 replayed
     task_id3, status_code3 = _submit_calc_task(

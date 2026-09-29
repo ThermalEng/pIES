@@ -590,7 +590,7 @@ def test_economic_nondefault_roundtrip_into_snapshot(client: TestClient, db: Ses
         None,
         owner_user.id,
     )
-    task, _ = submit_task(db, owner_user, project.id, "calc", config={})
+    task, _ = submit_task(db, owner_user, project.id, "calc", config={}, idempotency_key="cfg-eco-1")
     db.commit()
     snap = db.query(CalcSnapshot).order_by(CalcSnapshot.id.desc()).first()
     assert snap is not None

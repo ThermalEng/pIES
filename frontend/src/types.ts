@@ -569,8 +569,8 @@ export interface TaskCreateInput {
   dataset_ids?: EntityId[]
   priority?: number
   deadline?: ISO8601
-  /** 客户端重试幂等键(缺省由后端生成)。 */
-  idempotency_key?: string
+  /** 客户端重试幂等键(必填, 项目作用域)。 */
+  idempotency_key: string
   /** 任务附加参数(如不确定性采样数)。 */
   params?: Record<string, unknown>
 }

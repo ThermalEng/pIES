@@ -61,10 +61,6 @@ from iesplan.tasks.contracts import (
     UncertaintySnapshotRecord,
 )
 
-#: 非终态（重复提交去重/子任务传播用；与 services.TERMINAL_STATUSES 互补）。
-_NON_TERMINAL = ("queued", "running", "cancelling")
-
-
 def _iso(value: datetime | None) -> str | None:
     """ORM 时间 → 记录字符串（原样 isoformat，不增减时区后缀）。"""
     return value.isoformat() if value is not None else None
@@ -347,24 +343,6 @@ def list_tasks(
 def list_task_ids(db: Session, project_id: int) -> list[int]:
     """项目全部任务 id（id 升序；归档枚举用，不分页）。"""
     return list(db.execute(select(Task.id).where(Task.project_id == project_id).order_by(Task.id)).scalars())
-
-
-def find_active_duplicate(
-    db: Session, project_id: int, task_type: str, snapshot_id: int
-) -> TaskRecord | None:
-    """同（项目，类型，快照）的最新非终态任务；无返回 None。"""
-    row = db.execute(
-        select(Task)
-        .where(
-            Task.project_id == project_id,
-            Task.type == task_type,
-            Task.calc_snapshot_id == snapshot_id,
-            Task.status.in_(_NON_TERMINAL),
-        )
-        .order_by(Task.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    return _row_to_task(row) if row is not None else None
 
 
 def count_tasks_by_statuses(db: Session, statuses: Collection[str]) -> int:

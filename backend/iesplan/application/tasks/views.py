@@ -31,7 +31,7 @@ from iesplan.application.tasks.submissions import (
 )
 from iesplan.core.diagnostics import TASK_QUEUED
 from iesplan.identity.contracts import UserRecord
-from iesplan.tasks.contracts import TaskRecord
+from iesplan.tasks.contracts import InvalidRequestError, TaskRecord
 
 
 def _task_trace_id(db: Session, task: TaskRecord) -> str | None:
@@ -267,16 +267,23 @@ def submit_task_case(
     project_id: int,
     task_type: str,
     config: dict[str, Any] | None = None,
-    idempotency_key: str | None = None,
+    idempotency_key: str = "",
     parent_task_id: int | None = None,
 ) -> dict[str, Any]:
-    """提交任务完整用例(路由原顺序: 提交 → 摘要; 幂等/去重复用标记同返回)。
+    """提交任务完整用例(路由原顺序: 提交 → 摘要; 幂等标记同返回)。
 
-    ``submissions.submit_task`` 的 (任务记录, 标记) 元组契约保持不变(测试与
-    ``results`` 检查任务编排继续使用); 本用例在其上追加摘要组装, 供提交端点
-    一次转交。返回与 HTTP 无关的应用结果(摘要 + 标记); 幂等/去重复用 → 200
-    的状态码映射与中文提示由 API 传输层按 ``replayed``/``duplicate`` 决定。
+    用户任务提交必须提供项目作用域幂等键(宪法 §5.5); 缺失直接拒绝, 不设
+    无键补偿路径。``submissions.submit_task`` 的 (任务记录, 标记) 元组契约
+    保持不变(``results`` 检查任务编排继续使用); 本用例在其上追加摘要组装,
+    供提交端点一次转交。返回与 HTTP 无关的应用结果(摘要 + 标记); 幂等命中
+    → 200 的状态码映射与中文提示由 API 传输层按 ``replayed`` 决定。
     """
+    if not idempotency_key:
+        raise InvalidRequestError(
+            "任务提交必须提供幂等键(项目作用域)",
+            code="TASK-REQ-003",
+            params={"expected": "idempotency_key 非空字符串"},
+        )
     task, flags = submit_task(
         db, user, project_id, task_type,
         config=config, idempotency_key=idempotency_key, parent_task_id=parent_task_id,

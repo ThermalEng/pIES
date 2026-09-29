@@ -400,7 +400,7 @@ def _run_task(
 
 
 def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -> None:
-    """同幂等键返回同一任务; 同快照无键重复提交复用; 不同输入生成新快照。"""
+    """同幂等键返回同一任务; 无键提交拒绝(422); 不同输入生成新快照。"""
     owner = make_user(db, "owner_idem")
     pid = _prepare_project(client, db, owner)
 
@@ -421,15 +421,14 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     assert body["task"]["id"] == task_a["id"]
     assert body["task"]["calc_snapshot_id"] == snapshot_a
 
-    # 3) 无键、同输入重复提交 → 200 复用(重复提交语义, 附提示)
+    # 3) 无键提交 → 422(宪法 §5.5: Task 请求必须携带幂等键)
     status, body = _submit_task(client, pid, owner)
-    assert status == 200
-    assert body["duplicate"] is True
-    assert body["task"]["id"] == task_a["id"]
-    assert body["hint"]
+    assert status == 422
 
-    # 4) 不同输入(config 不同 → 快照输入不同) → 201 新任务新快照
-    status, body = _submit_task(client, pid, owner, config={"horizon_years": 3})
+    # 4) 不同输入(config 不同 → 快照输入不同, 带新键) → 201 新任务新快照
+    status, body = _submit_task(
+        client, pid, owner, config={"horizon_years": 3}, idempotency_key="op-20260818-def"
+    )
     assert status == 201
     assert body["task"]["id"] != task_a["id"]
     assert body["task"]["calc_snapshot_id"] != snapshot_a
@@ -857,6 +856,8 @@ def test_analysis_task_rejected_without_sweeps(client: TestClient, db: Session) 
     """analysis 任务缺 sweeps → 400(参数非法)。"""
     owner = make_user(db, "owner_analysis_bad")
     pid = _prepare_project(client, db, owner)
-    status, body = _submit_task(client, pid, owner, task_type="analysis", config={})
+    status, body = _submit_task(
+        client, pid, owner, task_type="analysis", config={}, idempotency_key="analysis-bad"
+    )
     assert status == 400
     assert body["error"]["code"] == "TASK-REQ-001"
