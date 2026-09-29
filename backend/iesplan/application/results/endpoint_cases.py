@@ -32,7 +32,6 @@ from iesplan.application.tasks import ensure_task_belongs, task_summary
 from iesplan.core.errors import NotFoundError
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import ResultAssessmentRecord, ResultSelectionRecord
-from iesplan.tasks.contracts import InvalidRequestError
 
 
 def result_view(
@@ -165,20 +164,16 @@ def create_check_task_case(
     project_id: int,
     task_id: int,
     evidence_package_id: int | None = None,
-    idempotency_key: str = "",
+    *,
+    idempotency_key: str,
 ) -> dict[str, Any]:
     """创建检查任务完整用例(路由原顺序: 创建检查任务 → 跨包任务摘要)。
 
-    幂等键必填(调用方提供, 宪法 §5.5); 同键重试返回同一逻辑任务。
+    幂等键为必填 keyword-only 参数(调用方提供, 宪法 §5.5); 空值由任务提交
+    权威用例按 TASK-REQ-003 拒绝。同键重试返回同一逻辑任务。
     application 内跨域组合: 复用 ``application.tasks`` 的任务摘要实现,
     API 层不再跨包二次调用。提交由任务提交用例拥有。返回响应就绪字典。
     """
-    if not idempotency_key:
-        raise InvalidRequestError(
-            "检查任务提交必须提供幂等键(项目作用域)",
-            code="TASK-REQ-003",
-            params={"expected": "idempotency_key 非空字符串"},
-        )
     task, flags = results_writes.run_check_task(
         db, user, project_id, task_id,
         evidence_package_id=evidence_package_id, idempotency_key=idempotency_key,

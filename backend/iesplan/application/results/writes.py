@@ -835,7 +835,8 @@ def run_check_task(
     project_id: int,
     task_id: int,
     evidence_package_id: int | None = None,
-    idempotency_key: str = "",
+    *,
+    idempotency_key: str,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """对已有证据包创建检查任务(report 类型, io 池)。
 

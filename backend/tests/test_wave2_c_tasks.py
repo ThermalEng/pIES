@@ -264,11 +264,11 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
     assert other.id != task.id
     assert other.calc_snapshot_id == task.calc_snapshot_id
 
-    # 用户完整用例无键提交 → 拒绝(400, TASK-REQ-003)
+    # 用户完整用例空键提交 → 拒绝(400, TASK-REQ-003, 权威用例唯一校验)
     from iesplan.tasks.contracts import InvalidRequestError
 
     with pytest.raises(InvalidRequestError) as exc:
-        tasks_uc.submit_task_case(db, owner, pid, "optimization")
+        tasks_uc.submit_task_case(db, owner, pid, "optimization", idempotency_key="")
     assert exc.value.code == "TASK-REQ-003"
 
 
@@ -511,7 +511,7 @@ def test_submit_errors_match_old_codes(client: TestClient, db: Session) -> None:
     pid = _project(client, owner, "w2c-proj-err")
 
     with pytest.raises(Exception) as exc:
-        tasks_uc.submit_task(db, owner, pid, "nope")
+        tasks_uc.submit_task(db, owner, pid, "nope", idempotency_key="w2c-err-1")
     assert exc.value.code == "TASK-REQ-002"
     db.rollback()
 
@@ -522,7 +522,7 @@ def test_submit_errors_match_old_codes(client: TestClient, db: Session) -> None:
 
     # analysis 缺 sweeps
     with pytest.raises(Exception) as exc_new:
-        tasks_uc.submit_task(db, owner, pid, "analysis", config={})
+        tasks_uc.submit_task(db, owner, pid, "analysis", config={}, idempotency_key="w2c-err-2")
     db.rollback()
     assert exc_new.value.code == "TASK-REQ-001"
 

@@ -191,11 +191,12 @@ def check_task_endpoint(
     """
     result = results_app.create_check_task_case(
         db, user, project_id, task_id,
-        payload.evidence_package_id, payload.idempotency_key,
+        evidence_package_id=payload.evidence_package_id,
+        idempotency_key=payload.idempotency_key,
     )
     if result["replayed"]:
         response.status_code = 200
-        result["hint"] = "已复用既有检查任务(输入相同, 未重复计算)"
+        result["hint"] = "同幂等键复用既有检查任务, 未重复计算"
     else:
         result["hint"] = None
     return result

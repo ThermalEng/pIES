@@ -4,7 +4,7 @@
 制冷机/电池/负荷)与连接 → 生成内置样例数据集 → 绑定数据集 → 保存计算配置 +
 财务基准确认 → 提交方案评价任务 → Worker 领取(租约/尝试状态先行可见)。
 
-另抽查核心语义：草稿乐观锁(409)、归档后禁止编辑、删除需显式确认、任务同快照去重、导出权限门禁、存储视图权限、财务基准校验门禁（见 manual/developer-guide/zh-CN/contracts.md §HTTP 语义； manual/developer-guide/zh-CN/domain-model.md §项目聚合/对象生命周期； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §8/§10/§16）。
+另抽查核心语义：草稿乐观锁(409)、归档后禁止编辑、删除需显式确认、任务幂等键复用、导出权限门禁、存储视图权限、财务基准校验门禁（见 manual/developer-guide/zh-CN/contracts.md §HTTP 语义； manual/developer-guide/zh-CN/domain-model.md §项目聚合/对象生命周期； manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §8/§10/§16）。
 
 执行方式: 内存 SQLite(StaticPool) + 临时对象存储目录 + 内存队列,
 不依赖部署 Postgres/Redis(与基础层降级路径一致)。

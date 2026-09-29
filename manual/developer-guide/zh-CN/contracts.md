@@ -23,7 +23,7 @@
 
 成功资源响应顶层使用**一级命名键包装**，每个键名直接表达资源语义：
 
-- 单资源响应：顶层为 `{<resource_name>, ...}`，例如 `{project, draft, versions, my_role}` / `{task, replayed, duplicate, hint}` / `{result}` / `{assessment}` / `{report, stored}`。
+- 单资源响应：顶层为 `{<resource_name>, ...}`，例如 `{project, draft, versions, my_role}` / `{task, replayed, hint}` / `{result}` / `{assessment}` / `{report, stored}`。
 - 列表 + 分页：顶层固定为 `{items, total}` 或 `{items, next_cursor}` 二键（具体由端点选择一种）。
 - 动作响应（确认/状态变更/校验触发）：顶层为 `{ok, ...}`，必要时附 message_key/expires_at/result 等。
 - 必要时可嵌套（如 `{project, draft, versions, my_role}`），嵌套键名同样遵循自我文档化原则。

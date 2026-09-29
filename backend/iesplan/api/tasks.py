@@ -90,7 +90,7 @@ def create_task_endpoint(
     )
     if result["replayed"]:
         response.status_code = 200
-        result["hint"] = "已复用既有任务(输入相同, 未重复计算)"
+        result["hint"] = "同幂等键复用既有任务, 未重复计算"
     else:
         result["hint"] = None
     return result

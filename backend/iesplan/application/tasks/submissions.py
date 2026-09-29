@@ -675,7 +675,8 @@ def _submit_task(
     project_id: int,
     task_type: str,
     config: dict[str, Any] | None = None,
-    idempotency_key: str = "",
+    *,
+    idempotency_key: str,
     parent_task_id: int | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """创建任务(幂等检查 → 门禁 → 快照 → INSERT → 入队)。
@@ -794,7 +795,8 @@ def submit_task(
     project_id: int,
     task_type: str,
     config: dict[str, Any] | None = None,
-    idempotency_key: str = "",
+    *,
+    idempotency_key: str,
     parent_task_id: int | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """提交任务用例(幂等键必填); 本层拥有事务提交/回滚。"""
