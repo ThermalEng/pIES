@@ -659,8 +659,11 @@ def test_api_list_and_detail(client: TestClient, session: Session) -> None:
     items = resp.json()["datasets"]
     assert len(items) == 1
     assert items[0]["dataset"]["name"] == "配电负荷"
+    # 时间戳取公开 record 的规范 ISO 字符串（传输层不再兼容 ORM datetime）。
+    assert isinstance(items[0]["dataset"]["created_at"], str)
     latest = items[0]["latest_version"]
     assert latest is not None and latest["version_no"] == 1
+    assert isinstance(latest["created_at"], str)
     # 详情
     resp = client.get(f"/api/projects/{proj.id}/datasets/{ds_id}", headers=login_headers(client, user))
     assert resp.status_code == 200
