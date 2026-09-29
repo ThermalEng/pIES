@@ -20,6 +20,7 @@ from auth_helpers import login_headers, make_user  # noqa: E402
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from iesplan.api.datasets import _dataset_dict, _version_dict
 from iesplan.api.deps import get_request_db
 from iesplan.application.datasets import (
     STANDARD_FIELDS,
@@ -34,6 +35,7 @@ from iesplan.application.datasets import (
 from iesplan.config import settings
 from iesplan.core.timeaxis import build_axis
 from iesplan.db import Base
+from iesplan.dataset.contracts import DatasetRecord, DatasetVersionRecord
 from iesplan.dataset.persistence import DatasetFile, DatasetVersion
 from iesplan.project.persistence import Project
 
@@ -659,11 +661,8 @@ def test_api_list_and_detail(client: TestClient, session: Session) -> None:
     items = resp.json()["datasets"]
     assert len(items) == 1
     assert items[0]["dataset"]["name"] == "配电负荷"
-    # 时间戳取公开 record 的规范 ISO 字符串（传输层不再兼容 ORM datetime）。
-    assert isinstance(items[0]["dataset"]["created_at"], str)
     latest = items[0]["latest_version"]
     assert latest is not None and latest["version_no"] == 1
-    assert isinstance(latest["created_at"], str)
     # 详情
     resp = client.get(f"/api/projects/{proj.id}/datasets/{ds_id}", headers=login_headers(client, user))
     assert resp.status_code == 200
@@ -830,3 +829,38 @@ def test_anonymous_and_xuserid_dataset_401(client: TestClient, session: Session)
     # 模板下载(公开)不受影响
     resp = client.get("/api/datasets/template", params={"resolution": "1h"})
     assert resp.status_code == 200
+
+def test_api_timestamp_serialization_passes_record_strings() -> None:
+    """传输时间戳取公开 record 的规范 ISO 字符串/None，不再兼容 ORM datetime。
+
+    纯序列化单测（无数据库/HTTP）：直接构造公开 record，断言
+    _dataset_dict/_version_dict 原样输出字符串与允许的 None。
+    """
+    ds = DatasetRecord(
+        id=1,
+        project_id=2,
+        name="配电负荷",
+        status="active",
+        created_by=3,
+        created_at="2026-09-29T00:00:00+00:00",
+        updated_at=None,
+    )
+    out = _dataset_dict(ds)
+    assert out["created_at"] == "2026-09-29T00:00:00+00:00"
+    assert isinstance(out["created_at"], str)
+    assert out["updated_at"] is None
+    version = DatasetVersionRecord(
+        id=4,
+        dataset_id=1,
+        version_no=1,
+        timeline="t",
+        fixed_utc_offset_minutes=480,
+        fields={},
+        units={},
+        created_by=3,
+        created_at="2026-09-29T01:00:00+00:00",
+        quality_report={"row_count": 1},
+    )
+    vout = _version_dict(version)
+    assert vout["created_at"] == "2026-09-29T01:00:00+00:00"
+    assert isinstance(vout["created_at"], str)
