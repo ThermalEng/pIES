@@ -88,7 +88,7 @@ def create_task_endpoint(
         idempotency_key=payload.idempotency_key,
         parent_task_id=payload.parent_task_id,
     )
-    if result["replayed"] or result["duplicate"]:
+    if result["replayed"]:
         response.status_code = 200
         result["hint"] = "已复用既有任务(输入相同, 未重复计算)"
     else:

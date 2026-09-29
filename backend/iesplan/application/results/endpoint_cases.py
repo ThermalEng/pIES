@@ -6,7 +6,7 @@
   ``latest_evidence``/``evidence_content``/``selection_diff``)直调
   ``writes`` 同名函数, 不拥有事务;
 - 写编排(``assess_task_evidence``/``select_task_result``/
-  ``create_check_task``)把路由原来的“多次服务调用 + 一次提交”整体下移为
+  ``create_check_task_case``)把路由原来的“多次服务调用 + 一次提交”整体下移为
   单个用例拥有的一次事务(失败回滚), 路由层不再提交;
 - 读编排(``get_selection_diff``/``read_task_hourly``)把路由原来的
   “归属/权限/缺失处理”整体下移, 行为与原路由一致;
@@ -32,7 +32,7 @@ from iesplan.application.tasks import ensure_task_belongs, task_summary
 from iesplan.core.errors import NotFoundError
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import ResultAssessmentRecord, ResultSelectionRecord
-from iesplan.tasks.contracts import TaskRecord
+from iesplan.tasks.contracts import InvalidRequestError
 
 
 def result_view(
@@ -159,17 +159,31 @@ def read_task_hourly(
     )
 
 
-def create_check_task(
+def create_check_task_case(
     db: Session,
     user: UserRecord,
     project_id: int,
     task_id: int,
     evidence_package_id: int | None = None,
-) -> TaskRecord:
-    """创建检查任务(report 类型; 提交由任务提交用例拥有)。"""
-    return results_writes.run_check_task(
-        db, user, project_id, task_id, evidence_package_id=evidence_package_id
+    idempotency_key: str = "",
+) -> dict[str, Any]:
+    """创建检查任务完整用例(路由原顺序: 创建检查任务 → 跨包任务摘要)。
+
+    幂等键必填(调用方提供, 宪法 §5.5); 同键重试返回同一逻辑任务。
+    application 内跨域组合: 复用 ``application.tasks`` 的任务摘要实现,
+    API 层不再跨包二次调用。提交由任务提交用例拥有。返回响应就绪字典。
+    """
+    if not idempotency_key:
+        raise InvalidRequestError(
+            "检查任务提交必须提供幂等键(项目作用域)",
+            code="TASK-REQ-003",
+            params={"expected": "idempotency_key 非空字符串"},
+        )
+    task, flags = results_writes.run_check_task(
+        db, user, project_id, task_id,
+        evidence_package_id=evidence_package_id, idempotency_key=idempotency_key,
     )
+    return {"task": task_summary(db, task), "replayed": bool(flags.get("replay", False))}
 
 
 def list_assessments_case(
@@ -188,21 +202,3 @@ def list_assessments_case(
         for a in results_writes.list_assessments(db, task_id)
     ]
     return {"items": items, "total": len(items)}
-
-
-def create_check_task_case(
-    db: Session,
-    user: UserRecord,
-    project_id: int,
-    task_id: int,
-    evidence_package_id: int | None = None,
-) -> dict[str, Any]:
-    """创建检查任务完整用例(路由原顺序: 创建检查任务 → 跨包任务摘要)。
-
-    application 内跨域组合: 复用 ``application.tasks`` 的任务摘要实现,
-    API 层不再跨包二次调用。提交由任务提交用例拥有。返回响应就绪字典。
-    """
-    task = results_writes.run_check_task(
-        db, user, project_id, task_id, evidence_package_id=evidence_package_id
-    )
-    return {"task": task_summary(db, task)}

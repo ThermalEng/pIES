@@ -893,34 +893,79 @@ def test_hourly_pagination(client: TestClient, db: Session) -> None:
 
 
 def test_run_check_task(client: TestClient, db: Session) -> None:
-    """检查任务: 对已有证据包创建 report 任务; 无证据包 → 404。"""
+    """检查任务: 幂等键必填; 新键新任务; 同键复用; 无证据包 → 404。"""
     owner = make_user(db, "owner_check")
     pid, task_id, _claim_ok, pkg, _objs = _prepare_task_with_evidence(client, db, owner)
+    url = f"/api/projects/{pid}/tasks/{task_id}/result/check"
 
+    # 缺键拒绝(422): 空体与仅带证据包均拒绝
+    resp = client.post(url, json={}, headers=_h(client, owner))
+    assert resp.status_code == 422
     resp = client.post(
-        f"/api/projects/{pid}/tasks/{task_id}/result/check", json={}, headers=_h(client, owner)
+        url, json={"evidence_package_id": pkg.id}, headers=_h(client, owner)
     )
+    assert resp.status_code == 422
+
+    # 新键 → 201 新检查任务
+    resp = client.post(url, json={"idempotency_key": "chk-1"}, headers=_h(client, owner))
     assert resp.status_code == 201, resp.text
-    task = resp.json()["task"]
+    body = resp.json()
+    assert body["replayed"] is False
+    task = body["task"]
     assert task["type"] == "report"
     assert task["status"] == "queued"
     # 检查任务通过服务创建的配置携带证据包引用(队列视图可查)
     assert pkg.id > 0
 
-    # 显式指定证据包
+    # 同键重试 → 200 同一任务
+    resp = client.post(url, json={"idempotency_key": "chk-1"}, headers=_h(client, owner))
+    assert resp.status_code == 200
+    assert resp.json()["task"]["id"] == task["id"]
+    assert resp.json()["replayed"] is True
+
+    # 新键(显式证据包) → 201 不同任务
     resp = client.post(
-        f"/api/projects/{pid}/tasks/{task_id}/result/check",
-        json={"evidence_package_id": pkg.id}, headers=_h(client, owner),
+        url,
+        json={"evidence_package_id": pkg.id, "idempotency_key": "chk-2"},
+        headers=_h(client, owner),
     )
     assert resp.status_code == 201
+    assert resp.json()["task"]["id"] != task["id"]
 
-    # 无证据包的任务 → 404
-    pid2 = _prepare_project(client, db, owner, name="无证据项目")
-    task2 = _submit_task(client, pid2, owner, idempotency_key="check-none")
+    # 他任务证据包 → 404(归属): 另起项目建任务+证据, 包 id 拿到本任务下使用
+    pid2 = _prepare_project(client, db, owner, name="结果测试项目2")
+    task_b = _submit_task(client, pid2, owner, idempotency_key=f"res-{pid2}")
+    claim_b = _claim(db, task_b["id"])
+    obj_b = _store_hourly(db, 100)
+    payload_b = _build_payload(task_b["calc_snapshot_id"], [obj_b, obj_b], owner.id)
+    pkg2 = _submit_evidence(db, task_b["id"], claim_b, payload_b)
     resp = client.post(
-        f"/api/projects/{pid2}/tasks/{task2['id']}/result/check", json={}, headers=_h(client, owner)
+        url,
+        json={"evidence_package_id": pkg2.id, "idempotency_key": "chk-3"},
+        headers=_h(client, owner),
     )
     assert resp.status_code == 404
+
+    # 无证据包的任务 → 404
+    pid3 = _prepare_project(client, db, owner, name="无证据项目")
+    task3 = _submit_task(client, pid3, owner, idempotency_key="check-none")
+    resp = client.post(
+        f"/api/projects/{pid3}/tasks/{task3['id']}/result/check",
+        json={"idempotency_key": "chk-4"}, headers=_h(client, owner),
+    )
+    assert resp.status_code == 404
+
+
+def test_check_task_permission(client: TestClient, db: Session) -> None:
+    """检查任务: 非项目成员提交 → 403(提交用例 edit 门禁)。"""
+    owner = make_user(db, "owner_check_perm")
+    outsider = make_user(db, "outsider_check_perm")
+    pid, task_id, _claim_ok, _pkg, _objs = _prepare_task_with_evidence(client, db, owner)
+    resp = client.post(
+        f"/api/projects/{pid}/tasks/{task_id}/result/check",
+        json={"idempotency_key": "chk-perm-1"}, headers=_h(client, outsider),
+    )
+    assert resp.status_code == 403
 
 
 def test_result_view_permission(client: TestClient, db: Session) -> None:

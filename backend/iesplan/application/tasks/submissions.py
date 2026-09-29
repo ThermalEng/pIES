@@ -675,12 +675,13 @@ def _submit_task(
     project_id: int,
     task_type: str,
     config: dict[str, Any] | None = None,
-    idempotency_key: str | None = None,
+    idempotency_key: str = "",
     parent_task_id: int | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """创建任务(幂等检查 → 门禁 → 快照 → INSERT → 入队)。
 
-    返回 (任务记录, 标记): 标记含 replay/duplicate。内部步骤只 flush,
+    幂等键必填(项目作用域, 宪法 §5.5); 缺失或格式非法直接拒绝。
+    返回 (任务记录, 标记): 标记仅含 replay。内部步骤只 flush,
     由顶层 submit_task 提交。
     """
     ensure_access(db, user, project_id, "edit")
@@ -697,9 +698,9 @@ def _submit_task(
                 "analysis 任务缺少扫描规格(sweeps)",
                 params={"task_type": task_type, "expected": "task_config.sweeps 非空数组"},
             )
-    if idempotency_key is not None and not re.fullmatch(_IDEMPOTENCY_KEY_RE, idempotency_key):
+    if not idempotency_key or not re.fullmatch(_IDEMPOTENCY_KEY_RE, idempotency_key):
         raise InvalidRequestError(
-            "幂等键格式非法(须匹配 ^[A-Za-z0-9._:-]{1,128}$)",
+            "任务提交必须提供幂等键(项目作用域, 须匹配 ^[A-Za-z0-9._:-]{1,128}$)",
             code="TASK-REQ-003",
             params={"idempotency_key": idempotency_key},
         )
@@ -713,10 +714,9 @@ def _submit_task(
             )
 
     # 1) 幂等命中(限定项目范围)
-    if idempotency_key is not None:
-        existing = tasks_domain.get_task_by_idempotency(db, project_id, idempotency_key)
-        if existing is not None:
-            return existing, {"replay": True, "duplicate": False}
+    existing = tasks_domain.get_task_by_idempotency(db, project_id, idempotency_key)
+    if existing is not None:
+        return existing, {"replay": True}
 
     snapshot: CalcSnapshotRecord | None = None
     if task_type in COMPUTE_TYPES:
@@ -785,7 +785,7 @@ def _submit_task(
         priority=priority,
         trace_id=trace_id,
     )
-    return task, {"replay": False, "duplicate": False}
+    return task, {"replay": False}
 
 
 def submit_task(
@@ -794,10 +794,10 @@ def submit_task(
     project_id: int,
     task_type: str,
     config: dict[str, Any] | None = None,
-    idempotency_key: str | None = None,
+    idempotency_key: str = "",
     parent_task_id: int | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
-    """提交任务用例; 本层拥有事务提交/回滚。"""
+    """提交任务用例(幂等键必填); 本层拥有事务提交/回滚。"""
     try:
         result = _submit_task(
             db, user, project_id, task_type,

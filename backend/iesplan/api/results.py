@@ -9,6 +9,7 @@
 - GET    /api/projects/{id}/tasks/{task_id}/result/diff    选中结果的参数差异预览
 - GET    /api/projects/{id}/tasks/{task_id}/result/hourly  逐时结果查询(对象存储, 分页)
 - POST   /api/projects/{id}/tasks/{task_id}/result/check   对已有证据包创建检查任务
+                                                           (幂等键必填, 命中 → 200)
 
 认证与权限: 统一使用 U01 身份单元提供的窗口会话认证(iesplan.api.auth.CurrentUser);
 读接口要求项目 view, 写接口(assess/select/check)要求项目 edit。结果应用
@@ -19,13 +20,14 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.api.deps import get_request_db
 from iesplan.application import results as results_app
+from iesplan.tasks.contracts import IDEMPOTENCY_KEY_RE
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/tasks/{task_id}/result", tags=["results"]
@@ -53,9 +55,13 @@ class SelectRequest(BaseModel):
 
 
 class CheckRequest(BaseModel):
-    """检查任务请求体(evidence_package_id 缺省取任务最新证据包)。"""
+    """检查任务请求体(evidence_package_id 缺省取任务最新证据包; 幂等键必填)。"""
 
     evidence_package_id: int | None = Field(default=None, description="要检查的证据包 id")
+    idempotency_key: str = Field(
+        min_length=1, max_length=128, pattern=IDEMPOTENCY_KEY_RE,
+        description="幂等键(必填, 项目作用域; 同键重试返回同一检查任务)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +182,20 @@ def check_task_endpoint(
     task_id: int,
     db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
-    payload: CheckRequest | None = None,
+    payload: CheckRequest,
+    response: Response,
 ) -> dict[str, Any]:
-    """对已有证据包创建检查任务(report 类型, io 池); Worker 消费后执行四维复查。"""
-    package_id = payload.evidence_package_id if payload else None
-    return results_app.create_check_task_case(db, user, project_id, task_id, package_id)
+    """对已有证据包创建检查任务(report 类型, io 池); Worker 消费后执行四维复查。
+
+    幂等键必填; 命中返回既有检查任务 → 200, 新建 → 201(与任务提交端点一致)。
+    """
+    result = results_app.create_check_task_case(
+        db, user, project_id, task_id,
+        payload.evidence_package_id, payload.idempotency_key,
+    )
+    if result["replayed"]:
+        response.status_code = 200
+        result["hint"] = "已复用既有检查任务(输入相同, 未重复计算)"
+    else:
+        result["hint"] = None
+    return result

@@ -136,7 +136,7 @@ def test_submit_report_task_commits_and_repeatable(
     pid = _project(client, owner, "w2c-proj-report")
 
     task, flags = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-rpt-1")
-    assert flags == {"replay": False, "duplicate": False}
+    assert flags == {"replay": False}
     assert task.status == "queued" and task.calc_snapshot_id is None
 
     # 事务提交证明: 新会话可见, 无需调用方 commit
@@ -146,7 +146,7 @@ def test_submit_report_task_commits_and_repeatable(
 
     # 行为对照: 同类型任务关键字段一致
     old, old_flags = tasks_uc.submit_task(db, owner, pid, "report", idempotency_key="w2c-rpt-2")
-    assert old_flags == {"replay": False, "duplicate": False}
+    assert old_flags == {"replay": False}
     assert (old.type, old.status, old.calc_snapshot_id) == (task.type, task.status, task.calc_snapshot_id)
 
 
@@ -239,7 +239,7 @@ def _declare_optimization_ready(
     return device_ref, revision
 
 
-def test_submit_compute_task_snapshot_replay_and_duplicate(
+def test_submit_compute_task_snapshot_replay_and_reuse(
     client: TestClient, db: Session
 ) -> None:
     """计算任务提交: 快照装配 + 幂等重放 + 快照复用(不同键同输入共享快照)。
@@ -251,16 +251,16 @@ def test_submit_compute_task_snapshot_replay_and_duplicate(
     _declare_optimization_ready(client, db, owner, pid)
 
     task, flags = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-opt-1")
-    assert flags == {"replay": False, "duplicate": False}
+    assert flags == {"replay": False}
     assert task.calc_snapshot_id is not None
 
     replay, rflags = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-opt-1")
-    assert rflags == {"replay": True, "duplicate": False}
+    assert rflags == {"replay": True}
     assert replay.id == task.id
 
     # 不同幂等键、同输入 → 新任务, 但复用同一快照(快照去重保留)
     other, oflags = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-opt-2")
-    assert oflags == {"replay": False, "duplicate": False}
+    assert oflags == {"replay": False}
     assert other.id != task.id
     assert other.calc_snapshot_id == task.calc_snapshot_id
 

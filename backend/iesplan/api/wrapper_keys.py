@@ -141,9 +141,9 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "hourly_endpoint": frozenset(
         {"end", "field", "next_start", "start", "total_rows", "unit", "values"}
     ),  # services.results.read_hourly
-    "check_task_endpoint": frozenset({"task"}),
+    "check_task_endpoint": frozenset({"hint", "replayed", "task"}),
     # ---- tasks.py ----
-    "create_task_endpoint": frozenset({"duplicate", "hint", "replayed", "task"}),
+    "create_task_endpoint": frozenset({"hint", "replayed", "task"}),
     "list_tasks_endpoint": frozenset({"items", "next_cursor"}),  # services.tasks.list_tasks
     "get_task_endpoint": frozenset({"task"}),
     "cancel_task_endpoint": frozenset({"cancel_status", "diagnostic", "task"}),

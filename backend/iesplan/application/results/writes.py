@@ -835,11 +835,13 @@ def run_check_task(
     project_id: int,
     task_id: int,
     evidence_package_id: int | None = None,
-) -> TaskRecord:
+    idempotency_key: str = "",
+) -> tuple[TaskRecord, dict[str, bool]]:
     """对已有证据包创建检查任务(report 类型, io 池)。
 
     evidence_package_id 缺省取该任务最新证据包; 检查任务配置携带证据包引用,
-    io Worker 消费后执行四维复查(本阶段仅创建任务)。提交由任务提交用例拥有。
+    io Worker 消费后执行四维复查(本阶段仅创建任务)。幂等键必填(调用方提供),
+    同键重试返回同一逻辑任务。提交由任务提交用例拥有。
     """
     ensure_task_belongs(db, project_id, task_id)
     if evidence_package_id is None:
@@ -853,11 +855,11 @@ def run_check_task(
                 "证据包不属于该任务",
                 params={"evidence_package_id": evidence_package_id, "task_id": task_id},
             )
-    task, _flags = submit_task(
+    return submit_task(
         db,
         user,
         project_id,
         "report",
         config={"action": "check", "evidence_package_id": package.id, "source_task_id": task_id},
+        idempotency_key=idempotency_key,
     )
-    return task

@@ -466,7 +466,7 @@ def test_success_wrappers_tasks_results_domain(client: TestClient, db: Session) 
         f"/api/projects/{pid}/tasks",
         json={"task_type": "calc", "idempotency_key": "wrap-task-1"}, headers=_bearer(tok),
     )
-    body = _assert_wrapper(resp, {"task", "replayed", "duplicate", "hint"})
+    body = _assert_wrapper(resp, {"task", "replayed", "hint"})
     task_id = body["task"]["id"]
     _assert_wrapper(client.get(f"/api/projects/{pid}/tasks", headers=_bearer(tok)), {"items", "next_cursor"})
     _assert_wrapper(client.get(f"/api/projects/{pid}/tasks/{task_id}", headers=_bearer(tok)), {"task"})

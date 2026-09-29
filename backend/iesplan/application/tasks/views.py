@@ -291,7 +291,6 @@ def submit_task_case(
     return {
         "task": task_summary(db, task),
         "replayed": bool(flags.get("replay", False)),
-        "duplicate": bool(flags.get("duplicate", False)),
     }
 
 
