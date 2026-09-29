@@ -26,6 +26,7 @@ from iesplan.computation.generators.linear import (
     LoweringUnsupportedError,
 )
 from iesplan.computation.generators.project import finance_component_declarations
+from iesplan.core.expression import ExpressionError
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.finance import FinanceProfile, merge_effective
@@ -732,11 +733,34 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
 
 
 def test_sale_tariff_sign_flips() -> None:
-    """售电方向记账为负（与购电对称）。"""
-    artifact, models, series, finance, config = _inputs(tariff_direction="sale")
+    """售电方向记账为负（与购电对称）。
+
+    必须引用与方向一致的 sale 后缀；反向 purchase 后缀引用售电绑定
+    与装配闸门同理非法（见 direction_suffix_mismatch）。
+    """
+    artifact, models, series, finance, config = _inputs(
+        tariff_direction="sale",
+        objective=(
+            "1 year * tank1__annual_fixed_om"
+            " + tank1__period_variable_om"
+            " + import_meter__period_energy_sale"
+        ),
+    )
     model, _, _ = build_project_model(artifact, models, series, finance, config)
     coeffs = _coeffs(model.objective)
     assert coeffs["load1__heat_in__t0"] == pytest.approx(-0.0007, rel=1e-9)
+    # 反向后缀不在符号表内，编译边界即大声拒绝（装配侧以
+    # direction_suffix_mismatch 精确阻断，此处不断言具体子类）。
+    with pytest.raises(ExpressionError):
+        artifact2, models2, series2, finance2, config2 = _inputs(
+            tariff_direction="sale",
+            objective=(
+                "1 year * tank1__annual_fixed_om"
+                " + tank1__period_variable_om"
+                " + import_meter__period_energy_purchase"
+            ),
+        )
+        build_project_model(artifact2, models2, series2, finance2, config2)
 
 
 def test_bilinear_unsupported() -> None:
@@ -799,8 +823,10 @@ def test_mps_tiny_maximize_model_exact_text() -> None:
 def test_finance_component_declarations_cover_produced_idents() -> None:
     """分量声明覆盖全部已声明产出分量，与目标写法无关。
 
-    mini 夹具：tank1(new) 的 tank_sys 未声明 upfront_capex → 不声明、
-    不补零；annual_fixed_om 量纲为币种/年；计费绑定双后缀同记账仿射式。
+    mini 夹具（购电绑定）：tank1(new) 的 tank_sys 未声明 upfront_capex
+    → 不声明、不补零；annual_fixed_om 量纲为币种/年；计费绑定只声明
+    与价格方向一致的 purchase 后缀，反向 sale 后缀不存在（装配闸门
+    同理阻断，见 direction_suffix_mismatch）。
     """
     artifact, models, series, finance, _config = _inputs()
     decls = finance_component_declarations(artifact, models, series, finance)
@@ -808,7 +834,6 @@ def test_finance_component_declarations_cover_produced_idents() -> None:
         "tank1__annual_fixed_om",
         "tank1__period_variable_om",
         "import_meter__period_energy_purchase",
-        "import_meter__period_energy_sale",
     }
     annual = decls["tank1__annual_fixed_om"]
     assert annual["unit"] == "CNY/a"
@@ -822,4 +847,27 @@ def test_finance_component_declarations_cover_produced_idents() -> None:
     purchase = decls["import_meter__period_energy_purchase"]
     assert purchase["unit"] == "CNY"
     assert purchase["caliber"] == "period"
-    assert decls["import_meter__period_energy_sale"] == purchase
+
+
+def test_finance_component_sale_binding_declares_sale_only() -> None:
+    """售电绑定只声明 sale 后缀：已带负号记账，不与 purchase 双计。
+
+    mini 夹具把 heat_import 方向改为 sale：load1.heat_in 走 LP 逐时
+    变量，8760 项系数均为 −0.7/3.6e6×3600 = −0.0007（与目标系数的
+    test_sale_tariff_sign_flips 同源），sale 分量自身为负。
+    """
+    artifact, models, series, finance, _config = _inputs(tariff_direction="sale")
+    decls = finance_component_declarations(artifact, models, series, finance)
+    assert set(decls) == {
+        "tank1__annual_fixed_om",
+        "tank1__period_variable_om",
+        "import_meter__period_energy_sale",
+    }
+    sale = decls["import_meter__period_energy_sale"]
+    assert sale["unit"] == "CNY"
+    assert sale["caliber"] == "period"
+    assert sale["constant"] == pytest.approx(0.0)
+    assert len(sale["terms"]) == 8760
+    assert set(sale["terms"]) == {f"load1__heat_in__t{t}" for t in range(8760)}
+    for coeff in sale["terms"].values():
+        assert coeff == pytest.approx(-0.0007, rel=1e-9)

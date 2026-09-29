@@ -82,6 +82,27 @@ _COMPONENT_CALIBER = {
 }
 
 
+def _tariff_suffix(direction: str) -> str:
+    """计费价格方向 → 唯一合法分量后缀（与装配规划校验同一规则）。
+
+    purchase 只产生 ``period_energy_purchase``（正记账），sale 只产生
+    ``period_energy_sale``（负记账）；反向后缀引用同一计费事实即非法，
+    不在此处另建第二映射。
+    """
+    if direction == "purchase":
+        return "period_energy_purchase"
+    if direction == "sale":
+        return "period_energy_sale"
+    raise LoweringUnsupportedError(f"未知计费方向: {direction!r}")
+
+
+def _binding_direction(builder: _ProjectBuilder, binding_id: str) -> str:
+    """取某计费绑定的价格方向（快照价格条目为准，不靠名称推断）。"""
+    bindings = builder.doc.get("tariff_bindings") or {}
+    price_id = bindings[binding_id]["price"]
+    return builder.finance.energy_prices[price_id].direction
+
+
 def _to_internal(value: float, unit: str) -> float:
     """业务数值 → 内部单位（物理量 SI，纯金额守币种原值）。"""
     if dims_of(unit) == Counter({"currency": 1}):
@@ -717,9 +738,11 @@ class _ProjectBuilder:
             return self._cost_affine(prefix, component)
         tariff = self.doc.get("tariff_bindings") or {}
         if prefix in tariff:
-            if component not in ("period_energy_purchase", "period_energy_sale"):
+            expected = _tariff_suffix(_binding_direction(self, prefix))
+            if component != expected:
                 raise LoweringUnsupportedError(
-                    f"计费标识符 {ident!r} 后缀非法"
+                    f"计费标识符 {ident!r} 后缀与价格方向不一致"
+                    f"（该绑定只产生 {expected!r}）"
                 )
             return self._tariff_affine(prefix)
         raise LoweringUnsupportedError(f"未知规划标识符 {ident!r}")
@@ -744,8 +767,8 @@ class _ProjectBuilder:
                 else:
                     symbols[ident] = Counter({"currency": 1})
         for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
-            for suffix in ("period_energy_purchase", "period_energy_sale"):
-                symbols[f"{binding_id}__{suffix}"] = Counter({"currency": 1})
+            suffix = _tariff_suffix(_binding_direction(self, binding_id))
+            symbols[f"{binding_id}__{suffix}"] = Counter({"currency": 1})
         for var_name, var in self.plan_vars.items():
             unit = var.get("unit")
             if unit is None:
@@ -785,8 +808,8 @@ class _ProjectBuilder:
                 for component in produced:
                     names.add(f"{inst}__{component}")
         for binding_id in (self.doc.get("tariff_bindings") or {}):
-            names.add(f"{binding_id}__period_energy_purchase")
-            names.add(f"{binding_id}__period_energy_sale")
+            suffix = _tariff_suffix(_binding_direction(self, binding_id))
+            names.add(f"{binding_id}__{suffix}")
         return names
 
     def _component_unit(self, component: str) -> str:
@@ -798,7 +821,7 @@ class _ProjectBuilder:
     def finance_components(self) -> Mapping[str, Mapping[str, object]]:
         """全部已声明财务分量的求值声明（与目标同一构造路径）。
 
-        每个产出分量（资产身份下已声明分量、全部计费绑定后缀）各一条：
+        每个产出分量（资产身份下已声明分量、各计费绑定的方向后缀）各一条：
         ``{unit, caliber, constant, terms}``，constant/terms 为内部单位
         仿射系数（LP 名 → 系数），与目标共用同一分量展开函数
         （``_cost_affine``/``_tariff_affine``），不依赖规划目标写法。
@@ -825,15 +848,15 @@ class _ProjectBuilder:
                     "terms": dict(sorted(affine.terms.items())),
                 }
         for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
-            for component in ("period_energy_purchase", "period_energy_sale"):
-                ident = f"{binding_id}__{component}"
-                affine = self._tariff_affine(binding_id)
-                out[ident] = {
-                    "unit": self._component_unit(component),
-                    "caliber": _COMPONENT_CALIBER[component],
-                    "constant": affine.constant,
-                    "terms": dict(sorted(affine.terms.items())),
-                }
+            component = _tariff_suffix(_binding_direction(self, binding_id))
+            ident = f"{binding_id}__{component}"
+            affine = self._tariff_affine(binding_id)
+            out[ident] = {
+                "unit": self._component_unit(component),
+                "caliber": _COMPONENT_CALIBER[component],
+                "constant": affine.constant,
+                "terms": dict(sorted(affine.terms.items())),
+            }
         return MappingProxyType(out)
 
     def _build_objective(self) -> tuple[_AffineAcc, str]:

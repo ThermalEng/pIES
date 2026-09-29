@@ -6,7 +6,8 @@ ies.solver.highs@1.7.2 垫片执行并签发回执；注册表按回执固定引
 选中真实 ResultAdapter 解释。不断言大模型手算最优值，只断言：
 成功状态、业务单位、追溯 id、声明输出子集、报告目标与 MPS 目标行
 独立复算一致、两次运行解字节一致；失败分支覆盖不可行模型与策略
-拒绝；成功链另断言声明财务分量与两年真实求解的评价一致性。
+拒绝；成功链另断言声明财务分量，以及两份独立真实求解作为评价
+输入的一致性（契约测试数据组织，非产品多年编排）。
 无 API/DB/Worker。
 """
 
@@ -45,7 +46,12 @@ from iesplan.computation.generators.highs_milp import (
 from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.computation.runtime import validate_highs_arguments
 from iesplan.devices import init_registry, list_devices
-from iesplan.finance import PaybackStatus, effective_from_yaml, evaluate_project_investment
+from iesplan.finance import (
+    IRREvaluationStatus,
+    PaybackStatus,
+    effective_from_yaml,
+    evaluate_project_investment,
+)
 from iesplan.modeling import build_math_contribution
 
 HERE = Path(__file__).resolve().parent
@@ -358,9 +364,9 @@ def test_chain_success_reports_declared_components() -> None:
         "hp1__upfront_capex",
         "hp1__annual_fixed_om",
         "hp1__period_variable_om",
+        # 计费绑定只发布与价格方向一致的后缀，不双计：
+        # import_meter 为购电、export_meter 为售电。
         "import_meter__period_energy_purchase",
-        "import_meter__period_energy_sale",
-        "export_meter__period_energy_purchase",
         "export_meter__period_energy_sale",
     }
     for name, entry in components.items():
@@ -388,11 +394,12 @@ def test_chain_success_reports_declared_components() -> None:
     assert solution["objective_value"] == pytest.approx(expect, rel=1e-9)
 
 
-def _yearly_flows(solution, baseline: float) -> tuple[float, float]:
-    """单次真实解 → (t0 投资取负, 年净流 = 基线 − 年成本合计)。
+def _yearly_flows(solution) -> tuple[float, float]:
+    """单次真实解 → (t=0 投资取负, 年净流)。
 
-    年成本合计 = 全部 annual 口径 + 全部 period 口径（sale 已带负号）；
-    baseline 为显式评价输入（测试常量，非装配事实）。
+    t=0 投资 = −upfront 口径合计；年净流 = −(annual + period 口径合计)，
+    其中 sale 分量已带负号（收益自动抵减成本），purchase 为正成本。
+    只用真实声明分量，不引入基线等外部金额。
     """
     components = _solution_components(solution)
     upfront = sum(
@@ -403,17 +410,19 @@ def _yearly_flows(solution, baseline: float) -> tuple[float, float]:
         entry["value"] for name, entry in components.items()
         if entry["caliber"] in ("annual", "period")
     )
-    return -upfront, baseline - annual_cost
+    return -upfront, -annual_cost
 
 
 def test_chain_two_solves_feed_yearly_evaluation() -> None:
-    """两份独立真实求解组成两年评价序列：无复制，指标与明细同源。
+    """两份独立真实求解作为评价输入：无复制，指标与明细同源。
 
-    第二年用不同冻结财务（购电价 0.7→0.5 CNY/kWh，经财务公开解析
-    入口重载；降价不破坏原约束可行性），得真实不同求解结果；两年
-    年净流必须不同，否则即复制单年结果。
+    仅为契约测试数据组织，不是产品级多年编排：第二年用不同冻结财务
+    （购电价 0.7→0.5 CNY/kWh，经财务公开解析入口重载；降价不破坏原
+    约束可行性），得真实不同求解结果；两年年净流必须不同，否则即复
+    制单年结果。t=0 取第一年方案的建设投资（测试边界：跨方案投资调
+    和是 0.11 用例层职责，此处不调和）。campus 样例无正净流，如实
+    断言无解/未回收，不虚构收入。
     """
-    baseline = 900000.0
     inputs1 = _campus_inputs()
     bundle1 = _generate_bundle(inputs1)
     runtime = _runtime()
@@ -433,8 +442,9 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
     receipt2, collected2 = runtime.run(bundle2, _attempt("yr2"))
     solution2 = _adapt(bundle2, receipt2, collected2).outputs["solution"]
 
-    invest, net1 = _yearly_flows(solution1, baseline)
-    _, net2 = _yearly_flows(solution2, baseline)
+    invest, net1 = _yearly_flows(solution1)
+    _, net2 = _yearly_flows(solution2)
+    assert net1 < 0 and net2 < 0, "campus 样例年净流为负（成本大于售电收益）"
     assert net1 != pytest.approx(net2), "两年须为不同真实解，不得复制"
     result = evaluate_project_investment(
         [invest, net1, net2],
@@ -447,6 +457,10 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
     assert result.evaluation_years == 2
     assert [float(row.net) for row in result.rows] == pytest.approx([invest, net1, net2])
     assert result.npv == result.rows[-1].cumulative_discounted
-    assert (result.static_status == PaybackStatus.recovered) == (
-        result.static_payback is not None
-    )
+    assert result.npv < 0
+    assert result.irr is None
+    assert result.irr_status == IRREvaluationStatus.no_solution
+    assert result.static_payback is None
+    assert result.static_status == PaybackStatus.not_recovered
+    assert result.dynamic_payback is None
+    assert result.dynamic_status == PaybackStatus.not_recovered
