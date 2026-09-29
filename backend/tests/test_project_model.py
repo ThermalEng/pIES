@@ -25,6 +25,7 @@ from iesplan.computation.generators.linear import (
     LinearVariable,
     LoweringUnsupportedError,
 )
+from iesplan.computation.generators.project import finance_component_declarations
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices.parser2 import parse_device_model_v2
 from iesplan.finance import FinanceProfile, merge_effective
@@ -793,3 +794,32 @@ def test_mps_tiny_maximize_model_exact_text() -> None:
         " MAX\n"
         "ENDATA\n"
     )
+
+
+def test_finance_component_declarations_cover_produced_idents() -> None:
+    """分量声明覆盖全部已声明产出分量，与目标写法无关。
+
+    mini 夹具：tank1(new) 的 tank_sys 未声明 upfront_capex → 不声明、
+    不补零；annual_fixed_om 量纲为币种/年；计费绑定双后缀同记账仿射式。
+    """
+    artifact, models, series, finance, _config = _inputs()
+    decls = finance_component_declarations(artifact, models, series, finance)
+    assert set(decls) == {
+        "tank1__annual_fixed_om",
+        "tank1__period_variable_om",
+        "import_meter__period_energy_purchase",
+        "import_meter__period_energy_sale",
+    }
+    annual = decls["tank1__annual_fixed_om"]
+    assert annual["unit"] == "CNY/a"
+    assert annual["caliber"] == "annual"
+    # cap 驱动绑定规划变量 tank_cap：35 CNY/kW/a → 内部 35/(1000×31536000)。
+    assert annual["terms"] == {"tank_cap": pytest.approx(35.0 / 31536000.0 / 1000.0)}
+    assert annual["constant"] == pytest.approx(0.0)
+    variable = decls["tank1__period_variable_om"]
+    assert variable["unit"] == "CNY"
+    assert variable["caliber"] == "period"
+    purchase = decls["import_meter__period_energy_purchase"]
+    assert purchase["unit"] == "CNY"
+    assert purchase["caliber"] == "period"
+    assert decls["import_meter__period_energy_sale"] == purchase

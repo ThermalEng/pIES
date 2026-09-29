@@ -72,6 +72,15 @@ from iesplan.modeling import (
 _COMPONENTS_NEW = ("upfront_capex", "annual_fixed_om", "period_variable_om")
 _COMPONENTS_EXISTING = ("period_variable_om",)
 
+#: 分量时间口径标签（与装配/财务契约的 upfront/annual/period 口径一致）。
+_COMPONENT_CALIBER = {
+    "upfront_capex": "upfront",
+    "annual_fixed_om": "annual",
+    "period_variable_om": "period",
+    "period_energy_purchase": "period",
+    "period_energy_sale": "period",
+}
+
 
 def _to_internal(value: float, unit: str) -> float:
     """业务数值 → 内部单位（物理量 SI，纯金额守币种原值）。"""
@@ -129,7 +138,7 @@ class _AffineAcc:
         else:
             self.terms[name] = total
 
-    def add_scaled(self, other: "_AffineAcc", factor: float) -> None:
+    def add_scaled(self, other: _AffineAcc, factor: float) -> None:
         self.add_const(other.constant * factor)
         for name, coeff in other.terms.items():
             self.add_term(name, coeff * factor)
@@ -166,21 +175,45 @@ def build_project_model(
     同一五项输入产生同一模型；超出首版降级能力的数学抛
     ``LoweringUnsupportedError``。
     """
+    return _new_builder(artifact, models, series, finance).build()
+
+
+def _new_builder(
+    artifact: ValidatedAssemblyArtifact,
+    models: Mapping[str, DeviceMathContribution],
+    series: tuple[MaterializedSeries, ...],
+    finance: EffectiveFinanceConfig,
+) -> _ProjectBuilder:
+    """由四项直接输入构造内部编排（建模与分量声明共用同一构造器）。"""
     doc = json.loads(artifact.canonical_text)
     baseline = doc["project_baseline"]
     point_count = _point_count(baseline["resolution"], baseline["leap_year"])
     step_s = _step_seconds(point_count, baseline["leap_year"])
-    devices = doc["devices"]
-    builder = _ProjectBuilder(
+    return _ProjectBuilder(
         doc=doc,
-        devices=devices,
+        devices=doc["devices"],
         models=models,
         series=series,
         finance=finance,
         point_count=point_count,
         step_s=step_s,
     )
-    return builder.build()
+
+
+def finance_component_declarations(
+    artifact: ValidatedAssemblyArtifact,
+    models: Mapping[str, DeviceMathContribution],
+    series: tuple[MaterializedSeries, ...],
+    finance: EffectiveFinanceConfig,
+) -> Mapping[str, Mapping[str, object]]:
+    """财务分量求值声明（ident → unit/caliber/constant/terms）。
+
+    与 ``build_project_model`` 同一构造器、同一分量展开路径，只做
+    初始化与分量展开，不执行装配建模；同一输入恒得同一声明。
+    供 GeneratorProvider 写入 Bundle ``parameters.json``，由配套
+    ResultAdapter 用同一次真实解求值发布，不重建财务模型。
+    """
+    return _new_builder(artifact, models, series, finance).finance_components()
 
 
 def _point_count(resolution: str, leap_year: bool) -> int:
@@ -756,6 +789,53 @@ class _ProjectBuilder:
             names.add(f"{binding_id}__period_energy_sale")
         return names
 
+    def _component_unit(self, component: str) -> str:
+        """分量业务单位（一次性/窗口合计取财务币种，年值取币种/年）。"""
+        if component == "annual_fixed_om":
+            return f"{self.finance.currency}/a"
+        return self.finance.currency
+
+    def finance_components(self) -> Mapping[str, Mapping[str, object]]:
+        """全部已声明财务分量的求值声明（与目标同一构造路径）。
+
+        每个产出分量（资产身份下已声明分量、全部计费绑定后缀）各一条：
+        ``{unit, caliber, constant, terms}``，constant/terms 为内部单位
+        仿射系数（LP 名 → 系数），与目标共用同一分量展开函数
+        （``_cost_affine``/``_tariff_affine``），不依赖规划目标写法。
+        未声明的分量不存在，不声明、不补零；时变价格等超出首版能力者
+        沿 ``_tariff_affine`` 直接拒绝。
+        """
+        out: dict[str, Mapping[str, object]] = {}
+        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
+        for inst in sorted(self.devices):
+            if inst not in instances or instances[inst].get("type") != "costed":
+                continue
+            origin = self.devices[inst].get("asset_origin")
+            produced = _COMPONENTS_NEW if origin == "new" else _COMPONENTS_EXISTING
+            ft_entry = self.finance.finance_types[instances[inst]["finance_type"]]
+            for component in produced:
+                if getattr(ft_entry, component) is None:
+                    continue
+                ident = f"{inst}__{component}"
+                affine = self._cost_affine(inst, component)
+                out[ident] = {
+                    "unit": self._component_unit(component),
+                    "caliber": _COMPONENT_CALIBER[component],
+                    "constant": affine.constant,
+                    "terms": dict(sorted(affine.terms.items())),
+                }
+        for binding_id in sorted(self.doc.get("tariff_bindings") or {}):
+            for component in ("period_energy_purchase", "period_energy_sale"):
+                ident = f"{binding_id}__{component}"
+                affine = self._tariff_affine(binding_id)
+                out[ident] = {
+                    "unit": self._component_unit(component),
+                    "caliber": _COMPONENT_CALIBER[component],
+                    "constant": affine.constant,
+                    "terms": dict(sorted(affine.terms.items())),
+                }
+        return MappingProxyType(out)
+
     def _build_objective(self) -> tuple[_AffineAcc, str]:
         planning = self.doc["planning"]
         raw = planning["objective"]
@@ -845,4 +925,4 @@ def _money_to_internal(money: Any) -> float:
     return _to_internal(float(money.value), money.unit)
 
 
-__all__ = ["build_project_model"]
+__all__ = ["build_project_model", "finance_component_declarations"]

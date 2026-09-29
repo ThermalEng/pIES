@@ -117,9 +117,11 @@ def _parameters(
     offset: object = 1.5,
     objective_unit: object = "CNY",
     outputs: object = None,
+    components: object = None,
 ) -> bytes:
     doc = {
         "assembly": {"id": "assembly-7", "schema_version": "2.0.0"},
+        "components": {} if components is None else components,
         "generator": "ies.generator.highs_milp@1.0.0",
         "objective_offset": offset,
         "objective_unit": objective_unit,
@@ -408,6 +410,87 @@ def test_corrupt_inputs_fail() -> None:
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(unit_map={"x": "not_a_unit_xyz"}),
+    }
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+    assert exc_info.value.reason == "result-protocol-failure"
+
+
+def test_declared_components_evaluated_from_same_solution() -> None:
+    """声明分量用同一次真实解求值发布：金额守币种、年值与物理量换算。
+
+    手算（tiny 最优解 x=3000, y=0；年内部以秒计，a = 31536000 s）：
+    capex = 100 + 2×3000 = 6100 CNY；
+    om_year = from_si(0.5×3000, CNY/a) = 1500×31536000 = 47304000000 CNY/a；
+    energy = 3600000 J = 1.0 kWh。
+    """
+    components = {
+        "capex": {
+            "unit": "CNY",
+            "caliber": "upfront",
+            "constant": 100.0,
+            "terms": {"x": 2.0},
+        },
+        "om_year": {
+            "unit": "CNY/a",
+            "caliber": "annual",
+            "constant": 0.0,
+            "terms": {"x": 0.5},
+        },
+        "energy": {
+            "unit": "kWh",
+            "caliber": "period",
+            "constant": 3600000.0,
+            "terms": {},
+        },
+    }
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(components=components),
+    }
+    result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+    assert result.math_status == "solved"
+    got = {k: dict(v) for k, v in result.outputs["solution"]["components"].items()}
+    assert got["capex"] == {"value": 6100.0, "unit": "CNY", "caliber": "upfront"}
+    assert got["om_year"]["unit"] == "CNY/a"
+    assert got["om_year"]["caliber"] == "annual"
+    assert got["om_year"]["value"] == pytest.approx(47304000000.0)
+    assert got["energy"] == {"value": 1.0, "unit": "kWh", "caliber": "period"}
+
+
+def test_components_fail_loudly() -> None:
+    """分量声明引用未知 LP 变量、形态非法或缺键，一律协议失败。"""
+    bad_decls = [
+        {
+            "capex": {
+                "unit": "CNY",
+                "caliber": "upfront",
+                "constant": 0.0,
+                "terms": {"ghost": 1.0},
+            }
+        },
+        {
+            "capex": {
+                "unit": "CNY",
+                "caliber": "upfront",
+                "constant": 0.0,
+            }
+        },
+        {"capex": "not-a-mapping"},
+    ]
+    for decl in bad_decls:
+        files = {
+            PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+            PARAMETERS_PATH: _parameters(components=decl),
+        }
+        with pytest.raises(ComputationUnavailableError) as exc_info:
+            _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+        assert exc_info.value.reason == "result-protocol-failure"
+    raw = json.loads(_parameters().decode("utf-8"))
+    del raw["components"]
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: (json.dumps(raw, sort_keys=True) + "\n").encode("utf-8"),
     }
     with pytest.raises(ComputationUnavailableError) as exc_info:
         _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))

@@ -20,7 +20,7 @@ from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.computation.generators.mps import write_mps
-from iesplan.computation.generators.project import build_project_model
+from iesplan.computation.generators.project import build_project_model, finance_component_declarations
 from iesplan.computation.protocols import (
     CalculationConfig,
     SolverBundle,
@@ -118,8 +118,9 @@ class HighsMilpProvider:
             artifact, models, series, finance, config
         )
         mps_text, offset = write_mps(model)
+        components = finance_component_declarations(artifact, models, series, finance)
         metadata = self._metadata(
-            artifact, unit_map, offset, objective_unit, seed, config
+            artifact, unit_map, offset, objective_unit, seed, config, components
         )
         manifest = SolverBundleManifest(
             bundle={"generator": self.ref, "solver": SOLVER_REF},
@@ -200,12 +201,15 @@ class HighsMilpProvider:
         objective_unit: str,
         seed: int,
         config: CalculationConfig,
+        components: Mapping[str, Mapping[str, object]],
     ) -> bytes:
         """ResultAdapter 后续必需的最小规范 JSON 元数据（规范字节）。
 
         只记录反向换算与追溯必需项（unit_map、目标偏移、目标业务单位、
-        请求 outputs、固定 seed、precision、装配/引用追溯），不复制完整
-        assembly、models、finance，不写 hash。
+        财务分量求值声明 components、请求 outputs、固定 seed、precision、
+        装配/引用追溯），不复制完整 assembly、models、finance，不写 hash。
+        components 为分量 ident → {unit, caliber, constant, terms}，与目标
+        同一分量展开路径，供配套适配器用同一次真实解求值发布。
         """
         doc = json.loads(artifact.canonical_text)
         assembly = doc.get("assembly") or {}
@@ -213,6 +217,15 @@ class HighsMilpProvider:
             "assembly": {
                 "id": assembly.get("id"),
                 "schema_version": doc.get("schema_version"),
+            },
+            "components": {
+                ident: {
+                    "unit": decl["unit"],
+                    "caliber": decl["caliber"],
+                    "constant": decl["constant"],
+                    "terms": dict(decl["terms"]),
+                }
+                for ident, decl in components.items()
             },
             "generator": self.ref,
             "objective_offset": offset,

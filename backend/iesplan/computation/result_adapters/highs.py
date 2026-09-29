@@ -210,7 +210,8 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
     """读 Bundle 内 generator 规范 parameters（可信生成器产物）。
 
     只取计算必需事实：unit_map、objective_offset、objective_unit、
-    outputs；缺键或形态错误即协议失败，不做 schema 复核。
+    components（财务分量求值声明）、outputs；缺键或形态错误即协议
+    失败，不做 schema 复核。无声明的老 Bundle 不静默降级，直接失败。
     """
     raw = bundle.files.get(_PARAMETERS_PATH)
     if not isinstance(raw, bytes):
@@ -233,11 +234,34 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
     requested = doc.get("outputs")
     if not isinstance(requested, list):
         _fail("parameters.outputs 缺失或非法")
+    components = doc.get("components")
+    if not isinstance(components, dict):
+        _fail("parameters.components 缺失或非法")
+    for ident, decl in components.items():
+        if not isinstance(ident, str) or not isinstance(decl, dict):
+            _fail(f"parameters.components 条目非法: {ident!r}")
+        if not isinstance(decl.get("unit"), str) or not isinstance(
+            decl.get("caliber"), str
+        ):
+            _fail(f"分量 {ident!r} 缺 unit/caliber")
+        if not isinstance(decl.get("constant"), (int, float)) or isinstance(
+            decl.get("constant"), bool
+        ):
+            _fail(f"分量 {ident!r} 的 constant 非法")
+        terms = decl.get("terms")
+        if not isinstance(terms, dict) or not all(
+            isinstance(name, str)
+            and isinstance(coeff, (int, float))
+            and not isinstance(coeff, bool)
+            for name, coeff in terms.items()
+        ):
+            _fail(f"分量 {ident!r} 的 terms 非法")
     return {
         "unit_map": dict(unit_map),
         "offset": float(offset),
         "objective_unit": objective_unit,
         "requested": list(requested),
+        "components": {ident: dict(decl) for ident, decl in components.items()},
     }
 
 
@@ -377,12 +401,43 @@ class HighsResultAdapter:
                 _fail(f"目标反向换算失败 →{objective_unit!r}: {exc}")
         if not math.isfinite(business_total):
             _fail("目标发布值非有限")
+        components_out: dict[str, object] = {}
+        for ident, decl in params["components"].items():
+            total = float(decl["constant"])
+            for name, coeff in decl["terms"].items():
+                try:
+                    index = names.index(name)
+                except ValueError:
+                    _fail(f"分量 {ident!r} 的 LP 变量不在 MPS 列中: {name!r}")
+                total += float(coeff) * solution["primals"][index]
+            if not math.isfinite(total):
+                _fail(f"分量 {ident!r} 内部值非有限")
+            unit = decl["unit"]
+            try:
+                currency = dims_of(unit) == Counter({"currency": 1})
+            except UnitError as exc:
+                _fail(f"分量 {ident!r} 单位无法解析 {unit!r}: {exc}")
+            if currency:
+                value = total
+            else:
+                try:
+                    value = from_si(total, unit)
+                except UnitError as exc:
+                    _fail(f"分量 {ident!r} 反向换算失败 →{unit!r}: {exc}")
+            if not math.isfinite(value):
+                _fail(f"分量 {ident!r} 发布值非有限")
+            components_out[ident] = {
+                "value": value,
+                "unit": unit,
+                "caliber": decl["caliber"],
+            }
         out: dict[str, object] = {}
         if "solution" in params["requested"]:
             out["solution"] = {
                 "objective_value": business_total,
                 "objective_unit": objective_unit,
                 "variables": variables,
+                "components": components_out,
             }
         if "metrics" in params["requested"]:
             out["metrics"] = {

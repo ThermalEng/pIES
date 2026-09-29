@@ -6,7 +6,8 @@ ies.solver.highs@1.7.2 垫片执行并签发回执；注册表按回执固定引
 选中真实 ResultAdapter 解释。不断言大模型手算最优值，只断言：
 成功状态、业务单位、追溯 id、声明输出子集、报告目标与 MPS 目标行
 独立复算一致、两次运行解字节一致；失败分支覆盖不可行模型与策略
-拒绝。无 API/DB/Worker/财务指标/现金流。
+拒绝；成功链另断言声明财务分量与两年真实求解的评价一致性。
+无 API/DB/Worker。
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ from iesplan.computation.generators.highs_milp import (
 from iesplan.computation.result_adapters.highs import HIGHS_ADAPTER
 from iesplan.computation.runtime import validate_highs_arguments
 from iesplan.devices import init_registry, list_devices
-from iesplan.finance import effective_from_yaml
+from iesplan.finance import PaybackStatus, effective_from_yaml, evaluate_project_investment
 from iesplan.modeling import build_math_contribution
 
 HERE = Path(__file__).resolve().parent
@@ -325,3 +326,127 @@ def test_chain_policy_rejected_never_executes() -> None:
     assert result.execution_status == "rejected"
     assert result.math_status == "not_solved"
     assert dict(result.outputs) == {}
+
+
+def _solution_components(solution) -> dict:
+    return {name: dict(entry) for name, entry in solution["components"].items()}
+
+
+def test_chain_success_reports_declared_components() -> None:
+    """成功链发布声明财务分量：键/单位/口径与同解交叉核对一致。
+
+    campus 手算关系（发布值均为业务单位）：
+    pv1__upfront_capex == 3500 × pv_cap；
+    pv1__annual_fixed_om == 35 × pv_cap；
+    objective == upfront + annual×1年 + pv1__period_variable_om
+      + import_meter__period_energy_purchase。
+    """
+    bundle = _generate_bundle(_campus_inputs())
+    runtime = _runtime()
+    receipt, collected = runtime.run(bundle, _attempt("comp"))
+    result = _adapt(bundle, receipt, collected)
+    assert result.math_status == "solved"
+    solution = result.outputs["solution"]
+    components = _solution_components(solution)
+    assert set(components) == {
+        "pv1__upfront_capex",
+        "pv1__annual_fixed_om",
+        "pv1__period_variable_om",
+        "bat1__upfront_capex",
+        "bat1__annual_fixed_om",
+        "bat1__period_variable_om",
+        "hp1__upfront_capex",
+        "hp1__annual_fixed_om",
+        "hp1__period_variable_om",
+        "import_meter__period_energy_purchase",
+        "import_meter__period_energy_sale",
+        "export_meter__period_energy_purchase",
+        "export_meter__period_energy_sale",
+    }
+    for name, entry in components.items():
+        assert set(entry) == {"value", "unit", "caliber"}
+        if name.endswith("__annual_fixed_om"):
+            assert entry["unit"] == "CNY/a", name
+            assert entry["caliber"] == "annual", name
+        else:
+            assert entry["unit"] == "CNY", name
+            assert entry["caliber"] in ("upfront", "period"), name
+        assert math.isfinite(entry["value"])
+
+    by_name = {item["name"]: item for item in solution["variables"]}
+    pv_cap = by_name["pv_cap"]["value"]
+    upfront = components["pv1__upfront_capex"]["value"]
+    annual = components["pv1__annual_fixed_om"]["value"]
+    assert upfront == pytest.approx(3500.0 * pv_cap, rel=1e-9)
+    assert annual == pytest.approx(35.0 * pv_cap, rel=1e-9)
+    expect = (
+        upfront
+        + annual
+        + components["pv1__period_variable_om"]["value"]
+        + components["import_meter__period_energy_purchase"]["value"]
+    )
+    assert solution["objective_value"] == pytest.approx(expect, rel=1e-9)
+
+
+def _yearly_flows(solution, baseline: float) -> tuple[float, float]:
+    """单次真实解 → (t0 投资取负, 年净流 = 基线 − 年成本合计)。
+
+    年成本合计 = 全部 annual 口径 + 全部 period 口径（sale 已带负号）；
+    baseline 为显式评价输入（测试常量，非装配事实）。
+    """
+    components = _solution_components(solution)
+    upfront = sum(
+        entry["value"] for name, entry in components.items()
+        if entry["caliber"] == "upfront"
+    )
+    annual_cost = sum(
+        entry["value"] for name, entry in components.items()
+        if entry["caliber"] in ("annual", "period")
+    )
+    return -upfront, baseline - annual_cost
+
+
+def test_chain_two_solves_feed_yearly_evaluation() -> None:
+    """两份独立真实求解组成两年评价序列：无复制，指标与明细同源。
+
+    第二年用不同冻结财务（购电价 0.7→0.5 CNY/kWh，经财务公开解析
+    入口重载；降价不破坏原约束可行性），得真实不同求解结果；两年
+    年净流必须不同，否则即复制单年结果。
+    """
+    baseline = 900000.0
+    inputs1 = _campus_inputs()
+    bundle1 = _generate_bundle(inputs1)
+    runtime = _runtime()
+    receipt1, collected1 = runtime.run(bundle1, _attempt("yr1"))
+    solution1 = _adapt(bundle1, receipt1, collected1).outputs["solution"]
+
+    finance_source = (
+        SAMPLES / "finance" / "campus.effective-finance.yaml"
+    ).read_text(encoding="utf-8")
+    anchor = "      value: '0.7'\n"
+    assert finance_source.count(anchor) == 1, "campus 购电价格锚点变化，需重审"
+    finance2 = effective_from_yaml(
+        finance_source.replace(anchor, "      value: '0.5'\n", 1)
+    )
+    artifact, models, series, _finance, config = inputs1
+    bundle2 = _generate_bundle((artifact, models, series, finance2, config))
+    receipt2, collected2 = runtime.run(bundle2, _attempt("yr2"))
+    solution2 = _adapt(bundle2, receipt2, collected2).outputs["solution"]
+
+    invest, net1 = _yearly_flows(solution1, baseline)
+    _, net2 = _yearly_flows(solution2, baseline)
+    assert net1 != pytest.approx(net2), "两年须为不同真实解，不得复制"
+    result = evaluate_project_investment(
+        [invest, net1, net2],
+        0.08,
+        2,
+        currency="CNY",
+        price_basis="tax_inclusive",
+        base_year=2025,
+    )
+    assert result.evaluation_years == 2
+    assert [float(row.net) for row in result.rows] == pytest.approx([invest, net1, net2])
+    assert result.npv == result.rows[-1].cumulative_discounted
+    assert (result.static_status == PaybackStatus.recovered) == (
+        result.static_payback is not None
+    )
