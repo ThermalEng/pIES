@@ -4,8 +4,6 @@
   组装）与过滤 + 游标分页查询；
 - 覆盖 `iesplan.audit` 域门面（旧 services.audit 已删除）：统一入口返回记录、
   查询信封、序列化形状（时间为 ISO 字符串）；
-- 覆盖 `application.configuration.load_work_graph`（旧 services.config 已删除；
-  经草稿内容 model 节取 2.0 名键设备清单）。
 运行环境与切片 7 一致：SQLite 内存库 + 临时 data_dir（对象存储）。
 """
 
@@ -23,7 +21,6 @@ from sqlalchemy.pool import StaticPool
 from iesplan import audit as audit_domain
 from iesplan import model as model_domain
 from iesplan import project as project_domain
-from iesplan.application import configuration as configuration_uc
 from iesplan.config import settings
 from iesplan.db import Base
 from iesplan.identity.persistence import User as _UserForDDL  # noqa: F401
@@ -120,40 +117,3 @@ def test_audit_service_envelope_and_serialization(db: Session) -> None:
     tail = audit_domain.query_audit(db, cursor=envelope["next_cursor"], limit=1)
     assert tail["items"] == [] and tail["next_cursor"] is None
     assert audit_domain.query_audit(db, action="no.such.action")["items"] == []
-
-
-def test_config_load_work_graph_through_model_domain(db: Session, data_dir: Path) -> None:
-    from iesplan.application.identity import create_user
-    from iesplan.application.projects import create_project, update_draft
-
-    owner = create_user(
-        db, "slice8owner", "Slice8-pass1", role="engineer",
-        force_password_change=False, display_name="slice8",
-    )
-    db.commit()
-    project = create_project(
-        db, owner, name="slice8-proj",
-        baseline_resolution="1h", baseline_leap_year=False,
-        baseline_scenario_mode="single",
-    )
-    assert configuration_uc.load_work_graph(db, project.id) == {"devices": []}
-
-    update_draft(
-        db, owner, project.id,
-        [{"id": "c-l1", "unit": "model", "type": "model.upsert_device",
-          "payload": {"name": "L1", "device_type": "ies.device.electric_load",
-                      "kind": "new", "params": {"a": 1}}}],
-        1,
-    )
-    got = configuration_uc.load_work_graph(db, project.id)
-    assert got == {
-        "devices": [
-            {
-                "name": "L1",
-                "device_type": "ies.device.electric_load",
-                "kind": "new",
-                "params": {"a": 1},
-            }
-        ]
-    }
-    assert configuration_uc.load_work_graph(db, 999999) == {"devices": []}

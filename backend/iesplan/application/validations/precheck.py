@@ -56,11 +56,7 @@ from iesplan.devices import get_device as get_device_type
 from iesplan.devices.contracts2 import PropertySpec
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord
-from iesplan.application.configuration import (
-    get_config as _app_get_config,
-    load_work_graph as _app_load_work_graph,
-    validate_config as _app_validate_config,
-)
+from iesplan import configuration as configuration_domain
 from iesplan.storage import add_ref, find_refs_by_owner, get_object, put_object
 
 # ---------------------------------------------------------------------------
@@ -70,13 +66,11 @@ from iesplan.storage import add_ref, find_refs_by_owner, get_object, put_object
 VALID_MODEL_NO_GRID = "VALID-MODEL-001"  # 模型缺少电网连接
 VALID_MODEL_NO_LOAD = "VALID-MODEL-002"  # 模型缺少负荷
 VALID_MODEL_NO_SUPPLY = "VALID-MODEL-003"  # 有负荷的载体缺少供给设备
-VALID_CONFIG_NOT_SAVED = "VALID-CONFIG-001"  # 计算配置未保存(使用默认配置)
-VALID_CONFIG_NO_IRR = "VALID-CONFIG-002"  # 缺少最低 IRR 硬约束
+VALID_CONFIG_NOT_SAVED = "VALID-CONFIG-001"  # 计算配置未保存(无默认配置可用)
 VALID_DATA_NO_BINDING = "VALID-DATA-001"  # 未绑定任何数据集版本
 VALID_DATA_VERSION_INVALID = "VALID-DATA-002"  # 数据集版本质量阻断
 VALID_DATA_BINDING_BROKEN = "VALID-DATA-004"  # 绑定的版本缺失/已删除/不属于本项目
 VALID_FIN_NO_CONFIRM = "VALID-FIN-001"  # 缺少财务基准确认证据
-VALID_FIN_STALE = "VALID-FIN-002"  # 财务基准确认内容与当前配置不一致
 VALID_READY_NOT_ASSEMBLABLE = "VALID-READY-001"  # 计算快照不可组装
 
 
@@ -88,13 +82,11 @@ def _register_diag_codes() -> None:
         VALID_MODEL_NO_GRID: "模型缺少电网连接(至少 1 个)",
         VALID_MODEL_NO_LOAD: "模型缺少负荷(至少 1 个)",
         VALID_MODEL_NO_SUPPLY: "有负荷的载体缺少供给设备",
-        VALID_CONFIG_NOT_SAVED: "计算配置未保存, 预检使用自动生成的默认配置",
-        VALID_CONFIG_NO_IRR: "缺少最低 IRR 硬约束(REQ-CALC-006)",
+        VALID_CONFIG_NOT_SAVED: "计算配置未保存(无默认配置可用)",
         VALID_DATA_NO_BINDING: "项目未绑定任何数据集版本",
         VALID_DATA_VERSION_INVALID: "所选数据集版本存在阻断性质量问题",
         VALID_DATA_BINDING_BROKEN: "绑定的数据集版本缺失/已删除或不属于本项目",
         VALID_FIN_NO_CONFIRM: "缺少财务基准确认证据(架构宪法 §16 安全与审计)",
-        VALID_FIN_STALE: "财务基准确认内容与当前配置不一致, 需重新确认",
         VALID_READY_NOT_ASSEMBLABLE: "计算快照不可组装",
     }
     for code, desc in codes.items():
@@ -104,12 +96,10 @@ def _register_diag_codes() -> None:
         VALID_MODEL_NO_LOAD: "ies.diag.valid.model_no_load",
         VALID_MODEL_NO_SUPPLY: "ies.diag.valid.model_no_supply",
         VALID_CONFIG_NOT_SAVED: "ies.diag.valid.config_not_saved",
-        VALID_CONFIG_NO_IRR: "ies.diag.valid.config_no_irr",
         VALID_DATA_NO_BINDING: "ies.diag.valid.data_no_binding",
         VALID_DATA_VERSION_INVALID: "ies.diag.valid.data_version_invalid",
         VALID_DATA_BINDING_BROKEN: "ies.diag.valid.data_binding_broken",
         VALID_FIN_NO_CONFIRM: "ies.diag.valid.fin_no_confirm",
-        VALID_FIN_STALE: "ies.diag.valid.fin_stale",
         VALID_READY_NOT_ASSEMBLABLE: "ies.diag.valid.ready_not_assemblable",
     }.items():
         diag_mod.DIAG_MESSAGE_KEYS.setdefault(code, key)
@@ -118,12 +108,10 @@ def _register_diag_codes() -> None:
         VALID_MODEL_NO_LOAD: "ies.fix.valid.model_add_load",
         VALID_MODEL_NO_SUPPLY: "ies.fix.valid.model_add_supply",
         VALID_CONFIG_NOT_SAVED: "ies.fix.valid.config_save",
-        VALID_CONFIG_NO_IRR: "ies.fix.valid.config_set_irr",
         VALID_DATA_NO_BINDING: "ies.fix.valid.data_bind",
         VALID_DATA_VERSION_INVALID: "ies.fix.valid.data_fix_version",
         VALID_DATA_BINDING_BROKEN: "ies.fix.valid.data_fix_binding",
         VALID_FIN_NO_CONFIRM: "ies.fix.valid.fin_confirm",
-        VALID_FIN_STALE: "ies.fix.valid.fin_reconfirm",
         VALID_READY_NOT_ASSEMBLABLE: "ies.fix.valid.ready_check",
     }.items():
         diag_mod.DIAG_FIX_HINT_KEYS.setdefault(code, hint)
@@ -219,15 +207,12 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
         warning 不降级阻断。
     """
     project = project_domain.require_project(db, project_id)
-    # 配置与设备图各只读一次(未保存时配置为生成的默认配置), 供检查项共用
-    config_data = _app_get_config(db, project_id)
-    graph = _app_load_work_graph(db, project_id)
     diags: list[Diagnostic] = []
     _check_model(db, project_id, diags)
-    _check_config(project_id, config_data, graph, diags)
+    _check_config(db, project_id, diags)
     if include_data:
         _check_data(db, project, diags)
-    _check_financial_baseline(db, project, config_data, diags)
+    _check_financial_baseline(db, project, diags)
     _check_readiness(project, diags)
     # 统一标记: 阻断错误保持阻断(与严重度一致), 警告不降级也不升级。
     # Diagnostic 为深度不可变类型, 上下文/阻断标记经 replace 生成新对象。
@@ -551,39 +536,22 @@ def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _check_config(project_id: int, config_data: dict, graph: dict, diags: list[Diagnostic]) -> None:
-    """计算配置: 参数当前值/变量初始值与界内/目标/约束/算法兼容(validate_config)。
+def _check_config(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
+    """计算配置: 须存在已保存 revision。
 
-    参数:
-        project_id: 项目 id(诊断定位)。
-        config_data: get_config 的返回 {"config", "meta", "version", "status", ...};
-            由 validate_project 一次性读取, 避免重复加载。
-        graph: load_work_graph 的设备清单(validate_config 的参数/变量校验输入)。
+    已保存内容在用户输入入口唯一校验, 此处只判存在性, 不重复校验内容。
     """
-    config = config_data.get("config") or {}
     loc = {"object_type": "config", "object_id": ""}
-    if config_data.get("version") is None:
-        # 未保存过配置: 预检使用自动生成的默认配置, 给出警告
+    latest = configuration_domain.get_latest_calculation_config(db, project_id)
+    if latest is None:
         diags.append(
             make_diag(
                 VALID_CONFIG_NOT_SAVED,
                 severity=SEVERITY_WARNING,
-                params={"project_id": project_id, "reason_code": "using_defaults"},
+                params={"project_id": project_id, "reason_code": "not_saved"},
                 location=loc,
             )
         )
-    # 最低 IRR 硬约束(REQ-CALC-006: 独立顶层字段, 不可被目标权重抵消)
-    if config.get("irr_floor") is None:
-        diags.append(
-            make_diag(
-                VALID_CONFIG_NO_IRR,
-                severity=SEVERITY_ERROR,
-                params={"project_id": project_id},
-                location={**loc, "field": "irr_floor"},
-            )
-        )
-    # 参数/变量/目标/约束/算法能力(REQ-CALC-002/004/005: 错误级阻断)
-    diags.extend(_app_validate_config(config, graph))
 
 
 # ---------------------------------------------------------------------------
@@ -739,24 +707,16 @@ def _latest_baseline_evidence(db: Session, project_id: int) -> AuditRecord | Non
     return rows[0] if rows else None
 
 
-def _current_assumptions(project: ProjectRecord, config: dict) -> dict:
-    """从当前配置导出财务基准关键假设(与确认时记录的键集合一致)。"""
-    econ = (config.get("parameters") or {}).get("economic") or {}
-    return {
-        "discount_rate": econ.get("discount_rate"),
-        "tax_rate": econ.get("tax_rate"),
-        "project_years": econ.get("project_years"),
-        "depreciation_years": econ.get("depreciation_years"),
-        "currency": project.currency or econ.get("currency"),
-        "irr_floor": config.get("irr_floor"),
-    }
-
-
 def _check_financial_baseline(
-    db: Session, project: ProjectRecord, config_data: dict, diags: list[Diagnostic]
+    db: Session, project: ProjectRecord, diags: list[Diagnostic]
 ) -> None:
-    """财务基准确认证据检查(架构宪法 §16 安全与审计): 确认人齐全且确认内容
-    与当前配置一致即通过; 不一致 → VALID-FIN-002 警告(直接比对原文)。"""
+    """财务基准确认证据检查(架构宪法 §16 安全与审计): 确认证据存在且确认人
+    齐全即通过。
+
+    注: 确认内容与当前假设的一致性比对已随旧形态经济参数移除而暂停;
+    评价输入(评价年限/折现率)以后续独立用户确认流程重建该比对, 此处不以
+    空假设伪造过期警告。
+    """
     loc = {
         "object_type": "project",
         "object_id": str(project.id),
@@ -780,19 +740,6 @@ def _check_financial_baseline(
                 VALID_FIN_NO_CONFIRM,
                 severity=SEVERITY_ERROR,
                 params={"project_id": project.id, "reason_code": "incomplete_evidence"},
-                location=loc,
-            )
-        )
-        return
-    confirmed = after.get("assumptions") or {}
-    config = config_data.get("config") or {}
-    current = _current_assumptions(project, config)
-    if confirmed != current:
-        diags.append(
-            make_diag(
-                VALID_FIN_STALE,
-                severity=SEVERITY_WARNING,
-                params={"project_id": project.id},
                 location=loc,
             )
         )

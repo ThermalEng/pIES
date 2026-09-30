@@ -59,81 +59,9 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.data.calendar_note': '标准非闰年 365 天',
 
   // -------------------------------------------------------------------------
-  // 计算配置(设计输入 §9.2 参数/变量/目标/约束)
+  // 计算配置(0.12-A1 起 CalculationConfig revision; 旧形态经济/变量键已移除)
   // -------------------------------------------------------------------------
-  'ies.config.economic_params': '经济参数',
-  'ies.config.evaluation_period': '评价周期(年)',
-  'ies.config.discount_rate': '折现率(%)',
-  'ies.config.tax_rate': '税率(%)',
-  'ies.config.depreciation_years': '折旧年限(年)',
-  'ies.config.currency': '币种',
-  'ies.config.min_irr_note': '最低可接受 IRR 为独立硬约束,与折现率无关;结果低于该值时视为不可接受',
-  'ies.config.hard_constraint': '硬约束',
-  'ies.config.hard_constraint_notice': '最低税后项目投资 IRR 为硬约束,不可被目标权重抵消',
-  'ies.config.hard_irr_summary': '税后项目投资 IRR ≥ {value}',
-  'ies.config.hard_irr_unset': '未设置最低 IRR(建议设置以保护项目收益底线)',
-  'ies.config.new_device_variables': '新增设备容量变量',
-  'ies.config.existing_devices_fixed': '存量设备(容量固定,不参与容量优化)',
-  'ies.config.initial_value': '初值',
-  'ies.config.lower_bound': '下界',
-  'ies.config.upper_bound': '上界',
-  'ies.config.add_variable': '添加变量',
-  'ies.config.remove_variable': '删除变量',
-  'ies.config.variable_hint': '初值/上下界留空时使用设备注册表默认值',
-  'ies.config.primary_objective': '主目标',
-  'ies.config.objective_irr_max': '税后项目投资 IRR 最大化(默认)',
-  'ies.config.objective_npv_max': 'NPV 最大化',
-  'ies.config.objective_equity_irr_max': '资本金 IRR 最大化',
-  'ies.config.carbon_target': '碳排放目标',
-  'ies.config.carbon_cap_enable': '设置运行期碳排放上限',
-  'ies.config.carbon_cap': '碳排放上限(tCO₂/年)',
-  'ies.config.predefined_constraints': '预定义约束',
-  'ies.config.advanced_mode': '高级模式:自定义表达式约束',
-  'ies.config.advanced_hint':
-    '受限语法:仅支持四则运算(+ - * / // %)、幂(^)与比较(<= >= == < >);函数仅限白名单(abs、min、max、clamp、sqrt、pow、round、if 等);标识符必须为已声明变量/参数/时序列字段;禁止赋值、循环与函数定义。表达式提交后由后端解析校验(EXPR-* 诊断)。',
-  'ies.config.expression_name': '表达式名称',
-  'ies.config.expression': '表达式',
-  'ies.config.add_expression': '添加',
-  'ies.config.remove_expression': '删除',
-  'ies.config.expression_placeholder': '例如:co2_annual <= 5000',
-  'ies.config.alg_mode': '算法选择方式',
-  'ies.config.alg_auto': '自动选择(由系统按模型特征推荐)',
-  'ies.config.alg_manual': '手动选择',
-  'ies.config.alg_capability': '支持的变量类型',
-  'ies.config.alg_cap_continuous': '连续',
-  'ies.config.alg_cap_discrete': '连续 + 整数/0-1',
-  'ies.config.alg_incompat_discrete':
-    '算法 {algo} 不支持整数/0-1 离散变量(当前配置含 {count} 个),请选择 MILP、启发式或遗传算法',
-  'ies.config.alg_custom_note': '自定义算法由后端校验;兼容性未确认前建议保持默认算法',
-  'ies.config.saved_ok': '配置已保存(版本 {version})',
   'ies.config.no_project': '请从项目工作台进入计算配置页面',
-  'ies.config.fixed': '固定',
-  'ies.config.capacity': '容量',
-  'ies.config.validation_diagnostics': '校验诊断',
-  'ies.config.con_energy_balance': '电力供需平衡',
-  'ies.config.con_heat_balance': '热力供需平衡',
-  'ies.config.con_cooling_balance': '冷量供需平衡',
-  'ies.config.con_no_reverse_feed': '禁止反送电(电网侧无售电)',
-  'ies.config.con_capacity_bounds': '设备出力不超过容量上下限',
-  'ies.config.con_soc_limits': '电池 SOC 运行限值',
-  'ies.config.con_co2_cap': '运行期碳排放上限约束',
-  'ies.config.con_load_satisfaction': '负荷必须完全满足(不允许削减)',
-  'ies.config.con_capacity_limits': '设备出力不超过容量上限',
-  'ies.config.err.name_required': '配置名称不能为空',
-  'ies.config.err.period_invalid': '评价周期必须为不小于 1 的整数(年)',
-  'ies.config.err.rate_range': '{field} 取值应在 0–100 之间',
-  'ies.config.err.depreciation_invalid': '折旧年限必须为不小于 1 的整数(年)',
-  'ies.config.err.min_irr_range': '最低可接受 IRR 取值应在 0–100 之间(%)',
-  'ies.config.err.variable_name_required': '变量 {index} 名称不能为空',
-  'ies.config.err.variable_name_dup': '变量名 {name} 重复,请使用唯一名称',
-  'ies.config.err.variable_name_invalid': '变量名 {name} 不合法,须为标识符(字母/下划线开头,仅含字母数字下划线)',
-  'ies.config.err.variable_initial_required': '变量 {name} 必须填写初始值',
-  'ies.config.err.variable_bounds': '变量 {name} 的下界应不大于上界',
-  'ies.config.err.variable_initial_range': '变量 {name} 的初值应在上下界范围内',
-  'ies.config.err.alg_incompat': '算法 {algo} 与当前配置不兼容:{reason}',
-  'ies.config.err.carbon_cap_invalid': '碳排放上限必须为大于 0 的数(tCO₂/年)',
-  'ies.config.err.expression_required': '表达式名称与内容不能为空',
-  'ies.config.err.expression_name_dup': '表达式名称 {name} 重复',
 
   // -------------------------------------------------------------------------
   // 诊断渲染(数据/配置共用)
@@ -159,7 +87,7 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.diag.loc.param': '参数',
 
   // -------------------------------------------------------------------------
-  // 项目校验(ValidationPage: 完整预检 + 财务基准确认)
+  // 项目校验(ValidationPage: 完整预检)
   // -------------------------------------------------------------------------
   'ies.validation.title': '项目校验',
   'ies.validation.subtitle': '对模型、数据与计算配置做完整预检;存在阻断问题时需修复后才能提交计算任务',
@@ -176,13 +104,6 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.validation.blocked_note': '当前禁止提交计算任务,请按修复建议处理下列问题后重新运行校验',
   'ies.validation.warnings_note': '校验通过,但存在警告,建议核对下列诊断项',
   'ies.validation.run_failed': '校验失败:{reason}',
-  'ies.validation.baseline_title': '财务基准确认',
-  'ies.validation.baseline_desc':
-    '财务基准 = 不新增建设、仅用已有设备运行,作为方案收益的对比参照。确认后系统记录确认人、时间与假设校验值(追加式审计,不可覆盖)。',
-  'ies.validation.baseline_confirm': '确认财务基准',
-  'ies.validation.baseline_confirmed': '财务基准已确认(作为收益对比参照)',
-  'ies.validation.baseline_ok': '财务基准确认已记录',
-  'ies.validation.baseline_failed': '基准确认失败:{reason}',
 
   // -------------------------------------------------------------------------
   // 导出(ExportPage: Excel 报告 + 完整项目包)
@@ -345,82 +266,9 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
   'ies.data.quality_pass': 'Pass',
   'ies.data.calendar_note': 'Standard 365-day non-leap year',
 
-  // Calc config (Design Input §9.2 params / variables / objectives / constraints)
-  'ies.config.economic_params': 'Economic parameters',
-  'ies.config.evaluation_period': 'Evaluation period (years)',
-  'ies.config.discount_rate': 'Discount rate (%)',
-  'ies.config.tax_rate': 'Tax rate (%)',
-  'ies.config.depreciation_years': 'Depreciation years',
-  'ies.config.currency': 'Currency',
-  'ies.config.min_irr_note':
-    'Minimum acceptable IRR is a hard constraint independent of the discount rate; results below it are unacceptable',
-  'ies.config.hard_constraint': 'Hard constraint',
-  'ies.config.hard_constraint_notice':
-    'Minimum after-tax project IRR is a hard constraint; it cannot be offset by objective weights',
-  'ies.config.hard_irr_summary': 'After-tax project IRR ≥ {value}',
-  'ies.config.hard_irr_unset': 'No minimum IRR set (recommended to protect the project return floor)',
-  'ies.config.new_device_variables': 'New device capacity variables',
-  'ies.config.existing_devices_fixed': 'Existing devices (fixed capacity, not optimized)',
-  'ies.config.initial_value': 'Initial',
-  'ies.config.lower_bound': 'Lower bound',
-  'ies.config.upper_bound': 'Upper bound',
-  'ies.config.add_variable': 'Add variable',
-  'ies.config.remove_variable': 'Remove variable',
-  'ies.config.variable_hint': 'Leave initial/bounds empty to use device registry defaults',
-  'ies.config.primary_objective': 'Primary objective',
-  'ies.config.objective_irr_max': 'Maximize after-tax project IRR (default)',
-  'ies.config.objective_npv_max': 'Maximize NPV',
-  'ies.config.objective_equity_irr_max': 'Maximize equity IRR',
-  'ies.config.carbon_target': 'Carbon target',
-  'ies.config.carbon_cap_enable': 'Set an annual carbon emission cap',
-  'ies.config.carbon_cap': 'Carbon cap (tCO₂/year)',
-  'ies.config.predefined_constraints': 'Predefined constraints',
-  'ies.config.advanced_mode': 'Advanced mode: custom expression constraints',
-  'ies.config.advanced_hint':
-    'Restricted syntax: arithmetic (+ - * / // %) and power (^) plus comparisons (<= >= == < >) only; whitelisted functions only (abs, min, max, clamp, sqrt, pow, round, if, ...); identifiers must be declared variables, parameters or time-series fields; no assignments, loops or function definitions. Expressions are parsed and validated by the backend (EXPR-* diagnostics).',
-  'ies.config.expression_name': 'Expression name',
-  'ies.config.expression': 'Expression',
-  'ies.config.add_expression': 'Add',
-  'ies.config.remove_expression': 'Remove',
-  'ies.config.expression_placeholder': 'e.g. co2_annual <= 5000',
-  'ies.config.alg_mode': 'Algorithm selection',
-  'ies.config.alg_auto': 'Auto (recommended by the system)',
-  'ies.config.alg_manual': 'Manual',
-  'ies.config.alg_capability': 'Supported variable types',
-  'ies.config.alg_cap_continuous': 'Continuous',
-  'ies.config.alg_cap_discrete': 'Continuous + integer/binary',
-  'ies.config.alg_incompat_discrete':
-    'Algorithm {algo} does not support integer/binary variables ({count} configured); choose MILP, heuristic or GA',
-  'ies.config.alg_custom_note': 'Custom algorithms are validated by the backend; keep the default until confirmed',
-  'ies.config.saved_ok': 'Config saved (version {version})',
+  // Calc config (CalculationConfig revision since 0.12-A1; legacy params keys removed)
+  // -------------------------------------------------------------------------
   'ies.config.no_project': 'Open the calculation config from a project workbench',
-  'ies.config.fixed': 'Fixed',
-  'ies.config.capacity': 'Capacity',
-  'ies.config.validation_diagnostics': 'Validation diagnostics',
-  'ies.config.con_energy_balance': 'Electricity supply-demand balance',
-  'ies.config.con_heat_balance': 'Heat supply-demand balance',
-  'ies.config.con_cooling_balance': 'Cooling supply-demand balance',
-  'ies.config.con_no_reverse_feed': 'No reverse feed-in to the grid',
-  'ies.config.con_capacity_bounds': 'Device output within capacity bounds',
-  'ies.config.con_soc_limits': 'Battery SOC operating limits',
-  'ies.config.con_co2_cap': 'Annual carbon emission cap',
-  'ies.config.con_load_satisfaction': 'Load must be fully satisfied (no shedding allowed)',
-  'ies.config.con_capacity_limits': 'Device output within capacity limits',
-  'ies.config.err.name_required': 'Config name is required',
-  'ies.config.err.period_invalid': 'Evaluation period must be an integer of at least 1 (years)',
-  'ies.config.err.rate_range': '{field} must be between 0 and 100',
-  'ies.config.err.depreciation_invalid': 'Depreciation years must be an integer of at least 1',
-  'ies.config.err.min_irr_range': 'Minimum acceptable IRR must be between 0 and 100 (%)',
-  'ies.config.err.variable_name_required': 'Variable #{index} needs a name',
-  'ies.config.err.variable_name_dup': 'Variable name {name} is duplicated; use unique names',
-  'ies.config.err.variable_name_invalid': 'Variable name {name} is invalid; must be an identifier (letters/underscore first, alphanumeric/underscore only)',
-  'ies.config.err.variable_initial_required': 'Variable {name} requires an initial value',
-  'ies.config.err.variable_bounds': 'Variable {name}: lower bound must not exceed upper bound',
-  'ies.config.err.variable_initial_range': 'Variable {name}: initial value must lie within its bounds',
-  'ies.config.err.alg_incompat': 'Algorithm {algo} is incompatible with this config: {reason}',
-  'ies.config.err.carbon_cap_invalid': 'Carbon cap must be a number greater than 0 (tCO₂/year)',
-  'ies.config.err.expression_required': 'Expression name and content are required',
-  'ies.config.err.expression_name_dup': 'Expression name {name} is duplicated',
 
   // Diagnostic rendering (data / config shared)
   'ies.diag.location': 'Location',
@@ -443,7 +291,7 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
   'ies.diag.loc.object': 'Object',
   'ies.diag.loc.param': 'Parameter',
 
-  // Project validation (ValidationPage: full preflight + financial baseline confirmation)
+  // Project validation (ValidationPage: full preflight)
   'ies.validation.title': 'Project Validation',
   'ies.validation.subtitle':
     'Runs a full preflight check on model, data and config; blocking issues must be fixed before submitting calculation tasks',
@@ -452,7 +300,7 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
   'ies.validation.result': 'Validation result',
   'ies.validation.not_run': 'Validation not run yet',
   'ies.validation.not_run_hint':
-    'Click "Run validation" to preflight model / data / config / baseline confirmation / readiness',
+    'Click "Run validation" to preflight model / data / config / readiness',
   'ies.validation.diag_count_suffix': 'diagnostics',
   'ies.validation.status_ok': 'Passed',
   'ies.validation.status_warnings': 'Warnings',
@@ -462,13 +310,6 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
     'Submitting calculation tasks is currently blocked. Fix the issues below and re-run validation.',
   'ies.validation.warnings_note': 'Validation passed with warnings; review the diagnostics below',
   'ies.validation.run_failed': 'Validation failed: {reason}.',
-  'ies.validation.baseline_title': 'Financial baseline confirmation',
-  'ies.validation.baseline_desc':
-    'The financial baseline assumes no new construction and uses only existing equipment, serving as the reference for plan returns. Confirmation is recorded with the confirmator, time and assumptions hash (append-only audit, cannot be overwritten).',
-  'ies.validation.baseline_confirm': 'Confirm financial baseline',
-  'ies.validation.baseline_confirmed': 'Financial baseline confirmed (reference for plan returns)',
-  'ies.validation.baseline_ok': 'Financial baseline confirmation recorded',
-  'ies.validation.baseline_failed': 'Baseline confirmation failed: {reason}.',
 
   // Export (ExportPage: Excel report + full project package)
   'ies.export.subtitle': 'Export an Excel results report, or package the full project',

@@ -1,37 +1,30 @@
-"""计算配置 API(U06): /api/projects/{id}/config 与 /api/registry/algorithms。
+"""计算配置 API(U06, 0.12-A1 起收敛为 CalculationConfig revision)。
 
-- GET    /api/projects/{id}/config          当前配置 + 参数元数据(单位/范围/帮助键)
-- PUT    /api/projects/{id}/config          保存 {config, expected_revision};
-  校验不通过返回 422 + 标准错误信封
-- POST   /api/projects/{id}/config/validate 只校验不保存
-- GET    /api/projects/{id}/config/default  重新生成默认配置
-- GET    /api/registry/algorithms           算法列表 + 能力
+- GET    /api/projects/{id}/config          最新计算配置 revision(未保存 404)
+- PUT    /api/projects/{id}/config          保存 {calculation_config, expected_revision};
+  输入入口唯一校验，不通过返回 422 + 标准错误信封；revision 失配 409
 
-注意: 本模块导出 config_router / registry_router 两个路由, 由集成阶段在
-main.py 通过 include_router 挂载(请求会话依赖见 iesplan/api/deps)。
+注意: 本模块导出 config_router, 由集成阶段在 main.py 通过 include_router
+挂载(请求会话依赖见 iesplan/api/deps)。
 
-认证与权限: 配置域全部端点要求窗口会话认证(iesplan.api.auth.CurrentUser,
-未认证 401); 读/校验接口要求项目 view, 保存要求项目 edit(403);
-算法注册表(/api/registry/algorithms)公开。
+认证与权限: 读要求项目 view, 保存要求项目 edit(403); 未认证 401。
 
-传输适配说明: 每个业务动作只转交 application.configuration.config_cases
+传输适配说明: 每个业务动作只转交 application.configuration.calc_config
 中的一个完整用例(授权、业务步骤与事务均在用例内); 本模块只做 DTO、
 一次调用和错误/响应映射。
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.api.deps import get_request_db
 from iesplan.application import configuration as config_cases
-from iesplan.core.errors import error_envelope
 
 #: FastAPI 依赖注入的数据库会话
 DbSession = Annotated[Session, Depends(get_request_db)]
@@ -39,79 +32,32 @@ DbSession = Annotated[Session, Depends(get_request_db)]
 #: 配置域路由: 挂载前缀 /api/projects/{project_id}/config
 config_router = APIRouter(prefix="/api/projects/{project_id}/config", tags=["config"])
 
-#: 注册表路由: 挂载前缀 /api/registry
-registry_router = APIRouter(prefix="/api/registry", tags=["registry"])
+
+class CalculationConfigSaveRequest(BaseModel):
+    """保存请求: 12 字段 CalculationConfig 全文 + 自有链期望 revision。"""
+
+    calculation_config: dict[str, Any] = Field(
+        description="计算配置(12 字段 CalculationConfig 契约)"
+    )
+    expected_revision: int | None = Field(
+        default=None, ge=1, description="期望的当前 revision; 首次保存为 null"
+    )
 
 
-class ConfigSaveRequest(BaseModel):
-    """保存请求: 计算配置 + 期望草稿修订(乐观锁)。"""
-
-    config: dict = Field(description="计算配置(结构见 application/configuration)")
-    expected_revision: int = Field(ge=1, description="期望的草稿修订号")
-
-
-class ConfigValidateRequest(BaseModel):
-    """校验请求: 只校验不保存。"""
-
-    config: dict = Field(description="计算配置")
-
-
-@config_router.get("", summary="读取当前计算配置")
+@config_router.get("", summary="读取最新计算配置 revision")
 def get_config_endpoint(project_id: int, db: DbSession, user: CurrentUser) -> dict:
-    """当前配置 + 参数元数据; 未保存过返回生成的默认配置(version=None)。"""
-    return config_cases.get_config_case(db, user, project_id)
+    """最新 CalculationConfig revision + revision 号; 未保存过 404。"""
+    return config_cases.get_calculation_config_case(db, user, project_id)
 
 
-@config_router.put("", summary="保存计算配置")
+@config_router.put("", summary="保存计算配置(新 revision)")
 def save_config_endpoint(
     project_id: int,
-    body: ConfigSaveRequest,
-    db: DbSession,
-    user: CurrentUser,
-) -> JSONResponse:
-    """保存配置(与草稿修订绑定); 校验不通过返回 422 + 标准错误信封, 不落库。"""
-    result = config_cases.save_config_case(
-        db, user, project_id, body.config, body.expected_revision
-    )
-    if not result.saved:
-        return JSONResponse(
-            status_code=422,
-            content=error_envelope(
-                code="CONFIG-VAL-001",
-                message_key="ies.error.data_validation_failed",
-                params={"diagnostics": result.diagnostics, "count": result.count},
-            ),
-        )
-    return JSONResponse(
-        status_code=200,
-        content={
-            "config": result.config,
-            "meta": result.meta,
-            "version": result.version,
-            "status": result.status,
-            "diagnostics": [],
-        },
-    )
-
-
-@config_router.post("/validate", summary="校验计算配置(不保存)")
-def validate_config_endpoint(
-    project_id: int,
-    body: ConfigValidateRequest,
+    body: CalculationConfigSaveRequest,
     db: DbSession,
     user: CurrentUser,
 ) -> dict:
-    """只校验不保存; 始终返回 200 + diagnostics(前端实时校验用)。"""
-    return config_cases.validate_config_case(db, user, project_id, body.config)
-
-
-@config_router.get("/default", summary="重新生成默认计算配置")
-def default_config_endpoint(project_id: int, db: DbSession, user: CurrentUser) -> dict:
-    """基于系统模型设备清单重新生成默认配置(不保存)。"""
-    return config_cases.default_config_case(db, user, project_id)
-
-
-@registry_router.get("/algorithms", summary="算法注册表列表")
-def algorithms_endpoint() -> dict:
-    """算法列表 + 能力清单 + 参数规格(供算法选择与能力检查)。"""
-    return config_cases.list_algorithms_case()
+    """保存 CalculationConfig: 输入校验 422, revision 失配 409。"""
+    return config_cases.save_calculation_config_case(
+        db, user, project_id, body.calculation_config, body.expected_revision
+    )

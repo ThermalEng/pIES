@@ -20,14 +20,11 @@ from sqlalchemy.pool import StaticPool
 
 from iesplan.api.deps import get_request_db
 from iesplan.application import identity
-from iesplan.application.configuration import calc_config
 from iesplan.application.projects import lifecycle as project_ops
-from iesplan.application.validations import precheck as validation_ops
 from iesplan.config import settings
 from iesplan.db import Base
 from iesplan.main import create_app
 from iesplan.identity.persistence import User
-from iesplan.project.persistence import Project
 
 #: 设备类型常量
 GRID = "ies.device.grid_connection"
@@ -52,7 +49,7 @@ def _headers(client: TestClient) -> dict[str, str]:
         client._auth_token = token  # type: ignore[attr-defined]
     return {"Authorization": f"Bearer {token}"}
 
-#: 与默认配置一致的财务基准关键假设(预检不产生 VALID-FIN-002 警告)
+#: 显式确认假设(调用方明确提供; 预检只判证据存在, 不再比对过期)
 DEFAULT_ASSUMPTIONS: dict = {
     "discount_rate": 0.08,
     "tax_rate": 0.25,
@@ -60,6 +57,23 @@ DEFAULT_ASSUMPTIONS: dict = {
     "depreciation_years": 10,
     "currency": "CNY",
     "irr_floor": 0.08,
+}
+
+
+#: 合法 12 字段 CalculationConfig(与 test_config_api 同构的最小有效载荷)
+CALC_PAYLOAD: dict = {
+    "schema": "ies.calculation-config",
+    "schema_version": "1.0.0",
+    "mode": "planning",
+    "predictions": [],
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "precision": "medium",
+    "convergence": None,
+    "time_limit_seconds": 600,
+    "options": {},
+    "seed": None,
+    "outputs": ["solution"],
 }
 
 
@@ -258,12 +272,15 @@ def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> N
     )
     assert resp.status_code == 201, resp.text
     version_id = resp.json()["dataset_version"]["id"]
-    bind_result = _bind_version(client, pid, version_id, revision)
-    # 3) 保存计算配置(消除未保存警告; 绑定后草稿修订已推进)
-    with factory() as session:
-        current = calc_config.get_config(session, pid)
-        calc_config.save_config(session, pid, current["config"], bind_result["revision"])
-        session.commit()
+    _bind_version(client, pid, version_id, revision)
+    # 3) 保存计算配置 revision(消除未保存警告)
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": CALC_PAYLOAD, "expected_revision": None},
+        headers=_headers(client),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["revision"] == 1
     # 4) 财务基准确认
     resp = client.post(
         f"/api/projects/{pid}/validation/baseline-confirm",
@@ -309,49 +326,22 @@ def test_baseline_confirm_state_change(client: TestClient, factory: sessionmaker
     assert {"VALID-MODEL-001", "VALID-MODEL-002", "VALID-DATA-001"} <= codes
 
 
-def test_baseline_stale_after_config_change(
+def test_baseline_confirm_with_explicit_assumptions(
     client: TestClient, factory: sessionmaker
 ) -> None:
-    """确认内容与当前配置不一致时给出 VALID-FIN-002 警告, 不阻断。"""
-    pid = _create_project(factory)
-    resp = client.post(
-        f"/api/projects/{pid}/validation/baseline-confirm",
-        json={"assumptions": {"discount_rate": 0.09}},  # 与默认 0.08 不一致
-        headers=_headers(client),
-    )
-    assert resp.status_code == 200
-    report = _run_report(client, pid)
-    stale = [d for d in report["diagnostics"] if d["code"] == "VALID-FIN-002"]
-    assert stale, "应产出 VALID-FIN-002 警告"
-    assert stale[0]["severity"] == "warning"
-    assert stale[0]["blocking"] is False
+    """显式假设确认成功; 预检不再做过期比对(无 VALID-FIN-002 码)。
 
-
-def test_baseline_nondefault_config_confirm_not_stale(
-    client: TestClient, factory: sessionmaker
-) -> None:
-    """非默认经济配置下, 按当前配置导出假设确认 → 不产出 VALID-FIN-002(FE-BE-05)。"""
+    过期比对已随旧形态经济参数移除而暂停, 待独立评价输入流程重建。
+    """
     pid = _create_project(factory)
-    # 1) 保存非默认经济参数(贴现 0.05 / 税率 0.2 / 年限 15 / 折旧 5)
-    with factory() as session:
-        current = calc_config.get_config(session, pid)
-        cfg = current["config"]
-        cfg["parameters"]["economic"] = {
-            "discount_rate": 0.05,
-            "tax_rate": 0.2,
-            "project_years": 15,
-            "depreciation_years": 5,
-            "currency": "CNY",
-        }
-        cfg["irr_floor"] = 0.06
-        revision = calc_config._current_draft_revision(session, pid)
-        calc_config.save_config(session, pid, cfg, revision)
-        session.commit()
-    # 2) 按 _current_assumptions 同源键集确认
-    with factory() as session:
-        current = calc_config.get_config(session, pid)
-        project = session.get(Project, pid)
-        assumptions = validation_ops._current_assumptions(project, current["config"])
+    assumptions = {
+        "discount_rate": 0.05,
+        "tax_rate": 0.2,
+        "project_years": 15,
+        "depreciation_years": 5,
+        "currency": "CNY",
+        "irr_floor": 0.06,
+    }
     resp = client.post(
         f"/api/projects/{pid}/validation/baseline-confirm",
         json={"assumptions": assumptions},
@@ -359,10 +349,10 @@ def test_baseline_nondefault_config_confirm_not_stale(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["confirmed"] is True
-    # 3) 预检: 无 VALID-FIN-002(刚确认即过期)
     report = _run_report(client, pid)
-    stale = [d for d in report["diagnostics"] if d["code"] == "VALID-FIN-002"]
-    assert not stale, f"确认后不应立即过期: {stale}"
+    codes = _diag_codes(report["diagnostics"])
+    assert "VALID-FIN-001" not in codes
+    assert "VALID-FIN-002" not in codes
 
 
 def test_get_latest_validation_report(

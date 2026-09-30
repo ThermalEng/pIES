@@ -21,15 +21,13 @@
 import type {
   AdminUserListParams,
   AdminUserRow,
-  AlgorithmId,
   ApiErrorBody,
   AssessmentGrade,
   AuditEntry,
   AuditListParams,
   CalcConfig,
   CalcConfigInput,
-  CalcConstraint,
-  ConfigVariable,
+  CalculationConfigBody,
   Connection,
   ConnectionInput,
   Currency,
@@ -50,7 +48,6 @@ import type {
   HealthStatus,
   LoginRequest,
   MetricValue,
-  Objective,
   PackageExportInput,
   PageResult,
   Project,
@@ -617,49 +614,29 @@ function assessmentFromServer(a: Record<string, unknown>): ResultAssessment {
   }
 }
 
-/** 后端配置信封 {config, meta, version, status, updated_at} → 前端 CalcConfig。 */
+/** 后端配置信封 {calculation_config, revision} → 前端 CalcConfig。 */
 function configFromServer(body: unknown, projectId: number): CalcConfig {
   const env = asRecord(body)
-  const cfg = asRecord(env.config)
-  const algo = asRecord(cfg.algorithm)
-  const updatedAt = env.updated_at === null || env.updated_at === undefined ? null : String(env.updated_at)
-  return {
-    id: 0,
-    project_id: projectId,
-    name: 'default',
-    description: null,
-    params: asRecord(cfg.parameters),
-    variables: Array.isArray(cfg.variables) ? (cfg.variables as ConfigVariable[]) : [],
-    objectives: Array.isArray(cfg.objectives) ? (cfg.objectives as Objective[]) : [],
-    constraints: Array.isArray(cfg.constraints) ? (cfg.constraints as CalcConstraint[]) : [],
-    min_irr: typeof cfg.irr_floor === 'number' ? (cfg.irr_floor as number) : null,
-    algorithm: (typeof algo.name === 'string' ? (algo.name as AlgorithmId) : 'milp'),
-    solver: null,
-    tolerances: asRecord(cfg.tolerances) as Record<string, number>,
-    random_seed: typeof cfg.random_seed === 'number' ? (cfg.random_seed as number) : null,
-    status: env.status === 'frozen' ? 'frozen' : 'draft',
-    version: typeof env.version === 'number' ? (env.version as number) : 0,
-    updated_by: 0,
-    created_at: updatedAt ?? '',
-    updated_at: updatedAt,
+  const cfg = asRecord(env.calculation_config)
+  const precision = cfg.precision === 'low' || cfg.precision === 'medium' || cfg.precision === 'high' ? cfg.precision : 'medium'
+  const calculationConfig: CalculationConfigBody = {
+    schema: String(cfg.schema ?? 'ies.calculation-config'),
+    schema_version: String(cfg.schema_version ?? '1.0.0'),
+    mode: String(cfg.mode ?? ''),
+    predictions: Array.isArray(cfg.predictions) ? (cfg.predictions as CalculationConfigBody['predictions']) : [],
+    generator: String(cfg.generator ?? ''),
+    solver: String(cfg.solver ?? ''),
+    precision,
+    convergence: cfg.convergence === null || cfg.convergence === undefined ? null : (cfg.convergence as CalculationConfigBody['convergence']),
+    time_limit_seconds: typeof cfg.time_limit_seconds === 'number' ? (cfg.time_limit_seconds as number) : 0,
+    options: asRecord(cfg.options),
+    seed: typeof cfg.seed === 'number' ? (cfg.seed as number) : null,
+    outputs: Array.isArray(cfg.outputs) ? (cfg.outputs as string[]) : [],
   }
-}
-
-/** 前端 CalcConfigInput → 后端配置 dict(parameters/irr_floor/algorithm 形状转换)。 */
-function configToServer(input: CalcConfigInput): Record<string, unknown> {
-  const params = asRecord(input.params)
   return {
-    parameters: params,
-    variables: input.variables ?? [],
-    objectives: input.objectives ?? [],
-    constraints: input.constraints ?? [],
-    algorithm: {
-      mode: params.algorithm_mode === 'manual' ? 'manual' : 'auto',
-      name: input.algorithm ?? 'milp',
-    },
-    irr_floor: input.min_irr === null || input.min_irr === undefined ? null : input.min_irr,
-    tolerances: input.tolerances ?? {},
-    random_seed: input.random_seed === null || input.random_seed === undefined ? null : input.random_seed,
+    project_id: projectId,
+    calculation_config: calculationConfig,
+    revision: typeof env.revision === 'number' ? (env.revision as number) : 0,
   }
 }
 
@@ -817,15 +794,6 @@ function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
         ]
       }),
     ),
-  }
-}
-
-/** 后端算法注册项 → 前端算法选择项。 */
-function algorithmFromServer(a: Record<string, unknown>): { name: string; label: string; description_key: string } {
-  return {
-    name: String(a.algo_id ?? ''),
-    label: String(a.name_zh ?? a.name_en ?? ''),
-    description_key: String(a.help_topic ?? ''),
   }
 }
 
@@ -1021,14 +989,14 @@ export interface DatasetsApi {
 export interface ConfigApi {
   get(projectId: number): Promise<CalcConfig>
   save(projectId: number, input: CalcConfigInput): Promise<CalcConfig>
-  validate(projectId: number): Promise<ValidationResult>
-  default(projectId: number): Promise<CalcConfigInput>
-  algorithms(): Promise<{ items: Array<{ name: string; label: string; description_key: string }> }>
 }
 
 export interface ValidationApi {
   run(projectId: number, opts?: { config_id?: number }): Promise<ValidationResult>
-  baselineConfirm(projectId: number): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }>
+  baselineConfirm(
+    projectId: number,
+    assumptions: Record<string, unknown>,
+  ): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }>
 }
 
 export interface TasksApi {
@@ -1316,40 +1284,16 @@ export const api = {
 
   config: {
     get(projectId: number): Promise<CalcConfig> {
-      // 后端返回 {config, meta, version, status, updated_at}: 映射为前端配置对象
+      // 后端返回 {calculation_config, revision}: 映射为前端配置对象
       return request<unknown>(`/projects/${projectId}/config`).then((body) => configFromServer(body, projectId))
     },
     save(projectId: number, input: CalcConfigInput): Promise<CalcConfig> {
-      // 后端 PUT 需要 {config, expected_revision}(乐观锁绑草稿修订):
-      // GET /projects/{id} 返回 {project, draft, versions, my_role};取 draft.revision。
-      return request<unknown>(`/projects/${projectId}`).then((view) => {
-        const revision = Number(asRecord(asRecord(view).draft).revision ?? 1)
-        return request<unknown>(`/projects/${projectId}/config`, {
-          method: 'PUT',
-          body: { config: configToServer(input), expected_revision: revision },
-        }).then((body) => configFromServer(body, projectId))
-      })
-    },
-    validate(projectId: number): Promise<ValidationResult> {
-      // 后端按 {config} 校验: 先取当前已存配置再回传校验(只校验不保存)
-      return request<unknown>(`/projects/${projectId}/config`).then((env) => {
-        const config = asRecord(asRecord(env).config)
-        return request<unknown>(`/projects/${projectId}/config/validate`, {
-          method: 'POST',
-          body: { config },
-        }).then((body) => {
-          const diags = asList<Diagnostic>(body, 'diagnostics')
-          return { valid: !diags.some((d) => d.blocking || d.severity === 'blocking'), diagnostics: diags }
-        })
-      })
-    },
-    default(projectId: number): Promise<CalcConfigInput> {
-      return request<unknown>(`/projects/${projectId}/config/default`).then((body) => configFromServer(body, projectId))
-    },
-    algorithms(): Promise<{ items: Array<{ name: string; label: string; description_key: string }> }> {
-      return request<unknown>('/registry/algorithms').then((body) => ({
-        items: asList<Record<string, unknown>>(body, 'algorithms').map(algorithmFromServer),
-      }))
+      // 后端 PUT 需要 {calculation_config, expected_revision}(自有链乐观锁):
+      // expected_revision 由调用方传入已加载 revision, 首次保存为 null。
+      return request<unknown>(`/projects/${projectId}/config`, {
+        method: 'PUT',
+        body: { calculation_config: input.calculation_config, expected_revision: input.expected_revision },
+      }).then((body) => configFromServer(body, projectId))
     },
   } satisfies ConfigApi,
 
@@ -1364,30 +1308,16 @@ export const api = {
         }
       })
     },
-    baselineConfirm(projectId: number): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }> {
-      // 确认内容须与后端 _current_assumptions 键集一致(validation.py 比对哈希),
-      // 从当前配置导出经济假设, 避免空对象哈希永远不匹配(VALID-FIN-002 恒过期)
-      // (FE-BE-05: cfg 已是 CalcConfig, params.economic 为经济段; 旧代码强转
-      // {config:{parameters}} 导致 rec.config 恒不存在 → 恒提交默认值)
-      return api.config
-        .get(projectId)
-        .catch(() => null)
-        .then((cfg) => {
-          const params = (cfg?.params ?? {}) as Record<string, unknown>
-          const eco = (params.economic ?? params) as Record<string, unknown>
-          const assumptions = {
-            discount_rate: typeof eco.discount_rate === 'number' ? eco.discount_rate : 0.08,
-            tax_rate: typeof eco.tax_rate === 'number' ? eco.tax_rate : 0.25,
-            project_years: typeof eco.project_years === 'number' ? eco.project_years : 20,
-            depreciation_years: typeof eco.depreciation_years === 'number' ? eco.depreciation_years : 10,
-            currency: typeof eco.currency === 'string' && eco.currency ? eco.currency : 'CNY',
-            irr_floor: typeof cfg?.min_irr === 'number' ? cfg.min_irr : 0.08,
-          }
-          return request<unknown>(`/projects/${projectId}/validation/baseline-confirm`, {
-            method: 'POST',
-            body: { assumptions },
-          }).then((body) => ({ confirmed: asRecord(body).confirmed === true, diagnostics: [] }))
-        })
+    baselineConfirm(
+      projectId: number,
+      assumptions: Record<string, unknown>,
+    ): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }> {
+      // 假设内容必须由调用方显式提供(用户确认的评价输入); 本层不编默认值、
+      // 不从计算配置派生(0.12-A1 起计算配置不再承载经济参数)。
+      return request<unknown>(`/projects/${projectId}/validation/baseline-confirm`, {
+        method: 'POST',
+        body: { assumptions },
+      }).then((body) => ({ confirmed: asRecord(body).confirmed === true, diagnostics: [] }))
     },
   } satisfies ValidationApi,
 

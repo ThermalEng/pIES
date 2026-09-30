@@ -76,26 +76,13 @@ class PlanningRevisionRecord:
 
 @dataclass(frozen=True, slots=True)
 class CalcConfigRecord:
-    """计算配置行（calc_configs 表公开视图，归属本域）。
+    """计算配置 revision（calc_configs 表公开视图，不可变，归属本域）。
 
-    注：该表物理上在 models.calc 中（与任务表同文件），但其语义是用户可编辑
-    的计算配置，由本域 repository 读写；tasks 域只消费其快照，不直接读写本表。
+    content 即已发布 12 字段 CalculationConfig 全文；version 按项目单调递增。
     """
 
     id: int
     project_id: int
-    name: str
-    params: dict[str, Any]
-    variables: list[Any]
-    objectives: list[Any]
-    constraints: list[Any]
-    tolerances: dict[str, Any]
-    description: str | None = None
-    min_irr: float | None = None
-    algorithm: str | None = None
-    solver: str | None = None
-    random_seed: int | None = None
-    status: str = "draft"
-    version: int = 1
-    updated_by: int = 0
-    updated_at: str | None = None
+    version: int
+    content: dict[str, Any]
+    created_by: int = 0

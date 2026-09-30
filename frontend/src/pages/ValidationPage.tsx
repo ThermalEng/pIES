@@ -1,13 +1,13 @@
 /**
- * 项目校验(ValidationPage):完整预检 + 财务基准确认。
+ * 项目校验(ValidationPage):完整预检。
  *
  * - 运行校验:调 api.validation.run(projectId) → {valid, diagnostics};
  *   由诊断严重度推导展示状态(ok / warnings / blocked),阻断时给出
  *   "禁止提交"提示;诊断列表复用 DiagnosticsList(严重度分组、代码、
  *   定位、修复建议),与数据/配置页展示一致。
- * - 财务基准确认:基准方案 = 不新增建设、仅用已有设备运行,作为方案收益
- *   的对比参照;确认调 api.validation.baselineConfirm(projectId),成功后
- *   显示已确认状态(后端追加式审计记录,不可覆盖)。
+ * - 财务基准确认入口已随旧形态经济参数移除而暂停(0.12-A1): 确认假设须由
+ *   后续独立评价输入流程显式提供, 不再由计算配置派生默认值; 后端
+ *   baseline-confirm 接口保留, 待评价输入切片恢复显式确认 UI。
  * - 错误处理:API 错误经 translateError 渲染为诊断文案(Alert)。
  * - 可访问性:所有操作均为原生 button/select,Tab+Enter 可达,
  *   状态徽章同时以文字 + 图标 + 形状编码。
@@ -19,7 +19,7 @@ import { useCallback, useState } from 'react'
 
 import { api } from '../api/client'
 import { DiagnosticsList } from '../components/DiagnosticsList'
-import { Alert, Badge, Button, Card, EmptyState, Spinner } from '../components/ui'
+import { Alert, Badge, Button, Card, EmptyState } from '../components/ui'
 import type { BadgeVariant, IconName } from '../components/ui'
 import { translateError, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
@@ -60,21 +60,14 @@ export default function ValidationPage() {
   const [running, setRunning] = useState(false)
   const [runError, setRunError] = useState<string | null>(null)
 
-  // 财务基准确认
-  const [baselineConfirmed, setBaselineConfirmed] = useState(false)
-  const [confirming, setConfirming] = useState(false)
-  const [confirmError, setConfirmError] = useState<string | null>(null)
-  const [confirmOk, setConfirmOk] = useState(false)
-
   // -------------------------------------------------------------------------
   // 动作
   // -------------------------------------------------------------------------
 
-  /** 运行完整预检(模型/数据/配置/基准确认/就绪)。 */
+  /** 运行完整预检(模型/数据/配置/就绪)。 */
   const runValidation = useCallback(async () => {
     setRunning(true)
     setRunError(null)
-    setConfirmOk(false)
     try {
       const res = await api.validation.run(projectId)
       setResult(res)
@@ -83,27 +76,6 @@ export default function ValidationPage() {
       setRunError(translateError(err as ApiError))
     } finally {
       setRunning(false)
-    }
-  }, [projectId])
-
-  /** 确认财务基准(基准方案 = 不新增建设仅用已有设备,作为收益参照)。 */
-  const confirmBaseline = useCallback(async () => {
-    setConfirming(true)
-    setConfirmError(null)
-    setConfirmOk(false)
-    try {
-      const res = await api.validation.baselineConfirm(projectId)
-      if (res.confirmed) {
-        setBaselineConfirmed(true)
-        setConfirmOk(true)
-      } else {
-        // 适配层仅折叠 confirmed 字段,无诊断返回时给出通用失败文案
-        setConfirmError(pt('ies.validation.baseline_failed', { reason: pt('ies.common.unknown') }))
-      }
-    } catch (err) {
-      setConfirmError(translateError(err as ApiError))
-    } finally {
-      setConfirming(false)
     }
   }, [projectId])
 
@@ -121,7 +93,7 @@ export default function ValidationPage() {
           <p className="ies-page-subtitle">{pt('ies.validation.subtitle')}</p>
         </div>
         <div className="ies-flex">
-          <Button icon="check" onClick={() => void runValidation()} loading={running} disabled={confirming}>
+          <Button icon="check" onClick={() => void runValidation()} loading={running}>
             {running ? pt('ies.validation.running') : pt('ies.validation.run')}
           </Button>
         </div>
@@ -175,34 +147,6 @@ export default function ValidationPage() {
         )}
       </Card>
 
-      {/* 财务基准确认 */}
-      <Card title={pt('ies.validation.baseline_title')}>
-        <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
-          {pt('ies.validation.baseline_desc')}
-        </p>
-        <div className="ies-flex" style={{ marginTop: 'var(--ies-space-3)', flexWrap: 'wrap', gap: 'var(--ies-space-2)' }}>
-          {baselineConfirmed ? (
-            <Badge label={pt('ies.validation.baseline_confirmed')} variant="success" icon="check" />
-          ) : (
-            <Button icon="check" onClick={() => void confirmBaseline()} loading={confirming} disabled={running}>
-              {pt('ies.validation.baseline_confirm')}
-            </Button>
-          )}
-          {confirming ? <Spinner size="sm" /> : null}
-        </div>
-        {confirmOk ? (
-          <div style={{ marginTop: 'var(--ies-space-3)' }}>
-            <Alert variant="success">{pt('ies.validation.baseline_ok')}</Alert>
-          </div>
-        ) : null}
-        {confirmError ? (
-          <div style={{ marginTop: 'var(--ies-space-3)' }}>
-            <Alert variant="error" title={pt('ies.validation.baseline_failed', { reason: '' })}>
-              {confirmError}
-            </Alert>
-          </div>
-        ) : null}
-      </Card>
     </div>
   )
 }

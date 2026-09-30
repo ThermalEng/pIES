@@ -144,6 +144,22 @@ BATTERY_COMMAND = {
     },
 }
 
+#: 合法 12 字段 CalculationConfig(与 test_config_api 同构的最小有效载荷)。
+_CALC_PAYLOAD = {
+    "schema": "ies.calculation-config",
+    "schema_version": "1.0.0",
+    "mode": "planning",
+    "predictions": [],
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "precision": "medium",
+    "convergence": None,
+    "time_limit_seconds": 600,
+    "options": {},
+    "seed": None,
+    "outputs": ["solution"],
+}
+
 #: 最小规划修订(公开规划契约形状: objective + 变量字典 + constraints)。
 PLANNING_PAYLOAD = {
     "objective": {"sense": "minimize", "expression": "0"},
@@ -523,9 +539,19 @@ def test_config_read_and_finance_planning_keys(
     uid = _uid()
     owner = _register_user(client, f"contract_cfg_{uid}")
     pid = _make_project(client, owner, f"contract_cfg_{uid}")
+    # 未保存读 404; 保存合法 CalculationConfig 后读回 revision 链
+    resp = client.get(f"/api/projects/{pid}/config", headers=owner)
+    assert resp.status_code == 404, resp.text
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": _CALC_PAYLOAD, "expected_revision": None},
+        headers=owner,
+    )
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()) == {"calculation_config", "revision"}
     resp = client.get(f"/api/projects/{pid}/config", headers=owner)
     assert resp.status_code == 200, resp.text
-    assert "config" in resp.json()
+    assert set(resp.json()) == {"calculation_config", "revision"}
     resp = client.get("/api/finance-profiles", headers=owner)
     assert resp.status_code == 200, resp.text
     assert set(resp.json()) == {"items", "count"}

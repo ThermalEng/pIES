@@ -423,37 +423,53 @@ def _declare_constant_bindings(
     return resp.json()["revision"]
 
 
-def _save_config(client: TestClient, user_id: int, project_id: int, revision: int) -> dict[str, Any]:
-    """读取默认配置并保存(带乐观锁修订), 返回 {config, version}。"""
-    resp = client.get(f"/api/projects/{project_id}/config", headers=_h(client, user_id))
-    assert resp.status_code == 200, resp.text
-    default_config = resp.json()["config"]
-    assert default_config["irr_floor"] == 0.08  # 最低 IRR 硬约束默认 8% 见 manual/developer-guide/zh-CN/domain-model.md §规划、财务与计算配置 及 manual/developer-guide/zh-CN/modules/finance.md
+#: 合法 12 字段 CalculationConfig(与 test_config_api 同构的最小有效载荷)
+CALC_PAYLOAD: dict[str, Any] = {
+    "schema": "ies.calculation-config",
+    "schema_version": "1.0.0",
+    "mode": "planning",
+    "predictions": [],
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "precision": "medium",
+    "convergence": None,
+    "time_limit_seconds": 600,
+    "options": {},
+    "seed": None,
+    "outputs": ["solution"],
+}
+
+
+def _save_config(client: TestClient, user_id: int, project_id: int) -> dict[str, Any]:
+    """保存计算配置 revision(首次保存), 返回 {calculation_config, revision}。"""
     resp = client.put(
         f"/api/projects/{project_id}/config",
-        json={"config": default_config, "expected_revision": revision},
+        json={"calculation_config": CALC_PAYLOAD, "expected_revision": None},
         headers=_h(client, user_id),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["version"] is not None and body["diagnostics"] == []
+    assert set(body) == {"calculation_config", "revision"}, body
+    assert body["revision"] == 1
     return body
 
 
-def _baseline_confirm(client: TestClient, user_id: int, project_id: int, config: dict[str, Any]) -> None:
-    """财务基准确认: 假设取当前配置导出的关键假设(与预检口径一致)。"""
-    econ = (config.get("parameters") or {}).get("economic") or {}
-    assumptions = {
-        "discount_rate": econ.get("discount_rate"),
-        "tax_rate": econ.get("tax_rate"),
-        "project_years": econ.get("project_years"),
-        "depreciation_years": econ.get("depreciation_years"),
-        "currency": "CNY",
-        "irr_floor": config.get("irr_floor"),
-    }
+#: 显式确认假设(调用方明确提供, 不从计算配置派生)
+CONFIRM_ASSUMPTIONS: dict[str, Any] = {
+    "discount_rate": 0.08,
+    "tax_rate": 0.25,
+    "project_years": 20,
+    "depreciation_years": 10,
+    "currency": "CNY",
+    "irr_floor": 0.08,
+}
+
+
+def _baseline_confirm(client: TestClient, user_id: int, project_id: int) -> None:
+    """财务基准确认: 调用方显式提供假设原文。"""
     resp = client.post(
         f"/api/projects/{project_id}/validation/baseline-confirm",
-        json={"assumptions": assumptions},
+        json={"assumptions": CONFIRM_ASSUMPTIONS},
         headers=_h(client, user_id),
     )
     assert resp.status_code == 200, resp.text
@@ -583,12 +599,12 @@ def _prepare_project(
     dataset_id, version_id = _create_sample_dataset(client, user_id, pid)
     revision = _bind_dataset(client, user_id, pid, revision, version_id)
 
-    # 保存配置(乐观锁修订, 不递增草稿修订) + 显式财务引用 + 显式计算声明 +
+    # 保存计算配置 revision + 显式财务引用 + 显式计算声明 +
     # 显式装配两节 + 最小规划修订(储能容量单变量) + 财务基准确认
     # (草稿修订链式递增, 不得复用旧修订号)
     from iesplan.application import configuration as config_cases
 
-    config_body = _save_config(client, user_id, pid, revision)
+    _save_config(client, user_id, pid)
     _declare_finance(db, user_id, pid)
     bat_ref = "battery"
     config_cases.save_planning_config(
@@ -617,13 +633,12 @@ def _prepare_project(
     )
     revision = _declare_constant_bindings(client, user_id, pid, revision)
     if confirm_baseline:
-        _baseline_confirm(client, user_id, pid, config_body["config"])
+        _baseline_confirm(client, user_id, pid)
 
     return {
         "project_id": pid,
         "dataset_id": dataset_id,
         "dataset_version_id": version_id,
-        "config": config_body["config"],
         "revision": revision,
     }
 
@@ -890,32 +905,30 @@ def test_permission_gates(client: TestClient, db: Session) -> None:
 
 
 def test_config_gate(client: TestClient, db: Session) -> None:
-    """非法配置保存被拒(422 + diagnostics), 合法默认配置可保存。"""
+    """非法计算配置保存被拒(422 标准信封), 合法 12 字段配置可保存并读回。"""
     eng_id = _seed_engineer_direct(client, db)
     pid = _create_project(client, eng_id)
 
     resp = client.put(
         f"/api/projects/{pid}/config",
-        json={"config": {"parameters": {}}, "expected_revision": 1},
+        json={"calculation_config": {"mode": "planning"}, "expected_revision": None},
         headers=_h(client, eng_id),
     )
     assert resp.status_code == 422
     body = resp.json()
-    params = body["error"]["params"]
-    assert params["count"] >= 1 and any(
-        d["severity"] in ("error", "blocking") for d in params["diagnostics"]
-    )
+    assert set(body) == {"error"}, body
+    assert body["error"]["code"] == "CONFIG-VAL-001"
 
-    resp = client.get(f"/api/projects/{pid}/config/default", headers=_h(client, eng_id))
-    assert resp.status_code == 200
-    config = resp.json()["config"]
-    assert config["algorithm"]["mode"] == "auto"
-    assert config["irr_floor"] == 0.08
+    # 未保存时读取 404(无默认配置可用)
+    resp = client.get(f"/api/projects/{pid}/config", headers=_h(client, eng_id))
+    assert resp.status_code == 404
 
-    # 算法注册表(公开)
-    resp = client.get("/api/registry/algorithms")
-    assert resp.status_code == 200
-    assert resp.json()["algorithms"]
+    # 合法保存 → revision 1 → 读回一致
+    body = _save_config(client, eng_id, pid)
+    assert body["calculation_config"]["generator"] == "ies.algo.milp_hybrid@1.0.0"
+    resp = client.get(f"/api/projects/{pid}/config", headers=_h(client, eng_id))
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == body
 
 
 # ---------------------------------------------------------------------------

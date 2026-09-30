@@ -77,15 +77,19 @@ def main():
     s, body = call("GET", f"/projects/{project_id}/versions", token=token)
     check("projects.versions → {versions:[...]}", s == 200 and isinstance(body.get("versions"), list))
 
-    # 5) config → {config, meta, version, status, updated_at}
+    # 5) config → 404(未保存); PUT 合法 CalculationConfig → {calculation_config,revision}; 读回一致
     s, body = call("GET", f"/projects/{project_id}/config", token=token)
-    check("config.get → {config{parameters,variables,objectives,constraints,algorithm{name}},meta,version,status}", s == 200 and "config" in body and "parameters" in body["config"] and "irr_floor" in body["config"] and "meta" in body, str(list(body.keys())))
-    s, body = call("GET", f"/projects/{project_id}/config/default", token=token)
-    check("config.default → {config,meta}", s == 200 and "config" in body, str(s))
-    s, body = call("GET", "/registry/algorithms", token=token)
-    check("registry.algorithms → {algorithms:[{algo_id,name_zh,help_topic}]}", s == 200 and isinstance(body.get("algorithms"), list) and "algo_id" in body["algorithms"][0] if body.get("algorithms") else True, str(list(body.keys())))
-    s, body = call("POST", f"/projects/{project_id}/config/validate", {"config": (call("GET", f"/projects/{project_id}/config", token=token)[1])["config"]}, token)
-    check("config.validate → {diagnostics,count}", s == 200 and isinstance(body.get("diagnostics"), list), str(s))
+    check("config.get unsaved → 404", s == 404, str(s))
+    payload = {
+        "schema": "ies.calculation-config", "schema_version": "1.0.0", "mode": "planning",
+        "predictions": [], "generator": "ies.algo.milp_hybrid@1.0.0", "solver": "ies.solver.highs@1.7.2",
+        "precision": "medium", "convergence": None, "time_limit_seconds": 600,
+        "options": {}, "seed": None, "outputs": ["solution"],
+    }
+    s, body = call("PUT", f"/projects/{project_id}/config", {"calculation_config": payload, "expected_revision": None}, token)
+    check("config.put → {calculation_config,revision}", s == 200 and set(body.keys()) == {"calculation_config", "revision"} and body["revision"] == 1, str(body.keys() if isinstance(body, dict) else s))
+    s, body = call("GET", f"/projects/{project_id}/config", token=token)
+    check("config.get → {calculation_config,revision}", s == 200 and body.get("calculation_config", {}).get("generator") == "ies.algo.milp_hybrid@1.0.0" and body.get("revision") == 1, str(list(body.keys()) if isinstance(body, dict) else s))
 
     # 6) 2.0 建模面: 项目视图草稿内容 model 节 → {devices, connections}(名键, 无端口表)
     s, body = call("GET", f"/projects/{project_id}", token=token)

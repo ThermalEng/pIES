@@ -20,8 +20,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    Numeric,
-    SmallInteger,
     Text,
     UniqueConstraint,
     func,
@@ -33,7 +31,6 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from iesplan.configuration.contracts import (
     CalcConfigRecord,
     ConfigurationConflictError,
-    ConfigurationNotFoundError,
     EffectiveRevisionRecord,
     FinanceProfileRecord,
     OverridesRevisionRecord,
@@ -102,28 +99,6 @@ def _row_to_planning(row: PlanningConfigRevision) -> PlanningRevisionRecord:
         content=row.content,
         receipt_object_id=row.receipt_object_id,
         created_by=row.created_by,
-    )
-
-
-def _row_to_calc_config(row: CalcConfig) -> CalcConfigRecord:
-    return CalcConfigRecord(
-        id=row.id,
-        project_id=row.project_id,
-        name=row.name,
-        params=row.params,
-        variables=row.variables,
-        objectives=row.objectives,
-        constraints=row.constraints,
-        tolerances=row.tolerances,
-        description=row.description,
-        min_irr=float(row.min_irr) if row.min_irr is not None else None,
-        algorithm=row.algorithm,
-        solver=row.solver,
-        random_seed=row.random_seed,
-        status=row.status,
-        version=row.version,
-        updated_by=row.updated_by,
-        updated_at=_iso(row.updated_at),
     )
 
 
@@ -373,128 +348,63 @@ def append_planning(
 
 
 # ---------------------------------------------------------------------------
-# CalcConfig（用户可编辑计算配置）
+# CalcConfig（计算配置不可变 revision, 0.12-A1 起收敛旧自由形态）
 # ---------------------------------------------------------------------------
 
 
-def get_calc_config(db: Session, config_id: int) -> CalcConfigRecord | None:
-    """按主键取计算配置；不存在返回 None。"""
-    row = db.get(CalcConfig, config_id)
-    return _row_to_calc_config(row) if row is not None else None
-
-
-def list_calc_configs(db: Session, project_id: int) -> list[CalcConfigRecord]:
-    """列出项目计算配置行（按 id 升序；同名最新由调用方按 version 取）。"""
-    rows = (
-        db.execute(select(CalcConfig).where(CalcConfig.project_id == project_id).order_by(CalcConfig.id))
-        .scalars()
-        .all()
+def _row_to_calculation_config(row: CalcConfig) -> CalcConfigRecord:
+    return CalcConfigRecord(
+        id=row.id,
+        project_id=row.project_id,
+        version=row.version,
+        content=row.content,
+        created_by=row.created_by,
     )
-    return [_row_to_calc_config(row) for row in rows]
 
 
-def create_calc_config(
+def get_latest_calculation_config(db: Session, project_id: int) -> CalcConfigRecord | None:
+    """取项目最新计算配置 revision；未保存过返回 None。"""
+    row = (
+        db.execute(
+            select(CalcConfig)
+            .where(CalcConfig.project_id == project_id)
+            .order_by(CalcConfig.version.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    return _row_to_calculation_config(row) if row is not None else None
+
+
+def create_calculation_config(
     db: Session,
     *,
     project_id: int,
-    name: str,
-    params: dict[str, Any],
-    variables: list[Any],
-    objectives: list[Any],
-    constraints: list[Any],
-    tolerances: dict[str, Any],
-    updated_by: int,
-    description: str | None = None,
-    algorithm: str | None = None,
-    solver: str | None = None,
-    random_seed: int | None = None,
-    min_irr: float | None = None,
+    content: dict[str, Any],
+    created_by: int,
 ) -> CalcConfigRecord:
-    """创建计算配置行（同项目同名 version 自动取表内 max+1；并发冲突抛错）。"""
+    """追加计算配置 revision（version 取表内 max+1；并发冲突抛错）。
+
+    content 须为应用输入入口已校验的 CalculationConfig 全文；本层不重复校验。
+    """
     max_version = db.execute(
-        select(func.max(CalcConfig.version)).where(
-            CalcConfig.project_id == project_id,
-            CalcConfig.name == name,
-        )
+        select(func.max(CalcConfig.version)).where(CalcConfig.project_id == project_id)
     ).scalar()
     row = CalcConfig(
         project_id=project_id,
-        name=name,
         version=int(max_version or 0) + 1,
-        status="draft",
-        params=params,
-        variables=variables,
-        objectives=objectives,
-        constraints=constraints,
-        tolerances=tolerances,
-        description=description,
-        min_irr=min_irr,
-        algorithm=algorithm,
-        solver=solver,
-        random_seed=random_seed,
-        updated_by=updated_by,
-        updated_at=_now(),
+        content=content,
+        created_by=created_by,
     )
     db.add(row)
     try:
         db.flush()
     except IntegrityError as exc:
         raise ConfigurationConflictError(
-            "计算配置创建冲突", params={"project_id": project_id, "name": name}
+            "计算配置创建冲突", params={"project_id": project_id}
         ) from exc
-    return _row_to_calc_config(row)
-
-
-#: update_calc_config 允许的写入列（白名单外键名直接拒绝，避免拼写污染行）。
-_UPDATABLE_CALC_CONFIG_FIELDS = frozenset(
-    {
-        "params",
-        "variables",
-        "objectives",
-        "constraints",
-        "tolerances",
-        "description",
-        "min_irr",
-        "algorithm",
-        "solver",
-        "random_seed",
-    }
-)
-
-
-def update_calc_config(
-    db: Session, config_id: int, *, values: dict[str, Any], updated_by: int
-) -> CalcConfigRecord:
-    """更新草稿态配置行；缺失抛 ConfigurationNotFoundError，非草稿态或未知列抛错。"""
-    row = db.get(CalcConfig, config_id)
-    if row is None:
-        raise ConfigurationNotFoundError("计算配置不存在", params={"config_id": config_id})
-    if row.status != "draft":
-        raise ConfigurationConflictError(
-            "冻结配置不可修改", params={"config_id": config_id, "status": row.status}
-        )
-    unknown = set(values) - _UPDATABLE_CALC_CONFIG_FIELDS
-    if unknown:
-        raise ConfigurationConflictError(
-            "未知更新列", params={"config_id": config_id, "fields": sorted(unknown)}
-        )
-    for key, value in values.items():
-        setattr(row, key, value)
-    row.updated_by = updated_by
-    row.updated_at = _now()
-    db.flush()
-    return _row_to_calc_config(row)
-
-
-def freeze_calc_config(db: Session, config_id: int) -> CalcConfigRecord:
-    """冻结配置行（draft → frozen）；缺失抛 ConfigurationNotFoundError。"""
-    row = db.get(CalcConfig, config_id)
-    if row is None:
-        raise ConfigurationNotFoundError("计算配置不存在", params={"config_id": config_id})
-    row.status = "frozen"
-    row.updated_at = _now()
-    db.flush()
-    return _row_to_calc_config(row)
+    return _row_to_calculation_config(row)
 
 
 # ---------------------------------------------------------------------------
@@ -502,44 +412,29 @@ def freeze_calc_config(db: Session, config_id: int) -> CalcConfigRecord:
 # ---------------------------------------------------------------------------
 
 class CalcConfig(Base):
-    """计算配置(参数/变量/目标/约束/算法/容差/种子, 01 §6.1)。"""
+    """计算配置不可变 revision(仅 INSERT, 0.12-A1 起收敛旧自由形态)。
+
+    每行 content 即已发布 12 字段 CalculationConfig 全文(to_dict 形态,
+    应用输入入口唯一校验)；version 按项目单调递增，读取以最新 revision
+    为准。旧形态列(params/variables/objectives/constraints/min_irr/
+    algorithm/solver/tolerances/random_seed/status)已退役(0.12-A1)。
+    """
 
     __tablename__ = "calc_configs"
 
     id: Mapped[int] = bigint_pk()
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    description: Mapped[str | None] = mapped_column(Text)
-    params: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
-    variables: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'[]'"))
-    objectives: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'[]'"))
-    constraints: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'[]'"))
-    min_irr: Mapped[float | None] = mapped_column(Numeric(6, 4))
-    algorithm: Mapped[str | None] = mapped_column(Text)
-    solver: Mapped[str | None] = mapped_column(Text)
-    tolerances: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
-    random_seed: Mapped[int | None] = mapped_column(BigInteger)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="draft")
-    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
-    updated_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()
     )
-    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        CheckConstraint(
-            "min_irr IS NULL OR min_irr BETWEEN 0 AND 1", name="ck_calc_configs_min_irr"
-        ),
-        CheckConstraint(
-            "algorithm IS NULL OR algorithm IN ('milp','lp','heuristic','ga','exhaustive','custom')",
-            name="ck_calc_configs_algorithm",
-        ),
-        CheckConstraint("status IN ('draft','frozen')", name="ck_calc_configs_status"),
-        Index(
-            "uq_calc_configs_name_version", "project_id", "name", "version", unique=True
-        ),
-        Index("idx_calc_configs_project", "project_id", "name"),
+        CheckConstraint("version >= 1", name="ck_calc_configs_revision"),
+        UniqueConstraint("project_id", "version", name="uq_calc_configs_revision"),
+        Index("idx_calc_configs_project", "project_id", sa.text("version DESC")),
     )
 
 
@@ -662,21 +557,8 @@ IMMUTABLE_TABLES: tuple[str, ...] = (
     "finance_overrides",
     "effective_finance_revisions",
     "planning_configs",
+    "calc_configs",
 )
-
-#: calc_configs: status='frozen' 的行禁止 UPDATE(01 §6.1);DELETE 由应用层约束
-CALC_CONFIGS_FROZEN_TRIGGER_SQL: str = """\
--- calc_configs: 冻结的计算配置不可修改
-CREATE FUNCTION tg_calc_configs_frozen() RETURNS trigger AS $$
-BEGIN
-  IF OLD.status = 'frozen' THEN
-    RAISE EXCEPTION '冻结的计算配置不可修改';
-  END IF;
-  RETURN NEW;
-END $$ LANGUAGE plpgsql;
-CREATE TRIGGER tg_calc_configs_no_update BEFORE UPDATE ON calc_configs
-  FOR EACH ROW EXECUTE FUNCTION tg_calc_configs_frozen();
-"""
 
 
 def install_triggers() -> tuple[str, ...]:
@@ -685,5 +567,4 @@ def install_triggers() -> tuple[str, ...]:
     statements.extend(immutable_trigger_sql(table) for table in IMMUTABLE_TABLES)
     statements.extend(immutable_revoke_sql(table) for table in IMMUTABLE_TABLES)
     statements.append(drop_trigger_function_sql("tg_calc_configs_frozen"))
-    statements.append(CALC_CONFIGS_FROZEN_TRIGGER_SQL)
     return tuple(statements)

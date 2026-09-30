@@ -165,8 +165,7 @@ def _declare_explicit_calc(
     planning 为冻结规划修订的确定性投影(公共契约要求至少一个变量，
     故需一台夹具电池设备承载变量 device_ref；PV 无汇会被 ASM-SOLV-002
     拦截，此处不用)。与 test_tasks_api.EXPLICIT_CALC_PATCH 同值。
-    仅需提交计算任务的用例调用; legacy PUT /config 期望修订号的用例
-    不得调用(会推进草稿修订号)。
+    仅需提交计算任务的用例调用; PUT /config(计算配置 revision)不推进草稿修订号。
     """
     resp = client.put(
         f"/api/projects/{pid}/draft",
@@ -279,11 +278,21 @@ def assert_error_envelope(
     return err
 
 
-def _default_config(client: TestClient, token: str, pid: int) -> dict:
-    """读取项目当前默认配置(设备添加后含容量变量)。"""
-    resp = client.get(f"/api/projects/{pid}/config", headers=_bearer(token))
-    assert resp.status_code == 200, resp.text
-    return resp.json()["config"]
+#: 合法 12 字段 CalculationConfig(与 test_config_api 同构的最小有效载荷)
+_CALC_PAYLOAD: dict = {
+    "schema": "ies.calculation-config",
+    "schema_version": "1.0.0",
+    "mode": "planning",
+    "predictions": [],
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "precision": "medium",
+    "convergence": None,
+    "time_limit_seconds": 600,
+    "options": {},
+    "seed": None,
+    "outputs": ["solution"],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -302,24 +311,17 @@ def test_error_envelope_shape_all_error_paths(
     viewer_tok = _login(client, "proto_viewer")
     admin_tok = _login(client, "proto_admin")
 
-    # --- 1) config PUT 422(CONFIG-VAL-001): 非法变量类型触发校验失败 ---
-    # (默认配置不再猜测变量, 用例显式声明)
+    # --- 1) config PUT 422(CONFIG-VAL-001): 非 12 字段契约触发输入校验失败 ---
     pid = _create_project(client, owner_tok, "协议项目")
     _add_device(client, owner_tok, pid)
-    cfg = _default_config(client, owner_tok, pid)
-    bad_cfg = dict(cfg)
-    bad_cfg["variables"] = [
-        {"name": "hp_cap", "type": "fuzzy", "min": 0.0, "max": 1000.0, "initial": 0.0}
-    ]
-    draft_rev = client.get(f"/api/projects/{pid}", headers=_bearer(owner_tok)).json()["draft"]["revision"]
     resp = client.put(
         f"/api/projects/{pid}/config",
-        json={"config": bad_cfg, "expected_revision": draft_rev},
+        json={"calculation_config": {"mode": "planning"}, "expected_revision": None},
         headers=_bearer(owner_tok),
     )
     err = assert_error_envelope(resp, 422, code="CONFIG-VAL-001")
     assert err["blocking"] is True
-    assert isinstance(err["params"]["diagnostics"], list) and err["params"]["count"] >= 1
+    assert isinstance(err["params"].get("detail"), str)
 
     # --- 2) datasets 上传 400(DATA-VAL-001): 行数不足 → DATA-TS-004 ---
     resp = client.post(
@@ -386,7 +388,7 @@ def test_error_envelope_shape_all_error_paths(
     # --- 7) 403 权限(PERM-DENIED-001): viewer 写项目(config PUT) ---
     resp = client.put(
         f"/api/projects/{pid}/config",
-        json={"config": bad_cfg, "expected_revision": 1},
+        json={"calculation_config": _CALC_PAYLOAD, "expected_revision": None},
         headers=_bearer(viewer_tok),
     )
     assert_error_envelope(resp, 403, code="PERM-DENIED-001", message_key="ies.diag.perm.denied")
@@ -488,9 +490,9 @@ def test_success_wrappers_tasks_results_domain(client: TestClient, db: Session) 
 def test_success_wrappers_config_validation_model_domain(client: TestClient, db: Session) -> None:
     """config/validation/model 域包装键锁定。
 
-    差异记录: 任务书期望 config GET → {"config", "meta", "version", "status",
-    "diagnostics"}; 实际 GET 为 {"config", "meta", "version", "status",
-    "updated_at"}(diagnostics 只在 PUT 保存成功响应中返回)。以实际为准锁定。
+    0.12-A1 起 config 收敛为 CalculationConfig revision: 未保存读 404;
+    PUT/GET 均为 {"calculation_config", "revision"}。旧 1.0 路由
+    (validate/default)与算法注册表已退役。
     2.0 建模面: 模型读经项目视图(含草稿内容), 校验读经校验报告。
     """
     user = make_user(db, "wrap_cfg")
@@ -498,29 +500,20 @@ def test_success_wrappers_config_validation_model_domain(client: TestClient, db:
     pid = _create_project(client, tok, "配置包装项目")
     _add_device(client, tok, pid)
 
-    _assert_wrapper(
-        client.get(f"/api/projects/{pid}/config", headers=_bearer(tok)),
-        {"config", "meta", "version", "status", "updated_at"},
-    )
-    cfg = _default_config(client, tok, pid)
-    draft_rev = client.get(f"/api/projects/{pid}", headers=_bearer(tok)).json()["draft"]["revision"]
+    resp = client.get(f"/api/projects/{pid}/config", headers=_bearer(tok))
+    assert resp.status_code == 404, resp.text
     resp = client.put(
         f"/api/projects/{pid}/config",
-        json={"config": cfg, "expected_revision": draft_rev},
+        json={"calculation_config": _CALC_PAYLOAD, "expected_revision": None},
         headers=_bearer(tok),
     )
-    _assert_wrapper(resp, {"config", "meta", "version", "status", "diagnostics"})
+    _assert_wrapper(resp, {"calculation_config", "revision"})
     _assert_wrapper(
-        client.post(f"/api/projects/{pid}/config/validate", json={"config": cfg}, headers=_bearer(tok)),
-        {"diagnostics", "count"},
-    )
-    _assert_wrapper(
-        client.get(f"/api/projects/{pid}/config/default", headers=_bearer(tok)),
-        {"config", "meta"},
+        client.get(f"/api/projects/{pid}/config", headers=_bearer(tok)),
+        {"calculation_config", "revision"},
     )
     # validation/run 包装键由独立契约套件锁定
     _assert_wrapper(client.get("/api/registry/device-types"), {"items"})
-    _assert_wrapper(client.get("/api/registry/algorithms"), {"algorithms"})
     # 项目详情包装键由独立契约套件锁定, 此处仅保校验报告读独有覆盖
     _assert_wrapper(client.get(f"/api/projects/{pid}/validation", headers=_bearer(tok)), {"report", "stored"})
 
@@ -707,11 +700,17 @@ def test_frontend_contract_adapters_consistent(client: TestClient, db: Session) 
     assert isinstance(view["draft"], dict) and "revision" in view["draft"]
     assert isinstance(view["my_role"], str)
 
-    # (3) 配置 GET {"config","meta","version","status","updated_at"} ↔
-    #     configFromServer(client.ts:619 读 env.config / env.updated_at / env.status)
+    # (3) 配置 GET {"calculation_config","revision"} ↔
+    #     configFromServer(读 env.calculation_config / env.revision)
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": _CALC_PAYLOAD, "expected_revision": None},
+        headers=_bearer(tok),
+    )
+    assert resp.status_code == 200, resp.text
     cfg = client.get(f"/api/projects/{pid}/config", headers=_bearer(tok)).json()
-    assert set(cfg) == {"config", "meta", "version", "status", "updated_at"}
-    assert "updated_at" in cfg  # 前端取 env.updated_at 而非 diagnostics
+    assert set(cfg) == {"calculation_config", "revision"}
+    assert cfg["revision"] == 1 and isinstance(cfg["calculation_config"], dict)
 
     # (4) 设备类型注册表 {"items"} ↔ asList(body, 'items')(client.ts:1340)
     reg = client.get("/api/registry/device-types").json()

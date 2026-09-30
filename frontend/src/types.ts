@@ -405,89 +405,49 @@ export interface DatasetUploadInput {
 }
 
 // ---------------------------------------------------------------------------
-// 计算配置(U06 配置写入单元)
+// 计算配置(U06, 0.12-A1 起 CalculationConfig revision)
 // ---------------------------------------------------------------------------
 
-export type AlgorithmId = 'milp' | 'lp' | 'heuristic' | 'ga' | 'exhaustive' | 'custom'
-
-/** 前端表单变量类型(UI 概念;binary 在提交时映射为后端 boolean)。 */
-export type VariableType = 'continuous' | 'binary' | 'integer'
-
-/** 后端变量类型(services/config.py VARIABLE_TYPES)。 */
-export type BackendVariableType = 'continuous' | 'integer' | 'boolean' | 'enum'
-
-export interface ConfigVariable {
-  name: string
-  type: BackendVariableType
-  /** 初始值(continuous/integer 必填;boolean 需 0/1)。 */
-  initial: number | null
-  /** 下界(与后端 min 对应)。 */
-  min: number | null
-  /** 上界(与后端 max 对应)。 */
-  max: number | null
+/** 预测目标配置项(与后端 CalculationConfig.predictions 元素一致)。 */
+export interface CalculationPrediction {
+  target: { instance: string; interface: string }
+  algorithm: string
+  parameters: Record<string, unknown>
 }
 
-export interface Objective {
-  /** 目标指标 id(与后端 OBJECTIVE_METRICS 一致: irr_after_tax / npv_after_tax 等)。 */
-  metric: string
-  /** 多目标加权系数。 */
-  weight: number
-  direction: 'min' | 'max'
+/** 阶段二收敛配置(null 表不适用;多个 data_predict 时必填性由后端结合 artifact 判断)。 */
+export interface CalculationConvergence {
+  tolerance: number
+  max_iterations: number
 }
 
-export interface CalcConstraint {
-  /** 约束类型(后端 U06 格式): predefined 预定义种类 / expression 受限表达式。 */
-  type: 'predefined' | 'expression'
-  /** 约束载荷: predefined 用 kind(co2_cap 含 max_tons); expression 用 name/expression。 */
-  payload: {
-    /** 预定义约束种类(load_satisfaction / capacity_limits / co2_cap / energy_cost_cap)。 */
-    kind?: string
-    /** co2_cap 的年碳排放上限(tCO₂/年)。 */
-    max_tons?: number
-    /** energy_cost_cap 的年购能费用上限。 */
-    max_amount?: number
-    /** 表达式约束名称(展示用)。 */
-    name?: string
-    /** 表达式约束声明(受限语法, 见 04 §4)。 */
-    expression?: string
-  }
+/** 已发布 12 字段 CalculationConfig 全文(见 formats/calculation-config.md)。 */
+export interface CalculationConfigBody {
+  schema: string
+  schema_version: string
+  mode: string
+  predictions: CalculationPrediction[]
+  generator: string
+  solver: string
+  precision: 'low' | 'medium' | 'high'
+  convergence: CalculationConvergence | null
+  time_limit_seconds: number
+  options: Record<string, unknown>
+  seed: number | null
+  outputs: string[]
 }
 
+/** 项目计算配置(不可变 revision;revision 即版本链序号)。 */
 export interface CalcConfig {
-  id: EntityId
   project_id: EntityId
-  name: string
-  description: string | null
-  /** 参数当前值(电价、燃料价、贴现率等)。 */
-  params: Record<string, unknown>
-  variables: ConfigVariable[]
-  objectives: Objective[]
-  constraints: CalcConstraint[]
-  min_irr: number | null
-  algorithm: AlgorithmId
-  solver: string | null
-  /** 容差(最优性间隙 MIPGap、可行性容差等)。 */
-  tolerances: Record<string, number>
-  random_seed: number | null
-  status: 'draft' | 'frozen'
-  version: number
-  updated_by: EntityId
-  created_at: ISO8601
-  updated_at: ISO8601 | null
+  calculation_config: CalculationConfigBody
+  revision: number
 }
 
-export type CalcConfigInput = Omit<
-  CalcConfig,
-  'id' | 'project_id' | 'status' | 'version' | 'updated_by' | 'created_at' | 'updated_at'
->
-
-export interface AlgorithmSpec {
-  name: string
-  label_zh: string
-  label_en: string
-  description_key: string
-  default_precision: Fidelity
-  supports: string[]
+/** 计算配置保存输入( revision 为自有链乐观锁;首次保存为 null)。 */
+export interface CalcConfigInput {
+  calculation_config: CalculationConfigBody
+  expected_revision: number | null
 }
 
 // ---------------------------------------------------------------------------

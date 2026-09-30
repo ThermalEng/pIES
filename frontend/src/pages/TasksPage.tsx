@@ -41,7 +41,7 @@ import {
   TaskOutcomeBadge,
   TaskStatusBadge,
 } from '../components/ui'
-import { formatDateTime, formatPercent, formatRelativeTime } from '../lib/format'
+import { formatDateTime, formatRelativeTime } from '../lib/format'
 import type {
   ApiError,
   CalcConfig,
@@ -102,13 +102,12 @@ const DEFAULT_FORM: CreateForm = {
 }
 
 /**
- * 后端 CalcConfig.version 即为配置 id(写入 PUT /config 返回 envelope.version);
- * 数据库层无独立的 config id,提交任务时携带 version 即可。
- * 旧版 CalcConfig.id 始终为 0(纯前端兜底),不能用作任务配置关联。
+ * 后端计算配置 revision 即为可提交的配置版本(PUT /config 返回 revision);
+ * 提交任务时携带 revision 即可(0.12-A2 接引用, 本切片仅展示与携带)。
  */
 function configVersion(cfg: CalcConfig | null): number | null {
   if (!cfg) return null
-  return typeof cfg.version === 'number' && cfg.version > 0 ? cfg.version : null
+  return typeof cfg.revision === 'number' && cfg.revision > 0 ? cfg.revision : null
 }
 
 /** 确定性哈希(FNV 变体),用于生成客户端幂等键。 */
@@ -246,19 +245,17 @@ export default function TasksPage() {
   // 派生:当前 config 版本(后端 CalcConfig.version 即为可提交的配置 id)
   const configVersionValue = useMemo(() => configVersion(config), [config])
 
-  // 算法 id 到 i18n 键('ies.config.algorithm_*' 或 'ies.algo.*')的映射。
-  // 直接拼接 t(`ies.config.algorithm_${config.algorithm}`) 在 algorithm 为
-  // 'milp_hybrid' / 'lp_relax' / 'mc_sampling' 时会得到不存在的键;这里集中处理。
-  const algorithmLabel = useMemo(() => {
-    const raw = String(config?.algorithm ?? '')
-    if (raw === 'milp' || raw === 'milp_hybrid') return t('ies.config.algorithm_milp')
-    if (raw === 'lp' || raw === 'lp_relax') return t('ies.config.algorithm_lp')
-    if (raw === 'heuristic') return t('ies.config.algorithm_heuristic')
-    if (raw === 'ga') return t('ies.config.algorithm_ga')
-    if (raw === 'exhaustive') return t('ies.config.algorithm_exhaustive')
-    if (raw === 'mc_sampling') return t('ies.algo.mc_sampling')
-    return raw || t('ies.common.unknown')
-  }, [config, t])
+  // 计算配置摘要直接展示精确引用(无映射、无猜测)。
+  const calcSummary = useMemo(() => {
+    const body = config?.calculation_config
+    if (!body) return null
+    return {
+      mode: body.mode,
+      generator: body.generator,
+      solver: body.solver,
+      precision: body.precision,
+    }
+  }, [config])
 
   // -------------------------------------------------------------------------
   // 基础数据加载
@@ -840,22 +837,14 @@ export default function TasksPage() {
         {config ? (
           <Card title={t('ies.task.config_summary')} className="ies-section">
             <dl className="ies-kv">
-              <dt>{t('ies.config.name')}</dt>
-              <dd>{config.name}</dd>
-              <dt>{t('ies.config.algorithm')}</dt>
-              <dd>{algorithmLabel}</dd>
-              <dt>{t('ies.config.objectives')}</dt>
-              <dd>{config.objectives.length}</dd>
-              <dt>{t('ies.config.min_irr')}</dt>
-              <dd>{config.min_irr === null ? '—' : formatPercent(config.min_irr)}</dd>
-              <dt>{t('ies.common.status')}</dt>
-              <dd>
-                <Badge
-                  variant={config.status === 'frozen' ? 'success' : 'warning'}
-                  icon={config.status === 'frozen' ? 'check' : 'clock'}
-                  label={t(`ies.config.status_${config.status}`)}
-                />
-              </dd>
+              <dt>{t('ies.config.mode')}</dt>
+              <dd>{calcSummary?.mode || '—'}</dd>
+              <dt>{t('ies.config.generator')}</dt>
+              <dd>{calcSummary?.generator || '—'}</dd>
+              <dt>{t('ies.config.solver')}</dt>
+              <dd>{calcSummary?.solver || '—'}</dd>
+              <dt>{t('ies.config.precision')}</dt>
+              <dd>{calcSummary?.precision || '—'}</dd>
               <dt>{t('ies.task.attempt')}</dt>
               <dd>
                 {configVersionValue !== null
@@ -866,10 +855,6 @@ export default function TasksPage() {
             {configVersionValue === null ? (
               <div style={{ marginTop: 'var(--ies-space-2)' }}>
                 <Alert variant="error">{t('ies.task.config_required')}</Alert>
-              </div>
-            ) : config.status !== 'frozen' ? (
-              <div style={{ marginTop: 'var(--ies-space-2)' }}>
-                <Alert variant="warning">{t('ies.task.config_not_frozen')}</Alert>
               </div>
             ) : null}
           </Card>

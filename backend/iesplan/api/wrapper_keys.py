@@ -50,15 +50,9 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "update_settings": frozenset({"registration_enabled"}),
     "read_settings": frozenset({"registration_enabled"}),
     "get_public_settings": frozenset({"registration_enabled"}),
-    # ---- config.py ----
-    "get_config_endpoint": frozenset(
-        {"config", "meta", "status", "updated_at", "version"}
-    ),  # services.config._read_config
-    "save_config_endpoint": frozenset(
-        {"config", "meta", "status", "updated_at", "version", "diagnostics"}
-    ),
-    "validate_config_endpoint": frozenset({"count", "diagnostics"}),
-    "default_config_endpoint": frozenset({"config", "meta"}),
+    # ---- config.py (0.12-A1 起 CalculationConfig revision) ----
+    "get_config_endpoint": frozenset({"calculation_config", "revision"}),
+    "save_config_endpoint": frozenset({"calculation_config", "revision"}),
     "algorithms_endpoint": frozenset({"algorithms"}),
     # ---- datasets.py ----
     "create_dataset": frozenset({"dataset"}),
