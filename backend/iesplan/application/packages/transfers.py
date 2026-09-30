@@ -638,14 +638,6 @@ def import_proposal(
                 and (cand.review_summary or {}).get("idempotency_key") == idempotency_key
             ):
                 return cand
-    # 源包落盘为新对象(每次提案新建对象行)
-    source_obj = put_object(
-        db,
-        file_bytes,
-        PACKAGE_MEDIA_TYPE,
-        source_category="project_package",
-    )
-
     # 1) 暂存对象: 包内全部对象按对象 id 落盘(每次写入新对象, 无内容去重)
     staged: dict[str, dict] = {}  # path → 元数据 dict(公开门面)
     for entry in manifest.get("objects", []):
@@ -656,6 +648,7 @@ def import_proposal(
             entry.get("media_type") or "application/octet-stream",
             source_category="project_package_import",
         )
+    # 源包落盘为新对象(每次提案新建对象行; 仅此一次, 结果记入提案)
     source_obj = put_object(
         db,
         file_bytes,

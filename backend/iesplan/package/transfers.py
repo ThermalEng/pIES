@@ -21,7 +21,7 @@ HMAC 下载授权与格式常量。财务/规划配置读经 configuration 域�
   不重新求解；查看者可导出 Excel，仅所有者可导出项目包；
 - 下载授权: 短期单对象授权(HMAC 签名 token 含 object_id + 过期，过期 5 分钟)。
 
-本层服务不主动 commit，事务边界由 API 层控制。
+本层服务不主动 commit，事务边界由 application 用例层拥有。
 """
 
 from __future__ import annotations

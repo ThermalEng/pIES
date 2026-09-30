@@ -40,7 +40,7 @@ from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.tasks.persistence import CalcSnapshot, Task  # noqa: E402
 from iesplan.results.persistence import EvidencePackage, ResultAssessment, ResultIndex  # noqa: E402
-from iesplan.storage import get_object, put_object  # noqa: E402
+from iesplan.storage import get_object, put_object, storage_stats  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 测试环境
@@ -242,6 +242,28 @@ def test_import_roundtrip_via_usecases(client: TestClient, db: Session, engine: 
     # 确认幂等重放: 已 applied 返回同一项目
     same = packages_uc.confirm_import(db, imp, proposal.id)
     assert same.id == new_project.id
+
+
+def test_import_proposal_writes_source_object_once(
+    client: TestClient, db: Session
+) -> None:
+    """导入提案源包只落盘一次: 暂存对象 + 源包对象各写一行, 无重复落盘。"""
+    owner = _user(db, "w2c_pkg_owner3")
+    pid = _project(client, owner, "w2c-导出项目3")
+    _version(client, owner, pid)
+    user = identity_domain.get_user(db, owner.id)
+    assert user is not None
+    exported = packages_uc.export_package(db, user, pid)
+    zip_bytes = get_object(db, exported.object_id)
+
+    importer = _user(db, "w2c_importer_once")
+    imp = identity_domain.get_user(db, importer.id)
+    assert imp is not None
+    before = storage_stats(db)["objects"]["count"]
+    proposal = packages_uc.propose_import(db, imp, zip_bytes, idempotency_key="w2c-imp-once")
+    after = storage_stats(db)["objects"]["count"]
+    staged_n = len((proposal.review_summary.get("staging") or {}).get("objects", []))
+    assert after - before == staged_n + 1
 
 
 def test_import_rejects_bad_package(client: TestClient, db: Session) -> None:
