@@ -11,9 +11,11 @@ helper、私有测试 helper, 也不把同类依赖藏进 conftest(本目录 con
     -e POSTGRES_USER=iesplan -e POSTGRES_PASSWORD=iesplan_contract \\
     -e POSTGRES_DB=contract_test postgres:16-alpine
   docker build -t pies-contract-test ./backend
-  docker run --rm --network host pies-contract-test \\
+  docker run --rm --network host -e IESPLAN_HTTP_CONTRACT=1 pies-contract-test \\
     python -m pytest tests/test_http_contract.py -q -p no:cacheprovider
-可用 IESPLAN_CONTRACT_PG_URL 覆盖默认库地址。
+可用 IESPLAN_CONTRACT_PG_URL 覆盖默认库地址。未显式启用
+(IESPLAN_HTTP_CONTRACT=1)时本模块在采集期直接跳过, 不改写任何环境变量,
+不导入 iesplan, 不连接数据库; 普通整套 pytest 因此不受影响。
 
 覆盖: 标准错误信封(8 字段)、成功包装键、状态码、关键权限/幂等语义,
 涉及认证/项目/草稿/数据/配置/任务/结果(无证据形态)/导出。
@@ -22,24 +24,26 @@ assess/select/check 成功、Excel 成功)、长时任务执行。
 """
 
 import os
-import sys
 import tempfile
 import uuid
 
-# 公开部署配置(须在任何 iesplan 导入之前生效; conftest 的 SQLite 默认被覆盖)。
+import pytest
+
+# 运行模式判定必须在任何环境变量修改/iesplan 导入之前: 未显式启用专用开关
+# 时直接跳过, 不污染同进程其他测试的环境, 也不连接任何数据库。
+if os.environ.get("IESPLAN_HTTP_CONTRACT") != "1":
+    pytest.skip(
+        "契约测试须显式启用(IESPLAN_HTTP_CONTRACT=1)后独立运行",
+        allow_module_level=True,
+    )
+
+# 专用运行才到这里: 公开部署配置(须在任何 iesplan 导入之前生效)。
 os.environ["IESPLAN_DB_URL"] = os.environ.get(
     "IESPLAN_CONTRACT_PG_URL",
     "postgresql+psycopg://iesplan:iesplan_contract@127.0.0.1:5433/contract_test",
 )
 os.environ["IESPLAN_DATA_DIR"] = tempfile.mkdtemp(prefix="pies-contract-data-")
 os.environ["IESPLAN_QUEUE"] = "memory"
-
-import pytest  # noqa: E402
-
-# 独立进程要求(采集期判定): 若同进程已有测试模块先绑定 iesplan.db 引擎
-# (SQLite), 整模块跳过而非误连; 独立运行时此处干净, 下面 env 生效。
-if "iesplan.db" in sys.modules:
-    pytest.skip("契约测试须独立进程运行(iesplan.db 已被先行绑定)", allow_module_level=True)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -557,9 +561,12 @@ def test_tasks_lifecycle_idempotency_permission(
     outsider = _register_user(client, f"contract_taskout_{uid}")
     pid = _make_project(client, owner, f"contract_task_{uid}")
     _declare_calc_ready(client, owner, pid)
-    # 缺键拒绝(422 非信封, FastAPI 校验形态)
-    status, _ = _submit_task(client, owner, pid, None)
-    assert status == 422
+    # 缺键拒绝 422 标准信封(API-REQ-001, contracts.md:422 行; pydantic 校验
+    # 失败走 RequestValidationError 处理器, 无裸 detail 偏差)
+    resp = client.post(
+        f"/api/projects/{pid}/tasks", json={"task_type": "optimization"}, headers=owner
+    )
+    _assert_envelope(resp, 422, code="API-REQ-001")
     # 新建 201 + 包装键
     status, body = _submit_task(client, owner, pid, f"ct-{uid}-1")
     assert status == 201, body

@@ -1,7 +1,14 @@
-"""0.3.0 C4: 公共协议测试基线 —— 错误信封形状 + 成功响应包装键锁定。
+"""0.3.0 C4: 集成/静态门禁测试 —— 错误信封形状 + 成功响应包装键锁定。
+
+本文件属集成层(非独立 HTTP 契约): 直接使用 ORM 建表(Base.metadata.create_all)、
+dependency_overrides 替换 get_request_db、私有测试 helper(auth_helpers/
+assembly_fixture)与应用内模块导入, 不得计为 0.11 独立 HTTP 契约测试。
+独立契约层见 tests/test_http_contract.py(专用开关 IESPLAN_HTTP_CONTRACT=1
+独立进程运行, 仅经公开 HTTP 准备与断言)。
 
 目标: 把「错误信封 8 字段形状」与「各域成功响应包装键」固化为可 CI 运行的
-契约, 禁止形状漂移。覆盖:
+集成门禁, 禁止形状漂移。与独立契约套件完全同义的简单包装键断言已移至
+test_http_contract.py, 此处仅保留独有覆盖。覆盖:
 
 1. test_error_envelope_shape_all_error_paths: 全库代表性错误路径(422/400/403
    CSRF/429/404/500/403 权限/401/业务错误), 每个非 2xx 响应必须为标准信封
@@ -9,15 +16,17 @@
    fix_hint_key, ref_ids}} 8 字段且字段集精确(不多不少)。
 2. test_success_wrapper_*: 锁定各域成功响应顶层包装键(命名键现状, 用户决策
    2026-08-23: 不迁移通用 {"data","meta"} 包装)。以实际为准, 期望与任务书
-   不符处以注释记录差异。
+   不符处以注释记录差异。与 test_http_contract.py 完全同义(同端点同键集)
+   的简单断言已删除, 此处只保留独立契约套件未覆盖的端点。
 3. test_no_bare_vs_wrapped_duplication: 静态门禁(AST 扫描 backend/iesplan/api/):
    同一端点函数的全部 dict 形状返回必须相互为子集/超集, 禁止「有时裸返回、
    有时包装返回」的两版响应。
 4. test_frontend_contract_adapters_consistent: 对照 frontend/src/api/client.ts
    的 asItems/oneOf 适配规则抽查, 确认实际响应与前端适配假设一致。
-5. test_pydantic_422_is_bare_detail: 记录已知偏差 —— FastAPI 请求体校验
-   (RequestValidationError)的 422 仍为裸 {"detail": [...]}, 未走标准信封
-   (业务 bug 记录, 本切片不修)。
+5. test_pydantic_request_validation_422_uses_envelope: FastAPI 请求体校验
+   (RequestValidationError)的 422 走标准 8 字段信封(code API-REQ-001),
+   无裸 {"detail": [...]} 偏差(0.3.0 已收口; 旧名 test_pydantic_422_is_bare_detail
+   的偏差记录已失效, 以本条 runtime 断言为准)。
 
 运行方式: 与 test_security_regression 同构 —— create_app() 挂载全部业务路由,
 SQLite :memory:(StaticPool) + dependency_overrides 替换 get_request_db,
@@ -449,10 +458,10 @@ def test_success_wrappers_projects_domain(client: TestClient, db: Session) -> No
         },
         headers=_bearer(tok),
     )
-    body = _assert_wrapper(resp, {"project", "my_role"})
+    # 创建/列表/详情包装键由独立契约套件锁定, 此处仅保版本列表独有覆盖
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
     pid = body["project"]["id"]
-    _assert_wrapper(client.get("/api/projects", headers=_bearer(tok)), {"projects"})
-    _assert_wrapper(client.get(f"/api/projects/{pid}", headers=_bearer(tok)), {"project", "draft", "versions", "my_role"})
     _assert_wrapper(client.get(f"/api/projects/{pid}/versions", headers=_bearer(tok)), {"versions"})
 
 
@@ -466,11 +475,10 @@ def test_success_wrappers_tasks_results_domain(client: TestClient, db: Session) 
         f"/api/projects/{pid}/tasks",
         json={"task_type": "calc", "idempotency_key": "wrap-task-1"}, headers=_bearer(tok),
     )
-    body = _assert_wrapper(resp, {"task", "replayed", "hint"})
+    # 提交/列表/详情/结果视图包装键由独立契约套件锁定, 此处仅保评估列表独有覆盖
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
     task_id = body["task"]["id"]
-    _assert_wrapper(client.get(f"/api/projects/{pid}/tasks", headers=_bearer(tok)), {"items", "next_cursor"})
-    _assert_wrapper(client.get(f"/api/projects/{pid}/tasks/{task_id}", headers=_bearer(tok)), {"task"})
-    _assert_wrapper(client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_bearer(tok)), {"result"})
     _assert_wrapper(
         client.get(f"/api/projects/{pid}/tasks/{task_id}/result/assessments", headers=_bearer(tok)),
         {"items", "total"},
@@ -510,10 +518,10 @@ def test_success_wrappers_config_validation_model_domain(client: TestClient, db:
         client.get(f"/api/projects/{pid}/config/default", headers=_bearer(tok)),
         {"config", "meta"},
     )
-    _assert_wrapper(client.post(f"/api/projects/{pid}/validation/run", headers=_bearer(tok)), {"report", "stored"})
+    # validation/run 包装键由独立契约套件锁定
     _assert_wrapper(client.get("/api/registry/device-types"), {"items"})
     _assert_wrapper(client.get("/api/registry/algorithms"), {"algorithms"})
-    _assert_wrapper(client.get(f"/api/projects/{pid}", headers=_bearer(tok)), {"project", "draft", "versions", "my_role"})
+    # 项目详情包装键由独立契约套件锁定, 此处仅保校验报告读独有覆盖
     _assert_wrapper(client.get(f"/api/projects/{pid}/validation", headers=_bearer(tok)), {"report", "stored"})
 
 
@@ -532,17 +540,12 @@ def test_success_wrappers_datasets_auth_admin_exports_domain(client: TestClient,
     adm_tok = _login(client, "wrap_adm")
     pid = _create_project(client, tok, "数据集包装项目")
 
-    # datasets
+    # datasets 创建包装键由独立契约套件锁定, 此处仅保列表独有覆盖
     resp = client.post(f"/api/projects/{pid}/datasets", json={"name": "D1"}, headers=_bearer(tok))
-    _assert_wrapper(resp, {"dataset"})
+    assert resp.status_code == 201, resp.text
     _assert_wrapper(client.get(f"/api/projects/{pid}/datasets", headers=_bearer(tok)), {"datasets"})
 
-    # exports(在下方重复登录前执行: 重复登录会把旧窗口凭证降级为
-    # takeover_pending, 尚未确认接管前无法访问业务端点)
-    _assert_wrapper(
-        client.post(f"/api/projects/{pid}/exports/package", headers=_bearer(tok)),
-        {"token", "expires_at", "file_name", "manifest", "media_type", "object_id", "oid", "size_bytes"},
-    )
+    # exports 项目包包装键由独立契约套件锁定(含下载与坏 token 路径, 此处不再重复)
 
     # auth(登录响应是 AuthResponse 模型; 登出为 {"ok"})
     resp = client.post("/api/auth/login", json={"username": "wrap_ds", "password": PASSWORD})
