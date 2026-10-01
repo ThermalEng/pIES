@@ -86,6 +86,7 @@ from iesplan.tasks.contracts import (
     IO_SLOT_CAPACITY,
     LEASE_TTL_SECONDS,
     POOL_BY_TYPE,
+    SNAPSHOT_SCHEMA_VERSION,
     TASK_TYPES,
     TERMINAL_STATUSES,
     CalcSnapshotRecord,
@@ -249,21 +250,25 @@ def _snapshot_inputs_equal(
     *,
     dataset_ids: list[int],
     calc_config: dict,
+    schema_version: str,
     program_version: str,
     extensions: dict,
     random_seed: int,
-    tolerances: dict,
     canonical_text: str | None,
     receipt: dict,
 ) -> bool:
-    """快照输入一致判定: 全部快照内容字段逐项相等(不使用内容摘要)。"""
+    """快照输入一致判定: 全部快照内容字段逐项相等(不使用内容摘要)。
+
+    复用身份包含 schema_version: 不同 schema 的快照永不复用。
+    容差唯一权威是 calc_config 正文的 convergence, 此处不另设 tolerances。
+    """
     return (
         list(snapshot.dataset_version_ids or []) == list(dataset_ids)
         and jsonable(snapshot.calc_config_snapshot or {}) == jsonable(calc_config)
+        and (snapshot.schema_version or "") == schema_version
         and (snapshot.program_version or "") == program_version
         and jsonable(snapshot.extension_versions or {}) == jsonable(extensions)
         and snapshot.random_seed == random_seed
-        and jsonable(snapshot.tolerances or {}) == jsonable(tolerances)
         and (snapshot.canonical_assembly_text or "") == (canonical_text or "")
         and jsonable(snapshot.assembly_receipt or {}) == jsonable(receipt)
     )
@@ -331,7 +336,6 @@ def _assemble_snapshot(
     if not isinstance(random_seed, int) or isinstance(random_seed, bool):
         random_seed = _derive_random_seed(version.id)
     dataset_ids = _bound_dataset_ids(content)
-    tolerances: dict[str, Any] = {}
     extensions = content.get("extensions") or {}
 
     # 统一生产闸门: 先签发规范文本/回执二件套, 失败不创建快照或任务。
@@ -343,10 +347,10 @@ def _assemble_snapshot(
             candidate,
             dataset_ids=dataset_ids,
             calc_config=calc_config,
+            schema_version=SNAPSHOT_SCHEMA_VERSION,
             program_version=__version__,
             extensions=extensions,
             random_seed=random_seed,
-            tolerances=tolerances,
             canonical_text=artifact.canonical_text,
             receipt=receipt,
         ):
@@ -359,9 +363,9 @@ def _assemble_snapshot(
         calc_config_snapshot=calc_config,
         random_seed=random_seed,
         created_by=actor.id,
+        schema_version=SNAPSHOT_SCHEMA_VERSION,
         program_version=__version__,
         extension_versions=extensions,
-        tolerances=tolerances,
         canonical_assembly_text=artifact.canonical_text,
         assembly_receipt=receipt,
     )

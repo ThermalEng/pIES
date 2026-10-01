@@ -77,9 +77,9 @@ def _row_to_snapshot(row: CalcSnapshot) -> CalcSnapshotRecord:
         dataset_version_ids=tuple(row.dataset_version_ids or []),
         calc_config_snapshot=row.calc_config_snapshot,
         random_seed=row.random_seed,
+        schema_version=row.schema_version,
         program_version=row.program_version,
         extension_versions=row.extension_versions,
-        tolerances=row.tolerances,
         canonical_assembly_text=row.canonical_assembly_text,
         assembly_receipt=row.assembly_receipt,
         created_by=row.created_by,
@@ -216,22 +216,22 @@ def create_snapshot(
     calc_config_snapshot: dict[str, Any],
     random_seed: int,
     created_by: int,
+    schema_version: str,
     program_version: str | None = None,
     extension_versions: dict[str, Any] | None = None,
-    tolerances: dict[str, Any] | None = None,
     canonical_assembly_text: str | None = None,
     assembly_receipt: dict[str, Any] | None = None,
 ) -> CalcSnapshotRecord:
-    """创建不可变快照行。"""
+    """创建不可变快照行(schema_version 由调用方显式传入, 无默认回退)。"""
     row = CalcSnapshot(
         project_version_id=project_version_id,
         dataset_version_ids=list(dataset_version_ids),
         calc_config_snapshot=calc_config_snapshot,
         random_seed=random_seed,
         created_by=created_by,
+        schema_version=schema_version,
         program_version=program_version,
         extension_versions=extension_versions if extension_versions is not None else {},
-        tolerances=tolerances,
         canonical_assembly_text=canonical_assembly_text,
         assembly_receipt=assembly_receipt,
     )
@@ -971,10 +971,13 @@ class CalcSnapshot(Base):
         BigIntArray, nullable=False, server_default=sa.text("'{}'")
     )
     calc_config_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    #: 快照 schema 版本(宪法 §7.1/§7.7): 非空固定值, 创建时显式写入。
+    #: 旧 tolerances 列已删除、旧库无升级回填(与 assembly_text 列同例:
+    #: 当前 schema 从空库直接建立)。
+    schema_version: Mapped[str] = mapped_column(Text, nullable=False)
     program_version: Mapped[str | None] = mapped_column(Text)
     extension_versions: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
     random_seed: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    tolerances: Mapped[dict | None] = mapped_column(JSONB)
     #: 规范装配文本 + 确定性校验回执（二件套，文本仅校验字头，不做 SHA）。
     #: 旧库 assembly_text 列已删除(W2-B: 当前 schema 从空库直接建立，不做升级
     #: 回填)；Worker 必须拒绝缺任一成员的快照；所有新快照由统一校验入口完整写入。

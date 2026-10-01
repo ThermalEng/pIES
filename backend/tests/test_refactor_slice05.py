@@ -101,6 +101,7 @@ def _make_snapshot(db: Session, version_id: int) -> int:
         calc_config_snapshot={},
         random_seed=42,
         created_by=7,
+        schema_version="1.0.0",
     )
     return snapshot.id
 

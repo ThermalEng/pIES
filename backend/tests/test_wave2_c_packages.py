@@ -149,7 +149,7 @@ def _seed_evidence(
         project_version_id=version_id, dataset_version_ids=[],
         calc_config_snapshot={"params": {"horizon_years": 1}, "algorithm": "milp"},
         program_version="0.1.0", extension_versions={}, random_seed=42,
-        tolerances={}, created_by=owner_id,
+        schema_version="1.0.0", created_by=owner_id,
     )
     db.add(snapshot)
     db.flush()

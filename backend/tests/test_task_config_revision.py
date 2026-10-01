@@ -546,3 +546,46 @@ def test_changed_inputs_with_new_key_yield_new_task_and_snapshot(
     # 冻结装配正文随项目输入变化(需求常量 100 → 200), 快照不相同
     assert snap1.canonical_assembly_text != snap2.canonical_assembly_text
     assert snap1.project_version_id != snap2.project_version_id
+
+
+def test_snapshot_schema_version_written_and_scoped_to_reuse(
+    client: TestClient, db: Session, factory,
+) -> None:
+    """快照显式写入 schema_version 1.0.0; 复用身份包含版本, 无 tolerances 死字段。
+
+    容差唯一权威仍是正文 convergence(此处冻结往返即证, 不另设字段)。
+    """
+    from iesplan.application.tasks.submissions import (  # noqa: E402
+        _snapshot_inputs_equal,
+    )
+
+    owner = make_user(db, "owner_schema_ver")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(
+        client, pid, owner,
+        _body(convergence={"tolerance": 0.001, "max_iterations": 50}),
+    )
+    status, body = _submit(client, pid, owner, {"config_revision": rev}, key="schemaver-1")
+    assert status == 201, body
+    snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
+    assert snap is not None
+    assert snap.schema_version == "1.0.0"
+    assert not hasattr(snap, "tolerances")
+    frozen = jsonable(dict(snap.calc_config_snapshot))
+    assert frozen["convergence"] == {"tolerance": 0.001, "max_iterations": 50}
+
+    status, second = _submit(client, pid, owner, {"config_revision": rev}, key="schemaver-2")
+    assert status == 201, second
+    assert second["task"]["calc_snapshot_id"] == body["task"]["calc_snapshot_id"]
+
+    same = dict(
+        dataset_ids=list(snap.dataset_version_ids or []),
+        calc_config=frozen,
+        program_version=snap.program_version or "",
+        extensions=jsonable(dict(snap.extension_versions or {})),
+        random_seed=snap.random_seed,
+        canonical_text=snap.canonical_assembly_text,
+        receipt=jsonable(dict(snap.assembly_receipt or {})),
+    )
+    assert _snapshot_inputs_equal(snap, schema_version="1.0.0", **same) is True
+    assert _snapshot_inputs_equal(snap, schema_version="9.9.9", **same) is False

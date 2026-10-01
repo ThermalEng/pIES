@@ -229,7 +229,7 @@ def _seed_evidence(
             "random_seed": 42,
         },
         program_version="0.1.0", extension_versions={}, random_seed=42,
-        tolerances={"gap": 0.01},
+        schema_version="1.0.0",
         created_by=owner_id,
     )
     db.add(snapshot)

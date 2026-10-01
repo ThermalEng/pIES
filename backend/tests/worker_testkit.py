@@ -290,7 +290,7 @@ def setup_environment(
             program_version="0.1.0",
             extension_versions={},
             random_seed=int(config.get("seed", 42)) if config else 42,
-            tolerances={},
+            schema_version="1.0.0",
             canonical_assembly_text=artifact.canonical_text,
             assembly_receipt=artifact.receipt.to_dict(),
             created_by=user.id,

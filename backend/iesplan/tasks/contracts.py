@@ -100,6 +100,11 @@ def _freeze_snapshot_value(value: object) -> object:
     return value
 
 
+#: 计算快照 schema 版本(宪法 §7.1/§7.7: 长期快照必须带 schema_version)。
+#: 未正式发布, 无旧库兼容: 现行值唯一, 创建时显式写入, 复用身份包含版本。
+SNAPSHOT_SCHEMA_VERSION: str = "1.0.0"
+
+
 @dataclass(frozen=True, slots=True)
 class CalcSnapshotRecord:
     """计算快照（calc_snapshots 表公开视图，不可变，任务唯一输入）。
@@ -107,7 +112,8 @@ class CalcSnapshotRecord:
     长期快照字段深度不可变: 构造时把封存 ``dict``/``list`` 递归冻结为
     只读 ``MappingProxy``/``tuple``（先复制再冻结），不与任何模块共享
     可变 ``dict``/``list``。需要与 JSON 输入比较或序列化时，由调用边界
-    统一转回普通 JSON 值。
+    统一转回普通 JSON 值。容差唯一权威是计算配置正文的 ``convergence``,
+    本记录不设第二份 tolerances 字段。
     """
 
     id: int
@@ -115,9 +121,9 @@ class CalcSnapshotRecord:
     dataset_version_ids: tuple[int, ...]
     calc_config_snapshot: Mapping[str, Any]
     random_seed: int
+    schema_version: str = SNAPSHOT_SCHEMA_VERSION
     program_version: str | None = None
     extension_versions: Mapping[str, Any] | None = None
-    tolerances: Mapping[str, Any] | None = None
     canonical_assembly_text: str | None = None
     assembly_receipt: Mapping[str, Any] | None = None
     created_by: int = 0
@@ -127,7 +133,6 @@ class CalcSnapshotRecord:
         for name in (
             "calc_config_snapshot",
             "extension_versions",
-            "tolerances",
             "assembly_receipt",
         ):
             value = getattr(self, name)
