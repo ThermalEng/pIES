@@ -614,19 +614,27 @@ function assessmentFromServer(a: Record<string, unknown>): ResultAssessment {
   }
 }
 
-/** 后端配置信封 {calculation_config, revision} → 前端 CalcConfig。 */
+/**
+ * 后端配置信封 {calculation_config, revision} → 前端 CalcConfig。
+ *
+ * 可信响应直接映射, 不补默认值、不重复校验: 缺失字段原样透出(空串/空
+ * 数组/null), 由编辑页显式呈现为空态, 缺失 revision 即视为无效响应。
+ */
 function configFromServer(body: unknown, projectId: number): CalcConfig {
   const env = asRecord(body)
   const cfg = asRecord(env.calculation_config)
-  const precision = cfg.precision === 'low' || cfg.precision === 'medium' || cfg.precision === 'high' ? cfg.precision : 'medium'
+  if (typeof env.revision !== 'number') {
+    throw new Error('invalid calculation config envelope: missing revision')
+  }
+  const precision = cfg.precision === 'low' || cfg.precision === 'medium' || cfg.precision === 'high' ? cfg.precision : ''
   const calculationConfig: CalculationConfigBody = {
-    schema: String(cfg.schema ?? 'ies.calculation-config'),
-    schema_version: String(cfg.schema_version ?? '1.0.0'),
-    mode: String(cfg.mode ?? ''),
+    schema: typeof cfg.schema === 'string' ? cfg.schema : '',
+    schema_version: typeof cfg.schema_version === 'string' ? cfg.schema_version : '',
+    mode: typeof cfg.mode === 'string' ? cfg.mode : '',
     predictions: Array.isArray(cfg.predictions) ? (cfg.predictions as CalculationConfigBody['predictions']) : [],
-    generator: String(cfg.generator ?? ''),
-    solver: String(cfg.solver ?? ''),
-    precision,
+    generator: typeof cfg.generator === 'string' ? cfg.generator : '',
+    solver: typeof cfg.solver === 'string' ? cfg.solver : '',
+    precision: precision as CalculationConfigBody['precision'],
     convergence: cfg.convergence === null || cfg.convergence === undefined ? null : (cfg.convergence as CalculationConfigBody['convergence']),
     time_limit_seconds: typeof cfg.time_limit_seconds === 'number' ? (cfg.time_limit_seconds as number) : 0,
     options: asRecord(cfg.options),
@@ -636,7 +644,7 @@ function configFromServer(body: unknown, projectId: number): CalcConfig {
   return {
     project_id: projectId,
     calculation_config: calculationConfig,
-    revision: typeof env.revision === 'number' ? (env.revision as number) : 0,
+    revision: env.revision as number,
   }
 }
 
@@ -992,7 +1000,7 @@ export interface ConfigApi {
 }
 
 export interface ValidationApi {
-  run(projectId: number, opts?: { config_id?: number }): Promise<ValidationResult>
+  run(projectId: number): Promise<ValidationResult>
   baselineConfirm(
     projectId: number,
     assumptions: Record<string, unknown>,
@@ -1298,7 +1306,7 @@ export const api = {
   } satisfies ConfigApi,
 
   validation: {
-    run(projectId: number, _opts?: { config_id?: number }): Promise<ValidationResult> {
+    run(projectId: number): Promise<ValidationResult> {
       return request<unknown>(`/projects/${projectId}/validation/run`, { method: 'POST' }).then((body) => {
         // 后端返回 {report, stored}: 报告含 status/blocks_submit/diagnostics
         const report = asRecord(asRecord(body).report)
@@ -1340,7 +1348,6 @@ export const api = {
     },
     create(input: TaskCreateInput): Promise<Task> {
       const config: Record<string, unknown> = {}
-      if (input.config_id !== undefined) config.config_id = input.config_id
       if (input.dataset_ids !== undefined) config.dataset_ids = input.dataset_ids
       if (input.priority !== undefined) config.priority = input.priority
       if (input.deadline !== undefined) config.deadline = input.deadline

@@ -544,10 +544,12 @@ def _check_config(db: Session, project_id: int, diags: list[Diagnostic]) -> None
     loc = {"object_type": "config", "object_id": ""}
     latest = configuration_domain.get_latest_calculation_config(db, project_id)
     if latest is None:
+        # 无默认配置可用: 未保存即阻断提交(错误级, 经 validate_project 统一标
+        # 记为 blocking), 不得静默按旧快照提交。
         diags.append(
             make_diag(
                 VALID_CONFIG_NOT_SAVED,
-                severity=SEVERITY_WARNING,
+                severity=SEVERITY_ERROR,
                 params={"project_id": project_id, "reason_code": "not_saved"},
                 location=loc,
             )

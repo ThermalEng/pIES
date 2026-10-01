@@ -1,9 +1,10 @@
 /**
  * 计算配置页(0.12-A1 起 CalculationConfig revision 编辑器)。
  *
- * - 读取:GET /config → 最新 revision 全文填表; 404 即空白表单(无默认配置可用);
+ * - 读取:GET /config → 最新 revision 全文填表; 404 即空白表单(无默认配置可用,
+ *   不预填精度/时间限制等用户未选值);
  * - 保存:PUT {calculation_config, expected_revision}(自有链乐观锁, 首次为 null);
- *   成功提示 revision; 409 提示他人修改并重载; 422 展示错误信息;
+ *   成功提示 revision; 409 保留表单仅提示冲突, 由用户主动重载; 422 展示错误信息;
  * - predictions/options/convergence/outputs 为 JSON 文本域, 本地解析失败即
  *   阻断保存; 空 convergence/seed 按契约以 null 提交。
  *
@@ -25,19 +26,34 @@ export interface ConfigPageProps {
   projectId?: number
 }
 
-const EMPTY_BODY: CalculationConfigBody = {
-  schema: 'ies.calculation-config',
-  schema_version: '1.0.0',
-  mode: '',
-  predictions: [],
-  generator: '',
-  solver: '',
-  precision: 'medium',
-  convergence: null,
-  time_limit_seconds: 600,
-  options: {},
-  seed: null,
-  outputs: [],
+/**
+ * 空白新建表单: 全部留空, 不冒充已填写(medium/600 等均须用户明确选择;
+ * schema/schema_version 为协议常量, 由提交时固定填入, 不在表单呈现)。
+ */
+function emptyFormState(): {
+  mode: string
+  generator: string
+  solver: string
+  precision: '' | 'low' | 'medium' | 'high'
+  timeLimit: string
+  seed: string
+  outputsText: string
+  predictionsText: string
+  convergenceText: string
+  optionsText: string
+} {
+  return {
+    mode: '',
+    generator: '',
+    solver: '',
+    precision: '',
+    timeLimit: '',
+    seed: '',
+    outputsText: '',
+    predictionsText: '',
+    convergenceText: '',
+    optionsText: '',
+  }
 }
 
 /** 解析 JSON 文本域: 空字符串按缺省处理, 解析失败返回错误信息。 */
@@ -79,6 +95,9 @@ export default function ConfigPage(props: ConfigPageProps) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
+  // 409 冲突后为 true: 表单保留用户编辑, 仅提供主动重载入口
+  const [conflict, setConflict] = useState(false)
+  const [reloading, setReloading] = useState(false)
 
   function applyBody(body: CalculationConfigBody, rev: number | null) {
     setMode(body.mode ?? '')
@@ -94,6 +113,26 @@ export default function ConfigPage(props: ConfigPageProps) {
     setRevision(rev)
     setFieldErrors({})
     setNotice(null)
+    setConflict(false)
+  }
+
+  /** 空白表单: 字段全部留空(404 无已保存配置时), 不预填任何用户未选值。 */
+  function applyEmpty() {
+    const e = emptyFormState()
+    setMode(e.mode)
+    setGenerator(e.generator)
+    setSolver(e.solver)
+    setPrecision(e.precision)
+    setTimeLimit(e.timeLimit)
+    setSeed(e.seed)
+    setOutputsText(e.outputsText)
+    setPredictionsText(e.predictionsText)
+    setConvergenceText(e.convergenceText)
+    setOptionsText(e.optionsText)
+    setRevision(null)
+    setFieldErrors({})
+    setNotice(null)
+    setConflict(false)
   }
 
   useEffect(() => {
@@ -112,7 +151,7 @@ export default function ConfigPage(props: ConfigPageProps) {
       } catch (err) {
         if (cancelled) return
         if (err instanceof ApiError && err.status === 404) {
-          applyBody(EMPTY_BODY, null)
+          applyEmpty()
         } else {
           setError(errorMessage(err))
         }
@@ -179,6 +218,20 @@ export default function ConfigPage(props: ConfigPageProps) {
     }
   }
 
+  /** 用户主动重载: 以最新 revision 覆盖当前表单(将丢弃未提交编辑)。 */
+  async function handleReloadLatest() {
+    if (pid === undefined) return
+    setReloading(true)
+    try {
+      const latest = await api.config.get(pid)
+      applyBody(latest.calculation_config, latest.revision)
+    } catch (err) {
+      setNotice({ kind: 'error', text: errorMessage(err) })
+    } finally {
+      setReloading(false)
+    }
+  }
+
   async function handleSave() {
     if (pid === undefined) return
     const { body, errors } = buildBody()
@@ -186,19 +239,16 @@ export default function ConfigPage(props: ConfigPageProps) {
     if (!body) return
     setSaving(true)
     setNotice(null)
+    setConflict(false)
     try {
       const saved = await api.config.save(pid, { calculation_config: body, expected_revision: revision })
       applyBody(saved.calculation_config, saved.revision)
       setNotice({ kind: 'success', text: pt('ies.config.saved_ok', { revision: saved.revision }) })
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        // 他人已保存新 revision: 重载最新后提示核对重试
-        try {
-          const latest = await api.config.get(pid)
-          applyBody(latest.calculation_config, latest.revision)
-        } catch {
-          // 重载失败则保留当前表单, 仅提示冲突
-        }
+        // 他人已保存新 revision: 保留当前表单编辑, 仅提示冲突,
+        // 由用户决定是否主动重载(重载将覆盖未提交编辑)
+        setConflict(true)
         setNotice({ kind: 'error', text: t('ies.config.conflict') })
       } else {
         setNotice({ kind: 'error', text: errorMessage(err) })
@@ -246,6 +296,13 @@ export default function ConfigPage(props: ConfigPageProps) {
 
       {notice ? (
         <Alert variant={notice.kind === 'success' ? 'success' : 'error'}>{notice.text}</Alert>
+      ) : null}
+      {conflict ? (
+        <div className="ies-flex">
+          <Button onClick={() => void handleReloadLatest()} loading={reloading}>
+            {t('ies.config.reload_latest')}
+          </Button>
+        </div>
       ) : null}
 
       <Card title={t('ies.config.title')}>

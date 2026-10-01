@@ -225,7 +225,7 @@ def _diag_codes(diags: list[dict]) -> set[str]:
 
 
 def test_empty_project_blocked(client: TestClient, factory: sessionmaker) -> None:
-    """空项目: 缺设备/数据/基准确认, 应阻断并一次返回全部问题; 未保存配置为警告不阻断。"""
+    """空项目: 缺设备/数据/基准确认, 应阻断并一次返回全部问题; 未保存配置无默认可用, 为错误级阻断。"""
     pid = _create_project(factory)
     report = _run_report(client, pid)
     assert report["status"] == "blocked"
@@ -238,15 +238,14 @@ def test_empty_project_blocked(client: TestClient, factory: sessionmaker) -> Non
     assert "VALID-DATA-001" in codes
     # 财务基准确认: 缺失
     assert "VALID-FIN-001" in codes
-    # 未保存配置为警告(不降级阻断, 也不阻断)
+    # 未保存配置无默认可用: 错误级阻断(随 validate_project 统一标记 blocking)
     assert any(
-        d["code"] == "VALID-CONFIG-001" and d["severity"] == "warning" and not d["blocking"]
+        d["code"] == "VALID-CONFIG-001" and d["severity"] == "error" and d["blocking"]
         for d in report["diagnostics"]
     )
-    # summary 计数一致
+    # summary 计数一致(模型 2 + 数据 1 + 财务 1 + 配置 1)
     summary = report["summary"]
-    assert summary["blocking"] >= 4
-    assert summary["warning"] >= 1
+    assert summary["blocking"] >= 5
 
 
 def test_complete_project_passes(client: TestClient, factory: sessionmaker) -> None:

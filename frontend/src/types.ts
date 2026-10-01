@@ -524,8 +524,6 @@ export interface TaskListParams {
 export interface TaskCreateInput {
   project_id: EntityId
   type: TaskType
-  /** 计算类任务(calc/optimization/uncertainty)必填。 */
-  config_id?: EntityId
   dataset_ids?: EntityId[]
   priority?: number
   deadline?: ISO8601

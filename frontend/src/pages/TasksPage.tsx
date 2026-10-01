@@ -17,7 +17,6 @@ import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
 import { translate, translateDiagnostic, translateError, useI18n } from '../i18n'
-import { pt } from '../i18n/pageMessages'
 import {
   Alert,
   Badge,
@@ -79,7 +78,6 @@ interface SweepRow {
 
 interface CreateForm {
   type: TaskType
-  configId: number | null
   datasetIds: number[]
   uMode: UncertaintyMode
   nSamples: number
@@ -91,7 +89,6 @@ interface CreateForm {
 
 const DEFAULT_FORM: CreateForm = {
   type: 'calc',
-  configId: null,
   datasetIds: [],
   uMode: 'fixed_reliability',
   nSamples: 200,
@@ -102,12 +99,11 @@ const DEFAULT_FORM: CreateForm = {
 }
 
 /**
- * 后端计算配置 revision 即为可提交的配置版本(PUT /config 返回 revision);
- * 提交任务时携带 revision 即可(0.12-A2 接引用, 本切片仅展示与携带)。
+ * 已保存配置存在性(A1 仅判存在: revision 只是配置版本链序号, 不是可提交
+ * 的配置 id, 不得映射、不随任务发送; 任务引用绑定为 0.12-A2 范围)。
  */
-function configVersion(cfg: CalcConfig | null): number | null {
-  if (!cfg) return null
-  return typeof cfg.revision === 'number' && cfg.revision > 0 ? cfg.revision : null
+function hasSavedConfig(cfg: CalcConfig | null): boolean {
+  return cfg !== null && typeof cfg.revision === 'number' && cfg.revision > 0
 }
 
 /** 确定性哈希(FNV 变体),用于生成客户端幂等键。 */
@@ -242,8 +238,8 @@ export default function TasksPage() {
   const [actionError, setActionError] = useState<string | null>(null)
   const [flash, setFlash] = useState<string | null>(null)
 
-  // 派生:当前 config 版本(后端 CalcConfig.version 即为可提交的配置 id)
-  const configVersionValue = useMemo(() => configVersion(config), [config])
+  // 派生:是否存在已保存配置(仅存在性, 不消费 revision 数值)
+  const hasSavedConfigValue = useMemo(() => hasSavedConfig(config), [config])
 
   // 计算配置摘要直接展示精确引用(无映射、无猜测)。
   const calcSummary = useMemo(() => {
@@ -397,11 +393,11 @@ export default function TasksPage() {
   const buildInput = useCallback(
     (f: CreateForm): TaskCreateInput => {
       const params = buildParams(f)
-      const idemKey = `sub-${f.type}-${f.configId ?? 'none'}-${stableHash(serializeParams(params))}`
+      // 幂等键只反映真实任务输入; 后端不消费配置引用, 不掺入 revision。
+      const idemKey = `sub-${f.type}-${stableHash(serializeParams(params))}`
       return {
         project_id: projectId,
         type: f.type,
-        ...(f.configId !== null ? { config_id: f.configId } : {}),
         ...(f.datasetIds.length > 0 ? { dataset_ids: f.datasetIds } : {}),
         idempotency_key: idemKey,
         ...(params ? { params } : {}),
@@ -781,12 +777,8 @@ export default function TasksPage() {
             </Button>
             <Button
               loading={submitting || checking}
-              disabled={configVersionValue === null}
+              disabled={!hasSavedConfigValue}
               onClick={() => {
-                // 提交前同步 form.configId 为当前已加载 config 版本
-                if (configVersionValue !== null && form.configId !== configVersionValue) {
-                  setForm((prev) => ({ ...prev, configId: configVersionValue }))
-                }
                 void submit(false)
               }}
             >
@@ -845,18 +837,16 @@ export default function TasksPage() {
               <dd>{calcSummary?.solver || '—'}</dd>
               <dt>{t('ies.config.precision')}</dt>
               <dd>{calcSummary?.precision || '—'}</dd>
-              <dt>{t('ies.task.attempt')}</dt>
-              <dd>
-                {configVersionValue !== null
-                  ? `v${configVersionValue}`
-                  : pt('ies.config.no_project')}
-              </dd>
             </dl>
-            {configVersionValue === null ? (
+            {hasSavedConfigValue ? (
+              <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                <Alert variant="info">{t('ies.task.config_not_bound')}</Alert>
+              </div>
+            ) : (
               <div style={{ marginTop: 'var(--ies-space-2)' }}>
                 <Alert variant="error">{t('ies.task.config_required')}</Alert>
               </div>
-            ) : null}
+            )}
           </Card>
         ) : (
           <Alert variant="error" title={t('ies.common.load_failed', { reason: '' })}>
