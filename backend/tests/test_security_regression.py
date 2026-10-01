@@ -325,10 +325,34 @@ def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) 
     )
     assert resp.status_code == 200, resp.text
 
-    # 所有者提交任务
+    # 所有者提交任务(须绑定已保存配置 revision)
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": {
+            "schema": "ies.calculation-config",
+            "schema_version": "1.0.0",
+            "mode": "planning",
+            "predictions": [],
+            "generator": "ies.algo.milp_hybrid@1.0.0",
+            "solver": "ies.solver.highs@1.7.2",
+            "precision": "medium",
+            "convergence": None,
+            "time_limit_seconds": 600,
+            "options": {},
+            "seed": None,
+            "outputs": ["solution"],
+        }, "expected_revision": None},
+        headers=_bearer(owner_token),
+    )
+    assert resp.status_code == 200, resp.text
+    rev = resp.json()["revision"]
     resp = client.post(
         f"/api/projects/{pid}/tasks",
-        json={"task_type": "optimization"},
+        json={
+            "task_type": "optimization",
+            "config": {"config_revision": rev},
+            "idempotency_key": "sec-task-replay-1",
+        },
         headers=_bearer(owner_token),
     )
     assert resp.status_code == 201, resp.text

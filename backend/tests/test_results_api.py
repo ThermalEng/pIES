@@ -39,6 +39,7 @@ from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import results as results_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import results as results_uc  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
@@ -97,6 +98,7 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
     app.include_router(projects_api.router)
     app.include_router(tasks_api.router)
     app.include_router(results_api.router)
+    app.include_router(config_router)
 
     def _override_request_db() -> Iterator[Session]:
         yield db
@@ -223,13 +225,45 @@ def _prepare_project(client: TestClient, db: Session, user, name: str = "结果�
     return pid
 
 
+#: 计算配置正文(12 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
+_CONFIG_BODY: dict[str, Any] = {
+    "schema": "ies.calculation-config",
+    "schema_version": "1.0.0",
+    "mode": "planning",
+    "predictions": [],
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "precision": "medium",
+    "convergence": None,
+    "time_limit_seconds": 600,
+    "options": {},
+    "seed": None,
+    "outputs": ["solution"],
+}
+
+
+def _save_config(client: TestClient, pid: int, user) -> int:
+    """保存一份计算配置, 返回 revision(计算任务提交绑定用)。"""
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": _CONFIG_BODY, "expected_revision": None},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
 def _submit_task(
-    client: TestClient, pid: int, user, idempotency_key: str
+    client: TestClient, pid: int, user, idempotency_key: str, *, config_revision: int
 ) -> dict[str, Any]:
     """提交计算任务(optimization), 返回任务体。"""
     resp = client.post(
         f"/api/projects/{pid}/tasks",
-        json={"task_type": "optimization", "idempotency_key": idempotency_key},
+        json={
+            "task_type": "optimization",
+            "config": {"config_revision": config_revision},
+            "idempotency_key": idempotency_key,
+        },
         headers=_h(client, user),
     )
     assert resp.status_code == 201, resp.text
@@ -403,7 +437,8 @@ def _prepare_task_with_evidence(
     返回 (project_id, task_id, claim, package, hourly_object_ids)。
     """
     pid = _prepare_project(client, db, user)
-    task = _submit_task(client, pid, user, idempotency_key=f"res-{pid}")
+    rev = _save_config(client, pid, user)
+    task = _submit_task(client, pid, user, idempotency_key=f"res-{pid}", config_revision=rev)
     task_id = task["id"]
     claim = _claim(db, task_id)
     obj_a = _store_hourly(db, hourly_rows)
@@ -425,7 +460,8 @@ def test_evidence_submit_and_fencing(client: TestClient, db: Session) -> None:
     """证据提交: 正常写入 → 不可变内容校验; 过期/失效 token 拒绝(409)。"""
     owner = make_user(db, "owner_fence")
     pid = _prepare_project(client, db, owner)
-    task = _submit_task(client, pid, owner, idempotency_key="fence-1")
+    rev = _save_config(client, pid, owner)
+    task = _submit_task(client, pid, owner, idempotency_key="fence-1", config_revision=rev)
     task_id = task["id"]
     claim = _claim(db, task_id)
     obj_a = _store_hourly(db, 100)
@@ -791,7 +827,8 @@ def test_result_view_no_evidence_explicit_status(client: TestClient, db: Session
     显式声明, 内容字段为 None(不再静默空数据猜测); 有证据后翻转为 available。"""
     owner = make_user(db, "owner_noevid")
     pid = _prepare_project(client, db, owner)
-    task = _submit_task(client, pid, owner, idempotency_key="noevid-1")
+    rev = _save_config(client, pid, owner)
+    task = _submit_task(client, pid, owner, idempotency_key="noevid-1", config_revision=rev)
     task_id = task["id"]
 
     # 无证据包: 显式 no_evidence + evidence=None + 内容字段全 None
@@ -934,7 +971,8 @@ def test_run_check_task(client: TestClient, db: Session) -> None:
 
     # 他任务证据包 → 404(归属): 另起项目建任务+证据, 包 id 拿到本任务下使用
     pid2 = _prepare_project(client, db, owner, name="结果测试项目2")
-    task_b = _submit_task(client, pid2, owner, idempotency_key=f"res-{pid2}")
+    rev2 = _save_config(client, pid2, owner)
+    task_b = _submit_task(client, pid2, owner, idempotency_key=f"res-{pid2}", config_revision=rev2)
     claim_b = _claim(db, task_b["id"])
     obj_b = _store_hourly(db, 100)
     payload_b = _build_payload(task_b["calc_snapshot_id"], [obj_b, obj_b], owner.id)
@@ -948,7 +986,8 @@ def test_run_check_task(client: TestClient, db: Session) -> None:
 
     # 无证据包的任务 → 404
     pid3 = _prepare_project(client, db, owner, name="无证据项目")
-    task3 = _submit_task(client, pid3, owner, idempotency_key="check-none")
+    rev3 = _save_config(client, pid3, owner)
+    task3 = _submit_task(client, pid3, owner, idempotency_key="check-none", config_revision=rev3)
     resp = client.post(
         f"/api/projects/{pid3}/tasks/{task3['id']}/result/check",
         json={"idempotency_key": "chk-4"}, headers=_h(client, owner),

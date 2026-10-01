@@ -21,6 +21,7 @@ append_effective = persistence.append_effective
 append_overrides = persistence.append_overrides
 append_planning = persistence.append_planning
 create_calculation_config = persistence.create_calculation_config
+get_calculation_config_revision = persistence.get_calculation_config_revision
 get_current_effective = persistence.get_current_effective
 get_current_overrides = persistence.get_current_overrides
 get_current_planning = persistence.get_current_planning
@@ -57,6 +58,7 @@ __all__ = [
     "append_overrides",
     "append_planning",
     "create_calculation_config",
+    "get_calculation_config_revision",
     "get_current_effective",
     "get_current_overrides",
     "get_current_planning",

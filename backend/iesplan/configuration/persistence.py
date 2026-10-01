@@ -362,6 +362,23 @@ def _row_to_calculation_config(row: CalcConfig) -> CalcConfigRecord:
     )
 
 
+def get_calculation_config_revision(
+    db: Session, project_id: int, revision: int
+) -> CalcConfigRecord | None:
+    """按 (project_id, version) 取计算配置 revision 行；不存在返回 None。
+
+    任务提交绑定指定 revision 用；跨项目号码在本项目查无行，
+    调用方按 404 处理，不回退最新或默认。
+    """
+    row = db.execute(
+        select(CalcConfig).where(
+            CalcConfig.project_id == project_id,
+            CalcConfig.version == revision,
+        )
+    ).scalar_one_or_none()
+    return _row_to_calculation_config(row) if row is not None else None
+
+
 def get_latest_calculation_config(db: Session, project_id: int) -> CalcConfigRecord | None:
     """取项目最新计算配置 revision；未保存过返回 None。"""
     row = (

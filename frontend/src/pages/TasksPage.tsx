@@ -60,13 +60,6 @@ const POLL_MS = 5000
 /** 可提交的任务类型(方案评价 / 规划优化 / 不确定性分析 / 批量扫描)。 */
 const SUBMITTABLE_TYPES: TaskType[] = ['calc', 'optimization', 'uncertainty', 'analysis']
 
-/**
- * A1 暂停计算任务新建: 已保存配置尚未绑定到任务提交, 上面四类新建入口
- * 在 GUI 一律阻断, 待 0.12-A2 绑定后开放。既有任务列表/查看/取消/重试
- * 不受影响; 后端受理逻辑不变, 仅 GUI 阻断, 不伪造任何配置引用。
- */
-const COMPUTE_CREATE_PAUSED = true
-
 /** 进行中的状态(不视为终结)。 */
 const ACTIVE_STATUSES: TaskStatus[] = ['queued', 'running', 'cancelling']
 
@@ -247,6 +240,11 @@ export default function TasksPage() {
 
   // 派生:是否存在已保存配置(仅存在性, 不消费 revision 数值)
   const hasSavedConfigValue = useMemo(() => hasSavedConfig(config), [config])
+  // 派生:当前已保存 revision(提交时如实引用并冻结进快照; 未保存为 null)
+  const savedRevisionValue = useMemo(
+    () => (config && typeof config.revision === 'number' && config.revision > 0 ? config.revision : null),
+    [config],
+  )
 
   // 计算配置摘要直接展示精确引用(无映射、无猜测)。
   const calcSummary = useMemo(() => {
@@ -400,17 +398,18 @@ export default function TasksPage() {
   const buildInput = useCallback(
     (f: CreateForm): TaskCreateInput => {
       const params = buildParams(f)
-      // 幂等键只反映真实任务输入; 后端不消费配置引用, 不掺入 revision。
-      const idemKey = `sub-${f.type}-${stableHash(serializeParams(params))}`
+      // 幂等键反映真实任务输入(含所引用的配置 revision, 不同 revision 永不复用)。
+      const idemKey = `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}`
       return {
         project_id: projectId,
         type: f.type,
+        ...(savedRevisionValue !== null ? { config_revision: savedRevisionValue } : {}),
         ...(f.datasetIds.length > 0 ? { dataset_ids: f.datasetIds } : {}),
         idempotency_key: idemKey,
         ...(params ? { params } : {}),
       }
     },
-    [projectId, buildParams],
+    [projectId, buildParams, savedRevisionValue],
   )
 
   const submit = useCallback(
@@ -677,6 +676,10 @@ export default function TasksPage() {
                       detail.calc_snapshot.random_seed !== undefined
                         ? ` · seed ${detail.calc_snapshot.random_seed}`
                         : ''}
+                      {detail.calc_snapshot.config_revision !== null &&
+                      detail.calc_snapshot.config_revision !== undefined
+                        ? ` · ${t('ies.task.snapshot_config_revision', { revision: detail.calc_snapshot.config_revision })}`
+                        : ''}
                     </dd>
                   </>
                 ) : null}
@@ -784,7 +787,7 @@ export default function TasksPage() {
             </Button>
             <Button
               loading={submitting || checking}
-              disabled={COMPUTE_CREATE_PAUSED || !hasSavedConfigValue}
+              disabled={!hasSavedConfigValue}
               onClick={() => {
                 void submit(false)
               }}
@@ -797,11 +800,9 @@ export default function TasksPage() {
         <div className="ies-section">
           <Alert variant="info">{t('ies.task.submit_hint')}</Alert>
         </div>
-        {COMPUTE_CREATE_PAUSED ? (
+        {savedRevisionValue !== null ? (
           <div className="ies-section">
-            <Alert variant="warning" title={t('ies.task.create_paused')}>
-              {t('ies.task.create_paused_note')}
-            </Alert>
+            <Alert variant="info">{t('ies.task.config_ref_note', { revision: savedRevisionValue })}</Alert>
           </div>
         ) : null}
 
@@ -852,15 +853,11 @@ export default function TasksPage() {
               <dt>{t('ies.config.precision')}</dt>
               <dd>{calcSummary?.precision || '—'}</dd>
             </dl>
-            {hasSavedConfigValue ? (
-              <div style={{ marginTop: 'var(--ies-space-2)' }}>
-                <Alert variant="info">{t('ies.task.config_not_bound')}</Alert>
-              </div>
-            ) : (
+            {savedRevisionValue === null ? (
               <div style={{ marginTop: 'var(--ies-space-2)' }}>
                 <Alert variant="error">{t('ies.task.config_required')}</Alert>
               </div>
-            )}
+            ) : null}
           </Card>
         ) : (
           <Alert variant="error" title={t('ies.common.load_failed', { reason: '' })}>

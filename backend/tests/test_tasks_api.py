@@ -32,6 +32,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan.api.config import config_router  # noqa: E402
 from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
@@ -96,6 +97,7 @@ def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
     app = create_app()
     app.include_router(projects_api.router)
     app.include_router(tasks_api.router)
+    app.include_router(config_router)
 
     def _override_request_db() -> Iterator[Session]:
         yield db
@@ -277,6 +279,34 @@ def _prepare_project(
     return pid
 
 
+#: 计算配置正文(12 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
+_CONFIG_BODY: dict[str, Any] = {
+    "schema": "ies.calculation-config",
+    "schema_version": "1.0.0",
+    "mode": "planning",
+    "predictions": [],
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "precision": "medium",
+    "convergence": None,
+    "time_limit_seconds": 600,
+    "options": {},
+    "seed": None,
+    "outputs": ["solution"],
+}
+
+
+def _save_config(client: TestClient, pid: int, user) -> int:
+    """保存一份计算配置, 返回 revision(计算任务提交绑定用)。"""
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": _CONFIG_BODY, "expected_revision": None},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
 def _submit_task(
     client: TestClient, pid: int, user, task_type: str = "optimization",
     config: dict[str, Any] | None = None, idempotency_key: str | None = None,
@@ -403,9 +433,12 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     """同幂等键返回同一任务; 无键提交拒绝(422); 不同输入生成新快照。"""
     owner = make_user(db, "owner_idem")
     pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
 
     # 1) 带幂等键创建 → 201
-    status, body = _submit_task(client, pid, owner, idempotency_key="op-20260818-abc")
+    status, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="op-20260818-abc"
+    )
     assert status == 201
     task_a = body["task"]
     assert task_a["status"] == "queued"
@@ -415,7 +448,9 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
     assert snapshot_a is not None
 
     # 2) 同键重发(客户端网络重试) → 200 返回同一任务
-    status, body = _submit_task(client, pid, owner, idempotency_key="op-20260818-abc")
+    status, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="op-20260818-abc"
+    )
     assert status == 200
     assert body["replayed"] is True
     assert body["task"]["id"] == task_a["id"]
@@ -427,7 +462,8 @@ def test_idempotent_create_and_snapshot_dedup(client: TestClient, db: Session) -
 
     # 4) 不同输入(config 不同 → 快照输入不同, 带新键) → 201 新任务新快照
     status, body = _submit_task(
-        client, pid, owner, config={"horizon_years": 3}, idempotency_key="op-20260818-def"
+        client, pid, owner, config={"config_revision": rev, "horizon_years": 3},
+        idempotency_key="op-20260818-def",
     )
     assert status == 201
     assert body["task"]["id"] != task_a["id"]
@@ -505,14 +541,20 @@ def test_idempotency_key_scoped_to_project(client: TestClient, db: Session) -> N
     owner = make_user(db, "owner_scope")
     pid_a = _prepare_project(client, db, owner, name="项目A")
     pid_b = _prepare_project(client, db, owner, name="项目B")
+    rev_a = _save_config(client, pid_a, owner)
+    rev_b = _save_config(client, pid_b, owner)
     key = "sub-calc-shared-key"
 
-    status, body = _submit_task(client, pid_a, owner, idempotency_key=key)
+    status, body = _submit_task(
+        client, pid_a, owner, config={"config_revision": rev_a}, idempotency_key=key
+    )
     assert status == 201
     task_a = body["task"]
 
     # 同键在另一项目提交 → 必须 201 新建, 绝不能 replay 项目 A 的任务
-    status, body = _submit_task(client, pid_b, owner, idempotency_key=key)
+    status, body = _submit_task(
+        client, pid_b, owner, config={"config_revision": rev_b}, idempotency_key=key
+    )
     assert status == 201, f"跨项目幂等键必须新建任务, 实际 {status}: {body}"
     assert body["replayed"] is False
     task_b = body["task"]
@@ -527,7 +569,9 @@ def test_idempotency_key_scoped_to_project(client: TestClient, db: Session) -> N
     assert resp.status_code == 404
 
     # 同项目内同键仍幂等(replay 语义不回归)
-    status, body = _submit_task(client, pid_b, owner, idempotency_key=key)
+    status, body = _submit_task(
+        client, pid_b, owner, config={"config_revision": rev_b}, idempotency_key=key
+    )
     assert status == 200
     assert body["replayed"] is True
     assert body["task"]["id"] == task_b["id"]
@@ -542,7 +586,10 @@ def test_state_advance_with_fake_executor(client: TestClient, db: Session) -> No
     """queued → running(尝试+租约+槽) → 进度 → completed(结局映射)。"""
     owner = make_user(db, "owner_exec")
     pid = _prepare_project(client, db, owner)
-    status, body = _submit_task(client, pid, owner, idempotency_key="exec-1")
+    rev = _save_config(client, pid, owner)
+    status, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="exec-1"
+    )
     assert status == 201
     task_id = body["task"]["id"]
 
@@ -597,7 +644,10 @@ def test_state_machine_guards(client: TestClient, db: Session) -> None:
     """终态不可迁移: 对已终态任务调用完成/失败/取消均被拒绝。"""
     owner = make_user(db, "owner_guard")
     pid = _prepare_project(client, db, owner)
-    _, body = _submit_task(client, pid, owner, idempotency_key="guard-1")
+    rev = _save_config(client, pid, owner)
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="guard-1"
+    )
     task_id = body["task"]["id"]
     _run_task(db, task_id)
     with pytest.raises(Exception) as exc_info:
@@ -617,9 +667,12 @@ def test_cancel_flow(client: TestClient, db: Session) -> None:
     """queued 直接取消; running 经 cancelling; 终态取消 409; 信号/出队清理。"""
     owner = make_user(db, "owner_cancel")
     pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
 
     # queued → 直接 cancelled, 队列消息移除
-    _, body = _submit_task(client, pid, owner, idempotency_key="cancel-1")
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="cancel-1"
+    )
     queued_id = body["task"]["id"]
     assert queue.queue_position(queued_id, "compute") == 0
     resp = client.post(f"/api/projects/{pid}/tasks/{queued_id}/cancel", headers=_h(client, owner))
@@ -628,7 +681,9 @@ def test_cancel_flow(client: TestClient, db: Session) -> None:
     assert queue.queue_position(queued_id, "compute") is None
 
     # running → cancelling(发信号) → acknowledge → cancelled
-    _, body = _submit_task(client, pid, owner, idempotency_key="cancel-2")
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="cancel-2"
+    )
     running_id = body["task"]["id"]
     _claim(db, running_id)
     resp = client.post(f"/api/projects/{pid}/tasks/{running_id}/cancel", headers=_h(client, owner))
@@ -645,7 +700,9 @@ def test_cancel_flow(client: TestClient, db: Session) -> None:
     assert queue.get_cancel(running_id) is None
 
     # 终态任务取消 → 409 + cancel_denied 诊断
-    _, body = _submit_task(client, pid, owner, idempotency_key="cancel-3")
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="cancel-3"
+    )
     done_id = body["task"]["id"]
     _run_task(db, done_id)
     resp = client.post(f"/api/projects/{pid}/tasks/{done_id}/cancel", headers=_h(client, owner))
@@ -664,7 +721,10 @@ def test_retry_reuses_same_snapshot(client: TestClient, db: Session) -> None:
     """终态任务手动重试: 复用同一 calc_snapshot_id, 新尝试编号递增。"""
     owner = make_user(db, "owner_retry")
     pid = _prepare_project(client, db, owner)
-    _, body = _submit_task(client, pid, owner, idempotency_key="retry-1")
+    rev = _save_config(client, pid, owner)
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="retry-1"
+    )
     task_id = body["task"]["id"]
     snapshot_id = body["task"]["calc_snapshot_id"]
     _run_task(db, task_id)
@@ -695,7 +755,10 @@ def test_retry_denied_for_running(client: TestClient, db: Session) -> None:
     """非终态任务重试被拒。"""
     owner = make_user(db, "owner_retry2")
     pid = _prepare_project(client, db, owner)
-    _, body = _submit_task(client, pid, owner, idempotency_key="retry-2")
+    rev = _save_config(client, pid, owner)
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="retry-2"
+    )
     task_id = body["task"]["id"]
     _claim(db, task_id)
     resp = client.post(f"/api/projects/{pid}/tasks/{task_id}/retry", headers=_h(client, owner))
@@ -712,9 +775,12 @@ def test_slot_limit_two_concurrent(client: TestClient, db: Session) -> None:
     """默认 2 个计算并发槽: 第 3 个任务保持 queued; 释放后继续领取。"""
     owner = make_user(db, "owner_slot")
     pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
     task_ids: list[int] = []
     for i in range(3):
-        _, body = _submit_task(client, pid, owner, idempotency_key=f"slot-{i}")
+        _, body = _submit_task(
+            client, pid, owner, config={"config_revision": rev}, idempotency_key=f"slot-{i}"
+        )
         task_ids.append(body["task"]["id"])
 
     # 前两个任务各占一槽 → running
@@ -752,8 +818,11 @@ def test_storage_gate_blocks_and_suggests(client: TestClient, db: Session) -> No
     owner = make_user(db, "owner_gate")
     # 数据集对象: 8 MB 已用, 配额仅 1 字节 → 可用空间 ≈ 0
     pid = _prepare_project(client, db, owner, dataset_size=8_000_000, quota_bytes=1)
+    rev = _save_config(client, pid, owner)
 
-    status, body = _submit_task(client, pid, owner, idempotency_key="gate-1")
+    status, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="gate-1"
+    )
     assert status == 409
     error = body["error"]
     assert error["code"] == "SYS-STORE-003"
@@ -772,7 +841,9 @@ def test_storage_gate_blocks_and_suggests(client: TestClient, db: Session) -> No
     for obj in objs:
         obj.quota_bytes = 10**18
     db.commit()
-    status, body = _submit_task(client, pid, owner, idempotency_key="gate-1")
+    status, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="gate-1"
+    )
     assert status == 201
     assert body["task"]["status"] == "queued"
     assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 1
@@ -839,9 +910,11 @@ def test_analysis_task_type_registered(client: TestClient, db: Session) -> None:
     """analysis 任务类型: 创建成功、入 compute 队列、快照绑定。"""
     owner = make_user(db, "owner_analysis")
     pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
     status, body = _submit_task(
         client, pid, owner, task_type="analysis",
-        config={"sweeps": [{"param_path": "calc_config.irr_floor",
+        config={"config_revision": rev,
+                "sweeps": [{"param_path": "calc_config.irr_floor",
                             "values": [0.06, 0.08], "unit": "-"}]},
         idempotency_key="analysis-1",
     )

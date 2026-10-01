@@ -139,6 +139,17 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _save_config(client: TestClient, token: str, pid: int) -> int:
+    """保存一份计算配置, 返回 revision(计算任务提交绑定用)。"""
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": _CALC_PAYLOAD, "expected_revision": None},
+        headers=_bearer(token),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
 def _create_project(client: TestClient, token: str, name: str) -> int:
     """通过 API 创建项目, 返回 project_id(显式携带默认基线)。"""
     resp = client.post(
@@ -412,7 +423,8 @@ def test_error_envelope_shape_all_error_paths(
     # 装配检查 ASM-CHECK-FAILED(ASM-SOLV-002 no_sink)拦截, 无法进入队列
     pid2 = _create_project(client, owner_tok, "解锁任务项目")
     _declare_explicit_calc(client, db, owner_tok, pid2, owner.id)
-    resp = client.post(f"/api/projects/{pid2}/tasks", json={"task_type": "optimization", "idempotency_key": "wrap-unlock-1"}, headers=_bearer(owner_tok))
+    rev2 = _save_config(client, owner_tok, pid2)
+    resp = client.post(f"/api/projects/{pid2}/tasks", json={"task_type": "optimization", "config": {"config_revision": rev2}, "idempotency_key": "wrap-unlock-1"}, headers=_bearer(owner_tok))
     assert resp.status_code == 201, resp.text
     task_id = resp.json()["task"]["id"]
     resp = client.post(
@@ -473,9 +485,10 @@ def test_success_wrappers_tasks_results_domain(client: TestClient, db: Session) 
     tok = _login(client, "wrap_task")
     pid = _create_project(client, tok, "任务包装项目")
     _declare_explicit_calc(client, db, tok, pid, user.id)
+    rev = _save_config(client, tok, pid)
     resp = client.post(
         f"/api/projects/{pid}/tasks",
-        json={"task_type": "calc", "idempotency_key": "wrap-task-1"}, headers=_bearer(tok),
+        json={"task_type": "calc", "config": {"config_revision": rev}, "idempotency_key": "wrap-task-1"}, headers=_bearer(tok),
     )
     # 提交/列表/详情/结果视图包装键由独立契约套件锁定, 此处仅保评估列表独有覆盖
     assert resp.status_code == 201, resp.text
@@ -682,11 +695,12 @@ def test_frontend_contract_adapters_consistent(client: TestClient, db: Session) 
     tok = _login(client, "wrap_fe")
     pid = _create_project(client, tok, "前端契约项目")
     _declare_explicit_calc(client, db, tok, pid, user.id)
+    rev = _save_config(client, tok, pid)
 
     # (1) 任务列表 {"items", "next_cursor"} ↔ asItems(body, 'tasks')(client.ts:1483)
     resp = client.post(
         f"/api/projects/{pid}/tasks",
-        json={"task_type": "calc", "idempotency_key": "wrap-fe-1"}, headers=_bearer(tok),
+        json={"task_type": "calc", "config": {"config_revision": rev}, "idempotency_key": "wrap-fe-1"}, headers=_bearer(tok),
     )
     assert resp.status_code == 201, resp.text
     body = client.get(f"/api/projects/{pid}/tasks", headers=_bearer(tok)).json()
@@ -702,12 +716,7 @@ def test_frontend_contract_adapters_consistent(client: TestClient, db: Session) 
 
     # (3) 配置 GET {"calculation_config","revision"} ↔
     #     configFromServer(读 env.calculation_config / env.revision)
-    resp = client.put(
-        f"/api/projects/{pid}/config",
-        json={"calculation_config": _CALC_PAYLOAD, "expected_revision": None},
-        headers=_bearer(tok),
-    )
-    assert resp.status_code == 200, resp.text
+    # 配置已在任务提交准备阶段保存(rev=1, 200 已断言), 此处直接读回验证信封。
     cfg = client.get(f"/api/projects/{pid}/config", headers=_bearer(tok)).json()
     assert set(cfg) == {"calculation_config", "revision"}
     assert cfg["revision"] == 1 and isinstance(cfg["calculation_config"], dict)

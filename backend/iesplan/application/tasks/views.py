@@ -191,9 +191,16 @@ def task_detail(
     detail = task_summary(db, task)
     if task.calc_snapshot_id is not None:
         snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
-        detail["calc_snapshot"] = (
-            {"id": snapshot.id, "random_seed": snapshot.random_seed} if snapshot is not None else None
-        )
+        if snapshot is None:
+            detail["calc_snapshot"] = None
+        else:
+            ref = snapshot.calc_config_snapshot.get("config_ref") or {}
+            detail["calc_snapshot"] = {
+                "id": snapshot.id,
+                "random_seed": snapshot.random_seed,
+                "config_revision": ref.get("revision"),
+                "config_project_id": ref.get("project_id"),
+            }
     else:
         detail["calc_snapshot"] = None
 

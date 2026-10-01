@@ -569,10 +569,24 @@ def test_config_read_and_finance_planning_keys(
 # ---------------------------------------------------------------------------
 
 
+def _save_config(client: TestClient, headers: dict[str, str], pid: int) -> int:
+    """保存一份计算配置, 返回 revision(计算任务提交绑定用)。"""
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": _CALC_PAYLOAD, "expected_revision": None},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
 def _submit_task(
-    client: TestClient, headers: dict[str, str], pid: int, key: str | None
+    client: TestClient, headers: dict[str, str], pid: int, key: str | None,
+    config_revision: int | None = None,
 ) -> tuple[int, dict]:
     payload: dict = {"task_type": "optimization"}
+    if config_revision is not None:
+        payload["config"] = {"config_revision": config_revision}
     if key is not None:
         payload["idempotency_key"] = key
     resp = client.post(f"/api/projects/{pid}/tasks", json=payload, headers=headers)
@@ -587,6 +601,7 @@ def test_tasks_lifecycle_idempotency_permission(
     outsider = _register_user(client, f"contract_taskout_{uid}")
     pid = _make_project(client, owner, f"contract_task_{uid}")
     _declare_calc_ready(client, owner, pid)
+    rev = _save_config(client, owner, pid)
     # 缺键拒绝 422 标准信封(API-REQ-001, contracts.md:422 行; pydantic 校验
     # 失败走 RequestValidationError 处理器, 无裸 detail 偏差)
     resp = client.post(
@@ -594,13 +609,13 @@ def test_tasks_lifecycle_idempotency_permission(
     )
     _assert_envelope(resp, 422, code="API-REQ-001")
     # 新建 201 + 包装键
-    status, body = _submit_task(client, owner, pid, f"ct-{uid}-1")
+    status, body = _submit_task(client, owner, pid, f"ct-{uid}-1", config_revision=rev)
     assert status == 201, body
     assert set(body) == {"hint", "replayed", "task"}
     assert body["replayed"] is False
     task_id = body["task"]["id"]
     # 同键重试 200 同一任务
-    status, body = _submit_task(client, owner, pid, f"ct-{uid}-1")
+    status, body = _submit_task(client, owner, pid, f"ct-{uid}-1", config_revision=rev)
     assert status == 200, body
     assert body["task"]["id"] == task_id
     assert body["replayed"] is True
@@ -635,7 +650,8 @@ def test_results_no_evidence_shapes(
     owner = _register_user(client, f"contract_result_{uid}")
     pid = _make_project(client, owner, f"contract_result_{uid}")
     _declare_calc_ready(client, owner, pid)
-    status, body = _submit_task(client, owner, pid, f"cr-{uid}-1")
+    rev = _save_config(client, owner, pid)
+    status, body = _submit_task(client, owner, pid, f"cr-{uid}-1", config_revision=rev)
     assert status == 201, body
     task_id = body["task"]["id"]
     resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=owner)
@@ -675,7 +691,8 @@ def test_exports_package_download_and_excel_guard(
     owner = _register_user(client, f"contract_export_{uid}")
     pid = _make_project(client, owner, f"contract_export_{uid}")
     _declare_calc_ready(client, owner, pid)
-    status, body = _submit_task(client, owner, pid, f"ce-{uid}-1")
+    rev = _save_config(client, owner, pid)
+    status, body = _submit_task(client, owner, pid, f"ce-{uid}-1", config_revision=rev)
     assert status == 201, body
     # 项目包导出 200 + 包装键, 凭 token 下载 200
     resp = client.post(f"/api/projects/{pid}/exports/package", headers=owner)

@@ -150,6 +150,23 @@ def test_submit_report_task_commits_and_repeatable(
     assert (old.type, old.status, old.calc_snapshot_id) == (task.type, task.status, task.calc_snapshot_id)
 
 
+#: 计算配置正文(12 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
+_CONFIG_BODY: dict = {
+    "schema": "ies.calculation-config",
+    "schema_version": "1.0.0",
+    "mode": "planning",
+    "predictions": [],
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "precision": "medium",
+    "convergence": None,
+    "time_limit_seconds": 600,
+    "options": {},
+    "seed": None,
+    "outputs": ["solution"],
+}
+
+
 #: 现行装配边界要求的显式计算声明(无静默默认): mode/generator/solver/
 #: time_axis 缺一即阻断(ASM-CONV-001)。与 test_tasks_api.EXPLICIT_CALC_PATCH
 #: 同值, 经 config.patch 草稿命令显式声明, 不得依赖回退。
@@ -246,20 +263,33 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
 
     无键提交由用户完整用例拒绝(宪法 §5.5), 不再有快照级任务去重。
     """
+    from iesplan.application.configuration.calc_config import save_calculation_config_case
+
     owner = _user(db, "w2c_owner_opt")
     pid = _project(client, owner, "w2c-proj-opt")
     _declare_optimization_ready(client, db, owner, pid)
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
+    rev = saved["revision"]
 
-    task, flags = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-opt-1")
+    task, flags = tasks_uc.submit_task(
+        db, owner, pid, "optimization",
+        config={"config_revision": rev}, idempotency_key="w2c-opt-1",
+    )
     assert flags == {"replay": False}
     assert task.calc_snapshot_id is not None
 
-    replay, rflags = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-opt-1")
+    replay, rflags = tasks_uc.submit_task(
+        db, owner, pid, "optimization",
+        config={"config_revision": rev}, idempotency_key="w2c-opt-1",
+    )
     assert rflags == {"replay": True}
     assert replay.id == task.id
 
     # 不同幂等键、同输入 → 新任务, 但复用同一快照(快照去重保留)
-    other, oflags = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-opt-2")
+    other, oflags = tasks_uc.submit_task(
+        db, owner, pid, "optimization",
+        config={"config_revision": rev}, idempotency_key="w2c-opt-2",
+    )
     assert oflags == {"replay": False}
     assert other.id != task.id
     assert other.calc_snapshot_id == task.calc_snapshot_id
@@ -281,10 +311,17 @@ def test_submit_without_frozen_refs_fails_explicitly(
     """
     from iesplan.tasks.contracts import InvalidRequestError
 
+    from iesplan.application.configuration.calc_config import save_calculation_config_case
+
     owner = _user(db, "w2c_owner_noref")
     pid = _project(client, owner, "w2c-proj-noref")
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
+    rev = saved["revision"]
     with pytest.raises(InvalidRequestError):
-        tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-noref-1")
+        tasks_uc.submit_task(
+            db, owner, pid, "optimization",
+            config={"config_revision": rev}, idempotency_key="w2c-noref-1",
+        )
 
     from test_config_revisions import PROFILE_PAYLOAD
 
@@ -296,7 +333,10 @@ def test_submit_without_frozen_refs_fails_explicitly(
     )
     # 仅财务就绪、规划缺席 → 仍明确失败(规划引用缺失)
     with pytest.raises(InvalidRequestError):
-        tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-noref-2")
+        tasks_uc.submit_task(
+            db, owner, pid, "optimization",
+            config={"config_revision": rev}, idempotency_key="w2c-noref-2",
+        )
 
 
 def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> None:
@@ -320,8 +360,12 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
     owner = _user(db, "w2c_owner_restore")
     pid = _project(client, owner, "w2c-proj-restore")
     device_ref, _ = _declare_optimization_ready(client, db, owner, pid)
+    from iesplan.application.configuration.calc_config import save_calculation_config_case
+
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
     task, _ = tasks_uc.submit_task(
-        db, owner, pid, "optimization", idempotency_key="w2c-restore-1"
+        db, owner, pid, "optimization",
+        config={"config_revision": saved["revision"]}, idempotency_key="w2c-restore-1",
     )
     assert task.calc_snapshot_id is not None
     snap1 = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
@@ -388,7 +432,10 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
     assert proj.effective_finance_revision == 1
     assert proj.planning_revision == 1
 
-    task2, _ = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-restore-2")
+    task2, _ = tasks_uc.submit_task(
+        db, owner, pid, "optimization",
+        config={"config_revision": saved["revision"]}, idempotency_key="w2c-restore-2",
+    )
     assert task2.calc_snapshot_id is not None
     snap2 = tasks_domain.get_snapshot(db, task2.calc_snapshot_id)
     assert snap2 is not None
@@ -475,8 +522,15 @@ def test_restore_version_without_finance_clears_pointers(
     assert "effective_finance" not in content
     assert "planning_config" not in content
 
+    from iesplan.application.configuration.calc_config import save_calculation_config_case
+
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
+    # 引用合法但财务/规划引用已清空 → 仍明确失败(装配门禁, 非绑定问题)
     with pytest.raises(InvalidRequestError):
-        tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-early-1")
+        tasks_uc.submit_task(
+            db, owner, pid, "optimization",
+            config={"config_revision": saved["revision"]}, idempotency_key="w2c-early-1",
+        )
 
 
 def test_bind_unknown_dataset_version_fails_at_input(
@@ -624,11 +678,18 @@ def _fail(db: Session, task_id: int) -> None:
 
 def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine: Engine) -> None:
     """重试: 终态 → queued(快照不变, 已提交); 重复落点一致; 非终态拒绝同码。"""
+    from iesplan.application.configuration.calc_config import save_calculation_config_case
+
     owner = _user(db, "w2c_owner_retry")
     pid = _project(client, owner, "w2c-proj-retry")
     _declare_optimization_ready(client, db, owner, pid)
+    saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
+    rev = saved["revision"]
 
-    t1, _ = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-t1")
+    t1, _ = tasks_uc.submit_task(
+        db, owner, pid, "optimization",
+        config={"config_revision": rev}, idempotency_key="w2c-t1",
+    )
     snap = t1.calc_snapshot_id
     _fail(db, t1.id)
     retried = tasks_uc.retry_task(db, owner, t1.id)
@@ -636,7 +697,10 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
     with _fresh_db(engine) as fresh:
         assert tasks_domain.get_task(fresh, t1.id).status == "queued"
 
-    t2, _ = tasks_uc.submit_task(db, owner, pid, "optimization", idempotency_key="w2c-t2")
+    t2, _ = tasks_uc.submit_task(
+        db, owner, pid, "optimization",
+        config={"config_revision": rev}, idempotency_key="w2c-t2",
+    )
     _fail(db, t2.id)
     old_retried = tasks_uc.retry_task(db, owner, t2.id)
     assert (old_retried.status, old_retried.calc_snapshot_id) == ("queued", t2.calc_snapshot_id)

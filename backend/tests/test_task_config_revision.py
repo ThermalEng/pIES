@@ -1,0 +1,359 @@
+"""0.12-A2: 计算任务绑定已保存 CalculationConfig revision。
+
+约定:
+- 计算类任务(calc/optimization/uncertainty/analysis)提交须在 config 中
+  明确引用本项目已保存 revision(``config_revision`` 正整数);
+- 后端按 (project_id, version) 精确解析行正文并冻结进快照
+  (``calc_config_snapshot`` = 正文 + task_params + config_ref), 不读最新
+  指针, 不回退草稿/默认/空字典;
+- 缺失或形态非法 → 400 TASK-REQ-006; 查无(未保存/超出现有/跨项目号码)
+  → 404 RES-MISS-003;
+- 快照复用身份以冻结输入为准(含 config_ref), 不同 revision 永不复用;
+  同幂等键命中返回同一任务(命中在先, 不再解析 revision)。
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest  # noqa: E402
+from auth_helpers import login_headers, make_user  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.engine import Engine  # noqa: E402
+from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+from iesplan import tasks as tasks_domain  # noqa: E402
+from iesplan.core.jsonutil import jsonable  # noqa: E402
+from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan.api.config import config_router  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
+from iesplan.application import identity  # noqa: E402
+from iesplan.db import Base  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402,F401
+from iesplan.main import create_app  # noqa: E402
+from iesplan.project.persistence import Project  # noqa: E402,F401
+from iesplan.tasks import persistence as tasks_persistence  # noqa: E402,F401
+from iesplan.tasks.persistence import Task  # noqa: E402,F401
+
+os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
+os.environ.setdefault("IESPLAN_QUEUE", "memory")
+os.environ.setdefault("IESPLAN_STORAGE_BACKEND", "local")
+
+
+@pytest.fixture(scope="module")
+def engine() -> Iterator[Engine]:
+    """模块级 SQLite 内存引擎(StaticPool: 所有会话共享同一连接)。"""
+    eng = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(eng)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _clean_state(engine: Engine) -> Iterator[None]:
+    """每个测试结束后清空全部表(避免测试间串扰, 与 test_tasks_api 同构)。"""
+    yield
+    with engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+
+
+@pytest.fixture()
+def db(engine: Engine):
+    """每个测试独立 Session(自动回滚)。"""
+    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.fixture()
+def factory(engine: Engine) -> sessionmaker:
+    """API 请求级 Session 工厂(供 get_request_db 覆盖)。"""
+    return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+@pytest.fixture()
+def client(factory: sessionmaker, tmp_path: Path) -> Iterator[TestClient]:
+    """挂载业务路由的内存应用(队列内存后端, 本地存储指向 tmp)。"""
+    from iesplan.config import settings  # noqa: E402
+
+    settings.data_dir = tmp_path
+    app = create_app()
+    app.include_router(projects_api.router)
+    app.include_router(tasks_api.router)
+    app.include_router(config_router)
+
+    def _override():
+        session = factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_request_db] = _override
+    with TestClient(app, raise_server_exceptions=False) as client:
+        yield client
+    app.dependency_overrides.clear()
+
+
+def _h(client: TestClient, user) -> dict[str, str]:
+    """认证头: 与 test_tasks_api 共用 login_headers 缓存, 避免多窗口接管。"""
+    return login_headers(client, user)
+
+
+def _prepare_project(client: TestClient, db: Session, owner, name: str = "绑定测试项目") -> int:
+    """准备可提交计算任务的项目(与 test_tasks_api 同构: 财务/设备/规划/显式计算声明/装配节/固化版本)。"""
+    from test_tasks_api import (  # noqa: E402
+        _bind_and_freeze,
+        _create_project,
+        _declare_assembly_sections,
+        _declare_device_and_planning,
+        _declare_finance,
+        _set_explicit_calc,
+    )
+
+    pid = _create_project(client, owner, name)
+    _declare_finance(db, owner, pid)
+    device_ref, revision = _declare_device_and_planning(client, db, owner, pid)
+    revision = _set_explicit_calc(client, pid, owner, revision)
+    revision = _declare_assembly_sections(
+        client, pid, owner, revision, {device_ref: {"type": "none"}}
+    )
+    _bind_and_freeze(client, pid, owner, None, revision=revision)
+    return pid
+
+
+def _body(**overrides: Any) -> dict[str, Any]:
+    """合法计算配置正文(12 字段契约)。"""
+    payload: dict[str, Any] = {
+        "schema": "ies.calculation-config",
+        "schema_version": "1.0.0",
+        "mode": "planning",
+        "predictions": [],
+        "generator": "ies.algo.milp_hybrid@1.0.0",
+        "solver": "ies.solver.highs@1.7.2",
+        "precision": "medium",
+        "convergence": None,
+        "time_limit_seconds": 600,
+        "options": {},
+        "seed": None,
+        "outputs": ["solution"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _save_config(
+    client: TestClient, pid: int, user,
+    body: dict[str, Any] | None = None, expected_revision: int | None = None,
+) -> int:
+    """保存一份计算配置, 返回 revision。"""
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": body or _body(), "expected_revision": expected_revision},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _submit(
+    client: TestClient, pid: int, user, config: dict[str, Any] | None, key: str,
+    task_type: str = "calc",
+) -> tuple[int, dict[str, Any]]:
+    """提交任务, 返回 (HTTP 状态码, 响应体)。"""
+    payload: dict[str, Any] = {"task_type": task_type, "idempotency_key": key}
+    if config is not None:
+        payload["config"] = config
+    resp = client.post(f"/api/projects/{pid}/tasks", json=payload, headers=_h(client, user))
+    return resp.status_code, resp.json()
+
+
+def _detail(client: TestClient, pid: int, user, task_id: int) -> dict[str, Any]:
+    resp = client.get(f"/api/projects/{pid}/tasks/{task_id}", headers=_h(client, user))
+    assert resp.status_code == 200, resp.text
+    return resp.json()["task"]
+
+
+def _error(resp_body: dict[str, Any]) -> dict[str, Any]:
+    assert "error" in resp_body, resp_body
+    return resp_body["error"]
+
+
+def test_missing_revision_rejected_400(client: TestClient, db: Session) -> None:
+    """计算任务缺 config_revision → 400 TASK-REQ-006, 无回退。"""
+    owner = make_user(db, "owner_bind_req")
+    pid = _prepare_project(client, db, owner)
+    _save_config(client, pid, owner)
+    for config in (None, {}, {"horizon_years": 1}):
+        status, body = _submit(client, pid, owner, config, key=f"req-{id(config)}")
+        assert status == 400, body
+        err = _error(body)
+        assert err["code"] == "TASK-REQ-006", err
+
+
+def test_malformed_revision_rejected_400(client: TestClient, db: Session) -> None:
+    """config_revision 非正整数(0/负数/字符串/布尔) → 400 TASK-REQ-006。"""
+    owner = make_user(db, "owner_bind_shape")
+    pid = _prepare_project(client, db, owner)
+    _save_config(client, pid, owner)
+    for i, raw in enumerate([0, -1, "1", True, 1.5]):
+        status, body = _submit(
+            client, pid, owner, {"config_revision": raw}, key=f"shape-{i}"
+        )
+        assert status == 400, body
+        assert _error(body)["code"] == "TASK-REQ-006", body
+
+
+def test_unknown_revision_404(client: TestClient, db: Session) -> None:
+    """未保存/超出现有号码 → 404 RES-MISS-003, 不回退最新或默认。"""
+    owner = make_user(db, "owner_bind_miss")
+    pid = _prepare_project(client, db, owner)
+    status, body = _submit(client, pid, owner, {"config_revision": 1}, key="miss-1")
+    assert status == 404, body
+    assert _error(body)["code"] == "RES-MISS-003", body
+
+    _save_config(client, pid, owner)
+    status, body = _submit(client, pid, owner, {"config_revision": 2}, key="miss-2")
+    assert status == 404, body
+    assert _error(body)["code"] == "RES-MISS-003", body
+
+
+def test_cross_project_revision_404(client: TestClient, db: Session) -> None:
+    """跨项目号码在本项目查无 → 404, 不得串用他项目正文。"""
+    owner = make_user(db, "owner_bind_cross")
+    pid_a = _prepare_project(client, db, owner, name="绑定项目A")
+    pid_b = _prepare_project(client, db, owner, name="绑定项目B")
+    _save_config(client, pid_a, owner)
+    _save_config(client, pid_b, owner)
+    rev_b2 = _save_config(client, pid_b, owner, expected_revision=1)
+    assert rev_b2 == 2
+    status, body = _submit(client, pid_a, owner, {"config_revision": 2}, key="cross-1")
+    assert status == 404, body
+    assert _error(body)["code"] == "RES-MISS-003", body
+
+
+def test_pinned_body_frozen_and_isolated(
+    client: TestClient, db: Session, factory
+) -> None:
+    """两 revision 各自冻结正文 + config_ref; 改最新不影响既有快照。"""
+    owner = make_user(db, "owner_bind_freeze")
+    pid = _prepare_project(client, db, owner)
+    rev1 = _save_config(client, pid, owner, _body(seed=11, outputs=["a"]))
+    status, body = _submit(client, pid, owner, {"config_revision": rev1}, key="frz-1")
+    assert status == 201, body
+    task1 = body["task"]
+    rev2 = _save_config(
+        client, pid, owner, _body(seed=22, outputs=["b"]), expected_revision=rev1
+    )
+    assert rev2 == 2
+
+    status, body = _submit(client, pid, owner, {"config_revision": rev2}, key="frz-2")
+    assert status == 201, body
+    task2 = body["task"]
+    assert task2["id"] != task1["id"]
+    assert task2["calc_snapshot_id"] != task1["calc_snapshot_id"]
+
+    snap1 = tasks_domain.get_snapshot(factory(), task1["calc_snapshot_id"])
+    snap2 = tasks_domain.get_snapshot(factory(), task2["calc_snapshot_id"])
+    assert snap1 is not None and snap2 is not None
+    # 冻结内容按领域 canonical 语义比较(jsonable: 元组/列表归一, 与复用判定一致)
+    frozen1 = jsonable(dict(snap1.calc_config_snapshot))
+    frozen2 = jsonable(dict(snap2.calc_config_snapshot))
+    assert frozen1["seed"] == 11 and frozen1["outputs"] == ["a"]
+    assert frozen2["seed"] == 22 and frozen2["outputs"] == ["b"]
+    assert frozen1["config_ref"] == {"project_id": pid, "revision": 1}
+    assert frozen2["config_ref"] == {"project_id": pid, "revision": 2}
+    assert "config_revision" not in frozen1.get("task_params", {})
+    # 改最新后重读旧快照: 正文保持钉选时内容
+    snap1_again = tasks_domain.get_snapshot(factory(), task1["calc_snapshot_id"])
+    assert snap1_again is not None
+    assert jsonable(dict(snap1_again.calc_config_snapshot))["seed"] == 11
+
+
+def test_same_inputs_reuse_snapshot(client: TestClient, db: Session, factory) -> None:
+    """同 revision 同输入不同键 → 新任务但复用同一快照。"""
+    owner = make_user(db, "owner_bind_reuse")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    status, first = _submit(client, pid, owner, {"config_revision": rev}, key="reuse-1")
+    assert status == 201, first
+    status, second = _submit(client, pid, owner, {"config_revision": rev}, key="reuse-2")
+    assert status == 201, second
+    assert second["task"]["id"] != first["task"]["id"]
+    assert second["task"]["calc_snapshot_id"] == first["task"]["calc_snapshot_id"]
+
+
+def test_same_key_replay_returns_same_task(client: TestClient, db: Session) -> None:
+    """同键重放返回同一任务(命中在先, 不再解析 revision)。"""
+    owner = make_user(db, "owner_bind_replay")
+    pid = _prepare_project(client, db, owner)
+    rev1 = _save_config(client, pid, owner)
+    status, first = _submit(client, pid, owner, {"config_revision": rev1}, key="replay-1")
+    assert status == 201, first
+    rev2 = _save_config(client, pid, owner, expected_revision=rev1)
+    assert rev2 == 2
+    status, second = _submit(client, pid, owner, {"config_revision": rev2}, key="replay-1")
+    assert status == 200, second
+    assert second["replayed"] is True
+    assert second["task"]["id"] == first["task"]["id"]
+
+
+def test_task_params_preserved(client: TestClient, db: Session, factory) -> None:
+    """任务级参数保留在 task_params, 不覆盖配置正文, 绑定键不混入。"""
+    owner = make_user(db, "owner_bind_params")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit(
+        client, pid, owner,
+        {"config_revision": rev, "horizon_years": 3, "priority": 5},
+        key="params-1",
+    )
+    assert status == 201, body
+    snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
+    assert snap is not None
+    frozen = dict(snap.calc_config_snapshot)
+    assert frozen["task_params"]["horizon_years"] == 3
+    assert "config_revision" not in frozen["task_params"]
+    assert frozen["mode"] == "planning" and frozen["generator"] == "ies.algo.milp_hybrid@1.0.0"
+
+
+def test_detail_shows_config_revision(client: TestClient, db: Session) -> None:
+    """任务详情快照摘要展示所用 revision 与项目身份。"""
+    owner = make_user(db, "owner_bind_detail")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit(client, pid, owner, {"config_revision": rev}, key="detail-1")
+    assert status == 201, body
+    detail = _detail(client, pid, owner, body["task"]["id"])
+    snap = detail["calc_snapshot"]
+    assert snap is not None
+    assert snap["config_revision"] == 1
+    assert snap["config_project_id"] == pid
+
+
+def test_report_task_needs_no_revision(client: TestClient, db: Session) -> None:
+    """io 类任务无快照, 不要求 config_revision(既有行为不倒退)。"""
+    owner = make_user(db, "owner_bind_report")
+    pid = _prepare_project(client, db, owner)
+    resp = client.post(
+        f"/api/projects/{pid}/tasks",
+        json={"task_type": "report", "idempotency_key": "rpt-bind-1"},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["task"]["calc_snapshot_id"] is None

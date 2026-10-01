@@ -524,6 +524,8 @@ export interface TaskListParams {
 export interface TaskCreateInput {
   project_id: EntityId
   type: TaskType
+  /** 计算类任务必填: 本项目已保存 CalculationConfig 的 revision(冻结进快照)。 */
+  config_revision?: number
   dataset_ids?: EntityId[]
   priority?: number
   deadline?: ISO8601
@@ -572,6 +574,9 @@ export interface TaskBatch {
 export interface CalcSnapshotSummary {
   id: EntityId
   random_seed: number | null
+  /** 快照冻结的配置来源(旧快照无此标记时为 null)。 */
+  config_revision: number | null
+  config_project_id: number | null
 }
 
 export interface EvidencePackageSummary {

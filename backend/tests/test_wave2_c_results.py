@@ -251,13 +251,36 @@ def _declare_optimization_ready(
     assert resp.status_code == 200, resp.text
 
 
+#: 计算配置正文(12 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
+_CONFIG_BODY: dict = {
+    "schema": "ies.calculation-config",
+    "schema_version": "1.0.0",
+    "mode": "planning",
+    "predictions": [],
+    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "solver": "ies.solver.highs@1.7.2",
+    "precision": "medium",
+    "convergence": None,
+    "time_limit_seconds": 600,
+    "options": {},
+    "seed": None,
+    "outputs": ["solution"],
+}
+
+
 def _prepare_running(
     client: TestClient, db: Session, user, name: str, key: str
 ) -> tuple[int, int, Any, int]:
-    """项目 → 显式计算声明 → 新用例提交计算任务 → 新用例领取。返回 (pid, task_id, claim, snapshot_id)。"""
+    """项目 → 显式计算声明 → 保存配置 → 新用例提交计算任务(绑定 revision) → 新用例领取。返回 (pid, task_id, claim, snapshot_id)。"""
+    from iesplan.application.configuration.calc_config import save_calculation_config_case
+
     pid = _project(client, user, name)
     _declare_optimization_ready(client, db, user, pid)
-    task, _ = tasks_uc.submit_task(db, user, pid, "optimization", idempotency_key=key)
+    saved = save_calculation_config_case(db, user, pid, dict(_CONFIG_BODY), None)
+    task, _ = tasks_uc.submit_task(
+        db, user, pid, "optimization",
+        config={"config_revision": saved["revision"]}, idempotency_key=key,
+    )
     claim = tasks_uc.claim_task(db, task.id, "w2c-fake-exec")
     assert claim is not None
     assert task.calc_snapshot_id is not None

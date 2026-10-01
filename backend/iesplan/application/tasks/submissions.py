@@ -269,19 +269,50 @@ def _snapshot_inputs_equal(
     )
 
 
+def _resolve_pinned_calculation_config(
+    db: Session, project_id: int, config: dict[str, Any] | None
+) -> tuple[dict[str, Any], int]:
+    """解析任务提交钉选的计算配置 revision → (正文副本, revision)。
+
+    只接受任务级 config 中的 ``config_revision``(正整数); 缺失或形态非法
+    (含布尔值) → 400 TASK-REQ-006。按 (project_id, version) 精确解析已保存
+    行, 正文原样取行内容, 不重复校验(输入入口唯一校验); 查无 → 404, 不读
+    最新指针, 不回退草稿 calc_config、默认配置或空字典。
+    """
+    raw = (config or {}).get("config_revision")
+    if raw is None or isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise InvalidRequestError(
+            "计算类任务须在 config 中明确引用已保存配置 revision(config_revision 正整数)",
+            code="TASK-REQ-006",
+            params={"project_id": project_id, "config_revision": raw},
+            location={"object_type": "project", "object_id": project_id, "field": "config_revision"},
+        )
+    row = configuration_domain.get_calculation_config_revision(db, project_id, raw)
+    if row is None:
+        raise NotFoundError(
+            "指定的计算配置 revision 在本项目不存在",
+            params={"project_id": project_id, "config_revision": raw},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "config_revision"},
+        )
+    return dict(row.content), row.version
+
+
 def _assemble_snapshot(
     db: Session,
     project_id: int,
     task_type: str,
     config: dict[str, Any] | None = None,
     user: UserRecord | None = None,
+    calculation_config: tuple[dict[str, Any], int] | None = None,
 ) -> CalcSnapshotRecord:
     """组装不可变计算快照(相同输入复用)。
 
-    绑定: 项目版本(无版本时固化当前草稿)、数据集版本 id 清单、计算配置全文、
-    程序版本、受控扩展版本、随机种子(强制非 NULL)、容差与规范装配文本/回执;
-    相同输入复用既有快照(快照内容字段逐项相等判定)。任务级 config 并入快照
-    的 calc_config_snapshot.task_params。
+    绑定: 项目版本(无版本时固化当前草稿)、数据集版本 id 清单、钉选的计算
+    配置正文 + 来源 revision/项目身份、程序版本、受控扩展版本、随机种子
+    (正文 seed 缺失时按版本派生, 强制非 NULL)、规范装配文本/回执; 相同输入
+    复用既有快照(快照内容字段逐项相等判定, 含 config_ref, 故不同 revision
+    永不复用)。任务级 config(除绑定键 config_revision 外)并入快照的
+    calc_config_snapshot.task_params, 不覆盖配置正文。
     """
     project = require_project(db, project_id)
     actor = user or identity_domain.get_user(db, project.owner_id)
@@ -289,14 +320,18 @@ def _assemble_snapshot(
         raise InvalidRequestError("无法确定快照创建者", params={"project_id": project_id})
     version, content = _resolve_project_inputs(db, project, actor, freeze=True)
     assert version is not None
-    calc_config: dict[str, Any] = dict(content.get("calc_config") or {})
-    if config:
-        calc_config["task_params"] = jsonable(config)
-    random_seed = calc_config.get("random_seed")
-    if random_seed is None:
+    body, revision = calculation_config if calculation_config is not None else ({}, 0)
+    calc_config: dict[str, Any] = dict(body)
+    task_params = {k: v for k, v in (config or {}).items() if k != "config_revision"}
+    if task_params:
+        calc_config["task_params"] = jsonable(task_params)
+    if revision:
+        calc_config["config_ref"] = {"project_id": project_id, "revision": revision}
+    random_seed = calc_config.get("seed")
+    if not isinstance(random_seed, int) or isinstance(random_seed, bool):
         random_seed = _derive_random_seed(version.id)
     dataset_ids = _bound_dataset_ids(content)
-    tolerances = calc_config.get("tolerances") or {}
+    tolerances: dict[str, Any] = {}
     extensions = content.get("extensions") or {}
 
     # 统一生产闸门: 先签发规范文本/回执二件套, 失败不创建快照或任务。
@@ -714,13 +749,17 @@ def _submit_task(
                 params={"parent_task_id": parent_task_id, "project_id": project_id},
             )
 
-    # 1) 幂等命中(限定项目范围)
+    # 1) 幂等命中(限定项目范围; 同键返回同一任务, 不再解析 revision)
     existing = tasks_domain.get_task_by_idempotency(db, project_id, idempotency_key)
     if existing is not None:
         return existing, {"replay": True}
 
     snapshot: CalcSnapshotRecord | None = None
     if task_type in COMPUTE_TYPES:
+        # 1b) 计算任务必须明确引用本项目已保存 CalculationConfig revision。
+        # 精确引用只解析传入号码, 不读最新指针, 不回退草稿/默认/空字典;
+        # 查无(未保存/超出现有/跨项目号码) → 404, 缺失或形态非法 → 400。
+        pinned = _resolve_pinned_calculation_config(db, project_id, config)
         # 2) 存储门禁(门禁失败不创建快照不创建任务)
         estimate = estimate_storage(db, project_id, task_type, config)
         if estimate.blocked:
@@ -735,7 +774,10 @@ def _submit_task(
                 location={"object_type": "project", "object_id": project_id},
             )
         # 3) 快照装配(相同输入复用既有快照, 见 _assemble_snapshot)
-        snapshot = _assemble_snapshot(db, project_id, task_type, config=config, user=user)
+        snapshot = _assemble_snapshot(
+            db, project_id, task_type, config=config, user=user,
+            calculation_config=pinned,
+        )
     # io 类任务(report/export/import/dataset_build): 无快照, 仅幂等键命中复用
 
     priority = 0

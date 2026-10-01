@@ -480,10 +480,13 @@ def _baseline_confirm(client: TestClient, user_id: int, project_id: int) -> None
 
 
 def _submit_calc_task(
-    client: TestClient, user_id: int, project_id: int, idempotency_key: str | None = None
+    client: TestClient, user_id: int, project_id: int, idempotency_key: str | None = None,
+    *, config_revision: int,
 ) -> tuple[int, int]:
     """提交方案评价任务(calc), 返回 (task_id, status_code)。"""
-    payload: dict[str, Any] = {"task_type": "calc", "config": {"horizon_years": 1}}
+    payload: dict[str, Any] = {
+        "task_type": "calc", "config": {"config_revision": config_revision, "horizon_years": 1},
+    }
     if idempotency_key is not None:
         payload["idempotency_key"] = idempotency_key
     resp = client.post(f"/api/projects/{project_id}/tasks", json=payload, headers=_h(client, user_id))
@@ -604,7 +607,8 @@ def _prepare_project(
     # (草稿修订链式递增, 不得复用旧修订号)
     from iesplan.application import configuration as config_cases
 
-    _save_config(client, user_id, pid)
+    config_body = _save_config(client, user_id, pid)
+    config_revision = config_body["revision"]
     _declare_finance(db, user_id, pid)
     bat_ref = "battery"
     config_cases.save_planning_config(
@@ -640,6 +644,7 @@ def _prepare_project(
         "dataset_id": dataset_id,
         "dataset_version_id": version_id,
         "revision": revision,
+        "config_revision": config_revision,
     }
 
 
@@ -676,7 +681,10 @@ def test_task_submit_snapshot_preguard(client: TestClient, db: Session) -> None:
     ctx = _prepare_project(client, db, eng_id)
 
     # 提交方案评价任务
-    task_id, status_code = _submit_calc_task(client, eng_id, ctx["project_id"], idempotency_key="it-chain-1")
+    task_id, status_code = _submit_calc_task(
+        client, eng_id, ctx["project_id"], idempotency_key="it-chain-1",
+        config_revision=ctx["config_revision"],
+    )
     assert status_code == 201
     task = _get_task(client, eng_id, ctx["project_id"], task_id)
     assert task["status"] == "queued"
@@ -808,23 +816,27 @@ def test_task_semantics(client: TestClient, db: Session) -> None:
     assert resp.status_code == 422
 
     task_id, status_code = _submit_calc_task(
-        client, eng_id, ctx["project_id"], idempotency_key="it-sem-0"
+        client, eng_id, ctx["project_id"], idempotency_key="it-sem-0",
+        config_revision=ctx["config_revision"],
     )
     assert status_code == 201
 
     # 不同键、同输入 → 新任务(不再有快照级去重)
     task_id2, status_code2 = _submit_calc_task(
-        client, eng_id, ctx["project_id"], idempotency_key="it-sem-1"
+        client, eng_id, ctx["project_id"], idempotency_key="it-sem-1",
+        config_revision=ctx["config_revision"],
     )
     assert task_id2 != task_id and status_code2 == 201
 
     # 幂等键: 同键命中返回既有任务并标记 replayed
     task_id3, status_code3 = _submit_calc_task(
-        client, eng_id, ctx["project_id"], idempotency_key="it-idem-1"
+        client, eng_id, ctx["project_id"], idempotency_key="it-idem-1",
+        config_revision=ctx["config_revision"],
     )
     assert status_code3 == 201
     task_id4, status_code4 = _submit_calc_task(
-        client, eng_id, ctx["project_id"], idempotency_key="it-idem-1"
+        client, eng_id, ctx["project_id"], idempotency_key="it-idem-1",
+        config_revision=ctx["config_revision"],
     )
     assert task_id4 == task_id3 and status_code4 == 200
 

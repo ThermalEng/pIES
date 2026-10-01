@@ -1334,6 +1334,7 @@ export const api = {
     },
     create(input: TaskCreateInput): Promise<Task> {
       const config: Record<string, unknown> = {}
+      if (input.config_revision !== undefined) config.config_revision = input.config_revision
       if (input.dataset_ids !== undefined) config.dataset_ids = input.dataset_ids
       if (input.priority !== undefined) config.priority = input.priority
       if (input.deadline !== undefined) config.deadline = input.deadline

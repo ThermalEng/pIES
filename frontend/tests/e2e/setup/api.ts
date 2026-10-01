@@ -197,9 +197,10 @@ export async function buildMinimalModel(
       },
     })
   }
-  connect('grid_connection', 'electric', 'electric_load', 'electric')
-  connect('grid_connection', 'electric', 'heat_pump', 'electric')
-  connect('grid_connection', 'electric', 'electric_chiller', 'electric')
+  // 注册表现实载体名为 electricity(历史 'electric' 已改名), heat/cool 不变。
+  connect('grid_connection', 'electricity', 'electric_load', 'electricity')
+  connect('grid_connection', 'electricity', 'heat_pump', 'electricity')
+  connect('grid_connection', 'electricity', 'electric_chiller', 'electricity')
   // 热泵热端为 heat 载体, 制冷机冷端为 cool 载体
   connect('heat_pump', 'heat', 'heat_load', 'heat')
   connect('electric_chiller', 'cool', 'cooling_load', 'cool')
