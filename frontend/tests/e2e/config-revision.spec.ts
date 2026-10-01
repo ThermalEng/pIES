@@ -330,12 +330,19 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
     await expect(submitBtn).toBeEnabled()
     await submitBtn.click()
     // 任务出现在列表, 打开详情展示冻结的 revision(任务排队等待执行, 不声称已计算)
-    await expect(page.locator('.ies-table__row').first()).toBeVisible({ timeout: 15_000 })
-    await page.locator('.ies-table__row').first().click()
-    await expect(page.locator('.ies-task-detail')).toBeVisible({ timeout: 10_000 })
+    const taskTable = page.getByRole('table')
+    const firstBodyRow = taskTable.getByRole('row').nth(1)
+    await expect(firstBodyRow).toBeVisible({ timeout: 15_000 })
+    await firstBodyRow.click()
+    await expect(page.getByRole('heading', { name: /任务详情|Task detail/ })).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText(/配置 revision v1/i).first()).toBeVisible({ timeout: 10_000 })
 
-    session.assertNoErrors()
+    // 预期内噪声: 空白项目在保存前读配置(工作台落地 + 配置页挂载各一次)
+    // 必为“尚未保存”404(公开契约); 精确到本项目路径与确切次数, 其余
+    // 任何 console/pageerror/失败请求仍零容忍。
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 2 },
+    ])
     await context.close()
   })
 })
