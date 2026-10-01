@@ -6,8 +6,7 @@
 // 前置: 独立用户(API 造数); 测试 1 项目由 UI 创建, 并发修改由同一用户的
 // 第二个标签页经 UI 保存产生(真实用户行为, 无 API 并发写); 测试 2 的
 // 模型/财务/规划/装配/基准走 API 造数(场景 6 同模式), 数据绑定、配置
-// 保存、提交对话框全走 UI; 提交后后端装配门禁 422 为前置死锁所致
-// (见末尾 skip), 非 A2 绑定失败。
+// 保存、任务提交、详情查看全走 UI。
 
 import { test, expect } from '@playwright/test'
 import type { APIRequestContext, Page, BrowserContext } from '@playwright/test'
@@ -59,7 +58,7 @@ async function seedAssembly(
   const view = await requestJson(request, 'GET', `/api/projects/${projectId}`, undefined, token)
   await requestJson(request, 'PUT', `/api/projects/${projectId}/draft`, {
     expected_revision: view.draft.revision,
-    commands: [EXPLICIT_CALC_PATCH, BATTERY_COMMAND, ...assemblyCommands()],
+    commands: [EXPLICIT_CALC_PATCH, BATTERY_COMMAND, ...DEMAND_COMMANDS, ...assemblyCommands()],
   }, token)
   await requestJson(request, 'POST', '/api/finance-profiles', {
     finance_profile: financeProfile(profileId),
@@ -85,6 +84,29 @@ const EXPLICIT_CALC_PATCH = {
     time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
   },
 }
+
+/** 负荷需求常量(预定义需求接口的显式来源声明: 标量 params → constant 模式;
+ * 预检与装配双门禁均认可, 见后端 _validate_device_params 对齐例外)。 */
+const DEMAND_COMMANDS = [
+  {
+    id: 'c-dem-electric',
+    unit: 'model',
+    type: 'model.upsert_device',
+    payload: { name: 'E2E electric_load', params: { electricity_demand: 50 } },
+  },
+  {
+    id: 'c-dem-heat',
+    unit: 'model',
+    type: 'model.upsert_device',
+    payload: { name: 'E2E heat_load', params: { heat_demand: 30 } },
+  },
+  {
+    id: 'c-dem-cool',
+    unit: 'model',
+    type: 'model.upsert_device',
+    payload: { name: 'E2E cooling_load', params: { cool_demand: 20 } },
+  },
+]
 
 /** 储能设备(规划变量 cap 引用的 device_ref bat1)。 */
 const BATTERY_COMMAND = {
@@ -248,7 +270,7 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
     await context.close()
   })
 
-  test('GUI 真实保存后提交: 引用提示 + revision 送达后端裁决', async ({ browser }) => {
+  test('GUI 真实保存后提交: 引用提示 + 任务创建 + 详情显示 revision', async ({ browser }) => {
     const username = uniqueName('es-cfgsub')
     const password = strongPassword('Init')
     const projectName = uniqueName('QA 提交绑定项目')
@@ -275,15 +297,7 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
-    // createSession 完成 UI 登录并安装监控; 本测试故意走到后端装配门禁
-    // 422, 且空白配置页必产生 404-as-absence, 故不用零容忍的
-    // session.assertNoErrors, 改用白名单断言(见文末)。
-    await createSession(page, username, password)
-    const consoleErrors: string[] = []
-    page.on('console', (msg) => {
-      if (msg.type() === 'error') consoleErrors.push(msg.text())
-    })
-    page.on('pageerror', (err) => consoleErrors.push(`pageerror: ${err.message}`))
+    const session = await createSession(page, username, password)
 
     // 打开项目(已由 API 造数)
     await page.getByText(projectName).click()
@@ -315,28 +329,13 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
     const submitBtn = dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i })
     await expect(submitBtn).toBeEnabled()
     await submitBtn.click()
-    // 装配门禁 tripwire: 后端受理顺序为 revision 解析(1b)在前、快照装配门禁(3)
-    // 在后; 此处 422 必为 ASM-VALIDATE-FAILED(缺负荷需求来源声明), 而非
-    // TASK-REQ-006/RES-MISS-003, 即证明 revision 已正确送达并通过解析。
-    // 任务创建 + 详情 revision 待前置死锁收口后恢复, 见本文件末尾 skip。
-    await expect(dialog.getByText(/提交失败/i).first()).toBeVisible({ timeout: 15_000 })
+    // 任务出现在列表, 打开详情展示冻结的 revision(任务排队等待执行, 不声称已计算)
+    await expect(page.locator('.ies-table__row').first()).toBeVisible({ timeout: 15_000 })
+    await page.locator('.ies-table__row').first().click()
+    await expect(page.locator('.ies-task-detail')).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByText(/配置 revision v1/i).first()).toBeVisible({ timeout: 10_000 })
 
-    // 白名单断言: 仅允许 404-as-absence(配置未保存, 本流程固有)与
-    // 422 装配门禁(上文 tripwire, 前置死锁所致); 其余控制台错误仍失败。
-    const unexpected = consoleErrors.filter((t) => !/404|422/.test(t))
-    expect(unexpected).toEqual([])
+    session.assertNoErrors()
     await context.close()
-  })
-
-  // future skip: 任务创建 + 详情显示冻结 revision。当前任何含负荷项目均无法
-  // 通过提交双门禁(前置死锁, A2 范围外, 待 Codex 裁决):
-  //  - 对话框预检 validation.run 要求至少 1 个负荷, 但 _validate_device_params
-  //    拒绝一切未在注册表 properties 声明的参数键, 含装配层认可的需求常量
-  //    (PARAM-UNIT-002 expected=registered actual=unknown, blocking);
-  //  - 去掉常量后提交时装配门禁要求需求来源声明
-  //    (ASM-BIND-001 missing_binding, blocking);
-  //  - 数据集列映射声明入口(S2c)在代码中仅见注释, 无实现。
-  // 死锁收口后恢复: 提交成功 → 列表出现任务 → 详情展示"配置 revision v1"。
-  test.skip('任务创建 + 详情显示冻结 revision(待提交双门禁死锁收口)', async () => {
   })
 })

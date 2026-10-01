@@ -128,6 +128,11 @@ function serializeParams(params: Record<string, unknown> | undefined): string {
   return JSON.stringify(sorted)
 }
 
+/** 新逻辑提交的一次性随机段(幂等键允许字符集内; 时间 + 随机, 碰撞可忽略)。 */
+function newSubmitNonce(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+}
+
 function progressOf(task: Task): number {
   const p = task.summary?.percent
   if (p !== null && p !== undefined && Number.isFinite(p)) return p
@@ -226,6 +231,9 @@ export default function TasksPage() {
 
   // 提交表单
   const [createOpen, setCreateOpen] = useState(false)
+  /** 本次对话框对应的逻辑提交标识: 打开对话框即换新键; 同一提交的网络
+   * 重试/确认复用原键(状态不变), 关闭重开即视为新的逻辑提交。 */
+  const [submitNonce, setSubmitNonce] = useState(() => newSubmitNonce())
   const [form, setForm] = useState<CreateForm>(DEFAULT_FORM)
   const [formError, setFormError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -395,11 +403,23 @@ export default function TasksPage() {
     [],
   )
 
+  /** 逻辑签名(类型 + 所引 revision + 参数指纹): 仅用于重复提交提示的
+   * 同输入判断, 不是幂等身份(幂等身份是完整幂等键, 由后端裁决)。 */
+  const logicalSigOf = useCallback(
+    (f: CreateForm): string => {
+      const params = buildParams(f)
+      return `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}`
+    },
+    [buildParams, savedRevisionValue],
+  )
+
   const buildInput = useCallback(
     (f: CreateForm): TaskCreateInput => {
       const params = buildParams(f)
-      // 幂等键反映真实任务输入(含所引用的配置 revision, 不同 revision 永不复用)。
-      const idemKey = `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}`
+      // 幂等键 = 逻辑签名 + 本次提交一次性随机段: 每次明确发起的新逻辑
+      // 提交(对话框打开)换新键, 参数变更/项目版本变化永不误复用历史任务;
+      // 同一提交的网络重试复用原键, 由后端按同键返回同一任务。
+      const idemKey = `${logicalSigOf(f)}-${submitNonce}`
       return {
         project_id: projectId,
         type: f.type,
@@ -409,7 +429,7 @@ export default function TasksPage() {
         ...(params ? { params } : {}),
       }
     },
-    [projectId, buildParams, savedRevisionValue],
+    [projectId, buildParams, savedRevisionValue, logicalSigOf, submitNonce],
   )
 
   const submit = useCallback(
@@ -433,10 +453,16 @@ export default function TasksPage() {
         setChecking(false)
       }
       if (!force && !submitting) {
-        // 重复提交提示:同类型 + 同配置(幂等键相同)的非终结任务
+        // 重复提交提示: 逻辑签名相同的非终结任务(同类型 + 同 revision +
+        // 同参数指纹, 兼容旧键形态)。这只是 UX 提示, 不得误当幂等身份:
+        // 真正的幂等身份是完整幂等键(含一次性随机段), 由后端裁决; 用户
+        // 确认后仍以本次新键提交产生新任务。
+        const sig = logicalSigOf(form)
         const dup =
           tasks?.find(
-            (tk) => tk.idempotency_key === input.idempotency_key && ACTIVE_STATUSES.includes(tk.status),
+            (tk) =>
+              ACTIVE_STATUSES.includes(tk.status) &&
+              (tk.idempotency_key === sig || tk.idempotency_key.startsWith(`${sig}-`)),
           ) ?? null
         if (dup) {
           setDuplicate(dup)
@@ -457,7 +483,7 @@ export default function TasksPage() {
         setSubmitting(false)
       }
     },
-    [buildInput, form, tasks, loadList, projectId, submitting, t],
+    [buildInput, form, tasks, loadList, projectId, submitting, t, logicalSigOf],
   )
 
   const confirmDuplicate = useCallback(() => {
@@ -465,9 +491,11 @@ export default function TasksPage() {
     void submit(true)
   }, [submit])
 
-  // 提交对话框打开时预检一次校验门禁, 让用户提前看到阻断问题(不再等到点提交才发现)
+  // 提交对话框打开 = 一次新的逻辑提交: 先换新随机段(幂等键换新),
+  // 再预检一次校验门禁, 让用户提前看到阻断问题(不再等到点提交才发现)
   useEffect(() => {
     if (!createOpen) return
+    setSubmitNonce(newSubmitNonce())
     let cancelled = false
     setBlockers(null)
     setChecking(true)

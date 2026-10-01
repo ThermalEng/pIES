@@ -31,6 +31,7 @@ from iesplan import tasks as tasks_domain  # noqa: E402
 from iesplan.core.jsonutil import jsonable  # noqa: E402
 from iesplan.api import projects as projects_api  # noqa: E402
 from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan.api import validation as validation_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import identity  # noqa: E402
@@ -96,6 +97,7 @@ def client(factory: sessionmaker, tmp_path: Path) -> Iterator[TestClient]:
     app.include_router(projects_api.router)
     app.include_router(tasks_api.router)
     app.include_router(config_router)
+    app.include_router(validation_api.router)
 
     def _override():
         session = factory()
@@ -357,3 +359,190 @@ def test_report_task_needs_no_revision(client: TestClient, db: Session) -> None:
     )
     assert resp.status_code == 201, resp.text
     assert resp.json()["task"]["calc_snapshot_id"] is None
+
+
+#: 负荷项目装配实例引用(与装配 slug 规则一致, 均为合法本地 id)。
+_LOAD_INSTANCES = ("grid1", "load1")
+
+
+def _prepare_load_project(
+    client: TestClient, db: Session, owner,
+    demands: dict[str, Any], name: str = "负荷绑定测试项目",
+) -> int:
+    """含负荷的可提交项目: 电网 + 电负荷(需求经 params 声明) + 电池(规划变量载体)。
+
+    demands 并入负荷 params(如 {"electricity_demand": 100.0}); finance_binding
+    全覆盖三实例(none), tariff 空声明。调用方用 demands 构造合法/非法常量。
+    """
+    from test_tasks_api import (  # noqa: E402
+        _bind_and_freeze,
+        _create_project,
+        _declare_assembly_sections,
+        _declare_device_and_planning,
+        _declare_finance,
+        _set_explicit_calc,
+    )
+
+    pid = _create_project(client, owner, name)
+    _declare_finance(db, owner, pid)
+    device_ref, revision = _declare_device_and_planning(client, db, owner, pid)
+    commands = [
+        {
+            "id": "m-grid1", "unit": "model", "type": "model.upsert_device",
+            "payload": {
+                "name": "grid1", "device_type": "ies.device.grid_connection",
+                "kind": "new", "params": {},
+            },
+        },
+        {
+            "id": "m-load1", "unit": "model", "type": "model.upsert_device",
+            "payload": {
+                "name": "load1", "device_type": "ies.device.electric_load",
+                "kind": "new", "params": {"peak_power_kw": 100, **demands},
+            },
+        },
+        {
+            "id": "m-conn1", "unit": "model", "type": "model.upsert_connection",
+            "payload": {
+                "name": "grid1.electricity_import->load1.electricity_in",
+                "from_device": "grid1", "from_port": "electricity_import",
+                "to_device": "load1", "to_port": "electricity_in",
+            },
+        },
+    ]
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": commands},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+    revision = _set_explicit_calc(client, pid, owner, revision)
+    instances = {device_ref: {"type": "none"}}
+    instances.update({inst: {"type": "none"} for inst in _LOAD_INSTANCES})
+    revision = _declare_assembly_sections(client, pid, owner, revision, instances)
+    _bind_and_freeze(client, pid, owner, None, revision=revision)
+    return pid
+
+
+def _run_validation(client: TestClient, pid: int, user) -> dict[str, Any]:
+    """执行完整预检, 返回报告体(run 返回 {report, stored} 信封)。"""
+    resp = client.post(
+        f"/api/projects/{pid}/validation/run", headers=_h(client, user)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "report" in body, body
+    return body["report"]
+
+
+def _blocking(report: dict[str, Any], code: str) -> list[dict[str, Any]]:
+    """报告中指定编码的阻断诊断。"""
+    return [
+        d for d in report.get("diagnostics", [])
+        if d.get("code") == code and d.get("blocking") is True
+    ]
+
+
+def test_predefined_constant_passes_precheck_and_submits(
+    client: TestClient, db: Session,
+) -> None:
+    """合法需求常量: 预检无 PARAM-UNIT-002 阻断, 提交 201(装配可签发)。"""
+    owner = make_user(db, "owner_const_ok")
+    pid = _prepare_load_project(client, db, owner, {"electricity_demand": 100.0})
+    rev = _save_config(client, pid, owner)
+    report = _run_validation(client, pid, owner)
+    assert _blocking(report, "PARAM-UNIT-002") == [], report.get("diagnostics")
+    status, body = _submit(client, pid, owner, {"config_revision": rev}, key="const-ok-1")
+    assert status == 201, body
+    assert body["task"]["calc_snapshot_id"] is not None
+
+
+def test_unknown_param_key_still_blocked(client: TestClient, db: Session) -> None:
+    """未知参数键仍被预检阻断(不对齐例外不豁免未知键)。"""
+    owner = make_user(db, "owner_const_unknown")
+    pid = _prepare_load_project(
+        client, db, owner,
+        {"electricity_demand": 100.0, "mystery_param": 1},
+    )
+    report = _run_validation(client, pid, owner)
+    hits = _blocking(report, "PARAM-UNIT-002")
+    assert any(
+        d.get("params", {}).get("actual") == "unknown"
+        and d.get("params", {}).get("param") == "mystery_param"
+        for d in hits
+    ), report.get("diagnostics")
+
+
+def test_illegal_predefined_constant_blocked(client: TestClient, db: Session) -> None:
+    """非法需求常量被预检阻断: 布尔/字符串/越界(负值低于 minimum 0)。"""
+    for i, bad in (("bool", True), ("str", "100"), ("neg", -5.0)):
+        owner = make_user(db, f"owner_const_bad_{i}")
+        pid = _prepare_load_project(
+            client, db, owner, {"electricity_demand": bad},
+            name=f"非法常量项目{i}",
+        )
+        report = _run_validation(client, pid, owner)
+        diags = report.get("diagnostics", [])
+        assert any(
+            d.get("blocking") is True
+            and d.get("code") in ("PARAM-UNIT-002", "PARAM-RNG-003")
+            for d in diags
+        ), (bad, diags)
+
+
+def test_nonfinite_predefined_constant_rejected_at_entry() -> None:
+    """非有限需求常量在入口被拒绝(inf/-inf/nan 走不到 JSON, 直测入口函数)。
+
+    blocking 由报告聚合按 error 严重度统一标记(见 HTTP 层用例), 此处断言
+    编码与 error 严重度。
+    """
+    from iesplan.application.validations.precheck import (  # noqa: E402
+        _validate_device_params,
+    )
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        diags = _validate_device_params(
+            "ies.device.electric_load", {"electricity_demand": bad}, "load1"
+        )
+        assert any(
+            d.code == "PARAM-UNIT-002" and d.severity == "error" for d in diags
+        ), bad
+
+
+def test_changed_inputs_with_new_key_yield_new_task_and_snapshot(
+    client: TestClient, db: Session, factory,
+) -> None:
+    """同 revision 但项目输入改变后用新键提交 → 新任务 + 新快照(不误复用)。"""
+    owner = make_user(db, "owner_bind_evolve")
+    pid = _prepare_load_project(client, db, owner, {"electricity_demand": 100.0})
+    rev = _save_config(client, pid, owner)
+    status, first = _submit(client, pid, owner, {"config_revision": rev}, key="evo-1")
+    assert status == 201, first
+    # 改变项目输入: 调整负荷需求常量并重新固化版本
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()
+    draft_rev = view["draft"]["revision"]
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": draft_rev, "commands": [{
+            "id": "m-dem2", "unit": "model", "type": "model.upsert_device",
+            "payload": {
+                "name": "load1", "params": {"peak_power_kw": 100, "electricity_demand": 200.0},
+            },
+        }]},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    from test_tasks_api import _bind_and_freeze  # noqa: E402
+
+    _bind_and_freeze(client, pid, owner, None, revision=resp.json()["revision"])
+    status, second = _submit(client, pid, owner, {"config_revision": rev}, key="evo-2")
+    assert status == 201, second
+    assert second["task"]["id"] != first["task"]["id"]
+    assert second["task"]["calc_snapshot_id"] != first["task"]["calc_snapshot_id"]
+    snap1 = tasks_domain.get_snapshot(factory(), first["task"]["calc_snapshot_id"])
+    snap2 = tasks_domain.get_snapshot(factory(), second["task"]["calc_snapshot_id"])
+    assert snap1 is not None and snap2 is not None
+    # 冻结装配正文随项目输入变化(需求常量 100 → 200), 快照不相同
+    assert snap1.canonical_assembly_text != snap2.canonical_assembly_text
+    assert snap1.project_version_id != snap2.project_version_id

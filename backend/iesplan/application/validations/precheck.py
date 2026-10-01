@@ -277,11 +277,14 @@ def _validate_device_params(
     - 类型未注册抛 NotFoundError(CONN-TYPE-002);
     - 未声明的参数键拒绝(PARAM-UNIT-002, actual=unknown);缺省键不校验, 按注册表默认值解释;
     - 数值参数校验 min/max(越界 → PARAM-RNG-003), 类型不匹配 → PARAM-UNIT-002。
-    全部传入键均须已在注册表声明，无内部保留键豁免。
+    全部传入键均须已在注册表声明，仅一处对齐例外(0.12-A2): 已注册
+    descriptor 中 type=predefined 的接口名允许以有效数值标量作 constant
+    显式来源声明(与 assembly builder 映射一致); 未知键仍拒绝，非
+    predefined 接口名不放宽。
     """
     spec = get_device_type(device_type)
     params = dict(params or {})  # 拷贝: 归一缺省键不得改写调用方原字典
-    # 全部传入键必须已在注册表声明(下循环 unknown 即拒)，无豁免
+    # 全部传入键必须已在注册表声明(下循环 unknown 即拒)，仅 predefined 常量例外
     provided = dict(params)
     diags: list[Diagnostic] = []
     loc = {"object_type": "device", "object_id": str(device_name), "field": ""}
@@ -289,17 +292,69 @@ def _validate_device_params(
     for name, value in provided.items():
         pspec = spec.properties.get(name)
         if pspec is None:
-            diags.append(
-                make_diag(
-                    PARAM_UNIT_MISMATCH,
-                    severity=SEVERITY_ERROR,
-                    params={"param": name, "expected": "registered", "actual": "unknown"},
-                    location={**loc, "field": name},
+            ispec = spec.interfaces.get(name)
+            if ispec is None or ispec.type != "predefined":
+                diags.append(
+                    make_diag(
+                        PARAM_UNIT_MISMATCH,
+                        severity=SEVERITY_ERROR,
+                        params={"param": name, "expected": "registered", "actual": "unknown"},
+                        location={**loc, "field": name},
+                    )
                 )
-            )
+                continue
+            diags.extend(_check_predefined_constant(name, value, ispec, loc))
             continue
         diags.extend(_check_param_value(name, value, pspec, loc))
     return diags
+
+
+def _check_predefined_constant(name: str, value: Any, ispec: Any, loc: dict) -> list[Diagnostic]:
+    """预定义接口 constant 显式来源的入口校验(0.12-A2 与 builder 对齐)。
+
+    仅接受有效数值标量: bool/非数值/NaN/Infinity → PARAM-UNIT-002;
+    接口 valid_range 数值界越界 → PARAM-RNG-003。裸标量不带单位声明,
+    按接口单位解释(与 builder constant 映射一致); 单位换算不在入口做。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return [
+            make_diag(
+                PARAM_UNIT_MISMATCH,
+                severity=SEVERITY_ERROR,
+                params={"param": name, "expected": ispec.unit, "actual": type(value).__name__},
+                location={**loc, "field": name},
+            )
+        ]
+    if not math.isfinite(float(value)):
+        return [
+            make_diag(
+                PARAM_UNIT_MISMATCH,
+                severity=SEVERITY_ERROR,
+                params={"param": name, "expected": ispec.unit, "actual": type(value).__name__},
+                location={**loc, "field": name},
+            )
+        ]
+    minimum = ispec.minimum if isinstance(ispec.minimum, (int, float)) else None
+    maximum = ispec.maximum if isinstance(ispec.maximum, (int, float)) else None
+    if minimum is not None and float(value) < minimum:
+        return [
+            make_diag(
+                PARAM_RNG_OUT,
+                severity=SEVERITY_ERROR,
+                params={"param": name, "value": value, "min": minimum, "max": maximum},
+                location={**loc, "field": name},
+            )
+        ]
+    if maximum is not None and float(value) > maximum:
+        return [
+            make_diag(
+                PARAM_RNG_OUT,
+                severity=SEVERITY_ERROR,
+                params={"param": name, "value": value, "min": minimum, "max": maximum},
+                location={**loc, "field": name},
+            )
+        ]
+    return []
 
 
 def _check_param_value(name: str, value: Any, pspec: PropertySpec, loc: dict) -> list[Diagnostic]:
