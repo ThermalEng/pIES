@@ -660,6 +660,7 @@ export const messagesZh: Record<string, string> = {
   'ies.algo.lp_relax': 'LP 松弛',
   'ies.algo.milp_hybrid': 'MILP 混合',
   'ies.algo.mc_sampling': '蒙特卡洛采样',
+  'ies.generator.highs_milp': 'HiGHS MILP 生成器',
 
   // -------------------------------------------------------------------------
   // 系统级错误(HTTP 信封兜底)

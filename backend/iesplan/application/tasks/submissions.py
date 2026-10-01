@@ -61,6 +61,7 @@ from iesplan.assembly import (
     ValidatedAssemblyArtifact,
     validate_project_export,
 )
+from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.config import settings
 from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
@@ -251,6 +252,8 @@ def _snapshot_inputs_equal(
     dataset_ids: list[int],
     calc_config: dict,
     schema_version: str,
+    result_adapter: str,
+    executor: str,
     program_version: str,
     extensions: dict,
     random_seed: int,
@@ -259,13 +262,16 @@ def _snapshot_inputs_equal(
 ) -> bool:
     """快照输入一致判定: 全部快照内容字段逐项相等(不使用内容摘要)。
 
-    复用身份包含 schema_version: 不同 schema 的快照永不复用。
+    复用身份包含 schema_version 与执行引用: 不同 schema 或不同配套
+    adapter/executor 的快照永不复用。
     容差唯一权威是 calc_config 正文的 convergence, 此处不另设 tolerances。
     """
     return (
         list(snapshot.dataset_version_ids or []) == list(dataset_ids)
         and jsonable(snapshot.calc_config_snapshot or {}) == jsonable(calc_config)
         and (snapshot.schema_version or "") == schema_version
+        and (snapshot.result_adapter or "") == result_adapter
+        and (snapshot.executor or "") == executor
         and (snapshot.program_version or "") == program_version
         and jsonable(snapshot.extension_versions or {}) == jsonable(extensions)
         and snapshot.random_seed == random_seed
@@ -302,6 +308,64 @@ def _resolve_pinned_calculation_config(
     return dict(row.content), row.version
 
 
+def _resolve_execution_refs(
+    body: Mapping[str, Any],
+    generator_registry: Any | None,
+    project_id: int,
+) -> tuple[str, str]:
+    """解析并冻结执行引用(0.12-A3): generator → descriptor → 配套 adapter/executor。
+
+    只做引用解析, 不做 mode/精度/options 能力门禁(那是生成时
+    ``GeneratorRegistry.resolve`` 的职责, 此处不重复校验):
+    - 目录未装配(None) → 500(服务端装配缺失, 无回退);
+    - generator 未注册(含旧 ``ies.algo.*`` 引用, 不隐式映射) → 400
+      TASK-REQ-007;
+    - solver 不在 descriptor.solvers → 400 TASK-REQ-008;
+    - executors 非恰好一个 → 400 TASK-REQ-009(不按首项/注册顺序猜测)。
+    返回 (result_adapter 精确引用, executor 精确引用)。
+    """
+    generator_ref = body.get("generator")
+    solver_ref = body.get("solver")
+    if generator_registry is None:
+        raise AppError(
+            "生成器目录未装配, 计算任务提交不可用",
+            params={"project_id": project_id},
+        )
+    if not isinstance(generator_ref, str) or not generator_ref:
+        raise InvalidRequestError(
+            "计算配置引用的生成器不是合法精确引用",
+            code="TASK-REQ-007",
+            params={"project_id": project_id, "generator": generator_ref},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
+        )
+    try:
+        provider = generator_registry.get(generator_ref)
+    except ComputationUnavailableError as exc:
+        raise InvalidRequestError(
+            "计算配置引用的生成器未注册(旧算法引用不隐式映射到新生成器)",
+            code="TASK-REQ-007",
+            params={"project_id": project_id, "generator": generator_ref},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
+        ) from exc
+    descriptor = provider.descriptor
+    if solver_ref not in descriptor.solvers:
+        raise InvalidRequestError(
+            "计算配置引用的求解器不在所选生成器兼容清单内",
+            code="TASK-REQ-008",
+            params={"project_id": project_id, "generator": generator_ref, "solver": solver_ref},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "solver"},
+        )
+    executors = tuple(descriptor.executors or ())
+    if len(executors) != 1:
+        raise InvalidRequestError(
+            "所选生成器未声明唯一执行器(无公开选择规则, 不猜测)",
+            code="TASK-REQ-009",
+            params={"project_id": project_id, "generator": generator_ref, "executors": list(executors)},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "generator"},
+        )
+    return descriptor.result_adapter, executors[0]
+
+
 def _assemble_snapshot(
     db: Session,
     project_id: int,
@@ -309,6 +373,7 @@ def _assemble_snapshot(
     config: dict[str, Any] | None = None,
     user: UserRecord | None = None,
     calculation_config: tuple[dict[str, Any], int] | None = None,
+    generator_registry: Any | None = None,
 ) -> CalcSnapshotRecord:
     """组装不可变计算快照(相同输入复用)。
 
@@ -337,6 +402,10 @@ def _assemble_snapshot(
         random_seed = _derive_random_seed(version.id)
     dataset_ids = _bound_dataset_ids(content)
     extensions = content.get("extensions") or {}
+    # 执行引用与快照同事务冻结: 同一已解析 generator 派生同一配套对。
+    result_adapter, executor = _resolve_execution_refs(
+        calc_config, generator_registry, project_id
+    )
 
     # 统一生产闸门: 先签发规范文本/回执二件套, 失败不创建快照或任务。
     # 回执进入快照身份; 快照去重使用内容字段逐项相等判定, 文本仅校验字头。
@@ -348,6 +417,8 @@ def _assemble_snapshot(
             dataset_ids=dataset_ids,
             calc_config=calc_config,
             schema_version=SNAPSHOT_SCHEMA_VERSION,
+            result_adapter=result_adapter,
+            executor=executor,
             program_version=__version__,
             extensions=extensions,
             random_seed=random_seed,
@@ -364,6 +435,8 @@ def _assemble_snapshot(
         random_seed=random_seed,
         created_by=actor.id,
         schema_version=SNAPSHOT_SCHEMA_VERSION,
+        result_adapter=result_adapter,
+        executor=executor,
         program_version=__version__,
         extension_versions=extensions,
         canonical_assembly_text=artifact.canonical_text,
@@ -717,12 +790,15 @@ def _submit_task(
     *,
     idempotency_key: str,
     parent_task_id: int | None = None,
+    generator_registry: Any | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """创建任务(幂等检查 → 门禁 → 快照 → INSERT → 入队)。
 
     幂等键必填(项目作用域, 宪法 §5.5); 缺失或格式非法直接拒绝。
     返回 (任务记录, 标记): 标记仅含 replay。内部步骤只 flush,
     由顶层 submit_task 提交。
+    generator_registry 为组合根已发布的生成器目录(计算任务解析冻结
+    执行引用用; io 任务不消费)。
     """
     ensure_access(db, user, project_id, "edit")
     project = require_project(db, project_id)
@@ -780,7 +856,7 @@ def _submit_task(
         # 3) 快照装配(相同输入复用既有快照, 见 _assemble_snapshot)
         snapshot = _assemble_snapshot(
             db, project_id, task_type, config=config, user=user,
-            calculation_config=pinned,
+            calculation_config=pinned, generator_registry=generator_registry,
         )
     # io 类任务(report/export/import/dataset_build): 无快照, 仅幂等键命中复用
 
@@ -844,12 +920,14 @@ def submit_task(
     *,
     idempotency_key: str,
     parent_task_id: int | None = None,
+    generator_registry: Any | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """提交任务用例(幂等键必填); 本层拥有事务提交/回滚。"""
     try:
         result = _submit_task(
             db, user, project_id, task_type,
             config=config, idempotency_key=idempotency_key, parent_task_id=parent_task_id,
+            generator_registry=generator_registry,
         )
         db.commit()
         return result

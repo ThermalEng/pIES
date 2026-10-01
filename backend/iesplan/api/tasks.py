@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -81,17 +81,24 @@ def create_task_endpoint(
     response: Response,
     db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
+    request: Request,
 ) -> dict[str, Any]:
     """提交任务(规格 2.2): 幂等键必填, 命中返回既有任务并附标记。
 
     幂等命中 → 200(附 replayed 标记与提示); 新建 → 201。
     本端点一次转交 ``submit_task_case`` 完整用例; 状态码与中文提示映射归本层。
+    生成器目录取组合根已发布实例(经 app.state 透传, 不自行发现/组装)。
     """
+    bootstrap = getattr(request.app.state, "bootstrap_context", None)
+    generator_registry = (
+        getattr(bootstrap, "generator_registry", None) if bootstrap is not None else None
+    )
     result = tasks_app.submit_task_case(
         db, user, project_id, payload.task_type,
         config=payload.config,
         idempotency_key=payload.idempotency_key,
         parent_task_id=payload.parent_task_id,
+        generator_registry=generator_registry,
     )
     if result["replayed"]:
         response.status_code = 200

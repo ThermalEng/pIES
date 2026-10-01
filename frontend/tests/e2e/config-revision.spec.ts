@@ -79,7 +79,7 @@ const EXPLICIT_CALC_PATCH = {
   type: 'config.patch',
   payload: {
     mode: 'fixed_operation',
-    generator: 'ies.algo.milp_hybrid@1.0.0',
+    generator: 'ies.generator.highs_milp@1.0.0',
     solver: 'ies.solver.highs@1.7.2',
     time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
   },
@@ -201,7 +201,7 @@ async function createProjectEnterConfig(page: Page, projectName: string): Promis
 /** 填写全部必填字段(精度由用户明确选择 medium)。 */
 async function fillConfig(page: Page, mode: string, timeLimit: string): Promise<void> {
   await page.locator('#calc-mode').fill(mode)
-  await page.locator('#calc-generator').fill('ies.algo.milp_hybrid@1.0.0')
+  await page.locator('#calc-generator').fill('ies.generator.highs_milp@1.0.0')
   await page.locator('#calc-solver').fill('ies.solver.highs@1.7.2')
   await page.locator('#calc-precision').selectOption('medium')
   await page.locator('#calc-time-limit').fill(timeLimit)

@@ -100,6 +100,11 @@ def _user(db: Session, name: str):
     return rec
 
 
+def _registry(client: TestClient):
+    """组合根已发布的生成器目录(随 app lifespan 装配; 测试只消费, 不组装)。"""
+    return client.app.state.bootstrap_context.generator_registry
+
+
 def _project(client: TestClient, user, name: str) -> int:
     resp = client.post(
         "/api/projects",
@@ -195,7 +200,7 @@ def _build_payload(snapshot_id: int, hourly_object_ids: list[int], created_by: i
 #: 同值, 经 config.patch 草稿命令显式声明, 不得依赖回退。
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }
@@ -257,7 +262,7 @@ _CONFIG_BODY: dict = {
     "schema_version": "1.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,
@@ -280,6 +285,7 @@ def _prepare_running(
     task, _ = tasks_uc.submit_task(
         db, user, pid, "optimization",
         config={"config_revision": saved["revision"]}, idempotency_key=key,
+        generator_registry=_registry(client),
     )
     claim = tasks_uc.claim_task(db, task.id, "w2c-fake-exec")
     assert claim is not None

@@ -78,6 +78,8 @@ def _row_to_snapshot(row: CalcSnapshot) -> CalcSnapshotRecord:
         calc_config_snapshot=row.calc_config_snapshot,
         random_seed=row.random_seed,
         schema_version=row.schema_version,
+        result_adapter=row.result_adapter,
+        executor=row.executor,
         program_version=row.program_version,
         extension_versions=row.extension_versions,
         canonical_assembly_text=row.canonical_assembly_text,
@@ -217,6 +219,8 @@ def create_snapshot(
     random_seed: int,
     created_by: int,
     schema_version: str,
+    result_adapter: str,
+    executor: str,
     program_version: str | None = None,
     extension_versions: dict[str, Any] | None = None,
     canonical_assembly_text: str | None = None,
@@ -230,6 +234,8 @@ def create_snapshot(
         random_seed=random_seed,
         created_by=created_by,
         schema_version=schema_version,
+        result_adapter=result_adapter,
+        executor=executor,
         program_version=program_version,
         extension_versions=extension_versions if extension_versions is not None else {},
         canonical_assembly_text=canonical_assembly_text,
@@ -975,6 +981,9 @@ class CalcSnapshot(Base):
     #: 旧 tolerances 列已删除、旧库无升级回填(与 assembly_text 列同例:
     #: 当前 schema 从空库直接建立)。
     schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 配套结果适配器 / 执行器精确引用(提交边界冻结, 非空)。
+    result_adapter: Mapped[str] = mapped_column(Text, nullable=False)
+    executor: Mapped[str] = mapped_column(Text, nullable=False)
     program_version: Mapped[str | None] = mapped_column(Text)
     extension_versions: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'"))
     random_seed: Mapped[int] = mapped_column(BigInteger, nullable=False)

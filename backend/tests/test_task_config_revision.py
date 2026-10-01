@@ -146,7 +146,7 @@ def _body(**overrides: Any) -> dict[str, Any]:
         "schema_version": "1.0.0",
         "mode": "planning",
         "predictions": [],
-        "generator": "ies.algo.milp_hybrid@1.0.0",
+        "generator": "ies.generator.highs_milp@1.0.0",
         "solver": "ies.solver.highs@1.7.2",
         "precision": "medium",
         "convergence": None,
@@ -331,7 +331,7 @@ def test_task_params_preserved(client: TestClient, db: Session, factory) -> None
     frozen = dict(snap.calc_config_snapshot)
     assert frozen["task_params"]["horizon_years"] == 3
     assert "config_revision" not in frozen["task_params"]
-    assert frozen["mode"] == "planning" and frozen["generator"] == "ies.algo.milp_hybrid@1.0.0"
+    assert frozen["mode"] == "planning" and frozen["generator"] == "ies.generator.highs_milp@1.0.0"
 
 
 def test_detail_shows_config_revision(client: TestClient, db: Session) -> None:
@@ -581,6 +581,8 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
     same = dict(
         dataset_ids=list(snap.dataset_version_ids or []),
         calc_config=frozen,
+        result_adapter="ies.result-adapter.highs@1.0.0",
+        executor="ies.executor.local_process@1.0.0",
         program_version=snap.program_version or "",
         extensions=jsonable(dict(snap.extension_versions or {})),
         random_seed=snap.random_seed,
@@ -589,3 +591,123 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
     )
     assert _snapshot_inputs_equal(snap, schema_version="1.0.0", **same) is True
     assert _snapshot_inputs_equal(snap, schema_version="9.9.9", **same) is False
+
+
+def test_unknown_generator_ref_rejected(client: TestClient, db: Session) -> None:
+    """旧算法引用不隐式映射: 提交时解析失败 → 400 TASK-REQ-007。"""
+    owner = make_user(db, "owner_old_algo")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    body = _body(generator="ies.algo.milp_hybrid@1.0.0")
+    new_rev = _save_config(client, pid, owner, body, rev)
+    assert new_rev == rev + 1
+    status, resp = _submit(client, pid, owner, {"config_revision": new_rev}, key="oldalgo-1")
+    assert status == 400, resp
+    assert resp["error"]["code"] == "TASK-REQ-007"
+
+
+def test_solver_not_in_descriptor_rejected(client: TestClient, db: Session) -> None:
+    """solver 不在所选生成器兼容清单 → 400 TASK-REQ-008。"""
+    owner = make_user(db, "owner_bad_solver")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    body = _body(solver="ies.solver.unknown@9.9.9")
+    new_rev = _save_config(client, pid, owner, body, rev)
+    status, resp = _submit(client, pid, owner, {"config_revision": new_rev}, key="badsolver-1")
+    assert status == 400, resp
+    assert resp["error"]["code"] == "TASK-REQ-008"
+
+
+def test_execution_refs_frozen_from_descriptor(
+    client: TestClient, db: Session, factory,
+) -> None:
+    """配套 adapter/executor 按 descriptor 冻结; 复用身份包含二者。"""
+    from iesplan.application.tasks.submissions import (  # noqa: E402
+        _snapshot_inputs_equal,
+    )
+
+    owner = make_user(db, "owner_exec_refs")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit(client, pid, owner, {"config_revision": rev}, key="execrefs-1")
+    assert status == 201, body
+    snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
+    assert snap is not None
+    assert snap.result_adapter == "ies.result-adapter.highs@1.0.0"
+    assert snap.executor == "ies.executor.local_process@1.0.0"
+
+    same = dict(
+        dataset_ids=list(snap.dataset_version_ids or []),
+        calc_config=jsonable(dict(snap.calc_config_snapshot)),
+        schema_version=snap.schema_version,
+        program_version=snap.program_version or "",
+        extensions=jsonable(dict(snap.extension_versions or {})),
+        random_seed=snap.random_seed,
+        canonical_text=snap.canonical_assembly_text,
+        receipt=jsonable(dict(snap.assembly_receipt or {})),
+    )
+    assert (
+        _snapshot_inputs_equal(
+            snap, result_adapter="ies.result-adapter.highs@1.0.0",
+            executor="ies.executor.local_process@1.0.0", **same,
+        )
+        is True
+    )
+    assert (
+        _snapshot_inputs_equal(
+            snap, result_adapter="ies.result-adapter.other@2.0.0",
+            executor="ies.executor.local_process@1.0.0", **same,
+        )
+        is False
+    )
+
+
+def test_ambiguous_executors_blocked_without_guessing() -> None:
+    """多执行器无公开选择规则 → 400 TASK-REQ-009(桩 descriptor, 仅证阻断)。"""
+    from types import SimpleNamespace  # noqa: E402
+
+    from iesplan.application.tasks.submissions import (  # noqa: E402
+        _resolve_execution_refs,
+    )
+    from iesplan.computation.generators.descriptor import (  # noqa: E402
+        GeneratorDescriptor,
+    )
+    from iesplan.tasks.contracts import InvalidRequestError  # noqa: E402
+
+    desc = GeneratorDescriptor(
+        generator_id="ies.generator.multi",
+        version="1.0.0",
+        options_schema={"type": "object", "additionalProperties": False},
+        assembly_schema_version="2.0",
+        modes=("planning",),
+        precisions=("medium",),
+        solvers=("ies.solver.highs@1.7.2",),
+        executors=("ies.executor.a@1.0.0", "ies.executor.b@1.0.0"),
+        result_adapter="ies.result-adapter.highs@1.0.0",
+        unit_system="SI",
+        seed_semantics="seed 解释见 descriptor",
+    )
+    registry = SimpleNamespace(get=lambda ref: SimpleNamespace(descriptor=desc))
+    body = {"generator": "ies.generator.multi@1.0.0", "solver": "ies.solver.highs@1.7.2"}
+    try:
+        _resolve_execution_refs(body, registry, project_id=1)
+    except InvalidRequestError as exc:
+        assert exc.code == "TASK-REQ-009"
+    else:
+        raise AssertionError("多执行器应当阻断")
+
+
+def test_missing_generator_registry_is_server_error() -> None:
+    """目录未装配(None) → 500, 无回退。"""
+    from iesplan.application.tasks.submissions import (  # noqa: E402
+        _resolve_execution_refs,
+    )
+    from iesplan.core.errors import AppError  # noqa: E402
+
+    body = {"generator": "ies.generator.highs_milp@1.0.0", "solver": "ies.solver.highs@1.7.2"}
+    try:
+        _resolve_execution_refs(body, None, project_id=1)
+    except AppError as exc:
+        assert exc.http_status == 500
+    else:
+        raise AssertionError("缺目录应当 500")

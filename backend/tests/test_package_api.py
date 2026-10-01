@@ -230,6 +230,8 @@ def _seed_evidence(
         },
         program_version="0.1.0", extension_versions={}, random_seed=42,
         schema_version="1.0.0",
+        result_adapter="ies.result-adapter.highs@1.0.0",
+        executor="ies.executor.local_process@1.0.0",
         created_by=owner_id,
     )
     db.add(snapshot)

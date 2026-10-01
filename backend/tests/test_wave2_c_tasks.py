@@ -102,6 +102,11 @@ def _user(db: Session, name: str):
     return rec
 
 
+def _registry(client: TestClient):
+    """组合根已发布的生成器目录(随 app lifespan 装配; 测试只消费, 不组装)。"""
+    return client.app.state.bootstrap_context.generator_registry
+
+
 def _project(client: TestClient, user, name: str) -> int:
     resp = client.post(
         "/api/projects",
@@ -156,7 +161,7 @@ _CONFIG_BODY: dict = {
     "schema_version": "1.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,
@@ -172,7 +177,7 @@ _CONFIG_BODY: dict = {
 #: 同值, 经 config.patch 草稿命令显式声明, 不得依赖回退。
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.algo.milp_hybrid@1.0.0",
+    "generator": "ies.generator.highs_milp@1.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }
@@ -274,6 +279,7 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
     task, flags = tasks_uc.submit_task(
         db, owner, pid, "optimization",
         config={"config_revision": rev}, idempotency_key="w2c-opt-1",
+        generator_registry=_registry(client),
     )
     assert flags == {"replay": False}
     assert task.calc_snapshot_id is not None
@@ -281,6 +287,7 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
     replay, rflags = tasks_uc.submit_task(
         db, owner, pid, "optimization",
         config={"config_revision": rev}, idempotency_key="w2c-opt-1",
+        generator_registry=_registry(client),
     )
     assert rflags == {"replay": True}
     assert replay.id == task.id
@@ -289,6 +296,7 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
     other, oflags = tasks_uc.submit_task(
         db, owner, pid, "optimization",
         config={"config_revision": rev}, idempotency_key="w2c-opt-2",
+        generator_registry=_registry(client),
     )
     assert oflags == {"replay": False}
     assert other.id != task.id
@@ -321,6 +329,7 @@ def test_submit_without_frozen_refs_fails_explicitly(
         tasks_uc.submit_task(
             db, owner, pid, "optimization",
             config={"config_revision": rev}, idempotency_key="w2c-noref-1",
+        generator_registry=_registry(client),
         )
 
     from test_config_revisions import PROFILE_PAYLOAD
@@ -336,6 +345,7 @@ def test_submit_without_frozen_refs_fails_explicitly(
         tasks_uc.submit_task(
             db, owner, pid, "optimization",
             config={"config_revision": rev}, idempotency_key="w2c-noref-2",
+        generator_registry=_registry(client),
         )
 
 
@@ -366,6 +376,7 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
     task, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
         config={"config_revision": saved["revision"]}, idempotency_key="w2c-restore-1",
+        generator_registry=_registry(client),
     )
     assert task.calc_snapshot_id is not None
     snap1 = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
@@ -435,6 +446,7 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
     task2, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
         config={"config_revision": saved["revision"]}, idempotency_key="w2c-restore-2",
+        generator_registry=_registry(client),
     )
     assert task2.calc_snapshot_id is not None
     snap2 = tasks_domain.get_snapshot(db, task2.calc_snapshot_id)
@@ -530,6 +542,7 @@ def test_restore_version_without_finance_clears_pointers(
         tasks_uc.submit_task(
             db, owner, pid, "optimization",
             config={"config_revision": saved["revision"]}, idempotency_key="w2c-early-1",
+        generator_registry=_registry(client),
         )
 
 
@@ -689,6 +702,7 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
     t1, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
         config={"config_revision": rev}, idempotency_key="w2c-t1",
+        generator_registry=_registry(client),
     )
     snap = t1.calc_snapshot_id
     _fail(db, t1.id)
@@ -700,6 +714,7 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
     t2, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
         config={"config_revision": rev}, idempotency_key="w2c-t2",
+        generator_registry=_registry(client),
     )
     _fail(db, t2.id)
     old_retried = tasks_uc.retry_task(db, owner, t2.id)

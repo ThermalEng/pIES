@@ -37,7 +37,7 @@ test.describe('场景 4: 数据上传 / 质量报告 / 绑定', () => {
         schema_version: '1.0.0',
         mode: 'planning',
         predictions: [],
-        generator: 'ies.algo.milp_hybrid@1.0.0',
+        generator: 'ies.generator.highs_milp@1.0.0',
         solver: 'ies.solver.highs@1.7.2',
         precision: 'medium',
         convergence: null,

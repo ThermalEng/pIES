@@ -650,6 +650,7 @@ export const messagesEn: Record<string, string> = {
   'ies.algo.lp_relax': 'LP relaxation',
   'ies.algo.milp_hybrid': 'MILP hybrid',
   'ies.algo.mc_sampling': 'Monte Carlo sampling',
+  'ies.generator.highs_milp': 'HiGHS MILP generator',
 
   // -------------------------------------------------------------------------
   // System-level errors (HTTP envelope fallbacks)
