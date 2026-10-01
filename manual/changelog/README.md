@@ -15,9 +15,9 @@
 
 ## Unreleased
 
-### 2026-10-01 — `0.12.0` 切片 A3：快照剩余依赖冻结（tolerances 清理 + schema_version，待复审合并）
+### 2026-10-01 — `0.12.0` 切片 A3：快照剩余依赖冻结（tolerances 清理 + schema_version + adapter/executor 冻结完成，待复审合并）
 
-**版本进展**：`0.12.0` 的第三个切片；产品版本仍为 `0.1.0`，不宣布 `0.12.0` 完成；executor/result adapter 精确版本冻结与评价年限/折现率确认流程按复审裁决推进。
+**版本进展**：`0.12.0` 的第三个切片；产品版本仍为 `0.1.0`，不宣布 `0.12.0` 完成；tolerances 清理、schema_version、executor/result adapter 精确引用冻结已随本切片完成；评价年限/折现率独立确认流程、Worker 执行载荷切换、多年财务等留待后续。
 
 #### 更新了什么
 

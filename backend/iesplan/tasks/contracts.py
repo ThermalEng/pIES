@@ -121,11 +121,12 @@ class CalcSnapshotRecord:
     dataset_version_ids: tuple[int, ...]
     calc_config_snapshot: Mapping[str, Any]
     random_seed: int
-    schema_version: str = SNAPSHOT_SCHEMA_VERSION
-    #: 提交边界经组合根已发布生成器目录解析冻结的配套结果适配器精确引用。
-    result_adapter: str | None = None
-    #: 提交边界冻结的执行器精确引用(单声明; 多声明无公开选择规则即阻断)。
-    executor: str | None = None
+    #: 快照 schema 版本(宪法 §7.1/§7.7: 非空必填, 创建时显式写入)。
+    schema_version: str
+    #: 提交边界经组合根已发布生成器目录解析冻结的配套结果适配器精确引用(必填)。
+    result_adapter: str
+    #: 提交边界冻结的执行器精确引用(单声明; 多声明无公开选择规则即阻断)(必填)。
+    executor: str
     program_version: str | None = None
     extension_versions: Mapping[str, Any] | None = None
     canonical_assembly_text: str | None = None
