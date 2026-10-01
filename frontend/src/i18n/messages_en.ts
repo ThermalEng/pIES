@@ -368,6 +368,8 @@ export const messagesEn: Record<string, string> = {
   'ies.task.config_summary': 'Config summary',
   'ies.task.config_required': 'Please save the calculation config before submitting a task.',
   'ies.task.config_not_bound': 'The saved calculation config is not yet bound to task submission (a later release); tasks still submit from the project snapshot.',
+  'ies.task.create_paused': 'New compute tasks are paused',
+  'ies.task.create_paused_note': 'The saved calculation config is not yet bound to task submission; new calc, optimization, uncertainty and analysis tasks will open after binding lands (A2). Listing, viewing, cancelling and retrying existing tasks are unaffected.',
   'ies.task.datasets': 'Linked datasets',
   'ies.task.no_published_datasets': 'No datasets yet; upload and bind one on the Data page first',
   'ies.task.validation_checking': 'Checking project validation gate…',

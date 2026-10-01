@@ -617,33 +617,19 @@ function assessmentFromServer(a: Record<string, unknown>): ResultAssessment {
 /**
  * 后端配置信封 {calculation_config, revision} → 前端 CalcConfig。
  *
- * 可信响应直接映射, 不补默认值、不重复校验: 缺失字段原样透出(空串/空
- * 数组/null), 由编辑页显式呈现为空态, 缺失 revision 即视为无效响应。
+ * 可信响应直接类型映射: 后端在用户输入入口已唯一校验全文, 此处不补齐
+ * 缺项(不伪造 ''/[]/null/0, 尤其 time_limit_seconds/options), 也不重复
+ * 作第二次业务校验; 仅保留 revision 信封判断。缺项原样透出, 由编辑页
+ * 显式呈现为空态。
  */
 function configFromServer(body: unknown, projectId: number): CalcConfig {
   const env = asRecord(body)
-  const cfg = asRecord(env.calculation_config)
-  if (typeof env.revision !== 'number') {
-    throw new Error('invalid calculation config envelope: missing revision')
-  }
-  const precision = cfg.precision === 'low' || cfg.precision === 'medium' || cfg.precision === 'high' ? cfg.precision : ''
-  const calculationConfig: CalculationConfigBody = {
-    schema: typeof cfg.schema === 'string' ? cfg.schema : '',
-    schema_version: typeof cfg.schema_version === 'string' ? cfg.schema_version : '',
-    mode: typeof cfg.mode === 'string' ? cfg.mode : '',
-    predictions: Array.isArray(cfg.predictions) ? (cfg.predictions as CalculationConfigBody['predictions']) : [],
-    generator: typeof cfg.generator === 'string' ? cfg.generator : '',
-    solver: typeof cfg.solver === 'string' ? cfg.solver : '',
-    precision: precision as CalculationConfigBody['precision'],
-    convergence: cfg.convergence === null || cfg.convergence === undefined ? null : (cfg.convergence as CalculationConfigBody['convergence']),
-    time_limit_seconds: typeof cfg.time_limit_seconds === 'number' ? (cfg.time_limit_seconds as number) : 0,
-    options: asRecord(cfg.options),
-    seed: typeof cfg.seed === 'number' ? (cfg.seed as number) : null,
-    outputs: Array.isArray(cfg.outputs) ? (cfg.outputs as string[]) : [],
+  if (typeof env.revision !== 'number' || !env.calculation_config || typeof env.calculation_config !== 'object') {
+    throw new Error('invalid calculation config envelope')
   }
   return {
     project_id: projectId,
-    calculation_config: calculationConfig,
+    calculation_config: env.calculation_config as CalculationConfigBody,
     revision: env.revision as number,
   }
 }

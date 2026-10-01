@@ -1,40 +1,62 @@
-// QA-E2E-01 场景 4-6(13.3):
+// QA-E2E-01 场景 4(13.3; 本文件仅保留场景 4):
 //   4. 上传年度数据(内置样例 1h), 查看质量报告并绑定版本
-//   5. 保存非默认财务配置, 重新读取、确认基准并通过校验
-//   6. 提交任务, 观察状态变化, 查看结果并下载导出
 //
-// 前置: 独立用户(API 造数); 项目由 UI 创建。
-// 造数(API): 仅创建用户; 业务流程全部走 UI。
+// 场景 5(旧 1.0 财务配置控件)已删除, 由 config-revision.spec.ts 的
+// 0.12-A1 新 UI 验收替代; 场景 6(真实计算/导出链)见本文件末尾 future skip。
+//
+// 前置: 独立用户(API 造数); 场景 4 的项目与一份占位配置由 API 造数
+// (场景 6 同模式, 避免工作台落地时的 404-as-absence 噪声);
+// 数据上传/质量报告/绑定业务流程全部走 UI。
 
 import { test, expect } from '@playwright/test'
 import type { Page, BrowserContext } from '@playwright/test'
 import { createSession, uniqueName, strongPassword } from './fixtures'
 import { buildMinimalModel, createEngineer, loginToken, requestJson } from './setup/api'
 
-/** 通过 UI 创建项目并进入数据页。 */
-async function createProjectEnterData(page: Page, projectName: string): Promise<void> {
-  await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
-  await page.getByLabel(/名称|Name/i).fill(projectName)
-  await page.getByRole('button', { name: /确认|Confirm/i }).click()
-  await expect(page.getByText(projectName)).toBeVisible()
-  await page.getByText(projectName).click()
-  await expect(page).toHaveURL(/\/projects\/\d+$/)
-  await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()
-  await expect(page).toHaveURL(/\/data$/)
-}
-
 test.describe('场景 4: 数据上传 / 质量报告 / 绑定', () => {
   test('内置样例生成并绑定到项目', async ({ browser }) => {
     const username = uniqueName('es-data')
     const password = strongPassword('Init')
+    const projectName = uniqueName('QA 数据项目')
+    // 造数阶段(UI 登录前, 场景 6 同模式): 建用户 → API 建项目 → API 保存
+    // 一份配置。配置与数据验收无关, 仅使工作台落地(tasks 重定向)时的
+    // 配置读取为 200, 避免 404-as-absence 的控制台噪声误触发断言;
+    // 数据上传/质量报告/绑定全走 UI。
     const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
     await createEngineer(apiCtx.request, username, password)
+    const setupToken = await loginToken(apiCtx.request, username, password)
+    const createdProj = await requestJson(apiCtx.request, 'POST', '/api/projects', {
+      name: projectName,
+      baseline_resolution: '1h',
+      baseline_leap_year: false,
+      baseline_scenario_mode: 'single',
+    }, setupToken)
+    await requestJson(apiCtx.request, 'PUT', `/api/projects/${createdProj.project?.id ?? createdProj.id}/config`, {
+      calculation_config: {
+        schema: 'ies.calculation-config',
+        schema_version: '1.0.0',
+        mode: 'planning',
+        predictions: [],
+        generator: 'ies.algo.milp_hybrid@1.0.0',
+        solver: 'ies.solver.highs@1.7.2',
+        precision: 'medium',
+        convergence: null,
+        time_limit_seconds: 600,
+        options: {},
+        seed: null,
+        outputs: ['solution'],
+      },
+      expected_revision: null,
+    }, setupToken)
     await apiCtx.close()
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
-    await createProjectEnterData(page, uniqueName('QA 数据项目'))
+    await page.getByText(projectName).click()
+    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()
+    await expect(page).toHaveURL(/\/data$/)
 
     // 4a. 打开"内置样例数据"对话框, 生成 1h 合成数据
     await page.getByRole('button', { name: /内置样例数据|Built-in sample data/i }).click()
@@ -57,64 +79,17 @@ test.describe('场景 4: 数据上传 / 质量报告 / 绑定', () => {
   })
 })
 
-test.describe('场景 5: 财务配置往返与校验', () => {
-  test('保存非默认配置, 重新读取, 确认基准, 校验通过', async ({ browser }) => {
-    const username = uniqueName('es-config')
-    const password = strongPassword('Init')
-    const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
-    await createEngineer(apiCtx.request, username, password)
-    await apiCtx.close()
+/* 场景 5(旧 1.0 财务配置控件: #cfg-discount / 保存默认 / 校验配置按钮)
+ * 已删除: 0.12-A1 移除了自由形态配置与 /validate、/default 端点,
+ * 对应验收由 config-revision.spec.ts 的新 UI 覆盖, 此处不再保留
+ * 必然失败的旧选择器。
+ */
 
-    const context: BrowserContext = await browser.newContext()
-    const page: Page = await context.newPage()
-    const session = await createSession(page, username, password)
-    const projectName = uniqueName('QA 配置项目')
-    await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
-    await page.getByLabel(/名称|Name/i).fill(projectName)
-    await page.getByRole('button', { name: /确认|Confirm/i }).click()
-    await expect(page.getByText(projectName)).toBeVisible()
-    await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
-
-    // 进入配置页
-    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('计算配置').click()
-    await expect(page).toHaveURL(/\/config$/)
-
-    // 5a. 修改经济参数为非默认值(折现率 8→10, 税率 25→20, 评价周期 20→15)
-    const discount = page.locator('#cfg-discount')
-    const tax = page.locator('#cfg-tax')
-    const period = page.locator('#cfg-period')
-    await expect(discount).toBeVisible()
-    await discount.fill('10')
-    await tax.fill('20')
-    await period.fill('15')
-
-    // 5b. 保存配置
-    await page.getByRole('button', { name: /^保存$/ }).click()
-    await expect(page.getByText(/已保存|Saved/i).first()).toBeVisible({ timeout: 10_000 })
-
-    // 5c. 重新读取(刷新页面)验证值保持
-    await page.reload()
-    await expect(page.locator('#cfg-discount')).toHaveValue('10')
-    await expect(page.locator('#cfg-tax')).toHaveValue('20')
-    await expect(page.locator('#cfg-period')).toHaveValue('15')
-
-    // 5d. 校验配置
-    await page.getByRole('button', { name: /校验配置|Validate config/i }).click()
-    await expect(page.getByText(/配置校验通过|Config validation passed/i).first()).toBeVisible({ timeout: 20_000 })
-
-    // 5e. 进入校验页: 确认财务基准
-    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('校验').click()
-    await expect(page).toHaveURL(/\/validation$/)
-    await page.getByRole('button', { name: /确认财务基准|Confirm financial baseline/i }).click()
-    await expect(page.getByText(/财务基准已确认|baseline confirmed/i).first()).toBeVisible({ timeout: 10_000 })
-
-    session.assertNoErrors()
-    await context.close()
-  })
-})
-
-test.describe('场景 6: 任务提交 / 状态 / 结果 / 导出', () => {
+// 场景 6 future skip: 真实计算/导出链属后续切片(A2 任务绑定 + Worker)。
+// 本体保留待后续按新 UI 重写, 当前 A1 不声称验收计算链。
+// 跳过原因: (1) 配置页已无"保存默认"(空白表单须逐项填写);
+// (2) 计算类任务新建在 GUI 已暂停待 A2 绑定; (3) 结果/导出需真实执行。
+test.describe.skip('场景 6: 任务提交 / 状态 / 结果 / 导出(后续切片)', () => {
   test('提交计算任务并观察状态与结果, 导出 Excel', async ({ browser }) => {
     const username = uniqueName('es-task')
     const password = strongPassword('Init')

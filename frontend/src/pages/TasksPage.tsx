@@ -60,6 +60,13 @@ const POLL_MS = 5000
 /** 可提交的任务类型(方案评价 / 规划优化 / 不确定性分析 / 批量扫描)。 */
 const SUBMITTABLE_TYPES: TaskType[] = ['calc', 'optimization', 'uncertainty', 'analysis']
 
+/**
+ * A1 暂停计算任务新建: 已保存配置尚未绑定到任务提交, 上面四类新建入口
+ * 在 GUI 一律阻断, 待 0.12-A2 绑定后开放。既有任务列表/查看/取消/重试
+ * 不受影响; 后端受理逻辑不变, 仅 GUI 阻断, 不伪造任何配置引用。
+ */
+const COMPUTE_CREATE_PAUSED = true
+
 /** 进行中的状态(不视为终结)。 */
 const ACTIVE_STATUSES: TaskStatus[] = ['queued', 'running', 'cancelling']
 
@@ -777,7 +784,7 @@ export default function TasksPage() {
             </Button>
             <Button
               loading={submitting || checking}
-              disabled={!hasSavedConfigValue}
+              disabled={COMPUTE_CREATE_PAUSED || !hasSavedConfigValue}
               onClick={() => {
                 void submit(false)
               }}
@@ -790,6 +797,13 @@ export default function TasksPage() {
         <div className="ies-section">
           <Alert variant="info">{t('ies.task.submit_hint')}</Alert>
         </div>
+        {COMPUTE_CREATE_PAUSED ? (
+          <div className="ies-section">
+            <Alert variant="warning" title={t('ies.task.create_paused')}>
+              {t('ies.task.create_paused_note')}
+            </Alert>
+          </div>
+        ) : null}
 
         {checking ? (
           <div className="ies-section">
