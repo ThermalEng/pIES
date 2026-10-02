@@ -107,43 +107,18 @@ def _raise_for_receipt_status(receipt: Any) -> None:
         )
 
 
-def _seal_files(
-    ctx: RunContext, bundle: Any, receipt: Any, collected: dict[str, bytes]
-) -> tuple[dict, dict]:
-    """声明文件字节以存储对象无损封存（短会话提交），返回描述子。
-
-    媒体类型取 manifest/回执的声明值；字节原样入对象，不做文本校验。
-    """
-    bundle_media = {
-        entry["path"]: entry["media_type"]
-        for entry in (*bundle.manifest.inputs, *bundle.manifest.outputs)
-    }
-    solution_media = {
-        entry["path"]: entry["media_type"] for entry in receipt.outputs
-    }
-    with ctx.session_factory() as db:
-        sealed_bundle = worker_app.seal_output_objects(
-            db,
-            {path: (data, bundle_media[path]) for path, data in bundle.files.items()},
-            actor_id=None,
-        )
-        sealed_solution = worker_app.seal_output_objects(
-            db,
-            {path: (collected[path], solution_media[path]) for path in collected},
-            actor_id=None,
-        )
-        db.commit()
-    return sealed_bundle, sealed_solution
-
-
-def _execute_compute(ctx: RunContext) -> dict:
-    """计算任务真实链: 快照恢复 → 生成 → 执行 → 适配 → 证据 payload。
+def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
+    """计算任务真实链: 快照恢复 → 生成 → 执行 → 适配 → 证据 payload 与输出文件。
 
     全程只按 application.worker 阶段网关结果驱动，不解释任何输入字段：
     冻结缺件即实际结构错误可见失败；预测需求明确拒绝（不 stub、不回退）；
     取消收拢为 TaskCancelled；租约隔离收拢为 LeaseFenced（不写终态）；
     非成功回执与不可映射结果收拢为 EngineRunError（结构化失败，不伪装
-    成功）。payload 只含 JSON 兼容的描述子，文件字节已另存对象。
+    成功）。回执状态判定后才写执行进度：fenced/cancelled/失败不产生
+    execute 进度与终态写回。返回 (payload, output_files)：payload 只含
+    JSON 兼容字段；output_files 为待封存原始字节（路径 → (字节, 声明
+    媒体类型)，媒体类型取 manifest/回执声明值，原样传递不做文本校验），
+    由提交单元同事务封存并注入描述子，本函数不写数据库。
     """
     task = ctx.task
     snapshot = ctx.snapshot
@@ -165,8 +140,8 @@ def _execute_compute(ctx: RunContext) -> dict:
     receipt, collected = worker_app.execute_bundle(
         plane=plane, bundle=bundle, attempt=attempt, stop=_stop_probe(ctx),
     )
-    ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
     _raise_for_receipt_status(receipt)
+    ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
     result = worker_app.adapt_result(plane, bundle, receipt, collected)
     outcome = worker_app.business_outcome_for(result)
     if outcome is None:
@@ -174,38 +149,51 @@ def _execute_compute(ctx: RunContext) -> dict:
             f"统一结果无法映射业务结局(execution={result.execution_status}, "
             f"math={result.math_status}, receipt={receipt.receipt_id})"
         )
-    sealed_bundle, sealed_solution = _seal_files(ctx, bundle, receipt, dict(collected))
+    bundle_media = {
+        entry["path"]: entry["media_type"]
+        for entry in (*bundle.manifest.inputs, *bundle.manifest.outputs)
+    }
+    solution_media = {
+        entry["path"]: entry["media_type"] for entry in receipt.outputs
+    }
+    output_files = {
+        "bundle_files": {
+            path: (data, bundle_media[path]) for path, data in bundle.files.items()
+        },
+        "solution": {
+            path: (collected[path], solution_media[path]) for path in collected
+        },
+    }
     return {
         "outcome": outcome,
         "compute_result": result.to_dict(),
         "receipt": receipt.to_dict(),
         "bundle_manifest": bundle.manifest.to_dict(),
-        "bundle_files": sealed_bundle,
-        "solution": sealed_solution,
-    }
+    }, output_files
 
 
 def dispatch(
     ctx: RunContext,
-) -> dict:
-    """按任务类型分派到执行器(返回结果 payload, 含显式 outcome)。
+) -> tuple[dict, dict | None]:
+    """按任务类型分派到执行器(返回结果 payload 与待封存输出文件, 含显式 outcome)。
 
     未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
     未知任务类型抛 InvalidTaskTypeError。计算类任务走真实链
     (``_execute_compute``): 任务/快照记录缺失即确定性失败, 不解释任何
-    输入字段。
+    输入字段；输出文件原始字节随 payload 之外返回，由提交单元同事务
+    封存（本函数不写数据库）。
     """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:
         return _execute_compute(ctx)
     if task_type == "report":
-        return executors.execute_check(ctx)
+        return executors.execute_check(ctx), None
     if task_type == "dataset_build":
-        return executors.execute_dataset_process(ctx)
+        return executors.execute_dataset_process(ctx), None
     if task_type == "export":
-        return executors.execute_export(ctx)
+        return executors.execute_export(ctx), None
     if task_type == "import":
-        return executors.execute_package_import(ctx)
+        return executors.execute_package_import(ctx), None
     raise InvalidTaskTypeError(
         "未知任务类型",
         params={"task_type": task_type, "allowed": list(COMPUTE_TASK_TYPES) + list(IO_TASK_TYPES)},
@@ -237,11 +225,12 @@ def run_task(
         终态状态: completed / failed / cancelled / lease_rejected / fenced。
         fenced 表示回执证明租约已失效：本次执行结果被丢弃，不写任何终态、
         不报取消（过期租约由领取循环自然回收）。
-    事务边界: 本函数不调用 commit/rollback, 不持有跨阶段的 Session; 任务/
-    快照读完即关闭读取会话, 求解/分析/导出在无数据库事务状态下运行,
-    领取/进度/续租/评估写入/提交/失败/取消各自的新短会话短事务由
-    application.worker 用例拥有并提交(领取已在执行前提交, 故执行期回滚
-    不会丢失租约; 失败收拢不再误判为 lease_rejected)。
+    事务边界: 本函数不调用 commit/rollback, 不持有跨阶段的 Session, 不写
+    ORM; 任务/快照读完即关闭读取会话, 求解/分析/导出在无数据库事务状态
+    下运行, 领取/进度/续租/评估写入/提交/失败/取消各自的新短会话短事务
+    由 application.worker 用例拥有并提交(领取已在执行前提交, 故执行期
+    回滚不会丢失租约; 失败收拢不再误判为 lease_rejected)。计算输出字节
+    由提交单元同事务封存(封存/证据/引用/完成一次提交), 本函数只传参。
     """
     factory = session_factory
     # 输入加载: 短读会话, 读完即关(task/snapshot 为脱离会话的值对象)
@@ -268,21 +257,16 @@ def run_task(
         progress_fn=_report_progress, compute=compute,
     )
     try:
-        payload = dispatch(ctx)
+        payload, output_files = dispatch(ctx)
         # 完成路径要求显式合法 outcome: 缺字段默认成功已删除, 缺失/非法
         # 即确定性失败, 绝不落成功(合法集合归 tasks 域所有)。
         outcome = payload.get("outcome")
         if outcome not in worker_app.BUSINESS_OUTCOMES:
             raise EngineRunError(f"执行器未返回显式合法 outcome: {outcome!r}")
         with factory() as db:
-            receipt = worker_app.submit_attempt_result(
-                db, claim, payload=payload, outcome=outcome, actor_id=task.requested_by)
-        with factory() as db:
-            worker_app.attach_evidence_objects(
-                db, receipt.evidence_package_id, payload["bundle_files"], actor_id=None)
-            worker_app.attach_evidence_objects(
-                db, receipt.evidence_package_id, payload["solution"], actor_id=None)
-            db.commit()
+            worker_app.submit_attempt_result(
+                db, claim, payload=payload, outcome=outcome,
+                actor_id=task.requested_by, output_files=output_files)
         return "completed"
     except LeaseFenced:
         logger.warning("租约隔离，丢弃本次执行结果: task=%s", task.id)

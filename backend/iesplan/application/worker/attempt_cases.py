@@ -14,9 +14,9 @@
   即刻对其他会话可见, 不随终态事务一并提交;
 - assess_report_evidence: report 单步评估写入, 独立短事务提交(内含 fencing
   校验; 迟到评估整笔回滚并抛 LeaseRejectedError);
-- submit_attempt_result: 结果提交全序列(证据包 + 四维评估 + 结果索引 +
-  尝试成功 + 任务完成), 同事务提交; fencing 失败整笔回滚并抛
-  LeaseRejectedError(迟到结果永远不入权威库);
+- submit_attempt_result: 结果提交全序列(输出封存 + 证据包 + 对象引用 +
+  四维评估 + 结果索引 + 尝试成功 + 任务完成), 同事务提交; fencing 失败
+  整笔回滚并抛 LeaseRejectedError(迟到结果永远不入权威库);
 - fail_attempt: 确定性失败收拢(尝试 failed + 租约 revoked + 槽释放 +
   任务 failed + 诊断), 同事务提交;
 - cancel_attempt: 取消收拢(尝试 stopped + 租约 revoked + 槽释放 +
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -40,6 +41,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from iesplan.application.tasks import Claim
+from iesplan.application.worker.compute_cases import attach_evidence_objects, seal_output_objects
 from iesplan.application.worker.evidence_cases import CheckAssessment, assess_check_evidence
 from iesplan.application.worker.lease_cases import (
     LeaseRejectedError,
@@ -213,17 +215,25 @@ def submit_attempt_result(
     payload: dict,
     outcome: str,
     actor_id: int | None = None,
+    output_files: Mapping[str, Mapping[str, tuple[bytes, str]]] | None = None,
 ) -> SubmitReceipt:
     """仅租约持有者可提交(03 §11.4): token 不符/租约过期 → 整笔回滚并抛 LeaseRejectedError。
 
+    输出字节随本单元封存(调用方传原始字节, 不经过第二种 payload 格式):
+    fencing 确认后、证据包创建前封存 Bundle 与声明输出并注入描述子,
+    证据包创建后挂接输出引用, 与提交同事务一次提交/回滚 —— 任一步失败
+    则任务/结果/证据/对象元数据/引用全无提交, 不留已完成缺引用与孤立
+    元数据(外部 Blob 字节跨资源不能同原子提交, 沿现有存储回收语义清理)。
+
     单事务顺序:
         1) fencing 校验(租约 active + token 匹配);
-        2) 结果序列化 → 对象存储;
-        3) 证据包(evidence_packages, 不可变) + 对象引用;
-        4) 四维评估(result_assessments, assessor='system');
-        5) 结果索引(result_index: 旧行 is_latest=false → 插新行);
-        6) 释放: 租约 released + 尝试 succeeded + 槽释放;
-        7) 任务 completed + business_outcome(技术状态与业务结局正交, 03 §3.2)。
+        2) 输出封存(Bundle/声明输出原始字节 → 对象, 描述子注入 payload);
+        3) 结果序列化 → 对象存储;
+        4) 证据包(evidence_packages, 不可变) + 对象引用(含输出引用挂接);
+        5) 四维评估(result_assessments, assessor='system');
+        6) 结果索引(result_index: 旧行 is_latest=false → 插新行);
+        7) 释放: 租约 released + 尝试 succeeded + 槽释放;
+        8) 任务 completed + business_outcome(技术状态与业务结局正交, 03 §3.2)。
     """
     try:
         attempt_id, token = claim.attempt_id, claim.lease_token
@@ -244,6 +254,12 @@ def submit_attempt_result(
         index_id: int | None = None
         snapshot = get_snapshot_record(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
         if snapshot is not None:
+            sealed_groups: dict[str, Mapping[str, Mapping[str, object]]] = {}
+            if output_files is not None:
+                for key, raw in output_files.items():
+                    sealed = seal_output_objects(db, raw, actor_id=who)
+                    payload[key] = sealed
+                    sealed_groups[key] = sealed
             blob = _payload_bytes(payload)
             object_id = store_result_blob(db, blob, actor_id=who)
             evidence_id = create_evidence_record(
@@ -251,6 +267,8 @@ def submit_attempt_result(
                 object_id=object_id, created_by=who,
             )
             attach_result_ref(db, object_id, evidence_id, actor_id=who)
+            for sealed in sealed_groups.values():
+                attach_evidence_objects(db, evidence_id, sealed, actor_id=who)
 
             assessment = payload.get("assessment") or {}
             assessment_id = create_assessment_record(

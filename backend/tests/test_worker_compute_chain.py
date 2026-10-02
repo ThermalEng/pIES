@@ -45,9 +45,10 @@ from iesplan.bootstrap import assemble_compute_worker  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.results import persistence as results_store  # noqa: E402
-from iesplan.storage import get_object  # noqa: E402
+from iesplan.storage import get_object, list_refs  # noqa: E402
+from iesplan.storage.persistence import StoredObject  # noqa: E402
 from iesplan.tasks import queue  # noqa: E402
-from iesplan.tasks.persistence import Task, TaskDiagnostic  # noqa: E402
+from iesplan.tasks.persistence import Task, TaskDiagnostic, TaskProgress  # noqa: E402
 from iesplan.worker import runner  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -363,3 +364,106 @@ class TestComputeChainEndToEnd:
         task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task.status == "running"
         assert task.business_outcome is None
+
+
+def _stored_object_count(db: Session) -> int:
+    """当前已提交的对象元数据行数（单事务回滚与否的直接证据）。"""
+    return len(db.execute(select(StoredObject)).scalars().all())
+
+
+class TestSingleUnitSeal:
+    """单一提交单元：封存/证据/引用/完成同一事务（阻断点回归）。
+
+    旧链路分三次提交（封存→提交→挂引用）：引用挂接失败会留下已完成
+    却缺引用的任务与已提交孤立对象；fenced 回执还会产生执行进度写回。
+    """
+
+    def test_completed_run_refs_all_outputs(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """成功后全部输出引用存在：每份封存字节都有证据包引用挂接。"""
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        assert _run(engine, claim, plane) == "completed"
+
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        for key in ("bundle_files", "solution"):
+            group = sealed[key]
+            assert group, key
+            for path, descriptor in sorted(group.items()):
+                refs = list_refs(db, descriptor["object_id"])
+                assert any(
+                    r.ref_type == "evidence_package"
+                    and r.ref_entity_id == str(evidence.id)
+                    for r in refs
+                ), (key, path)
+
+    def test_output_ref_failure_leaves_no_committed_metadata(
+        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
+    ) -> None:
+        """引用挂接注入失败 → 无 completed、无已提交孤立元数据。
+
+        只让输出引用挂接失败（purpose=evidence_output），结果引用保持
+        正常：整笔（含已封存对象元数据）必须回滚，不落终态完成。
+        """
+        from iesplan.application.worker import compute_cases  # noqa: E402
+
+        real_add_ref = compute_cases.add_ref
+
+        def _fail_output_refs(db, object_id, ref_type, ref_id, ref_entity_type=None,
+                              purpose=None, *, actor_id=None, actor_type="system"):
+            if purpose == "evidence_output":
+                raise RuntimeError("injected-ref-failure")
+            return real_add_ref(
+                db, object_id, ref_type, ref_id, ref_entity_type=ref_entity_type,
+                purpose=purpose, actor_id=actor_id, actor_type=actor_type,
+            )
+
+        monkeypatch.setattr(compute_cases, "add_ref", _fail_output_refs)
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        before = _stored_object_count(db)
+        assert _run(engine, claim, plane) == "failed"
+
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task.status == "failed"
+        assert task.business_outcome is None
+        assert results_store.latest_evidence_for_task(db, task_id) is None
+        assert _stored_object_count(db) == before
+
+    def test_submit_fence_rejects_before_seal(
+        self, client: TestClient, db: Session
+    ) -> None:
+        """提交时 fencing → 封存前拒绝，无 completed、无孤立元数据。"""
+        import dataclasses  # noqa: E402
+        import uuid  # noqa: E402
+
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        bad_claim = dataclasses.replace(claim, lease_token=uuid.uuid4())
+        before = _stored_object_count(db)
+        with pytest.raises(worker_app.LeaseRejectedError):
+            worker_app.submit_attempt_result(
+                db, bad_claim, payload={"outcome": "normal_completion"},
+                outcome="normal_completion",
+                output_files={"bundle_files": {"a.bin": (b"abc", "application/octet-stream")}},
+            )
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task.status == "running"
+        assert results_store.latest_evidence_for_task(db, task_id) is None
+        assert _stored_object_count(db) == before
+
+    def test_fenced_receipt_writes_no_execute_progress(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """fenced 回执判定后无进度写回：执行进度停在判定前的产生点。"""
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        assert _run(engine, claim, _plane_with_stub_runtime(plane, status="fenced")) == "fenced"
+        row = db.execute(
+            select(TaskProgress).where(TaskProgress.attempt_id == claim.attempt_id)
+        ).scalar_one_or_none()
+        assert row is not None
+        assert (row.stage, float(row.progress_percent)) == ("generate", 40.0)
