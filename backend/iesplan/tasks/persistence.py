@@ -32,6 +32,8 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -595,13 +597,28 @@ def ensure_slots(db: Session, pools: Mapping[str, int]) -> None:
 
     只增建不删除：调小额度由领取侧总量判定（``acquire_slot`` /
     ``pool_has_free_slot`` 的 ``capacity`` 参数）即时生效，已占用槽不受影响。
+    增建以 (pool_name, slot_no) 唯一键 + upsert 串行并发创建者：先到的事务
+    插入缺失序号，后到的冲突行直接跳过（单语句原子，不抛唯一冲突，
+    不毒化调用方事务）；PostgreSQL 与 SQLite 同语义。
     """
     for pool, capacity in pools.items():
         existing = (
             db.execute(select(func.count(ComputeSlot.id)).where(ComputeSlot.pool_name == pool)).scalar() or 0
         )
-        for _ in range(max(int(capacity) - int(existing), 0)):
-            db.add(ComputeSlot(pool_name=pool, status="free", capacity=1, in_use=0))
+        missing = [
+            {"pool_name": pool, "status": "free", "capacity": 1, "in_use": 0, "slot_no": no}
+            for no in range(existing, capacity)
+        ]
+        if not missing:
+            continue
+        dialect = db.get_bind().dialect.name
+        if dialect == "postgresql":
+            stmt = postgresql_insert(ComputeSlot).values(missing).on_conflict_do_nothing()
+        elif dialect == "sqlite":
+            stmt = sqlite_insert(ComputeSlot).values(missing).on_conflict_do_nothing()
+        else:
+            raise ValueError(f"不支持的数据库方言: {dialect}")
+        db.execute(stmt)
     db.flush()
 
 
@@ -1193,12 +1210,17 @@ class TaskDiagnostic(Base):
 
 
 class ComputeSlot(Base):
-    """计算并发槽(01 §7.7)。"""
+    """计算并发槽(01 §7.7)。
+
+    ``slot_no`` 为池内序号(0 起逐池 dense)：``ensure_slots`` 增建的并发
+    串行锚点，(pool_name, slot_no) 唯一。
+    """
 
     __tablename__ = "compute_slots"
 
     id: Mapped[int] = bigint_pk()
     pool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    slot_no: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     capacity: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
     in_use: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("0"))
@@ -1214,6 +1236,7 @@ class ComputeSlot(Base):
         CheckConstraint("capacity >= 1", name="ck_compute_slots_capacity"),
         CheckConstraint("in_use >= 0", name="ck_compute_slots_in_use"),
         CheckConstraint("in_use <= capacity", name="ck_compute_slots_capacity_bound"),
+        UniqueConstraint("pool_name", "slot_no", name="uq_compute_slots_pool_no"),
         Index(
             "uq_compute_slots_attempt",
             "current_attempt_id",

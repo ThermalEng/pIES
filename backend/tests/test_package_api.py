@@ -690,7 +690,7 @@ def test_admin_unlock_task(client: TestClient, db: Session) -> None:
     db.add(TaskLease(attempt_id=attempt.id, lease_token=uuid4(), acquired_by="w1",
                      acquired_at=now, renewed_at=now,
                      expires_at=now + timedelta(seconds=60), status="active"))
-    db.add(ComputeSlot(pool_name="compute", status="busy", capacity=1, in_use=1,
+    db.add(ComputeSlot(pool_name="compute", slot_no=0, status="busy", capacity=1, in_use=1,
                        current_attempt_id=attempt.id))
     db.commit()
 
