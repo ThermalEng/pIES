@@ -593,7 +593,7 @@ def get_lease_by_token(db: Session, lease_token: str) -> TaskLeaseRecord | None:
 def ensure_slots(db: Session, pools: Mapping[str, int]) -> None:
     """惰性初始化槽表（每池按并发额度建 capacity 行，幂等）。
 
-    只增建不删除：调小额度由领取侧有效窗口（``acquire_slot`` /
+    只增建不删除：调小额度由领取侧总量判定（``acquire_slot`` /
     ``pool_has_free_slot`` 的 ``capacity`` 参数）即时生效，已占用槽不受影响。
     """
     for pool, capacity in pools.items():
@@ -608,20 +608,22 @@ def ensure_slots(db: Session, pools: Mapping[str, int]) -> None:
 def acquire_slot(db: Session, pool_name: str, capacity: int) -> ComputeSlotRecord | None:
     """取可用槽位并标记占用（行锁，in_use+1，不绑定尝试）；无可用返回 None。
 
-    只在按 id 排序的前 ``capacity`` 行（有效窗口）内领取：部署调小额度后，
-    窗口外空闲行不再发放，已占用行（含窗口外）不中断、不回收。
+    缩容不取消已有运行：全池当前 in_use 总量 >= ``capacity`` 时不得新领，
+    只有总量低于额度才可在空闲行领取。总量判定与占槽在同一行锁事务内
+    原子完成（全池行锁串行并发领取者）；门禁判断见 ``pool_has_free_slot``。
     """
     slots = (
         db.execute(
             select(ComputeSlot)
             .where(ComputeSlot.pool_name == pool_name, ComputeSlot.status.in_(("free", "busy")))
             .order_by(ComputeSlot.id)
-            .limit(max(int(capacity), 0))
             .with_for_update()
         )
         .scalars()
         .all()
     )
+    if sum(slot.in_use for slot in slots) >= capacity:
+        return None
     for slot in slots:
         if slot.in_use < slot.capacity:
             slot.in_use += 1
@@ -907,7 +909,10 @@ def revoke_leases_for_attempts(db: Session, attempt_ids: Collection[int]) -> int
 
 
 def pool_has_free_slot(db: Session, pool_name: str, capacity: int) -> bool:
-    """槽门禁：有效窗口内是否存在可用槽（领取前确认；槽行未初始化视为有空位）。"""
+    """槽门禁：全池 in_use 总量 < 额度且存在空闲行（领取前确认；槽行未初始化视为有空位）。
+
+    与 ``acquire_slot`` 同一判定谓词（无锁预检查，原子保证在领取侧行锁事务内）。
+    """
     rows = (
         db.execute(
             select(ComputeSlot)
@@ -916,13 +921,14 @@ def pool_has_free_slot(db: Session, pool_name: str, capacity: int) -> bool:
                 ComputeSlot.status.in_(("free", "busy")),
             )
             .order_by(ComputeSlot.id)
-            .limit(max(int(capacity), 0))
         )
         .scalars()
         .all()
     )
     if not rows:
         return True
+    if sum(row.in_use for row in rows) >= capacity:
+        return False
     return any(row.in_use < row.capacity for row in rows)
 
 

@@ -194,43 +194,82 @@ class TestAcquire:
         assert worker_app.slot_available(db, "compute") is True  # 2 槽, 用 1 仍可领取
         assert worker_app.slot_available(db, "io") is True
 
-    def test_slot_effective_window_follows_configured_capacity(self, db: Session):
-        """部署调槽即时生效：调大增发、调小窗口外不发、占用不中断。
+    def test_slot_shrink_blocks_new_acquire_until_total_below_capacity(self, db: Session):
+        """缩容总量语义：全池 in_use 总量 >= 新上限时不得新领，低于上限才可领。
 
-        直接以行级 in_use 归零模拟占用释放（release_slot 的尝试绑定路径
-        另有覆盖）；断言真实有效槽数，不只断言 Settings 值。
+        反例覆盖：3 行全占用 → 降为 1 → 只释放 id 最小行（总量 2 ≥ 1）
+        仍不得新领；继续释放到总量仍 ≥ 上限仍拒绝；调大额度后总量低于
+        上限才可领。高 id 占用行始终不中断。
+        行级 in_use 归零模拟占用释放（release_slot 的尝试绑定路径另有覆盖）；
+        断言真实有效槽数，不只断言 Settings 值。
         """
-        from sqlalchemy import update
+        from sqlalchemy import func, select
 
         from iesplan.tasks import persistence as slot_store
 
-        slot_store.ensure_slots(db, {"compute": 1})
-        first = slot_store.acquire_slot(db, "compute", 1)
-        assert first is not None
-        assert slot_store.acquire_slot(db, "compute", 1) is None
-        assert slot_store.pool_has_free_slot(db, "compute", 1) is False
-        # 调大：增发行，无需删行
+        def total_in_use(pool: str) -> int:
+            return int(
+                db.execute(
+                    select(func.coalesce(func.sum(ComputeSlot.in_use), 0)).where(
+                        ComputeSlot.pool_name == pool
+                    )
+                ).scalar()
+                or 0
+            )
+
+        def release(row_id: int) -> None:
+            row = db.get(ComputeSlot, row_id)
+            assert row is not None
+            row.in_use = 0
+            db.flush()
+
         slot_store.ensure_slots(db, {"compute": 3})
+        first = slot_store.acquire_slot(db, "compute", 3)
         second = slot_store.acquire_slot(db, "compute", 3)
         third = slot_store.acquire_slot(db, "compute", 3)
-        assert second is not None and third is not None
+        assert first is not None and second is not None and third is not None
+        assert first.id < second.id < third.id
         assert slot_store.acquire_slot(db, "compute", 3) is None
-        # 调小到 1：三行全占用，新领被拒，已占用不中断
+        # 调大额度只增发行
+        slot_store.ensure_slots(db, {"compute": 5})
+        assert (
+            db.execute(
+                select(func.count(ComputeSlot.id)).where(ComputeSlot.pool_name == "compute")
+            ).scalar()
+            == 5
+        )
+        # 缩容到 1：总量 3 ≥ 1，新领被拒，已占用不中断
+        assert total_in_use("compute") == 3
         assert slot_store.acquire_slot(db, "compute", 1) is None
         assert slot_store.pool_has_free_slot(db, "compute", 1) is False
-        # 释放窗口内第一行与窗口外第二行：窗口内可再领一行，
-        # 窗口内满后窗口外空闲行也不发放
-        db.execute(update(ComputeSlot).where(ComputeSlot.id == first.id).values(in_use=0))
-        db.execute(update(ComputeSlot).where(ComputeSlot.id == second.id).values(in_use=0))
-        db.flush()
-        assert slot_store.pool_has_free_slot(db, "compute", 1) is True
-        assert slot_store.acquire_slot(db, "compute", 1) is not None
-        assert slot_store.acquire_slot(db, "compute", 1) is None
+        # 反例：只释放 id 最小行 → 总量 2 仍 ≥ 1，仍不得新领
+        release(first.id)
+        assert total_in_use("compute") == 2
         assert slot_store.pool_has_free_slot(db, "compute", 1) is False
-        # io 池窗口独立
+        assert slot_store.acquire_slot(db, "compute", 1) is None
+        # 高 id 占用行不受影响
+        assert db.get(ComputeSlot, second.id).in_use == 1
+        assert db.get(ComputeSlot, third.id).in_use == 1
+        # 继续释放但总量仍 ≥ 上限（1 ≥ 1）：仍拒绝
+        release(second.id)
+        assert total_in_use("compute") == 1
+        assert slot_store.pool_has_free_slot(db, "compute", 1) is False
+        assert slot_store.acquire_slot(db, "compute", 1) is None
+        assert db.get(ComputeSlot, third.id).in_use == 1
+        # 调大到 2：总量 1 < 2，可领一行（取最低空闲行），回满后再次拒绝
+        assert slot_store.pool_has_free_slot(db, "compute", 2) is True
+        refilled = slot_store.acquire_slot(db, "compute", 2)
+        assert refilled is not None
+        assert refilled.id == first.id
+        assert total_in_use("compute") == 2
+        assert slot_store.acquire_slot(db, "compute", 2) is None
+        assert slot_store.pool_has_free_slot(db, "compute", 2) is False
+        # io 池独立：compute 占满不影响 io
         slot_store.ensure_slots(db, {"io": 2})
-        assert slot_store.acquire_slot(db, "io", 1) is not None
-        assert slot_store.acquire_slot(db, "io", 1) is None
+        assert slot_store.acquire_slot(db, "io", 2) is not None
+        assert slot_store.acquire_slot(db, "io", 2) is not None
+        assert slot_store.acquire_slot(db, "io", 2) is None
+        assert slot_store.pool_has_free_slot(db, "io", 2) is False
 
 
 # ---------------------------------------------------------------------------

@@ -290,7 +290,7 @@ def publish_heartbeat(worker_id: str, payload: dict[str, Any], ttl: int) -> None
 
 
 def slot_available(db: Session, pool: str) -> bool:
-    """槽门禁: 有效窗口内是否存在可用槽(领取前确认; 槽行未初始化视为有空位)。"""
+    """槽门禁: 全池总量低于额度且有空闲行(领取前确认; 未初始化视为有空位)。"""
     capacities = {"compute": settings.compute_slots, "io": settings.io_slots}
     return tasks_domain.pool_has_free_slot(db, pool, capacities[pool])
 
