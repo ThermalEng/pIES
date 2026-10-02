@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +69,10 @@ from iesplan.finance import EffectiveFinanceConfig
 class AssemblyValidationResult:
     diagnostics: list[Diagnostic]
     artifact: ValidatedAssemblyArtifact | None
+    #: 本次校验实际解析的设备文档(``type_id → DeviceModelDocument``):
+    #: 与各校验阶段共用同一次 ``_device_registry()`` 结果, 失败时为空。
+    #: 调用方据此冻结逐实例数学贡献, 不得另行二次解析当前目录。
+    device_documents: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -268,7 +272,9 @@ def _run_validation(
     artifact = ValidatedAssemblyArtifact(
         canonical_text=canonical_text, receipt=receipt
     )
-    return AssemblyValidationResult(diagnostics=diags, artifact=artifact)
+    return AssemblyValidationResult(
+        diagnostics=diags, artifact=artifact, device_documents=registry
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ configuration, 含 tasks 域队列可重建视图); 不导入 ``models.*``。
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from collections.abc import Mapping
@@ -43,6 +44,7 @@ from iesplan import __version__
 from iesplan import configuration as configuration_domain
 from iesplan import dataset as dataset_domain
 from iesplan import identity as identity_domain
+from iesplan import modeling as modeling_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
@@ -58,7 +60,7 @@ from iesplan.application.projects import (
 )
 from iesplan.assembly import (
     AssemblyValidationError,
-    ValidatedAssemblyArtifact,
+    AssemblyValidationResult,
     validate_project_export,
 )
 from iesplan.computation.errors import ComputationUnavailableError
@@ -259,11 +261,12 @@ def _snapshot_inputs_equal(
     random_seed: int,
     canonical_text: str | None,
     receipt: dict,
+    device_models: dict,
 ) -> bool:
     """快照输入一致判定: 全部快照内容字段逐项相等(不使用内容摘要)。
 
-    复用身份包含 schema_version 与执行引用: 不同 schema 或不同配套
-    adapter/executor 的快照永不复用。
+    复用身份包含 schema_version、执行引用与逐实例数学贡献: 不同 schema、
+    不同配套 adapter/executor 或不同设备贡献的快照永不复用。
     容差唯一权威是 calc_config 正文的 convergence, 此处不另设 tolerances。
     """
     return (
@@ -277,6 +280,7 @@ def _snapshot_inputs_equal(
         and snapshot.random_seed == random_seed
         and (snapshot.canonical_assembly_text or "") == (canonical_text or "")
         and jsonable(snapshot.assembly_receipt or {}) == jsonable(receipt)
+        and jsonable(snapshot.device_models or {}) == jsonable(device_models)
     )
 
 
@@ -366,6 +370,38 @@ def _resolve_execution_refs(
     return descriptor.result_adapter, executors[0]
 
 
+def _freeze_device_models(artifact: Any, device_documents: Mapping[str, Any]) -> dict[str, Any]:
+    """逐装配实例数学贡献冻结(``{instance_id: contribution dict}``)。
+
+    实例 → 类型经规范文本 ``devices.<inst>.definition.id`` 唯一确定(闸门
+    已阻断未知类型)；贡献由本次闸门实际解析的设备文档构建，与各校验阶段
+    同一次解析，不二次读取当前目录。构建失败(方程语义阻断)即闸门失败，
+    不建快照、不补默认。同一输入恒得同一字节(``contribution_to_dict``
+    稳定键序)。
+    """
+    doc = json.loads(artifact.canonical_text)
+    devices = doc.get("devices") or {}
+    frozen: dict[str, Any] = {}
+    for inst in sorted(devices):
+        entry = devices[inst] or {}
+        definition = entry.get("definition") or {}
+        type_id = definition.get("id")
+        document = device_documents.get(type_id)
+        if not isinstance(type_id, str) or not type_id or document is None:
+            raise AssemblyValidationError(
+                [],
+                message=f"装配实例缺可解析设备定义: {inst!r}",
+            )
+        built = modeling_domain.build_math_contribution(document)
+        if not built.ok or built.contribution is None:
+            raise AssemblyValidationError(
+                list(built.diagnostics),
+                message=f"设备数学贡献构建失败: {inst!r}",
+            )
+        frozen[inst] = modeling_domain.contribution_to_dict(built.contribution)
+    return frozen
+
+
 def _assemble_snapshot(
     db: Session,
     project_id: int,
@@ -408,9 +444,13 @@ def _assemble_snapshot(
     )
 
     # 统一生产闸门: 先签发规范文本/回执二件套, 失败不创建快照或任务。
-    # 回执进入快照身份; 快照去重使用内容字段逐项相等判定, 文本仅校验字头。
-    artifact = _assembly_gate(db, project_id, content, task_type)
+    # 回执与逐实例数学贡献进入快照身份; 快照去重使用内容字段逐项相等判定,
+    # 文本仅校验字头。贡献由本次闸门同一次设备解析冻结，不二次读目录。
+    gate = _assembly_gate(db, project_id, content, task_type)
+    assert gate.artifact is not None
+    artifact = gate.artifact
     receipt = artifact.receipt.to_dict()
+    device_models = _freeze_device_models(artifact, gate.device_documents)
     for candidate in tasks_domain.list_snapshots_for_version(db, version.id):
         if _snapshot_inputs_equal(
             candidate,
@@ -424,6 +464,7 @@ def _assemble_snapshot(
             random_seed=random_seed,
             canonical_text=artifact.canonical_text,
             receipt=receipt,
+            device_models=device_models,
         ):
             return candidate  # 相同输入复用既有快照(不可变, 复用安全)
 
@@ -437,6 +478,7 @@ def _assemble_snapshot(
         schema_version=SNAPSHOT_SCHEMA_VERSION,
         result_adapter=result_adapter,
         executor=executor,
+        device_models=device_models,
         program_version=__version__,
         extension_versions=extensions,
         canonical_assembly_text=artifact.canonical_text,
@@ -511,10 +553,12 @@ def _frozen_ref(content: Mapping, project_id: int, key: str, field: str) -> Mapp
     return block
 
 
-def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) -> ValidatedAssemblyArtifact:
+def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) -> AssemblyValidationResult:
     """计算任务统一装配闸门: 完整四阶段校验后签发规范二件套。
 
     阻断诊断抛 AssemblyValidationError(HTTP 422)。签发即受信，不做重复复核。
+    成功结果同时携带本次校验实际解析的设备文档(同一次解析，供快照冻结
+    逐实例数学贡献，调用方不得另行二次解析当前目录)。
     finance/planning 只消费传入版本内容已冻结的精确引用
     (effective_finance {profile_id, overrides_revision, revision} /
     planning_config {revision})，
@@ -566,7 +610,7 @@ def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) 
     )
     if result.artifact is None:
         raise AssemblyValidationError(result.diagnostics)
-    return result.artifact
+    return result
 
 
 def _dataset_contents_for(

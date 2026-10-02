@@ -128,6 +128,7 @@ def test_calc_snapshot_record_freezes_nested_values():
         schema_version=tasks.SNAPSHOT_SCHEMA_VERSION,
         result_adapter="ies.result_adapter.milp_standard@1.0.0",
         executor="ies.executor.local_docker@1.0.0",
+        device_models={},
     )
     raw["params"]["series"].append(5)
     assert record.calc_config_snapshot["params"]["series"] == (1, 2)
@@ -136,17 +137,18 @@ def test_calc_snapshot_record_freezes_nested_values():
 
 
 def test_calc_snapshot_record_requires_version_and_execution_refs():
-    """快照版本与执行引用为无默认必填 str(与持久化非空列一致, 无运行期复核)。"""
+    """快照版本、执行引用与逐实例设备贡献为无默认必填(与持久化非空列一致, 无运行期复核)。"""
     required = {
         name: field
         for name, field in (
             (f.name, f) for f in dataclasses.fields(tasks.CalcSnapshotRecord)
         )
-        if name in ("schema_version", "result_adapter", "executor")
+        if name in ("schema_version", "result_adapter", "executor", "device_models")
     }
-    assert set(required) == {"schema_version", "result_adapter", "executor"}
+    assert set(required) == {"schema_version", "result_adapter", "executor", "device_models"}
     for name, field in required.items():
-        assert field.type == "str", f"{name} 必须为必填 str"
+        if name != "device_models":
+            assert field.type == "str", f"{name} 必须为必填 str"
         assert field.default is dataclasses.MISSING, f"{name} 不得带默认值"
         assert field.default_factory is dataclasses.MISSING, f"{name} 不得带默认工厂"
     with pytest.raises(TypeError):

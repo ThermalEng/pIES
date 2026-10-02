@@ -84,6 +84,7 @@ def _row_to_snapshot(row: CalcSnapshot) -> CalcSnapshotRecord:
         extension_versions=row.extension_versions,
         canonical_assembly_text=row.canonical_assembly_text,
         assembly_receipt=row.assembly_receipt,
+        device_models=row.device_models,
         created_by=row.created_by,
     )
 
@@ -221,12 +222,13 @@ def create_snapshot(
     schema_version: str,
     result_adapter: str,
     executor: str,
+    device_models: dict[str, Any],
     program_version: str | None = None,
     extension_versions: dict[str, Any] | None = None,
     canonical_assembly_text: str | None = None,
     assembly_receipt: dict[str, Any] | None = None,
 ) -> CalcSnapshotRecord:
-    """创建不可变快照行(schema_version 由调用方显式传入, 无默认回退)。"""
+    """创建不可变快照行(schema_version/device_models 由调用方显式传入, 无默认回退)。"""
     row = CalcSnapshot(
         project_version_id=project_version_id,
         dataset_version_ids=list(dataset_version_ids),
@@ -236,6 +238,7 @@ def create_snapshot(
         schema_version=schema_version,
         result_adapter=result_adapter,
         executor=executor,
+        device_models=device_models,
         program_version=program_version,
         extension_versions=extension_versions if extension_versions is not None else {},
         canonical_assembly_text=canonical_assembly_text,
@@ -992,6 +995,10 @@ class CalcSnapshot(Base):
     #: 回填)；Worker 必须拒绝缺任一成员的快照；所有新快照由统一校验入口完整写入。
     canonical_assembly_text: Mapped[str | None] = mapped_column(Text)
     assembly_receipt: Mapped[dict | None] = mapped_column(JSONB)
+    #: 逐装配实例数学贡献(``{instance_id: contribution dict}``，非空):
+    #: 提交边界与装配闸门同一次设备解析冻结，复用身份包含；Worker 只从
+    #: 快照恢复，不得读当前 devices 目录，不得重跑校验/hash 复核。
+    device_models: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=sa.func.now()

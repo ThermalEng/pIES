@@ -15,6 +15,16 @@
 
 ## Unreleased
 
+### 2026-10-02 — `0.12.0` 切片 B 设备输入冻结：快照按装配实例冻结设备数学贡献
+
+**版本进展**：`0.12.0` 的设备输入冻结切片；产品版本仍为 `0.1.0`，不宣布 `0.12.0` 完成；Worker 真实执行、评价年限/折现率确认、多年财务等留待后续；计算 Worker 仍拒启动。
+
+#### 更新了什么
+
+- 任务提交装配闸门在同一次设备解析中，按装配实例（`devices.<inst>.definition.id` 唯一确定类型，未知类型仍阻断）构建设备数学贡献，冻结为快照非空 `device_models`（`{instance_id: contribution dict}`），复用身份包含贡献；`modeling` 新增已封存贡献的纯结构恢复（`contribution_from_dict`/`ast_from_dict`，不重跑方程校验）。
+- Worker 后续只能从快照恢复贡献，不得读取当前 `devices` 目录，不得在内部交接重跑校验或增加 hash/完整性复核。
+- 提交后修改设备目录只影响新快照，历史快照输入不变（有测试锁定）。
+
 ### 2026-10-01 — `0.12.0` 切片 A3：快照剩余依赖冻结（tolerances 清理、schema_version、adapter/executor 引用）
 
 **版本进展**：`0.12.0` 的第三个切片；产品版本仍为 `0.1.0`，不宣布 `0.12.0` 完成；tolerances 清理、schema_version、executor/result adapter 精确引用冻结已随本切片完成；评价年限/折现率独立确认流程、Worker 执行载荷切换、多年财务等留待后续。

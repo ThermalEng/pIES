@@ -588,6 +588,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
         random_seed=snap.random_seed,
         canonical_text=snap.canonical_assembly_text,
         receipt=jsonable(dict(snap.assembly_receipt or {})),
+        device_models=jsonable(dict(snap.device_models or {})),
     )
     assert _snapshot_inputs_equal(snap, schema_version="1.0.0", **same) is True
     assert _snapshot_inputs_equal(snap, schema_version="9.9.9", **same) is False
@@ -645,6 +646,7 @@ def test_execution_refs_frozen_from_descriptor(
         random_seed=snap.random_seed,
         canonical_text=snap.canonical_assembly_text,
         receipt=jsonable(dict(snap.assembly_receipt or {})),
+        device_models=jsonable(dict(snap.device_models or {})),
     )
     assert (
         _snapshot_inputs_equal(
@@ -711,3 +713,91 @@ def test_missing_generator_registry_is_server_error() -> None:
         assert exc.http_status == 500
     else:
         raise AssertionError("缺目录应当 500")
+
+
+def test_snapshot_freezes_per_instance_device_models(
+    client: TestClient, db: Session, factory,
+) -> None:
+    """快照按装配实例冻结设备数学贡献；复用身份包含贡献；可结构恢复。
+
+    贡献由提交闸门同一次设备解析构建（`{instance_id: contribution dict}`），
+    Worker 后续只做类型化恢复，不重跑校验。
+    """
+    from iesplan.modeling import contribution_from_dict, contribution_to_dict
+
+    owner = make_user(db, "owner_dev_models")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit(client, pid, owner, {"config_revision": rev}, key="devmodels-1")
+    assert status == 201, body
+    snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
+    assert snap is not None
+    models = jsonable(dict(snap.device_models or {}))
+    assert models, "快照必须冻结逐实例设备贡献"
+    for entry in models.values():
+        assert entry["device_id"] == "ies.device.battery"
+        assert entry["variables"]["capacity_kwh"]["value"] == 1000
+
+    status, second = _submit(client, pid, owner, {"config_revision": rev}, key="devmodels-2")
+    assert status == 201, second
+    assert second["task"]["calc_snapshot_id"] == body["task"]["calc_snapshot_id"]
+
+    restored = {
+        inst: contribution_to_dict(contribution_from_dict(entry))
+        for inst, entry in models.items()
+    }
+    assert restored == models
+
+
+def test_device_catalog_change_does_not_rewrite_history(
+    client: TestClient, db: Session, factory, monkeypatch,
+) -> None:
+    """提交后修改设备目录，历史快照输入不变，新提交不再复用旧快照。
+
+    设备文档变更只影响新冻结的贡献；已封存快照行按当时内容解释。
+    """
+    import dataclasses
+
+    import iesplan.devices as devices_module
+
+    owner = make_user(db, "owner_dev_hist")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit(client, pid, owner, {"config_revision": rev}, key="devhist-1")
+    assert status == 201, body
+    first_id = body["task"]["calc_snapshot_id"]
+    first = tasks_domain.get_snapshot(factory(), first_id)
+    assert first is not None
+    first_models = jsonable(dict(first.device_models or {}))
+    assert first_models
+
+    real_list_devices = devices_module.list_devices
+
+    def _altered_capacity():
+        docs = []
+        for doc in real_list_devices():
+            if doc.device is not None and doc.device.id == "ies.device.battery":
+                props = dict(doc.properties)
+                props["capacity_kwh"] = dataclasses.replace(props["capacity_kwh"], value=2000)
+                doc = dataclasses.replace(doc, properties=props)
+            docs.append(doc)
+        return docs
+
+    monkeypatch.setattr(devices_module, "list_devices", _altered_capacity)
+    status, body2 = _submit(client, pid, owner, {"config_revision": rev}, key="devhist-2")
+    assert status == 201, body2
+    assert body2["task"]["calc_snapshot_id"] != first_id
+    second = tasks_domain.get_snapshot(factory(), body2["task"]["calc_snapshot_id"])
+    assert second is not None
+    second_models = jsonable(dict(second.device_models or {}))
+    assert second_models != first_models
+    for entry in second_models.values():
+        assert entry["variables"]["capacity_kwh"]["value"] == 2000
+
+    status, body3 = _submit(client, pid, owner, {"config_revision": rev}, key="devhist-3")
+    assert status == 201, body3
+    assert body3["task"]["calc_snapshot_id"] == body2["task"]["calc_snapshot_id"]
+
+    first_again = tasks_domain.get_snapshot(factory(), first_id)
+    assert first_again is not None
+    assert jsonable(dict(first_again.device_models or {})) == first_models

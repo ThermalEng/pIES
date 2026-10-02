@@ -9,13 +9,14 @@ from iesplan.modeling.contract2 import (
     CONTRACT_SCHEMA_ID, CONTRACT_SCHEMA_VERSION, EQUATION_AST_ID, EQUATION_AST_VERSION,
     BinaryNode, DeviceMathContribution, InterfaceFlow, MathContributionResult, MathRelation,
     MathVariable, NumberNode, RefNode, RelationAst, ResultMappingEntry, TimeIndexedRef,
-    UnaryNode, ast_to_dict, build_math_contribution, canonical_bytes, contribution_to_dict,
+    UnaryNode, ast_from_dict, ast_to_dict, build_math_contribution, canonical_bytes, contribution_from_dict,
+    contribution_to_dict,
 )
 
 __all__ = [
     "CONTRACT_SCHEMA_ID", "CONTRACT_SCHEMA_VERSION", "EQUATION_AST_ID", "EQUATION_AST_VERSION",
     "TimeIndexedRef", "NumberNode", "RefNode", "UnaryNode", "BinaryNode", "RelationAst",
     "MathVariable", "InterfaceFlow", "MathRelation", "ResultMappingEntry", "DeviceMathContribution",
-    "MathContributionResult", "ast_to_dict", "build_math_contribution", "canonical_bytes",
-    "contribution_to_dict",
+    "MathContributionResult", "ast_from_dict", "ast_to_dict", "build_math_contribution", "canonical_bytes",
+    "contribution_from_dict", "contribution_to_dict",
 ]

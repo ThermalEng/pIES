@@ -127,6 +127,9 @@ class CalcSnapshotRecord:
     result_adapter: str
     #: 提交边界冻结的执行器精确引用(单声明; 多声明无公开选择规则即阻断)(必填)。
     executor: str
+    #: 逐装配实例数学贡献(``{instance_id: contribution dict}``，必填):
+    #: 提交边界与装配闸门同一次设备解析冻结；Worker 只恢复，不重跑校验。
+    device_models: Mapping[str, Any]
     program_version: str | None = None
     extension_versions: Mapping[str, Any] | None = None
     canonical_assembly_text: str | None = None
@@ -139,6 +142,7 @@ class CalcSnapshotRecord:
             "calc_config_snapshot",
             "extension_versions",
             "assembly_receipt",
+            "device_models",
         ):
             value = getattr(self, name)
             if value is not None:

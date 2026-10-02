@@ -516,6 +516,125 @@ def canonical_bytes(contribution: DeviceMathContribution) -> bytes:
     return json.dumps(contribution_to_dict(contribution), **_CANONICAL_KWARGS).encode("utf-8")
 
 
+def ast_from_dict(data: Mapping[str, Any] | None) -> object | None:
+    """``ast_to_dict`` 逆操作：已冻结 AST dict → 不可变节点(纯结构恢复)。
+
+    只恢复形态，不重跑词法/语义校验；输入须为本模块封存形态。
+    """
+    if data is None:
+        return None
+    if "number" in data:
+        return NumberNode(value=data["number"])
+    if "ref" in data:
+        return RefNode(name=data["ref"], offset=data.get("offset", 0))
+    if "unary" in data:
+        return UnaryNode(op=data["unary"], operand=ast_from_dict(data["operand"]))
+    if "binary" in data:
+        return BinaryNode(
+            op=data["binary"],
+            left=ast_from_dict(data["left"]),
+            right=ast_from_dict(data["right"]),
+        )
+    raise ValueError(f"未知 AST 节点形态: {sorted(data)!r}")
+
+
+def contribution_from_dict(data: Mapping[str, Any]) -> DeviceMathContribution:
+    """``contribution_to_dict`` 逆操作：已冻结贡献 dict → 不可变贡献(纯结构恢复)。
+
+    只恢复形态，不重跑方程语义校验；输入须为提交边界已封存的形态。
+    """
+    equation_ast = data.get("equation_ast") or {}
+    variables = {}
+    for name, entry in (data.get("variables") or {}).items():
+        valid_range = entry.get("valid_range")
+        variables[name] = MathVariable(
+            name=name,
+            kind=entry["kind"],
+            unit=entry["unit"],
+            valid_range=(
+                (valid_range.get("minimum"), valid_range.get("maximum"))
+                if valid_range is not None
+                else None
+            ),
+            **({"value": entry["value"]} if "value" in entry else {}),
+            is_state=entry.get("is_state", False),
+            **(
+                {"initial_property_ref": entry["initial_property_ref"]}
+                if "initial_property_ref" in entry
+                else {}
+            ),
+            **(
+                {"minimum_property_ref": entry["minimum_property_ref"]}
+                if "minimum_property_ref" in entry
+                else {}
+            ),
+            **(
+                {"maximum_property_ref": entry["maximum_property_ref"]}
+                if "maximum_property_ref" in entry
+                else {}
+            ),
+        )
+    interfaces = {}
+    for iid, entry in (data.get("interfaces") or {}).items():
+        valid_range = entry["valid_range"]
+        interfaces[iid] = InterfaceFlow(
+            id=iid,
+            type=entry["type"],
+            carrier=entry["carrier"],
+            unit=entry["unit"],
+            valid_range=(valid_range.get("minimum"), valid_range.get("maximum")),
+            **(
+                {"minimum_property_ref": entry["minimum_property_ref"]}
+                if "minimum_property_ref" in entry
+                else {}
+            ),
+            **(
+                {"maximum_property_ref": entry["maximum_property_ref"]}
+                if "maximum_property_ref" in entry
+                else {}
+            ),
+        )
+    relations = []
+    for entry in data.get("relations") or []:
+        ast = RelationAst(
+            id=entry["id"],
+            output=entry.get("output"),
+            lhs_root=ast_from_dict(entry.get("lhs")),
+            rhs_root=ast_from_dict(entry.get("rhs")),
+            lhs_refs=tuple(
+                TimeIndexedRef(name=item["name"], offset=item.get("offset", 0))
+                for item in entry.get("lhs_refs") or []
+            ),
+            rhs_refs=tuple(
+                TimeIndexedRef(name=item["name"], offset=item.get("offset", 0))
+                for item in entry.get("rhs_refs") or []
+            ),
+        )
+        relations.append(
+            MathRelation(
+                id=entry["id"],
+                output=entry.get("output"),
+                ast=ast,
+                is_state_transition=entry.get("is_state_transition", False),
+            )
+        )
+    return DeviceMathContribution(
+        device_id=data["device_id"],
+        equation_ast_id=equation_ast.get("id", EQUATION_AST_ID),
+        equation_ast_version=equation_ast.get("version", EQUATION_AST_VERSION),
+        contract_schema_id=data.get("schema", CONTRACT_SCHEMA_ID),
+        contract_schema_version=data.get("schema_version", CONTRACT_SCHEMA_VERSION),
+        variables=variables,
+        interfaces=interfaces,
+        relations=tuple(relations),
+        states=tuple(data.get("states") or ()),
+        results=tuple(
+            ResultMappingEntry(variable=item["variable"], unit=item["unit"], kind=item["kind"])
+            for item in data.get("results") or []
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
