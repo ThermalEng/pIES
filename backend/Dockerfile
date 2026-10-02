@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml LICENSE ./
 COPY iesplan ./iesplan
+# 统一部署配置默认值（可被挂载文件通过 IESPLAN_DEPLOY_CONFIG_FILE 覆盖）
+COPY deploy ./deploy
 RUN pip install --upgrade pip && pip install .[dev]
 
 # 0.9-E: HiGHS 适配 executable 固定安装到绝对路径（shebang 指向镜像 python）

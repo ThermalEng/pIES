@@ -985,6 +985,15 @@ export interface ConfigApi {
   save(projectId: number, input: CalcConfigInput): Promise<CalcConfig>
 }
 
+/** 部署公开初值(统一部署配置中允许公开的非秘密默认值)。 */
+export interface DeploymentDefaults {
+  calculation_defaults: { time_limit_seconds: number }
+}
+
+export interface DeploymentApi {
+  defaults(): Promise<DeploymentDefaults>
+}
+
 export interface ValidationApi {
   run(projectId: number): Promise<ValidationResult>
   baselineConfirm(
@@ -1290,6 +1299,21 @@ export const api = {
       }).then((body) => configFromServer(body, projectId))
     },
   } satisfies ConfigApi,
+
+  deployment: {
+    defaults(): Promise<DeploymentDefaults> {
+      // 后端返回 {calculation_defaults: {time_limit_seconds}}: 形态断言
+      return request<unknown>('/deployment/defaults').then((body) => {
+        const root = asRecord(body)
+        const calc = asRecord(root.calculation_defaults)
+        const timeLimit = calc.time_limit_seconds
+        if (typeof timeLimit !== 'number' || !Number.isFinite(timeLimit)) {
+          throw new ApiError(500, null, 'ies.error.unknown')
+        }
+        return { calculation_defaults: { time_limit_seconds: timeLimit } }
+      })
+    },
+  } satisfies DeploymentApi,
 
   validation: {
     run(projectId: number): Promise<ValidationResult> {

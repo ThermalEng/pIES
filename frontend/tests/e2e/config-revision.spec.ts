@@ -209,7 +209,7 @@ async function fillConfig(page: Page, mode: string, timeLimit: string): Promise<
 }
 
 test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
-  test('空白无预填 / 保存 / 重读 / 409 保留表单并主动重载', async ({ browser }) => {
+  test('部署初值预填时间其余无预填 / 保存 / 重读 / 409 保留表单并主动重载', async ({ browser }) => {
     const username = uniqueName('es-cfgrev')
     const password = strongPassword('Init')
     const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
@@ -221,10 +221,13 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
     const session = await createSession(page, username, password)
     const projectId = await createProjectEnterConfig(page, uniqueName('QA 配置收口项目'))
 
-    // 1) 空白新建: 无已保存配置, 精度/时间限制不得预填
+    // 1) 空白新建: 无已保存配置, 精度/mode 不得预填; 时间限制取统一部署配置公开初值
     await expect(page.getByText(/尚未保存|Not saved yet/i)).toBeVisible()
     await expect(page.locator('#calc-precision')).toHaveValue('')
-    await expect(page.locator('#calc-time-limit')).toHaveValue('')
+    const defaultsResp = await page.request.get('/api/deployment/defaults')
+    const defaultsBody = await defaultsResp.json()
+    const expectedInitial = String(defaultsBody.calculation_defaults.time_limit_seconds)
+    await expect(page.locator('#calc-time-limit')).toHaveValue(expectedInitial, { timeout: 15000 })
     await expect(page.locator('#calc-mode')).toHaveValue('')
 
     // 2) 填写并保存 → v1

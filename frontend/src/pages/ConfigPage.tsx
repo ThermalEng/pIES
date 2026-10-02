@@ -27,8 +27,9 @@ export interface ConfigPageProps {
 }
 
 /**
- * 空白新建表单: 全部留空, 不冒充已填写(medium/600 等均须用户明确选择;
- * schema/schema_version 为协议常量, 由提交时固定填入, 不在表单呈现)。
+ * 空白新建表单: 除时间限制取统一部署配置公开初值外全部留空, 不冒充已填写
+ * (mode/generator/solver/precision 等均须用户明确选择; schema/schema_version
+ * 为协议常量, 由提交时固定填入, 不在表单呈现)。
  */
 function emptyFormState(): {
   mode: string
@@ -152,6 +153,13 @@ export default function ConfigPage(props: ConfigPageProps) {
         if (cancelled) return
         if (err instanceof ApiError && err.status === 404) {
           applyEmpty()
+          // 空白表单时间初值取统一部署配置公开值；取不到则保持留空
+          void api.deployment
+            .defaults()
+            .then((d) => {
+              if (!cancelled) setTimeLimit(String(d.calculation_defaults.time_limit_seconds))
+            })
+            .catch(() => {})
         } else {
           setError(errorMessage(err))
         }

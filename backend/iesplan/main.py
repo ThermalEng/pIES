@@ -237,6 +237,7 @@ def _register_business_routers(application: FastAPI) -> None:
         config,
         config_revisions,
         datasets,
+        deployment,
         exports,
         health,
         model,
@@ -278,6 +279,8 @@ def _register_business_routers(application: FastAPI) -> None:
     application.include_router(results.router)
     # 导出(U14/U15)
     application.include_router(exports.router)
+    # 部署公开初值(新建表单非秘密初值，公开读取)
+    application.include_router(deployment.deployment_router)
 
 
 def create_app() -> FastAPI:

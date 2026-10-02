@@ -359,3 +359,18 @@ def test_module_level_app_created() -> None:
 
     assert module_app.title == "pIES API"
     assert module_app.version == __version__
+
+
+def test_deployment_defaults_public(client: TestClient) -> None:
+    """部署公开初值：新建表单 time_limit 初值与统一配置一致（公开读取）。"""
+    from iesplan.config import settings
+
+    resp = client.get("/api/deployment/defaults")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == {
+        "calculation_defaults": {
+            "time_limit_seconds": settings.calc_time_limit_seconds,
+        },
+    }
+    assert body["calculation_defaults"]["time_limit_seconds"] == 43200

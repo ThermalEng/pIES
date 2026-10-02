@@ -1,0 +1,55 @@
+# pIES 统一部署配置：API 与各 Worker 非秘密应用运行参数的唯一权威。
+#
+# 部署者复制或挂载本文件后调整数值；程序内、Compose 环境变量与前端均
+# 不得再复制这些默认值。配置文件路径、秘密与容器编排信息仍由部署环境
+# 提供（见 IESPLAN_DEPLOY_CONFIG_FILE）。缺文件或非法输入在进程启动
+# 入口明确失败，不回退另一套默认值。
+#
+# 数值说明：solver 节为单次求解允许的策略上限，不是实际硬件保证，也
+# 不是单次计算的默认请求；单次计算的时间请求由已保存 CalculationConfig
+# 的 time_limit_seconds 决定。内存单位 MiB，输出总量单位字节。
+
+[worker]
+# 计算并发槽数
+compute_slots = 2
+
+[session]
+# 会话 TTL（分钟）
+ttl_minutes = 480
+
+[storage]
+# 对象存储最小剩余空间阈值（字节），低于该值拒绝写入
+min_free_bytes = 2000000000
+
+[rate_limit]
+enabled = true
+window_seconds = 60
+max_requests = 1000
+exempt_paths = "/api/healthz,/api/readyz,/api/auth/login"
+
+[quotas]
+# 上传配额（字节）；0 = 不限
+upload_bytes = 0
+project_bytes = 0
+
+[solver]
+# 单次求解上限 48 小时（秒）
+max_timeout_seconds = 172800
+# 内存允许上限 16 GiB（MiB）
+max_memory_mib = 16384
+# CPU 允许上限（核）
+max_cpu_cores = 8
+# 普通 solver 默认断网
+allow_network = false
+# 声明输出总量上限：512 MiB（字节）/ 64 文件
+max_output_files = 64
+max_output_bytes = 536870912
+# 默认允许的 executable 精确引用
+allowed_executables = ["ies.solver.highs@1.7.2"]
+# 允许注入的环境变量名（空 = 不允许任何环境变量）
+allowed_environment_vars = []
+
+[calculation]
+# 新建计算配置表单 time_limit_seconds 初值：12 小时（秒）。保存后该值
+# 属于项目 CalculationConfig revision，部署配置变更不得改写历史输入。
+time_limit_seconds = 43200
