@@ -526,7 +526,7 @@ def ast_from_dict(data: Mapping[str, Any] | None) -> object | None:
     if "number" in data:
         return NumberNode(value=data["number"])
     if "ref" in data:
-        return RefNode(name=data["ref"], offset=data.get("offset", 0))
+        return RefNode(name=data["ref"], offset=data["offset"])
     if "unary" in data:
         return UnaryNode(op=data["unary"], operand=ast_from_dict(data["operand"]))
     if "binary" in data:
@@ -604,12 +604,10 @@ def contribution_from_dict(data: Mapping[str, Any]) -> DeviceMathContribution:
             lhs_root=ast_from_dict(entry["lhs"]),
             rhs_root=ast_from_dict(entry["rhs"]),
             lhs_refs=tuple(
-                TimeIndexedRef(name=item["name"], offset=item["offset"])
-                for item in entry["lhs_refs"]
+                TimeIndexedRef(name=item["name"], offset=item["offset"]) for item in entry["lhs_refs"]
             ),
             rhs_refs=tuple(
-                TimeIndexedRef(name=item["name"], offset=item["offset"])
-                for item in entry["rhs_refs"]
+                TimeIndexedRef(name=item["name"], offset=item["offset"]) for item in entry["rhs_refs"]
             ),
         )
         relations.append(

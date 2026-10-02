@@ -383,15 +383,9 @@ def _freeze_device_models(artifact: Any, device_documents: Mapping[str, Any]) ->
     devices = doc.get("devices") or {}
     frozen: dict[str, Any] = {}
     for inst in sorted(devices):
-        entry = devices[inst] or {}
-        definition = entry.get("definition") or {}
-        type_id = definition.get("id")
-        # 闸门已阻断未知类型：此处缺定义/缺文档是内部不变量破坏，不得
-        # 伪装成用户输入错误(422)，直接断言。
-        assert isinstance(type_id, str) and type_id, f"装配实例缺设备定义: {inst!r}"
-        assert type_id in device_documents, f"闸门解析缺设备文档: {type_id!r}"
-        document = device_documents[type_id]
-        built = modeling_domain.build_math_contribution(document)
+        # definition.id 与设备文档由闸门保证：未知类型已阻断，此处直接使用。
+        type_id = (devices[inst].get("definition") or {}).get("id")
+        built = modeling_domain.build_math_contribution(device_documents[type_id])
         if not built.ok or built.contribution is None:
             raise AssemblyValidationError(
                 list(built.diagnostics),

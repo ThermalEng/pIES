@@ -24,7 +24,7 @@
 - 任务提交装配闸门在同一次设备解析中，按装配实例（`devices.<inst>.definition.id` 唯一确定类型，未知类型仍阻断）构建设备数学贡献，冻结为快照非空 `device_models`（`{instance_id: contribution dict}`），复用身份包含贡献；`modeling` 新增已封存贡献的纯结构恢复（`contribution_from_dict`/`ast_from_dict`，不重跑方程校验）。
 - Worker 后续只能从快照恢复贡献，不得读取当前 `devices` 目录，不得在内部交接重跑校验或增加 hash/完整性复核。
 - 提交后修改设备目录只影响新快照，历史快照输入不变（有测试锁定）。
-- 收口修正：新增必填 `device_models` 后快照 schema 版本提升为 `1.1.0`；`contribution_from_dict` 对封存必备字段直接取值（无兼容默认）并按同一规范字节恢复 `canonical_text`；闸门后内部不变量用断言表达，不伪装 422 用户错误。
+- 收口修正：新增必填 `device_models` 属破坏性 schema 变化，快照 schema 版本按宪法 §5.3 升主版本为 `2.0.0`（与未来产品 `1.1.0` 无关）；`contribution_from_dict` 对封存必备字段直接取值（无兼容默认）并按同一规范字节恢复 `canonical_text`；闸门已保证的 definition/文档直接使用，不重复校验不断言。
 
 ### 2026-10-01 — `0.12.0` 切片 A3：快照剩余依赖冻结（tolerances 清理、schema_version、adapter/executor 引用）
 
