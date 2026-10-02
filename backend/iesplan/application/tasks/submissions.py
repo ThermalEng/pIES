@@ -86,7 +86,6 @@ from iesplan.storage import (
 )
 from iesplan.tasks.contracts import (
     COMPUTE_TYPES,
-    IO_SLOT_CAPACITY,
     LEASE_TTL_SECONDS,
     POOL_BY_TYPE,
     SNAPSHOT_SCHEMA_VERSION,
@@ -980,7 +979,7 @@ def submit_task(
 
 def _ensure_slots(db: Session) -> None:
     """惰性初始化槽表(每池 capacity 行、每行容量 1, 幂等)。"""
-    tasks_domain.ensure_slots(db, {"compute": settings.compute_slots, "io": IO_SLOT_CAPACITY})
+    tasks_domain.ensure_slots(db, {"compute": settings.compute_slots, "io": settings.io_slots})
 
 
 def acquire_slot(db: Session, pool_name: str) -> ComputeSlotRecord | None:

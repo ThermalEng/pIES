@@ -349,3 +349,65 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
     await context.close()
   })
 })
+
+test.describe('0.12-B: 部署公开初值装配时序', () => {
+  test('部署初值不可用时明确报错而非静默空白', async ({ browser }) => {
+    const username = uniqueName('es-cfgdep-fail')
+    const password = strongPassword('Init')
+    const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
+    await createEngineer(apiCtx.request, username, password)
+    await apiCtx.close()
+
+    const context: BrowserContext = await browser.newContext()
+    const page: Page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await page.route('**/api/deployment/defaults', (route) =>
+      route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' }),
+    )
+    const projectId = await createProjectEnterConfig(page, uniqueName('QA 部署初值失败项目'))
+
+    // 失败可见: 错误横幅出现, 时间栏保持未填入的空白(非正常初值)
+    await expect(page.getByText(/页面加载失败|Load failed/i)).toBeVisible({ timeout: 15000 })
+    await expect(page.locator('#calc-time-limit')).toHaveCount(0)
+
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 2 },
+      { method: 'GET', path: '/api/deployment/defaults', status: 500, times: 1 },
+    ])
+    await context.close()
+  })
+
+  test('迟到部署初值原子填入且不覆盖用户编辑', async ({ browser }) => {
+    const username = uniqueName('es-cfgdep-late')
+    const password = strongPassword('Init')
+    const apiCtx = await browser.newContext({ baseURL: process.env.E2E_APP_URL ?? 'http://web:80' })
+    await createEngineer(apiCtx.request, username, password)
+    await apiCtx.close()
+
+    const context: BrowserContext = await browser.newContext()
+    const page: Page = await context.newPage()
+    const session = await createSession(page, username, password)
+    // 部署初值延迟 1.5s 到达(使用非常值, 不硬编码生产初值)
+    await page.route('**/api/deployment/defaults', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ calculation_defaults: { time_limit_seconds: 77777 } }),
+      })
+    })
+    const projectId = await createProjectEnterConfig(page, uniqueName('QA 部署初值迟到项目'))
+
+    // 同一次 load 原子填入延迟到达的初值
+    await expect(page.locator('#calc-time-limit')).toHaveValue('77777', { timeout: 15000 })
+    // 用户编辑后不再有写入: 等待超过原延迟后编辑值保持
+    await page.locator('#calc-time-limit').fill('123')
+    await page.waitForTimeout(2500)
+    await expect(page.locator('#calc-time-limit')).toHaveValue('123')
+
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 2 },
+    ])
+    await context.close()
+  })
+})

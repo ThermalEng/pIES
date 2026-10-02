@@ -117,25 +117,6 @@ export default function ConfigPage(props: ConfigPageProps) {
     setConflict(false)
   }
 
-  /** 空白表单: 字段全部留空(404 无已保存配置时), 不预填任何用户未选值。 */
-  function applyEmpty() {
-    const e = emptyFormState()
-    setMode(e.mode)
-    setGenerator(e.generator)
-    setSolver(e.solver)
-    setPrecision(e.precision)
-    setTimeLimit(e.timeLimit)
-    setSeed(e.seed)
-    setOutputsText(e.outputsText)
-    setPredictionsText(e.predictionsText)
-    setConvergenceText(e.convergenceText)
-    setOptionsText(e.optionsText)
-    setRevision(null)
-    setFieldErrors({})
-    setNotice(null)
-    setConflict(false)
-  }
-
   useEffect(() => {
     if (pid === undefined) {
       setLoading(false)
@@ -152,14 +133,29 @@ export default function ConfigPage(props: ConfigPageProps) {
       } catch (err) {
         if (cancelled) return
         if (err instanceof ApiError && err.status === 404) {
-          applyEmpty()
-          // 空白表单时间初值取统一部署配置公开值；取不到则保持留空
-          void api.deployment
-            .defaults()
-            .then((d) => {
-              if (!cancelled) setTimeLimit(String(d.calculation_defaults.time_limit_seconds))
-            })
-            .catch(() => {})
+          // 空白新建: 时间初值必须取统一部署配置公开值, 与其余字段同一次原子填入;
+          // 取不到即明确报错, 不得静默留空冒充正常初值, 迟到响应不得覆盖用户已编辑值
+          try {
+            const d = await api.deployment.defaults()
+            if (cancelled) return
+            const e = emptyFormState()
+            setMode(e.mode)
+            setGenerator(e.generator)
+            setSolver(e.solver)
+            setPrecision(e.precision)
+            setTimeLimit(String(d.calculation_defaults.time_limit_seconds))
+            setSeed(e.seed)
+            setOutputsText(e.outputsText)
+            setPredictionsText(e.predictionsText)
+            setConvergenceText(e.convergenceText)
+            setOptionsText(e.optionsText)
+            setRevision(null)
+            setFieldErrors({})
+            setNotice(null)
+            setConflict(false)
+          } catch (depErr) {
+            if (!cancelled) setError(errorMessage(depErr))
+          }
         } else {
           setError(errorMessage(err))
         }

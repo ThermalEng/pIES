@@ -36,7 +36,7 @@ DEFAULT_DEPLOY_CONFIG_FILE = Path(__file__).resolve().parent.parent / "deploy" /
 
 #: 允许的 TOML 节与键(未知节/键即非法输入，防拼写漂移)。
 _ALLOWED_DEPLOY_SECTIONS: dict[str, frozenset[str]] = {
-    "worker": frozenset({"compute_slots"}),
+    "worker": frozenset({"compute_slots", "io_slots"}),
     "session": frozenset({"ttl_minutes"}),
     "storage": frozenset({"min_free_bytes"}),
     "rate_limit": frozenset({"enabled", "window_seconds", "max_requests", "exempt_paths"}),
@@ -57,6 +57,7 @@ _ALLOWED_DEPLOY_SECTIONS: dict[str, frozenset[str]] = {
 #: Settings 应用运行字段 ← (TOML 节, 键)。
 _APP_TOML_MAP: tuple[tuple[str, str, str], ...] = (
     ("compute_slots", "worker", "compute_slots"),
+    ("io_slots", "worker", "io_slots"),
     ("session_ttl_minutes", "session", "ttl_minutes"),
     ("storage_min_free_bytes", "storage", "min_free_bytes"),
     ("rate_limit_enabled", "rate_limit", "enabled"),
@@ -150,42 +151,46 @@ class Settings(BaseSettings):
     deploy_config_file: Path = DEFAULT_DEPLOY_CONFIG_FILE
 
     # --- 应用运行层：部署文件唯一权威（禁环境变量，禁程序内默认）---
+    # 有效性约束只设在本边界一次：槽数/窗口/上限/TTL/资源上限/表单初值为正数，
+    # 存储阈值与配额为非负数（0 表示阈值关闭/不限）；非法部署输入在启动入口失败。
     #: 计算并发槽数
-    compute_slots: int = Field(exclude=True)
+    compute_slots: int = Field(exclude=True, gt=0)
+    #: IO 任务并发槽数（与计算并发槽共用租约槽位表，部署可调）
+    io_slots: int = Field(exclude=True, gt=0)
     #: 会话 TTL(分钟)
-    session_ttl_minutes: int = Field(exclude=True)
+    session_ttl_minutes: int = Field(exclude=True, gt=0)
     #: 对象存储最小剩余空间阈值(字节), 低于该值拒绝写入
-    storage_min_free_bytes: int = Field(exclude=True)
+    storage_min_free_bytes: int = Field(exclude=True, ge=0)
     #: 全局限流开关
     rate_limit_enabled: bool = Field(exclude=True)
     #: 全局限流窗口(秒); 单 IP 在窗口内超过上限即 429
-    rate_limit_window_seconds: int = Field(exclude=True)
+    rate_limit_window_seconds: int = Field(exclude=True, gt=0)
     #: 全局限流每 IP 请求上限(窗口内)
-    rate_limit_max_requests: int = Field(exclude=True)
+    rate_limit_max_requests: int = Field(exclude=True, gt=0)
     #: 全局限流豁免路径(逗号分隔)
     rate_limit_exempt_paths: str = Field(exclude=True)
     #: 用户上传配额(字节); 0 = 不限
-    upload_quota_bytes: int = Field(exclude=True)
+    upload_quota_bytes: int = Field(exclude=True, ge=0)
     #: 项目级上传配额(字节); 0 = 不限
-    project_quota_bytes: int = Field(exclude=True)
+    project_quota_bytes: int = Field(exclude=True, ge=0)
     #: 求解单次超时上限(秒)：策略上限，非单次计算默认请求
-    solver_max_timeout_seconds: int = Field(exclude=True)
+    solver_max_timeout_seconds: int = Field(exclude=True, gt=0)
     #: 求解内存允许上限(MiB)：策略上限，非硬件保证
-    solver_max_memory_mib: int = Field(exclude=True)
+    solver_max_memory_mib: int = Field(exclude=True, gt=0)
     #: 求解 CPU 允许上限(核)：策略上限，非硬件保证
-    solver_max_cpu_cores: int = Field(exclude=True)
+    solver_max_cpu_cores: int = Field(exclude=True, gt=0)
     #: 求解是否允许联网(普通 solver 默认断网)
     solver_allow_network: bool = Field(exclude=True)
     #: 声明输出文件数上限
-    solver_max_output_files: int = Field(exclude=True)
+    solver_max_output_files: int = Field(exclude=True, gt=0)
     #: 声明输出总量上限(字节)
-    solver_max_output_bytes: int = Field(exclude=True)
+    solver_max_output_bytes: int = Field(exclude=True, gt=0)
     #: 默认允许的 executable 精确引用
-    solver_allowed_executables: tuple[str, ...] = Field(exclude=True)
+    solver_allowed_executables: tuple[str, ...] = Field(exclude=True, min_length=1)
     #: 允许注入的环境变量名(空 = 不允许任何环境变量)
     solver_allowed_environment_vars: tuple[str, ...] = Field(exclude=True)
     #: 新建计算配置表单 time_limit_seconds 初值(秒)；保存后属项目 revision
-    calc_time_limit_seconds: int = Field(exclude=True)
+    calc_time_limit_seconds: int = Field(exclude=True, gt=0)
 
     def __init__(self, **values: Any) -> None:
         raw_path = (

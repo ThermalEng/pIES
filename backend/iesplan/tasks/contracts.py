@@ -317,8 +317,6 @@ VALID_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 #: 租约 TTL(秒, 默认 60 s)
 LEASE_TTL_SECONDS = 60
-#: io 池默认并发槽
-IO_SLOT_CAPACITY = 2
 
 
 def check_transition(task: TaskRecord, new_status: str) -> None:

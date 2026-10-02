@@ -24,7 +24,8 @@
 - 新增 `backend/deploy/pies.toml`（镜像内 `/app/deploy/pies.toml`，可挂载覆盖）：API 与各 Worker 非秘密应用运行参数唯一权威（并发槽、会话、存储阈值、限流、配额、求解策略上限 172800s/16GiB/8核/断网/64文件/512MiB、HiGHS 默认允许、环境变量空、新建表单时间初值 43200s）；程序内、Compose 环境变量与前端均不复制。
 - `Settings` 仍是唯一类型化入口：编排/秘密/角色走 `IESPLAN_` 环境，应用运行值只从部署文件装配（环境不得覆盖）；缺文件、非法 TOML、未知节/键、缺必需项一律在进程启动入口明确失败。`DeploymentPolicy` 后续由该入口值装配，本轮不提前保留仅测试调用的执行链抽象。
 - 删除无生产调用的 `task_timeout_hours = 8`，消除隐藏超时截断已允许求解的风险；测试用 600 秒夹具未动。
-- 新建表单时间初值经 `GET /api/deployment/defaults` 公开读取（取不到保持留空）；已保存 revision 与快照不受部署配置变动改写。
+- 新建表单时间初值经 `GET /api/deployment/defaults` 公开读取（取不到明确报错，不冒充正常空白）；已保存 revision 与快照不受部署配置变动改写。
+- 收口修正：空白表单改为同一次 load 等待部署初值后原子填入，失败明确报错（加载失败横幅）且无迟到覆盖用户编辑（e2e 路由拦截覆盖失败与迟到时序）；`IO_SLOT_CAPACITY = 2` 程序常量删除，IO 并发槽迁入同一 TOML/Settings（`[worker] io_slots`），两处 `ensure_slots` 消费者取同一值；部署输入边界一次性正数/非负约束（槽数、限流窗口/上限、会话 TTL、存储阈值/配额、solver 资源上限、表单初值，executable allowlist 非空），非法输入启动即失败。
 
 #### 覆盖优先级
 

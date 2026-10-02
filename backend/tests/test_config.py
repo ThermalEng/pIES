@@ -50,6 +50,7 @@ def test_defaults_from_deploy_file() -> None:
     assert s.debug is False
     # 部署文件唯一权威的值
     assert s.compute_slots == 2
+    assert s.io_slots == 2
     assert s.rate_limit_enabled is True
     assert s.rate_limit_window_seconds == 60
     assert s.rate_limit_max_requests == 1000
@@ -91,6 +92,38 @@ def test_env_override_only_for_env_layer(monkeypatch) -> None:
     assert s.worker_type == "io"
     assert s.compute_slots == 2
     assert s.solver_max_timeout_seconds == 172800
+
+
+def test_deploy_boundary_values_rejected(tmp_path: Path) -> None:
+    """无效部署输入（非正上限/空 executable  allowlist）在边界明确失败。"""
+    base = DEFAULT_DEPLOY_CONFIG_FILE.read_text(encoding="utf-8")
+
+    def _settings_with(replacements: dict[str, str]) -> Path:
+        text = base
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        target = tmp_path / f"boundary-{abs(hash(frozenset(replacements)))}.toml"
+        target.write_text(text, encoding="utf-8")
+        return target
+
+    with pytest.raises(ValueError, match="部署配置文件非法"):
+        Settings(
+            deploy_config_file=_settings_with(
+                {"max_timeout_seconds = 172800": "max_timeout_seconds = 0"}
+            )
+        )
+    with pytest.raises(ValueError, match="部署配置文件非法"):
+        Settings(deploy_config_file=_settings_with({"max_memory_mib = 16384": "max_memory_mib = -1"}))
+    with pytest.raises(ValueError, match="部署配置文件非法"):
+        Settings(deploy_config_file=_settings_with({"compute_slots = 2": "compute_slots = 0"}))
+    with pytest.raises(ValueError, match="部署配置文件非法"):
+        Settings(deploy_config_file=_settings_with({"time_limit_seconds = 43200": "time_limit_seconds = 0"}))
+    with pytest.raises(ValueError, match="部署配置文件非法"):
+        Settings(
+            deploy_config_file=_settings_with({
+                'allowed_executables = ["ies.solver.highs@1.7.2"]': "allowed_executables = []"
+            })
+        )
 
 
 def test_deploy_file_override(tmp_path: Path) -> None:

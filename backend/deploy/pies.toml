@@ -12,6 +12,8 @@
 [worker]
 # 计算并发槽数
 compute_slots = 2
+# IO 任务并发槽数（导入导出等 IO 任务与计算任务共用租约槽位表）
+io_slots = 2
 
 [session]
 # 会话 TTL（分钟）

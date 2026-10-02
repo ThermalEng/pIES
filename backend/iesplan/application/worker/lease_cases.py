@@ -43,7 +43,6 @@ from iesplan.core.errors import AppError, NotFoundError
 from iesplan.storage import add_ref, put_object
 from iesplan.tasks import (
     BUSINESS_OUTCOMES,
-    IO_SLOT_CAPACITY,
     LEASE_TTL_SECONDS,
     POOL_BY_TYPE,
     CalcSnapshotRecord,
@@ -131,7 +130,7 @@ def acquire_task(db: Session, task_id: int, worker_id: str) -> Claim | None:
     尝试/租约/任务状态/槽占用同批 flush; 无空槽或任务非 queued 时返回 None
     (任务保持排队)。不提交事务。
     """
-    tasks_domain.ensure_slots(db, {"compute": settings.compute_slots, "io": IO_SLOT_CAPACITY})
+    tasks_domain.ensure_slots(db, {"compute": settings.compute_slots, "io": settings.io_slots})
     task = _get_task(db, task_id)
     if task.status != "queued":
         return None
