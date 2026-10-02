@@ -43,12 +43,14 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
   "solver": "ies.solver.highs@1.7.2",
   "precision": "medium",
   "convergence": { "tolerance": 0.001, "max_iterations": 50 },
-  "time_limit_seconds": 600,
+  "time_limit_seconds": 43200,
   "options": { "gap_rel": 0.001 },
   "seed": 42,
   "outputs": ["solution", "metrics"]
 }
 ```
+
+示例中的 12 小时是一次计算的显式请求，不是部署硬上限。新建表单可用统一部署配置给出初值；保存后该值属于项目计算配置 revision，任务提交时冻结，部署配置变更不得改写历史输入。
 
 ## 校验边界
 

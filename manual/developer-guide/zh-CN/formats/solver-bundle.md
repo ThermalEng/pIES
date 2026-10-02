@@ -47,9 +47,8 @@ command:
     - --solution_file
     - output/solution.json
   working_directory: .
-  environment:
-    OMP_NUM_THREADS: "4"
-  timeout_seconds: 600
+  environment: {}
+  timeout_seconds: 43200
   memory_mib: 4096
   cpu_cores: 4
   network: false

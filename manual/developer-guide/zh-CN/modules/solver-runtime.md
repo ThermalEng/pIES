@@ -26,7 +26,7 @@ SolverRuntime 在受控环境中执行 Solver Bundle 声明的一个命令，并
 | Solver Bundle | schema、manifest、规范路径和声明输入完整 |
 | ExecutorProvider | 精确版本已由组合根装配，支持所声明 executable |
 | AttemptContext | attempt ID、租约 fencing、取消信号、证据目标明确 |
-| DeploymentPolicy | executable/environment allowlist 和硬资源上限 |
+| DeploymentPolicy | 由统一部署配置装配的 executable/environment allowlist 和硬资源上限；上限可部署时调整，不是单次计算的默认请求 |
 
 运行时不接受命令字符串、裸参数 dict 或 Python 函数路径。Worker 只能提交完整 Bundle。
 
