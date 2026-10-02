@@ -612,10 +612,15 @@ def ensure_slots(db: Session, pools: Mapping[str, int]) -> None:
         if not missing:
             continue
         dialect = db.get_bind().dialect.name
+        arbiter = ["pool_name", "slot_no"]
         if dialect == "postgresql":
-            stmt = postgresql_insert(ComputeSlot).values(missing).on_conflict_do_nothing()
+            stmt = postgresql_insert(ComputeSlot).values(missing).on_conflict_do_nothing(
+                index_elements=arbiter
+            )
         elif dialect == "sqlite":
-            stmt = sqlite_insert(ComputeSlot).values(missing).on_conflict_do_nothing()
+            stmt = sqlite_insert(ComputeSlot).values(missing).on_conflict_do_nothing(
+                index_elements=arbiter
+            )
         else:
             raise ValueError(f"不支持的数据库方言: {dialect}")
         db.execute(stmt)

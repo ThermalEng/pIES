@@ -271,6 +271,35 @@ class TestAcquire:
         assert slot_store.acquire_slot(db, "io", 2) is None
         assert slot_store.pool_has_free_slot(db, "io", 2) is False
 
+    def test_pg_guard_refuses_non_isolated_db(self) -> None:
+        """PG 守卫（sqlite 版，默认套件可跑）：空库/空用户表放行；用户表有行拒绝。
+
+        覆盖 test_slot_pg_concurrency._assert_isolated 的判定逻辑本身。
+        """
+        from sqlalchemy import text
+        from test_slot_pg_concurrency import _assert_isolated
+
+        empty = create_engine("sqlite+pysqlite://")
+        _assert_isolated(empty)
+        with empty.begin() as conn:
+            conn.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY)"))
+        _assert_isolated(empty)
+        with empty.begin() as conn:
+            conn.execute(text("INSERT INTO users (id) VALUES (1)"))
+        with pytest.raises(pytest.fail.Exception):
+            _assert_isolated(empty)
+        foreign = create_engine("sqlite+pysqlite://")
+        ComputeSlot.__table__.create(foreign)
+        with Session(foreign) as db:
+            db.add(
+                ComputeSlot(
+                    pool_name="compute", slot_no=0, status="busy", capacity=1, in_use=1
+                )
+            )
+            db.commit()
+        with pytest.raises(pytest.fail.Exception):
+            _assert_isolated(foreign)
+
 
 # ---------------------------------------------------------------------------
 # 续租与过期判定
