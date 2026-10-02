@@ -551,7 +551,7 @@ def test_changed_inputs_with_new_key_yield_new_task_and_snapshot(
 def test_snapshot_schema_version_written_and_scoped_to_reuse(
     client: TestClient, db: Session, factory,
 ) -> None:
-    """快照显式写入 schema_version 1.0.0; 复用身份包含版本, 无 tolerances 死字段。
+    """快照显式写入 schema_version 1.1.0; 复用身份包含版本, 无 tolerances 死字段。
 
     容差唯一权威仍是正文 convergence(此处冻结往返即证, 不另设字段)。
     """
@@ -569,7 +569,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
     assert status == 201, body
     snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
     assert snap is not None
-    assert snap.schema_version == "1.0.0"
+    assert snap.schema_version == "1.1.0"
     assert not hasattr(snap, "tolerances")
     frozen = jsonable(dict(snap.calc_config_snapshot))
     assert frozen["convergence"] == {"tolerance": 0.001, "max_iterations": 50}
@@ -590,7 +590,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
         receipt=jsonable(dict(snap.assembly_receipt or {})),
         device_models=jsonable(dict(snap.device_models or {})),
     )
-    assert _snapshot_inputs_equal(snap, schema_version="1.0.0", **same) is True
+    assert _snapshot_inputs_equal(snap, schema_version="1.1.0", **same) is True
     assert _snapshot_inputs_equal(snap, schema_version="9.9.9", **same) is False
 
 
@@ -723,7 +723,11 @@ def test_snapshot_freezes_per_instance_device_models(
     贡献由提交闸门同一次设备解析构建（`{instance_id: contribution dict}`），
     Worker 后续只做类型化恢复，不重跑校验。
     """
-    from iesplan.modeling import contribution_from_dict, contribution_to_dict
+    from iesplan.modeling import (
+        build_math_contribution,
+        contribution_from_dict,
+        contribution_to_dict,
+    )
 
     owner = make_user(db, "owner_dev_models")
     pid = _prepare_project(client, db, owner)
@@ -747,6 +751,22 @@ def test_snapshot_freezes_per_instance_device_models(
         for inst, entry in models.items()
     }
     assert restored == models
+
+    from iesplan.devices import get_device
+
+    built = build_math_contribution(get_device("ies.device.battery"))
+    assert built.ok and built.contribution is not None
+    original = built.contribution
+    assert original.canonical_text
+    revived = contribution_from_dict(contribution_to_dict(original))
+    # 封存形态按键排序 relations：对象级比较先按 id 规范化顺序；
+    # 规范字节相等才是 Worker 侧有效的同一性。
+    assert sorted(revived.relations, key=lambda r: r.id) == sorted(
+        original.relations, key=lambda r: r.id
+    )
+    assert revived.canonical_text == original.canonical_text
+    assert contribution_to_dict(revived) == contribution_to_dict(original)
+    assert models[next(iter(sorted(models)))] == contribution_to_dict(original)
 
 
 def test_device_catalog_change_does_not_rewrite_history(

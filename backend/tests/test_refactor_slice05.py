@@ -101,7 +101,7 @@ def _make_snapshot(db: Session, version_id: int) -> int:
         calc_config_snapshot={},
         random_seed=42,
         created_by=7,
-        schema_version="1.0.0",
+        schema_version="1.1.0",
         result_adapter="ies.result-adapter.highs@1.0.0",
         executor="ies.executor.local_process@1.0.0",
         device_models={},

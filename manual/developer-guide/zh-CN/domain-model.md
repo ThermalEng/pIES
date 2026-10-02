@@ -77,7 +77,7 @@ pIES 把信息按生命周期分为三类：
                  Evidence / Assessment / Export
 ```
 
-计算快照固定规范装配文本与校验回执、输入资源引用、schema 版本、设备 revision、规划/财务/计算配置 revision、预测目标与算法参数、generator/solver/executor/result adapter 版本、单位契约、随机种子、选项、容差和最大迭代数。任务执行期间不得重新读取不断变化的项目草稿。
+计算快照固定规范装配文本与校验回执、输入资源引用、schema 版本、逐装配实例设备数学贡献（提交闸门同一次设备解析冻结，`{instance_id: contribution}`；设备发布 revision 归属 1.1.0 模型库，本阶段未实现）、规划/财务/计算配置 revision、预测目标与算法参数、generator/solver/executor/result adapter 版本、单位契约、随机种子、选项、容差和最大迭代数。任务执行期间不得重新读取不断变化的项目草稿，也不得读取当前设备目录替代已冻结贡献。
 
 任务的技术状态与业务结局正交：任务可以正常完成，但业务上没有推荐方案或证据不足。重试创建新的执行尝试，但沿用相同逻辑输入。
 

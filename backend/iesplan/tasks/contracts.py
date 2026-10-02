@@ -102,7 +102,8 @@ def _freeze_snapshot_value(value: object) -> object:
 
 #: 计算快照 schema 版本(宪法 §7.1/§7.7: 长期快照必须带 schema_version)。
 #: 未正式发布, 无旧库兼容: 现行值唯一, 创建时显式写入, 复用身份包含版本。
-SNAPSHOT_SCHEMA_VERSION: str = "1.0.0"
+#: 1.1.0 新增必填 device_models(逐实例设备数学贡献)。
+SNAPSHOT_SCHEMA_VERSION: str = "1.1.0"
 
 
 @dataclass(frozen=True, slots=True)

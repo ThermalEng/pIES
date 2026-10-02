@@ -541,23 +541,25 @@ def ast_from_dict(data: Mapping[str, Any] | None) -> object | None:
 def contribution_from_dict(data: Mapping[str, Any]) -> DeviceMathContribution:
     """``contribution_to_dict`` 逆操作：已冻结贡献 dict → 不可变贡献(纯结构恢复)。
 
-    只恢复形态，不重跑方程语义校验；输入须为提交边界已封存的形态。
+    只恢复形态，不重跑方程语义校验；输入须为提交边界已封存的完整形态，
+    封存时必定存在的字段此处直接取值，不设兼容默认。``canonical_text``
+    与构建时一致，由恢复后的贡献体按同一规范字节派生。
     """
-    equation_ast = data.get("equation_ast") or {}
+    equation_ast = data["equation_ast"]
     variables = {}
-    for name, entry in (data.get("variables") or {}).items():
-        valid_range = entry.get("valid_range")
+    for name, entry in data["variables"].items():
+        valid_range = entry["valid_range"]
         variables[name] = MathVariable(
             name=name,
             kind=entry["kind"],
             unit=entry["unit"],
             valid_range=(
-                (valid_range.get("minimum"), valid_range.get("maximum"))
+                (valid_range["minimum"], valid_range["maximum"])
                 if valid_range is not None
                 else None
             ),
             **({"value": entry["value"]} if "value" in entry else {}),
-            is_state=entry.get("is_state", False),
+            is_state=entry["is_state"],
             **(
                 {"initial_property_ref": entry["initial_property_ref"]}
                 if "initial_property_ref" in entry
@@ -575,14 +577,14 @@ def contribution_from_dict(data: Mapping[str, Any]) -> DeviceMathContribution:
             ),
         )
     interfaces = {}
-    for iid, entry in (data.get("interfaces") or {}).items():
+    for iid, entry in data["interfaces"].items():
         valid_range = entry["valid_range"]
         interfaces[iid] = InterfaceFlow(
             id=iid,
             type=entry["type"],
             carrier=entry["carrier"],
             unit=entry["unit"],
-            valid_range=(valid_range.get("minimum"), valid_range.get("maximum")),
+            valid_range=(valid_range["minimum"], valid_range["maximum"]),
             **(
                 {"minimum_property_ref": entry["minimum_property_ref"]}
                 if "minimum_property_ref" in entry
@@ -595,43 +597,56 @@ def contribution_from_dict(data: Mapping[str, Any]) -> DeviceMathContribution:
             ),
         )
     relations = []
-    for entry in data.get("relations") or []:
+    for entry in data["relations"]:
         ast = RelationAst(
             id=entry["id"],
-            output=entry.get("output"),
-            lhs_root=ast_from_dict(entry.get("lhs")),
-            rhs_root=ast_from_dict(entry.get("rhs")),
+            output=entry["output"],
+            lhs_root=ast_from_dict(entry["lhs"]),
+            rhs_root=ast_from_dict(entry["rhs"]),
             lhs_refs=tuple(
-                TimeIndexedRef(name=item["name"], offset=item.get("offset", 0))
-                for item in entry.get("lhs_refs") or []
+                TimeIndexedRef(name=item["name"], offset=item["offset"])
+                for item in entry["lhs_refs"]
             ),
             rhs_refs=tuple(
-                TimeIndexedRef(name=item["name"], offset=item.get("offset", 0))
-                for item in entry.get("rhs_refs") or []
+                TimeIndexedRef(name=item["name"], offset=item["offset"])
+                for item in entry["rhs_refs"]
             ),
         )
         relations.append(
             MathRelation(
                 id=entry["id"],
-                output=entry.get("output"),
+                output=entry["output"],
                 ast=ast,
-                is_state_transition=entry.get("is_state_transition", False),
+                is_state_transition=entry["is_state_transition"],
             )
         )
-    return DeviceMathContribution(
+    contribution = DeviceMathContribution(
         device_id=data["device_id"],
-        equation_ast_id=equation_ast.get("id", EQUATION_AST_ID),
-        equation_ast_version=equation_ast.get("version", EQUATION_AST_VERSION),
-        contract_schema_id=data.get("schema", CONTRACT_SCHEMA_ID),
-        contract_schema_version=data.get("schema_version", CONTRACT_SCHEMA_VERSION),
+        equation_ast_id=equation_ast["id"],
+        equation_ast_version=equation_ast["version"],
+        contract_schema_id=data["schema"],
+        contract_schema_version=data["schema_version"],
         variables=variables,
         interfaces=interfaces,
         relations=tuple(relations),
-        states=tuple(data.get("states") or ()),
+        states=tuple(data["states"]),
         results=tuple(
             ResultMappingEntry(variable=item["variable"], unit=item["unit"], kind=item["kind"])
-            for item in data.get("results") or []
+            for item in data["results"]
         ),
+    )
+    return DeviceMathContribution(
+        device_id=contribution.device_id,
+        equation_ast_id=contribution.equation_ast_id,
+        equation_ast_version=contribution.equation_ast_version,
+        contract_schema_id=contribution.contract_schema_id,
+        contract_schema_version=contribution.contract_schema_version,
+        variables=contribution.variables,
+        interfaces=contribution.interfaces,
+        relations=contribution.relations,
+        states=contribution.states,
+        results=contribution.results,
+        canonical_text=canonical_bytes(contribution).decode("utf-8"),
     )
 
 
