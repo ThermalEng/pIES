@@ -42,7 +42,7 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError
 from iesplan.worker import executors
-from iesplan.worker.executors import EngineRunError, RunContext, TaskCancelled
+from iesplan.worker.executors import EngineRunError, LeaseFenced, RunContext, TaskCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -90,21 +90,60 @@ def _stop_probe(ctx: RunContext):
     return probe
 
 
-def _decode_text_files(files: dict[str, bytes], *, kind: str) -> dict[str, str]:
-    """声明文件字节按契约文本解码（MPS/解文件均为文本形态；损坏可见失败）。"""
-    try:
-        return {path: data.decode("utf-8") for path, data in files.items()}
-    except UnicodeDecodeError as exc:
-        raise EngineRunError(f"{kind}含非文本字节，违反文本形态契约: {exc}") from exc
+def _raise_for_receipt_status(receipt: Any) -> None:
+    """回执状态分流：取消 → TaskCancelled；隔离 → LeaseFenced；成功 → 通过。
+
+    租约隔离（fenced）绝不能走取消路径：不得报告取消，不得写终态。
+    非成功非取消非隔离一律 EngineRunError（结构化失败，不伪装成功）。
+    """
+    if receipt.status == "cancelled":
+        raise TaskCancelled("solve")
+    if receipt.status == "fenced":
+        raise LeaseFenced()
+    if receipt.status != "succeeded":
+        raise EngineRunError(
+            f"求解执行未成功(status={receipt.status}, "
+            f"receipt={receipt.receipt_id}): {receipt.error}"
+        )
+
+
+def _seal_files(
+    ctx: RunContext, bundle: Any, receipt: Any, collected: dict[str, bytes]
+) -> tuple[dict, dict]:
+    """声明文件字节以存储对象无损封存（短会话提交），返回描述子。
+
+    媒体类型取 manifest/回执的声明值；字节原样入对象，不做文本校验。
+    """
+    bundle_media = {
+        entry["path"]: entry["media_type"]
+        for entry in (*bundle.manifest.inputs, *bundle.manifest.outputs)
+    }
+    solution_media = {
+        entry["path"]: entry["media_type"] for entry in receipt.outputs
+    }
+    with ctx.session_factory() as db:
+        sealed_bundle = worker_app.seal_output_objects(
+            db,
+            {path: (data, bundle_media[path]) for path, data in bundle.files.items()},
+            actor_id=None,
+        )
+        sealed_solution = worker_app.seal_output_objects(
+            db,
+            {path: (collected[path], solution_media[path]) for path in collected},
+            actor_id=None,
+        )
+        db.commit()
+    return sealed_bundle, sealed_solution
 
 
 def _execute_compute(ctx: RunContext) -> dict:
     """计算任务真实链: 快照恢复 → 生成 → 执行 → 适配 → 证据 payload。
 
     全程只按 application.worker 阶段网关结果驱动，不解释任何输入字段：
-    快照/冻结件缺失即确定性失败；预测需求明确拒绝（不 stub、不回退）；
-    取消/租约失效收拢为 TaskCancelled；非成功回执与不可映射结果收拢为
-    EngineRunError（结构化失败，不伪装成功）。
+    冻结缺件即实际结构错误可见失败；预测需求明确拒绝（不 stub、不回退）；
+    取消收拢为 TaskCancelled；租约隔离收拢为 LeaseFenced（不写终态）；
+    非成功回执与不可映射结果收拢为 EngineRunError（结构化失败，不伪装
+    成功）。payload 只含 JSON 兼容的描述子，文件字节已另存对象。
     """
     task = ctx.task
     snapshot = ctx.snapshot
@@ -116,28 +155,18 @@ def _execute_compute(ctx: RunContext) -> dict:
         raise worker_app.ComputationUnavailableError(
             "计算执行面未装配，计算任务不可执行", reason="compute-plane-missing")
     with ctx.session_factory() as db:
-        inputs = worker_app.load_compute_inputs(db, task.project_id, snapshot)
-    if inputs is None:
-        raise SnapshotInputError(
-            "快照缺少计算必需的冻结输入",
-            params={"task_id": task.id, "snapshot_id": snapshot.id},
-            location={"object_type": "calc_snapshot", "object_id": snapshot.id},
+        artifact, models, series, finance, config = worker_app.load_compute_inputs(
+            db, task.project_id, snapshot
         )
     ctx.progress(10.0, "materialize", None)
-    bundle = worker_app.generate_bundle(plane, inputs)
+    bundle = worker_app.generate_bundle(plane, snapshot, artifact, models, series, finance, config)
     ctx.progress(40.0, "generate", None)
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
     receipt, collected = worker_app.execute_bundle(
         plane=plane, bundle=bundle, attempt=attempt, stop=_stop_probe(ctx),
     )
     ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
-    if receipt.status in ("cancelled", "fenced"):
-        raise TaskCancelled("solve")
-    if receipt.status != "succeeded":
-        raise EngineRunError(
-            f"求解执行未成功(status={receipt.status}, "
-            f"receipt={receipt.receipt_id}): {receipt.error}"
-        )
+    _raise_for_receipt_status(receipt)
     result = worker_app.adapt_result(plane, bundle, receipt, collected)
     outcome = worker_app.business_outcome_for(result)
     if outcome is None:
@@ -145,13 +174,14 @@ def _execute_compute(ctx: RunContext) -> dict:
             f"统一结果无法映射业务结局(execution={result.execution_status}, "
             f"math={result.math_status}, receipt={receipt.receipt_id})"
         )
+    sealed_bundle, sealed_solution = _seal_files(ctx, bundle, receipt, dict(collected))
     return {
         "outcome": outcome,
         "compute_result": result.to_dict(),
         "receipt": receipt.to_dict(),
         "bundle_manifest": bundle.manifest.to_dict(),
-        "bundle_files": _decode_text_files(dict(bundle.files), kind="bundle"),
-        "solution": _decode_text_files(dict(collected), kind="solution"),
+        "bundle_files": sealed_bundle,
+        "solution": sealed_solution,
     }
 
 
@@ -204,7 +234,9 @@ def run_task(
         stop_event: 取消/优雅退出事件(透传给执行器检查点与隔离子进程)。
         compute: 计算执行面(组合根装配; 计算任务必需, 缺失即明确不可用)。
     返回:
-        终态状态: completed / failed / cancelled / lease_rejected。
+        终态状态: completed / failed / cancelled / lease_rejected / fenced。
+        fenced 表示回执证明租约已失效：本次执行结果被丢弃，不写任何终态、
+        不报取消（过期租约由领取循环自然回收）。
     事务边界: 本函数不调用 commit/rollback, 不持有跨阶段的 Session; 任务/
     快照读完即关闭读取会话, 求解/分析/导出在无数据库事务状态下运行,
     领取/进度/续租/评估写入/提交/失败/取消各自的新短会话短事务由
@@ -243,9 +275,18 @@ def run_task(
         if outcome not in worker_app.BUSINESS_OUTCOMES:
             raise EngineRunError(f"执行器未返回显式合法 outcome: {outcome!r}")
         with factory() as db:
-            worker_app.submit_attempt_result(db, claim, payload=payload, outcome=outcome,
-                                             actor_id=task.requested_by)
+            receipt = worker_app.submit_attempt_result(
+                db, claim, payload=payload, outcome=outcome, actor_id=task.requested_by)
+        with factory() as db:
+            worker_app.attach_evidence_objects(
+                db, receipt.evidence_package_id, payload["bundle_files"], actor_id=None)
+            worker_app.attach_evidence_objects(
+                db, receipt.evidence_package_id, payload["solution"], actor_id=None)
+            db.commit()
         return "completed"
+    except LeaseFenced:
+        logger.warning("租约隔离，丢弃本次执行结果: task=%s", task.id)
+        return "fenced"
     except TaskCancelled as exc:
         return _handle_cancel(factory, ctx, claim, exc.stage)
     except (

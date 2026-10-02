@@ -191,6 +191,44 @@ def _run(engine: Engine, claim: worker_app.Claim, plane) -> str:
     return runner.run_task(factory, claim, worker_id="cw-e2e", compute=plane)
 
 
+class _StubRuntime:
+    """桩运行时：返回预设状态的停止回执（只覆盖 fenced/cancelled 分流）。"""
+
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    def run(self, bundle, attempt, *, stop=None):
+        from iesplan.computation import ExecutionReceipt  # noqa: E402
+
+        return (
+            ExecutionReceipt(
+                receipt_id=f"stub-{self._status}",
+                bundle_id=attempt.bundle_id,
+                attempt_id=attempt.attempt_id,
+                assembly_id=attempt.assembly_id,
+                calculation_config_id=attempt.calculation_config_id,
+                generator_ref="ies.generator.highs_milp@1.0.0",
+                solver_ref="ies.solver.highs@1.7.2",
+                executor_ref="ies.executor.local_process@1.0.0",
+                executable_ref="ies.solver.highs@1.7.2",
+                result_adapter_ref="ies.result-adapter.highs@1.0.0",
+                status=self._status,
+                termination_reason=self._status,
+            ),
+            {},
+        )
+
+
+def _plane_with_stub_runtime(plane, status: str):
+    """复用真实目录，仅把运行时换成预设停止回执的桩。"""
+    return worker_app.ComputeExecutionPlane(
+        generator_registry=plane.generator_registry,
+        executor_registry=plane.executor_registry,
+        adapter_registry=plane.adapter_registry,
+        runtime=_StubRuntime(status),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 真实链
 # ---------------------------------------------------------------------------
@@ -203,8 +241,10 @@ class TestComputeChainEndToEnd:
         """HiGHS 实任务：提交 → 领取 → 真实求解 → completed + 证据封存。
 
         断言：终态 completed、业务结局正常完成、统一结果 solved、回执
-        succeeded 且 executable 为冻结精确引用、证据封存 Bundle/回执/
-        声明解/统一结果。
+        succeeded 且 executable 为冻结精确引用；Bundle/声明输出字节以
+        存储对象无损封存并可按描述子取回；Bundle 使用快照冻结的有效种子
+        （配置 seed 缺省时取 snapshot.random_seed，不静默用 0）；回执身份
+        追溯真实装配 id 与配置 revision。
         """
         task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
         claim = _claim(db, task_id)
@@ -224,7 +264,24 @@ class TestComputeChainEndToEnd:
         assert sealed["receipt"]["status"] == "succeeded"
         assert sealed["receipt"]["executable_ref"] == "ies.solver.highs@1.7.2"
         assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@1.0.0")
-        assert set(sealed["solution"]) == {"output/solution.sol"}
+        snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
+        assert snapshot is not None
+        args = sealed["bundle_manifest"]["command"]["arguments"]
+        assert str(snapshot.random_seed) in [str(a) for a in args]
+        assert sealed["receipt"]["executor_ref"] == snapshot.executor
+        assert sealed["receipt"]["result_adapter_ref"] == snapshot.result_adapter
+        assert sealed["receipt"]["bundle_id"] == f"snapshot-{snapshot.id}:attempt-{claim.attempt_id}"
+        assert sealed["receipt"]["assembly_id"] != ""
+        assert sealed["receipt"]["calculation_config_id"].startswith("project-")
+
+        solution = sealed["solution"]
+        assert set(solution) == {"output/solution.sol"}
+        entry = solution["output/solution.sol"]
+        raw = get_object(db, entry["object_id"])
+        assert raw.startswith(b"HIGHS_SOLUTION_V1")
+        assert entry["size_bytes"] == len(raw)
+        for _path, descriptor in sorted(sealed["bundle_files"].items()):
+            assert get_object(db, descriptor["object_id"]) is not None
 
     def test_prediction_required_fails_with_clear_reason(
         self, client: TestClient, db: Session, engine: Engine, plane
@@ -248,3 +305,61 @@ class TestComputeChainEndToEnd:
             db.execute(select(TaskDiagnostic).where(TaskDiagnostic.task_id == task_id)).scalars().all()
         )
         assert any("prediction-not-supported" in (d.message or "") for d in diagnostics)
+
+    def test_frozen_provider_mismatch_fails_clearly(
+        self, client: TestClient, db: Session, engine: Engine
+    ) -> None:
+        """冻结依赖不可解析明确失败：执行器/适配器目录为空时，求解前即拒绝。"""
+        from iesplan.bootstrap import _deployment_policy_from_settings  # noqa: E402
+        from iesplan.computation import (  # noqa: E402
+            SolverRuntime,
+            build_executor_registry,
+            build_result_adapter_registry,
+        )
+        from iesplan.computation.generators import (  # noqa: E402
+            HIGHS_MILP_PROVIDER,  # noqa: E402
+            build_registry,  # noqa: E402
+        )
+
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        executor_registry = build_executor_registry(())
+        plane = worker_app.ComputeExecutionPlane(
+            generator_registry=build_registry((HIGHS_MILP_PROVIDER,)),
+            executor_registry=executor_registry,
+            adapter_registry=build_result_adapter_registry([]),
+            runtime=SolverRuntime(executor_registry, _deployment_policy_from_settings()),
+        )
+        assert _run(engine, claim, plane) == "failed"
+        diagnostics = (
+            db.execute(select(TaskDiagnostic).where(TaskDiagnostic.task_id == task_id)).scalars().all()
+        )
+        assert any("ies.executor.local_process@1.0.0" in (d.message or "") for d in diagnostics)
+
+    def test_fenced_receipt_abandons_without_cancel(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """fenced 分流：回执证明租约失效 → 返回 fenced，不写终态、不报取消。"""
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        fenced_plane = _plane_with_stub_runtime(plane, status="fenced")
+        assert _run(engine, claim, fenced_plane) == "fenced"
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task.status == "running"
+        assert task.business_outcome is None
+        diagnostics = (
+            db.execute(select(TaskDiagnostic).where(TaskDiagnostic.task_id == task_id)).scalars().all()
+        )
+        assert all("取消" not in (d.message or "") for d in diagnostics)
+
+    def test_cancelled_receipt_takes_cancel_path(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """cancelled 分流：回执证明用户取消 → 走取消路径（任务未 cancelling 则保持 running）。"""
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        cancelled_plane = _plane_with_stub_runtime(plane, status="cancelled")
+        assert _run(engine, claim, cancelled_plane) == "cancelled"
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task.status == "running"
+        assert task.business_outcome is None

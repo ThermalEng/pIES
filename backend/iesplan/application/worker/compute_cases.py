@@ -4,18 +4,25 @@
 返回的公开 contract 驱动状态机，不复制领域规则：
 
 - ``load_compute_inputs``：把快照冻结的五项直接输入恢复为生成器可消费
-  形态（规范装配二件套结构恢复、逐实例数学贡献结构恢复、财务快照按冻结
-  profile/revision 取不可变行、计算配置显式字段恢复、固定资源字节加载、
-  非预测序列物化）。缺失冻结件返回 None（调用方按快照不可用失败）；
-  封存形态损坏让实际恢复错误可见，不补默认。
+  形态并按序返回五元组（规范装配二件套结构恢复、逐实例数学贡献结构恢复、
+  财务快照按冻结 profile/revision 取不可变行、计算配置显式字段恢复并烘焙
+  快照冻结的有效种子、固定资源字节加载、非预测序列物化）。本层不包装第
+  二套输入对象，不做缺省；冻结结构缺件即实际结构错误（KeyError/TypeError/
+  ValueError 等）直接可见，不重跑输入校验。
 - ``generate_bundle`` / ``execute_bundle`` / ``adapt_result``：经组合根
-  给定的已发布目录与运行时完成三段调用，本层不选型、不回退。
+  给定的已发布目录与运行时完成三段调用，本层不选型、不回退；生成后核对
+  Bundle 声明与快照冻结 provider 一致并预先解析执行器/适配器（不可解析
+  即明确失败，不等到求解后）。
+- ``seal_output_objects`` / ``attach_evidence_objects``：声明文件字节以
+  存储对象无损封存并挂接证据引用（字节原样入对象，不做文本校验与编码
+  猜测；媒体类型取 manifest/回执声明）。
 - ``build_attempt_context`` / ``business_outcome_for``：回执身份派生与
   任务业务结局映射（只做 contract 允许的显式映射）。
 
 本模块只 flush-free：只读 DB 与纯内存转换，不拥有事务、不 commit/
-rollback。预测需求（``pending_predict`` 或配置 ``predictions`` 非空）
-走 ``ComputationUnavailableError(reason="prediction-not-supported")``
+rollback（对象封存的提交由调用方短会话负责）。预测需求
+（``pending_predict`` 或配置 ``predictions`` 非空）走
+``ComputationUnavailableError(reason="prediction-not-supported")``
 明确报告，不 stub、不回退旧链。
 
 依赖方向: worker → application → (configuration/dataset/project/
@@ -26,7 +33,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -52,18 +59,19 @@ from iesplan.computation.result_adapter import ResultAdapterRegistry
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import DeviceMathContribution, contribution_from_dict
-from iesplan.storage import get_object
+from iesplan.storage import add_ref, get_object, put_object
 from iesplan.tasks import BUSINESS_OUTCOMES
 
 __all__ = [
     "ComputeExecutionPlane",
-    "ComputeInputs",
     "adapt_result",
+    "attach_evidence_objects",
     "build_attempt_context",
     "business_outcome_for",
     "execute_bundle",
     "generate_bundle",
     "load_compute_inputs",
+    "seal_output_objects",
 ]
 
 
@@ -80,20 +88,6 @@ class ComputeExecutionPlane:
     executor_registry: ExecutorRegistry
     adapter_registry: ResultAdapterRegistry
     runtime: SolverRuntime
-
-
-@dataclass(frozen=True, slots=True)
-class ComputeInputs:
-    """生成器五项直接输入（快照冻结恢复，不可变值对象）。"""
-
-    artifact: ValidatedAssemblyArtifact
-    models: Mapping[str, DeviceMathContribution] = field(default_factory=dict)
-    series: tuple[MaterializedSeries, ...] = ()
-    finance: EffectiveFinanceConfig | None = None
-    config: CalculationConfig | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "series", tuple(self.series))
 
 
 #: 快照计算配置正文恢复的显式字段（task_params/config_ref 等提交
@@ -114,39 +108,25 @@ _CONFIG_FIELDS = (
 )
 
 
-def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt | None:
-    """回执结构恢复（只恢复形态，不重跑装配校验；字段缺失返回 None）。
+def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
+    """回执结构恢复（只恢复形态，不重跑装配校验）。
 
     形态以 ``ValidationReceipt.to_dict`` 为准：``schema``/``schema_version``、
     ``validator.{id,version}``、``canonical_algorithm.{id,version}``。
+    冻结缺件即实际结构错误（KeyError/TypeError）直接可见，不兼容旧形态。
     """
-    validator = data.get("validator")
-    canonical = data.get("canonical_algorithm")
-    scalars = {
-        "schema_id": data.get("schema"),
-        "schema_version": data.get("schema_version"),
-        "validator_id": validator.get("id") if isinstance(validator, Mapping) else None,
-        "validator_version": (validator.get("version") if isinstance(validator, Mapping) else None),
-        "canonical_algorithm_id": canonical.get("id") if isinstance(canonical, Mapping) else None,
-        "canonical_algorithm_version": (canonical.get("version") if isinstance(canonical, Mapping) else None),
-    }
-    if any(not isinstance(value, str) or not value for value in scalars.values()):
-        return None
-    for name in ("dependencies", "resources", "finance_snapshot", "planning"):
-        if not isinstance(data.get(name), Mapping):
-            return None
-    diagnostics = []
-    for entry in data.get("diagnostics") or ():
-        if not isinstance(entry, Mapping):
-            return None
-        diagnostics.append(Diagnostic(**dict(entry)))
     return ValidationReceipt(
-        **scalars,
+        schema_id=data["schema"],
+        schema_version=data["schema_version"],
+        validator_id=data["validator"]["id"],
+        validator_version=data["validator"]["version"],
+        canonical_algorithm_id=data["canonical_algorithm"]["id"],
+        canonical_algorithm_version=data["canonical_algorithm"]["version"],
         dependencies=dict(data["dependencies"]),
         resources=dict(data["resources"]),
         finance_snapshot=dict(data["finance_snapshot"]),
         planning=dict(data["planning"]),
-        diagnostics=tuple(diagnostics),
+        diagnostics=tuple(Diagnostic(**dict(entry)) for entry in data["diagnostics"]),
     )
 
 
@@ -171,52 +151,47 @@ def _collect_resource_ids(doc: Mapping[str, Any]) -> set[str]:
     return found
 
 
-def load_compute_inputs(db: Session, task_project_id: int, snapshot: Any) -> ComputeInputs | None:
-    """从快照恢复生成器五项直接输入；冻结件缺失返回 None。
+def load_compute_inputs(
+    db: Session, task_project_id: int, snapshot: Any
+) -> tuple[
+    ValidatedAssemblyArtifact,
+    dict[str, DeviceMathContribution],
+    tuple[MaterializedSeries, ...],
+    EffectiveFinanceConfig,
+    CalculationConfig,
+]:
+    """从快照恢复生成器五项直接输入并按序返回（不包装第二对象，不做缺省）。
 
     finance 按回执冻结血缘 {profile_id, revision} 取不可变 Effective 行
     （与提交闸门同一来源：钉选 revision，不读 latest/current 指针）；
-    固定资源按规范绑定 object_id 经 storage 公开门面读字节。
+    固定资源按规范绑定 object_id 经 storage 公开门面读字节；有效种子取
+    快照冻结值（配置缺省时不再静默用 0，而是提交闸门同一派生规则）。
+    冻结缺件即实际结构错误直接可见，不重跑输入校验。
     """
-    text = snapshot.canonical_assembly_text
-    receipt_map = snapshot.assembly_receipt
-    if not text or not isinstance(receipt_map, Mapping) or not receipt_map:
-        return None
-    receipt = _receipt_from_frozen(receipt_map)
-    if receipt is None:
-        return None
-    artifact = ValidatedAssemblyArtifact(canonical_text=text, receipt=receipt)
+    receipt = _receipt_from_frozen(snapshot.assembly_receipt)
+    artifact = ValidatedAssemblyArtifact(canonical_text=snapshot.canonical_assembly_text, receipt=receipt)
 
     raw_models = snapshot.device_models
-    if not isinstance(raw_models, Mapping) or not raw_models:
-        return None
     models = {inst: contribution_from_dict(contrib) for inst, contrib in raw_models.items()}
 
     finance_blood = receipt.finance_snapshot
-    profile_id = finance_blood.get("profile_id")
-    revision = finance_blood.get("revision")
-    if (
-        not isinstance(profile_id, str)
-        or not profile_id
-        or not isinstance(revision, int)
-        or isinstance(revision, bool)
-    ):
-        return None
-    finance_row = configuration_domain.get_effective_revision(db, task_project_id, revision)
-    if finance_row is None or finance_row.profile_id != profile_id:
-        return None
+    finance_row = configuration_domain.get_effective_revision(db, task_project_id, finance_blood["revision"])
+    if finance_row.profile_id != finance_blood["profile_id"]:
+        raise KeyError(
+            "快照财务血缘与不可变行不一致 "
+            f"(profile={finance_blood['profile_id']!r}, "
+            f"revision={finance_blood['revision']!r})"
+        )
     finance = EffectiveFinanceConfig.from_dict(finance_row.content)
 
     body = snapshot.calc_config_snapshot
-    if not isinstance(body, Mapping):
-        return None
-    try:
-        picked = {name: body[name] for name in _CONFIG_FIELDS}
-    except KeyError:
-        return None
-    config = CalculationConfig(**picked)
+    picked = {name: body[name] for name in _CONFIG_FIELDS}
+    seed = picked.get("seed")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        seed = snapshot.random_seed
+    config = CalculationConfig(**{**picked, "seed": seed})
 
-    doc = json.loads(text)
+    doc = json.loads(snapshot.canonical_assembly_text)
     resources = {object_id: get_object(db, object_id) for object_id in sorted(_collect_resource_ids(doc))}
     materialized = materialize_non_predictive_series(artifact, resources)
     if materialized.pending_predict or config.predictions:
@@ -224,24 +199,38 @@ def load_compute_inputs(db: Session, task_project_id: int, snapshot: Any) -> Com
             "该快照需要预测序列（data_predict/阶段二），本版尚未提供公开预测能力，不执行、不回退旧链",
             reason="prediction-not-supported",
         )
-    return ComputeInputs(
-        artifact=artifact,
-        models=models,
-        series=materialized.series,
-        finance=finance,
-        config=config,
-    )
+    return artifact, models, tuple(materialized.series), finance, config
 
 
-def generate_bundle(plane: ComputeExecutionPlane, inputs: ComputeInputs) -> SolverBundle:
-    """经生成器目录选中精确 provider 并生成完整 Bundle（注册表 resolve
-    即通用选择门禁的唯一真实边界）。
+def generate_bundle(
+    plane: ComputeExecutionPlane,
+    snapshot: Any,
+    artifact: ValidatedAssemblyArtifact,
+    models: Mapping[str, DeviceMathContribution],
+    series: tuple[MaterializedSeries, ...],
+    finance: EffectiveFinanceConfig,
+    config: CalculationConfig,
+) -> SolverBundle:
+    """经生成器目录选中精确 provider 生成完整 Bundle，并消费快照冻结引用。
 
-    未注册/不兼容即 ``ComputationUnavailableError``；用户计算选项非法为
-    ``ValueError``（封存配置与目录漂移的可见失败，不回退）。
+    注册表 resolve 即通用选择门禁的唯一真实边界（未注册/不兼容即
+    ``ComputationUnavailableError``；用户计算选项非法为 ``ValueError``）。
+    生成后核对 Bundle 声明的执行器/适配器与快照冻结精确引用一致，并预先
+    解析两者（不可解析即明确失败，不等到求解后；不读当前可变目录）。
     """
-    provider = plane.generator_registry.resolve(inputs.config)
-    return provider.generate(inputs.artifact, inputs.models, inputs.series, inputs.finance, inputs.config)
+    provider = plane.generator_registry.resolve(config)
+    bundle = provider.generate(artifact, models, series, finance, config)
+    declared_executor = bundle.manifest.command["executor"]
+    if declared_executor != snapshot.executor or bundle.manifest.result_adapter != snapshot.result_adapter:
+        raise ComputationUnavailableError(
+            "Bundle 声明与快照冻结 provider 不一致 "
+            f"(bundle={declared_executor!r}/{bundle.manifest.result_adapter!r}, "
+            f"snapshot={snapshot.executor!r}/{snapshot.result_adapter!r})",
+            reason="frozen-provider-mismatch",
+        )
+    plane.executor_registry.get(snapshot.executor)
+    plane.adapter_registry.get(snapshot.result_adapter)
+    return bundle
 
 
 def execute_bundle(
@@ -268,28 +257,66 @@ def adapt_result(
 def build_attempt_context(task: Any, claim: Claim, snapshot: Any) -> AttemptContext:
     """派生回执四项身份（快照/任务派生，不透明字符串，不做 hash）。
 
-    assembly 取规范文本装配 id；calculation_config 取快照 config_ref
-    （project:revision），缺失时回落到快照派生身份（仍可追溯，不伪装
-    成配置 revision）。
+    assembly_id 直接取规范文本装配 id；calculation_config_id 直接取快照
+    config_ref（project:revision）。提交闸门本应冻结真实 id/revision：
+    缺失即实际结构错误（KeyError）按快照故障可见失败，不伪造回落身份。
+    bundle_id 指向本次生成的 Bundle（快照:尝试派生；Bundle 本体在执行
+    时创建，无闸门冻结值可恢复）。
     """
     doc = json.loads(snapshot.canonical_assembly_text)
-    assembly_id = (doc.get("assembly") or {}).get("id") or f"snapshot-{snapshot.id}"
-    ref = snapshot.calc_config_snapshot.get("config_ref") or {}
-    if (
-        isinstance(ref.get("project_id"), int)
-        and not isinstance(ref.get("project_id"), bool)
-        and isinstance(ref.get("revision"), int)
-        and not isinstance(ref.get("revision"), bool)
-    ):
-        config_id = f"project-{ref['project_id']}:config-rev-{ref['revision']}"
-    else:
-        config_id = f"snapshot-{snapshot.id}:config"
+    ref = snapshot.calc_config_snapshot["config_ref"]
     return AttemptContext(
         attempt_id=str(claim.attempt_id),
         bundle_id=f"snapshot-{snapshot.id}:attempt-{claim.attempt_id}",
-        assembly_id=str(assembly_id),
-        calculation_config_id=config_id,
+        assembly_id=str(doc["assembly"]["id"]),
+        calculation_config_id=f"project-{ref['project_id']}:config-rev-{ref['revision']}",
     )
+
+
+def seal_output_objects(
+    db: Session, files: Mapping[str, tuple[bytes, str]], *, actor_id: int | None
+) -> dict[str, dict[str, object]]:
+    """声明文件字节以存储对象无损封存，返回按路径索引的描述子。
+
+    字节原样入对象（不做文本校验与编码猜测）；媒体类型取 manifest/回执
+    的声明值，由调用方按声明传入。提交由调用方短会话负责。
+    """
+    sealed: dict[str, dict[str, object]] = {}
+    for path in sorted(files):
+        data, media_type = files[path]
+        handle = put_object(
+            db,
+            data,
+            media_type,
+            source_category="evidence",
+            purpose="evidence_output",
+            actor_id=actor_id,
+        )
+        sealed[path] = {
+            "object_id": handle.id,
+            "media_type": media_type,
+            "size_bytes": len(data),
+        }
+    return sealed
+
+
+def attach_evidence_objects(
+    db: Session,
+    evidence_id: int,
+    sealed: Mapping[str, Mapping[str, object]],
+    *,
+    actor_id: int | None,
+) -> None:
+    """封存对象挂接证据引用（防清理误删；只 flush，提交由调用方负责）。"""
+    for path in sorted(sealed):
+        add_ref(
+            db,
+            int(sealed[path]["object_id"]),
+            "evidence_package",
+            evidence_id,
+            purpose="evidence_output",
+            actor_id=actor_id,
+        )
 
 
 def business_outcome_for(result: ComputeResult) -> str | None:

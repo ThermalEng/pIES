@@ -41,6 +41,14 @@ class EngineRunError(Exception):
     """引擎执行失败(含隔离子进程超时/异常)。"""
 
 
+class LeaseFenced(Exception):
+    """租约隔离：回执证明执行期间租约已失效，本次执行结果不得提交。
+
+    控制流异常（非错误）：调用方直接返回，不写任务终态、不报取消，
+    不留诊断；过期租约由领取循环自然回收。
+    """
+
+
 @dataclass(slots=True)
 class RunContext:
     """一次任务执行上下文(执行器/进度/取消检查共用)。

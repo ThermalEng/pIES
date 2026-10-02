@@ -45,13 +45,14 @@ from iesplan.application.worker.attempt_cases import (
 )
 from iesplan.application.worker.compute_cases import (
     ComputeExecutionPlane,
-    ComputeInputs,
     adapt_result,
+    attach_evidence_objects,
     build_attempt_context,
     business_outcome_for,
     execute_bundle,
     generate_bundle,
     load_compute_inputs,
+    seal_output_objects,
 )
 from iesplan.application.worker.lease_cases import (
     CalcSnapshotRecord,
@@ -91,7 +92,6 @@ __all__ = [
     "Claim",
     "ComputationUnavailableError",
     "ComputeExecutionPlane",
-    "ComputeInputs",
     "ExecutionUnavailableError",
     "LeaseRejectedError",
     "ReportCheckResult",
@@ -100,6 +100,7 @@ __all__ = [
     "acquire_attempt",
     "adapt_result",
     "assess_report_stage",
+    "attach_evidence_objects",
     "build_attempt_context",
     "business_outcome_for",
     "cancel_attempt",
@@ -122,6 +123,7 @@ __all__ = [
     "publish_heartbeat",
     "renew_attempt_lease",
     "report_attempt_progress",
+    "seal_output_objects",
     "slot_available",
     "submit_attempt_result",
     "verify_lease",
