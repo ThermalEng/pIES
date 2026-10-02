@@ -1,8 +1,9 @@
 /**
  * 计算配置页(0.12-A1 起 CalculationConfig revision 编辑器)。
  *
- * - 读取:GET /config → 最新 revision 全文填表; 404 即空白表单(无默认配置可用,
- *   不预填精度/时间限制等用户未选值);
+ * - 读取:GET /config → 最新 revision 全文填表; 404 即空白表单(时间限制取
+ *   GET /deployment/defaults 公开初值并同一次原子填入, 其余字段留空不预填;
+ *   初值加载失败即明确报错);
  * - 保存:PUT {calculation_config, expected_revision}(自有链乐观锁, 首次为 null);
  *   成功提示 revision; 409 保留表单仅提示冲突, 由用户主动重载; 422 展示错误信息;
  * - predictions/options/convergence/outputs 为 JSON 文本域, 本地解析失败即

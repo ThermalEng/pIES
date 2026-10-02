@@ -194,6 +194,44 @@ class TestAcquire:
         assert worker_app.slot_available(db, "compute") is True  # 2 槽, 用 1 仍可领取
         assert worker_app.slot_available(db, "io") is True
 
+    def test_slot_effective_window_follows_configured_capacity(self, db: Session):
+        """部署调槽即时生效：调大增发、调小窗口外不发、占用不中断。
+
+        直接以行级 in_use 归零模拟占用释放（release_slot 的尝试绑定路径
+        另有覆盖）；断言真实有效槽数，不只断言 Settings 值。
+        """
+        from sqlalchemy import update
+
+        from iesplan.tasks import persistence as slot_store
+
+        slot_store.ensure_slots(db, {"compute": 1})
+        first = slot_store.acquire_slot(db, "compute", 1)
+        assert first is not None
+        assert slot_store.acquire_slot(db, "compute", 1) is None
+        assert slot_store.pool_has_free_slot(db, "compute", 1) is False
+        # 调大：增发行，无需删行
+        slot_store.ensure_slots(db, {"compute": 3})
+        second = slot_store.acquire_slot(db, "compute", 3)
+        third = slot_store.acquire_slot(db, "compute", 3)
+        assert second is not None and third is not None
+        assert slot_store.acquire_slot(db, "compute", 3) is None
+        # 调小到 1：三行全占用，新领被拒，已占用不中断
+        assert slot_store.acquire_slot(db, "compute", 1) is None
+        assert slot_store.pool_has_free_slot(db, "compute", 1) is False
+        # 释放窗口内第一行与窗口外第二行：窗口内可再领一行，
+        # 窗口内满后窗口外空闲行也不发放
+        db.execute(update(ComputeSlot).where(ComputeSlot.id == first.id).values(in_use=0))
+        db.execute(update(ComputeSlot).where(ComputeSlot.id == second.id).values(in_use=0))
+        db.flush()
+        assert slot_store.pool_has_free_slot(db, "compute", 1) is True
+        assert slot_store.acquire_slot(db, "compute", 1) is not None
+        assert slot_store.acquire_slot(db, "compute", 1) is None
+        assert slot_store.pool_has_free_slot(db, "compute", 1) is False
+        # io 池窗口独立
+        slot_store.ensure_slots(db, {"io": 2})
+        assert slot_store.acquire_slot(db, "io", 1) is not None
+        assert slot_store.acquire_slot(db, "io", 1) is None
+
 
 # ---------------------------------------------------------------------------
 # 续租与过期判定

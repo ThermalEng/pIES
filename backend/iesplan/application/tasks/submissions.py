@@ -983,9 +983,10 @@ def _ensure_slots(db: Session) -> None:
 
 
 def acquire_slot(db: Session, pool_name: str) -> ComputeSlotRecord | None:
-    """占用一个并发槽; 无空槽返回 None。只 flush, 不拥有事务。"""
-    _ensure_slots(db)
-    return tasks_domain.acquire_slot(db, pool_name)
+    """占用一个并发槽(有效窗口内部署额度); 无空槽返回 None。只 flush, 不拥有事务。"""
+    capacities = {"compute": settings.compute_slots, "io": settings.io_slots}
+    tasks_domain.ensure_slots(db, capacities)
+    return tasks_domain.acquire_slot(db, pool_name, capacities[pool_name])
 
 
 def release_slot(db: Session, attempt_id: int) -> None:

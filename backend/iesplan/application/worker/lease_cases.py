@@ -130,12 +130,13 @@ def acquire_task(db: Session, task_id: int, worker_id: str) -> Claim | None:
     尝试/租约/任务状态/槽占用同批 flush; 无空槽或任务非 queued 时返回 None
     (任务保持排队)。不提交事务。
     """
-    tasks_domain.ensure_slots(db, {"compute": settings.compute_slots, "io": settings.io_slots})
+    capacities = {"compute": settings.compute_slots, "io": settings.io_slots}
+    tasks_domain.ensure_slots(db, capacities)
     task = _get_task(db, task_id)
     if task.status != "queued":
         return None
     pool = POOL_BY_TYPE.get(task.type, "compute")
-    slot = tasks_domain.acquire_slot(db, pool)
+    slot = tasks_domain.acquire_slot(db, pool, capacities[pool])
     if slot is None:
         return None
     attempt = tasks_domain.create_attempt(db, task_id=task.id, worker_id=worker_id)
@@ -289,8 +290,9 @@ def publish_heartbeat(worker_id: str, payload: dict[str, Any], ttl: int) -> None
 
 
 def slot_available(db: Session, pool: str) -> bool:
-    """槽门禁: 池内是否存在可用槽(领取前确认; 槽行未初始化视为有空位)。"""
-    return tasks_domain.pool_has_free_slot(db, pool)
+    """槽门禁: 有效窗口内是否存在可用槽(领取前确认; 槽行未初始化视为有空位)。"""
+    capacities = {"compute": settings.compute_slots, "io": settings.io_slots}
+    return tasks_domain.pool_has_free_slot(db, pool, capacities[pool])
 
 
 def verify_lease(db: Session, attempt_id: int, token: UUID | str) -> TaskLeaseRecord | None:

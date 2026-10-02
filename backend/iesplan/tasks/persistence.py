@@ -591,7 +591,11 @@ def get_lease_by_token(db: Session, lease_token: str) -> TaskLeaseRecord | None:
 
 
 def ensure_slots(db: Session, pools: Mapping[str, int]) -> None:
-    """惰性初始化槽表（每池按并发额度建 capacity 行，幂等）。"""
+    """惰性初始化槽表（每池按并发额度建 capacity 行，幂等）。
+
+    只增建不删除：调小额度由领取侧有效窗口（``acquire_slot`` /
+    ``pool_has_free_slot`` 的 ``capacity`` 参数）即时生效，已占用槽不受影响。
+    """
     for pool, capacity in pools.items():
         existing = (
             db.execute(select(func.count(ComputeSlot.id)).where(ComputeSlot.pool_name == pool)).scalar() or 0
@@ -601,13 +605,18 @@ def ensure_slots(db: Session, pools: Mapping[str, int]) -> None:
     db.flush()
 
 
-def acquire_slot(db: Session, pool_name: str) -> ComputeSlotRecord | None:
-    """取可用槽位并标记占用（行锁，in_use+1，不绑定尝试）；无可用返回 None。"""
+def acquire_slot(db: Session, pool_name: str, capacity: int) -> ComputeSlotRecord | None:
+    """取可用槽位并标记占用（行锁，in_use+1，不绑定尝试）；无可用返回 None。
+
+    只在按 id 排序的前 ``capacity`` 行（有效窗口）内领取：部署调小额度后，
+    窗口外空闲行不再发放，已占用行（含窗口外）不中断、不回收。
+    """
     slots = (
         db.execute(
             select(ComputeSlot)
             .where(ComputeSlot.pool_name == pool_name, ComputeSlot.status.in_(("free", "busy")))
             .order_by(ComputeSlot.id)
+            .limit(max(int(capacity), 0))
             .with_for_update()
         )
         .scalars()
@@ -897,14 +906,17 @@ def revoke_leases_for_attempts(db: Session, attempt_ids: Collection[int]) -> int
     return int(result.rowcount or 0)
 
 
-def pool_has_free_slot(db: Session, pool_name: str) -> bool:
-    """槽门禁：池内是否存在可用槽（领取前确认；槽行未初始化视为有空位）。"""
+def pool_has_free_slot(db: Session, pool_name: str, capacity: int) -> bool:
+    """槽门禁：有效窗口内是否存在可用槽（领取前确认；槽行未初始化视为有空位）。"""
     rows = (
         db.execute(
-            select(ComputeSlot).where(
+            select(ComputeSlot)
+            .where(
                 ComputeSlot.pool_name == pool_name,
                 ComputeSlot.status.in_(("free", "busy")),
             )
+            .order_by(ComputeSlot.id)
+            .limit(max(int(capacity), 0))
         )
         .scalars()
         .all()
