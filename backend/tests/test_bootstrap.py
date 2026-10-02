@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from iesplan.bootstrap import (
     ApplicationContext,
     assemble_api,
@@ -12,7 +10,6 @@ from iesplan.bootstrap import (
     collect_immutable_tables,
     collect_trigger_statements,
 )
-from iesplan.computation import ComputationUnavailableError
 
 
 def test_assemble_api_full_context() -> None:
@@ -39,16 +36,47 @@ def test_assemble_api_full_context() -> None:
 
 
 def test_assemble_worker_subsets() -> None:
-    """计算 Worker 即使目录含真实 provider 仍拒绝启动（执行编排属 0.9，
-    不启动 solver）；I/O Worker 正常装配。"""
-    with pytest.raises(ComputationUnavailableError) as exc_info:
-        assemble_compute_worker()
-    assert exc_info.value.reason == "worker-not-wired"
+    """计算 Worker 装配完整执行面（执行器/适配器目录 + 运行时 + 策略）；
+    API 与 I/O Worker 不装配执行面。"""
+    from iesplan.config import settings
+
+    compute = assemble_compute_worker()
+    assert compute.executor_registry is not None
+    assert [d.ref for d in compute.executor_registry.snapshot()] == [
+        "ies.executor.local_process@1.0.0"
+    ]
+    assert compute.result_adapter_registry is not None
+    assert [
+        d.ref for d in compute.result_adapter_registry.snapshot()
+    ] == ["ies.result-adapter.highs@1.0.0"]
+    assert compute.solver_runtime is not None
+    policy = compute.deployment_policy
+    assert policy is not None
+    assert policy.executables == tuple(settings.solver_allowed_executables)
+    assert policy.max_timeout_seconds == settings.solver_max_timeout_seconds
+    assert policy.max_memory_mib == settings.solver_max_memory_mib
+    assert policy.max_cpu_cores == settings.solver_max_cpu_cores
+    assert policy.allow_network is settings.solver_allow_network
+    assert policy.max_output_files == settings.solver_max_output_files
+    assert policy.max_output_bytes == settings.solver_max_output_bytes
+    assert compute.health()["executors"] == "ok"
+    plane = compute.compute_execution_plane()
+    assert plane is not None
+    assert plane.runtime is compute.solver_runtime
+
+    api = assemble_api()
+    assert api.executor_registry is None
+    assert api.result_adapter_registry is None
+    assert api.solver_runtime is None
+    assert api.deployment_policy is None
+    assert "executors" not in api.health()
+    assert api.compute_execution_plane() is None
 
     io = assemble_io_worker()
     assert io.storage is not None
     assert io.device_registry is None
     assert io.generator_registry is None
+    assert io.compute_execution_plane() is None
     assert "registry" not in io.health()
     assert "generators" not in io.health()
     assert io.health()["db"] == "ok"

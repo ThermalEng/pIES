@@ -13,7 +13,8 @@
 
 Worker 只按 application.worker 阶段网关结果驱动状态机, 不解释数据集
 字段、不补缺省值、不做 SI 换算、不物化时间轴、不解释装配内容与任务
-参数。计算能力将在 0.8 接入；当前计算 Worker 不会通过组合根启动。
+参数。计算任务走组合根装配的执行面真实链（快照恢复 → 生成 → 执行 →
+适配）；执行面缺失的计算 Worker 在组合根阶段拒绝启动。
 
 写入资格: 本模块不直接写任务状态/结果, 统一由 application.worker 的
 submit_attempt_result / fail_attempt / cancel_attempt 带 token 完成
@@ -71,24 +72,102 @@ class InvalidTaskTypeError(AppError):
 # ---------------------------------------------------------------------------
 
 
+def _stop_probe(ctx: RunContext):
+    """停止探针: 未停止 → None；用户取消 → cancelled；其余停止 → fenced。
+
+    其余停止只可能是租约失效（续租失败置位）或进程退出：租约隔离必须
+    记 fenced，不得记 cancelled。探针内取消查询走可重建队列视图，不持
+    有数据库会话。
+    """
+
+    def probe():
+        if ctx.stop_event is None or not ctx.stop_event.is_set():
+            return None
+        if worker_app.cancel_requested(ctx.task.id):
+            return "cancelled"
+        return "fenced"
+
+    return probe
+
+
+def _decode_text_files(files: dict[str, bytes], *, kind: str) -> dict[str, str]:
+    """声明文件字节按契约文本解码（MPS/解文件均为文本形态；损坏可见失败）。"""
+    try:
+        return {path: data.decode("utf-8") for path, data in files.items()}
+    except UnicodeDecodeError as exc:
+        raise EngineRunError(f"{kind}含非文本字节，违反文本形态契约: {exc}") from exc
+
+
+def _execute_compute(ctx: RunContext) -> dict:
+    """计算任务真实链: 快照恢复 → 生成 → 执行 → 适配 → 证据 payload。
+
+    全程只按 application.worker 阶段网关结果驱动，不解释任何输入字段：
+    快照/冻结件缺失即确定性失败；预测需求明确拒绝（不 stub、不回退）；
+    取消/租约失效收拢为 TaskCancelled；非成功回执与不可映射结果收拢为
+    EngineRunError（结构化失败，不伪装成功）。
+    """
+    task = ctx.task
+    snapshot = ctx.snapshot
+    if snapshot is None:
+        raise SnapshotInputError(
+            "计算快照缺失", location={"object_type": "calc_snapshot"})
+    plane = ctx.compute
+    if plane is None:
+        raise worker_app.ComputationUnavailableError(
+            "计算执行面未装配，计算任务不可执行", reason="compute-plane-missing")
+    with ctx.session_factory() as db:
+        inputs = worker_app.load_compute_inputs(db, task.project_id, snapshot)
+    if inputs is None:
+        raise SnapshotInputError(
+            "快照缺少计算必需的冻结输入",
+            params={"task_id": task.id, "snapshot_id": snapshot.id},
+            location={"object_type": "calc_snapshot", "object_id": snapshot.id},
+        )
+    ctx.progress(10.0, "materialize", None)
+    bundle = worker_app.generate_bundle(plane, inputs)
+    ctx.progress(40.0, "generate", None)
+    attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
+    receipt, collected = worker_app.execute_bundle(
+        plane=plane, bundle=bundle, attempt=attempt, stop=_stop_probe(ctx),
+    )
+    ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
+    if receipt.status in ("cancelled", "fenced"):
+        raise TaskCancelled("solve")
+    if receipt.status != "succeeded":
+        raise EngineRunError(
+            f"求解执行未成功(status={receipt.status}, "
+            f"receipt={receipt.receipt_id}): {receipt.error}"
+        )
+    result = worker_app.adapt_result(plane, bundle, receipt, collected)
+    outcome = worker_app.business_outcome_for(result)
+    if outcome is None:
+        raise EngineRunError(
+            f"统一结果无法映射业务结局(execution={result.execution_status}, "
+            f"math={result.math_status}, receipt={receipt.receipt_id})"
+        )
+    return {
+        "outcome": outcome,
+        "compute_result": result.to_dict(),
+        "receipt": receipt.to_dict(),
+        "bundle_manifest": bundle.manifest.to_dict(),
+        "bundle_files": _decode_text_files(dict(bundle.files), kind="bundle"),
+        "solution": _decode_text_files(dict(collected), kind="solution"),
+    }
+
+
 def dispatch(
     ctx: RunContext,
 ) -> dict:
     """按任务类型分派到执行器(返回结果 payload, 含显式 outcome)。
 
     未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
-    未知任务类型抛 InvalidTaskTypeError。计算类任务只按 application.worker
-    计算阶段网关结果驱动: 任务/快照记录缺失即确定性失败, 不解释任何输入
-    字段。计算执行编排属于 0.9：即使生成器目录已含真实 provider，此处也
-    不启动 solver，明确 unavailable；生产计算 Worker 会在组合根阶段拒绝
-    启动，因此不会领取后再走到这里。
+    未知任务类型抛 InvalidTaskTypeError。计算类任务走真实链
+    (``_execute_compute``): 任务/快照记录缺失即确定性失败, 不解释任何
+    输入字段。
     """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:
-        if ctx.snapshot is None:
-            raise SnapshotInputError(
-                "计算快照缺失", location={"object_type": "calc_snapshot"})
-        raise worker_app.ComputationUnavailableError(reason="no-provider")
+        return _execute_compute(ctx)
     if task_type == "report":
         return executors.execute_check(ctx)
     if task_type == "dataset_build":
@@ -114,6 +193,7 @@ def run_task(
     *,
     worker_id: str = "",
     stop_event: Any = None,
+    compute: Any = None,
 ) -> str:
     """执行已领取的任务并落终态(带 fencing 提交/失败/取消收拢)。
 
@@ -122,6 +202,7 @@ def run_task(
             开短会话, 本函数不持有跨阶段的 Session)。
         claim: acquire_attempt 的领取结果(尝试 + 租约 + token)。
         stop_event: 取消/优雅退出事件(透传给执行器检查点与隔离子进程)。
+        compute: 计算执行面(组合根装配; 计算任务必需, 缺失即明确不可用)。
     返回:
         终态状态: completed / failed / cancelled / lease_rejected。
     事务边界: 本函数不调用 commit/rollback, 不持有跨阶段的 Session; 任务/
@@ -152,7 +233,7 @@ def run_task(
     ctx = RunContext(
         task=task, claim=claim, session_factory=factory, worker_id=worker_id,
         stop_event=stop_event, snapshot=snapshot,
-        progress_fn=_report_progress,
+        progress_fn=_report_progress, compute=compute,
     )
     try:
         payload = dispatch(ctx)

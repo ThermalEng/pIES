@@ -1,0 +1,250 @@
+"""计算 Worker 真实链端到端(B4)：API 提交闸门 → 领取 → 真实执行 → 证据封存。
+
+- 数据库: SQLite :memory:(StaticPool 共享连接);
+- 队列: IESPLAN_QUEUE=memory 内存后端;
+- 执行: 组合根真实装配(assemble_compute_worker: 生成器/执行器/适配器
+  目录 + Settings 派生策略 + 通用运行时) + 镜像内 HiGHS 适配 executable。
+提交走任务 API 真实闸门(装配校验/冻结/引用解析)，不手造快照行。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Iterator
+from pathlib import Path
+
+os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
+os.environ.setdefault("IESPLAN_QUEUE", "memory")
+
+import pytest  # noqa: E402
+from assembly_fixture import declare_compute_device  # noqa: E402
+from auth_helpers import make_user  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import create_engine, select  # noqa: E402
+from sqlalchemy.engine import Engine  # noqa: E402
+from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+from test_tasks_api import (  # noqa: E402
+    _CONFIG_BODY,
+    _bind_and_freeze,
+    _create_project,
+    _declare_assembly_sections,
+    _declare_finance,
+    _h,
+    _set_explicit_calc,
+    _submit_task,
+)
+
+from iesplan.api import projects as projects_api  # noqa: E402
+from iesplan.api import tasks as tasks_api  # noqa: E402
+from iesplan.api.config import config_router  # noqa: E402
+from iesplan.api.deps import get_request_db  # noqa: E402
+from iesplan.application import worker as worker_app  # noqa: E402
+from iesplan.bootstrap import assemble_compute_worker  # noqa: E402
+from iesplan.db import Base  # noqa: E402
+from iesplan.main import create_app  # noqa: E402
+from iesplan.results import persistence as results_store  # noqa: E402
+from iesplan.storage import get_object  # noqa: E402
+from iesplan.tasks import queue  # noqa: E402
+from iesplan.tasks.persistence import Task, TaskDiagnostic  # noqa: E402
+from iesplan.worker import runner  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# 测试环境
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def engine() -> Iterator[Engine]:
+    """模块级 SQLite 内存引擎(StaticPool: 所有会话共享同一连接)。"""
+    eng = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(eng)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _clean_state(engine: Engine) -> Iterator[None]:
+    """每个测试前重置内存队列, 结束后清空全部表(避免测试间串扰)。"""
+    queue.force_memory()
+    yield
+    with engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+
+
+@pytest.fixture()
+def db(engine: Engine) -> Iterator[Session]:
+    """函数级共享会话(服务与测试共用, 端点内 commit)。"""
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    with factory() as session:
+        yield session
+
+
+@pytest.fixture()
+def client(engine: Engine, db: Session, tmp_path: Path) -> Iterator[TestClient]:
+    """测试客户端: 挂载项目+任务路由, 替换 get_request_db 依赖, 对象存储指向临时目录。"""
+    from iesplan.config import settings  # noqa: E402
+
+    settings.data_dir = tmp_path
+
+    app = create_app()
+    app.include_router(projects_api.router)
+    app.include_router(tasks_api.router)
+    app.include_router(config_router)
+
+    def _override_request_db() -> Iterator[Session]:
+        yield db
+
+    app.dependency_overrides[get_request_db] = _override_request_db
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
+
+
+@pytest.fixture()
+def plane():
+    """真实计算执行面(组合根装配，与 Worker 进程同一构成)。"""
+    ctx = assemble_compute_worker()
+    plane = ctx.compute_execution_plane()
+    assert plane is not None
+    return plane
+
+
+def _save_config_body(client: TestClient, pid: int, user, body: dict) -> int:
+    """保存一份计算配置正文, 返回 revision。"""
+    resp = client.put(
+        f"/api/projects/{pid}/config",
+        json={"calculation_config": body, "expected_revision": None},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _prepare_with_planning(client: TestClient, db: Session, user, planning_body: dict) -> int:
+    """准备可提交计算任务的项目（规划变量目标可定制，电池容量保持固定）。
+
+    步骤同 test_tasks_api._prepare_project：建项目 + 显式财务/装配声明 +
+    显式计算声明 + 固化版本；规划修订由调用方给定（额定功率类仿射界
+    接管可降，容量变量会引入除法不支持）。
+    """
+    from iesplan.application import configuration as config_cases  # noqa: E402
+
+    pid = _create_project(client, user, "链测试项目")
+    _declare_finance(db, user, pid)
+    device_ref, revision = declare_compute_device(client, pid, _h(client, user))
+    config_cases.save_planning_config(db, pid, planning_body, None, user.id)
+    revision = _set_explicit_calc(client, pid, user, revision)
+    revision = _declare_assembly_sections(client, pid, user, revision, {device_ref: {"type": "none"}})
+    _bind_and_freeze(client, pid, user, None, revision=revision)
+    return pid
+
+
+def _submit_calc_task(client: TestClient, db: Session, config_body: dict, planning_body: dict) -> int:
+    """准备项目→保存配置→提交 optimization 任务，返回 task_id。"""
+    user = make_user(db, "chain_owner")
+    pid = _prepare_with_planning(client, db, user, planning_body)
+    rev = _save_config_body(client, pid, user, config_body)
+    status, body = _submit_task(
+        client, pid, user, config={"config_revision": rev}, idempotency_key="chain-e2e-1"
+    )
+    assert status == 201, body
+    return int(body["task"]["id"])
+
+
+#: 规划体：目标常量 + 电池额定功率规划变量（仿射界接管）。
+#: device_ref 取装配实例引用（夹具电池名为 bat1）。
+PLANNING_BODY = {
+    "objective": {"sense": "minimize", "expression": "0"},
+    "variables": {
+        "cap": {
+            "device_ref": "bat1",
+            "parameter": "rated_power_kw",
+            "lower_bound": "0",
+            "upper_bound": "100",
+            "unit": "kW",
+        },
+    },
+    "constraints": {},
+}
+
+
+def _claim(db: Session, task_id: int) -> worker_app.Claim:
+    """领取任务并提交事务(模拟 Daemon 领取动作)。"""
+    claim = worker_app.acquire_attempt(db, task_id, "cw-e2e")
+    assert claim is not None
+    db.commit()
+    return claim
+
+
+def _run(engine: Engine, claim: worker_app.Claim, plane) -> str:
+    """经 worker.runner 跑真实链（与 Daemon 同一调用形状，各阶段开短会话）。"""
+
+    def factory() -> Session:
+        return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+
+    return runner.run_task(factory, claim, worker_id="cw-e2e", compute=plane)
+
+
+# ---------------------------------------------------------------------------
+# 真实链
+# ---------------------------------------------------------------------------
+
+
+class TestComputeChainEndToEnd:
+    def test_real_higs_task_completes_with_sealed_evidence(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """HiGHS 实任务：提交 → 领取 → 真实求解 → completed + 证据封存。
+
+        断言：终态 completed、业务结局正常完成、统一结果 solved、回执
+        succeeded 且 executable 为冻结精确引用、证据封存 Bundle/回执/
+        声明解/统一结果。
+        """
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        assert _run(engine, claim, plane) == "completed"
+
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task.status == "completed"
+        assert task.business_outcome == "normal_completion"
+
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        assert sealed["outcome"] == "normal_completion"
+        assert sealed["compute_result"]["execution_status"] == "completed"
+        assert sealed["compute_result"]["math_status"] == "solved"
+        assert sealed["compute_result"]["receipt_id"] == sealed["receipt"]["receipt_id"]
+        assert sealed["receipt"]["status"] == "succeeded"
+        assert sealed["receipt"]["executable_ref"] == "ies.solver.highs@1.7.2"
+        assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@1.0.0")
+        assert set(sealed["solution"]) == {"output/solution.sol"}
+
+    def test_prediction_required_fails_with_clear_reason(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """预测需求明确拒绝：配置含 predictions → failed + 原因可见，不执行。"""
+        body = dict(_CONFIG_BODY)
+        body["predictions"] = [
+            {
+                "target": {"instance": "d1", "interface": "e_load"},
+                "algorithm": "ies.predict.naive@1.0.0",
+                "parameters": {},
+            }
+        ]
+        task_id = _submit_calc_task(client, db, body, dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        assert _run(engine, claim, plane) == "failed"
+
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task.status == "failed"
+        diagnostics = (
+            db.execute(select(TaskDiagnostic).where(TaskDiagnostic.task_id == task_id)).scalars().all()
+        )
+        assert any("prediction-not-supported" in (d.message or "") for d in diagnostics)

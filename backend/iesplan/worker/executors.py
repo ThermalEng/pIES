@@ -1,6 +1,7 @@
 """I/O 与结果检查任务的执行上下文和入口。
 
-计算 Worker 在 0.8 前由组合根拒绝启动；本模块不保留求解执行占位或旧引擎。
+计算执行面由组合根装配经 ``RunContext.compute`` 传入；本模块不保留
+求解执行占位或旧引擎。
 
 I/O 任务（dataset_build/export/import）执行入口同样未实现：抛 tasks 域
 明确执行不可用错误，经 runner 收拢为结构化失败（failed +
@@ -59,6 +60,7 @@ class RunContext:
     progress_fn: Callable[[float, str, dict | None], None] | None = None
     snapshot: worker_app.CalcSnapshotRecord | None = None  # 计算类任务快照记录; 网关读出
     io_params: dict[str, Any] = field(default_factory=dict)  # io 任务参数(队列消息扩展)
+    compute: worker_app.ComputeExecutionPlane | None = None  # 计算执行面(组合根装配; 无则计算任务不可执行)
 
     def progress(self, percent: float, stage: str, detail: dict | None = None) -> None:
         """阶段化进度报告（PG 持久进度 + Redis 秒级进度，见 contracts §快照与异步契约）。"""

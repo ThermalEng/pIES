@@ -20,6 +20,9 @@ commit/rollback)。
   ``get_project_content_id``/``load_version_content``/
   ``get_dataset_version_record``/``get_dataset_data_object``/
   ``load_dataset_blob``/``parse_dataset_csv``/``count_completed_samples``;
+- 计算三段: ``load_compute_inputs``/``generate_bundle``/
+  ``execute_bundle``/``adapt_result``(配套 ``build_attempt_context``/
+  ``business_outcome_for``);
 - report 检查: ``locate_report_evidence``/``assess_report_stage``。
 
 不可变结果与错误语义: ``Claim``/``SubmitReceipt``/``ReportCheckResult``/
@@ -40,7 +43,16 @@ from iesplan.application.worker.attempt_cases import (
     report_attempt_progress,
     submit_attempt_result,
 )
-from iesplan.computation import ComputationUnavailableError
+from iesplan.application.worker.compute_cases import (
+    ComputeExecutionPlane,
+    ComputeInputs,
+    adapt_result,
+    build_attempt_context,
+    business_outcome_for,
+    execute_bundle,
+    generate_bundle,
+    load_compute_inputs,
+)
 from iesplan.application.worker.lease_cases import (
     CalcSnapshotRecord,
     Claim,
@@ -67,6 +79,7 @@ from iesplan.application.worker.runner_cases import (
     load_version_content,
     parse_dataset_csv,
 )
+from iesplan.computation import ComputationUnavailableError
 from iesplan.tasks import (
     BUSINESS_OUTCOMES,
     ExecutionUnavailableError,
@@ -77,23 +90,31 @@ __all__ = [
     "CalcSnapshotRecord",
     "Claim",
     "ComputationUnavailableError",
+    "ComputeExecutionPlane",
+    "ComputeInputs",
     "ExecutionUnavailableError",
     "LeaseRejectedError",
     "ReportCheckResult",
     "SubmitReceipt",
     "TaskRecord",
     "acquire_attempt",
+    "adapt_result",
     "assess_report_stage",
+    "build_attempt_context",
+    "business_outcome_for",
     "cancel_attempt",
     "cancel_requested",
     "count_completed_samples",
     "dequeue_task",
+    "execute_bundle",
     "fail_attempt",
+    "generate_bundle",
     "get_dataset_data_object",
     "get_dataset_version_record",
     "get_project_content_id",
     "get_snapshot_record",
     "get_task_record",
+    "load_compute_inputs",
     "load_dataset_blob",
     "load_version_content",
     "locate_report_evidence",

@@ -5,17 +5,18 @@
 ``ApplicationContext`` 或明确启动失败。
 
 - ``assemble_api``: 装配 database + storage + devices 2.0 注册表 +
-  生成器目录(显式注册内置真实 provider);
-- ``assemble_compute_worker``: 显式构建生成器目录(含内置真实
-  provider)，但计算执行编排属于 0.9，本轮仍明确拒绝启动，不启动
-  solver；
+  生成器目录(显式注册内置真实 provider)；不装配执行面（执行器目录/
+  运行时/执行策略只归计算 Worker）;
+- ``assemble_compute_worker``: 装配 database + storage + devices 2.0
+  注册表 + 生成器目录 + 执行器目录(含 HiGHS 本地进程绑定) + 结果适配器
+  目录 + 统一 Settings 派生的 DeploymentPolicy + 通用 SolverRuntime；
+  任一缺失即拒绝启动，不领取无法执行的计算任务；
 - ``assemble_io_worker``: I/O 所需子集(database + storage, 不含 devices
-  注册表与生成器目录)。
+  注册表与生成器目录）。
 
 失败语义: 任一必需依赖装配失败即抛异常(启动失败), 不发布半初始化
-状态, 不设 fallback。计算 Worker 在组合根明确拒绝启动(执行编排属于
-0.9)，因而不会领取无法执行的计算任务。provider 选择与装配只归本组合
-根；API/Worker 不得自行发现或动态加载 provider，不做动态扫描。
+状态, 不设 fallback。provider 选择与装配只归本组合根；API/Worker
+不得自行发现或动态加载 provider，不做动态扫描。
 
 本包只做装配与健康聚合, 不实现业务规则, 不新增全局 registry(装配结果
 由调用方持有, API 进程挂在 ``app.state.bootstrap_context``)。
@@ -29,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Never
+from typing import Any
 
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
@@ -58,16 +59,47 @@ class ApplicationContext:
     #: 已发布的生成器目录(未装配该能力时为 None; 内置真实 provider
     #: 由组合根显式注册，未知引用选择时即明确不可用)
     generator_registry: Any | None = None
+    #: 已发布的执行器目录(只归计算 Worker 装配; API 不装配执行面)
+    executor_registry: Any | None = None
+    #: 已发布的结果适配器目录(只归计算 Worker 装配)
+    result_adapter_registry: Any | None = None
+    #: 通用求解运行时(只归计算 Worker 装配)
+    solver_runtime: Any | None = None
+    #: 统一 Settings 派生的部署执行策略(只归计算 Worker 装配)
+    deployment_policy: Any | None = None
+
+    def compute_execution_plane(self) -> Any | None:
+        """计算执行面句柄：生成器/执行器/适配器目录与运行时四件齐备才装配。
+
+        任一缺席返回 None（计算 Worker 构造即拒绝，不领取任务）。
+        """
+        if (
+            self.generator_registry is None
+            or self.executor_registry is None
+            or self.result_adapter_registry is None
+            or self.solver_runtime is None
+        ):
+            return None
+        from iesplan.application.worker import ComputeExecutionPlane
+
+        return ComputeExecutionPlane(
+            generator_registry=self.generator_registry,
+            executor_registry=self.executor_registry,
+            adapter_registry=self.result_adapter_registry,
+            runtime=self.solver_runtime,
+        )
 
     def health(self) -> dict[str, str]:
         """各已装配依赖的健康状态(值仅为 ``"ok"`` 或 ``"unavailable"``)。
 
         - ``db``: 始终上报(会话 SELECT 1 探活);
-        - ``storage`` / ``registry`` / ``generators``: 仅在装配了该能力时
-          上报; 未装配(能力子集, 如 Worker 上下文)时不出现该键, 不伪装健康。
-        - ``generators`` 只探针目录本身可确定性快照(装配健康), 空表仍为
-          ``"ok"``; 未注册引用不可用语义在选择时表达(``get``/``resolve``
-          抛 ``ComputationUnavailableError``), 不污染就绪状态。
+        - ``storage`` / ``registry`` / ``generators`` / ``executors``:
+          仅在装配了该能力时上报; 未装配(能力子集, 如 Worker 上下文)
+          时不出现该键, 不伪装健康。
+        - ``generators`` / ``executors`` 只探针目录本身可确定性快照
+          (装配健康), 空表仍为 ``"ok"``; 未注册引用不可用语义在选择时
+          表达(``get``/``resolve`` 抛 ``ComputationUnavailableError``),
+          不污染就绪状态。
         探针失败原因只进日志, 不进入返回值(避免内部细节外泄)。
         """
         result: dict[str, str] = {}
@@ -79,6 +111,10 @@ class ApplicationContext:
         if self.generator_registry is not None:
             result["generators"] = (
                 "ok" if _check_generator_registry(self.generator_registry) else "unavailable"
+            )
+        if self.executor_registry is not None:
+            result["executors"] = (
+                "ok" if _check_executor_registry(self.executor_registry) else "unavailable"
             )
         return result
 
@@ -149,6 +185,87 @@ def _check_generator_registry(registry: Any) -> bool:
         return False
 
 
+def _check_executor_registry(registry: Any) -> bool:
+    """执行器目录装配检查: 已发布目录可给出确定性快照(语义同生成器目录)。"""
+    try:
+        registry.snapshot()
+        return True
+    except Exception:
+        logger.exception("组合根执行器目录探活失败")
+        return False
+
+
+def _deployment_policy_from_settings() -> Any:
+    """从统一 Settings 构造部署执行策略(组合根唯一装配点，不复制常量)。
+
+    数值与 allowlist 全部取自 pies.toml 经 Settings 类型化的部署值；
+    Settings 缺失/非法在进程启动时已失败，此处直接装配、不重复校验。
+    """
+    from iesplan.computation.runtime import DeploymentPolicy
+    from iesplan.config import settings
+
+    return DeploymentPolicy(
+        executables=tuple(settings.solver_allowed_executables),
+        environment_vars=tuple(settings.solver_allowed_environment_vars),
+        max_timeout_seconds=settings.solver_max_timeout_seconds,
+        max_memory_mib=settings.solver_max_memory_mib,
+        max_cpu_cores=settings.solver_max_cpu_cores,
+        allow_network=settings.solver_allow_network,
+        max_output_files=settings.solver_max_output_files,
+        max_output_bytes=settings.solver_max_output_bytes,
+    )
+
+
+def _assemble_execution_plane(policy: Any) -> tuple[Any, Any, Any]:
+    """装配计算执行面三件套(执行器目录 + 适配器目录 + 通用运行时)。
+
+    HiGHS 本地进程绑定与结果适配器均为组合根显式注册的内置真实
+    provider；任一不可用(缺二进制/版本自检失败)即整体拒绝，不发布
+    半表，不回退。执行器引用取生成器声明的配套值，不另存第二份。
+    """
+    from iesplan.computation import (
+        HIGHS_ADAPTER,
+        HIGHS_ADAPTER_PATH,
+        HIGHS_EXECUTABLE_REF,
+        HIGHS_VERSION,
+        ExecutableReadiness,
+        ExecutorDescriptor,
+        LocalExecutable,
+        LocalProcessProvider,
+        SolverRuntime,
+        build_executor_registry,
+        build_result_adapter_registry,
+    )
+    from iesplan.computation.generators.highs_milp import EXECUTOR_REF
+    from iesplan.computation.runtime import validate_highs_arguments
+
+    executor_id, _, executor_version = EXECUTOR_REF.rpartition("@")
+    local_provider = LocalProcessProvider(
+        ExecutorDescriptor(
+            executor_id=executor_id,
+            version=executor_version,
+            executables=(HIGHS_EXECUTABLE_REF,),
+        ),
+        (
+            LocalExecutable(
+                ref=HIGHS_EXECUTABLE_REF,
+                path=HIGHS_ADAPTER_PATH,
+                argv_validator=validate_highs_arguments,
+                readiness=ExecutableReadiness(
+                    version=HIGHS_VERSION,
+                    self_test=("--self-test",),
+                    output_path="self-test.sol",
+                ),
+            ),
+        ),
+        base_environ={},
+    )
+    executor_registry = build_executor_registry([local_provider])
+    adapter_registry = build_result_adapter_registry([HIGHS_ADAPTER])
+    runtime = SolverRuntime(executor_registry, policy)
+    return executor_registry, adapter_registry, runtime
+
+
 def _resolve_queue_mode() -> str:
     """解析队列模式: 组合根唯一读取 IESPLAN_QUEUE 的位置(默认 auto)。"""
     import os
@@ -208,6 +325,7 @@ def _assemble(
     with_storage: bool,
     with_registry: bool,
     with_generators: bool,
+    with_execution_plane: bool,
     seed_admin: bool,
 ) -> ApplicationContext:
     """通用装配：加载领域门面后建表、部署触发器并装配能力子集。
@@ -249,14 +367,29 @@ def _assemble(
         )
 
         generator_registry = build_registry((HIGHS_MILP_PROVIDER,))
+    # 6. 计算执行面(只归计算 Worker: 执行器/适配器目录 + 通用运行时 +
+    #    统一 Settings 派生的部署策略; 任一缺失即拒绝启动)
+    executor_registry: Any | None = None
+    result_adapter_registry: Any | None = None
+    solver_runtime: Any | None = None
+    deployment_policy: Any | None = None
+    if with_execution_plane:
+        deployment_policy = _deployment_policy_from_settings()
+        executor_registry, result_adapter_registry, solver_runtime = _assemble_execution_plane(
+            deployment_policy
+        )
     context = ApplicationContext(
         session_factory=db_module.SessionLocal,
         storage=storage,
         device_registry=device_registry,
         generator_registry=generator_registry,
+        executor_registry=executor_registry,
+        result_adapter_registry=result_adapter_registry,
+        solver_runtime=solver_runtime,
+        deployment_policy=deployment_policy,
     )
     logger.info(
-        "组合根装配完成: storage=%s registry=%s generators=%s",
+        "组合根装配完成: storage=%s registry=%s generators=%s executors=%s",
         "assembled" if storage is not None else "skipped",
         (
             f"assembled({len(device_registry.snapshot())} devices)"
@@ -268,37 +401,55 @@ def _assemble(
             if generator_registry is not None
             else "skipped"
         ),
+        (
+            f"assembled({len(executor_registry.snapshot())} executors)"
+            if executor_registry is not None
+            else "skipped"
+        ),
     )
     return context
 
 
 def assemble_api() -> ApplicationContext:
-    """装配 API 进程：database、storage、devices 2.0 注册表与生成器目录。"""
-    return _assemble(with_storage=True, with_registry=True, with_generators=True, seed_admin=True)
+    """装配 API 进程：database、storage、devices 2.0 注册表与生成器目录。
 
-
-def assemble_compute_worker() -> Never:
-    """装配计算 Worker：显式构建生成器目录(含内置真实 provider)。
-
-    计算执行编排属于 0.9：即使目录已含真实 provider，本轮仍明确拒绝
-    启动，不启动 solver，避免领取后再失败。
+    API 不装配执行面（执行器目录/运行时/执行策略只归计算 Worker）。
     """
-    from iesplan.computation import ComputationUnavailableError
-    from iesplan.computation.generators import (
-        HIGHS_MILP_PROVIDER,
-        build_registry,
+    return _assemble(
+        with_storage=True,
+        with_registry=True,
+        with_generators=True,
+        with_execution_plane=False,
+        seed_admin=True,
     )
 
-    build_registry((HIGHS_MILP_PROVIDER,))
-    raise ComputationUnavailableError(
-        "计算 Worker 执行编排属于 0.9，本轮不启动 solver，拒绝启动",
-        reason="worker-not-wired",
+
+def assemble_compute_worker() -> ApplicationContext:
+    """装配计算 Worker：database、storage、devices 2.0 注册表、生成器目录
+    与完整计算执行面（执行器目录 + 适配器目录 + 通用运行时 + 统一 Settings
+    派生的 DeploymentPolicy）。
+
+    任一必需依赖缺失（缺二进制/版本自检失败/策略非法）即抛异常拒绝启动，
+    不领取无法执行的计算任务。
+    """
+    return _assemble(
+        with_storage=True,
+        with_registry=True,
+        with_generators=True,
+        with_execution_plane=True,
+        seed_admin=True,
     )
 
 
 def assemble_io_worker() -> ApplicationContext:
-    """装配 I/O Worker：database 与 storage，不含 devices 注册表与生成器目录。"""
-    return _assemble(with_storage=True, with_registry=False, with_generators=False, seed_admin=True)
+    """装配 I/O Worker：database 与 storage，不含 devices 注册表、生成器目录与执行面。"""
+    return _assemble(
+        with_storage=True,
+        with_registry=False,
+        with_generators=False,
+        with_execution_plane=False,
+        seed_admin=True,
+    )
 
 
 __all__ = [

@@ -42,7 +42,7 @@ SHUTDOWN_GRACE = 30.0
 
 
 class Worker:
-    """后台任务 Worker 主循环；当前部署只启动 I/O Worker。"""
+    """后台任务 Worker 主循环；计算 Worker 需组合根装配执行面后启动。"""
 
     def __init__(
         self,
@@ -50,6 +50,7 @@ class Worker:
         worker_id: str | None = None,
         *,
         session_factory: Any,
+        compute: Any = None,
         poll_interval: float = POLL_INTERVAL,
         heartbeat_interval: float = HEARTBEAT_INTERVAL,
         renew_interval: float = RENEW_INTERVAL,
@@ -58,8 +59,11 @@ class Worker:
             raise ValueError(f"非法 worker_type: {worker_type!r}(可选 compute/io)")
         if session_factory is None:
             raise TypeError("Worker 缺少必需的 session_factory(由组合根装配显式传入)")
+        if worker_type == "compute" and compute is None:
+            raise TypeError("计算 Worker 缺少必需的执行面 compute(由组合根装配显式传入)")
         self.worker_type = worker_type
         self.pool = "compute" if worker_type == "compute" else "io"
+        self.compute = compute
         self.worker_id = worker_id or self._default_worker_id()
         # 会话工厂只能由 bootstrap 装配的 ApplicationContext 显式提供(main 传入
         # ctx.session_factory); 无缺省、无回退, 缺失即构造失败。
@@ -202,7 +206,7 @@ class Worker:
         try:
             runner.run_task(
                 self.session_factory, claim, worker_id=self.worker_id,
-                stop_event=self._cancel_event,
+                stop_event=self._cancel_event, compute=self.compute,
             )
         except Exception:  # noqa: BLE001 - 线程边界兜底, 防止静默死亡
             logger.exception("任务线程异常: task=%s", claim.task_id)
@@ -235,8 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     """Worker 进程入口(python -m iesplan.worker.main)。
 
     全部运行时能力经 bootstrap 组合根装配: 按 worker_type 选择
-    assemble_compute_worker()/assemble_io_worker(), Daemon 的会话工厂与
-    能力取自装配好的 ApplicationContext。计算能力尚未实现时
+    assemble_compute_worker()/assemble_io_worker(), Daemon 的会话工厂、
+    计算执行面与能力取自装配好的 ApplicationContext。计算执行面缺失时
     assemble_compute_worker 直接抛异常，Daemon 不启动、不领取任务。
     """
     parser = argparse.ArgumentParser(description="pIES 计算/I/O Worker")
@@ -258,10 +262,12 @@ def main(argv: list[str] | None = None) -> int:
 
     assemble = assemble_compute_worker if worker_type == "compute" else assemble_io_worker
     ctx = assemble()
+    compute = ctx.compute_execution_plane() if worker_type == "compute" else None
     Worker(
         worker_type=worker_type,
         worker_id=args.worker_id,
         session_factory=ctx.session_factory,
+        compute=compute,
     ).run()
     return 0
 
