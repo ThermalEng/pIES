@@ -118,7 +118,8 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     execute 进度与终态写回。返回 (payload, output_files)：payload 只含
     JSON 兼容字段；output_files 为待封存原始字节（路径 → (字节, 声明
     媒体类型)，媒体类型取 manifest/回执声明值，原样传递不做文本校验），
-    由提交单元同事务封存并注入描述子，本函数不写数据库。
+    由提交单元随提交在同一数据库事务内建对象元数据/引用并注入描述子
+    （Blob 字节落盘不参与原子提交），本函数不写数据库。
     """
     task = ctx.task
     snapshot = ctx.snapshot
@@ -180,8 +181,9 @@ def dispatch(
     未实现的 I/O 执行器抛 tasks 域执行不可用错误(上抛, 不落成功);
     未知任务类型抛 InvalidTaskTypeError。计算类任务走真实链
     (``_execute_compute``): 任务/快照记录缺失即确定性失败, 不解释任何
-    输入字段；输出文件原始字节随 payload 之外返回，由提交单元同事务
-    封存（本函数不写数据库）。
+    输入字段；输出文件原始字节随 payload 之外返回，由提交单元随提交
+    在同一数据库事务内建元数据/引用（Blob 字节落盘不参与原子提交，
+    本函数不写数据库）。
     """
     task_type = ctx.task.type
     if task_type in COMPUTE_TASK_TYPES:
@@ -230,7 +232,8 @@ def run_task(
     下运行, 领取/进度/续租/评估写入/提交/失败/取消各自的新短会话短事务
     由 application.worker 用例拥有并提交(领取已在执行前提交, 故执行期
     回滚不会丢失租约; 失败收拢不再误判为 lease_rejected)。计算输出字节
-    由提交单元同事务封存(封存/证据/引用/完成一次提交), 本函数只传参。
+    由提交单元随提交在同一数据库事务内建元数据/引用(封存/证据/引用/
+    完成一次提交; Blob 字节落盘不参与原子提交), 本函数只传参。
     """
     factory = session_factory
     # 输入加载: 短读会话, 读完即关(task/snapshot 为脱离会话的值对象)

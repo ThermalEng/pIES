@@ -34,17 +34,21 @@ from iesplan.main import create_app
 def stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """向 sys.modules 注入桩 iesplan.bootstrap, 记录各 assemble 调用次数。
 
-    桩上下文只提供 Daemon 启动所需的会话工厂。
+    桩上下文只提供 Daemon 启动所需的会话工厂与计算执行面哨兵。
     """
     calls: dict[str, int] = {"compute": 0, "io": 0}
     failures: dict[str, Exception] = {}
     sentinel_factory = object()
+    sentinel_plane = object()
 
     def _compute() -> SimpleNamespace:
         calls["compute"] += 1
         if "compute" in failures:
             raise failures["compute"]
-        return SimpleNamespace(session_factory=sentinel_factory)
+        return SimpleNamespace(
+            session_factory=sentinel_factory,
+            compute_execution_plane=lambda: sentinel_plane,
+        )
 
     def _io() -> SimpleNamespace:
         calls["io"] += 1
@@ -60,6 +64,7 @@ def stub_bootstrap(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "calls": calls,
         "failures": failures,
         "session_factory": sentinel_factory,
+        "compute_plane": sentinel_plane,
     }
 
 
@@ -125,9 +130,10 @@ def test_main_worker_type_from_env(
 def test_main_session_factory_comes_from_context(
     stub_bootstrap: dict[str, Any], fake_worker: dict[str, Any]
 ) -> None:
-    """Daemon 会话工厂必须取自装配好的 context, 不再直连 SessionLocal。"""
+    """Daemon 会话工厂与计算执行面必须取自装配好的 context, 不再直连 SessionLocal。"""
     _run_main(["--worker-type", "compute"])
     assert fake_worker["kwargs"]["session_factory"] is stub_bootstrap["session_factory"]
+    assert fake_worker["kwargs"]["compute"] is stub_bootstrap["compute_plane"]
 
 
 # ---------------------------------------------------------------------------
