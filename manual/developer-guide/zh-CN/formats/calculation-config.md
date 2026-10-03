@@ -17,7 +17,7 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
 | `generator` | `<稳定ID>@<语义化版本>` | 所选生成器精确引用 |
 | `solver` | `<稳定ID>@<语义化版本>` | 所选求解器精确引用 |
 | `precision` | `low`、`medium`、`high` | 计算精度（与界面精度语义一致） |
-| `convergence` | null 或 `{tolerance, max_iterations}` | 阶段二收敛：正有限容差与正整数迭代数；多个 `data_predict` 时是否必填由后续 application 结合 artifact 判断 |
+| `convergence` | null 或 `{tolerance, max_iterations}` | 阶段二收敛：正有限容差与正整数总求解轮数上限（阶段一计第 1 轮，每阶段二迭代都真实求解；多个 `data_predict` 时必填且上限至少为 2，由提交门 TASK-REQ-012 核对） |
 | `time_limit_seconds` | 正整数 | 时间限制（秒） |
 | `options` | 对象（可空对象，不接受 null） | 生成/求解选项；生成前由所选 descriptor 的 options schema 核对，未知字段与类型/范围错误直接拒绝 |
 | `seed` | 整数（不接受布尔值）或 null | 随机种子 |

@@ -424,6 +424,8 @@ def _check_prediction_inputs(
     - 配置中每个预测目标必须命中装配的 data_predict 绑定（实例 + 接口），否则 400 TASK-REQ-010；
     - 装配中每个 data_predict 绑定必须被配置预测覆盖（无算法无法物化），否则 400 TASK-REQ-011；
     - data_predict 绑定多于 1 个且 convergence 为空 → 400 TASK-REQ-012（0/1 个时收敛可空，直通阶段一）；
+      多于 1 个且 convergence.max_iterations（总求解轮数上限，阶段一计第 1 轮）小于 2
+      → 400 TASK-REQ-012（上限为 1 将跳过阶段二求解，不允许）；
     - 预测目录可用时(B5-2)：每个预测算法须精确解析，否则 400 TASK-REQ-013；
       算法不支持该绑定目标类型时 → 400 TASK-REQ-014。
     配置正文形态由保存入口冻结，此处直接使用，不重复校验字段形态。
@@ -459,6 +461,24 @@ def _check_prediction_inputs(
             params={"project_id": project_id, "predict_target_count": len(bound)},
             location={"object_type": "calculation_config", "object_id": project_id, "field": "convergence"},
         )
+    if len(bound) > 1:
+        max_iterations = int(calc_config["convergence"]["max_iterations"])
+        if max_iterations < 2:
+            raise InvalidRequestError(
+                "多个 data_predict 目标要求阶段二至少求解一轮 "
+                "(max_iterations 为总求解轮数上限，阶段一计第 1 轮，至少为 2)",
+                code="TASK-REQ-012",
+                params={
+                    "project_id": project_id,
+                    "predict_target_count": len(bound),
+                    "max_iterations": max_iterations,
+                },
+                location={
+                    "object_type": "calculation_config",
+                    "object_id": project_id,
+                    "field": "convergence",
+                },
+            )
     if predictor_registry is not None:
         for entry in predictions:
             algorithm = entry["algorithm"]

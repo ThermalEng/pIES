@@ -157,9 +157,13 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     EngineRunError（结构化失败，不伪装成功）。回执状态判定后才写执行
     进度：fenced/cancelled/失败不产生 execute 进度与终态写回。
     阶段二（data_predict 多于 1 个时必进，不可选）：每轮用上一轮统一
-    结果重建预测目标→重建模型→求解，以相邻两轮预测序列最大绝对差按
-    配置容差收敛或达最大迭代数；轮数上限为总求解轮数（阶段一计第 1 轮，
-    上限为 1 时即阶段一结果）。返回 (payload, output_files)：payload
+    结果重建预测目标→重建模型→真实求解，再以相邻两轮预测序列最大
+    绝对差按配置容差收敛或达最大迭代数；收敛判定不能跳过本轮求解。
+    轮数上限为总求解轮数（阶段一计第 1 轮；多目标时提交门要求上限
+    至少为 2，不存在跳过阶段二求解的上限）。prediction 载荷中
+    prediction_rounds 与 solve_rounds 恒等（每阶段二迭代都真实求解），
+    phase2_solve_rounds = solve_rounds - 1（阶段一计 1 轮）。
+    返回 (payload, output_files)：payload
     只含 JSON 兼容字段；output_files 为待封存原始字节，由提交单元随
     提交在同一数据库事务内建对象元数据/引用并注入描述子（Blob 字节落
     盘不参与原子提交），本函数不写数据库。
@@ -200,23 +204,22 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             new_series, new_predicted = _predict_round(
                 ctx, plane, snapshot, result.outputs)
             prediction_rounds += 1
-            new_values = {(p.device, p.interface): p.values for p in new_predicted}
-            final_delta = max(
-                worker_app.prediction_delta(previous_values[key], new_values[key])
-                for key in previous_values
-            )
-            if final_delta <= tolerance:
-                converged = True
-                predicted = new_predicted
-                break
             all_series = tuple(series) + tuple(new_series)
             bundle, receipt, collected, result, outcome = _solve_round(
                 ctx, plane, snapshot, artifact, models, all_series,
                 finance, config, attempt)
             solve_rounds += 1
             ctx.progress(90.0, "phase2", {"round": solve_rounds})
+            new_values = {(p.device, p.interface): p.values for p in new_predicted}
+            final_delta = max(
+                worker_app.prediction_delta(previous_values[key], new_values[key])
+                for key in previous_values
+            )
             previous_values = new_values
             predicted = new_predicted
+            if final_delta <= tolerance:
+                converged = True
+                break
     bundle_media = {
         entry["path"]: entry["media_type"]
         for entry in (*bundle.manifest.inputs, *bundle.manifest.outputs)
@@ -253,6 +256,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             "predict_target_count": len(predicted),
             "prediction_rounds": prediction_rounds,
             "solve_rounds": solve_rounds,
+            "phase2_solve_rounds": solve_rounds - 1,
             "converged": converged,
             "final_delta": final_delta,
             "receipts": receipts,
