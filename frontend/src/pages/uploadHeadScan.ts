@@ -52,6 +52,32 @@ function defaultReadHead(file: File): Promise<string> {
 }
 
 /** 创建一次对话框生命期内的判定器(调用方持有单例, 世代号跨选择单调递增)。 */
+/** 头判定状态: 提交可否进行的唯一判据(`ready` 以外一律不可提交)。
+ *
+ * - `empty`: 未选文件;
+ * - `pending`: 已选文件, 头判定进行中;
+ * - `ready`: 头判定成功完成(本轮选择有效);
+ * - `failed`: 头读取失败, 本轮选择作废, 只有重新选择并成功判定才可恢复。
+ */
+export type HeadScanStatus = 'empty' | 'pending' | 'ready' | 'failed'
+
+export type HeadScanEvent = 'select' | 'clear' | 'ok' | 'fail' | 'reset'
+
+/** 状态迁移(纯函数): `failed` 只能经 `select`(重新选择)回到 `pending`,
+ * 经 `ok` 才能到 `ready`; 世代过期由调用方按 `isCurrent` 先行丢弃。 */
+export function nextScanStatus(current: HeadScanStatus, event: HeadScanEvent): HeadScanStatus {
+  if (event === 'reset' || event === 'clear') return 'empty'
+  if (event === 'select') return 'pending'
+  if (current !== 'pending') return current
+  if (event === 'ok') return 'ready'
+  return 'failed'
+}
+
+/** 该状态是否允许提交(按钮禁用与 submit 内守卫共用此判据)。 */
+export function canSubmitScan(status: HeadScanStatus): boolean {
+  return status === 'ready'
+}
+
 export function createHeadScan(sink: HeadScanSink, readHead: HeadReader = defaultReadHead) {
   let seq = 0
   return {

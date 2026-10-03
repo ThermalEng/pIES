@@ -16,7 +16,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { createHeadScan } from './uploadHeadScan'
+import { canSubmitScan, createHeadScan, nextScanStatus } from './uploadHeadScan'
+import type { HeadScanStatus } from './uploadHeadScan'
 
 import { api, downloadBlob } from '../api/client'
 import { DiagnosticsList } from '../components/DiagnosticsList'
@@ -253,7 +254,8 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
   const [file, setFile] = useState<File | null>(null)
   const [schemaMode, setSchemaMode] = useState<'generic' | 'device-data'>('generic')
   const [fileResolution, setFileResolution] = useState<string | null>(null)
-  const [scanning, setScanning] = useState(false)
+  // 头判定状态即提交可否判据: 非 ready 一律不可提交; failed 须重选并成功才可恢复。
+  const [scanStatus, setScanStatus] = useState<HeadScanStatus>('empty')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<UploadOutcome | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -262,14 +264,15 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
     scanRef.current = createHeadScan({
       onSettled(seq, outcome) {
         if (!scanRef.current?.isCurrent(seq)) return
-        setScanning(false)
         if (!outcome.ok) {
-          // 读取失败: 可见错误, 保持 generic, 不静默回退。
+          // 读取失败: 可见错误 + 本轮文件作废, 不静默回退 generic 组装。
+          setScanStatus((prev) => nextScanStatus(prev, 'fail'))
           setSchemaMode('generic')
           setFileResolution(null)
           setError(pt('ies.data.file_head_unreadable'))
           return
         }
+        setScanStatus((prev) => nextScanStatus(prev, 'ok'))
         if (outcome.decision.mode === 'device-data') {
           setSchemaMode('device-data')
           setFileResolution(outcome.decision.resolution)
@@ -290,7 +293,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
     setFile(null)
     setSchemaMode('generic')
     setFileResolution(null)
-    setScanning(false)
+    setScanStatus('empty')
     setBusy(false)
     setResult(null)
     setError(null)
@@ -301,7 +304,11 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
     setSchemaMode('generic')
     setFileResolution(null)
     setError(null)
-    setScanning(true)
+    if (!selected) {
+      setScanStatus((prev) => nextScanStatus(prev, 'clear'))
+      return
+    }
+    setScanStatus((prev) => nextScanStatus(prev, 'select'))
     scanRef.current?.scan(selected)
   }
 
@@ -312,8 +319,9 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
   }
 
   async function submit() {
-    // 文件头判定完成前不可提交: 按钮已禁用, 此处再设防(防旧 Promise 覆盖后误组装)。
-    if (scanning) return
+    // 与提交按钮共用判据: 非 ready(未判定/判定中/读取失败)一律不可提交;
+    // 读取失败的本轮文件作废, 只有重选并成功判定才可恢复。
+    if (!canSubmitScan(scanStatus)) return
     if (!name.trim()) {
       setError(t('ies.common.required_field'))
       return
@@ -371,7 +379,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
             <Button variant="secondary" onClick={onClose}>
               {t('ies.common.cancel')}
             </Button>
-            <Button variant="primary" loading={busy || scanning} onClick={() => void submit()} disabled={busy || scanning}>
+            <Button variant="primary" loading={busy || scanStatus === 'pending'} onClick={() => void submit()} disabled={busy || !canSubmitScan(scanStatus)}>
               {t('ies.data.upload')}
             </Button>
           </>
