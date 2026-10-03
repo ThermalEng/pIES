@@ -174,6 +174,12 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     至少为 2，不存在跳过阶段二求解的上限）。prediction 载荷中
     prediction_rounds 与 solve_rounds 恒等（每阶段二迭代都真实求解），
     phase2_solve_rounds = solve_rounds - 1（阶段一计 1 轮）。
+    多轮证据（solve_rounds > 1 时）：阶段一与每个阶段二轮的 Bundle
+    文件、回执、声明原始输出、训练产物与预测序列字节全部进入
+    output_files["round_history"]（按 round-<n>/ 前缀区分），载荷
+    "rounds" 按轮次列出回执/ manifest/文件引用并标明最终权威轮；
+    最终轮各组（bundle_files/solution/prediction_files）保持原样，
+    即权威结果；仍由最终提交单元一次性封存提交，无中间轮终态。
     返回 (payload, output_files)：payload
     只含 JSON 兼容字段；output_files 为待封存原始字节，由提交单元随
     提交在同一数据库事务内建对象元数据/引用并注入描述子（Blob 字节落
@@ -199,8 +205,14 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         predicted_series, predicted = _predict_round(ctx, plane, snapshot, None)
     all_series = tuple(series) + tuple(predicted_series)
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
+    rounds_log: list[dict] = []
     bundle, receipt, collected, result, outcome = _solve_round(
         ctx, plane, snapshot, artifact, models, all_series, finance, config, attempt)
+    rounds_log.append({
+        "round": 1, "phase": "phase1",
+        "bundle": bundle, "receipt": receipt, "collected": collected,
+        "predicted": predicted,
+    })
     prediction_rounds = 1 if predicted else 0
     solve_rounds = 1
     converged = True
@@ -220,6 +232,11 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                 ctx, plane, snapshot, artifact, models, all_series,
                 finance, config, attempt)
             solve_rounds += 1
+            rounds_log.append({
+                "round": prediction_rounds, "phase": "phase2",
+                "bundle": bundle, "receipt": receipt, "collected": collected,
+                "predicted": new_predicted,
+            })
             ctx.progress(90.0, "phase2", {"round": solve_rounds})
             new_values = {(p.device, p.interface): p.values for p in new_predicted}
             final_delta = max(
@@ -275,6 +292,58 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             "final_delta": final_delta,
             "receipts": receipts,
         }
+    if len(rounds_log) > 1:
+        history: dict[str, tuple[bytes, str]] = {}
+        rounds: list[dict] = []
+        for record in rounds_log:
+            prefix = f"round-{record['round']}"
+            round_bundle = record["bundle"]
+            round_receipt = record["receipt"]
+            round_collected = record["collected"]
+            round_bundle_media = {
+                entry["path"]: entry["media_type"]
+                for entry in (*round_bundle.manifest.inputs, *round_bundle.manifest.outputs)
+            }
+            round_solution_media = {
+                entry["path"]: entry["media_type"] for entry in round_receipt.outputs
+            }
+            bundle_paths = []
+            for path, data in round_bundle.files.items():
+                key = f"{prefix}/bundle/{path}"
+                history[key] = (data, round_bundle_media[path])
+                bundle_paths.append(key)
+            solution_paths = []
+            for path in round_collected:
+                key = f"{prefix}/solution/{path}"
+                history[key] = (round_collected[path], round_solution_media[path])
+                solution_paths.append(key)
+            prediction_paths = []
+            for item in record["predicted"]:
+                artifact_key = (
+                    f"{prefix}/prediction/{item.device}/{item.interface}"
+                    "/training_artifact.json"
+                )
+                history[artifact_key] = (item.artifact, item.artifact_media_type)
+                series_key = (
+                    f"{prefix}/prediction/{item.device}/{item.interface}/series.csv"
+                )
+                history[series_key] = (_predicted_series_csv(item), "text/csv")
+                prediction_paths += [artifact_key, series_key]
+            rounds.append({
+                "round": record["round"],
+                "phase": record["phase"],
+                "authoritative": record["round"] == solve_rounds,
+                "receipt": round_receipt.to_dict(),
+                "bundle_manifest": round_bundle.manifest.to_dict(),
+                "files": {
+                    "bundle": sorted(bundle_paths),
+                    "solution": sorted(solution_paths),
+                    "prediction": sorted(prediction_paths),
+                },
+            })
+        output_files["round_history"] = history
+        payload["rounds"] = rounds
+        payload["authoritative_round"] = solve_rounds
     return payload, output_files
 
 

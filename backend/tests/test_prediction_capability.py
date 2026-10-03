@@ -837,7 +837,7 @@ class TestPredictEndToEnd:
         task_row = db.execute(select(Task).where(Task.id == task.id)).scalar_one()
         assert task_row.status == "completed"
         assert task_row.business_outcome == "normal_completion"
-        sealed, _evidence = _evidence_payload(db, task.id)
+        sealed, evidence = _evidence_payload(db, task.id)
         prediction = sealed["prediction"]
         assert prediction["predict_target_count"] == 2
         assert prediction["prediction_rounds"] == 3
@@ -889,6 +889,109 @@ class TestPredictEndToEnd:
             assert {line.split(",")[1] for line in sealed_lines[1:]} == {
                 repr(expected_value)
             }
+        # 多轮证据：三轮 Bundle/回执/原始输出/训练产物/序列全部可按引用取回。
+        history = sealed["round_history"]
+        rounds = sealed["rounds"]
+        assert [entry["round"] for entry in rounds] == [1, 2, 3]
+        assert [entry["phase"] for entry in rounds] == ["phase1", "phase2", "phase2"]
+        assert [entry["authoritative"] for entry in rounds] == [False, False, True]
+        assert sealed["authoritative_round"] == 3
+        round_receipt_ids = [entry["receipt"]["receipt_id"] for entry in rounds]
+        assert len(set(round_receipt_ids)) == 3
+        assert sealed["receipt"]["receipt_id"] == round_receipt_ids[2]
+        assert sealed["compute_result"]["receipt_id"] == round_receipt_ids[2]
+        relative_sets = []
+        for entry in rounds:
+            keys = (
+                entry["files"]["bundle"] + entry["files"]["solution"]
+                + entry["files"]["prediction"]
+            )
+            assert keys
+            relative_sets.append(sorted(key.split("/", 1)[1] for key in keys))
+            for key in keys:
+                object_id = history[key]["object_id"]
+                refs = list_refs(db, object_id)
+                assert any(
+                    r.ref_type == "evidence_package"
+                    and r.ref_entity_id == str(evidence.id)
+                    for r in refs
+                ), key
+        assert relative_sets[0] == relative_sets[1] == relative_sets[2]
+        # 最终轮各组字节即第 3 轮字节（同一证据，无第二权威结果）。
+        final_by_section = {
+            "bundle": sealed["bundle_files"],
+            "solution": sealed["solution"],
+        }
+        for section in ("bundle", "solution"):
+            for key in rounds[2]["files"][section]:
+                rel = key.split("/", 1)[1]
+                assert rel.startswith(section + "/")
+                original = rel[len(section) + 1:]
+                assert get_object(db, history[key]["object_id"]) == get_object(
+                    db, final_by_section[section][original]["object_id"]
+                )
+        final_prediction = sealed["prediction_files"]
+        for key in rounds[2]["files"]["prediction"]:
+            rel = key.split("/", 1)[1]
+            assert rel in final_prediction
+            assert get_object(db, history[key]["object_id"]) == get_object(
+                db, final_prediction[rel]["object_id"]
+            )
+
+    def test_round_history_seal_failure_rolls_back(
+        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
+    ) -> None:
+        """多轮封存/挂接注入失败 → 整笔 DB 回滚，无 completed 与孤立元数据。
+
+        只让输出引用挂接失败（purpose=evidence_output），结果引用保持
+        正常：含 round_history 在内的整笔（含已封存对象元数据）必须回滚。
+        """
+        from iesplan.application.worker import compute_cases  # noqa: E402
+        from iesplan.storage.persistence import StoredObject  # noqa: E402
+
+        real_add_ref = compute_cases.add_ref
+
+        def _fail_output_refs(db, object_id, ref_type, ref_id, ref_entity_type=None,
+                              purpose=None, *, actor_id=None, actor_type="system"):
+            if purpose == "evidence_output":
+                raise RuntimeError("injected-ref-failure")
+            return real_add_ref(
+                db, object_id, ref_type, ref_id, ref_entity_type=ref_entity_type,
+                purpose=purpose, actor_id=actor_id, actor_type=actor_type,
+            )
+
+        monkeypatch.setattr(compute_cases, "add_ref", _fail_output_refs)
+        user = make_user(db, "predict_owner_6")
+        pid, _vids = _prepare_predict_project(
+            client, db, user,
+            [("load1", "load", [48.0]), ("load2", "flex_load", [10.0])],
+        )
+        body = dict(_CONFIG_BODY)
+        body["predictions"] = [
+            {
+                "target": {"instance": dev, "interface": "electricity_demand"},
+                "algorithm": NAIVE_PREDICTOR_REF,
+                "parameters": {},
+            }
+            for dev in ("load1", "load2")
+        ]
+        body["convergence"] = {"tolerance": 0.001, "max_iterations": 2}
+        rev = _save_calc(client, pid, user, body)
+        status, resp = _submit_task(
+            client, pid, user, config={"config_revision": rev},
+            idempotency_key="predict-e2e-rollback",
+        )
+        assert status == 201, resp
+        task_id = int(resp["task"]["id"])
+        before = len(db.execute(select(StoredObject)).scalars().all())
+        claim = _claim(db, task_id)
+        assert _run(engine, claim, plane) == "failed"
+
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task.status == "failed"
+        assert task.business_outcome is None
+        assert results_store.latest_evidence_for_task(db, task_id) is None
+        assert len(db.execute(select(StoredObject)).scalars().all()) == before
 
     def test_unknown_algorithm_rejected_at_submit(
         self, client: TestClient, db: Session
