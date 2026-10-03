@@ -9,7 +9,7 @@
 ```text
 ValidatedAssemblyArtifact + CalculationConfig
           ↓
-constant/data_repeat/data_predict 序列物化
+constant/data_repeat/data_full/data_predict 序列物化
           ↓
 阶段一：GeneratorProvider → Solver Bundle → SolverRuntime
           ↓
@@ -65,7 +65,7 @@ ResultAdapter → ComputeResult
 
 ### 先物化序列并决定求解流程
 
-计算阶段按同一快照展开 `constant`、重复 `data_repeat`，并按目标类型和计算配置独立生成各 `data_predict`。然后用这些序列完成一次完整的阶段一求解。
+计算阶段按同一快照展开 `constant`、重复 `data_repeat`、原样使用覆盖全期的 `data_full`，并按目标类型和计算配置独立生成各 `data_predict`。然后用这些序列完成一次完整的阶段一求解。
 
 - `data_predict` 数量为零或一：阶段一结果直接作为权威结果；
 - `data_predict` 数量大于一：用阶段一结果作为初始值，启动阶段二；

@@ -69,7 +69,7 @@
 1. 按设备模型 YAML 写出可独立校验的设备说明，选择稳定、带命名空间的设备类型 ID；
 2. 定义不随时间变化的纯技术 properties、单位和值域，不写价格或成本；
 3. 定义每个序列 interface 的 carrier、单位、值域和 `in/out/bidirectional/predefined/blind` 类型；缺省只允许成为 `blind`；
-4. 在设备定义中声明 `predefined` 输入槽；每个项目实例必须在装配中为其选择并声明 `constant/data_repeat/data_predict` 来源，序列只在计算阶段物化；为内部序列变量和跨步关系写出 equations；
+4. 在设备定义中声明 `predefined` 输入槽；每个项目实例必须在装配中为其选择并声明 `constant/data_repeat/data_full/data_predict` 来源，序列只在计算阶段物化；为内部序列变量和跨步关系写出 equations；
 5. 校验受限方程，不写函数/包/模块路径、任意代码或计算精度；
 6. 提供合法/非法 YAML、最小/典型数据 CSV 和 provider 契约测试；
 7. 用目录 API、GUI schema、装配校验验证同一描述贯通，而不是修改消费者的设备类型表。

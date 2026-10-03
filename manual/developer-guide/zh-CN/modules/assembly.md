@@ -58,7 +58,7 @@
 
 ### 2. 模型与数据阶段
 
-核对设备内容、properties、equations、状态、接口数据、单位、时间覆盖和固定资源引用。序列接口完全来自公开 descriptor；只有 `predefined` 可绑定 `constant/data_repeat/data_predict`，`blind` 不得连接也不得作为预定义数据入口。
+核对设备内容、properties、equations、状态、接口数据、单位、时间覆盖和固定资源引用。序列接口完全来自公开 descriptor；只有 `predefined` 可绑定 `constant/data_repeat/data_full/data_predict`，`blind` 不得连接也不得作为预定义数据入口。
 
 ### 3. 图与系统阶段
 

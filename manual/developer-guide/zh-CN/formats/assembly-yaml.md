@@ -19,6 +19,7 @@ project_baseline:
   resolution: 1h
   leap_year: false
   scenario_mode: single
+  start_year: 2025
 
 devices:
   grid:
@@ -112,14 +113,14 @@ extensions: {}
 
 被引用的有效快照需含本装配用到的 `finance_type`（如 `pv_system`）与 `energy_prices` 的 `price_id`（如 `grid_import`/`pv_export`），完整字段定义见[财务 YAML 契约](finance-yaml.md)。实例 `instance_id`（如 `pv_1`/`grid`）、计量绑定 `binding_id`（如 `import_meter`）、财务 `finance_type`（如 `pv_system`）与技术模型 `device.id`（如 `ies.device.pv`）严格分离：`grid` 无设备成本、不绑定 `finance_type`（不再虚构 `grid_connection` 等零成本连接类别），其计量与计费完全由 `tariff_bindings` 表达。
 
-规划目标示例把成本项显式列出：`pv_1__annual_fixed_om`（currency/年）、`pv_1__period_variable_om`、`import_meter__period_energy_purchase`、`export_meter__period_energy_sale`（currency，运行/计费窗口合计）。这些标识符是受限表达式可解析的普通 `Name`，其编码与映射规则见下文「规划表达式中的财务分量标识符」：设备成本分量 = `<instance_id>__<分量>`，能源计费分量 = `<tariff_binding_id>__period_energy_purchase|sale`，不使用点分路径。`annual_fixed_om` 与 `period_*` 量纲不同（currency/年 vs currency），不能直接相加：示例中计算窗口恰好是项目基线覆盖的完整一年，表达式通过**显式时间跨度字面量 `1 year`** 把按年值换算为完整年度窗口金额（currency）后再与 `period_*` 相加；计算窗口不是完整一年时，不得默认相加或做其他隐式缩放（规则见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。会计符号由被引用价格的显式 `direction` 统一决定（定义见[财务 YAML 契约](finance-yaml.md)「计价规则」）：每个计量绑定先算 `raw_charge = Σ price×energy`，`purchase`（如 `grid_import`）分量为 +raw_charge、`sale`（如 `pv_export`）分量为 −raw_charge。分量是**已带符号的记账贡献**（正售电价时 sale 分量自身为负，收益自动抵减成本），因此目标表达式对所有分量**统一使用加法**——示例写 `+ export_meter__period_energy_sale`，不再书写额外负号，也不把“sale 以负号计入”写为规则。该示例是“预算上限约束下的年度运行成本最小化”这一**具体示例，不是通用经济目标**：一次性 `upfront_capex` 不进该目标，改由预算上限约束显式处理（示例上限 `900000 CNY` 为规划人员输入的带单位常数，单位必须与 `EffectiveFinanceConfig.currency` 一致，不是系统财务规则）；具体如何把一次性投资转换为可与运行期成本比较的规划分量，属于 `PlanningConfig` 的明确、版本化规则，需在规划配置契约中定义，本财务 Profile 不隐式定义或默认选择这种转换（不隐含资本回收系数、利率或年限等值）。表达式与约束的具体语法由规划配置契约定义，本格式页只定义财务分量标识符的映射与量纲，不定义表达式语言本身；分量标识符引用设备成本绑定（`pv_1`）与能源计费绑定（`import_meter`/`export_meter`），不依赖任何隐式“系统总成本”聚合。
+规划目标示例把成本项显式列出：`pv_1__annual_fixed_om`（currency/年）、`pv_1__period_variable_om`、`import_meter__period_energy_purchase`、`export_meter__period_energy_sale`（currency，运行/计费窗口合计）。这些标识符是受限表达式可解析的普通 `Name`，其编码与映射规则见下文「规划表达式中的财务分量标识符」：设备成本分量 = `<instance_id>__<分量>`，能源计费分量 = `<tariff_binding_id>__period_energy_purchase|sale`，不使用点分路径。`annual_fixed_om` 与 `period_*` 量纲不同（currency/年 vs currency），不能直接相加：示例中计算窗口恰好是快照冻结评价期覆盖的完整时间轴，表达式通过**显式时间跨度字面量（示例为单年窗口的 `1 year`，多年窗口按冻结评价年限的年数）**把按年值换算为窗口金额（currency）后再与 `period_*` 相加；缺少显式时间跨度时，不得默认相加或做其他隐式缩放（规则见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。会计符号由被引用价格的显式 `direction` 统一决定（定义见[财务 YAML 契约](finance-yaml.md)「计价规则」）：每个计量绑定先算 `raw_charge = Σ price×energy`，`purchase`（如 `grid_import`）分量为 +raw_charge、`sale`（如 `pv_export`）分量为 −raw_charge。分量是**已带符号的记账贡献**（正售电价时 sale 分量自身为负，收益自动抵减成本），因此目标表达式对所有分量**统一使用加法**——示例写 `+ export_meter__period_energy_sale`，不再书写额外负号，也不把“sale 以负号计入”写为规则。该示例是“预算上限约束下的年度运行成本最小化”这一**具体示例，不是通用经济目标**：一次性 `upfront_capex` 不进该目标，改由预算上限约束显式处理（示例上限 `900000 CNY` 为规划人员输入的带单位常数，单位必须与 `EffectiveFinanceConfig.currency` 一致，不是系统财务规则）；具体如何把一次性投资转换为可与运行期成本比较的规划分量，属于 `PlanningConfig` 的明确、版本化规则，需在规划配置契约中定义，本财务 Profile 不隐式定义或默认选择这种转换（不隐含资本回收系数、利率或年限等值）。表达式与约束的具体语法由规划配置契约定义，本格式页只定义财务分量标识符的映射与量纲，不定义表达式语言本身；分量标识符引用设备成本绑定（`pv_1`）与能源计费绑定（`import_meter`/`export_meter`），不依赖任何隐式“系统总成本”聚合。
 
 ## 顶层职责
 
 | 字段 | 作用 |
 |---|---|
 | `assembly` | 本装配的稳定 ID 和人类可读名称 |
-| `project_baseline` | 项目创建时固定的时间分辨率、闰年口径和场景模式 |
+| `project_baseline` | 项目创建时固定的时间分辨率、闰年口径、场景模式与运行起始年 |
 | `devices` | 设备实例、精确设备内容、存量/新增身份、允许的 property 覆盖和预定义接口绑定 |
 | `connections` | 可连接的真实 `<device>.<interface>` 之间的有向连接 |
 | `finance` | 对装配前由 `FinanceProfile` + `FinanceOverrides` 合并生成、完整校验的不可变 `EffectiveFinanceConfig` 的引用：`ref` 携带对象身份，`profile_id` 携带来源标识；规划与财务计算共同消费同一引用；装配内不内联另一份完整财务配置 |
@@ -139,8 +140,8 @@ extensions: {}
 - `asset_origin` 必须是 `existing` 或 `new`；不得从设备类型、创建时间或是否填写成本推断；
 - `properties` 只能覆盖设备定义已声明且允许实例化的非时变技术常量，并保留明确单位；不能新增字段，也不能放价格、成本或计算精度；
 - `predefined_interfaces` 只能绑定设备中 `type: predefined` 的 interface；每个 predefined 槽都必须恰好有一个显式绑定，缺失或绑定不存在/非 predefined 接口均阻断；
-- 来源判别联合严格为 `constant: {mode, value}`、`data_repeat: {mode, path}`、`data_predict: {mode, path, target_type}`；`path` 只能是项目目录内 CSV 相对路径。缺少必填字段、混入其他模式字段和所有额外字段均拒绝，没有默认 mode 或默认值；
-- `constant/data_repeat/data_predict` 只固定来源声明及项目相对 CSV 路径，不得在装配前替换为物化后的未来序列；规范化文本必须完整保留 `value/path/target_type`；
+- 来源判别联合严格为 `constant: {mode, value}`、`data_repeat: {mode, path}`、`data_full: {mode, path}`、`data_predict: {mode, path, target_type}`；`path` 只能是项目目录内 CSV 相对路径。缺少必填字段、混入其他模式字段和所有额外字段均拒绝，没有默认 mode 或默认值；
+- `constant/data_repeat/data_full/data_predict` 只固定来源声明及项目相对 CSV 路径，不得在装配前替换为物化后的未来序列；规范化文本必须完整保留 `value/path/target_type`；
 - `in/out/bidirectional` 通过 connections 取得外部交互；`blind` 既不能连接，也不能绑定预定义数据；
 - 每项覆盖、绑定和身份均进入校验回执；
 - 资产身份与增量成本强关联：`existing` 的沉没历史建设成本不计入增量目标，`new` 按新增驱动量计入固定建设成本与线性分量；但所有设备仍计算决策相关可变 O&M 与能源购售（能源购售只经 `tariff_bindings` 计量点产生，见[财务 YAML 契约](finance-yaml.md)）。
@@ -161,13 +162,14 @@ extensions: {}
 
 ## 项目计算基线
 
-`project_baseline` 在创建项目时一次性固定，当前只包含：
+`project_baseline` 在创建项目时一次性固定，当前包含：
 
 - `resolution`：全项目统一计算分辨率，必须能确定性切分一天；
-- `leap_year`：是否按 366 天生成全周期序列；
-- `scenario_mode`：当前固定为 `single`。
+- `leap_year`：单年口径是否按 366 天生成序列（仅单年评价沿用；多年评价以逐年公历推导为准）；
+- `scenario_mode`：当前固定为 `single`；
+- `start_year`：运行起始年，公历整数年，允许过去、现在或未来，不做“必须是未来年”校验，不涉闰秒；与财务 `base_year`（金额口径基年）是两个概念，不得互相推断。
 
-基线不保存时区、开始/结束时间、典型日/周/年或计算截取区间。计算序列统一使用从 `0` 开始的连续 `step`，点数由 `resolution` 和 `leap_year` 唯一推导。公开计算变量 `step_duration` 由 `resolution` 唯一推导并携带明确时间单位，是状态方程和能量积分使用的唯一公开步长变量。已有项目基线变更或多场景必须通过新的公开契约定义，不能作为本格式的隐式例外。
+基线不保存时区、典型日/周/年或计算截取区间。计算序列统一使用从 `0` 开始的连续 `step`；全周期点数由 `resolution`、`start_year` 与提交时确认的评价年限逐年按公历推导（闰年按实际公历年份确定），年度边界 step 下标随快照冻结。公开计算变量 `step_duration` 由 `resolution` 唯一推导并携带明确时间单位，是状态方程和能量积分使用的唯一公开步长变量。已有项目基线变更或多场景必须通过新的公开契约定义，不能作为本格式的隐式例外。
 
 ## 预定义序列与资源
 
@@ -179,7 +181,7 @@ path: data/campus_load.data.csv
 
 `path` 是实例化配置中的项目相对 CSV 路径，不能逃逸项目目录。后端在实例化入口直接读取并解析该文件，随后固定来源绑定；进入可信内部流程后不再因文件交接而重算校验。网络 URL、宿主机绝对路径、临时上传路径和存储 provider 私有路径不得进入可执行快照。
 
-CSV 必须固定相同的设备 ID，并且列 ID、单位、`source_mode`、分辨率、输入 `step` 和有效区间与目标 predefined interface 一致。装配使用实例化入口形成的项目相对 CSV 来源绑定。装配必须确认每个来源与项目基线分辨率一致、文件内 `step` 从零开始连续，并符合对应来源模式的覆盖要求；不同原始来源在物化前不要求点数相同或 `step` 一一对应。`data_repeat` 的完整来源序列整体作为重复基线，可为完整日、周或年，不另设周期字段。任一来源自身不符合时必须阻断，不重采样、插值、聚合、融合或补齐。计算阶段按项目基线物化后，所有计算序列统一点数和连续 `step`，并在产物与回执中固定。
+CSV 必须固定相同的设备 ID，并且列 ID、单位、`source_mode`、分辨率、输入 `step` 和有效区间与目标 predefined interface 一致。装配使用实例化入口形成的项目相对 CSV 来源绑定。装配必须确认每个来源与项目基线分辨率一致、文件内 `step` 从零开始连续，并符合对应来源模式的覆盖要求：`data_repeat` 的完整来源序列整体作为重复基线，可为完整日、周或年，不另设周期字段；`data_full` 必须原样覆盖全周期全部点数，不循环、不外推。任一来源自身不符合时必须阻断，不重采样、插值、聚合、融合或补齐。计算阶段物化后，所有计算序列统一为全周期点数和连续 `step`，并在产物与回执中固定。
 
 ## 规划配置与有效财务快照引用
 

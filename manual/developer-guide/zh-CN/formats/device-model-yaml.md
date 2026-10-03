@@ -106,8 +106,8 @@ properties:
 
 `inputs` 只用于同一 `ies.device-model` 范式的未实例化编辑态，不建立独立模型类型或 schema。模板必须预先完整声明目标模型结构，输入只能覆盖模板已声明的路径，不能创建新的 property、interface、变量、单位或值域。
 
-- 每个输入叶子必须声明 `type: number|boolean|string|array|object|data_repeat|data_predict`；number 还必须显式声明单位，不补 `-` 或其他默认单位；
-- `data_repeat`/`data_predict` 的用户值是项目目录内 `.csv` 相对路径；后端在实例化入口直接读取并绑定该 CSV。禁止绝对路径、`..`、URL、临时上传路径和项目外文件；
+- 每个输入叶子必须声明 `type: number|boolean|string|array|object|data_repeat|data_full|data_predict`；number 还必须显式声明单位，不补 `-` 或其他默认单位；
+- `data_repeat`/`data_full`/`data_predict` 的用户值是项目目录内 `.csv` 相对路径；后端在实例化入口直接读取并绑定该 CSV。禁止绝对路径、`..`、URL、临时上传路径和项目外文件；
 - 不允许 `default`、`source`、`mode`、`data_ref` 或任何隐式回退；数据路径只是实例化输入，不进入最终纯技术设备模型；
 - 用户必须提交所有声明叶子，并且只能提交已声明路径；缺少或多余字段均阻断；
 - array 作为整体提交，`items` 只逐元素校验，不形成额外的 `path[]` 必填输入；
@@ -125,7 +125,7 @@ properties:
 | `in` | 从其他设备的兼容输出接口接收序列 |
 | `out` | 向其他设备的兼容输入接口输出序列 |
 | `bidirectional` | 可在同一接口双向交换序列；必须具有确切物理语义；以有符号净流量参与母线守恒，正值表示向母线供给、负值表示从母线吸收，设备方程必须按此约定书写 |
-| `predefined` | 不连接其他设备，由 `constant`、`data_repeat` 或 `data_predict` 提供输入序列 |
+| `predefined` | 不连接其他设备，由 `constant`、`data_repeat`、`data_full` 或 `data_predict` 提供输入序列 |
 | `blind` | 不连接其他设备，也不接收预定义数据 |
 
 未写 `type` 时规范化为 `blind`。除此之外不得猜测方向或连接能力。
@@ -141,7 +141,7 @@ properties:
 - `blind` 不连接设备也不接受预定义数据；其数值如被方程引用，只能由同一设备的声明式方程确定，无法确定时装配失败；
 - 设备数据 CSV 只绑定 `predefined` interface，不再绑定独立 `data_inputs`。
 
-项目实例可使用 `constant`、`data_repeat` 或 `data_predict` 声明来源；字段结构、完整示例和校验规则以[装配 YAML](assembly-yaml.md)「设备实例」为唯一正文。本页只规定设备定义不携带项目来源，并规定每个 `predefined` 槽在进入计算前必须已有明确来源。装配不生成或替换未来全周期序列；展开、重复和预测统一发生在计算阶段，预测算法、revision 和参数属于 `CalculationConfig`。
+项目实例可使用 `constant`、`data_repeat`、`data_full` 或 `data_predict` 声明来源；字段结构、完整示例和校验规则以[装配 YAML](assembly-yaml.md)「设备实例」为唯一正文。本页只规定设备定义不携带项目来源，并规定每个 `predefined` 槽在进入计算前必须已有明确来源。装配不生成或替换未来全周期序列；展开、重复、原样使用和预测统一发生在计算阶段，预测算法、revision 和参数属于 `CalculationConfig`。
 
 ## `equations`
 

@@ -29,7 +29,7 @@
 - 稳定设备 ID 和本地化名称；
 - 非时变纯技术 `properties`、单位和值域；
 - `interfaces` 的 carrier、单位、有效区间和五类 type；
-- `predefined` 可绑定输入槽；设备定义不携带项目来源，每个项目装配实例必须声明 `constant/data_repeat/data_predict` 来源；
+- `predefined` 可绑定输入槽；设备定义不携带项目来源，每个项目装配实例必须声明 `constant/data_repeat/data_full/data_predict` 来源；
 - 受限声明式 `equations`；
 - 统一 schema 版本和校验回执。
 

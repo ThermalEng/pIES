@@ -30,7 +30,7 @@
 |---|---|
 | `ValidatedAssemblyArtifact` | 已由装配模块签发，零阻断诊断；实例、参数覆盖、连接拓扑、规划、财务/计费绑定、项目基线 |
 | `models` | 装配实例 ID 到设备数学贡献的映射（键为实例，不是设备类型） |
-| `series` | 已物化的全周期输入序列（`MaterializedSeries` 只读序列；`constant`/`data_repeat`/`data_predict` 统一为同一类型） |
+| `series` | 已物化的全周期输入序列（`MaterializedSeries` 只读序列；`constant`/`data_repeat`/`data_full`/`data_predict` 统一为同一类型） |
 | `finance` | 不可变 `EffectiveFinanceConfig`（经济参数唯一来源） |
 | `CalculationConfig` | 在计算阶段选择，包含预测算法与参数、generator、solver、精度、求解选项、收敛条件、种子和输出请求 |
 | GeneratorDescriptor | 支持装配 schema、所选计算能力和 solver，且与 `CalculationConfig` 一致；属 provider 静态事实，不作为每次生成参数 |
