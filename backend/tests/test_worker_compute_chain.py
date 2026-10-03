@@ -285,9 +285,13 @@ class TestComputeChainEndToEnd:
             assert get_object(db, descriptor["object_id"]) is not None
 
     def test_prediction_required_fails_with_clear_reason(
-        self, client: TestClient, db: Session, engine: Engine, plane
+        self, client: TestClient, db: Session
     ) -> None:
-        """预测需求明确拒绝：配置含 predictions → failed + 原因可见，不执行。"""
+        """预测需求明确拒绝(B5-1 前移): 无装配绑定的 predictions → 提交即 400，不建任务。
+
+        已匹配绑定的预测目标仍由执行闸门以 prediction-not-supported 拒绝，
+        直到 B5-2 公共预测能力落地（届时另行验收）。
+        """
         body = dict(_CONFIG_BODY)
         body["predictions"] = [
             {
@@ -296,16 +300,15 @@ class TestComputeChainEndToEnd:
                 "parameters": {},
             }
         ]
-        task_id = _submit_calc_task(client, db, body, dict(PLANNING_BODY))
-        claim = _claim(db, task_id)
-        assert _run(engine, claim, plane) == "failed"
-
-        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
-        assert task.status == "failed"
-        diagnostics = (
-            db.execute(select(TaskDiagnostic).where(TaskDiagnostic.task_id == task_id)).scalars().all()
+        user = make_user(db, "chain_owner_pred")
+        pid = _prepare_with_planning(client, db, user, dict(PLANNING_BODY))
+        rev = _save_config_body(client, pid, user, body)
+        status, resp = _submit_task(
+            client, pid, user, config={"config_revision": rev},
+            idempotency_key="chain-pred-reject-1",
         )
-        assert any("prediction-not-supported" in (d.message or "") for d in diagnostics)
+        assert status == 400, resp
+        assert resp["error"]["code"] == "TASK-REQ-010"
 
     def test_frozen_provider_mismatch_fails_clearly(
         self, client: TestClient, db: Session, engine: Engine

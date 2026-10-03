@@ -394,6 +394,72 @@ def _freeze_device_models(artifact: Any, device_documents: Mapping[str, Any]) ->
     return frozen
 
 
+def _prediction_binding_keys(canonical_doc: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, Any]]:
+    """装配规范文本中全部 data_predict 绑定 {(实例, 接口): 绑定}。
+
+    只读已签发规范文本的绑定声明（mode/path/target_type），不重跑装配校验，
+    不解释 target_type 取值语义（语义相容由算法 descriptor 在后续切片核对）。
+    """
+    doc = canonical_doc if isinstance(canonical_doc, Mapping) else {}
+    devices = doc.get("devices") or {}
+    bound: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for dev_id in sorted(devices):
+        bindings = (devices[dev_id].get("predefined_interfaces") or {})
+        if not isinstance(bindings, Mapping):
+            continue
+        for iface_id, binding in bindings.items():
+            if isinstance(binding, Mapping) and binding.get("mode") == "data_predict":
+                bound[(str(dev_id), str(iface_id))] = binding
+    return bound
+
+
+def _check_prediction_inputs(
+    canonical_doc: Mapping[str, Any],
+    calc_config: Mapping[str, Any],
+    project_id: int,
+) -> int:
+    """预测输入冻结核对(提交闸门，B5-1)：配置 predictions 与装配 data_predict 绑定双向匹配 + 多目标收敛必填。
+
+    - 配置中每个预测目标必须命中装配的 data_predict 绑定（实例 + 接口），否则 400 TASK-REQ-010；
+    - 装配中每个 data_predict 绑定必须被配置预测覆盖（无算法无法物化），否则 400 TASK-REQ-011；
+    - data_predict 绑定多于 1 个且 convergence 为空 → 400 TASK-REQ-012（0/1 个时收敛可空，直通阶段一）。
+    配置正文形态由保存入口冻结，此处直接使用，不重复校验字段形态；
+    target_type 取值语义与算法相容性留待预测能力切片（算法 descriptor 见 B5-2）。
+    返回 data_predict 绑定数。
+    """
+    bound = _prediction_binding_keys(canonical_doc)
+    predictions = calc_config.get("predictions") or []
+    configured = {
+        (str(entry["target"]["instance"]), str(entry["target"]["interface"]))
+        for entry in predictions
+    }
+    for dev_id, iface_id in sorted(set(configured) - set(bound)):
+        raise InvalidRequestError(
+            "计算配置的预测目标在装配中没有 data_predict 绑定",
+            code="TASK-REQ-010",
+            params={"project_id": project_id, "instance": dev_id, "interface": iface_id},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "predictions"},
+        )
+    for dev_id, iface_id in sorted(set(bound) - set(configured)):
+        raise InvalidRequestError(
+            "装配 data_predict 绑定缺少计算配置的预测算法（无法物化）",
+            code="TASK-REQ-011",
+            params={"project_id": project_id, "instance": dev_id, "interface": iface_id},
+            location={
+                "object_type": "device", "object_id": dev_id,
+                "field": f"predefined_interfaces.{iface_id}",
+            },
+        )
+    if len(bound) > 1 and calc_config.get("convergence") is None:
+        raise InvalidRequestError(
+            "多个 data_predict 目标须给出阶段二收敛容差与最大迭代数",
+            code="TASK-REQ-012",
+            params={"project_id": project_id, "predict_target_count": len(bound)},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "convergence"},
+        )
+    return len(bound)
+
+
 def _assemble_snapshot(
     db: Session,
     project_id: int,
@@ -443,6 +509,10 @@ def _assemble_snapshot(
     artifact = gate.artifact
     receipt = artifact.receipt.to_dict()
     device_models = _freeze_device_models(artifact, gate.device_documents)
+    # 预测输入冻结核对(B5-1): 配置↔装配双向匹配 + 多目标收敛必填, 失败不建快照。
+    _check_prediction_inputs(
+        json.loads(artifact.canonical_text), calc_config, project_id
+    )
     for candidate in tasks_domain.list_snapshots_for_version(db, version.id):
         if _snapshot_inputs_equal(
             candidate,
