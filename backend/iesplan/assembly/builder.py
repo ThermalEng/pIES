@@ -11,8 +11,9 @@
 无静默默认:project_baseline.resolution/leap_year/scenario_mode、
 设备 kind 均须显式声明,缺字段/非法值一律返回
 ASM-CONV-001 阻断诊断,不回退、不猜测、不吞错。装配不包含 calculation
-(计算配置在计算包生成时固定)。设备数据绑定(CSV 序列来源)由独立
-声明入口提供(S2c),本构造器只处理标量参数,不做数据集列映射。
+(计算配置在计算包生成时固定)。设备数据绑定(CSV 序列来源)由设备
+声明 params 中预定义接口的字典形态提供({mode, dataset_version_id,
+按模式可选 target_type},路径按版本合成),本构造器不做数据集列映射。
 
 依赖: devices 公开门面(get_device)、core 公共契约;不依赖 services 与 ORM。
 """
@@ -434,6 +435,46 @@ def _descriptor_unit(type_id: str, prop: str) -> str:
     return spec.unit if spec is not None and spec.unit else "1"
 
 
+#: 数据序列来源声明允许的形态(键集合按来源模式精确匹配)。
+_SOURCE_DECL_KEYS: dict[str, frozenset] = {
+    "data_repeat": frozenset({"mode", "dataset_version_id"}),
+    "data_predict": frozenset({"mode", "dataset_version_id", "target_type"}),
+}
+
+
+def _predefined_source_declaration(
+    dev_id: str, iface_id: str, value: Mapping, diags: list
+) -> dict | None:
+    """预定义接口数据序列来源声明(params 字典形态 → 绑定声明)。
+
+    接受 ``{"mode": "data_repeat", "dataset_version_id": int}`` 或
+    ``{"mode": "data_predict", "dataset_version_id": int, "target_type": str}``；
+    路径由构造器按版本合成(``dataset_export_path``)，声明方不拼路径。
+    形态不符一律转换阻断(ASM-CONV-001)，不猜测、不补默认。标量 constant
+    形态不受影响。
+    """
+    field = f"predefined_interfaces.{iface_id}"
+    mode = value.get("mode")
+    if mode not in ("data_repeat", "data_predict"):
+        diags.append(_conv_fail(dev_id, field, "unknown_source_mode", {"mode": mode}))
+        return None
+    if set(value) != _SOURCE_DECL_KEYS[mode]:
+        diags.append(_conv_fail(dev_id, field, "source_declaration_keys", {"mode": mode}))
+        return None
+    vid = value.get("dataset_version_id")
+    if not isinstance(vid, int) or isinstance(vid, bool):
+        diags.append(_conv_fail(dev_id, field, "source_dataset_version", {"mode": mode}))
+        return None
+    declared: dict = {"mode": mode, "path": dataset_export_path(vid)}
+    if mode == "data_predict":
+        target_type = value.get("target_type")
+        if not isinstance(target_type, str) or not target_type:
+            diags.append(_conv_fail(dev_id, field, "source_target_type", {"mode": mode}))
+            return None
+        declared["target_type"] = target_type
+    return declared
+
+
 def _build_instance(
     device: dict,
     type_id: str,
@@ -463,6 +504,10 @@ def _build_instance(
     for key, value in params.items():
         if key in predefined_ids and isinstance(value, (int, float)) and not isinstance(value, bool):
             predefined_out[key] = {"mode": "constant", "value": value}
+        elif key in predefined_ids and isinstance(value, Mapping):
+            declared = _predefined_source_declaration(dev_id, key, value, diags)
+            if declared is not None:
+                predefined_out[key] = declared
         elif key in property_ids:
             properties_out[key] = {"value": value, "unit": _descriptor_unit(type_id, key)}
         else:

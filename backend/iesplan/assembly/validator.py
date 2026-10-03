@@ -474,6 +474,8 @@ def _check_predefined(
                 continue
             if not isinstance(binding, Mapping):
                 continue
+            # 绑定形态(mode 枚举/键集合/target_type 非空)已由结构阶段严格
+            # 判别联合阻断，此处直接使用，不重复设防。
             mode = binding.get("mode")
             if mode == "constant":
                 continue
