@@ -47,6 +47,7 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.data.row_count_expect': '期望行数:365 天 × 24 小时 × {steps} 段/小时 = {rows}(首列时间戳 ISO8601,严格递增且不重复)',
   'ies.data.file': '数据文件(CSV)',
   'ies.data.file_required': '请选择要上传的 CSV 文件',
+  'ies.data.file_head_unreadable': '文件头读取失败，请重新选择文件后再上传',
   'ies.data.file_resolution': '文件分辨率',
   'ies.data.step_file_mode': '设备数据 step 文件',
   'ies.data.step_file_note': '检测到设备数据 step 文件：分辨率、单位与来源以文件内容为准，此处不再填写字段描述与 UTC 偏移',
@@ -258,6 +259,7 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
     'Expected rows: 365 d × 24 h × {steps} slots/h = {rows} (first column timestamps ISO8601, strictly increasing, no duplicates)',
   'ies.data.file': 'Data file (CSV)',
   'ies.data.file_required': 'Please choose a CSV file to upload',
+  'ies.data.file_head_unreadable': 'Could not read the file head; please choose the file again before uploading',
   'ies.data.file_resolution': 'File resolution',
   'ies.data.step_file_mode': 'Device-data step file',
   'ies.data.step_file_note':

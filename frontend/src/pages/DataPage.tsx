@@ -14,8 +14,9 @@
  * 也可由工作台以 <DataPage projectId={id} /> 方式嵌入。
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { createHeadScan } from './uploadHeadScan'
 
 import { api, downloadBlob } from '../api/client'
 import { DiagnosticsList } from '../components/DiagnosticsList'
@@ -147,24 +148,7 @@ function sampleFields(): FieldRow[] {
   }))
 }
 
-/** 检测文件头 schema 标记(仅用于显示与组装请求,后端仍权威校验)。 */
-function parseSchemaHead(head: string): { schema: string | null; resolution: string | null } {
-  let schema: string | null = null
-  let resolution: string | null = null
-  for (const line of head.split('\n')) {
-    const stripped = line.trim()
-    if (!stripped) continue
-    if (!stripped.startsWith('#')) break
-    const body = stripped.slice(1).trim()
-    const idx = body.indexOf(':')
-    if (idx < 0) continue
-    const key = body.slice(0, idx).trim()
-    const value = body.slice(idx + 1).trim()
-    if (key === 'schema' && schema === null) schema = value
-    if (key === 'resolution' && resolution === null) resolution = value
-  }
-  return { schema, resolution }
-}
+/** 文件头判定编排见 ./uploadHeadScan(世代守卫 + 失败显式上报, 有 node 回归)。 */
 
 /** 统一上传管线:附带分辨率/UTC 偏移/字段定义/许可证(设计输入 §8.2)。 */
 function runUpload(opts: {
@@ -269,12 +253,34 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
   const [file, setFile] = useState<File | null>(null)
   const [schemaMode, setSchemaMode] = useState<'generic' | 'device-data'>('generic')
   const [fileResolution, setFileResolution] = useState<string | null>(null)
+  const [scanning, setScanning] = useState(false)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<UploadOutcome | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const scanRef = useRef<ReturnType<typeof createHeadScan> | null>(null)
+  if (!scanRef.current) {
+    scanRef.current = createHeadScan({
+      onSettled(seq, outcome) {
+        if (!scanRef.current?.isCurrent(seq)) return
+        setScanning(false)
+        if (!outcome.ok) {
+          // 读取失败: 可见错误, 保持 generic, 不静默回退。
+          setSchemaMode('generic')
+          setFileResolution(null)
+          setError(pt('ies.data.file_head_unreadable'))
+          return
+        }
+        if (outcome.decision.mode === 'device-data') {
+          setSchemaMode('device-data')
+          setFileResolution(outcome.decision.resolution)
+        }
+      },
+    })
+  }
 
   useEffect(() => {
     if (!open) return
+    scanRef.current?.invalidate()
     setName('')
     setResolution('1h')
     setOffset(defaultOffsetMinutes)
@@ -284,6 +290,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
     setFile(null)
     setSchemaMode('generic')
     setFileResolution(null)
+    setScanning(false)
     setBusy(false)
     setResult(null)
     setError(null)
@@ -293,18 +300,9 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
     setFile(selected)
     setSchemaMode('generic')
     setFileResolution(null)
-    if (!selected) return
-    void selected
-      .slice(0, 4096)
-      .text()
-      .then((head) => {
-        const { schema, resolution } = parseSchemaHead(head)
-        if (schema === 'ies.device-data' && resolution) {
-          setSchemaMode('device-data')
-          setFileResolution(resolution)
-        }
-      })
-      .catch(() => {})
+    setError(null)
+    setScanning(true)
+    scanRef.current?.scan(selected)
   }
 
   const opt = resolutionOption(resolution)
@@ -314,6 +312,8 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
   }
 
   async function submit() {
+    // 文件头判定完成前不可提交: 按钮已禁用, 此处再设防(防旧 Promise 覆盖后误组装)。
+    if (scanning) return
     if (!name.trim()) {
       setError(t('ies.common.required_field'))
       return
@@ -371,7 +371,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
             <Button variant="secondary" onClick={onClose}>
               {t('ies.common.cancel')}
             </Button>
-            <Button variant="primary" loading={busy} onClick={() => void submit()} disabled={busy}>
+            <Button variant="primary" loading={busy || scanning} onClick={() => void submit()} disabled={busy || scanning}>
               {t('ies.data.upload')}
             </Button>
           </>
