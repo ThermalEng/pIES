@@ -890,17 +890,33 @@ class TestPredictEndToEnd:
             assert {line.split(",")[1] for line in sealed_lines[1:]} == {
                 repr(expected_value)
             }
-        # 多轮证据：三轮 Bundle/回执/原始输出/训练产物/序列全部可按引用取回。
+        # 多轮证据：三轮 Bundle/回执/原始输出/训练产物/序列全部可按引用取回；
+        # 最终轮不重复封存，其条目引用顶层最终组同一对象。
         history = sealed["round_history"]
         rounds = sealed["rounds"]
         assert [entry["round"] for entry in rounds] == [1, 2, 3]
         assert [entry["phase"] for entry in rounds] == ["phase1", "phase2", "phase2"]
         assert [entry["authoritative"] for entry in rounds] == [False, False, True]
         assert sealed["authoritative_round"] == 3
+        assert rounds[0]["sealed_in"] == rounds[1]["sealed_in"] == {
+            "bundle": "round_history", "solution": "round_history",
+            "prediction": "round_history",
+        }
+        assert rounds[2]["sealed_in"] == {
+            "bundle": "bundle_files", "solution": "solution",
+            "prediction": "prediction_files",
+        }
+        assert not [key for key in history if key.startswith("round-3/")]
         round_receipt_ids = [entry["receipt"]["receipt_id"] for entry in rounds]
         assert len(set(round_receipt_ids)) == 3
         assert sealed["receipt"]["receipt_id"] == round_receipt_ids[2]
         assert sealed["compute_result"]["receipt_id"] == round_receipt_ids[2]
+        top_groups = {
+            "bundle_files": sealed["bundle_files"],
+            "solution": sealed["solution"],
+            "prediction_files": sealed["prediction_files"],
+            "round_history": history,
+        }
         relative_sets = []
         for entry in rounds:
             keys = (
@@ -908,36 +924,44 @@ class TestPredictEndToEnd:
                 + entry["files"]["prediction"]
             )
             assert keys
-            relative_sets.append(sorted(key.split("/", 1)[1] for key in keys))
-            for key in keys:
-                object_id = history[key]["object_id"]
-                refs = list_refs(db, object_id)
-                assert any(
-                    r.ref_type == "evidence_package"
-                    and r.ref_entity_id == str(evidence.id)
-                    for r in refs
-                ), key
+            depth = 1 if entry["authoritative"] else 2
+            relative_sets.append(sorted(
+                "/".join(key.split("/")[depth:]) for key in keys
+            ))
+            for section in ("bundle", "solution", "prediction"):
+                group = top_groups[entry["sealed_in"][section]]
+                for key in entry["files"][section]:
+                    if entry["authoritative"] and section != "prediction":
+                        assert key.startswith(section + "/")
+                        descriptor = group[key[len(section) + 1:]]
+                    else:
+                        descriptor = group[key]
+                    refs = list_refs(db, descriptor["object_id"])
+                    assert any(
+                        r.ref_type == "evidence_package"
+                        and r.ref_entity_id == str(evidence.id)
+                        for r in refs
+                    ), key
         assert relative_sets[0] == relative_sets[1] == relative_sets[2]
-        # 最终轮各组字节即第 3 轮字节（同一证据，无第二权威结果）。
-        final_by_section = {
-            "bundle": sealed["bundle_files"],
-            "solution": sealed["solution"],
-        }
-        for section in ("bundle", "solution"):
-            for key in rounds[2]["files"][section]:
-                rel = key.split("/", 1)[1]
-                assert rel.startswith(section + "/")
-                original = rel[len(section) + 1:]
-                assert get_object(db, history[key]["object_id"]) == get_object(
-                    db, final_by_section[section][original]["object_id"]
-                )
-        final_prediction = sealed["prediction_files"]
-        for key in rounds[2]["files"]["prediction"]:
-            rel = key.split("/", 1)[1]
-            assert rel in final_prediction
-            assert get_object(db, history[key]["object_id"]) == get_object(
-                db, final_prediction[rel]["object_id"]
-            )
+        # 最终轮条目经 sealed_in 引用顶层最终组同一对象（无重复封存对象）。
+        final_entry = rounds[2]
+        for section, group_name in (
+            ("bundle", "bundle_files"), ("solution", "solution"),
+            ("prediction", "prediction_files"),
+        ):
+            assert final_entry["sealed_in"][section] == group_name
+            for key in final_entry["files"][section]:
+                if section == "prediction":
+                    assert key in top_groups[group_name]
+                else:
+                    assert key.startswith(section + "/")
+                    assert key[len(section) + 1:] in top_groups[group_name]
+        all_ids = [
+            descriptor["object_id"]
+            for group in top_groups.values()
+            for descriptor in group.values()
+        ]
+        assert len(set(all_ids)) == len(all_ids)
 
     def test_round_history_seal_failure_rolls_back(
         self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch

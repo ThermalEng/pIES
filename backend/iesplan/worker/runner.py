@@ -174,12 +174,14 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     至少为 2，不存在跳过阶段二求解的上限）。prediction 载荷中
     prediction_rounds 与 solve_rounds 恒等（每阶段二迭代都真实求解），
     phase2_solve_rounds = solve_rounds - 1（阶段一计 1 轮）。
-    多轮证据（solve_rounds > 1 时）：阶段一与每个阶段二轮的 Bundle
-    文件、回执、声明原始输出、训练产物与预测序列字节全部进入
-    output_files["round_history"]（按 round-<n>/ 前缀区分），载荷
-    "rounds" 按轮次列出回执/ manifest/文件引用并标明最终权威轮；
-    最终轮各组（bundle_files/solution/prediction_files）保持原样，
-    即权威结果；仍由最终提交单元一次性封存提交，无中间轮终态。
+    多轮证据（solve_rounds > 1 时）：阶段一与非最终中间轮的 Bundle
+    文件、回执、声明原始输出、训练产物与预测序列字节进入
+    output_files["round_history"]（按 round-<n>/ 前缀区分）；最终轮
+    不重复封存，其 rounds 条目直接引用顶层最终组
+   （bundle_files/solution/prediction_files）的同一对象描述子。
+    载荷 "rounds" 按轮次列出回执/manifest/文件引用（附各节所在
+    密封组）并标明最终权威轮；最终轮各组即权威结果；仍由最终
+    提交单元一次性封存提交，无中间轮终态。
     返回 (payload, output_files)：payload
     只含 JSON 兼容字段；output_files 为待封存原始字节，由提交单元随
     提交在同一数据库事务内建对象元数据/引用并注入描述子（Blob 字节落
@@ -295,7 +297,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     if len(rounds_log) > 1:
         history: dict[str, tuple[bytes, str]] = {}
         rounds: list[dict] = []
-        for record in rounds_log:
+        for record in rounds_log[:-1]:
             prefix = f"round-{record['round']}"
             round_bundle = record["bundle"]
             round_receipt = record["receipt"]
@@ -332,15 +334,38 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             rounds.append({
                 "round": record["round"],
                 "phase": record["phase"],
-                "authoritative": record["round"] == solve_rounds,
+                "authoritative": False,
                 "receipt": round_receipt.to_dict(),
                 "bundle_manifest": round_bundle.manifest.to_dict(),
+                "sealed_in": {
+                    "bundle": "round_history",
+                    "solution": "round_history",
+                    "prediction": "round_history",
+                },
                 "files": {
                     "bundle": sorted(bundle_paths),
                     "solution": sorted(solution_paths),
                     "prediction": sorted(prediction_paths),
                 },
             })
+        final_record = rounds_log[-1]
+        rounds.append({
+            "round": solve_rounds,
+            "phase": final_record["phase"],
+            "authoritative": True,
+            "receipt": receipt.to_dict(),
+            "bundle_manifest": bundle.manifest.to_dict(),
+            "sealed_in": {
+                "bundle": "bundle_files",
+                "solution": "solution",
+                "prediction": "prediction_files",
+            },
+            "files": {
+                "bundle": sorted(f"bundle/{path}" for path in bundle.files),
+                "solution": sorted(f"solution/{path}" for path in collected),
+                "prediction": sorted(prediction_files),
+            },
+        })
         output_files["round_history"] = history
         payload["rounds"] = rounds
         payload["authoritative_round"] = solve_rounds
