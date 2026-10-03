@@ -12,7 +12,6 @@ step 格式，见 B5-2a 日志；此处 workaround 仅限脚手架）。上传�
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -176,8 +175,7 @@ class _ChasePredictor:
             previous_objective = None
         else:
             previous_objective = float(previous["solution"]["objective_value"])
-            digest = hashlib.sha256(repr(previous_objective).encode("utf-8")).hexdigest()
-            value = 20.0 + (int(digest[:8], 16) % 4000) / 100.0
+            value = 20.0 + (abs(previous_objective) % 4.3)
         values = tuple(value for _ in range(point_count))
         self.calls.append(
             {
