@@ -19,11 +19,6 @@ from iesplan.devices.candidate import (
     CandidateTextFailure,
     parse_candidate_text,
 )
-from iesplan.devices.datacontract2 import (
-    ParsedDataFile2,
-    parse_data_file_v2,
-    repeat_cycle_lengths,
-)
 from iesplan.devices.contracts2 import (
     SCHEMA_ID,
     SCHEMA_VERSION,
@@ -33,6 +28,15 @@ from iesplan.devices.contracts2 import (
     canonical_receipt,
     is_valid_id,
     to_dict,
+)
+from iesplan.devices.datacontract2 import (
+    DeviceData2Result,
+    ParsedDataFile2,
+    build_data_quality_report_v2,
+    canonical_table_bytes_v2,
+    is_device_data_csv,
+    parse_data_file_v2,
+    repeat_cycle_lengths,
 )
 from iesplan.devices.loader import (
     DEFAULT_CATALOG_DIR,
@@ -74,6 +78,10 @@ __all__ = [
     "parse_data_file_v2",
     "repeat_cycle_lengths",
     "DeviceRegistry",
+    "DeviceData2Result",
+    "build_data_quality_report_v2",
+    "canonical_table_bytes_v2",
+    "is_device_data_csv",
     "DEFAULT_CATALOG_DIR",
     "discover_device_dirs",
     "load_all_devices",

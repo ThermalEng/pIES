@@ -15,6 +15,7 @@ identity, storage} 域公开门面``；不导入 ORM、不导入其他域内部�
 from __future__ import annotations
 
 import json
+import math
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -29,7 +30,9 @@ from iesplan.application.datasets.quotas import check_upload_quota
 from iesplan.application.projects import ensure_access
 from iesplan.core.diagnostics import (
     DATA_COL_UNIT_UNKNOWN,
+    PARAM_RNG_OUT,
     PARAM_UNIT_MISMATCH,
+    RES_NUM_INVALID,
     SEVERITY_ERROR,
     Diagnostic,
     make_diag,
@@ -54,6 +57,13 @@ from iesplan.dataset.contracts import (
     DatasetConflictError,
     DatasetRecord,
     DatasetVersionRecord,
+)
+from iesplan.devices import (
+    DeviceData2Result,
+    build_data_quality_report_v2,
+    canonical_table_bytes_v2,
+    is_device_data_csv,
+    parse_data_file_v2,
 )
 from iesplan.identity.contracts import UserRecord
 from iesplan.storage import (
@@ -264,7 +274,7 @@ def _commit_version(
     db: Session,
     dataset: DatasetRecord,
     axis: TimeAxis,
-    normalized_df: pd.DataFrame,
+    normalized_df: pd.DataFrame | None,
     diags: list[Diagnostic],
     declared_fields: dict | None,
     meta: dict,
@@ -272,6 +282,7 @@ def _commit_version(
     *,
     canonical_csv: bytes | None = None,
     row_count: int | None = None,
+    prebuilt: dict | None = None,
 ) -> DatasetVersionRecord:
     """校验通过后执行版本写入(对象 + 版本行 + 文件行 + 引用, 只 flush，不提交)。
 
@@ -279,18 +290,29 @@ def _commit_version(
     与手写 CSV 同一内容 → 同一规范字节), 缺省由 DataFrame 重新序列化
     (内置样例路径, 无元数据头)。
     row_count: 实际数据行数; 缺省用 axis.n(标准年步数)。
+    prebuilt: 已备好的 {fields, units, quality_report}(device-data 上传路径);
+    提供时跳过通用字段/质量报告构造, normalized_df 可为 None。
     """
-    fields_info, units, unit_diags = _build_fields_info(normalized_df, declared_fields)
-    all_diags = list(diags) + unit_diags
+    if prebuilt is None:
+        assert normalized_df is not None
+        fields_info, units, unit_diags = _build_fields_info(normalized_df, declared_fields)
+        all_diags = list(diags) + unit_diags
+    else:
+        fields_info, units = dict(prebuilt["fields"]), dict(prebuilt["units"])
+        all_diags = list(diags)
     if any(d.blocking for d in all_diags):
         raise DataValidationError(all_diags)
 
     n_rows = row_count if row_count is not None else axis.n
     if canonical_csv is None:
         canonical_csv = normalized_to_csv_bytes(normalized_df)
-    quality_report = build_quality_report(
-        axis, normalized_df, all_diags,
-    )
+    if prebuilt is None:
+        assert normalized_df is not None
+        quality_report = build_quality_report(
+            axis, normalized_df, all_diags,
+        )
+    else:
+        quality_report = dict(prebuilt["quality_report"])
 
     source_category = (
         meta.get("source_category") or getattr(dataset, "source_category", None) or DEFAULT_SOURCE_CATEGORY
@@ -366,6 +388,168 @@ def _commit_version(
     return version
 
 
+def _validate_device_data_upload(
+    data: bytes, resolution: str,
+) -> tuple[bytes, dict, dict, dict, list[Diagnostic], int]:
+    """校验 ies.device-data 上传字节，返回(规范字节, fields, units, 质量报告, 非阻断诊断, 行数)。
+
+    在 ``parse_data_file_v2`` 的格式校验之上，只补上传边界必需规则：
+    文件分辨率与上传参数一致、step 自 0 连续、每格非空有限数值、
+    每数据列有 ``unit.<列>`` 声明。接口/设备/模式/路径的绑定上下文核对
+    由装配 ``_check_csv_binding`` 负责，此处不做（无绑定上下文不臆断）；
+    ``fields`` 表单声明因文件自描述而忽略。
+    任一阻断即抛 DataValidationError（400 信封）。
+    """
+    parsed, parse_diags = parse_data_file_v2(data)
+    diags = list(parse_diags)
+    if parsed is None or any(d.blocking for d in diags):
+        raise DataValidationError(diags)
+    meta = parsed.meta
+    if meta.resolution != resolution:
+        diags.append(make_diag(
+            "DATA-META-004",
+            severity=SEVERITY_ERROR,
+            blocking=True,
+            params={"field": "resolution", "value": meta.resolution, "allowed": (resolution,)},
+            location=_field_location("resolution"),
+        ))
+        raise DataValidationError(diags)
+    columns = [name for name in parsed.header if name != "step"]
+    if not columns:
+        diags.append(make_diag(
+            "DATA-DIAL-001",
+            severity=SEVERITY_ERROR,
+            blocking=True,
+            params={"detail": "至少需要一个数据列"},
+            location=_field_location("header"),
+        ))
+        raise DataValidationError(diags)
+    for name in columns:
+        unit = meta.units.get(name, "")
+        if not unit.strip():
+            diags.append(make_diag(
+                "DATA-COL-007",
+                severity=SEVERITY_ERROR,
+                blocking=True,
+                params={"column": name},
+                location=_field_location(name),
+            ))
+    steps: list[int] = []
+    numeric_rows: list[dict] = []
+    for index, row in enumerate(parsed.rows):
+        lineno = index + 1
+        try:
+            step = int(row[0].strip())
+        except (TypeError, ValueError):
+            step = -1
+        if step != len(steps):
+            code = "DATA-STEP-001" if step < 0 else "DATA-STEP-002"
+            params: dict = {"value": row[0].strip()} if step < 0 else {}
+            diags.append(make_diag(
+                code,
+                severity=SEVERITY_ERROR,
+                blocking=True,
+                params=params,
+                location=_field_location("step", [lineno]),
+            ))
+            continue
+        steps.append(step)
+        record: dict = {}
+        for position, name in enumerate(columns, start=1):
+            raw = row[position].strip() if position < len(row) else ""
+            if not raw:
+                diags.append(make_diag(
+                    "DATA-VAL-002",
+                    severity=SEVERITY_ERROR,
+                    blocking=True,
+                    params={"column": name},
+                    location=_field_location(name, [lineno]),
+                ))
+                continue
+            try:
+                number = float(raw)
+            except ValueError:
+                number = float("nan")
+            if not math.isfinite(number):
+                diags.append(make_diag(
+                    RES_NUM_INVALID,
+                    severity=SEVERITY_ERROR,
+                    blocking=True,
+                    params={"field": name, "row_no": lineno},
+                    location=_field_location(name, [lineno]),
+                ))
+                continue
+            record[name] = number
+        numeric_rows.append(record)
+    if any(d.blocking for d in diags):
+        raise DataValidationError(diags)
+    canonical = canonical_table_bytes_v2(
+        steps, tuple(["step", *columns]), numeric_rows, meta=meta,
+    )
+    fields_info: dict = {
+        "step": {
+            "type": "integer", "unit": "step",
+            "description_zh": "行序号", "description_en": "Row step index",
+        }
+    }
+    units_map: dict = {"step": "step"}
+    for name in columns:
+        units_map[name] = meta.units[name]
+        fields_info[name] = {
+            "type": "float", "unit": meta.units[name],
+            "description_zh": name, "description_en": name,
+        }
+    report = build_data_quality_report_v2(DeviceData2Result(
+        meta=meta, column_order=tuple(["step", *columns]), rows=numeric_rows,
+        steps=steps, transformations=("upload-canonical",),
+        diagnostics=[d for d in diags if not d.blocking],
+    ))
+    return canonical, fields_info, units_map, report, diags, len(numeric_rows)
+
+
+def _upload_device_data_version(
+    db: Session,
+    dataset: DatasetRecord,
+    resolution: str,
+    utc_offset_minutes: int,
+    data: bytes,
+    meta: dict,
+    *,
+    user_id: int | None = None,
+) -> DatasetVersionRecord:
+    """保存 ies.device-data 版本（只 flush，不提交）。
+
+    文件自描述：分辨率/单位/来源由文件元数据给出并逐项校验，
+    ``fields`` 表单声明不适用；``utc_offset_minutes`` 只记入版本行
+    （step 文件无时间戳，不参与字节语义）。落盘字节为规范 step CSV，
+    可被装配直接消费（非通用时间戳别名）。
+    """
+    if (
+        not isinstance(utc_offset_minutes, int)
+        or not (-720 <= utc_offset_minutes <= 840)
+    ):
+        raise DataValidationError([make_diag(
+            PARAM_RNG_OUT,
+            severity=SEVERITY_ERROR,
+            blocking=True,
+            params={
+                "field": "utc_offset_minutes", "value": utc_offset_minutes,
+                "min": -720, "max": 840,
+            },
+            location=_field_location("utc_offset_minutes"),
+        )])
+    canonical, fields_info, units_map, report, diags, row_count = (
+        _validate_device_data_upload(data, resolution)
+    )
+    axis = build_axis(resolution, utc_offset_minutes)
+    return _commit_version(
+        db, dataset, axis, None, diags, {}, meta,
+        actor_id=user_id,
+        canonical_csv=canonical, row_count=row_count,
+        prebuilt={"fields": fields_info, "units": units_map, "quality_report": report},
+    )
+
+
 def _upload_dataset_version(
     db: Session,
     dataset_id: int,
@@ -381,6 +565,8 @@ def _upload_dataset_version(
 
     CSV 在这里完成一次表头、时间轴、数值、范围和声明单位校验。保存后的内部
     读取与交接信任该结果，不再绑定设备文件、重复校验内容或比较摘要。
+    含 ``schema: ies.device-data`` 标记的字节走 device-data step 分支
+    （文件自描述，落规范 step CSV），其余走通用时间戳分支。
 
     参数:
         db: 数据库会话。
@@ -404,6 +590,12 @@ def _upload_dataset_version(
         raise ConflictError(
             message_key="ies.error.dataset_deprecated",
             params={"dataset_id": dataset_id},
+        )
+
+    if is_device_data_csv(data_bytes):
+        return _upload_device_data_version(
+            db, dataset, resolution, utc_offset_minutes, data_bytes, meta,
+            user_id=user_id,
         )
 
     rows, parse_diags = parse_csv(data_bytes, resolution)

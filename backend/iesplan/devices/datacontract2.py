@@ -229,6 +229,32 @@ class ParsedDataFile2:
     column_order: tuple[str, ...] = ()
 
 
+def is_device_data_csv(data: bytes) -> bool:
+    """上传字节是否为 ies.device-data 文件（只看 schema 标记，不做完整校验）。
+
+    前导 ``#`` 元数据行中出现 ``schema: ies.device-data`` 即命中；
+    无 schema 标记（通用时间戳 CSV 等）返回 False；schema 为其他值也
+    返回 False（走原有路径，不在此臆断）。
+    """
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            return False
+        body = stripped[1:].strip()
+        if ":" not in body:
+            continue
+        key, _, value = body.partition(":")
+        if key.strip() == "schema":
+            return value.strip() == SCHEMA_ID
+    return False
+
+
 def parse_data_file_v2(data: bytes) -> tuple[ParsedDataFile2 | None, list[Diagnostic]]:
     diags: list[Diagnostic] = []
     try:

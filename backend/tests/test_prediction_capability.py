@@ -520,13 +520,15 @@ def _draft_put(client: TestClient, pid: int, user, revision: int, commands: list
 def _prepare_predict_project(
     client: TestClient, db: Session, user, targets: list[tuple[str, str, list[float]]],
     *, tariff_bindings: dict | None = None, planning_body: dict | None = None,
+    version_factory=None,
 ) -> tuple[int, dict[str, int]]:
     """真实预测项目（B5-2a 声明入口 + 域级历史版本）：返回 (pid, {dev: vid})。
 
     targets 为 (设备名, 目标类型, 历史值)；每目标独立数据集版本。
     tariff_bindings/planning_body 缺省为无电价绑定 + 恒零目标（目标与负荷
     无关，只验链路）；耦合测试传入真实电价绑定与电价目标以使求解结果
-    随预测序列变化。
+    随预测序列变化。version_factory 缺省为域级历史版本创建；公开上传
+    链测试传入 HTTP 上传工厂，不再域级 crafting。
     """
     from test_worker_compute_chain import PLANNING_BODY  # noqa: E402
 
@@ -534,10 +536,11 @@ def _prepare_predict_project(
 
     pid = _create_project(client, user, "预测能力测试项目")
     _declare_finance(db, user, pid)
+    make_version = version_factory or _craft_history_version
     vids: dict[str, int] = {}
     for dev, _tt, history in targets:
         raw = _predict_history_csv(history)
-        vids[dev] = _craft_history_version(db, client, pid, user, f"{dev}历史", raw)
+        vids[dev] = make_version(db, client, pid, user, f"{dev}历史", raw)
     view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
     revision = view["draft"]["revision"]
     commands = [
