@@ -1751,7 +1751,9 @@ async function uploadDataset(
   const formData = new FormData()
   formData.append('file', input.file)
   formData.append('resolution', input.resolution ?? '1h')
-  formData.append('utc_offset_minutes', String(input.fixed_utc_offset_minutes ?? 480))
+  if (input.fixed_utc_offset_minutes !== undefined && input.fixed_utc_offset_minutes !== null) {
+    formData.append('utc_offset_minutes', String(input.fixed_utc_offset_minutes))
+  }
   if (input.fields && Object.keys(input.fields).length > 0) {
     formData.append(
       'fields',

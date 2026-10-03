@@ -147,13 +147,32 @@ function sampleFields(): FieldRow[] {
   }))
 }
 
+/** 检测文件头 schema 标记(仅用于显示与组装请求,后端仍权威校验)。 */
+function parseSchemaHead(head: string): { schema: string | null; resolution: string | null } {
+  let schema: string | null = null
+  let resolution: string | null = null
+  for (const line of head.split('\n')) {
+    const stripped = line.trim()
+    if (!stripped) continue
+    if (!stripped.startsWith('#')) break
+    const body = stripped.slice(1).trim()
+    const idx = body.indexOf(':')
+    if (idx < 0) continue
+    const key = body.slice(0, idx).trim()
+    const value = body.slice(idx + 1).trim()
+    if (key === 'schema' && schema === null) schema = value
+    if (key === 'resolution' && resolution === null) resolution = value
+  }
+  return { schema, resolution }
+}
+
 /** 统一上传管线:附带分辨率/UTC 偏移/字段定义/许可证(设计输入 §8.2)。 */
 function runUpload(opts: {
   projectId?: number
   name: string
   description?: string
   resolutionValue: string
-  offsetMinutes: number
+  offsetMinutes?: number
   license?: string
   fields: FieldRow[]
   file: File
@@ -248,6 +267,8 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
   const [license, setLicense] = useState('')
   const [description, setDescription] = useState('')
   const [file, setFile] = useState<File | null>(null)
+  const [schemaMode, setSchemaMode] = useState<'generic' | 'device-data'>('generic')
+  const [fileResolution, setFileResolution] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<UploadOutcome | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -261,10 +282,30 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
     setLicense('')
     setDescription('')
     setFile(null)
+    setSchemaMode('generic')
+    setFileResolution(null)
     setBusy(false)
     setResult(null)
     setError(null)
   }, [open, defaultOffsetMinutes])
+
+  function inspectFile(selected: File | null) {
+    setFile(selected)
+    setSchemaMode('generic')
+    setFileResolution(null)
+    if (!selected) return
+    void selected
+      .slice(0, 4096)
+      .text()
+      .then((head) => {
+        const { schema, resolution } = parseSchemaHead(head)
+        if (schema === 'ies.device-data' && resolution) {
+          setSchemaMode('device-data')
+          setFileResolution(resolution)
+        }
+      })
+      .catch(() => {})
+  }
 
   const opt = resolutionOption(resolution)
 
@@ -284,14 +325,15 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
     setBusy(true)
     setError(null)
     try {
+      const stepResolution = schemaMode === 'device-data' ? fileResolution : null
       const res = await runUpload({
         projectId,
         name,
         description,
-        resolutionValue: resolution,
-        offsetMinutes: offset,
+        resolutionValue: stepResolution ?? resolution,
+        offsetMinutes: stepResolution ? undefined : offset,
         license,
-        fields,
+        fields: stepResolution ? [] : fields,
         file,
       })
       setResult(res)
@@ -349,23 +391,30 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
                 placeholder="e.g. 园区负荷 2025"
               />
             </FormField>
-            <FormField
-              label={pt('ies.data.resolution')}
-              htmlFor="dset-res"
-              hint={pt('ies.data.row_count_expect', {
-                steps: 60 / opt.minutes,
-                rows: expectedRows(opt),
-              })}
-            >
-              <Select id="dset-res" value={resolution} onChange={(e) => setResolution(e.target.value)}>
-                {RESOLUTION_OPTIONS.map((r) => (
-                  <option key={r.value} value={r.value}>
-                    {pt(`ies.data.resolution_${r.value}`)}
-                  </option>
-                ))}
-              </Select>
-            </FormField>
+            {schemaMode === 'device-data' && fileResolution ? (
+              <FormField label={pt('ies.data.file_resolution')} htmlFor="dset-res-ro">
+                <Input id="dset-res-ro" value={fileResolution} readOnly />
+              </FormField>
+            ) : (
+              <FormField
+                label={pt('ies.data.resolution')}
+                htmlFor="dset-res"
+                hint={pt('ies.data.row_count_expect', {
+                  steps: 60 / opt.minutes,
+                  rows: expectedRows(opt),
+                })}
+              >
+                <Select id="dset-res" value={resolution} onChange={(e) => setResolution(e.target.value)}>
+                  {RESOLUTION_OPTIONS.map((r) => (
+                    <option key={r.value} value={r.value}>
+                      {pt(`ies.data.resolution_${r.value}`)}
+                    </option>
+                  ))}
+                </Select>
+              </FormField>
+            )}
           </div>
+          {schemaMode === 'device-data' && fileResolution ? null : (
           <FormField label={pt('ies.data.utc_offset')} htmlFor="dset-offset" hint={pt('ies.data.utc_note')}>
             <Select id="dset-offset" value={offset} onChange={(e) => setOffset(Number(e.target.value))}>
               {OFFSET_OPTIONS.map((m) => (
@@ -375,6 +424,8 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
               ))}
             </Select>
           </FormField>
+          )}
+          {schemaMode === 'device-data' && fileResolution ? null : (
           <FormField label={pt('ies.data.field_desc')}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--ies-space-2)' }}>
               {fields.map((f, idx) => (
@@ -422,6 +473,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
               </div>
             </div>
           </FormField>
+          )}
           <div className="ies-meta-grid">
             <FormField label={pt('ies.data.license')} htmlFor="dset-license">
               <Input id="dset-license" value={license} onChange={(e) => setLicense(e.target.value)} placeholder="CC-BY-4.0" />
@@ -430,12 +482,17 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
               <Input id="dset-desc" value={description} onChange={(e) => setDescription(e.target.value)} />
             </FormField>
           </div>
+          {schemaMode === 'device-data' && fileResolution ? (
+            <Alert variant="info" title={pt('ies.data.step_file_mode')}>
+              {pt('ies.data.step_file_note')}
+            </Alert>
+          ) : null}
           <FormField label={pt('ies.data.file')} required htmlFor="dset-file">
             <Input
               id="dset-file"
               type="file"
               accept=".csv,text/csv"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => inspectFile(e.target.files?.[0] ?? null)}
             />
           </FormField>
           {error ? <Alert variant="error">{error}</Alert> : null}

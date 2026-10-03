@@ -245,7 +245,10 @@ def upload_version(
     存在阻断性诊断(行数/时间戳/缺失/范围等): 400 + 标准错误信封
     (诊断明细入 params.diagnostics, 字段/行号定位)。
     ies.device-data step 文件直接上传：resolution 表单须与文件内
-    ``# resolution`` 一致，落盘为可被装配直接消费的规范 step CSV。
+    ``# resolution`` 一致，落盘为可被装配直接消费的规范 step CSV；
+    显式 ``fields`` 表单对 step 文件不适用，以 DATA-FILE-005 警告记入
+    诊断（不静默丢弃）；显式未知 ``# schema`` 按 DATA-META-003 可见
+    拒绝，不按通用时间戳路径解析；无标记文件仍走通用时间戳路径。
 
     授权 → 归属 → 配额 → 保存的业务顺序由完整用例拥有; 本路由只做传输适配、
     输入 DTO 校验与错误/响应映射。

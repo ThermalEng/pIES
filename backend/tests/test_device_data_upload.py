@@ -5,8 +5,9 @@
 - API 正向：201 + 版本字段/单位/质量报告 + 数据文件对象即规范 step CSV。
 - 全链：HTTP 上传 → 项目绑定 → 任务提交 → 真实运行 → 证据
   （单目标；零域级 crafting）。
-- 通用时间戳路径不受影响：异构标记仍走原路径（400 缺时间戳），
-  既有 test_dataset_api 覆盖通用上传回归。
+- 通用时间戳路径不受影响：无标记文件仍走原路径，
+  既有 test_dataset_api 覆盖通用上传回归；显式异构标记按 schema
+  错误可见拒绝；显式 fields 表单以警告记入诊断，不静默丢弃。
 """
 
 from __future__ import annotations
@@ -131,11 +132,16 @@ def _rows(values: list[float], count: int = 6) -> list[str]:
 
 def _upload(
     client: TestClient, pid: int, user, ds_id: int, raw: bytes,
-    resolution: str = "1h",
+    resolution: str = "1h", fields: dict | None = None,
 ) -> tuple[int, dict]:
+    import json as _json  # noqa: E402
+
+    form: dict = {"resolution": resolution, "utc_offset_minutes": "480"}
+    if fields is not None:
+        form["fields"] = _json.dumps(fields)
     resp = client.post(
         f"/api/projects/{pid}/datasets/{ds_id}/versions",
-        data={"resolution": resolution, "utc_offset_minutes": "480"},
+        data=form,
         files={"file": ("history.csv", raw, "text/csv")},
         headers=_h(client, user),
     )
@@ -242,10 +248,10 @@ class TestDeviceDataUploadRejected:
         assert status == 400, body
         assert "DATA-COL-005" in _diag_codes(body), body
 
-    def test_foreign_schema_falls_back_to_generic_path(
+    def test_foreign_schema_rejected_as_schema_error(
         self, client: TestClient, db: Session
     ) -> None:
-        """异构标记不误判为 device-data：走原通用路径（缺时间戳 400）。"""
+        """显式异构标记按 schema 错误可见拒绝，不伪装普通时间戳 CSV。"""
         user = make_user(db, "dd_owner_foreign")
         pid = _create_project(client, user, "异构项目")
         ds_id = _make_dataset(client, pid, user)
@@ -253,7 +259,7 @@ class TestDeviceDataUploadRejected:
         status, body = _upload(client, pid, user, ds_id, _dd_bytes(meta, ["0,1.0"]))
         assert status == 400, body
         assert body["error"]["code"] == "DATA-VAL-001"
-        assert "DATA-COL-001" in _diag_codes(body), body
+        assert "DATA-META-003" in _diag_codes(body), body
 
 
 class TestDeviceDataUploadAccepted:
@@ -291,6 +297,22 @@ class TestDeviceDataUploadAccepted:
         assert lines[8] == "0,48.0"
         assert lines[9] == "1,49.0"
         assert stored.endswith(b"\n") and b"\r" not in stored
+
+    def test_explicit_fields_surfaced_as_warning(
+        self, client: TestClient, db: Session
+    ) -> None:
+        """device-data 显式 fields 表单不静默丢弃：201 + 非阻断警告。"""
+        user = make_user(db, "dd_owner_fields")
+        pid = _create_project(client, user, "显式字段项目")
+        ds_id = _make_dataset(client, pid, user)
+        raw = _dd_bytes(BASE_META, _rows([48.0, 49.0], 24))
+        status, body = _upload(
+            client, pid, user, ds_id, raw,
+            fields={"e_load": {"unit": "kWh"}},
+        )
+        assert status == 201, body
+        codes = [d["code"] for d in body["diagnostics"]]
+        assert "DATA-FILE-005" in codes, body
 
 
 def _upload_history_version(db, client, pid, user, name, raw, store=None):

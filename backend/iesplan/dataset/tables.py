@@ -174,6 +174,7 @@ def _register_diag_codes() -> None:
         "DATA-FILE-002": "CSV 行字段数与表头不一致",
         "DATA-FILE-003": "CSV 文件为空或没有数据行",
         "DATA-FILE-004": "CSV 时间戳列解析失败",
+        "DATA-FILE-005": "device-data 文件自描述，fields 表单声明未使用",
     }
     for code, desc in codes.items():
         diag_mod.NEW_DIAG_CODES.setdefault(code, desc)
@@ -182,6 +183,7 @@ def _register_diag_codes() -> None:
         "DATA-FILE-002": "ies.diag.data.file_row_width",
         "DATA-FILE-003": "ies.diag.data.file_empty",
         "DATA-FILE-004": "ies.diag.data.file_ts_parse",
+        "DATA-FILE-005": "ies.diag.data.fields_ignored",
     }.items():
         diag_mod.DIAG_MESSAGE_KEYS.setdefault(code, key)
         diag_mod.DIAG_FIX_HINT_KEYS.setdefault(code, "ies.fix.data.csv_general")

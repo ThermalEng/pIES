@@ -36,6 +36,7 @@ from iesplan.devices.datacontract2 import (
     canonical_table_bytes_v2,
     is_device_data_csv,
     parse_data_file_v2,
+    read_schema_marker,
     repeat_cycle_lengths,
 )
 from iesplan.devices.loader import (
@@ -82,6 +83,7 @@ __all__ = [
     "build_data_quality_report_v2",
     "canonical_table_bytes_v2",
     "is_device_data_csv",
+    "read_schema_marker",
     "DEFAULT_CATALOG_DIR",
     "discover_device_dirs",
     "load_all_devices",

@@ -64,6 +64,7 @@ from iesplan.devices import (
     canonical_table_bytes_v2,
     is_device_data_csv,
     parse_data_file_v2,
+    read_schema_marker,
 )
 from iesplan.identity.contracts import UserRecord
 from iesplan.storage import (
@@ -389,7 +390,7 @@ def _commit_version(
 
 
 def _validate_device_data_upload(
-    data: bytes, resolution: str,
+    data: bytes, resolution: str, *, fields_present: bool = False,
 ) -> tuple[bytes, dict, dict, dict, list[Diagnostic], int]:
     """校验 ies.device-data 上传字节，返回(规范字节, fields, units, 质量报告, 非阻断诊断, 行数)。
 
@@ -483,6 +484,13 @@ def _validate_device_data_upload(
         numeric_rows.append(record)
     if any(d.blocking for d in diags):
         raise DataValidationError(diags)
+    if fields_present:
+        diags.append(make_diag(
+            "DATA-FILE-005",
+            severity="warning",
+            params={},
+            location=_field_location("fields"),
+        ))
     canonical = canonical_table_bytes_v2(
         steps, tuple(["step", *columns]), numeric_rows, meta=meta,
     )
@@ -513,14 +521,16 @@ def _upload_device_data_version(
     resolution: str,
     utc_offset_minutes: int,
     data: bytes,
+    fields: dict,
     meta: dict,
     *,
     user_id: int | None = None,
 ) -> DatasetVersionRecord:
     """保存 ies.device-data 版本（只 flush，不提交）。
 
-    文件自描述：分辨率/单位/来源由文件元数据给出并逐项校验，
-    ``fields`` 表单声明不适用；``utc_offset_minutes`` 只记入版本行
+    文件自描述：分辨率/单位/来源由文件元数据给出并逐项校验；
+    显式传入的 ``fields`` 表单声明不适用，以非阻断警告记入诊断
+    （不静默丢弃）；``utc_offset_minutes`` 只记入版本行
     （step 文件无时间戳，不参与字节语义）。落盘字节为规范 step CSV，
     可被装配直接消费（非通用时间戳别名）。
     """
@@ -539,7 +549,7 @@ def _upload_device_data_version(
             location=_field_location("utc_offset_minutes"),
         )])
     canonical, fields_info, units_map, report, diags, row_count = (
-        _validate_device_data_upload(data, resolution)
+        _validate_device_data_upload(data, resolution, fields_present=bool(fields))
     )
     axis = build_axis(resolution, utc_offset_minutes)
     return _commit_version(
@@ -594,9 +604,18 @@ def _upload_dataset_version(
 
     if is_device_data_csv(data_bytes):
         return _upload_device_data_version(
-            db, dataset, resolution, utc_offset_minutes, data_bytes, meta,
+            db, dataset, resolution, utc_offset_minutes, data_bytes, fields, meta,
             user_id=user_id,
         )
+    schema, schema_version = read_schema_marker(data_bytes)
+    if schema is not None:
+        raise DataValidationError([make_diag(
+            "DATA-META-003",
+            severity=SEVERITY_ERROR,
+            blocking=True,
+            params={"schema": schema, "schema_version": schema_version or ""},
+            location=_field_location("schema"),
+        )])
 
     rows, parse_diags = parse_csv(data_bytes, resolution)
     frame = pd.DataFrame(rows)

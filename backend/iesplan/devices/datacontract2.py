@@ -229,30 +229,45 @@ class ParsedDataFile2:
     column_order: tuple[str, ...] = ()
 
 
-def is_device_data_csv(data: bytes) -> bool:
-    """上传字节是否为 ies.device-data 文件（只看 schema 标记，不做完整校验）。
+def read_schema_marker(data: bytes) -> tuple[str | None, str | None]:
+    """读取文件前导 schema 标记（只看标记，不做完整校验）。
 
-    前导 ``#`` 元数据行中出现 ``schema: ies.device-data`` 即命中；
-    无 schema 标记（通用时间戳 CSV 等）返回 False；schema 为其他值也
-    返回 False（走原有路径，不在此臆断）。
+    返回 ``(schema, schema_version)``；任一缺失为 None。无前导标记
+    （通用时间戳 CSV 等）返回 ``(None, None)``。解码失败同样返回
+    ``(None, None)``（由各路径自身解码诊断覆盖）。
     """
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
-        return False
+        return None, None
+    schema: str | None = None
+    version: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
         if not stripped.startswith("#"):
-            return False
+            break
         body = stripped[1:].strip()
         if ":" not in body:
             continue
         key, _, value = body.partition(":")
-        if key.strip() == "schema":
-            return value.strip() == SCHEMA_ID
-    return False
+        key = key.strip()
+        if key == "schema" and schema is None:
+            schema = value.strip()
+        elif key == "schema_version" and version is None:
+            version = value.strip()
+    return schema, version
+
+
+def is_device_data_csv(data: bytes) -> bool:
+    """上传字节是否为 ies.device-data 文件（只看 schema 标记，不做完整校验）。
+
+    ``schema`` 标记恰为本契约标识即命中；无标记或异构标记返回 False
+    （异构标记由上传入口按 schema 错误可见拒绝，不走通用路径伪装）。
+    """
+    schema, _ = read_schema_marker(data)
+    return schema == SCHEMA_ID
 
 
 def parse_data_file_v2(data: bytes) -> tuple[ParsedDataFile2 | None, list[Diagnostic]]:
