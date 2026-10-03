@@ -261,8 +261,8 @@ def submit_attempt_result(
                     sealed = seal_output_objects(db, raw, actor_id=who)
                     payload[key] = sealed
                     sealed_groups[key] = sealed
-            # 预测回执训练产物引用回填(B5-2): 密封描述子注入各回执,
-            # 随证据载荷同事务提交(外部 Blob 字节落盘不参与原子提交)。
+            # 预测回执引用回填(B5-2): 训练产物与最终轮输出序列的密封描述子
+            # 注入各回执, 随证据载荷同事务提交(外部 Blob 字节落盘不参与原子提交)。
             prediction_files = sealed_groups.get("prediction_files")
             if prediction_files is not None:
                 prediction = payload.get("prediction") or {}
@@ -270,6 +270,13 @@ def submit_attempt_result(
                     artifact_path = entry.get("artifact_path")
                     if artifact_path in prediction_files:
                         entry["training_artifact"] = dict(prediction_files[artifact_path])
+                    series_path = entry.get("series_path")
+                    if series_path in prediction_files:
+                        series_descriptor = dict(prediction_files[series_path])
+                        entry["output_series"] = {
+                            **(entry.get("output_series") or {}),
+                            "object_id": series_descriptor["object_id"],
+                        }
             blob = _payload_bytes(payload)
             object_id = store_result_blob(db, blob, actor_id=who)
             evidence_id = create_evidence_record(

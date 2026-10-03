@@ -147,6 +147,17 @@ def _solve_round(
     return bundle, receipt, collected, result, outcome
 
 
+def _predicted_series_csv(item: Any) -> bytes:
+    """最终轮预测序列确定性 CSV 字节（证据封存用）。
+
+    按索引连续排列全周期值（``repr`` 逐行），只如实序列化本轮预测
+    器产出的值，不做任何校验、补值或重算。
+    """
+    lines = [f"step,{item.interface}"]
+    lines += [f"{index},{value!r}" for index, value in enumerate(item.values)]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
 def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     """计算任务真实链: 快照恢复 → 预测 → 阶段一求解 → [阶段二迭代] → 证据。
 
@@ -247,8 +258,11 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         for item in predicted:
             artifact_path = f"prediction/{item.device}/{item.interface}/training_artifact.json"
             prediction_files[artifact_path] = (item.artifact, item.artifact_media_type)
+            series_path = f"prediction/{item.device}/{item.interface}/series.csv"
+            prediction_files[series_path] = (_predicted_series_csv(item), "text/csv")
             entry = dict(item.receipt)
             entry["artifact_path"] = artifact_path
+            entry["series_path"] = series_path
             entry["training_artifact"] = None
             receipts.append(entry)
         output_files["prediction_files"] = prediction_files

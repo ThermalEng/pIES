@@ -234,7 +234,9 @@ class NaivePredictor:
             "feature_order": ["history_value"],
             "target_order": [interface],
             "training_input_refs": {"history": history_object_id},
-            "training_target_refs": {},
+            # 朴素携载的学习目标即历史对象接口列末值：真实对象引用，
+            # 非推断；未来协变量无装配绑定字段，契约待定，保持空。
+            "training_target_refs": {interface: history_object_id},
             "covariate_refs": {},
             "seed": seed,
             "output_series": {

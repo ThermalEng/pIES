@@ -203,7 +203,7 @@ class _ChasePredictor:
             "feature_order": ["history_value", "previous_objective"],
             "target_order": [interface],
             "training_input_refs": {"history": history_object_id},
-            "training_target_refs": {},
+            "training_target_refs": {interface: history_object_id},
             "covariate_refs": {},
             "seed": seed,
             "previous_objective": previous_objective,
@@ -373,8 +373,19 @@ class TestMaterializePredicted:
         assert list(predicted[0].values)[:3] == [49.0, 49.0, 49.0]
         assert list(predicted[1].values)[:2] == [10.0, 10.0]
         assert predicted[0].receipt["training_input_refs"] == {"history": "obj-h1"}
+        assert predicted[0].receipt["training_target_refs"] == {
+            "electricity_demand": "obj-h1"
+        }
         assert predicted[0].receipt["seed"] == 7
         assert predicted[0].history_object_id == "obj-h1"
+
+    def test_predicted_series_csv_deterministic(self) -> None:
+        item = PredictedTarget(
+            device="d", interface="i", target_type="t",
+            values=(1.5, 2.0), history_object_id="o", artifact=b"{}", receipt={},
+        )
+        raw = runner._predicted_series_csv(item).decode("utf-8").splitlines()
+        assert raw == ["step,i", "0,1.5", "1,2.0"]
 
     def test_unknown_algorithm_unavailable(self) -> None:
         with pytest.raises(ComputationUnavailableError):
@@ -705,6 +716,17 @@ class TestPredictEndToEnd:
             for r in refs
         )
         assert sealed["prediction_files"][receipt["artifact_path"]]["object_id"] == training["object_id"]
+        assert receipt["training_target_refs"] == {
+            "electricity_demand": receipt["training_input_refs"]["history"]
+        }
+        series = receipt["output_series"]
+        assert series["device"] == "load1"
+        assert series["mode"] == "data_predict"
+        assert sealed["prediction_files"][receipt["series_path"]]["object_id"] == series["object_id"]
+        series_lines = get_object(db, series["object_id"]).decode("utf-8").splitlines()
+        assert series_lines[0] == "step,electricity_demand"
+        assert len(series_lines) == series["point_count"] + 1
+        assert {line.split(",")[1] for line in series_lines[1:]} == {"49.0"}
 
     def test_two_targets_phase_two_converges(
         self, client: TestClient, db: Session, engine: Engine, plane
@@ -856,6 +878,16 @@ class TestPredictEndToEnd:
         )
         assert final_delta == recomputed
         assert len(prediction["receipts"]) == 2
+        # 封存的最终轮序列字节与记录的第三轮值一致。
+        for entry in prediction["receipts"]:
+            series_id = entry["output_series"]["object_id"]
+            sealed_lines = get_object(db, series_id).decode("utf-8").splitlines()
+            assert sealed_lines[0] == "step,electricity_demand"
+            assert len(sealed_lines) == entry["output_series"]["point_count"] + 1
+            expected_value = by_target[entry["output_series"]["device"]][2]["value"]
+            assert {line.split(",")[1] for line in sealed_lines[1:]} == {
+                repr(expected_value)
+            }
 
     def test_unknown_algorithm_rejected_at_submit(
         self, client: TestClient, db: Session
