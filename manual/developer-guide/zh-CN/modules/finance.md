@@ -111,6 +111,7 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 - 不用浮点显示舍入值反推现金流；
 - 每个指标的状态不能被综合分数覆盖；
 - 同一 `EffectiveFinanceConfig` 必须同时进入规划和财务计算证据；
+- 财务模型实际消费的每项参数必须在求解前有明确权威来源与值，缺失即提交检查阻断；绝不默认、外推或事后反推（投产年份/新增容量可作为全期模型的优化决策，不得为参数确定而预先固定建设决策）；
 - 财务配置不得包含目标函数、规划约束、solver 选项或阶段性数据；
 - 财务三件套声明式配置使用 YAML，经安全子集解析与规范化，不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容；
 - 财务成本模型不得写入设备技术文件，不得依赖 `backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 第二权威源；
