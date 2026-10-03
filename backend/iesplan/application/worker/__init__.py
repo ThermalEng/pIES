@@ -20,9 +20,9 @@ commit/rollback)。
   ``get_project_content_id``/``load_version_content``/
   ``get_dataset_version_record``/``get_dataset_data_object``/
   ``load_dataset_blob``/``parse_dataset_csv``/``count_completed_samples``;
-- 计算三段: ``load_compute_inputs``/``generate_bundle``/
-  ``execute_bundle``/``adapt_result``(配套 ``build_attempt_context``/
-  ``business_outcome_for``);
+- 计算阶段: ``load_compute_inputs``/``predict_target_round``/
+  ``generate_bundle``/``execute_bundle``/``adapt_result``(配套
+  ``build_attempt_context``/``business_outcome_for``);
 - report 检查: ``locate_report_evidence``/``assess_report_stage``。
 
 不可变结果与错误语义: ``Claim``/``SubmitReceipt``/``ReportCheckResult``/
@@ -52,6 +52,8 @@ from iesplan.application.worker.compute_cases import (
     execute_bundle,
     generate_bundle,
     load_compute_inputs,
+    predict_target_round,
+    prediction_delta,
     seal_output_objects,
 )
 from iesplan.application.worker.lease_cases import (
@@ -120,6 +122,8 @@ __all__ = [
     "load_version_content",
     "locate_report_evidence",
     "parse_dataset_csv",
+    "predict_target_round",
+    "prediction_delta",
     "publish_heartbeat",
     "renew_attempt_lease",
     "report_attempt_progress",

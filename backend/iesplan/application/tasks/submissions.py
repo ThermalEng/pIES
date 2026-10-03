@@ -417,14 +417,16 @@ def _check_prediction_inputs(
     canonical_doc: Mapping[str, Any],
     calc_config: Mapping[str, Any],
     project_id: int,
+    predictor_registry: Any | None = None,
 ) -> int:
-    """预测输入冻结核对(提交闸门，B5-1)：配置 predictions 与装配 data_predict 绑定双向匹配 + 多目标收敛必填。
+    """预测输入冻结核对(提交闸门，B5-1 双向匹配 + B5-2 算法相容)。
 
     - 配置中每个预测目标必须命中装配的 data_predict 绑定（实例 + 接口），否则 400 TASK-REQ-010；
     - 装配中每个 data_predict 绑定必须被配置预测覆盖（无算法无法物化），否则 400 TASK-REQ-011；
-    - data_predict 绑定多于 1 个且 convergence 为空 → 400 TASK-REQ-012（0/1 个时收敛可空，直通阶段一）。
-    配置正文形态由保存入口冻结，此处直接使用，不重复校验字段形态；
-    target_type 取值语义与算法相容性留待预测能力切片（算法 descriptor 见 B5-2）。
+    - data_predict 绑定多于 1 个且 convergence 为空 → 400 TASK-REQ-012（0/1 个时收敛可空，直通阶段一）；
+    - 预测目录可用时(B5-2)：每个预测算法须精确解析，否则 400 TASK-REQ-013；
+      算法不支持该绑定目标类型时 → 400 TASK-REQ-014。
+    配置正文形态由保存入口冻结，此处直接使用，不重复校验字段形态。
     返回 data_predict 绑定数。
     """
     bound = _prediction_binding_keys(canonical_doc)
@@ -457,6 +459,37 @@ def _check_prediction_inputs(
             params={"project_id": project_id, "predict_target_count": len(bound)},
             location={"object_type": "calculation_config", "object_id": project_id, "field": "convergence"},
         )
+    if predictor_registry is not None:
+        for entry in predictions:
+            algorithm = entry["algorithm"]
+            try:
+                predictor = predictor_registry.get(algorithm)
+            except ComputationUnavailableError as exc:
+                raise InvalidRequestError(
+                    "计算配置引用的预测算法未注册",
+                    code="TASK-REQ-013",
+                    params={"project_id": project_id, "algorithm": algorithm},
+                    location={
+                        "object_type": "calculation_config",
+                        "object_id": project_id, "field": "predictions",
+                    },
+                ) from exc
+            dev_id = str(entry["target"]["instance"])
+            iface_id = str(entry["target"]["interface"])
+            target_type = str(bound[(dev_id, iface_id)].get("target_type"))
+            if not predictor.descriptor.supports(target_type):
+                raise InvalidRequestError(
+                    "预测算法不支持该装配目标类型",
+                    code="TASK-REQ-014",
+                    params={
+                        "project_id": project_id, "algorithm": algorithm,
+                        "instance": dev_id, "interface": iface_id, "target_type": target_type,
+                    },
+                    location={
+                        "object_type": "calculation_config",
+                        "object_id": project_id, "field": "predictions",
+                    },
+                )
     return len(bound)
 
 
@@ -468,6 +501,7 @@ def _assemble_snapshot(
     user: UserRecord | None = None,
     calculation_config: tuple[dict[str, Any], int] | None = None,
     generator_registry: Any | None = None,
+    predictor_registry: Any | None = None,
 ) -> CalcSnapshotRecord:
     """组装不可变计算快照(相同输入复用)。
 
@@ -509,9 +543,10 @@ def _assemble_snapshot(
     artifact = gate.artifact
     receipt = artifact.receipt.to_dict()
     device_models = _freeze_device_models(artifact, gate.device_documents)
-    # 预测输入冻结核对(B5-1): 配置↔装配双向匹配 + 多目标收敛必填, 失败不建快照。
+    # 预测输入冻结核对(B5-1 双向匹配 + B5-2 算法相容): 失败不建快照。
     _check_prediction_inputs(
-        json.loads(artifact.canonical_text), calc_config, project_id
+        json.loads(artifact.canonical_text), calc_config, project_id,
+        predictor_registry=predictor_registry,
     )
     for candidate in tasks_domain.list_snapshots_for_version(db, version.id):
         if _snapshot_inputs_equal(
@@ -897,6 +932,7 @@ def _submit_task(
     idempotency_key: str,
     parent_task_id: int | None = None,
     generator_registry: Any | None = None,
+    predictor_registry: Any | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """创建任务(幂等检查 → 门禁 → 快照 → INSERT → 入队)。
 
@@ -904,7 +940,8 @@ def _submit_task(
     返回 (任务记录, 标记): 标记仅含 replay。内部步骤只 flush,
     由顶层 submit_task 提交。
     generator_registry 为组合根已发布的生成器目录(计算任务解析冻结
-    执行引用用; io 任务不消费)。
+    执行引用用; io 任务不消费)。predictor_registry 为组合根已发布的
+    预测算法目录(计算任务核对预测算法相容用; 缺席时只做 B5-1 匹配)。
     """
     ensure_access(db, user, project_id, "edit")
     project = require_project(db, project_id)
@@ -963,6 +1000,7 @@ def _submit_task(
         snapshot = _assemble_snapshot(
             db, project_id, task_type, config=config, user=user,
             calculation_config=pinned, generator_registry=generator_registry,
+            predictor_registry=predictor_registry,
         )
     # io 类任务(report/export/import/dataset_build): 无快照, 仅幂等键命中复用
 
@@ -1027,13 +1065,14 @@ def submit_task(
     idempotency_key: str,
     parent_task_id: int | None = None,
     generator_registry: Any | None = None,
+    predictor_registry: Any | None = None,
 ) -> tuple[TaskRecord, dict[str, bool]]:
     """提交任务用例(幂等键必填); 本层拥有事务提交/回滚。"""
     try:
         result = _submit_task(
             db, user, project_id, task_type,
             config=config, idempotency_key=idempotency_key, parent_task_id=parent_task_id,
-            generator_registry=generator_registry,
+            generator_registry=generator_registry, predictor_registry=predictor_registry,
         )
         db.commit()
         return result

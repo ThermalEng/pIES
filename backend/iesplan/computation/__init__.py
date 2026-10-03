@@ -59,6 +59,17 @@ from iesplan.computation.generators import (
     build_registry,
     write_mps,
 )
+from iesplan.computation.predictors import (
+    NAIVE_PREDICTOR,
+    NAIVE_PREDICTOR_REF,
+    TRAINING_ARTIFACT_MEDIA_TYPE,
+    PredictedTarget,
+    Predictor,
+    PredictorDescriptor,
+    PredictorRegistry,
+    build_predictor_registry,
+    prediction_delta,
+)
 from iesplan.computation.protocols import (
     CALCULATION_CONFIG_SCHEMA,
     CALCULATION_CONFIG_VERSION,
@@ -91,14 +102,14 @@ from iesplan.computation.registry import (
     get_algorithm,
     list_algorithms,
 )
-from iesplan.computation.result_adapters import (
-    HIGHS_ADAPTER,
-    HighsResultAdapter,
-)
 from iesplan.computation.result_adapter import (
     ResultAdapterDescriptor,
     ResultAdapterRegistry,
     build_result_adapter_registry,
+)
+from iesplan.computation.result_adapters import (
+    HIGHS_ADAPTER,
+    HighsResultAdapter,
 )
 from iesplan.computation.runtime import (
     HIGHS_ADAPTER_PATH,
@@ -119,6 +130,7 @@ from iesplan.computation.sequences import (
     MaterializedSeries,
     MaterializedSet,
     materialize_non_predictive_series,
+    materialize_predicted_series,
 )
 
 __all__ = [
@@ -136,6 +148,8 @@ __all__ = [
     "HIGHS_EXECUTABLE_REF",
     "HIGHS_MILP_PROVIDER",
     "HIGHS_VERSION",
+    "NAIVE_PREDICTOR",
+    "NAIVE_PREDICTOR_REF",
     "SOLVER_BUNDLE_SCHEMA",
     "SOLVER_BUNDLE_VERSION",
     "AlgorithmSpec",
@@ -157,6 +171,10 @@ __all__ = [
     "HighsResultAdapter",
     "MaterializedSeries",
     "MaterializedSet",
+    "PredictedTarget",
+    "Predictor",
+    "PredictorDescriptor",
+    "PredictorRegistry",
     "ProcessOutcome",
     "RECEIPT_STATUSES",
     "ResultAdapter",
@@ -167,9 +185,11 @@ __all__ = [
     "SolverRuntime",
     "StopProbe",
     "TERMINATION_REASONS",
+    "TRAINING_ARTIFACT_MEDIA_TYPE",
     "LocalExecutable",
     "LocalProcessProvider",
     "build_executor_registry",
+    "build_predictor_registry",
     "build_project_model",
     "build_registry",
     "build_result_adapter_registry",
@@ -181,7 +201,9 @@ __all__ = [
     "load_calculation_config_schema",
     "manifest_to_yaml_bytes",
     "materialize_non_predictive_series",
+    "materialize_predicted_series",
     "normalize_bundle",
+    "prediction_delta",
     "read_stop_reason",
     "validate_bundle",
     "validate_calculation_config",

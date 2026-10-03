@@ -227,7 +227,8 @@ def submit_attempt_result(
 
     单事务顺序:
         1) fencing 校验(租约 active + token 匹配);
-        2) 输出封存(Bundle/声明输出原始字节 → 对象, 描述子注入 payload);
+        2) 输出封存(Bundle/声明输出/预测训练产物原始字节 → 对象,
+           描述子注入 payload, 预测回执训练产物引用回填);
         3) 结果序列化 → 对象存储;
         4) 证据包(evidence_packages, 不可变) + 对象引用(含输出引用挂接);
         5) 四维评估(result_assessments, assessor='system');
@@ -260,6 +261,15 @@ def submit_attempt_result(
                     sealed = seal_output_objects(db, raw, actor_id=who)
                     payload[key] = sealed
                     sealed_groups[key] = sealed
+            # 预测回执训练产物引用回填(B5-2): 密封描述子注入各回执,
+            # 随证据载荷同事务提交(外部 Blob 字节落盘不参与原子提交)。
+            prediction_files = sealed_groups.get("prediction_files")
+            if prediction_files is not None:
+                prediction = payload.get("prediction") or {}
+                for entry in prediction.get("receipts") or []:
+                    artifact_path = entry.get("artifact_path")
+                    if artifact_path in prediction_files:
+                        entry["training_artifact"] = dict(prediction_files[artifact_path])
             blob = _payload_bytes(payload)
             object_id = store_result_blob(db, blob, actor_id=who)
             evidence_id = create_evidence_record(

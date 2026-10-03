@@ -1,9 +1,10 @@
 """全周期已物化序列公共契约。
 
-非预测准备器的最小确定性物化逻辑，只处理 constant/data_repeat；
-data_predict 待完成目标记入 ``MaterializedSet.pending_predict``
-（保留固定资源身份），不物化、不跳过、不伪装完成；预测训练与
-完整预测序列生成不属于本函数。
+最小确定性物化逻辑：``materialize_non_predictive_series`` 只处理
+constant/data_repeat，data_predict 待完成目标记入
+``MaterializedSet.pending_predict``（保留固定资源身份）；预测训练与
+完整预测序列由 ``materialize_predicted_series`` 经调用方给定的公开
+predictor 完成，同一 ``MaterializedSeries`` 类型进入。
 
 输入只消费 ``ValidatedAssemblyArtifact``（已签发事实）与调用方按
 canonical 绑定 ``content.object_id``（字符串）显式传入的只读字节；
@@ -21,12 +22,14 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
+from iesplan.computation.errors import ComputationUnavailableError
+from iesplan.computation.predictors import PredictedTarget, Predictor
 from iesplan.core.contracts import point_count_for_baseline
 
 
@@ -227,8 +230,84 @@ def _project_column(data: bytes, interface_id: str) -> list[float]:
     ]
 
 
+def materialize_predicted_series(
+    artifact: ValidatedAssemblyArtifact,
+    resources: Mapping[str, bytes],
+    predictions: tuple[Mapping[str, object], ...],
+    resolve_predictor: Callable[[str], Predictor],
+    seed: int | None,
+    *,
+    previous: Mapping[str, object] | None = None,
+) -> tuple[PredictedTarget, ...]:
+    """物化装配产物中全部 data_predict 绑定的全周期预测序列。
+
+    ``predictions`` 为计算配置 ``predictions`` 原样条目
+    (``{target, algorithm, parameters}``); ``resolve_predictor`` 为
+    ``algorithm ref → Predictor`` 调用(目录由组合根持有, 此处只消费)。
+    配置↔绑定覆盖关系由提交闸门保证, 此处按 (实例, 接口) 直接配对,
+    缺配对即实际结构错误可见失败, 不重跑提交校验。历史列按绑定接口
+    名投影; 目标类型不透明透传进产物与回执, 不在此解释。
+    上一轮统一结果 ``previous`` 原样透传给各 predictor(自回归类算法
+    使用；朴素算法忽略)。
+    返回按 (实例, 接口) 稳定排序的预测产物。
+    """
+    doc = json.loads(artifact.canonical_text)
+    baseline_data = doc["project_baseline"]
+    point_count = point_count_for_baseline(
+        baseline_data["resolution"], baseline_data["leap_year"]
+    )
+    by_target = {}
+    for entry in predictions:
+        target = entry["target"]
+        by_target[(str(target["instance"]), str(target["interface"]))] = entry
+    devices = doc.get("devices") or {}
+    predicted: list[PredictedTarget] = []
+    for device_id in sorted(devices):
+        bindings = devices[device_id].get("predefined_interfaces") or {}
+        for interface_id in sorted(bindings):
+            binding = bindings[interface_id]
+            if not isinstance(binding, Mapping) or binding.get("mode") != "data_predict":
+                continue
+            key = (str(device_id), str(interface_id))
+            entry = by_target[key]  # 提交闸门已保证覆盖, 缺配对即快照故障
+            predictor: Predictor = resolve_predictor(str(entry["algorithm"]))
+            target_type = str(binding["target_type"])
+            if not predictor.descriptor.supports(target_type):
+                raise ComputationUnavailableError(
+                    f"预测算法不支持该目标类型: {entry['algorithm']!r} x {target_type!r}",
+                    reason="predictor-target-unsupported",
+                )
+            object_id = str(binding["content"]["object_id"])
+            if object_id not in resources:
+                raise ValueError(
+                    "固定资源缺失（必要输入不完整）: "
+                    f"{device_id!r} x {interface_id!r} x object {object_id!r}"
+                )
+            history = tuple(_project_column(resources[object_id], str(interface_id)))
+            parameters = entry.get("parameters") or {}
+            if not isinstance(parameters, Mapping):
+                raise ValueError(
+                    f"预测参数须为对象: {device_id!r} x {interface_id!r}"
+                )
+            predicted.append(
+                predictor.predict(
+                    device=str(device_id),
+                    interface=str(interface_id),
+                    target_type=target_type,
+                    history=history,
+                    history_object_id=object_id,
+                    parameters=parameters,
+                    seed=seed,
+                    point_count=point_count,
+                    previous=previous,
+                )
+            )
+    return tuple(predicted)
+
+
 __all__ = [
     "MaterializedSeries",
     "MaterializedSet",
     "materialize_non_predictive_series",
+    "materialize_predicted_series",
 ]

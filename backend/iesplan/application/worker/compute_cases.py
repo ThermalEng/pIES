@@ -50,10 +50,14 @@ from iesplan.computation import (
     ExecutorRegistry,
     GeneratorRegistry,
     MaterializedSeries,
+    PredictedTarget,
+    PredictorRegistry,
     SolverBundle,
     SolverRuntime,
     StopProbe,
     materialize_non_predictive_series,
+    materialize_predicted_series,
+    prediction_delta,
 )
 from iesplan.computation.result_adapter import ResultAdapterRegistry
 from iesplan.core.diagnostics import Diagnostic
@@ -71,6 +75,8 @@ __all__ = [
     "execute_bundle",
     "generate_bundle",
     "load_compute_inputs",
+    "predict_target_round",
+    "prediction_delta",
     "seal_output_objects",
 ]
 
@@ -79,15 +85,17 @@ __all__ = [
 class ComputeExecutionPlane:
     """计算执行面句柄（组合根装配、Worker 持有、阶段命令消费）。
 
-    四个成员均为已发布/已装配实例：生成器目录、执行器目录、结果适配器
-    目录与通用运行时。API 进程不装配执行面（执行器目录/运行时/策略只归
-    计算 Worker 组合根）。
+    五个成员均为已发布/已装配实例：生成器目录、执行器目录、结果适配器
+    目录、预测算法目录与通用运行时。API 进程不装配执行面（执行器目录/
+    运行时/策略只归计算 Worker 组合根；预测目录随生成器目录在 API 与
+    Worker 上下文同时装配，供提交相容核对与执行预测使用）。
     """
 
     generator_registry: GeneratorRegistry
     executor_registry: ExecutorRegistry
     adapter_registry: ResultAdapterRegistry
     runtime: SolverRuntime
+    predictor_registry: PredictorRegistry
 
 
 #: 快照计算配置正文恢复的显式字段（task_params/config_ref 等提交
@@ -131,7 +139,11 @@ def _receipt_from_frozen(data: Mapping[str, Any]) -> ValidationReceipt:
 
 
 def _collect_resource_ids(doc: Mapping[str, Any]) -> set[str]:
-    """从规范装配 devices 绑定收集 content.object_id（字符串身份集合）。"""
+    """从规范装配 devices 绑定收集 content.object_id（字符串身份集合）。
+
+    规范文本中的引用身份恒为字符串（提交侧由整数主键稳定序列化）；
+    读取时数字串转回整数主键走主键通道，非数字串走 oid 通道。
+    """
     found: set[str] = set()
 
     def collect(node: object) -> None:
@@ -151,6 +163,40 @@ def _collect_resource_ids(doc: Mapping[str, Any]) -> set[str]:
     return found
 
 
+def _restore_artifact_resources_config(
+    db: Session, task_project_id: int, snapshot: Any
+) -> tuple[
+    ValidatedAssemblyArtifact, dict[str, bytes], CalculationConfig, int,
+]:
+    """从快照恢复装配产物、固定资源字节、计算配置与有效种子。
+
+    finance 按回执冻结血缘 {profile_id, revision} 取不可变 Effective 行
+    （与提交闸门同一来源：钉选 revision，不读 latest/current 指针）；
+    固定资源按规范绑定 object_id 经 storage 公开门面读字节；有效种子取
+    快照冻结值（配置缺省时不再静默用 0，而是提交闸门同一派生规则）。
+    冻结缺件即实际结构错误直接可见，不重跑输入校验。
+    """
+    receipt = _receipt_from_frozen(snapshot.assembly_receipt)
+    artifact = ValidatedAssemblyArtifact(canonical_text=snapshot.canonical_assembly_text, receipt=receipt)
+
+    body = snapshot.calc_config_snapshot
+    picked = {name: body[name] for name in _CONFIG_FIELDS}
+    seed = picked.get("seed")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        seed = snapshot.random_seed
+    config = CalculationConfig(**{**picked, "seed": seed})
+
+    doc = json.loads(snapshot.canonical_assembly_text)
+    resource_ids = _collect_resource_ids(doc)
+    resources = {}
+    for object_id in sorted(resource_ids):
+        key: int | str = (
+            int(object_id) if object_id.isdigit() else object_id
+        )
+        resources[object_id] = get_object(db, key)
+    return artifact, resources, config, seed
+
+
 def load_compute_inputs(
     db: Session, task_project_id: int, snapshot: Any
 ) -> tuple[
@@ -162,18 +208,19 @@ def load_compute_inputs(
 ]:
     """从快照恢复生成器五项直接输入并按序返回（不包装第二对象，不做缺省）。
 
-    finance 按回执冻结血缘 {profile_id, revision} 取不可变 Effective 行
-    （与提交闸门同一来源：钉选 revision，不读 latest/current 指针）；
-    固定资源按规范绑定 object_id 经 storage 公开门面读字节；有效种子取
-    快照冻结值（配置缺省时不再静默用 0，而是提交闸门同一派生规则）。
-    冻结缺件即实际结构错误直接可见，不重跑输入校验。
+    finance 按回执冻结血缘取不可变 Effective 行；预测目标序列不在此
+    物化（``pending_predict`` 保留），由 ``predict_target_round`` 经公开
+    predictor 完成后再与此处序列合并。冻结缺件即实际结构错误直接可见，
+    不重跑输入校验。
     """
-    receipt = _receipt_from_frozen(snapshot.assembly_receipt)
-    artifact = ValidatedAssemblyArtifact(canonical_text=snapshot.canonical_assembly_text, receipt=receipt)
+    artifact, resources, config, _seed = _restore_artifact_resources_config(
+        db, task_project_id, snapshot
+    )
 
     raw_models = snapshot.device_models
     models = {inst: contribution_from_dict(contrib) for inst, contrib in raw_models.items()}
 
+    receipt = _receipt_from_frozen(snapshot.assembly_receipt)
     finance_blood = receipt.finance_snapshot
     finance_row = configuration_domain.get_effective_revision(db, task_project_id, finance_blood["revision"])
     if finance_row.profile_id != finance_blood["profile_id"]:
@@ -184,22 +231,50 @@ def load_compute_inputs(
         )
     finance = EffectiveFinanceConfig.from_dict(finance_row.content)
 
-    body = snapshot.calc_config_snapshot
-    picked = {name: body[name] for name in _CONFIG_FIELDS}
-    seed = picked.get("seed")
-    if not isinstance(seed, int) or isinstance(seed, bool):
-        seed = snapshot.random_seed
-    config = CalculationConfig(**{**picked, "seed": seed})
-
-    doc = json.loads(snapshot.canonical_assembly_text)
-    resources = {object_id: get_object(db, object_id) for object_id in sorted(_collect_resource_ids(doc))}
     materialized = materialize_non_predictive_series(artifact, resources)
-    if materialized.pending_predict or config.predictions:
-        raise ComputationUnavailableError(
-            "该快照需要预测序列（data_predict/阶段二），本版尚未提供公开预测能力，不执行、不回退旧链",
-            reason="prediction-not-supported",
-        )
     return artifact, models, tuple(materialized.series), finance, config
+
+
+def predict_target_round(
+    db: Session,
+    plane: ComputeExecutionPlane,
+    task_project_id: int,
+    snapshot: Any,
+    *,
+    previous: Mapping[str, object] | None = None,
+) -> tuple[tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]]:
+    """预测阶段命令：经公开 predictor 物化全部 data_predict 全周期序列。
+
+    纯计算阶段（读快照与固定资源字节，无数据库写入）：按配置条目经
+    执行面预测目录精确解析算法（未注册/目标类型不支持即明确不可用，
+    不回退），历史列按绑定接口名投影，目标类型不透明透传。返回
+    （生成器可消费序列，预测产物〈序列值/训练产物字节/回执基底〉），
+    均按（实例，接口）稳定排序。训练产物引用由提交密封后回填。
+    """
+    artifact, resources, config, seed = _restore_artifact_resources_config(
+        db, task_project_id, snapshot
+    )
+    predictions = tuple(config.predictions or ())
+    if not predictions:
+        return (), ()
+    predicted = materialize_predicted_series(
+        artifact, resources, predictions, plane.predictor_registry.get, seed,
+        previous=previous,
+    )
+    resolution = json.loads(snapshot.canonical_assembly_text)["project_baseline"]["resolution"]
+    series = tuple(
+        MaterializedSeries(
+            device=item.device,
+            interface=item.interface,
+            mode="data_predict",
+            resolution=resolution,
+            point_count=len(item.values),
+            values=item.values,
+            source={"kind": "data_predict", "object_id": item.history_object_id},
+        )
+        for item in predicted
+    )
+    return series, predicted
 
 
 def generate_bundle(

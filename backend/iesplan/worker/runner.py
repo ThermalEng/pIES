@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -107,19 +107,62 @@ def _raise_for_receipt_status(receipt: Any) -> None:
         )
 
 
+def _predict_round(
+    ctx: RunContext, plane: Any, snapshot: Any,
+    previous: Mapping[str, object] | None,
+) -> tuple[tuple, tuple]:
+    """预测阶段短读会话(读快照与固定资源, 无数据库写入)。"""
+    with ctx.session_factory() as db:
+        return worker_app.predict_target_round(
+            db, plane, ctx.task.project_id, snapshot, previous=previous,
+        )
+
+
+def _solve_round(
+    ctx: RunContext, plane: Any, snapshot: Any, artifact: Any, models: Any,
+    all_series: tuple, finance: Any, config: Any, attempt: Any,
+) -> tuple[Any, Any, Any, Any]:
+    """单轮求解: 生成 → 执行(含回执分流) → 适配 → 业务结局。
+
+    每轮回执独立判定: cancelled → TaskCancelled, fenced → LeaseFenced
+    (不写终态), 非成功/不可映射 → EngineRunError。生成后与回执判定后
+    分别写进度（判定前不写 execute 进度）。返回
+    (bundle, receipt, collected, result, outcome)。
+    """
+    bundle = worker_app.generate_bundle(
+        plane, snapshot, artifact, models, all_series, finance, config)
+    ctx.progress(40.0, "generate", None)
+    receipt, collected = worker_app.execute_bundle(
+        plane=plane, bundle=bundle, attempt=attempt, stop=_stop_probe(ctx),
+    )
+    _raise_for_receipt_status(receipt)
+    ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
+    result = worker_app.adapt_result(plane, bundle, receipt, collected)
+    outcome = worker_app.business_outcome_for(result)
+    if outcome is None:
+        raise EngineRunError(
+            f"统一结果无法映射业务结局(execution={result.execution_status}, "
+            f"math={result.math_status}, receipt={receipt.receipt_id})"
+        )
+    return bundle, receipt, collected, result, outcome
+
+
 def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
-    """计算任务真实链: 快照恢复 → 生成 → 执行 → 适配 → 证据 payload 与输出文件。
+    """计算任务真实链: 快照恢复 → 预测 → 阶段一求解 → [阶段二迭代] → 证据。
 
     全程只按 application.worker 阶段网关结果驱动，不解释任何输入字段：
-    冻结缺件即实际结构错误可见失败；预测需求明确拒绝（不 stub、不回退）；
-    取消收拢为 TaskCancelled；租约隔离收拢为 LeaseFenced（不写终态）；
-    非成功回执与不可映射结果收拢为 EngineRunError（结构化失败，不伪装
-    成功）。回执状态判定后才写执行进度：fenced/cancelled/失败不产生
-    execute 进度与终态写回。返回 (payload, output_files)：payload 只含
-    JSON 兼容字段；output_files 为待封存原始字节（路径 → (字节, 声明
-    媒体类型)，媒体类型取 manifest/回执声明值，原样传递不做文本校验），
-    由提交单元随提交在同一数据库事务内建对象元数据/引用并注入描述子
-    （Blob 字节落盘不参与原子提交），本函数不写数据库。
+    冻结缺件即实际结构错误可见失败；预测算法未注册/目标类型不支持即
+    明确不可用（不 stub、不回退）；取消收拢为 TaskCancelled；租约隔离
+    收拢为 LeaseFenced（不写终态）；非成功回执与不可映射结果收拢为
+    EngineRunError（结构化失败，不伪装成功）。回执状态判定后才写执行
+    进度：fenced/cancelled/失败不产生 execute 进度与终态写回。
+    阶段二（data_predict 多于 1 个时必进，不可选）：每轮用上一轮统一
+    结果重建预测目标→重建模型→求解，以相邻两轮预测序列最大绝对差按
+    配置容差收敛或达最大迭代数；轮数上限为总求解轮数（阶段一计第 1 轮，
+    上限为 1 时即阶段一结果）。返回 (payload, output_files)：payload
+    只含 JSON 兼容字段；output_files 为待封存原始字节，由提交单元随
+    提交在同一数据库事务内建对象元数据/引用并注入描述子（Blob 字节落
+    盘不参与原子提交），本函数不写数据库。
     """
     task = ctx.task
     snapshot = ctx.snapshot
@@ -135,21 +178,45 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             db, task.project_id, snapshot
         )
     ctx.progress(10.0, "materialize", None)
-    bundle = worker_app.generate_bundle(plane, snapshot, artifact, models, series, finance, config)
-    ctx.progress(40.0, "generate", None)
+    predicted: tuple = ()
+    predicted_series: tuple = ()
+    if config.predictions:
+        predicted_series, predicted = _predict_round(ctx, plane, snapshot, None)
+    all_series = tuple(series) + tuple(predicted_series)
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
-    receipt, collected = worker_app.execute_bundle(
-        plane=plane, bundle=bundle, attempt=attempt, stop=_stop_probe(ctx),
-    )
-    _raise_for_receipt_status(receipt)
-    ctx.progress(85.0, "execute", {"receipt_status": receipt.status})
-    result = worker_app.adapt_result(plane, bundle, receipt, collected)
-    outcome = worker_app.business_outcome_for(result)
-    if outcome is None:
-        raise EngineRunError(
-            f"统一结果无法映射业务结局(execution={result.execution_status}, "
-            f"math={result.math_status}, receipt={receipt.receipt_id})"
-        )
+    bundle, receipt, collected, result, outcome = _solve_round(
+        ctx, plane, snapshot, artifact, models, all_series, finance, config, attempt)
+    prediction_rounds = 1 if predicted else 0
+    solve_rounds = 1
+    converged = True
+    final_delta: float | None = None
+    if len(predicted) > 1:
+        convergence = config.convergence or {}
+        tolerance = float(convergence["tolerance"])
+        max_iterations = int(convergence["max_iterations"])
+        converged = False
+        previous_values = {(p.device, p.interface): p.values for p in predicted}
+        while prediction_rounds < max_iterations:
+            new_series, new_predicted = _predict_round(
+                ctx, plane, snapshot, result.outputs)
+            prediction_rounds += 1
+            new_values = {(p.device, p.interface): p.values for p in new_predicted}
+            final_delta = max(
+                worker_app.prediction_delta(previous_values[key], new_values[key])
+                for key in previous_values
+            )
+            if final_delta <= tolerance:
+                converged = True
+                predicted = new_predicted
+                break
+            all_series = tuple(series) + tuple(new_series)
+            bundle, receipt, collected, result, outcome = _solve_round(
+                ctx, plane, snapshot, artifact, models, all_series,
+                finance, config, attempt)
+            solve_rounds += 1
+            ctx.progress(90.0, "phase2", {"round": solve_rounds})
+            previous_values = new_values
+            predicted = new_predicted
     bundle_media = {
         entry["path"]: entry["media_type"]
         for entry in (*bundle.manifest.inputs, *bundle.manifest.outputs)
@@ -165,12 +232,32 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             path: (collected[path], solution_media[path]) for path in collected
         },
     }
-    return {
+    payload = {
         "outcome": outcome,
         "compute_result": result.to_dict(),
         "receipt": receipt.to_dict(),
         "bundle_manifest": bundle.manifest.to_dict(),
-    }, output_files
+    }
+    if predicted:
+        prediction_files = {}
+        receipts = []
+        for item in predicted:
+            artifact_path = f"prediction/{item.device}/{item.interface}/training_artifact.json"
+            prediction_files[artifact_path] = (item.artifact, item.artifact_media_type)
+            entry = dict(item.receipt)
+            entry["artifact_path"] = artifact_path
+            entry["training_artifact"] = None
+            receipts.append(entry)
+        output_files["prediction_files"] = prediction_files
+        payload["prediction"] = {
+            "predict_target_count": len(predicted),
+            "prediction_rounds": prediction_rounds,
+            "solve_rounds": solve_rounds,
+            "converged": converged,
+            "final_delta": final_delta,
+            "receipts": receipts,
+        }
+    return payload, output_files
 
 
 def dispatch(

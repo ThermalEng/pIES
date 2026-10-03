@@ -59,6 +59,9 @@ class ApplicationContext:
     #: 已发布的生成器目录(未装配该能力时为 None; 内置真实 provider
     #: 由组合根显式注册，未知引用选择时即明确不可用)
     generator_registry: Any | None = None
+    #: 已发布的预测算法目录(未装配该能力时为 None; 内置朴素 predictor
+    #: 由组合根显式注册，未知引用选择时即明确不可用)
+    predictor_registry: Any | None = None
     #: 已发布的执行器目录(只归计算 Worker 装配; API 不装配执行面)
     executor_registry: Any | None = None
     #: 已发布的结果适配器目录(只归计算 Worker 装配)
@@ -69,7 +72,7 @@ class ApplicationContext:
     deployment_policy: Any | None = None
 
     def compute_execution_plane(self) -> Any | None:
-        """计算执行面句柄：生成器/执行器/适配器目录与运行时四件齐备才装配。
+        """计算执行面句柄：生成器/执行器/适配器/预测目录与运行时五件齐备才装配。
 
         任一缺席返回 None（计算 Worker 构造即拒绝，不领取任务）。
         """
@@ -78,6 +81,7 @@ class ApplicationContext:
             or self.executor_registry is None
             or self.result_adapter_registry is None
             or self.solver_runtime is None
+            or self.predictor_registry is None
         ):
             return None
         from iesplan.application.worker import ComputeExecutionPlane
@@ -87,6 +91,7 @@ class ApplicationContext:
             executor_registry=self.executor_registry,
             adapter_registry=self.result_adapter_registry,
             runtime=self.solver_runtime,
+            predictor_registry=self.predictor_registry,
         )
 
     def health(self) -> dict[str, str]:
@@ -360,13 +365,19 @@ def _assemble(
     # 5. 生成器目录(原子发布; 显式注册内置真实 provider, 不做任何
     #    动态发现或扫描; 任一候选不符即整体失败, 不发布半表)
     generator_registry: Any | None = None
+    predictor_registry: Any | None = None
     if with_generators:
         from iesplan.computation.generators import (
             HIGHS_MILP_PROVIDER,
             build_registry,
         )
+        from iesplan.computation.predictors import (
+            NAIVE_PREDICTOR,
+            build_predictor_registry,
+        )
 
         generator_registry = build_registry((HIGHS_MILP_PROVIDER,))
+        predictor_registry = build_predictor_registry((NAIVE_PREDICTOR,))
     # 6. 计算执行面(只归计算 Worker: 执行器/适配器目录 + 通用运行时 +
     #    统一 Settings 派生的部署策略; 任一缺失即拒绝启动)
     executor_registry: Any | None = None
@@ -383,6 +394,7 @@ def _assemble(
         storage=storage,
         device_registry=device_registry,
         generator_registry=generator_registry,
+        predictor_registry=predictor_registry,
         executor_registry=executor_registry,
         result_adapter_registry=result_adapter_registry,
         solver_runtime=solver_runtime,
@@ -411,7 +423,7 @@ def _assemble(
 
 
 def assemble_api() -> ApplicationContext:
-    """装配 API 进程：database、storage、devices 2.0 注册表与生成器目录。
+    """装配 API 进程：database、storage、devices 2.0 注册表、生成器目录与预测算法目录。
 
     API 不装配执行面（执行器目录/运行时/执行策略只归计算 Worker）。
     """

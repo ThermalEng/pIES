@@ -227,6 +227,7 @@ def _plane_with_stub_runtime(plane, status: str):
         executor_registry=plane.executor_registry,
         adapter_registry=plane.adapter_registry,
         runtime=_StubRuntime(status),
+        predictor_registry=plane.predictor_registry,
     )
 
 
@@ -316,8 +317,10 @@ class TestComputeChainEndToEnd:
         """冻结依赖不可解析明确失败：执行器/适配器目录为空时，求解前即拒绝。"""
         from iesplan.bootstrap import _deployment_policy_from_settings  # noqa: E402
         from iesplan.computation import (  # noqa: E402
+            NAIVE_PREDICTOR,
             SolverRuntime,
             build_executor_registry,
+            build_predictor_registry,
             build_result_adapter_registry,
         )
         from iesplan.computation.generators import (  # noqa: E402
@@ -333,6 +336,7 @@ class TestComputeChainEndToEnd:
             executor_registry=executor_registry,
             adapter_registry=build_result_adapter_registry([]),
             runtime=SolverRuntime(executor_registry, _deployment_policy_from_settings()),
+            predictor_registry=build_predictor_registry((NAIVE_PREDICTOR,)),
         )
         assert _run(engine, claim, plane) == "failed"
         diagnostics = (

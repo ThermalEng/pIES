@@ -93,12 +93,16 @@ def create_task_endpoint(
     generator_registry = (
         getattr(bootstrap, "generator_registry", None) if bootstrap is not None else None
     )
+    predictor_registry = (
+        getattr(bootstrap, "predictor_registry", None) if bootstrap is not None else None
+    )
     result = tasks_app.submit_task_case(
         db, user, project_id, payload.task_type,
         config=payload.config,
         idempotency_key=payload.idempotency_key,
         parent_task_id=payload.parent_task_id,
         generator_registry=generator_registry,
+        predictor_registry=predictor_registry,
     )
     if result["replayed"]:
         response.status_code = 200
