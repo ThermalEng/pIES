@@ -329,5 +329,5 @@ tariff_bindings:
 - 五类 interface、来源模式（`constant`/`data_repeat`/`data_full`/`data_predict`）、存量/新增、设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性、`tariff_bindings` 的 `price_id`/`carrier`/`direction` 校验（含 `type: none` 计量点）、财务分量标识符映射（实例前缀与绑定前缀的命名空间规则）与带单位常量量纲校验、规划目标逐项引用及有效财务快照身份/血缘均有契约测试；
 - 非法文件没有旁路进入生成器，合法文件只产生一个规范形态；
 - 生成器只读 `ValidatedAssemblyArtifact`，不重新解释原始项目、CSV 路径或 GUI 状态；
-- `ies.assembly` `1.0.0` 是未发布开发草案；其 schema、迁移器、迁移回执、样例和兼容路径直接删除，开发数据按 `2.0.0` 重建，不提供 1.0/2.0 双轨或离线迁移入口。
-- `ies.assembly` `3.0.0` 删除基线 `leap_year` 并新增必填 `start_year`；开发数据按 `3.0.0` 重建，`2.0.0` 文件不再接受，不提供 2.0/3.0 双轨或离线迁移入口。
+- `ies.assembly` `1.0.0` 是未发布开发草案；其 schema、迁移器、迁移回执、样例和兼容路径直接删除，不提供 1.0/2.0 双轨或离线迁移入口。（历史记录：当时开发数据按 `2.0.0` 重建。）
+- `ies.assembly` `3.0.0` 删除基线 `leap_year` 并新增必填 `start_year`；现行开发数据按 `3.0.0` 重建，`2.0.0` 文件不再接受，不提供 2.0/3.0 双轨或离线迁移入口。
