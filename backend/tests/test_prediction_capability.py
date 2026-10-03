@@ -1,12 +1,13 @@
 """B5-2b 公共预测能力: descriptor/目录/naive 相容 → 物化 → 阶段二 → 证据。
 
 - 纯单元(无数据库): naive 确定性/携载/拒绝、目录原子发布、增量、
-  物化配对与相容拒绝、提交相容码 013/014；
-- 真实任务端到端(SQLite + 真实 HiGHS): 单目标直通完成、多目标阶段二
-  收敛完成、训练产物密封与引用、未知算法提交拒绝。
+  物化配对与相容拒绝、提交相容码 012/013/014；
+- 提交→执行→证据链测试(SQLite + 真实 HiGHS，非完整用户端到端)：
+  单目标直通完成、多目标阶段二收敛完成、耦合 predictor 逐轮求解、
+  训练产物/序列密封与引用、未知算法与上限不足提交拒绝。
 版本字节由域级创建(上传尚只收通用时间戳格式，门控只认 device-data
-step 格式，见 B5-2a 日志；此处 workaround 仅限脚手架，提交→执行→
-证据全链真实)。
+step 格式，见 B5-2a 日志；此处 workaround 仅限脚手架）。上传闭环
+待补：以下测试不含公开上传路径，不称完整用户端到端。
 """
 
 from __future__ import annotations
@@ -669,7 +670,7 @@ class TestPredictEndToEnd:
     def test_single_target_passthrough_completes(
         self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
-        """单预测目标端到端：阶段一即权威，训练产物密封可追溯。"""
+        """单预测目标提交→执行→证据链：阶段一即权威，训练产物/序列密封可追溯。"""
         user = make_user(db, "predict_owner_1")
         pid, _vids = _prepare_predict_project(
             client, db, user, [("load1", "load", [48.0, 49.0])]
@@ -731,7 +732,7 @@ class TestPredictEndToEnd:
     def test_two_targets_phase_two_converges(
         self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
-        """双预测目标端到端：必进阶段二，每轮真实求解，序列无差即收敛。"""
+        """双预测目标提交→执行→证据链：必进阶段二，每轮真实求解，序列无差即收敛。"""
         user = make_user(db, "predict_owner_2")
         pid, _vids = _prepare_predict_project(
             client, db, user,
