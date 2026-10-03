@@ -9,7 +9,7 @@
 
 ```yaml
 schema: ies.assembly
-schema_version: "2.0.0"
+schema_version: "3.0.0"
 
 assembly:
   id: campus_demo
@@ -17,7 +17,6 @@ assembly:
 
 project_baseline:
   resolution: 1h
-  leap_year: false
   scenario_mode: single
   start_year: 2025
 
@@ -120,7 +119,7 @@ extensions: {}
 | 字段 | 作用 |
 |---|---|
 | `assembly` | 本装配的稳定 ID 和人类可读名称 |
-| `project_baseline` | 项目创建时固定的时间分辨率、闰年口径、场景模式与运行起始年 |
+| `project_baseline` | 项目创建时固定的时间分辨率、场景模式与运行起始年（`3.0.0` 删除 `leap_year`，闰年一律逐年按公历推导） |
 | `devices` | 设备实例、精确设备内容、存量/新增身份、允许的 property 覆盖和预定义接口绑定 |
 | `connections` | 可连接的真实 `<device>.<interface>` 之间的有向连接 |
 | `finance` | 对装配前由 `FinanceProfile` + `FinanceOverrides` 合并生成、完整校验的不可变 `EffectiveFinanceConfig` 的引用：`ref` 携带对象身份，`profile_id` 携带来源标识；规划与财务计算共同消费同一引用；装配内不内联另一份完整财务配置 |
@@ -165,11 +164,10 @@ extensions: {}
 `project_baseline` 在创建项目时一次性固定，当前包含：
 
 - `resolution`：全项目统一计算分辨率，必须能确定性切分一天；
-- `leap_year`：单年口径是否按 366 天生成序列（仅单年评价沿用；多年评价以逐年公历推导为准）；
 - `scenario_mode`：当前固定为 `single`；
 - `start_year`：运行起始年，公历整数年，允许过去、现在或未来，不做“必须是未来年”校验，不涉闰秒；与财务 `base_year`（金额口径基年）是两个概念，不得互相推断。
 
-基线不保存时区、典型日/周/年或计算截取区间。计算序列统一使用从 `0` 开始的连续 `step`；全周期点数由 `resolution`、`start_year` 与提交时确认的评价年限逐年按公历推导（闰年按实际公历年份确定），年度边界 step 下标随快照冻结。公开计算变量 `step_duration` 由 `resolution` 唯一推导并携带明确时间单位，是状态方程和能量积分使用的唯一公开步长变量。已有项目基线变更或多场景必须通过新的公开契约定义，不能作为本格式的隐式例外。
+基线不保存时区、典型日/周/年或计算截取区间。计算序列统一使用从 `0` 开始的连续 `step`；全周期点数与年度边界 step 下标由 `resolution`、`start_year` 与提交时确认的评价年限逐年按公历唯一推导（闰年按实际公历年份确定，无 `leap_year` 输入），随快照冻结。公开计算变量 `step_duration` 由 `resolution` 唯一推导并携带明确时间单位，是状态方程和能量积分使用的唯一公开步长变量。已有项目基线变更或多场景必须通过新的公开契约定义，不能作为本格式的隐式例外。
 
 ## 预定义序列与资源
 
@@ -202,8 +200,8 @@ finance:
 
 - `object_id` 是在对象存储写入或外部导入边界确定的对象身份；内部装配按该身份取得已登记对象；
 - 外部导入时可在入口完成验证，并从来源 Profile 与 Overrides 重新合并验证财务语义；进入可信流程后不重复校验，也不静默改用其他来源；
-- 引用 `time_series` 价格的条目（在 Profile/Overrides 中声明）携带 `resolution`/`leap_year`/`point_count`/`unit` 等不可变序列元数据，装配时与项目基线核对：序列引用对象必须已校验为完整年度序列且元数据一致；不一致阻断，不重采样、不插值（Profile 不固定唯一项目分辨率，校验以被引用序列元数据为准）；时变价格按逐点计价（`Σ price[t]×e[t]`），聚合与计价衔接见[财务 YAML 契约](finance-yaml.md)「聚合与计价衔接」；
-- `planning` 只保存目标函数、目标权重、规划变量、上下界和规划/系统约束。目标函数用普通标识符逐项引用财务分量（映射规则见下文「规划表达式中的财务分量标识符」；示例见上方最小结构：`1 year * pv_1__annual_fixed_om + pv_1__period_variable_om + import_meter__period_energy_purchase + export_meter__period_energy_sale`，其中 `1 year` 为显式时间跨度字面量，把 currency/年 的按年值换算为完整年度窗口金额（currency）后再相加；能源计费分量**已带符号**——`purchase` 分量 = +raw_charge、`sale` 分量 = −raw_charge（`raw_charge = Σ price[t]×e[t]`，正售电价时 sale 分量自身为负），所以目标表达式对所有分量统一使用加法；负价自然反转该方向效果；窗口不是完整一年时不得默认相加）；该示例是“预算上限约束下的运行成本最小化”的具体示例，不是通用经济目标——把一次性 `upfront_capex` 转换为可与运行期成本比较的显式规划分量，属于 `PlanningConfig` 的版本化规则，须在该契约中定义后再使用；有效快照**不静默相加成默认总成本**，不提供隐式“系统总成本”标识符，Profile 不隐式年化或默认选择转换规则；规划配置显式选择或组合哪些分量；
+- 引用 `time_series` 价格的条目（在 Profile/Overrides 中声明）携带 `resolution`/`point_count`/`unit` 等不可变序列元数据（无 `leap_year`），装配时与全周期推导值核对：序列引用对象必须已校验为覆盖全期的连续序列且元数据一致；不一致阻断，不重采样、不插值（Profile 不固定唯一项目分辨率，校验以被引用序列元数据为准）；时变价格按逐点计价（`Σ price[t]×e[t]`），聚合与计价衔接见[财务 YAML 契约](finance-yaml.md)「聚合与计价衔接」；
+- `planning` 只保存目标函数、目标权重、规划变量、上下界和规划/系统约束。目标函数用普通标识符逐项引用财务分量（映射规则见下文「规划表达式中的财务分量标识符」；示例见上方最小结构：`1 year * pv_1__annual_fixed_om + pv_1__period_variable_om + import_meter__period_energy_purchase + export_meter__period_energy_sale`，其中 `1 year` 为显式时间跨度字面量（示例为单年窗口；多年窗口按冻结评价年限的年数），把 currency/年 的按年值换算为窗口金额（currency）后再相加；能源计费分量**已带符号**——`purchase` 分量 = +raw_charge、`sale` 分量 = −raw_charge（`raw_charge = Σ price[t]×e[t]`，正售电价时 sale 分量自身为负），所以目标表达式对所有分量统一使用加法；负价自然反转该方向效果；缺少显式时间跨度不得默认相加）；该示例是“预算上限约束下的运行成本最小化”的具体示例，不是通用经济目标——把一次性 `upfront_capex` 转换为可与运行期成本比较的显式规划分量，属于 `PlanningConfig` 的版本化规则，须在该契约中定义后再使用；有效快照**不静默相加成默认总成本**，不提供隐式“系统总成本”标识符，Profile 不隐式年化或默认选择转换规则；规划配置显式选择或组合哪些分量；
 - 项目覆盖是 authoring 输入，`EffectiveFinanceConfig` 是装配与计算唯一消费的不可变快照：运行期不继承 Profile、不读取“最新地区价格”、不静默默认值。本契约成本分量不包含折旧、融资、还款与 IRR 等后评价输入。
 
 ### 规划表达式中的财务分量标识符
@@ -227,7 +225,7 @@ finance:
 - 财务分量标识符自带量纲：`upfront_capex`、`period_variable_om`、`period_energy_purchase`、`period_energy_sale` 为 currency；`annual_fixed_om` 为 currency/年。能源计费分量是**有符号记账值**：`purchase` 分量 = +raw_charge（正价时为正值）、`sale` 分量 = −raw_charge（正售电价时为负、负售电价时为正）；负号是记账符号而非物理量取负，能量序列本身非负；量纲恒为 currency、与符号无关；
 - 表达式中的**有维度常量**以带单位字面量书写（`数值 + 单位标识符`，如 `900000 CNY`、`1 year`），单位标识符来自公共单位词汇；常量单位必须与 `EffectiveFinanceConfig.currency` 一致（示例币种 CNY），量纲不一致在装配规划校验阻断；
 - **纯无量纲系数**（如 `0.5`、整数权重）可以裸数字书写，不需要单位字面量；含维度加减与比较的表达式由规划校验做维度检查；
-- `annual_fixed_om` 与窗口合计分量相加前，必须显式乘以时间跨度字面量（示例 `1 year`，窗口为项目基线完整年度）；窗口不是完整一年时不得默认相加；
+- `annual_fixed_om` 与窗口合计分量相加前，必须显式乘以时间跨度字面量（示例 `1 year` 对应单年窗口；多年窗口按冻结评价年限的年数）；缺少显式时间跨度不得默认相加；
 - 本小节只定义财务分量标识符的编码、映射与量纲规则，不定义规划表达式语言本身（语法与运算符由规划配置契约提供）。
 
 ## 设备成本绑定 `finance_binding`

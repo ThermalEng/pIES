@@ -74,7 +74,7 @@
 
 规范化是公开纯过程：
 
-- 项目计算基线按固定的 `resolution/leap_year/scenario_mode` 规范化；
+- 项目计算基线按固定的 `resolution/scenario_mode/start_year` 规范化（无 `leap_year`）；
 - 预定义来源按稳定模式、目标类型和对象输入引用规范化；
 - `relative_file` 解析为内容 ID 和媒体类型；
 - 映射和无业务顺序集合按稳定键排序；

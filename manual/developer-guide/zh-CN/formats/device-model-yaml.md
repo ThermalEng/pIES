@@ -1,6 +1,6 @@
 # 设备模型 YAML
 
-> 契约标识：`ies.device-model`；目标 schema：`2.0.0`；推荐文件名：`<device-id>.device.yaml`。
+> 契约标识：`ies.device-model`；目标 schema：`2.1.0`（`2.1.0` 模板 `inputs` 新增 `data_full` 类型，正式模型不变）；推荐文件名：`<device-id>.device.yaml`。
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
 
 设备模型 YAML 是所有设备共同遵守的纯技术说明。它只回答三件事：设备具有哪些不随时间变化的技术常量、通过哪些序列接口与外部交互、这些常量和序列之间满足什么方程。设备文件不保存价格、成本、财务假设、计算精度、算法选择或可执行实现入口。
@@ -11,7 +11,7 @@
 
 ```yaml
 schema: ies.device-model
-schema_version: "2.0.0"
+schema_version: "2.1.0"
 
 device:
   id: acme.device.heat_pump
@@ -59,7 +59,7 @@ equations:
 | 字段 | 作用 |
 |---|---|
 | `schema` | 固定为 `ies.device-model` |
-| `schema_version` | 统一设备文件契约版本；目标值为 `2.0.0` |
+| `schema_version` | 统一设备文件契约版本；目标值为 `2.1.0` |
 | `device` | 稳定设备身份和显示信息 |
 | `properties` | 不随时间变化的纯技术常量 |
 | `interfaces` | 与外部交互的序列数据定义 |
@@ -112,7 +112,7 @@ properties:
 - 用户必须提交所有声明叶子，并且只能提交已声明路径；缺少或多余字段均阻断；
 - array 作为整体提交，`items` 只逐元素校验，不形成额外的 `path[]` 必填输入；
 - object 的 `fields` 全部必填并拒绝多余键；空 object、空 array 声明均非法；
-- 实例化完成后必须删除 `inputs`，再按只有六个顶层字段的正式模型执行一次完整 `2.0.0` 校验。
+- 实例化完成后必须删除 `inputs`，再按只有六个顶层字段的正式模型执行一次完整 `2.1.0` 校验。
 
 ## `interfaces`
 
@@ -219,7 +219,7 @@ equations:
 
 ## 完成标准
 
-- 合法示例可独立通过 `2.0.0` schema；
+- 合法示例可独立通过 `2.1.0` schema；
 - 所有设备只使用上述统一结构，不为具体设备增加核心关键词；
 - GUI、装配、技术模型和计算生成消费同一规范 descriptor；
 - properties、五类 interface、无项目来源的 `predefined` 槽、方程与非法引用均有契约测试；三种来源绑定由装配格式负责；

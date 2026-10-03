@@ -1,6 +1,6 @@
 # 财务 YAML 契约
 
-> 契约标识与版本：`ies.finance-profile@1.0.0`、`ies.finance-overrides@1.0.0`、`ies.effective-finance-config@1.0.0`
+> 契约标识与版本：`ies.finance-profile@2.0.0`、`ies.finance-overrides@2.0.0`、`ies.effective-finance-config@2.0.0`（`2.0.0` 删除价格 `series_meta.leap_year` 并收紧 `point_count` 为全周期总点数；`1.0.0` 文件不再接受）
 > 推荐文件名（项目包内固定名称）：`finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml`
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
 
@@ -22,13 +22,13 @@ assembly / computation / 项目包（精确引用 Effective YAML）
 
 金额一律为 `{value, unit}` 原子：`value` 为十进制定点字符串（禁止 `float`、`NaN/Infinity`、`null`），`unit` 来自公共单位规范并经 `normalize_unit` 规范化；禁止部分金额（缺 `value` 或 `unit`）与 `null`。成本分量金额非负（允许 `0`，零费用类别、零固定成本均合法）。能源价格不设符号限制：允许有限正数、零与负数（见 `energy_prices` 行与「计价规则」）；禁止 NaN/Infinity。
 
-## `ies.finance-profile@1.0.0`
+## `ies.finance-profile@2.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-profile
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 profile:
   id: cn-north-demo
   region: CN-North
@@ -71,8 +71,7 @@ energy_prices:
     ref: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     series_meta:
       resolution: 1h
-      leap_year: false
-      point_count: 8760
+      point_count: 8760  # 单年示例；实际必须等于全周期总点数
       unit: CNY/kWh
   heat_supply:                  # 第二载体示例：购热价格条目（heat 为设备接口示例已用的载体取值）
     carrier: heat
@@ -94,7 +93,7 @@ taxes:
 | 路径 | 必需 | 规则 |
 |---|---|---|
 | `schema` | 是 | 固定 `ies.finance-profile` |
-| `schema_version` | 是 | 固定 `"1.0.0"` |
+| `schema_version` | 是 | 固定 `"2.0.0"` |
 | `profile.id` | 是 | 稳定 ASCII 小写 ID（命名空间点分式、`lower_snake_case` 或短横线，同文件内保持一致），如 `cn-north-demo`；Overrides 与 Effective 沿用它做引用 |
 | `profile.region` | 是 | 地区标识（展示与追溯，不参与计算） |
 | `profile.currency` | 是 | `CNY` / `USD` |
@@ -113,7 +112,7 @@ taxes:
 | `energy_prices.*` | 是 | 定价定义判别联合：`{kind: constant, value: Money}` 或 `{kind: time_series, ref, series_meta}`，二选一 |
 | `energy_prices.*.value` | constant 必填 | 有限 Decimal，可正、可零、可负；单位量纲 = currency /（该 carrier 的能源单位量纲） |
 | `energy_prices.*.ref` | time_series 必填 | 对象引用（指向经校验、覆盖全周期全部点数的连续能源价格序列；年度价格不同直接在对应 step 给出不同值，不设逐年引用）；序列值同样为有限 Decimal、允许零与负 |
-| `energy_prices.*.series_meta` | time_series 必填 | 不可变时间元数据：`resolution`（15min/30min/1h）、`leap_year`（bool，单年口径沿用；多年评价以逐年公历推导为准）、`point_count`（整数，必须等于全周期总点数）、`unit`；装配时与项目基线＋快照冻结评价期（resolution、点数、年度边界）校验，不一致阻断且不重采样；Profile 不固定唯一项目分辨率 |
+| `energy_prices.*.series_meta` | time_series 必填 | 不可变时间元数据：`resolution`（15min/30min/1h）、`point_count`（整数，必须等于全周期总点数）、`unit`（无 `leap_year`，闰年由基线起始年逐年按公历推导）；装配时与全周期推导值（resolution、点数、年度边界）校验，不一致阻断且不重采样；Profile 不固定唯一项目分辨率 |
 | `taxes` | 可选（无税目可写 `{}`） | 税目登记映射：`id` → `{display_name, tax_type, rate, applies_to}`，见下「税目登记」 |
 | `profile`/`finance_types`/`energy_prices`/`taxes` | 按本页规则校验（字头 + 领域约束） |
 
@@ -145,19 +144,19 @@ taxes:
 
 口径换算与组合规则：
 
-- 按年分量（currency/年）与窗口合计分量（currency）相加前，必须把按年分量乘以**显式时间跨度**换算到同一窗口后再相加。若计算窗口恰好是完整一年，示例把 `annual_fixed_om` 乘以显式时间跨度 `1 year`（对应项目基线的完整年度）得到该窗口金额（currency），随后与 `period_*` 相加；计算窗口不是完整一年时，不得默认按 1 年相加或做其他隐式缩放；
+- 按年分量（currency/年）与窗口合计分量（currency）相加前，必须把按年分量乘以**显式时间跨度**换算到同一窗口后再相加。示例为单年窗口，把 `annual_fixed_om` 乘以显式时间跨度 `1 year` 得到该窗口金额（currency），随后与 `period_*` 相加；多年窗口按冻结评价年限的年数；缺少显式时间跨度不得默认相加或做其他隐式缩放；
 - 本契约不定义“总成本”聚合，也不提供隐式“系统总成本”标识符；`upfront_capex`（一次性）与运行期成本之间不存在本契约默认的转换——不做隐式年化，不隐含资本回收系数、利率或年限等值；
 - 具体如何把一次性投资转换为可与运行期成本比较的规划分量（例如时间口径一致的显式目标分量），属于 `PlanningConfig` 的明确、版本化规则，须在规划配置契约中定义后再使用；本财务 Profile 不隐式定义或默认选择这种转换，也不因不做后评价而禁止规划配置契约定义此类显式分量；
 - 后评价指标（NPV/IRR 等）不属于本契约输入（属 finance 模块长期蓝图，见[财务计算](../modules/finance.md)）；
 - 规划表达式引用这些分量的合法标识符编码与单位字面量规则见[装配 YAML](assembly-yaml.md)「规划表达式中的财务分量标识符」。
 
-## `ies.finance-overrides@1.0.0`
+## `ies.finance-overrides@2.0.0`
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 profile_ref:
   id: cn-north-demo
 finance_types:
@@ -175,8 +174,7 @@ energy_prices:
     ref: "9999999999999999999999999999999999999999999999999999999999999999"
     series_meta:
       resolution: 1h
-      leap_year: false
-      point_count: 8760
+      point_count: 8760  # 单年示例；实际必须等于全周期总点数
       unit: CNY/kWh
 ```
 
@@ -184,7 +182,7 @@ energy_prices:
 
 | 路径 | 规则 |
 |---|---|
-| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"1.0.0"` |
+| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"2.0.0"` |
 | `profile_ref` | 必填 `{id}`：与目标 Profile 的 `id` 一致（文本文件按字头校验，不做内容摘要） |
 | `finance_types` | 只允许覆盖目标 Profile **已存在** 的 `finance_type`；禁止新增或删除 `finance_type` |
 | `finance_types.*` | 只允许按 Profile 实际存在的叶子路径整体替换 `Money` 原子：`<分量>.fixed`（如 `upfront_capex.fixed`）替换为 `{value, unit}`；`<分量>.linear.<driver>.unit_cost` 替换为 `{value, unit}`。被替换叶子必须已在 Profile 声明；禁止新增或删除分量、`fixed` 节点或 `driver`（`driver` 集合不可增删）、禁止改分量类型与 `cost_method`、禁止改 `unit`（规范化后必须与 Profile 相同）；替换值必须为完整 `{value, unit}` 原子，禁止部分金额与 `null`；成本金额非负 |
@@ -194,7 +192,7 @@ energy_prices:
 
 覆盖只影响合并结果中的对应叶子；未覆盖条目原样保留（见 Effective 示例中未覆盖的 `battery_system`、`heat_supply`、`taxes` 等）。合并后重新跑完整校验，任一失败不产生 Effective。
 
-## `ies.effective-finance-config@1.0.0`
+## `ies.effective-finance-config@2.0.0`
 
 ### 完整示例
 
@@ -202,7 +200,7 @@ energy_prices:
 
 ```yaml
 schema: ies.effective-finance-config
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 profile_id: cn-north-demo
 currency: CNY
 base_year: 2025
@@ -236,15 +234,14 @@ energy_prices:
     direction: purchase
     kind: constant
     value: {value: "0.75", unit: CNY/kWh}
-  pv_export:                                           # 被覆盖定价：换用另一完整年度序列
+  pv_export:                                           # 被覆盖定价：换用另一覆盖全期的序列
     carrier: electricity
     direction: sale
     kind: time_series
     ref: "9999999999999999999999999999999999999999999999999999999999999999"
     series_meta:
       resolution: 1h
-      leap_year: false
-      point_count: 8760
+      point_count: 8760  # 单年示例；实际必须等于全周期总点数
       unit: CNY/kWh
   heat_supply:                                         # 未覆盖，原样保留
     carrier: heat
@@ -273,7 +270,7 @@ taxes:                                                 # 继承 Profile，原样
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "1.0.0"
+schema_version: "2.0.0"
 profile_ref:
   id: <profile-id>
 ```

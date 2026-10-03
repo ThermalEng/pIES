@@ -47,7 +47,7 @@
 
 ### 能源价格
 
-`energy_prices` 是 `price_id → 价格条目` 的开放映射（`price_id` 为稳定自定义名，`lower_snake_case`、不含 `__`；不存在固定白名单价格键，封闭的载体清单只在公共载体词汇中维护——见[设备模型 YAML](../formats/device-model-yaml.md)「interfaces」的 `carrier` 规则，本页不复制）。每个条目显式携带 `carrier`（来自公共载体词汇，与设备接口同一词汇源）与 `direction: purchase|sale`（会计方向，不靠 price_id/键名推断）；定价定义为 `constant {value, unit}` 或引用经校验完整年度序列的 `time_series`。价格为有限 Decimal，正、零、负均合法，禁止 NaN/Infinity。每个计量绑定产出的计费分量是**已带符号的记账贡献**：先算 `raw_charge = Σ price[t]×e[t]`，`purchase` 分量 = +raw_charge（正价时为正，成本向）、`sale` 分量 = −raw_charge（正售电价时为负，收益以负值自动抵减成本）；负价自然按该方向反转（负购电价使 purchase 分量为负、负售电价使 sale 分量为正），零电价合法；规划表达式对已签名分量统一使用加法，不再书写额外负号。`time_series` 引用携带 `resolution`/`leap_year`/`point_count`/`unit` 等不可变元数据，装配时与项目基线核对，不一致阻断且不重采样（Profile 不固定唯一项目分辨率）。装配 `tariff_bindings` 以 `binding_id → {price, instance, interface, aggregation}` 把每个用到的 `price_id` 绑定到方向明确的计费点实例接口与聚合，校验价格 `carrier` 与接口载体相容、`direction` 与接口流向一致；同一价格可被多个绑定复用。时变价格按逐点计价：聚合先得到与价格同轴的能量序列 `e[t]`，再按 `Σ price[t]×e[t]` 计费（`constant` 每点同价，结果与 `price×Σe[t]` 一致但语义仍为逐点）；禁止先对时变价格总量聚合再与总能量相乘（聚合与计价衔接见[财务 YAML 契约](../formats/finance-yaml.md)）。
+`energy_prices` 是 `price_id → 价格条目` 的开放映射（`price_id` 为稳定自定义名，`lower_snake_case`、不含 `__`；不存在固定白名单价格键，封闭的载体清单只在公共载体词汇中维护——见[设备模型 YAML](../formats/device-model-yaml.md)「interfaces」的 `carrier` 规则，本页不复制）。每个条目显式携带 `carrier`（来自公共载体词汇，与设备接口同一词汇源）与 `direction: purchase|sale`（会计方向，不靠 price_id/键名推断）；定价定义为 `constant {value, unit}` 或引用经校验、覆盖全期的连续序列的 `time_series`。价格为有限 Decimal，正、零、负均合法，禁止 NaN/Infinity。每个计量绑定产出的计费分量是**已带符号的记账贡献**：先算 `raw_charge = Σ price[t]×e[t]`，`purchase` 分量 = +raw_charge（正价时为正，成本向）、`sale` 分量 = −raw_charge（正售电价时为负，收益以负值自动抵减成本）；负价自然按该方向反转（负购电价使 purchase 分量为负、负售电价使 sale 分量为正），零电价合法；规划表达式对已签名分量统一使用加法，不再书写额外负号。`time_series` 引用携带 `resolution`/`point_count`/`unit` 等不可变元数据（无 `leap_year`），装配时与全周期推导值核对，不一致阻断且不重采样（Profile 不固定唯一项目分辨率）。装配 `tariff_bindings` 以 `binding_id → {price, instance, interface, aggregation}` 把每个用到的 `price_id` 绑定到方向明确的计费点实例接口与聚合，校验价格 `carrier` 与接口载体相容、`direction` 与接口流向一致；同一价格可被多个绑定复用。时变价格按逐点计价：聚合先得到与价格同轴的能量序列 `e[t]`，再按 `Σ price[t]×e[t]` 计费（`constant` 每点同价，结果与 `price×Σe[t]` 一致但语义仍为逐点）；禁止先对时变价格总量聚合再与总能量相乘（聚合与计价衔接见[财务 YAML 契约](../formats/finance-yaml.md)）。
 
 ## 长期蓝图：`FinancialResult`
 
@@ -98,7 +98,7 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 - 币种或口径（`base_year` / `price_basis`）不一致：拒绝计算；
 - 非有限值、长度错误或缺少必需分量：输入诊断；
 - `FinanceOverrides` 引用了未知 `profile id`、覆盖不存在的 `finance_type`/分量/`driver`/`price_id`、改变 driver 集合或分量类型、覆盖中改写 `carrier`/`direction` 或新增/删除 `price_id`、改变单位/币种/`price_basis`/`cost_method`、出现 `null` 或部分金额：阻断，不产生 Effective；
-- 被引用的 `time_series` 未通过校验、不是完整年度序列、元数据（resolution/leap_year/point_count）与引用声明或项目基线不一致：阻断，不重采样；
+- 被引用的 `time_series` 未通过校验、未覆盖全期、元数据（resolution/point_count）与引用声明或全周期推导值不一致：阻断，不重采样；
 - IRR 无解、多解或退化：返回对应业务状态，不抛普通内部异常（长期蓝图）；
 - 数值算法未收敛：返回 numeric failure 和受控细节；
 - 基准缺失：由 application 在调用前阻断，finance 不创建零基准。

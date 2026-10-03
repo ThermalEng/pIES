@@ -114,6 +114,8 @@
 
 计算类任务必须明确引用本项目已保存的计算配置 revision；提交时冻结该 revision 的完整配置与来源，后续保存新 revision 不改变已提交任务。缺失或不存在的引用不得回退到当前草稿、最新配置或默认配置；任务级参数不得覆盖计算配置正文。具体 HTTP 字段和错误信封以运行版本的 OpenAPI 为准。
 
+计算类任务提交的类型化输入包含显式评价确认 `evaluation: {evaluation_years: 正整数（≥1，无默认）, discount_rate: 无量纲比例（≥0，无默认）}`；服务端记录确认人/时间并随任务冻结，无确认即阻断提交（自由字典式 `baseline-confirm` 审计记录不作为参数来源）。`CalcSnapshot` 新增必填冻结块 `evaluation: {evaluation_years, discount_rate, confirmed_by, confirmed_at}` 与推导的年度边界（快照 schema `3.0.0`，`2.0.0` 快照不再接受新提交）；评价确认属财务输入，不新增第六类输入，Generator 五项直接输入不变。
+
 Worker 只有在命令可解析、租约有效且写入资格仍成立时才能提交进度和结果。失败保留结构化诊断；取消、超时和重试遵守公开状态转换。
 
 ## 兼容与演进
