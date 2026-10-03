@@ -61,12 +61,12 @@ function defaultReadHead(file: File): Promise<string> {
  */
 export type HeadScanStatus = 'empty' | 'pending' | 'ready' | 'failed'
 
-export type HeadScanEvent = 'select' | 'clear' | 'ok' | 'fail' | 'reset'
+export type HeadScanEvent = 'select' | 'clear' | 'ok' | 'fail'
 
 /** 状态迁移(纯函数): `failed` 只能经 `select`(重新选择)回到 `pending`,
  * 经 `ok` 才能到 `ready`; 世代过期由调用方按 `isCurrent` 先行丢弃。 */
 export function nextScanStatus(current: HeadScanStatus, event: HeadScanEvent): HeadScanStatus {
-  if (event === 'reset' || event === 'clear') return 'empty'
+  if (event === 'clear') return 'empty'
   if (event === 'select') return 'pending'
   if (current !== 'pending') return current
   if (event === 'ok') return 'ready'

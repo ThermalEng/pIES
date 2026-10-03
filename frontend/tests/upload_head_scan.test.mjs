@@ -115,7 +115,29 @@ check('首行非注释即停', decideHeadMode('timestamp,e_load\n# schema: ies.d
   check('failed 下 ok/fail 事件不恢复', nextScanStatus('failed', 'ok') === 'failed' && nextScanStatus('failed', 'fail') === 'failed')
   check('failed 只能重选恢复', nextScanStatus('failed', 'select') === 'pending')
   check('ready 重选回到 pending', nextScanStatus('ready', 'select') === 'pending')
-  check('reset/clear 回到 empty', nextScanStatus('failed', 'reset') === 'empty' && nextScanStatus('ready', 'clear') === 'empty')
+  check('clear 回到 empty', nextScanStatus('failed', 'clear') === 'empty' && nextScanStatus('ready', 'clear') === 'empty')
+}
+
+// 定向场景: 清空选择后旧读取迟到返回 step 头, 不得重建 step 模式。
+// 接线说明: 下列三行与 DataPage inspectFile(null) 分支逐行一致
+// (invalidate → clear; onSettled 首行 isCurrent 丢弃), 此处按同一序列驱动。
+{
+  const applied = []
+  let releaseA
+  const pendingA = new Promise((resolve) => { releaseA = resolve })
+  const scanning = createHeadScan({ onSettled: (seq, outcome) => {
+    if (!scanning.isCurrent(seq)) return
+    applied.push(outcome)
+  } }, () => pendingA)
+  let status = nextScanStatus('empty', 'select') // 选择文件 A
+  scanning.scan({ name: 'a.csv' })
+  scanning.invalidate() // 清空选择: 作废进行中判定
+  status = nextScanStatus(status, 'clear')
+  releaseA(STEP_HEAD) // 旧读取迟到返回 step 头
+  await pendingA
+  await new Promise((resolve) => { setTimeout(resolve, 0) })
+  check('清空后旧 step 结果被丢弃', applied.length === 0)
+  check('清空后状态为 empty(不可提交)', status === 'empty' && canSubmitScan(status) === false)
 }
 
 // 定向场景: 读取失败 → 再次提交被阻断 → 重选成功 → 可提交。

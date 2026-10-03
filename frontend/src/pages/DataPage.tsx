@@ -305,6 +305,9 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
     setFileResolution(null)
     setError(null)
     if (!selected) {
+      // 清空选择必须同时作废进行中判定, 否则旧 File.text() 迟到返回 step 头
+      // 仍会被 onSettled 接受, 造成无文件却显示 step 模式。
+      scanRef.current?.invalidate()
       setScanStatus((prev) => nextScanStatus(prev, 'clear'))
       return
     }
