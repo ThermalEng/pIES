@@ -1,6 +1,6 @@
 # 装配 YAML
 
-> 契约标识：`ies.assembly`；目标 schema：`2.0.0`；推荐文件名：`<assembly-id>.assembly.yaml`。
+> 契约标识：`ies.assembly`；目标 schema：`3.0.0`（`3.0.0` 删除基线 `leap_year` 并新增 `start_year`；`2.0.0` 文件不再接受）；推荐文件名：`<assembly-id>.assembly.yaml`。
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
 
 装配 YAML 是系统模型与规划意图的完整、可审查文本：它固定项目计算基线，实例化精确设备内容，绑定已校验的预定义来源声明、规范数据和不可变输入引用，连接可连接的真实 interfaces，区分存量/新增设备，为每个设备实例显式声明**设备成本**财务绑定（判别联合 `costed`/`none`），并用独立的 `tariff_bindings` 把能源价格条目（`price_id`）绑定到计费点实例/接口与聚合（计费点可以是 `type: none` 的纯计量实例），用精确引用固定装配前合并签发的不可变有效财务快照，并承载规划配置。它不包含物化后的未来序列、generator、solver、预测算法、计算精度或求解选项；这些计算事项在规范装配产物转换为计算包时固定。财务三件套的 schema 与字段见[财务 YAML 契约](finance-yaml.md)。
@@ -112,7 +112,7 @@ extensions: {}
 
 被引用的有效快照需含本装配用到的 `finance_type`（如 `pv_system`）与 `energy_prices` 的 `price_id`（如 `grid_import`/`pv_export`），完整字段定义见[财务 YAML 契约](finance-yaml.md)。实例 `instance_id`（如 `pv_1`/`grid`）、计量绑定 `binding_id`（如 `import_meter`）、财务 `finance_type`（如 `pv_system`）与技术模型 `device.id`（如 `ies.device.pv`）严格分离：`grid` 无设备成本、不绑定 `finance_type`（不再虚构 `grid_connection` 等零成本连接类别），其计量与计费完全由 `tariff_bindings` 表达。
 
-规划目标示例把成本项显式列出：`pv_1__annual_fixed_om`（currency/年）、`pv_1__period_variable_om`、`import_meter__period_energy_purchase`、`export_meter__period_energy_sale`（currency，运行/计费窗口合计）。这些标识符是受限表达式可解析的普通 `Name`，其编码与映射规则见下文「规划表达式中的财务分量标识符」：设备成本分量 = `<instance_id>__<分量>`，能源计费分量 = `<tariff_binding_id>__period_energy_purchase|sale`，不使用点分路径。`annual_fixed_om` 与 `period_*` 量纲不同（currency/年 vs currency），不能直接相加：示例中计算窗口恰好是快照冻结评价期覆盖的完整时间轴，表达式通过**显式时间跨度字面量（示例为单年窗口的 `1 year`，多年窗口按冻结评价年限的年数）**把按年值换算为窗口金额（currency）后再与 `period_*` 相加；缺少显式时间跨度时，不得默认相加或做其他隐式缩放（规则见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。会计符号由被引用价格的显式 `direction` 统一决定（定义见[财务 YAML 契约](finance-yaml.md)「计价规则」）：每个计量绑定先算 `raw_charge = Σ price×energy`，`purchase`（如 `grid_import`）分量为 +raw_charge、`sale`（如 `pv_export`）分量为 −raw_charge。分量是**已带符号的记账贡献**（正售电价时 sale 分量自身为负，收益自动抵减成本），因此目标表达式对所有分量**统一使用加法**——示例写 `+ export_meter__period_energy_sale`，不再书写额外负号，也不把“sale 以负号计入”写为规则。该示例是“预算上限约束下的年度运行成本最小化”这一**具体示例，不是通用经济目标**：一次性 `upfront_capex` 不进该目标，改由预算上限约束显式处理（示例上限 `900000 CNY` 为规划人员输入的带单位常数，单位必须与 `EffectiveFinanceConfig.currency` 一致，不是系统财务规则）；具体如何把一次性投资转换为可与运行期成本比较的规划分量，属于 `PlanningConfig` 的明确、版本化规则，需在规划配置契约中定义，本财务 Profile 不隐式定义或默认选择这种转换（不隐含资本回收系数、利率或年限等值）。表达式与约束的具体语法由规划配置契约定义，本格式页只定义财务分量标识符的映射与量纲，不定义表达式语言本身；分量标识符引用设备成本绑定（`pv_1`）与能源计费绑定（`import_meter`/`export_meter`），不依赖任何隐式“系统总成本”聚合。
+规划目标示例把成本项显式列出：`pv_1__annual_fixed_om`（currency/年）、`pv_1__period_variable_om`、`import_meter__period_energy_purchase`、`export_meter__period_energy_sale`（currency，运行/计费窗口合计）。这些标识符是受限表达式可解析的普通 `Name`，其编码与映射规则见下文「规划表达式中的财务分量标识符」：设备成本分量 = `<instance_id>__<分量>`，能源计费分量 = `<tariff_binding_id>__period_energy_purchase|sale`，不使用点分路径。`annual_fixed_om` 与 `period_*` 量纲不同（currency/年 vs currency），不能直接相加：示例中计算窗口恰好是快照冻结评价期覆盖的完整时间轴，表达式通过**显式时间跨度字面量（示例为单年窗口的 `1 year`）**把按年值换算为窗口金额（currency）后再与 `period_*` 相加；缺少显式时间跨度时，不得默认相加或做其他隐式缩放（规则见[财务 YAML 契约](finance-yaml.md)「时间口径与分量」）。会计符号由被引用价格的显式 `direction` 统一决定（定义见[财务 YAML 契约](finance-yaml.md)「计价规则」）：每个计量绑定先算 `raw_charge = Σ price×energy`，`purchase`（如 `grid_import`）分量为 +raw_charge、`sale`（如 `pv_export`）分量为 −raw_charge。分量是**已带符号的记账贡献**（正售电价时 sale 分量自身为负，收益自动抵减成本），因此目标表达式对所有分量**统一使用加法**——示例写 `+ export_meter__period_energy_sale`，不再书写额外负号，也不把“sale 以负号计入”写为规则。该示例是“预算上限约束下的年度运行成本最小化”这一**具体示例，不是通用经济目标**：一次性 `upfront_capex` 不进该目标，改由预算上限约束显式处理（示例上限 `900000 CNY` 为规划人员输入的带单位常数，单位必须与 `EffectiveFinanceConfig.currency` 一致，不是系统财务规则）；具体如何把一次性投资转换为可与运行期成本比较的规划分量，属于 `PlanningConfig` 的明确、版本化规则，需在规划配置契约中定义，本财务 Profile 不隐式定义或默认选择这种转换（不隐含资本回收系数、利率或年限等值）。表达式与约束的具体语法由规划配置契约定义，本格式页只定义财务分量标识符的映射与量纲，不定义表达式语言本身；分量标识符引用设备成本绑定（`pv_1`）与能源计费绑定（`import_meter`/`export_meter`），不依赖任何隐式“系统总成本”聚合。
 
 ## 顶层职责
 
@@ -200,8 +200,8 @@ finance:
 
 - `object_id` 是在对象存储写入或外部导入边界确定的对象身份；内部装配按该身份取得已登记对象；
 - 外部导入时可在入口完成验证，并从来源 Profile 与 Overrides 重新合并验证财务语义；进入可信流程后不重复校验，也不静默改用其他来源；
-- 引用 `time_series` 价格的条目（在 Profile/Overrides 中声明）携带 `resolution`/`point_count`/`unit` 等不可变序列元数据（无 `leap_year`），装配时与全周期推导值核对：序列引用对象必须已校验为覆盖全期的连续序列且元数据一致；不一致阻断，不重采样、不插值（Profile 不固定唯一项目分辨率，校验以被引用序列元数据为准）；时变价格按逐点计价（`Σ price[t]×e[t]`），聚合与计价衔接见[财务 YAML 契约](finance-yaml.md)「聚合与计价衔接」；
-- `planning` 只保存目标函数、目标权重、规划变量、上下界和规划/系统约束。目标函数用普通标识符逐项引用财务分量（映射规则见下文「规划表达式中的财务分量标识符」；示例见上方最小结构：`1 year * pv_1__annual_fixed_om + pv_1__period_variable_om + import_meter__period_energy_purchase + export_meter__period_energy_sale`，其中 `1 year` 为显式时间跨度字面量（示例为单年窗口；多年窗口按冻结评价年限的年数），把 currency/年 的按年值换算为窗口金额（currency）后再相加；能源计费分量**已带符号**——`purchase` 分量 = +raw_charge、`sale` 分量 = −raw_charge（`raw_charge = Σ price[t]×e[t]`，正售电价时 sale 分量自身为负），所以目标表达式对所有分量统一使用加法；负价自然反转该方向效果；缺少显式时间跨度不得默认相加）；该示例是“预算上限约束下的运行成本最小化”的具体示例，不是通用经济目标——把一次性 `upfront_capex` 转换为可与运行期成本比较的显式规划分量，属于 `PlanningConfig` 的版本化规则，须在该契约中定义后再使用；有效快照**不静默相加成默认总成本**，不提供隐式“系统总成本”标识符，Profile 不隐式年化或默认选择转换规则；规划配置显式选择或组合哪些分量；
+- 引用 `time_series` 价格的条目（在 Profile/Overrides 中声明）携带 `resolution`/`point_count`/`unit` 等不可变序列元数据（无 `leap_year`）；装配只核对元数据自身完整与分辨率一致。序列覆盖全期的核对统一在任务提交边界（取得已确认评价年限后核对点数与年度边界）；不一致阻断，不重采样、不插值（Profile 不固定唯一项目分辨率，校验以被引用序列元数据为准）；时变价格按逐点计价（`Σ price[t]×e[t]`），聚合与计价衔接见[财务 YAML 契约](finance-yaml.md)「聚合与计价衔接」；
+- `planning` 只保存目标函数、目标权重、规划变量、上下界和规划/系统约束。目标函数用普通标识符逐项引用财务分量（映射规则见下文「规划表达式中的财务分量标识符」；示例见上方最小结构：`1 year * pv_1__annual_fixed_om + pv_1__period_variable_om + import_meter__period_energy_purchase + export_meter__period_energy_sale`，其中 `1 year` 为显式时间跨度字面量（示例为单年窗口），把 currency/年 的按年值换算为窗口金额（currency）后再相加；能源计费分量**已带符号**——`purchase` 分量 = +raw_charge、`sale` 分量 = −raw_charge（`raw_charge = Σ price[t]×e[t]`，正售电价时 sale 分量自身为负），所以目标表达式对所有分量统一使用加法；负价自然反转该方向效果；缺少显式时间跨度不得默认相加）；该示例是“预算上限约束下的运行成本最小化”的具体示例，不是通用经济目标——把一次性 `upfront_capex` 转换为可与运行期成本比较的显式规划分量，属于 `PlanningConfig` 的版本化规则，须在该契约中定义后再使用；有效快照**不静默相加成默认总成本**，不提供隐式“系统总成本”标识符，Profile 不隐式年化或默认选择转换规则；规划配置显式选择或组合哪些分量；
 - 项目覆盖是 authoring 输入，`EffectiveFinanceConfig` 是装配与计算唯一消费的不可变快照：运行期不继承 Profile、不读取“最新地区价格”、不静默默认值。本契约成本分量不包含折旧、融资、还款与 IRR 等后评价输入。
 
 ### 规划表达式中的财务分量标识符
@@ -225,7 +225,7 @@ finance:
 - 财务分量标识符自带量纲：`upfront_capex`、`period_variable_om`、`period_energy_purchase`、`period_energy_sale` 为 currency；`annual_fixed_om` 为 currency/年。能源计费分量是**有符号记账值**：`purchase` 分量 = +raw_charge（正价时为正值）、`sale` 分量 = −raw_charge（正售电价时为负、负售电价时为正）；负号是记账符号而非物理量取负，能量序列本身非负；量纲恒为 currency、与符号无关；
 - 表达式中的**有维度常量**以带单位字面量书写（`数值 + 单位标识符`，如 `900000 CNY`、`1 year`），单位标识符来自公共单位词汇；常量单位必须与 `EffectiveFinanceConfig.currency` 一致（示例币种 CNY），量纲不一致在装配规划校验阻断；
 - **纯无量纲系数**（如 `0.5`、整数权重）可以裸数字书写，不需要单位字面量；含维度加减与比较的表达式由规划校验做维度检查；
-- `annual_fixed_om` 与窗口合计分量相加前，必须显式乘以时间跨度字面量（示例 `1 year` 对应单年窗口；多年窗口按冻结评价年限的年数）；缺少显式时间跨度不得默认相加；
+- `annual_fixed_om` 与窗口合计分量相加前，必须显式乘以时间跨度字面量（示例为单年窗口的 `1 year`）；缺少显式时间跨度不得默认相加；
 - 本小节只定义财务分量标识符的编码、映射与量纲规则，不定义规划表达式语言本身（语法与运算符由规划配置契约提供）。
 
 ## 设备成本绑定 `finance_binding`
@@ -311,13 +311,14 @@ tariff_bindings:
 
 生成器直接消费这两者。人工修改规范文本、替换资源或变更财务快照/绑定必须形成新的装配产物；任务创建后只消费该产物，不得重新读取“当前设备”“当前价格”或“最新项目”。
 
-规范化算法标识为 `ies.assembly.canonical@2.0.0`。相同语义必须得到相同规范文本和回执；算法语义变化必须升级版本并保留历史解释能力。
+规范化算法标识为 `ies.assembly.canonical@3.0.0`。相同语义必须得到相同规范文本和回执；算法语义变化必须升级版本并保留历史解释能力。
 
 ## 完成标准
 
-- 示例补齐真实设备引用、`finance` 精确引用、`finance_binding` 判别联合与 `tariff_bindings` 绑定映射后可通过 `2.0.0` schema；
+- 示例补齐真实设备引用、`finance` 精确引用、`finance_binding` 判别联合与 `tariff_bindings` 绑定映射后可通过 `3.0.0` schema；
 - 装配没有设备独立版本、parameters/ports/model commands 或设备经济字段；财务成本模型来自被引用的有效快照，不来自设备文件，也不在装配内内联完整财务配置；
-- 五类 interface、三类 predefined 来源、存量/新增、设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性、`tariff_bindings` 的 `price_id`/`carrier`/`direction` 校验（含 `type: none` 计量点）、财务分量标识符映射（实例前缀与绑定前缀的命名空间规则）与带单位常量量纲校验、规划目标逐项引用及有效财务快照身份/血缘均有契约测试；
+- 五类 interface、来源模式（`constant`/`data_repeat`/`data_full`/`data_predict`）、存量/新增、设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性、`tariff_bindings` 的 `price_id`/`carrier`/`direction` 校验（含 `type: none` 计量点）、财务分量标识符映射（实例前缀与绑定前缀的命名空间规则）与带单位常量量纲校验、规划目标逐项引用及有效财务快照身份/血缘均有契约测试；
 - 非法文件没有旁路进入生成器，合法文件只产生一个规范形态；
 - 生成器只读 `ValidatedAssemblyArtifact`，不重新解释原始项目、CSV 路径或 GUI 状态；
 - `ies.assembly` `1.0.0` 是未发布开发草案；其 schema、迁移器、迁移回执、样例和兼容路径直接删除，开发数据按 `2.0.0` 重建，不提供 1.0/2.0 双轨或离线迁移入口。
+- `ies.assembly` `3.0.0` 删除基线 `leap_year` 并新增必填 `start_year`；`2.0.0` 文件不再接受，不提供 2.0/3.0 双轨或离线迁移入口。
