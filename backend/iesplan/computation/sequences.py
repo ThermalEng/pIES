@@ -28,7 +28,6 @@ from types import MappingProxyType
 from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
-from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.predictors import PredictedTarget, Predictor
 from iesplan.core.contracts import point_count_for_baseline
 
@@ -271,12 +270,8 @@ def materialize_predicted_series(
             key = (str(device_id), str(interface_id))
             entry = by_target[key]  # 提交闸门已保证覆盖, 缺配对即快照故障
             predictor: Predictor = resolve_predictor(str(entry["algorithm"]))
+            # 算法↔目标类型相容已由提交闸门 TASK-REQ-014 校核, 此处不重复验证。
             target_type = str(binding["target_type"])
-            if not predictor.descriptor.supports(target_type):
-                raise ComputationUnavailableError(
-                    f"预测算法不支持该目标类型: {entry['algorithm']!r} x {target_type!r}",
-                    reason="predictor-target-unsupported",
-                )
             object_id = str(binding["content"]["object_id"])
             if object_id not in resources:
                 raise ValueError(
@@ -284,11 +279,8 @@ def materialize_predicted_series(
                     f"{device_id!r} x {interface_id!r} x object {object_id!r}"
                 )
             history = tuple(_project_column(resources[object_id], str(interface_id)))
+            # 参数形态已由配置冻结入口校核, 此处直接使用, 不重复验证。
             parameters = entry.get("parameters") or {}
-            if not isinstance(parameters, Mapping):
-                raise ValueError(
-                    f"预测参数须为对象: {device_id!r} x {interface_id!r}"
-                )
             predicted.append(
                 predictor.predict(
                     device=str(device_id),

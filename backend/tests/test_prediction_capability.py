@@ -396,22 +396,6 @@ class TestMaterializePredicted:
                 7,
             )
 
-    def test_strict_predictor_rejects_unsupported_type(self) -> None:
-        registry = build_predictor_registry((NAIVE_PREDICTOR, _StrictPredictor()))
-        with pytest.raises(ComputationUnavailableError) as exc_info:
-            materialize_predicted_series(
-                _predict_artifact(self._bindings()),
-                {
-                    "obj-h1": _history_csv_bytes("electricity_demand", [1.0]),
-                    "obj-h2": _history_csv_bytes("electricity_demand", [1.0]),
-                },
-                self._predictions(NAIVE_PREDICTOR_REF, STRICT_REF),
-                registry.get,
-                7,
-            )
-        assert exc_info.value.reason == "predictor-target-unsupported"
-
-
 class TestSubmitCompat:
     def _doc(self, *devs: str, target_type: str = "load") -> dict:
         devices: dict = {}

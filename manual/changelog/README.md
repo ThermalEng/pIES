@@ -47,11 +47,12 @@
 - 时序收口：文件头判定抽为 `uploadHeadScan`（世代守卫 + 失败显式上报），判定完成前提交按钮禁用且 `submit` 设防，新选择作废旧读取，读取失败报可见错误不再静默回退 generic；`upload_head_scan.test.mjs` 11 项回归。
 - 读取失败作废本轮文件：头判定状态机（`empty/pending/ready/failed`）为提交唯一判据，`failed` 下按钮与 `submit` 内守卫一致阻断（不再按 generic 组装），只有重选并成功判定才可恢复；状态机与失败→重选场景有定向回归。
 - 清空选择同时作废进行中判定（`invalidate` 复用现有机制，未新增抽象），旧读取迟到不再重建 step 模式；删去无生产调用的 `reset` 事件分支。
+- 边界收口：`materialize_predicted_series` 删除内部重复验证（算法↔目标类型 `supports` 校核与参数 `Mapping` 复核，已分别由提交闸门 `TASK-REQ-014` 与配置冻结入口覆盖），保留缺资源可见失败与 `resolve_predictor` 精确引用解析；删对应测试期待与无用 import。
 
 #### 解决了什么问题
 
 - Docker 定向验证：后端上传矩阵 20 passed、`test_device_data_upload` 全绿、ruff 全绿；Playwright Chromium 真实浏览器验收（`device-data-upload.spec.ts`）：step 文件自描述上传成功且通用文件原路径上传成功，控制台零错误（占位配置消除 `config` 404-as-absence 噪声；通用路径要求模板 7 列齐全，缺列阻断为基线行为，验收按模板供数）。
-- 明确未做：目标类型语义契约（P1 修订提案待用户裁决，不实施）；多年财务/折现率；B6。
+- 明确未做：目标类型语义契约（P1 修订提案已复审不批准：不以 load/flex_load 测试样例限死 naive，类型透传保留，待有真实类型语义需求再设计，不实施）；多年财务/折现率；B6。
 
 ### 2026-10-03 — `0.12.0` 切片 B5-2b 公共预测能力：naive 确定性预测 + 阶段二收敛循环
 
