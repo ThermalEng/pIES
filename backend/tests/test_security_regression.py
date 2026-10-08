@@ -91,7 +91,7 @@ def _create_project(client: TestClient, owner_token: str, name: str) -> int:
         json={
             "name": name,
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_bearer(owner_token),
@@ -350,7 +350,7 @@ def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) 
         f"/api/projects/{pid}/tasks",
         json={
             "task_type": "optimization",
-            "config": {"config_revision": rev},
+            "config": {"config_revision": rev, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}},
             "idempotency_key": "sec-task-replay-1",
         },
         headers=_bearer(owner_token),

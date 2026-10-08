@@ -206,13 +206,13 @@ class TestPreassemblyCadence:
         # 基线闰年: 完整年为 8784; 8760(非闰年)拒绝, 日/周点数不变
         wrong = canonicalize_device_data_v2(
             self._repeat_csv(n=8760), _device_doc(),
-            baseline_resolution="1h", baseline_leap_year=True,
+            baseline_resolution="1h", baseline_start_year=2024,
         )
         assert "DATA-STEP-006" in _codes(wrong)
         for n in (24, 168, 8784):
             ok = canonicalize_device_data_v2(
                 self._repeat_csv(n=n), _device_doc(),
-                baseline_resolution="1h", baseline_leap_year=True,
+                baseline_resolution="1h", baseline_start_year=2024,
             )
             assert not _codes(ok), n
 
@@ -235,7 +235,7 @@ class TestPreassemblyCadence:
             assert "DATA-STEP-006" in _codes(bad), resolution
         leap_15 = canonicalize_device_data_v2(
             self._repeat_csv(resolution="15min", n=35136), _device_doc(),
-            baseline_resolution="15min", baseline_leap_year=True,
+            baseline_resolution="15min", baseline_start_year=2024,
         )
         assert not _codes(leap_15)
 

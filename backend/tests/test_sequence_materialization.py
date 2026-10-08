@@ -72,10 +72,10 @@ def _repeat_binding(object_id: str) -> dict:
 def test_constant_point_counts() -> None:
     """constant 按基线展开到完整点数（普通年/闰年 × 三种分辨率代表）。"""
     cases = [
-        ({"resolution": "15min", "leap_year": False}, 35040),
-        ({"resolution": "30min", "leap_year": False}, 17520),
-        ({"resolution": "1h", "leap_year": False}, 8760),
-        ({"resolution": "1h", "leap_year": True}, 8784),
+        ({"resolution": "15min", "start_year": 2026}, 35040),
+        ({"resolution": "30min", "start_year": 2026}, 17520),
+        ({"resolution": "1h", "start_year": 2026}, 8760),
+        ({"resolution": "1h", "start_year": 2024}, 8784),
     ]
     for baseline, expected in cases:
         result = materialize_non_predictive_series(
@@ -93,7 +93,7 @@ def test_constant_point_counts() -> None:
 
 def test_repeat_day_week_year() -> None:
     """日周期重复、周周期尾部截断、年周期恒等。"""
-    baseline = {"resolution": "1h", "leap_year": False}
+    baseline = {"resolution": "1h", "start_year": 2026}
     day = [float(i) for i in range(24)]
     week = [float(i) for i in range(168)]
     year = [float(i % 100) for i in range(8760)]
@@ -117,7 +117,7 @@ def test_repeat_day_week_year() -> None:
 
 def test_multi_device_interface_column_selection() -> None:
     """多设备/接口与同文件多列精确选择；source 追溯 object_id。"""
-    baseline = {"resolution": "1h", "leap_year": False}
+    baseline = {"resolution": "1h", "start_year": 2026}
     resources = {
         "obj-21": _csv_bytes(["pa", "pb"], [[1.0, 2.0], [3.0, 4.0]]),
     }
@@ -145,7 +145,7 @@ def test_multi_device_interface_column_selection() -> None:
 
 def test_immutable_and_caller_mutation_ignored() -> None:
     """载体不可变；调用方事后改写输入不影响已物化结果。"""
-    baseline = {"resolution": "1h", "leap_year": False}
+    baseline = {"resolution": "1h", "start_year": 2026}
     resources = {"obj-31": _csv_bytes(["p"], [[9.0], [8.0]])}
     artifact = _artifact(
         baseline, {"d1": {"predefined_interfaces": {"p": _repeat_binding("obj-31")}}}
@@ -166,7 +166,7 @@ def test_immutable_and_caller_mutation_ignored() -> None:
 
 def test_missing_resource_fails_without_path_fallback() -> None:
     """资源缺失明确失败；path 字段永不用于读取（无 fallback）。"""
-    baseline = {"resolution": "1h", "leap_year": False}
+    baseline = {"resolution": "1h", "start_year": 2026}
     artifact = _artifact(
         baseline, {"d1": {"predefined_interfaces": {"p": _repeat_binding("obj-41")}}}
     )
@@ -176,7 +176,7 @@ def test_missing_resource_fails_without_path_fallback() -> None:
 
 def test_predict_is_pending_not_materialized() -> None:
     """data_predict 进入待定边界（含资源身份），不被误报为已物化。"""
-    baseline = {"resolution": "1h", "leap_year": False}
+    baseline = {"resolution": "1h", "start_year": 2026}
     devices = {
         "d1": {
             "predefined_interfaces": {
@@ -217,7 +217,7 @@ def test_predict_is_pending_not_materialized() -> None:
 
 def test_predict_missing_resource_fails() -> None:
     """预测绑定身份缺失同样是必要输入不完整，明确失败。"""
-    baseline = {"resolution": "1h", "leap_year": False}
+    baseline = {"resolution": "1h", "start_year": 2026}
     devices = {
         "d1": {
             "predefined_interfaces": {
@@ -236,7 +236,7 @@ def test_predict_missing_resource_fails() -> None:
 
 def test_quoted_numeric_cells_consumed() -> None:
     """RFC 4180 引号数值单元格可消费（标准库 csv，非 split 解析）。"""
-    baseline = {"resolution": "1h", "leap_year": False}
+    baseline = {"resolution": "1h", "start_year": 2026}
     raw = (
         CSV_META
         + 'step,p\n0,"48.3"\n1,"46.7"\n'

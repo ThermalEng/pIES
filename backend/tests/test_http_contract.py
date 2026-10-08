@@ -273,7 +273,7 @@ def _make_project(client: TestClient, headers: dict[str, str], name: str) -> int
         json={
             "name": name,
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=headers,
@@ -586,7 +586,7 @@ def _submit_task(
 ) -> tuple[int, dict]:
     payload: dict = {"task_type": "optimization"}
     if config_revision is not None:
-        payload["config"] = {"config_revision": config_revision}
+        payload["config"] = {"config_revision": config_revision, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}}
     if key is not None:
         payload["idempotency_key"] = key
     resp = client.post(f"/api/projects/{pid}/tasks", json=payload, headers=headers)

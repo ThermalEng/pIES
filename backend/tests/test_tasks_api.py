@@ -125,7 +125,7 @@ def _create_project(client: TestClient, user, name: str) -> int:
             "name": name,
             "currency": "CNY",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_h(client, user),
@@ -314,7 +314,7 @@ def _submit_task(
     """提交任务, 返回 (HTTP 状态码, 响应体)。"""
     body: dict[str, Any] = {"task_type": task_type}
     if config is not None:
-        body["config"] = config
+        body["config"] = {**config, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}}
     if idempotency_key is not None:
         body["idempotency_key"] = idempotency_key
     resp = client.post(f"/api/projects/{pid}/tasks", json=body, headers=_h(client, user))

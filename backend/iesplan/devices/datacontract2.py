@@ -39,16 +39,18 @@ _OPTIONAL_META_KEYS = frozenset(
 )
 
 
-def repeat_cycle_lengths(resolution: str, *, leap_year: bool = False) -> tuple[int, int, int]:
+def repeat_cycle_lengths(resolution: str, *, start_year: int) -> tuple[int, int, int]:
     """data_repeat 完整日/周/年点数(0.6.5 条目 3)。
 
-    日/周点数由分辨率年点数按非闰年 365 天推导; 年点数在闰年基线下加一日。
-    完整来源序列整体即重复基线, 不另设周期字段。分辨率非法时抛 KeyError,
-    调用方须保证元信息已校验。
+    日/周点数由分辨率年点数按非闰年 365 天推导; 年点数在闰年起始年下加一日
+    (闰年由起始年推导)。完整来源序列整体即重复基线, 不另设周期字段。
+    分辨率非法时抛 KeyError, 调用方须保证元信息已校验。
     """
+    from iesplan.core.contracts import is_leap_year
+
     yearly, _, _ = RESOLUTIONS[resolution]
     day = yearly // 365
-    return day, day * 7, yearly + (day if leap_year else 0)
+    return day, day * 7, yearly + (day if is_leap_year(start_year) else 0)
 _ID_RE = re.compile(r"^[a-z0-9]+([._-][a-z0-9]+)*$")
 
 
@@ -382,7 +384,7 @@ def canonicalize_device_data_v2(
     expected_rows: int | None = None,
     expected_data_ref: str | None = None,
     baseline_resolution: str | None = None,
-    baseline_leap_year: bool = False,
+    baseline_start_year: int | None = None,
 ) -> DeviceData2Result:
     parsed, diags = parse_data_file_v2(data)
     if parsed is None:
@@ -502,14 +504,25 @@ def canonicalize_device_data_v2(
                     field_name="resolution",
                 ))
             if meta.source_mode == "data_repeat" and meta.resolution in RESOLUTIONS:
-                day_n, week_n, year_n = repeat_cycle_lengths(
-                    meta.resolution, leap_year=baseline_leap_year
+                # 无基线上下文(独立数据校验)时接受闰/非闰两种完整年长度,
+                # 与具体起始年的绑定留给装配阶段; 有基线时只接受该起始年的年长度。
+                years = (
+                    (baseline_start_year,)
+                    if baseline_start_year is not None
+                    else (2001, 2004)
                 )
+                day_n, week_n, _ = repeat_cycle_lengths(
+                    meta.resolution, start_year=years[0]
+                )
+                year_ns = {
+                    repeat_cycle_lengths(meta.resolution, start_year=y)[2]
+                    for y in years
+                }
                 n = len(steps)
-                if n not in (day_n, week_n, year_n):
+                if n != day_n and n != week_n and n not in year_ns:
                     diags.append(_diag(
                         "DATA-STEP-006",
-                        {"expected": f"完整日 {day_n} / 完整周 {week_n} / 完整年 {year_n}",
+                        {"expected": f"完整日 {day_n} / 完整周 {week_n} / 完整年 {sorted(year_ns)}",
                          "actual": n, "resolution": meta.resolution},
                         field_name=STEP_COL,
                     ))

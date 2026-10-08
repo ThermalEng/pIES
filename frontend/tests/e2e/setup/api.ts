@@ -112,7 +112,7 @@ export async function createProject(
     name,
     description,
     baseline_resolution: '1h',
-    baseline_leap_year: false,
+    baseline_start_year: 2026,
     baseline_scenario_mode: 'single',
   }, userToken)
   return { id: res.id, name: res.name }

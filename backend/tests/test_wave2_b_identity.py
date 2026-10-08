@@ -191,7 +191,8 @@ def test_delete_user_audits_via_audit_facade(db: Session) -> None:
         db, "w2b_victim", "Test12345", role="engineer", force_password_change=False
     )
     project = project_domain.create_project(
-        db, name="w2b-proj", owner_id=victim.id, created_by=admin.id
+        db, name="w2b-proj", owner_id=victim.id, created_by=admin.id,
+        baseline_start_year=2026,
     )
 
     preview = identity_uc.preview_user_delete(db, admin, victim)

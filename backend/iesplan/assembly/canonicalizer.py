@@ -1,8 +1,8 @@
-"""ies.assembly 2.0.0 唯一规范化器。
+"""ies.assembly 3.0.0 唯一规范化器。
 
 规范化是公开纯过程(file-formats.md「人工编写与规范化」):
 - 映射键按格式规则稳定排序;有业务顺序的列表(series/metrics)保留声明顺序;
-- 项目计算基线(resolution/leap_year/scenario_mode)按规范形态透传,
+- 项目计算基线(resolution/start_year/scenario_mode)按规范形态透传,
   不做时区换算与起止时间派生;
 - 预定义文件绑定的 content 身份由校验器就地写入(与 path 一并保留);
   无 content 的文件绑定不得进入规范字节(校验器已阻断);

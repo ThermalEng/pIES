@@ -28,7 +28,7 @@ test.describe('场景 4: 数据上传 / 质量报告 / 绑定', () => {
     const createdProj = await requestJson(apiCtx.request, 'POST', '/api/projects', {
       name: projectName,
       baseline_resolution: '1h',
-      baseline_leap_year: false,
+      baseline_start_year: 2026,
       baseline_scenario_mode: 'single',
     }, setupToken)
     await requestJson(apiCtx.request, 'PUT', `/api/projects/${createdProj.project?.id ?? createdProj.id}/config`, {
@@ -102,7 +102,7 @@ test.describe.skip('场景 6: 任务提交 / 状态 / 结果 / 导出(后续切�
     const createdProj = await requestJson(apiCtx.request, 'POST', '/api/projects', {
       name: projectName,
       baseline_resolution: '1h',
-      baseline_leap_year: false,
+      baseline_start_year: 2026,
       baseline_scenario_mode: 'single',
     }, userTok)
     const projectId = createdProj.project?.id ?? createdProj.id
@@ -140,6 +140,9 @@ test.describe.skip('场景 6: 任务提交 / 状态 / 结果 / 导出(后续切�
     await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click()
     // 提交对话框: 校验门禁预检不应有阻断
     await expect(page.getByText(/任务由服务器端执行|runs on the server/i).first()).toBeVisible()
+    // 评价确认(必填, 无默认值): 年限 1 年 + 折现率 0.08
+    await page.locator('#task-eval-years').fill('1')
+    await page.locator('#task-discount-rate').fill('0.08')
     // 默认类型 calc, 点击对话框底部提交按钮
     await page.getByRole('button', { name: /提交任务|Submit task/i }).last().click()
     // 任务出现在列表

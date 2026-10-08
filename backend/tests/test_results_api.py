@@ -202,7 +202,7 @@ def _prepare_project(client: TestClient, db: Session, user, name: str = "结果�
         json={
             "name": name,
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_h(client, user),
@@ -261,7 +261,7 @@ def _submit_task(
         f"/api/projects/{pid}/tasks",
         json={
             "task_type": "optimization",
-            "config": {"config_revision": config_revision},
+            "config": {"config_revision": config_revision, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}},
             "idempotency_key": idempotency_key,
         },
         headers=_h(client, user),

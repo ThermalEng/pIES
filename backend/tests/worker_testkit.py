@@ -102,7 +102,7 @@ _FIXTURE_FINANCE_PROFILE_ID = "cn-fixture-demo"
 
 
 #: 机械夹具依赖锁固定版本(非实时设备目录值；夹具只保证二件套非空、
-#: schema 2.0、文本与回执相互一致，不代表真实签发时的内容锁)。
+#: schema 3.0、文本与回执相互一致，不代表真实签发时的内容锁)。
 _FIXTURE_DEVICE_LOCK = {
     "ies.device.battery": "2.0.0",
     "ies.device.grid_connection": "2.0.0",
@@ -114,10 +114,10 @@ _FIXTURE_EQUATION_LOCK = {
 
 
 def fixture_artifact() -> ValidatedAssemblyArtifact:
-    """机械 2.0 装配二件套(不跑装配校验)。
+    """机械 3.0 装配二件套(不跑装配校验)。
 
     规范文本由规范化纯函数生成(非校验);回执字段与同一文档一致:
-    schema 2.0.0、固定机械依赖锁、财务引用、规划摘要、零阻断诊断。
+    schema 3.0.0、固定机械依赖锁、财务引用、规划摘要、零阻断诊断。
     调用方(worker 机械测试/计算边界测试)只消费二件套形状,不代表真实签发。
     """
     from iesplan.finance import SCHEMA_EFFECTIVE
@@ -128,7 +128,7 @@ def fixture_artifact() -> ValidatedAssemblyArtifact:
         "schema_version": SCHEMA_VERSION,
         "assembly": {"id": "fixture", "name": "机械夹具装配"},
         "project_baseline": {
-            "resolution": "1h", "leap_year": False, "scenario_mode": "single",
+            "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
         },
         "devices": {
             "d1": {
@@ -183,7 +183,7 @@ def fixture_artifact() -> ValidatedAssemblyArtifact:
         dependencies={
             "devices": dict(_FIXTURE_DEVICE_LOCK),
             "baseline": {
-                "resolution": "1h", "leap_year": False, "scenario_mode": "single",
+                "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
             },
             "equations": dict(_FIXTURE_EQUATION_LOCK),
         },
@@ -237,7 +237,7 @@ def setup_environment(
     db.flush()
     project = Project(name=f"测试项目-{_env_seq}-{task_type}", owner_id=user.id,
                       created_by=user.id, status="active",
-                      baseline_resolution="1h", baseline_leap_year=False,
+                      baseline_resolution="1h", baseline_start_year=2026,
                       baseline_scenario_mode="single",
                       )
     db.add(project)
@@ -268,7 +268,7 @@ def setup_environment(
     content_object_id = store_content_object(db, content)
     version = ProjectVersion(
         project_id=project.id, version_no=1, name="v1", reason="snapshot_freeze",
-        baseline_resolution="1h", baseline_leap_year=False,
+        baseline_resolution="1h", baseline_start_year=2026,
         baseline_scenario_mode="single",
         currency="CNY", schema_version=1,
         content_object_id=content_object_id, created_by=user.id,
@@ -280,7 +280,7 @@ def setup_environment(
     snapshot = None
     if task_type in COMPUTE_TYPES:
         # 机械快照行(Worker 队列/租约 mechanics 用): 保存非空且内部一致的
-        # 2.0 二件套形状(不跑装配校验);真实签发只走任务提交闸门。
+        # 3.0 二件套形状(不跑装配校验);真实签发只走任务提交闸门。
         artifact = fixture_artifact()
         snapshot = CalcSnapshot(
             project_version_id=version.id,
@@ -290,7 +290,7 @@ def setup_environment(
             program_version="0.1.0",
             extension_versions={},
             random_seed=int(config.get("seed", 42)) if config else 42,
-            schema_version="1.0.0",
+            schema_version="3.0.0",
             result_adapter="ies.result-adapter.highs@1.0.0",
             executor="ies.executor.local_process@1.0.0",
             canonical_assembly_text=artifact.canonical_text,

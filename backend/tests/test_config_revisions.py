@@ -209,7 +209,7 @@ def _owner(client: TestClient, db_session: Session, name: str = "cfg_owner") -> 
         json={
             "name": f"配置项目 {name}",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=headers,

@@ -186,7 +186,7 @@ def _create_project(client: TestClient, user, name: str = "配置包项目") -> 
         json={
             "name": name,
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_h(client, user),
@@ -250,7 +250,7 @@ def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes
                 "name": "定制包项目",
                 "currency": "CNY",
                 "project_baseline": ProjectBaseline(
-                    resolution="1h", leap_year=False
+                    resolution="1h", start_year=2026
                 ).to_dict(),
             },
             ensure_ascii=False,
@@ -277,7 +277,7 @@ def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes
             "name": "定制包项目",
             "currency": "CNY",
             "project_baseline": ProjectBaseline(
-                resolution="1h", leap_year=False
+                resolution="1h", start_year=2026
             ).to_dict(),
         },
         "files": {"configs": configs_meta},

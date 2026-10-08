@@ -179,8 +179,8 @@ export interface ProjectCreateInput {
   currency: Currency
   /** 项目计算基线(创建必填, 创建后不可修改): 统一计算分辨率. */
   baseline_resolution: BaselineResolution
-  /** 是否按闰年(366 天)生成全周期序列. */
-  baseline_leap_year: boolean
+  /** 运行起始年(公历整数年, 创建必填; 闰年逐年按公历推导). */
+  baseline_start_year: number
   /** 场景模式(当前仅 single). */
   baseline_scenario_mode: 'single'
 }
@@ -526,6 +526,8 @@ export interface TaskCreateInput {
   type: TaskType
   /** 计算类任务必填: 本项目已保存 CalculationConfig 的 revision(冻结进快照)。 */
   config_revision?: number
+  /** 计算类任务必填: 评价确认(年限正整数/折现率有限非负数, 均无默认值)。 */
+  evaluation?: { evaluation_years: number; discount_rate: number }
   dataset_ids?: EntityId[]
   priority?: number
   deadline?: ISO8601

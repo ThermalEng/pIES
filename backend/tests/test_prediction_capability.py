@@ -296,7 +296,7 @@ def _predict_artifact(bindings: dict) -> ValidatedAssemblyArtifact:
     doc = {
         "schema": "ies.assembly",
         "schema_version": "2.0.0",
-        "project_baseline": {"resolution": "1h", "leap_year": False},
+        "project_baseline": {"resolution": "1h", "start_year": 2026},
         "devices": bindings,
     }
     return ValidatedAssemblyArtifact(
@@ -804,7 +804,7 @@ class TestPredictEndToEnd:
         chase = _ChasePredictor()
         registry = build_predictor_registry((chase,))
         task, _flags = submit_task(
-            db, user, pid, "optimization", config={"config_revision": rev},
+            db, user, pid, "optimization", config={"config_revision": rev, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}},
             idempotency_key="predict-e2e-chase",
             generator_registry=plane.generator_registry,
             predictor_registry=registry,

@@ -103,7 +103,7 @@ def _create_project(client: TestClient, user, name: str, **kw: Any) -> int:
     body = {
         "name": name,
         "baseline_resolution": "1h",
-        "baseline_leap_year": False,
+        "baseline_start_year": 2026,
         "baseline_scenario_mode": "single",
         **kw,
     }
@@ -144,7 +144,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     # 1. 创建项目: 创建者=所有者, 初始草稿 revision=1
     resp = client.post(
         "/api/projects",
-        json={"name": "园区综合能源", "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"},
+        json={"name": "园区综合能源", "currency": "CNY", "baseline_resolution": "1h", "baseline_start_year": 2026, "baseline_scenario_mode": "single"},
         headers=owner_h,
     )
     assert resp.status_code == 201
@@ -155,7 +155,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert body["project"]["currency"] == "CNY"
     assert body["project"]["project_baseline"] == {
         "resolution": "1h",
-        "leap_year": False,
+        "start_year": 2026,
         "scenario_mode": "single",
     }
     assert "fixed_utc_offset_minutes" not in body["project"]
@@ -267,7 +267,7 @@ def test_project_lifecycle_flow(client: TestClient, db_session: Session) -> None
     assert vcontent["currency"] == "CNY"
     assert vcontent["project_baseline"] == {
         "resolution": "1h",
-        "leap_year": False,
+        "start_year": 2026,
         "scenario_mode": "single",
     }
     assert "fixed_utc_offset_minutes" not in vcontent
@@ -794,7 +794,7 @@ def test_admin_cannot_create_project_via_api(client: TestClient, db_session: Ses
         json={
             "name": "管理员项目",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_h(client, admin),
@@ -816,7 +816,7 @@ def test_admin_cannot_create_project_via_service(db_session: Session) -> None:
         lifecycle_uc.create_project(
             db_session, admin, name="管理员服务项目",
             baseline_resolution="1h",
-            baseline_leap_year=False,
+            baseline_start_year=2026,
             baseline_scenario_mode="single",
         )
 
@@ -829,7 +829,7 @@ def test_engineer_can_create_project(client: TestClient, db_session: Session) ->
         json={
             "name": "工程师项目",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_h(client, owner),

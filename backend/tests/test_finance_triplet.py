@@ -84,7 +84,6 @@ def _profile_payload() -> dict:
                 "ref": "a" * 64,
                 "series_meta": {
                     "resolution": "1h",
-                    "leap_year": False,
                     "point_count": 8760,
                     "unit": "CNY/kWh",
                 },
@@ -474,12 +473,12 @@ def test_effective_deep_immutable():
 
 
 def test_series_meta_rejects_invalid_resolution_or_point_count():
-    base_meta = {"leap_year": False, "point_count": 8760, "unit": "CNY/kWh"}
+    base_meta = {"point_count": 8760, "unit": "CNY/kWh"}
     with pytest.raises(FinanceTripletError, match="resolution"):
         SeriesMeta.from_dict({"resolution": "5min", **base_meta})
     with pytest.raises(FinanceTripletError, match="point_count"):
-        SeriesMeta.from_dict({"resolution": "1h", "leap_year": False, "point_count": 0, "unit": "CNY/kWh"})
-    with pytest.raises(FinanceTripletError, match="leap_year"):
+        SeriesMeta.from_dict({"resolution": "1h", "point_count": 0, "unit": "CNY/kWh"})
+    with pytest.raises(FinanceTripletError, match="未知字段"):
         SeriesMeta.from_dict({"resolution": "1h", "leap_year": "no", "point_count": 8760, "unit": "CNY/kWh"})
 
 

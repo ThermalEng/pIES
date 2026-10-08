@@ -1,6 +1,6 @@
-"""ies.assembly 2.0.0 GUI 项目导出构造器。
+"""ies.assembly 3.0.0 GUI 项目导出构造器。
 
-将项目内容(设备/端口/连接/数据集绑定/项目基线)映射为 ies.assembly 2.0.0
+将项目内容(设备/端口/连接/数据集绑定/项目基线)映射为 ies.assembly 3.0.0
 纯技术实例形态(definition/asset_origin/properties/predefined_interfaces),
 与手写 YAML 进入同一校验入口(validator.validate_project_export)。
 
@@ -8,7 +8,7 @@
 普通设备方程或约束表达，本构造器不按设备类型分支、不合成设备、
 不猜测经济绑定。
 
-无静默默认:project_baseline.resolution/leap_year/scenario_mode、
+无静默默认:project_baseline.resolution/start_year/scenario_mode、
 设备 kind 均须显式声明,缺字段/非法值一律返回
 ASM-CONV-001 阻断诊断,不回退、不猜测、不吞错。装配不包含 calculation
 (计算配置在计算包生成时固定)。设备数据绑定(CSV 序列来源)由设备
@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from iesplan.assembly.contracts import SCHEMA_VERSION
 from iesplan.assembly.diags import (
     ASM_CONV_UNMAPPABLE,
 )
@@ -61,7 +62,7 @@ def build_assembly_doc_from_content(
     tariff_bindings: Mapping[str, Any] | None = None,
     planning: Mapping[str, Any] | None = None,
 ) -> BuildDocResult:
-    """项目内容 → ies.assembly 2.0.0 文档(无静默默认)。
+    """项目内容 → ies.assembly 3.0.0 文档(无静默默认)。
 
     输入结构(2.0 内容字段):
       content = {"model": {"devices": [...], "connections": [...]},
@@ -73,7 +74,7 @@ def build_assembly_doc_from_content(
     字段映射:
     - assembly.id/name: 内容 name(必填, 缺失阻断; id 为其 slug);
     - project_baseline: 内容 project_baseline 显式声明
-      (resolution/leap_year/scenario_mode 必填, 缺失/非法阻断;
+      (resolution/start_year/scenario_mode 必填, 缺失/非法阻断;
       不保存时区与起止时间);
     - devices: 每个实例 → {definition: {id: 裸稳定 ID},
       asset_origin: 内容 kind(existing/new, 缺失/非法阻断),
@@ -125,7 +126,7 @@ def build_assembly_doc_from_content(
         )
         return BuildDocResult(doc=None, diagnostics=diags)
 
-    # 1) 项目计算基线(resolution/leap_year/scenario_mode 必须显式声明,
+    # 1) 项目计算基线(resolution/start_year/scenario_mode 必须显式声明,
     #    无静默默认;不保存时区与起止时间)
     baseline_raw = content.get("project_baseline")
     if not isinstance(baseline_raw, Mapping):
@@ -163,19 +164,19 @@ def build_assembly_doc_from_content(
             )
         )
         return BuildDocResult(doc=None, diagnostics=diags)
-    leap_year_raw = baseline_raw.get("leap_year")
-    if not isinstance(leap_year_raw, bool):
+    start_year_raw = baseline_raw.get("start_year")
+    if not isinstance(start_year_raw, int) or isinstance(start_year_raw, bool):
         diags.append(
             make_diag(
                 ASM_CONV_UNMAPPABLE,
                 severity="error",
                 blocking=True,
-                params={"reason": "project_baseline_leap_year_invalid", "value": leap_year_raw},
-                location={"object_type": "assembly", "field": "project_baseline.leap_year"},
+                params={"reason": "project_baseline_start_year_invalid", "value": start_year_raw},
+                location={"object_type": "assembly", "field": "project_baseline.start_year"},
             )
         )
         return BuildDocResult(doc=None, diagnostics=diags)
-    leap_year = leap_year_raw
+    start_year = start_year_raw
     scenario_raw = baseline_raw.get("scenario_mode")
     if scenario_raw != "single":
         diags.append(
@@ -346,11 +347,11 @@ def build_assembly_doc_from_content(
     # 不猜测；缺席则结构阶段阻断)
     doc = {
         "schema": "ies.assembly",
-        "schema_version": "2.0.0",
+        "schema_version": SCHEMA_VERSION,
         "assembly": {"id": slug, "name": name},
         "project_baseline": {
             "resolution": resolution,
-            "leap_year": leap_year,
+            "start_year": start_year,
             "scenario_mode": scenario_mode,
         },
         "devices": devices_out,

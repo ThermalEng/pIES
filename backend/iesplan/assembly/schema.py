@@ -108,7 +108,7 @@ class AssemblyEdge:
 class AssemblySpec:
     """装配文件解析结果(内存模型; 2.0.0 无 calculation/time_axis)。
 
-    步数由项目计算基线(resolution/leap_year)唯一推导, 经 CheckContext
+    步数由项目计算基线(resolution/start_year)唯一推导, 经 CheckContext
     显式传入, 不在本模型内保存时间轴。transport_pipe 为普通 2.0 设备,
     与其他设备同列 devices，不再单独建节。
     """

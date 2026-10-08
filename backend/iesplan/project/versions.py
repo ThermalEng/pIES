@@ -70,7 +70,7 @@ def project_to_dict(project: ProjectRecord) -> dict:
         "currency": project.currency,
         "project_baseline": {
             "resolution": project.baseline_resolution,
-            "leap_year": project.baseline_leap_year,
+            "start_year": project.baseline_start_year,
             "scenario_mode": project.baseline_scenario_mode,
         },
         "schema_version": project.schema_version,
@@ -111,7 +111,7 @@ def version_to_dict(version: ProjectVersionRecord) -> dict:
         "reason": version.reason,
         "project_baseline": {
             "resolution": version.baseline_resolution,
-            "leap_year": version.baseline_leap_year,
+            "start_year": version.baseline_start_year,
             "scenario_mode": version.baseline_scenario_mode,
         },
         "currency": version.currency,
@@ -125,7 +125,7 @@ def build_version_content(
     *,
     currency: str,
     baseline_resolution: str,
-    baseline_leap_year: bool,
+    baseline_start_year: int,
     scenario_mode: str,
     effective_profile_id: str | None = None,
     overrides_revision: int | None = None,
@@ -152,7 +152,7 @@ def build_version_content(
     version_content["currency"] = currency
     version_content["project_baseline"] = {
         "resolution": baseline_resolution,
-        "leap_year": baseline_leap_year,
+        "start_year": baseline_start_year,
         "scenario_mode": scenario_mode,
     }
     if (

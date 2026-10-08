@@ -64,7 +64,9 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _project(db: Session, name: str = "slice9-proj"):
-    return project_domain.create_project(db, name=name, owner_id=7, created_by=7)
+    return project_domain.create_project(
+        db, name=name, owner_id=7, created_by=7, baseline_start_year=2026
+    )
 
 
 def test_project_archive_audit_through_domain(db: Session) -> None:

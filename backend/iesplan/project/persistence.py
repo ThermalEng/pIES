@@ -69,7 +69,7 @@ def _row_to_project(row: Project) -> ProjectRecord:
         owner_id=row.owner_id,
         currency=row.currency,
         baseline_resolution=row.baseline_resolution,
-        baseline_leap_year=row.baseline_leap_year,
+        baseline_start_year=row.baseline_start_year,
         baseline_scenario_mode=row.baseline_scenario_mode,
         schema_version=row.schema_version,
         finance_profile_id=row.finance_profile_id,
@@ -110,7 +110,7 @@ def _row_to_version(row: ProjectVersion) -> ProjectVersionRecord:
         source_draft_revision=row.source_draft_revision,
         reason=row.reason,
         baseline_resolution=row.baseline_resolution,
-        baseline_leap_year=row.baseline_leap_year,
+        baseline_start_year=row.baseline_start_year,
         baseline_scenario_mode=row.baseline_scenario_mode,
         currency=row.currency,
         schema_version=row.schema_version,
@@ -188,7 +188,7 @@ def create_project(
     description: str | None = None,
     currency: str = "CNY",
     baseline_resolution: str = "1h",
-    baseline_leap_year: bool = False,
+    baseline_start_year: int,
     baseline_scenario_mode: str = "single",
     schema_version: int = 1,
 ) -> ProjectRecord:
@@ -200,7 +200,7 @@ def create_project(
         owner_id=owner_id,
         currency=currency,
         baseline_resolution=baseline_resolution,
-        baseline_leap_year=baseline_leap_year,
+        baseline_start_year=baseline_start_year,
         baseline_scenario_mode=baseline_scenario_mode,
         schema_version=schema_version,
         created_by=created_by,
@@ -360,7 +360,7 @@ def create_version(
         source_draft_revision=source_draft_revision,
         reason=reason,
         baseline_resolution=project_row.baseline_resolution,
-        baseline_leap_year=project_row.baseline_leap_year,
+        baseline_start_year=project_row.baseline_start_year,
         baseline_scenario_mode=project_row.baseline_scenario_mode,
         currency=project_row.currency,
         schema_version=project_row.schema_version,
@@ -517,7 +517,7 @@ class Project(Base):
     # 项目计算基线(0.6.5 事项 1): 创建时一次性固定, 创建后不可修改
     # (宪法 7.5: 计算序列不使用时间戳或时区, 统一从 0 开始的连续 step)。
     baseline_resolution: Mapped[str] = mapped_column(Text, nullable=False)
-    baseline_leap_year: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    baseline_start_year: Mapped[int] = mapped_column(BigInteger, nullable=False)
     baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("1"))
     # 当前生效财务三件套/规划配置 revision 指针(0.6.5 条目 1-2):
@@ -611,7 +611,7 @@ class ProjectVersion(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     # 项目计算基线(版本固化, 自包含; 创建后不可修改)
     baseline_resolution: Mapped[str] = mapped_column(Text, nullable=False)
-    baseline_leap_year: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    baseline_start_year: Mapped[int] = mapped_column(BigInteger, nullable=False)
     baseline_scenario_mode: Mapped[str] = mapped_column(Text, nullable=False)
     currency: Mapped[str | None] = mapped_column(Text)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -703,7 +703,7 @@ PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL: str = """\
 CREATE FUNCTION tg_projects_baseline_immutable() RETURNS trigger AS $$
 BEGIN
   IF OLD.baseline_resolution IS DISTINCT FROM NEW.baseline_resolution
-     OR OLD.baseline_leap_year IS DISTINCT FROM NEW.baseline_leap_year
+     OR OLD.baseline_start_year IS DISTINCT FROM NEW.baseline_start_year
      OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode THEN
     RAISE EXCEPTION '项目计算基线创建后不可修改';
   END IF;
@@ -715,7 +715,7 @@ CREATE TRIGGER tg_projects_baseline_immutable BEFORE UPDATE ON projects
 CREATE FUNCTION tg_project_versions_baseline_immutable() RETURNS trigger AS $$
 BEGIN
   IF OLD.baseline_resolution IS DISTINCT FROM NEW.baseline_resolution
-     OR OLD.baseline_leap_year IS DISTINCT FROM NEW.baseline_leap_year
+     OR OLD.baseline_start_year IS DISTINCT FROM NEW.baseline_start_year
      OR OLD.baseline_scenario_mode IS DISTINCT FROM NEW.baseline_scenario_mode THEN
     RAISE EXCEPTION '项目版本基线固化后不可修改';
   END IF;

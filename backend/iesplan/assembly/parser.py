@@ -1,4 +1,4 @@
-"""ies.assembly 2.0.0 安全解析与结构校验。
+"""ies.assembly 3.0.0 安全解析与结构校验。
 
 单管线职责切分:
 - ``parse_assembly_doc`` 只做 YAML 1.2 安全子集解析(复用 core.yamlmini
@@ -56,7 +56,7 @@ TOP_SECTIONS: tuple[str, ...] = (
 )
 
 _ASSEMBLY_KEYS: tuple[str, ...] = ("id", "name")
-_BASELINE_KEYS: tuple[str, ...] = ("resolution", "leap_year", "scenario_mode")
+_BASELINE_KEYS: tuple[str, ...] = ("resolution", "start_year", "scenario_mode")
 _SOURCE_KINDS: tuple[str, ...] = ("relative_file", "object")
 #: 设备实例键(ies.device-model 2.0 纯技术契约):定义引用/存量新增身份/
 #: 非时变技术常量覆盖/预定义接口来源声明；旧 model/parameters/data 一律未知键拒绝
@@ -257,6 +257,12 @@ class _DocBuilder:
         self._diag(ASM_SYN_TYPE, field, {"reason": "expected_boolean", "actual": type(val).__name__})
         return None
 
+    def _int(self, val: Any, field: str) -> int | None:
+        if isinstance(val, int) and not isinstance(val, bool):
+            return val
+        self._diag(ASM_SYN_TYPE, field, {"reason": "expected_integer", "actual": type(val).__name__})
+        return None
+
     def _enum(self, val: Any, allowed: tuple[str, ...], field: str) -> str | None:
         if not isinstance(val, str) or val not in allowed:
             self._diag(
@@ -332,9 +338,9 @@ class _DocBuilder:
                 self._diag(ASM_SYN_PARSE, f"{field}.{key}", {"reason": "unknown_key", "key": key})
 
     def _build_project_baseline(self, value: Any, field: str) -> None:
-        """项目计算基线:resolution/leap_year/scenario_mode 均须显式声明。
+        """项目计算基线:resolution/start_year/scenario_mode 均须显式声明。
 
-        基线不保存时区与起止时间;含 start/end/endpoint 等旧键以未知键拒绝。
+        基线不保存时区;含 start/end/endpoint/leap_year 等旧键以未知键拒绝。
         """
         m = self._require_map(value, field)
         if m is None:
@@ -343,10 +349,10 @@ class _DocBuilder:
             self._diag(ASM_SYN_FIELD, f"{field}.resolution", {"reason": "missing_field", "key": "resolution"})
         else:
             self._enum(m.get("resolution"), _RESOLUTIONS, f"{field}.resolution")
-        if "leap_year" not in m:
-            self._diag(ASM_SYN_FIELD, f"{field}.leap_year", {"reason": "missing_field", "key": "leap_year"})
+        if "start_year" not in m:
+            self._diag(ASM_SYN_FIELD, f"{field}.start_year", {"reason": "missing_field", "key": "start_year"})
         else:
-            self._bool(m.get("leap_year"), f"{field}.leap_year")
+            self._int(m.get("start_year"), f"{field}.start_year")
         if "scenario_mode" not in m:
             self._diag(
                 ASM_SYN_FIELD, f"{field}.scenario_mode", {"reason": "missing_field", "key": "scenario_mode"}

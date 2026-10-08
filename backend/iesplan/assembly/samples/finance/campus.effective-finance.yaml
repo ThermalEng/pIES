@@ -82,7 +82,6 @@ energy_prices:
     ref: a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90
     series_meta:
       resolution: 1h
-      leap_year: false
       point_count: 8760
       unit: CNY/kWh
   pv_export:

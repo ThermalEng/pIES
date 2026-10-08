@@ -112,7 +112,7 @@ def _project(client: TestClient, user, name: str) -> int:
             "name": name,
             "currency": "CNY",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_h(client, user),
@@ -284,7 +284,7 @@ def _prepare_running(
     saved = save_calculation_config_case(db, user, pid, dict(_CONFIG_BODY), None)
     task, _ = tasks_uc.submit_task(
         db, user, pid, "optimization",
-        config={"config_revision": saved["revision"]}, idempotency_key=key,
+        config={"config_revision": saved["revision"], "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}}, idempotency_key=key,
         generator_registry=_registry(client),
     )
     claim = tasks_uc.claim_task(db, task.id, "w2c-fake-exec")

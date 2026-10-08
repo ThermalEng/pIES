@@ -214,7 +214,7 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
         "schema_version": "2.0.0",
         "assembly": {"id": "mini", "name": "最小真实装配"},
         "project_baseline": {
-            "resolution": "1h", "leap_year": False, "scenario_mode": "single",
+            "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
         },
         "devices": devices,
         "connections": {
@@ -526,7 +526,7 @@ def _island_doc() -> dict:
         "schema_version": "2.0.0",
         "assembly": {"id": "islands", "name": "双电岛共热网"},
         "project_baseline": {
-            "resolution": "1h", "leap_year": False, "scenario_mode": "single",
+            "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
         },
         "devices": devices,
         "connections": {

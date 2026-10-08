@@ -1,6 +1,6 @@
 # 非法样例: 未注册设备 → ASM-REF-002
 schema: ies.assembly
-schema_version: "2.0.0"
+schema_version: "3.0.0"
 
 assembly:
   id: bad_definition_unknown
@@ -8,7 +8,7 @@ assembly:
 
 project_baseline:
   resolution: 1h
-  leap_year: false
+  start_year: 2026
   scenario_mode: single
 
 devices:

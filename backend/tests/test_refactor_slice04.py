@@ -79,7 +79,7 @@ def _make_project(db: Session, name: str = "slice4-proj"):
         owner_id=7,
         created_by=7,
         baseline_resolution="1h",
-        baseline_leap_year=False,
+        baseline_start_year=2026,
         baseline_scenario_mode="single",
     )
 

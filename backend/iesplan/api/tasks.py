@@ -38,7 +38,11 @@ class TaskCreateRequest(BaseModel):
 
     task_type: calc(方案评价)/optimization(规划)/uncertainty(不确定性)/
         analysis(批量分析)/report(结果检查);
-    config: 任务级参数(如 horizon_years/n_samples/priority/deadline);
+    config: 任务级参数(如 n_samples/priority/deadline);
+        计算类任务须另带 evaluation{evaluation_years/discount_rate}(评价
+        年限必填正整数、折现率必填有限非负数, 均无默认值; F1 仅支持单年
+        evaluation_years=1, 多年 → 400 TASK-REQ-016): 确认人/确认时间由
+        服务端写入并随快照冻结;
         计算类任务须另带 config_revision(本项目已保存 CalculationConfig
         的 revision 正整数): 后端精确解析该行正文并冻结进快照(含来源
         revision/项目身份), 缺失或形态非法 → 400 TASK-REQ-006, 查无

@@ -107,7 +107,7 @@ def test_proposal_lifecycle_through_domain(db: Session) -> None:
         owner_id=user.id,
         created_by=user.id,
         baseline_resolution="1h",
-        baseline_leap_year=False,
+        baseline_start_year=2026,
         baseline_scenario_mode="single",
     )
     created = package_domain.create_proposal(
@@ -149,7 +149,7 @@ def test_project_name_exists_for_import_dedup(db: Session) -> None:
         owner_id=user.id,
         created_by=user.id,
         baseline_resolution="1h",
-        baseline_leap_year=False,
+        baseline_start_year=2026,
         baseline_scenario_mode="single",
     )
     assert project_domain.project_name_exists(db, "导入项目") is True

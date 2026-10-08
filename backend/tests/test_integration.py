@@ -197,7 +197,7 @@ def _create_project(client: TestClient, user_id: int, name: str = "集成测试�
     """工程师创建项目, 返回 project_id。"""
     resp = client.post(
         "/api/projects",
-        json={"name": name, "currency": "CNY", "baseline_resolution": "1h", "baseline_leap_year": False, "baseline_scenario_mode": "single"},
+        json={"name": name, "currency": "CNY", "baseline_resolution": "1h", "baseline_start_year": 2026, "baseline_scenario_mode": "single"},
         headers=_h(client, user_id),
     )
     assert resp.status_code == 201, resp.text
@@ -485,7 +485,7 @@ def _submit_calc_task(
 ) -> tuple[int, int]:
     """提交方案评价任务(calc), 返回 (task_id, status_code)。"""
     payload: dict[str, Any] = {
-        "task_type": "calc", "config": {"config_revision": config_revision, "horizon_years": 1},
+        "task_type": "calc", "config": {"config_revision": config_revision, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}},
     }
     if idempotency_key is not None:
         payload["idempotency_key"] = idempotency_key

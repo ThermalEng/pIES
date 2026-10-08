@@ -96,21 +96,44 @@ def _owner_headers(client: TestClient, db_session: Session) -> dict:
 
 
 @pytest.mark.parametrize(
-    ("resolution", "leap_year", "expected_points"),
+    ("resolution", "start_year", "expected_points"),
     [
-        ("1h", False, 8760),
-        ("1h", True, 8784),
-        ("30min", False, 17520),
-        ("30min", True, 17568),
-        ("15min", False, 35040),
-        ("15min", True, 35136),
+        ("1h", 2026, 8760),
+        ("1h", 2024, 8784),
+        ("30min", 2026, 17520),
+        ("30min", 2024, 17568),
+        ("15min", 2026, 35040),
+        ("15min", 2024, 35136),
     ],
 )
-def test_point_count_table(resolution: str, leap_year: bool, expected_points: int) -> None:
-    baseline = ProjectBaseline(resolution=resolution, leap_year=leap_year)
+def test_point_count_table(resolution: str, start_year: int, expected_points: int) -> None:
+    baseline = ProjectBaseline(resolution=resolution, start_year=start_year)
     assert baseline.point_count == expected_points
     assert baseline.initial_step == 0
     assert baseline.step_count == expected_points
+
+
+@pytest.mark.parametrize(
+    ("year", "expected"),
+    [(2024, True), (2000, True), (1900, False), (2026, False), (2025, False)],
+)
+def test_is_leap_year_gregorian(year: int, expected: bool) -> None:
+    from iesplan.core.contracts import is_leap_year
+
+    assert is_leap_year(year) is expected
+
+
+def test_horizon_derivation_from_start_year_and_confirmed_years() -> None:
+    from iesplan.core.contracts import (
+        horizon_point_count,
+        horizon_year_boundary_steps,
+        horizon_year_point_counts,
+    )
+
+    assert horizon_year_point_counts("1h", 2024, 2) == (8784, 8760)
+    assert horizon_point_count("1h", 2024, 2) == 8784 + 8760
+    assert horizon_year_boundary_steps("1h", 2024, 2) == (0, 8784, 8784 + 8760)
+    assert horizon_point_count("15min", 2026, 1) == 35040
 
 
 @pytest.mark.parametrize(
@@ -120,64 +143,66 @@ def test_point_count_table(resolution: str, leap_year: bool, expected_points: in
 def test_step_duration_is_derived_from_resolution(
     resolution: str, expected_duration: float
 ) -> None:
-    baseline = ProjectBaseline(resolution=resolution, leap_year=False)
+    baseline = ProjectBaseline(resolution=resolution, start_year=2026)
     assert baseline.step_duration == expected_duration
 
 
 def test_invalid_resolution_rejected() -> None:
     with pytest.raises(ProjectBaselineError):
-        ProjectBaseline(resolution="2h", leap_year=False)
+        ProjectBaseline(resolution="2h", start_year=2026)
 
 
 def test_invalid_scenario_mode_rejected() -> None:
     with pytest.raises(ProjectBaselineError):
-        ProjectBaseline(resolution="1h", leap_year=False, scenario_mode="multi")
+        ProjectBaseline(resolution="1h", start_year=2026, scenario_mode="multi")
 
 
-def test_leap_year_must_be_bool() -> None:
+def test_start_year_must_be_int_not_bool() -> None:
     with pytest.raises(ProjectBaselineError):
-        ProjectBaseline(resolution="1h", leap_year="false")  # type: ignore[arg-type]
+        ProjectBaseline(resolution="1h", start_year="2026")  # type: ignore[arg-type]
+    with pytest.raises(ProjectBaselineError):
+        ProjectBaseline(resolution="1h", start_year=True)  # type: ignore[arg-type]
 
 
 def test_canonical_payload_only_three_fields() -> None:
-    payload = ProjectBaseline(resolution="1h", leap_year=False).canonical_payload()
-    assert set(json.loads(payload)) == {"resolution", "leap_year", "scenario_mode"}
+    payload = ProjectBaseline(resolution="1h", start_year=2026).canonical_payload()
+    assert set(json.loads(payload)) == {"resolution", "start_year", "scenario_mode"}
 
 
 def test_from_dict_roundtrip_to_dict() -> None:
-    baseline = ProjectBaseline(resolution="30min", leap_year=True, scenario_mode="single")
+    baseline = ProjectBaseline(resolution="30min", start_year=2024, scenario_mode="single")
     assert ProjectBaseline.from_dict(baseline.to_dict()) == baseline
 
 
 def test_from_dict_rejects_unknown_and_missing_fields() -> None:
     with pytest.raises(ProjectBaselineError):
-        ProjectBaseline.from_dict({"resolution": "1h", "leap_year": False, "timezone": "+08:00"})
+        ProjectBaseline.from_dict({"resolution": "1h", "start_year": 2026, "timezone": "+08:00"})
     with pytest.raises(ProjectBaselineError):
         ProjectBaseline.from_dict({"resolution": "1h"})
     with pytest.raises(ProjectBaselineError):
-        ProjectBaseline.from_dict({"leap_year": False})
+        ProjectBaseline.from_dict({"start_year": 2026})
 
 
 def test_from_dict_scenario_mode_defaults_to_single() -> None:
-    baseline = ProjectBaseline.from_dict({"resolution": "1h", "leap_year": False})
+    baseline = ProjectBaseline.from_dict({"resolution": "1h", "start_year": 2026})
     assert baseline.scenario_mode == "single"
 
 
 def test_validate_reports_structured_diagnostics() -> None:
     diags = ProjectBaseline.validate(
-        {"resolution": "2h", "leap_year": "yes", "unknown": 1}
+        {"resolution": "2h", "start_year": "yes", "unknown": 1}
     )
     codes = {d.code for d in diags}
     assert codes == {"PROJ-BASE-001"}
     details = " ".join(str(d.params.get("detail") or "") for d in diags)
     assert "2h" in details
-    assert "布尔" in details
+    assert "整数年" in details
     assert "unknown" in details
 
 
 def test_validate_accepts_valid_dict() -> None:
     assert ProjectBaseline.validate(
-        ProjectBaseline(resolution="1h", leap_year=False).to_dict()
+        ProjectBaseline(resolution="1h", start_year=2026).to_dict()
     ) == []
 
 
@@ -199,7 +224,7 @@ def test_create_project_requires_explicit_scenario(client: TestClient, db_sessio
         json={
             "name": "缺场景模式",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
         },
         headers=headers,
     )
@@ -213,7 +238,7 @@ def test_create_project_rejects_invalid_baseline(client: TestClient, db_session:
         json={
             "name": "非法分辨率",
             "baseline_resolution": "2h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=headers,
@@ -231,7 +256,7 @@ def test_create_project_returns_baseline(
             "name": "基线项目",
             "currency": "CNY",
             "baseline_resolution": "30min",
-            "baseline_leap_year": True,
+            "baseline_start_year": 2024,
             "baseline_scenario_mode": "single",
         },
         headers=headers,
@@ -239,7 +264,7 @@ def test_create_project_returns_baseline(
     assert resp.status_code == 201, resp.text
     project = resp.json()["project"]
     expected = ProjectBaseline(
-        resolution="30min", leap_year=True, scenario_mode="single"
+        resolution="30min", start_year=2024, scenario_mode="single"
     )
     assert project["project_baseline"] == expected.to_dict()
 
@@ -254,7 +279,7 @@ def test_create_project_rejects_unknown_baseline_field(
             "name": "未知字段项目",
             "utc_offset_minutes": 480,
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=headers,
@@ -271,7 +296,7 @@ def test_project_view_and_version_freeze_baseline(
         json={
             "name": "基线冻结项目",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=headers,
@@ -279,7 +304,7 @@ def test_project_view_and_version_freeze_baseline(
     assert resp.status_code == 201, resp.text
     pid = resp.json()["project"]["id"]
     view = client.get(f"/api/projects/{pid}", headers=headers).json()
-    expected = ProjectBaseline(resolution="1h", leap_year=False, scenario_mode="single")
+    expected = ProjectBaseline(resolution="1h", start_year=2026, scenario_mode="single")
     assert view["project"]["project_baseline"] == expected.to_dict()
     # 版本创建: 版本字典与版本内容均固化基线
     resp = client.post(
@@ -306,7 +331,7 @@ def test_baseline_immutable_trigger_ddl_exists() -> None:
     assert "tg_project_versions_baseline_immutable" in PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL
     for column in (
         "baseline_resolution",
-        "baseline_leap_year",
+        "baseline_start_year",
         "baseline_scenario_mode",
     ):
         assert column in PROJECT_BASELINE_IMMUTABLE_TRIGGER_SQL
@@ -329,7 +354,7 @@ def test_empty_db_builds_current_baseline_columns() -> None:
         }
         assert {
             "baseline_resolution",
-            "baseline_leap_year",
+            "baseline_start_year",
             "baseline_scenario_mode",
         } <= cols
     eng.dispose()
@@ -354,8 +379,8 @@ def test_service_requires_explicit_baseline(db_session: Session) -> None:
     project = projects_uc.create_project(
         db_session, user, name="显式基线项目",
         baseline_resolution="1h",
-        baseline_leap_year=False,
+        baseline_start_year=2026,
         baseline_scenario_mode="single",
     )
     assert project.baseline_resolution == "1h"
-    assert project.baseline_leap_year is False
+    assert project.baseline_start_year == 2026

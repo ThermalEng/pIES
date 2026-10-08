@@ -173,9 +173,11 @@ class _AffineAcc:
         )
 
 
-def _step_seconds(point_count: int, leap_year: bool) -> float:
+def _step_seconds(point_count: int, start_year: int) -> float:
     """步长秒数（由已可信点数唯一推导，不重建基线对象）。"""
-    days = 366 if leap_year else 365
+    from iesplan.core.contracts import is_leap_year
+
+    days = 366 if is_leap_year(start_year) else 365
     return 86400.0 / (point_count // days)
 
 
@@ -208,8 +210,8 @@ def _new_builder(
     """由四项直接输入构造内部编排（建模与分量声明共用同一构造器）。"""
     doc = json.loads(artifact.canonical_text)
     baseline = doc["project_baseline"]
-    point_count = _point_count(baseline["resolution"], baseline["leap_year"])
-    step_s = _step_seconds(point_count, baseline["leap_year"])
+    point_count = _point_count(baseline["resolution"], baseline["start_year"])
+    step_s = _step_seconds(point_count, baseline["start_year"])
     return _ProjectBuilder(
         doc=doc,
         devices=doc["devices"],
@@ -237,11 +239,11 @@ def finance_component_declarations(
     return _new_builder(artifact, models, series, finance).finance_components()
 
 
-def _point_count(resolution: str, leap_year: bool) -> int:
+def _point_count(resolution: str, start_year: int) -> int:
     """基线点数（复用 core 权威纯函数）。"""
-    from iesplan.core.contracts import point_count_for_baseline
+    from iesplan.core.contracts import point_count_for_year
 
-    return point_count_for_baseline(resolution, leap_year)
+    return point_count_for_year(resolution, start_year)
 
 
 class _ProjectBuilder:

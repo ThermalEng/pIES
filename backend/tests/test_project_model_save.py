@@ -239,7 +239,7 @@ def client(engine: Engine, db_session: Session, tmp_path: Path) -> Iterator[Test
 _token_ns_map: dict[str, str] = {}
 
 def _make_owner(
-    client: TestClient, db: Session, name: str, *, leap: bool = False
+    client: TestClient, db: Session, name: str, *, start_year: int = 2026
 ) -> tuple[dict, int]:
     user = make_user(db, name)
     headers = login_headers(client, user)
@@ -251,7 +251,7 @@ def _make_owner(
         json={
             "name": f"{name} 项目",
             "baseline_resolution": "1h",
-            "baseline_leap_year": leap,
+            "baseline_start_year": start_year,
             "baseline_scenario_mode": "single",
         },
         headers=headers,
@@ -714,7 +714,7 @@ def test_concurrent_numbering_unique(tmp_path: Path) -> None:
         u = s.get(User, user.id)
         project = projects_uc.create_project(
             s, u, "并发项目",
-            baseline_resolution="1h", baseline_leap_year=False,
+            baseline_resolution="1h", baseline_start_year=2026,
             baseline_scenario_mode="single",
         )
         s.commit()

@@ -82,6 +82,7 @@ from iesplan.tasks import queue as _queue
 from iesplan.tasks.contracts import (
     BUSINESS_OUTCOMES,
     COMPUTE_TYPES,
+    EVALUATION_INPUT_KEYS,
     IDEMPOTENCY_KEY_RE,
     LEASE_TTL_SECONDS,
     POOL_BY_TYPE,
@@ -106,8 +107,10 @@ from iesplan.tasks.contracts import (
     TaskRecord,
     TaskStateError,
     UncertaintySnapshotRecord,
+    check_tariff_horizon_coverage,
     check_transition,
     map_business_outcome,
+    parse_evaluation_input,
 )
 
 
@@ -133,6 +136,7 @@ __all__ = [
     "QUEUE_IO",
     "BUSINESS_OUTCOMES",
     "COMPUTE_TYPES",
+    "EVALUATION_INPUT_KEYS",
     "IDEMPOTENCY_KEY_RE",
     "LEASE_TTL_SECONDS",
     "POOL_BY_TYPE",
@@ -157,8 +161,10 @@ __all__ = [
     "TaskRecord",
     "TaskStateError",
     "UncertaintySnapshotRecord",
+    "check_tariff_horizon_coverage",
     "check_transition",
     "map_business_outcome",
+    "parse_evaluation_input",
     "acquire_lease",
     "acquire_slot",
     "append_diagnostic",

@@ -1,6 +1,6 @@
 # 非法样例: definition.id 携带 @版本钉选 → ASM-SYN-007
 schema: ies.assembly
-schema_version: "2.0.0"
+schema_version: "3.0.0"
 
 assembly:
   id: bad_version_pin
@@ -8,7 +8,7 @@ assembly:
 
 project_baseline:
   resolution: 1h
-  leap_year: false
+  start_year: 2026
   scenario_mode: single
 
 devices:

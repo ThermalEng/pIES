@@ -63,7 +63,7 @@ test.describe('数据上传两种格式: step 自描述与通用时间戳', () =
     const createdProj = await requestJson(apiCtx.request, 'POST', '/api/projects', {
       name: projectName,
       baseline_resolution: '1h',
-      baseline_leap_year: false,
+      baseline_start_year: 2026,
       baseline_scenario_mode: 'single',
     }, setupToken)
     const projectId = createdProj.project?.id ?? createdProj.id

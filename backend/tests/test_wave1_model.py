@@ -219,7 +219,7 @@ def test_project_model_save_reads_writes_via_model_repository(db_session: Sessio
         user,
         "w1 项目",
         baseline_resolution="1h",
-        baseline_leap_year=False,
+        baseline_start_year=2026,
         baseline_scenario_mode="single",
     )
     draft = project_domain.get_current_draft(db_session, project.id)

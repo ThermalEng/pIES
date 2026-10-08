@@ -111,8 +111,8 @@ class TestSchemaFile:
         schema_path = ASSEMBLY_DIR / ASSEMBLY_SCHEMA_PATH
         assert schema_path.exists(), f"缺少 {ASSEMBLY_SCHEMA_PATH}"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        assert schema["$id"] == f"{SCHEMA_ID}/2.0.0"
-        assert schema["title"] == "ies.assembly 2.0.0 装配 YAML 契约"
+        assert schema["$id"] == f"{SCHEMA_ID}/3.0.0"
+        assert schema["title"] == "ies.assembly 3.0.0 装配 YAML 契约"
         required = schema["required"]
         assert "schema" in required and "schema_version" in required
         assert set(required) >= {
@@ -201,9 +201,9 @@ class TestSchemaFile:
         schema = json.loads((ASSEMBLY_DIR / ASSEMBLY_SCHEMA_PATH).read_text(encoding="utf-8"))
         baseline = schema["properties"]["project_baseline"]
         assert baseline["additionalProperties"] is False
-        assert set(baseline["required"]) == {"resolution", "leap_year", "scenario_mode"}
+        assert set(baseline["required"]) == {"resolution", "start_year", "scenario_mode"}
         assert set(baseline["properties"]["resolution"]["enum"]) == {"15min", "30min", "1h"}
-        assert baseline["properties"]["leap_year"]["type"] == "boolean"
+        assert baseline["properties"]["start_year"]["type"] == "integer"
         assert baseline["properties"]["scenario_mode"]["const"] == "single"
 
     def test_schema_sections_have_additional_properties_false(self):
@@ -399,11 +399,11 @@ class TestSamples:
         assert doc is not None, [d.to_dict() for d in diags]
         assert not any(d.blocking for d in diags)
         assert doc["schema"] == SCHEMA_ID
-        assert doc["schema_version"] == SCHEMA_VERSION == "2.0.0"
+        assert doc["schema_version"] == SCHEMA_VERSION == "3.0.0"
         assert doc["assembly"]["id"] == "campus_demo"
         assert doc["project_baseline"] == {
             "resolution": "1h",
-            "leap_year": False,
+            "start_year": 2026,
             "scenario_mode": "single",
         }
         assert "resources" not in doc
@@ -489,11 +489,11 @@ class TestSamples:
         assert "project_baseline" in fields
 
     def test_baseline_missing_member_rejected(self):
-        text = _load("campus.assembly.yaml").replace("  leap_year: false\n", "")
+        text = _load("campus.assembly.yaml").replace("  start_year: 2026\n", "")
         doc, diags = _structure(text)
         assert doc is None
         assert any(
-            d.code == ASM_SYN_FIELD and d.location["field"] == "project_baseline.leap_year"
+            d.code == ASM_SYN_FIELD and d.location["field"] == "project_baseline.start_year"
             for d in diags
         )
 
@@ -501,8 +501,8 @@ class TestSamples:
         ("old", "new"),
         [
             ("resolution: 1h", "resolution: 5min"),
-            ("leap_year: false", "leap_year: yes"),
-            ("leap_year: false", "leap_year: 0"),
+            ("start_year: 2026", "start_year: yes"),
+            ("start_year: 2026", "start_year: true"),
             ("scenario_mode: single", "scenario_mode: multi"),
         ],
     )
@@ -566,7 +566,7 @@ class TestSamples:
         assert any("extensions_key_not_namespaced" in str(d.params) for d in diags)
 
     def test_old_schema_version_rejected(self):
-        text = _load("campus.assembly.yaml").replace('schema_version: "2.0.0"', 'schema_version: "1.0.0"')
+        text = _load("campus.assembly.yaml").replace('schema_version: "3.0.0"', 'schema_version: "1.0.0"')
         doc, diags = _structure(text)
         assert doc is None
         assert any(d.code == "ASM-SYN-003" for d in diags)
@@ -929,7 +929,9 @@ class TestTariffGates:
         result = _validate_campus(text)
         assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
 
-    def test_series_point_count_mismatch_blocked(self, init_registry):
+    def test_series_point_count_not_checked_at_assembly(self, init_registry):
+        # 全期覆盖不在装配核对(只核对分辨率一致): 点数不符仍签发,
+        # 覆盖核对统一在任务提交边界(见 tasks 域 check_tariff_horizon_coverage)。
         from iesplan.finance import effective_from_yaml
 
         raw = (SAMPLES_DIR / "finance" / "campus.effective-finance.yaml").read_text(
@@ -948,11 +950,7 @@ class TestTariffGates:
             package_dir=SAMPLES_DIR,
             finance_snapshots={"fin:tou": effective_from_yaml(mutated)},
         )
-        assert result.artifact is None
-        assert any(
-            d.code == "ASM-TAR-001" and d.params.get("reason") == "series_point_count_mismatch"
-            for d in result.diagnostics
-        )
+        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
 
     def test_series_resolution_mismatch_blocked(self, init_registry):
         from iesplan.finance import effective_from_yaml
@@ -960,7 +958,7 @@ class TestTariffGates:
         raw = (SAMPLES_DIR / "finance" / "campus.effective-finance.yaml").read_text(
             encoding="utf-8"
         )
-        mutated = raw.replace("resolution: 1h\n      leap_year", "resolution: 30min\n      leap_year")
+        mutated = raw.replace("resolution: 1h\n      point_count", "resolution: 30min\n      point_count")
         text = _load("campus.assembly.yaml").replace(
             "price: grid_import\n", "price: grid_import_tou\n", 1
         )
@@ -1157,7 +1155,7 @@ class TestCanonicalization:
 
     def test_baseline_in_canonical_text(self):
         text = _validated_text()
-        assert '"project_baseline":{"leap_year":false,"resolution":"1h","scenario_mode":"single"}' in text
+        assert '"project_baseline":{"resolution":"1h","scenario_mode":"single","start_year":2026}' in text
         assert "time_axis" not in text
         assert "calculation" not in text
         assert "resources" not in text
@@ -1205,12 +1203,12 @@ class TestArtifact:
         assert result.artifact is not None
         receipt = result.artifact.receipt.to_dict()
         assert receipt["schema"] == SCHEMA_ID
-        assert receipt["schema_version"] == SCHEMA_VERSION == "2.0.0"
+        assert receipt["schema_version"] == SCHEMA_VERSION == "3.0.0"
         assert receipt["canonical_algorithm"] == {
             "id": CANON_ALGORITHM_ID,
             "version": CANON_ALGORITHM_VERSION,
         }
-        assert CANON_ALGORITHM_VERSION == "2.0.0"
+        assert CANON_ALGORITHM_VERSION == "3.0.0"
         assert set(receipt["dependencies"]["devices"]) >= {
             "ies.device.pv",
             "ies.device.electric_load",
@@ -1236,7 +1234,7 @@ class TestArtifact:
         }
         assert receipt["dependencies"]["baseline"] == {
             "resolution": "1h",
-            "leap_year": False,
+            "start_year": 2026,
             "scenario_mode": "single",
         }
         assert set(receipt["dependencies"]["equations"]) == {"contract", "ast"}

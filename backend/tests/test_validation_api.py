@@ -156,7 +156,7 @@ def _create_project(factory: sessionmaker, name: str = "校验测试项目") -> 
         engineer = session.get(User, 2)
         project = project_ops.create_project(
             session, engineer, name,
-            baseline_resolution="1h", baseline_leap_year=False, baseline_scenario_mode="single",
+            baseline_resolution="1h", baseline_start_year=2026, baseline_scenario_mode="single",
         )
         session.commit()
         return project.id

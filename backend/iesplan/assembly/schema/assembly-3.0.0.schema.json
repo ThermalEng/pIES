@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "ies.assembly/2.0.0",
-  "title": "ies.assembly 2.0.0 装配 YAML 契约",
+  "$id": "ies.assembly/3.0.0",
+  "title": "ies.assembly 3.0.0 装配 YAML 契约",
   "description": "装配 YAML 是系统模型与规划意图的完整、可审查文本:固定项目计算基线,实例化设备模型、绑定数据、连接真实端口、给出约束。装配不包含 calculation(计算配置在计算包生成时固定)。禁止 shell/command/executable/函数模块路径/环境变量/凭证。各节均必需,无内容写空 {} 或 []。",
   "type": "object",
   "required": [
@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schema": { "const": "ies.assembly" },
-    "schema_version": { "const": "2.0.0" },
+    "schema_version": { "const": "3.0.0" },
     "assembly": {
       "type": "object",
       "required": ["id", "name"],
@@ -36,16 +36,16 @@
     },
     "project_baseline": {
       "type": "object",
-      "required": ["resolution", "leap_year", "scenario_mode"],
+      "required": ["resolution", "start_year", "scenario_mode"],
       "properties": {
         "resolution": {
           "type": "string",
           "enum": ["15min", "30min", "1h"],
           "description": "全项目统一计算分辨率,必须能确定性切分一天"
         },
-        "leap_year": {
-          "type": "boolean",
-          "description": "是否按 366 天生成全周期序列"
+        "start_year": {
+          "type": "integer",
+          "description": "运行起始年,公历整数年"
         },
         "scenario_mode": {
           "type": "string",

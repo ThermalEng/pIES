@@ -33,7 +33,7 @@ class ProjectRecord:
     owner_id: int
     currency: str
     baseline_resolution: str
-    baseline_leap_year: bool
+    baseline_start_year: int
     baseline_scenario_mode: str
     schema_version: int
     finance_profile_id: int | None = None
@@ -72,6 +72,7 @@ class ProjectVersionRecord:
     project_id: int
     version_no: int
     name: str
+    baseline_start_year: int
     description: str | None = None
     created_by: int = 0
     parent_version_id: int | None = None
@@ -79,7 +80,6 @@ class ProjectVersionRecord:
     source_draft_revision: int | None = None
     reason: str = ""
     baseline_resolution: str = "1h"
-    baseline_leap_year: bool = False
     baseline_scenario_mode: str = "single"
     currency: str | None = None
     schema_version: int = 1

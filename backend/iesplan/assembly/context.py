@@ -20,6 +20,7 @@ from iesplan.assembly.schema import (
     AssemblySpec,
 )
 from iesplan.core import units
+from iesplan.core.contracts import is_leap_year
 from iesplan.core.errors import AppError
 from iesplan.core.expression import Dimensions
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
@@ -52,8 +53,8 @@ EXOGENOUS_SUPPLY_CARRIERS = frozenset({"solar", "gas"})
 _STEPS_PER_DAY: dict[str, int] = {"15min": 96, "30min": 48, "1h": 24}
 
 
-def steps_for_baseline(resolution: str, leap_year: bool) -> int:
-    """项目计算基线 → 年步数(分辨率 × 365/366 天; 未知分辨率抛错, 不猜测)。"""
+def steps_for_year(resolution: str, year: int) -> int:
+    """分辨率 + 公历年 → 该年步数(分辨率 × 365/366 天; 未知分辨率抛错, 不猜测)。"""
     per_day = _STEPS_PER_DAY.get(resolution)
     if per_day is None:
         raise AppError(
@@ -62,7 +63,7 @@ def steps_for_baseline(resolution: str, leap_year: bool) -> int:
             message_key="ies.diag.store.config_invalid",
             params={"resolution": resolution},
         )
-    return per_day * (366 if leap_year else 365)
+    return per_day * (366 if is_leap_year(year) else 365)
 
 
 @dataclass(slots=True)
@@ -322,7 +323,7 @@ def to_watts(value: float | None, unit: str | None) -> float | None:
 
 
 __all__ = [
-    "steps_for_baseline",
+    "steps_for_year",
     "PEAK_PARAM_BY_LOAD",
     "GRID_SIDE_PORTS",
     "EXOGENOUS_SUPPLY_CARRIERS",

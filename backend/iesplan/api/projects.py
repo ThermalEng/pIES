@@ -45,7 +45,7 @@ class ProjectCreateRequest(BaseModel):
 
     项目计算基线(0.6.5 事项 1)为创建时必填三字段, 缺失或非法一律 422:
     - baseline_resolution: '15min' | '30min' | '1h'(全项目统一计算分辨率);
-    - baseline_leap_year: 是否按 366 天(闰年)生成全周期序列;
+    - baseline_start_year: 运行起始年(公历整数年);
     - baseline_scenario_mode: 当前仅 'single'。
     基线创建后不可修改(无任何更新入口); 新项目创建必须显式提供。
     """
@@ -55,7 +55,7 @@ class ProjectCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     currency: Literal["CNY", "USD"] = "CNY"
     baseline_resolution: Literal["15min", "30min", "1h"]
-    baseline_leap_year: bool
+    baseline_start_year: int
     baseline_scenario_mode: Literal["single"]
     description: str | None = Field(default=None, max_length=2000)
 
@@ -118,7 +118,7 @@ def create_project_endpoint(
 ) -> dict:
     """创建项目: 创建者即所有者, 并创建初始草稿(revision=1)。
 
-    项目计算基线三字段(baseline_resolution/baseline_leap_year/
+    项目计算基线三字段(baseline_resolution/baseline_start_year/
     baseline_scenario_mode)为必填, 创建时一次性固定且创建后不可修改。
     """
     project = project_ops.create_project(
@@ -126,7 +126,7 @@ def create_project_endpoint(
         name=payload.name,
         currency=payload.currency,
         baseline_resolution=payload.baseline_resolution,
-        baseline_leap_year=payload.baseline_leap_year,
+        baseline_start_year=payload.baseline_start_year,
         baseline_scenario_mode=payload.baseline_scenario_mode,
         description=payload.description,
     )

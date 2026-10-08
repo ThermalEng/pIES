@@ -77,7 +77,7 @@ def _create_project(
     currency: str = "CNY",
     *,
     baseline_resolution: str,
-    baseline_leap_year: bool,
+    baseline_start_year: int,
     baseline_scenario_mode: str,
     description: str | None = None,
     language: str | None = None,
@@ -87,9 +87,9 @@ def _create_project(
     业务规则: 管理员不持有业务项目(仅负责账号与系统管理), 创建一律拒绝
     (403, PERM-DENIED-001 标准信封); 普通工程师行为不变。
     名称全局唯一(uq_projects_name), 冲突抛 ConflictError。
-    项目计算基线(0.6.5 事项 1): 创建时必须显式提供 resolution/leap_year/
+    项目计算基线(0.6.5 事项 1): 创建时必须显式提供 resolution/start_year/
     scenario_mode 三字段, 缺失或非法一律拒绝(PROJ-BASE-001), 不静默使用
-    默认值; 摘要经 ``core.contracts.ProjectBaseline`` 确定性计算。默认值
+    默认值; 摘要经 ``core.contracts.ProjectBaseline`` 确定性计算。
     基线字段不提供默认值，必须由创建用例显式传入。
     基线创建后无任何更新入口, 数据库层另有不可变触发器(Postgres)。
     """
@@ -103,16 +103,16 @@ def _create_project(
         raise InvalidRequestError("项目名称不能为空", code="PROJ-CMD-001")
     if currency not in ("CNY", "USD"):
         raise InvalidRequestError("币种仅支持 CNY/USD", params={"currency": currency})
-    if not isinstance(baseline_leap_year, bool):
+    if not isinstance(baseline_start_year, int) or isinstance(baseline_start_year, bool):
         raise InvalidRequestError(
-            "项目计算基线必须显式提供 leap_year(布尔值)",
+            "项目计算基线必须显式提供 start_year(公历整数年)",
             code="PROJ-BASE-001",
-            params={"baseline_leap_year": baseline_leap_year},
+            params={"baseline_start_year": baseline_start_year},
         )
     try:
         baseline = ProjectBaseline(
             resolution=baseline_resolution,
-            leap_year=baseline_leap_year,
+            start_year=baseline_start_year,
             scenario_mode=baseline_scenario_mode,
         )
     except ProjectBaselineError as exc:
@@ -128,7 +128,7 @@ def _create_project(
         description=description,
         currency=currency,
         baseline_resolution=baseline.resolution,
-        baseline_leap_year=baseline.leap_year,
+        baseline_start_year=baseline.start_year,
         baseline_scenario_mode=baseline.scenario_mode,
     )
     content_object_id = store_content_object(db, project_domain.initial_content(lang))
@@ -162,7 +162,7 @@ def create_project(
     currency: str = "CNY",
     *,
     baseline_resolution: str,
-    baseline_leap_year: bool,
+    baseline_start_year: int,
     baseline_scenario_mode: str,
     description: str | None = None,
     language: str | None = None,
@@ -175,7 +175,7 @@ def create_project(
             name,
             currency,
             baseline_resolution=baseline_resolution,
-            baseline_leap_year=baseline_leap_year,
+            baseline_start_year=baseline_start_year,
             baseline_scenario_mode=baseline_scenario_mode,
             description=description,
             language=language,

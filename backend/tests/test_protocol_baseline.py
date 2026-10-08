@@ -157,7 +157,7 @@ def _create_project(client: TestClient, token: str, name: str) -> int:
         json={
             "name": name,
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_bearer(token),
@@ -424,7 +424,7 @@ def test_error_envelope_shape_all_error_paths(
     pid2 = _create_project(client, owner_tok, "解锁任务项目")
     _declare_explicit_calc(client, db, owner_tok, pid2, owner.id)
     rev2 = _save_config(client, owner_tok, pid2)
-    resp = client.post(f"/api/projects/{pid2}/tasks", json={"task_type": "optimization", "config": {"config_revision": rev2}, "idempotency_key": "wrap-unlock-1"}, headers=_bearer(owner_tok))
+    resp = client.post(f"/api/projects/{pid2}/tasks", json={"task_type": "optimization", "config": {"config_revision": rev2, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}}, "idempotency_key": "wrap-unlock-1"}, headers=_bearer(owner_tok))
     assert resp.status_code == 201, resp.text
     task_id = resp.json()["task"]["id"]
     resp = client.post(
@@ -467,7 +467,7 @@ def test_success_wrappers_projects_domain(client: TestClient, db: Session) -> No
         json={
             "name": "包装项目",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_bearer(tok),
@@ -488,7 +488,7 @@ def test_success_wrappers_tasks_results_domain(client: TestClient, db: Session) 
     rev = _save_config(client, tok, pid)
     resp = client.post(
         f"/api/projects/{pid}/tasks",
-        json={"task_type": "calc", "config": {"config_revision": rev}, "idempotency_key": "wrap-task-1"}, headers=_bearer(tok),
+        json={"task_type": "calc", "config": {"config_revision": rev, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}}, "idempotency_key": "wrap-task-1"}, headers=_bearer(tok),
     )
     # 提交/列表/详情/结果视图包装键由独立契约套件锁定, 此处仅保评估列表独有覆盖
     assert resp.status_code == 201, resp.text
@@ -700,7 +700,7 @@ def test_frontend_contract_adapters_consistent(client: TestClient, db: Session) 
     # (1) 任务列表 {"items", "next_cursor"} ↔ asItems(body, 'tasks')(client.ts:1483)
     resp = client.post(
         f"/api/projects/{pid}/tasks",
-        json={"task_type": "calc", "config": {"config_revision": rev}, "idempotency_key": "wrap-fe-1"}, headers=_bearer(tok),
+        json={"task_type": "calc", "config": {"config_revision": rev, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}}, "idempotency_key": "wrap-fe-1"}, headers=_bearer(tok),
     )
     assert resp.status_code == 201, resp.text
     body = client.get(f"/api/projects/{pid}/tasks", headers=_bearer(tok)).json()

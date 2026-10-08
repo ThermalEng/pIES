@@ -97,7 +97,7 @@ def _create_project(client: TestClient, owner_token: str, name: str) -> int:
         json={
             "name": name,
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_bearer(owner_token),
@@ -180,7 +180,7 @@ def test_same_origin_cookie_state_change_allowed(client: TestClient, db: Session
         json={
             "name": "同源项目",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers={"Origin": "http://testserver"},  # TestClient 默认 Host: testserver
@@ -198,7 +198,7 @@ def test_trusted_origin_cookie_state_change_allowed(client: TestClient, db: Sess
         json={
             "name": "可信来源项目",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers={"Origin": TRUSTED_ORIGIN},
@@ -217,7 +217,7 @@ def test_no_origin_api_client_allowed(client: TestClient, db: Session) -> None:
         json={
             "name": "无来源客户端项目",
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_bearer(token),
@@ -232,7 +232,7 @@ def test_no_origin_api_client_allowed(client: TestClient, db: Session) -> None:
             json={
                 "name": "纯 Bearer 项目",
                 "baseline_resolution": "1h",
-                "baseline_leap_year": False,
+                "baseline_start_year": 2026,
                 "baseline_scenario_mode": "single",
             },
         )
@@ -251,7 +251,7 @@ def test_bearer_auth_not_affected_by_origin(client: TestClient, db: Session) -> 
             json={
                 "name": "Bearer 跨域项目",
                 "baseline_resolution": "1h",
-                "baseline_leap_year": False,
+                "baseline_start_year": 2026,
                 "baseline_scenario_mode": "single",
             },
             headers={**_bearer(token), "Origin": EVIL_ORIGIN},

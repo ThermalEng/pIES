@@ -289,18 +289,19 @@ class FinanceTypeEntry:
 
 @dataclass(frozen=True, slots=True)
 class SeriesMeta:
-    """``time_series`` 的不可变时间元数据。"""
+    """``time_series`` 的不可变时间元数据(仅自身完整: 分辨率/全期点数/单位)。
+
+    无年份字段: 全期覆盖(点数等于由基线起始年与已确认评价年限推导的
+    全周期总点数)在任务提交边界核对, 装配只核对分辨率一致。
+    """
 
     resolution: str
-    leap_year: bool
     point_count: int
     unit: str
 
     def __post_init__(self) -> None:
         if self.resolution not in RESOLUTION_VALUES:
             raise FinanceTripletError(f"series_meta.resolution 非法: {self.resolution!r}")
-        if not isinstance(self.leap_year, bool):
-            raise FinanceTripletError("series_meta.leap_year 必须为 bool")
         if (
             not isinstance(self.point_count, int)
             or isinstance(self.point_count, bool)
@@ -312,7 +313,6 @@ class SeriesMeta:
     def to_dict(self) -> dict:
         return {
             "resolution": self.resolution,
-            "leap_year": self.leap_year,
             "point_count": self.point_count,
             "unit": self.unit,
         }
@@ -321,21 +321,17 @@ class SeriesMeta:
     def from_dict(cls, mapping: object) -> SeriesMeta:
         if not isinstance(mapping, Mapping):
             raise FinanceTripletError("series_meta 必须是字典")
-        unknown = set(mapping) - {"resolution", "leap_year", "point_count", "unit"}
+        unknown = set(mapping) - {"resolution", "point_count", "unit"}
         if unknown:
             raise FinanceTripletError(f"series_meta 未知字段: {sorted(unknown)}")
-        missing = {"resolution", "leap_year", "point_count", "unit"} - set(mapping)
+        missing = {"resolution", "point_count", "unit"} - set(mapping)
         if missing:
             raise FinanceTripletError(f"series_meta 缺少字段: {sorted(missing)}")
-        leap = mapping["leap_year"]
-        if not isinstance(leap, bool):
-            raise FinanceTripletError("series_meta.leap_year 必须为 bool")
         pc = mapping["point_count"]
         if not isinstance(pc, int) or isinstance(pc, bool):
             raise FinanceTripletError("series_meta.point_count 必须为整数")
         return cls(
             resolution=str(mapping["resolution"]),
-            leap_year=leap,
             point_count=pc,
             unit=_normalized_unit(mapping["unit"], "series_meta.unit"),
         )

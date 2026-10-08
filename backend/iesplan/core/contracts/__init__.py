@@ -15,7 +15,12 @@ from iesplan.core.contracts.baseline import (
     TIMELINE_STEP_DURATION_VAR,
     ProjectBaseline,
     ProjectBaselineError,
+    horizon_point_count,
+    horizon_year_boundary_steps,
+    horizon_year_point_counts,
+    is_leap_year,
     point_count_for_baseline,
+    point_count_for_year,
 )
 from iesplan.core.contracts.parameters import ParameterSpec
 from iesplan.core.contracts.planning_config import (
@@ -49,5 +54,10 @@ __all__ = [
     "ProjectBaseline",
     "ProjectBaselineError",
     "compile_planning_expression",
+    "horizon_point_count",
+    "horizon_year_boundary_steps",
+    "horizon_year_point_counts",
+    "is_leap_year",
     "point_count_for_baseline",
+    "point_count_for_year",
 ]

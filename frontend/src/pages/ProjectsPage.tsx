@@ -75,6 +75,8 @@ export default function ProjectsPage() {
   const [createName, setCreateName] = useState('')
   const [createCurrency, setCreateCurrency] = useState<Currency>('CNY')
   const [createResolution, setCreateResolution] = useState<BaselineResolution>('1h')
+  const [createStartYear, setCreateStartYear] = useState('')
+  const [createStartYearError, setCreateStartYearError] = useState<string | null>(null)
   const [createNameError, setCreateNameError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
 
@@ -214,19 +216,27 @@ export default function ProjectsPage() {
       return
     }
     setCreateNameError(null)
+    const startYear = Number(createStartYear.trim())
+    if (!Number.isInteger(startYear)) {
+      setCreateStartYearError(t('ies.project.start_year_invalid'))
+      return
+    }
+    setCreateStartYearError(null)
     setCreating(true)
     try {
       await api.projects.create({
         name,
         currency: createCurrency,
         baseline_resolution: createResolution,
-        baseline_leap_year: false,
+        baseline_start_year: startYear,
         baseline_scenario_mode: 'single',
       })
       setCreateOpen(false)
       setCreateName('')
       setCreateCurrency('CNY')
       setCreateResolution('1h')
+      setCreateStartYear('')
+      setCreateStartYearError(null)
       setNotice({ kind: 'success', text: t('ies.project.create_ok') })
       await loadProjects(false, true)
     } catch (err) {
@@ -489,6 +499,24 @@ export default function ProjectsPage() {
             <option value="CNY">{t('ies.project.currency_cny')}</option>
             <option value="USD">{t('ies.project.currency_usd')}</option>
           </Select>
+        </FormField>
+        <FormField
+          label={t('ies.project.baseline_start_year')}
+          htmlFor="pp-create-start-year"
+          required
+          error={createStartYearError}
+        >
+          <Input
+            id="pp-create-start-year"
+            value={createStartYear}
+            placeholder="2026"
+            inputMode="numeric"
+            invalid={!!createStartYearError}
+            onChange={(event) => setCreateStartYear(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') void handleCreateSubmit()
+            }}
+          />
         </FormField>
         <FormField label={t('ies.project.baseline_resolution')} htmlFor="pp-create-resolution">
           <Select

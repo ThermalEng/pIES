@@ -44,7 +44,7 @@ def _content(params: dict) -> dict:
             ],
             "connections": [],
         },
-        "project_baseline": {"resolution": "1h", "leap_year": False, "scenario_mode": "single"},
+        "project_baseline": {"resolution": "1h", "start_year": 2026, "scenario_mode": "single"},
     }
 
 
@@ -163,7 +163,7 @@ def _gate_repeat_artifact():
                 },
             ],
         },
-        "project_baseline": {"resolution": "1h", "leap_year": False, "scenario_mode": "single"},
+        "project_baseline": {"resolution": "1h", "start_year": 2026, "scenario_mode": "single"},
     }
     result = validate_project_export(
         content,

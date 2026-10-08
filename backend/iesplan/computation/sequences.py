@@ -29,7 +29,7 @@ from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.predictors import PredictedTarget, Predictor
-from iesplan.core.contracts import point_count_for_baseline
+from iesplan.core.contracts import point_count_for_year
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,8 +134,8 @@ def materialize_non_predictive_series(
     """
     doc = json.loads(artifact.canonical_text)
     baseline_data = doc["project_baseline"]
-    point_count = point_count_for_baseline(
-        baseline_data["resolution"], baseline_data["leap_year"]
+    point_count = point_count_for_year(
+        baseline_data["resolution"], baseline_data["start_year"]
     )
     resolution = baseline_data["resolution"]
     series: list[MaterializedSeries] = []
@@ -252,8 +252,8 @@ def materialize_predicted_series(
     """
     doc = json.loads(artifact.canonical_text)
     baseline_data = doc["project_baseline"]
-    point_count = point_count_for_baseline(
-        baseline_data["resolution"], baseline_data["leap_year"]
+    point_count = point_count_for_year(
+        baseline_data["resolution"], baseline_data["start_year"]
     )
     by_target = {}
     for entry in predictions:

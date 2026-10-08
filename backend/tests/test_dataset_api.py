@@ -84,7 +84,7 @@ def _make_project(session: Session, user, name: str = "测试项目") -> Project
     """创建测试项目(projects.owner_id 记录所有者, 满足项目权限判定; 显式携带基线)。"""
     proj = Project(
         name=name, owner_id=user.id, created_by=user.id,
-        baseline_resolution="1h", baseline_leap_year=False, baseline_scenario_mode="single",
+        baseline_resolution="1h", baseline_start_year=2026, baseline_scenario_mode="single",
     )
     session.add(proj)
     session.flush()

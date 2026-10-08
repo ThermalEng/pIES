@@ -31,7 +31,7 @@ import re
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -103,6 +103,10 @@ from iesplan.tasks.contracts import (
 from iesplan.tasks.contracts import (
     IDEMPOTENCY_KEY_RE as _IDEMPOTENCY_KEY_RE,
 )
+from iesplan.tasks.contracts import (
+    check_tariff_horizon_coverage as _check_tariff_horizon_coverage,
+)
+from iesplan.tasks.contracts import parse_evaluation_input as _parse_evaluation_input
 
 #: 任务类型/池/状态机/结局映射与任务错误唯一权威见 tasks 域
 #: (``iesplan.tasks`` 门面, 本模块顶层导入复用); 此处不复制。
@@ -247,6 +251,29 @@ def _derive_random_seed(version_id: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _evaluation_identity(evaluation: object) -> object:
+    """评价确认复用身份: 只含年限/折现率(决定计算的输入)。
+
+    确认人/确认时间是来源 provenance(冻结存档, 不参与复用判定):
+    同一评价确认由不同人/时间重提 → 复用同一快照, 不重复建快照。
+    """
+    if not isinstance(evaluation, Mapping):
+        return evaluation
+    return {
+        "evaluation_years": evaluation.get("evaluation_years"),
+        "discount_rate": evaluation.get("discount_rate"),
+    }
+
+
+def _calc_config_identity(calc_config: object) -> object:
+    """快照正文复用身份: 全文逐项相等, 唯评价确认块只取年限/折现率。"""
+    frozen = jsonable(calc_config or {})
+    if isinstance(frozen, dict) and "evaluation" in frozen:
+        frozen = dict(frozen)
+        frozen["evaluation"] = _evaluation_identity(frozen["evaluation"])
+    return frozen
+
+
 def _snapshot_inputs_equal(
     snapshot: CalcSnapshotRecord,
     *,
@@ -264,13 +291,15 @@ def _snapshot_inputs_equal(
 ) -> bool:
     """快照输入一致判定: 全部快照内容字段逐项相等(不使用内容摘要)。
 
-    复用身份包含 schema_version、执行引用与逐实例数学贡献: 不同 schema、
-    不同配套 adapter/executor 或不同设备贡献的快照永不复用。
+    复用身份包含 schema_version、执行引用、逐实例数学贡献与评价确认的
+    年限/折现率: 不同 schema、不同配套 adapter/executor、不同设备贡献
+    或不同评价年限/折现率的快照永不复用; 确认人/确认时间只冻结存档,
+    不参与复用判定(见 ``_calc_config_identity``)。
     容差唯一权威是 calc_config 正文的 convergence, 此处不另设 tolerances。
     """
     return (
         list(snapshot.dataset_version_ids or []) == list(dataset_ids)
-        and jsonable(snapshot.calc_config_snapshot or {}) == jsonable(calc_config)
+        and _calc_config_identity(snapshot.calc_config_snapshot) == _calc_config_identity(calc_config)
         and (snapshot.schema_version or "") == schema_version
         and (snapshot.result_adapter or "") == result_adapter
         and (snapshot.executor or "") == executor
@@ -522,27 +551,41 @@ def _assemble_snapshot(
     calculation_config: tuple[dict[str, Any], int] | None = None,
     generator_registry: Any | None = None,
     predictor_registry: Any | None = None,
+    evaluation: dict[str, Any] | None = None,
 ) -> CalcSnapshotRecord:
     """组装不可变计算快照(相同输入复用)。
 
     绑定: 项目版本(无版本时固化当前草稿)、数据集版本 id 清单、钉选的计算
     配置正文 + 来源 revision/项目身份、程序版本、受控扩展版本、随机种子
-    (正文 seed 缺失时按版本派生, 强制非 NULL)、规范装配文本/回执; 相同输入
-    复用既有快照(快照内容字段逐项相等判定, 含 config_ref, 故不同 revision
-    永不复用)。任务级 config(除绑定键 config_revision 外)并入快照的
+    (正文 seed 缺失时按版本派生, 强制非 NULL)、规范装配文本/回执、评价确认
+    块(年限/折现率由提交边界类型化解析, 确认人/确认时间由服务端写入);
+    相同输入复用既有快照(快照内容字段逐项相等判定, 含 config_ref 与
+    evaluation 年限/折现率, 故不同 revision 或不同评价年限/折现率永不复用;
+    确认人/确认时间不参与复用判定)。任务级 config
+    (除绑定键 config_revision 与 evaluation 外)并入快照的
     calc_config_snapshot.task_params, 不覆盖配置正文。
     """
     project = require_project(db, project_id)
     actor = user or identity_domain.get_user(db, project.owner_id)
     if actor is None:
         raise InvalidRequestError("无法确定快照创建者", params={"project_id": project_id})
+    if evaluation is None:
+        raise InvalidRequestError("计算快照缺少评价确认(提交边界须先解析)", params={"project_id": project_id})
     version, content = _resolve_project_inputs(db, project, actor, freeze=True)
     assert version is not None
     body, revision = calculation_config if calculation_config is not None else ({}, 0)
     calc_config: dict[str, Any] = dict(body)
-    task_params = {k: v for k, v in (config or {}).items() if k != "config_revision"}
+    task_params = {
+        k: v for k, v in (config or {}).items() if k not in ("config_revision", "evaluation")
+    }
     if task_params:
         calc_config["task_params"] = jsonable(task_params)
+    calc_config["evaluation"] = {
+        "evaluation_years": evaluation["evaluation_years"],
+        "discount_rate": evaluation["discount_rate"],
+        "confirmed_by": actor.id,
+        "confirmed_at": datetime.now(UTC).isoformat(),
+    }
     if revision:
         calc_config["config_ref"] = {"project_id": project_id, "revision": revision}
     random_seed = calc_config.get("seed")
@@ -561,6 +604,9 @@ def _assemble_snapshot(
     gate = _assembly_gate(db, project_id, content, task_type)
     assert gate.artifact is not None
     artifact = gate.artifact
+    # 提交边界全期覆盖核对(装配不核对点数; 已确认评价年限后在此阻断):
+    # 规范文本基线 + 冻结财务快照时变序列点数 == 全周期总点数。
+    _check_submit_coverage(db, project_id, content, artifact, evaluation)
     receipt = artifact.receipt.to_dict()
     device_models = _freeze_device_models(artifact, gate.device_documents)
     # 预测输入冻结核对(B5-1 双向匹配 + B5-2 算法相容): 失败不建快照。
@@ -600,6 +646,50 @@ def _assemble_snapshot(
         extension_versions=extensions,
         canonical_assembly_text=artifact.canonical_text,
         assembly_receipt=receipt,
+    )
+
+
+def _check_submit_coverage(
+    db: Session,
+    project_id: int,
+    content: dict,
+    artifact: Any,
+    evaluation: dict[str, Any],
+) -> None:
+    """提交边界时变价格全期覆盖核对(任务提交边界唯一位置)。
+
+    消费已签发规范文本的基线/计费绑定(不重跑装配校验)与冻结财务引用
+    指向的不可变 Effective 行(持久化反序列化边界类型化恢复, 不重验字段);
+    期望点数由起始年 + 已确认评价年限 + 分辨率推导, 不一致 → 400
+    TASK-REQ-017(见 tasks 域 ``check_tariff_horizon_coverage``)。
+    """
+    from iesplan.finance import EffectiveFinanceConfig
+
+    canonical = json.loads(artifact.canonical_text)
+    baseline = canonical.get("project_baseline") or {}
+    profile_id, revision = _frozen_finance_ref(content, project_id)
+    row = configuration_domain.get_effective_revision(db, project_id, revision)
+    if row is None or row.profile_id != profile_id:
+        raise AppError(
+            "冻结版本引用的 Effective 财务快照不存在(先引用财务 Profile 后提交计算)",
+            code="PROJ-FIN-003",
+            params={"project_id": project_id, "profile_id": profile_id, "revision": revision},
+        )
+    effective = EffectiveFinanceConfig.from_dict(row.content)
+    series = {
+        price_id: {
+            "kind": price.kind,
+            "resolution": price.series_meta.resolution if price.series_meta else None,
+            "point_count": price.series_meta.point_count if price.series_meta else None,
+        }
+        for price_id, price in (effective.energy_prices or {}).items()
+    }
+    _check_tariff_horizon_coverage(
+        baseline_resolution=baseline.get("resolution"),
+        baseline_start_year=baseline.get("start_year"),
+        evaluation_years=evaluation["evaluation_years"],
+        tariff_bindings=canonical.get("tariff_bindings") or {},
+        price_series=series,
     )
 
 
@@ -670,6 +760,27 @@ def _frozen_ref(content: Mapping, project_id: int, key: str, field: str) -> Mapp
     return block
 
 
+def _frozen_finance_ref(content: Mapping, project_id: int) -> tuple[str, int]:
+    """版本内容冻结财务引用 → (profile_id, revision)。
+
+    缺席或形态非法 → InvalidRequestError, 不读项目当前指针, 不 fallback。
+    """
+    frozen_finance = _frozen_ref(content, project_id, "effective_finance", "revision")
+    profile_id = frozen_finance.get("profile_id")
+    revision = frozen_finance.get("revision")
+    if (
+        not isinstance(profile_id, str)
+        or not profile_id
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+    ):
+        raise InvalidRequestError(
+            "版本内容冻结财务引用非法(先引用财务 Profile 后提交计算)",
+            params={"project_id": project_id},
+        )
+    return profile_id, revision
+
+
 def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) -> AssemblyValidationResult:
     """计算任务统一装配闸门: 完整四阶段校验后签发规范二件套。
 
@@ -686,19 +797,7 @@ def _assembly_gate(db: Session, project_id: int, content: dict, task_type: str) 
     """
     if task_type not in COMPUTE_TYPES:
         raise InvalidRequestError("仅计算类任务可装配计算快照", params={"task_type": task_type})
-    frozen_finance = _frozen_ref(content, project_id, "effective_finance", "revision")
-    profile_id = frozen_finance.get("profile_id")
-    revision = frozen_finance.get("revision")
-    if (
-        not isinstance(profile_id, str)
-        or not profile_id
-        or not isinstance(revision, int)
-        or isinstance(revision, bool)
-    ):
-        raise InvalidRequestError(
-            "版本内容冻结财务引用非法(先引用财务 Profile 后提交计算)",
-            params={"project_id": project_id},
-        )
+    profile_id, revision = _frozen_finance_ref(content, project_id)
     frozen_planning = _frozen_ref(content, project_id, "planning_config", "revision")
     planning_revision = frozen_planning.get("revision")
     if not isinstance(planning_revision, int) or isinstance(planning_revision, bool):
@@ -1003,6 +1102,8 @@ def _submit_task(
         # 精确引用只解析传入号码, 不读最新指针, 不回退草稿/默认/空字典;
         # 查无(未保存/超出现有/跨项目号码) → 404, 缺失或形态非法 → 400。
         pinned = _resolve_pinned_calculation_config(db, project_id, config)
+        # 1c) 评价确认(提交边界唯一校验: 年限/折现率必填, 多年显式阻断)。
+        evaluation = _parse_evaluation_input(config)
         # 2) 存储门禁(门禁失败不创建快照不创建任务)
         estimate = estimate_storage(db, project_id, task_type, config)
         if estimate.blocked:
@@ -1020,7 +1121,7 @@ def _submit_task(
         snapshot = _assemble_snapshot(
             db, project_id, task_type, config=config, user=user,
             calculation_config=pinned, generator_registry=generator_registry,
-            predictor_registry=predictor_registry,
+            predictor_registry=predictor_registry, evaluation=evaluation,
         )
     # io 类任务(report/export/import/dataset_build): 无快照, 仅幂等键命中复用
 

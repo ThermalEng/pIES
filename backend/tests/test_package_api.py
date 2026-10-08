@@ -142,7 +142,7 @@ def _create_project(client: TestClient, user, name: str = "导出测试项目") 
         json={
             "name": name,
             "baseline_resolution": "1h",
-            "baseline_leap_year": False,
+            "baseline_start_year": 2026,
             "baseline_scenario_mode": "single",
         },
         headers=_h(client, user),

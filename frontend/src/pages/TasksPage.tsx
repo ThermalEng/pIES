@@ -79,6 +79,8 @@ interface SweepRow {
 interface CreateForm {
   type: TaskType
   datasetIds: number[]
+  evaluationYears: string
+  discountRate: string
   uMode: UncertaintyMode
   nSamples: number
   seed: string
@@ -90,6 +92,8 @@ interface CreateForm {
 const DEFAULT_FORM: CreateForm = {
   type: 'calc',
   datasetIds: [],
+  evaluationYears: '',
+  discountRate: '',
   uMode: 'fixed_reliability',
   nSamples: 200,
   seed: '',
@@ -408,10 +412,20 @@ export default function TasksPage() {
   const logicalSigOf = useCallback(
     (f: CreateForm): string => {
       const params = buildParams(f)
-      return `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}`
+      const evalSig = `${f.evaluationYears.trim()}/${f.discountRate.trim()}`
+      return `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}-e${evalSig}`
     },
     [buildParams, savedRevisionValue],
   )
+
+  /** 评价确认解析(提交边界必填; 非法返回 null 由调用方提示, 后端仍为权威校验)。 */
+  const parseEvaluation = useCallback((f: CreateForm) => {
+    const years = Number(f.evaluationYears.trim())
+    const rate = Number(f.discountRate.trim())
+    if (!Number.isInteger(years) || years < 1) return null
+    if (!Number.isFinite(rate) || rate < 0) return null
+    return { evaluation_years: years, discount_rate: rate }
+  }, [])
 
   const buildInput = useCallback(
     (f: CreateForm): TaskCreateInput => {
@@ -420,16 +434,18 @@ export default function TasksPage() {
       // 提交(对话框打开)换新键, 参数变更/项目版本变化永不误复用历史任务;
       // 同一提交的网络重试复用原键, 由后端按同键返回同一任务。
       const idemKey = `${logicalSigOf(f)}-${submitNonce}`
+      const evaluation = parseEvaluation(f)
       return {
         project_id: projectId,
         type: f.type,
         ...(savedRevisionValue !== null ? { config_revision: savedRevisionValue } : {}),
         ...(f.datasetIds.length > 0 ? { dataset_ids: f.datasetIds } : {}),
+        ...(evaluation ? { evaluation } : {}),
         idempotency_key: idemKey,
         ...(params ? { params } : {}),
       }
     },
-    [projectId, buildParams, savedRevisionValue, logicalSigOf, submitNonce],
+    [projectId, buildParams, savedRevisionValue, logicalSigOf, submitNonce, parseEvaluation],
   )
 
   const submit = useCallback(
@@ -468,6 +484,10 @@ export default function TasksPage() {
           setDuplicate(dup)
           return
         }
+      }
+      if (parseEvaluation(form) === null) {
+        setFormError(t('ies.task.evaluation_invalid'))
+        return
       }
       setFormError(null)
       setSubmitting(true)
@@ -917,6 +937,31 @@ export default function TasksPage() {
             {t('ies.task.no_published_datasets')}
           </p>
         )}
+
+        <fieldset className="ies-fieldset">
+          <legend>{t('ies.task.evaluation')}</legend>
+          <p className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
+            {t('ies.task.evaluation_hint')}
+          </p>
+          <FormField label={t('ies.task.evaluation_years')} htmlFor="task-eval-years" required>
+            <Input
+              id="task-eval-years"
+              value={form.evaluationYears}
+              placeholder="1"
+              inputMode="numeric"
+              onChange={(e) => setForm({ ...form, evaluationYears: e.target.value })}
+            />
+          </FormField>
+          <FormField label={t('ies.task.discount_rate')} htmlFor="task-discount-rate" required>
+            <Input
+              id="task-discount-rate"
+              value={form.discountRate}
+              placeholder="0.08"
+              inputMode="decimal"
+              onChange={(e) => setForm({ ...form, discountRate: e.target.value })}
+            />
+          </FormField>
+        </fieldset>
 
         {form.type === 'uncertainty' ? (
           <div className="ies-section">

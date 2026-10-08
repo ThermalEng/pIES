@@ -287,7 +287,7 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
     const createdProj = await requestJson(apiCtx.request, 'POST', '/api/projects', {
       name: projectName,
       baseline_resolution: '1h',
-      baseline_leap_year: false,
+      baseline_start_year: 2026,
       baseline_scenario_mode: 'single',
     }, setupToken)
     const projectId = createdProj.project?.id ?? createdProj.id
@@ -329,6 +329,8 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
     await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click()
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByText(/本次提交将引用已保存配置 revision v1/i)).toBeVisible()
+    await dialog.locator('#task-eval-years').fill('1')
+    await dialog.locator('#task-discount-rate').fill('0.08')
     const submitBtn = dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i })
     await expect(submitBtn).toBeEnabled()
     await submitBtn.click()

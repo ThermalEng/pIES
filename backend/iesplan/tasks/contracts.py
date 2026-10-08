@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -104,7 +105,118 @@ def _freeze_snapshot_value(value: object) -> object:
 #: 未正式发布, 无旧库兼容: 现行值唯一, 创建时显式写入, 复用身份包含版本。
 #: 2.0.0 新增必填 device_models(逐实例设备数学贡献): 破坏性 schema 变化
 #: 按宪法 §5.3 升主版本(与未来产品 1.1.0 无关)。
-SNAPSHOT_SCHEMA_VERSION: str = "2.0.0"
+#: 3.0.0 新增必填 evaluation 确认块(评价年限/折现率/确认人/确认时间,
+#: 0.12-F1): 快照复用身份包含年限/折现率, 不同即新快照; 确认人/确认时间
+#: 只冻结存档, 不参与复用判定。
+SNAPSHOT_SCHEMA_VERSION: str = "3.0.0"
+
+
+#: 评价确认输入合法键(任务提交边界唯一权威; 未知键拒绝, 不静默忽略)。
+EVALUATION_INPUT_KEYS: frozenset[str] = frozenset({"evaluation_years", "discount_rate"})
+
+
+def parse_evaluation_input(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    """计算类任务评价确认输入类型化解析(任务提交边界唯一校验)。
+
+    ``config["evaluation"]`` 必填字典, 须恰含 ``evaluation_years``(正整数,
+    不接受布尔值)与 ``discount_rate``(有限非负数, 不接受布尔值); 缺失或
+    形态非法 → 400 TASK-REQ-015(无默认值, 不回退)。0.12-F1 只可执行单年
+    期限(``evaluation_years == 1``), 多年显式阻断 → 400 TASK-REQ-016,
+    不静默按单年运行。返回 ``{evaluation_years, discount_rate}`` 普通字典。
+    """
+    raw = (config or {}).get("evaluation") if isinstance(config, Mapping) else None
+    if not isinstance(raw, Mapping):
+        raise InvalidRequestError(
+            "计算类任务须在 config.evaluation 中明确确认评价年限与折现率",
+            code="TASK-REQ-015",
+            params={"evaluation": raw},
+            location={"object_type": "task", "field": "config.evaluation"},
+        )
+    unknown = set(raw) - EVALUATION_INPUT_KEYS
+    if unknown:
+        raise InvalidRequestError(
+            f"config.evaluation 含未知字段: {sorted(unknown)}",
+            code="TASK-REQ-015",
+            params={"unknown": sorted(unknown)},
+            location={"object_type": "task", "field": "config.evaluation"},
+        )
+    years = raw.get("evaluation_years")
+    if not isinstance(years, int) or isinstance(years, bool) or years < 1:
+        raise InvalidRequestError(
+            "config.evaluation.evaluation_years 须为正整数(无默认值)",
+            code="TASK-REQ-015",
+            params={"evaluation_years": years},
+            location={"object_type": "task", "field": "config.evaluation.evaluation_years"},
+        )
+    rate = raw.get("discount_rate")
+    if (
+        isinstance(rate, bool)
+        or not isinstance(rate, (int, float))
+        or not math.isfinite(rate)
+        or rate < 0
+    ):
+        raise InvalidRequestError(
+            "config.evaluation.discount_rate 须为有限非负数(无默认值)",
+            code="TASK-REQ-015",
+            params={"discount_rate": rate},
+            location={"object_type": "task", "field": "config.evaluation.discount_rate"},
+        )
+    if years != 1:
+        raise InvalidRequestError(
+            "多年评价期限尚未实现(F1 仅支持 evaluation_years=1), 不静默按单年运行",
+            code="TASK-REQ-016",
+            params={"evaluation_years": years},
+            location={"object_type": "task", "field": "config.evaluation.evaluation_years"},
+        )
+    return {"evaluation_years": years, "discount_rate": float(rate)}
+
+
+def check_tariff_horizon_coverage(
+    *,
+    baseline_resolution: str,
+    baseline_start_year: int,
+    evaluation_years: int,
+    tariff_bindings: Mapping[str, Any],
+    price_series: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """时变价格全期覆盖核对(任务提交边界唯一权威)。
+
+    期望点数由基线起始年 + 已确认评价年限 + 分辨率逐年按公历唯一推导
+    (``horizon_point_count``); 引用 ``time_series`` 价格的绑定, 其序列
+    ``point_count`` 不等 → 400 TASK-REQ-017, 不重采样。``constant`` 价格
+    无序列, 不参与核对。未知价格引用同样阻断(装配闸门已保证存在, 此处
+    不假设)。
+    """
+    from iesplan.core.contracts import horizon_point_count
+
+    expected = horizon_point_count(baseline_resolution, baseline_start_year, evaluation_years)
+    for binding_id in sorted(tariff_bindings):
+        entry = tariff_bindings[binding_id]
+        if not isinstance(entry, Mapping):
+            continue
+        price_id = entry.get("price")
+        meta = price_series.get(price_id) if isinstance(price_id, str) else None
+        if meta is None:
+            raise InvalidRequestError(
+                "计费绑定引用的价格不存在, 无法核对全期覆盖",
+                code="TASK-REQ-017",
+                params={"binding_id": binding_id, "price": price_id},
+                location={"object_type": "tariff_binding", "object_id": str(binding_id)},
+            )
+        if meta.get("kind") != "time_series":
+            continue
+        if meta.get("point_count") != expected:
+            raise InvalidRequestError(
+                "时变价格序列未覆盖评价全期(点数不等于全周期总点数)",
+                code="TASK-REQ-017",
+                params={
+                    "binding_id": binding_id,
+                    "price": price_id,
+                    "series_point_count": meta.get("point_count"),
+                    "expected_point_count": expected,
+                },
+                location={"object_type": "tariff_binding", "object_id": str(binding_id)},
+            )
 
 
 @dataclass(frozen=True, slots=True)

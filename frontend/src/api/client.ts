@@ -1120,7 +1120,7 @@ export const api = {
           description: input.description ?? null,
           currency: input.currency,
           baseline_resolution: input.baseline_resolution,
-          baseline_leap_year: input.baseline_leap_year,
+          baseline_start_year: input.baseline_start_year,
           baseline_scenario_mode: input.baseline_scenario_mode,
         },
       }).then((body) => projectFromServer(body))
@@ -1359,6 +1359,7 @@ export const api = {
     create(input: TaskCreateInput): Promise<Task> {
       const config: Record<string, unknown> = {}
       if (input.config_revision !== undefined) config.config_revision = input.config_revision
+      if (input.evaluation !== undefined) config.evaluation = input.evaluation
       if (input.dataset_ids !== undefined) config.dataset_ids = input.dataset_ids
       if (input.priority !== undefined) config.priority = input.priority
       if (input.deadline !== undefined) config.deadline = input.deadline

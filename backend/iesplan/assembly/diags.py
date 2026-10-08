@@ -20,12 +20,12 @@ from iesplan.core.diagnostics import make_diag as _make_diag
 # ---------------------------------------------------------------------------
 ASM_SYN_PARSE = "ASM-SYN-001"  # YAML 解析失败/类型错误(键非字符串、值类型不符、未知键)
 ASM_SYN_SECTION = "ASM-SYN-002"  # 未知章节
-ASM_SYN_VERSION = "ASM-SYN-003"  # schema_version 不受支持(≠ "2.0.0")
+ASM_SYN_VERSION = "ASM-SYN-003"  # schema_version 不受支持(≠ "3.0.0")
 ASM_SYN_FIELD = "ASM-SYN-004"  # 必填字段缺失
 ASM_SYN_TYPE = "ASM-SYN-005"  # 键类型错误(如 params 非 map、枚举值非法)
 
 # ---------------------------------------------------------------------------
-# ies.assembly 2.0.0 契约:结构 / 资源 / 输出 / 产物一致性(装配不含 calculation)
+# ies.assembly 3.0.0 契约:结构 / 资源 / 输出 / 产物一致性(装配不含 calculation)
 # ---------------------------------------------------------------------------
 ASM_SYN_SCHEMA = "ASM-SYN-006"  # schema 标识无法识别(≠ ies.assembly)
 ASM_SYN_VERSION_PIN = "ASM-SYN-007"  # 引用必须固定精确版本(拒绝 latest/范围版本/未版本化别名)

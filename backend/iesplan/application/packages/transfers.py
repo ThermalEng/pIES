@@ -214,7 +214,7 @@ def _build_package_zip(
             "currency": project.currency,
             "project_baseline": {
                 "resolution": project.baseline_resolution,
-                "leap_year": project.baseline_leap_year,
+                "start_year": project.baseline_start_year,
                 "scenario_mode": project.baseline_scenario_mode,
             },
             "schema_version": project.schema_version,
@@ -289,7 +289,7 @@ def _build_package_zip(
                     "reason": version.reason,
                     "project_baseline": {
                         "resolution": version.baseline_resolution,
-                        "leap_year": version.baseline_leap_year,
+                        "start_year": version.baseline_start_year,
                         "scenario_mode": version.baseline_scenario_mode,
                     },
                     "currency": version.currency,
@@ -685,7 +685,7 @@ def import_proposal(
         description=project_meta.get("description"),
         currency=currency,
         baseline_resolution=baseline.resolution,
-        baseline_leap_year=baseline.leap_year,
+        baseline_start_year=baseline.start_year,
         baseline_scenario_mode=baseline.scenario_mode,
         schema_version=int(project_meta.get("schema_version", 1) or 1),
     )
@@ -996,7 +996,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             ) from exc
         if (
             version_baseline.resolution != project.baseline_resolution
-            or version_baseline.leap_year != project.baseline_leap_year
+            or version_baseline.start_year != project.baseline_start_year
             or version_baseline.scenario_mode != project.baseline_scenario_mode
         ):
             raise ImportValidationError(

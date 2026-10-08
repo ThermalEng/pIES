@@ -7,8 +7,7 @@
 ``sale`` 计量的能量经 ``in`` 接口流入计量设备(流出本站)；
 需猜测的绑定阻断。
 
-时序价格的序列元数据与项目基线逐项核对(resolution/leap_year/
-point_count), 不一致阻断, 不重采样。
+时序价格的序列元数据只核对自身完整与分辨率一致；全期覆盖在任务提交边界核对，不一致阻断, 不重采样。
 """
 
 from __future__ import annotations
@@ -68,8 +67,6 @@ def check_tariff_bindings(
     registry,
     *,
     baseline_resolution: str,
-    baseline_leap_year: bool,
-    baseline_steps: int,
     diags: list[Diagnostic],
 ) -> None:
     """tariff_bindings: price/实例/接口存在性 + 载体/方向相容 + 序列元数据核对。"""
@@ -167,28 +164,8 @@ def check_tariff_bindings(
                     },
                 )
                 continue
-            if meta.leap_year != baseline_leap_year:
-                _tar_fail(
-                    diags, field, "series_leap_year_mismatch",
-                    {
-                        "binding_id": binding_id,
-                        "price": price_id,
-                        "series_leap_year": meta.leap_year,
-                        "baseline_leap_year": baseline_leap_year,
-                    },
-                )
-                continue
-            if meta.point_count != baseline_steps:
-                _tar_fail(
-                    diags, field, "series_point_count_mismatch",
-                    {
-                        "binding_id": binding_id,
-                        "price": price_id,
-                        "series_point_count": meta.point_count,
-                        "baseline_steps": baseline_steps,
-                    },
-                )
-                continue
+            # 全期覆盖(点数)在任务提交边界核对(已确认评价年限后),
+            # 装配只核对元数据自身完整与分辨率一致。
 
 
 __all__ = ["TARIFF_AGGREGATIONS", "binding_prices", "check_tariff_bindings"]

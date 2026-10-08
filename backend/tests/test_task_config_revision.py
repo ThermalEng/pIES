@@ -180,7 +180,7 @@ def _submit(
     """提交任务, 返回 (HTTP 状态码, 响应体)。"""
     payload: dict[str, Any] = {"task_type": task_type, "idempotency_key": key}
     if config is not None:
-        payload["config"] = config
+        payload["config"] = {**config, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}}
     resp = client.post(f"/api/projects/{pid}/tasks", json=payload, headers=_h(client, user))
     return resp.status_code, resp.json()
 
@@ -281,6 +281,9 @@ def test_pinned_body_frozen_and_isolated(
     assert frozen1["config_ref"] == {"project_id": pid, "revision": 1}
     assert frozen2["config_ref"] == {"project_id": pid, "revision": 2}
     assert "config_revision" not in frozen1.get("task_params", {})
+    assert "evaluation" not in frozen1.get("task_params", {})
+    assert frozen1["evaluation"]["evaluation_years"] == 1
+    assert frozen1["evaluation"]["confirmed_by"] == owner.id
     # 改最新后重读旧快照: 正文保持钉选时内容
     snap1_again = tasks_domain.get_snapshot(factory(), task1["calc_snapshot_id"])
     assert snap1_again is not None
@@ -551,7 +554,7 @@ def test_changed_inputs_with_new_key_yield_new_task_and_snapshot(
 def test_snapshot_schema_version_written_and_scoped_to_reuse(
     client: TestClient, db: Session, factory,
 ) -> None:
-    """快照显式写入 schema_version 2.0.0; 复用身份包含版本, 无 tolerances 死字段。
+    """快照显式写入 schema_version 3.0.0; 复用身份包含版本, 无 tolerances 死字段。
 
     容差唯一权威仍是正文 convergence(此处冻结往返即证, 不另设字段)。
     """
@@ -569,7 +572,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
     assert status == 201, body
     snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
     assert snap is not None
-    assert snap.schema_version == "2.0.0"
+    assert snap.schema_version == "3.0.0"
     assert not hasattr(snap, "tolerances")
     frozen = jsonable(dict(snap.calc_config_snapshot))
     assert frozen["convergence"] == {"tolerance": 0.001, "max_iterations": 50}
@@ -590,7 +593,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
         receipt=jsonable(dict(snap.assembly_receipt or {})),
         device_models=jsonable(dict(snap.device_models or {})),
     )
-    assert _snapshot_inputs_equal(snap, schema_version="2.0.0", **same) is True
+    assert _snapshot_inputs_equal(snap, schema_version="3.0.0", **same) is True
     assert _snapshot_inputs_equal(snap, schema_version="9.9.9", **same) is False
 
 

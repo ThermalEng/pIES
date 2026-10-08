@@ -37,7 +37,7 @@ from typing import Any
 
 from iesplan.assembly.builder import build_assembly_doc_from_content
 from iesplan.assembly.canonicalizer import canonicalize_assembly_doc
-from iesplan.assembly.context import steps_for_baseline, units_compatible
+from iesplan.assembly.context import units_compatible
 from iesplan.assembly.contracts import (
     AssemblyValidationError,
     ValidatedAssemblyArtifact,
@@ -118,7 +118,7 @@ def validate_assembly_doc(
     dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
 ) -> AssemblyValidationResult:
-    """ies.assembly 2.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
+    """ies.assembly 3.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
 
     doc 为安全解析后的 plain dict(手写文本经 ``parse_assembly_doc`` 产生,
     GUI 导出经构造器产生);本入口做唯一一次结构校验,随后进入模型/
@@ -149,7 +149,7 @@ def validate_project_export(
 ) -> AssemblyValidationResult:
     """GUI 项目导出入口:
 
-    项目内容 → 构造器构造 ies.assembly 2.0.0 文档 → 与手写文件同一校验
+    项目内容 → 构造器构造 ies.assembly 3.0.0 文档 → 与手写文件同一校验
     入口(结构一次 + 领域阶段)。dataset_contents 为合成路径到对象字节的
     显式注入(供文档内 data 绑定消费)；finance /
     finance_binding / tariff_bindings / planning 为调用方显式提供的财务
@@ -220,13 +220,9 @@ def _run_validation(
     assert snapshot is not None
     baseline = doc.get("project_baseline") or {}
     resolution = baseline.get("resolution")
-    leap_year = baseline.get("leap_year")
-    steps = steps_for_baseline(resolution, leap_year)
     check_tariff_bindings(
         doc, snapshot, registry,
         baseline_resolution=resolution,
-        baseline_leap_year=leap_year,
-        baseline_steps=steps,
         diags=diags,
     )
     if _any_blocking(diags):
@@ -426,7 +422,7 @@ def _check_predefined(
     contents = dict(dataset_contents or {})
     baseline = doc.get("project_baseline") or {}
     resolution = baseline.get("resolution")
-    leap_year = baseline.get("leap_year", False)
+    start_year = baseline.get("start_year")
     for dev_id, dev in (doc.get("devices") or {}).items():
         if not isinstance(dev, Mapping):
             continue
@@ -504,7 +500,7 @@ def _check_predefined(
                 )
                 continue
             if _check_csv_binding(
-                dev_id, type_id, iface_id, iface, binding, payload, resolution, leap_year, diags
+                dev_id, type_id, iface_id, iface, binding, payload, resolution, start_year, diags
             ):
                 object_id = payload.get("object_id", "")
                 media_type = payload.get("media_type", "") or "text/csv"
@@ -596,7 +592,7 @@ def _check_csv_binding(
     binding: Mapping,
     payload: Mapping[str, Any],
     resolution: object,
-    leap_year: object,
+    start_year: object,
     diags: list[Diagnostic],
 ) -> bool:
     """绑定 CSV 内容确认(device_id/mode/分辨率/step/列/单位/值域)。"""
@@ -696,7 +692,7 @@ def _check_csv_binding(
         )
         return False
     if mode == "data_repeat":
-        day, week, year = repeat_cycle_lengths(str(resolution), leap_year=bool(leap_year))
+        day, week, year = repeat_cycle_lengths(str(resolution), start_year=int(start_year))
         if len(steps) not in (day, week, year):
             _bind_fail(
                 diags, dev_id, iface_id, "csv_repeat_length",
@@ -753,17 +749,17 @@ def _phase3_graph_system(
     """转换 doc → AssemblySpec + CheckContext,调用 run_phase_b +
     输入完备检查 + run_phase_d。年步数由项目计算基线显式推导后传入。
     """
-    from iesplan.assembly.context import CheckContext, steps_for_baseline
+    from iesplan.assembly.context import CheckContext, steps_for_year
     from iesplan.assembly.rules import run_phase_b, run_phase_d
 
     spec = _spec_from_doc(doc)
     baseline = doc.get("project_baseline") or {}
     resolution = baseline.get("resolution")
-    leap_year = baseline.get("leap_year")
+    start_year = baseline.get("start_year")
     ctx = CheckContext(
         registry=registry,
         baseline_resolution=resolution,
-        period_steps=steps_for_baseline(resolution, leap_year),
+        period_steps=steps_for_year(resolution, start_year),
     )
     # run_phase_b 内部 ensure_ports(spec, ctx)
     b_diags = run_phase_b(spec, ctx)
@@ -942,7 +938,7 @@ def _dependency_lock(doc: dict, registry) -> dict:
         "devices": dict(sorted(devices_lock.items())),
         "baseline": {
             "resolution": baseline.get("resolution"),
-            "leap_year": baseline.get("leap_year"),
+            "start_year": baseline.get("start_year"),
             "scenario_mode": baseline.get("scenario_mode"),
         },
         "equations": {

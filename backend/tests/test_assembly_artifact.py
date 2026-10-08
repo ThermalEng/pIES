@@ -1,4 +1,4 @@
-"""ies.assembly 2.0.0 校验入口测试(roadmap 0.8.0 切片 S2a)。
+"""ies.assembly 3.0.0 校验入口测试(roadmap 0.12 切片 F1)。
 
 覆盖:
 - 手写 YAML 与 GUI 项目导出进入同一校验入口(validate_assembly_text /
@@ -101,7 +101,7 @@ def _export_baseline(**overrides):
     """GUI 导出 project_baseline(显式声明,无静默默认)。"""
     cfg = {
         "resolution": "1h",
-        "leap_year": False,
+        "start_year": 2026,
         "scenario_mode": "single",
     }
     cfg.update(overrides)
@@ -197,9 +197,9 @@ class TestUnhappyPath:
         # (预定义数据接口不参与边连接, 用真实 in 端口覆盖该规则)
         text = (
             "schema: ies.assembly\n"
-            'schema_version: "2.0.0"\n'
+            'schema_version: "3.0.0"\n'
             "assembly:\n  id: bad\n  name: bad\n"
-            "project_baseline:\n  resolution: 1h\n  leap_year: false\n  scenario_mode: single\n"
+            "project_baseline:\n  resolution: 1h\n  start_year: 2026\n  scenario_mode: single\n"
             "devices:\n"
             "  hp1:\n"
             "    definition:\n"
@@ -472,9 +472,9 @@ class TestProjectExport:
         )
 
     def test_project_export_rejects_invalid_baseline_members(self, init_registry):
-        # leap_year 非布尔 / scenario_mode 非 single:阻断诊断返回,不猜测、不回退
+        # start_year 非整数 / scenario_mode 非 single:阻断诊断返回,不猜测、不回退
         for baseline, reason in [
-            (_export_baseline(leap_year=1), "project_baseline_leap_year_invalid"),
+            (_export_baseline(start_year="2026"), "project_baseline_start_year_invalid"),
             (_export_baseline(scenario_mode="multi"), "project_baseline_scenario_mode_invalid"),
         ]:
             content = {

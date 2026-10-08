@@ -77,7 +77,9 @@ def _store(db: Session, payload: dict, category: str = "test") -> int:
 
 
 def _make_project(db: Session, name: str = "slice5-proj"):
-    return project_domain.create_project(db, name=name, owner_id=7, created_by=7)
+    return project_domain.create_project(
+        db, name=name, owner_id=7, created_by=7, baseline_start_year=2026
+    )
 
 
 def _make_version(db: Session, project_id: int, name: str = "v1") -> int:
