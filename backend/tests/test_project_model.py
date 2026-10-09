@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest  # type: ignore[import-untyped]
 
@@ -972,6 +973,96 @@ def test_static_capacity_om_stays_constant_annual_rate() -> None:
         annual = _static_om_decls(years)["tank1__annual_fixed_om"]
         assert dict(annual["terms"]) == {}
         assert annual["constant"] == pytest.approx(expected)
+
+
+def _pv_25c_inputs():
+    """25°C 恒温＋标准辐照的内置 PV 输入（温度折减应为零）。
+
+    直接消费内置目录 `devices/catalog/pv.yaml`（不复制方程）：
+    额定 50kWp、辐照恒为参考值 1000W/m²、环境恒为 25°C，
+    `temp_coeff` 取目录默认值 −0.004（非零，不得以 0 绕开）。
+    返回 (model, rows)。
+    """
+    catalog = (
+        Path(__file__).resolve().parent.parent
+        / "iesplan" / "devices" / "catalog" / "pv.yaml"
+    )
+    contribution = _contribution(catalog.read_text(encoding="utf-8"))
+    doc = {
+        "schema": "ies.assembly",
+        "schema_version": "2.0.0",
+        "assembly": {"id": "pv-temp", "name": "PV 温度口径"},
+        "project_baseline": {
+            "resolution": "1h", "start_year": 2025, "scenario_mode": "single",
+        },
+        "devices": {
+            "pv1": {
+                "definition": {"id": "ies.device.pv"},
+                "asset_origin": "new",
+                "properties": {
+                    "rated_capacity_kwp": {"value": 50, "unit": "kWp"},
+                },
+                "predefined_interfaces": {
+                    "solar_irradiance": {"mode": "constant", "value": 1000},
+                    "ambient_temperature": {"mode": "constant", "value": 25},
+                },
+            },
+        },
+        "connections": {},
+        "finance_binding": {"instances": {}},
+        "tariff_bindings": {},
+        "planning": {
+            "objective": {"sense": "minimize", "expression": "pv_cap"},
+            "variables": {
+                "pv_cap": {
+                    "device_ref": "pv1",
+                    "parameter": "rated_capacity_kwp",
+                    "year_offset": 0,
+                    "lower_bound": "0",
+                    "upper_bound": "50",
+                    "unit": "kWp",
+                },
+            },
+            "constraints": {},
+        },
+        "outputs": {"series": []},
+    }
+    artifact = ValidatedAssemblyArtifact(
+        canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
+    )
+    models = {"pv1": contribution}
+    finance = merge_effective(FinanceProfile.from_dict(_finance_payload()), None)
+    materialized = materialize_non_predictive_series(
+        artifact, {}, evaluation_years=1,
+    )
+    config = CalculationConfig(
+        mode="planning",
+        generator="acme.generator@1.0.0",
+        solver="ies.solver.highs@1.7.2",
+        precision="medium",
+        time_limit_seconds=600,
+        outputs=["solution"],
+    )
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    return model, {row.name: row for row in model.constraints}
+
+
+def test_pv_generation_at_reference_temperature_has_no_derating() -> None:
+    """25°C 标准辐照下 PV 无温度折减（发电＝额定×辐照比）。
+
+    目录方程的 `(ambient_temperature[t] - 25)` 按接口声明单位 °C
+    书写；旧实现把环境序列换算为 K 后相减（298.15−25），温度项
+    得约 −1.09，发电恒为负/零，本测试在旧代码上为红。
+    """
+    _, rows = _pv_25c_inputs()
+    row = rows["pv1__pv_generation__t0"]
+    assert (row.sense, row.rhs) == ("eq", 0.0)
+    coeffs = _coeffs(row.expression)
+    assert coeffs["pv1__electric_out__t0"] == pytest.approx(1.0)
+    # 额定被年度变量接管：在产变量系数＝−辐照比×温度因子；
+    # 25°C 时温度因子应为 1（1 − 0.004×0），与额定/辐照无关。
+    assert coeffs["pv1__rated_capacity_kwp__inservice_y0"] == pytest.approx(-1.0)
+    assert row.expression.constant == pytest.approx(0.0)
 
 
 def test_sale_tariff_sign_flips() -> None:

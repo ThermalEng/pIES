@@ -24,6 +24,14 @@ properties:
     valid_range:
       minimum: -0.01
       maximum: 0
+  # STC 参考温度（方程以降级后 SI 单位求值，环境温度已换算为 K，
+  # 故此处取 298.15 K 而非 25；方程文法不支持小数字面量，必须用属性表达）。
+  stc_reference_temperature:
+    value: 298.15
+    unit: K
+    valid_range:
+      minimum: 0
+      maximum: null
 interfaces:
   solar_irradiance:
     type: predefined
@@ -56,4 +64,4 @@ equations:
   variables: {}
   relations:
     - id: pv_generation
-      expression: "electric_out[t] = rated_capacity_kwp * solar_irradiance[t] / reference_irradiance * (1 + temp_coeff * (ambient_temperature[t] - 25))"
+      expression: "electric_out[t] = rated_capacity_kwp * solar_irradiance[t] / reference_irradiance * (1 + temp_coeff * (ambient_temperature[t] - stc_reference_temperature))"

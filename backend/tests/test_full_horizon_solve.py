@@ -1405,10 +1405,9 @@ def _prepare_annual_project(
                 "kind": "new",
                 "params": {
                     # temp_coeff 置 0（无温度折减；属性覆盖取标量，单位从 descriptor）：
-                    # 现行 PV 方程按 °C 硬编码“−25”，而降级把环境温度换算
-                    # 为 K（25°C→298.15K），恒温 25°C 会得出负发电系数
-                    # （既有设备模型问题，与 F4b 无关，见报告残留）；
-                    # 本测试只验收分年容量不断言它。
+                    # 本测试只验收分年容量不验收温度折减（温度口径见
+                    # test_project_model.py 的参考温度测试；目录方程已用
+                    # stc_reference_temperature 属性修正 K/°C 口径）。
                     "temp_coeff": 0,
                     "solar_irradiance": {
                         "mode": "data_full",
