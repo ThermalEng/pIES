@@ -216,7 +216,13 @@ export default function ProjectsPage() {
       return
     }
     setCreateNameError(null)
-    const startYear = Number(createStartYear.trim())
+    // 空字符串经 Number() 会静默变为 0, 必须先判空, 不得直接转数字。
+    const startYearRaw = createStartYear.trim()
+    if (startYearRaw === '') {
+      setCreateStartYearError(t('ies.project.start_year_invalid'))
+      return
+    }
+    const startYear = Number(startYearRaw)
     if (!Number.isInteger(startYear)) {
       setCreateStartYearError(t('ies.project.start_year_invalid'))
       return

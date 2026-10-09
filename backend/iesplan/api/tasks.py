@@ -39,10 +39,12 @@ class TaskCreateRequest(BaseModel):
     task_type: calc(方案评价)/optimization(规划)/uncertainty(不确定性)/
         analysis(批量分析)/report(结果检查);
     config: 任务级参数(如 n_samples/priority/deadline);
-        计算类任务须另带 evaluation{evaluation_years/discount_rate}(评价
-        年限必填正整数、折现率必填有限非负数, 均无默认值; F1 仅支持单年
-        evaluation_years=1, 多年 → 400 TASK-REQ-016): 确认人/确认时间由
-        服务端写入并随快照冻结;
+    evaluation: 计算类任务必填的顶层评价确认输入(类型化任务输入, 不在
+        config 内): evaluation_years 必填正整数(确认的评价年限, 年;
+        接受 >= 1 的连续全期), discount_rate 必填 0..1 区间内有限数
+        (确认的折现率, 宪法 §7.3 比例口径), 均无默认值; 缺失或形态非法
+        → 400 TASK-REQ-015。确认人/确认时间由服务端写入并随快照顶层
+        冻结块冻结;
         计算类任务须另带 config_revision(本项目已保存 CalculationConfig
         的 revision 正整数): 后端精确解析该行正文并冻结进快照(含来源
         revision/项目身份), 缺失或形态非法 → 400 TASK-REQ-006, 查无
@@ -54,6 +56,7 @@ class TaskCreateRequest(BaseModel):
 
     task_type: Literal["calc", "optimization", "uncertainty", "analysis", "report"]
     config: dict[str, Any] | None = Field(default=None, description="任务级参数")
+    evaluation: dict[str, Any] | None = Field(default=None, description="评价确认输入(计算类任务必填)")
     idempotency_key: str = Field(
         min_length=1, max_length=128, pattern=IDEMPOTENCY_KEY_RE,
         description="幂等键(必填, 项目作用域; 命中返回既有任务)",
@@ -107,6 +110,7 @@ def create_task_endpoint(
         parent_task_id=payload.parent_task_id,
         generator_registry=generator_registry,
         predictor_registry=predictor_registry,
+        evaluation=payload.evaluation,
     )
     if result["replayed"]:
         response.status_code = 200

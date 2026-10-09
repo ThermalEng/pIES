@@ -526,7 +526,7 @@ export interface TaskCreateInput {
   type: TaskType
   /** 计算类任务必填: 本项目已保存 CalculationConfig 的 revision(冻结进快照)。 */
   config_revision?: number
-  /** 计算类任务必填: 评价确认(年限正整数/折现率有限非负数, 均无默认值)。 */
+  /** 计算类任务必填: 评价确认(年限正整数 ≥1/折现率 0..1 比例, 均无默认值; 以顶层字段提交)。 */
   evaluation?: { evaluation_years: number; discount_rate: number }
   dataset_ids?: EntityId[]
   priority?: number

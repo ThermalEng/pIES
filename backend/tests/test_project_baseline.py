@@ -110,7 +110,7 @@ def test_point_count_table(resolution: str, start_year: int, expected_points: in
     baseline = ProjectBaseline(resolution=resolution, start_year=start_year)
     assert baseline.point_count == expected_points
     assert baseline.initial_step == 0
-    assert baseline.step_count == expected_points
+    assert not hasattr(baseline, "step_count")  # 单年歧义属性已删除, 全期点数走 horizon_*
 
 
 @pytest.mark.parametrize(

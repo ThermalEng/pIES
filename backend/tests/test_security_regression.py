@@ -350,7 +350,7 @@ def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) 
         f"/api/projects/{pid}/tasks",
         json={
             "task_type": "optimization",
-            "config": {"config_revision": rev, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}},
+            "config": {"config_revision": rev}, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08},
             "idempotency_key": "sec-task-replay-1",
         },
         headers=_bearer(owner_token),

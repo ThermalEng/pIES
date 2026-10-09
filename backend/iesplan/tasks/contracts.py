@@ -115,38 +115,52 @@ SNAPSHOT_SCHEMA_VERSION: str = "3.0.0"
 EVALUATION_INPUT_KEYS: frozenset[str] = frozenset({"evaluation_years", "discount_rate"})
 
 
-def parse_evaluation_input(config: Mapping[str, Any] | None) -> dict[str, Any]:
+@dataclass(frozen=True, slots=True)
+class EvaluationInput:
+    """计算任务评价确认输入(任务级类型化输入)。
+
+    由任务提交边界 ``parse_evaluation_input`` 从顶层任务输入 ``evaluation``
+    块唯一解析, 不从宽泛任务参数字典读取, 也不混入封闭 ``CalculationConfig``
+    正文。``evaluation_years`` 为确认的评价年限(正整数, 年); ``discount_rate``
+    为确认的折现率(宪法 §7.3 比例口径 ``0..1``)。
+    """
+
+    evaluation_years: int
+    discount_rate: float
+
+
+def parse_evaluation_input(raw: Mapping[str, Any] | None) -> EvaluationInput:
     """计算类任务评价确认输入类型化解析(任务提交边界唯一校验)。
 
-    ``config["evaluation"]`` 必填字典, 须恰含 ``evaluation_years``(正整数,
-    不接受布尔值)与 ``discount_rate``(有限非负数, 不接受布尔值); 缺失或
-    形态非法 → 400 TASK-REQ-015(无默认值, 不回退)。0.12-F1 只可执行单年
-    期限(``evaluation_years == 1``), 多年显式阻断 → 400 TASK-REQ-016,
-    不静默按单年运行。返回 ``{evaluation_years, discount_rate}`` 普通字典。
+    顶层任务输入 ``evaluation`` 块必填字典, 须恰含 ``evaluation_years``
+    (正整数, 不接受布尔值)与 ``discount_rate``(``0..1`` 区间内有限数,
+    宪法 §7.3 比例口径, 不接受布尔值); 缺失或形态非法 → 400
+    TASK-REQ-015(无默认值, 不回退)。评价年限接受 ``>= 1`` 的连续全期
+    (全期连续时域见 0.12 Roadmap; 全周期求解由后续 F 切片贯通)。
+    返回不可变 ``EvaluationInput``。
     """
-    raw = (config or {}).get("evaluation") if isinstance(config, Mapping) else None
     if not isinstance(raw, Mapping):
         raise InvalidRequestError(
-            "计算类任务须在 config.evaluation 中明确确认评价年限与折现率",
+            "计算类任务须在顶层 evaluation 中明确确认评价年限与折现率",
             code="TASK-REQ-015",
             params={"evaluation": raw},
-            location={"object_type": "task", "field": "config.evaluation"},
+            location={"object_type": "task", "field": "evaluation"},
         )
     unknown = set(raw) - EVALUATION_INPUT_KEYS
     if unknown:
         raise InvalidRequestError(
-            f"config.evaluation 含未知字段: {sorted(unknown)}",
+            f"evaluation 含未知字段: {sorted(unknown)}",
             code="TASK-REQ-015",
             params={"unknown": sorted(unknown)},
-            location={"object_type": "task", "field": "config.evaluation"},
+            location={"object_type": "task", "field": "evaluation"},
         )
     years = raw.get("evaluation_years")
     if not isinstance(years, int) or isinstance(years, bool) or years < 1:
         raise InvalidRequestError(
-            "config.evaluation.evaluation_years 须为正整数(无默认值)",
+            "evaluation.evaluation_years 须为正整数(无默认值)",
             code="TASK-REQ-015",
             params={"evaluation_years": years},
-            location={"object_type": "task", "field": "config.evaluation.evaluation_years"},
+            location={"object_type": "task", "field": "evaluation.evaluation_years"},
         )
     rate = raw.get("discount_rate")
     if (
@@ -154,21 +168,15 @@ def parse_evaluation_input(config: Mapping[str, Any] | None) -> dict[str, Any]:
         or not isinstance(rate, (int, float))
         or not math.isfinite(rate)
         or rate < 0
+        or rate > 1
     ):
         raise InvalidRequestError(
-            "config.evaluation.discount_rate 须为有限非负数(无默认值)",
+            "evaluation.discount_rate 须为 0..1 区间内有限数(比例口径, 无默认值)",
             code="TASK-REQ-015",
             params={"discount_rate": rate},
-            location={"object_type": "task", "field": "config.evaluation.discount_rate"},
+            location={"object_type": "task", "field": "evaluation.discount_rate"},
         )
-    if years != 1:
-        raise InvalidRequestError(
-            "多年评价期限尚未实现(F1 仅支持 evaluation_years=1), 不静默按单年运行",
-            code="TASK-REQ-016",
-            params={"evaluation_years": years},
-            location={"object_type": "task", "field": "config.evaluation.evaluation_years"},
-        )
-    return {"evaluation_years": years, "discount_rate": float(rate)}
+    return EvaluationInput(evaluation_years=years, discount_rate=float(rate))
 
 
 def check_tariff_horizon_coverage(
@@ -244,6 +252,10 @@ class CalcSnapshotRecord:
     #: 逐装配实例数学贡献(``{instance_id: contribution dict}``，必填):
     #: 提交边界与装配闸门同一次设备解析冻结；Worker 只恢复，不重跑校验。
     device_models: Mapping[str, Any]
+    #: 评价确认冻结块(顶层必填, 快照主版本 3.0.0): 年限/折现率/确认人/
+    #: 确认时间, 由提交边界类型化解析后服务端写入, 不混入封闭
+    #: ``CalculationConfig`` 正文, 也不从宽泛任务参数字典读取。
+    evaluation: Mapping[str, Any]
     program_version: str | None = None
     extension_versions: Mapping[str, Any] | None = None
     canonical_assembly_text: str | None = None
@@ -257,6 +269,7 @@ class CalcSnapshotRecord:
             "extension_versions",
             "assembly_receipt",
             "device_models",
+            "evaluation",
         ):
             value = getattr(self, name)
             if value is not None:

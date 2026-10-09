@@ -69,7 +69,7 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 
 评价年限与折现率是财务输入的显式评价确认，不属于 `FinanceProfile`/`Overrides`/`Effective`（本页已明令不回流），不属于封闭 `CalculationConfig`，不设默认值（沿用 `0.08` 或由序列长度推导均属阻断行为）：
 
-- 确认字段：`evaluation_years`（整数 ≥1，无默认）、`discount_rate`（无量纲比例 ≥0，无默认，`r=0` 合法）、`confirmed_by`/`confirmed_at`（确认人/时间，追加审计不可覆盖）；
+- 确认字段：`evaluation_years`（整数 ≥1，无默认）、`discount_rate`（无量纲比例 `0..1`，宪法 §7.3，`r=0` 合法）、`confirmed_by`/`confirmed_at`（确认人/时间，追加审计不可覆盖）；
 - 运行起始年归项目计算基线（创建时固定），与 `base_year`（金额口径基年）不得互相推断；
 - 自由字典式 `baseline-confirm` 的审计记录不能充当已确认的计算参数：提交时须有关联到本次计算的显式确认记录，无确认即阻断提交；
 - 确认的评价年限与折现率随提交冻结进 `CalcSnapshot`（新增必填冻结块，快照主版本相应升级）；年度边界 step 下标由基线起始年与冻结年限推导并随快照冻结；评价时核对年限与流序列长度一致。

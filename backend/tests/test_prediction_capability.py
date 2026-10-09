@@ -804,7 +804,8 @@ class TestPredictEndToEnd:
         chase = _ChasePredictor()
         registry = build_predictor_registry((chase,))
         task, _flags = submit_task(
-            db, user, pid, "optimization", config={"config_revision": rev, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}},
+            db, user, pid, "optimization", config={"config_revision": rev},
+            evaluation={"evaluation_years": 1, "discount_rate": 0.08},
             idempotency_key="predict-e2e-chase",
             generator_registry=plane.generator_registry,
             predictor_registry=registry,

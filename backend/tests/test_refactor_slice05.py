@@ -107,6 +107,12 @@ def _make_snapshot(db: Session, version_id: int) -> int:
         result_adapter="ies.result-adapter.highs@1.0.0",
         executor="ies.executor.local_process@1.0.0",
         device_models={},
+        evaluation={
+            "evaluation_years": 1,
+            "discount_rate": 0.08,
+            "confirmed_by": 7,
+            "confirmed_at": "2026-10-09T00:00:00+00:00",
+        },
     )
     return snapshot.id
 

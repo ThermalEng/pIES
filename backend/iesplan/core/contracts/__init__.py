@@ -19,7 +19,6 @@ from iesplan.core.contracts.baseline import (
     horizon_year_boundary_steps,
     horizon_year_point_counts,
     is_leap_year,
-    point_count_for_baseline,
     point_count_for_year,
 )
 from iesplan.core.contracts.parameters import ParameterSpec
@@ -58,6 +57,5 @@ __all__ = [
     "horizon_year_boundary_steps",
     "horizon_year_point_counts",
     "is_leap_year",
-    "point_count_for_baseline",
     "point_count_for_year",
 ]

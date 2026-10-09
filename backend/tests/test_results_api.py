@@ -261,7 +261,7 @@ def _submit_task(
         f"/api/projects/{pid}/tasks",
         json={
             "task_type": "optimization",
-            "config": {"config_revision": config_revision, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}},
+            "config": {"config_revision": config_revision}, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08},
             "idempotency_key": idempotency_key,
         },
         headers=_h(client, user),

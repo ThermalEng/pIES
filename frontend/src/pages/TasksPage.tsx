@@ -412,18 +412,24 @@ export default function TasksPage() {
   const logicalSigOf = useCallback(
     (f: CreateForm): string => {
       const params = buildParams(f)
-      const evalSig = `${f.evaluationYears.trim()}/${f.discountRate.trim()}`
+      // 评价签名分隔符须落在后端幂等键格式集 [A-Za-z0-9._:-] 内('/' 会被传输层 422 拒绝)。
+      const evalSig = `${f.evaluationYears.trim()}_${f.discountRate.trim()}`
       return `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}-e${evalSig}`
     },
     [buildParams, savedRevisionValue],
   )
 
-  /** 评价确认解析(提交边界必填; 非法返回 null 由调用方提示, 后端仍为权威校验)。 */
+  /** 评价确认解析(提交边界必填; 空值/非法返回 null 由调用方提示, 后端仍为权威校验)。
+   * 空字符串经 Number() 会静默变为 0, 必须先判空, 不得直接转数字。
+   * 折现率为宪法 §7.3 比例口径(0..1), 与后端 TASK-REQ-015 同口径。 */
   const parseEvaluation = useCallback((f: CreateForm) => {
-    const years = Number(f.evaluationYears.trim())
-    const rate = Number(f.discountRate.trim())
+    const yearsRaw = f.evaluationYears.trim()
+    const rateRaw = f.discountRate.trim()
+    if (yearsRaw === '' || rateRaw === '') return null
+    const years = Number(yearsRaw)
+    const rate = Number(rateRaw)
     if (!Number.isInteger(years) || years < 1) return null
-    if (!Number.isFinite(rate) || rate < 0) return null
+    if (!Number.isFinite(rate) || rate < 0 || rate > 1) return null
     return { evaluation_years: years, discount_rate: rate }
   }, [])
 

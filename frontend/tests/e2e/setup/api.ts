@@ -219,3 +219,170 @@ export async function probeSession(ctx: APIRequestContext): Promise<void> {
     throw new Error(`public-settings 不可用: ${res.status()} ${(await res.text()).slice(0, 300)}`)
   }
 }
+
+/** 装配就绪(API 造数, 由 config-revision.spec.ts 迁移至此供多场景复用)。 */
+/** buildMinimalModel 名键设备关键字(名称 `E2E ${kw}`, 与 setup/api.ts 同源)。 */
+const E2E_DEVICE_KEYWORDS = [
+  'grid_connection',
+  'electric_load',
+  'heat_pump',
+  'heat_load',
+  'electric_chiller',
+  'cooling_load',
+]
+
+/** 装配实例引用派生(与后端 builder._slugify_id 同规则: 小写 + 非法字符折叠)。 */
+function assemblySlug(name: string): string {
+  const cleaned = name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^[-_]+|[-_]+$/g, '')
+  if (!/^[a-z][a-z0-9_-]*$/.test(cleaned)) throw new Error(`无法派生装配实例引用: ${name}`)
+  return cleaned
+}
+
+/** 装配声明: finance_binding 全覆盖(none) + 空 tariff_bindings(后端显式声明门禁)。 */
+function assemblyCommands(): unknown[] {
+  const instances: Record<string, unknown> = {}
+  for (const kw of E2E_DEVICE_KEYWORDS) instances[assemblySlug(`E2E ${kw}`)] = { type: 'none' }
+  instances['bat1'] = { type: 'none' }
+  return [
+    {
+      id: 'c-finbind',
+      unit: 'assembly',
+      type: 'assembly.set_finance_binding',
+      payload: { instances },
+    },
+    {
+      id: 'c-tariff',
+      unit: 'assembly',
+      type: 'assembly.set_tariff_bindings',
+      payload: { bindings: {} },
+    },
+  ]
+}
+
+/** 装配就绪(API 造数): 显式计算声明 + 储能设备 + 装配节声明 + 财务画像引用 + 规划配置。 */
+export async function seedAssembly(
+  request: APIRequestContext, projectId: number, token: string, profileId: string,
+): Promise<void> {
+  const view = await requestJson(request, 'GET', `/api/projects/${projectId}`, undefined, token)
+  await requestJson(request, 'PUT', `/api/projects/${projectId}/draft`, {
+    expected_revision: view.draft.revision,
+    commands: [EXPLICIT_CALC_PATCH, BATTERY_COMMAND, ...DEMAND_COMMANDS, ...assemblyCommands()],
+  }, token)
+  await requestJson(request, 'POST', '/api/finance-profiles', {
+    finance_profile: financeProfile(profileId),
+  }, token)
+  await requestJson(request, 'PUT', `/api/projects/${projectId}/finance-profile`, {
+    profile_ref: { id: profileId },
+  }, token)
+  await requestJson(request, 'PUT', `/api/projects/${projectId}/planning-config`, {
+    planning_config: PLANNING_PAYLOAD,
+    expected_revision: null,
+  }, token)
+}
+
+/** 现行装配边界要求的显式计算声明(与后端契约测试同值, 经 draft 命令声明)。 */
+const EXPLICIT_CALC_PATCH = {
+  id: 'c-calc',
+  unit: 'config',
+  type: 'config.patch',
+  payload: {
+    mode: 'fixed_operation',
+    generator: 'ies.generator.highs_milp@1.0.0',
+    solver: 'ies.solver.highs@1.7.2',
+    time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
+  },
+}
+
+/** 负荷需求常量(预定义需求接口的显式来源声明: 标量 params → constant 模式;
+ * 预检与装配双门禁均认可, 见后端 _validate_device_params 对齐例外)。 */
+const DEMAND_COMMANDS = [
+  {
+    id: 'c-dem-electric',
+    unit: 'model',
+    type: 'model.upsert_device',
+    payload: { name: 'E2E electric_load', params: { electricity_demand: 50 } },
+  },
+  {
+    id: 'c-dem-heat',
+    unit: 'model',
+    type: 'model.upsert_device',
+    payload: { name: 'E2E heat_load', params: { heat_demand: 30 } },
+  },
+  {
+    id: 'c-dem-cool',
+    unit: 'model',
+    type: 'model.upsert_device',
+    payload: { name: 'E2E cooling_load', params: { cool_demand: 20 } },
+  },
+]
+
+/** 储能设备(规划变量 cap 引用的 device_ref bat1)。 */
+const BATTERY_COMMAND = {
+  id: 'c-bat1',
+  unit: 'model',
+  type: 'model.upsert_device',
+  payload: {
+    name: 'bat1',
+    device_type: 'ies.device.battery',
+    kind: 'new',
+    params: { capacity_kwh: 200, rated_power_kw: 100 },
+    position: { x: 1, y: 1 },
+  },
+}
+
+/** 财务画像(与后端契约测试同构, id 按运行唯一)。 */
+function financeProfile(profileId: string): Record<string, unknown> {
+  return {
+    schema: 'ies.finance-profile',
+    schema_version: '1.0.0',
+    profile: {
+      id: profileId,
+      region: 'CN-North',
+      currency: 'CNY',
+      base_year: 2025,
+      price_basis: 'tax_inclusive',
+      cost_method: 'fixed_plus_linear',
+    },
+    finance_types: {
+      battery_system: {
+        upfront_capex: {
+          linear: { energy_kwh: { unit_cost: { value: '900', unit: 'CNY/kWh' } } },
+        },
+        annual_fixed_om: {
+          linear: { energy_kwh: { unit_cost: { value: '18', unit: 'CNY/kWh/a' } } },
+        },
+      },
+    },
+    energy_prices: {
+      grid_import: {
+        carrier: 'electricity',
+        direction: 'purchase',
+        kind: 'constant',
+        value: { value: '0.7', unit: 'CNY/kWh' },
+      },
+      pv_export: {
+        carrier: 'electricity',
+        direction: 'sale',
+        kind: 'constant',
+        value: { value: '0.4', unit: 'CNY/kWh' },
+      },
+    },
+    taxes: {},
+  }
+}
+
+/** 规划配置(单变量, 与后端契约测试同构)。 */
+const PLANNING_PAYLOAD = {
+  objective: { sense: 'minimize', expression: '0' },
+  variables: {
+    cap: {
+      device_ref: 'bat1',
+      parameter: 'capacity_kwh',
+      lower_bound: '0',
+      upper_bound: '1000',
+      unit: 'kWh',
+    },
+  },
+  constraints: {},
+}
+

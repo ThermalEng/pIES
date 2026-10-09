@@ -1359,7 +1359,6 @@ export const api = {
     create(input: TaskCreateInput): Promise<Task> {
       const config: Record<string, unknown> = {}
       if (input.config_revision !== undefined) config.config_revision = input.config_revision
-      if (input.evaluation !== undefined) config.evaluation = input.evaluation
       if (input.dataset_ids !== undefined) config.dataset_ids = input.dataset_ids
       if (input.priority !== undefined) config.priority = input.priority
       if (input.deadline !== undefined) config.deadline = input.deadline
@@ -1369,6 +1368,8 @@ export const api = {
         body: {
           task_type: input.type,
           config: Object.keys(config).length > 0 ? config : null,
+          // 评价确认是顶层类型化任务输入, 不混入 config(与后端 TaskCreateRequest 同形)。
+          ...(input.evaluation !== undefined ? { evaluation: input.evaluation } : {}),
           idempotency_key: input.idempotency_key ?? null,
           parent_task_id: null,
         },

@@ -180,7 +180,8 @@ def _submit(
     """提交任务, 返回 (HTTP 状态码, 响应体)。"""
     payload: dict[str, Any] = {"task_type": task_type, "idempotency_key": key}
     if config is not None:
-        payload["config"] = {**config, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}}
+        payload["config"] = dict(config)
+        payload["evaluation"] = {"evaluation_years": 1, "discount_rate": 0.08}
     resp = client.post(f"/api/projects/{pid}/tasks", json=payload, headers=_h(client, user))
     return resp.status_code, resp.json()
 
@@ -281,9 +282,13 @@ def test_pinned_body_frozen_and_isolated(
     assert frozen1["config_ref"] == {"project_id": pid, "revision": 1}
     assert frozen2["config_ref"] == {"project_id": pid, "revision": 2}
     assert "config_revision" not in frozen1.get("task_params", {})
+    assert "evaluation" not in frozen1
     assert "evaluation" not in frozen1.get("task_params", {})
-    assert frozen1["evaluation"]["evaluation_years"] == 1
-    assert frozen1["evaluation"]["confirmed_by"] == owner.id
+    frozen_eval1 = jsonable(dict(snap1.evaluation))
+    assert frozen_eval1["evaluation_years"] == 1
+    assert frozen_eval1["discount_rate"] == 0.08
+    assert frozen_eval1["confirmed_by"] == owner.id
+    assert frozen_eval1["confirmed_at"]
     # 改最新后重读旧快照: 正文保持钉选时内容
     snap1_again = tasks_domain.get_snapshot(factory(), task1["calc_snapshot_id"])
     assert snap1_again is not None
@@ -584,6 +589,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
     same = dict(
         dataset_ids=list(snap.dataset_version_ids or []),
         calc_config=frozen,
+        evaluation=jsonable(dict(snap.evaluation or {})),
         result_adapter="ies.result-adapter.highs@1.0.0",
         executor="ies.executor.local_process@1.0.0",
         program_version=snap.program_version or "",
@@ -643,6 +649,7 @@ def test_execution_refs_frozen_from_descriptor(
     same = dict(
         dataset_ids=list(snap.dataset_version_ids or []),
         calc_config=jsonable(dict(snap.calc_config_snapshot)),
+        evaluation=jsonable(dict(snap.evaluation or {})),
         schema_version=snap.schema_version,
         program_version=snap.program_version or "",
         extensions=jsonable(dict(snap.extension_versions or {})),

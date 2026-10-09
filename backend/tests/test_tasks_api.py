@@ -310,11 +310,20 @@ def _save_config(client: TestClient, pid: int, user) -> int:
 def _submit_task(
     client: TestClient, pid: int, user, task_type: str = "optimization",
     config: dict[str, Any] | None = None, idempotency_key: str | None = None,
+    evaluation: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """提交任务, 返回 (HTTP 状态码, 响应体)。"""
+    """提交任务, 返回 (HTTP 状态码, 响应体)。
+
+    计算类任务的评价确认以顶层字段发送(缺省为标准单年块, 仅测试便利;
+    产品无默认值)。需要定制评价输入的调用方显式传入 ``evaluation``。
+    """
     body: dict[str, Any] = {"task_type": task_type}
     if config is not None:
-        body["config"] = {**config, "evaluation": {"evaluation_years": 1, "discount_rate": 0.08}}
+        body["config"] = dict(config)
+        body["evaluation"] = (
+            evaluation if evaluation is not None
+            else {"evaluation_years": 1, "discount_rate": 0.08}
+        )
     if idempotency_key is not None:
         body["idempotency_key"] = idempotency_key
     resp = client.post(f"/api/projects/{pid}/tasks", json=body, headers=_h(client, user))

@@ -1,10 +1,11 @@
 """无状态纯数据类型: 项目计算基线(宪法 7.5 / 0.6.5 前置阶段事项 1)。
 
 项目创建时一次性固定的不可变计算口径只包含时间分辨率、运行起始年和
-场景模式(无闰年字段, 闰年逐年按公历推导)。``initial_step``、
-``step_duration`` 与 ``step_count`` 均从这些显式事实唯一推导，不形成
-第二组可提交字段；全周期点数与年度边界由分辨率、起始年与提交时确认的
-评价年限推导(见 ``horizon_point_count``)。
+场景模式(无闰年字段, 闰年逐年按公历推导)。``initial_step`` 与
+``step_duration`` 均从这些显式事实唯一推导，不形成第二组可提交字段；
+起始年单年点数见 ``point_count`` / ``point_count_for_year``，全周期点数
+与年度边界由分辨率、起始年与提交时确认的评价年限推导
+(见 ``horizon_point_count``)。
 
 多场景与已有项目基线变更属于 1.0.0 之后的 Roadmap 能力; 本项目只实现
 ``single`` 场景模式。
@@ -41,16 +42,6 @@ _POINT_COUNTS: Final[dict[str, tuple[int, int]]] = {
 }
 
 
-def point_count_for_baseline(resolution: str, leap_year: bool) -> int:
-    """分辨率 + 闰年 → 单年全周期点数的权威纯推导。
-
-    供 ``ProjectBaseline.point_count`` 与计算阶段共用；非法可信状态
-    （未知分辨率）让原生 ``KeyError`` 暴露，不包装诊断。
-    """
-    normal, leap = _POINT_COUNTS[resolution]
-    return leap if leap_year else normal
-
-
 def is_leap_year(year: int) -> bool:
     """公历闰年判定(能被 4 整除, 整百年须被 400 整除)。
 
@@ -60,8 +51,12 @@ def is_leap_year(year: int) -> bool:
 
 
 def point_count_for_year(resolution: str, year: int) -> int:
-    """分辨率 + 公历年份 → 该年点数(闰年按 ``is_leap_year`` 推导)。"""
-    return point_count_for_baseline(resolution, is_leap_year(year))
+    """分辨率 + 公历年份 → 该年点数(闰年按 ``is_leap_year`` 推导)。
+
+    非法可信状态（未知分辨率）让原生 ``KeyError`` 暴露，不包装诊断。
+    """
+    normal, leap = _POINT_COUNTS[resolution]
+    return leap if is_leap_year(year) else normal
 
 
 def horizon_year_point_counts(
@@ -144,7 +139,11 @@ class ProjectBaseline:
 
     @property
     def point_count(self) -> int:
-        """起始年单年点数(由 resolution 与起始年公历闰否唯一推导)。"""
+        """起始年单年点数(由 resolution 与起始年公历闰否唯一推导)。
+
+        仅表示起始年一年的点数；评价全期总点数与年度边界由分辨率、
+        起始年与已确认评价年限经 ``horizon_*`` 推导，不以本属性表示。
+        """
         return point_count_for_year(self.resolution, self.start_year)
 
     @property
@@ -156,11 +155,6 @@ class ProjectBaseline:
     def step_duration(self) -> float:
         """由 resolution 唯一推导的步长，单位为小时。"""
         return _RESOLUTION_HOURS[self.resolution]
-
-    @property
-    def step_count(self) -> int:
-        """由 resolution 与起始年唯一推导的项目计算点数(起始年单年)。"""
-        return self.point_count
 
     def canonical_payload(self) -> str:
         """规范化负载(稳定键序 + 紧凑 JSON)，不含摘要。"""
