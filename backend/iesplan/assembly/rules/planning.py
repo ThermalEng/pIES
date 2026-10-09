@@ -225,9 +225,12 @@ def _check_annual_scope(
 
     - ``year_offset`` 须落在 0..N-1(N 为冻结评价年限); 未声明的年份
       不得建设, 越界阻断。
-    - 固定建设成本为正的 costed 实例, 其年度变量须声明显式容量上界
-      (后续离散投产指示只能从显式上界建模, 不猜常数); 缺失阻断。
-      ``upfront_capex.fixed`` 缺席或为零 → 无固定成本, 不要求上界。
+    - 固定建设成本为正的 costed 实例, 其年度变量在离散投产指示机制
+      实现前明确拒收(``positive_fixed_cost_unsupported``)：固定 capex
+      只在首次正新增年份计一次，需要离散语义，不猜 ε/最小建设量/
+      big-M；已有显式上界也不得放行到旧按常数计费路径。
+      ``upfront_capex.fixed`` 缺席或为零 → 无固定成本，不在拒收范畴。
+      无年度变量的固定成本实例走既有静态路径，不在本次核对。
     """
     field = f"planning.variables.{var_name}"
     if not 0 <= variable.year_offset < evaluation_years:
@@ -248,9 +251,9 @@ def _check_annual_scope(
         return
     upfront = ft_entry.upfront_capex
     fixed = upfront.fixed if upfront is not None else None
-    if fixed is not None and fixed.value > 0 and variable.upper_bound is None:
+    if fixed is not None and fixed.value > 0:
         _plan_fail(
-            diags, ASM_PLAN_UNDEF, field, "missing_required_upper_bound",
+            diags, ASM_PLAN_UNDEF, field, "positive_fixed_cost_unsupported",
             {
                 "variable": var_name,
                 "device_ref": variable.device_ref,

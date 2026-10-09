@@ -1255,3 +1255,333 @@ class TestTimeVaryingPriceTrueSolve:
             float(TOU_YEAR1_PRICE) * YEAR1_STEPS + float(TOU_YEAR2_PRICE) * YEAR2_STEPS
         ) / FULL_STEPS
         assert purchase != pytest.approx(avg_price * total_energy, rel=1e-3)
+
+
+#: F4b 分年投产真求解场景：光伏自发自用，首年不许建设、次年可建。
+#: 负荷两年恒定 50kW；辐照恒 800W/m2、环境 25℃ 下每 kW 容量出力
+#: 0.8kW；次年容量上界 50kW（最大出力 40kW < 负荷，恒可行）。
+ANNUAL_LOAD_KW = 50.0
+ANNUAL_IRR_W_M2 = 800.0
+ANNUAL_TEMP_C = 25.0
+ANNUAL_CAP_UPPER_KW = 50.0
+ANNUAL_PV_KW_PER_KW = ANNUAL_IRR_W_M2 / 1000.0
+ANNUAL_Y1_PV_KW = ANNUAL_CAP_UPPER_KW * ANNUAL_PV_KW_PER_KW
+ANNUAL_Y0_IMPORT = ANNUAL_LOAD_KW * YEAR1_STEPS
+ANNUAL_Y1_IMPORT = (ANNUAL_LOAD_KW - ANNUAL_Y1_PV_KW) * YEAR2_STEPS
+
+
+def _annual_csv(dataset_id: str, device_id: str, column: str, unit: str, value: float) -> bytes:
+    """两年恒定值的全期 device-data 字节（年界可区分，由长度保证）。"""
+    lines = [
+        "# schema: ies.device-data",
+        "# schema_version: 2.1.0",
+        f"# dataset_id: {dataset_id}",
+        f"# device_id: {device_id}",
+        "# source_mode: data_full",
+        "# resolution: 1h",
+        f"# unit.{column}: {unit}",
+        f"step,{column}",
+    ]
+    lines += [f"{i},{value}" for i in range(FULL_STEPS)]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _craft_series_version(
+    db: Session, client: TestClient, pid: int, user, name: str,
+    raw: bytes, field: str, unit: str,
+) -> int:
+    """域级创建单列全期版本（_craft_full_version 的通用形态）。"""
+    from iesplan.dataset import persistence as dataset_store  # noqa: E402
+
+    resp = client.post(
+        f"/api/projects/{pid}/datasets",
+        json={"name": name, "source_category": "user_upload", "license": "CC-BY-4.0"},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 201, resp.text
+    ds_id = resp.json()["dataset"]["id"]
+    handle = put_object(db, raw, "text/csv", source_category="test", purpose="annual-build")
+    version = dataset_store.create_version(
+        db, dataset_id=ds_id, timeline="hourly", fixed_utc_offset_minutes=480,
+        fields={field: {"unit": unit}}, units={field: unit},
+        created_by=user.id, resolution="1h",
+    )
+    dataset_store.add_file(
+        db, dataset_version_id=version.id, object_id=handle.id,
+        file_kind="data", format="csv", row_count=FULL_STEPS, size_bytes=len(raw),
+    )
+    db.commit()
+    return version.id
+
+
+def _prepare_annual_project(client: TestClient, db: Session, user) -> int:
+    """准备 F4b 分年项目：pv1 自发自用 + grid1 补足 + data_full 负荷。
+
+    首年容量界 [0,0]、次年 [0,50]kW（取 finance.md 现实示例形态）；
+    finance 只有线性成本（固定 upfront 为 0，正固定成本另行拒收）。
+    """
+    from iesplan.application import configuration as config_cases  # noqa: E402
+
+    pid = _create_dated_project(client, user, "分年投产测试项目", START_YEAR)
+    _declare_finance(db, user, pid)
+    load_vid = _craft_series_version(
+        db, client, pid, user, "load2y",
+        _annual_csv("load_two_years", "ies.device.electric_load",
+                    "electricity_demand", "kW", ANNUAL_LOAD_KW),
+        "electricity_demand", "kW",
+    )
+    irr_vid = _craft_series_version(
+        db, client, pid, user, "irr2y",
+        _annual_csv("irr_two_years", "ies.device.pv",
+                    "solar_irradiance", "W/m2", ANNUAL_IRR_W_M2),
+        "solar_irradiance", "W/m2",
+    )
+    temp_vid = _craft_series_version(
+        db, client, pid, user, "temp2y",
+        _annual_csv("temp_two_years", "ies.device.pv",
+                    "ambient_temperature", "°C", ANNUAL_TEMP_C),
+        "ambient_temperature", "°C",
+    )
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    revision = view["draft"]["revision"]
+    commands = [
+        {
+            "id": "c-bind-pv-irr",
+            "unit": "dataset",
+            "type": "dataset.bind",
+            "payload": {"dataset_version_id": irr_vid, "role": "input"},
+        },
+        {
+            "id": "c-bind-pv-temp",
+            "unit": "dataset",
+            "type": "dataset.bind",
+            "payload": {"dataset_version_id": temp_vid, "role": "input"},
+        },
+        {
+            "id": "fixture-declare-grid",
+            "unit": "model",
+            "type": "model.upsert_device",
+            "payload": {
+                "name": "grid1",
+                "device_type": "ies.device.grid_connection",
+                "kind": "existing",
+                "params": {"max_import_power_kw": 800, "max_export_power_kw": 200},
+                "position": {"x": 0.0, "y": 0.0},
+            },
+        },
+        {
+            "id": "fixture-declare-load1",
+            "unit": "model",
+            "type": "model.upsert_device",
+            "payload": {
+                "name": "load1",
+                "device_type": "ies.device.electric_load",
+                "kind": "new",
+                "params": {
+                    "peak_power_kw": 200,
+                    "electricity_demand": {
+                        "mode": "data_full",
+                        "dataset_version_id": load_vid,
+                    },
+                },
+                "position": {"x": 2.0, "y": 0.0},
+            },
+        },
+        {
+            "id": "fixture-declare-pv1",
+            "unit": "model",
+            "type": "model.upsert_device",
+            "payload": {
+                "name": "pv1",
+                "device_type": "ies.device.pv",
+                "kind": "new",
+                "params": {
+                    # temp_coeff 置 0（无温度折减；属性覆盖取标量，单位从 descriptor）：
+                    # 现行 PV 方程按 °C 硬编码“−25”，而降级把环境温度换算
+                    # 为 K（25°C→298.15K），恒温 25°C 会得出负发电系数
+                    # （既有设备模型问题，与 F4b 无关，见报告残留）；
+                    # 本测试只验收分年容量不断言它。
+                    "temp_coeff": 0,
+                    "solar_irradiance": {
+                        "mode": "data_full",
+                        "dataset_version_id": irr_vid,
+                    },
+                    "ambient_temperature": {
+                        "mode": "data_full",
+                        "dataset_version_id": temp_vid,
+                    },
+                },
+                "position": {"x": 1.0, "y": 1.0},
+            },
+        },
+        {
+            "id": "fixture-connect-pv-load",
+            "unit": "model",
+            "type": "model.upsert_connection",
+            "payload": {
+                "name": "c-pv-load1",
+                "from_device": "pv1",
+                "from_port": "electric_out",
+                "to_device": "load1",
+                "to_port": "electricity_in",
+            },
+        },
+        {
+            "id": "fixture-connect-grid-load",
+            "unit": "model",
+            "type": "model.upsert_connection",
+            "payload": {
+                "name": "c-grid-load1",
+                "from_device": "grid1",
+                "from_port": "electricity_import",
+                "to_device": "load1",
+                "to_port": "electricity_in",
+            },
+        },
+    ]
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": commands},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+    planning = {
+        "objective": {
+            "sense": "minimize",
+            "expression": (
+                "pv1__upfront_capex + 1 year * pv1__annual_fixed_om"
+                " + pv1__period_variable_om + import_meter__period_energy_purchase"
+            ),
+        },
+        "variables": {
+            "pv_cap_y0": {
+                "device_ref": "pv1",
+                "parameter": "rated_capacity_kwp",
+                "year_offset": 0,
+                "lower_bound": "0",
+                "upper_bound": "0",
+                "unit": "kWp",
+            },
+            "pv_cap_y1": {
+                "device_ref": "pv1",
+                "parameter": "rated_capacity_kwp",
+                "year_offset": 1,
+                "lower_bound": "0",
+                "upper_bound": str(int(ANNUAL_CAP_UPPER_KW)),
+                "unit": "kWp",
+            },
+        },
+        "constraints": {},
+    }
+    config_cases.save_planning_config(db, pid, planning, None, user.id)
+    revision = _set_explicit_calc(client, pid, user, revision)
+    instances = {
+        "pv1": {
+            "type": "costed",
+            "finance_type": "pv_system",
+            "drivers": {
+                "capacity_kw": {"property": "rated_capacity_kwp"},
+                "generated_kwh": {
+                    "interface": "electric_out",
+                    "aggregation": "integrate_positive",
+                },
+            },
+        },
+        "grid1": {"type": "none"},
+        "load1": {"type": "none"},
+    }
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    revision = _declare_assembly_sections(client, pid, user, view["draft"]["revision"], instances)
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [{
+                "id": "c-tariff-bind", "unit": "assembly",
+                "type": "assembly.set_tariff_bindings",
+                "payload": {"bindings": {
+                    "import_meter": {
+                        "price": "grid_import",
+                        "instance": "grid1",
+                        "interface": "electricity_import",
+                        "aggregation": "integrate_positive",
+                    }
+                }},
+            }],
+        },
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+    _bind_and_freeze(client, pid, user, load_vid, revision=revision)
+    return pid
+
+
+def _solution_scalar(variables: list[dict], name: str) -> float:
+    for item in variables:
+        if str(item["name"]) == name:
+            return float(item["value"])
+    raise AssertionError(f"解变量缺失: {name}")
+
+
+class TestAnnualBuildTrueSolve:
+    def test_two_year_build_serves_each_year_capacity(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """N=2 分年投产真求解：两年在产上限不同，建设变量有解。
+
+        首年容量 [0,0]、次年 [0,50]kW：首年购电必须等于全年负荷，
+        次年购电为负荷减去新建 50kW 光伏出力，次年建设变量为 50。
+        旧生成器以单值覆盖全年：提交能通过，但首年行必引用次年变量
+        （首年购电被低估）或次年行被首年零界锁死（无建设），本测试
+        在旧代码上为红。不断言“提交通过”即完成。
+        """
+        from sqlalchemy import select  # noqa: E402
+
+        user = make_user(db, "annual_owner_1")
+        pid = _prepare_annual_project(client, db, user)
+        rev_resp = client.put(
+            f"/api/projects/{pid}/config",
+            json={"calculation_config": dict(_CONFIG_BODY), "expected_revision": None},
+            headers=_h(client, user),
+        )
+        assert rev_resp.status_code == 200, rev_resp.text
+        rev = rev_resp.json()["revision"]
+        status, body = _submit_task(
+            client, pid, user, config={"config_revision": rev},
+            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            idempotency_key="annual-build-n2",
+        )
+        assert status == 201, body
+        task_id = int(body["task"]["id"])
+        claim = worker_app.acquire_attempt(db, task_id, "annual-e2e")
+        assert claim is not None
+        db.commit()
+
+        def factory() -> Session:
+            return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+
+        assert runner.run_task(factory, claim, worker_id="annual-e2e", compute=plane) == "completed"
+        task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task_row.status == "completed"
+        assert task_row.business_outcome == "normal_completion"
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        solution = sealed["compute_result"]["outputs"]["solution"]
+        y0_import, y1_import, span = _yearly_served(
+            solution["variables"], "grid1__electricity_import__t"
+        )
+        assert span == FULL_STEPS
+        assert y0_import == pytest.approx(ANNUAL_Y0_IMPORT, rel=1e-6)
+        assert y1_import == pytest.approx(ANNUAL_Y1_IMPORT, rel=1e-6)
+        assert (y0_import / YEAR1_STEPS) != pytest.approx(
+            y1_import / YEAR2_STEPS, rel=1e-3
+        )
+        assert _solution_scalar(solution["variables"], "pv_cap_y0") == pytest.approx(
+            0.0, abs=1e-6
+        )
+        assert _solution_scalar(solution["variables"], "pv_cap_y1") == pytest.approx(
+            ANNUAL_CAP_UPPER_KW, rel=1e-6
+        )

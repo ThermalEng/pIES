@@ -212,7 +212,8 @@ class TestSubmitBoundaryAnnualScope:
         assert old in text
         return text.replace(old, new)
 
-    def test_positive_fixed_cost_requires_explicit_upper(self, init_registry):
+    def test_positive_fixed_cost_rejected_without_upper(self, init_registry):
+        # F4b：离散投产指示实现前，正固定成本案例明确拒收。
         text = self._object_finance_text(_load("campus.assembly.yaml")).replace(
             '      upper_bound: "500"\n', ""
         )
@@ -221,16 +222,17 @@ class TestSubmitBoundaryAnnualScope:
             finance_snapshots={"fin:test-fixed": self._fixed_snapshot()},
             evaluation_years=1,
         )
-        _reason(result, "missing_required_upper_bound")
+        _reason(result, "positive_fixed_cost_unsupported")
 
-    def test_positive_fixed_cost_with_upper_passes(self, init_registry):
+    def test_positive_fixed_cost_rejected_with_upper(self, init_registry):
+        # F4b：已有显式上界也不得放行到旧按常数计费路径。
         text = self._object_finance_text(_load("campus.assembly.yaml"))
         result = _validate(
             text,
             finance_snapshots={"fin:test-fixed": self._fixed_snapshot()},
             evaluation_years=1,
         )
-        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
+        _reason(result, "positive_fixed_cost_unsupported")
 
     def test_zero_fixed_cost_needs_no_upper(self, init_registry):
         # 园区样例 pv_system upfront fixed 为 0: 去掉上界仍签发。

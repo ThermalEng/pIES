@@ -380,8 +380,9 @@ def _coeffs(expr) -> dict:
 
 def test_project_inventory_counts(built) -> None:
     model, units, _ = built
-    assert len(model.variables) == 61321
-    assert len(model.constraints) == 52561
+    # F4b：单年度接管新增 1 个在产变量 + 1 条累加定义行（N=1）。
+    assert len(model.variables) == 61322
+    assert len(model.constraints) == 52562
     assert model.sense == "minimize"
     assert "tank_cap" in units
     assert units["tank_cap"] == "kW"
@@ -450,8 +451,9 @@ def test_objective_power_per_year_rejected() -> None:
 def test_objective_finance_and_tariff_terms(built) -> None:
     model, _, objective_unit = built
     coeffs = _coeffs(model.objective)
-    # 年费率 SI 归一后 × 1 year(31536000s) → 0.035 CNY/W
-    assert coeffs["tank_cap"] == pytest.approx(0.035, rel=1e-9)
+    # 年费率 SI 归一后 × 1 year(31536000s) → 0.035 CNY/W。
+    # F4b：年度接管后目标引用年在产变量（N=1 时 s_0 与原单变量值一致）。
+    assert coeffs["tank1__rated_kw__inservice_y0"] == pytest.approx(0.035, rel=1e-9)
     # 购能价 0.7 CNY/kWh → 每瓦负荷流量 0.0007 CNY
     assert coeffs["load1__heat_in__t0"] == pytest.approx(0.0007, rel=1e-9)
     assert coeffs["load1__heat_in__t8759"] == pytest.approx(0.0007, rel=1e-9)
@@ -766,21 +768,106 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
     assert by_var["gen1__dispatch__t0"].upper == pytest.approx(500000.0)
     assert by_var["gen1__spare__t0"].upper is None
     rows = {row.name: row for row in model.constraints}
+    # F4b：容量行引用当年在产变量（此处 N=1，s_0 由定义行钉住与原单变量等值）。
     cap = rows["gen1__power_out__plan_max__t0"]
     assert (cap.sense, cap.rhs) == ("le", 0.0)
     assert _coeffs(cap.expression) == {
-        "gen1__power_out__t0": 1.0, "gen_cap": -1.0,
+        "gen1__power_out__t0": 1.0, "gen1__cap_kw__inservice_y0": -1.0,
     }
     floor = rows["gen1__power_out__plan_min__t0"]
     assert (floor.sense, floor.rhs) == ("ge", 0.0)
     assert _coeffs(floor.expression) == {
-        "gen1__power_out__t0": 1.0, "gen_floor": -1.0,
+        "gen1__power_out__t0": 1.0, "gen1__floor_kw__inservice_y0": -1.0,
     }
     inner = rows["gen1__dispatch__plan_max__t0"]
     assert _coeffs(inner.expression) == {
-        "gen1__dispatch__t0": 1.0, "gen_cap": -1.0,
+        "gen1__dispatch__t0": 1.0, "gen1__cap_kw__inservice_y0": -1.0,
     }
     assert "gen1__spare__plan_max__t0" in rows
+
+
+def _gen_annual_inputs():
+    """双年容量变量输入(N=2)：同一参数 y0 零建设、y1 可建。
+
+    起始年 2026 为平年，年界为 step 8760。返回 (model, units, decls)。
+    """
+    _artifact, models, _materialized, finance, config = _gen_inputs()
+    doc = json.loads(_artifact.canonical_text)
+    cap_y0 = {
+        "device_ref": "gen1",
+        "parameter": "cap_kw",
+        "year_offset": 0,
+        "lower_bound": "0",
+        "upper_bound": "0",
+        "unit": "kW",
+    }
+    cap_y1 = dict(cap_y0, year_offset=1, upper_bound="500")
+    doc["planning"]["variables"] = {
+        "cap_y0": cap_y0,
+        "cap_y1": cap_y1,
+        "gen_floor": {
+            "device_ref": "gen1",
+            "parameter": "floor_kw",
+            "year_offset": 0,
+            "lower_bound": "10",
+            "upper_bound": "500",
+            "unit": "kW",
+        },
+        "spare_cap": {
+            "device_ref": "gen1",
+            "parameter": "spare_kw",
+            "year_offset": 0,
+            "lower_bound": "10",
+            "upper_bound": None,
+            "unit": "kW",
+        },
+    }
+    artifact = ValidatedAssemblyArtifact(
+        canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
+    )
+    materialized = materialize_non_predictive_series(
+        artifact, {}, evaluation_years=2,
+    )
+    model, units, _ = build_project_model(
+        artifact, models, materialized, finance, config,
+    )
+    decls = finance_component_declarations(artifact, models, materialized, finance)
+    return model, units, decls
+
+
+def test_annual_build_vars_form_inservice_capacity_per_year() -> None:
+    """跨年同参数变量：在产容量按年累加，逐年上限引用当年在产。
+
+    年 k 在产 = k 年及以前新增量之和；未声明年份新增量为 0。
+    旧实现以单值覆盖全年：首年行必引用次年变量（或定义行缺席），
+    本测试在旧代码上为红。
+    """
+    model, units, decls = _gen_annual_inputs()
+    s0 = "gen1__cap_kw__inservice_y0"
+    s1 = "gen1__cap_kw__inservice_y1"
+    assert units[s0] == "kW"
+    assert units[s1] == "kW"
+    rows = {row.name: row for row in model.constraints}
+    d0 = rows["gen1__cap_kw__inservice_def_y0"]
+    assert (d0.sense, d0.rhs) == ("eq", 0.0)
+    assert _coeffs(d0.expression) == {s0: 1.0, "cap_y0": -1.0}
+    d1 = rows["gen1__cap_kw__inservice_def_y1"]
+    assert (d1.sense, d1.rhs) == ("eq", 0.0)
+    assert _coeffs(d1.expression) == {s1: 1.0, "cap_y0": -1.0, "cap_y1": -1.0}
+    for step in (0, 8759):
+        row = rows[f"gen1__power_out__plan_max__t{step}"]
+        assert (row.sense, row.rhs) == ("le", 0.0)
+        assert _coeffs(row.expression) == {
+            f"gen1__power_out__t{step}": 1.0, s0: -1.0,
+        }
+    row1 = rows["gen1__power_out__plan_max__t8760"]
+    assert _coeffs(row1.expression) == {"gen1__power_out__t8760": 1.0, s1: -1.0}
+    by_var = {var.name: var for var in model.variables}
+    assert by_var["cap_y0"].upper == pytest.approx(0.0)
+    assert by_var["cap_y1"].upper == pytest.approx(500000.0)
+    annual = decls["gen1__annual_fixed_om"]
+    assert set(annual["terms"]) == {s0, s1}
+    assert annual["terms"][s0] == pytest.approx(annual["terms"][s1])
 
 
 def test_sale_tariff_sign_flips() -> None:
@@ -930,8 +1017,11 @@ def test_finance_component_declarations_cover_produced_idents() -> None:
     annual = decls["tank1__annual_fixed_om"]
     assert annual["unit"] == "CNY/a"
     assert annual["caliber"] == "annual"
-    # cap 驱动绑定规划变量 tank_cap：35 CNY/kW/a → 内部 35/(1000×31536000)。
-    assert annual["terms"] == {"tank_cap": pytest.approx(35.0 / 31536000.0 / 1000.0)}
+    # cap 驱动绑定年度在产变量：35 CNY/kW/a → 内部 35/(1000×31536000)。
+    # F4b：N=1 时 s_0 与原单变量值一致，引用名改为在产变量。
+    assert annual["terms"] == {
+        "tank1__rated_kw__inservice_y0": pytest.approx(35.0 / 31536000.0 / 1000.0)
+    }
     assert annual["constant"] == pytest.approx(0.0)
     variable = decls["tank1__period_variable_om"]
     assert variable["unit"] == "CNY"

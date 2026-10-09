@@ -58,6 +58,7 @@ from iesplan.computation.sequences import (
 )
 from iesplan.core.contracts import (
     compile_planning_expression,
+    horizon_year_boundary_steps,
 )
 from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 from iesplan.core.contracts.planning_expression import PlanningExpression
@@ -112,6 +113,17 @@ def _to_internal(value: float, unit: str) -> float:
     if dims_of(unit) == Counter({"currency": 1}):
         return float(value)
     return to_si(float(value), unit)
+
+
+def _year_of_step(boundaries: tuple[int, ...], step: int) -> int:
+    """step 所属年份索引（boundaries 为年度起始下标，首项恒 0）。"""
+    year = 0
+    for index in range(1, len(boundaries)):
+        if step >= boundaries[index]:
+            year = index
+        else:
+            break
+    return year
 
 
 #: 单一物理量纲 → SI 基准单位符号（目标单位报告用；仅公开 dims_of 推导）。
@@ -235,6 +247,7 @@ def _new_builder(
         finance=finance,
         point_count=point_count,
         step_s=step_s,
+        evaluation_years=materialized.evaluation_years,
     )
 
 
@@ -268,6 +281,7 @@ class _ProjectBuilder:
         finance: EffectiveFinanceConfig,
         point_count: int,
         step_s: float,
+        evaluation_years: int,
     ) -> None:
         self.doc = doc
         self.devices = devices
@@ -275,6 +289,7 @@ class _ProjectBuilder:
         self.finance = finance
         self.point_count = point_count
         self.step_s = step_s
+        self.evaluation_years = evaluation_years
         self.series: dict[tuple[str, str], list[float]] = {}
         for entry in series:
             self.series[(entry.device, entry.interface)] = list(entry.values)
@@ -289,9 +304,21 @@ class _ProjectBuilder:
         self.unit_map: dict[str, str] = {}
         planning = doc["planning"]
         self.plan_vars: Mapping[str, Any] = planning.get("variables") or {}
-        self.bound_prop: dict[tuple[str, str], str] = {}
+        #: (实例, 参数) → [(年份索引, 年度新增变量名)]（按年排序）。
+        #: 年 k 在产可用容量 = k 年及以前新增量之和；未声明年份新增量为 0。
+        self.annual: dict[tuple[str, str], list[tuple[int, str]]] = {}
         for var_name, var in self.plan_vars.items():
-            self.bound_prop[(var["device_ref"], var["parameter"])] = var_name
+            key = (var["device_ref"], var["parameter"])
+            self.annual.setdefault(key, []).append((var["year_offset"], var_name))
+        for entries in self.annual.values():
+            entries.sort()
+        baseline = doc["project_baseline"]
+        boundaries = horizon_year_boundary_steps(
+            baseline["resolution"], baseline["start_year"], evaluation_years,
+        )
+        self.step_year: list[int] = [
+            _year_of_step(boundaries, step) for step in range(point_count)
+        ]
 
     # ------------------------------------------------------------------
     # 变量声明
@@ -322,24 +349,95 @@ class _ProjectBuilder:
         var = self.models[inst].variables[prop]
         return float(var.value), var.unit  # type: ignore[arg-type]
 
+    def _inservice_name(self, inst: str, param: str, year: int) -> str:
+        """年 k 在产可用容量 LP 变量名（求解派生变量，由定义行钉住）。"""
+        return f"{inst}__{param}__inservice_y{year}"
+
+    def _inservice_builds(self, inst: str, param: str, year: int) -> list[str]:
+        """年 k 在产涉及的年度新增变量名（年份 ≤ k；未声明年份贡献 0）。"""
+        entries = self.annual.get((inst, param)) or []
+        return [vname for y, vname in entries if y <= year]
+
+    def _annual_envelope(
+        self, inst: str, param: str, unit: str, side: str,
+    ) -> float | None:
+        """年度变量界的静态包络（upper 取最大，lower 取最小；任一缺失即 None）。"""
+        key = "upper_bound" if side == "upper" else "lower_bound"
+        vals: list[float] = []
+        for _, vname in self.annual[(inst, param)]:
+            raw = self.plan_vars[vname].get(key)
+            if raw is None:
+                return None
+            vals.append(float(raw))
+        pick = max(vals) if side == "upper" else min(vals)
+        return _to_internal(pick, unit)
+
+    def _declare_inservice(self, inst: str, param: str, unit: str) -> None:
+        """年度新增变量 + 年在产变量 + 累加定义行（每年一条等式）。
+
+        各年新增变量保留用户声明名与界；在产 s_k 由定义行钉为
+        k 年及以前新增量之和（无新增年份贡献 0）。
+        """
+        for _, vname in self.annual[(inst, param)]:
+            spec = self.plan_vars[vname]
+            vunit = spec.get("unit") or unit
+            lower = spec.get("lower_bound")
+            upper = spec.get("upper_bound")
+            self._declare(
+                vname,
+                None if lower is None else _to_internal(float(lower), vunit),
+                None if upper is None else _to_internal(float(upper), vunit),
+                "continuous", vunit,
+            )
+        for year in range(self.evaluation_years):
+            sname = self._inservice_name(inst, param, year)
+            total = 0.0
+            unbounded = False
+            for _, vname in self.annual[(inst, param)]:
+                if self.plan_vars[vname]["year_offset"] > year:
+                    continue
+                raw = self.plan_vars[vname].get("upper_bound")
+                if raw is None:
+                    unbounded = True
+                    break
+                total += float(raw)
+            cap = None if unbounded else total
+            self._declare(
+                sname, None,
+                None if cap is None else _to_internal(cap, unit),
+                "continuous", unit,
+            )
+            terms = tuple(
+                sorted(
+                    [((sname, 0), 1.0)]
+                    + [((v, 0), -1.0) for v in self._inservice_builds(inst, param, year)]
+                )
+            )
+            self.rows.append(
+                LinearConstraint(
+                    name=f"{inst}__{param}__inservice_def_y{year}",
+                    expression=LinearExpression(terms=terms, constant=0.0),
+                    sense="eq",
+                    rhs=0.0,
+                )
+            )
+
     def _limit(
         self, inst: str, unit: str, number: float | None, ref: str | None,
         side: str,
     ) -> tuple[float | None, str | None]:
         """值域界内部值与接管规划变量名。
 
-        数值直接换算；未被接管的 property 引用按实例解析。被规划
-        变量接管的 property 不再用实例旧值：静态安全界取规划变量
-        对应界（maximum 取 upper_bound，minimum 取 lower_bound，
-        缺失则 None），并返回规划变量名供逐时容量行使用。
+        数值直接换算；未被接管的 property 引用按实例解析。被年度
+        变量接管的 property 不再用实例旧值：静态求解界取各年变量界
+        的包络（maximum 取各年 upper 之最大，minimum 取各年 lower
+        之最小，任一缺失则 None；精确逐年约束由在产容量行承担），
+        不再返回单变量名（第二返回值恒为 None，由调用方按在产建行）。
         """
-        if ref is not None and (inst, ref) in self.bound_prop:
-            pname = self.bound_prop[(inst, ref)]
-            spec = self.plan_vars[pname]
-            punit = spec.get("unit") or unit
-            raw = spec.get("upper_bound" if side == "upper" else "lower_bound")
-            bound = None if raw is None else _to_internal(float(raw), punit)
-            return bound, pname
+        if ref is not None and (inst, ref) in self.annual:
+            first = self.plan_vars[self.annual[(inst, ref)][0][1]]
+            punit = first.get("unit") or unit
+            return self._annual_envelope(inst, ref, punit, side), None
         if ref is not None:
             value, punit = self._prop_value_unit(inst, ref)
             return _to_internal(value, punit), None
@@ -376,53 +474,64 @@ class _ProjectBuilder:
         for name, var in contribution.variables.items():
             if var.kind == "property":
                 key = (inst, name)
-                if key in self.bound_prop:
-                    pname = self.bound_prop[key]
-                    spec = self.plan_vars[pname]
-                    unit = spec.get("unit") or var.unit
-                    lower = spec.get("lower_bound")
-                    upper = spec.get("upper_bound")
-                    lower_f = None if lower is None else _to_internal(float(lower), unit)
-                    upper_f = None if upper is None else _to_internal(float(upper), unit)
-                    symbols[name] = ("var", lower_f, upper_f)
-                    self._declare(pname, lower_f, upper_f, "continuous", unit)
+                if key in self.annual:
+                    first = self.plan_vars[self.annual[key][0][1]]
+                    unit = first.get("unit") or var.unit
+                    self._declare_inservice(inst, name, unit)
+                    symbols[name] = (
+                        "var",
+                        self._annual_envelope(inst, name, unit, "lower"),
+                        self._annual_envelope(inst, name, unit, "upper"),
+                    )
                 else:
                     symbols[name] = ("const", prop_const[name])
             else:
-                lower, pname_lo = self._limit(
+                lower, _ = self._limit(
                     inst, var.unit,
                     var.valid_range[0] if var.valid_range else None,
                     var.minimum_property_ref, "lower",
                 )
-                upper, pname_hi = self._limit(
+                upper, _ = self._limit(
                     inst, var.unit,
                     var.valid_range[1] if var.valid_range else None,
                     var.maximum_property_ref, "upper",
                 )
                 symbols[name] = ("var", lower, upper)
-                if pname_lo is not None:
-                    caps.append((name, pname_lo, "ge"))
-                if pname_hi is not None:
-                    caps.append((name, pname_hi, "le"))
+                if (
+                    var.minimum_property_ref is not None
+                    and (inst, var.minimum_property_ref) in self.annual
+                ):
+                    caps.append((name, var.minimum_property_ref, "ge"))
+                if (
+                    var.maximum_property_ref is not None
+                    and (inst, var.maximum_property_ref) in self.annual
+                ):
+                    caps.append((name, var.maximum_property_ref, "le"))
         symbols[TIMELINE_STEP_DURATION_VAR] = ("const", self.step_s)
         flow_names = sorted(
             set(self._referenced_flows(inst, contribution)) | set(bus_flows)
         )
         for iface_name in flow_names:
             flow = contribution.interfaces[iface_name]
-            lower, pname_lo = self._limit(
+            lower, _ = self._limit(
                 inst, flow.unit, flow.valid_range[0],
                 flow.minimum_property_ref, "lower",
             )
-            upper, pname_hi = self._limit(
+            upper, _ = self._limit(
                 inst, flow.unit, flow.valid_range[1],
                 flow.maximum_property_ref, "upper",
             )
             symbols[iface_name] = ("var", lower, upper)
-            if pname_lo is not None:
-                caps.append((iface_name, pname_lo, "ge"))
-            if pname_hi is not None:
-                caps.append((iface_name, pname_hi, "le"))
+            if (
+                flow.minimum_property_ref is not None
+                and (inst, flow.minimum_property_ref) in self.annual
+            ):
+                caps.append((iface_name, flow.minimum_property_ref, "ge"))
+            if (
+                flow.maximum_property_ref is not None
+                and (inst, flow.maximum_property_ref) in self.annual
+            ):
+                caps.append((iface_name, flow.maximum_property_ref, "le"))
             for step in range(self.point_count):
                 self._declare(
                     self._tech_name(inst, iface_name, step),
@@ -441,16 +550,17 @@ class _ProjectBuilder:
         for state in contribution.states:
             ref = contribution.variables[state].initial_property_ref
             initial[state] = prop_const[ref]  # type: ignore[index]
-        for local, pname, sense in caps:
+        for local, ref, sense in caps:
             for step in range(self.point_count):
                 vname = self._tech_name(inst, local, step)
+                sname = self._inservice_name(inst, ref, self.step_year[step])
                 suffix = "plan_max" if sense == "le" else "plan_min"
                 self.rows.append(
                     LinearConstraint(
                         name=f"{inst}__{local}__{suffix}__t{step}",
                         expression=LinearExpression(
                             terms=tuple(
-                                sorted((((vname, 0), 1.0), ((pname, 0), -1.0)))
+                                sorted((((vname, 0), 1.0), ((sname, 0), -1.0)))
                             ),
                             constant=0.0,
                         ),
@@ -539,12 +649,12 @@ class _ProjectBuilder:
             name, offset = key
             if name in qualified_vars:
                 return qualified_vars[name]
-            if (inst, name) in self.bound_prop:
+            if (inst, name) in self.annual:
                 if offset != 0:
                     raise LoweringUnsupportedError(
                         f"规划接管 property {name!r} 不得带时间索引"
                     )
-                return self.bound_prop[(inst, name)]
+                return self._inservice_name(inst, name, self.step_year[step])
             return self._tech_name(inst, name, step + offset)
 
         for row in lowered.constraints:
@@ -665,21 +775,38 @@ class _ProjectBuilder:
             out.add_const(_money_to_internal(comp.fixed))
         for driver, cost in (comp.linear or {}).items():
             coeff = _to_internal(float(cost.unit_cost.value), cost.unit_cost.unit)
-            out.add_scaled(self._driver_affine(inst, driver), coeff)
+            out.add_scaled(self._driver_affine(inst, driver, component), coeff)
         return out
 
-    def _driver_affine(self, inst: str, driver: str) -> _AffineAcc:
-        """单个 driver 的数量仿射式（property 标量或接口能量）。"""
+    def _driver_affine(self, inst: str, driver: str, component: str) -> _AffineAcc:
+        """单个 driver 的数量仿射式（property 标量或接口能量）。
+
+        年度接管的容量 property 按分量逐年展开：``upfront_capex`` 线性
+        跟随新增年份（各年新增量之和）；``annual_fixed_om`` 线性按各年
+        在产容量求和（各年在产之和）；``period_variable_om`` 只对能量
+        （接口）按 step 切片，容量 property 目标无年度语义，超出首版
+        能力明确拒绝。未接管 property 保持旧行为（实例常量）。
+        """
         out = _AffineAcc()
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
         target = instances[inst]["drivers"][driver]
         if "property" in target:
             prop = target["property"]
-            if (inst, prop) in self.bound_prop:
-                out.add_term(self.bound_prop[(inst, prop)], 1.0)
+            if (inst, prop) not in self.annual:
+                out.add_const(self._prop_const(inst, prop))
                 return out
-            out.add_const(self._prop_const(inst, prop))
-            return out
+            if component == "upfront_capex":
+                for _, vname in self.annual[(inst, prop)]:
+                    out.add_term(vname, 1.0)
+                return out
+            if component == "annual_fixed_om":
+                for year in range(self.evaluation_years):
+                    out.add_term(self._inservice_name(inst, prop, year), 1.0)
+                return out
+            raise LoweringUnsupportedError(
+                f"成本分量 {component!r} 的容量 property 驱动 "
+                f"{inst}.{prop} 超出首版能力"
+            )
         iface = target["interface"]
         aggregation = target["aggregation"]
         contribution = self.models[inst]
