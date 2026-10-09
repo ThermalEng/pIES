@@ -23,7 +23,7 @@ MPS-ready 的 ``LinearModel``，并附带结果反向换算所需的最小单位
 母线：连接只定义连通性，按 carrier + 无向连通分量逐 step 生成一条
 守恒式（out/bidirectional 为供给正项，in 为消耗负项）；孤立端口
 不建平衡式。值域界可引用实例 property（额定能力），实例级解析。
-时变电价序列值不在五项输入内，首个链路只支持 constant tariff，
+时变电价由第三项价格区逐点计价（``constant`` 同一逐点语义），
 能力核对留待 GeneratorDescriptor 切片。
 
 规划变量接管其绑定的设备 property：成本 driver 与技术方程中，
@@ -51,7 +51,11 @@ from iesplan.computation.generators.linear import (
     lower_relation,
 )
 from iesplan.computation.protocols import CalculationConfig
-from iesplan.computation.sequences import MaterializedSeries, MaterializedSet
+from iesplan.computation.sequences import (
+    MaterializedPriceSeries,
+    MaterializedSeries,
+    MaterializedSet,
+)
 from iesplan.core.contracts import (
     compile_planning_expression,
 )
@@ -227,6 +231,7 @@ def _new_builder(
         devices=doc["devices"],
         models=models,
         series=materialized.series,
+        prices=materialized.prices,
         finance=finance,
         point_count=point_count,
         step_s=step_s,
@@ -259,6 +264,7 @@ class _ProjectBuilder:
         devices: Mapping[str, Any],
         models: Mapping[str, DeviceMathContribution],
         series: tuple[MaterializedSeries, ...],
+        prices: tuple[MaterializedPriceSeries, ...] = (),
         finance: EffectiveFinanceConfig,
         point_count: int,
         step_s: float,
@@ -272,6 +278,11 @@ class _ProjectBuilder:
         self.series: dict[tuple[str, str], list[float]] = {}
         for entry in series:
             self.series[(entry.device, entry.interface)] = list(entry.values)
+        self.prices: dict[str, list[float]] = {}
+        for entry in prices:
+            self.prices[entry.price_id] = [
+                _to_internal(v, entry.unit) for v in entry.values
+            ]
         self._series_si_cache: dict[tuple[str, str], list[float]] = {}
         self.variables: dict[str, LinearVariable] = {}
         self.rows: list[LinearConstraint] = []
@@ -690,36 +701,75 @@ class _ProjectBuilder:
         return _to_internal(value, unit)
 
     def _tariff_affine(self, binding_id: str) -> _AffineAcc:
-        """单个计费绑定的已带符号记账分量仿射式。"""
+        """单个计费绑定的已带符号记账分量仿射式（逐点 ``price[t]×e[t]``）。
+
+        ``constant`` 价格即每点同值的逐点计价（与 ``price×Σe[t]`` 结果
+        一致，语义仍为逐点）；``time_series`` 取第三项已物化价格区
+        同 ``price_id`` 的全周期序列逐点相乘（长度/分辨率/单位由提交
+        边界核对，此处只消费不复核）。符号按财务方向：
+        ``purchase`` 为 ``+``、`sale` 为 ``-``；价格自身的正/零/负按
+        财务契约自然通过（负价按该方向反转），不做钳零或聚合。
+        """
         out = _AffineAcc()
         binding = (self.doc.get("tariff_bindings") or {})[binding_id]
         price = self.finance.energy_prices[binding["price"]]
-        if price.kind != "constant":
-            raise LoweringUnsupportedError(
-                f"计费绑定 {binding_id!r} 的时变价格序列值不在五项输入内"
-            )
-        price_si = _to_internal(float(price.value.value), price.value.unit)  # type: ignore[union-attr]
         sign = 1.0 if price.direction == "purchase" else -1.0
-        energy = self._driver_energy(
+        if price.kind == "constant":
+            price_si = _to_internal(float(price.value.value), price.value.unit)  # type: ignore[union-attr]
+            energy = self._driver_energy(
+                binding["instance"], binding["interface"], binding["aggregation"],
+            )
+            out.add_scaled(energy, sign * price_si)
+            return out
+        if price.kind != "time_series":
+            raise LoweringUnsupportedError(
+                f"计费绑定 {binding_id!r} 的价格类型未知: {price.kind!r}"
+            )
+        price_values = self.prices[binding["price"]]
+        energy_steps = self._driver_energy_steps(
             binding["instance"], binding["interface"], binding["aggregation"],
         )
-        out.add_scaled(energy, sign * price_si)
+        for step, (is_const, name_or_value, coeff) in enumerate(energy_steps):
+            charge = sign * price_values[step] * coeff
+            if is_const:
+                out.add_const(charge * name_or_value)
+            else:
+                out.add_term(name_or_value, charge)
         return out
 
     def _driver_energy(self, inst: str, iface: str, aggregation: str) -> _AffineAcc:
         """接口能量序列仿射式（流变量或物化序列，integrate 乘步长秒）。"""
         out = _AffineAcc()
-        contribution = self.models[inst]
-        if (inst, iface) in self.series:
-            values = self._series_si(inst, iface, contribution)
-            factor = self.step_s if aggregation == "integrate_positive" else 1.0
-            out.add_const(sum(values) * factor)
-            return out
-        prefix = f"{inst}__{iface}"
-        for step in range(self.point_count):
-            coeff = self.step_s if aggregation == "integrate_positive" else 1.0
-            out.add_term(f"{prefix}__t{step}", coeff)
+        for is_const, name_or_value, coeff in self._driver_energy_steps(
+            inst, iface, aggregation
+        ):
+            if is_const:
+                out.add_const(name_or_value * coeff)
+            else:
+                out.add_term(name_or_value, coeff)
         return out
+
+    def _driver_energy_steps(
+        self, inst: str, iface: str, aggregation: str,
+    ) -> list[tuple[bool, Any, float]]:
+        """接口能量逐点形态（供时变价格逐点相乘）。
+
+        每点为 ``(is_const, 名或值, 系数)``：物化序列点给出 SI 值
+        （常量），流变量点给出 LP 名；系数为聚合因子（integrate 取
+        步长秒，否则 1.0）。与 ``_driver_energy`` 同一事实展开。
+        """
+        contribution = self.models[inst]
+        factor = self.step_s if aggregation == "integrate_positive" else 1.0
+        if (inst, iface) in self.series:
+            return [
+                (True, value, factor)
+                for value in self._series_si(inst, iface, contribution)
+            ]
+        prefix = f"{inst}__{iface}"
+        return [
+            (False, f"{prefix}__t{step}", factor)
+            for step in range(self.point_count)
+        ]
 
     def _ident_affine(self, ident: str) -> _AffineAcc:
         """规划财务标识符 → 仿射式（`<前缀>__<分量>` 首个 __ 切分）。"""
@@ -830,8 +880,8 @@ class _ProjectBuilder:
         ``{unit, caliber, constant, terms}``，constant/terms 为内部单位
         仿射系数（LP 名 → 系数），与目标共用同一分量展开函数
         （``_cost_affine``/``_tariff_affine``），不依赖规划目标写法。
-        未声明的分量不存在，不声明、不补零；时变价格等超出首版能力者
-        沿 ``_tariff_affine`` 直接拒绝。
+        未声明的分量不存在，不声明、不补零；未知价格类型沿
+        ``_tariff_affine`` 直接拒绝。
         """
         out: dict[str, Mapping[str, object]] = {}
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}

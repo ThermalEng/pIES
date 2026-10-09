@@ -301,3 +301,139 @@ def test_submit_coverage_blocks_missing_object_017(db, tmp_path) -> None:  # noq
             evaluation={"evaluation_years": 1}, effective=effective,
         )
     assert exc_info.value.code == "TASK-REQ-017"
+
+
+# ---------------------------------------------------------------------------
+# F3b: Worker 物化(绑定引用→冻结对象→价格区)+完成态透传
+# ---------------------------------------------------------------------------
+
+def _stored_price(db, tmp_path, values: list[str], count: int) -> str:  # noqa: ANN001, ANN201
+    from iesplan.config import settings  # noqa: E402
+
+    settings.data_dir = tmp_path
+    raw = _price_bytes(_hourly_rows(values, count))
+    return put_object(db, raw, "text/csv", "user_upload").oid
+
+
+def test_worker_materializes_only_referenced_series(db, tmp_path) -> None:  # noqa: ANN001, ANN201
+    from iesplan.application.worker.compute_cases import _materialize_price_series  # noqa: E402
+
+    oid = _stored_price(db, tmp_path, ["0.4", "0.45"], 8760)
+    effective = _effective_with_price(oid, 8760)
+    prices = _materialize_price_series(db, _artifact(), effective)
+    assert [p.price_id for p in prices] == ["pv_export"]
+    assert prices[0].point_count == 8760
+    assert prices[0].resolution == "1h"
+    assert prices[0].unit == "CNY/kWh"
+    assert prices[0].values[:2] == (0.4, 0.45)
+    assert prices[0].source == {"kind": "price_series", "object_id": oid}
+
+
+def test_worker_skips_unreferenced_series(db, tmp_path) -> None:  # noqa: ANN001, ANN201
+    from test_finance_triplet import _profile_payload  # noqa: E402
+
+    from iesplan.application.worker.compute_cases import _materialize_price_series  # noqa: E402
+    from iesplan.finance.triplet import FinanceProfile, merge_effective  # noqa: E402
+
+    oid = _stored_price(db, tmp_path, ["0.4"], 8760)
+    payload = _profile_payload()
+    payload["energy_prices"]["pv_export"] = {
+        "carrier": "electricity",
+        "direction": "sale",
+        "kind": "time_series",
+        "ref": oid,
+        "series_meta": {"resolution": "1h", "point_count": 8760, "unit": "CNY/kWh"},
+    }
+    payload["energy_prices"]["unused_tou"] = {
+        "carrier": "electricity",
+        "direction": "purchase",
+        "kind": "time_series",
+        "ref": oid,
+        "series_meta": {"resolution": "1h", "point_count": 8760, "unit": "CNY/kWh"},
+    }
+    effective = merge_effective(FinanceProfile.from_dict(payload), None)
+    prices = _materialize_price_series(db, _artifact(), effective)
+    assert [p.price_id for p in prices] == ["pv_export"]
+
+
+def test_worker_skips_without_time_series(db, tmp_path) -> None:  # noqa: ANN001, ANN201
+    from test_finance_triplet import _profile_payload  # noqa: E402
+
+    from iesplan.application.worker.compute_cases import _materialize_price_series  # noqa: E402
+    from iesplan.config import settings  # noqa: E402
+    from iesplan.finance.triplet import FinanceProfile, merge_effective  # noqa: E402
+
+    settings.data_dir = tmp_path
+    payload = _profile_payload()
+    payload["energy_prices"]["pv_export"] = {
+        "carrier": "electricity",
+        "direction": "sale",
+        "kind": "constant",
+        "value": {"value": "0.4", "unit": "CNY/kWh"},
+    }
+    effective = merge_effective(FinanceProfile.from_dict(payload), None)
+    assert _materialize_price_series(db, _artifact(), effective) == ()
+
+
+def test_worker_missing_object_fails_naturally(db, tmp_path) -> None:  # noqa: ANN001, ANN201
+    from iesplan.application.worker.compute_cases import _materialize_price_series  # noqa: E402
+    from iesplan.config import settings  # noqa: E402
+    from iesplan.core.errors import NotFoundError  # noqa: E402
+    from iesplan.storage.contracts import ObjectCorruptError  # noqa: E402
+
+    settings.data_dir = tmp_path
+    effective = _effective_with_price("0" * 64, 8760)
+    with pytest.raises((NotFoundError, ObjectCorruptError)):
+        _materialize_price_series(db, _artifact(), effective)
+
+
+def test_worker_corrupt_bytes_fail_visibly(db, tmp_path) -> None:  # noqa: ANN001, ANN201
+    from iesplan.application.worker.compute_cases import _materialize_price_series  # noqa: E402
+    from iesplan.config import settings  # noqa: E402
+
+    settings.data_dir = tmp_path
+    oid = put_object(db, b"step,price\n0,abc\n", "text/csv", "user_upload").oid
+    effective = _effective_with_price(oid, 8760)
+    with pytest.raises(ValueError, match="不可解析"):
+        _materialize_price_series(db, _artifact(), effective)
+
+
+def test_complete_materialized_carries_prices() -> None:
+    from iesplan.application.worker.compute_cases import complete_materialized  # noqa: E402
+    from iesplan.computation import (  # noqa: E402
+        MaterializedPriceSeries,
+        MaterializedSeries,
+        MaterializedSet,
+    )
+
+    base = MaterializedSet(
+        evaluation_years=2,
+        series=(),
+        pending_predict=(
+            {"device": "d", "interface": "p", "target_type": "t", "object_id": "o"},
+        ),
+        prices=(
+            MaterializedPriceSeries(
+                price_id="pv_export",
+                point_count=2,
+                resolution="1h",
+                unit="CNY/kWh",
+                values=(0.4, 0.45),
+                source={"kind": "price_series", "object_id": "o" * 64},
+            ),
+        ),
+    )
+    completed = complete_materialized(
+        base,
+        (
+            MaterializedSeries(
+                device="d", interface="p", mode="data_predict",
+                resolution="1h", point_count=2, values=(1.0, 2.0),
+                source={"kind": "data_predict", "object_id": "o"},
+            ),
+        ),
+    )
+    assert completed.pending_predict == ()
+    assert [p.price_id for p in completed.prices] == ["pv_export"]
+    assert completed.prices[0].values == (0.4, 0.45)
+    assert len(completed.series) == 1

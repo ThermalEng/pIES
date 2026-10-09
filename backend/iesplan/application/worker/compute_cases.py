@@ -49,6 +49,7 @@ from iesplan.computation import (
     ExecutionReceipt,
     ExecutorRegistry,
     GeneratorRegistry,
+    MaterializedPriceSeries,
     MaterializedSeries,
     MaterializedSet,
     PredictedTarget,
@@ -240,7 +241,56 @@ def load_compute_inputs(
     materialized = materialize_non_predictive_series(
         artifact, resources, evaluation_years=evaluation_years
     )
+    prices = _materialize_price_series(db, artifact, finance)
+    if prices:
+        materialized = MaterializedSet(
+            evaluation_years=materialized.evaluation_years,
+            series=materialized.series,
+            pending_predict=materialized.pending_predict,
+            prices=prices,
+        )
     return artifact, models, materialized, finance, config
+
+
+def _materialize_price_series(
+    db: Session,
+    artifact: ValidatedAssemblyArtifact,
+    finance: EffectiveFinanceConfig,
+) -> tuple[MaterializedPriceSeries, ...]:
+    """计费绑定实际引用的时变价格读冻结对象物化为全周期序列。
+
+    只处理 canonical 计费绑定引用到的 ``kind == "time_series"`` 价格；
+    无引用即返回空（跳过，不建空序列）。提交边界已核对实长/分辨率/
+    单位，此处按可信流程读取：对象缺失或字节不可解析即实际错误可见，
+    不做完整性复核与重复领域校验。``ref`` 即冻结对象 oid。
+    """
+    from iesplan.finance.pricecsv import parse_price_series_file
+
+    doc = json.loads(artifact.canonical_text)
+    wanted: list[str] = []
+    for binding_id in sorted(doc.get("tariff_bindings") or {}):
+        price_id = (doc["tariff_bindings"][binding_id] or {}).get("price")
+        price = (finance.energy_prices or {}).get(price_id)
+        if price is not None and price.kind == "time_series" and price_id not in wanted:
+            wanted.append(price_id)
+    out: list[MaterializedPriceSeries] = []
+    for price_id in wanted:
+        price = finance.energy_prices[price_id]
+        raw = get_object(db, price.ref)
+        parsed, _ = parse_price_series_file(raw)
+        if parsed is None:
+            raise ValueError(f"冻结价格对象不可解析（违反已冻结事实）: {price_id!r}")
+        out.append(
+            MaterializedPriceSeries(
+                price_id=price_id,
+                point_count=len(parsed.values),
+                resolution=parsed.meta.resolution,
+                unit=parsed.meta.unit,
+                values=tuple(float(v) for v in parsed.values),
+                source={"kind": "price_series", "object_id": price.ref},
+            )
+        )
+    return tuple(out)
 
 
 def complete_materialized(
@@ -250,12 +300,13 @@ def complete_materialized(
 
     年限沿用基集合携带的已确认值，不重读快照；预测阶段交付全部
     ``pending``（提交闸门 TASK-REQ-010/011 保证配置与绑定双向覆盖），
-    此处只构成完成态，不复核。
+    此处只构成完成态，不复核。已物化价格区沿基集合透传。
     """
     return MaterializedSet(
         evaluation_years=base.evaluation_years,
         series=tuple(base.series) + tuple(predicted),
         pending_predict=(),
+        prices=base.prices,
     )
 
 

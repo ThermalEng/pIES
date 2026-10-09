@@ -6,9 +6,10 @@
 - 真实 campus 五项输入生成完整 SolverBundle 聚合：manifest、problem.mps
   bytes、元数据 bytes、结构化 command、原始输出声明、unit map/objective
   offset/objective unit、逐字节确定性、不写工作目录；
-- provider 特有检查：未知 outputs 与实际绑定 time_series 计费即明确
-  拒绝，无 fallback（通用 generator/mode/精度/solver/options 门禁只在
-  registry 侧覆盖，不在此重复证明）；
+- provider 特有检查：未知 outputs 与未知价格类型即明确拒绝，无
+  fallback；实际绑定的 constant/time_series 计费均接受（时变价格由
+  第三项价格区逐点计价）（通用 generator/mode/精度/solver/options
+  门禁只在 registry 侧覆盖，不在此重复证明）；
 - 注册表注册真实 provider 实例：resolve/get 返回可调用 provider，
   快照与 to_dict 只公开 descriptor 数据；重复/协议不符/引用不一致/
   不可用即整体构建失败。
@@ -22,6 +23,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -32,6 +34,8 @@ from iesplan.computation import (
     ComputationUnavailableError,
     GeneratorProvider,
     HIGHS_MILP_PROVIDER,
+    MaterializedPriceSeries,
+    MaterializedSet,
     SolverBundle,
     SolverBundleManifest,
     build_project_model,
@@ -221,17 +225,50 @@ def test_generate_rejects_unknown_outputs() -> None:
         provider.generate(artifact, models, materialized, finance, config)
 
 
-def test_generate_rejects_bound_time_series_tariff() -> None:
-    """实际绑定的计费价格为时变即拒绝；未绑定的快照条目不触发。"""
+def test_generate_accepts_bound_time_series_with_prices() -> None:
+    """实际绑定的时变价格随第三项价格区接受；未绑定的快照条目不触发。"""
     artifact, models, materialized, finance, config = _campus_inputs()
     doc = json.loads(artifact.canonical_text)
     doc["tariff_bindings"]["import_meter"]["price"] = "grid_import_tou"
     rebound = ValidatedAssemblyArtifact(
         canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
     )
+    priced = MaterializedSet(
+        evaluation_years=materialized.evaluation_years,
+        series=materialized.series,
+        pending_predict=materialized.pending_predict,
+        prices=(
+            MaterializedPriceSeries(
+                price_id="grid_import_tou",
+                point_count=8760,
+                resolution="1h",
+                unit="CNY/kWh",
+                values=(0.5,) * 8760,
+                source={"kind": "price_series", "object_id": "test-oid"},
+            ),
+        ),
+    )
+    provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
+    bundle = provider.generate(rebound, models, priced, finance, config)
+    assert isinstance(bundle, SolverBundle)
+
+
+def test_generate_rejects_unknown_price_kind() -> None:
+    """未知价格类型仍明确拒绝（门禁残留分支；三元组无法表示该类型，
+    此处以冻结值对象旁路构造仅为触达门禁）。"""
+    import copy
+
+    artifact, models, materialized, finance, config = _campus_inputs()
+    weird = copy.copy(finance.energy_prices["grid_import"])
+    object.__setattr__(weird, "kind", "weird_kind")
+    tampered = copy.copy(finance)
+    object.__setattr__(
+        tampered, "energy_prices",
+        MappingProxyType({**finance.energy_prices, "grid_import": weird}),
+    )
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        provider.generate(rebound, models, materialized, finance, config)
+        provider.generate(artifact, models, materialized, tampered, config)
     assert exc_info.value.reason == "unsupported-tariff"
 
 

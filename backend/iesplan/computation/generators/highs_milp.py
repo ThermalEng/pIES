@@ -175,8 +175,9 @@ class HighsMilpProvider:
         """本 provider 特有检查（通用门禁已由 registry 完成，此处信任）。
 
         未知输出请求为用户计算请求错误(``ValueError``)，明确拒绝，不忽略。
-        时变电价限制只看装配实际绑定的计费价格：快照中未被绑定的价格条目
-        不进入数学，不触发拒绝。
+        计费价格限制只看装配实际绑定的价格：快照中未被绑定的价格条目
+        不进入数学，不触发拒绝；``constant`` 与 ``time_series`` 均支持
+        （时变价格由第三项价格区逐点计价），未知类型明确拒绝。
         """
         for name in config.outputs:
             if name not in SUPPORTED_OUTPUTS:
@@ -189,9 +190,9 @@ class HighsMilpProvider:
         for binding_id in sorted(bindings):
             price_id = bindings[binding_id]["price"]
             kind = finance.energy_prices[price_id].kind
-            if kind != "constant":
+            if kind not in ("constant", "time_series"):
                 raise ComputationUnavailableError(
-                    f"本 provider 只支持 constant tariff，计费绑定 "
+                    f"本 provider 只支持 constant/time_series 计费价格，计费绑定 "
                     f"{binding_id!r} 的价格 {price_id!r} 为 {kind!r}",
                     reason="unsupported-tariff",
                 )

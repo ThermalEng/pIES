@@ -14,6 +14,7 @@ import pytest  # type: ignore[import-untyped]
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact, ValidationReceipt
 from iesplan.computation import (
     CalculationConfig,
+    MaterializedSet,
     build_project_model,
     materialize_non_predictive_series,
     write_mps,
@@ -112,7 +113,21 @@ equations:
       expression: "y[t] = x[t] * z[t]"
 """
 
-def _finance_payload(direction: str = "purchase"):
+def _finance_payload(direction: str = "purchase", tariff_kind: str = "constant"):
+    price: dict = {
+        "carrier": "heat",
+        "direction": direction,
+        "kind": tariff_kind,
+    }
+    if tariff_kind == "constant":
+        price["value"] = {"value": "0.7", "unit": "CNY/kWh"}
+    else:
+        price["ref"] = "b" * 64
+        price["series_meta"] = {
+            "resolution": "1h",
+            "point_count": POINTS,
+            "unit": "CNY/kWh",
+        }
     return {
         "schema": "ies.finance-profile",
         "schema_version": "1.0.0",
@@ -135,12 +150,7 @@ def _finance_payload(direction: str = "purchase"):
             }
         },
         "energy_prices": {
-            "heat_import": {
-                "carrier": "heat",
-                "direction": direction,
-                "kind": "constant",
-                "value": {"value": "0.7", "unit": "CNY/kWh"},
-            }
+            "heat_import": price,
         },
     }
 
@@ -274,6 +284,8 @@ def _inputs(
     *,
     bilinear: bool = False,
     tariff_direction: str = "purchase",
+    tariff_kind: str = "constant",
+    prices: tuple = (),
     objective: str | None = None,
 ):
     doc = _artifact_doc(bilinear=bilinear)
@@ -294,9 +306,16 @@ def _inputs(
         if inst in doc["devices"]
     }
     finance = merge_effective(
-        FinanceProfile.from_dict(_finance_payload(tariff_direction)), None
+        FinanceProfile.from_dict(_finance_payload(tariff_direction, tariff_kind)), None
     )
     result = materialize_non_predictive_series(artifact, {}, evaluation_years=1)
+    if prices:
+        result = MaterializedSet(
+            evaluation_years=result.evaluation_years,
+            series=result.series,
+            pending_predict=result.pending_predict,
+            prices=prices,
+        )
     config = CalculationConfig(
         mode="planning",
         generator="acme.generator@1.0.0",
@@ -306,6 +325,34 @@ def _inputs(
         outputs=["solution"],
     )
     return artifact, models, result, finance, config
+
+
+def _price_values(head: tuple) -> tuple:
+    """8760 点价格序列：头部取给定值，其余补 0.5（与声明元数据同长）。"""
+    assert len(head) <= POINTS
+    return tuple(head) + (0.5,) * (POINTS - len(head))
+
+
+def _priced_inputs(direction: str, head: tuple, objective: str):
+    """时变价格五项输入：heat_import 改 time_series + 第三项价格区。"""
+    from iesplan.computation import MaterializedPriceSeries
+
+    prices = (
+        MaterializedPriceSeries(
+            price_id="heat_import",
+            point_count=POINTS,
+            resolution="1h",
+            unit="CNY/kWh",
+            values=_price_values(head),
+            source={"kind": "price_series", "object_id": "b" * 64},
+        ),
+    )
+    return _inputs(
+        tariff_direction=direction,
+        tariff_kind="time_series",
+        prices=prices,
+        objective=objective,
+    )
 
 
 def _build():
@@ -761,6 +808,47 @@ def test_sale_tariff_sign_flips() -> None:
             ),
         )
         build_project_model(artifact2, models2, materialized2, finance2, config2)
+
+
+def test_time_series_tariff_pointwise_purchase() -> None:
+    """时变购电逐点计价：每步系数 = +price[t]/1000（1h 步长）。
+
+    正价折入、零价该步无项、负价按财务契约自然通过（分量为负，
+    不是钳零；见 finance.md/finance-yaml 计价规则）。
+    """
+    artifact, models, materialized, finance, config = _priced_inputs(
+        "purchase",
+        (0.5, 0.0, -0.25),
+        (
+            "1 year * tank1__annual_fixed_om"
+            " + tank1__period_variable_om"
+            " + import_meter__period_energy_purchase"
+        ),
+    )
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    coeffs = _coeffs(model.objective)
+    assert coeffs["load1__heat_in__t0"] == pytest.approx(0.0005, rel=1e-9)
+    assert "load1__heat_in__t1" not in coeffs
+    assert coeffs["load1__heat_in__t2"] == pytest.approx(-0.00025, rel=1e-9)
+    assert coeffs["load1__heat_in__t3"] == pytest.approx(0.0005, rel=1e-9)
+
+
+def test_time_series_tariff_pointwise_sale() -> None:
+    """时变售电逐点计价：每步系数 = −price[t]/1000；负价反转为正分量。"""
+    artifact, models, materialized, finance, config = _priced_inputs(
+        "sale",
+        (0.5, 0.0, -0.25),
+        (
+            "1 year * tank1__annual_fixed_om"
+            " + tank1__period_variable_om"
+            " + import_meter__period_energy_sale"
+        ),
+    )
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    coeffs = _coeffs(model.objective)
+    assert coeffs["load1__heat_in__t0"] == pytest.approx(-0.0005, rel=1e-9)
+    assert "load1__heat_in__t1" not in coeffs
+    assert coeffs["load1__heat_in__t2"] == pytest.approx(0.00025, rel=1e-9)
 
 
 def test_bilinear_unsupported() -> None:

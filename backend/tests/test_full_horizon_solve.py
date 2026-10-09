@@ -993,3 +993,239 @@ class TestShortPredictionRejected:
         assert runner.run_task(factory, claim, worker_id="predict-n2-short", compute=short_plane) == "failed"
         task_row = db.execute(select(Task).where(Task.id == task.id)).scalar_one()
         assert task_row.status == "failed"
+
+
+TOU_YEAR1_PRICE = "0.7"
+TOU_YEAR2_PRICE = "0.35"
+
+
+def _tou_price_bytes() -> bytes:
+    """两年时变购电文件：2023 年 8760 点 0.7，2024 年 8784 点 0.35。"""
+    lines = [
+        "# schema: ies.price-series",
+        "# schema_version: 1.0.0",
+        "# resolution: 1h",
+        "# unit: CNY/kWh",
+        "step,price",
+    ]
+    lines += [f"{i},{TOU_YEAR1_PRICE}" for i in range(YEAR1_STEPS)]
+    lines += [f"{YEAR1_STEPS + i},{TOU_YEAR2_PRICE}" for i in range(YEAR2_STEPS)]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _declare_tou_finance(db: Session, user, pid: int, price_oid: str) -> None:
+    """登记购电时变 Profile：grid_import 改 time_series（ref=真实 oid）。"""
+    from test_config_revisions import PROFILE_PAYLOAD  # noqa: E402
+
+    from iesplan.application import configuration as config_cases  # noqa: E402
+
+    payload = json.loads(json.dumps(PROFILE_PAYLOAD))
+    payload["energy_prices"]["grid_import"] = {
+        "carrier": "electricity",
+        "direction": "purchase",
+        "kind": "time_series",
+        "ref": price_oid,
+        "series_meta": {
+            "resolution": "1h",
+            "point_count": FULL_STEPS,
+            "unit": "CNY/kWh",
+        },
+    }
+    config_cases.register_finance_profile(db, payload, user.id)
+    config_cases.set_project_finance_profile(
+        db, pid, payload["profile"]["id"], user.id
+    )
+
+
+def _prepare_tou_project(client: TestClient, db: Session, user, raw: bytes) -> int:
+    """准备 N=2 时变价格项目：购电 0.7/0.35 分年 + 售电 constant（零流量）。
+
+    与 ``_prepare_full_project`` 同一负荷与拓扑，唯两处不同：财务
+    Profile 的 grid_import 为时变引用（价格文件经公开上传口落盘，
+    oid 填入 ref），计费绑定追加零流量的售电 constant 绑定。售电
+    接口无电源：负荷母线平衡与进出口互斥把 export 钉在 0，无虚假收益。
+    """
+    from test_device_data_upload import _make_dataset, _upload  # noqa: E402
+    from test_worker_compute_chain import PLANNING_BODY  # noqa: E402
+
+    from iesplan.application import configuration as config_cases  # noqa: E402
+
+    pid = _create_dated_project(client, user, "时变价格测试项目", START_YEAR)
+    ds_id = _make_dataset(client, pid, user, name="购电时变价格")
+    status, resp = _upload(client, pid, user, ds_id, _tou_price_bytes())
+    assert status == 201, resp
+    price_oid = resp["quality_report"]["price_object_id"]
+    _declare_tou_finance(db, user, pid, price_oid)
+    vid = _craft_full_version(db, client, pid, user, "load1全期", raw)
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    revision = view["draft"]["revision"]
+    commands = [
+        {
+            "id": "c-bind-load1",
+            "unit": "dataset",
+            "type": "dataset.bind",
+            "payload": {"dataset_version_id": vid, "role": "main"},
+        },
+        {
+            "id": "fixture-declare-grid",
+            "unit": "model",
+            "type": "model.upsert_device",
+            "payload": {
+                "name": "grid1",
+                "device_type": "ies.device.grid_connection",
+                "kind": "existing",
+                "params": {"max_import_power_kw": 800, "max_export_power_kw": 200},
+                "position": {"x": 0.0, "y": 0.0},
+            },
+        },
+        {
+            "id": "fixture-declare-load1",
+            "unit": "model",
+            "type": "model.upsert_device",
+            "payload": {
+                "name": "load1",
+                "device_type": "ies.device.electric_load",
+                "kind": "new",
+                "params": {
+                    "peak_power_kw": 200,
+                    "electricity_demand": {
+                        "mode": "data_full",
+                        "dataset_version_id": vid,
+                    },
+                },
+                "position": {"x": 2.0, "y": 0.0},
+            },
+        },
+        {
+            "id": "fixture-connect-load1",
+            "unit": "model",
+            "type": "model.upsert_connection",
+            "payload": {
+                "name": "c-grid-load1",
+                "from_device": "grid1",
+                "from_port": "electricity_import",
+                "to_device": "load1",
+                "to_port": "electricity_in",
+            },
+        },
+    ]
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": commands},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+    device_ref, revision = declare_compute_device(client, pid, _h(client, user))
+    planning = dict(PLANNING_BODY)
+    planning["objective"] = {
+        "sense": "minimize",
+        "expression": (
+            "grid_import__period_energy_purchase"
+            " + grid_export__period_energy_sale"
+        ),
+    }
+    config_cases.save_planning_config(db, pid, planning, None, user.id)
+    revision = _set_explicit_calc(client, pid, user, revision)
+    instances = {device_ref: {"type": "none"}, "grid1": {"type": "none"}, "load1": {"type": "none"}}
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    revision = _declare_assembly_sections(client, pid, user, view["draft"]["revision"], instances)
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [{
+                "id": "c-tariff-bind", "unit": "assembly",
+                "type": "assembly.set_tariff_bindings",
+                "payload": {"bindings": {
+                    "grid_import": {
+                        "price": "grid_import",
+                        "instance": "grid1",
+                        "interface": "electricity_import",
+                        "aggregation": "integrate_positive",
+                    },
+                    "grid_export": {
+                        "price": "pv_export",
+                        "instance": "grid1",
+                        "interface": "electricity_export",
+                        "aggregation": "integrate_positive",
+                    },
+                }},
+            }],
+        },
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+    _bind_and_freeze(client, pid, user, None, revision=revision)
+    return pid
+
+
+class TestTimeVaryingPriceTrueSolve:
+    def test_two_year_tou_billing_matches_hand_calc(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """N=2 时变购电真求解：逐点计价两年分量与手算一致。
+
+        购电价按年不同（0.7/0.35），售电 constant 零流量；若实现用
+        平均价、单年价或总量先聚合，总目标必偏离手算：
+        0.7*E1+0.35*E2。分年能量 E1/E2 取自解变量独立计量。
+        """
+        from sqlalchemy import select  # noqa: E402
+
+        user = make_user(db, "tou_owner_1")
+        raw = _full_csv(YEAR1_STEPS, YEAR1_KW, YEAR2_STEPS, YEAR2_KW)
+        pid = _prepare_tou_project(client, db, user, raw)
+        rev_resp = client.put(
+            f"/api/projects/{pid}/config",
+            json={"calculation_config": dict(_CONFIG_BODY), "expected_revision": None},
+            headers=_h(client, user),
+        )
+        assert rev_resp.status_code == 200, rev_resp.text
+        rev = rev_resp.json()["revision"]
+        status, body = _submit_task(
+            client, pid, user, config={"config_revision": rev},
+            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            idempotency_key="tou-n2-billing",
+        )
+        assert status == 201, body
+        task_id = int(body["task"]["id"])
+        claim = worker_app.acquire_attempt(db, task_id, "tou-e2e")
+        assert claim is not None
+        db.commit()
+
+        def factory() -> Session:
+            return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+
+        assert runner.run_task(factory, claim, worker_id="tou-e2e", compute=plane) == "completed"
+        task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task_row.status == "completed"
+        assert task_row.business_outcome == "normal_completion"
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        solution = sealed["compute_result"]["outputs"]["solution"]
+        year1_kw, year2_kw, span = _yearly_served(
+            solution["variables"], "grid1__electricity_import__t"
+        )
+        assert span == FULL_STEPS
+        energy1 = year1_kw * 1.0
+        energy2 = year2_kw * 1.0
+        expect1 = float(TOU_YEAR1_PRICE) * energy1
+        expect2 = float(TOU_YEAR2_PRICE) * energy2
+        assert expect1 != pytest.approx(expect2, rel=1e-3)
+        components = solution["components"]
+        purchase = components["grid_import__period_energy_purchase"]["value"]
+        sale = components["grid_export__period_energy_sale"]["value"]
+        assert purchase == pytest.approx(expect1 + expect2, rel=1e-6)
+        assert sale == pytest.approx(0.0, abs=1e-6)
+        assert solution["objective_value"] == pytest.approx(
+            expect1 + expect2, rel=1e-6
+        )
+        total_energy = energy1 + energy2
+        assert purchase != pytest.approx(float(TOU_YEAR1_PRICE) * total_energy, rel=1e-3)
+        assert purchase != pytest.approx(float(TOU_YEAR2_PRICE) * total_energy, rel=1e-3)
+        avg_price = (
+            float(TOU_YEAR1_PRICE) * YEAR1_STEPS + float(TOU_YEAR2_PRICE) * YEAR2_STEPS
+        ) / FULL_STEPS
+        assert purchase != pytest.approx(avg_price * total_energy, rel=1e-3)
