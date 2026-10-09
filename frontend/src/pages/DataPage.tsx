@@ -185,26 +185,58 @@ function runUpload(opts: {
     .then((res) => ({ version: res, diagnostics: res.diagnostics ?? [] }))
 }
 
+/** 价格对象 ID 复制小块（DataPage 局部复用，非通用框架）。
+
+成功态只在真实复制成功后出现：优先 Clipboard API，缺失或拒绝时
+回退框选 + execCommand（返回 true 才算成功）；均失败则给出可见的
+失败反馈，不显示“已复制”。
+*/
+function OidCopy({ value, inputId }: { value: string; inputId: string }) {
+  const [status, setStatus] = useState<'idle' | 'ok' | 'failed'>('idle')
+  async function copy() {
+    setStatus('idle')
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(value)
+        setStatus('ok')
+        return
+      }
+    } catch {
+      // Clipboard 不可用或被拒绝，继续走框选回退。
+    }
+    try {
+      const el = document.getElementById(inputId)
+      if (el instanceof HTMLInputElement) {
+        el.focus()
+        el.select()
+        if (document.execCommand('copy')) {
+          setStatus('ok')
+          return
+        }
+      }
+    } catch {
+      // 框选复制失败，下面统一报失败。
+    }
+    setStatus('failed')
+  }
+  return (
+    <div className="ies-flex" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+      <Input id={inputId} value={value} readOnly aria-label={pt('ies.data.price_object_id')} />
+      <Button variant="secondary" onClick={() => void copy()}>
+        {status === 'ok' ? pt('ies.data.copied') : pt('ies.data.copy')}
+      </Button>
+      {status === 'failed' ? (
+        <span className="ies-form-message" role="alert">{pt('ies.data.copy_failed')}</span>
+      ) : null}
+    </div>
+  )
+}
+
 /** 上传结果面板:质量报告摘要 + 阻断/警告诊断 + 绑定状态。 */
 function UploadResultPanel({ result }: { result: UploadOutcome }) {
   const { version, diagnostics } = result
   const q = version.quality_report
-  const [copied, setCopied] = useState(false)
   const blocking = diagnostics.filter((d) => d.blocking || d.severity === 'blocking').length
-  function copyOid() {
-    if (!q?.price_object_id) return
-    const done = () => setCopied(true)
-    try {
-      const p = navigator.clipboard?.writeText(q.price_object_id) as unknown
-      if (p && typeof (p as Promise<void>).then === 'function') {
-        void (p as Promise<void>).then(done, () => setCopied(false))
-      } else {
-        done()
-      }
-    } catch {
-      setCopied(false)
-    }
-  }
   return (
     <div className="ies-upload-result">
       <div className="ies-flex" style={{ flexWrap: 'wrap' }}>
@@ -215,12 +247,9 @@ function UploadResultPanel({ result }: { result: UploadOutcome }) {
         <Badge label={pt('ies.data.binding')} variant="neutral" />
       </div>
       {q?.price_object_id ? (
-        <div className="ies-flex" style={{ flexWrap: 'wrap', margin: 'var(--ies-space-2) 0', alignItems: 'center' }}>
+        <div style={{ margin: 'var(--ies-space-2) 0' }}>
           <span className="ies-form-message">{pt('ies.data.price_object_id')}:</span>
-          <Input value={q.price_object_id} readOnly aria-label={pt('ies.data.price_object_id')} />
-          <Button variant="secondary" onClick={copyOid}>
-            {copied ? pt('ies.data.copied') : pt('ies.data.copy')}
-          </Button>
+          <OidCopy value={q.price_object_id} inputId="price-oid-result" />
         </div>
       ) : null}
       <div className="ies-flex" style={{ flexWrap: 'wrap', margin: 'var(--ies-space-2) 0' }}>
@@ -696,8 +725,9 @@ function VersionDetail({ version }: { version: DatasetVersion }) {
             </span>
           </div>
           {q?.price_object_id ? (
-            <div className="ies-form-message" style={{ marginTop: 'var(--ies-space-2)' }}>
-              {pt('ies.data.price_object_id')}: <span className="ies-mono">{q.price_object_id}</span>
+            <div style={{ marginTop: 'var(--ies-space-2)' }}>
+              <span className="ies-form-message">{pt('ies.data.price_object_id')}:</span>
+              <OidCopy value={q.price_object_id} inputId="price-oid-detail" />
             </div>
           ) : null}
           {q?.interpolation_notes?.length ? (
