@@ -92,12 +92,12 @@ def chain():
         outputs=["solution"],
     )
     model, units, _ = build_project_model(
-        artifact, models, mat.series, finance, config
+        artifact, models, mat, finance, config
     )
     return {
         "model": model,
         "units": units,
-        "inputs": (artifact, models, mat.series, finance, config),
+        "inputs": (artifact, models, mat, finance, config),
     }
 
 

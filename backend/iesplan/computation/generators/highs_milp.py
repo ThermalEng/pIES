@@ -26,7 +26,7 @@ from iesplan.computation.protocols import (
     SolverBundle,
     SolverBundleManifest,
 )
-from iesplan.computation.sequences import MaterializedSeries
+from iesplan.computation.sequences import MaterializedSet
 from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import DeviceMathContribution
 
@@ -100,12 +100,13 @@ class HighsMilpProvider:
         self,
         artifact: ValidatedAssemblyArtifact,
         models: Mapping[str, DeviceMathContribution],
-        series: tuple[MaterializedSeries, ...],
+        materialized: MaterializedSet,
         finance: EffectiveFinanceConfig,
         config: CalculationConfig,
     ) -> SolverBundle:
         """由五项直接输入生成完整 SolverBundle 聚合。
 
+        第三项为已完成物化的集合（上游构成，此处信任，不复核）。
         通用选择门禁已由 ``GeneratorRegistry.resolve`` 完成，此处信任；
         依次执行本 provider 特有检查（outputs/实际绑定 tariff，不匹配即
         明确拒绝）→ ``build_project_model`` + ``write_mps``（数学超出
@@ -115,10 +116,12 @@ class HighsMilpProvider:
         self._check_capabilities(artifact, config, finance)
         seed = config.seed if config.seed is not None else FIXED_SEED
         model, unit_map, objective_unit = build_project_model(
-            artifact, models, series, finance, config
+            artifact, models, materialized, finance, config
         )
         mps_text, offset = write_mps(model)
-        components = finance_component_declarations(artifact, models, series, finance)
+        components = finance_component_declarations(
+            artifact, models, materialized, finance
+        )
         metadata = self._metadata(
             artifact, unit_map, offset, objective_unit, seed, config, components
         )

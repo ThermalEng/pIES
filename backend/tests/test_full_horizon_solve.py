@@ -12,6 +12,8 @@ Worker 仍只解第一年，N=2 任务可“提交成功 + completed”形成假
   跑 N=2 任务至 completed；封存解变量按 ``__t{step}`` 后缀分年汇总，
   第一年与第二年服务能量分别等于各自年度输入（48.0×8760 与 96.0×8784），
   步数跨度 17544。单年求解或首年复制均无法同时满足这两组等式。
+- 空序列级：零预定义绑定但有 SoC 时域耦合的项目，N=2 仍建 17544 步
+  整体模型/Bundle（集合携年限，不回退单年），跨年耦合约束行可查。
 
 财务逐年归集本 F2 切片未覆盖，仍属 0.12（路线图 0.12-4），本文件不断言它。
 """
@@ -51,8 +53,17 @@ from iesplan.api import tasks as tasks_api  # noqa: E402
 from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import worker as worker_app  # noqa: E402
+from iesplan.assembly.contracts import (  # noqa: E402
+    ValidatedAssemblyArtifact,
+    ValidationReceipt,
+)
 from iesplan.assembly.validator import validate_project_export  # noqa: E402
 from iesplan.bootstrap import assemble_compute_worker  # noqa: E402
+from iesplan.computation import (  # noqa: E402
+    HIGHS_MILP_PROVIDER,
+    CalculationConfig,
+    build_project_model,
+)
 from iesplan.computation.sequences import (  # noqa: E402
     materialize_non_predictive_series,
 )
@@ -486,3 +497,147 @@ class TestFullHorizonTrueSolve:
         assert year1 == pytest.approx(YEAR1_KW * YEAR1_STEPS, rel=1e-6)
         assert year2 == pytest.approx(YEAR2_KW * YEAR2_STEPS, rel=1e-6)
         assert year2 != pytest.approx(year1, rel=1e-3)
+
+
+STORE_YAML = """
+schema: ies.device-model
+schema_version: "2.0.0"
+device: {id: acme.device.store, names: {zh-CN: 储能, en-US: Store}}
+properties:
+  soc0: {value: 200, unit: kWh, valid_range: {minimum: 0, maximum: 1000}}
+  cap_kwh: {value: 400, unit: kWh, valid_range: {minimum: 0, maximum: 1000}}
+  step_h: {value: 1, unit: h, valid_range: {minimum: 0, maximum: 10}}
+interfaces:
+  charge: {type: in, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
+  discharge: {type: out, carrier: electricity, unit: kW, valid_range: {minimum: 0, maximum: null}}
+equations:
+  variables:
+    soc: {unit: kWh, valid_range: {minimum: 0, maximum: 1000}, initial: {property_ref: soc0}}
+  relations:
+    - id: soc_step
+      expression: "soc[t] = soc[t-1] + charge[t] * step_h - discharge[t] * step_h"
+"""
+
+
+def _store_doc() -> dict:
+    """无预定义接口的时域项目：储能 SoC 跨步耦合，但零预定义绑定。”
+    注：首方目录暂无状态设备，此形态经定制设备模型可达；此处以规范
+    canonical 直写（装配 UI 注册路径之外），只验收 Generator 契约。
+    """
+    return {
+        "schema": "ies.assembly",
+        "schema_version": "2.0.0",
+        "assembly": {"id": "mini-store", "name": "无序列储能"},
+        "project_baseline": {
+            "resolution": "1h", "start_year": START_YEAR, "scenario_mode": "single",
+        },
+        "devices": {
+            "store1": {
+                "definition": {"id": "acme.device.store"},
+                "asset_origin": "new",
+                "properties": {},
+                "predefined_interfaces": {},
+            },
+        },
+        "connections": {},
+        "finance": {
+            "ref": {
+                "kind": "object",
+                "object_id": "obj-finance",
+                "media_type": "application/yaml",
+            },
+            "profile_id": "cn-north-demo",
+        },
+        "finance_binding": {"instances": {"store1": {"type": "none"}}},
+        "tariff_bindings": {
+            "meter1": {
+                "price": "power_import",
+                "instance": "store1",
+                "interface": "charge",
+                "aggregation": "integrate_positive",
+            },
+        },
+        "planning": {
+            "objective": {
+                "sense": "minimize",
+                "expression": "meter1__period_energy_purchase",
+            },
+            "variables": {
+                "pmax": {
+                    "device_ref": "store1",
+                    "parameter": "cap_kwh",
+                    "lower_bound": "0",
+                    "upper_bound": "500",
+                    "unit": "kWh",
+                },
+            },
+            "constraints": {},
+        },
+    }
+
+
+def _step_of(name: str) -> int | None:
+    head, sep, tail = name.rpartition("__t")
+    return int(tail) if sep and tail.isdigit() else None
+
+
+class TestEmptySeriesFullHorizon:
+    def test_no_series_project_builds_two_year_model_and_bundle(self) -> None:
+        """无预定义序列但有时域决策：N=2 仍建 17544 步整体模型/Bundle。
+
+        空序列不再回退单年：SoC 状态变量覆盖末步 t17543，且存在同时
+        引用 t8759 与 t8760 的跨年耦合约束行（非首年复制/拼接）。
+        """
+        from test_project_model import _contribution, _finance_payload  # noqa: E402
+
+        from iesplan.finance import FinanceProfile, merge_effective  # noqa: E402
+
+        artifact = ValidatedAssemblyArtifact(
+            canonical_text=json.dumps(_store_doc()), receipt=ValidationReceipt(),
+        )
+        materialized = materialize_non_predictive_series(
+            artifact, {}, evaluation_years=YEARS
+        )
+        assert materialized.series == ()
+        assert materialized.pending_predict == ()
+        assert materialized.evaluation_years == YEARS
+        models = {"store1": _contribution(STORE_YAML)}
+        payload = _finance_payload()
+        payload["energy_prices"]["power_import"] = {
+            "carrier": "electricity",
+            "direction": "purchase",
+            "kind": "constant",
+            "value": {"value": "0.7", "unit": "CNY/kWh"},
+        }
+        finance = merge_effective(FinanceProfile.from_dict(payload), None)
+        config = CalculationConfig(
+            mode="planning",
+            generator="ies.generator.highs_milp@1.0.0",
+            solver="ies.solver.highs@1.7.2",
+            precision="medium",
+            time_limit_seconds=600,
+            outputs=["solution"],
+        )
+        model, _units, _ = build_project_model(
+            artifact, models, materialized, finance, config
+        )
+        names = [var.name for var in model.variables]
+        steps = sorted(s for s in (_step_of(n) for n in names) if s is not None)
+        assert steps[-1] == FULL_STEPS - 1
+        assert len([n for n in names if n.startswith("store1__soc__t")]) == FULL_STEPS
+        coupled = [
+            row for row in model.constraints
+            if any(
+                _step_of(term[0][0]) == YEAR1_STEPS - 1
+                for term in row.expression.terms
+            ) and any(
+                _step_of(term[0][0]) == YEAR1_STEPS
+                for term in row.expression.terms
+            )
+        ]
+        assert coupled, "SoC 跨年耦合约束缺失"
+        bundle = HIGHS_MILP_PROVIDER.generate(
+            artifact, models, materialized, finance, config
+        )
+        mps = bytes(bundle.files["input/problem.mps"])
+        assert f"store1__soc__t{FULL_STEPS - 1}".encode() in mps

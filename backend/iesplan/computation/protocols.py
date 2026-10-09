@@ -33,7 +33,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
-from iesplan.computation.sequences import MaterializedSeries
+from iesplan.computation.sequences import MaterializedSet
 from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import DeviceMathContribution
 
@@ -132,18 +132,21 @@ class GeneratorProvider(Protocol):
         self,
         artifact: ValidatedAssemblyArtifact,
         models: Mapping[str, DeviceMathContribution],
-        series: tuple[MaterializedSeries, ...],
+        materialized: MaterializedSet,
         finance: EffectiveFinanceConfig,
         config: CalculationConfig,
     ) -> SolverBundle:
         """由五项直接输入生成完整求解包(聚合：manifest + 输入文件字节)。
 
-        调用方只传入已签发 artifact; provider 信任上游装配与应用边界
-        已完成的签发与内容确认, 不复核。通用选择门禁(generator/mode/
-        精度/solver/options)由 ``GeneratorRegistry.resolve`` 完成，不在此
-        重复；本方法只做 provider 特有检查(outputs/实际绑定 tariff)，
-        不匹配即明确拒绝。数学超出降级能力时抛 lowerer 的明确不支持
-        错误。不写临时目录，不返回并列结构。
+        第三项为已完成物化的集合（``pending_predict`` 为空，由上游在预测
+        产物合并后构成；此处信任类型化交接，不复核）。全周期总点数由装配
+        基线起始年/分辨率与集合携带的已确认评价年限推导，``series`` 为空
+        时仍为完整时域，不回退单年。调用方只传入已签发 artifact; provider
+        信任上游装配与应用边界已完成的签发与内容确认, 不复核。通用选择
+        门禁(generator/mode/精度/solver/options)由 ``GeneratorRegistry.resolve``
+        完成，不在此重复；本方法只做 provider 特有检查(outputs/实际绑定
+        tariff)，不匹配即明确拒绝。数学超出降级能力时抛 lowerer 的明确
+        不支持错误。不写临时目录，不返回并列结构。
         """
         ...
 

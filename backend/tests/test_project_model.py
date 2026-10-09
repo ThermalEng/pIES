@@ -305,12 +305,12 @@ def _inputs(
         time_limit_seconds=600,
         outputs=["solution"],
     )
-    return artifact, models, result.series, finance, config
+    return artifact, models, result, finance, config
 
 
 def _build():
-    artifact, models, series, finance, config = _inputs()
-    return build_project_model(artifact, models, series, finance, config)
+    artifact, models, materialized, finance, config = _inputs()
+    return build_project_model(artifact, models, materialized, finance, config)
 
 
 @pytest.fixture(scope="module")
@@ -343,8 +343,8 @@ def test_project_inventory_counts(built) -> None:
 
 def _build_with_objective(expression: str):
     """以替换目标表达式的真实装配走完整构造（公开行为）。"""
-    artifact, models, series, finance, config = _inputs(objective=expression)
-    return build_project_model(artifact, models, series, finance, config)
+    artifact, models, materialized, finance, config = _inputs(objective=expression)
+    return build_project_model(artifact, models, materialized, finance, config)
 
 
 def test_objective_dimensionless_ratio_reports_unit_one() -> None:
@@ -378,25 +378,25 @@ def test_objective_scaled_power_keeps_si() -> None:
 
 def test_objective_exotic_dimension_rejected() -> None:
     """复合量纲（CNY/年）无可报告业务单位，超出首版能力明确拒绝。"""
-    artifact, models, series, finance, config = _inputs(
+    artifact, models, materialized, finance, config = _inputs(
         objective="tank1__annual_fixed_om"
     )
     with pytest.raises(LoweringUnsupportedError):
-        build_project_model(artifact, models, series, finance, config)
+        build_project_model(artifact, models, materialized, finance, config)
 
 
 def test_objective_inverse_power_rejected() -> None:
     """1 / 1 kW 根量纲为 power^-1（非无量纲），明确拒绝。"""
-    artifact, models, series, finance, config = _inputs(objective="1 / 1 kW")
+    artifact, models, materialized, finance, config = _inputs(objective="1 / 1 kW")
     with pytest.raises(LoweringUnsupportedError):
-        build_project_model(artifact, models, series, finance, config)
+        build_project_model(artifact, models, materialized, finance, config)
 
 
 def test_objective_power_per_year_rejected() -> None:
     """tank_cap / 1 year 根量纲为 power·time^-1（非 power），明确拒绝。"""
-    artifact, models, series, finance, config = _inputs(objective="tank_cap / 1 year")
+    artifact, models, materialized, finance, config = _inputs(objective="tank_cap / 1 year")
     with pytest.raises(LoweringUnsupportedError):
-        build_project_model(artifact, models, series, finance, config)
+        build_project_model(artifact, models, materialized, finance, config)
 
 
 def test_objective_finance_and_tariff_terms(built) -> None:
@@ -586,7 +586,7 @@ def _island_inputs():
         time_limit_seconds=600,
         outputs=["solution"],
     )
-    return artifact, models, result.series, finance, config
+    return artifact, models, result, finance, config
 
 
 def test_buses_split_per_carrier_components() -> None:
@@ -594,8 +594,8 @@ def test_buses_split_per_carrier_components() -> None:
 
     旧全局连通实现会把五台设备合并，只产生一条 electricity 行。
     """
-    artifact, models, series, finance, config = _island_inputs()
-    model, _, _ = build_project_model(artifact, models, series, finance, config)
+    artifact, models, materialized, finance, config = _island_inputs()
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
     by_name = {row.name: row for row in model.constraints}
     elec = {
         name: by_name[name] for name in by_name
@@ -698,7 +698,7 @@ def _gen_inputs():
         time_limit_seconds=600,
         outputs=["solution"],
     )
-    return artifact, models, result.series, finance, config
+    return artifact, models, result, finance, config
 
 
 def test_planning_takeover_bounds_follow_planning_var() -> None:
@@ -707,8 +707,8 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
     旧实现用实例常数作界且无容量行；新行为静态界取规划界，
     并为每个 step 生成对规划变量的容量约束。缺失安全界保持 None。
     """
-    artifact, models, series, finance, config = _gen_inputs()
-    model, _, _ = build_project_model(artifact, models, series, finance, config)
+    artifact, models, materialized, finance, config = _gen_inputs()
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
     by_var = {var.name: var for var in model.variables}
     assert by_var["gen1__power_out__t0"].upper == pytest.approx(500000.0)
     assert by_var["gen1__power_out__t0"].lower == pytest.approx(10000.0)
@@ -738,7 +738,7 @@ def test_sale_tariff_sign_flips() -> None:
     必须引用与方向一致的 sale 后缀；反向 purchase 后缀引用售电绑定
     与装配闸门同理非法（见 direction_suffix_mismatch）。
     """
-    artifact, models, series, finance, config = _inputs(
+    artifact, models, materialized, finance, config = _inputs(
         tariff_direction="sale",
         objective=(
             "1 year * tank1__annual_fixed_om"
@@ -746,13 +746,13 @@ def test_sale_tariff_sign_flips() -> None:
             " + import_meter__period_energy_sale"
         ),
     )
-    model, _, _ = build_project_model(artifact, models, series, finance, config)
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
     coeffs = _coeffs(model.objective)
     assert coeffs["load1__heat_in__t0"] == pytest.approx(-0.0007, rel=1e-9)
     # 反向后缀不在符号表内，编译边界即大声拒绝（装配侧以
     # direction_suffix_mismatch 精确阻断，此处不断言具体子类）。
     with pytest.raises(ExpressionError):
-        artifact2, models2, series2, finance2, config2 = _inputs(
+        artifact2, models2, materialized2, finance2, config2 = _inputs(
             tariff_direction="sale",
             objective=(
                 "1 year * tank1__annual_fixed_om"
@@ -760,13 +760,13 @@ def test_sale_tariff_sign_flips() -> None:
                 " + import_meter__period_energy_purchase"
             ),
         )
-        build_project_model(artifact2, models2, series2, finance2, config2)
+        build_project_model(artifact2, models2, materialized2, finance2, config2)
 
 
 def test_bilinear_unsupported() -> None:
-    artifact, models, series, finance, config = _inputs(bilinear=True)
+    artifact, models, materialized, finance, config = _inputs(bilinear=True)
     with pytest.raises(LoweringUnsupportedError):
-        build_project_model(artifact, models, series, finance, config)
+        build_project_model(artifact, models, materialized, finance, config)
 
 
 def test_model_rejects_bad_sense() -> None:
@@ -828,8 +828,8 @@ def test_finance_component_declarations_cover_produced_idents() -> None:
     与价格方向一致的 purchase 后缀，反向 sale 后缀不存在（装配闸门
     同理阻断，见 direction_suffix_mismatch）。
     """
-    artifact, models, series, finance, _config = _inputs()
-    decls = finance_component_declarations(artifact, models, series, finance)
+    artifact, models, materialized, finance, _config = _inputs()
+    decls = finance_component_declarations(artifact, models, materialized, finance)
     assert set(decls) == {
         "tank1__annual_fixed_om",
         "tank1__period_variable_om",
@@ -856,8 +856,8 @@ def test_finance_component_sale_binding_declares_sale_only() -> None:
     变量，8760 项系数均为 −0.7/3.6e6×3600 = −0.0007（与目标系数的
     test_sale_tariff_sign_flips 同源），sale 分量自身为负。
     """
-    artifact, models, series, finance, _config = _inputs(tariff_direction="sale")
-    decls = finance_component_declarations(artifact, models, series, finance)
+    artifact, models, materialized, finance, _config = _inputs(tariff_direction="sale")
+    decls = finance_component_declarations(artifact, models, materialized, finance)
     assert set(decls) == {
         "tank1__annual_fixed_om",
         "tank1__period_variable_om",

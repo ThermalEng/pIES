@@ -86,15 +86,20 @@ class MaterializedSeries:
 
 @dataclass(frozen=True, slots=True)
 class MaterializedSet:
-    """物化返回边界（不可变值对象）。
+    """物化返回边界（不可变值对象），即 Generator 第三项输入的集合形态。
 
-    ``series`` 仅含非预测来源（按 device/interface 确定性排序）；
+    ``evaluation_years`` 为调用方从快照顶层评价确认块读取的已确认评价
+    年限（必填，无默认值，不在此校验：提交边界唯一校验）；Generator
+    以基线起始年/分辨率与该年限推导全周期总点数，``series`` 为空时仍有
+    完整时域。``series`` 仅含非预测来源（按 device/interface 确定性排序）；
     ``pending_predict`` 为声明但不物化的预测绑定
     （{device, interface, target_type, object_id}，同序排列），是上游
-    序列准备结果，不传入 Generator。series 为空且 pending 非空时不代表
-    “已全部完成”。
+    序列准备结果，不传入 Generator：传入 Generator 的集合须为完成态
+    （``pending_predict`` 为空），由上游在预测产物合并后构成，本类型
+    只做类型化区分，不在运行期复核。
     """
 
+    evaluation_years: int
     series: tuple[MaterializedSeries, ...] = ()
     pending_predict: tuple[Mapping[str, object], ...] = ()
 
@@ -118,6 +123,7 @@ class MaterializedSet:
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
         return {
+            "evaluation_years": self.evaluation_years,
             "series": [s.to_dict() for s in self.series],
             "pending_predict": [dict(e) for e in self.pending_predict],
         }
@@ -229,7 +235,11 @@ def materialize_non_predictive_series(
                 raise ValueError(
                     f"未知来源模式（违反已签发事实）: {mode!r}"
                 )
-    return MaterializedSet(series=tuple(series), pending_predict=tuple(pending))
+    return MaterializedSet(
+        evaluation_years=evaluation_years,
+        series=tuple(series),
+        pending_predict=tuple(pending),
+    )
 
 
 def _project_column(data: bytes, interface_id: str) -> list[float]:

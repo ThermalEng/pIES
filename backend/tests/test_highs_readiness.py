@@ -101,15 +101,15 @@ def _campus_inputs():
         outputs=["solution", "metrics"],
         seed=None,
     )
-    return artifact, models, mat.series, finance, config
+    return artifact, models, mat, finance, config
 
 
 def _campus_bundle():
     """正式路径生成真实 Bundle（非手写 manifest）。"""
-    artifact, models, series, finance, config = _campus_inputs()
+    artifact, models, materialized, finance, config = _campus_inputs()
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     assert provider is HIGHS_MILP_PROVIDER
-    return provider.generate(artifact, models, series, finance, config)
+    return provider.generate(artifact, models, materialized, finance, config)
 
 
 def _readiness(**kwargs) -> ExecutableReadiness:

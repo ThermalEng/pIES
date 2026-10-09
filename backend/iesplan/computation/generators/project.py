@@ -51,7 +51,7 @@ from iesplan.computation.generators.linear import (
     lower_relation,
 )
 from iesplan.computation.protocols import CalculationConfig
-from iesplan.computation.sequences import MaterializedSeries
+from iesplan.computation.sequences import MaterializedSeries, MaterializedSet
 from iesplan.core.contracts import (
     compile_planning_expression,
 )
@@ -188,12 +188,14 @@ def _step_seconds(resolution: str, start_year: int) -> float:
 def build_project_model(
     artifact: ValidatedAssemblyArtifact,
     models: Mapping[str, DeviceMathContribution],
-    series: tuple[MaterializedSeries, ...],
+    materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
 ) -> tuple[LinearModel, Mapping[str, str], str]:
     """由五项直接输入构造项目级线性模型、单位映射与目标业务单位。
 
+    第三项为已完成物化的集合；求解域步数由装配基线起始年/分辨率与集合
+    携带的已确认评价年限推导，``series`` 为空时仍为完整时域。
     返回 ``(LinearModel, unit_map, objective_unit)``：``unit_map`` 为
     LP 名 → 业务单位，供后续 ResultAdapter 反向换算（内部 binary 不进入
     结果，不收录）；``objective_unit`` 为目标业务单位（金额取财务币种，
@@ -202,31 +204,29 @@ def build_project_model(
     同一五项输入产生同一模型；超出首版降级能力的数学抛
     ``LoweringUnsupportedError``。
     """
-    return _new_builder(artifact, models, series, finance).build()
+    return _new_builder(artifact, models, materialized, finance).build()
 
 
 def _new_builder(
     artifact: ValidatedAssemblyArtifact,
     models: Mapping[str, DeviceMathContribution],
-    series: tuple[MaterializedSeries, ...],
+    materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
 ) -> _ProjectBuilder:
     """由四项直接输入构造内部编排（建模与分量声明共用同一构造器）。"""
+    from iesplan.core.contracts import horizon_point_count
+
     doc = json.loads(artifact.canonical_text)
     baseline = doc["project_baseline"]
-    # 求解域步数由传入的全周期序列长度决定（宪法 §4.5 第三项输入）：
-    # 物化保证同一次全期序列点数一致；空序列是无时变设备输入的退化
-    # 情形，沿用起始年单年口径（与旧行为一致，不静默外推）。
-    if series:
-        point_count = series[0].point_count
-    else:
-        point_count = _point_count(baseline["resolution"], baseline["start_year"])
+    point_count = horizon_point_count(
+        baseline["resolution"], baseline["start_year"], materialized.evaluation_years
+    )
     step_s = _step_seconds(baseline["resolution"], baseline["start_year"])
     return _ProjectBuilder(
         doc=doc,
         devices=doc["devices"],
         models=models,
-        series=series,
+        series=materialized.series,
         finance=finance,
         point_count=point_count,
         step_s=step_s,
@@ -236,7 +236,7 @@ def _new_builder(
 def finance_component_declarations(
     artifact: ValidatedAssemblyArtifact,
     models: Mapping[str, DeviceMathContribution],
-    series: tuple[MaterializedSeries, ...],
+    materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
 ) -> Mapping[str, Mapping[str, object]]:
     """财务分量求值声明（ident → unit/caliber/constant/terms）。
@@ -246,14 +246,7 @@ def finance_component_declarations(
     供 GeneratorProvider 写入 Bundle ``parameters.json``，由配套
     ResultAdapter 用同一次真实解求值发布，不重建财务模型。
     """
-    return _new_builder(artifact, models, series, finance).finance_components()
-
-
-def _point_count(resolution: str, start_year: int) -> int:
-    """基线点数（复用 core 权威纯函数）。"""
-    from iesplan.core.contracts import point_count_for_year
-
-    return point_count_for_year(resolution, start_year)
+    return _new_builder(artifact, models, materialized, finance).finance_components()
 
 
 class _ProjectBuilder:

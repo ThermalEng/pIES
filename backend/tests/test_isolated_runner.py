@@ -153,7 +153,7 @@ def _campus_bundle(time_limit_seconds: int = 600):
         seed=None,
     )
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
-    return provider.generate(artifact, models, mat.series, finance, config)
+    return provider.generate(artifact, models, mat, finance, config)
 
 
 def _ipc_provider(exchange_dir: str) -> FileExchangeExecutorProvider:

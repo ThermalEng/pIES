@@ -16,7 +16,7 @@
 
 通用 CSV 首列时间戳必须严格递增且不重复；同一数据集使用一个固定 UTC 偏移，不使用夏令时跳变。数据时区应与项目时区一致。
 
-设备数据 step CSV（`ies.device-data`）不设统一全年行数要求：文件自带 `# resolution` 且须与项目基线一致，`step` 从 0 开始连续递增，每格为有限数值，每数据列有 `unit.<列>` 声明；来源绑定（设备、接口、模式）在装配处显式声明，不由列名猜测。
+设备数据 step CSV（`ies.device-data`）统一声明 `2.1.0` 字头（旧 `2.0.0` 不再接受），`source_mode` 只能为 `data_repeat`、`data_full`、`data_predict`（`constant` 直接在绑定中给值，没有 CSV）；文件自带 `# resolution` 且须与项目基线一致，`step` 从 0 开始连续递增，每格为有限数值，每数据列有 `unit.<列>` 声明；`data_repeat` 不设统一全年行数要求（完整日/周/年均可），`data_full` 必须覆盖全周期全部点数；来源绑定（设备、接口、模式）在装配处显式声明，不由列名猜测。建模页面的来源声明入口目前只提供 `data_repeat`/`data_predict`；`data_full` 全期文件可按 `2.1.0` 上传，其页面声明入口暂未提供。
 
 ## 上传 CSV
 

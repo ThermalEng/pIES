@@ -106,17 +106,17 @@ def _campus_inputs(*, outputs=("solution", "metrics"), seed=None):
         outputs=list(outputs),
         seed=seed,
     )
-    return artifact, models, mat.series, finance, config
+    return artifact, models, mat, finance, config
 
 
 def _resolved_generate(*args, **kwargs):
     """正式路径：registry 精确选择 + 通用门禁后调用 generate。"""
-    artifact, models, series, finance, config = _campus_inputs(*args, **kwargs)
+    artifact, models, materialized, finance, config = _campus_inputs(*args, **kwargs)
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     assert provider is HIGHS_MILP_PROVIDER
     return (
-        provider.generate(artifact, models, series, finance, config),
-        (artifact, models, series, finance, config),
+        provider.generate(artifact, models, materialized, finance, config),
+        (artifact, models, materialized, finance, config),
     )
 
 
@@ -175,9 +175,9 @@ def test_campus_generate_full_bundle() -> None:
     # campus 目标为金额：目标业务单位取财务币种 CNY。
     assert metadata["objective_unit"] == "CNY"
     # mps 文件字节即 writer 输出；unit_map/offset 与直接构造一致。
-    artifact, models, series, finance, config = _campus_inputs()
+    artifact, models, materialized, finance, config = _campus_inputs()
     model, unit_map, objective_unit = build_project_model(
-        artifact, models, series, finance, config
+        artifact, models, materialized, finance, config
     )
     mps_text, offset = write_mps(model)
     assert bundle.files["input/problem.mps"] == mps_text.encode("utf-8")
@@ -213,17 +213,17 @@ def _config_with(**kwargs) -> CalculationConfig:
 
 def test_generate_rejects_unknown_outputs() -> None:
     """未知输出请求是明确的用户请求错误，不忽略（门禁后特有检查）。"""
-    artifact, models, series, finance, config = _campus_inputs(
+    artifact, models, materialized, finance, config = _campus_inputs(
         outputs=["solution", "trace"]
     )
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     with pytest.raises(ValueError, match="不支持的输出请求"):
-        provider.generate(artifact, models, series, finance, config)
+        provider.generate(artifact, models, materialized, finance, config)
 
 
 def test_generate_rejects_bound_time_series_tariff() -> None:
     """实际绑定的计费价格为时变即拒绝；未绑定的快照条目不触发。"""
-    artifact, models, series, finance, config = _campus_inputs()
+    artifact, models, materialized, finance, config = _campus_inputs()
     doc = json.loads(artifact.canonical_text)
     doc["tariff_bindings"]["import_meter"]["price"] = "grid_import_tou"
     rebound = ValidatedAssemblyArtifact(
@@ -231,7 +231,7 @@ def test_generate_rejects_bound_time_series_tariff() -> None:
     )
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        provider.generate(rebound, models, series, finance, config)
+        provider.generate(rebound, models, materialized, finance, config)
     assert exc_info.value.reason == "unsupported-tariff"
 
 
@@ -274,7 +274,7 @@ class _FakeProvider:
     def available(self):
         return self._available
 
-    def generate(self, artifact, models, series, finance, config):
+    def generate(self, artifact, models, materialized, finance, config):
         raise AssertionError("测试替身不应被调用")
 
 

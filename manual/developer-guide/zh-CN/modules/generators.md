@@ -30,12 +30,12 @@
 |---|---|
 | `ValidatedAssemblyArtifact` | 已由装配模块签发，零阻断诊断；实例、参数覆盖、连接拓扑、规划、财务/计费绑定、项目基线 |
 | `models` | 装配实例 ID 到设备数学贡献的映射（键为实例，不是设备类型） |
-| `series` | 已物化的全周期输入序列（`MaterializedSeries` 只读序列；`constant`/`data_repeat`/`data_full`/`data_predict` 统一为同一类型） |
+| `materialized` | 已物化的全周期输入序列集合（`MaterializedSet`：`evaluation_years` + `MaterializedSeries` 只读序列；`constant`/`data_repeat`/`data_full`/`data_predict` 统一为同一类型；空 `series` 时仍以集合年限推导完整时域） |
 | `finance` | 不可变 `EffectiveFinanceConfig`（经济参数唯一来源） |
 | `CalculationConfig` | 在计算阶段选择，包含预测算法与参数、generator、solver、精度、求解选项、收敛条件、种子和输出请求 |
 | GeneratorDescriptor | 支持装配 schema、所选计算能力和 solver，且与 `CalculationConfig` 一致；属 provider 静态事实，不作为每次生成参数 |
 
-五项输入均来自可信上游，生成器不重复验证已签发的装配、设备贡献、财务快照或序列，不做内容摘要。Generator 只接收已完成的 `MaterializedSeries`；上游非预测序列准备若产生待预测目标，它还不是 `MaterializedSeries`，不能传给 Generator，必须由未来公开预测能力完成后再传入；需要其值即输入不完整，明确拒绝。不得为五项输入再建包装层。
+五项输入均来自可信上游，生成器不重复验证已签发的装配、设备贡献、财务快照或序列，不做内容摘要。Generator 只接收已完成物化的集合（`pending_predict` 为空，由上游在预测产物合并后构成，此处信任类型化交接，不复核）；全周期总点数由装配基线起始年/分辨率与集合携带的已确认评价年限推导，`series` 为空的项目仍得完整时域，不回退单年。不得为五项输入再建包装层。
 
 ## 输出
 

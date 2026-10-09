@@ -37,6 +37,7 @@ from iesplan.computation import (
     DEFAULT_ALGORITHM,
     EXECUTION_RECEIPT_SCHEMA,
     EXECUTION_RECEIPT_VERSION,
+    RECEIPT_STATUSES,
     SOLVER_BUNDLE_SCHEMA,
     SOLVER_BUNDLE_VERSION,
     AlgorithmSpec,
@@ -48,9 +49,8 @@ from iesplan.computation import (
     ExecutorProvider,
     GeneratorDescriptor,
     GeneratorProvider,
-    MaterializedSeries,
+    MaterializedSet,
     ProcessOutcome,
-    RECEIPT_STATUSES,
     ResultAdapter,
     SolverBundle,
     SolverBundleManifest,
@@ -180,7 +180,7 @@ class _GeneratorOnly:
         self,
         artifact: ValidatedAssemblyArtifact,
         models: Mapping[str, DeviceMathContribution],
-        series: tuple[MaterializedSeries, ...],
+        materialized: MaterializedSet,
         finance: EffectiveFinanceConfig,
         config: CalculationConfig,
     ) -> SolverBundle:
@@ -281,7 +281,7 @@ def test_protocol_methods_match_constitution_boundaries() -> None:
     import inspect
 
     assert list(inspect.signature(GeneratorProvider.generate).parameters) == [
-        "self", "artifact", "models", "series", "finance", "config",
+        "self", "artifact", "models", "materialized", "finance", "config",
     ]
     assert list(inspect.signature(ExecutorProvider.execute).parameters) == [
         "self", "command", "workdir", "stop",
@@ -304,7 +304,11 @@ def test_unavailable_error_semantics() -> None:
     gen, adapter = _GeneratorOnly(), _AdapterOnly()
     config = _config(seed=42)
     with pytest.raises(ComputationUnavailableError):
-        gen.generate(_artifact(), {}, (), _finance(), config)
+        gen.generate(
+            _artifact(), {},
+            MaterializedSet(evaluation_years=1, series=(), pending_predict=()),
+            _finance(), config,
+        )
     receipt = _receipt(status="process_failed")
     with pytest.raises(ComputationUnavailableError):
         adapter.adapt(_manifest(), receipt, {})

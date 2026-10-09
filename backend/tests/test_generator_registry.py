@@ -97,7 +97,7 @@ class _FakeProvider:
     def available(self) -> bool:
         return self._available
 
-    def generate(self, artifact, models, series, finance, config):
+    def generate(self, artifact, models, materialized, finance, config):
         raise AssertionError("注册表测试替身不应被调用")
 
 

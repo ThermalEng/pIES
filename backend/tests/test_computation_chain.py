@@ -108,15 +108,15 @@ def _campus_inputs():
         outputs=["solution", "metrics"],
         seed=None,
     )
-    return artifact, models, mat.series, finance, config
+    return artifact, models, mat, finance, config
 
 
 def _generate_bundle(inputs):
     """正式生成路径（注册表按配置选中 provider，与线上同一构成）。"""
-    artifact, models, series, finance, config = inputs
+    artifact, models, materialized, finance, config = inputs
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     assert provider is HIGHS_MILP_PROVIDER
-    return provider.generate(artifact, models, series, finance, config)
+    return provider.generate(artifact, models, materialized, finance, config)
 
 
 def _runtime(policy=None) -> SolverRuntime:
@@ -274,7 +274,7 @@ def test_chain_success_reports_business_result() -> None:
 
 def test_chain_infeasible_model_reports_math_status() -> None:
     """不可行链：垫片 exit 0 写 kInfeasible 文件，解释无业务输出。"""
-    artifact, models, series, finance, config = _campus_inputs()
+    artifact, models, materialized, finance, config = _campus_inputs()
     doc = json.loads(artifact.canonical_text)
     # 规划变量名（非内部 LP 名，后者含安全规则禁止的 __），取首个
     # 显式单位与上界的变量，上界十倍即不可行。
@@ -300,7 +300,7 @@ def test_chain_infeasible_model_reports_math_status() -> None:
     assert revalidated.ok, [
         (d.code, d.params) for d in revalidated.diagnostics if d.blocking
     ]
-    bundle = _generate_bundle((revalidated.artifact, models, series, finance, config))
+    bundle = _generate_bundle((revalidated.artifact, models, materialized, finance, config))
     receipt, collected = _runtime().run(bundle, _attempt("inf"))
     assert receipt.status == "succeeded"
     assert receipt.exit_code == 0
@@ -437,8 +437,8 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
     finance2 = effective_from_yaml(
         finance_source.replace(anchor, "      value: '0.5'\n", 1)
     )
-    artifact, models, series, _finance, config = inputs1
-    bundle2 = _generate_bundle((artifact, models, series, finance2, config))
+    artifact, models, materialized, _finance, config = inputs1
+    bundle2 = _generate_bundle((artifact, models, materialized, finance2, config))
     receipt2, collected2 = runtime.run(bundle2, _attempt("yr2"))
     solution2 = _adapt(bundle2, receipt2, collected2).outputs["solution"]
 

@@ -50,6 +50,7 @@ from iesplan.computation import (
     ExecutorRegistry,
     GeneratorRegistry,
     MaterializedSeries,
+    MaterializedSet,
     PredictedTarget,
     PredictorRegistry,
     SolverBundle,
@@ -72,6 +73,7 @@ __all__ = [
     "attach_evidence_objects",
     "build_attempt_context",
     "business_outcome_for",
+    "complete_materialized",
     "execute_bundle",
     "generate_bundle",
     "load_compute_inputs",
@@ -202,16 +204,17 @@ def load_compute_inputs(
 ) -> tuple[
     ValidatedAssemblyArtifact,
     dict[str, DeviceMathContribution],
-    tuple[MaterializedSeries, ...],
+    MaterializedSet,
     EffectiveFinanceConfig,
     CalculationConfig,
 ]:
     """从快照恢复生成器五项直接输入并按序返回（不包装第二对象，不做缺省）。
 
-    finance 按回执冻结血缘取不可变 Effective 行；预测目标序列不在此
-    物化（``pending_predict`` 保留），由 ``predict_target_round`` 经公开
-    predictor 完成后再与此处序列合并。序列按快照顶层评价确认块的已确认
-    评价年限物化为全周期长度（提交边界唯一校验，此处只读不验）。
+    finance 按回执冻结血缘取不可变 Effective 行；第三项为物化集合本身
+    （已确认评价年限随集合携带；预测目标序列不在此物化，
+    ``pending_predict`` 保留），由 ``predict_target_round`` 经公开
+    predictor 完成后再与此处集合并为完成态。序列按快照顶层评价确认块的
+    已确认评价年限物化为全周期长度（提交边界唯一校验，此处只读不验）。
     冻结缺件即实际结构错误直接可见，不重跑输入校验。
     """
     artifact, resources, config, _seed = _restore_artifact_resources_config(
@@ -236,7 +239,23 @@ def load_compute_inputs(
     materialized = materialize_non_predictive_series(
         artifact, resources, evaluation_years=evaluation_years
     )
-    return artifact, models, tuple(materialized.series), finance, config
+    return artifact, models, materialized, finance, config
+
+
+def complete_materialized(
+    base: MaterializedSet, predicted: tuple[MaterializedSeries, ...]
+) -> MaterializedSet:
+    """预测产物并入为完成态集合（Generator 第三项输入形态）。
+
+    年限沿用基集合携带的已确认值，不重读快照；预测阶段交付全部
+    ``pending``（提交闸门 TASK-REQ-010/011 保证配置与绑定双向覆盖），
+    此处只构成完成态，不复核。
+    """
+    return MaterializedSet(
+        evaluation_years=base.evaluation_years,
+        series=tuple(base.series) + tuple(predicted),
+        pending_predict=(),
+    )
 
 
 def predict_target_round(
@@ -287,19 +306,21 @@ def generate_bundle(
     snapshot: Any,
     artifact: ValidatedAssemblyArtifact,
     models: Mapping[str, DeviceMathContribution],
-    series: tuple[MaterializedSeries, ...],
+    materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
 ) -> SolverBundle:
     """经生成器目录选中精确 provider 生成完整 Bundle，并消费快照冻结引用。
 
-    注册表 resolve 即通用选择门禁的唯一真实边界（未注册/不兼容即
-    ``ComputationUnavailableError``；用户计算选项非法为 ``ValueError``）。
-    生成后核对 Bundle 声明的执行器/适配器与快照冻结精确引用一致，并预先
-    解析两者（不可解析即明确失败，不等到求解后；不读当前可变目录）。
+    第三项为已完成物化的集合（调用方在预测产物合并后构成，此处只透传，
+    不复核）。注册表 resolve 即通用选择门禁的唯一真实边界（未注册/
+    不兼容即 ``ComputationUnavailableError``；用户计算选项非法为
+    ``ValueError``）。生成后核对 Bundle 声明的执行器/适配器与快照冻结
+    精确引用一致，并预先解析两者（不可解析即明确失败，不等到求解后；
+    不读当前可变目录）。
     """
     provider = plane.generator_registry.resolve(config)
-    bundle = provider.generate(artifact, models, series, finance, config)
+    bundle = provider.generate(artifact, models, materialized, finance, config)
     declared_executor = bundle.manifest.command["executor"]
     if declared_executor != snapshot.executor or bundle.manifest.result_adapter != snapshot.result_adapter:
         raise ComputationUnavailableError(

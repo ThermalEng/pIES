@@ -120,7 +120,7 @@ def _predict_round(
 
 def _solve_round(
     ctx: RunContext, plane: Any, snapshot: Any, artifact: Any, models: Any,
-    all_series: tuple, finance: Any, config: Any, attempt: Any,
+    materialized: Any, finance: Any, config: Any, attempt: Any,
 ) -> tuple[Any, Any, Any, Any]:
     """单轮求解: 生成 → 执行(含回执分流) → 适配 → 业务结局。
 
@@ -130,7 +130,7 @@ def _solve_round(
     (bundle, receipt, collected, result, outcome)。
     """
     bundle = worker_app.generate_bundle(
-        plane, snapshot, artifact, models, all_series, finance, config)
+        plane, snapshot, artifact, models, materialized, finance, config)
     ctx.progress(40.0, "generate", None)
     receipt, collected = worker_app.execute_bundle(
         plane=plane, bundle=bundle, attempt=attempt, stop=_stop_probe(ctx),
@@ -197,7 +197,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         raise worker_app.ComputationUnavailableError(
             "计算执行面未装配，计算任务不可执行", reason="compute-plane-missing")
     with ctx.session_factory() as db:
-        artifact, models, series, finance, config = worker_app.load_compute_inputs(
+        artifact, models, materialized, finance, config = worker_app.load_compute_inputs(
             db, task.project_id, snapshot
         )
     ctx.progress(10.0, "materialize", None)
@@ -205,11 +205,13 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     predicted_series: tuple = ()
     if config.predictions:
         predicted_series, predicted = _predict_round(ctx, plane, snapshot, None)
-    all_series = tuple(series) + tuple(predicted_series)
+    # 完成态集合：预测阶段交付全部 pending（提交闸门 TASK-REQ-010/011 保证
+    # 配置与绑定双向覆盖），由应用层合并构成，不复核。
+    completed = worker_app.complete_materialized(materialized, predicted_series)
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
     rounds_log: list[dict] = []
     bundle, receipt, collected, result, outcome = _solve_round(
-        ctx, plane, snapshot, artifact, models, all_series, finance, config, attempt)
+        ctx, plane, snapshot, artifact, models, completed, finance, config, attempt)
     rounds_log.append({
         "round": 1, "phase": "phase1",
         "bundle": bundle, "receipt": receipt, "collected": collected,
@@ -229,9 +231,9 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             new_series, new_predicted = _predict_round(
                 ctx, plane, snapshot, result.outputs)
             prediction_rounds += 1
-            all_series = tuple(series) + tuple(new_series)
+            completed = worker_app.complete_materialized(materialized, new_series)
             bundle, receipt, collected, result, outcome = _solve_round(
-                ctx, plane, snapshot, artifact, models, all_series,
+                ctx, plane, snapshot, artifact, models, completed,
                 finance, config, attempt)
             solve_rounds += 1
             rounds_log.append({
