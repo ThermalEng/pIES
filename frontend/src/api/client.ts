@@ -635,16 +635,18 @@ function configFromServer(body: unknown, projectId: number): CalcConfig {
 }
 
 /** 后端质量报告 dict(checks 聚合形态) → 前端 QualityReport。 */
-function qualityFromServer(q: Record<string, unknown>): { missing_rate: number | null; outlier_rate: number | null; interpolation_notes: string[] | null } {
+function qualityFromServer(q: Record<string, unknown>): { missing_rate: number | null; outlier_rate: number | null; interpolation_notes: string[] | null; price_object_id: string | null } {
   const checks = asRecord(q.checks)
   const missing = asRecord(checks.missing_values)
   const ranges = asRecord(checks.ranges)
   const rc = asRecord(checks.row_count)
   const rowCount = Number(rc.expected ?? 0)
+  const oid = q.price_object_id
   return {
     missing_rate: rowCount > 0 ? Number(missing.total ?? 0) / rowCount : null,
     outlier_rate: rowCount > 0 ? Number(ranges.total ?? 0) / rowCount : null,
     interpolation_notes: null,
+    price_object_id: typeof oid === 'string' && oid ? oid : null,
   }
 }
 

@@ -6,7 +6,7 @@
  * 3. 读取失败给可见错误 —— `ok: false` 上报, 调用方展示, 不静默回退 generic。
  */
 
-export type HeadScanMode = 'generic' | 'device-data'
+export type HeadScanMode = 'generic' | 'device-data' | 'price-series'
 
 export interface HeadScanDecision {
   mode: HeadScanMode
@@ -31,6 +31,9 @@ export function decideHeadMode(head: string): HeadScanDecision {
   }
   if (schema === 'ies.device-data' && resolution) {
     return { mode: 'device-data', resolution }
+  }
+  if (schema === 'ies.price-series' && resolution) {
+    return { mode: 'price-series', resolution }
   }
   return { mode: 'generic', resolution: null }
 }

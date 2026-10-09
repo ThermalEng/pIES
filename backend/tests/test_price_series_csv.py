@@ -189,12 +189,26 @@ def test_rejections_carry_price_csv_codes() -> None:
     assert _rejected(_price_bytes([])) == "PRICE-CSV-009"
 
 
+def test_data_area_comments_blocked_010() -> None:
+    """数据区注释/补写元数据在输入边界阻断（契约：数据区无注释）。"""
+    head, _, _ = _price_bytes(["0,0.7", "1,0.8"]).partition(b"step,price\n")
+    head = head + b"step,price\n"
+    note = b"# note: late comment\n0,0.7\n"
+    assert _rejected(head + note) == "PRICE-CSV-010"
+    tail = b"0,0.7\n# trailing\n"
+    assert _rejected(head + tail) == "PRICE-CSV-010"
+    late_meta = b"0,0.7\n# unit: CNY/kWh\n"
+    assert _rejected(head + late_meta) == "PRICE-CSV-010"
+
+
 # ---------------------------------------------------------------------------
 # 上传入口: 同口识别 + oid 质量报告
 # ---------------------------------------------------------------------------
 
 
 def test_price_upload_returns_opaque_object_id(client, db) -> None:  # noqa: ANN001, ANN201
+    from test_tasks_api import _h  # noqa: E402
+
     user = make_user(db, "price_owner")
     pid = _create_project(client, user, "价格上传项目")
     ds_id = _make_dataset(client, pid, user, name="价格序列")
@@ -215,6 +229,12 @@ def test_price_upload_returns_opaque_object_id(client, db) -> None:  # noqa: ANN
     parsed, diags = parse_price_series_file(stored)
     assert diags == [] and parsed is not None
     assert len(parsed.values) == 100
+    # oid 随版本行持久化：版本详情复查同源可得（用户取 ref 的唯一来源）。
+    detail = client.get(f"/api/projects/{pid}/datasets/{ds_id}", headers=_h(client, user))
+    assert detail.status_code == 200, detail.text
+    versions = detail.json()["versions"]
+    assert len(versions) == 1
+    assert versions[0]["quality_report"]["price_object_id"] == oid
 
 
 def test_price_upload_blocks_resolution_mismatch(client, db) -> None:  # noqa: ANN001, ANN201
@@ -394,8 +414,63 @@ def test_worker_corrupt_bytes_fail_visibly(db, tmp_path) -> None:  # noqa: ANN00
     settings.data_dir = tmp_path
     oid = put_object(db, b"step,price\n0,abc\n", "text/csv", "user_upload").oid
     effective = _effective_with_price(oid, 8760)
-    with pytest.raises(ValueError, match="不可解析"):
+    # 可信解码不跑 PRICE-CSV 输入诊断：实际读取错误（非诊断码）直接可见。
+    with pytest.raises(ValueError, match="could not convert"):
         _materialize_price_series(db, _artifact(), effective)
+
+
+def test_trusted_decode_matches_validated_values() -> None:
+    """可信解码与输入校验同值（不重复诊断，只做最小解码）。"""
+    from iesplan.finance import read_trusted_price_values  # noqa: E402
+
+    raw = _price_bytes(_hourly_rows(["0.70", "0", "-0.250"], 6))
+    assert read_trusted_price_values(raw) == (0.7, 0.0, -0.25, 0.7, 0.0, -0.25)
+
+
+def test_trusted_decode_surfaces_raw_read_errors() -> None:
+    """损坏按实际读取错误报告（Unicode/ValueError），无诊断码包装。"""
+    from iesplan.finance import read_trusted_price_values  # noqa: E402
+
+    with pytest.raises(UnicodeDecodeError):
+        read_trusted_price_values(b"\xff\xfe\n")
+    with pytest.raises(ValueError):
+        read_trusted_price_values(b"step,price\n0,abc\n")
+
+
+def test_worker_preserves_negative_values(db, tmp_path) -> None:  # noqa: ANN001, ANN201
+    """负价在 Worker 层不钳零：按财务契约自然通过（组装侧逐点反转）。"""
+    from iesplan.application.worker.compute_cases import _materialize_price_series  # noqa: E402
+
+    oid = _stored_price(db, tmp_path, ["-0.25", "0", "0.7"], 3)
+    prices = _materialize_price_series(db, _artifact(), _effective_with_price(oid, 3))
+    assert [p.price_id for p in prices] == ["pv_export"]
+    assert prices[0].values == (-0.25, 0.0, 0.7)
+
+
+def test_snapshot_ref_retains_object_after_dataset_detach(db, tmp_path) -> None:  # noqa: ANN001, ANN201
+    """数据集侧引用解除后，快照引用仍保留对象，Worker 可读。
+
+    机制级证明：价格对象先挂数据集文件引用（模拟上传归属），再挂
+    snapshot_ref（模拟提交快照），解除前者后对象仍可读、引用清单
+    仅剩快照引用，物化仍能读出值。接线（提交时真实快照 id）由
+    N=2 端到端用例断言。
+    """
+    from iesplan.application.worker.compute_cases import _materialize_price_series  # noqa: E402
+    from iesplan.storage import add_ref, get_object, list_refs, remove_ref  # noqa: E402
+
+    oid = _stored_price(db, tmp_path, ["0.4", "0.45"], 8760)
+    add_ref(db, oid, "dataset_file", 11, ref_entity_type="dataset_files")
+    add_ref(db, oid, "snapshot_ref", 77, purpose="快照冻结时变价格")
+    refs = [(r.ref_type, r.ref_entity_id) for r in list_refs(db, oid)]
+    assert ("snapshot_ref", "77") in refs
+    remove_ref(db, oid, "dataset_file", 11, ref_entity_type="dataset_files")
+    db.flush()  # 会话 autoflush 关闭，删引用后显式刷盘再查清单
+    refs = [(r.ref_type, r.ref_entity_id) for r in list_refs(db, oid)]
+    assert refs == [("snapshot_ref", "77")]
+    assert get_object(db, oid)[:11] == b"# schema: i"
+    effective = _effective_with_price(oid, 8760)
+    prices = _materialize_price_series(db, _artifact(), effective)
+    assert prices[0].values[:2] == (0.4, 0.45)
 
 
 def test_complete_materialized_carries_prices() -> None:

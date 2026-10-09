@@ -48,7 +48,7 @@ from iesplan.finance.pricecsv import (
     emit_price_series_csv,
     is_price_series_csv,
     parse_price_series_file,
-    price_file_to_dict,
+    read_trusted_price_values,
 )
 from iesplan.finance.triplet import (
     COST_METHOD_VALUES,
@@ -131,5 +131,5 @@ __all__ = [
     "emit_price_series_csv",
     "is_price_series_csv",
     "parse_price_series_file",
-    "price_file_to_dict",
+    "read_trusted_price_values",
 ]

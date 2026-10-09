@@ -189,7 +189,22 @@ function runUpload(opts: {
 function UploadResultPanel({ result }: { result: UploadOutcome }) {
   const { version, diagnostics } = result
   const q = version.quality_report
+  const [copied, setCopied] = useState(false)
   const blocking = diagnostics.filter((d) => d.blocking || d.severity === 'blocking').length
+  function copyOid() {
+    if (!q?.price_object_id) return
+    const done = () => setCopied(true)
+    try {
+      const p = navigator.clipboard?.writeText(q.price_object_id) as unknown
+      if (p && typeof (p as Promise<void>).then === 'function') {
+        void (p as Promise<void>).then(done, () => setCopied(false))
+      } else {
+        done()
+      }
+    } catch {
+      setCopied(false)
+    }
+  }
   return (
     <div className="ies-upload-result">
       <div className="ies-flex" style={{ flexWrap: 'wrap' }}>
@@ -199,6 +214,15 @@ function UploadResultPanel({ result }: { result: UploadOutcome }) {
         {version.license ? <Badge label={version.license} variant="neutral" /> : null}
         <Badge label={pt('ies.data.binding')} variant="neutral" />
       </div>
+      {q?.price_object_id ? (
+        <div className="ies-flex" style={{ flexWrap: 'wrap', margin: 'var(--ies-space-2) 0', alignItems: 'center' }}>
+          <span className="ies-form-message">{pt('ies.data.price_object_id')}:</span>
+          <Input value={q.price_object_id} readOnly aria-label={pt('ies.data.price_object_id')} />
+          <Button variant="secondary" onClick={copyOid}>
+            {copied ? pt('ies.data.copied') : pt('ies.data.copy')}
+          </Button>
+        </div>
+      ) : null}
       <div className="ies-flex" style={{ flexWrap: 'wrap', margin: 'var(--ies-space-2) 0' }}>
         <span className="ies-form-message">
           {pt('ies.data.missing_rate')}: {q ? formatPercent(q.missing_rate) : '—'}
@@ -252,7 +276,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
   const [license, setLicense] = useState('')
   const [description, setDescription] = useState('')
   const [file, setFile] = useState<File | null>(null)
-  const [schemaMode, setSchemaMode] = useState<'generic' | 'device-data'>('generic')
+  const [schemaMode, setSchemaMode] = useState<'generic' | 'device-data' | 'price-series'>('generic')
   const [fileResolution, setFileResolution] = useState<string | null>(null)
   // 头判定状态即提交可否判据: 非 ready 一律不可提交; failed 须重选并成功才可恢复。
   const [scanStatus, setScanStatus] = useState<HeadScanStatus>('empty')
@@ -273,8 +297,8 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
           return
         }
         setScanStatus((prev) => nextScanStatus(prev, 'ok'))
-        if (outcome.decision.mode === 'device-data') {
-          setSchemaMode('device-data')
+        if (outcome.decision.mode === 'device-data' || outcome.decision.mode === 'price-series') {
+          setSchemaMode(outcome.decision.mode)
           setFileResolution(outcome.decision.resolution)
         }
       },
@@ -336,7 +360,9 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
     setBusy(true)
     setError(null)
     try {
-      const stepResolution = schemaMode === 'device-data' ? fileResolution : null
+      // device-data 与 price-series 均为自描述 step 文件：采用文件分辨率，
+      // 不传表单字段与 UTC 偏移（后端按文件自描述校验）。
+      const stepResolution = schemaMode === 'generic' ? null : fileResolution
       const res = await runUpload({
         projectId,
         name,
@@ -402,7 +428,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
                 placeholder="e.g. 园区负荷 2025"
               />
             </FormField>
-            {schemaMode === 'device-data' && fileResolution ? (
+            {schemaMode !== 'generic' && fileResolution ? (
               <FormField label={pt('ies.data.file_resolution')} htmlFor="dset-res-ro">
                 <Input id="dset-res-ro" value={fileResolution} readOnly />
               </FormField>
@@ -425,7 +451,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
               </FormField>
             )}
           </div>
-          {schemaMode === 'device-data' && fileResolution ? null : (
+          {schemaMode !== 'generic' && fileResolution ? null : (
           <FormField label={pt('ies.data.utc_offset')} htmlFor="dset-offset" hint={pt('ies.data.utc_note')}>
             <Select id="dset-offset" value={offset} onChange={(e) => setOffset(Number(e.target.value))}>
               {OFFSET_OPTIONS.map((m) => (
@@ -436,7 +462,7 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
             </Select>
           </FormField>
           )}
-          {schemaMode === 'device-data' && fileResolution ? null : (
+          {schemaMode !== 'generic' && fileResolution ? null : (
           <FormField label={pt('ies.data.field_desc')}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--ies-space-2)' }}>
               {fields.map((f, idx) => (
@@ -496,6 +522,11 @@ function UploadDialog({ projectId, defaultOffsetMinutes, open, onClose, onUpload
           {schemaMode === 'device-data' && fileResolution ? (
             <Alert variant="info" title={pt('ies.data.step_file_mode')}>
               {pt('ies.data.step_file_note')}
+            </Alert>
+          ) : null}
+          {schemaMode === 'price-series' && fileResolution ? (
+            <Alert variant="info" title={pt('ies.data.price_file_mode')}>
+              {pt('ies.data.price_file_note')}
             </Alert>
           ) : null}
           <FormField label={pt('ies.data.file')} required htmlFor="dset-file">
@@ -664,6 +695,11 @@ function VersionDetail({ version }: { version: DatasetVersion }) {
               {pt('ies.data.outlier_rate')}: {q ? formatPercent(q.outlier_rate) : '—'}
             </span>
           </div>
+          {q?.price_object_id ? (
+            <div className="ies-form-message" style={{ marginTop: 'var(--ies-space-2)' }}>
+              {pt('ies.data.price_object_id')}: <span className="ies-mono">{q.price_object_id}</span>
+            </div>
+          ) : null}
           {q?.interpolation_notes?.length ? (
             <ul style={{ margin: 'var(--ies-space-2) 0 0', paddingLeft: 'var(--ies-space-4)' }}>
               {q.interpolation_notes.map((note) => (

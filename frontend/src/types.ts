@@ -357,6 +357,8 @@ export interface QualityReport {
   missing_rate: number | null
   outlier_rate: number | null
   interpolation_notes: string[] | null
+  /** 价格序列对象 id（仅 ies.price-series 版本有；财务 ref 即填该值）。 */
+  price_object_id: string | null
 }
 
 export interface DatasetVersion {

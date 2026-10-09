@@ -4,7 +4,7 @@
  * 覆盖(uploadHeadScan.ts, 与 DataPage 共用同一模块):
  * 1. 快速换文件时旧读取结果失效(世代守卫);
  * 2. 读取失败上报 ok:false(调用方展示可见错误, 不静默回退 generic);
- * 3. decideHeadMode 判定: step 自描述 / 通用 / 有 schema 无 resolution / 空头;
+ * 3. decideHeadMode 判定: step 自描述 / 价格自描述 / 通用 / 有 schema 无 resolution / 空头;
  * 4. 清除选择直接以 generic 结算;
  * 5. 状态机(nextScanStatus/canSubmitScan, DataPage 按钮与 submit 共用判据):
  *    非 ready 不可提交, failed 只能重选恢复; 定向场景覆盖失败后再次
@@ -43,11 +43,21 @@ const STEP_HEAD = [
   'step,electricity_demand',
   '0,48',
 ].join('\n')
+const PRICE_HEAD = [
+  '# schema: ies.price-series',
+  '# schema_version: 1.0.0',
+  '# resolution: 1h',
+  '# unit: CNY/kWh',
+  'step,price',
+  '0,0.7',
+].join('\n')
 const GENERIC_HEAD = 'timestamp,e_load\n2025-01-01 00:00,100\n'
 
 // 3/4. 纯判定。
 check('step 头判为 device-data', JSON.stringify(decideHeadMode(STEP_HEAD)) === JSON.stringify({ mode: 'device-data', resolution: '1h' }))
 check('通用头判为 generic', JSON.stringify(decideHeadMode(GENERIC_HEAD)) === JSON.stringify({ mode: 'generic', resolution: null }))
+check('价格头判为 price-series', JSON.stringify(decideHeadMode(PRICE_HEAD)) === JSON.stringify({ mode: 'price-series', resolution: '1h' }))
+check('价格无 resolution 不判 step', decideHeadMode('# schema: ies.price-series\nstep,price\n').mode === 'generic')
 check('有 schema 无 resolution 不判 step', decideHeadMode('# schema: ies.device-data\nstep,x\n').mode === 'generic')
 check('空头判为 generic', decideHeadMode('').mode === 'generic')
 check('首行非注释即停', decideHeadMode('timestamp,e_load\n# schema: ies.device-data\n').mode === 'generic')

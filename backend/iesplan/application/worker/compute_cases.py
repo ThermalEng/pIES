@@ -264,7 +264,7 @@ def _materialize_price_series(
     单位，此处按可信流程读取：对象缺失或字节不可解析即实际错误可见，
     不做完整性复核与重复领域校验。``ref`` 即冻结对象 oid。
     """
-    from iesplan.finance.pricecsv import parse_price_series_file
+    from iesplan.finance import read_trusted_price_values
 
     doc = json.loads(artifact.canonical_text)
     wanted: list[str] = []
@@ -277,16 +277,17 @@ def _materialize_price_series(
     for price_id in wanted:
         price = finance.energy_prices[price_id]
         raw = get_object(db, price.ref)
-        parsed, _ = parse_price_series_file(raw)
-        if parsed is None:
-            raise ValueError(f"冻结价格对象不可解析（违反已冻结事实）: {price_id!r}")
+        # 可信流程最小解码（提交边界已唯一校验；损坏按实际读取错误可见，
+        # 不重跑 PRICE-CSV 输入诊断）：元数据取冻结声明，不读文件头。
+        values = read_trusted_price_values(raw)
+        meta = price.series_meta
         out.append(
             MaterializedPriceSeries(
                 price_id=price_id,
-                point_count=len(parsed.values),
-                resolution=parsed.meta.resolution,
-                unit=parsed.meta.unit,
-                values=tuple(float(v) for v in parsed.values),
+                point_count=len(values),
+                resolution=meta.resolution if meta else "",
+                unit=meta.unit if meta else "",
+                values=values,
                 source={"kind": "price_series", "object_id": price.ref},
             )
         )

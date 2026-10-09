@@ -80,6 +80,7 @@ from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import ProjectRecord, ProjectVersionRecord
 from iesplan.storage import (
+    add_ref,
     get_object,
     object_info,
     orphaned_stats,
@@ -627,6 +628,10 @@ def _assemble_snapshot(
         json.loads(artifact.canonical_text), calc_config, project_id,
         predictor_registry=predictor_registry,
     )
+    # 快照对实际计费使用的价格对象建 storage owner 引用（与快照同事务；
+    # add_ref 幂等，复用路径重复建引用不重复计数）：价格数据集侧引用解除
+    # 后快照仍保留对象，Worker 可信读取不受影响。不另建索引/元数据事实。
+    price_oids = _used_price_oids(artifact, effective)
     for candidate in tasks_domain.list_snapshots_for_version(db, version.id):
         if _snapshot_inputs_equal(
             candidate,
@@ -643,9 +648,11 @@ def _assemble_snapshot(
             receipt=receipt,
             device_models=device_models,
         ):
+            for oid in price_oids:
+                add_ref(db, oid, "snapshot_ref", candidate.id, purpose="快照冻结时变价格")
             return candidate  # 相同输入复用既有快照(不可变, 复用安全)
 
-    return tasks_domain.create_snapshot(
+    snapshot = tasks_domain.create_snapshot(
         db,
         project_version_id=version.id,
         dataset_version_ids=dataset_ids,
@@ -662,6 +669,30 @@ def _assemble_snapshot(
         canonical_assembly_text=artifact.canonical_text,
         assembly_receipt=receipt,
     )
+    for oid in price_oids:
+        add_ref(db, oid, "snapshot_ref", snapshot.id, purpose="快照冻结时变价格")
+    return snapshot
+
+
+def _used_price_oids(artifact: Any, effective: EffectiveFinanceConfig) -> list[str]:
+    """规范文本计费绑定实际使用的时变价格 oid（按绑定 id 稳定排序去重）。
+
+    只含 canonical tariff_bindings 引用到的 kind == "time_series" 价格；
+    未绑定条目不建引用。调用时提交覆盖核对已通过，对象存在且可读。
+    """
+    canonical = json.loads(artifact.canonical_text)
+    oids: list[str] = []
+    for binding_id in sorted(canonical.get("tariff_bindings") or {}):
+        entry = (canonical.get("tariff_bindings") or {}).get(binding_id)
+        if not isinstance(entry, Mapping):
+            continue
+        price = (effective.energy_prices or {}).get(entry.get("price"))
+        if price is None or price.kind != "time_series":
+            continue
+        ref = price.ref
+        if isinstance(ref, str) and ref and ref not in oids:
+            oids.append(ref)
+    return oids
 
 
 def _check_submit_coverage(
@@ -682,7 +713,7 @@ def _check_submit_coverage(
     分辨率或单位与声明元数据不一致 → 400 TASK-REQ-017；``constant``
     价格无对象，不参与核对。
     """
-    from iesplan.finance.pricecsv import parse_price_series_file
+    from iesplan.finance import parse_price_series_file
     from iesplan.storage.contracts import ObjectCorruptError
 
     canonical = json.loads(artifact.canonical_text)

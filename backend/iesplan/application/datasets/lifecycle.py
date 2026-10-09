@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import math
 import secrets
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -69,6 +68,7 @@ from iesplan.devices import (
 )
 from iesplan.identity.contracts import UserRecord
 from iesplan.storage import (
+    ObjectHandle,
     RefInfo,
     add_ref,
     get_object,
@@ -272,6 +272,15 @@ def _field_location(field: str, rows: list[int] | None = None) -> dict:
     return loc
 
 
+def _upload_source_category(dataset: DatasetRecord, meta: dict) -> str:
+    """上传对象来源类别（版本行 provenance 与对象行同一口径）。"""
+    return (
+        meta.get("source_category")
+        or getattr(dataset, "source_category", None)
+        or DEFAULT_SOURCE_CATEGORY
+    )
+
+
 def _commit_version(
     db: Session,
     dataset: DatasetRecord,
@@ -285,6 +294,7 @@ def _commit_version(
     canonical_csv: bytes | None = None,
     row_count: int | None = None,
     prebuilt: dict | None = None,
+    prebuilt_data_object: ObjectHandle | None = None,
 ) -> DatasetVersionRecord:
     """校验通过后执行版本写入(对象 + 版本行 + 文件行 + 引用, 只 flush，不提交)。
 
@@ -294,6 +304,9 @@ def _commit_version(
     row_count: 实际数据行数; 缺省用 axis.n(标准年步数)。
     prebuilt: 已备好的 {fields, units, quality_report}(device-data 上传路径);
     提供时跳过通用字段/质量报告构造, normalized_df 可为 None。
+    prebuilt_data_object: 调用方已落盘的数据本体对象句柄(价格上传路径:
+    先落盘取 oid 以便质量报告持久化 price_object_id); 提供时不再重复
+    写对象, 缺省内部落盘。
     """
     if prebuilt is None:
         assert normalized_df is not None
@@ -316,9 +329,7 @@ def _commit_version(
     else:
         quality_report = dict(prebuilt["quality_report"])
 
-    source_category = (
-        meta.get("source_category") or getattr(dataset, "source_category", None) or DEFAULT_SOURCE_CATEGORY
-    )
+    source_category = _upload_source_category(dataset, meta)
     provenance = dict(meta.get("provenance") or {})
     provenance.setdefault("source_category", source_category)
     license = meta.get("license") or dataset.default_license
@@ -327,7 +338,10 @@ def _commit_version(
     # 数据本体先落盘为对象存储对象; 版本行只持有不可变版本号,
     # 历史定位使用 (dataset_id, version_no), 规范字节经 dataset_files 对象引用读取。
     # version_no 由 dataset 域分配(单调递增, 并发冲突抛 DatasetConflictError)。
-    obj_data = put_object(db, canonical_csv, DATA_MEDIA_TYPE, source_category=source_category)
+    if prebuilt_data_object is None:
+        obj_data = put_object(db, canonical_csv, DATA_MEDIA_TYPE, source_category=source_category)
+    else:
+        obj_data = prebuilt_data_object
     version = dataset_domain.create_version(
         db,
         dataset_id=dataset.id,
@@ -582,7 +596,7 @@ def _upload_price_series_version(
     oid 记入质量报告 ``price_object_id``（Profile ``time_series.ref``
     即填该值）。
     """
-    from iesplan.finance.pricecsv import (
+    from iesplan.finance import (
         emit_price_series_csv,
         parse_price_series_file,
     )
@@ -624,6 +638,12 @@ def _upload_price_series_version(
     axis = build_axis(resolution, utc_offset_minutes)
     canonical = emit_price_series_csv(parsed.meta, parsed.values)
     row_count = len(parsed.values)
+    # 数据本体先落盘取 oid: 质量报告的 price_object_id 随版本行一并持久化,
+    # 上传响应与版本详情同源可查(Profile time_series.ref 即填该值)。
+    handle = put_object(
+        db, canonical, DATA_MEDIA_TYPE,
+        source_category=_upload_source_category(dataset, meta),
+    )
     fields_info: dict = {
         "step": {
             "type": "integer", "unit": "step",
@@ -641,23 +661,16 @@ def _upload_price_series_version(
         "resolution": parsed.meta.resolution,
         "unit": parsed.meta.unit,
         "row_count": row_count,
+        "price_object_id": handle.oid,
         "diagnostics": [d.to_dict() for d in diags if not d.blocking],
     }
-    version = _commit_version(
+    return _commit_version(
         db, dataset, axis, None, diags, {}, meta,
         actor_id=user_id,
         canonical_csv=canonical, row_count=row_count,
         prebuilt={"fields": fields_info, "units": units_map, "quality_report": report},
+        prebuilt_data_object=handle,
     )
-    for f in dataset_domain.list_files(db, version.id):
-        if f.file_kind == "data":
-            oid = object_info(db, f.object_id)["oid"]
-            version = replace(
-                version,
-                quality_report={**version.quality_report, "price_object_id": oid},
-            )
-            break
-    return version
 
 
 def _upload_dataset_version(
@@ -707,7 +720,7 @@ def _upload_dataset_version(
             db, dataset, resolution, utc_offset_minutes, data_bytes, fields, meta,
             user_id=user_id,
         )
-    from iesplan.finance.pricecsv import is_price_series_csv
+    from iesplan.finance import is_price_series_csv
 
     if is_price_series_csv(data_bytes):
         return _upload_price_series_version(

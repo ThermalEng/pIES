@@ -10,7 +10,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any
 
 from iesplan.core.diagnostics import Diagnostic, make_diag
 from iesplan.core.timeaxis import RESOLUTIONS
@@ -47,12 +46,34 @@ def _diag(code: str, params: Mapping[str, object]) -> Diagnostic:
     )
 
 
+def _read_schema_marker(data: bytes) -> str | None:
+    """读文件前导 schema 标记（本模块自包含最小实现，不跨域取数）。
+
+    只看表头前的 ``# schema:`` 行；无标记或解码失败返回 None（由各
+    路径自身诊断覆盖）。与设备数据域同名 helper 同行语义，不共享实现。
+    """
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            break
+        body = stripped[1:].strip()
+        if ":" not in body:
+            continue
+        key, _, value = body.partition(":")
+        if key.strip() == "schema":
+            return value.strip()
+    return None
+
+
 def is_price_series_csv(data: bytes) -> bool:
     """上传字节是否为价格序列文件（只看 schema 标记，不做完整校验）。"""
-    from iesplan.devices.datacontract2 import read_schema_marker
-
-    schema, _ = read_schema_marker(data)
-    return schema == SCHEMA_ID
+    return _read_schema_marker(data) == SCHEMA_ID
 
 
 def parse_price_series_file(data: bytes) -> tuple[ParsedPriceFile | None, list[Diagnostic]]:
@@ -70,6 +91,8 @@ def parse_price_series_file(data: bytes) -> tuple[ParsedPriceFile | None, list[D
         if not stripped:
             continue
         if stripped.startswith("#"):
+            if header is not None:
+                return None, [_diag("PRICE-CSV-010", {"detail": stripped[:60]})]
             body = stripped[1:].strip()
             if ":" not in body:
                 continue
@@ -145,15 +168,22 @@ def emit_price_series_csv(meta: PriceSeriesMeta, values: tuple[Decimal, ...]) ->
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def price_file_to_dict(parsed: ParsedPriceFile) -> dict[str, Any]:
-    """解析结果转 JSON 兼容字典（值保持十进制字符串，不转 float）。"""
-    return {
-        "schema": SCHEMA_ID,
-        "schema_version": SCHEMA_VERSION,
-        "resolution": parsed.meta.resolution,
-        "unit": parsed.meta.unit,
-        "values": [str(value) for value in parsed.values],
-    }
+def read_trusted_price_values(data: bytes) -> tuple[float, ...]:
+    """读已冻结价格对象的全周期值（Worker 可信流程专用）。
+
+    提交边界已做唯一一次输入校验（格式/数值/实长/分辨率/单位），此处
+    只做最小解码：UTF-8 解码后跳过前导 ``#`` 行与空行，首个数据行视为
+    表头（不复核），其余行取第二列转 float。损坏按实际读取错误
+    （UnicodeDecodeError/ValueError/IndexError）直接可见，不跑
+    PRICE-CSV 输入诊断、不做完整性复核（宪法 §2.6）。
+    """
+    text = data.decode("utf-8-sig")
+    content = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return tuple(float(row.split(",")[1].strip()) for row in content[1:])
 
 
 __all__ = [
@@ -164,5 +194,5 @@ __all__ = [
     "is_price_series_csv",
     "parse_price_series_file",
     "emit_price_series_csv",
-    "price_file_to_dict",
+    "read_trusted_price_values",
 ]

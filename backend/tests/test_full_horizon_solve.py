@@ -1037,13 +1037,14 @@ def _declare_tou_finance(db: Session, user, pid: int, price_oid: str) -> None:
     )
 
 
-def _prepare_tou_project(client: TestClient, db: Session, user, raw: bytes) -> int:
+def _prepare_tou_project(client: TestClient, db: Session, user, raw: bytes) -> tuple[int, str]:
     """准备 N=2 时变价格项目：购电 0.7/0.35 分年 + 售电 constant（零流量）。
 
     与 ``_prepare_full_project`` 同一负荷与拓扑，唯两处不同：财务
     Profile 的 grid_import 为时变引用（价格文件经公开上传口落盘，
     oid 填入 ref），计费绑定追加零流量的售电 constant 绑定。售电
     接口无电源：负荷母线平衡与进出口互斥把 export 钉在 0，无虚假收益。
+    返回（项目 id，价格对象 oid）。
     """
     from test_device_data_upload import _make_dataset, _upload  # noqa: E402
     from test_worker_compute_chain import PLANNING_BODY  # noqa: E402
@@ -1158,7 +1159,7 @@ def _prepare_tou_project(client: TestClient, db: Session, user, raw: bytes) -> i
     assert resp.status_code == 200, resp.text
     revision = resp.json()["revision"]
     _bind_and_freeze(client, pid, user, None, revision=revision)
-    return pid
+    return pid, price_oid
 
 
 class TestTimeVaryingPriceTrueSolve:
@@ -1173,9 +1174,11 @@ class TestTimeVaryingPriceTrueSolve:
         """
         from sqlalchemy import select  # noqa: E402
 
+        from iesplan.storage import list_refs  # noqa: E402
+
         user = make_user(db, "tou_owner_1")
         raw = _full_csv(YEAR1_STEPS, YEAR1_KW, YEAR2_STEPS, YEAR2_KW)
-        pid = _prepare_tou_project(client, db, user, raw)
+        pid, price_oid = _prepare_tou_project(client, db, user, raw)
         rev_resp = client.put(
             f"/api/projects/{pid}/config",
             json={"calculation_config": dict(_CONFIG_BODY), "expected_revision": None},
@@ -1190,6 +1193,25 @@ class TestTimeVaryingPriceTrueSolve:
         )
         assert status == 201, body
         task_id = int(body["task"]["id"])
+        # 提交快照对实际使用的价格对象建 storage 引用（与快照同事务）。
+        task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        snapshot_id = task_row.calc_snapshot_id
+        assert snapshot_id is not None
+        refs = [
+            (r.ref_type, r.ref_entity_id) for r in list_refs(db, price_oid)
+        ]
+        assert ("snapshot_ref", str(snapshot_id)) in refs
+        # 相同输入复用快照：引用幂等，不重复计数。
+        status2, _ = _submit_task(
+            client, pid, user, config={"config_revision": rev},
+            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            idempotency_key="tou-n2-billing-reuse",
+        )
+        assert status2 == 201, body
+        refs = [
+            (r.ref_type, r.ref_entity_id) for r in list_refs(db, price_oid)
+        ]
+        assert refs.count(("snapshot_ref", str(snapshot_id))) == 1
         claim = worker_app.acquire_attempt(db, task_id, "tou-e2e")
         assert claim is not None
         db.commit()
@@ -1198,6 +1220,9 @@ class TestTimeVaryingPriceTrueSolve:
             return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
 
         assert runner.run_task(factory, claim, worker_id="tou-e2e", compute=plane) == "completed"
+        # 本会话在提交阶段已读过任务行（快照引用断言），Worker 在独立
+        # 会话提交求解完成；显式过期后重读，避免读到已开始事务的旧快照。
+        db.expire_all()
         task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task_row.status == "completed"
         assert task_row.business_outcome == "normal_completion"

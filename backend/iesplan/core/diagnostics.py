@@ -165,6 +165,7 @@ NEW_DIAG_CODES: dict[str, str] = {
     "PRICE-CSV-007": "价格文件 step 必须从 0 开始连续递增: {step}(期望 {expected})",
     "PRICE-CSV-008": "价格文件价格必须为有限 Decimal: step {step} 值 {value}",
     "PRICE-CSV-009": "价格文件无数据行: {detail}",
+    "PRICE-CSV-010": "价格文件数据区不允许注释/元数据行: {detail}",
     "CONFIG-VAL-001": "计算配置校验失败(阻断性诊断,HTTP 422;包络码,见 api/config.py)",
     "API-REQ-001": (
         "请求体校验失败(422;FastAPI/Pydantic RequestValidationError 包络,"
@@ -344,6 +345,7 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "PRICE-CSV-007": "price_csv_step_invalid",
             "PRICE-CSV-008": "price_csv_value_invalid",
             "PRICE-CSV-009": "price_csv_empty",
+            "PRICE-CSV-010": "price_csv_data_comment",
         }.items()
     },
     **{
