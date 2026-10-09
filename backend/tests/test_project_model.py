@@ -787,9 +787,10 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
 
 
 def _gen_annual_inputs():
-    """双年容量变量输入(N=2)：同一参数 y0 零建设、y1 可建。
+    """双年容量变量输入(N=2)：同一参数两年均可正新增（y0≤40、y1≤60kW）。
 
-    起始年 2026 为平年，年界为 step 8760。返回 (model, units, decls)。
+    起始年 2026 为平年，年界为 step 8760。y1 省略下界（模型语义下界
+    为 0）。返回 (model, units, decls)。
     """
     _artifact, models, _materialized, finance, config = _gen_inputs()
     doc = json.loads(_artifact.canonical_text)
@@ -798,10 +799,16 @@ def _gen_annual_inputs():
         "parameter": "cap_kw",
         "year_offset": 0,
         "lower_bound": "0",
-        "upper_bound": "0",
+        "upper_bound": "40",
         "unit": "kW",
     }
-    cap_y1 = dict(cap_y0, year_offset=1, upper_bound="500")
+    cap_y1 = {
+        "device_ref": "gen1",
+        "parameter": "cap_kw",
+        "year_offset": 1,
+        "upper_bound": "60",
+        "unit": "kW",
+    }
     doc["planning"]["variables"] = {
         "cap_y0": cap_y0,
         "cap_y1": cap_y1,
@@ -863,8 +870,16 @@ def test_annual_build_vars_form_inservice_capacity_per_year() -> None:
     row1 = rows["gen1__power_out__plan_max__t8760"]
     assert _coeffs(row1.expression) == {"gen1__power_out__t8760": 1.0, s1: -1.0}
     by_var = {var.name: var for var in model.variables}
-    assert by_var["cap_y0"].upper == pytest.approx(0.0)
-    assert by_var["cap_y1"].upper == pytest.approx(500000.0)
+    assert by_var["cap_y0"].upper == pytest.approx(40000.0)
+    assert by_var["cap_y1"].upper == pytest.approx(60000.0)
+    # 省略下界的新增变量模型语义下界为 0；在产同样非负。
+    assert by_var["cap_y1"].lower == pytest.approx(0.0)
+    assert by_var[s0].lower == pytest.approx(0.0)
+    assert by_var[s1].lower == pytest.approx(0.0)
+    # 静态包络不收窄可行域：逐年上限之和（次年在产可到 100 > 单年最大 60）。
+    assert by_var[s1].upper == pytest.approx(100000.0)
+    assert by_var["gen1__power_out__t0"].upper == pytest.approx(40000.0)
+    assert by_var["gen1__power_out__t8760"].upper == pytest.approx(100000.0)
     annual = decls["gen1__annual_fixed_om"]
     assert set(annual["terms"]) == {s0, s1}
     assert annual["terms"][s0] == pytest.approx(annual["terms"][s1])

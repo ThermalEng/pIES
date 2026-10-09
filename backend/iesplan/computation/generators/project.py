@@ -358,19 +358,26 @@ class _ProjectBuilder:
         entries = self.annual.get((inst, param)) or []
         return [vname for y, vname in entries if y <= year]
 
-    def _annual_envelope(
-        self, inst: str, param: str, unit: str, side: str,
+    def _annual_cumulative(
+        self, inst: str, param: str, year: int, unit: str, side: str,
     ) -> float | None:
-        """年度变量界的静态包络（upper 取最大，lower 取最小；任一缺失即 None）。"""
+        """截至年份 year 的新增界累计（upper 求和，lower 求和、缺席按 0）。
+
+        任一年 upper 缺席则累计上界为 None。永不收窄可行域：上界是各年
+        真实在产上界之和（只放大），下界是各年下界之和（只放小）。
+        """
         key = "upper_bound" if side == "upper" else "lower_bound"
-        vals: list[float] = []
-        for _, vname in self.annual[(inst, param)]:
+        total = 0.0
+        for y, vname in self.annual[(inst, param)]:
+            if y > year:
+                continue
             raw = self.plan_vars[vname].get(key)
             if raw is None:
-                return None
-            vals.append(float(raw))
-        pick = max(vals) if side == "upper" else min(vals)
-        return _to_internal(pick, unit)
+                if side == "upper":
+                    return None
+                continue
+            total += float(raw)
+        return _to_internal(total, unit)
 
     def _declare_inservice(self, inst: str, param: str, unit: str) -> None:
         """年度新增变量 + 年在产变量 + 累加定义行（每年一条等式）。
@@ -385,10 +392,14 @@ class _ProjectBuilder:
             upper = spec.get("upper_bound")
             self._declare(
                 vname,
-                None if lower is None else _to_internal(float(lower), vunit),
+                0.0 if lower is None else _to_internal(float(lower), vunit),
                 None if upper is None else _to_internal(float(upper), vunit),
                 "continuous", vunit,
             )
+        param_range = self.models[inst].variables[param].valid_range
+        param_max: float | None = None
+        if param_range is not None and param_range[1] is not None:
+            param_max = float(param_range[1])
         for year in range(self.evaluation_years):
             sname = self._inservice_name(inst, param, year)
             total = 0.0
@@ -401,9 +412,13 @@ class _ProjectBuilder:
                     unbounded = True
                     break
                 total += float(raw)
-            cap = None if unbounded else total
+            cap: float | None = None if unbounded else total
+            # 在产即参数取值，受设备参数自身值域上限约束（权威参数规则，
+            # 非偶然的单年上界截断）。
+            if param_max is not None and (cap is None or cap > param_max):
+                cap = param_max
             self._declare(
-                sname, None,
+                sname, 0.0,
                 None if cap is None else _to_internal(cap, unit),
                 "continuous", unit,
             )
@@ -424,20 +439,22 @@ class _ProjectBuilder:
 
     def _limit(
         self, inst: str, unit: str, number: float | None, ref: str | None,
-        side: str,
+        side: str, year: int | None = None,
     ) -> tuple[float | None, str | None]:
         """值域界内部值与接管规划变量名。
 
         数值直接换算；未被接管的 property 引用按实例解析。被年度
-        变量接管的 property 不再用实例旧值：静态求解界取各年变量界
-        的包络（maximum 取各年 upper 之最大，minimum 取各年 lower
-        之最小，任一缺失则 None；精确逐年约束由在产容量行承担），
-        不再返回单变量名（第二返回值恒为 None，由调用方按在产建行）。
+        变量接管的 property 不再用实例旧值：静态求解界取截至给定年份
+        的新增界累计（upper 求和、lower 求和且缺席按 0；任一年 upper
+        缺席则上界为 None；缺席年份默认末年，即全家族包络；精确逐年
+        约束由在产容量行承担），永不收窄可行域。不再返回单变量名
+        （第二返回值恒为 None，由调用方按在产建行）。
         """
         if ref is not None and (inst, ref) in self.annual:
             first = self.plan_vars[self.annual[(inst, ref)][0][1]]
             punit = first.get("unit") or unit
-            return self._annual_envelope(inst, ref, punit, side), None
+            at = self.evaluation_years - 1 if year is None else year
+            return self._annual_cumulative(inst, ref, at, punit, side), None
         if ref is not None:
             value, punit = self._prop_value_unit(inst, ref)
             return _to_internal(value, punit), None
@@ -480,8 +497,10 @@ class _ProjectBuilder:
                     self._declare_inservice(inst, name, unit)
                     symbols[name] = (
                         "var",
-                        self._annual_envelope(inst, name, unit, "lower"),
-                        self._annual_envelope(inst, name, unit, "upper"),
+                        self._annual_cumulative(
+                            inst, name, self.evaluation_years - 1, unit, "lower"),
+                        self._annual_cumulative(
+                            inst, name, self.evaluation_years - 1, unit, "upper"),
                     )
                 else:
                     symbols[name] = ("const", prop_const[name])
@@ -532,19 +551,57 @@ class _ProjectBuilder:
                 and (inst, flow.maximum_property_ref) in self.annual
             ):
                 caps.append((iface_name, flow.maximum_property_ref, "le"))
+            flow_annual = (
+                (flow.minimum_property_ref is not None
+                 and (inst, flow.minimum_property_ref) in self.annual)
+                or (flow.maximum_property_ref is not None
+                    and (inst, flow.maximum_property_ref) in self.annual)
+            )
             for step in range(self.point_count):
+                if flow_annual:
+                    year = self.step_year[step]
+                    lo, _ = self._limit(
+                        inst, flow.unit, flow.valid_range[0],
+                        flow.minimum_property_ref, "lower", year,
+                    )
+                    hi, _ = self._limit(
+                        inst, flow.unit, flow.valid_range[1],
+                        flow.maximum_property_ref, "upper", year,
+                    )
+                else:
+                    lo, hi = lower, upper
                 self._declare(
                     self._tech_name(inst, iface_name, step),
-                    lower, upper, "continuous", flow.unit,
+                    lo, hi, "continuous", flow.unit,
                 )
         for name, var in contribution.variables.items():
             if var.kind == "property":
                 continue
             lower, upper = symbols[name][1], symbols[name][2]
+            var_annual = (
+                (var.minimum_property_ref is not None
+                 and (inst, var.minimum_property_ref) in self.annual)
+                or (var.maximum_property_ref is not None
+                    and (inst, var.maximum_property_ref) in self.annual)
+            )
             for step in range(self.point_count):
+                if var_annual:
+                    year = self.step_year[step]
+                    lo, _ = self._limit(
+                        inst, var.unit,
+                        var.valid_range[0] if var.valid_range else None,
+                        var.minimum_property_ref, "lower", year,
+                    )
+                    hi, _ = self._limit(
+                        inst, var.unit,
+                        var.valid_range[1] if var.valid_range else None,
+                        var.maximum_property_ref, "upper", year,
+                    )
+                else:
+                    lo, hi = lower, upper
                 self._declare(
                     self._tech_name(inst, name, step),
-                    lower, upper, "continuous", var.unit,
+                    lo, hi, "continuous", var.unit,
                 )
         initial: dict[str, float] = {}
         for state in contribution.states:

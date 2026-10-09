@@ -1314,15 +1314,23 @@ def _craft_series_version(
     return version.id
 
 
-def _prepare_annual_project(client: TestClient, db: Session, user) -> int:
+def _prepare_annual_project(
+    client: TestClient, db: Session, user,
+    *,
+    project_name: str = "分年投产测试项目",
+    y0_upper: str = "0",
+    y1_upper: str = "50",
+    y1_lower: str | None = "0",
+) -> int:
     """准备 F4b 分年项目：pv1 自发自用 + grid1 补足 + data_full 负荷。
 
-    首年容量界 [0,0]、次年 [0,50]kW（取 finance.md 现实示例形态）；
+    默认首年容量界 [0,0]、次年 [0,50]kW（取 finance.md 现实示例形态）；
     finance 只有线性成本（固定 upfront 为 0，正固定成本另行拒收）。
+    y1_lower 为 None 时省略下界（模型语义下界为 0）。
     """
     from iesplan.application import configuration as config_cases  # noqa: E402
 
-    pid = _create_dated_project(client, user, "分年投产测试项目", START_YEAR)
+    pid = _create_dated_project(client, user, project_name, START_YEAR)
     _declare_finance(db, user, pid)
     load_vid = _craft_series_version(
         db, client, pid, user, "load2y",
@@ -1460,15 +1468,15 @@ def _prepare_annual_project(client: TestClient, db: Session, user) -> int:
                 "parameter": "rated_capacity_kwp",
                 "year_offset": 0,
                 "lower_bound": "0",
-                "upper_bound": "0",
+                "upper_bound": y0_upper,
                 "unit": "kWp",
             },
             "pv_cap_y1": {
                 "device_ref": "pv1",
                 "parameter": "rated_capacity_kwp",
                 "year_offset": 1,
-                "lower_bound": "0",
-                "upper_bound": str(int(ANNUAL_CAP_UPPER_KW)),
+                **({} if y1_lower is None else {"lower_bound": y1_lower}),
+                "upper_bound": y1_upper,
                 "unit": "kWp",
             },
         },
@@ -1584,4 +1592,318 @@ class TestAnnualBuildTrueSolve:
         )
         assert _solution_scalar(solution["variables"], "pv_cap_y1") == pytest.approx(
             ANNUAL_CAP_UPPER_KW, rel=1e-6
+        )
+
+
+#: P1(1) 累计包络场景：两年均可正新增（y0≤40、y1≤22.5kW），次年在产
+#: 62.5kW 超过单年上界之最大（40）。辐照 800 下出力系数 0.8：
+#: 首年出力 32kW、次年 50kW（= 负荷，恒可行）。
+CUM_Y0_UPPER = 40.0
+CUM_Y1_UPPER = 22.5
+CUM_Y0_PV_KW = CUM_Y0_UPPER * ANNUAL_PV_KW_PER_KW
+CUM_Y1_PV_KW = (CUM_Y0_UPPER + CUM_Y1_UPPER) * ANNUAL_PV_KW_PER_KW
+CUM_Y0_IMPORT = (ANNUAL_LOAD_KW - CUM_Y0_PV_KW) * YEAR1_STEPS
+CUM_Y1_IMPORT = (ANNUAL_LOAD_KW - CUM_Y1_PV_KW) * YEAR2_STEPS
+
+
+class TestAnnualCumulativeTrueSolve:
+    def test_cumulative_inservice_beyond_max_single_upper(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """N=2 累计在产真求解：次年在产 62.5kW > 单年上界最大 40kW。
+
+        累计求和与省略下界（模型语义下界 0）的端到端回归：PV 出力口
+        无 max 引用，静态包络不影响本场景，故本测试在 cc97c0c 上亦
+        为绿；静态包络的证伪由结构测试与 TestAnnualEnvelopeTrueSolve
+        承担（旧代码上为红）。y1 省略下界，覆盖模型语义下界 0 路径。
+        """
+        from sqlalchemy import select  # noqa: E402
+
+        user = make_user(db, "annual_owner_2")
+        pid = _prepare_annual_project(
+            client, db, user,
+            project_name="分年累计包络测试项目",
+            y0_upper="40",
+            y1_upper="22.5",
+            y1_lower=None,
+        )
+        rev_resp = client.put(
+            f"/api/projects/{pid}/config",
+            json={"calculation_config": dict(_CONFIG_BODY), "expected_revision": None},
+            headers=_h(client, user),
+        )
+        assert rev_resp.status_code == 200, rev_resp.text
+        rev = rev_resp.json()["revision"]
+        status, body = _submit_task(
+            client, pid, user, config={"config_revision": rev},
+            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            idempotency_key="annual-cumulative-n2",
+        )
+        assert status == 201, body
+        task_id = int(body["task"]["id"])
+        claim = worker_app.acquire_attempt(db, task_id, "annual-cum-e2e")
+        assert claim is not None
+        db.commit()
+
+        def factory() -> Session:
+            return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+
+        assert runner.run_task(factory, claim, worker_id="annual-cum-e2e", compute=plane) == "completed"
+        task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task_row.status == "completed"
+        assert task_row.business_outcome == "normal_completion"
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        solution = sealed["compute_result"]["outputs"]["solution"]
+        y0_import, y1_import, span = _yearly_served(
+            solution["variables"], "grid1__electricity_import__t"
+        )
+        assert span == FULL_STEPS
+        assert y0_import == pytest.approx(CUM_Y0_IMPORT, rel=1e-6)
+        assert y1_import == pytest.approx(CUM_Y1_IMPORT, abs=1.0)
+        assert _solution_scalar(solution["variables"], "pv_cap_y0") == pytest.approx(
+            CUM_Y0_UPPER, rel=1e-6
+        )
+        assert _solution_scalar(solution["variables"], "pv_cap_y1") == pytest.approx(
+            CUM_Y1_UPPER, rel=1e-6
+        )
+
+
+#: P1(1) 包络真求解场景（热泵，无状态、无二进制、纯 LP）：
+#: 首年热负荷 30kW、次年 62.5kW；y0≤40、y1≤22.5kW。
+#: 次年负荷 62.5 恰为累计上界之和，强制两建设变量同时顶满
+#: （y0=40、y1=22.5，唯一解）；COP=3.2 下用电量精确可算。
+#: 次年在产 62.5kW > 单年上界之最大（40kW）：静态包络若取 max，
+#: 次年出力被假性截断（62.5>40 不可行）；正确包络为逐年累计。
+HP_Y0_LOAD = 30.0
+HP_Y1_LOAD = 62.5
+HP_Y0_UPPER = 40.0
+HP_Y1_UPPER = 22.5
+HP_COP = 3.2
+HP_Y0_IMPORT = (HP_Y0_LOAD / HP_COP) * YEAR1_STEPS
+HP_Y1_IMPORT = (HP_Y1_LOAD / HP_COP) * YEAR2_STEPS
+
+
+def _heat_demand_csv() -> bytes:
+    """两年分段恒定热负荷（首年 30kW、次年 62.5kW）。"""
+    lines = [
+        "# schema: ies.device-data",
+        "# schema_version: 2.1.0",
+        "# dataset_id: heat_two_years",
+        "# device_id: ies.device.heat_load",
+        "# source_mode: data_full",
+        "# resolution: 1h",
+        "# unit.heat_demand: kW",
+        "step,heat_demand",
+    ]
+    lines += [f"{i},{HP_Y0_LOAD}" for i in range(YEAR1_STEPS)]
+    lines += [f"{YEAR1_STEPS + i},{HP_Y1_LOAD}" for i in range(YEAR2_STEPS)]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _prepare_hp_project(client: TestClient, db: Session, user) -> int:
+    """准备 P1(1) 热泵项目：hp1 供热 + grid1 供电 + data_full 热负荷。
+
+    三实例均无设备成本（只验收分年容量机制）；y1 省略下界。
+    """
+    from iesplan.application import configuration as config_cases  # noqa: E402
+
+    pid = _create_dated_project(client, user, "分年热泵包络测试项目", START_YEAR)
+    _declare_finance(db, user, pid)
+    heat_vid = _craft_series_version(
+        db, client, pid, user, "heat2y", _heat_demand_csv(),
+        "heat_demand", "kW",
+    )
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    revision = view["draft"]["revision"]
+    commands = [
+        {
+            "id": "fixture-declare-grid",
+            "unit": "model",
+            "type": "model.upsert_device",
+            "payload": {
+                "name": "grid1",
+                "device_type": "ies.device.grid_connection",
+                "kind": "existing",
+                "params": {"max_import_power_kw": 800, "max_export_power_kw": 200},
+                "position": {"x": 0.0, "y": 0.0},
+            },
+        },
+        {
+            "id": "fixture-declare-hp1",
+            "unit": "model",
+            "type": "model.upsert_device",
+            "payload": {
+                "name": "hp1",
+                "device_type": "ies.device.heat_pump",
+                "kind": "new",
+                "params": {},
+                "position": {"x": 1.0, "y": 1.0},
+            },
+        },
+        {
+            "id": "fixture-declare-heat-load",
+            "unit": "model",
+            "type": "model.upsert_device",
+            "payload": {
+                "name": "heat_load1",
+                "device_type": "ies.device.heat_load",
+                "kind": "new",
+                "params": {
+                    "peak_heat_kw": 200,
+                    "heat_demand": {
+                        "mode": "data_full",
+                        "dataset_version_id": heat_vid,
+                    },
+                },
+                "position": {"x": 2.0, "y": 0.0},
+            },
+        },
+        {
+            "id": "fixture-connect-grid-hp",
+            "unit": "model",
+            "type": "model.upsert_connection",
+            "payload": {
+                "name": "c-grid-hp1",
+                "from_device": "grid1",
+                "from_port": "electricity_import",
+                "to_device": "hp1",
+                "to_port": "electricity_in",
+            },
+        },
+        {
+            "id": "fixture-connect-hp-load",
+            "unit": "model",
+            "type": "model.upsert_connection",
+            "payload": {
+                "name": "c-hp-load1",
+                "from_device": "hp1",
+                "from_port": "heat_out",
+                "to_device": "heat_load1",
+                "to_port": "heat_in",
+            },
+        },
+    ]
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": revision, "commands": commands},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+    planning = {
+        "objective": {
+            "sense": "minimize",
+            "expression": "import_meter__period_energy_purchase",
+        },
+        "variables": {
+            "hp_cap_y0": {
+                "device_ref": "hp1",
+                "parameter": "rated_heat_kw",
+                "year_offset": 0,
+                "lower_bound": "0",
+                "upper_bound": "40",
+                "unit": "kW",
+            },
+            "hp_cap_y1": {
+                "device_ref": "hp1",
+                "parameter": "rated_heat_kw",
+                "year_offset": 1,
+                "upper_bound": "22.5",
+                "unit": "kW",
+            },
+        },
+        "constraints": {},
+    }
+    config_cases.save_planning_config(db, pid, planning, None, user.id)
+    revision = _set_explicit_calc(client, pid, user, revision)
+    instances = {
+        "hp1": {"type": "none"},
+        "grid1": {"type": "none"},
+        "heat_load1": {"type": "none"},
+    }
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    revision = _declare_assembly_sections(client, pid, user, view["draft"]["revision"], instances)
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [{
+                "id": "c-tariff-bind", "unit": "assembly",
+                "type": "assembly.set_tariff_bindings",
+                "payload": {"bindings": {
+                    "import_meter": {
+                        "price": "grid_import",
+                        "instance": "grid1",
+                        "interface": "electricity_import",
+                        "aggregation": "integrate_positive",
+                    }
+                }},
+            }],
+        },
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+    _bind_and_freeze(client, pid, user, heat_vid, revision=revision)
+    return pid
+
+
+class TestAnnualEnvelopeTrueSolve:
+    def test_cumulative_inservice_beyond_max_single_upper(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """N=2 包络真求解：次年在产 62.5kW > 单年上界之最大 40kW。
+
+        静态包络若取 max(各年 upper)=40，次年 62.5kW 出力被假性截断；
+        正确包络为逐年累计，可行域不收窄。旧代码提交能通过（闸门
+        允许），但次年变量单值覆盖全年：首年上限 22.5 < 负荷 30，
+        求解必不可行；本测试在旧代码上为红（非“提交通过”式断言）。
+        y1 省略下界，覆盖模型语义下界 0 路径。
+        """
+        from sqlalchemy import select  # noqa: E402
+
+        user = make_user(db, "annual_owner_3")
+        pid = _prepare_hp_project(client, db, user)
+        rev_resp = client.put(
+            f"/api/projects/{pid}/config",
+            json={"calculation_config": dict(_CONFIG_BODY), "expected_revision": None},
+            headers=_h(client, user),
+        )
+        assert rev_resp.status_code == 200, rev_resp.text
+        rev = rev_resp.json()["revision"]
+        status, body = _submit_task(
+            client, pid, user, config={"config_revision": rev},
+            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            idempotency_key="annual-hp-envelope-n2",
+        )
+        assert status == 201, body
+        task_id = int(body["task"]["id"])
+        claim = worker_app.acquire_attempt(db, task_id, "annual-hp-e2e")
+        assert claim is not None
+        db.commit()
+
+        def factory() -> Session:
+            return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+
+        assert runner.run_task(factory, claim, worker_id="annual-hp-e2e", compute=plane) == "completed"
+        task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task_row.status == "completed"
+        assert task_row.business_outcome == "normal_completion"
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        solution = sealed["compute_result"]["outputs"]["solution"]
+        y0_import, y1_import, span = _yearly_served(
+            solution["variables"], "grid1__electricity_import__t"
+        )
+        assert span == FULL_STEPS
+        assert y0_import == pytest.approx(HP_Y0_IMPORT, rel=1e-6)
+        assert y1_import == pytest.approx(HP_Y1_IMPORT, rel=1e-6)
+        assert _solution_scalar(solution["variables"], "hp_cap_y0") == pytest.approx(
+            HP_Y0_UPPER, rel=1e-6
+        )
+        assert _solution_scalar(solution["variables"], "hp_cap_y1") == pytest.approx(
+            HP_Y1_UPPER, rel=1e-6
         )

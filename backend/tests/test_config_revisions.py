@@ -547,6 +547,23 @@ def test_planning_duplicate_annual_variable_rejected(
     assert resp.json()["error"]["code"] == "PROJ-PLAN-003"
 
 
+def test_planning_negative_bound_rejected(
+    client: TestClient, db_session: Session
+) -> None:
+    """保存边界: 年度新增显式负下界 → 400 PROJ-PLAN-001(新增非负)。"""
+    headers, pid = _owner(client, db_session)
+    _planning_saved_effective(client, headers, pid)
+    payload = _planning_payload()
+    payload["variables"]["hp_cap"]["lower_bound"] = "-5"
+    resp = client.put(
+        f"/api/projects/{pid}/planning-config",
+        json={"planning_config": payload, "expected_revision": None},
+        headers=headers,
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-PLAN-001"
+
+
 def test_planning_missing_year_offset_rejected(
     client: TestClient, db_session: Session
 ) -> None:

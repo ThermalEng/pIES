@@ -150,6 +150,16 @@ class PlanningVariable:
             raise PlanningConfigError(
                 f"规划变量 year_offset 必须 >= 0, 实际 {self.year_offset}"
             )
+        # 年度新增容量非负(在产累加语义)：显式负界无意义；未填下界的
+        # 模型语义下界为 0（生成器侧落实，本契约只保留 None）。
+        if self.lower_bound is not None and self.lower_bound < 0:
+            raise PlanningConfigError(
+                f"规划变量 lower_bound 不可为负, 实际 {self.lower_bound}"
+            )
+        if self.upper_bound is not None and self.upper_bound < 0:
+            raise PlanningConfigError(
+                f"规划变量 upper_bound 不可为负, 实际 {self.upper_bound}"
+            )
         if self.lower_bound is not None and self.upper_bound is not None:
             if self.lower_bound > self.upper_bound:
                 raise PlanningConfigError(

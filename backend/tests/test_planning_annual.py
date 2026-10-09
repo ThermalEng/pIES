@@ -90,11 +90,39 @@ class TestYearOffsetContract:
         with pytest.raises(PlanningConfigError, match="year_offset"):
             _config({"cap": _var(year_offset=-1)})
 
+
     def test_year_offset_roundtrip(self):
         config = _config({"cap": _var(year_offset=2)})
         restored = PlanningConfig.from_dict(config.to_dict())
         assert restored.variables["cap"].year_offset == 2
         assert restored.to_dict()["variables"]["cap"]["year_offset"] == 2
+
+
+class TestNewBuildNonNegative:
+    """年度新增容量非负（assembly-yaml.md 分年投产：在产累加语义）。
+
+    新增不可为负：显式负下界/负上界在核心契约拒收；未填下界的
+    模型语义下界为 0（新增量定义）。
+    """
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"lower_bound": "-5"},
+            {"lower_bound": -5},
+            {"upper_bound": "-1"},
+            {"upper_bound": -100},
+        ],
+    )
+    def test_negative_bounds_rejected(self, overrides):
+        with pytest.raises(PlanningConfigError, match="bound"):
+            _config({"cap": _var(**overrides)})
+
+    def test_missing_lower_bound_allowed(self):
+        var = _var()
+        del var["lower_bound"]
+        config = _config({"cap": var})
+        assert config.variables["cap"].lower_bound is None
 
 
 class TestSaveBoundaryUniqueness:
