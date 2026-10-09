@@ -839,10 +839,12 @@ class _ProjectBuilder:
         """单个 driver 的数量仿射式（property 标量或接口能量）。
 
         年度接管的容量 property 按分量逐年展开：``upfront_capex`` 线性
-        跟随新增年份（各年新增量之和）；``annual_fixed_om`` 线性按各年
-        在产容量求和（各年在产之和）；``period_variable_om`` 只对能量
-        （接口）按 step 切片，容量 property 目标无年度语义，超出首版
-        能力明确拒绝。未接管 property 保持旧行为（实例常量）。
+        跟随新增年份（各年新增量之和）；``annual_fixed_om`` 线性为各年
+        在产容量的算术年平均（各年在产之和 ÷ N，标识符量纲 currency/年，
+        不随计算窗口缩放；全期金额须由用户在目标中显式乘时长）；
+        ``period_variable_om`` 只对能量（接口）按 step 切片，容量
+        property 目标无年度语义，超出首版能力明确拒绝。未接管 property
+        保持旧行为（实例常量）。
         """
         out = _AffineAcc()
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
@@ -857,8 +859,12 @@ class _ProjectBuilder:
                     out.add_term(vname, 1.0)
                 return out
             if component == "annual_fixed_om":
+                # 按年值口径：各年在产的算术年平均（÷N，N 为冻结评价年限，
+                # 恒 ≥1）。逐年真实费用留待逐年现金流切片使用真实在产，
+                # 不得把本平均值复制为各年费用。
+                average = 1.0 / self.evaluation_years
                 for year in range(self.evaluation_years):
-                    out.add_term(self._inservice_name(inst, prop, year), 1.0)
+                    out.add_term(self._inservice_name(inst, prop, year), average)
                 return out
             raise LoweringUnsupportedError(
                 f"成本分量 {component!r} 的容量 property 驱动 "

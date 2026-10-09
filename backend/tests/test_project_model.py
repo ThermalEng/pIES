@@ -26,7 +26,10 @@ from iesplan.computation.generators.linear import (
     LinearVariable,
     LoweringUnsupportedError,
 )
-from iesplan.computation.generators.project import finance_component_declarations
+from iesplan.computation.generators.project import (
+    _to_internal,
+    finance_component_declarations,
+)
 from iesplan.core.expression import ExpressionError
 from iesplan.core.yamlmini import load as yaml_load
 from iesplan.devices.parser2 import parse_device_model_v2
@@ -786,14 +789,17 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
     assert "gen1__spare__plan_max__t0" in rows
 
 
-def _gen_annual_inputs():
+def _gen_annual_inputs(objective: str | None = None):
     """双年容量变量输入(N=2)：同一参数两年均可正新增（y0≤40、y1≤60kW）。
 
     起始年 2026 为平年，年界为 step 8760。y1 省略下界（模型语义下界
-    为 0）。返回 (model, units, decls)。
+    为 0）。objective 为空时沿用 ``1 year * gen1__annual_fixed_om``
+    默认目标。返回 (model, units, decls)。
     """
     _artifact, models, _materialized, finance, config = _gen_inputs()
     doc = json.loads(_artifact.canonical_text)
+    if objective is not None:
+        doc["planning"]["objective"]["expression"] = objective
     cap_y0 = {
         "device_ref": "gen1",
         "parameter": "cap_kw",
@@ -883,6 +889,89 @@ def test_annual_build_vars_form_inservice_capacity_per_year() -> None:
     annual = decls["gen1__annual_fixed_om"]
     assert set(annual["terms"]) == {s0, s1}
     assert annual["terms"][s0] == pytest.approx(annual["terms"][s1])
+
+
+def test_annual_fixed_om_ident_is_yearly_average() -> None:
+    """分年容量下 annual_fixed_om 标识符为按年值（各年在产年平均）。
+
+    finance-yaml「时间口径与分量」：annual_fixed_om 量纲 currency/年，
+    “按年值，不随计算窗口缩放”。N=2 时标识符 = 年费率×(s_0+s_1)/2；
+    旧实现为年费率×(s_0+s_1)（窗口合计冒充年率），本测试在旧代码上为红。
+    """
+    _, _, decls = _gen_annual_inputs()
+    s0 = "gen1__cap_kw__inservice_y0"
+    s1 = "gen1__cap_kw__inservice_y1"
+    annual = decls["gen1__annual_fixed_om"]
+    rate_si = _to_internal(35.0, "CNY/kW/a")
+    assert annual["terms"][s0] == pytest.approx(rate_si / 2)
+    assert annual["terms"][s1] == pytest.approx(rate_si / 2)
+
+
+def test_annual_om_one_year_goal_is_average_year_amount() -> None:
+    """目标写 1 year 时得到平均一年金额（N=2 不同在产）。
+
+    年费率归一后 ×1 年 = 每瓦 0.035 CNY；取年平均后每个在产变量
+    系数减半。旧实现系数为全额（两年合计冒充一年金额），本测试在
+    旧代码上为红。
+    """
+    model, _, _ = _gen_annual_inputs()
+    coeffs = _coeffs(model.objective)
+    assert coeffs["gen1__cap_kw__inservice_y0"] == pytest.approx(0.0175)
+    assert coeffs["gen1__cap_kw__inservice_y1"] == pytest.approx(0.0175)
+
+
+def test_annual_om_explicit_two_year_goal_is_horizon_total() -> None:
+    """目标显式写 2 year 时得到全期金额（各年真实费用之和）。
+
+    N 来自已确认年限、时长由用户明写；系统不改写目标、不加默认
+    时长、不折现。数值上等于旧实现的窗口合计，但含义为显式全期
+    金额而非年率。旧实现下该表达式先合计再乘时长、给出两倍金额，
+    本测试在旧代码上为红。
+    """
+    model, _, _ = _gen_annual_inputs(
+        objective=(
+            "2 year * gen1__annual_fixed_om"
+            " + gen1__period_variable_om"
+        ),
+    )
+    coeffs = _coeffs(model.objective)
+    assert coeffs["gen1__cap_kw__inservice_y0"] == pytest.approx(0.035)
+    assert coeffs["gen1__cap_kw__inservice_y1"] == pytest.approx(0.035)
+
+
+def _static_om_decls(evaluation_years: int):
+    """无年度变量输入：额定容量走静态常量路径（供静态年率锁定）。"""
+    doc = _artifact_doc()
+    doc["planning"]["variables"] = {}
+    artifact = ValidatedAssemblyArtifact(
+        canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
+    )
+    yamls = {
+        "heater1": HEATER_YAML,
+        "tank1": TANK_YAML,
+        "load1": LOAD_YAML,
+        "hub1": HUB_YAML,
+    }
+    models = {inst: _contribution(text) for inst, text in yamls.items()}
+    finance = merge_effective(FinanceProfile.from_dict(_finance_payload()), None)
+    materialized = materialize_non_predictive_series(
+        artifact, {}, evaluation_years=evaluation_years,
+    )
+    return finance_component_declarations(artifact, models, materialized, finance)
+
+
+def test_static_capacity_om_stays_constant_annual_rate() -> None:
+    """静态容量年费恒为恒定年率：分量内部绝不乘 N。
+
+    N=1 与 N=2 给出同一常数（60kW 额定 × 年费率），无变量项；
+    用户要全期金额须在目标中显式乘时长。本测试锁定既有行为，
+    新旧代码同绿。
+    """
+    expected = _to_internal(60.0, "kW") * _to_internal(35.0, "CNY/kW/a")
+    for years in (1, 2):
+        annual = _static_om_decls(years)["tank1__annual_fixed_om"]
+        assert dict(annual["terms"]) == {}
+        assert annual["constant"] == pytest.approx(expected)
 
 
 def test_sale_tariff_sign_flips() -> None:
