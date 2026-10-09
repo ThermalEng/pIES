@@ -81,7 +81,7 @@ def chain():
     for object_id in sorted(object_ids):
         rel = object_id[5:] if object_id.startswith("file:") else object_id
         resources[object_id] = (SAMPLES / rel).read_bytes()
-    mat = materialize_non_predictive_series(artifact, resources)
+    mat = materialize_non_predictive_series(artifact, resources, evaluation_years=1)
     assert not mat.pending_predict
     config = CalculationConfig(
         mode="planning",

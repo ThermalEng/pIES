@@ -173,12 +173,16 @@ class _AffineAcc:
         )
 
 
-def _step_seconds(point_count: int, start_year: int) -> float:
-    """步长秒数（由已可信点数唯一推导，不重建基线对象）。"""
-    from iesplan.core.contracts import is_leap_year
+def _step_seconds(resolution: str, start_year: int) -> float:
+    """步长秒数（由分辨率唯一推导，与年份无关：闰年 1h 同样是 3600 秒）。
 
-    days = 366 if is_leap_year(start_year) else 365
-    return 86400.0 / (point_count // days)
+    唯一权威是基线 ``step_duration``（小时/步），此处只做单位换算，
+    不另建步长事实。``start_year`` 仅满足基线构造形态，不参与推导。
+    """
+    from iesplan.core.contracts import ProjectBaseline
+
+    baseline = ProjectBaseline(resolution=resolution, start_year=start_year)
+    return baseline.step_duration * 3600.0
 
 
 def build_project_model(
@@ -210,8 +214,14 @@ def _new_builder(
     """由四项直接输入构造内部编排（建模与分量声明共用同一构造器）。"""
     doc = json.loads(artifact.canonical_text)
     baseline = doc["project_baseline"]
-    point_count = _point_count(baseline["resolution"], baseline["start_year"])
-    step_s = _step_seconds(point_count, baseline["start_year"])
+    # 求解域步数由传入的全周期序列长度决定（宪法 §4.5 第三项输入）：
+    # 物化保证同一次全期序列点数一致；空序列是无时变设备输入的退化
+    # 情形，沿用起始年单年口径（与旧行为一致，不静默外推）。
+    if series:
+        point_count = series[0].point_count
+    else:
+        point_count = _point_count(baseline["resolution"], baseline["start_year"])
+    step_s = _step_seconds(baseline["resolution"], baseline["start_year"])
     return _ProjectBuilder(
         doc=doc,
         devices=doc["devices"],

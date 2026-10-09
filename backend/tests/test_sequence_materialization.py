@@ -80,7 +80,7 @@ def test_constant_point_counts() -> None:
     for baseline, expected in cases:
         result = materialize_non_predictive_series(
             _artifact(baseline, {"d1": {"predefined_interfaces": {"p": _const_binding(2.5)}}}),
-            {},
+            {}, evaluation_years=1,
         )
         assert isinstance(result, MaterializedSet)
         assert len(result.series) == 1
@@ -107,7 +107,7 @@ def test_repeat_day_week_year() -> None:
         "week": {"predefined_interfaces": {"p": _repeat_binding("obj-12")}},
         "year": {"predefined_interfaces": {"p": _repeat_binding("obj-13")}},
     }
-    result = materialize_non_predictive_series(_artifact(baseline, devices), resources)
+    result = materialize_non_predictive_series(_artifact(baseline, devices), resources, evaluation_years=1)
     by_device = {s.device: s for s in result.series}
     assert list(by_device) == ["day", "week", "year"]
     assert list(by_device["day"].values) == day * 365
@@ -130,7 +130,7 @@ def test_multi_device_interface_column_selection() -> None:
             }
         },
     }
-    result = materialize_non_predictive_series(_artifact(baseline, devices), resources)
+    result = materialize_non_predictive_series(_artifact(baseline, devices), resources, evaluation_years=1)
     assert [(s.device, s.interface) for s in result.series] == [
         ("alpha", "pa"),
         ("alpha", "pc"),
@@ -150,7 +150,7 @@ def test_immutable_and_caller_mutation_ignored() -> None:
     artifact = _artifact(
         baseline, {"d1": {"predefined_interfaces": {"p": _repeat_binding("obj-31")}}}
     )
-    result = materialize_non_predictive_series(artifact, resources)
+    result = materialize_non_predictive_series(artifact, resources, evaluation_years=1)
     series = result.series[0]
     with pytest.raises(dataclasses.FrozenInstanceError):
         series.values = ()  # type: ignore[misc]
@@ -171,7 +171,7 @@ def test_missing_resource_fails_without_path_fallback() -> None:
         baseline, {"d1": {"predefined_interfaces": {"p": _repeat_binding("obj-41")}}}
     )
     with pytest.raises(ValueError, match="固定资源缺失"):
-        materialize_non_predictive_series(artifact, {})
+        materialize_non_predictive_series(artifact, {}, evaluation_years=1)
 
 
 def test_predict_is_pending_not_materialized() -> None:
@@ -194,7 +194,7 @@ def test_predict_is_pending_not_materialized() -> None:
         "obj-51": _csv_bytes(["pf"], [[1.0]]),
         "obj-52": _csv_bytes(["pr"], [[1.0]]),
     }
-    result = materialize_non_predictive_series(_artifact(baseline, devices), resources)
+    result = materialize_non_predictive_series(_artifact(baseline, devices), resources, evaluation_years=1)
     assert [s.interface for s in result.series] == ["pr"]
     assert result.pending_predict == (
         {
@@ -231,7 +231,7 @@ def test_predict_missing_resource_fails() -> None:
         }
     }
     with pytest.raises(ValueError, match="固定资源缺失"):
-        materialize_non_predictive_series(_artifact(baseline, devices), {})
+        materialize_non_predictive_series(_artifact(baseline, devices), {}, evaluation_years=1)
 
 
 def test_quoted_numeric_cells_consumed() -> None:
@@ -243,7 +243,7 @@ def test_quoted_numeric_cells_consumed() -> None:
     ).encode("utf-8")
     devices = {"d1": {"predefined_interfaces": {"p": _repeat_binding("obj-61")}}}
     result = materialize_non_predictive_series(
-        _artifact(baseline, devices), {"obj-61": raw}
+        _artifact(baseline, devices), {"obj-61": raw}, evaluation_years=1
     )
     assert list(result.series[0].values)[:2] == [48.3, 46.7]
 

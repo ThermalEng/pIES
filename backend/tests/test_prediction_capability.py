@@ -364,7 +364,7 @@ class TestMaterializePredicted:
             resources,
             self._predictions(NAIVE_PREDICTOR_REF, NAIVE_PREDICTOR_REF),
             build_predictor_registry((NAIVE_PREDICTOR,)).get,
-            7,
+            7, evaluation_years=1,
         )
         assert [(p.device, p.interface) for p in predicted] == [
             ("load1", "electricity_demand"), ("load2", "electricity_demand"),
@@ -393,7 +393,7 @@ class TestMaterializePredicted:
                 {"obj-h1": _history_csv_bytes("electricity_demand", [1.0])},
                 self._predictions("ies.predictor.missing@9.9.9", NAIVE_PREDICTOR_REF),
                 build_predictor_registry((NAIVE_PREDICTOR,)).get,
-                7,
+                7, evaluation_years=1,
             )
 
 class TestSubmitCompat:

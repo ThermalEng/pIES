@@ -1,15 +1,17 @@
 """全周期已物化序列公共契约。
 
-最小确定性物化逻辑：``materialize_non_predictive_series`` 只处理
-constant/data_repeat，data_predict 待完成目标记入
+最小确定性物化逻辑：``materialize_non_predictive_series`` 处理
+constant/data_repeat/data_full，data_predict 待完成目标记入
 ``MaterializedSet.pending_predict``（保留固定资源身份）；预测训练与
 完整预测序列由 ``materialize_predicted_series`` 经调用方给定的公开
 predictor 完成，同一 ``MaterializedSeries`` 类型进入。
 
-输入只消费 ``ValidatedAssemblyArtifact``（已签发事实）与调用方按
-canonical 绑定 ``content.object_id``（字符串）显式传入的只读字节；
-输出 step 恒为 ``0..point_count-1``，``point_count`` 由基线唯一推导
-（复用 core 权威纯函数，不重建基线对象、不重复校验）。
+输入只消费 ``ValidatedAssemblyArtifact``（已签发事实）、调用方按
+canonical 绑定 ``content.object_id``（字符串）显式传入的只读字节，
+以及调用方（Worker 编排）从快照顶层评价确认块读取的已确认评价年限；
+输出 step 恒为 ``0..point_count-1``，``point_count`` 由基线起始年、
+分辨率与已确认评价年限推导的全周期总点数（复用 core 权威纯函数，
+不重建基线对象、不重复校验）。
 
 信任装配已确认的事实，不做任何重复校验：不调用数据解析校验器，
 不复核 schema/单位/范围/step/周期，不产生诊断，不做 hash/摘要。
@@ -29,7 +31,7 @@ from typing import Any
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.predictors import PredictedTarget, Predictor
-from iesplan.core.contracts import point_count_for_year
+from iesplan.core.contracts import horizon_point_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,10 +39,10 @@ class MaterializedSeries:
     """单个预定义接口的全周期计算序列（不可变值对象）。
 
     ``values`` 按 step 0 起连续排列，长度恒等于 ``point_count``；
-    ``source`` 固定追溯（constant 无外部引用，data_repeat/data_predict
-    记 object_id）。``mode`` 为 constant、data_repeat、data_predict
-    三者之一；本函数只产出前两者，data_predict 完成值以同一类型进入
-    （训练与完整预测序列生成不属于本函数）。
+    ``source`` 固定追溯（constant 无外部引用，data_repeat/data_full/
+    data_predict 记 object_id）。``mode`` 为 constant、data_repeat、
+    data_full、data_predict 四者之一；本函数只产出前三者，data_predict
+    完成值以同一类型进入（训练与完整预测序列生成不属于本函数）。
     """
 
     device: str
@@ -56,7 +58,7 @@ class MaterializedSeries:
             raise ValueError(f"device 须为非空字符串: {self.device!r}")
         if not self.interface or not isinstance(self.interface, str):
             raise ValueError(f"interface 须为非空字符串: {self.interface!r}")
-        if self.mode not in ("constant", "data_repeat", "data_predict"):
+        if self.mode not in ("constant", "data_repeat", "data_full", "data_predict"):
             raise ValueError(f"未知来源模式: {self.mode!r}")
         if len(self.values) != self.point_count:
             raise ValueError(
@@ -124,6 +126,8 @@ class MaterializedSet:
 def materialize_non_predictive_series(
     artifact: ValidatedAssemblyArtifact,
     resources: Mapping[str, bytes],
+    *,
+    evaluation_years: int,
 ) -> MaterializedSet:
     """物化装配产物中全部非预测来源的全周期序列。
 
@@ -131,13 +135,17 @@ def materialize_non_predictive_series(
     显式提供只读字节（含预测绑定所需身份）；任一所需身份缺失即必要输入
     不完整，明确失败。不按 path 读取宿主机，不用最新数据替换，不改写
     artifact 与资源。
+    ``evaluation_years`` 为调用方从快照顶层评价确认块读取的已确认评价
+    年限（必填，无默认值，不在此校验：提交边界唯一校验）；全周期总点数
+    由基线起始年、分辨率与该年限推导。``data_full`` 原样采用全期文件
+    （长度须等于全周期总点数，提交闸门已核对，此处不等即快照故障）。
     """
     doc = json.loads(artifact.canonical_text)
     baseline_data = doc["project_baseline"]
-    point_count = point_count_for_year(
-        baseline_data["resolution"], baseline_data["start_year"]
-    )
     resolution = baseline_data["resolution"]
+    point_count = horizon_point_count(
+        resolution, baseline_data["start_year"], evaluation_years
+    )
     series: list[MaterializedSeries] = []
     pending: list[dict[str, object]] = []
     devices = doc.get("devices") or {}
@@ -181,6 +189,31 @@ def materialize_non_predictive_series(
                         point_count=point_count,
                         values=tuple(cycle[i % period] for i in range(point_count)),
                         source={"kind": "data_repeat", "object_id": object_id},
+                    )
+                )
+            elif mode == "data_full":
+                object_id = binding["content"]["object_id"]
+                if object_id not in resources:
+                    raise ValueError(
+                        "固定资源缺失（必要输入不完整）: "
+                        f"{device_id!r} x {interface_id!r} x object {object_id!r}"
+                    )
+                full = _project_column(resources[object_id], interface_id)
+                if len(full) != point_count:
+                    raise ValueError(
+                        "全期序列长度与已确认评价年限推导的全周期点数不一致 "
+                        f"(违反已签发事实): {device_id!r} x {interface_id!r} "
+                        f"x object {object_id!r}: {len(full)} x {point_count}"
+                    )
+                series.append(
+                    MaterializedSeries(
+                        device=device_id,
+                        interface=interface_id,
+                        mode=mode,
+                        resolution=resolution,
+                        point_count=point_count,
+                        values=tuple(full),
+                        source={"kind": "data_full", "object_id": object_id},
                     )
                 )
             elif mode == "data_predict":
@@ -236,6 +269,7 @@ def materialize_predicted_series(
     resolve_predictor: Callable[[str], Predictor],
     seed: int | None,
     *,
+    evaluation_years: int,
     previous: Mapping[str, object] | None = None,
 ) -> tuple[PredictedTarget, ...]:
     """物化装配产物中全部 data_predict 绑定的全周期预测序列。
@@ -246,14 +280,16 @@ def materialize_predicted_series(
     配置↔绑定覆盖关系由提交闸门保证, 此处按 (实例, 接口) 直接配对,
     缺配对即实际结构错误可见失败, 不重跑提交校验。历史列按绑定接口
     名投影; 目标类型不透明透传进产物与回执, 不在此解释。
-    上一轮统一结果 ``previous`` 原样透传给各 predictor(自回归类算法
+    ``evaluation_years`` 为调用方从快照顶层评价确认块读取的已确认评价
+    年限（必填，无默认值，不在此校验），预测序列按推导的全周期总点数
+    生成。上一轮统一结果 ``previous`` 原样透传给各 predictor(自回归类算法
     使用；朴素算法忽略)。
     返回按 (实例, 接口) 稳定排序的预测产物。
     """
     doc = json.loads(artifact.canonical_text)
     baseline_data = doc["project_baseline"]
-    point_count = point_count_for_year(
-        baseline_data["resolution"], baseline_data["start_year"]
+    point_count = horizon_point_count(
+        baseline_data["resolution"], baseline_data["start_year"], evaluation_years
     )
     by_target = {}
     for entry in predictions:

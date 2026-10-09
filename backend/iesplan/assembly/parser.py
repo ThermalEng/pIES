@@ -64,11 +64,12 @@ _DEVICE_KEYS: tuple[str, ...] = ("definition", "asset_origin", "properties", "pr
 #: 存量/新增身份(不得推断，缺失阻断)
 _ASSET_ORIGINS: tuple[str, ...] = ("existing", "new")
 #: 预定义来源模式判别联合
-_PREDEFINED_MODES: tuple[str, ...] = ("constant", "data_repeat", "data_predict")
+_PREDEFINED_MODES: tuple[str, ...] = ("constant", "data_repeat", "data_full", "data_predict")
 #: 各模式允许的精确键集合(缺少/多余一律拒绝，无默认)
 _PREDEFINED_KEYS: dict[str, frozenset] = {
     "constant": frozenset({"mode", "value"}),
     "data_repeat": frozenset({"mode", "path"}),
+    "data_full": frozenset({"mode", "path"}),
     "data_predict": frozenset({"mode", "path", "target_type"}),
 }
 

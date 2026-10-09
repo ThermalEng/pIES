@@ -439,6 +439,7 @@ def _descriptor_unit(type_id: str, prop: str) -> str:
 #: 数据序列来源声明允许的形态(键集合按来源模式精确匹配)。
 _SOURCE_DECL_KEYS: dict[str, frozenset] = {
     "data_repeat": frozenset({"mode", "dataset_version_id"}),
+    "data_full": frozenset({"mode", "dataset_version_id"}),
     "data_predict": frozenset({"mode", "dataset_version_id", "target_type"}),
 }
 
@@ -448,7 +449,8 @@ def _predefined_source_declaration(
 ) -> dict | None:
     """预定义接口数据序列来源声明(params 字典形态 → 绑定声明)。
 
-    接受 ``{"mode": "data_repeat", "dataset_version_id": int}`` 或
+    接受 ``{"mode": "data_repeat", "dataset_version_id": int}``、
+    ``{"mode": "data_full", "dataset_version_id": int}`` 或
     ``{"mode": "data_predict", "dataset_version_id": int, "target_type": str}``；
     路径由构造器按版本合成(``dataset_export_path``)，声明方不拼路径。
     形态不符一律转换阻断(ASM-CONV-001)，不猜测、不补默认。标量 constant
@@ -456,7 +458,7 @@ def _predefined_source_declaration(
     """
     field = f"predefined_interfaces.{iface_id}"
     mode = value.get("mode")
-    if mode not in ("data_repeat", "data_predict"):
+    if mode not in ("data_repeat", "data_full", "data_predict"):
         diags.append(_conv_fail(dev_id, field, "unknown_source_mode", {"mode": mode}))
         return None
     if set(value) != _SOURCE_DECL_KEYS[mode]:

@@ -210,8 +210,9 @@ def load_compute_inputs(
 
     finance 按回执冻结血缘取不可变 Effective 行；预测目标序列不在此
     物化（``pending_predict`` 保留），由 ``predict_target_round`` 经公开
-    predictor 完成后再与此处序列合并。冻结缺件即实际结构错误直接可见，
-    不重跑输入校验。
+    predictor 完成后再与此处序列合并。序列按快照顶层评价确认块的已确认
+    评价年限物化为全周期长度（提交边界唯一校验，此处只读不验）。
+    冻结缺件即实际结构错误直接可见，不重跑输入校验。
     """
     artifact, resources, config, _seed = _restore_artifact_resources_config(
         db, task_project_id, snapshot
@@ -231,7 +232,10 @@ def load_compute_inputs(
         )
     finance = EffectiveFinanceConfig.from_dict(finance_row.content)
 
-    materialized = materialize_non_predictive_series(artifact, resources)
+    evaluation_years = snapshot.evaluation["evaluation_years"]
+    materialized = materialize_non_predictive_series(
+        artifact, resources, evaluation_years=evaluation_years
+    )
     return artifact, models, tuple(materialized.series), finance, config
 
 
@@ -259,6 +263,7 @@ def predict_target_round(
         return (), ()
     predicted = materialize_predicted_series(
         artifact, resources, predictions, plane.predictor_registry.get, seed,
+        evaluation_years=snapshot.evaluation["evaluation_years"],
         previous=previous,
     )
     resolution = json.loads(snapshot.canonical_assembly_text)["project_baseline"]["resolution"]

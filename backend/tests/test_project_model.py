@@ -296,7 +296,7 @@ def _inputs(
     finance = merge_effective(
         FinanceProfile.from_dict(_finance_payload(tariff_direction)), None
     )
-    result = materialize_non_predictive_series(artifact, {})
+    result = materialize_non_predictive_series(artifact, {}, evaluation_years=1)
     config = CalculationConfig(
         mode="planning",
         generator="acme.generator@1.0.0",
@@ -577,7 +577,7 @@ def _island_inputs():
     }
     models = {inst: _contribution(text) for inst, text in yamls.items()}
     finance = merge_effective(FinanceProfile.from_dict(FINANCE_PAYLOAD), None)
-    result = materialize_non_predictive_series(artifact, {})
+    result = materialize_non_predictive_series(artifact, {}, evaluation_years=1)
     config = CalculationConfig(
         mode="planning",
         generator="acme.generator@1.0.0",
@@ -689,7 +689,7 @@ def _gen_inputs():
     )
     models = {"gen1": _contribution(GEN_YAML)}
     finance = merge_effective(FinanceProfile.from_dict(FINANCE_PAYLOAD), None)
-    result = materialize_non_predictive_series(artifact, {})
+    result = materialize_non_predictive_series(artifact, {}, evaluation_years=1)
     config = CalculationConfig(
         mode="planning",
         generator="acme.generator@1.0.0",

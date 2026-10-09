@@ -26,7 +26,7 @@ from iesplan.devices.contracts2 import DeviceModelDocument, is_valid_id
 SCHEMA_ID = "ies.device-data"
 SCHEMA_VERSION = "2.0.0"
 STEP_COL = "step"
-SOURCE_MODES = ("constant", "data_repeat", "data_predict")
+SOURCE_MODES = ("constant", "data_repeat", "data_full", "data_predict")
 RESOLUTION_VALUES = tuple(RESOLUTIONS)
 MAX_ROWS_PER_DIAG = 5
 

@@ -610,7 +610,10 @@ def _assemble_snapshot(
     # 文本仅校验字头。贡献由本次闸门同一次设备解析冻结，不二次读目录。
     # 闸门同时带回本次实际消费的不可变财务快照, 供提交边界覆盖核对复用,
     # 不另行二次解析。
-    gate, effective = _assembly_gate(db, project_id, content, task_type)
+    gate, effective = _assembly_gate(
+        db, project_id, content, task_type,
+        evaluation_years=evaluation.evaluation_years,
+    )
     assert gate.artifact is not None
     artifact = gate.artifact
     # 提交边界全期覆盖核对(装配不核对点数; 已确认评价年限后在此阻断):
@@ -781,7 +784,9 @@ def _frozen_finance_ref(content: Mapping, project_id: int) -> tuple[str, int]:
 
 
 def _assembly_gate(
-    db: Session, project_id: int, content: dict, task_type: str
+    db: Session, project_id: int, content: dict, task_type: str,
+    *,
+    evaluation_years: int | None = None,
 ) -> tuple[AssemblyValidationResult, EffectiveFinanceConfig]:
     """计算任务统一装配闸门: 完整四阶段校验后签发规范二件套。
 
@@ -795,6 +800,8 @@ def _assembly_gate(
     不 fallback，缺席/档案不符明确失败。finance_binding/tariff_bindings
     只透传项目内容已声明的节(起草命令写入)，缺席即对应装配节缺失阻断，
     不猜测、不补默认。
+    ``evaluation_years`` 为提交时已确认评价年限(调用方从类型化评价输入
+    透传)：``data_full`` 文件长度须等于其推导的全周期总点数。
     返回 (闸门结果, 本次实际消费的不可变 Effective 财务快照): 调用方
     (提交边界覆盖核对)直接复用该快照, 不得另行二次解析。
     """
@@ -827,6 +834,7 @@ def _assembly_gate(
         tariff_bindings=content.get("tariff_bindings"),
         planning=planning,
         finance_snapshots=finance_snapshots,
+        evaluation_years=evaluation_years,
     )
     if result.artifact is None:
         raise AssemblyValidationError(result.diagnostics)
