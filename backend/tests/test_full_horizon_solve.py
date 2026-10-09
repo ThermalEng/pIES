@@ -568,6 +568,7 @@ def _store_doc() -> dict:
                 "pmax": {
                     "device_ref": "store1",
                     "parameter": "cap_kwh",
+                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "500",
                     "unit": "kWh",

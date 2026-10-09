@@ -213,13 +213,65 @@ def _check_expression(
         )
 
 
+def _check_annual_scope(
+    doc: Mapping[str, Any],
+    snapshot: EffectiveFinanceConfig,
+    var_name: str,
+    variable: PlanningVariable,
+    evaluation_years: int,
+    diags: list[Diagnostic],
+) -> None:
+    """提交边界年度变量核对(仅提交闸门传入已确认 N 时执行)。
+
+    - ``year_offset`` 须落在 0..N-1(N 为冻结评价年限); 未声明的年份
+      不得建设, 越界阻断。
+    - 固定建设成本为正的 costed 实例, 其年度变量须声明显式容量上界
+      (后续离散投产指示只能从显式上界建模, 不猜常数); 缺失阻断。
+      ``upfront_capex.fixed`` 缺席或为零 → 无固定成本, 不要求上界。
+    """
+    field = f"planning.variables.{var_name}"
+    if not 0 <= variable.year_offset < evaluation_years:
+        _plan_fail(
+            diags, ASM_PLAN_UNDEF, field, "year_offset_out_of_range",
+            {
+                "variable": var_name,
+                "year_offset": variable.year_offset,
+                "evaluation_years": evaluation_years,
+            },
+        )
+    instances = (doc.get("finance_binding") or {}).get("instances") or {}
+    entry = instances.get(variable.device_ref)
+    if not isinstance(entry, Mapping) or entry.get("type") != "costed":
+        return
+    ft_entry = snapshot.finance_types.get(entry.get("finance_type"))
+    if ft_entry is None:
+        return
+    upfront = ft_entry.upfront_capex
+    fixed = upfront.fixed if upfront is not None else None
+    if fixed is not None and fixed.value > 0 and variable.upper_bound is None:
+        _plan_fail(
+            diags, ASM_PLAN_UNDEF, field, "missing_required_upper_bound",
+            {
+                "variable": var_name,
+                "device_ref": variable.device_ref,
+                "finance_type": entry.get("finance_type"),
+            },
+        )
+
+
 def check_planning(
     doc: Mapping[str, Any],
     snapshot: EffectiveFinanceConfig,
     registry,
     diags: list[Diagnostic],
+    evaluation_years: int | None = None,
 ) -> None:
-    """planning: 目标/变量/约束形状(核心契约) + 标识符映射 + 量纲。"""
+    """planning: 目标/变量/约束形状(核心契约) + 标识符映射 + 量纲。
+
+    ``evaluation_years`` 为提交时已确认评价年限(仅提交闸门传入):
+    非空时核对年度变量年份索引 0..N-1 与固定成本实例的必要显式上界;
+    缺席时不核对年限相关项(非提交调用不受影响)。
+    """
     devices = doc.get("devices") or {}
     planning = doc.get("planning") or {}
     objective_raw = planning.get("objective") or {}
@@ -249,6 +301,10 @@ def check_planning(
                 {"detail": str(exc)},
             )
             continue
+        if evaluation_years is not None:
+            _check_annual_scope(
+                doc, snapshot, var_name, variable, evaluation_years, diags,
+            )
         if var_name in finance_dims:
             _plan_fail(
                 diags, ASM_PLAN_UNDEF, field, "variable_reserved_collision",

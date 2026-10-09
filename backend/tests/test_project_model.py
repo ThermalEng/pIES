@@ -260,6 +260,7 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
                 "tank_cap": {
                     "device_ref": "tank1",
                     "parameter": "rated_kw",
+                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "500",
                     "unit": "kW",
@@ -710,6 +711,7 @@ def _gen_inputs():
             "gen_cap": {
                 "device_ref": "gen1",
                 "parameter": "cap_kw",
+                "year_offset": 0,
                 "lower_bound": "0",
                 "upper_bound": "500",
                 "unit": "kW",
@@ -717,6 +719,7 @@ def _gen_inputs():
             "gen_floor": {
                 "device_ref": "gen1",
                 "parameter": "floor_kw",
+                "year_offset": 0,
                 "lower_bound": "10",
                 "upper_bound": "500",
                 "unit": "kW",
@@ -724,6 +727,7 @@ def _gen_inputs():
             "spare_cap": {
                 "device_ref": "gen1",
                 "parameter": "spare_kw",
+                "year_offset": 0,
                 "lower_bound": "0",
                 "upper_bound": None,
                 "unit": "kW",

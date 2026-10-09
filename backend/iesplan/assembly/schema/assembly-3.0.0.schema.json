@@ -274,10 +274,11 @@
           "minProperties": 1,
           "additionalProperties": {
             "type": "object",
-            "required": ["device_ref", "parameter"],
+            "required": ["device_ref", "parameter", "year_offset"],
             "properties": {
               "device_ref": { "type": "string", "minLength": 1 },
               "parameter": { "type": "string", "minLength": 1 },
+              "year_offset": { "type": "integer", "minimum": 0 },
               "lower_bound": { "type": ["integer", "string", "null"] },
               "upper_bound": { "type": ["integer", "string", "null"] },
               "unit": { "type": ["string", "null"], "minLength": 1 }

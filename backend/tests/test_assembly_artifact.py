@@ -80,6 +80,7 @@ _EXPORT_PLANNING = {
         "hp_cap": {
             "device_ref": "hp1",
             "parameter": "rated_heat_kw",
+            "year_offset": 0,
             "lower_bound": "0",
             "upper_bound": "1000",
             "unit": "kW",
@@ -232,6 +233,7 @@ class TestUnhappyPath:
             "    hp_cap:\n"
             "      device_ref: hp1\n"
             "      parameter: rated_heat_kw\n"
+            "      year_offset: 0\n"
             '      lower_bound: "0"\n'
             '      upper_bound: "1000"\n'
             "      unit: kW\n"

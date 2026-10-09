@@ -244,7 +244,7 @@ def _run_validation(
     check_finance_binding(doc, snapshot, registry, diags)
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)
-    check_planning(doc, snapshot, registry, diags)
+    check_planning(doc, snapshot, registry, diags, evaluation_years=evaluation_years)
 
     if _any_blocking(diags):
         return AssemblyValidationResult(diagnostics=diags, artifact=None)

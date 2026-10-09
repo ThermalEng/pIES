@@ -136,6 +136,7 @@ def _planning_payload() -> dict:
             "hp_cap": {
                 "device_ref": "heat_pump_1",
                 "parameter": "capacity",
+                "year_offset": 0,
                 "lower_bound": "0",
                 "upper_bound": "1000",
                 "unit": "kW",
@@ -517,6 +518,50 @@ def test_planning_requires_current_effective(client: TestClient, db_session: Ses
 def test_planning_config_contract() -> None:
     config = PlanningConfig.from_dict(_planning_payload())
     assert PlanningConfig.from_dict(config.to_dict()) == config
+
+
+def _planning_saved_effective(client: TestClient, headers, pid: int) -> None:
+    _register_profile(client, headers)
+    resp = client.put(
+        f"/api/projects/{pid}/finance-profile",
+        json=_profile_ref(_profile()),
+        headers=headers,
+    )
+    assert resp.status_code in (200, 201), resp.text
+
+
+def test_planning_duplicate_annual_variable_rejected(
+    client: TestClient, db_session: Session
+) -> None:
+    """保存边界: 同实例同参数同一年份重复变量 → 400 PROJ-PLAN-003。"""
+    headers, pid = _owner(client, db_session)
+    _planning_saved_effective(client, headers, pid)
+    payload = _planning_payload()
+    payload["variables"]["hp_cap_b"] = dict(payload["variables"]["hp_cap"])
+    resp = client.put(
+        f"/api/projects/{pid}/planning-config",
+        json={"planning_config": payload, "expected_revision": None},
+        headers=headers,
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-PLAN-003"
+
+
+def test_planning_missing_year_offset_rejected(
+    client: TestClient, db_session: Session
+) -> None:
+    """保存边界: 缺 year_offset → 400 PROJ-PLAN-001(核心契约必填)。"""
+    headers, pid = _owner(client, db_session)
+    _planning_saved_effective(client, headers, pid)
+    payload = _planning_payload()
+    del payload["variables"]["hp_cap"]["year_offset"]
+    resp = client.put(
+        f"/api/projects/{pid}/planning-config",
+        json={"planning_config": payload, "expected_revision": None},
+        headers=headers,
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "PROJ-PLAN-001"
 
 
 # ---------------------------------------------------------------------------

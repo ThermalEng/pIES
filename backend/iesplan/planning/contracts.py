@@ -29,11 +29,16 @@ PLAN_VAR_REF_INVALID = "PROJ-PLAN-003"
 
 
 def validate_planning_domain(config: PlanningConfig) -> list[Diagnostic]:
-    """PlanningConfig 领域校验(设备引用格式 + 聚合完整性)。
+    """PlanningConfig 领域校验(设备引用格式 + 年度变量唯一性 + 聚合完整性)。
+
+    同一设备实例同一参数同一年份只允许一个年度新增容量变量(年份是
+    变量索引, 重复声明无法确定该年新增量, 保存边界阻断)。0..N-1 年限
+    范围需冻结评价年限, 不在本层(提交闸门按 N 核对)。
 
     返回阻断诊断列表(非法时非空)。
     """
     diags: list[Diagnostic] = []
+    seen: dict[tuple[str, str, int], str] = {}
     for var_name, variable in sorted(config.variables.items()):
         if not _DEVICE_REF_RE.fullmatch(variable.device_ref):
             diags.append(
@@ -48,6 +53,27 @@ def validate_planning_domain(config: PlanningConfig) -> list[Diagnostic]:
                     location={
                         "object_type": "planning_config",
                         "field": f"variables.{var_name}.device_ref",
+                    },
+                )
+            )
+        key = (variable.device_ref, variable.parameter, variable.year_offset)
+        first = seen.get(key)
+        if first is None:
+            seen[key] = var_name
+        else:
+            diags.append(
+                make_diag(
+                    PLAN_VAR_REF_INVALID,
+                    params={
+                        "detail": (
+                            f"规划变量 {var_name} 与 {first} 指向同一实例"
+                            f"同一参数同一年份(实例 {variable.device_ref!r} "
+                            f"参数 {variable.parameter!r} 年份 {variable.year_offset})"
+                        ),
+                    },
+                    location={
+                        "object_type": "planning_config",
+                        "field": f"variables.{var_name}.year_offset",
                     },
                 )
             )

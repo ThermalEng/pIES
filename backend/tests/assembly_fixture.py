@@ -79,6 +79,7 @@ def save_compute_planning(
                 "cap": {
                     "device_ref": device_ref,
                     "parameter": "capacity_kwh",
+                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "1000",
                     "unit": "kWh",

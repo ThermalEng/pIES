@@ -169,6 +169,7 @@ def fixture_artifact() -> ValidatedAssemblyArtifact:
                 "cap": {
                     "device_ref": "d2",
                     "parameter": "capacity_kwh",
+                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "1000",
                     "unit": "kWh",
