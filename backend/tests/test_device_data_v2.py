@@ -1,4 +1,4 @@
-"""ies.device-data 2.0.0 的 step 契约测试。
+"""ies.device-data 2.1.0 的 step 契约测试。
 
 0.6.5 条目 3 口径: 原始输入(``prepared: false``)必须 0..N-1 严格连续,
 与基线同分辨率; ``data_repeat`` 的完整来源序列整体即重复基线, 只能是
@@ -103,6 +103,14 @@ class TestMetadata:
         text = _csv_text().replace("# resolution: 1h", "# resolution: 1h\n# timestamp_mode: utc")
         result = canonicalize_device_data_v2(text.encode(), _device_doc())
         assert "DATA-META-002" in _codes(result)
+
+    def test_old_minor_header_rejected_without_dual_track(self) -> None:
+        # 2.1.0 统一字头：旧 2.0.0 不再接受，不建双版本解析
+        text = _csv_text().replace(
+            f"# schema_version: {SCHEMA_VERSION}", "# schema_version: 2.0.0"
+        )
+        result = canonicalize_device_data_v2(text.encode(), _device_doc())
+        assert "DATA-META-003" in _codes(result)
 
     def test_repeat_declares_no_period_field(self) -> None:
         # 0.6.5 条目 3: 不设周期字段; 声明 period 属未知核心字段

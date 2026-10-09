@@ -307,7 +307,7 @@ def _predict_artifact(bindings: dict) -> ValidatedAssemblyArtifact:
 def _history_csv_bytes(interface: str, values: list[float]) -> bytes:
     lines = [
         "# schema: ies.device-data",
-        "# schema_version: 2.0.0",
+        "# schema_version: 2.1.0",
         "# dataset_id: hist",
         "# device_id: ies.device.electric_load",
         "# source_mode: data_repeat",
@@ -451,7 +451,7 @@ def _predict_history_csv(values: list[float], rows: int = 24) -> bytes:
     """预测历史 device-data 字节（upload 尚不支持此格式，由域级直接建版本）。"""
     lines = [
         "# schema: ies.device-data",
-        "# schema_version: 2.0.0",
+        "# schema_version: 2.1.0",
         "# dataset_id: predict_history",
         "# device_id: ies.device.electric_load",
         "# source_mode: data_predict",

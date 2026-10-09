@@ -138,7 +138,7 @@ def materialize_non_predictive_series(
     ``evaluation_years`` 为调用方从快照顶层评价确认块读取的已确认评价
     年限（必填，无默认值，不在此校验：提交边界唯一校验）；全周期总点数
     由基线起始年、分辨率与该年限推导。``data_full`` 原样采用全期文件
-    （长度须等于全周期总点数，提交闸门已核对，此处不等即快照故障）。
+    （全期长度由提交闸门核对，此处只读不验；读取损坏按实际错误可见）。
     """
     doc = json.loads(artifact.canonical_text)
     baseline_data = doc["project_baseline"]
@@ -199,12 +199,6 @@ def materialize_non_predictive_series(
                         f"{device_id!r} x {interface_id!r} x object {object_id!r}"
                     )
                 full = _project_column(resources[object_id], interface_id)
-                if len(full) != point_count:
-                    raise ValueError(
-                        "全期序列长度与已确认评价年限推导的全周期点数不一致 "
-                        f"(违反已签发事实): {device_id!r} x {interface_id!r} "
-                        f"x object {object_id!r}: {len(full)} x {point_count}"
-                    )
                 series.append(
                     MaterializedSeries(
                         device=device_id,

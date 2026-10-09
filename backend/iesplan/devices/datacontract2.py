@@ -1,4 +1,4 @@
-"""`ies.device-data` 2.0.0 连续 step 文件契约。
+"""`ies.device-data` 2.1.0 连续 step 文件契约。
 
 装配前输入(``prepared: false``)以非负整数 ``step`` 表达原始序列, 不含时间戳、
 时区或 UTC 偏移; 0.6.5 起与项目基线同分辨率、0..N-1 严格连续, 不做任何
@@ -24,7 +24,7 @@ from iesplan.core.units import units_compatible
 from iesplan.devices.contracts2 import DeviceModelDocument, is_valid_id
 
 SCHEMA_ID = "ies.device-data"
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "2.1.0"
 STEP_COL = "step"
 SOURCE_MODES = ("constant", "data_repeat", "data_full", "data_predict")
 RESOLUTION_VALUES = tuple(RESOLUTIONS)

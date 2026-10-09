@@ -121,7 +121,7 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-META-008": "device_model/device_id 与被校验的设备描述符不匹配: 声明 {declared}, 期望 {expected}",
     "DATA-META-009": "文件声明的 device_model 未注册: {device_model}",
     "DATA-META-011": (
-        "ies.device-data 2.0.0 文件 source_mode 与设备接口声明的预定义来源模式"
+        "ies.device-data 2.1.0 文件 source_mode 与设备接口声明的预定义来源模式"
         "不匹配: {column} 声明 {mode}, 文件 {source_mode}"
     ),
     "DATA-DIAL-001": "CSV 方言不符合 ies.device-data 契约: {detail}",

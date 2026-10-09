@@ -26,7 +26,7 @@ from iesplan.computation import (
 
 CSV_META = (
     "# schema: ies.device-data\n"
-    "# schema_version: 2.0.0\n"
+    "# schema_version: 2.1.0\n"
     "# dataset_id: ds1\n"
     "# device_id: acme.device.load\n"
     "# source_mode: data_repeat\n"

@@ -13,7 +13,7 @@ Worker 仍只解第一年，N=2 任务可“提交成功 + completed”形成假
   第一年与第二年服务能量分别等于各自年度输入（48.0×8760 与 96.0×8784），
   步数跨度 17544。单年求解或首年复制均无法同时满足这两组等式。
 
-财务逐年归集不在 0.12 范围（见路线图），本文件不断言它。
+财务逐年归集本 F2 切片未覆盖，仍属 0.12（路线图 0.12-4），本文件不断言它。
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ def _full_csv(n1: int, v1: float, n2: int, v2: float) -> bytes:
     """全期 device-data 字节：文件顺序即 step 顺序，年界可区分。"""
     lines = [
         "# schema: ies.device-data",
-        "# schema_version: 2.0.0",
+        "# schema_version: 2.1.0",
         "# dataset_id: load_full_two_years",
         "# device_id: ies.device.electric_load",
         "# source_mode: data_full",
@@ -202,17 +202,6 @@ class TestFullHorizonGate:
         assert not result.ok
         blocking = [d for d in result.diagnostics if d.blocking]
         assert any(d.params.get("reason") == "csv_full_length" for d in blocking)
-
-    def test_truncated_full_series_fails_materialize(self, devices) -> None:
-        """物化侧长度不等即快照故障：明确失败，不静默截断求解。"""
-        raw = _full_csv(YEAR1_STEPS, YEAR1_KW, YEAR2_STEPS, YEAR2_KW)
-        result = _gate_full_artifact(raw)
-        assert result.ok and result.artifact is not None
-        short = _full_csv(YEAR1_STEPS, YEAR1_KW, 0, YEAR2_KW)
-        with pytest.raises(ValueError, match="全周期点数不一致"):
-            materialize_non_predictive_series(
-                result.artifact, {"obj-full-9": short}, evaluation_years=YEARS
-            )
 
 
 @pytest.fixture()
