@@ -61,6 +61,7 @@ from iesplan.computation import (
     prediction_delta,
 )
 from iesplan.computation.result_adapter import ResultAdapterRegistry
+from iesplan.core.contracts import horizon_point_count
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import DeviceMathContribution, contribution_from_dict
@@ -285,14 +286,20 @@ def predict_target_round(
         evaluation_years=snapshot.evaluation["evaluation_years"],
         previous=previous,
     )
-    resolution = json.loads(snapshot.canonical_assembly_text)["project_baseline"]["resolution"]
+    baseline_data = json.loads(snapshot.canonical_assembly_text)["project_baseline"]
+    # 全期点数取权威推导（与非预测物化同一来源），不以 predictor 输出
+    # 长度自洽：短/空输出由 MaterializedSeries 自身长度不变式自然拒绝。
+    point_count = horizon_point_count(
+        baseline_data["resolution"], baseline_data["start_year"],
+        snapshot.evaluation["evaluation_years"],
+    )
     series = tuple(
         MaterializedSeries(
             device=item.device,
             interface=item.interface,
             mode="data_predict",
-            resolution=resolution,
-            point_count=len(item.values),
+            resolution=baseline_data["resolution"],
+            point_count=point_count,
             values=item.values,
             source={"kind": "data_predict", "object_id": item.history_object_id},
         )

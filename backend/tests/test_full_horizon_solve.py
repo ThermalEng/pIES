@@ -12,8 +12,10 @@ Worker 仍只解第一年，N=2 任务可“提交成功 + completed”形成假
   跑 N=2 任务至 completed；封存解变量按 ``__t{step}`` 后缀分年汇总，
   第一年与第二年服务能量分别等于各自年度输入（48.0×8760 与 96.0×8784），
   步数跨度 17544。单年求解或首年复制均无法同时满足这两组等式。
-- 空序列级：零预定义绑定但有 SoC 时域耦合的项目，N=2 仍建 17544 步
-  整体模型/Bundle（集合携年限，不回退单年），跨年耦合约束行可查。
+- 空序列级（Generator 契约级，非公开项目端到端）：零预定义绑定但有
+  SoC 时域耦合的自定义设备，N=2 仍建 17544 步整体模型/Bundle（集合携
+  年限，不回退单年），跨年耦合约束行可查；该设备未在首方注册，artifact
+  未经公开闸门签发。
 
 财务逐年归集本 F2 切片未覆盖，仍属 0.12（路线图 0.12-4），本文件不断言它。
 """
@@ -526,7 +528,7 @@ def _store_doc() -> dict:
     """
     return {
         "schema": "ies.assembly",
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "assembly": {"id": "mini-store", "name": "无序列储能"},
         "project_baseline": {
             "resolution": "1h", "start_year": START_YEAR, "scenario_mode": "single",
@@ -581,12 +583,304 @@ def _step_of(name: str) -> int | None:
     return int(tail) if sep and tail.isdigit() else None
 
 
-class TestEmptySeriesFullHorizon:
-    def test_no_series_project_builds_two_year_model_and_bundle(self) -> None:
-        """无预定义序列但有时域决策：N=2 仍建 17544 步整体模型/Bundle。
+class _RecordingGenerator:
+    """测试记录型生成器外壳：记录每轮第三项集合时域，委托真实 HiGHS 生成。
 
-        空序列不再回退单年：SoC 状态变量覆盖末步 t17543，且存在同时
-        引用 t8759 与 t8760 的跨年耦合约束行（非首年复制/拼接）。
+    只观测 `materialized`（年限/各序列点数/pending），不改写、不拒收；
+    ref/描述符/可用性全部委托，保证 registry 解析走同一引用。
+    """
+
+    def __init__(self) -> None:
+        from iesplan.computation import HIGHS_MILP_PROVIDER as _inner  # noqa: E402
+
+        self._inner = _inner
+        self.calls: list[dict] = []
+
+    @property
+    def descriptor(self):
+        return self._inner.descriptor
+
+    @property
+    def ref(self) -> str:
+        return self._inner.ref
+
+    def available(self) -> bool:
+        return True
+
+    def generate(self, artifact, models, materialized, finance, config):
+        self.calls.append(
+            {
+                "evaluation_years": materialized.evaluation_years,
+                "series_count": len(materialized.series),
+                "point_counts": sorted({s.point_count for s in materialized.series}),
+                "pending": len(materialized.pending_predict),
+            }
+        )
+        return self._inner.generate(artifact, models, materialized, finance, config)
+
+
+def _prepare_predict_n2(client: TestClient, db: Session, user) -> int:
+    """N=2 预测项目（2023 起始跨闰年）：grid1 + 双 data_predict 负荷。
+
+    复用预测能力测试的域级版本 crafting 与装配流程，只改起始年。
+    """
+    from test_prediction_capability import (  # noqa: E402
+        _craft_history_version,
+        _draft_put,
+        _predict_history_csv,
+    )
+    from test_worker_compute_chain import PLANNING_BODY  # noqa: E402
+
+    from iesplan.application import configuration as config_cases  # noqa: E402
+
+    pid = _create_dated_project(client, user, "预测多轮全期测试项目", START_YEAR)
+    _declare_finance(db, user, pid)
+    vids = {}
+    for dev, history in (("load1", [48.0, 49.0]), ("load2", [10.0, 11.0])):
+        vids[dev] = _craft_history_version(
+            db, client, pid, user, f"{dev}历史", _predict_history_csv(history)
+        )
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    revision = view["draft"]["revision"]
+    commands = [
+        {
+            "id": f"c-bind-{dev}",
+            "unit": "dataset",
+            "type": "dataset.bind",
+            "payload": {"dataset_version_id": vid, "role": "main"},
+        }
+        for dev, vid in vids.items()
+    ]
+    commands.append(
+        {
+            "id": "fixture-declare-grid",
+            "unit": "model",
+            "type": "model.upsert_device",
+            "payload": {
+                "name": "grid1",
+                "device_type": "ies.device.grid_connection",
+                "kind": "existing",
+                "params": {"max_import_power_kw": 800, "max_export_power_kw": 200},
+                "position": {"x": 0.0, "y": 0.0},
+            },
+        }
+    )
+    for i, dev in enumerate(vids):
+        commands.append(
+            {
+                "id": f"fixture-declare-{dev}",
+                "unit": "model",
+                "type": "model.upsert_device",
+                "payload": {
+                    "name": dev,
+                    "device_type": "ies.device.electric_load",
+                    "kind": "new",
+                    "params": {
+                        "peak_power_kw": 200,
+                        "electricity_demand": {
+                            "mode": "data_predict",
+                            "dataset_version_id": vids[dev],
+                            "target_type": "load",
+                        },
+                    },
+                    "position": {"x": 2.0, "y": float(i)},
+                },
+            }
+        )
+        commands.append(
+            {
+                "id": f"fixture-connect-{dev}",
+                "unit": "model",
+                "type": "model.upsert_connection",
+                "payload": {
+                    "name": f"c-grid-{dev}",
+                    "from_device": "grid1",
+                    "from_port": "electricity_import",
+                    "to_device": dev,
+                    "to_port": "electricity_in",
+                },
+            }
+        )
+    revision = _draft_put(client, pid, user, revision, commands)
+    device_ref, revision = declare_compute_device(client, pid, _h(client, user))
+    planning = dict(PLANNING_BODY)
+    planning["objective"] = {
+        "sense": "minimize",
+        "expression": "grid_import__period_energy_purchase",
+    }
+    config_cases.save_planning_config(db, pid, planning, None, user.id)
+    revision = _set_explicit_calc(client, pid, user, revision)
+    instances = {device_ref: {"type": "none"}, "grid1": {"type": "none"}}
+    instances.update({dev: {"type": "none"} for dev in vids})
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    revision = _declare_assembly_sections(client, pid, user, view["draft"]["revision"], instances)
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={
+            "expected_revision": revision,
+            "commands": [{
+                "id": "c-tariff-bind", "unit": "assembly",
+                "type": "assembly.set_tariff_bindings",
+                "payload": {"bindings": {
+                    "grid_import": {
+                        "price": "grid_import",
+                        "instance": "grid1",
+                        "interface": "electricity_import",
+                        "aggregation": "integrate_positive",
+                    }
+                }},
+            }],
+        },
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    revision = resp.json()["revision"]
+    _bind_and_freeze(client, pid, user, None, revision=revision)
+    return pid
+
+
+class _ShortPredictor:
+    """测试短输出 predictor：只产 24 点，验预测公开输出边界不被伪装完成。"""
+
+    SHORT_REF = "test.predictor.short@1.0.0"
+
+    @property
+    def descriptor(self):
+        from iesplan.computation.predictors import (  # noqa: E402
+            PredictorDescriptor,
+        )
+
+        return PredictorDescriptor(
+            ref=self.SHORT_REF,
+            accepts_any_target_type=True,
+            needs_history=True,
+            description="测试短输出：恒返 24 点",
+        )
+
+    def predict(
+        self, *, device, interface, target_type, history, history_object_id,
+        parameters, seed, point_count, previous=None,
+    ):
+        from iesplan.computation.predictors import PredictedTarget  # noqa: E402
+
+        return PredictedTarget(
+            device=device,
+            interface=interface,
+            target_type=target_type,
+            values=tuple(1.0 for _ in range(24)),
+            history_object_id=history_object_id,
+            artifact=b"{}",
+            receipt={},
+        )
+
+
+class TestPredictPhase2FullHorizon:
+    def test_two_year_phase2_solves_full_horizon_each_round(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """N=2 阶段二多轮：快照评价年限驱动每轮完整 17544 步真求解。
+
+        双预测目标触发阶段二（上限 3 轮）；记录外壳证明三轮 generate
+        收到的第三项集合皆为完成态 17544 点；三轮目标值两两不同证明
+        每轮都解了新模型；终轮封存解分年汇总等于终轮预测值。
+        """
+        from sqlalchemy import select  # noqa: E402
+        from test_prediction_capability import (  # noqa: E402
+            CHASE_REF,
+            _ChasePredictor,
+            _save_calc,
+        )
+
+        from iesplan.application import worker as worker_app  # noqa: E402
+        from iesplan.application.tasks.submissions import submit_task  # noqa: E402
+        from iesplan.computation import build_registry  # noqa: E402
+        from iesplan.computation.predictors import (  # noqa: E402
+            build_predictor_registry,
+        )
+
+        user = make_user(db, "predict_n2_owner")
+        pid = _prepare_predict_n2(client, db, user)
+        body = dict(_CONFIG_BODY)
+        body["predictions"] = [
+            {
+                "target": {"instance": dev, "interface": "electricity_demand"},
+                "algorithm": CHASE_REF,
+                "parameters": {},
+            }
+            for dev in ("load1", "load2")
+        ]
+        body["convergence"] = {"tolerance": 0.001, "max_iterations": 3}
+        rev = _save_calc(client, pid, user, body)
+        chase = _ChasePredictor()
+        recorder = _RecordingGenerator()
+        gene_registry = build_registry((recorder,))
+        pred_registry = build_predictor_registry((chase,))
+        task, _flags = submit_task(
+            db, user, pid, "optimization", config={"config_revision": rev},
+            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            idempotency_key="predict-n2-phase2",
+            generator_registry=gene_registry,
+            predictor_registry=pred_registry,
+        )
+        n2_plane = worker_app.ComputeExecutionPlane(
+            generator_registry=gene_registry,
+            executor_registry=plane.executor_registry,
+            adapter_registry=plane.adapter_registry,
+            runtime=plane.runtime,
+            predictor_registry=pred_registry,
+        )
+        claim = worker_app.acquire_attempt(db, task.id, "predict-n2-e2e")
+        assert claim is not None
+        db.commit()
+
+        def factory() -> Session:
+            return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+
+        assert runner.run_task(factory, claim, worker_id="predict-n2-e2e", compute=n2_plane) == "completed"
+        task_row = db.execute(select(Task).where(Task.id == task.id)).scalar_one()
+        assert task_row.status == "completed"
+        assert task_row.business_outcome == "normal_completion"
+        assert len(recorder.calls) == 3
+        for call in recorder.calls:
+            assert call["evaluation_years"] == YEARS
+            assert call["pending"] == 0
+            assert call["series_count"] == 2
+            assert call["point_counts"] == [FULL_STEPS]
+        evidence = results_store.latest_evidence_for_task(db, task.id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        prediction = sealed["prediction"]
+        assert prediction["predict_target_count"] == 2
+        assert prediction["prediction_rounds"] == 3
+        assert prediction["solve_rounds"] == 3
+        assert prediction["phase2_solve_rounds"] == 2
+        assert prediction["converged"] is False
+        solution = sealed["compute_result"]["outputs"]["solution"]
+        round_objectives = [
+            chase.calls[2]["previous_objective"],
+            chase.calls[4]["previous_objective"],
+            solution["objective_value"],
+        ]
+        assert len(set(round_objectives)) == 3
+        for dev, call in (("load1", chase.calls[4]), ("load2", chase.calls[5])):
+            year1, year2, span = _yearly_served(
+                solution["variables"], f"{dev}__electricity_in__t"
+            )
+            assert span == FULL_STEPS
+            assert year1 == pytest.approx(call["value"] * YEAR1_STEPS, rel=1e-6)
+            assert year2 == pytest.approx(call["value"] * YEAR2_STEPS, rel=1e-6)
+
+
+class TestGeneratorEmptySeriesHorizon:
+    def test_empty_series_builds_two_year_model_and_bundle(self) -> None:
+        """Generator 契约级空序列时域证明（非公开项目端到端）。
+
+        本用例只证明 Generator 第三项输入为完成态空集合时，
+        N=2 仍建 17544 步整体模型/Bundle：SoC 状态变量覆盖末步 t17543，
+        且存在同时引用 t8759 与 t8760 的跨年耦合约束行（非首年复制/
+        拼接）。所用自定义储能设备未在首方注册（公开装配闸门以
+        ASM-REF-002 阻断未注册 definition，已探针取证），artifact 以
+        规范 canonical 直写、未经公开闸门签发；此处不断言提交/求解链。
         """
         from test_project_model import _contribution, _finance_payload  # noqa: E402
 
@@ -641,3 +935,61 @@ class TestEmptySeriesFullHorizon:
         )
         mps = bytes(bundle.files["input/problem.mps"])
         assert f"store1__soc__t{FULL_STEPS - 1}".encode() in mps
+
+
+class TestShortPredictionRejected:
+    def test_short_predictor_output_fails_task(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """短预测输出不得伪装完成：24 点输出进 17544 步全期即明确失败。
+
+        拒绝来自权威全期点数与序列自身长度不变式（非新增校验）；
+        失败收拢为 failed 终态，不落成功。
+        """
+        from sqlalchemy import select  # noqa: E402
+        from test_prediction_capability import _save_calc  # noqa: E402
+
+        from iesplan.application import worker as worker_app  # noqa: E402
+        from iesplan.application.tasks.submissions import submit_task  # noqa: E402
+        from iesplan.computation.predictors import (  # noqa: E402
+            build_predictor_registry,
+        )
+
+        user = make_user(db, "predict_short_owner")
+        pid = _prepare_predict_n2(client, db, user)
+        body = dict(_CONFIG_BODY)
+        body["predictions"] = [
+            {
+                "target": {"instance": dev, "interface": "electricity_demand"},
+                "algorithm": _ShortPredictor.SHORT_REF,
+                "parameters": {},
+            }
+            for dev in ("load1", "load2")
+        ]
+        body["convergence"] = {"tolerance": 0.001, "max_iterations": 2}
+        rev = _save_calc(client, pid, user, body)
+        pred_registry = build_predictor_registry((_ShortPredictor(),))
+        task, _flags = submit_task(
+            db, user, pid, "optimization", config={"config_revision": rev},
+            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            idempotency_key="predict-n2-short",
+            generator_registry=plane.generator_registry,
+            predictor_registry=pred_registry,
+        )
+        short_plane = worker_app.ComputeExecutionPlane(
+            generator_registry=plane.generator_registry,
+            executor_registry=plane.executor_registry,
+            adapter_registry=plane.adapter_registry,
+            runtime=plane.runtime,
+            predictor_registry=pred_registry,
+        )
+        claim = worker_app.acquire_attempt(db, task.id, "predict-n2-short")
+        assert claim is not None
+        db.commit()
+
+        def factory() -> Session:
+            return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+
+        assert runner.run_task(factory, claim, worker_id="predict-n2-short", compute=short_plane) == "failed"
+        task_row = db.execute(select(Task).where(Task.id == task.id)).scalar_one()
+        assert task_row.status == "failed"
