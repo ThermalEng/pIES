@@ -65,6 +65,7 @@ from iesplan.assembly import (
 )
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.config import settings
+from iesplan.core.contracts import horizon_point_count
 from iesplan.core.diagnostics import (
     SEVERITY_BLOCKING,
     SEVERITY_ERROR,
@@ -618,7 +619,7 @@ def _assemble_snapshot(
     artifact = gate.artifact
     # 提交边界全期覆盖核对(装配不核对点数; 已确认评价年限后在此阻断):
     # 规范文本基线 + 冻结财务快照时变序列点数 == 全周期总点数。
-    _check_submit_coverage(artifact=artifact, evaluation=frozen_evaluation, effective=effective)
+    _check_submit_coverage(db=db, artifact=artifact, evaluation=frozen_evaluation, effective=effective)
     receipt = artifact.receipt.to_dict()
     device_models = _freeze_device_models(artifact, gate.device_documents)
     # 预测输入冻结核对(B5-1 双向匹配 + B5-2 算法相容): 失败不建快照。
@@ -665,6 +666,7 @@ def _assemble_snapshot(
 
 def _check_submit_coverage(
     *,
+    db: Session,
     artifact: Any,
     evaluation: Mapping[str, Any],
     effective: EffectiveFinanceConfig,
@@ -675,7 +677,14 @@ def _check_submit_coverage(
     实际消费的不可变 Effective 财务快照(调用方传入, 此处不另行按引用
     二次解析); 期望点数由起始年 + 已确认评价年限 + 分辨率推导,
     不一致 → 400 TASK-REQ-017(见 tasks 域 ``check_tariff_horizon_coverage``)。
+    时变价格另读冻结对象实字节做唯一一次覆盖/声明元数据核对（此前只
+    核过声明元数据，未读过实字节）：对象缺失/不可解析/实长不等/文件
+    分辨率或单位与声明元数据不一致 → 400 TASK-REQ-017；``constant``
+    价格无对象，不参与核对。
     """
+    from iesplan.finance.pricecsv import parse_price_series_file
+    from iesplan.storage.contracts import ObjectCorruptError
+
     canonical = json.loads(artifact.canonical_text)
     baseline = canonical.get("project_baseline") or {}
     series = {
@@ -693,6 +702,54 @@ def _check_submit_coverage(
         tariff_bindings=canonical.get("tariff_bindings") or {},
         price_series=series,
     )
+    expected = horizon_point_count(
+        baseline.get("resolution"), baseline.get("start_year"),
+        evaluation["evaluation_years"],
+    )
+    for binding_id in sorted(canonical.get("tariff_bindings") or {}):
+        entry = (canonical.get("tariff_bindings") or {}).get(binding_id)
+        if not isinstance(entry, Mapping):
+            continue
+        price = (effective.energy_prices or {}).get(entry.get("price"))
+        if price is None or price.kind != "time_series":
+            continue
+        try:
+            raw = get_object(db, price.ref)
+        except (NotFoundError, ObjectCorruptError):
+            raise InvalidRequestError(
+                "时变价格冻结对象缺失, 无法核对全期覆盖",
+                code="TASK-REQ-017",
+                params={
+                    "binding_id": binding_id, "price": entry.get("price"),
+                    "reason": "object_unavailable",
+                },
+                location={"object_type": "tariff_binding", "object_id": str(binding_id)},
+            ) from None
+        parsed, parse_diags = parse_price_series_file(raw)
+        if parsed is None or any(d.blocking for d in parse_diags):
+            raise InvalidRequestError(
+                "时变价格冻结对象不可解析, 无法核对全期覆盖",
+                code="TASK-REQ-017",
+                params={"binding_id": binding_id, "price": entry.get("price"), "reason": "object_unparsable"},
+                location={"object_type": "tariff_binding", "object_id": str(binding_id)},
+            )
+        meta = price.series_meta
+        if (
+            len(parsed.values) != expected
+            or parsed.meta.resolution != (meta.resolution if meta else None)
+            or parsed.meta.unit != (meta.unit if meta else None)
+        ):
+            raise InvalidRequestError(
+                "时变价格序列未覆盖评价全期(实长/分辨率/单位与声明不一致)",
+                code="TASK-REQ-017",
+                params={
+                    "binding_id": binding_id,
+                    "price": entry.get("price"),
+                    "series_point_count": len(parsed.values),
+                    "expected_point_count": expected,
+                },
+                location={"object_type": "tariff_binding", "object_id": str(binding_id)},
+            )
 
 
 def _export_finance_for(

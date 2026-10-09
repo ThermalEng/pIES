@@ -36,6 +36,20 @@ from iesplan.finance.metrics import (
     project_npv,
 )
 from iesplan.finance.params import FinanceParams, finance_params_from_config
+from iesplan.finance.pricecsv import (
+    SCHEMA_ID as PRICE_SERIES_SCHEMA_ID,
+)
+from iesplan.finance.pricecsv import (
+    SCHEMA_VERSION as PRICE_SERIES_SCHEMA_VERSION,
+)
+from iesplan.finance.pricecsv import (
+    ParsedPriceFile,
+    PriceSeriesMeta,
+    emit_price_series_csv,
+    is_price_series_csv,
+    parse_price_series_file,
+    price_file_to_dict,
+)
 from iesplan.finance.triplet import (
     COST_METHOD_VALUES,
     CURRENCIES,
@@ -109,4 +123,13 @@ __all__ = [
     "DIRECTION_VALUES",
     "KIND_VALUES",
     "RESOLUTION_VALUES",
+    # 价格序列 CSV(ies.price-series@1.0.0; 0.12-F3a 契约切片)
+    "PRICE_SERIES_SCHEMA_ID",
+    "PRICE_SERIES_SCHEMA_VERSION",
+    "ParsedPriceFile",
+    "PriceSeriesMeta",
+    "emit_price_series_csv",
+    "is_price_series_csv",
+    "parse_price_series_file",
+    "price_file_to_dict",
 ]

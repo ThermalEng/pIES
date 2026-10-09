@@ -85,6 +85,50 @@ class MaterializedSeries:
 
 
 @dataclass(frozen=True, slots=True)
+class MaterializedPriceSeries:
+    """单个价格的全周期计算序列（不可变值对象，按 price_id 索引）。
+
+    ``values`` 按 step 0 起连续排列，长度恒等于 ``point_count``（与
+    求解域点数一致，供 Generator 逐点 ``price[t]×e[t]`` 计价）；
+    ``source`` 固定追溯价格冻结对象（``{"kind": "price_series",
+    "object_id": <oid>}``）。值填充在 F3b 由 Worker 物化完成，此处
+    只定形态。
+    """
+
+    price_id: str
+    point_count: int
+    resolution: str
+    unit: str
+    values: tuple[float, ...] = ()
+    source: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.price_id or not isinstance(self.price_id, str):
+            raise ValueError(f"price_id 须为非空字符串: {self.price_id!r}")
+        if len(self.values) != self.point_count:
+            raise ValueError(
+                f"价格序列长度须等于 point_count: {len(self.values)} x {self.point_count}"
+            )
+        object.__setattr__(self, "values", tuple(self.values))
+        if not isinstance(self.source, Mapping):
+            raise TypeError("source 须为 Mapping")
+        object.__setattr__(
+            self, "source", MappingProxyType(dict(self.source))
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为 JSON 兼容独立副本。"""
+        return {
+            "price_id": self.price_id,
+            "point_count": self.point_count,
+            "resolution": self.resolution,
+            "unit": self.unit,
+            "values": list(self.values),
+            "source": dict(self.source),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MaterializedSet:
     """物化返回边界（不可变值对象），即 Generator 第三项输入的集合形态。
 
@@ -96,15 +140,19 @@ class MaterializedSet:
     （{device, interface, target_type, object_id}，同序排列），是上游
     序列准备结果，不传入 Generator：传入 Generator 的集合须为完成态
     （``pending_predict`` 为空），由上游在预测产物合并后构成，本类型
-    只做类型化区分，不在运行期复核。
+    只做类型化区分，不在运行期复核。``prices`` 为已物化价格序列（按
+    ``price_id`` 索引，供 Generator 对计费绑定逐点计价；值填充在 F3b
+    由 Worker 物化完成）。
     """
 
     evaluation_years: int
     series: tuple[MaterializedSeries, ...] = ()
     pending_predict: tuple[Mapping[str, object], ...] = ()
+    prices: tuple[MaterializedPriceSeries, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "series", tuple(self.series))
+        object.__setattr__(self, "prices", tuple(self.prices))
         pending = tuple(self.pending_predict)
         for entry in pending:
             if not isinstance(entry, Mapping) or set(entry) != {
@@ -126,6 +174,7 @@ class MaterializedSet:
             "evaluation_years": self.evaluation_years,
             "series": [s.to_dict() for s in self.series],
             "pending_predict": [dict(e) for e in self.pending_predict],
+            "prices": [p.to_dict() for p in self.prices],
         }
 
 
@@ -338,6 +387,7 @@ def materialize_predicted_series(
 
 
 __all__ = [
+    "MaterializedPriceSeries",
     "MaterializedSeries",
     "MaterializedSet",
     "materialize_non_predictive_series",

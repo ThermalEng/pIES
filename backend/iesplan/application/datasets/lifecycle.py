@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import secrets
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -560,6 +561,105 @@ def _upload_device_data_version(
     )
 
 
+def _upload_price_series_version(
+    db: Session,
+    dataset: DatasetRecord,
+    resolution: str,
+    utc_offset_minutes: int,
+    data: bytes,
+    fields: dict,
+    meta: dict,
+    *,
+    user_id: int | None = None,
+) -> DatasetVersionRecord:
+    """保存 ies.price-series 价格版本（只 flush，不提交）。
+
+    文件自描述：分辨率/单位由文件元数据给出并校验，分辨率须与上传
+    参数一致；显式 ``fields`` 表单不适用，以非阻断警告记入诊断；
+    ``utc_offset_minutes`` 只记入版本行（step 文件无时间戳）。
+    不要求上传时已知项目年限（全期覆盖在任务提交边界核对）。
+    落盘为规范价格 CSV，可被财务价格引用直接消费；规范字节的对象
+    oid 记入质量报告 ``price_object_id``（Profile ``time_series.ref``
+    即填该值）。
+    """
+    from iesplan.finance.pricecsv import (
+        emit_price_series_csv,
+        parse_price_series_file,
+    )
+
+    if (
+        not isinstance(utc_offset_minutes, int)
+        or not (-720 <= utc_offset_minutes <= 840)
+    ):
+        raise DataValidationError([make_diag(
+            PARAM_RNG_OUT,
+            severity=SEVERITY_ERROR,
+            blocking=True,
+            params={
+                "field": "utc_offset_minutes", "value": utc_offset_minutes,
+                "min": -720, "max": 840,
+            },
+            location=_field_location("utc_offset_minutes"),
+        )])
+    parsed, parse_diags = parse_price_series_file(data)
+    diags = list(parse_diags)
+    if parsed is None or any(d.blocking for d in diags):
+        raise DataValidationError(diags)
+    if parsed.meta.resolution != resolution:
+        diags.append(make_diag(
+            "PRICE-CSV-004",
+            severity=SEVERITY_ERROR,
+            blocking=True,
+            params={"value": parsed.meta.resolution, "allowed": (resolution,)},
+            location=_field_location("resolution"),
+        ))
+        raise DataValidationError(diags)
+    if fields:
+        diags.append(make_diag(
+            "DATA-FILE-005",
+            severity="warning",
+            params={},
+            location=_field_location("fields"),
+        ))
+    axis = build_axis(resolution, utc_offset_minutes)
+    canonical = emit_price_series_csv(parsed.meta, parsed.values)
+    row_count = len(parsed.values)
+    fields_info: dict = {
+        "step": {
+            "type": "integer", "unit": "step",
+            "description_zh": "行序号", "description_en": "Row step index",
+        },
+        "price": {
+            "type": "decimal", "unit": parsed.meta.unit,
+            "description_zh": "能源价格", "description_en": "Energy price",
+        },
+    }
+    units_map: dict = {"step": "step", "price": parsed.meta.unit}
+    report = {
+        "schema": "ies.price-series",
+        "schema_version": "1.0.0",
+        "resolution": parsed.meta.resolution,
+        "unit": parsed.meta.unit,
+        "row_count": row_count,
+        "diagnostics": [d.to_dict() for d in diags if not d.blocking],
+    }
+    version = _commit_version(
+        db, dataset, axis, None, diags, {}, meta,
+        actor_id=user_id,
+        canonical_csv=canonical, row_count=row_count,
+        prebuilt={"fields": fields_info, "units": units_map, "quality_report": report},
+    )
+    for f in dataset_domain.list_files(db, version.id):
+        if f.file_kind == "data":
+            oid = object_info(db, f.object_id)["oid"]
+            version = replace(
+                version,
+                quality_report={**version.quality_report, "price_object_id": oid},
+            )
+            break
+    return version
+
+
 def _upload_dataset_version(
     db: Session,
     dataset_id: int,
@@ -604,6 +704,13 @@ def _upload_dataset_version(
 
     if is_device_data_csv(data_bytes):
         return _upload_device_data_version(
+            db, dataset, resolution, utc_offset_minutes, data_bytes, fields, meta,
+            user_id=user_id,
+        )
+    from iesplan.finance.pricecsv import is_price_series_csv
+
+    if is_price_series_csv(data_bytes):
+        return _upload_price_series_version(
             db, dataset, resolution, utc_offset_minutes, data_bytes, fields, meta,
             user_id=user_id,
         )

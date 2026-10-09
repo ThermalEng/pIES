@@ -127,6 +127,7 @@ from iesplan.computation.runtime import (
     build_executor_registry,
 )
 from iesplan.computation.sequences import (
+    MaterializedPriceSeries,
     MaterializedSeries,
     MaterializedSet,
     materialize_non_predictive_series,
@@ -169,6 +170,7 @@ __all__ = [
     "GeneratorRegistry",
     "HighsMilpProvider",
     "HighsResultAdapter",
+    "MaterializedPriceSeries",
     "MaterializedSeries",
     "MaterializedSet",
     "PredictedTarget",

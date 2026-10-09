@@ -155,6 +155,16 @@ NEW_DIAG_CODES: dict[str, str] = {
     "DATA-TIME-006": "时间戳形态与声明 timestamp_mode 不匹配: {value}"
     "(期望模式 {timestamp_mode}, 实际形态 {form})",
     "DATA-ARR-001": "数组长度与时间轴长度不一致",
+    # ies.price-series 1.0.0 价格文件契约: 头/元数据/列/step/数值诊断
+    "PRICE-CSV-001": "价格文件无法按 UTF-8 解码: {detail}",
+    "PRICE-CSV-002": "ies.price-series schema 标识或版本无法识别: {schema} {schema_version}",
+    "PRICE-CSV-003": "价格文件元数据非法: {detail}",
+    "PRICE-CSV-004": "价格文件分辨率非法: {value}(允许 {allowed})",
+    "PRICE-CSV-005": "价格文件单位缺失或无法解析: {value}",
+    "PRICE-CSV-006": "价格文件表头必须为 step,price: {actual}",
+    "PRICE-CSV-007": "价格文件 step 必须从 0 开始连续递增: {step}(期望 {expected})",
+    "PRICE-CSV-008": "价格文件价格必须为有限 Decimal: step {step} 值 {value}",
+    "PRICE-CSV-009": "价格文件无数据行: {detail}",
     "CONFIG-VAL-001": "计算配置校验失败(阻断性诊断,HTTP 422;包络码,见 api/config.py)",
     "API-REQ-001": (
         "请求体校验失败(422;FastAPI/Pydantic RequestValidationError 包络,"
@@ -325,6 +335,15 @@ DIAG_MESSAGE_KEYS: dict[str, str] = {
             "DATA-TIME-005": "time_convert_failed",
             "DATA-TIME-006": "time_form_mode_mismatch",
             "DATA-ARR-001": "array_length_mismatch",
+            "PRICE-CSV-001": "price_csv_undecodable",
+            "PRICE-CSV-002": "price_csv_schema_unknown",
+            "PRICE-CSV-003": "price_csv_meta_invalid",
+            "PRICE-CSV-004": "price_csv_resolution_invalid",
+            "PRICE-CSV-005": "price_csv_unit_invalid",
+            "PRICE-CSV-006": "price_csv_header_invalid",
+            "PRICE-CSV-007": "price_csv_step_invalid",
+            "PRICE-CSV-008": "price_csv_value_invalid",
+            "PRICE-CSV-009": "price_csv_empty",
         }.items()
     },
     **{

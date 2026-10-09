@@ -111,7 +111,7 @@ taxes:
 | `energy_prices.*.direction` | 是 | `purchase` / `sale` 二选一：显式会计方向。`purchase` 分量 = +raw_charge、`sale` 分量 = −raw_charge（`raw_charge = Σ price×energy`，定义见「计价规则」）；方向只由本字段决定，不靠 price_id 或键名后缀推断 |
 | `energy_prices.*` | 是 | 定价定义判别联合：`{kind: constant, value: Money}` 或 `{kind: time_series, ref, series_meta}`，二选一 |
 | `energy_prices.*.value` | constant 必填 | 有限 Decimal，可正、可零、可负；单位量纲 = currency /（该 carrier 的能源单位量纲） |
-| `energy_prices.*.ref` | time_series 必填 | 对象引用（指向经校验、覆盖全周期全部点数的连续能源价格序列；年度价格不同直接在对应 step 给出不同值，不设逐年引用）；序列值同样为有限 Decimal、允许零与负 |
+| `energy_prices.*.ref` | time_series 必填 | 对象引用：存储已有的不透明对象 ID（`oid`，随机对象 ID，不是内容 hash、路径或数据集版本），指向经校验、覆盖全周期全部点数的连续能源价格序列；年度价格不同直接在对应 step 给出不同值，不设逐年引用；序列值同样为有限 Decimal、允许零与负。`oid` 由价格文件经数据集上传入口校验落盘后在质量报告 `price_object_id` 中返回（格式见[价格序列 CSV](price-series-csv.md)）；Profile/Overrides 只存 `ref` + `series_meta`，不内联价格值；任务提交时以已确认全期时轴对实际对象做唯一一次覆盖/声明元数据核对并冻结引用 |
 | `energy_prices.*.series_meta` | time_series 必填 | 不可变时间元数据：`resolution`（15min/30min/1h）、`point_count`（整数，必须等于全周期总点数）、`unit`（无 `leap_year`，闰年由基线起始年逐年按公历推导）；全期覆盖在任务提交边界核对（取得已确认评价年限后），不一致阻断且不重采样；Profile 不固定唯一项目分辨率 |
 | `taxes` | 可选（无税目可写 `{}`） | 税目登记映射：`id` → `{display_name, tax_type, rate, applies_to}`，见下「税目登记」 |
 | `profile`/`finance_types`/`energy_prices`/`taxes` | 按本页规则校验（字头 + 领域约束） |
@@ -186,7 +186,7 @@ energy_prices:
 | `profile_ref` | 必填 `{id}`：与目标 Profile 的 `id` 一致（文本文件按字头校验，不做内容摘要） |
 | `finance_types` | 只允许覆盖目标 Profile **已存在** 的 `finance_type`；禁止新增或删除 `finance_type` |
 | `finance_types.*` | 只允许按 Profile 实际存在的叶子路径整体替换 `Money` 原子：`<分量>.fixed`（如 `upfront_capex.fixed`）替换为 `{value, unit}`；`<分量>.linear.<driver>.unit_cost` 替换为 `{value, unit}`。被替换叶子必须已在 Profile 声明；禁止新增或删除分量、`fixed` 节点或 `driver`（`driver` 集合不可增删）、禁止改分量类型与 `cost_method`、禁止改 `unit`（规范化后必须与 Profile 相同）；替换值必须为完整 `{value, unit}` 原子，禁止部分金额与 `null`；成本金额非负 |
-| `energy_prices` | 只允许覆盖 Profile **已存在** 的 `price_id`，禁止新增或删除 `price_id`。每个条目的 `energy_prices.<price_id>` 只写定价定义：`{kind: constant, value}` 或 `{kind: time_series, ref, series_meta}`（与 Profile 原 kind 无关）；`carrier` 与 `direction` 由 Profile 继承，在 Overrides 中出现即拒绝；`value.unit`（constant）或 `series_meta.unit`（time_series）必须与 Profile 原项相同；`time_series` 的 `ref` 指向经校验、覆盖全周期全部点数的价格序列对象，`series_meta` 必须完整并可与 Profile 引用不同序列；不允许部分混合替换（如只换 `ref` 保留旧 `series_meta`，或只换 kind 不带全量字段） |
+| `energy_prices` | 只允许覆盖 Profile **已存在** 的 `price_id`，禁止新增或删除 `price_id`。每个条目的 `energy_prices.<price_id>` 只写定价定义：`{kind: constant, value}` 或 `{kind: time_series, ref, series_meta}`（与 Profile 原 kind 无关）；`carrier` 与 `direction` 由 Profile 继承，在 Overrides 中出现即拒绝；`value.unit`（constant）或 `series_meta.unit`（time_series）必须与 Profile 原项相同；`time_series` 的 `ref` 为存储不透明对象 ID（`oid`，与 Profile 侧同一口径），指向经校验、覆盖全周期全部点数的价格序列对象，`series_meta` 必须完整并可与 Profile 引用不同序列；不允许部分混合替换（如只换 `ref` 保留旧 `series_meta`，或只换 kind 不带全量字段） |
 | 禁改字段 | 除 `profile_ref` 外，顶层不得出现 `profile.*`、`currency`、`base_year`、`price_basis`、`cost_method`、`taxes`（税目只属于 Profile 登记，项目不得新增/覆盖/删除）、价格条目的 `carrier`/`direction` 或任何税率字段；出现即拒绝 |
 | 其余字段 | 按本页规则校验 |
 
