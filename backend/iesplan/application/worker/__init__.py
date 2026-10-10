@@ -22,7 +22,8 @@ commit/rollback)。
   ``load_dataset_blob``/``parse_dataset_csv``/``count_completed_samples``;
 - 计算阶段: ``load_compute_inputs``/``predict_target_round``/
   ``generate_bundle``/``execute_bundle``/``adapt_result``(配套
-  ``build_attempt_context``/``business_outcome_for``);
+  ``build_attempt_context``/``business_outcome_for``)/
+  ``build_financial_evaluation``(已求解时间轴现金流与指标);
 - report 检查: ``locate_report_evidence``/``assess_report_stage``。
 
 不可变结果与错误语义: ``Claim``/``SubmitReceipt``/``ReportCheckResult``/
@@ -48,6 +49,7 @@ from iesplan.application.worker.compute_cases import (
     adapt_result,
     attach_evidence_objects,
     build_attempt_context,
+    build_financial_evaluation,
     business_outcome_for,
     complete_materialized,
     execute_bundle,
@@ -105,6 +107,7 @@ __all__ = [
     "assess_report_stage",
     "attach_evidence_objects",
     "build_attempt_context",
+    "build_financial_evaluation",
     "business_outcome_for",
     "cancel_attempt",
     "cancel_requested",

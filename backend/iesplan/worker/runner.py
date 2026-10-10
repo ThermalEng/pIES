@@ -371,6 +371,14 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         output_files["round_history"] = history
         payload["rounds"] = rounds
         payload["authoritative_round"] = solve_rounds
+    # 评价时间轴现金流与指标(0.12-T2): 只对最终轮已求解结果计算, 随
+    # payload 进同一证据封存/提交单元；未求解或缺 solution 输出返回
+    # None（不写财务块，不伪造）；冻结缺件即实际错误可见失败。
+    financial = worker_app.build_financial_evaluation(
+        snapshot, finance, artifact, models, completed, result
+    )
+    if financial is not None:
+        payload["financial_evaluation"] = financial
     return payload, output_files
 
 
