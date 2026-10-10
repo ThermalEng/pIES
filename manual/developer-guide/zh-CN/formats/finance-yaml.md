@@ -138,7 +138,7 @@ taxes:
 
 `FinanceProfile` 分别输出时间口径明确的分量，**不静默相加成默认总成本**：
 
-- `upfront_capex`：建设期一次性；金额量纲 = currency；
+- `upfront_capex`：本课题建设成本总额；金额量纲 = currency；固定建设费按选建实例只计一次，线性建设费按选定容量计算。“一次性建设成本”不表示付款只能发生一次或一律在 `t=0`；支付时点与建设期按[财务计算](../modules/finance.md)的明确项目安排处理，不隐式均摊；
 - `annual_fixed_om`：按年度计；金额量纲 = currency/年（按年值，不随计算窗口缩放）；
 - `period_variable_om`、`period_energy_purchase`、`period_energy_sale`：按运行/计费窗口合计；金额量纲 = currency；两个能源分量为**有符号记账贡献**，符号约定见「计价规则」（分量生成与计价规则见下文「聚合与计价衔接」）。
 
