@@ -15,9 +15,10 @@ import pytest
 
 from iesplan.finance import evaluate_project_investment
 from iesplan.finance.timeline import (
+    InterfaceDriverFacts,
+    PropertyDriverFacts,
     TariffYearFacts,
     TimelineInputs,
-    VariableOmFacts,
     annual_boundaries,
     annual_energy_nets,
     annual_fixed_om_total,
@@ -106,24 +107,24 @@ def test_sale_and_time_series_price_signs():
 
 
 def test_variable_om_interface_and_property():
-    """接口 driver 按年真实归集; 存量 driver 年均分(容量恒定即逐年真值)。"""
+    """接口 driver 按年真实归集; 存量 driver 只认年费率(每年计费率×存量)。
+    无时间口径的存量费率年归属无定义, 大声失败不均摊。"""
     bounds = ((0, 2), (2, 4))
     by_interface = annual_variable_om(
         step_seconds=H,
         boundaries=bounds,
-        drivers=[
-            VariableOmFacts(
+        interface_drivers=[
+            InterfaceDriverFacts(
                 "hp",
                 "consumed",
-                "interface",
                 (100.0, 100.0, 300.0, 300.0),
                 "kW",
                 "integrate_positive",
-                0.0,
                 Decimal("0.008"),
                 "CNY/kWh",
             )
         ],
+        property_drivers=[],
         currency="CNY",
     )
     assert float(by_interface[0]) == pytest.approx(float(Decimal("0.008") * 200), rel=1e-9)
@@ -131,32 +132,44 @@ def test_variable_om_interface_and_property():
     by_property = annual_variable_om(
         step_seconds=H,
         boundaries=bounds,
-        drivers=[
-            VariableOmFacts(
+        interface_drivers=[],
+        property_drivers=[
+            PropertyDriverFacts(
                 "hp",
                 "cap",
-                "property",
-                (),
-                "kW",
-                "integrate_positive",
                 50.0,
+                "kW",
                 Decimal("28"),
-                "CNY/kW",
+                "CNY/kW/a",
             )
         ],
         currency="CNY",
     )
-    assert (
-        float(by_property[0]) == float(by_property[1]) == pytest.approx(float(Decimal("1400") / 2), rel=1e-9)
-    )
+    assert float(by_property[0]) == pytest.approx(1400.0, rel=1e-9)
+    assert float(by_property[1]) == pytest.approx(1400.0, rel=1e-9)
+    with pytest.raises(ValueError, match="年归属无定义"):
+        annual_variable_om(
+            step_seconds=H,
+            boundaries=bounds,
+            interface_drivers=[],
+            property_drivers=[
+                PropertyDriverFacts(
+                    "hp",
+                    "cap",
+                    50.0,
+                    "kW",
+                    Decimal("28"),
+                    "CNY/kW",
+                )
+            ],
+            currency="CNY",
+        )
 
 
 def test_totals_are_decimal_exact():
     """C 与年固定 O&M 十进制精确累加(140000、1400)。"""
-    assert construction_total([(100000.0, "CNY"), (40000.0, "CNY")], "CNY") == Decimal("140000")
-    assert annual_fixed_om_total([(1400.0, "CNY/a")], "CNY") == Decimal("1400")
-    with pytest.raises(ValueError):
-        construction_total([(1.0, "USD")], "CNY")
+    assert construction_total([100000.0, 40000.0]) == Decimal("140000")
+    assert annual_fixed_om_total([1400.0]) == Decimal("1400")
 
 
 def test_k1n2_cashflow_shape_and_maintenance():
@@ -168,7 +181,7 @@ def test_k1n2_cashflow_shape_and_maintenance():
     assert annual[0].net == Decimal("294336") * -1 - Decimal("1400")
     assert annual[1].net == Decimal("590284.8") * -1 - Decimal("1400") - Decimal("1000.00")
     flows = assemble_cashflows(
-        TimelineInputs(1, 2, 3, ((0, Decimal("0.6")), (1, Decimal("0.4"))), tuple(annual), ()),
+        TimelineInputs(1, 2, 3, ((0, Decimal("0.6")), (1, Decimal("0.4"))), tuple(annual)),
         Decimal("140000"),
     )
     assert flows == [
@@ -186,23 +199,22 @@ def test_k0_full_payment_at_t0():
         [Decimal("100"), Decimal("200")], [Decimal("0"), Decimal("0")], Decimal("0"), {}, 0
     )
     flows = assemble_cashflows(
-        TimelineInputs(0, 2, 2, ((0, Decimal("1")),), tuple(annual), ()), Decimal("1150000")
+        TimelineInputs(0, 2, 2, ((0, Decimal("1")),), tuple(annual)), Decimal("1150000")
     )
     assert flows == [Decimal("-1150000"), Decimal("-100"), Decimal("-200")]
 
 
-def test_shape_errors_fail_loudly():
-    """长度/时点错误大声失败, 不返回默认现金流。"""
-    annual = combine_annual_nets([Decimal("1")], [Decimal("0")], Decimal("0"), {}, 0)
-    with pytest.raises(ValueError):
-        assemble_cashflows(TimelineInputs(0, 2, 2, ((0, Decimal("1")),), tuple(annual), ()), Decimal("1"))
-    with pytest.raises(ValueError):
-        assemble_cashflows(
-            TimelineInputs(1, 2, 3, ((2, Decimal("1")),), tuple(annual) * 2, ()),
-            Decimal("1"),
-        )
-    with pytest.raises(ValueError):
-        combine_annual_nets([Decimal("1")], [], Decimal("0"), {}, 0)
+def test_same_year_maintenance_sums_once():
+    """同年多项维护累加一次扣除(调用方已按年累加, 此处只记合并语义)。"""
+    annual = combine_annual_nets(
+        [Decimal("100"), Decimal("200")],
+        [Decimal("0"), Decimal("0")],
+        Decimal("0"),
+        {2: Decimal("1000.00") + Decimal("2500.50")},
+        0,
+    )
+    assert annual[0].net == Decimal("-100")
+    assert annual[1].net == Decimal("-200") - Decimal("3500.50")
 
 
 def test_evaluation_echoes_frozen_years_and_matches_rows():

@@ -152,8 +152,13 @@ def _prepare_t2_project(
     hp_binding: dict,
     planning: dict,
     profile: dict | None = None,
+    with_existing_hp: bool = False,
 ) -> int:
-    """T2 执行项目: grid1 + data_full 负荷 + 必建热泵 + 购电计费绑定。"""
+    """T2 执行项目: grid1 + data_full 负荷 + 必建热泵 + 购电计费绑定。
+
+    ``with_existing_hp`` 另加一台存量计费热泵 hp_old(静态 600kW, 其
+    FinanceType 含年固定费): 按公开资产口径只计可变费与能源, 不计沉
+    没建设及固定 O&M, 运行必须成功。"""
     from test_tasks_api import _declare_finance  # noqa: E402
 
     from iesplan.application import configuration as config_cases  # noqa: E402
@@ -237,6 +242,33 @@ def _prepare_t2_project(
             },
         },
     ]
+    if with_existing_hp:
+        commands += [
+            {
+                "id": "fixture-declare-hp-old",
+                "unit": "model",
+                "type": "model.upsert_device",
+                "payload": {
+                    "name": "hp_old",
+                    "device_type": "ies.device.heat_pump",
+                    "kind": "existing",
+                    "params": {"rated_heat_kw": 600, "cop": 3.5},
+                    "position": {"x": 1.0, "y": -1.0},
+                },
+            },
+            {
+                "id": "fixture-connect-hp-old",
+                "unit": "model",
+                "type": "model.upsert_connection",
+                "payload": {
+                    "name": "c-grid-hp-old",
+                    "from_device": "grid1",
+                    "from_port": "electricity_import",
+                    "to_device": "hp_old",
+                    "to_port": "electricity_in",
+                },
+            },
+        ]
     resp = client.put(
         f"/api/projects/{pid}/draft",
         json={"expected_revision": view["draft"]["revision"], "commands": commands},
@@ -250,6 +282,8 @@ def _prepare_t2_project(
         "load1": {"type": "none"},
         "hp1": dict(hp_binding),
     }
+    if with_existing_hp:
+        instances["hp_old"] = dict(hp_binding)
     view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
     revision = _declare_assembly_sections(client, pid, user, view["draft"]["revision"], instances)
     resp = client.put(
@@ -501,7 +535,8 @@ class TestT2CashflowChain:
         assert fin["evaluation"]["irr"] is None
 
     def test_maintenance_deducted_only_at_event_year(self, devices, client, db, engine, plane) -> None:
-        """同项目 + t=3 维护 1000: 仅 CF[3] 扣 M, CF[2] 与无维护一致。"""
+        """同项目 + t=3 两笔维护(1000+2500.50): 合计只扣 CF[3] 一次,
+        CF[2] 与无维护一致, 不限制年份唯一, 不丢项。"""
         raw = _full_csv(8760, 48.0, 8784, 96.0)
         owner = make_user(db, "t2_owner_b")
         pid = _prepare_t2_project(client, db, owner, raw, 2023, HP_BINDING, BASE_PLANNING, _hp_demo_profile())
@@ -513,16 +548,21 @@ class TestT2CashflowChain:
             plane,
             pid,
             owner,
-            _eval_k1n2([{"year": 3, "amount": "1000.00", "currency": "CNY"}]),
+            _eval_k1n2(
+                [
+                    {"year": 3, "amount": "1000.00", "currency": "CNY"},
+                    {"year": 3, "amount": "2500.50", "currency": "CNY"},
+                ]
+            ),
             "t2-k1n2-maint",
             expected_revision=1,
         )
         base_rows = base["financial_evaluation"]["evaluation"]["rows"]
         maint_rows = maint["financial_evaluation"]["evaluation"]["rows"]
         assert float(maint_rows[2]["net"]) == pytest.approx(float(base_rows[2]["net"]), rel=1e-9)
-        assert float(maint_rows[3]["net"]) == pytest.approx(float(base_rows[3]["net"]) - 1000.00, rel=1e-9)
-        # 快照冻结已按 R2 规范化去尾零("1000.00"→"1000"), 扣除金额等值。
-        assert maint["financial_evaluation"]["annual_operation"][1]["maintenance"] == "1000"
+        assert float(maint_rows[3]["net"]) == pytest.approx(float(base_rows[3]["net"]) - 3500.50, rel=1e-9)
+        # 快照冻结已按 R2 规范化去尾零("1000.00"→"1000"), 两笔合计等值扣除。
+        assert maint["financial_evaluation"]["annual_operation"][1]["maintenance"] == "3500.5"
 
     def test_k0_leap_first_mandatory_fixed(self, devices, client, db, engine, plane) -> None:
         """K0N2 闰年首年 + 必建固定费: CF=[-1150000,R1,R2], 年界 8784+8760。"""
@@ -551,4 +591,40 @@ class TestT2CashflowChain:
             payments=[(0, 1)],
             profile_id="t2-fixed-demo",
             bounds=((0, 8784), (8784, 17544)),
+        )
+
+    def test_existing_costed_counts_no_sunk_cost(self, devices, client, db, engine, plane) -> None:
+        """存量计费热泵 hp_old(静态 600kW, 画像含年固定费): 运行成功,
+        不计沉没建设(无 hp_old__upfront_capex)与存量固定 O&M(无
+        hp_old__annual_fixed_om); C 仍为 140000, 年固定仍为 28×50。
+        存量可变费与能源照常归集(空闲≈0, 不报错)。"""
+        raw = _full_csv(8760, 48.0, 8784, 96.0)
+        owner = make_user(db, "t2_owner_d")
+        pid = _prepare_t2_project(
+            client,
+            db,
+            owner,
+            raw,
+            2023,
+            HP_BINDING,
+            BASE_PLANNING,
+            _hp_demo_profile(),
+            with_existing_hp=True,
+        )
+        sealed = _solve(client, db, engine, plane, pid, owner, _eval_k1n2(), "t2-k1n2-existing")
+        components = sealed["compute_result"]["outputs"]["solution"]["components"]
+        assert "hp_old__upfront_capex" not in components
+        assert "hp_old__annual_fixed_om" not in components
+        _check_financial(
+            sealed,
+            k=1,
+            n=2,
+            e=3,
+            expected_c=140000.0,
+            fixed_rate=28.0,
+            maint_by_year={},
+            payments=[(0, 0.6), (1, 0.4)],
+            profile_id="t2-hp-demo",
+            bounds=((0, 8760), (8760, 17544)),
+            variable_rate=0.008,
         )

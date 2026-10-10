@@ -52,9 +52,10 @@ from iesplan.finance.pricecsv import (
 )
 from iesplan.finance.timeline import (
     AnnualBreakdown,
+    InterfaceDriverFacts,
+    PropertyDriverFacts,
     TariffYearFacts,
     TimelineInputs,
-    VariableOmFacts,
     annual_boundaries,
     annual_energy_nets,
     annual_fixed_om_total,
@@ -112,9 +113,10 @@ __all__ = [
     "evaluate_project_investment",
     # timeline(0.12-T2 评价时间轴现金流)
     "AnnualBreakdown",
+    "InterfaceDriverFacts",
+    "PropertyDriverFacts",
     "TariffYearFacts",
     "TimelineInputs",
-    "VariableOmFacts",
     "annual_boundaries",
     "annual_energy_nets",
     "annual_fixed_om_total",

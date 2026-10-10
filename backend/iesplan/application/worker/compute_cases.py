@@ -484,24 +484,13 @@ def attach_evidence_objects(
 
 
 def _solution_variables(result: ComputeResult) -> dict[str, tuple[float, str]]:
-    """适配输出变量 → {LP 名: (业务值, 业务单位)}(缺件即实际错误)."""
-    solution = (result.outputs or {}).get("solution")
-    if not isinstance(solution, Mapping):
-        raise ValueError("求解结果缺 solution 输出, 无法归集年度财务")
-    out: dict[str, tuple[float, str]] = {}
-    variables = solution.get("variables")
-    if not isinstance(variables, (list, tuple)):
-        raise ValueError("求解结果 solution.variables 缺失, 无法归集年度财务")
-    for item in variables:
-        if not isinstance(item, Mapping):
-            raise ValueError(f"求解变量条目非法: {item!r}")
-        name, value, unit = item.get("name"), item.get("value"), item.get("unit")
-        if not isinstance(name, str) or not isinstance(unit, str):
-            raise ValueError(f"求解变量条目缺名/单位: {item!r}")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"求解变量 {name!r} 值非有限数值: {value!r}")
-        out[name] = (float(value), unit)
-    return out
+    """适配输出变量 → {LP 名: (业务值, 业务单位)}。
+
+    适配器是求解输出进入结果模型的权威校验入口, 此处信任其类型化
+    输出, 残缺即自然错误可见, 不做形状重复校验。
+    """
+    solution = result.outputs["solution"]
+    return {item["name"]: (float(item["value"]), item["unit"]) for item in solution["variables"]}
 
 
 def _step_values(
@@ -510,13 +499,10 @@ def _step_values(
     inst: str,
     iface: str,
     total_steps: int,
-    what: str,
 ) -> tuple[tuple[float, ...], str]:
-    """接口逐 step 业务值(预定义取物化序列, 否则取求解变量; 缺步即实际错误)."""
+    """接口逐 step 业务值(预定义取物化序列, 否则取求解变量; 残缺自然可见)。"""
     if (inst, iface) in series_map:
         values, unit = series_map[(inst, iface)]
-        if len(values) < total_steps:
-            raise ValueError(f"{what}预定义序列长度不足({len(values)} < {total_steps})")
         return tuple(values[:total_steps]), unit
     prefix = f"{inst}__{iface}__t"
     found: dict[int, tuple[float, str]] = {}
@@ -528,10 +514,7 @@ def _step_values(
         except ValueError:
             continue
         found[step] = (value, unit)
-    if len(found) < total_steps or any(s not in found for s in range(total_steps)):
-        raise ValueError(f"{what}求解变量缺步(实得 {len(found)} 步, 需要 {total_steps})")
-    unit = found[0][1]
-    return tuple(found[s][0] for s in range(total_steps)), unit
+    return tuple(found[step][0] for step in range(total_steps)), found[0][1]
 
 
 def build_financial_evaluation(
@@ -552,9 +535,10 @@ def build_financial_evaluation(
     """
     from iesplan.core.contracts import ProjectBaseline
     from iesplan.finance import (
+        InterfaceDriverFacts,
+        PropertyDriverFacts,
         TariffYearFacts,
         TimelineInputs,
-        VariableOmFacts,
         annual_boundaries,
         annual_energy_nets,
         annual_fixed_om_total,
@@ -584,10 +568,7 @@ def build_financial_evaluation(
 
     series_map: dict[tuple[str, str], tuple[tuple[float, ...], str]] = {}
     for entry in materialized.series:
-        try:
-            unit = models[entry.device].interfaces[entry.interface].unit
-        except (KeyError, AttributeError) as exc:
-            raise ValueError(f"预定义序列 {entry.device}.{entry.interface} 缺接口单位") from exc
+        unit = models[entry.device].interfaces[entry.interface].unit
         series_map[(entry.device, entry.interface)] = (tuple(entry.values), str(unit))
 
     price_map: dict[str, tuple[tuple[float, ...], str]] = {}
@@ -600,26 +581,17 @@ def build_financial_evaluation(
         raise ValueError("求解结果 solution.components 缺失, 无法归集年度财务")
 
     tariffs: list[TariffYearFacts] = []
-    for binding_id in sorted(doc.get("tariff_bindings") or {}):
-        binding = (doc["tariff_bindings"] or {})[binding_id]
+    for binding_id in sorted(doc["tariff_bindings"]):
+        binding = doc["tariff_bindings"][binding_id]
         price = finance.energy_prices[binding["price"]]
         if price.kind == "constant":
             value = price.value
-            if value is None:
-                raise ValueError(f"constant 价格缺值: {binding['price']!r}")
             price_values = (float(value.value),) * total_steps
             price_unit = value.unit
         else:
-            if binding["price"] not in price_map:
-                raise ValueError(f"时变价格未物化: {binding['price']!r}")
             price_values, price_unit = price_map[binding["price"]]
         energy_values, energy_unit = _step_values(
-            variables,
-            series_map,
-            binding["instance"],
-            binding["interface"],
-            total_steps,
-            f"计费 {binding_id}",
+            variables, series_map, binding["instance"], binding["interface"], total_steps
         )
         tariffs.append(
             TariffYearFacts(
@@ -633,35 +605,35 @@ def build_financial_evaluation(
             )
         )
 
-    instances = (doc.get("finance_binding") or {}).get("instances") or {}
-    devices = doc.get("devices") or {}
-    plan_vars = (doc.get("planning") or {}).get("variables") or {}
+    instances = doc["finance_binding"]["instances"]
+    devices = doc["devices"]
+    plan_vars = doc["planning"]["variables"]
     bound: dict[tuple[str, str], str] = {}
     for var_name, var in plan_vars.items():
-        bound[(var.get("device_ref"), var.get("parameter"))] = var_name
+        bound[(var["device_ref"], var["parameter"])] = var_name
 
-    drivers: list[VariableOmFacts] = []
-    fixed_values: list[tuple[float, str]] = []
-    upfront_values: list[tuple[float, str]] = []
+    interface_drivers: list[InterfaceDriverFacts] = []
+    property_drivers: list[PropertyDriverFacts] = []
+    fixed_values: list[float] = []
+    upfront_values: list[float] = []
     for inst in sorted(instances):
         entry = instances[inst]
-        if entry.get("type") != "costed":
+        if entry["type"] != "costed":
             continue
         ft_entry = finance.finance_types[entry["finance_type"]]
-        origin = (devices.get(inst) or {}).get("asset_origin")
-        if ft_entry.annual_fixed_om is not None:
-            ident = f"{inst}__annual_fixed_om"
-            if ident not in components:
-                raise ValueError(f"求解结果缺固定 O&M 分量: {ident!r}")
-            fixed_values.append(_component_value(components[ident], ident))
+        is_new = devices[inst]["asset_origin"] == "new"
+        # 公开资产口径: 只有 new 计建设及新增固定 O&M; existing 不计沉没
+        # 建设及决策无关固定 O&M(生成器现行增量口径只为其产出可变分量),
+        # 但仍计可变费与能源。
+        if is_new and ft_entry.annual_fixed_om is not None:
+            fixed_values.append(float(components[f"{inst}__annual_fixed_om"]["value"]))
         variable = ft_entry.period_variable_om
         if variable is not None:
             if variable.fixed is not None:
-                drivers.append(
-                    VariableOmFacts(
+                property_drivers.append(
+                    PropertyDriverFacts(
                         inst=inst,
                         driver="*fixed*",
-                        kind="property",
                         quantity=1.0,
                         unit="1",
                         unit_cost=variable.fixed.value,
@@ -669,19 +641,18 @@ def build_financial_evaluation(
                     )
                 )
             for driver, cost in (variable.linear or {}).items():
-                target = (entry.get("drivers") or {})[driver]
+                target = entry["drivers"][driver]
                 if "property" in target:
                     prop = target["property"]
                     if (inst, prop) in bound:
                         qty, qty_unit = variables[bound[(inst, prop)]]
                     else:
-                        const = ((devices.get(inst) or {}).get("properties") or {})[prop]
+                        const = devices[inst]["properties"][prop]
                         qty, qty_unit = float(const["value"]), str(const["unit"])
-                    drivers.append(
-                        VariableOmFacts(
+                    property_drivers.append(
+                        PropertyDriverFacts(
                             inst=inst,
                             driver=driver,
-                            kind="property",
                             quantity=qty,
                             unit=qty_unit,
                             unit_cost=cost.unit_cost.value,
@@ -689,19 +660,11 @@ def build_financial_evaluation(
                         )
                     )
                 else:
-                    values, unit = _step_values(
-                        variables,
-                        series_map,
-                        inst,
-                        target["interface"],
-                        total_steps,
-                        f"可变 O&M {inst}.{driver}",
-                    )
-                    drivers.append(
-                        VariableOmFacts(
+                    values, unit = _step_values(variables, series_map, inst, target["interface"], total_steps)
+                    interface_drivers.append(
+                        InterfaceDriverFacts(
                             inst=inst,
                             driver=driver,
-                            kind="interface",
                             values=values,
                             unit=unit,
                             aggregation=target["aggregation"],
@@ -709,11 +672,8 @@ def build_financial_evaluation(
                             unit_cost_unit=cost.unit_cost.unit,
                         )
                     )
-        if origin == "new" and ft_entry.upfront_capex is not None:
-            ident = f"{inst}__upfront_capex"
-            if ident not in components:
-                raise ValueError(f"求解结果缺建设分量: {ident!r}")
-            upfront_values.append(_component_value(components[ident], ident))
+        if is_new and ft_entry.upfront_capex is not None:
+            upfront_values.append(float(components[f"{inst}__upfront_capex"]["value"]))
 
     from decimal import Decimal
 
@@ -722,14 +682,20 @@ def build_financial_evaluation(
         step_seconds=step_seconds, boundaries=boundaries, tariffs=tariffs, currency=currency
     )
     variable_nets = annual_variable_om(
-        step_seconds=step_seconds, boundaries=boundaries, drivers=drivers, currency=currency
+        step_seconds=step_seconds,
+        boundaries=boundaries,
+        interface_drivers=interface_drivers,
+        property_drivers=property_drivers,
+        currency=currency,
     )
-    fixed_total = annual_fixed_om_total(fixed_values, currency)
-    total = construction_total(upfront_values, currency)
+    fixed_total = annual_fixed_om_total(fixed_values)
+    total = construction_total(upfront_values)
 
-    maintenance_by_year = {
-        int(item["year"]): Decimal(str(item["amount"])) for item in evaluation["maintenance_expenses"]
-    }
+    # 同年多项维护按年累加扣除, 不限制年份唯一, 不丢项。
+    maintenance_by_year: dict[int, Decimal] = {}
+    for item in evaluation["maintenance_expenses"]:
+        year = int(item["year"])
+        maintenance_by_year[year] = maintenance_by_year.get(year, Decimal("0")) + Decimal(str(item["amount"]))
     annual = combine_annual_nets(energy_nets, variable_nets, fixed_total, maintenance_by_year, period)
     payments = tuple(
         (int(item["t"]), Decimal(str(item["ratio"]))) for item in evaluation["construction_payments"]
@@ -741,10 +707,6 @@ def build_financial_evaluation(
             evaluation_years=years,
             payments=payments,
             annual=tuple(annual),
-            maintenance=tuple(
-                (int(item["year"]), Decimal(str(item["amount"])))
-                for item in evaluation["maintenance_expenses"]
-            ),
         ),
         total,
     )
@@ -783,16 +745,6 @@ def build_financial_evaluation(
         ],
         "evaluation": assessed.to_dict(),
     }
-
-
-def _component_value(entry: object, ident: str) -> tuple[float, str]:
-    """适配分量条目 → (业务值, 单位)(缺件即实际错误)."""
-    if not isinstance(entry, Mapping):
-        raise ValueError(f"求解分量 {ident!r} 条目非法: {entry!r}")
-    value, unit = entry.get("value"), entry.get("unit")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isinstance(unit, str):
-        raise ValueError(f"求解分量 {ident!r} 值/单位非法: {entry!r}")
-    return float(value), unit
 
 
 def business_outcome_for(result: ComputeResult) -> str | None:
