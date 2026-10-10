@@ -71,7 +71,7 @@ energy_prices:
     ref: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     series_meta:
       resolution: 1h
-      point_count: 8760  # 单年示例（评价年限由提交时显式确认，此处取 1；非默认）；实际必须等于全周期总点数
+      point_count: 8760  # 单年示例（运营年限由提交时显式确认，此处取 1；非默认）；实际必须等于全周期总点数
       unit: CNY/kWh
   heat_supply:                  # 第二载体示例：购热价格条目（heat 为设备接口示例已用的载体取值）
     carrier: heat
@@ -112,7 +112,7 @@ taxes:
 | `energy_prices.*` | 是 | 定价定义判别联合：`{kind: constant, value: Money}` 或 `{kind: time_series, ref, series_meta}`，二选一 |
 | `energy_prices.*.value` | constant 必填 | 有限 Decimal，可正、可零、可负；单位量纲 = currency /（该 carrier 的能源单位量纲） |
 | `energy_prices.*.ref` | time_series 必填 | 对象引用（指向经校验、覆盖全周期全部点数的连续能源价格序列；年度价格不同直接在对应 step 给出不同值，不设逐年引用）；序列值同样为有限 Decimal、允许零与负 |
-| `energy_prices.*.series_meta` | time_series 必填 | 不可变时间元数据：`resolution`（15min/30min/1h）、`point_count`（整数，必须等于全周期总点数）、`unit`（无 `leap_year`，闰年由基线起始年逐年按公历推导）；全期覆盖在任务提交边界核对（取得已确认评价年限后），不一致阻断且不重采样；Profile 不固定唯一项目分辨率 |
+| `energy_prices.*.series_meta` | time_series 必填 | 不可变时间元数据：`resolution`（15min/30min/1h）、`point_count`（整数，必须等于全周期总点数）、`unit`（无 `leap_year`，闰年由基线起始年逐年按公历推导）；全期覆盖在任务提交边界核对（取得已确认运营年限 `operation_years` 后），不一致阻断且不重采样；Profile 不固定唯一项目分辨率 |
 | `taxes` | 可选（无税目可写 `{}`） | 税目登记映射：`id` → `{display_name, tax_type, rate, applies_to}`，见下「税目登记」 |
 | `profile`/`finance_types`/`energy_prices`/`taxes` | 按本页规则校验（字头 + 领域约束） |
 
@@ -144,7 +144,7 @@ taxes:
 
 口径换算与组合规则：
 
-- 按年分量（currency/年）与窗口合计分量（currency）相加前，必须把按年分量乘以**显式时间跨度**换算到同一窗口后再相加（示例为单年窗口：`annual_fixed_om × 1 year`，评价年限由提交时显式确认，此处取 1；非默认）；缺少显式时间跨度不得默认相加或做其他隐式缩放；
+- 按年分量（currency/年）与窗口合计分量（currency）相加前，必须把按年分量乘以**显式时间跨度**换算到同一窗口后再相加（示例为单年窗口：`annual_fixed_om × 1 year`，运营年限由提交时显式确认，此处取 1；非默认）；缺少显式时间跨度不得默认相加或做其他隐式缩放；
 - 本契约不定义“总成本”聚合，也不提供隐式“系统总成本”标识符；`upfront_capex`（一次性）与运行期成本之间不存在本契约默认的转换——不做隐式年化，不隐含资本回收系数、利率或年限等值；
 - 具体如何把一次性投资转换为可与运行期成本比较的规划分量（例如时间口径一致的显式目标分量），属于 `PlanningConfig` 的明确、版本化规则，须在规划配置契约中定义后再使用；本财务 Profile 不隐式定义或默认选择这种转换，也不因不做后评价而禁止规划配置契约定义此类显式分量；
 - 后评价指标（NPV/IRR 等）不属于本契约输入（属 finance 模块长期蓝图，见[财务计算](../modules/finance.md)）；
@@ -174,7 +174,7 @@ energy_prices:
     ref: "9999999999999999999999999999999999999999999999999999999999999999"
     series_meta:
       resolution: 1h
-      point_count: 8760  # 单年示例（评价年限由提交时显式确认，此处取 1；非默认）；实际必须等于全周期总点数
+      point_count: 8760  # 单年示例（运营年限由提交时显式确认，此处取 1；非默认）；实际必须等于全周期总点数
       unit: CNY/kWh
 ```
 
@@ -241,7 +241,7 @@ energy_prices:
     ref: "9999999999999999999999999999999999999999999999999999999999999999"
     series_meta:
       resolution: 1h
-      point_count: 8760  # 单年示例（评价年限由提交时显式确认，此处取 1；非默认）；实际必须等于全周期总点数
+      point_count: 8760  # 单年示例（运营年限由提交时显式确认，此处取 1；非默认）；实际必须等于全周期总点数
       unit: CNY/kWh
   heat_supply:                                         # 未覆盖，原样保留
     carrier: heat
