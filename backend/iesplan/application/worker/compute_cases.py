@@ -213,10 +213,10 @@ def load_compute_inputs(
     """从快照恢复生成器五项直接输入并按序返回（不包装第二对象，不做缺省）。
 
     finance 按回执冻结血缘取不可变 Effective 行；第三项为物化集合本身
-    （已确认评价年限随集合携带；预测目标序列不在此物化，
+    （已确认运营年限随集合携带；预测目标序列不在此物化，
     ``pending_predict`` 保留），由 ``predict_target_round`` 经公开
     predictor 完成后再与此处集合并为完成态。序列按快照顶层评价确认块的
-    已确认评价年限物化为全周期长度（提交边界唯一校验，此处只读不验）。
+    已确认运营年限物化为运营期长度（提交边界唯一校验，此处只读不验）。
     冻结缺件即实际结构错误直接可见，不重跑输入校验。
     """
     artifact, resources, config, _seed = _restore_artifact_resources_config(
@@ -237,14 +237,14 @@ def load_compute_inputs(
         )
     finance = EffectiveFinanceConfig.from_dict(finance_row.content)
 
-    evaluation_years = snapshot.evaluation["evaluation_years"]
+    operation_years = snapshot.evaluation["operation_years"]
     materialized = materialize_non_predictive_series(
-        artifact, resources, evaluation_years=evaluation_years
+        artifact, resources, operation_years=operation_years
     )
     prices = _materialize_price_series(db, artifact, finance)
     if prices:
         materialized = MaterializedSet(
-            evaluation_years=materialized.evaluation_years,
+            operation_years=materialized.operation_years,
             series=materialized.series,
             pending_predict=materialized.pending_predict,
             prices=prices,
@@ -304,7 +304,7 @@ def complete_materialized(
     此处只构成完成态，不复核。已物化价格区沿基集合透传。
     """
     return MaterializedSet(
-        evaluation_years=base.evaluation_years,
+        operation_years=base.operation_years,
         series=tuple(base.series) + tuple(predicted),
         pending_predict=(),
         prices=base.prices,
@@ -319,7 +319,7 @@ def predict_target_round(
     *,
     previous: Mapping[str, object] | None = None,
 ) -> tuple[tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]]:
-    """预测阶段命令：经公开 predictor 物化全部 data_predict 全周期序列。
+    """预测阶段命令：经公开 predictor 物化全部 data_predict 运营期序列。
 
     纯计算阶段（读快照与固定资源字节，无数据库写入）：按配置条目经
     执行面预测目录精确解析算法（未注册/目标类型不支持即明确不可用，
@@ -335,15 +335,15 @@ def predict_target_round(
         return (), ()
     predicted = materialize_predicted_series(
         artifact, resources, predictions, plane.predictor_registry.get, seed,
-        evaluation_years=snapshot.evaluation["evaluation_years"],
+        operation_years=snapshot.evaluation["operation_years"],
         previous=previous,
     )
     baseline_data = json.loads(snapshot.canonical_assembly_text)["project_baseline"]
-    # 全期点数取权威推导（与非预测物化同一来源），不以 predictor 输出
+    # 运营期点数取权威推导（与非预测物化同一来源），不以 predictor 输出
     # 长度自洽：短/空输出由 MaterializedSeries 自身长度不变式自然拒绝。
     point_count = horizon_point_count(
         baseline_data["resolution"], baseline_data["start_year"],
-        snapshot.evaluation["evaluation_years"],
+        snapshot.evaluation["operation_years"],
     )
     series = tuple(
         MaterializedSeries(

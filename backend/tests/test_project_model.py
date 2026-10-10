@@ -312,10 +312,10 @@ def _inputs(
     finance = merge_effective(
         FinanceProfile.from_dict(_finance_payload(tariff_direction, tariff_kind)), None
     )
-    result = materialize_non_predictive_series(artifact, {}, evaluation_years=1)
+    result = materialize_non_predictive_series(artifact, {}, operation_years=1)
     if prices:
         result = MaterializedSet(
-            evaluation_years=result.evaluation_years,
+            operation_years=result.operation_years,
             series=result.series,
             pending_predict=result.pending_predict,
             prices=prices,
@@ -630,7 +630,7 @@ def _island_inputs():
     }
     models = {inst: _contribution(text) for inst, text in yamls.items()}
     finance = merge_effective(FinanceProfile.from_dict(FINANCE_PAYLOAD), None)
-    result = materialize_non_predictive_series(artifact, {}, evaluation_years=1)
+    result = materialize_non_predictive_series(artifact, {}, operation_years=1)
     config = CalculationConfig(
         mode="planning",
         generator="acme.generator@1.0.0",
@@ -742,7 +742,7 @@ def _gen_inputs():
     )
     models = {"gen1": _contribution(GEN_YAML)}
     finance = merge_effective(FinanceProfile.from_dict(FINANCE_PAYLOAD), None)
-    result = materialize_non_predictive_series(artifact, {}, evaluation_years=1)
+    result = materialize_non_predictive_series(artifact, {}, operation_years=1)
     config = CalculationConfig(
         mode="planning",
         generator="acme.generator@1.0.0",
@@ -817,7 +817,7 @@ def _gen_fixed_inputs():
         canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
     )
     materialized = materialize_non_predictive_series(
-        artifact, {}, evaluation_years=1,
+        artifact, {}, operation_years=1,
     )
     model, _, _ = build_project_model(
         artifact, models, materialized, finance, config,
@@ -879,7 +879,7 @@ def _static_om_decls(evaluation_years: int):
     models = {inst: _contribution(text) for inst, text in yamls.items()}
     finance = merge_effective(FinanceProfile.from_dict(_finance_payload()), None)
     materialized = materialize_non_predictive_series(
-        artifact, {}, evaluation_years=evaluation_years,
+        artifact, {}, operation_years=evaluation_years,
     )
     return finance_component_declarations(artifact, models, materialized, finance)
 
@@ -955,7 +955,7 @@ def _pv_25c_inputs():
     models = {"pv1": contribution}
     finance = merge_effective(FinanceProfile.from_dict(_finance_payload()), None)
     materialized = materialize_non_predictive_series(
-        artifact, {}, evaluation_years=1,
+        artifact, {}, operation_years=1,
     )
     config = CalculationConfig(
         mode="planning",

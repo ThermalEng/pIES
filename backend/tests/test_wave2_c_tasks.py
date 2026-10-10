@@ -278,7 +278,12 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
 
     task, flags = tasks_uc.submit_task(
         db, owner, pid, "optimization",
-        config={"config_revision": rev}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-opt-1",
+        config={"config_revision": rev}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-opt-1",
         generator_registry=_registry(client),
     )
     assert flags == {"replay": False}
@@ -286,7 +291,12 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
 
     replay, rflags = tasks_uc.submit_task(
         db, owner, pid, "optimization",
-        config={"config_revision": rev}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-opt-1",
+        config={"config_revision": rev}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-opt-1",
         generator_registry=_registry(client),
     )
     assert rflags == {"replay": True}
@@ -295,7 +305,12 @@ def test_submit_compute_task_snapshot_replay_and_reuse(
     # 不同幂等键、同输入 → 新任务, 但复用同一快照(快照去重保留)
     other, oflags = tasks_uc.submit_task(
         db, owner, pid, "optimization",
-        config={"config_revision": rev}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-opt-2",
+        config={"config_revision": rev}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-opt-2",
         generator_registry=_registry(client),
     )
     assert oflags == {"replay": False}
@@ -328,7 +343,12 @@ def test_submit_without_frozen_refs_fails_explicitly(
     with pytest.raises(InvalidRequestError):
         tasks_uc.submit_task(
             db, owner, pid, "optimization",
-            config={"config_revision": rev}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-noref-1",
+            config={"config_revision": rev}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-noref-1",
         generator_registry=_registry(client),
         )
 
@@ -344,7 +364,12 @@ def test_submit_without_frozen_refs_fails_explicitly(
     with pytest.raises(InvalidRequestError):
         tasks_uc.submit_task(
             db, owner, pid, "optimization",
-            config={"config_revision": rev}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-noref-2",
+            config={"config_revision": rev}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-noref-2",
         generator_registry=_registry(client),
         )
 
@@ -375,7 +400,12 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
     saved = save_calculation_config_case(db, owner, pid, dict(_CONFIG_BODY), None)
     task, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
-        config={"config_revision": saved["revision"]}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-restore-1",
+        config={"config_revision": saved["revision"]}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-restore-1",
         generator_registry=_registry(client),
     )
     assert task.calc_snapshot_id is not None
@@ -445,7 +475,12 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
 
     task2, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
-        config={"config_revision": saved["revision"]}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-restore-2",
+        config={"config_revision": saved["revision"]}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-restore-2",
         generator_registry=_registry(client),
     )
     assert task2.calc_snapshot_id is not None
@@ -541,7 +576,12 @@ def test_restore_version_without_finance_clears_pointers(
     with pytest.raises(InvalidRequestError):
         tasks_uc.submit_task(
             db, owner, pid, "optimization",
-            config={"config_revision": saved["revision"]}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-early-1",
+            config={"config_revision": saved["revision"]}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-early-1",
         generator_registry=_registry(client),
         )
 
@@ -701,7 +741,12 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
 
     t1, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
-        config={"config_revision": rev}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-t1",
+        config={"config_revision": rev}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-t1",
         generator_registry=_registry(client),
     )
     snap = t1.calc_snapshot_id
@@ -713,7 +758,12 @@ def test_retry_terminal_task_consistent(client: TestClient, db: Session, engine:
 
     t2, _ = tasks_uc.submit_task(
         db, owner, pid, "optimization",
-        config={"config_revision": rev}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key="w2c-t2",
+        config={"config_revision": rev}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key="w2c-t2",
         generator_registry=_registry(client),
     )
     _fail(db, t2.id)

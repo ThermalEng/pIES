@@ -359,7 +359,12 @@ class TestPublicUploadChainEndToEnd:
         rev = _save_calc(client, pid, user, body)
         status, resp = _submit_task(
             client, pid, user, config={"config_revision": rev},
-            evaluation={"evaluation_years": 1, "discount_rate": 0.08},
+            evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            },
             idempotency_key="dd-e2e-chain",
         )
         assert status == 201, resp

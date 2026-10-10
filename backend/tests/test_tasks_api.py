@@ -314,15 +314,23 @@ def _submit_task(
 ) -> tuple[int, dict[str, Any]]:
     """提交任务, 返回 (HTTP 状态码, 响应体)。
 
-    计算类任务的评价确认以顶层字段发送(缺省为标准单年块, 仅测试便利;
-    产品无默认值)。需要定制评价输入的调用方显式传入 ``evaluation``。
+    计算类任务的评价确认以顶层字段发送(缺省为显式零建设期单年块
+    K=0/E=1/N=1, 仅测试便利; 产品无默认值)。需要定制评价输入的调用方
+    显式传入 ``evaluation``。
     """
     body: dict[str, Any] = {"task_type": task_type}
     if config is not None:
         body["config"] = dict(config)
         body["evaluation"] = (
             evaluation if evaluation is not None
-            else {"evaluation_years": 1, "discount_rate": 0.08}
+            else {
+                "evaluation_years": 1,
+                "construction_period": 0,
+                "operation_years": 1,
+                "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }
         )
     if idempotency_key is not None:
         body["idempotency_key"] = idempotency_key

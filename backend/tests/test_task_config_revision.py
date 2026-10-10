@@ -181,7 +181,12 @@ def _submit(
     payload: dict[str, Any] = {"task_type": task_type, "idempotency_key": key}
     if config is not None:
         payload["config"] = dict(config)
-        payload["evaluation"] = {"evaluation_years": 1, "discount_rate": 0.08}
+        payload["evaluation"] = {
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }
     resp = client.post(f"/api/projects/{pid}/tasks", json=payload, headers=_h(client, user))
     return resp.status_code, resp.json()
 
@@ -559,7 +564,7 @@ def test_changed_inputs_with_new_key_yield_new_task_and_snapshot(
 def test_snapshot_schema_version_written_and_scoped_to_reuse(
     client: TestClient, db: Session, factory,
 ) -> None:
-    """快照显式写入 schema_version 3.0.0; 复用身份包含版本, 无 tolerances 死字段。
+    """快照显式写入 schema_version 4.0.0; 复用身份包含版本, 无 tolerances 死字段。
 
     容差唯一权威仍是正文 convergence(此处冻结往返即证, 不另设字段)。
     """
@@ -577,7 +582,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
     assert status == 201, body
     snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
     assert snap is not None
-    assert snap.schema_version == "3.0.0"
+    assert snap.schema_version == "4.0.0"
     assert not hasattr(snap, "tolerances")
     frozen = jsonable(dict(snap.calc_config_snapshot))
     assert frozen["convergence"] == {"tolerance": 0.001, "max_iterations": 50}
@@ -599,7 +604,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
         receipt=jsonable(dict(snap.assembly_receipt or {})),
         device_models=jsonable(dict(snap.device_models or {})),
     )
-    assert _snapshot_inputs_equal(snap, schema_version="3.0.0", **same) is True
+    assert _snapshot_inputs_equal(snap, schema_version="4.0.0", **same) is True
     assert _snapshot_inputs_equal(snap, schema_version="9.9.9", **same) is False
 
 

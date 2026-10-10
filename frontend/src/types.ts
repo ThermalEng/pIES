@@ -528,8 +528,15 @@ export interface TaskCreateInput {
   type: TaskType
   /** 计算类任务必填: 本项目已保存 CalculationConfig 的 revision(冻结进快照)。 */
   config_revision?: number
-  /** 计算类任务必填: 评价确认(年限正整数 ≥1/折现率 0..1 比例, 均无默认值; 以顶层字段提交)。 */
-  evaluation?: { evaluation_years: number; discount_rate: number }
+  /** 计算类任务必填: 评价确认(E=K+N/折现率 0..1 比例/付款比例/维护清单, 均无默认值; 以顶层字段提交)。 */
+  evaluation?: {
+    evaluation_years: number
+    construction_period: number
+    operation_years: number
+    discount_rate: number
+    construction_payments: unknown[]
+    maintenance_expenses: unknown[]
+  }
   dataset_ids?: EntityId[]
   priority?: number
   deadline?: ISO8601

@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any
 
@@ -93,9 +94,7 @@ def _freeze_snapshot_value(value: object) -> object:
     只做表示冻结, 不校验内容: 快照创建边界已签发, 运行期不再复核。
     """
     if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _freeze_snapshot_value(item) for key, item in value.items()}
-        )
+        return MappingProxyType({key: _freeze_snapshot_value(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_snapshot_value(item) for item in value)
     return value
@@ -108,11 +107,41 @@ def _freeze_snapshot_value(value: object) -> object:
 #: 3.0.0 新增必填 evaluation 确认块(评价年限/折现率/确认人/确认时间,
 #: 0.12-F1): 快照复用身份包含年限/折现率, 不同即新快照; 确认人/确认时间
 #: 只冻结存档, 不参与复用判定。
-SNAPSHOT_SCHEMA_VERSION: str = "3.0.0"
+#: 4.0.0 评价确认块改为建设期/运营期/付款/维护冻结(0.12-T1): 评价年限
+#: 含建设期(``evaluation_years == construction_period + operation_years``);
+#: 运行点数/物化/预测/生成一律用 ``operation_years``; 复用身份包含新冻结
+#: 字段(确认时间除外); 不保留旧字段语义或双轨读取。
+SNAPSHOT_SCHEMA_VERSION: str = "4.0.0"
 
 
 #: 评价确认输入合法键(任务提交边界唯一权威; 未知键拒绝, 不静默忽略)。
-EVALUATION_INPUT_KEYS: frozenset[str] = frozenset({"evaluation_years", "discount_rate"})
+EVALUATION_INPUT_KEYS: frozenset[str] = frozenset(
+    {
+        "evaluation_years",
+        "construction_period",
+        "operation_years",
+        "discount_rate",
+        "construction_payments",
+        "maintenance_expenses",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ConstructionPayment:
+    """单笔建设付款比例(开工起整数年时点 + 十进制比例)。"""
+
+    t: int
+    ratio: str  # Decimal 定点字符串; 同一输入内 Σratio 精确为 1
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceExpense:
+    """单项维护/换新支出(财务发生年 + 十进制金额 + 币种)。"""
+
+    year: int
+    amount: str  # Decimal 定点字符串, 非负
+    currency: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,46 +150,149 @@ class EvaluationInput:
 
     由任务提交边界 ``parse_evaluation_input`` 从顶层任务输入 ``evaluation``
     块唯一解析, 不从宽泛任务参数字典读取, 也不混入封闭 ``CalculationConfig``
-    正文。``evaluation_years`` 为确认的评价年限(正整数, 年); ``discount_rate``
-    为确认的折现率(宪法 §7.3 比例口径 ``0..1``)。
+    正文。``evaluation_years`` 为确认的财务评价总年限(含建设期, 年);
+    ``construction_period`` 为非负整数建设期(年, 显式 0 合法, 不缺省);
+    ``operation_years`` 为正整数投产后运营年限(运行点数/物化/预测/生成
+    唯一使用的年限); ``discount_rate`` 为确认的折现率(宪法 §7.3 比例口径
+    ``0..1``); ``construction_payments``/``maintenance_expenses`` 为冻结
+    的付款比例与维护清单(实际现金流计算由后续切片消费)。
     """
 
     evaluation_years: int
+    construction_period: int
+    operation_years: int
     discount_rate: float
+    construction_payments: tuple[ConstructionPayment, ...] = ()
+    maintenance_expenses: tuple[MaintenanceExpense, ...] = ()
+
+
+def _evaluation_fail(message: str, params: dict[str, Any], field: str) -> InvalidRequestError:
+    """评价确认输入非法 → 400 TASK-REQ-015(无默认值, 不回退)。"""
+    return InvalidRequestError(
+        message,
+        code="TASK-REQ-015",
+        params=params,
+        location={"object_type": "task", "field": field},
+    )
+
+
+def _as_decimal(value: object, field: str, *, allow_str: bool) -> Decimal:
+    """JSON 数值/定点字符串 → Decimal(十进制语义; 拒 bool/非有限)。
+
+    ``allow_str`` 为假时只接受 int/float(付款比例 ``ratio: number``);
+    为真时另接受定点字符串(维护金额 ``amount: Decimal``)。
+    """
+    if isinstance(value, bool):
+        raise _evaluation_fail(
+            f"{field} 须为十进制数值",
+            {field: value},
+            f"evaluation.{field}",
+        )
+    if isinstance(value, str):
+        if not allow_str:
+            raise _evaluation_fail(
+                f"{field} 须为数值",
+                {field: value},
+                f"evaluation.{field}",
+            )
+        text = value
+    elif isinstance(value, (int, float)):
+        text = str(value)
+    else:
+        raise _evaluation_fail(
+            f"{field} 须为十进制数值",
+            {field: value},
+            f"evaluation.{field}",
+        )
+    try:
+        d = Decimal(text)
+    except (InvalidOperation, ValueError):
+        raise _evaluation_fail(
+            f"{field} 十进制解析失败",
+            {field: value},
+            f"evaluation.{field}",
+        ) from None
+    if not d.is_finite():
+        raise _evaluation_fail(
+            f"{field} 须为有限数",
+            {field: value},
+            f"evaluation.{field}",
+        )
+    return d
+
+
+def _as_fixed_str(d: Decimal) -> str:
+    """Decimal → 规范定点字符串(冻结/复用身份用, 去指数形态)。"""
+    return format(d.normalize(), "f")
 
 
 def parse_evaluation_input(raw: Mapping[str, Any] | None) -> EvaluationInput:
     """计算类任务评价确认输入类型化解析(任务提交边界唯一校验)。
 
     顶层任务输入 ``evaluation`` 块必填字典, 须恰含 ``evaluation_years``
-    (正整数, 不接受布尔值)与 ``discount_rate``(``0..1`` 区间内有限数,
-    宪法 §7.3 比例口径, 不接受布尔值); 缺失或形态非法 → 400
-    TASK-REQ-015(无默认值, 不回退)。评价年限接受 ``>= 1`` 的连续全期
-    (全期连续时域见 0.12 Roadmap; 全周期求解由后续 F 切片贯通)。
+    (正整数, 含建设期的财务评价总年限)、``construction_period``(非负整数
+    建设期年数, 显式 0 合法, 不缺省为零)、``operation_years``(正整数投产后
+    运营年限)、``discount_rate``(``0..1`` 区间内有限数, 宪法 §7.3 比例口径)、
+    ``construction_payments``(付款比例清单)、``maintenance_expenses``
+    (维护/换新清单); 缺失或形态非法 → 400 TASK-REQ-015(无默认值, 不回退)。
+    必须满足 ``evaluation_years == construction_period + operation_years``;
+    付款比例按十进制语义求和须精确等于 1(时点为开工起整数年
+    ``0..construction_period``); 维护发生年为财务时轴索引
+    ``construction_period+1..evaluation_years``(对应 ``CF[year]``),
+    金额非负十进制, 币种为非空字符串(与有效财务配置一致性由提交边界
+    持快照核对, 不在此重复读取)。布尔值一律不接受为数值。
     返回不可变 ``EvaluationInput``。
     """
     if not isinstance(raw, Mapping):
-        raise InvalidRequestError(
-            "计算类任务须在顶层 evaluation 中明确确认评价年限与折现率",
-            code="TASK-REQ-015",
-            params={"evaluation": raw},
-            location={"object_type": "task", "field": "evaluation"},
+        raise _evaluation_fail(
+            "计算类任务须在顶层 evaluation 中明确确认评价时轴与折现率",
+            {"evaluation": raw},
+            "evaluation",
         )
     unknown = set(raw) - EVALUATION_INPUT_KEYS
     if unknown:
-        raise InvalidRequestError(
+        raise _evaluation_fail(
             f"evaluation 含未知字段: {sorted(unknown)}",
-            code="TASK-REQ-015",
-            params={"unknown": sorted(unknown)},
-            location={"object_type": "task", "field": "evaluation"},
+            {"unknown": sorted(unknown)},
+            "evaluation",
+        )
+    missing = EVALUATION_INPUT_KEYS - set(raw)
+    if missing:
+        raise _evaluation_fail(
+            f"evaluation 缺少必填字段: {sorted(missing)}",
+            {"missing": sorted(missing)},
+            "evaluation",
         )
     years = raw.get("evaluation_years")
     if not isinstance(years, int) or isinstance(years, bool) or years < 1:
-        raise InvalidRequestError(
+        raise _evaluation_fail(
             "evaluation.evaluation_years 须为正整数(无默认值)",
-            code="TASK-REQ-015",
-            params={"evaluation_years": years},
-            location={"object_type": "task", "field": "evaluation.evaluation_years"},
+            {"evaluation_years": years},
+            "evaluation.evaluation_years",
+        )
+    period = raw.get("construction_period")
+    if not isinstance(period, int) or isinstance(period, bool) or period < 0:
+        raise _evaluation_fail(
+            "evaluation.construction_period 须为非负整数年(显式 0 合法, 不缺省)",
+            {"construction_period": period},
+            "evaluation.construction_period",
+        )
+    operation = raw.get("operation_years")
+    if not isinstance(operation, int) or isinstance(operation, bool) or operation < 1:
+        raise _evaluation_fail(
+            "evaluation.operation_years 须为正整数运营年限(无默认值)",
+            {"operation_years": operation},
+            "evaluation.operation_years",
+        )
+    if years != period + operation:
+        raise _evaluation_fail(
+            "evaluation 须满足 evaluation_years == construction_period + operation_years",
+            {
+                "evaluation_years": years,
+                "construction_period": period,
+                "operation_years": operation,
+            },
+            "evaluation",
         )
     rate = raw.get("discount_rate")
     if (
@@ -170,26 +302,130 @@ def parse_evaluation_input(raw: Mapping[str, Any] | None) -> EvaluationInput:
         or rate < 0
         or rate > 1
     ):
-        raise InvalidRequestError(
+        raise _evaluation_fail(
             "evaluation.discount_rate 须为 0..1 区间内有限数(比例口径, 无默认值)",
-            code="TASK-REQ-015",
-            params={"discount_rate": rate},
-            location={"object_type": "task", "field": "evaluation.discount_rate"},
+            {"discount_rate": rate},
+            "evaluation.discount_rate",
         )
-    return EvaluationInput(evaluation_years=years, discount_rate=float(rate))
+    payments_raw = raw.get("construction_payments")
+    if not isinstance(payments_raw, (list, tuple)):
+        raise _evaluation_fail(
+            "evaluation.construction_payments 须为付款比例清单",
+            {"construction_payments": payments_raw},
+            "evaluation.construction_payments",
+        )
+    payments: list[ConstructionPayment] = []
+    total = Decimal(0)
+    for index, entry in enumerate(payments_raw):
+        field = f"evaluation.construction_payments[{index}]"
+        if not isinstance(entry, Mapping):
+            raise _evaluation_fail(
+                f"{field} 须为 {{t, ratio}} 字典",
+                {"entry": entry},
+                field,
+            )
+        unknown_entry = set(entry) - {"t", "ratio"}
+        if unknown_entry or {"t", "ratio"} - set(entry):
+            raise _evaluation_fail(
+                f"{field} 须恰含 t 与 ratio",
+                {"entry": dict(entry)},
+                field,
+            )
+        t = entry.get("t")
+        if not isinstance(t, int) or isinstance(t, bool) or t < 0 or t > period:
+            raise _evaluation_fail(
+                f"{field}.t 须为开工起整数年时点 0..{period}",
+                {"t": t},
+                f"{field}.t",
+            )
+        ratio = _as_decimal(
+            entry.get("ratio"),
+            f"construction_payments[{index}].ratio",
+            allow_str=False,
+        )
+        if ratio < 0 or ratio > 1:
+            raise _evaluation_fail(
+                f"{field}.ratio 须在 0..1 内",
+                {"ratio": entry.get("ratio")},
+                f"{field}.ratio",
+            )
+        total += ratio
+        payments.append(ConstructionPayment(t=t, ratio=_as_fixed_str(ratio)))
+    if total != Decimal(1):
+        raise _evaluation_fail(
+            "evaluation.construction_payments 比例按十进制语义求和须精确等于 1",
+            {"total": str(total)},
+            "evaluation.construction_payments",
+        )
+    maintenance_raw = raw.get("maintenance_expenses")
+    if not isinstance(maintenance_raw, (list, tuple)):
+        raise _evaluation_fail(
+            "evaluation.maintenance_expenses 须为维护/换新清单(无支出给空清单)",
+            {"maintenance_expenses": maintenance_raw},
+            "evaluation.maintenance_expenses",
+        )
+    maintenance: list[MaintenanceExpense] = []
+    for index, entry in enumerate(maintenance_raw):
+        field = f"evaluation.maintenance_expenses[{index}]"
+        if not isinstance(entry, Mapping):
+            raise _evaluation_fail(
+                f"{field} 须为 {{year, amount, currency}} 字典",
+                {"entry": entry},
+                field,
+            )
+        if set(entry) != {"year", "amount", "currency"}:
+            raise _evaluation_fail(
+                f"{field} 须恰含 year、amount 与 currency",
+                {"entry": dict(entry)},
+                field,
+            )
+        year = entry.get("year")
+        if not isinstance(year, int) or isinstance(year, bool) or year < period + 1 or year > years:
+            raise _evaluation_fail(
+                f"{field}.year 须为财务发生年 {period + 1}..{years}(对应 CF[year])",
+                {"year": year},
+                f"{field}.year",
+            )
+        amount = _as_decimal(
+            entry.get("amount"),
+            f"maintenance_expenses[{index}].amount",
+            allow_str=True,
+        )
+        if amount < 0:
+            raise _evaluation_fail(
+                f"{field}.amount 须为非负十进制金额",
+                {"amount": entry.get("amount")},
+                f"{field}.amount",
+            )
+        currency = entry.get("currency")
+        if not isinstance(currency, str) or not currency:
+            raise _evaluation_fail(
+                f"{field}.currency 须为非空币种字符串",
+                {"currency": currency},
+                f"{field}.currency",
+            )
+        maintenance.append(MaintenanceExpense(year=year, amount=_as_fixed_str(amount), currency=currency))
+    return EvaluationInput(
+        evaluation_years=years,
+        construction_period=period,
+        operation_years=operation,
+        discount_rate=float(rate),
+        construction_payments=tuple(payments),
+        maintenance_expenses=tuple(maintenance),
+    )
 
 
 def check_tariff_horizon_coverage(
     *,
     baseline_resolution: str,
     baseline_start_year: int,
-    evaluation_years: int,
+    operation_years: int,
     tariff_bindings: Mapping[str, Any],
     price_series: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    """时变价格全期覆盖核对(任务提交边界唯一权威)。
+    """时变价格运营期覆盖核对(任务提交边界唯一权威)。
 
-    期望点数由基线起始年 + 已确认评价年限 + 分辨率逐年按公历唯一推导
+    期望点数由运行起始年 + 已确认运营年限 + 分辨率逐年按公历唯一推导
     (``horizon_point_count``); 引用 ``time_series`` 价格的绑定, 其序列
     ``point_count`` 不等 → 400 TASK-REQ-017, 不重采样。``constant`` 价格
     无序列, 不参与核对。未知价格引用同样阻断(装配闸门已保证存在, 此处
@@ -197,7 +433,7 @@ def check_tariff_horizon_coverage(
     """
     from iesplan.core.contracts import horizon_point_count
 
-    expected = horizon_point_count(baseline_resolution, baseline_start_year, evaluation_years)
+    expected = horizon_point_count(baseline_resolution, baseline_start_year, operation_years)
     for binding_id in sorted(tariff_bindings):
         entry = tariff_bindings[binding_id]
         if not isinstance(entry, Mapping):
@@ -215,7 +451,7 @@ def check_tariff_horizon_coverage(
             continue
         if meta.get("point_count") != expected:
             raise InvalidRequestError(
-                "时变价格序列未覆盖评价全期(点数不等于全周期总点数)",
+                "时变价格序列未覆盖运营期(点数不等于运营期总点数)",
                 code="TASK-REQ-017",
                 params={
                     "binding_id": binding_id,

@@ -284,7 +284,12 @@ def _prepare_running(
     saved = save_calculation_config_case(db, user, pid, dict(_CONFIG_BODY), None)
     task, _ = tasks_uc.submit_task(
         db, user, pid, "optimization",
-        config={"config_revision": saved["revision"]}, evaluation={"evaluation_years": 1, "discount_rate": 0.08}, idempotency_key=key,
+        config={"config_revision": saved["revision"]}, evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            }, idempotency_key=key,
         generator_registry=_registry(client),
     )
     claim = tasks_uc.claim_task(db, task.id, "w2c-fake-exec")

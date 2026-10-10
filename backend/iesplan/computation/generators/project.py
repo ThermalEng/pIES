@@ -198,8 +198,8 @@ def build_project_model(
 ) -> tuple[LinearModel, Mapping[str, str], str]:
     """由五项直接输入构造项目级线性模型、单位映射与目标业务单位。
 
-    第三项为已完成物化的集合；求解域步数由装配基线起始年/分辨率与集合
-    携带的已确认评价年限推导，``series`` 为空时仍为完整时域。
+    第三项为已完成物化的集合；求解域步数由装配运行起始年/分辨率与集合
+    携带的已确认运营年限推导，``series`` 为空时仍为完整运营时域。
     返回 ``(LinearModel, unit_map, objective_unit)``：``unit_map`` 为
     LP 名 → 业务单位，供后续 ResultAdapter 反向换算（内部 binary 不进入
     结果，不收录）；``objective_unit`` 为目标业务单位（金额取财务币种，
@@ -223,7 +223,7 @@ def _new_builder(
     doc = json.loads(artifact.canonical_text)
     baseline = doc["project_baseline"]
     point_count = horizon_point_count(
-        baseline["resolution"], baseline["start_year"], materialized.evaluation_years
+        baseline["resolution"], baseline["start_year"], materialized.operation_years
     )
     step_s = _step_seconds(baseline["resolution"], baseline["start_year"])
     return _ProjectBuilder(

@@ -587,7 +587,12 @@ def _submit_task(
     payload: dict = {"task_type": "optimization"}
     if config_revision is not None:
         payload["config"] = {"config_revision": config_revision}
-        payload["evaluation"] = {"evaluation_years": 1, "discount_rate": 0.08}
+        payload["evaluation"] = {
+            "evaluation_years": 1, "construction_period": 0,
+            "operation_years": 1, "discount_rate": 0.08,
+            "construction_payments": [{"t": 0, "ratio": 1}],
+            "maintenance_expenses": [],
+        }
     if key is not None:
         payload["idempotency_key"] = key
     resp = client.post(f"/api/projects/{pid}/tasks", json=payload, headers=headers)

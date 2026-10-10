@@ -206,7 +206,7 @@ class TestGateAndMaterialize:
         """冻结产物 + 同一字节 → 物化全周期序列（8760 点，来源可追溯）。"""
         artifact, raw = _gate_repeat_artifact()
         materialized = materialize_non_predictive_series(
-            artifact, {"obj-repeat-9": raw}, evaluation_years=1
+            artifact, {"obj-repeat-9": raw}, operation_years=1
         )
         assert not materialized.pending_predict
         series = [s for s in materialized.series if s.device == "load1"]

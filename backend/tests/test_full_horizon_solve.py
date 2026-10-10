@@ -4,8 +4,8 @@
 Worker 仍只解第一年，N=2 任务可“提交成功 + completed”形成假成功路径。
 本文件证明一次整体求解真实覆盖全期，而非单年结果冒充：
 
-- 门控级：``validate_project_export`` 全管线签发 data_full 绑定（起始年
-  2023 + 已确认 2 年），``materialize_non_predictive_series`` 物化
+- 门控级：``validate_project_export`` 全管线签发 data_full 绑定（运行起始年
+  2023 + 已确认运营 2 年），``materialize_non_predictive_series`` 物化
   17544 点（2023 平年 8760 + 2024 闰年 8784），年界值正确；截短文件在
   提交闸门以 ``csv_full_length`` 阻断（必要输入边界唯一校验）。
 - 执行级：真实 Worker 链（HTTP 提交 → 领取 → 本地 HiGHS 求解 → 证据封存）
@@ -84,6 +84,22 @@ YEAR2_STEPS = 8784
 FULL_STEPS = YEAR1_STEPS + YEAR2_STEPS
 YEAR1_KW = 48.0
 YEAR2_KW = 96.0
+
+
+def _eval_k0(*, discount_rate: float = 0.08) -> dict:
+    """零建设期评价输入（K=0、N=2、E=2；建设款 t=0 全额，无维护）。
+
+    本文件既有执行链场景沿用旧运营覆盖（2 年序列），迁移后显式确认
+    K=0，不把缺省当 0。
+    """
+    return {
+        "evaluation_years": 2,
+        "construction_period": 0,
+        "operation_years": YEARS,
+        "discount_rate": discount_rate,
+        "construction_payments": [{"t": 0, "ratio": 1}],
+        "maintenance_expenses": [],
+    }
 
 
 def _full_csv(n1: int, v1: float, n2: int, v2: float) -> bytes:
@@ -182,7 +198,7 @@ def _gate_full_artifact(raw: bytes):
         finance_snapshots=_finance_snapshots(),
         planning=dict(_EXPORT_PLANNING),
         dataset_contents=contents,
-        evaluation_years=YEARS,
+        operation_years=YEARS,
     )
 
 
@@ -198,7 +214,7 @@ class TestFullHorizonGate:
         assert binding["mode"] == "data_full"
         assert binding["content"]["object_id"] == "obj-full-9"
         materialized = materialize_non_predictive_series(
-            result.artifact, {"obj-full-9": raw}, evaluation_years=YEARS
+            result.artifact, {"obj-full-9": raw}, operation_years=YEARS
         )
         assert not materialized.pending_predict
         series = [s for s in materialized.series if s.device == "load1"]
@@ -472,7 +488,7 @@ class TestFullHorizonTrueSolve:
         rev = rev_resp.json()["revision"]
         status, body = _submit_task(
             client, pid, user, config={"config_revision": rev},
-            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            evaluation=_eval_k0(),
             idempotency_key="full-horizon-n2",
         )
         assert status == 201, body
@@ -610,7 +626,7 @@ class _RecordingGenerator:
     def generate(self, artifact, models, materialized, finance, config):
         self.calls.append(
             {
-                "evaluation_years": materialized.evaluation_years,
+                "operation_years": materialized.operation_years,
                 "series_count": len(materialized.series),
                 "point_counts": sorted({s.point_count for s in materialized.series}),
                 "pending": len(materialized.pending_predict),
@@ -817,7 +833,7 @@ class TestPredictPhase2FullHorizon:
         pred_registry = build_predictor_registry((chase,))
         task, _flags = submit_task(
             db, user, pid, "optimization", config={"config_revision": rev},
-            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            evaluation=_eval_k0(),
             idempotency_key="predict-n2-phase2",
             generator_registry=gene_registry,
             predictor_registry=pred_registry,
@@ -842,7 +858,7 @@ class TestPredictPhase2FullHorizon:
         assert task_row.business_outcome == "normal_completion"
         assert len(recorder.calls) == 3
         for call in recorder.calls:
-            assert call["evaluation_years"] == YEARS
+            assert call["operation_years"] == YEARS
             assert call["pending"] == 0
             assert call["series_count"] == 2
             assert call["point_counts"] == [FULL_STEPS]
@@ -890,11 +906,11 @@ class TestGeneratorEmptySeriesHorizon:
             canonical_text=json.dumps(_store_doc()), receipt=ValidationReceipt(),
         )
         materialized = materialize_non_predictive_series(
-            artifact, {}, evaluation_years=YEARS
+            artifact, {}, operation_years=YEARS
         )
         assert materialized.series == ()
         assert materialized.pending_predict == ()
-        assert materialized.evaluation_years == YEARS
+        assert materialized.operation_years == YEARS
         models = {"store1": _contribution(STORE_YAML)}
         payload = _finance_payload()
         payload["energy_prices"]["power_import"] = {
@@ -971,7 +987,7 @@ class TestShortPredictionRejected:
         pred_registry = build_predictor_registry((_ShortPredictor(),))
         task, _flags = submit_task(
             db, user, pid, "optimization", config={"config_revision": rev},
-            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            evaluation=_eval_k0(),
             idempotency_key="predict-n2-short",
             generator_registry=plane.generator_registry,
             predictor_registry=pred_registry,
@@ -1188,7 +1204,7 @@ class TestTimeVaryingPriceTrueSolve:
         rev = rev_resp.json()["revision"]
         status, body = _submit_task(
             client, pid, user, config={"config_revision": rev},
-            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            evaluation=_eval_k0(),
             idempotency_key="tou-n2-billing",
         )
         assert status == 201, body
@@ -1204,7 +1220,7 @@ class TestTimeVaryingPriceTrueSolve:
         # 相同输入复用快照：引用幂等，不重复计数。
         status2, _ = _submit_task(
             client, pid, user, config={"config_revision": rev},
-            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            evaluation=_eval_k0(),
             idempotency_key="tou-n2-billing-reuse",
         )
         assert status2 == 201, body
@@ -1558,7 +1574,7 @@ class TestFirstYearBuildTrueSolve:
         rev = rev_resp.json()["revision"]
         status, body = _submit_task(
             client, pid, user, config={"config_revision": rev},
-            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            evaluation=_eval_k0(),
             idempotency_key="build-n2",
         )
         assert status == 201, body
@@ -1632,7 +1648,7 @@ class TestMandatoryFixedBuildTrueSolve:
         rev = rev_resp.json()["revision"]
         status, body = _submit_task(
             client, pid, user, config={"config_revision": rev},
-            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            evaluation=_eval_k0(),
             idempotency_key="build-fixed-n2",
         )
         assert status == 201, body
@@ -1854,7 +1870,7 @@ class TestFirstYearHeatPumpTrueSolve:
         rev = rev_resp.json()["revision"]
         status, body = _submit_task(
             client, pid, user, config={"config_revision": rev},
-            evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
+            evaluation=_eval_k0(),
             idempotency_key="hp-build-n2",
         )
         assert status == 201, body
@@ -1883,3 +1899,59 @@ class TestFirstYearHeatPumpTrueSolve:
         assert _solution_scalar(solution["variables"], "hp_cap") == pytest.approx(
             HP_CAP_UPPER, rel=1e-6
         )
+
+
+class TestConstructionPeriodSubmitFreeze:
+    """K=1/N=2/E=3 提交冻结：2 年运营序列以运营年限过闸并冻结时轴/付款/维护。
+
+    判别点：若闸门仍用评价年限 E=3 推导期望点数，2 年序列将被
+    csv_full_length 阻断；201 即证运营年限已接管运行点数。
+    """
+
+    def test_k1n2_freeze(self, client, db, engine) -> None:
+        from sqlalchemy import select  # noqa: E402
+
+        from iesplan.tasks import persistence as task_store  # noqa: E402
+
+        user = make_user(db, "k1n2_owner")
+        pid = _prepare_build_project(client, db, user)
+        rev_resp = client.put(
+            f"/api/projects/{pid}/config",
+            json={"calculation_config": dict(_CONFIG_BODY), "expected_revision": None},
+            headers=_h(client, user),
+        )
+        assert rev_resp.status_code == 200, rev_resp.text
+        rev = rev_resp.json()["revision"]
+        status, body = _submit_task(
+            client, pid, user, config={"config_revision": rev},
+            evaluation={
+                "evaluation_years": 3,
+                "construction_period": 1,
+                "operation_years": 2,
+                "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}],
+                "maintenance_expenses": [
+                    {"year": 2, "amount": "500.00", "currency": "CNY"}
+                ],
+            },
+            idempotency_key="k1n2-freeze",
+        )
+        assert status == 201, body
+        task_row = db.execute(
+            select(Task).where(Task.id == int(body["task"]["id"]))
+        ).scalar_one()
+        snap = task_store.get_snapshot(db, task_row.calc_snapshot_id)
+        assert snap is not None
+        assert snap.schema_version == "4.0.0"
+        frozen = dict(snap.evaluation)
+        assert frozen["evaluation_years"] == 3
+        assert frozen["construction_period"] == 1
+        assert frozen["operation_years"] == 2
+        assert [dict(entry) for entry in frozen["construction_payments"]] == [
+            {"t": 0, "ratio": "0.6"}, {"t": 1, "ratio": "0.4"},
+        ]
+        assert [dict(entry) for entry in frozen["maintenance_expenses"]] == [
+            {"year": 2, "amount": "500", "currency": "CNY"},
+        ]
+        assert frozen["confirmed_by"] == user.id
+        assert frozen["confirmed_at"]

@@ -60,31 +60,31 @@ def point_count_for_year(resolution: str, year: int) -> int:
 
 
 def horizon_year_point_counts(
-    resolution: str, start_year: int, evaluation_years: int
+    resolution: str, start_year: int, years: int
 ) -> tuple[int, ...]:
-    """评价期逐年点数(``start_year`` 起连续 ``evaluation_years`` 年)。
+    """连续时轴逐年点数(``start_year`` 起连续 ``years`` 年)。
 
     年数须为正整数；非法输入由调用方前置校验(本函数只做推导)。
     """
     return tuple(
         point_count_for_year(resolution, start_year + offset)
-        for offset in range(evaluation_years)
+        for offset in range(years)
     )
 
 
 def horizon_point_count(
-    resolution: str, start_year: int, evaluation_years: int
+    resolution: str, start_year: int, years: int
 ) -> int:
     """全周期总点数(逐年点数之和)。"""
-    return sum(horizon_year_point_counts(resolution, start_year, evaluation_years))
+    return sum(horizon_year_point_counts(resolution, start_year, years))
 
 
 def horizon_year_boundary_steps(
-    resolution: str, start_year: int, evaluation_years: int
+    resolution: str, start_year: int, years: int
 ) -> tuple[int, ...]:
     """年度边界 step 下标(第 k 年起始 step；首项恒为 0)。"""
     boundaries: list[int] = [0]
-    for count in horizon_year_point_counts(resolution, start_year, evaluation_years):
+    for count in horizon_year_point_counts(resolution, start_year, years):
         boundaries.append(boundaries[-1] + count)
     return tuple(boundaries)
 

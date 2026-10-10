@@ -99,7 +99,7 @@ def _campus_inputs(*, outputs=("solution", "metrics"), seed=None):
     for object_id in sorted(object_ids):
         rel = object_id[5:] if object_id.startswith("file:") else object_id
         resources[object_id] = (SAMPLES / rel).read_bytes()
-    mat = materialize_non_predictive_series(artifact, resources, evaluation_years=1)
+    mat = materialize_non_predictive_series(artifact, resources, operation_years=1)
     assert not mat.pending_predict
     config = CalculationConfig(
         mode="planning",
@@ -234,7 +234,7 @@ def test_generate_accepts_bound_time_series_with_prices() -> None:
         canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
     )
     priced = MaterializedSet(
-        evaluation_years=materialized.evaluation_years,
+        operation_years=materialized.operation_years,
         series=materialized.series,
         pending_predict=materialized.pending_predict,
         prices=(

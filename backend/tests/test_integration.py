@@ -486,7 +486,12 @@ def _submit_calc_task(
     """提交方案评价任务(calc), 返回 (task_id, status_code)。"""
     payload: dict[str, Any] = {
         "task_type": "calc", "config": {"config_revision": config_revision},
-        "evaluation": {"evaluation_years": 1, "discount_rate": 0.08},
+        "evaluation": {
+            "evaluation_years": 1, "construction_period": 0,
+            "operation_years": 1, "discount_rate": 0.08,
+            "construction_payments": [{"t": 0, "ratio": 1}],
+            "maintenance_expenses": [],
+        },
     }
     if idempotency_key is not None:
         payload["idempotency_key"] = idempotency_key

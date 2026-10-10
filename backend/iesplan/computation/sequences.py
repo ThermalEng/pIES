@@ -132,9 +132,9 @@ class MaterializedPriceSeries:
 class MaterializedSet:
     """物化返回边界（不可变值对象），即 Generator 第三项输入的集合形态。
 
-    ``evaluation_years`` 为调用方从快照顶层评价确认块读取的已确认评价
+    ``operation_years`` 为调用方从快照顶层评价确认块读取的已确认运营
     年限（必填，无默认值，不在此校验：提交边界唯一校验）；Generator
-    以基线起始年/分辨率与该年限推导全周期总点数，``series`` 为空时仍有
+    以运行起始年/分辨率与该年限推导运营期总点数，``series`` 为空时仍有
     完整时域。``series`` 仅含非预测来源（按 device/interface 确定性排序）；
     ``pending_predict`` 为声明但不物化的预测绑定
     （{device, interface, target_type, object_id}，同序排列），是上游
@@ -145,7 +145,7 @@ class MaterializedSet:
     由 Worker 物化完成）。
     """
 
-    evaluation_years: int
+    operation_years: int
     series: tuple[MaterializedSeries, ...] = ()
     pending_predict: tuple[Mapping[str, object], ...] = ()
     prices: tuple[MaterializedPriceSeries, ...] = ()
@@ -171,7 +171,7 @@ class MaterializedSet:
     def to_dict(self) -> dict[str, Any]:
         """序列化为 JSON 兼容独立副本。"""
         return {
-            "evaluation_years": self.evaluation_years,
+            "operation_years": self.operation_years,
             "series": [s.to_dict() for s in self.series],
             "pending_predict": [dict(e) for e in self.pending_predict],
             "prices": [p.to_dict() for p in self.prices],
@@ -182,7 +182,7 @@ def materialize_non_predictive_series(
     artifact: ValidatedAssemblyArtifact,
     resources: Mapping[str, bytes],
     *,
-    evaluation_years: int,
+    operation_years: int,
 ) -> MaterializedSet:
     """物化装配产物中全部非预测来源的全周期序列。
 
@@ -190,16 +190,16 @@ def materialize_non_predictive_series(
     显式提供只读字节（含预测绑定所需身份）；任一所需身份缺失即必要输入
     不完整，明确失败。不按 path 读取宿主机，不用最新数据替换，不改写
     artifact 与资源。
-    ``evaluation_years`` 为调用方从快照顶层评价确认块读取的已确认评价
-    年限（必填，无默认值，不在此校验：提交边界唯一校验）；全周期总点数
-    由基线起始年、分辨率与该年限推导。``data_full`` 原样采用全期文件
-    （全期长度由提交闸门核对，此处只读不验；读取损坏按实际错误可见）。
+    ``operation_years`` 为调用方从快照顶层评价确认块读取的已确认运营
+    年限（必填，无默认值，不在此校验：提交边界唯一校验）；运营期总点数
+    由运行起始年、分辨率与该年限推导。``data_full`` 原样采用运营期文件
+    （运营期长度由提交闸门核对，此处只读不验；读取损坏按实际错误可见）。
     """
     doc = json.loads(artifact.canonical_text)
     baseline_data = doc["project_baseline"]
     resolution = baseline_data["resolution"]
     point_count = horizon_point_count(
-        resolution, baseline_data["start_year"], evaluation_years
+        resolution, baseline_data["start_year"], operation_years
     )
     series: list[MaterializedSeries] = []
     pending: list[dict[str, object]] = []
@@ -285,7 +285,7 @@ def materialize_non_predictive_series(
                     f"未知来源模式（违反已签发事实）: {mode!r}"
                 )
     return MaterializedSet(
-        evaluation_years=evaluation_years,
+        operation_years=operation_years,
         series=tuple(series),
         pending_predict=tuple(pending),
     )
@@ -322,7 +322,7 @@ def materialize_predicted_series(
     resolve_predictor: Callable[[str], Predictor],
     seed: int | None,
     *,
-    evaluation_years: int,
+    operation_years: int,
     previous: Mapping[str, object] | None = None,
 ) -> tuple[PredictedTarget, ...]:
     """物化装配产物中全部 data_predict 绑定的全周期预测序列。
@@ -333,8 +333,8 @@ def materialize_predicted_series(
     配置↔绑定覆盖关系由提交闸门保证, 此处按 (实例, 接口) 直接配对,
     缺配对即实际结构错误可见失败, 不重跑提交校验。历史列按绑定接口
     名投影; 目标类型不透明透传进产物与回执, 不在此解释。
-    ``evaluation_years`` 为调用方从快照顶层评价确认块读取的已确认评价
-    年限（必填，无默认值，不在此校验），预测序列按推导的全周期总点数
+    ``operation_years`` 为调用方从快照顶层评价确认块读取的已确认运营
+    年限（必填，无默认值，不在此校验），预测序列按推导的运营期总点数
     生成。上一轮统一结果 ``previous`` 原样透传给各 predictor(自回归类算法
     使用；朴素算法忽略)。
     返回按 (实例, 接口) 稳定排序的预测产物。
@@ -342,7 +342,7 @@ def materialize_predicted_series(
     doc = json.loads(artifact.canonical_text)
     baseline_data = doc["project_baseline"]
     point_count = horizon_point_count(
-        baseline_data["resolution"], baseline_data["start_year"], evaluation_years
+        baseline_data["resolution"], baseline_data["start_year"], operation_years
     )
     by_target = {}
     for entry in predictions:

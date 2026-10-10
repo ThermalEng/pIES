@@ -290,7 +290,7 @@ def test_submit_coverage_checks_real_object_bytes(db, tmp_path) -> None:  # noqa
     effective = _effective_with_price(oid, 8760)
     _check_submit_coverage(
         db=db, artifact=_artifact(),
-        evaluation={"evaluation_years": 1}, effective=effective,
+        evaluation={"operation_years": 1}, effective=effective,
     )
 
 
@@ -304,7 +304,7 @@ def test_submit_coverage_blocks_short_object_017(db, tmp_path) -> None:  # noqa:
     with pytest.raises(InvalidRequestError) as exc_info:
         _check_submit_coverage(
             db=db, artifact=_artifact(),
-            evaluation={"evaluation_years": 1}, effective=effective,
+            evaluation={"operation_years": 1}, effective=effective,
         )
     assert exc_info.value.code == "TASK-REQ-017"
     assert exc_info.value.params["expected_point_count"] == 8760
@@ -318,7 +318,7 @@ def test_submit_coverage_blocks_missing_object_017(db, tmp_path) -> None:  # noq
     with pytest.raises(InvalidRequestError) as exc_info:
         _check_submit_coverage(
             db=db, artifact=_artifact(),
-            evaluation={"evaluation_years": 1}, effective=effective,
+            evaluation={"operation_years": 1}, effective=effective,
         )
     assert exc_info.value.code == "TASK-REQ-017"
 
@@ -482,7 +482,7 @@ def test_complete_materialized_carries_prices() -> None:
     )
 
     base = MaterializedSet(
-        evaluation_years=2,
+        operation_years=2,
         series=(),
         pending_predict=(
             {"device": "d", "interface": "p", "target_type": "t", "object_id": "o"},

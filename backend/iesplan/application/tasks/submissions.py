@@ -257,18 +257,23 @@ def _derive_random_seed(version_id: int) -> int:
 
 
 def _evaluation_identity(evaluation: object) -> object:
-    """评价确认复用身份: 年限/折现率/确认人(决定计算归属的输入)。
+    """评价确认复用身份: 年限/建设期/运营期/折现率/付款/维护/确认人。
 
     确认时间是服务端写入的来源 provenance(冻结存档, 不参与复用判定:
     每次提交写入新的确认时间, 纳入身份将使复用永不命中)。同一评价确认
     由同一人重提 → 复用同一快照; 不同确认人 → 不同身份, 新建快照并如实
-    归属, 不错归确认人。
+    归属, 不错归确认人。运营年限决定运行模型时域, 付款/维护决定快照
+    财务含义, 均参与复用判定(实际现金流计算由后续切片消费)。
     """
     if not isinstance(evaluation, Mapping):
         return evaluation
     return {
         "evaluation_years": evaluation.get("evaluation_years"),
+        "construction_period": evaluation.get("construction_period"),
+        "operation_years": evaluation.get("operation_years"),
         "discount_rate": evaluation.get("discount_rate"),
+        "construction_payments": jsonable(evaluation.get("construction_payments")),
+        "maintenance_expenses": jsonable(evaluation.get("maintenance_expenses")),
         "confirmed_by": evaluation.get("confirmed_by"),
     }
 
@@ -300,8 +305,7 @@ def _snapshot_inputs_equal(
     """快照输入一致判定: 全部快照内容字段逐项相等(不使用内容摘要)。
 
     复用身份包含 schema_version、执行引用、逐实例数学贡献与顶层评价确认
-    块的年限/折现率/确认人: 不同 schema、不同配套 adapter/executor、
-    不同设备贡献、不同评价年限/折现率或不同确认人的快照永不复用;
+    块的年限/建设期/运营期/折现率/付款/维护/确认人: 任一不同即新快照;
     确认时间只冻结存档, 不参与复用判定(见 ``_evaluation_identity``)。
     容差唯一权威是 calc_config 正文的 convergence, 此处不另设 tolerances。
     """
@@ -567,11 +571,11 @@ def _assemble_snapshot(
     绑定: 项目版本(无版本时固化当前草稿)、数据集版本 id 清单、钉选的计算
     配置正文 + 来源 revision/项目身份、程序版本、受控扩展版本、随机种子
     (正文 seed 缺失时按版本派生, 强制非 NULL)、规范装配文本/回执、评价确认
-    块(年限/折现率由提交边界类型化解析, 确认人/确认时间由服务端写入,
-    存于快照顶层, 不混入配置正文);
+    块(年限/建设期/运营期/折现率/付款/维护由提交边界类型化解析,
+    确认人/确认时间由服务端写入, 存于快照顶层, 不混入配置正文);
     相同输入复用既有快照(快照内容字段逐项相等判定, 含 config_ref 与顶层
-    evaluation 年限/折现率/确认人, 故不同 revision、不同评价年限/折现率
-    或不同确认人永不复用; 确认时间不参与复用判定)。任务级 config
+    evaluation 年限/建设期/运营期/折现率/付款/维护/确认人; 确认时间不参与
+    复用判定)。任务级 config
     (除绑定键 config_revision 与顶层输入键 evaluation 外)并入快照的
     calc_config_snapshot.task_params, 不覆盖配置正文。
     """
@@ -591,7 +595,21 @@ def _assemble_snapshot(
         calc_config["task_params"] = jsonable(task_params)
     frozen_evaluation: dict[str, Any] = {
         "evaluation_years": evaluation.evaluation_years,
+        "construction_period": evaluation.construction_period,
+        "operation_years": evaluation.operation_years,
         "discount_rate": evaluation.discount_rate,
+        "construction_payments": [
+            {"t": payment.t, "ratio": payment.ratio}
+            for payment in evaluation.construction_payments
+        ],
+        "maintenance_expenses": [
+            {
+                "year": expense.year,
+                "amount": expense.amount,
+                "currency": expense.currency,
+            }
+            for expense in evaluation.maintenance_expenses
+        ],
         "confirmed_by": actor.id,
         "confirmed_at": datetime.now(UTC).isoformat(),
     }
@@ -614,13 +632,30 @@ def _assemble_snapshot(
     # 不另行二次解析。
     gate, effective = _assembly_gate(
         db, project_id, content, task_type,
-        evaluation_years=evaluation.evaluation_years,
+        operation_years=evaluation.operation_years,
     )
     assert gate.artifact is not None
     artifact = gate.artifact
-    # 提交边界全期覆盖核对(装配不核对点数; 已确认评价年限后在此阻断):
-    # 规范文本基线 + 冻结财务快照时变序列点数 == 全周期总点数。
+    # 提交边界运营期覆盖核对(装配不核对点数; 已确认运营年限后在此阻断):
+    # 规范文本基线 + 冻结财务快照时变序列点数 == 运营期总点数。
     _check_submit_coverage(db=db, artifact=artifact, evaluation=frozen_evaluation, effective=effective)
+    # 提交边界维护币种核对(本次闸门实际消费的不可变快照口径; 不一致阻断):
+    # 维护清单币种须与有效财务配置一致, 空清单直接通过。
+    for expense in evaluation.maintenance_expenses:
+        if expense.currency != effective.currency:
+            raise InvalidRequestError(
+                "维护/换新支出币种须与有效财务配置一致",
+                code="TASK-REQ-015",
+                params={
+                    "year": expense.year,
+                    "currency": expense.currency,
+                    "effective_currency": effective.currency,
+                },
+                location={
+                    "object_type": "task",
+                    "field": "evaluation.maintenance_expenses",
+                },
+            )
     receipt = artifact.receipt.to_dict()
     device_models = _freeze_device_models(artifact, gate.device_documents)
     # 预测输入冻结核对(B5-1 双向匹配 + B5-2 算法相容): 失败不建快照。
@@ -702,11 +737,11 @@ def _check_submit_coverage(
     evaluation: Mapping[str, Any],
     effective: EffectiveFinanceConfig,
 ) -> None:
-    """提交边界时变价格全期覆盖核对(任务提交边界唯一位置)。
+    """提交边界时变价格运营期覆盖核对(任务提交边界唯一位置)。
 
     消费已签发规范文本的基线/计费绑定(不重跑装配校验)与装配闸门本次
     实际消费的不可变 Effective 财务快照(调用方传入, 此处不另行按引用
-    二次解析); 期望点数由起始年 + 已确认评价年限 + 分辨率推导,
+    二次解析); 期望点数由运行起始年 + 已确认运营年限 + 分辨率推导,
     不一致 → 400 TASK-REQ-017(见 tasks 域 ``check_tariff_horizon_coverage``)。
     时变价格另读冻结对象实字节做唯一一次覆盖/声明元数据核对（此前只
     核过声明元数据，未读过实字节）：对象缺失/不可解析/实长不等/文件
@@ -729,13 +764,13 @@ def _check_submit_coverage(
     _check_tariff_horizon_coverage(
         baseline_resolution=baseline.get("resolution"),
         baseline_start_year=baseline.get("start_year"),
-        evaluation_years=evaluation["evaluation_years"],
+        operation_years=evaluation["operation_years"],
         tariff_bindings=canonical.get("tariff_bindings") or {},
         price_series=series,
     )
     expected = horizon_point_count(
         baseline.get("resolution"), baseline.get("start_year"),
-        evaluation["evaluation_years"],
+        evaluation["operation_years"],
     )
     for binding_id in sorted(canonical.get("tariff_bindings") or {}):
         entry = (canonical.get("tariff_bindings") or {}).get(binding_id)
@@ -874,7 +909,7 @@ def _frozen_finance_ref(content: Mapping, project_id: int) -> tuple[str, int]:
 def _assembly_gate(
     db: Session, project_id: int, content: dict, task_type: str,
     *,
-    evaluation_years: int | None = None,
+    operation_years: int | None = None,
 ) -> tuple[AssemblyValidationResult, EffectiveFinanceConfig]:
     """计算任务统一装配闸门: 完整四阶段校验后签发规范二件套。
 
@@ -888,8 +923,8 @@ def _assembly_gate(
     不 fallback，缺席/档案不符明确失败。finance_binding/tariff_bindings
     只透传项目内容已声明的节(起草命令写入)，缺席即对应装配节缺失阻断，
     不猜测、不补默认。
-    ``evaluation_years`` 为提交时已确认评价年限(调用方从类型化评价输入
-    透传)：``data_full`` 文件长度须等于其推导的全周期总点数。
+    ``operation_years`` 为提交时已确认运营年限(调用方从类型化评价输入
+    透传)：``data_full`` 文件长度须等于其推导的运营期总点数。
     返回 (闸门结果, 本次实际消费的不可变 Effective 财务快照): 调用方
     (提交边界覆盖核对)直接复用该快照, 不得另行二次解析。
     """
@@ -922,7 +957,7 @@ def _assembly_gate(
         tariff_bindings=content.get("tariff_bindings"),
         planning=planning,
         finance_snapshots=finance_snapshots,
-        evaluation_years=evaluation_years,
+        operation_years=operation_years,
     )
     if result.artifact is None:
         raise AssemblyValidationError(result.diagnostics)
@@ -1206,7 +1241,8 @@ def _submit_task(
         # 查无(未保存/超出现有/跨项目号码) → 404, 缺失或形态非法 → 400。
         pinned = _resolve_pinned_calculation_config(db, project_id, config)
         # 1c) 评价确认(提交边界唯一校验: 顶层输入必填, 形态非法 → 400
-        # TASK-REQ-015; 年限 >= 1 连续全期, 折现率 0..1 比例口径)。
+        # TASK-REQ-015; 评价年限含建设期(E==K+N), 折现率 0..1 比例口径,
+        # 付款比例十进制求和精确为 1, 维护清单发生年/金额/币种显式)。
         parsed_evaluation = _parse_evaluation_input(evaluation)
         # 2) 存储门禁(门禁失败不创建快照不创建任务)
         estimate = estimate_storage(db, project_id, task_type, config)

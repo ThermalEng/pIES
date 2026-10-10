@@ -364,7 +364,7 @@ class TestMaterializePredicted:
             resources,
             self._predictions(NAIVE_PREDICTOR_REF, NAIVE_PREDICTOR_REF),
             build_predictor_registry((NAIVE_PREDICTOR,)).get,
-            7, evaluation_years=1,
+            7, operation_years=1,
         )
         assert [(p.device, p.interface) for p in predicted] == [
             ("load1", "electricity_demand"), ("load2", "electricity_demand"),
@@ -393,7 +393,7 @@ class TestMaterializePredicted:
                 {"obj-h1": _history_csv_bytes("electricity_demand", [1.0])},
                 self._predictions("ies.predictor.missing@9.9.9", NAIVE_PREDICTOR_REF),
                 build_predictor_registry((NAIVE_PREDICTOR,)).get,
-                7, evaluation_years=1,
+                7, operation_years=1,
             )
 
 class TestSubmitCompat:
@@ -805,7 +805,12 @@ class TestPredictEndToEnd:
         registry = build_predictor_registry((chase,))
         task, _flags = submit_task(
             db, user, pid, "optimization", config={"config_revision": rev},
-            evaluation={"evaluation_years": 1, "discount_rate": 0.08},
+            evaluation={
+                "evaluation_years": 1, "construction_period": 0,
+                "operation_years": 1, "discount_rate": 0.08,
+                "construction_payments": [{"t": 0, "ratio": 1}],
+                "maintenance_expenses": [],
+            },
             idempotency_key="predict-e2e-chase",
             generator_registry=plane.generator_registry,
             predictor_registry=registry,

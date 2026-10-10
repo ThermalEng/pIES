@@ -40,9 +40,15 @@ class TaskCreateRequest(BaseModel):
         analysis(批量分析)/report(结果检查);
     config: 任务级参数(如 n_samples/priority/deadline);
     evaluation: 计算类任务必填的顶层评价确认输入(类型化任务输入, 不在
-        config 内): evaluation_years 必填正整数(确认的评价年限, 年;
-        接受 >= 1 的连续全期), discount_rate 必填 0..1 区间内有限数
-        (确认的折现率, 宪法 §7.3 比例口径), 均无默认值; 缺失或形态非法
+        config 内): evaluation_years 必填正整数(含建设期的财务评价总年限,
+        须等于 construction_period + operation_years),
+        construction_period 必填非负整数(建设期年数, 显式 0 合法),
+        operation_years 必填正整数(投产后运营年限, 运行点数唯一口径),
+        discount_rate 必填 0..1 区间内有限数
+        (确认的折现率, 宪法 §7.3 比例口径),
+        construction_payments 必填付款比例清单(十进制求和精确为 1),
+        maintenance_expenses 必填维护/换新清单(无支出给空清单),
+        均无默认值; 缺失或形态非法
         → 400 TASK-REQ-015。确认人/确认时间由服务端写入并随快照顶层
         冻结块冻结;
         计算类任务须另带 config_revision(本项目已保存 CalculationConfig

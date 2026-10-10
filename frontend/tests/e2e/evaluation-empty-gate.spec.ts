@@ -99,26 +99,30 @@ test.describe('空值门禁(非画布 GUI)', () => {
     await page.getByRole('button', { name: /保存计算配置|Save calculation config/i }).click()
     await expect(page.getByText(/已保存 revision v\d+|Saved revision v\d+/i).first()).toBeVisible({ timeout: 10_000 })
 
-    // 任务中心 → 提交对话框, 评价两栏留空提交
+    // 任务中心 → 提交对话框, 评价各栏留空提交
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click()
     await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click()
     const dialog = page.getByRole('dialog')
-    await expect(dialog.locator('#task-eval-years')).toHaveValue('')
+    await expect(dialog.locator('#task-construction-period')).toHaveValue('')
+    await expect(dialog.locator('#task-operation-years')).toHaveValue('')
     await expect(dialog.locator('#task-discount-rate')).toHaveValue('')
     await dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click()
     // 评价非法提示出现, 对话框保持打开, 未产生任务
-    await expect(dialog.getByText('请填写正整数评价年限(≥1)与 0..1 区间内折现率(均必填)')).toBeVisible({ timeout: 10_000 })
+    await expect(dialog.getByText('请填写建设期(非负整数)、运营年限(正整数)、0..1 区间内折现率与合法付款/维护 JSON(均必填)')).toBeVisible({ timeout: 10_000 })
     await expect(dialog).toBeVisible()
 
     // 折现率留空(0 被静默接受的回归点): 只填年限仍被拒绝
-    await dialog.locator('#task-eval-years').fill('1')
+    await dialog.locator('#task-construction-period').fill('0')
+    await dialog.locator('#task-operation-years').fill('1')
     await dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click()
-    await expect(dialog.getByText('请填写正整数评价年限(≥1)与 0..1 区间内折现率(均必填)')).toBeVisible({ timeout: 10_000 })
+    await expect(dialog.getByText('请填写建设期(非负整数)、运营年限(正整数)、0..1 区间内折现率与合法付款/维护 JSON(均必填)')).toBeVisible({ timeout: 10_000 })
 
     // 填入合法评价后提交: 先断言发出请求的形态(本切片契约)——评价确认走顶层
-    // evaluation 字段(不在 config 内), 幂等键落在后端格式集内; 再断言任务
-    // 创建成功并出现在列表(造数已备齐冻结引用)。
+    // evaluation 字段(不在 config 内), 评价年限 E=K+N 随提交明确发送,
+    // 幂等键落在后端格式集内; 再断言任务创建成功并出现在列表(造数已备齐冻结引用)。
     await dialog.locator('#task-discount-rate').fill('0.08')
+    await dialog.locator('#task-construction-payments').fill('[{"t": 0, "ratio": 1}]')
+    await dialog.locator('#task-maintenance-expenses').fill('[]')
     const [submitResponse] = await Promise.all([
       page.waitForResponse(
         (res) => res.url().includes(`/api/projects/${projectId}/tasks`) && res.request().method() === 'POST',
@@ -126,7 +130,14 @@ test.describe('空值门禁(非画布 GUI)', () => {
       dialog.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click(),
     ])
     const submitBody = submitResponse.request().postDataJSON() as Record<string, unknown>
-    expect(submitBody.evaluation).toEqual({ evaluation_years: 1, discount_rate: 0.08 })
+    expect(submitBody.evaluation).toEqual({
+      evaluation_years: 1,
+      construction_period: 0,
+      operation_years: 1,
+      discount_rate: 0.08,
+      construction_payments: [{ t: 0, ratio: 1 }],
+      maintenance_expenses: [],
+    })
     expect(submitBody.config).not.toHaveProperty('evaluation')
     expect(submitBody.idempotency_key).toMatch(/^[A-Za-z0-9._:-]{1,128}$/)
     expect(submitResponse.status()).toBe(201)

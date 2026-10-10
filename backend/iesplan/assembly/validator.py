@@ -117,15 +117,15 @@ def validate_assembly_doc(
     package_dir: str | Path | None = None,
     dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
-    evaluation_years: int | None = None,
+    operation_years: int | None = None,
 ) -> AssemblyValidationResult:
     """ies.assembly 3.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
 
     doc 为安全解析后的 plain dict(手写文本经 ``parse_assembly_doc`` 产生,
     GUI 导出经构造器产生);本入口做唯一一次结构校验,随后进入模型/
     属性/预定义来源 + 图/系统 + 输出引用/财务完整性领域校验。手写与 GUI
-    共用同一管线,不重复结构校验。``evaluation_years`` 透传提交时已确认
-    评价年限(仅提交闸门传入，见 ``validate_project_export``)。
+    共用同一管线,不重复结构校验。``operation_years`` 透传提交时已确认
+    运营年限(仅提交闸门传入，见 ``validate_project_export``)。
     """
     diags: list[Diagnostic] = []
     tree = run_structure_checks(dict(doc), source_name="<doc>", diags=diags)
@@ -136,7 +136,7 @@ def validate_assembly_doc(
         package_dir=package_dir,
         dataset_contents=dataset_contents,
         finance_snapshots=finance_snapshots,
-        evaluation_years=evaluation_years,
+        operation_years=operation_years,
     )
 
 
@@ -149,7 +149,7 @@ def validate_project_export(
     tariff_bindings: Mapping[str, Any] | None = None,
     planning: Mapping[str, Any] | None = None,
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
-    evaluation_years: int | None = None,
+    operation_years: int | None = None,
 ) -> AssemblyValidationResult:
     """GUI 项目导出入口:
 
@@ -160,9 +160,9 @@ def validate_project_export(
     引用、成本绑定、计费绑定与规划(缺席则对应装配节缺失阻断，不猜测)；
     finance_snapshots 为密封快照显式注入(kind=object 用)。设备数据序列
     来源声明由独立入口提供(S2c)，构造器不做数据集列映射。
-    ``evaluation_years`` 为提交时已确认评价年限(仅提交闸门传入)：
-    ``data_full`` 文件长度须等于其推导的全周期总点数；缺席时不核对
-    全期长度(项目导出等非提交调用不受影响)。
+    ``operation_years`` 为提交时已确认运营年限(仅提交闸门传入)：
+    ``data_full`` 文件长度须等于其推导的运营期总点数；缺席时不核对
+    运营期长度(项目导出等非提交调用不受影响)。
     """
     built = build_assembly_doc_from_content(
         content,
@@ -178,7 +178,7 @@ def validate_project_export(
         built.doc,
         dataset_contents=dataset_contents,
         finance_snapshots=finance_snapshots,
-        evaluation_years=evaluation_years,
+        operation_years=operation_years,
     )
 
 
@@ -193,7 +193,7 @@ def _run_validation(
     package_dir: str | Path | None,
     dataset_contents: Mapping[str, Mapping[str, Any]] | None,
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None,
-    evaluation_years: int | None = None,
+    operation_years: int | None = None,
 ) -> AssemblyValidationResult:
     from iesplan.assembly.rules.finance import (
         check_finance_binding,
@@ -210,7 +210,7 @@ def _run_validation(
     _check_properties(doc, registry, diags)
     resource_media = _check_predefined(
         doc, registry, package_dir, dataset_contents, diags,
-        evaluation_years=evaluation_years,
+        operation_years=operation_years,
     )
 
     if _any_blocking(diags):
@@ -424,15 +424,15 @@ def _check_predefined(
     dataset_contents: Mapping[str, Mapping[str, Any]] | None,
     diags: list[Diagnostic],
     *,
-    evaluation_years: int | None = None,
+    operation_years: int | None = None,
 ) -> dict[str, dict]:
     """预定义来源声明: 槽覆盖 + 槽类型 + 文件内容确认。
 
     每个 predefined 接口必须恰好有一个显式绑定，缺失/多余/绑到非
     predefined 接口均阻断；不得回退到设备文件自带来源。文件绑定读取
     字节并按绑定上下文确认(device_id/mode/分辨率/step/列/单位/值域)。
-    ``data_full`` 文件长度须等于已确认评价年限推导的全周期总点数
-    （``evaluation_years`` 仅提交闸门传入；缺席时不核对全期长度）。
+    ``data_full`` 文件长度须等于已确认运营年限推导的运营期总点数
+    （``operation_years`` 仅提交闸门传入；缺席时不核对运营期长度）。
     返回资源记录 {path: {"media_type"}}；文件绑定的 content 身份就地
     写入绑定映射(规范文本保留 path 与 content)。
     """
@@ -519,7 +519,7 @@ def _check_predefined(
                 continue
             if _check_csv_binding(
                 dev_id, type_id, iface_id, iface, binding, payload, resolution, start_year, diags,
-                evaluation_years=evaluation_years,
+                operation_years=operation_years,
             ):
                 object_id = payload.get("object_id", "")
                 media_type = payload.get("media_type", "") or "text/csv"
@@ -614,7 +614,7 @@ def _check_csv_binding(
     start_year: object,
     diags: list[Diagnostic],
     *,
-    evaluation_years: int | None = None,
+    operation_years: int | None = None,
 ) -> bool:
     """绑定 CSV 内容确认(device_id/mode/分辨率/step/列/单位/值域)。"""
     from iesplan.core.contracts import horizon_point_count
@@ -721,9 +721,9 @@ def _check_csv_binding(
                 {"actual": len(steps), "expected": [day, week, year]},
             )
             return False
-    if mode == "data_full" and evaluation_years is not None:
+    if mode == "data_full" and operation_years is not None:
         expected = horizon_point_count(
-            str(resolution), int(start_year), evaluation_years
+            str(resolution), int(start_year), operation_years
         )
         if len(steps) != expected:
             _bind_fail(

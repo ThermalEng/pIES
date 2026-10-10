@@ -39,6 +39,7 @@ import {
   TR,
   TaskOutcomeBadge,
   TaskStatusBadge,
+  Textarea,
 } from '../components/ui'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
 import type {
@@ -79,8 +80,11 @@ interface SweepRow {
 interface CreateForm {
   type: TaskType
   datasetIds: number[]
-  evaluationYears: string
+  constructionPeriod: string
+  operationYears: string
   discountRate: string
+  constructionPayments: string
+  maintenanceExpenses: string
   uMode: UncertaintyMode
   nSamples: number
   seed: string
@@ -92,8 +96,11 @@ interface CreateForm {
 const DEFAULT_FORM: CreateForm = {
   type: 'calc',
   datasetIds: [],
-  evaluationYears: '',
+  constructionPeriod: '',
+  operationYears: '',
   discountRate: '',
+  constructionPayments: '',
+  maintenanceExpenses: '',
   uMode: 'fixed_reliability',
   nSamples: 200,
   seed: '',
@@ -413,7 +420,7 @@ export default function TasksPage() {
     (f: CreateForm): string => {
       const params = buildParams(f)
       // 评价签名分隔符须落在后端幂等键格式集 [A-Za-z0-9._:-] 内('/' 会被传输层 422 拒绝)。
-      const evalSig = `${f.evaluationYears.trim()}_${f.discountRate.trim()}`
+      const evalSig = `${f.constructionPeriod.trim()}_${f.operationYears.trim()}_${f.discountRate.trim()}_${f.constructionPayments.trim()}_${f.maintenanceExpenses.trim()}`
       return `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}-e${evalSig}`
     },
     [buildParams, savedRevisionValue],
@@ -421,16 +428,38 @@ export default function TasksPage() {
 
   /** 评价确认解析(提交边界必填; 空值/非法返回 null 由调用方提示, 后端仍为权威校验)。
    * 空字符串经 Number() 会静默变为 0, 必须先判空, 不得直接转数字。
-   * 折现率为宪法 §7.3 比例口径(0..1), 与后端 TASK-REQ-015 同口径。 */
+   * 折现率为宪法 §7.3 比例口径(0..1), 与后端 TASK-REQ-015 同口径。
+   * 评价年限不手填: 由建设期 K + 运营年限 N 自动派生 E=K+N 并随提交
+   * 明确发送(关系成立由后端核对)。付款与维护为显式 JSON(无默认值;
+   * 无维护支出填 []), 形态由后端边界核对。 */
   const parseEvaluation = useCallback((f: CreateForm) => {
-    const yearsRaw = f.evaluationYears.trim()
+    const periodRaw = f.constructionPeriod.trim()
+    const operationRaw = f.operationYears.trim()
     const rateRaw = f.discountRate.trim()
-    if (yearsRaw === '' || rateRaw === '') return null
-    const years = Number(yearsRaw)
+    if (periodRaw === '' || operationRaw === '' || rateRaw === '') return null
+    const period = Number(periodRaw)
+    const operation = Number(operationRaw)
     const rate = Number(rateRaw)
-    if (!Number.isInteger(years) || years < 1) return null
+    if (!Number.isInteger(period) || period < 0) return null
+    if (!Number.isInteger(operation) || operation < 1) return null
     if (!Number.isFinite(rate) || rate < 0 || rate > 1) return null
-    return { evaluation_years: years, discount_rate: rate }
+    let payments: unknown
+    let maintenance: unknown
+    try {
+      payments = JSON.parse(f.constructionPayments)
+      maintenance = JSON.parse(f.maintenanceExpenses)
+    } catch {
+      return null
+    }
+    if (!Array.isArray(payments) || !Array.isArray(maintenance)) return null
+    return {
+      evaluation_years: period + operation,
+      construction_period: period,
+      operation_years: operation,
+      discount_rate: rate,
+      construction_payments: payments,
+      maintenance_expenses: maintenance,
+    }
   }, [])
 
   const buildInput = useCallback(
@@ -949,15 +978,34 @@ export default function TasksPage() {
           <p className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
             {t('ies.task.evaluation_hint')}
           </p>
-          <FormField label={t('ies.task.evaluation_years')} htmlFor="task-eval-years" required>
+          <FormField label={t('ies.task.construction_period')} htmlFor="task-construction-period" required>
             <Input
-              id="task-eval-years"
-              value={form.evaluationYears}
+              id="task-construction-period"
+              value={form.constructionPeriod}
               placeholder="1"
               inputMode="numeric"
-              onChange={(e) => setForm({ ...form, evaluationYears: e.target.value })}
+              onChange={(e) => setForm({ ...form, constructionPeriod: e.target.value })}
             />
           </FormField>
+          <FormField label={t('ies.task.operation_years')} htmlFor="task-operation-years" required>
+            <Input
+              id="task-operation-years"
+              value={form.operationYears}
+              placeholder="2"
+              inputMode="numeric"
+              onChange={(e) => setForm({ ...form, operationYears: e.target.value })}
+            />
+          </FormField>
+          <p className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
+            {t('ies.task.evaluation_years_derived', {
+              years: (() => {
+                const k = form.constructionPeriod.trim()
+                const n = form.operationYears.trim()
+                if (!/^(0|[1-9]\d*)$/.test(k) || !/^[1-9]\d*$/.test(n)) return '—'
+                return String(Number(k) + Number(n))
+              })(),
+            })}
+          </p>
           <FormField label={t('ies.task.discount_rate')} htmlFor="task-discount-rate" required>
             <Input
               id="task-discount-rate"
@@ -965,6 +1013,24 @@ export default function TasksPage() {
               placeholder="0.08"
               inputMode="decimal"
               onChange={(e) => setForm({ ...form, discountRate: e.target.value })}
+            />
+          </FormField>
+          <FormField label={t('ies.task.construction_payments')} htmlFor="task-construction-payments" required>
+            <Textarea
+              id="task-construction-payments"
+              value={form.constructionPayments}
+              placeholder={t('ies.task.construction_payments_placeholder')}
+              rows={2}
+              onChange={(e) => setForm({ ...form, constructionPayments: e.target.value })}
+            />
+          </FormField>
+          <FormField label={t('ies.task.maintenance_expenses')} htmlFor="task-maintenance-expenses" required>
+            <Textarea
+              id="task-maintenance-expenses"
+              value={form.maintenanceExpenses}
+              placeholder={t('ies.task.maintenance_expenses_placeholder')}
+              rows={2}
+              onChange={(e) => setForm({ ...form, maintenanceExpenses: e.target.value })}
             />
           </FormField>
         </fieldset>

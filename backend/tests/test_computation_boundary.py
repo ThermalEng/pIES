@@ -306,7 +306,7 @@ def test_unavailable_error_semantics() -> None:
     with pytest.raises(ComputationUnavailableError):
         gen.generate(
             _artifact(), {},
-            MaterializedSet(evaluation_years=1, series=(), pending_predict=()),
+            MaterializedSet(operation_years=1, series=(), pending_predict=()),
             _finance(), config,
         )
     receipt = _receipt(status="process_failed")
