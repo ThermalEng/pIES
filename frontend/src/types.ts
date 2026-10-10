@@ -747,29 +747,29 @@ export interface FinancialEvaluationRow {
 export interface FinancialEvaluationBlock {
   status: string
   evaluation_years: number
-  /** 旧证据可能缺失, 缺失时展示为未知, 不推导。 */
-  construction_period?: number | null
-  operation_years?: number | null
+  construction_period: number
+  operation_years: number
   currency: string
-  price_basis?: string | null
-  base_year?: number | null
-  discount_rate?: string | null
-  construction_total?: string | null
-  construction_total_unit?: string | null
-  annual_fixed_om?: string | null
-  payments_applied?: FinancialEvaluationPayment[]
-  annual_operation?: FinancialEvaluationYear[]
-  evaluation?: {
-    rows?: FinancialEvaluationRow[]
-    npv?: string | null
-    npv_unit?: string | null
-    irr?: number | null
-    irr_status?: string | null
-    static_payback?: number | null
-    static_status?: string | null
-    dynamic_payback?: number | null
-    dynamic_status?: string | null
-  } | null
+  price_basis: string
+  base_year: number
+  discount_rate: number
+  construction_total: string
+  construction_total_unit: string
+  annual_fixed_om: string
+  payments_applied: FinancialEvaluationPayment[]
+  annual_operation: FinancialEvaluationYear[]
+  evaluation: {
+    rows: FinancialEvaluationRow[]
+    npv: string
+    npv_unit: string
+    /** 仅 IRR/回收期数值为领域允许 null(状态字段仍必需)。 */
+    irr: number | null
+    irr_status: string
+    static_payback: number | null
+    static_status: string
+    dynamic_payback: number | null
+    dynamic_status: string
+  }
 }
 
 /** 财务评价缺块原因(后端按可观察事实判定, 有块时为 null)。 */

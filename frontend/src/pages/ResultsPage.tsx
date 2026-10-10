@@ -1163,13 +1163,11 @@ function MetricGroup({
 function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
   const { t } = useI18n()
   const ccy = fin.currency
-  const k = fin.construction_period ?? null
-  const n = fin.operation_years ?? null
-  const ev = fin.evaluation ?? null
-  const rows = ev?.rows ?? []
-  const payments = fin.payments_applied ?? []
-  const annual = fin.annual_operation ?? []
-  const irrStatus = ev?.irr_status ?? null
+  const ev = fin.evaluation
+  const rows = ev.rows
+  const payments = fin.payments_applied
+  const annual = fin.annual_operation
+  const irrStatus = ev.irr_status
   const irrKey: IrrStatusKey | null =
     irrStatus === 'normal'
       ? 'unique'
@@ -1178,12 +1176,12 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
           irrStatus === 'degenerate' ||
           irrStatus === 'out_of_domain' ||
           irrStatus === 'numeric_failure'
-        ? irrStatus
+        ? (irrStatus as IrrStatusKey)
         : null
-  const payback = (prefix: 'static' | 'dynamic'): { value: number | null; status: string | null } =>
+  const payback = (prefix: 'static' | 'dynamic'): { value: number | null; status: string } =>
     prefix === 'static'
-      ? { value: ev?.static_payback ?? null, status: ev?.static_status ?? null }
-      : { value: ev?.dynamic_payback ?? null, status: ev?.dynamic_status ?? null }
+      ? { value: ev.static_payback, status: ev.static_status }
+      : { value: ev.dynamic_payback, status: ev.dynamic_status }
   const staticPb = payback('static')
   const dynamicPb = payback('dynamic')
   return (
@@ -1192,18 +1190,18 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
         <dt>{t('ies.result.fin_e')}</dt>
         <dd>{fin.evaluation_years}</dd>
         <dt>{t('ies.result.fin_k')}</dt>
-        <dd>{k ?? '—'}</dd>
+        <dd>{fin.construction_period}</dd>
         <dt>{t('ies.result.fin_n')}</dt>
-        <dd>{n ?? '—'}</dd>
+        <dd>{fin.operation_years}</dd>
         <dt>{t('ies.result.fin_construction_total')}</dt>
         <dd>
-          {fin.construction_total ?? '—'} {fin.construction_total_unit ?? ccy}
+          {fin.construction_total} {fin.construction_total_unit}
         </dd>
         <dt>{t('ies.result.fin_discount')}</dt>
-        <dd>{fin.discount_rate ?? '—'}</dd>
+        <dd>{fin.discount_rate}</dd>
         <dt>{t('ies.result.fin_basis')}</dt>
         <dd>
-          {fin.price_basis ?? '—'} / {t('ies.result.fin_base_year')}: {fin.base_year ?? '—'}
+          {fin.price_basis} / {t('ies.result.fin_base_year')}: {fin.base_year}
         </dd>
       </dl>
       <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
@@ -1216,8 +1214,8 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
           </h3>
           <table className="ies-metric-table">
             <tbody>
-              {payments.map((p) => (
-                <tr key={p.t}>
+              {payments.map((p, index) => (
+                <tr key={`${p.t}-${index}`}>
                   <td>
                     {t('ies.result.fin_t_payment', { year: p.t })}
                   </td>
@@ -1275,10 +1273,10 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
         <dl className="ies-kv">
           <dt>NPV</dt>
           <dd>
-            {ev?.npv ?? '—'} {ev?.npv_unit ?? ccy}
+            {ev.npv} {ev.npv_unit}
           </dd>
           <dt>{t('ies.result.irr')}</dt>
-          <dd>{ev?.irr ?? '—'}</dd>
+          <dd>{ev.irr ?? '—'}</dd>
           <dt>{t(IRR_STATUS_KEY)}</dt>
           <dd>
             {irrKey ? (
@@ -1294,12 +1292,12 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
           <dt>{t('ies.result.fin_payback_static')}</dt>
           <dd>
             {staticPb.value ?? '—'} {staticPb.value !== null ? t('ies.result.fin_year_unit') : ''}{' '}
-            {staticPb.status ? t(`ies.result.fin_pb_${staticPb.status}`) : ''}
+            {t(`ies.result.fin_pb_${staticPb.status}`)}
           </dd>
           <dt>{t('ies.result.fin_payback_dynamic')}</dt>
           <dd>
             {dynamicPb.value ?? '—'} {dynamicPb.value !== null ? t('ies.result.fin_year_unit') : ''}{' '}
-            {dynamicPb.status ? t(`ies.result.fin_pb_${dynamicPb.status}`) : ''}
+            {t(`ies.result.fin_pb_${dynamicPb.status}`)}
           </dd>
         </dl>
       </div>

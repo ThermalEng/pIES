@@ -65,6 +65,17 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 
 项目投资口径评价以覆盖建设和运营的完整现金流 `CF[0..evaluation_years]` 与用户显式确认的评价参数为输入；`t=0` 为开工时点，后续时点按整数年排列，序列长度为 `evaluation_years + 1`。不由现金流或运行序列长度反推评价年限，不把单年结果复制为多年。逐年明细行含原始净流、贴现流（`CF[t]/(1+r)^t`）与两种累计，NPV、IRR、静态/动态回收期与明细同源复算。动态回收期对贴现流沿用静态回收期同一规则（累计首次非负、年内线性插值），未回收为无值并附明确状态，`r=0` 时与静态回收期一致。IRR 状态采用本页公开语义（`normal/no_solution/multiple/degenerate/out_of_domain/numeric_failure`）。
 
+### 封存评价块 `financial_evaluation`
+
+Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一证据单元封存（`status` 为 `"evaluated"`）；未求解或缺解输出不写财务块。读取与导出只消费该封存事实，不重算、不读最新配置。金额均为十进制字符串（不舍入），单位独立字段：
+
+- `evaluation_years`／`construction_period`／`operation_years`：整数（K/N 回显冻结输入，供时轴映射展示）；
+- `currency`、`price_basis`、`base_year`、`profile_id`、`discount_rate`：冻结值原样；
+- `construction_total` + `construction_total_unit`、`annual_fixed_om`：十进制字符串；
+- `payments_applied`：`[{t, ratio, amount}]` 数组；`t` 为整数财务时点，`ratio`／`amount` 为十进制字符串；同一 `t` 可多笔，不设时点唯一；
+- `annual_operation`：`[{financial_year, energy_net, variable_om, fixed_om, maintenance, net}]` 数组；金额十进制字符串，`maintenance` 为该年逐项维护合计；
+- `evaluation`：逐年明细与指标：`rows[{year, net, discounted, cumulative, cumulative_discounted}]`（金额字符串）；`npv`（字符串）+ `npv_unit`；`irr`（数或 null）+ `irr_status`（本页 IRR 状态枚举）；`static/dynamic_payback`（年数或 null）+ `_unit`（有值为 `"year"`）+ `_status`（`recovered`／`not_recovered`）。
+
 ### 评价确认与快照冻结
 
 评价年限与折现率是财务输入的显式评价确认，不属于 `FinanceProfile`/`Overrides`/`Effective`（本页已明令不回流），不属于封闭 `CalculationConfig`，不设默认值（沿用 `0.08` 或由序列长度推导均属阻断行为）：

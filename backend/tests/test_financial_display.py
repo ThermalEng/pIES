@@ -1,15 +1,14 @@
 """0.12-T3 定向测试: 封存财务评价的展示消费(纯逻辑, 无 DB)。
 
-覆盖: Excel 展平器只认 ``status == "evaluated"`` 封存形态并原样展示
-金额字符串(不重算、不舍入); 旧形态返回 None 走通用节渲染; 缺块原因
-``_financial_absence`` 按可观察事实区分, 不把所有缺块猜为未请求
-solution。DB 端到端(证据种子 → Excel/结果视图)见
+覆盖: Excel 展平器对封存块必需字段直接消费、金额字符串原样展示
+(不重算、不舍入); 缺块原因 ``_financial_absence`` 按可观察事实区分,
+不把所有缺块猜为未请求 solution。DB 端到端(证据种子 → Excel/结果视图)见
 ``test_wave2_c_packages.py`` / ``test_wave2_c_results.py``。
 """
 
 from __future__ import annotations
 
-from iesplan.application.packages.transfers import _financial_evaluation_rows
+from iesplan.application.packages.transfers import _sealed_evaluation_rows
 from iesplan.application.results.writes import _financial_absence
 
 
@@ -59,21 +58,13 @@ def _sealed() -> dict:
 def test_financial_rows_render_sealed_block_verbatim():
     """封存块展平: K/N/E、付款时点、运营年分量、CF、NPV/IRR 状态齐全,
     金额为封存字符串原样。"""
-    rows = _financial_evaluation_rows(_sealed())
-    assert rows is not None
+    rows = _sealed_evaluation_rows(_sealed())
     text = "\n".join(f"{k}\n{v}" for k, v in rows)
     assert "评价年限 E" in text and "建设期 K" in text and "运营年限 N" in text
     assert "140000" in text and "84000.0" in text and "56000.0" in text
     assert "运营年第 1 年(t=2)" in text and "3500.50" in text
     assert "CF[t=0]" in text and "CF[t=3]" in text
     assert "-123020.31" in text and "no_solution" in text and "not_recovered" in text
-
-
-def test_financial_rows_ignores_old_shapes():
-    """非封存形态返回 None, 走通用节渲染。"""
-    assert _financial_evaluation_rows(None) is None
-    assert _financial_evaluation_rows({"financial": {"总投资": 1}}) is None
-    assert _financial_evaluation_rows({"status": "evaluated"}) is None
 
 
 def test_financial_absence_reasons(monkeypatch):

@@ -129,6 +129,8 @@
 
 Worker 只有在命令可解析、租约有效且写入资格仍成立时才能提交进度和结果。失败保留结构化诊断；取消、超时和重试遵守公开状态转换。
 
+任务结果读取（`GET /projects/{id}/tasks/{task_id}/result` 的 `result` 视图）复用同一证据内容，不另建财务结果存储、不重新运行评价：有证据时原样投影 `financial_evaluation`（形态见[财务计算](modules/finance.md)“封存评价块”，无块时为 null）；同时给出缺块原因 `financial_absence`（有块时恒为 null）：`outcome_not_normal` 表示任务业务结局非正常完成（未求解或无可行方案）；`solution_not_requested` 表示快照 `outputs` 未请求 `solution`（解数据未发布）；`missing_unknown` 表示请求了 `solution` 但该证据未封存财务评价（如历史证据）。展示与导出不得把缺块猜为未请求、前两种原因伪装为评价通过。
+
 ## 兼容与演进
 
 产品正式发布前，错误的旧字段、响应并集和静默 fallback 应一次性删除。正式发布后：

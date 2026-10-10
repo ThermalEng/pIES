@@ -8,13 +8,34 @@
 // 同年维护合计及页面/导出的同一封存事实展示。
 
 import fs from 'node:fs'
+import path from 'node:path'
 import { test, expect } from '@playwright/test'
 import type { Page, BrowserContext, APIRequestContext } from '@playwright/test'
 import { createSession, uniqueName, strongPassword } from './fixtures'
 import { createEngineer, loginToken, requestJson } from './setup/api'
 
-function dbg(line: string): void {
-  fs.appendFileSync('/app/e2e/test-results/t3-debug.log', `${line}\n`)
+// 公开任务列表/结果视图的契约形态(后端返回 {items, next_cursor},
+// 列表项为 task_summary 含 id; 与前端 client 的 asItems 接线一致)。
+interface TaskListItem {
+  id: number
+}
+interface SealedCashflowRow {
+  year: number
+  net: string
+  discounted: string
+  cumulative: string
+  cumulative_discounted: string
+}
+interface SealedEvaluation {
+  status: string
+  evaluation_years: number
+  construction_period: number
+  operation_years: number
+  construction_total: string
+  annual_operation: Array<{ financial_year: number; maintenance: string }>
+  evaluation: {
+    rows: SealedCashflowRow[]
+  }
 }
 
 const APP = process.env.E2E_APP_URL ?? 'http://web:80'
@@ -246,15 +267,10 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     await createEngineer(apiCtx.request, username, password)
     const token = await loginToken(apiCtx.request, username, password)
     const pid = await scaffoldProject(apiCtx.request, token, projectName, profileId)
-    const pv = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}`, undefined, token)
-    const dc = pv.draft?.content ?? pv.draft ?? {}
-    dbg(`DRAFT devices=${JSON.stringify(Object.keys(dc.model?.devices ?? dc.devices ?? {}))} ` +
-      `conns=${JSON.stringify((dc.model?.connections ?? dc.connections ?? []).map((c: any) => c.name ?? c))} ` +
-      `bindings=${JSON.stringify(dc.dataset_bindings ?? dc.model?.dataset_bindings)} ` +
-      `finbind=${JSON.stringify(Object.keys(dc.assembly?.finance_binding?.instances ?? {}))}`)
     const precheck = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/validation/run`, {}, token)
-    const blockers = (precheck.report?.diagnostics ?? []).filter((d: any) => d.blocking)
-    dbg(`PRECHECK status=${precheck.report?.status} blockers=${JSON.stringify(blockers).slice(0, 1500)}`)
+    const blockers = (precheck.report?.diagnostics ?? []).filter(
+      (d: { blocking: boolean }) => d.blocking,
+    )
     expect(blockers).toEqual([])
 
     const context: BrowserContext = await browser.newContext()
@@ -275,15 +291,8 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
       '[{"year": 3, "amount": "1000.00", "currency": "CNY"}, {"year": 3, "amount": "2500.50", "currency": "CNY"}]',
     )
     const submitBtn = page.getByRole('button', { name: /提交任务|Submit task/i }).last()
-    dbg(`SUBMIT disabled=${await submitBtn.isDisabled()}`)
     await expect(submitBtn).toBeEnabled({ timeout: 10_000 })
     await submitBtn.click({ timeout: 30_000 })
-    // 提交成功后对话框关闭: 只在对话框仍存在时取文本(显式短超时, 不无期限等待)。
-    const dlg = await page
-      .getByRole('dialog')
-      .textContent({ timeout: 5_000 })
-      .catch(() => '(no dialog)')
-    dbg(`DIALOG after submit: ${(dlg ?? '').slice(0, 900)}`)
     await expect(page.locator('.ies-table__row').first()).toBeVisible({ timeout: 15_000 })
 
     // 完成(真实 Worker 求解, 轮询详情状态)
@@ -292,58 +301,54 @@ test.describe('T3: K1N2 财务评价确认/求解/结果/导出', () => {
     const detailBadge = page.locator('.ies-task-detail .ies-badge__label').first()
     await expect(async () => {
       const text = (await detailBadge.textContent()) ?? ''
-      dbg(`POLL badge=${text.slice(0, 60)}`)
       expect(text).toMatch(/已完成|Completed/i)
     }).toPass({ timeout: 240_000, intervals: [10_000] })
-    dbg('POLL passed')
-    const detailText = await page.locator('.ies-task-detail').textContent().catch(() => '')
-    dbg(`DETAIL full=${(detailText ?? '').slice(0, 500)}`)
 
     // 详情 → 结果页封存卡(同一封存事实展示)
     const viewResults = page.getByRole('link', { name: /查看结果|View results/i })
     await expect(viewResults).toBeVisible({ timeout: 10_000 })
     await viewResults.click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/results/)
-    dbg('AT results page')
     await expect(page.getByText(/评价现金流\(封存\)|Sealed evaluation/i)).toBeVisible({ timeout: 30_000 })
-    dbg('SEALED card visible')
     await expect(page.getByText('CF[t=0]').first()).toBeVisible()
     await expect(page.getByText('CF[t=3]').first()).toBeVisible()
     await expect(page.getByText('3500.5').first()).toBeVisible()
     await expect(page.getByText(/t=K\+j/).first()).toBeVisible()
 
-    // 导出页: Excel 报告下载
+    // 导出页: Excel 报告下载并落盘, 供下载内容验证消费同一封存事实。
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('导出').click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/export$/)
     const downloadPromise = page.waitForEvent('download', { timeout: 120_000 })
     await page.getByRole('button', { name: /导出 Excel 报告|Export Excel report/i }).click({ timeout: 30_000 })
     const download = await downloadPromise
     expect(download.suggestedFilename()).toMatch(/\.xlsx$/)
+    const outDir = process.env.E2E_OUTPUT_DIR ?? '/app/e2e/test-results'
+    await download.saveAs(path.join(outDir, 't3-report.xlsx'))
 
     // 结构断言经 API(UI 会话已用完, 重登拿新 token; 展示断言已在页面完成)
     const token2 = await loginToken(apiCtx.request, username, password)
     const listed = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks?limit=10`, undefined, token2)
-    const raw = listed.tasks ?? listed
-    const items: any[] = Array.isArray(raw) ? raw : (raw?.items ?? [])
-    dbg(`TASKS count=${items.length} first=${JSON.stringify(items[0]).slice(0, 200)}`)
-    const taskId: number = items[0]?.task_id ?? items[0]?.id ?? items[0]?.task?.id
+    const items = (listed.items ?? []) as TaskListItem[]
+    const taskId: number = items[0].id
     expect(taskId).toBeTruthy()
     const result = await requestJson(
       apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token2,
     )
-    const fin = result.result?.financial_evaluation
-    expect(fin?.status).toBe('evaluated')
-    expect(fin?.evaluation_years).toBe(3)
-    expect(fin?.construction_period).toBe(1)
-    expect(fin?.operation_years).toBe(2)
-    const total = Number(fin?.construction_total)
+    const fin = result.result.financial_evaluation as SealedEvaluation
+    expect(fin.status).toBe('evaluated')
+    expect(fin.evaluation_years).toBe(3)
+    expect(fin.construction_period).toBe(1)
+    expect(fin.operation_years).toBe(2)
+    const total = Number(fin.construction_total)
     expect(total).toBeGreaterThan(0)
-    const rows: any[] = fin?.evaluation?.rows ?? []
+    const rows = fin.evaluation.rows
     expect(rows.map((r) => r.year)).toEqual([0, 1, 2, 3])
     expect(Number(rows[0].net)).toBeCloseTo(-0.6 * total, 6)
     expect(Number(rows[1].net)).toBeCloseTo(-0.4 * total, 6)
-    expect(fin?.annual_operation?.[1]?.maintenance).toBe('3500.5')
-    expect(result.result?.financial_absence).toBeNull()
+    expect(fin.annual_operation[1].maintenance).toBe('3500.5')
+    expect(result.result.financial_absence).toBeNull()
+    // 封存事实落盘, 供下载内容验证逐项比对。
+    fs.writeFileSync(path.join(outDir, 't3-sealed.json'), JSON.stringify(fin))
 
     await apiCtx.close()
     session.assertNoErrors()

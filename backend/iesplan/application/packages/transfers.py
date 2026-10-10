@@ -1124,101 +1124,86 @@ def _write_kv(ws, rows: list[tuple[str, Any]], start_row: int = 3) -> int:
     return row
 
 
-def _financial_evaluation_rows(fin: Any) -> list[tuple[str, Any]] | None:
-    """已封存财务评价块 → 展示行(纯展示格式化, 不重算、不读最新配置)。
+def _is_sealed_evaluation(section: Any) -> bool:
+    """是否为封存评价块(分发表单, 非兼容回退)。
 
-    只认 0.12-T2 封存形态(``status == "evaluated"`` 含 ``evaluation``);
-    其他形态返回 None 走通用节渲染。金额均为封存字符串原样展示, 不转
-    浮点、不舍入; 旧证据缺 K/N 时该行记 "—", 不推导。
+    仅当节是 ``status == "evaluated"`` 的封存字典时走专用展平; 旧
+    ``financial`` 等真实业务摘要仍走通用节渲染(原样保留, 不删除)。
     """
-    if not isinstance(fin, dict) or fin.get("status") != "evaluated":
-        return None
-    evaluation = fin.get("evaluation")
-    if not isinstance(evaluation, dict):
-        return None
-    ccy = fin.get("currency") or evaluation.get("currency") or ""
-    period = fin.get("construction_period")
-    operation = fin.get("operation_years")
+    return isinstance(section, dict) and section.get("status") == "evaluated"
+
+
+def _sealed_evaluation_rows(fin: dict[str, Any]) -> list[tuple[str, Any]]:
+    """已封存评价块 → 展示行(纯展示格式化, 不重算、不读最新配置)。
+
+    必需字段直接消费, 缺件自然失败, 不跳行、不回退; 金额均为封存字符
+    串原样展示, 不转浮点、不舍入。仅 IRR/回收期数值为领域允许 null
+    (状态字段仍必需)。
+    """
+    evaluation = fin["evaluation"]
+    ccy = fin["currency"]
     rows: list[tuple[str, Any]] = [
-        ("评价年限 E / Evaluation years", fin.get("evaluation_years")),
-        (
-            "建设期 K(财务时点 t=0..K) / Construction period",
-            period if period is not None else "—",
-        ),
-        (
-            "运营年限 N(第 j 年落 t=K+j) / Operation years",
-            operation if operation is not None else "—",
-        ),
-        ("币种 / Currency", ccy or "—"),
-        ("价格口径 / Price basis", fin.get("price_basis") or "—"),
-        ("基年 / Base year", fin.get("base_year")),
-        ("折现率(冻结) / Discount rate", fin.get("discount_rate")),
+        ("评价年限 E / Evaluation years", fin["evaluation_years"]),
+        ("建设期 K(财务时点 t=0..K) / Construction period", fin["construction_period"]),
+        ("运营年限 N(第 j 年落 t=K+j) / Operation years", fin["operation_years"]),
+        ("币种 / Currency", ccy),
+        ("价格口径 / Price basis", fin["price_basis"]),
+        ("基年 / Base year", fin["base_year"]),
+        ("折现率(冻结) / Discount rate", fin["discount_rate"]),
         (
             "建设总额 C / Construction total",
-            f"{fin.get('construction_total')} {fin.get('construction_total_unit') or ccy}",
+            f"{fin['construction_total']} {fin['construction_total_unit']}",
         ),
     ]
-    payments = fin.get("payments_applied")
-    if isinstance(payments, list):
-        for item in payments:
-            if not isinstance(item, dict):
-                continue
-            rows.append(
-                (
-                    f"建设付款 t={item.get('t')} / Payment t={item.get('t')}",
-                    f"{item.get('ratio')} × C = {item.get('amount')} {ccy}",
-                )
+    for item in fin["payments_applied"]:
+        rows.append(
+            (
+                f"建设付款 t={item['t']} / Payment t={item['t']}",
+                f"{item['ratio']} × C = {item['amount']} {ccy}",
             )
-    annual = fin.get("annual_operation")
-    if isinstance(annual, list):
-        for index, item in enumerate(annual):
-            if not isinstance(item, dict):
-                continue
-            rows.append(
-                (
-                    f"运营年第 {index + 1} 年(t={item.get('financial_year')}) / Year {index + 1}",
-                    f"能源 {item.get('energy_net')} − 可变 {item.get('variable_om')} "
-                    f"− 固定 {item.get('fixed_om')} − 维护 {item.get('maintenance')} "
-                    f"= 净额 {item.get('net')} {ccy}",
-                )
+        )
+    for index, item in enumerate(fin["annual_operation"]):
+        rows.append(
+            (
+                f"运营年第 {index + 1} 年(t={item['financial_year']}) / Year {index + 1}",
+                f"能源 {item['energy_net']} − 可变 {item['variable_om']} "
+                f"− 固定 {item['fixed_om']} − 维护 {item['maintenance']} "
+                f"= 净额 {item['net']} {ccy}",
             )
-    ev_rows = evaluation.get("rows")
-    if isinstance(ev_rows, list):
-        for item in ev_rows:
-            if not isinstance(item, dict):
-                continue
-            rows.append(
-                (
-                    f"CF[t={item.get('year')}] 净额 / Net",
-                    f"{item.get('net')} {ccy}",
-                )
+        )
+    for item in evaluation["rows"]:
+        rows.append(
+            (
+                f"CF[t={item['year']}] 净额 / Net",
+                f"{item['net']} {ccy}",
             )
-            rows.append(
-                (
-                    f"CF[t={item.get('year')}] 贴现/累计/贴现累计",
-                    f"{item.get('discounted')} / {item.get('cumulative')} / "
-                    f"{item.get('cumulative_discounted')} {ccy}",
-                )
+        )
+        rows.append(
+            (
+                f"CF[t={item['year']}] 贴现/累计/贴现累计",
+                f"{item['discounted']} / {item['cumulative']} / "
+                f"{item['cumulative_discounted']} {ccy}",
             )
-    rows.append(("净现值 NPV / NPV", f"{evaluation.get('npv')} {evaluation.get('npv_unit') or ccy}"))
-    irr = evaluation.get("irr")
+        )
+    rows.append(("净现值 NPV / NPV", f"{evaluation['npv']} {evaluation['npv_unit']}"))
+    irr = evaluation["irr"]
     irr_text = (
-        f"{irr} / {evaluation.get('irr_status')}"
+        f"{irr} / {evaluation['irr_status']}"
         if irr is not None
-        else f"— / {evaluation.get('irr_status')}"
+        else f"— / {evaluation['irr_status']}"
     )
     rows.append(("内部收益率 IRR / IRR", irr_text))
     for key, label in (("static", "静态回收期"), ("dynamic", "动态回收期")):
-        value = evaluation.get(f"{key}_payback")
-        unit = evaluation.get(f"{key}_payback_unit") or ""
-        rows.append(
-            (
-                f"{label} / {key} payback",
-                f"{value} {unit} / {evaluation.get(f'{key}_status')}"
-                if value is not None
-                else f"— / {evaluation.get(f'{key}_status')}",
+        value = evaluation[f"{key}_payback"]
+        if value is not None:
+            rows.append(
+                (
+                    f"{label} / {key} payback",
+                    f"{value} {evaluation[f'{key}_payback_unit']} / {evaluation[f'{key}_status']}",
+                )
             )
-        )
+        else:
+            rows.append((f"{label} / {key} payback", f"— / {evaluation[f'{key}_status']}"))
     return rows
 
 
@@ -1439,8 +1424,12 @@ def export_excel(
     ):
         ws_s = wb.create_sheet(sheet_name)
         _set_sheet_title(ws_s, title_zh, title_en)
-        # 封存评价块走专用展平(同表同机制); 其他形态走通用节渲染。
-        rows = _financial_evaluation_rows(section) or _section_rows(section)
+        # 财务摘要表: 封存评价块走专用展平, 其他真实业务摘要(如旧
+        # financial 节)仍走通用节渲染; 非财务表一律通用渲染。
+        if title_zh == "财务摘要" and _is_sealed_evaluation(section):
+            rows = _sealed_evaluation_rows(section)
+        else:
+            rows = _section_rows(section)
         _write_kv(ws_s, rows if rows else [("无摘要数据 / No summary data", "—")])
 
     buf = io.BytesIO()
