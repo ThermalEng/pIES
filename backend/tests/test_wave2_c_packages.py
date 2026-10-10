@@ -131,10 +131,11 @@ def _fresh_db(engine: Engine) -> Session:
 
 
 def _seed_evidence(
-    db: Session, project_id: int, version_id: int, owner_id: int
+    db: Session, project_id: int, version_id: int, owner_id: int,
+    content_text: bytes | None = None,
 ) -> tuple[int, int]:
     """直接建任务/快照/证据包/评估/结果索引, 返回 (evidence_package_id, assessment_id)。"""
-    content = json.dumps(
+    content = content_text or json.dumps(
         {
             "kpis": [{"name": "年购电量", "value": 123456.7, "unit": "kWh"}],
             "financial": {"总投资": 1000, "IRR": 0.12},
@@ -296,6 +297,84 @@ def test_export_excel_usecase(client: TestClient, db: Session) -> None:
 
     new_title = load_workbook(io.BytesIO(new_bytes))["报告总览"].cell(row=1, column=1).value
     assert "pIES 项目结果报告" in new_title
+
+
+def _sealed_k1n2() -> dict:
+    """最小 K1N2 封存评价块(展示用, 含同年双维护已合计)。"""
+    return {
+        "status": "evaluated",
+        "evaluation_years": 3,
+        "construction_period": 1,
+        "operation_years": 2,
+        "currency": "CNY",
+        "price_basis": "tax_inclusive",
+        "base_year": 2025,
+        "discount_rate": "0.08",
+        "construction_total": "140000",
+        "construction_total_unit": "CNY",
+        "annual_fixed_om": "1400",
+        "payments_applied": [
+            {"t": 0, "ratio": "0.6", "amount": "84000.0"},
+            {"t": 1, "ratio": "0.4", "amount": "56000.0"},
+        ],
+        "annual_operation": [
+            {
+                "financial_year": 2, "energy_net": "10000", "variable_om": "100",
+                "fixed_om": "1400", "maintenance": "0", "net": "8500",
+            },
+            {
+                "financial_year": 3, "energy_net": "12000", "variable_om": "120",
+                "fixed_om": "1400", "maintenance": "3500.50", "net": "6979.50",
+            },
+        ],
+        "evaluation": {
+            "currency": "CNY", "evaluation_years": 3,
+            "rows": [
+                {"year": 0, "net": "-84000.0", "discounted": "-84000.0",
+                 "cumulative": "-84000.0", "cumulative_discounted": "-84000.0"},
+                {"year": 1, "net": "-56000.0", "discounted": "-51851.85",
+                 "cumulative": "-140000.0", "cumulative_discounted": "-135851.85"},
+                {"year": 2, "net": "8500", "discounted": "7288.07",
+                 "cumulative": "-131500.0", "cumulative_discounted": "-128563.78"},
+                {"year": 3, "net": "6979.50", "discounted": "5543.47",
+                 "cumulative": "-124520.50", "cumulative_discounted": "-123020.31"},
+            ],
+            "npv": "-123020.31", "npv_unit": "CNY",
+            "irr": None, "irr_status": "no_solution",
+            "static_payback": None, "static_status": "not_recovered",
+            "dynamic_payback": None, "dynamic_status": "not_recovered",
+        },
+    }
+
+
+def test_export_excel_renders_sealed_financial_evaluation(
+    client: TestClient, db: Session
+) -> None:
+    """Excel 财务摘要消费封存 financial_evaluation: K/N/E、付款时点、
+    运营年分量、CF[0..E]、NPV/IRR 状态同表展示, 不重算。"""
+    owner = _user(db, "w2c_xls_fin")
+    pid = _project(client, owner, "w2c-Excel财务项目")
+    vid = _version(client, owner, pid)
+    sealed = json.dumps(
+        {"kpis": [], "financial_evaluation": _sealed_k1n2()}, ensure_ascii=False
+    ).encode("utf-8")
+    ep_id, a_id = _seed_evidence(db, pid, vid, owner.id, content_text=sealed)
+    user = identity_domain.get_user(db, owner.id)
+    assert user is not None
+
+    new_bytes = transfers_uc.export_excel(db, user, pid, ep_id, a_id, lang="zh")
+    sheet = load_workbook(io.BytesIO(new_bytes))["财务摘要"]
+    text = "\n".join(str(cell.value) for row in sheet.iter_rows() for cell in row)
+    assert "评价年限 E" in text and "3" in text
+    assert "建设期 K" in text and "运营年限 N" in text
+    assert "建设总额 C" in text and "140000" in text
+    assert "建设付款 t=0" in text and "建设付款 t=1" in text
+    assert "运营年第 1 年(t=2)" in text and "运营年第 2 年(t=3)" in text
+    assert "3500.50" in text
+    assert "CF[t=0]" in text and "CF[t=3]" in text
+    assert "净现值 NPV" in text and "-123020.31" in text
+    assert "no_solution" in text and "not_recovered" in text
+
 
 
 def test_download_token_helpers_match_old() -> None:

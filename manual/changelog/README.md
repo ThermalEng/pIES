@@ -15,6 +15,32 @@
 
 ## Unreleased
 
+### 2026-10-10 — `0.12.0` 切片 T3：已封存评价的页面/导出收口（待 Codex 复审）
+
+**完成时间**：2026-10-10（Docker 定向验证与浏览器验收完成，待 Codex 复审；暂不合并）
+
+**版本进展**：产品版本仍为 `0.1.0`，不宣布 `0.12.0` 完成。本轮只收口已有封存结果的展示与导出：结果页新增“评价现金流（封存）”卡、Excel“财务摘要”表消费同一封存事实、缺块按因说明；未新增财务计算、存储或第二套结果。
+
+#### 更新了什么
+
+- 删 `compute_cases` 中 `period_variable_om.fixed` 不可达分支（triplet 禁止非 upfront 带 fixed）；合法 timeless 存量 driver 仍照常传递、年归属无定义由 finance 大声失败（未猜均摊，未改量纲契约）。
+- 封存块回显 `construction_period`/`operation_years`（冻结输入回显，供时轴映射展示）。
+- 结果读取同一入口投影：`result_view` 原样返回 `financial_evaluation`，并按可观察事实给出缺块原因（`outcome_not_normal`/`solution_not_requested`/`missing_unknown`），不把所有缺块猜为未请求 solution；不重算、不读最新配置。
+- 结果页“评价现金流（封存）”卡：K/N/E、建设总额与付款时点、运营年度分量、`CF[0..E]`、NPV/IRR/回收期与真实状态，金额为封存字符串原样；明确 t=0..K 为建设期、t=K+j 为第 j 年，不把 t=K 当第一年收益；无块时按原因说明，不伪装通过。
+- Excel 固定模板“财务摘要”表增加 `financial_evaluation` 键并展平同一封存事实（同表同机制）；旧形态走原通用渲染。无导出 schema 版本变化（固定模板即代码实现）。
+- 导出契约缺口结论：Excel 与项目包均无需新格式——财务块随证据内容字节已在包内，Excel 只需键名对接；已实现，无缺口。
+
+#### 解决了什么问题
+
+- Docker 真实 HiGHS + 浏览器：K1N2E3（付款 0.6/0.4，同 t=3 两笔维护 1000.00+2500.50）经 UI 确认→提交→完成→结果→导出全链；`CF=[-.6C,-.4C,R1,R2]`、维护合计 `3500.5` 只扣 CF[3]、IRR `no_solution` 在页面与 Excel 一致呈现。
+- 纯逻辑定向：封存展平与缺块原因 3 项全绿；链/冻结回归见提交报告。
+
+#### 明确未做
+
+- 合法 `period_variable_om` 标量 driver 的全期金额如何落年度：未裁决，本轮未处理（仍大声失败）。
+- 可选正固定建设费仍可见拒收（独立缺口）。
+- metrics-only 缺 solution 时不评价：按因说明，未强改 `outputs`。
+
 ### 2026-10-11 — `0.12.0` 切片 T2：评价时间轴现金流接通（待 Codex 复审）
 
 **完成时间**：2026-10-11（Docker 定向验证完成，待 Codex 复审；暂不合并）
@@ -23,21 +49,21 @@
 
 #### 更新了什么
 
-- 新增纯财务算法 `finance.timeline`：年度边界由运行起始年/分辨率/N 推导；能源按 `price[t]×e[t]` 逐点归集（purchase +/sale −，constant 与 time_series 同语义）；可变 O&M 接口 driver 按年真实归集、存量 driver 年均分；C 取已求解 `__upfront_capex` 分量和（固定+线性×优化容量）；年固定 O&M 取已求解年值；付款按冻结比例 `−ratio×C` 落款；维护按发生年扣减；复用既有 `evaluate_project_investment`（显式 E/费率/币种/口径/基年）得 NPV/IRR/回收期与明细。
+- 新增纯财务算法 `finance.timeline`：年度边界由运行起始年/分辨率/N 推导；能源按 `price[t]×e[t]` 逐点归集（purchase +/sale −，constant 与 time_series 同语义）；可变 O&M 只归集接口型（按年真实运行结果），存量型不参与年度归集（有传入即大声失败）；C 取已求解 `__upfront_capex` 分量和（固定+线性×优化容量）；年固定 O&M 取已求解年值；付款按冻结比例 `−ratio×C` 落款；维护按发生年扣减；复用既有 `evaluate_project_investment`（显式 E/费率/币种/口径/基年）得 NPV/IRR/回收期与明细。
 - Worker 接通：`compute_cases.build_financial_evaluation` 组装冻结事实（快照评价块、Effective、规范装配、物化序列/价格、适配输出业务值），只处理已求解且含 solution 输出的结果，其余不写财务块；`runner` 将结果注入同一 payload，随现有提交单元同事务封存（B4 边界不变）。
 - 未调用旧资金流构建器（无默认税率/折旧/融资）；不读最新配置；不重建生成器私有成本公式（单位换算走公共 `core.units`，分量语义以适配输出与财务契约为准）。
 - 复审修正（R1/R2/R3）：同年多项维护按年 Decimal 累加扣除，不限制年份唯一；年固定 O&M 与建设总额只计 new 实例（existing 只计可变费与能源，不计沉没费用）；按宪法 §2.6 删除 finance/worker 内部重复校验（提交/装配边界与适配器为权威入口，残缺自然错误可见），删除 `TimelineInputs.maintenance` 死字段；存量型可变 O&M 不参与年度归集（年费率经公开装配不可达，无口径费率年归属无定义），有传入即大声失败，不均摊、不执行；`solution.components` 由适配器保证，缺件自然失败，不补空；`ComputeResult.outputs` 的 Mapping 性由其构造保证，worker 只分支 solution 有无。
 
 #### 解决了什么问题
 
-- Docker 真实 HiGHS 链：K1N2E3（付款 0.6/0.4，C=140000 线性必建）`CF=[-.6C,-.4C,R1,R2]` 且 R1 != R2；同项目 +t=3 两笔维护（1000+2500.50）合计只扣 CF[3]；K0N2 闰年首年 + 必建固定费（C=1150000）全款 t0；存量计费热泵（静态 600kW）运行成功且 C/固定费不含沉没费用；NPV 与明细同源复算；全负现金流 IRR 状态如实为 `no_solution`。纯手算 9 项（边界/符号/归集/精确总额/年费率口径/无定义拒断）全绿。
+- Docker 真实 HiGHS 链：K1N2E3（付款 0.6/0.4，C=140000 线性必建）`CF=[-.6C,-.4C,R1,R2]` 且 R1 != R2；同项目 +t=3 两笔维护（1000+2500.50）合计只扣 CF[3]；K0N2 闰年首年 + 必建固定费（C=1150000）全款 t0；存量计费热泵（静态 600kW）运行成功且 C/固定费不含沉没费用；NPV 与明细同源复算；全负现金流 IRR 状态如实为 `no_solution`。纯手算 9 项（边界/符号/归集/精确总额/存量拒断）全绿。
 - 相邻回归：全期求解/计算链/worker 链/冻结定向（见提交报告）。
 
 #### 明确未做
 
 - T3 页面与导出收口、浏览器验收未实现；结果页展示与导出格式待 T3。
 - 未请求 solution 输出的已求解任务不写财务块：`outputs` 是用户结果物发布选项（`solution`/`metrics`），metrics-only 下解数据未发布，不重解释求解产物（不造第二套解对象）；T3 展示 solution 前提。
-- 存量型可变 O&M 无时间口径费率（如 timeless 的 property 费率、period_variable_om 的 fixed 常量）的年归属无权威定义，大声失败待裁决，未自行均摊。
+- 存量型可变 O&M 年归属无定义，大声失败待裁决，未自行均摊：timeless property 费率虽可装配但无年度规则；`period_variable_om.fixed` 经任何公开输入不可构造（triplet 禁止非 upfront 带 fixed），worker 已删对应不可达分支。
 - 可选正固定建设费仍可见拒收（独立缺口）。
 
 ### 2026-10-10 — `0.12.0` 切片 T1：建设包含式评价输入/冻结与运行口径切换（待 Codex 复审）

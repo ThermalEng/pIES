@@ -50,6 +50,8 @@ import type {
   Diagnostic,
   ExcelExportInput,
   EvidencePackageSummary,
+  FinancialAbsence,
+  FinancialEvaluationBlock,
   MetricValue,
   ResultAssessment,
   TaskDetail,
@@ -216,6 +218,10 @@ export default function ResultsPage() {
 
   // 选中证据包的结果数据
   const [metrics, setMetrics] = useState<Record<string, MetricValue> | null>(null)
+  /** 已封存财务评价(同一证据内容原样投影, 页面只展示不重算)。 */
+  const [finEval, setFinEval] = useState<FinancialEvaluationBlock | null>(null)
+  /** 缺块原因(有块为 null; 后端按可观察事实判定, 前端不猜测)。 */
+  const [finAbsence, setFinAbsence] = useState<FinancialAbsence>(null)
   const [noEvidence, setNoEvidence] = useState(false)
   const [resultDiag, setResultDiag] = useState<Diagnostic[]>([])
   const [assessments, setAssessments] = useState<ResultAssessment[]>([])
@@ -292,6 +298,8 @@ export default function ResultsPage() {
   useEffect(() => {
     if (!selectedPkgId) {
       setMetrics(null)
+      setFinEval(null)
+      setFinAbsence(null)
       setNoEvidence(false)
       setResultDiag([])
       setAssessments([])
@@ -312,6 +320,8 @@ export default function ResultsPage() {
         ])
         if (cancelled) return
         setMetrics(res?.metrics ?? null)
+        setFinEval(res?.financial ?? null)
+        setFinAbsence(res?.financialAbsence ?? null)
         // evidence_status=no_evidence: 任务存在但尚无证据包(后端显式状态, 非猜测)
         setNoEvidence(res?.evidence_status === 'no_evidence')
         setResultDiag(res?.diagnostics ?? [])
@@ -321,6 +331,8 @@ export default function ResultsPage() {
       } catch (err) {
         if (!cancelled) {
           setMetrics(null)
+          setFinEval(null)
+          setFinAbsence(null)
           setResultError(translateError(err as ApiError))
         }
       }
@@ -719,6 +731,21 @@ export default function ResultsPage() {
               ) : null}
             </Card>
           </div>
+
+          {/* 已封存财务评价: 只展示封存事实, 不重算; 缺块按后端判定原因说明, 不伪装通过 */}
+          {finEval ? (
+            <FinancialEvaluationCard fin={finEval} />
+          ) : finAbsence ? (
+            <div className="ies-section">
+              <Alert variant="warning">
+                {finAbsence === 'outcome_not_normal'
+                  ? t('ies.result.fin_absence_outcome_not_normal', { outcome: outcome ?? '—' })
+                  : finAbsence === 'solution_not_requested'
+                    ? t('ies.result.fin_absence_solution_not_requested')
+                    : t('ies.result.fin_absence_missing_unknown')}
+              </Alert>
+            </div>
+          ) : null}
 
           {/* 工程 */}
           <Card title={t('ies.result.eng_card')} className="ies-section">
@@ -1129,6 +1156,154 @@ function MetricGroup({
         </div>
       ) : null}
     </>
+  )
+}
+
+/** 已封存财务评价卡: 只展示封存事实, 不重算、不补默认折现率。金额为封存字符串原样。 */
+function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
+  const { t } = useI18n()
+  const ccy = fin.currency
+  const k = fin.construction_period ?? null
+  const n = fin.operation_years ?? null
+  const ev = fin.evaluation ?? null
+  const rows = ev?.rows ?? []
+  const payments = fin.payments_applied ?? []
+  const annual = fin.annual_operation ?? []
+  const irrStatus = ev?.irr_status ?? null
+  const irrKey: IrrStatusKey | null =
+    irrStatus === 'normal'
+      ? 'unique'
+      : irrStatus === 'no_solution' ||
+          irrStatus === 'multiple' ||
+          irrStatus === 'degenerate' ||
+          irrStatus === 'out_of_domain' ||
+          irrStatus === 'numeric_failure'
+        ? irrStatus
+        : null
+  const payback = (prefix: 'static' | 'dynamic'): { value: number | null; status: string | null } =>
+    prefix === 'static'
+      ? { value: ev?.static_payback ?? null, status: ev?.static_status ?? null }
+      : { value: ev?.dynamic_payback ?? null, status: ev?.dynamic_status ?? null }
+  const staticPb = payback('static')
+  const dynamicPb = payback('dynamic')
+  return (
+    <Card title={t('ies.result.fin_sealed_title')} className="ies-section">
+      <dl className="ies-kv">
+        <dt>{t('ies.result.fin_e')}</dt>
+        <dd>{fin.evaluation_years}</dd>
+        <dt>{t('ies.result.fin_k')}</dt>
+        <dd>{k ?? '—'}</dd>
+        <dt>{t('ies.result.fin_n')}</dt>
+        <dd>{n ?? '—'}</dd>
+        <dt>{t('ies.result.fin_construction_total')}</dt>
+        <dd>
+          {fin.construction_total ?? '—'} {fin.construction_total_unit ?? ccy}
+        </dd>
+        <dt>{t('ies.result.fin_discount')}</dt>
+        <dd>{fin.discount_rate ?? '—'}</dd>
+        <dt>{t('ies.result.fin_basis')}</dt>
+        <dd>
+          {fin.price_basis ?? '—'} / {t('ies.result.fin_base_year')}: {fin.base_year ?? '—'}
+        </dd>
+      </dl>
+      <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+        {t('ies.result.fin_axis_note')}
+      </p>
+      {payments.length > 0 ? (
+        <div style={{ marginTop: 'var(--ies-space-3)' }}>
+          <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+            {t('ies.result.fin_payments')}
+          </h3>
+          <table className="ies-metric-table">
+            <tbody>
+              {payments.map((p) => (
+                <tr key={p.t}>
+                  <td>
+                    {t('ies.result.fin_t_payment', { year: p.t })}
+                  </td>
+                  <td>
+                    {p.ratio} × C = {p.amount} {ccy}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {annual.length > 0 ? (
+        <div style={{ marginTop: 'var(--ies-space-3)' }}>
+          <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+            {t('ies.result.fin_yearly')}
+          </h3>
+          <table className="ies-metric-table">
+            <tbody>
+              {annual.map((a, i) => (
+                <tr key={a.financial_year}>
+                  <td>{t('ies.result.fin_year_row', { j: i + 1, year: a.financial_year })}</td>
+                  <td>
+                    {a.energy_net} − {a.variable_om} − {a.fixed_om} − {a.maintenance} = {a.net} {ccy}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      {rows.length > 0 ? (
+        <div style={{ marginTop: 'var(--ies-space-3)' }}>
+          <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+            {t('ies.result.fin_cf_table')}
+          </h3>
+          <table className="ies-metric-table">
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.year}>
+                  <td>CF[t={r.year}]</td>
+                  <td>
+                    {r.net} / {r.discounted} / {r.cumulative} / {r.cumulative_discounted} {ccy}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+      <div style={{ marginTop: 'var(--ies-space-3)' }}>
+        <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
+          {t('ies.result.fin_metrics')}
+        </h3>
+        <dl className="ies-kv">
+          <dt>NPV</dt>
+          <dd>
+            {ev?.npv ?? '—'} {ev?.npv_unit ?? ccy}
+          </dd>
+          <dt>{t('ies.result.irr')}</dt>
+          <dd>{ev?.irr ?? '—'}</dd>
+          <dt>{t(IRR_STATUS_KEY)}</dt>
+          <dd>
+            {irrKey ? (
+              <Badge
+                variant={irrKey === 'unique' ? 'success' : 'warning'}
+                icon={irrKey === 'unique' ? 'check' : 'warning'}
+                label={t(`ies.result.irr_${irrKey}`)}
+              />
+            ) : (
+              '—'
+            )}
+          </dd>
+          <dt>{t('ies.result.fin_payback_static')}</dt>
+          <dd>
+            {staticPb.value ?? '—'} {staticPb.value !== null ? t('ies.result.fin_year_unit') : ''}{' '}
+            {staticPb.status ? t(`ies.result.fin_pb_${staticPb.status}`) : ''}
+          </dd>
+          <dt>{t('ies.result.fin_payback_dynamic')}</dt>
+          <dd>
+            {dynamicPb.value ?? '—'} {dynamicPb.value !== null ? t('ies.result.fin_year_unit') : ''}{' '}
+            {dynamicPb.status ? t(`ies.result.fin_pb_${dynamicPb.status}`) : ''}
+          </dd>
+        </dl>
+      </div>
+    </Card>
   )
 }
 

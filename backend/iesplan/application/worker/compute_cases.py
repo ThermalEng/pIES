@@ -632,17 +632,8 @@ def build_financial_evaluation(
             fixed_values.append(float(components[f"{inst}__annual_fixed_om"]["value"]))
         variable = ft_entry.period_variable_om
         if variable is not None:
-            if variable.fixed is not None:
-                property_drivers.append(
-                    PropertyDriverFacts(
-                        inst=inst,
-                        driver="*fixed*",
-                        quantity=1.0,
-                        unit="1",
-                        unit_cost=variable.fixed.value,
-                        unit_cost_unit=variable.fixed.unit,
-                    )
-                )
+            # period_variable_om 只有 linear(triplet 禁止非 upfront 带 fixed);
+            # 存量型 linear driver 照常传递, 年归属无定义由 finance 大声失败。
             for driver, cost in (variable.linear or {}).items():
                 target = entry["drivers"][driver]
                 if "property" in target:
@@ -724,6 +715,9 @@ def build_financial_evaluation(
     return {
         "status": "evaluated",
         "evaluation_years": years,
+        # K/N 回显冻结输入(展示时轴映射用, 不做第二权威读取)。
+        "construction_period": period,
+        "operation_years": operation,
         "currency": currency,
         "price_basis": finance.price_basis,
         "base_year": finance.base_year,

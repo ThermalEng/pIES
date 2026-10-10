@@ -23,6 +23,7 @@ metrics 状态模型; 不导入 ``models.*``。
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -770,6 +771,29 @@ def read_hourly(
     }
 
 
+def _financial_absence(
+    business_outcome: str | None,
+    financial: Any,
+    snapshot_id: int | None,
+    db: Session,
+) -> str | None:
+    """财务评价缺块原因(只读派生, 不校验、不重算)。
+
+    有块返回 None; 无块时按可观察事实区分, 不把所有缺块猜为未请求
+    solution(是否请求以快照 outputs 为准)。
+    """
+    if financial is not None:
+        return None
+    if business_outcome != "normal_completion":
+        return "outcome_not_normal"
+    snapshot = tasks_domain.get_snapshot(db, snapshot_id) if snapshot_id else None
+    config = snapshot.calc_config_snapshot if snapshot is not None else None
+    outputs = config.get("outputs") if isinstance(config, Mapping) else None
+    if isinstance(outputs, list) and "solution" not in outputs:
+        return "solution_not_requested"
+    return "missing_unknown"
+
+
 def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) -> dict[str, Any]:
     """结果视图: 四维结论/业务结局/指标摘要/逐时结果引用/当前选中。
 
@@ -808,6 +832,17 @@ def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) ->
         ),
         "assessment": assessment_to_dict(db, assessment) if assessment is not None else None,
         "metrics_summary": content.get("metrics") if content else None,
+        # 已封存财务评价(同一证据内容原样投影, 不重算、不读最新配置)。
+        "financial_evaluation": content.get("financial_evaluation") if content else None,
+        # 缺块原因(可观察事实, 不猜测): outcome_not_normal=未求解/无可行方案;
+        # solution_not_requested=快照 outputs 未请求 solution; missing_unknown=
+        # 请求了 solution 仍无块(如历史证据); 有块时为 None。
+        "financial_absence": _financial_absence(
+            task.business_outcome,
+            content.get("financial_evaluation") if content else None,
+            task.calc_snapshot_id,
+            db,
+        ),
         # 证据内容中的候选解列表(方案评价单解 / 规划候选列表, 含 IRR/NPV)
         "candidates": (
             content.get("candidates") if content and isinstance(content.get("candidates"), list) else None

@@ -720,6 +720,61 @@ export interface ResultBundle {
   diagnostics: Diagnostic[]
 }
 
+/** 已封存财务评价块(0.12-T2; 后端原样投影, 前端只展示不重算)。 */
+export interface FinancialEvaluationPayment {
+  t: number
+  ratio: string
+  amount: string
+}
+
+export interface FinancialEvaluationYear {
+  financial_year: number
+  energy_net: string
+  variable_om: string
+  fixed_om: string
+  maintenance: string
+  net: string
+}
+
+export interface FinancialEvaluationRow {
+  year: number
+  net: string
+  discounted: string
+  cumulative: string
+  cumulative_discounted: string
+}
+
+export interface FinancialEvaluationBlock {
+  status: string
+  evaluation_years: number
+  /** 旧证据可能缺失, 缺失时展示为未知, 不推导。 */
+  construction_period?: number | null
+  operation_years?: number | null
+  currency: string
+  price_basis?: string | null
+  base_year?: number | null
+  discount_rate?: string | null
+  construction_total?: string | null
+  construction_total_unit?: string | null
+  annual_fixed_om?: string | null
+  payments_applied?: FinancialEvaluationPayment[]
+  annual_operation?: FinancialEvaluationYear[]
+  evaluation?: {
+    rows?: FinancialEvaluationRow[]
+    npv?: string | null
+    npv_unit?: string | null
+    irr?: number | null
+    irr_status?: string | null
+    static_payback?: number | null
+    static_status?: string | null
+    dynamic_payback?: number | null
+    dynamic_status?: string | null
+  } | null
+}
+
+/** 财务评价缺块原因(后端按可观察事实判定, 有块时为 null)。 */
+export type FinancialAbsence = 'outcome_not_normal' | 'solution_not_requested' | 'missing_unknown' | null
+
 export type ReportType = 'excel' | 'pdf' | 'html'
 
 export type ReportStatus = 'generating' | 'ready' | 'failed'

@@ -44,6 +44,8 @@ import type {
   Diagnostic,
   EnergyCarrier,
   ExcelExportInput,
+  FinancialAbsence,
+  FinancialEvaluationBlock,
   DraftModelSection,
   HealthStatus,
   LoginRequest,
@@ -1427,6 +1429,10 @@ export const api = {
       evidence_package_id: number
       metrics: Record<string, MetricValue> | null
       diagnostics: Diagnostic[]
+      /** 已封存财务评价(同一证据内容原样投影, 无块为 null)。 */
+      financial: FinancialEvaluationBlock | null
+      /** 缺块原因(有块为 null; 后端按可观察事实判定)。 */
+      financialAbsence: FinancialAbsence
     }> {
       return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then((body) => {
         // 后端返回 {result: {evidence_status, evidence, metrics_summary, ...}}
@@ -1435,6 +1441,8 @@ export const api = {
         // 缓存原始响应, hourly 复用同一次 GET(避免选中包时重复请求同一端点)
         resultBodyCache.set(`${projectId}:${taskId}`, r)
         const status = r.evidence_status === 'no_evidence' ? 'no_evidence' : 'available'
+        const fin = r.financial_evaluation as FinancialEvaluationBlock | null | undefined
+        const absence = r.financial_absence as FinancialAbsence | undefined
         return {
           evidence_status: status,
           evidence_package_id: Number(evidence.id ?? 0),
@@ -1443,6 +1451,9 @@ export const api = {
               ? null
               : ((r.metrics_summary as Record<string, MetricValue>) ?? {}),
           diagnostics: [],
+          financial:
+            status === 'no_evidence' || fin === null || fin === undefined ? null : fin,
+          financialAbsence: fin ? null : (absence ?? null),
         }
       })
     },

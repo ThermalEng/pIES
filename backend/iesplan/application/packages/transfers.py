@@ -1124,6 +1124,104 @@ def _write_kv(ws, rows: list[tuple[str, Any]], start_row: int = 3) -> int:
     return row
 
 
+def _financial_evaluation_rows(fin: Any) -> list[tuple[str, Any]] | None:
+    """已封存财务评价块 → 展示行(纯展示格式化, 不重算、不读最新配置)。
+
+    只认 0.12-T2 封存形态(``status == "evaluated"`` 含 ``evaluation``);
+    其他形态返回 None 走通用节渲染。金额均为封存字符串原样展示, 不转
+    浮点、不舍入; 旧证据缺 K/N 时该行记 "—", 不推导。
+    """
+    if not isinstance(fin, dict) or fin.get("status") != "evaluated":
+        return None
+    evaluation = fin.get("evaluation")
+    if not isinstance(evaluation, dict):
+        return None
+    ccy = fin.get("currency") or evaluation.get("currency") or ""
+    period = fin.get("construction_period")
+    operation = fin.get("operation_years")
+    rows: list[tuple[str, Any]] = [
+        ("评价年限 E / Evaluation years", fin.get("evaluation_years")),
+        (
+            "建设期 K(财务时点 t=0..K) / Construction period",
+            period if period is not None else "—",
+        ),
+        (
+            "运营年限 N(第 j 年落 t=K+j) / Operation years",
+            operation if operation is not None else "—",
+        ),
+        ("币种 / Currency", ccy or "—"),
+        ("价格口径 / Price basis", fin.get("price_basis") or "—"),
+        ("基年 / Base year", fin.get("base_year")),
+        ("折现率(冻结) / Discount rate", fin.get("discount_rate")),
+        (
+            "建设总额 C / Construction total",
+            f"{fin.get('construction_total')} {fin.get('construction_total_unit') or ccy}",
+        ),
+    ]
+    payments = fin.get("payments_applied")
+    if isinstance(payments, list):
+        for item in payments:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                (
+                    f"建设付款 t={item.get('t')} / Payment t={item.get('t')}",
+                    f"{item.get('ratio')} × C = {item.get('amount')} {ccy}",
+                )
+            )
+    annual = fin.get("annual_operation")
+    if isinstance(annual, list):
+        for index, item in enumerate(annual):
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                (
+                    f"运营年第 {index + 1} 年(t={item.get('financial_year')}) / Year {index + 1}",
+                    f"能源 {item.get('energy_net')} − 可变 {item.get('variable_om')} "
+                    f"− 固定 {item.get('fixed_om')} − 维护 {item.get('maintenance')} "
+                    f"= 净额 {item.get('net')} {ccy}",
+                )
+            )
+    ev_rows = evaluation.get("rows")
+    if isinstance(ev_rows, list):
+        for item in ev_rows:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                (
+                    f"CF[t={item.get('year')}] 净额 / Net",
+                    f"{item.get('net')} {ccy}",
+                )
+            )
+            rows.append(
+                (
+                    f"CF[t={item.get('year')}] 贴现/累计/贴现累计",
+                    f"{item.get('discounted')} / {item.get('cumulative')} / "
+                    f"{item.get('cumulative_discounted')} {ccy}",
+                )
+            )
+    rows.append(("净现值 NPV / NPV", f"{evaluation.get('npv')} {evaluation.get('npv_unit') or ccy}"))
+    irr = evaluation.get("irr")
+    irr_text = (
+        f"{irr} / {evaluation.get('irr_status')}"
+        if irr is not None
+        else f"— / {evaluation.get('irr_status')}"
+    )
+    rows.append(("内部收益率 IRR / IRR", irr_text))
+    for key, label in (("static", "静态回收期"), ("dynamic", "动态回收期")):
+        value = evaluation.get(f"{key}_payback")
+        unit = evaluation.get(f"{key}_payback_unit") or ""
+        rows.append(
+            (
+                f"{label} / {key} payback",
+                f"{value} {unit} / {evaluation.get(f'{key}_status')}"
+                if value is not None
+                else f"— / {evaluation.get(f'{key}_status')}",
+            )
+        )
+    return rows
+
+
 def export_excel(
     db: Session,
     user: UserRecord,
@@ -1324,7 +1422,7 @@ def export_excel(
             "财务摘要",
             "财务摘要",
             "Financial Summary",
-            _first_section(evidence_content, "financial", "finance"),
+            _first_section(evidence_content, "financial", "finance", "financial_evaluation"),
         ),
         (
             "环境摘要",
@@ -1341,7 +1439,8 @@ def export_excel(
     ):
         ws_s = wb.create_sheet(sheet_name)
         _set_sheet_title(ws_s, title_zh, title_en)
-        rows = _section_rows(section)
+        # 封存评价块走专用展平(同表同机制); 其他形态走通用节渲染。
+        rows = _financial_evaluation_rows(section) or _section_rows(section)
         _write_kv(ws_s, rows if rows else [("无摘要数据 / No summary data", "—")])
 
     buf = io.BytesIO()
