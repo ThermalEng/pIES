@@ -5,6 +5,8 @@
   不携带 year_offset(出现即未知字段阻断), to_dict/from_dict 往返一致;
   新增容量非负(显式负界拒收, 缺下界语义为 0);
 - 用户保存边界: 同实例同参数重复声明阻断(领域层), 跨参数声明通过;
+- 装配输入边界: 同实例同参数重复声明阻断(含变量名/字段定位),
+  同实例不同参数与同参数不同实例签发;
 - 装配结构边界: 手写 YAML 含 year_offset 即未知键阻断;
 - 任务提交边界: 正固定建设费 + 必建变量(下界 > 0)签发, 正固定费 +
   可选建设变量明确拒收(positive_fixed_cost_unsupported), fixed 缺席
@@ -174,6 +176,100 @@ def _strip_year_offset(text: str) -> str:
     return text.replace("      year_offset: 0\n", "").replace(
         "      year_offset: 1\n", ""
     )
+
+
+_PV_CAP_BLOCK = (
+    "    pv_cap:\n"
+    "      device_ref: pv1\n"
+    "      parameter: rated_capacity_kwp\n"
+    "      lower_bound: \"0\"\n"
+    "      upper_bound: \"500\"\n"
+    "      unit: kWp\n"
+)
+
+
+def _with_extra_var(text: str, block: str) -> str:
+    assert _PV_CAP_BLOCK in text
+    return text.replace(_PV_CAP_BLOCK, _PV_CAP_BLOCK + block, 1)
+
+
+def _var_block(
+    name: str, device_ref: str, parameter: str,
+    lower: str, upper: str, unit: str,
+) -> str:
+    return (
+        f"    {name}:\n"
+        f"      device_ref: {device_ref}\n"
+        f"      parameter: {parameter}\n"
+        f"      lower_bound: \"{lower}\"\n"
+        f"      upper_bound: \"{upper}\"\n"
+        f"      unit: {unit}\n"
+    )
+
+
+class TestAssemblyBoundaryUniqueness:
+    """装配输入边界: 同实例同参数只允许一个建设变量。
+
+    保存边界已有领域层检查(见 TestSaveBoundaryUniqueness)；手写装配
+    入口此前缺该规则，生成器 bound_prop 以后写入覆盖前者。
+    """
+
+    def test_duplicate_instance_parameter_rejected(self, init_registry):
+        text = _with_extra_var(
+            _strip_year_offset(_load("campus.assembly.yaml")),
+            _var_block("pv_cap_2", "pv1", "rated_capacity_kwp", "0", "100", "kWp"),
+        )
+        result = _validate(text)
+        assert result.artifact is None, [d.to_dict() for d in result.diagnostics]
+        matches = [
+            d for d in result.diagnostics
+            if d.code == "ASM-PLAN-003"
+            and d.params.get("reason") == "variable_duplicate_target"
+            and d.blocking
+        ]
+        assert len(matches) == 1
+        diag = matches[0]
+        assert diag.location.get("field") == "planning.variables.pv_cap_2"
+        assert diag.params.get("variable") == "pv_cap_2"
+        assert diag.params.get("conflict") == "pv_cap"
+
+    def test_same_instance_different_parameters_pass(self, init_registry):
+        text = _with_extra_var(
+            _strip_year_offset(_load("campus.assembly.yaml")),
+            _var_block("pv_irr", "pv1", "reference_irradiance", "0", "2000", "W/m2"),
+        )
+        result = _validate(text)
+        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
+
+    def test_same_parameter_different_instances_pass(self, init_registry):
+        text = _strip_year_offset(_load("campus.assembly.yaml"))
+        gas_device = (
+            "  gas1:\n"
+            "    definition:\n"
+            "      id: ies.device.gas_boiler\n"
+            "    asset_origin: existing\n"
+            "    properties: {}\n"
+            "    predefined_interfaces: {}\n"
+        )
+        anchor_devices = "        path: data/campus_heat.data.csv\n\nconnections:"
+        assert anchor_devices in text
+        text = text.replace(
+            anchor_devices,
+            "        path: data/campus_heat.data.csv\n" + gas_device + "\nconnections:",
+            1,
+        )
+        anchor_binding = "    heat_load:\n      type: none\n"
+        assert anchor_binding in text
+        text = text.replace(
+            anchor_binding, anchor_binding + "    gas1:\n      type: none\n", 1,
+        )
+        text = _with_extra_var(
+            text,
+            _var_block("gas_cap", "gas1", "rated_heat_kw", "0", "500", "kW")
+            + _var_block("hp_cap", "hp1", "rated_heat_kw", "0", "600", "kW"),
+        )
+        result = _validate(text)
+        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
 
 
 class TestSubmitBoundaryBuildScope:

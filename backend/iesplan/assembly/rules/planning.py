@@ -281,6 +281,10 @@ def check_planning(
     finance_dims, prod = finance_identifiers(doc, snapshot)
     allowed: dict[str, Counter] = dict(finance_dims)
     variables = planning.get("variables") or {}
+    # 同一实例同一参数只允许一个建设变量：与保存边界领域层
+    # validate_planning_domain 同一规则键，此处按装配诊断口径
+    # 报告（含变量名与字段定位）；只读已解析变量，不重验可信内容。
+    seen_targets: dict[tuple[str, str], str] = {}
     for var_name in sorted(variables):
         entry = variables[var_name]
         field = f"planning.variables.{var_name}"
@@ -292,6 +296,21 @@ def check_planning(
             _plan_fail(
                 diags, ASM_PLAN_UNDEF, field, "variable_invalid",
                 {"detail": str(exc)},
+            )
+            continue
+        target = (variable.device_ref, variable.parameter)
+        first = seen_targets.get(target)
+        if first is None:
+            seen_targets[target] = var_name
+        else:
+            _plan_fail(
+                diags, ASM_PLAN_UNDEF, field, "variable_duplicate_target",
+                {
+                    "variable": var_name,
+                    "conflict": first,
+                    "device_ref": variable.device_ref,
+                    "parameter": variable.parameter,
+                },
             )
             continue
         _check_build_scope(doc, snapshot, var_name, variable, diags)
