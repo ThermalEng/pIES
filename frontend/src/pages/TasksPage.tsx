@@ -416,26 +416,14 @@ export default function TasksPage() {
     [],
   )
 
-  /** 逻辑签名(类型 + 所引 revision + 参数指纹): 仅用于重复提交提示的
-   * 同输入判断, 不是幂等身份(幂等身份是完整幂等键, 由后端裁决)。 */
-  const logicalSigOf = useCallback(
-    (f: CreateForm): string => {
-      const params = buildParams(f)
-      // 评价签名只能使用后端幂等键格式集 [A-Za-z0-9._:-] 内的字符: 原始付款/
-      // 维护 JSON 含 []{}引号空格, 直接拼入必然 422, 故只取其确定性哈希
-      // (base36, 同 params 指纹机制; 同输入同哈希, 仍区分不同评价输入)。
-      const evalSig = `${f.constructionPeriod.trim()}_${f.operationYears.trim()}_${f.discountRate.trim()}_${stableHash(f.constructionPayments.trim())}_${stableHash(f.maintenanceExpenses.trim())}`
-      return `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}-e${evalSig}`
-    },
-    [buildParams, savedRevisionValue],
-  )
-
   /** 评价确认解析(提交边界必填; 空值/非法返回 null 由调用方提示, 后端仍为权威校验)。
    * 空字符串经 Number() 会静默变为 0, 必须先判空, 不得直接转数字。
    * 折现率为宪法 §7.3 比例口径(0..1), 与后端 TASK-REQ-015 同口径。
    * 评价年限不手填: 由建设期 K + 运营年限 N 自动派生 E=K+N 并随提交
    * 明确发送(关系成立由后端核对)。付款与维护为显式 JSON(无默认值;
-   * 无维护支出填 []), 形态由后端边界核对。 */
+   * 无维护支出填 []), 形态由后端边界核对。合法的数值写法(如 '+1'、
+   * 首尾空格、'0.080')按 Number() 接受, 展示 E 与签名都以此处解析出的
+   * 规范值为准, 不保留“显示—却接受该数值”的分裂。 */
   const parseEvaluation = useCallback((f: CreateForm) => {
     const periodRaw = f.constructionPeriod.trim()
     const operationRaw = f.operationYears.trim()
@@ -467,6 +455,26 @@ export default function TasksPage() {
       maintenance_expenses: maintenance,
     }
   }, [])
+
+  /** 逻辑签名(类型 + 所引 revision + 参数指纹): 仅用于重复提交提示的
+   * 同输入判断, 不是幂等身份(幂等身份是完整幂等键, 由后端裁决)。 */
+  const logicalSigOf = useCallback(
+    (f: CreateForm): string => {
+      const params = buildParams(f)
+      // 整个评价签名必须落在后端幂等键格式集 [A-Za-z0-9._:-] 内且有界:
+      // 合法表单取已解析规范值(K/N/费率规范文本 + 付款/维护 JSON 指纹),
+      // 不同写法但同数值(如 '+1' 与 '1')得同一签名; 非法表单取原始文本
+      // 指纹(仍合法有界, 仅用于对话框内提示, 提交仍走输入反馈)。
+      // 不另加数值上限, 不放宽后端键格式, 不新增安全哈希。
+      const parsed = parseEvaluation(f)
+      const evalSig =
+        parsed === null
+          ? `x${stableHash(`${f.constructionPeriod.trim()}|${f.operationYears.trim()}|${f.discountRate.trim()}|${f.constructionPayments.trim()}|${f.maintenanceExpenses.trim()}`)}`
+          : `${parsed.construction_period}_${parsed.operation_years}_${String(parsed.discount_rate)}_${stableHash(JSON.stringify(parsed.construction_payments))}_${stableHash(JSON.stringify(parsed.maintenance_expenses))}`
+      return `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}-e${evalSig}`
+    },
+    [buildParams, parseEvaluation, savedRevisionValue],
+  )
 
   const buildInput = useCallback(
     (f: CreateForm): TaskCreateInput => {
@@ -1004,11 +1012,11 @@ export default function TasksPage() {
           </FormField>
           <p className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
             {t('ies.task.evaluation_years_derived', {
+              // 与提交接受口径同源: 展示 E 取同一解析的规范值, 非法表单显 '—'
+              // (此前正则比 Number() 严格, '+1' 等合法写法显示与接受分裂)。
               years: (() => {
-                const k = form.constructionPeriod.trim()
-                const n = form.operationYears.trim()
-                if (!/^(0|[1-9]\d*)$/.test(k) || !/^[1-9]\d*$/.test(n)) return '—'
-                return String(Number(k) + Number(n))
+                const parsed = parseEvaluation(form)
+                return parsed === null ? '—' : String(parsed.evaluation_years)
               })(),
             })}
           </p>

@@ -173,6 +173,74 @@ test.describe('空值门禁(非画布 GUI)', () => {
     expect(submitResponse2.status()).toBe(201)
     await expect(page.locator('.ies-table__row').nth(1)).toBeVisible({ timeout: 15_000 })
 
+    // 数值写法边界('+1'/合法长小数): 接受口径与展示 E 同源, 发出的键仍
+    // 合法且不超 128。展示 E 应为 3(此前正则会显示 '—' 却接受提交)。
+    await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click()
+    const dialog3 = page.getByRole('dialog')
+    await dialog3.locator('#task-construction-period').fill('+1')
+    await dialog3.locator('#task-operation-years').fill('2')
+    await dialog3.locator('#task-discount-rate').fill('0.08000000000000000000000001')
+    await dialog3.locator('#task-construction-payments').fill('[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
+    await dialog3.locator('#task-maintenance-expenses').fill('[]')
+    await expect(dialog3.getByText(/评价年限 E=K\+N.*：3/)).toBeVisible({ timeout: 10_000 })
+    const [submitResponse3] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/projects/${projectId}/tasks`) && res.request().method() === 'POST',
+      ),
+      dialog3.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click(),
+    ])
+    const submitBody3 = submitResponse3.request().postDataJSON() as Record<string, unknown>
+    expect(submitBody3.evaluation).toEqual({
+      evaluation_years: 3,
+      construction_period: 1,
+      operation_years: 2,
+      discount_rate: 0.08,
+      construction_payments: [{ t: 0, ratio: 0.6 }, { t: 1, ratio: 0.4 }],
+      maintenance_expenses: [],
+    })
+    const key3 = submitBody3.idempotency_key as string
+    expect(key3).toMatch(/^[A-Za-z0-9._:-]{1,128}$/)
+    expect(key3.length).toBeLessThanOrEqual(128)
+    expect(submitResponse3.status()).toBe(201)
+    await expect(page.locator('.ies-table__row').nth(2)).toBeVisible({ timeout: 15_000 })
+
+    // 签名稳定性: 重开对话框填完全相同输入 → 重复提交提示出现(同签名);
+    // 确认后新键提交 201。改一个字段(费率) → 无提示直接提交(签名区分)。
+    await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click()
+    const dialog4 = page.getByRole('dialog')
+    await dialog4.locator('#task-construction-period').fill('1')
+    await dialog4.locator('#task-operation-years').fill('2')
+    await dialog4.locator('#task-discount-rate').fill('0.08')
+    await dialog4.locator('#task-construction-payments').fill('[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
+    await dialog4.locator('#task-maintenance-expenses').fill('[]')
+    await dialog4.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click()
+    await expect(page.getByText('检测到相同任务')).toBeVisible({ timeout: 10_000 })
+    const [submitResponse4] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/projects/${projectId}/tasks`) && res.request().method() === 'POST',
+      ),
+      page.getByRole('button', { name: '仍然提交' }).click(),
+    ])
+    expect(submitResponse4.status()).toBe(201)
+    await expect(page.locator('.ies-table__row').nth(3)).toBeVisible({ timeout: 15_000 })
+
+    await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click()
+    const dialog5 = page.getByRole('dialog')
+    await dialog5.locator('#task-construction-period').fill('1')
+    await dialog5.locator('#task-operation-years').fill('2')
+    await dialog5.locator('#task-discount-rate').fill('0.09')
+    await dialog5.locator('#task-construction-payments').fill('[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
+    await dialog5.locator('#task-maintenance-expenses').fill('[]')
+    const [submitResponse5] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/projects/${projectId}/tasks`) && res.request().method() === 'POST',
+      ),
+      dialog5.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click(),
+    ])
+    expect(submitResponse5.status()).toBe(201)
+    await expect(page.getByText('检测到相同任务')).toHaveCount(0)
+    await expect(page.locator('.ies-table__row').nth(4)).toBeVisible({ timeout: 15_000 })
+
     // 预期内噪声(与 config-revision.spec 同构, 精确到本项目路径与次数):
     // 空白项目在保存前读配置(工作台落地 + 配置页挂载各一次)必为“尚未保存”
     // 404(公开契约); 其余任何 console/pageerror/失败请求仍零容忍。
