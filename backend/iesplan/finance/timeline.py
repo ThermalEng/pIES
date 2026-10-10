@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from iesplan.core.contracts import horizon_year_boundary_steps
-from iesplan.core.units import dims_of, energy_to_joules, from_si, power_to_watts, to_si
+from iesplan.core.units import energy_to_joules, from_si, power_to_watts, to_si
 
 #: 计费方向记账符号(财务契约公开规则: purchase 为 +, sale 为 −;
 #: 方向由 Effective 边界保证, 此处直接取键)。
@@ -66,11 +66,12 @@ class InterfaceDriverFacts:
 
 @dataclass(frozen=True, slots=True)
 class PropertyDriverFacts:
-    """单个存量型可变 O&M driver 的事实(数量全期恒定)。
+    """单个存量型可变 O&M driver 的事实(数量全期恒定, 年归属无定义)。
 
-    年归集只认费率单位自带的时间口径: 年费率(单位含量纲 time, 如
-    CNY/kW/a)每年计 ``费率 × 存量``; 无时间口径的费率(CNY/kW 等)其
-    年归属无权威定义, 调用即大声失败, 不自行均摊。
+    存量 driver 不参与年度归集: 年费率(CNY/kW/a 等)经公开装配不可达
+    (装配量纲门禁对非 annual 分量只认 currency, 年费率被阻断); 无时间
+    口径的费率(CNY/kW 等)虽可装配, 但其全期合计归属哪一年无权威定
+    义。调用方如实传递, 此处调用即大声失败, 不均摊、不执行。
     """
 
     inst: str
@@ -141,11 +142,6 @@ def annual_energy_nets(
     return [_decimal(from_si(total, currency)) for total in nets]
 
 
-def _is_annual_rate(unit: str) -> bool:
-    """费率单位是否自带年时间口径(量纲含 time, 如 CNY/kW/a)。"""
-    return dims_of(unit).get("time", 0) < 0
-
-
 def annual_variable_om(
     *,
     step_seconds: float,
@@ -156,8 +152,9 @@ def annual_variable_om(
 ) -> list[Decimal]:
     """各运营年可变 O&M(成本为正)。
 
-    接口型按该年真实运行结果归集; 存量型只认年费率(每年计费率 × 存
-    量); 无时间口径的存量费率年归属无定义, 大声失败不均摊。
+    只归集接口型(按该年真实运行结果); 存量型年归属无定义, 有传入即
+    大声失败, 不均摊、不执行(年费率经公开装配不可达, 无口径费率无年
+    度规则, 见 ``PropertyDriverFacts``)。
     """
     nets = [0.0 for _ in boundaries]
     for facts in interface_drivers:
@@ -166,18 +163,10 @@ def annual_variable_om(
         for year, (start, end) in enumerate(boundaries):
             nets[year] += sum(rate_si * qty_j[step] for step in range(start, end))
     for facts in property_drivers:
-        if not _is_annual_rate(facts.unit_cost_unit):
-            raise ValueError(
-                f"可变 O&M {facts.inst}.{facts.driver} 存量费率单位无年时间口径"
-                f"({facts.unit_cost_unit!r}), 年归属无定义, 不均摊"
-            )
-        rate_si = to_si(float(facts.unit_cost), facts.unit_cost_unit)
-        qty_si = to_si(float(facts.quantity), facts.unit)
-        # 年费率 SI 含每秒口径, 乘单位制年秒数回到每年金额(与 to_si 同源,
-        # 非名义年天数假设; 费用是名义年金额, 不按闰年秒数分摊)。
-        yearly_si = rate_si * qty_si * to_si(1.0, "a")
-        for year in range(len(boundaries)):
-            nets[year] += yearly_si
+        raise ValueError(
+            f"可变 O&M {facts.inst}.{facts.driver} 为存量型 driver(费率"
+            f"{facts.unit_cost_unit!r}), 全期合计年归属无定义, 不均摊"
+        )
     return [_decimal(from_si(total, currency)) for total in nets]
 
 

@@ -2,8 +2,8 @@
 
 覆盖 ``finance.timeline`` 的时间口径(``finance.md``“项目建设安排与
 全周期现金流”): K1N2E3 付款 0.6/0.4 落款 ``CF=[-.6C,-.4C,R1,R2]``;
-维护只扣发生年; K0 全款 t0; 跨闰年边界; 购/售符号; 可变 O&M 接口与
-存量归集; 总额十进制精确; 形状错误大声失败。真实求解接通见
+维护只扣发生年; K0 全款 t0; 跨闰年边界; 购/售符号; 可变 O&M 接口
+归集与存量拒收; 总额十进制精确; 形状错误大声失败。真实求解接通见
 ``test_evaluation_cashflow_chain.py``。
 """
 
@@ -107,8 +107,12 @@ def test_sale_and_time_series_price_signs():
 
 
 def test_variable_om_interface_and_property():
-    """接口 driver 按年真实归集; 存量 driver 只认年费率(每年计费率×存量)。
-    无时间口径的存量费率年归属无定义, 大声失败不均摊。"""
+    """接口 driver 按年真实归集; 存量 driver 年归属无定义, 一律大声失败。
+
+    年费率(CNY/kW/a 等)经公开装配不可达(装配量纲门禁要求 product 为
+    currency, 见 rules/finance.py ``_expected_dims``); 无时间口径费率
+    (CNY/kW)虽可装配, 但年归属无权威定义。财务不执行任一存量路径,
+    不均摊。"""
     bounds = ((0, 2), (2, 4))
     by_interface = annual_variable_om(
         step_seconds=H,
@@ -129,41 +133,24 @@ def test_variable_om_interface_and_property():
     )
     assert float(by_interface[0]) == pytest.approx(float(Decimal("0.008") * 200), rel=1e-9)
     assert float(by_interface[1]) == pytest.approx(float(Decimal("0.008") * 600), rel=1e-9)
-    by_property = annual_variable_om(
-        step_seconds=H,
-        boundaries=bounds,
-        interface_drivers=[],
-        property_drivers=[
-            PropertyDriverFacts(
-                "hp",
-                "cap",
-                50.0,
-                "kW",
-                Decimal("28"),
-                "CNY/kW/a",
+    for rate_unit in ("CNY/kW/a", "CNY/kW"):
+        with pytest.raises(ValueError, match="年归属无定义"):
+            annual_variable_om(
+                step_seconds=H,
+                boundaries=bounds,
+                interface_drivers=[],
+                property_drivers=[
+                    PropertyDriverFacts(
+                        "hp",
+                        "cap",
+                        50.0,
+                        "kW",
+                        Decimal("28"),
+                        rate_unit,
+                    )
+                ],
+                currency="CNY",
             )
-        ],
-        currency="CNY",
-    )
-    assert float(by_property[0]) == pytest.approx(1400.0, rel=1e-9)
-    assert float(by_property[1]) == pytest.approx(1400.0, rel=1e-9)
-    with pytest.raises(ValueError, match="年归属无定义"):
-        annual_variable_om(
-            step_seconds=H,
-            boundaries=bounds,
-            interface_drivers=[],
-            property_drivers=[
-                PropertyDriverFacts(
-                    "hp",
-                    "cap",
-                    50.0,
-                    "kW",
-                    Decimal("28"),
-                    "CNY/kW",
-                )
-            ],
-            currency="CNY",
-        )
 
 
 def test_totals_are_decimal_exact():

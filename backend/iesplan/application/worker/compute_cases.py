@@ -551,7 +551,9 @@ def build_financial_evaluation(
 
     if result.math_status != "solved":
         return None
-    if not isinstance(result.outputs, Mapping) or "solution" not in result.outputs:
+    # outputs 为 Mapping 由 ComputeResult 构造时保证; 此处只分支用户结果物
+    # 发布选项(metrics-only 无 solution 即不评价, 不伪装)。
+    if "solution" not in result.outputs:
         return None
     evaluation = snapshot.evaluation
     period = int(evaluation["construction_period"])
@@ -564,7 +566,8 @@ def build_financial_evaluation(
     frozen_baseline = ProjectBaseline(resolution=baseline["resolution"], start_year=baseline["start_year"])
     step_seconds = frozen_baseline.step_duration * 3600.0
     boundaries = annual_boundaries(baseline["resolution"], baseline["start_year"], operation)
-    total_steps = boundaries[-1][1] if boundaries else 0
+    # operation_years ≥ 1 由提交边界保证, 年度边界恒非空, 不设空回退。
+    total_steps = boundaries[-1][1]
 
     series_map: dict[tuple[str, str], tuple[tuple[float, ...], str]] = {}
     for entry in materialized.series:
@@ -576,9 +579,9 @@ def build_financial_evaluation(
         price_map[entry.price_id] = (tuple(entry.values), entry.unit)
 
     variables = _solution_variables(result)
-    components = (result.outputs["solution"] or {}).get("components") or {}
-    if not isinstance(components, Mapping):
-        raise ValueError("求解结果 solution.components 缺失, 无法归集年度财务")
+    # solution 含 components 由适配器保证(请求 solution 时必写); 缺件即
+    # 自然 KeyError 可见, 不补空、不复核。
+    components = result.outputs["solution"]["components"]
 
     tariffs: list[TariffYearFacts] = []
     for binding_id in sorted(doc["tariff_bindings"]):

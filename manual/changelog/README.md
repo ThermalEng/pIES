@@ -26,7 +26,7 @@
 - 新增纯财务算法 `finance.timeline`：年度边界由运行起始年/分辨率/N 推导；能源按 `price[t]×e[t]` 逐点归集（purchase +/sale −，constant 与 time_series 同语义）；可变 O&M 接口 driver 按年真实归集、存量 driver 年均分；C 取已求解 `__upfront_capex` 分量和（固定+线性×优化容量）；年固定 O&M 取已求解年值；付款按冻结比例 `−ratio×C` 落款；维护按发生年扣减；复用既有 `evaluate_project_investment`（显式 E/费率/币种/口径/基年）得 NPV/IRR/回收期与明细。
 - Worker 接通：`compute_cases.build_financial_evaluation` 组装冻结事实（快照评价块、Effective、规范装配、物化序列/价格、适配输出业务值），只处理已求解且含 solution 输出的结果，其余不写财务块；`runner` 将结果注入同一 payload，随现有提交单元同事务封存（B4 边界不变）。
 - 未调用旧资金流构建器（无默认税率/折旧/融资）；不读最新配置；不重建生成器私有成本公式（单位换算走公共 `core.units`，分量语义以适配输出与财务契约为准）。
-- 复审修正（R1/R2/R3）：同年多项维护按年 Decimal 累加扣除，不限制年份唯一；年固定 O&M 与建设总额只计 new 实例（existing 只计可变费与能源，不计沉没费用）；按宪法 §2.6 删除 finance/worker 内部重复校验（提交/装配边界与适配器为权威入口，残缺自然错误可见），删除 `TimelineInputs.maintenance` 死字段；存量型可变 O&M 只认年费率单位时间口径（每年计费率×存量），无口径费率大声失败不均摊。
+- 复审修正（R1/R2/R3）：同年多项维护按年 Decimal 累加扣除，不限制年份唯一；年固定 O&M 与建设总额只计 new 实例（existing 只计可变费与能源，不计沉没费用）；按宪法 §2.6 删除 finance/worker 内部重复校验（提交/装配边界与适配器为权威入口，残缺自然错误可见），删除 `TimelineInputs.maintenance` 死字段；存量型可变 O&M 不参与年度归集（年费率经公开装配不可达，无口径费率年归属无定义），有传入即大声失败，不均摊、不执行；`solution.components` 由适配器保证，缺件自然失败，不补空；`ComputeResult.outputs` 的 Mapping 性由其构造保证，worker 只分支 solution 有无。
 
 #### 解决了什么问题
 
