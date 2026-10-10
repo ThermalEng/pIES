@@ -143,6 +143,36 @@ test.describe('空值门禁(非画布 GUI)', () => {
     expect(submitResponse.status()).toBe(201)
     await expect(page.locator('.ies-table__row').first()).toBeVisible({ timeout: 15_000 })
 
+    // K=1/N=2/E=3 二次提交: 付款 0.6/0.4 + 一条 amount 字符串维护。
+    // 幂等键不得含原始 JSON(引号/空格/超长 → 后端 422), 必须合法且 201;
+    // 不同评价输入签名必须与上一次不同(对话框重开换新随机段)。
+    await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click()
+    const dialog2 = page.getByRole('dialog')
+    await dialog2.locator('#task-construction-period').fill('1')
+    await dialog2.locator('#task-operation-years').fill('2')
+    await dialog2.locator('#task-discount-rate').fill('0.08')
+    await dialog2.locator('#task-construction-payments').fill('[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
+    await dialog2.locator('#task-maintenance-expenses').fill('[{"year": 3, "amount": "1000.00", "currency": "CNY"}]')
+    const [submitResponse2] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/projects/${projectId}/tasks`) && res.request().method() === 'POST',
+      ),
+      dialog2.getByRole('button', { name: /^提交任务$|^Submit task$/i }).click(),
+    ])
+    const submitBody2 = submitResponse2.request().postDataJSON() as Record<string, unknown>
+    expect(submitBody2.evaluation).toEqual({
+      evaluation_years: 3,
+      construction_period: 1,
+      operation_years: 2,
+      discount_rate: 0.08,
+      construction_payments: [{ t: 0, ratio: 0.6 }, { t: 1, ratio: 0.4 }],
+      maintenance_expenses: [{ year: 3, amount: '1000.00', currency: 'CNY' }],
+    })
+    expect(submitBody2.idempotency_key).toMatch(/^[A-Za-z0-9._:-]{1,128}$/)
+    expect(submitBody2.idempotency_key).not.toBe(submitBody.idempotency_key)
+    expect(submitResponse2.status()).toBe(201)
+    await expect(page.locator('.ies-table__row').nth(1)).toBeVisible({ timeout: 15_000 })
+
     // 预期内噪声(与 config-revision.spec 同构, 精确到本项目路径与次数):
     // 空白项目在保存前读配置(工作台落地 + 配置页挂载各一次)必为“尚未保存”
     // 404(公开契约); 其余任何 console/pageerror/失败请求仍零容忍。

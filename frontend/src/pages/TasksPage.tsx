@@ -47,6 +47,8 @@ import type {
   CalcConfig,
   Dataset,
   Diagnostic,
+  EvaluationConstructionPayment,
+  EvaluationMaintenanceExpense,
   Task,
   TaskCreateInput,
   TaskDetail,
@@ -419,8 +421,10 @@ export default function TasksPage() {
   const logicalSigOf = useCallback(
     (f: CreateForm): string => {
       const params = buildParams(f)
-      // 评价签名分隔符须落在后端幂等键格式集 [A-Za-z0-9._:-] 内('/' 会被传输层 422 拒绝)。
-      const evalSig = `${f.constructionPeriod.trim()}_${f.operationYears.trim()}_${f.discountRate.trim()}_${f.constructionPayments.trim()}_${f.maintenanceExpenses.trim()}`
+      // 评价签名只能使用后端幂等键格式集 [A-Za-z0-9._:-] 内的字符: 原始付款/
+      // 维护 JSON 含 []{}引号空格, 直接拼入必然 422, 故只取其确定性哈希
+      // (base36, 同 params 指纹机制; 同输入同哈希, 仍区分不同评价输入)。
+      const evalSig = `${f.constructionPeriod.trim()}_${f.operationYears.trim()}_${f.discountRate.trim()}_${stableHash(f.constructionPayments.trim())}_${stableHash(f.maintenanceExpenses.trim())}`
       return `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}-e${evalSig}`
     },
     [buildParams, savedRevisionValue],
@@ -443,15 +447,17 @@ export default function TasksPage() {
     if (!Number.isInteger(period) || period < 0) return null
     if (!Number.isInteger(operation) || operation < 1) return null
     if (!Number.isFinite(rate) || rate < 0 || rate > 1) return null
-    let payments: unknown
-    let maintenance: unknown
+    let payments: EvaluationConstructionPayment[]
+    let maintenance: EvaluationMaintenanceExpense[]
     try {
-      payments = JSON.parse(f.constructionPayments)
-      maintenance = JSON.parse(f.maintenanceExpenses)
+      const rawPayments: unknown = JSON.parse(f.constructionPayments)
+      const rawMaintenance: unknown = JSON.parse(f.maintenanceExpenses)
+      if (!Array.isArray(rawPayments) || !Array.isArray(rawMaintenance)) return null
+      payments = rawPayments as EvaluationConstructionPayment[]
+      maintenance = rawMaintenance as EvaluationMaintenanceExpense[]
     } catch {
       return null
     }
-    if (!Array.isArray(payments) || !Array.isArray(maintenance)) return null
     return {
       evaluation_years: period + operation,
       construction_period: period,

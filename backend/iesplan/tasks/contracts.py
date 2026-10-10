@@ -180,7 +180,9 @@ def _as_decimal(value: object, field: str, *, allow_str: bool) -> Decimal:
     """JSON 数值/定点字符串 → Decimal(十进制语义; 拒 bool/非有限)。
 
     ``allow_str`` 为假时只接受 int/float(付款比例 ``ratio: number``);
-    为真时另接受定点字符串(维护金额 ``amount: Decimal``)。
+    为真时只接受定点字符串(维护金额 ``amount`` 的权威形态是十进制
+    字符串, 宪法 §7.3 禁止金额 JSON number; 不接受 int/float, 不能靠
+    ``float → str`` 事后补回已丢精度)。
     """
     if isinstance(value, bool):
         raise _evaluation_fail(
@@ -197,6 +199,12 @@ def _as_decimal(value: object, field: str, *, allow_str: bool) -> Decimal:
             )
         text = value
     elif isinstance(value, (int, float)):
+        if allow_str:
+            raise _evaluation_fail(
+                f"{field} 须为十进制定点字符串(禁止 JSON number)",
+                {field: value},
+                f"evaluation.{field}",
+            )
         text = str(value)
     else:
         raise _evaluation_fail(
@@ -222,8 +230,18 @@ def _as_decimal(value: object, field: str, *, allow_str: bool) -> Decimal:
 
 
 def _as_fixed_str(d: Decimal) -> str:
-    """Decimal → 规范定点字符串(冻结/复用身份用, 去指数形态)。"""
-    return format(d.normalize(), "f")
+    """Decimal → 规范定点字符串(冻结/复用身份用, 去指数形态)。
+
+    纯表示规范化, 不做数值舍入: 不得经 ``normalize()``(其行为受
+    Decimal 上下文精度影响, 会无提示改写已确认金额)。``format(d, "f")``
+    不改变数值(构造器本就不按上下文截断位数), 此处仅去指数形态与尾零。
+    """
+    text = format(d, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if text in ("-0", ""):
+        text = "0"
+    return text
 
 
 def parse_evaluation_input(raw: Mapping[str, Any] | None) -> EvaluationInput:
@@ -239,8 +257,9 @@ def parse_evaluation_input(raw: Mapping[str, Any] | None) -> EvaluationInput:
     付款比例按十进制语义求和须精确等于 1(时点为开工起整数年
     ``0..construction_period``); 维护发生年为财务时轴索引
     ``construction_period+1..evaluation_years``(对应 ``CF[year]``),
-    金额非负十进制, 币种为非空字符串(与有效财务配置一致性由提交边界
-    持快照核对, 不在此重复读取)。布尔值一律不接受为数值。
+    金额为非负十进制定点字符串(拒 JSON number, 无精度上限), 币种为非空
+    字符串(与有效财务配置一致性由提交边界持快照核对, 不在此重复读取)。
+    布尔值一律不接受为数值。
     返回不可变 ``EvaluationInput``。
     """
     if not isinstance(raw, Mapping):

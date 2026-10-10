@@ -53,28 +53,39 @@ def _eval(**overrides):
 # ---------------------------------------------------------------------------
 
 
-def test_evaluation_missing_or_malformed_blocked_015() -> None:
+def test_evaluation_missing_blocked_015() -> None:
+    """缺失形态专用: 块缺失/空/缺必填键/未知键 → 015。"""
     for raw in (
         None,
         {},
-        {"evaluation_years": 1},
+        {"evaluation_years": 3},
         {"discount_rate": 0.08},
-        {"evaluation_years": 0, "discount_rate": 0.08},
-        {"evaluation_years": -1, "discount_rate": 0.08},
-        {"evaluation_years": True, "discount_rate": 0.08},
-        {"evaluation_years": "1", "discount_rate": 0.08},
-        {"evaluation_years": 1, "discount_rate": -0.01},
-        {"evaluation_years": 1, "discount_rate": 1.01},
-        {"evaluation_years": 1, "discount_rate": 2},
-        {"evaluation_years": 1, "discount_rate": float("inf")},
-        {"evaluation_years": 1, "discount_rate": float("nan")},
-        {"evaluation_years": 1, "discount_rate": True},
-        {"evaluation_years": 1, "discount_rate": "0.08"},
-        {"evaluation_years": 1, "discount_rate": 0.08, "extra": 1},
+        dict(_eval(), extra=1),
     ):
         with pytest.raises(InvalidRequestError) as exc_info:
             parse_evaluation_input(raw)
         assert exc_info.value.code == "TASK-REQ-015", raw
+
+
+@pytest.mark.parametrize("years", [0, -1, True, "3", 1.0, None])
+def test_evaluation_bad_years_points_at_years_field(years) -> None:
+    """非法评价年限以完整合法基线为底只改单字段: 失败定位须指向
+    evaluation.evaluation_years(证明是年限规则被测, 非缺失门挡住)。"""
+    with pytest.raises(InvalidRequestError) as exc_info:
+        parse_evaluation_input(_eval(evaluation_years=years))
+    assert exc_info.value.code == "TASK-REQ-015"
+    assert (exc_info.value.location or {}).get("field") == "evaluation.evaluation_years"
+
+
+@pytest.mark.parametrize("rate", [-0.01, 1.01, 2, float("inf"), float("nan"), True, "0.08", None])
+def test_evaluation_bad_discount_rate_points_at_rate_field(rate) -> None:
+    """非法折现率以完整合法基线为底只改单字段: 失败定位须指向
+    evaluation.discount_rate(范围/布尔/非有限/字符串都被该规则拒绝)。
+    阴性对照见 test_evaluation_single_year_parses(0 与 1 合法)。"""
+    with pytest.raises(InvalidRequestError) as exc_info:
+        parse_evaluation_input(_eval(discount_rate=rate))
+    assert exc_info.value.code == "TASK-REQ-015"
+    assert (exc_info.value.location or {}).get("field") == "evaluation.discount_rate"
 
 
 def test_evaluation_multi_year_accepted_as_continuous_horizon() -> None:
@@ -252,12 +263,26 @@ def test_evaluation_maintenance_entry_normalized() -> None:
     assert parse_evaluation_input(_eval()).maintenance_expenses == (
         MaintenanceExpense(year=3, amount="1000", currency="CNY"),
     )
-    int_amount = _eval(
-        maintenance_expenses=[{"year": 2, "amount": 500, "currency": "CNY"}]
+
+
+@pytest.mark.parametrize("amount", [500, 1000.5, True])
+def test_evaluation_maintenance_number_amount_blocked_015(amount) -> None:
+    """维护金额权威形态是十进制定点字符串: int/float/bool 一律拒收
+    (不能靠 float→str 事后补回已丢精度)。"""
+    with pytest.raises(InvalidRequestError) as exc_info:
+        parse_evaluation_input(_eval(maintenance_expenses=[{"year": 3, "amount": amount, "currency": "CNY"}]))
+    assert exc_info.value.code == "TASK-REQ-015"
+    assert (exc_info.value.location or {}).get("field") == ("evaluation.maintenance_expenses[0].amount")
+
+
+def test_evaluation_maintenance_long_precision_string_kept_exact() -> None:
+    """超过默认 Decimal 精度的合法金额字符串不丢位: 纯表示规范化只去
+    指数形态与尾零, 不做数值舍入。"""
+    raw = "12345678901234567890123456789.123456789"
+    parsed = parse_evaluation_input(
+        _eval(maintenance_expenses=[{"year": 3, "amount": raw, "currency": "CNY"}])
     )
-    assert parse_evaluation_input(int_amount).maintenance_expenses == (
-        MaintenanceExpense(year=2, amount="500", currency="CNY"),
-    )
+    assert parsed.maintenance_expenses == (MaintenanceExpense(year=3, amount=raw, currency="CNY"),)
 
 
 # ---------------------------------------------------------------------------

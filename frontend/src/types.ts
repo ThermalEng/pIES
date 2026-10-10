@@ -523,6 +523,19 @@ export interface TaskListParams {
   limit?: number
 }
 
+/** 评价确认付款条目(公开输入形态: t 为开工起整数年, ratio 为 JSON number)。 */
+export interface EvaluationConstructionPayment {
+  t: number
+  ratio: number
+}
+
+/** 评价确认维护条目(公开输入形态: year 对应 CF[year], amount 为十进制定点字符串, 禁止 JSON number)。 */
+export interface EvaluationMaintenanceExpense {
+  year: number
+  amount: string
+  currency: string
+}
+
 export interface TaskCreateInput {
   project_id: EntityId
   type: TaskType
@@ -534,8 +547,8 @@ export interface TaskCreateInput {
     construction_period: number
     operation_years: number
     discount_rate: number
-    construction_payments: unknown[]
-    maintenance_expenses: unknown[]
+    construction_payments: EvaluationConstructionPayment[]
+    maintenance_expenses: EvaluationMaintenanceExpense[]
   }
   dataset_ids?: EntityId[]
   priority?: number
