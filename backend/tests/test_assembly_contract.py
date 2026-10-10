@@ -189,13 +189,13 @@ class TestSchemaFile:
         variables = schema["properties"]["planning"]["properties"]["variables"][
             "additionalProperties"
         ]
-        assert set(variables["required"]) == {"device_ref", "parameter", "year_offset"}
+        assert set(variables["required"]) == {"device_ref", "parameter"}
         assert set(variables["properties"]) == {
-            "device_ref", "parameter", "year_offset",
+            "device_ref", "parameter",
             "lower_bound", "upper_bound", "unit",
         }
         assert variables["additionalProperties"] is False
-        assert variables["properties"]["year_offset"] == {"type": "integer", "minimum": 0}
+        assert "year_offset" not in variables["properties"]
         assert variables["properties"]["lower_bound"]["type"] == ["integer", "string", "null"]
         assert variables["properties"]["upper_bound"]["type"] == ["integer", "string", "null"]
 
@@ -323,17 +323,15 @@ class TestSchemaParserAgreement:
             "x1": {
                 "device_ref": "hp1",
                 "parameter": "rated_heat_kw",
-                "year_offset": 0,
                 "lower_bound": 0,
                 "upper_bound": 1000,
                 "unit": "kW",
             },
-            "x2": {"device_ref": "bat1", "parameter": "capacity_kwh", "year_offset": 1},
+            "x2": {"device_ref": "bat1", "parameter": "capacity_kwh"},
             # 确定性投影输出规范十进制字符串界：结构层接受
             "x3": {
                 "device_ref": "pv1",
                 "parameter": "rated_capacity_kwp",
-                "year_offset": 0,
                 "lower_bound": "0",
                 "upper_bound": "500",
                 "unit": "kWp",
@@ -1051,7 +1049,6 @@ class TestPlanningGates:
             "    hp_capacity:\n"
             "      device_ref: hp1\n"
             "      parameter: rated_heat_kw\n"
-            "      year_offset: 0\n"
             "      lower_bound: 0\n"
             "      upper_bound: 1000\n"
             "      unit: kW\n"
@@ -1082,14 +1079,12 @@ class TestPlanningGates:
             "    pv_cap:\n"
             "      device_ref: pv1\n"
             "      parameter: rated_capacity_kwp\n"
-            "      year_offset: 0\n"
             '      lower_bound: "0"\n'
             '      upper_bound: "500"\n'
             "      unit: kWp",
             "    pv1__upfront_capex:\n"
             "      device_ref: hp1\n"
-            "      parameter: rated_heat_kw\n"
-            "      year_offset: 0",
+            "      parameter: rated_heat_kw",
         )
         self._reason(text, "ASM-PLAN-003", "variable_reserved_collision")
 
@@ -1098,14 +1093,12 @@ class TestPlanningGates:
             "    pv_cap:\n"
             "      device_ref: pv1\n"
             "      parameter: rated_capacity_kwp\n"
-            "      year_offset: 0\n"
             '      lower_bound: "0"\n'
             '      upper_bound: "500"\n'
             "      unit: kWp",
             "    hp_capacity:\n"
             "      device_ref: hp1\n"
-            "      parameter: rated_nope\n"
-            "      year_offset: 0",
+            "      parameter: rated_nope",
         )
         self._reason(text, "ASM-PLAN-003", "variable_unknown_parameter")
 

@@ -166,7 +166,6 @@ PLANNING_BODY = {
         "cap": {
             "device_ref": "bat1",
             "parameter": "rated_power_kw",
-            "year_offset": 0,
             "lower_bound": "0",
             "upper_bound": "100",
             "unit": "kW",

@@ -88,9 +88,9 @@ _TARIFF_BINDING_KEYS: tuple[str, ...] = ("price", "instance", "interface", "aggr
 #: planning 章节键(objective 必需；variables/constraints 缺席视为空)
 _PLANNING_KEYS: tuple[str, ...] = ("objective", "variables", "constraints")
 
-#: planning 变量条目允许键(公共 PlanningVariable 契约的结构侧)
+#: planning 变量条目允许键(公共 PlanningVariable 契约的结构侧；无年度索引)
 _VARIABLE_KEYS: tuple[str, ...] = (
-    "device_ref", "parameter", "year_offset",
+    "device_ref", "parameter",
     "lower_bound", "upper_bound", "unit",
 )
 
@@ -808,13 +808,6 @@ class _DocBuilder:
                     self._diag(
                         ASM_SYN_FIELD, f"{field}.{req}", {"reason": "empty_string"},
                     )
-        if "year_offset" not in entry:
-            self._diag(
-                ASM_SYN_FIELD, field,
-                {"reason": "missing_field", "key": "year_offset"},
-            )
-        else:
-            self._int(entry.get("year_offset"), f"{field}.year_offset")
         for bound in ("lower_bound", "upper_bound"):
             # 公共契约界为十进制: 确定性投影输出规范字符串，int 同样接受；
             # float/bool 与其他类型结构阻断(与 schema 接受集合一致)。

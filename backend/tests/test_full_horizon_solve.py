@@ -568,7 +568,6 @@ def _store_doc() -> dict:
                 "pmax": {
                     "device_ref": "store1",
                     "parameter": "cap_kwh",
-                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "500",
                     "unit": "kWh",
@@ -1257,17 +1256,17 @@ class TestTimeVaryingPriceTrueSolve:
         assert purchase != pytest.approx(avg_price * total_energy, rel=1e-3)
 
 
-#: F4b 分年投产真求解场景：光伏自发自用，首年不许建设、次年可建。
+#: 首年建设真求解场景：光伏自发自用，首年一次建设、全期在产。
 #: 负荷两年恒定 50kW；辐照恒 800W/m2、环境 25℃ 下每 kW 容量出力
-#: 0.8kW；次年容量上界 50kW（最大出力 40kW < 负荷，恒可行）。
+#: 0.8kW；建设上界 50kW（最大出力 40kW < 负荷，恒可行）。
 ANNUAL_LOAD_KW = 50.0
 ANNUAL_IRR_W_M2 = 800.0
 ANNUAL_TEMP_C = 25.0
 ANNUAL_CAP_UPPER_KW = 50.0
 ANNUAL_PV_KW_PER_KW = ANNUAL_IRR_W_M2 / 1000.0
-ANNUAL_Y1_PV_KW = ANNUAL_CAP_UPPER_KW * ANNUAL_PV_KW_PER_KW
-ANNUAL_Y0_IMPORT = ANNUAL_LOAD_KW * YEAR1_STEPS
-ANNUAL_Y1_IMPORT = (ANNUAL_LOAD_KW - ANNUAL_Y1_PV_KW) * YEAR2_STEPS
+ANNUAL_PV_KW = ANNUAL_CAP_UPPER_KW * ANNUAL_PV_KW_PER_KW
+ANNUAL_Y0_IMPORT = (ANNUAL_LOAD_KW - ANNUAL_PV_KW) * YEAR1_STEPS
+ANNUAL_Y1_IMPORT = (ANNUAL_LOAD_KW - ANNUAL_PV_KW) * YEAR2_STEPS
 
 
 def _annual_csv(dataset_id: str, device_id: str, column: str, unit: str, value: float) -> bytes:
@@ -1314,24 +1313,37 @@ def _craft_series_version(
     return version.id
 
 
-def _prepare_annual_project(
+def _prepare_build_project(
     client: TestClient, db: Session, user,
     *,
-    project_name: str = "分年投产测试项目",
-    y0_upper: str = "0",
-    y1_upper: str = "50",
-    y1_lower: str | None = "0",
+    project_name: str = "首年建设测试项目",
+    cap_upper: str = "50",
+    cap_lower: str | None = "0",
+    fixed_upfront: str | None = None,
 ) -> int:
-    """准备 F4b 分年项目：pv1 自发自用 + grid1 补足 + data_full 负荷。
+    """准备首年建设项目：pv1 自发自用 + grid1 补足 + data_full 负荷。
 
-    默认首年容量界 [0,0]、次年 [0,50]kW（取 finance.md 现实示例形态）；
-    finance 只有线性成本（固定 upfront 为 0，正固定成本另行拒收）。
-    y1_lower 为 None 时省略下界（模型语义下界为 0）。
+    单个建设变量首年一次建设、全期在产（取 finance.md 现实示例形态）；
+    fixed_upfront 为 None 时 finance 只有线性成本；为金额字符串时登记
+    含该正固定费的地区 Profile（必建变量可达常数计费路径）。
+    cap_lower 为 None 时省略下界（模型语义下界为 0）。
     """
+    import copy  # noqa: E402
+
     from iesplan.application import configuration as config_cases  # noqa: E402
 
     pid = _create_dated_project(client, user, project_name, START_YEAR)
     _declare_finance(db, user, pid)
+    if fixed_upfront is not None:
+        from test_config_revisions import PROFILE_PAYLOAD  # noqa: E402
+
+        payload = copy.deepcopy(PROFILE_PAYLOAD)
+        payload["profile"]["id"] = "cn-north-fixed-demo"
+        payload["finance_types"]["pv_system"]["upfront_capex"]["fixed"] = {
+            "value": fixed_upfront, "unit": "CNY",
+        }
+        config_cases.register_finance_profile(db, payload, user.id)
+        config_cases.set_project_finance_profile(db, pid, "cn-north-fixed-demo", user.id)
     load_vid = _craft_series_version(
         db, client, pid, user, "load2y",
         _annual_csv("load_two_years", "ies.device.electric_load",
@@ -1405,7 +1417,7 @@ def _prepare_annual_project(
                 "kind": "new",
                 "params": {
                     # temp_coeff 置 0（无温度折减；属性覆盖取标量，单位从 descriptor）：
-                    # 本测试只验收分年容量不验收温度折减（温度口径见
+                    # 本测试只验收首年建设容量不验收温度折减（温度口径见
                     # test_project_model.py 的参考温度测试；目录方程已用
                     # stc_reference_temperature 属性修正 K/°C 口径）。
                     "temp_coeff": 0,
@@ -1462,20 +1474,11 @@ def _prepare_annual_project(
             ),
         },
         "variables": {
-            "pv_cap_y0": {
+            "pv_cap": {
                 "device_ref": "pv1",
                 "parameter": "rated_capacity_kwp",
-                "year_offset": 0,
-                "lower_bound": "0",
-                "upper_bound": y0_upper,
-                "unit": "kWp",
-            },
-            "pv_cap_y1": {
-                "device_ref": "pv1",
-                "parameter": "rated_capacity_kwp",
-                "year_offset": 1,
-                **({} if y1_lower is None else {"lower_bound": y1_lower}),
-                "upper_bound": y1_upper,
+                **({} if cap_lower is None else {"lower_bound": cap_lower}),
+                "upper_bound": cap_upper,
                 "unit": "kWp",
             },
         },
@@ -1532,22 +1535,20 @@ def _solution_scalar(variables: list[dict], name: str) -> float:
     raise AssertionError(f"解变量缺失: {name}")
 
 
-class TestAnnualBuildTrueSolve:
+class TestFirstYearBuildTrueSolve:
     def test_two_year_build_serves_each_year_capacity(
         self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
-        """N=2 分年投产真求解：两年在产上限不同，建设变量有解。
+        """N=2 首年建设真求解：一次建设 50kW，全期在产服务两年负荷。
 
-        首年容量 [0,0]、次年 [0,50]kW：首年购电必须等于全年负荷，
-        次年购电为负荷减去新建 50kW 光伏出力，次年建设变量为 50。
-        旧生成器以单值覆盖全年：提交能通过，但首年行必引用次年变量
-        （首年购电被低估）或次年行被首年零界锁死（无建设），本测试
-        在旧代码上为红。不断言“提交通过”即完成。
+        两年购电均为负荷减去 50kW 光伏出力（首年 87600、次年 87840kWh），
+        建设变量为 50（边际新建仍省购电费，顶满上界）。下界省略覆盖
+        模型语义下界 0 路径。不断言“提交通过”即完成。
         """
         from sqlalchemy import select  # noqa: E402
 
-        user = make_user(db, "annual_owner_1")
-        pid = _prepare_annual_project(client, db, user)
+        user = make_user(db, "build_owner_1")
+        pid = _prepare_build_project(client, db, user, cap_lower=None)
         rev_resp = client.put(
             f"/api/projects/{pid}/config",
             json={"calculation_config": dict(_CONFIG_BODY), "expected_revision": None},
@@ -1558,18 +1559,18 @@ class TestAnnualBuildTrueSolve:
         status, body = _submit_task(
             client, pid, user, config={"config_revision": rev},
             evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
-            idempotency_key="annual-build-n2",
+            idempotency_key="build-n2",
         )
         assert status == 201, body
         task_id = int(body["task"]["id"])
-        claim = worker_app.acquire_attempt(db, task_id, "annual-e2e")
+        claim = worker_app.acquire_attempt(db, task_id, "build-e2e")
         assert claim is not None
         db.commit()
 
         def factory() -> Session:
             return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
 
-        assert runner.run_task(factory, claim, worker_id="annual-e2e", compute=plane) == "completed"
+        assert runner.run_task(factory, claim, worker_id="build-e2e", compute=plane) == "completed"
         task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task_row.status == "completed"
         assert task_row.business_outcome == "normal_completion"
@@ -1583,48 +1584,44 @@ class TestAnnualBuildTrueSolve:
         assert span == FULL_STEPS
         assert y0_import == pytest.approx(ANNUAL_Y0_IMPORT, rel=1e-6)
         assert y1_import == pytest.approx(ANNUAL_Y1_IMPORT, rel=1e-6)
-        assert (y0_import / YEAR1_STEPS) != pytest.approx(
+        # 同一容量服务两年：两年平均购电功率相等（均为负荷减 40kW 出力）。
+        assert (y0_import / YEAR1_STEPS) == pytest.approx(
             y1_import / YEAR2_STEPS, rel=1e-3
         )
-        assert _solution_scalar(solution["variables"], "pv_cap_y0") == pytest.approx(
-            0.0, abs=1e-6
-        )
-        assert _solution_scalar(solution["variables"], "pv_cap_y1") == pytest.approx(
+        assert _solution_scalar(solution["variables"], "pv_cap") == pytest.approx(
             ANNUAL_CAP_UPPER_KW, rel=1e-6
         )
 
 
-#: P1(1) 累计包络场景：两年均可正新增（y0≤40、y1≤22.5kW），次年在产
-#: 62.5kW 超过单年上界之最大（40）。辐照 800 下出力系数 0.8：
-#: 首年出力 32kW、次年 50kW（= 负荷，恒可行）。
-CUM_Y0_UPPER = 40.0
-CUM_Y1_UPPER = 22.5
-CUM_Y0_PV_KW = CUM_Y0_UPPER * ANNUAL_PV_KW_PER_KW
-CUM_Y1_PV_KW = (CUM_Y0_UPPER + CUM_Y1_UPPER) * ANNUAL_PV_KW_PER_KW
-CUM_Y0_IMPORT = (ANNUAL_LOAD_KW - CUM_Y0_PV_KW) * YEAR1_STEPS
-CUM_Y1_IMPORT = (ANNUAL_LOAD_KW - CUM_Y1_PV_KW) * YEAR2_STEPS
+#: 必建 + 正固定费场景：容量界 [10,40]kW，固定费 900000 CNY 计一次。
+#: 边际新建仍省购电费（0.8×0.75 ≫ 容量费率），建设顶满 40kW；
+#: 两年出力均为 32kW，购电为负荷减出力。
+FIXED_CAP_KW = 40.0
+FIXED_PV_KW = FIXED_CAP_KW * 0.8
+FIXED_Y0_IMPORT = (50.0 - FIXED_PV_KW) * 8760
+FIXED_Y1_IMPORT = (50.0 - FIXED_PV_KW) * 8784
 
 
-class TestAnnualCumulativeTrueSolve:
-    def test_cumulative_inservice_beyond_max_single_upper(
+class TestMandatoryFixedBuildTrueSolve:
+    def test_mandatory_build_with_positive_fixed_completes(
         self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
-        """N=2 累计在产真求解：次年在产 62.5kW > 单年上界最大 40kW。
+        """N=2 必建 + 正固定费真求解：提交签发、求解完成、建设顶满。
 
-        累计求和与省略下界（模型语义下界 0）的端到端回归：PV 出力口
-        无 max 引用，静态包络不影响本场景，故本测试在 cc97c0c 上亦
-        为绿；静态包络的证伪由结构测试与 TestAnnualEnvelopeTrueSolve
-        承担（旧代码上为红）。y1 省略下界，覆盖模型语义下界 0 路径。
+        下界 10 > 0 时建设必然发生，固定费按常数计一次精确；旧代码
+        要求 year_offset 且对正固定费一律拒收，本测试在旧代码上为红
+        （保存或提交阶段即失败）。固定费计一次的模型层证据见
+        test_mandatory_fixed_charge_counted_once。
         """
         from sqlalchemy import select  # noqa: E402
 
-        user = make_user(db, "annual_owner_2")
-        pid = _prepare_annual_project(
+        user = make_user(db, "build_owner_2")
+        pid = _prepare_build_project(
             client, db, user,
-            project_name="分年累计包络测试项目",
-            y0_upper="40",
-            y1_upper="22.5",
-            y1_lower=None,
+            project_name="首年必建固定费测试项目",
+            cap_upper="40",
+            cap_lower="10",
+            fixed_upfront="900000",
         )
         rev_resp = client.put(
             f"/api/projects/{pid}/config",
@@ -1636,18 +1633,18 @@ class TestAnnualCumulativeTrueSolve:
         status, body = _submit_task(
             client, pid, user, config={"config_revision": rev},
             evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
-            idempotency_key="annual-cumulative-n2",
+            idempotency_key="build-fixed-n2",
         )
         assert status == 201, body
         task_id = int(body["task"]["id"])
-        claim = worker_app.acquire_attempt(db, task_id, "annual-cum-e2e")
+        claim = worker_app.acquire_attempt(db, task_id, "build-fixed-e2e")
         assert claim is not None
         db.commit()
 
         def factory() -> Session:
             return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
 
-        assert runner.run_task(factory, claim, worker_id="annual-cum-e2e", compute=plane) == "completed"
+        assert runner.run_task(factory, claim, worker_id="build-fixed-e2e", compute=plane) == "completed"
         task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task_row.status == "completed"
         assert task_row.business_outcome == "normal_completion"
@@ -1659,26 +1656,19 @@ class TestAnnualCumulativeTrueSolve:
             solution["variables"], "grid1__electricity_import__t"
         )
         assert span == FULL_STEPS
-        assert y0_import == pytest.approx(CUM_Y0_IMPORT, rel=1e-6)
-        assert y1_import == pytest.approx(CUM_Y1_IMPORT, abs=1.0)
-        assert _solution_scalar(solution["variables"], "pv_cap_y0") == pytest.approx(
-            CUM_Y0_UPPER, rel=1e-6
-        )
-        assert _solution_scalar(solution["variables"], "pv_cap_y1") == pytest.approx(
-            CUM_Y1_UPPER, rel=1e-6
+        assert y0_import == pytest.approx(FIXED_Y0_IMPORT, rel=1e-6)
+        assert y1_import == pytest.approx(FIXED_Y1_IMPORT, rel=1e-6)
+        assert _solution_scalar(solution["variables"], "pv_cap") == pytest.approx(
+            FIXED_CAP_KW, rel=1e-6
         )
 
 
-#: P1(1) 包络真求解场景（热泵，无状态、无二进制、纯 LP）：
-#: 首年热负荷 30kW、次年 62.5kW；y0≤40、y1≤22.5kW。
-#: 次年负荷 62.5 恰为累计上界之和，强制两建设变量同时顶满
-#: （y0=40、y1=22.5，唯一解）；COP=3.2 下用电量精确可算。
-#: 次年在产 62.5kW > 单年上界之最大（40kW）：静态包络若取 max，
-#: 次年出力被假性截断（62.5>40 不可行）；正确包络为逐年累计。
+#: 首年建设热泵场景（无状态、无二进制、纯 LP）：
+#: 首年热负荷 30kW、次年 62.5kW；单个建设变量上界 62.5kW。
+#: 次年峰值负荷强制建设顶满（唯一解 62.5）；COP=3.2 下用电量精确可算。
 HP_Y0_LOAD = 30.0
 HP_Y1_LOAD = 62.5
-HP_Y0_UPPER = 40.0
-HP_Y1_UPPER = 22.5
+HP_CAP_UPPER = 62.5
 HP_COP = 3.2
 HP_Y0_IMPORT = (HP_Y0_LOAD / HP_COP) * YEAR1_STEPS
 HP_Y1_IMPORT = (HP_Y1_LOAD / HP_COP) * YEAR2_STEPS
@@ -1702,13 +1692,14 @@ def _heat_demand_csv() -> bytes:
 
 
 def _prepare_hp_project(client: TestClient, db: Session, user) -> int:
-    """准备 P1(1) 热泵项目：hp1 供热 + grid1 供电 + data_full 热负荷。
+    """准备首年建设热泵项目：hp1 供热 + grid1 供电 + data_full 热负荷。
 
-    三实例均无设备成本（只验收分年容量机制）；y1 省略下界。
+    三实例均无设备成本（只验收首年建设容量机制）；下界省略覆盖
+    模型语义下界 0 路径。
     """
     from iesplan.application import configuration as config_cases  # noqa: E402
 
-    pid = _create_dated_project(client, user, "分年热泵包络测试项目", START_YEAR)
+    pid = _create_dated_project(client, user, "首年建设热泵测试项目", START_YEAR)
     _declare_finance(db, user, pid)
     heat_vid = _craft_series_version(
         db, client, pid, user, "heat2y", _heat_demand_csv(),
@@ -1797,19 +1788,10 @@ def _prepare_hp_project(client: TestClient, db: Session, user) -> int:
             "expression": "import_meter__period_energy_purchase",
         },
         "variables": {
-            "hp_cap_y0": {
+            "hp_cap": {
                 "device_ref": "hp1",
                 "parameter": "rated_heat_kw",
-                "year_offset": 0,
-                "lower_bound": "0",
-                "upper_bound": "40",
-                "unit": "kW",
-            },
-            "hp_cap_y1": {
-                "device_ref": "hp1",
-                "parameter": "rated_heat_kw",
-                "year_offset": 1,
-                "upper_bound": "22.5",
+                "upper_bound": "62.5",
                 "unit": "kW",
             },
         },
@@ -1849,21 +1831,19 @@ def _prepare_hp_project(client: TestClient, db: Session, user) -> int:
     return pid
 
 
-class TestAnnualEnvelopeTrueSolve:
-    def test_cumulative_inservice_beyond_max_single_upper(
+class TestFirstYearHeatPumpTrueSolve:
+    def test_single_capacity_serves_two_year_loads(
         self, client: TestClient, db: Session, engine: Engine, plane
     ) -> None:
-        """N=2 包络真求解：次年在产 62.5kW > 单年上界之最大 40kW。
+        """N=2 首年热泵真求解：单个 62.5kW 容量服务两年不同热负荷。
 
-        静态包络若取 max(各年 upper)=40，次年 62.5kW 出力被假性截断；
-        正确包络为逐年累计，可行域不收窄。旧代码提交能通过（闸门
-        允许），但次年变量单值覆盖全年：首年上限 22.5 < 负荷 30，
-        求解必不可行；本测试在旧代码上为红（非“提交通过”式断言）。
-        y1 省略下界，覆盖模型语义下界 0 路径。
+        次年峰值 62.5kW 强制建设顶满（唯一解）；两年购电为各年热负荷
+        除以 COP（首年 82125、次年 171562.5kWh）。下界省略覆盖模型语义
+        下界 0 路径。不断言“提交通过”即完成。
         """
         from sqlalchemy import select  # noqa: E402
 
-        user = make_user(db, "annual_owner_3")
+        user = make_user(db, "build_owner_3")
         pid = _prepare_hp_project(client, db, user)
         rev_resp = client.put(
             f"/api/projects/{pid}/config",
@@ -1875,18 +1855,18 @@ class TestAnnualEnvelopeTrueSolve:
         status, body = _submit_task(
             client, pid, user, config={"config_revision": rev},
             evaluation={"evaluation_years": YEARS, "discount_rate": 0.08},
-            idempotency_key="annual-hp-envelope-n2",
+            idempotency_key="hp-build-n2",
         )
         assert status == 201, body
         task_id = int(body["task"]["id"])
-        claim = worker_app.acquire_attempt(db, task_id, "annual-hp-e2e")
+        claim = worker_app.acquire_attempt(db, task_id, "hp-build-e2e")
         assert claim is not None
         db.commit()
 
         def factory() -> Session:
             return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
 
-        assert runner.run_task(factory, claim, worker_id="annual-hp-e2e", compute=plane) == "completed"
+        assert runner.run_task(factory, claim, worker_id="hp-build-e2e", compute=plane) == "completed"
         task_row = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task_row.status == "completed"
         assert task_row.business_outcome == "normal_completion"
@@ -1900,9 +1880,6 @@ class TestAnnualEnvelopeTrueSolve:
         assert span == FULL_STEPS
         assert y0_import == pytest.approx(HP_Y0_IMPORT, rel=1e-6)
         assert y1_import == pytest.approx(HP_Y1_IMPORT, rel=1e-6)
-        assert _solution_scalar(solution["variables"], "hp_cap_y0") == pytest.approx(
-            HP_Y0_UPPER, rel=1e-6
-        )
-        assert _solution_scalar(solution["variables"], "hp_cap_y1") == pytest.approx(
-            HP_Y1_UPPER, rel=1e-6
+        assert _solution_scalar(solution["variables"], "hp_cap") == pytest.approx(
+            HP_CAP_UPPER, rel=1e-6
         )

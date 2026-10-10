@@ -1,14 +1,14 @@
-"""F4a 年度新增容量公开契约: 必填 year_offset + 保存/提交边界核对。
+"""首年建设容量公开契约: 无年度索引 + 保存/提交边界核对。
 
-覆盖(roadmap 0.12-4, assembly-yaml.md §分年投产):
-- 核心契约: PlanningVariable 缺 year_offset/非整数/负数阻断, 0 起整数
-  可用且 to_dict/from_dict 往返一致;
-- 用户保存边界: 同实例同参数同一年份重复声明阻断(领域层), 跨年/
-  跨参数声明通过; 0..N-1 范围不在本层(N 未知);
-- 装配结构边界: 手写 YAML 缺 year_offset/非整数阻断;
-- 任务提交边界(已确认 N): 越界 year_offset 阻断, 缺席 N 时不核对;
-  固定建设成本为正的 costed 实例变量缺显式上界阻断, fixed 缺席或
-  为零时不要求上界。
+覆盖(roadmap 0.12-4, assembly-yaml.md §首年建设与全周期运行优化):
+- 核心契约: PlanningVariable 按设备实例及参数定义建设容量与上下界,
+  不携带 year_offset(出现即未知字段阻断), to_dict/from_dict 往返一致;
+  新增容量非负(显式负界拒收, 缺下界语义为 0);
+- 用户保存边界: 同实例同参数重复声明阻断(领域层), 跨参数声明通过;
+- 装配结构边界: 手写 YAML 含 year_offset 即未知键阻断;
+- 任务提交边界: 正固定建设费 + 必建变量(下界 > 0)签发, 正固定费 +
+  可选建设变量明确拒收(positive_fixed_cost_unsupported), fixed 缺席
+  或为零不受影响; 无年度索引核对, 不猜 epsilon/最小建设量。
 """
 
 from __future__ import annotations
@@ -49,7 +49,6 @@ def _var(**overrides):
     base = {
         "device_ref": "pv_1",
         "parameter": "rated_capacity_kwp",
-        "year_offset": 0,
         "lower_bound": "0",
         "upper_bound": "1000",
         "unit": "kWp",
@@ -68,38 +67,20 @@ def _config(variables: dict) -> PlanningConfig:
     )
 
 
-class TestYearOffsetContract:
-    def test_missing_year_offset_rejected(self):
-        var = _var()
-        del var["year_offset"]
-        with pytest.raises(PlanningConfigError, match="缺少字段"):
-            PlanningConfig.from_dict(
-                {
-                    "objective": {"sense": "minimize", "expression": "0"},
-                    "variables": {"cap": var},
-                    "constraints": {},
-                }
-            )
+class TestBuildVariableContract:
+    def test_year_offset_rejected_as_unknown_field(self):
+        with pytest.raises(PlanningConfigError, match="未知字段"):
+            _config({"cap": _var(year_offset=0)})
 
-    @pytest.mark.parametrize("bad", [True, False, "0", 0.5, None, [0]])
-    def test_non_integer_year_offset_rejected(self, bad):
-        with pytest.raises(PlanningConfigError, match="year_offset"):
-            _config({"cap": _var(year_offset=bad)})
-
-    def test_negative_year_offset_rejected(self):
-        with pytest.raises(PlanningConfigError, match="year_offset"):
-            _config({"cap": _var(year_offset=-1)})
-
-
-    def test_year_offset_roundtrip(self):
-        config = _config({"cap": _var(year_offset=2)})
+    def test_roundtrip_without_year_offset(self):
+        config = _config({"cap": _var()})
+        assert "year_offset" not in config.to_dict()["variables"]["cap"]
         restored = PlanningConfig.from_dict(config.to_dict())
-        assert restored.variables["cap"].year_offset == 2
-        assert restored.to_dict()["variables"]["cap"]["year_offset"] == 2
+        assert restored.variables["cap"].lower_bound is not None
 
 
 class TestNewBuildNonNegative:
-    """年度新增容量非负（assembly-yaml.md 分年投产：在产累加语义）。
+    """年度新增容量非负（首年建设：在产即建设量语义）。
 
     新增不可为负：显式负下界/负上界在核心契约拒收；未填下界的
     模型语义下界为 0（新增量定义）。
@@ -126,7 +107,7 @@ class TestNewBuildNonNegative:
 
 
 class TestSaveBoundaryUniqueness:
-    def test_duplicate_instance_parameter_year_blocked(self):
+    def test_duplicate_instance_parameter_blocked(self):
         config = _config(
             {
                 "a": _var(),
@@ -140,41 +121,38 @@ class TestSaveBoundaryUniqueness:
         assert diags[0].code == "PROJ-PLAN-003"
         assert "a" in diags[0].params["detail"] and "b" in diags[0].params["detail"]
 
-    def test_same_instance_parameter_different_years_pass(self):
-        config = _config({"a": _var(year_offset=0), "b": _var(year_offset=1)})
-        assert validate_planning_domain(config) == []
-
-    def test_same_instance_year_different_parameters_pass(self):
+    def test_same_instance_different_parameters_pass(self):
         config = _config(
             {"a": _var(parameter="rated_capacity_kwp"), "b": _var(parameter="cap_kw")}
         )
         assert validate_planning_domain(config) == []
 
 
+def _ensure_year_offset_line(text: str) -> str:
+    """保证文本含一条 year_offset 声明（样例清理后也能构造旧输入）。"""
+    if "year_offset" in text:
+        return text
+    return text.replace(
+        '      parameter: rated_capacity_kwp\n',
+        '      parameter: rated_capacity_kwp\n      year_offset: 0\n',
+    )
+
+
 class TestAssemblyStructureBoundary:
-    def test_missing_year_offset_blocked(self):
-        text = _load("campus.assembly.yaml").replace("      year_offset: 0\n", "")
+    def test_year_offset_rejected_as_unknown_key(self):
+        text = _ensure_year_offset_line(_load("campus.assembly.yaml"))
+        assert "year_offset" in text
         parsed = parse_assembly_doc(text)
         assert parsed.doc is not None
         diags: list = []
         assert run_structure_checks(dict(parsed.doc), diags=diags) is None
         assert any(
-            d.code == "ASM-SYN-004"
-            and d.params.get("reason") == "missing_field"
+            d.code == "ASM-SYN-001"
+            and d.params.get("reason") == "unknown_key"
             and d.params.get("key") == "year_offset"
             and d.blocking
             for d in diags
         )
-
-    def test_string_year_offset_blocked(self):
-        text = _load("campus.assembly.yaml").replace(
-            "      year_offset: 0\n", '      year_offset: "0"\n'
-        )
-        parsed = parse_assembly_doc(text)
-        assert parsed.doc is not None
-        diags: list = []
-        assert run_structure_checks(dict(parsed.doc), diags=diags) is None
-        assert any(d.code == "ASM-SYN-005" and d.blocking for d in diags)
 
 
 def _validate(text: str, **kwargs):
@@ -192,29 +170,15 @@ def _reason(result, reason: str) -> None:
     )
 
 
-class TestSubmitBoundaryAnnualScope:
-    def test_year_zero_passes_for_single_year(self, init_registry):
-        result = _validate(_load("campus.assembly.yaml"), evaluation_years=1)
-        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
+def _strip_year_offset(text: str) -> str:
+    return text.replace("      year_offset: 0\n", "").replace(
+        "      year_offset: 1\n", ""
+    )
 
-    def test_out_of_range_year_blocked(self, init_registry):
-        text = _load("campus.assembly.yaml").replace(
-            "      year_offset: 0\n", "      year_offset: 1\n"
-        )
-        _reason(_validate(text, evaluation_years=1), "year_offset_out_of_range")
 
-    def test_later_year_passes_for_two_years(self, init_registry):
-        text = _load("campus.assembly.yaml").replace(
-            "      year_offset: 0\n", "      year_offset: 1\n"
-        )
-        result = _validate(text, evaluation_years=2)
-        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
-
-    def test_no_evaluation_years_skips_range(self, init_registry):
-        text = _load("campus.assembly.yaml").replace(
-            "      year_offset: 0\n", "      year_offset: 5\n"
-        )
-        result = _validate(text)
+class TestSubmitBoundaryBuildScope:
+    def test_no_year_index_needed(self, init_registry):
+        result = _validate(_strip_year_offset(_load("campus.assembly.yaml")))
         assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
 
     def _fixed_snapshot(self):
@@ -240,30 +204,33 @@ class TestSubmitBoundaryAnnualScope:
         assert old in text
         return text.replace(old, new)
 
-    def test_positive_fixed_cost_rejected_without_upper(self, init_registry):
-        # F4b：离散投产指示实现前，正固定成本案例明确拒收。
-        text = self._object_finance_text(_load("campus.assembly.yaml")).replace(
+    def test_mandatory_build_with_positive_fixed_passes(self, init_registry):
+        # 必建变量(下界 > 0)建设必然发生：固定费按常数计一次精确，签发。
+        text = self._object_finance_text(
+            _strip_year_offset(_load("campus.assembly.yaml"))
+        ).replace('      lower_bound: "0"\n', '      lower_bound: "10"\n')
+        result = _validate(
+            text,
+            finance_snapshots={"fin:test-fixed": self._fixed_snapshot()},
+        )
+        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
+
+    def test_optional_build_with_positive_fixed_rejected(self, init_registry):
+        # 可选建设变量(下界为 0/缺席) + 正固定费：LP 内无精确触发表达，
+        # 在离散建模实现前明确拒收，不放行旧按常数计费路径。
+        text = self._object_finance_text(
+            _strip_year_offset(_load("campus.assembly.yaml"))
+        )
+        result = _validate(
+            text,
+            finance_snapshots={"fin:test-fixed": self._fixed_snapshot()},
+        )
+        _reason(result, "positive_fixed_cost_unsupported")
+
+    def test_zero_fixed_cost_passes(self, init_registry):
+        # 园区样例 pv_system upfront fixed 为 0: 去掉上界仍签发。
+        text = _strip_year_offset(_load("campus.assembly.yaml")).replace(
             '      upper_bound: "500"\n', ""
         )
-        result = _validate(
-            text,
-            finance_snapshots={"fin:test-fixed": self._fixed_snapshot()},
-            evaluation_years=1,
-        )
-        _reason(result, "positive_fixed_cost_unsupported")
-
-    def test_positive_fixed_cost_rejected_with_upper(self, init_registry):
-        # F4b：已有显式上界也不得放行到旧按常数计费路径。
-        text = self._object_finance_text(_load("campus.assembly.yaml"))
-        result = _validate(
-            text,
-            finance_snapshots={"fin:test-fixed": self._fixed_snapshot()},
-            evaluation_years=1,
-        )
-        _reason(result, "positive_fixed_cost_unsupported")
-
-    def test_zero_fixed_cost_needs_no_upper(self, init_registry):
-        # 园区样例 pv_system upfront fixed 为 0: 去掉上界仍签发。
-        text = _load("campus.assembly.yaml").replace('      upper_bound: "500"\n', "")
-        result = _validate(text, evaluation_years=1)
+        result = _validate(text)
         assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]

@@ -621,7 +621,6 @@ def _prepare_project(
                 "cap": {
                     "device_ref": bat_ref,
                     "parameter": "capacity_kwh",
-                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "1000",
                     "unit": "kWh",

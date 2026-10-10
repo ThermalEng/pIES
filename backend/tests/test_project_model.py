@@ -264,7 +264,6 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
                 "tank_cap": {
                     "device_ref": "tank1",
                     "parameter": "rated_kw",
-                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "500",
                     "unit": "kW",
@@ -384,9 +383,9 @@ def _coeffs(expr) -> dict:
 
 def test_project_inventory_counts(built) -> None:
     model, units, _ = built
-    # F4b：单年度接管新增 1 个在产变量 + 1 条累加定义行（N=1）。
-    assert len(model.variables) == 61322
-    assert len(model.constraints) == 52562
+    # 首年建设：单个建设容量变量，无在产变量与累加定义行。
+    assert len(model.variables) == 61321
+    assert len(model.constraints) == 52561
     assert model.sense == "minimize"
     assert "tank_cap" in units
     assert units["tank_cap"] == "kW"
@@ -456,8 +455,8 @@ def test_objective_finance_and_tariff_terms(built) -> None:
     model, _, objective_unit = built
     coeffs = _coeffs(model.objective)
     # 年费率 SI 归一后 × 1 year(31536000s) → 0.035 CNY/W。
-    # F4b：年度接管后目标引用年在产变量（N=1 时 s_0 与原单变量值一致）。
-    assert coeffs["tank1__rated_kw__inservice_y0"] == pytest.approx(0.035, rel=1e-9)
+    # 首年建设：目标直接引用建设容量变量。
+    assert coeffs["tank_cap"] == pytest.approx(0.035, rel=1e-9)
     # 购能价 0.7 CNY/kWh → 每瓦负荷流量 0.0007 CNY
     assert coeffs["load1__heat_in__t0"] == pytest.approx(0.0007, rel=1e-9)
     assert coeffs["load1__heat_in__t8759"] == pytest.approx(0.0007, rel=1e-9)
@@ -717,7 +716,6 @@ def _gen_inputs():
             "gen_cap": {
                 "device_ref": "gen1",
                 "parameter": "cap_kw",
-                "year_offset": 0,
                 "lower_bound": "0",
                 "upper_bound": "500",
                 "unit": "kW",
@@ -725,7 +723,6 @@ def _gen_inputs():
             "gen_floor": {
                 "device_ref": "gen1",
                 "parameter": "floor_kw",
-                "year_offset": 0,
                 "lower_bound": "10",
                 "upper_bound": "500",
                 "unit": "kW",
@@ -733,7 +730,6 @@ def _gen_inputs():
             "spare_cap": {
                 "device_ref": "gen1",
                 "parameter": "spare_kw",
-                "year_offset": 0,
                 "lower_bound": "0",
                 "upper_bound": None,
                 "unit": "kW",
@@ -772,172 +768,99 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
     assert by_var["gen1__dispatch__t0"].upper == pytest.approx(500000.0)
     assert by_var["gen1__spare__t0"].upper is None
     rows = {row.name: row for row in model.constraints}
-    # F4b：容量行引用当年在产变量（此处 N=1，s_0 由定义行钉住与原单变量等值）。
+    # 首年建设：全期所有 step 的容量行引用同一建设容量变量。
     cap = rows["gen1__power_out__plan_max__t0"]
     assert (cap.sense, cap.rhs) == ("le", 0.0)
     assert _coeffs(cap.expression) == {
-        "gen1__power_out__t0": 1.0, "gen1__cap_kw__inservice_y0": -1.0,
+        "gen1__power_out__t0": 1.0, "gen_cap": -1.0,
+    }
+    late = rows["gen1__power_out__plan_max__t8759"]
+    assert _coeffs(late.expression) == {
+        "gen1__power_out__t8759": 1.0, "gen_cap": -1.0,
     }
     floor = rows["gen1__power_out__plan_min__t0"]
     assert (floor.sense, floor.rhs) == ("ge", 0.0)
     assert _coeffs(floor.expression) == {
-        "gen1__power_out__t0": 1.0, "gen1__floor_kw__inservice_y0": -1.0,
+        "gen1__power_out__t0": 1.0, "gen_floor": -1.0,
     }
     inner = rows["gen1__dispatch__plan_max__t0"]
     assert _coeffs(inner.expression) == {
-        "gen1__dispatch__t0": 1.0, "gen1__cap_kw__inservice_y0": -1.0,
+        "gen1__dispatch__t0": 1.0, "gen_cap": -1.0,
     }
     assert "gen1__spare__plan_max__t0" in rows
 
 
-def _gen_annual_inputs(objective: str | None = None):
-    """双年容量变量输入(N=2)：同一参数两年均可正新增（y0≤40、y1≤60kW）。
+def _gen_fixed_inputs():
+    """首年建设 + 正固定费输入（必建变量，下界 10 > 0）。
 
-    起始年 2026 为平年，年界为 step 8760。y1 省略下界（模型语义下界
-    为 0）。objective 为空时沿用 ``1 year * gen1__annual_fixed_om``
-    默认目标。返回 (model, units, decls)。
+    finance 取线性费率载荷并追加 upfront 分量：固定 900000 CNY 计一次，
+    容量线性 3500 CNY/kW 跟随建设量。返回 (model, decls)。
     """
-    _artifact, models, _materialized, finance, config = _gen_inputs()
+    _artifact, models, _materialized, _finance, config = _gen_inputs()
     doc = json.loads(_artifact.canonical_text)
-    if objective is not None:
-        doc["planning"]["objective"]["expression"] = objective
-    cap_y0 = {
-        "device_ref": "gen1",
-        "parameter": "cap_kw",
-        "year_offset": 0,
-        "lower_bound": "0",
-        "upper_bound": "40",
-        "unit": "kW",
-    }
-    cap_y1 = {
-        "device_ref": "gen1",
-        "parameter": "cap_kw",
-        "year_offset": 1,
-        "upper_bound": "60",
-        "unit": "kW",
-    }
     doc["planning"]["variables"] = {
-        "cap_y0": cap_y0,
-        "cap_y1": cap_y1,
-        "gen_floor": {
+        "gen_cap": {
             "device_ref": "gen1",
-            "parameter": "floor_kw",
-            "year_offset": 0,
+            "parameter": "cap_kw",
             "lower_bound": "10",
             "upper_bound": "500",
             "unit": "kW",
         },
-        "spare_cap": {
-            "device_ref": "gen1",
-            "parameter": "spare_kw",
-            "year_offset": 0,
-            "lower_bound": "10",
-            "upper_bound": None,
-            "unit": "kW",
-        },
     }
+    payload = _finance_payload()
+    payload["finance_types"]["tank_sys"]["upfront_capex"] = {
+        "fixed": {"value": "900000", "unit": "CNY"},
+        "linear": {"cap": {"unit_cost": {"value": "3500", "unit": "CNY/kW"}}},
+    }
+    finance = merge_effective(FinanceProfile.from_dict(payload), None)
     artifact = ValidatedAssemblyArtifact(
         canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
     )
     materialized = materialize_non_predictive_series(
-        artifact, {}, evaluation_years=2,
+        artifact, {}, evaluation_years=1,
     )
-    model, units, _ = build_project_model(
+    model, _, _ = build_project_model(
         artifact, models, materialized, finance, config,
     )
     decls = finance_component_declarations(artifact, models, materialized, finance)
-    return model, units, decls
+    return model, decls
 
 
-def test_annual_build_vars_form_inservice_capacity_per_year() -> None:
-    """跨年同参数变量：在产容量按年累加，逐年上限引用当年在产。
+def test_mandatory_fixed_charge_counted_once() -> None:
+    """必建变量 + 正固定费：固定费按常数计一次，容量费跟随建设量。
 
-    年 k 在产 = k 年及以前新增量之和；未声明年份新增量为 0。
-    旧实现以单值覆盖全年：首年行必引用次年变量（或定义行缺席），
-    本测试在旧代码上为红。
+    下界 > 0 时建设必然发生，常数计费精确；可选建设 + 正固定费在
+    输入边界拒收（见提交边界测试），不进入生成器。
     """
-    model, units, decls = _gen_annual_inputs()
-    s0 = "gen1__cap_kw__inservice_y0"
-    s1 = "gen1__cap_kw__inservice_y1"
-    assert units[s0] == "kW"
-    assert units[s1] == "kW"
-    rows = {row.name: row for row in model.constraints}
-    d0 = rows["gen1__cap_kw__inservice_def_y0"]
-    assert (d0.sense, d0.rhs) == ("eq", 0.0)
-    assert _coeffs(d0.expression) == {s0: 1.0, "cap_y0": -1.0}
-    d1 = rows["gen1__cap_kw__inservice_def_y1"]
-    assert (d1.sense, d1.rhs) == ("eq", 0.0)
-    assert _coeffs(d1.expression) == {s1: 1.0, "cap_y0": -1.0, "cap_y1": -1.0}
-    for step in (0, 8759):
-        row = rows[f"gen1__power_out__plan_max__t{step}"]
-        assert (row.sense, row.rhs) == ("le", 0.0)
-        assert _coeffs(row.expression) == {
-            f"gen1__power_out__t{step}": 1.0, s0: -1.0,
-        }
-    row1 = rows["gen1__power_out__plan_max__t8760"]
-    assert _coeffs(row1.expression) == {"gen1__power_out__t8760": 1.0, s1: -1.0}
-    by_var = {var.name: var for var in model.variables}
-    assert by_var["cap_y0"].upper == pytest.approx(40000.0)
-    assert by_var["cap_y1"].upper == pytest.approx(60000.0)
-    # 省略下界的新增变量模型语义下界为 0；在产同样非负。
-    assert by_var["cap_y1"].lower == pytest.approx(0.0)
-    assert by_var[s0].lower == pytest.approx(0.0)
-    assert by_var[s1].lower == pytest.approx(0.0)
-    # 静态包络不收窄可行域：逐年上限之和（次年在产可到 100 > 单年最大 60）。
-    assert by_var[s1].upper == pytest.approx(100000.0)
-    assert by_var["gen1__power_out__t0"].upper == pytest.approx(40000.0)
-    assert by_var["gen1__power_out__t8760"].upper == pytest.approx(100000.0)
-    annual = decls["gen1__annual_fixed_om"]
-    assert set(annual["terms"]) == {s0, s1}
-    assert annual["terms"][s0] == pytest.approx(annual["terms"][s1])
+    _, decls = _gen_fixed_inputs()
+    upfront = decls["gen1__upfront_capex"]
+    assert upfront["unit"] == "CNY"
+    assert upfront["constant"] == pytest.approx(900000.0)
+    assert upfront["terms"] == {"gen_cap": pytest.approx(3.5)}
 
 
-def test_annual_fixed_om_ident_is_yearly_average() -> None:
-    """分年容量下 annual_fixed_om 标识符为按年值（各年在产年平均）。
+def test_single_build_om_ident_is_annual_rate() -> None:
+    """首年建设下 annual_fixed_om 标识符为年费率×建设量（按年值）。
 
-    finance-yaml「时间口径与分量」：annual_fixed_om 量纲 currency/年，
-    “按年值，不随计算窗口缩放”。N=2 时标识符 = 年费率×(s_0+s_1)/2；
-    旧实现为年费率×(s_0+s_1)（窗口合计冒充年率），本测试在旧代码上为红。
+    在产全期即建设量，无年平均；用户要多年金额须在目标中显式乘时长。
     """
-    _, _, decls = _gen_annual_inputs()
-    s0 = "gen1__cap_kw__inservice_y0"
-    s1 = "gen1__cap_kw__inservice_y1"
+    artifact, models, materialized, finance, _ = _gen_inputs()
+    decls = finance_component_declarations(artifact, models, materialized, finance)
     annual = decls["gen1__annual_fixed_om"]
     rate_si = _to_internal(35.0, "CNY/kW/a")
-    assert annual["terms"][s0] == pytest.approx(rate_si / 2)
-    assert annual["terms"][s1] == pytest.approx(rate_si / 2)
+    assert annual["terms"] == {"gen_cap": pytest.approx(rate_si)}
+    assert annual["constant"] == pytest.approx(0.0)
 
 
-def test_annual_om_one_year_goal_is_average_year_amount() -> None:
-    """目标写 1 year 时得到平均一年金额（N=2 不同在产）。
+def test_single_build_one_year_goal_amount() -> None:
+    """目标写 1 year 时得到一年金额（年费率归一 × 建设量）。
 
-    年费率归一后 ×1 年 = 每瓦 0.035 CNY；取年平均后每个在产变量
-    系数减半。旧实现系数为全额（两年合计冒充一年金额），本测试在
-    旧代码上为红。
+    年费率归一后 ×1 年 = 每瓦 0.035 CNY。
     """
-    model, _, _ = _gen_annual_inputs()
+    artifact, models, materialized, finance, config = _gen_inputs()
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
     coeffs = _coeffs(model.objective)
-    assert coeffs["gen1__cap_kw__inservice_y0"] == pytest.approx(0.0175)
-    assert coeffs["gen1__cap_kw__inservice_y1"] == pytest.approx(0.0175)
-
-
-def test_annual_om_explicit_two_year_goal_is_horizon_total() -> None:
-    """目标显式写 2 year 时得到全期金额（各年真实费用之和）。
-
-    N 来自已确认年限、时长由用户明写；系统不改写目标、不加默认
-    时长、不折现。数值上等于旧实现的窗口合计，但含义为显式全期
-    金额而非年率。旧实现下该表达式先合计再乘时长、给出两倍金额，
-    本测试在旧代码上为红。
-    """
-    model, _, _ = _gen_annual_inputs(
-        objective=(
-            "2 year * gen1__annual_fixed_om"
-            " + gen1__period_variable_om"
-        ),
-    )
-    coeffs = _coeffs(model.objective)
-    assert coeffs["gen1__cap_kw__inservice_y0"] == pytest.approx(0.035)
-    assert coeffs["gen1__cap_kw__inservice_y1"] == pytest.approx(0.035)
+    assert coeffs["gen_cap"] == pytest.approx(0.035)
 
 
 def _static_om_decls(evaluation_years: int):
@@ -990,7 +913,7 @@ def _pv_25c_inputs():
     contribution = _contribution(catalog.read_text(encoding="utf-8"))
     doc = {
         "schema": "ies.assembly",
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "assembly": {"id": "pv-temp", "name": "PV 温度口径"},
         "project_baseline": {
             "resolution": "1h", "start_year": 2025, "scenario_mode": "single",
@@ -1017,7 +940,6 @@ def _pv_25c_inputs():
                 "pv_cap": {
                     "device_ref": "pv1",
                     "parameter": "rated_capacity_kwp",
-                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "50",
                     "unit": "kWp",
@@ -1059,9 +981,9 @@ def test_pv_generation_at_reference_temperature_has_no_derating() -> None:
     assert (row.sense, row.rhs) == ("eq", 0.0)
     coeffs = _coeffs(row.expression)
     assert coeffs["pv1__electric_out__t0"] == pytest.approx(1.0)
-    # 额定被年度变量接管：在产变量系数＝−辐照比×温度因子；
+    # 额定被建设变量接管：建设变量系数＝−辐照比×温度因子；
     # 25°C 时温度因子应为 1（1 − 0.004×0），与额定/辐照无关。
-    assert coeffs["pv1__rated_capacity_kwp__inservice_y0"] == pytest.approx(-1.0)
+    assert coeffs["pv_cap"] == pytest.approx(-1.0)
     assert row.expression.constant == pytest.approx(0.0)
 
 
@@ -1212,10 +1134,9 @@ def test_finance_component_declarations_cover_produced_idents() -> None:
     annual = decls["tank1__annual_fixed_om"]
     assert annual["unit"] == "CNY/a"
     assert annual["caliber"] == "annual"
-    # cap 驱动绑定年度在产变量：35 CNY/kW/a → 内部 35/(1000×31536000)。
-    # F4b：N=1 时 s_0 与原单变量值一致，引用名改为在产变量。
+    # cap 驱动绑定首年建设容量变量：35 CNY/kW/a → 内部 35/(1000×31536000)。
     assert annual["terms"] == {
-        "tank1__rated_kw__inservice_y0": pytest.approx(35.0 / 31536000.0 / 1000.0)
+        "tank_cap": pytest.approx(35.0 / 31536000.0 / 1000.0)
     }
     assert annual["constant"] == pytest.approx(0.0)
     variable = decls["tank1__period_variable_om"]

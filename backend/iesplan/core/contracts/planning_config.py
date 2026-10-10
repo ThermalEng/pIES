@@ -117,21 +117,23 @@ class Objective:
 
 @dataclass(frozen=True, slots=True)
 class PlanningVariable:
-    """规划变量(允许建设年份的新增容量优化变量; 上下界即容量边界)。
+    """规划变量(首年建设容量优化变量; 上下界即容量边界)。
 
     属性:
         device_ref: 绑定的设备实例引用(如 'heat_pump_1'; 装配域校验存在性)。
         parameter: 变量对应的设备技术参数名。
-        year_offset: 年份索引(整数 >= 0, 0 为评价期首年); 年份是变量索引,
-            不是用户预先选定的投产年份。0..N-1 范围(N 为冻结评价年限)与
-            同实例同参数同年唯一性由用户输入边界核对, 不在本值对象重复实现。
         lower_bound / upper_bound: 容量上下界(Decimal; None=无界)。
+            下界是无条件容量下界(缺席语义为 0 由生成器落实), 不得重定义
+            为建设触发阈值。同实例同参数唯一性由用户输入边界核对,
+            不在本值对象重复实现。
         unit: 变量单位(可空; 声明时须与设备参数一致)。
+
+    破坏性说明(assembly 3.0.0 未发布期间): 本契约不再接受 ``year_offset``
+    (出现即未知字段阻断, 无兼容分支); 同一实例同一参数只允许一个变量。
     """
 
     device_ref: str
     parameter: str
-    year_offset: int
     lower_bound: Decimal | None = None
     upper_bound: Decimal | None = None
     unit: str | None = None
@@ -141,17 +143,8 @@ class PlanningVariable:
             raise PlanningConfigError("规划变量 device_ref 必须为非空字符串")
         if not isinstance(self.parameter, str) or not self.parameter.strip():
             raise PlanningConfigError("规划变量 parameter 必须为非空字符串")
-        if isinstance(self.year_offset, bool) or not isinstance(self.year_offset, int):
-            raise PlanningConfigError(
-                "规划变量 year_offset 必须为整数, "
-                f"实际 {type(self.year_offset).__name__}"
-            )
-        if self.year_offset < 0:
-            raise PlanningConfigError(
-                f"规划变量 year_offset 必须 >= 0, 实际 {self.year_offset}"
-            )
-        # 年度新增容量非负(在产累加语义)：显式负界无意义；未填下界的
-        # 模型语义下界为 0（生成器侧落实，本契约只保留 None）。
+        # 建设容量非负：显式负界无意义；未填下界的模型语义下界为 0
+        #（生成器侧落实，本契约只保留 None）。
         if self.lower_bound is not None and self.lower_bound < 0:
             raise PlanningConfigError(
                 f"规划变量 lower_bound 不可为负, 实际 {self.lower_bound}"
@@ -172,7 +165,6 @@ class PlanningVariable:
         return {
             "device_ref": self.device_ref,
             "parameter": self.parameter,
-            "year_offset": self.year_offset,
             "lower_bound": (
                 _decimal_to_canonical(self.lower_bound)
                 if self.lower_bound is not None
@@ -191,12 +183,12 @@ class PlanningVariable:
         if not isinstance(mapping, Mapping):
             raise PlanningConfigError("规划变量必须是字典")
         unknown = set(mapping) - {
-            "device_ref", "parameter", "year_offset",
+            "device_ref", "parameter",
             "lower_bound", "upper_bound", "unit",
         }
         if unknown:
             raise PlanningConfigError(f"规划变量存在未知字段: {sorted(unknown)}")
-        missing = {"device_ref", "parameter", "year_offset"} - set(mapping)
+        missing = {"device_ref", "parameter"} - set(mapping)
         if missing:
             raise PlanningConfigError(f"规划变量缺少字段: {sorted(missing)}")
         lower = mapping.get("lower_bound")
@@ -204,7 +196,6 @@ class PlanningVariable:
         return cls(
             device_ref=str(mapping["device_ref"]),
             parameter=str(mapping["parameter"]),
-            year_offset=mapping["year_offset"],
             lower_bound=(
                 _to_decimal(lower, "lower_bound") if lower is not None else None
             ),

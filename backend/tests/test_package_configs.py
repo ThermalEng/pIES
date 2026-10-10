@@ -117,7 +117,6 @@ def _planning_payload() -> dict:
             "hp_cap": {
                 "device_ref": "heat_pump_1",
                 "parameter": "capacity",
-            "year_offset": 0,
                 "lower_bound": "0",
                 "upper_bound": "1000",
                 "unit": "kW",

@@ -136,7 +136,6 @@ def _planning_payload() -> dict:
             "hp_cap": {
                 "device_ref": "heat_pump_1",
                 "parameter": "capacity",
-                "year_offset": 0,
                 "lower_bound": "0",
                 "upper_bound": "1000",
                 "unit": "kW",
@@ -530,10 +529,10 @@ def _planning_saved_effective(client: TestClient, headers, pid: int) -> None:
     assert resp.status_code in (200, 201), resp.text
 
 
-def test_planning_duplicate_annual_variable_rejected(
+def test_planning_duplicate_variable_rejected(
     client: TestClient, db_session: Session
 ) -> None:
-    """保存边界: 同实例同参数同一年份重复变量 → 400 PROJ-PLAN-003。"""
+    """保存边界: 同实例同参数重复变量 → 400 PROJ-PLAN-003。"""
     headers, pid = _owner(client, db_session)
     _planning_saved_effective(client, headers, pid)
     payload = _planning_payload()
@@ -550,7 +549,7 @@ def test_planning_duplicate_annual_variable_rejected(
 def test_planning_negative_bound_rejected(
     client: TestClient, db_session: Session
 ) -> None:
-    """保存边界: 年度新增显式负下界 → 400 PROJ-PLAN-001(新增非负)。"""
+    """保存边界: 建设容量显式负下界 → 400 PROJ-PLAN-001(容量非负)。"""
     headers, pid = _owner(client, db_session)
     _planning_saved_effective(client, headers, pid)
     payload = _planning_payload()
@@ -564,14 +563,14 @@ def test_planning_negative_bound_rejected(
     assert resp.json()["error"]["code"] == "PROJ-PLAN-001"
 
 
-def test_planning_missing_year_offset_rejected(
+def test_planning_unknown_year_offset_rejected(
     client: TestClient, db_session: Session
 ) -> None:
-    """保存边界: 缺 year_offset → 400 PROJ-PLAN-001(核心契约必填)。"""
+    """保存边界: 含 year_offset → 400 PROJ-PLAN-001(未知字段，无兼容)。"""
     headers, pid = _owner(client, db_session)
     _planning_saved_effective(client, headers, pid)
     payload = _planning_payload()
-    del payload["variables"]["hp_cap"]["year_offset"]
+    payload["variables"]["hp_cap"]["year_offset"] = 0
     resp = client.put(
         f"/api/projects/{pid}/planning-config",
         json={"planning_config": payload, "expected_revision": None},

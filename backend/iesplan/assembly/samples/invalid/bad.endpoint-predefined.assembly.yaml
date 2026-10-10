@@ -58,7 +58,6 @@ planning:
     v_struct:
       device_ref: any_device
       parameter: any_param
-      year_offset: 0
   constraints: {}
 
 outputs:

@@ -167,7 +167,6 @@ PLANNING_PAYLOAD = {
         "cap": {
             "device_ref": "bat1",
             "parameter": "capacity_kwh",
-            "year_offset": 0,
             "lower_bound": "0",
             "upper_bound": "1000",
             "unit": "kWh",

@@ -399,7 +399,6 @@ def test_restore_version_keeps_frozen_pins(client: TestClient, db: Session) -> N
                 "cap2": {
                     "device_ref": device_ref,
                     "parameter": "rated_power_kw",
-                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "100",
                     "unit": "kW",
@@ -500,7 +499,6 @@ def test_restore_version_without_finance_clears_pointers(
                 "cap2": {
                     "device_ref": device_ref,
                     "parameter": "rated_power_kw",
-                    "year_offset": 0,
                     "lower_bound": "0",
                     "upper_bound": "100",
                     "unit": "kW",
