@@ -89,10 +89,10 @@ def write_mps(model: LinearModel) -> tuple[str, float]:
             lines.append(f" FX       {_BOUND_NAME}  {var.name}  {_num(var.lower)}")
             continue
         if var.lower is None:
-            if var.upper == 0:
-                lines.append(f" MI       {_BOUND_NAME}  {var.name}")
-            else:
-                lines.append(f" FR       {_BOUND_NAME}  {var.name}")
+            # 无下界即 -inf：有限上界须用 MI+UP 表达。FR+UP 会被 HiGHS
+            # 判“BOUNDS 重复定义”丢弃 UP 行导致上界丢失（已实证）。
+            lines.append(f" MI       {_BOUND_NAME}  {var.name}")
+            if var.upper != 0:
                 lines.append(
                     f" UP       {_BOUND_NAME}  {var.name}  {_num(var.upper)}"  # type: ignore[arg-type]
                 )

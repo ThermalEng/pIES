@@ -42,6 +42,13 @@ from iesplan.computation.generators.highs_milp import (
     SOLUTION_PATH,
     SOLVER_REF,
 )
+from iesplan.computation.generators.linear import (
+    LinearConstraint,
+    LinearExpression,
+    LinearModel,
+    LinearVariable,
+)
+from iesplan.computation.generators.mps import write_mps
 from iesplan.computation.runtime import validate_highs_arguments
 from iesplan.devices import init_registry, list_devices
 from iesplan.finance import effective_from_yaml
@@ -320,3 +327,96 @@ def test_end_to_end_campus_bundle() -> None:
     assert len(facts["primals"]) == int(facts["num_columns"])
     assert receipt.outputs[0]["path"] == SOLUTION_PATH
     assert receipt.outputs[0]["size_bytes"] == len(outputs[SOLUTION_PATH])
+
+
+def _tiny_model(*, lower, upper, obj_coeff: float, rows: tuple = ()):
+    model = LinearModel(
+        variables=(LinearVariable(name="x", lower=lower, upper=upper),),
+        constraints=rows,
+        objective=LinearExpression(terms=((("x", 0), obj_coeff),)),
+        sense="minimize",
+    )
+    text, _ = write_mps(model)
+    return text
+
+
+def _ge_row(rhs: float):
+    return (
+        LinearConstraint(
+            name="r1",
+            expression=LinearExpression(terms=((("x", 0), 1.0),)),
+            sense="ge",
+            rhs=rhs,
+        ),
+    )
+
+
+def _run_tiny_mps(tmp_path, mps_text: str) -> tuple[str, dict]:
+    (tmp_path / "input").mkdir(exist_ok=True)
+    (tmp_path / "output").mkdir(exist_ok=True)
+    (tmp_path / "input" / "problem.mps").write_text(mps_text, encoding="utf-8")
+    completed = subprocess.run(
+        [
+            HIGHS_ADAPTER_PATH, "input/problem.mps",
+            "--solution_file", "output/solution.sol",
+            "--time_limit", "60", "--random_seed", "0",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=tmp_path,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    content = (tmp_path / "output" / "solution.sol").read_text(encoding="utf-8")
+    return completed.stderr, _parse_solution(content)
+
+
+class TestUnboundedLowerFiniteUpperHighs:
+    """无下界＋有限上界的 MPS 表达与真实 HiGHS 行为。
+
+    writer 曾对 lower=None 输出 FR+UP，HiGHS 判“BOUNDS 重复定义”
+    丢弃 UP 行导致上界丢失；现输出 MI+UP（-inf 下界＋有限上界）。
+    只在 Docker 内运行（需真实求解器二进制）。
+    """
+
+    def test_writer_emits_mi_plus_up_for_unbounded_lower(self) -> None:
+        text = _tiny_model(lower=None, upper=5.0, obj_coeff=-1.0)
+        lines = [line.split() for line in text.splitlines()]
+        bounds = [parts for parts in lines if len(parts) >= 3 and parts[1] == "BND1"]
+        kinds = sorted(parts[0] for parts in bounds)
+        assert kinds == ["MI", "UP"]
+        up = [parts for parts in bounds if parts[0] == "UP"][0]
+        assert up[2] == "x" and float(up[3]) == 5.0
+
+    def test_writer_keeps_zero_upper_and_free(self) -> None:
+        zero = _tiny_model(lower=None, upper=0.0, obj_coeff=1.0)
+        zero_kinds = sorted(
+            line.split()[0] for line in zero.splitlines() if "BND1" in line
+        )
+        assert zero_kinds == ["MI"]
+        free, _ = write_mps(
+            LinearModel(
+                variables=(LinearVariable(name="x", lower=None, upper=None),),
+                objective=LinearExpression(terms=((("x", 0), 1.0),)),
+            )
+        )
+        assert " FR " in free and " UP " not in free
+
+    def test_highs_caps_maximization_at_positive_upper(self, tmp_path) -> None:
+        text = _tiny_model(lower=None, upper=5.0, obj_coeff=-1.0, rows=_ge_row(3.0))
+        stderr, facts = _run_tiny_mps(tmp_path, text)
+        assert "duplicate" not in stderr.lower()
+        assert facts["model_status"] == "HighsModelStatus.kOptimal"
+        assert facts["primals"] == [5.0]
+
+    def test_highs_negative_upper_caps(self, tmp_path) -> None:
+        text = _tiny_model(lower=None, upper=-2.0, obj_coeff=-1.0)
+        _, facts = _run_tiny_mps(tmp_path, text)
+        assert facts["model_status"] == "HighsModelStatus.kOptimal"
+        assert facts["primals"] == [-2.0]
+
+    def test_highs_downward_unbounded_without_lower(self, tmp_path) -> None:
+        text = _tiny_model(lower=None, upper=5.0, obj_coeff=1.0)
+        _, facts = _run_tiny_mps(tmp_path, text)
+        assert facts["model_status"] == "HighsModelStatus.kUnbounded"
