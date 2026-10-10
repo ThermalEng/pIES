@@ -146,7 +146,7 @@ class ParseDocResult:
 
 
 def parse_assembly_doc(text: str, *, source_name: str = "assembly.yaml") -> ParseDocResult:
-    """ies.assembly 2.0.0 文本 → 原始文档树(仅安全解析,无结构判定)。
+    """ies.assembly 3.0.0 文本 → 原始文档树(仅安全解析,无结构判定)。
 
     产出 YAML 安全解析诊断(ASM-SYN-PARSE);解析失败时 doc 为 None。
     结构语义判定只在 ``run_structure_checks`` 做一次,由校验器经

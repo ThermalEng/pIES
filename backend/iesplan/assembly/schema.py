@@ -1,4 +1,4 @@
-"""装配数据模型(ies.assembly 2.0.0 内存形态)。
+"""装配数据模型(ies.assembly 3.0.0 内存形态)。
 
 所有 dataclass 均为 slots + frozen 语义;列表字段为普通 list,解析后不再可变。
 id 引用一律用点路径字符串 "<device>.<port>";端口一律经 CheckContext
@@ -66,7 +66,7 @@ class AssemblyPort:
 
 @dataclass(slots=True, frozen=True)
 class AssemblyDevice:
-    """设备实例(节点，ies.assembly 2.0.0 纯技术契约形态)。
+    """设备实例(节点，ies.assembly 3.0.0 纯技术契约形态)。
 
     definition_id 为裸稳定设备 ID(无 @版本钉选)；kind 即 asset_origin；
     properties 为 {prop: {value, unit}} 非时变技术常量覆盖；
@@ -106,7 +106,7 @@ class AssemblyEdge:
 
 @dataclass(slots=True)
 class AssemblySpec:
-    """装配文件解析结果(内存模型; 2.0.0 无 calculation/time_axis)。
+    """装配文件解析结果(内存模型; 3.0.0 无 calculation/time_axis)。
 
     步数由项目计算基线(resolution/start_year)唯一推导, 经 CheckContext
     显式传入, 不在本模型内保存时间轴。transport_pipe 为普通 2.0 设备,

@@ -225,7 +225,7 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
         bindings["hub1"] = {"type": "none"}
     return {
         "schema": "ies.assembly",
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "assembly": {"id": "mini", "name": "最小真实装配"},
         "project_baseline": {
             "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
@@ -576,7 +576,7 @@ def _island_doc() -> dict:
         }
     return {
         "schema": "ies.assembly",
-        "schema_version": "2.0.0",
+        "schema_version": "3.0.0",
         "assembly": {"id": "islands", "name": "双电岛共热网"},
         "project_baseline": {
             "resolution": "1h", "start_year": 2026, "scenario_mode": "single",

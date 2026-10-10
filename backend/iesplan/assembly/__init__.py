@@ -1,4 +1,4 @@
-"""装配域公共入口:ies.assembly 2.0.0 唯一生产管线。
+"""装配域公共入口:ies.assembly 3.0.0 唯一生产管线。
 
 生产调用(计算任务提交用例的统一装配闸门)只消费
 ``validator.validate_project_export`` 并持有其签发的
@@ -47,7 +47,7 @@ from iesplan.assembly.validator import (
 )
 
 __all__ = [
-    # ies.assembly 2.0.0 契约
+    # ies.assembly 3.0.0 契约
     "SCHEMA_ID",
     "SCHEMA_VERSION",
     "ASSEMBLY_SCHEMA_PATH",

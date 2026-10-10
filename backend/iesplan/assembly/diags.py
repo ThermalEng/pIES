@@ -33,7 +33,7 @@ ASM_SYN_FORBIDDEN = "ASM-SYN-008"  # 禁止字段(shell/command/executable/函�
 ASM_SYN_PATH = "ASM-SYN-009"  # 资源路径非法(绝对路径/.. 逃逸/宿主机路径)
 ASM_RES_INVALID = "ASM-RES-001"  # 资源文件不可读(不产生可执行产物)
 ASM_OUTPUT_REF = "ASM-OUT-001"  # outputs 引用未定义设备/端口
-ASM_CONV_UNMAPPABLE = "ASM-CONV-001"  # 旧项目形态无法映射到 ies.assembly 2.0.0(迁移/导出阻断)
+ASM_CONV_UNMAPPABLE = "ASM-CONV-001"  # 旧项目形态无法映射到 ies.assembly 3.0.0(迁移/导出阻断)
 ASM_INPUT_UNDECLARED = "ASM-INPUT-006"  # 参数未在设备模型声明(只允许已声明字段)
 ASM_INPUT_PROP_UNIT = "ASM-INPUT-007"  # 属性单位与设备模型量纲不可换算
 

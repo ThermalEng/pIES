@@ -183,7 +183,7 @@ def _normalize_value(value: Any) -> Any:
 def canonicalize_assembly_doc(doc: Mapping) -> str:
     """唯一规范化:已解析文档 → 规范文本。
 
-    - doc 必须是已完成结构/模型/属性/预定义来源解析的 ies.assembly 2.0.0
+    - doc 必须是已完成结构/模型/属性/预定义来源解析的 ies.assembly 3.0.0
       文档(文件绑定均已写入 content 身份;未知核心字段已在结构阶段拒绝);
     - 规范文本:紧凑 JSON(ensure_ascii=False, separators=(',', ':'), 拒绝 NaN),
       末尾 LF。
