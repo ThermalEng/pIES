@@ -328,7 +328,7 @@ def test_export_package_owner_only_with_manifest(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["token"]
-    assert body["manifest"]["format_version"] == "1.0"
+    assert body["manifest"]["format_version"] == "2.0.0"
     assert body["file_name"].endswith(".zip")
 
     status, content, ctype = _download(
@@ -342,10 +342,13 @@ def test_export_package_owner_only_with_manifest(
     # 清单与对象存在性（不做内部哈希重算比对）
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-        assert manifest["format_version"] == "1.0"
+        assert manifest["format_version"] == "2.0.0"
         assert manifest["package_type"] == "project"
         assert "project.json" in zf.namelist()
         assert "draft.json" in zf.namelist()
+        # 2.0: 数据集元数据按数据版本独立成条, 历史版本依赖有独立登记位
+        assert any(p.startswith("datasets/") and p.endswith("/dataset.json") and p.count("/") == 3 for p in zf.namelist())
+        assert isinstance(manifest["files"].get("version_configs"), dict)
         objects_manifest = manifest["objects"]
         assert len(objects_manifest) >= 4  # 项目/草稿/数据集/证据
         for entry in objects_manifest:

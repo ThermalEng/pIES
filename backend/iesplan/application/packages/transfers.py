@@ -26,6 +26,7 @@ from iesplan import tasks as tasks_domain
 from iesplan.application.configuration import (
     get_effective_finance_config as _get_effective_finance_config,
     get_finance_overrides as _get_finance_overrides,
+    get_finance_profile_by_ref as _get_finance_profile_by_ref,
     get_planning_config as _get_planning_config,
     register_finance_profile as _register_finance_profile,
     save_finance_overrides as _save_finance_overrides,
@@ -47,6 +48,7 @@ from iesplan.core.diagnostics import SEVERITY_ERROR
 from iesplan.core.errors import AppError, ConflictError, ForbiddenError, NotFoundError
 from iesplan.core.jsonutil import jsonable
 from iesplan.core.yamlmini import dump as yaml_dump
+from iesplan.core.yamlmini import load as yaml_load
 from iesplan.finance import (
     EffectiveFinanceConfig,
     FinanceOverrides,
@@ -304,13 +306,14 @@ def _build_package_zip(
             zf.writestr(path, raw)
             files_meta["versions"].append(path)
 
-        # 数据集版本与溯源(数据本体 + 元数据 + 溯源/许可证/质量报告)
+        # 数据集版本与溯源(数据本体 + 元数据 + 溯源/许可证/质量报告;
+        # 2.0: 每个数据版本独立目录, 元数据不再按数据集共用)
         for item in dataset_list:
             dataset = item["dataset"]
             version = item["version"]
             if dataset is None:
                 continue
-            base = f"datasets/{dataset.id}"
+            base = f"datasets/{dataset.id}/v{version.version_no}"
             meta_doc = {
                 "dataset_id": dataset.id,
                 "dataset_version_id": version.id,
@@ -352,9 +355,62 @@ def _build_package_zip(
             for file_item in item["files"]:
                 f, obj, content_bytes = file_item["file"], file_item["obj"], file_item["content"]
                 ext = _media_file_kind(obj.get("media_type"))
-                entry = f"{base}/v{version.version_no}-{f.file_kind}.{ext}"
+                entry = f"{base}/{f.file_kind}.{ext}"
                 _add(entry, content_bytes, obj.get("media_type") or "application/octet-stream")
                 zf.writestr(entry, content_bytes)
+
+        # 历史版本精确配置依赖(2.0 files.version_configs): 每个带引用块的
+        # 版本快照其冻结 revision 行内容(只带包内版本所需, 不带无关历史/
+        # 全库)。行缺失即 loudly 拒绝(指针损坏不静默); 当前工作状态组
+        # (files.configs)不受影响, 缺席的依赖不建条目。
+        version_configs_meta: dict[str, dict[str, str]] = {}
+        for version in versions:
+            content = version_contents.get(version.version_no, {})
+            eff = content.get("effective_finance") or {}
+            plan = content.get("planning_config") or {}
+            if not eff and not plan:
+                continue
+            key = f"{version.version_no:04d}"
+            dep_paths: dict[str, str] = {}
+            if eff:
+                ovr_row = configuration_domain.get_overrides_revision(
+                    db, project.id, eff.get("overrides_revision")
+                )
+                eff_row = configuration_domain.get_effective_revision(
+                    db, project.id, eff.get("revision")
+                )
+                if ovr_row is None or eff_row is None:
+                    raise AppError(
+                        "版本冻结的财务依赖行缺失",
+                        code="PROJ-FIN-003",
+                        params={"project_id": project.id, "version_no": version.version_no},
+                    )
+                for fname, fcontent in (
+                    ("finance_overrides.yaml", ovr_row.content),
+                    ("effective_finance.yaml", eff_row.content),
+                ):
+                    path = f"version_configs/{key}/{fname}"
+                    raw = yaml_dump(fcontent).encode("utf-8")
+                    _add(path, raw, "application/yaml")
+                    zf.writestr(path, raw)
+                    dep_paths[fname.removesuffix(".yaml")] = path
+            if plan:
+                plan_row = configuration_domain.get_planning_revision(
+                    db, project.id, plan.get("revision")
+                )
+                if plan_row is None:
+                    raise AppError(
+                        "版本冻结的规划配置行缺失",
+                        code="PROJ-PLAN-004",
+                        params={"project_id": project.id, "version_no": version.version_no},
+                    )
+                path = f"version_configs/{key}/planning_config.yaml"
+                raw = yaml_dump(plan_row.content).encode("utf-8")
+                _add(path, raw, "application/yaml")
+                zf.writestr(path, raw)
+                dep_paths["planning_config"] = path
+            version_configs_meta[key] = dep_paths
+        files_meta["version_configs"] = version_configs_meta
 
         # 历史结果证据与评估引用(证据数据 + 评估四维结论; 不重新求解)
         for item in evidence_list:
@@ -612,6 +668,89 @@ def parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
     return result
 
 
+def _yaml_doc(entries: dict[str, bytes], path: str) -> dict:
+    """包内 YAML 解码为映射(形态不对抛校验失败; 解码不是重新校验)。"""
+    try:
+        doc = yaml_load(entries[path].decode("utf-8"))
+    except Exception as exc:
+        raise ImportValidationError([f"包内文件无法解析: {path}"]) from exc
+    if not isinstance(doc, dict):
+        raise ImportValidationError([f"包内文件结构非法(期望映射): {path}"])
+    return doc
+
+
+def _check_version_dependencies(entries: dict[str, bytes], manifest: dict) -> None:
+    """2.0 历史依赖关系边界校验(上传入口一次校验, 任一失败 → 拒绝整个导入)。
+
+    - 版本元数据按数据版本唯一: 同一数据集不同版本不得共用元数据条目;
+    - 带引用块的版本必须有 version_configs 对应条目, 条目文件存在且可解析,
+      Effective 的 profile_id 与 Overrides 的 profile_ref 一致;
+    - 数据集元数据的每个文件条目必须在同目录有唯一匹配的暂存文件。
+    """
+    files_meta = manifest.get("files") or {}
+    vc_meta = files_meta.get("version_configs") or {}
+    if not isinstance(vc_meta, dict):
+        raise ImportValidationError(["清单 files.version_configs 结构非法(期望映射)"])
+    version_paths = files_meta.get("versions") or []
+    for key in vc_meta:
+        if f"versions/{key}.json" not in version_paths:
+            raise ImportValidationError([f"version_configs 引用了不存在的版本: {key}"])
+    for version_path in version_paths:
+        if version_path not in entries:
+            continue
+        try:
+            doc = json.loads(entries[version_path].decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ImportValidationError([f"包内版本文件无法解析: {version_path}"]) from exc
+        if not isinstance(doc, dict):
+            raise ImportValidationError([f"包内版本文件结构非法: {version_path}"])
+        key = version_path.removeprefix("versions/").removesuffix(".json")
+        content = doc.get("content") or {}
+        eff = content.get("effective_finance") or {}
+        plan = content.get("planning_config") or {}
+        if not eff and not plan:
+            continue
+        entry = vc_meta.get(key)
+        if not isinstance(entry, dict):
+            raise ImportValidationError([f"版本 {key} 带配置引用但缺 version_configs 条目"])
+        if eff:
+            o_path = entry.get("finance_overrides")
+            e_path = entry.get("effective_finance")
+            if not o_path or not e_path or o_path not in entries or e_path not in entries:
+                raise ImportValidationError([f"版本 {key} 的财务依赖文件缺失"])
+            o_doc = _yaml_doc(entries, o_path)
+            e_doc = _yaml_doc(entries, e_path)
+            profile_id = e_doc.get("profile_id")
+            if not isinstance(profile_id, str):
+                raise ImportValidationError([f"版本 {key} 的 Effective 缺 profile_id"])
+            if (o_doc.get("profile_ref") or {}).get("id") != profile_id:
+                raise ImportValidationError([f"版本 {key} 的 Overrides 与 Effective profile 不一致"])
+        if plan:
+            p_path = entry.get("planning_config")
+            if not p_path or p_path not in entries:
+                raise ImportValidationError([f"版本 {key} 的规划依赖文件缺失"])
+            _yaml_doc(entries, p_path)
+    for meta_path in files_meta.get("datasets") or []:
+        if meta_path not in entries:
+            continue
+        try:
+            meta = json.loads(entries[meta_path].decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ImportValidationError([f"包内数据集元数据无法解析: {meta_path}"]) from exc
+        if not isinstance(meta, dict) or not isinstance(meta.get("dataset_version_id"), int):
+            raise ImportValidationError([f"包内数据集元数据缺 dataset_version_id: {meta_path}"])
+        base = meta_path.removesuffix("/dataset.json")
+        for file_meta in meta.get("files") or []:
+            kind = (file_meta or {}).get("file_kind")
+            matches = [
+                p for p in entries
+                if p.startswith(base + "/") and p != meta_path
+                and p.rsplit("/", 1)[-1].split(".", 1)[0] == kind
+            ]
+            if len(matches) != 1:
+                raise ImportValidationError([f"数据集版本数据文件缺失或歧义: {meta_path} {kind}"])
+
+
 def import_proposal(
     db: Session,
     user: UserRecord,
@@ -620,7 +759,8 @@ def import_proposal(
 ) -> ImportProposalRecord:
     """创建导入提案: 校验 → 暂存对象 → 拟创建项目快照 → 校验报告(domain-model §对象生命周期)。
 
-    - 校验失败(格式/兼容性/清单/完整性)抛 ImportValidationError, 不创建任何记录;
+    - 校验失败(格式/兼容性/清单/完整性/历史依赖关系)抛 ImportValidationError,
+      不创建任何记录;
     - 幂等: 调用方传入 idempotency_key 时, 同一提议人已有相同键的未确认提案
       直接返回(不重复暂存); 无键时每次调用新建提案(对象存储无内容去重,
       源包字节相同也不复用对象行);
@@ -638,6 +778,8 @@ def import_proposal(
                 and (cand.review_summary or {}).get("idempotency_key") == idempotency_key
             ):
                 return cand
+    # 0) 历史依赖关系边界校验(暂存之前; 失败不落任何行)
+    _check_version_dependencies(entries, manifest)
     # 1) 暂存对象: 包内全部对象按对象 id 落盘(每次写入新对象, 无内容去重)
     staged: dict[str, dict] = {}  # path → 元数据 dict(公开门面)
     for entry in manifest.get("objects", []):
@@ -825,11 +967,12 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             "导入提案状态不允许确认", params={"proposal_id": proposal_id, "status": proposal.status}
         )
 
-    # 复核源包(完整性), 取分区提交内容
+    # 取分区提交内容: 消费提案阶段已接受的源包与暂存(解码读取, 不重新
+    # 跑上传边界的完整性/语义校验; 结构缺失则 loudly 拒绝)。
     summary = proposal.review_summary or {}
     source_object_id = (summary.get("staging") or {}).get("source_object_id")
     file_bytes = get_object(db, int(source_object_id))
-    manifest, entries = _parse_package(file_bytes)
+    manifest, entries = _read_staged_package(file_bytes)
     # 提案阶段暂存的对象 id 按包内路径索引(确认阶段不再按摘要查找对象)
     staged_by_path = {
         str(item.get("path")): int(item.get("object_id"))
@@ -837,27 +980,35 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         if isinstance(item, dict) and item.get("path") is not None and item.get("object_id") is not None
     }
 
-    # 1) 数据集(先建, 供绑定重映射; 原数据集版本标识 → 新标识)
+    # 1) 数据集(同源 dataset 只建一次, 各版本分别重建; 原数据集版本标识 →
+    # 新标识; 数据文件按元数据同目录唯一匹配)
     dataset_id_map: dict[int, int] = {}
+    new_dataset_by_source: dict[Any, int] = {}
     for meta_path in manifest.get("files", {}).get("datasets", []):
         if meta_path not in entries:
             continue
         meta = json.loads(entries[meta_path].decode("utf-8"))
         ds_meta = meta.get("dataset") or {}
         ver_meta = meta.get("version") or {}
-        # 数据集重建经 dataset 域公开门面(状态发布紧随创建, 与旧直写终态一致)。
-        dataset = dataset_domain.create_dataset(
-            db,
-            name=str(ds_meta.get("name") or "导入数据集"),
-            created_by=user.id,
-            project_id=project.id,
-            description=ds_meta.get("description"),
-            default_license=ds_meta.get("default_license"),
-        )
-        dataset = dataset_domain.set_dataset_status(db, dataset.id, "published")
+        group_key = meta.get("dataset_id", meta_path)
+        if group_key in new_dataset_by_source:
+            dataset_id = new_dataset_by_source[group_key]
+        else:
+            # 数据集重建经 dataset 域公开门面(状态发布紧随创建, 与旧直写终态一致)。
+            dataset = dataset_domain.create_dataset(
+                db,
+                name=str(ds_meta.get("name") or "导入数据集"),
+                created_by=user.id,
+                project_id=project.id,
+                description=ds_meta.get("description"),
+                default_license=ds_meta.get("default_license"),
+            )
+            dataset = dataset_domain.set_dataset_status(db, dataset.id, "published")
+            dataset_id = dataset.id
+            new_dataset_by_source[group_key] = dataset_id
         version = dataset_domain.create_version(
             db,
-            dataset_id=dataset.id,
+            dataset_id=dataset_id,
             timeline=str(ver_meta.get("timeline") or "hourly"),
             fixed_utc_offset_minutes=int(ver_meta.get("fixed_utc_offset_minutes", 480)),
             fields=ver_meta.get("fields") or {},
@@ -873,15 +1024,18 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         base = meta_path.removesuffix("/dataset.json")
         for file_meta in meta.get("files", []):
             kind = str(file_meta.get("file_kind") or "data")
-            prefix = f"{base}/v{int(ver_meta.get('version_no', 1))}-{kind}."
-            matches = [p for p in staged_by_path if p.startswith(prefix)]
+            matches = [
+                p for p in staged_by_path
+                if p.startswith(base + "/") and p != meta_path
+                and p.rsplit("/", 1)[-1].split(".", 1)[0] == kind
+            ]
             if len(matches) != 1:
                 raise AppError(
                     "导入暂存对象缺失(数据损坏)",
                     code="PKG-IMP-002",
                     severity=SEVERITY_ERROR,
                     message_key="ies.diag.store.corrupt",
-                    params={"path": prefix},
+                    params={"path": f"{base}/{kind}"},
                 )
             dataset_domain.add_file(
                 db,
@@ -904,7 +1058,83 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         content.pop("applied_commands", None)  # 命令簿记不外泄
         return content
 
-    # 2) 证据来源: 历史结果作为证据来源保留(不伪造本地任务, domain-model §快照、任务和结果)
+    def _refuse_missing(version_key: str, what: str) -> ImportValidationError:
+        return ImportValidationError([f"版本 {version_key} 的{what}缺失, 拒绝确认"])
+
+    # 2) 历史配置依赖重建(来源 revision → 新 revision 映射; 新编号, 不复用
+    # 来源数字; 同一来源只建一次。Profile 按 Effective 记录的稳定 id 解析,
+    # 缺席即拒绝, 绝不用当前导出 Profile 冒充历史)
+    config_rev_map: dict[tuple[str, Any], int] = {}
+    vc_meta = manifest.get("files", {}).get("version_configs") or {}
+    for version_path in sorted(manifest.get("files", {}).get("versions", [])):
+        if version_path not in entries:
+            continue
+        doc = json.loads(entries[version_path].decode("utf-8"))
+        key = version_path.removeprefix("versions/").removesuffix(".json")
+        content = (doc.get("content") or {}) if isinstance(doc, dict) else {}
+        eff = content.get("effective_finance") or {}
+        plan = content.get("planning_config") or {}
+        if not eff and not plan:
+            continue
+        vc_entry = vc_meta.get(key)
+        if not isinstance(vc_entry, dict):
+            raise _refuse_missing(key, "version_configs 条目")
+        if eff:
+            o_path = vc_entry.get("finance_overrides")
+            e_path = vc_entry.get("effective_finance")
+            if not o_path or not e_path or o_path not in entries or e_path not in entries:
+                raise _refuse_missing(key, "财务依赖文件")
+            o_doc = _yaml_doc(entries, o_path)
+            e_doc = _yaml_doc(entries, e_path)
+            profile_id = e_doc.get("profile_id")
+            _get_finance_profile_by_ref(db, profile_id)
+            src_ovr_rev = eff.get("overrides_revision")
+            if ("overrides", src_ovr_rev) not in config_rev_map:
+                new_ovr = configuration_domain.next_overrides_revision(db, project.id)
+                configuration_domain.append_overrides(
+                    db,
+                    project_id=project.id,
+                    revision=new_ovr,
+                    content=o_doc,
+                    profile_id=(o_doc.get("profile_ref") or {}).get("id"),
+                    created_by=user.id,
+                )
+                config_rev_map[("overrides", src_ovr_rev)] = new_ovr
+            src_eff_rev = eff.get("revision")
+            if ("effective", src_eff_rev) not in config_rev_map:
+                obj = put_object(
+                    db, entries[e_path], "application/yaml",
+                    source_category="project_package_history",
+                )
+                new_eff = configuration_domain.next_effective_revision(db, project.id)
+                configuration_domain.append_effective(
+                    db,
+                    project_id=project.id,
+                    revision=new_eff,
+                    content=e_doc,
+                    profile_id=profile_id,
+                    created_by=user.id,
+                    content_object_id=obj.id,
+                )
+                config_rev_map[("effective", src_eff_rev)] = new_eff
+        if plan:
+            p_path = vc_entry.get("planning_config")
+            if not p_path or p_path not in entries:
+                raise _refuse_missing(key, "规划依赖文件")
+            p_doc = _yaml_doc(entries, p_path)
+            src_plan_rev = plan.get("revision")
+            if ("planning", src_plan_rev) not in config_rev_map:
+                new_plan = configuration_domain.next_planning_revision(db, project.id)
+                configuration_domain.append_planning(
+                    db,
+                    project_id=project.id,
+                    revision=new_plan,
+                    content=p_doc,
+                    created_by=user.id,
+                )
+                config_rev_map[("planning", src_plan_rev)] = new_plan
+
+    # 3) 证据来源: 历史结果作为证据来源保留(不伪造本地任务, domain-model §快照、任务和结果)
     imported_evidence: list[dict[str, Any]] = []
     for evidence_path in manifest.get("files", {}).get("evidence", []):
         if evidence_path not in entries:
@@ -960,13 +1190,13 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             }
         )
 
-    # 3) 草稿(revision=1): 领域内容 + 证据来源登记
+    # 4) 草稿(revision=1): 领域内容 + 证据来源登记
     draft_doc = json.loads(entries["draft.json"].decode("utf-8"))
     draft_content = _remap(dict(draft_doc.get("content") or {}))
     draft_content["imported_evidence"] = imported_evidence
     _create_draft_row(db, project.id, draft_content, user)
 
-    # 4) 版本: 按包内版本顺序重建(新身份版本号, parent 链按导入顺序)
+    # 5) 版本: 按包内版本顺序重建(新身份版本号, parent 链按导入顺序)
     # 经 project 域 create_version 一次完成版本行 + 内容引用 + current 指针
     # 移动(基线/币种/schema 与项目一致, 由包内基线校验保证, 与旧直写等价;
     # 新身份下版本号自 1 起按包内顺序重新分配)。
@@ -977,35 +1207,28 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             continue
         doc = json.loads(entries[version_path].decode("utf-8"))
         ver_meta = doc.get("version") or {}
-        # 版本基线: 包内版本必须携带与项目一致的基线(缺失/不一致 → 拒绝,
-        # 版本内容自包含, 不以"当前项目"解释历史版本)。
-        version_baseline_errors = ProjectBaseline.validate(ver_meta.get("project_baseline"))
-        if version_baseline_errors:
-            raise ImportValidationError(
-                [
-                    f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线非法: "
-                    f"{d.params.get('detail') or d.code}"
-                    for d in version_baseline_errors
-                ]
-            )
-        try:
-            version_baseline = ProjectBaseline.from_dict(ver_meta.get("project_baseline"))
-        except ProjectBaselineError as exc:
-            raise ImportValidationError(
-                [f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线非法: {exc}"]
-            ) from exc
-        if (
-            version_baseline.resolution != project.baseline_resolution
-            or version_baseline.start_year != project.baseline_start_year
-            or version_baseline.scenario_mode != project.baseline_scenario_mode
-        ):
-            raise ImportValidationError(
-                [
-                    f"包内版本 {ver_meta.get('version_no', '?')} 项目计算基线"
-                    "与项目不一致(版本必须与项目共享同一基线)"
-                ]
-            )
-        version_content = _remap(dict(doc.get("content") or {}))
+        # 基线已在上传边界校验(提案已接受); 此处只消费, 不重复语义校验。
+        version_content = _remap(dict((doc.get("content") or {}) if isinstance(doc, dict) else {}))
+        # 配置引用改写: 来源 revision → 新项目映射后 revision(映射缺失 →
+        # 拒绝, 不回填当前值、不默认; 缺席的块保持缺席)。
+        version_key = version_path.removeprefix("versions/").removesuffix(".json")
+        eff = version_content.get("effective_finance")
+        if eff is not None:
+            for kind, field in (("overrides", "overrides_revision"), ("effective", "revision")):
+                new_rev = config_rev_map.get((kind, eff.get(field)))
+                if new_rev is None:
+                    raise ImportValidationError(
+                        [f"版本 {version_key} 的配置引用无映射: {kind} {eff.get(field)}"]
+                    )
+                eff[field] = new_rev
+        plan = version_content.get("planning_config")
+        if plan is not None:
+            new_rev = config_rev_map.get(("planning", plan.get("revision")))
+            if new_rev is None:
+                raise ImportValidationError(
+                    [f"版本 {version_key} 的规划引用无映射: {plan.get('revision')}"]
+                )
+            plan["revision"] = new_rev
         content_object_id = _store_content_object(db, version_content)
         version = project_domain.create_version(
             db,
@@ -1019,18 +1242,20 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         )
         prev_version = version
 
-    # 5) 财务三件套/规划配置(0.6.5 条目 1-2): 从暂存源包重解析并重建
-    # revision=1 行(与提案同源校验, 确认阶段为强制点; 失败 → 整个事务回滚,
-    # 不落任何行)。重建顺序: 登记 Profile → 保存 Overrides(重合并生成
-    # Effective) → 保存规划(强制与当前 Effective content 一致)。
+    # 6) 当前工作状态配置: 登记 Profile → 保存 Overrides(重合并生成
+    # Effective) → 保存规划(强制与当前 Effective content 一致)。历史行已在
+    # 前, 期望修订取设置 Profile 后的当前指针(不清零假设); 无规划则当前
+    # 规划保持缺席。失败 → 整个事务回滚, 不落任何行。
     package_configs = parse_config_files(entries, manifest)
     if "effective" in package_configs:
         try:
             row, _ = _register_finance_profile(db, package_configs["profile"].to_dict(), user.id)
             # 按稳定 profile_id 绑定注册行(注册表按 id 唯一, 同 id 复用既有行)
             # set_project_finance_profile 内部按稳定 profile_id 定位
-            _set_project_finance_profile(db, project.id, row.profile_id, user.id)
-            _save_finance_overrides(db, project.id, package_configs["overrides"].to_dict(), 1, user.id)
+            current_ovr_rev, _, _ = _set_project_finance_profile(db, project.id, row.profile_id, user.id)
+            _save_finance_overrides(
+                db, project.id, package_configs["overrides"].to_dict(), current_ovr_rev, user.id
+            )
             if "planning" in package_configs:
                 _save_planning_config(db, project.id, package_configs["planning"].to_dict(), None, user.id)
         except AppError as exc:
@@ -1038,7 +1263,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
                 [f"包内配置在确认阶段校验失败: {getattr(exc, 'code', 'PKG-IMP-001')} {exc}"]
             ) from exc
 
-    # 6) 提案收尾 + 审计(提案状态经 package 域状态机推进)
+    # 7) 提案收尾 + 审计(提案状态经 package 域状态机推进)
     _set_proposal_review(
         db,
         proposal.id,
@@ -1062,6 +1287,46 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
     )
     # 重读项目行: 版本/草稿创建已移动 current 指针, 入口快照已过期
     return project_domain.require_project(db, project.id)
+
+
+def _read_staged_package(file_bytes: bytes) -> tuple[dict, dict[str, bytes]]:
+    """读取已接受提案的源包(zip 解码 + 清单解码, 不重新校验)。
+
+    上传边界已做完整校验; 此处只做读取, 结构缺失抛导入损坏错误。
+    """
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(file_bytes))
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise AppError(
+            "导入暂存包损坏",
+            code="PKG-IMP-002",
+            message_key="ies.diag.store.corrupt",
+        ) from exc
+    with zf:
+        entries = {
+            info.filename: zf.read(info) for info in zf.infolist() if not info.is_dir()
+        }
+    if "manifest.json" not in entries:
+        raise AppError(
+            "导入暂存包缺失清单",
+            code="PKG-IMP-002",
+            message_key="ies.diag.store.corrupt",
+        )
+    try:
+        manifest = json.loads(entries["manifest.json"].decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AppError(
+            "导入暂存包清单无法解析",
+            code="PKG-IMP-002",
+            message_key="ies.diag.store.corrupt",
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise AppError(
+            "导入暂存包清单结构非法",
+            code="PKG-IMP-002",
+            message_key="ies.diag.store.corrupt",
+        )
+    return manifest, entries
 
 
 def _first_section(content: dict | None, *keys: str) -> Any:

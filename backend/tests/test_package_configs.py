@@ -41,7 +41,12 @@ from iesplan.application.packages import operations as packages_uc  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.contracts import ProjectBaseline  # noqa: E402
 from iesplan.core.yamlmini import dump as yaml_dump  # noqa: E402
+from iesplan.dataset.persistence import DatasetFile  # noqa: E402
 from iesplan.db import Base  # noqa: E402
+from iesplan.identity.persistence import User  # noqa: E402  # 注册 users 表
+from iesplan.storage import get_object  # noqa: E402
+from sqlalchemy import select  # noqa: E402
+from test_dataset_api import make_csv  # noqa: E402
 from iesplan.finance import (  # noqa: E402
     EffectiveFinanceConfig,
     FinanceOverrides,
@@ -271,7 +276,7 @@ def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes
         for path, raw in sorted(entries.items())
     ]
     manifest = {
-        "format_version": "1.0",
+        "format_version": "2.0.0",
         "package_type": "project",
         "project": {
             "name": "定制包项目",
@@ -435,6 +440,347 @@ def test_import_rejects_planning_domain_violation(client: TestClient, db: Sessio
     with pytest.raises(package_domain.ImportValidationError) as excinfo:
         packages_uc.propose_import(db, importer, zip_bytes)
     assert any("领域校验失败" in r for r in excinfo.value.reasons)
+
+
+def _overrides_payload_with_price(profile: FinanceProfile, price: str) -> dict:
+    payload = _overrides_payload(profile)
+    payload["energy_prices"]["grid_import"]["value"]["value"] = price
+    return payload
+
+
+def _planning_payload_with_bound(upper_bound: str) -> dict:
+    payload = _planning_payload()
+    payload["variables"]["hp_cap"]["upper_bound"] = upper_bound
+    return payload
+
+
+def _put_overrides(client: TestClient, user, pid: int, profile: FinanceProfile, price: str, expected_revision) -> None:
+    overrides = FinanceOverrides.from_dict(_overrides_payload_with_price(profile, price), profile=profile)
+    resp = client.put(
+        f"/api/projects/{pid}/finance-overrides",
+        json={"finance_overrides": overrides.to_dict(), "expected_revision": expected_revision},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def _put_planning(client: TestClient, user, pid: int, payload: dict, expected_revision) -> None:
+    resp = client.put(
+        f"/api/projects/{pid}/planning-config",
+        json={"planning_config": payload, "expected_revision": expected_revision},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def _create_dataset(client: TestClient, user, pid: int, name: str = "负荷数据") -> int:
+    resp = client.post(
+        f"/api/projects/{pid}/datasets",
+        json={"name": name, "source_category": "user_upload", "license": "CC-BY-4.0"},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["dataset"]["id"]
+
+
+def _upload_version(client: TestClient, user, pid: int, dsid: int, csv_bytes: bytes) -> int:
+    resp = client.post(
+        f"/api/projects/{pid}/datasets/{dsid}/versions",
+        data={"resolution": "1h", "utc_offset_minutes": "480"},
+        files={"file": ("data.csv", csv_bytes, "text/csv")},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["dataset_version"]["id"]
+
+
+def _bind_version(client: TestClient, user, pid: int, dvid: int, expected_revision: int, tag: str) -> int:
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={
+            "expected_revision": expected_revision,
+            "commands": [{
+                "id": f"bind-{tag}", "unit": "dataset", "type": "dataset.bind",
+                "payload": {"dataset_version_id": dvid, "role": "main"},
+            }],
+        },
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["revision"]
+
+
+def _create_hist_version(client: TestClient, user, pid: int, name: str) -> int:
+    resp = client.post(
+        f"/api/projects/{pid}/versions",
+        json={"name": name, "reason": "manual_save"},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["version"]["id"]
+
+
+def _first_e_load(csv_text: str) -> float:
+    lines = csv_text.strip().split("\n")
+    idx = lines[0].split(",").index("e_load")
+    return float(lines[1].split(",")[idx])
+
+
+def _bound_e_loads(client: TestClient, db: Session, user, pid: int) -> tuple[list[int], list[float]]:
+    """当前草稿绑定版本 id 集合与其首行 e_load 值集合(公开视图 + 对象读取)。"""
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    bindings = view["draft"]["content"].get("dataset_bindings") or []
+    ids: list[int] = []
+    loads: list[float] = []
+    for binding in bindings:
+        dvid = binding["dataset_version_id"]
+        row = db.execute(
+            select(DatasetFile).where(DatasetFile.dataset_version_id == dvid)
+        ).scalars().first()
+        assert row is not None
+        ids.append(dvid)
+        loads.append(_first_e_load(get_object(db, row.object_id).decode("utf-8")))
+    return ids, sorted(loads)
+
+
+def _import_new_project(client: TestClient, user, zip_bytes: bytes) -> tuple[int, int]:
+    """公开上传提案 → 公开确认, 返回 (新项目 id, 提案 id)。"""
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", zip_bytes, "application/zip")},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 201, resp.text
+    prop_id = resp.json()["proposal"]["id"]
+    resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, user))
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["project"]["id"] is not None
+    assert resp.json()["my_role"] == "owner"
+    return resp.json()["project"]["id"], prop_id
+
+
+def test_imported_history_versions_restore_original_deps(client: TestClient, db: Session) -> None:
+    """导入后历史版本可恢复出原业务依赖(财务/规划值与数据版本), 源项目不变。
+
+    公开流程: 两组覆盖/规划分别固化版本 + 同一数据集两个真实版本分别绑定
+    固化 → 公开导出/下载 → 公开上传提案 → 公开确认 → 新项目上恢复历史版本。
+    """
+    owner = make_user(db, "hist_owner")
+    importer = make_user(db, "hist_importer")
+    pid = _create_project(client, owner)
+    profile, _, _ = _setup_finance(client, owner, pid)  # 覆盖 rev2: 电价 0.75
+    _save_planning(client, owner, pid)  # 规划 rev1: 上界 1000
+    dsid = _create_dataset(client, owner, pid)
+    dvid1 = _upload_version(client, owner, pid, dsid, make_csv("1h", n=8760))
+    rev = _bind_version(client, owner, pid, dvid1, 1, "a")
+    _create_hist_version(client, owner, pid, "hist-a")
+    _put_overrides(client, owner, pid, profile, "0.95", 2)  # 覆盖 rev3(规划指针随之清空)
+    _put_planning(client, owner, pid, _planning_payload_with_bound("2000"), None)  # 规划 rev2
+    csv_b = make_csv("1h", n=8760, transform=lambda row, i: {**row, "e_load": row["e_load"] + 1000.0})
+    dvid2 = _upload_version(client, owner, pid, dsid, csv_b)
+    _bind_version(client, owner, pid, dvid2, rev, "b")
+    _create_hist_version(client, owner, pid, "hist-b")
+
+    zip_bytes = _export_zip(client, owner, pid)
+    new_pid, _ = _import_new_project(client, importer, zip_bytes)
+    assert new_pid != pid
+
+    # 导入后当前工作状态保持导出时实际选择(覆盖 0.95/规划 2000/绑定 B), 不隐式切换
+    ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()
+    assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.95"
+    plan = client.get(f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer)).json()
+    assert plan["planning_config"]["variables"]["hp_cap"]["upper_bound"] == "2000"
+    ids, loads = _bound_e_loads(client, db, importer, new_pid)
+    assert all(i not in (dvid1, dvid2) for i in ids)
+    assert loads == [100.0, 1100.0]
+
+    listed = client.get(f"/api/projects/{new_pid}/versions", headers=_h(client, importer)).json()["versions"]
+    assert len(listed) == 2
+    by_name = {v["name"]: v for v in listed}
+
+    # 恢复 hist-a: 原覆盖值/规划值/数据版本 A
+    resp = client.post(
+        f"/api/projects/{new_pid}/versions/{by_name['hist-a']['id']}/restore",
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 200, resp.text
+    ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()
+    assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.75"
+    plan = client.get(f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer)).json()
+    assert plan["planning_config"]["variables"]["hp_cap"]["upper_bound"] == "1000"
+    ids, loads = _bound_e_loads(client, db, importer, new_pid)
+    assert all(i not in (dvid1, dvid2) for i in ids)  # 重映射到新项目身份, 不沿用原内部 id
+    assert loads == [100.0]
+
+    # 恢复 hist-b: 原覆盖值/规划值/数据版本 B(最新不覆盖旧值; 绑定追加语义, 两 vintage 共存)
+    resp = client.post(
+        f"/api/projects/{new_pid}/versions/{by_name['hist-b']['id']}/restore",
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 200, resp.text
+    ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()
+    assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.95"
+    plan = client.get(f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer)).json()
+    assert plan["planning_config"]["variables"]["hp_cap"]["upper_bound"] == "2000"
+    ids, loads = _bound_e_loads(client, db, importer, new_pid)
+    assert all(i not in (dvid1, dvid2) for i in ids)
+    assert loads == [100.0, 1100.0]
+
+    # 源项目不变: 版本数、当前配置值、当前绑定
+    src_versions = client.get(f"/api/projects/{pid}/versions", headers=_h(client, owner)).json()["versions"]
+    assert len(src_versions) == 2
+    src_ovr = client.get(f"/api/projects/{pid}/finance-overrides", headers=_h(client, owner)).json()
+    assert src_ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.95"
+    src_ids, src_loads = _bound_e_loads(client, db, owner, pid)
+    assert sorted(src_ids) == sorted([dvid1, dvid2])
+    assert src_loads == [100.0, 1100.0]
+
+
+def test_imported_restore_resolves_version_scoped_config(client: TestClient, db: Session) -> None:
+    """导入后恢复历史版本: 按来源映射解析到重建的历史行, 取原业务值。
+
+    源 hist-a 冻结覆盖 rev2(电价 0.75)/规划 rev1(上界 1000); 新项目确认重建
+    恰好也有同号当前行(值 0.95/2000), 恢复必须取历史行原值, 不得撞车。
+    """
+    owner = make_user(db, "silent_owner")
+    importer = make_user(db, "silent_importer")
+    pid = _create_project(client, owner)
+    profile, _, _ = _setup_finance(client, owner, pid)  # 覆盖 rev2: 电价 0.75
+    _save_planning(client, owner, pid)  # 规划 rev1: 上界 1000
+    _create_hist_version(client, owner, pid, "silent-a")
+    _put_overrides(client, owner, pid, profile, "0.95", 2)  # 覆盖 rev3
+    _put_planning(client, owner, pid, _planning_payload_with_bound("2000"), None)  # 规划 rev2
+
+    zip_bytes = _export_zip(client, owner, pid)
+    new_pid, _ = _import_new_project(client, importer, zip_bytes)
+    listed = client.get(f"/api/projects/{new_pid}/versions", headers=_h(client, importer)).json()["versions"]
+    assert len(listed) == 1
+    resp = client.post(
+        f"/api/projects/{new_pid}/versions/{listed[0]['id']}/restore",
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 200, resp.text
+    ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()
+    assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.75"
+    plan = client.get(f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer)).json()
+    assert plan["planning_config"]["variables"]["hp_cap"]["upper_bound"] == "1000"
+
+
+def test_imported_restore_recovers_history_planning_despite_absent_current(client: TestClient, db: Session) -> None:
+    """导出时当前规划指针已被清空: 包内仍带历史规划依赖, 恢复成功取历史值,
+    当前规划缺席真实保持缺席(404), 不回填。"""
+    owner = make_user(db, "omit_owner")
+    importer = make_user(db, "omit_importer")
+    pid = _create_project(client, owner)
+    profile, _, _ = _setup_finance(client, owner, pid)
+    _save_planning(client, owner, pid)  # 规划 rev1: 上界 1000
+    _create_hist_version(client, owner, pid, "omit-a")
+    _put_overrides(client, owner, pid, profile, "0.95", 2)  # 规划指针清空, 不重存
+
+    zip_bytes = _export_zip(client, owner, pid)
+    new_pid, _ = _import_new_project(client, importer, zip_bytes)
+    # 当前规划缺席(包内无当前规划可重建)
+    resp = client.get(f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer))
+    assert resp.status_code == 404, resp.text
+    listed = client.get(f"/api/projects/{new_pid}/versions", headers=_h(client, importer)).json()["versions"]
+    assert len(listed) == 1
+    resp = client.post(
+        f"/api/projects/{new_pid}/versions/{listed[0]['id']}/restore",
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 200, resp.text
+    plan = client.get(f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer)).json()
+    assert plan["planning_config"]["variables"]["hp_cap"]["upper_bound"] == "1000"
+    ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()
+    assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.75"
+
+
+def _rezip_with_manifest(zip_bytes: bytes, mutate) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zin, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            raw = zin.read(info.filename)
+            if info.filename == "manifest.json":
+                doc = json.loads(raw.decode("utf-8"))
+                mutate(doc)
+                raw = json.dumps(doc, ensure_ascii=False).encode()
+            zout.writestr(info.filename, raw)
+    return buf.getvalue()
+
+
+def test_import_rejects_legacy_major_version(client: TestClient, db: Session) -> None:
+    """旧主版本 1.0 包 → 400 拒绝, reasons 非空指明期望 2.x, 不创建记录。"""
+    importer = make_user(db, "legacy_imp")
+    entries, configs_meta = _valid_triplet_entries()
+    legacy = _rezip_with_manifest(
+        _build_package(entries, configs_meta),
+        lambda doc: doc.update({"format_version": "1.0"}),
+    )
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", legacy, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert isinstance(reasons, list) and reasons
+    assert any("2.x" in r for r in reasons)
+
+
+def test_import_rejects_version_without_mapped_deps(client: TestClient, db: Session) -> None:
+    """带配置引用的版本缺 version_configs 条目 → 400, reasons 指明版本。"""
+    importer = make_user(db, "nodep_imp")
+    entries, configs_meta = _valid_triplet_entries()
+    entries["versions/0001.json"] = json.dumps({
+        "version": {"version_no": 1, "name": "v1", "project_baseline": ProjectBaseline(
+            resolution="1h", start_year=2026).to_dict()},
+        "content": {
+            "effective_finance": {"profile_id": "p", "overrides_revision": 1, "revision": 1},
+            "planning_config": {"revision": 1},
+        },
+    }, ensure_ascii=False).encode()
+    configs_meta = dict(configs_meta)
+    manifest_files = {"configs": configs_meta, "versions": ["versions/0001.json"]}
+    zip_bytes = _build_package(entries, configs_meta)
+    zip_bytes = _rezip_with_manifest(
+        zip_bytes,
+        lambda doc: doc["files"].update(manifest_files),
+    )
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", zip_bytes, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert any("0001" in r for r in reasons)
+
+
+def test_unconfirmed_proposal_project_lifecycle(client: TestClient, db: Session) -> None:
+    """上传提案后、确认前: 预建项目已 active 落库(列表可见)但无草稿(详情 500)。
+
+    GUI 取消 ≠ 零写入, 且确认前不得导航进该项目; 如实记录, 不顺手清理。
+    """
+    owner = make_user(db, "life_owner")
+    importer = make_user(db, "life_importer")
+    pid = _create_project(client, owner)
+    _create_hist_version(client, owner, pid, "life-a")
+    zip_bytes = _export_zip(client, owner, pid)
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", zip_bytes, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()["proposal"]
+    assert body["status"] == "proposed"
+    prebuilt_id = body["project_id"]
+    assert prebuilt_id != pid
+    listed = client.get("/api/projects", headers=_h(client, importer)).json()["projects"]
+    assert any(p["id"] == prebuilt_id and p["status"] == "active" for p in listed)
+    view = client.get(f"/api/projects/{prebuilt_id}", headers=_h(client, importer))
+    assert view.status_code == 500, view.text
+    assert view.json()["error"]["code"] == "SYS-STORE-001"
 
 
 def test_import_rejects_override_scope_violation(client: TestClient, db: Session) -> None:

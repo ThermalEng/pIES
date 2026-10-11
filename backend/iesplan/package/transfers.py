@@ -43,8 +43,8 @@ from iesplan.core.errors import AppError
 # 常量
 # ---------------------------------------------------------------------------
 
-#: 项目包格式版本(主版本号兼容判定: 只接受 1.x)
-PACKAGE_FORMAT_VERSION = "1.0"
+#: 项目包格式版本(主版本号兼容判定: 只接受 2.x)
+PACKAGE_FORMAT_VERSION = "2.0.0"
 #: 项目包媒体类型
 PACKAGE_MEDIA_TYPE = "application/zip"
 #: Excel 报告媒体类型
@@ -292,7 +292,7 @@ def parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
 
     校验项:
     - 格式: 合法 zip, 无路径穿越条目;
-    - 兼容性: 主版本号与当前格式兼容(1.x);
+    - 兼容性: 主版本号与当前格式兼容(2.x);
     - 清单: manifest.json 存在, package_type=project, 无账号/权限/会话/全局配置/密钥;
     - 完整性: 对象清单与包内文件一一对应 + 大小一致(传输完整性由 zip 条目 CRC 承担,
       不做内容摘要比对);
@@ -366,8 +366,8 @@ def parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
 
     # 兼容性: 格式主版本
     format_version = manifest.get("format_version")
-    if not isinstance(format_version, str) or not format_version.split(".", 1)[0] == "1":
-        reasons.append(f"格式版本不兼容: {format_version!r}, 期望 1.x")
+    if not isinstance(format_version, str) or not format_version.split(".", 1)[0] == "2":
+        reasons.append(f"格式版本不兼容: {format_version!r}, 期望 2.x(不保留 1.x 解析)")
     if manifest.get("package_type") != "project":
         reasons.append(f"包类型非法: {manifest.get('package_type')!r}, 期望 project")
     # 禁止携带账号/权限/会话/全局配置/密钥

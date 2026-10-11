@@ -198,7 +198,7 @@ def test_export_package_usecase_commits(
     assert user is not None
 
     result = packages_uc.export_package(db, user, pid)
-    assert result.manifest["format_version"] == "1.0"
+    assert result.manifest["format_version"] == "2.0.0"
     assert result.token
 
     # 事务提交证明: 新会话可读出包对象
