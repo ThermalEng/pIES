@@ -1,6 +1,6 @@
 # 文件格式标准
 
-> 文档状态：生效目标契约；设备模型、设备数据与装配目标 schema 为 `2.0.0`，财务三件套（`FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig`）目标 schema 为 `1.0.0`，Solver Bundle 目标 schema 为 `1.0.0`。本章规定插件开发和离线交换必须共同遵守的文件边界；财务三件套的字段级定义见[财务 YAML 契约](formats/finance-yaml.md)。
+> 文档状态：生效目标契约；设备模型、设备数据与装配目标 schema 为 `2.0.0`，财务三件套（`FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig`）目标 schema 为 `1.0.0`，Solver Bundle 目标 schema 为 `1.0.0`，项目包目标 `format_version` 为 `2.0.0`。本章规定插件开发和离线交换必须共同遵守的文件边界；财务三件套的字段级定义见[财务 YAML 契约](formats/finance-yaml.md)，项目包布局见[项目包](formats/project-package.md)。
 
 目标不是把内部对象“导出成差不多能读的文件”，而是让开发者只看本章及对应格式页，就能手写、校验和交付一个不依赖当前代码目录的输入包。
 
@@ -19,6 +19,7 @@
 | [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、指向有效财务快照的精确引用、`finance_binding`、`tariff_bindings`、规划配置 | 装配校验器 |
 | [Solver Bundle](formats/solver-bundle.md) | 一个目录或不可变归档 | 固定求解器输入文件、受控命令、预期输出和结果适配器 | 求解运行时 |
 | [计算配置](formats/calculation-config.md) | 计算提交输入（JSON 兼容映射） | 固定 mode、预测算法与参数、generator、solver、精度、收敛、时间限制、选项、种子和输出选择 | 生成器（生成前能力核对） |
+| [项目包](formats/project-package.md) | `*.zip`（`manifest.json` 在根） | 离线交换：当前工作状态、包内历史版本及其精确财务/规划/数据依赖 | 项目包导入器 |
 
 人工 authoring：设备模型 YAML、设备数据 CSV、`FinanceProfile`、`FinanceOverrides` 与装配 YAML 允许人工编写。`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，不能人工 authoring（导入时连同来源 Profile 与 Overrides 重新合并验证）。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
 
@@ -74,7 +75,7 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 
 ### 项目包的可移植历史依赖
 
-项目包现行目标格式为 `2.0.0`，以 `format_version` 声明；该目标改变历史依赖的携带与引用语义，不保留旧 `1.x` 解析路径。此处定义目标契约，不表示导入实现已经交付。
+项目包现行目标格式为 `2.0.0`，以 `format_version` 声明；该目标改变历史依赖的携带与引用语义，不保留旧 `1.x` 解析路径。完整布局见[项目包](formats/project-package.md)；此处定义目标契约，不表示导入实现已经交付。
 
 - 数据集元数据和数据文件按数据版本唯一定位，同一数据集的不同版本不能共用一个元数据条目。
 - 包须携带当前工作状态及包内历史版本恢复所需的精确财务、规划与数据依赖，包括当前已不再启用、但仍被历史引用的依赖；不导出无关配置历史或全库内容。
