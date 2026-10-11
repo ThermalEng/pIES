@@ -25,4 +25,3 @@ export interface VersionCreateRequestDto {
   /** 创建原因: 本切片恒为 manual_save。 */
   reason: 'manual_save'
 }
-
