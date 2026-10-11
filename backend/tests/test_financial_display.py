@@ -85,3 +85,16 @@ def test_financial_absence_reasons(monkeypatch):
 
     monkeypatch.setattr("iesplan.tasks.get_snapshot", lambda db, sid: _Snap2())
     assert _financial_absence("normal_completion", None, 1, None) == "missing_unknown"
+
+
+def test_financial_absence_frozen_tuple_outputs(monkeypatch):
+    """冻结快照 outputs 为 tuple(与 protocols 一致的合法冻结形态)时,
+    同样识别未请求 solution, 不得误报 missing_unknown。"""
+    frozen = {"outputs": ("metrics",)}
+    assert not isinstance(frozen["outputs"], list)
+
+    class _SnapFrozen:
+        calc_config_snapshot = frozen
+
+    monkeypatch.setattr("iesplan.tasks.get_snapshot", lambda db, sid: _SnapFrozen())
+    assert _financial_absence("normal_completion", None, 1, None) == "solution_not_requested"

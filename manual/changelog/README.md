@@ -37,6 +37,8 @@
 - Docker 真实 HiGHS + 浏览器：K1N2E3（付款 0.6/0.4，同 t=3 两笔维护 1000.00+2500.50）经 UI 确认→提交→完成→结果→导出全链；`CF=[-.6C,-.4C,R1,R2]`、维护合计 `3500.5` 只扣 CF[3]、IRR `no_solution` 在页面与 Excel 一致呈现。
 - 下载内容同源验证：真实下载 xlsx 财务摘要表与同一封存事实逐单元格精确对照（标签+对应值+顺序+行数，24 行全等，覆盖 K/N/E/C/币种、付款时点比例金额、每年度全部分量、CF 每个时点净额/贴现/累计/贴现累计、NPV 与 IRR/回收期值和状态；`backend/tests/test_financial_export_content.py` 3 passed）。阴性对照：交换两 CF 行净额 / 错改 K（相同数字仍在别处）时精确对照失败，而旧全表子串命中仍全绿，证明精确性确有提升。
 - 纯逻辑定向：封存展平原样与缺块原因 2 项全绿；链/冻结回归见提交报告。
+- 缺席浏览器验收（`frontend/tests/e2e/financial-absence.spec.ts` 2 passed，Docker 真实 HiGHS+Worker+Chromium）：A metrics-only 任务正常完成，结果页显示“快照未请求 solution”缺席说明、无封存财务卡/现金流行，HTTP `financial_evaluation=null`/`financial_absence=solution_not_requested`；B 合法 `capacity_limit` pin（`hp_cap >= 10000 kW`，公开装配通过）真实不可行，业务结局“无推荐方案”，结果页显示非正常缺席说明，HTTP 与页面一致。`missing_unknown` 无浏览器场景（不破坏可信封存流程），保留定向派生测试。
+- 最小接线修复：冻结快照 `outputs` 为 tuple（合法冻结形态，`protocols.py` 同口径）时 `_financial_absence` 误报 `missing_unknown`，现与 list 同等识别（`test_financial_absence_frozen_tuple_outputs` 红→绿；生产仅此一行分支条件变化）。
 
 #### 明确未做
 

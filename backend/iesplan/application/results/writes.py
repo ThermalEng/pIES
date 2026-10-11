@@ -789,7 +789,9 @@ def _financial_absence(
     snapshot = tasks_domain.get_snapshot(db, snapshot_id) if snapshot_id else None
     config = snapshot.calc_config_snapshot if snapshot is not None else None
     outputs = config.get("outputs") if isinstance(config, Mapping) else None
-    if isinstance(outputs, list) and "solution" not in outputs:
+    # 冻结快照 outputs 为 tuple(与 computation 协议一致的合法冻结形态),
+    # 与 list 同等对待; 非序列仍落 missing_unknown, 不猜测。
+    if isinstance(outputs, (list, tuple)) and "solution" not in outputs:
         return "solution_not_requested"
     return "missing_unknown"
 
