@@ -3,7 +3,7 @@
 > 契约标识：`ies.project-package`；目标 `format_version`：`2.0.0`；包文件：`*.zip`（`manifest.json` 在根）。
 > 文档状态：生效目标契约；只定义目标文件语义，不声明实现进度。`1.x` 不再保留解析路径，主版本不兼容。
 
-项目包是项目的离线交换载体：当前工作状态 + 包内历史版本 + 恢复它们所需的精确依赖。账号、权限、会话、密钥、数据库 ID、宿主机路径、ORM 字段不得入包（通用书写规则见[文件格式标准](../file-formats.md)）。
+项目包是项目的离线交换载体：当前工作状态 + 包内历史版本 + 恢复它们所需的精确依赖。账号、权限、会话、密钥、宿主机路径、ORM 字段不得入包；来源数据库标识（如 `dataset_id`、`dataset_version_id`、配置 revision 号）仅作为包内映射标识出现，确认导入时一律映射为新身份，不得直接复用为目标库身份（通用书写规则见[文件格式标准](../file-formats.md)）。
 
 ## 布局
 
@@ -31,6 +31,7 @@ version_configs/{NNNN}/*.yaml   # 每个历史版本恢复所需的精确配置�
 ```json
 "version_configs": {
   "0001": {
+    "finance_profile": "version_configs/0001/finance_profile.yaml",
     "finance_overrides": "version_configs/0001/finance_overrides.yaml",
     "effective_finance": "version_configs/0001/effective_finance.yaml",
     "planning_config": "version_configs/0001/planning_config.yaml"
@@ -38,16 +39,18 @@ version_configs/{NNNN}/*.yaml   # 每个历史版本恢复所需的精确配置�
 }
 ```
 
-- 三个文件分别使用正式财务/规划 YAML 契约，内容为该版本冻结引用指向的**原行内容原样**（Overrides/Effecitve/Planning 各自 revision 行）。
-- 键按需缺席：版本内容无 `effective_finance` 块则前两个键缺席，无 `planning_config` 块则第三个键缺席；缺席保持缺席，导入后恢复也不建立对应指针。
+- 四个文件分别使用正式财务/规划 YAML 契约，内容为该版本冻结引用指向的**原行内容原样**（Profile 稳定来源、Overrides/Effective/Planning 各自 revision 行）。
+- 键按需缺席：版本内容无 `effective_finance` 块则前三个键缺席，无 `planning_config` 块则第四个键缺席；缺席保持缺席，导入后恢复也不建立对应指针。
 - 来源键：版本内容 `effective_finance` 块的 `{profile_id, overrides_revision, revision}` 与 `planning_config` 块的 `{revision}` 即来源键，只用于在包内定位上述文件，**不作为目标数据库的身份或修订号**。
-- Profile 解析：以该版本 Effective 块记录的稳定 `profile_id` 从地区注册表解析，绝不用当前 `finance_profile.yaml` 冒充历史；注册表无该 id 则拒绝导入。
+- Profile 自包含：每组财务依赖携带其精确来源的 `FinanceProfile` 文件；确认导入时先注册包内来源（同稳定 id 复用既有行），内容不一致即身份冲突、明确拒绝。绝不用当前 `finance_profile.yaml` 冒充历史，也绝不用目标库同名或最新 Profile 替代包内来源。
 - 当前工作状态指向顶层 `finance_*.yaml` / `planning_config.yaml` 这一组（`files.configs`），与 `version_configs` 无关；导入后当前指针按该组重建，不隐式变成任一历史版本的配置。
 
-## 最小完整例子
+## 例子（片段，非可导入包）
+
+以下片段只示意关键条目的形状，不构成完整可导入包（完整包还须含 `draft.json`、全部对象条目、各版本全部依赖文件等）：
 
 ```json
-// manifest.json（节选）
+// manifest.json（片段）
 {
   "format_version": "2.0.0",
   "package_type": "project",
@@ -55,6 +58,7 @@ version_configs/{NNNN}/*.yaml   # 每个历史版本恢复所需的精确配置�
     {"path": "project.json", "size_bytes": 412, "media_type": "application/json"},
     {"path": "datasets/7/v2/dataset.json", "size_bytes": 388, "media_type": "application/json"},
     {"path": "datasets/7/v2/data.csv", "size_bytes": 1024, "media_type": "text/csv"},
+    {"path": "version_configs/0001/finance_profile.yaml", "size_bytes": 190, "media_type": "application/yaml"},
     {"path": "version_configs/0001/finance_overrides.yaml", "size_bytes": 210, "media_type": "application/yaml"}
   ],
   "files": {
@@ -64,7 +68,10 @@ version_configs/{NNNN}/*.yaml   # 每个历史版本恢复所需的精确配置�
     "versions": ["versions/0001.json"],
     "datasets": ["datasets/7/v2/dataset.json"],
     "evidence": [],
-    "version_configs": {"0001": {"finance_overrides": "version_configs/0001/finance_overrides.yaml"}}
+    "version_configs": {"0001": {
+      "finance_profile": "version_configs/0001/finance_profile.yaml",
+      "finance_overrides": "version_configs/0001/finance_overrides.yaml"
+    }}
   }
 }
 ```
