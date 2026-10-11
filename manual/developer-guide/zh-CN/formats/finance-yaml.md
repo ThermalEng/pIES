@@ -289,6 +289,8 @@ profile_ref:
 
 时序 `interface` 必须写 `aggregation`；`property` 只能对应 `scalar`，装配映射 `property` 时 `aggregation` 字段可省略（语义固定为 `scalar`）。本契约不接受模糊的双向净值或绝对值：购/售分别绑定方向明确的接口（如 `electricity_in`/`electricity_out`），能量/流量序列在聚合前必须非负并阻断负值，不自动取绝对值；价格本身的零/负值与能量非负是两个独立约束，不得混淆。
 
+`scalar` 成本 driver 用于 `upfront_capex` 的建设量或 `annual_fixed_om` 的年度存量计费；不得用于 `period_variable_om` 生成无年份、无时间维度的全期运维金额。`period_variable_om` 按接口时序的实际运行量计费，年度费用由该年运行结果直接归集，禁止把全期合计自动均摊。装配输入边界按 driver 实际消费的分量阻断上述标量组合，不禁止建设费或年度固定运维的合法 property 绑定；显式发生年的维护／换新清单见[财务计算](../modules/finance.md)。
+
 ### 计价规则（时变价格逐点计价，会计方向由 `direction` 固定）
 
 每个 `tariff_binding` 独立产生可追溯、**已带符号**的计费分量。聚合产物是与价格序列 `step` 一一对应的能量序列 `e[t]`（非负）；逐点计价后按被引用价格的显式 `direction` 加符号，会计方向不靠 price_id 或键名推断：
