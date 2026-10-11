@@ -416,7 +416,7 @@ def publish_accepted_finance_state(
         source_category="effective_finance",
     )
     next_eff = configuration_domain.next_effective_revision(db, project_id)
-    configuration_domain.append_effective(
+    eff_row = configuration_domain.append_effective(
         db,
         project_id=project_id,
         revision=next_eff,
@@ -424,6 +424,16 @@ def publish_accepted_finance_state(
         profile_id=effective_doc["profile_id"],
         created_by=user_id,
         content_object_id=eff_obj.id,
+    )
+    # 内容对象登记 owner 引用(引用清单为唯一权威, 防 orphan 清理误回收;
+    # 与调用方同一事务 flush/提交/回滚, 不新增校验/receipt)。
+    add_ref(
+        db,
+        eff_obj.id,
+        "effective_finance_revision",
+        eff_row.id,
+        ref_entity_type="effective_finance_revisions",
+        purpose="effective_finance_content",
     )
     published: dict[str, int] = {
         "overrides_revision": next_ovr,

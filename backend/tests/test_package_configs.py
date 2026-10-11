@@ -1125,11 +1125,14 @@ def test_confirm_does_not_rerun_upload_gate(client: TestClient, db: Session, mon
         m.setattr(triplet.EffectiveFinanceConfig, "from_dict", _boom)
         m.setattr(core_contracts.PlanningConfig, "from_dict", _boom)
         m.setattr(planning_contracts, "validate_planning_domain", _boom)
-        # 合并器打桩在真实解析位置(定义处与确认可达模块的引用处): 确认若再
-        # 合并即触发哨兵失败, 证明合并仅发生在上传边界。
+        # 合并器打桩在真实解析位置(定义处、确认可达模块的引用处与上传
+        # 模块的本地绑定处): 确认若再合并即触发哨兵失败, 证明合并仅发生
+        # 在上传边界。
         m.setattr(triplet, "merge_effective", _boom)
         import iesplan.application.configuration.revisions as revisions_mod
         m.setattr(revisions_mod, "merge_effective", _boom)
+        import iesplan.application.packages.transfers as pkg_transfers
+        m.setattr(pkg_transfers, "merge_effective", _boom)
         resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
         assert resp.status_code == 201, resp.text
     new_pid = resp.json()["project"]["id"]
@@ -1138,6 +1141,51 @@ def test_confirm_does_not_rerun_upload_gate(client: TestClient, db: Session, mon
     assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.75"
     plan = client.get(f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer)).json()
     assert plan["planning_config"]["variables"]["hp_cap"]["upper_bound"] == "1000"
+
+
+def test_confirm_registers_effective_content_refs(client: TestClient, db: Session) -> None:
+    """确认发布的历史/当前 Effective 内容对象均登记引用, 不被清理候选收录。
+
+    公开上传→确认(含一个历史版本与当前工作状态); 经配置公开读口取历史
+    rev1 与当前 Effective 行的内容对象 id; 引用公开视图须有
+    effective_finance_content 归属; safe_cleanup  dry_run 候选不得包含二者
+    (只预览, 不实际清理)。
+    """
+    import iesplan.configuration as configuration_domain
+    import iesplan.storage as storage_domain
+
+    owner = make_user(db, "ref_owner")
+    importer = make_user(db, "ref_importer")
+    pid = _create_project(client, owner)
+    _setup_finance(client, owner, pid)
+    _save_planning(client, owner, pid)
+    _create_hist_version(client, owner, pid, "ref-a")
+    zip_bytes = _export_zip(client, owner, pid)
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", zip_bytes, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 201, resp.text
+    prop_id = resp.json()["proposal"]["id"]
+    resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
+    assert resp.status_code == 201, resp.text
+    new_pid = resp.json()["project"]["id"]
+
+    hist_obj = configuration_domain.get_effective_revision(db, new_pid, 1).content_object_id
+    cur_row = configuration_domain.get_current_effective(db, new_pid)
+    assert cur_row.revision == 2
+    cur_obj = cur_row.content_object_id
+    refs = {
+        r["object_id"]: r
+        for r in storage_domain.find_refs_by_entity_type(db, "effective_finance_revisions")
+    }
+    assert refs[hist_obj]["purpose"] == "effective_finance_content"
+    assert refs[cur_obj]["purpose"] == "effective_finance_content"
+    plan = storage_domain.safe_cleanup(db, dry_run=True)
+    cand_ids = {c["id"] for c in plan["candidates"]}
+    assert hist_obj not in cand_ids
+    assert cur_obj not in cand_ids
 
 
 def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, monkeypatch) -> None:
@@ -1150,6 +1198,7 @@ def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, 
     """
     import iesplan.configuration as configuration_domain
     import iesplan.project as project_domain
+    import iesplan.storage as storage_domain
 
     owner = make_user(db, "rb_owner")
     importer = make_user(db, "rb_importer")
@@ -1167,6 +1216,14 @@ def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, 
     prop_id = resp.json()["proposal"]["id"]
     new_pid = resp.json()["proposal"]["project_id"]
 
+    def _content_refs() -> list[dict]:
+        return [
+            r for r in storage_domain.find_refs_by_entity_type(db, "effective_finance_revisions")
+            if r["purpose"] == "effective_finance_content"
+        ]
+
+    ref_count_before = len(_content_refs())
+
     def _boom(*args, **kwargs):
         raise RuntimeError("injected late confirm failure")
 
@@ -1174,6 +1231,9 @@ def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, 
         m.setattr(project_domain, "create_version", _boom)
         resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
         assert resp.status_code == 500, resp.text
+
+    # 新增引用随确认写入一同回滚(历史 Effective 内容引用不残留)。
+    assert len(_content_refs()) == ref_count_before
 
     assert client.get(
         f"/api/projects/{new_pid}/versions", headers=_h(client, importer)

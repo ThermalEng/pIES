@@ -1201,7 +1201,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
                     source_category="project_package_history",
                 )
                 new_eff = configuration_domain.next_effective_revision(db, project.id)
-                configuration_domain.append_effective(
+                eff_row = configuration_domain.append_effective(
                     db,
                     project_id=project.id,
                     revision=new_eff,
@@ -1209,6 +1209,15 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
                     profile_id=e_doc.get("profile_id"),
                     created_by=user.id,
                     content_object_id=obj.id,
+                )
+                # 历史 Effective 内容对象同样登记引用(与确认同事务回滚)。
+                add_ref(
+                    db,
+                    obj.id,
+                    "effective_finance_revision",
+                    eff_row.id,
+                    ref_entity_type="effective_finance_revisions",
+                    purpose="effective_finance_content",
                 )
                 config_rev_map[("effective", src_eff_rev)] = new_eff
         if plan:
