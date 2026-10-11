@@ -24,6 +24,7 @@ import { useI18n } from '../i18n'
 import ProjectPage from './ProjectPage'
 import ResultsPage from './ResultsPage'
 import TasksPage from './TasksPage'
+import VersionsPage from './VersionsPage'
 import { WorkbenchProvider } from './workbench'
 
 /** 并行 agent 实现的子页面(惰性扫描,缺失时回退占位)。 */
@@ -93,6 +94,7 @@ export default function WorkbenchPage() {
           <Route path="config" element={<ConfigPage />} />
           <Route path="validation" element={<ValidationPage />} />
           <Route path="tasks" element={<TasksPage />} />
+          <Route path="versions" element={<VersionsPage />} />
           <Route path="results" element={<ResultsPage />} />
           <Route path="export" element={<ExportPage />} />
         </Route>

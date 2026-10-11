@@ -76,6 +76,7 @@ export const messagesZh: Record<string, string> = {
   'ies.nav.data': '数据管理',
   'ies.nav.config': '计算配置',
   'ies.nav.tasks': '任务中心',
+  'ies.nav.versions': '版本历史',
   'ies.nav.results': '结果分析',
   'ies.nav.exports': '导出',
   'ies.nav.validation': '校验',
@@ -103,6 +104,33 @@ export const messagesZh: Record<string, string> = {
   'ies.workbench.offline': '离线',
   'ies.workbench.offline_hint': '网络已断开,展示的数据可能不是最新',
   'ies.workbench.load_failed': '项目信息加载失败',
+
+  // -------------------------------------------------------------------------
+  // 版本历史(S1: 创建/列表/详情; 恢复/应用/导入未交付)
+  // -------------------------------------------------------------------------
+  'ies.versions.history_title': '版本历史',
+  'ies.versions.create_open': '创建版本',
+  'ies.versions.create_title': '从当前草稿创建版本',
+  'ies.versions.create_submit': '创建',
+  'ies.versions.create_failed': '创建版本失败',
+  'ies.versions.field_name': '版本名称',
+  'ies.versions.field_description': '版本描述(可选)',
+  'ies.versions.name_required': '请填写版本名称',
+  'ies.versions.load_failed': '版本列表加载失败',
+  'ies.versions.empty_title': '尚无版本',
+  'ies.versions.empty_desc': '从当前草稿创建第一个不可变版本, 固化此刻的业务状态。',
+  'ies.versions.col_no': '版本号',
+  'ies.versions.col_created': '创建时间',
+  'ies.versions.col_reason': '创建原因',
+  'ies.versions.col_source': '来源草稿修订',
+  'ies.versions.col_current': '当前',
+  'ies.versions.col_baseline': '基线快照',
+  'ies.versions.col_meta': '币种/版本/创建人',
+  'ies.versions.detail_title': '版本详情(元数据)',
+  'ies.versions.detail_failed': '版本详情加载失败',
+  'ies.versions.current_badge': '当前版本',
+  'ies.versions.source_revision': '草稿修订 r{revision}',
+  'ies.versions.created_by': '用户 {user} 创建',
 
   // -------------------------------------------------------------------------
   // 登录 / 账号

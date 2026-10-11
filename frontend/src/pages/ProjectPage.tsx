@@ -1,7 +1,7 @@
 /**
  * 工作台框架(ProjectPage):侧边导航 + 项目信息头 + 内容出口。
  *
- * - 侧边导航:模型 / 数据 / 配置 / 校验 / 任务 / 结果 / 导出。
+ * - 侧边导航:模型 / 数据 / 配置 / 校验 / 任务 / 版本历史 / 结果 / 导出。
  * - 项目信息头:项目名称、版本、币种、UTC 偏移、自动保存状态、离线徽章。
  *
  * 子页面通过 useWorkbench()/useAutosave()(见 workbench.tsx)读取上下文;
@@ -18,7 +18,7 @@ import { formatUtcOffset, useWorkbench } from './workbench'
 import type { AutosaveStatus } from './workbench'
 import './workbench.css'
 
-type NavIconName = 'model' | 'data' | 'config' | 'validation' | 'tasks' | 'results' | 'export'
+type NavIconName = 'model' | 'data' | 'config' | 'validation' | 'tasks' | 'versions' | 'results' | 'export'
 
 interface NavItem {
   path: string
@@ -33,6 +33,7 @@ const NAV_ITEMS: NavItem[] = [
   { path: 'config', labelKey: 'ies.nav.config', icon: 'config' },
   { path: 'validation', labelKey: 'ies.nav.validation', icon: 'validation' },
   { path: 'tasks', labelKey: 'ies.nav.tasks', icon: 'tasks' },
+  { path: 'versions', labelKey: 'ies.nav.versions', icon: 'versions' },
   { path: 'results', labelKey: 'ies.nav.results', icon: 'results' },
   { path: 'export', labelKey: 'ies.nav.exports', icon: 'export' },
 ]
@@ -72,6 +73,14 @@ const NAV_ICON_PATHS: Record<NavIconName, ReactNode> = {
       <circle cx="4.5" cy="6" r="1" />
       <circle cx="4.5" cy="12" r="1" />
       <circle cx="4.5" cy="18" r="1" />
+    </>
+  ),
+  versions: (
+    <>
+      <circle cx="12" cy="5" r="2.2" />
+      <circle cx="12" cy="12" r="2.2" />
+      <circle cx="12" cy="19" r="2.2" />
+      <path d="M12 7.2v2.6M12 14.2v2.6" />
     </>
   ),
   results: (

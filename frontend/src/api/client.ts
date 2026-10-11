@@ -57,6 +57,7 @@ import type {
   ProjectListParams,
   ProjectRole,
   ProjectVersion,
+  ProjectVersionCreateInput,
   PublicAuthSettings,
   RegisterRequest,
   Report,
@@ -502,6 +503,71 @@ function projectFromServer(body: unknown): Project {
   return out
 }
 
+/**
+ * 后端版本 dict(version_to_dict) → 前端 ProjectVersion(严格解析)。
+ *
+ * 必填缺失或类型不符直接抛错, 不补 0/''/null 伪造版本(尤其 version_no /
+ * created_by / created_at / source_draft_revision 不可伪造); 可空字段仅
+ * 接受 null/undefined → null。详情端点只返回版本元数据, 此处不读取模型内容。
+ */
+function projectVersionFromServer(v: unknown): ProjectVersion {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+    throw new Error('invalid project version envelope')
+  }
+  const r = v as Record<string, unknown>
+  const num = (key: string): number => {
+    const val = r[key]
+    if (typeof val !== 'number' || !Number.isFinite(val)) throw new Error(`invalid project version field: ${key}`)
+    return val
+  }
+  const nullableNum = (key: string): number | null => {
+    const val = r[key]
+    if (val === null || val === undefined) return null
+    if (typeof val !== 'number' || !Number.isFinite(val)) throw new Error(`invalid project version field: ${key}`)
+    return val
+  }
+  const str = (key: string): string => {
+    const val = r[key]
+    if (typeof val !== 'string') throw new Error(`invalid project version field: ${key}`)
+    return val
+  }
+  const nullableStr = (key: string): string | null => {
+    const val = r[key]
+    if (val === null || val === undefined) return null
+    if (typeof val !== 'string') throw new Error(`invalid project version field: ${key}`)
+    return val
+  }
+  const baseline = r.project_baseline
+  if (baseline === null || typeof baseline !== 'object' || Array.isArray(baseline)) {
+    throw new Error('invalid project version field: project_baseline')
+  }
+  const b = baseline as Record<string, unknown>
+  if (typeof b.resolution !== 'string' || typeof b.start_year !== 'number' || typeof b.scenario_mode !== 'string') {
+    throw new Error('invalid project version field: project_baseline')
+  }
+  return {
+    id: num('id'),
+    project_id: num('project_id'),
+    version_no: num('version_no'),
+    name: str('name'),
+    description: nullableStr('description'),
+    created_by: num('created_by'),
+    created_at: str('created_at'),
+    parent_version_id: nullableNum('parent_version_id'),
+    source_draft_id: nullableNum('source_draft_id'),
+    source_draft_revision: nullableNum('source_draft_revision'),
+    reason: str('reason'),
+    project_baseline: {
+      resolution: b.resolution,
+      start_year: b.start_year,
+      scenario_mode: b.scenario_mode,
+    },
+    currency: r.currency as ProjectVersion['currency'],
+    schema_version: num('schema_version'),
+    content_object_id: num('content_object_id'),
+  }
+}
+
 /** 后端任务摘要(task_summary) → 前端 Task。 */
 function taskFromSummary(s: Record<string, unknown>, projectId: number): Task {
   return {
@@ -920,7 +986,12 @@ export interface ProjectsApi {
   list(params?: ProjectListParams): Promise<PageResult<Project>>
   create(input: ProjectCreateInput): Promise<Project>
   get(id: number): Promise<Project>
+  /** 版本列表: 严格消费唯一 {versions: [...]} 契约, 形状不符抛错(不猜测、不回退空列表)。 */
   versions(id: number): Promise<ProjectVersion[]>
+  /** 从当前草稿创建版本: 请求/响应与后端 VersionCreateRequest/{version} 一一对应。 */
+  createVersion(id: number, input: ProjectVersionCreateInput): Promise<ProjectVersion>
+  /** 版本详情: 严格消费唯一 {version: {...}} 契约(只返回版本元数据)。 */
+  versionDetail(projectId: number, versionId: number): Promise<ProjectVersion>
   archive(id: number): Promise<Project>
   unarchive(id: number): Promise<Project>
   /** 删除项目(0.2.0 B4: 须携带与项目名精确匹配的 name 确认)。 */
@@ -1134,7 +1205,27 @@ export const api = {
       return request<unknown>(`/projects/${id}`).then((body) => projectFromServer(body))
     },
     versions(id: number): Promise<ProjectVersion[]> {
-      return request<unknown>(`/projects/${id}/versions`).then((body) => asList<ProjectVersion>(body, 'versions'))
+      // 本流程只消费唯一 {versions: [...]} 契约; 其他形状直接抛错, 不回退空列表。
+      return request<unknown>(`/projects/${id}/versions`).then((body) => {
+        const rec = asRecord(body)
+        if (!Array.isArray(rec.versions)) throw new Error('invalid project versions envelope')
+        return (rec.versions as unknown[]).map(projectVersionFromServer)
+      })
+    },
+    createVersion(id: number, input: ProjectVersionCreateInput): Promise<ProjectVersion> {
+      const payload: Record<string, unknown> = { name: input.name }
+      if (input.description !== undefined) payload.description = input.description
+      if (input.reason !== undefined) payload.reason = input.reason
+      return request<unknown>(`/projects/${id}/versions`, { method: 'POST', body: payload }).then((body) => {
+        const rec = asRecord(body)
+        return projectVersionFromServer(rec.version)
+      })
+    },
+    versionDetail(projectId: number, versionId: number): Promise<ProjectVersion> {
+      return request<unknown>(`/projects/${projectId}/versions/${versionId}`).then((body) => {
+        const rec = asRecord(body)
+        return projectVersionFromServer(rec.version)
+      })
     },
     archive(id: number): Promise<Project> {
       return request<unknown>(`/projects/${id}/archive`, { method: 'POST' }).then((body) => projectFromServer(body))

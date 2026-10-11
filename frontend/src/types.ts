@@ -203,6 +203,7 @@ export interface ProjectDraft {
   }>
 }
 
+/** 项目版本(与后端 project.version_to_dict 一一对应; 详情端点只返回版本元数据)。 */
 export interface ProjectVersion {
   id: EntityId
   project_id: EntityId
@@ -215,10 +216,22 @@ export interface ProjectVersion {
   source_draft_id: EntityId | null
   source_draft_revision: number | null
   reason: string
-  fixed_utc_offset_minutes: number
+  /** 版本固化时的项目基线快照(非独立时区字段; 展示时区用 Project.fixed_utc_offset_minutes)。 */
+  project_baseline: {
+    resolution: string
+    start_year: number
+    scenario_mode: string
+  }
   currency: Currency
   schema_version: number
   content_object_id: EntityId
+}
+
+/** 创建项目版本输入(与后端 VersionCreateRequest 对应; reason 沿 manual_save 语义)。 */
+export interface ProjectVersionCreateInput {
+  name: string
+  description?: string | null
+  reason?: string
 }
 
 /** 项目列表筛选参数。 */

@@ -66,6 +66,7 @@ export const messagesEn: Record<string, string> = {
   'ies.nav.data': 'Data',
   'ies.nav.config': 'Calc Config',
   'ies.nav.tasks': 'Tasks',
+  'ies.nav.versions': 'Versions',
   'ies.nav.results': 'Results',
   'ies.nav.exports': 'Exports',
   'ies.nav.validation': 'Validation',
@@ -93,6 +94,33 @@ export const messagesEn: Record<string, string> = {
   'ies.workbench.offline': 'Offline',
   'ies.workbench.offline_hint': 'Network is disconnected; displayed data may be stale.',
   'ies.workbench.load_failed': 'Failed to load project info',
+
+  // -------------------------------------------------------------------------
+  // Version history (S1: create/list/detail; restore/apply/import not delivered)
+  // -------------------------------------------------------------------------
+  'ies.versions.history_title': 'Version history',
+  'ies.versions.create_open': 'Create version',
+  'ies.versions.create_title': 'Create version from current draft',
+  'ies.versions.create_submit': 'Create',
+  'ies.versions.create_failed': 'Failed to create version',
+  'ies.versions.field_name': 'Version name',
+  'ies.versions.field_description': 'Description (optional)',
+  'ies.versions.name_required': 'Version name is required',
+  'ies.versions.load_failed': 'Failed to load version list',
+  'ies.versions.empty_title': 'No versions yet',
+  'ies.versions.empty_desc': 'Create the first immutable version from the current draft.',
+  'ies.versions.col_no': 'No.',
+  'ies.versions.col_created': 'Created at',
+  'ies.versions.col_reason': 'Reason',
+  'ies.versions.col_source': 'Source draft revision',
+  'ies.versions.col_current': 'Current',
+  'ies.versions.col_baseline': 'Baseline snapshot',
+  'ies.versions.col_meta': 'Currency/Schema/By',
+  'ies.versions.detail_title': 'Version detail (metadata)',
+  'ies.versions.detail_failed': 'Failed to load version detail',
+  'ies.versions.current_badge': 'Current',
+  'ies.versions.source_revision': 'draft revision r{revision}',
+  'ies.versions.created_by': 'created by user {user}',
 
   // -------------------------------------------------------------------------
   // Auth / account
