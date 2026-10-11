@@ -312,6 +312,170 @@ def test_chain_infeasible_model_reports_math_status() -> None:
     assert result.receipt_id == receipt.receipt_id
 
 
+def test_gas_volume_driver_same_source_across_gates() -> None:
+    """燃气 m³ 同源(不求解): 公开装配量纲通过 → 生成器目标系数 →
+    年度费用手算一致(与 kWh 同公式, 不转能量、不均摊、不猜热值)。
+
+    gb1 为已注册燃气锅炉静态实例(公开闸门签发, 非手造事实冒充端到端);
+    求解断言由既有真实链覆盖, 此处只证明三层消费同一单位事实。
+    """
+    from decimal import Decimal
+
+    from iesplan.computation.generators.project import build_project_model
+    from iesplan.core.units import to_si
+    from iesplan.finance import effective_from_yaml as _effective_from_yaml
+    from iesplan.finance.timeline import InterfaceDriverFacts, annual_variable_om
+
+    raw_fin = (SAMPLES / "finance" / "campus.effective-finance.yaml").read_text(
+        encoding="utf-8"
+    )
+    gas_type = (
+        "  gas_boiler_system:\n"
+        "    upfront_capex:\n"
+        "      linear:\n"
+        "        heat_kw:\n"
+        "          unit_cost:\n"
+        "            value: '1500'\n"
+        "            unit: CNY/kW\n"
+        "    annual_fixed_om:\n"
+        "      linear:\n"
+        "        heat_kw:\n"
+        "          unit_cost:\n"
+        "            value: '15'\n"
+        "            unit: CNY/kW·a\n"
+        "    period_variable_om:\n"
+        "      linear:\n"
+        "        gas_m3h:\n"
+        "          unit_cost:\n"
+        "            value: '2.5'\n"
+        "            unit: CNY/m3\n"
+    )
+    assert raw_fin.count("\nenergy_prices:\n") == 1
+    finance = _effective_from_yaml(
+        raw_fin.replace("\nenergy_prices:\n", "\n" + gas_type + "\nenergy_prices:\n")
+    )
+
+    text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
+    gb_device = (
+        "  gb1:\n"
+        "    definition:\n"
+        "      id: ies.device.gas_boiler\n"
+        "    asset_origin: new\n"
+        "    properties:\n"
+        "      rated_heat_kw:\n"
+        "        value: 500\n"
+        "        unit: kW\n"
+        "    predefined_interfaces: {}\n"
+    )
+    assert text.count("  elec_load:\n    definition:") == 1
+    text = text.replace(
+        "  elec_load:\n    definition:", gb_device + "  elec_load:\n    definition:"
+    )
+    gb_binding = (
+        "    gb1:\n"
+        "      type: costed\n"
+        "      finance_type: gas_boiler_system\n"
+        "      drivers:\n"
+        "        heat_kw:\n"
+        "          property: rated_heat_kw\n"
+        "        gas_m3h:\n"
+        "          interface: gas_in\n"
+        "          aggregation: integrate_positive\n"
+    )
+    assert text.count("    elec_load:\n      type: none") == 1
+    text = text.replace(
+        "    elec_load:\n      type: none",
+        gb_binding + "    elec_load:\n      type: none",
+    )
+    old_objective = (
+        "expression: pv1__upfront_capex + 1 year * pv1__annual_fixed_om"
+        " + pv1__period_variable_om + import_meter__period_energy_purchase"
+    )
+    assert text.count(old_objective) == 1
+    text = text.replace(old_objective, old_objective + " + gb1__period_variable_om")
+    text = text.replace(
+        "    kind: relative_file\n    path: finance/campus.effective-finance.yaml",
+        "    kind: object\n    object_id: fin:gas",
+    )
+    validated = validate_assembly_text(
+        text, package_dir=SAMPLES, finance_snapshots={"fin:gas": finance}
+    )
+    assert validated.ok, [(d.code, d.params) for d in validated.diagnostics if d.blocking]
+    artifact = validated.artifact
+
+    init_registry()
+    contributions = {}
+    for doc in list_devices():
+        built = build_math_contribution(doc)
+        assert built.ok, (doc.device.id, built.diagnostics)
+        contributions[doc.device.id] = built.contribution
+    doc = json.loads(artifact.canonical_text)
+    models = {
+        inst: contributions[dev["definition"]["id"]] for inst, dev in doc["devices"].items()
+    }
+
+    def collect(node, found: set):
+        if isinstance(node, dict):
+            content = node.get("content")
+            if isinstance(content, dict) and "object_id" in content:
+                found.add(content["object_id"])
+            for value in node.values():
+                collect(value, found)
+        elif isinstance(node, list):
+            for value in node:
+                collect(value, found)
+
+    object_ids: set = set()
+    collect(doc["devices"], object_ids)
+    resources = {}
+    for object_id in sorted(object_ids):
+        rel = object_id[5:] if object_id.startswith("file:") else object_id
+        resources[object_id] = (SAMPLES / rel).read_bytes()
+    mat = materialize_non_predictive_series(artifact, resources, operation_years=1)
+    assert not mat.pending_predict
+    config = CalculationConfig(
+        mode="planning",
+        generator=GENERATOR_REF,
+        solver=SOLVER_REF,
+        precision="medium",
+        time_limit_seconds=600,
+        outputs=["solution", "metrics"],
+        seed=None,
+    )
+    model, _, _ = build_project_model(artifact, models, mat, finance, config)
+
+    step_s = 3600.0
+    expected_coeff = to_si(2.5, "CNY/m3") * step_s
+    gas_terms = [
+        (name, coeff)
+        for (name, _), coeff in model.objective.terms
+        if name.startswith("gb1__gas_in__t")
+    ]
+    assert len(gas_terms) == 8760
+    for _, coeff in gas_terms:
+        assert coeff == pytest.approx(expected_coeff, rel=1e-12)
+
+    # 模型流变量为 SI(m³/s): 同源费用须以 SI 流量相乘, 与财务一致。
+    flow = 10.0
+    flow_si = to_si(flow, "m3/h")
+    model_fee = sum(coeff * flow_si for _, coeff in gas_terms)
+    finance_fee = annual_variable_om(
+        step_seconds=step_s,
+        boundaries=((0, 8760),),
+        interface_drivers=[
+            InterfaceDriverFacts(
+                "gb1", "gas_m3h", (flow,) * 8760, "m3/h",
+                "integrate_positive", Decimal("2.5"), "CNY/m3",
+            )
+        ],
+        currency="CNY",
+    )[0]
+    # 年1: 10 m³/h×8760h=87600 m³×2.5=219000。
+    hand = Decimal("2.5") * Decimal(str(flow)) * Decimal("8760")
+    assert model_fee == pytest.approx(float(hand), rel=1e-9)
+    assert float(finance_fee) == pytest.approx(float(hand), rel=1e-9)
+
+
 def test_chain_policy_rejected_never_executes() -> None:
     """策略拒绝链：执行器不在配额内，不启动进程，无业务输出。"""
     bundle = _generate_bundle(_campus_inputs())

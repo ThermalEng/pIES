@@ -15,6 +15,12 @@
 
 ## Unreleased
 
+### 2026-10-11 — 使用量归集通用化（待 Codex 复审）
+
+- 财务归集不限能量：`integrate_positive`=`to_si` 流率×步长秒、`sum_positive`=数量 SI 直接求和（公共 `core.units`，与生成器同源），去掉只认 J/W 的能量限定；不做单位白名单、不猜热值、不做跨量纲换算。关税逐点计价同源修正（载体相容仍由装配绑定保证，不扩契约）。
+- 装配 `_check_driver_target` 费率量纲一次解析，同时供标量禁令判断与量纲组合使用，并入唯一 `cost_unit_unrecognized` 路径；拒收规则不变。
+- Docker 定向：体积两年手算（`m³/h` integrate 与 `m³` sum，不同年度费用；购气体积计费）、燃气锅炉 `m³` 经公开装配→生成器目标系数→年度费用手算同源（219000）、既有 kWh 用例全绿。`Nm³` 未在单位词汇注册，本轮未造别名、不做气体状态转换（现状如实记录）。
+
 ### 2026-10-11 — 标量运维禁令装配收口（待 Codex 复审）
 
 - 装配公开输入边界按实际消费分量拒收标量 `property`×无时间维度费率被 `period_variable_om` 消费的组合（`ASM-BIND-002`/`period_variable_om_scalar_unsupported`，阻断性）；`upfront_capex`/`annual_fixed_om` 的合法标量驱动与接口时序 `period_variable_om` 全部保留，不全局拒 `property`。

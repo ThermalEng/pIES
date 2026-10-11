@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from iesplan.core.contracts import horizon_year_boundary_steps
-from iesplan.core.units import energy_to_joules, from_si, power_to_watts, to_si
+from iesplan.core.units import from_si, to_si
 
 #: 计费方向记账符号(财务契约公开规则: purchase 为 +, sale 为 −;
 #: 方向由 Effective 边界保证, 此处直接取键)。
@@ -92,11 +92,18 @@ def annual_boundaries(resolution: str, start_year: int, operation_years: int) ->
     return tuple((bounds[i], bounds[i + 1]) for i in range(operation_years))
 
 
-def _step_joules(values: Sequence[float], unit: str, aggregation: str, step_seconds: float) -> list[float]:
-    """逐 step 能量 → 焦耳(聚合语义为公开契约, 非生成器私有公式)。"""
+def _step_quantities_si(
+    values: Sequence[float], unit: str, aggregation: str, step_seconds: float
+) -> list[float]:
+    """逐 step 使用量 → SI(聚合语义为公开契约, 与生成器同源)。
+
+    ``integrate_positive``: 流率 SI×步长秒(能量/体积/质量等一切已注册
+    流率, 不限能量); ``sum_positive``: 区间数量 SI 直接求和。不做量纲
+    白名单, 不猜热值、不做跨量纲换算(单位未注册即 ``to_si`` 自然失败)。
+    """
     if aggregation == "integrate_positive":
-        return [power_to_watts(float(v), unit) * step_seconds for v in values]
-    return [energy_to_joules(float(v), unit) for v in values]
+        return [to_si(float(v), unit) * step_seconds for v in values]
+    return [to_si(float(v), unit) for v in values]
 
 
 def annual_energy_nets(
@@ -106,20 +113,21 @@ def annual_energy_nets(
     tariffs: Sequence[TariffYearFacts],
     currency: str,
 ) -> list[Decimal]:
-    """各运营年能源净额(已带符号记账贡献之和; purchase +, sale −)。
+    """各运营年计费净额(已带符号记账贡献之和; purchase +, sale −)。
 
-    逐点 ``price[t]×e[t]``(财务契约公开语义), 按年区间求和; 单位经公共
-    单位换算走 SI, 结果回业务币种。
+    逐点 ``price[t]×e[t]``(财务契约公开语义), 按年区间求和; 使用量与
+    单价经公共单位换算走 SI(不限能量载体, 载体相容由装配绑定保证),
+    结果回业务币种。
     """
     nets = [0.0 for _ in boundaries]
     for facts in tariffs:
         sign = _DIRECTION_SIGN[facts.direction]
-        energy_j = _step_joules(facts.energy_values, facts.energy_unit, facts.aggregation, step_seconds)
+        qty_si = _step_quantities_si(facts.energy_values, facts.energy_unit, facts.aggregation, step_seconds)
         price_si = [to_si(float(p), facts.price_unit) for p in facts.price_values]
         for year, (start, end) in enumerate(boundaries):
             year_sum = 0.0
             for step in range(start, end):
-                year_sum += sign * price_si[step] * energy_j[step]
+                year_sum += sign * price_si[step] * qty_si[step]
             nets[year] += year_sum
     return [_decimal(from_si(total, currency)) for total in nets]
 
@@ -140,7 +148,7 @@ def annual_variable_om(
     nets = [0.0 for _ in boundaries]
     for facts in interface_drivers:
         rate_si = to_si(float(facts.unit_cost), facts.unit_cost_unit)
-        qty_j = _step_joules(facts.values, facts.unit, facts.aggregation, step_seconds)
+        qty_j = _step_quantities_si(facts.values, facts.unit, facts.aggregation, step_seconds)
         for year, (start, end) in enumerate(boundaries):
             nets[year] += sum(rate_si * qty_j[step] for step in range(start, end))
     return [_decimal(from_si(total, currency)) for total in nets]

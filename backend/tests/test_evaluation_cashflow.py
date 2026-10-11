@@ -106,6 +106,71 @@ def test_sale_and_time_series_price_signs():
     assert float(nets2[0]) != pytest.approx(float(nets2[1]), rel=1e-9)
 
 
+def test_volume_variable_om_yearly_both_aggregations():
+    """体积使用量两年手算: integrate(m³/h 流率×步长)与 sum(m³ 直接求和)
+    均按年直接归集, 两年不等, 不均摊、不转能量。"""
+    bounds = ((0, 2), (2, 4))
+    integrate = annual_variable_om(
+        step_seconds=H,
+        boundaries=bounds,
+        interface_drivers=[
+            InterfaceDriverFacts(
+                "gb",
+                "gas",
+                (10.0, 10.0, 30.0, 30.0),
+                "m3/h",
+                "integrate_positive",
+                Decimal("2.5"),
+                "CNY/m3",
+            )
+        ],
+        currency="CNY",
+    )
+    # 1h 步: 10 m³/h×1h=10 m³/step, 年1共20 m³×2.5=50; 年2为150。
+    assert float(integrate[0]) == pytest.approx(2.5 * 20, rel=1e-9)
+    assert float(integrate[1]) == pytest.approx(2.5 * 60, rel=1e-9)
+    summed = annual_variable_om(
+        step_seconds=H,
+        boundaries=bounds,
+        interface_drivers=[
+            InterfaceDriverFacts(
+                "gb",
+                "gas",
+                (100.0, 100.0, 300.0, 300.0),
+                "m3",
+                "sum_positive",
+                Decimal("2.5"),
+                "CNY/m3",
+            )
+        ],
+        currency="CNY",
+    )
+    assert float(summed[0]) == pytest.approx(2.5 * 200, rel=1e-9)
+    assert float(summed[1]) == pytest.approx(2.5 * 600, rel=1e-9)
+
+
+def test_volume_tariff_purchase_yearly():
+    """体积计费两年手算: 购气按年归集(年1: 20 m³×2.5=50, 年2: 60 m³×2.5=150)。"""
+    nets = annual_energy_nets(
+        step_seconds=H,
+        boundaries=((0, 2), (2, 4)),
+        tariffs=[
+            TariffYearFacts(
+                "g",
+                "purchase",
+                "integrate_positive",
+                (10.0, 10.0, 30.0, 30.0),
+                "m3/h",
+                (2.5, 2.5, 2.5, 2.5),
+                "CNY/m3",
+            )
+        ],
+        currency="CNY",
+    )
+    assert float(nets[0]) == pytest.approx(2.5 * 20, rel=1e-9)
+    assert float(nets[1]) == pytest.approx(2.5 * 60, rel=1e-9)
+
+
 def test_variable_om_interface_yearly():
     """接口 driver 按两年不同实际量产生不同年度费用, 直接归集不均摊。
 
