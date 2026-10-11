@@ -10,6 +10,16 @@ import type { ProjectVersion, VersionRestoreResult } from '../../types'
 /** 版本历史展示 model: 即共享 ProjectVersion(字段含义见 types 注释)。 */
 export type VersionModel = ProjectVersion
 
+/**
+ * 摘要刷新结果窄契约(本 feature 拥有)。
+ * 调用方(VersionsPage)传入 workbench refreshDetailed，其返回结构兼容即可；
+ * feature 不认识 Workbench(宪法 §6 pages→features→shared)。
+ */
+export interface SummaryRefreshErrors {
+  projectError: string | null
+  versionsError: string | null
+}
+
 /** 创建版本表单 model(名称必填, 描述可选; 原因恒为 manual_save, 不由用户选择)。 */
 export interface VersionCreateForm {
   name: string

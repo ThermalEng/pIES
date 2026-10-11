@@ -13,10 +13,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { errorMessage } from '../../../i18n'
-import type { WorkbenchRefreshErrors } from '../../../pages/workbench'
 import type { VersionCreateRequestDto } from '../contracts'
 import { createVersion, getVersion, listVersions, restoreVersion } from '../api'
-import type { VersionDetailState, VersionModel, VersionRestoreState } from '../model'
+import type {
+  SummaryRefreshErrors,
+  VersionDetailState,
+  VersionModel,
+  VersionRestoreState,
+} from '../model'
 
 export interface UseProjectVersions {
   versions: VersionModel[] | null
@@ -42,7 +46,7 @@ export interface UseProjectVersions {
 
 export function useProjectVersions(
   projectId: number,
-  refreshSummary: () => Promise<WorkbenchRefreshErrors>,
+  refreshSummary: () => Promise<SummaryRefreshErrors>,
 ): UseProjectVersions {
   const [versions, setVersions] = useState<VersionModel[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)

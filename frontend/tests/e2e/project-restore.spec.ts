@@ -226,9 +226,10 @@ test.describe('S2: 恢复历史版本', () => {
   })
 
   test('恢复成功但摘要刷新失败: 已发生明确展示, 不诱导再提交', async ({ browser }) => {
-    // 故障只注入恢复 POST 成功之后的一次项目摘要 GET(500 真实失败响应);
-    // 列表 GET 直通成功。恢复 POST 必须恰 1 次。
-    const { apiCtx, username, password, pid, v1Id } = await prepareTwoVersions(browser, 'es-s2e')
+    // 浏览器定向故障注入: 确认前即确定性布置下一次项目摘要 GET 失败一次
+    // (页面初始化已结束, 业务动作后该 GET 恰为刷新); 列表 GET 直通成功。
+    // 恢复 POST 必须恰 1 次。
+    const { apiCtx, username, password, pid } = await prepareTwoVersions(browser, 'es-s2e')
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
@@ -238,32 +239,24 @@ test.describe('S2: 恢复历史版本', () => {
       if (route.request().method() === 'POST') restorePosts++
       await route.continue()
     })
-    let failSummaryOnce = false
+    await openVersions(page, pid)
+    await expect(page.locator('.ies-table__body .ies-table__row')).toHaveCount(2, { timeout: 30_000 })
+    // 页面初始化已结束, 此后下一次项目摘要 GET 恰为恢复后的刷新: 确认前布置。
     let summaryFailed = false
     await page.route(`**/api/projects/${pid}`, async (route: Route) => {
       const req = route.request()
-      if (req.method() === 'GET' && failSummaryOnce && !summaryFailed) {
+      if (req.method() === 'GET' && !summaryFailed) {
         summaryFailed = true
         await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' })
         return
       }
       await route.continue()
     })
-
-    await openVersions(page, pid)
-    await expect(page.locator('.ies-table__body .ies-table__row')).toHaveCount(2, { timeout: 30_000 })
     const dialog = page.getByRole('dialog')
     await page.locator('.ies-table__body .ies-table__row', { hasText: 'v1带光伏' }).click({ timeout: 30_000 })
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await dialog.getByRole('button', { name: '恢复此版本' }).click({ timeout: 10_000 })
-    const restoreDone = page.waitForResponse(
-      (res) => res.url().endsWith(`/api/projects/${pid}/versions/${v1Id}/restore`) && res.request().method() === 'POST',
-      { timeout: 30_000 },
-    )
     await dialog.getByRole('button', { name: '确认恢复' }).click({ timeout: 10_000 })
-    await restoreDone
-    // 其后的一次项目摘要 GET 注入失败, 列表 GET 仍成功。
-    failSummaryOnce = true
     await expect(dialog.getByText('恢复已完成')).toBeVisible({ timeout: 30_000 })
     await expect(dialog.getByText(/摘要\/列表刷新失败/)).toBeVisible({ timeout: 10_000 })
     expect(restorePosts).toBe(1)
