@@ -16,9 +16,6 @@ export interface VersionCreateForm {
   description: string
 }
 
-/** 创建表单初始值。 */
-export const EMPTY_CREATE_FORM: VersionCreateForm = { name: '', description: '' }
-
 /** 详情加载状态(idle 未选 / loading / loaded / failed)。 */
 export type VersionDetailState =
   | { status: 'idle' }

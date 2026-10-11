@@ -4,7 +4,7 @@
  * 名称两侧空白在前端收敛一次(后端仍以 PROJ-CMD-001 为权威拒收空名);
  * 描述空串归一为 null(与后端 Optional 语义一致); reason 恒为 manual_save,
  * 不接受调用方传入(防止伪装 restore/apply_result 等后端内部原因)。
- * 响应 DTO → VersionModel 的严格解析在 api/client 完成, 此处不重复。
+ * 版本响应 → VersionModel 的严格解析在 api/client 完成, 此处不重复。
  */
 
 import type { VersionCreateRequestDto } from './contracts'

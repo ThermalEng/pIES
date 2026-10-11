@@ -5,7 +5,7 @@
 // 来源草稿修订/基线), 不声称完整模型内容。恢复/应用/导入仍未交付, 不测。
 
 import { test, expect } from '@playwright/test'
-import type { Page, BrowserContext } from '@playwright/test'
+import type { Page, BrowserContext, Route } from '@playwright/test'
 import { createSession, uniqueName, strongPassword } from './fixtures'
 import { createEngineer, loginToken, requestJson } from './setup/api'
 import { APP } from './financial-scaffold'
@@ -99,6 +99,91 @@ test.describe('S1: 项目版本创建/列表/详情', () => {
     // 与 config-revision.spec 同源); 其余仍零容忍。
     session.assertNoErrors([
       { method: 'GET', path: `/api/projects/${pid}/config`, status: 404, times: 1 },
+    ])
+    await context.close()
+  })
+
+  test('迟到详情不重开不覆盖: 关闭/切换作废旧请求', async ({ browser }) => {
+    // 驱动真实组件/hook: 仅延迟 A 版本详情的真实响应(内容不伪造),
+    // B 版本直通; 失败路径用真实 500 响应走客户端失败回调。
+    const username = uniqueName('es-verrace')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('版本时序项目')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, username, password)
+    const token = await loginToken(apiCtx.request, username, password)
+    const res = await requestJson(apiCtx.request, 'POST', '/api/projects', {
+      name: projectName,
+      baseline_resolution: '1h',
+      baseline_start_year: 2025,
+      baseline_scenario_mode: 'single',
+    }, token)
+    const pid: number = res.project?.id ?? res.id
+    const v1 = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/versions`, { name: 'v1 基线', reason: 'manual_save' }, token)
+    await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/versions`, { name: 'v2 调整', reason: 'manual_save' }, token)
+    const aId: number = v1.version.id
+
+    const context: BrowserContext = await browser.newContext()
+    const page: Page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await openVersions(page, projectName)
+    await expect(page.locator('.ies-table__body .ies-table__row')).toHaveCount(2, { timeout: 30_000 })
+
+    // A 详情 GET 被测试挂起, 其余请求直通; 挂起的是真实响应, 不伪造内容。
+    let heldA: Route | null = null
+    await page.route(`**/api/projects/${pid}/versions/${aId}`, async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.continue()
+        return
+      }
+      heldA = route
+    })
+
+    const dialog = page.getByRole('dialog')
+    const rowA = page.locator('.ies-table__body .ies-table__row', { hasText: 'v1 基线' })
+    const rowB = page.locator('.ies-table__body .ies-table__row', { hasText: 'v2 调整' })
+    const closeDialog = () => dialog.getByRole('button', { name: '关闭' }).last().click()
+
+    // 阶段 1: A 成功迟到 → 已关闭不重开。
+    await rowA.click({ timeout: 30_000 })
+    await expect(dialog).toBeVisible({ timeout: 10_000 })
+    await closeDialog()
+    await expect(dialog).toBeHidden({ timeout: 10_000 })
+    expect(heldA).toBeTruthy()
+    await heldA!.continue()
+    await page.waitForTimeout(1000)
+    await expect(dialog).toBeHidden()
+
+    // 阶段 2: A 迟到不能覆盖后选中的 B。
+    await rowA.click({ timeout: 30_000 })
+    await expect(dialog).toBeVisible({ timeout: 10_000 })
+    await closeDialog()
+    await expect(dialog).toBeHidden({ timeout: 10_000 })
+    await rowB.click({ timeout: 30_000 })
+    await expect(dialog.getByText('v2 调整')).toBeVisible({ timeout: 30_000 })
+    expect(heldA).toBeTruthy()
+    await heldA!.continue()
+    await page.waitForTimeout(1000)
+    await expect(dialog.getByText('v2 调整')).toBeVisible()
+    await expect(dialog.getByText('v1 基线')).toHaveCount(0)
+    await closeDialog()
+    await expect(dialog).toBeHidden({ timeout: 10_000 })
+
+    // 阶段 3: A 失败迟到 → 已关闭不重开报错。
+    await rowA.click({ timeout: 30_000 })
+    await expect(dialog).toBeVisible({ timeout: 10_000 })
+    await closeDialog()
+    await expect(dialog).toBeHidden({ timeout: 10_000 })
+    expect(heldA).toBeTruthy()
+    await heldA!.fulfill({ status: 500, contentType: 'application/json', body: '{}' })
+    await page.waitForTimeout(1000)
+    await expect(dialog).toBeHidden()
+
+    await apiCtx.close()
+    // 预期内噪声: 任务页落地读空白配置 404 + 本用例真实 500 失败响应一次。
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${pid}/config`, status: 404, times: 1 },
+      { method: 'GET', path: `/api/projects/${pid}/versions/${aId}`, status: 500, times: 1 },
     ])
     await context.close()
   })
