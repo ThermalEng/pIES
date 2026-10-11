@@ -29,16 +29,7 @@ from iesplan.application.configuration import (
     get_planning_config as _get_planning_config,
 )
 from iesplan.application.configuration.revisions import (
-    _register_finance_profile as _register_profile_row,
-)
-from iesplan.application.configuration.revisions import (
-    _save_finance_overrides as _save_overrides_row,
-)
-from iesplan.application.configuration.revisions import (
-    _save_planning_config as _save_planning_row,
-)
-from iesplan.application.configuration.revisions import (
-    _set_project_finance_profile as _set_profile_row,
+    publish_accepted_finance_state as _publish_accepted_finance_state,
 )
 from iesplan.application.projects import (
     ensure_access,
@@ -596,6 +587,7 @@ def parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
       PlanningConfig.from_dict: 拒未知/缺失字段);
     - Overrides 对 Profile 结构校验(profile_ref 匹配、只许既有叶子、
       禁改单位/carrier/direction/tax、禁新增 finance_type/price_id);
+    - Effective 的 profile_id 必须等于组内 Profile 稳定 id(来源一致);
     对象字节完整性由 _parse_package 的对象清单一一对应 + 大小校验承担
     (外部包入口边界); 领域层不做本地内容重算比对(2.6)。
     """
@@ -624,9 +616,13 @@ def parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
     if reasons:
         raise ImportValidationError(reasons)
 
-    return _parse_triplet_group(
+    group = _parse_triplet_group(
         entries, profile_path, overrides_path, effective_path, planning_path, label="包内",
     )
+    if "effective" in group and "profile" in group:
+        if group["effective"].profile_id != group["profile"].profile_id:
+            raise ImportValidationError(["包内 Effective 与 Profile 来源不一致"])
+    return group
 
 
 def _parse_triplet_group(
@@ -781,6 +777,10 @@ def _check_version_dependencies(
                 raise ImportValidationError([f"版本 {key} 的 Effective 与 Profile 来源不一致"])
             if group["overrides"].profile_ref["id"] != group["profile"].profile_id:
                 raise ImportValidationError([f"版本 {key} 的 Overrides 与 Profile 来源不一致"])
+            if eff.get("profile_id") != group["profile"].profile_id:
+                raise ImportValidationError(
+                    [f"版本 {key} 的冻结 Effective 引用与历史依赖 Profile 来源不一致"]
+                )
         if plan and "planning" not in group:
             raise ImportValidationError([f"版本 {key} 的规划依赖文件缺失"])
     for meta_path in files_meta.get("datasets") or []:
@@ -985,8 +985,8 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
     - 数据集: 重建 Dataset/DatasetVersion/DatasetFile(引用暂存对象, 原标识重映射);
     - 草稿: revision=1 领域内容(数据集绑定重映射, 证据来源登记);
     - 版本: 按包内版本顺序重建 ProjectVersion(新身份版本号, 不倒写原版本);
-    - 配置: 包内规划/财务配置 revision 重建为 revision=1 行(与提案同源
-      重校验, 失败 → 整个事务回滚, 不落任何行; 0.6.5 事项 3);
+    - 配置: 消费提案已接受的包内规划/财务配置发布 revision 行(上传边界
+      是唯一正式校验, 确认只消费及保存; 失败 → 整个事务回滚, 不落任何行);
     - 证据: 历史结果作为证据来源保留 — 登记对象引用(imported_evidence)与
       评估摘要, 不创建本地任务(不伪造本地任务, domain-model §快照、任务和结果)。
 
@@ -1104,20 +1104,47 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         content.pop("applied_commands", None)  # 命令簿记不外泄
         return content
 
-    def _ensure_profile(doc: dict, label: str) -> str:
-        """注册包内 Profile 来源并返回稳定 id(同 id 复用既有行)。
+    def _ensure_profile(entry_bytes: bytes, label: str) -> configuration_domain.FinanceProfileRecord:
+        """登记包内 Profile 来源并返回注册行(同 id 复用既有行)。
 
+        上传边界已做唯一正式解析; 此处只解码消费, 不跑 from_dict。
         既有行内容与包内来源不一致即身份冲突, 明确拒绝, 不偷偷沿用。
         """
-        prow, _ = _register_profile_row(db, doc, user.id)
-        if (
-            FinanceProfile.from_dict(prow.content).to_dict()
-            != FinanceProfile.from_dict(doc).to_dict()
-        ):
-            raise ImportValidationError(
-                [f"{label} 的 Profile 身份冲突: 稳定 id 在目标库已有不同内容, 拒绝导入"]
-            )
-        return prow.profile_id
+        doc = yaml_load(entry_bytes.decode("utf-8"))
+        if not isinstance(doc, dict) or not isinstance((doc.get("profile") or {}).get("id"), str):
+            raise ImportValidationError([f"{label} 的 Profile 来源结构缺失(数据损坏)"])
+        stable_id = doc["profile"]["id"]
+        existing = configuration_domain.get_profile(db, stable_id)
+        if existing is not None:
+            if existing.content != doc:
+                raise ImportValidationError(
+                    [f"{label} 的 Profile 身份冲突: 稳定 id 在目标库已有不同内容, 拒绝导入"]
+                )
+            return existing
+        obj = put_object(
+            db,
+            entry_bytes,
+            "application/yaml",
+            source_category="finance_profile",
+        )
+        row = configuration_domain.register_profile(
+            db,
+            profile_id=stable_id,
+            region=(doc["profile"].get("region") or ""),
+            content=doc,
+            object_id=obj.id,
+            created_by=user.id,
+        )
+        add_ref(
+            db,
+            obj.id,
+            "finance_profile",
+            row.id,
+            ref_entity_type="finance_profiles",
+            purpose="finance_profile_yaml",
+        )
+        db.flush()
+        return row
 
     # 2) 历史配置依赖重建(来源 revision → 新 revision 映射; 新编号, 不复用
     # 来源数字; 同一来源只建一次。Profile 按 Effective 记录的稳定 id 解析,
@@ -1134,9 +1161,8 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         plan = content.get("planning_config") or {}
         if not eff and not plan:
             continue
-        vc_entry = vc_meta.get(key)
-        if not isinstance(vc_entry, dict):
-            raise _refuse_missing(key, "version_configs 条目")
+        # 上传边界已保证带引用块的版本必有 version_configs 字典条目; 此处直接消费。
+        vc_entry = vc_meta[key]
         if eff:
             # 包内来源已在上传边界过正式解析; 此处只解码消费(普通读取)。
             # Profile 自包含: 注册包内来源(同 id 复用既有行), 内容不一致
@@ -1144,10 +1170,9 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             p_path = vc_entry.get("finance_profile")
             o_path = vc_entry.get("finance_overrides")
             e_path = vc_entry.get("effective_finance")
-            p_doc = yaml_load(entries[p_path].decode("utf-8"))
             o_doc = yaml_load(entries[o_path].decode("utf-8"))
             e_doc = yaml_load(entries[e_path].decode("utf-8"))
-            _ensure_profile(p_doc, f"版本 {key}")
+            _ensure_profile(entries[p_path], f"版本 {key}")
             src_ovr_rev = eff.get("overrides_revision")
             if ("overrides", src_ovr_rev) not in config_rev_map:
                 new_ovr = configuration_domain.next_overrides_revision(db, project.id)
@@ -1288,26 +1313,34 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         )
         prev_version = version
 
-    # 6) 当前工作状态配置: 只解码(上传边界已做正式校验), 经 flush 版写入
-    # 路径一次持久化(登记 Profile → 保存 Overrides → 保存规划), 与确认事务
-    # 同提交; 无规划则当前规划保持缺席。失败 → 整个事务回滚, 不落任何行。
+    # 6) 当前工作状态配置: 上传边界已做唯一正式校验, 此处只解码消费,
+    # 经 configuration 拥有者的公开 flush 能力一次发布(登记 Profile →
+    # 追加 Overrides/Effective[/Planning] 行 + 移动项目指针), 与确认事务
+    # 同提交, 不重跑作者输入校验/合并器; 无规划则当前规划保持缺席。
+    # 失败 → 整个事务回滚, 不落任何行。
     configs_meta = manifest.get("files", {}).get("configs") or {}
     if all(configs_meta.get(k) for k in ("finance_profile", "finance_overrides", "effective_finance")):
         try:
-            profile_doc = yaml_load(entries[configs_meta["finance_profile"]].decode("utf-8"))
+            profile_row = _ensure_profile(entries[configs_meta["finance_profile"]], "当前工作状态")
             overrides_doc = yaml_load(entries[configs_meta["finance_overrides"]].decode("utf-8"))
+            effective_doc = yaml_load(entries[configs_meta["effective_finance"]].decode("utf-8"))
             planning_doc = (
                 yaml_load(entries[configs_meta["planning_config"]].decode("utf-8"))
                 if configs_meta.get("planning_config") else None
             )
-            stable_id = _ensure_profile(profile_doc, "当前工作状态")
-            current_ovr_rev, _, _ = _set_profile_row(db, project.id, stable_id, user.id)
-            _save_overrides_row(db, project.id, overrides_doc, current_ovr_rev, user.id)
-            if planning_doc is not None:
-                _save_planning_row(db, project.id, planning_doc, None, user.id)
+            _publish_accepted_finance_state(
+                db,
+                project.id,
+                profile_row=profile_row,
+                overrides_doc=overrides_doc,
+                effective_doc=effective_doc,
+                effective_bytes=entries[configs_meta["effective_finance"]],
+                planning_doc=planning_doc,
+                user_id=user.id,
+            )
         except AppError as exc:
             raise ImportValidationError(
-                [f"包内配置在确认阶段校验失败: {getattr(exc, 'code', 'PKG-IMP-001')} {exc}"]
+                [f"包内配置在确认阶段发布失败: {getattr(exc, 'code', 'PKG-IMP-001')} {exc}"]
             ) from exc
 
     # 7) 提案收尾 + 审计(提案状态经 package 域状态机推进)

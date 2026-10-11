@@ -377,6 +377,88 @@ def set_project_finance_profile(
         raise
 
 
+def publish_accepted_finance_state(
+    db: Session,
+    project_id: int,
+    *,
+    profile_row: FinanceProfileRecord,
+    overrides_doc: dict,
+    effective_doc: dict,
+    effective_bytes: bytes,
+    planning_doc: dict | None,
+    user_id: int,
+) -> dict[str, int]:
+    """发布上传边界已接受的当前财务状态(消费已校验数据, 仅 flush, 不提交)。
+
+    - 不做 FinanceProfile/FinanceOverrides/EffectiveFinanceConfig/
+      PlanningConfig.from_dict 作者输入校验, 不跑 validate_planning_domain
+      与合并器: 包上传入口是唯一正式校验, 此处只持久化已接受内容(项目包
+      导入保来源精确, 不重新推导);
+    - 移动项目配置指针 + 追加 overrides/effective(/planning) 行, 与调用方
+      同一 application 事务提交/回滚;
+    - 不建回执事件(非用户新上传; 历史依赖行同样无回执)。
+    - 调用前目标项目配置指针为空(包导入预建新项目); 无规划分支保持缺席。
+    """
+    project_domain.require_project(db, project_id)
+    next_ovr = configuration_domain.next_overrides_revision(db, project_id)
+    configuration_domain.append_overrides(
+        db,
+        project_id=project_id,
+        revision=next_ovr,
+        content=overrides_doc,
+        profile_id=(overrides_doc.get("profile_ref") or {}).get("id") or profile_row.profile_id,
+        created_by=user_id,
+    )
+    eff_obj = put_object(
+        db,
+        effective_bytes,
+        "application/yaml",
+        source_category="effective_finance",
+    )
+    next_eff = configuration_domain.next_effective_revision(db, project_id)
+    configuration_domain.append_effective(
+        db,
+        project_id=project_id,
+        revision=next_eff,
+        content=effective_doc,
+        profile_id=effective_doc.get("profile_id") or profile_row.profile_id,
+        created_by=user_id,
+        content_object_id=eff_obj.id,
+    )
+    published: dict[str, int] = {
+        "overrides_revision": next_ovr,
+        "effective_finance_revision": next_eff,
+    }
+    if planning_doc is not None:
+        next_plan = configuration_domain.next_planning_revision(db, project_id)
+        configuration_domain.append_planning(
+            db,
+            project_id=project_id,
+            revision=next_plan,
+            content=planning_doc,
+            created_by=user_id,
+        )
+        project_domain.update_revision_pointers(
+            db,
+            project_id,
+            finance_profile_id=profile_row.id,
+            overrides_revision=next_ovr,
+            effective_finance_revision=next_eff,
+            planning_revision=next_plan,
+        )
+        published["planning_revision"] = next_plan
+    else:
+        # 无规划则当前规划保持缺席(不传 planning_revision, 不清空/不回填)。
+        project_domain.update_revision_pointers(
+            db,
+            project_id,
+            finance_profile_id=profile_row.id,
+            overrides_revision=next_ovr,
+            effective_finance_revision=next_eff,
+        )
+    return published
+
+
 def _save_finance_overrides(
     db: Session,
     project_id: int,

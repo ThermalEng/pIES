@@ -4,7 +4,7 @@
 - 导出: 项目有配置 → 包内含 finance_profile.yaml / finance_overrides.yaml /
   effective_finance.yaml / planning_config.yaml(对象清单逐对象校验值一致,
   manifest.files.configs 登记四键); 无配置 → 不含;
-- 导入: 三件套随包重建(revision 由服务层生成), 从精确来源重新合并;
+- 导入: 三件套随包重建(revision 由服务层生成), 消费上传边界已接受内容发布;
   规划引用 Effective content 一致; 无配置包导入后无配置(不静默默认);
 - 校验拒绝(ImportValidationError, PKG-IMP-001): 三件套缺一 / 对象字节
   校验值被篡改(外部包入口边界, 2.6) / 规划引用与包内有效快照不一致 / 越权覆盖。
@@ -970,13 +970,81 @@ def test_import_rejects_mismatched_history_baseline(client: TestClient, db: Sess
     assert any("基线" in r for r in reasons)
 
 
+def test_import_rejects_version_frozen_profile_mismatch(client: TestClient, db: Session) -> None:
+    """版本冻结 Effective 引用与组内 Profile 来源不一致 → 上传 400, 不等确认。
+
+    单项变异: 仅改版本内容块的 profile_id, 依赖文件不变; 上传边界一次核对
+    即拒绝并给出 reasons, 确认不会保留错误引用。
+    """
+    owner = make_user(db, "fpm_owner")
+    importer = make_user(db, "fpm_importer")
+    pid = _create_project(client, owner)
+    _setup_finance(client, owner, pid)
+    _save_planning(client, owner, pid)
+    _create_hist_version(client, owner, pid, "fpm-a")
+    zip_bytes = _export_zip(client, owner, pid)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        doc = json.loads(zf.read("versions/0001.json").decode("utf-8"))
+    assert doc["content"]["effective_finance"]["profile_id"] == "cn-north-demo"
+    doc["content"]["effective_finance"]["profile_id"] = "cn-east-demo"
+    bad = _rezip_mutate(zip_bytes, {
+        "versions/0001.json": json.dumps(doc, ensure_ascii=False).encode(),
+    })
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", bad, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert any("0001" in r for r in reasons)
+
+
+def test_import_rejects_current_effective_profile_mismatch(client: TestClient, db: Session) -> None:
+    """当前组 Effective 与 Profile 来源不一致 → 上传 400, 确认不存错文件。
+
+    单项变异: 仅改当前组 effective 文件的 profile_id, 其余不变; 上传边界一次
+    核对即拒绝。确认阶段原样发布已接受文件, 不重新合并, 故该核对必须在边界。
+    """
+    from iesplan.core.yamlmini import load as yaml_load
+
+    owner = make_user(db, "cpm_owner")
+    importer = make_user(db, "cpm_importer")
+    pid = _create_project(client, owner)
+    _setup_finance(client, owner, pid)
+    zip_bytes = _export_zip(client, owner, pid)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        doc = yaml_load(zf.read("effective_finance.yaml").decode("utf-8"))
+    assert doc["profile_id"] == "cn-north-demo"
+    doc["profile_id"] = "cn-east-demo"
+    bad = _rezip_mutate(zip_bytes, {
+        "effective_finance.yaml": yaml_dump(doc).encode("utf-8"),
+    })
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", bad, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert any("Effective" in r for r in reasons)
+
+
 def test_confirm_does_not_rerun_upload_gate(client: TestClient, db: Session, monkeypatch) -> None:
-    """确认消费已接受提案, 不再调用上传边界完整校验(窄回归)。"""
-    import iesplan.application.packages.transfers as pkg_app
+    """确认消费已接受提案, 不再调用上传边界的作者输入校验, 业务值仍正确发布。
+
+    真实公开上传成功后, 把相关正式解析入口设为失败哨兵(普通 YAML/JSON 解码
+    不算重复校验, 不设哨兵); 公开确认仍应 201, 且当前业务值正确。
+    """
+    import iesplan.core.contracts as core_contracts
+    import iesplan.finance.triplet as triplet
+    import iesplan.planning.contracts as planning_contracts
 
     owner = make_user(db, "gate_owner")
     importer = make_user(db, "gate_importer")
     pid = _create_project(client, owner)
+    _setup_finance(client, owner, pid)  # 覆盖 rev2: 电价 0.75
+    _save_planning(client, owner, pid)  # 规划 rev1: 上界 1000
     _create_hist_version(client, owner, pid, "gate-a")
     zip_bytes = _export_zip(client, owner, pid)
     resp = client.post(
@@ -990,9 +1058,85 @@ def test_confirm_does_not_rerun_upload_gate(client: TestClient, db: Session, mon
     def _boom(*args, **kwargs):
         raise AssertionError("confirm must not rerun upload gate")
 
-    monkeypatch.setattr(pkg_app, "_parse_package", _boom)
+    with monkeypatch.context() as m:
+        m.setattr(triplet.FinanceProfile, "from_dict", _boom)
+        m.setattr(triplet.FinanceOverrides, "from_dict", _boom)
+        m.setattr(triplet.EffectiveFinanceConfig, "from_dict", _boom)
+        m.setattr(core_contracts.PlanningConfig, "from_dict", _boom)
+        m.setattr(planning_contracts, "validate_planning_domain", _boom)
+        resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
+        assert resp.status_code == 201, resp.text
+    new_pid = resp.json()["project"]["id"]
+
+    ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()
+    assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.75"
+    plan = client.get(f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer)).json()
+    assert plan["planning_config"]["variables"]["hp_cap"]["upper_bound"] == "1000"
+
+
+def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, monkeypatch) -> None:
+    """确认写入后半段注入失败 → 本次 DB 写入整体回滚, 预建状态保留, 可重确认。
+
+    版本重建阶段注入失败; 公开观察版本空/当前财务规划缺席/项目仍无草稿;
+    领域公开读取历史与当前配置行均无; 预建项目仍在列表(之前已提交的预建
+    状态不算本次新增); 解除注入后同一提案可重确认成功且值正确。
+    外部 Blob 字节不在 DB 原子断言内。
+    """
+    import iesplan.configuration as configuration_domain
+    import iesplan.project as project_domain
+
+    owner = make_user(db, "rb_owner")
+    importer = make_user(db, "rb_importer")
+    pid = _create_project(client, owner)
+    _setup_finance(client, owner, pid)
+    _save_planning(client, owner, pid)
+    _create_hist_version(client, owner, pid, "rb-a")
+    zip_bytes = _export_zip(client, owner, pid)
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", zip_bytes, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 201, resp.text
+    prop_id = resp.json()["proposal"]["id"]
+    new_pid = resp.json()["proposal"]["project_id"]
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("injected late confirm failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(project_domain, "create_version", _boom)
+        resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
+        assert resp.status_code == 500, resp.text
+
+    assert client.get(
+        f"/api/projects/{new_pid}/versions", headers=_h(client, importer)
+    ).json()["versions"] == []
+    assert client.get(
+        f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)
+    ).status_code == 404
+    assert client.get(
+        f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer)
+    ).status_code == 404
+    assert client.get(
+        f"/api/projects/{new_pid}/effective-finance", headers=_h(client, importer)
+    ).status_code == 404
+    view = client.get(f"/api/projects/{new_pid}", headers=_h(client, importer))
+    assert view.status_code == 500, view.text
+    assert view.json()["error"]["code"] == "SYS-STORE-001"
+    assert configuration_domain.get_overrides_revision(db, new_pid, 1) is None
+    assert configuration_domain.get_effective_revision(db, new_pid, 1) is None
+    assert configuration_domain.get_planning_revision(db, new_pid, 1) is None
+    assert configuration_domain.get_current_overrides(db, new_pid) is None
+    assert configuration_domain.get_current_effective(db, new_pid) is None
+    assert configuration_domain.get_current_planning(db, new_pid) is None
+    listed = client.get("/api/projects", headers=_h(client, importer)).json()["projects"]
+    assert any(p["id"] == new_pid and p["status"] == "active" for p in listed)
+
     resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
     assert resp.status_code == 201, resp.text
+    ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()
+    assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.75"
 
 
 def test_unconfirmed_proposal_project_lifecycle(client: TestClient, db: Session) -> None:
