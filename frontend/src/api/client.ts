@@ -573,98 +573,52 @@ function projectVersionFromServer(v: unknown): ProjectVersion {
 }
 
 /**
- * 证据候选列表严格解析(仅取选择所需的 index, 其余不消费)。
- * 非数组或 index 非有限数直接抛错, 不猜测。
+ * 证据候选列表映射(仅取选择所需的 index, 其余不消费)。
+ * 后端→前端可信交换, 直接映射不重复校核; 无列表即空(单解证据)。
  */
 function evidenceCandidatesFromServer(v: unknown): EvidenceCandidate[] {
   if (v === null || v === undefined) return []
-  if (!Array.isArray(v)) throw new Error('invalid result candidates envelope')
-  return (v as unknown[]).map((item) => {
-    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
-      throw new Error('invalid result candidate')
-    }
-    const index = (item as Record<string, unknown>).index
-    if (typeof index !== 'number' || !Number.isFinite(index)) {
-      throw new Error('invalid result candidate')
-    }
-    return { index }
-  })
+  return (v as Array<{ index: number }>).map((item) => ({ index: item.index }))
 }
 
 /**
- * 规划解读取严格解析(单解身份见后端 SINGLE_SOLUTION_ID)。
- * null 即无可用解(metrics-only/无解), 不伪造候选; 形态不符抛错。
+ * 规划解读取映射(单解身份见后端 SINGLE_SOLUTION_ID)。
+ * null 即无可用解(metrics-only/无解), 不伪造候选; 可信交换直接映射。
  */
 function planningSolutionFromServer(v: unknown): PlanningSolution | null {
   if (v === null || v === undefined) return null
-  if (typeof v !== 'object' || Array.isArray(v)) throw new Error('invalid planning solution envelope')
-  const r = v as Record<string, unknown>
-  if (typeof r.solution_id !== 'number' || typeof r.single_solution !== 'boolean') {
-    throw new Error('invalid planning solution envelope')
-  }
-  if (!Array.isArray(r.params)) throw new Error('invalid planning solution envelope')
-  const params = (r.params as unknown[]).map((item) => {
-    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
-      throw new Error('invalid planning solution param')
-    }
-    const p = item as Record<string, unknown>
-    if (
-      typeof p.variable !== 'string' ||
-      typeof p.device_ref !== 'string' ||
-      typeof p.parameter !== 'string' ||
-      typeof p.value !== 'number' ||
-      typeof p.unit !== 'string'
-    ) {
-      throw new Error('invalid planning solution param')
-    }
-    return { variable: p.variable, device_ref: p.device_ref, parameter: p.parameter, value: p.value, unit: p.unit }
-  })
+  const r = v as PlanningSolution
   const refs = r.refs
-  if (refs === null || typeof refs !== 'object' || Array.isArray(refs)) {
-    throw new Error('invalid planning solution envelope')
-  }
-  const f = refs as Record<string, unknown>
-  const num = (key: string): number => {
-    const val = f[key]
-    if (typeof val !== 'number' || !Number.isFinite(val)) throw new Error('invalid planning solution envelope')
-    return val
-  }
-  const ids = f.dataset_version_ids
-  if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'number')) {
-    throw new Error('invalid planning solution envelope')
-  }
   return {
     solution_id: r.solution_id,
     single_solution: r.single_solution,
-    params,
+    params: r.params.map((p) => ({
+      variable: p.variable,
+      device_ref: p.device_ref,
+      parameter: p.parameter,
+      value: p.value,
+      unit: p.unit,
+    })),
     refs: {
-      task_id: num('task_id'),
-      calc_snapshot_id: num('calc_snapshot_id'),
-      project_version_id: num('project_version_id'),
-      evidence_package_id: num('evidence_package_id'),
-      dataset_version_ids: ids as number[],
+      task_id: refs.task_id,
+      calc_snapshot_id: refs.calc_snapshot_id,
+      project_version_id: refs.project_version_id,
+      evidence_package_id: refs.evidence_package_id,
+      dataset_version_ids: refs.dataset_version_ids,
     },
   }
 }
 
 /**
- * 原快照资源引用严格解析(无快照为 null; 形态不符抛错, 不读当前数据)。
+ * 原快照资源引用映射(无快照为 null; 可信交换直接映射, 不读当前数据)。
  */
 function snapshotRefsFromServer(v: unknown): SnapshotRefs | null {
   if (v === null || v === undefined) return null
-  if (typeof v !== 'object' || Array.isArray(v)) throw new Error('invalid snapshot refs envelope')
-  const r = v as Record<string, unknown>
-  if (typeof r.snapshot_id !== 'number' || typeof r.project_version_id !== 'number') {
-    throw new Error('invalid snapshot refs envelope')
-  }
-  const ids = r.dataset_version_ids
-  if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'number')) {
-    throw new Error('invalid snapshot refs envelope')
-  }
+  const r = v as SnapshotRefs
   return {
     snapshot_id: r.snapshot_id,
     project_version_id: r.project_version_id,
-    dataset_version_ids: ids as number[],
+    dataset_version_ids: r.dataset_version_ids,
   }
 }
 

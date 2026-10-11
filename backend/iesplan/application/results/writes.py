@@ -53,7 +53,7 @@ from iesplan.results.contracts import (
     ResultSelectionRecord,
 )
 from iesplan.storage import add_ref, get_object, object_info, put_object
-from iesplan.tasks.contracts import TaskAttemptRecord, TaskRecord
+from iesplan.tasks.contracts import CalcSnapshotRecord, TaskAttemptRecord, TaskRecord
 
 # 领域规则复导出(application 公开面保持稳定, 权威归 results 域):
 # 证据/评估状态、评估/选中类型、规则版本、评估阈值、结果错误。
@@ -641,131 +641,59 @@ def _planning_params(
     frozen_names: Sequence[str],
     bindings: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    """封存解变量 × 同一快照冻结规划变量筛出规划解(纯函数)。
+    """封存解变量 × 同一快照冻结规划变量投影(纯函数)。
 
-    名单来自回执 planning.variables(冻结变量名), 绑定(device_ref /
-    parameter)来自同一快照冻结装配正文 planning.variables, 值与单位沿
-    封存解原样(不重算、不猜单位)。只收录名单内且有冻结绑定的变量;
-    同名多条以首次为准(同一事实); 条目形态非法 → 数据损坏错误(不静默
-    丢弃); 名单内变量缺冻结绑定 → 冻结事实不一致错误(不伪造绑定)。
+    名单与绑定均是同一快照冻结事实(回执名单 + 装配正文绑定), 封存
+    变量形态由结果适配器契约保证, 此处直接消费不重验。只收录名单内
+    变量; 值与单位沿封存解原样(不重算、不猜单位); 不静默去重。
     """
     names = set(frozen_names)
-    params: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in variables:
-        if not isinstance(item, dict):
-            raise AppError(
-                "封存解变量条目非法(数据损坏)",
-                code="SYS-STORE-004",
-                severity="error",
-                message_key="ies.diag.store.corrupt",
-            )
-        name = item.get("name")
-        if not isinstance(name, str) or name in seen:
-            if not isinstance(name, str):
-                raise AppError(
-                    "封存解变量缺少名称(数据损坏)",
-                    code="SYS-STORE-004",
-                    severity="error",
-                    message_key="ies.diag.store.corrupt",
-                )
-            continue
-        if name not in names:
-            continue
-        binding = bindings.get(name)
-        if not isinstance(binding, Mapping):
-            raise AppError(
-                f"冻结规划变量 {name!r} 缺少装配正文绑定(冻结不一致)",
-                code="SYS-STORE-004",
-                severity="error",
-                message_key="ies.diag.store.corrupt",
-            )
-        value = item.get("value")
-        unit = item.get("unit")
-        if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not isinstance(unit, str)
-        ):
-            raise AppError(
-                f"封存解变量 {name!r} 值/单位非法(数据损坏)",
-                code="SYS-STORE-004",
-                severity="error",
-                message_key="ies.diag.store.corrupt",
-            )
-        device_ref = binding.get("device_ref")
-        parameter = binding.get("parameter")
-        if not isinstance(device_ref, str) or not isinstance(parameter, str):
-            raise AppError(
-                f"冻结规划变量 {name!r} 缺少实例绑定(冻结不一致)",
-                code="SYS-STORE-004",
-                severity="error",
-                message_key="ies.diag.store.corrupt",
-            )
-        seen.add(name)
-        params.append(
-            {
-                "variable": name,
-                "device_ref": device_ref,
-                "parameter": parameter,
-                "value": value,
-                "unit": unit,
-            }
-        )
-    return params
+    return [
+        {
+            "variable": item["name"],
+            "device_ref": bindings[item["name"]]["device_ref"],
+            "parameter": bindings[item["name"]]["parameter"],
+            "value": item["value"],
+            "unit": item["unit"],
+        }
+        for item in variables
+        if item["name"] in names
+    ]
 
 
-def planning_solution(
-    db: Session, user: UserRecord, project_id: int, task_id: int
+def _planning_solution(
+    task: TaskRecord,
+    package: EvidencePackageRecord | None,
+    content: dict[str, Any],
+    snapshot: CalcSnapshotRecord | None,
 ) -> dict[str, Any] | None:
-    """任务规划解读取(只读): 封存解 × 同一快照冻结规划变量绑定。
+    """规划解投影: 用调用方已有任务/证据/内容/快照材料直接投影(无新查询)。
 
-    变量名单来自同一快照回执 planning.variables, 绑定(device_ref /
-    parameter)来自同一快照冻结装配正文 planning.variables(装配闸门已
-    校验, 此处只读消费不重验)。返回 None 仅当无解可读(metrics-only、
-    无证据、快照缺失、冻结名单/正文缺失), 绝不伪造单解身份。变量名即
-    规划变量原名(生成器保留), 不按设备类型/显示名称/指标键猜测。只读,
-    不拥有事务。
+    无证据包或封存解无 solution 块(metrics-only)是业务缺席, 返回 None,
+    绝不伪造单解身份。快照冻结字段(回执名单、正文绑定)直接消费, 缺失
+    即正常错误路径可见, 不伪装成无解。变量名即规划变量原名(生成器保
+    留), 不按设备类型/显示名称/指标键猜测。
     """
-    ensure_access(db, user, project_id, "view")
-    task = ensure_task_belongs(db, project_id, task_id)
-    package = latest_evidence(db, task_id)
     if package is None:
         return None
-    content = results_domain.evidence_inner(evidence_content(db, package))
-    compute_result = content.get("compute_result")
-    outputs = compute_result.get("outputs") if isinstance(compute_result, dict) else None
-    solution = outputs.get("solution") if isinstance(outputs, dict) else None
-    variables = solution.get("variables") if isinstance(solution, dict) else None
-    if not isinstance(variables, list):
+    inner = results_domain.evidence_inner(content)
+    # compute_result 块缺席是合法业务形态(非计算类证据), 与块内无解区分:
+    # 前者即缺席, 后者(metrics-only)亦缺席; 块形态残缺即自然错误可见。
+    compute_result = inner.get("compute_result")
+    if compute_result is None:
         return None
-    snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
-    if snapshot is None:
+    solution = compute_result["outputs"].get("solution")
+    if solution is None:
         return None
-    receipt = snapshot.assembly_receipt
-    planning = receipt.get("planning") if isinstance(receipt, Mapping) else None
-    frozen_names = planning.get("variables") if isinstance(planning, Mapping) else None
-    if not isinstance(frozen_names, (list, tuple)) or not all(
-        isinstance(name, str) for name in frozen_names
-    ):
-        return None
-    bindings: Mapping[str, Any] | None = None
-    if snapshot.canonical_assembly_text:
-        try:
-            doc = json.loads(snapshot.canonical_assembly_text)
-        except ValueError:
-            doc = None
-        if isinstance(doc, dict):
-            frozen_planning = doc.get("planning")
-            if isinstance(frozen_planning, dict):
-                maybe = frozen_planning.get("variables")
-                bindings = maybe if isinstance(maybe, dict) else None
-    if bindings is None:
-        return None
+    params = _planning_params(
+        solution["variables"],
+        snapshot.assembly_receipt["planning"]["variables"],
+        json.loads(snapshot.canonical_assembly_text)["planning"]["variables"],
+    )
     return {
         "solution_id": SINGLE_SOLUTION_ID,
         "single_solution": True,
-        "params": _planning_params(variables, frozen_names, bindings),
+        "params": params,
         "refs": {
             "task_id": task.id,
             "calc_snapshot_id": task.calc_snapshot_id,
@@ -993,8 +921,8 @@ def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) ->
         "candidates": (
             content.get("candidates") if content and isinstance(content.get("candidates"), list) else None
         ),
-        # 规划解读取(封存解 × 同一快照冻结规划绑定; 无解可读即 None, 不伪造)。
-        "planning_solution": planning_solution(db, user, project_id, task_id),
+        # 规划解投影(已有材料直接投影; 无解可读即 None, 不伪造)。
+        "planning_solution": _planning_solution(task, package, content, snapshot_row),
         # 原快照资源引用(历史来源展示唯一依据; 无快照即 None, 不读当前数据)。
         "snapshot_refs": (
             {

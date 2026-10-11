@@ -1,68 +1,77 @@
-"""规划解读取纯函数测试(S3-A)。
+"""规划解投影测试(S3-A 收口)。
 
-覆盖 writes._planning_params: 回执冻结名单筛出、同一快照正文绑定附着、
-封存值/单位原样、同名首次为准、形态非法即数据损坏错误。DB 相关的 None
-契约(无证据/无解/快照缺失/冻结名单或正文缺失)由 e2e 真实链覆盖, 此处
-不伪造行。
+覆盖 writes._planning_params/_planning_solution: 冻结名单投影、同一快照
+正文绑定附着、封存值/单位原样、双实例绑定、非名单变量跳过；业务缺席
+(无证据包、metrics-only 无 solution 块)返回 None。内部可信形态不重验，
+故无损坏检测用例；DB 行不伪造，材料以同形存根传入。
 """
 
 from __future__ import annotations
 
-import pytest
+import json
+from types import SimpleNamespace
 
-from iesplan.application.results.writes import _planning_params
-from iesplan.core.errors import AppError
+from iesplan.application.results.writes import _planning_params, _planning_solution
 
-NAMES = ["hp_cap", "bo_cap"]
+NAMES = ["hp1_cap", "hp2_cap"]
 BINDINGS = {
-    "hp_cap": {"device_ref": "hp1", "parameter": "rated_heat_kw", "unit": "kW"},
-    "bo_cap": {"device_ref": "bo1", "parameter": "rated_heat_kw", "unit": "kW"},
+    "hp1_cap": {"device_ref": "hp1", "parameter": "rated_heat_kw", "unit": "kW"},
+    "hp2_cap": {"device_ref": "hp2", "parameter": "rated_heat_kw", "unit": "kW"},
 }
+VARIABLES = [
+    {"name": "hp1_cap", "value": 50.0, "unit": "kW"},
+    {"name": "grid1__electricity_in__t0", "value": 10.0, "unit": "kW"},
+    {"name": "hp2_cap", "value": 200.0, "unit": "kW"},
+]
 
 
-def test_filters_to_frozen_names() -> None:
-    variables = [
-        {"name": "hp_cap", "value": 320.5, "unit": "kW"},
-        {"name": "hp1__electricity_in__t0", "value": 10.0, "unit": "kW"},
-        {"name": "bo_cap", "value": 0.0, "unit": "kW"},
-    ]
-    params = _planning_params(variables, NAMES, BINDINGS)
+def _materials(outputs: dict) -> tuple:
+    task = SimpleNamespace(id=5, calc_snapshot_id=7)
+    package = SimpleNamespace(id=9)
+    content = {"compute_result": {"outputs": outputs}}
+    snapshot = SimpleNamespace(
+        project_version_id=86,
+        dataset_version_ids=[11],
+        assembly_receipt={"planning": {"variables": list(NAMES)}},
+        canonical_assembly_text=json.dumps({"planning": {"variables": dict(BINDINGS)}}),
+    )
+    return task, package, content, snapshot
+
+
+def test_projects_dual_instance_true_values() -> None:
+    params = _planning_params(VARIABLES, NAMES, BINDINGS)
     assert params == [
-        {"variable": "hp_cap", "device_ref": "hp1", "parameter": "rated_heat_kw", "value": 320.5, "unit": "kW"},
-        {"variable": "bo_cap", "device_ref": "bo1", "parameter": "rated_heat_kw", "value": 0.0, "unit": "kW"},
+        {"variable": "hp1_cap", "device_ref": "hp1", "parameter": "rated_heat_kw", "value": 50.0, "unit": "kW"},
+        {"variable": "hp2_cap", "device_ref": "hp2", "parameter": "rated_heat_kw", "value": 200.0, "unit": "kW"},
     ]
 
 
-def test_duplicate_name_first_wins() -> None:
-    variables = [
-        {"name": "hp_cap", "value": 100.0, "unit": "kW"},
-        {"name": "hp_cap", "value": 200.0, "unit": "kW"},
-    ]
-    params = _planning_params(variables, NAMES, BINDINGS)
-    assert [p["value"] for p in params] == [100.0]
+def test_solution_view_carries_refs() -> None:
+    task, package, content, snapshot = _materials({"solution": {"variables": VARIABLES}})
+    out = _planning_solution(task, package, content, snapshot)
+    assert out is not None
+    assert out["solution_id"] == 0
+    assert out["single_solution"] is True
+    assert [p["variable"] for p in out["params"]] == ["hp1_cap", "hp2_cap"]
+    assert out["refs"] == {
+        "task_id": 5,
+        "calc_snapshot_id": 7,
+        "project_version_id": 86,
+        "evidence_package_id": 9,
+        "dataset_version_ids": [11],
+    }
 
 
-def test_illegal_value_or_unit_is_corrupt() -> None:
-    with pytest.raises(AppError):
-        _planning_params([{"name": "hp_cap", "value": "320", "unit": "kW"}], NAMES, BINDINGS)
-    with pytest.raises(AppError):
-        _planning_params([{"name": "hp_cap", "value": 320.0, "unit": None}], NAMES, BINDINGS)
-    with pytest.raises(AppError):
-        _planning_params([{"name": "hp_cap", "value": True, "unit": "kW"}], NAMES, BINDINGS)
-    with pytest.raises(AppError):
-        _planning_params([{"value": 1.0, "unit": "kW"}], NAMES, BINDINGS)
+def test_no_package_is_absence() -> None:
+    task, _, content, snapshot = _materials({"solution": {"variables": VARIABLES}})
+    assert _planning_solution(task, None, content, snapshot) is None
 
 
-def test_missing_binding_is_corrupt() -> None:
-    with pytest.raises(AppError):
-        _planning_params(
-            [{"name": "hp_cap", "value": 1.0, "unit": "kW"}],
-            NAMES,
-            {"hp_cap": {"device_ref": "hp1"}},
-        )
-    with pytest.raises(AppError):
-        _planning_params(
-            [{"name": "hp_cap", "value": 1.0, "unit": "kW"}],
-            NAMES,
-            {},
-        )
+def test_metrics_only_is_absence() -> None:
+    task, package, content, snapshot = _materials({"metrics": {}})
+    assert _planning_solution(task, package, content, snapshot) is None
+
+
+def test_no_compute_block_is_absence() -> None:
+    task, package, _, snapshot = _materials({})
+    assert _planning_solution(task, package, {"metrics": {}}, snapshot) is None

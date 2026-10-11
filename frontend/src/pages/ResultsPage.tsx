@@ -286,6 +286,24 @@ export default function ResultsPage() {
       setSnapSources(null)
       return
     }
+    // 切换即清理旧结果与选择/确认状态: 加载中不提供选择/确认,
+    // 迟到响应沿取消机制丢弃, 不覆盖新选中。
+    setMetrics(null)
+    setFinEval(null)
+    setFinAbsence(null)
+    setNoEvidence(false)
+    setResultDiag([])
+    setAssessments([])
+    setHourly(null)
+    setResultError(null)
+    setCandList([])
+    setPlanSolution(null)
+    setSnapRefs(null)
+    setSnapSources(null)
+    setSelectedCandidateId(null)
+    setApplyOpen(false)
+    setApplyOk(false)
+    setApplyError(null)
     let cancelled = false
     const load = async () => {
       // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
@@ -293,7 +311,8 @@ export default function ResultsPage() {
       const taskId = entry ? entry.task.id : 0
       try {
         const [res, ass, hr] = await Promise.all([
-          api.results.result(projectId, taskId).catch(() => null),
+          // 主结果读取失败必须可见: 不吞错, 由外层错误呈现。
+          api.results.result(projectId, taskId),
           api.results.assessments(projectId, taskId).catch(() => [] as ResultAssessment[]),
           api.results.hourly(projectId, taskId).catch(() => null),
         ])
@@ -319,6 +338,8 @@ export default function ResultsPage() {
           setCandList([])
           setPlanSolution(null)
           setSnapRefs(null)
+          setSelectedCandidateId(null)
+          setApplyOpen(false)
           setResultError(translateError(err as ApiError))
         }
       }
@@ -842,7 +863,9 @@ export default function ResultsPage() {
         </>
       ) : null}
 
-      {/* 候选方案(真实候选列表; 选择只记录采用, 不创建版本) */}
+      {/* 候选方案(真实候选列表; 选择只记录采用, 不创建版本)。
+          读取失败时不渲染空态, 失败由错误条呈现, 不伪装成暂无候选。 */}
+      {!resultError ? (
       <Card
         title={t('ies.result.candidates_title')}
         actions={
@@ -883,8 +906,11 @@ export default function ResultsPage() {
           </ul>
         )}
       </Card>
+      ) : null}
 
-      {/* 规划解参数预览(封存解 × 冻结规划绑定; 无解不伪造候选) */}
+      {/* 规划解参数预览(封存解 × 冻结规划绑定; 无解不伪造候选)。
+          读取失败时不渲染空态, 不伪装成没有解。 */}
+      {!resultError ? (
       <Card title={t('ies.result.plan_solution_title')} className="ies-section">
         {planSolution ? (
           <>
@@ -922,6 +948,7 @@ export default function ResultsPage() {
           <EmptyState icon="info" title={t('ies.result.plan_solution_empty')} />
         )}
       </Card>
+      ) : null}
 
       {/* 选择成功提示(仅记录采用, 不创建版本; 实际应用未交付) */}
       {applyOk ? (
