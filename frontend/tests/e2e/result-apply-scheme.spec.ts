@@ -197,7 +197,15 @@ test.describe('S3-B: 应用方案写回与派生', () => {
     await expect(sideStack.locator('input[value="200"]')).toBeVisible({ timeout: 10_000 })
 
     // 刷新失败与成功分开报告且不重复应用: 第二次应用时摘要 GET 500。
+    // 确认准备读同样走项目 GET, 故障路由必须在对话框打开并读到基线之后再装,
+    // 否则消费的是准备读而非刷新。
     await page.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('结果分析').click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/results/)
+    await expect(page.getByText('规划解参数预览')).toBeVisible({ timeout: 30_000 })
+    await page.getByRole('button', { name: '应用方案' }).click({ timeout: 10_000 })
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByRole('dialog').getByText(/确认基线：当前草稿修订 r\d+/)).toBeVisible({ timeout: 30_000 })
     let projectGets = 0
     await page.route('**/apply-result', async (route) => {
       if (route.request().method() === 'POST') applyPosts += 1
@@ -214,11 +222,6 @@ test.describe('S3-B: 应用方案写回与派生', () => {
       }
       await route.continue()
     })
-    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('结果分析').click({ timeout: 30_000 })
-    await expect(page).toHaveURL(/\/results/)
-    await expect(page.getByText('规划解参数预览')).toBeVisible({ timeout: 30_000 })
-    await page.getByRole('button', { name: '应用方案' }).click({ timeout: 10_000 })
-    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 10_000 })
     await page.getByRole('dialog').getByRole('button', { name: /确定|确认/ }).click()
     await expect(page.getByText(/已应用方案/)).toBeVisible({ timeout: 30_000 })
     await expect(page.getByText(/摘要刷新失败/)).toBeVisible({ timeout: 30_000 })

@@ -585,6 +585,7 @@ export const messagesEn: Record<string, string> = {
   'ies.result.apply_scheme_ok': 'Scheme applied; new version {version} is current',
   'ies.result.apply_scheme_refresh_failed': 'Applied, but summary refresh failed: {reason} (refresh manually; do not apply again)',
   'ies.result.apply_scheme_revision': 'Confirm baseline: current draft revision r{revision}; if the draft is updated after confirming, apply will be rejected without overwriting new edits',
+  'ies.result.apply_scheme_revision_loading': 'Reading the current draft revision…',
   'ies.result.apply_scheme_revision_unavailable': 'Cannot read the current draft revision; apply cannot be confirmed. Refresh the page and retry',
   'ies.result.plan_solution_variable': 'Planning variable',
   'ies.result.plan_solution_device': 'Device instance',

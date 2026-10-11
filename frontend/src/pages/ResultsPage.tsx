@@ -220,9 +220,12 @@ export default function ResultsPage() {
   const [schemeError, setSchemeError] = useState<string | null>(null)
   const [schemeOk, setSchemeOk] = useState<string | null>(null)
   const [schemeRefreshError, setSchemeRefreshError] = useState<string | null>(null)
-  // 确认时捕获的当前草稿修订(打开确认框时取值, 发送前不重读最新)。
+  // 确认时捕获的当前草稿修订(每次打开确认框经公开查询现读, 发送前不重读)。
   const [schemeRevision, setSchemeRevision] = useState<number | null>(null)
   const [schemeRevisionError, setSchemeRevisionError] = useState<string | null>(null)
+  const [schemeRevLoading, setSchemeRevLoading] = useState(false)
+  // 确认准备读序号: 关闭/切换后迟到的读响应丢弃, 不碰旧弹框。
+  const schemeReadSeq = useRef(0)
   // 写请求飞行令牌: 旧回调不修改新操作状态, 完成只解除所属飞行。
   const schemeFlight = useRef(0)
   // 切换证据包的迟到读响应不发布状态(读取消机制, 不用于写请求)。
@@ -327,6 +330,8 @@ export default function ResultsPage() {
     setSchemeRefreshError(null)
     setSchemeRevision(null)
     setSchemeRevisionError(null)
+    setSchemeRevLoading(false)
+    schemeReadSeq.current += 1
     let cancelled = false
     const load = async () => {
       // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
@@ -367,6 +372,8 @@ export default function ResultsPage() {
           setSchemeError(null)
           setSchemeOk(null)
           setSchemeRefreshError(null)
+          setSchemeRevLoading(false)
+          schemeReadSeq.current += 1
           setResultError(translateError(err as ApiError))
         }
       }
@@ -534,12 +541,43 @@ export default function ResultsPage() {
     }
   }, [projectId, selectedCandidate])
 
+  // 打开应用方案确认: 每次经公开项目查询现读当前草稿修订(不用 Workbench
+  // 缓存), 读成功后才允许确认; 读失败可见报错、不伪造; 关闭/切换后迟到的读
+  // 响应按序号丢弃, 不重新打开旧弹框。读取只服务本次确认, 后续 POST 固定发送
+  // 该次捕获的修订, 发送前不重读。
+  const openSchemeDialog = useCallback(async () => {
+    setSchemeError(null)
+    setSchemeOk(null)
+    setSchemeRefreshError(null)
+    setSchemeRevision(null)
+    setSchemeRevisionError(null)
+    setSchemeRevLoading(true)
+    setSchemeOpen(true)
+    const seq = schemeReadSeq.current + 1
+    schemeReadSeq.current = seq
+    try {
+      const view = await api.projects.get(projectId)
+      if (schemeReadSeq.current !== seq) return
+      const rev = view.draft?.revision ?? null
+      if (rev === null) {
+        setSchemeRevisionError(t('ies.result.apply_scheme_revision_unavailable'))
+      } else {
+        setSchemeRevision(rev)
+      }
+    } catch {
+      if (schemeReadSeq.current !== seq) return
+      setSchemeRevisionError(t('ies.result.apply_scheme_revision_unavailable'))
+    } finally {
+      if (schemeReadSeq.current === seq) setSchemeRevLoading(false)
+    }
+  }, [projectId, t])
+
   // 应用方案(规划解预览 → 来源版本基线派生新版本; 只发送任务引用、解标识与
   // 确认时草稿修订, 参数与基线由服务端权威解析)。明确确认后才请求, 取消不
   // 变更; 处理中禁用证据选择与对话框关闭/取消, 避免重复; 服务端成功后刷新
   // 始终处理, 页面展示过期才按所属关系处理; 成功与刷新失败分开报告, 不重复应用。
   const confirmScheme = useCallback(async () => {
-    if (!planSolution || schemeBusy) return
+    if (!planSolution || schemeBusy || schemeRevLoading) return
     // 确认时修订缺失: 不伪造、不发送, 可见报错。
     if (schemeRevision === null) {
       setSchemeRevisionError(t('ies.result.apply_scheme_revision_unavailable'))
@@ -574,7 +612,7 @@ export default function ResultsPage() {
     } finally {
       if (schemeFlight.current === flight) setSchemeBusy(false)
     }
-  }, [projectId, planSolution, schemeBusy, schemeRevision, selectedPkgId, entries, refreshDetailed, t])
+  }, [projectId, planSolution, schemeBusy, schemeRevLoading, schemeRevision, selectedPkgId, entries, refreshDetailed, t])
 
   const submitAssessment = useCallback(async () => {
     if (!selectedPkgId) return
@@ -986,20 +1024,7 @@ export default function ResultsPage() {
         className="ies-section"
         actions={
           planSolution && planSolution.params.length > 0 ? (
-            <Button
-              onClick={() => {
-                setSchemeError(null)
-                setSchemeOk(null)
-                setSchemeRefreshError(null)
-                // 确认时点捕获当前草稿修订; 读不到则可见报错且不允许确认, 不伪造。
-                const rev = project?.draft?.revision ?? null
-                setSchemeRevision(rev)
-                setSchemeRevisionError(
-                  rev === null ? t('ies.result.apply_scheme_revision_unavailable') : null,
-                )
-                setSchemeOpen(true)
-              }}
-            >
+            <Button onClick={() => void openSchemeDialog()}>
               {t('ies.result.apply_scheme_btn')}
             </Button>
           ) : undefined
@@ -1234,7 +1259,7 @@ export default function ResultsPage() {
               {t('ies.common.cancel')}
             </Button>
             <Button
-              loading={schemeBusy}
+              loading={schemeBusy || schemeRevLoading}
               disabled={schemeRevision === null}
               onClick={() => void confirmScheme()}
             >
@@ -1250,7 +1275,9 @@ export default function ResultsPage() {
               {snapSources?.projectVersion ?? `id:${planSolution.refs.project_version_id}`}
             </p>
             <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
-              {t('ies.result.apply_scheme_revision', { revision: schemeRevision ?? '—' })}
+              {schemeRevLoading
+                ? t('ies.result.apply_scheme_revision_loading')
+                : t('ies.result.apply_scheme_revision', { revision: schemeRevision ?? '—' })}
             </p>
             {schemeRevisionError ? (
               <div style={{ marginTop: 'var(--ies-space-2)' }}>

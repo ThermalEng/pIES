@@ -4,12 +4,14 @@
 // 证据选择器渲染; 场景准备走公开 API, 并发修订/确认/取消走 GUI 或同源 Cookie
 // 会话 page.request(不新登录、不互踢); 不注库、不伪造 ComputeResult。
 // 断言:
-// A(C1): 打开确认框显示确认时草稿修订; 对话框打开后经公开接口新增草稿修订,
-//   确认应用得到可见 409 冲突, 不创建版本、不替换新编辑(hp3 保留)。
-// B(C2): 延迟 apply-result 真实服务端响应(先取回再持有回传, 证明已提交语义),
-//   飞行中确认/取消/证据选择禁用、Esc 与强制点确认无法产生第二 POST、busy 不
-//   提前解除; 放行后成功横幅与摘要刷新, 只发一次请求。
+// A(C1): 每次打开确认框经公开查询现读修订并显示; 对话框打开后经公开接口新增
+//   草稿修订, 确认应用得到可见 409 冲突, 不创建版本、不替换新编辑(hp3 保留)。
+// B(C1 时点 + C2): 取消后直接重新打开(不重载不切页), 打开前又一次公开编辑,
+//   确认基线现读最新而不假冲突并成功; 延迟 apply-result 真实服务端响应(先取回
+//   再持有回传, 证明已提交语义), 飞行中确认/取消/证据选择禁用、Esc 与强制点
+//   确认无法产生第二 POST、busy 不提前解除; 放行后成功横幅与摘要刷新。
 // C(C2): 应用 POST 本身 500 时确认框错误可见、原工作状态不变、busy 解除。
+// D(C1): 确认准备读 GET 500 时可见错误、确认禁用、零 POST, 原状态不变。
 
 import { test, expect } from '@playwright/test'
 import type { Page, BrowserContext } from '@playwright/test'
@@ -174,10 +176,20 @@ test.describe('C1/C2: 应用方案修订与请求生命周期', () => {
     await expect(dialog).toHaveCount(0)
     expect(applyPosts).toBe(1)
 
-    // ---- B(C2): 真实响应持有回传, 飞行中锁定, 放行后成功刷新。
-    // A 阶段的并发修订发生在 workbench 状态加载之后: 重载使确认基线取到最新。
-    await page.reload()
-    await expect(page.getByText('规划解参数预览')).toBeVisible({ timeout: 30_000 })
+    // ---- B(C1 时点 + C2): 打开前再经公开接口编辑一次, 直接重新打开(不重载
+    // 页面、不切出项目)。Workbench 缓存仍是 A 阶段前旧值, 确认基线必须现读到
+    // 最新而不产生假冲突; 随后真实响应持有回传, 验证飞行中锁定与成功刷新。
+    const preBump = await requestJson(page.request, 'PUT', `/api/projects/${pid}/draft`, {
+      expected_revision: revAtConfirm + 1,
+      commands: [{
+        id: 'guard-dev-hp3-tune', unit: 'model', type: 'model.upsert_device',
+        payload: {
+          name: 'hp3', device_type: 'ies.device.heat_pump', kind: 'new',
+          params: { rated_heat_kw: 600, cop: 3.8 }, position: { x: 9.0, y: 9.0 },
+        },
+      }],
+    })
+    expect(preBump.revision).toBe(revAtConfirm + 2)
     await page.unrouteAll({ behavior: 'wait' })
     let releaseHeld!: () => void
     const holdGate = new Promise<void>((resolve) => {
@@ -197,7 +209,7 @@ test.describe('C1/C2: 应用方案修订与请求生命周期', () => {
     await page.getByRole('button', { name: '应用方案' }).click({ timeout: 10_000 })
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 10_000 })
     const revTextB = await dialog.getByText(/确认基线：当前草稿修订/).textContent()
-    expect(revTextB).toContain(`r${revAtConfirm + 1}`)
+    expect(revTextB).toContain(`r${revAtConfirm + 2}`)
     await dialog.getByRole('button', { name: /确定|确认/ }).click()
     // 服务端已响应(已提交)但回传被持有: 此时仍 busy。
     await expect.poll(async () => applyPosts, { timeout: 60_000 }).toBe(2)
@@ -243,9 +255,40 @@ test.describe('C1/C2: 应用方案修订与请求生命周期', () => {
     await dialog.getByRole('button', { name: /取消/ }).click()
     await expect(dialog).toHaveCount(0)
 
+    // ---- D(C1): 确认准备读失败 → 可见错误、不允许确认、零 POST。
+    await page.unrouteAll({ behavior: 'wait' })
+    let projectGets = 0
+    await page.route('**/api/projects/*', async (route) => {
+      const isView =
+        route.request().method() === 'GET' &&
+        new URL(route.request().url()).pathname === `/api/projects/${pid}`
+      if (isView) {
+        projectGets += 1
+        if (projectGets === 1) {
+          await route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"guard-read-boom"}' })
+          return
+        }
+      }
+      await route.continue()
+    })
+    await page.getByRole('button', { name: '应用方案' }).click({ timeout: 10_000 })
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 10_000 })
+    await expect(dialog.getByText(/无法读取当前草稿修订号/)).toBeVisible({ timeout: 30_000 })
+    await expect(dialog.getByRole('button', { name: /确定|确认/ })).toBeDisabled()
+    expect(projectGets).toBe(1)
+    // 强制确认也不发送请求。
+    await dialog.getByRole('button', { name: /确定|确认/ }).click({ force: true })
+    expect(applyPosts).toBe(3)
+    await dialog.getByRole('button', { name: /取消/ }).click()
+    await expect(dialog).toHaveCount(0)
+    expect(applyPosts).toBe(3)
+    const versionsD = await requestJson(page.request, 'GET', `/api/projects/${pid}/versions`)
+    expect(versionsD.versions.map((v: { version_no: number }) => v.version_no).sort()).toEqual([1, 2, 3])
+
     session.assertNoErrors([
       { method: 'POST', path: `/api/projects/${pid}/apply-result`, status: 409, times: 1 },
       { method: 'POST', path: `/api/projects/${pid}/apply-result`, status: 500, times: 1 },
+      { method: 'GET', path: `/api/projects/${pid}`, status: 500, times: 1 },
     ])
     await context.close()
   })
