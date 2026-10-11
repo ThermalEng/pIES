@@ -85,15 +85,17 @@ function CreateDialog({
   )
 }
 
-/** 版本详情对话框(仅版本元数据, 非完整模型内容; 附恢复入口)。 */
+/**
+ * 版本详情对话框(仅版本元数据, 非完整模型内容; 附恢复入口)。
+ * 任何已保存版本都可恢复(含仍是当前版本的版本, 用于撤回其后草稿修改);
+ * 是否允许由后端与明确确认决定, 前端不比较内容。
+ */
 function DetailDialog({
   detail,
-  isCurrent,
   onRestore,
   onClose,
 }: {
   detail: Exclude<VersionDetailState, { status: 'idle' }>
-  isCurrent: boolean
   onRestore: (version: VersionModel) => void
   onClose: () => void
 }) {
@@ -107,8 +109,7 @@ function DetailDialog({
         </Button>
         <Button
           variant="primary"
-          disabled={loaded === null || isCurrent}
-          title={isCurrent ? t('ies.versions.restore_current_hint') : undefined}
+          disabled={loaded === null}
           onClick={() => {
             if (loaded !== null) onRestore(loaded)
           }}
@@ -152,7 +153,6 @@ function DetailDialog({
           </dd>
         </dl>
       )}
-      {isCurrent && loaded !== null ? <p role="note">{t('ies.versions.restore_current_hint')}</p> : null}
     </Dialog>
   )
 }
@@ -218,9 +218,9 @@ function RestoreDialog({ store }: { store: UseProjectVersions }) {
               revision: restore.restored.draftRevision,
             })}
           </Alert>
-          {restore.listRefreshError !== null ? (
+          {restore.refreshError !== null ? (
             <Alert variant="warning" title={t('ies.versions.restore_refresh_failed')}>
-              {restore.listRefreshError}
+              {restore.refreshError}
             </Alert>
           ) : null}
         </>
@@ -338,9 +338,6 @@ export function VersionHistoryPanel({
       {detailOpen(store.detail) ? (
         <DetailDialog
           detail={store.detail}
-          isCurrent={
-            store.detail.status === 'loaded' && store.detail.version.id === currentVersionId
-          }
           onRestore={(version) => {
             store.closeDetail()
             store.requestRestore(version)

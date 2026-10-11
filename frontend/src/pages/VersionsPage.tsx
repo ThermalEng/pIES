@@ -14,8 +14,8 @@ import { useWorkbench } from './workbench'
 
 /** 版本历史页(默认导出, 供 WorkbenchPage 路由挂载)。 */
 export default function VersionsPage() {
-  const { projectId, project, currentVersion, refresh } = useWorkbench()
-  const store = useProjectVersions(projectId, refresh)
+  const { projectId, project, currentVersion, refreshDetailed } = useWorkbench()
+  const store = useProjectVersions(projectId, refreshDetailed)
 
   return (
     <VersionHistoryPanel

@@ -25,7 +25,7 @@ export type VersionDetailState =
 
 /**
  * 恢复流程状态(confirming 仅打开确认框, 不发送请求; working 处理中防重复;
- * done 恢复已发生, listRefreshError 仅表示后续列表刷新失败, 不诱导再提交)。
+ * done 恢复已发生, refreshError 仅表示后续摘要/列表刷新失败, 不诱导再提交)。
  */
 export type VersionRestoreState =
   | { status: 'idle' }
@@ -36,5 +36,5 @@ export type VersionRestoreState =
       status: 'done'
       version: VersionModel
       restored: VersionRestoreResult
-      listRefreshError: string | null
+      refreshError: string | null
     }

@@ -4,8 +4,8 @@
  * - 列表/详情失败必须可见(展示后端错误, 不回退成“尚无版本”);
  *   仅当请求成功且数组为空时才展示空态。
  * - 创建提交中禁用重复点击; 失败保留用户输入并展示后端错误。
- * - 创建成功后调用 onMutated(页面传入 workbench refresh, 刷新项目
- *   current_version 与列表, 旧版本不消失)。
+ * - 创建成功后调用 refreshSummary(页面传入 workbench refreshDetailed),
+ *   刷新项目 current_version 与列表, 旧版本不消失。
  * - 时序守卫(本地请求标识, 非数据校验): 关闭/新选择/项目切换即作废旧
  *   详情请求, 迟到成功/失败回调不写回; 旧项目列表响应不覆盖新项目。
  */
@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { errorMessage } from '../../../i18n'
+import type { WorkbenchRefreshErrors } from '../../../pages/workbench'
 import type { VersionCreateRequestDto } from '../contracts'
 import { createVersion, getVersion, listVersions, restoreVersion } from '../api'
 import type { VersionDetailState, VersionModel, VersionRestoreState } from '../model'
@@ -39,15 +40,16 @@ export interface UseProjectVersions {
   closeRestore: () => void
 }
 
-export function useProjectVersions(projectId: number, onMutated: () => void): UseProjectVersions {
+export function useProjectVersions(
+  projectId: number,
+  refreshSummary: () => Promise<WorkbenchRefreshErrors>,
+): UseProjectVersions {
   const [versions, setVersions] = useState<VersionModel[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [reloading, setReloading] = useState(false)
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [detail, setDetail] = useState<VersionDetailState>({ status: 'idle' })
-  const mutatedRef = useRef(onMutated)
-  mutatedRef.current = onMutated
   // 当前项目标识: 列表回调仅当响应仍属于当前项目才写回, 旧项目迟到响应丢弃。
   const projectRef = useRef(projectId)
   projectRef.current = projectId
@@ -90,7 +92,7 @@ export function useProjectVersions(projectId: number, onMutated: () => void): Us
       setCreateError(null)
       try {
         const created = await createVersion(projectId, dto)
-        mutatedRef.current()
+        void summaryRef.current()
         reload()
         return created
       } catch (err: unknown) {
@@ -134,6 +136,9 @@ export function useProjectVersions(projectId: number, onMutated: () => void): Us
     setDetail({ status: 'idle' })
   }, [])
 
+  const summaryRef = useRef(refreshSummary)
+  summaryRef.current = refreshSummary
+
   const [restore, setRestore] = useState<VersionRestoreState>({ status: 'idle' })
 
   const requestRestore = useCallback((version: VersionModel) => {
@@ -155,19 +160,29 @@ export function useProjectVersions(projectId: number, onMutated: () => void): Us
     setRestore({ status: 'working', version })
     try {
       const restored = await restoreVersion(projectId, version.id)
-      mutatedRef.current()
-      try {
-        const list = await listVersions(projectId)
-        if (projectRef.current !== projectId) return
-        setVersions(list)
+      // 恢复已发生; 等待必要摘要刷新, 任一失败明确展示, 不诱导再提交。
+      const listPromise = listVersions(projectId).then(
+        (list) => ({ ok: true as const, list }),
+        (err: unknown) => ({ ok: false as const, message: errorMessage(err) }),
+      )
+      const [summary, listed] = await Promise.all([summaryRef.current(), listPromise])
+      if (projectRef.current !== projectId) return
+      const errors: string[] = []
+      if (summary.projectError !== null) errors.push(summary.projectError)
+      if (summary.versionsError !== null) errors.push(summary.versionsError)
+      if (listed.ok) {
+        setVersions(listed.list)
         setLoadError(null)
         setReloading(false)
-        setRestore({ status: 'done', version, restored, listRefreshError: null })
-      } catch (err: unknown) {
-        if (projectRef.current !== projectId) return
-        // 恢复已发生, 仅列表刷新失败: 明确区分, 不诱导再提交。
-        setRestore({ status: 'done', version, restored, listRefreshError: errorMessage(err) })
+      } else {
+        errors.push(listed.message)
       }
+      setRestore({
+        status: 'done',
+        version,
+        restored,
+        refreshError: errors.length > 0 ? errors.join('\n') : null,
+      })
     } catch (err: unknown) {
       // 失败保留所选版本上下文, 可重试; 不丢选择。
       setRestore({ status: 'failed', version, message: errorMessage(err) })

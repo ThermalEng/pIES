@@ -122,7 +122,6 @@ export const messagesEn: Record<string, string> = {
   'ies.versions.source_revision': 'draft revision r{revision}',
   'ies.versions.created_by': 'created by user {user}',
   'ies.versions.restore_open': 'Restore this version',
-  'ies.versions.restore_current_hint': 'Already the current version, no restore needed',
   'ies.versions.restore_title': 'Restore historical version',
   'ies.versions.restore_target': 'Restore version v{no} ({name}) as the new current draft and a new version.',
   'ies.versions.restore_impact_draft': 'The current editable draft will be replaced with the content saved in that version.',
@@ -133,7 +132,7 @@ export const messagesEn: Record<string, string> = {
   'ies.versions.restore_failed': 'Restore failed',
   'ies.versions.restore_done_title': 'Restore completed',
   'ies.versions.restore_done_desc': 'New version v{no} created, current draft revision r{revision}.',
-  'ies.versions.restore_refresh_failed': 'Restore happened, but the version list failed to refresh (do not submit restore again)',
+  'ies.versions.restore_refresh_failed': 'Restore happened, but the project summary/list failed to refresh (do not submit restore again)',
 
   // -------------------------------------------------------------------------
   // Auth / account

@@ -132,7 +132,6 @@ export const messagesZh: Record<string, string> = {
   'ies.versions.source_revision': '草稿修订 r{revision}',
   'ies.versions.created_by': '用户 {user} 创建',
   'ies.versions.restore_open': '恢复此版本',
-  'ies.versions.restore_current_hint': '已是当前版本，无需恢复',
   'ies.versions.restore_title': '恢复历史版本',
   'ies.versions.restore_target': '将版本 v{no}（{name}）恢复为新的当前草稿和新版本。',
   'ies.versions.restore_impact_draft': '当前可编辑草稿将被替换为该版本保存的内容。',
@@ -143,7 +142,7 @@ export const messagesZh: Record<string, string> = {
   'ies.versions.restore_failed': '恢复失败',
   'ies.versions.restore_done_title': '恢复已完成',
   'ies.versions.restore_done_desc': '已创建新版本 v{no}，当前草稿修订 r{revision}。',
-  'ies.versions.restore_refresh_failed': '恢复已发生，但版本列表刷新失败（无需重新提交恢复）',
+  'ies.versions.restore_refresh_failed': '恢复已发生，但项目摘要/列表刷新失败（无需再次恢复）',
 
   // -------------------------------------------------------------------------
   // 登录 / 账号

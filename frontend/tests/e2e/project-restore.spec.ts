@@ -154,8 +154,8 @@ test.describe('S2: 恢复历史版本', () => {
     await openVersions(page, pid)
     await expect(page.locator('.ies-table__body .ies-table__row')).toHaveCount(2, { timeout: 30_000 })
     const dialog = page.getByRole('dialog')
-    // 恢复非当前版本 v1(当前 v2 的恢复按钮按设计禁用)。
-    await page.locator('.ies-table__body .ies-table__row', { hasText: 'v1带光伏' }).click({ timeout: 30_000 })
+    // 恢复仍是当前版本的 v2(任何已保存版本都可恢复, 不回避)。
+    await page.locator('.ies-table__body .ies-table__row', { hasText: 'v2带锅炉' }).click({ timeout: 30_000 })
     await expect(dialog).toBeVisible({ timeout: 10_000 })
     await dialog.getByRole('button', { name: '恢复此版本' }).click({ timeout: 10_000 })
     const confirm = dialog.getByRole('button', { name: '确认恢复' })
@@ -171,6 +171,117 @@ test.describe('S2: 恢复历史版本', () => {
 
     await apiCtx.close()
     session.assertNoErrors()
+    await context.close()
+  })
+
+  test('恢复仍是当前的v2: 撤回版本后未固化的草稿修改', async ({ browser }) => {
+    // v2 仍是当前版本, 但其后草稿经公开 API 修改未再固化; 恢复 v2 必须允许,
+    // 产生 v3 parent=v2, 后续修改消失(可观察内容证明)。
+    const { apiCtx, username, password, pid, v2Id } = await prepareTwoVersions(browser, 'es-s2d')
+    const token = await loginToken(apiCtx.request, username, password)
+    await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/draft`, {
+      expected_revision: 3,
+      commands: [
+        { id: 'cmd-fj', unit: 'model', type: 'model.upsert_device', payload: { name: '风机1', device_type: 'ies.device.pv', kind: 'new' } },
+      ],
+    }, token)
+
+    const context: BrowserContext = await browser.newContext()
+    const page: Page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await openVersions(page, pid)
+    await expect(page.locator('.ies-table__body .ies-table__row')).toHaveCount(2, { timeout: 30_000 })
+    // v2 仍标当前版本, 但其恢复按钮必须可用。
+    const rowV2 = page.locator('.ies-table__body .ies-table__row', { hasText: 'v2带锅炉' })
+    await expect(rowV2.getByText('当前版本')).toBeVisible()
+    await expect(page.locator('.wb-header__meta').getByText(/版本: v2/)).toBeVisible()
+    const dialog = page.getByRole('dialog')
+    await rowV2.click({ timeout: 30_000 })
+    await expect(dialog).toBeVisible({ timeout: 10_000 })
+    const restoreBtn = dialog.getByRole('button', { name: '恢复此版本' })
+    await expect(restoreBtn).toBeEnabled({ timeout: 10_000 })
+    await restoreBtn.click({ timeout: 10_000 })
+    await dialog.getByRole('button', { name: '确认恢复' }).click({ timeout: 10_000 })
+    await expect(dialog.getByText('恢复已完成')).toBeVisible({ timeout: 30_000 })
+    await dialog.getByRole('button', { name: '关闭' }).last().click({ timeout: 10_000 })
+
+    const rowV3 = page.locator('.ies-table__body .ies-table__row', { hasText: '恢复: v2带锅炉' })
+    await expect(rowV3).toBeVisible({ timeout: 30_000 })
+    await expect(page.locator('.ies-table__body .ies-table__row')).toHaveCount(3)
+    await expect(page.locator('.wb-header__meta').getByText(/版本: v3/)).toBeVisible()
+
+    const token2 = await loginToken(apiCtx.request, username, password)
+    const listed = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/versions`, undefined, token2)
+    const v3 = listed.versions.find((v: { version_no: number }) => v.version_no === 3)
+    expect(v3.reason).toBe('restore')
+    expect(v3.parent_version_id).toBe(v2Id)
+    const view = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}`, undefined, token2)
+    expect(view.draft.revision).toBe(5)
+    const names = (view.draft.content.model.devices as Array<{ name: string }>).map((d) => d.name)
+    expect(names).toEqual(['光伏1', '锅炉1'])
+
+    await apiCtx.close()
+    session.assertNoErrors()
+    await context.close()
+  })
+
+  test('恢复成功但摘要刷新失败: 已发生明确展示, 不诱导再提交', async ({ browser }) => {
+    // 故障只注入恢复 POST 成功之后的一次项目摘要 GET(500 真实失败响应);
+    // 列表 GET 直通成功。恢复 POST 必须恰 1 次。
+    const { apiCtx, username, password, pid, v1Id } = await prepareTwoVersions(browser, 'es-s2e')
+    const context: BrowserContext = await browser.newContext()
+    const page: Page = await context.newPage()
+    const session = await createSession(page, username, password)
+
+    let restorePosts = 0
+    await page.route(`**/api/projects/${pid}/versions/*/restore`, async (route: Route) => {
+      if (route.request().method() === 'POST') restorePosts++
+      await route.continue()
+    })
+    let failSummaryOnce = false
+    let summaryFailed = false
+    await page.route(`**/api/projects/${pid}`, async (route: Route) => {
+      const req = route.request()
+      if (req.method() === 'GET' && failSummaryOnce && !summaryFailed) {
+        summaryFailed = true
+        await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' })
+        return
+      }
+      await route.continue()
+    })
+
+    await openVersions(page, pid)
+    await expect(page.locator('.ies-table__body .ies-table__row')).toHaveCount(2, { timeout: 30_000 })
+    const dialog = page.getByRole('dialog')
+    await page.locator('.ies-table__body .ies-table__row', { hasText: 'v1带光伏' }).click({ timeout: 30_000 })
+    await expect(dialog).toBeVisible({ timeout: 10_000 })
+    await dialog.getByRole('button', { name: '恢复此版本' }).click({ timeout: 10_000 })
+    const restoreDone = page.waitForResponse(
+      (res) => res.url().endsWith(`/api/projects/${pid}/versions/${v1Id}/restore`) && res.request().method() === 'POST',
+      { timeout: 30_000 },
+    )
+    await dialog.getByRole('button', { name: '确认恢复' }).click({ timeout: 10_000 })
+    await restoreDone
+    // 其后的一次项目摘要 GET 注入失败, 列表 GET 仍成功。
+    failSummaryOnce = true
+    await expect(dialog.getByText('恢复已完成')).toBeVisible({ timeout: 30_000 })
+    await expect(dialog.getByText(/摘要\/列表刷新失败/)).toBeVisible({ timeout: 10_000 })
+    expect(restorePosts).toBe(1)
+    // 恢复已发生: 列表仍成功刷新出 3 行, 不是空态; 头部摘要丢失可见。
+    await expect(page.locator('.ies-table__body .ies-table__row')).toHaveCount(3, { timeout: 30_000 })
+    await expect(page.locator('.wb-header__meta')).toHaveCount(0)
+    await dialog.getByRole('button', { name: '关闭' }).last().click({ timeout: 10_000 })
+
+    // 解除拦截并重新加载: 真实新草稿/版本可见。
+    await page.unrouteAll({ behavior: 'wait' })
+    await page.reload()
+    await expect(page.locator('.ies-table__body .ies-table__row')).toHaveCount(3, { timeout: 30_000 })
+    await expect(page.locator('.wb-header__meta').getByText(/版本: v3/)).toBeVisible({ timeout: 30_000 })
+
+    await apiCtx.close()
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${pid}`, status: 500, times: 1 },
+    ])
     await context.close()
   })
 

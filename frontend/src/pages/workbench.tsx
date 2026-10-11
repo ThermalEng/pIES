@@ -13,6 +13,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { ReactNode } from 'react'
 
 import { api } from '../api/client'
+import { errorMessage } from '../i18n'
 import type { Project, ProjectVersion } from '../types'
 
 /** 自动保存状态(工作台头部指示)。 */
@@ -33,8 +34,16 @@ export interface WorkbenchValue {
   autosave: AutosaveStatus
   /** 更新自动保存状态(由子页面保存草稿时调用)。 */
   setAutosave: (status: AutosaveStatus) => void
-  /** 重新加载项目信息与版本列表。 */
+  /** 重新加载项目信息与版本列表(即发即忘, 不报告结果)。 */
   refresh: () => void
+  /** 重新加载并等待结果: 任一失败在对应位置留空并返回错误文本, 不抛错。 */
+  refreshDetailed: () => Promise<WorkbenchRefreshErrors>
+}
+
+/** 摘要刷新错误(null 表示该路成功; 恢复等流程用以区分已发生与刷新失败)。 */
+export interface WorkbenchRefreshErrors {
+  projectError: string | null
+  versionsError: string | null
 }
 
 const WorkbenchContext = createContext<WorkbenchValue | null>(null)
@@ -76,16 +85,31 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
     typeof navigator === 'undefined' ? false : !navigator.onLine,
   )
 
-  const refresh = useCallback(() => {
-    api.projects
-      .get(projectId)
-      .then(setProject)
-      .catch(() => setProject(null))
-    api.projects
-      .versions(projectId)
-      .then((list) => setVersions([...list].sort((a, b) => a.version_no - b.version_no)))
-      .catch(() => setVersions([]))
+  const refreshDetailed = useCallback(async (): Promise<WorkbenchRefreshErrors> => {
+    const [projectSettled, versionsSettled] = await Promise.allSettled([
+      api.projects.get(projectId),
+      api.projects.versions(projectId),
+    ])
+    let projectError: string | null = null
+    let versionsError: string | null = null
+    if (projectSettled.status === 'fulfilled') {
+      setProject(projectSettled.value)
+    } else {
+      projectError = errorMessage(projectSettled.reason)
+      setProject(null)
+    }
+    if (versionsSettled.status === 'fulfilled') {
+      setVersions([...versionsSettled.value].sort((a, b) => a.version_no - b.version_no))
+    } else {
+      versionsError = errorMessage(versionsSettled.reason)
+      setVersions([])
+    }
+    return { projectError, versionsError }
   }, [projectId])
+
+  const refresh = useCallback(() => {
+    void refreshDetailed()
+  }, [refreshDetailed])
 
   useEffect(() => {
     refresh()
@@ -114,8 +138,9 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
       autosave,
       setAutosave,
       refresh,
+      refreshDetailed,
     }),
-    [projectId, project, versions, currentVersion, offline, autosave, refresh],
+    [projectId, project, versions, currentVersion, offline, autosave, refresh, refreshDetailed],
   )
 
   return <WorkbenchContext.Provider value={value}>{children}</WorkbenchContext.Provider>
