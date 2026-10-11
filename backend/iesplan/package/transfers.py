@@ -87,7 +87,10 @@ class ImportValidationError(AppError):
 
     def __init__(self, reasons: list[str], message: str = "") -> None:
         self.reasons = list(reasons)
-        super().__init__(message or f"项目包校验失败: {'; '.join(reasons)}")
+        super().__init__(
+            message or f"项目包校验失败: {'; '.join(reasons)}",
+            params={"reasons": list(reasons)},
+        )
 
 
 class DownloadTokenError(AppError):

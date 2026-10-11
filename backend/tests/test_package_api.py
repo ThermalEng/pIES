@@ -517,6 +517,23 @@ def test_import_rejects_corrupt_and_non_zip(client: TestClient, db: Session) -> 
     assert proposals == []
 
 
+def test_import_rejection_reasons_visible_over_http(client: TestClient, db: Session) -> None:
+    """公开上传失败包 → 400 信封 params.reasons 逐项可见(提案 GUI 失败展示依据)。"""
+    importer = make_user(db, "reasons_importer")
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("bad.zip", b"not a zip at all", "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()["error"]
+    assert body["code"] == "PKG-IMP-001"
+    assert isinstance(body["params"].get("reasons"), list)
+    assert any("zip" in r for r in body["params"]["reasons"])
+    # 失败不创建任何提案/项目
+    assert db.execute(select(ImportProposal)).scalars().all() == []
+
+
 def test_import_proposal_rejects_forbidden_sections(client: TestClient, db: Session) -> None:
     """包含账号/权限/会话等禁止内容的包拒绝导入（见 manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md §7.8 公共文件契约； manual/developer-guide/zh-CN/file-formats.md §通用书写规则）"""
     owner = make_user(db, "owner")
