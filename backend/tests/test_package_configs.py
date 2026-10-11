@@ -1000,6 +1000,66 @@ def test_import_rejects_version_frozen_profile_mismatch(client: TestClient, db: 
     assert any("0001" in r for r in reasons)
 
 
+def test_import_rejects_current_effective_value_mismatch(client: TestClient, db: Session) -> None:
+    """当前组 Effective 电价与来源合并结果不一致(profile_id 不变) → 上传 400。
+
+    单项变异: 仅改当前组 effective 文件的电价值, Profile/Overrides 不变;
+    上传边界从精确来源合并确定结果并拒绝。
+    """
+    from iesplan.core.yamlmini import load as yaml_load
+
+    owner = make_user(db, "cvm_owner")
+    importer = make_user(db, "cvm_importer")
+    pid = _create_project(client, owner)
+    _setup_finance(client, owner, pid)  # 覆盖 rev2: 电价 0.75
+    zip_bytes = _export_zip(client, owner, pid)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        doc = yaml_load(zf.read("effective_finance.yaml").decode("utf-8"))
+    price = doc["energy_prices"]["grid_import"]["value"]
+    assert price["value"] == "0.75"
+    price["value"] = "0.95"
+    bad = _rezip_mutate(zip_bytes, {
+        "effective_finance.yaml": yaml_dump(doc).encode("utf-8"),
+    })
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", bad, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert any("合并结果" in r for r in reasons)
+
+
+def test_import_rejects_history_effective_value_mismatch(client: TestClient, db: Session) -> None:
+    """历史组 Effective 电价与来源合并结果不一致(profile_id 不变) → 上传 400。"""
+    from iesplan.core.yamlmini import load as yaml_load
+
+    owner = make_user(db, "hvm_owner")
+    importer = make_user(db, "hvm_importer")
+    pid = _create_project(client, owner)
+    _setup_finance(client, owner, pid)
+    _save_planning(client, owner, pid)
+    _create_hist_version(client, owner, pid, "hvm-a")
+    zip_bytes = _export_zip(client, owner, pid)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        doc = yaml_load(zf.read("version_configs/0001/effective_finance.yaml").decode("utf-8"))
+    price = doc["energy_prices"]["grid_import"]["value"]
+    assert price["value"] == "0.75"
+    price["value"] = "0.95"
+    bad = _rezip_mutate(zip_bytes, {
+        "version_configs/0001/effective_finance.yaml": yaml_dump(doc).encode("utf-8"),
+    })
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", bad, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert any("0001" in r for r in reasons)
+
+
 def test_import_rejects_current_effective_profile_mismatch(client: TestClient, db: Session) -> None:
     """当前组 Effective 与 Profile 来源不一致 → 上传 400, 确认不存错文件。
 
@@ -1034,7 +1094,8 @@ def test_confirm_does_not_rerun_upload_gate(client: TestClient, db: Session, mon
     """确认消费已接受提案, 不再调用上传边界的作者输入校验, 业务值仍正确发布。
 
     真实公开上传成功后, 把相关正式解析入口设为失败哨兵(普通 YAML/JSON 解码
-    不算重复校验, 不设哨兵); 公开确认仍应 201, 且当前业务值正确。
+    不算重复校验, 不设哨兵); 合并仅允许在上传边界执行, 确认阶段打桩合并器
+    证明不再合并。公开确认仍应 201, 且当前业务值正确。
     """
     import iesplan.core.contracts as core_contracts
     import iesplan.finance.triplet as triplet
@@ -1064,6 +1125,11 @@ def test_confirm_does_not_rerun_upload_gate(client: TestClient, db: Session, mon
         m.setattr(triplet.EffectiveFinanceConfig, "from_dict", _boom)
         m.setattr(core_contracts.PlanningConfig, "from_dict", _boom)
         m.setattr(planning_contracts, "validate_planning_domain", _boom)
+        # 合并器打桩在真实解析位置(定义处与确认可达模块的引用处): 确认若再
+        # 合并即触发哨兵失败, 证明合并仅发生在上传边界。
+        m.setattr(triplet, "merge_effective", _boom)
+        import iesplan.application.configuration.revisions as revisions_mod
+        m.setattr(revisions_mod, "merge_effective", _boom)
         resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
         assert resp.status_code == 201, resp.text
     new_pid = resp.json()["project"]["id"]

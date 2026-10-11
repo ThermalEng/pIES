@@ -406,7 +406,7 @@ def publish_accepted_finance_state(
         project_id=project_id,
         revision=next_ovr,
         content=overrides_doc,
-        profile_id=(overrides_doc.get("profile_ref") or {}).get("id") or profile_row.profile_id,
+        profile_id=overrides_doc["profile_ref"]["id"],
         created_by=user_id,
     )
     eff_obj = put_object(
@@ -421,7 +421,7 @@ def publish_accepted_finance_state(
         project_id=project_id,
         revision=next_eff,
         content=effective_doc,
-        profile_id=effective_doc.get("profile_id") or profile_row.profile_id,
+        profile_id=effective_doc["profile_id"],
         created_by=user_id,
         content_object_id=eff_obj.id,
     )

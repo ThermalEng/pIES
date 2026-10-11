@@ -28,7 +28,7 @@ from iesplan.application.configuration import (
     get_finance_overrides as _get_finance_overrides,
     get_planning_config as _get_planning_config,
 )
-from iesplan.application.configuration.revisions import (
+from iesplan.application.configuration import (
     publish_accepted_finance_state as _publish_accepted_finance_state,
 )
 from iesplan.application.projects import (
@@ -52,6 +52,7 @@ from iesplan.finance import (
     FinanceOverrides,
     FinanceProfile,
     FinanceTripletError,
+    merge_effective,
 )
 from iesplan.identity.contracts import UserRecord
 from iesplan.package import (
@@ -587,7 +588,8 @@ def parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
       PlanningConfig.from_dict: 拒未知/缺失字段);
     - Overrides 对 Profile 结构校验(profile_ref 匹配、只许既有叶子、
       禁改单位/carrier/direction/tax、禁新增 finance_type/price_id);
-    - Effective 的 profile_id 必须等于组内 Profile 稳定 id(来源一致);
+    - Effective 的 profile_id 必须等于组内 Profile 稳定 id(来源一致),
+      且其内容必须等于精确来源合并结果(公开 merge_effective 确定);
     对象字节完整性由 _parse_package 的对象清单一一对应 + 大小校验承担
     (外部包入口边界); 领域层不做本地内容重算比对(2.6)。
     """
@@ -622,6 +624,10 @@ def parse_config_files(entries: dict[str, bytes], manifest: dict) -> dict:
     if "effective" in group and "profile" in group:
         if group["effective"].profile_id != group["profile"].profile_id:
             raise ImportValidationError(["包内 Effective 与 Profile 来源不一致"])
+        # 外部输入核心财务约束: 包内 Effective 必须等于精确来源合并结果。
+        expected = merge_effective(group["profile"], group.get("overrides"))
+        if expected.to_dict() != group["effective"].to_dict():
+            raise ImportValidationError(["包内 Effective 与来源合并结果不一致"])
     return group
 
 
@@ -706,7 +712,7 @@ def _check_version_dependencies(
     - 版本元数据按数据版本唯一: 同一数据集不同版本不得共用元数据条目;
     - 带引用块的版本必须有 version_configs 对应条目, 每组依赖经同一正式
       解析器(字头/结构/领域)校验, 版本冻结引用与组内来源一致(Effective 的
-      profile_id 等于组内 Profile 稳定 id);
+      profile_id 等于组内 Profile 稳定 id, 内容等于精确来源合并结果);
     - 数据集元数据的每个文件条目必须在同目录有唯一匹配的暂存文件。
     """
     files_meta = manifest.get("files") or {}
@@ -781,6 +787,10 @@ def _check_version_dependencies(
                 raise ImportValidationError(
                     [f"版本 {key} 的冻结 Effective 引用与历史依赖 Profile 来源不一致"]
                 )
+            # 外部输入核心财务约束: 历史组同样从精确来源合并确定结果。
+            expected = merge_effective(group["profile"], group["overrides"])
+            if expected.to_dict() != group["effective"].to_dict():
+                raise ImportValidationError([f"版本 {key} 的 Effective 与来源合并结果不一致"])
         if plan and "planning" not in group:
             raise ImportValidationError([f"版本 {key} 的规划依赖文件缺失"])
     for meta_path in files_meta.get("datasets") or []:
@@ -1111,8 +1121,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         既有行内容与包内来源不一致即身份冲突, 明确拒绝, 不偷偷沿用。
         """
         doc = yaml_load(entry_bytes.decode("utf-8"))
-        if not isinstance(doc, dict) or not isinstance((doc.get("profile") or {}).get("id"), str):
-            raise ImportValidationError([f"{label} 的 Profile 来源结构缺失(数据损坏)"])
+        # 已接受内容的解码消费: 字段由上传边界保证, 此处直接取值, 不做形状设防。
         stable_id = doc["profile"]["id"]
         existing = configuration_domain.get_profile(db, stable_id)
         if existing is not None:
@@ -1130,7 +1139,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         row = configuration_domain.register_profile(
             db,
             profile_id=stable_id,
-            region=(doc["profile"].get("region") or ""),
+            region=doc["profile"]["region"],
             content=doc,
             object_id=obj.id,
             created_by=user.id,
