@@ -820,17 +820,18 @@ def import_proposal(
     file_bytes: bytes,
     idempotency_key: str | None = None,
 ) -> ImportProposalRecord:
-    """创建导入提案: 校验 → 暂存对象 → 拟创建项目快照 → 校验报告(domain-model §对象生命周期)。
+    """创建导入提案: 校验 → 暂存对象 → 提案记录 → 校验报告(domain-model §对象生命周期)。
 
     - 校验失败(格式/兼容性/清单/完整性/历史依赖关系)抛 ImportValidationError,
       不创建任何记录;
     - 幂等: 调用方传入 idempotency_key 时, 同一提议人已有相同键的未确认提案
       直接返回(不重复暂存); 无键时每次调用新建提案(对象存储无内容去重,
       源包字节相同也不复用对象行);
-    - 暂存: 包内全部对象按对象 id 落盘;
-    - 拟创建项目快照: 同事务创建新项目身份(导入者即所有者, 原授权不迁移),
-      校验报告与分区提交内容写入 review_summary(review_errors 空);
-    - 确认导入见 confirm_import。
+    - 暂存: 包内全部对象按对象 id 落盘, 源包落盘为新对象;
+    - 提案阶段不创建普通项目(无目标项目身份); 拟创建项目快照(名称/币种/
+      基线)与校验报告写入 review_summary(review_errors 空);
+    - 暂存对象与源包由提案登记存储引用, 提案存续期间不被当孤儿;
+    - 确认导入见 confirm_import(确认时才创建新项目身份, 导入者成为所有者)。
     """
     manifest, entries = _parse_package(file_bytes)
     # 幂等: 同一提议人 + 同一幂等键的未确认提案 → 直接返回(校验已通过, 不重复暂存)
@@ -859,9 +860,10 @@ def import_proposal(
         source_category="import_package_source",
     )
 
-    # 2) 拟创建项目快照: 新项目身份(每次导入新身份, 导入者成为所有者)
+    # 2) 拟创建项目快照: 只做命名/币种/基线的输入校验与快照记录, 不创建
+    # 普通项目(确认时才创建新项目身份, 导入者成为所有者, 原授权不迁移)。
     project_meta = manifest.get("project") or {}
-    name = _unique_project_name(db, str(project_meta.get("name") or "导入项目"))
+    name = str(project_meta.get("name") or "导入项目")
     currency = project_meta.get("currency") or "CNY"
     if currency not in ("CNY", "USD"):
         raise ImportValidationError([f"包内币种非法: {currency}"])
@@ -877,36 +879,43 @@ def import_proposal(
         baseline = ProjectBaseline.from_dict(project_meta.get("project_baseline"))
     except ProjectBaselineError as exc:
         raise ImportValidationError([f"包内项目计算基线非法: {exc}"]) from exc
-    # 1b) 历史依赖关系边界校验(项目行创建之前; 失败不建项目/提案行)
+    # 1b) 历史依赖关系边界校验(提案行创建之前; 失败不建提案行)
     _check_version_dependencies(entries, manifest, baseline)
     # 规划/财务配置 revision(0.6.5 事项 3): 包内配置严格校验(缺失 = 导入后
     # 无配置, 不静默默认; 非法 → 拒绝整个导入)。
     package_configs = parse_config_files(entries, manifest)
-    project = project_domain.create_project(
-        db,
-        name=name,
-        owner_id=user.id,
-        created_by=user.id,
-        description=project_meta.get("description"),
-        currency=currency,
-        baseline_resolution=baseline.resolution,
-        baseline_start_year=baseline.start_year,
-        baseline_scenario_mode=baseline.scenario_mode,
-        schema_version=int(project_meta.get("schema_version", 1) or 1),
-    )
+    schema_version = int(project_meta.get("schema_version", 1) or 1)
 
     # 3) 导入提案(校验报告 + 分区提交内容, 01 §10.4)
     # 不再写 source_path(该列可空且无任何消费点) —— storage_path 属
     # §11 内部路径, 不得进入审计记录; 可追溯性由 source_object_id
     # (对象存储对象外键)承担。提案行经 package 域 repository 创建,
-    # 不直接访问提案表。
+    # 不直接访问提案表。提案阶段无目标项目(project_id 缺席)。
     proposal = _create_proposal(
         db,
-        project_id=project.id,
         proposer_id=user.id,
         source_type="json",
         source_object_id=source_obj.id,
     )
+    # 提案持有暂存对象引用: 源包与包内暂存对象在提案存续期间不被当孤儿;
+    # 与提案同事务提交/回滚, 不新增校验。
+    add_ref(
+        db,
+        source_obj.id,
+        "import_proposal",
+        proposal.id,
+        ref_entity_type="import_proposals",
+        purpose="proposal_source",
+    )
+    for path, obj in sorted(staged.items()):
+        add_ref(
+            db,
+            obj.id,
+            "import_proposal",
+            proposal.id,
+            ref_entity_type="import_proposals",
+            purpose="proposal_staging",
+        )
     proposal = _set_proposal_review(
         db,
         proposal.id,
@@ -921,8 +930,9 @@ def import_proposal(
             "project_snapshot": {
                 "name": name,
                 "currency": currency,
+                "description": project_meta.get("description"),
                 "project_baseline": baseline.to_dict(),
-                "schema_version": project.schema_version,
+                "schema_version": schema_version,
             },
             "configs": {
                 "finance_triplet": {
@@ -958,7 +968,7 @@ def import_proposal(
         audit_domain.AUDIT_PROJECT_IMPORT_PROPOSED,
         "import_proposals",
         proposal.id,
-        result={"project_id": project.id, "source_object_id": source_obj.id, "staged_objects": len(staged)},
+        result={"source_object_id": source_obj.id, "staged_objects": len(staged)},
     )
     return proposal
 
@@ -991,7 +1001,9 @@ def _staged_object_id(staged_by_path: dict[str, int], path: str) -> int:
 def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRecord:
     """提交导入(U14, domain-model §对象生命周期): 创建新项目身份, 导入者成为所有者。
 
-    分区提交内容(单事务):
+    分区提交内容(同一数据库事务: 新项目身份/所有权/草稿/历史版本/当前配置/
+    对象引用/提案应用状态一并发布; 失败全回滚, 不留半成品, 提案可重试):
+    - 新项目: 按提案快照创建项目身份(名称去重, 导入者即所有者);
     - 数据集: 重建 Dataset/DatasetVersion/DatasetFile(引用暂存对象, 原标识重映射);
     - 草稿: revision=1 领域内容(数据集绑定重映射, 证据来源登记);
     - 版本: 按包内版本顺序重建 ProjectVersion(新身份版本号, 不倒写原版本);
@@ -1001,7 +1013,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
       评估摘要, 不创建本地任务(不伪造本地任务, domain-model §快照、任务和结果)。
 
     导入约束: 不得静默覆盖(名称去重 + 新项目身份); 账号/权限/会话不随包导入;
-    导入者成为新项目所有者; 原授权关系不迁移。
+    导入者成为新项目所有者; 原授权关系不迁移。确认重放返回同一已应用项目。
     """
     proposal = _get_proposal(db, proposal_id)
     if proposal is None:
@@ -1016,11 +1028,11 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             params={"proposal_id": proposal_id},
             location={"object_type": "import_proposals", "object_id": proposal_id},
         )
-    project = project_domain.get_project(db, proposal.project_id)
-    if project is None:
-        raise NotFoundError("导入提案关联项目缺失", params={"proposal_id": proposal_id})
     if proposal.status == "applied":
-        return project  # 幂等重放: 已导入则返回导入结果项目
+        project = project_domain.get_project(db, proposal.project_id)
+        if project is None:
+            raise NotFoundError("导入提案关联项目缺失", params={"proposal_id": proposal_id})
+        return project  # 幂等重放: 已导入则返回同一导入结果项目
     if proposal.status == "rejected":
         raise ConflictError(
             "导入提案已被拒绝", params={"proposal_id": proposal_id, "status": proposal.status}
@@ -1029,6 +1041,11 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         raise ConflictError(
             "导入提案状态不允许确认", params={"proposal_id": proposal_id, "status": proposal.status}
         )
+    if proposal.project_id is not None:
+        raise ConflictError(
+            "导入提案已有项目关联, 状态不一致",
+            params={"proposal_id": proposal_id, "status": proposal.status},
+        )
 
     # 取分区提交内容: 消费提案阶段已接受的源包与暂存(解码读取, 不重新
     # 跑上传边界的完整性/语义校验; 结构缺失则 loudly 拒绝)。
@@ -1036,6 +1053,21 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
     source_object_id = (summary.get("staging") or {}).get("source_object_id")
     file_bytes = get_object(db, int(source_object_id))
     manifest, entries = _read_staged_package(file_bytes)
+    # 确认时创建新项目身份(每次导入新身份, 导入者成为所有者; 名称按快照去重)。
+    snapshot = summary.get("project_snapshot") or {}
+    snap_baseline = snapshot.get("project_baseline") or {}
+    project = project_domain.create_project(
+        db,
+        name=_unique_project_name(db, str(snapshot.get("name") or "导入项目")),
+        owner_id=user.id,
+        created_by=user.id,
+        description=snapshot.get("description"),
+        currency=snapshot.get("currency") or "CNY",
+        baseline_resolution=snap_baseline.get("resolution") or "1h",
+        baseline_start_year=snap_baseline.get("start_year") or 2026,
+        baseline_scenario_mode=snap_baseline.get("scenario_mode") or "single",
+        schema_version=int(snapshot.get("schema_version", 1) or 1),
+    )
     # 提案阶段暂存的对象 id 按包内路径索引(确认阶段不再按摘要查找对象)
     staged_by_path = {
         str(item.get("path")): int(item.get("object_id"))
@@ -1361,12 +1393,13 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
                 [f"包内配置在确认阶段发布失败: {getattr(exc, 'code', 'PKG-IMP-001')} {exc}"]
             ) from exc
 
-    # 7) 提案收尾 + 审计(提案状态经 package 域状态机推进)
+    # 7) 提案收尾 + 审计(提案状态经 package 域状态机推进, 写入新项目关联)
     _set_proposal_review(
         db,
         proposal.id,
         status="applied",
         decided_by=user.id,
+        project_id=project.id,
     )
     _audit_entry(
         db,

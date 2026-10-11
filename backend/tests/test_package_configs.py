@@ -1192,11 +1192,9 @@ def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, 
     """确认写入后半段注入失败 → 本次 DB 写入整体回滚, 预建状态保留, 可重确认。
 
     版本重建阶段注入失败; 公开观察版本空/当前财务规划缺席/项目仍无草稿;
-    领域公开读取历史与当前配置行均无; 预建项目仍在列表(之前已提交的预建
-    状态不算本次新增); 解除注入后同一提案可重确认成功且值正确。
-    外部 Blob 字节不在 DB 原子断言内。
+    晚阶段失败不留半成品项目(导入者列表仍为空); 解除注入后同一提案可重
+    确认成功且值正确。外部 Blob 字节不在 DB 原子断言内。
     """
-    import iesplan.configuration as configuration_domain
     import iesplan.project as project_domain
     import iesplan.storage as storage_domain
 
@@ -1214,7 +1212,7 @@ def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, 
     )
     assert resp.status_code == 201, resp.text
     prop_id = resp.json()["proposal"]["id"]
-    new_pid = resp.json()["proposal"]["project_id"]
+    assert resp.json()["proposal"]["project_id"] is None
 
     def _content_refs() -> list[dict]:
         return [
@@ -1235,41 +1233,26 @@ def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, 
     # 新增引用随确认写入一同回滚(历史 Effective 内容引用不残留)。
     assert len(_content_refs()) == ref_count_before
 
-    assert client.get(
-        f"/api/projects/{new_pid}/versions", headers=_h(client, importer)
-    ).json()["versions"] == []
-    assert client.get(
-        f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)
-    ).status_code == 404
-    assert client.get(
-        f"/api/projects/{new_pid}/planning-config", headers=_h(client, importer)
-    ).status_code == 404
-    assert client.get(
-        f"/api/projects/{new_pid}/effective-finance", headers=_h(client, importer)
-    ).status_code == 404
-    view = client.get(f"/api/projects/{new_pid}", headers=_h(client, importer))
-    assert view.status_code == 500, view.text
-    assert view.json()["error"]["code"] == "SYS-STORE-001"
-    assert configuration_domain.get_overrides_revision(db, new_pid, 1) is None
-    assert configuration_domain.get_effective_revision(db, new_pid, 1) is None
-    assert configuration_domain.get_planning_revision(db, new_pid, 1) is None
-    assert configuration_domain.get_current_overrides(db, new_pid) is None
-    assert configuration_domain.get_current_effective(db, new_pid) is None
-    assert configuration_domain.get_current_planning(db, new_pid) is None
+    # 晚阶段失败不留半成品项目: 导入者项目列表仍为空, 提案未应用。
     listed = client.get("/api/projects", headers=_h(client, importer)).json()["projects"]
-    assert any(p["id"] == new_pid and p["status"] == "active" for p in listed)
+    assert listed == []
 
     resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
     assert resp.status_code == 201, resp.text
+    new_pid = resp.json()["project"]["id"]
     ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()
     assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.75"
 
 
-def test_unconfirmed_proposal_project_lifecycle(client: TestClient, db: Session) -> None:
-    """上传提案后、确认前: 预建项目已 active 落库(列表可见)但无草稿(详情 500)。
+def test_unconfirmed_proposal_creates_no_project(client: TestClient, db: Session) -> None:
+    """上传提案后、确认前: 只保存提案与暂存, 不创建普通项目。
 
-    GUI 取消 ≠ 零写入, 且确认前不得导航进该项目; 如实记录, 不顺手清理。
+    提案 project_id 为 null(缺席含义见包域契约); 导入者项目列表无新增,
+    无半成品项目; 源包与暂存对象由提案登记引用, safe_cleanup dry_run
+    候选不含(只预览, 不实际清理); 确认后项目才出现且详情可用。
     """
+    import iesplan.storage as storage_domain
+
     owner = make_user(db, "life_owner")
     importer = make_user(db, "life_importer")
     pid = _create_project(client, owner)
@@ -1283,13 +1266,54 @@ def test_unconfirmed_proposal_project_lifecycle(client: TestClient, db: Session)
     assert resp.status_code == 201, resp.text
     body = resp.json()["proposal"]
     assert body["status"] == "proposed"
-    prebuilt_id = body["project_id"]
-    assert prebuilt_id != pid
+    assert body["project_id"] is None
     listed = client.get("/api/projects", headers=_h(client, importer)).json()["projects"]
-    assert any(p["id"] == prebuilt_id and p["status"] == "active" for p in listed)
-    view = client.get(f"/api/projects/{prebuilt_id}", headers=_h(client, importer))
-    assert view.status_code == 500, view.text
-    assert view.json()["error"]["code"] == "SYS-STORE-001"
+    assert listed == []
+
+    staging = body["review_summary"]["staging"]
+    staged_ids = {item["object_id"] for item in staging["objects"]} | {staging["source_object_id"]}
+    refs = storage_domain.find_refs_by_entity_type(db, "import_proposals")
+    assert staged_ids <= {r["object_id"] for r in refs}
+    plan = storage_domain.safe_cleanup(db, dry_run=True)
+    cand_ids = {c["id"] for c in plan["candidates"]}
+    assert not (staged_ids & cand_ids)
+
+    prop_id = body["id"]
+    resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
+    assert resp.status_code == 201, resp.text
+    new_pid = resp.json()["project"]["id"]
+    listed = client.get("/api/projects", headers=_h(client, importer)).json()["projects"]
+    assert any(p["id"] == new_pid and p["status"] == "active" for p in listed)
+    view = client.get(f"/api/projects/{new_pid}", headers=_h(client, importer))
+    assert view.status_code == 200, view.text
+
+
+def test_confirm_replay_returns_same_project(client: TestClient, db: Session) -> None:
+    """确认重放返回同一已应用项目, 不重复创建项目/版本。"""
+    owner = make_user(db, "replay_owner")
+    importer = make_user(db, "replay_importer")
+    pid = _create_project(client, owner)
+    _create_hist_version(client, owner, pid, "replay-a")
+    zip_bytes = _export_zip(client, owner, pid)
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", zip_bytes, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 201, resp.text
+    prop_id = resp.json()["proposal"]["id"]
+    resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
+    assert resp.status_code == 201, resp.text
+    new_pid = resp.json()["project"]["id"]
+    resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["project"]["id"] == new_pid
+    listed = client.get("/api/projects", headers=_h(client, importer)).json()["projects"]
+    assert [p["id"] for p in listed] == [new_pid]
+    versions = client.get(
+        f"/api/projects/{new_pid}/versions", headers=_h(client, importer)
+    ).json()["versions"]
+    assert len(versions) == 1
 
 
 def test_import_rejects_override_scope_violation(client: TestClient, db: Session) -> None:

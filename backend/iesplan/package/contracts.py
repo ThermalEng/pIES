@@ -24,10 +24,14 @@ class PackageConflictError(ConflictError):
 
 @dataclass(frozen=True, slots=True)
 class ImportProposalRecord:
-    """导入提议（import_proposals 表公开视图）。"""
+    """导入提议（import_proposals 表公开视图）。
+
+    project_id 缺席含义: 确认前提案阶段不创建普通项目, 该字段为 None;
+    确认成功后填入新创建的项目 id; applied 状态必有值。
+    """
 
     id: int
-    project_id: int
+    project_id: int | None
     proposer_id: int
     source_type: str
     status: str

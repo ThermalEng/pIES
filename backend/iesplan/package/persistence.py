@@ -65,13 +65,13 @@ def _row_to_proposal(row: ImportProposal) -> ImportProposalRecord:
 def create_proposal(
     db: Session,
     *,
-    project_id: int,
+    project_id: int | None = None,
     proposer_id: int,
     source_type: str,
     source_object_id: int | None = None,
     source_path: str | None = None,
 ) -> ImportProposalRecord:
-    """创建导入提案（初始状态 proposed）；落库失败抛领域错误。"""
+    """创建导入提案（初始状态 proposed，无目标项目时 project_id 缺席）；落库失败抛领域错误。"""
     row = ImportProposal(
         project_id=project_id,
         proposer_id=proposer_id,
@@ -128,11 +128,13 @@ def set_proposal_review(
     review_summary: dict[str, Any] | None = None,
     review_errors: dict[str, Any] | None = None,
     decided_by: int | None = None,
+    project_id: int | None = None,
 ) -> ImportProposalRecord:
     """推进评审状态机；非法转换抛 PackageConflictError，缺失抛 PackageNotFoundError。
 
     同状态复写评审内容允许（如创建后补写校验报告）；终态不可再迁移；
-    标记 applied 时记录 decided_by 与 decided_at。
+    标记 applied 时记录 decided_by 与 decided_at；确认创建新项目时经
+    project_id 写入关联（仅确认路径传入）。
     """
     if status not in KNOWN_PROPOSAL_STATUSES:
         raise PackageConflictError("导入提案状态非法", params={"proposal_id": proposal_id, "status": status})
@@ -145,6 +147,8 @@ def set_proposal_review(
             params={"proposal_id": proposal_id, "status": row.status},
         )
     row.status = status
+    if project_id is not None:
+        row.project_id = project_id
     if review_summary is not None:
         row.review_summary = review_summary
     if review_errors is not None:
@@ -166,7 +170,8 @@ class ImportProposal(Base):
     __tablename__ = "import_proposals"
 
     id: Mapped[int] = bigint_pk()
-    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    # 确认前无目标项目(可空); 确认成功后填入新项目 id, applied 必有值。
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
     proposer_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     source_type: Mapped[str] = mapped_column(Text, nullable=False)
     source_object_id: Mapped[int | None] = mapped_column(ForeignKey("objects.id"))

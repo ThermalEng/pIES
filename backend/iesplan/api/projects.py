@@ -312,7 +312,7 @@ def import_package_endpoint(
     file: Annotated[UploadFile, File(description="项目包 zip")],
     idempotency_key: str | None = None,
 ) -> dict:
-    """上传项目包并创建导入提案(校验 → 暂存对象 → 拟创建项目快照)。
+    """上传项目包并创建导入提案(校验 → 暂存对象 → 提案记录, 不创建普通项目)。
 
     大小门禁(H-07): 以 (上限+1) 字节封顶流式读取, 超限立即拒绝
     (压缩包字节上限 MAX_PACKAGE_BYTES, 与 Nginx client_max_body_size 对齐),
@@ -357,7 +357,11 @@ def confirm_import_endpoint(
 
 
 def _proposal_to_dict(proposal) -> dict:
-    """导入提案序列化(API 展示; 提案为 package 域记录时时间为 ISO 字符串)。"""
+    """导入提案序列化(API 展示; 提案为 package 域记录时时间为 ISO 字符串)。
+
+    project_id 缺席语义: 确认前为 null(提案阶段不创建普通项目); 确认成功后
+    为新项目 id。
+    """
     created_at = proposal.created_at
     if created_at is not None and hasattr(created_at, "isoformat"):
         created_at = created_at.isoformat()
