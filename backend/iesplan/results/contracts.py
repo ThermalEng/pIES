@@ -46,6 +46,14 @@ class ResultInvalidRequestError(AppError):
     message_key = "ies.diag.param.invalid"
 
 
+#: 单解证据的公开解身份(结果契约边界定义)。
+#:
+#: 当前真实求解链为单解封存, 证据无候选 ID 载体时规划解读取/预览统一用
+#: 该身份, 不把数组位置或指标键正则包装成权威, 也不保留旧 candidates
+#: 兼容双轨。metrics-only 或无解证据不得伪造该身份(无 solution 块即无解)。
+SINGLE_SOLUTION_ID: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class EvidencePackageRecord:
     """证据包（evidence_packages 表公开视图，不可变）。"""

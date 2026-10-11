@@ -9,8 +9,9 @@
  *   (唯一、无解、多解、退化、超出定义域、数值失败)。
  * - 环境:运行碳排放 / 排放边界 / 因子版本。
  * - 工程:能源平衡表(电/热/冷)、设备容量、逐时曲线(SVG 折线)、峰值、购售电、需量。
- * - Pareto:候选点 SVG 散点(目标轴),用户选择候选 -> 参数差异预览 -> 确认应用
- *   (提示将创建新项目版本,原版本保持不变)。
+ * - 候选方案:真实候选列表(#index),选择只记录采用,不创建版本;
+ *   规划解参数预览(封存解 × 冻结规划绑定);实际应用方案未交付。
+ * - 来源:仅按原快照引用展示项目版本与数据集,不读当前最新。
  * - 评估历史(不可变列表)与重新评估按钮。
  * - 导出:Excel 按钮(选择语言 zh/en)、完整项目包按钮(仅所有者可见)。
  *
@@ -35,12 +36,18 @@ import {
   Icon,
   Select,
   Spinner,
+  Table,
   TaskOutcomeBadge,
   TaskStatusBadge,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
 } from '../components/ui'
 import type { BadgeVariant, IconName } from '../components/ui'
-import { LineChart, ScatterChart } from '../components/charts'
-import type { LineSeries, ScatterPoint } from '../components/charts'
+import { LineChart } from '../components/charts'
+import type { LineSeries } from '../components/charts'
 import { formatCo2, formatDateTime, formatMoney, formatNumber, formatPercent } from '../lib/format'
 import type {
   ApiError,
@@ -48,12 +55,15 @@ import type {
   AssessmentGrade,
   Currency,
   Diagnostic,
+  EvidenceCandidate,
   ExcelExportInput,
   EvidencePackageSummary,
   FinancialAbsence,
   FinancialEvaluationBlock,
   MetricValue,
+  PlanningSolution,
   ResultAssessment,
+  SnapshotRefs,
   TaskDetail,
   TaskOutcome,
 } from '../types'
@@ -64,14 +74,6 @@ import { useWorkbench } from './workbench'
 // ---------------------------------------------------------------------------
 
 type DimStatus = 'passed' | 'restricted' | 'failed' | 'na' | 'insufficient'
-
-interface Candidate {
-  indexId: number
-  label: string
-  x: number | null
-  y: number | null
-  metrics: MetricValue[]
-}
 
 const DIMENSIONS: Array<{ key: AssessmentDimension; labelKey: string }> = [
   { key: 'physical', labelKey: 'ies.result.dimension_physical' },
@@ -160,48 +162,13 @@ function inferIrrStatusKey(diagnostics: Diagnostic[]): IrrStatusKey | null {
   return null
 }
 
-/** 从指标中提取 Pareto 候选点(id 形如 pareto|candidate.<i>.x/.y/.label/.index_id)。 */
-function extractCandidates(metrics: Record<string, MetricValue> | null): Candidate[] {
-  if (!metrics) return []
-  const map = new Map<string, { x?: number; y?: number; labelKey?: string; indexId?: number; metrics: MetricValue[] }>()
-  for (const [id, m] of Object.entries(metrics)) {
-    const m2 = /^(?:pareto|candidate|opt\.candidate|opt\.pareto)(?:\.|\.\d+\.)?(.+)$/i.exec(id)
-    if (!m2) continue
-    const rest = m2[1]
-    const dot = rest.indexOf('.')
-    const key = dot === -1 ? rest : rest.slice(0, dot)
-    const field = dot === -1 ? '' : rest.slice(dot + 1)
-    let entry = map.get(key)
-    if (!entry) {
-      entry = { metrics: [] }
-      map.set(key, entry)
-    }
-    if (/^x$/i.test(field)) entry.x = m.value ?? undefined
-    else if (/^y$/i.test(field)) entry.y = m.value ?? undefined
-    else if (/label|name/i.test(field)) entry.labelKey = m.label_key
-    else if (/index.?id|id$/i.test(field)) entry.indexId = m.value ?? undefined
-    else entry.metrics.push(m)
-  }
-  const out: Candidate[] = []
-  for (const [key, entry] of map) {
-    out.push({
-      indexId: entry.indexId ?? (Number(key) || 0),
-      label: entry.labelKey ? translate(entry.labelKey) : `#${key}`,
-      x: entry.x ?? null,
-      y: entry.y ?? null,
-      metrics: entry.metrics,
-    })
-  }
-  return out.sort((a, b) => a.indexId - b.indexId)
-}
-
 // ---------------------------------------------------------------------------
 // 页面
 // ---------------------------------------------------------------------------
 
 export default function ResultsPage() {
   const { t, locale } = useI18n()
-  const { projectId, project, currentVersion } = useWorkbench()
+  const { projectId, project } = useWorkbench()
   const currency: Currency = project?.currency ?? 'CNY'
 
   // URL ?package= 直达参数(仅首次读取,避免轮询重载)
@@ -228,8 +195,16 @@ export default function ResultsPage() {
   const [hourly, setHourly] = useState<{ resolution: string; n: number; flows: Record<string, number[]> } | null>(null)
   const [resultError, setResultError] = useState<string | null>(null)
 
-  // 数据版本(摘要展示)
-  const [dataVersions, setDataVersions] = useState<Array<{ name: string; version_no: number }>>([])
+  // 真实候选列表/规划解/快照引用(随选中证据包加载, 不按指标键反解)
+  const [candList, setCandList] = useState<EvidenceCandidate[]>([])
+  const [planSolution, setPlanSolution] = useState<PlanningSolution | null>(null)
+  const [snapRefs, setSnapRefs] = useState<SnapshotRefs | null>(null)
+  // 快照来源展示(项目版本 + 数据集名称, 按引用 id 匹配; 失败可见)
+  const [snapSources, setSnapSources] = useState<{
+    projectVersion: string
+    datasets: string[]
+    error: string | null
+  } | null>(null)
 
   // Pareto 选择与应用
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null)
@@ -305,6 +280,10 @@ export default function ResultsPage() {
       setAssessments([])
       setHourly(null)
       setResultError(null)
+      setCandList([])
+      setPlanSolution(null)
+      setSnapRefs(null)
+      setSnapSources(null)
       return
     }
     let cancelled = false
@@ -327,12 +306,19 @@ export default function ResultsPage() {
         setResultDiag(res?.diagnostics ?? [])
         setAssessments([...(ass ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)))
         setHourly(hr)
+        // 真实候选/规划解/快照引用(后端权威, 不反解指标键)
+        setCandList(res?.candidates ?? [])
+        setPlanSolution(res?.planningSolution ?? null)
+        setSnapRefs(res?.snapshotRefs ?? null)
         setResultError(null)
       } catch (err) {
         if (!cancelled) {
           setMetrics(null)
           setFinEval(null)
           setFinAbsence(null)
+          setCandList([])
+          setPlanSolution(null)
+          setSnapRefs(null)
           setResultError(translateError(err as ApiError))
         }
       }
@@ -343,32 +329,55 @@ export default function ResultsPage() {
     }
   }, [selectedPkgId])
 
-  // 数据版本(数据集 + 最新版本号)
+  // 快照来源展示: 仅按原快照引用解析名称, 不读当前最新。
+  // 名称缺失显示精确引用 id; 查询失败可见, 不静默吞错。
   useEffect(() => {
+    if (!snapRefs) {
+      setSnapSources(null)
+      return
+    }
     let cancelled = false
     const load = async () => {
       try {
+        const versions = await api.projects.versions(projectId)
+        const hit = versions.find((v) => v.id === snapRefs.project_version_id)
         const page = await api.datasets.list({ project_id: projectId, limit: 50 })
-        const rows = await Promise.all(
-          page.items.map(async (ds) => {
-            try {
-              const vs = await api.datasets.versions(projectId, ds.id)
-              return { name: ds.name, version_no: vs.length > 0 ? vs[vs.length - 1].version_no : 0 }
-            } catch {
-              return null
+        const matched = new Set<number>()
+        const shown: string[] = []
+        for (const ds of page.items) {
+          const vs = await api.datasets.versions(projectId, ds.id)
+          for (const v of vs) {
+            if (snapRefs.dataset_version_ids.includes(v.id) && !matched.has(v.id)) {
+              matched.add(v.id)
+              shown.push(`${ds.name} v${v.version_no}`)
             }
-          }),
-        )
-        if (!cancelled) setDataVersions(rows.filter((r): r is { name: string; version_no: number } => r !== null))
-      } catch {
-        // 数据版本为非必需信息,失败静默
+          }
+        }
+        // 未解析显示精确引用 id, 不造名称。
+        for (const id of snapRefs.dataset_version_ids) {
+          if (!matched.has(id)) shown.push(`id:${id}`)
+        }
+        if (cancelled) return
+        setSnapSources({
+          projectVersion: hit ? `v${hit.version_no}` : `id:${snapRefs.project_version_id}`,
+          datasets: shown,
+          error: null,
+        })
+      } catch (err) {
+        if (!cancelled) {
+          setSnapSources({
+            projectVersion: `id:${snapRefs.project_version_id}`,
+            datasets: snapRefs.dataset_version_ids.map((id) => `id:${id}`),
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
       }
     }
     void load()
     return () => {
       cancelled = true
     }
-  }, [projectId])
+  }, [projectId, snapRefs])
 
   // -------------------------------------------------------------------------
   // 派生数据
@@ -420,11 +429,15 @@ export default function ResultsPage() {
   const demandMetrics = useMemo(() => pickMetrics(metrics, [/demand/i]), [metrics])
   const relMetrics = useMemo(() => pickMetrics(metrics, [/^rel\.|sample/i]), [metrics])
 
-  const candidates = useMemo(() => extractCandidates(metrics), [metrics])
+  // 真实候选(后端候选列表 index 排序; 不按指标键反解)
+  const candidates = useMemo(
+    () => [...candList].sort((a, b) => a.index - b.index),
+    [candList],
+  )
 
   const selectedCandidate = useMemo(() => {
     if (!selectedCandidateId) return null
-    const idx = candidates.findIndex((c) => c.indexId === Number(selectedCandidateId))
+    const idx = candidates.findIndex((c) => c.index === Number(selectedCandidateId))
     return idx >= 0 ? candidates[idx] : null
   }, [selectedCandidateId, candidates])
 
@@ -448,17 +461,10 @@ export default function ResultsPage() {
     }
   }, [hourly, t])
 
-  const scatterPoints: ScatterPoint[] = useMemo(
-    () =>
-      candidates
-        .filter((c) => c.x !== null && c.y !== null)
-        .map((c) => ({ id: String(c.indexId), x: c.x as number, y: c.y as number, label: c.label })),
-    [candidates],
-  )
-
   // -------------------------------------------------------------------------
   // 动作
   // -------------------------------------------------------------------------
+  // 选择只记录采用(后端 select), 不创建版本、不写回参数; 实际应用未交付。
   const applyCandidate = useCallback(async () => {
     if (!selectedCandidate) return
     setApplyError(null)
@@ -468,8 +474,8 @@ export default function ResultsPage() {
       // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
       const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
       await api.results.select(projectId, entry?.task.id ?? 0, {
-        result_index_id: selectedCandidate.indexId,
-        reason: 'user-selected-pareto-candidate',
+        result_index_id: selectedCandidate.index,
+        reason: 'user-selected-candidate',
       })
       setApplyOk(true)
       setApplyOpen(false)
@@ -613,13 +619,19 @@ export default function ResultsPage() {
           {selectedEntry ? (
             <dl className="ies-kv">
               <dt>{t('ies.result.project_version')}</dt>
-              <dd>{currentVersion ? `v${currentVersion.version_no}` : '—'}</dd>
+              <dd>{snapSources ? snapSources.projectVersion : '—'}</dd>
               <dt>{t('ies.result.data_versions')}</dt>
               <dd>
-                {dataVersions.length > 0
-                  ? dataVersions.map((d) => `${d.name} v${d.version_no}`).join('、')
+                {snapSources && snapSources.datasets.length > 0
+                  ? snapSources.datasets.join('、')
                   : '—'}
               </dd>
+              {snapSources?.error ? (
+                <>
+                  <dt>{t('ies.result.source_error')}</dt>
+                  <dd>{snapSources.error}</dd>
+                </>
+              ) : null}
               <dt>{t('ies.result.calc_config')}</dt>
               <dd>
                 {snapshot ? `#${snapshot.id}` : '—'}
@@ -830,13 +842,13 @@ export default function ResultsPage() {
         </>
       ) : null}
 
-      {/* Pareto 候选方案 */}
+      {/* 候选方案(真实候选列表; 选择只记录采用, 不创建版本) */}
       <Card
-        title={t('ies.result.pareto_title')}
+        title={t('ies.result.candidates_title')}
         actions={
           candidates.length > 0 && selectedCandidate ? (
             <Button icon="check" onClick={() => setApplyOpen(true)}>
-              {t('ies.result.apply_candidate')}
+              {t('ies.result.select_candidate_btn')}
             </Button>
           ) : undefined
         }
@@ -845,79 +857,77 @@ export default function ResultsPage() {
         {candidates.length === 0 ? (
           <EmptyState
             icon="question"
-            title={t('ies.result.pareto_empty')}
+            title={t('ies.result.candidates_empty')}
             description={t('ies.result.select_candidate')}
           />
         ) : (
-          <div className="ies-grid ies-grid--cols-2">
-            <div className="ies-section">
-              {scatterPoints.length >= 2 ? (
-                <ScatterChart
-                  points={scatterPoints}
-                  ariaLabel={t('ies.result.pareto_title')}
-                  xLabel={t('ies.result.pareto_axis')}
-                  yLabel={t('ies.result.pareto_axis')}
-                  selectedId={selectedCandidateId}
-                  onSelect={(id) => setSelectedCandidateId(id)}
-                />
-              ) : (
-                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
-                  {t('ies.result.param_diff_empty')}
-                </p>
-              )}
-              <ul className="ies-cand-list" style={{ marginTop: 'var(--ies-space-3)' }}>
-                {candidates.map((c) => (
-                  <li
-                    key={c.indexId}
-                    className={`ies-cand-row ${
-                      selectedCandidateId === String(c.indexId) ? 'ies-cand-row--selected' : ''
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      className="ies-btn ies-btn--ghost ies-btn--sm"
-                      style={{ padding: 0, border: 0, background: 'transparent', minHeight: 0 }}
-                      onClick={() => setSelectedCandidateId(String(c.indexId))}
-                      aria-pressed={selectedCandidateId === String(c.indexId)}
-                    >
-                      {c.label}
-                    </button>
-                    <span className="ies-cand-row__vals">
-                      {c.x !== null ? `x ${formatNumber(c.x, { digits: 2 })}` : ''}
-                      {c.y !== null ? `y ${formatNumber(c.y, { digits: 2 })}` : ''}
-                      {c.x === null && c.y === null ? `#${c.indexId}` : ''}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            {/* 参数差异预览 */}
-            <div>
-              <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, marginBottom: 'var(--ies-space-2)' }}>
-                {t('ies.result.param_diff')}
-              </h3>
-              {selectedCandidate ? (
-                selectedCandidate.metrics.length > 0 ? (
-                  <MetricTable metrics={selectedCandidate.metrics} currency={currency} />
-                ) : (
-                  <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
-                    {t('ies.result.param_diff_empty')}
-                  </p>
-                )
-              ) : (
-                <EmptyState icon="info" title={t('ies.result.select_candidate')} />
-              )}
-            </div>
-          </div>
+          <ul className="ies-cand-list">
+            {candidates.map((c) => (
+              <li
+                key={c.index}
+                className={`ies-cand-row ${
+                  selectedCandidateId === String(c.index) ? 'ies-cand-row--selected' : ''
+                }`}
+              >
+                <button
+                  type="button"
+                  className="ies-btn ies-btn--ghost ies-btn--sm"
+                  style={{ padding: 0, border: 0, background: 'transparent', minHeight: 0 }}
+                  onClick={() => setSelectedCandidateId(String(c.index))}
+                  aria-pressed={selectedCandidateId === String(c.index)}
+                >
+                  #{c.index}
+                </button>
+              </li>
+            ))}
+          </ul>
         )}
       </Card>
 
-      {/* 应用成功提示 */}
+      {/* 规划解参数预览(封存解 × 冻结规划绑定; 无解不伪造候选) */}
+      <Card title={t('ies.result.plan_solution_title')} className="ies-section">
+        {planSolution ? (
+          <>
+            <Table>
+              <THead>
+                <TR>
+                  <TH>{t('ies.result.plan_solution_variable')}</TH>
+                  <TH>{t('ies.result.plan_solution_device')}</TH>
+                  <TH>{t('ies.result.plan_solution_parameter')}</TH>
+                  <TH>{t('ies.result.plan_solution_value')}</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {planSolution.params.map((p) => (
+                  <TR key={p.variable}>
+                    <TD>{p.variable}</TD>
+                    <TD>{p.device_ref}</TD>
+                    <TD>{p.parameter}</TD>
+                    <TD>{`${formatNumber(p.value, { digits: 4 })} ${p.unit}`}</TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
+              {t('ies.result.plan_solution_refs', {
+                solution: planSolution.solution_id,
+                task: planSolution.refs.task_id,
+                snapshot: planSolution.refs.calc_snapshot_id,
+                version: planSolution.refs.project_version_id,
+                evidence: planSolution.refs.evidence_package_id,
+              })}
+            </p>
+          </>
+        ) : (
+          <EmptyState icon="info" title={t('ies.result.plan_solution_empty')} />
+        )}
+      </Card>
+
+      {/* 选择成功提示(仅记录采用, 不创建版本; 实际应用未交付) */}
       {applyOk ? (
         <div className="ies-section">
           <Alert variant="success" closable onClose={() => setApplyOk(false)}>
-            {t('ies.result.apply_ok')}
+            {t('ies.result.select_ok')}
           </Alert>
         </div>
       ) : null}
@@ -1044,11 +1054,11 @@ export default function ResultsPage() {
         </Card>
       </div>
 
-      {/* 应用候选确认(创建新版本提示) */}
+      {/* 选择候选确认(仅记录采用, 不创建版本; 实际应用未交付) */}
       <Dialog
         open={applyOpen}
         onClose={() => setApplyOpen(false)}
-        title={t('ies.result.apply_candidate')}
+        title={t('ies.result.select_candidate_btn')}
         size="sm"
         footer={
           <>
@@ -1061,8 +1071,8 @@ export default function ResultsPage() {
           </>
         }
       >
-        <Alert variant="warning" title={t('ies.result.apply_confirm')}>
-          {selectedCandidate ? `#${selectedCandidate.indexId} · ${selectedCandidate.label}` : ''}
+        <Alert variant="warning" title={t('ies.result.select_candidate_confirm')}>
+          {selectedCandidate ? `#${selectedCandidate.index}` : ''}
         </Alert>
         {applyError ? (
           <div style={{ marginTop: 'var(--ies-space-3)' }}>

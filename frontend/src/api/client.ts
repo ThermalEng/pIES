@@ -43,6 +43,7 @@ import type {
   DeviceTypeSpec,
   Diagnostic,
   EnergyCarrier,
+  EvidenceCandidate,
   ExcelExportInput,
   FinancialAbsence,
   FinancialEvaluationBlock,
@@ -52,7 +53,9 @@ import type {
   MetricValue,
   PackageExportInput,
   PageResult,
+  PlanningSolution,
   Project,
+  SnapshotRefs,
   ProjectCreateInput,
   ProjectListParams,
   ProjectRole,
@@ -566,6 +569,102 @@ function projectVersionFromServer(v: unknown): ProjectVersion {
     currency: r.currency as ProjectVersion['currency'],
     schema_version: num('schema_version'),
     content_object_id: num('content_object_id'),
+  }
+}
+
+/**
+ * 证据候选列表严格解析(仅取选择所需的 index, 其余不消费)。
+ * 非数组或 index 非有限数直接抛错, 不猜测。
+ */
+function evidenceCandidatesFromServer(v: unknown): EvidenceCandidate[] {
+  if (v === null || v === undefined) return []
+  if (!Array.isArray(v)) throw new Error('invalid result candidates envelope')
+  return (v as unknown[]).map((item) => {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error('invalid result candidate')
+    }
+    const index = (item as Record<string, unknown>).index
+    if (typeof index !== 'number' || !Number.isFinite(index)) {
+      throw new Error('invalid result candidate')
+    }
+    return { index }
+  })
+}
+
+/**
+ * 规划解读取严格解析(单解身份见后端 SINGLE_SOLUTION_ID)。
+ * null 即无可用解(metrics-only/无解), 不伪造候选; 形态不符抛错。
+ */
+function planningSolutionFromServer(v: unknown): PlanningSolution | null {
+  if (v === null || v === undefined) return null
+  if (typeof v !== 'object' || Array.isArray(v)) throw new Error('invalid planning solution envelope')
+  const r = v as Record<string, unknown>
+  if (typeof r.solution_id !== 'number' || typeof r.single_solution !== 'boolean') {
+    throw new Error('invalid planning solution envelope')
+  }
+  if (!Array.isArray(r.params)) throw new Error('invalid planning solution envelope')
+  const params = (r.params as unknown[]).map((item) => {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error('invalid planning solution param')
+    }
+    const p = item as Record<string, unknown>
+    if (
+      typeof p.variable !== 'string' ||
+      typeof p.device_ref !== 'string' ||
+      typeof p.parameter !== 'string' ||
+      typeof p.value !== 'number' ||
+      typeof p.unit !== 'string'
+    ) {
+      throw new Error('invalid planning solution param')
+    }
+    return { variable: p.variable, device_ref: p.device_ref, parameter: p.parameter, value: p.value, unit: p.unit }
+  })
+  const refs = r.refs
+  if (refs === null || typeof refs !== 'object' || Array.isArray(refs)) {
+    throw new Error('invalid planning solution envelope')
+  }
+  const f = refs as Record<string, unknown>
+  const num = (key: string): number => {
+    const val = f[key]
+    if (typeof val !== 'number' || !Number.isFinite(val)) throw new Error('invalid planning solution envelope')
+    return val
+  }
+  const ids = f.dataset_version_ids
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'number')) {
+    throw new Error('invalid planning solution envelope')
+  }
+  return {
+    solution_id: r.solution_id,
+    single_solution: r.single_solution,
+    params,
+    refs: {
+      task_id: num('task_id'),
+      calc_snapshot_id: num('calc_snapshot_id'),
+      project_version_id: num('project_version_id'),
+      evidence_package_id: num('evidence_package_id'),
+      dataset_version_ids: ids as number[],
+    },
+  }
+}
+
+/**
+ * 原快照资源引用严格解析(无快照为 null; 形态不符抛错, 不读当前数据)。
+ */
+function snapshotRefsFromServer(v: unknown): SnapshotRefs | null {
+  if (v === null || v === undefined) return null
+  if (typeof v !== 'object' || Array.isArray(v)) throw new Error('invalid snapshot refs envelope')
+  const r = v as Record<string, unknown>
+  if (typeof r.snapshot_id !== 'number' || typeof r.project_version_id !== 'number') {
+    throw new Error('invalid snapshot refs envelope')
+  }
+  const ids = r.dataset_version_ids
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'number')) {
+    throw new Error('invalid snapshot refs envelope')
+  }
+  return {
+    snapshot_id: r.snapshot_id,
+    project_version_id: r.project_version_id,
+    dataset_version_ids: ids as number[],
   }
 }
 
@@ -1097,6 +1196,12 @@ export interface ResultsApi {
     evidence_package_id: number
     metrics: Record<string, MetricValue> | null
     diagnostics: Diagnostic[]
+    /** 真实候选列表(选择用 index; 空即无候选可供选择)。 */
+    candidates: EvidenceCandidate[]
+    /** 规划解读取(无可用解为 null, 不伪造候选)。 */
+    planningSolution: PlanningSolution | null
+    /** 原快照资源引用(历史来源展示唯一依据)。 */
+    snapshotRefs: SnapshotRefs | null
   }>
   assessments(projectId: number, taskId: number): Promise<ResultAssessment[]>
   /** 触发系统评估(FE-BE-03: 后端仅接受 assessment_type, 不支持人工评分输入) */
@@ -1550,6 +1655,12 @@ export const api = {
       financial: FinancialEvaluationBlock | null
       /** 缺块原因(有块为 null; 后端按可观察事实判定)。 */
       financialAbsence: FinancialAbsence
+      /** 真实候选列表(选择用 index)。 */
+      candidates: EvidenceCandidate[]
+      /** 规划解读取(无可用解为 null)。 */
+      planningSolution: PlanningSolution | null
+      /** 原快照资源引用。 */
+      snapshotRefs: SnapshotRefs | null
     }> {
       return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then((body) => {
         // 后端返回 {result: {evidence_status, evidence, metrics_summary, ...}}
@@ -1571,6 +1682,12 @@ export const api = {
           financial:
             status === 'no_evidence' || fin === null || fin === undefined ? null : fin,
           financialAbsence: fin ? null : (absence ?? null),
+          candidates:
+            status === 'no_evidence' ? [] : evidenceCandidatesFromServer(r.candidates),
+          planningSolution:
+            status === 'no_evidence' ? null : planningSolutionFromServer(r.planning_solution),
+          snapshotRefs:
+            status === 'no_evidence' ? null : snapshotRefsFromServer(r.snapshot_refs),
         }
       })
     },

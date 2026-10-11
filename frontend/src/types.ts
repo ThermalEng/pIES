@@ -795,6 +795,41 @@ export interface FinancialEvaluationBlock {
 /** 财务评价缺块原因(后端按可观察事实判定, 有块时为 null)。 */
 export type FinancialAbsence = 'outcome_not_normal' | 'solution_not_requested' | 'missing_unknown' | null
 
+/** 证据候选(真实候选列表项; 选择用 index, 不按指标键反解)。 */
+export interface EvidenceCandidate {
+  index: number
+}
+
+/** 原快照资源引用(历史来源展示唯一依据; 无快照为 null)。 */
+export interface SnapshotRefs {
+  snapshot_id: number
+  project_version_id: number
+  dataset_version_ids: number[]
+}
+
+/** 规划解参数(封存解变量 × 冻结规划绑定, 值/单位原样)。 */
+export interface PlanningSolutionParam {
+  variable: string
+  device_ref: string
+  parameter: string
+  value: number
+  unit: string
+}
+
+/** 规划解读取(单解身份见后端结果契约 SINGLE_SOLUTION_ID; 无解为 null)。 */
+export interface PlanningSolution {
+  solution_id: number
+  single_solution: boolean
+  params: PlanningSolutionParam[]
+  refs: {
+    task_id: number
+    calc_snapshot_id: number
+    project_version_id: number
+    evidence_package_id: number
+    dataset_version_ids: number[]
+  }
+}
+
 export type ReportType = 'excel' | 'pdf' | 'html'
 
 export type ReportStatus = 'generating' | 'ready' | 'failed'

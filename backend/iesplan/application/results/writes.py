@@ -23,7 +23,7 @@ metrics 状态模型; 不导入 ``models.*``。
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -43,6 +43,7 @@ from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.jsonutil import canonical_json
 from iesplan.identity.contracts import UserRecord
 from iesplan.results.contracts import (
+    SINGLE_SOLUTION_ID,
     EvidenceInvalidError,
     EvidencePackageRecord,
     EvidenceWriteDeniedError,
@@ -635,6 +636,146 @@ def select_result(
     return selection
 
 
+def _planning_params(
+    variables: list[dict[str, Any]],
+    frozen_names: Sequence[str],
+    bindings: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """封存解变量 × 同一快照冻结规划变量筛出规划解(纯函数)。
+
+    名单来自回执 planning.variables(冻结变量名), 绑定(device_ref /
+    parameter)来自同一快照冻结装配正文 planning.variables, 值与单位沿
+    封存解原样(不重算、不猜单位)。只收录名单内且有冻结绑定的变量;
+    同名多条以首次为准(同一事实); 条目形态非法 → 数据损坏错误(不静默
+    丢弃); 名单内变量缺冻结绑定 → 冻结事实不一致错误(不伪造绑定)。
+    """
+    names = set(frozen_names)
+    params: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in variables:
+        if not isinstance(item, dict):
+            raise AppError(
+                "封存解变量条目非法(数据损坏)",
+                code="SYS-STORE-004",
+                severity="error",
+                message_key="ies.diag.store.corrupt",
+            )
+        name = item.get("name")
+        if not isinstance(name, str) or name in seen:
+            if not isinstance(name, str):
+                raise AppError(
+                    "封存解变量缺少名称(数据损坏)",
+                    code="SYS-STORE-004",
+                    severity="error",
+                    message_key="ies.diag.store.corrupt",
+                )
+            continue
+        if name not in names:
+            continue
+        binding = bindings.get(name)
+        if not isinstance(binding, Mapping):
+            raise AppError(
+                f"冻结规划变量 {name!r} 缺少装配正文绑定(冻结不一致)",
+                code="SYS-STORE-004",
+                severity="error",
+                message_key="ies.diag.store.corrupt",
+            )
+        value = item.get("value")
+        unit = item.get("unit")
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not isinstance(unit, str)
+        ):
+            raise AppError(
+                f"封存解变量 {name!r} 值/单位非法(数据损坏)",
+                code="SYS-STORE-004",
+                severity="error",
+                message_key="ies.diag.store.corrupt",
+            )
+        device_ref = binding.get("device_ref")
+        parameter = binding.get("parameter")
+        if not isinstance(device_ref, str) or not isinstance(parameter, str):
+            raise AppError(
+                f"冻结规划变量 {name!r} 缺少实例绑定(冻结不一致)",
+                code="SYS-STORE-004",
+                severity="error",
+                message_key="ies.diag.store.corrupt",
+            )
+        seen.add(name)
+        params.append(
+            {
+                "variable": name,
+                "device_ref": device_ref,
+                "parameter": parameter,
+                "value": value,
+                "unit": unit,
+            }
+        )
+    return params
+
+
+def planning_solution(
+    db: Session, user: UserRecord, project_id: int, task_id: int
+) -> dict[str, Any] | None:
+    """任务规划解读取(只读): 封存解 × 同一快照冻结规划变量绑定。
+
+    变量名单来自同一快照回执 planning.variables, 绑定(device_ref /
+    parameter)来自同一快照冻结装配正文 planning.variables(装配闸门已
+    校验, 此处只读消费不重验)。返回 None 仅当无解可读(metrics-only、
+    无证据、快照缺失、冻结名单/正文缺失), 绝不伪造单解身份。变量名即
+    规划变量原名(生成器保留), 不按设备类型/显示名称/指标键猜测。只读,
+    不拥有事务。
+    """
+    ensure_access(db, user, project_id, "view")
+    task = ensure_task_belongs(db, project_id, task_id)
+    package = latest_evidence(db, task_id)
+    if package is None:
+        return None
+    content = results_domain.evidence_inner(evidence_content(db, package))
+    compute_result = content.get("compute_result")
+    outputs = compute_result.get("outputs") if isinstance(compute_result, dict) else None
+    solution = outputs.get("solution") if isinstance(outputs, dict) else None
+    variables = solution.get("variables") if isinstance(solution, dict) else None
+    if not isinstance(variables, list):
+        return None
+    snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
+    if snapshot is None:
+        return None
+    receipt = snapshot.assembly_receipt
+    planning = receipt.get("planning") if isinstance(receipt, Mapping) else None
+    frozen_names = planning.get("variables") if isinstance(planning, Mapping) else None
+    if not isinstance(frozen_names, (list, tuple)) or not all(
+        isinstance(name, str) for name in frozen_names
+    ):
+        return None
+    bindings: Mapping[str, Any] | None = None
+    if snapshot.canonical_assembly_text:
+        try:
+            doc = json.loads(snapshot.canonical_assembly_text)
+        except ValueError:
+            doc = None
+        if isinstance(doc, dict):
+            frozen_planning = doc.get("planning")
+            if isinstance(frozen_planning, dict):
+                maybe = frozen_planning.get("variables")
+                bindings = maybe if isinstance(maybe, dict) else None
+    if bindings is None:
+        return None
+    return {
+        "solution_id": SINGLE_SOLUTION_ID,
+        "single_solution": True,
+        "params": _planning_params(variables, frozen_names, bindings),
+        "refs": {
+            "task_id": task.id,
+            "calc_snapshot_id": task.calc_snapshot_id,
+            "project_version_id": snapshot.project_version_id,
+            "evidence_package_id": package.id,
+            "dataset_version_ids": list(snapshot.dataset_version_ids or []),
+        },
+    }
+
+
 def selection_diff(db: Session, project_id: int) -> dict[str, Any] | None:
     """当前选中结果的参数差异预览(补丁 + 校验值 + 来源信息)。
 
@@ -808,6 +949,9 @@ def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) ->
     package = latest_evidence(db, task_id)
     assessment = latest_assessment(db, package.id) if package is not None else None
     selection = current_selection(db, project_id)
+    snapshot_row = (
+        tasks_domain.get_snapshot(db, task.calc_snapshot_id) if task.calc_snapshot_id else None
+    )
     content: dict[str, Any] = {}
     if package is not None:
         content = evidence_content(db, package)
@@ -848,6 +992,18 @@ def result_view(db: Session, user: UserRecord, project_id: int, task_id: int) ->
         # 证据内容中的候选解列表(方案评价单解 / 规划候选列表, 含 IRR/NPV)
         "candidates": (
             content.get("candidates") if content and isinstance(content.get("candidates"), list) else None
+        ),
+        # 规划解读取(封存解 × 同一快照冻结规划绑定; 无解可读即 None, 不伪造)。
+        "planning_solution": planning_solution(db, user, project_id, task_id),
+        # 原快照资源引用(历史来源展示唯一依据; 无快照即 None, 不读当前数据)。
+        "snapshot_refs": (
+            {
+                "snapshot_id": snapshot_row.id,
+                "project_version_id": snapshot_row.project_version_id,
+                "dataset_version_ids": list(snapshot_row.dataset_version_ids or []),
+            }
+            if snapshot_row is not None
+            else None
         ),
         "best": content.get("best") if content else None,
         "plan_summary": content.get("summary") if content else None,
