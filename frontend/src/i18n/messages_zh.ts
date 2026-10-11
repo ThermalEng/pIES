@@ -594,6 +594,8 @@ export const messagesZh: Record<string, string> = {
   'ies.result.apply_scheme_impact': '将以任务快照的来源版本 {version} 为基线写入下列参数并派生新版本；当前工作状态将被替换，计算后新增的编辑不带入；历史版本与证据保持不变。确定应用？',
   'ies.result.apply_scheme_ok': '已应用方案，新版本 {version} 为当前版本',
   'ies.result.apply_scheme_refresh_failed': '应用已成功，但摘要刷新失败：{reason}（请手动刷新，不要重复应用）',
+  'ies.result.apply_scheme_revision': '确认基线：当前草稿修订 r{revision}；确认后草稿若被更新，应用将被拒绝而不覆盖新编辑',
+  'ies.result.apply_scheme_revision_unavailable': '无法读取当前草稿修订号，不能确认应用；请刷新页面后重试',
   'ies.result.plan_solution_variable': '规划变量',
   'ies.result.plan_solution_device': '设备实例',
   'ies.result.plan_solution_parameter': '参数',

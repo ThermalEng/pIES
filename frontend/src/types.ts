@@ -241,10 +241,12 @@ export interface VersionRestoreResult {
   draftRevision: number
 }
 
-/** 应用方案输入(任务引用 + 解标识; 参数与基线由服务端权威解析)。 */
+/** 应用方案输入(任务引用 + 解标识 + 确认时草稿修订; 参数与基线由服务端权威解析)。 */
 export interface ApplySchemeInput {
   task_id: number
   solution_id: number
+  /** 打开确认框时捕获的当前草稿修订; 发送前不重读, 不符服务端 409。 */
+  expected_revision: number
 }
 
 /** 应用方案结果(与后端 apply-result 响应 {version, draft} 对应)。 */

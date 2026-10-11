@@ -1054,7 +1054,8 @@ export interface ProjectsApi {
   restoreVersion(projectId: number, versionId: number): Promise<VersionRestoreResult>
   /**
    * 应用方案: 与后端 POST .../apply-result 对应。
-   * 只发送任务引用与解标识; 参数与来源基线由服务端权威解析, 不发送补丁。
+   * 只发送任务引用、解标识与确认时草稿修订; 参数与来源基线由服务端权威解析,
+   * 不发送补丁。修订不符服务端 409, 不创建版本。
    * 响应唯一 {version, draft}, draft 仅取 id/revision。
    */
   applyScheme(projectId: number, input: ApplySchemeInput): Promise<ApplySchemeResult>
@@ -1321,10 +1322,10 @@ export const api = {
       })
     },
     applyScheme(projectId: number, input: ApplySchemeInput): Promise<ApplySchemeResult> {
-      // 唯一 {version, draft} 契约; 只发送引用, draft 仅取刷新所需的 id/revision。可信交换直接映射。
+      // 唯一 {version, draft} 契约; 只发送引用与确认时修订, draft 仅取刷新所需的 id/revision。可信交换直接映射。
       return request<unknown>(`/projects/${projectId}/apply-result`, {
         method: 'POST',
-        body: { task_id: input.task_id, solution_id: input.solution_id },
+        body: { task_id: input.task_id, solution_id: input.solution_id, expected_revision: input.expected_revision },
       }).then((body) => {
         const rec = asRecord(body)
         const d = rec.draft as { id: number; revision: number }

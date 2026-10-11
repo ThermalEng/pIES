@@ -12,7 +12,7 @@
 - GET    /api/projects/{id}/versions           版本列表
 - GET    /api/projects/{id}/versions/{vid}     版本详情
 - POST   /api/projects/{id}/versions/{vid}/restore   恢复版本(新版本+新草稿)
-- POST   /api/projects/{id}/apply-result       应用选定结果(参数差异补丁→新草稿+新版本)
+- POST   /api/projects/{id}/apply-result       应用方案(任务引用+解标识+确认时修订→来源版本基线派生新版本)
 - POST   /api/projects/{id}/archive|unarchive  归档/撤销归档
 - DELETE /api/projects/{id}                    删除(须 confirm: true)
 """

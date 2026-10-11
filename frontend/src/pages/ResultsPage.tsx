@@ -220,7 +220,12 @@ export default function ResultsPage() {
   const [schemeError, setSchemeError] = useState<string | null>(null)
   const [schemeOk, setSchemeOk] = useState<string | null>(null)
   const [schemeRefreshError, setSchemeRefreshError] = useState<string | null>(null)
-  // 切换证据包的迟到应用响应不发布状态。
+  // 确认时捕获的当前草稿修订(打开确认框时取值, 发送前不重读最新)。
+  const [schemeRevision, setSchemeRevision] = useState<number | null>(null)
+  const [schemeRevisionError, setSchemeRevisionError] = useState<string | null>(null)
+  // 写请求飞行令牌: 旧回调不修改新操作状态, 完成只解除所属飞行。
+  const schemeFlight = useRef(0)
+  // 切换证据包的迟到读响应不发布状态(读取消机制, 不用于写请求)。
   const selectedPkgRef = useRef<number | null>(null)
   selectedPkgRef.current = selectedPkgId
 
@@ -298,7 +303,8 @@ export default function ResultsPage() {
       return
     }
     // 切换即清理旧结果与选择/确认状态: 加载中不提供选择/确认,
-    // 迟到响应沿取消机制丢弃, 不覆盖新选中。
+    // 迟到响应沿取消机制丢弃, 不覆盖新选中。应用写请求飞行中证据选择被禁用,
+    // 此处不解除 schemeBusy(完成只由所属飞行解除)。
     setMetrics(null)
     setFinEval(null)
     setFinAbsence(null)
@@ -316,10 +322,11 @@ export default function ResultsPage() {
     setApplyOk(false)
     setApplyError(null)
     setSchemeOpen(false)
-    setSchemeBusy(false)
     setSchemeError(null)
     setSchemeOk(null)
     setSchemeRefreshError(null)
+    setSchemeRevision(null)
+    setSchemeRevisionError(null)
     let cancelled = false
     const load = async () => {
       // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
@@ -527,25 +534,34 @@ export default function ResultsPage() {
     }
   }, [projectId, selectedCandidate])
 
-  // 应用方案(规划解预览 → 来源版本基线派生新版本; 只发送任务引用与解标识,
-  // 参数与基线由服务端权威解析)。明确确认后才请求, 取消不变更; 处理中避免
-  // 重复; 成功与刷新失败分开报告, 不重复应用; 切换后迟到响应不发布状态。
+  // 应用方案(规划解预览 → 来源版本基线派生新版本; 只发送任务引用、解标识与
+  // 确认时草稿修订, 参数与基线由服务端权威解析)。明确确认后才请求, 取消不
+  // 变更; 处理中禁用证据选择与对话框关闭/取消, 避免重复; 服务端成功后刷新
+  // 始终处理, 页面展示过期才按所属关系处理; 成功与刷新失败分开报告, 不重复应用。
   const confirmScheme = useCallback(async () => {
     if (!planSolution || schemeBusy) return
+    // 确认时修订缺失: 不伪造、不发送, 可见报错。
+    if (schemeRevision === null) {
+      setSchemeRevisionError(t('ies.result.apply_scheme_revision_unavailable'))
+      return
+    }
     const pkgAtConfirm = selectedPkgId
+    const flight = schemeFlight.current + 1
+    schemeFlight.current = flight
     setSchemeError(null)
     setSchemeOk(null)
     setSchemeRefreshError(null)
     setSchemeBusy(true)
     try {
       const entry = entries.find((e) => e.pkg.package_id === pkgAtConfirm)
+      // 发送打开确认框时捕获的修订; 发送前不重读最新, 否则绕过冲突检测。
       const applied = await api.projects.applyScheme(projectId, {
         task_id: entry?.task.id ?? 0,
         solution_id: planSolution.solution_id,
+        expected_revision: schemeRevision,
       })
-      if (selectedPkgRef.current !== pkgAtConfirm) return
       const refreshed = await refreshDetailed()
-      if (selectedPkgRef.current !== pkgAtConfirm) return
+      if (schemeFlight.current !== flight || selectedPkgRef.current !== pkgAtConfirm) return
       const errors = [refreshed.projectError, refreshed.versionsError].filter(
         (m): m is string => m !== null,
       )
@@ -553,12 +569,12 @@ export default function ResultsPage() {
       setSchemeRefreshError(errors.length > 0 ? errors.join('\n') : null)
       setSchemeOpen(false)
     } catch (err) {
-      if (selectedPkgRef.current !== pkgAtConfirm) return
+      if (schemeFlight.current !== flight || selectedPkgRef.current !== pkgAtConfirm) return
       setSchemeError(translateError(err as ApiError))
     } finally {
-      setSchemeBusy(false)
+      if (schemeFlight.current === flight) setSchemeBusy(false)
     }
-  }, [projectId, planSolution, schemeBusy, selectedPkgId, entries, refreshDetailed])
+  }, [projectId, planSolution, schemeBusy, schemeRevision, selectedPkgId, entries, refreshDetailed, t])
 
   const submitAssessment = useCallback(async () => {
     if (!selectedPkgId) return
@@ -678,6 +694,7 @@ export default function ResultsPage() {
               <Select
                 aria-label={t('ies.result.evidence_status')}
                 value={selectedPkgId ?? ''}
+                disabled={schemeBusy}
                 onChange={(e) => setSelectedPkgId(Number(e.target.value))}
                 style={{ maxWidth: 260 }}
               >
@@ -974,6 +991,12 @@ export default function ResultsPage() {
                 setSchemeError(null)
                 setSchemeOk(null)
                 setSchemeRefreshError(null)
+                // 确认时点捕获当前草稿修订; 读不到则可见报错且不允许确认, 不伪造。
+                const rev = project?.draft?.revision ?? null
+                setSchemeRevision(rev)
+                setSchemeRevisionError(
+                  rev === null ? t('ies.result.apply_scheme_revision_unavailable') : null,
+                )
                 setSchemeOpen(true)
               }}
             >
@@ -1192,18 +1215,29 @@ export default function ResultsPage() {
         ) : null}
       </Dialog>
 
-      {/* 应用方案确认(来源版本基线派生新版本; 服务端权威解析, 取消不请求) */}
+      {/* 应用方案确认(来源版本基线派生新版本; 服务端权威解析, 取消不请求;
+          写请求飞行中禁用关闭/取消, 证据选择同时禁用) */}
       <Dialog
         open={schemeOpen}
-        onClose={() => setSchemeOpen(false)}
+        onClose={() => {
+          if (!schemeBusy) setSchemeOpen(false)
+        }}
         title={t('ies.result.apply_scheme_title')}
         size="md"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setSchemeOpen(false)}>
+            <Button
+              variant="secondary"
+              disabled={schemeBusy}
+              onClick={() => setSchemeOpen(false)}
+            >
               {t('ies.common.cancel')}
             </Button>
-            <Button loading={schemeBusy} onClick={() => void confirmScheme()}>
+            <Button
+              loading={schemeBusy}
+              disabled={schemeRevision === null}
+              onClick={() => void confirmScheme()}
+            >
               {t('ies.common.confirm')}
             </Button>
           </>
@@ -1215,6 +1249,14 @@ export default function ResultsPage() {
               {t('ies.result.apply_scheme_source')}:{' '}
               {snapSources?.projectVersion ?? `id:${planSolution.refs.project_version_id}`}
             </p>
+            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
+              {t('ies.result.apply_scheme_revision', { revision: schemeRevision ?? '—' })}
+            </p>
+            {schemeRevisionError ? (
+              <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                <Alert variant="error">{schemeRevisionError}</Alert>
+              </div>
+            ) : null}
             <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
               {t('ies.result.plan_solution_refs', {
                 solution: planSolution.solution_id,
