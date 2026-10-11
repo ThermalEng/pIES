@@ -94,6 +94,27 @@ def get_proposal(db: Session, proposal_id: int) -> ImportProposalRecord | None:
     return _row_to_proposal(row) if row is not None else None
 
 
+def claim_proposal_for_confirm(db: Session, proposal_id: int) -> ImportProposalRecord | None:
+    """确认领取: 原子抢占未确认提案的行锁, 持有到调用方事务提交/回滚。
+
+    UPDATE ... WHERE status 仍可确认: 首个提交者抢到行锁并继续确认;
+    等候者在行锁上阻塞到前者提交/回滚 — 前者提交且已应用则本次返回 None
+    (调用方重读最新 applied 并重放同一项目), 前者回滚则等候者抢到锁并
+    继续确认。无实质列变更, 只为串行化同一提案的确认; 不新增锁表/状态。
+    """
+    result = db.execute(
+        sa.update(ImportProposal)
+        .where(
+            ImportProposal.id == proposal_id,
+            ImportProposal.status.in_(["proposed", "validated", "approved"]),
+        )
+        .values(status=ImportProposal.status)
+    )
+    if result.rowcount != 1:
+        return None
+    return get_proposal(db, proposal_id)
+
+
 def list_proposals(db: Session, project_id: int) -> list[ImportProposalRecord]:
     """列出项目的导入提案（id 升序）。"""
     rows = (

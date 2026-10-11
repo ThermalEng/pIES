@@ -34,6 +34,7 @@ from iesplan.package.transfers import (
     verify_download_token,
 )
 
+claim_proposal_for_confirm = persistence.claim_proposal_for_confirm
 create_proposal = persistence.create_proposal
 get_proposal = persistence.get_proposal
 list_proposals = persistence.list_proposals
@@ -58,6 +59,7 @@ __all__ = [
     "PackageSizeError",
     "DownloadTokenError",
     "bound_dataset_ids",
+    "claim_proposal_for_confirm",
     "create_download_token",
     "media_file_kind",
     "create_proposal",

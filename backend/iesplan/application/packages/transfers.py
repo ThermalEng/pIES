@@ -66,6 +66,7 @@ from iesplan.package import (
 from iesplan.package import (
     bound_dataset_ids as _bound_dataset_ids,
 )
+from iesplan.package import claim_proposal_for_confirm as _claim_proposal_for_confirm
 from iesplan.package import create_proposal as _create_proposal
 from iesplan.package import get_proposal as _get_proposal
 from iesplan.package import list_proposals_for_proposer as _list_proposals_for_proposer
@@ -907,7 +908,7 @@ def import_proposal(
         ref_entity_type="import_proposals",
         purpose="proposal_source",
     )
-    for path, obj in sorted(staged.items()):
+    for _path, obj in sorted(staged.items()):
         add_ref(
             db,
             obj.id,
@@ -1014,8 +1015,16 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
 
     导入约束: 不得静默覆盖(名称去重 + 新项目身份); 账号/权限/会话不随包导入;
     导入者成为新项目所有者; 原授权关系不迁移。确认重放返回同一已应用项目。
+    同一提案的并发确认经提案行锁串行化, 等候者返回同一项目。
     """
-    proposal = _get_proposal(db, proposal_id)
+    # 确认领取(同一提案串行化): 原子抢占行锁, 持有到本事务提交/回滚。
+    # 未抢到说明行已被他方确认, 重读最新状态并按状态机处理。
+    proposal = _claim_proposal_for_confirm(db, proposal_id)
+    if proposal is None:
+        # 丢弃本事务内可能已读的旧快照, 等候者必须看到最新 applied, 不得
+        # 沿用身份缓存中的旧 proposed。
+        db.expire_all()
+        proposal = _get_proposal(db, proposal_id)
     if proposal is None:
         raise NotFoundError(
             "导入提案不存在",
@@ -1041,32 +1050,27 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         raise ConflictError(
             "导入提案状态不允许确认", params={"proposal_id": proposal_id, "status": proposal.status}
         )
-    if proposal.project_id is not None:
-        raise ConflictError(
-            "导入提案已有项目关联, 状态不一致",
-            params={"proposal_id": proposal_id, "status": proposal.status},
-        )
-
     # 取分区提交内容: 消费提案阶段已接受的源包与暂存(解码读取, 不重新
-    # 跑上传边界的完整性/语义校验; 结构缺失则 loudly 拒绝)。
+    # 跑上传边界的完整性/语义校验; 结构缺失则 loudly 拒绝)。快照各必备键
+    # 由上传边界写入, 此处直接读取, 不做静默默认、不重新 from_dict 校验。
     summary = proposal.review_summary or {}
     source_object_id = (summary.get("staging") or {}).get("source_object_id")
     file_bytes = get_object(db, int(source_object_id))
     manifest, entries = _read_staged_package(file_bytes)
     # 确认时创建新项目身份(每次导入新身份, 导入者成为所有者; 名称按快照去重)。
-    snapshot = summary.get("project_snapshot") or {}
-    snap_baseline = snapshot.get("project_baseline") or {}
+    snapshot = summary["project_snapshot"]
+    snap_baseline = snapshot["project_baseline"]
     project = project_domain.create_project(
         db,
-        name=_unique_project_name(db, str(snapshot.get("name") or "导入项目")),
+        name=_unique_project_name(db, snapshot["name"]),
         owner_id=user.id,
         created_by=user.id,
         description=snapshot.get("description"),
-        currency=snapshot.get("currency") or "CNY",
-        baseline_resolution=snap_baseline.get("resolution") or "1h",
-        baseline_start_year=snap_baseline.get("start_year") or 2026,
-        baseline_scenario_mode=snap_baseline.get("scenario_mode") or "single",
-        schema_version=int(snapshot.get("schema_version", 1) or 1),
+        currency=snapshot["currency"],
+        baseline_resolution=snap_baseline["resolution"],
+        baseline_start_year=snap_baseline["start_year"],
+        baseline_scenario_mode=snap_baseline["scenario_mode"],
+        schema_version=snapshot["schema_version"],
     )
     # 提案阶段暂存的对象 id 按包内路径索引(确认阶段不再按摘要查找对象)
     staged_by_path = {

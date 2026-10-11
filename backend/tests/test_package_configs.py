@@ -1195,6 +1195,7 @@ def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, 
     晚阶段失败不留半成品项目(导入者列表仍为空); 解除注入后同一提案可重
     确认成功且值正确。外部 Blob 字节不在 DB 原子断言内。
     """
+    import iesplan.configuration as configuration_domain
     import iesplan.project as project_domain
     import iesplan.storage as storage_domain
 
@@ -1222,7 +1223,11 @@ def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, 
 
     ref_count_before = len(_content_refs())
 
+    # 注入点记录本次已创建的新项目 id(创建先于版本重建), 用于实质回滚断言。
+    recorded: dict = {}
+
     def _boom(*args, **kwargs):
+        recorded["project_id"] = kwargs["project_id"]
         raise RuntimeError("injected late confirm failure")
 
     with monkeypatch.context() as m:
@@ -1233,7 +1238,13 @@ def test_confirm_failure_rolls_back_all_writes(client: TestClient, db: Session, 
     # 新增引用随确认写入一同回滚(历史 Effective 内容引用不残留)。
     assert len(_content_refs()) == ref_count_before
 
-    # 晚阶段失败不留半成品项目: 导入者项目列表仍为空, 提案未应用。
+    # 实质回滚断言(公开领域读口 + 注入点记录的新项目 id, 不直接跨域 ORM):
+    # 中途创建的项目行与其配置行均已消失, 不只列表无新增。
+    new_pid = recorded["project_id"]
+    assert project_domain.get_project(db, new_pid) is None
+    assert configuration_domain.get_current_overrides(db, new_pid) is None
+    assert configuration_domain.get_current_effective(db, new_pid) is None
+    assert configuration_domain.get_current_planning(db, new_pid) is None
     listed = client.get("/api/projects", headers=_h(client, importer)).json()["projects"]
     assert listed == []
 
