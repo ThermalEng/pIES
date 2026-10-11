@@ -455,6 +455,9 @@ def _planning_payload_with_bound(upper_bound: str) -> dict:
 
 
 def _put_overrides(client: TestClient, user, pid: int, profile: FinanceProfile, price: str, expected_revision) -> None:
+    if expected_revision is None:
+        current = client.get(f"/api/projects/{pid}/finance-overrides", headers=_h(client, user)).json()
+        expected_revision = current["revision"]
     overrides = FinanceOverrides.from_dict(_overrides_payload_with_price(profile, price), profile=profile)
     resp = client.put(
         f"/api/projects/{pid}/finance-overrides",
@@ -754,6 +757,242 @@ def test_import_rejects_version_without_mapped_deps(client: TestClient, db: Sess
     assert resp.status_code == 400, resp.text
     reasons = resp.json()["error"]["params"]["reasons"]
     assert any("0001" in r for r in reasons)
+
+
+PROFILE_B_PAYLOAD: dict = {
+    **PROFILE_PAYLOAD,
+    "profile": {
+        **PROFILE_PAYLOAD["profile"],
+        "id": "cn-east-demo",
+        "region": "CN-East",
+    },
+}
+
+
+def _register_profile(client: TestClient, user, payload: dict) -> None:
+    resp = client.post("/api/finance-profiles", json={"finance_profile": payload}, headers=_h(client, user))
+    assert resp.status_code == 200, resp.text
+
+
+def _set_profile(client: TestClient, user, pid: int, profile_id: str) -> None:
+    resp = client.put(
+        f"/api/projects/{pid}/finance-profile",
+        json={"profile_ref": {"id": profile_id}},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def _isolated_target(tmp_path_factory):
+    """第二套隔离应用/DB(空注册表), 同一 Docker 测试环境内。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    eng = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(eng)
+    settings.data_dir = tmp_path_factory.mktemp("target")
+    factory = sessionmaker(bind=eng, autoflush=False, expire_on_commit=False)
+    session = factory()
+    app = create_app()
+    app.include_router(projects_api.router)
+    app.include_router(config_api.router)
+    app.include_router(config_api.profile_router)
+    app.include_router(exports_api.router)
+
+    def _override_request_db2():
+        yield session
+
+    app.dependency_overrides[get_request_db] = _override_request_db2
+    return TestClient(app, raise_server_exceptions=False), session, eng
+
+
+def test_imported_history_resolves_distinct_profiles_cross_db(
+    client: TestClient, db: Session, tmp_path_factory
+) -> None:
+    """跨库往返: 历史与当前引用不同 Profile, 目标空注册表也能成功并各取原值。"""
+    owner = make_user(db, "xdb_owner")
+    pid = _create_project(client, owner)
+    _register_profile(client, owner, PROFILE_PAYLOAD)
+    _set_profile(client, owner, pid, "cn-north-demo")
+    profile_a = FinanceProfile.from_dict(PROFILE_PAYLOAD)
+    _put_overrides(client, owner, pid, profile_a, "0.75", 1)
+    _save_planning(client, owner, pid)
+    _create_hist_version(client, owner, pid, "xdb-a")
+    _register_profile(client, owner, PROFILE_B_PAYLOAD)
+    _set_profile(client, owner, pid, "cn-east-demo")
+    profile_b = FinanceProfile.from_dict(PROFILE_B_PAYLOAD)
+    _put_overrides(client, owner, pid, profile_b, "0.95", None)
+    _put_planning(client, owner, pid, _planning_payload_with_bound("2000"), None)
+    _create_hist_version(client, owner, pid, "xdb-b")
+
+    zip_bytes = _export_zip(client, owner, pid)
+
+    prev_data_dir = settings.data_dir
+    client2, db2, eng2 = _isolated_target(tmp_path_factory)
+    try:
+        importer = make_user(db2, "xdb_importer")
+        resp = client2.post(
+            "/api/projects/import",
+            files={"file": ("pkg.zip", zip_bytes, "application/zip")},
+            headers=_h(client2, importer),
+        )
+        assert resp.status_code == 201, resp.text
+        prop_id = resp.json()["proposal"]["id"]
+        resp = client2.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client2, importer))
+        assert resp.status_code == 201, resp.text
+        new_pid = resp.json()["project"]["id"]
+
+        listed = client2.get(f"/api/projects/{new_pid}/versions", headers=_h(client2, importer)).json()["versions"]
+        assert len(listed) == 2
+        by_name = {v["name"]: v for v in listed}
+        resp = client2.post(
+            f"/api/projects/{new_pid}/versions/{by_name['xdb-a']['id']}/restore",
+            headers=_h(client2, importer),
+        )
+        assert resp.status_code == 200, resp.text
+        eff = client2.get(f"/api/projects/{new_pid}/effective-finance", headers=_h(client2, importer)).json()
+        assert eff["effective_finance_config"]["profile_id"] == "cn-north-demo"
+        ovr = client2.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client2, importer)).json()
+        assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.75"
+        resp = client2.post(
+            f"/api/projects/{new_pid}/versions/{by_name['xdb-b']['id']}/restore",
+            headers=_h(client2, importer),
+        )
+        assert resp.status_code == 200, resp.text
+        eff = client2.get(f"/api/projects/{new_pid}/effective-finance", headers=_h(client2, importer)).json()
+        assert eff["effective_finance_config"]["profile_id"] == "cn-east-demo"
+        ovr = client2.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client2, importer)).json()
+        assert ovr["finance_overrides"]["energy_prices"]["grid_import"]["value"]["value"] == "0.95"
+    finally:
+        settings.data_dir = prev_data_dir
+        eng2.dispose()
+
+
+def test_import_refuses_conflicting_profile_identity(
+    client: TestClient, db: Session, tmp_path_factory
+) -> None:
+    """目标库同稳定 id 已有不同内容 → 确认 400 身份冲突, 不偷偷沿用。"""
+    owner = make_user(db, "conf_owner")
+    pid = _create_project(client, owner)
+    profile, _, _ = _setup_finance(client, owner, pid)
+    _save_planning(client, owner, pid)
+    _create_hist_version(client, owner, pid, "conf-a")
+    zip_bytes = _export_zip(client, owner, pid)
+
+    prev_data_dir = settings.data_dir
+    client2, db2, eng2 = _isolated_target(tmp_path_factory)
+    try:
+        importer = make_user(db2, "conf_importer")
+        other = dict(PROFILE_PAYLOAD)
+        other = {**other, "profile": {**other["profile"], "region": "CN-Conflict"}}
+        _register_profile(client2, importer, other)
+        resp = client2.post(
+            "/api/projects/import",
+            files={"file": ("pkg.zip", zip_bytes, "application/zip")},
+            headers=_h(client2, importer),
+        )
+        assert resp.status_code == 201, resp.text
+        prop_id = resp.json()["proposal"]["id"]
+        resp = client2.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client2, importer))
+        assert resp.status_code == 400, resp.text
+        reasons = resp.json()["error"]["params"]["reasons"]
+        assert any("身份冲突" in r for r in reasons)
+    finally:
+        settings.data_dir = prev_data_dir
+        eng2.dispose()
+
+
+def _rezip_mutate(zip_bytes: bytes, mutations: dict[str, bytes]) -> bytes:
+    """替换包内条目并同步对象清单大小(非法输入变异用, 保持包体自洽)。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zin, zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            raw = mutations.get(info.filename, zin.read(info.filename))
+            if info.filename == "manifest.json":
+                doc = json.loads(raw.decode("utf-8"))
+                for entry in doc.get("objects", []):
+                    if entry.get("path") in mutations:
+                        entry["size_bytes"] = len(mutations[entry["path"]])
+                raw = json.dumps(doc, ensure_ascii=False).encode()
+            zout.writestr(info.filename, raw)
+    return buf.getvalue()
+
+
+def test_import_rejects_illegal_history_overrides(client: TestClient, db: Session) -> None:
+    """历史 Overrides 非法字头 → 上传 400, reasons 指明版本与原因。"""
+    owner = make_user(db, "ill_owner")
+    importer = make_user(db, "ill_importer")
+    pid = _create_project(client, owner)
+    profile, _, _ = _setup_finance(client, owner, pid)
+    _save_planning(client, owner, pid)
+    _create_hist_version(client, owner, pid, "ill-a")
+    zip_bytes = _export_zip(client, owner, pid)
+    bad = _rezip_mutate(zip_bytes, {
+        "version_configs/0001/finance_overrides.yaml": b"not: [valid yaml",
+    })
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", bad, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert any("0001" in r for r in reasons)
+
+
+def test_import_rejects_mismatched_history_baseline(client: TestClient, db: Session) -> None:
+    """历史版本基线与项目基线不一致 → 上传 400, 不等确认才暴露。"""
+    owner = make_user(db, "base_owner")
+    importer = make_user(db, "base_importer")
+    pid = _create_project(client, owner)
+    profile, _, _ = _setup_finance(client, owner, pid)
+    _save_planning(client, owner, pid)
+    _create_hist_version(client, owner, pid, "base-a")
+    zip_bytes = _export_zip(client, owner, pid)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        doc = json.loads(zf.read("versions/0001.json").decode("utf-8"))
+    doc["version"]["project_baseline"]["start_year"] = 2099
+    bad = _rezip_mutate(zip_bytes, {
+        "versions/0001.json": json.dumps(doc, ensure_ascii=False).encode(),
+    })
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", bad, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert any("基线" in r for r in reasons)
+
+
+def test_confirm_does_not_rerun_upload_gate(client: TestClient, db: Session, monkeypatch) -> None:
+    """确认消费已接受提案, 不再调用上传边界完整校验(窄回归)。"""
+    import iesplan.application.packages.transfers as pkg_app
+
+    owner = make_user(db, "gate_owner")
+    importer = make_user(db, "gate_importer")
+    pid = _create_project(client, owner)
+    _create_hist_version(client, owner, pid, "gate-a")
+    zip_bytes = _export_zip(client, owner, pid)
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", zip_bytes, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 201, resp.text
+    prop_id = resp.json()["proposal"]["id"]
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("confirm must not rerun upload gate")
+
+    monkeypatch.setattr(pkg_app, "_parse_package", _boom)
+    resp = client.post(f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer))
+    assert resp.status_code == 201, resp.text
 
 
 def test_unconfirmed_proposal_project_lifecycle(client: TestClient, db: Session) -> None:
