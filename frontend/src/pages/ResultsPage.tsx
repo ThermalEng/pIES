@@ -10,7 +10,8 @@
  * - 环境:运行碳排放 / 排放边界 / 因子版本。
  * - 工程:能源平衡表(电/热/冷)、设备容量、逐时曲线(SVG 折线)、峰值、购售电、需量。
  * - 候选方案:真实候选列表(#index),选择只记录采用,不创建版本;
- *   规划解参数预览(封存解 × 冻结规划绑定);实际应用方案未交付。
+ *   规划解参数预览(封存解 × 冻结规划绑定);应用方案以后者为权威,
+ *   在来源版本工作状态上写回并派生新版本(切换为当前)。
  * - 来源:仅按原快照引用展示项目版本与数据集,不读当前最新。
  * - 评估历史(不可变列表)与重新评估按钮。
  * - 导出:Excel 按钮(选择语言 zh/en)、完整项目包按钮(仅所有者可见)。
@@ -19,7 +20,7 @@
  * 分组按常用前缀(fin./env./eng./rel./energy 等)与常见关键词匹配,缺失时优雅降级。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api, downloadBlob } from '../api/client'
@@ -168,7 +169,7 @@ function inferIrrStatusKey(diagnostics: Diagnostic[]): IrrStatusKey | null {
 
 export default function ResultsPage() {
   const { t, locale } = useI18n()
-  const { projectId, project } = useWorkbench()
+  const { projectId, project, refreshDetailed } = useWorkbench()
   const currency: Currency = project?.currency ?? 'CNY'
 
   // URL ?package= 直达参数(仅首次读取,避免轮询重载)
@@ -212,6 +213,16 @@ export default function ResultsPage() {
   const [applying, setApplying] = useState(false)
   const [applyError, setApplyError] = useState<string | null>(null)
   const [applyOk, setApplyOk] = useState(false)
+
+  // 方案应用(规划解预览 → 来源版本基线派生新版本; 服务端权威解析)
+  const [schemeOpen, setSchemeOpen] = useState(false)
+  const [schemeBusy, setSchemeBusy] = useState(false)
+  const [schemeError, setSchemeError] = useState<string | null>(null)
+  const [schemeOk, setSchemeOk] = useState<string | null>(null)
+  const [schemeRefreshError, setSchemeRefreshError] = useState<string | null>(null)
+  // 切换证据包的迟到应用响应不发布状态。
+  const selectedPkgRef = useRef<number | null>(null)
+  selectedPkgRef.current = selectedPkgId
 
   // 重新评估对话框(只触发系统四维检查, FE-BE-03)
   const [assessOpen, setAssessOpen] = useState(false)
@@ -304,6 +315,11 @@ export default function ResultsPage() {
     setApplyOpen(false)
     setApplyOk(false)
     setApplyError(null)
+    setSchemeOpen(false)
+    setSchemeBusy(false)
+    setSchemeError(null)
+    setSchemeOk(null)
+    setSchemeRefreshError(null)
     let cancelled = false
     const load = async () => {
       // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
@@ -340,6 +356,10 @@ export default function ResultsPage() {
           setSnapRefs(null)
           setSelectedCandidateId(null)
           setApplyOpen(false)
+          setSchemeOpen(false)
+          setSchemeError(null)
+          setSchemeOk(null)
+          setSchemeRefreshError(null)
           setResultError(translateError(err as ApiError))
         }
       }
@@ -485,7 +505,7 @@ export default function ResultsPage() {
   // -------------------------------------------------------------------------
   // 动作
   // -------------------------------------------------------------------------
-  // 选择只记录采用(后端 select), 不创建版本、不写回参数; 实际应用未交付。
+  // 选择只记录采用(后端 select), 不创建版本、不写回参数。
   const applyCandidate = useCallback(async () => {
     if (!selectedCandidate) return
     setApplyError(null)
@@ -506,6 +526,39 @@ export default function ResultsPage() {
       setApplying(false)
     }
   }, [projectId, selectedCandidate])
+
+  // 应用方案(规划解预览 → 来源版本基线派生新版本; 只发送任务引用与解标识,
+  // 参数与基线由服务端权威解析)。明确确认后才请求, 取消不变更; 处理中避免
+  // 重复; 成功与刷新失败分开报告, 不重复应用; 切换后迟到响应不发布状态。
+  const confirmScheme = useCallback(async () => {
+    if (!planSolution || schemeBusy) return
+    const pkgAtConfirm = selectedPkgId
+    setSchemeError(null)
+    setSchemeOk(null)
+    setSchemeRefreshError(null)
+    setSchemeBusy(true)
+    try {
+      const entry = entries.find((e) => e.pkg.package_id === pkgAtConfirm)
+      const applied = await api.projects.applyScheme(projectId, {
+        task_id: entry?.task.id ?? 0,
+        solution_id: planSolution.solution_id,
+      })
+      if (selectedPkgRef.current !== pkgAtConfirm) return
+      const refreshed = await refreshDetailed()
+      if (selectedPkgRef.current !== pkgAtConfirm) return
+      const errors = [refreshed.projectError, refreshed.versionsError].filter(
+        (m): m is string => m !== null,
+      )
+      setSchemeOk(`v${applied.version.version_no} ${applied.version.name}`)
+      setSchemeRefreshError(errors.length > 0 ? errors.join('\n') : null)
+      setSchemeOpen(false)
+    } catch (err) {
+      if (selectedPkgRef.current !== pkgAtConfirm) return
+      setSchemeError(translateError(err as ApiError))
+    } finally {
+      setSchemeBusy(false)
+    }
+  }, [projectId, planSolution, schemeBusy, selectedPkgId, entries, refreshDetailed])
 
   const submitAssessment = useCallback(async () => {
     if (!selectedPkgId) return
@@ -911,7 +964,24 @@ export default function ResultsPage() {
       {/* 规划解参数预览(封存解 × 冻结规划绑定; 无解不伪造候选)。
           读取失败时不渲染空态, 不伪装成没有解。 */}
       {!resultError ? (
-      <Card title={t('ies.result.plan_solution_title')} className="ies-section">
+      <Card
+        title={t('ies.result.plan_solution_title')}
+        className="ies-section"
+        actions={
+          planSolution && planSolution.params.length > 0 ? (
+            <Button
+              onClick={() => {
+                setSchemeError(null)
+                setSchemeOk(null)
+                setSchemeRefreshError(null)
+                setSchemeOpen(true)
+              }}
+            >
+              {t('ies.result.apply_scheme_btn')}
+            </Button>
+          ) : undefined
+        }
+      >
         {planSolution ? (
           <>
             <Table>
@@ -950,12 +1020,26 @@ export default function ResultsPage() {
       </Card>
       ) : null}
 
-      {/* 选择成功提示(仅记录采用, 不创建版本; 实际应用未交付) */}
+      {/* 选择成功提示(仅记录采用, 不创建版本) */}
       {applyOk ? (
         <div className="ies-section">
           <Alert variant="success" closable onClose={() => setApplyOk(false)}>
             {t('ies.result.select_ok')}
           </Alert>
+        </div>
+      ) : null}
+
+      {/* 应用方案成功与刷新失败分开报告(不重复应用) */}
+      {schemeOk ? (
+        <div className="ies-section">
+          <Alert variant="success" closable onClose={() => setSchemeOk(null)}>
+            {t('ies.result.apply_scheme_ok', { version: schemeOk })}
+          </Alert>
+        </div>
+      ) : null}
+      {schemeRefreshError ? (
+        <div className="ies-section">
+          <Alert variant="error">{t('ies.result.apply_scheme_refresh_failed', { reason: schemeRefreshError })}</Alert>
         </div>
       ) : null}
 
@@ -1081,7 +1165,7 @@ export default function ResultsPage() {
         </Card>
       </div>
 
-      {/* 选择候选确认(仅记录采用, 不创建版本; 实际应用未交付) */}
+      {/* 选择候选确认(仅记录采用, 不创建版本) */}
       <Dialog
         open={applyOpen}
         onClose={() => setApplyOpen(false)}
@@ -1104,6 +1188,60 @@ export default function ResultsPage() {
         {applyError ? (
           <div style={{ marginTop: 'var(--ies-space-3)' }}>
             <Alert variant="error">{applyError}</Alert>
+          </div>
+        ) : null}
+      </Dialog>
+
+      {/* 应用方案确认(来源版本基线派生新版本; 服务端权威解析, 取消不请求) */}
+      <Dialog
+        open={schemeOpen}
+        onClose={() => setSchemeOpen(false)}
+        title={t('ies.result.apply_scheme_title')}
+        size="md"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setSchemeOpen(false)}>
+              {t('ies.common.cancel')}
+            </Button>
+            <Button loading={schemeBusy} onClick={() => void confirmScheme()}>
+              {t('ies.common.confirm')}
+            </Button>
+          </>
+        }
+      >
+        {planSolution ? (
+          <>
+            <p className="ies-muted">
+              {t('ies.result.apply_scheme_source')}:{' '}
+              {snapSources?.projectVersion ?? `id:${planSolution.refs.project_version_id}`}
+            </p>
+            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)' }}>
+              {t('ies.result.plan_solution_refs', {
+                solution: planSolution.solution_id,
+                task: planSolution.refs.task_id,
+                snapshot: planSolution.refs.calc_snapshot_id,
+                version: planSolution.refs.project_version_id,
+                evidence: planSolution.refs.evidence_package_id,
+              })}
+            </p>
+            <p className="ies-muted">{t('ies.result.apply_scheme_params')}:</p>
+            <ul className="ies-diag-list" style={{ marginTop: 'var(--ies-space-2)' }}>
+              {planSolution.params.map((p) => (
+                <li key={p.variable}>
+                  {p.variable}: {p.device_ref}.{p.parameter} = {`${formatNumber(p.value, { digits: 4 })} ${p.unit}`}
+                </li>
+              ))}
+            </ul>
+            <Alert variant="warning" title={t('ies.result.apply_scheme_impact_title')}>
+              {t('ies.result.apply_scheme_impact', {
+                version: snapSources?.projectVersion ?? `id:${planSolution.refs.project_version_id}`,
+              })}
+            </Alert>
+          </>
+        ) : null}
+        {schemeError ? (
+          <div style={{ marginTop: 'var(--ies-space-3)' }}>
+            <Alert variant="error">{schemeError}</Alert>
           </div>
         ) : null}
       </Dialog>

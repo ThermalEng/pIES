@@ -41,6 +41,7 @@ list_evidence_for_tasks = persistence.list_evidence_for_tasks
 list_package_assessments = persistence.list_package_assessments
 list_package_index = persistence.list_package_index
 list_reports = persistence.list_reports
+planning_solution_params = rules.planning_solution_params
 point_index_assessment = persistence.point_index_assessment
 point_index_latest = persistence.point_index_latest
 select_result = persistence.select_result
@@ -137,6 +138,7 @@ __all__ = [
     "list_package_index",
     "list_reports",
     "overall_score",
+    "planning_solution_params",
     "point_index_assessment",
     "point_index_latest",
     "select_result",

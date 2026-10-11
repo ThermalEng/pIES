@@ -17,6 +17,7 @@ audit 领域公开门面, storage 经 content_objects)``；不导入 ORM、不�
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -25,6 +26,8 @@ from sqlalchemy.orm import Session
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
+from iesplan import results as results_domain
+from iesplan import tasks as tasks_domain
 from iesplan.application.configuration import (
     get_effective_finance_config as _read_effective,
     get_finance_profile_by_ref as _profile_by_ref,
@@ -34,13 +37,14 @@ from iesplan.application.projects import ensure_access
 from iesplan.application.projects.content_objects import (
     load_content_bytes as _load_content_bytes,
     load_content_object as _load_content_object,
-    merge_patch,
     store_content_object as _store_content_object,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.core.jsonutil import canonical_json
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import DraftRecord, ProjectRecord, ProjectVersionRecord
+from iesplan.results.contracts import SINGLE_SOLUTION_ID
+from iesplan.storage import get_object as _get_object
 
 
 def _audit(
@@ -474,59 +478,172 @@ def restore_version(
         raise
 
 
-def apply_result(
+def _scheme_params(db: Session, package: Any, snapshot: Any) -> list[dict[str, Any]]:
+    """应用方案参数投影(服务端权威解析): 封存解 × 同一快照冻结绑定。
+
+    无 compute_result 块或块内无 solution(metrics-only)是业务缺席, 返回
+    空表(调用方不创建空应用版本); 冻结字段直接消费, 残缺即正常错误
+    路径可见。值与单位沿封存解原样, 不猜测、不重验。
+    """
+    raw = _get_object(db, package.object_id)
+    inner = results_domain.evidence_inner(json.loads(raw.decode("utf-8")))
+    compute_result = inner.get("compute_result")
+    if compute_result is None:
+        return []
+    solution = compute_result["outputs"].get("solution")
+    if solution is None:
+        return []
+    return results_domain.planning_solution_params(
+        solution["variables"],
+        snapshot.assembly_receipt["planning"]["variables"],
+        json.loads(snapshot.canonical_assembly_text)["planning"]["variables"],
+    )
+
+
+def apply_scheme(
     db: Session,
     user: UserRecord,
     project_id: int,
-    diff_patch: dict,
+    task_id: int,
     *,
-    version_id: int | None = None,
+    solution_id: int,
     name: str | None = None,
     description: str | None = None,
-    source_result_id: str | None = None,
+    expected_revision: int | None = None,
 ) -> dict[str, Any]:
-    """事务型应用选定结果(参数差异补丁→新草稿+新版本)；统一提交或回滚。"""
+    """事务型应用方案(真实规划参数 → 来源版本派生新草稿 + 新版本)；统一提交或回滚。
+
+    基线严格取任务快照引用的计算来源版本：在其完整工作状态上写入封存
+    规划解参数(同一快照实例/参数绑定，值原样；来源其他参数/设备/连接/
+    配置完整保留)，派生新版本并切换为当前工作状态；不叠加当前草稿，
+    不带入计算后编辑。配置指针按来源版本既有恢复语义移动；参数写入、
+    新版本创建与状态切换同一事务完成，失败零部分状态。
+    """
     try:
         ensure_access(db, user, project_id, "edit")
         project = project_domain.require_project(db, project_id)
         if project.status != "active":
             raise ConflictError(
-                "项目已归档或已删除, 不能应用结果",
+                "项目已归档或已删除, 不能应用方案",
                 location={"object_type": "project", "object_id": project_id},
             )
-        source = (
-            project_domain.require_version(db, project_id, version_id) if version_id is not None else None
-        )
-        if source is None:
-            if project.current_version_id is None:
-                raise NotFoundError("项目尚无版本, 无法应用结果", params={"project_id": project_id})
-            source = project_domain.require_version(db, project_id, project.current_version_id)
-        if not isinstance(diff_patch, dict):
-            raise project_domain.InvalidRequestError("diff_patch 必须是对象", code="PROJ-CMD-005")
-        draft = project_domain.require_current_draft(db, project)
-        content = _load_content_object(db, draft.content_object_id)
-        inner = diff_patch.get("calc_config")
-        patch = inner if isinstance(inner, dict) else diff_patch
-        if not isinstance(patch, dict):
-            raise project_domain.InvalidRequestError("diff_patch 内容非法", code="PROJ-CMD-005")
-        merge_patch(content["calc_config"], patch)
-        content.pop("applied_commands", None)
-        content_object_id = _store_content_object(db, content)
+        if expected_revision is not None:
+            draft_now = project_domain.require_current_draft(db, project)
+            if draft_now.revision != expected_revision:
+                raise ConflictError(
+                    "项目草稿已被其他操作更新",
+                    params={
+                        "expected_revision": expected_revision,
+                        "current_revision": draft_now.revision,
+                    },
+                    location={"object_type": "draft", "object_id": str(draft_now.id)},
+                )
+        task = tasks_domain.get_task(db, task_id)
+        if task is None or task.project_id != project_id:
+            raise NotFoundError(
+                "任务不存在",
+                params={"task_id": task_id, "project_id": project_id},
+                location={"object_type": "task", "object_id": task_id},
+            )
+        if solution_id != SINGLE_SOLUTION_ID:
+            raise NotFoundError(
+                "所选解不存在",
+                params={"task_id": task_id, "solution_id": solution_id},
+                location={"object_type": "task", "object_id": task_id},
+            )
+        snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
+        source = project_domain.require_version(db, project_id, snapshot.project_version_id)
+        package = results_domain.latest_evidence_for_task(db, task_id)
+        if package is None:
+            raise NotFoundError(
+                "任务尚无证据包, 无法应用方案",
+                params={"task_id": task_id},
+                location={"object_type": "task", "object_id": task_id},
+            )
+        params = _scheme_params(db, package, snapshot)
+        if not params:
+            raise NotFoundError(
+                "该任务结果无可用规划解, 不能应用方案",
+                params={"task_id": task_id},
+                location={"object_type": "task", "object_id": task_id},
+            )
+        src_content = _load_content_object(db, source.content_object_id)
+        draft_content = {
+            k: v for k, v in src_content.items() if k != "applied_commands"
+        }
+        devices = draft_content["model"]["devices"]
+        for param in params:
+            device = next(
+                (d for d in devices if d.get("name") == param["device_ref"]), None
+            )
+            if device is None:
+                raise NotFoundError(
+                    "来源版本工作状态缺少设备",
+                    params={"version_id": source.id, "device": param["device_ref"]},
+                    location={"object_type": "project_version", "object_id": source.id},
+                )
+            merged = dict(device.get("params") or {})
+            merged[param["parameter"]] = param["value"]
+            device["params"] = merged
+        eff_lineage, plan_rev = _source_pins(db, project_id, src_content)
+        content_object_id = _store_content_object(db, draft_content)
         new_draft = project_domain.create_draft(
             db,
             project_id=project.id,
             content_object_id=content_object_id,
             updated_by=user.id,
         )
-        version = _do_create_version(
+        project_domain.update_revision_pointers(
             db,
-            user,
-            project_id,
-            name=name or "应用结果",
-            description=description,
+            project.id,
+            finance_profile_id=eff_lineage[0] if eff_lineage is not None else None,
+            overrides_revision=eff_lineage[2] if eff_lineage is not None else None,
+            effective_finance_revision=eff_lineage[3] if eff_lineage is not None else None,
+            planning_revision=plan_rev,
+        )
+        version_name = (name or f"应用: {source.name}").strip()
+        if not version_name:
+            raise project_domain.InvalidRequestError("版本名称不能为空", code="PROJ-CMD-001")
+        version_content = project_domain.build_version_content(
+            draft_content,
+            currency=project.currency,
+            baseline_resolution=project.baseline_resolution,
+            baseline_start_year=project.baseline_start_year,
+            scenario_mode=project.baseline_scenario_mode,
+            effective_profile_id=eff_lineage[1] if eff_lineage is not None else None,
+            overrides_revision=eff_lineage[2] if eff_lineage is not None else None,
+            effective_revision=eff_lineage[3] if eff_lineage is not None else None,
+            planning_revision=plan_rev,
+        )
+        version_object_id = _store_content_object(db, version_content)
+        source_result_id = f"task:{task.id}/evidence:{package.id}/solution:{solution_id}"
+        version = project_domain.create_version(
+            db,
+            project_id=project.id,
+            name=version_name,
             reason="apply_result",
+            created_by=user.id,
+            content_object_id=version_object_id,
+            source_draft_id=new_draft.id,
+            source_draft_revision=new_draft.revision,
+            description=description,
             parent_version_id=source.id,
-            source_result_id=source_result_id,
+        )
+        _audit(
+            db,
+            "project_version",
+            version.id,
+            "project.version_created",
+            user.id,
+            after={
+                "project_id": project.id,
+                "version_no": version.version_no,
+                "name": version_name,
+                "reason": "apply_result",
+                "parent_version_id": version.parent_version_id,
+                "source_draft_revision": new_draft.revision,
+                "source_result_id": source_result_id,
+            },
         )
         _audit(
             db,
@@ -538,8 +655,11 @@ def apply_result(
                 "project_id": project.id,
                 "source_version_no": source.version_no,
                 "new_version_no": version.version_no,
-                "source_result_id": source_result_id,
                 "new_revision": new_draft.revision,
+                "task_id": task.id,
+                "evidence_package_id": package.id,
+                "solution_id": solution_id,
+                "source_result_id": source_result_id,
             },
         )
         db.commit()
@@ -567,7 +687,7 @@ def get_version(
 
 
 __all__ = [
-    "apply_result",
+    "apply_scheme",
     "create_version",
     "current_version_matches_draft",
     "freeze_snapshot_version",

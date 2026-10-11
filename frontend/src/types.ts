@@ -241,6 +241,19 @@ export interface VersionRestoreResult {
   draftRevision: number
 }
 
+/** 应用方案输入(任务引用 + 解标识; 参数与基线由服务端权威解析)。 */
+export interface ApplySchemeInput {
+  task_id: number
+  solution_id: number
+}
+
+/** 应用方案结果(与后端 apply-result 响应 {version, draft} 对应)。 */
+export interface ApplySchemeResult {
+  version: ProjectVersion
+  draftId: number
+  draftRevision: number
+}
+
 /** 项目列表筛选参数。 */
 export interface ProjectListParams {
   status?: ProjectStatus

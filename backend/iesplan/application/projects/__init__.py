@@ -25,7 +25,7 @@ from iesplan.application.projects.lifecycle import (
     version_to_dict,
 )
 from iesplan.application.projects.versions import (
-    apply_result,
+    apply_scheme,
     create_version,
     current_version_matches_draft,
     freeze_snapshot_version,
@@ -36,7 +36,7 @@ from iesplan.application.projects.versions import (
 )
 
 __all__ = [
-    "apply_result",
+    "apply_scheme",
     "archive_project_case",
     "create_project",
     "create_version",

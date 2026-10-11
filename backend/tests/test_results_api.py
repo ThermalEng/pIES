@@ -43,6 +43,7 @@ from iesplan.api.config import config_router  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import results as results_uc  # noqa: E402
 from iesplan.application import tasks as tasks_uc  # noqa: E402
+from iesplan.audit.persistence import AuditLog  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.core.diagnostics import SEVERITY_INFO, TASK_QUEUED  # noqa: E402
 from iesplan.core.errors import NotFoundError  # noqa: E402
@@ -1019,3 +1020,235 @@ def test_result_view_permission(client: TestClient, db: Session) -> None:
     pid, task_id, _claim_ok, _pkg, _objs = _prepare_task_with_evidence(client, db, owner)
     resp = client.get(f"/api/projects/{pid}/tasks/{task_id}/result", headers=_h(client, outsider))
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 方案应用(apply_scheme): 来源版本基线派生
+# ---------------------------------------------------------------------------
+
+
+def _prepare_apply_task(client: TestClient, db: Session, user, *, solution_vars=None) -> tuple:
+    """准备: 真实装配冻结快照的任务 + 含解证据。返回 (pid, task_id, pkg)。
+
+    快照经公开提交闸门真实冻结(含规划变量 cap→电池 capacity_kwh 绑定);
+    证据解值只为应用写回提供封存事实(端到端真值由 Docker 验收覆盖)。
+    """
+    pid = _prepare_project(client, db, user)
+    rev = _save_config(client, pid, user)
+    task = _submit_task(
+        client, pid, user,
+        idempotency_key=f"apply-{pid}-{uuid4().hex[:8]}", config_revision=rev,
+    )
+    task_id = task["id"]
+    claim = _claim(db, task_id)
+    obj_a = _store_hourly(db, 100)
+    obj_b = _store_hourly(db, 100, fields=["p_grid_buy"])
+    variables = (
+        solution_vars
+        if solution_vars is not None
+        else [
+            {"name": "cap", "value": 320.0, "unit": "kWh"},
+            {"name": "other__x__t0", "value": 1.0, "unit": "kW"},
+        ]
+    )
+    payload = _build_payload(
+        task["calc_snapshot_id"], [obj_a, obj_b], user.id,
+        content_overrides={"compute_result": {"outputs": {"solution": {"variables": variables}}}},
+    )
+    pkg = _submit_evidence(db, task_id, claim, payload)
+    _complete_task(db, task_id, outcome=tasks_domain.map_business_outcome("OPTIMAL"))
+    db.commit()
+    return pid, task_id, pkg
+
+
+def _apply(client: TestClient, pid: int, user, task_id: int, **extra) -> Any:
+    body = {"task_id": task_id, "solution_id": 0}
+    body.update(extra)
+    return client.post(f"/api/projects/{pid}/apply-result", json=body, headers=_h(client, user))
+
+
+def _draft_devices(client: TestClient, pid: int, user) -> list:
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, user)).json()
+    return view["draft"]["content"]["model"]["devices"]
+
+
+def test_apply_scheme_writes_params_to_source_version(client: TestClient, db: Session) -> None:
+    """应用方案: 来源版本基线写回真实参数, 其他参数保留, 来源不变, 追溯完整。"""
+    owner = make_user(db, "owner_apply")
+    pid, task_id, pkg = _prepare_apply_task(client, db, owner)
+    v1 = client.get(f"/api/projects/{pid}/versions", headers=_h(client, owner)).json()["versions"][0]
+    rev_before = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()["draft"]["revision"]
+
+    resp = _apply(client, pid, owner, task_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["version"]["version_no"] == 2
+    assert body["version"]["reason"] == "apply_result"
+    assert body["version"]["parent_version_id"] == v1["id"]
+    assert body["version"]["name"].startswith("应用")
+    assert body["draft"]["revision"] == rev_before + 1
+
+    # 新工作状态: 目标参数已写回, 其他参数完整保留
+    bat1 = next(d for d in _draft_devices(client, pid, owner) if d["name"] == "bat1")
+    assert bat1["params"]["capacity_kwh"] == 320.0
+    assert bat1["params"]["rated_power_kw"] == 100
+    assert bat1["kind"] == "new"
+
+    # 来源版本与证据保持不变
+    v1_now = client.get(
+        f"/api/projects/{pid}/versions/{v1['id']}", headers=_h(client, owner)
+    ).json()["version"]
+    assert v1_now["content_object_id"] == v1["content_object_id"]
+
+    # 审计携带任务/证据/解引用与来源结果标识
+    rows = db.execute(
+        select(AuditLog).where(AuditLog.action == "project.result_applied")
+    ).scalars().all()
+    assert len(rows) == 1
+    after = rows[0].after
+    assert after["task_id"] == task_id
+    assert after["evidence_package_id"] == pkg.id
+    assert after["solution_id"] == 0
+    assert after["source_version_no"] == 1
+    assert after["new_version_no"] == 2
+    assert after["source_result_id"] == f"task:{task_id}/evidence:{pkg.id}/solution:0"
+
+
+def test_apply_scheme_ignores_post_compute_edits(client: TestClient, db: Session) -> None:
+    """计算后的草稿编辑不带入派生状态; 指针随来源恢复而非保留最新。"""
+    owner = make_user(db, "owner_apply_iso")
+    pid, task_id, _pkg = _prepare_apply_task(client, db, owner)
+    planning_before = client.get(
+        f"/api/projects/{pid}/planning-config", headers=_h(client, owner)
+    ).json()
+
+    # 计算后新增设备 + 新规划修订(当前指针已偏离来源冻结)
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()
+    resp = client.put(
+        f"/api/projects/{pid}/draft",
+        json={"expected_revision": view["draft"]["revision"], "commands": [{
+            "id": "post-compute-dev", "unit": "model", "type": "model.upsert_device",
+            "payload": {
+                "name": "late1", "device_type": "ies.device.battery", "kind": "new",
+                "params": {"capacity_kwh": 10, "rated_power_kw": 5},
+                "position": {"x": 9.0, "y": 9.0},
+            },
+        }]},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    resp = client.put(
+        f"/api/projects/{pid}/planning-config",
+        json={"planning_config": planning_before["planning_config"],
+              "expected_revision": planning_before["revision"]},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["revision"] != planning_before["revision"]
+
+    resp = _apply(client, pid, owner, task_id)
+    assert resp.status_code == 200, resp.text
+
+    # 新增设备未混入派生状态, 目标参数已写回
+    names = [d["name"] for d in _draft_devices(client, pid, owner)]
+    assert "late1" not in names
+    bat1 = next(
+        d for d in _draft_devices(client, pid, owner) if d["name"] == "bat1"
+    )
+    assert bat1["params"]["capacity_kwh"] == 320.0
+
+    # 规划指针回到来源冻结修订, 而非最新
+    planning_now = client.get(
+        f"/api/projects/{pid}/planning-config", headers=_h(client, owner)
+    ).json()
+    assert planning_now["revision"] == planning_before["revision"]
+
+
+def test_apply_scheme_no_solution_404(client: TestClient, db: Session) -> None:
+    """无规划解(纯指标证据)不能创建空应用版本。"""
+    owner = make_user(db, "owner_apply_none")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    task = _submit_task(
+        client, pid, owner,
+        idempotency_key=f"apply-none-{pid}-{uuid4().hex[:8]}", config_revision=rev,
+    )
+    claim = _claim(db, task["id"])
+    obj_a = _store_hourly(db, 100)
+    obj_b = _store_hourly(db, 100, fields=["p_grid_buy"])
+    _submit_evidence(
+        db, task["id"], claim, _build_payload(task["calc_snapshot_id"], [obj_a, obj_b], owner.id)
+    )
+    _complete_task(db, task["id"], outcome=tasks_domain.map_business_outcome("OPTIMAL"))
+    db.commit()
+
+    resp = _apply(client, pid, owner, task["id"])
+    assert resp.status_code == 404
+    listed = client.get(f"/api/projects/{pid}/versions", headers=_h(client, owner)).json()
+    assert len(listed["versions"]) == 1
+
+
+def test_apply_scheme_guards(client: TestClient, db: Session) -> None:
+    """权限/所属关系/解标识/修订冲突可见, 且失败不发布状态。"""
+    owner = make_user(db, "owner_apply_guard")
+    outsider = make_user(db, "outsider_apply_guard")
+    pid, task_id, _pkg = _prepare_apply_task(client, db, owner)
+    other_pid = _prepare_project(client, db, outsider, name="他项目")
+
+    # 非成员 403
+    resp = _apply(client, pid, outsider, task_id)
+    assert resp.status_code == 403
+    # 他项目任务 404
+    resp = _apply(client, other_pid, outsider, task_id)
+    assert resp.status_code == 404
+    # 不存在的解 404
+    resp = _apply(client, pid, owner, task_id, solution_id=7)
+    assert resp.status_code == 404
+    # 修订冲突 409
+    resp = _apply(client, pid, owner, task_id, expected_revision=1)
+    assert resp.status_code == 409
+
+    listed = client.get(f"/api/projects/{pid}/versions", headers=_h(client, owner)).json()
+    assert len(listed["versions"]) == 1
+
+    # 归档 409
+    resp = client.post(f"/api/projects/{pid}/archive", headers=_h(client, owner))
+    assert resp.status_code == 200, resp.text
+    resp = _apply(client, pid, owner, task_id)
+    assert resp.status_code == 409
+    listed = client.get(f"/api/projects/{pid}/versions", headers=_h(client, owner)).json()
+    assert len(listed["versions"]) == 1
+
+
+def test_apply_scheme_write_failure_atomic(client: TestClient, db: Session, monkeypatch) -> None:
+    """注入实际写入失败: 零部分状态(无新版本/草稿/指针移动)。"""
+    import iesplan.application.projects.versions as versions_mod
+
+    owner = make_user(db, "owner_apply_atomic")
+    pid, task_id, _pkg = _prepare_apply_task(client, db, owner)
+    rev_before = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()["draft"]["revision"]
+    plan_before = client.get(
+        f"/api/projects/{pid}/planning-config", headers=_h(client, owner)
+    ).json()["revision"]
+
+    calls = {"n": 0}
+    real_store = versions_mod._store_content_object
+
+    def boom(db_session, content):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("injected store failure")
+        return real_store(db_session, content)
+
+    monkeypatch.setattr(versions_mod, "_store_content_object", boom)
+    resp = _apply(client, pid, owner, task_id)
+    assert resp.status_code == 500
+
+    listed = client.get(f"/api/projects/{pid}/versions", headers=_h(client, owner)).json()
+    assert len(listed["versions"]) == 1
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()
+    assert view["draft"]["revision"] == rev_before
+    plan_now = client.get(
+        f"/api/projects/{pid}/planning-config", headers=_h(client, owner)
+    ).json()
+    assert plan_now["revision"] == plan_before

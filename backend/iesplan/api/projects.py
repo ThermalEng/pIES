@@ -96,13 +96,17 @@ class RestoreRequest(BaseModel):
 
 
 class ApplyResultRequest(BaseModel):
-    """应用结果请求体(宪法 §4.4 assembly、§12 快照 + domain-model §项目聚合: 参数差异补丁 + 可选来源版本/结果标识)。"""
+    """应用方案请求体(domain-model §项目聚合: 任务引用 + 解标识 + 可选命名/并发期望)。
 
-    diff_patch: dict[str, Any]
-    version_id: int | None = None
+    参数与来源基线由服务端从权威任务/快照/证据解析, 不接受浏览器侧
+    diff_patch(旧补丁语义已收敛删除, 无兼容双轨)。
+    """
+
+    task_id: int
+    solution_id: int
     name: str | None = Field(default=None, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
-    source_result_id: str | None = Field(default=None, max_length=200)
+    expected_revision: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -239,20 +243,21 @@ def restore_version_endpoint(
     return result
 
 
-@router.post("/{project_id}/apply-result", summary="应用选定规划结果")
+@router.post("/{project_id}/apply-result", summary="应用方案")
 def apply_result_endpoint(
     project_id: int,
     payload: ApplyResultRequest,
     db: Annotated[Session, Depends(get_request_db)],
     user: CurrentUser,
 ) -> dict:
-    """应用选定结果: 参数差异补丁应用到新草稿并创建新版本, 来源版本不变。"""
-    result = project_ops.apply_result(
-        db, user, project_id, payload.diff_patch,
-        version_id=payload.version_id,
+    """应用方案: 服务端从任务快照解析来源版本与封存规划参数, 在来源版本
+    工作状态上写回并派生新版本(切换为当前), 不叠加当前草稿。"""
+    result = project_ops.apply_scheme(
+        db, user, project_id, payload.task_id,
+        solution_id=payload.solution_id,
         name=payload.name,
         description=payload.description,
-        source_result_id=payload.source_result_id,
+        expected_revision=payload.expected_revision,
     )
     return result
 

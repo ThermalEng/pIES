@@ -95,7 +95,7 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "list_versions_endpoint": frozenset({"versions"}),
     "get_version_endpoint": frozenset({"version"}),
     "restore_version_endpoint": frozenset({"draft", "version"}),  # services.project.restore_version
-    "apply_result_endpoint": frozenset({"draft", "version"}),  # services.project.apply_result
+    "apply_result_endpoint": frozenset({"draft", "version"}),  # application.projects.apply_scheme
     "archive_project_endpoint": frozenset({"my_role", "project"}),
     "unarchive_project_endpoint": frozenset({"my_role", "project"}),
     "delete_project_endpoint": frozenset({"deleted", "ok"}),

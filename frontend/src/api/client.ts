@@ -37,6 +37,8 @@ import type {
   DatasetUploadInput,
   DatasetVersion,
   Device,
+  ApplySchemeInput,
+  ApplySchemeResult,
   DeviceInput,
   DeviceKind,
   DevicePortSpec,
@@ -1050,6 +1052,12 @@ export interface ProjectsApi {
    * draft 仅取 id/revision(刷新摘要所需), 其余字段忽略不猜测。
    */
   restoreVersion(projectId: number, versionId: number): Promise<VersionRestoreResult>
+  /**
+   * 应用方案: 与后端 POST .../apply-result 对应。
+   * 只发送任务引用与解标识; 参数与来源基线由服务端权威解析, 不发送补丁。
+   * 响应唯一 {version, draft}, draft 仅取 id/revision。
+   */
+  applyScheme(projectId: number, input: ApplySchemeInput): Promise<ApplySchemeResult>
   /** 版本详情: 严格消费唯一 {version: {...}} 契约(只返回版本元数据)。 */
   versionDetail(projectId: number, versionId: number): Promise<ProjectVersion>
   archive(id: number): Promise<Project>
@@ -1310,6 +1318,17 @@ export const api = {
           throw new Error('invalid version restore envelope')
         }
         return { version, draftId: d.id, draftRevision: d.revision }
+      })
+    },
+    applyScheme(projectId: number, input: ApplySchemeInput): Promise<ApplySchemeResult> {
+      // 唯一 {version, draft} 契约; 只发送引用, draft 仅取刷新所需的 id/revision。可信交换直接映射。
+      return request<unknown>(`/projects/${projectId}/apply-result`, {
+        method: 'POST',
+        body: { task_id: input.task_id, solution_id: input.solution_id },
+      }).then((body) => {
+        const rec = asRecord(body)
+        const d = rec.draft as { id: number; revision: number }
+        return { version: projectVersionFromServer(rec.version), draftId: d.id, draftRevision: d.revision }
       })
     },
     archive(id: number): Promise<Project> {

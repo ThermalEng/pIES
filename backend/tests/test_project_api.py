@@ -411,28 +411,11 @@ def test_versions_reads_authorize_inside_usecase(client: TestClient, db_session:
     ).status_code == 403
 
 
-def test_apply_result(client: TestClient, db_session: Session) -> None:
-    """应用选定结果: 参数差异补丁→新草稿+新版本, 来源版本不变。"""
+def test_apply_result_legacy_patch_rejected(client: TestClient, db_session: Session) -> None:
+    """旧补丁语义已收敛删除: diff_patch 请求体不再被接受(无兼容双轨)。"""
     owner = make_user(db_session, "owner_apply")
     owner_h = _h(client, owner)
     pid = _create_project(client, owner, "应用结果测试")
-    resp = client.put(
-        f"/api/projects/{pid}/draft",
-        json={
-            "expected_revision": 1,
-            "commands": [{
-                "id": "a-cmd-1", "unit": "config", "type": "config.patch",
-                "payload": {"params": {"tariff": 0.5}},
-            }],
-        },
-        headers=owner_h,
-    )
-    assert resp.status_code == 200 and resp.json()["revision"] == 2
-    v1 = client.post(
-        f"/api/projects/{pid}/versions",
-        json={"name": "V1", "reason": "milestone"},
-        headers=owner_h,
-    ).json()["version"]
 
     resp = client.post(
         f"/api/projects/{pid}/apply-result",
@@ -443,28 +426,11 @@ def test_apply_result(client: TestClient, db_session: Session) -> None:
         },
         headers=owner_h,
     )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["version"]["version_no"] == 2
-    assert body["version"]["reason"] == "apply_result"
-    assert body["version"]["parent_version_id"] == v1["id"]
-    assert body["draft"]["revision"] == 3
+    assert resp.status_code == 422
 
-    # 新草稿已含应用后的参数
-    view = client.get(f"/api/projects/{pid}", headers=owner_h).json()
-    params = view["draft"]["content"]["calc_config"]["params"]
-    assert params["tariff"] == 0.8
-    assert params["peak_demand"] == 100
-
-    # 来源版本保持不变
-    v1_now = client.get(f"/api/projects/{pid}/versions/{v1['id']}", headers=owner_h).json()["version"]
-    assert v1_now["content_object_id"] == v1["content_object_id"]
-
-    # 审计记录来源结果标识
-    rows = db_session.execute(
-        select(AuditLog).where(AuditLog.action == "project.version_created")
-    ).scalars().all()
-    assert any(row.after.get("source_result_id") == "res-100" for row in rows)
+    # 未创建任何版本
+    listed = client.get(f"/api/projects/{pid}/versions", headers=owner_h).json()
+    assert listed["versions"] == []
 
 
 # ---------------------------------------------------------------------------

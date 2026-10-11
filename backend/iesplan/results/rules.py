@@ -16,6 +16,7 @@ Wave 3-B 自 ``application.results.writes`` 回归：单领域规则的唯一权
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -99,6 +100,31 @@ def evidence_inner(payload: dict[str, Any]) -> dict[str, Any]:
     评估消费内容文档(residuals/financial/reliability/candidates)。"""
     inner = payload.get("content")
     return inner if isinstance(inner, dict) else payload
+
+
+def planning_solution_params(
+    variables: list[dict[str, Any]],
+    frozen_names: Sequence[str],
+    bindings: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """封存解变量 × 同一快照冻结规划变量投影(纯规则)。
+
+    名单与绑定均是同一快照冻结事实(回执名单 + 装配正文绑定), 封存
+    变量形态由结果适配器契约保证, 此处直接消费不重验。只收录名单内
+    变量; 值与单位沿封存解原样(不重算、不猜单位); 不静默去重。
+    """
+    names = set(frozen_names)
+    return [
+        {
+            "variable": item["name"],
+            "device_ref": bindings[item["name"]]["device_ref"],
+            "parameter": bindings[item["name"]]["parameter"],
+            "value": item["value"],
+            "unit": item["unit"],
+        }
+        for item in variables
+        if item["name"] in names
+    ]
 
 
 def validate_evidence_structure(payload: dict[str, Any]) -> list[str]:

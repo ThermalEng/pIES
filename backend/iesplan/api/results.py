@@ -12,8 +12,9 @@
                                                            (幂等键必填, 命中 → 200)
 
 认证与权限: 统一使用 U01 身份单元提供的窗口会话认证(iesplan.api.auth.CurrentUser);
-读接口要求项目 view, 写接口(assess/select/check)要求项目 edit。结果应用
-(apply_result)由项目单元处理, 本路由只提供数据与差异补丁。
+读接口要求项目 view, 写接口(assess/select/check)要求项目 edit。方案应用
+(apply_scheme)由项目单元按任务引用服务端解析执行, 本路由只提供选择记录
+与差异预览。
 """
 
 from __future__ import annotations

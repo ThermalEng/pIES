@@ -1,9 +1,10 @@
-"""规划解投影测试(S3-A 收口)。
+"""规划解投影测试(S3-A 收口，S3-B 复用领域投影)。
 
-覆盖 writes._planning_params/_planning_solution: 冻结名单投影、同一快照
-正文绑定附着、封存值/单位原样、双实例绑定、非名单变量跳过；业务缺席
-(无证据包、metrics-only 无 solution 块)返回 None。内部可信形态不重验，
-故无损坏检测用例；DB 行不伪造，材料以同形存根传入。
+覆盖领域 planning_solution_params/_planning_solution: 冻结名单投影、
+同一快照正文绑定附着、封存值/单位原样、双实例绑定、非名单变量跳过；
+业务缺席(无证据包、无 compute 块、metrics-only 无 solution 块)返回
+None。内部可信形态不重验，故无损坏检测用例；DB 行不伪造，材料以
+同形存根传入。
 """
 
 from __future__ import annotations
@@ -11,7 +12,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from iesplan.application.results.writes import _planning_params, _planning_solution
+from iesplan import results as results_domain
+from iesplan.application.results.writes import _planning_solution
 
 NAMES = ["hp1_cap", "hp2_cap"]
 BINDINGS = {
@@ -39,7 +41,7 @@ def _materials(outputs: dict) -> tuple:
 
 
 def test_projects_dual_instance_true_values() -> None:
-    params = _planning_params(VARIABLES, NAMES, BINDINGS)
+    params = results_domain.planning_solution_params(VARIABLES, NAMES, BINDINGS)
     assert params == [
         {"variable": "hp1_cap", "device_ref": "hp1", "parameter": "rated_heat_kw", "value": 50.0, "unit": "kW"},
         {"variable": "hp2_cap", "device_ref": "hp2", "parameter": "rated_heat_kw", "value": 200.0, "unit": "kW"},

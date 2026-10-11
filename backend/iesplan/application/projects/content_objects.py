@@ -65,8 +65,8 @@ def load_content_object(db: Session, content_object_id: int) -> dict:
 def merge_patch(base: dict, patch: dict) -> None:
     """递归合并补丁到内容文档字典(值为 dict 时继续下钻, 其余覆盖)。
 
-    草稿语义命令（layout.patch / config.patch / set_extensions）与版本应用
-    （apply_result）的补丁语义唯一实现；调用方就地修改 ``base``。
+    草稿语义命令（layout.patch / config.patch / set_extensions）的补丁语义
+    唯一实现；调用方就地修改 ``base``。方案应用不再消费浏览器侧补丁。
     """
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):

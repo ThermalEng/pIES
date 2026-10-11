@@ -23,7 +23,7 @@ metrics 状态模型; 不导入 ``models.*``。
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -520,10 +520,11 @@ def current_selection(db: Session, project_id: int) -> ResultSelectionRecord | N
 
 
 def build_diff_patch(content: dict[str, Any], solution_id: int) -> dict[str, Any]:
-    """生成参数差异补丁(供项目单元 apply_result 应用)。
+    """生成参数差异补丁(选择记录追溯与差异预览用)。
 
-    补丁形状: {"params": {"result_adoption": {...}}}, apply_result 深合并进
-    calc_config.params。容量只给证据原生契约粒度(type_id → 容量);
+    补丁形状: {"params": {"result_adoption": {...}}}。方案应用不再消费
+    浏览器侧补丁, 由服务端从权威任务/快照/证据解析(apply_scheme)。
+    容量只给证据原生契约粒度(type_id → 容量);
     注册表参数名解释不得经旧 engines 静态映射, 有消费方时经 devices
     公开能力解析。
     """
@@ -636,31 +637,6 @@ def select_result(
     return selection
 
 
-def _planning_params(
-    variables: list[dict[str, Any]],
-    frozen_names: Sequence[str],
-    bindings: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    """封存解变量 × 同一快照冻结规划变量投影(纯函数)。
-
-    名单与绑定均是同一快照冻结事实(回执名单 + 装配正文绑定), 封存
-    变量形态由结果适配器契约保证, 此处直接消费不重验。只收录名单内
-    变量; 值与单位沿封存解原样(不重算、不猜单位); 不静默去重。
-    """
-    names = set(frozen_names)
-    return [
-        {
-            "variable": item["name"],
-            "device_ref": bindings[item["name"]]["device_ref"],
-            "parameter": bindings[item["name"]]["parameter"],
-            "value": item["value"],
-            "unit": item["unit"],
-        }
-        for item in variables
-        if item["name"] in names
-    ]
-
-
 def _planning_solution(
     task: TaskRecord,
     package: EvidencePackageRecord | None,
@@ -685,7 +661,7 @@ def _planning_solution(
     solution = compute_result["outputs"].get("solution")
     if solution is None:
         return None
-    params = _planning_params(
+    params = results_domain.planning_solution_params(
         solution["variables"],
         snapshot.assembly_receipt["planning"]["variables"],
         json.loads(snapshot.canonical_assembly_text)["planning"]["variables"],
