@@ -121,6 +121,19 @@ export const messagesEn: Record<string, string> = {
   'ies.versions.current_badge': 'Current',
   'ies.versions.source_revision': 'draft revision r{revision}',
   'ies.versions.created_by': 'created by user {user}',
+  'ies.versions.restore_open': 'Restore this version',
+  'ies.versions.restore_current_hint': 'Already the current version, no restore needed',
+  'ies.versions.restore_title': 'Restore historical version',
+  'ies.versions.restore_target': 'Restore version v{no} ({name}) as the new current draft and a new version.',
+  'ies.versions.restore_impact_draft': 'The current editable draft will be replaced with the content saved in that version.',
+  'ies.versions.restore_impact_pointers': 'Finance and planning config pointers return to the state frozen in that version.',
+  'ies.versions.restore_impact_history': 'A new version (reason restore) and a new draft revision are created; existing versions, tasks and results stay unchanged.',
+  'ies.versions.restore_confirm': 'Confirm restore',
+  'ies.versions.restore_retry': 'Retry',
+  'ies.versions.restore_failed': 'Restore failed',
+  'ies.versions.restore_done_title': 'Restore completed',
+  'ies.versions.restore_done_desc': 'New version v{no} created, current draft revision r{revision}.',
+  'ies.versions.restore_refresh_failed': 'Restore happened, but the version list failed to refresh (do not submit restore again)',
 
   // -------------------------------------------------------------------------
   // Auth / account

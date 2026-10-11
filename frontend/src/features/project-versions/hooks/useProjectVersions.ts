@@ -14,8 +14,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { errorMessage } from '../../../i18n'
 import type { VersionCreateRequestDto } from '../contracts'
-import { createVersion, getVersion, listVersions } from '../api'
-import type { VersionDetailState, VersionModel } from '../model'
+import { createVersion, getVersion, listVersions, restoreVersion } from '../api'
+import type { VersionDetailState, VersionModel, VersionRestoreState } from '../model'
 
 export interface UseProjectVersions {
   versions: VersionModel[] | null
@@ -29,6 +29,14 @@ export interface UseProjectVersions {
   detail: VersionDetailState
   openDetail: (versionId: number) => void
   closeDetail: () => void
+  restore: VersionRestoreState
+  /** 打开恢复确认(仅展示影响, 不发送请求)。 */
+  requestRestore: (version: VersionModel) => void
+  /** 取消恢复确认(不发送请求, 保留选择上下文由调用方持有)。 */
+  cancelRestore: () => void
+  /** 确认恢复(处理中防重复; 成功后刷新列表与项目摘要)。 */
+  confirmRestore: () => Promise<void>
+  closeRestore: () => void
 }
 
 export function useProjectVersions(projectId: number, onMutated: () => void): UseProjectVersions {
@@ -126,6 +134,46 @@ export function useProjectVersions(projectId: number, onMutated: () => void): Us
     setDetail({ status: 'idle' })
   }, [])
 
+  const [restore, setRestore] = useState<VersionRestoreState>({ status: 'idle' })
+
+  const requestRestore = useCallback((version: VersionModel) => {
+    setRestore({ status: 'confirming', version })
+  }, [])
+
+  const cancelRestore = useCallback(() => {
+    // 取消不发送任何请求。
+    setRestore({ status: 'idle' })
+  }, [])
+
+  const closeRestore = useCallback(() => {
+    setRestore({ status: 'idle' })
+  }, [])
+
+  const confirmRestore = useCallback(async () => {
+    if (restore.status !== 'confirming' && restore.status !== 'failed') return
+    const version = restore.version
+    setRestore({ status: 'working', version })
+    try {
+      const restored = await restoreVersion(projectId, version.id)
+      mutatedRef.current()
+      try {
+        const list = await listVersions(projectId)
+        if (projectRef.current !== projectId) return
+        setVersions(list)
+        setLoadError(null)
+        setReloading(false)
+        setRestore({ status: 'done', version, restored, listRefreshError: null })
+      } catch (err: unknown) {
+        if (projectRef.current !== projectId) return
+        // 恢复已发生, 仅列表刷新失败: 明确区分, 不诱导再提交。
+        setRestore({ status: 'done', version, restored, listRefreshError: errorMessage(err) })
+      }
+    } catch (err: unknown) {
+      // 失败保留所选版本上下文, 可重试; 不丢选择。
+      setRestore({ status: 'failed', version, message: errorMessage(err) })
+    }
+  }, [projectId, restore])
+
   return {
     versions,
     loadError,
@@ -138,5 +186,10 @@ export function useProjectVersions(projectId: number, onMutated: () => void): Us
     detail,
     openDetail,
     closeDetail,
+    restore,
+    requestRestore,
+    cancelRestore,
+    confirmRestore,
+    closeRestore,
   }
 }

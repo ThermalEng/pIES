@@ -131,6 +131,19 @@ export const messagesZh: Record<string, string> = {
   'ies.versions.current_badge': '当前版本',
   'ies.versions.source_revision': '草稿修订 r{revision}',
   'ies.versions.created_by': '用户 {user} 创建',
+  'ies.versions.restore_open': '恢复此版本',
+  'ies.versions.restore_current_hint': '已是当前版本，无需恢复',
+  'ies.versions.restore_title': '恢复历史版本',
+  'ies.versions.restore_target': '将版本 v{no}（{name}）恢复为新的当前草稿和新版本。',
+  'ies.versions.restore_impact_draft': '当前可编辑草稿将被替换为该版本保存的内容。',
+  'ies.versions.restore_impact_pointers': '财务与规划配置的当前指针同步回到该版本冻结的状态。',
+  'ies.versions.restore_impact_history': '产生新版本（原因记为恢复）与新草稿修订；已有版本、任务与结果保持不变。',
+  'ies.versions.restore_confirm': '确认恢复',
+  'ies.versions.restore_retry': '重试',
+  'ies.versions.restore_failed': '恢复失败',
+  'ies.versions.restore_done_title': '恢复已完成',
+  'ies.versions.restore_done_desc': '已创建新版本 v{no}，当前草稿修订 r{revision}。',
+  'ies.versions.restore_refresh_failed': '恢复已发生，但版本列表刷新失败（无需重新提交恢复）',
 
   // -------------------------------------------------------------------------
   // 登录 / 账号

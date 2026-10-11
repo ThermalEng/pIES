@@ -5,7 +5,7 @@
  */
 
 import { api } from '../../api/client'
-import type { ProjectVersionCreateInput } from '../../types'
+import type { ProjectVersionCreateInput, VersionRestoreResult } from '../../types'
 import type { VersionCreateRequestDto } from './contracts'
 import type { VersionModel } from './model'
 
@@ -27,4 +27,15 @@ export async function createVersion(
   const input: ProjectVersionCreateInput = { name: dto.name, reason: dto.reason }
   if (dto.description !== null) input.description = dto.description
   return api.projects.createVersion(projectId, input)
+}
+
+/**
+ * 恢复历史版本(沿后端自动命名, 不发送 name/description)。
+ * 后端创建 reason=restore、parent=来源的新版本与新草稿, 不倒写历史。
+ */
+export async function restoreVersion(
+  projectId: number,
+  versionId: number,
+): Promise<VersionRestoreResult> {
+  return api.projects.restoreVersion(projectId, versionId)
 }

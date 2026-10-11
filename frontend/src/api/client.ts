@@ -58,6 +58,7 @@ import type {
   ProjectRole,
   ProjectVersion,
   ProjectVersionCreateInput,
+  VersionRestoreResult,
   PublicAuthSettings,
   RegisterRequest,
   Report,
@@ -990,6 +991,12 @@ export interface ProjectsApi {
   versions(id: number): Promise<ProjectVersion[]>
   /** 从当前草稿创建版本: 请求/响应与后端 VersionCreateRequest/{version} 一一对应。 */
   createVersion(id: number, input: ProjectVersionCreateInput): Promise<ProjectVersion>
+  /**
+   * 恢复历史版本: 与后端 POST .../versions/{vid}/restore 对应。
+   * 请求体沿自动命名(不发送 name/description); 响应唯一 {version, draft}。
+   * draft 仅取 id/revision(刷新摘要所需), 其余字段忽略不猜测。
+   */
+  restoreVersion(projectId: number, versionId: number): Promise<VersionRestoreResult>
   /** 版本详情: 严格消费唯一 {version: {...}} 契约(只返回版本元数据)。 */
   versionDetail(projectId: number, versionId: number): Promise<ProjectVersion>
   archive(id: number): Promise<Project>
@@ -1225,6 +1232,25 @@ export const api = {
       return request<unknown>(`/projects/${projectId}/versions/${versionId}`).then((body) => {
         const rec = asRecord(body)
         return projectVersionFromServer(rec.version)
+      })
+    },
+    restoreVersion(projectId: number, versionId: number): Promise<VersionRestoreResult> {
+      // 唯一 {version, draft} 契约; draft 仅取刷新所需的 id/revision。
+      return request<unknown>(`/projects/${projectId}/versions/${versionId}/restore`, {
+        method: 'POST',
+        body: {},
+      }).then((body) => {
+        const rec = asRecord(body)
+        const version = projectVersionFromServer(rec.version)
+        const draft = rec.draft
+        if (draft === null || typeof draft !== 'object' || Array.isArray(draft)) {
+          throw new Error('invalid version restore envelope')
+        }
+        const d = draft as Record<string, unknown>
+        if (typeof d.id !== 'number' || typeof d.revision !== 'number') {
+          throw new Error('invalid version restore envelope')
+        }
+        return { version, draftId: d.id, draftRevision: d.revision }
       })
     },
     archive(id: number): Promise<Project> {

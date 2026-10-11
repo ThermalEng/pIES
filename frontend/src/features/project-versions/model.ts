@@ -5,7 +5,7 @@
  * 本文件只定义创建表单 model 与提交守卫状态, 不复制后端字段。
  */
 
-import type { ProjectVersion } from '../../types'
+import type { ProjectVersion, VersionRestoreResult } from '../../types'
 
 /** 版本历史展示 model: 即共享 ProjectVersion(字段含义见 types 注释)。 */
 export type VersionModel = ProjectVersion
@@ -22,3 +22,19 @@ export type VersionDetailState =
   | { status: 'loading'; versionId: number }
   | { status: 'loaded'; version: VersionModel }
   | { status: 'failed'; versionId: number; message: string }
+
+/**
+ * 恢复流程状态(confirming 仅打开确认框, 不发送请求; working 处理中防重复;
+ * done 恢复已发生, listRefreshError 仅表示后续列表刷新失败, 不诱导再提交)。
+ */
+export type VersionRestoreState =
+  | { status: 'idle' }
+  | { status: 'confirming'; version: VersionModel }
+  | { status: 'working'; version: VersionModel }
+  | { status: 'failed'; version: VersionModel; message: string }
+  | {
+      status: 'done'
+      version: VersionModel
+      restored: VersionRestoreResult
+      listRefreshError: string | null
+    }

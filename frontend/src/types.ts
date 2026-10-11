@@ -234,6 +234,13 @@ export interface ProjectVersionCreateInput {
   reason?: string
 }
 
+/** 恢复历史版本结果(与后端 restore 响应 {version, draft} 对应)。 */
+export interface VersionRestoreResult {
+  version: ProjectVersion
+  draftId: number
+  draftRevision: number
+}
+
 /** 项目列表筛选参数。 */
 export interface ProjectListParams {
   status?: ProjectStatus

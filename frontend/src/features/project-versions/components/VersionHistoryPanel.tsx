@@ -7,6 +7,8 @@
  *   归档项目后端拒收(ConflictError)时展示后端错误, 不新增前端权限策略。
  * - 详情: 选中行打开, 展示同一版本元数据(基线/币种/schema/内容引用);
  *   详情端点只返回版本元数据, 本页不声称展示完整模型内容。
+ * - 恢复: 详情内进入确认, 仅明确确认无额外关卡; 取消不发请求, 处理中
+ *   防重复, 成功刷新列表与项目摘要, 刷新失败与恢复成功明确区分。
  */
 
 import { useState } from 'react'
@@ -83,14 +85,37 @@ function CreateDialog({
   )
 }
 
-/** 版本详情对话框(仅版本元数据, 非完整模型内容)。 */
-function DetailDialog({ detail, onClose }: { detail: Exclude<VersionDetailState, { status: 'idle' }>; onClose: () => void }) {
+/** 版本详情对话框(仅版本元数据, 非完整模型内容; 附恢复入口)。 */
+function DetailDialog({
+  detail,
+  isCurrent,
+  onRestore,
+  onClose,
+}: {
+  detail: Exclude<VersionDetailState, { status: 'idle' }>
+  isCurrent: boolean
+  onRestore: (version: VersionModel) => void
+  onClose: () => void
+}) {
   const { t } = useI18n()
+  const loaded = detail.status === 'loaded' ? detail.version : null
   return (
     <Dialog open onClose={onClose} title={t('ies.versions.detail_title')} footer={
-      <Button variant="secondary" onClick={onClose}>
-        {t('ies.common.close')}
-      </Button>
+      <>
+        <Button variant="secondary" onClick={onClose}>
+          {t('ies.common.close')}
+        </Button>
+        <Button
+          variant="primary"
+          disabled={loaded === null || isCurrent}
+          title={isCurrent ? t('ies.versions.restore_current_hint') : undefined}
+          onClick={() => {
+            if (loaded !== null) onRestore(loaded)
+          }}
+        >
+          {t('ies.versions.restore_open')}
+        </Button>
+      </>
     }>
       {detail.status === 'loading' ? (
         <div role="status"><Spinner size="md" /> {t('ies.common.loading')}</div>
@@ -127,6 +152,79 @@ function DetailDialog({ detail, onClose }: { detail: Exclude<VersionDetailState,
           </dd>
         </dl>
       )}
+      {isCurrent && loaded !== null ? <p role="note">{t('ies.versions.restore_current_hint')}</p> : null}
+    </Dialog>
+  )
+}
+
+/**
+ * 恢复确认对话框(无名称/描述输入, 沿后端自动命名)。
+ * confirming 仅展示影响不发送请求; working 禁用重复提交;
+ * failed 保留所选版本可重试; done 明确恢复已发生, 刷新失败另行说明。
+ */
+function RestoreDialog({ store }: { store: UseProjectVersions }) {
+  const { t } = useI18n()
+  const restore = store.restore
+  if (restore.status === 'idle') return null
+  const working = restore.status === 'working'
+  return (
+    <Dialog
+      open
+      onClose={() => {
+        if (!working) store.cancelRestore()
+      }}
+      title={t('ies.versions.restore_title')}
+      footer={
+        restore.status === 'done' ? (
+          <Button variant="secondary" onClick={store.closeRestore}>
+            {t('ies.common.close')}
+          </Button>
+        ) : (
+          <>
+            <Button variant="secondary" onClick={store.cancelRestore} disabled={working}>
+              {t('ies.common.cancel')}
+            </Button>
+            <Button variant="primary" onClick={() => void store.confirmRestore()} disabled={working}>
+              {working ? <Spinner size="sm" /> : null}
+              {restore.status === 'failed'
+                ? t('ies.versions.restore_retry')
+                : t('ies.versions.restore_confirm')}
+            </Button>
+          </>
+        )
+      }
+    >
+      <p>
+        {t('ies.versions.restore_target', {
+          no: restore.version.version_no,
+          name: restore.version.name,
+        })}
+      </p>
+      <ul>
+        <li>{t('ies.versions.restore_impact_draft')}</li>
+        <li>{t('ies.versions.restore_impact_pointers')}</li>
+        <li>{t('ies.versions.restore_impact_history')}</li>
+      </ul>
+      {restore.status === 'failed' ? (
+        <Alert variant="error" title={t('ies.versions.restore_failed')}>
+          {restore.message}
+        </Alert>
+      ) : null}
+      {restore.status === 'done' ? (
+        <>
+          <Alert variant="success" title={t('ies.versions.restore_done_title')}>
+            {t('ies.versions.restore_done_desc', {
+              no: restore.restored.version.version_no,
+              revision: restore.restored.draftRevision,
+            })}
+          </Alert>
+          {restore.listRefreshError !== null ? (
+            <Alert variant="warning" title={t('ies.versions.restore_refresh_failed')}>
+              {restore.listRefreshError}
+            </Alert>
+          ) : null}
+        </>
+      ) : null}
     </Dialog>
   )
 }
@@ -238,8 +336,19 @@ export function VersionHistoryPanel({
         onClose={() => setDialogOpen(false)}
       />
       {detailOpen(store.detail) ? (
-        <DetailDialog detail={store.detail} onClose={store.closeDetail} />
+        <DetailDialog
+          detail={store.detail}
+          isCurrent={
+            store.detail.status === 'loaded' && store.detail.version.id === currentVersionId
+          }
+          onRestore={(version) => {
+            store.closeDetail()
+            store.requestRestore(version)
+          }}
+          onClose={store.closeDetail}
+        />
       ) : null}
+      <RestoreDialog store={store} />
     </div>
   )
 }
