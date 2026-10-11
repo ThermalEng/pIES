@@ -15,6 +15,12 @@
 
 ## Unreleased
 
+### 2026-10-11 — 标量运维禁令装配收口（待 Codex 复审）
+
+- 装配公开输入边界按实际消费分量拒收标量 `property`×无时间维度费率被 `period_variable_om` 消费的组合（`ASM-BIND-002`/`period_variable_om_scalar_unsupported`，阻断性）；`upfront_capex`/`annual_fixed_om` 的合法标量驱动与接口时序 `period_variable_om` 全部保留，不全局拒 `property`。
+- 删除因此不可达的内部标量运维载体（`PropertyDriverFacts`、时间轴 `property_drivers` 分支与大声失败、worker 组装分支），不新增求解后/快照读取重复校验；`annual_fixed_om`、`maintenance_expenses`、时序使用运维与 `existing` 增量口径均未改动。
+- Docker 定向：装配拒收/合法放行 2 项、纯财务接口两年不同量归集、真实求解链（K1N2/K0/存量/全期）24 passed 不倒退；ruff 无新增问题（4 项为基线预存）。
+
 ### 2026-10-11 — 运维费用与 0.12 收口范围裁决
 
 - 运维费用分类明确为固定运维费（投产后逐年计取的 `annual_fixed_om` 与按显式发生年扣减的 `maintenance_expenses`）和使用运维费（按实际运行量／发电量逐年归集的 `period_variable_om`）；分类不新增输入字段，使用运维能力全部保留。

@@ -65,24 +65,6 @@ class InterfaceDriverFacts:
 
 
 @dataclass(frozen=True, slots=True)
-class PropertyDriverFacts:
-    """单个存量型可变 O&M driver 的事实(数量全期恒定, 年归属无定义)。
-
-    存量 driver 不参与年度归集: 年费率(CNY/kW/a 等)经公开装配不可达
-    (装配量纲门禁对非 annual 分量只认 currency, 年费率被阻断); 无时间
-    口径的费率(CNY/kW 等)虽可装配, 但其全期合计归属哪一年无权威定
-    义。调用方如实传递, 此处调用即大声失败, 不均摊、不执行。
-    """
-
-    inst: str
-    driver: str
-    quantity: float  # 存量(业务单位, 全期恒定)
-    unit: str
-    unit_cost: Decimal  # 冻结 Decimal
-    unit_cost_unit: str
-
-
-@dataclass(frozen=True, slots=True)
 class AnnualBreakdown:
     """单个完整运营年的净额分量(金额 Decimal, 业务币种)。"""
 
@@ -147,14 +129,13 @@ def annual_variable_om(
     step_seconds: float,
     boundaries: Sequence[tuple[int, int]],
     interface_drivers: Sequence[InterfaceDriverFacts],
-    property_drivers: Sequence[PropertyDriverFacts],
     currency: str,
 ) -> list[Decimal]:
     """各运营年可变 O&M(成本为正)。
 
-    只归集接口型(按该年真实运行结果); 存量型年归属无定义, 有传入即
-    大声失败, 不均摊、不执行(年费率经公开装配不可达, 无口径费率无年
-    度规则, 见 ``PropertyDriverFacts``)。
+    只归集接口型(按该年真实运行结果); 标量存量组合在装配公开输入
+    边界已阻断(``period_variable_om_scalar_unsupported``), 此处只有
+    接口型可达, 不做二次核对、不均摊。
     """
     nets = [0.0 for _ in boundaries]
     for facts in interface_drivers:
@@ -162,11 +143,6 @@ def annual_variable_om(
         qty_j = _step_joules(facts.values, facts.unit, facts.aggregation, step_seconds)
         for year, (start, end) in enumerate(boundaries):
             nets[year] += sum(rate_si * qty_j[step] for step in range(start, end))
-    for facts in property_drivers:
-        raise ValueError(
-            f"可变 O&M {facts.inst}.{facts.driver} 为存量型 driver(费率"
-            f"{facts.unit_cost_unit!r}), 全期合计年归属无定义, 不均摊"
-        )
     return [_decimal(from_si(total, currency)) for total in nets]
 
 

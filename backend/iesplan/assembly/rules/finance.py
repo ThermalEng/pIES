@@ -374,7 +374,32 @@ def _check_driver_target(
             object_id=str(inst_id),
         )
         return
+    is_property_target = "property" in target
     for component, cost_unit in declarations:
+        if component == "period_variable_om" and is_property_target:
+            # 财务规范禁令(装配公开输入边界执行): 标量 property×无时间
+            # 维度费率不得被 period_variable_om 消费(无年份全期金额)。
+            # 有时间维度费率仍走量纲门禁; upfront/annual 的合法标量驱动
+            # 不在此分支判定(按实际消费分量判断, 不全局拒 property)。
+            try:
+                rate_dims = dims_of(cost_unit)
+            except Exception:
+                rate_dims = None
+            if rate_dims is not None and rate_dims.get(_DIM_TIME, 0) == 0:
+                _cost_fail(
+                    diags,
+                    field,
+                    "period_variable_om_scalar_unsupported",
+                    {
+                        "instance": inst_id,
+                        "finance_type": finance_type,
+                        "driver": driver,
+                        "driver_unit": target_unit,
+                        "cost_unit": cost_unit,
+                    },
+                    object_id=str(inst_id),
+                )
+                return
         try:
             product = _add_dims(driver_dims, dims_of(cost_unit))
         except Exception as exc:

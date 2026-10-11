@@ -857,6 +857,65 @@ class TestFinanceGates:
             for d in result.diagnostics
         )
 
+    def test_scalar_upfront_annual_and_interface_period_pass(self, init_registry):
+        """合法组合放行: 标量 property 用于 upfront/annual, period 只用
+        接口时序(园区样例即此形态)。"""
+        result = _validate_campus(_load("campus.assembly.yaml"))
+        assert result.artifact is not None, [d.to_dict() for d in result.diagnostics]
+        assert not any(d.blocking for d in result.diagnostics)
+
+    def test_scalar_period_variable_om_blocked(self, init_registry):
+        """禁令组合阻断: 标量 property×无时间维度费率被 period_variable_om
+        消费, 在装配公开输入边界以明确诊断拒绝, 不进入求解。"""
+        from iesplan.finance import effective_from_yaml
+
+        raw = (SAMPLES_DIR / "finance" / "campus.effective-finance.yaml").read_text(
+            encoding="utf-8"
+        )
+        old_block = (
+            "    period_variable_om:\n"
+            "      linear:\n"
+            "        generated_kwh:\n"
+            "          unit_cost:\n"
+            "            value: '0.01'\n"
+            "            unit: CNY/kWh\n"
+        )
+        assert raw.count(old_block) == 1
+        mutated = raw.replace(
+            old_block,
+            "    period_variable_om:\n"
+            "      linear:\n"
+            "        capacity_kw:\n"
+            "          unit_cost:\n"
+            "            value: '0.01'\n"
+            "            unit: CNY/kW\n",
+        )
+        text = _load("campus.assembly.yaml").replace(
+            "        generated_kwh:\n"
+            "          interface: electric_out\n"
+            "          aggregation: integrate_positive\n",
+            "",
+        )
+        text = text.replace(
+            "    kind: relative_file\n    path: finance/campus.effective-finance.yaml",
+            "    kind: object\n    object_id: fin:scalar-period",
+        )
+        result = validate_assembly_text(
+            text,
+            package_dir=SAMPLES_DIR,
+            finance_snapshots={"fin:scalar-period": effective_from_yaml(mutated)},
+        )
+        assert result.artifact is None
+        diag = next(
+            d
+            for d in result.diagnostics
+            if d.code == "ASM-BIND-002"
+            and d.params.get("reason") == "period_variable_om_scalar_unsupported"
+        )
+        assert diag.blocking
+        assert diag.params.get("driver") == "capacity_kw"
+        assert diag.params.get("cost_unit") == "CNY/kW"
+
 
 # ---------------------------------------------------------------------------
 # 能源计费绑定(ASM-TAR-001)

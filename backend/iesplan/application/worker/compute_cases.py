@@ -536,7 +536,6 @@ def build_financial_evaluation(
     from iesplan.core.contracts import ProjectBaseline
     from iesplan.finance import (
         InterfaceDriverFacts,
-        PropertyDriverFacts,
         TariffYearFacts,
         TimelineInputs,
         annual_boundaries,
@@ -610,13 +609,8 @@ def build_financial_evaluation(
 
     instances = doc["finance_binding"]["instances"]
     devices = doc["devices"]
-    plan_vars = doc["planning"]["variables"]
-    bound: dict[tuple[str, str], str] = {}
-    for var_name, var in plan_vars.items():
-        bound[(var["device_ref"], var["parameter"])] = var_name
 
     interface_drivers: list[InterfaceDriverFacts] = []
-    property_drivers: list[PropertyDriverFacts] = []
     fixed_values: list[float] = []
     upfront_values: list[float] = []
     for inst in sorted(instances):
@@ -633,39 +627,22 @@ def build_financial_evaluation(
         variable = ft_entry.period_variable_om
         if variable is not None:
             # period_variable_om 只有 linear(triplet 禁止非 upfront 带 fixed);
-            # 存量型 linear driver 照常传递, 年归属无定义由 finance 大声失败。
+            # 标量存量组合在装配公开输入边界已阻断, 此处只有接口型可达,
+            # 按年真实运行结果归集, 不均摊。
             for driver, cost in (variable.linear or {}).items():
                 target = entry["drivers"][driver]
-                if "property" in target:
-                    prop = target["property"]
-                    if (inst, prop) in bound:
-                        qty, qty_unit = variables[bound[(inst, prop)]]
-                    else:
-                        const = devices[inst]["properties"][prop]
-                        qty, qty_unit = float(const["value"]), str(const["unit"])
-                    property_drivers.append(
-                        PropertyDriverFacts(
-                            inst=inst,
-                            driver=driver,
-                            quantity=qty,
-                            unit=qty_unit,
-                            unit_cost=cost.unit_cost.value,
-                            unit_cost_unit=cost.unit_cost.unit,
-                        )
+                values, unit = _step_values(variables, series_map, inst, target["interface"], total_steps)
+                interface_drivers.append(
+                    InterfaceDriverFacts(
+                        inst=inst,
+                        driver=driver,
+                        values=values,
+                        unit=unit,
+                        aggregation=target["aggregation"],
+                        unit_cost=cost.unit_cost.value,
+                        unit_cost_unit=cost.unit_cost.unit,
                     )
-                else:
-                    values, unit = _step_values(variables, series_map, inst, target["interface"], total_steps)
-                    interface_drivers.append(
-                        InterfaceDriverFacts(
-                            inst=inst,
-                            driver=driver,
-                            values=values,
-                            unit=unit,
-                            aggregation=target["aggregation"],
-                            unit_cost=cost.unit_cost.value,
-                            unit_cost_unit=cost.unit_cost.unit,
-                        )
-                    )
+                )
         if is_new and ft_entry.upfront_capex is not None:
             upfront_values.append(float(components[f"{inst}__upfront_capex"]["value"]))
 
@@ -679,7 +656,6 @@ def build_financial_evaluation(
         step_seconds=step_seconds,
         boundaries=boundaries,
         interface_drivers=interface_drivers,
-        property_drivers=property_drivers,
         currency=currency,
     )
     fixed_total = annual_fixed_om_total(fixed_values)

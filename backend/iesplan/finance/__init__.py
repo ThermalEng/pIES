@@ -53,7 +53,6 @@ from iesplan.finance.pricecsv import (
 from iesplan.finance.timeline import (
     AnnualBreakdown,
     InterfaceDriverFacts,
-    PropertyDriverFacts,
     TariffYearFacts,
     TimelineInputs,
     annual_boundaries,
@@ -114,7 +113,6 @@ __all__ = [
     # timeline(0.12-T2 评价时间轴现金流)
     "AnnualBreakdown",
     "InterfaceDriverFacts",
-    "PropertyDriverFacts",
     "TariffYearFacts",
     "TimelineInputs",
     "annual_boundaries",
