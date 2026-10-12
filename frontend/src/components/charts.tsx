@@ -1,7 +1,7 @@
 /**
  * 原生 SVG 图表组件(不引入图表库)。
  *
- * - LineChart:多序列折线(逐时曲线),超出 maxPoints 自动抽稀(8760 点 -> 约 1000 点)。
+ * - LineChart:多序列折线(计算步序列, 横轴为步序号),超出 maxPoints 自动抽稀。
  * - ScatterChart:Pareto 候选点散点图,支持键盘/鼠标选择。
  *
  * 颜色使用设计系统语义色的十六进制值,与 styles.css 令牌一致。
@@ -25,6 +25,8 @@ export interface LineChartProps {
   ariaLabel: string
   /** Y 轴标题(可选)。 */
   yLabel?: string
+  /** X 轴标题(可选, 计算步序号说明)。 */
+  xLabel?: string
   /** 最多渲染点数(超出按步长抽稀)。 */
   maxPoints?: number
   /** 高度(px,viewBox 逻辑单位)。 */
@@ -65,7 +67,7 @@ function formatAxisValue(v: number): string {
 }
 
 /** 多序列折线图。 */
-export function LineChart({ series, ariaLabel, yLabel, maxPoints = 1000, height = 240 }: LineChartProps) {
+export function LineChart({ series, ariaLabel, yLabel, xLabel, maxPoints = 1000, height = 240 }: LineChartProps) {
   const plot = useMemo(() => {
     const n = series.reduce((max, s) => Math.max(max, s.values.length), 0)
     const step = Math.max(1, Math.ceil(n / maxPoints))
@@ -137,10 +139,20 @@ export function LineChart({ series, ariaLabel, yLabel, maxPoints = 1000, height 
                 className="ies-chart__tick"
                 textAnchor={i === 0 ? 'start' : 'end'}
               >
-                H{Math.round(i * step)}
+                {Math.round(i * step)}
               </text>
             ))
           : null}
+        {xLabel ? (
+          <text
+            x={W / 2}
+            y={height - 6}
+            className="ies-chart__tick"
+            textAnchor="middle"
+          >
+            {xLabel}
+          </text>
+        ) : null}
         {yLabel ? (
           <text
             x={9}

@@ -8,7 +8,7 @@
  * - 财务:投资 / 运行成本 / 收益 / 现金流表 / IRR 状态
  *   (唯一、无解、多解、退化、超出定义域、数值失败)。
  * - 环境:运行碳排放 / 排放边界 / 因子版本。
- * - 工程:能源平衡表(电/热/冷)、设备容量、逐时曲线(SVG 折线)、峰值、购售电、需量。
+ * - 工程:能源平衡表(电/热/冷)、设备容量、计算步曲线(SVG 折线, 横轴为步序号)、峰值、购售电、需量。
  * - 候选方案:真实候选列表(#index),选择只记录采用,不创建版本;
  *   规划解参数预览(封存解 × 冻结规划绑定);应用方案以后者为权威,
  *   在来源版本工作状态上写回并派生新版本(切换为当前)。
@@ -193,7 +193,7 @@ export default function ResultsPage() {
   const [noEvidence, setNoEvidence] = useState(false)
   const [resultDiag, setResultDiag] = useState<Diagnostic[]>([])
   const [assessments, setAssessments] = useState<ResultAssessment[]>([])
-  const [hourly, setHourly] = useState<{ resolution: string; n: number; flows: Record<string, number[]> } | null>(null)
+  const [hourly, setHourly] = useState<{ flows: Record<string, number[]> } | null>(null)
   const [resultError, setResultError] = useState<string | null>(null)
 
   // 真实候选列表/规划解/快照引用(随选中证据包加载, 不按指标键反解)
@@ -496,7 +496,17 @@ export default function ResultsPage() {
     return idx >= 0 ? candidates[idx] : null
   }, [selectedCandidateId, candidates])
 
-  // 逐时曲线序列
+  // 计算步序列展示计数: 取自实际取得的各字段数据点数(非硬编码)。
+  const hourlyPointCount = useMemo(() => {
+    if (!hourly) return 0
+    let max = 0
+    for (const v of Object.values(hourly.flows)) {
+      if (v.length > max) max = v.length
+    }
+    return max
+  }, [hourly])
+
+  // 计算步序列(横轴为步序号, 非小时)
   const hourlySeries = useMemo(() => {
     if (!hourly) return { power: [] as LineSeries[], soc: [] as LineSeries[] }
     const f = hourly.flows
@@ -934,11 +944,11 @@ export default function ResultsPage() {
             ) : null}
           </Card>
 
-          {/* 逐时曲线 */}
+          {/* 计算步序列(横轴为步序号) */}
           {hourlySeries.power.length > 0 || hourlySeries.soc.length > 0 ? (
             <Card title={t('ies.result.hourly_chart')} className="ies-section">
               <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
-                {t('ies.result.hourly_note', { n: 168 })}
+                {t('ies.result.hourly_note', { n: hourlyPointCount })}
               </p>
               {hourlySeries.power.length > 0 ? (
                 <div className="ies-section">
@@ -946,6 +956,7 @@ export default function ResultsPage() {
                     series={hourlySeries.power}
                     ariaLabel={t('ies.result.hourly_chart')}
                     yLabel={t('ies.unit.kw')}
+                    xLabel={t('ies.result.hourly_step_axis')}
                   />
                 </div>
               ) : null}
@@ -954,6 +965,7 @@ export default function ResultsPage() {
                   series={hourlySeries.soc}
                   ariaLabel={t('ies.result.series_soc')}
                   yLabel={t('ies.result.series_soc')}
+                  xLabel={t('ies.result.hourly_step_axis')}
                 />
               ) : null}
             </Card>

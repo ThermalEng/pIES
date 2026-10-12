@@ -88,6 +88,7 @@ import type {
   ValidationResult,
 } from '../types'
 import { ApiError } from '../types'
+import { collectHourlyValues } from './hourlyPages'
 
 const API_BASE = '/api'
 
@@ -1239,7 +1240,7 @@ export interface ResultsApi {
     assessmentType: 'full' | 'physical' | 'optimality' | 'financial' | 'reliability',
   ): Promise<ResultAssessment>
   select(projectId: number, taskId: number, input: { result_index_id: number; reason?: string }): Promise<ResultSelection>
-  hourly(projectId: number, taskId: number): Promise<{ resolution: string; n: number; flows: Record<string, number[]> }>
+  hourly(projectId: number, taskId: number): Promise<{ flows: Record<string, number[]> }>
 }
 
 export interface ExportsApi {
@@ -1782,9 +1783,10 @@ export const api = {
         }
       })
     },
-    hourly(projectId: number, taskId: number): Promise<{ resolution: string; n: number; flows: Record<string, number[]> }> {
+    hourly(projectId: number, taskId: number): Promise<{ flows: Record<string, number[]> }> {
       // 后端 hourly 为单字段分页查询(需 field 参数): 先取结果视图的 hourly_refs
-      // 字段清单, 再并行拉取各字段完整序列组装 flows。
+      // 字段清单, 再并行拉取各字段完整序列组装 flows。单字段超过后端
+      // MAX_HOURLY_LIMIT 时按公开 next_start 分页读到 null 为止(见 hourlyPages)。
       // 结果视图复用 result() 已拉取的缓存(避免同一次选中重复 GET 同一端点)。
       const cacheKey = `${projectId}:${taskId}`
       const pending = resultBodyCache.get(cacheKey)
@@ -1807,12 +1809,17 @@ export const api = {
         const pages = await Promise.all(
           fields.map(async (field) => {
             try {
-              const page = asRecord(
-                await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/hourly`, {
-                  query: { field, start: 0, end: rows, limit: Math.max(rows, 1) },
-                }),
+              const values = await collectHourlyValues(
+                (start, limit) =>
+                  request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/hourly`, {
+                    query: { field, start, end: rows, limit },
+                  }).then((pageBody) => {
+                    const page = asRecord(pageBody)
+                    return { values: page.values as number[], next_start: page.next_start as number | null }
+                  }),
+                rows,
               )
-              return [field, page.values] as const
+              return [field, values] as const
             } catch {
               // 单字段读取失败不影响其余字段
               return null
@@ -1823,7 +1830,7 @@ export const api = {
         for (const hit of pages) {
           if (hit && Array.isArray(hit[1])) flows[hit[0]] = hit[1] as number[]
         }
-        return { resolution: '', n: rows, flows }
+        return { flows }
       })
     },
   } satisfies ResultsApi,
