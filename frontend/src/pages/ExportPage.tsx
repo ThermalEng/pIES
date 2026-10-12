@@ -92,14 +92,14 @@ export default function ExportPage() {
     setOkMsg(null)
     setExportBusy('excel')
     try {
-      // lang 为前端约定附加参数(适配层透传给后端,缺省 zh)
-      const input = {
+      // lang 为契约字段(缺省 zh 由适配层按后端约定补齐)
+      const input: ExcelExportInput = {
         project_id: projectId,
         evidence_package_id: evidence,
         include_hourly: true,
         include_diagnostics: true,
         lang,
-      } as ExcelExportInput
+      }
       const report = await api.exports.excel(input)
       const { blob, filename } = await api.exports.download(report.id)
       downloadBlob(blob, filename)

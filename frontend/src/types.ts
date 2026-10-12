@@ -905,6 +905,8 @@ export interface ExcelExportInput {
   evidence_package_id?: EntityId
   include_hourly?: boolean
   include_diagnostics?: boolean
+  /** 报告语言(与后端 ExcelExportRequest.lang 一致, 缺省 zh)。 */
+  lang?: 'zh' | 'en'
 }
 
 export interface PackageExportInput {

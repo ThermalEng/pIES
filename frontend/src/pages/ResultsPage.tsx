@@ -642,13 +642,13 @@ export default function ResultsPage() {
     try {
       // 评估缓存已由选中包加载效应填充(pkgAssessmentCache);
       // 若评估历史为空,api.exports.excel → resolveAssessmentId 内部会主动触发 full 评估。
-      const input = {
+      const input: ExcelExportInput = {
         project_id: projectId,
         evidence_package_id: selectedPkgId,
         include_hourly: true,
         include_diagnostics: true,
         lang: exportLang,
-      } as ExcelExportInput
+      }
       const report = await api.exports.excel(input)
       const { blob, filename } = await api.exports.download(report.id)
       downloadBlob(blob, filename)

@@ -1838,7 +1838,7 @@ export const api = {
           body: {
             evidence_package_id: input.evidence_package_id,
             assessment_id: assessmentId,
-            lang: (input as unknown as { lang?: string }).lang ?? 'zh',
+            lang: input.lang ?? 'zh',
           },
         }).then((body) => {
           // 后端返回 {token, file_name, ...}: 记录下载会话, 返回 Report 形态(id=会话 id)
