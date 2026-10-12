@@ -85,20 +85,24 @@ test.describe('场景 8: 帮助中心', () => {
     await expect(page.getByText('开发者指南').first()).toBeVisible()
     await expect(page.getByText('更新日志').first()).toBeVisible()
 
-    // 进入使用者指南 → 快速开始
-    await page.getByText('快速开始').first().click()
+    // 进入系统架构蓝图(开发者指南下正式章节, 确有代码块与表格;
+    // 快速开始正文无代码块、宪法正文无表格, 不以缺素材断言渲染失败)
+    await page.getByText('系统架构蓝图').first().click()
     // RR-P2-10: 规范 locale 为 zh-CN(manual/SUMMARY.zh-CN.md 登记), 不是 zh
     await expect(page).toHaveURL(/\/help\/zh-CN\/[^/]+/i)
 
-    // Markdown 内容渲染(标题 / 代码块)
+    // Markdown 内容渲染(标题 / 代码块真实内容, 非仅存在性)
     const content = page.locator('.ies-help__content')
     await expect(content).toBeVisible()
     await expect(content.locator('.ies-help__title, .ies-help__h1').first()).toBeVisible({ timeout: 10_000 })
-    await expect(content.locator('pre.ies-help__code, code').first()).toBeVisible()
+    const codeBlock = content.locator('pre.ies-help__code').first()
+    await expect(codeBlock).toBeVisible()
+    await expect(codeBlock).toContainText('GeneratorProvider')
 
-    // 表格渲染: 快速开始无表格, 跳转到"架构宪法"(含 Markdown 表格)验证
-    await page.getByText('架构宪法').first().click()
-    await expect(page.locator('.ies-help__content table.ies-help__table').first()).toBeVisible({ timeout: 10_000 })
+    // 表格渲染(真实单元格内容, 非仅存在性)
+    const table = content.locator('table.ies-help__table').first()
+    await expect(table).toBeVisible({ timeout: 10_000 })
+    await expect(table).toContainText('DeviceDescriptor')
 
     // 章节跳转(下一页)
     const nextBtn = page.getByRole('link', { name: /下一页|Next/i })
@@ -113,8 +117,8 @@ test.describe('场景 8: 帮助中心', () => {
     await prevBtn.click()
     await expect(page).toHaveURL(urlBefore)
 
-    // 返回应用(顶部按钮)
-    await page.getByRole('link', { name: /返回应用|Back to app/i }).click()
+    // 返回应用(帮助页无专用返回按钮, 经顶部统一导航的项目列表入口返回)
+    await page.getByRole('navigation', { name: /项目列表|Projects/i }).getByText(/项目列表|Projects/i).click()
     await expect(page).toHaveURL(/\/$/)
 
     session.assertNoErrors()
