@@ -36,6 +36,31 @@ async function tableRowTexts(page: Page): Promise<string[]> {
   return page.getByRole('table').locator('tbody tr').allInnerTexts()
 }
 
+interface AuditRow {
+  text: string
+  timeTitle: string | null
+  entryId: string | null
+}
+
+/** 表格行文本 + 时间 title(原始 occurred_at)+entry id。 */
+async function tableRows(page: Page): Promise<AuditRow[]> {
+  return page
+    .getByRole('table')
+    .locator('tbody tr')
+    .evaluateAll((trs) =>
+      trs.map((tr) => ({
+        text: (tr as HTMLElement).innerText ?? '',
+        timeTitle: tr.querySelector('td:first-child span')?.getAttribute('title') ?? null,
+        entryId: tr.getAttribute('data-entry-id'),
+      })),
+    )
+}
+
+/** 当天日期(UTC)前缀, 与审计 occurred_at ISO 对照。 */
+function todayPrefix(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
 /** 点击“更多”直到没有下一页, 返回累积行数。 */
 async function loadAllPages(page: Page): Promise<number> {
   for (;;) {
@@ -60,7 +85,7 @@ test.describe('审计日志只读查看', () => {
     const projectName = uniqueName('审计项目')
     const profileId = uniqueName('aud-tariff')
     const apiCtx = await browser.newContext({ baseURL: APP })
-    const owner = await createEngineer(apiCtx.request, ownerName, password)
+    await createEngineer(apiCtx.request, ownerName, password)
     const importer = await createEngineer(apiCtx.request, importerName, password)
     const ownerToken = await loginToken(apiCtx.request, ownerName, password)
     const importerToken = await loginToken(apiCtx.request, importerName, password)
@@ -164,7 +189,18 @@ test.describe('审计日志只读查看', () => {
     expect(uploaded.ok()).toBe(true)
     const proposal = (await uploaded.json()).proposal
     expect(proposal.project_id).toBeNull()
-    await requestJson(apiCtx.request, 'POST', `/api/projects/import/${proposal.id}/confirm`, {}, importerToken)
+    const proposalId: number = proposal.id
+    const confirmed = await requestJson(apiCtx.request, 'POST', `/api/projects/import/${proposalId}/confirm`, {}, importerToken)
+    const importedPid: number = confirmed.project.id
+    expect(importedPid).toBeTruthy()
+    // 本轮独有集合: 11 个手动版本(隔离筛选遍历用, 不依赖全站残留)。
+    const bulkIds: number[] = []
+    for (let i = 0; i < 11; i += 1) {
+      const v = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/versions`, {
+        name: `aud-bulk-${i}`, reason: 'manual_save',
+      }, ownerToken)
+      bulkIds.push(v.version.id as number)
+    }
 
     // 版本/应用/恢复的真实版本 id(经公开列表复核, 不猜)。
     const versions = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/versions`, undefined, ownerToken)
@@ -175,33 +211,57 @@ test.describe('审计日志只读查看', () => {
     expect(appliedId).toBeTruthy()
     expect(restoredId).toBeTruthy()
 
-    // 管理员 GUI 查看: 首屏恰一页(10 行)且有下一页; 翻页后行 id 唯一。
+    // 管理员 GUI 查看: 首屏恰一页(10 行)且有下一页(后端游标已修正, 详见后端回归)。
     const context = await browser.newContext()
     const page = await context.newPage()
     await createSession(page, 'admin', ADMIN_PASSWORD)
     await page.goto('/')
     await openAuditPage(page)
     expect(await page.getByRole('table').locator('tbody tr').count()).toBe(10)
-    const total = await loadAllPages(page)
-    expect(total).toBeGreaterThan(10)
-    // 翻页无重复: 行 entry id 唯一; 本轮已知事件无遗漏见下述三元核对。
-    const entryIds = await page
-      .getByRole('table')
-      .locator('tbody tr')
-      .evaluateAll((trs) => trs.map((tr) => tr.getAttribute('data-entry-id')))
-    expect(new Set(entryIds).size).toBe(entryIds.length)
-    const rows = await tableRowTexts(page)
-    // 已知事件都在: 动作/操作者/对象三元逐项核对, 时间列非空由行结构保证。
-    for (const [action, actorId, entity] of [
-      ['project.version_created', owner.id, `project_version #${v1Id}`],
-      ['project.version_restored', owner.id, `project_version #${restoredId}`],
-      ['project.result_applied', owner.id, `project_version #${appliedId}`],
-      ['import.proposal_created', importer.id, 'import_proposals #'],
-      ['project.imported', importer.id, 'project #'],
-    ] as Array<[string, number, string]>) {
-      const hit = rows.filter((r) => r.includes(action) && r.includes(`user #${actorId}`) && r.includes(entity))
-      expect(hit.length).toBeGreaterThanOrEqual(1)
+    await expect(page.getByRole('button', { name: /^(更多|More)$/ })).toBeVisible({ timeout: 10_000 })
+    // 隔离筛选到本轮已知集合: 11 个独有版本 + v1/应用/恢复版本, 遍历各页
+    // 核对完整预期 entity 集合(entry id 唯一), 不依赖全站残留数量。
+    await page.locator('#audit-filter-action').fill('project.version_created')
+    await page.getByRole('button', { name: /应用筛选|Apply filters/i }).click()
+    await expect(async () => {
+      expect(await page.getByRole('table').locator('tbody tr').count()).toBeGreaterThan(0)
+    }).toPass({ timeout: 30_000 })
+    await loadAllPages(page)
+    const created = await tableRows(page)
+    const createdIds = created.map((r) => r.entryId)
+    expect(new Set(createdIds).size).toBe(createdIds.length)
+    const entityIds = new Set<number>()
+    for (const r of created) {
+      expect(r.text).toContain('project.version_created')
+      const m = r.text.match(/project_version #(\d+)/)
+      if (m) entityIds.add(Number(m[1]))
+      expect(r.timeTitle).toContain(todayPrefix())
     }
+    for (const vid of [...bulkIds, v1Id, appliedId, restoredId]) {
+      expect(entityIds.has(vid)).toBe(true)
+    }
+    // 导入两类行断言精确实际对象 ID(前缀匹配会误命中其他事件)。
+    await page.locator('#audit-filter-action').fill('project.imported')
+    await page.getByRole('button', { name: /应用筛选|Apply filters/i }).click()
+    await expect(async () => {
+      const rows = await tableRows(page)
+      const hit = rows.filter(
+        (r) => r.text.includes(`project #${importedPid}`) && r.text.includes(`user #${importer.id}`),
+      )
+      expect(hit.length).toBeGreaterThanOrEqual(1)
+      for (const r of hit) expect(r.timeTitle).toContain(todayPrefix())
+    }).toPass({ timeout: 30_000 })
+    await page.locator('#audit-filter-action').fill('import.proposal_created')
+    await page.getByRole('button', { name: /应用筛选|Apply filters/i }).click()
+    await expect(async () => {
+      const rows = await tableRows(page)
+      const hit = rows.filter(
+        (r) =>
+          r.text.includes(`import_proposals #${proposalId}`) && r.text.includes(`user #${importer.id}`),
+      )
+      expect(hit.length).toBeGreaterThanOrEqual(1)
+      for (const r of hit) expect(r.timeTitle).toContain(todayPrefix())
+    }).toPass({ timeout: 30_000 })
     // 操作筛选: 只剩该动作。
     await page.locator('#audit-filter-action').fill('project.result_applied')
     await page.getByRole('button', { name: /应用筛选|Apply filters/i }).click()

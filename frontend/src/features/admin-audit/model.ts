@@ -7,13 +7,6 @@
 
 import type { AuditEntry } from '../../types'
 
-/** 筛选输入(原始字符串; 对象标识在应用时校验为整数)。 */
-export interface AuditFilterInput {
-  action: string
-  entityType: string
-  entityId: string
-}
-
 /** 已应用的查询(与 AuditListParams 对齐的可选子集)。 */
 export interface AppliedAuditQuery {
   action?: string

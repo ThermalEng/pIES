@@ -608,55 +608,24 @@ function projectVersionFromServer(v: unknown): ProjectVersion {
 }
 
 /**
- * 审计记录映射(与后端 entry_to_dict 字段一一对应; 字段缺失或形状非法即
- * 抛错, 由调用方展示读取失败, 不伪造、不补默认)。
+ * 审计记录映射(后端 entry_to_dict 可信字段直接消费, 一次映射; 不回填
+ * 缺失、不做 Number/String 猜测、不逐字段重复验证)。
  */
 function auditEntryFromServer(v: unknown): AuditEntry {
-  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
-    throw new Error('invalid audit entry envelope')
-  }
-  const r = v as Record<string, unknown>
-  const num = (key: string): number => {
-    const val = r[key]
-    if (typeof val !== 'number' || !Number.isFinite(val)) throw new Error(`invalid audit entry field: ${key}`)
-    return val
-  }
-  const nullableNum = (key: string): number | null => {
-    const val = r[key]
-    if (val === null || val === undefined) return null
-    if (typeof val !== 'number' || !Number.isFinite(val)) throw new Error(`invalid audit entry field: ${key}`)
-    return val
-  }
-  const str = (key: string): string => {
-    const val = r[key]
-    if (typeof val !== 'string') throw new Error(`invalid audit entry field: ${key}`)
-    return val
-  }
-  const nullableStr = (key: string): string | null => {
-    const val = r[key]
-    if (val === null || val === undefined) return null
-    if (typeof val !== 'string') throw new Error(`invalid audit entry field: ${key}`)
-    return val
-  }
-  const nullableObj = (key: string): Record<string, unknown> | null => {
-    const val = r[key]
-    if (val === null || val === undefined) return null
-    if (typeof val !== 'object' || Array.isArray(val)) throw new Error(`invalid audit entry field: ${key}`)
-    return val as Record<string, unknown>
-  }
+  const r = asRecord(v)
   return {
-    id: num('id'),
-    entity_type: nullableStr('entity_type'),
-    entity_id: nullableNum('entity_id'),
-    action: str('action'),
-    actor_id: nullableNum('actor_id'),
-    actor_type: nullableStr('actor_type'),
-    occurred_at: str('occurred_at'),
-    ip: nullableStr('ip'),
-    before: nullableObj('before'),
-    after: nullableObj('after'),
-    request_id: nullableStr('request_id'),
-    trace_id: nullableStr('trace_id'),
+    id: r.id as number,
+    entity_type: r.entity_type as string | null,
+    entity_id: r.entity_id as number | null,
+    action: r.action as string,
+    actor_id: r.actor_id as number | null,
+    actor_type: r.actor_type as string | null,
+    occurred_at: r.occurred_at as string,
+    ip: r.ip as string | null,
+    before: r.before as Record<string, unknown> | null,
+    after: r.after as Record<string, unknown> | null,
+    request_id: r.request_id as string | null,
+    trace_id: r.trace_id as string | null,
   }
 }
 

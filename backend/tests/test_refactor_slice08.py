@@ -113,7 +113,42 @@ def test_audit_service_envelope_and_serialization(db: Session) -> None:
     }
     assert isinstance(item["occurred_at"], str)
 
-    # next_cursor 指向页外末条：再取一页为空且无后续游标
+    # next_cursor 指向最后一条实际展示行：下一页继续展示剩余行，末页无游标
+    # （旧实现曾指向未展示的探测行，导致探测行被 `id < cursor` 永远跳过）。
+    assert envelope["next_cursor"] == item["id"]
     tail = audit_domain.query_audit(db, cursor=envelope["next_cursor"], limit=1)
-    assert tail["items"] == [] and tail["next_cursor"] is None
+    assert [r["id"] for r in tail["items"]] != [item["id"]] and len(tail["items"]) == 1
+    assert tail["next_cursor"] is None
     assert audit_domain.query_audit(db, action="no.such.action")["items"] == []
+
+
+def test_audit_cursor_points_at_last_shown_row(db: Session) -> None:
+    """分页游标回归：12 条记录 limit=5，逐页 ID 精确集合/顺序，不重不漏。
+
+    旧实现 `next_cursor=rows[-1].id` 取未展示探测行（首页展示 ID 前 5
+    却返回第 6 行 ID），下一页 `id < cursor` 使探测行永久丢失；
+    修正后游标恒为最后展示行 ID。
+    """
+    made = [
+        audit_domain.append_entry(
+            db, actor_id=7, action="page.probe", entity_type="probe", entity_id=i,
+        ).id
+        for i in range(1, 13)
+    ]
+    db.commit()
+    desc = sorted(made, reverse=True)
+
+    page1 = audit_domain.query_audit(db, action="page.probe", limit=5)
+    assert [r["id"] for r in page1["items"]] == desc[:5]
+    assert page1["next_cursor"] == desc[4]
+
+    page2 = audit_domain.query_audit(db, action="page.probe", limit=5, cursor=page1["next_cursor"])
+    assert [r["id"] for r in page2["items"]] == desc[5:10]
+    assert page2["next_cursor"] == desc[9]
+
+    page3 = audit_domain.query_audit(db, action="page.probe", limit=5, cursor=page2["next_cursor"])
+    assert [r["id"] for r in page3["items"]] == desc[10:]
+    assert page3["next_cursor"] is None
+
+    seen = [r["id"] for r in page1["items"] + page2["items"] + page3["items"]]
+    assert sorted(seen) == sorted(made)

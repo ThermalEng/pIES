@@ -264,7 +264,9 @@ def query_audit(
         limit=limit + 1,
     )
     items = [entry_to_dict(row) for row in rows[:limit]]
-    next_cursor = rows[-1].id if len(rows) > limit else None
+    # 游标必须指向最后一条实际展示行(rows[limit-1]), 不能用未展示的
+    # 探测行(rows[-1]), 否则下一页 `id < cursor` 会永远跳过探测行。
+    next_cursor = rows[limit - 1].id if len(rows) > limit else None
     return {"items": items, "next_cursor": next_cursor}
 
 

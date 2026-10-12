@@ -14,8 +14,10 @@ import { formatDateTime } from '../../../lib/format'
 import type { AuditEntry } from '../../../types'
 import { useAdminAudit } from '../hooks/useAdminAudit'
 
+/** 操作者展示: 类型恒保留(如 system), ID 缺席仅省略、不伪造用户。 */
 function actorText(entry: AuditEntry): string {
-  if (entry.actor_type === null || entry.actor_id === null) return '—'
+  if (entry.actor_type === null) return '—'
+  if (entry.actor_id === null) return entry.actor_type
   return `${entry.actor_type} #${entry.actor_id}`
 }
 
