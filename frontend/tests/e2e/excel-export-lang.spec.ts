@@ -24,7 +24,8 @@ const EVALUATION = {
   maintenance_expenses: [],
 }
 
-/** xlsx(zip) 各成员解压拼合(纯 node; openpyxl 输出无 data-descriptor)。 */
+/** xlsx(zip) 各成员解压拼合(纯 node; openpyxl 输出无 data-descriptor)。
+ * 解压异常直接抛出使测试失败, 不吞错。 */
 function xlsxText(buf: Buffer): string {
   const parts: string[] = []
   let off = 0
@@ -36,15 +37,17 @@ function xlsxText(buf: Buffer): string {
     const extraLen = buf.readUInt16LE(off + 28)
     const start = off + 30 + nameLen + extraLen
     const data = buf.subarray(start, start + compSize)
-    try {
-      parts.push((method === 8 ? zlib.inflateRawSync(data) : data).toString('utf8'))
-    } catch {
-      // 损坏成员不掩盖: 调用方按标记缺席判定失败
-    }
+    parts.push((method === 8 ? zlib.inflateRawSync(data) : data).toString('utf8'))
     off = start + compSize
   }
   return parts.join('\n')
 }
+
+// 后端写入的生成语言行全文(transfers.py): zh 为“生成语言: 简体中文 /
+// Language: zh”, en 为“生成语言: English / Language: en”; 报告其余
+// 标题/列名固定中英双语, 本片只核对该语言行, 不宣称整份报告已本地化。
+const ZH_LANG_LINE = '生成语言: 简体中文 / Language: zh'
+const EN_LANG_LINE = '生成语言: English / Language: en'
 
 interface ExcelPost {
   lang: string
@@ -172,8 +175,8 @@ test.describe('R8: Excel 导出语言', () => {
     const zhPkg = posts[0]?.evidence_package_id
     expect(zhPkg).toBeGreaterThan(0)
     const zhText = xlsxText(zhBuf)
-    expect(zhText).toContain('Language: zh')
-    expect(zhText).not.toContain('Language: en')
+    expect(zhText).toContain(ZH_LANG_LINE)
+    expect(zhText).not.toContain(EN_LANG_LINE)
 
     // 结果页: 切换英文导出, 同一证据来源。
     await page.locator('#export-lang').selectOption('en')
@@ -182,19 +185,26 @@ test.describe('R8: Excel 导出语言', () => {
     expect(posts[1]?.lang).toBe('en')
     expect(posts[1]?.evidence_package_id).toBe(zhPkg)
     const enText = xlsxText(enBuf)
-    expect(enText).toContain('Language: en')
-    expect(enText).not.toContain('Language: zh')
+    expect(enText).toContain(EN_LANG_LINE)
+    expect(enText).not.toContain(ZH_LANG_LINE)
 
-    // 独立导出页: 英文导出, 同一证据来源。
+    // 独立导出页: 先走中文默认选择→真实下载, 再切换英文导出, 同一证据来源。
     await page.goto(`/projects/${pid}/export`)
+    const expZhBuf = await exportAndRead(page, /导出 Excel 报告|Export Excel report/i)
+    expect(posts.length).toBe(3)
+    expect(posts[2]?.lang).toBe('zh')
+    expect(posts[2]?.evidence_package_id).toBe(zhPkg)
+    const expZhText = xlsxText(expZhBuf)
+    expect(expZhText).toContain(ZH_LANG_LINE)
+    expect(expZhText).not.toContain(EN_LANG_LINE)
     await page.locator('#export-lang').selectOption('en')
     const expBuf = await exportAndRead(page, /导出 Excel 报告|Export Excel report/i)
-    expect(posts.length).toBe(3)
-    expect(posts[2]?.lang).toBe('en')
-    expect(posts[2]?.evidence_package_id).toBe(zhPkg)
+    expect(posts.length).toBe(4)
+    expect(posts[3]?.lang).toBe('en')
+    expect(posts[3]?.evidence_package_id).toBe(zhPkg)
     const expText = xlsxText(expBuf)
-    expect(expText).toContain('Language: en')
-    expect(expText).not.toContain('Language: zh')
+    expect(expText).toContain(EN_LANG_LINE)
+    expect(expText).not.toContain(ZH_LANG_LINE)
 
     // 缺省语言: 原始 API 调用不带 lang, 既有 zh 语义生效(不新增默认)。
     // GUI 登录已接管会话, API 再读前重登(此后无 GUI 动作)。
@@ -203,15 +213,9 @@ test.describe('R8: Excel 导出语言', () => {
       apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result/assessments`, undefined, freshToken,
     )
     const items = assessments.items as Array<{ id: number }>
-    let assessmentId: number
-    if (items.length > 0) {
-      assessmentId = items[0].id
-    } else {
-      const created = await requestJson(
-        apiCtx.request, 'POST', `/api/projects/${pid}/tasks/${taskId}/result/assess`, { assessment_type: 'full' }, freshToken,
-      )
-      assessmentId = (created.assessment as { id: number }).id
-    }
+    // GUI 导出前序已创建评估: 直接消费真实列表并断言存在, 不补建备用分支。
+    expect(items.length).toBeGreaterThan(0)
+    const assessmentId = (items[0] as { id: number }).id
     const rawExport = await apiCtx.request.post(`${APP}/api/projects/${pid}/exports/excel`, {
       headers: { Authorization: `Bearer ${freshToken}` },
       data: { evidence_package_id: zhPkg, assessment_id: assessmentId },
@@ -224,8 +228,8 @@ test.describe('R8: Excel 导出语言', () => {
     )
     if (!dl.ok()) throw new Error(`download excel -> ${dl.status()}`)
     const defaultText = xlsxText(Buffer.from(await dl.body()))
-    expect(defaultText).toContain('Language: zh')
-    expect(defaultText).not.toContain('Language: en')
+    expect(defaultText).toContain(ZH_LANG_LINE)
+    expect(defaultText).not.toContain(EN_LANG_LINE)
 
     await apiCtx.close()
     await context.close()
