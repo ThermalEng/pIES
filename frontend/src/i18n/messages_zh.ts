@@ -165,6 +165,9 @@ export const messagesZh: Record<string, string> = {
   'ies.import.confirm_failed': '确认导入失败（同一提案可重试）',
   'ies.import.done_title': '已导入为新项目（{name}）',
   'ies.import.done_hint': '项目列表已刷新，可以打开新项目查看恢复的内容。',
+  'ies.import.refreshing': '正在刷新项目列表……',
+  'ies.import.refresh_failed': '导入成功，但项目列表刷新失败；可单独重试刷新，或直接打开新项目。',
+  'ies.import.retry_refresh': '重试刷新列表',
   'ies.import.open_project': '打开新项目',
 
   // -------------------------------------------------------------------------

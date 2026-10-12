@@ -25,4 +25,8 @@ export type ImportFlowState =
   | { status: 'proposed'; proposal: ImportProposal; view: ProposalView }
   | { status: 'confirming'; proposal: ImportProposal; view: ProposalView }
   | { status: 'confirmFailed'; proposal: ImportProposal; view: ProposalView; message: string }
-  | { status: 'done'; proposal: ImportProposal; view: ProposalView; project: Project }
+  /**
+   * 导入已成功(不可逆业务成功); refresh 只跟踪其后列表刷新的展示状态,
+   * 刷新失败不改变导入成功事实, 仅允许单独重试列表读取。
+   */
+  | { status: 'done'; proposal: ImportProposal; view: ProposalView; project: Project; refresh: 'pending' | 'ok' | 'failed' }

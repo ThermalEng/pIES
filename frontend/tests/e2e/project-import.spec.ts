@@ -1,5 +1,7 @@
 // S4-C 项目包导入 GUI 验收: 上传→提案→确认前无新项目→确认→新项目可用;
-// 取消确认不创建项目; 非法包服务端原因可见; 模拟网络故障后同一提案可重试。
+// 取消确认不创建项目; 非法包服务端原因可见; 模拟网络故障后同一提案可重试;
+// C1 打开新项目后重开即全新流程; C2 导入成功与列表刷新区分展示、刷新失败
+// 可单独重试(计数确认 POST, 不重发确认/不重传文件)。
 //
 // 脚手架(用户/项目/财务/版本/导出)走公开 API, 上传/确认/取消的被测动作必须
 // 经 GUI 完成, 不 mock、不注库、不注前端状态。历史关键值用两组不同电价
@@ -122,6 +124,8 @@ test.describe('S4-C: 项目包导入 GUI', () => {
     await page.getByRole('button', { name: '确认导入' }).click({ timeout: 30_000 })
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByText(/已导入为新项目/)).toBeVisible({ timeout: 60_000 })
+    // 正常路径: “已刷新”文案只在实际列表刷新成功后出现, 非确认成功即声称。
+    await expect(dialog.getByText(/项目列表已刷新/)).toBeVisible({ timeout: 30_000 })
     await dialog.getByRole('button', { name: '打开新项目' }).click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/projects\/\d+/)
     const newPid = Number(page.url().match(/\/projects\/(\d+)/)?.[1])
@@ -227,6 +231,102 @@ test.describe('S4-C: 项目包导入 GUI', () => {
     await page.getByRole('button', { name: '重试' }).click({ timeout: 30_000 })
     await expect(page.getByRole('dialog').getByText(/已导入为新项目/)).toBeVisible({ timeout: 60_000 })
     expect(await listProjectIds(apiCtx.request, await loginToken(apiCtx.request, importerName, password))).toHaveLength(1)
+    await apiCtx.close()
+    await context.close()
+  })
+
+  test('C1: 打开新项目后重开导入即全新流程, 无旧成功残留', async ({ browser }) => {
+    const ownerName = uniqueName('es-impc1-own')
+    const importerName = uniqueName('es-impc1-doer')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('重开导入项目')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, ownerName, password)
+    await createEngineer(apiCtx.request, importerName, password)
+    const ownerToken = await loginToken(apiCtx.request, ownerName, password)
+    const { pid } = await scaffoldSource(apiCtx.request, ownerToken, projectName, uniqueName('s4c-c1'))
+    const zipPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pies-impc1-')), 'pkg.zip')
+    await downloadPackage(apiCtx.request, pid, ownerToken, zipPath)
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await createSession(page, importerName, password)
+    await page.goto('/')
+    await openImportDialog(page)
+    await page.locator('#import-package-file').setInputFiles(zipPath)
+    await expect(page.getByRole('button', { name: '确认导入' })).toBeVisible({ timeout: 30_000 })
+    await page.getByRole('button', { name: '确认导入' }).click({ timeout: 30_000 })
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByText(/已导入为新项目/)).toBeVisible({ timeout: 60_000 })
+    await expect(dialog.getByText(/项目列表已刷新/)).toBeVisible({ timeout: 30_000 })
+    // 经“打开新项目”离开(与普通关闭统一重置本地状态), 返回后再打开。
+    await dialog.getByRole('button', { name: '打开新项目' }).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/projects\/\d+/)
+    await page.goto('/')
+    await openImportDialog(page)
+    const reopened = page.getByRole('dialog')
+    // 全新流程: 选择文件入口可见, 无旧成功文案/旧打开按钮残留。
+    await expect(reopened.getByText(/选择导出的项目包文件/)).toBeVisible({ timeout: 10_000 })
+    await expect(reopened.getByText(/已导入为新项目/)).toBeHidden({ timeout: 10_000 })
+    await expect(reopened.getByRole('button', { name: '打开新项目' })).toBeHidden({ timeout: 10_000 })
+    await apiCtx.close()
+    await context.close()
+  })
+
+  test('C2: 列表刷新失败仍导入成功, 单独重试只 GET 不重发确认', async ({ browser }) => {
+    const ownerName = uniqueName('es-impc2-own')
+    const importerName = uniqueName('es-impc2-doer')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('刷新失败项目')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, ownerName, password)
+    await createEngineer(apiCtx.request, importerName, password)
+    const ownerToken = await loginToken(apiCtx.request, ownerName, password)
+    const { pid } = await scaffoldSource(apiCtx.request, ownerToken, projectName, uniqueName('s4c-c2'))
+    const zipPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pies-impc2-')), 'pkg.zip')
+    await downloadPackage(apiCtx.request, pid, ownerToken, zipPath)
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    let confirmPosts = 0
+    let uploadPosts = 0
+    page.on('request', (req) => {
+      if (req.method() !== 'POST') return
+      if (/\/api\/projects\/import\/\d+\/confirm/.test(req.url())) confirmPosts += 1
+      else if (new URL(req.url()).pathname === '/api/projects/import') uploadPosts += 1
+    })
+    await createSession(page, importerName, password)
+    await page.goto('/')
+    await openImportDialog(page)
+    await page.locator('#import-package-file').setInputFiles(zipPath)
+    await expect(page.getByRole('button', { name: '确认导入' })).toBeVisible({ timeout: 30_000 })
+    // 确认成功后的下一次项目列表 GET 定向失败(模拟故障, 非业务失败)。
+    let failNextList = true
+    await page.route(
+      (url) => url.pathname === '/api/projects',
+      (route) => {
+        if (failNextList) {
+          failNextList = false
+          return route.abort('failed')
+        }
+        return route.continue()
+      },
+    )
+    await page.getByRole('button', { name: '确认导入' }).click({ timeout: 30_000 })
+    const dialog = page.getByRole('dialog')
+    // 导入成功仍展示, 但“已刷新”不出现, 刷新失败可见。
+    await expect(dialog.getByText(/已导入为新项目/)).toBeVisible({ timeout: 60_000 })
+    await expect(dialog.getByText(/刷新失败/)).toBeVisible({ timeout: 30_000 })
+    await expect(dialog.getByText(/项目列表已刷新/)).toBeHidden({ timeout: 10_000 })
+    // 单独重试刷新: 只 GET, 不重发确认、不重传文件。
+    await dialog.getByRole('button', { name: '重试刷新列表' }).click({ timeout: 30_000 })
+    await expect(dialog.getByText(/项目列表已刷新/)).toBeVisible({ timeout: 30_000 })
+    expect(confirmPosts).toBe(1)
+    expect(uploadPosts).toBe(1)
+    // 新项目可打开且正确(名称一致)。
+    await dialog.getByRole('button', { name: '打开新项目' }).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/projects\/\d+/)
+    await expect(page.getByText(projectName).first()).toBeVisible({ timeout: 30_000 })
     await apiCtx.close()
     await context.close()
   })

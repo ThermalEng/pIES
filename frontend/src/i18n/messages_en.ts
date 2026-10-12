@@ -155,6 +155,9 @@ export const messagesEn: Record<string, string> = {
   'ies.import.confirm_failed': 'Confirm import failed (retry with the same proposal)',
   'ies.import.done_title': 'Imported as new project ({name})',
   'ies.import.done_hint': 'The project list is refreshed; open the new project to review the restored content.',
+  'ies.import.refreshing': 'Refreshing project list…',
+  'ies.import.refresh_failed': 'Import succeeded, but refreshing the project list failed; retry the refresh or open the new project directly.',
+  'ies.import.retry_refresh': 'Retry list refresh',
   'ies.import.open_project': 'Open new project',
 
   // -------------------------------------------------------------------------

@@ -14,8 +14,11 @@ import { useImportProposal } from '../hooks/useImportProposal'
 export interface ImportProposalDialogProps {
   open: boolean
   onClose: () => void
-  /** 确认成功后刷新列表(由调用方传入)。 */
-  onImported: () => void
+  /**
+   * 确认成功后刷新列表(由调用方传入; 返回刷新是否成功, 仅决定 done.refresh
+   * 展示, 不改变导入成功事实)。
+   */
+  onImported: () => Promise<boolean>
   /** 确认成功后打开新项目(由调用方传入项目 id)。 */
   onOpenProject: (projectId: number) => void
 }
@@ -29,6 +32,14 @@ export function ImportProposalDialog({ open, onClose, onImported, onOpenProject 
     if (busy) return
     actions.reset()
     onClose()
+  }
+
+  /** 打开新项目与普通关闭统一退出本地状态, 再打开即全新流程。 */
+  const handleOpenProject = () => {
+    if (state.status !== 'done' || busy) return
+    const projectId = state.project.id
+    actions.reset()
+    onOpenProject(projectId)
   }
 
   const handlePick = () => {
@@ -57,7 +68,7 @@ export function ImportProposalDialog({ open, onClose, onImported, onOpenProject 
             </Button>
           ) : null}
           {state.status === 'done' ? (
-            <Button variant="primary" onClick={() => onOpenProject(state.project.id)}>
+            <Button variant="primary" onClick={handleOpenProject}>
               {t('ies.import.open_project')}
             </Button>
           ) : null}
@@ -135,9 +146,22 @@ export function ImportProposalDialog({ open, onClose, onImported, onOpenProject 
         </div>
       ) : null}
       {state.status === 'done' ? (
-        <Alert variant="success" title={t('ies.import.done_title', { name: state.project.name })}>
-          <p>{t('ies.import.done_hint')}</p>
-        </Alert>
+        <div>
+          <Alert variant="success" title={t('ies.import.done_title', { name: state.project.name })} />
+          {state.refresh === 'ok' ? <p>{t('ies.import.done_hint')}</p> : null}
+          {state.refresh === 'pending' ? (
+            <div role="status">
+              <Spinner label={t('ies.import.refreshing')} />
+            </div>
+          ) : null}
+          {state.refresh === 'failed' ? (
+            <Alert variant="warning" title={t('ies.import.refresh_failed')}>
+              <Button variant="secondary" size="sm" onClick={actions.refreshList}>
+                {t('ies.import.retry_refresh')}
+              </Button>
+            </Alert>
+          ) : null}
+        </div>
       ) : null}
     </Dialog>
   )

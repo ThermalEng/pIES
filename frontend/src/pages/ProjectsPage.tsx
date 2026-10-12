@@ -111,7 +111,11 @@ export default function ProjectsPage() {
     })
   }
 
-  const loadProjects = async (append = false, silent = false) => {
+  /**
+   * 加载项目列表; 返回本次读取是否成功应用(调用方据此展示刷新状态,
+   * 如导入对话框的 done.refresh)。过期丢弃与失败均返回 false。
+   */
+  const loadProjects = async (append = false, silent = false): Promise<boolean> => {
     if (!silent) setLoading(true)
     if (append) setLoadingMore(true)
     setLoadError(null)
@@ -121,7 +125,7 @@ export default function ProjectsPage() {
       if (statusFilter !== 'all') params.status = statusFilter
       if (append && nextCursor) params.cursor = nextCursor
       const page = await api.projects.list(params)
-      if (seq !== seqRef.current) return
+      if (seq !== seqRef.current) return false
       setProjects((prev) => {
         const merged = append ? [...prev, ...page.items] : page.items
         const seen = new Map<number, Project>()
@@ -130,9 +134,11 @@ export default function ProjectsPage() {
       })
       setNextCursor(page.next_cursor)
       void loadLatestTasks(page.items)
+      return true
     } catch (err) {
-      if (seq !== seqRef.current) return
+      if (seq !== seqRef.current) return false
       setLoadError(translateError(err as ApiError))
+      return false
     } finally {
       if (seq === seqRef.current) {
         setLoading(false)
@@ -607,11 +613,12 @@ export default function ProjectsPage() {
         </FormField>
       </Dialog>
 
-      {/* 项目包导入(确认成功后刷新列表; 打开新项目由对话框内入口导航) */}
+      {/* 项目包导入(确认成功后刷新列表, 结果只决定对话框 done.refresh 展示;
+          打开新项目与关闭统一重置对话框本地状态) */}
       <ImportProposalDialog
         open={importOpen}
         onClose={() => setImportOpen(false)}
-        onImported={() => void loadProjects(false, true)}
+        onImported={() => loadProjects(false, true)}
         onOpenProject={(projectId) => {
           setImportOpen(false)
           void navigate(`/projects/${projectId}`)
