@@ -6,6 +6,7 @@
  *   /               项目列表
  *   /projects/:id   项目工作台
  *   /admin/users    账号管理(管理员)
+ *   /admin/audit    审计日志(管理员,只读)
  *   /settings       系统设置(管理员)
  *   /help/*         帮助中心(一級菜单最后一项, 在应用外壳内)
  *   *               404
@@ -100,6 +101,7 @@ const WorkbenchPage = lazyPage('WorkbenchPage')
 const HelpPage = lazyPage('HelpPage')
 const SettingsPage = lazyPage('SettingsPage')
 const AdminUsersPage = lazyPage('AdminUsersPage')
+const AdminAuditPage = lazyPage('AdminAuditPage')
 const CustomizationPage = lazyPage('CustomizationPage')
 
 /** 整页加载指示(路由切换 Suspense 兜底)。 */
@@ -205,6 +207,11 @@ function AppShell() {
               {t('ies.nav.accounts')}
             </NavLink>
           ) : null}
+          {isAdmin === true ? (
+            <NavLink to="/admin/audit" className="ies-topbar__link">
+              {t('ies.nav.audit')}
+            </NavLink>
+          ) : null}
           <NavLink to="/settings" className="ies-topbar__link">
             {t('ies.nav.settings')}
           </NavLink>
@@ -275,6 +282,14 @@ export default function App() {
             element={
               <RequireAdmin>
                 <AdminUsersPage />
+              </RequireAdmin>
+            }
+          />
+          <Route
+            path="/admin/audit"
+            element={
+              <RequireAdmin>
+                <AdminAuditPage />
               </RequireAdmin>
             }
           />

@@ -608,6 +608,59 @@ function projectVersionFromServer(v: unknown): ProjectVersion {
 }
 
 /**
+ * 审计记录映射(与后端 entry_to_dict 字段一一对应; 字段缺失或形状非法即
+ * 抛错, 由调用方展示读取失败, 不伪造、不补默认)。
+ */
+function auditEntryFromServer(v: unknown): AuditEntry {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+    throw new Error('invalid audit entry envelope')
+  }
+  const r = v as Record<string, unknown>
+  const num = (key: string): number => {
+    const val = r[key]
+    if (typeof val !== 'number' || !Number.isFinite(val)) throw new Error(`invalid audit entry field: ${key}`)
+    return val
+  }
+  const nullableNum = (key: string): number | null => {
+    const val = r[key]
+    if (val === null || val === undefined) return null
+    if (typeof val !== 'number' || !Number.isFinite(val)) throw new Error(`invalid audit entry field: ${key}`)
+    return val
+  }
+  const str = (key: string): string => {
+    const val = r[key]
+    if (typeof val !== 'string') throw new Error(`invalid audit entry field: ${key}`)
+    return val
+  }
+  const nullableStr = (key: string): string | null => {
+    const val = r[key]
+    if (val === null || val === undefined) return null
+    if (typeof val !== 'string') throw new Error(`invalid audit entry field: ${key}`)
+    return val
+  }
+  const nullableObj = (key: string): Record<string, unknown> | null => {
+    const val = r[key]
+    if (val === null || val === undefined) return null
+    if (typeof val !== 'object' || Array.isArray(val)) throw new Error(`invalid audit entry field: ${key}`)
+    return val as Record<string, unknown>
+  }
+  return {
+    id: num('id'),
+    entity_type: nullableStr('entity_type'),
+    entity_id: nullableNum('entity_id'),
+    action: str('action'),
+    actor_id: nullableNum('actor_id'),
+    actor_type: nullableStr('actor_type'),
+    occurred_at: str('occurred_at'),
+    ip: nullableStr('ip'),
+    before: nullableObj('before'),
+    after: nullableObj('after'),
+    request_id: nullableStr('request_id'),
+    trace_id: nullableStr('trace_id'),
+  }
+}
+
+/**
  * 证据候选列表映射(仅取选择所需的 index, 其余不消费)。
  * 后端→前端可信交换, 直接映射不重复校核; 无列表即空(单解证据)。
  */
@@ -1937,29 +1990,24 @@ export const api = {
       })
     },
     audit(params?: AuditListParams): Promise<PageResult<AuditEntry>> {
+      // 审计查询: 参数与后端 entry_to_dict 字段一一透传, 不改名、不虚构
+      // (无 project_id 语义; before/after/request_id 等一并保留在行内)。
       const query: Record<string, unknown> = {}
-      if (params?.actor_id !== undefined) query.actor_id = params.actor_id
+      if (params?.entity_type !== undefined) query.entity_type = params.entity_type
+      if (params?.entity_id !== undefined) query.entity_id = params.entity_id
       if (params?.action !== undefined) query.action = params.action
-      if (params?.from !== undefined) query.since = params.from
-      if (params?.to !== undefined) query.until = params.to
+      if (params?.actor_id !== undefined) query.actor_id = params.actor_id
+      if (params?.actor_type !== undefined) query.actor_type = params.actor_type
+      if (params?.since !== undefined) query.since = params.since
+      if (params?.until !== undefined) query.until = params.until
       if (params?.cursor !== undefined) query.cursor = params.cursor
       if (params?.limit !== undefined) query.limit = params.limit
       return request<unknown>('/admin/audit', { query }).then((body) => {
         const page = asItems<Record<string, unknown>>(body, 'items')
         return {
-          items: page.items.map((e) => ({
-            id: Number(e.id),
-            actor_id: e.actor_id === null || e.actor_id === undefined ? null : Number(e.actor_id),
-            action: String(e.action ?? ''),
-            object_type: e.entity_type === null || e.entity_type === undefined ? null : String(e.entity_type),
-            object_id: e.entity_id === null || e.entity_id === undefined ? null : String(e.entity_id),
-            project_id: null,
-            detail: (e.after as Record<string, unknown>) ?? null,
-            occurred_at: String(e.occurred_at ?? ''),
-            trace_id: e.trace_id === null || e.trace_id === undefined ? null : String(e.trace_id),
-          })),
+          items: page.items.map(auditEntryFromServer),
           next_cursor: page.next_cursor,
-          limit: page.limit,
+          limit: params?.limit ?? page.limit,
         }
       })
     },

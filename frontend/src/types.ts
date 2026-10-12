@@ -959,24 +959,34 @@ export interface HealthStatus {
   checks: Record<string, HealthCheckEntry>
 }
 
+/**
+ * 审计记录(与后端 entry_to_dict 一一对应, snake_case; 无 project_id 查询
+ * 语义, 不得把 entity_id 无对象类型地当作项目过滤)。
+ */
 export interface AuditEntry {
-  id: EntityId
-  actor_id: EntityId | null
+  id: number
+  entity_type: string | null
+  entity_id: number | null
   action: string
-  object_type: string | null
-  object_id: string | null
-  project_id: EntityId | null
-  detail: Record<string, unknown> | null
+  actor_id: number | null
+  actor_type: string | null
   occurred_at: ISO8601
+  ip: string | null
+  before: Record<string, unknown> | null
+  after: Record<string, unknown> | null
+  request_id: string | null
   trace_id: string | null
 }
 
+/** 审计查询参数(与 GET /admin/audit 查询参数一致, 精确过滤 + 游标分页)。 */
 export interface AuditListParams {
-  actor_id?: EntityId
+  entity_type?: string
+  entity_id?: number
   action?: string
-  project_id?: EntityId
-  from?: ISO8601
-  to?: ISO8601
+  actor_id?: number
+  actor_type?: string
+  since?: ISO8601
+  until?: ISO8601
   cursor?: string
   limit?: number
 }

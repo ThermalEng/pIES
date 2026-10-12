@@ -5,7 +5,7 @@
  * - 当前版本标识来自 workbench 项目摘要(currentVersion), 来源草稿修订来自
  *   列表/详情的 source_draft_revision(后端真实字段)。
  * - 创建成功后经 workbench refresh 刷新项目 current_version 与列表。
- * - 本切片不做恢复按钮、结果应用或包导入(仍未交付, 见用户指南)。
+ * - 恢复入口在版本详情内(确认影响后执行); 结果应用与包导入见各自页面。
  */
 
 import { VersionHistoryPanel } from '../features/project-versions/components/VersionHistoryPanel'
