@@ -62,7 +62,7 @@ docker compose run --rm backend pytest -q
 docker compose up -d --build
 ```
 
-设计、开发、重构和审查前必须阅读[架构宪法](manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)。画布拖放由人工核查。
+设计、开发、重构和审查前必须阅读[架构宪法](manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)。GUI 功能（含画布拖放和接口连接）统一使用 Docker 中的 Playwright 验收。
 
 ## 许可
 

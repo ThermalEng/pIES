@@ -53,7 +53,7 @@ docker compose up -d --build
   ↓
 启动完整依赖并检查 readiness
   ↓
-运行浏览器或人工验收
+运行浏览器验收
   ↓
 停止测试服务并保留必要证据
 ```

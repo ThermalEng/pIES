@@ -68,7 +68,7 @@ API 的一次业务动作应转交一个完整 application 用例。Worker 不�
 
 后端、前端和系统验收保持职责分离。Playwright 可以通过公开接口准备隔离数据，但不能绕过正在验收的 UI 操作。
 
-所有测试都在 Docker 中执行。画布拖放和 interface 连接由人工核查；画布 property 编辑等非拖放功能仍可自动验收。
+所有测试都在 Docker 中执行。画布拖放、interface 连接、property 编辑等 GUI 功能统一使用 Playwright 完成真实浏览器验收，不设人工检查例外。
 
 ## 端点实现：状态码与包装键选择
 

@@ -101,7 +101,7 @@ RequestContract + revision/idempotency key
 
 设备 properties、单位、五类 interfaces、方程诊断和算法兼容性来自公开 schema。前端只保留与具体设备无关的交互规则，例如禁止自环、重复连线和接口类型不匹配；`blind` 不可连接，`predefined` 只展示其数据来源配置。
 
-画布使用服务端提供的真实 interface ID。拖放和连线属于关键人工验收；其他 property 编辑、导航和错误状态可由浏览器测试覆盖。
+画布使用服务端提供的真实 interface ID。拖放、连线、property 编辑、导航和错误状态统一通过 Docker 中的 Playwright 浏览器验收。
 
 ## 开发一个 feature
 
@@ -176,7 +176,7 @@ Markdown 禁止执行原始 HTML、脚本、内联事件或不安全 URL。语�
 - mapper 的百分比、单位、ID、空值和错误边界有单元测试；
 - 加载、空数据、失败、离线、冲突和权限状态可区分；
 - 桌面、移动、键盘、深链接和刷新行为通过浏览器验收；
-- 画布拖放和 interface 连接完成人工核查；
+- 画布拖放和 interface 连接通过真实浏览器交互验收；
 - 页面行为与使用者指南一致，帮助中心能在业务后端不可用时静态阅读。
 
 代码阅读从路由页面确认用户工作流，再进入相应 feature 的 contract、mapper 和 hook；迁移期页面集中代码应按上述依赖方向逐步拆分，而不是成为新功能继续堆叠的位置。
