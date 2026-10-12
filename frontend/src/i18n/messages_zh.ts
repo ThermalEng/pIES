@@ -145,6 +145,29 @@ export const messagesZh: Record<string, string> = {
   'ies.versions.restore_refresh_failed': '恢复已发生，但项目摘要/列表刷新失败（无需再次恢复）',
 
   // -------------------------------------------------------------------------
+  // 项目包导入(S4-C: 上传提案→明确确认; 取消不删除后端提案)
+  // -------------------------------------------------------------------------
+  'ies.import.open_button': '导入项目包',
+  'ies.import.dialog_title': '导入项目包',
+  'ies.import.pick_hint': '选择导出的项目包文件（.zip），上传后先展示提案，由你明确确认后才创建新项目。',
+  'ies.import.pick_file': '选择项目包文件',
+  'ies.import.pick_another': '重新选择文件',
+  'ies.import.uploading': '正在上传 {file}……',
+  'ies.import.upload_failed': '上传失败（{file}）',
+  'ies.import.proposal_hint': '服务端已接受该项目包，确认为其创建独立新项目（不覆盖任何现有项目）。',
+  'ies.import.snapshot_name': '包内项目名称',
+  'ies.import.snapshot_currency': '币种',
+  'ies.import.staged_count': '暂存对象数',
+  'ies.import.unknown_value': '未知',
+  'ies.import.confirm_impact': '确认后将创建新项目并恢复其草稿、版本与配置；取消不会创建项目。',
+  'ies.import.confirm_submit': '确认导入',
+  'ies.import.confirming': '正在确认导入……',
+  'ies.import.confirm_failed': '确认导入失败（同一提案可重试）',
+  'ies.import.done_title': '已导入为新项目（{name}）',
+  'ies.import.done_hint': '项目列表已刷新，可以打开新项目查看恢复的内容。',
+  'ies.import.open_project': '打开新项目',
+
+  // -------------------------------------------------------------------------
   // 登录 / 账号
   // -------------------------------------------------------------------------
   'ies.auth.login': '登录',

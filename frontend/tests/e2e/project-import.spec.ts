@@ -1,0 +1,233 @@
+// S4-C 项目包导入 GUI 验收: 上传→提案→确认前无新项目→确认→新项目可用;
+// 取消确认不创建项目; 非法包服务端原因可见; 模拟网络故障后同一提案可重试。
+//
+// 脚手架(用户/项目/财务/版本/导出)走公开 API, 上传/确认/取消的被测动作必须
+// 经 GUI 完成, 不 mock、不注库、不注前端状态。历史关键值用两组不同电价
+// (0.75/0.95)验证; 重试用路由中断模拟网络故障(与真实业务失败区分报告)。
+
+import { test, expect } from '@playwright/test'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import type { APIRequestContext, Page } from '@playwright/test'
+import { createSession, uniqueName, strongPassword } from './fixtures'
+import { createEngineer, loginToken, requestJson } from './setup/api'
+import { APP, financeProfile } from './financial-scaffold'
+
+const PRICE_A = '0.75'
+const PRICE_B = '0.95'
+
+function overridesPayload(profileId: string, price: string): Record<string, unknown> {
+  return {
+    schema: 'ies.finance-overrides',
+    schema_version: '1.0.0',
+    profile_ref: { id: profileId },
+    energy_prices: {
+      grid_import: { kind: 'constant', value: { value: price, unit: 'CNY/kWh' } },
+    },
+  }
+}
+
+async function currentPrice(
+  api: APIRequestContext, pid: number, token: string,
+): Promise<string> {
+  const ovr = await requestJson(api, 'GET', `/api/projects/${pid}/finance-overrides`, undefined, token)
+  return ovr.finance_overrides.energy_prices.grid_import.value.value as string
+}
+
+/** 源项目: 画像 + 0.75 覆盖(hist-a) + 0.95 覆盖(hist-b), 当前 0.95。 */
+async function scaffoldSource(
+  api: APIRequestContext, token: string, projectName: string, profileId: string,
+): Promise<{ pid: number; histA: number }> {
+  const created = await requestJson(api, 'POST', '/api/projects', {
+    name: projectName,
+    baseline_resolution: '1h',
+    baseline_start_year: 2025,
+    baseline_scenario_mode: 'single',
+  }, token)
+  const pid: number = created.project?.id ?? created.id
+  await requestJson(api, 'POST', '/api/finance-profiles', {
+    finance_profile: financeProfile(profileId),
+  }, token)
+  await requestJson(api, 'PUT', `/api/projects/${pid}/finance-profile`, {
+    profile_ref: { id: profileId },
+  }, token)
+  const rev1 = (await requestJson(api, 'GET', `/api/projects/${pid}/finance-overrides`, undefined, token)).revision
+  await requestJson(api, 'PUT', `/api/projects/${pid}/finance-overrides`, {
+    finance_overrides: overridesPayload(profileId, PRICE_A), expected_revision: rev1,
+  }, token)
+  const histA = await requestJson(api, 'POST', `/api/projects/${pid}/versions`, {
+    name: 'hist-a', reason: 'manual_save',
+  }, token)
+  const rev2 = (await requestJson(api, 'GET', `/api/projects/${pid}/finance-overrides`, undefined, token)).revision
+  await requestJson(api, 'PUT', `/api/projects/${pid}/finance-overrides`, {
+    finance_overrides: overridesPayload(profileId, PRICE_B), expected_revision: rev2,
+  }, token)
+  await requestJson(api, 'POST', `/api/projects/${pid}/versions`, {
+    name: 'hist-b', reason: 'manual_save',
+  }, token)
+  return { pid, histA: histA.version.id as number }
+}
+
+async function downloadPackage(
+  api: APIRequestContext, pid: number, token: string, dest: string,
+): Promise<void> {
+  const exported = await requestJson(api, 'POST', `/api/projects/${pid}/exports/package`, undefined, token)
+  const res = await api.fetch(`${APP}/api/projects/${pid}/exports/package/download?token=${exported.token}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok()) throw new Error(`download package -> ${res.status()}`)
+  fs.writeFileSync(dest, await res.body())
+}
+
+async function listProjectIds(api: APIRequestContext, token: string): Promise<number[]> {
+  const listed = await requestJson(api, 'GET', '/api/projects', undefined, token)
+  return (listed.projects as Array<{ id: number }>).map((p) => p.id)
+}
+
+async function openImportDialog(page: Page): Promise<void> {
+  await page.getByRole('button', { name: '导入项目包' }).click({ timeout: 30_000 })
+  await expect(page.getByRole('dialog')).toBeVisible({ timeout: 10_000 })
+}
+
+test.describe('S4-C: 项目包导入 GUI', () => {
+  test.setTimeout(600_000)
+
+  test('上传→提案→确认前无项目→确认→新项目可用, 历史值与源不变', async ({ browser }) => {
+    const ownerName = uniqueName('es-imp-own')
+    const importerName = uniqueName('es-imp-doer')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('导入S4C项目')
+    const profileId = uniqueName('s4c-tariff')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, ownerName, password)
+    await createEngineer(apiCtx.request, importerName, password)
+    const ownerToken = await loginToken(apiCtx.request, ownerName, password)
+    const importerToken = await loginToken(apiCtx.request, importerName, password)
+    const { pid, histA } = await scaffoldSource(apiCtx.request, ownerToken, projectName, profileId)
+    const zipPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pies-imp-')), 'pkg.zip')
+    await downloadPackage(apiCtx.request, pid, ownerToken, zipPath)
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await createSession(page, importerName, password)
+    await page.goto('/')
+    await openImportDialog(page)
+    await page.locator('#import-package-file').setInputFiles(zipPath)
+    // 提案展示(包内项目名), 确认前不导航; 上传 alone 不建项目由取消用例覆盖,
+    // 此处确认后恰好一个项目即证确认前无预建(重登会接管浏览器会话, 留到最后)。
+    await expect(page.getByRole('dialog').getByText(projectName)).toBeVisible({ timeout: 30_000 })
+    await expect(page).toHaveURL(/^.*\/$/)
+
+    await page.getByRole('button', { name: '确认导入' }).click({ timeout: 30_000 })
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByText(/已导入为新项目/)).toBeVisible({ timeout: 60_000 })
+    await dialog.getByRole('button', { name: '打开新项目' }).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/projects\/\d+/)
+    const newPid = Number(page.url().match(/\/projects\/(\d+)/)?.[1])
+    expect(newPid).toBeTruthy()
+    // 草稿存在(详情可用), 当前配置为 0.95, 历史有两个版本。
+    await expect(page.getByText(projectName).first()).toBeVisible({ timeout: 30_000 })
+    // GUI 登录已接管会话, API 再读前重登(此后无 GUI 动作)。
+    const verifyToken = await loginToken(apiCtx.request, importerName, password)
+    expect(await currentPrice(apiCtx.request, newPid, verifyToken)).toBe(PRICE_B)
+    const versions = await requestJson(apiCtx.request, 'GET', `/api/projects/${newPid}/versions`, undefined, verifyToken)
+    expect(versions.versions).toHaveLength(2)
+    // 历史恢复 hist-a 得 0.75; 源项目仍为 0.95。
+    const histAVersion = (versions.versions as Array<{ id: number; name: string }>).find((v) => v.name === 'hist-a')
+    expect(histAVersion).toBeTruthy()
+    expect(histA).toBeTruthy()
+    await requestJson(apiCtx.request, 'POST', `/api/projects/${newPid}/versions/${histAVersion?.id}/restore`, {}, verifyToken)
+    expect(await currentPrice(apiCtx.request, newPid, verifyToken)).toBe(PRICE_A)
+    expect(await currentPrice(apiCtx.request, pid, ownerToken)).toBe(PRICE_B)
+    // 确认后恰好一个项目: 上传未预建、确认未重复创建。
+    expect(await listProjectIds(apiCtx.request, verifyToken)).toHaveLength(1)
+    await apiCtx.close()
+    await context.close()
+  })
+
+  test('取消确认不创建项目', async ({ browser }) => {
+    const ownerName = uniqueName('es-impc-own')
+    const importerName = uniqueName('es-impc-doer')
+    const password = strongPassword('Init')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, ownerName, password)
+    await createEngineer(apiCtx.request, importerName, password)
+    const ownerToken = await loginToken(apiCtx.request, ownerName, password)
+    const importerToken = await loginToken(apiCtx.request, importerName, password)
+    const { pid } = await scaffoldSource(apiCtx.request, ownerToken, uniqueName('取消导入项目'), uniqueName('s4c-cancel'))
+    const zipPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pies-impc-')), 'pkg.zip')
+    await downloadPackage(apiCtx.request, pid, ownerToken, zipPath)
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await createSession(page, importerName, password)
+    await page.goto('/')
+    await openImportDialog(page)
+    await page.locator('#import-package-file').setInputFiles(zipPath)
+    await expect(page.getByRole('button', { name: '确认导入' })).toBeVisible({ timeout: 30_000 })
+    await page.getByRole('button', { name: '取消' }).click({ timeout: 10_000 })
+    await expect(page.getByRole('dialog')).toBeHidden({ timeout: 10_000 })
+    expect(await listProjectIds(apiCtx.request, await loginToken(apiCtx.request, importerName, password))).toEqual([])
+    await apiCtx.close()
+    await context.close()
+  })
+
+  test('非法包服务端原因逐项可见, 不创建项目', async ({ browser }) => {
+    const importerName = uniqueName('es-impbad-doer')
+    const password = strongPassword('Init')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, importerName, password)
+    const importerToken = await loginToken(apiCtx.request, importerName, password)
+    const badPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pies-impbad-')), 'bad.zip')
+    fs.writeFileSync(badPath, Buffer.from('not-a-package'))
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await createSession(page, importerName, password)
+    await page.goto('/')
+    await openImportDialog(page)
+    await page.locator('#import-package-file').setInputFiles(badPath)
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByText(/上传失败/)).toBeVisible({ timeout: 30_000 })
+    // reasons 逐项渲染为列表(至少一项), 非笼统错误。
+    expect(await dialog.locator('li').count()).toBeGreaterThan(0)
+    expect(await listProjectIds(apiCtx.request, await loginToken(apiCtx.request, importerName, password))).toEqual([])
+    await apiCtx.close()
+    await context.close()
+  })
+
+  test('模拟网络故障确认失败后同一提案可重试成功', async ({ browser }) => {
+    const ownerName = uniqueName('es-impr-own')
+    const importerName = uniqueName('es-impr-doer')
+    const password = strongPassword('Init')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, ownerName, password)
+    await createEngineer(apiCtx.request, importerName, password)
+    const ownerToken = await loginToken(apiCtx.request, ownerName, password)
+    const importerToken = await loginToken(apiCtx.request, importerName, password)
+    const { pid } = await scaffoldSource(apiCtx.request, ownerToken, uniqueName('重试导入项目'), uniqueName('s4c-retry'))
+    const zipPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pies-impr-')), 'pkg.zip')
+    await downloadPackage(apiCtx.request, pid, ownerToken, zipPath)
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await createSession(page, importerName, password)
+    await page.goto('/')
+    await openImportDialog(page)
+    await page.locator('#import-package-file').setInputFiles(zipPath)
+    await expect(page.getByRole('button', { name: '确认导入' })).toBeVisible({ timeout: 30_000 })
+    // 首次确认请求模拟网络中断(路由 abort; 属测试模拟故障, 非业务失败)。
+    await page.route('**/api/projects/import/*/confirm', (route) => route.abort('failed'))
+    await page.getByRole('button', { name: '确认导入' }).click({ timeout: 30_000 })
+    await expect(page.getByRole('dialog').getByText(/确认导入失败/)).toBeVisible({ timeout: 30_000 })
+    // 恢复网络, 同一提案重试成功(不重新上传); 最终恰好一个项目, 失败未留半成品
+    // (失败未建项目的行级证明由后端回滚回归覆盖, 此处重登会接管浏览器会话)。
+    await page.unroute('**/api/projects/import/*/confirm')
+    await page.getByRole('button', { name: '重试' }).click({ timeout: 30_000 })
+    await expect(page.getByRole('dialog').getByText(/已导入为新项目/)).toBeVisible({ timeout: 60_000 })
+    expect(await listProjectIds(apiCtx.request, await loginToken(apiCtx.request, importerName, password))).toHaveLength(1)
+    await apiCtx.close()
+    await context.close()
+  })
+})

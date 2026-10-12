@@ -135,6 +135,29 @@ export const messagesEn: Record<string, string> = {
   'ies.versions.restore_refresh_failed': 'Restore happened, but the project summary/list failed to refresh (do not submit restore again)',
 
   // -------------------------------------------------------------------------
+  // Project package import
+  // -------------------------------------------------------------------------
+  'ies.import.open_button': 'Import project package',
+  'ies.import.dialog_title': 'Import project package',
+  'ies.import.pick_hint': 'Choose an exported project package (.zip); the proposal is shown after upload, and a new project is created only after your explicit confirmation.',
+  'ies.import.pick_file': 'Choose package file',
+  'ies.import.pick_another': 'Choose another file',
+  'ies.import.uploading': 'Uploading {file}…',
+  'ies.import.upload_failed': 'Upload failed ({file})',
+  'ies.import.proposal_hint': 'The server accepted this package; confirming creates an independent new project (no existing project is overwritten).',
+  'ies.import.snapshot_name': 'Project name in package',
+  'ies.import.snapshot_currency': 'Currency',
+  'ies.import.staged_count': 'Staged objects',
+  'ies.import.unknown_value': 'Unknown',
+  'ies.import.confirm_impact': 'Confirming creates the new project and restores its draft, versions and configs; cancelling creates nothing.',
+  'ies.import.confirm_submit': 'Confirm import',
+  'ies.import.confirming': 'Confirming import…',
+  'ies.import.confirm_failed': 'Confirm import failed (retry with the same proposal)',
+  'ies.import.done_title': 'Imported as new project ({name})',
+  'ies.import.done_hint': 'The project list is refreshed; open the new project to review the restored content.',
+  'ies.import.open_project': 'Open new project',
+
+  // -------------------------------------------------------------------------
   // Auth / account
   // -------------------------------------------------------------------------
   'ies.auth.login': 'Sign in',

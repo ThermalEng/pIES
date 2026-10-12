@@ -53,6 +53,8 @@ import type {
   HealthStatus,
   LoginRequest,
   MetricValue,
+  ImportConfirmResult,
+  ImportProposal,
   PackageExportInput,
   PageResult,
   PlanningSolution,
@@ -516,6 +518,37 @@ function projectFromServer(body: unknown): Project {
  * created_by / created_at / source_draft_revision 不可伪造); 可空字段仅
  * 接受 null/undefined → null。详情端点只返回版本元数据, 此处不读取模型内容。
  */
+/** 导入提案解析(与后端 _proposal_to_dict 一一对应; project_id 可缺席为 null)。 */
+function importProposalFromServer(v: unknown): ImportProposal {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+    throw new Error('invalid import proposal envelope')
+  }
+  const r = v as Record<string, unknown>
+  if (typeof r.id !== 'number' || !Number.isFinite(r.id)) throw new Error('invalid import proposal field: id')
+  if (r.project_id !== null && (typeof r.project_id !== 'number' || !Number.isFinite(r.project_id))) {
+    throw new Error('invalid import proposal field: project_id')
+  }
+  if (typeof r.proposer_id !== 'number' || typeof r.status !== 'string') {
+    throw new Error('invalid import proposal field')
+  }
+  const asNullableRecord = (key: string): Record<string, unknown> | null => {
+    const val = r[key]
+    if (val === null || val === undefined) return null
+    if (typeof val !== 'object' || Array.isArray(val)) throw new Error(`invalid import proposal field: ${key}`)
+    return val as Record<string, unknown>
+  }
+  return {
+    id: r.id,
+    project_id: r.project_id,
+    proposer_id: r.proposer_id,
+    status: r.status,
+    source_object_id: typeof r.source_object_id === 'number' ? r.source_object_id : null,
+    review_summary: asNullableRecord('review_summary'),
+    review_errors: asNullableRecord('review_errors'),
+    created_at: typeof r.created_at === 'string' ? r.created_at : null,
+  }
+}
+
 function projectVersionFromServer(v: unknown): ProjectVersion {
   if (v === null || typeof v !== 'object' || Array.isArray(v)) {
     throw new Error('invalid project version envelope')
@@ -1061,6 +1094,16 @@ export interface ProjectsApi {
   applyScheme(projectId: number, input: ApplySchemeInput): Promise<ApplySchemeResult>
   /** 版本详情: 严格消费唯一 {version: {...}} 契约(只返回版本元数据)。 */
   versionDetail(projectId: number, versionId: number): Promise<ProjectVersion>
+  /**
+   * 上传项目包创建导入提案: 与后端 POST /projects/import(multipart file) 对应。
+   * 响应唯一 {proposal: {...}}; 确认前 proposal.project_id 为 null, 不得据此导航。
+   */
+  proposeImport(file: File): Promise<ImportProposal>
+  /**
+   * 确认导入提案: 与后端 POST /projects/import/{proposal_id}/confirm 对应。
+   * 响应唯一 {project, my_role}; 只有此时才展示已导入并刷新列表。
+   */
+  confirmImport(proposalId: number): Promise<ImportConfirmResult>
   archive(id: number): Promise<Project>
   unarchive(id: number): Promise<Project>
   /** 删除项目(0.2.0 B4: 须携带与项目名精确匹配的 name 确认)。 */
@@ -1300,6 +1343,21 @@ export const api = {
       return request<unknown>(`/projects/${projectId}/versions/${versionId}`).then((body) => {
         const rec = asRecord(body)
         return projectVersionFromServer(rec.version)
+      })
+    },
+    proposeImport(file: File): Promise<ImportProposal> {
+      const formData = new FormData()
+      formData.append('file', file)
+      return request<unknown>('/projects/import', { method: 'POST', formData, timeoutMs: 0 }).then((body) => {
+        const rec = asRecord(body)
+        return importProposalFromServer(rec.proposal)
+      })
+    },
+    confirmImport(proposalId: number): Promise<ImportConfirmResult> {
+      return request<unknown>(`/projects/import/${proposalId}/confirm`, { method: 'POST' }).then((body) => {
+        const rec = asRecord(body)
+        const project = projectFromServer({ project: rec.project, my_role: rec.my_role })
+        return { project, myRole: typeof rec.my_role === 'string' ? rec.my_role : null }
       })
     },
     restoreVersion(projectId: number, versionId: number): Promise<VersionRestoreResult> {

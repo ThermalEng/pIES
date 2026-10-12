@@ -40,6 +40,7 @@ import {
 } from '../components/ui'
 import { ApiError } from '../types'
 import type { BaselineResolution, Currency, Project, ProjectListParams, Task } from '../types'
+import { ImportProposalDialog } from '../features/project-import/components/ImportProposalDialog'
 
 type StatusFilter = 'all' | 'active' | 'archived'
 type RowOp = 'archive' | 'unarchive' | 'delete'
@@ -83,6 +84,9 @@ export default function ProjectsPage() {
   // 归档 / 删除确认对话框
   const [archiveTarget, setArchiveTarget] = useState<Project | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null)
+
+  // 项目包导入对话框(打开即全新流程; 确认成功后刷新列表)
+  const [importOpen, setImportOpen] = useState(false)
   // 0.2.0 B4 删除确认强化: 须输入项目名精确匹配(替代旧空布尔 confirm)
   const [deleteName, setDeleteName] = useState('')
   const [deleteNameError, setDeleteNameError] = useState<string | null>(null)
@@ -287,9 +291,14 @@ export default function ProjectsPage() {
       <div className="ies-page-header">
         <h1 className="ies-page-title">{t('ies.nav.projects')}</h1>
         {isAdmin === false ? (
-          <Button variant="primary" icon="plus" onClick={() => setCreateOpen(true)}>
-            {t('ies.project.new')}
-          </Button>
+          <>
+            <Button variant="primary" icon="plus" onClick={() => setCreateOpen(true)}>
+              {t('ies.project.new')}
+            </Button>
+            <Button variant="secondary" icon="upload" onClick={() => setImportOpen(true)}>
+              {t('ies.import.open_button')}
+            </Button>
+          </>
         ) : null}
       </div>
 
@@ -597,6 +606,17 @@ export default function ProjectsPage() {
           />
         </FormField>
       </Dialog>
+
+      {/* 项目包导入(确认成功后刷新列表; 打开新项目由对话框内入口导航) */}
+      <ImportProposalDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={() => void loadProjects(false, true)}
+        onOpenProject={(projectId) => {
+          setImportOpen(false)
+          void navigate(`/projects/${projectId}`)
+        }}
+      />
     </div>
   )
 }

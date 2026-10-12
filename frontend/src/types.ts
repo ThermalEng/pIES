@@ -234,6 +234,29 @@ export interface ProjectVersionCreateInput {
   reason?: string
 }
 
+/**
+ * 项目包导入提案(与后端 _proposal_to_dict 一一对应)。
+ *
+ * project_id 缺席语义: 确认前为 null(提案阶段不创建普通项目, 不得据此
+ * 导航或预建展示); 确认成功后为新项目 id。
+ */
+export interface ImportProposal {
+  id: EntityId
+  project_id: EntityId | null
+  proposer_id: EntityId
+  status: string
+  source_object_id: EntityId | null
+  review_summary: Record<string, unknown> | null
+  review_errors: Record<string, unknown> | null
+  created_at: ISO8601 | null
+}
+
+/** 确认导入结果(与后端 {project, my_role} 对应)。 */
+export interface ImportConfirmResult {
+  project: Project
+  myRole: string | null
+}
+
 /** 恢复历史版本结果(与后端 restore 响应 {version, draft} 对应)。 */
 export interface VersionRestoreResult {
   version: ProjectVersion
