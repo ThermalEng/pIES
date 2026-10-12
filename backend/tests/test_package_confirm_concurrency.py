@@ -4,20 +4,24 @@ sqlite 无法表达跨事务行锁等待, 本模块只在 PG 下运行: 未设
 IESPLAN_TEST_PG_URL 时整模块跳过(跳过不是通过, 不计入回归证据)。
 
 隔离实现(不代替注释): 每次运行在目标库内创建唯一临时 schema
-(`pietest_` 前缀 + 随机标识), 全部连接经 search_path 固定到该 schema,
-建表与数据只发生在自有 schema; 退出只删这个确切 schema, 不 TRUNCATE
-目标库业务表、不 drop public、不读写其他 schema 的用户数据。失败路径
-同样经 finally 清理自有资源并保留原始异常。Docker 证据见对应切片报告
-(自建隔离 PG, 用后清理)。
+(`pietest_` 前缀 + 随机标识), 全部业务连接经 search_path 固定到该
+schema, 建表与数据只发生在自有 schema; 退出只删确切自有范围(仅当
+CREATE 成功提交、已拥有才删), 不 TRUNCATE 目标库业务表、不 drop
+public、不读写其他 schema 的用户数据。正常并发用例完全不碰 public;
+隔离证明另用唯一自有 schema 模拟外部已有数据。清理各步骤独立执行,
+清理失败不掩盖主异常。失败路径同样清理已拥有范围并保留原始异常。
+Docker 证据见对应切片报告(自建隔离 PG, 用后清理)。
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import sys
 import threading
 import uuid
-from collections.abc import Iterator
+import warnings
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -70,7 +74,46 @@ _CYCLE_TABLES = frozenset({
     "model_template_draft_revisions",
 })
 
-_DECOY_TABLE = "_pietest_decoy"
+
+def _guard(errors: list[str], label: str, fn: Callable[[], object]) -> None:
+    """清理单步执行, 失败只记录不抛出(各步骤独立执行)。"""
+    try:
+        fn()
+    except Exception as exc:
+        errors.append(f"{label}: {exc!r}")
+
+
+def _raise_cleanup(errors: list[str]) -> None:
+    """无主异常时清理失败必须可见; 有主异常时只附加警告, 不替换主异常。"""
+    if not errors:
+        return
+    message = f"测试清理失败: {'; '.join(errors)}"
+    if sys.exception() is None:
+        raise RuntimeError(message)
+    warnings.warn(f"{message}(主异常保留)", stacklevel=3)
+
+
+def _drop_schema(admin_engine: Engine, schema: str) -> None:
+    with admin_engine.begin() as conn:
+        conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+
+
+def _schema_exists(admin_engine: Engine, schema: str) -> bool:
+    with admin_engine.connect() as conn:
+        return bool(
+            conn.execute(
+                text("SELECT 1 FROM pg_namespace WHERE nspname = :schema"),
+                {"schema": schema},
+            ).first()
+        )
+
+
+def _public_tables(admin_engine: Engine) -> set[str]:
+    with admin_engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+        ).all()
+    return {row[0] for row in rows}
 
 
 class _PgCase:
@@ -94,48 +137,23 @@ class _PgCase:
         self.factory = factory
 
 
-def _public_tables(admin_engine: Engine) -> set[str]:
-    with admin_engine.connect() as conn:
-        rows = conn.execute(
-            text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
-        ).all()
-    return {row[0] for row in rows}
-
-
-def _schema_exists(admin_engine: Engine, schema: str) -> bool:
-    with admin_engine.connect() as conn:
-        return bool(
-            conn.execute(
-                text("SELECT 1 FROM pg_namespace WHERE nspname = :schema"),
-                {"schema": schema},
-            ).first()
-        )
-
-
 @contextlib.contextmanager
 def _pg_case(tmp_path: Path) -> Iterator[_PgCase]:
-    """自建唯一 schema 的隔离环境; 退出只删自有 schema 并恢复 data_dir。
+    """自建唯一 schema 的隔离环境; 退出只删已拥有的自有 schema 并恢复 data_dir。
 
-    诱饵表建在 public(模拟既有用户数据), 退出时一并只删自建的诱饵表;
-    失败路径经 finally 同样清理, 原始异常不吞没。
+    正常并发用例完全不创建/删除 public 资源。schema 仅在 CREATE 成功提交
+    后才算已拥有, 失败不删除未拥有资源。
     """
     schema = f"pietest_{uuid.uuid4().hex[:12]}"
     prev_data_dir = settings.data_dir
     admin_engine = create_engine(PG_URL)
     engine = create_engine(PG_URL, connect_args={"options": f"-c search_path={schema}"})
     settings.data_dir = tmp_path
+    owned_schema = False
     try:
         with admin_engine.begin() as conn:
             conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-            conn.execute(
-                text(
-                    f"CREATE TABLE public.{_DECOY_TABLE} "
-                    "(id SERIAL PRIMARY KEY, note TEXT NOT NULL)"
-                )
-            )
-            conn.execute(
-                text(f"INSERT INTO public.{_DECOY_TABLE} (note) VALUES ('decoy-keep')")
-            )
+        owned_schema = True
         tables = [t for t in Base.metadata.tables.values() if t.name not in _CYCLE_TABLES]
         Base.metadata.create_all(engine, tables=tables)
         factory = sessionmaker(bind=engine)
@@ -160,18 +178,13 @@ def _pg_case(tmp_path: Path) -> Iterator[_PgCase]:
                     factory=factory,
                 )
     finally:
-        with admin_engine.begin() as conn:
-            conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-            conn.execute(text(f"DROP TABLE IF EXISTS public.{_DECOY_TABLE}"))
-        engine.dispose()
-        admin_engine.dispose()
+        errors: list[str] = []
+        if owned_schema:
+            _guard(errors, f"drop schema {schema}", lambda: _drop_schema(admin_engine, schema))
+        _guard(errors, "dispose engine", engine.dispose)
+        _guard(errors, "dispose admin engine", admin_engine.dispose)
         settings.data_dir = prev_data_dir
-
-
-def _decoy_note(admin_engine: Engine) -> str | None:
-    with admin_engine.connect() as conn:
-        row = conn.execute(text(f"SELECT note FROM public.{_DECOY_TABLE}")).first()
-    return row[0] if row else None
+        _raise_cleanup(errors)
 
 
 def _h(client: TestClient, user) -> dict[str, str]:
@@ -193,7 +206,7 @@ def test_concurrent_confirm_creates_single_project(tmp_path: Path) -> None:
 
     两线程各持独立 Session 同时进入 application 确认用例(非 HTTP 并发);
     领取行锁使后者等待前者提交, 等候者读到最新 applied 并重放同一项目
-    (不重复创建)。诱饵行在全程保持不变。
+    (不重复创建)。本用例不创建/删除 public 资源。
     """
     with _pg_case(tmp_path) as case:
         client, db = case.client, case.db
@@ -232,18 +245,28 @@ def test_concurrent_confirm_creates_single_project(tmp_path: Path) -> None:
 
         listed = client.get("/api/projects", headers=_h(client, importer)).json()["projects"]
         assert [p["id"] for p in listed] == [outcomes[0][1]]
-        assert _decoy_note(case.admin_engine) == "decoy-keep"
 
 
 def test_pg_case_touches_only_own_schema(tmp_path: Path) -> None:
-    """隔离证明: 业务写只进自有 schema, 退出只清自有范围。
+    """隔离证明: 业务写只进自有 schema, 退出只清各自拥有的范围。
 
-    public 在进入时除自建诱饵表外无新增, 全程诱饵行不变; 退出后自有
-    schema 与诱饵表均消失, 不动其他 schema 用户数据。
+    外层另建唯一自有 schema 模拟外部已有数据(public 不动); 业务 case
+    退出后自有 schema 消失、外部诱饵原值仍在; 外层再删自己的确切诱饵
+    schema。不用固定共享表名。
     """
-    admin_engine = create_engine(PG_URL)
+    admin = create_engine(PG_URL)
+    errors: list[str] = []
+    decoy_schema = f"pietest_decoy_{uuid.uuid4().hex[:12]}"
+    decoy_owned = False
     try:
-        public_before = _public_tables(admin_engine) | {_DECOY_TABLE}
+        with admin.begin() as conn:
+            conn.execute(text(f'CREATE SCHEMA "{decoy_schema}"'))
+            conn.execute(
+                text(f'CREATE TABLE "{decoy_schema}".decoy (id SERIAL PRIMARY KEY, note TEXT)')
+            )
+            conn.execute(text(f'INSERT INTO "{decoy_schema}".decoy (note) VALUES (\'decoy-keep\')'))
+        decoy_owned = True
+        public_before = _public_tables(admin)
         with _pg_case(tmp_path) as case:
             client, db = case.client, case.db
             assert _schema_exists(case.admin_engine, case.schema)
@@ -257,16 +280,113 @@ def test_pg_case_touches_only_own_schema(tmp_path: Path) -> None:
                 f"/api/projects/import/{prop_id}/confirm", headers=_h(client, importer)
             )
             assert resp.status_code == 201, resp.text
-            assert _decoy_note(case.admin_engine) == "decoy-keep"
-            assert _public_tables(case.admin_engine) == public_before
+            with admin.connect() as conn:
+                assert conn.execute(
+                    text(f'SELECT note FROM "{decoy_schema}".decoy')
+                ).first()[0] == "decoy-keep"
+            assert _public_tables(admin) == public_before
             schema = case.schema
-        assert not _schema_exists(admin_engine, schema)
-        with admin_engine.connect() as conn:
-            assert not conn.execute(
-                text(
-                    "SELECT 1 FROM pg_tables WHERE schemaname = 'public' "
-                    f"AND tablename = '{_DECOY_TABLE}'"
-                )
-            ).first()
+        assert not _schema_exists(admin, schema)
+        with admin.connect() as conn:
+            assert conn.execute(
+                text(f'SELECT note FROM "{decoy_schema}".decoy')
+            ).first()[0] == "decoy-keep"
     finally:
-        admin_engine.dispose()
+        if decoy_owned:
+            _guard(errors, f"drop decoy schema {decoy_schema}", lambda: _drop_schema(admin, decoy_schema))
+        _guard(errors, "dispose admin", admin.dispose)
+        _raise_cleanup(errors)
+
+
+def test_pg_case_build_failure_cleans_owned_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """建表失败: 主异常原样抛出, 已拥有的自有 schema 仍被清理, 外层诱饵不变。"""
+    admin = create_engine(PG_URL)
+    errors: list[str] = []
+    decoy_schema = f"pietest_decoy_{uuid.uuid4().hex[:12]}"
+    decoy_owned = False
+    try:
+        with admin.begin() as conn:
+            conn.execute(text(f'CREATE SCHEMA "{decoy_schema}"'))
+            conn.execute(
+                text(f'CREATE TABLE "{decoy_schema}".decoy (id SERIAL PRIMARY KEY, note TEXT)')
+            )
+            conn.execute(text(f'INSERT INTO "{decoy_schema}".decoy (note) VALUES (\'decoy-keep\')'))
+        decoy_owned = True
+        data_dir_before = settings.data_dir
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("injected build failure")
+
+        monkeypatch.setattr(Base.metadata, "create_all", _boom)
+        with pytest.raises(RuntimeError, match="injected build failure"):
+            with _pg_case(tmp_path):
+                pass  # pragma: no cover
+        with admin.connect() as conn:
+            assert conn.execute(
+                text(
+                    "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'pietest\\_%' "
+                    "AND nspname != :decoy"
+                ),
+                {"decoy": decoy_schema},
+            ).all() == []
+            assert conn.execute(
+                text(f'SELECT note FROM "{decoy_schema}".decoy')
+            ).first()[0] == "decoy-keep"
+        assert settings.data_dir == data_dir_before
+    finally:
+        if decoy_owned:
+            _guard(errors, f"drop decoy schema {decoy_schema}", lambda: _drop_schema(admin, decoy_schema))
+        _guard(errors, "dispose admin", admin.dispose)
+        _raise_cleanup(errors)
+
+
+def test_pg_case_cleanup_failure_stays_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """清理失败: 无主异常时真实清理失败必须可见, settings 照常恢复。
+
+    故障注入在自家清理步骤上(精确短路删 schema, 不碰全局执行路径)。
+    """
+    import test_package_confirm_concurrency as self_mod
+
+    attempted: list[str] = []
+
+    def _fail_on_drop(admin_engine: Engine, schema: str) -> None:
+        attempted.append(schema)
+        raise RuntimeError("injected drop failure")
+
+    monkeypatch.setattr(self_mod, "_drop_schema", _fail_on_drop)
+    data_dir_before = settings.data_dir
+    with pytest.raises(RuntimeError, match="injected drop failure"):
+        with _pg_case(tmp_path):
+            pass
+    assert settings.data_dir == data_dir_before
+    # 精确清理本轮自建 schema(注入测试的已知遗留, 非宽泛打扫)。
+    assert len(attempted) == 1
+    with create_engine(PG_URL).begin() as conn:
+        conn.execute(text(f'DROP SCHEMA "{attempted[0]}" CASCADE'))
+
+
+def test_pg_case_main_error_not_masked_by_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """主异常 + 清理失败: 主异常原样抛出不被替换, settings 照常恢复。"""
+    import test_package_confirm_concurrency as self_mod
+
+    attempted: list[str] = []
+
+    def _fail_on_drop(admin_engine: Engine, schema: str) -> None:
+        attempted.append(schema)
+        raise RuntimeError("injected drop failure")
+
+    monkeypatch.setattr(self_mod, "_drop_schema", _fail_on_drop)
+    data_dir_before = settings.data_dir
+    with pytest.raises(RuntimeError, match="injected main failure"):
+        with _pg_case(tmp_path):
+            raise RuntimeError("injected main failure")
+    assert settings.data_dir == data_dir_before
+    assert len(attempted) == 1
+    with create_engine(PG_URL).begin() as conn:
+        conn.execute(text(f'DROP SCHEMA "{attempted[0]}" CASCADE'))
