@@ -514,7 +514,6 @@ export const messagesZh: Record<string, string> = {
   'ies.result.annual': '年度汇总',
   'ies.result.monthly': '月度趋势',
   'ies.result.hourly': '逐时曲线',
-  'ies.result.assessment': '结果评估',
   'ies.result.score': '综合得分',
   'ies.result.dimension_physical': '物理可行性',
   'ies.result.dimension_optimality': '最优性',

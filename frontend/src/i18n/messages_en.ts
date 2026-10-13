@@ -504,7 +504,6 @@ export const messagesEn: Record<string, string> = {
   'ies.result.annual': 'Annual summary',
   'ies.result.monthly': 'Monthly trend',
   'ies.result.hourly': 'Hourly series',
-  'ies.result.assessment': 'Assessment',
   'ies.result.score': 'Overall score',
   'ies.result.dimension_physical': 'Physical feasibility',
   'ies.result.dimension_optimality': 'Optimality',

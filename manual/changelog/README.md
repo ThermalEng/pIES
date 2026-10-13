@@ -15,14 +15,14 @@
 
 ## Unreleased
 
-### 2026-10-14 — `0.14.0` 结果页 IRR 状态走封存字段 R1/R2（待复审）
+### 2026-10-13 — `0.14.0` 结果页 IRR 状态走封存字段 R1/R2（待复审）
 
 - 结果视图适配层删除伪造的 `diagnostics: []` 及其 `ResultsApi` 契约字段（后端 `result_view` 本就没有该字段）；`ResultsPage` 删除 `inferIrrStatusKey` 诊断猜测、`resultDiag` 状态与已恒空的诊断折叠区、`DiagnosticLine`（仅服务于该假链）及相关导入。
 - 旧财务摘要徽章改走封存事实：新增 `irrStatusToKey` 唯一映射（即封存卡既有语义：`normal`→唯一解、五枚举直通、未知回 null），摘要与封存卡共用；无财务评价块或状态不可显示时摘要侧整行不展示，不补默认值。
-- 未动：`TaskDetail` 真实 diagnostics、任务/导出诊断链、后端结果契约与财务求值；封存卡未知状态仍显 `—`（既有语义保留）；`ies.result.assessment` 键只剩定义暂留，未删。
+- 未动：`TaskDetail` 真实 diagnostics、任务/导出诊断链、后端结果契约与财务求值；封存卡未知状态仍显 `—`（既有语义保留）。`ies.result.assessment` 中英键已随假链删除（rg 确认除定义外无前端引用；`assessment_history` 等仍被使用，未碰）。
 - 证据：前端构建（tsc＋vite，随 web 镜像构建）通过；新增 node 适配层用例 `result_view_no_synthetic_diagnostics.test.mjs` 6 项通过（返回对象无 `diagnostics` 键、有块/无块透传）；新增浏览器用例 `result-irr-status-r1r2.spec.ts` 2 通过（真实求解：封存任务摘要与封存卡同显 HTTP 封存 `irr_status` 对应标签且全页仅 2 处；metrics-only 任务全页无 IRR 状态行，HTTP 与缺席原因一致）。D1/D2/全量未重跑。此项不代表 `0.14.0` 整体完成。
 
-### 2026-10-14 — `0.14.0` 数据页项目主体三态与项目无时区收口 D3（复审通过）
+### 2026-10-13 — `0.14.0` 数据页项目主体三态与项目无时区收口 D3（复审通过）
 
 - `WorkbenchProvider` 新增 `projectLoading`/`projectError` 三态：`DataPage` 加载中只转圈（无可写表单、无项目名、无伪默认），主体失败只显错＋`refreshDetailed` 重试（重试回到加载分支，结构上不可重复点击），成功才显示数据页与可写控件；D2 的列表/版本独立错误路径不动。
 - 项目不设置时区：删 `Project.fixed_utc_offset_minutes` 类型字段（后端 `GET /projects/{id}` 本就没有该字段）、工作台头部与数据页头部的项目时区展示；上传/样例对话框保留既有 `480` 表单初值（注释明确非项目时区）；数据集版本行/详情与上传表单的版本偏移展示不变。
