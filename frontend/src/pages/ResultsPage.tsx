@@ -183,6 +183,8 @@ export default function ResultsPage() {
   const [entries, setEntries] = useState<Array<{ pkg: EvidencePackageSummary; task: TaskDetail }>>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  /** 收集重试序号: 仅重读任务列表与详情, 不重求解/重评估。 */
+  const [loadNonce, setLoadNonce] = useState(0)
   const [selectedPkgId, setSelectedPkgId] = useState<number | null>(null)
 
   // 选中证据包的结果数据
@@ -267,12 +269,13 @@ export default function ResultsPage() {
             tk.status === 'completed' &&
             (tk.type === 'calc' || tk.type === 'optimization' || tk.type === 'uncertainty'),
         )
+        // 任一详情(含明确可用时的 /result 补充读取)失败即整组失败,
+        // 不跳过失败任务形成缩水成功/空态, 由全局 loadError 呈现并可重试。
         const details = await Promise.all(
-          completed.slice(0, 10).map((tk) => api.tasks.get(projectId, tk.id).catch(() => null)),
+          completed.slice(0, 10).map((tk) => api.tasks.get(projectId, tk.id)),
         )
         const collected: Array<{ pkg: EvidencePackageSummary; task: TaskDetail }> = []
         for (const d of details) {
-          if (!d) continue
           for (const p of d.evidence ?? []) collected.push({ pkg: p, task: d })
         }
         collected.sort((a, b) => a.pkg.package_id - b.pkg.package_id)
@@ -292,7 +295,7 @@ export default function ResultsPage() {
     return () => {
       cancelled = true
     }
-  }, [projectId, initialPkgParam])
+  }, [projectId, initialPkgParam, loadNonce])
 
   // -------------------------------------------------------------------------
   // 选中证据包的结果/评估/逐时数据
@@ -773,21 +776,36 @@ export default function ResultsPage() {
     )
   }
 
+  // 收集失败即使用户尚无条目也必须可见(早返不得吞掉全局错误与重试)。
+  const loadErrorBlock = loadError ? (
+    <div className="ies-section">
+      <Alert variant="error">{loadError}</Alert>
+      <div style={{ marginTop: 'var(--ies-space-2)' }}>
+        <Button onClick={() => setLoadNonce((n) => n + 1)}>{t('ies.common.retry')}</Button>
+      </div>
+    </div>
+  ) : null
+
   if (entries.length === 0) {
     return (
-      <div className="ies-section">
-        <Card title={t('ies.result.summary')}>
-          <EmptyState
-            icon="info"
-            title={t('ies.result.no_result_available')}
-            description={t('ies.result.no_result_hint')}
-            action={
-              <Link className="ies-btn ies-btn--primary ies-btn--md" to={`/projects/${projectId}/tasks`}>
-                {t('ies.nav.tasks')}
-              </Link>
-            }
-          />
-        </Card>
+      <div>
+        {loadErrorBlock}
+        {loadError ? null : (
+          <div className="ies-section">
+            <Card title={t('ies.result.summary')}>
+              <EmptyState
+                icon="info"
+                title={t('ies.result.no_result_available')}
+                description={t('ies.result.no_result_hint')}
+                action={
+                  <Link className="ies-btn ies-btn--primary ies-btn--md" to={`/projects/${projectId}/tasks`}>
+                    {t('ies.nav.tasks')}
+                  </Link>
+                }
+              />
+            </Card>
+          </div>
+        )}
       </div>
     )
   }
@@ -801,11 +819,7 @@ export default function ResultsPage() {
 
   return (
     <div>
-      {loadError ? (
-        <div className="ies-section">
-          <Alert variant="error">{loadError}</Alert>
-        </div>
-      ) : null}
+      {loadErrorBlock}
 
       {/* 结果摘要 */}
       <div className="ies-section">

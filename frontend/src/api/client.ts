@@ -1678,26 +1678,24 @@ export const api = {
         const detail = taskDetailFromServer(asRecord(oneOf<Record<string, unknown>>(body, 'task')), projectId)
         // RR-P1-05: 结果可用性是任务元数据(result_available), 只有明确可用时
         // 才读取证据包; 未完成/无结果不是页面级失败, 不靠探测 /result 的 404 猜测。
+        // 可用性明确为 true 时 /result 读取失败必须 reject, 不吞错置空 evidence
+        // 伪装详情正常无结果(调用方负责失败可见)。
         if (detail.result_available) {
-          try {
-            const result = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`)
-            const r = asRecord(oneOf<Record<string, unknown>>(result, 'result'))
-            const evidence = asRecord(r.evidence)
-            const pkgId = Number(evidence.id ?? 0)
-            if (pkgId > 0) {
-              const status = String(evidence.status ?? 'complete')
-              detail.evidence = [
-                {
-                  package_id: pkgId,
-                  object_id: Number(evidence.object_id ?? 0),
-                  status: status as TaskDetail['evidence'][number]['status'],
-                },
-              ]
-              // 缓存 证据包 → 任务 反向映射(结果/导出 API 以任务为路由键)
-              pkgTaskCache.set(pkgId, taskId)
-            }
-          } catch {
-            // 结果元数据读取失败: 保持空 evidence(详情仍可查, 结果页负责重试)
+          const result = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`)
+          const r = asRecord(oneOf<Record<string, unknown>>(result, 'result'))
+          const evidence = asRecord(r.evidence)
+          const pkgId = Number(evidence.id ?? 0)
+          if (pkgId > 0) {
+            const status = String(evidence.status ?? 'complete')
+            detail.evidence = [
+              {
+                package_id: pkgId,
+                object_id: Number(evidence.object_id ?? 0),
+                status: status as TaskDetail['evidence'][number]['status'],
+              },
+            ]
+            // 缓存 证据包 → 任务 反向映射(结果/导出 API 以任务为路由键)
+            pkgTaskCache.set(pkgId, taskId)
           }
         }
         return detail

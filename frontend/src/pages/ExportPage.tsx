@@ -31,12 +31,12 @@ async function resolveEvidencePackage(projectId: number): Promise<number | null>
   const done = page.items
     .filter((tk) => tk.status === 'completed')
     .sort((a, b) => b.requested_at.localeCompare(a.requested_at))
-  // 最多尝试最近的 10 个已完成任务;tasks.get 内部已拉取结果视图填充 evidence,
-  // 各任务并行解析(原先逐任务串行 + 重复 result 请求)。
-  const details = await Promise.allSettled(done.slice(0, 10).map((tk) => api.tasks.get(projectId, tk.id)))
+  // 最多读取最近的 10 个已完成任务; 任一必需详情(含明确可用时的 /result
+  // 补充读取)失败即整组失败, 不跳过失败任务降到其他包(调用方呈现并可重试)。
+  const details = await Promise.all(done.slice(0, 10).map((tk) => api.tasks.get(projectId, tk.id)))
   for (const d of details) {
-    if (d.status === 'fulfilled' && d.value.evidence.length > 0) {
-      return d.value.evidence[0].package_id
+    if (d.evidence.length > 0) {
+      return d.evidence[0].package_id
     }
   }
   return null
@@ -53,6 +53,10 @@ export default function ExportPage() {
   /** 证据包 id:null = 无可导出结果,undefined = 解析中。 */
   const [evidence, setEvidence] = useState<number | null | undefined>(undefined)
   const [resolving, setResolving] = useState(true)
+  /** 解析失败(列表/任一详情失败): 明确加载失败并可重试, 不当无结果。 */
+  const [resolveError, setResolveError] = useState<string | null>(null)
+  /** 解析重试序号: 仅重读列表与详情, 不发任务/评估 POST。 */
+  const [resolveNonce, setResolveNonce] = useState(0)
 
   const [exportError, setExportError] = useState<string | null>(null)
   /** 当前进行中的导出动作(excel / package / null)。 */
@@ -66,11 +70,16 @@ export default function ExportPage() {
     let cancelled = false
     const resolve = async () => {
       setResolving(true)
+      setResolveError(null)
       try {
         const found = await resolveEvidencePackage(projectId)
-        if (!cancelled) setEvidence(found)
-      } catch {
-        if (!cancelled) setEvidence(null)
+        if (cancelled) return
+        setEvidence(found)
+      } catch (err) {
+        if (cancelled) return
+        // 解析失败不是无结果: 清证据选择、显错并可重试, 不降到其他包。
+        setEvidence(null)
+        setResolveError(translateError(err as ApiError))
       } finally {
         if (!cancelled) setResolving(false)
       }
@@ -79,7 +88,7 @@ export default function ExportPage() {
     return () => {
       cancelled = true
     }
-  }, [projectId])
+  }, [projectId, resolveNonce])
 
   // -------------------------------------------------------------------------
   // 动作
@@ -160,6 +169,14 @@ export default function ExportPage() {
           {exportError}
         </Alert>
       ) : null}
+      {resolveError ? (
+        <div className="ies-section">
+          <Alert variant="error">{resolveError}</Alert>
+          <div style={{ marginTop: 'var(--ies-space-2)' }}>
+            <Button onClick={() => setResolveNonce((n) => n + 1)}>{pt('ies.common.retry')}</Button>
+          </div>
+        </div>
+      ) : null}
 
       {/* Excel 报告导出 */}
       <Card title={pt('ies.export.excel')}>
@@ -183,7 +200,7 @@ export default function ExportPage() {
           </Button>
           {resolving ? <Spinner size="sm" /> : null}
         </div>
-        {!resolving && !excelReady ? (
+        {!resolving && !excelReady && !resolveError ? (
           <div style={{ marginTop: 'var(--ies-space-3)' }}>
             <Alert variant="warning">{pt('ies.export.no_result')}</Alert>
           </div>
