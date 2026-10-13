@@ -262,6 +262,11 @@ export default function ResultsPage() {
     const load = async () => {
       setLoading(true)
       setLoadError(null)
+      // 上下文变化/重载即清旧条目与旧选择(触发已有取消/重置机制):
+      // 失败态只剩错误+重试, 不把旧包展示为当前包; 成功后按既有规则重选。
+      // 不新增缓存/回退/备用状态。
+      setEntries([])
+      setSelectedPkgId(null)
       try {
         const page = await api.tasks.list({ project_id: projectId, limit: 100 })
         const completed = page.items.filter(

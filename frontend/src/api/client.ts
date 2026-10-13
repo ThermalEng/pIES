@@ -1681,22 +1681,21 @@ export const api = {
         // 可用性明确为 true 时 /result 读取失败必须 reject, 不吞错置空 evidence
         // 伪装详情正常无结果(调用方负责失败可见)。
         if (detail.result_available) {
+          // 可用性权威说明存在证据: 补充元数据必需字段直接消费,
+          // 不做 ??0/默认 complete/pkgId>0 过滤掩盖, 不新增字段校验器。
           const result = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`)
           const r = asRecord(oneOf<Record<string, unknown>>(result, 'result'))
           const evidence = asRecord(r.evidence)
-          const pkgId = Number(evidence.id ?? 0)
-          if (pkgId > 0) {
-            const status = String(evidence.status ?? 'complete')
-            detail.evidence = [
-              {
-                package_id: pkgId,
-                object_id: Number(evidence.object_id ?? 0),
-                status: status as TaskDetail['evidence'][number]['status'],
-              },
-            ]
-            // 缓存 证据包 → 任务 反向映射(结果/导出 API 以任务为路由键)
-            pkgTaskCache.set(pkgId, taskId)
-          }
+          const pkgId = Number(evidence.id)
+          detail.evidence = [
+            {
+              package_id: pkgId,
+              object_id: Number(evidence.object_id),
+              status: evidence.status as TaskDetail['evidence'][number]['status'],
+            },
+          ]
+          // 缓存 证据包 → 任务 反向映射(结果/导出 API 以任务为路由键)
+          pkgTaskCache.set(pkgId, taskId)
         }
         return detail
       })

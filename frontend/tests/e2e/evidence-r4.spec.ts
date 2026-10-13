@@ -183,10 +183,183 @@ test.describe('R4: 证据收集失败可见', () => {
     expect(await page.getByText(/暂无可用结果/).count()).toBe(0)
     expect(writePosts).toEqual([])
 
+    // 真实用户导出: 捕获 excel POST 体核对同一证据包, 真实下载文件。
+    // 导出可能按既定语义创建评估(R7 范围, 不改); 收集/重试零 POST 断言止于此前。
+    let excelBody: { evidence_package_id?: unknown } | null = null
+    await context.route(
+      (url) => url.pathname === `/api/projects/${pid}/exports/excel`,
+      async (route) => {
+        excelBody = route.request().postDataJSON() as { evidence_package_id?: unknown } | null
+        await route.fallback()
+      },
+    )
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 180_000 }),
+      excelBtn.click({ timeout: 30_000 }),
+    ])
+    expect(excelBody?.evidence_package_id).toBe(pkgId)
+    const downloadPath = await download.path()
+    expect(downloadPath).toBeTruthy()
+    const { statSync } = await import('node:fs')
+    expect(statSync(downloadPath as string).size).toBeGreaterThan(0)
+
     // 预期内噪声: 详情 500×1, /result 500×2(结果页重载 + 导出页)。
     session.assertNoErrors([
       { method: 'GET', path: detailPath, status: 500, times: 1 },
       { method: 'GET', path: resultPath, status: 500, times: 2 },
+    ])
+    await apiCtx.close()
+    await context.close()
+  })
+
+  test('切换项目后旧条目不滞留、失败只剩错误重试', async ({ browser }) => {
+    // 说明: Workbench static 路由树无 key, 同组件在项目间复用实例、
+    // 保留 state; 收集 effect 仅随 projectId 重跑。?package= 只首读一次,
+    // 改 query 不重跑 effect, 故不列为切换路径。
+    const userName = uniqueName('es-r4sw-doer')
+    const password = strongPassword('Init')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, userName, password)
+    const userToken = await loginToken(apiCtx.request, userName, password)
+
+    // 项目 A: 公开 API 脚手架 + 真实求解完成(本场景唯一求解)。
+    const projectA = uniqueName('R4切换A')
+    const pidA = await scaffoldProject(
+      requestJson, apiCtx.request, userToken, projectA, uniqueName('r4sw-tariff'),
+    )
+    const view0 = await requestJson(apiCtx.request, 'GET', `/api/projects/${pidA}`, undefined, userToken)
+    await requestJson(apiCtx.request, 'PUT', `/api/projects/${pidA}/draft`, {
+      expected_revision: view0.draft.revision,
+      commands: [{
+        id: 'st-dev-hp2', unit: 'model', type: 'model.upsert_device',
+        payload: {
+          name: 'hp2', device_type: 'ies.device.heat_pump', kind: 'new',
+          params: { rated_heat_kw: 500, cop: 4.0 }, position: { x: 6.0, y: 6.0 },
+        },
+      }, {
+        id: 'st-conn-grid-hp2', unit: 'model', type: 'model.upsert_connection',
+        payload: {
+          name: 'c-grid-hp2', from_device: 'grid1', from_port: 'electricity_import',
+          to_device: 'hp2', to_port: 'electricity_in',
+        },
+      }, {
+        id: 'st-finbind2', unit: 'assembly', type: 'assembly.set_finance_binding',
+        payload: {
+          instances: {
+            grid1: { type: 'none' },
+            load1: { type: 'none' },
+            heatload: { type: 'none' },
+            hp1: {
+              type: 'costed', finance_type: 'heat_pump_system',
+              drivers: {
+                heat_kw: { property: 'rated_heat_kw' },
+                consumed_kwh: { interface: 'electricity_in', aggregation: 'integrate_positive' },
+              },
+            },
+            hp2: {
+              type: 'costed', finance_type: 'heat_pump_system',
+              drivers: {
+                heat_kw: { property: 'rated_heat_kw' },
+                consumed_kwh: { interface: 'electricity_in', aggregation: 'integrate_positive' },
+              },
+            },
+          },
+        },
+      }],
+    }, userToken)
+    await requestJson(apiCtx.request, 'PUT', `/api/projects/${pidA}/planning-config`, {
+      planning_config: {
+        objective: {
+          sense: 'minimize',
+          expression: 'hp1__upfront_capex + hp2__upfront_capex + 1 year * hp1__annual_fixed_om + 1 year * hp2__annual_fixed_om',
+        },
+        variables: {
+          hp1_cap: { device_ref: 'hp1', parameter: 'rated_heat_kw', lower_bound: '50', upper_bound: '1000', unit: 'kW' },
+          hp2_cap: { device_ref: 'hp2', parameter: 'rated_heat_kw', lower_bound: '200', upper_bound: '1000', unit: 'kW' },
+        },
+        constraints: {},
+      },
+      expected_revision: 1,
+    }, userToken)
+    const precheck = await requestJson(apiCtx.request, 'POST', `/api/projects/${pidA}/validation/run`, {}, userToken)
+    expect((precheck.report?.diagnostics ?? []).filter((d: { blocking: boolean }) => d.blocking)).toEqual([])
+    const cfg = await requestJson(apiCtx.request, 'GET', `/api/projects/${pidA}/config`, undefined, userToken)
+    const task = await requestJson(apiCtx.request, 'POST', `/api/projects/${pidA}/tasks`, {
+      task_type: 'optimization',
+      config: { config_revision: cfg.revision },
+      evaluation: EVALUATION,
+      idempotency_key: `r4sw-${Date.now()}`,
+      parent_task_id: null,
+    }, userToken)
+    const taskId: number = task.task.id
+    await expect(async () => {
+      const detail = await requestJson(apiCtx.request, 'GET', `/api/projects/${pidA}/tasks/${taskId}`, undefined, userToken)
+      expect(detail.task.status).toBe('completed')
+    }).toPass({ timeout: 420_000, intervals: [10_000] })
+    const view = await requestJson(
+      apiCtx.request, 'GET', `/api/projects/${pidA}/tasks/${taskId}/result`, undefined, userToken,
+    )
+    const pkgId: number = view.result.evidence.id
+    expect(pkgId).toBeGreaterThan(0)
+    const entryText = `任务 #${taskId} · 证据包 #${pkgId}`
+
+    // 项目 B: 公开 API 仅创建空项目(无任务、无求解)。
+    const projectB = uniqueName('R4切换B')
+    const createdB = await requestJson(apiCtx.request, 'POST', '/api/projects', {
+      name: projectB,
+      baseline_resolution: '1h',
+      baseline_start_year: 2025,
+      baseline_scenario_mode: 'single',
+    }, userToken)
+    const pidB: number = createdB.project?.id ?? createdB.id
+    expect(pidB).toBeTruthy()
+    const bListPath = `/api/projects/${pidB}/tasks`
+
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    // B 的任务列表按标志失败(只在点结果分析前打开, 不污染 B 任务页加载)。
+    let failBList = false
+    await context.route(
+      (url) => url.pathname === bListPath,
+      (route) => failBList
+        ? route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: '{"detail":"r4 injected switch failure"}',
+        })
+        : route.fallback(),
+    )
+    const session = await createSession(page, userName, password)
+
+    // A 结果页成功, 旧条目可见。
+    await page.goto(`/projects/${pidA}/results`)
+    await expect(page.getByText(entryText)).toBeVisible({ timeout: 60_000 })
+
+    // 客户端路由切到 B(同组件复用、state 沿用): 先到列表, 再进 B, 再点结果分析。
+    await page.getByText('项目列表').first().click({ timeout: 30_000 })
+    await page.getByText(projectB).click({ timeout: 30_000 })
+    // 项目页 index 重定向到任务中心子路由。
+    await expect(page).toHaveURL(/\/projects\/\d+\/tasks/)
+    failBList = true
+    await page.getByText('结果分析').first().click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/results/)
+
+    // 失败态只剩错误+重试: A 旧条目不再显示, 无伪空态, 无旧包导出按钮。
+    await expect(page.getByRole('button', { name: '重试', exact: true }).first()).toBeVisible({ timeout: 60_000 })
+    expect(await page.getByText(entryText).count()).toBe(0)
+    expect(await page.getByText('该项目暂无结果').count()).toBe(0)
+    expect(await page.getByRole('button', { name: /导出 Excel/i }).count()).toBe(0)
+
+    // 解除失败后重试: B 真实空态, A 条目仍不出现。
+    failBList = false
+    await page.getByRole('button', { name: '重试', exact: true }).first().click({ timeout: 30_000 })
+    await expect(page.getByText('该项目暂无结果')).toBeVisible({ timeout: 60_000 })
+    expect(await page.getByText(entryText).count()).toBe(0)
+
+    session.assertNoErrors([
+      { method: 'GET', path: bListPath, status: 500, times: 1 },
+      // 空项目 B 任务页读尚无保存的计算配置 404(R4 外既有行为, 计数锁定防漂移)。
+      { method: 'GET', path: `/api/projects/${pidB}/config`, status: 404, times: 1 },
     ])
     await apiCtx.close()
     await context.close()
