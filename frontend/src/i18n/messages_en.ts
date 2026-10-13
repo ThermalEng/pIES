@@ -225,7 +225,6 @@ export const messagesEn: Record<string, string> = {
   'ies.project.currency': 'Currency',
   'ies.project.currency_cny': 'CNY (RMB)',
   'ies.project.currency_usd': 'USD',
-  'ies.project.utc_offset': 'UTC offset (minutes)',
   'ies.project.baseline_resolution': 'Resolution (immutable after creation)',
   'ies.project.baseline_start_year': 'Start year (immutable after creation)',
   'ies.project.start_year_invalid': 'Enter a Gregorian integer start year (e.g. 2026)',

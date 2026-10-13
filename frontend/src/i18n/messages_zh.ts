@@ -235,7 +235,6 @@ export const messagesZh: Record<string, string> = {
   'ies.project.currency': '币种',
   'ies.project.currency_cny': '人民币 (CNY)',
   'ies.project.currency_usd': '美元 (USD)',
-  'ies.project.utc_offset': '时区偏移(分钟)',
   'ies.project.baseline_resolution': '计算分辨率(创建后不可修改)',
   'ies.project.baseline_start_year': '运行起始年(创建后不可修改)',
   'ies.project.start_year_invalid': '请输入公历整数起始年(如 2026)',
