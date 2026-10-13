@@ -39,7 +39,7 @@ import { api } from '../api/client'
 import { ApiError, PublicAuthSettings } from '../types'
 import { errorMessage, useI18n } from '../i18n'
 import type { Locale } from '../i18n'  // Locale kept for setLocale typing if needed
-import { Alert, Badge, Button, Checkbox, FormField, Input } from '../components/ui'
+import { Alert, Badge, Button, FormField, Input } from '../components/ui'
 import { BrandMark } from '../components/BrandMark'
 
 // ---------------------------------------------------------------------------
@@ -116,7 +116,6 @@ export default function LoginPage() {
   // 登录表单
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [remember, setRemember] = useState(false)
   const [loginError, setLoginError] = useState<string | null>(null)
   const [loginBusy, setLoginBusy] = useState(false)
   const [loginOffline, setLoginOffline] = useState(false)
@@ -171,7 +170,6 @@ export default function LoginPage() {
       const res = (await api.auth.login({
         username: username.trim(),
         password,
-        remember,
       })) as unknown as AuthResponse
       setLoginResult(res)
       if (res.user.force_password_change) {
@@ -345,13 +343,6 @@ export default function LoginPage() {
                 disabled={loginBusy}
               />
             </FormField>
-            <Checkbox
-              id="login-remember"
-              label={t('ies.auth.remember')}
-              checked={remember}
-              onChange={(event) => setRemember(event.target.checked)}
-              disabled={loginBusy}
-            />
             {loginError ? (
               <Alert variant="error" title={loginError} closable onClose={() => setLoginError(null)} />
             ) : null}

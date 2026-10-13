@@ -123,7 +123,6 @@ export interface User {
 export interface LoginRequest {
   username: string
   password: string
-  remember?: boolean
 }
 
 export interface RegisterRequest {

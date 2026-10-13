@@ -178,7 +178,6 @@ export const messagesZh: Record<string, string> = {
   'ies.auth.brand_tagline': '园区综合能源系统规划',
   'ies.auth.username': '用户名',
   'ies.auth.password': '密码',
-  'ies.auth.remember': '记住我',
   'ies.auth.language': '界面语言',
   'ies.auth.login_submit': '登 录',
   'ies.auth.logout_confirm': '确定退出登录?',

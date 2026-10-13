@@ -168,7 +168,6 @@ export const messagesEn: Record<string, string> = {
   'ies.auth.brand_tagline': 'Park integrated energy system planning',
   'ies.auth.username': 'Username',
   'ies.auth.password': 'Password',
-  'ies.auth.remember': 'Remember me',
   'ies.auth.language': 'Language',
   'ies.auth.login_submit': 'Sign in',
   'ies.auth.logout_confirm': 'Sign out of the current account?',
