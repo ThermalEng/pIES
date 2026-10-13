@@ -299,6 +299,8 @@ export default function ResultsPage() {
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (!selectedPkgId) {
+      // 取消选择即作废在途曲线/重试读, 不向空选择发布旧响应。
+      hourlySeq.current += 1
       setMetrics(null)
       setFinEval(null)
       setFinAbsence(null)
@@ -366,8 +368,15 @@ export default function ResultsPage() {
         setNoEvidence(res?.evidence_status === 'no_evidence')
         setResultDiag(res?.diagnostics ?? [])
         setAssessments([...(ass ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)))
-        // 曲线独立读取: 缺席与失败只记曲线状态, 不清财务/指标/摘要;
-        // 整组失败直接呈现, 不缩水、不补空。序号 guard 避免旧读覆盖新选择。
+        // 主结果状态先全部发布(财务/指标/候选/规划解/快照引用), 再读曲线:
+        // 曲线慢/挂起不延迟主结果展示。曲线缺席与失败只记曲线状态。
+        // 真实候选/规划解/快照引用(后端权威, 不反解指标键)
+        setCandList(res?.candidates ?? [])
+        setPlanSolution(res?.planningSolution ?? null)
+        setSnapRefs(res?.snapshotRefs ?? null)
+        setResultError(null)
+        // 曲线独立读取: 整组失败直接呈现, 不缩水、不补空。
+        // 序号 guard 避免旧读覆盖新选择。
         const mySeq = hourlySeq.current + 1
         hourlySeq.current = mySeq
         setHourlyLoading(true)
@@ -390,11 +399,6 @@ export default function ResultsPage() {
         } finally {
           if (!cancelled && hourlySeq.current === mySeq) setHourlyLoading(false)
         }
-        // 真实候选/规划解/快照引用(后端权威, 不反解指标键)
-        setCandList(res?.candidates ?? [])
-        setPlanSolution(res?.planningSolution ?? null)
-        setSnapRefs(res?.snapshotRefs ?? null)
-        setResultError(null)
       } catch (err) {
         if (!cancelled) {
           setMetrics(null)
@@ -418,6 +422,9 @@ export default function ResultsPage() {
     void load()
     return () => {
       cancelled = true
+      // 卸载/切换时作废曲线与重试在途读: 旧响应不再发布(含 retryHourly,
+      // 它只认序号、不认 cancelled)。
+      hourlySeq.current += 1
     }
   }, [selectedPkgId])
 

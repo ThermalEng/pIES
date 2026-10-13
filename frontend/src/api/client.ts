@@ -1817,11 +1817,13 @@ export const api = {
           })
       return pending.then(async (body) => {
         const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
-        // 合法缺席: 后端显式 hourly_refs=null/空数组/空序列集合(metrics-only
-        // 或非计算任务无封存引用)。只对已定义缺席分支处理, 不抛错。
-        const rawRefs = r.hourly_refs as { series: HourlySeriesMeta[]; rows: number }[] | null | undefined
-        const ref = Array.isArray(rawRefs) ? rawRefs[0] : undefined
-        if (!ref || !Array.isArray(ref.series) || ref.series.length === 0) return { absent: true }
+        // 合法缺席仅三种后端显式形态: hourly_refs=null/空数组/空序列集合
+        // (metrics-only 或非计算任务无封存引用)。其余直接可信消费,
+        // 不把缺件/失配伪装缺席, 不做形状验证器。
+        const rawRefs = r.hourly_refs as { series: HourlySeriesMeta[]; rows: number }[] | null
+        if (rawRefs === null || rawRefs.length === 0) return { absent: true }
+        const ref = rawRefs[0]
+        if (ref.series.length === 0) return { absent: true }
         const series = ref.series
         const rows = ref.rows
         // 引用存在后任何分页失败都直接抛错(整组失败), 不缩水 flows、

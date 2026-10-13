@@ -117,6 +117,15 @@ test.describe('R3: 曲线读取失败可见', () => {
     const metas = refs[0].series
     expect(metas.length).toBeGreaterThan(0)
     const expectedLabels = metas.map((m) => `${m.instance_id}.${m.variable_id}`)
+    // 同次真实结果的已封存财务事实(直接 API 值对照, 不重算): 失败前后必须原样保留。
+    const fin = view.result.financial_evaluation as {
+      construction_total: unknown; construction_total_unit: string;
+      currency: string; payments_applied: Array<{ t: number; ratio: unknown; amount: unknown }>;
+    } | null
+    expect(fin).not.toBeNull()
+    const totalLine = `${String(fin!.construction_total)} ${fin!.construction_total_unit}`
+    const firstPay = fin!.payments_applied[0]
+    const payLine = `${String(firstPay.ratio)} × C = ${String(firstPay.amount)} ${fin!.currency}`
 
     // GUI: 曲线分页请求全部定向 500, 主结果与其他端点保持真实。
     const context = await browser.newContext()
@@ -146,8 +155,10 @@ test.describe('R3: 曲线读取失败可见', () => {
     expect(await card.locator('.ies-chart__legend-item').count()).toBe(0)
     const retryBtn = card.getByRole('button', { name: '重试', exact: true })
     await expect(retryBtn).toBeVisible()
-    // 财务摘要保留: 财务卡仍在, 主结果无全局错误。
-    await expect(page.getByText('财务', { exact: true }).first()).toBeVisible()
+    // 财务摘要保留: 封存财务卡标题与已封存关键值原样可见, 主结果无全局错误。
+    await expect(page.getByText('评价现金流(封存)').first()).toBeVisible()
+    await expect(page.getByText(totalLine).first()).toBeVisible()
+    await expect(page.getByText(payLine).first()).toBeVisible()
     expect(writePosts).toEqual([])
 
     // 解除拦截后点击重试: 真实恢复, 图例与 API 身份一致, 仍无写请求。
@@ -163,6 +174,9 @@ test.describe('R3: 曲线读取失败可见', () => {
     }
     const note = await card.getByText(/个数据点/).first().innerText()
     expect(note).toContain(`共 ${refs[0].rows} 个数据点`)
+    // 重试后封存财务关键值仍原样保留。
+    await expect(page.getByText(totalLine).first()).toBeVisible()
+    await expect(page.getByText(payLine).first()).toBeVisible()
     expect(writePosts).toEqual([])
 
     // 预期内噪声: 首轮每序列恰一次 500(单页, rows < 后端上限)。
@@ -172,6 +186,141 @@ test.describe('R3: 曲线读取失败可见', () => {
       status: 500,
       times: metas.length,
     }])
+    await apiCtx.close()
+    await context.close()
+  })
+
+  test('慢曲线不阻塞主结果、恢复后为真实值', async ({ browser }) => {
+    const userName = uniqueName('es-r3slow-doer')
+    const password = strongPassword('Init')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, userName, password)
+    const userToken = await loginToken(apiCtx.request, userName, password)
+
+    // 公开 API 准备: 与失败场景同源的双泵规划 + 真实求解完成(独立求解)。
+    const pid = await scaffoldProject(
+      requestJson, apiCtx.request, userToken, uniqueName('R3慢曲线项目'), uniqueName('r3slow-tariff'),
+    )
+    const view0 = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}`, undefined, userToken)
+    await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/draft`, {
+      expected_revision: view0.draft.revision,
+      commands: [{
+        id: 'st-dev-hp2', unit: 'model', type: 'model.upsert_device',
+        payload: {
+          name: 'hp2', device_type: 'ies.device.heat_pump', kind: 'new',
+          params: { rated_heat_kw: 500, cop: 4.0 }, position: { x: 6.0, y: 6.0 },
+        },
+      }, {
+        id: 'st-conn-grid-hp2', unit: 'model', type: 'model.upsert_connection',
+        payload: {
+          name: 'c-grid-hp2', from_device: 'grid1', from_port: 'electricity_import',
+          to_device: 'hp2', to_port: 'electricity_in',
+        },
+      }, {
+        id: 'st-finbind2', unit: 'assembly', type: 'assembly.set_finance_binding',
+        payload: {
+          instances: {
+            grid1: { type: 'none' },
+            load1: { type: 'none' },
+            heatload: { type: 'none' },
+            hp1: {
+              type: 'costed', finance_type: 'heat_pump_system',
+              drivers: {
+                heat_kw: { property: 'rated_heat_kw' },
+                consumed_kwh: { interface: 'electricity_in', aggregation: 'integrate_positive' },
+              },
+            },
+            hp2: {
+              type: 'costed', finance_type: 'heat_pump_system',
+              drivers: {
+                heat_kw: { property: 'rated_heat_kw' },
+                consumed_kwh: { interface: 'electricity_in', aggregation: 'integrate_positive' },
+              },
+            },
+          },
+        },
+      }],
+    }, userToken)
+    await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/planning-config`, {
+      planning_config: {
+        objective: {
+          sense: 'minimize',
+          expression: 'hp1__upfront_capex + hp2__upfront_capex + 1 year * hp1__annual_fixed_om + 1 year * hp2__annual_fixed_om',
+        },
+        variables: {
+          hp1_cap: { device_ref: 'hp1', parameter: 'rated_heat_kw', lower_bound: '50', upper_bound: '1000', unit: 'kW' },
+          hp2_cap: { device_ref: 'hp2', parameter: 'rated_heat_kw', lower_bound: '200', upper_bound: '1000', unit: 'kW' },
+        },
+        constraints: {},
+      },
+      expected_revision: 1,
+    }, userToken)
+    const precheck = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/validation/run`, {}, userToken)
+    expect((precheck.report?.diagnostics ?? []).filter((d: { blocking: boolean }) => d.blocking)).toEqual([])
+    const cfg = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/config`, undefined, userToken)
+    const task = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/tasks`, {
+      task_type: 'optimization',
+      config: { config_revision: cfg.revision },
+      evaluation: EVALUATION,
+      idempotency_key: `r3slow-${Date.now()}`,
+      parent_task_id: null,
+    }, userToken)
+    const taskId: number = task.task.id
+    await expect(async () => {
+      const detail = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}`, undefined, userToken)
+      expect(detail.task.status).toBe('completed')
+    }).toPass({ timeout: 420_000, intervals: [10_000] })
+
+    const view = await requestJson(
+      apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, userToken,
+    )
+    const refs = view.result.hourly_refs as Array<{
+      fields: string[]; rows: number;
+      series: Array<{ series_id: string; instance_id: string; variable_id: string; unit: string }>;
+    }>
+    expect(refs.length).toBeGreaterThan(0)
+    const metas = refs[0].series
+    expect(metas.length).toBeGreaterThan(0)
+    const expectedLabels = metas.map((m) => `${m.instance_id}.${m.variable_id}`)
+    const fin = view.result.financial_evaluation as {
+      construction_total: unknown; construction_total_unit: string;
+    } | null
+    expect(fin).not.toBeNull()
+    const totalLine = `${String(fin!.construction_total)} ${fin!.construction_total_unit}`
+
+    // GUI: 曲线分页真实响应但延迟 8s(内容不 mock, 只慢); 主结果应先显示。
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await context.route('**/result/hourly*', async (route) => {
+      const res = await route.fetch()
+      await new Promise((r) => setTimeout(r, 8000))
+      await route.fulfill({ response: res })
+    })
+    const session = await createSession(page, userName, password)
+    await page.goto(`/projects/${pid}/results`)
+    await expect(page.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
+
+    // 延迟期间: 曲线处加载中、无图表; 封存财务与规划解已显示。
+    const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()
+    await expect(card).toBeVisible({ timeout: 60_000 })
+    await expect(card.getByText(/正在读取计算步曲线/)).toBeVisible({ timeout: 30_000 })
+    expect(await card.locator('.ies-chart').count()).toBe(0)
+    await expect(page.getByText(totalLine).first()).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByText('hp1_cap').first()).toBeVisible({ timeout: 30_000 })
+
+    // 延迟后真实恢复: 图例与 API 身份一致, 点数一致。
+    await expect(async () => {
+      const items = await card.locator('.ies-chart__legend-item').allInnerTexts()
+      expect(items.length).toBe(expectedLabels.length)
+    }).toPass({ timeout: 60_000 })
+    const legends = await card.locator('.ies-chart__legend-item').allInnerTexts()
+    for (const label of expectedLabels) {
+      expect(legends.some((t) => t.includes(label))).toBe(true)
+    }
+    const note = await card.getByText(/个数据点/).first().innerText()
+    expect(note).toContain(`共 ${refs[0].rows} 个数据点`)
+
+    session.assertNoErrors()
     await apiCtx.close()
     await context.close()
   })
