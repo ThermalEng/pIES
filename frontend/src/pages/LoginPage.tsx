@@ -8,8 +8,9 @@
  *   change_password  首次登录强制改密(后端 user.force_password_change = true;
  *                    改密成功即凭证轮换,须用新密码重新登录)
  *   takeover         窗口接管确认(后端 needs_takeover_confirm = true:
- *                    旧窗口会话已被降级为 takeover_pending,确认后调用
- *                    confirm-takeover 撤销旧会话并轮换新窗口凭证)
+ *                    旧窗口会话已被降级为 takeover_pending,确认时调用无请求体
+ *                    的 confirm-takeover(身份取自 Cookie/Bearer)撤销其余会话,
+ *                    当前窗口凭证即最终凭证,不轮换)
  *
  * 其他能力:
  *   - 注册开关 / SSO 入口: 登录页渲染时拉取公开设置(GET /api/auth/public-settings,
@@ -25,7 +26,8 @@
  * 与后端契约(backend/iesplan/api/auth.py):
  *   POST /api/auth/login            → {token, user{force_password_change}, needs_takeover_confirm}
  *   POST /api/auth/change-password  → 改密后凭证版本递增,当前及旧会话全部失效
- *   POST /api/auth/confirm-takeover → 以 Cookie 凭证确认,返回全新 token
+ *   POST /api/auth/confirm-takeover → 无请求体,以 Cookie/Bearer 凭证确认,
+ *                    返回当前窗口凭证(不轮换)
  *   GET  /api/auth/public-settings  → {registration_enabled, sso_enabled, sso_provider_name}
  *   POST /api/auth/register         → 仅开关开启时可用(创建 engineer 账号)
  *   GET  /api/auth/oidc/login       → 302 跳转 OIDC 提供方授权页
@@ -110,7 +112,6 @@ export default function LoginPage() {
   const redirectTarget = routeState?.from ?? '/'
 
   const [view, setView] = useState<View>('login')
-  const [loginResult, setLoginResult] = useState<AuthResponse | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
   // 登录表单
@@ -171,7 +172,6 @@ export default function LoginPage() {
         username: username.trim(),
         password,
       })) as unknown as AuthResponse
-      setLoginResult(res)
       if (res.user.force_password_change) {
         // 首次登录(或密码被重置):强制改密;改密成功后当前会话随之失效
         setOldPassword(password)
@@ -180,11 +180,11 @@ export default function LoginPage() {
         setChangeError(null)
         setView('change_password')
       } else if (res.needs_takeover_confirm) {
-        // 旧窗口已被降级为待接管:直接调用 confirm-takeover 轮换凭证,
+        // 旧窗口已被降级为待接管:直接调用 confirm-takeover 确认(无请求体,
+        // 身份取自登录响应设置的 Cookie/Bearer),
         // 避免无人值守/后台测试场景下停留在接管对话框造成 session 卡死循环。
         try {
-          const confirmed = await api.auth.confirmTakeover({ token: res.token })
-          setLoginResult(confirmed)
+          await api.auth.confirmTakeover()
           navigate(redirectTarget, { replace: true })
         } catch (confirmErr) {
           setTakeoverError(errorText(confirmErr))
@@ -255,7 +255,6 @@ export default function LoginPage() {
       await api.auth.changePassword({ old_password: oldPassword, new_password: newPassword })
       // 凭证版本已轮换,当前及全部旧会话失效:回登录表单,用新密码重新登录
       setNotice(t('ies.auth.password_changed'))
-      setLoginResult(null)
       setPassword('')
       setOldPassword('')
       setNewPassword('')
@@ -272,8 +271,8 @@ export default function LoginPage() {
     setTakeoverError(null)
     setTakeoverBusy(true)
     try {
-      // 后端以 Cookie 会话确认接管并轮换凭证(body 仅供客户端语义传递,服务端忽略)
-      await api.auth.confirmTakeover({ token: loginResult?.token ?? '' })
+      // 后端以 Cookie/Bearer 会话确认接管(无请求体,不轮换凭证)
+      await api.auth.confirmTakeover()
       navigate(redirectTarget, { replace: true })
     } catch (err) {
       setTakeoverError(errorText(err))
@@ -287,7 +286,6 @@ export default function LoginPage() {
     void api.auth.logout().catch(() => {
       /* 会话失效由 client 的 401 处理器兜底清理 */
     })
-    setLoginResult(null)
     setView('login')
   }
 

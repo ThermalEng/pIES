@@ -15,6 +15,11 @@
 
 ## Unreleased
 
+### 2026-10-13 — `0.14.0` 接管确认去请求体 A2（待复审）
+
+- `POST /api/auth/confirm-takeover` 端点签名无 body 参数，身份全走 Cookie/Bearer（`AuthCtx`）；前端删除被忽略的 `{token}` payload 与 `confirmTakeover(input)` 签名，两调用点改为无 body 确认；删除随之失效的 `loginResult` 状态；仅纠正该路径上“轮换凭证/全新 token”过期注释（后端明确不轮换，当前窗口凭证即最终凭证）。
+- 保留响应 token 用途、Cookie/Bearer 认证与接管业务逻辑，不动 A1 已删字段之外的认证行为。证据：前端构建（tsc＋vite）通过；新增 `takeover-no-body.spec.ts` 1 通过（第二窗口接管 POST 无 body、接管后会话继续有效）；既有场景 1 通过。同文件场景 2/3 既有失败不变（A1 已在干净基线确认，与认证改动无关）。此项不代表 `0.14.0` 整体完成。
+
 ### 2026-10-13 — `0.14.0` 登录“记住我”无语义清理 A1（待复审）
 
 - 登录页“记住我”勾选从未进入后端语义（后端 `LoginRequest` 仅用户名/密码/设备，`remember` 键全仓无消费、被 pydantic 默认忽略）：删除该 Checkbox、组件状态、`LoginRequest.remember` 字段及中英文文案键；不新增持久登录、TTL、会话期限或其他认证行为，不动 A2 接管 payload。

@@ -1075,7 +1075,8 @@ export interface AuthApi {
   login(input: LoginRequest): Promise<LoginResult>
   logout(): Promise<void>
   changePassword(input: { old_password: string; new_password: string }): Promise<void>
-  confirmTakeover(input: { token: string }): Promise<LoginResult>
+  /** 确认接管(无请求体; 身份取自 Cookie/Bearer, 服务端忽略 body)。 */
+  confirmTakeover(): Promise<LoginResult>
   register(input: RegisterRequest): Promise<User>
   /** 获取当前登录用户(页面刷新后恢复用户信息)。 */
   me(): Promise<User>
@@ -1293,8 +1294,8 @@ export const api = {
     changePassword(input: { old_password: string; new_password: string }): Promise<void> {
       return request<void>('/auth/change-password', { method: 'POST', body: input })
     },
-    confirmTakeover(input: { token: string }): Promise<LoginResult> {
-      return request<LoginResult>('/auth/confirm-takeover', { method: 'POST', body: input }).then((res) => {
+    confirmTakeover(): Promise<LoginResult> {
+      return request<LoginResult>('/auth/confirm-takeover', { method: 'POST' }).then((res) => {
         setSession()
         return res
       })
