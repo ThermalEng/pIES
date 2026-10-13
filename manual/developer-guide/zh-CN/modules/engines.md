@@ -107,6 +107,14 @@ SolverRuntime 根据 allowlist 解析结构化命令，在隔离目录执行，�
 - 扩展适配器只需实现 `ResultAdapter` 公开身份（`descriptor`/`ref`/`available`）与唯一业务调用 `adapt(Bundle, receipt, outputs)`，经 `build_result_adapter_registry` 原子发布，按 manifest/回执固定的精确引用解析。
 - 首个内置 `ies.result-adapter.highs@1.0.0`（配 `ies.generator.highs_milp@1.0.0`）解释求解 executable 写出的 `HIGHS_SOLUTION_V1` 文本（状态、目标值、列数与按索引的主解）。`kOptimal` 有完整主解时记 `solved`：变量按 MPS 列序对 `unit_map` 键反向换算到业务单位；目标值先加回 `objective_offset`（只加一次），再按 `objective_unit` 恢复业务单位——金额量纲守币种原值（财务币种，含 USD），物理量反向换算，单位由生成器确定，适配器不猜。声明分量按 `components` 用同一次主解求值发布到 `solution.components`（每分量 `{value, unit, caliber}`，年值按币种/年换算；声明缺失或引用未知 LP 变量即协议失败，不补零）。只发布 parameters 已请求的 `solution`/`metrics`。`kInfeasible`/`kUnbounded` 映射同名数学状态且无业务输出；`kUnboundedOrInfeasible` 记 `not_solved` 且无输出。文件自报时间限制时明确报错（部分解不当成功解释）；垫片超时以非零退出且不写文件，走回执失败路径，监督超时走回执 `timed_out`，此时不读 solution 文件。其余非最优状态、未知状态、格式损坏、缺失输出、发布值非有限一律结果协议失败。结果填 `receipt_id` 与 `bundle_id` 追溯，不读取当前项目或最新 provider。
 
+### 统一求解步序列
+
+以下为生效目标契约，不表示当前链已实现。ResultAdapter 按 [Bundle 步序列映射](../formats/solver-bundle.md#步序列结果映射) 与同次主解恢复 `ComputeResult.outputs.series`：以不透明 `series_id` 为键，每项为 `{instance_id, variable_id, unit, values}`；`values` 顺序对应完整运营时域的连续 `step=0..n-1`，使用业务单位。不得由消费者拆解列名或序列 ID，不补零、不循环输入、不重新求解；实际结果解释失败沿已有结果协议错误处理。
+
+步序列随已请求的 `solution` 发布，不增加 CalculationConfig 输出词汇；未请求 solution、无可用数学解时不发布 series。候选归属复用同一结果的已有 solution/bundle/receipt 身份，不为曲线另造候选。该新增输出不改变 ComputeResult 顶层状态及追溯字段；配套 provider 的必需映射变更按其协议版本处理。
+
+application 只将已恢复统一序列序列化为结果对象，经 storage 落盘，并在已有封存事务内提交对象元数据、引用、证据和任务终态；外部 Blob 不参与数据库原子提交。序列身份、单位和顺序保留到公开读取 DTO，禁止 application 再解释 Bundle 列或做内部长度/hash 复核。Worker 只调用用例，不解释求解输出。读取协议见 [公共契约](../contracts.md#求解步序列读取)。
+
 ## 失败语义
 
 | 阶段 | 示例 | 结果 |
