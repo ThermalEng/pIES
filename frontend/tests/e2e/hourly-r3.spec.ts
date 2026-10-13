@@ -288,27 +288,42 @@ test.describe('R3: 曲线读取失败可见', () => {
     expect(fin).not.toBeNull()
     const totalLine = `${String(fin!.construction_total)} ${fin!.construction_total_unit}`
 
-    // GUI: 曲线分页真实响应但延迟 8s(内容不 mock, 只慢); 主结果应先显示。
+    // GUI: 曲线分页进可控闸门挂起(route.fetch 取真实响应, 内容不 mock,
+    // 只挂起不释放); 至少一个真实请求进入闸门后, 主结果必须已显示。
     const context = await browser.newContext()
     const page = await context.newPage()
+    let releaseGate!: () => void
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve })
+    let entered = false
     await context.route('**/result/hourly*', async (route) => {
+      entered = true
       const res = await route.fetch()
-      await new Promise((r) => setTimeout(r, 8000))
+      await gate
       await route.fulfill({ response: res })
     })
     const session = await createSession(page, userName, password)
-    await page.goto(`/projects/${pid}/results`)
-    await expect(page.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
+    try {
+      await page.goto(`/projects/${pid}/results`)
+      await expect(page.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
 
-    // 延迟期间: 曲线处加载中、无图表; 封存财务与规划解已显示。
+      // 等至少一个真实曲线请求进入闸门(响应仍被挂起, 未释放)。
+      await expect.poll(async () => entered, { timeout: 30_000 }).toBe(true)
+
+      // 挂起期间: 曲线处加载中、无图表; 封存财务与规划解变量已显示。
+      // 旧代码(主结果状态位于曲线 await 之后)在此会因规划解未发布而失败。
+      const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()
+      await expect(card).toBeVisible({ timeout: 60_000 })
+      await expect(card.getByText(/正在读取计算步曲线/)).toBeVisible({ timeout: 30_000 })
+      expect(await card.locator('.ies-chart').count()).toBe(0)
+      await expect(page.getByText(totalLine).first()).toBeVisible({ timeout: 30_000 })
+      await expect(page.getByText('hp1_cap').first()).toBeVisible({ timeout: 30_000 })
+    } finally {
+      // 测试失败也释放闸门, 不留挂起请求。
+      releaseGate()
+    }
+
+    // 释放后真实恢复: 图例与 API 身份一致, 点数一致。
     const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()
-    await expect(card).toBeVisible({ timeout: 60_000 })
-    await expect(card.getByText(/正在读取计算步曲线/)).toBeVisible({ timeout: 30_000 })
-    expect(await card.locator('.ies-chart').count()).toBe(0)
-    await expect(page.getByText(totalLine).first()).toBeVisible({ timeout: 30_000 })
-    await expect(page.getByText('hp1_cap').first()).toBeVisible({ timeout: 30_000 })
-
-    // 延迟后真实恢复: 图例与 API 身份一致, 点数一致。
     await expect(async () => {
       const items = await card.locator('.ies-chart__legend-item').allInnerTexts()
       expect(items.length).toBe(expectedLabels.length)
