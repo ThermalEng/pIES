@@ -745,8 +745,8 @@ export default function ResultsPage() {
         include_diagnostics: true,
         lang: exportLang,
       }
-      const report = await api.exports.excel(input)
-      const { blob, filename } = await api.exports.download(report.id)
+      const downloadSessionId = await api.exports.excel(input)
+      const { blob, filename } = await api.exports.download(downloadSessionId)
       downloadBlob(blob, filename)
       setExportOk(true)
     } catch (err) {
@@ -765,8 +765,8 @@ export default function ResultsPage() {
     setExportOk(false)
     setExportBusy('package')
     try {
-      const report = await api.exports.package({ project_id: projectId, include_versions: true })
-      const { blob, filename } = await api.exports.download(report.id)
+      const downloadSessionId = await api.exports.package({ project_id: projectId, include_versions: true })
+      const { blob, filename } = await api.exports.download(downloadSessionId)
       downloadBlob(blob, filename)
       setExportOk(true)
     } catch (err) {

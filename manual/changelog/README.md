@@ -15,6 +15,12 @@
 
 ## Unreleased
 
+### 2026-10-13 — `0.14.0` 导出返回本地下载会话 R9（待复审）
+
+- `api.exports.excel/package` 不再构造含 `report_type/object_id/generated_by/generated_at/status` 的伪持久化 `Report`（其中项目包还曾伪造 `report_type: 'pdf'`）；两者直接返回本地下载会话 id（number，一次下载引用），`download()` 仍按此 id 取短期 token 下载；删除 `Report/ReportType/ReportStatus` 死类型（已确认无其他真实消费者）并同步四处页面调用点。
+- Excel 是结果报告、项目包是完整项目现场导出（不是报告），职责不变；不改后端导出行为、评估要求与包内容，不改页面文案。`ExcelExportInput.report_type?` 输入字段保留（输出形态之外，未动）。
+- 证据：前端构建（tsc＋vite）通过；既有 Excel 导出浏览器验收（`financial-evaluation` 封存下载、`excel-export-lang` 中英）与 R7 用例复跑通过；R7 node 断言同步为会话 id。未跑全量。此项不代表 `0.14.0` 整体完成。
+
 ### 2026-10-13 — `0.14.0` 接管确认去请求体 A2（待复审）
 
 - `POST /api/auth/confirm-takeover` 端点签名无 body 参数，身份全走 Cookie/Bearer（`AuthCtx`）；前端删除被忽略的 `{token}` payload 与 `confirmTakeover(input)` 签名，两调用点改为无 body 确认；删除随之失效的 `loginResult` 状态；仅纠正该路径上“轮换凭证/全新 token”过期注释（后端明确不轮换，当前窗口凭证即最终凭证）。

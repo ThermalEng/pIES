@@ -858,21 +858,6 @@ export interface PlanningSolution {
   }
 }
 
-export type ReportType = 'excel' | 'pdf' | 'html'
-
-export type ReportStatus = 'generating' | 'ready' | 'failed'
-
-export interface Report {
-  id: EntityId
-  project_id: EntityId
-  report_type: ReportType
-  object_id: EntityId
-  generated_by_task_id: EntityId | null
-  generated_by: EntityId
-  generated_at: ISO8601
-  status: ReportStatus
-}
-
 // ---------------------------------------------------------------------------
 // 校验(四维有效性:数据/模型/求解/结果)
 // ---------------------------------------------------------------------------

@@ -67,7 +67,6 @@ import type {
   VersionRestoreResult,
   PublicAuthSettings,
   RegisterRequest,
-  Report,
   ResultAssessment,
   ResultSelection,
   Severity,
@@ -1251,10 +1250,14 @@ export type HourlyRead =
   | { absent: false; flows: Record<string, number[]>; series: HourlySeriesMeta[] }
 
 export interface ExportsApi {
-  excel(input: ExcelExportInput): Promise<Report>
-  package(input: PackageExportInput): Promise<Report>
-  /** 下载报告文件(返回 Blob 与建议文件名)。 */
-  download(reportId: number): Promise<{ blob: Blob; filename: string }>
+  /**
+   * Excel 结果报告导出: 返回本地下载会话 id(一次下载引用, 非持久化报告)。
+   * 项目包是完整项目现场导出, 不是报告, 同样只返回本地下载会话 id。
+   */
+  excel(input: ExcelExportInput): Promise<number>
+  package(input: PackageExportInput): Promise<number>
+  /** 按本地下载会话 id 取 Blob 与建议文件名并下载。 */
+  download(downloadSessionId: number): Promise<{ blob: Blob; filename: string }>
 }
 
 export interface AdminApi {
@@ -1835,9 +1838,9 @@ export const api = {
   } satisfies ResultsApi,
 
   exports: {
-    excel(input: ExcelExportInput): Promise<Report> {
+    excel(input: ExcelExportInput): Promise<number> {
       const projectId = input.project_id
-      // 后端需要 assessment_id(必填): 取该证据包最新评估(评估历史缓存/拉取)
+      // 后端需要 assessment_id(必填): 取该证据包所属任务评估历史最新一条
       return resolveAssessmentId(projectId, input.evidence_package_id ?? 0).then((assessmentId) =>
         request<unknown>(`/projects/${projectId}/exports/excel`, {
           method: 'POST',
@@ -1847,7 +1850,7 @@ export const api = {
             lang: input.lang ?? 'zh',
           },
         }).then((body) => {
-          // 后端返回 {token, file_name, ...}: 记录下载会话, 返回 Report 形态(id=会话 id)
+          // 后端返回 {token, file_name, ...}: 记录下载会话, 返回本地会话 id
           const rec = asRecord(body)
           downloadSeq += 1
           const id = downloadSeq
@@ -1857,23 +1860,14 @@ export const api = {
             token: String(rec.token ?? ''),
             filename: String(rec.file_name ?? 'report.xlsx'),
           })
-          return {
-            id,
-            project_id: projectId,
-            report_type: 'excel',
-            object_id: input.evidence_package_id ?? 0,
-            generated_by_task_id: null,
-            generated_by: 0,
-            generated_at: '',
-            status: 'ready' as const,
-          }
+          return id
         }),
       )
     },
-    package(input: PackageExportInput): Promise<Report> {
+    package(input: PackageExportInput): Promise<number> {
       const projectId = input.project_id
       return request<unknown>(`/projects/${projectId}/exports/package`, { method: 'POST' }).then((body) => {
-        // 后端返回 {token, file_name, ...}: 记录下载会话, 返回 Report 形态(id=会话 id)
+        // 后端返回 {token, file_name, ...}: 记录下载会话, 返回本地会话 id
         const rec = asRecord(body)
         downloadSeq += 1
         const id = downloadSeq
@@ -1883,21 +1877,12 @@ export const api = {
           token: String(rec.token ?? ''),
           filename: String(rec.file_name ?? 'project-package.zip'),
         })
-        return {
-          id,
-          project_id: projectId,
-          report_type: 'pdf' as const,
-          object_id: 0,
-          generated_by_task_id: null,
-          generated_by: 0,
-          generated_at: '',
-          status: 'ready' as const,
-        }
+        return id
       })
     },
-    async download(reportId: number): Promise<{ blob: Blob; filename: string }> {
-      // 后端下载走短期单对象授权 token: 用会话 id 还原 projectId/kind/token
-      const session = downloadSessions.get(reportId)
+    async download(downloadSessionId: number): Promise<{ blob: Blob; filename: string }> {
+      // 后端下载走短期单对象授权 token: 用本地会话 id 还原 projectId/kind/token
+      const session = downloadSessions.get(downloadSessionId)
       if (!session) throw new ApiError(404, null, 'ies.error.route_not_found')
       const blob = await requestBlob(`/projects/${session.projectId}/exports/${session.kind}/download`, {
         query: { token: session.token },

@@ -88,6 +88,15 @@ function installStub({ assessmentsItems = [], assessmentsStatus = 200 }) {
     if (method === 'POST' && text.includes('/exports/excel')) {
       return new Response(JSON.stringify({ token: 'tok', file_name: 'report.xlsx' }), { status: 200 })
     }
+    if (method === 'POST' && text.includes('/exports/package')) {
+      return new Response(JSON.stringify({ token: 'pkt', file_name: 'project-package.zip' }), { status: 200 })
+    }
+    if (text.includes('/exports/package/download')) {
+      return new Response(new Uint8Array([80, 75, 3, 4]), { status: 200 })
+    }
+    if (text.includes('/exports/excel/download')) {
+      return new Response(new Uint8Array([1, 2, 3]), { status: 200 })
+    }
     if (text.includes('/result/assessments')) {
       if (assessmentsStatus !== 200) return new Response('{"detail":"boom"}', { status: assessmentsStatus })
       return new Response(JSON.stringify({ items: assessmentsItems }), { status: 200 })
@@ -154,8 +163,8 @@ async function expectNoAssessment(name, fn, calls) {
 // 3. 有既有评估 → 引用最新一条 id，不建评估(包26)。
 {
   const calls = installStub({ assessmentsItems: [assessmentItem(41, 26)] })
-  const report = await api.exports.excel(excelInput(26))
-  check('有评估正常导出', report.report_type === 'excel', JSON.stringify(report.report_type))
+  const downloadSessionId = await api.exports.excel(excelInput(26))
+  check('有评估正常导出(本地会话id)', typeof downloadSessionId === 'number' && downloadSessionId > 0, String(downloadSessionId))
   check('发一次Excel请求', calls.filter((c) => c.includes('/exports/excel')).length === 1, calls.join(';'))
   check('零assess创建请求', !calls.some((c) => c.includes('/result/assess') && !c.includes('/assessments')), calls.join(';'))
 }
@@ -193,6 +202,21 @@ async function expectNoAssessment(name, fn, calls) {
     check('列表失败直接抛错', err?.message_key !== 'ies.error.no_assessment_available', `message_key=${err?.message_key},status=${err?.status}`)
     check('列表失败零写请求', postsOf(calls, before).length === 0, calls.slice(before).join(';'))
   }
+}
+
+// 5. 项目包同样返回本地下载会话 id, download() 按此 id 取回文件。
+{
+  const calls = installStub({})
+  const sessionId = await api.exports.package({ project_id: 5, include_versions: true })
+  check('项目包返回本地会话id', typeof sessionId === 'number' && sessionId > 0, String(sessionId))
+  const got = await api.exports.download(sessionId)
+  const bytes = new Uint8Array(await got.blob.arrayBuffer())
+  check(
+    '会话id可下载包文件',
+    got.filename === 'project-package.zip' && bytes.length === 4 && bytes[0] === 80,
+    `${got.filename}/${bytes.length}`,
+  )
+  check('包导出零assess请求', !calls.some((c) => c.includes('/result/assess')), calls.join(';'))
 }
 
 if (failures > 0) {
