@@ -1248,8 +1248,17 @@ export interface ResultsApi {
     assessmentType: 'full' | 'physical' | 'optimality' | 'financial' | 'reliability',
   ): Promise<ResultAssessment>
   select(projectId: number, taskId: number, input: { result_index_id: number; reason?: string }): Promise<ResultSelection>
-  hourly(projectId: number, taskId: number): Promise<{ flows: Record<string, number[]>; series: HourlySeriesMeta[] }>
+  hourly(projectId: number, taskId: number): Promise<HourlyRead>
 }
+
+/**
+ * 逐时序列读取结果: 合法缺席(absent)与读取失败(抛错)严格区分。
+ * 缺席仅当结果视图 `hourly_refs` 为 null/空数组/空序列集合;
+ * 引用存在后任何分页失败都直接抛错, 不缩水、不补空。
+ */
+export type HourlyRead =
+  | { absent: true }
+  | { absent: false; flows: Record<string, number[]>; series: HourlySeriesMeta[] }
 
 export interface ExportsApi {
   excel(input: ExcelExportInput): Promise<Report>
@@ -1791,7 +1800,7 @@ export const api = {
         }
       })
     },
-    hourly(projectId: number, taskId: number): Promise<{ flows: Record<string, number[]>; series: HourlySeriesMeta[] }> {
+    hourly(projectId: number, taskId: number): Promise<HourlyRead> {
       // 后端 hourly 为单序列分页查询(需 field 参数): 结果视图 hourly_refs
       // 的 series 即当前已封存公开 DTO，直接类型化消费
       // {series_id, instance_id, variable_id, unit}（字段非 null），
@@ -1808,39 +1817,35 @@ export const api = {
           })
       return pending.then(async (body) => {
         const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
-        const refs = r.hourly_refs as { series: HourlySeriesMeta[]; rows: number }[]
-        const ref = refs[0]
-        // 无证据包/无逐时引用是显式状态(后端 evidence_status/no_hourly_refs),
-        // 不再静默返回空 flows 掩盖失败。
-        if (!ref) throw new ApiError(404, null, 'ies.error.no_hourly_data')
+        // 合法缺席: 后端显式 hourly_refs=null/空数组/空序列集合(metrics-only
+        // 或非计算任务无封存引用)。只对已定义缺席分支处理, 不抛错。
+        const rawRefs = r.hourly_refs as { series: HourlySeriesMeta[]; rows: number }[] | null | undefined
+        const ref = Array.isArray(rawRefs) ? rawRefs[0] : undefined
+        if (!ref || !Array.isArray(ref.series) || ref.series.length === 0) return { absent: true }
         const series = ref.series
         const rows = ref.rows
-        // 各序列完全独立, 并行拉取。
+        // 引用存在后任何分页失败都直接抛错(整组失败), 不缩水 flows、
+        // 不过滤 series、不返回空成功伪装剩余曲线成功。
         const pages = await Promise.all(
           series.map(async (meta) => {
-            try {
-              const values = await collectHourlyValues(
-                (start, limit) =>
-                  request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/hourly`, {
-                    query: { field: meta.series_id, start, end: rows, limit },
-                  }).then((pageBody) => {
-                    const page = asRecord(pageBody)
-                    return { values: page.values as number[], next_start: page.next_start as number | null }
-                  }),
-                rows,
-              )
-              return [meta.series_id, values] as const
-            } catch {
-              // 单序列读取失败不影响其余序列
-              return null
-            }
+            const values = await collectHourlyValues(
+              (start, limit) =>
+                request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/hourly`, {
+                  query: { field: meta.series_id, start, end: rows, limit },
+                }).then((pageBody) => {
+                  const page = asRecord(pageBody)
+                  return { values: page.values as number[], next_start: page.next_start as number | null }
+                }),
+              rows,
+            )
+            return [meta.series_id, values] as const
           }),
         )
         const flows: Record<string, number[]> = {}
         for (const hit of pages) {
-          if (hit && Array.isArray(hit[1])) flows[hit[0]] = hit[1] as number[]
+          flows[hit[0]] = hit[1] as number[]
         }
-        return { flows, series: series.filter((meta) => meta.series_id in flows) }
+        return { absent: false, flows, series }
       })
     },
   } satisfies ResultsApi,

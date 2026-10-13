@@ -15,6 +15,11 @@
 
 ## Unreleased
 
+### 2026-10-13 — `0.14.0` 计算步曲线读取失败可见 R3（待复审）
+
+- `api.results.hourly` 删单序列 `catch→null` 缩水与 `series.filter`：引用存在后任何分页失败整组抛错；合法缺席只认后端显式 `hourly_refs=null`/空数组/空序列集合，返回明确 `{absent:true}` 类型（metrics-only 真实无引用即缺席），真实 404 对象缺失仍是失败。结果页去掉 `.catch(()=>null)`，主结果与曲线读取分离：曲线失败不清财务/指标/摘要，曲线区独立呈现加载/合法缺席/读取失败＋重试；重试仅重读所选任务曲线（序号 guard 防旧读覆盖新选择），不重求解不重评估。
+- 证据：Docker 适配层缺席/失败定向 11 项通过（null/空数组/空序列判缺席且零分页请求、单序列失败与后续页失败整组抛错、对象缺失 404 判失败非缺席、成功值身份完整）、17 序列消费回归 5 项通过、分页 12 项保留；前端构建（tsc＋vite）通过；新建浏览器用例 2 通过（同一真实 HiGHS 求解：全部分页定向 500 时曲线错误可见、无图表、财务卡保留、解除拦截后重试恢复图例与点数一致且无任务/评估 POST；公开 metrics-only 任务结果页显示缺席说明、无错误无图表，HTTP `hourly_refs` 为 null 一致）；相邻 `hourly-steps` 成功路径回归 1 通过。此项不代表 `0.14.0` 整体完成。
+
 ### 2026-10-13 — `0.14.0` 求解步序列发布与封存闭环 R5/R6（复审通过）
 
 - Generator 在建变量同一路径形成 `step_series` 声明（序列身份＋按 step 顺序的显式求解列＋步数＋业务单位，无步变量为空数组）并写入 Bundle `parameters.json`；ResultAdapter 按声明用同次主解恢复业务单位序列到 `ComputeResult.outputs.series`（随 solution 发布，metrics-only 缺席；无声明旧 Bundle 直接协议失败）；application 将统一序列序列化为 hourly 对象并在提交同一事务内封存引用（含身份/单位元数据），`read_hourly` 公开实例与变量身份；前端删旧字段名猜测链，按公开身份/单位通用选取分组展示，计数与入图序列同源。内置 generator/adapter 升主版本到 2.0.0（组合根/精确引用/默认示例/相关规范与定向测试同步，无旧别名与回退）；ComputeResult 保持 2.0.0，CalculationConfig 未动。

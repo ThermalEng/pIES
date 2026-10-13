@@ -4,6 +4,7 @@
  * 覆盖 `src/api/client.ts` results.hourly 对已封存 `hourly_refs.series`
  * 的直接类型化消费：声明列表有多少取多少（无静默截断），每条的值、
  * 身份、单位与桩给定的真实内容一致；第 17 条必须真实返回。
+ * 成功返回 `{absent:false, flows, series}`（缺席/失败语义见 hourly_absence）。
  * fetch 用桩代替（node22 原生 Response/fetch），业务值全为桩内真实数组，
  * 不 mock 成功语义本身之外的任何行为。
  *
@@ -86,6 +87,7 @@ globalThis.fetch = async (url) => {
 
 const out = await api.results.hourly(7, 9)
 
+check('成功非缺席', out.absent === false, JSON.stringify(out.absent))
 check('17 条全部返回', Object.keys(out.flows).length === 17, String(Object.keys(out.flows).length))
 check('请求覆盖全部声明', new Set(requestedFields).size === 17, JSON.stringify(requestedFields))
 const last = SERIES[16]

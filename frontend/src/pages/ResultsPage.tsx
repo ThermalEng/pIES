@@ -195,6 +195,11 @@ export default function ResultsPage() {
   const [resultDiag, setResultDiag] = useState<Diagnostic[]>([])
   const [assessments, setAssessments] = useState<ResultAssessment[]>([])
   const [hourly, setHourly] = useState<{ flows: Record<string, number[]>; series: HourlySeriesMeta[] } | null>(null)
+  /** 曲线合法缺席(后端显式无逐时引用, 非失败, 不清其他结果)。 */
+  const [hourlyAbsent, setHourlyAbsent] = useState(false)
+  /** 曲线读取失败(整组失败, 不清财务/指标/摘要, 可重试)。 */
+  const [hourlyError, setHourlyError] = useState<string | null>(null)
+  const [hourlyLoading, setHourlyLoading] = useState(false)
   const [resultError, setResultError] = useState<string | null>(null)
 
   // 真实候选列表/规划解/快照引用(随选中证据包加载, 不按指标键反解)
@@ -232,6 +237,8 @@ export default function ResultsPage() {
   // 切换证据包的迟到读响应不发布状态(读取消机制, 不用于写请求)。
   const selectedPkgRef = useRef<number | null>(null)
   selectedPkgRef.current = selectedPkgId
+  // 曲线读取序号: 切换证据/重试后迟到的旧读响应丢弃, 不覆盖新选择。
+  const hourlySeq = useRef(0)
 
   // 重新评估对话框(只触发系统四维检查, FE-BE-03)
   const [assessOpen, setAssessOpen] = useState(false)
@@ -299,6 +306,9 @@ export default function ResultsPage() {
       setResultDiag([])
       setAssessments([])
       setHourly(null)
+      setHourlyAbsent(false)
+      setHourlyError(null)
+      setHourlyLoading(false)
       setResultError(null)
       setCandList([])
       setPlanSolution(null)
@@ -316,6 +326,9 @@ export default function ResultsPage() {
     setResultDiag([])
     setAssessments([])
     setHourly(null)
+    setHourlyAbsent(false)
+    setHourlyError(null)
+    setHourlyLoading(false)
     setResultError(null)
     setCandList([])
     setPlanSolution(null)
@@ -333,17 +346,17 @@ export default function ResultsPage() {
     setSchemeRevisionError(null)
     setSchemeRevLoading(false)
     schemeReadSeq.current += 1
+    hourlySeq.current += 1
     let cancelled = false
     const load = async () => {
       // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
       const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
       const taskId = entry ? entry.task.id : 0
       try {
-        const [res, ass, hr] = await Promise.all([
+        const [res, ass] = await Promise.all([
           // 主结果读取失败必须可见: 不吞错, 由外层错误呈现。
           api.results.result(projectId, taskId),
           api.results.assessments(projectId, taskId).catch(() => [] as ResultAssessment[]),
-          api.results.hourly(projectId, taskId).catch(() => null),
         ])
         if (cancelled) return
         setMetrics(res?.metrics ?? null)
@@ -353,7 +366,30 @@ export default function ResultsPage() {
         setNoEvidence(res?.evidence_status === 'no_evidence')
         setResultDiag(res?.diagnostics ?? [])
         setAssessments([...(ass ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)))
-        setHourly(hr)
+        // 曲线独立读取: 缺席与失败只记曲线状态, 不清财务/指标/摘要;
+        // 整组失败直接呈现, 不缩水、不补空。序号 guard 避免旧读覆盖新选择。
+        const mySeq = hourlySeq.current + 1
+        hourlySeq.current = mySeq
+        setHourlyLoading(true)
+        try {
+          const hr = await api.results.hourly(projectId, taskId)
+          if (cancelled || hourlySeq.current !== mySeq) return
+          if (hr.absent) {
+            setHourly(null)
+            setHourlyAbsent(true)
+          } else {
+            setHourly({ flows: hr.flows, series: hr.series })
+            setHourlyAbsent(false)
+          }
+          setHourlyError(null)
+        } catch (err) {
+          if (cancelled || hourlySeq.current !== mySeq) return
+          setHourly(null)
+          setHourlyAbsent(false)
+          setHourlyError(translateError(err as ApiError))
+        } finally {
+          if (!cancelled && hourlySeq.current === mySeq) setHourlyLoading(false)
+        }
         // 真实候选/规划解/快照引用(后端权威, 不反解指标键)
         setCandList(res?.candidates ?? [])
         setPlanSolution(res?.planningSolution ?? null)
@@ -384,6 +420,33 @@ export default function ResultsPage() {
       cancelled = true
     }
   }, [selectedPkgId])
+
+  // 曲线重试: 仅重读所选任务曲线, 不重求解/重评估; 旧读按序号丢弃,
+  // 不覆盖切换后的新选择。重试期间不碰财务/指标/摘要状态。
+  const retryHourly = useCallback(async () => {
+    const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
+    const taskId = entry ? entry.task.id : 0
+    const mySeq = hourlySeq.current + 1
+    hourlySeq.current = mySeq
+    setHourlyError(null)
+    setHourlyLoading(true)
+    try {
+      const hr = await api.results.hourly(projectId, taskId)
+      if (hourlySeq.current !== mySeq) return
+      if (hr.absent) {
+        setHourly(null)
+        setHourlyAbsent(true)
+      } else {
+        setHourly({ flows: hr.flows, series: hr.series })
+        setHourlyAbsent(false)
+      }
+    } catch (err) {
+      if (hourlySeq.current !== mySeq) return
+      setHourlyError(translateError(err as ApiError))
+    } finally {
+      if (hourlySeq.current === mySeq) setHourlyLoading(false)
+    }
+  }, [entries, projectId, selectedPkgId])
 
   // 快照来源展示: 仅按原快照引用解析名称, 不读当前最新。
   // 名称缺失显示精确引用 id; 查询失败可见, 不静默吞错。
@@ -948,7 +1011,8 @@ export default function ResultsPage() {
             ) : null}
           </Card>
 
-          {/* 计算步序列(横轴为步序号, 按单位分组) */}
+          {/* 计算步序列(横轴为步序号, 按单位分组): 成功/合法缺席/读取失败/加载四态;
+              失败不清财务摘要, 重试仅重读曲线。成功但无可入图数据与合法缺席同展示。 */}
           {hourlyGroups.length > 0 ? (
             <Card title={t('ies.result.hourly_chart')} className="ies-section">
               <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
@@ -965,7 +1029,31 @@ export default function ResultsPage() {
                 </div>
               ))}
             </Card>
-          ) : null}
+          ) : (
+            <Card title={t('ies.result.hourly_chart')} className="ies-section">
+              {hourlyError ? (
+                <>
+                  <Alert variant="error">{hourlyError}</Alert>
+                  <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+                    {t('ies.result.hourly_failed')}
+                  </p>
+                  <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                    <Button onClick={() => void retryHourly()} disabled={hourlyLoading}>
+                      {t('ies.common.retry')}
+                    </Button>
+                  </div>
+                </>
+              ) : hourlyAbsent || (hourly && !hourlyLoading) ? (
+                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                  {t('ies.result.hourly_absent')}
+                </p>
+              ) : (
+                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                  {t('ies.result.hourly_loading')}
+                </p>
+              )}
+            </Card>
+          )}
 
           {/* 可靠性统计 */}
           {relMetrics.length > 0 ? (
