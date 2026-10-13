@@ -1,6 +1,6 @@
-"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@1.0.0``。
+"""首个真实 ResultAdapterProvider：``ies.result-adapter.highs@2.0.0``。
 
-与 ``ies.generator.highs_milp@1.0.0`` 配套，解释其声明输出
+与 ``ies.generator.highs_milp@2.0.0`` 配套，解释其声明输出
 ``output/solution.sol``。该文件由求解 executable
 ``ies.solver.highs@1.7.2``（``ies-highs-solver`` 垫片，0.9-E 已提交
 契约）写出的 ``HIGHS_SOLUTION_V1`` 文本：状态行、目标值、列数与按
@@ -50,7 +50,7 @@ from iesplan.computation.result_adapter import ResultAdapterDescriptor
 from iesplan.core.units import UnitError, dims_of, from_si
 
 ADAPTER_ID = "ies.result-adapter.highs"
-ADAPTER_VERSION = "1.0.0"
+ADAPTER_VERSION = "2.0.0"
 ADAPTER_REF = f"{ADAPTER_ID}@{ADAPTER_VERSION}"
 
 DESCRIPTOR = ResultAdapterDescriptor(
@@ -210,8 +210,9 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
     """读 Bundle 内 generator 规范 parameters（可信生成器产物）。
 
     只取计算必需事实：unit_map、objective_offset、objective_unit、
-    components（财务分量求值声明）、outputs；缺键或形态错误即协议
-    失败，不做 schema 复核。无声明的老 Bundle 不静默降级，直接失败。
+    components（财务分量求值声明）、step_series（可发布步序列声明）、
+    outputs；缺键或形态错误即协议失败，不做 schema 复核。
+    无声明的老 Bundle 不静默降级、不回退旧解析，直接失败。
     """
     raw = bundle.files.get(_PARAMETERS_PATH)
     if not isinstance(raw, bytes):
@@ -234,6 +235,22 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
     requested = doc.get("outputs")
     if not isinstance(requested, list):
         _fail("parameters.outputs 缺失或非法")
+    series = doc.get("step_series")
+    if not isinstance(series, list):
+        _fail("parameters.step_series 缺失或非法")
+    for entry in series:
+        if not isinstance(entry, dict):
+            _fail("parameters.step_series 条目非法")
+        for key in ("series_id", "instance_id", "variable_id", "unit"):
+            if not isinstance(entry.get(key), str) or not entry[key]:
+                _fail(f"parameters.step_series 条目缺 {key}")
+        columns = entry.get("columns")
+        if (
+            not isinstance(columns, list)
+            or not columns
+            or not all(isinstance(name, str) and name for name in columns)
+        ):
+            _fail("parameters.step_series 条目 columns 非法")
     components = doc.get("components")
     if not isinstance(components, dict):
         _fail("parameters.components 缺失或非法")
@@ -261,6 +278,7 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
         "offset": float(offset),
         "objective_unit": objective_unit,
         "requested": list(requested),
+        "step_series": [dict(entry) for entry in series],
         "components": {ident: dict(decl) for ident, decl in components.items()},
     }
 
@@ -439,6 +457,33 @@ class HighsResultAdapter:
                 "variables": variables,
                 "components": components_out,
             }
+            # 统一求解步序列：按生成器声明的显式列引用，用同一次主解
+            # 恢复业务单位序列发布（与 variables 同一 primal 路径）。
+            # 随 solution 请求发布；声明列缺失/换算失败即协议失败，
+            # 不补零、不回退。metrics-only 无 solution 即无 series。
+            series_out: dict[str, object] = {}
+            for entry in params["step_series"]:
+                unit = entry["unit"]
+                values: list[float] = []
+                for name in entry["columns"]:
+                    try:
+                        index = names.index(name)
+                    except ValueError:
+                        _fail(f"步序列 {entry['series_id']!r} 的列不在 MPS 列中: {name!r}")
+                    try:
+                        value = from_si(solution["primals"][index], unit)
+                    except UnitError as exc:
+                        _fail(f"步序列 {entry['series_id']!r} 反向换算失败 →{unit!r}: {exc}")
+                    if not math.isfinite(value):
+                        _fail(f"步序列 {entry['series_id']!r} 换算后非有限数值")
+                    values.append(value)
+                series_out[entry["series_id"]] = {
+                    "instance_id": entry["instance_id"],
+                    "variable_id": entry["variable_id"],
+                    "unit": unit,
+                    "values": values,
+                }
+            out["series"] = series_out
         if "metrics" in params["requested"]:
             out["metrics"] = {
                 "model_status": status,

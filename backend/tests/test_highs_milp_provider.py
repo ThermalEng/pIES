@@ -1,4 +1,4 @@
-"""首个真实 GeneratorProvider 测试：highs_milp@1.0.0。
+"""首个真实 GeneratorProvider 测试：highs_milp@2.0.0。
 
 只覆盖公开行为，不测私有实现，不启动 solver；正常生成一律走
 ``registry.resolve(config).generate(...)`` 正式路径：
@@ -388,3 +388,44 @@ def test_bundle_aggregate_requires_exact_manifest_files_match() -> None:
     }
     assert exported["bundle.yaml"].endswith(b"\n")
     assert "output/" not in exported
+
+
+def test_step_series_declared_from_variable_path() -> None:
+    """步序列声明与建变量同一路径形成，不依赖命名模式。
+
+    campus 真实五项输入：声明条目键齐全、series_id 唯一、每列真实存在于
+    同次构造的模型变量且单位与 unit_map 同源、各条等长且非空；
+    generate 写入 parameters.json 的声明与直接声明一致；
+    manifest/元数据引用同步到 2.0.0。
+    """
+    from iesplan.computation.generators.project import step_series_declarations  # noqa: E402
+
+    bundle, inputs = _resolved_generate()
+    artifact, models, materialized, finance, config = inputs
+    model, unit_map, _objective_unit = build_project_model(
+        artifact, models, materialized, finance, config
+    )
+    model_names = {v.name for v in model.variables}
+    decls = step_series_declarations(artifact, models, materialized, finance)
+    assert decls, "campus 应有可发布步变量"
+    assert [sorted(d) for d in decls] == [
+        ["columns", "instance_id", "series_id", "unit", "variable_id"] for _ in decls
+    ]
+    ids = [d["series_id"] for d in decls]
+    assert len(set(ids)) == len(ids)
+    assert ids == sorted(ids)
+    lengths = set()
+    for d in decls:
+        assert d["series_id"] == f"{d['instance_id']}.{d['variable_id']}"
+        assert d["columns"], d["series_id"]
+        lengths.add(len(d["columns"]))
+        for column in d["columns"]:
+            assert column in model_names, column
+            assert unit_map[column] == d["unit"], column
+    assert len(lengths) == 1
+    metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
+    assert metadata["step_series"] == [dict(d) for d in decls]
+    assert metadata["generator"] == GENERATOR_REF == "ies.generator.highs_milp@2.0.0"
+    assert metadata["result_adapter"] == ADAPTER_REF == "ies.result-adapter.highs@2.0.0"
+    assert bundle.manifest.bundle["generator"] == GENERATOR_REF
+    assert bundle.manifest.result_adapter == ADAPTER_REF

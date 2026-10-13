@@ -41,7 +41,11 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from iesplan.application.tasks import Claim
-from iesplan.application.worker.compute_cases import attach_evidence_objects, seal_output_objects
+from iesplan.application.worker.compute_cases import (
+    HOURLY_OBJECT_PATH,
+    attach_evidence_objects,
+    seal_output_objects,
+)
 from iesplan.application.worker.evidence_cases import CheckAssessment, assess_check_evidence
 from iesplan.application.worker.lease_cases import (
     LeaseRejectedError,
@@ -277,6 +281,36 @@ def submit_attempt_result(
                             **(entry.get("output_series") or {}),
                             "object_id": series_descriptor["object_id"],
                         }
+            # 统一求解步序列引用(0.14-R5/R6): 已封存 hourly 对象描述子 +
+            # 载荷内已恢复统一序列的身份/单位元数据, 组装 hourly_refs 随
+            # 证据载荷同事务提交；无 hourly 组即缺席, 不伪造空引用。
+            # 只消费已恢复序列, 不解释求解列, 不做长度/hash 复核。
+            hourly_sealed = sealed_groups.get("hourly")
+            hourly_series = (
+                (payload.get("compute_result") or {}).get("outputs") or {}
+            ).get("series")
+            if (
+                hourly_sealed is not None
+                and isinstance(hourly_series, dict)
+                and hourly_series
+            ):
+                hourly_desc = hourly_sealed.get(HOURLY_OBJECT_PATH) or {}
+                ordered_ids = sorted(hourly_series)
+                first_values = hourly_series[ordered_ids[0]].get("values") or []
+                payload["hourly_refs"] = [{
+                    "object_id": hourly_desc.get("object_id"),
+                    "fields": ordered_ids,
+                    "rows": len(first_values),
+                    "series": [
+                        {
+                            "series_id": series_id,
+                            "instance_id": hourly_series[series_id].get("instance_id"),
+                            "variable_id": hourly_series[series_id].get("variable_id"),
+                            "unit": hourly_series[series_id].get("unit"),
+                        }
+                        for series_id in ordered_ids
+                    ],
+                }]
             blob = _payload_bytes(payload)
             object_id = store_result_blob(db, blob, actor_id=who)
             evidence_id = create_evidence_record(

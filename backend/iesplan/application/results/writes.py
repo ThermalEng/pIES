@@ -745,7 +745,8 @@ def read_hourly(
 ) -> dict[str, Any]:
     """逐时结果查询(从对象存储按对象 id 读取; 行号分页)。
 
-    返回: {field, unit, start, end, values, next_start, total_rows}。
+    返回: {field, unit, instance_id, variable_id, start, end, values,
+    next_start, total_rows}。身份取对象内已封存元数据, 不读当前项目。
     """
     refs = content.get("hourly_refs")
     if not isinstance(refs, list) or not refs:
@@ -805,9 +806,15 @@ def read_hourly(
     meta = doc.get("meta") or {}
     units = meta.get("units") if isinstance(meta, dict) else None
     unit = units.get(field) if isinstance(units, dict) else None
+    identities = meta.get("series") if isinstance(meta, dict) else None
+    identity = identities.get(field) if isinstance(identities, dict) else None
+    if not isinstance(identity, dict):
+        identity = {}
     return {
         "field": field,
         "unit": unit,
+        "instance_id": identity.get("instance_id"),
+        "variable_id": identity.get("variable_id"),
         "start": start_i,
         "end": chunk_end,
         "values": values[start_i:chunk_end],

@@ -371,6 +371,12 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         output_files["round_history"] = history
         payload["rounds"] = rounds
         payload["authoritative_round"] = solve_rounds
+    # 统一求解步序列对象(0.14-R5/R6): 只对最终轮结果已恢复的统一序列
+    # 序列化, 随 output_files 进同一证据封存/提交单元；无序列(缺 solution
+    # 输出/metrics-only/无可发布步变量)即无文件, 不伪造。
+    hourly_files = worker_app.build_hourly_files(result.outputs)
+    if hourly_files:
+        output_files["hourly"] = hourly_files
     # 评价时间轴现金流与指标(0.12-T2): 只对最终轮已求解结果计算, 随
     # payload 进同一证据封存/提交单元；未求解或缺 solution 输出返回
     # None（不写财务块，不伪造）；冻结缺件即实际错误可见失败。

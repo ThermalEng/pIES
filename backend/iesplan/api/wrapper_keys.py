@@ -133,7 +133,7 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "select_result_endpoint": frozenset({"diff", "selection"}),
     "diff_endpoint": frozenset({"diff"}),
     "hourly_endpoint": frozenset(
-        {"end", "field", "next_start", "start", "total_rows", "unit", "values"}
+        {"end", "field", "instance_id", "variable_id", "next_start", "start", "total_rows", "unit", "values"}
     ),  # services.results.read_hourly
     "check_task_endpoint": frozenset({"hint", "replayed", "task"}),
     # ---- tasks.py ----

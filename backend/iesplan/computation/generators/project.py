@@ -254,6 +254,23 @@ def finance_component_declarations(
     return _new_builder(artifact, models, materialized, finance).finance_components()
 
 
+def step_series_declarations(
+    artifact: ValidatedAssemblyArtifact,
+    models: Mapping[str, DeviceMathContribution],
+    materialized: MaterializedSet,
+    finance: EffectiveFinanceConfig,
+) -> tuple[Mapping[str, object], ...]:
+    """可发布求解步序列声明（与建变量同一路径形成）。
+
+    与 ``build_project_model`` 同一构造器、同一变量声明路径，只做
+    初始化与变量声明展开，不执行装配建模；同一输入恒得同一声明。
+    供 GeneratorProvider 写入 Bundle ``parameters.json``，由配套
+    ResultAdapter 用同一次真实解恢复发布，不重建变量映射。
+    无可发布步变量时为空元组。
+    """
+    return _new_builder(artifact, models, materialized, finance).step_series()
+
+
 class _ProjectBuilder:
     """项目级构造的内部编排（实例方法只传 derived 状态，五项只进厂）。"""
 
@@ -287,6 +304,11 @@ class _ProjectBuilder:
         self.variables: dict[str, LinearVariable] = {}
         self.rows: list[LinearConstraint] = []
         self.unit_map: dict[str, str] = {}
+        #: (实例, 局部变量身份) → 按 step 顺序的求解列名, 仅收录带业务单位的
+        #: 步变量(接口流与设备技术变量, 与 _declare 调用同源; 关系降级
+        #: 临时变量 unit 为 None, 不进入)。下游不得拆解列名反推身份。
+        self._step_columns: dict[tuple[str, str], list[str]] = {}
+        self._step_units: dict[tuple[str, str], str] = {}
         planning = doc["planning"]
         self.plan_vars: Mapping[str, Any] = planning.get("variables") or {}
         #: (实例, 参数) → 首年建设容量变量名。同一实例同一参数只允许
@@ -430,19 +452,19 @@ class _ProjectBuilder:
             if pname_hi is not None:
                 caps.append((iface_name, pname_hi, "le"))
             for step in range(self.point_count):
-                self._declare(
-                    self._tech_name(inst, iface_name, step),
-                    lower, upper, "continuous", flow.unit,
-                )
+                cname = self._tech_name(inst, iface_name, step)
+                self._declare(cname, lower, upper, "continuous", flow.unit)
+                self._step_columns.setdefault((inst, iface_name), []).append(cname)
+            self._step_units[(inst, iface_name)] = flow.unit
         for name, var in contribution.variables.items():
             if var.kind == "property":
                 continue
             lower, upper = symbols[name][1], symbols[name][2]
             for step in range(self.point_count):
-                self._declare(
-                    self._tech_name(inst, name, step),
-                    lower, upper, "continuous", var.unit,
-                )
+                cname = self._tech_name(inst, name, step)
+                self._declare(cname, lower, upper, "continuous", var.unit)
+                self._step_columns.setdefault((inst, name), []).append(cname)
+            self._step_units[(inst, name)] = var.unit
         initial: dict[str, float] = {}
         for state in contribution.states:
             ref = contribution.variables[state].initial_property_ref
@@ -986,12 +1008,42 @@ class _ProjectBuilder:
     # 总装
     # ------------------------------------------------------------------
 
-    def build(self) -> tuple[LinearModel, Mapping[str, str], str]:
-        buses = self._compute_buses()
+    def _bus_flow_index(
+        self, buses: list[tuple[str, tuple[str, ...], tuple[tuple[str, str, float], ...]]]
+    ) -> dict[str, set[str]]:
         bus_flows: dict[str, set[str]] = {}
         for _carrier, _members, ports in buses:
             for inst, iface, _sign in ports:
                 bus_flows.setdefault(inst, set()).add(iface)
+        return bus_flows
+
+    def step_series(self) -> tuple[Mapping[str, object], ...]:
+        """可发布求解步序列声明（与建变量同一路径形成，不拆列名）。
+
+        对实例每个带业务单位的步变量集合（接口流与设备技术变量）各一条：
+        ``{series_id, instance_id, variable_id, unit, columns}``，
+        ``columns`` 按连续 ``step`` 顺序为显式求解列名；无步变量时为空元组。
+        ``series_id`` 为 ``{instance}.{variable}``，Bundle 内稳定唯一，
+        消费者不得拆解。只做初始化与变量声明展开，不执行装配建模。
+        """
+        buses = self._compute_buses()
+        bus_flows = self._bus_flow_index(buses)
+        for inst in sorted(self.devices):
+            self._declare_instance_statics(inst, bus_flows.get(inst, frozenset()))
+        out: list[Mapping[str, object]] = []
+        for inst, local in sorted(self._step_columns):
+            out.append({
+                "series_id": f"{inst}.{local}",
+                "instance_id": inst,
+                "variable_id": local,
+                "unit": self._step_units[(inst, local)],
+                "columns": list(self._step_columns[(inst, local)]),
+            })
+        return tuple(out)
+
+    def build(self) -> tuple[LinearModel, Mapping[str, str], str]:
+        buses = self._compute_buses()
+        bus_flows = self._bus_flow_index(buses)
         for inst in sorted(self.devices):
             statics = self._declare_instance_statics(
                 inst, bus_flows.get(inst, frozenset())

@@ -291,7 +291,7 @@ def setup_environment(
             extension_versions={},
             random_seed=int(config.get("seed", 42)) if config else 42,
             schema_version="3.0.0",
-            result_adapter="ies.result-adapter.highs@1.0.0",
+            result_adapter="ies.result-adapter.highs@2.0.0",
             executor="ies.executor.local_process@1.0.0",
             canonical_assembly_text=artifact.canonical_text,
             assembly_receipt=artifact.receipt.to_dict(),

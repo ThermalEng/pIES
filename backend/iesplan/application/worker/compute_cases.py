@@ -66,6 +66,7 @@ from iesplan.computation import (
 )
 from iesplan.computation.result_adapter import ResultAdapterRegistry
 from iesplan.core.contracts import horizon_point_count
+from iesplan.core.jsonutil import canonical_json
 from iesplan.core.diagnostics import Diagnostic
 from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import DeviceMathContribution, contribution_from_dict
@@ -73,11 +74,13 @@ from iesplan.storage import add_ref, get_object, put_object
 from iesplan.tasks import BUSINESS_OUTCOMES
 
 __all__ = [
+    "HOURLY_OBJECT_PATH",
     "ComputeExecutionPlane",
     "adapt_result",
     "attach_evidence_objects",
     "build_attempt_context",
     "build_financial_evaluation",
+    "build_hourly_files",
     "business_outcome_for",
     "complete_materialized",
     "execute_bundle",
@@ -435,6 +438,42 @@ def build_attempt_context(task: Any, claim: Claim, snapshot: Any) -> AttemptCont
         assembly_id=str(doc["assembly"]["id"]),
         calculation_config_id=f"project-{ref['project_id']}:config-rev-{ref['revision']}",
     )
+
+
+#: hourly 结果对象在输出文件组内的规范路径与媒体类型。
+HOURLY_OBJECT_PATH = "hourly/series.json"
+HOURLY_OBJECT_MEDIA_TYPE = "application/json"
+
+
+def build_hourly_files(
+    outputs: Mapping[str, object],
+) -> dict[str, tuple[bytes, str]]:
+    """已恢复统一序列 → hourly 对象字节（只序列化已恢复序列）。
+
+    消费 ``ComputeResult.outputs["series"]``（ResultAdapter 按生成器声明
+    用同一次真实解恢复的业务单位统一序列）；无该键或为空时返回空组
+    （metrics-only/无可发布步变量诚实缺席，不伪造空对象）。
+    对象形状复用既有 ``{data, meta.units}`` 语义，并保留序列身份元数据
+    （``meta.series``），供读取 DTO 公开；键排序规范 JSON。
+    本函数不解释求解列、不做长度/hash 复核；残缺即自然错误可见。
+    （输入为冻结映射，判定用 ``Mapping`` 而非 ``dict``。）
+    """
+    series = outputs.get("series")
+    if not isinstance(series, Mapping) or not series:
+        return {}
+    data: dict[str, list[float]] = {}
+    units: dict[str, str] = {}
+    identities: dict[str, dict[str, str]] = {}
+    for series_id in sorted(series):
+        entry = series[series_id]
+        data[series_id] = list(entry["values"])  # type: ignore[index]
+        units[series_id] = entry["unit"]  # type: ignore[index]
+        identities[series_id] = {
+            "instance_id": entry["instance_id"],  # type: ignore[index]
+            "variable_id": entry["variable_id"],  # type: ignore[index]
+        }
+    blob = canonical_json({"data": data, "meta": {"units": units, "series": identities}})
+    return {HOURLY_OBJECT_PATH: (blob.encode("utf-8"), HOURLY_OBJECT_MEDIA_TYPE)}
 
 
 def seal_output_objects(

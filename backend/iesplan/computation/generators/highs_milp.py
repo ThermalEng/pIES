@@ -1,4 +1,4 @@
-"""首个真实 GeneratorProvider：``ies.generator.highs_milp@1.0.0``。
+"""首个真实 GeneratorProvider：``ies.generator.highs_milp@2.0.0``。
 
 纯内存确定性转换：五项直接输入 → ``SolverBundle`` 完整聚合
 (manifest + 输入文件字节)，不写临时目录，不启动 solver，不访问
@@ -8,6 +8,10 @@ DB/网络/对象存储/环境变量/用户目录，不读取随机全局状态�
 solver=``ies.solver.highs@1.7.2``、空 options、输出 solution/metrics、
 constant tariff；数学能力即 ``build_project_model`` 现有 lowerer 明确
 支持的部分，超出即明确拒绝，不近似、不回退。
+
+2.0.0 相对 1.0.0 的唯一破坏性变化：``parameters.json`` 必需
+``step_series``（可发布求解步序列声明），配套适配器同步升主版本；
+不保留旧声明回退。
 """
 
 from __future__ import annotations
@@ -20,7 +24,11 @@ from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.computation.generators.descriptor import GeneratorDescriptor
 from iesplan.computation.generators.mps import write_mps
-from iesplan.computation.generators.project import build_project_model, finance_component_declarations
+from iesplan.computation.generators.project import (
+    build_project_model,
+    finance_component_declarations,
+    step_series_declarations,
+)
 from iesplan.computation.protocols import (
     CalculationConfig,
     SolverBundle,
@@ -31,11 +39,11 @@ from iesplan.finance import EffectiveFinanceConfig
 from iesplan.modeling import DeviceMathContribution
 
 GENERATOR_ID = "ies.generator.highs_milp"
-GENERATOR_VERSION = "1.0.0"
+GENERATOR_VERSION = "2.0.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
-ADAPTER_REF = "ies.result-adapter.highs@1.0.0"
+ADAPTER_REF = "ies.result-adapter.highs@2.0.0"
 ASSEMBLY_SCHEMA_VERSION = "3.0.0"
 
 #: seed 为 null 时 descriptor 明示的固定种子。
@@ -122,8 +130,12 @@ class HighsMilpProvider:
         components = finance_component_declarations(
             artifact, models, materialized, finance
         )
+        series = step_series_declarations(
+            artifact, models, materialized, finance
+        )
         metadata = self._metadata(
-            artifact, unit_map, offset, objective_unit, seed, config, components
+            artifact, unit_map, offset, objective_unit, seed, config, components,
+            series,
         )
         manifest = SolverBundleManifest(
             bundle={"generator": self.ref, "solver": SOLVER_REF},
@@ -206,14 +218,18 @@ class HighsMilpProvider:
         seed: int,
         config: CalculationConfig,
         components: Mapping[str, Mapping[str, object]],
+        series: tuple[Mapping[str, object], ...],
     ) -> bytes:
         """ResultAdapter 后续必需的最小规范 JSON 元数据（规范字节）。
 
         只记录反向换算与追溯必需项（unit_map、目标偏移、目标业务单位、
-        财务分量求值声明 components、请求 outputs、固定 seed、precision、
-        装配/引用追溯），不复制完整 assembly、models、finance，不写 hash。
+        财务分量求值声明 components、可发布步序列声明 step_series、请求
+        outputs、固定 seed、precision、装配/引用追溯），不复制完整
+        assembly、models、finance，不写 hash。
         components 为分量 ident → {unit, caliber, constant, terms}，与目标
         同一分量展开路径，供配套适配器用同一次真实解求值发布。
+        step_series 为可发布步序列声明（与建变量同一路径形成），供配套
+        适配器用同一次真实解恢复统一序列发布；无步变量时为空数组。
         """
         doc = json.loads(artifact.canonical_text)
         assembly = doc.get("assembly") or {}
@@ -239,6 +255,16 @@ class HighsMilpProvider:
             "result_adapter": ADAPTER_REF,
             "seed": seed,
             "solver": SOLVER_REF,
+            "step_series": [
+                {
+                    "series_id": entry["series_id"],
+                    "instance_id": entry["instance_id"],
+                    "variable_id": entry["variable_id"],
+                    "unit": entry["unit"],
+                    "columns": list(entry["columns"]),
+                }
+                for entry in series
+            ],
             "unit_map": dict(sorted(unit_map.items())),
         }
         return (

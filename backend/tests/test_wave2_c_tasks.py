@@ -161,7 +161,7 @@ _CONFIG_BODY: dict = {
     "schema_version": "1.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.generator.highs_milp@1.0.0",
+    "generator": "ies.generator.highs_milp@2.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,
@@ -177,7 +177,7 @@ _CONFIG_BODY: dict = {
 #: 同值, 经 config.patch 草稿命令显式声明, 不得依赖回退。
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.generator.highs_milp@1.0.0",
+    "generator": "ies.generator.highs_milp@2.0.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }

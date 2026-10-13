@@ -208,11 +208,11 @@ class _StubRuntime:
                 attempt_id=attempt.attempt_id,
                 assembly_id=attempt.assembly_id,
                 calculation_config_id=attempt.calculation_config_id,
-                generator_ref="ies.generator.highs_milp@1.0.0",
+                generator_ref="ies.generator.highs_milp@2.0.0",
                 solver_ref="ies.solver.highs@1.7.2",
                 executor_ref="ies.executor.local_process@1.0.0",
                 executable_ref="ies.solver.highs@1.7.2",
-                result_adapter_ref="ies.result-adapter.highs@1.0.0",
+                result_adapter_ref="ies.result-adapter.highs@2.0.0",
                 status=self._status,
                 termination_reason=self._status,
             ),
@@ -265,7 +265,7 @@ class TestComputeChainEndToEnd:
         assert sealed["compute_result"]["receipt_id"] == sealed["receipt"]["receipt_id"]
         assert sealed["receipt"]["status"] == "succeeded"
         assert sealed["receipt"]["executable_ref"] == "ies.solver.highs@1.7.2"
-        assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@1.0.0")
+        assert sealed["bundle_manifest"]["bundle"]["generator"] == ("ies.generator.highs_milp@2.0.0")
         snapshot = worker_app.get_snapshot_record(db, task.calc_snapshot_id)
         assert snapshot is not None
         args = sealed["bundle_manifest"]["command"]["arguments"]
@@ -437,6 +437,102 @@ class TestSingleUnitSeal:
         task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
         assert task.status == "failed"
         assert task.business_outcome is None
+        assert results_store.latest_evidence_for_task(db, task_id) is None
+        assert _stored_object_count(db) == before
+
+    def test_hourly_sealed_from_declared_series(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """统一序列封存闭环：声明 → 同次求解 → hourly 对象 → 引用。
+
+        全部取自同一真实求解的封存载荷：hourly_refs 的字段/行数/身份与
+        parameters.json 内生成器声明一致；对象数据键与字段一致、单位一致；
+        每步值等于同次解变量在声明列的值（声明驱动对照，不拆列名）；
+        至少一个序列非常恒（真实求解，非存根常量）；对象有证据包引用挂接。
+        """
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        assert _run(engine, claim, plane) == "completed"
+
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        refs = sealed.get("hourly_refs")
+        assert isinstance(refs, list) and len(refs) == 1
+        ref = refs[0]
+        params = json.loads(
+            get_object(db, sealed["bundle_files"]["input/parameters.json"]["object_id"]).decode("utf-8")
+        )
+        decls = params["step_series"]
+        assert decls, "真实求解应有可发布步变量声明"
+        assert ref["fields"] == sorted(d["series_id"] for d in decls)
+        assert ref["rows"] > 0
+        assert [
+            {k: m[k] for k in ("series_id", "instance_id", "variable_id", "unit")}
+            for m in ref["series"]
+        ] == [
+            {
+                "series_id": d["series_id"],
+                "instance_id": d["instance_id"],
+                "variable_id": d["variable_id"],
+                "unit": d["unit"],
+            }
+            for d in sorted(decls, key=lambda d: d["series_id"])
+        ]
+        hourly = json.loads(get_object(db, ref["object_id"]).decode("utf-8"))
+        assert set(hourly["data"]) == set(ref["fields"])
+        assert hourly["meta"]["units"] == {d["series_id"]: d["unit"] for d in decls}
+        assert hourly["meta"]["series"] == {
+            d["series_id"]: {"instance_id": d["instance_id"], "variable_id": d["variable_id"]}
+            for d in decls
+        }
+        assert all(len(v) == ref["rows"] for v in hourly["data"].values())
+        varmap = {
+            v["name"]: v["value"]
+            for v in sealed["compute_result"]["outputs"]["solution"]["variables"]
+        }
+        for d in decls:
+            assert hourly["data"][d["series_id"]] == [varmap[c] for c in d["columns"]]
+        assert any(len(set(v)) > 1 for v in hourly["data"].values()), "应有非常恒真实序列"
+        attached = list_refs(db, ref["object_id"])
+        assert any(
+            r.ref_type == "evidence_package" and r.ref_entity_id == str(evidence.id)
+            for r in attached
+        )
+
+    def test_hourly_absent_for_metrics_only(
+        self, client: TestClient, db: Session, engine: Engine, plane
+    ) -> None:
+        """metrics-only：未请求 solution 即无 hourly 对象与引用（缺席，不伪造）。"""
+        body = dict(_CONFIG_BODY)
+        body["outputs"] = ["metrics"]
+        task_id = _submit_calc_task(client, db, body, dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        assert _run(engine, claim, plane) == "completed"
+
+        evidence = results_store.latest_evidence_for_task(db, task_id)
+        assert evidence is not None
+        sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
+        assert "hourly_refs" not in sealed
+        assert "series" not in sealed["compute_result"]["outputs"]
+
+    def test_late_failure_rolls_back_hourly_seal(
+        self, client: TestClient, db: Session, engine: Engine, plane, monkeypatch
+    ) -> None:
+        """评估写入失败 → 含 hourly 封存在内整笔回滚，无孤立元数据与引用。"""
+        import iesplan.application.worker.attempt_cases as attempt_cases  # noqa: E402
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("injected-assessment-failure")
+
+        monkeypatch.setattr(attempt_cases, "create_assessment_record", _boom)
+        task_id = _submit_calc_task(client, db, dict(_CONFIG_BODY), dict(PLANNING_BODY))
+        claim = _claim(db, task_id)
+        before = _stored_object_count(db)
+        assert _run(engine, claim, plane) == "failed"
+
+        task = db.execute(select(Task).where(Task.id == task_id)).scalar_one()
+        assert task.status == "failed"
         assert results_store.latest_evidence_for_task(db, task_id) is None
         assert _stored_object_count(db) == before
 

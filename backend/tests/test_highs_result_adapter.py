@@ -1,4 +1,4 @@
-"""ies.result-adapter.highs@1.0.0 聚焦行为测试。
+"""ies.result-adapter.highs@2.0.0 聚焦行为测试。
 
 V1 夹具为 Docker 内真实求解垫片（``ies-highs-solver``，highspy 1.7.2）
 逐字节产出，断言前已核对：
@@ -118,11 +118,12 @@ def _parameters(
     objective_unit: object = "CNY",
     outputs: object = None,
     components: object = None,
+    step_series: object = None,
 ) -> bytes:
     doc = {
         "assembly": {"id": "assembly-7", "schema_version": "2.0.0"},
         "components": {} if components is None else components,
-        "generator": "ies.generator.highs_milp@1.0.0",
+        "generator": "ies.generator.highs_milp@2.0.0",
         "objective_offset": offset,
         "objective_unit": objective_unit,
         "outputs": ["solution", "metrics"] if outputs is None else outputs,
@@ -130,6 +131,7 @@ def _parameters(
         "result_adapter": ADAPTER_REF,
         "seed": 0,
         "solver": "ies.solver.highs@1.7.2",
+        "step_series": [] if step_series is None else step_series,
         "unit_map": {"x": "kW", "y": "kW"} if unit_map is None else unit_map,
     }
     return (json.dumps(doc, sort_keys=True) + "\n").encode("utf-8")
@@ -143,7 +145,7 @@ def _bundle(files: dict | None = None) -> SolverBundle:
         }
     manifest = SolverBundleManifest(
         bundle={
-            "generator": "ies.generator.highs_milp@1.0.0",
+            "generator": "ies.generator.highs_milp@2.0.0",
             "solver": "ies.solver.highs@1.7.2",
         },
         inputs=[{"path": path, "media_type": "application/octet-stream"} for path in sorted(files)],
@@ -173,7 +175,7 @@ def _receipt(**kwargs) -> ExecutionReceipt:
     kwargs.setdefault("assembly_id", "assembly-7")
     kwargs.setdefault("calculation_config_id", "config-7")
     kwargs.setdefault("attempt_id", "attempt-7")
-    kwargs.setdefault("generator_ref", "ies.generator.highs_milp@1.0.0")
+    kwargs.setdefault("generator_ref", "ies.generator.highs_milp@2.0.0")
     kwargs.setdefault("solver_ref", "ies.solver.highs@1.7.2")
     kwargs.setdefault("executor_ref", "ies.executor.local_process@1.0.0")
     kwargs.setdefault("executable_ref", "ies.solver.highs@1.7.2")
@@ -194,7 +196,7 @@ def _adapt(bundle_files, receipt, solution: bytes | None) -> ComputeResult:
 def test_identity_and_registry() -> None:
     """公开身份与独立原子注册（精确引用选中，无回退）。"""
     assert isinstance(HIGHS_ADAPTER, HighsResultAdapter)
-    assert HIGHS_ADAPTER.ref == ADAPTER_REF == "ies.result-adapter.highs@1.0.0"
+    assert HIGHS_ADAPTER.ref == ADAPTER_REF == "ies.result-adapter.highs@2.0.0"
     assert HIGHS_ADAPTER.descriptor.ref == ADAPTER_REF
     assert HIGHS_ADAPTER.available() is True
     registry = build_result_adapter_registry([HIGHS_ADAPTER])
@@ -211,7 +213,8 @@ def test_optimal_money_objective_keeps_currency() -> None:
     assert result.math_status == "solved"
     assert result.bundle_id == "bundle-7"
     assert result.receipt_id == "receipt-7"
-    assert set(result.outputs) == {"solution", "metrics"}
+    assert set(result.outputs) == {"solution", "metrics", "series"}
+    assert dict(result.outputs["series"]) == {}
     solution = result.outputs["solution"]
     assert solution["objective_value"] == 3001.5
     assert solution["objective_unit"] == "CNY"
@@ -269,13 +272,15 @@ def test_requested_subset_only() -> None:
         PARAMETERS_PATH: _parameters(outputs=["solution"]),
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert set(result.outputs) == {"solution"}
+    assert set(result.outputs) == {"solution", "series"}
+    assert dict(result.outputs["series"]) == {}
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: _parameters(outputs=["solution", "nope"]),
     }
     result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert set(result.outputs) == {"solution"}
+    assert set(result.outputs) == {"solution", "series"}
+    assert dict(result.outputs["series"]) == {}
 
 
 def test_infeasible_and_unbounded_have_no_business_outputs() -> None:
@@ -491,6 +496,91 @@ def test_components_fail_loudly() -> None:
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: (json.dumps(raw, sort_keys=True) + "\n").encode("utf-8"),
+    }
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+    assert exc_info.value.reason == "result-protocol-failure"
+
+
+def test_series_recovers_by_declared_columns() -> None:
+    """步序列按声明显式列引用恢复，与列名模式无关。
+
+    声明 columns 故意逆序（["y", "x"]），断言恢复值跟随声明顺序
+    （[0.0, 3.0]）而非 MPS 列序；单位按声明反向换算，身份原样发布。
+    主解 x=3000W→3.0kW、y=0 形成非恒定序列。
+    """
+    decl = [{
+        "series_id": "inst.flow",
+        "instance_id": "inst",
+        "variable_id": "flow",
+        "unit": "kW",
+        "columns": ["y", "x"],
+    }]
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(step_series=decl),
+    }
+    result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+    assert result.math_status == "solved"
+    assert set(result.outputs) == {"solution", "metrics", "series"}
+    series = {key: dict(item) for key, item in result.outputs["series"].items()}
+    assert series == {
+        "inst.flow": {
+            "instance_id": "inst",
+            "variable_id": "flow",
+            "unit": "kW",
+            "values": (0.0, 3.0),
+        }
+    }
+
+
+def test_series_absent_without_solution_request() -> None:
+    """metrics-only：未请求 solution 即无 series（缺席，不伪造空键）。"""
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(
+            outputs=["metrics"],
+            step_series=[{
+                "series_id": "inst.flow",
+                "instance_id": "inst",
+                "variable_id": "flow",
+                "unit": "kW",
+                "columns": ["x", "y"],
+            }],
+        ),
+    }
+    result = _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+    assert result.math_status == "solved"
+    assert set(result.outputs) == {"metrics"}
+    assert "series" not in result.outputs
+    assert "solution" not in result.outputs
+
+
+def test_legacy_bundle_without_step_series_fails() -> None:
+    """旧声明（无 step_series 键）直接协议失败，不回退、不忽略。"""
+    raw = json.loads(_parameters().decode("utf-8"))
+    del raw["step_series"]
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: (json.dumps(raw, sort_keys=True) + "\n").encode("utf-8"),
+    }
+    with pytest.raises(ComputationUnavailableError) as exc_info:
+        _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
+    assert exc_info.value.reason == "result-protocol-failure"
+
+
+def test_series_unknown_column_fails() -> None:
+    """声明引用未知 LP 列即协议失败，不补零。"""
+    decl = [{
+        "series_id": "inst.flow",
+        "instance_id": "inst",
+        "variable_id": "flow",
+        "unit": "kW",
+        "columns": ["x", "ghost"],
+    }]
+    files = {
+        PROBLEM_PATH: TINY_MPS.encode("utf-8"),
+        PARAMETERS_PATH: _parameters(step_series=decl),
     }
     with pytest.raises(ComputationUnavailableError) as exc_info:
         _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
