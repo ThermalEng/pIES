@@ -957,7 +957,17 @@ function PreviewDialog({
     >
       {error ? <Alert variant="error">{error}</Alert> : null}
       {!sample && !error ? <Spinner /> : null}
-      {sample ? (
+      {sample && !sample.rows_available ? (
+        <>
+          <Alert variant="info">{pt('ies.data.sample_unavailable')}</Alert>
+          {sample.headers.length > 0 ? (
+            <p className="ies-form-message">
+              {pt('ies.data.sample_fields')}: {sample.headers.join('、')}
+            </p>
+          ) : null}
+        </>
+      ) : null}
+      {sample && sample.rows_available ? (
         <>
           <p className="ies-form-message">
             {t('ies.data.row_count')}: {sample.total_rows}

@@ -1561,11 +1561,17 @@ export const api = {
       )
     },
     sample(projectId: number, id: number): Promise<DatasetSample> {
-      // 后端无数据行预览端点; 降级: 从最新版本字段名生成表头, 不返回行数据
+      // 后端无数据行预览端点: 只取最新版本字段名作真实元数据表头,
+      // 行级数据标记为不可用, 不得伪造空行/零行数冒充真实空数据集。
       return request<unknown>(`/projects/${projectId}/datasets/${id}`).then((body) => {
         const versions = asList<Record<string, unknown>>(body, 'versions')
         const latest = versions[0]
-        return { headers: Object.keys(asRecord(latest?.fields ?? {})), rows: [], total_rows: 0 }
+        return {
+          headers: Object.keys(asRecord(latest?.fields ?? {})),
+          rows: [],
+          total_rows: 0,
+          rows_available: false,
+        }
       })
     },
     bind(projectId: number, datasetVersionId: number, datasetId: number): Promise<{ revision: number }> {
