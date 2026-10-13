@@ -213,9 +213,9 @@ test.describe('R4: 证据收集失败可见', () => {
   })
 
   test('切换项目后旧条目不滞留、失败只剩错误重试', async ({ browser }) => {
-    // 说明: Workbench static 路由树无 key, 同组件在项目间复用实例、
-    // 保留 state; 收集 effect 仅随 projectId 重跑。?package= 只首读一次,
-    // 改 query 不重跑 effect, 故不列为切换路径。
+    // 本场景验收真实项目间导航的失败/恢复，不证明同组件状态复用：
+    // 经项目列表会卸载原 ResultsPage。收集启动清旧状态另由源码复审核对。
+    // ?package= 只首读一次，不列为切换路径。
     const userName = uniqueName('es-r4sw-doer')
     const password = strongPassword('Init')
     const apiCtx = await browser.newContext({ baseURL: APP })
@@ -335,7 +335,7 @@ test.describe('R4: 证据收集失败可见', () => {
     await page.goto(`/projects/${pidA}/results`)
     await expect(page.getByText(entryText)).toBeVisible({ timeout: 60_000 })
 
-    // 客户端路由切到 B(同组件复用、state 沿用): 先到列表, 再进 B, 再点结果分析。
+    // 客户端路由切到 B：先到列表，再进 B，再点结果分析。
     await page.getByText('项目列表').first().click({ timeout: 30_000 })
     await page.getByText(projectB).click({ timeout: 30_000 })
     // 项目页 index 重定向到任务中心子路由。
