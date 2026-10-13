@@ -25,7 +25,7 @@ import { Link } from 'react-router-dom'
 
 import { api, downloadBlob } from '../api/client'
 import type { HourlySeriesMeta } from '../api/client'
-import { translate, translateDiagnostic, translateError, useI18n } from '../i18n'
+import { translate, translateError, useI18n } from '../i18n'
 import type { Locale } from '../i18n'
 import {
   Alert,
@@ -35,7 +35,6 @@ import {
   Dialog,
   EmptyState,
   FormField,
-  Icon,
   Select,
   Spinner,
   Table,
@@ -56,7 +55,6 @@ import type {
   AssessmentDimension,
   AssessmentGrade,
   Currency,
-  Diagnostic,
   EvidenceCandidate,
   ExcelExportInput,
   EvidencePackageSummary,
@@ -147,21 +145,23 @@ function formatMetricValue(m: MetricValue, currency: Currency): string {
   return `${formatNumber(m.value, { digits: 2 })}${m.unit ? ` ${m.unit}` : ''}`
 }
 
-/** 从诊断中推断 IRR 计算状态(唯一/无解/多解/退化/域外/数值失败)。 */
+/** 封存 IRR 状态徽章键(唯一/无解/多解/退化/域外/数值失败)。 */
 type IrrStatusKey = 'unique' | 'no_solution' | 'multiple' | 'degenerate' | 'out_of_domain' | 'numeric_failure'
 
-function inferIrrStatusKey(diagnostics: Diagnostic[]): IrrStatusKey | null {
-  for (const d of diagnostics ?? []) {
-    const k = d.message_key.toLowerCase()
-    if (!/irr|financial/.test(k)) continue
-    if (/no.?solution|infeasible/.test(k)) return 'no_solution'
-    if (/multi|multiple/.test(k)) return 'multiple'
-    if (/degenerate|degen/.test(k)) return 'degenerate'
-    if (/domain|out.?of|range/.test(k)) return 'out_of_domain'
-    if (/numeric|nan|fail|error/.test(k)) return 'numeric_failure'
-    return 'unique'
-  }
-  return null
+/**
+ * 封存 evaluation.irr_status → 徽章键(唯一权威映射, 摘要与封存卡共用)。
+ * 后端 'normal' 即唯一解；其余五枚举直通；未知状态不猜测，回 null 即不展示。
+ */
+function irrStatusToKey(irrStatus: string): IrrStatusKey | null {
+  return irrStatus === 'normal'
+    ? 'unique'
+    : irrStatus === 'no_solution' ||
+        irrStatus === 'multiple' ||
+        irrStatus === 'degenerate' ||
+        irrStatus === 'out_of_domain' ||
+        irrStatus === 'numeric_failure'
+      ? (irrStatus as IrrStatusKey)
+      : null
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +194,6 @@ export default function ResultsPage() {
   /** 缺块原因(有块为 null; 后端按可观察事实判定, 前端不猜测)。 */
   const [finAbsence, setFinAbsence] = useState<FinancialAbsence>(null)
   const [noEvidence, setNoEvidence] = useState(false)
-  const [resultDiag, setResultDiag] = useState<Diagnostic[]>([])
   const [assessments, setAssessments] = useState<ResultAssessment[]>([])
   const [hourly, setHourly] = useState<{ flows: Record<string, number[]>; series: HourlySeriesMeta[] } | null>(null)
   /** 曲线合法缺席(后端显式无逐时引用, 非失败, 不清其他结果)。 */
@@ -313,7 +312,6 @@ export default function ResultsPage() {
       setFinEval(null)
       setFinAbsence(null)
       setNoEvidence(false)
-      setResultDiag([])
       setAssessments([])
       setHourly(null)
       setHourlyAbsent(false)
@@ -333,7 +331,6 @@ export default function ResultsPage() {
     setFinEval(null)
     setFinAbsence(null)
     setNoEvidence(false)
-    setResultDiag([])
     setAssessments([])
     setHourly(null)
     setHourlyAbsent(false)
@@ -374,7 +371,6 @@ export default function ResultsPage() {
         setFinAbsence(res?.financialAbsence ?? null)
         // evidence_status=no_evidence: 任务存在但尚无证据包(后端显式状态, 非猜测)
         setNoEvidence(res?.evidence_status === 'no_evidence')
-        setResultDiag(res?.diagnostics ?? [])
         setAssessments([...(ass ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)))
         // 主结果状态先全部发布(财务/指标/候选/规划解/快照引用), 再读曲线:
         // 曲线慢/挂起不延迟主结果展示。曲线缺席与失败只记曲线状态。
@@ -538,7 +534,12 @@ export default function ResultsPage() {
     [dimStatusOf, t],
   )
 
-  const irrKey = useMemo(() => inferIrrStatusKey(resultDiag), [resultDiag])
+  // 旧摘要徽章不再从诊断猜测: 与封存卡同一封存状态事实、同一映射；
+  // 无财务评价块或状态不可显示时为 null, 摘要侧不展示状态行(不补默认)。
+  const irrKey = useMemo(
+    () => (finEval ? irrStatusToKey(finEval.evaluation.irr_status) : null),
+    [finEval],
+  )
 
   // 财务/环境/工程指标分组(数据驱动)
   const finMetrics = useMemo(
@@ -1322,16 +1323,6 @@ export default function ResultsPage() {
               </Alert>
             </div>
           ) : null}
-          {resultDiag.length > 0 ? (
-            <details style={{ marginTop: 'var(--ies-space-4)' }}>
-              <summary className="ies-summary">{t('ies.result.assessment')}</summary>
-              <ul className="ies-diag-list" style={{ marginTop: 'var(--ies-space-2)' }}>
-                {resultDiag.map((d, i) => (
-                  <DiagnosticLine key={`${d.code}-${i}`} diag={d} />
-                ))}
-              </ul>
-            </details>
-          ) : null}
         </Card>
       </div>
 
@@ -1507,14 +1498,14 @@ function MetricGroup({
       <dl className="ies-kv">
         <dt>{labels.irr}</dt>
         <dd>{irrMetric ? formatMetricValue(irrMetric, currency) : '—'}</dd>
-        <dt>{labels.irrStatus}</dt>
-        <dd>
-          {irrKey ? (
-            <Badge variant={irrKey === 'unique' ? 'success' : 'warning'} icon={irrKey === 'unique' ? 'check' : 'warning'} label={t(`ies.result.irr_${irrKey}`)} />
-          ) : (
-            '—'
-          )}
-        </dd>
+        {irrKey ? (
+          <>
+            <dt>{labels.irrStatus}</dt>
+            <dd>
+              <Badge variant={irrKey === 'unique' ? 'success' : 'warning'} icon={irrKey === 'unique' ? 'check' : 'warning'} label={t(`ies.result.irr_${irrKey}`)} />
+            </dd>
+          </>
+        ) : null}
       </dl>
       {others.length > 0 ? (
         <div style={{ marginTop: 'var(--ies-space-3)' }}>
@@ -1533,17 +1524,7 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
   const rows = ev.rows
   const payments = fin.payments_applied
   const annual = fin.annual_operation
-  const irrStatus = ev.irr_status
-  const irrKey: IrrStatusKey | null =
-    irrStatus === 'normal'
-      ? 'unique'
-      : irrStatus === 'no_solution' ||
-          irrStatus === 'multiple' ||
-          irrStatus === 'degenerate' ||
-          irrStatus === 'out_of_domain' ||
-          irrStatus === 'numeric_failure'
-        ? (irrStatus as IrrStatusKey)
-        : null
+  const irrKey: IrrStatusKey | null = irrStatusToKey(ev.irr_status)
   const payback = (prefix: 'static' | 'dynamic'): { value: number | null; status: string } =>
     prefix === 'static'
       ? { value: ev.static_payback, status: ev.static_status }
@@ -1668,21 +1649,5 @@ function FinancialEvaluationCard({ fin }: { fin: FinancialEvaluationBlock }) {
         </dl>
       </div>
     </Card>
-  )
-}
-
-/** 结果诊断单行(消息 + 修复建议)。 */
-function DiagnosticLine({ diag }: { diag: Diagnostic }) {
-  const { t } = useI18n()
-  return (
-    <li className="ies-diag">
-      <p className="ies-diag__msg">{translateDiagnostic(diag)}</p>
-      {diag.fix_hint_key ? (
-        <p className="ies-diag__fix">
-          <Icon name="info" size={12} />
-          {t('ies.task.fix_hint')}: {translate(diag.fix_hint_key, diag.params)}
-        </p>
-      ) : null}
-    </li>
   )
 }

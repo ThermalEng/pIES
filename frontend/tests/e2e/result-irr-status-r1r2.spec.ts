@@ -1,0 +1,172 @@
+// R1/R2 结果页 IRR 状态来源收口验收: 旧摘要徽章不再从诊断猜测,
+// 与封存卡共用同一封存 evaluation.irr_status；无财务块时不展示状态。
+//
+// A(封存同源): 公开 API 脚手架＋UI 确认/提交→真实 Worker 求解→结果页,
+//   旧财务摘要徽章与封存卡徽章文本一致, 且等于 HTTP 封存 irr_status 的
+//   已知标签(未知状态直接失败, 不猜测)。
+// B(无块不伪造): outputs=['metrics'] 真实任务→结果页无“IRR 计算状态”行,
+//   HTTP financial_evaluation=null 且缺席原因一致。
+// 求解/页面走真实链路, 不注入状态、不 mock 业务、不注库。D1/D2 不重跑。
+
+import { test, expect } from '@playwright/test'
+import type { Page, BrowserContext } from '@playwright/test'
+import { createSession, uniqueName, strongPassword } from './fixtures'
+import { createEngineer, loginToken, requestJson } from './setup/api'
+import { APP, scaffoldProject } from './financial-scaffold'
+
+interface TaskListItem {
+  id: number
+}
+
+/** 已知封存 irr_status → 页面徽章标签(测试 oracle；未知状态即失败)。 */
+const IRR_LABEL: Record<string, string> = {
+  normal: '唯一解',
+  no_solution: '无解',
+  multiple: '多解',
+  degenerate: '退化',
+  out_of_domain: '超出定义域',
+  numeric_failure: '数值失败',
+}
+
+async function submitEvaluationViaUI(page: Page): Promise<void> {
+  await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
+  await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
+  await page.locator('#task-type').selectOption('optimization')
+  await page.locator('#task-construction-period').fill('1')
+  await page.locator('#task-operation-years').fill('2')
+  await page.locator('#task-discount-rate').fill('0.08')
+  await page.locator('#task-construction-payments').fill('[{"t": 0, "ratio": 0.6}, {"t": 1, "ratio": 0.4}]')
+  await page.locator('#task-maintenance-expenses').fill('[]')
+  const submitBtn = page.getByRole('button', { name: /提交任务|Submit task/i }).last()
+  await expect(submitBtn).toBeEnabled({ timeout: 10_000 })
+  await submitBtn.click({ timeout: 30_000 })
+  await expect(page.locator('.ies-table__row').first()).toBeVisible({ timeout: 15_000 })
+}
+
+async function waitCompleted(page: Page): Promise<void> {
+  await page.locator('.ies-table__row').first().click({ timeout: 30_000 })
+  await expect(page.locator('.ies-task-detail')).toBeVisible({ timeout: 10_000 })
+  const detailBadge = page.locator('.ies-task-detail .ies-badge__label').first()
+  await expect(async () => {
+    const text = (await detailBadge.textContent()) ?? ''
+    expect(text).toMatch(/已完成|Completed/i)
+  }).toPass({ timeout: 240_000, intervals: [10_000] })
+}
+
+async function openResults(page: Page): Promise<void> {
+  const viewResults = page.getByRole('link', { name: /查看结果|View results/i })
+  await expect(viewResults).toBeVisible({ timeout: 10_000 })
+  await viewResults.click({ timeout: 30_000 })
+  await expect(page).toHaveURL(/\/results/)
+}
+
+test.describe('R1/R2: IRR 状态走封存字段', () => {
+  test.setTimeout(900_000)
+
+  test('A: 封存任务两处徽章同源一致', async ({ browser }) => {
+    const username = uniqueName('es-irr-a')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('IRR同源项目')
+    const profileId = `irra-hp-${Date.now()}`
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, username, password)
+    const token = await loginToken(apiCtx.request, username, password)
+    const pid = await scaffoldProject(requestJson, apiCtx.request, token, projectName, profileId)
+    const precheck = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/validation/run`, {}, token)
+    const blockers = (precheck.report?.diagnostics ?? []).filter(
+      (d: { blocking: boolean }) => d.blocking,
+    )
+    expect(blockers).toEqual([])
+
+    const context: BrowserContext = await browser.newContext()
+    const page: Page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await page.getByText(projectName).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await submitEvaluationViaUI(page)
+    await waitCompleted(page)
+    await openResults(page)
+
+    // 封存卡出现, 旧摘要卡出现。
+    await expect(page.getByText(/评价现金流\(封存\)|Sealed evaluation/i).first()).toBeVisible({ timeout: 30_000 })
+
+    // HTTP 封存 irr_status 是唯一依据；未知状态直接失败。
+    const token2 = await loginToken(apiCtx.request, username, password)
+    const listed = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks?limit=10`, undefined, token2)
+    const items = (listed.items ?? []) as TaskListItem[]
+    const taskId: number = items[0].id
+    expect(taskId).toBeTruthy()
+    const result = await requestJson(
+      apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token2,
+    )
+    const irrStatus: string = result.result.financial_evaluation?.evaluation?.irr_status
+    expect(typeof irrStatus).toBe('string')
+    const expectedLabel = IRR_LABEL[irrStatus]
+    expect(expectedLabel, `未知封存 irr_status: ${irrStatus}`).toBeTruthy()
+
+    // 旧摘要卡与封存卡各展示一次同一标签, 别无第三处来源。
+    const summaryCard = page.locator('section.ies-card').filter({
+      has: page.getByRole('heading', { name: '财务', exact: true }),
+    })
+    const sealedCard = page.locator('section.ies-card').filter({
+      has: page.getByRole('heading', { name: /评价现金流\(封存\)|Sealed evaluation/i }),
+    })
+    await expect(summaryCard.getByText('IRR 计算状态')).toBeVisible({ timeout: 30_000 })
+    await expect(summaryCard.getByText(expectedLabel!).first()).toBeVisible({ timeout: 30_000 })
+    await expect(sealedCard.getByText('IRR 计算状态')).toBeVisible({ timeout: 30_000 })
+    await expect(sealedCard.getByText(expectedLabel!).first()).toBeVisible({ timeout: 30_000 })
+    expect(await page.getByText(expectedLabel!).count()).toBe(2)
+
+    await apiCtx.close()
+    session.assertNoErrors()
+    await context.close()
+  })
+
+  test('B: 无财务块时不展示 IRR 状态', async ({ browser }) => {
+    const username = uniqueName('es-irr-b')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('IRR无块项目')
+    const profileId = `irrb-hp-${Date.now()}`
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, username, password)
+    const token = await loginToken(apiCtx.request, username, password)
+    const pid = await scaffoldProject(requestJson, apiCtx.request, token, projectName, profileId, {
+      outputs: ['metrics'],
+    })
+    const precheck = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/validation/run`, {}, token)
+    const blockers = (precheck.report?.diagnostics ?? []).filter(
+      (d: { blocking: boolean }) => d.blocking,
+    )
+    expect(blockers).toEqual([])
+
+    const context: BrowserContext = await browser.newContext()
+    const page: Page = await context.newPage()
+    const session = await createSession(page, username, password)
+    await page.getByText(projectName).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await submitEvaluationViaUI(page)
+    await waitCompleted(page)
+    await openResults(page)
+
+    // 缺席说明出现, 封存卡不出现, 全页无 IRR 状态行(不补默认)。
+    await expect(page.getByText(/快照未请求 solution/).first()).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByText(/评价现金流\(封存\)|Sealed evaluation/i)).toHaveCount(0)
+    expect(await page.getByText('IRR 计算状态').count()).toBe(0)
+
+    // HTTP 与页面一致。
+    const token2 = await loginToken(apiCtx.request, username, password)
+    const listed = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks?limit=10`, undefined, token2)
+    const items = (listed.items ?? []) as TaskListItem[]
+    const taskId: number = items[0].id
+    expect(taskId).toBeTruthy()
+    const result = await requestJson(
+      apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${taskId}/result`, undefined, token2,
+    )
+    expect(result.result.financial_evaluation).toBeNull()
+    expect(result.result.financial_absence).toBe('solution_not_requested')
+
+    await apiCtx.close()
+    session.assertNoErrors()
+    await context.close()
+  })
+})

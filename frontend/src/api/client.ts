@@ -1232,7 +1232,6 @@ export interface ResultsApi {
   result(projectId: number, taskId: number): Promise<{
     evidence_package_id: number
     metrics: Record<string, MetricValue> | null
-    diagnostics: Diagnostic[]
     /** 真实候选列表(选择用 index; 空即无候选可供选择)。 */
     candidates: EvidenceCandidate[]
     /** 规划解读取(无可用解为 null, 不伪造候选)。 */
@@ -1717,7 +1716,6 @@ export const api = {
       evidence_status: 'available' | 'no_evidence'
       evidence_package_id: number
       metrics: Record<string, MetricValue> | null
-      diagnostics: Diagnostic[]
       /** 已封存财务评价(同一证据内容原样投影, 无块为 null)。 */
       financial: FinancialEvaluationBlock | null
       /** 缺块原因(有块为 null; 后端按可观察事实判定)。 */
@@ -1745,7 +1743,6 @@ export const api = {
             status === 'no_evidence'
               ? null
               : ((r.metrics_summary as Record<string, MetricValue>) ?? {}),
-          diagnostics: [],
           financial:
             status === 'no_evidence' || fin === null || fin === undefined ? null : fin,
           financialAbsence: fin ? null : (absence ?? null),
