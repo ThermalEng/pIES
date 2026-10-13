@@ -157,8 +157,6 @@ export interface Project {
   status: ProjectStatus
   owner_id: EntityId
   currency: Currency
-  /** 项目固定 UTC 偏移(分钟),所有时序数据按此偏移解释。 */
-  fixed_utc_offset_minutes: number
   schema_version: number
   current_draft_id: EntityId | null
   current_version_id: EntityId | null
@@ -216,7 +214,7 @@ export interface ProjectVersion {
   source_draft_id: EntityId | null
   source_draft_revision: number | null
   reason: string
-  /** 版本固化时的项目基线快照(非独立时区字段; 展示时区用 Project.fixed_utc_offset_minutes)。 */
+  /** 版本固化时的项目基线快照(分辨率/起始年/场景; 项目与版本均不声明时区)。 */
   project_baseline: {
     resolution: string
     start_year: number

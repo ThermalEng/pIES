@@ -3,7 +3,7 @@
  *
  * 由 WorkbenchPage 挂载,ProjectPage(框架布局)与各子页面(Tasks/Results/Model/
  * Data/Config/Validation/Export)通过 useWorkbench() 读取项目信息、版本、币种、
- * UTC 偏移、自动保存状态与离线状态。
+ * 自动保存状态与离线状态(项目不声明时区; 偏移由数据集版本声明)。
  *
  * 子页面保存草稿时调用 useAutosave().setStatus(...) 通知工作台头部的状态指示;
  * 约定状态机: saving(保存中) -> saved(成功) / dirty(有未保存更改) / error(失败)。
@@ -22,8 +22,12 @@ export type AutosaveStatus = 'saved' | 'saving' | 'dirty' | 'error'
 export interface WorkbenchValue {
   /** 当前项目 ID(来自路由 /projects/:id)。 */
   projectId: number
-  /** 项目信息(加载失败为 null)。 */
+  /** 项目信息(加载中与加载失败均为 null, 以 projectLoading/projectError 区分)。 */
   project: Project | null
+  /** 项目主体仍在加载(初始与每次重读期间为 true)。 */
+  projectLoading: boolean
+  /** 项目主体读取失败的真实错误(成功与加载中为 null)。 */
+  projectError: string | null
   /** 版本列表(按 version_no 升序)。 */
   versions: ProjectVersion[]
   /** 当前版本(最新版本号)。 */
@@ -63,7 +67,7 @@ export function useAutosave(): { status: AutosaveStatus; setStatus: (status: Aut
   return { status: autosave, setStatus: setAutosave }
 }
 
-/** 项目固定 UTC 偏移(分钟)格式化为 "UTC+08:00" / "UTC-05:30"。 */
+/** 固定 UTC 偏移(分钟, 由数据集版本声明)格式化为 "UTC+08:00" / "UTC-05:30"。 */
 export function formatUtcOffset(minutes: number | null | undefined): string {
   if (minutes === null || minutes === undefined || Number.isNaN(minutes)) return 'UTC'
   const sign = minutes < 0 ? '-' : '+'
@@ -79,6 +83,8 @@ export function formatUtcOffset(minutes: number | null | undefined): string {
  */
 export function WorkbenchProvider({ projectId, children }: { projectId: number; children: ReactNode }) {
   const [project, setProject] = useState<Project | null>(null)
+  const [projectLoading, setProjectLoading] = useState(true)
+  const [projectError, setProjectError] = useState<string | null>(null)
   const [versions, setVersions] = useState<ProjectVersion[]>([])
   const [autosave, setAutosave] = useState<AutosaveStatus>('saved')
   const [offline, setOffline] = useState(() =>
@@ -86,25 +92,30 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
   )
 
   const refreshDetailed = useCallback(async (): Promise<WorkbenchRefreshErrors> => {
+    // 每次重读都更新三态: 加载中 → 成功/失败, 供消费者区分 null 的含义。
+    setProjectLoading(true)
+    setProjectError(null)
     const [projectSettled, versionsSettled] = await Promise.allSettled([
       api.projects.get(projectId),
       api.projects.versions(projectId),
     ])
-    let projectError: string | null = null
+    let nextProjectError: string | null = null
     let versionsError: string | null = null
     if (projectSettled.status === 'fulfilled') {
       setProject(projectSettled.value)
     } else {
-      projectError = errorMessage(projectSettled.reason)
+      nextProjectError = errorMessage(projectSettled.reason)
       setProject(null)
     }
+    setProjectError(nextProjectError)
     if (versionsSettled.status === 'fulfilled') {
       setVersions([...versionsSettled.value].sort((a, b) => a.version_no - b.version_no))
     } else {
       versionsError = errorMessage(versionsSettled.reason)
       setVersions([])
     }
-    return { projectError, versionsError }
+    setProjectLoading(false)
+    return { projectError: nextProjectError, versionsError }
   }, [projectId])
 
   const refresh = useCallback(() => {
@@ -132,6 +143,8 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
     () => ({
       projectId,
       project,
+      projectLoading,
+      projectError,
       versions,
       currentVersion,
       offline,
@@ -140,7 +153,7 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
       refresh,
       refreshDetailed,
     }),
-    [projectId, project, versions, currentVersion, offline, autosave, refresh, refreshDetailed],
+    [projectId, project, projectLoading, projectError, versions, currentVersion, offline, autosave, refresh, refreshDetailed],
   )
 
   return <WorkbenchContext.Provider value={value}>{children}</WorkbenchContext.Provider>

@@ -2,7 +2,7 @@
  * 工作台框架(ProjectPage):侧边导航 + 项目信息头 + 内容出口。
  *
  * - 侧边导航:模型 / 数据 / 配置 / 校验 / 任务 / 版本历史 / 结果 / 导出。
- * - 项目信息头:项目名称、版本、币种、UTC 偏移、自动保存状态、离线徽章。
+ * - 项目信息头:项目名称、版本、币种、自动保存状态、离线徽章(项目不声明时区)。
  *
  * 子页面通过 useWorkbench()/useAutosave()(见 workbench.tsx)读取上下文;
  * 保存草稿时调用 useAutosave().setStatus(...) 更新头部状态指示。
@@ -14,7 +14,7 @@ import { NavLink, Outlet } from 'react-router-dom'
 
 import { Icon, Spinner } from '../components/ui'
 import { useI18n } from '../i18n'
-import { formatUtcOffset, useWorkbench } from './workbench'
+import { useWorkbench } from './workbench'
 import type { AutosaveStatus } from './workbench'
 import './workbench.css'
 
@@ -199,9 +199,6 @@ export default function ProjectPage() {
                   {t('ies.workbench.currency')}:{' '}
                   {project.currency === 'CNY' ? t('ies.unit.cny') : t('ies.unit.usd')}(
                   {project.currency})
-                </span>
-                <span>
-                  {t('ies.workbench.utc')}: {formatUtcOffset(project.fixed_utc_offset_minutes)}
                 </span>
               </div>
             ) : null}

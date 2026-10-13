@@ -51,7 +51,7 @@ import {
   syntheticCsv,
 } from '../lib/datasetCsv'
 import { formatDateTime, formatPercent } from '../lib/format'
-import type { Dataset, DatasetSample, DatasetVersion, Diagnostic } from '../types'
+import type { Dataset, DatasetSample, DatasetVersion, Diagnostic, Project } from '../types'
 
 /** 支持的固定 UTC 偏移(分钟,整点,对齐数据库 CHECK -720..840)。 */
 const OFFSET_OPTIONS: readonly number[] = (() => {
@@ -992,7 +992,9 @@ function PreviewDialog({
 
 export function DataPage() {
   // 唯一项目 ID 来自工作台上下文(路由 /projects/:id 持有者); 无独立挂载。
-  const { projectId: pid, project } = useWorkbench()
+  // project 为 null 时以 projectLoading/projectError 区分加载中与失败,
+  // 不把 null 解读为正常项目, 不猜默认值。
+  const { projectId: pid, project, projectLoading, projectError, refreshDetailed } = useWorkbench()
   const { t } = useI18n()
 
   const [datasets, setDatasets] = useState<Dataset[] | null>(null)
@@ -1049,9 +1051,6 @@ export function DataPage() {
     return vs.length > 0 ? vs.reduce((a, b) => (a.version_no >= b.version_no ? a : b)) : undefined
   }
 
-  /** 已绑定到项目草稿的版本 id 集合(权威来源: GET /projects/{id} draft.content.dataset_bindings)。 */
-  const boundVersionIds = new Set((project?.draft?.dataset_bindings ?? []).map((b) => b.dataset_version_id))
-
   /** 快速绑定最新版本(表格行内操作)。 */
   async function bindLatest(ds: Dataset) {
     if (pid === undefined || busyBind !== null) return
@@ -1084,6 +1083,34 @@ export function DataPage() {
     }
   }
 
+  if (projectLoading) {
+    return (
+      <div className="ies-page-placeholder" role="status">
+        <Spinner size="lg" />
+      </div>
+    )
+  }
+
+  if (projectError) {
+    // 项目主体读取失败: 只显错+重试(调原 Provider 重读), 不渲染可写表单,
+    // 不以空绑定掩盖项目不可读; 重试在途切回加载态, 不能反复触发。
+    // 数据列表/版本错误仍归本页 D2 入口, 不误接为项目重试。
+    return (
+      <div className="ies-page-placeholder">
+        <Alert variant="error" title={t('ies.common.load_failed', { reason: projectError })} />
+        <Button variant="secondary" onClick={() => void refreshDetailed()}>
+          {t('ies.common.retry')}
+        </Button>
+      </div>
+    )
+  }
+
+  // 到此处项目主体已成功(projectLoading=false 且 projectError=null 蕴含
+  // project 非 null, 由 Provider 三态保证); 直接消费必填字段, 不加默认分支。
+  const proj = project as Project
+  /** 已绑定到项目草稿的版本 id 集合(权威来源: GET /projects/{id} draft.content.dataset_bindings)。 */
+  const boundVersionIds = new Set((proj.draft?.dataset_bindings ?? []).map((b) => b.dataset_version_id))
+
   if (loading && !datasets) {
     return (
       <div className="ies-page-placeholder">
@@ -1109,9 +1136,8 @@ export function DataPage() {
         <div>
           <h1 className="ies-page-title">{t('ies.data.title')}</h1>
           <p className="ies-page-subtitle">
-            {project ? `${project.name} · ` : ''}
-            {pt('ies.data.resolution')} 15/30/60 min · {pt('ies.data.calendar_note')} ·{' '}
-            {pt('ies.data.utc_offset')} {project ? formatUtcOffset(project.fixed_utc_offset_minutes) : '±14h'}
+            {`${proj.name} · `}
+            {pt('ies.data.resolution')} 15/30/60 min · {pt('ies.data.calendar_note')}
           </p>
         </div>
         <div className="ies-flex">
@@ -1229,16 +1255,17 @@ export function DataPage() {
         )}
       </Card>
 
+      {/* 上传表单既有初值(分钟); 项目不声明时区, 版本偏移以上传选择为准。 */}
       <UploadDialog
         projectId={pid}
-        defaultOffsetMinutes={project?.fixed_utc_offset_minutes ?? 480}
+        defaultOffsetMinutes={480}
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
         onUploaded={() => setRefreshTick((x) => x + 1)}
       />
       <SampleDialog
         projectId={pid}
-        defaultOffsetMinutes={project?.fixed_utc_offset_minutes ?? 480}
+        defaultOffsetMinutes={480}
         open={sampleOpen}
         onClose={() => setSampleOpen(false)}
         onUploaded={() => setRefreshTick((x) => x + 1)}
