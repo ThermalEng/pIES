@@ -1022,10 +1022,14 @@ export function DataPage({ projectId }: DataPageProps) {
     async function load() {
       setLoading(true)
       setLoadError(null)
+      // 新上下文/刷新即清旧表格与版本弹框目标: 旧 dataset/versions 不可再交互绑定;
+      // 失败态只剩错误+重试。成功排序/选择规则不变, 不新增状态。
+      setDatasets(null)
+      setVersions({})
+      setVersionsTarget(null)
       try {
         const page = await api.datasets.list(pid !== undefined ? { project_id: pid, limit: 100 } : { limit: 100 })
         if (cancelled) return
-        setDatasets(page.items)
         // 独立挂载时兜底拉取项目信息(工作台内 WorkbenchProvider 已持有)
         if (pid !== undefined && !wbProject) {
           api.projects
@@ -1035,18 +1039,17 @@ export function DataPage({ projectId }: DataPageProps) {
             })
             .catch(() => undefined)
         }
-        // 每个数据集拉取版本历史(最新版本含质量报告/溯源/许可证)
+        // 列表与全部版本同批发布: 任一版本读取失败即整组失败,
+        // 不用 []/旧版本/猜质量报告伪成功; 合法空 versions 仍正常发布。
         const entries = await Promise.all(
           page.items.map(async (ds) => {
-            try {
-              const vs = pid !== undefined ? await api.datasets.versions(pid, ds.id) : []
-              return [ds.id, vs] as const
-            } catch {
-              return [ds.id, [] as DatasetVersion[]] as const
-            }
+            const vs = pid !== undefined ? await api.datasets.versions(pid, ds.id) : []
+            return [ds.id, vs] as const
           }),
         )
-        if (!cancelled) setVersions(Object.fromEntries(entries))
+        if (cancelled) return
+        setDatasets(page.items)
+        setVersions(Object.fromEntries(entries))
       } catch (err) {
         if (!cancelled) setLoadError(errorMessage(err))
       } finally {
