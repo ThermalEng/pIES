@@ -47,7 +47,6 @@ import { pt } from '../i18n/pageMessages'
 import {
   HEADERS,
   RESOLUTION_OPTIONS,
-  csvTemplate,
   expectedRows,
   resolutionOption,
   syntheticCsv,
@@ -1091,12 +1090,12 @@ export function DataPage({ projectId }: DataPageProps) {
     try {
       const blob = await api.datasets.template()
       downloadBlob(blob, 'ies_data_template.csv')
-    } catch {
-      // 后端模板暂不可用:回退本地标准模板(表头 + 示例行)
-      downloadBlob(new Blob([csvTemplate()], { type: 'text/csv' }), 'ies_data_template.csv')
+      setNotice({ kind: 'success', text: pt('ies.data.template_downloaded') })
+    } catch (err) {
+      // 后端模板失败不得本地回退伪成功: 显错、不下载、不报成功, 可再点重试。
+      setNotice({ kind: 'error', text: errorMessage(err) })
     } finally {
       setTemplateBusy(false)
-      setNotice({ kind: 'success', text: pt('ies.data.template_downloaded') })
     }
   }
 
