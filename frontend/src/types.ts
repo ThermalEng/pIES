@@ -447,18 +447,6 @@ export interface DatasetFile {
   created_at: ISO8601
 }
 
-/** 数据预览(样本行,表头 + 行数据)。 */
-export interface DatasetSample {
-  headers: string[]
-  rows: unknown[][]
-  total_rows: number
-  /**
-   * 行级数据是否真实可用。后端暂无行预览端点时为 false,
-   * 此时 rows/total_rows 无意义, 界面不得将其渲染为空行表。
-   */
-  rows_available: boolean
-}
-
 export interface DatasetUploadInput {
   project_id?: EntityId
   name: string

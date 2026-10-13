@@ -33,7 +33,6 @@ import type {
   Currency,
   Dataset,
   DatasetField,
-  DatasetSample,
   DatasetUploadInput,
   DatasetVersion,
   Device,
@@ -1180,7 +1179,8 @@ export interface DatasetsApi {
    */
   uploadDetailed(input: DatasetUploadDetailedInput): Promise<DatasetVersion & { diagnostics?: Diagnostic[] }>
   versions(projectId: number, id: number): Promise<DatasetVersion[]>
-  sample(projectId: number, id: number): Promise<DatasetSample>
+  /** 最新版本字段名(行级预览无能力, 只返元数据, 不带行载体)。 */
+  versionFields(projectId: number, id: number): Promise<string[]>
   /**
    * 绑定数据集版本到项目草稿(dataset.bind 语义命令, 写入 draft.content.dataset_bindings)。
    * 绑定是校验 VALID-DATA-001 与任务数据输入的权威来源。
@@ -1560,18 +1560,13 @@ export const api = {
         asList<Record<string, unknown>>(body, 'versions').map(datasetVersionFromServer),
       )
     },
-    sample(projectId: number, id: number): Promise<DatasetSample> {
-      // 后端无数据行预览端点: 只取最新版本字段名作真实元数据表头,
-      // 行级数据标记为不可用, 不得伪造空行/零行数冒充真实空数据集。
+    versionFields(projectId: number, id: number): Promise<string[]> {
+      // 后端无数据行预览端点: 只返回最新版本真实字段名,
+      // 不设行/行数载体, 不得伪造空行冒充真实空数据集。
       return request<unknown>(`/projects/${projectId}/datasets/${id}`).then((body) => {
         const versions = asList<Record<string, unknown>>(body, 'versions')
         const latest = versions[0]
-        return {
-          headers: Object.keys(asRecord(latest?.fields ?? {})),
-          rows: [],
-          total_rows: 0,
-          rows_available: false,
-        }
+        return Object.keys(asRecord(latest?.fields ?? {}))
       })
     },
     bind(projectId: number, datasetVersionId: number, datasetId: number): Promise<{ revision: number }> {

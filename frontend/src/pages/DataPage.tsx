@@ -51,7 +51,7 @@ import {
   syntheticCsv,
 } from '../lib/datasetCsv'
 import { formatDateTime, formatPercent } from '../lib/format'
-import type { Dataset, DatasetSample, DatasetVersion, Diagnostic, Project } from '../types'
+import type { Dataset, DatasetVersion, Diagnostic, Project } from '../types'
 
 /** 支持的固定 UTC 偏移(分钟,整点,对齐数据库 CHECK -720..840)。 */
 const OFFSET_OPTIONS: readonly number[] = (() => {
@@ -918,22 +918,23 @@ function PreviewDialog({
   onClose: () => void
 }) {
   const { t } = useI18n()
-  const [sample, setSample] = useState<DatasetSample | null>(null)
+  /** 最新版本真实字段名(行级数据无能力, 不设行载体)。 */
+  const [fields, setFields] = useState<string[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open || !dataset) return
     let cancelled = false
-    setSample(null)
+    setFields(null)
     setError(null)
     if (projectId === undefined) {
       setError(pt('ies.data.sample_unavailable'))
       return
     }
     api.datasets
-      .sample(projectId, dataset.id)
-      .then((s) => {
-        if (!cancelled) setSample(s)
+      .versionFields(projectId, dataset.id)
+      .then((names) => {
+        if (!cancelled) setFields(names)
       })
       .catch((err) => {
         if (!cancelled) setError(errorMessage(err))
@@ -956,40 +957,15 @@ function PreviewDialog({
       }
     >
       {error ? <Alert variant="error">{error}</Alert> : null}
-      {!sample && !error ? <Spinner /> : null}
-      {sample && !sample.rows_available ? (
+      {!fields && !error ? <Spinner /> : null}
+      {fields ? (
         <>
           <Alert variant="info">{pt('ies.data.sample_unavailable')}</Alert>
-          {sample.headers.length > 0 ? (
+          {fields.length > 0 ? (
             <p className="ies-form-message">
-              {pt('ies.data.sample_fields')}: {sample.headers.join('、')}
+              {pt('ies.data.sample_fields')}: {fields.join('、')}
             </p>
           ) : null}
-        </>
-      ) : null}
-      {sample && sample.rows_available ? (
-        <>
-          <p className="ies-form-message">
-            {t('ies.data.row_count')}: {sample.total_rows}
-          </p>
-          <Table>
-            <THead>
-              <TR>
-                {sample.headers.map((h) => (
-                  <TH key={h}>{h}</TH>
-                ))}
-              </TR>
-            </THead>
-            <TBody>
-              {sample.rows.slice(0, 20).map((row, ri) => (
-                <TR key={ri}>
-                  {row.map((cell, ci) => (
-                    <TD key={ci}>{String(cell)}</TD>
-                  ))}
-                </TR>
-              ))}
-            </TBody>
-          </Table>
         </>
       ) : null}
     </Dialog>
