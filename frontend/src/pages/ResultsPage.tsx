@@ -497,24 +497,21 @@ export default function ResultsPage() {
     return idx >= 0 ? candidates[idx] : null
   }, [selectedCandidateId, candidates])
 
-  // 计算步序列按单位分组: 身份与单位取公开封存元数据, 不按设备类型
-  // 或旧字段名猜语义, 不把所有曲线标同一单位。
+  // 计算步序列按单位分组: 标签直接公开 instance/variable, 单位直接使用,
+  // 不留 series_id 备用显示与未知单位组掩盖缺件。
   const hourlyGroups = useMemo(() => {
-    if (!hourly) return [] as { unit: string | null; series: LineSeries[] }[]
+    if (!hourly) return [] as { unit: string; series: LineSeries[] }[]
     const palette = ['#0e5cad', '#b3261e', '#8a5a00', '#1e7d32', '#6a1b9a', '#00838f']
-    const groups = new Map<string, { unit: string | null; series: LineSeries[] }>()
+    const groups = new Map<string, { unit: string; series: LineSeries[] }>()
     let index = 0
     for (const meta of hourly.series) {
       const values = hourly.flows[meta.series_id]
       if (!values?.length) continue
-      const label = meta.instance_id && meta.variable_id
-        ? `${meta.instance_id}.${meta.variable_id}`
-        : meta.series_id
-      const key = meta.unit ?? ''
-      let group = groups.get(key)
+      const label = `${meta.instance_id}.${meta.variable_id}`
+      let group = groups.get(meta.unit)
       if (!group) {
         group = { unit: meta.unit, series: [] }
-        groups.set(key, group)
+        groups.set(meta.unit, group)
       }
       group.series.push({ key: meta.series_id, label, color: palette[index % palette.length], values })
       index += 1
@@ -957,12 +954,12 @@ export default function ResultsPage() {
               <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
                 {t('ies.result.hourly_note', { n: hourlyPointCount })}
               </p>
-              {hourlyGroups.map((group, gi) => (
-                <div className="ies-section" key={group.unit ?? `group-${gi}`}>
+              {hourlyGroups.map((group) => (
+                <div className="ies-section" key={group.unit}>
                   <LineChart
                     series={group.series}
-                    ariaLabel={group.unit ? `${t('ies.result.hourly_chart')} (${group.unit})` : t('ies.result.hourly_chart')}
-                    yLabel={group.unit ?? undefined}
+                    ariaLabel={`${t('ies.result.hourly_chart')} (${group.unit})`}
+                    yLabel={group.unit}
                     xLabel={t('ies.result.hourly_step_axis')}
                   />
                 </div>

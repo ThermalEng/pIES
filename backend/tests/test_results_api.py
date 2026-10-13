@@ -325,6 +325,14 @@ def _complete_task(db: Session, task_id: int, *, outcome: str) -> Any:
     return task
 
 
+#: 夹具序列的显式身份常量（随对象封存的测试数据，非名称反解）。
+_FIXTURE_SERIES_IDENTITY = {
+    "p_grid_buy": {"instance_id": "fixture-grid", "variable_id": "purchase"},
+    "p_grid_sell": {"instance_id": "fixture-grid", "variable_id": "sale"},
+    "soc": {"instance_id": "fixture-battery", "variable_id": "soc"},
+}
+
+
 def _store_hourly(db: Session, rows: int, fields: list[str] | None = None) -> int:
     """写入逐时结果对象(对象存储, 真实落盘), 返回 object_id。"""
     fields = fields or ["p_grid_buy", "p_grid_sell", "soc"]
@@ -337,7 +345,8 @@ def _store_hourly(db: Session, rows: int, fields: list[str] | None = None) -> in
         "fields": fields,
         "data": {f: data[f] for f in fields},
         "meta": {"resolution": "1h", "rows": rows,
-                 "units": {"p_grid_buy": "kW", "p_grid_sell": "kW", "soc": "%"}},
+                 "units": {"p_grid_buy": "kW", "p_grid_sell": "kW", "soc": "%"},
+                 "series": {f: dict(_FIXTURE_SERIES_IDENTITY[f]) for f in fields}},
     }
     obj = put_object(
         db, _canonical(doc).encode("utf-8"), "application/json", "eval_results",
@@ -881,13 +890,15 @@ def test_hourly_pagination(client: TestClient, db: Session) -> None:
     pid, task_id, _claim_ok, _pkg, _objs = _prepare_task_with_evidence(client, db, owner)
     url = f"/api/projects/{pid}/tasks/{task_id}/result/hourly"
 
-    # 1) 第一页: start=0 end=20 limit=8 → 8 行 + next_start 游标
+    # 1) 第一页: start=0 end=20 limit=8 → 8 行 + next_start 游标 + 封存身份
     resp = client.get(url, params={"field": "p_grid_buy", "start": 0, "end": 20, "limit": 8},
                       headers=_h(client, owner))
     assert resp.status_code == 200, resp.text
     page = resp.json()
     assert page["field"] == "p_grid_buy"
     assert page["unit"] == "kW"
+    assert page["instance_id"] == "fixture-grid"
+    assert page["variable_id"] == "purchase"
     assert page["start"] == 0 and page["end"] == 8
     assert page["values"] == [float(i % 100) for i in range(8)]
     assert page["next_start"] == 8
@@ -904,12 +915,15 @@ def test_hourly_pagination(client: TestClient, db: Session) -> None:
     assert len(tail["values"]) == 4
     assert tail["next_start"] is None
 
-    # 3) 越界: start 超出总行数 → 空页, 不报错
+    # 3) 越界: start 超出总行数 → 空页, 不报错, 身份单位与正常页一致
     resp = client.get(url, params={"field": "p_grid_buy", "start": 200, "limit": 10},
                       headers=_h(client, owner))
     page = resp.json()
     assert page["values"] == [] and page["next_start"] is None
     assert page["total_rows"] == 100
+    assert page["unit"] == "kW"
+    assert page["instance_id"] == "fixture-grid"
+    assert page["variable_id"] == "purchase"
 
     # 4) 缺省 end: 到末尾
     resp = client.get(url, params={"field": "p_grid_buy", "start": 95, "limit": 100},

@@ -457,9 +457,13 @@ def build_hourly_files(
     （``meta.series``），供读取 DTO 公开；键排序规范 JSON。
     本函数不解释求解列、不做长度/hash 复核；残缺即自然错误可见。
     （输入为冻结映射，判定用 ``Mapping`` 而非 ``dict``。）
+    无 ``series`` 键即未请求该输出（metrics-only），合法缺席；
+    键存在但集合为空即无可发布步变量，同样缺席；其余形态直接消费。
     """
-    series = outputs.get("series")
-    if not isinstance(series, Mapping) or not series:
+    if "series" not in outputs:
+        return {}
+    series = outputs["series"]
+    if not series:
         return {}
     data: dict[str, list[float]] = {}
     units: dict[str, str] = {}

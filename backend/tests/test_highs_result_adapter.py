@@ -557,16 +557,15 @@ def test_series_absent_without_solution_request() -> None:
 
 
 def test_legacy_bundle_without_step_series_fails() -> None:
-    """旧声明（无 step_series 键）直接协议失败，不回退、不忽略。"""
+    """旧声明（无 step_series 键）自然失败，不回退、不忽略、不另造校验器。"""
     raw = json.loads(_parameters().decode("utf-8"))
     del raw["step_series"]
     files = {
         PROBLEM_PATH: TINY_MPS.encode("utf-8"),
         PARAMETERS_PATH: (json.dumps(raw, sort_keys=True) + "\n").encode("utf-8"),
     }
-    with pytest.raises(ComputationUnavailableError) as exc_info:
+    with pytest.raises(KeyError):
         _adapt(files, _receipt(), SHIM_OPTIMAL.encode("utf-8"))
-    assert exc_info.value.reason == "result-protocol-failure"
 
 
 def test_series_unknown_column_fails() -> None:

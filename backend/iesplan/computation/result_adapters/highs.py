@@ -235,22 +235,8 @@ def _parameters(bundle: SolverBundle) -> dict[str, Any]:
     requested = doc.get("outputs")
     if not isinstance(requested, list):
         _fail("parameters.outputs 缺失或非法")
-    series = doc.get("step_series")
-    if not isinstance(series, list):
-        _fail("parameters.step_series 缺失或非法")
-    for entry in series:
-        if not isinstance(entry, dict):
-            _fail("parameters.step_series 条目非法")
-        for key in ("series_id", "instance_id", "variable_id", "unit"):
-            if not isinstance(entry.get(key), str) or not entry[key]:
-                _fail(f"parameters.step_series 条目缺 {key}")
-        columns = entry.get("columns")
-        if (
-            not isinstance(columns, list)
-            or not columns
-            or not all(isinstance(name, str) and name for name in columns)
-        ):
-            _fail("parameters.step_series 条目 columns 非法")
+    # 可发布步序列声明与配套生成器同源（缺键即旧包，自然失败，不另造校验器）。
+    series = doc["step_series"]
     components = doc.get("components")
     if not isinstance(components, dict):
         _fail("parameters.components 缺失或非法")
@@ -389,13 +375,14 @@ class HighsResultAdapter:
         names = _mps_column_names(problem_raw)
         if len(names) != len(solution["primals"]):
             _fail("MPS 变量数与 solution primal 个数不一致")
+        # 列名→下标一次构造，变量与序列两条取值路径共享，避免逐步线性搜索。
+        index_of = {name: i for i, name in enumerate(names)}
         variables: list[dict[str, object]] = []
         for name, unit in params["unit_map"].items():
             if not isinstance(name, str) or not isinstance(unit, str):
                 _fail("parameters.unit_map 键值须为字符串")
-            try:
-                index = names.index(name)
-            except ValueError:
+            index = index_of.get(name)
+            if index is None:
                 _fail(f"unit_map 变量不在 MPS 列中: {name!r}")
             try:
                 value = from_si(solution["primals"][index], unit)
@@ -466,9 +453,8 @@ class HighsResultAdapter:
                 unit = entry["unit"]
                 values: list[float] = []
                 for name in entry["columns"]:
-                    try:
-                        index = names.index(name)
-                    except ValueError:
+                    index = index_of.get(name)
+                    if index is None:
                         _fail(f"步序列 {entry['series_id']!r} 的列不在 MPS 列中: {name!r}")
                     try:
                         value = from_si(solution["primals"][index], unit)

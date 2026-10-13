@@ -19,6 +19,7 @@
 
 - Generator 在建变量同一路径形成 `step_series` 声明（序列身份＋按 step 顺序的显式求解列＋步数＋业务单位，无步变量为空数组）并写入 Bundle `parameters.json`；ResultAdapter 按声明用同次主解恢复业务单位序列到 `ComputeResult.outputs.series`（随 solution 发布，metrics-only 缺席；无声明旧 Bundle 直接协议失败）；application 将统一序列序列化为 hourly 对象并在提交同一事务内封存引用（含身份/单位元数据），`read_hourly` 公开实例与变量身份；前端删旧字段名猜测链，按公开身份/单位通用选取分组展示，计数与入图序列同源。内置 generator/adapter 升主版本到 2.0.0（组合根/精确引用/默认示例/相关规范与定向测试同步，无旧别名与回退）；ComputeResult 保持 2.0.0，CalculationConfig 未动。
 - 证据：Docker 后端定向——生成器声明测试（列真实存在于同次模型变量且单位同源）通过；adapter 4 项（逆序声明恢复、metrics-only 缺席、旧 Bundle 拒绝、未知列拒绝）通过；Worker 封存 3 项（声明→求解→对象→引用闭环一致且有非常恒序列、metrics-only 缺席、评估失败整笔回滚）通过；邻接 `TestSingleUnitSeal`＋逐时 API 回归 9 通过；适配层分页原 12 项保留。Docker 前端构建（tsc＋vite）通过；重建的浏览器用例 1 通过（同一真实 HiGHS 求解：引用身份/单位/行数、分段分页一致、图例与 API 身份一一对应、y 轴标题与 API 单位集合一致、步序号轴、无 168/小时旧文案）。此前 `hourly_refs` 为空的失败证据保留在 `docs/reviews/2026-10-13-0.14-hourly-gui-block.md`，不倒改当时事实。此项不代表 `0.14.0` 整体完成。
+- 2026-10-13 定向修正（待复审）：删前端旧协议并集/16 条静默截断（声明列表全量消费）与 `series_id`/未知单位组掩盖；删 adapter 逐项结构校验（缺键自然失败）并一次构造列下标共享两条取值路径；封存侧只分支“未请求/合法空”后直接消费，空窗口返回同一身份单位；API 夹具迁现行带元数据对象。证据：adapter＋provider 25 通过、封存类＋逐时 API 23 通过、17 序列消费回归 4 项通过、分页 12 项保留、前端构建通过、浏览器用例重跑 1 通过（含空窗口身份单位断言）。
 
 ### 2026-10-12 — `0.14.0` 计算步序列展示与分页消费收口 R5/R6（待复审）
 

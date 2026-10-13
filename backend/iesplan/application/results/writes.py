@@ -791,10 +791,17 @@ def read_hourly(
     total = len(values)
     start_i = max(int(start), 0)
     end_i = total if end is None else min(max(int(end), start_i), total)
+    # 身份与单位取对象内已封存元数据（与值同源），分支前统一读取，
+    # 空窗口（start>=total）同样返回同一身份和单位。
+    meta = doc["meta"]
+    unit = meta["units"][field]
+    identity = meta["series"][field]
     if start_i >= total:
         return {
             "field": field,
-            "unit": None,
+            "unit": unit,
+            "instance_id": identity["instance_id"],
+            "variable_id": identity["variable_id"],
             "start": start_i,
             "end": start_i,
             "values": [],
@@ -803,18 +810,11 @@ def read_hourly(
         }
     limit = max(1, min(int(limit), MAX_HOURLY_LIMIT))
     chunk_end = min(end_i, start_i + limit)
-    meta = doc.get("meta") or {}
-    units = meta.get("units") if isinstance(meta, dict) else None
-    unit = units.get(field) if isinstance(units, dict) else None
-    identities = meta.get("series") if isinstance(meta, dict) else None
-    identity = identities.get(field) if isinstance(identities, dict) else None
-    if not isinstance(identity, dict):
-        identity = {}
     return {
         "field": field,
         "unit": unit,
-        "instance_id": identity.get("instance_id"),
-        "variable_id": identity.get("variable_id"),
+        "instance_id": identity["instance_id"],
+        "variable_id": identity["variable_id"],
         "start": start_i,
         "end": chunk_end,
         "values": values[start_i:chunk_end],

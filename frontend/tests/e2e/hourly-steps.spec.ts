@@ -153,6 +153,21 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     }
     const full = await part(0, refs[0].rows)
     expect([...(await part(0, half)), ...(await part(half, refs[0].rows))]).toEqual(full)
+    // 空窗口(start>=total)同样返回同一身份和单位。
+    const emptyRes = await apiCtx.request.get(
+      `${APP}/api/projects/${pid}/tasks/${taskId}/result/hourly` +
+      `?field=${encodeURIComponent(metas[0].series_id)}&start=${refs[0].rows + 100}&limit=10`,
+      { headers: { Authorization: `Bearer ${userToken}` } },
+    )
+    expect(emptyRes.ok()).toBe(true)
+    const emptyBody = (await emptyRes.json()) as {
+      values: number[]; next_start: null; unit: string; instance_id: string; variable_id: string;
+    }
+    expect(emptyBody.values).toEqual([])
+    expect(emptyBody.next_start).toBe(null)
+    expect(emptyBody.unit).toBe(metas[0].unit)
+    expect(emptyBody.instance_id).toBe(metas[0].instance_id)
+    expect(emptyBody.variable_id).toBe(metas[0].variable_id)
 
     // GUI 被测显示。
     const context = await browser.newContext()
