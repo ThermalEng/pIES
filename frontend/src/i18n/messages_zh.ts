@@ -630,6 +630,7 @@ export const messagesZh: Record<string, string> = {
   'ies.result.assessment_history': '评估历史',
   'ies.result.assessment_history_note': '每次评估生成不可变记录,不会覆盖原记录',
   'ies.result.reassess': '重新评估',
+  'ies.result.export_need_assessment': '该结果尚无系统评估记录,Excel 导出不会自动创建评估。请先完成系统评估,再导出报告。',
   'ies.result.no_assessments': '尚无评估记录',
   'ies.result.assess_dialog_title': '结果评估',
   'ies.result.assess_run': '重新运行系统评估',

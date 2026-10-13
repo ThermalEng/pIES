@@ -126,6 +126,8 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   'ies.export.lang_en': 'English',
   'ies.export.excel_btn': '导出 Excel 报告',
   'ies.export.no_result': '暂无可用结果:请先在任务中心完成方案评价或规划任务,再导出报告',
+  'ies.export.need_assessment': '导出 Excel 需要该结果的系统评估记录,且导出不会自动创建评估。请先到结果分析完成系统评估,再回来导出。',
+  'ies.export.goto_results': '去结果分析',
   'ies.export.download_ok': '报告已生成,下载已开始:{filename}',
   'ies.export.package_ok': '项目包已生成,下载已开始:{filename}',
   'ies.export.export_failed': '导出失败:{reason}',
@@ -344,6 +346,9 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
   'ies.export.excel_btn': 'Export Excel report',
   'ies.export.no_result':
     'No result available: complete a calc or optimization task in Tasks first, then export the report',
+  'ies.export.need_assessment':
+    'Exporting Excel requires a system assessment record for this result, and export will not create one. Please complete a system assessment in Results first, then come back to export.',
+  'ies.export.goto_results': 'Go to Results',
   'ies.export.download_ok': 'Report generated; download started: {filename}',
   'ies.export.package_ok': 'Project package generated; download started: {filename}',
   'ies.export.export_failed': 'Export failed: {reason}.',

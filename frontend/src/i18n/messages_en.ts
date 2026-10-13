@@ -620,6 +620,7 @@ export const messagesEn: Record<string, string> = {
   'ies.result.assessment_history': 'Assessment history',
   'ies.result.assessment_history_note': 'Every assessment creates an immutable record; existing records are never overwritten.',
   'ies.result.reassess': 'Reassess',
+  'ies.result.export_need_assessment': 'This result has no system assessment record, and Excel export will not create one. Please complete a system assessment first, then export.',
   'ies.result.no_assessments': 'No assessment records yet',
   'ies.result.assess_dialog_title': 'Result assessment',
   'ies.result.assess_run': 'Rerun system assessment',

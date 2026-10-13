@@ -1033,31 +1033,24 @@ async function sendDraftCommand(
   return { revision: Number(body.revision ?? expectedRevision) }
 }
 
-/** 解析证据包的最新评估 id(Excel 导出需要; 缓存未命中时按需回退:先取最新评估列表,若空则触发一次 full 评估)。 */
+/** 解析证据包的最新评估 id(Excel 导出需要)。无既有评估即抛缺评估业务错，
+ * 不隐式触发 full 评估；真实接口/网络错误直接透传，不伪装成无评估。 */
 async function resolveAssessmentId(projectId: number, evidencePackageId: number): Promise<number> {
   const cached = pkgAssessmentCache.get(evidencePackageId)
   if (cached !== undefined && cached > 0) return cached
   const taskId = pkgTaskCache.get(evidencePackageId)
-  if (taskId !== undefined) {
-    try {
-      const body = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`)
-      const items = asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer)
-      for (const a of items) pkgAssessmentCache.set(a.evidence_package_id, a.id)
-      const latest = items[0]
-      if (latest) return latest.id
-      // 评估列表为空:主动触发一次 full 评估(后端 run_assessment 创建新记录)
-      const assess = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assess`, {
-        method: 'POST',
-        body: { assessment_type: 'full' },
-      })
-      const created = assessmentFromServer(asRecord(oneOf<Record<string, unknown>>(assess, 'assessment')))
-      pkgAssessmentCache.set(created.evidence_package_id, created.id)
-      return created.id
-    } catch {
-      // 评估接口不可用:走"无 assessment_id"兼容路径(由后端 fallback 处理)
-    }
-  }
+  if (taskId === undefined) throw new ApiError(404, null, 'ies.error.no_assessment_available')
+  const body = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`)
+  const items = asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer)
+  for (const a of items) pkgAssessmentCache.set(a.evidence_package_id, a.id)
+  const latest = items[0]
+  if (latest) return latest.id
   throw new ApiError(404, null, 'ies.error.no_assessment_available')
+}
+
+/** 是否为 Excel 导出缺评估的业务信号(调用方据此引导用户先完成系统评估)。 */
+export function isNoAssessmentError(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.message_key === 'ies.error.no_assessment_available'
 }
 
 // ---------------------------------------------------------------------------

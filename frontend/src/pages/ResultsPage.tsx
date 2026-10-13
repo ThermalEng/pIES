@@ -23,7 +23,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api, downloadBlob } from '../api/client'
+import { api, downloadBlob, isNoAssessmentError } from '../api/client'
 import type { HourlySeriesMeta } from '../api/client'
 import { translate, translateError, useI18n } from '../i18n'
 import type { Locale } from '../i18n'
@@ -252,6 +252,8 @@ export default function ResultsPage() {
   const [exportBusy, setExportBusy] = useState<'excel' | 'package' | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
   const [exportOk, setExportOk] = useState(false)
+  /** 导出缺评估引导(无既有评估时置 true, 不隐式创建评估)。 */
+  const [exportNeedsAssess, setExportNeedsAssess] = useState(false)
 
   // -------------------------------------------------------------------------
   // 证据包收集(完成任务 -> 详情 -> evidence)
@@ -731,10 +733,12 @@ export default function ResultsPage() {
     if (!selectedPkgId) return
     setExportError(null)
     setExportOk(false)
+    setExportNeedsAssess(false)
     setExportBusy('excel')
     try {
       // 评估缓存已由选中包加载效应填充(pkgAssessmentCache);
-      // 若评估历史为空,api.exports.excel → resolveAssessmentId 内部会主动触发 full 评估。
+      // 若无既有评估, excel 直接抛缺评估业务错并由导出区引导用户先完成
+      // 系统评估, 不隐式创建评估。
       const input: ExcelExportInput = {
         project_id: projectId,
         evidence_package_id: selectedPkgId,
@@ -747,7 +751,11 @@ export default function ResultsPage() {
       downloadBlob(blob, filename)
       setExportOk(true)
     } catch (err) {
-      setExportError(translateError(err as ApiError))
+      if (isNoAssessmentError(err)) {
+        setExportNeedsAssess(true)
+      } else {
+        setExportError(translateError(err as ApiError))
+      }
     } finally {
       setExportBusy(null)
     }
@@ -1314,6 +1322,16 @@ export default function ResultsPage() {
           {exportError ? (
             <div style={{ marginTop: 'var(--ies-space-3)' }}>
               <Alert variant="error">{exportError}</Alert>
+            </div>
+          ) : null}
+          {exportNeedsAssess ? (
+            <div style={{ marginTop: 'var(--ies-space-3)' }}>
+              <Alert variant="warning">{t('ies.result.export_need_assessment')}</Alert>
+              <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                <Button variant="secondary" onClick={() => setAssessOpen(true)}>
+                  {t('ies.result.reassess')}
+                </Button>
+              </div>
             </div>
           ) : null}
           {exportOk ? (

@@ -14,8 +14,9 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 
-import { api, downloadBlob } from '../api/client'
+import { api, downloadBlob, isNoAssessmentError } from '../api/client'
 import { Alert, Button, Card, FormField, Select, Spinner } from '../components/ui'
 import { translateError, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
@@ -59,6 +60,8 @@ export default function ExportPage() {
   const [resolveNonce, setResolveNonce] = useState(0)
 
   const [exportError, setExportError] = useState<string | null>(null)
+  /** 导出缺评估引导(无既有评估时置 true, 不隐式创建评估)。 */
+  const [exportNeedsAssess, setExportNeedsAssess] = useState(false)
   /** 当前进行中的导出动作(excel / package / null)。 */
   const [exportBusy, setExportBusy] = useState<'excel' | 'package' | null>(null)
   const [okMsg, setOkMsg] = useState<string | null>(null)
@@ -99,9 +102,12 @@ export default function ExportPage() {
     if (evidence === null || evidence === undefined) return
     setExportError(null)
     setOkMsg(null)
+    setExportNeedsAssess(false)
     setExportBusy('excel')
     try {
-      // lang 为契约字段(缺省 zh 由适配层按后端约定补齐)
+      // lang 为契约字段(缺省 zh 由适配层按后端约定补齐)。
+      // 若无既有评估, excel 直接抛缺评估业务错并由本页引导用户先完成
+      // 系统评估, 不隐式创建评估。
       const input: ExcelExportInput = {
         project_id: projectId,
         evidence_package_id: evidence,
@@ -114,7 +120,11 @@ export default function ExportPage() {
       downloadBlob(blob, filename)
       setOkMsg(pt('ies.export.download_ok', { filename }))
     } catch (err) {
-      setExportError(translateError(err as ApiError))
+      if (isNoAssessmentError(err)) {
+        setExportNeedsAssess(true)
+      } else {
+        setExportError(translateError(err as ApiError))
+      }
     } finally {
       setExportBusy(null)
     }
@@ -174,6 +184,16 @@ export default function ExportPage() {
           <Alert variant="error">{resolveError}</Alert>
           <div style={{ marginTop: 'var(--ies-space-2)' }}>
             <Button onClick={() => setResolveNonce((n) => n + 1)}>{pt('ies.common.retry')}</Button>
+          </div>
+        </div>
+      ) : null}
+      {exportNeedsAssess ? (
+        <div className="ies-section">
+          <Alert variant="warning">{pt('ies.export.need_assessment')}</Alert>
+          <div style={{ marginTop: 'var(--ies-space-2)' }}>
+            <Link className="ies-btn ies-btn--secondary ies-btn--md" to={`/projects/${projectId}/results`}>
+              {pt('ies.export.goto_results')}
+            </Link>
           </div>
         </div>
       ) : null}
