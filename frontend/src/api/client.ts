@@ -1170,7 +1170,7 @@ export interface DatasetUploadDetailedInput extends DatasetUploadInput {
 }
 
 export interface DatasetsApi {
-  list(params: { project_id?: number; status?: string; cursor?: string; limit?: number }): Promise<PageResult<Dataset>>
+  list(params: { project_id: number; status?: string; cursor?: string; limit?: number }): Promise<PageResult<Dataset>>
   template(): Promise<Blob>
   upload(input: DatasetUploadInput): Promise<DatasetVersion>
   /**
@@ -1533,12 +1533,10 @@ export const api = {
   } satisfies ModelApi,
 
   datasets: {
-    list(params?: { project_id?: number; status?: string; cursor?: string; limit?: number }): Promise<PageResult<Dataset>> {
-      const projectId = params?.project_id
-      if (projectId === undefined || projectId === null) {
-        // 后端数据集按项目挂载(/api/projects/{pid}/datasets); 无项目上下文时返回空页
-        return Promise.resolve({ items: [], next_cursor: null, limit: 0 })
-      }
+    list(params: { project_id: number; status?: string; cursor?: string; limit?: number }): Promise<PageResult<Dataset>> {
+      // 数据集按项目挂载(/api/projects/{pid}/datasets); 项目 ID 必填,
+      // 直接调用公开接口, 不做无项目空页伪成功, 不复核 ID。
+      const projectId = params.project_id
       return request<unknown>(`/projects/${projectId}/datasets`).then((body) => {
         // 后端返回 {datasets: [{dataset, latest_version}]}: 解包 dataset 为行
         const entries = asList<Record<string, unknown>>(body, 'datasets')

@@ -7,15 +7,14 @@
  *   后端返回质量报告与诊断列表(阻断/警告分级,经 location 定位到字段/行);
  *   阻断性错误未修复时版本不可绑定计算;
  * - 内置样例数据:客户端生成 365 天非闰年合成 CSV,走同一上传管线;
- * - 模板下载:后端模板接口,不可用时回退本地标准模板;
+ * - 模板下载:后端模板接口,失败显错不回退;
  * - 版本历史与质量报告详情、数据预览。
  *
- * 挂载方式:路由 /projects/:id/data 由 useParams 取项目 id;
- * 也可由工作台以 <DataPage projectId={id} /> 方式嵌入。
+ * 挂载方式:仅工作台嵌套路由 /projects/:id/data, 项目 ID 唯一取自
+ * useWorkbench().projectId, 无独立挂载入口。
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
 import { canSubmitScan, createHeadScan, nextScanStatus } from './uploadHeadScan'
 import type { HeadScanStatus } from './uploadHeadScan'
 
@@ -52,11 +51,7 @@ import {
   syntheticCsv,
 } from '../lib/datasetCsv'
 import { formatDateTime, formatPercent } from '../lib/format'
-import type { Dataset, DatasetSample, DatasetVersion, Diagnostic, Project } from '../types'
-
-export interface DataPageProps {
-  projectId?: number
-}
+import type { Dataset, DatasetSample, DatasetVersion, Diagnostic } from '../types'
 
 /** 支持的固定 UTC 偏移(分钟,整点,对齐数据库 CHECK -720..840)。 */
 const OFFSET_OPTIONS: readonly number[] = (() => {
@@ -995,14 +990,10 @@ function PreviewDialog({
 // 页面主体
 // ---------------------------------------------------------------------------
 
-export function DataPage({ projectId }: DataPageProps) {
-  const { id } = useParams()
-  const pid = projectId ?? (id !== undefined && Number.isFinite(Number(id)) ? Number(id) : undefined)
+export function DataPage() {
+  // 唯一项目 ID 来自工作台上下文(路由 /projects/:id 持有者); 无独立挂载。
+  const { projectId: pid, project } = useWorkbench()
   const { t } = useI18n()
-  // 工作台内已由 WorkbenchProvider 拉取项目;独立挂载(无上下文)时本地兜底
-  const wbProject = useWorkbench().project
-  const [fallbackProject, setFallbackProject] = useState<Project | null>(null)
-  const project = wbProject ?? fallbackProject
 
   const [datasets, setDatasets] = useState<Dataset[] | null>(null)
   const [versions, setVersions] = useState<Record<number, DatasetVersion[]>>({})
@@ -1028,22 +1019,13 @@ export function DataPage({ projectId }: DataPageProps) {
       setVersions({})
       setVersionsTarget(null)
       try {
-        const page = await api.datasets.list(pid !== undefined ? { project_id: pid, limit: 100 } : { limit: 100 })
+        const page = await api.datasets.list({ project_id: pid, limit: 100 })
         if (cancelled) return
-        // 独立挂载时兜底拉取项目信息(工作台内 WorkbenchProvider 已持有)
-        if (pid !== undefined && !wbProject) {
-          api.projects
-            .get(pid)
-            .then((p) => {
-              if (!cancelled) setFallbackProject(p)
-            })
-            .catch(() => undefined)
-        }
         // 列表与全部版本同批发布: 任一版本读取失败即整组失败,
         // 不用 []/旧版本/猜质量报告伪成功; 合法空 versions 仍正常发布。
         const entries = await Promise.all(
           page.items.map(async (ds) => {
-            const vs = pid !== undefined ? await api.datasets.versions(pid, ds.id) : []
+            const vs = await api.datasets.versions(pid, ds.id)
             return [ds.id, vs] as const
           }),
         )
