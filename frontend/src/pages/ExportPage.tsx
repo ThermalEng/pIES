@@ -191,7 +191,10 @@ export default function ExportPage() {
         <div className="ies-section">
           <Alert variant="warning">{pt('ies.export.need_assessment')}</Alert>
           <div style={{ marginTop: 'var(--ies-space-2)' }}>
-            <Link className="ies-btn ies-btn--secondary ies-btn--md" to={`/projects/${projectId}/results`}>
+            <Link
+              className="ies-btn ies-btn--secondary ies-btn--md"
+              to={evidence == null ? `/projects/${projectId}/results` : `/projects/${projectId}/results?package=${evidence}`}
+            >
               {pt('ies.export.goto_results')}
             </Link>
           </div>

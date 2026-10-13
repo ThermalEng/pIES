@@ -93,9 +93,9 @@ async function scaffoldSolvedBase(
 test.describe('R7: 导出先评估再导出', () => {
   test.setTimeout(900_000)
 
-  test('A: 结果页导出引用既有最新评估、不新建', async ({ browser }) => {
+  test('A: 显式重评估后导出引用最新、不额外新建', async ({ browser }) => {
     const projectName = uniqueName('R7导出A项目')
-    const { soloCtx, soloUser, soloPass, soloToken, soloPid } = await scaffoldSolvedBase(browser, 'a', projectName)
+    const { soloCtx, soloUser, soloPass, soloPid } = await scaffoldSolvedBase(browser, 'a', projectName)
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
@@ -107,18 +107,33 @@ test.describe('R7: 导出先评估再导出', () => {
     await waitCompleted(page)
     await openResults(page)
 
-    // 导出成功, 且全程无 assessment POST(引用既有, 不新建)。
+    // 先用现有 UI 显式重新评估(这是唯一的 assessment POST 来源)。
+    const historyCard = page.locator('section.ies-card').filter({
+      has: page.getByRole('heading', { name: '评估历史', exact: true }),
+    })
+    await historyCard.getByRole('button', { name: '重新评估', exact: true }).click({ timeout: 30_000 })
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible({ timeout: 30_000 })
+    await dialog.getByRole('button', { name: /重新运行系统评估|Re-run/i }).click({ timeout: 30_000 })
+    // 显式创建成功以历史新增条目为准(成功提示随确认框关闭, 不可见;
+    // Worker 提交 1 条＋本次显式 1 条)。
+    await expect(historyCard.locator('.ies-assess-item')).toHaveCount(2, { timeout: 60_000 })
+    const assessPosts = posts.filter((p) => p.url.includes('/result/assess'))
+    expect(assessPosts.length).toBe(1)
+
+    // 再导出: 导出不再额外 POST 创建评估, 下载成功。
     const exportCard = page.locator('section.ies-card').filter({
       has: page.getByRole('heading', { name: '导出', exact: true }),
     })
+    const mark = posts.length
     const downloadPromise = page.waitForEvent('download', { timeout: 120_000 })
     await exportCard.getByRole('button', { name: '导出 Excel', exact: true }).click({ timeout: 30_000 })
     const download = await downloadPromise
     expect(download.suggestedFilename()).toMatch(/\.xlsx$/)
-    expect(posts.filter((p) => p.url.includes('/result/assess'))).toEqual([])
+    expect(posts.slice(mark).filter((p) => p.url.includes('/result/assess'))).toEqual([])
     expect(await exportCard.getByText(/尚无系统评估记录/).count()).toBe(0)
 
-    // Excel 请求携带评估历史最新一条 id。
+    // Excel 请求携带该证据包最新评估列表第一项(即刚显式创建的一条)。
     const excelPosts = posts.filter((p) => p.url.includes('/exports/excel'))
     expect(excelPosts.length).toBe(1)
     const sentAssessmentId = (JSON.parse(excelPosts[0].body) as { assessment_id: number }).assessment_id
@@ -130,8 +145,10 @@ test.describe('R7: 导出先评估再导出', () => {
     const assessments = await requestJson(
       soloCtx.request, 'GET', `/api/projects/${soloPid}/tasks/${taskId}/result/assessments`, undefined, soloToken2,
     )
-    const latestId: number = (assessments.items ?? [])[0]?.id
-    expect(latestId).toBe(sentAssessmentId)
+    const items = (assessments.items ?? []) as Array<{ id: number }>
+    // Worker 提交写 1 条＋显式重评估 1 条, 最新第一项即显式创建。
+    expect(items.length).toBe(2)
+    expect(items[0].id).toBe(sentAssessmentId)
 
     await soloCtx.close()
     session.assertNoErrors()

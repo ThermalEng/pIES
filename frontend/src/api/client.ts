@@ -979,8 +979,7 @@ function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
 /** 证据包 id → 任务 id(由任务详情填充; 结果/导出 API 以任务为路由键)。 */
 const pkgTaskCache = new Map<number, number>()
 
-/** 证据包 id → 最新评估 id(由评估历史填充; Excel 导出需要 assessment_id)。 */
-const pkgAssessmentCache = new Map<number, number>()
+
 
 /** 任务 → 结果视图原始响应缓存(hourly 复用 result 的同一次 GET, 避免重复往返)。 */
 const resultBodyCache = new Map<string, Record<string, unknown>>()
@@ -1033,16 +1032,14 @@ async function sendDraftCommand(
   return { revision: Number(body.revision ?? expectedRevision) }
 }
 
-/** 解析证据包的最新评估 id(Excel 导出需要)。无既有评估即抛缺评估业务错，
- * 不隐式触发 full 评估；真实接口/网络错误直接透传，不伪装成无评估。 */
+/** 解析证据包所属任务评估历史的最新评估 id(Excel 导出需要)。每次读取真实
+ * 列表，不用内存缓存（避免显式重评估后导出仍引用旧评估）。无既有评估即抛
+ * 缺评估业务错，不隐式触发 full 评估；真实接口/网络错误直接透传，不伪装成无评估。 */
 async function resolveAssessmentId(projectId: number, evidencePackageId: number): Promise<number> {
-  const cached = pkgAssessmentCache.get(evidencePackageId)
-  if (cached !== undefined && cached > 0) return cached
   const taskId = pkgTaskCache.get(evidencePackageId)
   if (taskId === undefined) throw new ApiError(404, null, 'ies.error.no_assessment_available')
   const body = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`)
   const items = asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer)
-  for (const a of items) pkgAssessmentCache.set(a.evidence_package_id, a.id)
   const latest = items[0]
   if (latest) return latest.id
   throw new ApiError(404, null, 'ies.error.no_assessment_available')
@@ -1750,11 +1747,9 @@ export const api = {
       })
     },
     assessments(projectId: number, taskId: number): Promise<ResultAssessment[]> {
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`).then((body) => {
-        const items = asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer)
-        for (const a of items) pkgAssessmentCache.set(a.evidence_package_id, a.id)
-        return items
-      })
+      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`).then((body) =>
+        asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer),
+      )
     },
     assess(projectId: number, taskId: number, assessmentType: 'full' | 'physical' | 'optimality' | 'financial' | 'reliability' = 'full'): Promise<ResultAssessment> {
       // 后端 assess 为「触发系统四维检查」(assessment_type), 不接收人工评分输入

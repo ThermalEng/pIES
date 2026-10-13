@@ -736,9 +736,8 @@ export default function ResultsPage() {
     setExportNeedsAssess(false)
     setExportBusy('excel')
     try {
-      // 评估缓存已由选中包加载效应填充(pkgAssessmentCache);
       // 若无既有评估, excel 直接抛缺评估业务错并由导出区引导用户先完成
-      // 系统评估, 不隐式创建评估。
+      // 系统评估, 不隐式创建评估。评估历史每次真实读取，不用内存缓存。
       const input: ExcelExportInput = {
         project_id: projectId,
         evidence_package_id: selectedPkgId,
