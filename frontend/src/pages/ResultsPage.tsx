@@ -24,6 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api, downloadBlob } from '../api/client'
+import type { HourlySeriesMeta } from '../api/client'
 import { translate, translateDiagnostic, translateError, useI18n } from '../i18n'
 import type { Locale } from '../i18n'
 import {
@@ -193,7 +194,7 @@ export default function ResultsPage() {
   const [noEvidence, setNoEvidence] = useState(false)
   const [resultDiag, setResultDiag] = useState<Diagnostic[]>([])
   const [assessments, setAssessments] = useState<ResultAssessment[]>([])
-  const [hourly, setHourly] = useState<{ flows: Record<string, number[]> } | null>(null)
+  const [hourly, setHourly] = useState<{ flows: Record<string, number[]>; series: HourlySeriesMeta[] } | null>(null)
   const [resultError, setResultError] = useState<string | null>(null)
 
   // 真实候选列表/规划解/快照引用(随选中证据包加载, 不按指标键反解)
@@ -496,35 +497,41 @@ export default function ResultsPage() {
     return idx >= 0 ? candidates[idx] : null
   }, [selectedCandidateId, candidates])
 
-  // 计算步序列展示计数: 取自实际取得的各字段数据点数(非硬编码)。
-  const hourlyPointCount = useMemo(() => {
-    if (!hourly) return 0
-    let max = 0
-    for (const v of Object.values(hourly.flows)) {
-      if (v.length > max) max = v.length
+  // 计算步序列按单位分组: 身份与单位取公开封存元数据, 不按设备类型
+  // 或旧字段名猜语义, 不把所有曲线标同一单位。
+  const hourlyGroups = useMemo(() => {
+    if (!hourly) return [] as { unit: string | null; series: LineSeries[] }[]
+    const palette = ['#0e5cad', '#b3261e', '#8a5a00', '#1e7d32', '#6a1b9a', '#00838f']
+    const groups = new Map<string, { unit: string | null; series: LineSeries[] }>()
+    let index = 0
+    for (const meta of hourly.series) {
+      const values = hourly.flows[meta.series_id]
+      if (!values?.length) continue
+      const label = meta.instance_id && meta.variable_id
+        ? `${meta.instance_id}.${meta.variable_id}`
+        : meta.series_id
+      const key = meta.unit ?? ''
+      let group = groups.get(key)
+      if (!group) {
+        group = { unit: meta.unit, series: [] }
+        groups.set(key, group)
+      }
+      group.series.push({ key: meta.series_id, label, color: palette[index % palette.length], values })
+      index += 1
     }
-    return max
+    return [...groups.values()]
   }, [hourly])
 
-  // 计算步序列(横轴为步序号, 非小时)
-  const hourlySeries = useMemo(() => {
-    if (!hourly) return { power: [] as LineSeries[], soc: [] as LineSeries[] }
-    const f = hourly.flows
-    const power: LineSeries[] = []
-    const buy = f['p_grid_buy'] ?? f['grid_buy']
-    const sell = f['p_grid_sell'] ?? f['grid_sell']
-    const load = f['e_load'] ?? f['electric_load']
-    const pv = f['p_pv'] ?? f['pv']
-    if (buy?.length) power.push({ key: 'buy', label: t('ies.result.series_grid_buy'), color: '#0e5cad', values: buy })
-    if (load?.length) power.push({ key: 'load', label: t('ies.result.series_load'), color: '#b3261e', values: load })
-    if (pv?.length) power.push({ key: 'pv', label: t('ies.result.series_pv'), color: '#8a5a00', values: pv })
-    if (sell?.length) power.push({ key: 'sell', label: t('ies.result.series_grid_sell'), color: '#1e7d32', values: sell })
-    const soc = f['soc']
-    return {
-      power,
-      soc: soc?.length ? [{ key: 'soc', label: t('ies.result.series_soc'), color: '#0e5cad', values: soc }] : [],
+  // 展示计数与入图序列同源(非硬编码, 不含未入图字段)。
+  const hourlyPointCount = useMemo(() => {
+    let max = 0
+    for (const group of hourlyGroups) {
+      for (const s of group.series) {
+        if (s.values.length > max) max = s.values.length
+      }
     }
-  }, [hourly, t])
+    return max
+  }, [hourlyGroups])
 
   // -------------------------------------------------------------------------
   // 动作
@@ -944,30 +951,22 @@ export default function ResultsPage() {
             ) : null}
           </Card>
 
-          {/* 计算步序列(横轴为步序号) */}
-          {hourlySeries.power.length > 0 || hourlySeries.soc.length > 0 ? (
+          {/* 计算步序列(横轴为步序号, 按单位分组) */}
+          {hourlyGroups.length > 0 ? (
             <Card title={t('ies.result.hourly_chart')} className="ies-section">
               <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
                 {t('ies.result.hourly_note', { n: hourlyPointCount })}
               </p>
-              {hourlySeries.power.length > 0 ? (
-                <div className="ies-section">
+              {hourlyGroups.map((group, gi) => (
+                <div className="ies-section" key={group.unit ?? `group-${gi}`}>
                   <LineChart
-                    series={hourlySeries.power}
-                    ariaLabel={t('ies.result.hourly_chart')}
-                    yLabel={t('ies.unit.kw')}
+                    series={group.series}
+                    ariaLabel={group.unit ? `${t('ies.result.hourly_chart')} (${group.unit})` : t('ies.result.hourly_chart')}
+                    yLabel={group.unit ?? undefined}
                     xLabel={t('ies.result.hourly_step_axis')}
                   />
                 </div>
-              ) : null}
-              {hourlySeries.soc.length > 0 ? (
-                <LineChart
-                  series={hourlySeries.soc}
-                  ariaLabel={t('ies.result.series_soc')}
-                  yLabel={t('ies.result.series_soc')}
-                  xLabel={t('ies.result.hourly_step_axis')}
-                />
-              ) : null}
+              ))}
             </Card>
           ) : null}
 

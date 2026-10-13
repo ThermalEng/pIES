@@ -15,6 +15,11 @@
 
 ## Unreleased
 
+### 2026-10-13 — `0.14.0` 求解步序列发布与封存闭环 R5/R6（待复审）
+
+- Generator 在建变量同一路径形成 `step_series` 声明（序列身份＋按 step 顺序的显式求解列＋步数＋业务单位，无步变量为空数组）并写入 Bundle `parameters.json`；ResultAdapter 按声明用同次主解恢复业务单位序列到 `ComputeResult.outputs.series`（随 solution 发布，metrics-only 缺席；无声明旧 Bundle 直接协议失败）；application 将统一序列序列化为 hourly 对象并在提交同一事务内封存引用（含身份/单位元数据），`read_hourly` 公开实例与变量身份；前端删旧字段名猜测链，按公开身份/单位通用选取分组展示，计数与入图序列同源。内置 generator/adapter 升主版本到 2.0.0（组合根/精确引用/默认示例/相关规范与定向测试同步，无旧别名与回退）；ComputeResult 保持 2.0.0，CalculationConfig 未动。
+- 证据：Docker 后端定向——生成器声明测试（列真实存在于同次模型变量且单位同源）通过；adapter 4 项（逆序声明恢复、metrics-only 缺席、旧 Bundle 拒绝、未知列拒绝）通过；Worker 封存 3 项（声明→求解→对象→引用闭环一致且有非常恒序列、metrics-only 缺席、评估失败整笔回滚）通过；邻接 `TestSingleUnitSeal`＋逐时 API 回归 9 通过；适配层分页原 12 项保留。Docker 前端构建（tsc＋vite）通过；重建的浏览器用例 1 通过（同一真实 HiGHS 求解：引用身份/单位/行数、分段分页一致、图例与 API 身份一一对应、y 轴标题与 API 单位集合一致、步序号轴、无 168/小时旧文案）。此前 `hourly_refs` 为空的失败证据保留在 `docs/reviews/2026-10-13-0.14-hourly-gui-block.md`，不倒改当时事实。此项不代表 `0.14.0` 整体完成。
+
 ### 2026-10-12 — `0.14.0` 计算步序列展示与分页消费收口 R5/R6（待复审）
 
 - 删除无权威的 `resolution: ''` 伪造值及前端相应类型声明（`api.results.hourly` 现只返回 `{ flows }`）；文案与横轴改按计算步序号展示（标题“计算步曲线”、轴标题“计算步/step”、刻度去掉 `H` 前缀）；展示计数取自实际取得的数据点数，不再硬编码 168；单字段超后端 `MAX_HOURLY_LIMIT=50000` 时按公开 `next_start` 分页读到 null 为止并拼接。抽稀策略与求解序列未动；单字段吞错与页面空态留 R3 后续片。

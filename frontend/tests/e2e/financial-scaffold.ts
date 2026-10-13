@@ -139,7 +139,7 @@ export async function scaffoldProject(
       id: 'e2e-calc', unit: 'config', type: 'config.patch',
       payload: {
         mode: 'fixed_operation',
-        generator: 'ies.generator.highs_milp@1.0.0',
+        generator: 'ies.generator.highs_milp@2.0.0',
         solver: 'ies.solver.highs@1.7.2',
         time_axis: { resolution: '1h', start: '2025-01-01T00:00:00Z' },
       },
@@ -227,7 +227,7 @@ export async function scaffoldProject(
       schema_version: '1.0.0',
       mode: 'planning',
       predictions: [],
-      generator: 'ies.generator.highs_milp@1.0.0',
+      generator: 'ies.generator.highs_milp@2.0.0',
       solver: 'ies.solver.highs@1.7.2',
       precision: 'medium',
       convergence: null,

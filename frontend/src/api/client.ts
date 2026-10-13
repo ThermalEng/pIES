@@ -1220,6 +1220,14 @@ export interface TasksApi {
   retry(projectId: number, taskId: number): Promise<Task>
 }
 
+/** 逐时序列公开身份(与值同源的封存元数据, 不猜语义)。 */
+export interface HourlySeriesMeta {
+  series_id: string
+  instance_id: string | null
+  variable_id: string | null
+  unit: string | null
+}
+
 export interface ResultsApi {
   result(projectId: number, taskId: number): Promise<{
     evidence_package_id: number
@@ -1240,7 +1248,7 @@ export interface ResultsApi {
     assessmentType: 'full' | 'physical' | 'optimality' | 'financial' | 'reliability',
   ): Promise<ResultAssessment>
   select(projectId: number, taskId: number, input: { result_index_id: number; reason?: string }): Promise<ResultSelection>
-  hourly(projectId: number, taskId: number): Promise<{ flows: Record<string, number[]> }>
+  hourly(projectId: number, taskId: number): Promise<{ flows: Record<string, number[]>; series: HourlySeriesMeta[] }>
 }
 
 export interface ExportsApi {
@@ -1783,10 +1791,12 @@ export const api = {
         }
       })
     },
-    hourly(projectId: number, taskId: number): Promise<{ flows: Record<string, number[]> }> {
+    hourly(projectId: number, taskId: number): Promise<{ flows: Record<string, number[]>; series: HourlySeriesMeta[] }> {
       // 后端 hourly 为单字段分页查询(需 field 参数): 先取结果视图的 hourly_refs
-      // 字段清单, 再并行拉取各字段完整序列组装 flows。单字段超过后端
+      // 公开序列身份清单, 再并行拉取各序列完整值组装 flows。单序列超过后端
       // MAX_HOURLY_LIMIT 时按公开 next_start 分页读到 null 为止(见 hourlyPages)。
+      // 身份与单位取引用内已封存元数据(与值同源, 不读当前项目, 不猜语义);
+      // 无身份元数据的遗留引用以序列 ID 展示、单位取读取响应。
       // 结果视图复用 result() 已拉取的缓存(避免同一次选中重复 GET 同一端点)。
       const cacheKey = `${projectId}:${taskId}`
       const pending = resultBodyCache.get(cacheKey)
@@ -1803,11 +1813,28 @@ export const api = {
         // 无证据包/无逐时引用是显式状态(后端 evidence_status/no_hourly_refs),
         // 不再静默返回空 flows 掩盖失败。
         if (!ref) throw new ApiError(404, null, 'ies.error.no_hourly_data')
-        const fields = Array.isArray(ref.fields) ? (ref.fields as string[]).slice(0, 16) : []
+        const declared = (Array.isArray(ref.series) ? ref.series : []) as Record<string, unknown>[]
+        const metas = new Map<string, HourlySeriesMeta>()
+        for (const entry of declared) {
+          const id = typeof entry.series_id === 'string' ? entry.series_id : null
+          if (!id || metas.has(id)) continue
+          metas.set(id, {
+            series_id: id,
+            instance_id: typeof entry.instance_id === 'string' ? entry.instance_id : null,
+            variable_id: typeof entry.variable_id === 'string' ? entry.variable_id : null,
+            unit: typeof entry.unit === 'string' ? entry.unit : null,
+          })
+        }
+        const legacy = (Array.isArray(ref.fields) ? ref.fields : []) as unknown[]
+        const ids = [...metas.keys()]
+        for (const field of legacy) {
+          if (typeof field === 'string' && field && !metas.has(field)) ids.push(field)
+        }
         const rows = Number(ref.rows ?? 0)
-        // 各字段序列完全独立, 并行拉取(原先逐字段串行最多 16 次往返)
+        // 各序列完全独立, 并行拉取(原先逐字段串行最多 16 次往返)
+        const firstPage = new Map<string, { unit: string | null; instance_id: string | null; variable_id: string | null }>()
         const pages = await Promise.all(
-          fields.map(async (field) => {
+          ids.slice(0, 16).map(async (field) => {
             try {
               const values = await collectHourlyValues(
                 (start, limit) =>
@@ -1815,13 +1842,20 @@ export const api = {
                     query: { field, start, end: rows, limit },
                   }).then((pageBody) => {
                     const page = asRecord(pageBody)
+                    if (start === 0) {
+                      firstPage.set(field, {
+                        unit: typeof page.unit === 'string' ? page.unit : null,
+                        instance_id: typeof page.instance_id === 'string' ? page.instance_id : null,
+                        variable_id: typeof page.variable_id === 'string' ? page.variable_id : null,
+                      })
+                    }
                     return { values: page.values as number[], next_start: page.next_start as number | null }
                   }),
                 rows,
               )
               return [field, values] as const
             } catch {
-              // 单字段读取失败不影响其余字段
+              // 单序列读取失败不影响其余序列
               return null
             }
           }),
@@ -1830,7 +1864,18 @@ export const api = {
         for (const hit of pages) {
           if (hit && Array.isArray(hit[1])) flows[hit[0]] = hit[1] as number[]
         }
-        return { flows }
+        const series: HourlySeriesMeta[] = []
+        for (const id of Object.keys(flows)) {
+          const declaredMeta = metas.get(id)
+          const pageMeta = firstPage.get(id)
+          series.push({
+            series_id: id,
+            instance_id: declaredMeta?.instance_id ?? pageMeta?.instance_id ?? null,
+            variable_id: declaredMeta?.variable_id ?? pageMeta?.variable_id ?? null,
+            unit: declaredMeta?.unit ?? pageMeta?.unit ?? null,
+          })
+        }
+        return { flows, series }
       })
     },
   } satisfies ResultsApi,
