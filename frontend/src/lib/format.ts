@@ -4,8 +4,7 @@
  * - 单位显示:中文用翻译键(ies.unit.*),英文直接用符号;locale 由 i18n 模块
  *   提供(getLocale),非 React 环境亦可调用。
  * - 金额按币种(CNY/USD)与语言格式化。
- * - 日期时间默认按浏览器本地时区展示;项目场景可传固定 UTC 偏移(分钟),
- *   与后端"项目固定偏移"约定一致(数据时间戳均按项目偏移解释)。
+ * - 日期时间默认按浏览器本地时区展示;调用方可传数据集版本声明的固定 UTC 偏移(分钟)。
  */
 
 import { getLocale, translate } from '../i18n'
@@ -158,7 +157,7 @@ function symbolOf(currency: 'CNY' | 'USD'): string {
 // ---------------------------------------------------------------------------
 
 export interface DateTimeOptions {
-  /** 以项目固定 UTC 偏移(分钟)解释时间戳;缺省用浏览器本地时区。 */
+  /** 以数据集版本固定 UTC 偏移(分钟)解释时间戳;缺省用浏览器本地时区。 */
   utcOffsetMinutes?: number
   /** 是否包含秒。 */
   withSeconds?: boolean

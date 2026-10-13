@@ -19,7 +19,7 @@
 
 - `WorkbenchProvider` 新增 `projectLoading`/`projectError` 三态：`DataPage` 加载中只转圈（无可写表单、无项目名、无伪默认），主体失败只显错＋`refreshDetailed` 重试（重试回到加载分支，结构上不可重复点击），成功才显示数据页与可写控件；D2 的列表/版本独立错误路径不动。
 - 项目不设置时区：删 `Project.fixed_utc_offset_minutes` 类型字段（后端 `GET /projects/{id}` 本就没有该字段）、工作台头部与数据页头部的项目时区展示；上传/样例对话框保留既有 `480` 表单初值（注释明确非项目时区）；数据集版本行/详情与上传表单的版本偏移展示不变。
-- 删无消费者的 `data_utc_mismatch`/`data_fix_offset` 中英键（rg 确认后端无此诊断码、前端除定义外无消费者）；`ies.workbench.utc` 键因只剩定义暂留，未动（超出本片删除范围）。
+- 删无消费者的 `data_utc_mismatch`/`data_fix_offset` 中英键（rg 确认后端无此诊断码、前端除定义外无消费者）及仅剩定义的 `ies.workbench.utc` 键；格式化偏移的注释也改为由数据集版本提供。
 - 指南同步：`getting-started` 删除新建项目选偏移步骤（创建表单本就没有该输入）、`concepts-and-limits`、`data-preparation`（偏移在数据集版本中声明，step 文件连续 step 无时区）、`system-modeling` 去掉“项目时区”。
 - 证据：前端构建（tsc＋vite，随 web 镜像构建）通过；新建浏览器用例 `data-project-d3.spec.ts` 1 通过（真实进入页面、API 正文不 mock，仅对目标 `GET /projects/{id}` 做延迟/500；延迟期无下载模板按钮、无项目名、无写 POST，恢复后项目名与项目响应一致、版本行偏移与版本响应一致；500 后只显错＋重试，重试恢复且不补第二次列表读取；预期噪声仅主体 500×1 与既有计算配置 404×1）。首次失败系用例把 `count()` Promise 直接断言（缺内层 `await`），改正后通过；D1/D2 未重跑。此项不代表 `0.14.0` 整体完成。
 

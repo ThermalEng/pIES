@@ -97,7 +97,6 @@ export const messagesZh: Record<string, string> = {
   // -------------------------------------------------------------------------
   'ies.workbench.version': '版本',
   'ies.workbench.currency': '币种',
-  'ies.workbench.utc': '时区',
   'ies.workbench.autosave_saving': '自动保存中…',
   'ies.workbench.autosave_saved': '已自动保存',
   'ies.workbench.autosave_dirty': '有未保存的更改',

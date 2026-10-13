@@ -87,7 +87,6 @@ export const messagesEn: Record<string, string> = {
   // -------------------------------------------------------------------------
   'ies.workbench.version': 'Version',
   'ies.workbench.currency': 'Currency',
-  'ies.workbench.utc': 'Time zone',
   'ies.workbench.autosave_saving': 'Saving…',
   'ies.workbench.autosave_saved': 'Autosaved',
   'ies.workbench.autosave_dirty': 'Unsaved changes',
