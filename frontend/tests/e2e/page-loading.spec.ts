@@ -30,8 +30,15 @@ async function openWorkbench(
   const context = await browser.newContext()
   const page = await context.newPage()
   const session = await createSession(page, username, password)
+  // 等待默认任务页的配置读取完成再离开，避免导航竞态决定已知 404 是否发生。
+  const configRead = page.waitForResponse((response) =>
+    response.request().method() === 'GET' &&
+    /^\/api\/projects\/\d+\/config$/.test(new URL(response.url()).pathname) &&
+    response.status() === 404,
+  )
   await page.getByText(projectName, { exact: true }).click()
   await expect(page).toHaveURL(/\/projects\/\d+\/tasks/)
+  await configRead
   return { context, page, session }
 }
 
@@ -54,16 +61,22 @@ test('嵌套分块失败显示可见错误而非永久加载', async ({ browser 
   const { username, password, project } = await setupProject(browser, 'nested')
   const { context, page, session } = await openWorkbench(browser, username, password, project.name)
   try {
-    await context.route('**/*.js', async (route) => {
+    let aborted = 0
+    await context.route(/\/assets\/DataPage-[^/]+\.js$/, async (route) => {
       const req = route.request()
+      aborted++
       session.registerExpectedAbort(req.method(), new URL(req.url()).pathname)
       await route.abort()
     })
     await page.getByRole('link', { name: '数据管理' }).click()
     await expect(page).toHaveURL(/\/projects\/\d+\/data/)
     await expect(page.getByRole('alert')).toBeVisible()
-    await expect(page.getByText('页面加载失败')).toBeVisible()
+    await expect(page.getByText('页面加载失败', { exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: '重试' })).toBeVisible()
+    expect(aborted).toBe(1)
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${project.id}/config`, status: 404, times: 1 },
+    ])
   } finally {
     await context.close()
   }
@@ -73,13 +86,16 @@ test('解除失败后显式重试到达目标页', async ({ browser }) => {
   const { username, password, project } = await setupProject(browser, 'recover')
   const { context, page, session } = await openWorkbench(browser, username, password, project.name)
   try {
-    await context.route('**/*.js', async (route) => {
+    let aborted = 0
+    await context.route(/\/assets\/DataPage-[^/]+\.js$/, async (route) => {
       const req = route.request()
+      aborted++
       session.registerExpectedAbort(req.method(), new URL(req.url()).pathname)
       await route.abort()
     })
     await page.getByRole('link', { name: '数据管理' }).click()
     await expect(page.getByRole('alert')).toBeVisible()
+    expect(aborted).toBe(1)
     await context.unrouteAll({ behavior: 'wait' })
     await page.getByRole('button', { name: '重试' }).click()
     await expect(page).toHaveURL(/\/projects\/\d+\/data/)
@@ -92,18 +108,27 @@ test('解除失败后显式重试到达目标页', async ({ browser }) => {
   }
 })
 
-test('顶层分块失败同样可见错误', async ({ browser }) => {
+test('顶层分块失败同样可见错误且重试恢复', async ({ browser }) => {
   const { username, password, project } = await setupProject(browser, 'top')
   const { context, page, session } = await openWorkbench(browser, username, password, project.name)
   try {
-    await context.route('**/*.js', async (route) => {
+    let aborted = 0
+    await context.route(/\/assets\/HelpPage-[^/]+\.js$/, async (route) => {
       const req = route.request()
+      aborted++
       session.registerExpectedAbort(req.method(), new URL(req.url()).pathname)
       await route.abort()
     })
     await page.getByRole('link', { name: /帮助|Help/ }).click()
     await expect(page.getByRole('alert')).toBeVisible()
-    await expect(page.getByText('页面加载失败')).toBeVisible()
+    await expect(page.getByText('页面加载失败', { exact: true })).toBeVisible()
+    expect(aborted).toBe(1)
+    await context.unrouteAll({ behavior: 'wait' })
+    await page.getByRole('button', { name: '重试' }).click()
+    await expect(page.locator('.ies-help').first()).toBeVisible()
+    session.assertNoErrors([
+      { method: 'GET', path: `/api/projects/${project.id}/config`, status: 404, times: 1 },
+    ])
   } finally {
     await context.close()
   }

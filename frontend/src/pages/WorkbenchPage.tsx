@@ -38,14 +38,13 @@ const subPageLoaders = import.meta.glob<{ default: ComponentType }>([
 
 /** 惰性加载已发版子页面; 模块缺失或分块加载失败均显示可见错误与重试。 */
 function lazySubPage(file: string): ComponentType {
-  const FailedPage = () => <PageLoadError name={file} />
   return lazy(async () => {
     const loader = subPageLoaders[file]
-    if (!loader) return { default: FailedPage }
+    if (!loader) return { default: PageLoadError }
     try {
       return await loader()
     } catch {
-      return { default: FailedPage }
+      return { default: PageLoadError }
     }
   })
 }

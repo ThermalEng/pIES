@@ -47,15 +47,14 @@ const pageLoaders = import.meta.glob<{ default: ComponentType }>('./pages/*.tsx'
 
 /** 惰性加载已发版页面; 模块缺失或分块加载失败均显示可见错误与重试。 */
 function lazyPage(name: string) {
-  const FailedPage = () => <PageLoadError name={name} />
   return lazy(async () => {
     const loader = pageLoaders[`./pages/${name}.tsx`]
-    if (!loader) return { default: FailedPage }
+    if (!loader) return { default: PageLoadError }
     try {
       return await loader()
     } catch {
       // 构建产物更新后旧 chunk 哈希失效等: 显示可重试错误页, 而非永久"加载中"
-      return { default: FailedPage }
+      return { default: PageLoadError }
     }
   })
 }

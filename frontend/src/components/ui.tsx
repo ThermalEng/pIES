@@ -211,14 +211,12 @@ export function Spinner({ size = 'md', label, className }: { size?: 'sm' | 'md' 
 }
 
 /** 页面模块加载失败:显示可见错误与重载恢复(替代永久"加载中")。 */
-export function PageLoadError({ name }: { name: string }) {
+export function PageLoadError() {
   const { t } = useI18n()
   return (
     <div className="ies-page-placeholder" role="alert">
       <Icon name="warning" size={32} />
-      <p>
-        {name} · {t('ies.common.load_failed')}
-      </p>
+      <p>{t('ies.common.load_failed')}</p>
       <Button variant="primary" onClick={() => window.location.reload()}>
         {t('ies.common.retry')}
       </Button>
