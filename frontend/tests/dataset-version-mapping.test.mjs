@@ -6,16 +6,22 @@
  *    字段类型与单位与中文说明/units/质量率/许可/创建人）；
  * 2. 空 versions 列表合法为空，不抛错；
  * 3. 失败请求可见抛错，不回退空数据；
- * 4. list() 容忍 latest_version 缺席（无版本数据集的合法 null），空列表合法。
+ * 4. list() 容忍 latest_version 缺席（无版本数据集的合法 null）；
+ * 5. list() 的真空 {datasets: []} 合法为空；
+ * 6. 缺 versions 具名键的畸形信封可见抛错，不回退空列表。
+ * 另覆盖 integer/decimal 字段类型透传（features/datasets 纯映射）。
  * fetch 用桩代替（node22 原生 Response），业务值全为桩内真实形态内容。
  *
  * 运行（Docker，复用已缓存的 playwright 镜像，不新增镜像/依赖）：
  *   docker run --rm -v "$PWD/frontend:/app:ro" --entrypoint sh \
  *     mcr.microsoft.com/playwright:v1.54.2-noble -c "
- *     mkdir -p /tmp/dv/api && cp /app/src/api/client.ts /app/src/api/hourlyPages.ts /tmp/dv/api/ &&
+ *     mkdir -p /tmp/dv/api /tmp/dv/features/datasets &&
+ *     cp /app/src/api/client.ts /app/src/api/hourlyPages.ts /tmp/dv/api/ &&
+ *     cp /app/src/features/datasets/contracts.ts /app/src/features/datasets/mappers.ts /tmp/dv/features/datasets/ &&
  *     cp /app/src/types.ts /tmp/dv/types.ts && cp /app/tests/dataset-version-mapping.test.mjs /tmp/dv/ &&
  *     sed -i \"s#'../src/api/client.ts'#'./api/client.ts'#\" /tmp/dv/dataset-version-mapping.test.mjs &&
- *     sed -i \"s#from '../types'#from '../types.ts'#; s#from './hourlyPages'#from './hourlyPages.ts'#\" /tmp/dv/api/client.ts &&
+ *     sed -i \"s#from '../types'#from '../types.ts'#; s#from './hourlyPages'#from './hourlyPages.ts'#; s#from '../features/datasets/contracts'#from '../features/datasets/contracts.ts'#; s#from '../features/datasets/mappers'#from '../features/datasets/mappers.ts'#\" /tmp/dv/api/client.ts &&
+ *     sed -i \"s#from '../../types'#from '../../types.ts'#\" /tmp/dv/features/datasets/contracts.ts /tmp/dv/features/datasets/mappers.ts &&
  *     node /tmp/dv/dataset-version-mapping.test.mjs"
  * （node22 自带类型剥离；仅给相对导入补机械后缀，逻辑与仓库文件一致；
  * client.ts 顶层无浏览器副作用。）
@@ -42,8 +48,10 @@ function fullVersion() {
       e_load: { type: 'float', unit: 'kWh', description_zh: '电负荷', description_en: 'Electric load' },
       // 后端发布的 step 类型字面量即 integer：直接透传，不回退 float。
       step: { type: 'integer', unit: 'step', description_zh: '行序号', description_en: 'Row step index' },
+      // 价格序列 price 列类型字面量即 decimal：直接透传，不归一化。
+      price: { type: 'decimal', unit: 'CNY/kWh', description_zh: '能源价格', description_en: 'Energy price' },
     },
-    units: { e_load: 'kWh', step: 'step' },
+    units: { e_load: 'kWh', step: 'step', price: 'CNY/kWh' },
     quality_report: {
       tool: 'iesplan.dataset',
       generated_at: '2026-10-15T00:00:00+00:00',
@@ -110,6 +118,13 @@ globalThis.fetch = async (url, init = {}) => {
   if (method === 'GET' && text.includes('/projects/7/datasets/5')) {
     return new Response(JSON.stringify({ error: { code: 'API-500-001' } }), { status: 500 })
   }
+  if (method === 'GET' && text.includes('/projects/7/datasets/6')) {
+    // 畸形体：缺 versions 具名键，不得静默为空列表。
+    return new Response(JSON.stringify({ dataset: datasetRow(6, null).dataset }), { status: 200 })
+  }
+  if (method === 'GET' && text.endsWith('/projects/8/datasets')) {
+    return new Response(JSON.stringify({ datasets: [] }), { status: 200 })
+  }
   return new Response('not found', { status: 404 })
 }
 
@@ -130,6 +145,7 @@ async function expectApiError(promise) {
   check('身份三元组', v.id === 11 && v.dataset_id === 3 && v.version_no === 2)
   check('时域/分辨率/偏移', v.timeline === 'hourly' && v.resolution === '1h' && v.fixed_utc_offset_minutes === 480)
   check('字段类型透传', v.fields.e_load.type === 'float' && v.fields.step.type === 'integer')
+  check('decimal 类型保留', v.fields.price.type === 'decimal' && v.units.price === 'CNY/kWh')
   check('字段单位说明', v.fields.e_load.unit === 'kWh' && v.fields.e_load.description === '电负荷')
   check('单位表', v.units.e_load === 'kWh' && v.units.step === 'step')
   check('缺失率实算', v.quality_report?.missing_rate === 12 / 8760, `r=${v.quality_report?.missing_rate}`)
@@ -156,6 +172,19 @@ async function expectApiError(promise) {
   const page = await api.datasets.list({ project_id: 7 })
   check('列表行数', page.items.length === 2, `n=${page.items.length}`)
   check('行身份', page.items[0].id === 3 && page.items[1].id === 4)
+  // 首行 latest_version 为 null（无版本数据集）仍是合法行，不阻断列表。
+}
+
+// 5. 真空数据集列表：{datasets: []} 合法为空。
+{
+  const page = await api.datasets.list({ project_id: 8 })
+  check('空数据集列表', Array.isArray(page.items) && page.items.length === 0)
+}
+
+// 6. 畸形信封（缺 versions 具名键）必须可见抛错，不得回退空列表。
+{
+  const err = await expectApiError(api.datasets.versions(7, 6))
+  check('畸形抛错', err !== null)
 }
 
 if (failures > 0) {

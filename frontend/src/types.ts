@@ -428,9 +428,18 @@ export interface Dataset {
   updated_at: ISO8601 | null
 }
 
+/**
+ * 数据集版本字段类型: 后端实际发布的完整集合(见
+ * application/datasets/lifecycle.py 三处字段构造: 通用时间戳列 datetime /
+ * 标准与非标准数值列 float / 设备数据 step 序号列 integer / 价格序列 price 列
+ * decimal)。后端无类型注册表, 此联合即权威发布值集合; 从未发布的 int/text
+ * 不再列入, integer/decimal 不得归一化为其他字面量。
+ */
+export type DatasetFieldType = 'datetime' | 'float' | 'integer' | 'decimal'
+
 export interface DatasetField {
   name: string
-  type: 'float' | 'int' | 'text' | 'datetime'
+  type: DatasetFieldType
   unit: string | null
   description?: string
 }
