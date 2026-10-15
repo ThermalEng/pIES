@@ -11,15 +11,15 @@
  *   /help/*         帮助中心(一級菜单最后一项, 在应用外壳内)
  *   *               404
  *
- * 页面组件约定(由并行 agent 实现,路径即约定,不得改名):
+ * 页面组件约定(路径即约定,不得改名):
  *   src/pages/LoginPage.tsx         默认导出登录组件
  *   src/pages/ProjectListPage.tsx   默认导出项目列表组件
  *   src/pages/WorkbenchPage.tsx     默认导出工作台组件(useParams 取 :id)
  *   src/pages/HelpPage.tsx          默认导出帮助中心组件
  *   src/pages/SettingsPage.tsx      默认导出设置组件
  *
- * 页面通过 import.meta.glob 惰性扫描加载:页面文件未就绪时自动回退到内联
- * 占位组件,不阻塞构建;页面就绪后无缝启用(代码分割)。
+ * 已发版页面按约定路径惰性加载(代码分割); 模块缺失或分块加载失败均显示
+ * 可见错误与重试, 不再假设未来占位页。
  */
 
 import { Suspense, lazy, useEffect, useState } from 'react'
@@ -39,58 +39,23 @@ import {
 import { api, hasSession, setUnauthorizedHandler } from './api/client'
 import { BrandMark } from './components/BrandMark'
 import { useI18n } from './i18n'
-import { Button, Icon, Spinner } from './components/ui'
+import { Button, Icon, PageLoadError, Spinner } from './components/ui'
 import type { User } from './types'
 
-/** 页面模块约定路径(见文件头注释),惰性扫描避免页面未就绪时构建失败。 */
+/** 已发版页面模块(见文件头注释),惰性加载做代码分割。 */
 const pageLoaders = import.meta.glob<{ default: ComponentType }>('./pages/*.tsx')
 
-/** 页面占位组件(对应页面尚未实现时展示)。 */
-function PagePlaceholder(name: string): ComponentType {
-  return function PagePlaceholderView() {
-    const { t } = useI18n()
-    return (
-      <div className="ies-page-placeholder">
-        <Spinner size="lg" />
-        <p>
-          {name} · {t('ies.common.loading')}
-        </p>
-      </div>
-    )
-  }
-}
-
-/** 页面加载失败页:显示错误并提供重试(替代永久"加载中", 避免旧构建缓存导致卡死)。 */
-function PageLoadError(name: string): ComponentType {
-  return function PageLoadErrorView() {
-    const { t } = useI18n()
-    return (
-      <div className="ies-page-placeholder" role="alert">
-        <Icon name="warning" size={32} />
-        <p>
-          {name} · {t('ies.common.load_failed')}
-        </p>
-        <Button variant="primary" onClick={() => window.location.reload()}>
-          {t('ies.common.retry')}
-        </Button>
-        <p className="ies-page-subtitle">{t('ies.common.load_failed_hint')}</p>
-      </div>
-    )
-  }
-}
-
-/** 惰性加载页面;模块缺失或加载失败时回退占位,保证应用可启动。 */
+/** 惰性加载已发版页面; 模块缺失或分块加载失败均显示可见错误与重试。 */
 function lazyPage(name: string) {
+  const FailedPage = () => <PageLoadError name={name} />
   return lazy(async () => {
     const loader = pageLoaders[`./pages/${name}.tsx`]
-    if (!loader) return { default: PagePlaceholder(name) }
+    if (!loader) return { default: FailedPage }
     try {
-      const mod = await loader()
-      if (!mod.default) return { default: PagePlaceholder(name) }
-      return mod
+      return await loader()
     } catch {
-      // 构建产物更新后旧 chunk 哈希失效: 显示可重试错误页, 而非永久"加载中"
-      return { default: PageLoadError(name) }
+      // 构建产物更新后旧 chunk 哈希失效等: 显示可重试错误页, 而非永久"加载中"
+      return { default: FailedPage }
     }
   })
 }
