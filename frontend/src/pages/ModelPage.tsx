@@ -121,6 +121,10 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const [connections, setConnections] = useState<LocalConnection[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  // 图就绪(当前项目一次真实成功的模型读取, 含可解释的描述符):
+  // 未就绪时不渲染可写画布/面板, 读写状态不标已保存; 成功前失败保留旧输入
+  // (不清为空图), 刷新失败不重置保存/冲突态。项目切换时重置。
+  const [graphReady, setGraphReady] = useState(false)
 
   // 已有设备后继续新增 → 自动 fit 全部节点, 避免节点堆叠遮挡端口句柄
   // (ReactFlow fitView prop 只在 hasDevices false→true 边沿触发一次, 后续
@@ -178,8 +182,14 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const specOf = useCallback((typeId: string): ExtendedDeviceTypeSpec | null => typeMap[typeId] ?? null, [typeMap])
 
   // -- 加载 ------------------------------------------------------------
+  // 只读入口: 描述符缺失时图不可解释, 直接立错而不以空描述呈现有效连接。
   const reloadGraph = useCallback(async () => {
     setLoading(true)
+    if (deviceTypes === null) {
+      setLoadError(lt('panel.load_failed'))
+      setLoading(false)
+      return
+    }
     try {
       // 2.0 唯一项目建模事实: 项目视图草稿内容 model 节(名键设备与端点连接)。
       const { model, revision } = await api.model.getModel(projectId)
@@ -198,20 +208,36 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       setDevices(deviceList)
       setConnections(connectionList)
       setLoadError(null)
-    } catch (err) {
-      // 加载失败(网络/权限等): 显示错误并以空画布继续(可本地编辑,保存时再校验)
-      setLoadError(errorMessage(err))
-      setDevices([])
-      setConnections([])
-    } finally {
-      setLoading(false)
+      setGraphReady(true)
       setSelectedDeviceId(null)
       setSelectedConnId(null)
       setValidateResult(null)
       setSaveState('saved')
       setAutosave('saved')
+    } catch (err) {
+      // 读取失败(网络/权限等): 仅显示错误与重试入口; 已有画布原样保留
+      // (陈旧但不伪装成当前成功读取), 从未成功则保持未就绪、不可写。
+      setLoadError(errorMessage(err))
+    } finally {
+      setLoading(false)
     }
-  }, [projectId, setAutosave, typeMap])
+  }, [projectId, setAutosave, deviceTypes, typeMap])
+
+  // 读取重试: 描述符失败时一并重取注册表(图依赖其解释连接), 否则只重读模型。
+  const retryLoad = useCallback(() => {
+    if (typesError) {
+      setTypesError(false)
+      setDeviceTypes(null)
+    } else {
+      void reloadGraph()
+    }
+  }, [typesError, reloadGraph])
+
+  // 项目切换: 旧图不再是当前草稿, 未读到新图前保持未就绪(不可写)。
+  useEffect(() => {
+    setGraphReady(false)
+    setLoadError(null)
+  }, [projectId])
 
   // 注册表 deviceTypes 全局唯一, 每个会话只加载一次(与草稿加载解耦,
   // 避免 deviceTypes 更新改变 reloadGraph 身份导致加载 effect 循环请求)。
@@ -237,8 +263,14 @@ function ModelCanvas({ projectId }: { projectId: number }) {
 
   // 草稿加载: 初挂载 / 项目切换 / 手动刷新时取数; 连接解析依赖 descriptor,
   // 故等待注册表就绪(或失败)后再请求, 之后 deviceTypes 不再变化, 无循环。
+  // 注册表失败时图不可解释: 立错而不标记就绪, 重试一并重取注册表。
   useEffect(() => {
     if (deviceTypes === null && !typesError) return
+    if (typesError) {
+      setLoadError(lt('panel.load_failed'))
+      setLoading(false)
+      return
+    }
     void reloadGraph()
   }, [reloadGraph, deviceTypes, typesError])
 
@@ -715,7 +747,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
             icon={validating ? undefined : 'check'}
             loading={validating}
             onClick={() => void runValidate()}
-            disabled={validating}
+            disabled={validating || !graphReady}
           >
             {t('ies.modeling.graph_validate')}
           </Button>
@@ -746,14 +778,32 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         </Alert>
       ) : null}
 
-      {loadError ? (
+      {loadError && graphReady ? (
         <Alert variant="warning" title={lt('load.error', { reason: loadError })} closable onClose={() => setLoadError(null)}>
-          <Button variant="secondary" size="sm" onClick={() => void reloadGraph()}>
+          <Button variant="secondary" size="sm" onClick={retryLoad}>
             {t('ies.common.retry')}
           </Button>
         </Alert>
       ) : null}
 
+      {!graphReady ? (
+        <div className="mp-body">
+          <div className="mp-load-state" role="status">
+            {loadError ? (
+              <Alert variant="error" title={lt('load.error', { reason: loadError })}>
+                <Button variant="secondary" size="sm" onClick={retryLoad}>
+                  {t('ies.common.retry')}
+                </Button>
+              </Alert>
+            ) : (
+              <>
+                <Spinner size="md" />
+                <p>{lt('load.loading')}</p>
+              </>
+            )}
+          </div>
+        </div>
+      ) : (
       <div className="mp-body">
         <Palette
           specs={deviceTypes ?? []}
@@ -857,6 +907,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           ) : null}
         </div>
       </div>
+      )}
     {flash ? (
         <div
           role="status"

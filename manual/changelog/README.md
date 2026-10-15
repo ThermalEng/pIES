@@ -15,6 +15,11 @@
 
 ## Unreleased
 
+### 2026-10-16 — `0.14.0` 模型页读取状态收口（待复审）
+
+- 模型页必需读取改为就绪门禁：加载中只显示加载态、不渲染可写画布/面板；读取失败显示可见本地化错误与明确重试，不再清空为可编辑空图，不再误标“已保存”；只有一次真实成功读取（含可解释的注册表描述符）后才开放编辑并采用服务端修订。成功空模型仍是合法可编辑空态。刷新失败保留旧图并横幅提示，不静默转空图、不重置保存/冲突态；项目切换重置就绪态。
+- 证据：新增 `model-load-state.spec.ts` 2 通过（定向 500→无可写空图/无伪已保存/零草稿写→重试恢复真实 6 设备图→侧栏改名 PUT 200 回到已保存；定向延迟→加载态无写→释放后成功空模型可编辑；注入噪声精确计数）；`tsc+vite` 构建通过；`model-new`/`auth-navigation-model` 场景 2/3 在 UI 建项目对话框必填起始年处失败，系 `ProjectsPage.tsx`（本片未动、与主线同字节）与旧用例的前置不一致，属主线既有问题未动。另发现既有缺陷：画布 `ENERGY_CARRIERS` 未跟注册表 `electricity` 更名，electric 口设备改名重建连接 400，本片未碰（改名验证改用 heat 口设备）。本条不表示 0.14 完成，切片待 Codex 复审。
+
 ### 2026-10-15 — `0.14.0` 数据集读取契约与纯映射收口（已复审）
 
 - 新增 `features/datasets` 唯一归属：`contracts.ts` 声明后端实际信封（列表 `{datasets: [{dataset, latest_version}]}`、详情 `{dataset, versions}`、上传 `{dataset_version, diagnostics}`）与版本/质量 DTO，`mappers.ts` 为纯映射（不导入 HTTP 层）；`api/client.ts` 只保留传输层与 `api.datasets` 调用面，直接消费具名键。畸形体自然抛错可见，不再以 `asList` 空列表伪装成功；空 `{datasets: []}`、空 `versions` 与 `latest_version=null` 仍为合法并原样保留。

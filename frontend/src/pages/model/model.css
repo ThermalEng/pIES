@@ -195,6 +195,19 @@
   display: none;
 }
 
+/* 未就绪(加载中/加载失败)占位: 不渲染可写画布, 只给状态与重试。 */
+.mp-load-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ies-space-3);
+  color: var(--ies-color-text-muted);
+  font-size: var(--ies-fs-sm);
+  padding: var(--ies-space-5);
+}
+
 /* ---------------------------------------------------------------------------
  * 自定义设备节点
  * ------------------------------------------------------------------------- */
