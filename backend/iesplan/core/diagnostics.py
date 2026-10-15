@@ -171,6 +171,7 @@ NEW_DIAG_CODES: dict[str, str] = {
         "请求体校验失败(422;FastAPI/Pydantic RequestValidationError 包络,"
         "见 main.py;业务域复用同码但 message_key 不同)"
     ),
+    "API-REQ-003": "HTTP 请求异常包络(状态码与 detail 见 params)",
     # assembly 域诊断。消息键与修复键由 assembly.diags 自治维护；core 只承担
     # 宪法 §8.3 要求的稳定码登记，不持有装配业务文案或运行期可变注册状态。
     "ASM-SYN-001": "装配 YAML 解析失败或根节点类型非法",
@@ -256,6 +257,7 @@ NEW_DIAG_CODES: dict[str, str] = {
 # 诊断码 ↔ 消息键映射(04 §5.1 规则 3:一一对应)
 # ---------------------------------------------------------------------------
 DIAG_MESSAGE_KEYS: dict[str, str] = {
+    "API-REQ-003": "ies.error.http_exception",
     DATA_TS_DUP: "ies.diag.data.ts_dup",
     DATA_TS_GAP: "ies.diag.data.ts_gap",
     DATA_TS_LEAP: "ies.diag.data.ts_leap",

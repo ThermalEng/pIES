@@ -802,7 +802,7 @@ export const messagesZh: Record<string, string> = {
   // -------------------------------------------------------------------------
   'ies.error.app': '应用错误:{reason}',
   'ies.error.internal': '服务器内部错误',
-  'ies.error.http_exception': '请求失败(HTTP {status})',
+  'ies.error.http_exception': '请求失败(HTTP {status_code})',
   'ies.error.invalid_request': '请求参数不合法: 共 {count} 项错误',
   'ies.error.route_not_found': '请求的接口不存在',
   'ies.error.db_unavailable': '数据库暂不可用,请稍后重试',

@@ -169,11 +169,11 @@ def _register_exception_handlers(app: FastAPI) -> None:
             )
         else:
             body = _error_envelope(
-                code=f"HTTP-{exc.status_code}",
+                code="API-REQ-003",
                 message_key="ies.error.http_exception",
                 params={"status_code": exc.status_code, "detail": str(exc.detail)},
             )
-        return JSONResponse(status_code=exc.status_code, content=body)
+        return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def _request_validation_handler(
