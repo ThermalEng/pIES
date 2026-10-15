@@ -151,6 +151,12 @@
   opacity: 0.5;
 }
 
+/* 读阻塞时只读展示: 不可拖拽, 与可写态明确区分。 */
+.mp-palette-item[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .mp-palette-item__name {
   font-size: var(--ies-fs-sm);
   font-weight: 600;

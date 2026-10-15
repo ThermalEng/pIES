@@ -27,7 +27,8 @@ test.describe('模型页读取状态', () => {
       baseline_start_year: 2026,
       baseline_scenario_mode: 'single',
     }, userToken)
-    const pid: number = created.project?.id ?? created.id
+    // 创建响应精确信封 {project, my_role}: 直接消费具名键, 不做兼容猜测。
+    const pid: number = created.project.id
     expect(pid).toBeTruthy()
     // 公开 API 预置非空模型(电网→负荷/热泵等 6 设备); 成功后按真实设备名对照。
     await buildMinimalModel(apiCtx.request, pid, userToken)
@@ -37,7 +38,9 @@ test.describe('模型页读取状态', () => {
     // 定向故障: 仅模型页内的目标项目视图 GET 可 500。WorkbenchProvider 跨
     // 页签常驻不重发, 模型页只新增一次 getModel 读取, 故故障恰好命中该读
     // 1 次(计数锁定防漂移); 进项目主页的同路径请求真实放行。
+    // 重试阶段对放行响应加定向延迟, 验证 error→loading 真过渡与单飞。
     let failProject = true
+    let passDelayMs = 0
     const context = await browser.newContext()
     const page = await context.newPage()
     await context.route(
@@ -55,9 +58,17 @@ test.describe('模型页读取状态', () => {
           })
           return
         }
+        if (passDelayMs > 0 && page.url().includes('/model')) {
+          await new Promise((r) => setTimeout(r, passDelayMs))
+        }
         await route.continue()
       },
     )
+    // 目标读计数: 断言重试只派发一次模型读(无重叠重复请求)。
+    let projectGets = 0
+    page.on('request', (req) => {
+      if (req.method() === 'GET' && new URL(req.url()).pathname === projectPath) projectGets += 1
+    })
     // 全程业务写请求追踪: 失败/加载态只许读, 重试恢复后改名才允许草稿写。
     // 只覆盖业务写路径(draft/tasks/models/datasets 等), 登录等认证请求除外。
     const writeReqs: string[] = []
@@ -84,10 +95,17 @@ test.describe('模型页读取状态', () => {
     expect(await page.getByText(/^已保存$|^Saved$/).count()).toBe(0)
     expect(writeReqs).toEqual([])
 
-    // 阶段二: 解除故障后点正文重试 → 只读恢复, 图与真实预置一致且标已保存。
+    // 阶段二: 解除故障后点正文重试 → 先进入真实加载态(旧错清除、重试按钮
+    // 卸载, 不可重复派发), 再只读恢复, 图与真实预置一致且标已保存。
     failProject = false
+    passDelayMs = 3000
+    const getsBeforeRetry = projectGets
     await page.getByRole('button', { name: /^重试$|^Retry$/ }).click({ timeout: 30_000 })
+    await expect(page.getByText(/模型加载中|Loading model/)).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByRole('button', { name: /^重试$|^Retry$/ })).toHaveCount(0, { timeout: 30_000 })
     await expect(page.locator('.react-flow__node', { hasText: 'E2E heat_load' })).toBeVisible({ timeout: 60_000 })
+    // 重试只派发一次模型读: 重复点击不可能(按钮在途卸载), 无重叠请求。
+    expect(projectGets).toBe(getsBeforeRetry + 1)
     expect(await page.locator('.react-flow__node').count()).toBeGreaterThanOrEqual(6)
     await expect(page.getByText(/^已保存$|^Saved$/)).toBeVisible({ timeout: 30_000 })
     await expect(page.getByLabel(/设备面板|Device palette/)).toBeVisible()
@@ -101,8 +119,10 @@ test.describe('模型页读取状态', () => {
     await page.locator('.react-flow__node', { hasText: 'E2E heat_load' }).first().click()
     await expect(page.locator('#mp-device-name')).toBeVisible({ timeout: 30_000 })
     await page.locator('#mp-device-name').fill(newName)
+    // 先登记响应等待再触发失焦保存, 快响应也不漏检。
+    const putWait = page.waitForResponse((res) => res.request().method() === 'PUT' && res.url().includes('/draft'), { timeout: 60_000 })
     await page.locator('#mp-device-name').press('Tab')
-    const putRes = await page.waitForResponse((res) => res.request().method() === 'PUT' && res.url().includes('/draft'), { timeout: 60_000 })
+    const putRes = await putWait
     expect(putRes.status()).toBe(200)
     await expect(page.locator('.react-flow__node', { hasText: newName })).toBeVisible({ timeout: 60_000 })
     await expect(page.getByText(/^已保存$|^Saved$/)).toBeVisible({ timeout: 30_000 })
@@ -129,7 +149,8 @@ test.describe('模型页读取状态', () => {
       baseline_start_year: 2026,
       baseline_scenario_mode: 'single',
     }, userToken)
-    const pid: number = created.project?.id ?? created.id
+    // 创建响应精确信封 {project, my_role}: 直接消费具名键, 不做兼容猜测。
+    const pid: number = created.project.id
     expect(pid).toBeTruthy()
     await apiCtx.close()
 
@@ -184,6 +205,198 @@ test.describe('模型页读取状态', () => {
     }
 
     session.assertNoErrors([
+      // 进项目读尚无保存的计算配置 404(D3 外既有行为, 计数锁定防漂移)。
+      { method: 'GET', path: `/api/projects/${pid}/config`, status: 404, times: 1 },
+    ])
+    await context.close()
+  })
+
+  test('已加载图刷新在途不可写, 失败保留旧图并持久提示, 恢复后可写', async ({ browser }) => {
+    const userName = uniqueName('es-modelload')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('模型刷新项目')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, userName, password)
+    const userToken = await loginToken(apiCtx.request, userName, password)
+    const created = await requestJson(apiCtx.request, 'POST', '/api/projects', {
+      name: projectName,
+      baseline_resolution: '1h',
+      baseline_start_year: 2026,
+      baseline_scenario_mode: 'single',
+    }, userToken)
+    // 创建响应精确信封 {project, my_role}: 直接消费具名键, 不做兼容猜测。
+    const pid: number = created.project.id
+    expect(pid).toBeTruthy()
+    await buildMinimalModel(apiCtx.request, pid, userToken)
+    await apiCtx.close()
+
+    const projectPath = `/api/projects/${pid}`
+    // 刷新故障: 模型页内的目标项目视图 GET 可延迟、可 500; 其余真实放行。
+    // (初次加载与主页请求全部放行, 只拦截手动刷新那一次)。
+    let armRefreshFault = false
+    let refreshDelayMs = 0
+    let refreshFail = false
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await context.route(
+      (url) => url.pathname === projectPath,
+      async (route) => {
+        if (route.request().method() !== 'GET') {
+          await route.continue()
+          return
+        }
+        if (armRefreshFault && page.url().includes('/model')) {
+          if (refreshDelayMs > 0) {
+            await new Promise((r) => setTimeout(r, refreshDelayMs))
+          }
+          if (refreshFail) {
+            await route.fulfill({
+              status: 500,
+              contentType: 'application/json',
+              body: '{"detail":"modelload injected refresh failure"}',
+            })
+            return
+          }
+        }
+        await route.continue()
+      },
+    )
+    const writeReqs: string[] = []
+    page.on('request', (req) => {
+      if (req.method() !== 'GET' && /\/(draft|tasks|models|datasets|sample|bind|upload|versions)\b/.test(req.url())) {
+        writeReqs.push(`${req.method()} ${new URL(req.url()).pathname}`)
+      }
+    })
+    const session = await createSession(page, userName, password)
+
+    await page.getByText(projectName).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/model$/)
+    await expect(page.locator('.react-flow__node', { hasText: 'E2E heat_load' })).toBeVisible({ timeout: 60_000 })
+    await expect(page.getByText(/^已保存$|^Saved$/)).toBeVisible({ timeout: 30_000 })
+    expect(writeReqs).toEqual([])
+
+    // 阶段一: 刷新在途(延迟 3s) → 旧图仍在但不可写: 校验禁用、点节点无侧栏。
+    armRefreshFault = true
+    refreshDelayMs = 3000
+    refreshFail = false
+    await page.getByRole('button', { name: /^刷新$|^Refresh$/ }).click({ timeout: 30_000 })
+    await expect(page.getByRole('button', { name: /校验系统图|Validate graph/ })).toBeDisabled({ timeout: 30_000 })
+    await page.locator('.react-flow__node', { hasText: 'E2E heat_load' }).first().click()
+    expect(await page.locator('#mp-device-name').count()).toBe(0)
+    // 面板条目在途只读(不可拖拽)。
+    expect(await page.locator('.mp-palette-item[aria-disabled="true"]').count()).toBeGreaterThan(0)
+    expect(writeReqs).toEqual([])
+    // 在途刷新成功落定(旧修订一致), 再进入失败阶段。
+    refreshDelayMs = 0
+    await expect(page.getByRole('button', { name: /校验系统图|Validate graph/ })).toBeEnabled({ timeout: 60_000 })
+
+    // 阶段二: 再次刷新失败 → 旧图仍在(非空、非成功态), 陈旧提示持久,
+    // 写操作仍被阻断, 无草稿写请求, 保存/冲突态未被重置。
+    refreshFail = true
+    await page.getByRole('button', { name: /^刷新$|^Refresh$/ }).click({ timeout: 30_000 })
+    await expect(page.getByText(/模型加载失败|Failed to load model/)).toBeVisible({ timeout: 60_000 })
+    expect(await page.locator('.react-flow__node').count()).toBeGreaterThanOrEqual(6)
+    expect(await page.getByText(/从左侧面板拖拽设备|Drag devices from the left panel/).count()).toBe(0)
+    await expect(page.getByRole('button', { name: /校验系统图|Validate graph/ })).toBeDisabled()
+    await page.locator('.react-flow__node', { hasText: 'E2E heat_load' }).first().click()
+    expect(await page.locator('#mp-device-name').count()).toBe(0)
+    expect(writeReqs).toEqual([])
+
+    // 阶段三: 故障解除后显式恢复 → 当前内容/修订一致, 编辑重新可用。
+    refreshFail = false
+    refreshDelayMs = 0
+    await page.getByRole('button', { name: /^重试$|^Retry$/ }).click({ timeout: 30_000 })
+    await expect(page.getByText(/^已保存$|^Saved$/)).toBeVisible({ timeout: 60_000 })
+    await expect(page.getByRole('button', { name: /校验系统图|Validate graph/ })).toBeEnabled()
+    const newName = uniqueName('E2E refresh')
+    await page.locator('.react-flow__node', { hasText: 'E2E heat_load' }).first().click()
+    await expect(page.locator('#mp-device-name')).toBeVisible({ timeout: 30_000 })
+    await page.locator('#mp-device-name').fill(newName)
+    const putWait = page.waitForResponse((res) => res.request().method() === 'PUT' && res.url().includes('/draft'), { timeout: 60_000 })
+    await page.locator('#mp-device-name').press('Tab')
+    expect((await putWait).status()).toBe(200)
+    await expect(page.locator('.react-flow__node', { hasText: newName })).toBeVisible({ timeout: 60_000 })
+
+    session.assertNoErrors([
+      { method: 'GET', path: projectPath, status: 500, times: 1 },
+      // 进项目读尚无保存的计算配置 404(D3 外既有行为, 计数锁定防漂移)。
+      { method: 'GET', path: `/api/projects/${pid}/config`, status: 404, times: 1 },
+    ])
+    await context.close()
+  })
+
+  test('描述符失败图不就绪, 重试重取注册表后恢复', async ({ browser }) => {
+    const userName = uniqueName('es-modelload')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('模型描述符项目')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, userName, password)
+    const userToken = await loginToken(apiCtx.request, userName, password)
+    const created = await requestJson(apiCtx.request, 'POST', '/api/projects', {
+      name: projectName,
+      baseline_resolution: '1h',
+      baseline_start_year: 2026,
+      baseline_scenario_mode: 'single',
+    }, userToken)
+    // 创建响应精确信封 {project, my_role}: 直接消费具名键, 不做兼容猜测。
+    const pid: number = created.project.id
+    expect(pid).toBeTruthy()
+    await apiCtx.close()
+
+    const typesPath = '/api/registry/device-types'
+    // 定向故障: 仅注册表 GET 可 500 一次, 其余真实放行。
+    let failTypes = true
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await context.route(
+      (url) => url.pathname === typesPath,
+      async (route) => {
+        if (route.request().method() !== 'GET') {
+          await route.continue()
+          return
+        }
+        if (failTypes) {
+          failTypes = false
+          await route.fulfill({
+            status: 500,
+            contentType: 'application/json',
+            body: '{"detail":"modelload injected types failure"}',
+          })
+          return
+        }
+        await route.continue()
+      },
+    )
+    const writeReqs: string[] = []
+    page.on('request', (req) => {
+      if (req.method() !== 'GET' && /\/(draft|tasks|models|datasets|sample|bind|upload|versions)\b/.test(req.url())) {
+        writeReqs.push(`${req.method()} ${new URL(req.url()).pathname}`)
+      }
+    })
+    const session = await createSession(page, userName, password)
+
+    await page.getByText(projectName).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/model$/)
+
+    // 描述符失败 → 图不就绪: 可见错误 + 重试, 无面板/节点, 无写请求。
+    await expect(page.getByText(/模型加载失败|Failed to load model/)).toBeVisible({ timeout: 60_000 })
+    await expect(page.getByRole('button', { name: /^重试$|^Retry$/ })).toBeVisible({ timeout: 30_000 })
+    expect(await page.getByLabel(/设备面板|Device palette/).count()).toBe(0)
+    expect(await page.locator('.react-flow__node').count()).toBe(0)
+    expect(writeReqs).toEqual([])
+
+    // 重试一并重取注册表 → 真实恢复为空图可编辑态。
+    await page.getByRole('button', { name: /^重试$|^Retry$/ }).click({ timeout: 30_000 })
+    await expect(page.getByText(/从左侧面板拖拽设备|Drag devices from the left panel/)).toBeVisible({ timeout: 60_000 })
+    await expect(page.getByLabel(/设备面板|Device palette/)).toBeVisible({ timeout: 30_000 })
+    expect(writeReqs).toEqual([])
+
+    session.assertNoErrors([
+      { method: 'GET', path: typesPath, status: 500, times: 1 },
       // 进项目读尚无保存的计算配置 404(D3 外既有行为, 计数锁定防漂移)。
       { method: 'GET', path: `/api/projects/${pid}/config`, status: 404, times: 1 },
     ])

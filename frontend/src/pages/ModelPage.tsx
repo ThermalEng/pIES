@@ -125,6 +125,12 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   // 未就绪时不渲染可写画布/面板, 读写状态不标已保存; 成功前失败保留旧输入
   // (不清为空图), 刷新失败不重置保存/冲突态。项目切换时重置。
   const [graphReady, setGraphReady] = useState(false)
+  // 就绪镜像(reload 回调内读取, 避免 graphReady 进依赖导致加载 effect 重放)。
+  const graphReadyRef = useRef(false)
+  // 读在途(单飞: 重试/刷新按钮加载中禁用, 回调内再保险, 不搭请求框架)。
+  const loadInflightRef = useRef(false)
+  // 读阻塞(未就绪 / 刷新在途 / 读失败未恢复): 可写控件只读或隐藏, 不接受变更。
+  const readBlocked = !graphReady || loading || loadError !== null
 
   // 已有设备后继续新增 → 自动 fit 全部节点, 避免节点堆叠遮挡端口句柄
   // (ReactFlow fitView prop 只在 hasDevices false→true 边沿触发一次, 后续
@@ -183,11 +189,17 @@ function ModelCanvas({ projectId }: { projectId: number }) {
 
   // -- 加载 ------------------------------------------------------------
   // 只读入口: 描述符缺失时图不可解释, 直接立错而不以空描述呈现有效连接。
+  // 单飞: 未就绪重试先清旧错进入真实加载态(按钮随视图卸载); 已就绪刷新
+  // 保留陈旧提示直至成功恢复, 期间重试按钮禁用, 不叠加请求、不乱序覆盖。
   const reloadGraph = useCallback(async () => {
+    if (loadInflightRef.current) return
+    loadInflightRef.current = true
     setLoading(true)
+    if (!graphReadyRef.current) setLoadError(null)
     if (deviceTypes === null) {
       setLoadError(lt('panel.load_failed'))
       setLoading(false)
+      loadInflightRef.current = false
       return
     }
     try {
@@ -209,6 +221,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       setConnections(connectionList)
       setLoadError(null)
       setGraphReady(true)
+      graphReadyRef.current = true
       setSelectedDeviceId(null)
       setSelectedConnId(null)
       setValidateResult(null)
@@ -220,12 +233,17 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       setLoadError(errorMessage(err))
     } finally {
       setLoading(false)
+      loadInflightRef.current = false
     }
   }, [projectId, setAutosave, deviceTypes, typeMap])
 
   // 读取重试: 描述符失败时一并重取注册表(图依赖其解释连接), 否则只重读模型。
+  // 重试即进入加载态(清旧错, 按钮加载中禁用/卸载), 与读回调单飞互锁。
   const retryLoad = useCallback(() => {
+    if (loadInflightRef.current) return
     if (typesError) {
+      setLoadError(null)
+      setLoading(true)
       setTypesError(false)
       setDeviceTypes(null)
     } else {
@@ -236,6 +254,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   // 项目切换: 旧图不再是当前草稿, 未读到新图前保持未就绪(不可写)。
   useEffect(() => {
     setGraphReady(false)
+    graphReadyRef.current = false
     setLoadError(null)
   }, [projectId])
 
@@ -290,6 +309,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const addDevice = useCallback(
     async (spec: ExtendedDeviceTypeSpec, position: { x: number; y: number }) => {
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         const sameTypeCount = devices.filter((d) => d.deviceType === spec.type_id).length
         const name = uniqueDeviceName(defaultDeviceName(spec as DeviceTypeSpec, sameTypeCount, locale))
         const params = buildDefaultParams(spec as DeviceTypeSpec, 'new')
@@ -347,6 +368,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         kind: patch.kind ?? current.kind,
       }
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         if (!renamed) {
           const { revision } = await api.model.upsertDevice(
             projectId,
@@ -432,6 +455,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       const current = devices.find((d) => d.id === deviceId)
       if (!current) return
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         // 服务端删设备级联移除关联连接, 本地同步裁剪。
         const { revision } = await api.model.removeDevice(projectId, current.name, revisionRef.current)
         revisionRef.current = revision
@@ -522,6 +547,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         return
       }
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         // 2.0 连接只表达真实端点(设备名 + 注册表端口名), 无类型/容量/损耗字段
         const { name, revision } = await api.model.upsertConnection(
           projectId,
@@ -557,6 +584,9 @@ function ModelCanvas({ projectId }: { projectId: number }) {
             deviceId: fromDevice.id,
           }
           setIssues((prev) => [...prev.slice(-3), item])
+          // 写失败同样离开 saving(否则刷新永久禁用); 诊断面板已定位问题。
+          setSaveState('error')
+          setAutosave('error')
         })
       }
     },
@@ -566,6 +596,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const disconnectConn = useCallback(
     async (connId: string) => {
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         const { revision } = await api.model.removeConnection(projectId, connId, revisionRef.current)
         revisionRef.current = revision
         setConnections((prev) => prev.filter((c) => c.id !== connId))
@@ -661,13 +693,15 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const handleDrop = useCallback(
     (event: ReactDragEvent) => {
       event.preventDefault()
+      // 读阻塞时画布不接受放置(面板项已不可拖拽, 此处再保险)。
+      if (readBlocked) return
       const typeId = event.dataTransfer.getData('application/ies-device-type')
       if (!typeId) return
       const spec = specOf(typeId)
       if (!spec) return
       addDevice(spec, screenToFlowPosition({ x: event.clientX, y: event.clientY }))
     },
-    [addDevice, screenToFlowPosition, specOf],
+    [addDevice, screenToFlowPosition, specOf, readBlocked],
   )
 
   const clearSelection = useCallback(() => {
@@ -747,7 +781,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
             icon={validating ? undefined : 'check'}
             loading={validating}
             onClick={() => void runValidate()}
-            disabled={validating || !graphReady}
+            disabled={validating || readBlocked}
           >
             {t('ies.modeling.graph_validate')}
           </Button>
@@ -755,7 +789,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
             variant="primary"
             size="sm"
             onClick={() => void reloadGraph()}
-            disabled={loading || offline}
+            disabled={loading || offline || saveState === 'saving'}
             title={offline ? lt('save.error') : undefined}
           >
             {t('ies.common.refresh')}
@@ -772,15 +806,15 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       {saveState === 'conflict' ? (
         <Alert variant="warning" title={lt('save.conflict')}>
           {lt('save.conflict_banner')}{' '}
-          <Button variant="secondary" size="sm" onClick={() => void reloadGraph()}>
+          <Button variant="secondary" size="sm" onClick={() => void reloadGraph()} disabled={loading}>
             {lt('save.conflict_reload')}
           </Button>
         </Alert>
       ) : null}
 
       {loadError && graphReady ? (
-        <Alert variant="warning" title={lt('load.error', { reason: loadError })} closable onClose={() => setLoadError(null)}>
-          <Button variant="secondary" size="sm" onClick={retryLoad}>
+        <Alert variant="warning" title={lt('load.error', { reason: loadError })}>
+          <Button variant="secondary" size="sm" onClick={retryLoad} disabled={loading}>
             {t('ies.common.retry')}
           </Button>
         </Alert>
@@ -807,6 +841,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       <div className="mp-body">
         <Palette
           specs={deviceTypes ?? []}
+          disabled={readBlocked}
           loading={deviceTypes === null && !typesError}
           error={typesError}
           onRetry={() => {
@@ -825,6 +860,9 @@ function ModelCanvas({ projectId }: { projectId: number }) {
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
+              nodesDraggable={!readBlocked}
+              nodesConnectable={!readBlocked}
+              elementsSelectable={!readBlocked}
               onConnect={handleConnect}
               onNodeDragStop={handleNodeDragStop}
               onNodeClick={(_, node) => {
@@ -877,7 +915,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         </div>
 
         <div className="mp-side-stack">
-          {selectedConn ? (
+          {selectedConn && !readBlocked ? (
             <ConnectionPanel
               conn={selectedConn}
               devices={devices}
@@ -886,7 +924,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
               onClose={() => setSelectedConnId(null)}
             />
           ) : null}
-          {selectedDevice ? (
+          {selectedDevice && !readBlocked ? (
             <DeviceSidebar
               device={selectedDevice}
               spec={specOf(selectedDevice.deviceType) ?? EMPTY_SPEC}
@@ -971,11 +1009,14 @@ function SaveStateChip({ state }: { state: SaveState }) {
 
 function Palette({
   specs,
+  disabled = false,
   loading,
   error,
   onRetry,
 }: {
   specs: DeviceTypeSpec[]
+  /** 读阻塞时只读展示: 条目不可拖拽(画布刷新在途/失败未恢复时不接受变更)。 */
+  disabled?: boolean
   loading: boolean
   error: boolean
   onRetry: () => void
@@ -1023,7 +1064,8 @@ function Palette({
             <div
               key={spec.type_id}
               className="mp-palette-item"
-              draggable
+              draggable={!disabled}
+              aria-disabled={disabled}
               onDragStart={(event) => {
                 event.dataTransfer.setData('application/ies-device-type', spec.type_id)
                 event.dataTransfer.effectAllowed = 'copy'
