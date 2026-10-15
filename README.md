@@ -107,26 +107,6 @@ README 是项目的快速导览入口，详细技术规范与使用指南以 `ma
 
 ---
 
-## 💻 开发者与自动化测试
-
-本项目恪守严格的架构规范与容器化验证流程，所有编译、测试与端到端验收均在隔离的 Docker 容器中执行：
-
-```bash
-# 构建后端与前端镜像
-docker compose build backend web
-
-# 执行后端全套单元与契约测试
-docker compose run --rm backend pytest -q
-
-# 启动全栈服务以进行端到端自动化验收
-docker compose up -d --build
-```
-
-* 本项目严格遵守 [架构宪法](manual/developer-guide/zh-CN/ARCHITECTURE_CONSTITUTION.md)；
-* 画布拖拽、参数录入与报表导出等 GUI 流程统一使用 Docker 中的 Playwright 进行真实浏览器全自动验证。
-
----
-
 ## 🗺️ 未来路线图（Roadmap 展望）
 
 - **`0.14.0`**：前端严格契约切分与 Playwright 端到端浏览器验收收尾；
