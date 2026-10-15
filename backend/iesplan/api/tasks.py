@@ -5,6 +5,7 @@
                                                 幂等键必填, 命中 → 200)
 - GET    /api/projects/{id}/tasks               任务列表(状态/结局/进度摘要, 游标分页)
 - GET    /api/projects/{id}/tasks/{task_id}     任务详情(进度/尝试/租约/诊断/快照)
+- GET    /api/projects/{id}/tasks/{task_id}/inputs  任务冻结输入(快照投影 + 版本钉选引用)
 - POST   /api/projects/{id}/tasks/{task_id}/cancel   取消(传播批量子任务)
 - POST   /api/projects/{id}/tasks/{task_id}/retry    手动重试(复用同一快照)
 
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from iesplan.api.auth import CurrentUser
 from iesplan.api.deps import get_request_db
+from iesplan.application import projects as project_ops
 from iesplan.application import tasks as tasks_app
 from iesplan.tasks.contracts import IDEMPOTENCY_KEY_RE
 
@@ -154,6 +156,35 @@ def get_task_endpoint(
     """任务详情(规格 9.2): 状态/结局 + 尝试历史 + 当前租约(不含 token) + 进度 +
     诊断 + 快照摘要 + 批量关系。"""
     return {"task": tasks_app.task_detail(db, user, project_id, task_id)}
+
+
+@router.get("/{task_id}/inputs", summary="任务冻结输入")
+def get_task_inputs_endpoint(
+    project_id: int,
+    task_id: int,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+) -> dict[str, Any]:
+    """任务冻结输入上下文(只读): 任务身份 + 不可变快照投影(项目版本/
+    数据集版本/计算配置正文/模型贡献/评价确认块) + 版本钉选的规划/财务引用。
+    无快照的任务返回 snapshot=null。不读当前草稿, 不触发计算。"""
+    return {"inputs": tasks_app.task_inputs(db, user, project_id, task_id)}
+
+
+@router.post("/{task_id}/load-draft", summary="任务冻结输入载入工作草稿")
+def load_task_draft_endpoint(
+    project_id: int,
+    task_id: int,
+    db: Annotated[Session, Depends(get_request_db)],
+    user: CurrentUser,
+) -> dict[str, Any]:
+    """选择计算任务: 将其冻结输入载入本项目可编辑草稿(工作区更新)。
+
+    新草稿 revision + 配置指针移动 + 计算配置 revision 追加, 单事务;
+    不创建任务与项目版本, 快照/来源版本只读不改。无快照的任务 400。
+    本端点一次转交 ``load_task_into_draft`` 完整用例。
+    """
+    return project_ops.load_task_into_draft(db, user, project_id, task_id)
 
 
 @router.post("/{task_id}/cancel", summary="取消任务")

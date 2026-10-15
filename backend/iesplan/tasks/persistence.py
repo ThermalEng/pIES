@@ -500,6 +500,24 @@ def list_attempts(db: Session, task_id: int) -> list[TaskAttemptRecord]:
     return [_row_to_attempt(row) for row in rows]
 
 
+def latest_finished_at_for_tasks(db: Session, task_ids: Collection[int]) -> dict[int, str | None]:
+    """批量取任务最新尝试完成时刻（MAX finished_at；无已完成尝试为 None）。
+
+    任务列表“完成最晚”默认选择的读模型扩展：一次 GROUP BY 查询，
+    不逐任务读尝试。NULL（尝试未完成/无尝试）不参与 MAX。
+    """
+    if not task_ids:
+        return {}
+    rows = (
+        db.execute(
+            select(TaskAttempt.task_id, func.max(TaskAttempt.finished_at))
+            .where(TaskAttempt.task_id.in_(task_ids))
+            .group_by(TaskAttempt.task_id)
+        )
+    ).all()
+    return {task_id: _iso(finished) for task_id, finished in rows}
+
+
 # ---------------------------------------------------------------------------
 # 租约
 # ---------------------------------------------------------------------------

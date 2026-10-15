@@ -143,11 +143,19 @@ def build_version_content(
     # 引用；缺席就真正缺席，不继承、不合并：
     # - applied_commands: 命令簿记；
     # - planning: 已删除的 assembly.set_planning 草稿副本；
-    # - effective_finance/planning_config: 上次冻结的引用(本次重写)。
+    # - effective_finance/planning_config: 上次冻结的引用(本次重写)；
+    # - task_working_inputs: 任务对话框可编辑态的草稿侧副本(工作区暂存，
+    #   非版本领域状态；提交时由边界类型化解析冻结进快照)。
     version_content = {
         k: v
         for k, v in content.items()
-        if k not in ("applied_commands", "planning", "effective_finance", "planning_config")
+        if k not in (
+            "applied_commands",
+            "planning",
+            "effective_finance",
+            "planning_config",
+            "task_working_inputs",
+        )
     }
     version_content["currency"] = currency
     version_content["project_baseline"] = {

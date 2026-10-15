@@ -75,6 +75,8 @@ import type {
   TaskBatch,
   TaskCreateInput,
   TaskDetail,
+  TaskDraftLoadResult,
+  TaskInputs,
   TaskLease,
   TaskListParams,
   TaskOutcome,
@@ -495,6 +497,17 @@ function projectFromServer(body: unknown): Project {
     const bindings = Array.isArray(draft.dataset_bindings)
       ? (draft.dataset_bindings as NonNullable<Project['draft']>['dataset_bindings'])
       : undefined
+    // 任务提交工作输入只读草稿内容文档的 task_working_inputs 单键(纯对象才
+    // 携带; 缺席/形态不符为 undefined, 对话框取默认空态, 不猜测)。
+    const content =
+      draft.content !== null && typeof draft.content === 'object' && !Array.isArray(draft.content)
+        ? (draft.content as Record<string, unknown>)
+        : null
+    const workingRaw = content?.task_working_inputs
+    const working =
+      workingRaw !== null && typeof workingRaw === 'object' && !Array.isArray(workingRaw)
+        ? (workingRaw as Record<string, unknown>)
+        : undefined
     out.draft = {
       id: Number(draft.id ?? 0),
       project_id: Number(draft.project_id ?? 0),
@@ -505,6 +518,7 @@ function projectFromServer(body: unknown): Project {
       updated_at: String(draft.updated_at ?? ''),
       created_at: String(draft.created_at ?? ''),
       dataset_bindings: bindings,
+      task_working_inputs: working,
     }
   }
   return out
@@ -699,6 +713,14 @@ function taskFromSummary(s: Record<string, unknown>, projectId: number): Task {
     created_at: String(s.created_at ?? ''),
     updated_at: s.updated_at === null || s.updated_at === undefined ? null : String(s.updated_at),
     result_available: s.result_available === true,
+    completed_at:
+      typeof s.completed_at === 'string' && s.completed_at !== '' ? (s.completed_at as string) : null,
+    latest_package_id:
+      typeof s.latest_package_id === 'number' && Number.isFinite(s.latest_package_id)
+        ? (s.latest_package_id as number)
+        : null,
+    latest_evidence_status:
+      typeof s.latest_evidence_status === 'string' ? (s.latest_evidence_status as string) : null,
     summary: (s.summary as Task['summary']) ?? undefined,
   }
 }
@@ -1206,6 +1228,24 @@ export interface TasksApi {
   list(params?: TaskListParams): Promise<PageResult<Task>>
   create(input: TaskCreateInput): Promise<Task>
   get(projectId: number, taskId: number): Promise<TaskDetail>
+  /** 任务冻结输入上下文(只读; 无快照时 snapshot=null)。 */
+  inputs(projectId: number, taskId: number): Promise<TaskInputs>
+  /**
+   * 选择任务载入工作草稿(新草稿 revision + 配置追加; 不建任务/版本;
+   * 无快照任务 400)。返回新草稿 revision 与追加的配置 revision(缺席为 null)。
+   */
+  loadDraft(projectId: number, taskId: number): Promise<TaskDraftLoadResult>
+  /**
+   * 暂存任务提交工作输入(task.set_working_inputs 单命令)。
+   * 只做存放, 不做领域校验(提交边界仍为权威)。返回新草稿 revision。
+   * expectedRevision 缺省时先读当前修订(常规防抖保存); 卸载兜底刷新传入
+   * 调度时修订(冲突即 409 放弃, 不覆盖切换后的新选择)。
+   */
+  saveWorkingInputs(
+    projectId: number,
+    working: Record<string, unknown>,
+    expectedRevision?: number,
+  ): Promise<{ revision: number }>
   cancel(projectId: number, taskId: number): Promise<Task>
   retry(projectId: number, taskId: number): Promise<Task>
 }
@@ -1647,9 +1687,11 @@ export const api = {
       })
     },
     create(input: TaskCreateInput): Promise<Task> {
+      // 数据集版本清单唯一权威是草稿 dataset_bindings(数据页绑定; 提交装配
+      // 只读该绑定)。对话框不再发送 dataset_ids(旧 config.dataset_ids 后端
+      // 从未消费, 为误导性输入, 删除)。
       const config: Record<string, unknown> = {}
       if (input.config_revision !== undefined) config.config_revision = input.config_revision
-      if (input.dataset_ids !== undefined) config.dataset_ids = input.dataset_ids
       if (input.priority !== undefined) config.priority = input.priority
       if (input.deadline !== undefined) config.deadline = input.deadline
       if (input.params !== undefined) config.params = input.params
@@ -1702,6 +1744,86 @@ export const api = {
       return request<unknown>(`/projects/${projectId}/tasks/${taskId}/retry`, { method: 'POST', body: {} }).then(
         (res) => taskFromSummary(asRecord(oneOf<Record<string, unknown>>(res, 'task')), projectId),
       )
+    },
+    async saveWorkingInputs(
+      projectId: number,
+      working: Record<string, unknown>,
+      expectedRevision?: number,
+    ): Promise<{ revision: number }> {
+      if (expectedRevision === undefined) {
+        return sendDraftCommand(projectId, 'task.set_working_inputs', { working })
+      }
+      const cmd = makeCommand(projectId, expectedRevision, 'task.set_working_inputs', { working }, 'task')
+      const body = asRecord(
+        await request<unknown>(`/projects/${projectId}/draft`, {
+          method: 'PUT',
+          body: { expected_revision: expectedRevision, commands: [cmd] },
+        }),
+      )
+      return { revision: Number(body.revision ?? expectedRevision) }
+    },
+    loadDraft(projectId: number, taskId: number): Promise<TaskDraftLoadResult> {
+      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/load-draft`, {
+        method: 'POST',
+      }).then((body) => {
+        const v = asRecord(body)
+        const draft = asRecord(v.draft)
+        const configRevision = v.config_revision
+        return {
+          draftRevision: Number(draft.revision),
+          configRevision:
+            configRevision === null || configRevision === undefined
+              ? null
+              : Number(configRevision),
+        }
+      })
+    },
+    inputs(projectId: number, taskId: number): Promise<TaskInputs> {
+      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/inputs`).then((body) => {
+        const v = asRecord(oneOf<Record<string, unknown>>(body, 'inputs'))
+        const task = asRecord(v.task)
+        const snap = v.snapshot === null || v.snapshot === undefined ? null : asRecord(v.snapshot)
+        const refs = asRecord(v.frozen_refs)
+        return {
+          task: {
+            id: Number(task.id),
+            type: task.type as TaskInputs['task']['type'],
+            status: task.status as TaskInputs['task']['status'],
+            calc_snapshot_id:
+              task.calc_snapshot_id === null || task.calc_snapshot_id === undefined
+                ? null
+                : Number(task.calc_snapshot_id),
+          },
+          snapshot:
+            snap === null
+              ? null
+              : {
+                  id: Number(snap.id),
+                  project_version_id: Number(snap.project_version_id),
+                  dataset_version_ids: (snap.dataset_version_ids as unknown[]).map(Number),
+                  calc_config_snapshot: asRecord(snap.calc_config_snapshot),
+                  device_models: asRecord(snap.device_models),
+                  evaluation: asRecord(snap.evaluation),
+                  schema_version: String(snap.schema_version),
+                  random_seed:
+                    snap.random_seed === null || snap.random_seed === undefined ? null : Number(snap.random_seed),
+                },
+          frozen_refs: {
+            planning_revision:
+              refs.planning_revision === null || refs.planning_revision === undefined
+                ? null
+                : Number(refs.planning_revision),
+            finance_profile_id:
+              refs.finance_profile_id === null || refs.finance_profile_id === undefined
+                ? null
+                : String(refs.finance_profile_id),
+            finance_revision:
+              refs.finance_revision === null || refs.finance_revision === undefined
+                ? null
+                : Number(refs.finance_revision),
+          },
+        }
+      })
     },
   } satisfies TasksApi,
 

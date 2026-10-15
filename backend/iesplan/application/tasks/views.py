@@ -31,6 +31,7 @@ from iesplan.application.tasks.submissions import (
     submit_task,
 )
 from iesplan.core.diagnostics import TASK_QUEUED
+from iesplan.core.jsonutil import jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.tasks.contracts import TaskRecord
 
@@ -147,25 +148,53 @@ def list_tasks(
     )
     page_tasks = list(rows[:limit])
     # result_available 批量预取(避免逐任务 N+1 查询证据包): 仅 completed 任务
-    # 需要判定, 一次批量取回。
+    # 需要判定, 一次批量取回。完成时刻/最新证据包同批预取(默认“完成最晚”
+    # 选择与选择器选项的读模型扩展, 同样避免 N+1)。
     if page_tasks:
         completed_ids = [t.id for t in page_tasks if t.status == "completed"]
         available_ids: set[int] = set()
+        finished_at: dict[int, str | None] = {}
+        latest_evidence: dict[int, tuple[int, str]] = {}
         if completed_ids:
             statuses = results_domain.evidence_statuses_for_tasks(db, completed_ids)
             available_ids = {tid for tid, st in statuses.items() if st in ("complete", "partial")}
-        items = [_task_summary_prefetched(db, task, available_ids) for task in page_tasks]
+            finished_at = tasks_domain.latest_finished_at_for_tasks(db, completed_ids)
+            latest_evidence = results_domain.latest_evidence_for_tasks(db, completed_ids)
+        items = [
+            _task_summary_prefetched(db, task, available_ids, finished_at, latest_evidence)
+            for task in page_tasks
+        ]
     else:
         items = []
-    next_cursor = rows[-1].id if len(rows) > limit else None
+    # 游标取本页末行（rows[limit - 1]），不能取 +1 探测行 rows[-1]，
+    # 否则下一页 `id < cursor` 会永远跳过探测行（与 audit 列表同口径）。
+    next_cursor = rows[limit - 1].id if len(rows) > limit else None
     return {"items": items, "next_cursor": next_cursor}
 
 
-def _task_summary_prefetched(db: Session, task: TaskRecord, available_ids: set[int]) -> dict[str, Any]:
-    """列表项摘要: 复用 task_summary, 但结果可用性来自批量预取集合。"""
+def _task_summary_prefetched(
+    db: Session,
+    task: TaskRecord,
+    available_ids: set[int],
+    finished_at: dict[int, str | None] | None = None,
+    latest_evidence: dict[int, tuple[int, str]] | None = None,
+) -> dict[str, Any]:
+    """列表项摘要: 复用 task_summary, 但结果可用性来自批量预取集合。
+
+    完成时刻/最新证据包同样来自批量预取(缺席为 null, 不回退猜测);
+    非 completed 任务这三项恒为 null。
+    """
     summary = task_summary(db, task)
     if task.status == "completed":
         summary["result_available"] = task.id in available_ids
+        summary["completed_at"] = (finished_at or {}).get(task.id)
+        latest = (latest_evidence or {}).get(task.id)
+        summary["latest_package_id"] = latest[0] if latest is not None else None
+        summary["latest_evidence_status"] = latest[1] if latest is not None else None
+    else:
+        summary["completed_at"] = None
+        summary["latest_package_id"] = None
+        summary["latest_evidence_status"] = None
     return summary
 
 
@@ -267,6 +296,74 @@ def task_detail(
     parent_id = parent_sample.parent_task_id if parent_sample is not None else None
     detail["batch"] = {"parent_task_id": parent_id, "child_task_count": len(children), "children": children}
     return detail
+
+
+def _frozen_int(value: object) -> int | None:
+    """冻结引用整数(形态不符返回 None, 不重验可信内容)。"""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def task_inputs(
+    db: Session, user: UserRecord, project_id: int, task_id: int
+) -> dict[str, Any]:
+    """任务冻结输入上下文(只读投影, 不重验、不回退、不读当前草稿)。
+
+    返回任务身份 + 其不可变快照行(项目版本、数据集版本、计算配置正文、
+    逐实例模型贡献、评价确认块) + 快照所属版本内容钉选的规划/财务引用。
+    任务尚无快照(非计算任务)时 snapshot 为 None。规范装配文本/回执体量大
+    且无界面/预填消费者, 不在此返回。版本行缺失时引用置空(工作流已在提交
+    闸门拒绝缺件快照, 此处不复核)。
+    """
+    from iesplan import project as project_domain
+    from iesplan.application.projects.content_objects import load_content_object
+
+    ensure_access(db, user, project_id, "view")
+    task = ensure_task_belongs(db, project_id, task_id)
+    result: dict[str, Any] = {
+        "task": {
+            "id": task.id,
+            "type": task.type,
+            "status": task.status,
+            "calc_snapshot_id": task.calc_snapshot_id,
+        },
+        "snapshot": None,
+        "frozen_refs": {
+            "planning_revision": None,
+            "finance_profile_id": None,
+            "finance_revision": None,
+        },
+    }
+    if task.calc_snapshot_id is None:
+        return result
+    snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
+    if snapshot is None:
+        return result
+    # 冻结块经 jsonable 投影(MappingProxy/Decimal 等转为 JSON 安全值, 只读不改库)。
+    result["snapshot"] = {
+        "id": snapshot.id,
+        "project_version_id": snapshot.project_version_id,
+        "dataset_version_ids": list(snapshot.dataset_version_ids),
+        "calc_config_snapshot": jsonable(snapshot.calc_config_snapshot),
+        "device_models": jsonable(snapshot.device_models),
+        "evaluation": jsonable(snapshot.evaluation),
+        "schema_version": snapshot.schema_version,
+        "random_seed": snapshot.random_seed,
+    }
+    version = project_domain.get_version(db, project_id, snapshot.project_version_id)
+    if version is None:
+        return result
+    # 内容对象缺失/损坏直接抛(数据损坏, 不伪装成无引用)。
+    content = load_content_object(db, version.content_object_id)
+    planning = content.get("planning_config")
+    finance = content.get("effective_finance")
+    result["frozen_refs"] = {
+        "planning_revision": _frozen_int(planning.get("revision")) if isinstance(planning, Mapping) else None,
+        "finance_profile_id": finance.get("profile_id")
+        if isinstance(finance, Mapping) and isinstance(finance.get("profile_id"), str)
+        else None,
+        "finance_revision": _frozen_int(finance.get("revision")) if isinstance(finance, Mapping) else None,
+    }
+    return result
 
 
 def submit_task_case(

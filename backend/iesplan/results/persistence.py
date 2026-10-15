@@ -217,6 +217,29 @@ def evidence_statuses_for_tasks(db: Session, task_ids: Collection[int]) -> dict[
     return statuses
 
 
+def latest_evidence_for_tasks(db: Session, task_ids: Collection[int]) -> dict[int, tuple[int, str]]:
+    """批量取任务最新证据包（id 倒序首个的包 id + 状态；无证据不在返回中）。
+
+    任务列表选择器选项与结果深链映射的读模型扩展：一次查询，
+    不逐任务读证据包。
+    """
+    if not task_ids:
+        return {}
+    rows = (
+        db.execute(
+            select(EvidencePackage)
+            .where(EvidencePackage.task_id.in_(task_ids))
+            .order_by(EvidencePackage.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    latest: dict[int, tuple[int, str]] = {}
+    for row in rows:
+        latest.setdefault(row.task_id, (row.id, row.status))
+    return latest
+
+
 # ---------------------------------------------------------------------------
 # 评估
 # ---------------------------------------------------------------------------

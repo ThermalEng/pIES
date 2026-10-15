@@ -31,6 +31,7 @@ from iesplan.application.projects.versions import (
     freeze_snapshot_version,
     get_version,
     list_versions,
+    load_task_into_draft,
     replace_project_model_refs,
     restore_version,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "list_versions",
     "list_visible_projects",
     "load_content_object",
+    "load_task_into_draft",
     "project_to_dict",
     "replace_project_model_refs",
     "restore_version",

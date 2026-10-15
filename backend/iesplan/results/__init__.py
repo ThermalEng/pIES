@@ -33,6 +33,7 @@ get_evidence = persistence.get_evidence
 get_index = persistence.get_index
 insert_index = persistence.insert_index
 latest_assessment = persistence.latest_assessment
+latest_evidence_for_tasks = persistence.latest_evidence_for_tasks
 latest_evidence_for_task = persistence.latest_evidence_for_task
 latest_index_for_version = persistence.latest_index_for_version
 list_assessments = persistence.list_assessments
@@ -129,6 +130,7 @@ __all__ = [
     "get_index",
     "insert_index",
     "latest_assessment",
+    "latest_evidence_for_tasks",
     "latest_evidence_for_task",
     "latest_index_for_version",
     "list_assessments",

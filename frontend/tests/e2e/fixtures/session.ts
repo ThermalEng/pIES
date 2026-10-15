@@ -44,6 +44,13 @@ export interface SessionContext {
    * 历史零容忍行为。
    */
   assertNoErrors(expected?: ExpectedHttpNoise[]): void
+  /**
+   * 登记一次测试主动中止：须在 route 回调内部、route.abort() 紧前调用，
+   * 按该请求的实际 method + URL 路径精确登记，一次登记只核销一条匹配
+   * 的失败请求及其一条控制台回显。未登记的失败（含登记期内的其他
+   * URL/方法）一律判失败；无跨 URL/跨方法的预算共用。
+   */
+  registerExpectedAbort(method: string, url: string): void
 }
 
 /** 预期内 HTTP 噪声声明(method + 路径 + 状态 + 确切次数)。 */
@@ -67,7 +74,13 @@ export interface ExpectedHttpNoise {
 export async function createSession(page: Page, username: string, password: string): Promise<SessionContext> {
   await loginViaUI(page, username, password)
   const info: SessionInfo = { username, password, token: '' }
-  const session: SessionContext = { main: page, newTab: page, info, assertNoErrors: () => {} }
+  const session: SessionContext = {
+    main: page,
+    newTab: page,
+    info,
+    assertNoErrors: () => {},
+    registerExpectedAbort: () => {},
+  }
   // 后续标签页由调用方 tab-new 创建后通过 attachTab 接入监控
   attachMonitoring(session, page)
   return session
@@ -97,6 +110,12 @@ function attachMonitoring(session: SessionContext, page: Page): void {
   // error 控制台各自对应的资源 URL(Chromium location, 无则空串; 与 errors 同下标)。
   const errorResourceUrls: string[] = []
   const failedRequests: string[] = []
+  // 已登记的测试主动中止（method + 路径精确匹配，一条登记只消费一次；
+  // 未登记的 ERR_FAILED（含登记期内的其他 URL/方法）照常记为失败）。
+  const registeredAborts: Array<{ method: string; path: string }> = []
+  // 已核销失败请求对应的控制台回显配额（路径精确匹配，一条配额只核销
+  // 一条同路径的确切 ERR_FAILED 回显）。
+  const abortEchoAllowance: string[] = []
   // 全部已完成响应的 (method, path, status), 供预期噪声核对次数。
   const responses: Array<{ method: string; path: string; status: number }> = []
   page.on('console', (msg: ConsoleMessage) => {
@@ -111,17 +130,45 @@ function attachMonitoring(session: SessionContext, page: Page): void {
   page.on('requestfailed', (req) => {
     // ERR_ABORTED 是导航/页面关闭时浏览器主动取消的 chunk 请求(SPA 懒加载
     // 取消属正常行为, 不是服务器失败); 其余失败(连接拒绝/超时/非 2xx)记录。
+    // 测试主动 route.abort 的 ERR_FAILED 仅在有完全相同 method + 路径的
+    // 登记时核销（登记一次消费一次，并给同路径回显一条配额）；无登记、
+    // 方法或路径任一不符的失败一律记录（含登记期内的其他请求）。
     const errText = req.failure()?.errorText ?? 'unknown'
     if (errText === 'net::ERR_ABORTED') return
+    if (errText === 'net::ERR_FAILED') {
+      const idx = registeredAborts.findIndex(
+        (r) => r.method === req.method() && r.path === pathOf(req.url()),
+      )
+      if (idx >= 0) {
+        registeredAborts.splice(idx, 1)
+        abortEchoAllowance.push(pathOf(req.url()))
+        return
+      }
+    }
     failedRequests.push(`${req.method()} ${req.url()} :: ${errText}`)
   })
   page.on('pageerror', (err) => {
     errors.push(`pageerror: ${err.message}`)
     errorResourceUrls.push('')
   })
+  session.registerExpectedAbort = (method: string, url: string) => {
+    registeredAborts.push({ method, path: pathOf(url) })
+  }
   session.assertNoErrors = (expected: ExpectedHttpNoise[] = []) => {
     const remaining = errors.slice()
     const remainingUrls = errorResourceUrls.slice()
+    // 已登记中止的控制台回显：文本须为确切的 ERR_FAILED 回显，且其资源
+    // 路径须有同路径配额（一次登记只给一条同路径配额；路径不符的同文本
+    // 回显仍判失败，无跨 URL 预算共用）。
+    const allowance = abortEchoAllowance.slice()
+    for (let i = remaining.length - 1; i >= 0; i--) {
+      if (remaining[i] !== 'Failed to load resource: net::ERR_FAILED') continue
+      const at = allowance.indexOf(pathOf(remainingUrls[i]))
+      if (at < 0) continue
+      allowance.splice(at, 1)
+      remaining.splice(i, 1)
+      remainingUrls.splice(i, 1)
+    }
     for (const spec of expected) {
       const matched = responses.filter(
         (r) => r.method === spec.method && r.path === spec.path && r.status === spec.status,

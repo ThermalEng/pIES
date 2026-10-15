@@ -813,6 +813,22 @@ def _cmd_assembly_set_tariff_bindings(content: dict, payload: dict) -> dict:
     return {"stored": True, "bindings": sorted(bindings)}
 
 
+def _cmd_task_set_working_inputs(content: dict, payload: dict) -> dict:
+    """暂存任务提交工作输入(任务对话框可编辑态的草稿侧副本)。
+
+    只做容器形态守卫(working 对象)；数值/评价关系/任务参数由提交边界
+    类型化解析判定(宪法 §2.6：起草阶段不复制提交校验)。未完成的编辑态
+    (空字符串/非法 JSON 文本)如实存放，提交时由边界明确拒绝。
+    """
+    working = payload.get("working")
+    if not isinstance(working, dict):
+        raise InvalidRequestError(
+            "task.set_working_inputs 需要 working 对象", code="PROJ-CMD-005"
+        )
+    content["task_working_inputs"] = jsonable(working)
+    return {"stored": True}
+
+
 # assembly.set_planning 已删除: 装配 planning 是冻结 PlanningConfig 修订的
 # 确定性投影(任务提交闸门按版本内容 planning_config.revision 经公开门面
 # 读取)，项目不再保存第二份 planning 草稿副本。
@@ -833,6 +849,7 @@ _COMMAND_HANDLERS.update(
         "project.set_extensions": _cmd_project_set_extensions,
         "assembly.set_finance_binding": _cmd_assembly_set_finance_binding,
         "assembly.set_tariff_bindings": _cmd_assembly_set_tariff_bindings,
+        "task.set_working_inputs": _cmd_task_set_working_inputs,
     }
 )
 

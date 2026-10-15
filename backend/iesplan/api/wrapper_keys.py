@@ -140,6 +140,8 @@ WRAPPER_KEYS: dict[str, frozenset[str]] = {
     "create_task_endpoint": frozenset({"hint", "replayed", "task"}),
     "list_tasks_endpoint": frozenset({"items", "next_cursor"}),  # services.tasks.list_tasks
     "get_task_endpoint": frozenset({"task"}),
+    "get_task_inputs_endpoint": frozenset({"inputs"}),
+    "load_task_draft_endpoint": frozenset({"config_revision", "draft"}),
     "cancel_task_endpoint": frozenset({"cancel_status", "diagnostic", "task"}),
     "retry_task_endpoint": frozenset({"task"}),
     # ---- validation.py ----

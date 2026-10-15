@@ -15,6 +15,10 @@
 
 ## Unreleased
 
+### 2026-10-14 — 任务输入载入项目草稿/结果绑定所选任务（已复审）
+
+- 每项目可编辑工作区即其草稿：切换计算任务将其整套冻结输入（模型/装配内容、数据集版本绑定、规划与财务输入、计算配置、评价确认、任务参数）载入草稿，后续编辑只改草稿；只有确认提交、实际发起计算时才固化为新任务。结果、评估和报告导出跟随同一所选任务，默认最新完成的计算任务，未完成或无结果不回退；导出前须完成该任务结果的评估。Docker 定向验证：任务切换/编辑/提交浏览器全链路、并发选择串行、最终编辑落定、直达失败单次可见及显式重试，以及 tsc/vite 构建门禁。本条不表示 0.14 完成。
+
 ### 2026-10-13 — `0.14.0` 导出返回本地下载会话 R9（待复审）
 
 - `api.exports.excel/package` 不再构造含 `report_type/object_id/generated_by/generated_at/status` 的伪持久化 `Report`（其中项目包还曾伪造 `report_type: 'pdf'`）；两者直接返回本地下载会话 id（number，一次下载引用），`download()` 仍按此 id 取短期 token 下载；删除 `Report/ReportType/ReportStatus` 死类型（已确认无其他真实消费者）并同步四处页面调用点。
@@ -52,6 +56,7 @@
 - 证据：前端构建（tsc＋vite，随 web 镜像构建）通过；新增 node 适配层用例 `result_view_no_synthetic_diagnostics.test.mjs` 6 项通过（返回对象无 `diagnostics` 键、有块/无块透传）；新增浏览器用例 `result-irr-status-r1r2.spec.ts` 2 通过（真实求解：封存任务摘要与封存卡同显 HTTP 封存 `irr_status` 对应标签且全页仅 2 处；metrics-only 任务全页无 IRR 状态行，HTTP 与缺席原因一致）。D1/D2/全量未重跑。此项不代表 `0.14.0` 整体完成。
 
 ### 2026-10-13 — `0.14.0` 数据页项目主体三态与项目无时区收口 D3（复审通过）
+
 
 - `WorkbenchProvider` 新增 `projectLoading`/`projectError` 三态：`DataPage` 加载中只转圈（无可写表单、无项目名、无伪默认），主体失败只显错＋`refreshDetailed` 重试（重试回到加载分支，结构上不可重复点击），成功才显示数据页与可写控件；D2 的列表/版本独立错误路径不动。
 - 项目不设置时区：删 `Project.fixed_utc_offset_minutes` 类型字段（后端 `GET /projects/{id}` 本就没有该字段）、工作台头部与数据页头部的项目时区展示；上传/样例对话框保留既有 `480` 表单初值（注释明确非项目时区）；数据集版本行/详情与上传表单的版本偏移展示不变。

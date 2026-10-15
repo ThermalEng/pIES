@@ -12,7 +12,7 @@
  *   可配置样本数、随机种子与分布参数。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
@@ -22,7 +22,6 @@ import {
   Badge,
   Button,
   Card,
-  Checkbox,
   Dialog,
   EmptyState,
   FormField,
@@ -49,14 +48,16 @@ import type {
   Diagnostic,
   EvaluationConstructionPayment,
   EvaluationMaintenanceExpense,
+  ProjectVersion,
   Task,
   TaskCreateInput,
   TaskDetail,
+  TaskInputs,
   TaskStatus,
   TaskType,
   User,
 } from '../types'
-import { useWorkbench } from './workbench'
+import { useAutosave, useWorkbench } from './workbench'
 
 const POLL_MS = 5000
 
@@ -79,9 +80,13 @@ interface SweepRow {
   unit: string
 }
 
+/**
+ * 提交对话框工作表单(草稿 task_working_inputs 的可编辑镜像; 数据集版本
+ * 清单唯一权威是草稿 dataset_bindings, 不在此选择——旧 datasetIds 勾选
+ * 后端从未消费, 已删除)。
+ */
 interface CreateForm {
   type: TaskType
-  datasetIds: number[]
   constructionPeriod: string
   operationYears: string
   discountRate: string
@@ -97,7 +102,6 @@ interface CreateForm {
 
 const DEFAULT_FORM: CreateForm = {
   type: 'calc',
-  datasetIds: [],
   constructionPeriod: '',
   operationYears: '',
   discountRate: '',
@@ -109,6 +113,139 @@ const DEFAULT_FORM: CreateForm = {
   distType: 'normal',
   noisePct: 5,
   sweeps: [{ path: '', values: '', unit: '' }],
+}
+
+/**
+ * 表单 → 草稿工作输入(键为 snake_case 业务名, 值是用户所填原文; 不含数据集选择)。
+ *
+ * 后端只做容器级存放、不解析: 未完成的编辑态(空串/非法 JSON)如实存放,
+ * 提交时由边界严格解析, 不在此预判。task_params 与冻结快照同形
+ * ({params: 内层}, 见提交装配): 不确定性/批量分析写内层, 其他类型省略
+ * (与冻结缺席一致); seed 存原文(提交时再转数值), sweeps 行存原文
+ * (读取时文本直用、数组 join)。
+ */
+function workingOfForm(f: CreateForm): Record<string, unknown> {
+  const working: Record<string, unknown> = {
+    task_type: f.type,
+    construction_period: f.constructionPeriod,
+    operation_years: f.operationYears,
+    discount_rate: f.discountRate,
+    construction_payments: f.constructionPayments,
+    maintenance_expenses: f.maintenanceExpenses,
+  }
+  if (f.type === 'uncertainty') {
+    const inner: Record<string, unknown> = {
+      mode: f.uMode,
+      n_samples: f.nSamples,
+      distribution: { type: f.distType, noise_pct: f.noisePct },
+    }
+    if (f.seed.trim() !== '') inner.seed = f.seed.trim()
+    working.task_params = { params: inner }
+  } else if (f.type === 'analysis') {
+    working.task_params = {
+      params: {
+        sweeps: f.sweeps.map((s) => ({ param_path: s.path, values: s.values, unit: s.unit })),
+      },
+    }
+  }
+  return working
+}
+
+/**
+ * 草稿工作输入 → 表单(整体替换; 未知/缺席取显式空态, 不混入他任务字段)。
+ *
+ * 后端存的是业务值原样(数字/清单/定点字符串)或用户编辑原文, 显示形态由
+ * 此处统一负责: 文本直用, 有限数转文本, 清单转 JSON 文本(付款 ratio 定点
+ * 字符串转 JSON number, 与提交边界口径一致); 其余形态记空文本, 由提交
+ * 边界明确拒绝, 不猜测。
+ */
+function formFromWorking(working: Record<string, unknown>): CreateForm {
+  const text = (v: unknown): string => {
+    if (typeof v === 'string') return v
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+    if (Array.isArray(v)) return JSON.stringify(v)
+    return ''
+  }
+  const paymentsText = (v: unknown): string => {
+    if (typeof v === 'string') return v
+    if (!Array.isArray(v)) return ''
+    const rows = v.map((row) => {
+      if (typeof row !== 'object' || row === null) return row
+      const r = { ...(row as Record<string, unknown>) }
+      const ratio = (row as Record<string, unknown>).ratio
+      if (typeof ratio === 'string' && ratio.trim() !== '') {
+        const n = Number(ratio)
+        if (Number.isFinite(n)) r.ratio = n
+      }
+      return r
+    })
+    return JSON.stringify(rows)
+  }
+  const next: CreateForm = {
+    ...DEFAULT_FORM,
+    sweeps: DEFAULT_FORM.sweeps.map((s) => ({ ...s })),
+  }
+  if ((SUBMITTABLE_TYPES as string[]).includes(working.task_type as string)) {
+    next.type = working.task_type as TaskType
+  }
+  next.constructionPeriod = text(working.construction_period)
+  next.operationYears = text(working.operation_years)
+  next.discountRate = text(working.discount_rate)
+  next.constructionPayments = paymentsText(working.construction_payments)
+  next.maintenanceExpenses = text(working.maintenance_expenses)
+  const tp = working.task_params
+  if (typeof tp === 'object' && tp !== null) {
+    applyWorkingTaskParams(next, next.type, tp as Record<string, unknown>)
+  }
+  return next
+}
+
+/**
+ * 工作输入任务级参数 → 表单类型相关字段(未知/非法取默认, 不猜测)。
+ *
+ * 读冻结同形({params: 内层}; 内层键与提交装配一致)。seed 接受文本(自存)
+ * 与数值(冻结), 提交时统一转数值; sweeps 值接受文本(自存)与数组(冻结)。
+ */
+function applyWorkingTaskParams(next: CreateForm, type: TaskType, tp: Record<string, unknown>): void {
+  const rawInner = tp.params
+  const inner =
+    typeof rawInner === 'object' && rawInner !== null ? (rawInner as Record<string, unknown>) : null
+  if (inner === null) return
+  if (type === 'uncertainty') {
+    if (inner.mode === 'fixed_reliability' || inner.mode === 'replan_sensitivity') next.uMode = inner.mode
+    if (typeof inner.n_samples === 'number' && Number.isInteger(inner.n_samples) && inner.n_samples > 0) {
+      next.nSamples = inner.n_samples
+    }
+    if (typeof inner.seed === 'string') next.seed = inner.seed
+    else if (typeof inner.seed === 'number' && Number.isFinite(inner.seed)) next.seed = String(inner.seed)
+    const dist = inner.distribution
+    if (typeof dist === 'object' && dist !== null) {
+      const dd = dist as Record<string, unknown>
+      if (dd.type === 'normal' || dd.type === 'triangular' || dd.type === 'uniform') next.distType = dd.type
+      if (typeof dd.noise_pct === 'number' && Number.isFinite(dd.noise_pct)) next.noisePct = dd.noise_pct
+    }
+  }
+  if (type === 'analysis' && Array.isArray(inner.sweeps)) {
+    const rows: SweepRow[] = []
+    for (const s of inner.sweeps) {
+      if (typeof s !== 'object' || s === null) continue
+      const r = s as Record<string, unknown>
+      if (typeof r.param_path !== 'string') continue
+      const values =
+        typeof r.values === 'string'
+          ? r.values
+          : Array.isArray(r.values)
+            ? (r.values as unknown[]).map((x) => String(x)).join(',')
+            : null
+      if (values === null) continue
+      rows.push({
+        path: r.param_path,
+        values,
+        unit: typeof r.unit === 'string' ? r.unit : '',
+      })
+    }
+    if (rows.length > 0) next.sweeps = rows
+  }
 }
 
 /**
@@ -144,6 +281,115 @@ function serializeParams(params: Record<string, unknown> | undefined): string {
 /** 新逻辑提交的一次性随机段(幂等键允许字符集内; 时间 + 随机, 碰撞可忽略)。 */
 function newSubmitNonce(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+}
+
+/** 冻结数值 → 表单文本(有限 number 或数值字符串才映射, 其余返回 null 表缺席)。 */
+function frozenNumText(v: unknown): string | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return v.trim()
+  return null
+}
+
+/** 冻结字符串(非空字符串才采用, 其余返回 null 表缺席)。 */
+function frozenStr(v: unknown): string | null {
+  return typeof v === 'string' && v !== '' ? v : null
+}
+
+/** 冻结评价确认块 → 单行摘要(缺席项以 — 占位, 不猜测)。 */
+function describeFrozenEvaluation(evaluation: Record<string, unknown>): string {
+  const parts: string[] = []
+  const years = frozenNumText(evaluation.evaluation_years)
+  const period = frozenNumText(evaluation.construction_period)
+  const operation = frozenNumText(evaluation.operation_years)
+  const rate = frozenNumText(evaluation.discount_rate)
+  if (years !== null) parts.push(`E${years}`)
+  if (period !== null) parts.push(`K${period}`)
+  if (operation !== null) parts.push(`N${operation}`)
+  if (rate !== null) parts.push(`r${rate}`)
+  if (Array.isArray(evaluation.construction_payments)) {
+    parts.push(`付款${evaluation.construction_payments.length}笔`)
+  }
+  if (Array.isArray(evaluation.maintenance_expenses)) {
+    parts.push(`维护${evaluation.maintenance_expenses.length}笔`)
+  }
+  const by = evaluation.confirmed_by
+  if (typeof by === 'number' && Number.isFinite(by)) parts.push(`确认人#${by}`)
+  const at = frozenStr(evaluation.confirmed_at)
+  if (at !== null) parts.push(at)
+  return parts.length > 0 ? parts.join(' · ') : '—'
+}
+
+/** 冻结计算配置正文 → 单行摘要(缺席以 — 占位, 不猜测)。 */
+function describeFrozenConfig(body: Record<string, unknown>): string {
+  const parts = [frozenStr(body.mode), frozenStr(body.generator), frozenStr(body.solver)].filter(
+    (x): x is string => x !== null,
+  )
+  const ref = body.config_ref
+  if (typeof ref === 'object' && ref !== null) {
+    const rev = (ref as Record<string, unknown>).revision
+    if (typeof rev === 'number' && Number.isFinite(rev)) parts.push(`revision v${rev}`)
+  }
+  return parts.length > 0 ? parts.join(' · ') : '—'
+}
+
+/** 冻结财务引用 → 单行摘要(缺席以 — 占位, 不猜测)。 */
+function describeFrozenFinance(profileId: string | null, revision: number | null): string {
+  if (profileId === null && revision === null) return '—'
+  const parts: string[] = []
+  if (profileId !== null) parts.push(profileId)
+  if (revision !== null) parts.push(`revision v${revision}`)
+  return parts.join(' · ')
+}
+
+/** 冻结输入只读视图(快照投影; 版本/数据集名称按冻结 id 解析, 缺失显精确引用)。 */
+function FrozenInputsView({
+  inputs,
+  versions,
+  datasetNames,
+  labels,
+}: {
+  inputs: TaskInputs
+  versions: ProjectVersion[]
+  datasetNames: string[]
+  labels: {
+    snapshot: string
+    version: string
+    datasets: string
+    evaluation: string
+    config: string
+    planning: string
+    finance: string
+    models: string
+  }
+}) {
+  const snap = inputs.snapshot
+  if (!snap) return null
+  const versionHit = versions.find((v) => v.id === snap.project_version_id)
+  const modelIds = Object.keys(snap.device_models)
+  return (
+    <dl className="ies-kv">
+      <dt>{labels.snapshot}</dt>
+      <dd>
+        #{snap.id}
+        {snap.random_seed !== null ? ` · seed ${snap.random_seed}` : ''}
+        {` · schema ${snap.schema_version}`}
+      </dd>
+      <dt>{labels.version}</dt>
+      <dd>{versionHit ? `v${versionHit.version_no}` : `id:${snap.project_version_id}`}</dd>
+      <dt>{labels.datasets}</dt>
+      <dd>{datasetNames.length > 0 ? datasetNames.join('、') : '—'}</dd>
+      <dt>{labels.evaluation}</dt>
+      <dd>{describeFrozenEvaluation(snap.evaluation)}</dd>
+      <dt>{labels.config}</dt>
+      <dd>{describeFrozenConfig(snap.calc_config_snapshot)}</dd>
+      <dt>{labels.planning}</dt>
+      <dd>{inputs.frozen_refs.planning_revision !== null ? `revision v${inputs.frozen_refs.planning_revision}` : '—'}</dd>
+      <dt>{labels.finance}</dt>
+      <dd>{describeFrozenFinance(inputs.frozen_refs.finance_profile_id, inputs.frozen_refs.finance_revision)}</dd>
+      <dt>{labels.models}</dt>
+      <dd>{modelIds.length > 0 ? `${modelIds.length} · ${modelIds.join('、')}` : '—'}</dd>
+    </dl>
+  )
 }
 
 function progressOf(task: Task): number {
@@ -216,7 +462,19 @@ function DiagnosticItem({ diag }: { diag: Diagnostic }) {
 
 export default function TasksPage() {
   const { t } = useI18n()
-  const { projectId } = useWorkbench()
+  // 全局任务选择(结果/导出页同选择; 仅记录选择, 打开表单/切换选择不创建任务)
+  const {
+    projectId,
+    project,
+    selectedTaskId: selectedId,
+    setSelectedTaskId: setSelectedId,
+    selectTaskWithDraft,
+    draftLoadingTaskId,
+    versions,
+    refreshDetailed,
+    workspaceCoord,
+  } = useWorkbench()
+  const { setStatus: setAutosaveStatus } = useAutosave()
 
   // -------------------------------------------------------------------------
   // 数据状态
@@ -225,29 +483,45 @@ export default function TasksPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [me, setMe] = useState<User | null>(null)
   const [config, setConfig] = useState<CalcConfig | null>(null)
+  // 数据集目录仅服务冻结输入视图的名称解析(只读); 提交对话框不再做数据集
+  // 选择(清单权威是草稿 dataset_bindings), 故无目录就绪/挂起/补解状态。
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [typeFilter, setTypeFilter] = useState<'all' | TaskType>('all')
 
-  // 选中任务(详情面板),localStorage 持久化以支持重开恢复
-  const [selectedId, setSelectedId] = useState<number | null>(() => {
-    try {
-      const raw = window.localStorage.getItem(`iesplan.tasks.selected.${projectId}`)
-      const v = raw ? Number(raw) : NaN
-      return Number.isFinite(v) && v > 0 ? v : null
-    } catch {
-      return null
-    }
-  })
+  // 选中任务来自全局工作台上下文(持久化由 Provider 持有, 此处不另存)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  // 冻结输入视图(所选任务快照的只读投影, 非当前草稿; 失败可见, 不回退草稿)
+  const [frozenInputs, setFrozenInputs] = useState<TaskInputs | null>(null)
+  const [frozenLoading, setFrozenLoading] = useState(false)
+  const [frozenError, setFrozenError] = useState<string | null>(null)
+  const [frozenDatasetNames, setFrozenDatasetNames] = useState<string[]>([])
+
+  // 工作输入暂存(表单是草稿 task_working_inputs 的可编辑镜像):
+  // 脏标记 + 防抖保存; 保存互斥与切换序列归工作台共享协调(与选择载入
+  // 同序列, 同页/跨页有序, 旧值不得在载入后落地)。
+  const [form, setForm] = useState<CreateForm>(DEFAULT_FORM)
+  const formRef = useRef<CreateForm>(form)
+  const dirtyRef = useRef(false)
+  const saveTimer = useRef<number | null>(null)
+  const saveSeqRef = useRef(0)
+  /** 切换待落定(任务 id + 载入返回的新草稿修订; 修订到达前不读旧草稿)。 */
+  const pendingSwitchRef = useRef<{ task: number; rev: number } | null>(null)
+  /** 上次与草稿一致的工作输入签名(防抖保存成功/水合时更新)。 */
+  const lastSyncedRef = useRef<string | null>(null)
+  /** 上次已应用到表单的草稿工作输入签名(避免重复水合)。 */
+  const lastAppliedRef = useRef<string | null>(null)
+  /** 工作输入是否已就绪(挂载水合/切换落定已应用，或用户已编辑)。
+   * 未就绪时表单仍是默认空态，提交必须禁用，避免在草稿读到前把空值
+   * 当成用户输入冻结；切换载入等待中同样禁用，避免冻结旧任务的值。 */
+  const [workingReady, setWorkingReady] = useState(false)
 
   // 提交表单
   const [createOpen, setCreateOpen] = useState(false)
   /** 本次对话框对应的逻辑提交标识: 打开对话框即换新键; 同一提交的网络
    * 重试/确认复用原键(状态不变), 关闭重开即视为新的逻辑提交。 */
   const [submitNonce, setSubmitNonce] = useState(() => newSubmitNonce())
-  const [form, setForm] = useState<CreateForm>(DEFAULT_FORM)
   const [formError, setFormError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   /** 校验门禁结果:提交前 validation.run 的阻断诊断(空数组 = 通过; null = 未检查/校验不可用)。 */
@@ -299,9 +573,13 @@ export default function TasksPage() {
   useEffect(() => {
     api.datasets
       .list({ project_id: projectId, limit: 100 })
-      // 后端数据集创建即 draft 状态(无发布流程); 只要未废弃即可选, 避免误导
-      .then((page) => setDatasets(page.items.filter((d) => d.status !== 'deprecated')))
-      .catch(() => setDatasets([]))
+      // 后端数据集创建即 draft 状态(无发布流程); 只要未废弃即列入名称解析
+      .then((page) => {
+        setDatasets(page.items.filter((d) => d.status !== 'deprecated'))
+      })
+      .catch(() => {
+        setDatasets([])
+      })
   }, [projectId])
 
   // -------------------------------------------------------------------------
@@ -331,17 +609,6 @@ export default function TasksPage() {
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [loadList])
-
-  // 选中任务持久化(浏览器关闭后重开可恢复视图)
-  useEffect(() => {
-    try {
-      const key = `iesplan.tasks.selected.${projectId}`
-      if (selectedId) window.localStorage.setItem(key, String(selectedId))
-      else window.localStorage.removeItem(key)
-    } catch {
-      // 隐私模式忽略
-    }
-  }, [selectedId, projectId])
 
   // -------------------------------------------------------------------------
   // 详情轮询(5s)
@@ -376,6 +643,67 @@ export default function TasksPage() {
       clearInterval(timer)
     }
   }, [selectedId])
+
+  // -------------------------------------------------------------------------
+  // 冻结输入视图(所选任务快照只读投影; 名称按冻结 id 解析, 缺失显精确引用)
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    if (!selectedId) {
+      setFrozenInputs(null)
+      setFrozenError(null)
+      setFrozenDatasetNames([])
+      return
+    }
+    let cancelled = false
+    const load = async () => {
+      setFrozenLoading(true)
+      setFrozenError(null)
+      try {
+        const inputs = await api.tasks.inputs(projectId, selectedId)
+        if (cancelled) return
+        setFrozenInputs(inputs)
+        // 数据集名称按冻结版本 id 匹配现有数据集版本(只读查询, 不建任务);
+        // 未匹配显精确引用 id, 不读当前绑定猜测。
+        const vids = inputs.snapshot ? inputs.snapshot.dataset_version_ids : []
+        const names: string[] = []
+        const matched = new Set<number>()
+        if (vids.length > 0) {
+          for (const ds of datasets) {
+            try {
+              const vs = await api.datasets.versions(projectId, ds.id)
+              if (cancelled) return
+              for (const v of vs) {
+                if (vids.includes(v.id) && !matched.has(v.id)) {
+                  matched.add(v.id)
+                  names.push(`${ds.name} v${v.version_no}`)
+                }
+              }
+            } catch {
+              // 单个数据集版本查询失败不遮蔽冻结引用(下方按 id 兜底展示)
+            }
+          }
+          for (const vid of vids) {
+            // 名称未解析: 精确引用 id(版本 id 全局唯一, 直接展示)
+            if (!matched.has(vid)) names.push(`id:${vid}`)
+          }
+        }
+        if (!cancelled) setFrozenDatasetNames(names)
+      } catch (err) {
+        if (!cancelled) {
+          setFrozenInputs(null)
+          setFrozenDatasetNames([])
+          setFrozenError(translateError(err as ApiError))
+        }
+      } finally {
+        if (!cancelled) setFrozenLoading(false)
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+    // datasets 就绪后重解名称(只读); 输入本身随选择变化重读。
+  }, [selectedId, projectId, datasets])
 
   // -------------------------------------------------------------------------
   // 提交新任务
@@ -488,7 +816,6 @@ export default function TasksPage() {
         project_id: projectId,
         type: f.type,
         ...(savedRevisionValue !== null ? { config_revision: savedRevisionValue } : {}),
-        ...(f.datasetIds.length > 0 ? { dataset_ids: f.datasetIds } : {}),
         ...(evaluation ? { evaluation } : {}),
         idempotency_key: idemKey,
         ...(params ? { params } : {}),
@@ -499,7 +826,20 @@ export default function TasksPage() {
 
   const submit = useCallback(
     async (force: boolean) => {
-      const input = buildInput(form)
+      // 提交即冻结当时工作区: 先把对话框工作输入落到草稿(失败则中止并可见,
+      // 不冻结与草稿不一致的值), 再按表单值提交(与刚落定的草稿一致)。
+      if (saveTimer.current !== null) {
+        window.clearTimeout(saveTimer.current)
+        saveTimer.current = null
+      }
+      if (dirtyRef.current) {
+        const flushed = await persistWorking(formRef.current)
+        if (!flushed) {
+          setFormError(t('ies.task.working_save_failed'))
+          return
+        }
+      }
+      const input = buildInput(formRef.current)
       // 校验门禁:存在阻断问题禁止提交(与校验页一致; 否则任务提交后约 1 秒
       // 会被 worker 以数据/配置缺失拒绝, 造成无效提交)
       setChecking(true)
@@ -522,7 +862,7 @@ export default function TasksPage() {
         // 同参数指纹, 兼容旧键形态)。这只是 UX 提示, 不得误当幂等身份:
         // 真正的幂等身份是完整幂等键(含一次性随机段), 由后端裁决; 用户
         // 确认后仍以本次新键提交产生新任务。
-        const sig = logicalSigOf(form)
+        const sig = logicalSigOf(formRef.current)
         const dup =
           tasks?.find(
             (tk) =>
@@ -534,7 +874,7 @@ export default function TasksPage() {
           return
         }
       }
-      if (parseEvaluation(form) === null) {
+      if (parseEvaluation(formRef.current) === null) {
         setFormError(t('ies.task.evaluation_invalid'))
         return
       }
@@ -552,7 +892,7 @@ export default function TasksPage() {
         setSubmitting(false)
       }
     },
-    [buildInput, form, tasks, loadList, projectId, submitting, t, logicalSigOf],
+    [buildInput, tasks, loadList, projectId, submitting, t, logicalSigOf],
   )
 
   const confirmDuplicate = useCallback(() => {
@@ -586,6 +926,211 @@ export default function TasksPage() {
       cancelled = true
     }
   }, [createOpen, projectId])
+
+  // -------------------------------------------------------------------------
+  // 工作输入暂存与水合: 表单是草稿 task_working_inputs 的可编辑镜像
+  // -------------------------------------------------------------------------
+  // - 编辑经 updateForm: 本地即时 + 脏标记 + 防抖落草稿(含未完成编辑态);
+  // - 挂载/重进/外部修订: 脏为 false 且草稿签名变化时整体替换(不覆盖编辑);
+  // - 任务切换: 服务端 load-draft 已整体替换工作输入, 此处待新修订到达后
+  //   整体替换(切换序列使挂起保存作废, 不覆盖新选择);
+  // - 切换/编辑/保存均不创建任务; 提交前先落定脏输入再冻结。
+  /** 当前表单工作输入签名(与已落定值比较, 决定落定后脏态去留)。 */
+  const keyOfCurrentForm = useCallback((): string => {
+    return serializeParams(workingOfForm(formRef.current))
+  }, [])
+  /**
+   * 按当前表单是否仍等于已同步值同步脏态/指示: 相等即已同步(清脏);
+   * 不等即排队/落定期间产生了新编辑, 保留其脏态与待落定。
+   */
+  const syncDirtyStatus = useCallback(
+    (syncedKey: string): void => {
+      const stillSynced = keyOfCurrentForm() === syncedKey
+      dirtyRef.current = !stillSynced
+      setAutosaveStatus(stillSynced ? 'saved' : 'dirty')
+    },
+    [keyOfCurrentForm, setAutosaveStatus],
+  )
+  const persistWorking = useCallback(
+    async (f: CreateForm, expectedRevision?: number): Promise<boolean> => {
+      // 同页保存串行: 等待在途保存落定后再执行, 本次 GET 即读到其推进后
+      // 的修订, 不与之自竞 409。锁自身永不拒绝, 无需捕获等待段。
+      // 互斥与切换序列归工作台共享: 先记序列再排队, 执行前复核——已被
+      // 切换超越的保存(旧任务表单值)在写前丢弃, 不得落地覆盖新载入。
+      const seq = workspaceCoord.switchSeq.current
+      const prev = workspaceCoord.saveMutex.current
+      let release!: () => void
+      workspaceCoord.saveMutex.current = new Promise<void>((res) => {
+        release = res
+      })
+      await prev
+      try {
+        // 写前复核在 try 内: 丢弃路径亦经 finally 释放互斥槽, 不得泄漏
+        // 槽位卡住其后排队者与选择载入的等待。
+        if (workspaceCoord.switchSeq.current !== seq) return false
+        const mySave = saveSeqRef.current + 1
+        saveSeqRef.current = mySave
+        setAutosaveStatus('saving')
+        try {
+          const working = workingOfForm(f)
+          // 排队期间已有完全相同值落定(防抖/关闭/卸载任一先落地):
+          // 去重不写, 脏清零, 视为已同步。值比较而非脏标记——往返编辑
+          // 回到已同步值时脏仍为 true, 但服务端已有该值, 不必再写;
+          // 值不同必写, 不丢编辑。互斥保证执行时此前保存均已落定,
+          // lastSynced 新鲜, 跳过不可能掩盖未落定的值。
+          if (serializeParams(working) === lastSyncedRef.current) {
+            // 去重不写: 脏态按当前表单是否仍等于实际已同步值决定——传已
+            // 知落定的 lastSynced(与所带 working 相等), 不得传当前表单
+            // (恒等于自身, 会清掉排队期间新编辑 f2 的脏态)。
+            syncDirtyStatus(lastSyncedRef.current)
+            return true
+          }
+          if (expectedRevision === undefined) {
+            await api.tasks.saveWorkingInputs(projectId, working)
+          } else {
+            await api.tasks.saveWorkingInputs(projectId, working, expectedRevision)
+          }
+          // 切换后落定的旧保存作废, 不碰新选择的状态; 但落定的值确已
+          // 写入服务端, lastSynced 按实际落定值更新(后续去重依据)。
+          const key = serializeParams(working)
+          lastSyncedRef.current = key
+          if (workspaceCoord.switchSeq.current !== seq || saveSeqRef.current !== mySave) return false
+          lastAppliedRef.current = key
+          // 脏态按当前表单是否仍等于本次落定值决定: 落定途中用户又编辑
+          // (f2) 时保留其脏态与待落定, 不得用旧值(f1)的落定清掉新编辑。
+          syncDirtyStatus(key)
+          return true
+        } catch {
+          if (workspaceCoord.switchSeq.current === seq && saveSeqRef.current === mySave) {
+            setAutosaveStatus('error')
+          }
+          return false
+        }
+      } finally {
+        release()
+      }
+    },
+    [projectId, setAutosaveStatus, workspaceCoord, keyOfCurrentForm, syncDirtyStatus],
+  )
+  const persistRef = useRef(persistWorking)
+  persistRef.current = persistWorking
+
+  const schedulePersist = useCallback(() => {
+    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current)
+    const seq = workspaceCoord.switchSeq.current
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null
+      if (workspaceCoord.switchSeq.current !== seq) return
+      void persistRef.current(formRef.current)
+    }, 700)
+  }, [workspaceCoord])
+
+  /** 表单唯一写入口(本地即时 + 脏标记 + 防抖落草稿)。 */
+  const updateForm = useCallback(
+    (next: CreateForm) => {
+      formRef.current = next
+      setForm(next)
+      dirtyRef.current = true
+      setAutosaveStatus('dirty')
+      schedulePersist()
+    },
+    [schedulePersist, setAutosaveStatus],
+  )
+
+  /** 脏输入落定(提交/关闭对话框前调用; 无脏即 true)。 */
+  const flushWorking = useCallback(async (): Promise<boolean> => {
+    if (saveTimer.current !== null) {
+      window.clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+    if (!dirtyRef.current) return true
+    return persistRef.current(formRef.current)
+  }, [])
+
+  const draftWorking = project?.draft?.task_working_inputs ?? null
+  const draftRevision = project?.draft?.revision ?? 0
+  useEffect(() => {
+    const pending = pendingSwitchRef.current
+    if (pending !== null) {
+      if (selectedId !== pending.task) {
+        pendingSwitchRef.current = null
+      } else if (draftRevision >= pending.rev) {
+        // 切换落定: 整体替换为新选择的工作输入(挂起保存作废, 脏标记清零)。
+        pendingSwitchRef.current = null
+        if (saveTimer.current !== null) {
+          window.clearTimeout(saveTimer.current)
+          saveTimer.current = null
+        }
+        dirtyRef.current = false
+        if (draftWorking !== null && typeof draftWorking === 'object' && !Array.isArray(draftWorking)) {
+          const working = draftWorking as Record<string, unknown>
+          const key = serializeParams(working)
+          lastSyncedRef.current = key
+          lastAppliedRef.current = key
+          const next = formFromWorking(working)
+          formRef.current = next
+          setForm(next)
+        }
+        setWorkingReady(true)
+      } else {
+        // 切换载入等待中: 表单仍是旧任务的值，不可提交。
+        setWorkingReady(false)
+      }
+      return
+    }
+    // 项目未载入时表单仍是默认空态，不可提交（等下分支水合后再开）。
+    if (project === null) {
+      setWorkingReady(false)
+      return
+    }
+    // 用户已编辑：表单即用户值（水合会跳过脏表单），可以提交。
+    if (dirtyRef.current) {
+      setWorkingReady(true)
+      return
+    }
+    const key = serializeParams(
+      draftWorking !== null && typeof draftWorking === 'object' && !Array.isArray(draftWorking)
+        ? (draftWorking as Record<string, unknown>)
+        : {},
+    )
+    if (key === lastAppliedRef.current) {
+      setWorkingReady(true)
+      return
+    }
+    // 挂载/重进/外部修订: 非脏时整体替换(缺席即默认空态, 不沿用他任务值)。
+    lastAppliedRef.current = key
+    if (draftWorking !== null && typeof draftWorking === 'object' && !Array.isArray(draftWorking)) {
+      lastSyncedRef.current = key
+      const next = formFromWorking(draftWorking as Record<string, unknown>)
+      formRef.current = next
+      setForm(next)
+    }
+    setWorkingReady(true)
+  }, [project, selectedId, draftRevision, draftWorking])
+
+  // 挂载即重读项目视图(工作台 Provider 常驻, 子页重进不自动重读; 重读后
+  // 上方水合 effect 以最新草稿为准, 不读旧快照覆盖编辑)。
+  useEffect(() => {
+    void refreshDetailed()
+  }, [refreshDetailed])
+
+  // 卸载兜底: 脏输入落定一次, 保住导航前最后一次编辑。执行时重读修订
+  // (与互斥串行, 不以调度时旧修订号写); 若卸载前已发生切换, 写前复核
+  // 序列即丢弃, 不覆盖新选择。结果页切换即走此路径。
+  // 入队时脏即排队, 执行时复核(见 persistWorking): 排队后已有同值落定
+  // (关闭落定/防抖先落地)则跳过, 值不同或从未落定必写, 不丢编辑。
+  useEffect(
+    () => () => {
+      if (saveTimer.current !== null) {
+        window.clearTimeout(saveTimer.current)
+        saveTimer.current = null
+      }
+      if (dirtyRef.current) {
+        void persistRef.current(formRef.current)
+      }
+    },
+    [],
+  )
 
   // -------------------------------------------------------------------------
   // 取消 / 重试
@@ -693,7 +1238,32 @@ export default function TasksPage() {
                     key={tk.id}
                     clickable
                     className={selectedId === tk.id ? 'ies-table__row--active' : undefined}
-                    onClick={() => setSelectedId(tk.id)}
+                    onClick={() => {
+                      // 显式选择即把该任务冻结输入载入工作草稿(仅用户点击;
+                      // 初始化/重挂载不触发)。载入期间(忙态)或同任务重复
+                      // 点击一律忽略: 不得为此取消防抖计时器/清脏态, 否则
+                      // 待落定的编辑丢失; 共享边界同样会忽略此次调用。
+                      // 非忽略时: 选择经工作台同序列作废在途旧保存并等其
+                      // 落定后再载入; 新修订到达后表单整体替换(见水合 effect)。
+                      if (draftLoadingTaskId !== null || tk.id === selectedId) return
+                      setActionError(null)
+                      if (saveTimer.current !== null) {
+                        window.clearTimeout(saveTimer.current)
+                        saveTimer.current = null
+                      }
+                      dirtyRef.current = false
+                      void selectTaskWithDraft(tk.id).then((res) => {
+                        if (res.error !== null) {
+                          setActionError(res.error)
+                        } else if (res.loaded) {
+                          pendingSwitchRef.current = {
+                            task: tk.id,
+                            rev: res.draftRevision ?? 0,
+                          }
+                          setFlash(t('ies.task.draft_loaded', { task_id: tk.id }))
+                        }
+                      })
+                    }}
                   >
                     <TD>#{tk.id}</TD>
                     <TD>{t(`ies.task.type_${tk.type}`)}</TD>
@@ -781,6 +1351,38 @@ export default function TasksPage() {
                   </>
                 ) : null}
               </dl>
+
+              {/* 冻结输入: 所选任务快照的只读投影(非当前草稿); 失败可见, 不回退草稿 */}
+              <h3 style={{ fontSize: 'var(--ies-fs-sm)', fontWeight: 700, margin: 'var(--ies-space-4) 0 var(--ies-space-2)' }}>
+                {t('ies.task.frozen_inputs')}
+              </h3>
+              {frozenLoading ? (
+                <div style={{ padding: 'var(--ies-space-2)' }}>
+                  <Spinner size="sm" />
+                </div>
+              ) : frozenError ? (
+                <Alert variant="error">{frozenError}</Alert>
+              ) : !frozenInputs ? null : frozenInputs.snapshot === null ? (
+                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                  {t('ies.task.frozen_no_snapshot')}
+                </p>
+              ) : (
+                <FrozenInputsView
+                  inputs={frozenInputs}
+                  versions={versions}
+                  datasetNames={frozenDatasetNames}
+                  labels={{
+                    snapshot: t('ies.task.frozen_snapshot'),
+                    version: t('ies.task.frozen_version'),
+                    datasets: t('ies.task.frozen_datasets'),
+                    evaluation: t('ies.task.frozen_evaluation'),
+                    config: t('ies.task.frozen_config'),
+                    planning: t('ies.task.frozen_planning'),
+                    finance: t('ies.task.frozen_finance'),
+                    models: t('ies.task.frozen_models'),
+                  }}
+                />
+              )}
 
               <div style={{ margin: 'var(--ies-space-3) 0' }}>
                 <ProgressBar
@@ -871,20 +1473,35 @@ export default function TasksPage() {
         </Card>
       </section>
 
-      {/* 提交任务对话框 */}
+      {/* 提交任务对话框(关闭即把脏工作输入后台落草稿, 不建任务;
+          对话框立即关闭以便继续导航/选择, 不被网络停顿的保存卡住;
+          落定失败经工作台自动保存指示可见, 不当成功静默丢编辑;
+          提交按钮仍先落定再冻结, 与关闭路径不同) */}
       <Dialog
         open={createOpen}
-        onClose={() => setCreateOpen(false)}
+        onClose={() => {
+          setCreateOpen(false)
+          setFormError(null)
+          void flushWorking()
+        }}
         title={t('ies.task.submit')}
         size="lg"
         footer={
           <>
-            <Button variant="secondary" onClick={() => setCreateOpen(false)}>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                // 与对话框 onClose 同语义: 立即关闭, 脏输入后台落定。
+                setCreateOpen(false)
+                setFormError(null)
+                void flushWorking()
+              }}
+            >
               {t('ies.common.cancel')}
             </Button>
             <Button
               loading={submitting || checking}
-              disabled={!hasSavedConfigValue}
+              disabled={!hasSavedConfigValue || !workingReady}
               onClick={() => {
                 void submit(false)
               }}
@@ -928,7 +1545,7 @@ export default function TasksPage() {
           <Select
             id="task-type"
             value={form.type}
-            onChange={(e) => setForm({ ...form, type: e.target.value as TaskType })}
+            onChange={(e) => updateForm({ ...form, type: e.target.value as TaskType })}
           >
             {SUBMITTABLE_TYPES.map((ty) => (
               <option key={ty} value={ty}>
@@ -962,30 +1579,9 @@ export default function TasksPage() {
           </Alert>
         )}
 
-        {datasets.length > 0 ? (
-          <fieldset className="ies-fieldset">
-            <legend>{t('ies.task.datasets')}</legend>
-            {datasets.map((ds) => (
-              <Checkbox
-                key={ds.id}
-                label={ds.name}
-                checked={form.datasetIds.includes(ds.id)}
-                onChange={() =>
-                  setForm({
-                    ...form,
-                    datasetIds: form.datasetIds.includes(ds.id)
-                      ? form.datasetIds.filter((id) => id !== ds.id)
-                      : [...form.datasetIds, ds.id],
-                  })
-                }
-              />
-            ))}
-          </fieldset>
-        ) : (
-          <p className="ies-form-message" style={{ marginBottom: 'var(--ies-space-4)' }}>
-            {t('ies.task.no_published_datasets')}
-          </p>
-        )}
+        <div className="ies-section">
+          <Alert variant="info">{t('ies.task.datasets_note')}</Alert>
+        </div>
 
         <fieldset className="ies-fieldset">
           <legend>{t('ies.task.evaluation')}</legend>
@@ -998,7 +1594,7 @@ export default function TasksPage() {
               value={form.constructionPeriod}
               placeholder="1"
               inputMode="numeric"
-              onChange={(e) => setForm({ ...form, constructionPeriod: e.target.value })}
+              onChange={(e) => updateForm({ ...form, constructionPeriod: e.target.value })}
             />
           </FormField>
           <FormField label={t('ies.task.operation_years')} htmlFor="task-operation-years" required>
@@ -1007,7 +1603,7 @@ export default function TasksPage() {
               value={form.operationYears}
               placeholder="2"
               inputMode="numeric"
-              onChange={(e) => setForm({ ...form, operationYears: e.target.value })}
+              onChange={(e) => updateForm({ ...form, operationYears: e.target.value })}
             />
           </FormField>
           <p className="ies-form-message" style={{ marginBottom: 'var(--ies-space-2)' }}>
@@ -1026,7 +1622,7 @@ export default function TasksPage() {
               value={form.discountRate}
               placeholder="0.08"
               inputMode="decimal"
-              onChange={(e) => setForm({ ...form, discountRate: e.target.value })}
+              onChange={(e) => updateForm({ ...form, discountRate: e.target.value })}
             />
           </FormField>
           <FormField label={t('ies.task.construction_payments')} htmlFor="task-construction-payments" required>
@@ -1035,7 +1631,7 @@ export default function TasksPage() {
               value={form.constructionPayments}
               placeholder={t('ies.task.construction_payments_placeholder')}
               rows={2}
-              onChange={(e) => setForm({ ...form, constructionPayments: e.target.value })}
+              onChange={(e) => updateForm({ ...form, constructionPayments: e.target.value })}
             />
           </FormField>
           <FormField label={t('ies.task.maintenance_expenses')} htmlFor="task-maintenance-expenses" required>
@@ -1044,7 +1640,7 @@ export default function TasksPage() {
               value={form.maintenanceExpenses}
               placeholder={t('ies.task.maintenance_expenses_placeholder')}
               rows={2}
-              onChange={(e) => setForm({ ...form, maintenanceExpenses: e.target.value })}
+              onChange={(e) => updateForm({ ...form, maintenanceExpenses: e.target.value })}
             />
           </FormField>
         </fieldset>
@@ -1070,7 +1666,7 @@ export default function TasksPage() {
                     name="u-mode"
                     value={mode}
                     checked={form.uMode === mode}
-                    onChange={() => setForm({ ...form, uMode: mode })}
+                    onChange={() => updateForm({ ...form, uMode: mode })}
                   />
                   <span className="ies-radio-card__title">{t(titleKey)}</span>
                   <span className="ies-radio-card__desc">{t(descKey)}</span>
@@ -1086,7 +1682,7 @@ export default function TasksPage() {
                   max={10000}
                   value={form.nSamples}
                   onChange={(e) =>
-                    setForm({ ...form, nSamples: Math.max(1, Number(e.target.value) || 1) })
+                    updateForm({ ...form, nSamples: Math.max(1, Number(e.target.value) || 1) })
                   }
                 />
               </FormField>
@@ -1096,14 +1692,14 @@ export default function TasksPage() {
                   type="number"
                   placeholder={t('ies.common.optional')}
                   value={form.seed}
-                  onChange={(e) => setForm({ ...form, seed: e.target.value })}
+                  onChange={(e) => updateForm({ ...form, seed: e.target.value })}
                 />
               </FormField>
               <FormField label={t('ies.task.distribution')} htmlFor="u-dist">
                 <Select
                   id="u-dist"
                   value={form.distType}
-                  onChange={(e) => setForm({ ...form, distType: e.target.value as DistType })}
+                  onChange={(e) => updateForm({ ...form, distType: e.target.value as DistType })}
                 >
                   <option value="normal">{t('ies.task.distribution_normal')}</option>
                   <option value="triangular">{t('ies.task.distribution_triangular')}</option>
@@ -1118,7 +1714,7 @@ export default function TasksPage() {
                   max={100}
                   value={form.noisePct}
                   onChange={(e) =>
-                    setForm({ ...form, noisePct: Math.max(0, Number(e.target.value) || 0) })
+                    updateForm({ ...form, noisePct: Math.max(0, Number(e.target.value) || 0) })
                   }
                 />
               </FormField>
@@ -1138,7 +1734,7 @@ export default function TasksPage() {
                     placeholder="calc_config.params.discount_rate"
                     value={sweep.path}
                     onChange={(e) =>
-                      setForm({
+                      updateForm({
                         ...form,
                         sweeps: form.sweeps.map((s, i) =>
                           i === idx ? { ...s, path: e.target.value } : s,
@@ -1154,7 +1750,7 @@ export default function TasksPage() {
                     placeholder="0.06,0.08,0.10"
                     value={sweep.values}
                     onChange={(e) =>
-                      setForm({
+                      updateForm({
                         ...form,
                         sweeps: form.sweeps.map((s, i) =>
                           i === idx ? { ...s, values: e.target.value } : s,
@@ -1170,7 +1766,7 @@ export default function TasksPage() {
                     placeholder="-"
                     value={sweep.unit}
                     onChange={(e) =>
-                      setForm({
+                      updateForm({
                         ...form,
                         sweeps: form.sweeps.map((s, i) =>
                           i === idx ? { ...s, unit: e.target.value } : s,
@@ -1186,7 +1782,7 @@ export default function TasksPage() {
                 variant="ghost"
                 size="sm"
                 onClick={() =>
-                  setForm({ ...form, sweeps: [...form.sweeps, { path: '', values: '', unit: '' }] })
+                  updateForm({ ...form, sweeps: [...form.sweeps, { path: '', values: '', unit: '' }] })
                 }
               >
                 {t('ies.task.sweep_add')}
@@ -1195,7 +1791,7 @@ export default function TasksPage() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setForm({ ...form, sweeps: form.sweeps.slice(0, -1) })}
+                  onClick={() => updateForm({ ...form, sweeps: form.sweeps.slice(0, -1) })}
                 >
                   {t('ies.task.sweep_remove')}
                 </Button>

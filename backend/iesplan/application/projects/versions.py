@@ -40,7 +40,7 @@ from iesplan.application.projects.content_objects import (
     store_content_object as _store_content_object,
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
-from iesplan.core.jsonutil import canonical_json
+from iesplan.core.jsonutil import canonical_json, jsonable
 from iesplan.identity.contracts import UserRecord
 from iesplan.project.contracts import DraftRecord, ProjectRecord, ProjectVersionRecord
 from iesplan.results.contracts import SINGLE_SOLUTION_ID
@@ -672,6 +672,116 @@ def apply_scheme(
         raise
 
 
+# 任务提交工作输入的项目侧契约(task_working_inputs, snake_case 业务键):
+# task_type + 评价确认块年份/费率/付款/维护 + 任务级参数 task_params。
+# 值为冻结业务值原样(数字/清单/定点字符串); 用户编辑中的未完成文本由
+# 前端 mapping 写入同键, 后端只做容器级存放, 不解析、不转显示形态。
+# 评价确认与 FinanceProfile/封闭 CalculationConfig 分离(冻结时去向不变)。
+_WORKING_EVALUATION_KEYS: tuple[str, ...] = (
+    "construction_period",
+    "operation_years",
+    "discount_rate",
+    "construction_payments",
+    "maintenance_expenses",
+)
+
+
+def load_task_into_draft(
+    db: Session, user: UserRecord, project_id: int, task_id: int
+) -> dict[str, Any]:
+    """选择计算任务 → 将其冻结输入载入本项目可编辑草稿(工作区更新)。
+
+    单事务: 新草稿行(内容 = 来源版本内容去命令簿记, 与 restore 同派生) +
+    配置指针移动(缺席引用则指针清空, 不 fallback) + 计算配置 revision 追加
+    (冻结正文去任务级附加键; 缺席则不动配置链) + 任务提交工作输入
+    (快照评价确认块与任务级参数业务值原样拷贝, snake_case 业务键, 整体
+    替换, 不混入他任务字段; 缺席的键不写, 不猜测)。不创建任务与项目版本;
+    快照/来源版本/历史输出只读不改。提交时统一提交或回滚。
+    """
+    try:
+        ensure_access(db, user, project_id, "edit")
+        project = project_domain.require_project(db, project_id)
+        if project.status != "active":
+            raise ConflictError(
+                "项目已归档或已删除, 不能载入任务输入",
+                location={"object_type": "project", "object_id": project_id},
+            )
+        task = tasks_domain.get_task(db, task_id)
+        if task is None or task.project_id != project_id:
+            raise NotFoundError(
+                "任务不存在",
+                params={"task_id": task_id, "project_id": project_id},
+                location={"object_type": "task", "object_id": task_id},
+            )
+        if task.calc_snapshot_id is None:
+            raise project_domain.InvalidRequestError("任务尚无可载入的冻结输入")
+        snapshot = tasks_domain.get_snapshot(db, task.calc_snapshot_id)
+        if snapshot is None:
+            raise project_domain.corrupt_error(
+                "计算快照缺失(数据损坏)", object_id=task.calc_snapshot_id
+            )
+        version = project_domain.get_version(db, project_id, snapshot.project_version_id)
+        if version is None:
+            raise project_domain.corrupt_error(
+                "快照引用的项目版本缺失(数据损坏)", object_id=snapshot.project_version_id
+            )
+        content = _load_content_object(db, version.content_object_id)
+        draft_content = {k: v for k, v in content.items() if k != "applied_commands"}
+        eff_lineage, plan_rev = _source_pins(db, project_id, content)
+        project_domain.update_revision_pointers(
+            db,
+            project.id,
+            finance_profile_id=eff_lineage[0] if eff_lineage is not None else None,
+            overrides_revision=eff_lineage[2] if eff_lineage is not None else None,
+            effective_finance_revision=eff_lineage[3] if eff_lineage is not None else None,
+            planning_revision=plan_rev,
+        )
+        # 冻结计算配置正文去任务级附加键(task_params/config_ref 为提交装配
+        # 附加, 非 12 字段配置正文); 缺席则不动配置链, 不猜测。
+        config_revision: int | None = None
+        body = snapshot.calc_config_snapshot
+        if isinstance(body, Mapping) and len(body) > 0:
+            stripped = jsonable({k: v for k, v in body.items() if k not in ("task_params", "config_ref")})
+            if isinstance(stripped, dict) and len(stripped) > 0:
+                row = configuration_domain.create_calculation_config(
+                    db,
+                    project_id=project.id,
+                    content=stripped,
+                    created_by=user.id,
+                )
+                config_revision = row.version
+        # 任务提交工作输入: 快照评价确认块(去服务端确认人/时间, 重提时由
+        # 服务端重写)与任务级参数整体替换为本次所选任务的值; 缺席的键不写,
+        # 不沿用草稿旧值、不混入他任务字段。值为冻结业务值原样拷贝(数字/
+        # 清单/定点字符串), 显示形态由前端 mapping 负责, 后端不转换。
+        # 快照 evaluation 在库内为不可变形态(tuple/mappingproxy, 与提交
+        # 冻结同值), 仅经 jsonable 归一为可存 JSON(持久化归一, 非显示转换)。
+        evaluation = jsonable(snapshot.evaluation)
+        working: dict[str, Any] = {"task_type": task.type}
+        for key in _WORKING_EVALUATION_KEYS:
+            if key in evaluation:
+                working[key] = evaluation[key]
+        params = body.get("task_params") if isinstance(body, Mapping) else None
+        params = jsonable(params) if isinstance(params, Mapping) else None
+        if isinstance(params, dict) and len(params) > 0:
+            working["task_params"] = params
+        draft_content["task_working_inputs"] = working
+        new_draft = project_domain.create_draft(
+            db,
+            project_id=project.id,
+            content_object_id=_store_content_object(db, draft_content),
+            updated_by=user.id,
+        )
+        db.commit()
+        return {
+            "draft": project_domain.draft_to_dict(new_draft),
+            "config_revision": config_revision,
+        }
+    except Exception:
+        db.rollback()
+        raise
+
+
 def list_versions(db: Session, user: UserRecord, project_id: int) -> list[ProjectVersionRecord]:
     """版本列表(新版本在前；含 view 授权，只读，不提交事务)。"""
     ensure_access(db, user, project_id, "view")
@@ -693,6 +803,7 @@ __all__ = [
     "freeze_snapshot_version",
     "get_version",
     "list_versions",
+    "load_task_into_draft",
     "replace_project_model_refs",
     "restore_version",
 ]

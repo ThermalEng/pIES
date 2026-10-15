@@ -198,6 +198,33 @@ export interface ProjectDraft {
     role?: string | null
     note?: string | null
   }>
+  /**
+   * 任务提交工作输入(任务对话框可编辑态的草稿侧副本, task.set_working_inputs
+   * 写入/load-draft 载入; 缺席即无暂存, 对话框取默认空态)。
+   * 键为 snake_case 业务名(见 TaskWorkingInputs, 与后端载入写入一致);
+   * 值为冻结业务值原样或用户编辑原文, 显示形态由对话框 mapping 负责。
+   */
+  task_working_inputs?: TaskWorkingInputs | null
+}
+
+/**
+ * 任务提交工作输入的项目侧契约(草稿 task_working_inputs)。
+ *
+ * 键: task_type + 评价确认块(construction_period/operation_years/
+ * discount_rate/construction_payments/maintenance_expenses) + 任务级参数
+ * task_params({params: 内层}, 与冻结快照同形)。值: 载入时为冻结业务值
+ * 原样(数字/清单/定点字符串), 编辑后为用户所填原文(含未完成态); 后端
+ * 只做容器级存放、不解析, 提交边界严格解析。评价确认与 FinanceProfile
+ * 和封闭 CalculationConfig 分离。
+ */
+export interface TaskWorkingInputs {
+  task_type?: unknown
+  construction_period?: unknown
+  operation_years?: unknown
+  discount_rate?: unknown
+  construction_payments?: unknown
+  maintenance_expenses?: unknown
+  task_params?: unknown
 }
 
 /** 项目版本(与后端 project.version_to_dict 一一对应; 详情端点只返回版本元数据)。 */
@@ -558,6 +585,12 @@ export interface Task {
   updated_at: ISO8601 | null
   /** 是否存在可用证据包(RR-P1-05: 结果可用性是任务元数据, 不靠探测 404 猜测)。 */
   result_available: boolean
+  /** 最新尝试完成时刻(ISO; 列表批量预取, 默认“完成最晚”的排序依据, 缺席为 null)。 */
+  completed_at: string | null
+  /** 最新证据包 id(列表批量预取, 无证据为 null, 不回退猜测)。 */
+  latest_package_id: number | null
+  /** 最新证据包状态(列表批量预取, 无证据为 null)。 */
+  latest_evidence_status: string | null
   /** 列表接口返回的进度摘要(主来源仍是详情/轮询接口)。 */
   summary?: TaskSummary
 }
@@ -598,7 +631,6 @@ export interface TaskCreateInput {
     construction_payments: EvaluationConstructionPayment[]
     maintenance_expenses: EvaluationMaintenanceExpense[]
   }
-  dataset_ids?: EntityId[]
   priority?: number
   deadline?: ISO8601
   /** 客户端重试幂等键(必填, 项目作用域)。 */
@@ -666,6 +698,43 @@ export interface TaskDetail extends Task {
   diagnostics: Diagnostic[]
   evidence: EvidencePackageSummary[]
   calc_snapshot: CalcSnapshotSummary | null
+}
+
+/** 任务冻结输入上下文(只读; 来自快照行投影, 非当前草稿)。 */
+export interface TaskFrozenSnapshot {
+  id: EntityId
+  project_version_id: EntityId
+  dataset_version_ids: EntityId[]
+  /** 计算配置正文(含 task_params/config_ref，不断言其内部形态)。 */
+  calc_config_snapshot: Record<string, unknown>
+  /** 逐装配实例数学贡献(键为实例 id)。 */
+  device_models: Record<string, unknown>
+  /** 评价确认冻结块(年限/折现率/付款/维护/确认人/确认时间)。 */
+  evaluation: Record<string, unknown>
+  schema_version: string
+  random_seed: number | null
+}
+
+/** 版本内容钉选的规划/财务引用(缺席为 null，不回退当前指针)。 */
+export interface TaskFrozenRefs {
+  planning_revision: number | null
+  finance_profile_id: string | null
+  finance_revision: number | null
+}
+
+export interface TaskInputs {
+  task: { id: EntityId; type: TaskType; status: TaskStatus; calc_snapshot_id: EntityId | null }
+  /** 无快照的任务为 null（非计算任务，无冻结输入可读）。 */
+  snapshot: TaskFrozenSnapshot | null
+  frozen_refs: TaskFrozenRefs
+}
+
+/** 选择任务载入工作草稿结果(与后端 load-draft 响应一一对应)。 */
+export interface TaskDraftLoadResult {
+  /** 新草稿 revision(各编辑页后续保存以此为准)。 */
+  draftRevision: number
+  /** 本次追加的计算配置 revision(冻结正文缺席时为 null, 配置链不动)。 */
+  configRevision: number | null
 }
 
 // ---------------------------------------------------------------------------

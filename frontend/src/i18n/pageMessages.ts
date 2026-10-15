@@ -120,12 +120,13 @@ const PAGE_MESSAGES_ZH: Record<string, string> = {
   // 导出(ExportPage: Excel 报告 + 完整项目包)
   // -------------------------------------------------------------------------
   'ies.export.subtitle': '导出结果 Excel 报告,或打包完整项目',
-  'ies.export.excel_desc': '导出最近结果的固定模板 Excel 报告(报告语言可选);下载自动开始',
+  'ies.export.excel_desc': '导出所选任务结果的固定模板 Excel 报告(报告语言可选);下载自动开始',
   'ies.export.lang': '报告语言',
   'ies.export.lang_zh': '中文',
   'ies.export.lang_en': 'English',
   'ies.export.excel_btn': '导出 Excel 报告',
   'ies.export.no_result': '暂无可用结果:请先在任务中心完成方案评价或规划任务,再导出报告',
+  'ies.export.selected_unfinished': '所选任务尚未完成、暂无可导出结果:Excel 导出已禁用,不会使用其他任务的结果',
   'ies.export.need_assessment': '导出 Excel 需要该结果的系统评估记录,且导出不会自动创建评估。请先到结果分析完成系统评估,再回来导出。',
   'ies.export.goto_results': '去结果分析',
   'ies.export.download_ok': '报告已生成,下载已开始:{filename}',
@@ -339,13 +340,15 @@ const PAGE_MESSAGES_EN: Record<string, string> = {
 
   // Export (ExportPage: Excel report + full project package)
   'ies.export.subtitle': 'Export an Excel results report, or package the full project',
-  'ies.export.excel_desc': 'Exports the fixed-template Excel report of the latest result (language selectable); download starts automatically',
+  'ies.export.excel_desc': 'Exports the fixed-template Excel report of the selected task’s result (language selectable); download starts automatically',
   'ies.export.lang': 'Report language',
   'ies.export.lang_zh': 'Chinese',
   'ies.export.lang_en': 'English',
   'ies.export.excel_btn': 'Export Excel report',
   'ies.export.no_result':
     'No result available: complete a calc or optimization task in Tasks first, then export the report',
+  'ies.export.selected_unfinished':
+    'The selected task is not finished and has no exportable result: Excel export is disabled and will not use another task’s result',
   'ies.export.need_assessment':
     'Exporting Excel requires a system assessment record for this result, and export will not create one. Please complete a system assessment in Results first, then come back to export.',
   'ies.export.goto_results': 'Go to Results',

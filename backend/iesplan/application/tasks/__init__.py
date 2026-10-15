@@ -18,6 +18,7 @@ from iesplan.application.tasks.views import (
     retry_user_task,
     submit_task_case,
     task_detail,
+    task_inputs,
     task_summary,
 )
 from iesplan.application.tasks.submissions import (
@@ -60,6 +61,7 @@ __all__ = [
     "submit_task",
     "submit_task_case",
     "task_detail",
+    "task_inputs",
     "task_summary",
     "unlock_task_case",
 ]

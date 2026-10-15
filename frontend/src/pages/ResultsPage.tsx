@@ -64,10 +64,9 @@ import type {
   PlanningSolution,
   ResultAssessment,
   SnapshotRefs,
-  TaskDetail,
   TaskOutcome,
 } from '../types'
-import { useWorkbench } from './workbench'
+import { useEffectiveTaskContext, useWorkbench } from './workbench'
 
 // ---------------------------------------------------------------------------
 // 类型与常量
@@ -170,22 +169,49 @@ function irrStatusToKey(irrStatus: string): IrrStatusKey | null {
 
 export default function ResultsPage() {
   const { t, locale } = useI18n()
-  const { projectId, project, refreshDetailed } = useWorkbench()
+  // 全局任务选择(任务/导出页同选择; null = 无显式选择走默认最新完成)
+  const { projectId, project, refreshDetailed, selectTaskWithDraft, draftLoadingTaskId } = useWorkbench()
   const currency: Currency = project?.currency ?? 'CNY'
 
-  // URL ?package= 直达参数(仅首次读取,避免轮询重载)
+  // URL ?package= 直达参数(仅首次读取; 一次性初始化同一共享任务选择,
+  // 完成后用户选择统管草稿/结果/评估/导出, 不再是常驻的第二权威)。
   const [initialPkgParam] = useState<number | null>(() => {
     const v = Number(new URLSearchParams(window.location.search).get('package'))
     return Number.isFinite(v) && v > 0 ? v : null
   })
+  // ?package= 映射到的显式任务 id(-1 = 包未知/不可解析, 阻塞不回退)。
+  // 初始化完成(linkDone)后改走全局选择; 完成前保持 -1, 不闪现他任务结果。
+  const [linkTaskId, setLinkTaskId] = useState<number | null>(() => (initialPkgParam !== null ? -1 : null))
+  const [linkDone, setLinkDone] = useState(false)
 
-  // 证据包收集(来自已完成任务的详情)
-  const [entries, setEntries] = useState<Array<{ pkg: EvidencePackageSummary; task: TaskDetail }>>([])
-  const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  /** 收集重试序号: 仅重读任务列表与详情, 不重求解/重评估。 */
-  const [loadNonce, setLoadNonce] = useState(0)
-  const [selectedPkgId, setSelectedPkgId] = useState<number | null>(null)
+  // 有效任务上下文(与导出页同一规则、同一来源; 只读列表与详情)
+  const taskCtx = useEffectiveTaskContext(initialPkgParam !== null && !linkDone ? linkTaskId : undefined)
+  const { loading, loadError } = { loading: taskCtx.loading, loadError: taskCtx.error }
+  // 证据包选择器选项(走完全部 completed 历史的各任务最新包, 按包 id 升序)。
+  const options = useMemo(() => {
+    const collected: Array<{
+      packageId: number
+      taskId: number
+      status: EvidencePackageSummary['status']
+      outcome: TaskOutcome | null
+    }> = []
+    for (const tk of taskCtx.history) {
+      if (tk.latest_package_id === null || tk.latest_evidence_status === null) continue
+      collected.push({
+        packageId: tk.latest_package_id,
+        taskId: tk.id as number,
+        status: tk.latest_evidence_status as EvidencePackageSummary['status'],
+        outcome: tk.business_outcome,
+      })
+    }
+    collected.sort((a, b) => a.packageId - b.packageId)
+    return collected
+  }, [taskCtx.history])
+  const selectedPkgId = taskCtx.picked ? taskCtx.picked.packageId : null
+  /** 选中证据包所属任务 id(结果域 API 路由键; 无选中为 0, 后端明确 404)。 */
+  const pickedTaskId = taskCtx.picked ? taskCtx.picked.taskId : 0
+  /** 显式选择无可用结果(未完成/无证据/未知): 只展示无结果, 永不回退他任务。 */
+  const explicitNoResult = !taskCtx.loading && taskCtx.explicitBlocked
 
   // 选中证据包的结果数据
   const [metrics, setMetrics] = useState<Record<string, MetricValue> | null>(null)
@@ -202,6 +228,16 @@ export default function ResultsPage() {
   const [hourlyError, setHourlyError] = useState<string | null>(null)
   const [hourlyLoading, setHourlyLoading] = useState(false)
   const [resultError, setResultError] = useState<string | null>(null)
+  // 结果错误归属任务: 草稿载入/结果读取失败钉在所属任务上。结果加载 effect
+  // 切换清理时, 属于正选中任务自身的失败予以保留(失败与结果展示可共存,
+  // 直达载入失败晚于选中包到达时不被清理吞掉); 切走或新的成功载入即清除。
+  const resultErrorTaskRef = useRef<number | null>(null)
+  /** 结果域切换/落定清理错误位: 正选中任务自身的失败保留, 其余清除。 */
+  const clearResultErrorFor = useCallback((incomingTaskId: number | null): void => {
+    if (resultErrorTaskRef.current !== null && resultErrorTaskRef.current === incomingTaskId) return
+    resultErrorTaskRef.current = null
+    setResultError(null)
+  }, [])
 
   // 真实候选列表/规划解/快照引用(随选中证据包加载, 不按指标键反解)
   const [candList, setCandList] = useState<EvidenceCandidate[]>([])
@@ -256,52 +292,41 @@ export default function ResultsPage() {
   const [exportNeedsAssess, setExportNeedsAssess] = useState(false)
 
   // -------------------------------------------------------------------------
-  // 证据包收集(完成任务 -> 详情 -> evidence)
+  // ?package= 直达初始化(一次性): 按走完的历史把包映射为任务, 经同一共享
+  // 选择边界选中(含草稿载入)。成功/同任务无操作后清 URL 参数并交还用户选择
+  // (同任务无操作不重拷快照, 草稿编辑保留; 简单重挂载/重载无参数即不重拷)。
+  // 未知包保持阻塞并保留参数(历史走完仍无该包, 不回退默认); 载入失败可见
+  // 且保留参数, 不伪造选择, 不自动循环重试(等用户经证据选择器显式重试)。
   // -------------------------------------------------------------------------
+  // 直达单次尝试标记: 同一包只主动发起一次载入。结果/错误回调不随忙态或
+  // 历史变化取消(忙态变化只决定本次是否发起), 故一次尝试的结局必然可见;
+  // 失败后 effect 重跑亦不再重发。
+  // ?package= 直达初始化: 本 effect 拥有唯一一次尝试。结果/错误在 busy
+  // 状态翻转后仍保留可观察; 仅真实上下文变化/unmount 才取消, 失败后显式重试。
+  const linkAttemptRef = useRef<number | null>(null)
   useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      setLoading(true)
-      setLoadError(null)
-      // 上下文变化/重载即清旧条目与旧选择(触发已有取消/重置机制):
-      // 失败态只剩错误+重试, 不把旧包展示为当前包; 成功后按既有规则重选。
-      // 不新增缓存/回退/备用状态。
-      setEntries([])
-      setSelectedPkgId(null)
-      try {
-        const page = await api.tasks.list({ project_id: projectId, limit: 100 })
-        const completed = page.items.filter(
-          (tk) =>
-            tk.status === 'completed' &&
-            (tk.type === 'calc' || tk.type === 'optimization' || tk.type === 'uncertainty'),
-        )
-        // 任一详情(含明确可用时的 /result 补充读取)失败即整组失败,
-        // 不跳过失败任务形成缩水成功/空态, 由全局 loadError 呈现并可重试。
-        const details = await Promise.all(
-          completed.slice(0, 10).map((tk) => api.tasks.get(projectId, tk.id)),
-        )
-        const collected: Array<{ pkg: EvidencePackageSummary; task: TaskDetail }> = []
-        for (const d of details) {
-          for (const p of d.evidence ?? []) collected.push({ pkg: p, task: d })
-        }
-        collected.sort((a, b) => a.pkg.package_id - b.pkg.package_id)
-        if (cancelled) return
-        setEntries(collected)
-        const chosen =
-          collected.find((c) => c.pkg.package_id === initialPkgParam) ??
-          (collected.length > 0 ? collected[collected.length - 1] : null)
-        setSelectedPkgId(chosen ? chosen.pkg.package_id : null)
-      } catch (err) {
-        if (!cancelled) setLoadError(translateError(err as ApiError))
-      } finally {
-        if (!cancelled) setLoading(false)
+    if (initialPkgParam === null || linkDone || taskCtx.loading || taskCtx.error) return
+    if (linkAttemptRef.current !== null) return
+    const hit = taskCtx.history.find((tk) => tk.latest_package_id === initialPkgParam) ?? null
+    if (hit === null) {
+      // 未知包: 保持 -1 阻塞, 不回退默认。
+      setLinkTaskId(-1)
+      return
+    }
+    const mappedId = hit.id as number
+    setLinkTaskId(mappedId)
+    linkAttemptRef.current = mappedId
+    void selectTaskWithDraft(mappedId).then((res) => {
+      if (res.error !== null) {
+        resultErrorTaskRef.current = mappedId
+        setResultError(res.error)
+        return
       }
-    }
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [projectId, initialPkgParam, loadNonce])
+      resultErrorTaskRef.current = null
+      setLinkDone(true)
+      window.history.replaceState(null, '', window.location.pathname)
+    })
+  }, [initialPkgParam, linkDone, taskCtx.loading, taskCtx.error, taskCtx.history, selectTaskWithDraft])
 
   // -------------------------------------------------------------------------
   // 选中证据包的结果/评估/逐时数据
@@ -319,7 +344,7 @@ export default function ResultsPage() {
       setHourlyAbsent(false)
       setHourlyError(null)
       setHourlyLoading(false)
-      setResultError(null)
+      clearResultErrorFor(null)
       setCandList([])
       setPlanSolution(null)
       setSnapRefs(null)
@@ -338,7 +363,8 @@ export default function ResultsPage() {
     setHourlyAbsent(false)
     setHourlyError(null)
     setHourlyLoading(false)
-    setResultError(null)
+    // 正选中任务自身草稿载入失败的错误予以保留(与结果展示共存), 其余清除。
+    clearResultErrorFor(pickedTaskId === 0 ? null : pickedTaskId)
     setCandList([])
     setPlanSolution(null)
     setSnapRefs(null)
@@ -358,9 +384,8 @@ export default function ResultsPage() {
     hourlySeq.current += 1
     let cancelled = false
     const load = async () => {
-      // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
-      const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
-      const taskId = entry ? entry.task.id : 0
+      // 结果域 API 以任务为路由键: 选中证据包所属任务即绑定任务(同源, 不反查)。
+      const taskId = pickedTaskId
       try {
         const [res, ass] = await Promise.all([
           // 主结果读取失败必须可见: 不吞错, 由外层错误呈现。
@@ -380,7 +405,8 @@ export default function ResultsPage() {
         setCandList(res?.candidates ?? [])
         setPlanSolution(res?.planningSolution ?? null)
         setSnapRefs(res?.snapshotRefs ?? null)
-        setResultError(null)
+        // 结果读成功不吞掉正选中任务自身的草稿载入失败(草稿仍未载入)。
+        clearResultErrorFor(taskId)
         // 曲线独立读取: 整组失败直接呈现, 不缩水、不补空。
         // 序号 guard 避免旧读覆盖新选择。
         const mySeq = hourlySeq.current + 1
@@ -421,6 +447,8 @@ export default function ResultsPage() {
           setSchemeRefreshError(null)
           setSchemeRevLoading(false)
           schemeReadSeq.current += 1
+          // 结果读取失败钉在当前任务上(与草稿载入失败同一保留规则)。
+          resultErrorTaskRef.current = taskId
           setResultError(translateError(err as ApiError))
         }
       }
@@ -437,8 +465,7 @@ export default function ResultsPage() {
   // 曲线重试: 仅重读所选任务曲线, 不重求解/重评估; 旧读按序号丢弃,
   // 不覆盖切换后的新选择。重试期间不碰财务/指标/摘要状态。
   const retryHourly = useCallback(async () => {
-    const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
-    const taskId = entry ? entry.task.id : 0
+    const taskId = pickedTaskId
     const mySeq = hourlySeq.current + 1
     hourlySeq.current = mySeq
     setHourlyError(null)
@@ -459,7 +486,7 @@ export default function ResultsPage() {
     } finally {
       if (hourlySeq.current === mySeq) setHourlyLoading(false)
     }
-  }, [entries, projectId, selectedPkgId])
+  }, [pickedTaskId, projectId, selectedPkgId])
 
   // 快照来源展示: 仅按原快照引用解析名称, 不读当前最新。
   // 名称缺失显示精确引用 id; 查询失败可见, 不静默吞错。
@@ -514,9 +541,13 @@ export default function ResultsPage() {
   // -------------------------------------------------------------------------
   // 派生数据
   // -------------------------------------------------------------------------
-  const selectedEntry = entries.find((e) => e.pkg.package_id === selectedPkgId) ?? null
-  const outcome = selectedEntry?.task.business_outcome ?? null
-  const snapshot = selectedEntry?.task.calc_snapshot ?? null
+  // 选中条目展示(绑定任务的精确详情; picked 恒有对应详情, 缺席即无结果分支)。
+  const selectedEntry = taskCtx.details.find((d) => d.id === (taskCtx.picked?.taskId ?? -1)) ?? null
+  const outcome = selectedEntry?.business_outcome ?? null
+  const snapshot = selectedEntry?.calc_snapshot ?? null
+  /** 选中证据包状态(绑定任务精确详情的证据行; 摘要徽章用)。 */
+  const selectedPkgStatus =
+    selectedEntry?.evidence.find((p) => p.package_id === selectedPkgId)?.status ?? null
 
   const latestAssessment = useMemo(
     () => (assessments.length > 0 ? assessments[0] : null),
@@ -621,9 +652,8 @@ export default function ResultsPage() {
     setApplyOk(false)
     setApplying(true)
     try {
-      // 结果域 API 以任务为路由键: 由选中证据包反查所属任务
-      const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
-      await api.results.select(projectId, entry?.task.id ?? 0, {
+      // 结果域 API 以任务为路由键: 选中证据包所属任务即绑定任务(同源)。
+      await api.results.select(projectId, pickedTaskId, {
         result_index_id: selectedCandidate.index,
         reason: 'user-selected-candidate',
       })
@@ -634,7 +664,7 @@ export default function ResultsPage() {
     } finally {
       setApplying(false)
     }
-  }, [projectId, selectedCandidate])
+  }, [projectId, selectedCandidate, pickedTaskId])
 
   // 打开应用方案确认: 每次经公开项目查询现读当前草稿修订(不用 Workbench
   // 缓存), 读成功后才允许确认; 读失败可见报错、不伪造; 关闭/切换后迟到的读
@@ -686,10 +716,9 @@ export default function ResultsPage() {
     setSchemeRefreshError(null)
     setSchemeBusy(true)
     try {
-      const entry = entries.find((e) => e.pkg.package_id === pkgAtConfirm)
       // 发送打开确认框时捕获的修订; 发送前不重读最新, 否则绕过冲突检测。
       const applied = await api.projects.applyScheme(projectId, {
-        task_id: entry?.task.id ?? 0,
+        task_id: pickedTaskId,
         solution_id: planSolution.solution_id,
         expected_revision: schemeRevision,
       })
@@ -707,7 +736,7 @@ export default function ResultsPage() {
     } finally {
       if (schemeFlight.current === flight) setSchemeBusy(false)
     }
-  }, [projectId, planSolution, schemeBusy, schemeRevLoading, schemeRevision, selectedPkgId, entries, refreshDetailed, t])
+  }, [projectId, planSolution, schemeBusy, schemeRevLoading, schemeRevision, selectedPkgId, pickedTaskId, refreshDetailed, t])
 
   const submitAssessment = useCallback(async () => {
     if (!selectedPkgId) return
@@ -715,10 +744,9 @@ export default function ResultsPage() {
     setAssessOk(false)
     setAssessBusy(true)
     try {
-      const entry = entries.find((e) => e.pkg.package_id === selectedPkgId)
       // 后端 assess = 触发系统四维检查(FE-BE-03: 人工评分输入不支持持久化,
       // 不再伪装接受评分/评论后静默丢弃)
-      const created = await api.results.assess(projectId, entry?.task.id ?? 0, 'full')
+      const created = await api.results.assess(projectId, pickedTaskId, 'full')
       setAssessments((prev) => [created, ...prev].sort((a, b) => b.created_at.localeCompare(a.created_at)))
       setAssessOk(true)
       setAssessOpen(false)
@@ -794,15 +822,22 @@ export default function ResultsPage() {
     <div className="ies-section">
       <Alert variant="error">{loadError}</Alert>
       <div style={{ marginTop: 'var(--ies-space-2)' }}>
-        <Button onClick={() => setLoadNonce((n) => n + 1)}>{t('ies.common.retry')}</Button>
+        <Button onClick={() => taskCtx.retry()}>{t('ies.common.retry')}</Button>
       </div>
     </div>
   ) : null
 
-  if (entries.length === 0) {
+  // 无绑定(无显式选择且默认无可用结果, 或显式选择无可用结果): 只展示
+  // 无结果/阻塞, 永不回退他任务。
+  if (selectedEntry === null) {
     return (
       <div>
         {loadErrorBlock}
+        {explicitNoResult && !loadError ? (
+          <div className="ies-section">
+            <Alert variant="warning">{t('ies.result.no_evidence')}</Alert>
+          </div>
+        ) : null}
         {loadError ? null : (
           <div className="ies-section">
             <Card title={t('ies.result.summary')}>
@@ -824,11 +859,7 @@ export default function ResultsPage() {
   }
 
   const evidenceBadgeVariant: BadgeVariant =
-    selectedEntry?.pkg.status === 'complete'
-      ? 'success'
-      : selectedEntry?.pkg.status === 'partial'
-        ? 'warning'
-        : 'danger'
+    selectedPkgStatus === 'complete' ? 'success' : selectedPkgStatus === 'partial' ? 'warning' : 'danger'
 
   return (
     <div>
@@ -839,17 +870,33 @@ export default function ResultsPage() {
         <Card
           title={t('ies.result.summary')}
           actions={
-            entries.length > 1 ? (
+            options.length > 1 ? (
               <Select
                 aria-label={t('ies.result.evidence_status')}
                 value={selectedPkgId ?? ''}
-                disabled={schemeBusy}
-                onChange={(e) => setSelectedPkgId(Number(e.target.value))}
+                disabled={schemeBusy || draftLoadingTaskId !== null}
+                onChange={(e) => {
+                  const pkgId = Number(e.target.value)
+                  const hit = options.find((x) => x.packageId === pkgId) ?? null
+                  // 选择即全局任务选择(任务 id)并将其冻结输入载入工作草稿,
+                  // 与任务页同一边界; 失败可见且选择不变, 不建任务/版本。
+                  // 用户选择接管后直达参数不再覆盖(见 linkDone)。
+                  // 显式切换先清旧错; 新失败钉在所选任务上(同一直达失败保留规则)。
+                  setResultError(null)
+                  resultErrorTaskRef.current = null
+                  setLinkDone(true)
+                  void selectTaskWithDraft(hit ? hit.taskId : null).then((res) => {
+                    if (res.error !== null) {
+                      if (hit) resultErrorTaskRef.current = hit.taskId
+                      setResultError(res.error)
+                    }
+                  })
+                }}
                 style={{ maxWidth: 260 }}
               >
-                {entries.map((e) => (
-                  <option key={e.pkg.package_id} value={e.pkg.package_id}>
-                    #{e.pkg.package_id} · {e.task.id} · {e.pkg.status}
+                {options.map((o) => (
+                  <option key={o.packageId} value={o.packageId}>
+                    #{o.packageId} · {o.taskId} · {o.status}
                   </option>
                 ))}
               </Select>
@@ -882,11 +929,11 @@ export default function ResultsPage() {
               <dt>{t('ies.common.status')}</dt>
               <dd>
                 <div className="ies-flex" style={{ flexWrap: 'wrap', gap: 'var(--ies-space-2)' }}>
-                  <TaskStatusBadge status={selectedEntry.task.status} />
+                  <TaskStatusBadge status={selectedEntry.status} />
                   <Badge
                     variant={evidenceBadgeVariant}
                     icon={evidenceBadgeVariant === 'success' ? 'check' : 'warning'}
-                    label={t(`ies.result.evidence_status_${selectedEntry.pkg.status}`)}
+                    label={t(`ies.result.evidence_status_${selectedPkgStatus ?? 'invalid'}`)}
                   />
                 </div>
               </dd>
@@ -896,7 +943,7 @@ export default function ResultsPage() {
               </dd>
               <dt>{t('ies.common.id')}</dt>
               <dd>
-                任务 #{selectedEntry.task.id} · 证据包 #{selectedEntry.pkg.package_id}
+                任务 #{selectedEntry.id} · 证据包 #{selectedPkgId}
               </dd>
             </dl>
           ) : (
@@ -936,7 +983,7 @@ export default function ResultsPage() {
       ) : null}
 
       {/* 后端显式 no_evidence 状态: 任务存在但证据包尚未提交, 不以空数据伪装成功 */}
-      {noEvidence ? (
+      {noEvidence || explicitNoResult ? (
         <div className="ies-section">
           <Alert variant="warning">{t('ies.result.no_evidence')}</Alert>
         </div>
