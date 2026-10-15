@@ -15,6 +15,13 @@
 
 ## Unreleased
 
+### 2026-10-15 — `0.14.0` 数据集读取契约与纯映射收口（待复审）
+
+- 新增 `features/datasets` 唯一归属：`contracts.ts` 声明后端实际信封（列表 `{datasets: [{dataset, latest_version}]}`、详情 `{dataset, versions}`、上传 `{dataset_version, diagnostics}`）与版本/质量 DTO，`mappers.ts` 为纯映射（不导入 HTTP 层）；`api/client.ts` 只保留传输层与 `api.datasets` 调用面，直接消费具名键。畸形体自然抛错可见，不再以 `asList` 空列表伪装成功；空 `{datasets: []}`、空 `versions` 与 `latest_version=null` 仍为合法并原样保留。
+- 去猜测值（沿用上一笔）：非空列不再补 0/`hourly`/480，字段说明只取已发布的 `description_zh`；`resolution` 空字符串与 quality/provenance/license/事由 null 等合法缺席语义保留。上传与读取共用同一映射。
+- 字段类型与后端权威发布值对齐：`DatasetFieldType = 'datetime' | 'float' | 'integer' | 'decimal'`（通用时间戳/float 数值/step 序号/价格序列四处构造）；从未发布的 `int`/`text` 不再列入，`integer`/`decimal` 直接透传不归一化。v2 质量报告展示语义未动。
+- 证据：`dataset-version-mapping.test.mjs` 18 项通过（含真空列表、畸形信封可见抛错、integer/decimal 保留）；Docker 前端构建（tsc＋vite）通过；D2/D3/D5 读路径浏览器通过；`device-data-upload` 在主线基线同样失败，属既有问题未动。本条不表示 0.14 完成，切片待 Codex 复审。
+
 ### 2026-10-15 — `0.14.0` 路由分块加载失败可见（已复审）
 
 - 顶层与工作台嵌套路由共用同一 `PageLoadError` 失败组件：已发版页面模块缺失或分块加载失败均显示可见本地化错误与重载重试，不再回退永久“加载中”占位；正常 Suspense 加载指示保留。证据：Docker 前端构建（tsc＋vite）通过；新增 `page-loading.spec.ts` 4 通过（数据页正常导航、分块中止后可见错误、解除后显式重试到达目标页、顶层分块失败可见；旧占位语义下失败用例复现为红）。本条不表示 0.14 完成。

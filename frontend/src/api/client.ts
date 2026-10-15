@@ -32,7 +32,6 @@ import type {
   ConnectionInput,
   Currency,
   Dataset,
-  DatasetField,
   DatasetUploadInput,
   DatasetVersion,
   Device,
@@ -82,12 +81,17 @@ import type {
   TaskOutcome,
   TaskStatus,
   TaskType,
-  Timeline,
   User,
   UserDeletePreview,
   ValidationResult,
 } from '../types'
 import { ApiError } from '../types'
+import type {
+  DatasetDetailResponseDto,
+  DatasetsListResponseDto,
+  DatasetUploadResponseDto,
+} from '../features/datasets/contracts'
+import { datasetVersionFromServer } from '../features/datasets/mappers'
 import { collectHourlyValues } from './hourlyPages'
 
 const API_BASE = '/api'
@@ -817,58 +821,7 @@ function configFromServer(body: unknown, projectId: number): CalcConfig {
   }
 }
 
-/** 后端质量报告 dict(checks 聚合形态) → 前端 QualityReport。 */
-function qualityFromServer(q: Record<string, unknown>): { missing_rate: number | null; outlier_rate: number | null; interpolation_notes: string[] | null; price_object_id: string | null } {
-  const checks = asRecord(q.checks)
-  const missing = asRecord(checks.missing_values)
-  const ranges = asRecord(checks.ranges)
-  const rc = asRecord(checks.row_count)
-  const rowCount = Number(rc.expected ?? 0)
-  const oid = q.price_object_id
-  return {
-    missing_rate: rowCount > 0 ? Number(missing.total ?? 0) / rowCount : null,
-    outlier_rate: rowCount > 0 ? Number(ranges.total ?? 0) / rowCount : null,
-    interpolation_notes: null,
-    price_object_id: typeof oid === 'string' && oid ? oid : null,
-  }
-}
-
-/** 后端数据集版本 dict → 前端 DatasetVersion(fields/quality_report 形状适配)。 */
-function datasetVersionFromServer(v: Record<string, unknown>): DatasetVersion {
-  const fields = asRecord(v.fields)
-  return {
-    id: Number(v.id),
-    dataset_id: Number(v.dataset_id ?? 0),
-    version_no: Number(v.version_no ?? 0),
-    timeline: (v.timeline as Timeline) ?? 'hourly',
-    resolution: String(v.resolution ?? ''),
-    fixed_utc_offset_minutes: Number(v.fixed_utc_offset_minutes ?? 480),
-    fields: Object.fromEntries(
-      Object.entries(fields).map(([name, f]) => {
-        const fr = asRecord(f)
-        return [
-          name,
-          {
-            name,
-            type: (fr.type as DatasetField['type']) ?? 'float',
-            unit: fr.unit === null || fr.unit === undefined ? null : String(fr.unit),
-            description: String(fr.description_zh ?? fr.description ?? ''),
-          },
-        ]
-      }),
-    ),
-    units: asRecord(v.units) as Record<string, string>,
-    quality_report:
-      v.quality_report === null || v.quality_report === undefined
-        ? null
-        : qualityFromServer(asRecord(v.quality_report)),
-    provenance: v.provenance === null || v.provenance === undefined ? null : (v.provenance as Record<string, unknown>),
-    license: v.license === null || v.license === undefined ? null : String(v.license),
-    created_by: Number(v.created_by ?? 0),
-    created_at: String(v.created_at ?? ''),
-    created_reason: v.created_reason === null || v.created_reason === undefined ? null : String(v.created_reason),
-  }
-}
+/** 数据集版本/质量纯映射归 features/datasets/mappers 所有, 本文件只作传输层调用。 */
 
 /** 草稿内容设备条目 → 前端 Device(2.0 名键, 无 id/状态/时间字段)。 */
 function deviceFromDraft(d: Record<string, unknown>): Device {
@@ -1554,10 +1507,12 @@ export const api = {
       // 直接调用公开接口, 不做无项目空页伪成功, 不复核 ID。
       const projectId = params.project_id
       return request<unknown>(`/projects/${projectId}/datasets`).then((body) => {
-        // 后端返回 {datasets: [{dataset, latest_version}]}: 解包 dataset 为行
-        const entries = asList<Record<string, unknown>>(body, 'datasets')
+        // 后端精确信封 {datasets: [{dataset, latest_version}]}: 直接消费具名键。
+        // 畸形体自然抛错可见, 不以空列表伪装成功; 空数组与 latest_version=null
+        // 均为合法(分别表示无数据集 / 尚无版本), 原样保留。
+        const entries = (body as DatasetsListResponseDto).datasets
         return {
-          items: entries.map((e) => asRecord(e.dataset) as unknown as Dataset),
+          items: entries.map((e) => e.dataset),
           next_cursor: null,
           limit: entries.length,
         }
@@ -1573,17 +1528,19 @@ export const api = {
       return uploadDataset(input)
     },
     versions(projectId: number, id: number): Promise<DatasetVersion[]> {
+      // 后端精确信封 {dataset, versions}: 直接消费具名键, 畸形体自然抛错可见。
       return request<unknown>(`/projects/${projectId}/datasets/${id}`).then((body) =>
-        asList<Record<string, unknown>>(body, 'versions').map(datasetVersionFromServer),
+        (body as DatasetDetailResponseDto).versions.map(datasetVersionFromServer),
       )
     },
     versionFields(projectId: number, id: number): Promise<string[]> {
       // 后端无数据行预览端点: 只返回最新版本真实字段名,
       // 不设行/行数载体, 不得伪造空行冒充真实空数据集。
       return request<unknown>(`/projects/${projectId}/datasets/${id}`).then((body) => {
-        const versions = asList<Record<string, unknown>>(body, 'versions')
+        const versions = (body as DatasetDetailResponseDto).versions
         const latest = versions[0]
-        return Object.keys(asRecord(latest?.fields ?? {}))
+        if (latest === undefined) return []
+        return Object.keys(latest.fields)
       })
     },
     bind(projectId: number, datasetVersionId: number, datasetId: number): Promise<{ revision: number }> {
@@ -2167,15 +2124,13 @@ async function uploadDataset(
       created_reason: 'upload',
     }),
   )
-  const uploaded = asRecord(
-    await request<unknown>(`/projects/${projectId}/datasets/${datasetId}/versions`, {
-      method: 'POST',
-      formData,
-      timeoutMs: 0,
-    }),
-  )
-  const version = datasetVersionFromServer(asRecord(uploaded.dataset_version))
-  const diagnostics = Array.isArray(uploaded.diagnostics) ? (uploaded.diagnostics as Diagnostic[]) : []
+  const uploaded = (await request<unknown>(`/projects/${projectId}/datasets/${datasetId}/versions`, {
+    method: 'POST',
+    formData,
+    timeoutMs: 0,
+  })) as DatasetUploadResponseDto
+  const version = datasetVersionFromServer(uploaded.dataset_version)
+  const diagnostics = uploaded.diagnostics ?? []
   return { ...version, diagnostics }
 }
 
