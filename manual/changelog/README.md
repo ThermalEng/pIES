@@ -15,6 +15,10 @@
 
 ## Unreleased
 
+### 2026-10-15 — `0.14.0` 数据集读取映射去猜测值（待复审）
+
+- `datasetVersionFromServer` 按后端 `_version_dict` 权威形态直接消费：非空列（id/数据集/版本号/时域/偏移/创建人/时间）不再补 0/`hourly`/480，字段类型直接透传（含 step 的 `integer`），说明只取已发布的 `description_zh`；`resolution` 空字符串与 quality/provenance/license/事由 null 等合法缺席语义保留。上传与读取共用同一映射。证据：新增 `dataset-version-mapping.test.mjs` 15 项通过；D2/D3/D5 与前端构建通过；`device-data-upload` 在主线基线同样失败，属既有问题未动。本条不表示 0.14 完成。
+
 ### 2026-10-15 — `0.14.0` 路由分块加载失败可见（已复审）
 
 - 顶层与工作台嵌套路由共用同一 `PageLoadError` 失败组件：已发版页面模块缺失或分块加载失败均显示可见本地化错误与重载重试，不再回退永久“加载中”占位；正常 Suspense 加载指示保留。证据：Docker 前端构建（tsc＋vite）通过；新增 `page-loading.spec.ts` 4 通过（数据页正常导航、分块中止后可见错误、解除后显式重试到达目标页、顶层分块失败可见；旧占位语义下失败用例复现为红）。本条不表示 0.14 完成。

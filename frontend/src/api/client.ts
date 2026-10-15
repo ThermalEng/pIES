@@ -833,16 +833,24 @@ function qualityFromServer(q: Record<string, unknown>): { missing_rate: number |
   }
 }
 
-/** 后端数据集版本 dict → 前端 DatasetVersion(fields/quality_report 形状适配)。 */
+/**
+ * 后端数据集版本 dict → 前端 DatasetVersion(与 api/datasets._version_dict 同形)。
+ *
+ * 可信响应直接消费: id/dataset_id/version_no/timeline/offset/created_by/created_at
+ * 在后端均为非空列, 不补 0/'hourly'/480 等猜测值; 字段条目一律带 type,
+ * 说明只取已发布的 description_zh(后端从不发布裸 description 键);
+ * resolution 可空列保留空字符串缺席语义, quality/provenance/license/created_reason
+ * 可空列保留 null。
+ */
 function datasetVersionFromServer(v: Record<string, unknown>): DatasetVersion {
   const fields = asRecord(v.fields)
   return {
     id: Number(v.id),
-    dataset_id: Number(v.dataset_id ?? 0),
-    version_no: Number(v.version_no ?? 0),
-    timeline: (v.timeline as Timeline) ?? 'hourly',
+    dataset_id: Number(v.dataset_id),
+    version_no: Number(v.version_no),
+    timeline: v.timeline as Timeline,
     resolution: String(v.resolution ?? ''),
-    fixed_utc_offset_minutes: Number(v.fixed_utc_offset_minutes ?? 480),
+    fixed_utc_offset_minutes: Number(v.fixed_utc_offset_minutes),
     fields: Object.fromEntries(
       Object.entries(fields).map(([name, f]) => {
         const fr = asRecord(f)
@@ -850,9 +858,9 @@ function datasetVersionFromServer(v: Record<string, unknown>): DatasetVersion {
           name,
           {
             name,
-            type: (fr.type as DatasetField['type']) ?? 'float',
+            type: fr.type as DatasetField['type'],
             unit: fr.unit === null || fr.unit === undefined ? null : String(fr.unit),
-            description: String(fr.description_zh ?? fr.description ?? ''),
+            description: String(fr.description_zh ?? ''),
           },
         ]
       }),
@@ -864,8 +872,8 @@ function datasetVersionFromServer(v: Record<string, unknown>): DatasetVersion {
         : qualityFromServer(asRecord(v.quality_report)),
     provenance: v.provenance === null || v.provenance === undefined ? null : (v.provenance as Record<string, unknown>),
     license: v.license === null || v.license === undefined ? null : String(v.license),
-    created_by: Number(v.created_by ?? 0),
-    created_at: String(v.created_at ?? ''),
+    created_by: Number(v.created_by),
+    created_at: String(v.created_at),
     created_reason: v.created_reason === null || v.created_reason === undefined ? null : String(v.created_reason),
   }
 }
