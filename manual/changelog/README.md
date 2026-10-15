@@ -23,6 +23,15 @@
 
 - 删除项目成员残留措辞，明确每项目工作区即草稿、任务切换载入冻结输入、发起计算才创建新任务，以及结果/评估/报告绑定同一任务。使用者指南补充导出前评估要求，并如实标明整套输入联动尚在完善；本条仅记录文档修订，不表示该功能已验收完成。
 
+### 2026-10-14 — `0.14.0` 数据页项目主体三态与项目无时区收口 D3（复审通过）
+
+- `WorkbenchProvider` 新增 `projectLoading`/`projectError` 三态：`DataPage` 加载中只转圈（无可写表单、无项目名、无伪默认），主体失败只显错＋`refreshDetailed` 重试（重试回到加载分支，结构上不可重复点击），成功才显示数据页与可写控件；D2 的列表/版本独立错误路径不动。
+- 项目不设置时区：删 `Project.fixed_utc_offset_minutes` 类型字段（后端 `GET /projects/{id}` 本就没有该字段）、工作台头部与数据页头部的项目时区展示；上传/样例对话框保留既有 `480` 表单初值（注释明确非项目时区）；数据集版本行/详情与上传表单的版本偏移展示不变。
+- 删无消费者的 `data_utc_mismatch`/`data_fix_offset` 中英键（rg 确认后端无此诊断码、前端除定义外无消费者）及仅剩定义的 `ies.workbench.utc` 键；格式化偏移的注释也改为由数据集版本提供。
+- 指南同步：`getting-started` 删除新建项目选偏移步骤（创建表单本就没有该输入）、`concepts-and-limits`、`data-preparation`（偏移在数据集版本中声明，step 文件连续 step 无时区）、`system-modeling` 去掉“项目时区”。
+- 复审补清：移除无消费者的旧项目 UTC 偏移中英界面文案；live 用户指南与前端界面均只将固定 UTC 偏移归属到数据集版本。
+- 证据：前端构建（tsc＋vite，随 web 镜像构建）通过；新建浏览器用例 `data-project-d3.spec.ts` 1 通过（真实进入页面、API 正文不 mock，仅对目标 `GET /projects/{id}` 做延迟/500；延迟期无下载模板按钮、无项目名、无写 POST，恢复后项目名与项目响应一致、版本行偏移与版本响应一致；500 后只显错＋重试，重试恢复且不补第二次列表读取；预期噪声仅主体 500×1 与既有计算配置 404×1）。首次失败系用例把 `count()` Promise 直接断言（缺内层 `await`），改正后通过；D1/D2 未重跑。此项不代表 `0.14.0` 整体完成。
+
 ### 2026-10-13 — `0.14.0` 导出返回本地下载会话 R9（待复审）
 
 - `api.exports.excel/package` 不再构造含 `report_type/object_id/generated_by/generated_at/status` 的伪持久化 `Report`（其中项目包还曾伪造 `report_type: 'pdf'`）；两者直接返回本地下载会话 id（number，一次下载引用），`download()` 仍按此 id 取短期 token 下载；删除 `Report/ReportType/ReportStatus` 死类型（已确认无其他真实消费者）并同步四处页面调用点。
@@ -58,15 +67,6 @@
 - 旧财务摘要徽章改走封存事实：新增 `irrStatusToKey` 唯一映射（即封存卡既有语义：`normal`→唯一解、五枚举直通、未知回 null），摘要与封存卡共用；无财务评价块或状态不可显示时摘要侧整行不展示，不补默认值。
 - 未动：`TaskDetail` 真实 diagnostics、任务/导出诊断链、后端结果契约与财务求值；封存卡未知状态仍显 `—`（既有语义保留）。`ies.result.assessment` 中英键已随假链删除（rg 确认除定义外无前端引用；`assessment_history` 等仍被使用，未碰）。
 - 证据：前端构建（tsc＋vite，随 web 镜像构建）通过；新增 node 适配层用例 `result_view_no_synthetic_diagnostics.test.mjs` 6 项通过（返回对象无 `diagnostics` 键、有块/无块透传）；新增浏览器用例 `result-irr-status-r1r2.spec.ts` 2 通过（真实求解：封存任务摘要与封存卡同显 HTTP 封存 `irr_status` 对应标签且全页仅 2 处；metrics-only 任务全页无 IRR 状态行，HTTP 与缺席原因一致）。D1/D2/全量未重跑。此项不代表 `0.14.0` 整体完成。
-
-### 2026-10-14 — `0.14.0` 数据页项目主体三态与项目无时区收口 D3（复审通过）
-
-- `WorkbenchProvider` 新增 `projectLoading`/`projectError` 三态：`DataPage` 加载中只转圈（无可写表单、无项目名、无伪默认），主体失败只显错＋`refreshDetailed` 重试（重试回到加载分支，结构上不可重复点击），成功才显示数据页与可写控件；D2 的列表/版本独立错误路径不动。
-- 项目不设置时区：删 `Project.fixed_utc_offset_minutes` 类型字段（后端 `GET /projects/{id}` 本就没有该字段）、工作台头部与数据页头部的项目时区展示；上传/样例对话框保留既有 `480` 表单初值（注释明确非项目时区）；数据集版本行/详情与上传表单的版本偏移展示不变。
-- 删无消费者的 `data_utc_mismatch`/`data_fix_offset` 中英键（rg 确认后端无此诊断码、前端除定义外无消费者）及仅剩定义的 `ies.workbench.utc` 键；格式化偏移的注释也改为由数据集版本提供。
-- 指南同步：`getting-started` 删除新建项目选偏移步骤（创建表单本就没有该输入）、`concepts-and-limits`、`data-preparation`（偏移在数据集版本中声明，step 文件连续 step 无时区）、`system-modeling` 去掉“项目时区”。
-- 复审补清：移除无消费者的旧项目 UTC 偏移中英界面文案；live 用户指南与前端界面均只将固定 UTC 偏移归属到数据集版本。
-- 证据：前端构建（tsc＋vite，随 web 镜像构建）通过；新建浏览器用例 `data-project-d3.spec.ts` 1 通过（真实进入页面、API 正文不 mock，仅对目标 `GET /projects/{id}` 做延迟/500；延迟期无下载模板按钮、无项目名、无写 POST，恢复后项目名与项目响应一致、版本行偏移与版本响应一致；500 后只显错＋重试，重试恢复且不补第二次列表读取；预期噪声仅主体 500×1 与既有计算配置 404×1）。首次失败系用例把 `count()` Promise 直接断言（缺内层 `await`），改正后通过；D1/D2 未重跑。此项不代表 `0.14.0` 整体完成。
 
 ### 2026-10-13 — `0.14.0` 数据页可信项目上下文收口 D3/D4（1/2 死路径清理，复审通过）
 
