@@ -33,7 +33,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { ApiError } from '../types'
 import type { Diagnostic, DeviceTypeSpec } from '../types'
-import { useI18n, translateDiagnostic, translateError } from '../i18n'
+import { useI18n, translateDiagnostic, errorMessage } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import {
   Alert,
@@ -89,13 +89,6 @@ const CARRIER_COLOR: Record<string, string> = {
   heat: '#c2410c',
   cool: '#0891b2',
   gas: '#8a5a00',
-}
-
-/** 任意异常 → ApiError(供 translateError 渲染)。 */
-function toApiError(err: unknown): ApiError {
-  if (err instanceof ApiError) return err
-  if (err instanceof Error) return new ApiError(0, null, err.message || 'ies.error.unknown')
-  return new ApiError(0, null, 'ies.error.unknown')
 }
 
 // ===========================================================================
@@ -159,7 +152,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   /** 写冲突(409)进冲突态: 提示加载服务器版本(本地画布未动, 与服务端一致)。 */
   const handleWriteError = useCallback(
     (err: unknown, onOther: () => void) => {
-      if (toApiError(err).status === 409) {
+      if (err instanceof ApiError && err.status === 409) {
         setSaveState('conflict')
         setAutosave('error')
       } else {
@@ -207,7 +200,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       setLoadError(null)
     } catch (err) {
       // 加载失败(网络/权限等): 显示错误并以空画布继续(可本地编辑,保存时再校验)
-      setLoadError(translateError(toApiError(err)))
+      setLoadError(errorMessage(err))
       setDevices([])
       setConnections([])
     } finally {
@@ -296,7 +289,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         window.setTimeout(() => setFlash(null), 1800)
       } catch (err) {
         handleWriteError(err, () => {
-          setLastError(translateError(toApiError(err)))
+          setLastError(errorMessage(err))
           setSaveState('error')
           setAutosave('error')
         })
@@ -393,7 +386,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         setAutosave('saved')
       } catch (err) {
         handleWriteError(err, () => {
-          setLastError(translateError(toApiError(err)))
+          setLastError(errorMessage(err))
           setSaveState('error')
           setAutosave('error')
         })
@@ -418,7 +411,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         setAutosave('saved')
       } catch (err) {
         handleWriteError(err, () => {
-          setLastError(translateError(toApiError(err)))
+          setLastError(errorMessage(err))
           setSaveState('error')
           setAutosave('error')
         })
@@ -528,7 +521,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           const item: IssueItem = {
             id: localId(),
             severity: 'error',
-            message: translateError(toApiError(err)),
+            message: errorMessage(err),
             deviceId: fromDevice.id,
           }
           setIssues((prev) => [...prev.slice(-3), item])
@@ -549,7 +542,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         setAutosave('saved')
       } catch (err) {
         handleWriteError(err, () => {
-          setLastError(translateError(toApiError(err)))
+          setLastError(errorMessage(err))
           setSaveState('error')
           setAutosave('error')
         })
@@ -594,7 +587,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       const result = await api.model.validate(projectId)
       setValidateResult(result.diagnostics)
     } catch (err) {
-      setValidateError(translateError(toApiError(err)))
+      setValidateError(errorMessage(err))
       setValidateResult([])
     } finally {
       setValidating(false)

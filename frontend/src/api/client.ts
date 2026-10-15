@@ -227,27 +227,10 @@ function parseErrorEnvelope(body: unknown): ApiErrorBody | null {
   return null
 }
 
-/** 由非 2xx 响应构造 ApiError。 */
+/** 由非 2xx 响应构造 ApiError(标准 {error} 信封经解析透传, 其余走状态码通用文案)。 */
 function toApiError(status: number, body: unknown): ApiError {
   const envelope = parseErrorEnvelope(body)
   if (envelope) return new ApiError(status, envelope)
-  // 0.3.0 C3: 全部错误路径已迁移标准 {error} 信封(宪法 §8.3), 诊断明细在
-  // params.diagnostics(parseErrorEnvelope 已透传)。此裸 {diagnostics} fallback 仅作
-  // 防御性兜底(未来回归/非标准错误体), 成功响应的 diagnostics 兄弟字段
-  // (validation/run 200、dataset 上传 201)不经由此处, 由 unwrapBody 直接返回。
-  const raw = body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : {}
-  if (Array.isArray(raw.diagnostics)) {
-    return new ApiError(status, {
-      code: 'VALIDATION-FAILED',
-      message_key: 'ies.error.data_validation_failed',
-      severity: 'error',
-      blocking: true,
-      params: { diagnostics: raw.diagnostics },
-      location: null,
-      fix_hint_key: null,
-      ref_ids: [],
-    })
-  }
   // 无信封:按状态码映射通用文案键
   let fallbackKey = 'ies.error.unknown'
   if (status === 0 || status >= 500) fallbackKey = 'ies.error.internal'

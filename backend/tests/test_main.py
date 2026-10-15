@@ -202,8 +202,24 @@ def test_http_exception_mapping(client: TestClient) -> None:
     resp = client.get("/api/_test/http-418")
     assert resp.status_code == 418
     body = resp.json()
-    assert body["error"]["code"] == "HTTP-418"
+    assert body["error"]["code"] == "API-REQ-003"
+    assert body["error"]["message_key"] == "ies.error.http_exception"
+    assert body["error"]["params"]["status_code"] == 418
     assert body["error"]["params"]["detail"] == "teapot"
+
+
+def test_method_not_allowed_uses_registered_envelope(client: TestClient) -> None:
+    """真实路由的错误方法保留 405 与 Allow 头, 使用已登记的标准错误码。"""
+    from iesplan.core.diagnostics import DIAG_MESSAGE_KEYS, NEW_DIAG_CODES
+
+    resp = client.post("/api/healthz")
+    assert resp.status_code == 405
+    assert "GET" in resp.headers["allow"]
+    err = resp.json()["error"]
+    assert err["code"] == "API-REQ-003"
+    assert err["code"] in NEW_DIAG_CODES
+    assert err["message_key"] == DIAG_MESSAGE_KEYS[err["code"]]
+    assert err["params"] == {"status_code": 405, "detail": "Method Not Allowed"}
 
 
 # ---------------------------------------------------------------------------
