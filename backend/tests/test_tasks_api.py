@@ -735,7 +735,7 @@ def test_cancel_flow(client: TestClient, db: Session) -> None:
 
 
 def test_retry_reuses_same_snapshot(client: TestClient, db: Session) -> None:
-    """终态任务手动重试: 复用同一 calc_snapshot_id, 新尝试编号递增。"""
+    """失败任务手动重试: 复用同一 calc_snapshot_id, 新尝试编号递增; 已完成任务不可重开。"""
     owner = make_user(db, "owner_retry")
     pid = _prepare_project(client, db, owner)
     rev = _save_config(client, pid, owner)
@@ -744,7 +744,9 @@ def test_retry_reuses_same_snapshot(client: TestClient, db: Session) -> None:
     )
     task_id = body["task"]["id"]
     snapshot_id = body["task"]["calc_snapshot_id"]
-    _run_task(db, task_id)
+    _claim(db, task_id)
+    _fail_task(db, task_id)
+    db.commit()
 
     resp = client.post(f"/api/projects/{pid}/tasks/{task_id}/retry", headers=_h(client, owner))
     assert resp.status_code == 200
@@ -766,6 +768,36 @@ def test_retry_reuses_same_snapshot(client: TestClient, db: Session) -> None:
     # 快照始终只有 1 个(复用)
     snapshots = db.execute(select(CalcSnapshot)).scalars().all()
     assert len(snapshots) == 1
+
+    # 已完成任务重试 → 409, 无任何变更(不重开、不入队)
+    resp = client.post(f"/api/projects/{pid}/tasks/{task_id}/retry", headers=_h(client, owner))
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "TASK-STATE-001"
+    done = db.get(Task, task_id)
+    assert done.status == "completed"
+    assert done.business_outcome == "restricted_results"
+    assert queue.queue_position(task_id, "compute") is None
+
+
+def test_retry_clears_stale_cancel_signal(client: TestClient, db: Session) -> None:
+    """重试清残留取消信号: 失败落终态前的未观察取消请求不得取消新尝试。"""
+    owner = make_user(db, "owner_retry3")
+    pid = _prepare_project(client, db, owner)
+    rev = _save_config(client, pid, owner)
+    _, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="retry-3"
+    )
+    task_id = body["task"]["id"]
+    _claim(db, task_id)
+    queue.set_cancel(task_id, "user_cancel")
+    _fail_task(db, task_id)
+    db.commit()
+    assert queue.get_cancel(task_id) == "user_cancel"
+
+    resp = client.post(f"/api/projects/{pid}/tasks/{task_id}/retry", headers=_h(client, owner))
+    assert resp.status_code == 200
+    assert resp.json()["task"]["status"] == "queued"
+    assert queue.get_cancel(task_id) is None
 
 
 def test_retry_denied_for_running(client: TestClient, db: Session) -> None:

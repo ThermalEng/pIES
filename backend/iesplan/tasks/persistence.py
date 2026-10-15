@@ -1370,12 +1370,15 @@ IMMUTABLE_TABLES: tuple[str, ...] = (
     "uncertainty_snapshots",
 )
 
-#: tasks: 终态(completed/cancelled/timed_out/failed)禁止再迁移状态(01 §7.2)
+#: tasks: 终态迁出仅授权的手动重试(failed/cancelled/timed_out → queued;
+#: completed 永不重开, 其余终态迁出仍阻断)
 TASKS_TERMINAL_TRIGGER_SQL: str = """\
--- tasks: 终态任务不可迁移状态
+-- tasks: 终态任务不可迁移状态(唯一例外: 授权的手动重试
+-- failed/cancelled/timed_out → queued; completed 永不重开)
 CREATE FUNCTION tg_tasks_terminal() RETURNS trigger AS $$
 BEGIN
-  IF OLD.status IN ('completed','cancelled','timed_out','failed') AND NEW.status <> OLD.status THEN
+  IF OLD.status IN ('completed','cancelled','timed_out','failed') AND NEW.status <> OLD.status
+     AND NOT (OLD.status IN ('failed','cancelled','timed_out') AND NEW.status = 'queued') THEN
     RAISE EXCEPTION '终态任务不可迁移状态';
   END IF;
   RETURN NEW;

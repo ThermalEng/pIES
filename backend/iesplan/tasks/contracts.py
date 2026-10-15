@@ -685,30 +685,38 @@ POOL_BY_TYPE: dict[str, str] = {
     "export": "io",
     "import": "io",
 }
-#: 终态(终态不可再迁移)
+#: 终态(除授权的手动重试迁出外不可再迁移)
 TERMINAL_STATUSES: tuple[str, ...] = ("completed", "cancelled", "timed_out", "failed")
-#: 状态机合法迁移
+#: 可手动重试的终态(失败/超时/已取消 → queued; completed 永不重开)
+RETRYABLE_STATUSES: tuple[str, ...] = ("failed", "timed_out", "cancelled")
+#: 状态机合法迁移(终态中仅授权的手动重试可迁出, 且只能回到 queued)
 VALID_TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"running", "cancelled"}),
     "running": frozenset({"completed", "cancelling", "queued", "timed_out", "failed"}),
     # cancelling → cancelled 由确认取消完成; → completed 为取消竞态
     # 下先落终态者为准的异常路径
     "cancelling": frozenset({"cancelled", "completed", "timed_out", "failed"}),
+    "failed": frozenset({"queued"}),
+    "timed_out": frozenset({"queued"}),
+    "cancelled": frozenset({"queued"}),
 }
 #: 租约 TTL(秒, 默认 60 s)
 LEASE_TTL_SECONDS = 60
 
 
 def check_transition(task: TaskRecord, new_status: str) -> None:
-    """状态机校验: 终态不可迁移; 非法跳转抛 TaskStateError。"""
-    if task.status in TERMINAL_STATUSES:
-        raise TaskStateError(
-            "终态任务不可迁移状态",
-            code="TASK-STATE-002",
-            params={"task_id": task.id, "status": task.status},
-            location={"object_type": "task", "object_id": task.id},
-        )
+    """状态机校验: 以合法迁移表为唯一权威; 终态迁出仅授权的手动重试。
+
+    终态阻断沿用 TASK-STATE-002, 其他非法跳转沿用 TASK-STATE-003。
+    """
     if new_status not in VALID_TRANSITIONS.get(task.status, frozenset()):
+        if task.status in TERMINAL_STATUSES:
+            raise TaskStateError(
+                "终态任务不可迁移状态",
+                code="TASK-STATE-002",
+                params={"task_id": task.id, "status": task.status},
+                location={"object_type": "task", "object_id": task.id},
+            )
         raise TaskStateError(
             "非法状态迁移",
             code="TASK-STATE-003",

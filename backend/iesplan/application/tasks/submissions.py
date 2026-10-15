@@ -1545,16 +1545,16 @@ def acknowledge_cancel(db: Session, task_id: int) -> TaskRecord:
 
 
 def _retry_task(db: Session, user: UserRecord, task_id: int) -> TaskRecord:
-    """手动重试(仅终态任务; 计算类须存在快照, 缺失 → TASK-DATA-001 blocking)。
+    """手动重试(仅失败/超时/已取消任务; 计算类须存在快照, 缺失 → TASK-DATA-001 blocking)。
 
     重试不改变 idempotency_key 语义、不改变快照; 新尝试在下次领取时创建
-    (attempt_no 递增, 新租约新 token)。
+    (attempt_no 递增, 新租约新 token)。已完成任务永不重开, 非终态不可重试。
     """
     task = _get_task(db, task_id)
     ensure_access(db, user, task.project_id, "edit")
-    if task.status not in TERMINAL_STATUSES:
+    if task.status not in tasks_domain.RETRYABLE_STATUSES:
         raise TaskStateError(
-            "仅终态任务可手动重试",
+            "仅失败/超时/已取消任务可手动重试",
             params={"task_id": task_id, "status": task.status},
             location={"object_type": "task", "object_id": task_id},
         )
@@ -1570,6 +1570,8 @@ def _retry_task(db: Session, user: UserRecord, task_id: int) -> TaskRecord:
     pool = POOL_BY_TYPE[task.type]
     trace_id = new_id("trc-")
     task = tasks_domain.set_task_status(db, task.id, "queued", business_outcome=None)
+    # 清残留取消信号: 失败/超时落终态前若有未被观察的取消请求, 不得让新尝试被立即取消。
+    tasks_domain.clear_cancel(task.id)
     _write_diagnostic(
         db,
         task.id,
