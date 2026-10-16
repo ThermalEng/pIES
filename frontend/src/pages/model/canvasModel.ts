@@ -75,18 +75,18 @@ export function parseHandle(
   handle: string,
 ): { carrier: EnergyCarrier; direction: 'in' | 'out'; name: string } | null {
   // 句柄格式 `{carrier}:{direction}:{name}`, name 为注册表端口声明名(2.0 连线键)。
+  // 载能是开放身份(公开契约非枚举): 只拒绝空载能, 不以成员表拒绝未知载能;
+  // 方向保持 in/out 封闭语义。
   const parts = handle.split(':')
   if (parts.length < 3) return null
-  const carrier = parts[0] as EnergyCarrier
+  const carrier = parts[0]
   const direction = parts[1] as 'in' | 'out'
-  if (!ENERGY_CARRIERS.includes(carrier)) return null
+  if (!carrier) return null
   if (direction !== 'in' && direction !== 'out') return null
   const name = parts.slice(2).join(':')
   if (!name) return null
   return { carrier, direction, name }
 }
-
-export const ENERGY_CARRIERS: EnergyCarrier[] = ['electricity', 'heat', 'cool', 'gas', 'solar']
 
 // ---------------------------------------------------------------------------
 // 端口句柄派生(注册表 DTO 真实端口,RR-P1-04)
@@ -174,8 +174,11 @@ export function checkConnection(
 // 载能 → 文案映射
 // ---------------------------------------------------------------------------
 
-/** 载能 → 展示文案键(全局 i18n 已覆盖的键)。 */
-export function carrierLabelKey(carrier: EnergyCarrier): string {
+/**
+ * 载能 → 展示文案键(全局 i18n 已覆盖的键)。未知载能返回 null, 调用方直接
+ * 展示真实载能 ID(文案表不是业务准入表, 不得据此拒绝端口)。
+ */
+export function carrierLabelKey(carrier: EnergyCarrier): string | null {
   switch (carrier) {
     case 'electricity':
       return 'ies.modeling.port_electric'
@@ -187,6 +190,8 @@ export function carrierLabelKey(carrier: EnergyCarrier): string {
       return 'ies.modeling.port_fuel'
     case 'solar':
       return 'port.solar' // 页面级文案(text.ts)
+    default:
+      return null
   }
 }
 

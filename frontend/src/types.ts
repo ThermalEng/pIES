@@ -367,8 +367,12 @@ export interface DraftModelSection {
 // 设备注册表(04 §2/§3)
 // ---------------------------------------------------------------------------
 
-/** 载能标识(与设备 YAML/注册表 descriptor 的 energy_carrier 同一身份, 非展示文案)。 */
-export type EnergyCarrier = 'electricity' | 'heat' | 'cool' | 'gas' | 'solar'
+/**
+ * 载能标识: 公开契约是开放字符串(device-model 载能形如 `^[a-z][a-z0-9_]*$`,
+ * 见 assembly 数量映射 electricity/heat/cool/gas/water/data), 非封闭枚举。
+ * 前端不得以固定成员表拒绝未知载能(未知仅影响展示文案与颜色回退)。
+ */
+export type EnergyCarrier = string
 
 export interface ParameterSpec {
   unit: string | null

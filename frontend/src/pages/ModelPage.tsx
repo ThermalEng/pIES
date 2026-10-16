@@ -491,6 +491,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const connectionLabel = useCallback(
     (carrier: LocalConnection['carrier']): string => {
       const key = carrierLabelKey(carrier)
+      if (key === null) return carrier
       return key === 'port.solar' ? lt(key) : t(key)
     },
     [t],

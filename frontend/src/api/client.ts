@@ -893,16 +893,10 @@ function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
   const params = asRecord(s.parameters)
   const ports = Array.isArray(s.ports) ? (s.ports as DevicePortSpec[]) : []
   // 注册表公开 DTO 用 names {zh-CN,en-US} 字典(无 name_zh/name_en 平铺字段),
-  // 载能只存在于 ports[].energy_carrier(无 energy_carriers 顶层数组): 按端口
-  // 声明顺序去重派生, 与 descriptor 同一身份, 不猜测、不补默认。
+  // 载能只存在于 ports[].energy_carrier(无 energy_carriers 顶层数组): 直接按
+  // 端口声明顺序去重派生, 与 descriptor 同一身份, 不做形状复核与值过滤。
   const names = asRecord(s.names)
-  const carriers: EnergyCarrier[] = []
-  for (const p of ports) {
-    const c = (p as { energy_carrier?: unknown }).energy_carrier
-    if (typeof c === 'string' && c !== '' && !(carriers as string[]).includes(c)) {
-      carriers.push(c as EnergyCarrier)
-    }
-  }
+  const carriers = [...new Set(ports.map((p) => p.energy_carrier))]
   return {
     type_id: String(s.type_id ?? ''),
     version: String(s.version ?? ''),
