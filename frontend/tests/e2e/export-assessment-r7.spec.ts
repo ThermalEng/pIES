@@ -37,6 +37,17 @@ function watchExportPosts(page: Page): PostRecord[] {
   return posts
 }
 
+/** 记录评估列表 GET(导出评估解析必须携带所选任务 id, 不靠包→任务隐式反查)。 */
+function watchAssessmentGets(page: Page): string[] {
+  const urls: string[] = []
+  page.on('request', (req) => {
+    if (req.method() === 'GET' && req.url().includes('/result/assessments')) {
+      urls.push(req.url())
+    }
+  })
+  return urls
+}
+
 async function submitEvaluationViaUI(page: Page): Promise<void> {
   await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
   await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
@@ -101,6 +112,7 @@ test.describe('R7: 导出先评估再导出', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, soloUser, soloPass)
     const posts = watchExportPosts(page)
+    const assessGets = watchAssessmentGets(page)
     await page.getByText(projectName).click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/projects\/\d+$/)
     await submitEvaluationViaUI(page)
@@ -149,6 +161,11 @@ test.describe('R7: 导出先评估再导出', () => {
     // Worker 提交写 1 条＋显式重评估 1 条, 最新第一项即显式创建。
     expect(items.length).toBe(2)
     expect(items[0].id).toBe(sentAssessmentId)
+    // 评估解析显式携带所选任务 id(导出不再依赖包→任务隐式反查)。
+    expect(assessGets.length).toBeGreaterThan(0)
+    for (const url of assessGets) {
+      expect(url).toContain(`/tasks/${taskId}/result/assessments`)
+    }
 
     await soloCtx.close()
     session.assertNoErrors()

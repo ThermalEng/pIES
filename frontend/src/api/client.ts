@@ -42,7 +42,6 @@ import type {
   DevicePortSpec,
   DeviceTypeSpec,
   Diagnostic,
-  EnergyCarrier,
   EvidenceCandidate,
   ExcelExportInput,
   FinancialAbsence,
@@ -935,16 +934,10 @@ function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
 }
 
 // ---------------------------------------------------------------------------
-// 跨方法模块级缓存(后端路由以 project/task 为键, 前端方法以业务对象为键)
+// 下载会话登记(本地数字 id → 下载参数; 后端下载走短期 token)。
+// 结果/评估/曲线读取一律按调用方显式传入的任务 id 直接读端点, 不设
+// 模块级业务缓存、不做跨方法隐式预热。
 // ---------------------------------------------------------------------------
-
-/** 证据包 id → 任务 id(由任务详情填充; 结果/导出 API 以任务为路由键)。 */
-const pkgTaskCache = new Map<number, number>()
-
-
-
-/** 任务 → 结果视图原始响应缓存(hourly 复用 result 的同一次 GET, 避免重复往返)。 */
-const resultBodyCache = new Map<string, Record<string, unknown>>()
 
 /** 下载授权会话(id → 下载参数; 后端下载走短期 token, 前端以会话 id 引用)。 */
 const downloadSessions = new Map<number, { projectId: number; kind: 'excel' | 'package'; token: string; filename: string }>()
@@ -994,12 +987,11 @@ async function sendDraftCommand(
   return { revision: Number(body.revision ?? expectedRevision) }
 }
 
-/** 解析证据包所属任务评估历史的最新评估 id(Excel 导出需要)。每次读取真实
- * 列表，不用内存缓存（避免显式重评估后导出仍引用旧评估）。无既有评估即抛
- * 缺评估业务错，不隐式触发 full 评估；真实接口/网络错误直接透传，不伪装成无评估。 */
-async function resolveAssessmentId(projectId: number, evidencePackageId: number): Promise<number> {
-  const taskId = pkgTaskCache.get(evidencePackageId)
-  if (taskId === undefined) throw new ApiError(404, null, 'ies.error.no_assessment_available')
+/** 解析任务评估历史的最新评估 id(Excel 导出需要): 调用方显式传入任务 id
+ * (与所选证据同源), 每次读取真实列表, 不用内存缓存(避免显式重评估后导出
+ * 仍引用旧评估)。无既有评估即抛缺评估业务错, 不隐式触发 full 评估;
+ * 真实接口/网络错误直接透传, 不伪装成无评估。 */
+async function resolveAssessmentId(projectId: number, taskId: number): Promise<number> {
   const body = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`)
   const items = asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer)
   const latest = items[0]
@@ -1673,8 +1665,6 @@ export const api = {
               status: evidence.status as TaskDetail['evidence'][number]['status'],
             },
           ]
-          // 缓存 证据包 → 任务 反向映射(结果/导出 API 以任务为路由键)
-          pkgTaskCache.set(pkgId, taskId)
         }
         return detail
       })
@@ -1793,8 +1783,6 @@ export const api = {
         // 后端返回 {result: {evidence_status, evidence, metrics_summary, ...}}
         const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
         const evidence = asRecord(r.evidence)
-        // 缓存原始响应, hourly 复用同一次 GET(避免选中包时重复请求同一端点)
-        resultBodyCache.set(`${projectId}:${taskId}`, r)
         const status = r.evidence_status === 'no_evidence' ? 'no_evidence' : 'available'
         const fin = r.financial_evaluation as FinancialEvaluationBlock | null | undefined
         const absence = r.financial_absence as FinancialAbsence | undefined
@@ -1858,15 +1846,12 @@ export const api = {
       // {series_id, instance_id, variable_id, unit}（字段非 null），
       // 不做旧协议并集、不互补缺。单序列超过后端 MAX_HOURLY_LIMIT 时按公开
       // next_start 分页读到 null 为止(见 hourlyPages)，声明列表全量消费，
-      // 不静默截断。结果视图复用 result() 已拉取的缓存。
-      const cacheKey = `${projectId}:${taskId}`
-      const pending = resultBodyCache.get(cacheKey)
-        ? Promise.resolve({ result: resultBodyCache.get(cacheKey) })
-        : request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then((body) => {
-            const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
-            resultBodyCache.set(cacheKey, r)
-            return { result: r }
-          })
+      // 不静默截断。结果视图按显式任务 id 直接重读(调用方刚读过主结果,
+      // 此处多一次 GET 是诚实代价, 不跨方法复用缓存)。
+      const pending = request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then((body) => {
+        const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
+        return { result: r }
+      })
       return pending.then(async (body) => {
         const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
         // 合法缺席仅三种后端显式形态: hourly_refs=null/空数组/空序列集合
@@ -1907,8 +1892,8 @@ export const api = {
   exports: {
     excel(input: ExcelExportInput): Promise<number> {
       const projectId = input.project_id
-      // 后端需要 assessment_id(必填): 取该证据包所属任务评估历史最新一条
-      return resolveAssessmentId(projectId, input.evidence_package_id ?? 0).then((assessmentId) =>
+      // 后端需要 assessment_id(必填): 取调用方显式传入任务的评估历史最新一条
+      return resolveAssessmentId(projectId, input.task_id).then((assessmentId) =>
         request<unknown>(`/projects/${projectId}/exports/excel`, {
           method: 'POST',
           body: {

@@ -768,6 +768,7 @@ export default function ResultsPage() {
       // 系统评估, 不隐式创建评估。评估历史每次真实读取，不用内存缓存。
       const input: ExcelExportInput = {
         project_id: projectId,
+        task_id: pickedTaskId,
         evidence_package_id: selectedPkgId,
         include_hourly: true,
         include_diagnostics: true,
@@ -786,7 +787,7 @@ export default function ResultsPage() {
     } finally {
       setExportBusy(null)
     }
-  }, [projectId, selectedPkgId, exportLang])
+  }, [projectId, selectedPkgId, pickedTaskId, exportLang])
 
   const exportPackage = useCallback(async () => {
     setExportError(null)

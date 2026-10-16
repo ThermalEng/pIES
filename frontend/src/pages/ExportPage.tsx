@@ -41,6 +41,8 @@ export default function ExportPage() {
   const [lang, setLang] = useState<ExportLang>('zh')
   /** 证据包 id:null = 无可导出结果,undefined = 解析中。 */
   const evidence = taskCtx.loading ? undefined : taskCtx.picked ? taskCtx.picked.packageId : null
+  /** 所选任务 id(与证据同源; 导出评估按此任务读取)。 */
+  const pickedTaskId = taskCtx.picked ? taskCtx.picked.taskId : 0
   const resolving = taskCtx.loading
   /** 显式选择无可用结果(未完成/无证据): Excel 禁用, 不回退他任务。 */
   const explicitBlocked = !taskCtx.loading && taskCtx.explicitBlocked
@@ -71,6 +73,7 @@ export default function ExportPage() {
       // 系统评估, 不隐式创建评估。
       const input: ExcelExportInput = {
         project_id: projectId,
+        task_id: pickedTaskId,
         evidence_package_id: evidence,
         include_hourly: true,
         include_diagnostics: true,
@@ -89,7 +92,7 @@ export default function ExportPage() {
     } finally {
       setExportBusy(null)
     }
-  }, [projectId, evidence, lang])
+  }, [projectId, evidence, pickedTaskId, lang])
 
   /** 完整项目包导出(仅所有者;后端对查看者返回 403)。 */
   const exportPackage = useCallback(async () => {

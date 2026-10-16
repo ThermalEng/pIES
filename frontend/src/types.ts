@@ -959,6 +959,8 @@ export interface ValidationResult {
 export interface ExcelExportInput {
   project_id: EntityId
   report_type?: 'excel'
+  /** 报告所属任务(与所选证据同源, 调用方显式传入; 评估按此任务读取)。 */
+  task_id: EntityId
   /** 结果来源证据包(缺省用最新结果)。 */
   evidence_package_id?: EntityId
   include_hourly?: boolean
