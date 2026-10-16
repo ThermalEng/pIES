@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
+import { getMe } from '../features/auth'
 import { translate, translateDiagnostic, translateError, useI18n } from '../i18n'
 import {
   Alert,
@@ -557,8 +558,7 @@ export default function TasksPage() {
   // 基础数据加载
   // -------------------------------------------------------------------------
   useEffect(() => {
-    api.auth
-      .me()
+    getMe()
       .then(setMe)
       .catch(() => setMe(null))
   }, [])

@@ -6,11 +6,7 @@
  */
 
 import type {
-  AdminUserListParams,
-  AdminUserRow,
   ApiErrorBody,
-  AuditEntry,
-  AuditListParams,
   CalcConfig,
   CalcConfigInput,
   CalculationConfigBody,
@@ -30,8 +26,6 @@ import type {
   Diagnostic,
   ExcelExportInput,
   DraftModelSection,
-  HealthStatus,
-  LoginRequest,
   ImportConfirmResult,
   ImportProposal,
   PackageExportInput,
@@ -43,8 +37,6 @@ import type {
   ProjectVersion,
   ProjectVersionCreateInput,
   VersionRestoreResult,
-  PublicAuthSettings,
-  RegisterRequest,
   Severity,
   Task,
   TaskAttempt,
@@ -58,8 +50,6 @@ import type {
   TaskOutcome,
   TaskStatus,
   TaskType,
-  User,
-  UserDeletePreview,
   ValidationResult,
 } from '../types'
 import { ApiError } from '../types'
@@ -81,28 +71,6 @@ import {
   downloadExport,
 } from '../features/exports'
 import { exportTaskReport } from '../application/exportTaskReport'
-import {
-  changePassword as authChangePassword,
-  confirmTakeover as authConfirmTakeover,
-  getMe as authGetMe,
-  getPublicSettings as authGetPublicSettings,
-  login as authLogin,
-  logout as authLogout,
-  register as authRegister,
-} from '../features/auth'
-import {
-  deactivateUser as adminDeactivateUser,
-  deleteUser as adminDeleteUser,
-  getAdminHealth,
-  getSecuritySettings as adminGetSecuritySettings,
-  getStorageStatus as adminGetStorageStatus,
-  listUsers as adminListUsers,
-  previewUserDelete as adminPreviewUserDelete,
-  queryAudit as adminQueryAudit,
-  reactivateUser as adminReactivateUser,
-  resetPassword as adminResetPassword,
-  setRegistrationEnabled as adminSetRegistrationEnabled,
-} from '../features/admin'
 
 import { request, requestBlob } from '../shared/http'
 
@@ -568,36 +536,6 @@ async function sendDraftCommand(
 // 类型化方法集
 // ---------------------------------------------------------------------------
 
-/** 登录/接管响应(与后端 AuthResponse 一致; user 为 UserOut 精简形态)。 */
-export interface LoginResult {
-  token: string
-  token_type: string
-  user: {
-    id: number
-    username: string
-    display_name: string
-    role: string
-    status: string
-    force_password_change: boolean
-    credential_version: number
-    last_login_at: string | null
-  }
-  needs_takeover_confirm: boolean
-}
-
-export interface AuthApi {
-  login(input: LoginRequest): Promise<LoginResult>
-  logout(): Promise<void>
-  changePassword(input: { old_password: string; new_password: string }): Promise<void>
-  /** 确认接管(无请求体; 身份取自 Cookie/Bearer, 服务端忽略 body)。 */
-  confirmTakeover(): Promise<LoginResult>
-  register(input: RegisterRequest): Promise<User>
-  /** 获取当前登录用户(页面刷新后恢复用户信息)。 */
-  me(): Promise<User>
-  /** 登录页公开设置(无需认证): 注册开关 / SSO 入口。 */
-  publicSettings(): Promise<PublicAuthSettings>
-}
-
 export interface ProjectsApi {
   list(params?: ProjectListParams): Promise<PageResult<Project>>
   create(input: ProjectCreateInput): Promise<Project>
@@ -754,38 +692,7 @@ export interface ExportsApi {
   download(downloadSessionId: number): Promise<{ blob: Blob; filename: string }>
 }
 
-export interface AdminApi {
-  users(params?: AdminUserListParams): Promise<PageResult<AdminUserRow>>
-  storage(): Promise<{ total_bytes: number; used_bytes: number; quota_bytes: number | null; object_count: number }>
-  health(): Promise<HealthStatus>
-  audit(params?: AuditListParams): Promise<PageResult<AuditEntry>>
-  /** 删除账号预告(管理员): 返回将受影响项目清单 + 确认令牌。 */
-  previewUserDelete(userId: number): Promise<UserDeletePreview>
-  /** 删除账号(管理员): 需 confirm=true + preview 签发的 confirm_token, 级联删除其项目。 */
-  deleteUser(userId: number, confirmToken: string): Promise<{ deleted_projects: number }>
-  /** 停用账号(管理员)。 */
-  deactivateUser(userId: number): Promise<void>
-  /** 重新启用账号(管理员)。 */
-  reactivateUser(userId: number): Promise<void>
-  /** 重置密码(管理员): 签发临时密码并强制目标用户改密, 其全部会话失效。 */
-  resetPassword(userId: number, newPassword: string): Promise<void>
-  /** 读取安全设置(管理员)。 */
-  getSecuritySettings(): Promise<{ registration_enabled: boolean }>
-  /** 更新安全设置: 自助注册开关(管理员)。 */
-  setRegistrationEnabled(enabled: boolean): Promise<{ registration_enabled: boolean }>
-}
-
 export const api = {
-  auth: {
-    login: authLogin,
-    logout: authLogout,
-    changePassword: authChangePassword,
-    confirmTakeover: authConfirmTakeover,
-    register: authRegister,
-    publicSettings: authGetPublicSettings,
-    me: authGetMe,
-  } satisfies AuthApi,
-
   projects: {
     list(params?: ProjectListParams): Promise<PageResult<Project>> {
       return request<unknown>('/projects', { query: params }).then((body) => {
@@ -1265,20 +1172,6 @@ export const api = {
     package: exportPackage,
     download: downloadExport,
   } satisfies ExportsApi,
-
-  admin: {
-    users: adminListUsers,
-    storage: adminGetStorageStatus,
-    health: getAdminHealth,
-    audit: adminQueryAudit,
-    previewUserDelete: adminPreviewUserDelete,
-    deleteUser: adminDeleteUser,
-    deactivateUser: adminDeactivateUser,
-    reactivateUser: adminReactivateUser,
-    resetPassword: adminResetPassword,
-    getSecuritySettings: adminGetSecuritySettings,
-    setRegistrationEnabled: adminSetRegistrationEnabled,
-  } satisfies AdminApi,
 }
 
 // ---------------------------------------------------------------------------
