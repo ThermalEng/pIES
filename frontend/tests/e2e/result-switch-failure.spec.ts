@@ -102,9 +102,19 @@ test.describe('C2/C3: 结果失败可见与切换状态归属', () => {
 
     const context: BrowserContext = await browser.newContext()
     const page: Page = await context.newPage()
-    // B 的结果响应延迟 6s, A 直通: 构造切换竞态。
+    // B 的结果响应在 C3 阶段延迟 6s、在 C2 阶段 500, A 始终直通。
+    // 同一路由按阶段标志切换行为, 不得 unrouteAll 后重注册: 实证表明
+    // unrouteAll({behavior:'wait'}) 阻塞等待在途延迟处理器后, 重注册的
+    // 同 pattern 路由对后续请求(含直接 fetch)不再生效, 500 注入静默丢失。
+    let resultPhase: 'delay' | 'fail' = 'delay'
     await page.route('**/api/projects/*/tasks/*/result', async (route) => {
       if (route.request().url().includes(`/tasks/${taskB}/result`)) {
+        if (resultPhase === 'fail') {
+          await route.fulfill({
+            status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'c2-boom' }),
+          })
+          return
+        }
         await new Promise((r) => setTimeout(r, 6000))
       }
       await route.continue()
@@ -141,16 +151,8 @@ test.describe('C2/C3: 结果失败可见与切换状态归属', () => {
     await expect(kv.getByText('v3', { exact: true })).toBeVisible()
 
     // C2: B 的结果 GET 500 → 错误条可见, 两空态卡不渲染。
-    await page.unrouteAll({ behavior: 'wait' })
-    await page.route('**/api/projects/*/tasks/*/result', async (route) => {
-      if (route.request().url().includes(`/tasks/${taskB}/result`)) {
-        await route.fulfill({
-          status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'c2-boom' }),
-        })
-      } else {
-        await route.continue()
-      }
-    })
+    // 同一路由切到 fail 相, 不得重注册(见上)。
+    resultPhase = 'fail'
     await evSelect.selectOption({ index: 0 })
     await expect(bRow.getByText(/60\.0000/)).toHaveCount(0)
     await evSelect.selectOption({ index: 1 })
