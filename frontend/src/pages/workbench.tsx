@@ -139,23 +139,21 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
       // 隐私模式忽略
     }
   }, [projectId])
-  // 项目切换即按新项目键重解持久化选择: 前一项目的任务 id 不得泄漏到新项目。
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(`iesplan.tasks.selected.${projectId}`)
-      const v = raw ? Number(raw) : NaN
-      setSelectedTaskIdState(Number.isFinite(v) && v > 0 ? v : null)
-    } catch {
-      setSelectedTaskIdState(null)
-    }
-  }, [projectId])
+  // Provider 已按 projectId 键控重挂: 上方初始化器每次挂载按新项目键读取
+  // 持久化选择, 前一项目的任务 id 不得泄漏到新项目, 无需第二个同步 effect。
   const [autosave, setAutosave] = useState<AutosaveStatus>('saved')
   const [offline, setOffline] = useState(() =>
     typeof navigator === 'undefined' ? false : !navigator.onLine,
   )
 
+  // 摘要刷新序列(同实例内): 挂载双读/任务页双读/任务载入后刷新等同一项目
+  // 的并发重读以后发起者为准, 先发起的迟到回包不得覆盖更新的发布(含
+  // loading/error 位); 跨项目由 Provider 键控重挂在结构上隔离。
+  const refreshSeqRef = useRef(0)
   const refreshDetailed = useCallback(async (): Promise<WorkbenchRefreshErrors> => {
     // 每次重读都更新三态: 加载中 → 成功/失败, 供消费者区分 null 的含义。
+    const mySeq = refreshSeqRef.current + 1
+    refreshSeqRef.current = mySeq
     setProjectLoading(true)
     setProjectError(null)
     const [projectSettled, versionsSettled] = await Promise.allSettled([
@@ -165,18 +163,25 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
     let nextProjectError: string | null = null
     let versionsError: string | null = null
     if (projectSettled.status === 'fulfilled') {
-      setProject(projectSettled.value)
+      if (refreshSeqRef.current === mySeq) setProject(projectSettled.value)
     } else {
       nextProjectError = errorMessage(projectSettled.reason)
-      setProject(null)
+      if (refreshSeqRef.current === mySeq) setProject(null)
     }
-    setProjectError(nextProjectError)
     if (versionsSettled.status === 'fulfilled') {
-      setVersions([...versionsSettled.value].sort((a, b) => a.version_no - b.version_no))
+      if (refreshSeqRef.current === mySeq) {
+        setVersions([...versionsSettled.value].sort((a, b) => a.version_no - b.version_no))
+      }
     } else {
       versionsError = errorMessage(versionsSettled.reason)
-      setVersions([])
+      if (refreshSeqRef.current === mySeq) setVersions([])
     }
+    // 被超越的刷新: 真实错误仍如实返回给调用方(调用方自有飞行检查决定),
+    // 但不再触碰共享摘要/版本/loading 位, 避免旧回包覆盖新发布。
+    if (refreshSeqRef.current !== mySeq) {
+      return { projectError: nextProjectError, versionsError }
+    }
+    setProjectError(nextProjectError)
     setProjectLoading(false)
     return { projectError: nextProjectError, versionsError }
   }, [projectId])

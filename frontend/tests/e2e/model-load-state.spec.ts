@@ -404,8 +404,9 @@ test.describe('模型页读取状态', () => {
   })
 
   test('项目切换不压住新读, 旧读回包不污染新项目', async ({ browser }) => {
-    // 生命周期回归: A 读挂起时切到 B, B 必须真实读出, 随后放行 A 也不得
-    // 把 A 内容/修订/就绪/错误或共享状态发布到 B。
+    // 生命周期回归: A 读挂起时切到 B, B 必须真实读出(画布节点 + 工作台头部
+    // 项目名均为 B), 随后放行 A 也不得把 A 内容/修订/就绪/错误、共享状态
+    // 或工作台项目摘要发布到 B。
     // 说明: 工作台内无跨项目切换 UI(仅列表进项目, 会重挂整树), 此处用路由
     // 本身支持的同树 :id 切换(与路由参数变更同一生命周期, 不新增产品特性):
     // history 入栈 + popstate 由真实路由消费, 组件/网络均为真实。
@@ -508,6 +509,9 @@ test.describe('模型页读取状态', () => {
       expect(await page.locator('.react-flow__node', { hasText: 'E2E grid_connection' }).count()).toBe(0)
       await expect(page.getByText(/^已保存$|^Saved$/)).toBeVisible({ timeout: 30_000 })
       expect(bGets).toBeGreaterThanOrEqual(1)
+      // 工作台摘要归属 B: 头部标题为 B 项目名, A 项目名不得作为当前状态出现。
+      await expect(page.locator('.wb-header__title', { hasText: projectB })).toBeVisible({ timeout: 30_000 })
+      expect(await page.getByText(projectA, { exact: false }).count()).toBe(0)
 
       // 放行 A 的旧读: 三个挂起的 A 响应都必须真实到达(响应事件计数,
       // 每个旧请求独立事件, 不共用同一 waitForResponse),
@@ -515,6 +519,9 @@ test.describe('模型页读取状态', () => {
       releaseA()
       await expect.poll(async () => aLateStatuses.length, { timeout: 30_000 }).toBe(3)
       expect(aLateStatuses).toEqual([200, 200, 200])
+      // 旧 A 摘要回包不得覆盖 B: 标题仍为 B, A 名仍不出现(画布断言在后)。
+      await expect(page.locator('.wb-header__title', { hasText: projectB })).toBeVisible({ timeout: 30_000 })
+      expect(await page.getByText(projectA, { exact: false }).count()).toBe(0)
       await expect(page.locator('.react-flow__node', { hasText: bDevice })).toBeVisible({ timeout: 30_000 })
       expect(await page.locator('.react-flow__node', { hasText: 'E2E grid_connection' }).count()).toBe(0)
       expect(await page.locator('.react-flow__node').count()).toBe(1)
