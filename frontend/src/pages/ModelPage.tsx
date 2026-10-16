@@ -99,7 +99,9 @@ export default function ModelPage() {
   const { projectId } = useWorkbench()
   return (
     <ReactFlowProvider>
-      <ModelCanvas projectId={projectId} />
+      {/* 项目键控: 切换项目即全新挂载, 旧项目的读在途标记/草稿/就绪态不继承,
+          旧读回包不得发布到新项目; 项目内刷新不受影响。 */}
+      <ModelCanvas key={projectId} projectId={projectId} />
     </ReactFlowProvider>
   )
 }
@@ -129,6 +131,12 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const graphReadyRef = useRef(false)
   // 读在途(单飞: 重试/刷新按钮加载中禁用, 回调内再保险, 不搭请求框架)。
   const loadInflightRef = useRef(false)
+  // 归属作废(卸载/键控重挂): 旧读回包不得发布图/修订/就绪/错误,
+  // 也不得再碰共享 autosave 状态。
+  const cancelledRef = useRef(false)
+  useEffect(() => () => {
+    cancelledRef.current = true
+  }, [])
   // 读阻塞(未就绪 / 刷新在途 / 读失败未恢复): 可写控件只读或隐藏, 不接受变更。
   const readBlocked = !graphReady || loading || loadError !== null
 
@@ -205,6 +213,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
     try {
       // 2.0 唯一项目建模事实: 项目视图草稿内容 model 节(名键设备与端点连接)。
       const { model, revision } = await api.model.getModel(projectId)
+      // 归属已作废(切换项目/卸载): 旧回包整体丢弃, 不发布任何状态。
+      if (cancelledRef.current) return
       revisionRef.current = revision
       const layout = loadLayout(projectId)
       const deviceList = model.devices.map((d, i) =>
@@ -251,12 +261,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
     }
   }, [typesError, reloadGraph])
 
-  // 项目切换: 旧图不再是当前草稿, 未读到新图前保持未就绪(不可写)。
-  useEffect(() => {
-    setGraphReady(false)
-    graphReadyRef.current = false
-    setLoadError(null)
-  }, [projectId])
+  // 项目切换无需重置: 画布按 projectId 键控重挂, 状态天然全新;
+  // 旧读回包由 cancelledRef 丢弃, 不会发布到新项目。
 
   // 注册表 deviceTypes 全局唯一, 每个会话只加载一次(与草稿加载解耦,
   // 避免 deviceTypes 更新改变 reloadGraph 身份导致加载 effect 循环请求)。

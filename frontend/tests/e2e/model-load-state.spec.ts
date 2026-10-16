@@ -402,4 +402,121 @@ test.describe('模型页读取状态', () => {
     ])
     await context.close()
   })
+
+  test('项目切换不压住新读, 旧读回包不污染新项目', async ({ browser }) => {
+    // 生命周期回归: A 读挂起时切到 B, B 必须真实读出, 随后放行 A 也不得
+    // 把 A 内容/修订/就绪/错误或共享状态发布到 B。
+    // 说明: 工作台内无跨项目切换 UI(仅列表进项目, 会重挂整树), 此处用路由
+    // 本身支持的同树 :id 切换(与路由参数变更同一生命周期, 不新增产品特性):
+    // history 入栈 + popstate 由真实路由消费, 组件/网络均为真实。
+    const userName = uniqueName('es-modelload')
+    const password = strongPassword('Init')
+    const projectA = uniqueName('模型A项目')
+    const projectB = uniqueName('模型B项目')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, userName, password)
+    const userToken = await loginToken(apiCtx.request, userName, password)
+    const mkProject = async (name: string): Promise<number> => {
+      const created = await requestJson(apiCtx.request, 'POST', '/api/projects', {
+        name,
+        baseline_resolution: '1h',
+        baseline_start_year: 2026,
+        baseline_scenario_mode: 'single',
+      }, userToken)
+      // 创建响应精确信封 {project, my_role}: 直接消费具名键, 不做兼容猜测。
+      const pid: number = created.project.id
+      expect(pid).toBeTruthy()
+      return pid
+    }
+    const pidA = await mkProject(projectA)
+    await buildMinimalModel(apiCtx.request, pidA, userToken)
+    const pidB = await mkProject(projectB)
+    // B 仅放一个同名绝不重复的设备, 与 A 的 6 节点明确区分。
+    const bDevice = uniqueName('E2E-B-lifecycle')
+    const deviceTypes = await requestJson(apiCtx.request, 'GET', '/api/registry/device-types', undefined, userToken)
+    const heatType = (deviceTypes.items as Array<{ type_id: string }>).find((it) => it.type_id.includes('heat_load'))
+    expect(heatType).toBeTruthy()
+    const viewB = await requestJson(apiCtx.request, 'GET', `/api/projects/${pidB}`, undefined, userToken)
+    await requestJson(apiCtx.request, 'PUT', `/api/projects/${pidB}/draft`, {
+      expected_revision: viewB.draft.revision,
+      commands: [{
+        id: `e2e-lifecycle-${pidB}`,
+        unit: 'model',
+        type: 'model.upsert_device',
+        payload: { name: bDevice, device_type: heatType!.type_id, kind: 'new', params: {} },
+      }],
+    }, userToken)
+    await apiCtx.close()
+
+    const pathA = `/api/projects/${pidA}`
+    // 定向挂起: 仅 A 项目视图 GET 取回真实响应后挂起, B 与其余真实放行。
+    let releaseA!: () => void
+    const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await context.route(
+      (url) => url.pathname === pathA,
+      async (route) => {
+        if (route.request().method() !== 'GET') {
+          await route.continue()
+          return
+        }
+        const res = await route.fetch()
+        await gateA
+        await route.fulfill({ response: res })
+      },
+    )
+    let bGets = 0
+    page.on('request', (req) => {
+      if (req.method() === 'GET' && new URL(req.url()).pathname === `/api/projects/${pidB}`) bGets += 1
+    })
+    const session = await createSession(page, userName, password)
+
+    try {
+      // A 页加载中(A 读挂起)。
+      await page.getByText(projectA).click({ timeout: 30_000 })
+      await expect(page).toHaveURL(/\/projects\/\d+$/)
+      await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
+      await expect(page).toHaveURL(/\/model$/)
+      await expect(page.getByText(/模型加载中|Loading model/)).toBeVisible({ timeout: 30_000 })
+
+      // 同树切到 B(路由 :id 变更, 画布按 projectId 键控重挂)。
+      await page.evaluate((url) => {
+        window.history.pushState({}, '', url)
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }, `/projects/${pidB}/model`)
+      // B 真实读出: 唯一节点 + 已保存, 且 B 确实发起了读取。
+      await expect(page.locator('.react-flow__node', { hasText: bDevice })).toBeVisible({ timeout: 60_000 })
+      expect(await page.locator('.react-flow__node', { hasText: 'E2E grid_connection' }).count()).toBe(0)
+      await expect(page.getByText(/^已保存$|^Saved$/)).toBeVisible({ timeout: 30_000 })
+      expect(bGets).toBeGreaterThanOrEqual(1)
+
+      // 放行 A 的旧读: 两个挂起的 A 响应都必须真实到达, 但 B 内容/就绪/
+      // 共享状态不得被覆盖, 也不得立错。
+      const aLate1 = page.waitForResponse(
+        (res) => res.request().method() === 'GET' && new URL(res.url()).pathname === pathA,
+        { timeout: 30_000 },
+      )
+      const aLate2 = page.waitForResponse(
+        (res) => res.request().method() === 'GET' && new URL(res.url()).pathname === pathA,
+        { timeout: 30_000 },
+      )
+      releaseA()
+      await aLate1
+      await aLate2
+      await expect(page.locator('.react-flow__node', { hasText: bDevice })).toBeVisible({ timeout: 30_000 })
+      expect(await page.locator('.react-flow__node', { hasText: 'E2E grid_connection' }).count()).toBe(0)
+      expect(await page.locator('.react-flow__node').count()).toBe(1)
+      await expect(page.getByText(/^已保存$|^Saved$/)).toBeVisible({ timeout: 30_000 })
+      expect(await page.getByText(/模型加载失败|Failed to load model/).count()).toBe(0)
+    } finally {
+      releaseA()
+    }
+
+    session.assertNoErrors([
+      // 进项目读尚无保存的计算配置 404(D3 外既有行为, 计数锁定防漂移)。
+      { method: 'GET', path: `/api/projects/${pidA}/config`, status: 404, times: 1 },
+    ])
+    await context.close()
+  })
 })
