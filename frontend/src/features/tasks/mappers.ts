@@ -3,12 +3,10 @@
  *
  * 全部函数为纯函数: 不访问网络、缓存或 React 状态, 不导入 HTTP 层。
  * 可信响应直接消费具名键: 列表/详情/提交/取消/重试/冻结输入/载入均为
- * 唯一精确信封, 不做 {items}/{key}/裸数组并集猜测(oneOf/asItems 已删除),
- * 不以 ??0/'' 补后端非空列(与 application/tasks/views.py 同形)。
- * 仅在后端真正可空处保留缺席语义(与旧行为一致):
- * business_outcome/calc_snapshot_id/deadline…为 null、
- * idempotency_key 可空列缺席为空串(历史行真实存在 null, 非伪造值)、
- * completed_at/latest_* 仅列表项携带(详情/提交一律 null, 不反查)、
+ * 唯一精确信封, 不做 {items}/{key}/裸数组并集猜测, 不以 ??0/'' 补任何
+ * 列(与 application/tasks/views.py 同形); 后端可空事实原样透传为 null
+ * (idempotency_key/progress.attempt_no/progress.updated_at 等)。
+ * completed_at/latest_* 仅列表项携带(详情/提交一律 null, 不反查);
  * 无 project_id/deadline/outcome_note 键(后端未发布, 不猜测: project_id
  * 取请求作用域入参, deadline/outcome_note 恒为 null)。
  * 畸形体自然抛错可见, 不伪装成功。
@@ -43,8 +41,8 @@ export function taskFromSummary(s: TaskSummaryDto, projectId: number): Task {
     type: s.type,
     status: s.status,
     business_outcome: s.business_outcome,
-    // idempotency_key 列可空: 历史行真实存在 null, 缺席为空串(旧行为保留)。
-    idempotency_key: s.idempotency_key ?? '',
+    // idempotency_key 可空事实原样透传(比较处按缺席处理, 见 TasksPage 重复提示)。
+    idempotency_key: s.idempotency_key,
     calc_snapshot_id: s.calc_snapshot_id,
     requested_by: s.requested_by,
     requested_at: s.requested_at,
@@ -80,24 +78,26 @@ export function taskListFromServer(body: TaskListResponseDto, projectId: number)
   return body.items.map((t) => taskFromListItem(t, projectId))
 }
 
-/** 后端任务诊断行 → 前端 Diagnostic(错误路径映射, 与旧行为逐键一致)。 */
+/**
+ * 后端任务诊断行 → 前端 Diagnostic(与生产者 task_diagnostics 表同口径:
+ * level/message/created_at 非空直接消费; code 可空, 缺席用显式展示标签,
+ * 不伪造服务端身份; 无 trace_id 键, 恒为 null)。
+ */
 export function taskDiagFromServer(d: TaskDiagDto): Diagnostic {
-  const level = String(d.level ?? 'error')
+  const level = d.level
   const severity: Severity =
     level === 'blocking' ? 'blocking' : level === 'warning' ? 'warning' : level === 'info' ? 'info' : 'error'
   return {
-    code: String(d.code ?? 'TASK-DIAG'),
+    code: d.code ?? 'TASK-DIAG',
     message_key: 'ies.diag.raw',
-    params: { message: String(d.message ?? '') },
+    params: { message: d.message },
     severity,
     blocking: level === 'blocking' || level === 'error',
     location: null,
     fix_hint_key: null,
     ref_ids: [],
-    occurred_at:
-      d.created_at === null || d.created_at === undefined ? new Date().toISOString() : String(d.created_at),
+    occurred_at: d.created_at,
     source: 'task',
-    // 任务诊断行无 trace_id 键(见 task_detail 诊断装配): 恒为 null。
     trace_id: null,
     project_id: null,
     task_id: null,
@@ -125,13 +125,12 @@ export function taskDetailFromServer(body: TaskDetailResponseDto, projectId: num
     progress: {
       task_id: base.id,
       status: base.status,
-      // 进度摘要 attempt_no 可空(尚无尝试): 缺席为 0(旧行为保留)。
-      attempt_no: p.attempt_no ?? 0,
+      // 进度可空事实原样透传(界面不消费 attempt_no/updated_at, 见 TaskProgress)。
+      attempt_no: p.attempt_no,
       percent: p.percent,
       stage: p.stage,
       detail: p.detail ?? {},
-      // updated_at 可空: 缺席为空串(旧行为保留, 无消费者依赖其值)。
-      updated_at: p.updated_at ?? '',
+      updated_at: p.updated_at,
       source: p.source === 'redis' ? 'redis' : 'pg',
       retry: false,
     },

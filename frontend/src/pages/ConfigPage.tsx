@@ -17,6 +17,7 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 
 import { api } from '../api/client'
+import { getCalcConfig, saveCalcConfig } from '../features/config'
 import { Alert, Button, Card, EmptyState, FormField, Input, Select, Spinner, Textarea } from '../components/ui'
 import { errorMessage, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
@@ -129,7 +130,7 @@ export default function ConfigPage(props: ConfigPageProps) {
       setLoading(true)
       setError(null)
       try {
-        const cfg = await api.config.get(projectIdNum)
+        const cfg = await getCalcConfig(projectIdNum)
         if (!cancelled) applyBody(cfg.calculation_config, cfg.revision)
       } catch (err) {
         if (cancelled) return
@@ -228,7 +229,7 @@ export default function ConfigPage(props: ConfigPageProps) {
     if (pid === undefined) return
     setReloading(true)
     try {
-      const latest = await api.config.get(pid)
+      const latest = await getCalcConfig(pid)
       applyBody(latest.calculation_config, latest.revision)
     } catch (err) {
       setNotice({ kind: 'error', text: errorMessage(err) })
@@ -246,7 +247,7 @@ export default function ConfigPage(props: ConfigPageProps) {
     setNotice(null)
     setConflict(false)
     try {
-      const saved = await api.config.save(pid, { calculation_config: body, expected_revision: revision })
+      const saved = await saveCalcConfig(pid, { calculation_config: body, expected_revision: revision })
       applyBody(saved.calculation_config, saved.revision)
       setNotice({ kind: 'success', text: pt('ies.config.saved_ok', { revision: saved.revision }) })
     } catch (err) {

@@ -104,16 +104,19 @@ export interface TaskProgressDto {
   source: string
 }
 
-/** 任务诊断行(与 task_detail diagnostics 条目同形; 非验证诊断形态, 见 mappers)。 */
+/**
+ * 任务诊断行(与 task_diagnostics 表公开视图同形; level/message/created_at
+ * 非空, code 可空; 非验证诊断形态)。
+ */
 export interface TaskDiagDto {
   id: number
-  level: string
+  level: 'blocking' | 'error' | 'warning' | 'info'
   code: string | null
-  message: string | null
+  message: string
   stack_trace: string | null
   context: Record<string, unknown> | null
   attempt_id: number | null
-  created_at: string | null
+  created_at: string
 }
 
 /** 快照摘要(与 task_detail calc_snapshot 同形)。 */
@@ -237,9 +240,13 @@ export interface TaskEvidenceDto {
   object_id: number
 }
 
-/** 结果视图响应中 tasks.get 消费的子集。 */
+/**
+ * 结果视图响应中 tasks.get 补充读取消费的子集(非结果家族通用 result_view
+ * 契约): 仅在任务元数据 result_available 明确为 true 时读取, 与可用性判定
+ * 同查询族, 证据包必然存在; 直接消费, 缺席即自然抛错可见。
+ */
 export interface TaskResultEnvelopeDto {
   result: {
-    evidence: TaskEvidenceDto | null
+    evidence: TaskEvidenceDto
   }
 }

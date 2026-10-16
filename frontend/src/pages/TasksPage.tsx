@@ -20,17 +20,25 @@ import {
   DEFAULT_FORM,
   SUBMITTABLE_TYPES,
   buildInput,
+  cancelTask,
+  createTask,
   describeFrozenConfig,
   describeFrozenEvaluation,
   describeFrozenFinance,
   formFromWorking,
+  getTaskDetail,
+  getTaskInputs,
   hasSavedConfig,
+  listTasks,
   logicalSigOf,
   newSubmitNonce,
   parseEvaluation,
+  retryTask,
   serializeParams,
   workingOfForm,
 } from '../features/tasks'
+import { getCalcConfig } from '../features/config'
+import { runValidation } from '../features/validation'
 import type { CreateForm, DistType } from '../features/tasks'
 import { translate, translateDiagnostic, translateError, useI18n } from '../i18n'
 import {
@@ -303,8 +311,7 @@ export default function TasksPage() {
   }, [])
 
   useEffect(() => {
-    api.config
-      .get(projectId)
+    getCalcConfig(projectId)
       .then(setConfig)
       .catch(() => setConfig(null))
   }, [projectId])
@@ -326,7 +333,7 @@ export default function TasksPage() {
   // -------------------------------------------------------------------------
   const loadList = useCallback(async () => {
     try {
-      const page = await api.tasks.list({ project_id: projectId, limit: 100 })
+      const page = await listTasks({ project_id: projectId, limit: 100 })
       setTasks(page.items)
       setLoadError(null)
     } catch (err) {
@@ -362,7 +369,7 @@ export default function TasksPage() {
     const load = async () => {
       setDetailLoading(true)
       try {
-        const d = await api.tasks.get(projectId, selectedId)
+        const d = await getTaskDetail(projectId, selectedId)
         if (!cancelled) {
           setDetail(d)
           setDetailError(null)
@@ -398,7 +405,7 @@ export default function TasksPage() {
       setFrozenLoading(true)
       setFrozenError(null)
       try {
-        const inputs = await api.tasks.inputs(projectId, selectedId)
+        const inputs = await getTaskInputs(projectId, selectedId)
         if (cancelled) return
         setFrozenInputs(inputs)
         // 数据集名称按冻结版本 id 匹配现有数据集版本(只读查询, 不建任务);
@@ -469,7 +476,7 @@ export default function TasksPage() {
       setChecking(true)
       setBlockers(null)
       try {
-        const res = await api.validation.run(projectId)
+        const res = await runValidation(projectId)
         const blocking = res.diagnostics.filter((d) => d.blocking || d.severity === 'blocking')
         setBlockers(blocking)
         if (blocking.length > 0) {
@@ -488,11 +495,11 @@ export default function TasksPage() {
         // 确认后仍以本次新键提交产生新任务。
         const sig = logicalSigOf(formRef.current, savedRevisionValue)
         const dup =
-          tasks?.find(
-            (tk) =>
-              ACTIVE_STATUSES.includes(tk.status) &&
-              (tk.idempotency_key === sig || tk.idempotency_key.startsWith(`${sig}-`)),
-          ) ?? null
+          tasks?.find((tk) => {
+            // 幂等键可空: 历史 null 行永不命中签名(按缺席处理, 不伪造空串比较)。
+            const key = tk.idempotency_key ?? ''
+            return ACTIVE_STATUSES.includes(tk.status) && (key === sig || key.startsWith(`${sig}-`))
+          }) ?? null
         if (dup) {
           setDuplicate(dup)
           return
@@ -505,7 +512,7 @@ export default function TasksPage() {
       setFormError(null)
       setSubmitting(true)
       try {
-        const created = await api.tasks.create(input)
+        const created = await createTask(input)
         setCreateOpen(false)
         setSelectedId(created.id)
         setFlash(t('ies.task.create_ok'))
@@ -532,8 +539,7 @@ export default function TasksPage() {
     let cancelled = false
     setBlockers(null)
     setChecking(true)
-    api.validation
-      .run(projectId)
+    runValidation(projectId)
       .then((res) => {
         if (cancelled) return
         setBlockers(
@@ -763,7 +769,7 @@ export default function TasksPage() {
     if (!cancelTarget) return
     setActionError(null)
     try {
-      await api.tasks.cancel(projectId, cancelTarget.id)
+      await cancelTask(projectId, cancelTarget.id)
       setCancelTarget(null)
       setFlash(t('ies.task.cancel_ok', { task_id: cancelTarget.id }))
       await loadList()
@@ -777,7 +783,7 @@ export default function TasksPage() {
     if (!retryTarget) return
     setActionError(null)
     try {
-      await api.tasks.retry(projectId, retryTarget.id)
+      await retryTask(projectId, retryTarget.id)
       setRetryTarget(null)
       setFlash(t('ies.task.retry_ok'))
       await loadList()

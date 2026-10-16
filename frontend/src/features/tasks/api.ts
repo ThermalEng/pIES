@@ -91,15 +91,10 @@ export async function getTaskDetail(projectId: number, taskId: number): Promise<
   const body = await request<TaskDetailResponseDto>(`/projects/${projectId}/tasks/${taskId}`)
   const detail = taskDetailFromServer(body, projectId)
   if (detail.result_available) {
-    // 可用性权威说明存在证据: 补充元数据必需字段直接消费。可用性判定与
-    // 本读取同查询族, 证据缺席只可能是不一致的后端响应, 按畸形体明确失败
-    // (deployment.defaults 同口径), 不伪造 NaN 条目。
+    // 可用性权威说明存在证据(见 TaskResultEnvelopeDto): 补充元数据必需
+    // 字段直接消费, 缺席即自然抛错可见, 不设一致性守卫、不伪造条目。
     const result = await request<TaskResultEnvelopeDto>(`/projects/${projectId}/tasks/${taskId}/result`)
-    const evidence = result.result.evidence
-    if (evidence === null) {
-      throw new ApiError(500, null, 'ies.error.unknown')
-    }
-    const pkg = evidenceFromServer(evidence)
+    const pkg = evidenceFromServer(result.result.evidence)
     detail.evidence = [
       {
         package_id: pkg.package_id,

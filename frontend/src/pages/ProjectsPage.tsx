@@ -16,6 +16,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent
 import { useNavigate, useOutletContext } from 'react-router-dom'
 
 import { api } from '../api/client'
+import { listTasks } from '../features/tasks'
 import { translateError, useI18n } from '../i18n'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
 import {
@@ -100,7 +101,7 @@ export default function ProjectsPage() {
 
   const loadLatestTasks = async (items: Project[]) => {
     if (items.length === 0) return
-    const results = await Promise.allSettled(items.map((p) => api.tasks.list({ project_id: p.id, limit: 1 })))
+    const results = await Promise.allSettled(items.map((p) => listTasks({ project_id: p.id, limit: 1 })))
     setLatestTasks((prev) => {
       const next = { ...prev }
       items.forEach((p, i) => {

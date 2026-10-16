@@ -11,8 +11,6 @@ import type {
   ApiErrorBody,
   AuditEntry,
   AuditListParams,
-  CalcConfig,
-  CalcConfigInput,
   Connection,
   ConnectionInput,
   Currency,
@@ -45,10 +43,8 @@ import type {
   PublicAuthSettings,
   RegisterRequest,
   Task,
-  TaskCreateInput,
   TaskDetail,
   TaskDraftLoadResult,
-  TaskInputs,
   TaskListParams,
   TaskStatus,
   TaskType,
@@ -74,17 +70,7 @@ import {
   exportPackage,
   downloadExport,
 } from '../features/exports'
-import { getCalcConfig, saveCalcConfig } from '../features/config/api'
-import {
-  cancelTask,
-  createTask,
-  getTaskDetail,
-  getTaskInputs,
-  listTasks,
-  loadTaskDraft,
-  retryTask,
-} from '../features/tasks/api'
-import { confirmBaseline, runValidation } from '../features/validation/api'
+import { getTaskDetail, listTasks, loadTaskDraft } from '../features/tasks'
 import { exportTaskReport } from '../application/exportTaskReport'
 
 import { request, requestBlob, setSession, clearSession } from '../shared/http'
@@ -623,11 +609,6 @@ export interface DatasetsApi {
   unbind(projectId: number, datasetVersionId: number): Promise<{ revision: number }>
 }
 
-export interface ConfigApi {
-  get(projectId: number): Promise<CalcConfig>
-  save(projectId: number, input: CalcConfigInput): Promise<CalcConfig>
-}
-
 /** 部署公开初值(统一部署配置中允许公开的非秘密默认值)。 */
 export interface DeploymentDefaults {
   calculation_defaults: { time_limit_seconds: number }
@@ -635,40 +616,6 @@ export interface DeploymentDefaults {
 
 export interface DeploymentApi {
   defaults(): Promise<DeploymentDefaults>
-}
-
-export interface ValidationApi {
-  run(projectId: number): Promise<ValidationResult>
-  baselineConfirm(
-    projectId: number,
-    assumptions: Record<string, unknown>,
-  ): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }>
-}
-
-export interface TasksApi {
-  list(params?: TaskListParams): Promise<PageResult<Task>>
-  create(input: TaskCreateInput): Promise<Task>
-  get(projectId: number, taskId: number): Promise<TaskDetail>
-  /** 任务冻结输入上下文(只读; 无快照时 snapshot=null)。 */
-  inputs(projectId: number, taskId: number): Promise<TaskInputs>
-  /**
-   * 选择任务载入工作草稿(新草稿 revision + 配置追加; 不建任务/版本;
-   * 无快照任务 400)。返回新草稿 revision 与追加的配置 revision(缺席为 null)。
-   */
-  loadDraft(projectId: number, taskId: number): Promise<TaskDraftLoadResult>
-  /**
-   * 暂存任务提交工作输入(task.set_working_inputs 单命令)。
-   * 只做存放, 不做领域校验(提交边界仍为权威)。返回新草稿 revision。
-   * expectedRevision 缺省时先读当前修订(常规防抖保存); 卸载兜底刷新传入
-   * 调度时修订(冲突即 409 放弃, 不覆盖切换后的新选择)。
-   */
-  saveWorkingInputs(
-    projectId: number,
-    working: Record<string, unknown>,
-    expectedRevision?: number,
-  ): Promise<{ revision: number }>
-  cancel(projectId: number, taskId: number): Promise<Task>
-  retry(projectId: number, taskId: number): Promise<Task>
 }
 
 export interface ExportsApi {
@@ -1001,14 +948,7 @@ export const api = {
     },
   } satisfies DatasetsApi,
 
-  config: {
-    get(projectId: number): Promise<CalcConfig> {
-      return getCalcConfig(projectId)
-    },
-    save(projectId: number, input: CalcConfigInput): Promise<CalcConfig> {
-      return saveCalcConfig(projectId, input)
-    },
-  } satisfies ConfigApi,
+  // 计算配置请求归 features/config 所有(页面直接消费公开入口), 本聚合器不再保留委托。
 
   deployment: {
     defaults(): Promise<DeploymentDefaults> {
@@ -1025,36 +965,23 @@ export const api = {
     },
   } satisfies DeploymentApi,
 
-  validation: {
-    run(projectId: number): Promise<ValidationResult> {
-      return runValidation(projectId)
-    },
-    baselineConfirm(
-      projectId: number,
-      assumptions: Record<string, unknown>,
-    ): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }> {
-      return confirmBaseline(projectId, assumptions)
-    },
-  } satisfies ValidationApi,
+  // 校验请求归 features/validation 所有(页面直接消费公开入口), 本聚合器不再保留委托。
 
   tasks: {
+    // 任务请求归 features/tasks 公开入口所有: 页面已直调, 本聚合器仅暂留
+    // 工作台共享上下文仍消费的 list/get/loadDraft(随工作台接线另立集成候选
+    // 一并移除)与跨家族草稿命令通道 saveWorkingInputs(复用
+    // sendDraftCommand/makeCommand, 不向 feature 重复一份命令组装)。
+    // 跨家族草稿命令传输可待 Codex 共享边界集成。
     list(params?: TaskListParams): Promise<PageResult<Task>> {
       return listTasks(params)
-    },
-    create(input: TaskCreateInput): Promise<Task> {
-      return createTask(input)
     },
     get(projectId: number, taskId: number): Promise<TaskDetail> {
       return getTaskDetail(projectId, taskId)
     },
-    cancel(projectId: number, taskId: number): Promise<Task> {
-      return cancelTask(projectId, taskId)
+    loadDraft(projectId: number, taskId: number): Promise<TaskDraftLoadResult> {
+      return loadTaskDraft(projectId, taskId)
     },
-    retry(projectId: number, taskId: number): Promise<Task> {
-      return retryTask(projectId, taskId)
-    },
-    // 工作输入暂存复用跨家族共享的草稿命令通道(sendDraftCommand/makeCommand),
-    // 故传输实现留在此聚合器(不向 feature 重复一份命令组装), 行为不变。
     async saveWorkingInputs(
       projectId: number,
       working: Record<string, unknown>,
@@ -1072,13 +999,7 @@ export const api = {
       )
       return { revision: Number(body.revision ?? expectedRevision) }
     },
-    loadDraft(projectId: number, taskId: number): Promise<TaskDraftLoadResult> {
-      return loadTaskDraft(projectId, taskId)
-    },
-    inputs(projectId: number, taskId: number): Promise<TaskInputs> {
-      return getTaskInputs(projectId, taskId)
-    },
-  } satisfies TasksApi,
+  },
 
   results: {
     result: getResult,
