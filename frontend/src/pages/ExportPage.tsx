@@ -4,7 +4,7 @@
  * - Excel 报告:语言选择(中文/English,默认中文)+ 导出按钮;
  *   固定引用全局所选任务的证据包与最新评估(无显式选择时默认最新完成;
  *   所选任务未完成/无结果时禁用导出且不回退他任务; 评估历史每次真实读取),
- *   导出成功经 api.exports.download(本地下载会话 id) 取 Blob 后由
+ *   导出成功经 downloadExport(本地下载会话 id) 取 Blob 后由
  *   downloadBlob 触发浏览器下载。
  * - 完整项目包:仅项目所有者可导出(后端 403);非所有者时按钮禁用并提示。
  *   包内容为模型/版本/数据/历史结果,不含账号/权限/会话。
@@ -17,7 +17,9 @@
 import { useCallback, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api, downloadBlob, isNoAssessmentError } from '../api/client'
+import { downloadBlob } from '../shared/http'
+import { exportTaskReport, isNoAssessmentError } from '../application/exportTaskReport'
+import { exportPackage as createPackageExport, downloadExport } from '../features/exports'
 import { Alert, Button, Card, FormField, Select, Spinner } from '../components/ui'
 import { translateError, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
@@ -41,6 +43,8 @@ export default function ExportPage() {
   const [lang, setLang] = useState<ExportLang>('zh')
   /** 证据包 id:null = 无可导出结果,undefined = 解析中。 */
   const evidence = taskCtx.loading ? undefined : taskCtx.picked ? taskCtx.picked.packageId : null
+  /** 所选任务 id(与证据同源; 导出评估按此任务读取)。 */
+  const pickedTaskId = taskCtx.picked ? taskCtx.picked.taskId : 0
   const resolving = taskCtx.loading
   /** 显式选择无可用结果(未完成/无证据): Excel 禁用, 不回退他任务。 */
   const explicitBlocked = !taskCtx.loading && taskCtx.explicitBlocked
@@ -71,13 +75,14 @@ export default function ExportPage() {
       // 系统评估, 不隐式创建评估。
       const input: ExcelExportInput = {
         project_id: projectId,
+        task_id: pickedTaskId,
         evidence_package_id: evidence,
         include_hourly: true,
         include_diagnostics: true,
         lang,
       }
-      const downloadSessionId = await api.exports.excel(input)
-      const { blob, filename } = await api.exports.download(downloadSessionId)
+      const downloadSessionId = await exportTaskReport(input)
+      const { blob, filename } = await downloadExport(downloadSessionId)
       downloadBlob(blob, filename)
       setOkMsg(pt('ies.export.download_ok', { filename }))
     } catch (err) {
@@ -89,7 +94,7 @@ export default function ExportPage() {
     } finally {
       setExportBusy(null)
     }
-  }, [projectId, evidence, lang])
+  }, [projectId, evidence, pickedTaskId, lang])
 
   /** 完整项目包导出(仅所有者;后端对查看者返回 403)。 */
   const exportPackage = useCallback(async () => {
@@ -98,8 +103,8 @@ export default function ExportPage() {
     setOkMsg(null)
     setExportBusy('package')
     try {
-      const downloadSessionId = await api.exports.package({ project_id: projectId, include_versions: true })
-      const { blob, filename } = await api.exports.download(downloadSessionId)
+      const downloadSessionId = await createPackageExport({ project_id: projectId, include_versions: true })
+      const { blob, filename } = await downloadExport(downloadSessionId)
       downloadBlob(blob, filename)
       setOkMsg(pt('ies.export.package_ok', { filename }))
     } catch (err) {

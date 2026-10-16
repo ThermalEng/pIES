@@ -12,16 +12,10 @@
  * fetch 用桩代替（node22 原生 Response/fetch），业务值全为桩内真实数组，
  * 不 mock 成功语义本身之外的任何行为。
  *
- * 运行（Docker，复用已缓存的 playwright 镜像，不新增镜像/依赖）：
- *   docker run --rm -v "$PWD/frontend:/app:ro" --entrypoint sh \
- *     mcr.microsoft.com/playwright:v1.54.2-noble -c "
- *     mkdir -p /tmp/ha/api && cp /app/src/api/client.ts /app/src/api/hourlyPages.ts /tmp/ha/api/ &&
- *     cp /app/src/types.ts /tmp/ha/types.ts && cp /app/tests/hourly_absence.test.mjs /tmp/ha/ &&
- *     sed -i \"s#'../src/api/client.ts'#'./api/client.ts'#\" /tmp/ha/hourly_absence.test.mjs &&
- *     sed -i \"s#from '../types'#from '../types.ts'#; s#from './hourlyPages'#from './hourlyPages.ts'#\" /tmp/ha/api/client.ts &&
- *     node /tmp/ha/hourly_absence.test.mjs"
- * （node22 自带类型剥离；仅给相对导入补机械后缀，逻辑与仓库文件一致；
- * client.ts 顶层无浏览器副作用。）
+ * 运行（仓库根目录；只在 Docker 构建和执行，复用前端已有 esbuild）：
+ *   docker build --target build -f frontend/Dockerfile -t pies-focused-tests .
+ *   docker run --rm pies-focused-tests sh -ec './node_modules/.bin/esbuild tests/hourly_absence.test.mjs --bundle --platform=node --format=esm --outfile=/tmp/focused.mjs; node /tmp/focused.mjs'
+ * 验证后删除自建 pies-focused-tests 镜像，不删除基础镜像。
  */
 
 import { api } from '../src/api/client.ts'

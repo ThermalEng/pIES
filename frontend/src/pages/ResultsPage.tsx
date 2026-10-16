@@ -23,8 +23,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api, downloadBlob, isNoAssessmentError } from '../api/client'
-import type { HourlySeriesMeta } from '../api/client'
+import { api } from '../api/client'
+import { downloadBlob } from '../shared/http'
+import { exportTaskReport, isNoAssessmentError } from '../application/exportTaskReport'
+import { exportPackage as createPackageExport, downloadExport } from '../features/exports'
+import { getResult, listAssessments, assess, select, readHourly } from '../features/results'
+import type { HourlySeriesMeta } from '../features/results'
 import { translate, translateError, useI18n } from '../i18n'
 import type { Locale } from '../i18n'
 import {
@@ -389,22 +393,22 @@ export default function ResultsPage() {
       try {
         const [res, ass] = await Promise.all([
           // 主结果读取失败必须可见: 不吞错, 由外层错误呈现。
-          api.results.result(projectId, taskId),
-          api.results.assessments(projectId, taskId).catch(() => [] as ResultAssessment[]),
+          getResult(projectId, taskId),
+          listAssessments(projectId, taskId),
         ])
         if (cancelled) return
-        setMetrics(res?.metrics ?? null)
-        setFinEval(res?.financial ?? null)
-        setFinAbsence(res?.financialAbsence ?? null)
+        setMetrics(res.metrics)
+        setFinEval(res.financial)
+        setFinAbsence(res.financialAbsence)
         // evidence_status=no_evidence: 任务存在但尚无证据包(后端显式状态, 非猜测)
-        setNoEvidence(res?.evidence_status === 'no_evidence')
-        setAssessments([...(ass ?? [])].sort((a, b) => b.created_at.localeCompare(a.created_at)))
+        setNoEvidence(res.evidence_status === 'no_evidence')
+        setAssessments([...ass].sort((a, b) => b.created_at.localeCompare(a.created_at)))
         // 主结果状态先全部发布(财务/指标/候选/规划解/快照引用), 再读曲线:
         // 曲线慢/挂起不延迟主结果展示。曲线缺席与失败只记曲线状态。
         // 真实候选/规划解/快照引用(后端权威, 不反解指标键)
-        setCandList(res?.candidates ?? [])
-        setPlanSolution(res?.planningSolution ?? null)
-        setSnapRefs(res?.snapshotRefs ?? null)
+        setCandList(res.candidates)
+        setPlanSolution(res.planningSolution)
+        setSnapRefs(res.snapshotRefs)
         // 结果读成功不吞掉正选中任务自身的草稿载入失败(草稿仍未载入)。
         clearResultErrorFor(taskId)
         // 曲线独立读取: 整组失败直接呈现, 不缩水、不补空。
@@ -413,7 +417,7 @@ export default function ResultsPage() {
         hourlySeq.current = mySeq
         setHourlyLoading(true)
         try {
-          const hr = await api.results.hourly(projectId, taskId)
+          const hr = await readHourly(projectId, taskId)
           if (cancelled || hourlySeq.current !== mySeq) return
           if (hr.absent) {
             setHourly(null)
@@ -471,7 +475,7 @@ export default function ResultsPage() {
     setHourlyError(null)
     setHourlyLoading(true)
     try {
-      const hr = await api.results.hourly(projectId, taskId)
+      const hr = await readHourly(projectId, taskId)
       if (hourlySeq.current !== mySeq) return
       if (hr.absent) {
         setHourly(null)
@@ -653,7 +657,7 @@ export default function ResultsPage() {
     setApplying(true)
     try {
       // 结果域 API 以任务为路由键: 选中证据包所属任务即绑定任务(同源)。
-      await api.results.select(projectId, pickedTaskId, {
+      await select(projectId, pickedTaskId, {
         result_index_id: selectedCandidate.index,
         reason: 'user-selected-candidate',
       })
@@ -746,7 +750,7 @@ export default function ResultsPage() {
     try {
       // 后端 assess = 触发系统四维检查(FE-BE-03: 人工评分输入不支持持久化,
       // 不再伪装接受评分/评论后静默丢弃)
-      const created = await api.results.assess(projectId, pickedTaskId, 'full')
+      const created = await assess(projectId, pickedTaskId, 'full')
       setAssessments((prev) => [created, ...prev].sort((a, b) => b.created_at.localeCompare(a.created_at)))
       setAssessOk(true)
       setAssessOpen(false)
@@ -768,13 +772,14 @@ export default function ResultsPage() {
       // 系统评估, 不隐式创建评估。评估历史每次真实读取，不用内存缓存。
       const input: ExcelExportInput = {
         project_id: projectId,
+        task_id: pickedTaskId,
         evidence_package_id: selectedPkgId,
         include_hourly: true,
         include_diagnostics: true,
         lang: exportLang,
       }
-      const downloadSessionId = await api.exports.excel(input)
-      const { blob, filename } = await api.exports.download(downloadSessionId)
+      const downloadSessionId = await exportTaskReport(input)
+      const { blob, filename } = await downloadExport(downloadSessionId)
       downloadBlob(blob, filename)
       setExportOk(true)
     } catch (err) {
@@ -786,15 +791,15 @@ export default function ResultsPage() {
     } finally {
       setExportBusy(null)
     }
-  }, [projectId, selectedPkgId, exportLang])
+  }, [projectId, selectedPkgId, pickedTaskId, exportLang])
 
   const exportPackage = useCallback(async () => {
     setExportError(null)
     setExportOk(false)
     setExportBusy('package')
     try {
-      const downloadSessionId = await api.exports.package({ project_id: projectId, include_versions: true })
-      const { blob, filename } = await api.exports.download(downloadSessionId)
+      const downloadSessionId = await createPackageExport({ project_id: projectId, include_versions: true })
+      const { blob, filename } = await downloadExport(downloadSessionId)
       downloadBlob(blob, filename)
       setExportOk(true)
     } catch (err) {
@@ -989,6 +994,22 @@ export default function ResultsPage() {
         </div>
       ) : null}
 
+      {/* 已封存财务评价: 只展示封存事实, 不重算; 缺块按后端判定原因说明, 不伪装通过 */}
+      {finEval ? (
+        <FinancialEvaluationCard fin={finEval} />
+      ) : finAbsence ? (
+        <div className="ies-section">
+          <Alert variant="warning">
+            {finAbsence === 'outcome_not_normal'
+              ? t('ies.result.fin_absence_outcome_not_normal', { outcome: outcome ?? '—' })
+              : finAbsence === 'solution_not_requested'
+                ? t('ies.result.fin_absence_solution_not_requested')
+                : t('ies.result.fin_absence_missing_unknown')}
+          </Alert>
+        </div>
+      ) : null}
+
+
       {metrics ? (
         <>
           {/* 财务 */}
@@ -1030,21 +1051,6 @@ export default function ResultsPage() {
               ) : null}
             </Card>
           </div>
-
-          {/* 已封存财务评价: 只展示封存事实, 不重算; 缺块按后端判定原因说明, 不伪装通过 */}
-          {finEval ? (
-            <FinancialEvaluationCard fin={finEval} />
-          ) : finAbsence ? (
-            <div className="ies-section">
-              <Alert variant="warning">
-                {finAbsence === 'outcome_not_normal'
-                  ? t('ies.result.fin_absence_outcome_not_normal', { outcome: outcome ?? '—' })
-                  : finAbsence === 'solution_not_requested'
-                    ? t('ies.result.fin_absence_solution_not_requested')
-                    : t('ies.result.fin_absence_missing_unknown')}
-              </Alert>
-            </div>
-          ) : null}
 
           {/* 工程 */}
           <Card title={t('ies.result.eng_card')} className="ies-section">

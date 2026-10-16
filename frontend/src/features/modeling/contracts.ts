@@ -19,7 +19,7 @@
  *   - source=yaml: model_yaml(候选 YAML 文本)由后端直接解析校验。
  * 两条路径汇合为同一个后端用例。
  *
- * 依赖方向: features/modeling → ../../types(共享错误类型)/../../api/client(HTTP 层)。
+ * 依赖方向: features/modeling → ../../types(共享错误类型)/../../shared/http(HTTP 层)。
  */
 
 // ---------------------------------------------------------------------------

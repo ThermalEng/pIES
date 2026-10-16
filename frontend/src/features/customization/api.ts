@@ -5,7 +5,7 @@
  * 信封解包与严格解析; 不组织跨端点工作流。
  */
 
-import { request } from '../../api/client'
+import { request } from '../../shared/http'
 import { ApiError } from '../../types'
 import type {
   ModelDiagnosticDto,

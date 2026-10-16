@@ -1,28 +1,14 @@
 /**
- * API 客户端:fetch 封装 + 类型化方法集。
- *
- * 本文件同时承担「前后端契约适配层」职责:后端(backend/iesplan/api/*)路由
- * 以 /api/projects/{project_id}/... 为统一前缀,列表/单资源返回裸信封
- * (如 {projects: [...]}、{project: {...}}),前端方法签名以业务语义为准,
- * 由本层完成路径拼接与请求/响应形状映射。适配规则:
- * - 列表信封 → PageResult{items, next_cursor, limit}(asItems 辅助);
- * - 单资源包裹 → 解包(oneOf / projectFromServer 等辅助);
- * - 字段名与后端 snake_case 保持一致,前端类型字段与之对齐;
- * - 后端不具备的能力(人工评估打分、数据行预览等)按可用端点降级适配,见方法注释。
- *
- * 其余约定(错误信封 / 401 处理 / 会话标记)与原实现一致:
- * - 所有请求走相对路径 /api/*,由 Vite 代理转发到后端(见 vite.config.ts)。
- * - 自动携带凭证(credentials: 'include',会话 Cookie)。
- * - 统一错误处理:解析后端错误信封 {"error": {code, message_key, severity,
- *   blocking, params, location, fix_hint_key, ref_ids}} 为 ApiError;
- * - 成功响应兼容两种形态:裸 JSON 或 {"ok": true, "data": ...} 信封。
+ * 现有业务 API 的组合入口；各业务族逐步迁入 feature。
+ * 通用传输、会话和下载辅助由 shared/http 拥有。
+ * 结果/导出直接组合 feature 公开入口和 application 用例；
+ * 尚未迁移的业务适配辅助不能作为新 feature 的依赖。
  */
 
 import type {
   AdminUserListParams,
   AdminUserRow,
   ApiErrorBody,
-  AssessmentGrade,
   AuditEntry,
   AuditListParams,
   CalcConfig,
@@ -42,22 +28,15 @@ import type {
   DevicePortSpec,
   DeviceTypeSpec,
   Diagnostic,
-  EnergyCarrier,
-  EvidenceCandidate,
   ExcelExportInput,
-  FinancialAbsence,
-  FinancialEvaluationBlock,
   DraftModelSection,
   HealthStatus,
   LoginRequest,
-  MetricValue,
   ImportConfirmResult,
   ImportProposal,
   PackageExportInput,
   PageResult,
-  PlanningSolution,
   Project,
-  SnapshotRefs,
   ProjectCreateInput,
   ProjectListParams,
   ProjectRole,
@@ -66,8 +45,6 @@ import type {
   VersionRestoreResult,
   PublicAuthSettings,
   RegisterRequest,
-  ResultAssessment,
-  ResultSelection,
   Severity,
   Task,
   TaskAttempt,
@@ -92,297 +69,20 @@ import type {
   DatasetUploadResponseDto,
 } from '../features/datasets/contracts'
 import { datasetVersionFromServer } from '../features/datasets/mappers'
-import { collectHourlyValues } from './hourlyPages'
+import {
+  getResult,
+  listAssessments,
+  assess as assessResult,
+  select as selectResult,
+  readHourly,
+} from '../features/results'
+import {
+  exportPackage,
+  downloadExport,
+} from '../features/exports'
+import { exportTaskReport } from '../application/exportTaskReport'
 
-const API_BASE = '/api'
-
-/** 会话标记(登录成功写入;HttpOnly Cookie 无法被 JS 读取,仅作前端路由守卫的 best-effort)。 */
-const SESSION_KEY = 'iesplan.session'
-
-/**
- * 查询参数(undefined/null/空串自动剔除)。
- * 用 object 而非 Record<string, ...>,使接口类型(如 ProjectListParams)可直接传入。
- */
-type Query = object
-
-interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
-  /** 拼接到路径后的查询参数。 */
-  query?: Query
-  /** JSON 请求体。 */
-  body?: unknown
-  /** multipart 表单(上传场景)。 */
-  formData?: FormData
-  headers?: Record<string, string>
-  /** 超时(毫秒);缺省 60s,0 表示不超时。 */
-  timeoutMs?: number
-  signal?: AbortSignal
-}
-
-// ---------------------------------------------------------------------------
-// 会话管理
-// ---------------------------------------------------------------------------
-
-function setSession(): void {
-  try {
-    window.localStorage.setItem(SESSION_KEY, '1')
-  } catch {
-    // 隐私模式忽略
-  }
-}
-
-function clearSession(): void {
-  try {
-    window.localStorage.removeItem(SESSION_KEY)
-  } catch {
-    // 忽略
-  }
-}
-
-/** 前端路由守卫用:是否存在会话标记(权威校验仍由后端完成)。 */
-export function hasSession(): boolean {
-  try {
-    return window.localStorage.getItem(SESSION_KEY) === '1'
-  } catch {
-    return false
-  }
-}
-
-/** 会话失效回调(由 App 注册,默认跳 /login)。 */
-let unauthorizedHandler: (() => void) | null = null
-
-export function setUnauthorizedHandler(handler: (() => void) | null): void {
-  unauthorizedHandler = handler
-}
-
-function notifyUnauthorized(): void {
-  clearSession()
-  if (unauthorizedHandler) {
-    unauthorizedHandler()
-  } else {
-    const current = window.location.pathname
-    if (current !== '/login') {
-      window.location.assign('/login')
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 底层请求
-// ---------------------------------------------------------------------------
-
-function buildUrl(path: string, query?: Query): string {
-  const base = API_BASE + path
-  if (!query) return base
-  const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(query)) {
-    if (value !== undefined && value !== null && value !== '') {
-      params.set(key, String(value))
-    }
-  }
-  const qs = params.toString()
-  return qs ? `${base}?${qs}` : base
-}
-
-/** 请求超时控制(外部 signal 与内部超时合并)。 */
-function createAbort(external?: AbortSignal, timeoutMs?: number): {
-  signal: AbortSignal
-  cleanup: () => void
-} {
-  const controller = new AbortController()
-  const onExternalAbort = () => controller.abort()
-  if (external) {
-    external.addEventListener('abort', onExternalAbort, { once: true })
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined
-  if (timeoutMs && timeoutMs > 0) {
-    timer = setTimeout(() => controller.abort(new DOMException('Timeout', 'TimeoutError')), timeoutMs)
-  }
-  return {
-    signal: controller.signal,
-    cleanup: () => {
-      if (timer !== undefined) clearTimeout(timer)
-      if (external) {
-        external.removeEventListener('abort', onExternalAbort)
-      }
-    },
-  }
-}
-
-function parseErrorEnvelope(body: unknown): ApiErrorBody | null {
-  if (body && typeof body === 'object') {
-    const error = (body as { error?: unknown }).error
-    if (error && typeof error === 'object') {
-      const e = error as Partial<ApiErrorBody>
-      if (typeof e.message_key === 'string') {
-        return {
-          code: e.code ?? 'API-UNKNOWN',
-          message_key: e.message_key,
-          severity: e.severity ?? 'error',
-          blocking: e.blocking ?? true,
-          params: e.params ?? {},
-          location: e.location ?? null,
-          fix_hint_key: e.fix_hint_key ?? null,
-          ref_ids: e.ref_ids ?? [],
-        }
-      }
-    }
-  }
-  return null
-}
-
-/** 由非 2xx 响应构造 ApiError(标准 {error} 信封经解析透传, 其余走状态码通用文案)。 */
-function toApiError(status: number, body: unknown): ApiError {
-  const envelope = parseErrorEnvelope(body)
-  if (envelope) return new ApiError(status, envelope)
-  // 无信封:按状态码映射通用文案键
-  let fallbackKey = 'ies.error.unknown'
-  if (status === 0 || status >= 500) fallbackKey = 'ies.error.internal'
-  else if (status === 404) fallbackKey = 'ies.error.route_not_found'
-  return new ApiError(status, null, fallbackKey)
-}
-
-/** 成功响应解包:支持裸 JSON 或 {"ok": true, "data": ...} 信封。 */
-function unwrapBody<T>(body: unknown): T {
-  if (body && typeof body === 'object' && !Array.isArray(body)) {
-    const record = body as Record<string, unknown>
-    if (record.ok === true && 'data' in record) {
-      return record.data as T
-    }
-  }
-  return body as T
-}
-
-/** 响应体 JSON 解析(空响应返回 null)。 */
-async function parseJson(res: Response): Promise<unknown> {
-  const text = await res.text()
-  if (!text) return null
-  try {
-    return JSON.parse(text) as unknown
-  } catch {
-    throw new ApiError(res.status, null, 'ies.error.bad_json')
-  }
-}
-
-/**
- * 401 响应统一处理(区分「会话失效」与「其他 401」):
- * - 后端认证失败均带诊断信封(message_key);仅当明确表示会话无效
- *   (ies.diag.auth.session_invalid)或响应不可识别时, 才清除本地会话并跳登录页。
- * - takeover_pending 属于"旧窗口被降级/新会话待确认"中间态(H-01),
- *   不应立即清空会话/跳登录页(避免循环登录);由调用方在确认接管后恢复。
- * - 登录请求自身的 401 不触发跳转(页面内展示错误)。
- */
-function handleUnauthorized(path: string, envelope: ApiErrorBody | null): ApiError {
-  const isLoginPath = path.startsWith('/auth/login')
-  const sessionInvalid = envelope?.message_key === 'ies.diag.auth.session_invalid'
-  const takeoverPending =
-    sessionInvalid && (envelope?.params as { reason?: string } | undefined)?.reason === 'takeover_pending'
-  if (!isLoginPath && !takeoverPending && (sessionInvalid || !envelope)) {
-    notifyUnauthorized()
-  }
-  return new ApiError(401, envelope, envelope ? undefined : 'ies.diag.auth.session_invalid')
-}
-
-/**
- * 底层请求: 统一错误信封解析 / 401 会话处理 / {ok, data} 信封解包。
- * 供 feature 层 api.ts(如 features/modeling/api.ts)复用, 避免重复实现 HTTP 层。
- * 页面与组件不得直接调用, 必须经 feature api。
- */
-export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const { signal, cleanup } = createAbort(opts.signal, opts.timeoutMs ?? 60_000)
-  try {
-    const headers: Record<string, string> = { ...opts.headers }
-    let body: BodyInit | undefined
-    if (opts.formData) {
-      body = opts.formData // 由浏览器生成 Content-Type(multipart boundary)
-    } else if (opts.body !== undefined) {
-      headers['Content-Type'] = 'application/json'
-      body = JSON.stringify(opts.body)
-    }
-
-    let res: Response
-    try {
-      res = await fetch(buildUrl(path, opts.query), {
-        method: opts.method ?? 'GET',
-        credentials: 'include',
-        headers,
-        body,
-        signal,
-      })
-    } catch (err) {
-      if (signal.aborted && (err as Error).name === 'AbortError') {
-        throw new ApiError(0, null, 'ies.error.timeout')
-      }
-      throw new ApiError(0, null, 'ies.error.network')
-    }
-
-    if (res.status === 401) {
-      let envelope: ApiErrorBody | null = null
-      try {
-        envelope = parseErrorEnvelope(await parseJson(res))
-      } catch {
-        envelope = null
-      }
-      throw handleUnauthorized(path, envelope)
-    }
-
-    const payload = await parseJson(res)
-    if (!res.ok) {
-      throw toApiError(res.status, payload)
-    }
-    return unwrapBody<T>(payload)
-  } finally {
-    cleanup()
-  }
-}
-
-/** 二进制下载(Blob 返回,带 Content-Disposition 文件名解析)。 */
-async function requestBlob(path: string, opts: RequestOptions = {}): Promise<Blob> {
-  const { signal, cleanup } = createAbort(opts.signal, opts.timeoutMs ?? 120_000)
-  try {
-    const res = await fetch(buildUrl(path, opts.query), {
-      method: opts.method ?? 'GET',
-      credentials: 'include',
-      signal,
-    })
-    if (res.status === 401) {
-      let envelope: ApiErrorBody | null = null
-      try {
-        envelope = parseErrorEnvelope(await parseJson(res))
-      } catch {
-        envelope = null
-      }
-      throw handleUnauthorized(path, envelope)
-    }
-    if (!res.ok) {
-      const payload = await parseJson(res)
-      throw toApiError(res.status, payload)
-    }
-    return await res.blob()
-  } catch (err) {
-    if (err instanceof ApiError) throw err
-    throw new ApiError(0, null, 'ies.error.network')
-  } finally {
-    cleanup()
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 下载辅助
-// ---------------------------------------------------------------------------
-
-/** 触发浏览器下载 Blob。 */
-export function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  anchor.style.display = 'none'
-  document.body.appendChild(anchor)
-  anchor.click()
-  anchor.remove()
-  URL.revokeObjectURL(url)
-}
+import { request, requestBlob, setSession, clearSession } from '../shared/http'
 
 // ---------------------------------------------------------------------------
 // 契约适配辅助(后端形状 → 前端类型)
@@ -629,56 +329,6 @@ function auditEntryFromServer(v: unknown): AuditEntry {
   }
 }
 
-/**
- * 证据候选列表映射(仅取选择所需的 index, 其余不消费)。
- * 后端→前端可信交换, 直接映射不重复校核; 无列表即空(单解证据)。
- */
-function evidenceCandidatesFromServer(v: unknown): EvidenceCandidate[] {
-  if (v === null || v === undefined) return []
-  return (v as Array<{ index: number }>).map((item) => ({ index: item.index }))
-}
-
-/**
- * 规划解读取映射(单解身份见后端 SINGLE_SOLUTION_ID)。
- * null 即无可用解(metrics-only/无解), 不伪造候选; 可信交换直接映射。
- */
-function planningSolutionFromServer(v: unknown): PlanningSolution | null {
-  if (v === null || v === undefined) return null
-  const r = v as PlanningSolution
-  const refs = r.refs
-  return {
-    solution_id: r.solution_id,
-    single_solution: r.single_solution,
-    params: r.params.map((p) => ({
-      variable: p.variable,
-      device_ref: p.device_ref,
-      parameter: p.parameter,
-      value: p.value,
-      unit: p.unit,
-    })),
-    refs: {
-      task_id: refs.task_id,
-      calc_snapshot_id: refs.calc_snapshot_id,
-      project_version_id: refs.project_version_id,
-      evidence_package_id: refs.evidence_package_id,
-      dataset_version_ids: refs.dataset_version_ids,
-    },
-  }
-}
-
-/**
- * 原快照资源引用映射(无快照为 null; 可信交换直接映射, 不读当前数据)。
- */
-function snapshotRefsFromServer(v: unknown): SnapshotRefs | null {
-  if (v === null || v === undefined) return null
-  const r = v as SnapshotRefs
-  return {
-    snapshot_id: r.snapshot_id,
-    project_version_id: r.project_version_id,
-    dataset_version_ids: r.dataset_version_ids,
-  }
-}
-
 /** 后端任务摘要(task_summary) → 前端 Task。 */
 function taskFromSummary(s: Record<string, unknown>, projectId: number): Task {
   return {
@@ -779,25 +429,6 @@ function taskDetailFromServer(d: Record<string, unknown>, projectId: number): Ta
       : [],
     evidence: Array.isArray(d.evidence) ? (d.evidence as TaskDetail['evidence']) : [],
     calc_snapshot: d.calc_snapshot === null || d.calc_snapshot === undefined ? null : (d.calc_snapshot as TaskDetail['calc_snapshot']),
-  }
-}
-
-/** 后端评估 dict(dimensions 聚合形态) → 前端 ResultAssessment(扁平维度字段)。 */
-function assessmentFromServer(a: Record<string, unknown>): ResultAssessment {
-  const dims = asRecord(a.dimensions)
-  return {
-    id: Number(a.id),
-    evidence_package_id: Number(a.evidence_package_id ?? 0),
-    assessor: a.assessor === 'human' ? 'human' : 'system',
-    assessed_by: a.assessed_by === null || a.assessed_by === undefined ? null : Number(a.assessed_by),
-    dimension_physical: (dims.physical as AssessmentGrade) ?? 'unknown',
-    dimension_optimality: (dims.optimality as AssessmentGrade) ?? 'unknown',
-    dimension_financial: (dims.financial as AssessmentGrade) ?? 'unknown',
-    dimension_reliability: (dims.reliability as AssessmentGrade) ?? 'unknown',
-    overall_score: typeof a.overall_score === 'number' ? (a.overall_score as number) : null,
-    comment: a.comment === null || a.comment === undefined ? null : String(a.comment),
-    detail: a.detail === null || a.detail === undefined ? null : (a.detail as Record<string, unknown>),
-    created_at: String(a.created_at ?? ''),
   }
 }
 
@@ -934,22 +565,6 @@ function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 跨方法模块级缓存(后端路由以 project/task 为键, 前端方法以业务对象为键)
-// ---------------------------------------------------------------------------
-
-/** 证据包 id → 任务 id(由任务详情填充; 结果/导出 API 以任务为路由键)。 */
-const pkgTaskCache = new Map<number, number>()
-
-
-
-/** 任务 → 结果视图原始响应缓存(hourly 复用 result 的同一次 GET, 避免重复往返)。 */
-const resultBodyCache = new Map<string, Record<string, unknown>>()
-
-/** 下载授权会话(id → 下载参数; 后端下载走短期 token, 前端以会话 id 引用)。 */
-const downloadSessions = new Map<number, { projectId: number; kind: 'excel' | 'package'; token: string; filename: string }>()
-let downloadSeq = 0
-
 /** 语义命令批次的命令 id 计数器(保证批次内唯一)。 */
 let commandSeq = 0
 
@@ -992,24 +607,6 @@ async function sendDraftCommand(
     }),
   )
   return { revision: Number(body.revision ?? expectedRevision) }
-}
-
-/** 解析证据包所属任务评估历史的最新评估 id(Excel 导出需要)。每次读取真实
- * 列表，不用内存缓存（避免显式重评估后导出仍引用旧评估）。无既有评估即抛
- * 缺评估业务错，不隐式触发 full 评估；真实接口/网络错误直接透传，不伪装成无评估。 */
-async function resolveAssessmentId(projectId: number, evidencePackageId: number): Promise<number> {
-  const taskId = pkgTaskCache.get(evidencePackageId)
-  if (taskId === undefined) throw new ApiError(404, null, 'ies.error.no_assessment_available')
-  const body = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`)
-  const items = asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer)
-  const latest = items[0]
-  if (latest) return latest.id
-  throw new ApiError(404, null, 'ies.error.no_assessment_available')
-}
-
-/** 是否为 Excel 导出缺评估的业务信号(调用方据此引导用户先完成系统评估)。 */
-export function isNoAssessmentError(err: unknown): err is ApiError {
-  return err instanceof ApiError && err.message_key === 'ies.error.no_assessment_available'
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,45 +787,6 @@ export interface TasksApi {
   cancel(projectId: number, taskId: number): Promise<Task>
   retry(projectId: number, taskId: number): Promise<Task>
 }
-
-/** 逐时序列公开身份(已封存 DTO，字段非 null，直接消费)。 */
-export interface HourlySeriesMeta {
-  series_id: string
-  instance_id: string
-  variable_id: string
-  unit: string
-}
-
-export interface ResultsApi {
-  result(projectId: number, taskId: number): Promise<{
-    evidence_package_id: number
-    metrics: Record<string, MetricValue> | null
-    /** 真实候选列表(选择用 index; 空即无候选可供选择)。 */
-    candidates: EvidenceCandidate[]
-    /** 规划解读取(无可用解为 null, 不伪造候选)。 */
-    planningSolution: PlanningSolution | null
-    /** 原快照资源引用(历史来源展示唯一依据)。 */
-    snapshotRefs: SnapshotRefs | null
-  }>
-  assessments(projectId: number, taskId: number): Promise<ResultAssessment[]>
-  /** 触发系统评估(FE-BE-03: 后端仅接受 assessment_type, 不支持人工评分输入) */
-  assess(
-    projectId: number,
-    taskId: number,
-    assessmentType: 'full' | 'physical' | 'optimality' | 'financial' | 'reliability',
-  ): Promise<ResultAssessment>
-  select(projectId: number, taskId: number, input: { result_index_id: number; reason?: string }): Promise<ResultSelection>
-  hourly(projectId: number, taskId: number): Promise<HourlyRead>
-}
-
-/**
- * 逐时序列读取结果: 合法缺席(absent)与读取失败(抛错)严格区分。
- * 缺席仅当结果视图 `hourly_refs` 为 null/空数组/空序列集合;
- * 引用存在后任何分页失败都直接抛错, 不缩水、不补空。
- */
-export type HourlyRead =
-  | { absent: true }
-  | { absent: false; flows: Record<string, number[]>; series: HourlySeriesMeta[] }
 
 export interface ExportsApi {
   /**
@@ -1673,8 +1231,6 @@ export const api = {
               status: evidence.status as TaskDetail['evidence'][number]['status'],
             },
           ]
-          // 缓存 证据包 → 任务 反向映射(结果/导出 API 以任务为路由键)
-          pkgTaskCache.set(pkgId, taskId)
         }
         return detail
       })
@@ -1773,189 +1329,17 @@ export const api = {
   } satisfies TasksApi,
 
   results: {
-    result(projectId: number, taskId: number): Promise<{
-      /** available=已提交证据包; no_evidence=任务尚无证据包(未完成), 内容字段为 null。 */
-      evidence_status: 'available' | 'no_evidence'
-      evidence_package_id: number
-      metrics: Record<string, MetricValue> | null
-      /** 已封存财务评价(同一证据内容原样投影, 无块为 null)。 */
-      financial: FinancialEvaluationBlock | null
-      /** 缺块原因(有块为 null; 后端按可观察事实判定)。 */
-      financialAbsence: FinancialAbsence
-      /** 真实候选列表(选择用 index)。 */
-      candidates: EvidenceCandidate[]
-      /** 规划解读取(无可用解为 null)。 */
-      planningSolution: PlanningSolution | null
-      /** 原快照资源引用。 */
-      snapshotRefs: SnapshotRefs | null
-    }> {
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then((body) => {
-        // 后端返回 {result: {evidence_status, evidence, metrics_summary, ...}}
-        const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
-        const evidence = asRecord(r.evidence)
-        // 缓存原始响应, hourly 复用同一次 GET(避免选中包时重复请求同一端点)
-        resultBodyCache.set(`${projectId}:${taskId}`, r)
-        const status = r.evidence_status === 'no_evidence' ? 'no_evidence' : 'available'
-        const fin = r.financial_evaluation as FinancialEvaluationBlock | null | undefined
-        const absence = r.financial_absence as FinancialAbsence | undefined
-        return {
-          evidence_status: status,
-          evidence_package_id: Number(evidence.id ?? 0),
-          metrics:
-            status === 'no_evidence'
-              ? null
-              : ((r.metrics_summary as Record<string, MetricValue>) ?? {}),
-          financial:
-            status === 'no_evidence' || fin === null || fin === undefined ? null : fin,
-          financialAbsence: fin ? null : (absence ?? null),
-          candidates:
-            status === 'no_evidence' ? [] : evidenceCandidatesFromServer(r.candidates),
-          planningSolution:
-            status === 'no_evidence' ? null : planningSolutionFromServer(r.planning_solution),
-          snapshotRefs:
-            status === 'no_evidence' ? null : snapshotRefsFromServer(r.snapshot_refs),
-        }
-      })
-    },
-    assessments(projectId: number, taskId: number): Promise<ResultAssessment[]> {
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assessments`).then((body) =>
-        asList<Record<string, unknown>>(body, 'items').map(assessmentFromServer),
-      )
-    },
-    assess(projectId: number, taskId: number, assessmentType: 'full' | 'physical' | 'optimality' | 'financial' | 'reliability' = 'full'): Promise<ResultAssessment> {
-      // 后端 assess 为「触发系统四维检查」(assessment_type), 不接收人工评分输入
-      // (FE-BE-03: 人工评分无法持久化, 前端不再伪装接受 AssessmentInput 后丢弃)
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/assess`, {
-        method: 'POST',
-        body: { assessment_type: assessmentType },
-      }).then((body) => assessmentFromServer(asRecord(oneOf<Record<string, unknown>>(body, 'assessment'))))
-    },
-    select(projectId: number, taskId: number, input: { result_index_id: number; reason?: string }): Promise<ResultSelection> {
-      // 后端按 solution_id(证据候选索引)选择: 前端 result_index_id 即候选索引
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/select`, {
-        method: 'POST',
-        body: {
-          solution_id: input.result_index_id,
-          selection_type: 'adopt',
-          reason: input.reason ?? null,
-        },
-      }).then((body) => {
-        const s = asRecord(oneOf<Record<string, unknown>>(body, 'selection'))
-        return {
-          id: Number(s.id),
-          project_id: Number(s.project_id ?? projectId),
-          result_index_id: Number(s.result_index_id ?? 0),
-          selected_by: Number(s.selected_by ?? 0),
-          selected_at: String(s.selected_at ?? ''),
-          reason: s.reason === null || s.reason === undefined ? null : String(s.reason),
-          is_current: s.is_current !== false,
-        }
-      })
-    },
-    hourly(projectId: number, taskId: number): Promise<HourlyRead> {
-      // 后端 hourly 为单序列分页查询(需 field 参数): 结果视图 hourly_refs
-      // 的 series 即当前已封存公开 DTO，直接类型化消费
-      // {series_id, instance_id, variable_id, unit}（字段非 null），
-      // 不做旧协议并集、不互补缺。单序列超过后端 MAX_HOURLY_LIMIT 时按公开
-      // next_start 分页读到 null 为止(见 hourlyPages)，声明列表全量消费，
-      // 不静默截断。结果视图复用 result() 已拉取的缓存。
-      const cacheKey = `${projectId}:${taskId}`
-      const pending = resultBodyCache.get(cacheKey)
-        ? Promise.resolve({ result: resultBodyCache.get(cacheKey) })
-        : request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`).then((body) => {
-            const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
-            resultBodyCache.set(cacheKey, r)
-            return { result: r }
-          })
-      return pending.then(async (body) => {
-        const r = asRecord(oneOf<Record<string, unknown>>(body, 'result'))
-        // 合法缺席仅三种后端显式形态: hourly_refs=null/空数组/空序列集合
-        // (metrics-only 或非计算任务无封存引用)。其余直接可信消费,
-        // 不把缺件/失配伪装缺席, 不做形状验证器。
-        const rawRefs = r.hourly_refs as { series: HourlySeriesMeta[]; rows: number }[] | null
-        if (rawRefs === null || rawRefs.length === 0) return { absent: true }
-        const ref = rawRefs[0]
-        if (ref.series.length === 0) return { absent: true }
-        const series = ref.series
-        const rows = ref.rows
-        // 引用存在后任何分页失败都直接抛错(整组失败), 不缩水 flows、
-        // 不过滤 series、不返回空成功伪装剩余曲线成功。
-        const pages = await Promise.all(
-          series.map(async (meta) => {
-            const values = await collectHourlyValues(
-              (start, limit) =>
-                request<unknown>(`/projects/${projectId}/tasks/${taskId}/result/hourly`, {
-                  query: { field: meta.series_id, start, end: rows, limit },
-                }).then((pageBody) => {
-                  const page = asRecord(pageBody)
-                  return { values: page.values as number[], next_start: page.next_start as number | null }
-                }),
-              rows,
-            )
-            return [meta.series_id, values] as const
-          }),
-        )
-        const flows: Record<string, number[]> = {}
-        for (const hit of pages) {
-          flows[hit[0]] = hit[1] as number[]
-        }
-        return { absent: false, flows, series }
-      })
-    },
-  } satisfies ResultsApi,
+    result: getResult,
+    assessments: listAssessments,
+    assess: assessResult,
+    select: selectResult,
+    hourly: readHourly,
+  },
 
   exports: {
-    excel(input: ExcelExportInput): Promise<number> {
-      const projectId = input.project_id
-      // 后端需要 assessment_id(必填): 取该证据包所属任务评估历史最新一条
-      return resolveAssessmentId(projectId, input.evidence_package_id ?? 0).then((assessmentId) =>
-        request<unknown>(`/projects/${projectId}/exports/excel`, {
-          method: 'POST',
-          body: {
-            evidence_package_id: input.evidence_package_id,
-            assessment_id: assessmentId,
-            lang: input.lang ?? 'zh',
-          },
-        }).then((body) => {
-          // 后端返回 {token, file_name, ...}: 记录下载会话, 返回本地会话 id
-          const rec = asRecord(body)
-          downloadSeq += 1
-          const id = downloadSeq
-          downloadSessions.set(id, {
-            projectId,
-            kind: 'excel',
-            token: String(rec.token ?? ''),
-            filename: String(rec.file_name ?? 'report.xlsx'),
-          })
-          return id
-        }),
-      )
-    },
-    package(input: PackageExportInput): Promise<number> {
-      const projectId = input.project_id
-      return request<unknown>(`/projects/${projectId}/exports/package`, { method: 'POST' }).then((body) => {
-        // 后端返回 {token, file_name, ...}: 记录下载会话, 返回本地会话 id
-        const rec = asRecord(body)
-        downloadSeq += 1
-        const id = downloadSeq
-        downloadSessions.set(id, {
-          projectId,
-          kind: 'package',
-          token: String(rec.token ?? ''),
-          filename: String(rec.file_name ?? 'project-package.zip'),
-        })
-        return id
-      })
-    },
-    async download(downloadSessionId: number): Promise<{ blob: Blob; filename: string }> {
-      // 后端下载走短期单对象授权 token: 用本地会话 id 还原 projectId/kind/token
-      const session = downloadSessions.get(downloadSessionId)
-      if (!session) throw new ApiError(404, null, 'ies.error.route_not_found')
-      const blob = await requestBlob(`/projects/${session.projectId}/exports/${session.kind}/download`, {
-        query: { token: session.token },
-      })
-      return { blob, filename: session.filename }
-    },
+    excel: exportTaskReport,
+    package: exportPackage,
+    download: downloadExport,
   } satisfies ExportsApi,
 
   admin: {

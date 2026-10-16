@@ -13,7 +13,7 @@
  *   DELETE /api/model-templates/{template_id}        删除未发布草稿
  *   GET    /api/model-templates/{template_id}/revisions/{revision}  精确 revision 详情
  *
- * 依赖方向: features/customization → ../../types / ../../api/client。
+ * 依赖方向: features/customization → ../../types / ../../shared/http。
  */
 
 /** 模板生命周期状态。 */

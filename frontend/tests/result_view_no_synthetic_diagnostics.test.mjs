@@ -11,16 +11,10 @@
  * fetch 用桩代替（node22 原生 Response/fetch），业务值全为桩内真实内容，
  * 不 mock 成功语义本身之外的任何行为。
  *
- * 运行（Docker，复用已缓存的 playwright 镜像，不新增镜像/依赖）：
- *   docker run --rm -v "$PWD/frontend:/app:ro" --entrypoint sh \
- *     mcr.microsoft.com/playwright:v1.54.2-noble -c "
- *     mkdir -p /tmp/rv/api && cp /app/src/api/client.ts /tmp/rv/api/ &&
- *     cp /app/src/types.ts /tmp/rv/types.ts && cp /app/tests/result_view_no_synthetic_diagnostics.test.mjs /tmp/rv/ &&
- *     sed -i \"s#'../src/api/client.ts'#'./api/client.ts'#\" /tmp/rv/result_view_no_synthetic_diagnostics.test.mjs &&
- *     sed -i \"s#from '../types'#from '../types.ts'#\" /tmp/rv/api/client.ts &&
- *     node /tmp/rv/result_view_no_synthetic_diagnostics.test.mjs"
- * （node22 自带类型剥离；仅给相对导入补机械后缀，逻辑与仓库文件一致；
- * client.ts 顶层无浏览器副作用。）
+ * 运行（仓库根目录；只在 Docker 构建和执行，复用前端已有 esbuild）：
+ *   docker build --target build -f frontend/Dockerfile -t pies-focused-tests .
+ *   docker run --rm pies-focused-tests sh -ec './node_modules/.bin/esbuild tests/result_view_no_synthetic_diagnostics.test.mjs --bundle --platform=node --format=esm --outfile=/tmp/focused.mjs; node /tmp/focused.mjs'
+ * 验证后删除自建 pies-focused-tests 镜像，不删除基础镜像。
  */
 
 import { api } from '../src/api/client.ts'
@@ -86,6 +80,21 @@ function installStub(resultBody) {
     res.financialAbsence === 'solution_not_requested',
     String(res.financialAbsence),
   )
+}
+
+// 3. 后端明确的未完成/无证据状态：保留 null，不制造 id=0 或空指标成功。
+{
+  installStub({
+    evidence_status: 'no_evidence', evidence: null, metrics_summary: null,
+    financial_evaluation: null, financial_absence: 'outcome_not_normal',
+    candidates: null, planning_solution: null, snapshot_refs: null,
+  })
+  const res = await api.results.result(5, 7)
+  check('未完成状态原样保留', res.evidence_status === 'no_evidence')
+  check('无证据无伪造id', res.evidence_package_id === null)
+  check('无指标保留null', res.metrics === null)
+  check('未完成缺席原因保留', res.financialAbsence === 'outcome_not_normal')
+  check('无候选是空集合', res.candidates.length === 0)
 }
 
 if (failures > 0) {

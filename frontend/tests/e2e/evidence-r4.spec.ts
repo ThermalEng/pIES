@@ -184,7 +184,7 @@ test.describe('R4: 证据收集失败可见', () => {
     expect(writePosts).toEqual([])
 
     // 真实用户导出: 捕获 excel POST 体核对同一证据包, 真实下载文件。
-    // 导出可能按既定语义创建评估(R7 范围, 不改); 收集/重试零 POST 断言止于此前。
+    // 导出从不隐式创建评估(缺评估只给显式引导, 见 R7); 收集/重试零 POST 断言止于此前。
     let excelBody: { evidence_package_id?: unknown } | null = null
     await context.route(
       (url) => url.pathname === `/api/projects/${pid}/exports/excel`,
@@ -318,9 +318,15 @@ test.describe('R4: 证据收集失败可见', () => {
     const context = await browser.newContext()
     const page = await context.newPage()
     // B 的任务列表按标志失败(只在点结果分析前打开, 不污染 B 任务页加载)。
+    // 仅命中结果页任务上下文查询(status=completed&limit=100, 与当前
+    // useEffectiveTaskContext 语义一致); 任务中心页自身的 limit=100 轮询等
+    // 其他查询一律走真实后端, 不在此 counted。
     let failBList = false
     await context.route(
-      (url) => url.pathname === bListPath,
+      (url) =>
+        url.pathname === bListPath &&
+        url.searchParams.get('status') === 'completed' &&
+        url.searchParams.get('limit') === '100',
       (route) => failBList
         ? route.fulfill({
           status: 500,
@@ -340,9 +346,20 @@ test.describe('R4: 证据收集失败可见', () => {
     await page.getByText(projectB).click({ timeout: 30_000 })
     // 项目页 index 重定向到任务中心子路由。
     await expect(page).toHaveURL(/\/projects\/\d+\/tasks/)
+    // 先登记定向失败响应观察(任务上下文查询 500), 点击后再等待其真实到达,
+    // 证明失败态与该注入对应后才断言 UI。
+    const targetedFailure = page.waitForResponse(
+      (res) =>
+        res.request().method() === 'GET' &&
+        new URL(res.url()).pathname === bListPath &&
+        new URL(res.url()).searchParams.get('status') === 'completed' &&
+        res.status() === 500,
+      { timeout: 30_000 },
+    )
     failBList = true
     await page.getByText('结果分析').first().click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/results/)
+    await targetedFailure
 
     // 失败态只剩错误+重试: A 旧条目不再显示, 无伪空态, 无旧包导出按钮。
     await expect(page.getByRole('button', { name: '重试', exact: true }).first()).toBeVisible({ timeout: 60_000 })

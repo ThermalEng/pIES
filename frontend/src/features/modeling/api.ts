@@ -18,7 +18,7 @@
  * (项目修订获取、幂等键生成等编排在 hooks/ 完成)。
  */
 
-import { request } from '../../api/client'
+import { request } from '../../shared/http'
 import { ApiError } from '../../types'
 import {
   buildCandidateRequest,

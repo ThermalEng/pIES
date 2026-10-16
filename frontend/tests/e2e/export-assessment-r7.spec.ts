@@ -37,6 +37,17 @@ function watchExportPosts(page: Page): PostRecord[] {
   return posts
 }
 
+/** 记录评估列表 GET(导出评估解析必须携带所选任务 id, 不靠包→任务隐式反查)。 */
+function watchAssessmentGets(page: Page): string[] {
+  const urls: string[] = []
+  page.on('request', (req) => {
+    if (req.method() === 'GET' && req.url().includes('/result/assessments')) {
+      urls.push(req.url())
+    }
+  })
+  return urls
+}
+
 async function submitEvaluationViaUI(page: Page): Promise<void> {
   await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('任务中心').click({ timeout: 30_000 })
   await page.getByRole('button', { name: /提交任务|Submit task/i }).first().click({ timeout: 30_000 })
@@ -101,6 +112,7 @@ test.describe('R7: 导出先评估再导出', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, soloUser, soloPass)
     const posts = watchExportPosts(page)
+    const assessGets = watchAssessmentGets(page)
     await page.getByText(projectName).click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/projects\/\d+$/)
     await submitEvaluationViaUI(page)
@@ -149,6 +161,11 @@ test.describe('R7: 导出先评估再导出', () => {
     // Worker 提交写 1 条＋显式重评估 1 条, 最新第一项即显式创建。
     expect(items.length).toBe(2)
     expect(items[0].id).toBe(sentAssessmentId)
+    // 评估解析显式携带所选任务 id(导出不再依赖包→任务隐式反查)。
+    expect(assessGets.length).toBeGreaterThan(0)
+    for (const url of assessGets) {
+      expect(url).toContain(`/tasks/${taskId}/result/assessments`)
+    }
 
     await soloCtx.close()
     session.assertNoErrors()
@@ -189,14 +206,28 @@ test.describe('R7: 导出先评估再导出', () => {
     expect(posts.filter((p) => p.url.includes('/result/assess'))).toEqual([])
     expect(posts.filter((p) => p.url.includes('/exports/excel'))).toEqual([])
 
-    // 定向注入的 500 按真实任务 id 精确计数(真实错误, 不得吞成缺评估)。
+    // 同一真实失败在结果页也必须可见，不能吞成“暂无评估”。解除注入后
+    // 重载仍读回原任务的真实评估，不创建新评估来修饰失败。
+    const historyFailed = page.waitForResponse((res) =>
+      res.url().includes('/result/assessments') && res.status() === 500,
+    )
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('结果分析').click()
+    await historyFailed
+    await expect(page.getByRole('alert').first()).toBeVisible()
+    expect(await page.getByText(/暂无评估记录/).count()).toBe(0)
+    expect(posts.filter((p) => p.url.includes('/result/assess'))).toEqual([])
+    await context.unrouteAll({ behavior: 'wait' })
+    await page.reload()
+    await expect(page.locator('.ies-assess-item')).toHaveCount(1, { timeout: 30_000 })
+
+    // 定向注入的两次 500 按真实任务 id 精确计数。
     const soloTokenB = await loginToken(soloCtx.request, soloUser, soloPass)
     const listedB = await requestJson(soloCtx.request, 'GET', `/api/projects/${soloPid}/tasks?limit=10`, undefined, soloTokenB)
     const taskIdB: number = ((listedB.items ?? []) as TaskListItem[])[0].id
     expect(taskIdB).toBeTruthy()
     await soloCtx.close()
     session.assertNoErrors([
-      { method: 'GET', path: `/api/projects/${soloPid}/tasks/${taskIdB}/result/assessments`, status: 500, times: 1 },
+      { method: 'GET', path: `/api/projects/${soloPid}/tasks/${taskIdB}/result/assessments`, status: 500, times: 2 },
     ])
     await context.close()
   })
