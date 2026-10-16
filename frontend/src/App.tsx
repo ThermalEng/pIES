@@ -36,7 +36,8 @@ import {
   useOutletContext,
 } from 'react-router-dom'
 
-import { api, hasSession, setUnauthorizedHandler } from './api/client'
+import { api } from './api/client'
+import { hasSession, setUnauthorizedHandler } from './shared/http'
 import { BrandMark } from './components/BrandMark'
 import { useI18n } from './i18n'
 import { Button, Icon, PageLoadError, Spinner } from './components/ui'

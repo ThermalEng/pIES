@@ -17,7 +17,7 @@ pages/model/NewModelPage.tsx        # 路由级组合(模板页签 + YAML 页签
        └─ components/               # 列表 / 递归表单 / YAML 编辑器 / 状态 / 诊断 / 结果
 ```
 
-依赖方向: `pages → features → shared(api/client + types + i18n)`。
+依赖方向: `pages → features → shared(http + types + i18n)`。
 页面与组件不直接拼请求 JSON; mapper 不访问网络、缓存或 React 状态。
 
 ## 保存状态机

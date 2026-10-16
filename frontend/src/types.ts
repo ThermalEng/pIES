@@ -961,8 +961,8 @@ export interface ExcelExportInput {
   report_type?: 'excel'
   /** 报告所属任务(与所选证据同源, 调用方显式传入; 评估按此任务读取)。 */
   task_id: EntityId
-  /** 结果来源证据包(缺省用最新结果)。 */
-  evidence_package_id?: EntityId
+  /** 当前所选任务的证据包，不回退到其他任务。 */
+  evidence_package_id: EntityId
   include_hourly?: boolean
   include_diagnostics?: boolean
   /** 报告语言(与后端 ExcelExportRequest.lang 一致, 缺省 zh)。 */

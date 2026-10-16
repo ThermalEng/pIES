@@ -13,17 +13,10 @@
  * fetch 用桩代替（node22 原生 Response/fetch），桩按精确方法+路径匹配，
  * 未知请求一律 500 可见失败，不做子串兜底。
  *
- * 运行（Docker，复用已缓存的 playwright 镜像，不新增镜像/依赖）：
- *   docker run --rm -v "$PWD/frontend:/app:ro" --entrypoint sh \
- *     mcr.microsoft.com/playwright:v1.54.2-noble -c "
- *     mkdir -p /tmp/r7/api /tmp/r7/features/datasets && cp /app/src/api/client.ts /app/src/api/hourlyPages.ts /tmp/r7/api/ &&
- *     cp /app/src/features/datasets/contracts.ts /app/src/features/datasets/mappers.ts /tmp/r7/features/datasets/ &&
- *     cp /app/src/types.ts /tmp/r7/types.ts && cp /app/tests/export_no_implicit_assessment.test.mjs /tmp/r7/ &&
- *     sed -i \"s#'../src/api/client.ts'#'./api/client.ts'#\" /tmp/r7/export_no_implicit_assessment.test.mjs &&
- *     sed -i \"s#from '../types'#from '../types.ts'#; s#from './hourlyPages'#from './hourlyPages.ts'#; s#from '../features/datasets/\(contracts\|mappers\)'#from '../features/datasets/\1.ts'#\" /tmp/r7/api/client.ts &&
- *     node /tmp/r7/export_no_implicit_assessment.test.mjs"
- * （node22 自带类型剥离；仅给相对导入补机械后缀，逻辑与仓库文件一致；
- * client.ts 顶层无浏览器副作用。）
+ * 运行（仓库根目录；只在 Docker 构建和执行，复用前端已有 esbuild）：
+ *   docker build --target build -f frontend/Dockerfile -t pies-focused-tests .
+ *   docker run --rm pies-focused-tests sh -ec './node_modules/.bin/esbuild tests/export_no_implicit_assessment.test.mjs --bundle --platform=node --format=esm --outfile=/tmp/focused.mjs; node /tmp/focused.mjs'
+ * 验证后删除自建 pies-focused-tests 镜像，不删除基础镜像。
  */
 
 import { api } from '../src/api/client.ts'

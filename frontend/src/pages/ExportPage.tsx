@@ -4,7 +4,7 @@
  * - Excel 报告:语言选择(中文/English,默认中文)+ 导出按钮;
  *   固定引用全局所选任务的证据包与最新评估(无显式选择时默认最新完成;
  *   所选任务未完成/无结果时禁用导出且不回退他任务; 评估历史每次真实读取),
- *   导出成功经 api.exports.download(本地下载会话 id) 取 Blob 后由
+ *   导出成功经 downloadExport(本地下载会话 id) 取 Blob 后由
  *   downloadBlob 触发浏览器下载。
  * - 完整项目包:仅项目所有者可导出(后端 403);非所有者时按钮禁用并提示。
  *   包内容为模型/版本/数据/历史结果,不含账号/权限/会话。
@@ -17,7 +17,9 @@
 import { useCallback, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api, downloadBlob, isNoAssessmentError } from '../api/client'
+import { downloadBlob } from '../shared/http'
+import { exportTaskReport, isNoAssessmentError } from '../application/exportTaskReport'
+import { exportPackage as createPackageExport, downloadExport } from '../features/exports'
 import { Alert, Button, Card, FormField, Select, Spinner } from '../components/ui'
 import { translateError, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
@@ -79,8 +81,8 @@ export default function ExportPage() {
         include_diagnostics: true,
         lang,
       }
-      const downloadSessionId = await api.exports.excel(input)
-      const { blob, filename } = await api.exports.download(downloadSessionId)
+      const downloadSessionId = await exportTaskReport(input)
+      const { blob, filename } = await downloadExport(downloadSessionId)
       downloadBlob(blob, filename)
       setOkMsg(pt('ies.export.download_ok', { filename }))
     } catch (err) {
@@ -101,8 +103,8 @@ export default function ExportPage() {
     setOkMsg(null)
     setExportBusy('package')
     try {
-      const downloadSessionId = await api.exports.package({ project_id: projectId, include_versions: true })
-      const { blob, filename } = await api.exports.download(downloadSessionId)
+      const downloadSessionId = await createPackageExport({ project_id: projectId, include_versions: true })
+      const { blob, filename } = await downloadExport(downloadSessionId)
       downloadBlob(blob, filename)
       setOkMsg(pt('ies.export.package_ok', { filename }))
     } catch (err) {

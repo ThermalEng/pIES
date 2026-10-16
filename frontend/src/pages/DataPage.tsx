@@ -18,7 +18,8 @@ import { useEffect, useRef, useState } from 'react'
 import { canSubmitScan, createHeadScan, nextScanStatus } from './uploadHeadScan'
 import type { HeadScanStatus } from './uploadHeadScan'
 
-import { api, downloadBlob } from '../api/client'
+import { api } from '../api/client'
+import { downloadBlob } from '../shared/http'
 import { DiagnosticsList } from '../components/DiagnosticsList'
 import { formatUtcOffset, useWorkbench } from './workbench'
 import {

@@ -206,14 +206,28 @@ test.describe('R7: 导出先评估再导出', () => {
     expect(posts.filter((p) => p.url.includes('/result/assess'))).toEqual([])
     expect(posts.filter((p) => p.url.includes('/exports/excel'))).toEqual([])
 
-    // 定向注入的 500 按真实任务 id 精确计数(真实错误, 不得吞成缺评估)。
+    // 同一真实失败在结果页也必须可见，不能吞成“暂无评估”。解除注入后
+    // 重载仍读回原任务的真实评估，不创建新评估来修饰失败。
+    const historyFailed = page.waitForResponse((res) =>
+      res.url().includes('/result/assessments') && res.status() === 500,
+    )
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('结果分析').click()
+    await historyFailed
+    await expect(page.getByRole('alert').first()).toBeVisible()
+    expect(await page.getByText(/暂无评估记录/).count()).toBe(0)
+    expect(posts.filter((p) => p.url.includes('/result/assess'))).toEqual([])
+    await context.unrouteAll({ behavior: 'wait' })
+    await page.reload()
+    await expect(page.locator('.ies-assess-item')).toHaveCount(1, { timeout: 30_000 })
+
+    // 定向注入的两次 500 按真实任务 id 精确计数。
     const soloTokenB = await loginToken(soloCtx.request, soloUser, soloPass)
     const listedB = await requestJson(soloCtx.request, 'GET', `/api/projects/${soloPid}/tasks?limit=10`, undefined, soloTokenB)
     const taskIdB: number = ((listedB.items ?? []) as TaskListItem[])[0].id
     expect(taskIdB).toBeTruthy()
     await soloCtx.close()
     session.assertNoErrors([
-      { method: 'GET', path: `/api/projects/${soloPid}/tasks/${taskIdB}/result/assessments`, status: 500, times: 1 },
+      { method: 'GET', path: `/api/projects/${soloPid}/tasks/${taskIdB}/result/assessments`, status: 500, times: 2 },
     ])
     await context.close()
   })
