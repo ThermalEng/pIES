@@ -13,6 +13,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from 'react'
 
 import { api } from '../api/client'
+import { getTaskDetail, listTasks, loadTaskDraft } from '../features/tasks'
 import { errorMessage, translateError } from '../i18n'
 import type { ApiError, Project, ProjectVersion, Task, TaskDetail } from '../types'
 import { selectDefaultTaskId, selectEvidencePackage, type SelectedEvidence } from '../lib/taskSelection'
@@ -237,7 +238,7 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
       setDraftLoadingTaskId(taskId)
       await saveMutexRef.current
       try {
-        const loaded = await api.tasks.loadDraft(projectId, taskId)
+        const loaded = await loadTaskDraft(projectId, taskId)
         setSelectedTaskId(taskId)
         // 草稿 revision 已变化, 刷新项目摘要使各编辑页读到最新; 刷新失败
         // 由摘要错误位可见, 不回滚已成功的载入(草稿权威在服务端)。
@@ -354,7 +355,7 @@ export function useEffectiveTaskContext(explicitOverride?: number | null): Effec
         let explicit: TaskDetail | null = null
         if (explicitTaskId !== null && explicitTaskId >= 0) {
           try {
-            explicit = await api.tasks.get(projectId, explicitTaskId)
+            explicit = await getTaskDetail(projectId, explicitTaskId)
           } catch (err) {
             // 404 = 选择指向未知任务(已删/跨项目): 只阻塞该选择,
             // 不当整组读取失败; 其余错误整组失败。
@@ -369,7 +370,7 @@ export function useEffectiveTaskContext(explicitOverride?: number | null): Effec
         const walked: Task[] = []
         let cursor: string | undefined
         for (;;) {
-          const page = await api.tasks.list({
+          const page = await listTasks({
             project_id: projectId,
             status: 'completed',
             limit: 100,
@@ -389,7 +390,7 @@ export function useEffectiveTaskContext(explicitOverride?: number | null): Effec
             walked.filter((tk) => isDefaultCandidateType(tk.type)),
           )
           if (winnerId !== null) {
-            winner = await api.tasks.get(projectId, winnerId)
+            winner = await getTaskDetail(projectId, winnerId)
             if (cancelled) return
           }
         }

@@ -42,10 +42,6 @@ import type {
   VersionRestoreResult,
   PublicAuthSettings,
   RegisterRequest,
-  Task,
-  TaskDetail,
-  TaskDraftLoadResult,
-  TaskListParams,
   TaskStatus,
   TaskType,
   User,
@@ -70,7 +66,6 @@ import {
   exportPackage,
   downloadExport,
 } from '../features/exports'
-import { getTaskDetail, listTasks, loadTaskDraft } from '../features/tasks'
 import { exportTaskReport } from '../application/exportTaskReport'
 
 import { request, requestBlob, setSession, clearSession } from '../shared/http'
@@ -968,20 +963,11 @@ export const api = {
   // 校验请求归 features/validation 所有(页面直接消费公开入口), 本聚合器不再保留委托。
 
   tasks: {
-    // 任务请求归 features/tasks 公开入口所有: 页面已直调, 本聚合器仅暂留
-    // 工作台共享上下文仍消费的 list/get/loadDraft(随工作台接线另立集成候选
-    // 一并移除)与跨家族草稿命令通道 saveWorkingInputs(复用
-    // sendDraftCommand/makeCommand, 不向 feature 重复一份命令组装)。
-    // 跨家族草稿命令传输可待 Codex 共享边界集成。
-    list(params?: TaskListParams): Promise<PageResult<Task>> {
-      return listTasks(params)
-    },
-    get(projectId: number, taskId: number): Promise<TaskDetail> {
-      return getTaskDetail(projectId, taskId)
-    },
-    loadDraft(projectId: number, taskId: number): Promise<TaskDraftLoadResult> {
-      return loadTaskDraft(projectId, taskId)
-    },
+    // 任务请求归 features/tasks 公开入口所有(工作台共享上下文已直调):
+    // list/get/loadDraft/create/cancel/retry/inputs 均已迁出, 本聚合器
+    // 仅保留跨家族共享的草稿命令通道 saveWorkingInputs(复用
+    // sendDraftCommand/makeCommand, 不向 feature 重复一份命令组装),
+    // 行为不变。跨家族草稿命令传输可待 Codex 共享边界集成。
     async saveWorkingInputs(
       projectId: number,
       working: Record<string, unknown>,
