@@ -85,7 +85,7 @@ interface ExtendedDeviceTypeSpec extends Omit<DeviceTypeSpec, 'parameters'> {
 }
 
 const CARRIER_COLOR: Record<string, string> = {
-  electric: '#0e5cad',
+  electricity: '#0e5cad',
   heat: '#c2410c',
   cool: '#0891b2',
   gas: '#8a5a00',

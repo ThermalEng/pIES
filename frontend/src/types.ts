@@ -367,7 +367,8 @@ export interface DraftModelSection {
 // 设备注册表(04 §2/§3)
 // ---------------------------------------------------------------------------
 
-export type EnergyCarrier = 'electric' | 'heat' | 'cool' | 'gas' | 'solar'
+/** 载能标识(与设备 YAML/注册表 descriptor 的 energy_carrier 同一身份, 非展示文案)。 */
+export type EnergyCarrier = 'electricity' | 'heat' | 'cool' | 'gas' | 'solar'
 
 export interface ParameterSpec {
   unit: string | null

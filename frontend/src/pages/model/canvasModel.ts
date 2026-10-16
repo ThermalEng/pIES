@@ -86,7 +86,7 @@ export function parseHandle(
   return { carrier, direction, name }
 }
 
-export const ENERGY_CARRIERS: EnergyCarrier[] = ['electric', 'heat', 'cool', 'gas', 'solar']
+export const ENERGY_CARRIERS: EnergyCarrier[] = ['electricity', 'heat', 'cool', 'gas', 'solar']
 
 // ---------------------------------------------------------------------------
 // 端口句柄派生(注册表 DTO 真实端口,RR-P1-04)
@@ -177,7 +177,7 @@ export function checkConnection(
 /** 载能 → 展示文案键(全局 i18n 已覆盖的键)。 */
 export function carrierLabelKey(carrier: EnergyCarrier): string {
   switch (carrier) {
-    case 'electric':
+    case 'electricity':
       return 'ies.modeling.port_electric'
     case 'heat':
       return 'ies.modeling.port_thermal'
