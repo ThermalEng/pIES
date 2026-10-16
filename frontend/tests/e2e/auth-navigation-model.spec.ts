@@ -117,6 +117,7 @@ test.describe('场景 2: 项目与页面导航', () => {
     const projectName = uniqueName('QA 验收项目')
     await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
     await page.getByLabel(/名称|Name/i).fill(projectName)
+    await page.locator('#pp-create-start-year').fill('2026')
     await page.getByRole('button', { name: /确认|Confirm/i }).click()
     await expect(page.getByText(projectName)).toBeVisible()
 
@@ -143,7 +144,11 @@ test.describe('场景 2: 项目与页面导航', () => {
       await expect(page.locator('.wb-content .ies-page-placeholder')).not.toBeVisible({ timeout: 10_000 })
     }
 
-    session.assertNoErrors()
+    const projectId = page.url().match(/\/projects\/(\d+)/)![1]
+    session.assertNoErrors([
+      // 新建空项目尚未保存计算配置, 访问任务中心/配置页读取 404 为既有正常行为(计数锁定防漂移)。
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 3 },
+    ])
     await context.close()
   })
 })

@@ -36,11 +36,11 @@ import {
   useOutletContext,
 } from 'react-router-dom'
 
-import { api } from './api/client'
+import { getMe, logout } from './features/auth'
 import { hasSession, setUnauthorizedHandler } from './shared/http'
 import { BrandMark } from './components/BrandMark'
-import { useI18n } from './i18n'
-import { Button, Icon, PageLoadError, Spinner } from './components/ui'
+import { errorMessage, useI18n } from './i18n'
+import { Alert, Button, Icon, PageLoadError, Spinner } from './components/ui'
 import type { User } from './types'
 
 /** 已发版页面模块(见文件头注释),惰性加载做代码分割。 */
@@ -111,6 +111,7 @@ function AppShell() {
   const location = useLocation()
   const [currentUser, setCurrentUser] = useState<User | null>(null)
   const [userLoaded, setUserLoaded] = useState(false)
+  const [logoutError, setLogoutError] = useState<string | null>(null)
 
   // 会话失效(401)统一处理:清除会话并跳转登录页
   useEffect(() => {
@@ -125,8 +126,7 @@ function AppShell() {
   // 加载当前用户角色, 用于管理员导航/页面守卫(后端 403 为权威闸门)
   useEffect(() => {
     let cancelled = false
-    api.auth
-      .me()
+    getMe()
       .then((u) => {
         if (!cancelled) {
           setCurrentUser(u)
@@ -144,9 +144,10 @@ function AppShell() {
   const isAdmin = userLoaded ? currentUser?.role === 'admin' : null
 
   const handleLogout = () => {
-    void api.auth.logout().finally(() => {
+    setLogoutError(null)
+    void logout().then(() => {
       navigate('/login', { replace: true })
-    })
+    }).catch((err: unknown) => setLogoutError(errorMessage(err)))
   }
 
   const toggleLocale = () => {
@@ -197,6 +198,7 @@ function AppShell() {
       </header>
       <main className="ies-app__main">
         <div className="ies-content">
+          {logoutError !== null ? <Alert variant="error">{logoutError}</Alert> : null}
           <Outlet context={{ isAdmin }} />
         </div>
       </main>

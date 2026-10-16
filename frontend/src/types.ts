@@ -106,17 +106,11 @@ export interface User {
   id: EntityId
   username: string
   display_name: string
-  email: string | null
   /** 后端 UserOut 精简角色(admin / engineer / ''), 用于前端导航权限呈现。 */
   role: string
   status: UserStatus
-  locale: string
-  timezone: string
-  fixed_utc_offset_minutes: number
+  force_password_change: boolean
   credential_version: number
-  is_system: boolean
-  created_at: ISO8601
-  updated_at: ISO8601 | null
   last_login_at: ISO8601 | null
 }
 
@@ -984,9 +978,7 @@ export interface PackageExportInput {
 // ---------------------------------------------------------------------------
 
 export interface AdminUserRow extends User {
-  roles: string[]
   project_count: number
-  last_active_at: ISO8601 | null
 }
 
 /** 删除账号预告(0.2.0 B1 误操作防护): 将受影响项目清单 + 签名确认令牌。 */

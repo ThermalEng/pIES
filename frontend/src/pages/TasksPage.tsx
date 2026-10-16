@@ -40,6 +40,7 @@ import {
 import { getCalcConfig } from '../features/config'
 import { runValidation } from '../features/validation'
 import type { CreateForm, DistType } from '../features/tasks'
+import { getMe } from '../features/auth'
 import { translate, translateDiagnostic, translateError, useI18n } from '../i18n'
 import {
   Alert,
@@ -304,8 +305,7 @@ export default function TasksPage() {
   // 基础数据加载
   // -------------------------------------------------------------------------
   useEffect(() => {
-    api.auth
-      .me()
+    getMe()
       .then(setMe)
       .catch(() => setMe(null))
   }, [])

@@ -6,11 +6,7 @@
  */
 
 import type {
-  AdminUserListParams,
-  AdminUserRow,
   ApiErrorBody,
-  AuditEntry,
-  AuditListParams,
   Connection,
   ConnectionInput,
   Currency,
@@ -27,8 +23,6 @@ import type {
   Diagnostic,
   ExcelExportInput,
   DraftModelSection,
-  HealthStatus,
-  LoginRequest,
   ImportConfirmResult,
   ImportProposal,
   PackageExportInput,
@@ -40,12 +34,8 @@ import type {
   ProjectVersion,
   ProjectVersionCreateInput,
   VersionRestoreResult,
-  PublicAuthSettings,
-  RegisterRequest,
   TaskStatus,
   TaskType,
-  User,
-  UserDeletePreview,
   ValidationResult,
 } from '../types'
 import { ApiError } from '../types'
@@ -68,7 +58,7 @@ import {
 } from '../features/exports'
 import { exportTaskReport } from '../application/exportTaskReport'
 
-import { request, requestBlob, setSession, clearSession } from '../shared/http'
+import { request, requestBlob } from '../shared/http'
 
 // ---------------------------------------------------------------------------
 // 契约适配辅助(后端形状 → 前端类型)
@@ -79,30 +69,6 @@ function asRecord(body: unknown): Record<string, unknown> {
   return body !== null && typeof body === 'object' && !Array.isArray(body)
     ? (body as Record<string, unknown>)
     : {}
-}
-
-/** 删除账号预告响应解析(0.2.0 B1): {user_id, username, project_count, projects, confirm_token}。 */
-function parseUserDeletePreview(body: unknown): UserDeletePreview {
-  const rec = asRecord(body)
-  const projects = Array.isArray(rec.projects)
-    ? (rec.projects as unknown[])
-        .filter((p) => p !== null && typeof p === 'object')
-        .map((p) => {
-          const pr = p as Record<string, unknown>
-          return {
-            id: Number(pr.id ?? 0),
-            name: String(pr.name ?? ''),
-            status: String(pr.status ?? ''),
-          }
-        })
-    : []
-  return {
-    user_id: Number(rec.user_id ?? 0),
-    username: String(rec.username ?? ''),
-    project_count: Number(rec.project_count ?? projects.length),
-    projects,
-    confirm_token: String(rec.confirm_token ?? ''),
-  }
 }
 
 /** 列表信封适配:兼容 {items, next_cursor} 与 {key: [...]} 与裸数组(PageResult 统一)。 */
@@ -133,27 +99,6 @@ function oneOf<T>(body: unknown, key: string): T {
   const rec = asRecord(body)
   if (key in rec) return rec[key] as T
   return body as T
-}
-
-/** 后端 UserOut(id/username/display_name/role/status/force_password_change/...)
- *  → 前端 User(补齐前端类型要求的缺省字段)。 */
-function normalizeUser(u: Record<string, unknown>): User {
-  return {
-    id: Number(u.id ?? 0),
-    username: String(u.username ?? ''),
-    display_name: String(u.display_name ?? ''),
-    email: u.email === null || u.email === undefined ? null : String(u.email),
-    role: String(u.role ?? ''),
-    status: (u.status as User['status']) ?? 'active',
-    locale: String(u.locale ?? 'zh-CN'),
-    timezone: String(u.timezone ?? 'UTC'),
-    fixed_utc_offset_minutes: Number(u.fixed_utc_offset_minutes ?? 480),
-    credential_version: Number(u.credential_version ?? 0),
-    is_system: Boolean(u.is_system ?? false),
-    created_at: String(u.created_at ?? ''),
-    updated_at: u.updated_at === null || u.updated_at === undefined ? null : String(u.updated_at),
-    last_login_at: u.last_login_at === null || u.last_login_at === undefined ? null : String(u.last_login_at),
-  }
 }
 
 /**
@@ -293,29 +238,6 @@ function projectVersionFromServer(v: unknown): ProjectVersion {
   }
 }
 
-/**
- * 审计记录映射(后端 entry_to_dict 可信字段直接消费, 一次映射; 不回填
- * 缺失、不做 Number/String 猜测、不逐字段重复验证)。
- */
-function auditEntryFromServer(v: unknown): AuditEntry {
-  const r = asRecord(v)
-  return {
-    id: r.id as number,
-    entity_type: r.entity_type as string | null,
-    entity_id: r.entity_id as number | null,
-    action: r.action as string,
-    actor_id: r.actor_id as number | null,
-    actor_type: r.actor_type as string | null,
-    occurred_at: r.occurred_at as string,
-    ip: r.ip as string | null,
-    before: r.before as Record<string, unknown> | null,
-    after: r.after as Record<string, unknown> | null,
-    request_id: r.request_id as string | null,
-    trace_id: r.trace_id as string | null,
-  }
-}
-
-/** 任务/配置映射归 features/tasks、features/config 所有, 本文件只作传输层委托。 */
 /** 数据集版本/质量纯映射归 features/datasets/mappers 所有, 本文件只作传输层调用。 */
 
 /** 草稿内容设备条目 → 前端 Device(2.0 名键, 无 id/状态/时间字段)。 */
@@ -477,36 +399,6 @@ async function sendDraftCommand(
 // 类型化方法集
 // ---------------------------------------------------------------------------
 
-/** 登录/接管响应(与后端 AuthResponse 一致; user 为 UserOut 精简形态)。 */
-export interface LoginResult {
-  token: string
-  token_type: string
-  user: {
-    id: number
-    username: string
-    display_name: string
-    role: string
-    status: string
-    force_password_change: boolean
-    credential_version: number
-    last_login_at: string | null
-  }
-  needs_takeover_confirm: boolean
-}
-
-export interface AuthApi {
-  login(input: LoginRequest): Promise<LoginResult>
-  logout(): Promise<void>
-  changePassword(input: { old_password: string; new_password: string }): Promise<void>
-  /** 确认接管(无请求体; 身份取自 Cookie/Bearer, 服务端忽略 body)。 */
-  confirmTakeover(): Promise<LoginResult>
-  register(input: RegisterRequest): Promise<User>
-  /** 获取当前登录用户(页面刷新后恢复用户信息)。 */
-  me(): Promise<User>
-  /** 登录页公开设置(无需认证): 注册开关 / SSO 入口。 */
-  publicSettings(): Promise<PublicAuthSettings>
-}
-
 export interface ProjectsApi {
   list(params?: ProjectListParams): Promise<PageResult<Project>>
   create(input: ProjectCreateInput): Promise<Project>
@@ -624,69 +516,7 @@ export interface ExportsApi {
   download(downloadSessionId: number): Promise<{ blob: Blob; filename: string }>
 }
 
-export interface AdminApi {
-  users(params?: AdminUserListParams): Promise<PageResult<AdminUserRow>>
-  storage(): Promise<{ total_bytes: number; used_bytes: number; quota_bytes: number | null; object_count: number }>
-  health(): Promise<HealthStatus>
-  audit(params?: AuditListParams): Promise<PageResult<AuditEntry>>
-  /** 删除账号预告(管理员): 返回将受影响项目清单 + 确认令牌。 */
-  previewUserDelete(userId: number): Promise<UserDeletePreview>
-  /** 删除账号(管理员): 需 confirm=true + preview 签发的 confirm_token, 级联删除其项目。 */
-  deleteUser(userId: number, confirmToken: string): Promise<{ deleted_projects: number }>
-  /** 停用账号(管理员)。 */
-  deactivateUser(userId: number): Promise<void>
-  /** 重新启用账号(管理员)。 */
-  reactivateUser(userId: number): Promise<void>
-  /** 重置密码(管理员): 签发临时密码并强制目标用户改密, 其全部会话失效。 */
-  resetPassword(userId: number, newPassword: string): Promise<void>
-  /** 读取安全设置(管理员)。 */
-  getSecuritySettings(): Promise<{ registration_enabled: boolean }>
-  /** 更新安全设置: 自助注册开关(管理员)。 */
-  setRegistrationEnabled(enabled: boolean): Promise<{ registration_enabled: boolean }>
-}
-
 export const api = {
-  auth: {
-    login(input: LoginRequest): Promise<LoginResult> {
-      return request<LoginResult>('/auth/login', { method: 'POST', body: input }).then((res) => {
-        setSession()
-        return res
-      })
-    },
-    logout(): Promise<void> {
-      return request<void>('/auth/logout', { method: 'POST' }).then(() => {
-        clearSession()
-      })
-    },
-    changePassword(input: { old_password: string; new_password: string }): Promise<void> {
-      return request<void>('/auth/change-password', { method: 'POST', body: input })
-    },
-    confirmTakeover(): Promise<LoginResult> {
-      return request<LoginResult>('/auth/confirm-takeover', { method: 'POST' }).then((res) => {
-        setSession()
-        return res
-      })
-    },
-    register(input: RegisterRequest): Promise<User> {
-      return request<unknown>('/auth/register', { method: 'POST', body: input }).then((res) =>
-        normalizeUser(asRecord(res)),
-      )
-    },
-    publicSettings(): Promise<PublicAuthSettings> {
-      return request<unknown>('/auth/public-settings').then((res) => {
-        const body = asRecord(res)
-        return {
-          registration_enabled: Boolean(body.registration_enabled),
-          sso_enabled: Boolean(body.sso_enabled),
-          sso_provider_name: String(body.sso_provider_name ?? ''),
-        }
-      })
-    },
-    me(): Promise<User> {
-      return request<unknown>('/auth/me').then((res) => normalizeUser(asRecord(res)))
-    },
-  } satisfies AuthApi,
-
   projects: {
     list(params?: ProjectListParams): Promise<PageResult<Project>> {
       return request<unknown>('/projects', { query: params }).then((body) => {
@@ -1000,125 +830,6 @@ export const api = {
     package: exportPackage,
     download: downloadExport,
   } satisfies ExportsApi,
-
-  admin: {
-    users(params?: AdminUserListParams): Promise<PageResult<AdminUserRow>> {
-      // 后端用户列表在 /api/auth/users(管理员), 返回 {users: [UserOut]}
-      return request<unknown>('/auth/users').then((body) => {
-        let list = asList<Record<string, unknown>>(body, 'users')
-        if (params?.status) list = list.filter((u) => String(u.status) === params.status)
-        return {
-          items: list.map((u) => {
-            const base = normalizeUser(u)
-            return {
-              ...base,
-              roles: typeof u.role === 'string' && u.role ? [u.role] : [],
-              project_count: Number(u.project_count ?? 0),
-              last_active_at: base.last_login_at,
-            }
-          }),
-          next_cursor: null,
-          limit: list.length,
-        }
-      })
-    },
-    storage(): Promise<{
-      total_bytes: number
-      used_bytes: number
-      quota_bytes: number | null
-      object_count: number
-    }> {
-      return request<unknown>('/admin/storage').then((body) => {
-        const rec = asRecord(body)
-        const objects = asRecord(rec.objects)
-        return {
-          total_bytes: Number(objects.total_bytes ?? 0),
-          used_bytes: Number(objects.total_bytes ?? 0),
-          quota_bytes: null,
-          object_count: Number(objects.count ?? 0),
-        }
-      })
-    },
-    health(): Promise<HealthStatus> {
-      return request<unknown>('/admin/health').then((body) => {
-        const rec = asRecord(body)
-        const liveness = asRecord(rec.liveness)
-        const readiness = asRecord(rec.readiness)
-        const storage = asRecord(rec.storage)
-        return {
-          status: (rec.status as HealthStatus['status']) ?? 'degraded',
-          version: String(rec.version ?? ''),
-          checks: {
-            liveness: { status: liveness.ok === true ? 'ok' : 'down' },
-            readiness: { status: readiness.db === true ? 'ok' : 'down' },
-            // STO-07: 存储健康 provider 形状 {capacity, ok}; 容量不可测(capacity_unknown)降级
-            storage: {
-              status: storage.ok === true ? 'ok' : 'degraded',
-            },
-          },
-        }
-      })
-    },
-    audit(params?: AuditListParams): Promise<PageResult<AuditEntry>> {
-      // 审计查询: 参数与后端 entry_to_dict 字段一一透传, 不改名、不虚构
-      // (无 project_id 语义; before/after/request_id 等一并保留在行内)。
-      const query: Record<string, unknown> = {}
-      if (params?.entity_type !== undefined) query.entity_type = params.entity_type
-      if (params?.entity_id !== undefined) query.entity_id = params.entity_id
-      if (params?.action !== undefined) query.action = params.action
-      if (params?.actor_id !== undefined) query.actor_id = params.actor_id
-      if (params?.actor_type !== undefined) query.actor_type = params.actor_type
-      if (params?.since !== undefined) query.since = params.since
-      if (params?.until !== undefined) query.until = params.until
-      if (params?.cursor !== undefined) query.cursor = params.cursor
-      if (params?.limit !== undefined) query.limit = params.limit
-      return request<unknown>('/admin/audit', { query }).then((body) => {
-        const page = asItems<Record<string, unknown>>(body, 'items')
-        return {
-          items: page.items.map(auditEntryFromServer),
-          next_cursor: page.next_cursor,
-          limit: params?.limit ?? page.limit,
-        }
-      })
-    },
-    deleteUser(userId: number, confirmToken: string): Promise<{ deleted_projects: number }> {
-      return request<unknown>(`/auth/users/${userId}`, {
-        method: 'DELETE',
-        body: { confirm: true, confirm_token: confirmToken },
-      }).then((body) => {
-        const rec = asRecord(body)
-        return { deleted_projects: Number(rec.deleted_projects ?? 0) }
-      })
-    },
-    previewUserDelete(userId: number): Promise<UserDeletePreview> {
-      return request<unknown>(`/auth/users/${userId}/delete-preview`, { method: 'POST' }).then(
-        (body) => parseUserDeletePreview(body),
-      )
-    },
-    deactivateUser(userId: number): Promise<void> {
-      return request<void>(`/auth/users/${userId}/deactivate`, { method: 'POST' })
-    },
-    reactivateUser(userId: number): Promise<void> {
-      return request<void>(`/auth/users/${userId}/reactivate`, { method: 'POST' })
-    },
-    resetPassword(userId: number, newPassword: string): Promise<void> {
-      return request<void>(`/auth/users/${userId}/reset-password`, {
-        method: 'POST',
-        body: { new_password: newPassword },
-      })
-    },
-    getSecuritySettings(): Promise<{ registration_enabled: boolean }> {
-      return request<unknown>('/auth/settings').then((body) => ({
-        registration_enabled: Boolean(asRecord(body).registration_enabled),
-      }))
-    },
-    setRegistrationEnabled(enabled: boolean): Promise<{ registration_enabled: boolean }> {
-      return request<unknown>('/auth/settings', {
-        method: 'PUT',
-        body: { registration_enabled: enabled },
-      }).then((body) => ({ registration_enabled: Boolean(asRecord(body).registration_enabled) }))
-    },
-  } satisfies AdminApi,
 }
 
 // ---------------------------------------------------------------------------

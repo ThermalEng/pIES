@@ -221,6 +221,7 @@ test.describe('场景 11: 视口与键盘', () => {
     const projectName = uniqueName('QA 键盘项目')
     await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
     await page.getByLabel(/名称|Name/i).fill(projectName)
+    await page.locator('#pp-create-start-year').fill('2026')
     await page.getByRole('button', { name: /确认|Confirm/i }).click()
     await expect(page.getByText(projectName)).toBeVisible()
 
