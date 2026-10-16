@@ -65,8 +65,10 @@ export default function WorkbenchPage() {
     return <Navigate to="/" replace />
   }
 
+  // 项目归属即实例归属: :id 切换即全新 Provider(摘要/版本/选择均重读,
+  // 旧实例在途读回包无法发布到新项目, 与画布 projectId 键控同一所有权)。
   return (
-    <WorkbenchProvider projectId={projectId}>
+    <WorkbenchProvider key={projectId} projectId={projectId}>
       <Routes>
         <Route element={<ProjectPage />}>
           <Route index element={<Navigate to="tasks" replace />} />
