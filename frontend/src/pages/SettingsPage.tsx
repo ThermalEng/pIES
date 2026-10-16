@@ -16,7 +16,14 @@ import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useOutletContext } from 'react-router-dom'
 
-import { api } from '../api/client'
+import { changePassword } from '../features/auth'
+import {
+  getAdminHealth,
+  getSecuritySettings,
+  getStorageStatus,
+  setRegistrationEnabled,
+} from '../features/admin'
+import type { StorageStatus } from '../features/admin'
 import { errorMessage, useI18n } from '../i18n'
 import { Alert, Badge, Button, Card, FormField, Input } from '../components/ui'
 import { formatBytes } from '../lib/format'
@@ -35,17 +42,12 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState(false)
 
   // 安全设置(管理员): 自助注册开关
-  const [registrationEnabled, setRegistrationEnabled] = useState<boolean | null>(null)
+  const [registrationEnabled, setRegistrationEnabledState] = useState<boolean | null>(null)
   const [securityError, setSecurityError] = useState<string | null>(null)
   const [securityBusy, setSecurityBusy] = useState(false)
 
   // 服务健康(管理员): 存储用量 + 健康状态
-  const [storage, setStorage] = useState<{
-    total_bytes: number
-    used_bytes: number
-    quota_bytes: number | null
-    object_count: number
-  } | null>(null)
+  const [storage, setStorage] = useState<StorageStatus | null>(null)
   const [health, setHealth] = useState<HealthStatus | null>(null)
   const [healthError, setHealthError] = useState<string | null>(null)
   const [healthBusy, setHealthBusy] = useState(false)
@@ -55,9 +57,8 @@ export default function SettingsPage() {
 
   const loadSecuritySettings = () => {
     setSecurityError(null)
-    api.admin
-      .getSecuritySettings()
-      .then((s) => setRegistrationEnabled(s.registration_enabled))
+    getSecuritySettings()
+      .then((s) => setRegistrationEnabledState(s.registration_enabled))
       .catch((err) => setSecurityError(errorText(err)))
   }
 
@@ -65,8 +66,8 @@ export default function SettingsPage() {
     setSecurityBusy(true)
     setSecurityError(null)
     try {
-      const result = await api.admin.setRegistrationEnabled(enabled)
-      setRegistrationEnabled(result.registration_enabled)
+      const result = await setRegistrationEnabled(enabled)
+      setRegistrationEnabledState(result.registration_enabled)
     } catch (err) {
       setSecurityError(errorText(err))
     } finally {
@@ -85,7 +86,7 @@ export default function SettingsPage() {
   const loadHealth = () => {
     setHealthBusy(true)
     setHealthError(null)
-    Promise.all([api.admin.storage(), api.admin.health()])
+    Promise.all([getStorageStatus(), getAdminHealth()])
       .then(([storageData, healthData]) => {
         setStorage(storageData)
         setHealth(healthData)
@@ -112,7 +113,7 @@ export default function SettingsPage() {
     setError(null)
     setBusy(true)
     try {
-      await api.auth.changePassword({ old_password: oldPassword, new_password: newPassword })
+      await changePassword({ old_password: oldPassword, new_password: newPassword })
       setNotice(t('ies.auth.password_changed'))
       setOldPassword('')
       setNewPassword('')

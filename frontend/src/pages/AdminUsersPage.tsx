@@ -10,9 +10,16 @@
 
 import { useEffect, useState } from 'react'
 
-import { api } from '../api/client'
+import {
+  deactivateUser,
+  deleteUser,
+  listUsers,
+  previewUserDelete,
+  reactivateUser,
+  resetPassword as adminResetPassword,
+} from '../features/admin'
 import { errorMessage, useI18n } from '../i18n'
-import { Alert, Button, Card, Dialog, FormField, Input, Table, TBody, TD, TH, THead, TR } from '../components/ui'
+import { Alert, Badge, Button, Card, Dialog, FormField, Input, Table, TBody, TD, TH, THead, TR } from '../components/ui'
 import type { AdminUserRow, UserDeletePreview } from '../types'
 
 export default function AdminUsersPage() {
@@ -45,8 +52,7 @@ export default function AdminUsersPage() {
   const loadUsers = () => {
     setUsersBusy(true)
     setUsersError(null)
-    api.admin
-      .users({ limit: 200 })
+    listUsers({ limit: 200 })
       .then((page) => setUsers(page.items))
       .catch((err) => setUsersError(errorText(err)))
       .finally(() => setUsersBusy(false))
@@ -64,7 +70,7 @@ export default function AdminUsersPage() {
     setDeletePreview(null)
     setDeleteBusy(true)
     try {
-      const preview = await api.admin.previewUserDelete(user.id)
+      const preview = await previewUserDelete(user.id)
       setDeletePreview(preview)
     } catch (err) {
       setDeleteError(errorText(err))
@@ -80,7 +86,7 @@ export default function AdminUsersPage() {
     setUsersError(null)
     setUsersNotice(null)
     try {
-      const result = await api.admin.deleteUser(deleteTarget.id, deletePreview.confirm_token)
+      const result = await deleteUser(deleteTarget.id, deletePreview.confirm_token)
       setUsersNotice(t('ies.admin.user_deleted', { username: deleteTarget.username, count: result.deleted_projects }))
       setDeleteTarget(null)
       setDeletePreview(null)
@@ -98,6 +104,26 @@ export default function AdminUsersPage() {
     setDeleteError(null)
   }
 
+  const handleToggleUserStatus = async (user: AdminUserRow) => {
+    setUsersBusy(true)
+    setUsersError(null)
+    setUsersNotice(null)
+    try {
+      if (user.status === 'disabled') {
+        await reactivateUser(user.id)
+        setUsersNotice(`已重新启用账号 ${user.username}`)
+      } else {
+        await deactivateUser(user.id)
+        setUsersNotice(`已停用账号 ${user.username}`)
+      }
+      loadUsers()
+    } catch (err) {
+      setUsersError(errorText(err))
+    } finally {
+      setUsersBusy(false)
+    }
+  }
+
   const handleResetSubmit = async () => {
     const target = resetTarget
     if (!target) return
@@ -112,7 +138,7 @@ export default function AdminUsersPage() {
     setResetBusy(true)
     setResetError(null)
     try {
-      await api.admin.resetPassword(target.id, resetPassword)
+      await adminResetPassword(target.id, resetPassword)
       const donePassword = resetPassword
       setResetTarget(null)
       setResetPassword('')
@@ -174,6 +200,7 @@ export default function AdminUsersPage() {
             <THead>
               <TR>
                 <TH>{t('ies.admin.username')}</TH>
+                <TH>{t('ies.admin.status')}</TH>
                 <TH>{t('ies.admin.project_count')}</TH>
                 <TH>{t('ies.admin.roles')}</TH>
                 <TH>{t('ies.admin.actions')}</TH>
@@ -186,10 +213,24 @@ export default function AdminUsersPage() {
                     {u.display_name}
                     <span className="ies-mono"> ({u.username})</span>
                   </TD>
+                  <TD>
+                    <Badge
+                      label={u.status === 'disabled' ? '停用' : '正常'}
+                      variant={u.status === 'disabled' ? 'danger' : 'success'}
+                    />
+                  </TD>
                   <TD>{u.project_count}</TD>
                   <TD>{(u.roles ?? []).join(', ')}</TD>
                   <TD>
                     <div className="ies-flex" style={{ gap: 'var(--ies-space-1)' }}>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={usersBusy || u.username === 'admin'}
+                        onClick={() => void handleToggleUserStatus(u)}
+                      >
+                        {u.status === 'disabled' ? '启用' : '停用'}
+                      </Button>
                       <Button
                         variant="secondary"
                         size="sm"

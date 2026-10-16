@@ -37,34 +37,20 @@ import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
-import { api } from '../api/client'
-import { ApiError, PublicAuthSettings } from '../types'
+import {
+  changePassword,
+  confirmTakeover,
+  getPublicSettings,
+  login,
+  logout,
+  register,
+} from '../features/auth'
+import type { PublicAuthSettings } from '../features/auth'
+import { ApiError } from '../types'
 import { errorMessage, useI18n } from '../i18n'
 import type { Locale } from '../i18n'  // Locale kept for setLocale typing if needed
 import { Alert, Badge, Button, FormField, Input } from '../components/ui'
 import { BrandMark } from '../components/BrandMark'
-
-// ---------------------------------------------------------------------------
-// 类型(与后端 AuthResponse 对齐;脚手架 LoginResponse 已过时,此处本地收窄)
-// ---------------------------------------------------------------------------
-
-interface AuthUser {
-  id: number
-  username: string
-  display_name: string
-  role: string
-  status: string
-  force_password_change: boolean
-  credential_version: number
-  last_login_at: string | null
-}
-
-interface AuthResponse {
-  token: string
-  token_type: string
-  user: AuthUser
-  needs_takeover_confirm: boolean
-}
 
 type View = 'login' | 'register' | 'change_password' | 'takeover'
 
@@ -147,8 +133,7 @@ export default function LoginPage() {
 
   // 拉取公开设置(无需认证; 失败时注册/SSO 入口隐藏, 登录不受影响)
   useEffect(() => {
-    api.auth
-      .publicSettings()
+    getPublicSettings()
       .then(setPublicSettings)
       .catch(() => setSettingsError(t('ies.error.network')))
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -168,10 +153,10 @@ export default function LoginPage() {
     setLoginError(null)
     setLoginBusy(true)
     try {
-      const res = (await api.auth.login({
+      const res = await login({
         username: username.trim(),
         password,
-      })) as unknown as AuthResponse
+      })
       if (res.user.force_password_change) {
         // 首次登录(或密码被重置):强制改密;改密成功后当前会话随之失效
         setOldPassword(password)
@@ -184,7 +169,7 @@ export default function LoginPage() {
         // 身份取自登录响应设置的 Cookie/Bearer),
         // 避免无人值守/后台测试场景下停留在接管对话框造成 session 卡死循环。
         try {
-          await api.auth.confirmTakeover()
+          await confirmTakeover()
           navigate(redirectTarget, { replace: true })
         } catch (confirmErr) {
           setTakeoverError(errorText(confirmErr))
@@ -214,7 +199,7 @@ export default function LoginPage() {
     setRegError(null)
     setRegBusy(true)
     try {
-      await api.auth.register({
+      await register({
         username: regUsername.trim(),
         password: regPassword,
         display_name: regDisplayName.trim() || regUsername.trim(),
@@ -252,7 +237,7 @@ export default function LoginPage() {
     setChangeError(null)
     setChangeBusy(true)
     try {
-      await api.auth.changePassword({ old_password: oldPassword, new_password: newPassword })
+      await changePassword({ old_password: oldPassword, new_password: newPassword })
       // 凭证版本已轮换,当前及全部旧会话失效:回登录表单,用新密码重新登录
       setNotice(t('ies.auth.password_changed'))
       setPassword('')
@@ -272,7 +257,7 @@ export default function LoginPage() {
     setTakeoverBusy(true)
     try {
       // 后端以 Cookie/Bearer 会话确认接管(无请求体,不轮换凭证)
-      await api.auth.confirmTakeover()
+      await confirmTakeover()
       navigate(redirectTarget, { replace: true })
     } catch (err) {
       setTakeoverError(errorText(err))
@@ -283,7 +268,7 @@ export default function LoginPage() {
 
   const handleCancelTakeover = () => {
     // 放弃接管:撤销当前新会话并回登录表单(旧窗口保持待接管,下次登录时自动清理)
-    void api.auth.logout().catch(() => {
+    void logout().catch(() => {
       /* 会话失效由 client 的 401 处理器兜底清理 */
     })
     setView('login')

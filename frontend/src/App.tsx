@@ -36,7 +36,7 @@ import {
   useOutletContext,
 } from 'react-router-dom'
 
-import { api } from './api/client'
+import { getMe, logout } from './features/auth'
 import { hasSession, setUnauthorizedHandler } from './shared/http'
 import { BrandMark } from './components/BrandMark'
 import { useI18n } from './i18n'
@@ -125,8 +125,7 @@ function AppShell() {
   // 加载当前用户角色, 用于管理员导航/页面守卫(后端 403 为权威闸门)
   useEffect(() => {
     let cancelled = false
-    api.auth
-      .me()
+    getMe()
       .then((u) => {
         if (!cancelled) {
           setCurrentUser(u)
@@ -144,7 +143,7 @@ function AppShell() {
   const isAdmin = userLoaded ? currentUser?.role === 'admin' : null
 
   const handleLogout = () => {
-    void api.auth.logout().finally(() => {
+    void logout().finally(() => {
       navigate('/login', { replace: true })
     })
   }

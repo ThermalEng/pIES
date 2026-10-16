@@ -5,7 +5,7 @@
  * 游标, 不做聚合或缓存。
  */
 
-import { api } from '../../api/client'
+import { queryAudit as adminQueryAudit } from '../admin/api'
 import type { AuditEntry } from '../../types'
 import type { AppliedAuditQuery } from './model'
 
@@ -17,7 +17,7 @@ export async function queryAudit(
   query: AppliedAuditQuery,
   cursor: string | null,
 ): Promise<{ items: AuditEntry[]; next_cursor: string | null }> {
-  const page = await api.admin.audit({
+  const page = await adminQueryAudit({
     ...query,
     limit: AUDIT_PAGE_SIZE,
     ...(cursor === null ? {} : { cursor }),
