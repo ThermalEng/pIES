@@ -15,7 +15,7 @@
  *   GET    /api/admin/audit                         审计查询(管理员) → AuditListResponseDto
  */
 
-import type { UserOutDto } from '../auth/contracts'
+import type { UserOutDto } from '../auth'
 
 /** 管理员用户列表项 DTO(UserOut + project_count)。 */
 export interface AdminUserOutDto extends UserOutDto {
@@ -94,15 +94,15 @@ export interface StorageCapacityDto {
 export interface StorageObjectsDto {
   count: number
   total_bytes: number
-  by_status?: Record<string, number>
-  orphan_count?: number
-  pending_deletion_count?: number
+  by_status: Record<string, number>
+  orphan_count: number
+  pending_deletion_count: number
 }
 
 /** 存储引用摘要 DTO。 */
 export interface StorageRefsDto {
   count: number
-  referenced_objects?: number
+  referenced_objects: number
 }
 
 /** 存储视图响应 DTO(GET /api/admin/storage)。 */
@@ -113,30 +113,30 @@ export interface StorageStatusResponseDto {
   objects: StorageObjectsDto
   capacity: StorageCapacityDto
   refs: StorageRefsDto
-  pending_deletion_count?: number
+  pending_deletion_count: number
 }
 
 /** 运维健康响应 DTO(GET /api/admin/health)。 */
 export interface AdminHealthResponseDto {
-  status: 'ok' | 'degraded' | 'down'
+  status: 'ok' | 'degraded'
   service: string
   version: string
   time: string
-  liveness: { ok: boolean; process?: string }
+  liveness: { ok: boolean; process: string }
   readiness: { db: boolean }
-  metrics?: {
-    tasks_by_status?: Record<string, number>
-    projects_by_status?: Record<string, number>
-    users?: number
+  metrics: {
+    tasks_by_status: Record<string, number>
+    projects_by_status: Record<string, number>
+    users: number
   }
-  queue?: Record<string, unknown>
-  storage?: {
-    capacity?: Record<string, unknown>
-    corrupt_count?: number
-    orphan_count?: number
-    object_count?: number
-    ok?: boolean
-    verify?: Record<string, unknown>
+  queue: Record<string, unknown>
+  storage: {
+    capacity: Record<string, unknown>
+    corrupt_count: number
+    orphan_count: number
+    object_count: number
+    ok: boolean
+    verify: Record<string, unknown>
   }
 }
 

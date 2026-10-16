@@ -3,10 +3,10 @@
  *
  * 规范:
  * - 纯函数, 不访问网络或 React 状态;
- * - 不做多余猜测或空数据伪造; 后端权威数据直接映射。
+ * - 不做多余猜测或空数据伪造; 真实字段直接类型化映射。
  */
 
-import type { UserStatus } from '../../types'
+import type { UserStatus } from '../auth'
 import type {
   AdminHealthResponseDto,
   AdminUserOutDto,
@@ -30,20 +30,12 @@ export function mapAdminUserDtoToModel(dto: AdminUserOutDto): AdminUserRow {
     id: dto.id,
     username: dto.username,
     display_name: dto.display_name,
-    email: null,
     role: dto.role,
-    roles: dto.role ? [dto.role] : [],
     status: dto.status as UserStatus,
-    locale: 'zh-CN',
-    timezone: 'UTC',
-    fixed_utc_offset_minutes: 480,
+    force_password_change: dto.force_password_change,
     credential_version: dto.credential_version,
-    is_system: false,
-    created_at: '',
-    updated_at: null,
-    last_login_at: dto.last_login_at ?? null,
-    last_active_at: dto.last_login_at ?? null,
-    project_count: Number(dto.project_count ?? 0),
+    last_login_at: dto.last_login_at,
+    project_count: dto.project_count,
   }
 }
 
@@ -54,8 +46,8 @@ export function mapUserDeletePreviewDto(dto: UserDeletePreviewResponseDto): User
   return {
     user_id: dto.user_id,
     username: dto.username,
-    project_count: Number(dto.project_count ?? 0),
-    projects: (dto.projects ?? []).map((p) => ({
+    project_count: dto.project_count,
+    projects: dto.projects.map((p) => ({
       id: p.id,
       name: p.name,
       status: p.status,
@@ -70,12 +62,12 @@ export function mapUserDeletePreviewDto(dto: UserDeletePreviewResponseDto): User
  * total_bytes 与 used_bytes 均反映已存对象大小之和(objects.total_bytes)。
  */
 export function mapStorageStatusDto(dto: StorageStatusResponseDto): StorageStatus {
-  const total = Number(dto.objects?.total_bytes ?? 0)
+  const usageBytes = dto.objects.total_bytes
   return {
-    total_bytes: total,
-    used_bytes: total,
+    total_bytes: usageBytes,
+    used_bytes: usageBytes,
     quota_bytes: null,
-    object_count: Number(dto.objects?.count ?? 0),
+    object_count: dto.objects.count,
   }
 }
 
@@ -83,16 +75,13 @@ export function mapStorageStatusDto(dto: StorageStatusResponseDto): StorageStatu
  * 后端 AdminHealthResponse DTO → 前端 HealthStatus 模型。
  */
 export function mapAdminHealthDto(dto: AdminHealthResponseDto): HealthStatus {
-  const liveness = dto.liveness ?? { ok: false }
-  const readiness = dto.readiness ?? { db: false }
-  const storage = dto.storage ?? { ok: false }
   return {
-    status: dto.status ?? 'degraded',
-    version: dto.version ?? '',
+    status: dto.status,
+    version: dto.version,
     checks: {
-      liveness: { status: liveness.ok === true ? 'ok' : 'down' },
-      readiness: { status: readiness.db === true ? 'ok' : 'down' },
-      storage: { status: storage.ok === true ? 'ok' : 'degraded' },
+      liveness: { status: dto.liveness.ok ? 'ok' : 'down' },
+      readiness: { status: dto.readiness.db ? 'ok' : 'down' },
+      storage: { status: dto.storage.ok ? 'ok' : 'degraded' },
     },
   }
 }
@@ -103,16 +92,16 @@ export function mapAdminHealthDto(dto: AdminHealthResponseDto): HealthStatus {
 export function mapAuditEntryDto(dto: AuditEntryDto): AuditEntry {
   return {
     id: dto.id,
-    entity_type: dto.entity_type ?? null,
-    entity_id: dto.entity_id !== null && dto.entity_id !== undefined ? Number(dto.entity_id) : null,
+    entity_type: dto.entity_type,
+    entity_id: dto.entity_id,
     action: dto.action,
-    actor_id: dto.actor_id !== null && dto.actor_id !== undefined ? Number(dto.actor_id) : null,
-    actor_type: dto.actor_type ?? null,
+    actor_id: dto.actor_id,
+    actor_type: dto.actor_type,
     occurred_at: dto.occurred_at,
-    ip: dto.ip ?? null,
-    before: dto.before ?? null,
-    after: dto.after ?? null,
-    request_id: dto.request_id ?? null,
-    trace_id: dto.trace_id ?? null,
+    ip: dto.ip,
+    before: dto.before,
+    after: dto.after,
+    request_id: dto.request_id,
+    trace_id: dto.trace_id,
   }
 }

@@ -37,14 +37,11 @@ export async function login(input: LoginRequestDto): Promise<LoginResult> {
 }
 
 /**
- * 撤销当前窗口会话并清空本地会话标记。
+ * 撤销当前窗口会话并清空本地会话标记(仅在成功时清除会话)。
  */
 export async function logout(): Promise<void> {
-  try {
-    await request<LogoutResponseDto>('/auth/logout', { method: 'POST' })
-  } finally {
-    clearSession()
-  }
+  await request<LogoutResponseDto>('/auth/logout', { method: 'POST' })
+  clearSession()
 }
 
 /**

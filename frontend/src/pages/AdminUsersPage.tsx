@@ -111,10 +111,10 @@ export default function AdminUsersPage() {
     try {
       if (user.status === 'disabled') {
         await reactivateUser(user.id)
-        setUsersNotice(`已重新启用账号 ${user.username}`)
+        setUsersNotice(t('ies.admin.user_reactivated', { username: user.username }))
       } else {
         await deactivateUser(user.id)
-        setUsersNotice(`已停用账号 ${user.username}`)
+        setUsersNotice(t('ies.admin.user_deactivated', { username: user.username }))
       }
       loadUsers()
     } catch (err) {
@@ -215,26 +215,38 @@ export default function AdminUsersPage() {
                   </TD>
                   <TD>
                     <Badge
-                      label={u.status === 'disabled' ? '停用' : '正常'}
-                      variant={u.status === 'disabled' ? 'danger' : 'success'}
+                      label={
+                        u.status === 'active'
+                          ? t('ies.admin.status_active')
+                          : u.status === 'disabled'
+                            ? t('ies.admin.status_disabled')
+                            : t('ies.admin.status_locked')
+                      }
+                      variant={
+                        u.status === 'active'
+                          ? 'success'
+                          : u.status === 'disabled'
+                            ? 'danger'
+                            : 'warning'
+                      }
                     />
                   </TD>
                   <TD>{u.project_count}</TD>
-                  <TD>{(u.roles ?? []).join(', ')}</TD>
+                  <TD>{u.role}</TD>
                   <TD>
                     <div className="ies-flex" style={{ gap: 'var(--ies-space-1)' }}>
                       <Button
                         variant="secondary"
                         size="sm"
-                        disabled={usersBusy || u.username === 'admin'}
+                        disabled={usersBusy}
                         onClick={() => void handleToggleUserStatus(u)}
                       >
-                        {u.status === 'disabled' ? '启用' : '停用'}
+                        {u.status === 'disabled' ? t('ies.admin.enable_user') : t('ies.admin.disable_user')}
                       </Button>
                       <Button
                         variant="secondary"
                         size="sm"
-                        disabled={usersBusy || u.username === 'admin'}
+                        disabled={usersBusy}
                         onClick={() => {
                           setResetTarget(u)
                           setResetPassword('')
@@ -247,7 +259,7 @@ export default function AdminUsersPage() {
                       <Button
                         variant="danger"
                         size="sm"
-                        disabled={usersBusy || u.username === 'admin'}
+                        disabled={usersBusy}
                         onClick={() => void handlePreviewDeleteUser(u)}
                       >
                         {t('ies.admin.delete_user')}

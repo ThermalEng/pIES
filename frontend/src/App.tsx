@@ -143,7 +143,7 @@ function AppShell() {
   const isAdmin = userLoaded ? currentUser?.role === 'admin' : null
 
   const handleLogout = () => {
-    void logout().finally(() => {
+    void logout().then(() => {
       navigate('/login', { replace: true })
     })
   }

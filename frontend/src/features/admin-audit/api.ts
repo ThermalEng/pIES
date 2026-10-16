@@ -5,7 +5,7 @@
  * 游标, 不做聚合或缓存。
  */
 
-import { queryAudit as adminQueryAudit } from '../admin/api'
+import { queryAudit as adminQueryAudit } from '../admin'
 import type { AuditEntry } from '../../types'
 import type { AppliedAuditQuery } from './model'
 

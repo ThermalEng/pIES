@@ -121,7 +121,7 @@ export async function deleteUser(
  */
 export async function getSecuritySettings(): Promise<{ registration_enabled: boolean }> {
   const res = await request<SecuritySettingsResponseDto>('/auth/settings')
-  return { registration_enabled: Boolean(res.registration_enabled) }
+  return { registration_enabled: res.registration_enabled }
 }
 
 /**
@@ -135,7 +135,7 @@ export async function setRegistrationEnabled(
     method: 'PUT',
     body,
   })
-  return { registration_enabled: Boolean(res.registration_enabled) }
+  return { registration_enabled: res.registration_enabled }
 }
 
 /**
@@ -171,8 +171,8 @@ export async function queryAudit(params?: AuditListParams): Promise<PageResult<A
 
   const res = await request<AuditListResponseDto>('/admin/audit', { query })
   return {
-    items: (res.items ?? []).map(mapAuditEntryDto),
-    next_cursor: res.next_cursor === null || res.next_cursor === undefined ? null : String(res.next_cursor),
-    limit: params?.limit ?? (res.items ?? []).length,
+    items: res.items.map(mapAuditEntryDto),
+    next_cursor: res.next_cursor !== null && res.next_cursor !== undefined ? String(res.next_cursor) : null,
+    limit: params?.limit ?? res.items.length,
   }
 }
