@@ -11,9 +11,6 @@ import type {
   ApiErrorBody,
   AuditEntry,
   AuditListParams,
-  CalcConfig,
-  CalcConfigInput,
-  CalculationConfigBody,
   Connection,
   ConnectionInput,
   Currency,
@@ -45,17 +42,6 @@ import type {
   VersionRestoreResult,
   PublicAuthSettings,
   RegisterRequest,
-  Severity,
-  Task,
-  TaskAttempt,
-  TaskBatch,
-  TaskCreateInput,
-  TaskDetail,
-  TaskDraftLoadResult,
-  TaskInputs,
-  TaskLease,
-  TaskListParams,
-  TaskOutcome,
   TaskStatus,
   TaskType,
   User,
@@ -329,129 +315,7 @@ function auditEntryFromServer(v: unknown): AuditEntry {
   }
 }
 
-/** 后端任务摘要(task_summary) → 前端 Task。 */
-function taskFromSummary(s: Record<string, unknown>, projectId: number): Task {
-  return {
-    id: Number(s.id),
-    project_id: Number(s.project_id ?? projectId),
-    type: s.type as TaskType,
-    status: s.status as TaskStatus,
-    business_outcome: (s.business_outcome as TaskOutcome) ?? null,
-    idempotency_key: String(s.idempotency_key ?? ''),
-    calc_snapshot_id: s.calc_snapshot_id === null || s.calc_snapshot_id === undefined ? null : Number(s.calc_snapshot_id),
-    requested_by: Number(s.requested_by ?? 0),
-    requested_at: String(s.requested_at ?? ''),
-    priority: Number(s.priority ?? 0),
-    deadline: s.deadline === null || s.deadline === undefined ? null : String(s.deadline),
-    superseded_by_task_id:
-      s.superseded_by_task_id === null || s.superseded_by_task_id === undefined ? null : Number(s.superseded_by_task_id),
-    attempt_count: Number(s.attempt_count ?? 0),
-    max_attempts: Number(s.max_attempts ?? 1),
-    created_at: String(s.created_at ?? ''),
-    updated_at: s.updated_at === null || s.updated_at === undefined ? null : String(s.updated_at),
-    result_available: s.result_available === true,
-    completed_at:
-      typeof s.completed_at === 'string' && s.completed_at !== '' ? (s.completed_at as string) : null,
-    latest_package_id:
-      typeof s.latest_package_id === 'number' && Number.isFinite(s.latest_package_id)
-        ? (s.latest_package_id as number)
-        : null,
-    latest_evidence_status:
-      typeof s.latest_evidence_status === 'string' ? (s.latest_evidence_status as string) : null,
-    summary: (s.summary as Task['summary']) ?? undefined,
-  }
-}
-
-/** 后端任务诊断(level/code/message/context) → 前端 Diagnostic(文案键 ies.diag.raw)。 */
-function taskDiagFromServer(d: Record<string, unknown>): Diagnostic {
-  const level = String(d.level ?? 'error')
-  const severity: Severity =
-    level === 'blocking' ? 'blocking' : level === 'warning' ? 'warning' : level === 'info' ? 'info' : 'error'
-  return {
-    code: String(d.code ?? 'TASK-DIAG'),
-    message_key: 'ies.diag.raw',
-    params: { message: String(d.message ?? '') },
-    severity,
-    blocking: level === 'blocking' || level === 'error',
-    location: null,
-    fix_hint_key: null,
-    ref_ids: [],
-    occurred_at:
-      d.created_at === null || d.created_at === undefined ? new Date().toISOString() : String(d.created_at),
-    source: 'task',
-    trace_id: d.trace_id === null || d.trace_id === undefined ? null : String(d.trace_id),
-    project_id: null,
-    task_id: null,
-    suppressed: false,
-  }
-}
-
-/** 后端任务详情 dict → 前端 TaskDetail。 */
-function taskDetailFromServer(d: Record<string, unknown>, projectId: number): TaskDetail {
-  const base = taskFromSummary(d, projectId)
-  const progress = asRecord(d.progress)
-  const attempts: TaskAttempt[] = Array.isArray(d.attempts)
-    ? (d.attempts as Record<string, unknown>[]).map((a) => ({
-        attempt_no: Number(a.attempt_no ?? 0),
-        worker_id: a.worker_id === null || a.worker_id === undefined ? null : String(a.worker_id),
-        status: (a.status as TaskAttempt['status']) ?? 'pending',
-        stop_reason: a.stop_reason === null || a.stop_reason === undefined ? null : String(a.stop_reason),
-        started_at: a.started_at === null || a.started_at === undefined ? null : String(a.started_at),
-        finished_at: a.finished_at === null || a.finished_at === undefined ? null : String(a.finished_at),
-      }))
-    : []
-  const batch = d.batch as TaskBatch | null | undefined
-  return {
-    ...base,
-    attempts,
-    current_lease: d.current_lease === null || d.current_lease === undefined ? null : (d.current_lease as TaskLease),
-    progress:
-      d.progress === null || d.progress === undefined
-        ? null
-        : {
-            task_id: base.id,
-            status: base.status,
-            attempt_no: Number(progress.attempt_no ?? 0),
-            percent: typeof progress.percent === 'number' ? (progress.percent as number) : null,
-            stage: progress.stage === null || progress.stage === undefined ? null : String(progress.stage),
-            detail: asRecord(progress.detail),
-            updated_at:
-              progress.updated_at === null || progress.updated_at === undefined
-                ? ''
-                : String(progress.updated_at),
-            source: progress.source === 'redis' ? 'redis' : 'pg',
-            retry: Boolean(progress.retry ?? false),
-          },
-    batch: batch ?? null,
-    outcome_note: d.outcome_note === null || d.outcome_note === undefined ? null : String(d.outcome_note),
-    diagnostics: Array.isArray(d.diagnostics)
-      ? (d.diagnostics as Record<string, unknown>[]).map(taskDiagFromServer)
-      : [],
-    evidence: Array.isArray(d.evidence) ? (d.evidence as TaskDetail['evidence']) : [],
-    calc_snapshot: d.calc_snapshot === null || d.calc_snapshot === undefined ? null : (d.calc_snapshot as TaskDetail['calc_snapshot']),
-  }
-}
-
-/**
- * 后端配置信封 {calculation_config, revision} → 前端 CalcConfig。
- *
- * 可信响应直接类型映射: 后端在用户输入入口已唯一校验全文, 此处不补齐
- * 缺项(不伪造 ''/[]/null/0, 尤其 time_limit_seconds/options), 也不重复
- * 作第二次业务校验; 仅保留 revision 信封判断。缺项原样透出, 由编辑页
- * 显式呈现为空态。
- */
-function configFromServer(body: unknown, projectId: number): CalcConfig {
-  const env = asRecord(body)
-  if (typeof env.revision !== 'number' || !env.calculation_config || typeof env.calculation_config !== 'object') {
-    throw new Error('invalid calculation config envelope')
-  }
-  return {
-    project_id: projectId,
-    calculation_config: env.calculation_config as CalculationConfigBody,
-    revision: env.revision as number,
-  }
-}
-
+/** 任务/配置映射归 features/tasks、features/config 所有, 本文件只作传输层委托。 */
 /** 数据集版本/质量纯映射归 features/datasets/mappers 所有, 本文件只作传输层调用。 */
 
 /** 草稿内容设备条目 → 前端 Device(2.0 名键, 无 id/状态/时间字段)。 */
@@ -740,11 +604,6 @@ export interface DatasetsApi {
   unbind(projectId: number, datasetVersionId: number): Promise<{ revision: number }>
 }
 
-export interface ConfigApi {
-  get(projectId: number): Promise<CalcConfig>
-  save(projectId: number, input: CalcConfigInput): Promise<CalcConfig>
-}
-
 /** 部署公开初值(统一部署配置中允许公开的非秘密默认值)。 */
 export interface DeploymentDefaults {
   calculation_defaults: { time_limit_seconds: number }
@@ -752,40 +611,6 @@ export interface DeploymentDefaults {
 
 export interface DeploymentApi {
   defaults(): Promise<DeploymentDefaults>
-}
-
-export interface ValidationApi {
-  run(projectId: number): Promise<ValidationResult>
-  baselineConfirm(
-    projectId: number,
-    assumptions: Record<string, unknown>,
-  ): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }>
-}
-
-export interface TasksApi {
-  list(params?: TaskListParams): Promise<PageResult<Task>>
-  create(input: TaskCreateInput): Promise<Task>
-  get(projectId: number, taskId: number): Promise<TaskDetail>
-  /** 任务冻结输入上下文(只读; 无快照时 snapshot=null)。 */
-  inputs(projectId: number, taskId: number): Promise<TaskInputs>
-  /**
-   * 选择任务载入工作草稿(新草稿 revision + 配置追加; 不建任务/版本;
-   * 无快照任务 400)。返回新草稿 revision 与追加的配置 revision(缺席为 null)。
-   */
-  loadDraft(projectId: number, taskId: number): Promise<TaskDraftLoadResult>
-  /**
-   * 暂存任务提交工作输入(task.set_working_inputs 单命令)。
-   * 只做存放, 不做领域校验(提交边界仍为权威)。返回新草稿 revision。
-   * expectedRevision 缺省时先读当前修订(常规防抖保存); 卸载兜底刷新传入
-   * 调度时修订(冲突即 409 放弃, 不覆盖切换后的新选择)。
-   */
-  saveWorkingInputs(
-    projectId: number,
-    working: Record<string, unknown>,
-    expectedRevision?: number,
-  ): Promise<{ revision: number }>
-  cancel(projectId: number, taskId: number): Promise<Task>
-  retry(projectId: number, taskId: number): Promise<Task>
 }
 
 export interface ExportsApi {
@@ -1118,20 +943,7 @@ export const api = {
     },
   } satisfies DatasetsApi,
 
-  config: {
-    get(projectId: number): Promise<CalcConfig> {
-      // 后端返回 {calculation_config, revision}: 映射为前端配置对象
-      return request<unknown>(`/projects/${projectId}/config`).then((body) => configFromServer(body, projectId))
-    },
-    save(projectId: number, input: CalcConfigInput): Promise<CalcConfig> {
-      // 后端 PUT 需要 {calculation_config, expected_revision}(自有链乐观锁):
-      // expected_revision 由调用方传入已加载 revision, 首次保存为 null。
-      return request<unknown>(`/projects/${projectId}/config`, {
-        method: 'PUT',
-        body: { calculation_config: input.calculation_config, expected_revision: input.expected_revision },
-      }).then((body) => configFromServer(body, projectId))
-    },
-  } satisfies ConfigApi,
+  // 计算配置请求归 features/config 所有(页面直接消费公开入口), 本聚合器不再保留委托。
 
   deployment: {
     defaults(): Promise<DeploymentDefaults> {
@@ -1148,104 +960,14 @@ export const api = {
     },
   } satisfies DeploymentApi,
 
-  validation: {
-    run(projectId: number): Promise<ValidationResult> {
-      return request<unknown>(`/projects/${projectId}/validation/run`, { method: 'POST' }).then((body) => {
-        // 后端返回 {report, stored}: 报告含 status/blocks_submit/diagnostics
-        const report = asRecord(asRecord(body).report)
-        return {
-          valid: report.blocks_submit !== true,
-          diagnostics: asList<Diagnostic>(report, 'diagnostics'),
-        }
-      })
-    },
-    baselineConfirm(
-      projectId: number,
-      assumptions: Record<string, unknown>,
-    ): Promise<{ confirmed: boolean; diagnostics: Diagnostic[] }> {
-      // 假设内容必须由调用方显式提供(用户确认的评价输入); 本层不编默认值、
-      // 不从计算配置派生(0.12-A1 起计算配置不再承载经济参数)。
-      return request<unknown>(`/projects/${projectId}/validation/baseline-confirm`, {
-        method: 'POST',
-        body: { assumptions },
-      }).then((body) => ({ confirmed: asRecord(body).confirmed === true, diagnostics: [] }))
-    },
-  } satisfies ValidationApi,
+  // 校验请求归 features/validation 所有(页面直接消费公开入口), 本聚合器不再保留委托。
 
   tasks: {
-    list(params?: TaskListParams): Promise<PageResult<Task>> {
-      const projectId = params?.project_id
-      if (projectId === undefined || projectId === null) {
-        throw new ApiError(400, null, 'ies.error.unknown')
-      }
-      const query = { ...params } as Record<string, unknown>
-      delete query.project_id
-      return request<unknown>(`/projects/${projectId}/tasks`, { query }).then((body) => {
-        const page = asItems<Record<string, unknown>>(body, 'tasks')
-        return {
-          items: page.items.map((t) => taskFromSummary(t, projectId)),
-          next_cursor: page.next_cursor,
-          limit: page.limit,
-        }
-      })
-    },
-    create(input: TaskCreateInput): Promise<Task> {
-      // 数据集版本清单唯一权威是草稿 dataset_bindings(数据页绑定; 提交装配
-      // 只读该绑定)。对话框不再发送 dataset_ids(旧 config.dataset_ids 后端
-      // 从未消费, 为误导性输入, 删除)。
-      const config: Record<string, unknown> = {}
-      if (input.config_revision !== undefined) config.config_revision = input.config_revision
-      if (input.priority !== undefined) config.priority = input.priority
-      if (input.deadline !== undefined) config.deadline = input.deadline
-      if (input.params !== undefined) config.params = input.params
-      return request<unknown>(`/projects/${input.project_id}/tasks`, {
-        method: 'POST',
-        body: {
-          task_type: input.type,
-          config: Object.keys(config).length > 0 ? config : null,
-          // 评价确认是顶层类型化任务输入, 不混入 config(与后端 TaskCreateRequest 同形)。
-          ...(input.evaluation !== undefined ? { evaluation: input.evaluation } : {}),
-          idempotency_key: input.idempotency_key ?? null,
-          parent_task_id: null,
-        },
-      }).then((res) => taskFromSummary(asRecord(oneOf<Record<string, unknown>>(res, 'task')), input.project_id))
-    },
-    get(projectId: number, taskId: number): Promise<TaskDetail> {
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}`).then(async (body) => {
-        const detail = taskDetailFromServer(asRecord(oneOf<Record<string, unknown>>(body, 'task')), projectId)
-        // RR-P1-05: 结果可用性是任务元数据(result_available), 只有明确可用时
-        // 才读取证据包; 未完成/无结果不是页面级失败, 不靠探测 /result 的 404 猜测。
-        // 可用性明确为 true 时 /result 读取失败必须 reject, 不吞错置空 evidence
-        // 伪装详情正常无结果(调用方负责失败可见)。
-        if (detail.result_available) {
-          // 可用性权威说明存在证据: 补充元数据必需字段直接消费,
-          // 不做 ??0/默认 complete/pkgId>0 过滤掩盖, 不新增字段校验器。
-          const result = await request<unknown>(`/projects/${projectId}/tasks/${taskId}/result`)
-          const r = asRecord(oneOf<Record<string, unknown>>(result, 'result'))
-          const evidence = asRecord(r.evidence)
-          const pkgId = Number(evidence.id)
-          detail.evidence = [
-            {
-              package_id: pkgId,
-              object_id: Number(evidence.object_id),
-              status: evidence.status as TaskDetail['evidence'][number]['status'],
-            },
-          ]
-        }
-        return detail
-      })
-    },
-    cancel(projectId: number, taskId: number): Promise<Task> {
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/cancel`, {
-        method: 'POST',
-        body: { reason: 'user_cancel' },
-      }).then((res) => taskFromSummary(asRecord(oneOf<Record<string, unknown>>(res, 'task')), projectId))
-    },
-    retry(projectId: number, taskId: number): Promise<Task> {
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/retry`, { method: 'POST', body: {} }).then(
-        (res) => taskFromSummary(asRecord(oneOf<Record<string, unknown>>(res, 'task')), projectId),
-      )
-    },
+    // 任务请求归 features/tasks 公开入口所有(工作台共享上下文已直调):
+    // list/get/loadDraft/create/cancel/retry/inputs 均已迁出, 本聚合器
+    // 仅保留跨家族共享的草稿命令通道 saveWorkingInputs(复用
+    // sendDraftCommand/makeCommand, 不向 feature 重复一份命令组装),
+    // 行为不变。跨家族草稿命令传输可待 Codex 共享边界集成。
     async saveWorkingInputs(
       projectId: number,
       working: Record<string, unknown>,
@@ -1263,70 +985,7 @@ export const api = {
       )
       return { revision: Number(body.revision ?? expectedRevision) }
     },
-    loadDraft(projectId: number, taskId: number): Promise<TaskDraftLoadResult> {
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/load-draft`, {
-        method: 'POST',
-      }).then((body) => {
-        const v = asRecord(body)
-        const draft = asRecord(v.draft)
-        const configRevision = v.config_revision
-        return {
-          draftRevision: Number(draft.revision),
-          configRevision:
-            configRevision === null || configRevision === undefined
-              ? null
-              : Number(configRevision),
-        }
-      })
-    },
-    inputs(projectId: number, taskId: number): Promise<TaskInputs> {
-      return request<unknown>(`/projects/${projectId}/tasks/${taskId}/inputs`).then((body) => {
-        const v = asRecord(oneOf<Record<string, unknown>>(body, 'inputs'))
-        const task = asRecord(v.task)
-        const snap = v.snapshot === null || v.snapshot === undefined ? null : asRecord(v.snapshot)
-        const refs = asRecord(v.frozen_refs)
-        return {
-          task: {
-            id: Number(task.id),
-            type: task.type as TaskInputs['task']['type'],
-            status: task.status as TaskInputs['task']['status'],
-            calc_snapshot_id:
-              task.calc_snapshot_id === null || task.calc_snapshot_id === undefined
-                ? null
-                : Number(task.calc_snapshot_id),
-          },
-          snapshot:
-            snap === null
-              ? null
-              : {
-                  id: Number(snap.id),
-                  project_version_id: Number(snap.project_version_id),
-                  dataset_version_ids: (snap.dataset_version_ids as unknown[]).map(Number),
-                  calc_config_snapshot: asRecord(snap.calc_config_snapshot),
-                  device_models: asRecord(snap.device_models),
-                  evaluation: asRecord(snap.evaluation),
-                  schema_version: String(snap.schema_version),
-                  random_seed:
-                    snap.random_seed === null || snap.random_seed === undefined ? null : Number(snap.random_seed),
-                },
-          frozen_refs: {
-            planning_revision:
-              refs.planning_revision === null || refs.planning_revision === undefined
-                ? null
-                : Number(refs.planning_revision),
-            finance_profile_id:
-              refs.finance_profile_id === null || refs.finance_profile_id === undefined
-                ? null
-                : String(refs.finance_profile_id),
-            finance_revision:
-              refs.finance_revision === null || refs.finance_revision === undefined
-                ? null
-                : Number(refs.finance_revision),
-          },
-        }
-      })
-    },
-  } satisfies TasksApi,
+  },
 
   results: {
     result: getResult,

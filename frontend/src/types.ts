@@ -574,7 +574,8 @@ export type TaskOutcome =
   | 'insufficient_evidence'
 
 export interface TaskSummary {
-  attempt_no: number
+  /** 尚无尝试行时为 null(后端原样发布; 界面仅消费 percent)。 */
+  attempt_no: number | null
   percent: number | null
   stage: string | null
   queue_position: number | null
@@ -586,7 +587,8 @@ export interface Task {
   type: TaskType
   status: TaskStatus
   business_outcome: TaskOutcome | null
-  idempotency_key: string
+  /** 幂等键列可空(历史行真实存在 null); 比较时按缺席处理, 不伪造空串存入。 */
+  idempotency_key: string | null
   calc_snapshot_id: EntityId | null
   requested_by: EntityId
   requested_at: ISO8601
@@ -663,7 +665,8 @@ export interface TaskAttempt {
 }
 
 export interface TaskLease {
-  attempt_no: number
+  /** 租约无对应尝试行时为 null(后端原样发布, 当前无界面消费者)。 */
+  attempt_no: number | null
   acquired_by: string
   renewed_at: ISO8601
   expires_at: ISO8601
@@ -672,11 +675,13 @@ export interface TaskLease {
 export interface TaskProgress {
   task_id: EntityId
   status: TaskStatus
-  attempt_no: number
+  /** 尚无尝试行时为 null(后端原样发布; 界面不消费此值)。 */
+  attempt_no: number | null
   percent: number | null
   stage: string | null
   detail: Record<string, unknown>
-  updated_at: ISO8601
+  /** 进度行缺席时为 null(后端原样发布; 界面不消费此值)。 */
+  updated_at: ISO8601 | null
   /** 数据来源(redis/pg),便于前端感知降级。 */
   source: 'redis' | 'pg'
   /** 租约过期重试中。 */

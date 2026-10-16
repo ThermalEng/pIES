@@ -16,6 +16,30 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
+import {
+  DEFAULT_FORM,
+  SUBMITTABLE_TYPES,
+  buildInput,
+  cancelTask,
+  createTask,
+  describeFrozenConfig,
+  describeFrozenEvaluation,
+  describeFrozenFinance,
+  formFromWorking,
+  getTaskDetail,
+  getTaskInputs,
+  hasSavedConfig,
+  listTasks,
+  logicalSigOf,
+  newSubmitNonce,
+  parseEvaluation,
+  retryTask,
+  serializeParams,
+  workingOfForm,
+} from '../features/tasks'
+import { getCalcConfig } from '../features/config'
+import { runValidation } from '../features/validation'
+import type { CreateForm, DistType } from '../features/tasks'
 import { translate, translateDiagnostic, translateError, useI18n } from '../i18n'
 import {
   Alert,
@@ -46,11 +70,8 @@ import type {
   CalcConfig,
   Dataset,
   Diagnostic,
-  EvaluationConstructionPayment,
-  EvaluationMaintenanceExpense,
   ProjectVersion,
   Task,
-  TaskCreateInput,
   TaskDetail,
   TaskInputs,
   TaskStatus,
@@ -61,285 +82,11 @@ import { useAutosave, useWorkbench } from './workbench'
 
 const POLL_MS = 5000
 
-/** 可提交的任务类型(方案评价 / 规划优化 / 不确定性分析 / 批量扫描)。 */
-const SUBMITTABLE_TYPES: TaskType[] = ['calc', 'optimization', 'uncertainty', 'analysis']
-
 /** 进行中的状态(不视为终结)。 */
 const ACTIVE_STATUSES: TaskStatus[] = ['queued', 'running', 'cancelling']
 
-type UncertaintyMode = 'fixed_reliability' | 'replan_sensitivity'
-type DistType = 'normal' | 'triangular' | 'uniform'
-
-/** 批量分析扫描规格行(param_path → 扫描值列表; 后端 03 §8.2 task_params.sweeps)。 */
-interface SweepRow {
-  /** 参数路径(如 calc_config.params.discount_rate)。 */
-  path: string
-  /** 逗号分隔的扫描值(如 0.06,0.08,0.10)。 */
-  values: string
-  /** 可选单位(如 -、%、CNY/kWh)。 */
-  unit: string
-}
-
-/**
- * 提交对话框工作表单(草稿 task_working_inputs 的可编辑镜像; 数据集版本
- * 清单唯一权威是草稿 dataset_bindings, 不在此选择——旧 datasetIds 勾选
- * 后端从未消费, 已删除)。
- */
-interface CreateForm {
-  type: TaskType
-  constructionPeriod: string
-  operationYears: string
-  discountRate: string
-  constructionPayments: string
-  maintenanceExpenses: string
-  uMode: UncertaintyMode
-  nSamples: number
-  seed: string
-  distType: DistType
-  noisePct: number
-  sweeps: SweepRow[]
-}
-
-const DEFAULT_FORM: CreateForm = {
-  type: 'calc',
-  constructionPeriod: '',
-  operationYears: '',
-  discountRate: '',
-  constructionPayments: '',
-  maintenanceExpenses: '',
-  uMode: 'fixed_reliability',
-  nSamples: 200,
-  seed: '',
-  distType: 'normal',
-  noisePct: 5,
-  sweeps: [{ path: '', values: '', unit: '' }],
-}
-
-/**
- * 表单 → 草稿工作输入(键为 snake_case 业务名, 值是用户所填原文; 不含数据集选择)。
- *
- * 后端只做容器级存放、不解析: 未完成的编辑态(空串/非法 JSON)如实存放,
- * 提交时由边界严格解析, 不在此预判。task_params 与冻结快照同形
- * ({params: 内层}, 见提交装配): 不确定性/批量分析写内层, 其他类型省略
- * (与冻结缺席一致); seed 存原文(提交时再转数值), sweeps 行存原文
- * (读取时文本直用、数组 join)。
- */
-function workingOfForm(f: CreateForm): Record<string, unknown> {
-  const working: Record<string, unknown> = {
-    task_type: f.type,
-    construction_period: f.constructionPeriod,
-    operation_years: f.operationYears,
-    discount_rate: f.discountRate,
-    construction_payments: f.constructionPayments,
-    maintenance_expenses: f.maintenanceExpenses,
-  }
-  if (f.type === 'uncertainty') {
-    const inner: Record<string, unknown> = {
-      mode: f.uMode,
-      n_samples: f.nSamples,
-      distribution: { type: f.distType, noise_pct: f.noisePct },
-    }
-    if (f.seed.trim() !== '') inner.seed = f.seed.trim()
-    working.task_params = { params: inner }
-  } else if (f.type === 'analysis') {
-    working.task_params = {
-      params: {
-        sweeps: f.sweeps.map((s) => ({ param_path: s.path, values: s.values, unit: s.unit })),
-      },
-    }
-  }
-  return working
-}
-
-/**
- * 草稿工作输入 → 表单(整体替换; 未知/缺席取显式空态, 不混入他任务字段)。
- *
- * 后端存的是业务值原样(数字/清单/定点字符串)或用户编辑原文, 显示形态由
- * 此处统一负责: 文本直用, 有限数转文本, 清单转 JSON 文本(付款 ratio 定点
- * 字符串转 JSON number, 与提交边界口径一致); 其余形态记空文本, 由提交
- * 边界明确拒绝, 不猜测。
- */
-function formFromWorking(working: Record<string, unknown>): CreateForm {
-  const text = (v: unknown): string => {
-    if (typeof v === 'string') return v
-    if (typeof v === 'number' && Number.isFinite(v)) return String(v)
-    if (Array.isArray(v)) return JSON.stringify(v)
-    return ''
-  }
-  const paymentsText = (v: unknown): string => {
-    if (typeof v === 'string') return v
-    if (!Array.isArray(v)) return ''
-    const rows = v.map((row) => {
-      if (typeof row !== 'object' || row === null) return row
-      const r = { ...(row as Record<string, unknown>) }
-      const ratio = (row as Record<string, unknown>).ratio
-      if (typeof ratio === 'string' && ratio.trim() !== '') {
-        const n = Number(ratio)
-        if (Number.isFinite(n)) r.ratio = n
-      }
-      return r
-    })
-    return JSON.stringify(rows)
-  }
-  const next: CreateForm = {
-    ...DEFAULT_FORM,
-    sweeps: DEFAULT_FORM.sweeps.map((s) => ({ ...s })),
-  }
-  if ((SUBMITTABLE_TYPES as string[]).includes(working.task_type as string)) {
-    next.type = working.task_type as TaskType
-  }
-  next.constructionPeriod = text(working.construction_period)
-  next.operationYears = text(working.operation_years)
-  next.discountRate = text(working.discount_rate)
-  next.constructionPayments = paymentsText(working.construction_payments)
-  next.maintenanceExpenses = text(working.maintenance_expenses)
-  const tp = working.task_params
-  if (typeof tp === 'object' && tp !== null) {
-    applyWorkingTaskParams(next, next.type, tp as Record<string, unknown>)
-  }
-  return next
-}
-
-/**
- * 工作输入任务级参数 → 表单类型相关字段(未知/非法取默认, 不猜测)。
- *
- * 读冻结同形({params: 内层}; 内层键与提交装配一致)。seed 接受文本(自存)
- * 与数值(冻结), 提交时统一转数值; sweeps 值接受文本(自存)与数组(冻结)。
- */
-function applyWorkingTaskParams(next: CreateForm, type: TaskType, tp: Record<string, unknown>): void {
-  const rawInner = tp.params
-  const inner =
-    typeof rawInner === 'object' && rawInner !== null ? (rawInner as Record<string, unknown>) : null
-  if (inner === null) return
-  if (type === 'uncertainty') {
-    if (inner.mode === 'fixed_reliability' || inner.mode === 'replan_sensitivity') next.uMode = inner.mode
-    if (typeof inner.n_samples === 'number' && Number.isInteger(inner.n_samples) && inner.n_samples > 0) {
-      next.nSamples = inner.n_samples
-    }
-    if (typeof inner.seed === 'string') next.seed = inner.seed
-    else if (typeof inner.seed === 'number' && Number.isFinite(inner.seed)) next.seed = String(inner.seed)
-    const dist = inner.distribution
-    if (typeof dist === 'object' && dist !== null) {
-      const dd = dist as Record<string, unknown>
-      if (dd.type === 'normal' || dd.type === 'triangular' || dd.type === 'uniform') next.distType = dd.type
-      if (typeof dd.noise_pct === 'number' && Number.isFinite(dd.noise_pct)) next.noisePct = dd.noise_pct
-    }
-  }
-  if (type === 'analysis' && Array.isArray(inner.sweeps)) {
-    const rows: SweepRow[] = []
-    for (const s of inner.sweeps) {
-      if (typeof s !== 'object' || s === null) continue
-      const r = s as Record<string, unknown>
-      if (typeof r.param_path !== 'string') continue
-      const values =
-        typeof r.values === 'string'
-          ? r.values
-          : Array.isArray(r.values)
-            ? (r.values as unknown[]).map((x) => String(x)).join(',')
-            : null
-      if (values === null) continue
-      rows.push({
-        path: r.param_path,
-        values,
-        unit: typeof r.unit === 'string' ? r.unit : '',
-      })
-    }
-    if (rows.length > 0) next.sweeps = rows
-  }
-}
-
-/**
- * 已保存配置存在性(A1 仅判存在: revision 只是配置版本链序号, 不是可提交
- * 的配置 id, 不得映射、不随任务发送; 任务引用绑定为 0.12-A2 范围)。
- */
-function hasSavedConfig(cfg: CalcConfig | null): boolean {
-  return cfg !== null && typeof cfg.revision === 'number' && cfg.revision > 0
-}
-
-/** 确定性哈希(FNV 变体),用于生成客户端幂等键。 */
-function stableHash(input: string): string {
-  let h1 = 0x811c9dc5
-  let h2 = 0x01000193
-  for (let i = 0; i < input.length; i++) {
-    const c = input.charCodeAt(i)
-    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0
-    h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0
-  }
-  return (h1 ^ h2).toString(36)
-}
-
-/** 序列化任务附加参数(键排序,保证相同输入产生相同签名)。 */
-function serializeParams(params: Record<string, unknown> | undefined): string {
-  if (!params) return ''
-  const sorted: Record<string, unknown> = {}
-  for (const key of Object.keys(params).sort()) {
-    sorted[key] = params[key]
-  }
-  return JSON.stringify(sorted)
-}
-
-/** 新逻辑提交的一次性随机段(幂等键允许字符集内; 时间 + 随机, 碰撞可忽略)。 */
-function newSubmitNonce(): string {
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
-}
-
-/** 冻结数值 → 表单文本(有限 number 或数值字符串才映射, 其余返回 null 表缺席)。 */
-function frozenNumText(v: unknown): string | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return String(v)
-  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return v.trim()
-  return null
-}
-
-/** 冻结字符串(非空字符串才采用, 其余返回 null 表缺席)。 */
-function frozenStr(v: unknown): string | null {
-  return typeof v === 'string' && v !== '' ? v : null
-}
-
-/** 冻结评价确认块 → 单行摘要(缺席项以 — 占位, 不猜测)。 */
-function describeFrozenEvaluation(evaluation: Record<string, unknown>): string {
-  const parts: string[] = []
-  const years = frozenNumText(evaluation.evaluation_years)
-  const period = frozenNumText(evaluation.construction_period)
-  const operation = frozenNumText(evaluation.operation_years)
-  const rate = frozenNumText(evaluation.discount_rate)
-  if (years !== null) parts.push(`E${years}`)
-  if (period !== null) parts.push(`K${period}`)
-  if (operation !== null) parts.push(`N${operation}`)
-  if (rate !== null) parts.push(`r${rate}`)
-  if (Array.isArray(evaluation.construction_payments)) {
-    parts.push(`付款${evaluation.construction_payments.length}笔`)
-  }
-  if (Array.isArray(evaluation.maintenance_expenses)) {
-    parts.push(`维护${evaluation.maintenance_expenses.length}笔`)
-  }
-  const by = evaluation.confirmed_by
-  if (typeof by === 'number' && Number.isFinite(by)) parts.push(`确认人#${by}`)
-  const at = frozenStr(evaluation.confirmed_at)
-  if (at !== null) parts.push(at)
-  return parts.length > 0 ? parts.join(' · ') : '—'
-}
-
-/** 冻结计算配置正文 → 单行摘要(缺席以 — 占位, 不猜测)。 */
-function describeFrozenConfig(body: Record<string, unknown>): string {
-  const parts = [frozenStr(body.mode), frozenStr(body.generator), frozenStr(body.solver)].filter(
-    (x): x is string => x !== null,
-  )
-  const ref = body.config_ref
-  if (typeof ref === 'object' && ref !== null) {
-    const rev = (ref as Record<string, unknown>).revision
-    if (typeof rev === 'number' && Number.isFinite(rev)) parts.push(`revision v${rev}`)
-  }
-  return parts.length > 0 ? parts.join(' · ') : '—'
-}
-
-/** 冻结财务引用 → 单行摘要(缺席以 — 占位, 不猜测)。 */
-function describeFrozenFinance(profileId: string | null, revision: number | null): string {
-  if (profileId === null && revision === null) return '—'
-  const parts: string[] = []
-  if (profileId !== null) parts.push(profileId)
-  if (revision !== null) parts.push(`revision v${revision}`)
-  return parts.join(' · ')
-}
+// 表单状态类型与工作输入/提交装配纯映射归 features/tasks(form.ts) 所有,
+// 本页只持有表单实例与时序协调(纯映射见 features/tasks/form.ts 与 mappers.ts)。
 
 /** 冻结输入只读视图(快照投影; 版本/数据集名称按冻结 id 解析, 缺失显精确引用)。 */
 function FrozenInputsView({
@@ -564,8 +311,7 @@ export default function TasksPage() {
   }, [])
 
   useEffect(() => {
-    api.config
-      .get(projectId)
+    getCalcConfig(projectId)
       .then(setConfig)
       .catch(() => setConfig(null))
   }, [projectId])
@@ -587,7 +333,7 @@ export default function TasksPage() {
   // -------------------------------------------------------------------------
   const loadList = useCallback(async () => {
     try {
-      const page = await api.tasks.list({ project_id: projectId, limit: 100 })
+      const page = await listTasks({ project_id: projectId, limit: 100 })
       setTasks(page.items)
       setLoadError(null)
     } catch (err) {
@@ -623,7 +369,7 @@ export default function TasksPage() {
     const load = async () => {
       setDetailLoading(true)
       try {
-        const d = await api.tasks.get(projectId, selectedId)
+        const d = await getTaskDetail(projectId, selectedId)
         if (!cancelled) {
           setDetail(d)
           setDetailError(null)
@@ -659,7 +405,7 @@ export default function TasksPage() {
       setFrozenLoading(true)
       setFrozenError(null)
       try {
-        const inputs = await api.tasks.inputs(projectId, selectedId)
+        const inputs = await getTaskInputs(projectId, selectedId)
         if (cancelled) return
         setFrozenInputs(inputs)
         // 数据集名称按冻结版本 id 匹配现有数据集版本(只读查询, 不建任务);
@@ -706,123 +452,8 @@ export default function TasksPage() {
   }, [selectedId, projectId, datasets])
 
   // -------------------------------------------------------------------------
-  // 提交新任务
+  // 提交新任务(装配纯函数见 features/tasks/form.ts, 本页只做时序与提交动作)
   // -------------------------------------------------------------------------
-  const buildParams = useCallback(
-    (f: CreateForm): Record<string, unknown> | undefined => {
-      if (f.type === 'uncertainty') {
-        const params: Record<string, unknown> = {
-          mode: f.uMode,
-          n_samples: f.nSamples,
-          distribution: { type: f.distType, noise_pct: f.noisePct },
-        }
-        const seed = Number(f.seed.trim())
-        if (Number.isFinite(seed)) params.seed = seed
-        return params
-      }
-      if (f.type === 'analysis') {
-        // 批量扫描: 构造 task_params.sweeps(03 §8.2), 与后端 executors 格式一致
-        const sweeps = f.sweeps
-          .filter((s) => s.path.trim() && s.values.trim())
-          .map((s) => {
-            const sweep: Record<string, unknown> = {
-              param_path: s.path.trim(),
-              values: s.values
-                .split(',')
-                .map((v) => v.trim())
-                .filter((v) => v !== '')
-                .map((v) => Number(v)),
-            }
-            if (s.unit.trim()) sweep.unit = s.unit.trim()
-            return sweep
-          })
-        if (sweeps.length === 0) return { sweeps: [] }
-        return { sweeps }
-      }
-      return undefined
-    },
-    [],
-  )
-
-  /** 评价确认解析(提交边界必填; 空值/非法返回 null 由调用方提示, 后端仍为权威校验)。
-   * 空字符串经 Number() 会静默变为 0, 必须先判空, 不得直接转数字。
-   * 折现率为宪法 §7.3 比例口径(0..1), 与后端 TASK-REQ-015 同口径。
-   * 评价年限不手填: 由建设期 K + 运营年限 N 自动派生 E=K+N 并随提交
-   * 明确发送(关系成立由后端核对)。付款与维护为显式 JSON(无默认值;
-   * 无维护支出填 []), 形态由后端边界核对。合法的数值写法(如 '+1'、
-   * 首尾空格、'0.080')按 Number() 接受, 展示 E 与签名都以此处解析出的
-   * 规范值为准, 不保留“显示—却接受该数值”的分裂。 */
-  const parseEvaluation = useCallback((f: CreateForm) => {
-    const periodRaw = f.constructionPeriod.trim()
-    const operationRaw = f.operationYears.trim()
-    const rateRaw = f.discountRate.trim()
-    if (periodRaw === '' || operationRaw === '' || rateRaw === '') return null
-    const period = Number(periodRaw)
-    const operation = Number(operationRaw)
-    const rate = Number(rateRaw)
-    if (!Number.isInteger(period) || period < 0) return null
-    if (!Number.isInteger(operation) || operation < 1) return null
-    if (!Number.isFinite(rate) || rate < 0 || rate > 1) return null
-    let payments: EvaluationConstructionPayment[]
-    let maintenance: EvaluationMaintenanceExpense[]
-    try {
-      const rawPayments: unknown = JSON.parse(f.constructionPayments)
-      const rawMaintenance: unknown = JSON.parse(f.maintenanceExpenses)
-      if (!Array.isArray(rawPayments) || !Array.isArray(rawMaintenance)) return null
-      payments = rawPayments as EvaluationConstructionPayment[]
-      maintenance = rawMaintenance as EvaluationMaintenanceExpense[]
-    } catch {
-      return null
-    }
-    return {
-      evaluation_years: period + operation,
-      construction_period: period,
-      operation_years: operation,
-      discount_rate: rate,
-      construction_payments: payments,
-      maintenance_expenses: maintenance,
-    }
-  }, [])
-
-  /** 逻辑签名(类型 + 所引 revision + 参数指纹): 仅用于重复提交提示的
-   * 同输入判断, 不是幂等身份(幂等身份是完整幂等键, 由后端裁决)。 */
-  const logicalSigOf = useCallback(
-    (f: CreateForm): string => {
-      const params = buildParams(f)
-      // 整个评价签名必须落在后端幂等键格式集 [A-Za-z0-9._:-] 内且有界:
-      // 合法表单取已解析规范值(K/N/费率规范文本 + 付款/维护 JSON 指纹),
-      // 不同写法但同数值(如 '+1' 与 '1')得同一签名; 非法表单取原始文本
-      // 指纹(仍合法有界, 仅用于对话框内提示, 提交仍走输入反馈)。
-      // 不另加数值上限, 不放宽后端键格式, 不新增安全哈希。
-      const parsed = parseEvaluation(f)
-      const evalSig =
-        parsed === null
-          ? `x${stableHash(`${f.constructionPeriod.trim()}|${f.operationYears.trim()}|${f.discountRate.trim()}|${f.constructionPayments.trim()}|${f.maintenanceExpenses.trim()}`)}`
-          : `${parsed.construction_period}_${parsed.operation_years}_${String(parsed.discount_rate)}_${stableHash(JSON.stringify(parsed.construction_payments))}_${stableHash(JSON.stringify(parsed.maintenance_expenses))}`
-      return `sub-${f.type}-r${savedRevisionValue ?? 'none'}-${stableHash(serializeParams(params))}-e${evalSig}`
-    },
-    [buildParams, parseEvaluation, savedRevisionValue],
-  )
-
-  const buildInput = useCallback(
-    (f: CreateForm): TaskCreateInput => {
-      const params = buildParams(f)
-      // 幂等键 = 逻辑签名 + 本次提交一次性随机段: 每次明确发起的新逻辑
-      // 提交(对话框打开)换新键, 参数变更/项目版本变化永不误复用历史任务;
-      // 同一提交的网络重试复用原键, 由后端按同键返回同一任务。
-      const idemKey = `${logicalSigOf(f)}-${submitNonce}`
-      const evaluation = parseEvaluation(f)
-      return {
-        project_id: projectId,
-        type: f.type,
-        ...(savedRevisionValue !== null ? { config_revision: savedRevisionValue } : {}),
-        ...(evaluation ? { evaluation } : {}),
-        idempotency_key: idemKey,
-        ...(params ? { params } : {}),
-      }
-    },
-    [projectId, buildParams, savedRevisionValue, logicalSigOf, submitNonce, parseEvaluation],
-  )
 
   const submit = useCallback(
     async (force: boolean) => {
@@ -839,13 +470,13 @@ export default function TasksPage() {
           return
         }
       }
-      const input = buildInput(formRef.current)
+      const input = buildInput(formRef.current, projectId, savedRevisionValue, submitNonce)
       // 校验门禁:存在阻断问题禁止提交(与校验页一致; 否则任务提交后约 1 秒
       // 会被 worker 以数据/配置缺失拒绝, 造成无效提交)
       setChecking(true)
       setBlockers(null)
       try {
-        const res = await api.validation.run(projectId)
+        const res = await runValidation(projectId)
         const blocking = res.diagnostics.filter((d) => d.blocking || d.severity === 'blocking')
         setBlockers(blocking)
         if (blocking.length > 0) {
@@ -862,13 +493,13 @@ export default function TasksPage() {
         // 同参数指纹, 兼容旧键形态)。这只是 UX 提示, 不得误当幂等身份:
         // 真正的幂等身份是完整幂等键(含一次性随机段), 由后端裁决; 用户
         // 确认后仍以本次新键提交产生新任务。
-        const sig = logicalSigOf(formRef.current)
+        const sig = logicalSigOf(formRef.current, savedRevisionValue)
         const dup =
-          tasks?.find(
-            (tk) =>
-              ACTIVE_STATUSES.includes(tk.status) &&
-              (tk.idempotency_key === sig || tk.idempotency_key.startsWith(`${sig}-`)),
-          ) ?? null
+          tasks?.find((tk) => {
+            // 幂等键可空: 历史 null 行永不命中签名(按缺席处理, 不伪造空串比较)。
+            const key = tk.idempotency_key ?? ''
+            return ACTIVE_STATUSES.includes(tk.status) && (key === sig || key.startsWith(`${sig}-`))
+          }) ?? null
         if (dup) {
           setDuplicate(dup)
           return
@@ -881,7 +512,7 @@ export default function TasksPage() {
       setFormError(null)
       setSubmitting(true)
       try {
-        const created = await api.tasks.create(input)
+        const created = await createTask(input)
         setCreateOpen(false)
         setSelectedId(created.id)
         setFlash(t('ies.task.create_ok'))
@@ -892,7 +523,7 @@ export default function TasksPage() {
         setSubmitting(false)
       }
     },
-    [buildInput, tasks, loadList, projectId, submitting, t, logicalSigOf],
+    [tasks, loadList, projectId, submitting, t, savedRevisionValue, submitNonce],
   )
 
   const confirmDuplicate = useCallback(() => {
@@ -908,8 +539,7 @@ export default function TasksPage() {
     let cancelled = false
     setBlockers(null)
     setChecking(true)
-    api.validation
-      .run(projectId)
+    runValidation(projectId)
       .then((res) => {
         if (cancelled) return
         setBlockers(
@@ -1139,7 +769,7 @@ export default function TasksPage() {
     if (!cancelTarget) return
     setActionError(null)
     try {
-      await api.tasks.cancel(projectId, cancelTarget.id)
+      await cancelTask(projectId, cancelTarget.id)
       setCancelTarget(null)
       setFlash(t('ies.task.cancel_ok', { task_id: cancelTarget.id }))
       await loadList()
@@ -1153,7 +783,7 @@ export default function TasksPage() {
     if (!retryTarget) return
     setActionError(null)
     try {
-      await api.tasks.retry(projectId, retryTarget.id)
+      await retryTask(projectId, retryTarget.id)
       setRetryTarget(null)
       setFlash(t('ies.task.retry_ok'))
       await loadList()

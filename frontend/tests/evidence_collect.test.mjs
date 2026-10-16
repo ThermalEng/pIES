@@ -1,12 +1,15 @@
 /**
  * R4 证据收集失败可见定向测试。
  *
- * 覆盖 `src/api/client.ts` tasks.get 的补充 /result 读取语义：
- * 1. 任务详情 GET 失败 → 直接 reject（不返回无证据详情）；
+ * 覆盖 `src/features/tasks` 公开入口 getTaskDetail 的补充 /result 读取语义：
+ * 1. 任务详情 GET 失败 → 直接 reject（真实 HTTP 状态可见，不返回无证据详情）；
  * 2. result_available=true 但 /result 补充读取失败 → 直接 reject，
  *    不吞错置空 evidence 伪装详情正常无结果；
  * 3. result_available=false → 成功返回且 evidence 为空，不发任何 /result 请求；
  * 4. 成功 → evidence 包身份（package_id/object_id/status）与桩完全一致。
+ * 成功桩与后端 application/tasks/views.py task_summary/task_detail 同形：
+ * 摘要全集（priority/attempt_count/max_attempts/created_at 等）、summary 块、
+ * progress 全量对象、batch、calc_snapshot。
  * fetch 用桩代替（node22 原生 Response/fetch），业务值全为桩内真实内容，
  * 不 mock 成功语义本身之外的任何行为。
  *
@@ -16,7 +19,7 @@
  * 验证后删除自建 pies-focused-tests 镜像，不删除基础镜像。
  */
 
-import { api } from '../src/api/client.ts'
+import { getTaskDetail } from '../src/features/tasks/index.ts'
 
 let failures = 0
 function check(name, cond, detail = '') {
@@ -24,25 +27,39 @@ function check(name, cond, detail = '') {
   console.log(`[${cond ? 'PASS' : 'FAIL'}] ${name}${detail ? ` — ${detail}` : ''}`)
 }
 
+/** 与 task_detail 生产者同形的成功桩体（摘要全集 + 详情专有块）。 */
 function taskBody({ id, resultAvailable }) {
   return {
     task: {
       id,
-      project_id: 5,
       type: 'optimization',
       status: 'completed',
       business_outcome: 'normal_completion',
-      idempotency_key: `k-${id}`,
+      priority: 0,
       calc_snapshot_id: 3,
       requested_by: 1,
       requested_at: '2026-10-13T00:00:00Z',
+      attempt_count: 1,
+      max_attempts: 3,
+      idempotency_key: `k-${id}`,
+      superseded_by_task_id: null,
+      created_at: '2026-10-13T00:00:01Z',
+      updated_at: '2026-10-13T00:05:00Z',
       result_available: resultAvailable,
+      summary: { attempt_no: 1, percent: 100, stage: 'done', queue_position: null },
+      calc_snapshot: { id: 3, random_seed: 7, config_revision: 1, config_project_id: 5 },
       attempts: [],
-      progress: null,
-      batch: null,
-      outcome_note: null,
+      current_lease: null,
+      progress: {
+        attempt_no: 1,
+        percent: 100,
+        stage: 'done',
+        detail: {},
+        updated_at: '2026-10-13T00:05:00Z',
+        source: 'pg',
+      },
       diagnostics: [],
-      evidence: [],
+      batch: { parent_task_id: null, child_task_count: 0, children: [] },
     },
   }
 }
@@ -68,41 +85,56 @@ function installStub({ detailStatus = 200, resultAvailable = true, resultStatus 
   return () => resultCalls
 }
 
-async function expectReject(name, fn) {
+async function expectApiError(name, fn, { status, code }) {
   try {
     await fn()
-  } catch {
-    check(name, true)
+  } catch (err) {
+    check(`${name}抛错`, true)
+    check(`${name}真实状态`, err?.status === status, `status=${err?.status}`)
+    check(`${name}真实错误码`, err?.code === code, `code=${err?.code}`)
     return
   }
-  check(name, false, '未抛错')
+  check(`${name}抛错`, false, '未抛错')
 }
 
-// 1. 详情 GET 失败 → reject。
+// 1. 详情 GET 失败 → reject，真实 500/API-UNKNOWN 可见。
 {
   installStub({ detailStatus: 500 })
-  await expectReject('详情失败直接抛错', () => api.tasks.get(5, 7))
+  await expectApiError('详情失败', () => getTaskDetail(5, 7), { status: 500, code: 'API-UNKNOWN' })
 }
 
 // 2. /result 补充读取失败 → reject，不置空伪装。
 {
   installStub({ resultAvailable: true, resultStatus: 500 })
-  await expectReject('可用时result失败直接抛错', () => api.tasks.get(5, 7))
+  await expectApiError('可用时result失败', () => getTaskDetail(5, 7), { status: 500, code: 'API-UNKNOWN' })
 }
 
-// 3. result_available=false → 成功、无证据、零 /result 请求。
+// 3. result_available=false → 成功、无证据、零 /result 请求，生产者字段同步。
 {
   const calls = installStub({ resultAvailable: false })
-  const d = await api.tasks.get(5, 7)
+  const d = await getTaskDetail(5, 7)
   check('不可用仍成功', d.id === 7 && d.result_available === false)
   check('不可用诚实无证据', Array.isArray(d.evidence) && d.evidence.length === 0)
   check('不可用零result请求', calls() === 0, String(calls()))
+  check('摘要priority同步', d.priority === 0, `priority=${d.priority}`)
+  check('摘要尝试数同步', d.attempt_count === 1 && d.max_attempts === 3)
+  check('摘要创建时间同步', d.created_at === '2026-10-13T00:00:01Z', `created_at=${d.created_at}`)
+  check(
+    'progress对象同步',
+    d.progress !== null
+      && d.progress.attempt_no === 1
+      && d.progress.percent === 100
+      && d.progress.stage === 'done',
+    JSON.stringify(d.progress),
+  )
+  check('batch同步', d.batch !== null && d.batch.child_task_count === 0, JSON.stringify(d.batch))
+  check('快照引用同步', d.calc_snapshot !== null && d.calc_snapshot.id === 3, JSON.stringify(d.calc_snapshot))
 }
 
 // 4. 成功 → 证据身份精确。
 {
   installStub({ resultAvailable: true, resultStatus: 200 })
-  const d = await api.tasks.get(5, 7)
+  const d = await getTaskDetail(5, 7)
   check(
     '成功证据身份精确',
     d.evidence.length === 1

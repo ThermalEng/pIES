@@ -1,7 +1,8 @@
 /**
  * 错误信封定向测试：标准 {error} 透传；裸 {diagnostics} 走通用可见错误。
  *
- * 覆盖 `src/api/client.ts` toApiError 经公开方法的行为：
+ * 覆盖共享 toApiError 经公开方法（任务重试走 `src/features/tasks`
+ * 公开入口，校验仍走聚合器模型家族）的行为：
  * 1. 真实形态的标准错误信封保留 status/code/message_key 与嵌套 diagnostics；
  * 2. 不再识别的裸 {diagnostics} 错误体不再伪造 VALIDATION-FAILED，走可见通用错误；
  * 3. 成功响应的 diagnostics 兄弟字段（validation/run 200）仍可用。
@@ -16,6 +17,7 @@
  */
 
 import { api } from '../src/api/client.ts'
+import { retryTask } from '../src/features/tasks/index.ts'
 import { errorMessage, translate } from '../src/i18n/index.ts'
 import { ApiError } from '../src/types.ts'
 
@@ -78,7 +80,7 @@ async function expectApiError(promise) {
 
 // 1. 标准信封：status/code/message_key 与嵌套 diagnostics 全部保留。
 {
-  const err = await expectApiError(api.tasks.retry(7, 9))
+  const err = await expectApiError(retryTask(7, 9))
   check('标准信封抛错', err !== null)
   check('状态码保留', err?.status === 409, `status=${err?.status}`)
   check('错误码保留', err?.code === 'TASK-STATE-001', `code=${err?.code}`)
@@ -90,7 +92,7 @@ async function expectApiError(promise) {
 // 2. 裸 {diagnostics}：不再伪造 VALIDATION-FAILED，走可见通用错误。
 {
   mode = 'bare'
-  const err = await expectApiError(api.tasks.retry(7, 9))
+  const err = await expectApiError(retryTask(7, 9))
   check('裸错误体抛错', err !== null)
   check('不伪造 VALIDATION-FAILED', err?.code !== 'VALIDATION-FAILED', `code=${err?.code}`)
   check('通用错误码', err?.code === 'API-UNKNOWN', `code=${err?.code}`)

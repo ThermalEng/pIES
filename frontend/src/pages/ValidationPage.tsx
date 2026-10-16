@@ -1,7 +1,7 @@
 /**
  * 项目校验(ValidationPage):完整预检。
  *
- * - 运行校验:调 api.validation.run(projectId) → {valid, diagnostics};
+ * - 运行校验:调 features/validation.runValidation(projectId) → {valid, diagnostics};
  *   由诊断严重度推导展示状态(ok / warnings / blocked),阻断时给出
  *   "禁止提交"提示;诊断列表复用 DiagnosticsList(严重度分组、代码、
  *   定位、修复建议),与数据/配置页展示一致。
@@ -17,7 +17,7 @@
 
 import { useCallback, useState } from 'react'
 
-import { api } from '../api/client'
+import { runValidation as runValidationRequest } from '../features/validation'
 import { DiagnosticsList } from '../components/DiagnosticsList'
 import { Alert, Badge, Button, Card, EmptyState } from '../components/ui'
 import type { BadgeVariant, IconName } from '../components/ui'
@@ -69,7 +69,7 @@ export default function ValidationPage() {
     setRunning(true)
     setRunError(null)
     try {
-      const res = await api.validation.run(projectId)
+      const res = await runValidationRequest(projectId)
       setResult(res)
       setStatus(deriveStatus(res.diagnostics))
     } catch (err) {
