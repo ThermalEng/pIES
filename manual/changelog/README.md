@@ -17,8 +17,8 @@
 
 ### 2026-10-16 — `0.14.0` 结果/导出任务身份显式化与模块级业务缓存删除（待复审）
 
-- 删 `pkgTaskCache`/`resultBodyCache` 两个模块级业务缓存：`ExcelExportInput.task_id` 改为必填，由结果页/导出页所选任务（与所选证据同源）显式传入，评估按该任务真实读取，不再要求无关 `tasks.get` 预热；`hourly()` 按显式任务 id 直接重读（多一次诚实 GET，不跨方法复用）。`downloadSessions` 保留为临时下载句柄登记，未迁入 Context、未加 TTL。调用方契约与返回形状不变；任务选择/草稿/新建任务、缺评估引导、无结果不可导出语义不变；未加单例、注册表、TTL、形状验证器与客户端重构。
-- 证据：`tsc+vite` 构建通过；r7 A（含新增“评估读取路径即所选任务 id”断言）/B 通过；r4 首用例、financial-absence A/B、excel-export-lang（双页导出/原文/缺省中文）通过。r4 切换用例 3/6 通过：失败均为既有用例 `tasks 500 恰好 1 次` 断言撞上 TasksPage 既有 5s 轮询（trace 证实第二 500 为轮询 `limit=100` 发起，与本片无关，未改该用例）。本条不表示 0.14 完成，切片待 Codex 复审。
+- 删 `pkgTaskCache`/`resultBodyCache` 两个模块级业务缓存：`ExcelExportInput.task_id` 改为前端调用方必填（HTTP POST 体不变），由结果页/导出页所选任务（与所选证据同源）显式传入，评估按该任务真实读取，不再要求无关 `tasks.get` 预热；`hourly()` 按显式任务 id 直接重读（多一次诚实 GET，不跨方法复用）。`downloadSessions` 保留为临时下载句柄登记，未迁入 Context、未加 TTL。返回形状、任务选择/草稿/新建任务、缺评估引导、无结果不可导出语义不变；未加单例、注册表、TTL、形状验证器与客户端重构。
+- 证据：`tsc+vite` 构建通过；`export_no_implicit_assessment` 18 项全过（新任务无预热可导出、双任务各自评估路径与请求体精确、空历史零写、失败透传零写、零隐式创建）；r7 A（含新增“评估读取路径即所选任务 id”断言）/B 通过；r4 首用例、financial-absence A/B、excel-export-lang（双页导出/原文/缺省中文）通过。r4 切换用例已收窄注入到任务上下文查询并等待定向失败响应后断言，修正后 3/3 通过；共享 oneOf/asList 逐族迁移是下一片，不在本片。本条不表示 0.14 完成，切片待 Codex 复审。
 
 ### 2026-10-16 — `0.14.0` 载能开放身份收口（已复审）
 
