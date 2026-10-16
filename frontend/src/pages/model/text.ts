@@ -102,6 +102,7 @@ const TEXTS: Record<string, Entry> = {
   'diag.source_graph': { zh: '系统图', en: 'System graph' },
 
   // 加载
+  'load.loading': { zh: '模型加载中…', en: 'Loading model…' },
   'load.error': { zh: '模型加载失败:{reason}', en: 'Failed to load model: {reason}' },
   'load.empty_hint': { zh: '尚未保存设备与连接', en: 'No devices or connections saved yet' },
 }

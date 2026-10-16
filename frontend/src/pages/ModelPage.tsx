@@ -99,7 +99,9 @@ export default function ModelPage() {
   const { projectId } = useWorkbench()
   return (
     <ReactFlowProvider>
-      <ModelCanvas projectId={projectId} />
+      {/* 项目键控: 切换项目即全新挂载, 旧项目的读在途标记/草稿/就绪态不继承,
+          旧读回包不得发布到新项目; 项目内刷新不受影响。 */}
+      <ModelCanvas key={projectId} projectId={projectId} />
     </ReactFlowProvider>
   )
 }
@@ -121,6 +123,26 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const [connections, setConnections] = useState<LocalConnection[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
+  // 图就绪(当前项目一次真实成功的模型读取, 含可解释的描述符):
+  // 未就绪时不渲染可写画布/面板, 读写状态不标已保存; 成功前失败保留旧输入
+  // (不清为空图), 刷新失败不重置保存/冲突态。项目切换时重置。
+  const [graphReady, setGraphReady] = useState(false)
+  // 就绪镜像(reload 回调内读取, 避免 graphReady 进依赖导致加载 effect 重放)。
+  const graphReadyRef = useRef(false)
+  // 读在途(单飞: 重试/刷新按钮加载中禁用, 回调内再保险, 不搭请求框架)。
+  const loadInflightRef = useRef(false)
+  // 归属作废(卸载/键控重挂): 旧读回包不得发布图/修订/就绪/错误,
+  // 也不得再碰共享 autosave 状态。setup 内复位(StrictMode 开发重放
+  // setup→cleanup→setup 后仍为有效归属, 不得删 StrictMode 或此保护)。
+  const cancelledRef = useRef(false)
+  useEffect(() => {
+    cancelledRef.current = false
+    return () => {
+      cancelledRef.current = true
+    }
+  }, [])
+  // 读阻塞(未就绪 / 刷新在途 / 读失败未恢复): 可写控件只读或隐藏, 不接受变更。
+  const readBlocked = !graphReady || loading || loadError !== null
 
   // 已有设备后继续新增 → 自动 fit 全部节点, 避免节点堆叠遮挡端口句柄
   // (ReactFlow fitView prop 只在 hasDevices false→true 边沿触发一次, 后续
@@ -178,11 +200,25 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const specOf = useCallback((typeId: string): ExtendedDeviceTypeSpec | null => typeMap[typeId] ?? null, [typeMap])
 
   // -- 加载 ------------------------------------------------------------
+  // 只读入口: 描述符缺失时图不可解释, 直接立错而不以空描述呈现有效连接。
+  // 单飞: 未就绪重试先清旧错进入真实加载态(按钮随视图卸载); 已就绪刷新
+  // 保留陈旧提示直至成功恢复, 期间重试按钮禁用, 不叠加请求、不乱序覆盖。
   const reloadGraph = useCallback(async () => {
+    if (loadInflightRef.current) return
+    loadInflightRef.current = true
     setLoading(true)
+    if (!graphReadyRef.current) setLoadError(null)
+    if (deviceTypes === null) {
+      setLoadError(lt('panel.load_failed'))
+      setLoading(false)
+      loadInflightRef.current = false
+      return
+    }
     try {
       // 2.0 唯一项目建模事实: 项目视图草稿内容 model 节(名键设备与端点连接)。
       const { model, revision } = await api.model.getModel(projectId)
+      // 归属已作废(切换项目/卸载): 旧回包整体丢弃, 不发布任何状态。
+      if (cancelledRef.current) return
       revisionRef.current = revision
       const layout = loadLayout(projectId)
       const deviceList = model.devices.map((d, i) =>
@@ -198,20 +234,39 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       setDevices(deviceList)
       setConnections(connectionList)
       setLoadError(null)
-    } catch (err) {
-      // 加载失败(网络/权限等): 显示错误并以空画布继续(可本地编辑,保存时再校验)
-      setLoadError(errorMessage(err))
-      setDevices([])
-      setConnections([])
-    } finally {
-      setLoading(false)
+      setGraphReady(true)
+      graphReadyRef.current = true
       setSelectedDeviceId(null)
       setSelectedConnId(null)
       setValidateResult(null)
       setSaveState('saved')
       setAutosave('saved')
+    } catch (err) {
+      // 读取失败(网络/权限等): 仅显示错误与重试入口; 已有画布原样保留
+      // (陈旧但不伪装成当前成功读取), 从未成功则保持未就绪、不可写。
+      setLoadError(errorMessage(err))
+    } finally {
+      setLoading(false)
+      loadInflightRef.current = false
     }
-  }, [projectId, setAutosave, typeMap])
+  }, [projectId, setAutosave, deviceTypes, typeMap])
+
+  // 读取重试: 描述符失败时一并重取注册表(图依赖其解释连接), 否则只重读模型。
+  // 重试即进入加载态(清旧错, 按钮加载中禁用/卸载), 与读回调单飞互锁。
+  const retryLoad = useCallback(() => {
+    if (loadInflightRef.current) return
+    if (typesError) {
+      setLoadError(null)
+      setLoading(true)
+      setTypesError(false)
+      setDeviceTypes(null)
+    } else {
+      void reloadGraph()
+    }
+  }, [typesError, reloadGraph])
+
+  // 项目切换无需重置: 画布按 projectId 键控重挂, 状态天然全新;
+  // 旧读回包由 cancelledRef 丢弃, 不会发布到新项目。
 
   // 注册表 deviceTypes 全局唯一, 每个会话只加载一次(与草稿加载解耦,
   // 避免 deviceTypes 更新改变 reloadGraph 身份导致加载 effect 循环请求)。
@@ -237,8 +292,14 @@ function ModelCanvas({ projectId }: { projectId: number }) {
 
   // 草稿加载: 初挂载 / 项目切换 / 手动刷新时取数; 连接解析依赖 descriptor,
   // 故等待注册表就绪(或失败)后再请求, 之后 deviceTypes 不再变化, 无循环。
+  // 注册表失败时图不可解释: 立错而不标记就绪, 重试一并重取注册表。
   useEffect(() => {
     if (deviceTypes === null && !typesError) return
+    if (typesError) {
+      setLoadError(lt('panel.load_failed'))
+      setLoading(false)
+      return
+    }
     void reloadGraph()
   }, [reloadGraph, deviceTypes, typesError])
 
@@ -258,6 +319,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const addDevice = useCallback(
     async (spec: ExtendedDeviceTypeSpec, position: { x: number; y: number }) => {
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         const sameTypeCount = devices.filter((d) => d.deviceType === spec.type_id).length
         const name = uniqueDeviceName(defaultDeviceName(spec as DeviceTypeSpec, sameTypeCount, locale))
         const params = buildDefaultParams(spec as DeviceTypeSpec, 'new')
@@ -315,6 +378,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         kind: patch.kind ?? current.kind,
       }
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         if (!renamed) {
           const { revision } = await api.model.upsertDevice(
             projectId,
@@ -400,6 +465,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       const current = devices.find((d) => d.id === deviceId)
       if (!current) return
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         // 服务端删设备级联移除关联连接, 本地同步裁剪。
         const { revision } = await api.model.removeDevice(projectId, current.name, revisionRef.current)
         revisionRef.current = revision
@@ -490,6 +557,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         return
       }
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         // 2.0 连接只表达真实端点(设备名 + 注册表端口名), 无类型/容量/损耗字段
         const { name, revision } = await api.model.upsertConnection(
           projectId,
@@ -525,6 +594,9 @@ function ModelCanvas({ projectId }: { projectId: number }) {
             deviceId: fromDevice.id,
           }
           setIssues((prev) => [...prev.slice(-3), item])
+          // 写失败同样离开 saving(否则刷新永久禁用); 诊断面板已定位问题。
+          setSaveState('error')
+          setAutosave('error')
         })
       }
     },
@@ -534,6 +606,8 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const disconnectConn = useCallback(
     async (connId: string) => {
       try {
+        // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
+        setSaveState('saving')
         const { revision } = await api.model.removeConnection(projectId, connId, revisionRef.current)
         revisionRef.current = revision
         setConnections((prev) => prev.filter((c) => c.id !== connId))
@@ -629,13 +703,15 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const handleDrop = useCallback(
     (event: ReactDragEvent) => {
       event.preventDefault()
+      // 读阻塞时画布不接受放置(面板项已不可拖拽, 此处再保险)。
+      if (readBlocked) return
       const typeId = event.dataTransfer.getData('application/ies-device-type')
       if (!typeId) return
       const spec = specOf(typeId)
       if (!spec) return
       addDevice(spec, screenToFlowPosition({ x: event.clientX, y: event.clientY }))
     },
-    [addDevice, screenToFlowPosition, specOf],
+    [addDevice, screenToFlowPosition, specOf, readBlocked],
   )
 
   const clearSelection = useCallback(() => {
@@ -715,7 +791,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
             icon={validating ? undefined : 'check'}
             loading={validating}
             onClick={() => void runValidate()}
-            disabled={validating}
+            disabled={validating || readBlocked}
           >
             {t('ies.modeling.graph_validate')}
           </Button>
@@ -723,7 +799,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
             variant="primary"
             size="sm"
             onClick={() => void reloadGraph()}
-            disabled={loading || offline}
+            disabled={loading || offline || saveState === 'saving'}
             title={offline ? lt('save.error') : undefined}
           >
             {t('ies.common.refresh')}
@@ -740,23 +816,42 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       {saveState === 'conflict' ? (
         <Alert variant="warning" title={lt('save.conflict')}>
           {lt('save.conflict_banner')}{' '}
-          <Button variant="secondary" size="sm" onClick={() => void reloadGraph()}>
+          <Button variant="secondary" size="sm" onClick={() => void reloadGraph()} disabled={loading}>
             {lt('save.conflict_reload')}
           </Button>
         </Alert>
       ) : null}
 
-      {loadError ? (
-        <Alert variant="warning" title={lt('load.error', { reason: loadError })} closable onClose={() => setLoadError(null)}>
-          <Button variant="secondary" size="sm" onClick={() => void reloadGraph()}>
+      {loadError && graphReady ? (
+        <Alert variant="warning" title={lt('load.error', { reason: loadError })}>
+          <Button variant="secondary" size="sm" onClick={retryLoad} disabled={loading}>
             {t('ies.common.retry')}
           </Button>
         </Alert>
       ) : null}
 
+      {!graphReady ? (
+        <div className="mp-body">
+          <div className="mp-load-state" role="status">
+            {loadError ? (
+              <Alert variant="error" title={lt('load.error', { reason: loadError })}>
+                <Button variant="secondary" size="sm" onClick={retryLoad}>
+                  {t('ies.common.retry')}
+                </Button>
+              </Alert>
+            ) : (
+              <>
+                <Spinner size="md" />
+                <p>{lt('load.loading')}</p>
+              </>
+            )}
+          </div>
+        </div>
+      ) : (
       <div className="mp-body">
         <Palette
           specs={deviceTypes ?? []}
+          disabled={readBlocked}
           loading={deviceTypes === null && !typesError}
           error={typesError}
           onRetry={() => {
@@ -775,6 +870,9 @@ function ModelCanvas({ projectId }: { projectId: number }) {
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}
+              nodesDraggable={!readBlocked}
+              nodesConnectable={!readBlocked}
+              elementsSelectable={!readBlocked}
               onConnect={handleConnect}
               onNodeDragStop={handleNodeDragStop}
               onNodeClick={(_, node) => {
@@ -827,7 +925,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         </div>
 
         <div className="mp-side-stack">
-          {selectedConn ? (
+          {selectedConn && !readBlocked ? (
             <ConnectionPanel
               conn={selectedConn}
               devices={devices}
@@ -836,7 +934,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
               onClose={() => setSelectedConnId(null)}
             />
           ) : null}
-          {selectedDevice ? (
+          {selectedDevice && !readBlocked ? (
             <DeviceSidebar
               device={selectedDevice}
               spec={specOf(selectedDevice.deviceType) ?? EMPTY_SPEC}
@@ -857,6 +955,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           ) : null}
         </div>
       </div>
+      )}
     {flash ? (
         <div
           role="status"
@@ -920,11 +1019,14 @@ function SaveStateChip({ state }: { state: SaveState }) {
 
 function Palette({
   specs,
+  disabled = false,
   loading,
   error,
   onRetry,
 }: {
   specs: DeviceTypeSpec[]
+  /** 读阻塞时只读展示: 条目不可拖拽(画布刷新在途/失败未恢复时不接受变更)。 */
+  disabled?: boolean
   loading: boolean
   error: boolean
   onRetry: () => void
@@ -972,7 +1074,8 @@ function Palette({
             <div
               key={spec.type_id}
               className="mp-palette-item"
-              draggable
+              draggable={!disabled}
+              aria-disabled={disabled}
               onDragStart={(event) => {
                 event.dataTransfer.setData('application/ies-device-type', spec.type_id)
                 event.dataTransfer.effectAllowed = 'copy'
