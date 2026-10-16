@@ -892,12 +892,17 @@ function paramDefaultValue(v: unknown): number | string | Record<string, number>
 function deviceTypeFromServer(s: Record<string, unknown>): DeviceTypeSpec {
   const params = asRecord(s.parameters)
   const ports = Array.isArray(s.ports) ? (s.ports as DevicePortSpec[]) : []
+  // 注册表公开 DTO 用 names {zh-CN,en-US} 字典(无 name_zh/name_en 平铺字段),
+  // 载能只存在于 ports[].energy_carrier(无 energy_carriers 顶层数组): 直接按
+  // 端口声明顺序去重派生, 与 descriptor 同一身份, 不做形状复核与值过滤。
+  const names = asRecord(s.names)
+  const carriers = [...new Set(ports.map((p) => p.energy_carrier))]
   return {
     type_id: String(s.type_id ?? ''),
     version: String(s.version ?? ''),
-    name_zh: String(s.name_zh ?? ''),
-    name_en: String(s.name_en ?? ''),
-    energy_carriers: Array.isArray(s.energy_carriers) ? (s.energy_carriers as EnergyCarrier[]) : [],
+    name_zh: String(names['zh-CN'] ?? ''),
+    name_en: String(names['en-US'] ?? ''),
+    energy_carriers: carriers,
     is_load: Boolean(s.is_load ?? false),
     capabilities: Array.isArray(s.capabilities) ? (s.capabilities as string[]) : [],
     model_method: (s.model_method as DeviceTypeSpec['model_method']) ?? 'mechanism',

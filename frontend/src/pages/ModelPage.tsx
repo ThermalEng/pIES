@@ -85,7 +85,7 @@ interface ExtendedDeviceTypeSpec extends Omit<DeviceTypeSpec, 'parameters'> {
 }
 
 const CARRIER_COLOR: Record<string, string> = {
-  electric: '#0e5cad',
+  electricity: '#0e5cad',
   heat: '#c2410c',
   cool: '#0891b2',
   gas: '#8a5a00',
@@ -491,6 +491,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   const connectionLabel = useCallback(
     (carrier: LocalConnection['carrier']): string => {
       const key = carrierLabelKey(carrier)
+      if (key === null) return carrier
       return key === 'port.solar' ? lt(key) : t(key)
     },
     [t],

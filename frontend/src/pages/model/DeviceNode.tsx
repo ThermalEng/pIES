@@ -50,6 +50,7 @@ function PortHandles({ device, spec }: { device: LocalDevice; spec: DeviceTypeSp
   const outs = ports.filter((p) => p.direction === 'out')
   const labelOf = (carrier: EnergyCarrier): string => {
     const key = carrierLabelKey(carrier)
+    if (key === null) return carrier
     return key === 'port.solar' ? lt(key) : t(key)
   }
   return (

@@ -164,10 +164,11 @@ test.describe('场景 3: 建模与连线', () => {
     const page: Page = await context.newPage()
     const session = await createSession(page, username, password)
 
-    // 创建项目
+    // 创建项目(起始年为服务端必填, 按当前产品要求如实填写, 不弱化校验)
     const projectName = uniqueName('QA 建模项目')
     await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
     await page.getByLabel(/名称|Name/i).fill(projectName)
+    await page.locator('#pp-create-start-year').fill('2026')
     await page.getByRole('button', { name: /确认|Confirm/i }).click()
     await expect(page.getByText(projectName)).toBeVisible()
     await page.getByText(projectName).click()
@@ -224,7 +225,7 @@ test.describe('场景 3: 建模与连线', () => {
     // xyflow 连接操作: 拖拽源句柄到目标句柄
     // (handle 是 React Flow 的 div; 用 class 定位热泵 heat 输出与电负荷 electric 输入)
     const hpOut = hpNode.locator('.mp-handle--heat').last() // thermal out
-    const loadIn = loadNode.locator('.mp-handle--electric').first() // electric in
+    const loadIn = loadNode.locator('.mp-handle--electricity').first() // electricity in
     await expect(hpOut).toBeVisible({ timeout: 5_000 })
     await expect(loadIn).toBeVisible({ timeout: 5_000 })
     const src = await hpOut.boundingBox()
@@ -280,7 +281,10 @@ test.describe('场景 3: 建模与连线', () => {
     expect(typeof conn.to_device).toBe('string')
     expect(conn.to_device.length).toBeGreaterThan(0)
 
-    session.assertNoErrors()
+    session.assertNoErrors([
+      // 进项目读尚无保存的计算配置 404(既有行为, 计数锁定防漂移)。
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 1 },
+    ])
     await context.close()
   })
 })
