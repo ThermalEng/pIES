@@ -450,8 +450,13 @@ test.describe('模型页读取状态', () => {
 
     const pathA = `/api/projects/${pidA}`
     // 定向挂起: 仅 A 项目视图 GET 取回真实响应后挂起, B 与其余真实放行。
+    // A 读取精确到 3 次(工作台主体 + 任务页刷新 + 模型读取各 1 次): 发起计数
+    // 与挂起计数必须在切换前都到达 3, 证明模型旧读已真实发出并卡在门禁,
+    // 而不只是看到加载文案; 多一次少一次都超时失败, 不静默吸收噪声。
     let releaseA!: () => void
     const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+    let aHeld = 0
+    let aReqTotal = 0
     const context = await browser.newContext()
     const page = await context.newPage()
     await context.route(
@@ -461,14 +466,23 @@ test.describe('模型页读取状态', () => {
           await route.continue()
           return
         }
+        aReqTotal += 1
         const res = await route.fetch()
+        aHeld += 1
         await gateA
         await route.fulfill({ response: res })
       },
     )
     let bGets = 0
     page.on('request', (req) => {
-      if (req.method() === 'GET' && new URL(req.url()).pathname === `/api/projects/${pidB}`) bGets += 1
+      const u = new URL(req.url())
+      if (req.method() === 'GET' && u.pathname === `/api/projects/${pidB}`) bGets += 1
+    })
+    // A 旧响应收集(按响应事件计数, 不共用同一 waitForResponse)。
+    const aLateStatuses: number[] = []
+    page.on('response', (res) => {
+      const req = res.request()
+      if (req.method() === 'GET' && new URL(req.url()).pathname === pathA) aLateStatuses.push(res.status())
     })
     const session = await createSession(page, userName, password)
 
@@ -479,6 +493,10 @@ test.describe('模型页读取状态', () => {
       await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click({ timeout: 30_000 })
       await expect(page).toHaveURL(/\/model$/)
       await expect(page.getByText(/模型加载中|Loading model/)).toBeVisible({ timeout: 30_000 })
+      // 三次 A 读取(工作台主体/任务页刷新/模型读取)全部发出并卡在门禁,
+      // 其中第 3 次即模型旧读: 到达门禁才切换, 不依赖加载文案时序。
+      await expect.poll(async () => aReqTotal, { timeout: 30_000 }).toBe(3)
+      await expect.poll(async () => aHeld, { timeout: 30_000 }).toBe(3)
 
       // 同树切到 B(路由 :id 变更, 画布按 projectId 键控重挂)。
       await page.evaluate((url) => {
@@ -491,19 +509,12 @@ test.describe('模型页读取状态', () => {
       await expect(page.getByText(/^已保存$|^Saved$/)).toBeVisible({ timeout: 30_000 })
       expect(bGets).toBeGreaterThanOrEqual(1)
 
-      // 放行 A 的旧读: 两个挂起的 A 响应都必须真实到达, 但 B 内容/就绪/
-      // 共享状态不得被覆盖, 也不得立错。
-      const aLate1 = page.waitForResponse(
-        (res) => res.request().method() === 'GET' && new URL(res.url()).pathname === pathA,
-        { timeout: 30_000 },
-      )
-      const aLate2 = page.waitForResponse(
-        (res) => res.request().method() === 'GET' && new URL(res.url()).pathname === pathA,
-        { timeout: 30_000 },
-      )
+      // 放行 A 的旧读: 三个挂起的 A 响应都必须真实到达(响应事件计数,
+      // 每个旧请求独立事件, 不共用同一 waitForResponse),
+      // 但 B 内容/就绪/共享状态不得被覆盖, 也不得立错。
       releaseA()
-      await aLate1
-      await aLate2
+      await expect.poll(async () => aLateStatuses.length, { timeout: 30_000 }).toBe(3)
+      expect(aLateStatuses).toEqual([200, 200, 200])
       await expect(page.locator('.react-flow__node', { hasText: bDevice })).toBeVisible({ timeout: 30_000 })
       expect(await page.locator('.react-flow__node', { hasText: 'E2E grid_connection' }).count()).toBe(0)
       expect(await page.locator('.react-flow__node').count()).toBe(1)

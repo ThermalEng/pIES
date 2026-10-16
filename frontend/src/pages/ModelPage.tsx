@@ -132,10 +132,14 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   // 读在途(单飞: 重试/刷新按钮加载中禁用, 回调内再保险, 不搭请求框架)。
   const loadInflightRef = useRef(false)
   // 归属作废(卸载/键控重挂): 旧读回包不得发布图/修订/就绪/错误,
-  // 也不得再碰共享 autosave 状态。
+  // 也不得再碰共享 autosave 状态。setup 内复位(StrictMode 开发重放
+  // setup→cleanup→setup 后仍为有效归属, 不得删 StrictMode 或此保护)。
   const cancelledRef = useRef(false)
-  useEffect(() => () => {
-    cancelledRef.current = true
+  useEffect(() => {
+    cancelledRef.current = false
+    return () => {
+      cancelledRef.current = true
+    }
   }, [])
   // 读阻塞(未就绪 / 刷新在途 / 读失败未恢复): 可写控件只读或隐藏, 不接受变更。
   const readBlocked = !graphReady || loading || loadError !== null
