@@ -574,7 +574,8 @@ export type TaskOutcome =
   | 'insufficient_evidence'
 
 export interface TaskSummary {
-  attempt_no: number
+  /** 尚无尝试行时为 null(后端原样发布; 界面仅消费 percent)。 */
+  attempt_no: number | null
   percent: number | null
   stage: string | null
   queue_position: number | null
@@ -663,7 +664,8 @@ export interface TaskAttempt {
 }
 
 export interface TaskLease {
-  attempt_no: number
+  /** 租约无对应尝试行时为 null(后端原样发布, 当前无界面消费者)。 */
+  attempt_no: number | null
   acquired_by: string
   renewed_at: ISO8601
   expires_at: ISO8601
