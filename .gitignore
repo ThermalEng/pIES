@@ -34,3 +34,4 @@ uv.lock
 !backend/iesplan/assembly/samples/data/
 !backend/iesplan/assembly/samples/data/*.csv
 /.claude/
+/.opencode/
