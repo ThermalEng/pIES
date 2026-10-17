@@ -161,6 +161,7 @@ __all__ = [
     "WindowSessionRecord",
     "active_credentials_by_user",
     "add_credential",
+    "allocate_public_namespace",
     "bind_auth_subject",
     "build_authorization_url",
     "build_state",
@@ -398,6 +399,22 @@ def clean_ip(ip: str | None) -> str | None:
         return None
 
 
+def allocate_public_namespace(db: Session) -> str:
+    """为新账号分配唯一公开命名空间(CSPRNG; 碰撞重试, 身份域唯一实现)。
+
+    注册、OIDC JIT、内置 admin 种子与默认操作者四类现有创建入口共用;
+    只生成并返回一个当前未被占用的值, 不写库、不提交/回滚调用方事务,
+    也不接收既有账号(旧账号命名空间补配不在本函数职责内)。
+    """
+    from iesplan.identity import persistence as _persistence
+
+    for _ in range(20):
+        candidate = generate_namespace()
+        if _persistence.get_user_by_namespace(db, candidate) is None:
+            return candidate
+    raise RuntimeError("无法分配唯一的 public_namespace")
+
+
 def provision_user(
     db: Session,
     claims: dict[str, Any],
@@ -431,15 +448,8 @@ def provision_user(
         index += 1
         if index > 100:
             raise ExternalAuthError(reason="username_collision")
-    # 分配公开命名空间（CSPRNG，60 bit 熵；全局唯一，碰撞重试）
-    ns = None
-    for _ in range(20):
-        candidate = generate_namespace()
-        if _persistence.get_user_by_namespace(db, candidate) is None:
-            ns = candidate
-            break
-    if ns is None:
-        raise RuntimeError("无法分配唯一的 public_namespace")
+    # 分配公开命名空间（身份域唯一实现：CSPRNG，全局唯一，碰撞重试）
+    ns = allocate_public_namespace(db)
     email = claims.get("email") or None
     if isinstance(email, str):
         email = email.strip().lower() or None

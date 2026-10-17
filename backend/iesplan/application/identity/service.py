@@ -29,7 +29,6 @@ from iesplan import identity as identity_domain
 from iesplan import project as project_domain
 from iesplan.config import settings
 from iesplan.core.errors import ConflictError, ForbiddenError
-from iesplan.core.namespace import generate_namespace
 from iesplan.core.security import (
     hash_password,
     new_session_token,
@@ -175,8 +174,8 @@ def seed_builtin_admin(db: Session, password: str | None = None) -> None:
     种子身份数据的唯一归属(原 iesplan.db.seed_admin 整体迁移至此;
     db.py 只负责建表/迁移/触发器, 不再保留业务种子逻辑):
     - 已有 admin 角色有效授权则直接返回;
-    - 否则补齐 admin 系统角色, 建 admin 用户 + password 凭证
-      (requires_change=True), 初始密码取参数, 缺省取配置默认值,
+    - 否则补齐 admin 系统角色, 建 admin 用户(创建时分配公开命名空间)
+      + password 凭证(requires_change=True), 初始密码取参数, 缺省取配置默认值,
       强度不足只记低分不断言(沿用旧种子语义);
     - 管理员自授权(授权人即本人), 完成后提交(调用方拥有事务时由调用方提交
       亦可, 此处提交与 create_user 一致)。
@@ -190,7 +189,10 @@ def seed_builtin_admin(db: Session, password: str | None = None) -> None:
     pwd = password or settings.default_admin_password
     ok, _ = identity_domain.validate_new_password(pwd)
     user = identity_domain.create_user(
-        db, username="admin", display_name="管理员"
+        db,
+        username="admin",
+        display_name="管理员",
+        public_namespace=identity_domain.allocate_public_namespace(db),
     )
     identity_domain.add_credential(
         db,
@@ -297,16 +299,8 @@ def create_user(
         db, role, name="工程师" if role == identity_domain.ROLE_ENGINEER else "管理员"
     )
 
-    # 分配公开命名空间（CSPRNG，60 bit 熵；全局唯一，碰撞重试）
-    ns = None
-    for _ in range(20):
-        candidate = generate_namespace()
-        # 检查唯一性（极低碰撞概率，但仍需保证）
-        if identity_domain.get_user_by_namespace(db, candidate) is None:
-            ns = candidate
-            break
-    if ns is None:
-        raise RuntimeError("无法分配唯一的 public_namespace")
+    # 分配公开命名空间（身份域唯一实现：CSPRNG，60 bit 熵；全局唯一，碰撞重试）
+    ns = identity_domain.allocate_public_namespace(db)
     user = identity_domain.create_user(
         db,
         username=username,
