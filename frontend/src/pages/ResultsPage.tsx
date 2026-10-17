@@ -23,7 +23,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api } from '../api/client'
+import { listDatasets, listVersions as listDatasetVersions } from '../features/datasets'
+import { applyScheme, listVersions } from '../features/project-versions'
+import { getProject } from '../features/projects'
 import { downloadBlob } from '../shared/http'
 import { exportTaskReport, isNoAssessmentError } from '../application/exportTaskReport'
 import { exportPackage as createPackageExport, downloadExport } from '../features/exports'
@@ -502,13 +504,13 @@ export default function ResultsPage() {
     let cancelled = false
     const load = async () => {
       try {
-        const versions = await api.projects.versions(projectId)
+        const versions = await listVersions(projectId)
         const hit = versions.find((v) => v.id === snapRefs.project_version_id)
-        const page = await api.datasets.list({ project_id: projectId, limit: 50 })
+        const page = await listDatasets({ project_id: projectId, limit: 50 })
         const matched = new Set<number>()
         const shown: string[] = []
         for (const ds of page.items) {
-          const vs = await api.datasets.versions(projectId, ds.id)
+          const vs = await listDatasetVersions(projectId, ds.id)
           for (const v of vs) {
             if (snapRefs.dataset_version_ids.includes(v.id) && !matched.has(v.id)) {
               matched.add(v.id)
@@ -685,7 +687,7 @@ export default function ResultsPage() {
     const seq = schemeReadSeq.current + 1
     schemeReadSeq.current = seq
     try {
-      const view = await api.projects.get(projectId)
+      const view = await getProject(projectId)
       if (schemeReadSeq.current !== seq) return
       const rev = view.draft?.revision ?? null
       if (rev === null) {
@@ -721,7 +723,7 @@ export default function ResultsPage() {
     setSchemeBusy(true)
     try {
       // 发送打开确认框时捕获的修订; 发送前不重读最新, 否则绕过冲突检测。
-      const applied = await api.projects.applyScheme(projectId, {
+      const applied = await applyScheme(projectId, {
         task_id: pickedTaskId,
         solution_id: planSolution.solution_id,
         expected_revision: schemeRevision,

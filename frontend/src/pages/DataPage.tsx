@@ -18,7 +18,15 @@ import { useEffect, useRef, useState } from 'react'
 import { canSubmitScan, createHeadScan, nextScanStatus } from './uploadHeadScan'
 import type { HeadScanStatus } from './uploadHeadScan'
 
-import { api } from '../api/client'
+import {
+  bindVersion,
+  downloadTemplate as downloadDatasetTemplate,
+  listDatasets,
+  listVersions,
+  unbindVersion,
+  uploadDataset,
+  versionFieldNames,
+} from '../features/datasets'
 import { downloadBlob } from '../shared/http'
 import { DiagnosticsList } from '../components/DiagnosticsList'
 import { formatUtcOffset, useWorkbench } from './workbench'
@@ -158,8 +166,7 @@ function runUpload(opts: {
   file: File
 }): Promise<UploadOutcome> {
   const opt = resolutionOption(opts.resolutionValue)
-  return api.datasets
-    .uploadDetailed({
+  return uploadDataset({
       project_id: opts.projectId,
       name: opts.name,
       description: opts.description || undefined,
@@ -802,9 +809,9 @@ function VersionsDialog({
     setActionError(null)
     try {
       if (bind) {
-        await api.datasets.bind(projectId, v.id, v.dataset_id)
+        await bindVersion(projectId, v.id, v.dataset_id)
       } else {
-        await api.datasets.unbind(projectId, v.id)
+        await unbindVersion(projectId, v.id)
       }
       onChanged()
     } catch (err) {
@@ -932,8 +939,7 @@ function PreviewDialog({
       setError(pt('ies.data.sample_unavailable'))
       return
     }
-    api.datasets
-      .versionFields(projectId, dataset.id)
+    versionFieldNames(projectId, dataset.id)
       .then((names) => {
         if (!cancelled) setFields(names)
       })
@@ -1008,13 +1014,13 @@ export function DataPage() {
       setVersions({})
       setVersionsTarget(null)
       try {
-        const page = await api.datasets.list({ project_id: pid, limit: 100 })
+        const page = await listDatasets({ project_id: pid, limit: 100 })
         if (cancelled) return
         // 列表与全部版本同批发布: 任一版本读取失败即整组失败,
         // 不用 []/旧版本/猜质量报告伪成功; 合法空 versions 仍正常发布。
         const entries = await Promise.all(
           page.items.map(async (ds) => {
-            const vs = await api.datasets.versions(pid, ds.id)
+            const vs = await listVersions(pid, ds.id)
             return [ds.id, vs] as const
           }),
         )
@@ -1046,7 +1052,7 @@ export function DataPage() {
     setBusyBind(v.id)
     setNotice(null)
     try {
-      await api.datasets.bind(pid, v.id, ds.id)
+      await bindVersion(pid, v.id, ds.id)
       setNotice({ kind: 'success', text: pt('ies.data.bound_ok') })
       setRefreshTick((x) => x + 1)
     } catch (err) {
@@ -1059,7 +1065,7 @@ export function DataPage() {
   async function downloadTemplate() {
     setTemplateBusy(true)
     try {
-      const blob = await api.datasets.template()
+      const blob = await downloadDatasetTemplate()
       downloadBlob(blob, 'ies_data_template.csv')
       setNotice({ kind: 'success', text: pt('ies.data.template_downloaded') })
     } catch (err) {

@@ -12,22 +12,14 @@
  * 另覆盖 integer/decimal 字段类型透传（features/datasets 纯映射）。
  * fetch 用桩代替（node22 原生 Response），业务值全为桩内真实形态内容。
  *
- * 运行（Docker，复用已缓存的 playwright 镜像，不新增镜像/依赖）：
- *   docker run --rm -v "$PWD/frontend:/app:ro" --entrypoint sh \
- *     mcr.microsoft.com/playwright:v1.54.2-noble -c "
- *     mkdir -p /tmp/dv/api /tmp/dv/features/datasets &&
- *     cp /app/src/api/client.ts /app/src/api/hourlyPages.ts /tmp/dv/api/ &&
- *     cp /app/src/features/datasets/contracts.ts /app/src/features/datasets/mappers.ts /tmp/dv/features/datasets/ &&
- *     cp /app/src/types.ts /tmp/dv/types.ts && cp /app/tests/dataset-version-mapping.test.mjs /tmp/dv/ &&
- *     sed -i \"s#'../src/api/client.ts'#'./api/client.ts'#\" /tmp/dv/dataset-version-mapping.test.mjs &&
- *     sed -i \"s#from '../types'#from '../types.ts'#; s#from './hourlyPages'#from './hourlyPages.ts'#; s#from '../features/datasets/contracts'#from '../features/datasets/contracts.ts'#; s#from '../features/datasets/mappers'#from '../features/datasets/mappers.ts'#\" /tmp/dv/api/client.ts &&
- *     sed -i \"s#from '../../types'#from '../../types.ts'#\" /tmp/dv/features/datasets/contracts.ts /tmp/dv/features/datasets/mappers.ts &&
- *     node /tmp/dv/dataset-version-mapping.test.mjs"
- * （node22 自带类型剥离；仅给相对导入补机械后缀，逻辑与仓库文件一致；
- * client.ts 顶层无浏览器副作用。）
+ * 运行（Docker，通过 esbuild 打包执行）：
+ *   docker run --rm -v "$PWD/frontend:/workspace:ro" pies014b3-fe-build sh -c '
+ *     /app/node_modules/.bin/esbuild /workspace/tests/dataset-version-mapping.test.mjs --bundle --platform=node \
+ *       --format=esm --outfile=/tmp/dataset-version-mapping.mjs &&
+ *     node /tmp/dataset-version-mapping.mjs'
  */
 
-import { api } from '../src/api/client.ts'
+import { listDatasets, listVersions } from '../src/features/datasets/index.ts'
 
 let failures = 0
 function check(name, cond, detail = '') {
@@ -139,7 +131,7 @@ async function expectApiError(promise) {
 
 // 1. 真实形态版本：全部业务值保留，无猜测填充。
 {
-  const versions = await api.datasets.versions(7, 3)
+  const versions = await listVersions(7, 3)
   check('版本数', versions.length === 1, `n=${versions.length}`)
   const v = versions[0]
   check('身份三元组', v.id === 11 && v.dataset_id === 3 && v.version_no === 2)
@@ -156,20 +148,20 @@ async function expectApiError(promise) {
 
 // 2. 空版本列表合法为空。
 {
-  const versions = await api.datasets.versions(7, 9)
+  const versions = await listVersions(7, 9)
   check('空版本列表', Array.isArray(versions) && versions.length === 0)
 }
 
 // 3. 失败请求可见抛错，不回退空数据。
 {
-  const err = await expectApiError(api.datasets.versions(7, 5))
+  const err = await expectApiError(listVersions(7, 5))
   check('失败抛错', err !== null)
   check('服务端状态保留', err?.status === 500, `status=${err?.status}`)
 }
 
 // 4. 列表容忍 latest_version 缺席；空列表合法。
 {
-  const page = await api.datasets.list({ project_id: 7 })
+  const page = await listDatasets({ project_id: 7 })
   check('列表行数', page.items.length === 2, `n=${page.items.length}`)
   check('行身份', page.items[0].id === 3 && page.items[1].id === 4)
   // 首行 latest_version 为 null（无版本数据集）仍是合法行，不阻断列表。
@@ -177,13 +169,13 @@ async function expectApiError(promise) {
 
 // 5. 真空数据集列表：{datasets: []} 合法为空。
 {
-  const page = await api.datasets.list({ project_id: 8 })
+  const page = await listDatasets({ project_id: 8 })
   check('空数据集列表', Array.isArray(page.items) && page.items.length === 0)
 }
 
 // 6. 畸形信封（缺 versions 具名键）必须可见抛错，不得回退空列表。
 {
-  const err = await expectApiError(api.datasets.versions(7, 6))
+  const err = await expectApiError(listVersions(7, 6))
   check('畸形抛错', err !== null)
 }
 

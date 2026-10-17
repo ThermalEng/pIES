@@ -203,3 +203,83 @@ export interface ModelDiagnosticDto {
 
 /** 候选保存失败: 400 错误信封 params.diagnostics 中的聚合诊断条目。 */
 export type CandidateDiagnosticDto = ModelDiagnosticDto
+
+// ---------------------------------------------------------------------------
+// 草稿模型节(项目视图 draft.content.model; 2.0 名键设备与端点连接)
+// ---------------------------------------------------------------------------
+
+/** 草稿设备条目(2.0 名键, 无 id/状态/时间字段)。 */
+export interface DraftDeviceDto {
+  name: string
+  device_type: string
+  kind: string
+  params: Record<string, unknown>
+}
+
+/** 草稿连接条目(2.0 名键端点, 无类型/容量/损耗)。 */
+export interface DraftConnectionDto {
+  name: string
+  from_device: string
+  from_port: string
+  to_device: string
+  to_port: string
+}
+
+/** 草稿模型节(与视图 content.model 同形)。 */
+export interface DraftModelSectionDto {
+  devices: DraftDeviceDto[]
+  connections: DraftConnectionDto[]
+}
+
+// ---------------------------------------------------------------------------
+// 设备类型注册表(供画布设备选择器)
+// ---------------------------------------------------------------------------
+
+/** 注册表端口规格(与后端 _device_type_schema.ports 字段对应)。 */
+export interface DevicePortDto {
+  name: string
+  direction: 'in' | 'out'
+  energy_carrier: string
+  unit: string | null
+}
+
+/** 注册表参数规格(与后端 _parameter_schema 字段名对应)。 */
+export interface DeviceParameterSpecDto {
+  name?: string
+  unit: string | null
+  min: number | null
+  max: number | null
+  default: number | string | Record<string, number> | null
+  help_key?: string
+  enum?: Array<string | number | boolean> | null
+}
+
+/** 设备类型注册项(公开 DTO 用 names 字典, 载能只在 ports[].energy_carrier)。 */
+export interface DeviceTypeDto {
+  type_id: string
+  schema_version?: number
+  version?: string
+  names: Record<string, string>
+  ports: DevicePortDto[]
+  parameters: Record<string, DeviceParameterSpecDto>
+}
+
+/** 注册表响应: 精确 {items: [...]}。 */
+export interface DeviceTypeListResponseDto {
+  items: DeviceTypeDto[]
+}
+
+// ---------------------------------------------------------------------------
+// 项目模型校验(validation/run)
+// ---------------------------------------------------------------------------
+
+/** 校验报告(只消费 blocks_submit/diagnostics 两键)。 */
+export interface ValidationReportDto {
+  blocks_submit: unknown
+  diagnostics: unknown
+}
+
+/** 校验响应: 精确 {report: {...}}。 */
+export interface ValidationRunResponseDto {
+  report: ValidationReportDto
+}

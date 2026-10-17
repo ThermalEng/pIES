@@ -16,8 +16,7 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 
-import { api } from '../api/client'
-import { getCalcConfig, saveCalcConfig } from '../features/config'
+import { getCalcConfig, getDeploymentDefaults, saveCalcConfig } from '../features/config'
 import { Alert, Button, Card, EmptyState, FormField, Input, Select, Spinner, Textarea } from '../components/ui'
 import { errorMessage, useI18n } from '../i18n'
 import { pt } from '../i18n/pageMessages'
@@ -138,7 +137,7 @@ export default function ConfigPage(props: ConfigPageProps) {
           // 空白新建: 时间初值必须取统一部署配置公开值, 与其余字段同一次原子填入;
           // 取不到即明确报错, 不得静默留空冒充正常初值, 迟到响应不得覆盖用户已编辑值
           try {
-            const d = await api.deployment.defaults()
+            const d = await getDeploymentDefaults()
             if (cancelled) return
             const e = emptyFormState()
             setMode(e.mode)

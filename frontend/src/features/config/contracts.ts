@@ -19,3 +19,8 @@ export interface ConfigEnvelopeDto {
   calculation_config: CalculationConfigBody
   revision: number
 }
+
+/** 统一部署公开初值(与后端 /deployment/defaults 同形)。 */
+export interface DeploymentDefaultsDto {
+  calculation_defaults: { time_limit_seconds: number }
+}

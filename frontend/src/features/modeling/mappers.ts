@@ -8,7 +8,13 @@
 
 import type {
   CandidateSaveRequestDto,
+  DeviceParameterSpecDto,
+  DeviceTypeDto,
+  DeviceTypeListResponseDto,
+  DraftConnectionDto,
+  DraftDeviceDto,
   ValidRangeDto,
+  ValidationRunResponseDto,
 } from './contracts'
 import type { FormFieldError, FormFieldValue } from './form'
 import type {
@@ -21,6 +27,16 @@ import type {
   TemplateSummary,
 } from './model'
 import { MapperError } from './model'
+import type {
+  Connection,
+  Device,
+  DeviceKind,
+  DevicePortSpec,
+  DeviceTypeSpec,
+  Diagnostic,
+  DraftModelSection,
+  ValidationResult,
+} from '../../types'
 
 // ---------------------------------------------------------------------------
 // 数值(宪法 §7.3: 有限数值; 表单字符串在 mapper 边界解析)
@@ -713,4 +729,158 @@ export function yamlLineColumn(text: string, offset: number): { line: number; co
   const lastNewline = before.lastIndexOf('\n')
   const column = lastNewline >= 0 ? clamped - lastNewline : clamped + 1
   return { line, column }
+}
+
+// ---------------------------------------------------------------------------
+// 草稿模型节(项目视图 draft.content.model; 2.0 唯一项目建模事实)
+// ---------------------------------------------------------------------------
+
+/** 草稿内容设备条目 → 前端 Device(2.0 名键, 无 id/状态/时间字段)。 */
+export function deviceFromDraft(d: DraftDeviceDto): Device {
+  return {
+    name: String(d.name ?? ''),
+    device_type: String(d.device_type ?? ''),
+    kind: (d.kind as DeviceKind) ?? 'new',
+    params: d.params,
+  }
+}
+
+/** 草稿内容连接条目 → 前端 Connection(2.0 名键端点, 无类型/容量/损耗)。 */
+export function connFromDraft(c: DraftConnectionDto): Connection {
+  return {
+    name: String(c.name ?? ''),
+    from_device: String(c.from_device ?? ''),
+    from_port: String(c.from_port ?? ''),
+    to_device: String(c.to_device ?? ''),
+    to_port: String(c.to_port ?? ''),
+  }
+}
+
+/** 项目视图 draft.content.model → 前端 DraftModelSection(与旧聚合器同形)。 */
+export function modelSectionFromView(body: unknown): { revision: number; model: DraftModelSection } {
+  const view =
+    body !== null && typeof body === 'object' && !Array.isArray(body)
+      ? (body as { draft?: unknown })
+      : {}
+  const draft =
+    view.draft !== null && typeof view.draft === 'object' && !Array.isArray(view.draft)
+      ? (view.draft as { revision?: unknown; content?: unknown })
+      : {}
+  const content =
+    draft.content !== null && typeof draft.content === 'object' && !Array.isArray(draft.content)
+      ? (draft.content as { model?: unknown })
+      : {}
+  const model =
+    content.model !== null && typeof content.model === 'object' && !Array.isArray(content.model)
+      ? (content.model as { devices?: unknown; connections?: unknown })
+      : {}
+  return {
+    revision: Number(
+      (draft as { revision?: unknown }).revision ?? 1,
+    ),
+    model: {
+      devices: Array.isArray(model.devices)
+        ? (model.devices as DraftDeviceDto[]).map(deviceFromDraft)
+        : [],
+      connections: Array.isArray(model.connections)
+        ? (model.connections as DraftConnectionDto[]).map(connFromDraft)
+        : [],
+    },
+  }
+}
+
+/** 2.0 连接默认命名(与后端 upsert_connection 缺省名公式一致)。 */
+export function connectionName(
+  fromDevice: string,
+  fromPort: string,
+  toDevice: string,
+  toPort: string,
+): string {
+  return `${fromDevice}.${fromPort}->${toDevice}.${toPort}`
+}
+
+// ---------------------------------------------------------------------------
+// 设备类型注册表
+// ---------------------------------------------------------------------------
+
+/** 参数默认值适配:枚举为字符串, 数值为 number, 结构化对象原样透传数值项。 */
+export function paramDefaultValue(v: unknown): number | string | Record<string, number> | null {
+  if (typeof v === 'number') return v
+  if (typeof v === 'string') return v
+  if (typeof v === 'object' && v !== null) {
+    const out: Record<string, number> = {}
+    for (const [key, val] of Object.entries(v)) {
+      if (typeof val === 'number') out[key] = val
+    }
+    return Object.keys(out).length > 0 ? out : null
+  }
+  return null
+}
+
+/** 后端设备类型注册项 → 前端 DeviceTypeSpec(参数规格字段名适配 + 真实端口透传)。 */
+export function deviceTypeFromServer(s: DeviceTypeDto): DeviceTypeSpec {
+  const params = s.parameters
+  const ports: DevicePortSpec[] = s.ports.map((p) => ({
+    name: p.name,
+    direction: p.direction,
+    energy_carrier: p.energy_carrier,
+    unit: p.unit ?? null,
+  }))
+  // 注册表公开 DTO 用 names {zh-CN,en-US} 字典(无 name_zh/name_en 平铺字段),
+  // 载能只存在于 ports[].energy_carrier(无 energy_carriers 顶层数组): 直接按
+  // 端口声明顺序去重派生, 与 descriptor 同一身份, 不做形状复核与值过滤。
+  const names = s.names
+  const carriers = [...new Set(ports.map((p) => p.energy_carrier))]
+  return {
+    type_id: s.type_id,
+    version: s.version ?? (s.schema_version !== undefined ? String(s.schema_version) : ''),
+    name_zh: names['zh-CN'] ?? '',
+    name_en: names['en-US'] ?? '',
+    energy_carriers: carriers,
+    is_load: false,
+    capabilities: [],
+    model_method: 'mechanism',
+    stateful: false,
+    ports,
+    parameters: Object.fromEntries(
+      Object.entries(params).map(([name, p]: [string, DeviceParameterSpecDto]) => [
+        name,
+        {
+          unit: p.unit ?? null,
+          min: p.min ?? null,
+          max: p.max ?? null,
+          default: paramDefaultValue(p.default),
+          is_optimizable: false,
+          existing_default: null,
+          help_key: p.help_key ?? '',
+          enum: Array.isArray(p.enum) ? p.enum : null,
+        },
+      ]),
+    ),
+  }
+}
+
+/** 注册表响应 {items} → DeviceTypeSpec 列表。 */
+export function deviceTypeListFromServer(body: DeviceTypeListResponseDto): DeviceTypeSpec[] {
+  if (!Array.isArray(body.items)) throw new MapperError('GET /registry/device-types 响应缺少 items')
+  return body.items.map(deviceTypeFromServer)
+}
+
+// ---------------------------------------------------------------------------
+// 项目模型校验(validation/run)
+// ---------------------------------------------------------------------------
+
+/** 校验响应 {report:{blocks_submit, diagnostics}} → ValidationResult。 */
+export function validationFromServer(body: ValidationRunResponseDto): ValidationResult {
+  const report = body.report
+  if (report === null || typeof report !== 'object' || Array.isArray(report)) {
+    throw new MapperError('POST /validation/run 响应缺少 report')
+  }
+  if (!Array.isArray(report.diagnostics)) {
+    throw new MapperError('POST /validation/run 响应缺少 diagnostics')
+  }
+  return {
+    valid: report.blocks_submit !== true,
+    diagnostics: report.diagnostics as Diagnostic[],
+  }
 }

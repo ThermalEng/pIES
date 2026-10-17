@@ -11,7 +11,7 @@
 
 import { useCallback, useMemo, useState } from 'react'
 
-import { api } from '../../../api/client'
+import { getProject } from '../../projects'
 import { saveCandidate } from '../api'
 import type { CandidateModel, ModelDiagnostic, ModelSavePhase, SavedModelInfo } from '../model'
 import { CandidateSaveError } from '../model'
@@ -45,7 +45,7 @@ export function useCandidateSave(projectId: number): CandidateSaveController {
 
   /** 读取项目草稿修订(乐观锁; 失败时用 1 兜底会掩盖冲突, 因此直接抛出)。 */
   const resolveProjectRevision = useCallback(async (): Promise<number> => {
-    const project = await api.projects.get(projectId)
+    const project = await getProject(projectId)
     const revision = project.draft?.revision
     if (typeof revision !== 'number' || revision < 1) {
       throw new Error(`项目草稿修订不可用: ${String(revision)}`)

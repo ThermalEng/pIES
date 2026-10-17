@@ -16,7 +16,7 @@
  *     node /tmp/error-envelope.mjs'
  */
 
-import { api } from '../src/api/client.ts'
+import { validateModel } from '../src/features/modeling/index.ts'
 import { retryTask } from '../src/features/tasks/index.ts'
 import { errorMessage, translate } from '../src/i18n/index.ts'
 import { ApiError } from '../src/types.ts'
@@ -102,7 +102,7 @@ async function expectApiError(promise) {
 
 // 3. 成功响应的 diagnostics 仍可用。
 {
-  const result = await api.model.validate(7)
+  const result = await validateModel(7)
   check('校验结论可用', result.valid === true)
   check('成功诊断可用', result.diagnostics?.[0]?.code === 'V-1')
 }

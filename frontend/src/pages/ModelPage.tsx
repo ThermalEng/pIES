@@ -30,7 +30,16 @@ import type { Edge as RFEdge, Connection as RFConnection, Node as RFNode } from 
 import '@xyflow/react/dist/style.css'
 import { useNavigate } from 'react-router-dom'
 
-import { api } from '../api/client'
+import {
+  getModel,
+  listDeviceTypes,
+  removeConnection,
+  removeDevice,
+  sendCommands,
+  upsertConnection,
+  upsertDevice,
+  validateModel,
+} from '../features/modeling'
 import { ApiError } from '../types'
 import type { Diagnostic, DeviceTypeSpec } from '../types'
 import { useI18n, translateDiagnostic, errorMessage } from '../i18n'
@@ -216,7 +225,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
     }
     try {
       // 2.0 唯一项目建模事实: 项目视图草稿内容 model 节(名键设备与端点连接)。
-      const { model, revision } = await api.model.getModel(projectId)
+      const { model, revision } = await getModel(projectId)
       // 归属已作废(切换项目/卸载): 旧回包整体丢弃, 不发布任何状态。
       if (cancelledRef.current) return
       revisionRef.current = revision
@@ -273,8 +282,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   useEffect(() => {
     if (deviceTypes !== null || typesError) return
     let cancelled = false
-    void api.model
-      .deviceTypes()
+    void listDeviceTypes()
       .then((types) => {
         if (!cancelled) {
           // 注册表 schema 携带 enum 字段,前端参数表单按 spec.enum 渲染下拉/单选。
@@ -324,7 +332,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         const sameTypeCount = devices.filter((d) => d.deviceType === spec.type_id).length
         const name = uniqueDeviceName(defaultDeviceName(spec as DeviceTypeSpec, sameTypeCount, locale))
         const params = buildDefaultParams(spec as DeviceTypeSpec, 'new')
-        const { revision } = await api.model.upsertDevice(
+        const { revision } = await upsertDevice(
           projectId,
           {
             device_type: spec.type_id,
@@ -381,7 +389,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
         setSaveState('saving')
         if (!renamed) {
-          const { revision } = await api.model.upsertDevice(
+          const { revision } = await upsertDevice(
             projectId,
             {
               device_type: current.deviceType,
@@ -399,7 +407,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           const touched = connections.filter(
             (c) => c.fromDeviceId === deviceId || c.toDeviceId === deviceId,
           )
-          const { revision } = await api.model.sendCommands(
+          const { revision } = await sendCommands(
             projectId,
             [
               { type: 'model.remove_device', payload: { name: current.name } },
@@ -468,7 +476,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
         setSaveState('saving')
         // 服务端删设备级联移除关联连接, 本地同步裁剪。
-        const { revision } = await api.model.removeDevice(projectId, current.name, revisionRef.current)
+        const { revision } = await removeDevice(projectId, current.name, revisionRef.current)
         revisionRef.current = revision
         setDevices((prev) => prev.filter((d) => d.id !== deviceId))
         setConnections((prev) => prev.filter((c) => c.fromDeviceId !== deviceId && c.toDeviceId !== deviceId))
@@ -561,7 +569,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
         // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
         setSaveState('saving')
         // 2.0 连接只表达真实端点(设备名 + 注册表端口名), 无类型/容量/损耗字段
-        const { name, revision } = await api.model.upsertConnection(
+        const { name, revision } = await upsertConnection(
           projectId,
           {
             from_device: fromDevice.name,
@@ -609,7 +617,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
       try {
         // 写在途标保存中: 刷新按钮此间禁用, 读回旧修订不得覆盖本次保存。
         setSaveState('saving')
-        const { revision } = await api.model.removeConnection(projectId, connId, revisionRef.current)
+        const { revision } = await removeConnection(projectId, connId, revisionRef.current)
         revisionRef.current = revision
         setConnections((prev) => prev.filter((c) => c.id !== connId))
         setSelectedConnId((cur) => (cur === connId ? null : cur))
@@ -659,7 +667,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
     setValidating(true)
     setValidateError(null)
     try {
-      const result = await api.model.validate(projectId)
+      const result = await validateModel(projectId)
       setValidateResult(result.diagnostics)
     } catch (err) {
       setValidateError(errorMessage(err))
@@ -858,8 +866,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           onRetry={() => {
             setTypesError(false)
             setDeviceTypes(null)
-            void api.model
-              .deviceTypes()
+            void listDeviceTypes()
               .then(setDeviceTypes)
               .catch(() => setTypesError(true))
           }}
