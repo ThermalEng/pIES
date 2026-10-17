@@ -199,13 +199,70 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(page.getByText(templateDeviceId)).toBeVisible()
     await expect(page.getByText(/已发布|Published/i).first()).toBeVisible()
 
-    // 窄切片 /custom 回归: 查看精确 revision 详情，直读 schema_version 与摘要
+    // 窄切片 /custom 回归: 查看精确 revision 详情，断言实际 schema_version 真实值 2.0.0 (非仅标签)
     const v1Btn = page.locator('.ies-custom-card__rev', { hasText: 'v1' }).first()
     await expect(v1Btn).toBeVisible()
     await v1Btn.click()
     const revBox = page.locator('.ies-custom-revision')
     await expect(revBox).toBeVisible()
-    await expect(revBox.getByText(/schema 版本|schema version/i)).toBeVisible()
+    await expect(revBox.getByText(/v1/)).toBeVisible()
+    await expect(revBox.getByText(/2\.0\.0/)).toBeVisible()
+    // 点击返回回到列表
+    await page.getByRole('button', { name: /返回|Back/i }).click()
+    await expect(page.locator('.ies-custom-list')).toBeVisible()
+
+    // 真实检验 /custom 在线编辑 YAML 的「校验」按钮(覆盖无 template_id 草稿的原始 YAML 校验传输):
+    // (a) 打开创建编辑器，输入非法 YAML
+    await page.getByRole('button', { name: /创建模板|New template/i }).click()
+    const yamlInput = page.locator('#ies-custom-yaml')
+    await expect(yamlInput).toBeVisible()
+    const invalidYaml = 'schema: ies.device-model\nschema_version: "2.0.0"\ninvalid_key: true\n'
+    await yamlInput.fill(invalidYaml)
+    // 点击校验
+    await page.getByRole('button', { name: /校验|Validate/i }).click()
+    // 检验完整诊断可见
+    await expect(page.getByText(/校验失败|Validation failed/i)).toBeVisible()
+    await expect(page.locator('.ies-custom-diagnostics__item').first()).toBeVisible()
+    // 检验非法编辑内容原样保留未被清空
+    expect(await yamlInput.inputValue()).toBe(invalidYaml)
+
+    // (b) 替换为合法 YAML 再次校验
+    const validYaml = [
+      'schema: ies.device-model',
+      'schema_version: "2.0.0"',
+      'device:',
+      `  id: user.custom.valid_${Date.now()}`,
+      '  names:',
+      '    zh-CN: 有效模板',
+      '    en-US: Valid Template',
+      'inputs:',
+      '  properties:',
+      '    peak_power_kw:',
+      '      value:',
+      '        type: number',
+      '        unit: kW',
+      '        valid_range: {minimum: 0, maximum: 1000}',
+      '        default: 100',
+      'properties:',
+      '  cop:',
+      '    value: 3.2',
+      '    unit: "1"',
+      '    valid_range: {minimum: 1, maximum: 10}',
+      'interfaces:',
+      '  electricity_in:',
+      '    type: in',
+      '    carrier: electricity',
+      '    unit: kW',
+      '    valid_range: {minimum: 0, maximum: 1000}',
+      'equations:',
+      '  variables: {}',
+      '  relations: []',
+    ].join('\n') + '\n'
+    await yamlInput.fill(validYaml)
+    await page.getByRole('button', { name: /校验|Validate/i }).click()
+    // 校验成功，无阻断错误提示
+    await expect(page.getByText(/校验失败|Validation failed/i)).not.toBeVisible()
+    await expect(page.locator('.ies-custom-diagnostics__item')).toHaveCount(0)
     // 点击返回回到列表
     await page.getByRole('button', { name: /返回|Back/i }).click()
     await expect(page.locator('.ies-custom-list')).toBeVisible()

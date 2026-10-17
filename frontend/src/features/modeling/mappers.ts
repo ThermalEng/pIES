@@ -532,9 +532,7 @@ export function templateDetailFromServer(
     summary,
     document,
     inputs,
-    diagnostics: Array.isArray(body.diagnostics)
-      ? body.diagnostics.map(diagFromServer).filter((d): d is ModelDiagnostic => d !== null)
-      : [],
+    diagnostics: body.diagnostics.map(diagFromServer),
     raw: document ?? {},
   }
 }
@@ -563,17 +561,16 @@ export function projectModelFromServer(dto: ProjectModelDto): ProjectModelSummar
 export function savedModelFromServer(res: CandidateSaveResultDto): SavedModelInfo {
   const model = res.project_model
   const receipt = res.receipt
-  const summary = {
-    property_count: typeof receipt?.property_count === 'number' ? receipt.property_count : 0,
-    interface_count: typeof receipt?.interface_count === 'number' ? receipt.interface_count : 0,
-    relation_count: typeof receipt?.relation_count === 'number' ? receipt.relation_count : 0,
-  }
   return {
     model_id: model.device_id,
     device_id: model.device_id,
     suffix: model.suffix,
     base_device_id: model.base_device_id,
-    summary,
+    summary: {
+      property_count: receipt.property_count,
+      interface_count: receipt.interface_count,
+      relation_count: receipt.relation_count,
+    },
     project_revision: res.project_revision,
     source: model.source,
     template_id: model.template_id,
@@ -587,18 +584,18 @@ export function diagFromServer(dto: ModelDiagnosticDto): ModelDiagnostic {
   const loc = dto.location
   const params = dto.params
   return {
-    code: dto.code ?? 'MODEL-VAL-001',
+    code: dto.code,
     message_key: dto.message_key,
-    severity: dto.severity === 'blocking' || dto.severity === 'warning' || dto.severity === 'info' ? dto.severity : 'error',
-    blocking: dto.blocking === true,
+    severity: dto.severity,
+    blocking: dto.blocking,
     field: loc?.field ?? null,
     line: loc?.line ?? null,
     column: loc?.column ?? null,
     detail: typeof params?.detail === 'string' ? params.detail : null,
     expected: params?.expected ?? null,
     actual: params?.actual ?? null,
-    fix_hint_key: dto.fix_hint_key ?? null,
-    ref_ids: Array.isArray(dto.ref_ids) ? dto.ref_ids : [],
+    fix_hint_key: dto.fix_hint_key,
+    ref_ids: dto.ref_ids,
   }
 }
 

@@ -116,9 +116,9 @@ export interface TemplateDetailDto {
 export interface TemplateRevisionDetailDto {
   template: TemplateSummaryDto
   revision: TemplateRevisionDto
-  document: DeviceModelRawDto | null
-  receipt: Record<string, unknown> | null
-  summary: Record<string, unknown> | null
+  document: DeviceModelRawDto
+  receipt: Record<string, unknown>
+  summary: Record<string, unknown>
   diagnostics: ModelDiagnosticDto[]
 }
 
@@ -180,10 +180,22 @@ export interface ProjectModelListResponseDto {
   project_models: ProjectModelDto[]
 }
 
+/** 校验回执统计(与 backend devices.contracts2.canonical_receipt 结构统计一致)。 */
+export interface DeviceModelReceiptDto {
+  schema?: string
+  schema_version?: string
+  canonicalizer?: string
+  device_id?: string | null
+  property_count: number
+  interface_count: number
+  relation_count: number
+  is_template?: boolean
+}
+
 /** 候选保存成功响应(单资源信封 {project_model, receipt, project_revision})。 */
 export interface CandidateSaveResultDto {
   project_model: ProjectModelDto
-  receipt: Record<string, unknown>
+  receipt: DeviceModelReceiptDto
   project_revision: number
   /** 幂等重放标志(重试返回同一逻辑结果)。 */
   duplicate: boolean

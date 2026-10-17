@@ -67,7 +67,7 @@ export async function validateTemplateYaml(
   modelYaml: string,
 ): Promise<{ valid: boolean; diagnostics: ModelDiagnosticDto[] }> {
   return request<TemplateValidateResponseDto>(
-    `/model-templates/${encodeURIComponent('validate')}`,
+    '/model-templates/validate',
     {
       method: 'POST',
       body: { model_yaml: modelYaml },

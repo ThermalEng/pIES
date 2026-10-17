@@ -90,9 +90,9 @@ export interface TemplateDeleteResponseDto {
 export interface TemplateRevisionDetailResponseDto {
   template: TemplateDto
   revision: TemplateRevisionDto
-  document: Record<string, unknown> | null
-  receipt: Record<string, unknown> | null
-  summary: Record<string, unknown> | null
+  document: Record<string, unknown>
+  receipt: Record<string, unknown>
+  summary: Record<string, unknown>
   diagnostics: ModelDiagnosticDto[]
 }
 
