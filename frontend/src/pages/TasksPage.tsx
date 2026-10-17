@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api } from '../api/client'
+import { listDatasets, listVersions as listDatasetVersions } from '../features/datasets'
 import {
   DEFAULT_FORM,
   SUBMITTABLE_TYPES,
@@ -317,8 +318,7 @@ export default function TasksPage() {
   }, [projectId])
 
   useEffect(() => {
-    api.datasets
-      .list({ project_id: projectId, limit: 100 })
+    listDatasets({ project_id: projectId, limit: 100 })
       // 后端数据集创建即 draft 状态(无发布流程); 只要未废弃即列入名称解析
       .then((page) => {
         setDatasets(page.items.filter((d) => d.status !== 'deprecated'))
@@ -416,7 +416,7 @@ export default function TasksPage() {
         if (vids.length > 0) {
           for (const ds of datasets) {
             try {
-              const vs = await api.datasets.versions(projectId, ds.id)
+              const vs = await listDatasetVersions(projectId, ds.id)
               if (cancelled) return
               for (const v of vs) {
                 if (vids.includes(v.id) && !matched.has(v.id)) {

@@ -386,10 +386,11 @@ export interface ParameterSpec {
 /** 服务器端口声明(RR-P1-04: 来自设备 YAML 公开 descriptor, 前端画布按此渲染句柄)。 */
 export interface DevicePortSpec {
   name: string
-  port_type: PortType
+  port_type?: PortType
   direction: 'in' | 'out' | 'bidirectional'
   energy_carrier: EnergyCarrier
-  capacity_ref: string | null
+  capacity_ref?: string | null
+  unit?: string | null
 }
 
 export interface DeviceTypeSpec {
