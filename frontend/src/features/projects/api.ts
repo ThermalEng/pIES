@@ -5,8 +5,8 @@
  * 消费后交 mappers 映射; 畸形体自然抛错可见, 不做形状并集猜测。
  * 草稿语义命令 PUT 传输是项目业务协议, 由本文件公开(sendDraftCommand /
  * putDraftCommands); modeling/dataset/task 各自准备业务 payload 后调用,
- * 不在各家族复制命令组装。返回修订号严格消费后端实际值, 缺席即抛错,
- * 不回显期望值、不猜 revision 1。
+ * 不在各家族复制命令组装。返回修订号直接消费后端实际返回的新修订号,
+ * 冲突由 409 表达, 不回显期望值、不猜 revision 1。
  */
 
 import type {
@@ -102,18 +102,9 @@ function commandUnit(type: string): string {
   return type.split('.')[0] ?? 'model'
 }
 
-/** PUT draft 响应修订号严格消费(后端恒返新修订号; 缺席即抛错, 不回显期望值)。 */
-function revisionFromUpdate(body: DraftUpdateResponseDto, expectedRevision: number): number {
-  const revision = (body as DraftUpdateResponseDto).revision
-  if (typeof revision !== 'number' || !Number.isFinite(revision)) {
-    throw new Error(`invalid draft update envelope, expected_revision=${expectedRevision}`)
-  }
-  return revision
-}
-
 /**
  * 发送草稿语义命令(调用方给定显式期望修订, 写前不 GET;
- * 成功以后端返回为准, 冲突由后端 409 表达)。
+ * 成功直接消费后端返回的新修订号, 冲突由后端 409 表达)。
  */
 export async function putDraftCommands(
   projectId: number,
@@ -127,22 +118,17 @@ export async function putDraftCommands(
       commands: commands.map((c) => makeCommand(projectId, expectedRevision, c.type, c.payload, commandUnit(c.type))),
     },
   })
-  return { revision: revisionFromUpdate(body, expectedRevision) }
+  return { revision: body.revision }
 }
 
 /**
  * 发送单条草稿语义命令(先取项目视图当前草稿修订作乐观锁, 再 PUT)。
- * 修订不可用时直接抛错, 不用 1 兜底掩盖冲突。
  */
 export async function sendDraftCommand(
   projectId: number,
   type: string,
   payload: Record<string, unknown>,
 ): Promise<{ revision: number }> {
-  const view = await getProject(projectId)
-  const expectedRevision = view.draft?.revision
-  if (typeof expectedRevision !== 'number' || !Number.isFinite(expectedRevision)) {
-    throw new Error(`项目草稿修订不可用: ${String(expectedRevision)}`)
-  }
-  return putDraftCommands(projectId, [{ type, payload }], expectedRevision)
+  const body = await request<ProjectViewResponseDto>(`/projects/${projectId}`)
+  return putDraftCommands(projectId, [{ type, payload }], body.draft.revision)
 }

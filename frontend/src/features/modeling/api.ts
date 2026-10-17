@@ -19,10 +19,12 @@
  */
 
 import { putDraftCommands } from '../projects'
+import type { ProjectViewResponseDto } from '../projects'
+import { runValidation } from '../validation'
 import { request } from '../../shared/http'
 import { ApiError } from '../../types'
 import type { ConnectionInput, DeviceInput, DeviceTypeSpec, DraftModelSection, ValidationResult } from '../../types'
-import type { DeviceTypeListResponseDto, ValidationRunResponseDto } from './contracts'
+import type { DeviceTypeListResponseDto } from './contracts'
 import {
   buildCandidateRequest,
   connectionName,
@@ -34,7 +36,6 @@ import {
   savedModelFromServer,
   templateDetailFromServer,
   templateSummaryFromServer,
-  validationFromServer,
 } from './mappers'
 import type { CandidateModel, ModelDiagnostic, ProjectModelSummary, SavedModelInfo, TemplateDetail, TemplateSummary } from './model'
 import { CandidateSaveError, MapperError } from './model'
@@ -135,7 +136,7 @@ export async function saveCandidate(projectId: number, candidate: CandidateModel
 
 /** 读项目视图草稿内容 model 节(2.0 名键设备与端点连接, 附带草稿修订号)。 */
 export async function getModel(projectId: number): Promise<{ revision: number; model: DraftModelSection }> {
-  const body = await request<unknown>(`/projects/${projectId}`)
+  const body = await request<ProjectViewResponseDto>(`/projects/${projectId}`)
   return modelSectionFromView(body)
 }
 
@@ -208,10 +209,9 @@ export async function removeConnection(projectId: number, name: string, expected
   return sendCommands(projectId, [{ type: 'model.remove_connection', payload: { name } }], expectedRevision)
 }
 
-/** 运行项目模型校验(validation/run → {report:{blocks_submit, diagnostics}})。 */
+/** 运行项目模型校验(复用 validation feature 公开能力)。 */
 export async function validateModel(projectId: number): Promise<ValidationResult> {
-  const body = await request<ValidationRunResponseDto>(`/projects/${projectId}/validation/run`, { method: 'POST' })
-  return validationFromServer(body)
+  return runValidation(projectId)
 }
 
 /** 设备类型注册表(公开, 供画布; 精确 {items} 信封)。 */

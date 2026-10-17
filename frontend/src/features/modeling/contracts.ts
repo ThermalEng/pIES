@@ -22,6 +22,8 @@
  * 依赖方向: features/modeling → ../../types(共享错误类型)/../../shared/http(HTTP 层)。
  */
 
+import type { DeviceKind } from '../../types'
+
 // ---------------------------------------------------------------------------
 // 模板 inputs(与后端 TemplateInputSpec / device-model-2.0.0.schema.json 对应)
 // ---------------------------------------------------------------------------
@@ -212,7 +214,7 @@ export type CandidateDiagnosticDto = ModelDiagnosticDto
 export interface DraftDeviceDto {
   name: string
   device_type: string
-  kind: string
+  kind: DeviceKind
   params: Record<string, unknown>
 }
 
@@ -232,33 +234,30 @@ export interface DraftModelSectionDto {
 }
 
 // ---------------------------------------------------------------------------
-// 设备类型注册表(供画布设备选择器)
+// 设备类型注册表(供画布设备选择器, 与后端 selector.py 严格一致)
 // ---------------------------------------------------------------------------
 
 /** 注册表端口规格(与后端 _device_type_schema.ports 字段对应)。 */
 export interface DevicePortDto {
   name: string
-  direction: 'in' | 'out'
+  direction: string
   energy_carrier: string
   unit: string | null
 }
 
-/** 注册表参数规格(与后端 _parameter_schema 字段名对应)。 */
+/** 注册表参数规格(与后端 _parameter_schema 字段对应: name, unit, min, max, default)。 */
 export interface DeviceParameterSpecDto {
-  name?: string
+  name: string
   unit: string | null
   min: number | null
   max: number | null
   default: number | string | Record<string, number> | null
-  help_key?: string
-  enum?: Array<string | number | boolean> | null
 }
 
 /** 设备类型注册项(公开 DTO 用 names 字典, 载能只在 ports[].energy_carrier)。 */
 export interface DeviceTypeDto {
   type_id: string
-  schema_version?: number
-  version?: string
+  schema_version: string
   names: Record<string, string>
   ports: DevicePortDto[]
   parameters: Record<string, DeviceParameterSpecDto>
@@ -267,19 +266,4 @@ export interface DeviceTypeDto {
 /** 注册表响应: 精确 {items: [...]}。 */
 export interface DeviceTypeListResponseDto {
   items: DeviceTypeDto[]
-}
-
-// ---------------------------------------------------------------------------
-// 项目模型校验(validation/run)
-// ---------------------------------------------------------------------------
-
-/** 校验报告(只消费 blocks_submit/diagnostics 两键)。 */
-export interface ValidationReportDto {
-  blocks_submit: unknown
-  diagnostics: unknown
-}
-
-/** 校验响应: 精确 {report: {...}}。 */
-export interface ValidationRunResponseDto {
-  report: ValidationReportDto
 }

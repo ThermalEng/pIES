@@ -12,6 +12,7 @@ import type { DatasetUploadInput } from '../../types'
 import { request, requestBlob } from '../../shared/http'
 import { sendDraftCommand } from '../projects'
 import type {
+  DatasetCreateResponseDto,
   DatasetDetailResponseDto,
   DatasetsListResponseDto,
   DatasetUploadResponseDto,
@@ -67,7 +68,7 @@ export async function uploadDataset(
     throw new ApiError(400, null, 'ies.error.unknown')
   }
   // 1) 创建数据集元数据
-  const created = (await request<unknown>(`/projects/${projectId}/datasets`, {
+  const created = await request<DatasetCreateResponseDto>(`/projects/${projectId}/datasets`, {
     method: 'POST',
     body: {
       name: input.name,
@@ -75,8 +76,8 @@ export async function uploadDataset(
       source_category: 'user_upload',
       license: input.license ?? null,
     },
-  })) as { dataset: { id: unknown } }
-  const datasetId = Number((created.dataset as { id: unknown }).id)
+  })
+  const datasetId = created.dataset.id
   // 2) 上传版本(multipart: file/resolution/utc_offset_minutes/fields/meta)
   const formData = new FormData()
   formData.append('file', input.file)

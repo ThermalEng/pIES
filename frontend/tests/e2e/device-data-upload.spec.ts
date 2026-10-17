@@ -14,7 +14,7 @@ import { buildMinimalModel, createEngineer, loginToken, requestJson } from './se
 
 const STEP_CSV = [
   '# schema: ies.device-data',
-  '# schema_version: 2.0.0',
+  '# schema_version: 2.1.0',
   '# dataset_id: e2e_history',
   '# device_id: ies.device.electric_load',
   '# source_mode: data_predict',

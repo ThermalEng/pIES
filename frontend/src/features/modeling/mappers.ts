@@ -14,8 +14,8 @@ import type {
   DraftConnectionDto,
   DraftDeviceDto,
   ValidRangeDto,
-  ValidationRunResponseDto,
 } from './contracts'
+import type { ProjectViewResponseDto } from '../projects'
 import type { FormFieldError, FormFieldValue } from './form'
 import type {
   CandidateModel,
@@ -30,12 +30,9 @@ import { MapperError } from './model'
 import type {
   Connection,
   Device,
-  DeviceKind,
   DevicePortSpec,
   DeviceTypeSpec,
-  Diagnostic,
   DraftModelSection,
-  ValidationResult,
 } from '../../types'
 
 // ---------------------------------------------------------------------------
@@ -738,9 +735,9 @@ export function yamlLineColumn(text: string, offset: number): { line: number; co
 /** 草稿内容设备条目 → 前端 Device(2.0 名键, 无 id/状态/时间字段)。 */
 export function deviceFromDraft(d: DraftDeviceDto): Device {
   return {
-    name: String(d.name ?? ''),
-    device_type: String(d.device_type ?? ''),
-    kind: (d.kind as DeviceKind) ?? 'new',
+    name: d.name,
+    device_type: d.device_type,
+    kind: d.kind,
     params: d.params,
   }
 }
@@ -748,43 +745,21 @@ export function deviceFromDraft(d: DraftDeviceDto): Device {
 /** 草稿内容连接条目 → 前端 Connection(2.0 名键端点, 无类型/容量/损耗)。 */
 export function connFromDraft(c: DraftConnectionDto): Connection {
   return {
-    name: String(c.name ?? ''),
-    from_device: String(c.from_device ?? ''),
-    from_port: String(c.from_port ?? ''),
-    to_device: String(c.to_device ?? ''),
-    to_port: String(c.to_port ?? ''),
+    name: c.name,
+    from_device: c.from_device,
+    from_port: c.from_port,
+    to_device: c.to_device,
+    to_port: c.to_port,
   }
 }
 
-/** 项目视图 draft.content.model → 前端 DraftModelSection(与旧聚合器同形)。 */
-export function modelSectionFromView(body: unknown): { revision: number; model: DraftModelSection } {
-  const view =
-    body !== null && typeof body === 'object' && !Array.isArray(body)
-      ? (body as { draft?: unknown })
-      : {}
-  const draft =
-    view.draft !== null && typeof view.draft === 'object' && !Array.isArray(view.draft)
-      ? (view.draft as { revision?: unknown; content?: unknown })
-      : {}
-  const content =
-    draft.content !== null && typeof draft.content === 'object' && !Array.isArray(draft.content)
-      ? (draft.content as { model?: unknown })
-      : {}
-  const model =
-    content.model !== null && typeof content.model === 'object' && !Array.isArray(content.model)
-      ? (content.model as { devices?: unknown; connections?: unknown })
-      : {}
+/** 项目视图 draft.content.model → 前端 DraftModelSection。 */
+export function modelSectionFromView(view: ProjectViewResponseDto): { revision: number; model: DraftModelSection } {
   return {
-    revision: Number(
-      (draft as { revision?: unknown }).revision ?? 1,
-    ),
+    revision: view.draft.revision,
     model: {
-      devices: Array.isArray(model.devices)
-        ? (model.devices as DraftDeviceDto[]).map(deviceFromDraft)
-        : [],
-      connections: Array.isArray(model.connections)
-        ? (model.connections as DraftConnectionDto[]).map(connFromDraft)
-        : [],
+      devices: view.draft.content.model.devices.map(deviceFromDraft),
+      connections: view.draft.content.model.connections.map(connFromDraft),
     },
   }
 }
@@ -833,27 +808,20 @@ export function deviceTypeFromServer(s: DeviceTypeDto): DeviceTypeSpec {
   const carriers = [...new Set(ports.map((p) => p.energy_carrier))]
   return {
     type_id: s.type_id,
-    version: s.version ?? (s.schema_version !== undefined ? String(s.schema_version) : ''),
+    schema_version: s.schema_version ?? '2.0.0',
     name_zh: names['zh-CN'] ?? '',
     name_en: names['en-US'] ?? '',
     energy_carriers: carriers,
-    is_load: false,
-    capabilities: [],
-    model_method: 'mechanism',
-    stateful: false,
     ports,
     parameters: Object.fromEntries(
       Object.entries(params).map(([name, p]: [string, DeviceParameterSpecDto]) => [
         name,
         {
+          name: p.name,
           unit: p.unit ?? null,
           min: p.min ?? null,
           max: p.max ?? null,
           default: paramDefaultValue(p.default),
-          is_optimizable: false,
-          existing_default: null,
-          help_key: p.help_key ?? '',
-          enum: Array.isArray(p.enum) ? p.enum : null,
         },
       ]),
     ),
@@ -862,25 +830,5 @@ export function deviceTypeFromServer(s: DeviceTypeDto): DeviceTypeSpec {
 
 /** 注册表响应 {items} → DeviceTypeSpec 列表。 */
 export function deviceTypeListFromServer(body: DeviceTypeListResponseDto): DeviceTypeSpec[] {
-  if (!Array.isArray(body.items)) throw new MapperError('GET /registry/device-types 响应缺少 items')
   return body.items.map(deviceTypeFromServer)
-}
-
-// ---------------------------------------------------------------------------
-// 项目模型校验(validation/run)
-// ---------------------------------------------------------------------------
-
-/** 校验响应 {report:{blocks_submit, diagnostics}} → ValidationResult。 */
-export function validationFromServer(body: ValidationRunResponseDto): ValidationResult {
-  const report = body.report
-  if (report === null || typeof report !== 'object' || Array.isArray(report)) {
-    throw new MapperError('POST /validation/run 响应缺少 report')
-  }
-  if (!Array.isArray(report.diagnostics)) {
-    throw new MapperError('POST /validation/run 响应缺少 diagnostics')
-  }
-  return {
-    valid: report.blocks_submit !== true,
-    diagnostics: report.diagnostics as Diagnostic[],
-  }
 }

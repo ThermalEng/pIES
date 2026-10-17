@@ -17,6 +17,7 @@ export {
 export type { DatasetUploadDetailedInput } from './api'
 export { datasetVersionFromServer, qualityFromServer } from './mappers'
 export type {
+  DatasetCreateResponseDto,
   DatasetDetailResponseDto,
   DatasetFieldDto,
   DatasetListEntryDto,

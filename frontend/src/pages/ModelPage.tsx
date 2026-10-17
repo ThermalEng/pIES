@@ -41,7 +41,7 @@ import {
   validateModel,
 } from '../features/modeling'
 import { ApiError } from '../types'
-import type { Diagnostic, DeviceTypeSpec } from '../types'
+import type { Diagnostic, DeviceTypeSpec, ParameterSpec } from '../types'
 import { useI18n, translateDiagnostic, errorMessage } from '../i18n'
 import { pt } from '../i18n/pageMessages'
 import {
@@ -50,7 +50,6 @@ import {
   Icon,
   IconButton,
   Input,
-  Select,
   SeverityBadge,
   Spinner,
 } from '../components/ui'
@@ -86,12 +85,9 @@ interface IssueItem {
   deviceId?: string
 }
 
-/** 参数规格(类型已在 types.ParameterSpec 声明 enum, 此处直接复用)。 */
-type ParamSpecExt = DeviceTypeSpec['parameters'][string]
-
-interface ExtendedDeviceTypeSpec extends Omit<DeviceTypeSpec, 'parameters'> {
-  parameters: Record<string, ParamSpecExt>
-}
+/** 参数规格。 */
+type ParamSpecExt = ParameterSpec
+type ExtendedDeviceTypeSpec = DeviceTypeSpec
 
 const CARRIER_COLOR: Record<string, string> = {
   electricity: '#0e5cad',
@@ -986,14 +982,10 @@ function ModelCanvas({ projectId }: { projectId: number }) {
 /** 注册表缺失时兜底的空 spec(节点仍可渲染,参数表单为空)。 */
 const EMPTY_SPEC: ExtendedDeviceTypeSpec = {
   type_id: '',
-  version: '',
+  schema_version: '2.0.0',
   name_zh: '',
   name_en: '',
   energy_carriers: [],
-  is_load: false,
-  capabilities: [],
-  model_method: 'mechanism',
-  stateful: false,
   ports: [],
   parameters: {},
 }
@@ -1190,28 +1182,6 @@ function DeviceSidebar({
 
   const commitParam = (key: string, specParam: ParamSpecExt) => {
     const draft = paramDrafts[key] ?? ''
-    // 枚举类参数: 保留字符串字面量(如 'heating'),不做 Number 强制。
-    if (Array.isArray(specParam.enum) && specParam.enum.length > 0) {
-      const raw = String(draft)
-      const allowed = specParam.enum.map((v) => String(v))
-      if (raw === '') {
-        const next = { ...device.params }
-        delete next[key]
-        onPatch({ params: next })
-        setErrors((prev) => ({ ...prev, [key]: null }))
-        return
-      }
-      if (!allowed.includes(raw)) {
-        setErrors((prev) => ({
-          ...prev,
-          [key]: lt('sidebar.param_invalid', { min: allowed.join('/'), max: allowed.join('/') }),
-        }))
-        return
-      }
-      onPatch({ params: { ...device.params, [key]: raw } })
-      setErrors((prev) => ({ ...prev, [key]: null }))
-      return
-    }
     // 结构化参数(字典,如 import_tariff={peak,flat,valley}):子键全部填齐才提交。
     if (typeof draft === 'object') {
       const subKeys = Object.keys(draft)
@@ -1365,17 +1335,13 @@ function DeviceSidebar({
         {paramKeys.length === 0 ? <p>{lt('sidebar.params_none')}</p> : null}
         {paramKeys.map((key) => {
           const p = spec.parameters[key]
-          const hasEnum = Array.isArray(p.enum) && p.enum.length > 0
           // 结构化参数(默认值为对象,如 import_tariff):按 spec 判定,避免草稿缺失时渲染错位
-          const isDict =
-            !hasEnum &&
-            ((typeof p.default === 'object' && p.default !== null) ||
-              (typeof p.existing_default === 'object' && p.existing_default !== null))
+          const isDict = typeof p.default === 'object' && p.default !== null
           // 字典草稿:未初始化(参数被清空)时回退 spec 默认值做子键骨架
           const dictDraft: Record<string, string> =
             typeof paramDrafts[key] === 'object' && paramDrafts[key] !== null
               ? (paramDrafts[key] as Record<string, string>)
-              : (draftsOfValue(isDict ? (p.default ?? p.existing_default) : null) as Record<string, string>)
+              : (draftsOfValue(isDict ? p.default : null) as Record<string, string>)
           const range = isDict ? (p.unit ?? '') : `${p.min ?? '—'} ~ ${p.max ?? '—'}`
           return (
             <div className="mp-param" key={key}>
@@ -1394,39 +1360,7 @@ function DeviceSidebar({
                 </span>
               </div>
               <div className="mp-param__input-wrap">
-                {hasEnum ? (
-                  <Select
-                    className="mp-param__input"
-                    value={String(paramDrafts[key] ?? '')}
-                    aria-label={`${key}${p.unit ? ` (${p.unit})` : ''}`}
-                    aria-describedby={errors[key] ? `mp-param-err-${key}` : undefined}
-                    invalid={Boolean(errors[key])}
-                    onChange={(event) => {
-                      const v = event.target.value
-                      setParamDrafts((prev) => ({ ...prev, [key]: v }))
-                      // 下拉选择直接提交(避免浏览器对 number 输入的非数字清空)
-                      const allowed = (p.enum ?? []).map((x) => String(x))
-                      if (v === '') {
-                        const next = { ...device.params }
-                        delete next[key]
-                        onPatch({ params: next })
-                      } else if (allowed.includes(v)) {
-                        onPatch({ params: { ...device.params, [key]: v } })
-                      }
-                      setErrors((prev) => ({ ...prev, [key]: null }))
-                    }}
-                  >
-                    <option value="">{lt('sidebar.param_unset')}</option>
-                    {(p.enum ?? []).map((opt) => {
-                      const label = String(opt)
-                      return (
-                        <option key={label} value={label}>
-                          {label}
-                        </option>
-                      )
-                    })}
-                  </Select>
-                ) : isDict ? (
+                {isDict ? (
                   /* 结构化参数(如 import_tariff 分时电价):按子键渲染子输入 */
                   <div className="mp-param__dict">
                     {Object.keys(dictDraft).map((subKey) => (
@@ -1463,19 +1397,13 @@ function DeviceSidebar({
                     onBlur={() => commitParam(key, p)}
                   />
                 )}
-                <span className="mp-param__range" title={p.help_key}>
+                <span className="mp-param__range">
                   {range}
                 </span>
               </div>
               {errors[key] ? (
                 <div id={`mp-param-err-${key}`} className="mp-param__range" role="alert" style={{ color: 'var(--ies-danger-text)' }}>
                   {errors[key]}
-                </div>
-              ) : null}
-              {p.is_optimizable ? (
-                <div className="mp-param__opt">
-                  <Icon name="info" size={11} />
-                  {lt('sidebar.param_opt')}
                 </div>
               ) : null}
             </div>

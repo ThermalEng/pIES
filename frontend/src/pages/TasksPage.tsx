@@ -15,7 +15,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api } from '../api/client'
 import { listDatasets, listVersions as listDatasetVersions } from '../features/datasets'
 import {
   DEFAULT_FORM,
@@ -35,6 +34,7 @@ import {
   newSubmitNonce,
   parseEvaluation,
   retryTask,
+  saveWorkingInputs,
   serializeParams,
   workingOfForm,
 } from '../features/tasks'
@@ -616,9 +616,9 @@ export default function TasksPage() {
             return true
           }
           if (expectedRevision === undefined) {
-            await api.tasks.saveWorkingInputs(projectId, working)
+            await saveWorkingInputs(projectId, working)
           } else {
-            await api.tasks.saveWorkingInputs(projectId, working, expectedRevision)
+            await saveWorkingInputs(projectId, working, expectedRevision)
           }
           // 切换后落定的旧保存作废, 不碰新选择的状态; 但落定的值确已
           // 写入服务端, lastSynced 按实际落定值更新(后续去重依据)。

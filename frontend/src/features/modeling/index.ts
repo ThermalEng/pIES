@@ -27,7 +27,6 @@ export {
   deviceTypeFromServer,
   deviceTypeListFromServer,
   modelSectionFromView,
-  validationFromServer,
 } from './mappers'
 export type {
   DeviceParameterSpecDto,
@@ -36,6 +35,4 @@ export type {
   DraftConnectionDto,
   DraftDeviceDto,
   DraftModelSectionDto,
-  ValidationReportDto,
-  ValidationRunResponseDto,
 } from './contracts'

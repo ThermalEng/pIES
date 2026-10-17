@@ -14,10 +14,6 @@ import type {
   TaskType,
 } from '../types'
 import {
-  putDraftCommands as putProjectDraftCommands,
-  sendDraftCommand as sendProjectDraftCommand,
-} from '../features/projects'
-import {
   getResult,
   listAssessments,
   assess as assessResult,
@@ -58,26 +54,7 @@ export const api = {
 
   // 校验请求归 features/validation 所有(页面直接消费公开入口), 本聚合器不再保留委托。
 
-  tasks: {
-    // 任务请求归 features/tasks 公开入口所有:
-    // list/get/loadDraft/create/cancel/retry/inputs 均已迁出, 本聚合器
-    // 仅保留 saveWorkingInputs(任务业务 payload), 经 features/projects
-    // 唯一公开草稿传输发送, 不在本文件重复命令组装。
-    async saveWorkingInputs(
-      projectId: number,
-      working: Record<string, unknown>,
-      expectedRevision?: number,
-    ): Promise<{ revision: number }> {
-      if (expectedRevision === undefined) {
-        return sendProjectDraftCommand(projectId, 'task.set_working_inputs', { working })
-      }
-      return putProjectDraftCommands(
-        projectId,
-        [{ type: 'task.set_working_inputs', payload: { working } }],
-        expectedRevision,
-      )
-    },
-  },
+  // 任务请求归 features/tasks 公开入口所有(页面直接消费公开入口), 本聚合器不再保留委托。
 
   results: {
     result: getResult,

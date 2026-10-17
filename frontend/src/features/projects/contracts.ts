@@ -15,7 +15,7 @@
  * modeling/dataset/task 各自准备业务 payload, 共用同一传输, 不复制。
  */
 
-import type { Currency, ProjectRole, ProjectStatus } from '../../types'
+import type { Currency, DeviceKind, ProjectRole, ProjectStatus } from '../../types'
 
 // ---------------------------------------------------------------------------
 // 项目主体(project_to_dict + 行内 my_role)
@@ -83,7 +83,37 @@ export interface DraftBindingDto {
   note?: string | null
 }
 
-/** 视图草稿(draft_to_dict + 内容文档; content 仅消费 task_working_inputs 单键)。 */
+/** 草稿内容模型设备条目。 */
+export interface DraftContentDeviceDto {
+  name: string
+  device_type: string
+  kind: DeviceKind
+  params: Record<string, unknown>
+}
+
+/** 草稿内容模型连接条目。 */
+export interface DraftContentConnectionDto {
+  name: string
+  from_device: string
+  from_port: string
+  to_device: string
+  to_port: string
+}
+
+/** 草稿内容 model 节。 */
+export interface DraftContentModelDto {
+  devices: DraftContentDeviceDto[]
+  connections: DraftContentConnectionDto[]
+}
+
+/** 草稿内容文档(初始骨架见 backend project/content.py: schema_version, model, calc_config 等)。 */
+export interface DraftContentDto {
+  model: DraftContentModelDto
+  task_working_inputs?: Record<string, unknown> | null
+  [key: string]: unknown
+}
+
+/** 视图草稿(draft_to_dict + 内容文档)。 */
 export interface DraftViewDto {
   id: number
   project_id: number
@@ -94,15 +124,13 @@ export interface DraftViewDto {
   updated_at: string
   created_at: string
   dataset_bindings?: DraftBindingDto[] | null
-  content?: {
-    task_working_inputs?: Record<string, unknown> | null
-  } | null
+  content: DraftContentDto
 }
 
 /** 项目视图响应: 精确 {project, draft, versions, my_role}(versions 由版本特性消费, 此处不消费)。 */
 export interface ProjectViewResponseDto {
   project: ProjectDto
-  draft: DraftViewDto | null
+  draft: DraftViewDto
   my_role: unknown
 }
 
