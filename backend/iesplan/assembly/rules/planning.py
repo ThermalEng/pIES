@@ -197,11 +197,7 @@ def _check_expression(
             {"expression": expr, "detail": str(exc)},
         )
     except ExpressionCodeError as exc:
-        symbol = ""
-        try:
-            symbol = str(exc.params.get("variable", ""))
-        except Exception:
-            symbol = ""
+        symbol = str(exc.params.get("variable", ""))
         _plan_fail(
             diags, ASM_PLAN_UNDEF, field, "undefined_identifier",
             {"expression": expr, "identifier": symbol or str(exc)[:80]},
