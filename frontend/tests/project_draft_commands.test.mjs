@@ -20,6 +20,7 @@
 import { putDraftCommands, sendDraftCommand } from '../src/features/projects/index.ts'
 import { modelSectionFromView, deviceTypeFromServer } from '../src/features/modeling/index.ts'
 import { saveWorkingInputs } from '../src/features/tasks/index.ts'
+import { derivePorts } from '../src/pages/model/canvasModel.ts'
 import { ApiError } from '../src/types.ts'
 
 let failures = 0
@@ -198,30 +199,40 @@ globalThis.fetch = async (url, init = {}) => {
 }
 
 // ---------------------------------------------------------------------------
-// 4. deviceTypeFromServer: 后端 selector.py 规范精确映射
+// 4. deviceTypeFromServer 与 derivePorts: 后端 selector.py 规范与全部五种接口类型
 // ---------------------------------------------------------------------------
 {
   const typeDto = {
-    type_id: 'ies.device.heat_pump',
-    schema_version: '2.0.0',
-    names: { 'zh-CN': '热泵', 'en-US': 'Heat Pump' },
+    type_id: 'ies.device.solar_collector',
+    schema_version: '2.1.0',
+    names: { 'zh-CN': '太阳能集热器', 'en-US': 'Solar Collector' },
     ports: [
-      { name: 'electricity_in', direction: 'in', energy_carrier: 'electric', unit: 'kW' },
+      { name: 'water_in', direction: 'in', energy_carrier: 'water', unit: 'm3/h' },
       { name: 'heat_out', direction: 'out', energy_carrier: 'heat', unit: 'kW' },
+      { name: 'storage_loop', direction: 'bidirectional', energy_carrier: 'thermal_oil', unit: 'kW' },
+      { name: 'solar_irradiance', direction: 'predefined', energy_carrier: 'solar_radiation', unit: 'W/m2' },
+      { name: 'ambient_loss', direction: 'blind', energy_carrier: 'ambient_heat', unit: 'kW' },
     ],
     parameters: {
-      cop: { name: 'cop', unit: null, min: 1.0, max: 7.0, default: 3.5 },
-      mode: { name: 'mode', unit: null, min: null, max: null, default: 'both' },
+      area: { name: 'area', unit: 'm2', min: 1.0, max: 10000.0, default: 50.0 },
     },
   }
   const spec = deviceTypeFromServer(typeDto)
-  check('deviceTypeFromServer: type_id 与 schema_version', spec.type_id === 'ies.device.heat_pump' && spec.schema_version === '2.0.0')
-  check('deviceTypeFromServer: 多语言名称', spec.name_zh === '热泵' && spec.name_en === 'Heat Pump')
-  check('deviceTypeFromServer: 载能去重派生', spec.energy_carriers.join(',') === 'electric,heat')
-  check('deviceTypeFromServer: 端口映射', spec.ports.length === 2 && spec.ports[0].name === 'electricity_in' && spec.ports[0].direction === 'in')
-  check('deviceTypeFromServer: 参数映射', spec.parameters.cop.name === 'cop' && spec.parameters.cop.default === 3.5 && spec.parameters.cop.min === 1.0)
+  check('deviceTypeFromServer: 真实非 2.0.0 schema_version 直读', spec.schema_version === '2.1.0')
+  check('deviceTypeFromServer: 多语言名称', spec.name_zh === '太阳能集热器' && spec.name_en === 'Solar Collector')
+  check('deviceTypeFromServer: 开放载能 ID 保留', spec.energy_carriers.join(',') === 'water,heat,thermal_oil,solar_radiation,ambient_heat')
+  check('deviceTypeFromServer: 全部五种接口方向保留', spec.ports.map((p) => p.direction).join(',') === 'in,out,bidirectional,predefined,blind')
+  check('deviceTypeFromServer: 参数直映射', spec.parameters.area.name === 'area' && spec.parameters.area.default === 50.0)
   check('deviceTypeFromServer: 不包含编造属性', !('is_load' in spec) && !('capabilities' in spec) && !('model_method' in spec) && !('stateful' in spec) && !('version' in spec))
-  check('deviceTypeFromServer: 参数不包含旧元数据', !('is_optimizable' in spec.parameters.cop) && !('existing_default' in spec.parameters.cop) && !('help_key' in spec.parameters.cop))
+
+  // 接口语义投影 (derivePorts: 仅 in/out/bidirectional 派生连接句柄，predefined/blind 严禁派生连接句柄)
+  const handles = derivePorts(spec, {})
+  check('derivePorts: 仅 in/out/bidirectional 派生句柄 (in*1 + out*1 + bi*2 = 4)', handles.length === 4)
+  check('derivePorts: in 接口派生单一 in 句柄', handles.some((h) => h.name === 'water_in' && h.direction === 'in') && !handles.some((h) => h.name === 'water_in' && h.direction === 'out'))
+  check('derivePorts: out 接口派生单一 out 句柄', handles.some((h) => h.name === 'heat_out' && h.direction === 'out') && !handles.some((h) => h.name === 'heat_out' && h.direction === 'in'))
+  check('derivePorts: bidirectional 接口派生 in 和 out 两个句柄', handles.filter((h) => h.name === 'storage_loop').length === 2)
+  check('derivePorts: predefined 接口无连接句柄 (禁止作为连接目标或输出)', !handles.some((h) => h.name === 'solar_irradiance'))
+  check('derivePorts: blind 接口无连接句柄 (禁止作为连接目标或输出)', !handles.some((h) => h.name === 'ambient_loss'))
 }
 
 // ---------------------------------------------------------------------------
