@@ -152,13 +152,14 @@ def load_device_file(yaml_path: Path) -> DeviceModelDocument:
 
 
 def load_all_devices(base_dir: Path) -> list[DeviceModelDocument]:
-    """加载目录下全部设备；任一设备校验失败 → 整体拒绝加载。
+    """加载目录下全部设备；任一设备校验失败或稳定 ID 跨文件冲突 → 整体拒绝加载。
 
     返回按 device.id 排序的设备文档列表。
     """
     base = Path(base_dir)
     docs: list[DeviceModelDocument] = []
     all_diags: list[Diagnostic] = []
+    seen_ids: dict[str, Path] = {}
     for d in discover_device_dirs(base):
         for yaml_path in _device_yaml_files(d):
             ds = validate_device_file(yaml_path)
@@ -169,6 +170,24 @@ def load_all_devices(base_dir: Path) -> list[DeviceModelDocument]:
                 assert raw is not None
                 res = parse_device_model_v2(raw, file=str(yaml_path))
                 if res.document is not None:
+                    dev_id = res.document.device.id if res.document.device else ""
+                    first = seen_ids.get(dev_id) if dev_id else None
+                    if first is None:
+                        if dev_id:
+                            seen_ids[dev_id] = yaml_path
+                    else:
+                        all_diags.append(
+                            make_diag(
+                                SYS_CFG_INVALID,
+                                severity=SEVERITY_ERROR,
+                                blocking=True,
+                                params={
+                                    "file": str(yaml_path),
+                                    "detail": f"重复稳定设备 ID {dev_id!r}: 已定义于 {first}",
+                                },
+                                location={"object_type": "device-model", "file": str(yaml_path)},
+                            )
+                        )
                     docs.append(res.document)
     if any(x.severity == SEVERITY_ERROR or x.blocking for x in all_diags):
         raise _diag_error(base, all_diags)

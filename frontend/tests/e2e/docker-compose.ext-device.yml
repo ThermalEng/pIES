@@ -1,0 +1,19 @@
+# 0.15 首切片隔离覆盖: 外部设备内容目录只读挂载到既有扫描目录的新子目录。
+#
+# - 不修改生产 Compose / 内置 catalog; 不遮蔽内置 YAML (加载器平铺 + 一层
+#   子目录扫描, 新子目录只做追加);
+# - 不新建外部目录配置对象或运行期热加载入口: 注入即进程启动时目录扫描;
+# - io_worker 无设备注册表消费, 不挂载; 求解 Worker 不读目录 (消费任务快照
+#   冻结贡献), 挂载仅为保持与新部署同一注册表集合。
+#
+# 用法(仓库根目录, 绝对路径必须显式给出):
+#   PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external" \
+#   docker compose -p <project> -f docker-compose.yml \
+#     -f frontend/tests/e2e/docker-compose.ext-device.yml up -d --build backend compute_worker
+services:
+  backend:
+    volumes:
+      - ${PIES_EXT_DEVICE_DIR:?请在环境变量 PIES_EXT_DEVICE_DIR 给出外部设备内容目录的绝对路径}:/app/iesplan/devices/catalog/zz_external:ro
+  compute_worker:
+    volumes:
+      - ${PIES_EXT_DEVICE_DIR:?请在环境变量 PIES_EXT_DEVICE_DIR 给出外部设备内容目录的绝对路径}:/app/iesplan/devices/catalog/zz_external:ro

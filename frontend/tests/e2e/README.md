@@ -32,6 +32,39 @@ docker compose run --rm e2e npx playwright test --project=chromium --grep "场�
 #   frontend/tests/e2e/test-results/
 ```
 
+### 0.15 外部设备 YAML 注入验收(隔离覆盖)
+
+`device-yaml-extension.spec.ts` 验收外部设备内容(仓库外新增 YAML)的公开
+消费链: 设备选择器 → 画布拖放/参数/连线 → 装配提交 → 真实 Worker → 结果。
+外部内容 `device-catalog-external/constant_load.yaml` 经
+`docker-compose.ext-device.yml` 只读挂载到扫描目录新子目录, 不修改生产
+Compose 与内置 catalog。
+
+该规格只能在挂载栈运行: 默认套件(`playwright.config.ts`)用 `testIgnore`
+将其排除(标准部署无外部挂载, 收集它必红; 不是 skip, 也不在设备缺失时通过);
+专用配置 `playwright.ext-device.config.ts` 复用默认配置、清除该排除并恰好
+收集这一项。
+
+```bash
+# 在待验收工作树根目录执行: 数据目录即该根的 ./data(隔离副本);
+# 勿在别的仓库根运行, 以免误用主线数据。项目名/端口任取隔离值, 不碰其他栈。
+export PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external"
+export IESPLAN_PORT=18085   # 任取空闲端口, 避免与其他栈冲突
+docker compose -p pies-ext-dev -f docker-compose.yml \
+  -f frontend/tests/e2e/docker-compose.ext-device.yml up -d --build \
+  web backend io_worker compute_worker
+
+# 运行本用例(专用配置; --build 确保测试镜像含当前 spec/配置, 不用陈旧镜像)
+docker compose -p pies-ext-dev -f docker-compose.yml \
+  -f frontend/tests/e2e/docker-compose.ext-device.yml --profile e2e \
+  run --rm --build --no-deps e2e npx playwright test \
+  --config playwright.ext-device.config.ts
+```
+
+入口自检(不启动应用): 默认 `npx playwright test --project=chromium --list`
+不含本规格; `npx playwright test --config playwright.ext-device.config.ts
+--list` 恰含一项。
+
 ## 场景清单(§13.3)
 
 | # | 场景 | 文件 |
