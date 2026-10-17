@@ -30,16 +30,23 @@
 // 封存现金流(建设总额/付款/年值)按 objective 原文同构展开 +
 // 外部设备逐时 series(extload1.electricity_in)恒 40 kW。
 //
-// 运行(仓库根目录; 项目名任取隔离名, 不碰他栈; 见 e2e README 同节):
-//   PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external" \
+// 测试入口: 默认套件(playwright.config.ts)以 testIgnore 排除本规格(标准
+// 部署无外部挂载, 收集它必红); 本规格由专用配置
+// playwright.ext-device.config.ts 清除该排除并恰好收集一项——不使用 skip,
+// 也不在设备缺失时直接通过。
+//
+// 运行(仅在本工作树根目录执行: 数据目录即该工作树隔离 ./data, 勿从主线
+// 仓库根执行以免落到主线数据; 项目名/端口任取隔离值, 不碰其他栈;
+// 见 e2e README 同节):
+//   export PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external"
+//   export IESPLAN_PORT=18085   # 任取空闲端口, 避免与其他栈冲突
 //   docker compose -p pies-ext-dev -f docker-compose.yml \
 //     -f frontend/tests/e2e/docker-compose.ext-device.yml up -d --build \
 //     web backend io_worker compute_worker
-//   PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external" \
 //   docker compose -p pies-ext-dev -f docker-compose.yml \
 //     -f frontend/tests/e2e/docker-compose.ext-device.yml --profile e2e \
-//     run --rm --build --no-deps e2e npx playwright test --project=chromium \
-//     device-yaml-extension.spec.ts
+//     run --rm --build --no-deps e2e npx playwright test \
+//     --config playwright.ext-device.config.ts
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -339,8 +346,9 @@ test.describe('0.15 外部设备 YAML 注入', () => {
       expect(Number(row.fixed_om)).toBeCloseTo(EXPECTED_FIXED_OM_CNY, 6)
       expect(Number(row.variable_om)).toBeCloseTo(EXPECTED_VARIABLE_OM_CNY, 6)
     }
-    // 目标值同构展开(脚手架 objective 原文 = 全期购电 + 建设 + 1 年固定
-    // 运维 + 全期变动运维), 用公开封存现金流字段复算。
+    // objectiveFromPublicFacts: 脚手架 objective 原文(全期购电 + 建设 +
+    // 1 年固定运维 + 全期变动运维)按公开封存财务事实的同构展开, 非读取
+    // 求解器目标字段(LP 目标值未公开投影); 断言容差 <1 CNY。
     const objectiveFromPublicFacts =
       Math.abs(Number(ao[0].energy_net)) + Math.abs(Number(ao[1].energy_net)) +
       Number(ao[0].fixed_om) +

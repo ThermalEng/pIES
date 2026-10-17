@@ -15,6 +15,12 @@ const OUTPUT_DIR = process.env.E2E_OUTPUT_DIR ?? './test-results'
 
 export default defineConfig({
   testDir: '.',
+  // 默认套件面向标准部署: device-yaml-extension.spec.ts 需要隔离覆盖
+  // 只读挂载外部设备目录(frontend/tests/e2e/docker-compose.ext-device.yml),
+  // 未挂载时设备面板必无该外部类型、收集它必红; 故默认配置排除这一特殊
+  // 部署规格, 由专用配置 playwright.ext-device.config.ts 恰好收集它
+  // (不使用 skip, 也不在设备缺失时直接通过)。
+  testIgnore: '**/device-yaml-extension.spec.ts',
   // 前置造数(seed)与场景互相隔离: 每个 spec 文件一个 worker
   fullyParallel: false,
   workers: 1,
