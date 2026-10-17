@@ -27,12 +27,35 @@ export {
   deviceTypeFromServer,
   deviceTypeListFromServer,
   modelSectionFromView,
+  buildYamlSkeleton,
+  isValidDeviceId,
 } from './mappers'
 export type {
+  CandidateSaveRequestDto,
+  CandidateSaveResultDto,
+  CandidateValidateResponseDto,
+  CatalogResponseDto,
   DeviceParameterSpecDto,
   DeviceTypeDto,
   DeviceTypeListResponseDto,
   DraftConnectionDto,
   DraftDeviceDto,
   DraftModelSectionDto,
+  ModelDiagnosticDto,
+  ProjectModelDto,
+  ProjectModelListResponseDto,
+  TemplateDetailDto,
+  TemplateRevisionDetailDto,
+  TemplateRevisionDto,
+  TemplateSummaryDto,
 } from './contracts'
+export type {
+  CandidateModel,
+  ModelDiagnostic,
+  ProjectModelSummary,
+  SavedModelInfo,
+  TemplateDetail,
+  TemplateRevision,
+  TemplateSummary,
+} from './model'
+export { CandidateSaveError } from './model'

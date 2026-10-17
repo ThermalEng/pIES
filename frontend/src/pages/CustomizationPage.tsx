@@ -29,9 +29,9 @@ import {
   saveTemplateDraft,
   setTemplateEnabled,
   validateTemplateYaml,
-} from '../features/customization/api'
-import type { ModelDiagnosticDto, TemplateDto, TemplateRevisionDto } from '../features/customization/contracts'
-import { isValidDeviceId } from '../features/modeling/mappers'
+} from '../features/customization'
+import type { ModelDiagnosticDto, TemplateDto, TemplateRevisionDto } from '../features/customization'
+import { isValidDeviceId } from '../features/modeling'
 
 /** 标准 ies.device-model 2.0.0 模板骨架(含顶层 inputs 声明)。 */
 const TEMPLATE_SKELETON = [
@@ -86,7 +86,7 @@ export default function CustomizationPage() {
   const [diagnostics, setDiagnostics] = useState<ModelDiagnosticDto[]>([])
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [revisionDetail, setRevisionDetail] = useState<{ revision: TemplateRevisionDto; summary: Record<string, unknown> } | null>(null)
+  const [revisionDetail, setRevisionDetail] = useState<{ revision: TemplateRevisionDto; summary: Record<string, unknown> | null } | null>(null)
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -247,7 +247,12 @@ export default function CustomizationPage() {
     setActionError(null)
     try {
       const detail = await getTemplateRevision(tpl.template_id, revision)
+      setSelected(tpl)
       setRevisionDetail({ revision: detail.revision, summary: detail.summary })
+      if (detail.document) {
+        setYamlText(JSON.stringify(detail.document, null, 2))
+      }
+      setMode('edit')
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err))
     } finally {

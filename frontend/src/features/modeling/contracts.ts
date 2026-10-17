@@ -82,6 +82,11 @@ export interface TemplateSummaryDto {
   revision?: TemplateRevisionDto | null
 }
 
+/** 目录接口响应信封: 精确 {items: [...]}。 */
+export interface CatalogResponseDto {
+  items: TemplateSummaryDto[]
+}
+
 /** 精确发布 revision(不可变; 模板 ID + revision + schema_version + 摘要固定内容)。 */
 export interface TemplateRevisionDto {
   id: string
@@ -111,9 +116,9 @@ export interface TemplateDetailDto {
 export interface TemplateRevisionDetailDto {
   template: TemplateSummaryDto
   revision: TemplateRevisionDto
-  document: DeviceModelRawDto
-  receipt: Record<string, unknown>
-  summary: { property_count: number; interface_count: number; equation_count: number }
+  document: DeviceModelRawDto | null
+  receipt: Record<string, unknown> | null
+  summary: Record<string, unknown> | null
   diagnostics: ModelDiagnosticDto[]
 }
 
@@ -123,6 +128,12 @@ export interface TemplateRevisionDetailDto {
 
 /** 候选来源(与后端 ModelSaveRequest.source 一致): 模板实例化 / 直接 YAML 编辑。 */
 export type CandidateSource = 'direct_yaml' | 'template'
+
+/** 候选校验响应: 精确 {valid: boolean, diagnostics: [...]}。 */
+export interface CandidateValidateResponseDto {
+  valid: boolean
+  diagnostics: ModelDiagnosticDto[]
+}
 
 /**
  * 候选校验/保存请求(判别字段 source):
@@ -162,6 +173,11 @@ export interface ProjectModelDto {
   template_revision: number | null
   created_by: string
   created_at: string | null
+}
+
+/** 项目模型清单响应信封: 精确 {project_models: [...]}。 */
+export interface ProjectModelListResponseDto {
+  project_models: ProjectModelDto[]
 }
 
 /** 候选保存成功响应(单资源信封 {project_model, receipt, project_revision})。 */

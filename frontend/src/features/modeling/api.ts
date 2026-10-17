@@ -24,7 +24,14 @@ import { runValidation } from '../validation'
 import { request } from '../../shared/http'
 import { ApiError } from '../../types'
 import type { ConnectionInput, DeviceInput, DeviceTypeSpec, DraftModelSection, ValidationResult } from '../../types'
-import type { DeviceTypeListResponseDto } from './contracts'
+import type {
+  CandidateSaveResultDto,
+  CandidateValidateResponseDto,
+  CatalogResponseDto,
+  DeviceTypeListResponseDto,
+  ProjectModelListResponseDto,
+  TemplateRevisionDetailDto,
+} from './contracts'
 import {
   buildCandidateRequest,
   connectionName,
@@ -38,17 +45,12 @@ import {
   templateSummaryFromServer,
 } from './mappers'
 import type { CandidateModel, ModelDiagnostic, ProjectModelSummary, SavedModelInfo, TemplateDetail, TemplateSummary } from './model'
-import { CandidateSaveError, MapperError } from './model'
+import { CandidateSaveError } from './model'
 
-/** 可用模板目录(已发布且启用; 列表信封 {items: [...]} 严格解析)。 */
-export async function listTemplates(locale: string): Promise<TemplateSummary[]> {
-  const body = await request<unknown>('/model-templates/catalog')
-  const rec =
-    body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null
-  if (!rec || !Array.isArray(rec.items)) {
-    throw new MapperError('GET /model-templates/catalog 响应缺少 items')
-  }
-  return rec.items.map((item) => templateSummaryFromServer(item, locale))
+/** 可用模板目录(已发布且启用; 列表信封 {items: [...]} 直读)。 */
+export async function listTemplates(locale?: string): Promise<TemplateSummary[]> {
+  const body = await request<CatalogResponseDto>('/model-templates/catalog')
+  return body.items.map((item) => templateSummaryFromServer(item, locale))
 }
 
 /**
@@ -60,9 +62,9 @@ export async function listTemplates(locale: string): Promise<TemplateSummary[]> 
 export async function getTemplate(
   templateId: string,
   revision: number,
-  locale: string,
+  locale?: string,
 ): Promise<TemplateDetail> {
-  const body = await request<unknown>(
+  const body = await request<TemplateRevisionDetailDto>(
     `/model-templates/${encodeURIComponent(templateId)}/revisions/${revision}`,
   )
   return templateDetailFromServer(body, locale)
@@ -70,13 +72,8 @@ export async function getTemplate(
 
 /** 项目模型清单(最新在前; 编号对用户可见)。 */
 export async function listProjectModels(projectId: number): Promise<ProjectModelSummary[]> {
-  const body = await request<unknown>(`/projects/${projectId}/models`)
-  const rec =
-    body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null
-  if (!rec || !Array.isArray(rec.project_models)) {
-    throw new MapperError('GET /projects/{pid}/models 响应缺少 project_models')
-  }
-  return rec.project_models.map((item) => projectModelFromServer(item))
+  const body = await request<ProjectModelListResponseDto>(`/projects/${projectId}/models`)
+  return body.project_models.map(projectModelFromServer)
 }
 
 /**
@@ -88,22 +85,14 @@ export async function validateCandidate(
   projectId: number,
   candidate: CandidateModel,
 ): Promise<{ valid: boolean; diagnostics: ModelDiagnostic[] }> {
-  const body = await request<unknown>(`/projects/${projectId}/models/validate`, {
+  const body = await request<CandidateValidateResponseDto>(`/projects/${projectId}/models/validate`, {
     method: 'POST',
     body: buildCandidateRequest(candidate),
   })
-  const rec =
-    body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : null
-  if (!rec || typeof rec.valid !== 'boolean' || !Array.isArray(rec.diagnostics)) {
-    throw new MapperError('POST /models/validate 响应缺少 valid/diagnostics')
+  return {
+    valid: body.valid,
+    diagnostics: body.diagnostics.map(diagFromServer),
   }
-  const diagnostics: ModelDiagnostic[] = []
-  for (const item of rec.diagnostics as unknown[]) {
-    const parsed = diagFromServer(item)
-    if (parsed === null) throw new MapperError('诊断条目形状与契约不一致')
-    diagnostics.push(parsed)
-  }
-  return { valid: rec.valid as boolean, diagnostics }
 }
 
 /**
@@ -114,7 +103,7 @@ export async function validateCandidate(
  */
 export async function saveCandidate(projectId: number, candidate: CandidateModel): Promise<SavedModelInfo> {
   try {
-    const body = await request<unknown>(`/projects/${projectId}/models`, {
+    const body = await request<CandidateSaveResultDto>(`/projects/${projectId}/models`, {
       method: 'POST',
       body: buildCandidateRequest(candidate),
     })

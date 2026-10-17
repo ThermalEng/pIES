@@ -193,11 +193,22 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(page.getByRole('status', { name: /正式已保存|Saved/i })).toBeVisible()
     await expect(page.locator('.ies-modeling__saved').getByText('acme.device.e2e_direct_2').first()).toBeVisible() // 项目内编号递增
 
-    // 12h. 一级菜单「自定义」: 模板管理页显示已发布模板(真实列表)
+    // 12h. 一级菜单「自定义」: 模板管理页显示已发布模板(真实列表)并可查看精确 revision 详情
     await page.getByRole('navigation', { name: /项目|Projects/i }).getByText(/自定义|Custom/i).click()
     await expect(page).toHaveURL(/\/custom$/)
     await expect(page.getByText(templateDeviceId)).toBeVisible()
     await expect(page.getByText(/已发布|Published/i).first()).toBeVisible()
+
+    // 窄切片 /custom 回归: 查看精确 revision 详情，直读 schema_version 与摘要
+    const v1Btn = page.locator('.ies-custom-card__rev', { hasText: 'v1' }).first()
+    await expect(v1Btn).toBeVisible()
+    await v1Btn.click()
+    const revBox = page.locator('.ies-custom-revision')
+    await expect(revBox).toBeVisible()
+    await expect(revBox.getByText(/schema 版本|schema version/i)).toBeVisible()
+    // 点击返回回到列表
+    await page.getByRole('button', { name: /返回|Back/i }).click()
+    await expect(page.locator('.ies-custom-list')).toBeVisible()
 
     session.assertNoErrors([
       // 新建空项目尚未保存计算配置, 访问任务中心读取 404 为既有正常行为(计数锁定防漂移)。
