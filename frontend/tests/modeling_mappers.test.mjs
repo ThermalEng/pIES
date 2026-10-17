@@ -341,9 +341,12 @@ check('保存: 来源', saved.source === 'template')
 check('保存: 模板溯源透传', saved.template_id === 'ies.test.sample' && saved.template_revision === 1)
 check('保存: 项目修订', saved.project_revision === 2)
 check('保存: 摘要计数来自回执', saved.summary.property_count === 4 && saved.summary.interface_count === 1 && saved.summary.relation_count === 0)
-check('保存: 无回执时计数保持 0', (() => {
-  const s = md.savedModelFromServer({ ...saveBody, receipt: undefined })
-  return s.summary.property_count === 0 && s.summary.interface_count === 0
+check('保存: 真实全零回执计数正确保留', (() => {
+  const s = md.savedModelFromServer({
+    ...saveBody,
+    receipt: { property_count: 0, interface_count: 0, relation_count: 0 },
+  })
+  return s.summary.property_count === 0 && s.summary.interface_count === 0 && s.summary.relation_count === 0
 })())
 check('保存: direct_yaml 来源', md.savedModelFromServer({ ...saveBody, project_model: { ...saveBody.project_model, source: 'direct_yaml', template_id: null } }).source === 'direct_yaml')
 

@@ -32,11 +32,11 @@ from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.config import settings  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
-import iesplan.audit.persistence  # noqa: E402,F401
+from iesplan.audit.persistence import AuditLog  # noqa: E402
+from iesplan.model.persistence import ModelTemplateRevision  # noqa: E402
 import iesplan.configuration.persistence  # noqa: E402,F401
 import iesplan.dataset.persistence  # noqa: E402,F401
 import iesplan.identity.persistence  # noqa: E402,F401
-import iesplan.model.persistence  # noqa: E402,F401
 import iesplan.package.persistence  # noqa: E402,F401
 import iesplan.project.persistence  # noqa: E402,F401
 import iesplan.results.persistence  # noqa: E402,F401
