@@ -1,9 +1,11 @@
-// R1/R2 结果页 IRR 状态来源收口验收: 旧摘要徽章不再从诊断猜测,
-// 与封存卡共用同一封存 evaluation.irr_status；无财务块时不展示状态。
+// R1/R2 结果页 IRR 状态来源收口验收: 旧摘要徽章不再从诊断猜测;
+// 指标摘要缺席时封存卡承载唯一 IRR 状态展示, 与同一封存
+// evaluation.irr_status 精确一致；无财务块时不展示状态。
 //
-// A(封存同源): 公开 API 脚手架＋UI 确认/提交→真实 Worker 求解→结果页,
-//   旧财务摘要徽章与封存卡徽章文本一致, 且等于 HTTP 封存 irr_status 的
-//   已知标签(未知状态直接失败, 不猜测)。
+// A(指标摘要缺席时封存 IRR 仍正常展示): 公开 API 脚手架＋UI 确认/提交→
+//   真实 Worker 求解→结果页, HTTP metrics_summary=null、旧摘要财务卡不
+//   显示, 封存卡出现且其 IRR 状态标签精确等于 HTTP 封存 irr_status 的
+//   已知标签(未知状态直接失败, 不猜测), 该标签全页仅一处。
 // B(无块不伪造): outputs=['metrics'] 真实任务→结果页无“IRR 计算状态”行,
 //   HTTP financial_evaluation=null 且缺席原因一致。
 // 求解/页面走真实链路, 不注入状态、不 mock 业务、不注库。D1/D2 不重跑。
@@ -63,7 +65,7 @@ async function openResults(page: Page): Promise<void> {
 test.describe('R1/R2: IRR 状态走封存字段', () => {
   test.setTimeout(900_000)
 
-  test('A: 封存任务两处徽章同源一致', async ({ browser }) => {
+  test('A: 指标摘要缺席时封存 IRR 仍正常展示', async ({ browser }) => {
     const username = uniqueName('es-irr-a')
     const password = strongPassword('Init')
     const projectName = uniqueName('IRR同源项目')
@@ -87,7 +89,8 @@ test.describe('R1/R2: IRR 状态走封存字段', () => {
     await waitCompleted(page)
     await openResults(page)
 
-    // 封存卡出现, 旧摘要卡出现。
+    // 封存卡出现(旧摘要卡缺席, 由下方 HTTP metrics_summary=null 与
+    // 页面卡计数钉死)。
     await expect(page.getByText(/评价现金流\(封存\)|Sealed evaluation/i).first()).toBeVisible({ timeout: 30_000 })
 
     // HTTP 封存 irr_status 是唯一依据；未知状态直接失败。
@@ -103,19 +106,23 @@ test.describe('R1/R2: IRR 状态走封存字段', () => {
     expect(typeof irrStatus).toBe('string')
     const expectedLabel = IRR_LABEL[irrStatus]
     expect(expectedLabel, `未知封存 irr_status: ${irrStatus}`).toBeTruthy()
+    // 指标摘要缺席是当前内置计算链的真实契约(runner 只发布 compute_result 块);
+    // 旧摘要卡因此整块不渲染, 不属于缺陷也不补默认。
+    expect(result.result.metrics_summary).toBeNull()
 
-    // 旧摘要卡与封存卡各展示一次同一标签, 别无第三处来源。
+    // 旧摘要卡整块缺席; 封存卡是唯一展示处, 其 IRR 状态标签与 HTTP 封存
+    // facts 精确一致, 全页仅一处该标签。
     const summaryCard = page.locator('section.ies-card').filter({
       has: page.getByRole('heading', { name: '财务', exact: true }),
     })
+    await expect(summaryCard).toHaveCount(0)
     const sealedCard = page.locator('section.ies-card').filter({
       has: page.getByRole('heading', { name: /评价现金流\(封存\)|Sealed evaluation/i }),
     })
-    await expect(summaryCard.getByText('IRR 计算状态')).toBeVisible({ timeout: 30_000 })
-    await expect(summaryCard.getByText(expectedLabel!).first()).toBeVisible({ timeout: 30_000 })
+    await expect(sealedCard).toBeVisible({ timeout: 30_000 })
     await expect(sealedCard.getByText('IRR 计算状态')).toBeVisible({ timeout: 30_000 })
     await expect(sealedCard.getByText(expectedLabel!).first()).toBeVisible({ timeout: 30_000 })
-    expect(await page.getByText(expectedLabel!).count()).toBe(2)
+    await expect(page.getByText(expectedLabel!)).toHaveCount(1)
 
     await apiCtx.close()
     session.assertNoErrors()

@@ -1,8 +1,13 @@
 // T3/缺席验收共享脚手架: 项目/画像/模型/装配/冻结/配置走公开 API,
 // 评价确认/提交/结果查看走 UI。不注入前端状态, 不 mock 求解。
 //
-// 改动本文件时须同步跑 financial-evaluation 与 financial-absence 两个
-// spec(后者不重跑现金流阳性, 但须保证导入解析)。
+// 可选扩展(extraEnergyPrices/extraTariffBindings/includeElectricLoad)
+// 只做追加与缺省保持: 正收益售热场景追加售热价格与计费绑定、可不建
+// 电负荷; 缺省装配的命令顺序与内容逐字不变。
+//
+// 改动本文件时须同步跑 financial-evaluation、financial-absence 与
+// result-irr-status-r1r2 三个 spec(后两者不重跑现金流阳性, 但须保证
+// 导入解析与缺省行为不变)。
 
 import type { APIRequestContext } from '@playwright/test'
 
@@ -13,9 +18,18 @@ export interface ScaffoldOptions {
   outputs?: string[]
   /** planning.constraints 附加项(默认 {})。 */
   planningConstraints?: Record<string, { type: string; expression: string; enabled?: boolean }>
+  /** 追加能源价格条目(公开 finance-profile energy_prices 同构), 并入画像(默认 {})。 */
+  extraEnergyPrices?: Record<string, unknown>
+  /** 追加计费绑定(公开 assembly tariff_bindings 同构), 并入装配(默认 {})。 */
+  extraTariffBindings?: Record<string, unknown>
+  /** 是否创建电负荷 load1(默认 true); 售热正收益场景可关闭。 */
+  includeElectricLoad?: boolean
 }
 
-export function financeProfile(profileId: string): Record<string, unknown> {
+export function financeProfile(
+  profileId: string,
+  extraEnergyPrices: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
     schema: 'ies.finance-profile',
     schema_version: '1.0.0',
@@ -47,6 +61,7 @@ export function financeProfile(profileId: string): Record<string, unknown> {
         kind: 'constant',
         value: { value: '0.7', unit: 'CNY/kWh' },
       },
+      ...extraEnergyPrices,
     },
     taxes: {},
   }
@@ -74,13 +89,14 @@ export async function scaffoldProject(
   }, token)
   const pid: number = created.project?.id ?? created.id
   await requestJson(api, 'POST', '/api/finance-profiles', {
-    finance_profile: financeProfile(profileId),
+    finance_profile: financeProfile(profileId, opts.extraEnergyPrices ?? {}),
   }, token)
   await requestJson(api, 'PUT', `/api/projects/${pid}/finance-profile`, {
     profile_ref: { id: profileId },
   }, token)
 
   const view = await requestJson(api, 'GET', `/api/projects/${pid}`, undefined, token)
+  const includeElectricLoad = opts.includeElectricLoad !== false
   const devices = [
     {
       id: 'e2e-dev-grid1', unit: 'model', type: 'model.upsert_device',
@@ -90,14 +106,19 @@ export async function scaffoldProject(
         position: { x: 0.0, y: 0.0 },
       },
     },
-    {
-      id: 'e2e-dev-load1', unit: 'model', type: 'model.upsert_device',
-      payload: {
-        name: 'load1', device_type: 'ies.device.electric_load', kind: 'new',
-        params: { peak_power_kw: 200, electricity_demand: 50 },
-        position: { x: 2.0, y: 0.0 },
-      },
-    },
+    // 电负荷(售热正收益场景关闭; 缺省与历史装配逐字一致)。
+    ...(includeElectricLoad
+      ? [
+          {
+            id: 'e2e-dev-load1', unit: 'model', type: 'model.upsert_device',
+            payload: {
+              name: 'load1', device_type: 'ies.device.electric_load', kind: 'new',
+              params: { peak_power_kw: 200, electricity_demand: 50 },
+              position: { x: 2.0, y: 0.0 },
+            },
+          },
+        ]
+      : []),
     {
       id: 'e2e-dev-hp1', unit: 'model', type: 'model.upsert_device',
       payload: {
@@ -106,13 +127,17 @@ export async function scaffoldProject(
         position: { x: 1.0, y: 1.0 },
       },
     },
-    {
-      id: 'e2e-conn-grid-load1', unit: 'model', type: 'model.upsert_connection',
-      payload: {
-        name: 'c-grid-load1', from_device: 'grid1', from_port: 'electricity_import',
-        to_device: 'load1', to_port: 'electricity_in',
-      },
-    },
+    ...(includeElectricLoad
+      ? [
+          {
+            id: 'e2e-conn-grid-load1', unit: 'model', type: 'model.upsert_connection',
+            payload: {
+              name: 'c-grid-load1', from_device: 'grid1', from_port: 'electricity_import',
+              to_device: 'load1', to_port: 'electricity_in',
+            },
+          },
+        ]
+      : []),
     {
       id: 'e2e-conn-grid-hp1', unit: 'model', type: 'model.upsert_connection',
       payload: {
@@ -149,7 +174,7 @@ export async function scaffoldProject(
       payload: {
         instances: {
           grid1: { type: 'none' },
-          load1: { type: 'none' },
+          ...(includeElectricLoad ? { load1: { type: 'none' } } : {}),
           heatload: { type: 'none' },
           hp1: {
             type: 'costed',
@@ -170,6 +195,7 @@ export async function scaffoldProject(
             price: 'grid_import', instance: 'grid1', interface: 'electricity_import',
             aggregation: 'integrate_positive',
           },
+          ...(opts.extraTariffBindings ?? {}),
         },
       },
     },
