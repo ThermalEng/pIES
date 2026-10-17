@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Backend-Python%203.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
   <img src="https://img.shields.io/badge/Frontend-React%20%7C%20TypeScript-61DAFB?logo=react&logoColor=black" alt="React & TS">
   <img src="https://img.shields.io/badge/Solver-HiGHS-green.svg" alt="Solver: HiGHS">
-  <img src="https://img.shields.io/badge/Milestone-0.13.0%20(Current)-orange.svg" alt="Milestone 0.13.0">
+  <img src="https://img.shields.io/badge/Milestone-0.14.0%20(Current)-orange.svg" alt="Milestone 0.14.0">
 </p>
 
 ---
@@ -109,7 +109,6 @@ README 是项目的快速导览入口，详细技术规范与使用指南以 `ma
 
 ## 🗺️ 未来路线图（Roadmap 展望）
 
-- **`0.14.0`**：前端严格契约切分与 Playwright 端到端浏览器验收收尾；
 - **`0.15.0`**：外部 Provider 扩展机制验收（以黑盒视角接入外部设备 YAML 与时序数据）；
 - **`1.0.0`**：首个正式工业稳定版；
 - **`1.1.0`**：模型库与算法插件共享园地（支持氢能、冷/热储能扩展与外部算法容器化运行）；
