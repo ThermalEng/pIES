@@ -132,6 +132,7 @@ def default_user(db: Session) -> UserRecord:
             username="admin",
             display_name="系统管理员",
             is_system=True,
+            public_namespace=identity_domain.allocate_public_namespace(db),
         )
     return user
 

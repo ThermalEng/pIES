@@ -182,12 +182,6 @@ def _diag(code: str, detail: str, *, field: str | None = None,
     )
 
 
-def _ensure_namespace(db: Session, user) -> str:
-    """确保用户已分配 public_namespace（首次需要时分配，终身不变）。"""
-    from iesplan.application.namespace import ensure_public_namespace
-    return ensure_public_namespace(db, user)
-
-
 def _validate_slug(slug: str) -> None:
     """校验 slug 格式与长度，不合法抛 400。"""
     if not is_valid_slug(slug):
@@ -586,13 +580,13 @@ def create_template_draft(
 ) -> dict[str, Any]:
     """创建模板草稿(客户端提交 slug，后端组合稳定 ID)。
 
-    流程：校验 slug → 分配 public_namespace → 组合 device.id →
+    流程：校验 slug → 读取用户创建时已分配的 public_namespace → 组合 device.id →
     校验 YAML → 比对 device.id 一致性 → 保存。
 
     模板稳定 ID 创建后不可变更；需要不同 slug 时创建新条目。
     """
     _validate_slug(slug)
-    namespace = _ensure_namespace(db, user)
+    namespace = user.public_namespace
     expected_id = build_stable_id(namespace, slug)
     validation = validate_template_yaml(model_yaml)
     if not validation.ok or validation.document is None or validation.document.device is None:

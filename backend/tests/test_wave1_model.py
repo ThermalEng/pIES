@@ -23,12 +23,13 @@ os.environ.setdefault("IESPLAN_DB_URL", "sqlite+pysqlite://")
 
 import pytest  # noqa: E402
 from auth_helpers import make_user  # noqa: E402
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.engine import Engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan import audit as audit_domain  # noqa: E402
+from iesplan import identity as identity_domain  # noqa: E402
 from iesplan import model as model_domain  # noqa: E402
 from iesplan import project as project_domain  # noqa: E402
 from iesplan.application.model_templates import (  # noqa: E402
@@ -150,17 +151,34 @@ def db_session(engine: Engine) -> Iterator[Session]:
 
 @pytest.fixture()
 def user(db_session: Session):
-    """真实 ORM 用户行(命名空间分配需写行, 快照对象不可写)。"""
+    """真实账号不可变快照(经建号用例创建, 创建时已携带 public_namespace)。"""
     snapshot = make_user(db_session, "w1model")
-    return db_session.get(User, snapshot.id)
+    return identity_domain.get_user(db_session, snapshot.id)
 
 
 def test_template_lifecycle_reads_writes_via_model_repository(db_session: Session, user):
-    """模板草稿/发布经 model 域 repository 落盘, 域读取视图与用例返回一致。"""
-    from iesplan.application.namespace import ensure_public_namespace
-    from iesplan.core.namespace import build_stable_id
+    """模板草稿/发布经 model 域 repository 落盘, 域读取视图与用例返回一致。
 
-    namespace = ensure_public_namespace(db_session, user)
+    M-04: 模板创建只读消费不可变 UserRecord 的创建时命名空间(不重新分配/
+    不写用户行), 且不回滚调用方在会话内的未提交工作。
+    """
+    from iesplan.core.namespace import build_stable_id, is_valid_namespace
+
+    namespace = user.public_namespace
+    assert is_valid_namespace(namespace)
+    before = db_session.execute(
+        select(User.public_namespace, User.updated_at).where(User.id == user.id)
+    ).one()
+    # 调用方在模板用例前的未提交工作(模板用例提交后必须完整保留)
+    audit_domain.append_entry(
+        db_session,
+        entity_type="w1_caller_work",
+        entity_id=7,
+        action="w1.caller.pending",
+        actor_id=user.id,
+        actor_type="user",
+        extra={"kind": "caller_work"},
+    )
     yaml_text = TEMPLATE_YAML.replace(
         "acme.device.electric_load", build_stable_id(namespace, "eload")
     )
@@ -169,6 +187,15 @@ def test_template_lifecycle_reads_writes_via_model_repository(db_session: Sessio
     )
     template_id = created["template_id"]
     assert template_id == build_stable_id(namespace, "eload")
+
+    # M-04: 用户行未被重新分配/写入(命名空间与 updated_at 保持调用前状态)
+    after = db_session.execute(
+        select(User.public_namespace, User.updated_at).where(User.id == user.id)
+    ).one()
+    assert after.public_namespace == before.public_namespace == namespace
+    assert after.updated_at == before.updated_at
+    caller_work = audit_domain.list_entries(db_session, entity_type="w1_caller_work")
+    assert [e.action for e in caller_work] == ["w1.caller.pending"]
 
     stored = model_domain.get_owned_template(db_session, user.id, template_id)
     assert stored is not None
