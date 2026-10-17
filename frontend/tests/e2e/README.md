@@ -32,6 +32,30 @@ docker compose run --rm e2e npx playwright test --project=chromium --grep "场�
 #   frontend/tests/e2e/test-results/
 ```
 
+### 0.15 外部设备 YAML 注入验收(隔离覆盖)
+
+`device-yaml-extension.spec.ts` 验收外部设备内容(仓库外新增 YAML)的公开
+消费链: 设备选择器 → 画布拖放/参数/连线 → 装配提交 → 真实 Worker → 结果。
+外部内容 `device-catalog-external/constant_load.yaml` 经
+`docker-compose.ext-device.yml` 只读挂载到扫描目录新子目录, 不修改生产
+Compose 与内置 catalog; 未挂载覆盖文件时该用例会在设备面板断言处失败
+(外部类型不存在), 属预期。
+
+```bash
+# 启动(仓库根目录; 项目名任取隔离名, 不碰其他栈)
+PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external" \
+docker compose -p pies-ext-dev -f docker-compose.yml \
+  -f frontend/tests/e2e/docker-compose.ext-device.yml up -d --build \
+  web backend io_worker compute_worker
+
+# 运行本用例
+PIES_EXT_DEVICE_DIR="$PWD/frontend/tests/e2e/device-catalog-external" \
+docker compose -p pies-ext-dev -f docker-compose.yml \
+  -f frontend/tests/e2e/docker-compose.ext-device.yml --profile e2e \
+  run --rm --no-deps e2e npx playwright test --project=chromium \
+  device-yaml-extension.spec.ts
+```
+
 ## 场景清单(§13.3)
 
 | # | 场景 | 文件 |
