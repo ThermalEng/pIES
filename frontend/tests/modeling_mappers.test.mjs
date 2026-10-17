@@ -273,21 +273,10 @@ check('模板: 状态与描述透传', summary.status === 'published' && summary
 check('模板: 草稿/发布修订透传', summary.draft_revision === 2 && summary.published_revision === 1)
 check('模板: revision 精确视图解析', summary.revision !== null && summary.revision.revision === 1 && summary.revision.input_count === 4)
 check('模板: has_inputs 透传', summary.has_inputs === true)
-check('模板: 缺 template_id 抛 MapperError', (() => {
-  try {
-    md.templateSummaryFromServer({ names: {} }, 'zh')
-    return false
-  } catch (err) {
-    return err.name === 'MapperError'
-  }
-})())
-check('模板: 未知 status 抛 MapperError(§7.1 枚举严格)', (() => {
-  try {
-    md.templateSummaryFromServer({ ...catalogItem, status: 'archived' }, 'zh')
-    return false
-  } catch (err) {
-    return err.name === 'MapperError'
-  }
+check('模板: schema_version 来自权威 revision', summary.schema_version === '2.0.0')
+check('模板: 无 revision 时 schema_version 为 null', (() => {
+  const s = md.templateSummaryFromServer({ ...catalogItem, revision: null })
+  return s.schema_version === null && s.revision === null
 })())
 
 const detailBody = {
@@ -317,17 +306,9 @@ check(
   '精确 revision 详情: 独立 revision 字段合入模板摘要',
   exactDetail.summary.revision?.revision === 3,
 )
-check('模板详情: 缺 template 抛 MapperError', (() => {
-  try {
-    md.templateDetailFromServer({ document: {} }, 'zh')
-    return false
-  } catch (err) {
-    return err.name === 'MapperError'
-  }
-})())
 
 // ---------------------------------------------------------------------------
-// 保存结果解析(真实信封 {project_model, project_revision}: 最终 _N ID / 溯源)
+// 保存结果解析(真实信封 {project_model, receipt, project_revision}: 最终 _N ID / 溯源)
 // ---------------------------------------------------------------------------
 const saveBody = {
   project_model: {
@@ -352,6 +333,7 @@ const saveBody = {
     relation_count: 0,
   },
   project_revision: 2,
+  duplicate: false,
 }
 const saved = md.savedModelFromServer(saveBody)
 check('保存: 最终编号 = _N 设备 ID(非不透明主行 id)', saved.model_id === 'ies.test.sample_1' && saved.device_id === 'ies.test.sample_1')
@@ -359,41 +341,20 @@ check('保存: 来源', saved.source === 'template')
 check('保存: 模板溯源透传', saved.template_id === 'ies.test.sample' && saved.template_revision === 1)
 check('保存: 项目修订', saved.project_revision === 2)
 check('保存: 摘要计数来自回执', saved.summary.property_count === 4 && saved.summary.interface_count === 1 && saved.summary.relation_count === 0)
-check('保存: 无回执时计数保持 0', (() => {
-  const s = md.savedModelFromServer({ ...saveBody, receipt: undefined })
-  return s.summary.property_count === 0 && s.summary.interface_count === 0
-})())
-check('保存: 响应缺 project_model 抛 MapperError', (() => {
-  try {
-    md.savedModelFromServer({ project_revision: 2 })
-    return false
-  } catch (err) {
-    return err.name === 'MapperError'
-  }
+check('保存: 真实全零回执计数正确保留', (() => {
+  const s = md.savedModelFromServer({
+    ...saveBody,
+    receipt: { property_count: 0, interface_count: 0, relation_count: 0 },
+  })
+  return s.summary.property_count === 0 && s.summary.interface_count === 0 && s.summary.relation_count === 0
 })())
 check('保存: direct_yaml 来源', md.savedModelFromServer({ ...saveBody, project_model: { ...saveBody.project_model, source: 'direct_yaml', template_id: null } }).source === 'direct_yaml')
-check('保存: 未知 source 抛 MapperError(§7.1 枚举严格)', (() => {
-  try {
-    md.savedModelFromServer({ ...saveBody, project_model: { ...saveBody.project_model, source: 'yaml' } })
-    return false
-  } catch (err) {
-    return err.name === 'MapperError'
-  }
-})())
 
 // 项目模型清单行(projectModelFromServer)
 const rowSummary = md.projectModelFromServer(saveBody.project_model)
 check('清单: device_id 与编号', rowSummary.device_id === 'ies.test.sample_1' && rowSummary.suffix === 1)
 check('清单: 模板溯源透传', rowSummary.template_id === 'ies.test.sample' && rowSummary.template_revision === 1)
 check('清单: source 判别', rowSummary.source === 'template')
-check('清单: 缺 device_id 抛 MapperError', (() => {
-  try {
-    md.projectModelFromServer({ suffix: 1 })
-    return false
-  } catch (err) {
-    return err.name === 'MapperError'
-  }
-})())
 
 // ---------------------------------------------------------------------------
 // 诊断解析(字段路径 / YAML 行列 / expected/actual)
@@ -417,7 +378,6 @@ check('诊断: 空 location 容错', (() => {
   const d = md.diagFromServer({ ...diagRaw, location: null })
   return d.field === null && d.line === null
 })())
-check('诊断: 形状不符返回 null', md.diagFromServer({ code: 'X' }) === null)
 check('诊断: 从错误 params.diagnostics 提取', (() => {
   const err = { params: { diagnostics: [diagRaw] } }
   const list = md.diagnosticsFromError(err)

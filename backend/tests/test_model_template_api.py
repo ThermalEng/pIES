@@ -34,6 +34,14 @@ from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
 from iesplan.audit.persistence import AuditLog  # noqa: E402
 from iesplan.model.persistence import ModelTemplateRevision  # noqa: E402
+import iesplan.configuration.persistence  # noqa: E402,F401
+import iesplan.dataset.persistence  # noqa: E402,F401
+import iesplan.identity.persistence  # noqa: E402,F401
+import iesplan.package.persistence  # noqa: E402,F401
+import iesplan.project.persistence  # noqa: E402,F401
+import iesplan.results.persistence  # noqa: E402,F401
+import iesplan.storage.persistence  # noqa: E402,F401
+import iesplan.tasks.persistence  # noqa: E402,F401
 
 PASSWORD = "Test12345"
 
@@ -464,6 +472,29 @@ def test_delete_published_rejected(client: TestClient, db_session: Session) -> N
 # ---------------------------------------------------------------------------
 # 5. 校验端点(不落盘)
 # ---------------------------------------------------------------------------
+
+
+def test_validate_endpoint_raw_yaml_unpersisted(client: TestClient, db_session: Session) -> None:
+    """未持久化草稿/在线编辑直接向 /validate 端点提交原始 YAML 校验。"""
+    headers = _make_owner(client, db_session, "tpl_val_raw")
+    resp = client.post(
+        "/api/model-templates/validate",
+        json={"model_yaml": TEMPLATE_YAML},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["valid"] is True
+    assert resp.json()["diagnostics"] == []
+
+    # 非法输入 -> valid: False 并返回诊断
+    resp2 = client.post(
+        "/api/model-templates/validate",
+        json={"model_yaml": NO_INPUTS_YAML},
+        headers=headers,
+    )
+    assert resp2.status_code == 200
+    assert resp2.json()["valid"] is False
+    assert any(d["code"] == "TPL-MDL-001" for d in resp2.json()["diagnostics"])
 
 
 def test_validate_endpoint_direct_yaml(client: TestClient, db_session: Session) -> None:

@@ -55,6 +55,47 @@ export interface TemplateDetailDto {
   diagnostics: ModelDiagnosticDto[]
 }
 
+/** 模板列表响应信封: 精确 {templates: [...]}。 */
+export interface TemplateListResponseDto {
+  templates: TemplateDto[]
+}
+
+/** 模板详情响应信封: 精确 {template, document, diagnostics}。 */
+export type TemplateDetailResponseDto = TemplateDetailDto
+
+/** 模板变更响应信封(创建/保存草稿/启停用): 精确 {template: {...}}。 */
+export interface TemplateMutationResponseDto {
+  template: TemplateDto
+}
+
+/** 模板校验响应信封: 精确 {valid: boolean, diagnostics: [...]}。 */
+export interface TemplateValidateResponseDto {
+  valid: boolean
+  diagnostics: ModelDiagnosticDto[]
+}
+
+/** 模板发布响应信封: 精确 {revision: {...}, duplicate: boolean}。 */
+export interface TemplatePublishResponseDto {
+  revision: TemplateRevisionDto
+  duplicate: boolean
+}
+
+/** 模板删除响应信封: 精确 {ok: boolean, deleted: string}。 */
+export interface TemplateDeleteResponseDto {
+  ok: boolean
+  deleted: string
+}
+
+/** 模板精确 revision 详情响应信封。 */
+export interface TemplateRevisionDetailResponseDto {
+  template: TemplateDto
+  revision: TemplateRevisionDto
+  document: Record<string, unknown>
+  receipt: Record<string, unknown>
+  summary: Record<string, unknown>
+  diagnostics: ModelDiagnosticDto[]
+}
+
 /** 创建/保存草稿请求。 */
 export interface TemplateDraftRequestDto {
   slug: string

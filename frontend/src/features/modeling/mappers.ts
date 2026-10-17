@@ -8,11 +8,18 @@
 
 import type {
   CandidateSaveRequestDto,
+  CandidateSaveResultDto,
   DeviceParameterSpecDto,
   DeviceTypeDto,
   DeviceTypeListResponseDto,
   DraftConnectionDto,
   DraftDeviceDto,
+  ModelDiagnosticDto,
+  ProjectModelDto,
+  TemplateDetailDto,
+  TemplateRevisionDetailDto,
+  TemplateRevisionDto,
+  TemplateSummaryDto,
   ValidRangeDto,
 } from './contracts'
 import type { ProjectViewResponseDto } from '../projects'
@@ -24,9 +31,11 @@ import type {
   ProjectModelSummary,
   SavedModelInfo,
   TemplateDetail,
+  TemplateRevision,
   TemplateSummary,
 } from './model'
 import { MapperError } from './model'
+import { ApiError } from '../../types'
 import type {
   Connection,
   Device,
@@ -465,53 +474,39 @@ export function localeName(names: Record<string, string> | null | undefined, loc
   return ''
 }
 
-/** 后端模板列表项 → 前端 TemplateSummary(模板 ID 即展示名; 无独立 names 字段)。 */
-export function templateSummaryFromServer(raw: unknown, locale: string): TemplateSummary {
-  const rec = asRecord(raw)
-  if (!rec || typeof rec.template_id !== 'string') {
-    throw new MapperError('模板列表项缺少 template_id')
-  }
+/** 后端模板列表项 → 前端 TemplateSummary(模板 ID 即展示名; schema_version 来自权威 revision)。 */
+export function templateSummaryFromServer(dto: TemplateSummaryDto, locale?: string): TemplateSummary {
   void locale
-  // 枚举严格校验(§7.1): 枚举之外的值必须被拒绝, 不静默映射为合法值
-  const status = rec.status
-  if (status !== 'draft' && status !== 'published' && status !== 'disabled') {
-    throw new MapperError(`模板列表项 status 非法: ${String(status)}`)
-  }
   return {
-    id: typeof rec.id === 'string' ? rec.id : '',
-    template_id: rec.template_id,
-    status,
-    description: typeof rec.description === 'string' ? rec.description : null,
-    draft_revision: typeof rec.draft_revision === 'number' ? rec.draft_revision : 0,
-    draft_has_inputs: rec.draft_has_inputs === true ? true : rec.draft_has_inputs === false ? false : null,
-    published_revision: typeof rec.published_revision === 'number' ? rec.published_revision : 0,
-    published_at: typeof rec.published_at === 'string' ? rec.published_at : null,
-    created_at: typeof rec.created_at === 'string' ? rec.created_at : null,
-    updated_at: typeof rec.updated_at === 'string' ? rec.updated_at : null,
-    revision: rec.revision !== null && rec.revision !== undefined ? templateRevisionFromServer(rec.revision) : null,
+    id: dto.id,
+    template_id: dto.template_id,
+    status: dto.status,
+    description: dto.description,
+    draft_revision: dto.draft_revision,
+    draft_has_inputs: dto.draft_has_inputs,
+    published_revision: dto.published_revision,
+    published_at: dto.published_at,
+    created_at: dto.created_at,
+    updated_at: dto.updated_at,
+    revision: dto.revision ? templateRevisionFromServer(dto.revision) : null,
     name: '',
-    names: {},
-    schema_version: '2.0.0',
-    has_inputs: rec.draft_has_inputs === true,
+    schema_version: dto.revision?.schema_version ?? null,
+    has_inputs: dto.draft_has_inputs === true,
   }
 }
 
-/** 精确发布 revision 后端视图 → 前端领域形态(模板 ID + revision + 摘要固定内容)。 */
-export function templateRevisionFromServer(raw: unknown): TemplateSummary['revision'] {
-  const rec = asRecord(raw)
-  if (!rec || typeof rec.revision !== 'number') {
-    throw new MapperError('模板 revision 缺少 revision')
-  }
+/** 精确发布 revision 后端视图 → 前端领域形态(直映射权威事实)。 */
+export function templateRevisionFromServer(dto: TemplateRevisionDto): TemplateRevision {
   return {
-    id: typeof rec.id === 'string' ? rec.id : '',
-    revision: rec.revision,
-    schema_version: typeof rec.schema_version === 'string' ? rec.schema_version : '2.0.0',
-    input_count: typeof rec.input_count === 'number' ? rec.input_count : 0,
-    yaml_object_id: typeof rec.yaml_object_id === 'string' ? rec.yaml_object_id : '',
-    receipt_object_id: typeof rec.receipt_object_id === 'string' ? rec.receipt_object_id : '',
-    summary_object_id: typeof rec.summary_object_id === 'string' ? rec.summary_object_id : '',
-    published_by: typeof rec.published_by === 'string' ? rec.published_by : '',
-    published_at: typeof rec.published_at === 'string' ? rec.published_at : null,
+    id: dto.id,
+    revision: dto.revision,
+    schema_version: dto.schema_version,
+    input_count: dto.input_count,
+    yaml_object_id: dto.yaml_object_id,
+    receipt_object_id: dto.receipt_object_id,
+    summary_object_id: dto.summary_object_id,
+    published_by: dto.published_by,
+    published_at: dto.published_at,
   }
 }
 
@@ -520,128 +515,100 @@ export function templateRevisionFromServer(raw: unknown): TemplateSummary['revis
  * 精确 revision 接口将 revision 与 template 分列返回；这里把它合入 summary，
  * 使项目候选始终携带与 document 完全一致的 revision。
  */
-export function templateDetailFromServer(body: unknown, locale: string): TemplateDetail {
-  const rec = asRecord(body)
-  const summaryRaw = asRecord(rec?.template)
-  if (!summaryRaw) throw new MapperError('模板详情缺少 template')
-  const exactRevision = rec?.revision
-  const summary = templateSummaryFromServer(
-    exactRevision === undefined ? summaryRaw : { ...summaryRaw, revision: exactRevision },
-    locale,
-  )
-  const document = asRecord(rec?.document)
-  const inputs = document ? buildInputTree(document.inputs) : []
+export function templateDetailFromServer(
+  body: TemplateRevisionDetailDto | TemplateDetailDto,
+  locale?: string,
+): TemplateDetail {
+  void locale
+  const exactRevision = 'revision' in body && body.revision ? body.revision : body.template.revision ?? null
+  const summaryDto: TemplateSummaryDto = {
+    ...body.template,
+    revision: exactRevision,
+  }
+  const summary = templateSummaryFromServer(summaryDto)
+  const document = body.document
+  const inputs = document && document.inputs ? buildInputTree(document.inputs) : []
   return {
     summary,
-    document: document ?? null,
+    document,
     inputs,
-    diagnostics: Array.isArray(rec?.diagnostics)
-      ? (rec.diagnostics as unknown[]).map(diagFromServer).filter((d): d is ModelDiagnostic => d !== null)
-      : [],
+    diagnostics: body.diagnostics.map(diagFromServer),
     raw: document ?? {},
   }
 }
 
-/** 项目模型清单行 → 前端领域形态(编号对用户可见)。 */
-export function projectModelFromServer(raw: unknown): ProjectModelSummary {
-  const rec = asRecord(raw)
-  if (!rec || typeof rec.device_id !== 'string') {
-    throw new MapperError('项目模型清单行缺少 device_id')
-  }
+/** 项目模型清单行 → 前端领域形态(编号对用户可见, 严格按后端 project_model_to_dict 映射)。 */
+export function projectModelFromServer(dto: ProjectModelDto): ProjectModelSummary {
   return {
-    id: typeof rec.id === 'string' ? rec.id : '',
-    project_id: typeof rec.project_id === 'string' ? rec.project_id : '',
-    device_id: rec.device_id,
-    base_device_id: typeof rec.base_device_id === 'string' ? rec.base_device_id : rec.device_id,
-    suffix: typeof rec.suffix === 'number' ? rec.suffix : 0,
-    revision: typeof rec.revision === 'number' ? rec.revision : 1,
-    project_revision: typeof rec.project_revision === 'number' ? rec.project_revision : 0,
-    model_object_id: typeof rec.model_object_id === 'string' ? rec.model_object_id : '',
-    receipt_object_id: typeof rec.receipt_object_id === 'string' ? rec.receipt_object_id : '',
-    source: rec.source === 'template' ? 'template' : 'direct_yaml',
-    template_id: typeof rec.template_id === 'string' ? rec.template_id : null,
-    template_revision: typeof rec.template_revision === 'number' ? rec.template_revision : null,
-    created_by: typeof rec.created_by === 'string' ? rec.created_by : '',
-    created_at: typeof rec.created_at === 'string' ? rec.created_at : null,
+    id: dto.id,
+    project_id: dto.project_id,
+    device_id: dto.device_id,
+    base_device_id: dto.base_device_id,
+    suffix: dto.suffix,
+    revision: dto.revision,
+    project_revision: dto.project_revision,
+    model_object_id: dto.model_object_id,
+    receipt_object_id: dto.receipt_object_id,
+    source: dto.source,
+    template_id: dto.template_id,
+    template_revision: dto.template_revision,
+    created_by: dto.created_by,
+    created_at: dto.created_at,
   }
 }
 
-/** 保存成功响应 {project_model, receipt, project_revision} → 前端 SavedModelInfo。 */
-export function savedModelFromServer(body: unknown): SavedModelInfo {
-  const rec = asRecord(body)
-  const model = asRecord(rec?.project_model)
-  if (!model || typeof model.device_id !== 'string') {
-    throw new MapperError('候选保存响应缺少 project_model.device_id')
-  }
-  // 摘要计数从校验回执读取(权威); 回执缺失时保持 0 计数
-  const receipt = asRecord(rec?.receipt)
-  // 枚举严格校验(§7.1): 未知 source 拒绝, 不静默映射为 direct_yaml
-  const source = model.source
-  if (source !== 'direct_yaml' && source !== 'template') {
-    throw new MapperError(`保存结果 source 非法: ${String(source)}`)
-  }
-  const summary = {
-    property_count:
-      receipt && typeof receipt.property_count === 'number' ? receipt.property_count : 0,
-    interface_count:
-      receipt && typeof receipt.interface_count === 'number' ? receipt.interface_count : 0,
-    relation_count:
-      receipt && typeof receipt.relation_count === 'number' ? receipt.relation_count : 0,
-  }
+/** 保存成功响应 {project_model, receipt, project_revision, duplicate} → 前端 SavedModelInfo。 */
+export function savedModelFromServer(res: CandidateSaveResultDto): SavedModelInfo {
+  const model = res.project_model
+  const receipt = res.receipt
   return {
-    // 最终编号 = 后端分配的 _N 设备 ID(前端不预分配); 主表行 id 为不透明十进制
     model_id: model.device_id,
     device_id: model.device_id,
-    suffix: typeof model.suffix === 'number' ? model.suffix : 0,
-    base_device_id: typeof model.base_device_id === 'string' ? model.base_device_id : model.device_id,
-    schema_version: '2.0.0',
-    summary,
-    project_revision: typeof rec?.project_revision === 'number' ? rec.project_revision : 0,
-    source,
-    template_id: typeof model.template_id === 'string' ? model.template_id : null,
-    template_revision: typeof model.template_revision === 'number' ? model.template_revision : null,
-    duplicate: rec?.duplicate === true,
+    suffix: model.suffix,
+    base_device_id: model.base_device_id,
+    summary: {
+      property_count: receipt.property_count,
+      interface_count: receipt.interface_count,
+      relation_count: receipt.relation_count,
+    },
+    project_revision: res.project_revision,
+    source: model.source,
+    template_id: model.template_id,
+    template_revision: model.template_revision,
+    duplicate: res.duplicate === true,
   }
 }
 
-/** 后端诊断条目 → 前端 ModelDiagnostic(形状不符返回 null, 由调用方过滤)。 */
-export function diagFromServer(raw: unknown): ModelDiagnostic | null {
-  const rec = asRecord(raw)
-  if (!rec || typeof rec.message_key !== 'string') return null
-  const params = asRecord(rec.params)
-  const loc = asRecord(rec.location)
+/** 后端诊断条目 → 前端 ModelDiagnostic。 */
+export function diagFromServer(dto: ModelDiagnosticDto): ModelDiagnostic {
+  const loc = dto.location
+  const params = dto.params
   return {
-    code: typeof rec.code === 'string' ? rec.code : 'MODEL-VAL-001',
-    message_key: rec.message_key,
-    // 严重度未知时回退 'error'(合法枚举成员): 诊断必须保持可见,
-    // 丢弃整条诊断比徽章颜色降级更糟(与 source/status 的拒绝语义不同)
-    severity: rec.severity === 'blocking' || rec.severity === 'warning' || rec.severity === 'info' ? rec.severity : 'error',
-    blocking: rec.blocking === true,
-    field: loc && typeof loc.field === 'string' ? loc.field : null,
-    line: loc && typeof loc.line === 'number' ? loc.line : null,
-    column: loc && typeof loc.column === 'number' ? loc.column : null,
-    detail: params && typeof params.detail === 'string' ? params.detail : null,
+    code: dto.code,
+    message_key: dto.message_key,
+    severity: dto.severity,
+    blocking: dto.blocking,
+    field: loc?.field ?? null,
+    line: loc?.line ?? null,
+    column: loc?.column ?? null,
+    detail: typeof params?.detail === 'string' ? params.detail : null,
     expected: params?.expected ?? null,
     actual: params?.actual ?? null,
-    fix_hint_key: typeof rec.fix_hint_key === 'string' ? rec.fix_hint_key : null,
-    ref_ids: Array.isArray(rec.ref_ids) ? (rec.ref_ids as unknown[]).filter((r) => typeof r === 'string') : [],
+    fix_hint_key: dto.fix_hint_key,
+    ref_ids: dto.ref_ids,
   }
 }
 
-/** 从任意错误对象提取诊断列表(ApiError 信封 params.diagnostics / 裸数组)。 */
+/** 从错误对象(ApiError 信封 params.diagnostics / 诊断数组)提取诊断列表。 */
 export function diagnosticsFromError(error: unknown): ModelDiagnostic[] {
-  const rec = asRecord(error)
-  const params = asRecord(rec?.params)
-  const list = params ? (Array.isArray(params.diagnostics) ? params.diagnostics : null) : null
-  if (list === null) {
-    if (Array.isArray((error as { diagnostics?: unknown })?.diagnostics)) {
-      return (error as { diagnostics: unknown[] }).diagnostics
-        .map(diagFromServer)
-        .filter((d): d is ModelDiagnostic => d !== null)
-    }
-    return []
-  }
-  return list.map(diagFromServer).filter((d): d is ModelDiagnostic => d !== null)
+  const params = error instanceof ApiError ? error.params : (error as { params?: { diagnostics?: unknown[] } })?.params
+  const list = params && Array.isArray(params.diagnostics)
+    ? params.diagnostics
+    : Array.isArray((error as { diagnostics?: unknown[] })?.diagnostics)
+      ? (error as { diagnostics: unknown[] }).diagnostics
+      : null
+  if (!list) return []
+  return (list as ModelDiagnosticDto[]).map(diagFromServer)
 }
 
 /** 候选领域对象 → 保存请求 DTO(判别字段 source)。 */

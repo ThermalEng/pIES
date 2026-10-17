@@ -186,6 +186,20 @@ def save_template_draft_endpoint(
     return {"template": result}
 
 
+@router.post("/validate", summary="在线编辑模板完整校验(不落盘)")
+def validate_template_yaml_endpoint(
+    payload: TemplateValidateRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    """模板完整校验(在线编辑即时校验): 返回聚合诊断与 valid 标志, 不落盘、不产生 revision。"""
+    validation = validate_template_yaml(payload.model_yaml or "")
+    return {
+        "valid": validation.ok,
+        "diagnostics": [d.to_dict() for d in validation.diagnostics],
+    }
+
+
 @router.post("/{template_id}/validate", summary="模板完整校验(不落盘)")
 def validate_template_endpoint(
     template_id: str,

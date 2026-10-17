@@ -46,9 +46,7 @@ export interface TemplateSummary {
   revision: TemplateRevision | null
   /** 展示名(模板 ID 派生; 后端无独立 names 字段)。 */
   name: string
-  /** 兼容字段(模板详情文档含 names; 目录项为空)。 */
-  names: Record<string, string>
-  schema_version: string
+  schema_version: string | null
   has_inputs: boolean
 }
 
@@ -132,7 +130,6 @@ export interface SavedModelInfo {
   /** 项目内编号(_N)。 */
   suffix: number
   base_device_id: string
-  schema_version: string
   summary: { property_count: number; interface_count: number; relation_count: number }
   /** 保存后的项目草稿修订。 */
   project_revision: number
