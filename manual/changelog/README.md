@@ -15,7 +15,7 @@
 
 ## Unreleased
 
-### 2026-10-17 — `0.14.0` 项目边界、草稿命令传输与依赖家族前端架构收口（已复审）
+### 2026-10-17 — `0.14.0` 项目边界、草稿命令传输与依赖家族前端架构收口（待复审收口）
 
 - 项目、项目版本、项目导入、建模、数据集与配置初值归入各自独立 feature，页面及工作台全面消费 feature 公开入口；从聚合器 `api/client.ts` 彻底删除已迁移的业务重复实现与 `api.tasks`。草稿语义命令传输统一由 `features/projects` 公开拥有，`saveWorkingInputs` 归入 `features/tasks` 公开入口，`applyScheme` 归入 `features/project-versions` 公开入口。
 - 收敛内部多余校验与编造字段：消除草稿修订返回值的多余内部检查与草稿命令前置重复核算，直接消费后端返回的真实修订号与 409 冲突；草稿模型节直读服务端真实修订号与名键端点设备/连接，保留真实空数组；设备类型注册表严格对齐后端 `selector.py`（必填字符串 `schema_version`，真实端口与参数字段），移除前端自编造的 `is_load/capabilities/model_method/stateful/version` 与废弃参数元数据；删除未使用的兼容导出，数据集创建直接消费权威 `{ dataset }` 信封。
