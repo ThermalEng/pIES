@@ -18,12 +18,20 @@
  * (项目修订获取、幂等键生成等编排在 hooks/ 完成)。
  */
 
+import { putDraftCommands } from '../projects'
+import type { ProjectViewResponseDto } from '../projects'
+import { runValidation } from '../validation'
 import { request } from '../../shared/http'
 import { ApiError } from '../../types'
+import type { ConnectionInput, DeviceInput, DeviceTypeSpec, DraftModelSection, ValidationResult } from '../../types'
+import type { DeviceTypeListResponseDto } from './contracts'
 import {
   buildCandidateRequest,
+  connectionName,
+  deviceTypeListFromServer,
   diagnosticsFromError,
   diagFromServer,
+  modelSectionFromView,
   projectModelFromServer,
   savedModelFromServer,
   templateDetailFromServer,
@@ -120,4 +128,94 @@ export async function saveCandidate(projectId: number, candidate: CandidateModel
     }
     throw err
   }
+}
+
+// ---------------------------------------------------------------------------
+// 草稿模型写(经 projects 唯一公开草稿传输; 各自准备业务 payload)
+// ---------------------------------------------------------------------------
+
+/** 读项目视图草稿内容 model 节(2.0 名键设备与端点连接, 附带草稿修订号)。 */
+export async function getModel(projectId: number): Promise<{ revision: number; model: DraftModelSection }> {
+  const body = await request<ProjectViewResponseDto>(`/projects/${projectId}`)
+  return modelSectionFromView(body)
+}
+
+/** 发送模型语义命令(修订号由调用方已加载值传入, 写前不 GET; 成功以后端返回为准)。 */
+export async function sendCommands(
+  projectId: number,
+  commands: Array<{ type: string; payload: Record<string, unknown> }>,
+  expectedRevision: number,
+): Promise<{ revision: number }> {
+  return putDraftCommands(projectId, commands, expectedRevision)
+}
+
+/** 新增/更新设备实例(model.upsert_device)。 */
+export async function upsertDevice(
+  projectId: number,
+  input: DeviceInput,
+  expectedRevision: number,
+): Promise<{ revision: number }> {
+  return sendCommands(
+    projectId,
+    [
+      {
+        type: 'model.upsert_device',
+        payload: {
+          name: input.name,
+          device_type: input.device_type,
+          kind: input.kind,
+          ...(input.params !== undefined ? { params: input.params } : {}),
+        },
+      },
+    ],
+    expectedRevision,
+  )
+}
+
+/** 删除设备实例(model.remove_device)。 */
+export async function removeDevice(projectId: number, name: string, expectedRevision: number): Promise<{ revision: number }> {
+  return sendCommands(projectId, [{ type: 'model.remove_device', payload: { name } }], expectedRevision)
+}
+
+/** 新增/更新连接(model.upsert_connection; 缺省名与后端公式一致)。 */
+export async function upsertConnection(
+  projectId: number,
+  input: ConnectionInput,
+  expectedRevision: number,
+): Promise<{ revision: number; name: string }> {
+  const name =
+    input.name ?? connectionName(input.from_device, input.from_port, input.to_device, input.to_port)
+  const { revision } = await sendCommands(
+    projectId,
+    [
+      {
+        type: 'model.upsert_connection',
+        payload: {
+          name,
+          from_device: input.from_device,
+          from_port: input.from_port,
+          to_device: input.to_device,
+          to_port: input.to_port,
+        },
+      },
+    ],
+    expectedRevision,
+  )
+  return { revision, name }
+}
+
+/** 删除连接(model.remove_connection)。 */
+export async function removeConnection(projectId: number, name: string, expectedRevision: number): Promise<{ revision: number }> {
+  return sendCommands(projectId, [{ type: 'model.remove_connection', payload: { name } }], expectedRevision)
+}
+
+/** 运行项目模型校验(复用 validation feature 公开能力)。 */
+export async function validateModel(projectId: number): Promise<ValidationResult> {
+  return runValidation(projectId)
+}
+
+/** 设备类型注册表(公开, 供画布; 精确 {items} 信封)。 */
+export async function listDeviceTypes(): Promise<DeviceTypeSpec[]> {
+  const body = await request<DeviceTypeListResponseDto>('/registry/device-types')
+  return deviceTypeListFromServer(body)
 }

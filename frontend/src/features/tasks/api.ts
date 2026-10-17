@@ -6,11 +6,11 @@
  * 结果可用性补充读取(tasks.get 内 /result)与旧行为一致: 仅当任务元数据
  * result_available 明确为 true 时读取(未完成/无结果不是失败, 不探测 404);
  * 可用时读取失败必须 reject(调用方负责失败可见), 不吞错置空。
- * saveWorkingInputs 仍由 api/client 直接实现(复用跨家族共享的草稿命令
- * helper, 不在本家族重复), 故不在此文件。
+ * saveWorkingInputs 复用 features/projects 唯一公开草稿命令传输。
  */
 
 import { ApiError } from '../../types'
+import { putDraftCommands, sendDraftCommand } from '../projects'
 import type {
   PageResult,
   Task,
@@ -140,4 +140,23 @@ export async function retryTask(projectId: number, taskId: number): Promise<Task
     body: {},
   })
   return taskFromRetryResponse(res, projectId)
+}
+
+/**
+ * 保存任务提交工作输入到项目草稿(task.set_working_inputs 语义命令)。
+ * 复用 projects 唯一公开草稿命令传输; 有显式修订时写前不 GET, 无时先读当前草稿。
+ */
+export async function saveWorkingInputs(
+  projectId: number,
+  working: Record<string, unknown>,
+  expectedRevision?: number,
+): Promise<{ revision: number }> {
+  if (expectedRevision !== undefined) {
+    return putDraftCommands(
+      projectId,
+      [{ type: 'task.set_working_inputs', payload: { working } }],
+      expectedRevision,
+    )
+  }
+  return sendDraftCommand(projectId, 'task.set_working_inputs', { working })
 }

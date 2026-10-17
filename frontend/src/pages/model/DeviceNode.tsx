@@ -129,7 +129,7 @@ function DeviceNodeView({ data }: NodeProps<Node<DeviceNodeData, 'device'>>) {
       </header>
       <div className="mp-node__type">{typeLabel}</div>
       <div className="mp-node__meta">
-        <span className="mp-node__capacity" title={capacitySpec?.help_key ?? lt('node.capacity')}>
+        <span className="mp-node__capacity" title={lt('node.capacity')}>
           {capacityValue !== null
             ? `${t('ies.modeling.capacity')} ${capacityValue}${capacitySpec?.unit ? ` ${capacitySpec.unit}` : ''}`
             : lt('node.capacity_none')}

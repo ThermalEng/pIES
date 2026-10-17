@@ -115,7 +115,8 @@ export function derivePorts(spec: DeviceTypeSpec, params: Record<string, unknown
       ports.push({ name: p.name, carrier: p.energy_carrier, direction: 'in' })
       ports.push({ name: p.name, carrier: p.energy_carrier, direction: 'out' })
     } else {
-      ports.push({ name: p.name, carrier: p.energy_carrier, direction: p.direction })
+      const dir = p.direction === 'in' ? 'in' : 'out'
+      ports.push({ name: p.name, carrier: p.energy_carrier, direction: dir })
     }
   }
   return ports
@@ -202,11 +203,8 @@ export function carrierLabelKey(carrier: EnergyCarrier): string | null {
 /** 参数默认值(与 ParameterSpec.default 同型:number | string | 字典对象 | null)。 */
 export type ParamValue = number | string | Record<string, number> | null
 
-/** 按设备属性(存量/新增)取参数默认值:存量优先 existing_default。
- *  枚举参数(如 mode)默认值为字符串字面量,数值参数为 number,
- *  结构化参数(如 import_tariff)为 {peak, flat, valley} 对象。 */
-export function defaultParamValue(spec: ParameterSpec, kind: DeviceKind): ParamValue {
-  if (kind === 'existing' && spec.existing_default !== null) return spec.existing_default
+/** 取参数默认值:数值参数为 number, 结构化参数为 {peak, flat, valley} 对象。 */
+export function defaultParamValue(spec: ParameterSpec, _kind?: DeviceKind): ParamValue {
   return spec.default
 }
 

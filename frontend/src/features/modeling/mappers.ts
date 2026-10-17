@@ -8,8 +8,14 @@
 
 import type {
   CandidateSaveRequestDto,
+  DeviceParameterSpecDto,
+  DeviceTypeDto,
+  DeviceTypeListResponseDto,
+  DraftConnectionDto,
+  DraftDeviceDto,
   ValidRangeDto,
 } from './contracts'
+import type { ProjectViewResponseDto } from '../projects'
 import type { FormFieldError, FormFieldValue } from './form'
 import type {
   CandidateModel,
@@ -21,6 +27,13 @@ import type {
   TemplateSummary,
 } from './model'
 import { MapperError } from './model'
+import type {
+  Connection,
+  Device,
+  DevicePortSpec,
+  DeviceTypeSpec,
+  DraftModelSection,
+} from '../../types'
 
 // ---------------------------------------------------------------------------
 // 数值(宪法 §7.3: 有限数值; 表单字符串在 mapper 边界解析)
@@ -713,4 +726,109 @@ export function yamlLineColumn(text: string, offset: number): { line: number; co
   const lastNewline = before.lastIndexOf('\n')
   const column = lastNewline >= 0 ? clamped - lastNewline : clamped + 1
   return { line, column }
+}
+
+// ---------------------------------------------------------------------------
+// 草稿模型节(项目视图 draft.content.model; 2.0 唯一项目建模事实)
+// ---------------------------------------------------------------------------
+
+/** 草稿内容设备条目 → 前端 Device(2.0 名键, 无 id/状态/时间字段)。 */
+export function deviceFromDraft(d: DraftDeviceDto): Device {
+  return {
+    name: d.name,
+    device_type: d.device_type,
+    kind: d.kind,
+    params: d.params,
+  }
+}
+
+/** 草稿内容连接条目 → 前端 Connection(2.0 名键端点, 无类型/容量/损耗)。 */
+export function connFromDraft(c: DraftConnectionDto): Connection {
+  return {
+    name: c.name,
+    from_device: c.from_device,
+    from_port: c.from_port,
+    to_device: c.to_device,
+    to_port: c.to_port,
+  }
+}
+
+/** 项目视图 draft.content.model → 前端 DraftModelSection。 */
+export function modelSectionFromView(view: ProjectViewResponseDto): { revision: number; model: DraftModelSection } {
+  return {
+    revision: view.draft.revision,
+    model: {
+      devices: view.draft.content.model.devices.map(deviceFromDraft),
+      connections: view.draft.content.model.connections.map(connFromDraft),
+    },
+  }
+}
+
+/** 2.0 连接默认命名(与后端 upsert_connection 缺省名公式一致)。 */
+export function connectionName(
+  fromDevice: string,
+  fromPort: string,
+  toDevice: string,
+  toPort: string,
+): string {
+  return `${fromDevice}.${fromPort}->${toDevice}.${toPort}`
+}
+
+// ---------------------------------------------------------------------------
+// 设备类型注册表
+// ---------------------------------------------------------------------------
+
+/** 参数默认值适配:枚举为字符串, 数值为 number, 结构化对象原样透传数值项。 */
+export function paramDefaultValue(v: unknown): number | string | Record<string, number> | null {
+  if (typeof v === 'number') return v
+  if (typeof v === 'string') return v
+  if (typeof v === 'object' && v !== null) {
+    const out: Record<string, number> = {}
+    for (const [key, val] of Object.entries(v)) {
+      if (typeof val === 'number') out[key] = val
+    }
+    return Object.keys(out).length > 0 ? out : null
+  }
+  return null
+}
+
+/** 后端设备类型注册项 → 前端 DeviceTypeSpec(参数规格字段名适配 + 真实端口透传)。 */
+export function deviceTypeFromServer(s: DeviceTypeDto): DeviceTypeSpec {
+  const params = s.parameters
+  const ports: DevicePortSpec[] = s.ports.map((p) => ({
+    name: p.name,
+    direction: p.direction,
+    energy_carrier: p.energy_carrier,
+    unit: p.unit ?? null,
+  }))
+  // 注册表公开 DTO 用 names {zh-CN,en-US} 字典(无 name_zh/name_en 平铺字段),
+  // 载能只存在于 ports[].energy_carrier(无 energy_carriers 顶层数组): 直接按
+  // 端口声明顺序去重派生, 与 descriptor 同一身份, 不做形状复核与值过滤。
+  const names = s.names
+  const carriers = [...new Set(ports.map((p) => p.energy_carrier))]
+  return {
+    type_id: s.type_id,
+    schema_version: s.schema_version ?? '2.0.0',
+    name_zh: names['zh-CN'] ?? '',
+    name_en: names['en-US'] ?? '',
+    energy_carriers: carriers,
+    ports,
+    parameters: Object.fromEntries(
+      Object.entries(params).map(([name, p]: [string, DeviceParameterSpecDto]) => [
+        name,
+        {
+          name: p.name,
+          unit: p.unit ?? null,
+          min: p.min ?? null,
+          max: p.max ?? null,
+          default: paramDefaultValue(p.default),
+        },
+      ]),
+    ),
+  }
+}
+
+/** 注册表响应 {items} → DeviceTypeSpec 列表。 */
+export function deviceTypeListFromServer(body: DeviceTypeListResponseDto): DeviceTypeSpec[] {
+  return body.items.map(deviceTypeFromServer)
 }

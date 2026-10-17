@@ -12,6 +12,7 @@ export {
   listTasks,
   loadTaskDraft,
   retryTask,
+  saveWorkingInputs,
 } from './api'
 export {
   buildInput,

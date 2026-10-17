@@ -83,6 +83,11 @@ export interface DatasetDetailResponseDto {
   versions: DatasetVersionDto[]
 }
 
+/** 创建元数据响应: 精确 {dataset} 信封。 */
+export interface DatasetCreateResponseDto {
+  dataset: Dataset
+}
+
 /** 上传响应: 精确 {dataset_version, diagnostics} 信封。 */
 export interface DatasetUploadResponseDto {
   dataset_version: DatasetVersionDto

@@ -309,9 +309,6 @@ export interface ProjectListParams {
 // 系统模型(设备模型 2.0: 项目草稿内容 model 节, 名键唯一事实)
 // ---------------------------------------------------------------------------
 
-/** 注册表端口类型(设备 YAML 公开 descriptor, 画布句柄与服务端端口的共同依据)。 */
-export type PortType = 'electric' | 'thermal' | 'cooling' | 'fuel' | 'water' | 'data'
-
 /** 数值精度标记(算法默认精度 / 指标精度; 建模链 2.0 不再携带模型精度)。 */
 export type Fidelity = 'low' | 'medium' | 'high'
 
@@ -358,7 +355,7 @@ export interface DraftModelSection {
 }
 
 // ---------------------------------------------------------------------------
-// 设备注册表(04 §2/§3)
+// 设备注册表(04 §2/§3, 与后端 selector.py 严格一致)
 // ---------------------------------------------------------------------------
 
 /**
@@ -369,39 +366,28 @@ export interface DraftModelSection {
 export type EnergyCarrier = string
 
 export interface ParameterSpec {
+  name: string
   unit: string | null
   min: number | null
   max: number | null
-  /** 默认值:枚举参数为字符串字面量(如 heat_pump.mode='both'),数值参数为 number,
-   *  结构化参数为对象(如 grid_connection.import_tariff={peak,flat,valley})。 */
+  /** 默认值:数值参数为 number, 结构化参数为对象(如 grid_connection.import_tariff={peak,flat,valley})。 */
   default: number | string | Record<string, number> | null
-  is_optimizable: boolean
-  /** 存量默认值(与 default 同型)。 */
-  existing_default: number | string | Record<string, number> | null
-  help_key: string
-  /** 可选枚举值列表(后端 /api/registry/device-types 透出,前端按此渲染下拉/单选)。 */
-  enum?: Array<string | number | boolean> | null
 }
 
 /** 服务器端口声明(RR-P1-04: 来自设备 YAML 公开 descriptor, 前端画布按此渲染句柄)。 */
 export interface DevicePortSpec {
   name: string
-  port_type: PortType
-  direction: 'in' | 'out' | 'bidirectional'
+  direction: 'in' | 'out' | 'bidirectional' | string
   energy_carrier: EnergyCarrier
-  capacity_ref: string | null
+  unit?: string | null
 }
 
 export interface DeviceTypeSpec {
   type_id: string
-  version: string
+  schema_version: string
   name_zh: string
   name_en: string
   energy_carriers: EnergyCarrier[]
-  is_load: boolean
-  capabilities: string[]
-  model_method: 'mechanism' | 'data_repeat' | 'data_predict'
-  stateful: boolean
   ports: DevicePortSpec[]
   parameters: Record<string, ParameterSpec>
 }

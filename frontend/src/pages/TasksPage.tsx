@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api } from '../api/client'
+import { listDatasets, listVersions as listDatasetVersions } from '../features/datasets'
 import {
   DEFAULT_FORM,
   SUBMITTABLE_TYPES,
@@ -34,6 +34,7 @@ import {
   newSubmitNonce,
   parseEvaluation,
   retryTask,
+  saveWorkingInputs,
   serializeParams,
   workingOfForm,
 } from '../features/tasks'
@@ -317,8 +318,7 @@ export default function TasksPage() {
   }, [projectId])
 
   useEffect(() => {
-    api.datasets
-      .list({ project_id: projectId, limit: 100 })
+    listDatasets({ project_id: projectId, limit: 100 })
       // 后端数据集创建即 draft 状态(无发布流程); 只要未废弃即列入名称解析
       .then((page) => {
         setDatasets(page.items.filter((d) => d.status !== 'deprecated'))
@@ -416,7 +416,7 @@ export default function TasksPage() {
         if (vids.length > 0) {
           for (const ds of datasets) {
             try {
-              const vs = await api.datasets.versions(projectId, ds.id)
+              const vs = await listDatasetVersions(projectId, ds.id)
               if (cancelled) return
               for (const v of vs) {
                 if (vids.includes(v.id) && !matched.has(v.id)) {
@@ -616,9 +616,9 @@ export default function TasksPage() {
             return true
           }
           if (expectedRevision === undefined) {
-            await api.tasks.saveWorkingInputs(projectId, working)
+            await saveWorkingInputs(projectId, working)
           } else {
-            await api.tasks.saveWorkingInputs(projectId, working, expectedRevision)
+            await saveWorkingInputs(projectId, working, expectedRevision)
           }
           // 切换后落定的旧保存作废, 不碰新选择的状态; 但落定的值确已
           // 写入服务端, lastSynced 按实际落定值更新(后续去重依据)。

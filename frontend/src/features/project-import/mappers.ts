@@ -3,7 +3,13 @@
  */
 
 import { ApiError } from '../../types'
-import type { ImportProposal } from '../../types'
+import type { ImportConfirmResult, ImportProposal } from '../../types'
+import { projectFromDto } from '../projects'
+import type {
+  ImportConfirmResponseDto,
+  ImportProposalResponseDto,
+} from './contracts'
+import { confirmedRole } from './contracts'
 import type { ProposalView } from './model'
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -30,4 +36,27 @@ export function errorReasons(err: unknown): string[] {
   const reasons = (err.params as Record<string, unknown> | null)?.reasons
   if (!Array.isArray(reasons)) return []
   return reasons.filter((r): r is string => typeof r === 'string' && r.length > 0)
+}
+
+/** 提案信封 {proposal} → 前端 ImportProposal(与后端 _proposal_to_dict 一一对应)。 */
+export function proposalFromServer(body: ImportProposalResponseDto): ImportProposal {
+  const p = body.proposal
+  return {
+    id: p.id,
+    project_id: p.project_id,
+    proposer_id: p.proposer_id,
+    status: p.status,
+    source_object_id: p.source_object_id,
+    review_summary: p.review_summary,
+    review_errors: p.review_errors,
+    created_at: p.created_at,
+  }
+}
+
+/** 确认信封 {project, my_role} → 前端确认结果(项目主体经 projects 映射复用)。 */
+export function confirmFromServer(body: ImportConfirmResponseDto): ImportConfirmResult {
+  return {
+    project: projectFromDto(body.project, body.my_role),
+    myRole: confirmedRole(body.my_role),
+  }
 }

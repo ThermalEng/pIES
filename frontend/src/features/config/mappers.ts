@@ -9,7 +9,7 @@
  */
 
 import type { CalcConfig } from '../../types'
-import type { ConfigEnvelopeDto } from './contracts'
+import type { ConfigEnvelopeDto, DeploymentDefaultsDto } from './contracts'
 
 /** 后端配置信封 {calculation_config, revision} → 前端 CalcConfig。 */
 export function configFromServer(body: ConfigEnvelopeDto, projectId: number): CalcConfig {
@@ -17,5 +17,14 @@ export function configFromServer(body: ConfigEnvelopeDto, projectId: number): Ca
     project_id: projectId,
     calculation_config: body.calculation_config,
     revision: body.revision,
+  }
+}
+
+/** 部署公开初值 → DeploymentDefaultsDto。 */
+export function deploymentDefaultsFromServer(body: DeploymentDefaultsDto): DeploymentDefaultsDto {
+  return {
+    calculation_defaults: {
+      time_limit_seconds: body.calculation_defaults.time_limit_seconds,
+    },
   }
 }

@@ -15,7 +15,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 
-import { api } from '../api/client'
+import {
+  archiveProject,
+  createProject,
+  deleteProject,
+  listProjects,
+  unarchiveProject,
+} from '../features/projects'
 import { listTasks } from '../features/tasks'
 import { translateError, useI18n } from '../i18n'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
@@ -125,7 +131,7 @@ export default function ProjectsPage() {
       const params: ProjectListParams = { limit: PAGE_SIZE }
       if (statusFilter !== 'all') params.status = statusFilter
       if (append && nextCursor) params.cursor = nextCursor
-      const page = await api.projects.list(params)
+      const page = await listProjects(params)
       if (seq !== seqRef.current) return false
       setProjects((prev) => {
         const merged = append ? [...prev, ...page.items] : page.items
@@ -190,7 +196,7 @@ export default function ProjectsPage() {
   const handleArchiveConfirm = async () => {
     const target = archiveTarget
     if (!target) return
-    const ok = await runOp('archive', target, () => api.projects.archive(target.id), 'ies.project.archive_ok')
+    const ok = await runOp('archive', target, () => archiveProject(target.id), 'ies.project.archive_ok')
     if (ok) setArchiveTarget(null)
   }
 
@@ -206,7 +212,7 @@ export default function ProjectsPage() {
     const ok = await runOp(
       'delete',
       target,
-      () => api.projects.delete(target.id, target.name),
+      () => deleteProject(target.id, target.name),
       'ies.project.delete_ok',
     )
     if (ok) {
@@ -241,7 +247,7 @@ export default function ProjectsPage() {
     setCreateStartYearError(null)
     setCreating(true)
     try {
-      await api.projects.create({
+      await createProject({
         name,
         currency: createCurrency,
         baseline_resolution: createResolution,
@@ -437,7 +443,7 @@ export default function ProjectsPage() {
                           disabled={rowBusy}
                           loading={rowBusy && busy?.op === 'unarchive'}
                           onClick={() =>
-                            void runOp('unarchive', project, () => api.projects.unarchive(project.id), 'ies.project.unarchive_ok')
+                            void runOp('unarchive', project, () => unarchiveProject(project.id), 'ies.project.unarchive_ok')
                           }
                         >
                           {t('ies.project.unarchive')}

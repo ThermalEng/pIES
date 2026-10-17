@@ -27,7 +27,7 @@ async function createProjectEnterConfig(page: Page, projectName: string): Promis
   await page.getByRole('button', { name: /确认|Confirm/i }).click()
   await expect(page.getByText(projectName)).toBeVisible()
   await page.getByText(projectName).click()
-  await expect(page).toHaveURL(/\/projects\/\d+$/)
+  await expect(page).toHaveURL(/\/projects\/\d+(\/tasks)?$/)
   await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('计算配置').click()
   await expect(page).toHaveURL(/\/config$/)
   const m = page.url().match(/\/projects\/(\d+)\/config$/)
@@ -141,7 +141,7 @@ test.describe('0.12-A1: 计算配置 revision 编辑器', () => {
 
     // 打开项目(已由 API 造数)
     await page.getByText(projectName).click()
-    await expect(page).toHaveURL(/\/projects\/\d+$/)
+    await expect(page).toHaveURL(/\/projects\/\d+(\/tasks)?$/)
 
     // 数据: 内置样例生成并绑定(场景 4 同流程)
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('数据管理').click()

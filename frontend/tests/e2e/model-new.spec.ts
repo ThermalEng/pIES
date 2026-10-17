@@ -127,30 +127,19 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     // 监控: 本场景含一次有意触发的 400 校验失败(真实后端), 浏览器会为该响应
     // 产生 "Failed to load resource: ... 400" console 噪音; 过滤该已知噪音后断言
     // 无其他 console error / pageerror / 失败网络请求(13.2)。
-    const consoleErrors: string[] = []
-    const pageErrors: string[] = []
-    const failedRequests: string[] = []
-    page.on('console', (msg) => {
-      if (msg.type() === 'error' && !/Failed to load resource.*400/.test(msg.text())) consoleErrors.push(msg.text())
-    })
-    page.on('pageerror', (err) => pageErrors.push(err.message))
-    page.on('requestfailed', (req) => {
-      const errText = req.failure()?.errorText ?? 'unknown'
-      if (errText === 'net::ERR_ABORTED') return
-      failedRequests.push(`${req.method()} ${req.url()} :: ${errText}`)
-    })
-
     // UI 登录(createSession 同时安装会话上下文)
-    await createSession(page, username, password)
+    const session = await createSession(page, username, password)
 
     // 12a. 通过 UI 新建项目并进入模型页
     const projectName = uniqueName('QA 模型模板')
     await page.getByRole('button', { name: /新建项目|New project/i }).first().click()
     await page.getByLabel(/名称|Name/i).fill(projectName)
+    await page.locator('#pp-create-start-year').fill('2026')
     await page.getByRole('button', { name: /确认|Confirm/i }).click()
     await expect(page.getByText(projectName)).toBeVisible()
     await page.getByText(projectName).click()
     await expect(page).toHaveURL(/\/projects\/\d+$/)
+    const projectId = page.url().match(/\/projects\/(\d+)/)![1]
     await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText(/系统建模|System Modeling/i).click()
     await expect(page).toHaveURL(/\/model$/)
 
@@ -210,12 +199,10 @@ test.describe('场景 12: 新建项目模型(真实后端模板与 YAML)', () =>
     await expect(page.getByText(templateDeviceId)).toBeVisible()
     await expect(page.getByText(/已发布|Published/i).first()).toBeVisible()
 
-    // 不应有 console error / pageerror / 失败网络请求
-    expect(
-      [...consoleErrors, ...pageErrors],
-      `console error / pageerror 应不存在, 实际:\n${[...consoleErrors, ...pageErrors].join('\n')}`,
-    ).toEqual([])
-    expect(failedRequests, `失败网络请求应不存在, 实际:\n${failedRequests.join('\n')}`).toEqual([])
+    session.assertNoErrors([
+      // 新建空项目尚未保存计算配置, 访问任务中心读取 404 为既有正常行为(计数锁定防漂移)。
+      { method: 'GET', path: `/api/projects/${projectId}/config`, status: 404, times: 1 },
+    ])
     await context.close()
   })
 })

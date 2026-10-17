@@ -12,7 +12,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
-import { api } from '../api/client'
+import { getProject } from '../features/projects'
+import { listVersions } from '../features/project-versions'
 import { getTaskDetail, listTasks, loadTaskDraft } from '../features/tasks'
 import { errorMessage, translateError } from '../i18n'
 import type { ApiError, Project, ProjectVersion, Task, TaskDetail } from '../types'
@@ -158,8 +159,8 @@ export function WorkbenchProvider({ projectId, children }: { projectId: number; 
     setProjectLoading(true)
     setProjectError(null)
     const [projectSettled, versionsSettled] = await Promise.allSettled([
-      api.projects.get(projectId),
-      api.projects.versions(projectId),
+      getProject(projectId),
+      listVersions(projectId),
     ])
     let nextProjectError: string | null = null
     let versionsError: string | null = null
