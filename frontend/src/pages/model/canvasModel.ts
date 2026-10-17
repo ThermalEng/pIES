@@ -114,10 +114,12 @@ export function derivePorts(spec: DeviceTypeSpec, params: Record<string, unknown
     if (p.direction === 'bidirectional') {
       ports.push({ name: p.name, carrier: p.energy_carrier, direction: 'in' })
       ports.push({ name: p.name, carrier: p.energy_carrier, direction: 'out' })
-    } else {
-      const dir = p.direction === 'in' ? 'in' : 'out'
-      ports.push({ name: p.name, carrier: p.energy_carrier, direction: dir })
+    } else if (p.direction === 'in') {
+      ports.push({ name: p.name, carrier: p.energy_carrier, direction: 'in' })
+    } else if (p.direction === 'out') {
+      ports.push({ name: p.name, carrier: p.energy_carrier, direction: 'out' })
     }
+    // predefined 与 blind 接口不连接其他设备, 格式契约严禁作为连接句柄暴露
   }
   return ports
 }

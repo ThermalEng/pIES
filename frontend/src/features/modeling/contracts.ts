@@ -22,7 +22,7 @@
  * 依赖方向: features/modeling → ../../types(共享错误类型)/../../shared/http(HTTP 层)。
  */
 
-import type { DeviceKind } from '../../types'
+import type { DeviceKind, InterfaceDirection } from '../../types'
 
 // ---------------------------------------------------------------------------
 // 模板 inputs(与后端 TemplateInputSpec / device-model-2.0.0.schema.json 对应)
@@ -237,10 +237,10 @@ export interface DraftModelSectionDto {
 // 设备类型注册表(供画布设备选择器, 与后端 selector.py 严格一致)
 // ---------------------------------------------------------------------------
 
-/** 注册表端口规格(与后端 _device_type_schema.ports 字段对应)。 */
+/** 注册表端口规格(与后端 _device_type_schema.ports 字段对应: formats/device-model-yaml.md:121-141 严格定义五种接口类型)。 */
 export interface DevicePortDto {
   name: string
-  direction: string
+  direction: InterfaceDirection
   energy_carrier: string
   unit: string | null
 }

@@ -808,7 +808,7 @@ export function deviceTypeFromServer(s: DeviceTypeDto): DeviceTypeSpec {
   const carriers = [...new Set(ports.map((p) => p.energy_carrier))]
   return {
     type_id: s.type_id,
-    schema_version: s.schema_version ?? '2.0.0',
+    schema_version: s.schema_version,
     name_zh: names['zh-CN'] ?? '',
     name_en: names['en-US'] ?? '',
     energy_carriers: carriers,

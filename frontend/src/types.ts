@@ -374,10 +374,13 @@ export interface ParameterSpec {
   default: number | string | Record<string, number> | null
 }
 
+/** 接口类型(formats/device-model-yaml.md:121-141: in/out/bidirectional/predefined/blind)。 */
+export type InterfaceDirection = 'in' | 'out' | 'bidirectional' | 'predefined' | 'blind'
+
 /** 服务器端口声明(RR-P1-04: 来自设备 YAML 公开 descriptor, 前端画布按此渲染句柄)。 */
 export interface DevicePortSpec {
   name: string
-  direction: 'in' | 'out' | 'bidirectional' | string
+  direction: InterfaceDirection
   energy_carrier: EnergyCarrier
   unit?: string | null
 }

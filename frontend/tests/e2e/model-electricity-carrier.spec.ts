@@ -58,6 +58,17 @@ test.describe('电力载能连接与改名', () => {
     // 旧 electric 身份下此步静默无事发生(句柄解析失败直接 return), 不得回退。
     const gridNode = page.locator('.react-flow__node', { hasText: '电网连接' }).first()
     const loadNode = page.locator('.react-flow__node', { hasText: '电负荷' }).first()
+
+    // 接口语义验证: 电负荷声明了 electricity_in(in) 与 electricity_demand(predefined);
+    // predefined 接口严禁作为连接句柄暴露, 电负荷节点上仅有单一 in 句柄, 零 out 句柄
+    await expect(loadNode.locator('.mp-handle')).toHaveCount(1)
+    await expect(loadNode.locator('.react-flow__handle-left.mp-handle--electricity')).toHaveCount(1)
+    await expect(loadNode.locator('.react-flow__handle-right')).toHaveCount(0)
+
+    // 电网连接声明了 electricity_import(out) 与 electricity_export(in), 两连接句柄均正常呈现
+    await expect(gridNode.locator('.mp-handle')).toHaveCount(2)
+    await expect(gridNode.locator('.react-flow__handle-left')).toHaveCount(1)
+    await expect(gridNode.locator('.react-flow__handle-right')).toHaveCount(1)
     const gridOut = gridNode.locator('.mp-handle--electricity').last()
     const loadIn = loadNode.locator('.mp-handle--electricity').first()
     await expect(gridOut).toBeVisible({ timeout: 10_000 })
