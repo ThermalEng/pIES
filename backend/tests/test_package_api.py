@@ -459,7 +459,10 @@ def test_import_creates_new_identity_owner_and_evidence_source(
         db, importer, zip_bytes, idempotency_key="idem-import-1"
     )
     assert proposal.status == "proposed"
-    assert proposal.review_summary["checks"]["integrity_ok"] is True
+    assert proposal.review_summary["checks"]["zip_ok"] is True
+    assert proposal.review_summary["checks"]["manifest_ok"] is True
+    assert "integrity_ok" not in proposal.review_summary["checks"]
+    assert "integrity_verified_objects" not in proposal.review_summary["checks"]
     # 幂等: 相同源文件重复提案返回同一提案
     again = packages_uc.propose_import(db, importer, zip_bytes, idempotency_key="idem-import-1")
     assert again.id == proposal.id

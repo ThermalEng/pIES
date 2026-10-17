@@ -275,7 +275,7 @@ def units_compatible(u1: str | None, u2: str | None) -> bool:
     try:
         units.convert(1.0, a, b)
         return True
-    except Exception:
+    except units.UnitError:
         pass
     # 能量↔功率: 数据列按步能量声明, 端口按功率; 业务单位到求解器内部单位的换算
     # 只发生在 GeneratorProvider 边界(宪法 §4.5/§7.4)。
@@ -318,7 +318,7 @@ def to_watts(value: float | None, unit: str | None) -> float | None:
         return None
     try:
         return units.convert(float(value), unit or "W", "W")
-    except Exception:
+    except units.UnitError:
         return None
 
 

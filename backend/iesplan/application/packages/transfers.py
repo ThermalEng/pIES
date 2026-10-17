@@ -956,8 +956,6 @@ def import_proposal(
             "checks": {
                 "zip_ok": True,
                 "manifest_ok": True,
-                "integrity_ok": True,
-                "integrity_verified_objects": len(manifest.get("objects", [])),
             },
             "idempotency_key": idempotency_key,
         },

@@ -368,3 +368,46 @@ class TestProductionPipeline:
         monkeypatch.setattr("iesplan.devices.list_devices", fake_list_devices)
         with pytest.raises(AppError):
             validate_project_export(_export_content())
+
+
+class TestAssemblyUnitHandling:
+    """M-01 聚焦测试: 单位兼容性与换算只捕获 UnitError，非预期程序异常必须上浮。"""
+
+    def test_units_compatible_domain_semantics(self):
+        from iesplan.assembly.context import units_compatible
+
+        assert units_compatible("kW", "MW") is True
+        assert units_compatible("kWh", "MWh") is True
+        assert units_compatible("kWh", "kW") is True  # 能量 ↔ 功率允许
+        assert units_compatible("", "1") is True  # 无量纲
+        assert units_compatible("kW", "C") is False  # 量纲不兼容
+        assert units_compatible("kW", "unknown_unit") is False  # 未知单位返回 False
+
+    def test_units_compatible_unexpected_error_propagates(self, monkeypatch):
+        import iesplan.core.units as units
+        from iesplan.assembly.context import units_compatible
+
+        def broken_convert(*args, **kwargs):
+            raise TypeError("unexpected internal bug")
+
+        monkeypatch.setattr(units, "convert", broken_convert)
+        with pytest.raises(TypeError, match="unexpected internal bug"):
+            units_compatible("kW", "MW")
+
+    def test_to_watts_domain_semantics(self):
+        from iesplan.assembly.context import to_watts
+
+        assert to_watts(None, "kW") is None
+        assert to_watts(1.5, "kW") == pytest.approx(1500.0)
+        assert to_watts(100.0, "C") is None  # 无法换算到 W 返回 None
+
+    def test_to_watts_unexpected_error_propagates(self, monkeypatch):
+        import iesplan.core.units as units
+        from iesplan.assembly.context import to_watts
+
+        def broken_convert(*args, **kwargs):
+            raise RuntimeError("unexpected bug in conversion engine")
+
+        monkeypatch.setattr(units, "convert", broken_convert)
+        with pytest.raises(RuntimeError, match="unexpected bug in conversion engine"):
+            to_watts(1.0, "kW")
