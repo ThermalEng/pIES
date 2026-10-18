@@ -334,6 +334,13 @@ def _mut_draft_model(manifest: dict, entries: dict[str, bytes], model: object) -
     _set_file(manifest, entries, "draft.json", json.dumps(doc, ensure_ascii=False).encode())
 
 
+def _mut_version_refs(manifest: dict, entries: dict[str, bytes], refs: object) -> None:
+    path = manifest["files"]["versions"][0]
+    doc = json.loads(entries[path])
+    doc["content"]["project_models"] = refs
+    _set_file(manifest, entries, path, json.dumps(doc, ensure_ascii=False).encode())
+
+
 def _rewrite_manifest(manifest: dict, entries: dict[str, bytes]) -> bytes:
     entries["manifest.json"] = json.dumps(manifest, ensure_ascii=False).encode()
     return _rebuilt_zip(entries)
@@ -647,6 +654,26 @@ _MALFORMED_CONTENT_STRUCTURES: list[tuple[str, object, str]] = [
         "草稿 model.devices 条目非对象",
         lambda manifest, entries: _mut_draft_model(manifest, entries, {"devices": [1]}),
         "model.devices 条目结构非法(期望对象)",
+    ),
+    (
+        "草稿 model 节显式 null",
+        lambda manifest, entries: _mut_draft_model(manifest, entries, None),
+        "model 节结构非法(期望对象)",
+    ),
+    (
+        "草稿 model.devices 显式 null",
+        lambda manifest, entries: _mut_draft_model(manifest, entries, {"devices": None}),
+        "model.devices 结构非法(期望列表)",
+    ),
+    (
+        "草稿 project_models 显式 null",
+        lambda manifest, entries: _mut_draft_refs(manifest, entries, None),
+        "project_models 结构非法(期望列表)",
+    ),
+    (
+        "历史版本 project_models 显式 null",
+        lambda manifest, entries: _mut_version_refs(manifest, entries, None),
+        "project_models 结构非法(期望列表)",
     ),
 ]
 
