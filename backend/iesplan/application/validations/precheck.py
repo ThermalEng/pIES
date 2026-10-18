@@ -53,6 +53,7 @@ from iesplan.core.diagnostics import (
     make_diag,
 )
 from iesplan.core.errors import AppError, NotFoundError
+from iesplan.application.models.project_devices import load_project_device_documents
 from iesplan.devices import DeviceModelDocument as DeviceTypeSpec
 from iesplan.devices import get_device as get_device_type
 from iesplan.devices.contracts2 import PropertySpec
@@ -240,11 +241,16 @@ def validate_project(db: Session, project_id: int, include_data: bool = True) ->
     )
 
 
-def _device_spec(dev: dict) -> DeviceTypeSpec | None:
-    """设备序列化 → 注册表规格(设备类型未注册返回 None, 供完整性判断)。"""
+def _device_spec(
+    dev: dict, device_documents: Mapping[str, DeviceTypeSpec]
+) -> DeviceTypeSpec | None:
+    """设备序列化 → 项目模型文档或公开目录规格(未注册返回 None, 供完整性判断)。"""
     type_id = dev.get("device_type")
     if not isinstance(type_id, str) or not type_id:
         return None
+    explicit = device_documents.get(type_id)
+    if explicit is not None:
+        return explicit
     try:
         return get_device_type(type_id)
     except NotFoundError:
@@ -256,9 +262,8 @@ def _device_spec(dev: dict) -> DeviceTypeSpec | None:
 # ---------------------------------------------------------------------------
 
 
-def _model_section(db: Session, project_id: int) -> tuple[list[dict], list[dict]]:
-    """当前草稿内容 model 节设备/连接(2.0 唯一项目建模事实)。"""
-    content = _current_draft_content(db, project_id)
+def _model_section(content: dict) -> tuple[list[dict], list[dict]]:
+    """内容 model 节设备/连接(2.0 唯一项目建模事实)。"""
     model = content.get("model")
     if not isinstance(model, dict):
         return [], []
@@ -271,9 +276,12 @@ def _model_section(db: Session, project_id: int) -> tuple[list[dict], list[dict]
 
 
 def _validate_device_params(
-    device_type: str | None, params: dict | None, device_name: str = ""
+    device_type: str | None,
+    params: dict | None,
+    device_documents: Mapping[str, DeviceTypeSpec],
+    device_name: str = "",
 ) -> list[Diagnostic]:
-    """按注册表 schema 校验设备参数(类型/单位/范围/枚举)。
+    """按设备文档 schema 校验设备参数(类型/单位/范围/枚举)。
 
     规则(与旧 U04 参数校验一致):
     - 类型未注册抛 NotFoundError(CONN-TYPE-002);
@@ -283,8 +291,11 @@ def _validate_device_params(
     descriptor 中 type=predefined 的接口名允许以有效数值标量作 constant
     或数据序列来源声明(映射形态, 与 assembly builder 转换同集合)显式声明
     来源; 未知键仍拒绝，非 predefined 接口名不放宽。
+    项目已保存模型文档优先于公开目录。
     """
-    spec = get_device_type(device_type)
+    spec = device_documents.get(device_type) if isinstance(device_type, str) else None
+    if spec is None:
+        spec = get_device_type(device_type)
     params = dict(params or {})  # 拷贝: 归一缺省键不得改写调用方原字典
     # 全部传入键必须已在注册表声明(下循环 unknown 即拒)，仅 predefined 常量例外
     provided = dict(params)
@@ -548,12 +559,18 @@ def _check_topology(
 
 def _check_model(db: Session, project_id: int, diags: list[Diagnostic]) -> None:
     """模型完整性: 拓扑/设备参数 + 电网连接/负荷/载体供给(草稿内容 2.0 名键事实)。"""
-    devices, conns = _model_section(db, project_id)
+    content = _current_draft_content(db, project_id)
+    devices, conns = _model_section(content)
+    device_documents = load_project_device_documents(db, content)
     by_name = {d.get("name"): d for d in devices if isinstance(d.get("name"), str)}
-    specs = {name: _device_spec(dev) for name, dev in by_name.items()}
+    specs = {name: _device_spec(dev, device_documents) for name, dev in by_name.items()}
     # 每台设备参数校验(类型未注册抛 NotFoundError，与旧行为一致先行阻断)
     for name, dev in by_name.items():
-        diags.extend(_validate_device_params(dev.get("device_type"), dev.get("params"), name))
+        diags.extend(
+            _validate_device_params(
+                dev.get("device_type"), dev.get("params"), device_documents, name
+            )
+        )
     loc = {"object_type": "project", "object_id": str(project_id)}
     # 至少 1 个电网连接(供能接口, 架构宪法 §12 快照任务与结果 + domain-model §项目聚合)
     if not any(d.get("device_type") == GRID_TYPE_ID for d in devices):

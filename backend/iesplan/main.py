@@ -264,6 +264,8 @@ def _register_business_routers(application: FastAPI) -> None:
     application.include_router(model_templates.router)
     # 设备类型注册表(公开; 项目建模写入走项目草稿语义命令)
     application.include_router(model.registry_router)
+    # 项目作用域设备选择器(公开目录 + 本项目已保存模型)
+    application.include_router(model.project_selector_router)
     # 数据集(U05) + 模板
     application.include_router(datasets.router)
     # 计算配置(U06, 0.12-A1 起 CalculationConfig revision)

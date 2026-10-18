@@ -261,7 +261,7 @@ def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes
             ensure_ascii=False,
         ).encode(),
         "draft.json": json.dumps(
-            {"revision": 1, "content": {}}
+            {"revision": 1, "content": {"model": {"devices": [], "connections": []}}}
         ).encode(),
     }
     for path, raw in extra_entries.items():
@@ -276,7 +276,7 @@ def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes
         for path, raw in sorted(entries.items())
     ]
     manifest = {
-        "format_version": "2.0.0",
+        "format_version": "3.0.0",
         "package_type": "project",
         "project": {
             "name": "定制包项目",
@@ -712,7 +712,7 @@ def _rezip_with_manifest(zip_bytes: bytes, mutate) -> bytes:
 
 
 def test_import_rejects_legacy_major_version(client: TestClient, db: Session) -> None:
-    """旧主版本 1.0 包 → 400 拒绝, reasons 非空指明期望 2.x, 不创建记录。"""
+    """旧主版本 1.0 包 → 400 拒绝, reasons 非空指明期望 3.x, 不创建记录。"""
     importer = make_user(db, "legacy_imp")
     entries, configs_meta = _valid_triplet_entries()
     legacy = _rezip_with_manifest(
@@ -727,7 +727,7 @@ def test_import_rejects_legacy_major_version(client: TestClient, db: Session) ->
     assert resp.status_code == 400, resp.text
     reasons = resp.json()["error"]["params"]["reasons"]
     assert isinstance(reasons, list) and reasons
-    assert any("2.x" in r for r in reasons)
+    assert any("3.x" in r for r in reasons)
 
 
 def test_import_rejects_version_without_mapped_deps(client: TestClient, db: Session) -> None:

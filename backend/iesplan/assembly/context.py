@@ -179,16 +179,13 @@ def default_registry() -> dict[str, DeviceTypeSpec]:
 # ---------------------------------------------------------------------------
 
 
-def yaml_device_ports(device: AssemblyDevice, type_id: str) -> list[AssemblyPort]:
-    """从 YAML 设备注册表取端口定义 → AssemblyPort 列表(权威来源)。
+def yaml_device_ports(device: AssemblyDevice, spec: DeviceTypeSpec) -> list[AssemblyPort]:
+    """从已解析的设备文档取端口定义 → AssemblyPort 列表(权威来源)。
 
-    yaml 端口(DeviceYamlSpec.ports: 端口名/载体/方向/容量引用)为唯一权威,
-    装配检查据此做连接合法性与可解性检查。
-    注册表未初始化或端口数据错误一律向上阻断(RR-P2-05: 无静态回退)。
+    端口名/载体/方向/容量来自设备文档 interfaces；调用方传入的必须是
+    装配上下文已解析的文档(公开目录或本项目已保存模型), 本函数不再旁路
+    读取目录，也不做静态回退。
     """
-    from iesplan.devices import get_device
-
-    spec = get_device(type_id)
     ports: list[AssemblyPort] = []
     for name, interface in spec.interfaces.items():
         if interface.carrier not in CARRIER_DEFAULT_QUANTITY_UNIT:
@@ -220,7 +217,7 @@ def derive_device_ports(spec: AssemblySpec, ctx: CheckContext, device: AssemblyD
     if type_spec is None:
         return []  # 模型未注册,端口无从推导(REF-002 已报)
     assert type_spec.device is not None
-    return yaml_device_ports(device, type_spec.device.id)
+    return yaml_device_ports(device, type_spec)
 
 
 def resolve_ports(spec: AssemblySpec, ctx: CheckContext) -> dict[str, AssemblyPort]:

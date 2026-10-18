@@ -2,7 +2,7 @@
  * 建模画布页面(/projects/:id/model)。
  *
  * 能力:
- * - 左侧设备面板(注册表 /api/registry/device-types),拖拽添加到画布;
+ * - 左侧设备面板(项目作用域目录 /api/projects/{id}/device-types),拖拽添加到画布;
  *   节点展示 名称/类型/存量新增徽章/容量。
  * - 端口间连线:按 能源类型 + 方向(out 源 → in 汇)校验,不兼容连接被阻止
  *   并生成可定位诊断(可跳转到相关设备)。
@@ -273,12 +273,12 @@ function ModelCanvas({ projectId }: { projectId: number }) {
   // 项目切换无需重置: 画布按 projectId 键控重挂, 状态天然全新;
   // 旧读回包由 cancelledRef 丢弃, 不会发布到新项目。
 
-  // 注册表 deviceTypes 全局唯一, 每个会话只加载一次(与草稿加载解耦,
-  // 避免 deviceTypes 更新改变 reloadGraph 身份导致加载 effect 循环请求)。
+  // 设备面板按项目作用域加载(公开目录 ∪ 本项目已保存模型); 画布按
+  // projectId 键控重挂, 状态天然全新, 不会跨项目复用。
   useEffect(() => {
     if (deviceTypes !== null || typesError) return
     let cancelled = false
-    void listDeviceTypes()
+    void listDeviceTypes(projectId)
       .then((types) => {
         if (!cancelled) {
           // 注册表 schema 携带 enum 字段,前端参数表单按 spec.enum 渲染下拉/单选。
@@ -862,7 +862,7 @@ function ModelCanvas({ projectId }: { projectId: number }) {
           onRetry={() => {
             setTypesError(false)
             setDeviceTypes(null)
-            void listDeviceTypes()
+            void listDeviceTypes(projectId)
               .then(setDeviceTypes)
               .catch(() => setTypesError(true))
           }}

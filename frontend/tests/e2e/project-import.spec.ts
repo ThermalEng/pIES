@@ -1,7 +1,8 @@
 // S4-C 项目包导入 GUI 验收: 上传→提案→确认前无新项目→确认→新项目可用;
 // 取消确认不创建项目; 非法包服务端原因可见; 模拟网络故障后同一提案可重试;
 // C1 打开新项目后重开即全新流程; C2 导入成功与列表刷新区分展示、刷新失败
-// 可单独重试(计数确认 POST, 不重发确认/不重传文件)。
+// 可单独重试(计数确认 POST, 不重发确认/不重传文件);
+// S4-D 项目已保存模型随包导入: 副本画布设备类型与参数来自副本自己的模型行。
 //
 // 脚手架(用户/项目/财务/版本/导出)走公开 API, 上传/确认/取消的被测动作必须
 // 经 GUI 完成, 不 mock、不注库、不注前端状态。历史关键值用两组不同电价
@@ -18,6 +19,40 @@ import { APP, financeProfile } from './financial-scaffold'
 
 const PRICE_A = '0.75'
 const PRICE_B = '0.95'
+
+//: S4-D 样例项目模型(与 project-model-consumption.spec.ts 同构: 属性驱动汇)。
+const SINK_TYPE = 'acme.device.consumption_load'
+const SINK_TYPE_FINAL = `${SINK_TYPE}_1`
+const SINK_LABEL = '消费链负荷'
+const SINK_NAME = 'userload'
+const SINK_YAML = `schema: ies.device-model
+schema_version: "2.0.0"
+device:
+  id: acme.device.consumption_load
+  names:
+    zh-CN: 消费链负荷
+    en-US: Consumption Load
+properties:
+  rated_demand_kw:
+    value: 10
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 100000
+interfaces:
+  heat_in:
+    type: in
+    carrier: heat
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+equations:
+  variables: {}
+  relations:
+    - id: serve
+      expression: "heat_in[t] = rated_demand_kw"
+`
 
 function overridesPayload(profileId: string, price: string): Record<string, unknown> {
   return {
@@ -327,6 +362,86 @@ test.describe('S4-C: 项目包导入 GUI', () => {
     await dialog.getByRole('button', { name: '打开新项目' }).click({ timeout: 30_000 })
     await expect(page).toHaveURL(/\/projects\/\d+/)
     await expect(page.getByText(projectName).first()).toBeVisible({ timeout: 30_000 })
+    await apiCtx.close()
+    await context.close()
+  })
+
+  test('S4-D: 项目已保存模型随包导入, 副本画布消费副本自己的模型', async ({ browser }) => {
+    const ownerName = uniqueName('es-impm-own')
+    const importerName = uniqueName('es-impm-doer')
+    const password = strongPassword('Init')
+    const projectName = uniqueName('导入模型项目')
+    const apiCtx = await browser.newContext({ baseURL: APP })
+    await createEngineer(apiCtx.request, ownerName, password)
+    await createEngineer(apiCtx.request, importerName, password)
+    const ownerToken = await loginToken(apiCtx.request, ownerName, password)
+    // 源项目脚手架(公开 API): 保存项目模型 → 草稿设备实例引用该模型 → 导出包。
+    const created = await requestJson(apiCtx.request, 'POST', '/api/projects', {
+      name: projectName,
+      baseline_resolution: '1h',
+      baseline_start_year: 2025,
+      baseline_scenario_mode: 'single',
+    }, ownerToken)
+    const pid: number = created.project?.id ?? created.id
+    const saved = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/models`, {
+      model_yaml: SINK_YAML,
+      expected_revision: 1,
+    }, ownerToken)
+    expect(saved.project_model.device_id).toBe(SINK_TYPE_FINAL)
+    await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/draft`, {
+      expected_revision: saved.project_revision,
+      commands: [{
+        id: 'imp-model-load',
+        unit: 'model',
+        type: 'model.upsert_device',
+        payload: { name: SINK_NAME, device_type: SINK_TYPE_FINAL, kind: 'new', params: { rated_demand_kw: 20 } },
+      }],
+    }, ownerToken)
+    const zipPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pies-impm-')), 'pkg.zip')
+    await downloadPackage(apiCtx.request, pid, ownerToken, zipPath)
+
+    // 被测动作(真实 GUI, 不可替代): 上传 → 确认 → 打开新项目。
+    const context = await browser.newContext()
+    const page = await context.newPage()
+    await createSession(page, importerName, password)
+    await page.goto('/')
+    await openImportDialog(page)
+    await page.locator('#import-package-file').setInputFiles(zipPath)
+    await page.getByRole('button', { name: '确认导入' }).click({ timeout: 30_000 })
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByText(/已导入为新项目/)).toBeVisible({ timeout: 60_000 })
+    await dialog.getByRole('button', { name: '打开新项目' }).click({ timeout: 30_000 })
+    await expect(page).toHaveURL(/\/projects\/\d+/)
+    const newPid = Number(page.url().match(/\/projects\/(\d+)/)?.[1])
+    expect(newPid).toBeTruthy()
+    expect(newPid).not.toBe(pid)
+
+    // 副本画布: 设备实例与端口来自副本自己的模型行; 类型串是副本新身份,
+    // 参数默认值来自副本模型 schema(断链或消费源项目行时不会成立)。
+    await page.getByRole('navigation', { name: /工作台|Workspace/i }).getByText('系统建模').click()
+    await expect(page).toHaveURL(/\/model$/)
+    const palette = page.locator('.mp-palette')
+    await expect(palette).toBeVisible({ timeout: 30_000 })
+    const sinkItem = palette.locator(`[aria-label*="${SINK_LABEL}"]`).first()
+    await sinkItem.scrollIntoViewIfNeeded()
+    await expect(sinkItem).toBeVisible({ timeout: 15_000 })
+    const sinkNode = page.locator('.react-flow__node', { hasText: SINK_NAME }).first()
+    await expect(sinkNode).toBeVisible({ timeout: 15_000 })
+    await expect(sinkNode.locator('.mp-handle')).toHaveCount(1)
+    await sinkNode.click()
+    // 侧栏类型串是副本自己的身份; 参数节来自副本模型 schema(名称/范围),
+    // 实例参数 20 随内容迁移; “恢复默认值”取到副本模型默认 10 并真实写草稿。
+    await expect(page.locator('.mp-sidebar__section').first()).toHaveText(SINK_TYPE_FINAL)
+    await expect(page.locator('.mp-param__name').first()).toHaveText('rated_demand_kw')
+    await expect(page.locator('.mp-param__range').first()).toHaveText('0 ~ 100000')
+    await expect(page.locator('input[aria-label="rated_demand_kw (kW)"]')).toHaveValue('20')
+    await page.getByRole('button', { name: '恢复默认值' }).first().click({ timeout: 10_000 })
+    await expect(page.locator('input[aria-label="rated_demand_kw (kW)"]')).toHaveValue('10')
+
+    // 源项目不受影响: 源模型清单与草稿保持原身份(副本不复用源行身份)。
+    const sourceModels = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/models`, undefined, ownerToken)
+    expect(sourceModels.project_models).toHaveLength(1)
+    expect(sourceModels.project_models[0].device_id).toBe(SINK_TYPE_FINAL)
     await apiCtx.close()
     await context.close()
   })

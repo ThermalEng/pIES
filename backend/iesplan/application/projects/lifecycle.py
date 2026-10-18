@@ -457,6 +457,8 @@ def _update_draft(
         _validate_command_scope(cmd, project_id)
         if cmd.get("type") == "dataset.bind" and isinstance(cmd.get("payload"), dict):
             _validate_dataset_bind(db, project_id, cmd["payload"])
+        if cmd.get("type") == "model.upsert_device" and isinstance(cmd.get("payload"), dict):
+            _validate_device_type_ref(db, content, cmd["payload"])
         result = _apply_command(content, cmd)
         applied[cid] = {"revision": draft.revision + 1, "result": jsonable(result)}
         changed = True
@@ -565,8 +567,16 @@ def _apply_command(content: dict, cmd: dict) -> dict:
     return handler(content, payload)
 
 
-def _require_registered_device_type(type_id: object) -> None:
-    """device_type 必须为已注册 2.0 设备 ID，否则当场拒绝（不静默忽略）。"""
+def _validate_device_type_ref(db: Session, content: dict, payload: dict) -> None:
+    """device_type 引用边界: 公开目录已注册 或 当前草稿内容精确引用的本项目模型。
+
+    在命令应用前经 devices 公开门面与项目设备描述确认；引用集取自当前
+    草稿内容声明的 ``project_models``（恢复版本后随之变化），跨项目模型
+    不可引用，未注册类型与既有行为一致当场拒绝（PROJ-CMD-005）。
+    """
+    type_id = payload.get("device_type")
+    if type_id is None:
+        return
     if not isinstance(type_id, str) or not type_id:
         raise InvalidRequestError(
             "设备 device_type 必须为非空字符串",
@@ -577,12 +587,18 @@ def _require_registered_device_type(type_id: object) -> None:
 
     try:
         get_device(type_id)
+        return
     except NotFoundError:
-        raise InvalidRequestError(
-            "设备 device_type 未注册",
-            code="PROJ-CMD-005",
-            params={"device_type": type_id},
-        ) from None
+        pass
+    from iesplan.application.models.project_devices import project_device_type_ids
+
+    if type_id in project_device_type_ids(db, content):
+        return
+    raise InvalidRequestError(
+        "设备 device_type 未注册",
+        code="PROJ-CMD-005",
+        params={"device_type": type_id},
+    )
 
 
 def _cmd_model_upsert_device(content: dict, payload: dict) -> dict:
@@ -591,7 +607,7 @@ def _cmd_model_upsert_device(content: dict, payload: dict) -> dict:
     2.0 设备契约只允许 name/device_type/kind/params/position；额外字段
     (如无 2.0 去向的 model_fidelity)当场拒绝，不静默丢弃。
     params 提供即完整替换（含清空）；非对象 params 当场拒绝。
-    device_type 新建必须提供，提供时必须已注册，否则当场拒绝。
+    device_type 新建必须提供；引用归属由草稿写入前的项目边界校验判定。
     """
     name = payload.get("name")
     if not isinstance(name, str) or not name:
@@ -615,8 +631,6 @@ def _cmd_model_upsert_device(content: dict, payload: dict) -> dict:
             )
         device = {"name": name}
         devices.append(device)
-    if payload.get("device_type") is not None:
-        _require_registered_device_type(payload["device_type"])
     for field in ("device_type", "kind"):
         if field in payload:
             device[field] = payload[field]

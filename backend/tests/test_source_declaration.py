@@ -128,7 +128,8 @@ class TestPrecheckAlignment:
         return [
             d
             for d in _validate_device_params(
-                "ies.device.electric_load", {"electricity_demand": decl}, "load1"
+                "ies.device.electric_load", {"electricity_demand": decl},
+                device_documents={}, device_name="load1",
             )
             if d.code == "PARAM-UNIT-002"
         ]

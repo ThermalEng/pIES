@@ -92,6 +92,7 @@ def validate_assembly_text(
     package_dir: str | Path | None = None,
     dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
+    device_documents: Mapping[str, Any] | None = None,
 ) -> AssemblyValidationResult:
     """手写装配 YAML 文本 → 单管线校验(安全解析一次 + 结构/领域校验一次)。
 
@@ -108,6 +109,7 @@ def validate_assembly_text(
         package_dir=package_dir,
         dataset_contents=dataset_contents,
         finance_snapshots=finance_snapshots,
+        device_documents=device_documents,
     )
 
 
@@ -118,6 +120,7 @@ def validate_assembly_doc(
     dataset_contents: Mapping[str, Mapping[str, Any]] | None = None,
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
     operation_years: int | None = None,
+    device_documents: Mapping[str, Any] | None = None,
 ) -> AssemblyValidationResult:
     """ies.assembly 3.0.0 文档 → 单管线校验(结构一次 + 领域阶段)。
 
@@ -137,6 +140,7 @@ def validate_assembly_doc(
         dataset_contents=dataset_contents,
         finance_snapshots=finance_snapshots,
         operation_years=operation_years,
+        device_documents=device_documents,
     )
 
 
@@ -150,6 +154,7 @@ def validate_project_export(
     planning: Mapping[str, Any] | None = None,
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None = None,
     operation_years: int | None = None,
+    device_documents: Mapping[str, Any] | None = None,
 ) -> AssemblyValidationResult:
     """GUI 项目导出入口:
 
@@ -160,6 +165,9 @@ def validate_project_export(
     引用、成本绑定、计费绑定与规划(缺席则对应装配节缺失阻断，不猜测)；
     finance_snapshots 为密封快照显式注入(kind=object 用)。设备数据序列
     来源声明由独立入口提供(S2c)，构造器不做数据集列映射。
+    ``device_documents`` 为调用方显式提供的本项目已保存模型文档，
+    构造器与校验器与公开目录合并消费（同 ID 以显式文档为准），本入口不访问
+    DB/storage。
     ``operation_years`` 为提交时已确认运营年限(仅提交闸门传入)：
     ``data_full`` 文件长度须等于其推导的运营期总点数；缺席时不核对
     运营期长度(项目导出等非提交调用不受影响)。
@@ -170,6 +178,7 @@ def validate_project_export(
         finance_binding=finance_binding,
         tariff_bindings=tariff_bindings,
         planning=planning,
+        device_documents=device_documents,
     )
     if built.doc is None:
         return AssemblyValidationResult(diagnostics=list(built.diagnostics), artifact=None)
@@ -179,6 +188,7 @@ def validate_project_export(
         dataset_contents=dataset_contents,
         finance_snapshots=finance_snapshots,
         operation_years=operation_years,
+        device_documents=device_documents,
     )
 
 
@@ -194,6 +204,7 @@ def _run_validation(
     dataset_contents: Mapping[str, Mapping[str, Any]] | None,
     finance_snapshots: Mapping[str, EffectiveFinanceConfig] | None,
     operation_years: int | None = None,
+    device_documents: Mapping[str, Any] | None = None,
 ) -> AssemblyValidationResult:
     from iesplan.assembly.rules.finance import (
         check_finance_binding,
@@ -203,7 +214,7 @@ def _run_validation(
     from iesplan.assembly.rules.tariff import check_tariff_bindings
 
     diags: list[Diagnostic] = []
-    registry = _device_registry()
+    registry = _device_registry(device_documents)
 
     # --- 阶段 2:模型 / 属性 / 预定义来源 --------------------------------
     _check_devices(doc, registry, diags)
@@ -980,11 +991,16 @@ def _dependency_lock(doc: dict, registry) -> dict:
     }
 
 
-def _device_registry() -> dict:
-    """已注册的设备描述符快照(从 devices 公开门面构建)。"""
+def _device_registry(device_documents: Mapping[str, Any] | None = None) -> dict:
+    """设备描述符快照：公开目录 ∪ 调用方显式提供的项目模型（同 ID 显式优先）。"""
     from iesplan.devices import list_devices
 
-    return {desc.device.id: desc for desc in list_devices() if desc.device is not None}
+    registry = {
+        desc.device.id: desc for desc in list_devices() if desc.device is not None
+    }
+    if device_documents is not None:
+        registry.update(device_documents)
+    return registry
 
 
 def _any_blocking(diags: list[Diagnostic]) -> bool:

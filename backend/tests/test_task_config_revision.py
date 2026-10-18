@@ -516,7 +516,8 @@ def test_nonfinite_predefined_constant_rejected_at_entry() -> None:
 
     for bad in (float("inf"), float("-inf"), float("nan")):
         diags = _validate_device_params(
-            "ies.device.electric_load", {"electricity_demand": bad}, "load1"
+            "ies.device.electric_load", {"electricity_demand": bad},
+            device_documents={}, device_name="load1",
         )
         assert any(
             d.code == "PARAM-UNIT-002" and d.severity == "error" for d in diags
