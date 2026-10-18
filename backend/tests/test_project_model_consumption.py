@@ -55,6 +55,10 @@ from iesplan.tasks.persistence import Task  # noqa: E402,F401
 SINK_TYPE_BASE = "acme.device.consumption_load"
 SINK_TYPE_FINAL = f"{SINK_TYPE_BASE}_1"
 
+AUX_TYPE_BASE = "acme.device.standby_load"
+#: 编号是项目级单一序列(不按 base 分列): 本项目第二次保存拿到 suffix 2。
+AUX_TYPE_FINAL = f"{AUX_TYPE_BASE}_2"
+
 SINK_YAML = """
 schema: ies.device-model
 schema_version: "2.0.0"
@@ -66,6 +70,37 @@ device:
 properties:
   rated_demand_kw:
     value: 10
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: 100000
+interfaces:
+  heat_in:
+    type: in
+    carrier: heat
+    unit: kW
+    valid_range:
+      minimum: 0
+      maximum: null
+equations:
+  variables: {}
+  relations:
+    - id: serve
+      expression: "heat_in[t] = rated_demand_kw"
+"""
+
+#: 第二样例(同形态、不同稳定 ID; 引用重建语义回归)。
+AUX_YAML = """
+schema: ies.device-model
+schema_version: "2.0.0"
+device:
+  id: acme.device.standby_load
+  names:
+    zh-CN: 备用负荷
+    en-US: Standby Load
+properties:
+  rated_demand_kw:
+    value: 5
     unit: kW
     valid_range:
       minimum: 0
@@ -189,10 +224,12 @@ def _revision(client: TestClient, user, pid: int) -> int:
     return view["draft"]["revision"]
 
 
-def _save_project_model(client: TestClient, user, pid: int) -> dict:
+def _save_project_model(
+    client: TestClient, user, pid: int, model_yaml: str = SINK_YAML
+) -> dict:
     resp = client.post(
         f"/api/projects/{pid}/models",
-        json={"model_yaml": SINK_YAML, "expected_revision": _revision(client, user, pid)},
+        json={"model_yaml": model_yaml, "expected_revision": _revision(client, user, pid)},
         headers=_h(client, user),
     )
     assert resp.status_code == 201, resp.text
@@ -553,3 +590,58 @@ def test_consumption_follows_content_model_refs_across_restore(
         _upsert_device(client, owner, pid, "grid1", "ies.device.grid_connection").status_code
         == 200
     )
+
+
+# ---------------------------------------------------------------------------
+# 5) 引用重建语义(澄清记录): 保存/删除按当前清单快照重建草稿引用
+# ---------------------------------------------------------------------------
+
+
+def test_save_or_delete_after_restore_rebuilds_refs_from_full_model_list(
+    client: TestClient, db: Session
+) -> None:
+    """恢复之后任一次保存/删除都把引用重建为当前清单完整快照(既定语义)。
+
+    恢复版本把草稿引用收窄为该版本内容声明的集合; 但保存路径(保存/删除
+    模型)始终按项目模型清单重建引用 —— 清单中的既有资产会一并回到选择器
+    与建模命令边界。本用例锚定该语义与其用户可见后果(撤销入口是清单资产,
+    不新增启用/停用入口), 不视为缺陷修复。
+    """
+    owner = _user(db, "consume_rebuild_owner")
+    pid = _project(client, owner, "引用重建项目")
+
+    # 基线版本(无引用) → 保存两个模型 → 恢复基线: 引用清空。
+    resp = client.post(
+        f"/api/projects/{pid}/versions",
+        json={"name": "基线", "reason": "milestone"},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 201, resp.text
+    baseline = resp.json()["version"]
+    first = _save_project_model(client, owner, pid)
+    second = _save_project_model(client, owner, pid, AUX_YAML)
+    assert first["device_id"] == SINK_TYPE_FINAL
+    assert second["device_id"] == AUX_TYPE_FINAL
+    resp = client.post(
+        f"/api/projects/{pid}/versions/{baseline['id']}/restore",
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    view = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()
+    assert not view["draft"]["content"].get("project_models")
+    assert _selector_ids(client, owner, pid) & {SINK_TYPE_FINAL, AUX_TYPE_FINAL} == set()
+
+    # 删除其一: 引用按删除后的清单重建 → 另一个资产回到选择器与命令边界。
+    resp = client.request(
+        "DELETE",
+        f"/api/projects/{pid}/models/{second['id']}",
+        json={"expected_revision": _revision(client, owner, pid)},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    refs = client.get(f"/api/projects/{pid}", headers=_h(client, owner)).json()["draft"][
+        "content"
+    ]["project_models"]
+    assert [ref["device_id"] for ref in refs] == [SINK_TYPE_FINAL]
+    assert SINK_TYPE_FINAL in _selector_ids(client, owner, pid)
+    assert _upsert_device(client, owner, pid, "load3", SINK_TYPE_FINAL).status_code == 200

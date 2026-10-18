@@ -55,7 +55,6 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 
 1. 用仓库外测试内容/扩展依次验证设备 YAML、数据 CSV、公共方程 contract、GeneratorProvider、ResultAdapterProvider、ExecutorProvider 和存储扩展。
 2. 发布可运行扩展示例、四种文件契约测试工具，以及设备稳定 ID、publication revision 与 provider 精确版本固定规则。
-3. 项目包导出携带项目已保存模型的规范 YAML、回执与来源，导入时重建项目模型资产并把草稿与历史版本内容引用映射到新项目；包内缺少内容所引用的模型时拒绝确认，不复用源项目行身份。
 
 退出标准：新增或替换 provider 不修改无关业务模块、GUI 映射或通用 runtime；任一注册失败不发布部分状态。
 

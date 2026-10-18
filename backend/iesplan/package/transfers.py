@@ -43,8 +43,8 @@ from iesplan.core.errors import AppError
 # 常量
 # ---------------------------------------------------------------------------
 
-#: 项目包格式版本(主版本号兼容判定: 只接受 2.x)
-PACKAGE_FORMAT_VERSION = "2.0.0"
+#: 项目包格式版本(主版本号兼容判定: 只接受 3.x)
+PACKAGE_FORMAT_VERSION = "3.0.0"
 #: 项目包媒体类型
 PACKAGE_MEDIA_TYPE = "application/zip"
 #: Excel 报告媒体类型
@@ -366,8 +366,8 @@ def parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
 
     # 兼容性: 格式主版本
     format_version = manifest.get("format_version")
-    if not isinstance(format_version, str) or not format_version.split(".", 1)[0] == "2":
-        reasons.append(f"格式版本不兼容: {format_version!r}, 期望 2.x(不保留 1.x 解析)")
+    if not isinstance(format_version, str) or not format_version.split(".", 1)[0] == "3":
+        reasons.append(f"格式版本不兼容: {format_version!r}, 期望 3.x(不保留 2.x 解析)")
     if manifest.get("package_type") != "project":
         reasons.append(f"包类型非法: {manifest.get('package_type')!r}, 期望 project")
     # 禁止携带账号/权限/会话/全局配置/密钥

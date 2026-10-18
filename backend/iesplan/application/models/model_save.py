@@ -407,7 +407,13 @@ def _load_stored_receipt(db: Session, model: ProjectModelRecord) -> dict[str, An
 
 
 def _project_model_draft_refs(db: Session, project_id: int) -> list[dict[str, object]]:
-    """项目草稿只保存模型清单引用，不复制模型正文。文本文件只校验字头。"""
+    """项目草稿只保存模型清单引用，不复制模型正文。文本文件只校验字头。
+
+    写入规则: 保存/删除模型都把草稿引用重建为**当前清单的完整快照**。
+    恢复历史版本会把引用收窄为该版本内容声明的集合, 之后任一次保存/删除
+    再按清单重写——清单中的既有资产会随之回到选择器与消费边界(当前没有
+    独立的启用/停用清单资产入口, 这是既定语义)。
+    """
     rows = model_domain.list_project_models(db, project_id)
     return [
         {
@@ -598,6 +604,38 @@ def _save_project_model(
     }
 
 
+def save_project_model_in_transaction(
+    db: Session,
+    user,
+    project_id: int,
+    *,
+    model_yaml: str,
+    expected_revision: int,
+    source: str = MODEL_SOURCE_DIRECT,
+    template_id: str | None = None,
+    template_revision: int | None = None,
+    template_inputs: Mapping[str, Any] | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """在调用方事务内保存项目模型(不提交/不回滚; 事务边界归调用方)。
+
+    供项目包导入等组合用例复用同一权威保存路径(候选校验 → 编号分配 →
+    规范化 → 落盘与清单引用); ``save_project_model`` 在此之上持有提交。
+    """
+    return _save_project_model(
+        db,
+        user,
+        project_id,
+        model_yaml=model_yaml,
+        expected_revision=expected_revision,
+        source=source,
+        template_id=template_id,
+        template_revision=template_revision,
+        template_inputs=template_inputs,
+        idempotency_key=idempotency_key,
+    )
+
+
 def save_project_model(
     db: Session,
     user,
@@ -613,7 +651,7 @@ def save_project_model(
 ) -> dict[str, Any]:
     """事务型保存命令；application 层统一提交或回滚。文本文件只校验字头。"""
     try:
-        result = _save_project_model(
+        result = save_project_model_in_transaction(
             db,
             user,
             project_id,

@@ -20,6 +20,7 @@ from iesplan import __version__
 from iesplan import audit as audit_domain
 from iesplan import configuration as configuration_domain
 from iesplan import dataset as dataset_domain
+from iesplan import model as model_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
@@ -30,6 +31,10 @@ from iesplan.application.configuration import (
 )
 from iesplan.application.configuration import (
     publish_accepted_finance_state as _publish_accepted_finance_state,
+)
+from iesplan.application.models import (
+    MODEL_MEDIA_TYPE as _MODEL_MEDIA_TYPE,
+    save_project_model_in_transaction as _save_project_model_in_transaction,
 )
 from iesplan.application.projects import (
     ensure_access,
@@ -164,6 +169,35 @@ def _collect_evidence(db: Session, project_id: int) -> list[dict]:
             }
         )
     return out
+
+
+def _content_model_refs(content: dict | None) -> dict[str, dict]:
+    """内容声明的项目模型精确引用(device_id → 引用; 保存/删除模型时写入)。"""
+    refs = (content or {}).get("project_models") or []
+    return {str(ref["device_id"]): ref for ref in refs}
+
+
+def _remap_model_device_types(content: dict, model_map: dict[str, dict[str, Any]]) -> None:
+    """内容 model 节设备实例的 device_type: 来源模型 ID → 新项目模型 ID。
+
+    源项目删除过模型(suffix 空号)时新编号与来源不同, 因此一律按导入重建后
+    的真实新 ID 改写, 不假设编号不变、不产生双后缀。
+    """
+    model = content.get("model") or {}
+    for device in model.get("devices") or []:
+        mapped = model_map.get(str(device.get("device_type")))
+        if mapped is not None:
+            device["device_type"] = mapped["device_id"]
+
+
+def _remap_model_refs(content: dict, model_map: dict[str, dict[str, Any]]) -> None:
+    """内容 project_models 引用映射到新项目行身份(源行 id 不复用为目标身份)。"""
+    for ref in content.get("project_models") or []:
+        mapped = model_map.get(str(ref["device_id"]))
+        if mapped is not None:
+            ref["id"] = mapped["id"]
+            ref["device_id"] = mapped["device_id"]
+            ref["revision"] = mapped["revision"]
 
 
 def _build_package_zip(
@@ -305,6 +339,38 @@ def _build_package_zip(
             _add(path, raw, "application/json")
             zf.writestr(path, raw)
             files_meta["versions"].append(path)
+
+        # 项目模型依赖(3.0 files.models): 携带草稿与全部历史版本内容精确
+        # 引用到的每个项目模型的已冻结规范文本(当前草稿未引用但历史版本
+        # 引用的同样携带, 与 version_configs 同理; 行缺失即 loudly 拒绝,
+        # 不静默丢弃、不携带其他项目行)。清单键 device_id 为来源最终 ID,
+        # base_device_id 供导入侧重建时按本项目重新分配编号。
+        model_refs: dict[str, dict] = _content_model_refs(draft_content)
+        for content in version_contents.values():
+            model_refs.update(_content_model_refs(content))
+        model_rows: list[model_domain.ProjectModelRecord] = []
+        for ref in model_refs.values():
+            row = model_domain.get_project_model(db, int(ref["id"]))
+            if row is None or row.project_id != project.id:
+                raise model_domain.ProjectModelNotFoundError(
+                    "内容引用的项目模型行缺失",
+                    params={"project_id": project.id, "device_id": ref["device_id"]},
+                )
+            model_rows.append(row)
+        models_meta: list[dict[str, str]] = []
+        for row in sorted(model_rows, key=lambda item: item.suffix):
+            path = f"models/{row.device_id}.json"
+            raw = get_object(db, row.model_object_id)
+            _add(path, raw, _MODEL_MEDIA_TYPE)
+            zf.writestr(path, raw)
+            models_meta.append(
+                {
+                    "device_id": row.device_id,
+                    "base_device_id": row.base_device_id,
+                    "model_text": path,
+                }
+            )
+        files_meta["models"] = models_meta
 
         # 数据集版本与溯源(数据本体 + 元数据 + 溯源/许可证/质量报告;
         # 2.0: 每个数据版本独立目录, 元数据不再按数据集共用)
@@ -704,6 +770,75 @@ def _parse_triplet_group(
     return result
 
 
+def _package_content_docs(entries: dict[str, bytes], manifest: dict) -> list[dict]:
+    """包内草稿与全部历史版本的内容文档(边界校验消费; 解码失败即拒绝导入)。"""
+    files_meta = manifest.get("files") or {}
+    docs: list[dict] = []
+
+    def _content_of(raw: bytes, label: str) -> dict:
+        try:
+            doc = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ImportValidationError([f"{label}无法解析"]) from exc
+        if not isinstance(doc, dict):
+            raise ImportValidationError([f"{label}结构非法(期望对象)"])
+        content = doc.get("content")
+        return content if isinstance(content, dict) else {}
+
+    if "draft.json" in entries:
+        docs.append(_content_of(entries["draft.json"], "包内草稿文件"))
+    for version_path in files_meta.get("versions") or []:
+        if version_path not in entries:
+            continue
+        docs.append(_content_of(entries[version_path], f"包内版本文件 {version_path}"))
+    return docs
+
+
+def _check_model_dependencies(entries: dict[str, bytes], manifest: dict) -> None:
+    """3.0 项目模型依赖关系边界校验(上传入口一次校验, 任一失败 → 拒绝整个导入)。
+
+    - ``files.models`` 条目结构合法、``device_id`` 唯一、``model_text`` 文件在包内;
+    - 包内携带的模型集合必须等于草稿与全部历史版本内容引用的集合:
+      内容引用了未携带的模型 → 拒绝(不复用源行身份、不回填、不静默丢弃);
+      携带了内容未引用的模型 → 拒绝(不把包内多余资产带进新项目)。
+
+    模型正文的正式校验由确认导入的权威保存路径一次完成(提案阶段无目标项目)。
+    """
+    files_meta = manifest.get("files") or {}
+    models_meta = files_meta.get("models") or []
+    if not isinstance(models_meta, list):
+        raise ImportValidationError(["清单 files.models 结构非法(期望列表)"])
+    reasons: list[str] = []
+    carried: set[str] = set()
+    for item in models_meta:
+        if not isinstance(item, dict):
+            reasons.append("清单 files.models 条目结构非法(期望对象)")
+            continue
+        device_id = item.get("device_id")
+        if not isinstance(device_id, str) or not device_id:
+            reasons.append("清单 files.models 条目缺 device_id")
+            continue
+        if device_id in carried:
+            reasons.append(f"清单 files.models 重复携带模型: {device_id}")
+        if not isinstance(item.get("base_device_id"), str) or not item["base_device_id"]:
+            reasons.append(f"模型 {device_id} 缺 base_device_id")
+        path = item.get("model_text")
+        if not isinstance(path, str) or path not in entries:
+            reasons.append(f"模型 {device_id} 的 model_text 文件缺失: {path}")
+        carried.add(device_id)
+    referenced: set[str] = set()
+    for content in _package_content_docs(entries, manifest):
+        referenced.update(_content_model_refs(content))
+    missing = sorted(referenced - carried)
+    if missing:
+        reasons.append("内容引用的项目模型未随包携带: " + ", ".join(missing))
+    extra = sorted(carried - referenced)
+    if extra:
+        reasons.append("包内携带了内容未引用的项目模型: " + ", ".join(extra))
+    if reasons:
+        raise ImportValidationError(reasons)
+
+
 def _check_version_dependencies(
     entries: dict[str, bytes], manifest: dict, baseline: ProjectBaseline
 ) -> None:
@@ -882,6 +1017,8 @@ def import_proposal(
         raise ImportValidationError([f"包内项目计算基线非法: {exc}"]) from exc
     # 1b) 历史依赖关系边界校验(提案行创建之前; 失败不建提案行)
     _check_version_dependencies(entries, manifest, baseline)
+    # 1c) 项目模型依赖关系边界校验(3.0; 与历史配置依赖同一上传入口)
+    _check_model_dependencies(entries, manifest)
     # 规划/财务配置 revision(0.6.5 事项 3): 包内配置严格校验(缺失 = 导入后
     # 无配置, 不静默默认; 非法 → 拒绝整个导入)。
     package_configs = parse_config_files(entries, manifest)
@@ -1004,6 +1141,9 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
     对象引用/提案应用状态一并发布; 失败全回滚, 不留半成品, 提案可重试):
     - 新项目: 按提案快照创建项目身份(名称去重, 导入者即所有者);
     - 数据集: 重建 Dataset/DatasetVersion/DatasetFile(引用暂存对象, 原标识重映射);
+    - 项目模型: 按包内携带的已冻结规范模型文本经权威保存路径重建本项目模型资产
+      (新编号/新行 id, 源行身份不复用), 草稿与历史版本的引用与设备类型串
+      映射到新身份;
     - 草稿: revision=1 领域内容(数据集绑定重映射, 证据来源登记);
     - 版本: 按包内版本顺序重建 ProjectVersion(新身份版本号, 不倒写原版本);
     - 配置: 消费提案已接受的包内规划/财务配置发布 revision 行(上传边界
@@ -1330,6 +1470,42 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
     draft_content["imported_evidence"] = imported_evidence
     _create_draft_row(db, project.id, draft_content, user)
 
+    # 4b) 项目模型依赖重建(3.0 files.models): 按包内来源经权威保存路径重建
+    # 本项目模型资产(新 suffix/新行 id, 不复用源身份; 包内携带模型规范文本
+    # [紧凑 JSON], 其 device.id 是来源最终 ID, 按来源 base_device_id 提交后
+    # 由保存路径分配新 suffix), 再把草稿与每个历史版本内容中的引用与设备
+    # 类型串映射到新 ID。
+    model_map: dict[str, dict[str, Any]] = {}
+    for item in manifest.get("files", {}).get("models") or []:
+        source_device_id = str(item["device_id"])
+        doc = json.loads(entries[str(item["model_text"])].decode("utf-8"))
+        doc["device"]["id"] = str(item["base_device_id"])
+        saved = _save_project_model_in_transaction(
+            db,
+            user,
+            project.id,
+            model_yaml=yaml_dump(doc),
+            expected_revision=project_domain.require_current_draft(db, project).revision,
+            source="direct_yaml",
+        )["project_model"]
+        model_map[source_device_id] = {
+            "id": str(saved["id"]),
+            "device_id": saved["device_id"],
+            "revision": saved["revision"],
+        }
+    if model_map:
+        # 保存路径已按本项目清单重建草稿 project_models 引用; 这里改写草稿
+        # model 节设备实例的 device_type 并推进草稿(源引用不残留)。
+        current = project_domain.require_current_draft(db, project)
+        content = _load_content_object(db, current.content_object_id)
+        _remap_model_device_types(content, model_map)
+        project_domain.create_draft(
+            db,
+            project_id=project.id,
+            content_object_id=_store_content_object(db, content),
+            updated_by=user.id,
+        )
+
     # 5) 版本: 按包内版本顺序重建(新身份版本号, parent 链按导入顺序)
     # 经 project 域 create_version 一次完成版本行 + 内容引用 + current 指针
     # 移动(基线/币种/schema 与项目一致, 由包内基线校验保证, 与旧直写等价;
@@ -1352,6 +1528,9 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
         plan = version_content.get("planning_config")
         if plan is not None:
             plan["revision"] = config_rev_map[("planning", plan.get("revision"))]
+        # 项目模型引用/设备类型串改写: 来源身份 → 本项目重建身份(与草稿同一映射)。
+        _remap_model_refs(version_content, model_map)
+        _remap_model_device_types(version_content, model_map)
         content_object_id = _store_content_object(db, version_content)
         version = project_domain.create_version(
             db,
@@ -1414,6 +1593,7 @@ def confirm_import(db: Session, user: UserRecord, proposal_id: int) -> ProjectRe
             "source_object_id": proposal.source_object_id,
             "imported_versions": len(version_paths),
             "imported_datasets": len(dataset_id_map),
+            "imported_project_models": len(model_map),
             "evidence_objects": len(imported_evidence),
             "imported_configs": len([v for v in configs_meta.values() if v]),
             "mapped_config_revisions": len(config_rev_map),
