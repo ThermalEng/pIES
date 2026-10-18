@@ -94,6 +94,63 @@ class TestSourceDeclaration:
         assert any(d.blocking for d in result.diagnostics)
 
 
+#: 合法来源声明形态(与构造器单元测试同集合)。
+_VALID_DECLS: tuple[dict, ...] = (
+    {"mode": "data_repeat", "dataset_version_id": 7},
+    {"mode": "data_full", "dataset_version_id": 7},
+    {"mode": "data_predict", "dataset_version_id": 7, "target_type": "load"},
+)
+
+#: 形态不符的声明(与 ``TestSourceDeclaration`` 拒绝集合一致)。
+_MALFORMED_DECLS: tuple[dict, ...] = (
+    {"mode": "data_guess", "dataset_version_id": 7},
+    {"mode": "data_repeat", "dataset_version_id": "7"},
+    {"mode": "data_repeat", "dataset_version_id": True},
+    {"mode": "data_repeat"},
+    {"mode": "data_repeat", "dataset_version_id": 7, "target_type": "load"},
+    {"mode": "data_predict", "dataset_version_id": 7},
+    {"mode": "data_predict", "dataset_version_id": 7, "target_type": ""},
+    {"mode": "data_predict", "dataset_version_id": 7, "target_type": "load", "path": "x"},
+)
+
+
+class TestPrecheckAlignment:
+    """预检来源准入与构造器一致(0.15 修复 dict 声明被数值常量预检误拒)。
+
+    预检对 predefined 接口名须与 builder 的公开来源声明语义同集合:
+    合法声明通过, 形态不符仍在权威入口明确报 PARAM-UNIT-002(error),
+    不以"任意 dict 都放行"冒充修复; 不放宽未知键与非 predefined 接口名。
+    """
+
+    def _precheck_hits(self, decl: dict):
+        from iesplan.application.validations.precheck import _validate_device_params
+
+        return [
+            d
+            for d in _validate_device_params(
+                "ies.device.electric_load", {"electricity_demand": decl}, "load1"
+            )
+            if d.code == "PARAM-UNIT-002"
+        ]
+
+    @pytest.mark.parametrize("decl", _VALID_DECLS)
+    def test_valid_declaration_passes_precheck(self, devices, decl: dict) -> None:
+        assert self._precheck_hits(decl) == [], decl
+
+    @pytest.mark.parametrize("decl", _MALFORMED_DECLS)
+    def test_malformed_declaration_rejected_by_precheck(self, devices, decl: dict) -> None:
+        hits = self._precheck_hits(decl)
+        assert any(d.severity == "error" for d in hits), (decl, hits)
+
+    def test_precheck_acceptance_matches_public_parse(self, devices) -> None:
+        """预检放行集合 == 公开来源声明纯解析接受集合(单一权威, 不复制规则)。"""
+        from iesplan.assembly import parse_predefined_source_declaration
+
+        for decl in (*_VALID_DECLS, *_MALFORMED_DECLS):
+            _declared, reason = parse_predefined_source_declaration(decl)
+            assert (self._precheck_hits(decl) == []) == (reason is None), decl
+
+
 def _repeat_csv() -> bytes:
     lines = [
         "# schema: ies.device-data",

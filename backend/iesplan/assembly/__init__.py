@@ -19,6 +19,7 @@ from iesplan.assembly.builder import (
     BuildDocResult,
     build_assembly_doc_from_content,
     dataset_export_path,
+    parse_predefined_source_declaration,
 )
 from iesplan.assembly.canonicalizer import (
     canonical_algorithm_ref,
@@ -64,6 +65,7 @@ __all__ = [
     "build_assembly_doc_from_content",
     "BuildDocResult",
     "dataset_export_path",
+    "parse_predefined_source_declaration",
     # 校验入口与产物签发
     "AssemblyValidationResult",
     "validate_assembly_text",

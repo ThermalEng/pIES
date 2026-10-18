@@ -80,9 +80,10 @@ API 提交 → 真实 io/compute Worker 求解 → 逐时/年累计与封存评�
 
 覆盖边界(2026-10-18 切片裁决, 详见切片报告):
 
-- 上传与结果查看走真实 GUI; 来源声明与任务提交走公开 API。当前校验预检对
-  dict 来源声明产出 `PARAM-UNIT-002` 假阻断, 任务中心 GUI 提交被该校验门禁
-  挡住(证据见切片报告), 待独立有限修复; 本规格不据此做任何断言。
+- 上传与结果查看走真实 GUI; 来源声明与任务提交走公开 API。切片当时校验预检
+  对 dict 来源声明产出 `PARAM-UNIT-002` 假阻断, 任务中心 GUI 提交被该校验
+  门禁挡住(证据见切片报告); 修复收口(合法声明放行 + GUI 提交闭环)见下文
+  `device-data-csv-gui-submit.spec.ts`。本规格不据此做任何断言。
 - 结果页“工程/计算步曲线”区块以 `metrics_summary` 为渲染门, 当前封存链未
   写该键, 区块实测不渲染(既有缺口: 既有 `hourly-steps.spec.ts` 同点失败);
   本规格以摘要/规划解/封存评价卡为结果 GUI 断言面。
@@ -96,6 +97,23 @@ docker compose -p pies-ext-csv up -d --build web backend io_worker compute_worke
 # 运行本用例(默认套件收集; --build 确保测试镜像含当前 spec/工件)
 docker compose -p pies-ext-csv --profile e2e run --rm --build --no-deps e2e \
   npx playwright test device-data-csv-extension.spec.ts --project=chromium
+```
+
+### 0.15 外部数据 CSV 修复收口: 任务中心 GUI 提交
+
+`device-data-csv-gui-submit.spec.ts` 在同一条公开链上验收修复后的校验门禁:
+数据页真实 GUI 上传同一 CSV → 公开草稿命令声明 `{mode: data_repeat,
+dataset_version_id}` 来源并完成装配/绑定/基线确认/配置 → 任务中心真实
+GUI 提交(K=0/N=1)必须放行合法声明(无 “存在 1 项阻断问题…” 弹层, 修复前
+该校验门禁误报 `PARAM-UNIT-002`) → 真实 io/compute Worker 完成 → 公开 API
+核对逐时 30/50、年负荷 350,400 kWh、电网年购 425,485.714… kWh、封存
+`energy_net` −297,840.0 CNY。提交为被测 GUI 动作, 脚手架与数值核对经公开 API。
+
+```bash
+export IESPLAN_PORT=18087   # 任取空闲端口, 避免与其他栈冲突
+docker compose -p pies-ext-csv-gui up -d --build web backend io_worker compute_worker
+docker compose -p pies-ext-csv-gui --profile e2e run --rm --build --no-deps e2e \
+  npx playwright test device-data-csv-gui-submit.spec.ts --project=chromium
 ```
 
 ## 场景清单(§13.3)

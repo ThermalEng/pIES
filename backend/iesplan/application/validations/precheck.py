@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -36,6 +37,7 @@ from sqlalchemy.orm import Session
 from iesplan import audit as audit_domain
 from iesplan import dataset as dataset_domain
 from iesplan import project as project_domain
+from iesplan.assembly import parse_predefined_source_declaration
 from iesplan.audit.contracts import AuditRecord
 from iesplan.core.diagnostics import (
     CONN_NODE_ORPHAN,
@@ -277,10 +279,10 @@ def _validate_device_params(
     - 类型未注册抛 NotFoundError(CONN-TYPE-002);
     - 未声明的参数键拒绝(PARAM-UNIT-002, actual=unknown);缺省键不校验, 按注册表默认值解释;
     - 数值参数校验 min/max(越界 → PARAM-RNG-003), 类型不匹配 → PARAM-UNIT-002。
-    全部传入键均须已在注册表声明，仅一处对齐例外(0.12-A2): 已注册
+    全部传入键均须已在注册表声明，仅一处对齐例外(0.12-A2/0.15): 已注册
     descriptor 中 type=predefined 的接口名允许以有效数值标量作 constant
-    显式来源声明(与 assembly builder 映射一致); 未知键仍拒绝，非
-    predefined 接口名不放宽。
+    或数据序列来源声明(映射形态, 与 assembly builder 转换同集合)显式声明
+    来源; 未知键仍拒绝，非 predefined 接口名不放宽。
     """
     spec = get_device_type(device_type)
     params = dict(params or {})  # 拷贝: 归一缺省键不得改写调用方原字典
@@ -310,12 +312,31 @@ def _validate_device_params(
 
 
 def _check_predefined_constant(name: str, value: Any, ispec: Any, loc: dict) -> list[Diagnostic]:
-    """预定义接口 constant 显式来源的入口校验(0.12-A2 与 builder 对齐)。
+    """预定义接口显式来源的入口校验(与 builder 对齐: 0.12-A2 标量 / 0.15 声明)。
 
-    仅接受有效数值标量: bool/非数值/NaN/Infinity → PARAM-UNIT-002;
+    标量: 仅接受有效数值标量, bool/非数值/NaN/Infinity → PARAM-UNIT-002;
     接口 valid_range 数值界越界 → PARAM-RNG-003。裸标量不带单位声明,
     按接口单位解释(与 builder constant 映射一致); 单位换算不在入口做。
+    映射: 数据序列来源声明, 复用 assembly 公开纯解析
+    ``parse_predefined_source_declaration``(与 builder 转换同集合);
+    形态不符 → PARAM-UNIT-002(actual=dict:{reason}), 不放行任意 dict。
     """
+    if isinstance(value, Mapping):
+        _declared, reason = parse_predefined_source_declaration(value)
+        if reason is None:
+            return []
+        return [
+            make_diag(
+                PARAM_UNIT_MISMATCH,
+                severity=SEVERITY_ERROR,
+                params={
+                    "param": name,
+                    "expected": "source_declaration",
+                    "actual": f"dict:{reason}",
+                },
+                location={**loc, "field": name},
+            )
+        ]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return [
             make_diag(
