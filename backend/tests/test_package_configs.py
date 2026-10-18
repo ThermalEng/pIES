@@ -261,7 +261,7 @@ def _build_package(extra_entries: dict[str, bytes], configs_meta: dict) -> bytes
             ensure_ascii=False,
         ).encode(),
         "draft.json": json.dumps(
-            {"revision": 1, "content": {}}
+            {"revision": 1, "content": {"model": {"devices": [], "connections": []}}}
         ).encode(),
     }
     for path, raw in extra_entries.items():

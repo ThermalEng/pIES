@@ -845,32 +845,46 @@ def _check_content_structures(entries: dict[str, bytes], manifest: dict) -> set[
     重映射直接消费, 形状非法即在此给可定位诊断(不落 500、不静默归一):
 
     - ``project_models`` 引用: 列表、条目对象、``device_id`` 非空字符串;
-    - ``model`` 节: 对象、``devices`` 列表、设备条目对象(设备类型重映射、
-      证据/审计消费)。
+    - ``model`` 节: 对象、``devices``/``connections`` 列表、条目对象(设备类型
+      重映射、证据/审计与设备/连接命令消费)。
 
-    字段缺席与显式 ``null`` 区分: 缺席按现有契约处理; 字段存在时严格要求
-    上述形状。内容文档本身的解码与 ``content`` 对象形状由
-    ``_package_content_docs`` 保证(失败即 ``ImportValidationError``)。
+    ``model`` 节按平台内容骨架(``initial_content``)要求存在——消费端按存在
+    直接读取(``content["model"]["devices"]`` 等), 缺席与显式 ``null`` 同等
+    拒绝。内容文档本身的解码与 ``content`` 对象形状由 ``_package_content_docs``
+    保证(失败即 ``ImportValidationError``)。
     """
     reasons: list[str] = []
     referenced: set[str] = set()
     for label, content in _package_content_docs(entries, manifest):
         referenced |= _content_model_ref_ids(content, label, reasons)
-        if "model" in content:
-            model = content["model"]
-            if not isinstance(model, dict):
-                reasons.append(f"{label}的 model 节结构非法(期望对象)")
-            elif "devices" in model:
-                devices = model["devices"]
-                if not isinstance(devices, list):
-                    reasons.append(f"{label}的 model.devices 结构非法(期望列表)")
-                else:
-                    for device in devices:
-                        if not isinstance(device, dict):
-                            reasons.append(f"{label}的 model.devices 条目结构非法(期望对象)")
+        _check_model_section(content, label, reasons)
     if reasons:
         raise ImportValidationError(reasons)
     return referenced
+
+
+def _check_model_section(content: dict, label: str, reasons: list[str]) -> None:
+    """内容 ``model`` 节形状(设备/连接名键表): 消费端按存在直接读取。
+
+    与平台内容骨架(``initial_content``)一致: ``model`` 对象、``devices``/
+    ``connections`` 列表、条目对象; 字段缺席与显式 ``null`` 同等拒绝。
+    """
+    if "model" not in content:
+        reasons.append(f"{label}内容缺 model 节")
+        return
+    model = content["model"]
+    if not isinstance(model, dict):
+        reasons.append(f"{label}的 model 节结构非法(期望对象)")
+        return
+    for key in ("devices", "connections"):
+        if key not in model:
+            reasons.append(f"{label}的 model 节缺 {key}")
+        elif not isinstance(model[key], list):
+            reasons.append(f"{label}的 model.{key} 结构非法(期望列表)")
+        else:
+            for entry in model[key]:
+                if not isinstance(entry, dict):
+                    reasons.append(f"{label}的 model.{key} 条目结构非法(期望对象)")
 
 
 def _check_model_dependencies(
