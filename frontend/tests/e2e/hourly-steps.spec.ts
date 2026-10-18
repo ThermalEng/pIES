@@ -1,6 +1,10 @@
 // R5/R6 计算步序列闭环 GUI 验收: 公开提交→真实 HiGHS 求解→封存→
 // API 分页→结果页按公开身份/单位选取曲线展示。
 //
+// 0.15 补强: 真实链顶层 metrics_summary 合法为 null(封存内容无 metrics 块),
+// 曲线按自身读取状态独立于指标摘要展示; 同页覆盖任务切换 — metrics-only
+// 任务(合法无逐时引用)缺席有明确说明、旧曲线不残留, 切回按公开身份/点数恢复。
+//
 // 求解脚手架走公开 API(与 excel-export-lang 同模式); 被测的曲线显示走 GUI,
 // 不注入页面状态、不 mock 成功业务、不注库。曲线名/单位/点数全部取自
 // 真实 API 元数据, 不硬编码设备类型与字段名。
@@ -115,6 +119,9 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     expect(refs.length).toBeGreaterThan(0)
     const metas = refs[0].series
     expect(metas.length).toBeGreaterThan(0)
+    // 缺陷触发条件(公开 HTTP 事实): 顶层指标摘要合法为 null, 而逐时引用与
+    // 逐时读取已有真实数据 — 曲线必须独立于指标摘要可见, 不被其遮蔽。
+    expect(view.result.metrics_summary).toBeNull()
     const expectedLabels = metas.map((m) => `${m.instance_id}.${m.variable_id}`)
     const expectedUnits = [...new Set(metas.map((m) => m.unit))]
     // 真实关键值: 各序列分页读全, 长度与引用一致、身份单位与元数据一致、
@@ -169,7 +176,38 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     expect(emptyBody.instance_id).toBe(metas[0].instance_id)
     expect(emptyBody.variable_id).toBe(metas[0].variable_id)
 
-    // GUI 被测显示。
+    // --- 第二任务(真实求解 metrics-only): 合法无逐时引用 ----------------------
+    // 公开配置改为仅请求 metrics(新 config revision)后提交并等真实完成。
+    // 任务准备全部在 GUI 登录前完成: 单活动窗口会话模型下 GUI 登录会置换
+    // 既有 API 会话, 不能在其后继续用旧 token 调 API。
+    const cfgNow = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/config`, undefined, userToken)
+    await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/config`, {
+      calculation_config: { ...cfgNow.calculation_config, outputs: ['metrics'] },
+      expected_revision: cfgNow.revision,
+    }, userToken)
+    const cfgAbsent = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/config`, undefined, userToken)
+    const task2 = await requestJson(apiCtx.request, 'POST', `/api/projects/${pid}/tasks`, {
+      task_type: 'optimization',
+      config: { config_revision: cfgAbsent.revision },
+      evaluation: EVALUATION,
+      idempotency_key: `steps-metrics-only-${Date.now()}`,
+      parent_task_id: null,
+    }, userToken)
+    const task2Id: number = task2.task.id
+    await expect(async () => {
+      const detail = await requestJson(apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${task2Id}`, undefined, userToken)
+      expect(detail.task.status).toBe('completed')
+    }).toPass({ timeout: 420_000, intervals: [10_000] })
+    const view2 = await requestJson(
+      apiCtx.request, 'GET', `/api/projects/${pid}/tasks/${task2Id}/result`, undefined, userToken,
+    )
+    expect(view2.result.evidence_status).toBe('available')
+    expect(view2.result.hourly_refs).toBeNull()
+    const pkg1Id: number = view.result.evidence.id
+    const pkg2Id: number = view2.result.evidence.id
+
+    // GUI 被测显示: 默认选择为最新完成任务(metrics-only) → 先验合法缺席;
+    // 选择只绑定封存证据包, 不注入页面状态。
     const context = await browser.newContext()
     const page = await context.newPage()
     await createSession(page, userName, password)
@@ -177,6 +215,18 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     await expect(page.getByRole('button', { name: /导出 Excel/i }).first()).toBeEnabled({ timeout: 60_000 })
 
     const card = page.locator('.ies-section', { hasText: '计算步曲线' }).first()
+    const picker = page.getByLabel('证据包状态')
+    await expect(picker).toBeEnabled({ timeout: 60_000 })
+
+    // 初始(默认最新完成 = metrics-only 任务): 曲线缺席明确、无图表、无错误。
+    await expect(page.getByText(`任务 #${task2Id} · 证据包 #${pkg2Id}`)).toBeVisible({ timeout: 60_000 })
+    await expect(card.getByText(/所选任务无计算步曲线数据/)).toBeVisible({ timeout: 60_000 })
+    expect(await card.locator('.ies-chart').count()).toBe(0)
+    expect(await card.locator('.ies-alert--error').count()).toBe(0)
+
+    // 选到逐时任务: 曲线按公开身份/单位/step 展示(与 API 一致)。
+    await picker.selectOption(String(pkg1Id))
+    await expect(page.getByText(`任务 #${taskId} · 证据包 #${pkg1Id}`)).toBeVisible({ timeout: 60_000 })
     await expect(card).toBeVisible({ timeout: 60_000 })
     await expect(card.getByText(/按计算步展示/)).toBeVisible()
     const note = await card.getByText(/个数据点/).first().innerText()
@@ -199,6 +249,35 @@ test.describe('R5/R6: 计算步序列闭环', () => {
     const axisTitles = await card.locator('.ies-chart__axis-title').allTextContents()
     const yTitles = axisTitles.filter((t) => t !== '计算步')
     expect([...new Set(yTitles)].sort()).toEqual([...expectedUnits].sort())
+
+    // --- 任务切换(同一证据选择器): 第二任务为真实求解的 metrics-only --------
+    // 切换断言: 任务身份更新、旧曲线不残留、缺席有明确说明, 切回按同一
+    // 公开身份/单位/点数恢复; 选择只绑定封存证据包, 不注入页面状态。
+    // 切到 metrics-only 任务: 身份更新、曲线缺席明确、旧曲线不残留。
+    await picker.selectOption(String(pkg2Id))
+    await expect(page.getByText(`任务 #${task2Id} · 证据包 #${pkg2Id}`)).toBeVisible({ timeout: 60_000 })
+    await expect(card.getByText(/所选任务无计算步曲线数据/)).toBeVisible({ timeout: 60_000 })
+    expect(await card.locator('.ies-chart').count()).toBe(0)
+    expect(await card.locator('.ies-chart__legend-item').count()).toBe(0)
+    for (const label of expectedLabels) {
+      expect(await card.getByText(label, { exact: false }).count()).toBe(0)
+    }
+
+    // 切回逐时任务: 按同一公开身份/点数恢复, 缺席说明消失。
+    await expect(picker).toBeEnabled({ timeout: 60_000 })
+    await picker.selectOption(String(pkg1Id))
+    await expect(page.getByText(`任务 #${taskId} · 证据包 #${pkg1Id}`)).toBeVisible({ timeout: 60_000 })
+    await expect(async () => {
+      const items = await card.locator('.ies-chart__legend-item').allInnerTexts()
+      expect(items.length).toBe(expectedLabels.length)
+    }).toPass({ timeout: 60_000 })
+    const backLegends = await card.locator('.ies-chart__legend-item').allInnerTexts()
+    for (const label of expectedLabels) {
+      expect(backLegends.some((t) => t.includes(label))).toBe(true)
+    }
+    const backNote = await card.getByText(/个数据点/).first().innerText()
+    expect(backNote).toContain(`共 ${refs[0].rows} 个数据点`)
+    expect(await card.getByText(/所选任务无计算步曲线数据/).count()).toBe(0)
 
     await apiCtx.close()
     await context.close()

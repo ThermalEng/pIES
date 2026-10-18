@@ -1099,61 +1099,66 @@ export default function ResultsPage() {
               </div>
             ) : null}
           </Card>
-
-          {/* 计算步序列(横轴为步序号, 按单位分组): 成功/合法缺席/读取失败/加载四态;
-              失败不清财务摘要, 重试仅重读曲线。成功但无可入图数据与合法缺席同展示。 */}
-          {hourlyGroups.length > 0 ? (
-            <Card title={t('ies.result.hourly_chart')} className="ies-section">
-              <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
-                {t('ies.result.hourly_note', { n: hourlyPointCount })}
-              </p>
-              {hourlyGroups.map((group) => (
-                <div className="ies-section" key={group.unit}>
-                  <LineChart
-                    series={group.series}
-                    ariaLabel={`${t('ies.result.hourly_chart')} (${group.unit})`}
-                    yLabel={group.unit}
-                    xLabel={t('ies.result.hourly_step_axis')}
-                  />
-                </div>
-              ))}
-            </Card>
-          ) : (
-            <Card title={t('ies.result.hourly_chart')} className="ies-section">
-              {hourlyError ? (
-                <>
-                  <Alert variant="error">{hourlyError}</Alert>
-                  <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
-                    {t('ies.result.hourly_failed')}
-                  </p>
-                  <div style={{ marginTop: 'var(--ies-space-2)' }}>
-                    <Button onClick={() => void retryHourly()} disabled={hourlyLoading}>
-                      {t('ies.common.retry')}
-                    </Button>
-                  </div>
-                </>
-              ) : hourlyAbsent || (hourly && !hourlyLoading) ? (
-                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
-                  {t('ies.result.hourly_absent')}
-                </p>
-              ) : (
-                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
-                  {t('ies.result.hourly_loading')}
-                </p>
-              )}
-            </Card>
-          )}
-
-          {/* 可靠性统计 */}
-          {relMetrics.length > 0 ? (
-            <Card title={t('ies.result.dimension_reliability')} className="ies-section">
-              <MetricTable metrics={relMetrics} currency={currency} />
-              <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
-                {t('ies.result.rel_note')}
-              </p>
-            </Card>
-          ) : null}
         </>
+      ) : null}
+
+      {/* 计算步序列(横轴为步序号, 按单位分组): 成功/合法缺席/读取失败/加载四态。
+          按曲线自身状态独立展示, 不依赖指标摘要 — 封存链顶层 metrics_summary
+          可合法为 null, 而独立逐时引用与读取已有真实数据; 摘要缺席不遮蔽曲线。
+          失败不清财务摘要, 重试仅重读曲线。成功但无可入图数据与合法缺席同展示;
+          无选中/无结果/主结果读取失败时曲线各态均为空, 不显示本区块。 */}
+      {hourly || hourlyAbsent || hourlyError || hourlyLoading ? (
+        hourlyGroups.length > 0 ? (
+          <Card title={t('ies.result.hourly_chart')} className="ies-section">
+            <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginBottom: 'var(--ies-space-2)' }}>
+              {t('ies.result.hourly_note', { n: hourlyPointCount })}
+            </p>
+            {hourlyGroups.map((group) => (
+              <div className="ies-section" key={group.unit}>
+                <LineChart
+                  series={group.series}
+                  ariaLabel={`${t('ies.result.hourly_chart')} (${group.unit})`}
+                  yLabel={group.unit}
+                  xLabel={t('ies.result.hourly_step_axis')}
+                />
+              </div>
+            ))}
+          </Card>
+        ) : (
+          <Card title={t('ies.result.hourly_chart')} className="ies-section">
+            {hourlyError ? (
+              <>
+                <Alert variant="error">{hourlyError}</Alert>
+                <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+                  {t('ies.result.hourly_failed')}
+                </p>
+                <div style={{ marginTop: 'var(--ies-space-2)' }}>
+                  <Button onClick={() => void retryHourly()} disabled={hourlyLoading}>
+                    {t('ies.common.retry')}
+                  </Button>
+                </div>
+              </>
+            ) : hourlyAbsent || (hourly && !hourlyLoading) ? (
+              <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                {t('ies.result.hourly_absent')}
+              </p>
+            ) : (
+              <p style={{ fontSize: 'var(--ies-fs-sm)', color: 'var(--ies-color-text-secondary)' }}>
+                {t('ies.result.hourly_loading')}
+              </p>
+            )}
+          </Card>
+        )
+      ) : null}
+
+      {/* 可靠性统计 */}
+      {relMetrics.length > 0 ? (
+        <Card title={t('ies.result.dimension_reliability')} className="ies-section">
+          <MetricTable metrics={relMetrics} currency={currency} />
+          <p style={{ fontSize: 'var(--ies-fs-xs)', color: 'var(--ies-color-text-secondary)', marginTop: 'var(--ies-space-2)' }}>
+            {t('ies.result.rel_note')}
+          </p>
+        </Card>
       ) : null}
 
       {/* 候选方案(真实候选列表; 选择只记录采用, 不创建版本)。
