@@ -6,6 +6,8 @@
 
 本页定义财务三件套的完整 YAML 结构与校验语义，是 [文件格式标准](../file-formats.md) 与[财务计算](../modules/finance.md)的字段级权威正文。装配如何引用有效快照见[装配 YAML](assembly-yaml.md)。
 
+本页 `2.0.0` 定义基础金额、计价和税目登记，尚不足以表达完整税后规则；不能将它解释为 finance 模块禁止税后评价，也不能宣称现有字段已支持税后计算。税后能力须先按[财务计算](../modules/finance.md)明确公开输入、规则与结果，再对受影响契约及消费者一同版本化，不在本页现有 schema 下私加字段或隐式行为。
+
 ```text
 FinanceProfile（地区财务基准，人工 authoring）
 FinanceOverrides（项目覆盖，人工 authoring）
@@ -34,7 +36,7 @@ profile:
   region: CN-North
   currency: CNY
   base_year: 2025
-  price_basis: tax_inclusive   # 文件内金额是否已含适用税目；本版分量直接使用金额，不做计税/扣税
+  price_basis: tax_inclusive   # 输入金额口径；不表示已经得到税后评价结果
   cost_method: fixed_plus_linear
 finance_types:
   pv_system:
@@ -98,7 +100,7 @@ taxes:
 | `profile.region` | 是 | 地区标识（展示与追溯，不参与计算） |
 | `profile.currency` | 是 | `CNY` / `USD` |
 | `profile.base_year` | 是 | 整数财务基准年（1900–2999） |
-| `profile.price_basis` | 是 | `tax_inclusive` / `tax_exclusive`：文件内金额是否已含适用税目（与 `taxes` 配合阅读）；本版成本与价格分量直接使用文件金额原值，不执行计税或扣税运算，含税价格不得在计算中再次加税 |
+| `profile.price_basis` | 是 | `tax_inclusive` / `tax_exclusive`：文件内金额是否已含适用税目（与 `taxes` 配合阅读）；基础分量使用文件金额，不隐式加税或扣税；此标签不是评价税前/税后标识 |
 | `profile.cost_method` | 是 | `fixed_plus_linear`：表示成本函数为一个固定建设成本加多个独立线性分量 |
 | `finance_types` | 是 | `finance_type` → 成本分量块；键名与 `device.id`/`instance_id` 相互独立 |
 | `finance_types.*.upfront_capex` | 至少一个分量存在 | 建设期一次性成本，仅 `new` 计入 |
@@ -124,15 +126,15 @@ taxes:
 
 ### 税目登记
 
-`taxes` 只做声明性登记，供人工核验与审计；**本版成本与价格计算不消费它**：
+`2.0.0` 的 `taxes` 是声明性登记，不能仅凭登记生成税后结果；基础成本与价格分量不隐式消费它：
 
 - `id`：唯一 `lower_snake_case` 稳定标识；
 - `display_name`：人类可读税种名；
-- `tax_type`：税种标识（如 `value_added_tax`）；本契约只登记不解析税种语义，不预建税务引擎；
+- `tax_type`：税种标识（如 `value_added_tax`）；登记本身不包含计税基础、抵扣、亏损或优惠等完整计算规则；
 - `rate`：法定税率（`Decimal` 比例，`0 ≤ rate ≤ 1`，`unit: "1"`）；
 - `applies_to`：明确适用对象，二选一——引用本文件 `energy_prices` 的 `price_id`（如 `grid_import`），或 `finance_types` 的分量路径（如 `pv_system.upfront_capex`）；一个税目对应一个适用对象，多个对象登记多个税目。
 
-金额口径与防重复加税：文件内金额按 `profile.price_basis` 解释（`tax_inclusive` = 已含适用税目）。本版把成本与价格分量按文件金额直接使用：不含税金额不会由系统自动计税，含税金额也不会被再次加税或拆税；税后换算（含税价扣税、不含税价计税后进入目标）不属于本契约定义范围，不得在 `taxes` 之外引入隐式税务行为。
+金额口径与防重复加税：文件内金额按 `profile.price_basis` 解释（`tax_inclusive` = 已含适用税目）。基础分量按声明金额使用，不含税金额不被隐式加税，含税金额不重复加税。税后计税、抵扣、折旧及其进入规划目标的规则属于 finance 的显式计算契约，现有 `2.0.0` 登记结构不能替代这些规则；扩展必须版本化定义，不在 API、Worker、生成器或前端各自推算。
 
 ### 时间口径与分量
 
