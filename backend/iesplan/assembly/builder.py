@@ -444,38 +444,49 @@ _SOURCE_DECL_KEYS: dict[str, frozenset] = {
 }
 
 
-def _predefined_source_declaration(
-    dev_id: str, iface_id: str, value: Mapping, diags: list
-) -> dict | None:
-    """预定义接口数据序列来源声明(params 字典形态 → 绑定声明)。
+def parse_predefined_source_declaration(value: Mapping) -> tuple[dict | None, str | None]:
+    """来源声明纯解析: 映射 → (绑定声明, None), 形态不符 → (None, reason)。
 
     接受 ``{"mode": "data_repeat", "dataset_version_id": int}``、
     ``{"mode": "data_full", "dataset_version_id": int}`` 或
     ``{"mode": "data_predict", "dataset_version_id": int, "target_type": str}``；
     路径由构造器按版本合成(``dataset_export_path``)，声明方不拼路径。
-    形态不符一律转换阻断(ASM-CONV-001)，不猜测、不补默认。标量 constant
-    形态不受影响。
+    reason ∈ unknown_source_mode / source_declaration_keys /
+    source_dataset_version / source_target_type; 纯函数不抛异常、不改写输入。
+    构造器转换与预检准入共用本解析(单一权威), 不重复实现形态规则。
     """
-    field = f"predefined_interfaces.{iface_id}"
     mode = value.get("mode")
     if mode not in ("data_repeat", "data_full", "data_predict"):
-        diags.append(_conv_fail(dev_id, field, "unknown_source_mode", {"mode": mode}))
-        return None
+        return None, "unknown_source_mode"
     if set(value) != _SOURCE_DECL_KEYS[mode]:
-        diags.append(_conv_fail(dev_id, field, "source_declaration_keys", {"mode": mode}))
-        return None
+        return None, "source_declaration_keys"
     vid = value.get("dataset_version_id")
     if not isinstance(vid, int) or isinstance(vid, bool):
-        diags.append(_conv_fail(dev_id, field, "source_dataset_version", {"mode": mode}))
-        return None
+        return None, "source_dataset_version"
     declared: dict = {"mode": mode, "path": dataset_export_path(vid)}
     if mode == "data_predict":
         target_type = value.get("target_type")
         if not isinstance(target_type, str) or not target_type:
-            diags.append(_conv_fail(dev_id, field, "source_target_type", {"mode": mode}))
-            return None
+            return None, "source_target_type"
         declared["target_type"] = target_type
-    return declared
+    return declared, None
+
+
+def _predefined_source_declaration(
+    dev_id: str, iface_id: str, value: Mapping, diags: list
+) -> dict | None:
+    """预定义接口数据序列来源声明(params 字典形态 → 绑定声明)。
+
+    解析委托公开纯函数 ``parse_predefined_source_declaration``(预检准入
+    同集合); 形态不符一律转换阻断(ASM-CONV-001)，不猜测、不补默认。
+    标量 constant 形态不受影响。
+    """
+    declared, reason = parse_predefined_source_declaration(value)
+    if reason is None:
+        return declared
+    field = f"predefined_interfaces.{iface_id}"
+    diags.append(_conv_fail(dev_id, field, reason, {"mode": value.get("mode")}))
+    return None
 
 
 def _build_instance(

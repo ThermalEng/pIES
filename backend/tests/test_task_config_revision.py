@@ -523,6 +523,35 @@ def test_nonfinite_predefined_constant_rejected_at_entry() -> None:
         ), bad
 
 
+def test_predefined_source_declaration_passes_precheck(
+    client: TestClient, db: Session,
+) -> None:
+    """合法数据序列来源声明: 预检无 PARAM-UNIT-002 假阻断(0.15 对齐构造器入口)。"""
+    owner = make_user(db, "owner_decl_ok")
+    pid = _prepare_load_project(
+        client, db, owner,
+        {"electricity_demand": {"mode": "data_repeat", "dataset_version_id": 1}},
+    )
+    report = _run_validation(client, pid, owner)
+    assert _blocking(report, "PARAM-UNIT-002") == [], report.get("diagnostics")
+
+
+def test_malformed_source_declaration_still_blocked(
+    client: TestClient, db: Session,
+) -> None:
+    """形态不符的来源声明仍被预检明确阻断(不放行任意 dict)。"""
+    owner = make_user(db, "owner_decl_bad")
+    pid = _prepare_load_project(
+        client, db, owner,
+        {"electricity_demand": {"mode": "data_guess", "dataset_version_id": 7}},
+    )
+    report = _run_validation(client, pid, owner)
+    hits = _blocking(report, "PARAM-UNIT-002")
+    assert any(d.get("params", {}).get("param") == "electricity_demand" for d in hits), (
+        report.get("diagnostics")
+    )
+
+
 def test_changed_inputs_with_new_key_yield_new_task_and_snapshot(
     client: TestClient, db: Session, factory,
 ) -> None:
