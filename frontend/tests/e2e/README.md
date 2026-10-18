@@ -65,6 +65,39 @@ docker compose -p pies-ext-dev -f docker-compose.yml \
 不含本规格; `npx playwright test --config playwright.ext-device.config.ts
 --list` 恰含一项。
 
+### 0.15 外部数据 CSV 验收(既有公开路径, 含缺口边界)
+
+`device-data-csv-extension.spec.ts` 验收仓库外设备数据 step CSV
+(`device-data-external/electric_load_repeat_24h.csv`, `ies.device-data` 2.1.0,
+24h `data_repeat` 基线: 偶数步 30 kW / 奇数步 50 kW, `device_id:
+ies.device.electric_load`)的公开消费链: 数据页真实 GUI 上传(真实文件 +
+质量报告“已通过校验”) → 公开草稿命令声明预定义槽来源(`{mode:
+data_repeat, dataset_version_id}`)并 `dataset.bind` 同一版本 → 公开任务
+API 提交 → 真实 io/compute Worker 求解 → 逐时/年累计与封存评价对账(手算
+关键值: 年负荷 350,400 kWh; 电网购入 425,485.714… kWh; 封存
+`energy_net` −297,840.0 CNY) → 结果页真实 GUI(结果摘要含上传数据集版本、
+规划解参数预览、封存评价卡)。
+
+覆盖边界(2026-10-18 切片裁决, 详见切片报告):
+
+- 上传与结果查看走真实 GUI; 来源声明与任务提交走公开 API。当前校验预检对
+  dict 来源声明产出 `PARAM-UNIT-002` 假阻断, 任务中心 GUI 提交被该校验门禁
+  挡住(证据见切片报告), 待独立有限修复; 本规格不据此做任何断言。
+- 结果页“工程/计算步曲线”区块以 `metrics_summary` 为渲染门, 当前封存链未
+  写该键, 区块实测不渲染(既有缺口: 既有 `hourly-steps.spec.ts` 同点失败);
+  本规格以摘要/规划解/封存评价卡为结果 GUI 断言面。
+
+```bash
+# 在待验收工作树根目录执行: 数据目录即该根的 ./data(隔离副本); 勿在别的
+# 仓库根运行, 以免误用主线数据。项目名/端口任取隔离值, 不碰其他栈。
+export IESPLAN_PORT=18086   # 任取空闲端口, 避免与其他栈冲突
+docker compose -p pies-ext-csv up -d --build web backend io_worker compute_worker
+
+# 运行本用例(默认套件收集; --build 确保测试镜像含当前 spec/工件)
+docker compose -p pies-ext-csv --profile e2e run --rm --build --no-deps e2e \
+  npx playwright test device-data-csv-extension.spec.ts --project=chromium
+```
+
 ## 场景清单(§13.3)
 
 | # | 场景 | 文件 |
