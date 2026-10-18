@@ -21,9 +21,8 @@
 //     校验预检对 dict 来源声明产出 PARAM-UNIT-002 假阻断, 任务中心 GUI 提交
 //     被该校验门禁挡住(证据留存在切片报告); 修复后的 GUI 提交收口见
 //     device-data-csv-gui-submit.spec.ts。
-//   - 结果页“工程/计算步曲线”区块以 metrics_summary(封存载荷 "metrics" 键)
-//     为渲染门; 当前封存链未写该键, 区块实测不渲染(既有缺口: 既有
-//     hourly-steps 规格同点失败; 见切片报告)。本规格不以该区块断言。
+//   - 切片当时曲线被指标摘要缺席遮蔽; 现已独立修复，真实曲线/任务切换
+//     与读取状态验收见 hourly-steps/hourly-r3 规格。本规格不重复曲线断言。
 //   - 本规格不据此缺口做任何断言, 也不宣称完整 GUI 闭环或 0.15 完成。
 
 import { test, expect } from '@playwright/test'
