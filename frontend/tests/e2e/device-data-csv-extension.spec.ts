@@ -68,6 +68,7 @@ interface HourlySeriesMeta {
 }
 
 interface HourlyBody {
+  field: string
   values: number[]
   total_rows: number
   unit: string
@@ -331,24 +332,42 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
     expect(refs.length).toBeGreaterThan(0)
     expect(refs[0].rows).toBe(HOURLY_ROWS)
     const metas = refs[0].series
-    const loadMeta = metas.find((m) => m.instance_id === 'load1' && m.variable_id === 'electricity_demand')
-      ?? metas.find((m) => m.instance_id === 'load1')
+    // 封存逐时引用按真实运行留存的公开输出精确匹配身份
+    // (series_id = "<instance_id>.<variable_id>"), 不设同实例兜底:
+    // 身份不符即显式失败, 不静默退回任意 load1 序列。
+    const loadMeta = metas.find((m) => m.instance_id === 'load1' && m.variable_id === 'electricity_in')
+    expect(loadMeta, '封存引用应含 load1.electricity_in').toMatchObject({
+      instance_id: 'load1',
+      variable_id: 'electricity_in',
+      series_id: 'load1.electricity_in',
+      unit: 'kW',
+    })
     const gridMeta = metas.find((m) => m.instance_id === 'grid1' && m.variable_id === 'electricity_import')
-    expect(loadMeta, 'load1 序列应在封存引用中').toBeTruthy()
-    expect(gridMeta, 'grid1 购入序列应在封存引用中').toBeTruthy()
+    expect(gridMeta, '封存引用应含 grid1.electricity_import').toMatchObject({
+      instance_id: 'grid1',
+      variable_id: 'electricity_import',
+      series_id: 'grid1.electricity_import',
+      unit: 'kW',
+    })
 
-    const hourly = async (seriesId: string): Promise<HourlyBody> => {
+    // 逐时响应身份/单位须与所选封存引用同源一致(field 为服务端对请求的回显)。
+    const hourly = async (meta: HourlySeriesMeta): Promise<HourlyBody> => {
       const res = await apiCtx.request.get(
         `${APP}/api/projects/${pid}/tasks/${taskId}/result/hourly` +
-        `?field=${encodeURIComponent(seriesId)}&start=0&end=${HOURLY_ROWS}&limit=${HOURLY_ROWS}`,
+        `?field=${encodeURIComponent(meta.series_id)}&start=0&end=${HOURLY_ROWS}&limit=${HOURLY_ROWS}`,
         { headers: { Authorization: `Bearer ${token}` } },
       )
       expect(res.ok()).toBe(true)
-      return (await res.json()) as HourlyBody
+      const body = (await res.json()) as HourlyBody
+      expect(body.field).toBe(meta.series_id)
+      expect(body.instance_id).toBe(meta.instance_id)
+      expect(body.variable_id).toBe(meta.variable_id)
+      expect(body.unit).toBe(meta.unit)
+      return body
     }
 
     // 电负荷: 与 CSV 的 24h 重复基线逐时一致(含跨日重复边界)。
-    const loadBody = await hourly(loadMeta!.series_id)
+    const loadBody = await hourly(loadMeta!)
     expect(loadBody.total_rows).toBe(HOURLY_ROWS)
     expect(loadBody.values.length).toBe(HOURLY_ROWS)
     expect(loadBody.unit).toBe('kW')
@@ -359,7 +378,7 @@ test.describe('0.15 外部数据 CSV: data_repeat step 文件公开消费链', (
     expectClose(loadSum, LOAD_ANNUAL_KWH, LOAD_ANNUAL_KWH * 1e-6)
 
     // 电网购入 = 电负荷 + 热泵电耗(热需求 30 kW 恒定 / cop 3.5)。
-    const gridBody = await hourly(gridMeta!.series_id)
+    const gridBody = await hourly(gridMeta!)
     expect(gridBody.values.length).toBe(HOURLY_ROWS)
     expect(gridBody.unit).toBe('kW')
     for (const step of [0, 1, 2, 23, 24, 25, 8758, 8759]) {
