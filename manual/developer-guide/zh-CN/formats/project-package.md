@@ -23,7 +23,7 @@ version_configs/{NNNN}/*.yaml   # 每个历史版本恢复所需的精确配置�
 models/{来源 device_id}.json     # 草稿与历史版本引用的项目模型规范文本（见下）
 ```
 
-`manifest.json` 形状：`{format_version, package_type: "project", objects: [{path, size_bytes, media_type}], files: {project, draft, configs, versions[], datasets[], evidence[], version_configs, models[]}}`。对象清单与包内文件一一对应（除清单本身），大小一致；重复路径拒绝。
+`manifest.json` 形状：`{format_version, package_type: "project", objects: [{path, size_bytes, media_type}], files: {project, draft, configs, versions[], datasets[], evidence[], version_configs, models[]}}`。`files` 必须为映射；对象清单与包内文件一一对应（除清单本身），大小一致；重复路径拒绝。清单、内容文档与携带模型文本的结构非法一律在**上传入口**给可定位诊断（`params.reasons`）并拒绝整个导入，不静默归一为空集、不落内部错误。
 
 ## files.version_configs（唯一形状）
 
@@ -64,7 +64,7 @@ models/{来源 device_id}.json     # 草稿与历史版本引用的项目模型�
 - `device_id`（来源最终 ID）与 `base_device_id`（来源基础 ID）只用于在包内定位来源与重建，**不作为目标数据库的身份或编号**；导入时按 `base_device_id` 经正式保存路径重建本项目模型行，分配本项目新编号（新 suffix、新行 id，编号不复用来源数字）。
 - 导入重建后，草稿与每个历史版本内容里的 `project_models` 引用及其 `model` 节设备实例的 `device_type` 串，一律映射为重建后的真实新 ID（不假设编号与来源相同；源项目删除过模型形成的编号空号不影响映射）。历史版本内容按来源内容逐一映射；导入草稿的引用由保存路径按本项目重建后的清单重建，等于包内携带的全部模型集合（与项目内保存/删除模型的引用重建规则一致）。
 - 模型回执（receipt）与来源溯源不随包携带：导入重建时由正式保存路径对规范文本重新生成回执，重建行来源记为 `direct_yaml`；包内规范文本即该模型的内容事实，源项目的模板来源标签不作为目标库身份或溯源。
-- 模型正文的正式校验在确认导入时由正式保存路径一次完成（候选校验 → 新编号 → 规范化 → 回执）；提案阶段只校验依赖携带关系（集合相等、文件在包内），不重复跑一遍模型语义校验。
+- 模型正文的正式校验在确认导入时由正式保存路径一次完成（候选校验 → 新编号 → 规范化 → 回执）；提案阶段只校验依赖携带关系与消费结构（`files` / `files.models` 与内容 `project_models` 引用的形状、`model_text` 文件在包内且能解码为带 `device` 节的对象），不重复跑模型语义校验。结构非法 → 上传入口拒绝；正文非法 → 确认导入经该权威路径拒绝并整体回滚（无新项目与模型行、提案不进入已应用状态）。
 - 历史结果证据里冻结的设备类型串属于证据原文，不改写。
 
 ## 例子（片段，非可导入包）

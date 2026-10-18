@@ -375,6 +375,10 @@ def parse_package(data: bytes) -> tuple[dict, dict[str, bytes]]:
     if forbidden:
         reasons.append(f"包包含禁止内容({', '.join(sorted(forbidden))}), 拒绝导入")
 
+    # 结构: files 为路径/元数据映射(传递编排按映射消费)
+    if not isinstance(manifest.get("files"), dict):
+        reasons.append("清单缺少 files 文件映射")
+
     # 完整性: 对象清单与包内文件一一对应 + 大小一致
     objects_manifest = manifest.get("objects")
     if not isinstance(objects_manifest, list):

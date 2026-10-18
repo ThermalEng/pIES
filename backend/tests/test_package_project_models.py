@@ -39,6 +39,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from iesplan import identity as identity_domain  # noqa: E402
 from iesplan import model as model_domain  # noqa: E402
+from iesplan import package as package_domain  # noqa: E402
 from iesplan import project as project_domain  # noqa: E402
 from iesplan.api.deps import get_request_db  # noqa: E402
 from iesplan.application import packages as packages_uc  # noqa: E402
@@ -288,6 +289,44 @@ def _rebuilt_zip(entries: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
+# ---------------------------------------------------------------------------
+# 手改包(结构非法用例): 改文件内容必须同步对象清单大小
+# ---------------------------------------------------------------------------
+
+
+def _set_file(manifest: dict, entries: dict[str, bytes], path: str, raw: bytes) -> None:
+    entries[path] = raw
+    for entry in manifest["objects"]:
+        if entry["path"] == path:
+            entry["size_bytes"] = len(raw)
+            break
+    else:
+        raise AssertionError(f"对象清单缺条目: {path}")
+
+
+def _mut_draft_content(manifest: dict, entries: dict[str, bytes], content: object) -> None:
+    doc = json.loads(entries["draft.json"])
+    doc["content"] = content
+    _set_file(manifest, entries, "draft.json", json.dumps(doc, ensure_ascii=False).encode())
+
+
+def _mut_draft_refs(manifest: dict, entries: dict[str, bytes], refs: object) -> None:
+    doc = json.loads(entries["draft.json"])
+    doc["content"]["project_models"] = refs
+    _set_file(manifest, entries, "draft.json", json.dumps(doc, ensure_ascii=False).encode())
+
+
+def _mut_model_text(manifest: dict, entries: dict[str, bytes], text: str) -> None:
+    path = manifest["files"]["models"][0]["model_text"]
+    _set_file(manifest, entries, path, text.encode("utf-8"))
+
+
+def _rewrite_manifest(manifest: dict, entries: dict[str, bytes]) -> bytes:
+    entries["manifest.json"] = json.dumps(manifest, ensure_ascii=False).encode()
+    return _rebuilt_zip(entries)
+
+
+
 def _draft_content(db: Session, pid: int) -> dict:
     draft = project_domain.require_current_draft(db, project_domain.get_project(db, pid))
     return load_content_object(db, draft.content_object_id)
@@ -509,3 +548,100 @@ def test_import_rejects_missing_and_extra_model_dependencies(
     assert resp.status_code == 400, resp.text
     reasons = resp.json()["error"]["params"]["reasons"]
     assert any("files.models 结构非法" in reason for reason in reasons)
+
+
+#: 模型依赖相关结构非法用例(手改包 → 期望的上传边界诊断)。
+_MALFORMED_MODEL_STRUCTURES: list[tuple[str, object, str]] = [
+    (
+        "内容引用条目缺 device_id",
+        lambda manifest, entries: _mut_draft_refs(manifest, entries, [{}]),
+        "project_models 条目缺 device_id",
+    ),
+    (
+        "内容引用结构非法",
+        lambda manifest, entries: _mut_draft_refs(manifest, entries, {}),
+        "project_models 结构非法(期望列表)",
+    ),
+    (
+        "草稿内容结构非法",
+        lambda manifest, entries: _mut_draft_content(manifest, entries, []),
+        "内容结构非法(期望对象)",
+    ),
+    (
+        "files 非映射",
+        lambda manifest, entries: manifest.__setitem__("files", []),
+        "清单缺少 files 文件映射",
+    ),
+    (
+        "files.models 非列表(空映射)",
+        lambda manifest, entries: manifest["files"].__setitem__("models", {}),
+        "清单 files.models 结构非法(期望列表)",
+    ),
+    (
+        "携带模型文本非对象",
+        lambda manifest, entries: _mut_model_text(manifest, entries, "{}"),
+        "不是模型文本",
+    ),
+    (
+        "携带模型文本 device 缺失",
+        lambda manifest, entries: _mut_model_text(manifest, entries, '{"device": null}'),
+        "不是模型文本",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [(mutate, expected) for _name, mutate, expected in _MALFORMED_MODEL_STRUCTURES],
+    ids=[name for name, _mutate, _expected in _MALFORMED_MODEL_STRUCTURES],
+)
+def test_import_rejects_malformed_model_structures(
+    client: TestClient, db: Session, mutate, expected: str
+) -> None:
+    """模型依赖相关结构非法: 上传边界给可定位 4xx, 不落 500、不静默归一为空集。"""
+    owner = _user(db, "pkg_model_owner5")
+    pid = _project(client, owner, "包模型-结构拒绝")
+    _save_model(client, owner, pid, SINK_YAML)
+    raw = _export_bytes(db, owner, pid)
+    importer = _user(db, "pkg_model_importer5")
+
+    manifest, entries = _load_zip(raw)
+    mutate(manifest, entries)
+    resp = _propose(client, importer, _rewrite_manifest(manifest, entries))
+    assert resp.status_code == 400, f"{resp.status_code} {resp.text}"
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert any(expected in reason for reason in reasons), reasons
+
+
+def test_confirm_rejects_semantically_invalid_carried_model(
+    client: TestClient, db: Session
+) -> None:
+    """携带模型文本结构可消费但正文非法: 确认导入由权威保存路径拒绝并整体回滚。
+
+    边界只保证导入改写所需结构; schema/属性/接口/方程等正文校验在确认导入
+    时由保存路径完成, 失败不留项目/模型行, 提案不进入已应用状态、可重试。
+    """
+    owner = _user(db, "pkg_model_owner6")
+    pid = _project(client, owner, "包模型-正文拒绝")
+    _save_model(client, owner, pid, SINK_YAML)
+    raw = _export_bytes(db, owner, pid)
+    manifest, entries = _load_zip(raw)
+    _mut_model_text(manifest, entries, '{"device": {}}')
+    tampered = _rewrite_manifest(manifest, entries)
+
+    importer = _user(db, "pkg_model_importer6")
+    proposal = packages_uc.propose_import(db, importer, tampered)
+    resp = client.post(
+        f"/api/projects/import/{proposal.id}/confirm", headers=_h(client, importer)
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"].startswith("PROJ-MDL-"), resp.text
+
+    # 回滚: 导入者没有新项目(因此也没有模型行), 提案仍未应用。
+    names = {
+        project["name"]
+        for project in client.get("/api/projects", headers=_h(client, importer)).json()["projects"]
+    }
+    assert "包模型-正文拒绝" not in names
+    record = package_domain.get_proposal(db, proposal.id)
+    assert record is not None and record.status == "proposed"

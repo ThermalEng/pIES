@@ -770,10 +770,10 @@ def _parse_triplet_group(
     return result
 
 
-def _package_content_docs(entries: dict[str, bytes], manifest: dict) -> list[dict]:
-    """包内草稿与全部历史版本的内容文档(边界校验消费; 解码失败即拒绝导入)。"""
-    files_meta = manifest.get("files") or {}
-    docs: list[dict] = []
+def _package_content_docs(entries: dict[str, bytes], manifest: dict) -> list[tuple[str, dict]]:
+    """包内草稿与全部历史版本的内容文档(边界校验消费; 形状/解码非法即拒绝导入)。"""
+    files_meta = manifest["files"]
+    docs: list[tuple[str, dict]] = []
 
     def _content_of(raw: bytes, label: str) -> dict:
         try:
@@ -783,15 +783,55 @@ def _package_content_docs(entries: dict[str, bytes], manifest: dict) -> list[dic
         if not isinstance(doc, dict):
             raise ImportValidationError([f"{label}结构非法(期望对象)"])
         content = doc.get("content")
-        return content if isinstance(content, dict) else {}
+        if content is None:
+            return {}
+        if not isinstance(content, dict):
+            raise ImportValidationError([f"{label}内容结构非法(期望对象)"])
+        return content
 
     if "draft.json" in entries:
-        docs.append(_content_of(entries["draft.json"], "包内草稿文件"))
+        label = "包内草稿文件"
+        docs.append((label, _content_of(entries["draft.json"], label)))
     for version_path in files_meta.get("versions") or []:
         if version_path not in entries:
             continue
-        docs.append(_content_of(entries[version_path], f"包内版本文件 {version_path}"))
+        label = f"包内版本文件 {version_path}"
+        docs.append((label, _content_of(entries[version_path], label)))
     return docs
+
+
+def _content_model_ref_ids(content: dict, label: str, reasons: list[str]) -> set[str]:
+    """内容声明的项目模型引用键(device_id); 形状非法即记原因, 不静默归一为空集。"""
+    refs = content.get("project_models")
+    if refs is None:
+        return set()
+    if not isinstance(refs, list):
+        reasons.append(f"{label}的 project_models 结构非法(期望列表)")
+        return set()
+    ids: set[str] = set()
+    for ref in refs:
+        if not isinstance(ref, dict):
+            reasons.append(f"{label}的 project_models 条目结构非法(期望对象)")
+            continue
+        device_id = ref.get("device_id")
+        if not isinstance(device_id, str) or not device_id:
+            reasons.append(f"{label}的 project_models 条目缺 device_id")
+            continue
+        ids.add(device_id)
+    return ids
+
+
+def _is_carried_model_document(raw: bytes) -> bool:
+    """携带模型文本可消费的最小结构: 可解码 JSON 对象且带 ``device`` 节。
+
+    确认导入只按来源 ``base_device_id`` 改写 ``device.id``; schema/属性/
+    接口/方程等正文校验由该权威保存路径完成, 此处不重复校验语义。
+    """
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return isinstance(doc, dict) and isinstance(doc.get("device"), dict)
 
 
 def _check_model_dependencies(entries: dict[str, bytes], manifest: dict) -> None:
@@ -802,13 +842,18 @@ def _check_model_dependencies(entries: dict[str, bytes], manifest: dict) -> None
       内容引用了未携带的模型 → 拒绝(不复用源行身份、不回填、不静默丢弃);
       携带了内容未引用的模型 → 拒绝(不把包内多余资产带进新项目)。
 
-    模型正文的正式校验由确认导入的权威保存路径一次完成(提案阶段无目标项目)。
+    结构校验只覆盖依赖定位与导入改写所需的部分(清单/内容引用形状、
+    ``model_text`` 文件在包内且带 ``device`` 节); 模型正文的正式校验由
+    确认导入的权威保存路径一次完成(提案阶段无目标项目)。
     """
-    files_meta = manifest.get("files") or {}
-    models_meta = files_meta.get("models") or []
-    if not isinstance(models_meta, list):
-        raise ImportValidationError(["清单 files.models 结构非法(期望列表)"])
+    files_meta = manifest["files"]
+    models_meta = files_meta.get("models")
     reasons: list[str] = []
+    if models_meta is None:
+        models_meta = []
+    elif not isinstance(models_meta, list):
+        reasons.append("清单 files.models 结构非法(期望列表)")
+        models_meta = []
     carried: set[str] = set()
     for item in models_meta:
         if not isinstance(item, dict):
@@ -823,12 +868,17 @@ def _check_model_dependencies(entries: dict[str, bytes], manifest: dict) -> None
         if not isinstance(item.get("base_device_id"), str) or not item["base_device_id"]:
             reasons.append(f"模型 {device_id} 缺 base_device_id")
         path = item.get("model_text")
-        if not isinstance(path, str) or path not in entries:
+        raw = entries.get(path) if isinstance(path, str) else None
+        if raw is None:
             reasons.append(f"模型 {device_id} 的 model_text 文件缺失: {path}")
+        elif not _is_carried_model_document(raw):
+            reasons.append(
+                f"模型 {device_id} 的 model_text 不是模型文本(需 JSON 对象且带 device 节)"
+            )
         carried.add(device_id)
     referenced: set[str] = set()
-    for content in _package_content_docs(entries, manifest):
-        referenced.update(_content_model_refs(content))
+    for label, content in _package_content_docs(entries, manifest):
+        referenced |= _content_model_ref_ids(content, label, reasons)
     missing = sorted(referenced - carried)
     if missing:
         reasons.append("内容引用的项目模型未随包携带: " + ", ".join(missing))
