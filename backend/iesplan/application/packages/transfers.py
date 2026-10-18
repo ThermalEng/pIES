@@ -834,17 +834,57 @@ def _is_carried_model_document(raw: bytes) -> bool:
     return isinstance(doc, dict) and isinstance(doc.get("device"), dict)
 
 
-def _check_model_dependencies(entries: dict[str, bytes], manifest: dict) -> None:
+def _check_content_structures(entries: dict[str, bytes], manifest: dict) -> set[str]:
+    """内容文档消费结构校验 + 引用集合收集(上传入口, 先于其他内容消费者)。
+
+    返回内容声明的 ``project_models`` 引用集合; 以下结构被后续校验与导入
+    重映射直接消费, 形状非法即在此给可定位诊断(不落 500、不静默归一):
+
+    - ``project_models`` 引用: 列表、条目对象、``device_id`` 非空字符串;
+    - ``model`` 节: 对象、``devices`` 列表、设备条目对象(设备类型重映射、
+      证据/审计消费)。
+
+    内容文档本身的解码与 ``content`` 对象形状由 ``_package_content_docs``
+    保证(失败即 ``ImportValidationError``)。
+    """
+    reasons: list[str] = []
+    referenced: set[str] = set()
+    for label, content in _package_content_docs(entries, manifest):
+        referenced |= _content_model_ref_ids(content, label, reasons)
+        model = content.get("model")
+        if model is None:
+            continue
+        if not isinstance(model, dict):
+            reasons.append(f"{label}的 model 节结构非法(期望对象)")
+            continue
+        devices = model.get("devices")
+        if devices is None:
+            continue
+        if not isinstance(devices, list):
+            reasons.append(f"{label}的 model.devices 结构非法(期望列表)")
+            continue
+        for device in devices:
+            if not isinstance(device, dict):
+                reasons.append(f"{label}的 model.devices 条目结构非法(期望对象)")
+    if reasons:
+        raise ImportValidationError(reasons)
+    return referenced
+
+
+def _check_model_dependencies(
+    entries: dict[str, bytes], manifest: dict, referenced: set[str]
+) -> None:
     """3.0 项目模型依赖关系边界校验(上传入口一次校验, 任一失败 → 拒绝整个导入)。
+
+    前置: ``_check_content_structures`` 已校验内容形状并给出引用集合; 本函数
+    只校验携带侧与集合相等:
 
     - ``files.models`` 条目结构合法、``device_id`` 唯一、``model_text`` 文件在包内;
     - 包内携带的模型集合必须等于草稿与全部历史版本内容引用的集合:
       内容引用了未携带的模型 → 拒绝(不复用源行身份、不回填、不静默丢弃);
       携带了内容未引用的模型 → 拒绝(不把包内多余资产带进新项目)。
 
-    结构校验只覆盖依赖定位与导入改写所需的部分(清单/内容引用形状、
-    ``model_text`` 文件在包内且带 ``device`` 节); 模型正文的正式校验由
-    确认导入的权威保存路径一次完成(提案阶段无目标项目)。
+    模型正文的正式校验由确认导入的权威保存路径一次完成(提案阶段无目标项目)。
     """
     files_meta = manifest["files"]
     models_meta = files_meta.get("models")
@@ -876,9 +916,6 @@ def _check_model_dependencies(entries: dict[str, bytes], manifest: dict) -> None
                 f"模型 {device_id} 的 model_text 不是模型文本(需 JSON 对象且带 device 节)"
             )
         carried.add(device_id)
-    referenced: set[str] = set()
-    for label, content in _package_content_docs(entries, manifest):
-        referenced |= _content_model_ref_ids(content, label, reasons)
     missing = sorted(referenced - carried)
     if missing:
         reasons.append("内容引用的项目模型未随包携带: " + ", ".join(missing))
@@ -1065,10 +1102,12 @@ def import_proposal(
         baseline = ProjectBaseline.from_dict(project_meta.get("project_baseline"))
     except ProjectBaselineError as exc:
         raise ImportValidationError([f"包内项目计算基线非法: {exc}"]) from exc
-    # 1b) 历史依赖关系边界校验(提案行创建之前; 失败不建提案行)
+    # 1b) 内容文档消费结构 + 引用集合(先于历史配置依赖消费内容)
+    referenced = _check_content_structures(entries, manifest)
+    # 1c) 历史依赖关系边界校验(提案行创建之前; 失败不建提案行)
     _check_version_dependencies(entries, manifest, baseline)
-    # 1c) 项目模型依赖关系边界校验(3.0; 与历史配置依赖同一上传入口)
-    _check_model_dependencies(entries, manifest)
+    # 1d) 项目模型依赖关系边界校验(3.0; 与历史配置依赖同一上传入口)
+    _check_model_dependencies(entries, manifest, referenced)
     # 规划/财务配置 revision(0.6.5 事项 3): 包内配置严格校验(缺失 = 导入后
     # 无配置, 不静默默认; 非法 → 拒绝整个导入)。
     package_configs = parse_config_files(entries, manifest)

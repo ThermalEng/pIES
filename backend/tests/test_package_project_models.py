@@ -321,6 +321,19 @@ def _mut_model_text(manifest: dict, entries: dict[str, bytes], text: str) -> Non
     _set_file(manifest, entries, path, text.encode("utf-8"))
 
 
+def _mut_version_content(manifest: dict, entries: dict[str, bytes], content: object) -> None:
+    path = manifest["files"]["versions"][0]
+    doc = json.loads(entries[path])
+    doc["content"] = content
+    _set_file(manifest, entries, path, json.dumps(doc, ensure_ascii=False).encode())
+
+
+def _mut_draft_model(manifest: dict, entries: dict[str, bytes], model: object) -> None:
+    doc = json.loads(entries["draft.json"])
+    doc["content"]["model"] = model
+    _set_file(manifest, entries, "draft.json", json.dumps(doc, ensure_ascii=False).encode())
+
+
 def _rewrite_manifest(manifest: dict, entries: dict[str, bytes]) -> bytes:
     entries["manifest.json"] = json.dumps(manifest, ensure_ascii=False).encode()
     return _rebuilt_zip(entries)
@@ -604,6 +617,61 @@ def test_import_rejects_malformed_model_structures(
     _save_model(client, owner, pid, SINK_YAML)
     raw = _export_bytes(db, owner, pid)
     importer = _user(db, "pkg_model_importer5")
+
+    manifest, entries = _load_zip(raw)
+    mutate(manifest, entries)
+    resp = _propose(client, importer, _rewrite_manifest(manifest, entries))
+    assert resp.status_code == 400, f"{resp.status_code} {resp.text}"
+    reasons = resp.json()["error"]["params"]["reasons"]
+    assert any(expected in reason for reason in reasons), reasons
+
+
+#: 内容文档消费结构非法用例(手改包 → 期望的上传边界诊断; 历史依赖消费者之前)。
+_MALFORMED_CONTENT_STRUCTURES: list[tuple[str, object, str]] = [
+    (
+        "历史版本 content 为列表",
+        lambda manifest, entries: _mut_version_content(manifest, entries, [1]),
+        "内容结构非法(期望对象)",
+    ),
+    (
+        "草稿 content 为字符串",
+        lambda manifest, entries: _mut_draft_content(manifest, entries, "abc"),
+        "内容结构非法(期望对象)",
+    ),
+    (
+        "草稿 model 节为列表",
+        lambda manifest, entries: _mut_draft_model(manifest, entries, [1]),
+        "model 节结构非法(期望对象)",
+    ),
+    (
+        "草稿 model.devices 条目非对象",
+        lambda manifest, entries: _mut_draft_model(manifest, entries, {"devices": [1]}),
+        "model.devices 条目结构非法(期望对象)",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [(mutate, expected) for _name, mutate, expected in _MALFORMED_CONTENT_STRUCTURES],
+    ids=[name for name, _mutate, _expected in _MALFORMED_CONTENT_STRUCTURES],
+)
+def test_import_rejects_malformed_content_structures(
+    client: TestClient, db: Session, mutate, expected: str
+) -> None:
+    """内容消费结构非法: 上传入口先于历史依赖消费者给可定位 4xx, 不落 500。"""
+    owner = _user(db, "pkg_model_owner7")
+    pid = _project(client, owner, "包模型-内容结构拒绝")
+    _save_model(client, owner, pid, SINK_YAML)
+    # 至少一个历史版本(消费结构用例改历史版本 content)。
+    resp = client.post(
+        f"/api/projects/{pid}/versions",
+        json={"name": "基线", "reason": "milestone"},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 201, resp.text
+    raw = _export_bytes(db, owner, pid)
+    importer = _user(db, "pkg_model_importer7")
 
     manifest, entries = _load_zip(raw)
     mutate(manifest, entries)
