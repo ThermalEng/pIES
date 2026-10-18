@@ -48,6 +48,7 @@ from iesplan import modeling as modeling_domain
 from iesplan import project as project_domain
 from iesplan import results as results_domain
 from iesplan import tasks as tasks_domain
+from iesplan.application.models.project_devices import load_project_device_documents
 from iesplan.application.projects import (
     current_version_matches_draft as _current_version_matches_draft,
 )
@@ -949,6 +950,9 @@ def _assembly_gate(
     require_project(db, project_id)
     export_content["name"] = f"project_{project_id}"
     contents = _dataset_contents_for(db, content)
+    # 本项目已保存模型: 按版本内容精确引用一次读取并经构造器/校验器同一次
+    # 合并解析; 冻结链继续消费闸门结果, 不二次读取当前模型清单。
+    device_documents = load_project_device_documents(db, content)
     result = validate_project_export(
         export_content,
         dataset_contents=contents,
@@ -958,6 +962,7 @@ def _assembly_gate(
         planning=planning,
         finance_snapshots=finance_snapshots,
         operation_years=operation_years,
+        device_documents=device_documents,
     )
     if result.artifact is None:
         raise AssemblyValidationError(result.diagnostics)

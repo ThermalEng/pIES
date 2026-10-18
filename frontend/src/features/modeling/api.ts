@@ -5,6 +5,8 @@
  *   GET  /api/model-templates/catalog                    可用模板目录 → {items: [...]}
  *   GET  /api/model-templates/{template_id}/revisions/{revision}
  *                                                        固定发布版详情
+ *   GET  /api/projects/{pid}/device-types                公开目录 ∪ 本项目已保存模型
+ *                                                        → {items: [...]}
  *   GET  /api/projects/{pid}/models                      项目模型清单 → {project_models: [...]}
  *   POST /api/projects/{pid}/models/validate             候选模型门禁 → {valid, diagnostics}
  *   POST /api/projects/{pid}/models                      正式保存:
@@ -203,8 +205,8 @@ export async function validateModel(projectId: number): Promise<ValidationResult
   return runValidation(projectId)
 }
 
-/** 设备类型注册表(公开, 供画布; 精确 {items} 信封)。 */
-export async function listDeviceTypes(): Promise<DeviceTypeSpec[]> {
-  const body = await request<DeviceTypeListResponseDto>('/registry/device-types')
+/** 项目作用域设备类型(公开目录 ∪ 本项目已保存模型; 精确 {items} 信封)。 */
+export async function listDeviceTypes(projectId: number): Promise<DeviceTypeSpec[]> {
+  const body = await request<DeviceTypeListResponseDto>(`/projects/${projectId}/device-types`)
   return deviceTypeListFromServer(body)
 }

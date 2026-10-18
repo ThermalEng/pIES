@@ -7,20 +7,25 @@
 
 from __future__ import annotations
 
-from iesplan.application.models import model_save, selector
+from iesplan.application.models import model_save, project_devices, selector
 from iesplan.application.models.model_save import (
     delete_project_model,
     get_project_models,
     save_project_model,
     validate_candidate,
 )
-from iesplan.application.models.selector import list_device_types
+from iesplan.application.models.selector import (
+    list_device_types,
+    list_project_device_types,
+)
 
 __all__ = [
     "delete_project_model",
     "get_project_models",
     "list_device_types",
+    "list_project_device_types",
     "model_save",
+    "project_devices",
     "save_project_model",
     "selector",
     "validate_candidate",

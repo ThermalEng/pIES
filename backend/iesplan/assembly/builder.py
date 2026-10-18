@@ -61,6 +61,7 @@ def build_assembly_doc_from_content(
     finance_binding: Mapping[str, Any] | None = None,
     tariff_bindings: Mapping[str, Any] | None = None,
     planning: Mapping[str, Any] | None = None,
+    device_documents: Mapping[str, Any] | None = None,
 ) -> BuildDocResult:
     """项目内容 → ies.assembly 3.0.0 文档(无静默默认)。
 
@@ -90,6 +91,8 @@ def build_assembly_doc_from_content(
       否则阻断; 只映射显式端点引用，不解释、不合成、不补绑定。
     - finance/finance_binding/tariff_bindings/planning: 调用方显式提供,
       原样透传进文档(缺席则结构阶段按节缺失阻断)。
+    - device_documents: 调用方显式提供的项目设备文档(已保存模型),
+      与公开目录合并消费且同 ID 以显式文档为准; 本构造器不访问 DB/storage。
 
     返回 (doc, diagnostics)。任一阻断错误 → doc=None(不进入校验器)。
     """
@@ -229,7 +232,9 @@ def build_assembly_doc_from_content(
                 )
             )
             continue
-        instance, inst_diags = _build_instance(d, type_id, dev_id, kind_raw)
+        instance, inst_diags = _build_instance(
+            d, type_id, dev_id, kind_raw, device_documents
+        )
         diags.extend(inst_diags)
         if inst_diags and any(x.blocking for x in inst_diags):
             continue
@@ -293,7 +298,7 @@ def build_assembly_doc_from_content(
         bad: tuple[str, str, str] | None = None
         for side, dev, port in (("from", from_dev, from_port), ("to", to_dev, to_port)):
             type_id = name_type_of[dev]
-            descriptor = _descriptor_of(type_id) if type_id else None
+            descriptor = _descriptor_of(type_id, device_documents) if type_id else None
             if descriptor is not None and descriptor.interfaces.get(port) is None:
                 bad = (side, dev, port)
                 break
@@ -419,7 +424,11 @@ def _conv_fail(dev_id: str, field: str, reason: str, extra: dict | None = None) 
     )
 
 
-def _descriptor_of(type_id: str):
+def _descriptor_of(type_id: str, device_documents: Mapping[str, Any] | None = None):
+    if device_documents is not None:
+        explicit = device_documents.get(type_id)
+        if explicit is not None:
+            return explicit
     from iesplan.devices import get_device
 
     try:
@@ -428,8 +437,10 @@ def _descriptor_of(type_id: str):
         return None
 
 
-def _descriptor_unit(type_id: str, prop: str) -> str:
-    descriptor = _descriptor_of(type_id)
+def _descriptor_unit(
+    type_id: str, prop: str, device_documents: Mapping[str, Any] | None = None
+) -> str:
+    descriptor = _descriptor_of(type_id, device_documents)
     if descriptor is None:
         return "1"
     spec = descriptor.properties.get(prop)
@@ -483,16 +494,17 @@ def _build_instance(
     type_id: str,
     dev_id: str,
     asset_origin: str,
+    device_documents: Mapping[str, Any] | None = None,
 ) -> tuple[dict | None, list[Diagnostic]]:
     """项目设备 → 2.0 实例形态(属性覆盖 + 预定义来源声明)。
 
     命中 predefined 接口名的标量参数落为 constant；命中 property 名的
     标量落为属性覆盖(单位取 descriptor)；其余标量透传由校验器判未声明。
     数据序列来源由独立声明入口提供(S2c)，此处不做数据集列映射。
-    未注册设备仅发射 definition，由校验器阻断。
+    未注册设备仅发射 definition，由校验器阻断。显式项目设备文档优先于目录。
     """
     diags: list[Diagnostic] = []
-    descriptor = _descriptor_of(type_id)
+    descriptor = _descriptor_of(type_id, device_documents)
     predefined_ids = (
         {name for name, iface in descriptor.interfaces.items() if iface.type == "predefined"}
         if descriptor is not None
@@ -512,7 +524,10 @@ def _build_instance(
             if declared is not None:
                 predefined_out[key] = declared
         elif key in property_ids:
-            properties_out[key] = {"value": value, "unit": _descriptor_unit(type_id, key)}
+            properties_out[key] = {
+                "value": value,
+                "unit": _descriptor_unit(type_id, key, device_documents),
+            }
         else:
             properties_out[key] = {"value": value, "unit": "1"}
 

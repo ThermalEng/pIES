@@ -274,6 +274,83 @@ def canonical_bytes(document: DeviceModelDocument) -> bytes:
     return json.dumps(to_dict(document), **_CANONICAL_KWARGS).encode("utf-8")
 
 
+def _valid_range_of(raw: object) -> tuple[float | None, float | None] | None:
+    """``{"minimum", "maximum"}`` → 值域元组；缺席返回 None。"""
+    if not isinstance(raw, Mapping):
+        return None
+    return (raw.get("minimum"), raw.get("maximum"))
+
+
+def from_dict(raw: Mapping[str, Any]) -> DeviceModelDocument:
+    """规范 ``to_dict`` 形态 → 深度不可变文档（纯结构还原，不重校验）。
+
+    供已通过入口校验并保存的模型对象在消费链读取时还原为领域文档；
+    不再重复 schema/方程/值域校验（入口唯一校验，宪法 §2.6）。
+    """
+    device_raw = raw.get("device")
+    device = (
+        DeviceInfo(id=str(device_raw["id"]), names=_freeze(device_raw.get("names") or {}))
+        if isinstance(device_raw, Mapping)
+        else None
+    )
+    properties = MappingProxyType(
+        {
+            str(pid): PropertySpec(
+                id=str(pid),
+                value=item["value"],
+                unit=str(item["unit"]),
+                valid_range=_valid_range_of(item.get("valid_range")),
+            )
+            for pid, item in (raw.get("properties") or {}).items()
+        }
+    )
+    interfaces: dict[str, InterfaceSpec] = {}
+    for iid, item in (raw.get("interfaces") or {}).items():
+        source_raw = item.get("source")
+        source = (
+            SourceSpec(
+                mode=str(source_raw["mode"]),
+                value=source_raw.get("value"),
+                data_ref=source_raw.get("data_ref"),
+            )
+            if isinstance(source_raw, Mapping)
+            else None
+        )
+        interfaces[str(iid)] = InterfaceSpec(
+            id=str(iid),
+            type=str(item["type"]),
+            carrier=str(item["carrier"]),
+            unit=str(item["unit"]),
+            valid_range=_valid_range_of(item.get("valid_range")) or (None, None),
+            source=source,
+        )
+    equations_raw = raw.get("equations") or {}
+    variables = MappingProxyType(
+        {
+            str(vid): EquationVariable(
+                id=str(vid),
+                unit=str(item["unit"]),
+                valid_range=_valid_range_of(item.get("valid_range")),
+                initial_property_ref=(item.get("initial") or {}).get("property_ref"),
+            )
+            for vid, item in (equations_raw.get("variables") or {}).items()
+        }
+    )
+    relations = tuple(
+        EquationRelation(id=str(item["id"]), expression=str(item["expression"]))
+        for item in (equations_raw.get("relations") or [])
+    )
+    inputs = _freeze(raw["inputs"]) if raw.get("inputs") is not None else None
+    return DeviceModelDocument(
+        schema_version=str(raw.get("schema_version", SCHEMA_VERSION)),
+        device=device,
+        properties=properties,
+        interfaces=MappingProxyType(interfaces),
+        equations=Equations(variables=variables, relations=relations),
+        inputs=inputs,
+    )
+
+
 def canonical_receipt(document: DeviceModelDocument) -> dict[str, Any]:
     """校验回执：schema、规范化器版本与结构统计。文本文件只校验字头。"""
     return {
