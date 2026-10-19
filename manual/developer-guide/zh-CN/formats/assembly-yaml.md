@@ -296,7 +296,7 @@ tariff_bindings:
 
 ## 计算包生成边界
 
-装配 YAML 不包含 `calculation`。规范 `ValidatedAssemblyArtifact` 与独立计算配置一起进入计算包生成用例。计算配置固定 mode、预测目标所用算法与参数、计算精度、generator、solver、时间限制、选项、随机种子和输出选择，并在生成 Solver Bundle 前完成能力兼容校验。
+装配 YAML 不包含 `calculation`。规范 `ValidatedAssemblyArtifact` 与独立计算配置一起进入计算包生成用例。计算配置固定 mode、预测目标所用算法与参数、计算精度、generator、solver、耦合预测收敛条件、时间限制、选项、随机种子和输出选择，并在生成 Solver Bundle 前完成能力兼容校验。
 
 更换 generator、solver、精度或求解选项只会形成新的计算配置和 Solver Bundle，不改变装配文本。
 

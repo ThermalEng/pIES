@@ -90,8 +90,9 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 ```text
 提交命令 → application 授权与完整校验 → assembly
         → 固化 CalcSnapshot → 创建 Task → Worker 领取 Attempt
-        → 物化全期序列（含求解前预测）
+        → 物化全期序列（独立预测或耦合预测初值）
         → 生成完整技术／财务模型 → 求解 → result adapter
+        → [有耦合预测：结果反馈 → 更新序列 → 重建求解 → 判定收敛]
         → finance/analysis → 提交 Evidence → Result View
 ```
 

@@ -47,7 +47,7 @@ pIES 把信息按生命周期分为三类：
 
 财务参数以三件套表达：地区 `FinanceProfile`（已注册、可复用的地区财务基准：币种/基准年/金额口径、按 `finance_type` 的时间口径成本分量、能源购售价格）、项目 `FinanceOverrides`（引用 Profile 稳定 ID，只对既有成本/价格做原子稀疏覆盖）与确定性合并器生成的不可变 `EffectiveFinanceConfig`。三件套不保存目标函数、规划变量/约束、计算选项或仅在某一阶段使用的数据，在项目包内固定为 `.yaml`。规划生成与结果财务计算必须引用同一 `EffectiveFinanceConfig`。
 
-计算配置只描述把规范装配产物转换为计算包的方法：mode、预测目标所用算法与参数、generator、solver、计算精度、时间限制、选项、随机种子和输出选择。计算配置不进入 assembly，在计算包生成时与 `ValidatedAssemblyArtifact` 一起固定。三类配置保存均形成修订，历史任务按当时明确 revision 解释。
+计算配置只描述把规范装配产物转换为计算包的方法：mode、预测目标所用算法与参数、generator、solver、计算精度、耦合预测收敛条件、时间限制、选项、随机种子和输出选择。计算配置不进入 assembly，在计算包生成时与 `ValidatedAssemblyArtifact` 一起固定。三类配置保存均形成修订，历史任务按当时明确 revision 解释。
 
 存量设备的历史投资按沉没成本处理，不重复进入新增投资；新增设备投资必须与候选容量变量绑定。目标函数只定义在规划配置中，可引用 `EffectiveFinanceConfig` 的参数；财务参数本身不表达优化意图。
 
@@ -79,11 +79,13 @@ pIES 把信息按生命周期分为三类：
            Solver Bundle（技术／财务模型）
                           ↓
                 ExecutionReceipt → Result
+                          ↓
+          [有耦合预测：反馈更新序列并重建求解]
                          ↓
                  Evidence / Assessment / Export
 ```
 
-计算快照固定规范装配文本与校验回执、输入资源引用、schema 版本、逐装配实例设备数学贡献（提交闸门同一次设备解析冻结，`{instance_id: contribution}`；设备发布 revision 归属 1.1.0 模型库，本阶段未实现）、规划/财务/计算配置 revision、预测目标与算法参数、generator/solver/executor/result adapter 版本、单位契约、随机种子与选项。任务执行期间不得重新读取不断变化的项目草稿，也不得读取当前设备目录替代已冻结贡献。
+计算快照固定规范装配文本与校验回执、输入资源引用、schema 版本、逐装配实例设备数学贡献（提交闸门同一次设备解析冻结，`{instance_id: contribution}`；设备发布 revision 归属 1.1.0 模型库，本阶段未实现）、规划/财务/计算配置 revision、预测目标、算法参数及计算依赖、generator/solver/executor/result adapter 版本、单位契约、随机种子、选项及适用的收敛条件。任务执行期间不得重新读取不断变化的项目草稿，也不得读取当前设备目录替代已冻结贡献。
 
 任务的技术状态与业务结局正交：任务可以正常完成，但业务上没有推荐方案或证据不足。重试创建新的执行尝试，但沿用相同逻辑输入。
 
