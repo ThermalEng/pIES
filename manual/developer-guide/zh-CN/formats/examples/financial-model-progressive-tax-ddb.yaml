@@ -1,0 +1,137 @@
+schema: ies.financial-model
+schema_version: "1.0.0"
+model:
+  id: ies.built-in.progressive_tax_ddb
+  revision: 1
+  names:
+    zh-CN: 累进所得税双倍余额递减折旧模型
+    en: Progressive income tax with double-declining balance depreciation
+  description: 适用于项目投资口径的税后评价模型，采用累进所得税、双倍余额递减折旧与亏损结转
+  investor_perspective: project_equity
+  required_capabilities:
+    - affine
+    - piecewise_linear
+parameters:
+  tax_bracket1_rate:
+    type: ratio
+    display_name: 第一档税率
+    unit: "1"
+    range: {min: "0", max: "1"}
+  tax_bracket1_limit:
+    type: money
+    display_name: 第一档上限
+    unit: CNY
+    range: {min: "0"}
+  tax_bracket2_rate:
+    type: ratio
+    display_name: 第二档税率
+    unit: "1"
+    range: {min: "0", max: "1"}
+  ddb_rate:
+    type: ratio
+    display_name: 双倍余额递减率
+    unit: "1"
+    range: {min: "0", max: "1"}
+  salvage_value:
+    type: money
+    display_name: 残值
+    unit: CNY
+    range: {min: "0"}
+  depreciation_years:
+    type: integer
+    display_name: 折旧年限
+    unit: "1"
+    range: {min: 1, max: 50}
+state:
+  - id: book_value
+    unit: CNY
+    initial: {input: initial_cost}
+    description: 资产账面净值
+  - id: loss_carryforward_balance
+    unit: CNY
+    initial: {value: "0", unit: CNY}
+    description: 未抵扣亏损余额（本模型显式结转；不表述任何法定到期规则）
+inputs:
+  - id: operating_revenue
+    source: materialized_component
+    component: period_energy_sale
+    unit: CNY
+    sign: negative
+  - id: operating_cost
+    source: materialized_component
+    component: period_variable_om
+    unit: CNY
+    sign: positive
+  - id: initial_cost
+    source: construction_total
+    component: construction_total
+    unit: CNY
+    sign: positive
+  - id: construction_payment
+    source: evaluation_confirmation
+    component: construction_payment
+    unit: CNY
+    sign: positive
+relations:
+  - id: depreciation
+    expression: min(ddb_rate * book_value[year-1], book_value[year-1] - salvage_value)
+    unit: CNY
+    kind: intermediate
+    active: {from_op_year: 1, to_op_year: depreciation_years}
+  - id: book_value
+    expression: book_value[year-1] - depreciation[year]
+    unit: CNY
+    kind: intermediate
+  - id: taxable_income_before_loss
+    expression: operating_revenue[year] - operating_cost[year] - depreciation[year]
+    unit: CNY
+    kind: intermediate
+  - id: loss_carryforward_used
+    expression: min(loss_carryforward_balance[year-1], max(0, taxable_income_before_loss[year]))
+    unit: CNY
+    kind: intermediate
+  - id: loss_carryforward_new
+    expression: max(0, -taxable_income_before_loss[year])
+    unit: CNY
+    kind: intermediate
+  - id: loss_carryforward_balance
+    expression: loss_carryforward_balance[year-1] + loss_carryforward_new[year] - loss_carryforward_used[year]
+    unit: CNY
+    kind: intermediate
+  - id: taxable_income
+    expression: taxable_income_before_loss[year] - loss_carryforward_used[year]
+    unit: CNY
+    kind: intermediate
+  - id: income_tax
+    expression: tax_bracket1_rate * min(max(taxable_income[year], 0), tax_bracket1_limit) + tax_bracket2_rate * max(0, taxable_income[year] - tax_bracket1_limit)
+    unit: CNY
+    kind: intermediate
+  - id: before_tax_cashflow
+    expression: operating_revenue[year] - operating_cost[year] - construction_payment[year]
+    unit: CNY
+    kind: output
+  - id: after_tax_cashflow
+    expression: operating_revenue[year] - operating_cost[year] - income_tax[year] - construction_payment[year]
+    unit: CNY
+    kind: output
+outputs:
+  - id: before_tax_cashflow
+    kind: series
+    unit: CNY
+    cashflow: {tax_basis: before_tax}
+    description: 税前现金流（逐年序列）
+  - id: after_tax_cashflow
+    kind: series
+    unit: CNY
+    cashflow: {tax_basis: after_tax}
+    description: 税后现金流（逐年序列）
+  - id: before_tax_npv
+    kind: npv
+    source: before_tax_cashflow
+    unit: CNY
+    description: 税前净现值（按冻结评价期与折现率贴现）
+  - id: after_tax_npv
+    kind: npv
+    source: after_tax_cashflow
+    unit: CNY
+    description: 税后净现值（按冻结评价期与折现率贴现）

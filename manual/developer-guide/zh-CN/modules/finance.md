@@ -1,16 +1,17 @@
 # 财务计算
 
 > 文档状态：生效蓝图；代码边界：`backend/iesplan/finance/`。
-> 财务三件套 `FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig` 的文件契约（schema、字段表、完整示例、规范化与校验、失败语义）以[财务 YAML 契约](../formats/finance-yaml.md)为唯一字段级权威正文，本页只描述模块职责、分割线与其消费方式。
+> 财务三件套 `FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig` 的文件契约（schema、字段表、完整示例、规范化与校验、失败语义）以[财务 YAML 契约](../formats/finance-yaml.md)为唯一字段级权威正文；财务模型 `ies.financial-model` 的文件契约（schema、字段表、时间轴、关系式语法、状态结转、输出与能力声明、项目包携带）以[财务模型 YAML 契约](../formats/financial-model-yaml.md)为唯一字段级权威正文。本页只描述模块职责、分割线与其消费方式。
 
 ## 作用
 
 `finance` 管理整体模型共用财务参数，并把建设投入、运行结果和这些经济假设转换成可复核的现金流与财务指标。它必须让每个参数、指标的口径、时间点和状态可复核，避免把一个看似正常的数字当作完整财务结论。
 
-财务模块分为两个范围，本页明确分段：
+财务模块分为三个范围，本页明确分段：
 
 1. **财务文件契约**：`FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig` 的领域结构、YAML 解析、安全规范化与完整校验，以及把合并后的成本/能源分量交给装配、规划与计算消费的边界。字段级定义全部在[财务 YAML 契约](../formats/finance-yaml.md)。
-2. **现金流与评价**：以明确核算主体，将运行结果及建设、运维、税务和折旧规则组织为税前、税后项目现金流及 NPV、IRR、回收期等指标，并封存结果。财务文件的基础计价结构不等于完整税后输入；税务与折旧能力须经公开契约版本化定义，不从旧字段或默认值推测。资本金评价和附加指标仍是独立扩展，不因税后项目评价自动纳入。
+2. **财务模型契约**：`ies.financial-model@1.0.0` 定义收入、费用、计税、折旧和现金流的具体计算关系；程序提供通用执行框架；项目选择模型并显式提供参数。模型身份、关系式语法、年度时间轴、状态结转、输出与规划目标引用、生成器能力声明及项目包携带的字段级定义见[财务模型 YAML 契约](../formats/financial-model-yaml.md)。
+3. **现金流与评价**：以明确核算主体，将运行结果及建设、运维、税务和折旧规则组织为税前、税后项目现金流及 NPV、IRR、回收期等指标，并封存结果。财务文件的基础计价结构不等于完整税后输入；税务与折旧能力须经公开契约版本化定义，不从旧字段或默认值推测。资本金评价和附加指标仍是独立扩展，不因税后项目评价自动纳入。
 
 ## 边界
 
@@ -26,11 +27,24 @@
 
 模型表达方式应从当前核心需求出发，通过版本化公开契约定义，不预建通用财务编程语言、模型商城或独立插件平台；声明文件不能嵌入任意 Python、shell 或实现路径。现有财务三件套尚不等于上述完整模型契约，不能在现有 schema 下私加字段或声称自定义方法已交付。
 
+### 财务模型与执行框架的边界
+
+财务模型（`ies.financial-model`）与执行框架的职责划分：
+
+- **模型**：通过版本化公开契约定义核算主体口径、参数槽位、年度时间轴关系式、状态结转和输出。模型引用已物化的财务分量和规划分量，不内联运行数值。
+- **框架**：提供关系式解析、单位量纲校验、年度归集、通用指标（NPV/IRR 等）计算和与生成器的衔接。框架不按客户、案例或设备名称分支。
+- **项目**：选择模型并显式提供参数值；参数值随项目财务配置固定，缺失即提交检查阻断。
+
+模型表达方式从当前核心需求出发，通过版本化公开契约定义，不预建通用财务编程语言、模型商城或独立插件平台；声明文件不能嵌入任意 Python、shell 或实现路径。财务模型与设备技术模型完全分离：不进入设备选择器，不随设备 revision 固定，不携带价格或成本参数槽位以外的财务假设。
+
+模型规则与参数随任务固定，历史结果不读取最新模型重算。模型既为求解提供影响方案选择的关系，也为评价提供同源明细；不在生成器与评价器分别维护两套业务公式。优化目标及规划变量仍由规划配置选择，财务模型提供可引用的财务关系和输出，不私自选择目标。
+
 ### 模块职责
 
 模块负责：
 
 - 财务三件套的领域结构、解析、规范化与校验，以及确定性合并器的语义（字段细节见[财务 YAML 契约](../formats/finance-yaml.md)）；
+- 财务模型的领域结构、解析、规范化与校验：模型身份、关系式语法（复用 `core/equation_grammar` 白名单词法，扩展年度时间索引 `[year]`/`[year-1]` 与受控函数 `max`/`min`）、状态变量结转、输出声明与生成器能力核对（字段细节见[财务模型 YAML 契约](../formats/financial-model-yaml.md)）；
 - 按时间口径组织成本/能源分量：`upfront_capex`（建设期一次性，仅 `new`）、`annual_fixed_om`（按年度，currency/年）、`period_variable_om` / `period_energy_purchase` / `period_energy_sale`（按运行/计费窗口合计，currency；两个能源分量为**有符号记账贡献**、由 `tariff_bindings` 的每个计量绑定独立产生，符号约定见[财务 YAML 契约](../formats/finance-yaml.md)「计价规则」）；不把分量静默相加成默认总成本，按年分量与窗口合计相加前必须以显式时间跨度换算，组合目标由规划配置显式选择；
 - 长期蓝图：从规范运行汇总生成不可变 `FinancialResult`，并对每个指标独立计算与分类失败状态。
 - 项目投资口径的税务与折旧计算及税前/税后现金流；技术模型与通用执行器不拥有税务规则。
@@ -45,13 +59,15 @@
 
 | 输入 | 关键要求 |
 |---|---|
-| `FinanceProfile` / `FinanceOverrides` | 见[财务 YAML 契约](../formats/finance-yaml.md)：Profile 是已注册、可复用的地区财务基准，不得以内置形态充当全局默认；Overrides 引用 `profile {id}`，对既有成本分量叶子做 `{value, unit}` 原子替换、对能源价格条目（`price_id`）做定价定义整项替换（`carrier`/`direction` 由 Profile 继承，禁止新增/删除 `price_id`） |
-| `EffectiveFinanceConfig` | 唯一由确定性合并器从 Profile（+ Overrides）生成并完整校验的不可变快照；可导出/导入/进入快照，项目包导入在外部上传边界连同精确来源完成合并验证，确认阶段不重复执行；装配、规划与计算只消费同一引用（见[装配 YAML](../formats/assembly-yaml.md)） |
+| `FinanceProfile` / `FinanceOverrides` | 见[财务 YAML 契约](../formats/finance-yaml.md)：Profile 是已注册、可复用的地区财务基准，不得以内置形态充当全局默认；Overrides 引用 `profile {id}`，对既有成本分量叶子做 `{value, unit}` 原子替换、对能源价格条目（`price_id`）做定价定义整项替换（`carrier`/`direction` 由 Profile 继承，禁止新增/删除 `price_id`）；目标版本 `3.0.0` 增加 `model_ref`（模型 ID + revision）、`parameters_values`（参数值）与 `input_bindings`（逐输入绑定，键恰为所选模型的物化分量输入；多项显式求和、不隐式聚合） |
+| `EffectiveFinanceConfig` | 唯一由确定性合并器从 Profile、Overrides 与所选模型 revision 正文生成并完整校验的不可变快照，携带 `model_ref {id, revision}`、`model_rules`（正文规范化冻结副本）、`parameters_values` 与 `input_bindings`；可导出/导入/进入快照，项目包导入在外部上传边界连同精确来源完成合并验证，确认阶段不重复执行；装配、规划与计算只消费同一引用（见[装配 YAML](../formats/assembly-yaml.md)） |
 | 建设与替换计划 | 金额币种、发生期、`price_basis`（含税/不含税口径标签）和 `base_year` 明确 |
 | 逐时或年度运行汇总 | 能量、成本、收益的单位和时间范围明确 |
 | 规划与财务基准 | 与当前方案使用同一 `EffectiveFinanceConfig` |
 
 金额与需要精确往返的费率使用十进制定点语义（`Decimal` 字符串，`{value, unit}` 原子，禁止 `null` 与部分金额）；物理量来自规范计算输出。模块不能自行读取“最新地区价格”补齐缺失输入，也不运行期继承 Profile 或覆盖。
+
+生成（求解）阶段的五项直接输入为：`ValidatedAssemblyArtifact`、设备模型集合、同次物化事实（`MaterializedSet`，同时携带冻结评价确认 `evaluation`）、`finance`（本页的 `EffectiveFinanceConfig`：已解析规则 `model_rules` + `parameters_values` + `input_bindings`）与封闭的 `CalculationConfig`。生成器只消费这五项，不读取模型库、目录或对象存储，不新增第六输入或全局 registry。评价确认（`construction_period`/`operation_years`/`discount_rate`/`construction_payments`/`maintenance_expenses`）持久化在任务快照 `evaluation`，由 application 编排原样放入第三项输入的 `MaterializedSet.evaluation`；生成器只读该块，不读快照或数据库，也不重复校验。生成器能力核对在公开提交边界进行：按 `model_rules` 的实际语法推导需求集合，与 `GeneratorDescriptor.capabilities` 对比，不满足即明确拒绝；`CalculationConfig` 保持封闭，不承载模型需求或能力自报。
 
 ### 成本语义与增量规则
 
@@ -87,20 +103,35 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 - 税前/税后逐年明细分别可解释实际收付款、税额及资产处理与现金流的关系；指标、页面和导出只消费对应的封存结果，不读取最新税务配置重算历史任务。本文现有封存块不因此被视为已具有税后字段；契约及全部消费者须一同演进后才能宣称支持。
 - 税后规则影响目标时必须参与优化；若所选生成器不能表达该目标，应在公开能力边界明确拒绝，不静默退回税前，也不靠旧的单年收益复制或简化税率函数伪造全周期税后结果。
 
-### 项目投资口径评价规则
+### 现金流与指标口径
 
-项目投资口径评价以覆盖建设和运营的完整现金流 `CF[0..evaluation_years]` 与用户显式确认的评价参数为输入；`t=0` 为开工时点，后续时点按整数年排列，序列长度为 `evaluation_years + 1`。不由现金流或运行序列长度反推评价年限，不把单年结果复制为多年。逐年明细行含原始净流、贴现流（`CF[t]/(1+r)^t`）与两种累计，NPV、IRR、静态/动态回收期与明细同源复算。动态回收期对贴现流沿用静态回收期同一规则（累计首次非负、年内线性插值），未回收为无值并附明确状态，`r=0` 时与静态回收期一致。IRR 状态采用本页公开语义（`normal/no_solution/multiple/degenerate/out_of_domain/numeric_failure`）。
+项目投资口径不内置固定公式：收入、费用、维护／换新、税款、折旧与现金流的关系由所选财务模型声明（模型以 `kind: output` 关系式显式表达，见[财务模型 YAML 契约](../formats/financial-model-yaml.md)），框架不对任何任务另算一份“基础现金流”或另一套指标。评价轴固定为 `t=0` 开工、`t=K` 投产、`t=K+N` 期末，覆盖 `0..evaluation_years`；评价参数取冻结评价确认，不由现金流或运行序列长度反推，不把单年结果复制为多年。
+
+模型在 `outputs` 中显式声明：
+
+- 现金流序列：`kind: series` + `cashflow: {tax_basis: before_tax|after_tax}`（机器可识别的税前/税后口径）；
+- 指标：`kind: npv|irr|payback_static|payback_dynamic` + `source` 指向一条已声明现金流；模型未声明的指标不计算、不展示、不补默认。
+
+框架只提供通用指标算法，按声明的 `source` 计算：NPV = `Σ CF[t]/(1+r)^t`，`r` 取冻结 `discount_rate`（无默认，零合法）；IRR 为 `Σ CF[t]/(1+x)^t = 0` 的根，状态采用本页公开语义（`normal/no_solution/multiple/degenerate/out_of_domain/numeric_failure`）；静态回收期对 `CF` 累计首次非负、年内线性插值；动态回收期对贴现流沿用同一规则，未回收为无值并附 `not_recovered`，`r=0` 时与静态回收期一致。指标、页面与导出读取同一封存结果，不重算，也不与模型输出并行维护第二套业务公式。
+
+当规划需要现金流形成的标量目标时，由财务模型声明 `kind: npv` 输出并在规划配置中显式引用；IRR 与回收期不是标量目标，序列输出不能直接作规划目标，系统不提供默认目标。
 
 ### 封存评价块 `financial_evaluation`
 
 Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一证据单元封存（`status` 为 `"evaluated"`）；未求解或缺解输出不写财务块。读取与导出只消费该封存事实，不重算、不读最新配置。金额均为十进制字符串（不舍入），单位独立字段：
 
+- 块版本：`schema` 固定 `ies.financial-evaluation`，`schema_version` 当前 `"1.0.0"`；封存块携带自己的版本声明，与 `CalcSnapshot` 版本相互独立（见下）；
 - `evaluation_years`／`construction_period`／`operation_years`：整数（K/N 回显冻结输入，供时轴映射展示）；
 - `currency`、`price_basis`、`base_year`、`profile_id`、`discount_rate`：冻结值原样；
 - `construction_total` + `construction_total_unit`、`annual_fixed_om`：十进制字符串；
 - `payments_applied`：`[{t, ratio, amount}]` 数组；`t` 为整数财务时点，`ratio`／`amount` 为十进制字符串；同一 `t` 可多笔，不设时点唯一；
-- `annual_operation`：`[{financial_year, energy_net, variable_om, fixed_om, maintenance, net}]` 数组；金额十进制字符串，`maintenance` 为该年逐项维护合计；
-- `evaluation`：逐年明细与指标：`rows[{year, net, discounted, cumulative, cumulative_discounted}]`（金额字符串）；`npv`（字符串）+ `npv_unit`；`irr`（数或 null）+ `irr_status`（本页 IRR 状态枚举）；`static/dynamic_payback`（年数或 null）+ `_unit`（有值为 `"year"`）+ `_status`（`recovered`／`not_recovered`）。
+- `model`：`{id, revision}`，本任务冻结的财务模型身份；历史任务按自身 revision 读取自身封存事实，不回填最新版本；
+- `model_yearly`：`[{financial_year, values}]` 数组；`values` 为 `{<输入/关系式/状态/序列输出 ID>: 十进制字符串}`，含模型解析后的逐年输入值、中间量、状态与序列输出的同源明细；单位取同任务冻结 `EffectiveFinanceConfig.model_rules` 中对应声明；
+- `model_metrics`：`{<指标输出 ID>: {"value": 十进制字符串或 null, "status": 状态}}`；指标类型、`source`、`tax_basis` 与单位按同任务冻结 `model_rules.outputs` 的声明解释。`npv` 恒为 `normal`；`irr` 用本页 IRR 状态枚举，仅 `normal` 有值；`payback_static`／`payback_dynamic` 为 `recovered`／`not_recovered`，`not_recovered` 时值为 `null`。
+
+`model`／`model_yearly`／`model_metrics` 与块版本属**封存评价块自身的契约** `ies.financial-evaluation@1.0.0`（字段与口径以本页为唯一正文），按[公共契约](../contracts.md)「兼容与演进」的版本策略演进：块内显式携带自己的 `schema`/`schema_version`，变化按该版本空间处理；不继承也不改变 `CalcSnapshot` 的版本号——`CalcSnapshot 5.0.0` 是任务**输入快照** schema（评价确认与冻结输入，含模型 `{id, revision}`），封存财务结果不是输入快照的一部分，也不与快照版本机械同步。
+
+口径映射与单位：展示与导出按封存块 `model_metrics` 的键及同任务冻结 `model_rules.outputs` 的 `cashflow.tax_basis`／`source`／`unit` 识别每条指标的口径，并对指标标注模型 `{id, revision}`；不得按 ID 命名（如是否叫 `after_tax_npv`）或 `description` 猜测口径。`model_yearly`／`model_metrics` 的数值单位逐 ID 取 `model_rules` 的声明（金额=声明币种，比例=无量纲，回收期=`year`）。封存块不再另存框架自有的基础现金流、贴现行或平行指标。没有模型输出的任务不写 `model*` 字段。
 
 ### 评价确认与快照冻结
 
@@ -109,9 +140,11 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 确认字段（均无业务默认值）：
 - 时间关系：`construction_period` 为非负整数年，`operation_years` 为正整数运营年限，`evaluation_years = construction_period + operation_years`，包含建设期，不能再作为运行序列的年限。明确确认这些时间参数及折现率，不以缺省建设期为零代替用户确认；
 - `discount_rate` 为无量纲比例（API 规范值 `0..1`，无默认，`r=0` 合法）；确认同时包含明确的建设付款比例计划和维护／换新支出清单，公开字段见[公共契约](../contracts.md)；`confirmed_by`/`confirmed_at` 由服务端记录（追加审计不可覆盖）；
+- 财务模型选择与参数：模型 `{id, revision}`、全部参数值与输入绑定随 `EffectiveFinanceConfig`（`3.0.0`）在提交时冻结；无默认模型、不隐式选择内置模板、不在运行期回填最新 revision；
 - 运行起始年归项目计算基线（创建时固定），与 `base_year`（金额口径基年）不得互相推断；
 - 自由字典式 `baseline-confirm` 的审计记录不能充当已确认的计算参数：提交时须有关联到本次计算的显式确认记录，无确认即阻断提交；
-- 以上确认随提交冻结进 `CalcSnapshot`（破坏性修改提升快照主版本）；运行年度边界 step 下标只由基线运行起始年、分辨率与 `operation_years` 推导并随快照冻结。参数关系与输入范围在公开提交边界校验，内部快照读取与交接不重复校核。
+- 以上确认随提交冻结进 `CalcSnapshot 5.0.0.evaluation`（破坏性修改提升快照主版本）；运行年度边界 step 下标只由基线运行起始年、分辨率与 `operation_years` 推导并随快照冻结。参数关系与输入范围在公开提交边界校验，内部快照读取与交接不重复校核。
+- 字段路径（唯一）：任务提交顶层 `evaluation` → 快照 `CalcSnapshot.evaluation`（持久化归属，任务级，不进入 `FinanceProfile`/`Overrides`/`Effective`，也不进入封闭 `CalculationConfig`）→ application 编排 `load_compute_inputs` 原样取业务字段（`evaluation_years`/`construction_period`/`operation_years`/`discount_rate`/`construction_payments`/`maintenance_expenses`）→ 第三项直接输入 `MaterializedSet.evaluation`（生成阶段消费载体）→ `GeneratorProvider.generate(...)` 读该块完成时间轴、NPV/回收期贴现与 `construction_payment`/`maintenance_expenses` 输入取值。第三项只是同次任务的消费载体，不是第二份财务配置，也不构成第六输入；确认人/时间等审计字段只留快照，不进生成器。
 
 ### 项目建设安排与全周期现金流
 
@@ -120,8 +153,7 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 令 `K = construction_period`、`N = operation_years`。项目在 `t=0` 开工，`t=K` 建设期末投产，第 `j` 个完整运营年末位于 `t=K+j`（`j=1..N`）；评价期为 `K+N` 年。运行仿真只覆盖投产后的连续 `N` 年，不生成建设阶段的虚假运行 step。基线 `start_year` 是运行起始公历年，而不是开工年；运行年界仍按实际公历推导。
 
 - 付款计划是用户明确给出的比例计划，总和精确为 `1.0`；求解前不要求确定选建方案的总金额。求解得到建设总额 `C` 后，按各时点比例计入 `−ratio_t × C`，可在建设期末 `t=K` 付款；不一律强放 `t=0`，不默认均摊；
-- 第 `j` 年运行净额来自同一次全期解的对应运营年切片，计入 `CF[K+j]`；无运行的建设阶段不能复制运行期收益，投产时点 `t=K` 没有前序完整运营年收益；
-- 现有基础税前口径的各年运行净额＝能源净收益 − 可变 O&M − 固定 O&M − 当年未包含在前述 O&M 中的维护／换新支出；不是所有财务模型或税后口径的完整公式。税后模型须显式表达相应税务关系。能源及可变 O&M 按该年真实运行结果归集，固定 O&M 按本课题选定容量及明确费率计算；不能以平均年费替代逐年实际支出。
+- 第 `j` 年运行净额来自同一次全期解的对应运营年切片，计入 `CF[K+j]`；无运行的建设阶段不能复制运行期收益，投产时点 `t=K` 没有前序完整运营年收益；运行净额、维护／换新、税款与折旧如何组成现金流由所选模型的关系式显式声明，框架不以固定基础口径另算一份运行净额，也不在模型之外追加扣减。能源及可变 O&M 按该年真实运行结果归集，固定 O&M 按本课题选定容量及明确费率计算，维护／换新按评价确认的发生年归集；不能以平均年费替代逐年实际支出。
 
 手算时轴样例：建设 `1` 年、运营 `2` 年、评价 `3` 年，付款计划为 `[{t: 0, ratio: 0.6}, {t: 1, ratio: 0.4}]`。开工 `t=0` 付 `0.6C`，投产 `t=1` 付 `0.4C` 且无前序运行收益，`t=2`、`t=3` 分别计入第 1、2 个完整运营年的净收益 `R1`、`R2`。因此 `CF = [−0.6C, −0.4C, R1, R2]`，长度 `4 = evaluation_years + 1`，运行序列仅覆盖两年。
 
@@ -129,9 +161,9 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 
 ### 运行期换新与指标口径
 
-维持既有运行能力的维护、部件更换与电池换新支出，按汇报口径归入运行期维护费用，在实际发生年份扣减年末运行净额，不回填初始建设投资；已包含在 O&M 分量中的支出不得重复扣减。新增或扩建设备容量属于另一个建设计算课题，不能仅因发生在运行期就归为本课题维护。维护费用的报告分类不等于将一次性换新支出写入 `annual_fixed_om` 年费率；用户在评价确认中逐项显式给出发生年、金额与币种（见公共契约），不能猜测换新周期或费用，明确无额外支出时给空清单。
+维持既有运行能力的维护、部件更换与电池换新支出，按汇报口径归入运行期维护费用，在实际发生年份计入模型输入 `maintenance_expenses`（`evaluation_confirmation` 来源），由模型关系式显式决定其进入税额与现金流的位置；框架不在模型之外另行扣减，也不回填初始建设投资；已包含在 O&M 分量中的支出不得重复扣减。所选模型未声明该输入时，非空清单在提交边界明确拒绝。新增或扩建设备容量属于另一个建设计算课题，不能仅因发生在运行期就归为本课题维护。维护费用的报告分类不等于将一次性换新支出写入 `annual_fixed_om` 年费率；用户在评价确认中逐项显式给出发生年、金额与币种（见公共契约），不能猜测换新周期或费用，明确无额外支出时给空清单。
 
-以初始建设投资为分母的简单回报率，分母不因运行期换新而扩大，收益仍须扣除维护与换新支出，并明确评价期间及计算定义；NPV、IRR、静态／动态回收期必须使用包含全部建设投入和运行期维护／换新支出的逐年现金流，不能只计算初始投入与毛收益。
+以初始建设投资为分母的简单回报率，分母不因运行期换新而扩大，收益仍须扣除维护与换新支出，并明确评价期间及计算定义；模型声明的项目投资口径现金流必须包含全部建设投入和运行期维护／换新支出，NPV、IRR、静态／动态回收期只按模型声明的对应现金流计算，不能只计算初始投入与毛收益。
 
 ## 蓝图设计思路
 
@@ -173,7 +205,9 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 - 自定义财务方法必须由公开模型契约表达并与参数一同固定，不以新增主体/客户专属程序分支代替；通用指标计算不要求每个模型重新实现数学算法；
 - 财务模型实际消费的每项参数必须在求解前有明确权威来源与值，缺失即提交检查阻断；绝不默认、外推或事后反推（建设期及支付安排为明确项目输入，建设选择与容量仍为规划决策，不为参数确定而预先固定选建方案与容量）；
 - 财务配置不得包含目标函数、规划约束、solver 选项或阶段性数据；
-- 财务三件套声明式配置使用 YAML，经安全子集解析与规范化，不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容；
+- 财务模型文件不得包含可执行代码、模块路径或环境变量；模型关系式只允许白名单标识符、算术运算符、`max`/`min` 受控函数与 `[year]`/`[year-1]` 时间索引；
+- 财务模型必须声明 `required_capabilities`，生成器能力声明之外的需求在公开提交边界明确拒绝，不静默退回税前；
+- 财务三件套与财务模型声明式配置使用 YAML，经安全子集解析与规范化，不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容；
 - 财务成本模型不得写入设备技术文件，不得依赖 `backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 第二权威源；
 - `device.id`（技术模型）、`finance_type`（财务类别）、`instance_id`（装配实例）与 `binding_id`（计量绑定）严格分离：装配实例通过显式 `finance_binding`（`costed`/`none`）声明设备成本，禁止猜测；能源计费走装配 `tariff_bindings`（`binding_id → {price, instance, interface, aggregation}`），`type: none` 的纯计量实例可以承担计费；
 - `FinanceProfile` 不以内置形态充当全局默认；内置只作为样例或注册 provider 的输入。
@@ -181,6 +215,7 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 ## 完成标准
 
 - 财务三件套解析、规范化与合并的契约测试以[财务 YAML 契约](../formats/finance-yaml.md)为字段权威；拒绝测试覆盖未知 `finance_type`、越权覆盖、`null`/部分金额、旧 JSON 别名，以及外部导入边界的对象身份不匹配；
+- 财务模型解析、规范化与校验的契约测试以[财务模型 YAML 契约](../formats/financial-model-yaml.md)为字段权威；拒绝测试覆盖未知标识符、未来引用、单位量纲不一致、参数值缺失、状态变量循环引用与生成器能力不匹配；
 - 手算基准、正常现金流及 IRR 各异常状态均有测试（IRR 属长期蓝图，独立验收）；
 - 项目和资本金口径不会混用；
 - 输入不完整时没有默认现金流或伪指标；
@@ -188,4 +223,4 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 - 同口径手算样例与真实项目验收覆盖税前/税后现金流、税额及折旧等资产明细，求解目标、指标、页面与导出一致；需要税后结论的实例不能降级成税前验收或仅比对含税金额。原表错误及已变更假设不要求新实现复现，参考答案必须按已确认输入独立计算；
 - 新指标不要求 finance 读取项目或任务内部状态。
 
-代码阅读从 `FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig`（及其[文件契约](../formats/finance-yaml.md)）开始；合并器语义与分量时间口径在装配与财务契约测试中核对。对应测试以财务模块测试为入口。
+代码阅读从 `FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig`（及其[文件契约](../formats/finance-yaml.md)）和财务模型（及其[文件契约](../formats/financial-model-yaml.md)）开始；合并器语义与分量时间口径在装配与财务契约测试中核对。对应测试以财务模块测试为入口。

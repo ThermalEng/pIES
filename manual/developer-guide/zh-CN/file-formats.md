@@ -1,6 +1,6 @@
 # 文件格式标准
 
-> 文档状态：生效目标契约；设备模型、设备数据与装配目标 schema 为 `2.0.0`，财务三件套（`FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig`）目标 schema 为 `1.0.0`，Solver Bundle 目标 schema 为 `1.0.0`，项目包目标 `format_version` 为 `3.0.0`。本章规定插件开发和离线交换必须共同遵守的文件边界；财务三件套的字段级定义见[财务 YAML 契约](formats/finance-yaml.md)，项目包布局见[项目包](formats/project-package.md)。
+> 文档状态：生效目标契约；设备模型、设备数据与装配目标 schema 为 `2.0.0`，`FinanceProfile` 目标 schema 为 `2.0.0`、`FinanceOverrides` 目标 schema 为 `3.0.0`、`EffectiveFinanceConfig` 目标 schema 为 `3.0.0`，财务模型目标 schema 为 `1.0.0`，Solver Bundle 目标 schema 为 `1.0.0`，项目包目标 `format_version` 为 `4.0.0`。本章规定插件开发和离线交换必须共同遵守的文件边界；财务三件套的字段级定义见[财务 YAML 契约](formats/finance-yaml.md)，财务模型的字段级定义见[财务模型 YAML 契约](formats/financial-model-yaml.md)，项目包布局见[项目包](formats/project-package.md)。
 
 目标不是把内部对象“导出成差不多能读的文件”，而是让开发者只看本章及对应格式页，就能手写、校验和交付一个不依赖当前代码目录的输入包。
 
@@ -14,14 +14,15 @@
 | [设备数据 CSV](formats/device-data-csv.md) | `*.data.csv` | 提供带 step、采样间隔、单位和来源语义的设备序列数据 | 数据导入器、装配校验、计算阶段序列物化 |
 | [价格序列 CSV](formats/price-series-csv.md) | `*.price.csv` | 提供与全期时轴同轴的能源价格序列（`step` 从 0 连续，价格为有限 Decimal，正/零/负均可） | 数据导入器（同上传入口）、任务提交覆盖核对、计算阶段价格物化 |
 | [地区 FinanceProfile YAML](formats/finance-yaml.md) | `*.finance-profile.yaml` / `finance_profile.yaml` | 注册地区财务基准：`region`/`currency`/`base_year`/`price_basis`/`cost_method`、按 `finance_type` 的时间口径成本分量、能源购售价格 | 财务合并器与装配校验 |
-| [项目 FinanceOverrides YAML](formats/finance-yaml.md) | `*.finance-overrides.yaml` / `finance_overrides.yaml` | 稀疏原子覆盖：引用 `FinanceProfile {id}`，只替换既有 `finance_type` 分量与 constant 能源价格的金额 | 财务合并器 |
+| [项目 FinanceOverrides YAML](formats/finance-yaml.md) | `*.finance-overrides.yaml` / `finance_overrides.yaml` | 稀疏原子覆盖：引用 `FinanceProfile {id}`，只替换既有 `finance_type` 分量与 constant 能源价格的金额；目标版本 `3.0.0` 增加 `model_ref` 与 `parameters_values` 覆盖 | 财务合并器 |
 | [有效财务快照](formats/finance-yaml.md) | `*.effective-finance.yaml` / `effective_finance.yaml` | 合并器确定性产物：`profile_id` 与合并后的完整 `finance_types` / `energy_prices` | 装配校验、计算生成与求解 |
+| [财务模型 YAML](formats/financial-model-yaml.md) | `financial_model.yaml` | 声明式财务模型：核算主体口径、参数槽位、年度时间轴关系式、状态结转、输出声明 | 财务计算、生成器能力核对、装配校验 |
 | [装配 YAML](formats/assembly-yaml.md) | `*.assembly.yaml` | 固定项目计算基线、设备实例、规范数据与来源绑定、连接、指向有效财务快照的精确引用、`finance_binding`、`tariff_bindings`、规划配置 | 装配校验器 |
 | [Solver Bundle](formats/solver-bundle.md) | 一个目录或不可变归档 | 固定求解器输入文件、受控命令、预期输出和结果适配器 | 求解运行时 |
 | [计算配置](formats/calculation-config.md) | 计算提交输入（JSON 兼容映射） | 固定 mode、预测算法与参数、generator、solver、精度、收敛、时间限制、选项、种子和输出选择 | 生成器（生成前能力核对） |
 | [项目包](formats/project-package.md) | `*.zip`（`manifest.json` 在根） | 离线交换：当前工作状态、包内历史版本及其精确财务/规划/数据依赖 | 项目包导入器 |
 
-人工 authoring：设备模型 YAML、设备数据 CSV、`FinanceProfile`、`FinanceOverrides` 与装配 YAML 允许人工编写。`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，不能人工 authoring（导入时连同来源 Profile 与 Overrides 重新合并验证）。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
+人工 authoring：设备模型 YAML、设备数据 CSV、`FinanceProfile`、`FinanceOverrides`、财务模型 YAML 与装配 YAML 允许人工编写。`EffectiveFinanceConfig` 只能由合并器生成，可导出、导入和进入快照，不能人工 authoring（导入时连同来源 Profile 与 Overrides 重新合并验证）。Solver Bundle 必须由生成器产生，不作为用户手写的项目输入。
 
 ## 扩展交付契约
 
@@ -32,7 +33,8 @@
 ```text
 地区 FinanceProfile（人工 authoring，注册地区财务基准）
 项目 FinanceOverrides（人工 authoring，精确引用 Profile revision）
-        │ 两者并列
+财务 FinancialModel（人工 authoring，由 Overrides 精确引用 ID + revision）
+        │ 三者并列
         ▼
 merger（确定性合并 + 完整校验）──→ EffectiveFinanceConfig（不可人工 authoring）
                                           │ 只消费该不可变快照
@@ -75,12 +77,13 @@ YAML 采用 YAML 1.2 的安全子集：两个空格缩进，禁止 Tab、自定�
 
 ### 项目包的可移植历史依赖
 
-项目包现行目标格式为 `3.0.0`，以 `format_version` 声明；该目标改变历史依赖的携带与引用语义，不保留旧 `1.x` / `2.x` 解析路径。完整布局见[项目包](formats/project-package.md)；后端导出/导入往返与导入 GUI 均已交付。
+项目包现行目标格式为 `4.0.0`，以 `format_version` 声明；该目标改变历史依赖的携带与引用语义，不保留旧 `1.x` / `2.x` / `3.x` 解析路径。目标 `4.0.0` 增加 `financial_model.yaml` 必需文件与 `version_configs.financial_model` 键；当前实现仍是 `3.0.0`，本次修订只定义目标契约，`4.0.0` 导出/导入与完整模型的 GUI 尚未实现。完整布局见[项目包](formats/project-package.md)。
 
 - 数据集元数据和数据文件按数据版本唯一定位，同一数据集的不同版本不能共用一个元数据条目。
 - 包须携带当前工作状态及包内历史版本恢复所需的精确财务、规划与数据依赖，包括当前已不再启用、但仍被历史引用的依赖；不导出无关配置历史或全库内容。
-- 每组财务依赖包含其精确来源的 `FinanceProfile`、`FinanceOverrides` 和 `EffectiveFinanceConfig`；不能要求导入环境预先注册历史 Profile，也不能用导入环境的同名或最新 Profile 替代包内来源。
+- 每组财务依赖包含其精确来源的 `FinanceProfile`、`FinanceOverrides`、`EffectiveFinanceConfig` 和财务模型 YAML；不能要求导入环境预先注册历史 Profile，也不能用导入环境的同名或最新 Profile 替代包内来源。
 - 草稿与包内全部历史版本内容引用的项目已保存模型必须随包携带（仅历史引用、当前草稿已不引用的同样携带），携带集合与引用集合必须恰好相等：引用未携带或多携带未引用模型均拒绝导入；只被冻结证据引用的设备类型串属于证据原文，不参与集合。
+- 财务模型 YAML 随包携带，`effective_finance.yaml` 的 `model_ref` 指向该模型；导入时校验模型 ID 与 revision 匹配，不静默替换为新模板。
 - 项目模型随包携带其**规范模型文本原样**（规范化存储形态的紧凑 JSON 字节），条目按来源编号升序；导入时按来源基础 ID 经正式保存路径重建本项目模型行（新编号、新行 id），再把草稿与历史版本内容里的模型引用与设备类型串映射为新 ID。用户侧编写模型仍使用正式设备模型 YAML 契约。
 - 声明式配置仍使用各自正式 YAML 契约；包内引用只用于定位包内来源，不能作为目标数据库的身份或修订号直接复用。确认导入时建立来源到新项目依赖的明确映射，再发布引用这些依赖的版本；缺席保持缺席，不用当前配置替代历史。
 - 外部上传入口一次性校验文件及依赖关系，失败原因通过标准错误信封的 `params.reasons` 返回；后续确认消费已接受的提案，不新增内部摘要比对或重复语义校验。

@@ -30,12 +30,12 @@
 |---|---|
 | `ValidatedAssemblyArtifact` | 已由装配模块签发，零阻断诊断；实例、参数覆盖、连接拓扑、规划、财务/计费绑定、项目基线 |
 | `models` | 装配实例 ID 到设备数学贡献的映射（键为实例，不是设备类型） |
-| `materialized` | 已物化的运营期输入序列集合（`MaterializedSet`：`operation_years` + `MaterializedSeries` 只读序列；`constant`/`data_repeat`/`data_full`/`data_predict` 统一为同一类型；空 `series` 时仍以集合年限推导完整运营时域） |
-| `finance` | 不可变 `EffectiveFinanceConfig`（经济参数唯一来源） |
+| `materialized` | 已物化的运营期输入序列集合（`MaterializedSet`：冻结评价确认 `evaluation`（`evaluation_years`/`construction_period`/`operation_years`/`discount_rate`/`construction_payments`/`maintenance_expenses`）+ `MaterializedSeries` 只读序列；`constant`/`data_repeat`/`data_full`/`data_predict` 统一为同一类型；空 `series` 时仍以 `evaluation.operation_years` 推导完整运营时域） |
+| `finance` | 不可变 `EffectiveFinanceConfig`：已解析规则 `model_rules` + `parameters_values` + `input_bindings`（经济参数唯一来源） |
 | `CalculationConfig` | 在计算阶段选择，包含预测算法与参数、generator、solver、精度、求解选项、收敛条件、种子和输出请求 |
 | GeneratorDescriptor | 支持装配 schema、所选计算能力和 solver，且与 `CalculationConfig` 一致；属 provider 静态事实，不作为每次生成参数 |
 
-五项输入均来自可信上游，生成器不重复验证已签发的装配、设备贡献、财务快照或序列，不做内容摘要。Generator 只接收已完成物化的集合（`pending_predict` 为空，由上游在预测产物合并后构成，此处信任类型化交接，不复核）；全周期总点数由装配基线起始年/分辨率与集合携带的已确认评价年限推导，`series` 为空的项目仍得完整时域，不回退单年。不得为五项输入再建包装层。
+五项输入均来自可信上游，生成器不重复验证已签发的装配、设备贡献、财务快照或序列，不做内容摘要。评价确认（`construction_period`/`operation_years`/`discount_rate`/`construction_payments`/`maintenance_expenses`）持久化在任务快照 `evaluation`，由 application 编排原样放入第三项输入 `MaterializedSet.evaluation`；生成器只读该块（时间轴、评价贴现与 `construction_payment`/`maintenance_expenses` 输入取值），不读快照、数据库或对象存储，不再校验——这是评价确认进入生成阶段的唯一载体，不构成第六输入。Generator 只接收已完成物化的集合（`pending_predict` 为空，由上游在预测产物合并后构成，此处信任类型化交接，不复核）；全周期总点数由装配基线起始年/分辨率与集合携带的冻结评价确认（`evaluation.operation_years`）推导，`series` 为空的项目仍得完整时域，不回退单年。不得为五项输入再建包装层。财务模型能力核对在公开提交边界进行：按 `model_rules` 的实际语法推导需求集合并与 `GeneratorDescriptor.capabilities` 对比，含 `max`/`min` 的模型需要声明 `piecewise_linear` 的 provider，不满足即明确拒绝——不近似、不回退为仅税前计算；`CalculationConfig` 保持封闭，不承载能力自报。生成器不读取模型库、目录或对象存储。
 
 ## 输出
 

@@ -1,0 +1,14 @@
+# 合成样例 C 的规划配置：显式选择财务模型提供的标量目标 net_discounted_total。
+# 该 ID 由模型 outputs 的 kind: npv 输出给出（不使用 before_tax/after_tax 命名，目标识别不看名字）；
+# 折现率与评价期来自任务提交冻结的 evaluation（discount_rate / construction_period / operation_years）。
+objective:
+  sense: maximize
+  expression: net_discounted_total
+variables:
+  pv_capacity:
+    device_ref: pv_system_1
+    parameter: rated_capacity_kwp
+    lower_bound: "0"
+    upper_bound: "1000"
+    unit: kWp
+constraints: {}

@@ -1,0 +1,22 @@
+# 合成样例 B 的项目财务配置：选择模型、提供参数值、逐项选择输入绑定。
+# 与样例 A 使用同一绑定形态；本样例的模型参数与折旧截止不同（depreciation_years=3）。
+schema: ies.finance-overrides
+schema_version: "3.0.0"
+profile_ref:
+  id: cn-north-demo
+model_ref:
+  id: ies.built-in.progressive_tax_ddb
+  revision: 1
+parameters_values:
+  tax_bracket1_rate: {value: "0.15", unit: "1"}
+  tax_bracket1_limit: {value: "50000", unit: CNY}
+  tax_bracket2_rate: {value: "0.25", unit: "1"}
+  ddb_rate: {value: "0.2", unit: "1"}
+  salvage_value: {value: "50000", unit: CNY}
+  depreciation_years: {value: "3", unit: "1"}
+input_bindings:
+  operating_revenue:
+    - tariff_binding: pv_export_1
+  operating_cost:
+    - instance: pv_system_1
+    - instance: pv_system_2

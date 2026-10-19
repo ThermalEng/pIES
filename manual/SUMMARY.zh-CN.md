@@ -18,6 +18,8 @@
     - [设备数据 CSV](developer-guide/zh-CN/formats/device-data-csv.md)
     - [装配 YAML](developer-guide/zh-CN/formats/assembly-yaml.md)
     - [财务 YAML](developer-guide/zh-CN/formats/finance-yaml.md)
+    - [财务模型 YAML](developer-guide/zh-CN/formats/financial-model-yaml.md)
+    - [财务模型手算预期](developer-guide/zh-CN/formats/examples/financial-model-hand-calculation.md)
     - [Solver Bundle](developer-guide/zh-CN/formats/solver-bundle.md)
     - [计算配置](developer-guide/zh-CN/formats/calculation-config.md)
     - [算法插件包](developer-guide/zh-CN/formats/algorithm-plugin-package.md)

@@ -135,11 +135,11 @@
 | `construction_payments` | 显式付款比例清单 `[{t: integer, ratio: number}]`；`t` 为自开工起的整数年时点，`0..construction_period`；比例各在 `0..1`，按十进制语义求和须精确等于 `1.0`，不猜金额、不自动均摊 |
 | `maintenance_expenses` | 显式维护／换新清单 `[{year: integer, amount: Decimal, currency: string}]`；`year` 为从开工起的财务发生年（对应 `CF[year]`，范围 `construction_period+1..evaluation_years`），不是公历年份；金额为非负十进制定点字符串，币种与有效财务配置一致；空清单明确表示无额外支出 |
 
-服务端记录 `confirmed_by`/`confirmed_at`，将上述确认及运行年度边界随任务冻结。无确认、时间关系不成立、付款比例不成立或必要财务参数未确定，在公开提交边界阻断；自由字典式 `baseline-confirm` 审计记录不作为参数来源。冻结块仍为 `evaluation`，目标快照 schema 升为 `4.0.0`，不保留旧字段语义或双轨读取；评价确认属财务输入，不新增第六类输入，Generator 五项直接输入不变。建设支出与运营净流的时点映射以[财务计算](modules/finance.md)为唯一语义正文。
+服务端记录 `confirmed_by`/`confirmed_at`，将上述确认及运行年度边界随任务冻结。无确认、时间关系不成立、付款比例不成立或必要财务参数未确定，在公开提交边界阻断；自由字典式 `baseline-confirm` 审计记录不作为参数来源。冻结块仍为 `evaluation`，目标快照 schema 升为 `5.0.0`，不保留旧字段语义或双轨读取；评价确认属财务输入，不新增第六类输入，Generator 五项直接输入不变。生成阶段由 application 编排把该确认的业务字段原样放入第三项直接输入（`MaterializedSet.evaluation`），生成器只读该块（时间轴、评价贴现与 `construction_payment`/`maintenance_expenses` 输入取值），不读快照或数据库；审计字段只留快照。持久化归属是任务快照，第三项只是同次任务的消费载体，不构成第六输入，也不进入财务三件套或封闭 `CalculationConfig`。财务模型及参数随同一快照冻结（`model_ref` 与模型 revision 进入快照），历史任务不读取最新模型重算。建设支出与运营净流的时点映射以[财务计算](modules/finance.md)为唯一语义正文。
 
 Worker 只有在命令可解析、租约有效且写入资格仍成立时才能提交进度和结果。失败保留结构化诊断；取消、超时和重试遵守公开状态转换。
 
-任务结果读取（`GET /projects/{id}/tasks/{task_id}/result` 的 `result` 视图）复用同一证据内容，不另建财务结果存储、不重新运行评价：有证据时原样投影 `financial_evaluation`（形态见[财务计算](modules/finance.md)“封存评价块”，无块时为 null）；同时给出缺块原因 `financial_absence`（有块时恒为 null）：`outcome_not_normal` 表示任务业务结局非正常完成（未求解或无可行方案）；`solution_not_requested` 表示快照 `outputs` 未请求 `solution`（解数据未发布）；`missing_unknown` 表示请求了 `solution` 但该证据未封存财务评价（如历史证据）。展示与导出不得把缺块猜为未请求、前两种原因伪装为评价通过。
+任务结果读取（`GET /projects/{id}/tasks/{task_id}/result` 的 `result` 视图）复用同一证据内容，不另建财务结果存储、不重新运行评价：有证据时原样投影 `financial_evaluation`（形态见[财务计算](modules/finance.md)“封存评价块”，无块时为 null）；同时给出缺块原因 `financial_absence`（有块时恒为 null）：`outcome_not_normal` 表示任务业务结局非正常完成（未求解或无可行方案）；`solution_not_requested` 表示快照 `outputs` 未请求 `solution`（解数据未发布）；`missing_unknown` 表示请求了 `solution` 但该证据未封存财务评价（如历史证据）。展示与导出不得把缺块猜为未请求、前两种原因伪装为评价通过。封存块携带自己的契约版本 `ies.financial-evaluation@1.0.0`（块内 `schema`/`schema_version`，字段与口径见财务计算页），属结果侧契约，按本节版本策略独立演进，不随 `CalcSnapshot` 版本机械同步；展示与导出按 `model_metrics` 的键与同任务冻结 `model_rules.outputs` 的 `cashflow.tax_basis`／`source`／`unit` 识别口径并标注模型身份，不按 ID 命名或 `description` 猜测；封存块不再另存框架自有基础现金流、贴现行或平行指标。
 
 ## 兼容与演进
 
@@ -154,15 +154,16 @@ Worker 只有在命令可解析、租约有效且写入资格仍成立时才能�
 
 ## 公共文件契约
 
-核心计算和离线交换继续使用四种版本化契约：设备模型 YAML、设备数据 CSV、装配 YAML 和 Solver Bundle。用户算法扩展另使用[算法插件包](formats/algorithm-plugin-package.md)交付契约；它由通用计算 provider 在隔离环境解释，不能代替 Solver Bundle。完整标准见[文件格式标准](file-formats.md)。
+核心计算和离线交换继续使用五种版本化契约：设备模型 YAML、设备数据 CSV、装配 YAML、Solver Bundle 和财务模型 YAML。用户算法扩展另使用[算法插件包](formats/algorithm-plugin-package.md)交付契约；它由通用计算 provider 在隔离环境解释，不能代替 Solver Bundle。完整标准见[文件格式标准](file-formats.md)。
 
 - 前三种允许人工编写，但必须先经过对应 schema 校验和规范化；
+- 财务模型 YAML 允许人工编写，但必须先经过 `ies.financial-model@1.0.0` schema 校验和规范化；
 - 装配成功产出 `ValidatedAssemblyArtifact`，不能把原始 YAML `dict` 直接交给计算；
 - GeneratorProvider 只从规范装配生成 Solver Bundle；
 - SolverRuntime 只按 Bundle 的结构化命令执行，不解释业务字段；
-- 设备、数据和装配文件禁止实现模块路径、shell 字符串、宿主机绝对路径和凭证；算法插件入口只能出现在插件 manifest 的受控字段中，并且只由隔离运行器解释。
+- 设备、数据、装配和财务模型文件禁止实现模块路径、shell 字符串、宿主机绝对路径和凭证；算法插件入口只能出现在插件 manifest 的受控字段中，并且只由隔离运行器解释。
 
-四种核心 schema 与算法插件包 schema 分别独立版本化。不能识别的 MAJOR 必须拒绝，不得以“尽可能解析”方式继续任务。
+五种核心 schema 与算法插件包 schema 分别独立版本化。不能识别的 MAJOR 必须拒绝，不得以"尽可能解析"方式继续任务。
 
 前端生成文件的契约测试必须把实际序列化字节提交给正式后端文件入口，并验证关键业务值完整往返。解析或领域错误统一进入标准错误信封；测试专用解析器、前端预解析对象和直接构造领域模型都不能替代这条链路。
 

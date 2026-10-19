@@ -1,28 +1,31 @@
 # 财务 YAML 契约
 
-> 契约标识与版本：`ies.finance-profile@2.0.0`、`ies.finance-overrides@2.0.0`、`ies.effective-finance-config@2.0.0`（`2.0.0` 删除价格 `series_meta.leap_year` 并收紧 `point_count` 为全周期总点数；`1.0.0` 文件不再接受）
+> 契约标识与版本：`ies.finance-profile@2.0.0`、`ies.finance-overrides@3.0.0`、`ies.effective-finance-config@3.0.0`（三件套 `2.0.0` 删除价格 `series_meta.leap_year` 并收紧 `point_count` 为全周期总点数；FinanceProfile 仍采用 `2.0.0`，Overrides 与 Effective 采用 `3.0.0`。各文件只接受对应目标版本，不保留旧版本解析路径。）
 > 推荐文件名（项目包内固定名称）：`finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml`
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
+
+> 财务模型（`ies.financial-model@1.0.0`）定义收入、费用、计税、折旧和现金流的具体计算关系，其完整契约见[财务模型 YAML 契约](financial-model-yaml.md)。本页三件套是基础参数与计价契约；Overrides 目标版本 `3.0.0` 增加 `model_ref`、`parameters_values` 与 `input_bindings`（模型选择、参数值与输入绑定）；Effective 目标版本 `3.0.0` 增加 `model_ref`、`model_rules`、`parameters_values` 与 `input_bindings`。四者都是必填：不存在“省略模型选择与事实来源的空 Overrides”形态。
 
 本页定义财务三件套的完整 YAML 结构与校验语义，是 [文件格式标准](../file-formats.md) 与[财务计算](../modules/finance.md)的字段级权威正文。装配如何引用有效快照见[装配 YAML](assembly-yaml.md)。
 
 本页 `2.0.0` 定义基础金额、计价和税目登记，尚不足以表达完整税后规则；不能将它解释为 finance 模块禁止税后评价，也不能宣称现有字段已支持税后计算。税后能力须先按[财务计算](../modules/finance.md)明确公开输入、规则与结果，再对受影响契约及消费者一同版本化，不在本页现有 schema 下私加字段或隐式行为。
 
-财务方法由财务模型定义、程序提供通用执行框架，具体边界以[财务计算](../modules/finance.md)为准。本页现有三件套是基础参数与计价契约，不是完整的自定义方法契约；`cost_method: fixed_plus_linear` 也不构成对所有后续模型的永久限制。模型表达、参数绑定及求解/评价共同消费方式须先经公开契约确定；本次边界说明不新增模型字段，不改变 `2.0.0` 的合法输入与计算语义。
+财务方法由财务模型定义、程序提供通用执行框架，具体边界以[财务计算](../modules/finance.md)为准。本页现有三件套是基础参数与计价契约，不是完整的自定义方法契约；`cost_method: fixed_plus_linear` 也不构成对所有后续模型的永久限制。模型表达、参数值与输入绑定及求解/评价共同消费方式已由[财务模型 YAML 契约](financial-model-yaml.md)确定；本页不内联模型正文。
 
 ```text
 FinanceProfile（地区财务基准，人工 authoring）
-FinanceOverrides（项目覆盖，人工 authoring）
-        │ 两者并列
+FinanceOverrides（项目覆盖，人工 authoring：model_ref + parameters_values + input_bindings）
+FinancialModel revision 正文（已接受内容，唯一 authoring 权威）
+        │ 三者并列
         ▼
-merger（确定性合并 + 完整校验）── 生成不可变 EffectiveFinanceConfig（不可人工 authoring）
+merger（确定性合并 + 完整校验 + 冻结模型正文副本）── 生成不可变 EffectiveFinanceConfig（不可人工 authoring）
         ▼
 assembly / computation / 项目包（精确引用 Effective YAML）
 ```
 
 - `FinanceProfile` 是已注册、可复用的地区财务基准（以稳定 ID 与 revision 标识）；系统不得把它硬编码为对所有项目生效的全局默认，也不得把样例文件当作隐式默认绑定。仓库内或插件包中的样例只作为示范或注册 provider 的输入。
-- `FinanceOverrides` 精确引用 Profile 的稳定 ID 与 revision，只做稀疏原子覆盖，是 authoring 输入。
-- `EffectiveFinanceConfig` 只能由合并器从 Profile 与 Overrides 生成；可以导出、导入、进入快照，但用户不能直接 authoring。项目包导入在外部上传边界连同精确 Profile 与 Overrides 从来源重新合并，包内 Effective 必须与来源合并结果一致；当前组与历史依赖组遵守同一规则。确认阶段只发布已接受内容，不再解析校验或重新合并。
+- `FinanceOverrides` 精确引用 Profile 的稳定 ID 与 revision，只做稀疏原子覆盖，是 authoring 输入；同时引用财务模型（`model_ref`）并给出参数值与输入绑定，覆盖不了模型规则本身。
+- `EffectiveFinanceConfig` 只能由合并器从 Profile、Overrides 与所选模型 revision 正文生成；可以导出、导入、进入快照，但用户不能直接 authoring。项目包导入在外部上传边界连同精确 Profile、Overrides 与模型文本从来源重新合并，包内 Effective 必须与来源合并结果一致；当前组与历史依赖组遵守同一规则。确认阶段只发布已接受内容，不再解析校验或重新合并。
 
 金额一律为 `{value, unit}` 原子：`value` 为十进制定点字符串（禁止 `float`、`NaN/Infinity`、`null`），`unit` 来自公共单位规范并经 `normalize_unit` 规范化；禁止部分金额（缺 `value` 或 `unit`）与 `null`。成本分量金额非负（允许 `0`，零费用类别、零固定成本均合法）。能源价格不设符号限制：允许有限正数、零与负数（见 `energy_prices` 行与「计价规则」）；禁止 NaN/Infinity。
 
@@ -154,23 +157,36 @@ taxes:
 - 后评价指标（NPV/IRR 等）不属于本契约输入（属 finance 模块长期蓝图，见[财务计算](../modules/finance.md)）；
 - 规划表达式引用这些分量的合法标识符编码与单位字面量规则见[装配 YAML](assembly-yaml.md)「规划表达式中的财务分量标识符」。
 
-## `ies.finance-overrides@2.0.0`
+## `ies.finance-overrides@3.0.0`
+
+> 目标版本 `3.0.0` 增加 `model_ref`、`parameters_values` 与 `input_bindings`，用于选择财务模型、提供参数值并逐输入选择绑定。`2.0.0` 文件不再接受，不保留双轨。字段级定义见[财务模型 YAML 契约](financial-model-yaml.md)。
 
 ### 完整示例
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "2.0.0"
+schema_version: "3.0.0"
 profile_ref:
   id: cn-north-demo
+model_ref:
+  id: ies.built-in.linear_income_tax
+  revision: 1
+parameters_values:
+  income_tax_rate: {value: "0.25", unit: "1"}
+  depreciation_years: {value: "10", unit: "1"}
+input_bindings:
+  operating_revenue:
+    - tariff_binding: export_meter       # 逐输入列出；同类计量绑定未列入即不参与，不隐式聚合
+  operating_cost:
+    - instance: pv_1                     # 设备成本分量；同类多实例须逐项显式列出
 finance_types:
   pv_system:
     upfront_capex:
-      fixed: {value: "1500", unit: CNY}                    # 按叶子路径整体替换 Money
+      fixed: {value: "1500", unit: CNY}
       linear:
         capacity_kw: {unit_cost: {value: "3200", unit: CNY/kW}}
 energy_prices:
-  grid_import:                                             # 只替换定价定义（kind+值/序列）
+  grid_import:
     kind: constant
     value: {value: "0.75", unit: CNY/kWh}
   pv_export:
@@ -178,7 +194,7 @@ energy_prices:
     ref: "9999999999999999999999999999999999999999999999999999999999999999"
     series_meta:
       resolution: 1h
-      point_count: 8760  # 单年示例（运营年限由提交时显式确认，此处取 1；非默认）；实际必须等于全周期总点数
+      point_count: 8760
       unit: CNY/kWh
 ```
 
@@ -186,17 +202,22 @@ energy_prices:
 
 | 路径 | 规则 |
 |---|---|
-| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"2.0.0"` |
+| `schema` / `schema_version` | 固定 `ies.finance-overrides` / `"3.0.0"` |
 | `profile_ref` | 必填 `{id}`：与目标 Profile 的 `id` 一致（文本文件按字头校验，不做内容摘要） |
+| `model_ref` | 必填 `{id, revision}`：引用已发布财务模型的稳定 ID 与 revision |
+| `parameters_values` | 必填：覆盖模型声明的参数槽位；必须覆盖模型 `parameters` 中所有声明的参数；`{value, unit}` 原子（单位与声明一致、值落在声明范围内） |
+| `input_bindings` | 必填：键必须恰好是所选模型 `inputs` 中 `source: materialized_component` 的输入 ID；值为非空列表，逐项为单键判别 `{tariff_binding: <binding_id>}`（能源计费分量）或 `{instance: <instance_id>}`（设备成本分量）；多项显式求和，不隐式聚合；绑定存在性、分量可得性与单位相容在装配边界核对 |
 | `finance_types` | 只允许覆盖目标 Profile **已存在** 的 `finance_type`；禁止新增或删除 `finance_type` |
 | `finance_types.*` | 只允许按 Profile 实际存在的叶子路径整体替换 `Money` 原子：`<分量>.fixed`（如 `upfront_capex.fixed`）替换为 `{value, unit}`；`<分量>.linear.<driver>.unit_cost` 替换为 `{value, unit}`。被替换叶子必须已在 Profile 声明；禁止新增或删除分量、`fixed` 节点或 `driver`（`driver` 集合不可增删）、禁止改分量类型与 `cost_method`、禁止改 `unit`（规范化后必须与 Profile 相同）；替换值必须为完整 `{value, unit}` 原子，禁止部分金额与 `null`；成本金额非负 |
 | `energy_prices` | 只允许覆盖 Profile **已存在** 的 `price_id`，禁止新增或删除 `price_id`。每个条目的 `energy_prices.<price_id>` 只写定价定义：`{kind: constant, value}` 或 `{kind: time_series, ref, series_meta}`（与 Profile 原 kind 无关）；`carrier` 与 `direction` 由 Profile 继承，在 Overrides 中出现即拒绝；`value.unit`（constant）或 `series_meta.unit`（time_series）必须与 Profile 原项相同；`time_series` 的 `ref` 为存储不透明对象 ID（`oid`，与 Profile 侧同一口径），指向经校验、覆盖全周期全部点数的价格序列对象，`series_meta` 必须完整并可与 Profile 引用不同序列；不允许部分混合替换（如只换 `ref` 保留旧 `series_meta`，或只换 kind 不带全量字段） |
-| 禁改字段 | 除 `profile_ref` 外，顶层不得出现 `profile.*`、`currency`、`base_year`、`price_basis`、`cost_method`、`taxes`（税目只属于 Profile 登记，项目不得新增/覆盖/删除）、价格条目的 `carrier`/`direction` 或任何税率字段；出现即拒绝 |
+| 禁改字段 | 除 `profile_ref`、`model_ref`、`parameters_values`、`input_bindings` 外，顶层不得出现 `profile.*`、`currency`、`base_year`、`price_basis`、`cost_method`、`taxes`（税目只属于 Profile 登记，项目不得新增/覆盖/删除）、价格条目的 `carrier`/`direction` 或任何税率字段；出现即拒绝 |
 | 其余字段 | 按本页规则校验 |
 
-覆盖只影响合并结果中的对应叶子；未覆盖条目原样保留（见 Effective 示例中未覆盖的 `battery_system`、`heat_supply`、`taxes` 等）。合并后重新跑完整校验，任一失败不产生 Effective。
+覆盖只影响合并结果中的对应叶子；未覆盖条目原样保留（见 Effective 示例中未覆盖的 `battery_system`、`heat_supply`、`taxes` 等）。`model_ref`、`parameters_values` 与 `input_bindings` 随覆盖进入 Effective，并由合并器冻结所选 revision 的规范化正文副本（`model_rules`）。合并后重新跑完整校验，任一失败不产生 Effective。评价确认（`evaluation_years`/`construction_period`/`operation_years`/`discount_rate`/`construction_payments`/`maintenance_expenses`）不是 Profile/Overrides/Effective 字段：它随任务提交冻结在 `CalcSnapshot.evaluation`，生成阶段由第三项直接输入 `MaterializedSet.evaluation` 原样携带（见[财务计算](../modules/finance.md)），不回流本文件、不进入封闭计算配置。
 
-## `ies.effective-finance-config@2.0.0`
+## `ies.effective-finance-config@3.0.0`
+
+> 目标版本 `3.0.0` 增加 `model_ref`、`model_rules`（所选 revision 的规范化冻结副本）、`parameters_values` 与 `input_bindings`，引用财务模型并固定其规则与项目侧参数、绑定。`2.0.0` 文件不再接受，不保留双轨。字段级定义见[财务模型 YAML 契约](financial-model-yaml.md)。
 
 ### 完整示例
 
@@ -204,8 +225,40 @@ energy_prices:
 
 ```yaml
 schema: ies.effective-finance-config
-schema_version: "2.0.0"
+schema_version: "3.0.0"
 profile_id: cn-north-demo
+model_ref:
+  id: ies.built-in.linear_income_tax
+  revision: 1
+parameters_values:
+  income_tax_rate: {value: "0.25", unit: "1"}
+  depreciation_years: {value: "10", unit: "1"}
+input_bindings:                                        # 逐输入选择绑定，随覆盖进入 Effective
+  operating_revenue:
+    - tariff_binding: export_meter
+  operating_cost:
+    - instance: pv_1
+model_rules:                                           # 所选 revision 正文的规范化冻结副本（只含规则五节；此处以紧凑写法展示，宽式为常态）
+  parameters:
+    income_tax_rate: {type: ratio, display_name: 所得税率, unit: "1", range: {min: "0", max: "1"}}
+    depreciation_years: {type: integer, display_name: 折旧年限, unit: "1", range: {min: 1, max: 50}}
+  state: []
+  inputs:
+    - {id: operating_revenue, source: materialized_component, component: period_energy_sale, unit: CNY, sign: negative}
+    - {id: operating_cost, source: materialized_component, component: period_variable_om, unit: CNY, sign: positive}
+    - {id: initial_cost, source: construction_total, component: construction_total, unit: CNY, sign: positive}
+    - {id: construction_payment, source: evaluation_confirmation, component: construction_payment, unit: CNY, sign: positive}
+  relations:
+    - {id: depreciation, expression: "initial_cost / depreciation_years", unit: CNY, kind: intermediate, active: {from_op_year: 1, to_op_year: depreciation_years}}
+    - {id: taxable_income, expression: "operating_revenue[year] - operating_cost[year] - depreciation[year]", unit: CNY, kind: intermediate}
+    - {id: income_tax, expression: "max(0, taxable_income[year]) * income_tax_rate", unit: CNY, kind: intermediate}
+    - {id: before_tax_cashflow, expression: "operating_revenue[year] - operating_cost[year] - construction_payment[year]", unit: CNY, kind: output}
+    - {id: after_tax_cashflow, expression: "operating_revenue[year] - operating_cost[year] - income_tax[year] - construction_payment[year]", unit: CNY, kind: output}
+  outputs:
+    - {id: before_tax_cashflow, kind: series, unit: CNY, cashflow: {tax_basis: before_tax}, description: 税前现金流（逐年序列）}
+    - {id: after_tax_cashflow, kind: series, unit: CNY, cashflow: {tax_basis: after_tax}, description: 税后现金流（逐年序列）}
+    - {id: before_tax_npv, kind: npv, source: before_tax_cashflow, unit: CNY, description: 税前净现值（按冻结评价期与折现率贴现）}
+    - {id: after_tax_npv, kind: npv, source: after_tax_cashflow, unit: CNY, description: 税后净现值（按冻结评价期与折现率贴现）}
 currency: CNY
 base_year: 2025
 price_basis: tax_inclusive
@@ -262,7 +315,8 @@ taxes:                                                 # 继承 Profile，原样
 
 生成规则：
 
-- `EffectiveFinanceConfig` 只能由合并器生成：`merge(FinanceProfile, FinanceOverrides | None)`；无覆盖时使用空 Overrides 文档，不允许省略来源字段。
+- `EffectiveFinanceConfig` 只能由合并器生成：`merge(FinanceProfile, FinanceOverrides, FinancialModel)`。Overrides 与所选模型 revision 正文都是必填合并输入；没有额外覆盖内容时，Overrides 仍必须完整给出 `model_ref`、`parameters_values` 与 `input_bindings`（模型选择与事实来源不允许省略）。字段级形态：`model_ref {id, revision}`、`model_rules`（所选 revision 五节正文的规范化冻结副本）、`parameters_values`、`input_bindings`。
+- 合并同时校验并冻结模型侧内容：参数值覆盖全部参数槽位且单位/范围逐项通过、`input_bindings` 键恰为模型的物化分量输入、模型 ID/revision 与正文一致；任一失败不产生 Effective。历史任务不读取最新 revision，也不从模型库回填。
 - 合并结果重新跑完整校验：币种/`price_basis`/`cost_method` 一致性、分量完整性、`price_id` 唯一性与存在性、每项 `carrier`/`direction` 合法且与 Profile 一致、价格有限性（正零负均允许，禁止 NaN/Infinity）、`time_series` 元数据完整、单位量纲与 `taxes` 引用完整性全部重验；任一失败不产生 Effective。
 - 稀疏覆盖只替换被覆盖叶子：未覆盖的 `finance_types`、能源价格与 `taxes` 全部原样保留，不允许省略、裁剪或按“示例只写用到的部分”生成。
 - `EffectiveFinanceConfig` 可以导出、导入、进入快照；项目包导入在外部上传边界连同来源 Profile 与 Overrides 一次性完成合并验证，确认阶段不重复执行。
@@ -270,16 +324,24 @@ taxes:                                                 # 继承 Profile，原样
 
 ## 规范化
 
-文本财务文件只校验字头（`schema`/`schema_version`）与领域约束。规范化仍由公开纯函数完成（映射键稳定排序、金额用定点十进制字符串、单位保留原始拼写、注释与空行移除、LF 换行、非 ASCII 保留），用于确定性比较与测试。无覆盖时使用空 Overrides 文档：
+文本财务文件只校验字头（`schema`/`schema_version`）与领域约束。规范化仍由公开纯函数完成（映射键稳定排序、金额用定点十进制字符串、单位保留原始拼写、注释与空行移除、LF 换行、非 ASCII 保留），用于确定性比较与测试。`3.0.0` 不存在“空 Overrides 文档”形态：即使不覆盖任何 `finance_types`/`energy_prices` 条目，Overrides 也必须完整给出模型选择、参数值与输入绑定（仅当所选模型没有参数槽位/物化分量输入时，`parameters_values`/`input_bindings` 才可为空 `{}`）：
 
 ```yaml
 schema: ies.finance-overrides
-schema_version: "2.0.0"
+schema_version: "3.0.0"
 profile_ref:
   id: <profile-id>
+model_ref:
+  id: <model-id>
+  revision: 1
+parameters_values:
+  <参数ID>: {value: "<十进制>", unit: "<声明单位>"}
+input_bindings:
+  <物化分量输入ID>:
+    - {tariff_binding: <binding-id>}
 ```
 
-该文档本身有效（没有覆盖任何内容），合并结果等于 Profile。
+该文档有效：合并结果等于 Profile 原样内容加上模型规则冻结副本（`model_rules`）、参数值与输入绑定。`2.0.0` 的空 Overrides 文档（无 `model_ref`/`parameters_values`/`input_bindings`）不再接受。
 
 ## 聚合与计价衔接（装配绑定引用）
 
@@ -316,5 +378,5 @@ period_energy_sale(b)     = −raw_charge(b)         # direction: sale
 
 - 装配 YAML 的 `finance` 节引用 Effective YAML：`ref`（`kind: object` 或包内 `relative_file`）携带对象 ID；`profile_id` 携带来源标识。装配不在内内联完整财务配置；`ValidatedAssemblyArtifact` 固定引用。
 - 对象存储写入或项目包外部导入时，在边界一次性确定对象身份；内部读取按对象身份取得已登记内容，来源标识随快照传递。
-- 项目包可携带 `finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml` 三个文件；外部上传边界按清单接受文件，并从精确 Profile 与 Overrides 合并确定 Effective。来源一致性属于输入业务约束，不是内部文件完整性复核；确认阶段只消费已接受内容。
+- 项目包可携带 `finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml`、`financial_model.yaml` 四个文件；外部上传边界按清单接受文件，并从精确 Profile、Overrides 与模型文本合并确定 Effective。来源一致性属于输入业务约束，不是内部文件完整性复核；确认阶段只消费已接受内容。
 - 数据库内部存储使用列/JSON 表示，不强制 YAML；HTTP JSON DTO 仍为 JSON。

@@ -15,6 +15,17 @@
 
 ## Unreleased
 
+### 2026-10-19 — 财务模型最小公开契约设计（仅契约，未实现）
+
+- 新增 `ies.financial-model@1.0.0` 格式契约：财务模型定义收入、费用、计税、折旧和现金流的具体计算关系，程序提供通用执行框架，项目选择模型并显式提供参数。模型文件只包含不可变规则；参数值与输入绑定由项目财务配置（`ies.finance-overrides@3.0.0` 的 `parameters_values`、`input_bindings`）提供；Effective `3.0.0` 确定性合并生成 `model_ref` + `model_rules`（正文冻结副本）+ 参数与绑定。
+- 明确年度时间轴语义：`year=0` 开工、`year=K` 投产、第 j 运营年对应财务年 `K+j`；`[year]`/`[year-1]` 索引（`[year-1]` 仅限状态变量）、逐年依赖拓扑求值、`active` 区间与区间外唯一语义（非状态关系为 0、状态保持）、状态初值为 `year=-1` 存量（`{value,unit}` 或标量输入）；`materialized_component` 输入仅在运营年有值，`construction_payment` 按确认付款计划建设期非零。
+- 输出为判别联合：`kind: series`（对应 `kind: output` 关系式，可用 `cashflow.tax_basis` 声明机器可识别的税前/税后现金流口径）与指标 `kind: npv|irr|payback_static|payback_dynamic`（`source` 必须指向一条已声明现金流；`npv = Σ CF[y]/(1+r)^y`，`r` 取冻结 `discount_rate`，无默认）；仅 `kind: npv` 可作规划目标，规划目标由规划配置显式选择，系统不提供默认目标。
+- 生成器能力按 `GeneratorDescriptor.capabilities` 声明并依实际语法的决策相关性推导：全部模型含 `affine`，出现 `max`/`min` 追加 `piecewise_linear`（精确线性化、有限界来自公开声明、不猜 M/ε）；决策相关表达式相乘或以决策相关量为除数在提交边界拒绝；`CalculationConfig` 保持封闭。
+- 评价参数（K/N/r/付款计划/维护清单）进入模型的路径唯一：持久化归属任务快照 `evaluation`，生成阶段由 application 编排原样放入第三项直接输入 `MaterializedSet.evaluation`，生成器只读该块（不新增第六输入、不重复校验、不回流财务三件套）；非空维护清单由模型 `maintenance_expenses` 输入按确认发生年显式消费（税额处理由模型决定），模型未声明该输入时提交边界明确拒绝。
+- 三个完整合成样例（线性所得税+直线折旧、累进所得税+DDB+亏损结转、维护清单+指标消费）及完整项目侧输入（Overrides、规划配置、评价确认与同次事实夹具含逐年预期与指标），覆盖 K=1、折旧年限跨截止、两个同类计量绑定与两个同类设备实例的选择与显式组合、亏损抵扣耗尽、非空维护清单按发生年影响税额与现金流、非约定命名的税前/税后现金流与 NPV/IRR/静态/动态回收期指标消费。
+- 受影响契约版本：`ies.financial-model@1.0.0`（新增）、`ies.effective-finance-config@3.0.0`（增 `model_ref` + `model_rules` + `parameters_values` + `input_bindings`）、`ies.finance-overrides@3.0.0`（增 `model_ref` + `parameters_values` + `input_bindings`）、项目包 `4.0.0`（增 `financial_model.yaml`）、CalcSnapshot `5.0.0`（输入快照增评价确认与模型 revision）、`ies.financial-evaluation@1.0.0`（新增结果侧封存块契约：`model`/`model_yearly`/`model_metrics`；框架不再另存基础现金流/贴现行/平行指标）。
+- 本次只有契约设计与合成样例，没有实现生产代码、变更运行时行为或宣布任何计算能力已交付（含 `max`/`min` 的模型在现有 provider 能力声明下于提交边界被明确拒绝）。
+
 ### 2026-10-18 — 财务模型与执行框架边界明确（指导文件）
 
 - 用户批准财务模型定义具体方法、项目配置提供参数、程序提供通用执行框架；宪法升至 `1.14.0`。内置模型仅作为可选择和替换的模板，不按核算主体或案例写死业务分支。

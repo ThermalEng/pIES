@@ -1,0 +1,12 @@
+# 合成样例 B 的规划配置：显式选择财务模型提供的标量目标 after_tax_npv（同 A 的目标引用形态）。
+objective:
+  sense: maximize
+  expression: after_tax_npv
+variables:
+  pv_capacity:
+    device_ref: pv_system_1
+    parameter: rated_capacity_kwp
+    lower_bound: "0"
+    upper_bound: "1000"
+    unit: kWp
+constraints: {}

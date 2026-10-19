@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://iesplan.invalid/schema/financial-model-1.0.0.schema.json",
+  "title": "ies.financial-model@1.0.0",
+  "description": "财务模型 YAML 结构契约（字段语义以 manual/developer-guide/zh-CN/formats/financial-model-yaml.md 为唯一正文）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "model", "parameters", "inputs", "relations", "outputs"],
+  "properties": {
+    "schema": { "const": "ies.financial-model" },
+    "schema_version": { "const": "1.0.0" },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "names", "description", "investor_perspective", "required_capabilities"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^(?!.*__)(ies\\.built-in|user\\.[a-z0-9]+)\\.[a-z0-9]+([._-][a-z0-9]+)*$"
+        },
+        "revision": { "type": "integer", "minimum": 1 },
+        "names": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "investor_perspective": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "required_capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["affine", "piecewise_linear"] }
+        }
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "propertyNames": { "pattern": "^(?!.*__)[a-z][a-z0-9_]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "display_name", "unit", "range"],
+        "properties": {
+          "type": { "enum": ["ratio", "money", "integer", "decimal"] },
+          "display_name": { "type": "string", "minLength": 1 },
+          "unit": { "type": "string", "minLength": 1 },
+          "range": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["min"],
+            "properties": {
+              "min": { "type": ["string", "number"] },
+              "max": { "type": ["string", "number"] }
+            }
+          }
+        }
+      }
+    },
+    "state": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "unit", "initial", "description"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "unit": { "type": "string", "minLength": 1 },
+          "initial": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["value", "unit"],
+                "properties": {
+                  "value": { "type": ["string", "number"] },
+                  "unit": { "type": "string", "minLength": 1 }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["input"],
+                "properties": { "input": { "$ref": "#/$defs/id" } }
+              }
+            ]
+          },
+          "description": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/input_materialized" },
+          { "$ref": "#/$defs/input_construction_total" },
+          { "$ref": "#/$defs/input_evaluation_confirmation" }
+        ]
+      }
+    },
+    "relations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "expression", "unit", "kind"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "expression": { "type": "string", "minLength": 1 },
+          "unit": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["intermediate", "output"] },
+          "active": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from_op_year", "to_op_year"],
+            "properties": {
+              "from_op_year": { "$ref": "#/$defs/positive_int_or_param" },
+              "to_op_year": { "$ref": "#/$defs/positive_int_or_param" }
+            }
+          }
+        }
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/output_series" },
+          { "$ref": "#/$defs/output_npv" },
+          { "$ref": "#/$defs/output_irr" },
+          { "$ref": "#/$defs/output_payback_static" },
+          { "$ref": "#/$defs/output_payback_dynamic" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^(?!.*__)[a-z][a-z0-9_]*$" },
+    "positive_int_or_param": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1 },
+        { "$ref": "#/$defs/id" }
+      ]
+    },
+    "input_materialized": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "component", "unit", "sign"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "source": { "const": "materialized_component" },
+        "component": { "enum": ["annual_fixed_om", "period_variable_om", "period_energy_purchase", "period_energy_sale"] },
+        "unit": { "type": "string", "minLength": 1 },
+        "sign": { "enum": ["positive", "negative"] }
+      }
+    },
+    "input_construction_total": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "component", "unit", "sign"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "source": { "const": "construction_total" },
+        "component": { "const": "construction_total" },
+        "unit": { "type": "string", "minLength": 1 },
+        "sign": { "const": "positive" }
+      }
+    },
+    "input_evaluation_confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "component", "unit", "sign"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "source": { "const": "evaluation_confirmation" },
+        "component": { "enum": ["construction_payment", "maintenance_expenses"] },
+        "unit": { "type": "string", "minLength": 1 },
+        "sign": { "const": "positive" }
+      }
+    },
+    "output_series": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "unit", "description"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "series" },
+        "unit": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "cashflow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tax_basis"],
+          "properties": {
+            "tax_basis": { "enum": ["before_tax", "after_tax"] }
+          }
+        }
+      }
+    },
+    "output_npv": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "source", "unit", "description"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "npv" },
+        "source": { "$ref": "#/$defs/id" },
+        "unit": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "output_irr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "source", "unit", "description"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "irr" },
+        "source": { "$ref": "#/$defs/id" },
+        "unit": { "const": "1" },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "output_payback_static": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "source", "unit", "description"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "payback_static" },
+        "source": { "$ref": "#/$defs/id" },
+        "unit": { "const": "year" },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "output_payback_dynamic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "source", "unit", "description"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "payback_dynamic" },
+        "source": { "$ref": "#/$defs/id" },
+        "unit": { "const": "year" },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
