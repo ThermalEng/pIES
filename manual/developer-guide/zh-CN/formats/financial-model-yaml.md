@@ -393,7 +393,7 @@ objective:
 - **声明必须等于推导集合**（不是自由声明）。推导按实际语法的**决策相关性**判定：① 先按「关系式语法」的限制核对（乘法至少一侧为常数、除数必须是常数）；出现决策相关表达式相乘或以决策相关量为除数时，模型不被 `1.0.0` 支持，提交边界拒绝——不把此类算术当作仿射，也不近似。② 通过后：全部模型含基础 `affine`（`+ - * /`（常除）、年度索引、跨年线性结转）；任一关系式出现 `max`/`min` 时追加 `piecewise_linear`。多写、少写、写错都在模型校验拒绝。
 - 提交边界核对：推导集合 ⊆ 所选 `GeneratorDescriptor.capabilities`，否则明确拒绝；不近似、不静默降级、不回退为仅税前计算。
 - 能力只在描述符声明；`CalculationConfig` 保持封闭，不承载模型需求或能力自报。
-- 现状：首个内置 provider `ies.generator.highs_milp@2.0.0` 声明 `("affine", "mutex_bigm")`。本页两份样例都需要 `piecewise_linear`，在出现声明该能力的 provider 前于提交边界被明确拒绝——这是契约要求的边界行为，不是静默降级。
+- 本页合成样例需要 `piecewise_linear`；只声明 `affine` 与 `mutex_bigm` 的 provider 不能接受它们。文件结构合法不等于任意 provider 均能执行，实际可用能力以所选 provider 的公开描述符为准。
 
 ### max/min 精确支持条件
 

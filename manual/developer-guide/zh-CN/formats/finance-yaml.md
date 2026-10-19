@@ -213,7 +213,7 @@ energy_prices:
 | 禁改字段 | 除 `profile_ref`、`model_ref`、`parameters_values`、`input_bindings` 外，顶层不得出现 `profile.*`、`currency`、`base_year`、`price_basis`、`cost_method`、`taxes`（税目只属于 Profile 登记，项目不得新增/覆盖/删除）、价格条目的 `carrier`/`direction` 或任何税率字段；出现即拒绝 |
 | 其余字段 | 按本页规则校验 |
 
-覆盖只影响合并结果中的对应叶子；未覆盖条目原样保留（见 Effective 示例中未覆盖的 `battery_system`、`heat_supply`、`taxes` 等）。`model_ref`、`parameters_values` 与 `input_bindings` 随覆盖进入 Effective，并由合并器冻结所选 revision 的规范化正文副本（`model_rules`）。合并后重新跑完整校验，任一失败不产生 Effective。评价确认（`evaluation_years`/`construction_period`/`operation_years`/`discount_rate`/`construction_payments`/`maintenance_expenses`）不是 Profile/Overrides/Effective 字段：它随任务提交冻结在 `CalcSnapshot.evaluation`，生成阶段由第三项直接输入 `MaterializedSet.evaluation` 原样携带（见[财务计算](../modules/finance.md)），不回流本文件、不进入封闭计算配置。
+覆盖只影响合并结果中的对应叶子；未覆盖条目原样保留（见 Effective 示例中未覆盖的 `battery_system`、`heat_supply`、`taxes` 等）。`model_ref`、`parameters_values` 与 `input_bindings` 随覆盖进入 Effective，并由合并器冻结所选 revision 的规范化正文副本（`model_rules`）。公开财务输入在合并接受前完成领域校验，失败不产生 Effective；可信内部交接不重验。评价确认不属于 Profile/Overrides/Effective 字段，也不进入计算配置；其任务级归属与生成期载体见[财务计算](../modules/finance.md#评价确认与快照冻结)。
 
 ## `ies.effective-finance-config@3.0.0`
 
@@ -317,7 +317,7 @@ taxes:                                                 # 继承 Profile，原样
 
 - `EffectiveFinanceConfig` 只能由合并器生成：`merge(FinanceProfile, FinanceOverrides, FinancialModel)`。Overrides 与所选模型 revision 正文都是必填合并输入；没有额外覆盖内容时，Overrides 仍必须完整给出 `model_ref`、`parameters_values` 与 `input_bindings`（模型选择与事实来源不允许省略）。字段级形态：`model_ref {id, revision}`、`model_rules`（所选 revision 五节正文的规范化冻结副本）、`parameters_values`、`input_bindings`。
 - 合并同时校验并冻结模型侧内容：参数值覆盖全部参数槽位且单位/范围逐项通过、`input_bindings` 键恰为模型的物化分量输入、模型 ID/revision 与正文一致；任一失败不产生 Effective。历史任务不读取最新 revision，也不从模型库回填。
-- 合并结果重新跑完整校验：币种/`price_basis`/`cost_method` 一致性、分量完整性、`price_id` 唯一性与存在性、每项 `carrier`/`direction` 合法且与 Profile 一致、价格有限性（正零负均允许，禁止 NaN/Infinity）、`time_series` 元数据完整、单位量纲与 `taxes` 引用完整性全部重验；任一失败不产生 Effective。
+- 公开财务输入在合并接受边界一次核对币种与口径、分量及价格引用、覆盖权限、有限数值、时间序列元数据、单位量纲与税目引用等领域约束；任一失败不产生 Effective。已接受的类型化内容在内部生成、冻结和读取时不重复执行同一校验。
 - 稀疏覆盖只替换被覆盖叶子：未覆盖的 `finance_types`、能源价格与 `taxes` 全部原样保留，不允许省略、裁剪或按“示例只写用到的部分”生成。
 - `EffectiveFinanceConfig` 可以导出、导入、进入快照；项目包导入在外部上传边界连同来源 Profile 与 Overrides 一次性完成合并验证，确认阶段不重复执行。
 - 装配与计算只消费该不可变快照：不运行期继承 Profile、不读取“最新地区价格”、不静默默认值。

@@ -54,7 +54,7 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 4. **计算生成**统一物化 `constant/data_repeat/data_full/data_predict` 序列，再由 GeneratorProvider 直接消费装配产物、设备数学贡献、物化序列、有效财务快照与计算配置五项输入，按所选 solver、计算精度和算法选项生成求解器输入文件及结构化运行命令；
 5. **受控求解**只消费 Solver Bundle，在隔离环境按结构化运行命令执行，不再解释项目或设备；
 6. **结果适配**把声明输出和执行回执转成统一 `ComputeResult`；
-7. **财务与结果分析**把计算输出形成财务指标、敏感性、有效性评估和证据。
+7. **财务与结果分析**按同一冻结财务模型组织现金流及指标，再形成分析、评估和证据；财务关系同时参与生成与求解，不是求解结束后另套一份业务公式。
 
 装配不是可选预检查。任何直接从旧项目形状拼接计算输入、缺接口时猜双向接口、把 `blind` 接口用于连接或装配失败后继续计算的路径都违反蓝图。格式边界详见[文件格式标准](file-formats.md)。
 
@@ -69,7 +69,7 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 | 计算生成 | 装配产物、设备数学贡献、物化序列、有效财务快照、独立 `CalculationConfig` 五项直接输入 | Solver Bundle | 计算能力兼容，求解器输入、结构化命令、输出和适配器声明完整 |
 | 受控求解 | Solver Bundle、资源与取消上下文 | `ExecutionReceipt` 与原始输出 | 实际命令、限制、日志、退出和输出完整 |
 | 结果适配 | Bundle、执行回执、声明输出 | `ComputeResult` | 技术/数学状态、候选、流量、单位和依赖版本完整 |
-| 财务与分析 | 计算结果、财务参数、分析命令 | 财务/分析结果与证据 | 指标口径、状态、来源和适用范围可追溯 |
+| 财务与分析 | 同次计算结果、冻结财务模型与参数、评价确认、分析命令 | 财务/分析结果与证据 | 求解与评价同源，指标口径、状态、来源和适用范围可追溯 |
 
 每一阶段只消费上游公开输出。若一个阶段必须读取上游目录、ORM 或实现函数才能工作，说明公开 contract 尚未完成，而不是允许临时穿透边界。
 
@@ -117,7 +117,7 @@ pIES 把用户的设备、连接、时序数据和经济约束转化为可校验
 | [generators](modules/generators.md) | 规范装配到求解器输入、命令与 Bundle | 启动进程、读取数据库、提交任务 |
 | [solver runtime](modules/solver-runtime.md) | 受控执行、资源限制、日志与执行回执 | 设备语义、问题构造、结果解释 |
 | [computation](modules/engines.md) | 生成、执行、结果适配的公共契约与统一结果 | HTTP、会话、ORM 和项目草稿 |
-| [finance](modules/finance.md) | 财务三件套（`FinanceProfile`/`FinanceOverrides`/`EffectiveFinanceConfig`）、现金流与指标蓝图 | 规划目标、计算选项、页面状态和跨用例事务 |
+| [finance](modules/finance.md) | 财务文件与模型契约、规则执行、同源现金流与通用指标 | 规划目标选择、计算选项、页面状态和跨用例事务 |
 | [analysis](modules/analysis.md) | 敏感性、批量扫描、指标和评估 | 任务租约、HTTP 传输 |
 | [storage](modules/storage.md) | 引用、保留和存储 provider | 理解项目或结果内部业务表 |
 | [application](modules/application.md) | 权限后的用例、事务和跨模块编排 | 穿透模块私有实现 |

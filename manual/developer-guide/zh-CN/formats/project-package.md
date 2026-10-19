@@ -42,8 +42,8 @@ models/{来源 device_id}.json     # 草稿与历史版本引用的项目模型�
 }
 ```
 
-- 五个文件分别使用正式财务/财务模型/规划 YAML 契约，内容为该版本冻结引用指向的**原行内容原样**（Profile 稳定来源、Overrides/Effective/Planning/Model 各自 revision 行）。
-- 键按需缺席：版本内容无 `effective_finance` 块则前三个键缺席，无 `planning_config` 块则最后一个键缺席；`effective_finance` 块存在时 `financial_model` 键必须存在（模型是有效财务配置的必需组成，不允许只有 Effective 而缺失模型）。
+- 五个文件分别使用正式财务/财务模型/规划 YAML 契约，携带该版本冻结引用指向的不可变正文，不从当前工作状态回填。
+- 键按需缺席：无 `effective_finance` 块时，Profile、Overrides、Effective 与 FinancialModel 四项财务依赖均缺席；有该块时四项必须齐备。规划依赖独立按 `planning_config` 块是否存在携带。
 - 来源键：版本内容 `effective_finance` 块的 `{profile_id, overrides_revision, revision, model_ref}` 与 `planning_config` 块的 `{revision}` 即来源键，只用于在包内定位上述文件，**不作为目标数据库的身份或修订号**。
 - Profile 自包含：每组财务依赖携带其精确来源的 `FinanceProfile` 文件；确认导入时先注册包内来源（同稳定 id 复用既有行），内容不一致即身份冲突、明确拒绝。绝不用当前 `finance_profile.yaml` 冒充历史，也绝不用目标库同名或最新 Profile 替代包内来源。
 - 财务模型随包携带：`financial_model.yaml` 使用正式财务模型 YAML 契约；`effective_finance.yaml` 的 `model_ref` 指向该模型，导入时校验模型 ID 与 revision 匹配。
