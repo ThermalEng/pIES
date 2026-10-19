@@ -63,7 +63,7 @@ Application 不拥有长时后台运算的执行状态机。它在提交阶段�
 | datasets | 上传、质量、版本、来源模式对应的时间覆盖与连续性校验、表示规范化、对象引用与项目绑定 | 经校验的不可变数据版本 |
 | modeling | 项目设备、properties、interfaces、连接、存量/新增身份、revision 与即时校验 | 项目图修订 |
 | planning | 目标函数/权重、规划变量、上下界和规划/系统约束 | 规划配置 revision/诊断 |
-| finance | 协调财务基准、项目覆盖及所选模型修订，经领域门面合并为同一有效财务配置 | `EffectiveFinanceConfig` 与诊断 |
+| finance | `FinanceProfile`/`FinanceOverrides` 的解析校验与确定性合并，签发不可变 `EffectiveFinanceConfig` | `EffectiveFinanceConfig` 与诊断 |
 | calculation | mode、预测算法与参数、generator、solver、精度、容差、选项、种子和输出选择 | 计算配置 revision/诊断 |
 | validation | 汇总项目基线、模型、规范数据与固定输入引用、规划配置和 `EffectiveFinanceConfig` | 项目校验报告 |
 | tasks | 快照、幂等、任务、取消和重试 | 任务受理与状态 |
@@ -117,14 +117,14 @@ Application 不拥有长时后台运算的执行状态机。它在提交阶段�
 1. 确认用户有提交权限且项目可计算；
 2. 读取并固定项目版本、数据版本和配置版本；
 3. 调用 assembly，阻断所有 blocking 诊断；
-4. 固定用户选择的计算配置及显式评价确认，在公开提交边界核对计算与财务模型所需能力；多预测任务同时满足收敛配置要求，不静默退回旧方法或默认模型；
-5. 生成固定装配产物、设备数学贡献、配置与模型修订、评价确认、输入资源及 provider 精确版本的 `CalcSnapshot`（内容归属见[领域模型](../domain-model.md#快照任务和结果)）；
+4. 固定用户选择的计算配置，校验 mode、预测目标所用算法与参数、generator、solver、精度、选项与输出能力；有多个 `data_predict` 时另校验收敛容差与最大迭代数；
+5. 生成包含 `ValidatedAssemblyArtifact`、设备 revision、方程 contract、规划/财务/计算配置 revision、预测目标和资源引用及 generator/solver/executor/result adapter 精确版本的 `CalcSnapshot`；
 6. 以项目作用域幂等键创建逻辑任务；
 7. 附加快照对象引用并记录审计；
 8. 提交后发布可重建队列消息；
 9. 返回任务 ID、状态和实际快照。
 
-Application 不生成 Solver Bundle。计算 Worker 经应用阶段命令把冻结输入交给纯 GeneratorProvider；物化输入携带同任务评价确认，有效财务配置携带冻结模型、参数与绑定，仍保持[生成器](generators.md#输入)规定的五项直接输入。运行阶段信任已经通过提交边界的类型化事实，不重复核对能力、读取最新模型或回读项目草稿；生成后再交给 SolverRuntime。
+Application 不生成 Solver Bundle。计算 Worker 在同一冻结快照上把装配产物、设备数学贡献、物化序列、有效财务快照与计算配置五项直接输入一起交给纯 GeneratorProvider，完成计算配置能力校验并封存 Bundle 后交给 SolverRuntime；这样 HTTP 事务不承担求解器文件生成，也不会让 Worker 回读项目草稿。
 
 队列发布失败不能让数据库中的任务变成不可解释孤儿；恢复器应能从权威任务状态重新入队。
 

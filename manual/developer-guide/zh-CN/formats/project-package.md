@@ -1,7 +1,7 @@
 # 项目包
 
-> 契约标识：`ies.project-package`；目标 `format_version`：`4.0.0`；包文件：`*.zip`（`manifest.json` 在根）。
-> 文档状态：生效目标契约；只定义目标文件语义，不声明实现进度。`1.x` / `2.x` / `3.x` 不再保留解析路径，主版本不兼容。
+> 契约标识：`ies.project-package`；目标 `format_version`：`3.0.0`；包文件：`*.zip`（`manifest.json` 在根）。
+> 文档状态：生效目标契约；只定义目标文件语义，不声明实现进度。`1.x` / `2.x` 不再保留解析路径，主版本不兼容。
 
 项目包是项目的离线交换载体：当前工作状态 + 包内历史版本 + 恢复它们所需的精确依赖（含项目已保存模型）。账号、权限、会话、密钥、宿主机路径、ORM 字段不得入包；来源数据库标识（如 `dataset_id`、`dataset_version_id`、配置 revision 号）仅作为包内映射标识出现，确认导入时一律映射为新身份，不得直接复用为目标库身份（通用书写规则见[文件格式标准](../file-formats.md)）。
 
@@ -12,9 +12,8 @@ manifest.json
 project.json
 draft.json
 finance_profile.yaml            # 当前工作状态的财务 Profile（正式财务契约）
-finance_overrides.yaml          # 当前工作状态的 Overrides（无额外覆盖时仍须含 model_ref、parameters_values、input_bindings）
+finance_overrides.yaml          # 当前工作状态的 Overrides（无覆盖时为显式空文档）
 effective_finance.yaml          # 当前工作状态的 Effective（合并器产物，不可人工改写）
-financial_model.yaml            # 当前工作状态的财务模型（正式财务模型契约）
 planning_config.yaml            # 当前工作状态的规划配置（当前无规划时缺席）
 versions/0001.json …            # 包内历史版本（内容自包含，引用见下）
 datasets/{dataset_id}/v{version_no}/dataset.json    # 每个数据版本独立元数据条目
@@ -36,18 +35,16 @@ models/{来源 device_id}.json     # 草稿与历史版本引用的项目模型�
     "finance_profile": "version_configs/0001/finance_profile.yaml",
     "finance_overrides": "version_configs/0001/finance_overrides.yaml",
     "effective_finance": "version_configs/0001/effective_finance.yaml",
-    "financial_model": "version_configs/0001/financial_model.yaml",
     "planning_config": "version_configs/0001/planning_config.yaml"
   }
 }
 ```
 
-- 五个文件分别使用正式财务/财务模型/规划 YAML 契约，携带该版本冻结引用指向的不可变正文，不从当前工作状态回填。
-- 键按需缺席：无 `effective_finance` 块时，Profile、Overrides、Effective 与 FinancialModel 四项财务依赖均缺席；有该块时四项必须齐备。规划依赖独立按 `planning_config` 块是否存在携带。
-- 来源键：版本内容 `effective_finance` 块的 `{profile_id, overrides_revision, revision, model_ref}` 与 `planning_config` 块的 `{revision}` 即来源键，只用于在包内定位上述文件，**不作为目标数据库的身份或修订号**。
+- 四个文件分别使用正式财务/规划 YAML 契约，内容为该版本冻结引用指向的**原行内容原样**（Profile 稳定来源、Overrides/Effective/Planning 各自 revision 行）。
+- 键按需缺席：版本内容无 `effective_finance` 块则前三个键缺席，无 `planning_config` 块则第四个键缺席；缺席保持缺席，导入后恢复也不建立对应指针。
+- 来源键：版本内容 `effective_finance` 块的 `{profile_id, overrides_revision, revision}` 与 `planning_config` 块的 `{revision}` 即来源键，只用于在包内定位上述文件，**不作为目标数据库的身份或修订号**。
 - Profile 自包含：每组财务依赖携带其精确来源的 `FinanceProfile` 文件；确认导入时先注册包内来源（同稳定 id 复用既有行），内容不一致即身份冲突、明确拒绝。绝不用当前 `finance_profile.yaml` 冒充历史，也绝不用目标库同名或最新 Profile 替代包内来源。
-- 财务模型随包携带：`financial_model.yaml` 使用正式财务模型 YAML 契约；`effective_finance.yaml` 的 `model_ref` 指向该模型，导入时校验模型 ID 与 revision 匹配。
-- 当前工作状态指向顶层 `finance_*.yaml` / `financial_model.yaml` / `planning_config.yaml` 这一组（`files.configs`），与 `version_configs` 无关；导入后当前指针按该组重建，不隐式变成任一历史版本的配置。
+- 当前工作状态指向顶层 `finance_*.yaml` / `planning_config.yaml` 这一组（`files.configs`），与 `version_configs` 无关；导入后当前指针按该组重建，不隐式变成任一历史版本的配置。
 
 ## files.models（唯一形状）
 
@@ -77,7 +74,7 @@ models/{来源 device_id}.json     # 草稿与历史版本引用的项目模型�
 ```json
 // manifest.json（片段）
 {
-  "format_version": "4.0.0",
+  "format_version": "3.0.0",
   "package_type": "project",
   "objects": [
     {"path": "project.json", "size_bytes": 412, "media_type": "application/json"},
@@ -85,20 +82,18 @@ models/{来源 device_id}.json     # 草稿与历史版本引用的项目模型�
     {"path": "datasets/7/v2/data.csv", "size_bytes": 1024, "media_type": "text/csv"},
     {"path": "models/acme.device.load_1.json", "size_bytes": 320, "media_type": "application/json"},
     {"path": "version_configs/0001/finance_profile.yaml", "size_bytes": 190, "media_type": "application/yaml"},
-    {"path": "version_configs/0001/finance_overrides.yaml", "size_bytes": 210, "media_type": "application/yaml"},
-    {"path": "financial_model.yaml", "size_bytes": 180, "media_type": "application/yaml"}
+    {"path": "version_configs/0001/finance_overrides.yaml", "size_bytes": 210, "media_type": "application/yaml"}
   ],
   "files": {
     "project": "project.json",
     "draft": "draft.json",
-    "configs": {"finance_profile": "finance_profile.yaml", "financial_model": "financial_model.yaml"},
+    "configs": {"finance_profile": "finance_profile.yaml"},
     "versions": ["versions/0001.json"],
     "datasets": ["datasets/7/v2/dataset.json"],
     "evidence": [],
     "version_configs": {"0001": {
       "finance_profile": "version_configs/0001/finance_profile.yaml",
-      "finance_overrides": "version_configs/0001/finance_overrides.yaml",
-      "financial_model": "version_configs/0001/financial_model.yaml"
+      "finance_overrides": "version_configs/0001/finance_overrides.yaml"
     }},
     "models": [{
       "device_id": "acme.device.load_1",
@@ -126,7 +121,6 @@ models/{来源 device_id}.json     # 草稿与历史版本引用的项目模型�
 
 ## 格式变更决策记录
 
-- `3.0.0` → `4.0.0`（主版本）：新增 `financial_model.yaml` 必需文件与 `version_configs` 中的 `financial_model` 键。财务模型是有效财务配置的组成部分（`effective_finance.yaml` 的 `model_ref` 指向该模型），旧包不包含该文件则无法恢复完整财务语义，故按主版本升级；导入不再解析 `3.x`。
 - `2.0.0` → `3.0.0`（主版本）：新增 `files.models` 携带草稿与历史版本引用的项目模型依赖，导入时经正式保存路径重建并映射引用。同一输入（内容引用了项目模型的包）在 `2.0.0` 下被接受但副本消费源项目模型行（跨项目身份泄漏、源项目删除模型即断链），在 `3.0.0` 下要么携带并映射、要么拒绝导入——旧消费者无法安全忽略该依赖，故按主版本升级；导入不再解析 `2.x`。
 - `1.0` → `2.0.0`（主版本）：数据集元数据路径从按数据集唯一改为按数据版本唯一；新增 `files.version_configs` 携带历史精确依赖；导入不再解析 `1.x`。旧包（仅当前配置、无多版本数据集）不在新读取器下重释，多版本 `1.0` 包本就无法通过上传校验、无有效存量。
 - 否决（`2.0.0` → `3.0.0`）：把包内模型行 id 复用为目标身份；让副本继续消费源项目模型行（本决策修正的泄漏）；模型依赖缺失时静默清空内容引用；把携带模型推迟为可选扩展而保持 `2.x`（旧消费者会把无依赖的包当有效包消费）。

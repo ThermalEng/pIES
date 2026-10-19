@@ -202,7 +202,7 @@ finance:
 - 外部导入时可在入口完成验证，并从来源 Profile 与 Overrides 重新合并验证财务语义；进入可信流程后不重复校验，也不静默改用其他来源；
 - 引用 `time_series` 价格的条目（在 Profile/Overrides 中声明）携带 `resolution`/`point_count`/`unit` 等不可变序列元数据（无 `leap_year`）；装配只核对元数据自身完整与分辨率一致。序列覆盖全期的核对统一在任务提交边界（取得已确认运营年限 `operation_years` 后核对点数与年度边界）；不一致阻断，不重采样、不插值（Profile 不固定唯一项目分辨率，校验以被引用序列元数据为准）；时变价格按逐点计价（`Σ price[t]×e[t]`），聚合与计价衔接见[财务 YAML 契约](finance-yaml.md)「聚合与计价衔接」；
 - `planning` 只保存目标函数、目标权重、规划变量、上下界和规划/系统约束。目标函数用普通标识符逐项引用财务分量（映射规则见下文「规划表达式中的财务分量标识符」；示例见上方最小结构：`1 year * pv_1__annual_fixed_om + pv_1__period_variable_om + import_meter__period_energy_purchase + export_meter__period_energy_sale`，其中 `1 year` 为显式时间跨度字面量（示例为单年窗口），把 currency/年 的按年值换算为窗口金额（currency）后再相加；能源计费分量**已带符号**——`purchase` 分量 = +raw_charge、`sale` 分量 = −raw_charge（`raw_charge = Σ price[t]×e[t]`，正售电价时 sale 分量自身为负），所以目标表达式对所有分量统一使用加法；负价自然反转该方向效果；缺少显式时间跨度不得默认相加）；该示例是“预算上限约束下的运行成本最小化”的具体示例，不是通用经济目标——把一次性 `upfront_capex` 转换为可与运行期成本比较的显式规划分量，属于 `PlanningConfig` 的版本化规则，须在该契约中定义后再使用；有效快照**不静默相加成默认总成本**，不提供隐式“系统总成本”标识符，Profile 不隐式年化或默认选择转换规则；规划配置显式选择或组合哪些分量；
-- 项目覆盖是 authoring 输入，`EffectiveFinanceConfig` 是装配与计算唯一消费的不可变快照：运行期不继承 Profile、不读取“最新地区价格”、不静默默认值。基础成本分量不混入折旧、融资、还款或 IRR 等评价语义；税后计算与规划目标的衔接由[财务计算](../modules/finance.md)及版本化财务/规划契约明确，不因分量边界而禁止税后目标，也不在装配中另造计税公式。
+- 项目覆盖是 authoring 输入，`EffectiveFinanceConfig` 是装配与计算唯一消费的不可变快照：运行期不继承 Profile、不读取“最新地区价格”、不静默默认值。本契约成本分量不包含折旧、融资、还款与 IRR 等后评价输入。
 
 ### 规划表达式中的财务分量标识符
 
@@ -219,8 +219,6 @@ finance:
 - 后缀决定分量族：`upfront_capex`/`annual_fixed_om`/`period_variable_om` 只与实例前缀（设备成本）合法；`period_energy_purchase`/`period_energy_sale` 只与绑定前缀（能源计费）合法，且必须与被引用价格的显式 `direction` 匹配——`direction: purchase` 的 price 产生 `<binding_id>__period_energy_purchase`，`direction: sale` 的 price 产生 `<binding_id>__period_energy_sale`；方向不靠 binding_id 或 price_id 的名称推断，后缀与方向不匹配即阻断；
 - 标识符到 `(前缀, 分量)` 的映射唯一可逆。装配校验确认该前缀在绑定下**实际产生**该分量：设备成本分量要求实例为 `type: costed`、其 `finance_type` 声明该分量且相关 driver 按增量语义齐全；能源计费分量要求该 `binding_id` 在 `tariff_bindings` 中绑定存在的 `price_id`（`carrier` 与接口相容、方向匹配）。`existing` 实例不得引用被排除的沉没分量（`upfront_capex`、`annual_fixed_om`）；不满足即阻断，防止把不存在的量写进目标；
 - 规划配置不得把上述保留集合中的标识符声明为其它含义（与变量或技术量同名冲突即拒绝）；其余表达式标识符（模型技术量、规划变量等）由规划配置契约定义，本小节只定义财务分量引用的映射。
-- 财务模型的 `kind: npv` 输出 ID（如 `after_tax_npv`）作为普通 `Name` 进入同一规划表达式命名空间：规划配置只能引用，不得以变量或技术量重定义（同名冲突即拒绝）；模型未声明的输出名不存在，引用即拒绝；序列输出（`kind: series`）与 `irr`/`payback_static`/`payback_dynamic` 指标输出不是规划目标或约束项，引用即拒绝。模型身份、输出口径（`cashflow.tax_basis`）与时间语义见[财务模型 YAML 契约](financial-model-yaml.md)。
-- 项目财务配置的 `input_bindings`（模型输入 → 计量绑定/实例列表）在本装配边界核对：绑定存在性、该绑定实际产生所声明分量、单位与方向相容；多项即显式求和，不隐式聚合；不满足即阻断。
 
 量纲与单位字面量：
 
@@ -309,7 +307,7 @@ tariff_bindings:
 1. **结构校验**：安全 YAML、schema、字段类型、ID和引用形状（含 `finance` 引用、`finance_binding` 判别联合、`tariff_bindings` 的 binding_id 结构与命名规则）；
 2. **模型与数据校验**：设备内容、properties、equations、predefined interfaces、数据时间覆盖、单位与状态；
 3. **图与系统校验**：interface 类型、连接、carrier、拓扑、平衡和系统约束；校验 `existing`/`new` 身份，以及 `tariff_bindings` 的实例/接口存在性、接口流向与方向可用性；
-4. **规划与财务完整性校验**：每个实例的显式设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性（`new` 全量、`existing` 仅周期可变分量）、`tariff_bindings` 的 `price_id` 存在性、载体/方向相容性与 binding_id 唯一性、目标函数逐项引用（财务分量标识符映射与带单位常量的量纲/`currency` 一致性）、模型 `kind: npv` 输出符号保留（同名冲突与序列/`irr`/回收期引用拒绝）、模型输入绑定 `input_bindings`（存在性、分量可得、单位/方向相容）、规划变量/约束、有效财务快照引用与 `driver` 映射的聚合/量纲/存在性校验。
+4. **规划与财务完整性校验**：每个实例的显式设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性（`new` 全量、`existing` 仅周期可变分量）、`tariff_bindings` 的 `price_id` 存在性、载体/方向相容性与 binding_id 唯一性、目标函数逐项引用（财务分量标识符映射与带单位常量的量纲/`currency` 一致性）、规划变量/约束、有效财务快照引用与 `driver` 映射的聚合/量纲/存在性校验。
 
 同阶段尽量聚合可修复诊断；任何 error 都不产生可执行产物。
 
@@ -328,7 +326,7 @@ tariff_bindings:
 
 - 示例补齐真实设备引用、`finance` 精确引用、`finance_binding` 判别联合与 `tariff_bindings` 绑定映射后可通过 `3.0.0` schema；
 - 装配没有设备独立版本、parameters/ports/model commands 或设备经济字段；财务成本模型来自被引用的有效快照，不来自设备文件，也不在装配内内联完整财务配置；
-- 五类 interface、来源模式（`constant`/`data_repeat`/`data_full`/`data_predict`）、存量/新增、设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性、`tariff_bindings` 的 `price_id`/`carrier`/`direction` 校验（含 `type: none` 计量点）、财务分量标识符映射（实例前缀与绑定前缀的命名空间规则）与带单位常量量纲校验、规划目标逐项引用（含模型 `kind: npv` 输出符号保留与冲突拒绝）及有效财务快照身份/血缘均有契约测试；
+- 五类 interface、来源模式（`constant`/`data_repeat`/`data_full`/`data_predict`）、存量/新增、设备成本绑定（`costed`/`none`）、按增量语义的 driver 齐全性、`tariff_bindings` 的 `price_id`/`carrier`/`direction` 校验（含 `type: none` 计量点）、财务分量标识符映射（实例前缀与绑定前缀的命名空间规则）与带单位常量量纲校验、规划目标逐项引用及有效财务快照身份/血缘均有契约测试；
 - 非法文件没有旁路进入生成器，合法文件只产生一个规范形态；
 - 生成器只读 `ValidatedAssemblyArtifact`，不重新解释原始项目、CSV 路径或 GUI 状态；
 - `ies.assembly` `1.0.0` 是未发布开发草案；其 schema、迁移器、迁移回执、样例和兼容路径直接删除，不提供 1.0/2.0 双轨或离线迁移入口。

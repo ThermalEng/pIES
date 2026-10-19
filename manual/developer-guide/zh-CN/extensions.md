@@ -17,7 +17,6 @@
 | 对象 | 稳定身份 | 固定具体内容 | 兼容性版本 |
 |---|---|---|---|
 | 设备 YAML | `device.id` | 发布 revision、校验回执 | 仅统一 `ies.device-model` schema 版本 |
-| 财务模型 YAML | 模型 ID | 不可变 revision | 统一 `ies.financial-model` schema 版本 |
 | 算法插件/provider | 命名空间 ID | 发布记录 | 独立三段式语义版本 |
 | 数据版本 | dataset ID | 变换记录 | 文件 schema 版本 |
 
@@ -50,7 +49,7 @@
 - 输出 solver 无关的变量、关系、状态、接口流和结果映射；
 - 禁止动态执行、文件/网络访问和 solver 私有对象。
 
-装配固定设备贡献与方程 contract；所选计算能力在公开提交边界核对，生成阶段消费已经接受的类型化事实，不再重复预检。
+装配固定设备 revision 和方程 contract；generator 在执行前验证能力匹配。
 
 ## 计算 provider
 
@@ -60,9 +59,7 @@
 - ExecutorProvider：把受信任 executable ID 映射为受控进程或容器执行方式；
 - ResultAdapterProvider：把声明输出和执行回执映射为统一 `ComputeResult`。
 
-GeneratorDescriptor 必须提前声明支持的装配、计算与数学能力，以及 solver、选项、内部单位、确定性和配套 ResultAdapter。目标选择与规划边界来自规划配置；财务模型规则、项目参数与绑定由有效财务配置提供，评价确认随同次物化输入交接，见[生成器](modules/generators.md#输入)。不能将它们写入设备技术 descriptor。
-
-财务方法扩展走[财务模型 YAML](formats/financial-model-yaml.md)，不是可执行 provider 注册或算法插件热加载。模型只声明规则，是否可参与求解由所选生成器的公开数学能力决定；不按模型 ID 添加专属程序分支。
+GeneratorDescriptor 必须提前声明支持的装配 schema、计算 mode、方程 contract、solver、选项、计算精度、内部单位、确定性和配套 ResultAdapter。目标函数、规划变量和约束来自规划配置；设备成本分量、O&M 与能源价格等公共财务参数来自装配引用的 `EffectiveFinanceConfig`。generator 可以据此形成目标，但不得修改或扩充设备技术 descriptor。
 
 ExecutorDescriptor 声明 allowlist、资源隔离、取消和 readiness 能力。运行时只执行 Solver Bundle 中的结构化命令；装配 YAML 和设备 YAML 不得含 shell 或代码路径。
 

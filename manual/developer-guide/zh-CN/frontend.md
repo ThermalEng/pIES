@@ -150,8 +150,6 @@ RequestContract + revision/idempotency key
 
 结果页以 task/evidence 标识加载固定结果。指标、逐时数据、评估和导出都来自该来源；不得用当前项目缓存补缺失字段，也不得在前端重算财务或评估公式。
 
-财务表单与人工文件共用正式财务契约；展示按冻结模型的声明解释指标来源、税前/税后口径及单位，不按模型或输出名称维护业务映射。结果页与导出消费同一任务的封存评价，缺席不伪装为通过；字段与状态见[财务计算](modules/finance.md#封存评价块-financial_evaluation)。
-
 ## 帮助中心
 
 `manual/` 是帮助中心唯一正文来源。构建阶段读取 `SUMMARY.<locale>.md` 生成只读内容清单，运行时不读取宿主机文件，也不调用后端转换 Markdown。
