@@ -53,10 +53,11 @@ Roadmap 是尚未实现工作的动态清单，规定开发顺序，不承诺具
 
 目标：在公开边界完成后，用仓库外视角验证扩展不需修改核心模块。
 
-1. 用仓库外测试内容/扩展依次验证设备 YAML、数据 CSV、公共方程 contract、GeneratorProvider、ResultAdapterProvider、ExecutorProvider 和存储扩展。
-2. 发布可运行扩展示例、四种文件契约测试工具，以及设备稳定 ID、publication revision 与 provider 精确版本固定规则。
+1. 按财务模块指南收敛嵌入式税务的必要输入与生成器能力，接通税后 NPV 目标、同次现金流评价及页面／导出；以可手算的通用样例验收，不建设通用财务语言或税务申报系统，不以税前邻域搜索替代税后求解。
+2. 用仓库外测试内容/扩展依次验证设备 YAML、数据 CSV、公共方程 contract、GeneratorProvider、ResultAdapterProvider、ExecutorProvider 和存储扩展。
+3. 发布可运行扩展示例、四种文件契约测试工具，以及设备稳定 ID、publication revision 与 provider 精确版本固定规则。
 
-退出标准：新增或替换 provider 不修改无关业务模块、GUI 映射或通用 runtime；任一注册失败不发布部分状态。
+退出标准：税后目标与同任务评价、页面及导出同源，增值税含税收付款及跨期抵扣有独立手算验收；新增或替换 provider 不修改无关业务模块、GUI 映射或通用 runtime；任一注册失败不发布部分状态。
 
 ## `0.16.0` — 运维、备份与故障演练
 

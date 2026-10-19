@@ -37,6 +37,8 @@ ResultAdapter → ComputeResult
 
 ## 输入
 
+选择税后目标时，税务是同一次计算模型中的财务关系，不增加独立税务求解任务，也不以敏感性搜索或插值替代该目标。关系分类、现金流与求解能力边界见[财务计算](finance.md#税务参与规划与现金流)；运行时只执行 Bundle，不解释税务政策。
+
 计算入口只接受：
 
 - 由装配模块签发的 `ValidatedAssemblyArtifact`；
