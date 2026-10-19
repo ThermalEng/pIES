@@ -202,7 +202,7 @@ finance:
 - 外部导入时可在入口完成验证，并从来源 Profile 与 Overrides 重新合并验证财务语义；进入可信流程后不重复校验，也不静默改用其他来源；
 - 引用 `time_series` 价格的条目（在 Profile/Overrides 中声明）携带 `resolution`/`point_count`/`unit` 等不可变序列元数据（无 `leap_year`）；装配只核对元数据自身完整与分辨率一致。序列覆盖全期的核对统一在任务提交边界（取得已确认运营年限 `operation_years` 后核对点数与年度边界）；不一致阻断，不重采样、不插值（Profile 不固定唯一项目分辨率，校验以被引用序列元数据为准）；时变价格按逐点计价（`Σ price[t]×e[t]`），聚合与计价衔接见[财务 YAML 契约](finance-yaml.md)「聚合与计价衔接」；
 - `planning` 只保存目标函数、目标权重、规划变量、上下界和规划/系统约束。目标函数用普通标识符逐项引用财务分量（映射规则见下文「规划表达式中的财务分量标识符」；示例见上方最小结构：`1 year * pv_1__annual_fixed_om + pv_1__period_variable_om + import_meter__period_energy_purchase + export_meter__period_energy_sale`，其中 `1 year` 为显式时间跨度字面量（示例为单年窗口），把 currency/年 的按年值换算为窗口金额（currency）后再相加；能源计费分量**已带符号**——`purchase` 分量 = +raw_charge、`sale` 分量 = −raw_charge（`raw_charge = Σ price[t]×e[t]`，正售电价时 sale 分量自身为负），所以目标表达式对所有分量统一使用加法；负价自然反转该方向效果；缺少显式时间跨度不得默认相加）；该示例是“预算上限约束下的运行成本最小化”的具体示例，不是通用经济目标——把一次性 `upfront_capex` 转换为可与运行期成本比较的显式规划分量，属于 `PlanningConfig` 的版本化规则，须在该契约中定义后再使用；有效快照**不静默相加成默认总成本**，不提供隐式“系统总成本”标识符，Profile 不隐式年化或默认选择转换规则；规划配置显式选择或组合哪些分量；
-- 项目覆盖是 authoring 输入，`EffectiveFinanceConfig` 是装配与计算唯一消费的不可变快照：运行期不继承 Profile、不读取“最新地区价格”、不静默默认值。本契约成本分量不包含折旧、融资、还款与 IRR 等后评价输入。
+- 项目覆盖是 authoring 输入，`EffectiveFinanceConfig` 是装配与计算唯一消费的不可变快照：运行期不继承 Profile、不读取“最新地区价格”、不静默默认值。计税折旧与税务关系由[财务模块](../modules/finance.md#税务参与规划与现金流)定义，装配通过有效财务快照引用；评价指标由同次解生成。
 
 ### 规划表达式中的财务分量标识符
 
@@ -296,7 +296,7 @@ tariff_bindings:
 
 ## 计算包生成边界
 
-装配 YAML 不包含 `calculation`。规范 `ValidatedAssemblyArtifact` 与独立计算配置一起进入计算包生成用例。计算配置固定 mode、预测目标所用算法与参数、计算精度、generator、solver、阶段二适用时的收敛容差与最大迭代数、时间限制、选项、随机种子和输出选择，并在生成 Solver Bundle 前完成能力兼容校验。
+装配 YAML 不包含 `calculation`。规范 `ValidatedAssemblyArtifact` 与独立计算配置一起进入计算包生成用例。计算配置固定 mode、预测目标所用算法与参数、计算精度、generator、solver、时间限制、选项、随机种子和输出选择，并在生成 Solver Bundle 前完成能力兼容校验。
 
 更换 generator、solver、精度或求解选项只会形成新的计算配置和 Solver Bundle，不改变装配文本。
 

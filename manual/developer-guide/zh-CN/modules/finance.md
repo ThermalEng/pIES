@@ -7,10 +7,10 @@
 
 `finance` 管理整体模型共用财务参数，并把建设投入、运行结果和这些经济假设转换成可复核的现金流与财务指标。它必须让每个参数、指标的口径、时间点和状态可复核，避免把一个看似正常的数字当作完整财务结论。
 
-财务模块分为两个范围，本页明确分段：
+财务模块负责两个方面：
 
 1. **财务文件契约**：`FinanceProfile` / `FinanceOverrides` / `EffectiveFinanceConfig` 的领域结构、YAML 解析、安全规范化与完整校验，以及把合并后的成本/能源分量交给装配、规划与计算消费的边界。字段级定义全部在[财务 YAML 契约](../formats/finance-yaml.md)。
-2. **长期指标蓝图（FinancialResult）**：把规范化现金流与运行汇总解释为项目/资本金现金流及 NPV、IRR、LCOE、回收期等指标，形成不可变 `FinancialResult`。这是模块蓝图目标，与本次 Profile 文件契约分开规划；Profile 文件契约不包含评价期、折旧、融资等后评价专用输入，蓝图也不能据此提前实现输入字段。
+2. **规划财务关系与项目评价**：向生成器提供成本、收入、税务及计税折旧关系，从同次解形成项目现金流、NPV、IRR、静态和动态回收期。评价年限、折现率与建设安排通过评价确认提供，字段归属见本页「评价确认与快照冻结」。
 
 ## 边界
 
@@ -18,7 +18,7 @@
 
 - 财务三件套的领域结构、解析、规范化与校验，以及确定性合并器的语义（字段细节见[财务 YAML 契约](../formats/finance-yaml.md)）；
 - 按时间口径组织成本/能源分量：`upfront_capex`（建设期一次性，仅 `new`）、`annual_fixed_om`（按年度，currency/年）、`period_variable_om` / `period_energy_purchase` / `period_energy_sale`（按运行/计费窗口合计，currency；两个能源分量为**有符号记账贡献**、由 `tariff_bindings` 的每个计量绑定独立产生，符号约定见[财务 YAML 契约](../formats/finance-yaml.md)「计价规则」）；不把分量静默相加成默认总成本，按年分量与窗口合计相加前必须以显式时间跨度换算，组合目标由规划配置显式选择；
-- 长期蓝图：从规范运行汇总生成不可变 `FinancialResult`，并对每个指标独立计算与分类失败状态。
+- 提供参与规划的财务关系，形成同次解的现金流和财务指标，并记录各指标的计算状态。
 
 模块不负责从数据库找价格、不选择当前项目版本、不判断用户权限、不调度任务，也不修改计算结果。`backend/iesplan/devices/catalog/prices.yaml` 与 `$price` 不作为第二权威源，不得静默回退或运行期兼容；不保留 `finance_config.json` 别名或 JSON/YAML 双格式兼容。
 
@@ -105,17 +105,17 @@ credit[k] = max(-net[k], 0)
 
 化简结果与原财务关系等价，所需上下界由业务参数与变量边界推导。公开提交边界核对生成器是否支持所选关系，不支持时返回能力诊断。内部计算沿用已确认的参数和类型化交接。
 
-## 长期蓝图：`FinancialResult`
+## 项目财务评价结果
 
-`FinancialResult` 蓝图至少表达：
+项目财务评价结果包含：
 
-- 逐期项目和资本金现金流；
+- 逐期项目现金流；
 - 投资、运行成本、收益和残值等组成；
-- NPV、IRR、LCOE、回收期及单位；
+- NPV、IRR、静态回收期、动态回收期及单位；
 - 每个无法正常计算指标的独立状态与原因；
 - `EffectiveFinanceConfig`（含币种、`price_basis`、`base_year`）与计算版本。
 
-IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_failure` 等状态一起消费；不能用 `null` 或零模糊这些情况。该蓝图需要的评价期、资金时间价值、折旧等输入不属于本版 Profile 文件契约；落地时按「增加财务指标」流程补入独立契约，不回流为财务文件契约的隐式字段。
+IRR 与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_failure` 等状态一起消费。计税折旧参与求解中的应税所得计算；评价使用同一规则和同次解。对外读取与导出统一使用下面的封存评价块。
 
 ### 项目投资口径评价规则
 
@@ -123,7 +123,7 @@ IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、nu
 
 ### 封存评价块 `financial_evaluation`
 
-Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一证据单元封存（`status` 为 `"evaluated"`）；未求解或缺解输出不写财务块。读取与导出只消费该封存事实，不重算、不读最新配置。金额均为十进制字符串（不舍入），单位独立字段：
+Worker 对同次已求解结果计算一次评价，随结果载荷同一证据单元封存（`status` 为 `"evaluated"`）；未求解或缺解输出不写财务块。读取与导出只消费该封存事实，不重算、不读最新配置。金额均为十进制字符串（不舍入），单位独立字段：
 
 - `evaluation_years`／`construction_period`／`operation_years`：整数（K/N 回显冻结输入，供时轴映射展示）；
 - `currency`、`price_basis`、`base_year`、`profile_id`、`discount_rate`：冻结值原样；
@@ -166,7 +166,7 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 ## 蓝图设计思路
 
 1. 把输入规范成时间点明确的现金流分量；
-2. 再组合项目现金流和资本金现金流；
+2. 按同次财务关系组合项目现金流；
 3. 对每个指标独立计算并分类失败状态；
 4. 在公开输入边界确认必要的时间、金额与币种约束；内部计算、快照读取与阶段交接信任已确认的事实，不重复校验分量之和、长度或币种；
 5. 最后形成不可变财务结果，交给 analysis 和证据层。
@@ -178,7 +178,7 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 1. 写清业务定义、单位、时间点和适用范围；
 2. 明确输入不足、分母为零、多解或无解时的状态；
 3. 用手算小样例和边界现金流建立测试；
-4. 将指标加入 `FinancialResult` 的版本化 contract；
+4. 将指标加入封存财务评价的版本化 contract；
 5. 更新 analysis 对指标的读取，但不让 finance 依赖 analysis；
 6. 同步结果解释和更新日志中的用户可见变化。
 
@@ -188,7 +188,7 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 - 非有限值、长度错误或缺少必需分量：输入诊断；
 - `FinanceOverrides` 引用了未知 `profile id`、覆盖不存在的 `finance_type`/分量/`driver`/`price_id`、改变 driver 集合或分量类型、覆盖中改写 `carrier`/`direction` 或新增/删除 `price_id`、改变单位/币种/`price_basis`/`cost_method`、出现 `null` 或部分金额：阻断，不产生 Effective；
 - 被引用的 `time_series` 未通过校验、未覆盖全期、元数据（resolution/point_count）与引用声明或全周期推导值不一致（任务提交边界核对）：阻断，不重采样；
-- IRR 无解、多解或退化：返回对应业务状态，不抛普通内部异常（长期蓝图）；
+- IRR 无解、多解或退化：返回对应业务状态；
 - 数值算法未收敛：返回 numeric failure 和受控细节；
 - 基准缺失：由 application 在调用前阻断，finance 不创建零基准。
 
@@ -210,8 +210,8 @@ Worker 只对最终轮已求解结果计算一次评价，随结果载荷同一�
 ## 完成标准
 
 - 财务三件套解析、规范化与合并的契约测试以[财务 YAML 契约](../formats/finance-yaml.md)为字段权威；拒绝测试覆盖未知 `finance_type`、越权覆盖、`null`/部分金额、旧 JSON 别名，以及外部导入边界的对象身份不匹配；
-- 手算基准、正常现金流及 IRR 各异常状态均有测试（IRR 属长期蓝图，独立验收）；
-- 项目和资本金口径不会混用；
+- 手算基准、正常现金流及 IRR 各异常状态均有测试；
+- 结果采用明确的项目投资口径；
 - 输入不完整时没有默认现金流或伪指标；
 - 结果可序列化、可追溯且足以生成用户解释；
 - 新指标不要求 finance 读取项目或任务内部状态。

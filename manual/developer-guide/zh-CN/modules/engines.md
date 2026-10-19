@@ -11,12 +11,7 @@ ValidatedAssemblyArtifact + CalculationConfig
           ↓
 constant/data_repeat/data_full/data_predict 序列物化
           ↓
-阶段一：GeneratorProvider → Solver Bundle → SolverRuntime
-          ↓
-data_predict > 1 ? ─否→ ResultAdapter → ComputeResult
-          │是
-          ↓
-阶段二：以上次结果为初始值，重建预测目标与计算模型并迭代求解
+GeneratorProvider → Solver Bundle → SolverRuntime
           ↓
 ResultAdapter → ComputeResult
 ```
@@ -45,7 +40,7 @@ ResultAdapter → ComputeResult
 - 与装配回执一致的预定义来源声明和对象输入资源；
 - 预测目标类型及其所需时间、自回归和外生协变量绑定；
 - 精确 generator、solver、executor 和 result adapter 版本；
-- 固定预测算法与参数、生成选项、求解选项、收敛容差、最大迭代数、随机种子和资源上限；
+- 固定预测算法与参数、生成选项、求解选项、随机种子和资源上限；
 - Worker 提供的 attempt、取消、租约和证据写入上下文。
 
 不接受项目草稿、前端表单、ORM 对象、未经校验的 YAML/CSV、宿主机路径和动态函数入口。
@@ -65,15 +60,13 @@ ResultAdapter → ComputeResult
 
 ## 开发思路
 
-### 先物化序列并决定求解流程
+### 先物化全期序列，再整体求解
 
-计算阶段按同一快照展开 `constant`、重复 `data_repeat`、原样使用覆盖全期的 `data_full`，并按目标类型和计算配置独立生成各 `data_predict`。然后用这些序列完成一次完整的阶段一求解。
+计算阶段按同一快照展开 `constant`、重复 `data_repeat`、原样使用覆盖全期的 `data_full`，并按目标类型和计算配置生成各 `data_predict`。全部序列生成完成后，构建完整技术／财务模型并整体求解。
 
-- `data_predict` 数量为零或一：阶段一结果直接作为权威结果；
-- `data_predict` 数量大于一：用阶段一结果作为初始值，启动阶段二；
-- `constant` 和 `data_repeat` 不计入触发数量。
+预测使用历史数据和未来已知条件，在求解前生成完整运营期序列；多个目标分别物化后共同进入模型，目标数量不改变求解流程。容量与单位出力的关系、储能 SOC 等运行状态直接由技术方程表达。
 
-阶段二在每次迭代中重建完整预测目标和计算模型，再生成 Bundle 并求解，直到达到计算配置的收敛容差或最大迭代数。阶段一对阶段二只提供初始值；阶段二仍从固定装配、输入和配置重建模型，不依赖阶段一产物才能表达正确模型；阶段一只缩短其寻优路径。阶段二的最终结果是权威结果。
+依赖求解结果的外部预测／仿真反馈，在出现明确业务需求时单独定义依赖关系与计算方法。当前规划流程采用求解前物化，不设置通用预测外层循环。
 
 ### 先冻结业务输入
 

@@ -117,7 +117,7 @@ Application 不拥有长时后台运算的执行状态机。它在提交阶段�
 1. 确认用户有提交权限且项目可计算；
 2. 读取并固定项目版本、数据版本和配置版本；
 3. 调用 assembly，阻断所有 blocking 诊断；
-4. 固定用户选择的计算配置，校验 mode、预测目标所用算法与参数、generator、solver、精度、选项与输出能力；有多个 `data_predict` 时另校验收敛容差与最大迭代数；
+4. 固定用户选择的计算配置，校验 mode、预测目标所用算法与参数、generator、solver、精度、选项与输出能力；
 5. 生成包含 `ValidatedAssemblyArtifact`、设备 revision、方程 contract、规划/财务/计算配置 revision、预测目标和资源引用及 generator/solver/executor/result adapter 精确版本的 `CalcSnapshot`；
 6. 以项目作用域幂等键创建逻辑任务；
 7. 附加快照对象引用并记录审计；
