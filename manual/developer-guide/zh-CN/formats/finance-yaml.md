@@ -4,13 +4,11 @@
 > 推荐文件名（项目包内固定名称）：`finance_profile.yaml`、`finance_overrides.yaml`、`effective_finance.yaml`
 > 文档状态：生效目标契约；本页只定义目标文件语义，不声明实现进度。
 
-> 财务模型（`ies.financial-model@1.0.0`）定义收入、费用、计税、折旧和现金流的具体计算关系，其完整契约见[财务模型 YAML 契约](financial-model-yaml.md)。本页三件套是基础参数与计价契约；Overrides 目标版本 `3.0.0` 增加 `model_ref`、`parameters_values` 与 `input_bindings`（模型选择、参数值与输入绑定）；Effective 目标版本 `3.0.0` 增加 `model_ref`、`model_rules`、`parameters_values` 与 `input_bindings`。四者都是必填：不存在“省略模型选择与事实来源的空 Overrides”形态。
+> 财务模型定义收入、费用、计税、折旧和现金流的计算关系，完整规则见[财务模型 YAML 契约](financial-model-yaml.md)。本页定义基础参数、计价及项目选择；Overrides 必须给出模型选择、参数值与输入绑定，Effective 还固定所选模型规则正文。具体字段分别见各文件字段表。
 
 本页定义财务三件套的完整 YAML 结构与校验语义，是 [文件格式标准](../file-formats.md) 与[财务计算](../modules/finance.md)的字段级权威正文。装配如何引用有效快照见[装配 YAML](assembly-yaml.md)。
 
-本页 `2.0.0` 定义基础金额、计价和税目登记，尚不足以表达完整税后规则；不能将它解释为 finance 模块禁止税后评价，也不能宣称现有字段已支持税后计算。税后能力须先按[财务计算](../modules/finance.md)明确公开输入、规则与结果，再对受影响契约及消费者一同版本化，不在本页现有 schema 下私加字段或隐式行为。
-
-财务方法由财务模型定义、程序提供通用执行框架，具体边界以[财务计算](../modules/finance.md)为准。本页现有三件套是基础参数与计价契约，不是完整的自定义方法契约；`cost_method: fixed_plus_linear` 也不构成对所有后续模型的永久限制。模型表达、参数值与输入绑定及求解/评价共同消费方式已由[财务模型 YAML 契约](financial-model-yaml.md)确定；本页不内联模型正文。
+成本、价格及税目登记不是完整的税后方法，也不隐式启用税务计算。财务方法由模型定义，程序执行模型关系；`cost_method: fixed_plus_linear` 仅限定本页成本分量的表达能力，不将它扩大成所有财务模型的永久限制。跨模块职责见[财务计算](../modules/finance.md)。
 
 ```text
 FinanceProfile（地区财务基准，人工 authoring）
@@ -154,7 +152,7 @@ taxes:
 - 按年分量（currency/年）与窗口合计分量（currency）相加前，必须把按年分量乘以**显式时间跨度**换算到同一窗口后再相加（示例为单年窗口：`annual_fixed_om × 1 year`，运营年限由提交时显式确认，此处取 1；非默认）；缺少显式时间跨度不得默认相加或做其他隐式缩放；
 - 本契约不定义“总成本”聚合，也不提供隐式“系统总成本”标识符；`upfront_capex`（一次性）与运行期成本之间不存在本契约默认的转换——不做隐式年化，不隐含资本回收系数、利率或年限等值；
 - 具体如何把一次性投资转换为可与运行期成本比较的规划分量（例如时间口径一致的显式目标分量），属于 `PlanningConfig` 的明确、版本化规则，须在规划配置契约中定义后再使用；本财务 Profile 不隐式定义或默认选择这种转换，也不因不做后评价而禁止规划配置契约定义此类显式分量；
-- 后评价指标（NPV/IRR 等）不属于本契约输入（属 finance 模块长期蓝图，见[财务计算](../modules/finance.md)）；
+- 评价指标（NPV/IRR 等）不是本文件的参数输入，由模型声明并由通用执行框架计算，见[财务计算](../modules/finance.md)；
 - 规划表达式引用这些分量的合法标识符编码与单位字面量规则见[装配 YAML](assembly-yaml.md)「规划表达式中的财务分量标识符」。
 
 ## `ies.finance-overrides@3.0.0`

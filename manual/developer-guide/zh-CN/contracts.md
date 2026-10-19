@@ -154,16 +154,15 @@ Worker 只有在命令可解析、租约有效且写入资格仍成立时才能�
 
 ## 公共文件契约
 
-核心计算和离线交换继续使用五种版本化契约：设备模型 YAML、设备数据 CSV、装配 YAML、Solver Bundle 和财务模型 YAML。用户算法扩展另使用[算法插件包](formats/algorithm-plugin-package.md)交付契约；它由通用计算 provider 在隔离环境解释，不能代替 Solver Bundle。完整标准见[文件格式标准](file-formats.md)。
+文件种类、版本、人工编写权限及唯一规范化规则以[文件格式标准](file-formats.md)和对应格式页为准。用户算法扩展使用[算法插件包](formats/algorithm-plugin-package.md)，由隔离运行器解释，不能替代 Solver Bundle 或改写业务输入。
 
-- 前三种允许人工编写，但必须先经过对应 schema 校验和规范化；
-- 财务模型 YAML 允许人工编写，但必须先经过 `ies.financial-model@1.0.0` schema 校验和规范化；
+- 用户文件在正式输入边界完成所属 schema 与领域校验；可信内部交接消费已接受的类型化事实；
 - 装配成功产出 `ValidatedAssemblyArtifact`，不能把原始 YAML `dict` 直接交给计算；
 - GeneratorProvider 只从规范装配生成 Solver Bundle；
 - SolverRuntime 只按 Bundle 的结构化命令执行，不解释业务字段；
 - 设备、数据、装配和财务模型文件禁止实现模块路径、shell 字符串、宿主机绝对路径和凭证；算法插件入口只能出现在插件 manifest 的受控字段中，并且只由隔离运行器解释。
 
-五种核心 schema 与算法插件包 schema 分别独立版本化。不能识别的 MAJOR 必须拒绝，不得以"尽可能解析"方式继续任务。
+各文件 schema 分别独立版本化。不能识别的 MAJOR 必须拒绝，不得以"尽可能解析"方式继续任务。
 
 前端生成文件的契约测试必须把实际序列化字节提交给正式后端文件入口，并验证关键业务值完整往返。解析或领域错误统一进入标准错误信封；测试专用解析器、前端预解析对象和直接构造领域模型都不能替代这条链路。
 

@@ -71,17 +71,11 @@
 
 `energy_prices` 是 `price_id → 价格条目` 的开放映射（`price_id` 为稳定自定义名，`lower_snake_case`、不含 `__`；不存在固定白名单价格键，封闭的载体清单只在公共载体词汇中维护——见[设备模型 YAML](../formats/device-model-yaml.md)「interfaces」的 `carrier` 规则，本页不复制）。每个条目显式携带 `carrier`（来自公共载体词汇，与设备接口同一词汇源）与 `direction: purchase|sale`（会计方向，不靠 price_id/键名推断）；定价定义为 `constant {value, unit}` 或引用经校验、覆盖全期的连续序列的 `time_series`。价格为有限 Decimal，正、零、负均合法，禁止 NaN/Infinity。每个计量绑定产出的计费分量是**已带符号的记账贡献**：先算 `raw_charge = Σ price[t]×e[t]`，`purchase` 分量 = +raw_charge（正价时为正，成本向）、`sale` 分量 = −raw_charge（正售电价时为负，收益以负值自动抵减成本）；负价自然按该方向反转（负购电价使 purchase 分量为负、负售电价使 sale 分量为正），零电价合法；规划表达式对已签名分量统一使用加法，不再书写额外负号。`time_series` 引用携带 `resolution`/`point_count`/`unit` 等不可变元数据（无 `leap_year`），全期覆盖在任务提交边界核对，不一致阻断且不重采样（Profile 不固定唯一项目分辨率）。装配 `tariff_bindings` 以 `binding_id → {price, instance, interface, aggregation}` 把每个用到的 `price_id` 绑定到方向明确的计费点实例接口与聚合，校验价格 `carrier` 与接口载体相容、`direction` 与接口流向一致；同一价格可被多个绑定复用。时变价格按逐点计价：聚合先得到与价格同轴的能量序列 `e[t]`，再按 `Σ price[t]×e[t]` 计费（`constant` 每点同价，结果与 `price×Σe[t]` 一致但语义仍为逐点）；禁止先对时变价格总量聚合再与总能量相乘（聚合与计价衔接见[财务 YAML 契约](../formats/finance-yaml.md)）。
 
-## 长期蓝图：`FinancialResult`
+## 财务结果与口径
 
-`FinancialResult` 蓝图至少表达：
+结果表达模型声明的现金流、明细与指标，并保留模型及任务来源。封存形态由本页「封存评价块」统一定义，不另建平行的财务结果对象或内置另一套计算公式；资本金评价与附加指标不因通用执行框架而自动纳入。
 
-- 逐期项目和资本金现金流；
-- 投资、运行成本、收益和残值等组成；
-- NPV、IRR、LCOE、回收期及单位；
-- 每个无法正常计算指标的独立状态与原因；
-- `EffectiveFinanceConfig`（含币种、`price_basis`、`base_year`）与计算版本。
-
-IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_failure` 等状态一起消费；不能用 `null` 或零模糊这些情况。评价期与折现率仍归显式评价确认；税务、折旧等输入须由公开财务契约明确，不写入设备技术模型或封闭 `CalculationConfig`，不借蓝图添加无人消费的字段。
+IRR 必须与 `normal、no_solution、multiple、degenerate、out_of_domain、numeric_failure` 等状态一起消费，不能用零或无解释的空值掩盖无解。评价期与折现率归显式评价确认；模型方法、项目参数与评价确认分别沿各自权威输入冻结。
 
 ### 税前与税后口径
 

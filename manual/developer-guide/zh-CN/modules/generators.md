@@ -15,7 +15,7 @@
 - GeneratorDescriptor、Provider protocol、能力查询和独立注册状态；
 - 直接消费五项运行输入（装配产物、设备数学贡献、物化序列、有效财务快照、计算配置），不设包装层；
 - 按规范设备方程贡献收集变量、约束、状态、接口流和索引；
-- 按规划配置形成目标、变量边界和规划约束，并从 `EffectiveFinanceConfig` 取得经济参数；价格或成本不得写回设备技术语义；
+- 按规划配置形成目标、变量边界和规划约束，消费 `EffectiveFinanceConfig` 中的财务模型规则与项目参数；财务语义不得写回设备技术定义；
 - 将规范业务单位显式转换为求解器内部单位；
 - 生成求解器输入文件、结构化命令、输出声明和 ResultAdapter ID；
 - 规范化 Bundle。
@@ -30,12 +30,14 @@
 |---|---|
 | `ValidatedAssemblyArtifact` | 已由装配模块签发，零阻断诊断；实例、参数覆盖、连接拓扑、规划、财务/计费绑定、项目基线 |
 | `models` | 装配实例 ID 到设备数学贡献的映射（键为实例，不是设备类型） |
-| `materialized` | 已物化的运营期输入序列集合（`MaterializedSet`：冻结评价确认 `evaluation`（`evaluation_years`/`construction_period`/`operation_years`/`discount_rate`/`construction_payments`/`maintenance_expenses`）+ `MaterializedSeries` 只读序列；`constant`/`data_repeat`/`data_full`/`data_predict` 统一为同一类型；空 `series` 时仍以 `evaluation.operation_years` 推导完整运营时域） |
-| `finance` | 不可变 `EffectiveFinanceConfig`：已解析规则 `model_rules` + `parameters_values` + `input_bindings`（经济参数唯一来源） |
+| `materialized` | 同次物化的只读运营序列集合，包含冻结评价确认 `MaterializedSet.evaluation`；不同来源统一为相同序列类型；空序列集合仍由已确认运营年限确定时域 |
+| `finance` | 不可变 `EffectiveFinanceConfig`：所选模型规则、项目参数及输入绑定 |
 | `CalculationConfig` | 在计算阶段选择，包含预测算法与参数、generator、solver、精度、求解选项、收敛条件、种子和输出请求 |
 | GeneratorDescriptor | 支持装配 schema、所选计算能力和 solver，且与 `CalculationConfig` 一致；属 provider 静态事实，不作为每次生成参数 |
 
-五项输入均来自可信上游，生成器不重复验证已签发的装配、设备贡献、财务快照或序列，不做内容摘要。评价确认（`construction_period`/`operation_years`/`discount_rate`/`construction_payments`/`maintenance_expenses`）持久化在任务快照 `evaluation`，由 application 编排原样放入第三项输入 `MaterializedSet.evaluation`；生成器只读该块（时间轴、评价贴现与 `construction_payment`/`maintenance_expenses` 输入取值），不读快照、数据库或对象存储，不再校验——这是评价确认进入生成阶段的唯一载体，不构成第六输入。Generator 只接收已完成物化的集合（`pending_predict` 为空，由上游在预测产物合并后构成，此处信任类型化交接，不复核）；全周期总点数由装配基线起始年/分辨率与集合携带的冻结评价确认（`evaluation.operation_years`）推导，`series` 为空的项目仍得完整时域，不回退单年。不得为五项输入再建包装层。财务模型能力核对在公开提交边界进行：按 `model_rules` 的实际语法推导需求集合并与 `GeneratorDescriptor.capabilities` 对比，含 `max`/`min` 的模型需要声明 `piecewise_linear` 的 provider，不满足即明确拒绝——不近似、不回退为仅税前计算；`CalculationConfig` 保持封闭，不承载能力自报。生成器不读取模型库、目录或对象存储。
+五项输入均来自可信上游，生成器不重复验证已签发装配、设备贡献、财务快照或物化结果，不做内容摘要，也不另建输入包装层。评价确认由 application 从快照原样交给 `MaterializedSet.evaluation`，生成器只消费该块，不读取快照、模型库、数据库或对象存储；字段归属见[财务计算](finance.md#评价确认与快照冻结)。
+
+上游完成所有预测物化后才调用生成器；完整运营时域由项目基线与冻结运营年限确定，不能因序列集合为空回退单年。模型数学能力在公开提交边界按[财务模型契约](../formats/financial-model-yaml.md#生成器能力需求)核对，不满足即拒绝，不近似、不退回税前；计算配置不承载模型能力自报。
 
 ## 输出
 
@@ -52,37 +54,17 @@
 
 步序列的求解引用由生成器在建立实际变量时显式声明，形状以 [Bundle 步序列结果映射](../formats/solver-bundle.md#步序列结果映射) 为唯一正文。业务单位恢复和统一结果发布归 ResultAdapter；不得把生成器内部列命名规则交给 application 或前端反解。
 
-## 内部开发分层
+## 数学生成与文件输出的边界
 
-一个生成器建议按以下纯步骤组织：
+生成器在同一完整运营时域合并技术贡献、连接守恒、规划边界与财务模型关系。连接与流向遵守[装配契约](../formats/assembly-yaml.md)，计量与成本遵守[财务契约](../formats/finance-yaml.md)；不能通过求解器 writer 猜测、补齐或重解释这些业务事实。
 
-```text
-接收已签发输入
-  ↓
-方程展开：设备实例 → 规范数学贡献
-  ↓
-系统合并：变量/索引/平衡/目标/约束
-  ↓
-单位与数值规范化
-  ↓
-求解器格式 writer
-  ↓
-command/output manifest builder
-  ↓
-Bundle 规范化与原子发布
-```
-
-各步骤使用不可变中间 contract。求解器格式 writer 不应重新读取设备模型；command builder 不应重新解释装配业务。
-
-## 项目级线性模型与 MPS writer
-
-`build_project_model` 把五项直接输入装配成项目级 `LinearModel`（变量声明、约束行、目标表达式与 min/max 方向）、单位映射与目标业务单位，不设包装层：按基线展开全部连续 `step`，实例与时步确定命名；技术关系经现有 lowerer 逐降（`t`/`t-1`、Big-M，有限界来自值域数值或实例额定引用）；公开原语 `step_duration` 以基线导出的 SI 秒注入；连接只定义连通性，按 carrier + 无向连通分量逐 step 生成一条母线守恒式（out/bidirectional 为正，in 为负），无边载体不建平衡式；负荷需求经可连接输入口与 serve 方程进入母线；规划目标/变量/约束与财务/计费分量按绑定展开；物理量归 SI、金额守币种；计费支持 constant 与 time_series（时变价格由第三项价格区逐点 `price[t]×e[t]` 计价，`constant` 同一逐点语义；未知价格类型明确拒绝）。`write_mps` 只序列化已完成的 `LinearModel`（稳定 ROWS/COLUMNS/RHS/BOUNDS/整数标记/OBJSENSE，目标常数以偏移量单独报告），同一模型逐字节相同。
+数学构造与文件序列化应可独立测试，但不规定内部类、函数名或中间对象层数。内部表示按实际复用需要选择；不得为了分层预建无人消费的抽象。文件输出保持确定性，业务单位转换及反向映射必须完整，不能让消费者依赖内部列名或 JSON 布局推断业务含义。
 
 ## 首个内置 provider 与完整 Bundle 聚合
 
 首个内置 provider 为 `ies.generator.highs_milp@2.0.0`（见“首个内置链”裁定目标）：mode 只要 `planning`、精度只要 `medium`、solver 只要 `ies.solver.highs@1.7.2`；options 只接受空对象；输出请求支持 `solution` 与 `metrics`（`metrics` 为 ResultAdapter 后处理请求，不对应求解器第二个原始文件，未知输出明确拒绝）；只消费装配实际绑定的 constant/time_series 计费价格（快照中未绑定的价格条目不触发拒绝），未知价格类型明确拒绝；`seed` 为 null 时使用固定种子 `0`，种子同时固定进求解命令与元数据，不读取随机全局状态。
 
-`generate` 返回唯一完整聚合：manifest（即 `bundle.yaml` 内容）加按规范相对路径索引的只读输入文件字节映射（`input/problem.mps` 与 `input/parameters.json`）。`input/parameters.json` 为最小规范 JSON 元数据，只保存 ResultAdapter 后续必需的 `unit_map`、`objective_offset`、`objective_unit`（目标业务单位，按编译期根量纲确定：金额取财务币种，无量纲取 `"1"`，单一物理量纲取 SI 基准单位）、财务分量求值声明 `components`（分量 ident → `{unit, caliber, constant, terms}`，与目标同一分量展开路径，不依赖目标写法）、请求 outputs、固定 seed、precision 与装配/引用追溯，不复制完整装配、模型与财务，不写 hash。结构化命令按真实 HiGHS CLI 语法逐项存储（非 shell），`time_limit_seconds` 同时进入硬资源声明与求解器选项且语义一致；同一五项输入与 provider 版本逐字节相同，不写临时目录，不启动 solver。
+生成器按[Solver Bundle](../formats/solver-bundle.md)交付 manifest 与完整只读输入字节。配套适配信息必须足以用同次解恢复变量、目标及财务分量的业务值与单位，保留目标常数偏移且只应用一次；只发布已请求输出。结构化命令与资源声明采用一致的限制，固定实际种子与依赖；不复制另一份完整业务配置，不写 hash，不携带临时目录，不启动 solver。provider 内部输入文件的组织不作为上游业务契约。
 
 注册表注册真实 provider 实例：`ref` 与描述符引用单一来源；`resolve` 完成通用门禁后返回可调用 provider，快照与目录只公开描述符数据；任一候选不符即整体构建失败。组合根显式注册内置 provider，不动态扫描。
 
@@ -98,18 +80,13 @@ descriptor 至少声明：
 - 内部单位体系、确定性承诺和种子语义；
 - 生成的媒体类型、ResultAdapter ID 和版本关系。
 
-这些信息必须在生成 Solver Bundle 前可查询并完成兼容校验，不能等 Worker 启动求解后才发现不兼容。装配阶段不选择或锁定 generator 与 solver。生成前用 descriptor 的 options schema 校验计算配置选项：非法选项是用户配置错误，直接拒绝，不回退其他生成器，不删字段、不补默认；schema 内 `default` 只作描述。
+这些信息必须可在公开任务提交边界查询并核对，不能等 Worker 启动求解后才发现不兼容。装配阶段不选择或锁定 generator 与 solver。非法选项在计算配置输入或提交边界拒绝；生成器不再校验同一配置，不回退其他生成器、不删字段、不补默认；schema 内 `default` 只作描述。
 
 ## 设备方程如何参与
 
-设备 descriptor 内的声明式方程是设备到数学贡献的公开边界。生成器消费 modeling 已解析、校验和规范化的贡献，并接收：
+设备 descriptor 内的声明式方程经 modeling 解析为技术贡献，包含变量、技术约束、状态关系、接口流和结果映射元数据；不接受财务方法或 solver 私有对象，不写文件、不运行进程。
 
-- 实例 ID、已校验 properties 和状态初值；
-- 已由当前计算阶段按项目基线物化为连续 `step` 的预定义接口数据和连接接口；
-- 存量/新增身份、规划配置以及不可变 `EffectiveFinanceConfig`；
-- 由 generator 提供的能力受限 builder contract。
-
-方程贡献提供声明式变量、技术约束、状态关系、接口流和结果映射元数据，不直接操作具体 solver 私有对象，不写文件，不运行进程。目标及规划边界来自规划配置，成本分量、O&M 与能源价格等共用经济参数来自 `EffectiveFinanceConfig`；预测算法、计算精度及求解选项由 `CalculationConfig` 决定。生成器不训练预测模型；它只消费当前阶段已物化的序列，因此阶段二每次重建后可独立重新生成 Bundle。
+生成器独立消费这些技术贡献、装配中的规划与连接关系、物化序列及有效财务配置，再按计算配置生成问题；财务方法不反向进入设备方程。预测由上游物化阶段完成，生成器只消费当前阶段的序列，因此每轮都可独立生成完整 Bundle。
 
 ## 单位与数值
 
@@ -159,7 +136,7 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 | 非法装配输入 | 装配/application 边界阻断，不进入生成 |
 | 五项输入不完整 | 调用方输入不完整，不生成 Bundle |
 | 方程 contract 或 solver 能力不匹配 | 兼容诊断，执行前阻断 |
-| 非仿射数学（变量×变量、变量作除数、非常数幂、函数等） | 明确拒绝，不近似、不回退 |
+| 所选 provider 未声明支持的数学能力 | 公开输入/提交边界拒绝，不近似、不回退；其他 provider 可按其公开能力接入 |
 | 互斥项非负不可证或缺有限上界 | 明确拒绝，不猜测 Big-M |
 | `[t-k]`（k>1）时间引用 | 设备发布输入边界拒绝 |
 | 单位无法换算或出现非有限数 | 数值输入诊断，定位字段/实例 |
@@ -170,7 +147,7 @@ Bundle 以规范 manifest 与全部输入文件作为身份，不另放随机 ID
 
 ## 必须遵循的规范
 
-- 只消费装配、规范方程贡献和 core 的公开 contract；
+- 仅通过所属模块公开 contract 消费既定五项输入，不穿透其解析器、持久化或内部注册状态；
 - 一个 provider 拥有自己的注册候选，组合根原子发布；
 - 所有相对路径由 Bundle builder 生成并校验；
 - command 只能引用受信任 executor/executable ID；
