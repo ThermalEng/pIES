@@ -130,6 +130,7 @@ class _StrictPredictor:
     def descriptor(self):
         return PredictorDescriptor(
             ref="ies.predictor.strict@1.0.0",
+            depends_on_solve_result=False,
             accepts_any_target_type=False,
             target_types=("load",),
             needs_history=True,
@@ -159,6 +160,7 @@ class _ChasePredictor:
     def descriptor(self):
         return PredictorDescriptor(
             ref=CHASE_REF,
+            depends_on_solve_result=True,
             accepts_any_target_type=True,
             needs_history=True,
             description="测试耦合: 预测值随上一轮求解目标值变化",
@@ -269,6 +271,21 @@ class TestPredictorRegistry:
         registry = build_predictor_registry((NAIVE_PREDICTOR,))
         assert registry.get(NAIVE_PREDICTOR_REF) is NAIVE_PREDICTOR
         assert [d.ref for d in registry.snapshot()] == [NAIVE_PREDICTOR_REF]
+
+    def test_dependency_declaration_required_and_round_tripped(self) -> None:
+        assert NAIVE_PREDICTOR.descriptor.depends_on_solve_result is False
+        chase = _ChasePredictor()
+        assert chase.descriptor.depends_on_solve_result is True
+        registry = build_predictor_registry((NAIVE_PREDICTOR, chase))
+        snapshot = {d.ref: d.depends_on_solve_result for d in registry.snapshot()}
+        assert snapshot == {NAIVE_PREDICTOR_REF: False, CHASE_REF: True}
+        with pytest.raises(TypeError):
+            PredictorDescriptor(ref="ies.predictor.missing@1.0.0")
+        with pytest.raises(TypeError):
+            PredictorDescriptor(
+                ref="ies.predictor.missing@1.0.0",
+                depends_on_solve_result=0,
+            )
 
     def test_unknown_ref_unavailable_without_fallback(self) -> None:
         registry = build_predictor_registry((NAIVE_PREDICTOR,))

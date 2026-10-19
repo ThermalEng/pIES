@@ -3,7 +3,8 @@
 - 预测算法以 ``CalculationConfig.predictions[].algorithm`` 精确引用
   (``<稳定ID>@<语义化版本>``)选择, 与 generator/solver/executor/result
   adapter 同一引用语义, 不回退、不猜测;
-- ``PredictorDescriptor`` 只声明结构性需求: 是否接受任意目标类型
+- ``PredictorDescriptor`` 只声明结构性需求: 是否依赖上一轮求解结果
+  (必填 ``depends_on_solve_result``)、是否接受任意目标类型
   (否则列出显式支持名)、是否需要历史序列。目标类型取值本身不透明
   透传, 不在此建立类型注册表(多种目标类型均可工作, 以定向测试锁定);
 - predictor 为纯函数: 历史序列 + 参数 + 种子 + 全周期点数 → 完整预测
@@ -35,16 +36,24 @@ class PredictorDescriptor:
     """单个预测算法的公开能力描述(不可变值对象)。
 
     ``ref`` 为 ``<稳定ID>@<语义化版本>``; 配置 ``algorithm`` 与本 ``ref``
-    相等才表示选中。``accepts_any_target_type`` 为真时接受任意装配声明
+    相等才表示选中。``depends_on_solve_result`` 为必填布尔: ``False`` 为
+    独立预测(求解前生成一次), ``True`` 为耦合预测(消费上一轮求解结果);
+    不设默认值, 省略即构造失败, 防止未声明被误认为独立。
+    ``accepts_any_target_type`` 为真时接受任意装配声明
     的目标类型(不透明透传); 为假时仅接受 ``target_types`` 所列。
     ``needs_history`` 声明是否需要历史序列输入。
     """
 
     ref: str
+    depends_on_solve_result: bool
     accepts_any_target_type: bool = True
     target_types: tuple[str, ...] = ()
     needs_history: bool = True
     description: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.depends_on_solve_result, bool):
+            raise TypeError("depends_on_solve_result 须为显式布尔值")
 
     def supports(self, target_type: str) -> bool:
         """该目标类型是否可用本算法预测。"""
@@ -188,6 +197,7 @@ class NaivePredictor:
     def descriptor(self) -> PredictorDescriptor:
         return PredictorDescriptor(
             ref=NAIVE_PREDICTOR_REF,
+            depends_on_solve_result=False,
             accepts_any_target_type=True,
             needs_history=True,
             description="末值携载(全确定性, 种子只追溯不参与计算)",

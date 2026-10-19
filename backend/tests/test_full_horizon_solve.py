@@ -768,6 +768,7 @@ class _ShortPredictor:
 
         return PredictorDescriptor(
             ref=self.SHORT_REF,
+            depends_on_solve_result=False,
             accepts_any_target_type=True,
             needs_history=True,
             description="测试短输出：恒返 24 点",
