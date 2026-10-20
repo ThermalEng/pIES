@@ -320,6 +320,23 @@ def test_explicit_schedule_method_and_replace() -> None:
     assert [(e.period, e.ratio) for e in confirm.schedule] == [(2, Decimal("1"))]
 
 
+def test_payment_period_schedule_override_rejected() -> None:
+    """payment_period 规则出现 confirmation.schedule 即拒收，不静默丢弃。"""
+    profile = FinanceProfile.from_dict(_base_profile())
+    confirm = profile.tax_rules["building_vat"].confirmation  # type: ignore[union-attr]
+    assert confirm.method == "payment_period"
+    with pytest.raises(FinanceTripletError, match="schedule"):
+        FinanceOverrides.from_dict(
+            {
+                "schema": "ies.finance-overrides",
+                "schema_version": "3.0.0",
+                "profile_ref": {"id": profile.profile_id},
+                "tax_rules": {"building_vat": {"confirmation": {"schedule": [{"period": 2, "ratio": "1"}]}}},
+            },
+            profile=profile,
+        )
+
+
 def test_rule_may_not_carry_pool_facts() -> None:
     payload = _base_profile()
     payload["tax_rules"]["operating_vat"]["opening_credit"] = {"value": "1", "unit": "CNY"}
@@ -469,24 +486,12 @@ def test_submission_gate_passes_empty_rules() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _manual_path() -> Path:
-    """正式 finance-yaml.md 位置：Docker 只读挂载 /manual 优先，源码树相对次之。"""
-    mounted = Path("/manual/developer-guide/zh-CN/formats/finance-yaml.md")
-    if mounted.is_file():
-        return mounted
-    here = Path(__file__).resolve()
-    for parent in (here.parent, *here.parents):
-        candidate = parent / "manual" / "developer-guide" / "zh-CN" / "formats" / "finance-yaml.md"
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-_MANUAL = _manual_path()
+_MANUAL_PATH = Path("/manual/developer-guide/zh-CN/formats/finance-yaml.md")
 
 
 def _manual_yaml_blocks() -> list[str]:
-    text = _MANUAL.read_text(encoding="utf-8")
+    assert _MANUAL_PATH.is_file(), "正式手册缺失：测试命令须把当前工作树 manual 只读挂载到 /manual，不降门禁"
+    text = _MANUAL_PATH.read_text(encoding="utf-8")
     return [part.split("```", 1)[0] for part in text.split("```yaml")[1:]]
 
 
@@ -497,8 +502,6 @@ def test_manual_examples_parse_and_merge() -> None:
     """
     from iesplan.core.yamlmini import load as yaml_load
 
-    if _MANUAL is None:
-        pytest.skip("正式手册不在可读位置（容器请只读挂载 manual 卷）")
     blocks = _manual_yaml_blocks()
     profile_block = next(b for b in blocks if "schema: ies.finance-profile" in b)
     tax_block = next(b for b in blocks if b.lstrip().startswith("taxes:") and "main_pool" in b)
@@ -608,13 +611,43 @@ def test_explicit_null_tax_sections_rejected() -> None:
         EffectiveFinanceConfig.from_dict(effective_doc)
 
 
-def test_missing_tax_sections_default_to_empty() -> None:
+def test_profile_missing_each_tax_section_rejected() -> None:
+    """Profile 的 tax_rules/credit_pools 必填（空表必须显式 {}）。
+
+    其余节置空，拒绝必须来自缺节本身，不能是未知池引用的误报。
+    """
+    for key in ("tax_rules", "credit_pools"):
+        payload = _base_profile()
+        payload["taxes"] = {}
+        payload["credit_pools"] = {}
+        payload["tax_rules"] = {}
+        del payload[key]
+        with pytest.raises(FinanceTripletError, match=key):
+            FinanceProfile.from_dict(payload)
+
+
+def test_profile_explicit_empty_tax_sections_accepted() -> None:
     payload = _base_profile()
-    del payload["tax_rules"]
-    del payload["credit_pools"]
+    payload["taxes"] = {}
+    payload["credit_pools"] = {}
+    payload["tax_rules"] = {}
     profile = FinanceProfile.from_dict(payload)
     assert profile.tax_rules == {}
     assert profile.credit_pools == {}
+
+
+def test_effective_missing_each_tax_section_rejected() -> None:
+    base = _base_profile()
+    base["taxes"] = {}
+    base["credit_pools"] = {}
+    base["tax_rules"] = {}
+    profile = FinanceProfile.from_dict(base)
+    doc = merge_effective(profile, None).to_dict()
+    for key in ("tax_rules", "credit_pools"):
+        bad = dict(doc)
+        del bad[key]
+        with pytest.raises(FinanceTripletError, match=key):
+            EffectiveFinanceConfig.from_dict(bad)
 
 
 # ---------------------------------------------------------------------------
