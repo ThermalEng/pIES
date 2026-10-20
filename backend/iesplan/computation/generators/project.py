@@ -1198,6 +1198,12 @@ class _ProjectBuilder:
             return value
         return value / (1.0 + value)
 
+    @staticmethod
+    def _vat_gross_split_factor(rate: Any) -> float:
+        """实际含税付款 → 税额拆分系数（维护金额口径，不随文件 basis 改变）。"""
+        value = float(rate.value)
+        return value / (1.0 + value)
+
     def _vat_pool_month_bases(
         self,
         pool_rules: dict[str, list],
@@ -1271,13 +1277,14 @@ class _ProjectBuilder:
                             )
             for entry in rule.maintenance_input_tax:
                 # 引用存在性与跨输入对应已由提交边界核对，此处按冻结
-                # 清单顺序取数，不复制金额。
+                # 清单顺序取数，不复制金额。维护金额为实际含税付款，
+                # 恒按含税拆价计税，不随文件 price_basis 改变。
                 year_amounts = [
                     float(item.amount)
                     for item in self.evaluation.maintenance_expenses
                     if item.year == entry.year
                 ]
-                factor = self._vat_gross_factor(entry.rate) * float(
+                factor = self._vat_gross_split_factor(entry.rate) * float(
                     entry.deductible_ratio.value
                 )
                 inp[12 * entry.year - 1].add_const(

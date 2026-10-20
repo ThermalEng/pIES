@@ -56,7 +56,7 @@ EFFICIENCY = 0.9
 ELEC_KW = LOAD_KW / EFFICIENCY
 
 
-def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="all"):
+def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="all", maintenance_tax=True):
     payload = {
         "schema": "ies.finance-profile",
         "schema_version": "3.0.0",
@@ -186,6 +186,8 @@ def _finance_payload(*, refunds=(), opening="0", basis="tax_inclusive", rules="a
         payload["tax_rules"] = {"con_vat": payload["tax_rules"]["con_vat"]}
     elif rules != "all":
         raise ValueError(f"未知规则子集: {rules!r}")
+    if not maintenance_tax and "vat_op" in payload["tax_rules"]:
+        payload["tax_rules"]["vat_op"]["maintenance_input_tax"] = []
     return payload
 
 
@@ -437,6 +439,7 @@ def _inputs(
     basis="tax_inclusive",
     rules="all",
     tank_origin="new",
+    maintenance_tax=True,
 ):
     doc = _doc(tank_origin=tank_origin)
     if objective is not None:
@@ -449,7 +452,13 @@ def _inputs(
     }
     finance = merge_effective(
         FinanceProfile.from_dict(
-            _finance_payload(refunds=refunds, opening=opening, basis=basis, rules=rules)
+            _finance_payload(
+                refunds=refunds,
+                opening=opening,
+                basis=basis,
+                rules=rules,
+                maintenance_tax=maintenance_tax,
+            )
         ),
         None,
     )
@@ -492,12 +501,15 @@ def _inputs(
 # ---------------------------------------------------------------------------
 
 
-def _hand_monthly(*, tax_factor=GROSS_FACTOR, upfront=Decimal("6000"), fixed_om=Decimal("2100")):
+def _hand_monthly(
+    *, tax_factor=GROSS_FACTOR, upfront=Decimal("6000"), fixed_om=Decimal("2100"), maintenance_tax=True
+):
     """36 个月 (out, in) 手算（业务 Decimal，与实现公式独立书写）。
 
-    ``tax_factor`` 为税额系数（含税 ``r/(1+r)``，不含税 ``r``）；
-    ``upfront``/``fixed_om`` 为建设总额/年固定 OM（既有沉没时取 0，
-    对应无建设进项、无固定 OM 进项）。
+    ``tax_factor`` 为税额系数（含税 ``r/(1+r)``，不含税 ``r``），仅用于
+    建设/价格/OM；维护金额为实际含税付款，恒按含税拆价计税，不随文件
+    ``price_basis`` 改变。``upfront``/``fixed_om`` 为建设总额/年固定 OM
+    （既有沉没时取 0，对应无建设进项、无固定 OM 进项）。
     """
     out = [Decimal("0")] * 36
     inp = [Decimal("0")] * 36
@@ -518,7 +530,8 @@ def _hand_monthly(*, tax_factor=GROSS_FACTOR, upfront=Decimal("6000"), fixed_om=
         out[month - 1] += Decimal(str(ELEC_KW)) * Decimal(str(hours)) * Decimal("2.0") * tax_factor
     inp[23] += fixed_om * tax_factor * Decimal("0.5")
     inp[35] += fixed_om * tax_factor * Decimal("0.5")
-    inp[23] += Decimal("1200.50") * tax_factor
+    if maintenance_tax:
+        inp[23] += Decimal("1200.50") * GROSS_FACTOR
     return out, inp
 
 
@@ -835,6 +848,44 @@ def test_vat_existing_fixed_om_not_credited(tmp_path) -> None:
         )
     expected = _hand_npv_with_vat(paids, upfront=Decimal("0"), fixed_om=Decimal("0"))
     assert value == pytest.approx(float(expected), rel=1e-6)
+
+
+def test_vat_maintenance_credit_basis_independent(tmp_path) -> None:
+    """同一笔维护付款在两种文件口径下税额相等；抵扣只动税额不动现金。
+
+    1200.50 实际含税付款、13%、抵扣 100% → 可抵税额 138.110619469，
+    不随文件 ``price_basis`` 改变。用同口径内有/无维护税务引用的隔离
+    差值度量（不引入其他金额变动）：m24 留抵差即该税额；NPV 差只来自
+    该税额，基础现金（含 300 不可抵维护的实际付款）保持不变。
+    """
+    expected_credit = Decimal("1200.50") * Decimal("0.13") / Decimal("1.13")
+    assert expected_credit == pytest.approx(Decimal("138.110619469"), abs=Decimal("1e-9"))
+    carry_deltas = {}
+    for basis in ("tax_inclusive", "tax_exclusive"):
+        tax_factor = GROSS_FACTOR if basis == "tax_inclusive" else Decimal("0.13")
+        cash = Decimal("1") if basis == "tax_inclusive" else Decimal("1.13")
+        states = {}
+        for maintenance_tax in (True, False):
+            artifact, models, materialized, finance, config, evaluation = _inputs(
+                basis=basis, maintenance_tax=maintenance_tax
+            )
+            bundle = HIGHS_MILP_PROVIDER.generate(artifact, models, materialized, finance, config, evaluation)
+            out, inp = _hand_monthly(tax_factor=tax_factor, maintenance_tax=maintenance_tax)
+            paids, carries = _hand_chain(out, inp)
+            value, solved, _ = _solve_internal(bundle, tmp_path)
+            for month in range(1, 37):
+                assert solved[f"vat__main_pool__paid__m{month}"] == pytest.approx(
+                    float(paids[month - 1]), rel=1e-6
+                )
+                assert solved[f"vat__main_pool__carry__m{month}"] == pytest.approx(
+                    float(carries[month - 1]), rel=1e-6
+                )
+            assert value == pytest.approx(float(_hand_npv_with_vat(paids, cash=cash)), rel=1e-6)
+            states[maintenance_tax] = (carries, value)
+        delta = states[True][0][24 - 1] - states[False][0][24 - 1]
+        assert float(delta) == pytest.approx(float(expected_credit), abs=1e-6)
+        carry_deltas[basis] = delta
+    assert carry_deltas["tax_exclusive"] == pytest.approx(carry_deltas["tax_inclusive"], abs=1e-6)
 
 
 HEATER_UNBOUNDED_YAML = """
