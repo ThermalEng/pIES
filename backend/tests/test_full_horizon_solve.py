@@ -808,7 +808,7 @@ class TestPredictPhase2FullHorizon:
         from test_prediction_capability import (  # noqa: E402
             CHASE_REF,
             _ChasePredictor,
-            _save_calc,
+            _save_calc_case,
         )
 
         from iesplan.application import worker as worker_app  # noqa: E402
@@ -830,11 +830,11 @@ class TestPredictPhase2FullHorizon:
             for dev in ("load1", "load2")
         ]
         body["convergence"] = {"tolerance": 0.001, "max_iterations": 3}
-        rev = _save_calc(client, pid, user, body)
         chase = _ChasePredictor()
         recorder = _RecordingGenerator()
         gene_registry = build_registry((recorder,))
         pred_registry = build_predictor_registry((chase,))
+        rev = _save_calc_case(db, user, pid, body, pred_registry)
         task, _flags = submit_task(
             db, user, pid, "optimization", config={"config_revision": rev},
             evaluation=_eval_k0(),
@@ -967,7 +967,7 @@ class TestShortPredictionRejected:
         失败收拢为 failed 终态，不落成功。
         """
         from sqlalchemy import select  # noqa: E402
-        from test_prediction_capability import _save_calc  # noqa: E402
+        from test_prediction_capability import _save_calc_case  # noqa: E402
 
         from iesplan.application import worker as worker_app  # noqa: E402
         from iesplan.application.tasks.submissions import submit_task  # noqa: E402
@@ -986,9 +986,9 @@ class TestShortPredictionRejected:
             }
             for dev in ("load1", "load2")
         ]
-        body["convergence"] = {"tolerance": 0.001, "max_iterations": 2}
-        rev = _save_calc(client, pid, user, body)
+        assert body["convergence"] is None
         pred_registry = build_predictor_registry((_ShortPredictor(),))
+        rev = _save_calc_case(db, user, pid, body, pred_registry)
         task, _flags = submit_task(
             db, user, pid, "optimization", config={"config_revision": rev},
             evaluation=_eval_k0(),

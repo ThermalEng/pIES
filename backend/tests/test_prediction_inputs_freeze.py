@@ -15,6 +15,7 @@ from iesplan.computation import (
     NAIVE_PREDICTOR_REF,
     build_predictor_registry,
 )
+from iesplan.core.errors import AppError
 from iesplan.tasks import InvalidRequestError
 
 
@@ -97,12 +98,24 @@ class TestPredictionInputsFreeze:
             _check_prediction_inputs(doc, cfg, 1, predictor_registry=_chase_registry())
         assert exc_info.value.code == "TASK-REQ-012"
 
-    def test_registry_absent_fail_closed(self) -> None:
+    def test_registry_absent_unavailable(self) -> None:
         doc = _doc(("pv1", "power_out", "data_predict"))
-        with pytest.raises(InvalidRequestError) as exc_info:
+        with pytest.raises(AppError):
             _check_prediction_inputs(
                 doc, _config(_pred("pv1", "power_out", NAIVE_PREDICTOR_REF)), 1
             )
+
+    def test_registry_absent_without_predictions_needs_nothing(self) -> None:
+        assert _check_prediction_inputs(_doc(), _config(), 1) == 0
+
+    def test_independent_with_convergence_rejected(self) -> None:
+        doc = _doc(("pv1", "power_out", "data_predict"))
+        cfg = _config(
+            _pred("pv1", "power_out", NAIVE_PREDICTOR_REF),
+            convergence={"tolerance": 0.001, "max_iterations": 50},
+        )
+        with pytest.raises(InvalidRequestError) as exc_info:
+            _check_prediction_inputs(doc, cfg, 1, predictor_registry=_naive_registry())
         assert exc_info.value.code == "TASK-REQ-012"
 
     def test_config_target_without_binding_rejected(self) -> None:

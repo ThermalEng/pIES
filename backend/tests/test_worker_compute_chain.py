@@ -288,16 +288,18 @@ class TestComputeChainEndToEnd:
     def test_prediction_required_fails_with_clear_reason(
         self, client: TestClient, db: Session
     ) -> None:
-        """预测需求明确拒绝(B5-1 前移): 无装配绑定的 predictions → 提交即 400，不建任务。
+        """预测需求明确拒绝: 无装配绑定的 predictions → 提交即 400，不建任务。
 
-        已匹配绑定的预测目标仍由执行闸门以 prediction-not-supported 拒绝，
-        直到 B5-2 公共预测能力落地（届时另行验收）。
+        使用生产 naive 精确引用以通过保存入口参数规则；项目无 data_predict
+        绑定，提交闸门按 TASK-REQ-010 拒绝。
         """
+        from iesplan.computation import NAIVE_PREDICTOR_REF  # noqa: E402
+
         body = dict(_CONFIG_BODY)
         body["predictions"] = [
             {
                 "target": {"instance": "d1", "interface": "e_load"},
-                "algorithm": "ies.predict.naive@1.0.0",
+                "algorithm": NAIVE_PREDICTOR_REF,
                 "parameters": {},
             }
         ]

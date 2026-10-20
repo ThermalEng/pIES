@@ -604,10 +604,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
 
     owner = make_user(db, "owner_schema_ver")
     pid = _prepare_project(client, db, owner)
-    rev = _save_config(
-        client, pid, owner,
-        _body(convergence={"tolerance": 0.001, "max_iterations": 50}),
-    )
+    rev = _save_config(client, pid, owner, _body())
     status, body = _submit(client, pid, owner, {"config_revision": rev}, key="schemaver-1")
     assert status == 201, body
     snap = tasks_domain.get_snapshot(factory(), body["task"]["calc_snapshot_id"])
@@ -615,7 +612,7 @@ def test_snapshot_schema_version_written_and_scoped_to_reuse(
     assert snap.schema_version == "4.0.0"
     assert not hasattr(snap, "tolerances")
     frozen = jsonable(dict(snap.calc_config_snapshot))
-    assert frozen["convergence"] == {"tolerance": 0.001, "max_iterations": 50}
+    assert frozen["convergence"] is None
 
     status, second = _submit(client, pid, owner, {"config_revision": rev}, key="schemaver-2")
     assert status == 201, second
