@@ -55,7 +55,7 @@
 
 计算扩展拆成三个主要角色：
 
-- GeneratorProvider：直接接受装配产物、设备数学贡献、物化序列、有效财务快照与计算配置五项输入，生成 [Solver Bundle](formats/solver-bundle.md)；
+- GeneratorProvider：直接接受装配产物、设备数学贡献、物化序列、有效财务快照、计算配置与冻结评价确认，生成 [Solver Bundle](formats/solver-bundle.md)；
 - ExecutorProvider：把受信任 executable ID 映射为受控进程或容器执行方式；
 - ResultAdapterProvider：把声明输出和执行回执映射为统一 `ComputeResult`。
 
