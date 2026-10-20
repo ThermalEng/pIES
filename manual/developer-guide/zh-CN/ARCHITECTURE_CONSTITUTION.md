@@ -1,11 +1,11 @@
 # pIES 架构宪法
 
 > 状态：生效
-> 版本：1.15.0
+> 版本：1.16.0
 > 生效日期：2026-08-20
-> 最后更新：2026-10-19
+> 最后更新：2026-10-20
 > 适用范围：根目录入口、`manual/`、`docs/`、`backend/`、`frontend/`、数据库、对象存储、Worker、测试与后续插件
-> 依据：2026-08-20 架构专项审查、ADR-0001 至 ADR-0008、2026-09-07 地区 FinanceProfile 三件套规范及 2026-10-19 用户批准的嵌入式税务计算裁决（ADR-0011）
+> 依据：2026-08-20 架构专项审查、ADR-0001 至 ADR-0008、2026-09-07 地区 FinanceProfile 三件套规范、2026-10-19 用户批准的嵌入式税务计算裁决（ADR-0011）及 2026-10-20 用户批准的评价确认独立直传裁决（ADR-0012）
 
 ## 1. 文档效力
 
@@ -143,7 +143,7 @@ schema、字段、公式与聚合枚举以 [装配与检查](modules/assembly.md
 
 计算必须拆为三个独立边界：
 
-- `GeneratorProvider` 只接受已签发的 `ValidatedAssemblyArtifact`、按装配实例固定的设备数学贡献、已物化的全周期输入序列、不可变 `EffectiveFinanceConfig` 与经过公开输入校验的 `CalculationConfig`，在生成计算包时确定性生成 Solver Bundle；不得为这些输入再建立包装层或第二份业务事实；
+- `GeneratorProvider` 直接接受已签发的 `ValidatedAssemblyArtifact`、按装配实例固定的设备数学贡献、已物化的全周期输入序列、不可变 `EffectiveFinanceConfig`、经过公开输入校验的 `CalculationConfig`，以及已确认并冻结的评价输入，在生成计算包时确定性生成 Solver Bundle；输入按职责分别传递，不为维持参数数量而混装，也不再建立外层包装或第二份业务事实；
 - `SolverRuntime` 只校验并执行 Bundle 中的结构化命令，生成 `ExecutionReceipt` 与原始输出；
 - `ResultAdapter` 只把 Bundle、回执和声明输出映射为带 schema/version 的 `ComputeResult`。
 

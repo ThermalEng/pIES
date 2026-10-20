@@ -150,6 +150,8 @@ Worker 对同次已求解结果计算一次评价，随结果载荷同一证据�
 
 评价年限与折现率是财务输入的显式评价确认，不属于 `FinanceProfile`/`Overrides`/`Effective`（本页已明令不回流），不属于封闭 `CalculationConfig`，不设默认值（沿用 `0.08` 或由序列长度推导均属阻断行为）：
 
+评价确认的不可变业务值对象归 `finance` 所有，字段以[公共契约](../contracts.md#快照与异步契约)为准。application 从同一任务冻结块恢复并独立传给生成器及同次解评价；公开提交入口校验一次，内部恢复只还原类型，不重跑校验。付款比例和维护费用保持各自财务时点，不展开成运行步长序列，不另建参数来源。
+
 确认字段（均无业务默认值）：
 - 时间关系：`construction_period` 为非负整数年，`operation_years` 为正整数运营年限，`evaluation_years = construction_period + operation_years`，包含建设期，不能再作为运行序列的年限。明确确认这些时间参数及折现率，不以缺省建设期为零代替用户确认；
 - `discount_rate` 为无量纲比例（API 规范值 `0..1`，无默认，`r=0` 合法）；确认同时包含明确的建设付款比例计划和维护／换新支出清单，公开字段见[公共契约](../contracts.md)；`confirmed_by`/`confirmed_at` 由服务端记录（追加审计不可覆盖）；
