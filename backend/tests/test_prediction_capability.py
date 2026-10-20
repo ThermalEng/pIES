@@ -13,6 +13,7 @@ step 格式，见 B5-2a 日志；此处 workaround 仅限脚手架）。上传�
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -55,10 +56,13 @@ from iesplan.computation import (  # noqa: E402
     NAIVE_PREDICTOR_REF,
     ComputationUnavailableError,
     PredictedTarget,
+    PredictionConvergence,
     PredictorDescriptor,
     build_predictor_registry,
+    check_convergence,
     materialize_predicted_series,
     prediction_delta,
+    split_predictions_by_dependency,
 )
 from iesplan.db import Base  # noqa: E402
 from iesplan.main import create_app  # noqa: E402
@@ -136,6 +140,9 @@ class _StrictPredictor:
             needs_history=True,
         )
 
+    def validate_parameters(self, parameters):
+        return None
+
     def predict(self, **kwargs):
         raise AssertionError("strict predictor 不执行预测")
 
@@ -164,6 +171,39 @@ class _ChasePredictor:
             accepts_any_target_type=True,
             needs_history=True,
             description="测试耦合: 预测值随上一轮求解目标值变化",
+        )
+
+    def validate_parameters(self, parameters):
+        """测试耦合参数规则: 要求 parameters.scale 为正有限数(本算法归一化尺度)。"""
+        scale = parameters.get("scale") if isinstance(parameters, dict) else None
+        if (
+            isinstance(scale, bool)
+            or not isinstance(scale, (int, float))
+            or not math.isfinite(scale)
+            or scale <= 0
+        ):
+            raise ValueError("测试耦合预测要求 parameters.scale 为正有限数")
+
+    def measure_convergence(
+        self, *, previous_prediction, current_prediction,
+        previous_outputs, current_outputs, parameters,
+    ):
+        from iesplan.computation.predictors import (  # noqa: E402
+            PredictionConvergence,
+            prediction_delta,
+        )
+
+        scale = parameters["scale"]
+        if (
+            isinstance(scale, bool)
+            or not isinstance(scale, (int, float))
+            or not math.isfinite(scale)
+            or scale <= 0
+        ):
+            raise ValueError("测试耦合预测要求 parameters.scale 为正有限数")
+        delta = prediction_delta(previous_prediction.values, current_prediction.values)
+        return PredictionConvergence(
+            metric="max_abs_diff", value=delta / float(scale), unit="1",
         )
 
     def predict(
@@ -307,6 +347,109 @@ class TestPredictionDelta:
     def test_length_mismatch_rejected(self) -> None:
         with pytest.raises(ValueError, match="点数不一致"):
             prediction_delta((1.0,), (1.0, 2.0))
+
+
+class _CoupledWithoutMeasure:
+    """注册拒绝用：声明耦合但不提供收敛度量。"""
+
+    @property
+    def descriptor(self):
+        return PredictorDescriptor(
+            ref="test.predictor.coupled-naked@1.0.0",
+            depends_on_solve_result=True,
+        )
+
+    def validate_parameters(self, parameters):
+        return None
+
+
+class _NoValidatePredictor:
+    """注册拒绝用：缺少参数校验。"""
+
+    @property
+    def descriptor(self):
+        return PredictorDescriptor(
+            ref="test.predictor.no-validate@1.0.0",
+            depends_on_solve_result=False,
+        )
+
+
+def _convergence_target(device, values):
+    return PredictedTarget(
+        device=device, interface="electricity_demand", target_type="load",
+        values=tuple(values), history_object_id="obj-h",
+        artifact=b"{}", receipt={},
+    )
+
+
+class TestConvergenceContract:
+    def test_convergence_value_rules(self) -> None:
+        good = PredictionConvergence(metric="max_abs_diff", value=2, unit="1")
+        assert good.value == 2.0 and isinstance(good.value, float)
+        with pytest.raises(TypeError):
+            PredictionConvergence(metric="", value=0.0, unit="1")
+        with pytest.raises(TypeError):
+            PredictionConvergence(metric="max_abs_diff", value=True, unit="1")
+        for bad in (-0.5, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                PredictionConvergence(metric="max_abs_diff", value=bad, unit="1")
+        with pytest.raises(ValueError, match="'1'"):
+            PredictionConvergence(metric="max_abs_diff", value=0.0, unit="kW")
+
+    def test_check_convergence_boundary(self) -> None:
+        good = PredictionConvergence(metric="max_abs_diff", value=0.5, unit="1")
+        assert check_convergence(good) is good
+        with pytest.raises(ComputationUnavailableError):
+            check_convergence({"metric": "max_abs_diff", "value": 0.5, "unit": "1"})
+
+    def test_registry_enforces_capabilities(self) -> None:
+        with pytest.raises(ComputationUnavailableError):
+            build_predictor_registry((_CoupledWithoutMeasure(),))
+        with pytest.raises(ComputationUnavailableError):
+            build_predictor_registry((_NoValidatePredictor(),))
+        registry = build_predictor_registry((NAIVE_PREDICTOR, _ChasePredictor()))
+        assert len(registry) == 2
+
+    def test_split_by_dependency(self) -> None:
+        registry = build_predictor_registry((NAIVE_PREDICTOR, _ChasePredictor()))
+        entries = (
+            {
+                "target": {"instance": "load1", "interface": "electricity_demand"},
+                "algorithm": NAIVE_PREDICTOR_REF,
+                "parameters": {},
+            },
+            {
+                "target": {"instance": "flex1", "interface": "electricity_demand"},
+                "algorithm": CHASE_REF,
+                "parameters": {"scale": 10.0},
+            },
+        )
+        independent, coupled = split_predictions_by_dependency(
+            entries, registry.get
+        )
+        assert [e["target"]["instance"] for e in independent] == ["load1"]
+        assert [e["target"]["instance"] for e in coupled] == ["flex1"]
+
+    def test_chase_parameter_rule(self) -> None:
+        chase = _ChasePredictor()
+        chase.validate_parameters({"scale": 2.5})
+        NAIVE_PREDICTOR.validate_parameters({})
+        for bad in ({}, {"scale": 0}, {"scale": -1.0}, {"scale": "10"}, {"scale": True}):
+            with pytest.raises(ValueError, match="scale"):
+                chase.validate_parameters(bad)
+
+    def test_chase_measure_hand_numbers(self) -> None:
+        chase = _ChasePredictor()
+        out = chase.measure_convergence(
+            previous_prediction=_convergence_target("flex1", (10.0, 10.0, 10.0)),
+            current_prediction=_convergence_target("flex1", (12.0, 10.0, 10.0)),
+            previous_outputs={},
+            current_outputs={},
+            parameters={"scale": 4.0},
+        )
+        assert out.metric == "max_abs_diff"
+        assert out.value == 0.5
+        assert out.unit == "1"
 
 
 def _predict_artifact(bindings: dict) -> ValidatedAssemblyArtifact:

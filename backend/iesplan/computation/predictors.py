@@ -11,14 +11,20 @@
   序列值 + 不可变训练产物字节 + 回执基底(JSON, 训练产物引用由提交
   密封后回填)。不在 Worker/Generator 内训练; 本模块不接触数据库、
   存储与网络;
+- 每个 provider 以 ``validate_parameters`` 在计算配置输入边界校验自己的
+  参数; 耦合 provider 另以 ``measure_convergence`` 对相邻两轮预测产物
+  与只读计算输出计算无量纲收敛量(归一化与尺度由算法版本化参数规则
+  定义, 平台不统一规定);
 - 注册表由 bootstrap 组合根持有并发布; 未注册引用统一抛
-  ``ComputationUnavailableError``, 不回退。
+  ``ComputationUnavailableError``, 不回退。耦合能力在注册时确认收敛
+  调用可用, 不到每轮重复探测。
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+import math
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -78,6 +84,32 @@ class PredictedTarget:
     receipt: Mapping[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class PredictionConvergence:
+    """单目标单轮无量纲收敛量(不可变值对象, 耦合算法的公开返回值)。
+
+    ``metric`` 为算法版本化规则定义的指标标识(非空字符串);
+    ``value`` 为非负有限数(无量纲, 归一化已由算法完成, 不混比不同
+    物理单位); ``unit`` 固定为 ``"1"``。
+    """
+
+    metric: str
+    value: float
+    unit: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.metric, str) or not self.metric:
+            raise TypeError("convergence metric 须为非空字符串")
+        value = self.value
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("convergence value 须为数值(不接受布尔值)")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("convergence value 须为非负有限数")
+        object.__setattr__(self, "value", float(value))
+        if self.unit != "1":
+            raise ValueError("convergence unit 固定为 '1'(无量纲)")
+
+
 @runtime_checkable
 class Predictor(Protocol):
     """预测算法公开身份(结构协议)。"""
@@ -85,6 +117,15 @@ class Predictor(Protocol):
     @property
     def descriptor(self) -> PredictorDescriptor:
         """本算法公开描述。"""
+        ...
+
+    def validate_parameters(self, parameters: Mapping[str, object]) -> None:
+        """校验本算法公开参数(计算配置输入边界唯一调用)。
+
+        形态(是否为 Mapping、是否有限 JSON)已由配置载体保证;
+        此处只检查算法自身的版本化参数规则, 不满足即 ``ValueError``
+        指明字段。执行阶段直接使用已固定参数, 不重复调用。
+        """
         ...
 
     def predict(
@@ -101,6 +142,31 @@ class Predictor(Protocol):
         previous: Mapping[str, object] | None = None,
     ) -> PredictedTarget:
         """由历史序列生成全周期预测值。"""
+        ...
+
+
+@runtime_checkable
+class CoupledPredictor(Predictor, Protocol):
+    """耦合预测算法公开身份: 独立能力之外, 另提供纯收敛度量。
+
+    首轮 ``previous_outputs`` 为 ``None`` 时不调用本方法(首轮没有相邻轮
+    比较); 后续每轮求解完成后调用一次。
+    """
+
+    def measure_convergence(
+        self,
+        *,
+        previous_prediction: PredictedTarget,
+        current_prediction: PredictedTarget,
+        previous_outputs: Mapping[str, object] | None,
+        current_outputs: Mapping[str, object],
+        parameters: Mapping[str, object],
+    ) -> PredictionConvergence:
+        """由相邻两轮预测产物与只读计算输出计算本目标无量纲收敛量。
+
+        纯函数: 只读入参, 不接触数据库、存储与网络。所需尺度来自
+        ``parameters`` 中本算法版本化规则定义的参数(平台不统一规定)。
+        """
         ...
 
 
@@ -132,8 +198,8 @@ class PredictorRegistry:
 def build_predictor_registry(providers: tuple[Predictor, ...]) -> PredictorRegistry:
     """原子发布预测算法目录: 全部校验通过后一次性发布。
 
-    任一候选协议不符、重复 ref、descriptor/ref 不一致即整体拒绝,
-    不发布部分状态。
+    任一候选协议不符、重复 ref、缺少参数校验、耦合缺少收敛度量即整体
+    拒绝, 不发布部分状态。收敛调用可用性在此确定, 不到每轮重复探测。
     """
     seen: dict[str, Predictor] = {}
     for provider in providers:
@@ -147,12 +213,58 @@ def build_predictor_registry(providers: tuple[Predictor, ...]) -> PredictorRegis
             raise ComputationUnavailableError(
                 "预测算法 descriptor 非法", reason="bad-predictor-descriptor"
             )
+        if not callable(getattr(provider, "validate_parameters", None)):
+            raise ComputationUnavailableError(
+                f"预测算法缺少参数校验: {descriptor.ref!r}",
+                reason="bad-predictor-parameters",
+            )
+        if descriptor.depends_on_solve_result and not callable(
+            getattr(provider, "measure_convergence", None)
+        ):
+            raise ComputationUnavailableError(
+                f"耦合预测算法缺少收敛度量: {descriptor.ref!r}",
+                reason="bad-predictor-convergence",
+            )
         if descriptor.ref in seen:
             raise ComputationUnavailableError(
                 f"预测算法重复注册: {descriptor.ref!r}", reason="duplicate-predictor"
             )
         seen[descriptor.ref] = provider
     return PredictorRegistry(seen)
+
+
+def check_convergence(value: object) -> PredictionConvergence:
+    """校验耦合算法返回的收敛量(自定义能力公开输出边界)。
+
+    非 ``PredictionConvergence`` 即明确不可用; 字段合法性由其构造时
+    保证, 此处不重复核对字段。
+    """
+    if not isinstance(value, PredictionConvergence):
+        raise ComputationUnavailableError(
+            f"预测收敛量返回形态非法: {type(value).__name__!r}",
+            reason="bad-predictor-convergence",
+        )
+    return value
+
+
+def split_predictions_by_dependency(
+    predictions: tuple[Mapping[str, object], ...],
+    resolve_predictor: Callable[[str], Predictor],
+) -> tuple[tuple[Mapping[str, object], ...], tuple[Mapping[str, object], ...]]:
+    """按依赖声明拆分配置预测条目 → (独立条目, 耦合条目), 各组保持配置稳定序。
+
+    只读各算法已注册的 ``depends_on_solve_result`` 声明; 未知算法引用
+    即明确不可用。禁止按目标数量、目标类型或猜测 previous 使用情况分流。
+    """
+    independent: list[Mapping[str, object]] = []
+    coupled: list[Mapping[str, object]] = []
+    for entry in predictions:
+        predictor = resolve_predictor(str(entry["algorithm"]))
+        if predictor.descriptor.depends_on_solve_result:
+            coupled.append(entry)
+        else:
+            independent.append(entry)
+    return tuple(independent), tuple(coupled)
 
 
 def _artifact_bytes(
@@ -202,6 +314,10 @@ class NaivePredictor:
             needs_history=True,
             description="末值携载(全确定性, 种子只追溯不参与计算)",
         )
+
+    def validate_parameters(self, parameters: Mapping[str, object]) -> None:
+        """朴素算法无参数约束: 接受任意映射(形态已由配置载体保证)。"""
+        return None
 
     def predict(
         self,
@@ -291,11 +407,15 @@ __all__ = [
     "NAIVE_PREDICTOR",
     "NAIVE_PREDICTOR_REF",
     "TRAINING_ARTIFACT_MEDIA_TYPE",
+    "CoupledPredictor",
     "PredictedTarget",
+    "PredictionConvergence",
     "Predictor",
     "PredictorDescriptor",
     "PredictorRegistry",
     "NaivePredictor",
     "build_predictor_registry",
+    "check_convergence",
     "prediction_delta",
+    "split_predictions_by_dependency",
 ]

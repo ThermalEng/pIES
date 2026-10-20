@@ -774,6 +774,9 @@ class _ShortPredictor:
             description="测试短输出：恒返 24 点",
         )
 
+    def validate_parameters(self, parameters):
+        return None
+
     def predict(
         self, *, device, interface, target_type, history, history_object_id,
         parameters, seed, point_count, previous=None,
