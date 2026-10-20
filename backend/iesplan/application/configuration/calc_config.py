@@ -39,18 +39,36 @@ def _check_predictor_parameters(
     predictor_registry: Any | None,
     project_id: int,
 ) -> None:
-    """逐预测条目调用算法自身的参数规则（保存输入边界唯一位置）。
+    """逐预测条目解析精确引用并调用算法自身的参数规则（保存输入边界唯一位置）。
 
-    目录未装配或算法未注册时跳过：未知算法由提交闸门按精确引用阻断，
-    此处不抢闸门职责。算法规则失败（``ValueError`` 指明字段）即保存拒绝。
+    无预测条目时直接通过，不要求无关能力。目录缺席或算法未知时保存拒绝：
+    未知算法不能冒充已校验配置落库（提交边界仍负责绑定与实际可用性语义，
+    此处不替代）。算法规则失败（``ValueError`` 指明字段）即保存拒绝，
+    统一走 CONFIG-VAL-001 信封。
     """
-    if predictor_registry is None:
+    entries = tuple(validated.predictions or ())
+    if not entries:
         return
-    for entry in validated.predictions:
+    if predictor_registry is None:
+        raise AppError(
+            "预测算法目录未装配，含预测目标的计算配置不可保存",
+            params={"project_id": project_id},
+            location={
+                "object_type": "calculation_config",
+                "object_id": project_id,
+                "field": "predictions",
+            },
+        )
+    for entry in entries:
+        target = entry["target"]
         try:
             predictor = predictor_registry.get(str(entry["algorithm"]))
-        except ComputationUnavailableError:
-            continue
+        except ComputationUnavailableError as exc:
+            raise ValueError(
+                "预测算法未注册，参数规则无法确认 "
+                f"(algorithm={entry['algorithm']!r}, "
+                f"target={target['instance']!r}x{target['interface']!r})"
+            ) from exc
         try:
             predictor.validate_parameters(dict(entry.get("parameters") or {}))
         except (ValueError, TypeError) as exc:
@@ -71,8 +89,9 @@ def save_calculation_config_case(
     """保存计算配置（用户输入入口唯一校验；成功追加不可变 revision）。
 
     校验不通过 → 422 CONFIG-VAL-001 标准信封，不落库；revision 失配 → 409。
-    预测条目的算法级参数规则经组合根已发布的预测目录调用；目录未装配
-    时跳过该层检查（提交闸门仍会按精确引用阻断未知算法）。
+    预测条目的算法精确引用在此解析并调用其参数规则；未知算法不能冒充
+    已校验配置落库（含预测目标而目录缺席同样不可用）。无预测条目时不
+    要求无关能力。
     """
     ensure_access(db, user, project_id, "edit")
     project_domain.require_project(db, project_id)

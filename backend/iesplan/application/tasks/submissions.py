@@ -469,10 +469,12 @@ def _check_prediction_inputs(
     - 任一选中算法声明依赖求解结果（耦合）且 convergence 为空 → 400 TASK-REQ-012；
       耦合时 convergence.max_iterations（总求解轮数上限，阶段一计第 1 轮）小于 2
       → 400 TASK-REQ-012（上限为 1 将跳过耦合迭代求解，不允许）；
+    - 无耦合目标（无预测或仅独立）且 convergence 非空 → 400 TASK-REQ-012
+      （收敛配置只属于耦合迭代，不适用不得携带）；
     - 预测目录可用时：每个预测算法须精确解析，否则 400 TASK-REQ-013；
       算法不支持该绑定目标类型时 → 400 TASK-REQ-014；
-    - 预测目录缺席时 fail-closed：有 data_predict 绑定即要求收敛配置
-      （无法确认独立性，不猜测）。
+    - 含预测绑定而预测目录缺席时明确不可用（不猜耦合、不静默绕过）；
+      无预测绑定时不要求无关能力。
     配置正文形态由保存入口冻结，此处直接使用，不重复校验字段形态。
     返回 data_predict 绑定数。
     """
@@ -499,57 +501,64 @@ def _check_prediction_inputs(
                 "field": f"predefined_interfaces.{iface_id}",
             },
         )
+    if predictor_registry is None:
+        if bound:
+            raise AppError(
+                "预测算法目录未装配，含预测目标的计算任务不可提交",
+                params={"project_id": project_id},
+                location={
+                    "object_type": "calculation_config",
+                    "object_id": project_id, "field": "predictions",
+                },
+            )
+        return 0
     coupled: list[tuple[str, str]] = []
-    if predictor_registry is not None:
-        for entry in predictions:
-            algorithm = entry["algorithm"]
-            try:
-                predictor = predictor_registry.get(algorithm)
-            except ComputationUnavailableError as exc:
-                raise InvalidRequestError(
-                    "计算配置引用的预测算法未注册",
-                    code="TASK-REQ-013",
-                    params={"project_id": project_id, "algorithm": algorithm},
-                    location={
-                        "object_type": "calculation_config",
-                        "object_id": project_id, "field": "predictions",
-                    },
-                ) from exc
-            dev_id = str(entry["target"]["instance"])
-            iface_id = str(entry["target"]["interface"])
-            target_type = str(bound[(dev_id, iface_id)].get("target_type"))
-            if not predictor.descriptor.supports(target_type):
-                raise InvalidRequestError(
-                    "预测算法不支持该装配目标类型",
-                    code="TASK-REQ-014",
-                    params={
-                        "project_id": project_id, "algorithm": algorithm,
-                        "instance": dev_id, "interface": iface_id, "target_type": target_type,
-                    },
-                    location={
-                        "object_type": "calculation_config",
-                        "object_id": project_id, "field": "predictions",
-                    },
-                )
-            if predictor.descriptor.depends_on_solve_result:
-                coupled.append((dev_id, iface_id))
-        has_coupled = bool(coupled)
-    else:
-        # 能力源缺席时 fail-closed：有预测绑定即要求收敛，不猜测独立性。
-        has_coupled = bool(bound)
-    if has_coupled and calc_config.get("convergence") is None:
+    for entry in predictions:
+        algorithm = entry["algorithm"]
+        try:
+            predictor = predictor_registry.get(algorithm)
+        except ComputationUnavailableError as exc:
+            raise InvalidRequestError(
+                "计算配置引用的预测算法未注册",
+                code="TASK-REQ-013",
+                params={"project_id": project_id, "algorithm": algorithm},
+                location={
+                    "object_type": "calculation_config",
+                    "object_id": project_id, "field": "predictions",
+                },
+            ) from exc
+        dev_id = str(entry["target"]["instance"])
+        iface_id = str(entry["target"]["interface"])
+        target_type = str(bound[(dev_id, iface_id)].get("target_type"))
+        if not predictor.descriptor.supports(target_type):
+            raise InvalidRequestError(
+                "预测算法不支持该装配目标类型",
+                code="TASK-REQ-014",
+                params={
+                    "project_id": project_id, "algorithm": algorithm,
+                    "instance": dev_id, "interface": iface_id, "target_type": target_type,
+                },
+                location={
+                    "object_type": "calculation_config",
+                    "object_id": project_id, "field": "predictions",
+                },
+            )
+        if predictor.descriptor.depends_on_solve_result:
+            coupled.append((dev_id, iface_id))
+    has_coupled = bool(coupled)
+    convergence = calc_config.get("convergence")
+    if has_coupled and convergence is None:
         raise InvalidRequestError(
             "耦合预测目标须给出收敛容差与最大迭代数",
             code="TASK-REQ-012",
             params={
                 "project_id": project_id,
-                "coupled_targets": sorted(f"{dev}x{iface}" for dev, iface in coupled)
-                or sorted(f"{dev}x{iface}" for dev, iface in bound),
+                "coupled_targets": sorted(f"{dev}x{iface}" for dev, iface in coupled),
             },
             location={"object_type": "calculation_config", "object_id": project_id, "field": "convergence"},
         )
     if has_coupled:
-        max_iterations = int(calc_config["convergence"]["max_iterations"])
+        max_iterations = int(convergence["max_iterations"])
         if max_iterations < 2:
             raise InvalidRequestError(
                 "耦合预测要求至少求解一轮 "
@@ -565,6 +574,13 @@ def _check_prediction_inputs(
                     "field": "convergence",
                 },
             )
+    if not has_coupled and convergence is not None:
+        raise InvalidRequestError(
+            "无耦合预测目标时 convergence 必须为 null（收敛配置只属于耦合迭代）",
+            code="TASK-REQ-012",
+            params={"project_id": project_id},
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "convergence"},
+        )
     return len(bound)
 
 
@@ -1215,8 +1231,8 @@ def _submit_task(
     由顶层 submit_task 提交。
     generator_registry 为组合根已发布的生成器目录(计算任务解析冻结
     执行引用用; io 任务不消费)。predictor_registry 为组合根已发布的
-    预测算法目录(计算任务核对预测算法相容与依赖分流用; 缺席时 fail-closed,
-    有预测绑定即要求收敛配置)。
+    预测算法目录(计算任务核对预测算法相容与依赖分流用; 含预测绑定而
+    缺席时明确不可用, 无预测绑定时不要求)。
     """
     ensure_access(db, user, project_id, "edit")
     project = require_project(db, project_id)

@@ -61,7 +61,7 @@ def save_config_endpoint(
     """保存 CalculationConfig: 输入校验 422, revision 失配 409。
 
     预测算法目录取组合根已发布实例(经 app.state 透传, 不自行发现/组装);
-    预测参数规则由用例在输入边界调用, 未装配目录时跳过算法级检查。
+    含预测目标而目录缺席时由用例可见报告不可用, 不猜测、不绕过。
     """
     bootstrap = getattr(request.app.state, "bootstrap_context", None)
     predictor_registry = (

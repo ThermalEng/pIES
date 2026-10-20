@@ -441,8 +441,6 @@ def convergence_for_round(
     records: list[dict[str, object]] = []
     for entry in coupled_entries:
         target = entry["target"]
-        if not isinstance(target, Mapping):
-            raise KeyError(f"预测条目缺少 target: {entry!r}")
         key = (str(target["instance"]), str(target["interface"]))
         algorithm = str(entry["algorithm"])
         predictor = plane.predictor_registry.get(algorithm)
