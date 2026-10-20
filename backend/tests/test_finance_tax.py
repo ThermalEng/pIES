@@ -52,11 +52,11 @@ def test_split_keeps_full_precision():
     assert got.net + got.tax == Decimal("10.00")
 
 
-def test_split_rejects_negative_amount_and_bad_rate():
-    with pytest.raises(FinanceTripletError):
-        split_tax_amount(Decimal("-1"), RATE_13, amount_includes_tax=True)
-    with pytest.raises(FinanceTripletError):
-        split_tax_amount(Decimal("100"), Decimal("2"), amount_includes_tax=False)
+def test_split_negative_amount_keeps_sign():
+    """−113.00 @13% → net −100.00、tax −13.00，且和恒等。"""
+    got = split_tax_amount(Decimal("-113.00"), RATE_13, amount_includes_tax=True)
+    assert got == TaxSplit(net=Decimal("-100.00"), tax=Decimal("-13.00"))
+    assert got.net + got.tax == Decimal("-113.00")
 
 
 # ---------------------------------------------------------------------------
@@ -104,14 +104,26 @@ def test_vat_scheduled_refund_deducts_and_arrival_is_caller_side():
     assert got.paid == Decimal("0")
 
 
-def test_vat_claim_capped_by_credit_and_zero_claim_invents_nothing():
-    over = settle_vat_period(
+def test_vat_claim_equal_to_credit_is_legal():
+    """声明 2600＝可用留抵 2600 → 全扣，转下期 0。"""
+    got = settle_vat_period(
         opening_credit=Decimal("2600"),
         output_vat=Decimal("0"),
         input_vat=Decimal("0"),
-        refund_claim=Decimal("5000"),
+        refund_claim=Decimal("2600"),
     )
-    assert (over.refund_applied, over.carry_next) == (Decimal("2600"), Decimal("0"))
+    assert (got.refund_applied, got.carry_next) == (Decimal("2600"), Decimal("0"))
+
+
+def test_vat_over_claim_fails_and_zero_claim_invents_nothing():
+    """声明 5000＞留抵 2600 → 业务不可执行，不截小返回。"""
+    with pytest.raises(FinanceTripletError):
+        settle_vat_period(
+            opening_credit=Decimal("2600"),
+            output_vat=Decimal("0"),
+            input_vat=Decimal("0"),
+            refund_claim=Decimal("5000"),
+        )
     none = settle_vat_period(
         opening_credit=Decimal("2600"),
         output_vat=Decimal("0"),
@@ -228,16 +240,11 @@ def test_loss_results_are_immutable_and_inputs_untouched():
     assert balances[0].amount == Decimal("20")
 
 
-def test_loss_rejects_non_balance_and_zero_carry_years():
-    with pytest.raises(FinanceTripletError):
-        use_losses(
-            taxable_base=Decimal("30"),
-            balances=("20",),
-            year=2026,  # type: ignore[list-item]
-            carryforward_years=5,
-        )
-    with pytest.raises(FinanceTripletError):
-        use_losses(taxable_base=Decimal("-50"), balances=(), year=2026, carryforward_years=0)
+def test_loss_zero_base_uses_nothing_and_keeps_active_balances():
+    balances = (LossBalance(amount=Decimal("20"), last_usable_year=2030),)
+    got = use_losses(taxable_base=Decimal("0"), balances=balances, year=2026, carryforward_years=5)
+    assert got.uses == (Decimal("0"),)
+    assert got.remaining == balances
 
 
 # ---------------------------------------------------------------------------
@@ -278,12 +285,14 @@ def test_depreciation_residual_and_life_one():
     assert straight_line_period_amount(period_index=6, **one) == Decimal("0")
 
 
-def test_depreciation_rejects_residual_above_base():
-    with pytest.raises(FinanceTripletError):
-        straight_line_period_amount(
-            depreciable_base=Decimal("100"),
-            residual=Decimal("101"),
-            life_years=10,
-            period_index=1,
-            first_period=1,
-        )
+def test_depreciation_later_first_period_shifts_window():
+    """first=5、life=3：5..7 期计提，8 期停止。"""
+    kwargs: dict = {
+        "depreciable_base": Decimal("9000"),
+        "residual": Decimal("0"),
+        "life_years": 3,
+        "first_period": 5,
+    }
+    assert straight_line_period_amount(period_index=5, **kwargs) == Decimal("3000")
+    assert straight_line_period_amount(period_index=7, **kwargs) == Decimal("3000")
+    assert straight_line_period_amount(period_index=8, **kwargs) == Decimal("0")

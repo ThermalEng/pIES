@@ -3,10 +3,11 @@
 公开纯函数＋必要不可变值对象：含税/不含税拆分、单期 VAT 结算、
 亏损结转使用/产生/核销、所得税额、直线折旧期间金额。
 
-输入为调用方已类型化的 ``Decimal`` 金额/比例/期间与不可变余额；
-不读库/文件/API/当前项目，不设税率/期限默认值，计算链不按展示精度
-舍入，不原地修改输入。生成器未来等价约束的数值语义基础与独立对照，
-不是优化外的税务任务。
+输入是调用边界已类型化的 ``Decimal`` 金额/比例/期间与不可变余额，
+本模块直接消费，不重复校验；不读库/文件/API/当前项目，不设税率/
+期限默认值，计算链不按展示精度舍入，不原地修改输入。交易金额保留
+正负符号。生成器未来等价约束的数值语义基础与独立对照，不是优化外
+的税务任务。
 """
 
 from __future__ import annotations
@@ -16,29 +17,6 @@ from decimal import Decimal
 
 from iesplan.finance.triplet import FinanceTripletError
 
-
-def _money(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise FinanceTripletError(f"{name}: 必须为有限 Decimal")
-    if value < 0:
-        raise FinanceTripletError(f"{name}: 金额禁止为负")
-    return value
-
-
-def _rate(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise FinanceTripletError(f"{name}: 必须为有限 Decimal")
-    if not Decimal("0") <= value <= Decimal("1"):
-        raise FinanceTripletError(f"{name}: 税率必须在 0..1")
-    return value
-
-
-def _year(name: str, value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise FinanceTripletError(f"{name}: 必须为整数年度")
-    return value
-
-
 # ---------------------------------------------------------------------------
 # 含税/不含税拆分
 # ---------------------------------------------------------------------------
@@ -46,7 +24,7 @@ def _year(name: str, value: object) -> int:
 
 @dataclass(frozen=True, slots=True)
 class TaxSplit:
-    """金额拆分结果：net 不含税，tax 税额。"""
+    """金额拆分结果：net 不含税，tax 税额（保留输入符号）。"""
 
     net: Decimal
     tax: Decimal
@@ -54,12 +32,10 @@ class TaxSplit:
 
 def split_tax_amount(amount: Decimal, rate: Decimal, *, amount_includes_tax: bool) -> TaxSplit:
     """按显式口径拆分：含税 ``tax = amount*rate/(1+rate)``，否则 ``tax = amount*rate``。"""
-    total = _money("amount", amount)
-    ratio = _rate("rate", rate)
     if amount_includes_tax:
-        tax = total * ratio / (Decimal("1") + ratio)
-        return TaxSplit(net=total - tax, tax=tax)
-    return TaxSplit(net=total, tax=total * ratio)
+        tax = amount * rate / (Decimal("1") + rate)
+        return TaxSplit(net=amount - tax, tax=tax)
+    return TaxSplit(net=amount, tax=amount * rate)
 
 
 # ---------------------------------------------------------------------------
@@ -86,17 +62,20 @@ def settle_vat_period(
     refund_claim: Decimal,
 ) -> VatSettlement:
     """``net = output − input − opening``；``paid = max(net, 0)``，
-    ``carry_out = max(−net, 0)``；已声明退税 ``min(claim, carry_out)`` 扣减，
-    未声明（claim = 0）不造退款；到账期间由调用方另行归集。"""
-    opening = _money("opening_credit", opening_credit)
-    output = _money("output_vat", output_vat)
-    entering = _money("input_vat", input_vat)
-    claim = _money("refund_claim", refund_claim)
-    net = output - entering - opening
+    ``carry_out = max(−net, 0)``；已声明退税按声明金额扣减，超过本期
+    可用留抵为业务不可执行；未声明（claim = 0）不造退款；到账期间由
+    调用方另行归集。"""
+    net = output_vat - input_vat - opening_credit
     paid = max(net, Decimal("0"))
     carry = max(-net, Decimal("0"))
-    applied = min(claim, carry)
-    return VatSettlement(paid=paid, carry_out=carry, refund_applied=applied, carry_next=carry - applied)
+    if refund_claim > carry:
+        raise FinanceTripletError(f"声明退税 {refund_claim} 超过本期可用留抵 {carry}，业务不可执行")
+    return VatSettlement(
+        paid=paid,
+        carry_out=carry,
+        refund_applied=refund_claim,
+        carry_next=carry - refund_claim,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -136,25 +115,11 @@ def use_losses(
     ``(last_usable_year, 输入顺序)`` 抵扣当年正基数。新生亏损
     ``max(−base, 0)``，``last_usable_year = year + carryforward_years``，
     本期不参与抵扣、只进入以后可用余额。"""
-    if not isinstance(taxable_base, Decimal) or not taxable_base.is_finite():
-        raise FinanceTripletError("taxable_base: 必须为有限 Decimal")
-    current = _year("year", year)
-    carry_years = _year("carryforward_years", carryforward_years)
-    if carry_years < 1:
-        raise FinanceTripletError("carryforward_years: 必须 ≥ 1")
-    checked: list[LossBalance] = []
-    for position, item in enumerate(balances):
-        if not isinstance(item, LossBalance):
-            raise FinanceTripletError(f"balances[{position}]: 必须为 LossBalance")
-        _money(f"balances[{position}].amount", item.amount)
-        _year(f"balances[{position}].last_usable_year", item.last_usable_year)
-        checked.append(item)
-
-    uses = [Decimal("0")] * len(checked)
-    write_offs = [Decimal("0")] * len(checked)
+    uses = [Decimal("0")] * len(balances)
+    write_offs = [Decimal("0")] * len(balances)
     survivors: list[tuple[int, LossBalance]] = []
-    for position, item in enumerate(checked):
-        if item.last_usable_year < current:
+    for position, item in enumerate(balances):
+        if item.last_usable_year < year:
             write_offs[position] = item.amount
         else:
             survivors.append((position, item))
@@ -165,12 +130,12 @@ def use_losses(
         need -= take
     generated = max(-taxable_base, Decimal("0"))
     remaining: list[LossBalance] = []
-    for position, item in enumerate(checked):
+    for position, item in enumerate(balances):
         left = item.amount - uses[position] - write_offs[position]
         if left > 0:
             remaining.append(LossBalance(amount=left, last_usable_year=item.last_usable_year))
     if generated > 0:
-        remaining.append(LossBalance(amount=generated, last_usable_year=current + carry_years))
+        remaining.append(LossBalance(amount=generated, last_usable_year=year + carryforward_years))
     return LossUseResult(
         uses=tuple(uses),
         write_offs=tuple(write_offs),
@@ -183,11 +148,7 @@ def use_losses(
 
 def income_tax_payable(*, taxable_base: Decimal, loss_used: Decimal, rate: Decimal) -> Decimal:
     """所得税额 ``= rate × max(base − used, 0)``。"""
-    if not isinstance(taxable_base, Decimal) or not taxable_base.is_finite():
-        raise FinanceTripletError("taxable_base: 必须为有限 Decimal")
-    used = _money("loss_used", loss_used)
-    ratio = _rate("rate", rate)
-    return ratio * max(taxable_base - used, Decimal("0"))
+    return rate * max(taxable_base - loss_used, Decimal("0"))
 
 
 # ---------------------------------------------------------------------------
@@ -205,15 +166,6 @@ def straight_line_period_amount(
 ) -> Decimal:
     """``(base − residual)/life``，仅 ``first_period ≤ period < first_period+life``
     计提，之外为 0。计税基础由调用方按选择/容量派生后传入。"""
-    base = _money("depreciable_base", depreciable_base)
-    leftover = _money("residual", residual)
-    if leftover > base:
-        raise FinanceTripletError("residual: 不得超过 depreciable_base")
-    life = _year("life_years", life_years)
-    if life < 1:
-        raise FinanceTripletError("life_years: 必须 ≥ 1")
-    index = _year("period_index", period_index)
-    start = _year("first_period", first_period)
-    if start <= index < start + life:
-        return (base - leftover) / Decimal(life)
+    if first_period <= period_index < first_period + life_years:
+        return (depreciable_base - residual) / Decimal(life_years)
     return Decimal("0")
