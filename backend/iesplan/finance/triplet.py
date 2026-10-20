@@ -2418,12 +2418,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         if not bound and patch:
             pool_values = _check_pool_patch_shape(pool_id, patch)
         elif patch:
-            try:
-                pool_values = overrides._parsed_credit_pools[pool_id]
-            except KeyError as exc:
-                raise FinanceTripletError(
-                    f"credit_pools.{pool_id} 已绑定补丁缺失已解析值(内部状态非法)"
-                ) from exc
+            pool_values = overrides._parsed_credit_pools[pool_id]
         else:
             pool_values = {}
         merged_pools[pool_id] = _apply_pool_patch(pool, pool_values)
@@ -2435,12 +2430,7 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
         if not bound and patch:
             rule_values = _check_rule_override_shape(rule_id, patch, rule)
         elif patch:
-            try:
-                rule_values = overrides._parsed_tax_rules[rule_id]
-            except KeyError as exc:
-                raise FinanceTripletError(
-                    f"tax_rules.{rule_id} 已绑定补丁缺失已解析值(内部状态非法)"
-                ) from exc
+            rule_values = overrides._parsed_tax_rules[rule_id]
         else:
             rule_values = {}
         merged_rules[rule_id] = _apply_rule_patch(rule_id, rule, rule_values)
