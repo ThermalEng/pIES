@@ -1486,6 +1486,9 @@ class FinanceOverrides:
 
     覆盖子树的原始形状保留在 ``finance_types`` / ``energy_prices`` 中
     (仅按叶子做形状/单位/存在性校验), 由合并器应用。
+    税则/池补丁另以输入边界已解析的不可变类型化值保留在
+    ``_parsed_tax_rules`` / ``_parsed_credit_pools``（已绑定时），
+    供绑定合并直接消费，不重解析；不序列化。
     """
 
     schema: str
@@ -1497,6 +1500,14 @@ class FinanceOverrides:
     credit_pools: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     #: 解析时绑定的 Profile id（合并器据此判定覆盖权限是否已核对；不序列化）。
     _bound_profile: str = ""
+    #: 输入边界已形成的不可变类型化补丁（规则 id → 已解析值；未绑定为空）。
+    _parsed_tax_rules: Mapping[str, Mapping[str, object]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    #: 输入边界已形成的不可变类型化补丁（池 id → 已解析值；未绑定为空）。
+    _parsed_credit_pools: Mapping[str, Mapping[str, object]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_OVERRIDES:
@@ -1508,6 +1519,12 @@ class FinanceOverrides:
         object.__setattr__(self, "energy_prices", MappingProxyType(dict(sorted(self.energy_prices.items()))))
         object.__setattr__(self, "tax_rules", MappingProxyType(dict(sorted(self.tax_rules.items()))))
         object.__setattr__(self, "credit_pools", MappingProxyType(dict(sorted(self.credit_pools.items()))))
+        object.__setattr__(
+            self, "_parsed_tax_rules", MappingProxyType(dict(sorted(self._parsed_tax_rules.items())))
+        )
+        object.__setattr__(
+            self, "_parsed_credit_pools", MappingProxyType(dict(sorted(self._parsed_credit_pools.items())))
+        )
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -1596,19 +1613,27 @@ class FinanceOverrides:
 
         tax_raw = _optional_section(mapping, "tax_rules", "tax_rules")
         tax_rules: dict[str, Mapping[str, object]] = {}
+        parsed_rules: dict[str, dict] = {}
         for rule_id, rule_val in tax_raw.items():
             rule_id = _validate_local_id(rule_id, "tax rule")
             if not isinstance(rule_val, Mapping) or not rule_val:
                 raise FinanceTripletError(f"tax_rules.{rule_id} 必须为非空字典")
-            tax_rules[rule_id] = _validate_tax_rule_override(rule_id, rule_val, profile)
+            raw_patch, parsed_values = _validate_tax_rule_override(rule_id, rule_val, profile)
+            tax_rules[rule_id] = raw_patch
+            if parsed_values:
+                parsed_rules[rule_id] = parsed_values
 
         pools_raw = _optional_section(mapping, "credit_pools", "credit_pools")
         credit_pools: dict[str, Mapping[str, object]] = {}
+        parsed_pools: dict[str, dict] = {}
         for pool_id, pool_val in pools_raw.items():
             pool_id = _validate_local_id(pool_id, "credit pool")
             if not isinstance(pool_val, Mapping) or not pool_val:
                 raise FinanceTripletError(f"credit_pools.{pool_id} 必须为非空字典")
-            credit_pools[pool_id] = _validate_pool_override(pool_id, pool_val, profile)
+            raw_patch, parsed_values = _validate_pool_override(pool_id, pool_val, profile)
+            credit_pools[pool_id] = raw_patch
+            if parsed_values:
+                parsed_pools[pool_id] = parsed_values
 
         return cls(
             schema=schema,
@@ -1619,6 +1644,8 @@ class FinanceOverrides:
             tax_rules=tax_rules,
             credit_pools=credit_pools,
             _bound_profile=profile.profile_id if profile is not None else "",
+            _parsed_tax_rules=_freeze(parsed_rules),
+            _parsed_credit_pools=_freeze(parsed_pools),
         )
 
     @classmethod
@@ -1808,7 +1835,7 @@ def _validate_tax_rule_override(
     rule_id: str,
     rule_val: Mapping[str, object],
     profile: FinanceProfile | None,
-) -> Mapping[str, object]:
+) -> tuple[Mapping[str, object], dict]:
     """校验单个 tax_rule 覆盖: 只允许替换已有参数，不增删规则、不改方法/范围/池归属。
 
     - vat: in_tax/out_tax/om_input_tax 稀疏条目按 price/for 对应已有对象，
@@ -1819,6 +1846,9 @@ def _validate_tax_rule_override(
     - income: rate 原子、折旧 life_years/residual/first_year(按已有 asset 对应)、
       loss_carryforward_years；deductible_maintenance.items 与 opening_losses
       整表替换。范围列表(revenue/energy_cost/annual_om/variable_om)不可覆盖。
+
+    返回（冻结原始补丁，已解析不可变值）：有 Profile 时一次核对即形成
+    类型化值，由对象保留供绑定合并直接消费；无 Profile 时值为空。
     """
     out: dict[str, object] = {}
     prof_rule: TaxRule | None = None
@@ -1829,9 +1859,9 @@ def _validate_tax_rule_override(
     for key, value in rule_val.items():
         out[str(key)] = value
     if prof_rule is None:
-        return _freeze(out)  # type: ignore[return-value]
-    _check_rule_override_shape(rule_id, out, prof_rule)
-    return _freeze(out)  # type: ignore[return-value]
+        return _freeze(out), {}  # type: ignore[return-value]
+    parsed = _check_rule_override_shape(rule_id, out, prof_rule)
+    return _freeze(out), parsed  # type: ignore[return-value]
 
 
 def _check_rule_override_shape(rule_id: str, out: Mapping[str, object], prof_rule: TaxRule) -> dict:
@@ -2076,8 +2106,13 @@ def _validate_pool_override(
     pool_id: str,
     pool_val: Mapping[str, object],
     profile: FinanceProfile | None,
-) -> Mapping[str, object]:
-    """校验单个池覆盖: 只允许 opening_credit 原子或 refunds 整表替换，不增删池，不改策略。"""
+) -> tuple[Mapping[str, object], dict]:
+    """校验单个池覆盖: 只允许 opening_credit 原子或 refunds 整表替换，不增删池，不改策略。
+
+    返回（冻结原始补丁，已解析不可变值）：有 Profile 时键集合核对与值
+    解析一次完成，由对象保留供绑定合并直接消费；无 Profile 时只做键集合
+    核对，值留待首次绑定核对，对象保留值为空。
+    """
     field = f"credit_pools.{pool_id}"
     if profile is not None and pool_id not in profile.credit_pools:
         raise FinanceTripletError(f"credit pool {pool_id!r} 在 Profile 中不存在, 禁止新增")
@@ -2086,18 +2121,15 @@ def _validate_pool_override(
         raise FinanceTripletError(f"{field} 只允许覆盖已有参数: {sorted(unknown)}")
     if not pool_val:
         raise FinanceTripletError(f"{field} 必须覆盖至少一个叶子")
+    if profile is None:
+        return _freeze(dict(pool_val)), {}  # type: ignore[return-value]
+    parsed = _check_pool_patch_shape(pool_id, dict(pool_val))
     out: dict[str, object] = {}
-    if "opening_credit" in pool_val:
-        money = Money.from_dict(pool_val["opening_credit"], field=f"{field}.opening_credit")
-        out["opening_credit"] = money.to_dict()
-    if "refunds" in pool_val:
-        raw = _as_list(pool_val["refunds"], f"{field}.refunds")
-        checked = []
-        for index, entry in enumerate(raw):
-            refund = PoolRefund.from_dict(entry, field=f"{field}.refunds[{index}]")
-            checked.append(refund.to_dict())
-        out["refunds"] = checked
-    return _freeze(out)  # type: ignore[return-value]
+    if "opening_credit" in parsed:
+        out["opening_credit"] = parsed["opening_credit"].to_dict()
+    if "refunds" in parsed:
+        out["refunds"] = [refund.to_dict() for refund in parsed["refunds"]]
+    return _freeze(out), parsed  # type: ignore[return-value]
 
 
 def _check_same_unit(unit_a: str, unit_b: str, field: str) -> None:
@@ -2368,8 +2400,9 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
     merged_taxes: dict[str, TaxEntry] = dict(profile.taxes)
 
     # ---- credit_pools / tax_rules: 复用 Profile 已解析不可变事实，类型化应用
-    # 覆盖变更。与 Profile 绑定过的 Overrides 不再复核；无绑定 Overrides 在此
-    # 做唯一一次覆盖权限核对。合并后做一次组合领域引用核对；不重解析未覆盖项。
+    # 覆盖变更。与 Profile 绑定过的 Overrides 直接消费对象保留的已解析
+    # 类型化补丁，不再复核、不重解析；无绑定 Overrides 在此做唯一一次覆盖
+    # 权限核对与值解析。合并后做一次组合领域引用核对；不重解析未覆盖项。
     bound = overrides._bound_profile == profile.profile_id and bool(overrides._bound_profile)
     for pool_id in sorted(overrides.credit_pools):
         if pool_id not in profile.credit_pools:
@@ -2384,8 +2417,15 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
             raise FinanceTripletError(f"credit_pools.{pool_id} 覆盖形态非法")
         if not bound and patch:
             pool_values = _check_pool_patch_shape(pool_id, patch)
+        elif patch:
+            try:
+                pool_values = overrides._parsed_credit_pools[pool_id]
+            except KeyError as exc:
+                raise FinanceTripletError(
+                    f"credit_pools.{pool_id} 已绑定补丁缺失已解析值(内部状态非法)"
+                ) from exc
         else:
-            pool_values = _parse_pool_patch_values(pool_id, patch)
+            pool_values = {}
         merged_pools[pool_id] = _apply_pool_patch(pool, pool_values)
     merged_rules: dict[str, TaxRule] = {}
     for rule_id, rule in sorted(profile.tax_rules.items()):
@@ -2394,8 +2434,15 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
             raise FinanceTripletError(f"tax_rules.{rule_id} 覆盖形态非法")
         if not bound and patch:
             rule_values = _check_rule_override_shape(rule_id, patch, rule)
+        elif patch:
+            try:
+                rule_values = overrides._parsed_tax_rules[rule_id]
+            except KeyError as exc:
+                raise FinanceTripletError(
+                    f"tax_rules.{rule_id} 已绑定补丁缺失已解析值(内部状态非法)"
+                ) from exc
         else:
-            rule_values = _parse_rule_patch_values(rule_id, patch, rule)
+            rule_values = {}
         merged_rules[rule_id] = _apply_rule_patch(rule_id, rule, rule_values)
     _check_tax_refs(
         currency=profile.currency,
