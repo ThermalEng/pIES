@@ -17,7 +17,7 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
 | `generator` | `<稳定ID>@<语义化版本>` | 所选生成器精确引用 |
 | `solver` | `<稳定ID>@<语义化版本>` | 所选求解器精确引用 |
 | `precision` | `low`、`medium`、`high` | 计算精度（与界面精度语义一致） |
-| `convergence` | null 或 `{tolerance, max_iterations}` | 有耦合预测时必填：`tolerance` 为正有限数，指标与单位由耦合算法定义；`max_iterations` 为总求解轮数上限，含首次求解，至少为 2。仅有独立预测或无预测时为 null |
+| `convergence` | null 或 `{tolerance, max_iterations}` | 有耦合预测时必填：`tolerance` 为正有限的无量纲阈值，算法按其公开规则返回无量纲收敛量，所有耦合目标均满足阈值才收敛；`max_iterations` 为总求解轮数上限，含首次求解，至少为 2。仅有独立预测或无预测时为 null |
 | `time_limit_seconds` | 正整数 | 时间限制（秒） |
 | `options` | 对象（可空对象，不接受 null） | 生成/求解选项；生成前由所选 descriptor 的 options schema 核对，未知字段与类型/范围错误直接拒绝 |
 | `seed` | 整数（不接受布尔值）或 null | 随机种子 |
@@ -55,3 +55,5 @@ CalculationConfig 不进入 assembly，在计算包生成时与 `ValidatedAssemb
 ## 校验边界
 
 公开 CalculationConfig 输入边界校验全部字段形态与领域规则；生成前由 GeneratorDescriptor 核对 mode、精度与 solver 兼容性。预测目标按绑定和算法输入要求校验，收敛配置按预测能力声明的计算依赖确定。`2.0.0` 以依赖关系取代旧版按目标数量选择流程的规则。
+
+算法参数与收敛调用以[预测能力契约](../modules/engines.md#预测参数与收敛能力)为准；不要求所有算法提供同名尺度参数。该目标契约的输入与执行统一使用 `2.0.0`，不保留旧数量分流或双版本解析入口。
