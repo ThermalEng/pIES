@@ -39,6 +39,12 @@ _CURRENCY_LITERAL_RE = re.compile(
 #: 别名改写前缀(引擎安全：不含被禁子串；与 qconst 内部名前缀不冲突)。
 _ALIAS_PREFIX = "pfin"
 
+#: 显式全周期税后 NPV 保留目标(完整目标表达式唯一合法形态)。
+#: 只能作为 ``planning.objective.expression`` 整体出现，不开放点分
+#: 属性访问，不参与其他表达式或约束运算；方向核对与计算能力分属
+#: 装配闸门与生成器边界，本模块只定字面量。
+SYSTEM_AFTER_TAX_NPV = "system.after_tax_npv"
+
 
 @dataclass(frozen=True, slots=True)
 class PlanningExpression:

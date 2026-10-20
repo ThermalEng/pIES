@@ -157,7 +157,7 @@ def _seed_dataset(db: Session, user, pid: int, *, quota_bytes: int = 0) -> int:
 #: time_axis 缺一即阻断(ASM-CONV-001)。夹具必须显式声明, 不得依赖回退。
 EXPLICIT_CALC_PATCH = {
     "mode": "fixed_operation",
-    "generator": "ies.generator.highs_milp@3.0.0",
+    "generator": "ies.generator.highs_milp@3.1.0",
     "solver": "ies.solver.highs@1.7.2",
     "time_axis": {"resolution": "1h", "start": "2025-01-01T00:00:00Z"},
 }
@@ -285,7 +285,7 @@ _CONFIG_BODY: dict[str, Any] = {
     "schema_version": "2.0.0",
     "mode": "planning",
     "predictions": [],
-    "generator": "ies.generator.highs_milp@3.0.0",
+    "generator": "ies.generator.highs_milp@3.1.0",
     "solver": "ies.solver.highs@1.7.2",
     "precision": "medium",
     "convergence": None,

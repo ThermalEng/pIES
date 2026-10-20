@@ -57,12 +57,13 @@ from iesplan.computation.sequences import (
     MaterializedSet,
 )
 from iesplan.core.contracts import (
+    SYSTEM_AFTER_TAX_NPV,
     compile_planning_expression,
 )
 from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 from iesplan.core.contracts.planning_expression import PlanningExpression
 from iesplan.core.units import dims_of, to_si
-from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
+from iesplan.finance import EffectiveFinanceConfig, EvaluationInput, annual_boundaries
 from iesplan.modeling import (
     BinaryNode,
     DeviceMathContribution,
@@ -177,6 +178,11 @@ class _AffineAcc:
         )
 
 
+#: 年秒数（与单位表 ``a`` 同源：适配器 ``from_si(..., "CNY/a")`` 发布年值
+#: 即按此折算，生成器年金额取同一因子，保证目标与评价现金流同源）。
+_YEAR_SECONDS = _to_internal(1.0, "a")
+
+
 def _step_seconds(resolution: str, start_year: int) -> float:
     """步长秒数（由分辨率唯一推导，与年份无关：闰年 1h 同样是 3600 秒）。
 
@@ -236,6 +242,7 @@ def _new_builder(
         series=materialized.series,
         prices=materialized.prices,
         finance=finance,
+        evaluation=evaluation,
         point_count=point_count,
         step_s=step_s,
     )
@@ -288,6 +295,7 @@ class _ProjectBuilder:
         series: tuple[MaterializedSeries, ...],
         prices: tuple[MaterializedPriceSeries, ...] = (),
         finance: EffectiveFinanceConfig,
+        evaluation: EvaluationInput,
         point_count: int,
         step_s: float,
     ) -> None:
@@ -295,6 +303,7 @@ class _ProjectBuilder:
         self.devices = devices
         self.models = models
         self.finance = finance
+        self.evaluation = evaluation
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
@@ -687,12 +696,15 @@ class _ProjectBuilder:
     # 财务分量仿射式
     # ------------------------------------------------------------------
 
-    def _cost_affine(self, inst: str, component: str) -> _AffineAcc:
+    def _cost_affine(
+        self, inst: str, component: str, start: int = 0, end: int | None = None,
+    ) -> _AffineAcc:
         """单个成本分量的仿射式（fixed 常数 + linear driver 展开）。
 
         ``fixed`` 按常数计入：仅静态实例与必建变量（下界 > 0，建设必然
         发生）可达本路径；可选建设变量 + 正固定费在用户输入边界拒收，
-        不进入生成器。
+        不进入生成器。``start``/``end`` 只约束接口型 driver 的 step
+        区间（property 标量按年值口径本年全额，不切片）。
         """
         out = _AffineAcc()
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
@@ -703,14 +715,18 @@ class _ProjectBuilder:
             out.add_const(_money_to_internal(comp.fixed))
         for driver, cost in (comp.linear or {}).items():
             coeff = _to_internal(float(cost.unit_cost.value), cost.unit_cost.unit)
-            out.add_scaled(self._driver_affine(inst, driver), coeff)
+            out.add_scaled(self._driver_affine(inst, driver, start, end), coeff)
         return out
 
-    def _driver_affine(self, inst: str, driver: str) -> _AffineAcc:
+    def _driver_affine(
+        self, inst: str, driver: str, start: int = 0, end: int | None = None,
+    ) -> _AffineAcc:
         """单个 driver 的数量仿射式（property 标量或接口能量）。
 
         被规划接管的容量 property 直接引用首年建设容量变量（全期在产
-        即建设量）；未接管 property 保持旧行为（实例常量）。
+        即建设量）；未接管 property 保持旧行为（实例常量）。property
+        口径为年值（费率含时间维度由装配边界保证），逐年路径下本年全额，
+        不按区间切片；接口能量按区间内实际步求和。
         """
         out = _AffineAcc()
         instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
@@ -725,15 +741,16 @@ class _ProjectBuilder:
         iface = target["interface"]
         aggregation = target["aggregation"]
         contribution = self.models[inst]
+        stop = self.point_count if end is None else end
         if (inst, iface) in self.series:
-            values = self._series_si(inst, iface, contribution)
+            values = self._series_si(inst, iface, contribution)[start:stop]
             if aggregation == "integrate_positive":
                 out.add_const(sum(values) * self.step_s)
             else:
                 out.add_const(sum(values))
             return out
         prefix = f"{inst}__{iface}"
-        for step in range(self.point_count):
+        for step in range(start, stop):
             coeff = self.step_s if aggregation == "integrate_positive" else 1.0
             out.add_term(f"{prefix}__t{step}", coeff)
         return out
@@ -742,7 +759,9 @@ class _ProjectBuilder:
         value, unit = self._prop_value_unit(inst, prop)
         return _to_internal(value, unit)
 
-    def _tariff_affine(self, binding_id: str) -> _AffineAcc:
+    def _tariff_affine(
+        self, binding_id: str, start: int = 0, end: int | None = None,
+    ) -> _AffineAcc:
         """单个计费绑定的已带符号记账分量仿射式（逐点 ``price[t]×e[t]``）。
 
         ``constant`` 价格即每点同值的逐点计价（与 ``price×Σe[t]`` 结果
@@ -751,15 +770,19 @@ class _ProjectBuilder:
         边界核对，此处只消费不复核）。符号按财务方向：
         ``purchase`` 为 ``+``、`sale` 为 ``-``；价格自身的正/零/负按
         财务契约自然通过（负价按该方向反转），不做钳零或聚合。
+        ``start``/``end`` 约束归集 step 区间（时变价格仍按全局步下标
+        取价，不重排价格序列）。
         """
         out = _AffineAcc()
         binding = (self.doc.get("tariff_bindings") or {})[binding_id]
         price = self.finance.energy_prices[binding["price"]]
         sign = 1.0 if price.direction == "purchase" else -1.0
+        stop = self.point_count if end is None else end
         if price.kind == "constant":
             price_si = _to_internal(float(price.value.value), price.value.unit)  # type: ignore[union-attr]
             energy = self._driver_energy(
                 binding["instance"], binding["interface"], binding["aggregation"],
+                start, stop,
             )
             out.add_scaled(energy, sign * price_si)
             return out
@@ -770,20 +793,24 @@ class _ProjectBuilder:
         price_values = self.prices[binding["price"]]
         energy_steps = self._driver_energy_steps(
             binding["instance"], binding["interface"], binding["aggregation"],
+            start, stop,
         )
-        for step, (is_const, name_or_value, coeff) in enumerate(energy_steps):
-            charge = sign * price_values[step] * coeff
+        for offset, (is_const, name_or_value, coeff) in enumerate(energy_steps):
+            charge = sign * price_values[start + offset] * coeff
             if is_const:
                 out.add_const(charge * name_or_value)
             else:
                 out.add_term(name_or_value, charge)
         return out
 
-    def _driver_energy(self, inst: str, iface: str, aggregation: str) -> _AffineAcc:
+    def _driver_energy(
+        self, inst: str, iface: str, aggregation: str,
+        start: int = 0, end: int | None = None,
+    ) -> _AffineAcc:
         """接口能量序列仿射式（流变量或物化序列，integrate 乘步长秒）。"""
         out = _AffineAcc()
         for is_const, name_or_value, coeff in self._driver_energy_steps(
-            inst, iface, aggregation
+            inst, iface, aggregation, start, end
         ):
             if is_const:
                 out.add_const(name_or_value * coeff)
@@ -793,6 +820,7 @@ class _ProjectBuilder:
 
     def _driver_energy_steps(
         self, inst: str, iface: str, aggregation: str,
+        start: int = 0, end: int | None = None,
     ) -> list[tuple[bool, Any, float]]:
         """接口能量逐点形态（供时变价格逐点相乘）。
 
@@ -802,15 +830,16 @@ class _ProjectBuilder:
         """
         contribution = self.models[inst]
         factor = self.step_s if aggregation == "integrate_positive" else 1.0
+        stop = self.point_count if end is None else end
         if (inst, iface) in self.series:
             return [
                 (True, value, factor)
-                for value in self._series_si(inst, iface, contribution)
+                for value in self._series_si(inst, iface, contribution)[start:stop]
             ]
         prefix = f"{inst}__{iface}"
         return [
             (False, f"{prefix}__t{step}", factor)
-            for step in range(self.point_count)
+            for step in range(start, stop)
         ]
 
     def _ident_affine(self, ident: str) -> _AffineAcc:
@@ -956,9 +985,124 @@ class _ProjectBuilder:
             }
         return MappingProxyType(out)
 
+    def _construction_affine(self) -> _AffineAcc:
+        """建设总额仿射式（新建 costed 实例 upfront 分量之和，既有沉没不计）。
+
+        与 ``finance_components`` 同一新增/既有增量语义：existing 只计
+        周期可变分量，建设沉没成本不进入前瞻现金流。
+        """
+        out = _AffineAcc()
+        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
+        for inst in sorted(self.devices):
+            if inst not in instances or instances[inst].get("type") != "costed":
+                continue
+            if self.devices[inst].get("asset_origin") != "new":
+                continue
+            ft_entry = self.finance.finance_types[instances[inst]["finance_type"]]
+            if ft_entry.upfront_capex is None:
+                continue
+            out.add_scaled(self._cost_affine(inst, "upfront_capex"), 1.0)
+        return out
+
+    def _annual_fixed_om_annual(self, inst: str) -> _AffineAcc:
+        """单个实例年固定 O&M 的年金额仿射式（每年全额）。
+
+        分量声明口径为年率（线性费率×数量）：年金额 = 年率 × 年秒数
+        （与适配器 ``from_si`` 年值折算同源）；固定金额（公开入口已禁
+        止非 upfront 带 fixed，此处按年金额直通）不乘年秒数。
+        """
+        out = _AffineAcc()
+        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
+        entry = instances[inst]
+        ft_entry = self.finance.finance_types[entry["finance_type"]]
+        comp = ft_entry.annual_fixed_om
+        if comp is None:
+            return out
+        if comp.fixed is not None:
+            out.add_const(_money_to_internal(comp.fixed))
+        for driver, cost in (comp.linear or {}).items():
+            coeff = _to_internal(float(cost.unit_cost.value), cost.unit_cost.unit)
+            out.add_scaled(
+                self._driver_affine(inst, driver), coeff * _YEAR_SECONDS
+            )
+        return out
+
+    def _maintenance_by_year(self) -> dict[int, float]:
+        """维护/换新按评价年归集（同年多笔累加，不复制现金清单）。"""
+        out: dict[int, float] = {}
+        for entry in self.evaluation.maintenance_expenses:
+            out[entry.year] = out.get(entry.year, 0.0) + float(entry.amount)
+        return out
+
+    def _npv_objective(self) -> _AffineAcc:
+        """显式全周期 NPV 目标仿射式（空税则现金流基础，同次解内表达）。
+
+        ``CF[t]`` 评价年口径（``t = 0..E``，``E = K + N``）：建设总额按
+        冻结付款比例落款；第 j 个运营年净额（能源净收益 − 可变 O&M −
+        固定 O&M − 当年维护）计入 ``CF[K+j]``；再按冻结折现率折现求和。
+        能源按区间内实际步归集（公历年界与求解域同源）；固定 O&M 按年值
+        口径每年全额；维护按清单年一次扣除。税额关系由后续切片接入，
+        本路径只消费空税则（非空在生成器能力边界明确拒绝）。
+        """
+        evaluation = self.evaluation
+        construction = self._construction_affine()
+        maintenance = self._maintenance_by_year()
+        baseline = self.doc["project_baseline"]
+        bounds = annual_boundaries(
+            baseline["resolution"], baseline["start_year"], evaluation.operation_years
+        )
+        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
+        bindings = self.doc.get("tariff_bindings") or {}
+        npv = _AffineAcc()
+
+        def discount(year: int) -> float:
+            return (1.0 + evaluation.discount_rate) ** year
+
+        for payment in evaluation.construction_payments:
+            npv.add_scaled(
+                construction, -float(payment.ratio) / discount(payment.t)
+            )
+        for index, (start, end) in enumerate(bounds):
+            year_no = evaluation.construction_period + index + 1
+            annual = _AffineAcc()
+            for binding_id in sorted(bindings):
+                annual.add_scaled(self._tariff_affine(binding_id, start, end), -1.0)
+            for inst in sorted(self.devices):
+                if inst not in instances or instances[inst].get("type") != "costed":
+                    continue
+                origin = self.devices[inst].get("asset_origin")
+                produced = _COMPONENTS_NEW if origin == "new" else _COMPONENTS_EXISTING
+                ft_entry = self.finance.finance_types[instances[inst]["finance_type"]]
+                if (
+                    "period_variable_om" in produced
+                    and ft_entry.period_variable_om is not None
+                ):
+                    annual.add_scaled(
+                        self._cost_affine(inst, "period_variable_om", start, end), -1.0
+                    )
+                if (
+                    "annual_fixed_om" in produced
+                    and ft_entry.annual_fixed_om is not None
+                ):
+                    annual.add_scaled(self._annual_fixed_om_annual(inst), -1.0)
+            annual.add_const(-maintenance.get(year_no, 0.0))
+            npv.add_scaled(annual, 1.0 / discount(year_no))
+        return npv
+
     def _build_objective(self) -> tuple[_AffineAcc, str]:
         planning = self.doc["planning"]
         raw = planning["objective"]
+        if (
+            isinstance(raw.get("expression"), str)
+            and raw["expression"].strip() == SYSTEM_AFTER_TAX_NPV
+        ):
+            # 显式全周期 NPV 目标：方向与空税则能力由本边界落实（装配闸门
+            # 已在输入边界核对，此处不复核装配内容，只做能力自身语义）。
+            if raw.get("sense") != "maximize":
+                raise LoweringUnsupportedError(
+                    f"{SYSTEM_AFTER_TAX_NPV} 目标方向须为 maximize"
+                )
+            return self._npv_objective(), self.finance.currency
         symbols, placeholders = self._planning_symbols()
         compiled = compile_planning_expression(
             raw["expression"], symbols, currency=None,

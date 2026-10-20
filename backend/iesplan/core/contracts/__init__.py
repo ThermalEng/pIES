@@ -32,6 +32,7 @@ from iesplan.core.contracts.planning_config import (
     PlanningVariable,
 )
 from iesplan.core.contracts.planning_expression import (
+    SYSTEM_AFTER_TAX_NPV,
     PlanningExpression,
     compile_planning_expression,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "PlanningConfigError",
     "PlanningVariable",
     "PlanningExpression",
+    "SYSTEM_AFTER_TAX_NPV",
     "ProjectBaseline",
     "ProjectBaselineError",
     "compile_planning_expression",

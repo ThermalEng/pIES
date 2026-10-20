@@ -31,6 +31,7 @@ from iesplan.assembly.diags import make_asm_diag as make_diag
 from iesplan.assembly.rules.finance import required_components
 from iesplan.assembly.rules.tariff import binding_prices
 from iesplan.core.contracts import (
+    SYSTEM_AFTER_TAX_NPV,
     Constraint,
     Objective,
     PlanningConfigError,
@@ -387,16 +388,26 @@ def check_planning(
             allowed[var_name] = Counter()
     instance_ids = {str(k) for k in devices}
     binding_ids = {str(k) for k in binding_prices(doc, snapshot)}
-    _check_expression(
-        objective_raw.get("expression"),
-        field="planning.objective.expression",
-        allowed=allowed,
-        currency=snapshot.currency,
-        instance_ids=instance_ids,
-        binding_ids=binding_ids,
-        prod=prod,
-        diags=diags,
-    )
+    objective_expr = objective_raw.get("expression")
+    if isinstance(objective_expr, str) and objective_expr.strip() == SYSTEM_AFTER_TAX_NPV:
+        # 显式全周期 NPV 保留目标：只核对方向，不送标识符/编译检查；
+        # 约束中的点分形态仍走下方通用路径明确拒绝。
+        if objective_raw.get("sense") != "maximize":
+            _plan_fail(
+                diags, ASM_PLAN_UNDEF, "planning.objective", "objective_invalid",
+                {"detail": f"{SYSTEM_AFTER_TAX_NPV} 目标方向须为 maximize"},
+            )
+    else:
+        _check_expression(
+            objective_expr,
+            field="planning.objective.expression",
+            allowed=allowed,
+            currency=snapshot.currency,
+            instance_ids=instance_ids,
+            binding_ids=binding_ids,
+            prod=prod,
+            diags=diags,
+        )
     constraints = planning.get("constraints") or {}
     for const_name in sorted(constraints):
         entry = constraints[const_name]
