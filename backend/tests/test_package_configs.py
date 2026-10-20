@@ -1344,3 +1344,254 @@ def test_import_rejects_override_scope_violation(client: TestClient, db: Session
     with pytest.raises(package_domain.ImportValidationError) as excinfo:
         packages_uc.propose_import(db, importer, zip_bytes)
     assert any("FinanceOverrides" in r for r in excinfo.value.reasons)
+
+
+# ---------------------------------------------------------------------------
+# 非空税则/池随包携带(B1b): 多税率/维护两维度/退款与期初亏损/显式确认表
+# ---------------------------------------------------------------------------
+
+
+def _tax_package_profile() -> dict:
+    """非空税则包画像(合成，不读 0.15)：多税率、维护两维度、显式确认表。"""
+    from test_config_revisions import _tax_profile_payload
+
+    payload = _tax_profile_payload()
+    vat = payload["tax_rules"]["operating_vat"]
+    vat["om_input_tax"] = [
+        {
+            "for": "pv_system.annual_fixed_om",
+            "rate": {"value": "0.06", "unit": "1"},
+            "deductible_ratio": {"value": "1", "unit": "1"},
+        },
+        {
+            "for": "pv_system.period_variable_om",
+            "rate": {"value": "0.06", "unit": "1"},
+            "deductible_ratio": {"value": "0.5", "unit": "1"},
+        },
+    ]
+    vat["maintenance_input_tax"] = [
+        {
+            "year": 2,
+            "position": 1,
+            "rate": {"value": "0.13", "unit": "1"},
+            "deductible_ratio": {"value": "0", "unit": "1"},
+        },
+        {
+            "year": 2,
+            "position": 2,
+            "rate": {"value": "0.13", "unit": "1"},
+            "deductible_ratio": {"value": "1", "unit": "1"},
+        },
+    ]
+    payload["tax_rules"]["building_vat"] = {
+        "kind": "construction_input_vat",
+        "label_ref": "vat_label",
+        "for": "pv_system.upfront_capex",
+        "rate": {"value": "0.09", "unit": "1"},
+        "deductible_ratio": {"value": "0.8", "unit": "1"},
+        "credit_pool": "main_pool",
+        "confirmation": {
+            "method": "explicit_schedule",
+            "schedule": [{"period": 1, "ratio": "0.6"}, {"period": 13, "ratio": "0.4"}],
+        },
+    }
+    return payload
+
+
+def _tax_package_overrides(rate: str, refund_amount: str) -> dict:
+    """非空税则包覆盖: 所得税率 + 维护两维度 + 期初亏损 + 池期初/退款。"""
+    return {
+        "schema": "ies.finance-overrides",
+        "schema_version": "3.0.0",
+        "profile_ref": {"id": "cn-tax-demo"},
+        "credit_pools": {
+            "main_pool": {
+                "opening_credit": {"value": "90000", "unit": "CNY"},
+                "refunds": [
+                    {
+                        "period": 14,
+                        "amount": {"value": refund_amount, "unit": "CNY"},
+                        "arrival_period": 15,
+                    }
+                ],
+            },
+        },
+        "tax_rules": {
+            "income": {
+                "rate": {"value": rate, "unit": "1"},
+                "deductible_maintenance": {
+                    "mode": "explicit_items",
+                    "items": [
+                        {"year": 2, "position": 1, "deductible": True},
+                        {"year": 2, "position": 2, "deductible": False},
+                    ],
+                },
+                "opening_losses": [{"amount": {"value": "30000", "unit": "CNY"}, "last_usable_year": 6}],
+            },
+        },
+    }
+
+
+def _setup_tax_finance(client: TestClient, user, pid: int) -> None:
+    """登记非空税则画像并由项目引用(空覆盖 rev1)。"""
+    resp = client.post(
+        "/api/finance-profiles",
+        json={"finance_profile": _tax_package_profile()},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+    resp = client.put(
+        f"/api/projects/{pid}/finance-profile",
+        json={"profile_ref": {"id": "cn-tax-demo"}},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def _put_tax_overrides(client: TestClient, user, pid: int, payload: dict, expected_revision) -> None:
+    resp = client.put(
+        f"/api/projects/{pid}/finance-overrides",
+        json={"finance_overrides": payload, "expected_revision": expected_revision},
+        headers=_h(client, user),
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_export_import_roundtrip_with_nonempty_tax_rules(client: TestClient, db: Session) -> None:
+    """非空税则/池随真实包导出→上传提案→确认导入→公开读回，源项目不受影响。"""
+    from decimal import Decimal
+
+    from iesplan.core.yamlmini import load as yaml_load
+
+    owner = make_user(db, "taxpkg_owner")
+    importer = make_user(db, "taxpkg_importer")
+    pid = _create_project(client, owner)
+    _setup_tax_finance(client, owner, pid)
+    _put_tax_overrides(client, owner, pid, _tax_package_overrides("0.2", "1500"), 1)
+
+    zip_bytes = _export_zip(client, owner, pid)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        profile = FinanceProfile.from_dict(yaml_load(zf.read("finance_profile.yaml").decode("utf-8")))
+        assert profile.tax_rules["income"].rate.value == Decimal("0.25")  # type: ignore[union-attr]
+        om = profile.tax_rules["operating_vat"].om_input_tax  # type: ignore[union-attr]
+        assert [e.deductible_ratio.value for e in om] == [Decimal("1"), Decimal("0.5")]
+        sched = profile.tax_rules["building_vat"].confirmation  # type: ignore[union-attr]
+        assert sched.method == "explicit_schedule"
+        assert [(e.period, e.ratio) for e in sched.schedule] == [(1, Decimal("0.6")), (13, Decimal("0.4"))]
+        effective = EffectiveFinanceConfig.from_dict(
+            yaml_load(zf.read("effective_finance.yaml").decode("utf-8"))
+        )
+        assert effective.tax_rules["income"].rate.value == Decimal("0.2")  # type: ignore[union-attr]
+        assert effective.credit_pools["main_pool"].opening_credit.value == Decimal("90000")
+        assert [(r.period, r.arrival_period) for r in effective.credit_pools["main_pool"].refunds] == [
+            (14, 15)
+        ]
+        income_items = effective.tax_rules["income"].deductible_maintenance.items  # type: ignore[union-attr]
+        assert [(i.year, i.position, i.deductible) for i in income_items] == [(2, 1, True), (2, 2, False)]
+        vat_items = effective.tax_rules["operating_vat"].maintenance_input_tax  # type: ignore[union-attr]
+        assert [(i.year, i.position, i.deductible_ratio.value) for i in vat_items] == [
+            (2, 1, Decimal("0")),
+            (2, 2, Decimal("1")),
+        ]
+        losses = effective.tax_rules["income"].opening_losses  # type: ignore[union-attr]
+        assert [(o.amount.value, o.last_usable_year) for o in losses] == [(Decimal("30000"), 6)]
+
+    new_pid, _ = _import_new_project(client, importer, zip_bytes)
+    assert new_pid != pid
+    eff_body = client.get(f"/api/projects/{new_pid}/effective-finance", headers=_h(client, importer)).json()[
+        "effective_finance_config"
+    ]
+    assert eff_body["tax_rules"]["income"]["rate"] == {"value": "0.2", "unit": "1"}
+    assert eff_body["tax_rules"]["building_vat"]["confirmation"]["schedule"] == [
+        {"period": 1, "ratio": "0.6"},
+        {"period": 13, "ratio": "0.4"},
+    ]
+    assert eff_body["credit_pools"]["main_pool"]["opening_credit"] == {"value": "90000", "unit": "CNY"}
+    assert eff_body["credit_pools"]["main_pool"]["refunds"][0]["amount"] == {"value": "1500", "unit": "CNY"}
+    ovr_body = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()[
+        "finance_overrides"
+    ]
+    assert ovr_body["tax_rules"]["income"]["rate"] == {"value": "0.2", "unit": "1"}
+    assert ovr_body["tax_rules"]["income"]["opening_losses"] == [
+        {"amount": {"value": "30000", "unit": "CNY"}, "last_usable_year": 6}
+    ]
+
+    src_eff = client.get(f"/api/projects/{pid}/effective-finance", headers=_h(client, owner)).json()[
+        "effective_finance_config"
+    ]
+    assert src_eff["tax_rules"]["income"]["rate"] == {"value": "0.2", "unit": "1"}
+
+
+def test_imported_history_versions_restore_distinct_tax_overrides(client: TestClient, db: Session) -> None:
+    """两份不同合法税则覆盖各自精确依赖：恢复取原值，不被当前覆盖替代。"""
+    owner = make_user(db, "taxhist_owner")
+    importer = make_user(db, "taxhist_importer")
+    pid = _create_project(client, owner)
+    _setup_tax_finance(client, owner, pid)
+    _put_tax_overrides(client, owner, pid, _tax_package_overrides("0.2", "1500"), 1)
+    _create_hist_version(client, owner, pid, "tax-a")
+    _put_tax_overrides(client, owner, pid, _tax_package_overrides("0.15", "2500"), 2)
+    _create_hist_version(client, owner, pid, "tax-b")
+
+    zip_bytes = _export_zip(client, owner, pid)
+    new_pid, _ = _import_new_project(client, importer, zip_bytes)
+    listed = client.get(f"/api/projects/{new_pid}/versions", headers=_h(client, importer)).json()["versions"]
+    assert len(listed) == 2
+    by_name = {v["name"]: v for v in listed}
+
+    resp = client.post(
+        f"/api/projects/{new_pid}/versions/{by_name['tax-a']['id']}/restore",
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 200, resp.text
+    ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()[
+        "finance_overrides"
+    ]
+    assert ovr["tax_rules"]["income"]["rate"] == {"value": "0.2", "unit": "1"}
+    assert ovr["credit_pools"]["main_pool"]["refunds"][0]["amount"] == {"value": "1500", "unit": "CNY"}
+
+    resp = client.post(
+        f"/api/projects/{new_pid}/versions/{by_name['tax-b']['id']}/restore",
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 200, resp.text
+    ovr = client.get(f"/api/projects/{new_pid}/finance-overrides", headers=_h(client, importer)).json()[
+        "finance_overrides"
+    ]
+    assert ovr["tax_rules"]["income"]["rate"] == {"value": "0.15", "unit": "1"}
+    assert ovr["credit_pools"]["main_pool"]["refunds"][0]["amount"] == {"value": "2500", "unit": "CNY"}
+
+
+def test_import_rejects_tampered_tax_values(client: TestClient, db: Session) -> None:
+    """包内 Effective 税率被改坏 / Overrides 越权加范围 → 上传边界拒绝，不能确认补救。"""
+    from iesplan.core.yamlmini import load as yaml_load
+
+    owner = make_user(db, "taxtamper_owner")
+    importer = make_user(db, "taxtamper_importer")
+    pid = _create_project(client, owner)
+    _setup_tax_finance(client, owner, pid)
+    _put_tax_overrides(client, owner, pid, _tax_package_overrides("0.2", "1500"), 1)
+    zip_bytes = _export_zip(client, owner, pid)
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        eff_doc = yaml_load(zf.read("effective_finance.yaml").decode("utf-8"))
+        ovr_doc = yaml_load(zf.read("finance_overrides.yaml").decode("utf-8"))
+    assert eff_doc["tax_rules"]["income"]["rate"]["value"] == "0.2"
+    eff_doc["tax_rules"]["income"]["rate"]["value"] = "0.99"
+    bad = _rezip_mutate(zip_bytes, {"effective_finance.yaml": yaml_dump(eff_doc).encode("utf-8")})
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", bad, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
+    assert any("合并结果" in r for r in resp.json()["error"]["params"]["reasons"])
+
+    ovr_doc["tax_rules"]["income"]["revenue"] = []
+    bad = _rezip_mutate(zip_bytes, {"finance_overrides.yaml": yaml_dump(ovr_doc).encode("utf-8")})
+    resp = client.post(
+        "/api/projects/import",
+        files={"file": ("pkg.zip", bad, "application/zip")},
+        headers=_h(client, importer),
+    )
+    assert resp.status_code == 400, resp.text
