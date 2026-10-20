@@ -474,7 +474,7 @@ def _check_prediction_inputs(
     - 预测目录可用时：每个预测算法须精确解析，否则 400 TASK-REQ-013；
       算法不支持该绑定目标类型时 → 400 TASK-REQ-014；
     - 含预测绑定而预测目录缺席时明确不可用（不猜耦合、不静默绕过）；
-      无预测绑定时不要求无关能力。
+      无预测绑定时不要求目录能力，但 convergence 非空仍按统一规则拒绝。
     配置正文形态由保存入口冻结，此处直接使用，不重复校验字段形态。
     返回 data_predict 绑定数。
     """
@@ -511,7 +511,7 @@ def _check_prediction_inputs(
                     "object_id": project_id, "field": "predictions",
                 },
             )
-        return 0
+        coupled = []
     coupled: list[tuple[str, str]] = []
     for entry in predictions:
         algorithm = entry["algorithm"]
