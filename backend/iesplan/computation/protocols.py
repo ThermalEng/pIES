@@ -2,10 +2,10 @@
 
 三段式真实边界(宪法 §4.5):
 
-- ``GeneratorProvider`` 只接受已签发的 ``ValidatedAssemblyArtifact``、按装配
+- ``GeneratorProvider`` 直接接受已签发的 ``ValidatedAssemblyArtifact``、按装配
   实例固定的设备数学贡献、已物化的全周期输入序列、不可变
-  ``EffectiveFinanceConfig`` 与经过公开输入校验的 ``CalculationConfig``
-  五项直接输入, 确定性生成 ``SolverBundle``;
+  ``EffectiveFinanceConfig``、经过公开输入校验的 ``CalculationConfig``
+  与已确认冻结的评价输入, 确定性生成 ``SolverBundle``;
 - 执行层只校验并执行 Bundle 中的结构化命令, 生成 ``ExecutionReceipt``
   与原始输出;
 - ``ResultAdapter`` 只把 Bundle、回执和声明输出映射为带 schema/version 的
@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from iesplan.assembly.contracts import ValidatedAssemblyArtifact
 from iesplan.computation.sequences import MaterializedSet
-from iesplan.finance import EffectiveFinanceConfig
+from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
 if TYPE_CHECKING:
@@ -109,9 +109,10 @@ def check_provider_ref(value: object, name: str) -> str:
 class GeneratorProvider(Protocol):
     """方案生成能力(首个真实实现见 ``generators.highs_milp``)。
 
-    纯转换: 直接消费五项已可信输入, 不得连接数据库/对象服务/网络,
+    纯转换: 直接消费装配产物、设备数学贡献、物化序列、有效财务快照、
+    计算配置及冻结评价确认, 不得连接数据库/对象服务/网络,
     不得启动求解器, 不得读环境变量, 不得修改项目或任务状态; 不得为
-    五项输入再建包装层。同一五项输入与生成器版本必须产生相同输入字节。
+    这些输入再建包装层。同一组直接输入与生成器版本必须产生相同输入字节。
     """
 
     @property
@@ -135,13 +136,16 @@ class GeneratorProvider(Protocol):
         materialized: MaterializedSet,
         finance: EffectiveFinanceConfig,
         config: CalculationConfig,
+        evaluation: EvaluationInput,
     ) -> SolverBundle:
-        """由五项直接输入生成完整求解包(聚合：manifest + 输入文件字节)。
+        """由直接输入生成完整求解包(聚合：manifest + 输入文件字节)。
 
         第三项为已完成物化的集合（``pending_predict`` 为空，由上游在预测
-        产物合并后构成；此处信任类型化交接，不复核）。全周期总点数由装配
-        基线起始年/分辨率与集合携带的已确认评价年限推导，``series`` 为空
-        时仍为完整时域，不回退单年。调用方只传入已签发 artifact; provider
+        产物合并后构成；此处信任类型化交接，不复核）。冻结评价确认为独立
+        必需输入（无默认值；调用方从同一任务冻结块恢复，不读最新草稿）。
+        全周期总点数由装配基线起始年/分辨率与评价确认的已确认运营年限
+        推导，``series`` 为空时仍为完整时域，不回退单年；物化集合不再承载
+        财务年限权威。调用方只传入已签发 artifact; provider
         信任上游装配与应用边界已完成的签发与内容确认, 不复核。通用选择
         门禁(generator/mode/精度/solver/options)由 ``GeneratorRegistry.resolve``
         完成，不在此重复；本方法只做 provider 特有检查(outputs/实际绑定

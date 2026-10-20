@@ -153,7 +153,23 @@ def _campus_bundle(time_limit_seconds: int = 600):
         seed=None,
     )
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
-    return provider.generate(artifact, models, mat, finance, config)
+    from iesplan.finance import EvaluationInput
+
+    return provider.generate(
+        artifact,
+        models,
+        mat,
+        finance,
+        config,
+        EvaluationInput(
+            evaluation_years=1,
+            construction_period=0,
+            operation_years=1,
+            discount_rate=0.08,
+            construction_payments=(),
+            maintenance_expenses=(),
+        ),
+    )
 
 
 def _ipc_provider(exchange_dir: str) -> FileExchangeExecutorProvider:

@@ -6,7 +6,7 @@
   不完整实现的结构判定; 三协议用各自独立的最小替身验证(不用一个
   同时实现三协议的假对象证明错误形状);
 - 宪法 §4.5 方法形状: generate 消费装配产物/设备数学贡献/物化序列/
-  有效财务快照/公开配置五项直接输入产出完整 Bundle 聚合(manifest +
+  有效财务快照/公开配置直接输入产出完整 Bundle 聚合(manifest +
   文件字节); execute 消费结构化命令与运行目录产出最小过程结果;
   adapt 消费三件套产出统一结果; manifest 载体为
   ``SolverBundleManifest``; 回执载体为 ``ExecutionReceipt``;
@@ -186,8 +186,24 @@ class _GeneratorOnly:
         materialized: MaterializedSet,
         finance: EffectiveFinanceConfig,
         config: CalculationConfig,
+        evaluation,
     ) -> SolverBundle:
         raise ComputationUnavailableError(reason="no-provider")
+
+
+
+def _evaluation():
+    """合成评价确认（N=1/K=0/E=1，冻结值直传）。"""
+    from iesplan.finance import EvaluationInput
+
+    return EvaluationInput(
+        evaluation_years=1,
+        construction_period=0,
+        operation_years=1,
+        discount_rate=0.08,
+        construction_payments=(),
+        maintenance_expenses=(),
+    )
 
 
 def _receipt(**kwargs) -> ExecutionReceipt:
@@ -310,7 +326,7 @@ def test_unavailable_error_semantics() -> None:
         gen.generate(
             _artifact(), {},
             MaterializedSet(operation_years=1, series=(), pending_predict=()),
-            _finance(), config,
+            _finance(), config, _evaluation(),
         )
     receipt = _receipt(status="process_failed")
     with pytest.raises(ComputationUnavailableError):

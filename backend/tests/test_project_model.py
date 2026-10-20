@@ -134,7 +134,7 @@ def _finance_payload(direction: str = "purchase", tariff_kind: str = "constant")
         }
     return {
         "schema": "ies.finance-profile",
-        "schema_version": "1.0.0",
+        "schema_version": "3.0.0",
         "profile": {
             "id": "cn-north-demo",
             "region": "CN-North",
@@ -143,6 +143,9 @@ def _finance_payload(direction: str = "purchase", tariff_kind: str = "constant")
             "price_basis": "tax_inclusive",
             "cost_method": "fixed_plus_linear",
         },
+        "taxes": {},
+        "credit_pools": {},
+        "tax_rules": {},
         "finance_types": {
             "tank_sys": {
                 "annual_fixed_om": {
@@ -284,6 +287,20 @@ def _artifact_doc(*, bilinear: bool = False) -> dict:
     }
 
 
+def _evaluation_n(n: int):
+    """合成评价确认（K=0、E=N，无付款、无维护，冻结值直传）。"""
+    from iesplan.finance import EvaluationInput
+
+    return EvaluationInput(
+        evaluation_years=n,
+        construction_period=0,
+        operation_years=n,
+        discount_rate=0.08,
+        construction_payments=(),
+        maintenance_expenses=(),
+    )
+
+
 def _inputs(
     *,
     bilinear: bool = False,
@@ -328,7 +345,7 @@ def _inputs(
         time_limit_seconds=600,
         outputs=["solution"],
     )
-    return artifact, models, result, finance, config
+    return artifact, models, result, finance, config, _evaluation_n(1)
 
 
 def _price_values(head: tuple) -> tuple:
@@ -338,7 +355,7 @@ def _price_values(head: tuple) -> tuple:
 
 
 def _priced_inputs(direction: str, head: tuple, objective: str):
-    """时变价格五项输入：heat_import 改 time_series + 第三项价格区。"""
+    """时变价格直接输入：heat_import 改 time_series + 第三项价格区。"""
     from iesplan.computation import MaterializedPriceSeries
 
     prices = (
@@ -360,8 +377,8 @@ def _priced_inputs(direction: str, head: tuple, objective: str):
 
 
 def _build():
-    artifact, models, materialized, finance, config = _inputs()
-    return build_project_model(artifact, models, materialized, finance, config)
+    artifact, models, materialized, finance, config, evaluation = _inputs()
+    return build_project_model(artifact, models, materialized, finance, config, evaluation)
 
 
 @pytest.fixture(scope="module")
@@ -395,8 +412,8 @@ def test_project_inventory_counts(built) -> None:
 
 def _build_with_objective(expression: str):
     """以替换目标表达式的真实装配走完整构造（公开行为）。"""
-    artifact, models, materialized, finance, config = _inputs(objective=expression)
-    return build_project_model(artifact, models, materialized, finance, config)
+    artifact, models, materialized, finance, config, evaluation = _inputs(objective=expression)
+    return build_project_model(artifact, models, materialized, finance, config, evaluation)
 
 
 def test_objective_dimensionless_ratio_reports_unit_one() -> None:
@@ -430,25 +447,25 @@ def test_objective_scaled_power_keeps_si() -> None:
 
 def test_objective_exotic_dimension_rejected() -> None:
     """复合量纲（CNY/年）无可报告业务单位，超出首版能力明确拒绝。"""
-    artifact, models, materialized, finance, config = _inputs(
+    artifact, models, materialized, finance, config, evaluation = _inputs(
         objective="tank1__annual_fixed_om"
     )
     with pytest.raises(LoweringUnsupportedError):
-        build_project_model(artifact, models, materialized, finance, config)
+        build_project_model(artifact, models, materialized, finance, config, evaluation)
 
 
 def test_objective_inverse_power_rejected() -> None:
     """1 / 1 kW 根量纲为 power^-1（非无量纲），明确拒绝。"""
-    artifact, models, materialized, finance, config = _inputs(objective="1 / 1 kW")
+    artifact, models, materialized, finance, config, evaluation = _inputs(objective="1 / 1 kW")
     with pytest.raises(LoweringUnsupportedError):
-        build_project_model(artifact, models, materialized, finance, config)
+        build_project_model(artifact, models, materialized, finance, config, evaluation)
 
 
 def test_objective_power_per_year_rejected() -> None:
     """tank_cap / 1 year 根量纲为 power·time^-1（非 power），明确拒绝。"""
-    artifact, models, materialized, finance, config = _inputs(objective="tank_cap / 1 year")
+    artifact, models, materialized, finance, config, evaluation = _inputs(objective="tank_cap / 1 year")
     with pytest.raises(LoweringUnsupportedError):
-        build_project_model(artifact, models, materialized, finance, config)
+        build_project_model(artifact, models, materialized, finance, config, evaluation)
 
 
 def test_objective_finance_and_tariff_terms(built) -> None:
@@ -639,7 +656,7 @@ def _island_inputs():
         time_limit_seconds=600,
         outputs=["solution"],
     )
-    return artifact, models, result, finance, config
+    return artifact, models, result, finance, config, _evaluation_n(1)
 
 
 def test_buses_split_per_carrier_components() -> None:
@@ -647,8 +664,8 @@ def test_buses_split_per_carrier_components() -> None:
 
     旧全局连通实现会把五台设备合并，只产生一条 electricity 行。
     """
-    artifact, models, materialized, finance, config = _island_inputs()
-    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    artifact, models, materialized, finance, config, evaluation = _island_inputs()
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
     by_name = {row.name: row for row in model.constraints}
     elec = {
         name: by_name[name] for name in by_name
@@ -751,7 +768,7 @@ def _gen_inputs():
         time_limit_seconds=600,
         outputs=["solution"],
     )
-    return artifact, models, result, finance, config
+    return artifact, models, result, finance, config, _evaluation_n(1)
 
 
 def test_planning_takeover_bounds_follow_planning_var() -> None:
@@ -760,8 +777,8 @@ def test_planning_takeover_bounds_follow_planning_var() -> None:
     旧实现用实例常数作界且无容量行；新行为静态界取规划界，
     并为每个 step 生成对规划变量的容量约束。缺失安全界保持 None。
     """
-    artifact, models, materialized, finance, config = _gen_inputs()
-    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    artifact, models, materialized, finance, config, evaluation = _gen_inputs()
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
     by_var = {var.name: var for var in model.variables}
     assert by_var["gen1__power_out__t0"].upper == pytest.approx(500000.0)
     assert by_var["gen1__power_out__t0"].lower == pytest.approx(10000.0)
@@ -796,7 +813,7 @@ def _gen_fixed_inputs():
     finance 取线性费率载荷并追加 upfront 分量：固定 900000 CNY 计一次，
     容量线性 3500 CNY/kW 跟随建设量。返回 (model, decls)。
     """
-    _artifact, models, _materialized, _finance, config = _gen_inputs()
+    _artifact, models, _materialized, _finance, config, _ = _gen_inputs()
     doc = json.loads(_artifact.canonical_text)
     doc["planning"]["variables"] = {
         "gen_cap": {
@@ -820,9 +837,11 @@ def _gen_fixed_inputs():
         artifact, {}, operation_years=1,
     )
     model, _, _ = build_project_model(
-        artifact, models, materialized, finance, config,
+        artifact, models, materialized, finance, config, _evaluation_n(1)
     )
-    decls = finance_component_declarations(artifact, models, materialized, finance)
+    decls = finance_component_declarations(
+        artifact, models, materialized, finance, _evaluation_n(1)
+    )
     return model, decls
 
 
@@ -844,8 +863,10 @@ def test_single_build_om_ident_is_annual_rate() -> None:
 
     在产全期即建设量，无年平均；用户要多年金额须在目标中显式乘时长。
     """
-    artifact, models, materialized, finance, _ = _gen_inputs()
-    decls = finance_component_declarations(artifact, models, materialized, finance)
+    artifact, models, materialized, finance, _, _ = _gen_inputs()
+    decls = finance_component_declarations(
+        artifact, models, materialized, finance, _evaluation_n(1)
+    )
     annual = decls["gen1__annual_fixed_om"]
     rate_si = _to_internal(35.0, "CNY/kW/a")
     assert annual["terms"] == {"gen_cap": pytest.approx(rate_si)}
@@ -857,8 +878,8 @@ def test_single_build_one_year_goal_amount() -> None:
 
     年费率归一后 ×1 年 = 每瓦 0.035 CNY。
     """
-    artifact, models, materialized, finance, config = _gen_inputs()
-    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    artifact, models, materialized, finance, config, evaluation = _gen_inputs()
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
     coeffs = _coeffs(model.objective)
     assert coeffs["gen_cap"] == pytest.approx(0.035)
 
@@ -881,7 +902,45 @@ def _static_om_decls(evaluation_years: int):
     materialized = materialize_non_predictive_series(
         artifact, {}, operation_years=evaluation_years,
     )
-    return finance_component_declarations(artifact, models, materialized, finance)
+    return finance_component_declarations(
+        artifact, models, materialized, finance, _evaluation_n(evaluation_years)
+    )
+
+
+def test_empty_series_builds_full_two_year_horizon_from_evaluation() -> None:
+    """空序列多年时域由评价确认取值：N=2 空序列仍建 17520 步完整模型。"""
+    doc = _artifact_doc()
+    artifact = ValidatedAssemblyArtifact(
+        canonical_text=json.dumps(doc), receipt=ValidationReceipt(),
+    )
+    models = {
+        inst: _contribution(text)
+        for inst, text in {
+            "heater1": HEATER_YAML,
+            "tank1": TANK_YAML,
+            "load1": LOAD_YAML,
+            "hub1": HUB_YAML,
+        }.items()
+        if inst in doc["devices"]
+    }
+    finance = merge_effective(FinanceProfile.from_dict(_finance_payload()), None)
+    materialized = materialize_non_predictive_series(artifact, {}, operation_years=2)
+    assert {s.point_count for s in materialized.series} == {17520}
+    config = CalculationConfig(
+        mode="planning",
+        generator="acme.generator@1.0.0",
+        solver="ies.solver.highs@1.7.2",
+        precision="medium",
+        time_limit_seconds=600,
+        outputs=["solution"],
+    )
+    model, _, _ = build_project_model(
+        artifact, models, materialized, finance, config, _evaluation_n(2)
+    )
+    steps = sorted(
+        int(name.rsplit("__t", 1)[1]) for name in {v.name for v in model.variables} if "__t" in name
+    )
+    assert steps[-1] == 2 * 8760 - 1
 
 
 def test_static_capacity_om_stays_constant_annual_rate() -> None:
@@ -965,7 +1024,7 @@ def _pv_25c_inputs():
         time_limit_seconds=600,
         outputs=["solution"],
     )
-    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, _evaluation_n(1))
     return model, {row.name: row for row in model.constraints}
 
 
@@ -993,7 +1052,7 @@ def test_sale_tariff_sign_flips() -> None:
     必须引用与方向一致的 sale 后缀；反向 purchase 后缀引用售电绑定
     与装配闸门同理非法（见 direction_suffix_mismatch）。
     """
-    artifact, models, materialized, finance, config = _inputs(
+    artifact, models, materialized, finance, config, evaluation = _inputs(
         tariff_direction="sale",
         objective=(
             "1 year * tank1__annual_fixed_om"
@@ -1001,13 +1060,13 @@ def test_sale_tariff_sign_flips() -> None:
             " + import_meter__period_energy_sale"
         ),
     )
-    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
     coeffs = _coeffs(model.objective)
     assert coeffs["load1__heat_in__t0"] == pytest.approx(-0.0007, rel=1e-9)
     # 反向后缀不在符号表内，编译边界即大声拒绝（装配侧以
     # direction_suffix_mismatch 精确阻断，此处不断言具体子类）。
     with pytest.raises(ExpressionError):
-        artifact2, models2, materialized2, finance2, config2 = _inputs(
+        artifact2, models2, materialized2, finance2, config2, _ = _inputs(
             tariff_direction="sale",
             objective=(
                 "1 year * tank1__annual_fixed_om"
@@ -1015,7 +1074,7 @@ def test_sale_tariff_sign_flips() -> None:
                 " + import_meter__period_energy_purchase"
             ),
         )
-        build_project_model(artifact2, models2, materialized2, finance2, config2)
+        build_project_model(artifact2, models2, materialized2, finance2, config2, evaluation)
 
 
 def test_time_series_tariff_pointwise_purchase() -> None:
@@ -1024,7 +1083,7 @@ def test_time_series_tariff_pointwise_purchase() -> None:
     正价折入、零价该步无项、负价按财务契约自然通过（分量为负，
     不是钳零；见 finance.md/finance-yaml 计价规则）。
     """
-    artifact, models, materialized, finance, config = _priced_inputs(
+    artifact, models, materialized, finance, config, evaluation = _priced_inputs(
         "purchase",
         (0.5, 0.0, -0.25),
         (
@@ -1033,7 +1092,7 @@ def test_time_series_tariff_pointwise_purchase() -> None:
             " + import_meter__period_energy_purchase"
         ),
     )
-    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
     coeffs = _coeffs(model.objective)
     assert coeffs["load1__heat_in__t0"] == pytest.approx(0.0005, rel=1e-9)
     assert "load1__heat_in__t1" not in coeffs
@@ -1043,7 +1102,7 @@ def test_time_series_tariff_pointwise_purchase() -> None:
 
 def test_time_series_tariff_pointwise_sale() -> None:
     """时变售电逐点计价：每步系数 = −price[t]/1000；负价反转为正分量。"""
-    artifact, models, materialized, finance, config = _priced_inputs(
+    artifact, models, materialized, finance, config, evaluation = _priced_inputs(
         "sale",
         (0.5, 0.0, -0.25),
         (
@@ -1052,7 +1111,7 @@ def test_time_series_tariff_pointwise_sale() -> None:
             " + import_meter__period_energy_sale"
         ),
     )
-    model, _, _ = build_project_model(artifact, models, materialized, finance, config)
+    model, _, _ = build_project_model(artifact, models, materialized, finance, config, evaluation)
     coeffs = _coeffs(model.objective)
     assert coeffs["load1__heat_in__t0"] == pytest.approx(-0.0005, rel=1e-9)
     assert "load1__heat_in__t1" not in coeffs
@@ -1060,9 +1119,9 @@ def test_time_series_tariff_pointwise_sale() -> None:
 
 
 def test_bilinear_unsupported() -> None:
-    artifact, models, materialized, finance, config = _inputs(bilinear=True)
+    artifact, models, materialized, finance, config, evaluation = _inputs(bilinear=True)
     with pytest.raises(LoweringUnsupportedError):
-        build_project_model(artifact, models, materialized, finance, config)
+        build_project_model(artifact, models, materialized, finance, config, evaluation)
 
 
 def test_model_rejects_bad_sense() -> None:
@@ -1124,8 +1183,8 @@ def test_finance_component_declarations_cover_produced_idents() -> None:
     与价格方向一致的 purchase 后缀，反向 sale 后缀不存在（装配闸门
     同理阻断，见 direction_suffix_mismatch）。
     """
-    artifact, models, materialized, finance, _config = _inputs()
-    decls = finance_component_declarations(artifact, models, materialized, finance)
+    artifact, models, materialized, finance, _config, _ = _inputs()
+    decls = finance_component_declarations(artifact, models, materialized, finance, _evaluation_n(1))
     assert set(decls) == {
         "tank1__annual_fixed_om",
         "tank1__period_variable_om",
@@ -1154,8 +1213,8 @@ def test_finance_component_sale_binding_declares_sale_only() -> None:
     变量，8760 项系数均为 −0.7/3.6e6×3600 = −0.0007（与目标系数的
     test_sale_tariff_sign_flips 同源），sale 分量自身为负。
     """
-    artifact, models, materialized, finance, _config = _inputs(tariff_direction="sale")
-    decls = finance_component_declarations(artifact, models, materialized, finance)
+    artifact, models, materialized, finance, _config, _ = _inputs(tariff_direction="sale")
+    decls = finance_component_declarations(artifact, models, materialized, finance, _evaluation_n(1))
     assert set(decls) == {
         "tank1__annual_fixed_om",
         "tank1__period_variable_om",

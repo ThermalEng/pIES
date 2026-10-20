@@ -1,6 +1,6 @@
 """0.9-E：真实 HiGHS 绑定、精确版本 readiness 与最小 Bundle 集成。
 
-只在 Docker 内运行。``HighsMilpProvider`` 五项直接输入生成真实
+只在 Docker 内运行。``HighsMilpProvider`` 直接输入生成真实
 Bundle，经 executor registry + ``DeploymentPolicy`` +
 ``SolverRuntime`` 执行，产出声明的真实原始 solution 文件。不实现
 ResultAdapter，不解释求解业务状态；不声称网络/CPU/内存/OOM/身份
@@ -63,7 +63,7 @@ EXECUTOR_VERSION = "1.0.0"
 
 
 def _campus_inputs():
-    """真实 campus 五项直接输入（与 generator 测试同一来源）。"""
+    """真实 campus 直接输入（与 generator 测试同一来源）。"""
     init_registry()
     text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
     validated = validate_assembly_text(text, package_dir=SAMPLES)
@@ -111,12 +111,26 @@ def _campus_inputs():
     return artifact, models, mat, finance, config
 
 
+def _campus_evaluation():
+    """campus 合成评价确认（与物化同一 N=1/K=0 口径，冻结值直传）。"""
+    from iesplan.finance import EvaluationInput
+
+    return EvaluationInput(
+        evaluation_years=1,
+        construction_period=0,
+        operation_years=1,
+        discount_rate=0.08,
+        construction_payments=(),
+        maintenance_expenses=(),
+    )
+
+
 def _campus_bundle():
     """正式路径生成真实 Bundle（非手写 manifest）。"""
     artifact, models, materialized, finance, config = _campus_inputs()
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     assert provider is HIGHS_MILP_PROVIDER
-    return provider.generate(artifact, models, materialized, finance, config)
+    return provider.generate(artifact, models, materialized, finance, config, _campus_evaluation())
 
 
 def _readiness(**kwargs) -> ExecutableReadiness:

@@ -1,9 +1,9 @@
-"""首个真实 GeneratorProvider 测试：highs_milp@2.0.0。
+"""首个真实 GeneratorProvider 测试：highs_milp@3.0.0。
 
 只覆盖公开行为，不测私有实现，不启动 solver；正常生成一律走
 ``registry.resolve(config).generate(...)`` 正式路径：
 
-- 真实 campus 五项输入生成完整 SolverBundle 聚合：manifest、problem.mps
+- 真实 campus 直接输入生成完整 SolverBundle 聚合：manifest、problem.mps
   bytes、元数据 bytes、结构化 command、原始输出声明、unit map/objective
   offset/objective unit、逐字节确定性、不写工作目录；
 - provider 特有检查：未知 outputs 与未知价格类型即明确拒绝，无
@@ -57,8 +57,22 @@ from iesplan.modeling import build_math_contribution
 SAMPLES = Path(__file__).resolve().parent.parent / "iesplan" / "assembly" / "samples"
 
 
+def _evaluation():
+    """campus 合成评价确认（与物化同一 N=1/K=0 口径，冻结值直传）。"""
+    from iesplan.finance import EvaluationInput
+
+    return EvaluationInput(
+        evaluation_years=1,
+        construction_period=0,
+        operation_years=1,
+        discount_rate=0.08,
+        construction_payments=(),
+        maintenance_expenses=(),
+    )
+
+
 def _campus_inputs(*, outputs=("solution", "metrics"), seed=None):
-    """真实 campus 五项输入（validator 签发 + 目录贡献 + 物化序列）。"""
+    """真实 campus 直接输入（validator 签发 + 目录贡献 + 物化序列 + 评价确认）。"""
     init_registry()
     text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
     validated = validate_assembly_text(text, package_dir=SAMPLES)
@@ -110,17 +124,17 @@ def _campus_inputs(*, outputs=("solution", "metrics"), seed=None):
         outputs=list(outputs),
         seed=seed,
     )
-    return artifact, models, mat, finance, config
+    return artifact, models, mat, finance, config, _evaluation()
 
 
 def _resolved_generate(*args, **kwargs):
     """正式路径：registry 精确选择 + 通用门禁后调用 generate。"""
-    artifact, models, materialized, finance, config = _campus_inputs(*args, **kwargs)
+    artifact, models, materialized, finance, config, evaluation = _campus_inputs(*args, **kwargs)
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     assert provider is HIGHS_MILP_PROVIDER
     return (
-        provider.generate(artifact, models, materialized, finance, config),
-        (artifact, models, materialized, finance, config),
+        provider.generate(artifact, models, materialized, finance, config, evaluation),
+        (artifact, models, materialized, finance, config, evaluation),
     )
 
 
@@ -179,9 +193,9 @@ def test_campus_generate_full_bundle() -> None:
     # campus 目标为金额：目标业务单位取财务币种 CNY。
     assert metadata["objective_unit"] == "CNY"
     # mps 文件字节即 writer 输出；unit_map/offset 与直接构造一致。
-    artifact, models, materialized, finance, config = _campus_inputs()
+    artifact, models, materialized, finance, config, evaluation = _campus_inputs()
     model, unit_map, objective_unit = build_project_model(
-        artifact, models, materialized, finance, config
+        artifact, models, materialized, finance, config, evaluation
     )
     mps_text, offset = write_mps(model)
     assert bundle.files["input/problem.mps"] == mps_text.encode("utf-8")
@@ -217,17 +231,17 @@ def _config_with(**kwargs) -> CalculationConfig:
 
 def test_generate_rejects_unknown_outputs() -> None:
     """未知输出请求是明确的用户请求错误，不忽略（门禁后特有检查）。"""
-    artifact, models, materialized, finance, config = _campus_inputs(
+    artifact, models, materialized, finance, config, evaluation = _campus_inputs(
         outputs=["solution", "trace"]
     )
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     with pytest.raises(ValueError, match="不支持的输出请求"):
-        provider.generate(artifact, models, materialized, finance, config)
+        provider.generate(artifact, models, materialized, finance, config, evaluation)
 
 
 def test_generate_accepts_bound_time_series_with_prices() -> None:
     """实际绑定的时变价格随第三项价格区接受；未绑定的快照条目不触发。"""
-    artifact, models, materialized, finance, config = _campus_inputs()
+    artifact, models, materialized, finance, config, evaluation = _campus_inputs()
     doc = json.loads(artifact.canonical_text)
     doc["tariff_bindings"]["import_meter"]["price"] = "grid_import_tou"
     rebound = ValidatedAssemblyArtifact(
@@ -249,7 +263,7 @@ def test_generate_accepts_bound_time_series_with_prices() -> None:
         ),
     )
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
-    bundle = provider.generate(rebound, models, priced, finance, config)
+    bundle = provider.generate(rebound, models, priced, finance, config, _evaluation())
     assert isinstance(bundle, SolverBundle)
 
 
@@ -258,7 +272,7 @@ def test_generate_rejects_unknown_price_kind() -> None:
     此处以冻结值对象旁路构造仅为触达门禁）。"""
     import copy
 
-    artifact, models, materialized, finance, config = _campus_inputs()
+    artifact, models, materialized, finance, config, evaluation = _campus_inputs()
     weird = copy.copy(finance.energy_prices["grid_import"])
     object.__setattr__(weird, "kind", "weird_kind")
     tampered = copy.copy(finance)
@@ -268,7 +282,7 @@ def test_generate_rejects_unknown_price_kind() -> None:
     )
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     with pytest.raises(ComputationUnavailableError) as exc_info:
-        provider.generate(artifact, models, materialized, tampered, config)
+        provider.generate(artifact, models, materialized, tampered, config, evaluation)
     assert exc_info.value.reason == "unsupported-tariff"
 
 
@@ -311,7 +325,7 @@ class _FakeProvider:
     def available(self):
         return self._available
 
-    def generate(self, artifact, models, materialized, finance, config):
+    def generate(self, artifact, models, materialized, finance, config, evaluation):
         raise AssertionError("测试替身不应被调用")
 
 
@@ -393,20 +407,20 @@ def test_bundle_aggregate_requires_exact_manifest_files_match() -> None:
 def test_step_series_declared_from_variable_path() -> None:
     """步序列声明与建变量同一路径形成，不依赖命名模式。
 
-    campus 真实五项输入：声明条目键齐全、series_id 唯一、每列真实存在于
+    campus 真实直接输入：声明条目键齐全、series_id 唯一、每列真实存在于
     同次构造的模型变量且单位与 unit_map 同源、各条等长且非空；
     generate 写入 parameters.json 的声明与直接声明一致；
-    manifest/元数据引用同步到 2.0.0。
+    manifest/元数据引用同步到 3.0.0。
     """
     from iesplan.computation.generators.project import step_series_declarations  # noqa: E402
 
     bundle, inputs = _resolved_generate()
-    artifact, models, materialized, finance, config = inputs
+    artifact, models, materialized, finance, config, evaluation = inputs
     model, unit_map, _objective_unit = build_project_model(
-        artifact, models, materialized, finance, config
+        artifact, models, materialized, finance, config, evaluation
     )
     model_names = {v.name for v in model.variables}
-    decls = step_series_declarations(artifact, models, materialized, finance)
+    decls = step_series_declarations(artifact, models, materialized, finance, evaluation)
     assert decls, "campus 应有可发布步变量"
     assert [sorted(d) for d in decls] == [
         ["columns", "instance_id", "series_id", "unit", "variable_id"] for _ in decls
@@ -425,7 +439,7 @@ def test_step_series_declared_from_variable_path() -> None:
     assert len(lengths) == 1
     metadata = json.loads(bundle.files["input/parameters.json"].decode("utf-8"))
     assert metadata["step_series"] == [dict(d) for d in decls]
-    assert metadata["generator"] == GENERATOR_REF == "ies.generator.highs_milp@2.0.0"
+    assert metadata["generator"] == GENERATOR_REF == "ies.generator.highs_milp@3.0.0"
     assert metadata["result_adapter"] == ADAPTER_REF == "ies.result-adapter.highs@2.0.0"
     assert bundle.manifest.bundle["generator"] == GENERATOR_REF
     assert bundle.manifest.result_adapter == ADAPTER_REF

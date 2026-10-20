@@ -1,6 +1,7 @@
-"""首个真实 GeneratorProvider：``ies.generator.highs_milp@2.0.0``。
+"""首个真实 GeneratorProvider：``ies.generator.highs_milp@3.0.0``。
 
-纯内存确定性转换：五项直接输入 → ``SolverBundle`` 完整聚合
+纯内存确定性转换：直接输入（装配产物、设备数学贡献、物化序列、
+有效财务快照、计算配置、冻结评价确认）→ ``SolverBundle`` 完整聚合
 (manifest + 输入文件字节)，不写临时目录，不启动 solver，不访问
 DB/网络/对象存储/环境变量/用户目录，不读取随机全局状态。
 
@@ -9,9 +10,9 @@ solver=``ies.solver.highs@1.7.2``、空 options、输出 solution/metrics、
 constant tariff；数学能力即 ``build_project_model`` 现有 lowerer 明确
 支持的部分，超出即明确拒绝，不近似、不回退。
 
-2.0.0 相对 1.0.0 的唯一破坏性变化：``parameters.json`` 必需
-``step_series``（可发布求解步序列声明），配套适配器同步升主版本；
-不保留旧声明回退。
+3.0.0 相对 2.0.0 的唯一破坏性变化：冻结评价确认为必需生成输入，
+不保留旧调用签名或默认评价值。通用 Bundle manifest 未变；结果适配
+协议按实际输出变化独立版本化，不因生成器输入变化而同步升版。
 """
 
 from __future__ import annotations
@@ -35,11 +36,11 @@ from iesplan.computation.protocols import (
     SolverBundleManifest,
 )
 from iesplan.computation.sequences import MaterializedSet
-from iesplan.finance import EffectiveFinanceConfig
+from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution
 
 GENERATOR_ID = "ies.generator.highs_milp"
-GENERATOR_VERSION = "2.0.0"
+GENERATOR_VERSION = "3.0.0"
 GENERATOR_REF = f"{GENERATOR_ID}@{GENERATOR_VERSION}"
 SOLVER_REF = "ies.solver.highs@1.7.2"
 EXECUTOR_REF = "ies.executor.local_process@1.0.0"
@@ -111,30 +112,34 @@ class HighsMilpProvider:
         materialized: MaterializedSet,
         finance: EffectiveFinanceConfig,
         config: CalculationConfig,
+        evaluation: EvaluationInput,
     ) -> SolverBundle:
-        """由五项直接输入生成完整 SolverBundle 聚合。
+        """由直接输入生成完整 SolverBundle 聚合。
 
-        第三项为已完成物化的集合（上游构成，此处信任，不复核）。
-        通用选择门禁已由 ``GeneratorRegistry.resolve`` 完成，此处信任；
-        依次执行本 provider 特有检查（outputs/实际绑定 tariff，不匹配即
-        明确拒绝）→ ``build_project_model`` + ``write_mps``（数学超出
-        lowerer 能力即明确不支持）→ manifest + 文件字节原子组装。
-        同一五项输入与本 provider 版本恒得逐字节相同的聚合。
+        第三项为已完成物化的集合（上游构成，此处信任，不复核）。冻结
+        评价确认为独立必需输入（无默认值；上游从同一任务冻结块恢复，
+        不读最新草稿）。通用选择门禁已由 ``GeneratorRegistry.resolve``
+        完成，此处信任；依次执行本 provider 特有检查（outputs/实际绑定
+        tariff，不匹配即明确拒绝）→ ``build_project_model`` + ``write_mps``
+        （数学超出 lowerer 能力即明确不支持）→ manifest + 文件字节原子组装。
+        同一组直接输入与本 provider 版本恒得逐字节相同的聚合。
         """
         self._check_capabilities(artifact, config, finance)
         seed = config.seed if config.seed is not None else FIXED_SEED
         model, unit_map, objective_unit = build_project_model(
-            artifact, models, materialized, finance, config
+            artifact, models, materialized, finance, config, evaluation
         )
         mps_text, offset = write_mps(model)
-        components = finance_component_declarations(
-            artifact, models, materialized, finance
-        )
-        series = step_series_declarations(
-            artifact, models, materialized, finance
-        )
+        components = finance_component_declarations(artifact, models, materialized, finance, evaluation)
+        series = step_series_declarations(artifact, models, materialized, finance, evaluation)
         metadata = self._metadata(
-            artifact, unit_map, offset, objective_unit, seed, config, components,
+            artifact,
+            unit_map,
+            offset,
+            objective_unit,
+            seed,
+            config,
+            components,
             series,
         )
         manifest = SolverBundleManifest(

@@ -131,17 +131,17 @@ def _predict_selected_round(
 
 def _solve_round(
     ctx: RunContext, plane: Any, snapshot: Any, artifact: Any, models: Any,
-    materialized: Any, finance: Any, config: Any, attempt: Any,
+    materialized: Any, finance: Any, config: Any, evaluation: Any, attempt: Any,
 ) -> tuple[Any, Any, Any, Any]:
     """单轮求解: 生成 → 执行(含回执分流) → 适配 → 业务结局。
 
     每轮回执独立判定: cancelled → TaskCancelled, fenced → LeaseFenced
     (不写终态), 非成功/不可映射 → EngineRunError。生成后与回执判定后
-    分别写进度（判定前不写 execute 进度）。返回
-    (bundle, receipt, collected, result, outcome)。
+    分别写进度（判定前不写 execute 进度）。评价确认逐轮透传同一冻结值，
+    不读最新草稿。返回 (bundle, receipt, collected, result, outcome)。
     """
     bundle = worker_app.generate_bundle(
-        plane, snapshot, artifact, models, materialized, finance, config)
+        plane, snapshot, artifact, models, materialized, finance, config, evaluation)
     ctx.progress(40.0, "generate", None)
     receipt, collected = worker_app.execute_bundle(
         plane=plane, bundle=bundle, attempt=attempt, stop=_stop_probe(ctx),
@@ -210,7 +210,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
         raise worker_app.ComputationUnavailableError(
             "计算执行面未装配，计算任务不可执行", reason="compute-plane-missing")
     with ctx.session_factory() as db:
-        artifact, models, materialized, finance, config = worker_app.load_compute_inputs(
+        artifact, models, materialized, finance, config, evaluation = worker_app.load_compute_inputs(
             db, task.project_id, snapshot
         )
     ctx.progress(10.0, "materialize", None)
@@ -246,7 +246,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     attempt = worker_app.build_attempt_context(task, ctx.claim, snapshot)
     rounds_log: list[dict] = []
     bundle, receipt, collected, result, outcome = _solve_round(
-        ctx, plane, snapshot, artifact, models, completed, finance, config, attempt)
+        ctx, plane, snapshot, artifact, models, completed, finance, config, evaluation, attempt)
     rounds_log.append({
         "round": 1, "phase": "phase1",
         "bundle": bundle, "receipt": receipt, "collected": collected,
@@ -273,7 +273,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                 materialized, independent_series + new_series)
             bundle, receipt, collected, result, outcome = _solve_round(
                 ctx, plane, snapshot, artifact, models, completed,
-                finance, config, attempt)
+                finance, config, evaluation, attempt)
             solve_rounds += 1
             current_coupled = {(item.device, item.interface): item for item in new_predicted}
             aggregate, records = worker_app.convergence_for_round(

@@ -26,6 +26,14 @@ from iesplan.core.diagnostics import (
 )
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 
+#: 评价确认值对象公开所有权归 finance（单一定义，此处复用，不复制）；
+#: 任务提交边界仍负责 HTTP 解析、领域校验与 TASK-REQ-015 错误映射。
+from iesplan.finance.confirmation import (
+    ConstructionPayment,
+    EvaluationInput,
+    MaintenanceExpense,
+)
+
 #: 幂等键格式(字母/数字/._:-, 1-128 位)。任务域唯一权威:
 #: 任务提交 API/用例与 DDL 均引用此处, 不得各自复述字面量,
 #: 不得上提 core。
@@ -125,45 +133,6 @@ EVALUATION_INPUT_KEYS: frozenset[str] = frozenset(
         "maintenance_expenses",
     }
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ConstructionPayment:
-    """单笔建设付款比例(开工起整数年时点 + 十进制比例)。"""
-
-    t: int
-    ratio: str  # Decimal 定点字符串; 同一输入内 Σratio 精确为 1
-
-
-@dataclass(frozen=True, slots=True)
-class MaintenanceExpense:
-    """单项维护/换新支出(财务发生年 + 十进制金额 + 币种)。"""
-
-    year: int
-    amount: str  # Decimal 定点字符串, 非负
-    currency: str
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationInput:
-    """计算任务评价确认输入(任务级类型化输入)。
-
-    由任务提交边界 ``parse_evaluation_input`` 从顶层任务输入 ``evaluation``
-    块唯一解析, 不从宽泛任务参数字典读取, 也不混入封闭 ``CalculationConfig``
-    正文。``evaluation_years`` 为确认的财务评价总年限(含建设期, 年);
-    ``construction_period`` 为非负整数建设期(年, 显式 0 合法, 不缺省);
-    ``operation_years`` 为正整数投产后运营年限(运行点数/物化/预测/生成
-    唯一使用的年限); ``discount_rate`` 为确认的折现率(宪法 §7.3 比例口径
-    ``0..1``); ``construction_payments``/``maintenance_expenses`` 为冻结
-    的付款比例与维护清单(实际现金流计算由后续切片消费)。
-    """
-
-    evaluation_years: int
-    construction_period: int
-    operation_years: int
-    discount_rate: float
-    construction_payments: tuple[ConstructionPayment, ...] = ()
-    maintenance_expenses: tuple[MaintenanceExpense, ...] = ()
 
 
 def _evaluation_fail(message: str, params: dict[str, Any], field: str) -> InvalidRequestError:

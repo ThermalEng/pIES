@@ -27,6 +27,20 @@ from iesplan.modeling import build_math_contribution
 SAMPLES = Path(__file__).resolve().parent.parent / "iesplan" / "assembly" / "samples"
 
 
+def _evaluation():
+    """campus 合成评价确认（与物化同一 N=1/K=0 口径，冻结值直传）。"""
+    from iesplan.finance import EvaluationInput
+
+    return EvaluationInput(
+        evaluation_years=1,
+        construction_period=0,
+        operation_years=1,
+        discount_rate=0.08,
+        construction_payments=(),
+        maintenance_expenses=(),
+    )
+
+
 def _row(model, name):
     for row in model.constraints:
         if row.name == name:
@@ -40,7 +54,7 @@ def _coeffs(expr) -> dict:
 
 @pytest.fixture(scope="module")
 def chain():
-    """真实五项输入（validator 签发 artifact + 目录贡献 + 物化序列）。"""
+    """真实直接输入（validator 签发 artifact + 目录贡献 + 物化序列 + 评价确认）。"""
     init_registry()
     text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
     validated = validate_assembly_text(text, package_dir=SAMPLES)
@@ -85,19 +99,19 @@ def chain():
     assert not mat.pending_predict
     config = CalculationConfig(
         mode="planning",
-        generator="ies.generator.highs_milp@2.0.0",
+        generator="ies.generator.highs_milp@3.0.0",
         solver="ies.solver.highs@1.7.2",
         precision="medium",
         time_limit_seconds=3600,
         outputs=["solution"],
     )
     model, units, _ = build_project_model(
-        artifact, models, mat, finance, config
+        artifact, models, mat, finance, config, _evaluation()
     )
     return {
         "model": model,
         "units": units,
-        "inputs": (artifact, models, mat, finance, config),
+        "inputs": (artifact, models, mat, finance, config, _evaluation()),
     }
 
 

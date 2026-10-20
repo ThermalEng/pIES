@@ -599,6 +599,20 @@ def _step_of(name: str) -> int | None:
     return int(tail) if sep and tail.isdigit() else None
 
 
+def _frozen_evaluation():
+    """同口径冻结评价确认（K=0、N=2、E=2；建设款 t=0 全额，无维护）。"""
+    from iesplan.finance import EvaluationInput
+
+    return EvaluationInput(
+        evaluation_years=2,
+        construction_period=0,
+        operation_years=YEARS,
+        discount_rate=0.08,
+        construction_payments=(),
+        maintenance_expenses=(),
+    )
+
+
 class _RecordingGenerator:
     """测试记录型生成器外壳：记录每轮第三项集合时域，委托真实 HiGHS 生成。
 
@@ -623,16 +637,51 @@ class _RecordingGenerator:
     def available(self) -> bool:
         return True
 
-    def generate(self, artifact, models, materialized, finance, config):
+
+
+    def generate(self, artifact, models, materialized, finance, config, evaluation):
         self.calls.append(
             {
                 "operation_years": materialized.operation_years,
                 "series_count": len(materialized.series),
                 "point_counts": sorted({s.point_count for s in materialized.series}),
                 "pending": len(materialized.pending_predict),
+                "evaluation": evaluation,
             }
         )
-        return self._inner.generate(artifact, models, materialized, finance, config)
+        return self._inner.generate(artifact, models, materialized, finance, config, evaluation)
+
+
+def test_from_frozen_restores_typed_facts_in_order() -> None:
+    """冻结恢复只还原类型：关键值与付款/维护顺序一致，多余审计键忽略。"""
+    from iesplan.finance import EvaluationInput
+
+    restored = EvaluationInput.from_frozen(
+        {
+            "evaluation_years": 3,
+            "construction_period": 1,
+            "operation_years": 2,
+            "discount_rate": 0.05,
+            "construction_payments": [{"t": 0, "ratio": "0.4"}, {"t": 1, "ratio": "0.6"}],
+            "maintenance_expenses": [
+                {"year": 2, "amount": "100", "currency": "CNY"},
+                {"year": 3, "amount": "50", "currency": "CNY"},
+            ],
+            "confirmed_by": 7,
+            "confirmed_at": "2026-01-01T00:00:00",
+        }
+    )
+    assert (
+        restored.evaluation_years,
+        restored.construction_period,
+        restored.operation_years,
+    ) == (3, 1, 2)
+    assert restored.discount_rate == 0.05
+    assert [(p.t, p.ratio) for p in restored.construction_payments] == [(0, "0.4"), (1, "0.6")]
+    assert [(e.year, e.amount, e.currency) for e in restored.maintenance_expenses] == [
+        (2, "100", "CNY"),
+        (3, "50", "CNY"),
+    ]
 
 
 def _prepare_predict_n2(client: TestClient, db: Session, user) -> int:
@@ -866,6 +915,9 @@ class TestPredictPhase2FullHorizon:
             assert call["pending"] == 0
             assert call["series_count"] == 2
             assert call["point_counts"] == [FULL_STEPS]
+            assert call["evaluation"].operation_years == YEARS
+            assert call["evaluation"].construction_period == 0
+        assert len({id(call["evaluation"]) for call in recorder.calls}) == 1
         evidence = results_store.latest_evidence_for_task(db, task.id)
         assert evidence is not None
         sealed = json.loads(get_object(db, evidence.object_id).decode("utf-8"))
@@ -926,14 +978,14 @@ class TestGeneratorEmptySeriesHorizon:
         finance = merge_effective(FinanceProfile.from_dict(payload), None)
         config = CalculationConfig(
             mode="planning",
-            generator="ies.generator.highs_milp@2.0.0",
+            generator="ies.generator.highs_milp@3.0.0",
             solver="ies.solver.highs@1.7.2",
             precision="medium",
             time_limit_seconds=600,
             outputs=["solution"],
         )
         model, _units, _ = build_project_model(
-            artifact, models, materialized, finance, config
+            artifact, models, materialized, finance, config, _frozen_evaluation()
         )
         names = [var.name for var in model.variables]
         steps = sorted(s for s in (_step_of(n) for n in names) if s is not None)
@@ -951,7 +1003,7 @@ class TestGeneratorEmptySeriesHorizon:
         ]
         assert coupled, "SoC 跨年耦合约束缺失"
         bundle = HIGHS_MILP_PROVIDER.generate(
-            artifact, models, materialized, finance, config
+            artifact, models, materialized, finance, config, _frozen_evaluation()
         )
         mps = bytes(bundle.files["input/problem.mps"])
         assert f"store1__soc__t{FULL_STEPS - 1}".encode() in mps

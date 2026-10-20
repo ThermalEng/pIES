@@ -62,8 +62,22 @@ PARAMETERS_PATH = "input/parameters.json"
 SOLUTION_PATH = "output/solution.sol"
 
 
+def _campus_evaluation():
+    """campus 合成评价确认（与物化同一 N=1/K=0 口径，冻结值直传）。"""
+    from iesplan.finance import EvaluationInput
+
+    return EvaluationInput(
+        evaluation_years=1,
+        construction_period=0,
+        operation_years=1,
+        discount_rate=0.08,
+        construction_payments=(),
+        maintenance_expenses=(),
+    )
+
+
 def _campus_inputs():
-    """真实 campus 五项直接输入（与 generator/readiness 测试同一来源）。"""
+    """真实 campus 直接输入（与 generator/readiness 测试同一来源）。"""
     init_registry()
     text = (SAMPLES / "valid" / "campus.assembly.yaml").read_text(encoding="utf-8")
     validated = validate_assembly_text(text, package_dir=SAMPLES)
@@ -108,15 +122,15 @@ def _campus_inputs():
         outputs=["solution", "metrics"],
         seed=None,
     )
-    return artifact, models, mat, finance, config
+    return artifact, models, mat, finance, config, _campus_evaluation()
 
 
 def _generate_bundle(inputs):
     """正式生成路径（注册表按配置选中 provider，与线上同一构成）。"""
-    artifact, models, materialized, finance, config = inputs
+    artifact, models, materialized, finance, config, evaluation = inputs
     provider = build_registry((HIGHS_MILP_PROVIDER,)).resolve(config)
     assert provider is HIGHS_MILP_PROVIDER
-    return provider.generate(artifact, models, materialized, finance, config)
+    return provider.generate(artifact, models, materialized, finance, config, evaluation)
 
 
 def _runtime(policy=None) -> SolverRuntime:
@@ -274,7 +288,7 @@ def test_chain_success_reports_business_result() -> None:
 
 def test_chain_infeasible_model_reports_math_status() -> None:
     """不可行链：垫片 exit 0 写 kInfeasible 文件，解释无业务输出。"""
-    artifact, models, materialized, finance, config = _campus_inputs()
+    artifact, models, materialized, finance, config, evaluation = _campus_inputs()
     doc = json.loads(artifact.canonical_text)
     # 规划变量名（非内部 LP 名，后者含安全规则禁止的 __），取首个
     # 显式单位与上界的变量，上界十倍即不可行。
@@ -300,7 +314,7 @@ def test_chain_infeasible_model_reports_math_status() -> None:
     assert revalidated.ok, [
         (d.code, d.params) for d in revalidated.diagnostics if d.blocking
     ]
-    bundle = _generate_bundle((revalidated.artifact, models, materialized, finance, config))
+    bundle = _generate_bundle((revalidated.artifact, models, materialized, finance, config, evaluation))
     receipt, collected = _runtime().run(bundle, _attempt("inf"))
     assert receipt.status == "succeeded"
     assert receipt.exit_code == 0
@@ -442,7 +456,7 @@ def test_gas_volume_driver_same_source_across_gates() -> None:
         outputs=["solution", "metrics"],
         seed=None,
     )
-    model, _, _ = build_project_model(artifact, models, mat, finance, config)
+    model, _, _ = build_project_model(artifact, models, mat, finance, config, _campus_evaluation())
 
     step_s = 3600.0
     expected_coeff = to_si(2.5, "CNY/m3") * step_s
@@ -601,8 +615,8 @@ def test_chain_two_solves_feed_yearly_evaluation() -> None:
     finance2 = effective_from_yaml(
         finance_source.replace(anchor, "      value: '0.5'\n", 1)
     )
-    artifact, models, materialized, _finance, config = inputs1
-    bundle2 = _generate_bundle((artifact, models, materialized, finance2, config))
+    artifact, models, materialized, _finance, config, evaluation = inputs1
+    bundle2 = _generate_bundle((artifact, models, materialized, finance2, config, evaluation))
     receipt2, collected2 = runtime.run(bundle2, _attempt("yr2"))
     solution2 = _adapt(bundle2, receipt2, collected2).outputs["solution"]
 

@@ -3,8 +3,8 @@
 本模块提供 worker.md 规定的生成 / 执行 / 适配公开阶段命令，Worker 只按
 返回的公开 contract 驱动状态机，不复制领域规则：
 
-- ``load_compute_inputs``：把快照冻结的五项直接输入恢复为生成器可消费
-  形态并按序返回五元组（规范装配二件套结构恢复、逐实例数学贡献结构恢复、
+- ``load_compute_inputs``：把快照冻结的直接输入恢复为生成器可消费
+  形态并按序返回（规范装配二件套结构恢复、逐实例数学贡献结构恢复、
   财务快照按冻结 profile/revision 取不可变行、计算配置显式字段恢复并烘焙
   快照冻结的有效种子、固定资源字节加载、非预测序列物化）。本层不包装第
   二套输入对象，不做缺省；冻结结构缺件即实际结构错误（KeyError/TypeError/
@@ -70,7 +70,7 @@ from iesplan.computation.result_adapter import ResultAdapterRegistry
 from iesplan.core.contracts import horizon_point_count
 from iesplan.core.jsonutil import canonical_json
 from iesplan.core.diagnostics import Diagnostic
-from iesplan.finance import EffectiveFinanceConfig
+from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import DeviceMathContribution, contribution_from_dict
 from iesplan.storage import add_ref, get_object, put_object
 from iesplan.tasks import BUSINESS_OUTCOMES
@@ -221,15 +221,17 @@ def load_compute_inputs(
     MaterializedSet,
     EffectiveFinanceConfig,
     CalculationConfig,
+    EvaluationInput,
 ]:
-    """从快照恢复生成器五项直接输入并按序返回（不包装第二对象，不做缺省）。
+    """从快照恢复生成器直接输入并按序返回（不包装第二对象，不做缺省）。
 
     finance 按回执冻结血缘取不可变 Effective 行；第三项为物化集合本身
-    （已确认运营年限随集合携带；预测目标序列不在此物化，
-    ``pending_predict`` 保留），由 ``predict_target_round`` 经公开
-    predictor 完成后再与此处集合并为完成态。序列按快照顶层评价确认块的
-    已确认运营年限物化为运营期长度（提交边界唯一校验，此处只读不验）。
-    冻结缺件即实际结构错误直接可见，不重跑输入校验。
+    （预测目标序列不在此物化，``pending_predict`` 保留），由
+    ``predict_target_round`` 经公开 predictor 完成后再与此处集合并为
+    完成态。序列按快照顶层评价确认块的已确认运营年限物化为运营期长度；
+    评价确认经 ``EvaluationInput.from_frozen`` 从同一冻结块直接恢复
+    类型化事实（只还原类型，不重跑提交校验），独立直传。提交边界唯一
+    校验，此处只读不验。冻结缺件即实际结构错误直接可见，不重跑输入校验。
     """
     artifact, resources, config, _seed = _restore_artifact_resources_config(
         db, task_project_id, snapshot
@@ -250,6 +252,7 @@ def load_compute_inputs(
     finance = EffectiveFinanceConfig.from_dict(finance_row.content)
 
     operation_years = snapshot.evaluation["operation_years"]
+    evaluation = EvaluationInput.from_frozen(snapshot.evaluation)
     materialized = materialize_non_predictive_series(
         artifact, resources, operation_years=operation_years
     )
@@ -261,7 +264,7 @@ def load_compute_inputs(
             pending_predict=materialized.pending_predict,
             prices=prices,
         )
-    return artifact, models, materialized, finance, config
+    return artifact, models, materialized, finance, config, evaluation
 
 
 def _materialize_price_series(
@@ -477,18 +480,20 @@ def generate_bundle(
     materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
+    evaluation: EvaluationInput,
 ) -> SolverBundle:
     """经生成器目录选中精确 provider 生成完整 Bundle，并消费快照冻结引用。
 
     第三项为已完成物化的集合（调用方在预测产物合并后构成，此处只透传，
-    不复核）。注册表 resolve 即通用选择门禁的唯一真实边界（未注册/
-    不兼容即 ``ComputationUnavailableError``；用户计算选项非法为
-    ``ValueError``）。生成后核对 Bundle 声明的执行器/适配器与快照冻结
-    精确引用一致，并预先解析两者（不可解析即明确失败，不等到求解后；
+    不复核）。冻结评价确认独立直传（无默认值；调用方传同一任务冻结块
+    恢复的值，不读最新草稿）。注册表 resolve 即通用选择门禁的唯一真实
+    边界（未注册/不兼容即 ``ComputationUnavailableError``；用户计算选项
+    非法为 ``ValueError``）。生成后核对 Bundle 声明的执行器/适配器与快照
+    冻结精确引用一致，并预先解析两者（不可解析即明确失败，不等到求解后；
     不读当前可变目录）。
     """
     provider = plane.generator_registry.resolve(config)
-    bundle = provider.generate(artifact, models, materialized, finance, config)
+    bundle = provider.generate(artifact, models, materialized, finance, config, evaluation)
     declared_executor = bundle.manifest.command["executor"]
     if declared_executor != snapshot.executor or bundle.manifest.result_adapter != snapshot.result_adapter:
         raise ComputationUnavailableError(

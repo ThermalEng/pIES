@@ -1,8 +1,8 @@
 """项目级线性模型构造(0.8f-B)。
 
-把五项直接输入装配成首个 HiGHS MILP 链可消费的、求解器中立且
+把直接输入装配成首个 HiGHS MILP 链可消费的、求解器中立且
 MPS-ready 的 ``LinearModel``，并附带结果反向换算所需的最小单位映射。
-内部构造函数同样直接列出五项，不设包装层。
+内部构造函数同样直接列出各项，不设包装层。
 
 事实来源（只读公开契约，不重复校验）：
 
@@ -62,7 +62,7 @@ from iesplan.core.contracts import (
 from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 from iesplan.core.contracts.planning_expression import PlanningExpression
 from iesplan.core.units import dims_of, to_si
-from iesplan.finance import EffectiveFinanceConfig
+from iesplan.finance import EffectiveFinanceConfig, EvaluationInput
 from iesplan.modeling import (
     BinaryNode,
     DeviceMathContribution,
@@ -195,20 +195,22 @@ def build_project_model(
     materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
     config: CalculationConfig,
+    evaluation: EvaluationInput,
 ) -> tuple[LinearModel, Mapping[str, str], str]:
-    """由五项直接输入构造项目级线性模型、单位映射与目标业务单位。
+    """由直接输入构造项目级线性模型、单位映射与目标业务单位。
 
-    第三项为已完成物化的集合；求解域步数由装配运行起始年/分辨率与集合
-    携带的已确认运营年限推导，``series`` 为空时仍为完整运营时域。
+    第三项为已完成物化的集合；求解域步数由装配运行起始年/分辨率与评价
+    确认的已确认运营年限推导，``series`` 为空时仍为完整运营时域（物化
+    集合不再承载财务年限权威，此处不复核两者一致）。
     返回 ``(LinearModel, unit_map, objective_unit)``：``unit_map`` 为
     LP 名 → 业务单位，供后续 ResultAdapter 反向换算（内部 binary 不进入
     结果，不收录）；``objective_unit`` 为目标业务单位（金额取财务币种，
     无量纲取 ``"1"``，单一物理量纲取 SI 基准单位；复合量纲无可报告业务
     单位，超出首版能力）。
-    同一五项输入产生同一模型；超出首版降级能力的数学抛
+    同一组直接输入产生同一模型；超出首版降级能力的数学抛
     ``LoweringUnsupportedError``。
     """
-    return _new_builder(artifact, models, materialized, finance).build()
+    return _new_builder(artifact, models, materialized, finance, evaluation).build()
 
 
 def _new_builder(
@@ -216,14 +218,15 @@ def _new_builder(
     models: Mapping[str, DeviceMathContribution],
     materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
+    evaluation: EvaluationInput,
 ) -> _ProjectBuilder:
-    """由四项直接输入构造内部编排（建模与分量声明共用同一构造器）。"""
+    """由直接输入构造内部编排（建模与分量声明共用同一构造器）。"""
     from iesplan.core.contracts import horizon_point_count
 
     doc = json.loads(artifact.canonical_text)
     baseline = doc["project_baseline"]
     point_count = horizon_point_count(
-        baseline["resolution"], baseline["start_year"], materialized.operation_years
+        baseline["resolution"], baseline["start_year"], evaluation.operation_years
     )
     step_s = _step_seconds(baseline["resolution"], baseline["start_year"])
     return _ProjectBuilder(
@@ -243,6 +246,7 @@ def finance_component_declarations(
     models: Mapping[str, DeviceMathContribution],
     materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
+    evaluation: EvaluationInput,
 ) -> Mapping[str, Mapping[str, object]]:
     """财务分量求值声明（ident → unit/caliber/constant/terms）。
 
@@ -251,7 +255,7 @@ def finance_component_declarations(
     供 GeneratorProvider 写入 Bundle ``parameters.json``，由配套
     ResultAdapter 用同一次真实解求值发布，不重建财务模型。
     """
-    return _new_builder(artifact, models, materialized, finance).finance_components()
+    return _new_builder(artifact, models, materialized, finance, evaluation).finance_components()
 
 
 def step_series_declarations(
@@ -259,6 +263,7 @@ def step_series_declarations(
     models: Mapping[str, DeviceMathContribution],
     materialized: MaterializedSet,
     finance: EffectiveFinanceConfig,
+    evaluation: EvaluationInput,
 ) -> tuple[Mapping[str, object], ...]:
     """可发布求解步序列声明（与建变量同一路径形成）。
 
@@ -268,11 +273,11 @@ def step_series_declarations(
     ResultAdapter 用同一次真实解恢复发布，不重建变量映射。
     无可发布步变量时为空元组。
     """
-    return _new_builder(artifact, models, materialized, finance).step_series()
+    return _new_builder(artifact, models, materialized, finance, evaluation).step_series()
 
 
 class _ProjectBuilder:
-    """项目级构造的内部编排（实例方法只传 derived 状态，五项只进厂）。"""
+    """项目级构造的内部编排（实例方法只传 derived 状态，直接输入只进厂）。"""
 
     def __init__(
         self,

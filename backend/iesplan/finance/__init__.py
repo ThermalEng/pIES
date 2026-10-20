@@ -17,6 +17,11 @@
 
 from __future__ import annotations
 
+from iesplan.finance.confirmation import (
+    ConstructionPayment,
+    EvaluationInput,
+    MaintenanceExpense,
+)
 from iesplan.finance.evaluation import (
     EVALUATION_SCHEMA,
     EVALUATION_VERSION,
@@ -135,6 +140,10 @@ __all__ = [
     "compute_financials",
     "compute_lcoe",
     "compute_payback",
+    # confirmation(评价确认值对象，公开所有权)
+    "ConstructionPayment",
+    "EvaluationInput",
+    "MaintenanceExpense",
     # evaluation(0.10-D 纯评价切片)
     "EVALUATION_SCHEMA",
     "EVALUATION_VERSION",
