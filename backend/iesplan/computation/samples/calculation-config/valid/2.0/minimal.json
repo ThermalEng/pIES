@@ -1,16 +1,11 @@
 {
   "schema": "ies.calculation-config",
-  "schema_version": "1.0.0",
+  "schema_version": "2.0.0",
   "mode": "planning",
   "predictions": [
     {
       "target": { "instance": "pv1", "interface": "power_out" },
       "algorithm": "ies.predictor.naive@1.0.0",
-      "parameters": {}
-    },
-    {
-      "target": { "instance": "pv1", "interface": "power_out" },
-      "algorithm": "ies.predictor.arima@1.0.0",
       "parameters": {}
     }
   ],

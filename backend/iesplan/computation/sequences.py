@@ -324,15 +324,18 @@ def materialize_predicted_series(
     *,
     operation_years: int,
     previous: Mapping[str, object] | None = None,
+    allow_subset: bool = False,
 ) -> tuple[PredictedTarget, ...]:
-    """物化装配产物中全部 data_predict 绑定的全周期预测序列。
+    """物化装配产物中 data_predict 绑定的全周期预测序列。
 
     ``predictions`` 为计算配置 ``predictions`` 原样条目
     (``{target, algorithm, parameters}``); ``resolve_predictor`` 为
     ``algorithm ref → Predictor`` 调用(目录由组合根持有, 此处只消费)。
+    ``allow_subset`` 为 ``False`` 时 ``predictions`` 须覆盖全部绑定:
     配置↔绑定覆盖关系由提交闸门保证, 此处按 (实例, 接口) 直接配对,
-    缺配对即实际结构错误可见失败, 不重跑提交校验。历史列按绑定接口
-    名投影; 目标类型不透明透传进产物与回执, 不在此解释。
+    缺配对即实际结构错误可见失败, 不重跑提交校验。为 ``True`` 时只物化
+    给定条目命中的绑定(耦合轮次只重算耦合目标, 独立产物由调用方复用)。
+    历史列按绑定接口名投影; 目标类型不透明透传进产物与回执, 不在此解释。
     ``operation_years`` 为调用方从快照顶层评价确认块读取的已确认运营
     年限（必填，无默认值，不在此校验），预测序列按推导的运营期总点数
     生成。上一轮统一结果 ``previous`` 原样透传给各 predictor(自回归类算法
@@ -357,7 +360,11 @@ def materialize_predicted_series(
             if not isinstance(binding, Mapping) or binding.get("mode") != "data_predict":
                 continue
             key = (str(device_id), str(interface_id))
-            entry = by_target[key]  # 提交闸门已保证覆盖, 缺配对即快照故障
+            if key not in by_target:
+                if allow_subset:
+                    continue
+                raise KeyError(key)  # 提交闸门已保证覆盖, 缺配对即快照故障
+            entry = by_target[key]
             predictor: Predictor = resolve_predictor(str(entry["algorithm"]))
             # 算法↔目标类型相容已由提交闸门 TASK-REQ-014 校核, 此处不重复验证。
             target_type = str(binding["target_type"])

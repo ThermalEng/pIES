@@ -825,7 +825,7 @@ class TestPredictPhase2FullHorizon:
             {
                 "target": {"instance": dev, "interface": "electricity_demand"},
                 "algorithm": CHASE_REF,
-                "parameters": {},
+                "parameters": {"scale": 10.0},
             }
             for dev in ("load1", "load2")
         ]

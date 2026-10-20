@@ -60,9 +60,11 @@ from iesplan.computation import (
     SolverBundle,
     SolverRuntime,
     StopProbe,
+    check_convergence,
     materialize_non_predictive_series,
     materialize_predicted_series,
     prediction_delta,
+    split_predictions_by_dependency,
 )
 from iesplan.computation.result_adapter import ResultAdapterRegistry
 from iesplan.core.contracts import horizon_point_count
@@ -83,12 +85,15 @@ __all__ = [
     "build_hourly_files",
     "business_outcome_for",
     "complete_materialized",
+    "convergence_for_round",
     "execute_bundle",
     "generate_bundle",
     "load_compute_inputs",
+    "predict_selected_round",
     "predict_target_round",
     "prediction_delta",
     "seal_output_objects",
+    "split_predictions_by_dependency",
 ]
 
 
@@ -318,6 +323,52 @@ def complete_materialized(
     )
 
 
+def _predict_entries(
+    artifact: ValidatedAssemblyArtifact,
+    resources: Mapping[str, bytes],
+    entries: tuple[Mapping[str, object], ...],
+    resolve_predictor: Any,
+    seed: int | None,
+    *,
+    operation_years: int,
+    previous: Mapping[str, object] | None = None,
+    allow_subset: bool = False,
+) -> tuple[tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]]:
+    """按给定配置条目经公开 predictor 物化运营期序列（无数据库写入）。
+
+    历史列按绑定接口名投影，目标类型不透明透传；返回均按（实例，接口）
+    稳定排序。运营期点数取权威推导，不以 predictor 输出长度自洽。
+    ``allow_subset`` 为真时只物化给定条目命中的绑定（耦合轮次用）。
+    """
+    if not entries:
+        return (), ()
+    predicted = materialize_predicted_series(
+        artifact, resources, tuple(entries), resolve_predictor, seed,
+        operation_years=operation_years,
+        previous=previous,
+        allow_subset=allow_subset,
+    )
+    baseline_data = json.loads(artifact.canonical_text)["project_baseline"]
+    # 运营期点数取权威推导（与非预测物化同一来源），不以 predictor 输出
+    # 长度自洽：短/空输出由 MaterializedSeries 自身长度不变式自然拒绝。
+    point_count = horizon_point_count(
+        baseline_data["resolution"], baseline_data["start_year"], operation_years
+    )
+    series = tuple(
+        MaterializedSeries(
+            device=item.device,
+            interface=item.interface,
+            mode="data_predict",
+            resolution=baseline_data["resolution"],
+            point_count=point_count,
+            values=item.values,
+            source={"kind": "data_predict", "object_id": item.history_object_id},
+        )
+        for item in predicted
+    )
+    return series, predicted
+
+
 def predict_target_round(
     db: Session,
     plane: ComputeExecutionPlane,
@@ -337,34 +388,87 @@ def predict_target_round(
     artifact, resources, config, seed = _restore_artifact_resources_config(
         db, task_project_id, snapshot
     )
-    predictions = tuple(config.predictions or ())
-    if not predictions:
-        return (), ()
-    predicted = materialize_predicted_series(
-        artifact, resources, predictions, plane.predictor_registry.get, seed,
+    return _predict_entries(
+        artifact, resources, tuple(config.predictions or ()),
+        plane.predictor_registry.get, seed,
         operation_years=snapshot.evaluation["operation_years"],
         previous=previous,
     )
-    baseline_data = json.loads(snapshot.canonical_assembly_text)["project_baseline"]
-    # 运营期点数取权威推导（与非预测物化同一来源），不以 predictor 输出
-    # 长度自洽：短/空输出由 MaterializedSeries 自身长度不变式自然拒绝。
-    point_count = horizon_point_count(
-        baseline_data["resolution"], baseline_data["start_year"],
-        snapshot.evaluation["operation_years"],
+
+
+def predict_selected_round(
+    db: Session,
+    plane: ComputeExecutionPlane,
+    task_project_id: int,
+    snapshot: Any,
+    entries: tuple[Mapping[str, object], ...],
+    *,
+    previous: Mapping[str, object] | None = None,
+) -> tuple[tuple[MaterializedSeries, ...], tuple[PredictedTarget, ...]]:
+    """预测阶段命令：只重算给定配置条目（耦合轮次用，独立产物由调用方复用）。
+
+    与 ``predict_target_round`` 同一物化路径；调用方传入已按依赖声明
+    拆出的条目（见 ``split_predictions_by_dependency``），此处不重复分流。
+    """
+    artifact, resources, _config, seed = _restore_artifact_resources_config(
+        db, task_project_id, snapshot
     )
-    series = tuple(
-        MaterializedSeries(
-            device=item.device,
-            interface=item.interface,
-            mode="data_predict",
-            resolution=baseline_data["resolution"],
-            point_count=point_count,
-            values=item.values,
-            source={"kind": "data_predict", "object_id": item.history_object_id},
+    return _predict_entries(
+        artifact, resources, tuple(entries),
+        plane.predictor_registry.get, seed,
+        operation_years=snapshot.evaluation["operation_years"],
+        previous=previous,
+        allow_subset=True,
+    )
+
+
+def convergence_for_round(
+    plane: ComputeExecutionPlane,
+    coupled_entries: tuple[Mapping[str, object], ...],
+    previous_predicted: Mapping[tuple[str, str], PredictedTarget],
+    current_predicted: Mapping[tuple[str, str], PredictedTarget],
+    previous_outputs: Mapping[str, object] | None,
+    current_outputs: Mapping[str, object],
+) -> tuple[float, tuple[dict[str, object], ...]]:
+    """逐耦合目标调用算法收敛度量并汇总（求解完成后的公开输出边界）。
+
+    每项目返回值经 ``check_convergence`` 校验；汇总值为各目标无量纲值
+    的最大值，调用方以同一 ``tolerance`` 比较（全部不大于才收敛）。
+    参数取各条目已固定的 ``parameters``，此处不重复跑参数校验。
+    返回（汇总值，逐目标记录）：记录为
+    ``{device, interface, algorithm, metric, value, unit}`` 按目标排序。
+    """
+    records: list[dict[str, object]] = []
+    for entry in coupled_entries:
+        target = entry["target"]
+        if not isinstance(target, Mapping):
+            raise KeyError(f"预测条目缺少 target: {entry!r}")
+        key = (str(target["instance"]), str(target["interface"]))
+        algorithm = str(entry["algorithm"])
+        predictor = plane.predictor_registry.get(algorithm)
+        # 可用性已由注册边界确定（耦合必有收敛度量），此处直接调用。
+        convergence = check_convergence(
+            predictor.measure_convergence(
+                previous_prediction=previous_predicted[key],
+                current_prediction=current_predicted[key],
+                previous_outputs=previous_outputs,
+                current_outputs=current_outputs,
+                parameters=dict(entry.get("parameters") or {}),
+            )
         )
-        for item in predicted
-    )
-    return series, predicted
+        records.append(
+            {
+                "device": key[0],
+                "interface": key[1],
+                "algorithm": algorithm,
+                "metric": convergence.metric,
+                "value": convergence.value,
+                "unit": convergence.unit,
+            }
+        )
+    records.sort(key=lambda record: (str(record["device"]), str(record["interface"])))
+    aggregate = max(float(record["value"]) for record in records)
+    return aggregate, tuple(records)
 
 
 def generate_bundle(

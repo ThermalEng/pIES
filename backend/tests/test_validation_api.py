@@ -63,7 +63,7 @@ DEFAULT_ASSUMPTIONS: dict = {
 #: 合法 12 字段 CalculationConfig(与 test_config_api 同构的最小有效载荷)
 CALC_PAYLOAD: dict = {
     "schema": "ies.calculation-config",
-    "schema_version": "1.0.0",
+    "schema_version": "2.0.0",
     "mode": "planning",
     "predictions": [],
     "generator": "ies.generator.highs_milp@2.0.0",

@@ -330,7 +330,7 @@ def test_non_owner_cannot_cancel_or_retry_task(client: TestClient, db: Session) 
         f"/api/projects/{pid}/config",
         json={"calculation_config": {
             "schema": "ies.calculation-config",
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
             "mode": "planning",
             "predictions": [],
             "generator": "ies.generator.highs_milp@2.0.0",

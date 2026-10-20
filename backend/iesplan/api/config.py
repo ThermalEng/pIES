@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -56,8 +56,18 @@ def save_config_endpoint(
     body: CalculationConfigSaveRequest,
     db: DbSession,
     user: CurrentUser,
+    request: Request,
 ) -> dict:
-    """保存 CalculationConfig: 输入校验 422, revision 失配 409。"""
+    """保存 CalculationConfig: 输入校验 422, revision 失配 409。
+
+    预测算法目录取组合根已发布实例(经 app.state 透传, 不自行发现/组装);
+    预测参数规则由用例在输入边界调用, 未装配目录时跳过算法级检查。
+    """
+    bootstrap = getattr(request.app.state, "bootstrap_context", None)
+    predictor_registry = (
+        getattr(bootstrap, "predictor_registry", None) if bootstrap is not None else None
+    )
     return config_cases.save_calculation_config_case(
-        db, user, project_id, body.calculation_config, body.expected_revision
+        db, user, project_id, body.calculation_config, body.expected_revision,
+        predictor_registry=predictor_registry,
     )

@@ -143,7 +143,7 @@ def _body(**overrides: Any) -> dict[str, Any]:
     """合法计算配置正文(12 字段契约)。"""
     payload: dict[str, Any] = {
         "schema": "ies.calculation-config",
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "mode": "planning",
         "predictions": [],
         "generator": "ies.generator.highs_milp@2.0.0",

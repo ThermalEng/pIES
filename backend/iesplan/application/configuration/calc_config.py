@@ -23,7 +23,8 @@ from sqlalchemy.orm import Session
 from iesplan import configuration as configuration_domain
 from iesplan import project as project_domain
 from iesplan.application.projects import ensure_access
-from iesplan.computation import validate_calculation_config
+from iesplan.computation import CalculationConfig, validate_calculation_config
+from iesplan.computation.errors import ComputationUnavailableError
 from iesplan.core.errors import AppError, ConflictError, NotFoundError
 from iesplan.identity.contracts import UserRecord
 
@@ -33,21 +34,51 @@ __all__ = [
 ]
 
 
+def _check_predictor_parameters(
+    validated: CalculationConfig,
+    predictor_registry: Any | None,
+    project_id: int,
+) -> None:
+    """逐预测条目调用算法自身的参数规则（保存输入边界唯一位置）。
+
+    目录未装配或算法未注册时跳过：未知算法由提交闸门按精确引用阻断，
+    此处不抢闸门职责。算法规则失败（``ValueError`` 指明字段）即保存拒绝。
+    """
+    if predictor_registry is None:
+        return
+    for entry in validated.predictions:
+        try:
+            predictor = predictor_registry.get(str(entry["algorithm"]))
+        except ComputationUnavailableError:
+            continue
+        try:
+            predictor.validate_parameters(dict(entry.get("parameters") or {}))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                "预测算法参数不满足该算法输入规则 "
+                f"(algorithm={entry['algorithm']!r}): {exc}"
+            ) from exc
+
+
 def save_calculation_config_case(
     db: Session,
     user: UserRecord,
     project_id: int,
     calculation_config: dict[str, Any],
     expected_revision: int | None,
+    predictor_registry: Any | None = None,
 ) -> dict[str, Any]:
     """保存计算配置（用户输入入口唯一校验；成功追加不可变 revision）。
 
     校验不通过 → 422 CONFIG-VAL-001 标准信封，不落库；revision 失配 → 409。
+    预测条目的算法级参数规则经组合根已发布的预测目录调用；目录未装配
+    时跳过该层检查（提交闸门仍会按精确引用阻断未知算法）。
     """
     ensure_access(db, user, project_id, "edit")
     project_domain.require_project(db, project_id)
     try:
         validated = validate_calculation_config(calculation_config)
+        _check_predictor_parameters(validated, predictor_registry, project_id)
     except (ValueError, TypeError) as exc:
         err = AppError(
             "计算配置校验失败",

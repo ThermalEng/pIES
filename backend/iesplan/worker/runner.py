@@ -118,6 +118,17 @@ def _predict_round(
         )
 
 
+def _predict_selected_round(
+    ctx: RunContext, plane: Any, snapshot: Any,
+    entries: tuple, previous: Mapping[str, object] | None,
+) -> tuple[tuple, tuple]:
+    """耦合轮次预测短读会话(只重算给定条目, 独立产物由调用方复用)。"""
+    with ctx.session_factory() as db:
+        return worker_app.predict_selected_round(
+            db, plane, ctx.task.project_id, snapshot, entries, previous=previous,
+        )
+
+
 def _solve_round(
     ctx: RunContext, plane: Any, snapshot: Any, artifact: Any, models: Any,
     materialized: Any, finance: Any, config: Any, attempt: Any,
@@ -159,7 +170,7 @@ def _predicted_series_csv(item: Any) -> bytes:
 
 
 def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
-    """计算任务真实链: 快照恢复 → 预测 → 阶段一求解 → [阶段二迭代] → 证据。
+    """计算任务真实链: 快照恢复 → 预测 → 阶段一求解 → [耦合迭代] → 证据。
 
     全程只按 application.worker 阶段网关结果驱动，不解释任何输入字段：
     冻结缺件即实际结构错误可见失败；预测算法未注册/目标类型不支持即
@@ -167,12 +178,14 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     收拢为 LeaseFenced（不写终态）；非成功回执与不可映射结果收拢为
     EngineRunError（结构化失败，不伪装成功）。回执状态判定后才写执行
     进度：fenced/cancelled/失败不产生 execute 进度与终态写回。
-    阶段二（data_predict 多于 1 个时必进，不可选）：每轮用上一轮统一
-    结果重建预测目标→重建模型→真实求解，再以相邻两轮预测序列最大
-    绝对差按配置容差收敛或达最大迭代数；收敛判定不能跳过本轮求解。
-    轮数上限为总求解轮数（阶段一计第 1 轮；多目标时提交门要求上限
-    至少为 2，不存在跳过阶段二求解的上限）。prediction 载荷中
-    prediction_rounds 与 solve_rounds 恒等（每阶段二迭代都真实求解），
+    耦合迭代（任一选中算法声明依赖求解结果时必进，不可选；单个耦合
+    目标也迭代，多个独立目标仍直接求解）：首轮全部目标生成并求解；
+    后续每轮只重算耦合目标（独立产物与序列复用首轮），重建完整模型
+    并真实求解，再由各耦合算法的收敛度量计算无量纲收敛量，全部不大
+    于同一容差即收敛，否则达最大迭代数；收敛判定不能跳过本轮求解。
+    轮数上限为总求解轮数（阶段一计第 1 轮；耦合时提交门要求上限
+    至少为 2，不存在跳过耦合迭代求解的上限）。prediction 载荷中
+    prediction_rounds 与 solve_rounds 恒等（每耦合迭代都真实求解），
     phase2_solve_rounds = solve_rounds - 1（阶段一计 1 轮）。
     多轮证据（solve_rounds > 1 时）：阶段一与非最终中间轮的 Bundle
     文件、回执、声明原始输出、训练产物与预测序列字节进入
@@ -203,8 +216,30 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     ctx.progress(10.0, "materialize", None)
     predicted: tuple = ()
     predicted_series: tuple = ()
+    independent_predicted: tuple = ()
+    independent_series: tuple = ()
+    coupled_entries: tuple = ()
+    coupled_predicted: tuple = ()
     if config.predictions:
         predicted_series, predicted = _predict_round(ctx, plane, snapshot, None)
+        # 按已注册的依赖声明分流（提交闸门同一事实；未知引用即明确不可用）。
+        _independent_entries, coupled_entries = worker_app.split_predictions_by_dependency(
+            tuple(config.predictions or ()), plane.predictor_registry.get
+        )
+        if coupled_entries:
+            coupled_keys = {
+                (str(entry["target"]["instance"]), str(entry["target"]["interface"]))
+                for entry in coupled_entries
+            }
+            independent_predicted = tuple(
+                item for item in predicted if (item.device, item.interface) not in coupled_keys
+            )
+            independent_series = tuple(
+                item for item in predicted_series if (item.device, item.interface) not in coupled_keys
+            )
+            coupled_predicted = tuple(
+                item for item in predicted if (item.device, item.interface) in coupled_keys
+            )
     # 完成态集合：预测阶段交付全部 pending（提交闸门 TASK-REQ-010/011 保证
     # 配置与绑定双向覆盖），由应用层合并构成，不复核。
     completed = worker_app.complete_materialized(materialized, predicted_series)
@@ -221,37 +256,45 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
     solve_rounds = 1
     converged = True
     final_delta: float | None = None
-    if len(predicted) > 1:
+    final_convergences: tuple = ()
+    previous_outputs: Mapping[str, object] | None = None
+    if coupled_entries:
         convergence = config.convergence or {}
         tolerance = float(convergence["tolerance"])
         max_iterations = int(convergence["max_iterations"])
         converged = False
-        previous_values = {(p.device, p.interface): p.values for p in predicted}
+        previous_coupled = {(item.device, item.interface): item for item in coupled_predicted}
+        previous_outputs = result.outputs
         while prediction_rounds < max_iterations:
-            new_series, new_predicted = _predict_round(
-                ctx, plane, snapshot, result.outputs)
+            new_series, new_predicted = _predict_selected_round(
+                ctx, plane, snapshot, coupled_entries, previous_outputs)
             prediction_rounds += 1
-            completed = worker_app.complete_materialized(materialized, new_series)
+            completed = worker_app.complete_materialized(
+                materialized, independent_series + new_series)
             bundle, receipt, collected, result, outcome = _solve_round(
                 ctx, plane, snapshot, artifact, models, completed,
                 finance, config, attempt)
             solve_rounds += 1
+            current_coupled = {(item.device, item.interface): item for item in new_predicted}
+            aggregate, records = worker_app.convergence_for_round(
+                plane, coupled_entries, previous_coupled, current_coupled,
+                previous_outputs, result.outputs)
+            final_delta = aggregate
+            final_convergences = records
             rounds_log.append({
                 "round": prediction_rounds, "phase": "phase2",
                 "bundle": bundle, "receipt": receipt, "collected": collected,
-                "predicted": new_predicted,
+                "predicted": independent_predicted + new_predicted,
+                "convergence": {"aggregate": aggregate, "per_target": [dict(r) for r in records]},
             })
             ctx.progress(90.0, "phase2", {"round": solve_rounds})
-            new_values = {(p.device, p.interface): p.values for p in new_predicted}
-            final_delta = max(
-                worker_app.prediction_delta(previous_values[key], new_values[key])
-                for key in previous_values
-            )
-            previous_values = new_values
-            predicted = new_predicted
-            if final_delta <= tolerance:
+            previous_coupled = current_coupled
+            previous_outputs = result.outputs
+            coupled_predicted = new_predicted
+            if aggregate <= tolerance:
                 converged = True
                 break
+        predicted = independent_predicted + coupled_predicted
     bundle_media = {
         entry["path"]: entry["media_type"]
         for entry in (*bundle.manifest.inputs, *bundle.manifest.outputs)
@@ -294,6 +337,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
             "phase2_solve_rounds": solve_rounds - 1,
             "converged": converged,
             "final_delta": final_delta,
+            "convergences": [dict(record) for record in final_convergences],
             "receipts": receipts,
         }
     if len(rounds_log) > 1:
@@ -333,7 +377,7 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                 )
                 history[series_key] = (_predicted_series_csv(item), "text/csv")
                 prediction_paths += [artifact_key, series_key]
-            rounds.append({
+            round_entry: dict[str, object] = {
                 "round": record["round"],
                 "phase": record["phase"],
                 "authoritative": False,
@@ -349,9 +393,13 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                     "solution": sorted(solution_paths),
                     "prediction": sorted(prediction_paths),
                 },
-            })
+            }
+            if "convergence" in record:
+                # 耦合轮次收敛聚合与逐目标明细；首轮无该键，不伪造零差。
+                round_entry["convergence"] = record["convergence"]
+            rounds.append(round_entry)
         final_record = rounds_log[-1]
-        rounds.append({
+        final_entry: dict[str, object] = {
             "round": solve_rounds,
             "phase": final_record["phase"],
             "authoritative": True,
@@ -367,7 +415,10 @@ def _execute_compute(ctx: RunContext) -> tuple[dict, dict]:
                 "solution": sorted(f"solution/{path}" for path in collected),
                 "prediction": sorted(prediction_files),
             },
-        })
+        }
+        if "convergence" in final_record:
+            final_entry["convergence"] = final_record["convergence"]
+        rounds.append(final_entry)
         output_files["round_history"] = history
         payload["rounds"] = rounds
         payload["authoritative_round"] = solve_rounds

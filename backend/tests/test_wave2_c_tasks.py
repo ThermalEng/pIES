@@ -158,7 +158,7 @@ def test_submit_report_task_commits_and_repeatable(
 #: 计算配置正文(12 字段契约; 与 test_http_contract._CALC_PAYLOAD 同构)。
 _CONFIG_BODY: dict = {
     "schema": "ies.calculation-config",
-    "schema_version": "1.0.0",
+    "schema_version": "2.0.0",
     "mode": "planning",
     "predictions": [],
     "generator": "ies.generator.highs_milp@2.0.0",

@@ -462,15 +462,17 @@ def _check_prediction_inputs(
     project_id: int,
     predictor_registry: Any | None = None,
 ) -> int:
-    """预测输入冻结核对(提交闸门，B5-1 双向匹配 + B5-2 算法相容)。
+    """预测输入冻结核对(提交闸门：双向匹配 + 算法相容 + 依赖分流)。
 
     - 配置中每个预测目标必须命中装配的 data_predict 绑定（实例 + 接口），否则 400 TASK-REQ-010；
     - 装配中每个 data_predict 绑定必须被配置预测覆盖（无算法无法物化），否则 400 TASK-REQ-011；
-    - data_predict 绑定多于 1 个且 convergence 为空 → 400 TASK-REQ-012（0/1 个时收敛可空，直通阶段一）；
-      多于 1 个且 convergence.max_iterations（总求解轮数上限，阶段一计第 1 轮）小于 2
-      → 400 TASK-REQ-012（上限为 1 将跳过阶段二求解，不允许）；
-    - 预测目录可用时(B5-2)：每个预测算法须精确解析，否则 400 TASK-REQ-013；
-      算法不支持该绑定目标类型时 → 400 TASK-REQ-014。
+    - 任一选中算法声明依赖求解结果（耦合）且 convergence 为空 → 400 TASK-REQ-012；
+      耦合时 convergence.max_iterations（总求解轮数上限，阶段一计第 1 轮）小于 2
+      → 400 TASK-REQ-012（上限为 1 将跳过耦合迭代求解，不允许）；
+    - 预测目录可用时：每个预测算法须精确解析，否则 400 TASK-REQ-013；
+      算法不支持该绑定目标类型时 → 400 TASK-REQ-014；
+    - 预测目录缺席时 fail-closed：有 data_predict 绑定即要求收敛配置
+      （无法确认独立性，不猜测）。
     配置正文形态由保存入口冻结，此处直接使用，不重复校验字段形态。
     返回 data_predict 绑定数。
     """
@@ -497,31 +499,7 @@ def _check_prediction_inputs(
                 "field": f"predefined_interfaces.{iface_id}",
             },
         )
-    if len(bound) > 1 and calc_config.get("convergence") is None:
-        raise InvalidRequestError(
-            "多个 data_predict 目标须给出阶段二收敛容差与最大迭代数",
-            code="TASK-REQ-012",
-            params={"project_id": project_id, "predict_target_count": len(bound)},
-            location={"object_type": "calculation_config", "object_id": project_id, "field": "convergence"},
-        )
-    if len(bound) > 1:
-        max_iterations = int(calc_config["convergence"]["max_iterations"])
-        if max_iterations < 2:
-            raise InvalidRequestError(
-                "多个 data_predict 目标要求阶段二至少求解一轮 "
-                "(max_iterations 为总求解轮数上限，阶段一计第 1 轮，至少为 2)",
-                code="TASK-REQ-012",
-                params={
-                    "project_id": project_id,
-                    "predict_target_count": len(bound),
-                    "max_iterations": max_iterations,
-                },
-                location={
-                    "object_type": "calculation_config",
-                    "object_id": project_id,
-                    "field": "convergence",
-                },
-            )
+    coupled: list[tuple[str, str]] = []
     if predictor_registry is not None:
         for entry in predictions:
             algorithm = entry["algorithm"]
@@ -553,6 +531,40 @@ def _check_prediction_inputs(
                         "object_id": project_id, "field": "predictions",
                     },
                 )
+            if predictor.descriptor.depends_on_solve_result:
+                coupled.append((dev_id, iface_id))
+        has_coupled = bool(coupled)
+    else:
+        # 能力源缺席时 fail-closed：有预测绑定即要求收敛，不猜测独立性。
+        has_coupled = bool(bound)
+    if has_coupled and calc_config.get("convergence") is None:
+        raise InvalidRequestError(
+            "耦合预测目标须给出收敛容差与最大迭代数",
+            code="TASK-REQ-012",
+            params={
+                "project_id": project_id,
+                "coupled_targets": sorted(f"{dev}x{iface}" for dev, iface in coupled)
+                or sorted(f"{dev}x{iface}" for dev, iface in bound),
+            },
+            location={"object_type": "calculation_config", "object_id": project_id, "field": "convergence"},
+        )
+    if has_coupled:
+        max_iterations = int(calc_config["convergence"]["max_iterations"])
+        if max_iterations < 2:
+            raise InvalidRequestError(
+                "耦合预测要求至少求解一轮 "
+                "(max_iterations 为总求解轮数上限，阶段一计第 1 轮，至少为 2)",
+                code="TASK-REQ-012",
+                params={
+                    "project_id": project_id,
+                    "max_iterations": max_iterations,
+                },
+                location={
+                    "object_type": "calculation_config",
+                    "object_id": project_id,
+                    "field": "convergence",
+                },
+            )
     return len(bound)
 
 
@@ -1203,7 +1215,8 @@ def _submit_task(
     由顶层 submit_task 提交。
     generator_registry 为组合根已发布的生成器目录(计算任务解析冻结
     执行引用用; io 任务不消费)。predictor_registry 为组合根已发布的
-    预测算法目录(计算任务核对预测算法相容用; 缺席时只做 B5-1 匹配)。
+    预测算法目录(计算任务核对预测算法相容与依赖分流用; 缺席时 fail-closed,
+    有预测绑定即要求收敛配置)。
     """
     ensure_access(db, user, project_id, "edit")
     project = require_project(db, project_id)
