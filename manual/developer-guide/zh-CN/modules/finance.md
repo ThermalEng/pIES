@@ -30,7 +30,7 @@
 
 | 输入 | 关键要求 |
 |---|---|
-| `FinanceProfile` / `FinanceOverrides` | 见[财务 YAML 契约](../formats/finance-yaml.md)：Profile 是已注册、可复用的地区财务基准，不得以内置形态充当全局默认；Overrides 引用 `profile {id}`，对既有成本分量叶子做 `{value, unit}` 原子替换、对能源价格条目（`price_id`）做定价定义整项替换（`carrier`/`direction` 由 Profile 继承，禁止新增/删除 `price_id`） |
+| `FinanceProfile` / `FinanceOverrides` | 见[财务 YAML 契约](../formats/finance-yaml.md)：Profile 是已注册、可复用的地区财务基准，不得以内置形态充当全局默认；Overrides 对已有成本、价格及税务规则参数做明确覆盖，方法与范围仍由 Profile 声明，具体覆盖路径以格式页为准 |
 | `EffectiveFinanceConfig` | 唯一由确定性合并器从 Profile（+ Overrides）生成并完整校验的不可变快照；可导出/导入/进入快照，项目包导入在外部上传边界连同精确来源完成合并验证，确认阶段不重复执行；装配、规划与计算只消费同一引用（见[装配 YAML](../formats/assembly-yaml.md)） |
 | 建设与替换计划 | 金额币种、发生期、`price_basis`（含税/不含税口径标签）和 `base_year` 明确 |
 | 逐时或年度运行汇总 | 能量、成本、收益的单位和时间范围明确 |
@@ -54,7 +54,7 @@
 
 ## 税务参与规划与现金流
 
-税务关系嵌入现有规划模型，与建设选择、容量和运行变量一起求解。财务配置声明核算主体、计税基础、税率、抵扣规则、结算期间和现金发生时间。字段定义以[财务 YAML 契约](../formats/finance-yaml.md#税目登记)为准，新增计算输入按该契约版本化扩展。
+税务关系嵌入现有规划模型，与建设选择、容量和运行变量一起求解。财务配置声明核算主体、计税基础、税率、抵扣规则、结算期间和现金发生时间。字段定义以[财务 YAML 契约](../formats/finance-yaml.md#税务计算输入)为准；展示税目与计算规则分开，抵扣池是余额与退款的唯一所有者。
 
 ### 规划目标与同源评价
 
