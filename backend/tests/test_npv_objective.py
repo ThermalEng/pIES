@@ -224,13 +224,19 @@ def _contribution(yaml_text: str):
     return built.contribution
 
 
-def _doc(*, sense: str = "maximize", expression: str = NPV_MARKER, variables: dict | None = None):
+def _doc(
+    *,
+    sense: str = "maximize",
+    expression: str = NPV_MARKER,
+    variables: dict | None = None,
+    start_year: int = 2026,
+):
     return {
         "schema": "ies.assembly",
         "schema_version": "3.0.0",
         "assembly": {"id": "npv-mini", "name": "NPV 手算装配"},
         "project_baseline": {
-            "resolution": "1h", "start_year": 2026, "scenario_mode": "single",
+            "resolution": "1h", "start_year": start_year, "scenario_mode": "single",
         },
         "devices": {
             "heater1": {
@@ -565,8 +571,8 @@ def test_npv_payment_timing_moves_value() -> None:
     assert model.objective.constant > early_model.objective.constant
 
 
-def test_generate_rejects_nonempty_tax_relations() -> None:
-    """非空税则/抵扣池在生成器能力边界明确拒绝，不按税前生成。"""
+def test_generate_rejects_unsupported_tax_relations() -> None:
+    """未知税则类型在生成器能力边界明确拒绝，不按税前生成。"""
     from iesplan.computation.errors import ComputationUnavailableError
 
     artifact, models, materialized, finance, config, evaluation = _inputs()
@@ -575,11 +581,25 @@ def test_generate_rejects_nonempty_tax_relations() -> None:
         HIGHS_MILP_PROVIDER.generate(
             artifact, models, materialized, taxed, config, evaluation
         )
-    credited = replace(finance, credit_pools={"pool1": object()})
-    with pytest.raises(ComputationUnavailableError):
-        HIGHS_MILP_PROVIDER.generate(
-            artifact, models, materialized, credited, config, evaluation
-        )
+
+
+def test_generate_accepts_pool_without_rules() -> None:
+    """仅抵扣池（无税则）可生成：期初留抵参与连续结转。"""
+    from iesplan.finance import CreditPool
+
+    artifact, models, materialized, finance, config, evaluation = _inputs()
+    pool = CreditPool.from_dict(
+        {
+            "opening_credit": {"value": "100", "unit": "CNY"},
+            "receivable_policy": "end_receivable",
+            "refunds": [],
+        }
+    )
+    credited = replace(finance, credit_pools={"pool1": pool})
+    bundle = HIGHS_MILP_PROVIDER.generate(
+        artifact, models, materialized, credited, config, evaluation
+    )
+    assert bundle.manifest.bundle["generator"] == GENERATOR_REF
 
 
 # ---------------------------------------------------------------------------

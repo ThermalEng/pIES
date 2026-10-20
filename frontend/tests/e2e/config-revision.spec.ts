@@ -38,7 +38,7 @@ async function createProjectEnterConfig(page: Page, projectName: string): Promis
 /** 填写全部必填字段(精度由用户明确选择 medium)。 */
 async function fillConfig(page: Page, mode: string, timeLimit: string): Promise<void> {
   await page.locator('#calc-mode').fill(mode)
-  await page.locator('#calc-generator').fill('ies.generator.highs_milp@3.1.0')
+  await page.locator('#calc-generator').fill('ies.generator.highs_milp@3.2.0')
   await page.locator('#calc-solver').fill('ies.solver.highs@1.7.2')
   await page.locator('#calc-precision').selectOption('medium')
   await page.locator('#calc-time-limit').fill(timeLimit)

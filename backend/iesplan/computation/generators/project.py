@@ -34,8 +34,10 @@ MPS-ready 的 ``LinearModel``，并附带结果反向换算所需的最小单位
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 
@@ -46,6 +48,7 @@ from iesplan.computation.generators.linear import (
     LinearModel,
     LinearVariable,
     LoweringUnsupportedError,
+    _mutex_big_m,
     lower_planning_constraint,
     lower_planning_expression,
     lower_relation,
@@ -63,7 +66,13 @@ from iesplan.core.contracts import (
 from iesplan.core.contracts.baseline import TIMELINE_STEP_DURATION_VAR
 from iesplan.core.contracts.planning_expression import PlanningExpression
 from iesplan.core.units import dims_of, to_si
-from iesplan.finance import EffectiveFinanceConfig, EvaluationInput, annual_boundaries
+from iesplan.finance import (
+    ConstructionVatRule,
+    EffectiveFinanceConfig,
+    EvaluationInput,
+    VatRule,
+    annual_boundaries,
+)
 from iesplan.modeling import (
     BinaryNode,
     DeviceMathContribution,
@@ -304,6 +313,7 @@ class _ProjectBuilder:
         self.models = models
         self.finance = finance
         self.evaluation = evaluation
+        self._vat_cash: _AffineAcc | None = None
         self.point_count = point_count
         self.step_s = step_s
         self.series: dict[tuple[str, str], list[float]] = {}
@@ -1077,6 +1087,389 @@ class _ProjectBuilder:
             npv.add_scaled(annual, 1.0 / discount(year_no))
         return npv
 
+    # -- VAT 月度精确关系（3.2.0；无规则无池时整段跳过）--
+
+    def _vat_month_spans(self) -> list[tuple[int, int, int]]:
+        """税务月 → 求解步半开区间（仅经营月有步，公历月界，含闰年）。
+
+        步按运行起始年/分辨率映射公历月，再平移建设期（首运营月为
+        ``12K+1``）；经营步必落在 ``12K+1..12E``，之外即交接不一致，
+        明确拒绝。
+        """
+        baseline = self.doc["project_baseline"]
+        start_year = baseline["start_year"]
+        step_hours = self.step_s / 3600.0
+        construction = self.evaluation.construction_period
+        last_month = 12 * self.evaluation.evaluation_years
+        origin = datetime(start_year, 1, 1)
+        spans: dict[int, list[int]] = {}
+        for step in range(self.point_count):
+            moment = origin + timedelta(hours=step * step_hours)
+            month = (
+                12 * construction
+                + (moment.year - start_year) * 12
+                + moment.month
+            )
+            if month < 1 or month > last_month:
+                raise LoweringUnsupportedError(
+                    f"求解步 {step} 映射税务月 {month} 超出 1..{last_month}"
+                )
+            slot = spans.setdefault(month, [step, step])
+            slot[1] = step
+        return [
+            (month, bounds[0], bounds[1] + 1)
+            for month, bounds in sorted(spans.items())
+        ]
+
+    def _vat_grouped_rules(self) -> dict[str, dict[str, list]] | None:
+        """已支持税则按池分组；无规则无池返回 None；未支持形态明确拒绝。
+
+        3.2.0 仅实现 ``vat``（monthly/same_period）与
+        ``construction_input_vat``；所得税及未知 kind 不忽略、不半生成。
+        规则引用的池必须已声明（公开入口已核对，此处缺席即交接不一致）。
+        """
+        rules = self.finance.tax_rules
+        pools = self.finance.credit_pools
+        if not rules and not pools:
+            return None
+        grouped: dict[str, dict[str, list]] = {}
+        for rule_id in sorted(rules):
+            rule = rules[rule_id]
+            if isinstance(rule, VatRule):
+                if rule.settlement != "monthly" or rule.confirmation != "same_period":
+                    raise LoweringUnsupportedError(
+                        f"VAT 规则 {rule_id!r} 仅支持 monthly/same_period"
+                    )
+                grouped.setdefault(
+                    rule.credit_pool, {"vat": [], "construction": []}
+                )["vat"].append(rule)
+            elif isinstance(rule, ConstructionVatRule):
+                grouped.setdefault(
+                    rule.credit_pool, {"vat": [], "construction": []}
+                )["construction"].append(rule)
+            else:
+                raise LoweringUnsupportedError(
+                    f"税务规则 {rule_id!r} 类型 {type(rule).__name__} 超出 3.2.0 已实现关系"
+                )
+        for pool_id in sorted(pools):
+            grouped.setdefault(pool_id, {"vat": [], "construction": []})
+        for pool_id in grouped:
+            if pool_id not in pools:
+                raise LoweringUnsupportedError(
+                    f"税务规则引用未声明的抵扣池 {pool_id!r}"
+                )
+        return grouped
+
+    def _vat_gross_factor(self, rate: Any) -> float:
+        """含税/不含税总额 → 税额系数（税率已知，先合并金额系数）。"""
+        value = float(rate.value)
+        if self.finance.price_basis == "tax_exclusive":
+            return value
+        return value / (1.0 + value)
+
+    def _vat_pool_month_bases(
+        self,
+        pool_rules: dict[str, list],
+        spans: list[tuple[int, int, int]],
+    ) -> tuple[list[_AffineAcc], list[_AffineAcc]]:
+        """单池每税务月 (销项, 可抵进项) 仿射（无交易月为零）。
+
+        经营数据按步区间归集；年度固定 OM 按运营年年末月确认；维护按
+        清单年年末月确认；建设进项总额按确认方法落月。金额符号如实
+        保留，不钳零。
+        """
+        months = 12 * self.evaluation.evaluation_years
+        out: list[_AffineAcc] = [_AffineAcc() for _ in range(months)]
+        inp: list[_AffineAcc] = [_AffineAcc() for _ in range(months)]
+        construction = self.evaluation.construction_period
+        operation = self.evaluation.operation_years
+        bindings = self.doc.get("tariff_bindings") or {}
+        instances = (self.doc.get("finance_binding") or {}).get("instances") or {}
+        for rule in pool_rules["vat"]:
+            for entry in rule.in_tax:
+                price = self.finance.energy_prices[entry.price]
+                if price.direction != "purchase":
+                    raise LoweringUnsupportedError(
+                        f"进项规则价格 {entry.price!r} 须为 purchase"
+                    )
+                factor = self._vat_gross_factor(entry.rate) * float(
+                    entry.deductible_ratio.value
+                )
+                for binding_id, binding in bindings.items():
+                    if binding.get("price") != entry.price:
+                        continue
+                    for month, start, end in spans:
+                        inp[month - 1].add_scaled(
+                            self._tariff_affine(binding_id, start, end), factor
+                        )
+            for entry in rule.out_tax:
+                price = self.finance.energy_prices[entry.price]
+                if price.direction != "sale":
+                    raise LoweringUnsupportedError(
+                        f"销项规则价格 {entry.price!r} 须为 sale"
+                    )
+                factor = self._vat_gross_factor(entry.rate)
+                for binding_id, binding in bindings.items():
+                    if binding.get("price") != entry.price:
+                        continue
+                    for month, start, end in spans:
+                        # 销项记账为负，税基取相反数（符号如实保留）。
+                        out[month - 1].add_scaled(
+                            self._tariff_affine(binding_id, start, end), -factor
+                        )
+            for entry in rule.om_input_tax:
+                finance_type, _, component = entry.for_path.partition(".")
+                if component not in ("annual_fixed_om", "period_variable_om"):
+                    raise LoweringUnsupportedError(
+                        f"运维进项 for {entry.for_path!r} 只支持年固/可变分量"
+                    )
+                factor = self._vat_gross_factor(entry.rate) * float(
+                    entry.deductible_ratio.value
+                )
+                for inst in sorted(self.devices):
+                    if inst not in instances or instances[inst].get("type") != "costed":
+                        continue
+                    if instances[inst].get("finance_type") != finance_type:
+                        continue
+                    ft_entry = self.finance.finance_types[finance_type]
+                    if getattr(ft_entry, component) is None:
+                        continue
+                    if component == "annual_fixed_om":
+                        amount = self._annual_fixed_om_annual(inst)
+                        for year in range(construction + 1, construction + operation + 1):
+                            inp[12 * year - 1].add_scaled(amount, factor)
+                    else:
+                        for month, start, end in spans:
+                            inp[month - 1].add_scaled(
+                                self._cost_affine(inst, component, start, end), factor
+                            )
+            for entry in rule.maintenance_input_tax:
+                if entry.year < 1 or entry.year > self.evaluation.evaluation_years:
+                    raise LoweringUnsupportedError(
+                        f"维护进项引用评价年 {entry.year} 超出税务月 1..{months}"
+                    )
+                year_amounts = [
+                    float(item.amount)
+                    for item in self.evaluation.maintenance_expenses
+                    if item.year == entry.year
+                ]
+                if entry.position < 1 or entry.position > len(year_amounts):
+                    raise LoweringUnsupportedError(
+                        f"维护进项引用 ({entry.year}, {entry.position}) 无对应清单金额"
+                    )
+                factor = self._vat_gross_factor(entry.rate) * float(
+                    entry.deductible_ratio.value
+                )
+                inp[12 * entry.year - 1].add_const(
+                    year_amounts[entry.position - 1] * factor
+                )
+        for rule in pool_rules["construction"]:
+            finance_type, _, component = rule.for_path.partition(".")
+            if component != "upfront_capex":
+                raise LoweringUnsupportedError(
+                    f"建设进项 for {rule.for_path!r} 只支持 upfront_capex"
+                )
+            if finance_type not in self.finance.finance_types:
+                raise LoweringUnsupportedError(
+                    f"建设进项引用未知 finance_type {finance_type!r}"
+                )
+            total = _AffineAcc()
+            for inst in sorted(self.devices):
+                if inst not in instances or instances[inst].get("type") != "costed":
+                    continue
+                if self.devices[inst].get("asset_origin") != "new":
+                    continue
+                if instances[inst].get("finance_type") != finance_type:
+                    continue
+                ft_entry = self.finance.finance_types[finance_type]
+                if ft_entry.upfront_capex is None:
+                    continue
+                total.add_scaled(self._cost_affine(inst, "upfront_capex"), 1.0)
+            factor = self._vat_gross_factor(rule.rate) * float(
+                rule.deductible_ratio.value
+            )
+            deductible = _AffineAcc()
+            deductible.add_scaled(total, factor)
+            method = rule.confirmation.method
+            if method == "payment_period":
+                for payment in self.evaluation.construction_payments:
+                    inp[12 * payment.t].add_scaled(deductible, float(payment.ratio))
+            elif method == "explicit_schedule":
+                # 比例直接作用于派生总额，不再次乘付款比例。
+                for item in rule.confirmation.schedule:
+                    if item.period < 1 or item.period > months:
+                        raise LoweringUnsupportedError(
+                            f"建设确认 period {item.period} 超出税务月 1..{months}"
+                        )
+                    inp[item.period - 1].add_scaled(deductible, float(item.ratio))
+            else:
+                raise LoweringUnsupportedError(
+                    f"建设确认方法 {method!r} 超出已实现范围"
+                )
+        return out, inp
+
+    @staticmethod
+    def _affine_side(
+        affine: _AffineAcc,
+        var_bounds: Mapping[str, tuple[float | None, float | None]],
+        *,
+        side: str,
+        pool_id: str,
+        month: int,
+    ) -> float:
+        """仿射式在变量盒上的确界；无界即明确能力不支持。
+
+        有限界由实际变量界推导，不猜常量；缺界命名池/月/变量后拒绝，
+        不填业务默认。
+        """
+        total = affine.constant
+        for name, coeff in affine.terms.items():
+            if coeff == 0.0:
+                continue
+            if name not in var_bounds:
+                raise LoweringUnsupportedError(
+                    f"VAT 池 {pool_id!r} 第 {month} 月引用未知变量 {name!r}"
+                )
+            lower, upper = var_bounds[name]
+            bound = upper if (coeff > 0.0) == (side == "max") else lower
+            if bound is None or not math.isfinite(bound):
+                raise LoweringUnsupportedError(
+                    f"VAT 池 {pool_id!r} 第 {month} 月缺有限界："
+                    f"变量 {name!r} 界不足，互斥分段无法精确"
+                )
+            total += coeff * bound
+        return total
+
+    def _build_vat(self) -> _AffineAcc | None:
+        """各池连续月度 paid/carry 精确链；返回 NPV 现金仿射（或 None）。
+
+        ``paid - carry = out - in - 上月余额`` 等式 + 非负 + 互斥
+        （已有 Big-M，界由变量界与累计推导）确定唯一精确状态，不靠
+        目标压紧；退款按声明从可用留抵扣减（超额即不可行），到账月记
+        现金，期后到账仅应收。约束与目标选择无关，现金只入 NPV。
+        """
+        grouped = self._vat_grouped_rules()
+        if grouped is None:
+            return None
+        evaluation = self.evaluation
+        months = 12 * evaluation.evaluation_years
+        spans = self._vat_month_spans()
+        var_bounds = {
+            variable.name: (variable.lower, variable.upper)
+            for variable in self.variables.values()
+        }
+        taken = set(var_bounds)
+        cash = _AffineAcc()
+        rate = evaluation.discount_rate
+
+        def discount(year: int) -> float:
+            return (1.0 + rate) ** year
+
+        for pool_id in sorted(grouped):
+            pool = self.finance.credit_pools[pool_id]
+            out_list, in_list = self._vat_pool_month_bases(grouped[pool_id], spans)
+            claims: dict[int, float] = {}
+            arrivals: dict[int, float] = {}
+            for refund in pool.refunds:
+                amount = _money_to_internal(refund.amount)
+                claims[refund.period] = claims.get(refund.period, 0.0) + amount
+                if refund.arrival_period <= months:
+                    arrivals[refund.arrival_period] = (
+                        arrivals.get(refund.arrival_period, 0.0) + amount
+                    )
+            cumulative_hi = _money_to_internal(pool.opening_credit)
+            previous = _AffineAcc()
+            previous.add_const(cumulative_hi)
+            for month in range(1, months + 1):
+                out_max = self._affine_side(
+                    out_list[month - 1], var_bounds,
+                    side="max", pool_id=pool_id, month=month,
+                )
+                out_min = self._affine_side(
+                    out_list[month - 1], var_bounds,
+                    side="min", pool_id=pool_id, month=month,
+                )
+                in_max = self._affine_side(
+                    in_list[month - 1], var_bounds,
+                    side="max", pool_id=pool_id, month=month,
+                )
+                in_min = self._affine_side(
+                    in_list[month - 1], var_bounds,
+                    side="min", pool_id=pool_id, month=month,
+                )
+                # 留抵上界须覆盖销项为负（销售记账抵减）的一侧：单调递推
+                # cumulative_hi（只增不减）保证归纳每一步不切割真解；
+                # max 内置于递推会破坏归纳，此处不取。
+                cumulative_hi += max(in_max - out_min, 0.0)
+                # 上月余额非负（期初解析禁负 + 退款声明受可用约束），
+                # 故实缴上界取 max(out - in, 0) 的盒确界即 sound。
+                paid_hi = max(out_max - in_min, 0.0)
+                if not math.isfinite(paid_hi):
+                    raise LoweringUnsupportedError(
+                        f"VAT 池 {pool_id!r} 第 {month} 月实缴无有限上界"
+                    )
+                paid_name = f"vat__{pool_id}__paid__m{month}"
+                carry_name = f"vat__{pool_id}__carry__m{month}"
+                for name in (paid_name, carry_name):
+                    if name in taken:
+                        raise LoweringUnsupportedError(
+                            f"VAT 内部列名与已有变量冲突 {name!r}"
+                        )
+                    taken.add(name)
+                self.variables[paid_name] = LinearVariable(
+                    paid_name, lower=0.0, upper=paid_hi,
+                )
+                self.variables[carry_name] = LinearVariable(
+                    carry_name, lower=0.0, upper=cumulative_hi,
+                )
+                if paid_hi > 0.0 and cumulative_hi > 0.0:
+                    mutex = _mutex_big_m(
+                        f"vat__{pool_id}__m{month}",
+                        (paid_name, 0),
+                        (carry_name, 0),
+                        {
+                            paid_name: ("var", 0.0, paid_hi),
+                            carry_name: ("var", 0.0, cumulative_hi),
+                        },
+                    )
+                    binary = mutex.variables[0]
+                    self.variables[binary.name] = binary
+                    self.rows.extend(mutex.constraints)
+                equation = _AffineAcc()
+                equation.add_term(paid_name, 1.0)
+                equation.add_term(carry_name, -1.0)
+                equation.add_scaled(out_list[month - 1], -1.0)
+                equation.add_scaled(in_list[month - 1], 1.0)
+                equation.add_scaled(previous, 1.0)
+                self.rows.append(
+                    LinearConstraint(
+                        name=f"vat__{pool_id}__eq__m{month}",
+                        expression=equation.freeze(),
+                        sense="eq",
+                        rhs=0.0,
+                    )
+                )
+                claim = claims.get(month, 0.0)
+                if claim > 0.0:
+                    claim_expr = _AffineAcc()
+                    claim_expr.add_term(carry_name, 1.0)
+                    self.rows.append(
+                        LinearConstraint(
+                            name=f"vat__{pool_id}__claim__m{month}",
+                            expression=claim_expr.freeze(),
+                            sense="ge",
+                            rhs=claim,
+                        )
+                    )
+                year = (month + 11) // 12
+                cash.add_term(paid_name, -1.0 / discount(year))
+                if month in arrivals:
+                    cash.add_const(arrivals[month] / discount(year))
+                previous = _AffineAcc()
+                previous.add_term(carry_name, 1.0)
+                previous.add_const(-claim)
+        return cash
+
     def _build_objective(self) -> tuple[_AffineAcc, str]:
         planning = self.doc["planning"]
         raw = planning["objective"]
@@ -1085,8 +1478,12 @@ class _ProjectBuilder:
             and raw["expression"].strip() == SYSTEM_AFTER_TAX_NPV
         ):
             # 显式全周期 NPV 目标：方向已由装配输入边界核对，此处信任
-            # 类型化交接，不重复拒绝。
-            return self._npv_objective(), self.finance.currency
+            # 类型化交接，不重复拒绝。VAT 现金（实缴流出、到账退税流入）
+            # 只入本目标；税额状态约束与目标选择无关，已在建模段落实。
+            npv = self._npv_objective()
+            if self._vat_cash is not None:
+                npv.add_scaled(self._vat_cash, 1.0)
+            return npv, self.finance.currency
         symbols, placeholders = self._planning_symbols()
         compiled = compile_planning_expression(
             raw["expression"], symbols, currency=None,
@@ -1184,6 +1581,7 @@ class _ProjectBuilder:
             self._build_relations(inst, statics)
         self._build_bus_rows(buses)
         self._build_planning_rows()
+        self._vat_cash = self._build_vat()
         objective, objective_unit = self._build_objective()
         model = LinearModel(
             variables=tuple(self.variables.values()),

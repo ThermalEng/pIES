@@ -82,14 +82,14 @@ def main():
     check("config.get unsaved → 404", s == 404, str(s))
     payload = {
         "schema": "ies.calculation-config", "schema_version": "2.0.0", "mode": "planning",
-        "predictions": [], "generator": "ies.generator.highs_milp@3.1.0", "solver": "ies.solver.highs@1.7.2",
+        "predictions": [], "generator": "ies.generator.highs_milp@3.2.0", "solver": "ies.solver.highs@1.7.2",
         "precision": "medium", "convergence": None, "time_limit_seconds": 600,
         "options": {}, "seed": None, "outputs": ["solution"],
     }
     s, body = call("PUT", f"/projects/{project_id}/config", {"calculation_config": payload, "expected_revision": None}, token)
     check("config.put → {calculation_config,revision}", s == 200 and set(body.keys()) == {"calculation_config", "revision"} and body["revision"] == 1, str(body.keys() if isinstance(body, dict) else s))
     s, body = call("GET", f"/projects/{project_id}/config", token=token)
-    check("config.get → {calculation_config,revision}", s == 200 and body.get("calculation_config", {}).get("generator") == "ies.generator.highs_milp@3.1.0" and body.get("revision") == 1, str(list(body.keys()) if isinstance(body, dict) else s))
+    check("config.get → {calculation_config,revision}", s == 200 and body.get("calculation_config", {}).get("generator") == "ies.generator.highs_milp@3.2.0" and body.get("revision") == 1, str(list(body.keys()) if isinstance(body, dict) else s))
 
     # 6) 2.0 建模面: 项目视图草稿内容 model 节 → {devices, connections}(名键, 无端口表)
     s, body = call("GET", f"/projects/{project_id}", token=token)

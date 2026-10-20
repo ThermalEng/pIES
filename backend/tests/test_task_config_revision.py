@@ -146,7 +146,7 @@ def _body(**overrides: Any) -> dict[str, Any]:
         "schema_version": "2.0.0",
         "mode": "planning",
         "predictions": [],
-        "generator": "ies.generator.highs_milp@3.1.0",
+        "generator": "ies.generator.highs_milp@3.2.0",
         "solver": "ies.solver.highs@1.7.2",
         "precision": "medium",
         "convergence": None,
@@ -344,7 +344,7 @@ def test_task_params_preserved(client: TestClient, db: Session, factory) -> None
     frozen = dict(snap.calc_config_snapshot)
     assert frozen["task_params"]["horizon_years"] == 3
     assert "config_revision" not in frozen["task_params"]
-    assert frozen["mode"] == "planning" and frozen["generator"] == "ies.generator.highs_milp@3.1.0"
+    assert frozen["mode"] == "planning" and frozen["generator"] == "ies.generator.highs_milp@3.2.0"
 
 
 def test_detail_shows_config_revision(client: TestClient, db: Session) -> None:
@@ -748,7 +748,7 @@ def test_missing_generator_registry_is_server_error() -> None:
     )
     from iesplan.core.errors import AppError  # noqa: E402
 
-    body = {"generator": "ies.generator.highs_milp@3.1.0", "solver": "ies.solver.highs@1.7.2"}
+    body = {"generator": "ies.generator.highs_milp@3.2.0", "solver": "ies.solver.highs@1.7.2"}
     try:
         _resolve_execution_refs(body, None, project_id=1)
     except AppError as exc:
