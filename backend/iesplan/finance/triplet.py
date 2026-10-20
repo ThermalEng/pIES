@@ -814,30 +814,18 @@ class IncomeTaxRule:
 TaxRule = VatRule | ConstructionVatRule | IncomeTaxRule
 
 
-@dataclass(frozen=True, slots=True)
-class _TaxRefCtx:
-    """规则引用上下文(文件内已解析节；仅承载引用存在性判断，不做二次校验)。"""
-
-    currency: str
-    prices: Mapping[str, EnergyPrice]
-    ft_names: frozenset[str]
-    ft_paths: frozenset[str]
-    tax_ids: frozenset[str]
-    pool_ids: frozenset[str]
-
-
-def _parse_tax_rule(rule_id: str, mapping: object, ctx: _TaxRefCtx) -> TaxRule:
+def _parse_tax_rule(rule_id: str, mapping: object) -> TaxRule:
     """规则映射 → 不可变规则(引用存在性与同类单用性由文件后检统一保证，此处只做形状)。"""
     field = f"tax_rules.{rule_id}"
     if not isinstance(mapping, Mapping):
         raise FinanceTripletError(f"{field} 必须是字典")
     kind = mapping.get("kind")
     if kind == "vat":
-        return _parse_vat_rule(rule_id, mapping, ctx)
+        return _parse_vat_rule(rule_id, mapping)
     if kind == "construction_input_vat":
-        return _parse_construction_rule(rule_id, mapping, ctx)
+        return _parse_construction_rule(rule_id, mapping)
     if kind == "income_tax":
-        return _parse_income_rule(rule_id, mapping, ctx)
+        return _parse_income_rule(rule_id, mapping)
     raise FinanceTripletError(f"{field}.kind 非法: {kind!r}")
 
 
@@ -850,7 +838,7 @@ def _require_keys(mapping: Mapping, keys: set[str], field: str) -> None:
         raise FinanceTripletError(f"{field} 缺少字段: {sorted(missing)}")
 
 
-def _parse_vat_rule(rule_id: str, mapping: Mapping, ctx: _TaxRefCtx) -> VatRule:
+def _parse_vat_rule(rule_id: str, mapping: Mapping) -> VatRule:
     field = f"tax_rules.{rule_id}"
     _require_keys(
         mapping,
@@ -928,7 +916,19 @@ def _as_list(value: object, field: str) -> list:
     return value
 
 
-def _parse_construction_rule(rule_id: str, mapping: Mapping, ctx: _TaxRefCtx) -> ConstructionVatRule:
+def _optional_section(mapping: Mapping, key: str, field: str) -> Mapping:
+    """可选节：缺省合法；显式 null 非法；非字典非法。"""
+    if key not in mapping:
+        return {}
+    value = mapping[key]
+    if value is None:
+        raise FinanceTripletError(f"{field} 显式 null 非法（缺省即合法空表）")
+    if not isinstance(value, Mapping):
+        raise FinanceTripletError(f"{field} 必须是字典")
+    return value
+
+
+def _parse_construction_rule(rule_id: str, mapping: Mapping) -> ConstructionVatRule:
     field = f"tax_rules.{rule_id}"
     _require_keys(
         mapping,
@@ -975,7 +975,7 @@ def _parse_construction_rule(rule_id: str, mapping: Mapping, ctx: _TaxRefCtx) ->
     )
 
 
-def _parse_income_rule(rule_id: str, mapping: Mapping, ctx: _TaxRefCtx) -> IncomeTaxRule:
+def _parse_income_rule(rule_id: str, mapping: Mapping) -> IncomeTaxRule:
     field = f"tax_rules.{rule_id}"
     _require_keys(
         mapping,
@@ -1085,8 +1085,8 @@ def _check_tax_refs(
     seen_out: dict[str, str] = {}
     seen_om: dict[str, str] = {}
     seen_for: dict[str, str] = {}
-    seen_revenue: dict[str, str] = {}
-    seen_cost: dict[str, str] = {}
+    seen_income_price: dict[str, str] = {}
+    seen_income_om: dict[str, str] = {}
     for rule_id, rule in tax_rules.items():
         field = f"tax_rules.{rule_id}"
         if rule.label_ref not in taxes:
@@ -1102,21 +1102,42 @@ def _check_tax_refs(
             for entry in rule.om_input_tax:
                 _claim_component(seen_om, entry.for_path, rule_id, ft_paths,
                                  ("annual_fixed_om", "period_variable_om"), field)
+            seen_maint: set[tuple[int, int]] = set()
+            for entry in rule.maintenance_input_tax:
+                key = (entry.year, entry.position)
+                if key in seen_maint:
+                    raise FinanceTripletError(
+                        f"{field}.maintenance_input_tax 维护引用重复: {key!r}")
+                seen_maint.add(key)
         elif isinstance(rule, ConstructionVatRule):
             _claim_component(seen_for, rule.for_path, rule_id, ft_paths,
                              ("upfront_capex",), field)
         elif isinstance(rule, IncomeTaxRule):
             for price_id in rule.revenue:
-                _claim_price(seen_revenue, price_id, rule_id, energy_prices, "sale", f"{field}.revenue")
+                _claim_price(seen_income_price, price_id, rule_id, energy_prices, "sale",
+                             f"{field}.revenue")
             for price_id in rule.energy_cost:
-                _claim_price(seen_cost, price_id, rule_id, energy_prices, "purchase", f"{field}.energy_cost")
+                _claim_price(seen_income_price, price_id, rule_id, energy_prices, "purchase",
+                             f"{field}.energy_cost")
             for path in rule.annual_om:
-                _claim_component({}, path, rule_id, ft_paths, ("annual_fixed_om",), field)
+                _claim_component(seen_income_om, path, rule_id, ft_paths, ("annual_fixed_om",), field)
             for path in rule.variable_om:
-                _claim_component({}, path, rule_id, ft_paths, ("period_variable_om",), field)
+                _claim_component(seen_income_om, path, rule_id, ft_paths, ("period_variable_om",), field)
+            seen_maint_items: set[tuple[int, int]] = set()
+            for item in rule.deductible_maintenance.items:
+                key = (item.year, item.position)
+                if key in seen_maint_items:
+                    raise FinanceTripletError(
+                        f"{field}.deductible_maintenance 维护引用重复: {key!r}")
+                seen_maint_items.add(key)
+            seen_assets: set[str] = set()
             for item in rule.depreciation:
                 if item.asset not in finance_types:
                     raise FinanceTripletError(f"{field}.depreciation.asset 不存在: {item.asset!r}")
+                if item.asset in seen_assets:
+                    raise FinanceTripletError(
+                        f"{field}.depreciation 资产引用重复: {item.asset!r}")
+                seen_assets.add(item.asset)
                 if item.base_from != f"{item.asset}.upfront_capex_net":
                     raise FinanceTripletError(
                         f"{field}.depreciation.base_from 须为 {item.asset}.upfront_capex_net")
@@ -1308,8 +1329,7 @@ class FinanceProfile:
         unknown = set(mapping) - known_profile
         if unknown:
             raise FinanceTripletError(f"FinanceProfile 未知字段: {sorted(unknown)}")
-        missing = {"schema", "schema_version", "profile", "finance_types", "energy_prices",
-                   "credit_pools", "tax_rules"} - set(mapping)
+        missing = {"schema", "schema_version", "profile", "finance_types", "energy_prices"} - set(mapping)
         if missing:
             raise FinanceTripletError(f"FinanceProfile 缺少字段: {sorted(missing)}")
         schema = str(mapping["schema"])
@@ -1398,9 +1418,7 @@ class FinanceProfile:
                 raise FinanceTripletError(f"taxes.{tax_id} 禁止 null")
             taxes[tax_id] = TaxEntry.from_dict(tax_val)
 
-        pools_raw = mapping["credit_pools"]
-        if not isinstance(pools_raw, Mapping):
-            raise FinanceTripletError("credit_pools 必须是字典")
+        pools_raw = _optional_section(mapping, "credit_pools", "credit_pools")
         credit_pools: dict[str, CreditPool] = {}
         for pool_id, pool_val in pools_raw.items():
             pool_id = _validate_local_id(pool_id, "credit pool")
@@ -1408,28 +1426,13 @@ class FinanceProfile:
                 raise FinanceTripletError(f"credit_pools.{pool_id} 禁止 null")
             credit_pools[pool_id] = CreditPool.from_dict(pool_val, field=f"credit_pools.{pool_id}")
 
-        ctx = _TaxRefCtx(
-            currency=currency,
-            prices=MappingProxyType(dict(energy_prices)),
-            ft_names=frozenset(finance_types),
-            ft_paths=frozenset(
-                f"{ft_name}.{comp}"
-                for ft_name, entry in finance_types.items()
-                for comp in FINANCE_COMPONENTS
-                if getattr(entry, comp) is not None
-            ),
-            tax_ids=frozenset(taxes),
-            pool_ids=frozenset(credit_pools),
-        )
-        rules_raw = mapping["tax_rules"]
-        if not isinstance(rules_raw, Mapping):
-            raise FinanceTripletError("tax_rules 必须是字典")
+        rules_raw = _optional_section(mapping, "tax_rules", "tax_rules")
         tax_rules: dict[str, TaxRule] = {}
         for rule_id, rule_val in rules_raw.items():
             rule_id = _validate_local_id(rule_id, "tax rule")
             if rule_val is None:
                 raise FinanceTripletError(f"tax_rules.{rule_id} 禁止 null")
-            tax_rules[rule_id] = _parse_tax_rule(rule_id, rule_val, ctx)
+            tax_rules[rule_id] = _parse_tax_rule(rule_id, rule_val)
         _check_tax_refs(
             currency=currency,
             energy_prices=energy_prices,
@@ -1480,6 +1483,8 @@ class FinanceOverrides:
     energy_prices: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     tax_rules: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
     credit_pools: Mapping[str, Mapping[str, object]] = field(default_factory=lambda: MappingProxyType({}))
+    #: 解析时绑定的 Profile id（合并器据此判定覆盖权限是否已核对；不序列化）。
+    _bound_profile: str = ""
 
     def __post_init__(self) -> None:
         if self.schema != SCHEMA_OVERRIDES:
@@ -1503,9 +1508,9 @@ class FinanceOverrides:
         if self.energy_prices:
             d["energy_prices"] = _freeze_overrides(self.energy_prices)
         if self.tax_rules:
-            d["tax_rules"] = _freeze_overrides(self.tax_rules)
+            d["tax_rules"] = _thaw(self.tax_rules)
         if self.credit_pools:
-            d["credit_pools"] = _freeze_overrides(self.credit_pools)
+            d["credit_pools"] = _thaw(self.credit_pools)
         return d
 
     @classmethod
@@ -1577,9 +1582,7 @@ class FinanceOverrides:
                 raise FinanceTripletError(f"energy_prices.{price_id} 必须为非空字典")
             energy_prices[price_id] = _validate_price_override(price_id, price_val, profile)
 
-        tax_raw = mapping.get("tax_rules") or {}
-        if not isinstance(tax_raw, Mapping):
-            raise FinanceTripletError("tax_rules 必须是字典")
+        tax_raw = _optional_section(mapping, "tax_rules", "tax_rules")
         tax_rules: dict[str, Mapping[str, object]] = {}
         for rule_id, rule_val in tax_raw.items():
             rule_id = _validate_local_id(rule_id, "tax rule")
@@ -1587,9 +1590,7 @@ class FinanceOverrides:
                 raise FinanceTripletError(f"tax_rules.{rule_id} 必须为非空字典")
             tax_rules[rule_id] = _validate_tax_rule_override(rule_id, rule_val, profile)
 
-        pools_raw = mapping.get("credit_pools") or {}
-        if not isinstance(pools_raw, Mapping):
-            raise FinanceTripletError("credit_pools 必须是字典")
+        pools_raw = _optional_section(mapping, "credit_pools", "credit_pools")
         credit_pools: dict[str, Mapping[str, object]] = {}
         for pool_id, pool_val in pools_raw.items():
             pool_id = _validate_local_id(pool_id, "credit pool")
@@ -1605,6 +1606,7 @@ class FinanceOverrides:
             energy_prices=energy_prices,
             tax_rules=tax_rules,
             credit_pools=credit_pools,
+            _bound_profile=profile.profile_id if profile is not None else "",
         )
 
     @classmethod
@@ -1626,6 +1628,24 @@ def _freeze_overrides(mapping: Mapping[str, object]) -> dict:
         else:
             out[str(k)] = v
     return out
+
+
+def _freeze(value: object) -> object:
+    """深冻结：字典→排序不可变映射，列表→元组（切断调用方输入别名）。"""
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(k): _freeze(value[k]) for k in sorted(value, key=str)})
+    if isinstance(value, list):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: object) -> object:
+    """深解冻：冻结结构→全新可变副本（to_dict/合并消费，防回写）。"""
+    if isinstance(value, Mapping):
+        return {str(k): _thaw(value[k]) for k in value}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
 
 def _validate_ft_override(
     ft_name: str,
@@ -1794,11 +1814,11 @@ def _validate_tax_rule_override(
             raise FinanceTripletError(f"tax rule {rule_id!r} 在 Profile 中不存在, 禁止新增")
         prof_rule = profile.tax_rules[rule_id]
     for key, value in rule_val.items():
-        out[str(key)] = _freeze_overrides(value) if isinstance(value, Mapping) else value
+        out[str(key)] = value
     if prof_rule is None:
-        return MappingProxyType(out)
+        return _freeze(out)  # type: ignore[return-value]
     _check_rule_override_shape(rule_id, out, prof_rule)
-    return MappingProxyType(out)
+    return _freeze(out)  # type: ignore[return-value]
 
 
 def _check_rule_override_shape(rule_id: str, out: Mapping[str, object], prof_rule: TaxRule) -> None:
@@ -1881,7 +1901,22 @@ def _check_rule_override_shape(rule_id: str, out: Mapping[str, object], prof_rul
                 if "residual" in patch:
                     Money.from_dict(patch["residual"], field=f"{field}.depreciation.{asset}.residual")
         if "deductible_maintenance" in out:
-            _parse_maint_items(out["deductible_maintenance"], f"{field}.deductible_maintenance")
+            raw_maint = out["deductible_maintenance"]
+            if not isinstance(raw_maint, Mapping):
+                raise FinanceTripletError(f"{field}.deductible_maintenance 必须是字典")
+            sub_unknown = set(raw_maint) - {"mode", "items"}
+            if sub_unknown:
+                raise FinanceTripletError(
+                    f"{field}.deductible_maintenance 只允许覆盖 items: {sorted(sub_unknown)}")
+            if "items" not in raw_maint:
+                raise FinanceTripletError(f"{field}.deductible_maintenance 缺少 items")
+            if "mode" in raw_maint and str(raw_maint["mode"]) != prof_rule.deductible_maintenance.mode:
+                raise FinanceTripletError(
+                    f"{field}.deductible_maintenance.mode 跟随规则，不可更改")
+            _parse_maint_items(
+                {"mode": prof_rule.deductible_maintenance.mode, "items": raw_maint["items"]},
+                f"{field}.deductible_maintenance",
+            )
         if "opening_losses" in out:
             _parse_opening_losses(out["opening_losses"], f"{field}.opening_losses")
 
@@ -1985,7 +2020,7 @@ def _validate_pool_override(
             refund = PoolRefund.from_dict(entry, field=f"{field}.refunds[{index}]")
             checked.append(refund.to_dict())
         out["refunds"] = checked
-    return MappingProxyType(out)
+    return _freeze(out)  # type: ignore[return-value]
 
 
 def _check_same_unit(unit_a: str, unit_b: str, field: str) -> None:
@@ -2076,7 +2111,6 @@ class EffectiveFinanceConfig:
             "schema", "schema_version", "profile_id",
             "currency", "base_year", "price_basis", "cost_method",
             "finance_types", "energy_prices",
-            "credit_pools", "tax_rules",
         } - set(mapping)
         if missing:
             raise FinanceTripletError(f"EffectiveFinanceConfig 缺少字段: {sorted(missing)}")
@@ -2130,9 +2164,7 @@ class EffectiveFinanceConfig:
                 raise FinanceTripletError(f"taxes.{tax_id} 禁止 null")
             taxes[tax_id] = TaxEntry.from_dict(tax_val)
 
-        pools_raw = mapping["credit_pools"]
-        if not isinstance(pools_raw, Mapping):
-            raise FinanceTripletError("credit_pools 必须是字典")
+        pools_raw = _optional_section(mapping, "credit_pools", "credit_pools")
         credit_pools: dict[str, CreditPool] = {}
         for pool_id, pool_val in pools_raw.items():
             pool_id = _validate_local_id(pool_id, "credit pool")
@@ -2140,28 +2172,13 @@ class EffectiveFinanceConfig:
                 raise FinanceTripletError(f"credit_pools.{pool_id} 禁止 null")
             credit_pools[pool_id] = CreditPool.from_dict(pool_val, field=f"credit_pools.{pool_id}")
 
-        ctx = _TaxRefCtx(
-            currency=currency,
-            prices=MappingProxyType(dict(energy_prices)),
-            ft_names=frozenset(finance_types),
-            ft_paths=frozenset(
-                f"{ft_name}.{comp}"
-                for ft_name, entry in finance_types.items()
-                for comp in FINANCE_COMPONENTS
-                if getattr(entry, comp) is not None
-            ),
-            tax_ids=frozenset(taxes),
-            pool_ids=frozenset(credit_pools),
-        )
-        rules_raw = mapping["tax_rules"]
-        if not isinstance(rules_raw, Mapping):
-            raise FinanceTripletError("tax_rules 必须是字典")
+        rules_raw = _optional_section(mapping, "tax_rules", "tax_rules")
         tax_rules: dict[str, TaxRule] = {}
         for rule_id, rule_val in rules_raw.items():
             rule_id = _validate_local_id(rule_id, "tax rule")
             if rule_val is None:
                 raise FinanceTripletError(f"tax_rules.{rule_id} 禁止 null")
-            tax_rules[rule_id] = _parse_tax_rule(rule_id, rule_val, ctx)
+            tax_rules[rule_id] = _parse_tax_rule(rule_id, rule_val)
         _check_tax_refs(
             currency=currency,
             energy_prices=energy_prices,
@@ -2273,34 +2290,32 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
     # ---- taxes: 税目只属于 Profile, 原样继承 ----
     merged_taxes: dict[str, TaxEntry] = dict(profile.taxes)
 
-    # ---- credit_pools: 深拷贝 Profile，再应用 opening_credit / refunds 覆盖 ----
-    merged_pools: dict[str, CreditPool] = {
-        pool_id: CreditPool.from_dict(pool.to_dict(), field=f"credit_pools.{pool_id}")
-        for pool_id, pool in sorted(profile.credit_pools.items())
-    }
-    for pool_id, pool_override in sorted(overrides.credit_pools.items()):
-        if pool_id not in merged_pools:
+    # ---- credit_pools / tax_rules: 复用 Profile 已解析不可变事实，类型化应用
+    # 覆盖变更。与 Profile 绑定过的 Overrides 不再复核；无绑定 Overrides 在此
+    # 做唯一一次覆盖权限核对。合并后做一次组合领域引用核对；不重解析未覆盖项。
+    bound = overrides._bound_profile == profile.profile_id and bool(overrides._bound_profile)
+    for pool_id in sorted(overrides.credit_pools):
+        if pool_id not in profile.credit_pools:
             raise FinanceTripletError(f"credit pool {pool_id!r} 在 Profile 中不存在, 禁止新增")
-        pool_dict = merged_pools[pool_id].to_dict()
-        patch = _freeze_overrides(pool_override)
-        if "opening_credit" in patch:
-            pool_dict["opening_credit"] = patch["opening_credit"]
-        if "refunds" in patch:
-            pool_dict["refunds"] = patch["refunds"]
-        merged_pools[pool_id] = CreditPool.from_dict(pool_dict, field=f"credit_pools.{pool_id}")
-
-    # ---- tax_rules: 深拷贝 Profile，再应用参数覆盖 ----
+    for rule_id in sorted(overrides.tax_rules):
+        if rule_id not in profile.tax_rules:
+            raise FinanceTripletError(f"tax rule {rule_id!r} 在 Profile 中不存在, 禁止新增")
+    merged_pools: dict[str, CreditPool] = {}
+    for pool_id, pool in sorted(profile.credit_pools.items()):
+        patch = _thaw(overrides.credit_pools.get(pool_id, {}))
+        if not isinstance(patch, dict):
+            raise FinanceTripletError(f"credit_pools.{pool_id} 覆盖形态非法")
+        if not bound and patch:
+            _check_pool_patch_shape(pool_id, patch)
+        merged_pools[pool_id] = _apply_pool_patch(pool_id, pool, patch)
     merged_rules: dict[str, TaxRule] = {}
     for rule_id, rule in sorted(profile.tax_rules.items()):
-        merged_rules[rule_id] = _parse_tax_rule(
-            rule_id, rule.to_dict(), _profile_tax_ctx(profile))
-    for rule_id, rule_override in sorted(overrides.tax_rules.items()):
-        if rule_id not in merged_rules:
-            raise FinanceTripletError(f"tax rule {rule_id!r} 在 Profile 中不存在, 禁止新增")
-        merged_dict = merged_rules[rule_id].to_dict()
-        _apply_rule_override(merged_dict, _freeze_overrides(rule_override), rule_id)
-        merged_rules[rule_id] = _parse_tax_rule(
-            rule_id, merged_dict, _profile_tax_ctx(profile))
+        patch = _thaw(overrides.tax_rules.get(rule_id, {}))
+        if not isinstance(patch, dict):
+            raise FinanceTripletError(f"tax_rules.{rule_id} 覆盖形态非法")
+        if not bound and patch:
+            _check_rule_override_shape(rule_id, patch, rule)
+        merged_rules[rule_id] = _apply_rule_patch(rule_id, rule, patch)
     _check_tax_refs(
         currency=profile.currency,
         energy_prices=profile.energy_prices,
@@ -2326,61 +2341,201 @@ def merge_effective(profile: FinanceProfile, overrides: FinanceOverrides | None)
     )
 
 
-def _profile_tax_ctx(profile: FinanceProfile) -> _TaxRefCtx:
-    """Profile 已解析节 → 规则引用上下文(合并器复用，不二次校验)。"""
-    return _TaxRefCtx(
-        currency=profile.currency,
-        prices=profile.energy_prices,
-        ft_names=frozenset(profile.finance_types),
-        ft_paths=frozenset(
-            f"{ft_name}.{comp}"
-            for ft_name, entry in profile.finance_types.items()
-            for comp in FINANCE_COMPONENTS
-            if getattr(entry, comp) is not None
-        ),
-        tax_ids=frozenset(profile.taxes),
-        pool_ids=frozenset(profile.credit_pools),
+def _check_pool_patch_shape(pool_id: str, patch: dict) -> None:
+    """池覆盖键集合合法性：只允许 opening_credit 原子或 refunds 整表替换。"""
+    field = f"credit_pools.{pool_id}"
+    unknown = set(patch) - {"opening_credit", "refunds"}
+    if unknown:
+        raise FinanceTripletError(f"{field} 只允许覆盖已有参数: {sorted(unknown)}")
+    if not patch:
+        raise FinanceTripletError(f"{field} 必须覆盖至少一个叶子")
+
+
+def _apply_pool_patch(pool_id: str, pool: CreditPool, patch: dict) -> CreditPool:
+    """池覆盖的类型化应用（只消费已核对补丁，不重解析未覆盖项）。"""
+    field = f"credit_pools.{pool_id}"
+    opening = pool.opening_credit
+    refunds = pool.refunds
+    if "opening_credit" in patch:
+        opening = Money.from_dict(patch["opening_credit"], field=f"{field}.opening_credit")
+    if "refunds" in patch:
+        raw = patch["refunds"]
+        if not isinstance(raw, list):
+            raise FinanceTripletError(f"{field}.refunds 必须是列表")
+        refunds = tuple(
+            PoolRefund.from_dict(entry, field=f"{field}.refunds[{index}]")
+            for index, entry in enumerate(raw)
+        )
+    return CreditPool(
+        opening_credit=opening,
+        receivable_policy=pool.receivable_policy,
+        refunds=refunds,
     )
 
 
-def _apply_rule_override(merged: dict, patch: Mapping[str, object], rule_id: str) -> None:
-    """覆盖叶子应用到规则字典(原地)：原子替换、稀疏条目替换、整表替换。
+def _apply_rule_patch(rule_id: str, rule: TaxRule, patch: dict) -> TaxRule:
+    """规则覆盖的类型化应用（只消费已核对补丁，不重解析未覆盖项）。"""
+    field = f"tax_rules.{rule_id}"
+    if isinstance(rule, VatRule):
+        in_tax = list(rule.in_tax)
+        out_tax = list(rule.out_tax)
+        om_input_tax = list(rule.om_input_tax)
+        for key, base in (("in_tax", in_tax), ("out_tax", out_tax), ("om_input_tax", om_input_tax)):
+            for target, atom_patch in patch.get(key, {}).items():
+                base[_rule_entry_index(base, target, field, key)] = _patched_entry(
+                    base, target, atom_patch, field, key)
+        maintenance_input_tax = rule.maintenance_input_tax
+        if "maintenance_input_tax" in patch:
+            raw = patch["maintenance_input_tax"]
+            if not isinstance(raw, list):
+                raise FinanceTripletError(f"{field}.maintenance_input_tax 必须是列表")
+            maintenance_input_tax = tuple(
+                MaintInputTaxEntry(
+                    year=_pos_int(e["year"], f"{field}.maintenance_input_tax.year"),
+                    position=_pos_int(e["position"], f"{field}.maintenance_input_tax.position"),
+                    rate=_ratio_money(e["rate"], f"{field}.maintenance_input_tax.rate"),
+                    deductible_ratio=_ratio_money(
+                        e["deductible_ratio"], f"{field}.maintenance_input_tax.deductible_ratio"),
+                )
+                for e in [dict(entry) for entry in raw]
+            )
+        return VatRule(
+            label_ref=rule.label_ref,
+            settlement=rule.settlement,
+            in_tax=tuple(in_tax),
+            out_tax=tuple(out_tax),
+            om_input_tax=tuple(om_input_tax),
+            maintenance_input_tax=maintenance_input_tax,
+            credit_pool=rule.credit_pool,
+            confirmation=rule.confirmation,
+        )
+    if isinstance(rule, ConstructionVatRule):
+        rate = rule.rate
+        ratio = rule.deductible_ratio
+        confirmation = rule.confirmation
+        if "rate" in patch:
+            rate = _ratio_money(patch["rate"], f"{field}.rate")
+        if "deductible_ratio" in patch:
+            ratio = _ratio_money(patch["deductible_ratio"], f"{field}.deductible_ratio")
+        if "confirmation" in patch:
+            raw = patch["confirmation"]
+            schedule = tuple(
+                ConstructionScheduleEntry(
+                    period=_pos_int(e["period"], f"{field}.confirmation.schedule.period"),
+                    ratio=_to_decimal_str(e["ratio"], f"{field}.confirmation.schedule.ratio"),
+                )
+                for e in [dict(entry) for entry in raw["schedule"]]
+            )
+            confirmation = ConstructionConfirmation(
+                method=rule.confirmation.method, schedule=schedule)
+        return ConstructionVatRule(
+            label_ref=rule.label_ref,
+            for_path=rule.for_path,
+            rate=rate,
+            deductible_ratio=ratio,
+            credit_pool=rule.credit_pool,
+            confirmation=confirmation,
+        )
+    if isinstance(rule, IncomeTaxRule):
+        rate = rule.rate
+        loss_years = rule.loss_carryforward_years
+        depreciation = list(rule.depreciation)
+        if "rate" in patch:
+            rate = _ratio_money(patch["rate"], f"{field}.rate")
+        if "loss_carryforward_years" in patch:
+            loss_years = _nonneg_int(
+                patch["loss_carryforward_years"], f"{field}.loss_carryforward_years")
+        for asset, asset_patch in patch.get("depreciation", {}).items():
+            for index, entry in enumerate(depreciation):
+                if entry.asset == asset:
+                    life = entry.life_years
+                    first = entry.first_year
+                    residual = entry.residual
+                    if "life_years" in asset_patch:
+                        life = _pos_int(
+                            asset_patch["life_years"], f"{field}.depreciation.{asset}.life_years")
+                    if "first_year" in asset_patch:
+                        first = _pos_int(
+                            asset_patch["first_year"], f"{field}.depreciation.{asset}.first_year")
+                    if "residual" in asset_patch:
+                        residual = Money.from_dict(
+                            asset_patch["residual"],
+                            field=f"{field}.depreciation.{asset}.residual")
+                    depreciation[index] = DepreciationEntry(
+                        asset=entry.asset,
+                        base_from=entry.base_from,
+                        method=entry.method,
+                        life_years=life,
+                        residual=residual,
+                        first_year=first,
+                    )
+        deductible_maintenance = rule.deductible_maintenance
+        if "deductible_maintenance" in patch:
+            raw_items = patch["deductible_maintenance"]["items"]
+            if not isinstance(raw_items, list):
+                raise FinanceTripletError(f"{field}.deductible_maintenance.items 必须是列表")
+            deductible_maintenance = DeductibleMaintenance(
+                mode=rule.deductible_maintenance.mode,
+                items=tuple(
+                    MaintItem(
+                        year=_pos_int(e["year"], f"{field}.deductible_maintenance.year"),
+                        position=_pos_int(e["position"], f"{field}.deductible_maintenance.position"),
+                        deductible=_strict_bool(
+                            e["deductible"], f"{field}.deductible_maintenance.deductible"),
+                    )
+                    for e in [dict(entry) for entry in raw_items]
+                ),
+            )
+        opening_losses = rule.opening_losses
+        if "opening_losses" in patch:
+            raw_losses = patch["opening_losses"]
+            if not isinstance(raw_losses, list):
+                raise FinanceTripletError(f"{field}.opening_losses 必须是列表")
+            opening_losses = tuple(
+                OpeningLoss(
+                    amount=Money.from_dict(e["amount"], field=f"{field}.opening_losses.amount"),
+                    last_usable_year=_pos_int(
+                        e["last_usable_year"], f"{field}.opening_losses.last_usable_year"),
+                )
+                for e in [dict(entry) for entry in raw_losses]
+            )
+        return IncomeTaxRule(
+            label_ref=rule.label_ref,
+            rate=rate,
+            revenue=rule.revenue,
+            energy_cost=rule.energy_cost,
+            annual_om=rule.annual_om,
+            variable_om=rule.variable_om,
+            deductible_maintenance=deductible_maintenance,
+            depreciation=tuple(depreciation),
+            loss_carryforward_years=loss_years,
+            opening_losses=opening_losses,
+        )
+    raise FinanceTripletError(f"{field} 未知规则类型(内部状态非法)")
 
-    覆盖纪律已在 ``FinanceOverrides.from_dict`` 校验，此处只做机械应用。
-    """
-    for key, value in patch.items():
-        if key in ("in_tax", "out_tax", "om_input_tax") and isinstance(value, Mapping):
-            base_list = merged.get(key)
-            if not isinstance(base_list, list):
-                raise FinanceTripletError(f"tax_rules.{rule_id}.{key} 基线形态非法(内部状态非法)")
-            index_by_target: dict[str, int] = {}
-            for index, entry in enumerate(base_list):
-                if isinstance(entry, Mapping):
-                    target = entry.get("price", entry.get("for"))
-                    if isinstance(target, str):
-                        index_by_target[target] = index
-            for target, atom_patch in value.items():
-                if target not in index_by_target or not isinstance(atom_patch, Mapping):
-                    raise FinanceTripletError(
-                        f"tax_rules.{rule_id}.{key} {target!r} 在 Profile 中不存在(内部状态非法)")
-                base_list[index_by_target[target]].update(atom_patch)
-        elif key == "depreciation" and isinstance(value, Mapping):
-            base_list = merged.get("depreciation")
-            if not isinstance(base_list, list):
-                raise FinanceTripletError(f"tax_rules.{rule_id}.depreciation 基线形态非法(内部状态非法)")
-            index_by_asset = {
-                entry["asset"]: index for index, entry in enumerate(base_list)
-                if isinstance(entry, Mapping) and isinstance(entry.get("asset"), str)
-            }
-            for asset, asset_patch in value.items():
-                if asset not in index_by_asset or not isinstance(asset_patch, Mapping):
-                    raise FinanceTripletError(
-                        f"tax_rules.{rule_id}.depreciation asset {asset!r} 在 Profile 中不存在(内部状态非法)")
-                base_list[index_by_asset[asset]].update(asset_patch)
-        elif key == "confirmation" and isinstance(value, Mapping):
-            base_confirm = merged.get("confirmation")
-            if not isinstance(base_confirm, Mapping):
-                raise FinanceTripletError(f"tax_rules.{rule_id}.confirmation 基线形态非法(内部状态非法)")
-            base_confirm.update(value)
-        else:
-            merged[str(key)] = value
+
+def _rule_entry_index(base: list, target: str, field: str, key: str) -> int:
+    """稀疏条目按 price/for 定位基线下标(纪律已核对，缺席为内部非法)。"""
+    for index, entry in enumerate(base):
+        candidate = getattr(entry, "price", getattr(entry, "for_path", None))
+        if candidate == target:
+            return index
+    raise FinanceTripletError(f"{field}.{key} {target!r} 在 Profile 中不存在(内部状态非法)")
+
+
+def _patched_entry(base: list, target: str, atom_patch: Mapping, field: str, key: str):
+    """稀疏条目原子替换（只消费已核对补丁）。"""
+    index = _rule_entry_index(base, target, field, key)
+    old = base[index]
+    rate = old.rate
+    if "rate" in atom_patch:
+        rate = _ratio_money(atom_patch["rate"], f"{field}.{key}.{target}.rate")
+    if isinstance(old, OutTaxEntry):
+        return OutTaxEntry(price=old.price, rate=rate)
+    ratio = old.deductible_ratio  # type: ignore[union-attr]
+    if "deductible_ratio" in atom_patch:
+        ratio = _ratio_money(
+            atom_patch["deductible_ratio"], f"{field}.{key}.{target}.deductible_ratio")
+    if isinstance(old, InTaxEntry):
+        return InTaxEntry(price=old.price, rate=rate, deductible_ratio=ratio)
+    return OmInputTaxEntry(for_path=old.for_path, rate=rate, deductible_ratio=ratio)  # type: ignore[union-attr]

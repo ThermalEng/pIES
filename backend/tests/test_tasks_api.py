@@ -548,6 +548,48 @@ def test_compute_submission_uses_unified_assembly_gate(
     assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
 
 
+def test_submit_rejects_nonempty_tax_rules_without_creating_task(
+    client: TestClient, db: Session
+) -> None:
+    """真实提交入口：有效快照含非空 tax_rules 即 400 且不创建任务/快照。
+
+    切回空规则 Profile 后同一项目可正常提交（既有路径保持）。
+    """
+    from assembly_fixture import save_compute_planning
+    from test_config_revisions import _tax_profile_payload
+
+    from iesplan.application import configuration as config_cases
+
+    owner = make_user(db, "owner_taxgate")
+    # 内联 _prepare_project 以保留 device_ref：切换 Profile 按设计使旧
+    # Planning 一并失效(_set_project_profile)，必须重存规划后才能提交。
+    pid = _create_project(client, owner, "任务测试项目")
+    _declare_finance(db, owner, pid)
+    device_ref, revision = _declare_device_and_planning(client, db, owner, pid)
+    revision = _set_explicit_calc(client, pid, owner, revision)
+    revision = _declare_assembly_sections(
+        client, pid, owner, revision, {device_ref: {"type": "none"}}
+    )
+    _bind_and_freeze(client, pid, owner, None, revision=revision)
+    tax_payload = _tax_profile_payload()
+    config_cases.register_finance_profile(db, dict(tax_payload), owner.id)
+    config_cases.set_project_finance_profile(db, pid, "cn-tax-demo", owner.id)
+    save_compute_planning(db, pid, owner.id, device_ref)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="op-tax-001")
+    assert status == 400, body
+    assert body["error"]["code"] == "TASK-REQ-007"
+    assert db.execute(select(func.count(Task.id))).scalar() == 0
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+    config_cases.set_project_finance_profile(db, pid, "cn-north-demo", owner.id)
+    save_compute_planning(db, pid, owner.id, device_ref)
+    status, body = _submit_task(
+        client, pid, owner, config={"config_revision": rev}, idempotency_key="op-tax-002")
+    assert status == 201, body
+    assert body["task"]["status"] == "queued"
+
+
 def test_idempotency_key_scoped_to_project(client: TestClient, db: Session) -> None:
     """幂等键必须限定项目范围(RR-P1-05)。
 

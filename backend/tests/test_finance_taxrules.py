@@ -8,11 +8,13 @@ yaml.safe_load 自检代替。预期独立手算。纯函数契约测试，无�
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from iesplan.application.tasks.submissions import _reject_unsupported_tax_rules
 from iesplan.finance import (
+    EffectiveFinanceConfig,
     FinanceOverrides,
     FinanceProfile,
     FinanceTripletError,
@@ -460,3 +462,219 @@ def test_submission_gate_passes_empty_rules() -> None:
     payload["tax_rules"] = {}
     effective = merge_effective(FinanceProfile.from_dict(payload), None)
     assert _reject_unsupported_tax_rules("acme.generator@1.0.0", effective) is None
+
+
+# ---------------------------------------------------------------------------
+# 正式 YAML 示例直读（生产解析/合并；手抄子集不能代替）
+# ---------------------------------------------------------------------------
+
+
+def _manual_path() -> Path:
+    """正式 finance-yaml.md 位置：Docker 只读挂载 /manual 优先，源码树相对次之。"""
+    mounted = Path("/manual/developer-guide/zh-CN/formats/finance-yaml.md")
+    if mounted.is_file():
+        return mounted
+    here = Path(__file__).resolve()
+    for parent in (here.parent, *here.parents):
+        candidate = parent / "manual" / "developer-guide" / "zh-CN" / "formats" / "finance-yaml.md"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+_MANUAL = _manual_path()
+
+
+def _manual_yaml_blocks() -> list[str]:
+    text = _MANUAL.read_text(encoding="utf-8")
+    return [part.split("```", 1)[0] for part in text.split("```yaml")[1:]]
+
+
+def test_manual_examples_parse_and_merge() -> None:
+    """正式 finance-yaml.md 的 Profile 基座＋税则节＋逐项维护覆盖直读合并。
+
+    覆盖侧 deductible_maintenance 仅 items（mode 继承），拒收即回归。
+    """
+    from iesplan.core.yamlmini import load as yaml_load
+
+    if _MANUAL is None:
+        pytest.skip("正式手册不在可读位置（容器请只读挂载 manual 卷）")
+    blocks = _manual_yaml_blocks()
+    profile_block = next(b for b in blocks if "schema: ies.finance-profile" in b)
+    tax_block = next(b for b in blocks if b.lstrip().startswith("taxes:") and "main_pool" in b)
+    maint_block = next(
+        b for b in blocks if "schema: ies.finance-overrides" in b and "deductible_maintenance" in b
+    )
+    profile_doc = yaml_load(profile_block)
+    assert isinstance(profile_doc, dict)
+    tax_sections = yaml_load(tax_block)
+    assert isinstance(tax_sections, dict)
+    for key in ("taxes", "credit_pools", "tax_rules"):
+        profile_doc[key] = tax_sections[key]
+    profile = FinanceProfile.from_dict(profile_doc)
+    assert set(profile.tax_rules) == {"operating_vat", "building_vat", "income"}
+    overrides_doc = yaml_load(maint_block)
+    assert isinstance(overrides_doc, dict)
+    overrides = FinanceOverrides.from_dict(overrides_doc, profile=profile)
+    effective = merge_effective(profile, overrides)
+    income = effective.tax_rules["income"]
+    assert income.deductible_maintenance.mode == "explicit_items"  # type: ignore[union-attr]
+    assert [
+        (i.year, i.position, i.deductible)  # type: ignore[union-attr]
+        for i in income.deductible_maintenance.items
+    ] == [(2, 1, True), (2, 2, False)]
+    vat_items = effective.tax_rules["operating_vat"].maintenance_input_tax  # type: ignore[union-attr]
+    assert [(i.year, i.position, i.deductible_ratio.value) for i in vat_items] == [
+        (2, 1, Decimal("0")),
+        (2, 2, Decimal("1")),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 无 Profile 解析 → 合并：合法放行，禁改范围拦截
+# ---------------------------------------------------------------------------
+
+
+def test_unbound_overrides_legal_path_merges() -> None:
+    profile = FinanceProfile.from_dict(_base_profile())
+    payload = _base_overrides(profile)
+    standalone = FinanceOverrides.from_dict(payload)
+    assert standalone._bound_profile == ""
+    effective = merge_effective(profile, standalone)
+    assert effective.tax_rules["operating_vat"].in_tax[0].rate.value == Decimal("0.15")  # type: ignore[union-attr]
+
+
+def test_unbound_overrides_forbidden_scope_rejected_at_merge() -> None:
+    profile = FinanceProfile.from_dict(_base_profile())
+    payload = _base_overrides(profile)
+    payload["tax_rules"]["income"]["revenue"] = []
+    standalone = FinanceOverrides.from_dict(payload)
+    with pytest.raises(FinanceTripletError):
+        merge_effective(profile, standalone)
+
+
+# ---------------------------------------------------------------------------
+# 不可变性：输入别名切断，to_dict 回写无效
+# ---------------------------------------------------------------------------
+
+
+def test_overrides_deeply_immutable() -> None:
+    profile = FinanceProfile.from_dict(_base_profile())
+    payload = _base_overrides(profile)
+    overrides = FinanceOverrides.from_dict(payload, profile=profile)
+    from collections.abc import Mapping
+
+    rule_view = overrides.tax_rules["income"]
+    assert isinstance(rule_view, Mapping) and not isinstance(rule_view, dict)
+    with pytest.raises(TypeError):
+        overrides.tax_rules["income"] = {}  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        overrides.credit_pools["main_pool"]["refunds"].append({})  # type: ignore[attr-defined]
+    # 调用方改输入：对象不受影响
+    payload["tax_rules"]["income"]["rate"] = {"value": "0.99", "unit": "1"}
+    payload["credit_pools"]["main_pool"]["refunds"].append(
+        {"period": 99, "amount": {"value": "1", "unit": "CNY"}, "arrival_period": 99}
+    )
+    assert overrides.to_dict()["tax_rules"]["income"].get("rate") is None
+    assert len(overrides.to_dict()["credit_pools"]["main_pool"]["refunds"]) == 1
+    # 改 to_dict 副本：对象不受影响
+    snapshot = overrides.to_dict()
+    snapshot["tax_rules"]["income"]["rate"] = {"value": "0.99", "unit": "1"}
+    assert overrides.to_dict()["tax_rules"]["income"].get("rate") is None
+
+
+# ---------------------------------------------------------------------------
+# 显式 null 非法，缺省合法
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_null_tax_sections_rejected() -> None:
+    payload = _base_profile()
+    payload["tax_rules"] = None  # type: ignore[assignment]
+    with pytest.raises(FinanceTripletError):
+        FinanceProfile.from_dict(payload)
+    payload = _base_profile()
+    payload["credit_pools"] = None  # type: ignore[assignment]
+    with pytest.raises(FinanceTripletError):
+        FinanceProfile.from_dict(payload)
+    profile = FinanceProfile.from_dict(_base_profile())
+    bad = _base_overrides(profile)
+    bad["tax_rules"] = None  # type: ignore[assignment]
+    with pytest.raises(FinanceTripletError):
+        FinanceOverrides.from_dict(bad, profile=profile)
+    effective_doc = merge_effective(profile, None).to_dict()
+    effective_doc["tax_rules"] = None
+    with pytest.raises(FinanceTripletError):
+        EffectiveFinanceConfig.from_dict(effective_doc)
+
+
+def test_missing_tax_sections_default_to_empty() -> None:
+    payload = _base_profile()
+    del payload["tax_rules"]
+    del payload["credit_pools"]
+    profile = FinanceProfile.from_dict(payload)
+    assert profile.tax_rules == {}
+    assert profile.credit_pools == {}
+
+
+# ---------------------------------------------------------------------------
+# 同类重复扣计与引用唯一性最小反例
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_annual_om_rejected() -> None:
+    payload = _base_profile()
+    payload["tax_rules"]["income"]["annual_om"] = ["pv_system.annual_fixed_om", "pv_system.annual_fixed_om"]
+    with pytest.raises(FinanceTripletError):
+        FinanceProfile.from_dict(payload)
+
+
+def test_duplicate_maint_and_asset_references_rejected() -> None:
+    payload = _base_profile()
+    payload["tax_rules"]["income"]["deductible_maintenance"] = {
+        "mode": "explicit_items",
+        "items": [
+            {"year": 2, "position": 1, "deductible": True},
+            {"year": 2, "position": 1, "deductible": False},
+        ],
+    }
+    with pytest.raises(FinanceTripletError):
+        FinanceProfile.from_dict(payload)
+    payload = _base_profile()
+    payload["tax_rules"]["income"]["depreciation"] = [
+        {
+            "asset": "pv_system",
+            "base_from": "pv_system.upfront_capex_net",
+            "method": "straight_line",
+            "life_years": 20,
+            "residual": {"value": "0", "unit": "CNY"},
+            "first_year": 1,
+        },
+        {
+            "asset": "pv_system",
+            "base_from": "pv_system.upfront_capex_net",
+            "method": "straight_line",
+            "life_years": 10,
+            "residual": {"value": "0", "unit": "CNY"},
+            "first_year": 1,
+        },
+    ]
+    with pytest.raises(FinanceTripletError):
+        FinanceProfile.from_dict(payload)
+    payload = _base_profile()
+    payload["tax_rules"]["operating_vat"]["maintenance_input_tax"] = [
+        {
+            "year": 2,
+            "position": 1,
+            "rate": {"value": "0.13", "unit": "1"},
+            "deductible_ratio": {"value": "1", "unit": "1"},
+        },
+        {
+            "year": 2,
+            "position": 1,
+            "rate": {"value": "0.13", "unit": "1"},
+            "deductible_ratio": {"value": "0", "unit": "1"},
+        },
+    ]
+    with pytest.raises(FinanceTripletError):
+        FinanceProfile.from_dict(payload)
