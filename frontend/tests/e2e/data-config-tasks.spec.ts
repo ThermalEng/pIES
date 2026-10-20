@@ -34,7 +34,7 @@ test.describe('场景 4: 数据上传 / 质量报告 / 绑定', () => {
     await requestJson(apiCtx.request, 'PUT', `/api/projects/${createdProj.project?.id ?? createdProj.id}/config`, {
       calculation_config: {
         schema: 'ies.calculation-config',
-        schema_version: '1.0.0',
+        schema_version: '2.0.0',
         mode: 'planning',
         predictions: [],
         generator: 'ies.generator.highs_milp@2.0.0',

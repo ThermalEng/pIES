@@ -207,7 +207,7 @@ export default function ConfigPage(props: ConfigPageProps) {
     return {
       body: {
         schema: 'ies.calculation-config',
-        schema_version: '1.0.0',
+        schema_version: '2.0.0',
         mode: mode.trim(),
         predictions: predictions.value as CalculationConfigBody['predictions'],
         generator: generator.trim(),

@@ -102,7 +102,7 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
     const placeholderConfig = await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/config`, {
       calculation_config: {
         schema: 'ies.calculation-config',
-        schema_version: '1.0.0',
+        schema_version: '2.0.0',
         mode: 'planning',
         predictions: [],
         generator: 'ies.generator.highs_milp@2.0.0',
@@ -287,7 +287,7 @@ test.describe('0.15 外部数据 CSV: 合法来源声明经任务中心 GUI 提�
     await requestJson(apiCtx.request, 'PUT', `/api/projects/${pid}/config`, {
       calculation_config: {
         schema: 'ies.calculation-config',
-        schema_version: '1.0.0',
+        schema_version: '2.0.0',
         mode: 'planning',
         predictions: [],
         generator: 'ies.generator.highs_milp@2.0.0',

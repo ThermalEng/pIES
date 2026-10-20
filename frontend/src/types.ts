@@ -489,7 +489,7 @@ export interface CalculationPrediction {
   parameters: Record<string, unknown>
 }
 
-/** 阶段二收敛配置(null 表不适用;多个 data_predict 时必填性由后端结合 artifact 判断)。 */
+/** 阶段二收敛配置(null 表不适用;任一耦合预测时必填，由后端按算法依赖声明判断)。 */
 export interface CalculationConvergence {
   tolerance: number
   max_iterations: number

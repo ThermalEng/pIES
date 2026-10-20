@@ -250,7 +250,7 @@ export async function scaffoldProject(
   await requestJson(api, 'PUT', `/api/projects/${pid}/config`, {
     calculation_config: {
       schema: 'ies.calculation-config',
-      schema_version: '1.0.0',
+      schema_version: '2.0.0',
       mode: 'planning',
       predictions: [],
       generator: 'ies.generator.highs_milp@2.0.0',
