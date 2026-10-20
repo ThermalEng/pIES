@@ -590,6 +590,284 @@ def test_submit_rejects_nonempty_tax_rules_without_creating_task(
     assert body["task"]["status"] == "queued"
 
 
+def _prepare_taxref_project(client: TestClient, db: Session, owner, profile_payload: dict) -> tuple:
+    """建项目 + 登记/引用税则画像 + 保存覆盖 + 规划/计算/装配/固化(返回 pid 与 device_ref)。"""
+    pid = _create_project(client, owner, "税则跨输入项目")
+    resp = client.post(
+        "/api/finance-profiles",
+        json={"finance_profile": profile_payload},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    resp = client.put(
+        f"/api/projects/{pid}/finance-profile",
+        json={"profile_ref": {"id": profile_payload["profile"]["id"]}},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+    device_ref, revision = _declare_device_and_planning(client, db, owner, pid)
+    revision = _set_explicit_calc(client, pid, owner, revision)
+    revision = _declare_assembly_sections(
+        client, pid, owner, revision, {device_ref: {"type": "none"}}
+    )
+    _bind_and_freeze(client, pid, owner, None, revision=revision)
+    return pid, device_ref
+
+
+def _put_project_overrides(client: TestClient, pid: int, owner, payload: dict, expected_revision) -> None:
+    resp = client.put(
+        f"/api/projects/{pid}/finance-overrides",
+        json={"finance_overrides": payload, "expected_revision": expected_revision},
+        headers=_h(client, owner),
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def _evaluation_2y(expenses: list) -> dict:
+    return {
+        "evaluation_years": 2,
+        "construction_period": 0,
+        "operation_years": 2,
+        "discount_rate": 0.08,
+        "construction_payments": [{"t": 0, "ratio": 1}],
+        "maintenance_expenses": expenses,
+    }
+
+
+def _maint_ref_overrides(items: list) -> dict:
+    return {
+        "schema": "ies.finance-overrides",
+        "schema_version": "3.0.0",
+        "profile_ref": {"id": "cn-tax-demo"},
+        "tax_rules": {
+            "operating_vat": {
+                "maintenance_input_tax": [
+                    {
+                        "year": year,
+                        "position": position,
+                        "rate": {"value": "0.13", "unit": "1"},
+                        "deductible_ratio": {"value": ratio, "unit": "1"},
+                    }
+                    for year, position, ratio in [
+                        (2, 1, "0"),
+                        (2, 2, "1"),
+                    ]
+                ],
+            },
+            "income": {
+                "deductible_maintenance": {"mode": "explicit_items", "items": items},
+            },
+        },
+    }
+
+
+def test_submit_tax_refs_two_items_same_year_reach_capability_gate(client: TestClient, db: Session) -> None:
+    """同年两笔合法引用(两维度独立)：跨输入通过，仍到能力 007，不建任务。"""
+    from assembly_fixture import save_compute_planning
+    from test_config_revisions import _tax_profile_payload
+
+    owner = make_user(db, "owner_taxref_ok")
+    pid, device_ref = _prepare_taxref_project(client, db, owner, _tax_profile_payload())
+    _put_project_overrides(
+        client,
+        pid,
+        owner,
+        _maint_ref_overrides(
+            [
+                {"year": 2, "position": 1, "deductible": True},
+                {"year": 2, "position": 2, "deductible": False},
+            ]
+        ),
+        1,
+    )
+    save_compute_planning(db, pid, owner.id, device_ref)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit_task(
+        client,
+        pid,
+        owner,
+        config={"config_revision": rev},
+        evaluation=_evaluation_2y(
+            [
+                {"year": 2, "amount": "100", "currency": "CNY"},
+                {"year": 2, "amount": "50", "currency": "CNY"},
+            ]
+        ),
+        idempotency_key="op-taxref-ok",
+    )
+    assert status == 400, body
+    assert body["error"]["code"] == "TASK-REQ-007"
+    assert db.execute(select(func.count(Task.id))).scalar() == 0
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+
+
+def test_submit_tax_refs_reject_missing_year(client: TestClient, db: Session) -> None:
+    """引用清单缺失的评价年 → 400 TASK-REQ-015，不建任务。"""
+    from assembly_fixture import save_compute_planning
+    from test_config_revisions import _tax_profile_payload
+
+    owner = make_user(db, "owner_taxref_year")
+    pid, device_ref = _prepare_taxref_project(client, db, owner, _tax_profile_payload())
+    payload = _maint_ref_overrides([{"year": 3, "position": 1, "deductible": True}])
+    payload["tax_rules"]["operating_vat"]["maintenance_input_tax"] = []
+    _put_project_overrides(client, pid, owner, payload, 1)
+    save_compute_planning(db, pid, owner.id, device_ref)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit_task(
+        client,
+        pid,
+        owner,
+        config={"config_revision": rev},
+        evaluation=_evaluation_2y(
+            [
+                {"year": 2, "amount": "100", "currency": "CNY"},
+            ]
+        ),
+        idempotency_key="op-taxref-year",
+    )
+    assert status == 400, body
+    assert body["error"]["code"] == "TASK-REQ-015"
+    assert body["error"]["params"]["year"] == 3
+    assert body["error"]["params"]["position"] == 1
+    assert db.execute(select(func.count(Task.id))).scalar() == 0
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+
+
+def test_submit_tax_refs_reject_position_overflow(client: TestClient, db: Session) -> None:
+    """同年 position 越位 → 400 TASK-REQ-015，不建任务。"""
+    from assembly_fixture import save_compute_planning
+    from test_config_revisions import _tax_profile_payload
+
+    owner = make_user(db, "owner_taxref_pos")
+    pid, device_ref = _prepare_taxref_project(client, db, owner, _tax_profile_payload())
+    payload = _maint_ref_overrides([{"year": 2, "position": 2, "deductible": True}])
+    payload["tax_rules"]["operating_vat"]["maintenance_input_tax"] = []
+    _put_project_overrides(client, pid, owner, payload, 1)
+    save_compute_planning(db, pid, owner.id, device_ref)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit_task(
+        client,
+        pid,
+        owner,
+        config={"config_revision": rev},
+        evaluation=_evaluation_2y(
+            [
+                {"year": 2, "amount": "100", "currency": "CNY"},
+            ]
+        ),
+        idempotency_key="op-taxref-pos",
+    )
+    assert status == 400, body
+    assert body["error"]["code"] == "TASK-REQ-015"
+    assert body["error"]["params"]["year"] == 2
+    assert body["error"]["params"]["position"] == 2
+    assert db.execute(select(func.count(Task.id))).scalar() == 0
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+
+
+def _sched_profile_payload() -> dict:
+    from test_config_revisions import _tax_profile_payload
+
+    payload = _tax_profile_payload()
+    payload["profile"] = {**payload["profile"], "id": "cn-tax-sched", "region": "CN-Sched"}
+    payload["tax_rules"]["building_vat"] = {
+        "kind": "construction_input_vat",
+        "label_ref": "vat_label",
+        "for": "pv_system.upfront_capex",
+        "rate": {"value": "0.09", "unit": "1"},
+        "deductible_ratio": {"value": "0.8", "unit": "1"},
+        "credit_pool": "main_pool",
+        "confirmation": {
+            "method": "explicit_schedule",
+            "schedule": [{"period": 1, "ratio": "0.6"}, {"period": 13, "ratio": "0.4"}],
+        },
+    }
+    return payload
+
+
+def _sched_refund_overrides(schedule: list | None, refund_period: int, arrival: int) -> dict:
+    patch: dict = {
+        "schema": "ies.finance-overrides",
+        "schema_version": "3.0.0",
+        "profile_ref": {"id": "cn-tax-sched"},
+        "credit_pools": {
+            "main_pool": {
+                "refunds": [
+                    {
+                        "period": refund_period,
+                        "amount": {"value": "1500", "unit": "CNY"},
+                        "arrival_period": arrival,
+                    }
+                ],
+            },
+        },
+    }
+    if schedule is not None:
+        patch["tax_rules"] = {"building_vat": {"confirmation": {"schedule": schedule}}}
+    return patch
+
+
+def test_submit_tax_schedule_and_refund_bounds(client: TestClient, db: Session) -> None:
+    """确认期边界：period=12E 合法且晚到账通过本项(到 007)；超上界 015，不建任务。"""
+    from assembly_fixture import save_compute_planning
+
+    owner = make_user(db, "owner_taxsched")
+    pid, device_ref = _prepare_taxref_project(client, db, owner, _sched_profile_payload())
+    evaluation = _evaluation_2y([])
+
+    _put_project_overrides(
+        client, pid, owner, _sched_refund_overrides([{"period": 24, "ratio": "1"}], 24, 30), 1
+    )
+    save_compute_planning(db, pid, owner.id, device_ref)
+    rev = _save_config(client, pid, owner)
+    status, body = _submit_task(
+        client,
+        pid,
+        owner,
+        config={"config_revision": rev},
+        evaluation=evaluation,
+        idempotency_key="op-taxsched-ok",
+    )
+    assert status == 400, body
+    assert body["error"]["code"] == "TASK-REQ-007"
+    assert db.execute(select(func.count(Task.id))).scalar() == 0
+
+    _put_project_overrides(
+        client, pid, owner, _sched_refund_overrides([{"period": 25, "ratio": "1"}], 24, 30), 2
+    )
+    save_compute_planning(db, pid, owner.id, device_ref)
+    status, body = _submit_task(
+        client,
+        pid,
+        owner,
+        config={"config_revision": rev},
+        evaluation=evaluation,
+        idempotency_key="op-taxsched-period",
+    )
+    assert status == 400, body
+    assert body["error"]["code"] == "TASK-REQ-015"
+    assert body["error"]["params"]["period"] == 25
+    assert db.execute(select(func.count(Task.id))).scalar() == 0
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+
+    _put_project_overrides(client, pid, owner, _sched_refund_overrides(None, 25, 26), 3)
+    save_compute_planning(db, pid, owner.id, device_ref)
+    status, body = _submit_task(
+        client,
+        pid,
+        owner,
+        config={"config_revision": rev},
+        evaluation=evaluation,
+        idempotency_key="op-taxsched-refund",
+    )
+    assert status == 400, body
+    assert body["error"]["code"] == "TASK-REQ-015"
+    assert body["error"]["params"]["pool"] == "main_pool"
+    assert body["error"]["params"]["period"] == 25
+    assert db.execute(select(func.count(Task.id))).scalar() == 0
+    assert db.execute(select(func.count(CalcSnapshot.id))).scalar() == 0
+
+
 def test_idempotency_key_scoped_to_project(client: TestClient, db: Session) -> None:
     """幂等键必须限定项目范围(RR-P1-05)。
 

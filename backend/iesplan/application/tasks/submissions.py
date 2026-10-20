@@ -668,6 +668,10 @@ def _assemble_snapshot(
     # 提交边界运营期覆盖核对(装配不核对点数; 已确认运营年限后在此阻断):
     # 规范文本基线 + 冻结财务快照时变序列点数 == 运营期总点数。
     _check_submit_coverage(db=db, artifact=artifact, evaluation=frozen_evaluation, effective=effective)
+    # 提交边界税务跨输入对应核对(B1c): 规则引用的评价维护项与确认期必须
+    # 落在本次评价输入内(能力拒绝之前，先给可定位的输入错误)。复用闸门
+    # 实际消费的不可变快照与已解析评价输入，不读当前财务行、不二次解析。
+    _check_tax_evaluation_refs(evaluation, effective)
     # 提交边界税务能力闸门: 有效快照含税务计算规则时，求解链尚不支持(C批
     # 接通后解除)，明确拒绝，不静默按税前执行。复用闸门实际消费的不可变
     # 快照，不二次解析。
@@ -740,6 +744,86 @@ def _assemble_snapshot(
     for oid in price_oids:
         add_ref(db, oid, "snapshot_ref", snapshot.id, purpose="快照冻结时变价格")
     return snapshot
+
+
+def _check_tax_evaluation_refs(
+    evaluation: _EvaluationInput,
+    effective: EffectiveFinanceConfig,
+) -> None:
+    """税务规则与本次评价输入的跨输入对应核对(B1c)。
+
+    空税则直接通过(既有路径不变)。非空时一次性核对，不在快照/持久化/
+    Worker/Generator 重复：
+    - ``maintenance_input_tax`` / ``deductible_maintenance.items`` 的
+      ``(year, position)`` 必须在本次冻结 ``maintenance_expenses`` 清单中
+      存在(year 为评价年，position 为同年内 1 起顺序；两维度独立核对，
+      金额不复制)；
+    - 显式建设确认 ``schedule[].period`` 与池 ``refunds[].period`` 必须在
+      本次评价月份 ``1..12E`` 内(E 为已确认评价总年限)；``arrival_period``
+      不限上界(晚到为期末应收，不等于到账)；
+    - ``opening_losses.last_usable_year`` 与折旧 ``first_year`` 不加评价期
+      限制(口径见正式财务契约，此处不复核)。
+    文件边界已保证正整数/比例/到达不早于确认，此处只核对跨输入归属。
+    失败为 400 TASK-REQ-015(与评价相关的输入错误体系)，带规则/字段与
+    引用值位置。
+    """
+    from iesplan.finance import ConstructionVatRule, IncomeTaxRule, VatRule
+
+    if not effective.tax_rules:
+        return
+    months = 12 * int(evaluation.evaluation_years)
+    year_sizes: dict[int, int] = {}
+    for expense in evaluation.maintenance_expenses:
+        year_sizes[expense.year] = year_sizes.get(expense.year, 0) + 1
+
+    def _require_maint(rule_id: str, field: str, year: int, position: int) -> None:
+        if year_sizes.get(year, 0) < position:
+            raise InvalidRequestError(
+                "税务规则引用的维护项在本次评价清单中不存在",
+                code="TASK-REQ-015",
+                params={"rule": rule_id, "year": year, "position": position},
+                location={
+                    "object_type": "task",
+                    "field": f"effective_finance.tax_rules.{rule_id}.{field}",
+                },
+            )
+
+    def _require_month(rule_id: str, field: str, period: int) -> None:
+        if period > months:
+            raise InvalidRequestError(
+                "税务确认期超出本次评价月份上界",
+                code="TASK-REQ-015",
+                params={"rule": rule_id, "period": period, "months": months},
+                location={
+                    "object_type": "task",
+                    "field": f"effective_finance.tax_rules.{rule_id}.{field}",
+                },
+            )
+
+    for rule_id, rule in effective.tax_rules.items():
+        if isinstance(rule, VatRule):
+            for entry in rule.maintenance_input_tax:
+                _require_maint(rule_id, "maintenance_input_tax", entry.year, entry.position)
+        elif isinstance(rule, IncomeTaxRule):
+            items = rule.deductible_maintenance.items
+            for entry in items:
+                _require_maint(rule_id, "deductible_maintenance.items", entry.year, entry.position)
+        elif isinstance(rule, ConstructionVatRule):
+            if rule.confirmation.method == "explicit_schedule":
+                for entry in rule.confirmation.schedule:
+                    _require_month(rule_id, "confirmation.schedule", entry.period)
+    for pool_id, pool in effective.credit_pools.items():
+        for refund in pool.refunds:
+            if refund.period > months:
+                raise InvalidRequestError(
+                    "退款确认期超出本次评价月份上界",
+                    code="TASK-REQ-015",
+                    params={"pool": pool_id, "period": refund.period, "months": months},
+                    location={
+                        "object_type": "task",
+                        "field": f"effective_finance.credit_pools.{pool_id}.refunds",
+                    },
+                )
 
 
 def _reject_unsupported_tax_rules(generator_ref: object, effective: EffectiveFinanceConfig) -> None:
