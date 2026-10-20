@@ -24,11 +24,13 @@ from test_task_config_revision import (  # noqa: E402,F401,F811
 )
 
 from iesplan import tasks as tasks_domain
-from iesplan.tasks.contracts import (
+from iesplan.finance import (
     ConstructionPayment,
     EvaluationInput,
-    InvalidRequestError,
     MaintenanceExpense,
+)
+from iesplan.tasks.contracts import (
+    InvalidRequestError,
     check_tariff_horizon_coverage,
     parse_evaluation_input,
 )

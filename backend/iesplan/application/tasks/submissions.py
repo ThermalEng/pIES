@@ -37,6 +37,7 @@ from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from iesplan.finance import EffectiveFinanceConfig
+    from iesplan.finance import EvaluationInput as _EvaluationInput
 
 from sqlalchemy.orm import Session
 
@@ -105,9 +106,6 @@ from iesplan.tasks.contracts import (
 )
 from iesplan.tasks.contracts import (
     IDEMPOTENCY_KEY_RE as _IDEMPOTENCY_KEY_RE,
-)
-from iesplan.tasks.contracts import (
-    EvaluationInput as _EvaluationInput,
 )
 from iesplan.tasks.contracts import (
     check_tariff_horizon_coverage as _check_tariff_horizon_coverage,

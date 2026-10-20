@@ -28,7 +28,7 @@ from iesplan.core.errors import AppError, ConflictError, NotFoundError
 
 #: 评价确认值对象公开所有权归 finance（单一定义，此处复用，不复制）；
 #: 任务提交边界仍负责 HTTP 解析、领域校验与 TASK-REQ-015 错误映射。
-from iesplan.finance.confirmation import (
+from iesplan.finance import (
     ConstructionPayment,
     EvaluationInput,
     MaintenanceExpense,
