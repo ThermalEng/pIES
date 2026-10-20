@@ -8,6 +8,8 @@
   build_equity_cashflows / equity_irr / IRRStatus(自 metrics/financial.py 迁入);
 - hourly:compute_financials / compute_lcoe / compute_payback / FinancialResult(新增);
 - params:FinanceParams / finance_params_from_config;
+- tax(B0 纯计算关系):split_tax_amount / settle_vat_period / use_losses /
+  income_tax_payable / straight_line_period_amount 及不可变值对象;
 - 财务三件套(finance-yaml@1.0.0):FinanceProfile / FinanceOverrides /
   EffectiveFinanceConfig 领域结构、规范化摘要与确定性合并器 merge_effective
   (0.6.5 契约切片,见 triplet 模块)。
@@ -49,6 +51,17 @@ from iesplan.finance.pricecsv import (
     is_price_series_csv,
     parse_price_series_file,
     read_trusted_price_values,
+)
+from iesplan.finance.tax import (
+    LossBalance,
+    LossUseResult,
+    TaxSplit,
+    VatSettlement,
+    income_tax_payable,
+    settle_vat_period,
+    split_tax_amount,
+    straight_line_period_amount,
+    use_losses,
 )
 from iesplan.finance.timeline import (
     AnnualBreakdown,
@@ -125,6 +138,16 @@ __all__ = [
     # params
     "FinanceParams",
     "finance_params_from_config",
+    # tax(B0 纯计算关系)
+    "LossBalance",
+    "LossUseResult",
+    "TaxSplit",
+    "VatSettlement",
+    "income_tax_payable",
+    "settle_vat_period",
+    "split_tax_amount",
+    "straight_line_period_amount",
+    "use_losses",
     # 财务三件套(finance-yaml@1.0.0; 0.6.5 契约切片)
     "FinanceProfile",
     "FinanceOverrides",
