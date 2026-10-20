@@ -44,6 +44,8 @@ from iesplan.core.yamlmini import dump as yaml_dump  # noqa: E402
 from iesplan.dataset.persistence import DatasetFile  # noqa: E402
 from iesplan.db import Base  # noqa: E402
 from iesplan.identity.persistence import User  # noqa: E402  # 注册 users 表
+# 独立建表需要注册 evidence_packages.task_id 的目标，不依赖其他测试先导入。
+from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
 from iesplan.storage import get_object  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 from test_dataset_api import make_csv  # noqa: E402
@@ -1501,6 +1503,7 @@ def test_export_import_roundtrip_with_nonempty_tax_rules(client: TestClient, db:
     eff_body = client.get(f"/api/projects/{new_pid}/effective-finance", headers=_h(client, importer)).json()[
         "effective_finance_config"
     ]
+    assert EffectiveFinanceConfig.from_dict(eff_body).to_dict() == effective.to_dict()
     assert eff_body["tax_rules"]["income"]["rate"] == {"value": "0.2", "unit": "1"}
     assert eff_body["tax_rules"]["building_vat"]["confirmation"]["schedule"] == [
         {"period": 1, "ratio": "0.6"},
@@ -1519,6 +1522,7 @@ def test_export_import_roundtrip_with_nonempty_tax_rules(client: TestClient, db:
     src_eff = client.get(f"/api/projects/{pid}/effective-finance", headers=_h(client, owner)).json()[
         "effective_finance_config"
     ]
+    assert EffectiveFinanceConfig.from_dict(src_eff).to_dict() == effective.to_dict()
     assert src_eff["tax_rules"]["income"]["rate"] == {"value": "0.2", "unit": "1"}
 
 
