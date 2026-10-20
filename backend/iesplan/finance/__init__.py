@@ -10,9 +10,9 @@
 - params:FinanceParams / finance_params_from_config;
 - tax(B0 纯计算关系):split_tax_amount / settle_vat_period / use_losses /
   income_tax_payable / straight_line_period_amount 及不可变值对象;
-- 财务三件套(finance-yaml@1.0.0):FinanceProfile / FinanceOverrides /
+- 财务三件套(finance-yaml@3.0.0):FinanceProfile / FinanceOverrides /
   EffectiveFinanceConfig 领域结构、规范化摘要与确定性合并器 merge_effective
-  (0.6.5 契约切片,见 triplet 模块)。
+  (0.6.5 契约切片,见 triplet 模块); B1a 税则/池规则 CreditPool / TaxRule。
 """
 
 from __future__ import annotations
@@ -77,25 +77,45 @@ from iesplan.finance.timeline import (
     construction_total,
 )
 from iesplan.finance.triplet import (
+    CONFIRM_METHODS,
     COST_METHOD_VALUES,
     CURRENCIES,
     DIRECTION_VALUES,
     FINANCE_COMPONENTS,
     KIND_VALUES,
     PRICE_BASIS_VALUES,
+    RECEIVABLE_POLICIES,
     RESOLUTION_VALUES,
     SCHEMA_EFFECTIVE,
     SCHEMA_OVERRIDES,
     SCHEMA_PROFILE,
     SCHEMA_VERSION,
+    TAX_RULE_KINDS,
+    VAT_SETTLEMENTS,
+    ConstructionConfirmation,
+    ConstructionScheduleEntry,
+    ConstructionVatRule,
     CostComponent,
+    CreditPool,
+    DeductibleMaintenance,
+    DepreciationEntry,
     EffectiveFinanceConfig,
     EnergyPrice,
     FinanceOverrides,
     FinanceProfile,
     FinanceTripletError,
     FinanceTypeEntry,
+    IncomeTaxRule,
+    InTaxEntry,
+    MaintInputTaxEntry,
+    MaintItem,
+    OmInputTaxEntry,
+    OpeningLoss,
+    OutTaxEntry,
+    PoolRefund,
     SeriesMeta,
+    TaxRule,
+    VatRule,
     merge_effective,
 )
 from iesplan.finance.yaml_io import effective_from_yaml, effective_to_yaml
@@ -148,7 +168,7 @@ __all__ = [
     "split_tax_amount",
     "straight_line_period_amount",
     "use_losses",
-    # 财务三件套(finance-yaml@1.0.0; 0.6.5 契约切片)
+    # 财务三件套(finance-yaml@3.0.0; 0.6.5 契约切片 + B1a 税则池规则)
     "FinanceProfile",
     "FinanceOverrides",
     "EffectiveFinanceConfig",
@@ -159,6 +179,26 @@ __all__ = [
     "SeriesMeta",
     "FinanceTripletError",
     "merge_effective",
+    "TAX_RULE_KINDS",
+    "VAT_SETTLEMENTS",
+    "CONFIRM_METHODS",
+    "RECEIVABLE_POLICIES",
+    "CreditPool",
+    "PoolRefund",
+    "VatRule",
+    "ConstructionVatRule",
+    "ConstructionConfirmation",
+    "ConstructionScheduleEntry",
+    "IncomeTaxRule",
+    "InTaxEntry",
+    "OutTaxEntry",
+    "OmInputTaxEntry",
+    "MaintInputTaxEntry",
+    "MaintItem",
+    "DeductibleMaintenance",
+    "DepreciationEntry",
+    "OpeningLoss",
+    "TaxRule",
     "effective_from_yaml",
     "effective_to_yaml",
     "SCHEMA_PROFILE",

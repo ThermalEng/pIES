@@ -61,7 +61,7 @@ from iesplan.main import create_app  # noqa: E402
 
 PROFILE_PAYLOAD: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "1.0.0",
+    "schema_version": "3.0.0",
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
@@ -93,13 +93,15 @@ PROFILE_PAYLOAD: dict = {
         },
     },
     "taxes": {},
+    "credit_pools": {},
+    "tax_rules": {},
 }
 
 
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "1.0.0",
+        "schema_version": "3.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {

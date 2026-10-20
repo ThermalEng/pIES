@@ -401,6 +401,24 @@ def dump(value: object) -> str:
                 if isinstance(child, dict) and child:
                     first = sorted(child, key=str)[0]
                     rest = {k: v for k, v in child.items() if k != first}
+                    first_val = child[first]
+                    if isinstance(first_val, dict) and first_val:
+                        lines.append(f"{pad}- {_dump_scalar(str(first))}:")
+                        _write(first_val, indent + 4)
+                        _write(rest, indent + 2)
+                        continue
+                    if isinstance(first_val, list) and first_val:
+                        lines.append(f"{pad}- {_dump_scalar(str(first))}:")
+                        _write(first_val, indent + 4)
+                        _write(rest, indent + 2)
+                        continue
+                    if isinstance(first_val, (dict, list)):
+                        lines.append(
+                            f"{pad}- {_dump_scalar(str(first))}: "
+                            f"{'{}' if isinstance(first_val, dict) else '[]'}"
+                        )
+                        _write(rest, indent + 2)
+                        continue
                     if isinstance(rest, dict) and not rest:
                         lines.append(
                             f"{pad}- {_dump_scalar(str(first))}: {_dump_scalar(child[first])}"

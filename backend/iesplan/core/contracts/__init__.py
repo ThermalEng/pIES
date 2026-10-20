@@ -3,7 +3,7 @@
 - ``ParameterSpec``、``ProjectBaseline``、``PlanningConfig``
   等公共数据类型归属本包, 不携带注册状态;
 - 财务三件套(FinanceProfile / FinanceOverrides / EffectiveFinanceConfig)
-  属 finance 模块领域结构(0.6.5 条目 1, finance-yaml@1.0.0), 见
+  属 finance 模块领域结构(0.6.5 条目 1, finance-yaml@3.0.0), 见
   ``iesplan.finance.triplet``; 旧单体 FinanceConfig 契约已退役;
 - core 包禁止导入任何业务模块。
 """

@@ -668,6 +668,10 @@ def _assemble_snapshot(
     # 提交边界运营期覆盖核对(装配不核对点数; 已确认运营年限后在此阻断):
     # 规范文本基线 + 冻结财务快照时变序列点数 == 运营期总点数。
     _check_submit_coverage(db=db, artifact=artifact, evaluation=frozen_evaluation, effective=effective)
+    # 提交边界税务能力闸门: 有效快照含税务计算规则时，求解链尚不支持(C批
+    # 接通后解除)，明确拒绝，不静默按税前执行。复用闸门实际消费的不可变
+    # 快照，不二次解析。
+    _reject_unsupported_tax_rules(calc_config.get("generator"), effective)
     # 提交边界维护币种核对(本次闸门实际消费的不可变快照口径; 不一致阻断):
     # 维护清单币种须与有效财务配置一致, 空清单直接通过。
     for expense in evaluation.maintenance_expenses:
@@ -736,6 +740,25 @@ def _assemble_snapshot(
     for oid in price_oids:
         add_ref(db, oid, "snapshot_ref", snapshot.id, purpose="快照冻结时变价格")
     return snapshot
+
+
+def _reject_unsupported_tax_rules(generator_ref: object, effective: EffectiveFinanceConfig) -> None:
+    """税务规则提交能力闸门(B1a)：有效快照含非空 ``tax_rules`` 即 400。
+
+    求解链尚未表达税务关系(C批接通后解除)；空规则不影响现有计算。
+    复用提交边界生成器能力诊断码 TASK-REQ-007，不建临时注册表/开关。
+    """
+    if not effective.tax_rules:
+        return
+    raise InvalidRequestError(
+        "有效财务配置含税务计算规则，当前求解链尚不支持，不按税前执行",
+        code="TASK-REQ-007",
+        params={
+            "generator": generator_ref,
+            "tax_rules": sorted(effective.tax_rules),
+        },
+        location={"object_type": "task", "field": "effective_finance.tax_rules"},
+    )
 
 
 def _used_price_oids(artifact: Any, effective: EffectiveFinanceConfig) -> list[str]:

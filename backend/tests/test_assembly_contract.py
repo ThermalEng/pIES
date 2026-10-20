@@ -1285,7 +1285,7 @@ class TestArtifact:
             "profile_id": "cn-north-demo",
             "revision": None,
             "schema": "ies.effective-finance-config",
-            "schema_version": "1.0.0",
+            "schema_version": "3.0.0",
             "currency": "CNY",
         }
         assert receipt["planning"] == {

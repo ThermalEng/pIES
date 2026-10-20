@@ -58,7 +58,7 @@ from iesplan.tasks.persistence import Task as _TaskForDDL  # noqa: E402,F401
 
 PROFILE_PAYLOAD: dict = {
     "schema": "ies.finance-profile",
-    "schema_version": "1.0.0",
+    "schema_version": "3.0.0",
     "profile": {
         "id": "cn-north-demo",
         "region": "CN-North",
@@ -107,13 +107,15 @@ PROFILE_PAYLOAD: dict = {
         },
     },
     "taxes": {},
+    "credit_pools": {},
+    "tax_rules": {},
 }
 
 
 def _overrides_payload(profile: FinanceProfile) -> dict:
     return {
         "schema": "ies.finance-overrides",
-        "schema_version": "1.0.0",
+        "schema_version": "3.0.0",
         "profile_ref": {"id": profile.profile_id},
         "finance_types": {
             "pv_system": {
@@ -355,6 +357,116 @@ def test_overrides_save_remerges_effective(client: TestClient, db_session: Sessi
     resp = client.get(f"/api/projects/{pid}/finance-overrides", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["revision"] == 2
+
+
+def _tax_profile_payload() -> dict:
+    payload = dict(PROFILE_PAYLOAD)
+    payload["profile"] = {**PROFILE_PAYLOAD["profile"], "id": "cn-tax-demo", "region": "CN-Tax"}
+    payload["taxes"] = {
+        "vat_label": {
+            "display_name": "合成增值税", "tax_type": "value_added_tax",
+            "applies_to": "grid_import",
+        },
+        "income_label": {
+            "display_name": "合成所得税", "tax_type": "income_tax",
+            "applies_to": "pv_export",
+        },
+    }
+    payload["credit_pools"] = {
+        "main_pool": {
+            "opening_credit": {"value": "0", "unit": "CNY"},
+            "receivable_policy": "end_receivable",
+            "refunds": [],
+        },
+    }
+    payload["tax_rules"] = {
+        "operating_vat": {
+            "kind": "vat", "label_ref": "vat_label", "settlement": "monthly",
+            "in_tax": [{"price": "grid_import", "rate": {"value": "0.13", "unit": "1"},
+                        "deductible_ratio": {"value": "1", "unit": "1"}}],
+            "out_tax": [{"price": "pv_export", "rate": {"value": "0.13", "unit": "1"}}],
+            "om_input_tax": [], "maintenance_input_tax": [],
+            "credit_pool": "main_pool", "confirmation": "same_period",
+        },
+        "income": {
+            "kind": "income_tax", "label_ref": "income_label",
+            "rate": {"value": "0.25", "unit": "1"},
+            "revenue": ["pv_export"], "energy_cost": ["grid_import"],
+            "annual_om": ["pv_system.annual_fixed_om"],
+            "variable_om": ["pv_system.period_variable_om"],
+            "deductible_maintenance": {"mode": "explicit_items", "items": []},
+            "depreciation": [
+                {"asset": "pv_system", "base_from": "pv_system.upfront_capex_net",
+                 "method": "straight_line", "life_years": 20,
+                 "residual": {"value": "0", "unit": "CNY"}, "first_year": 1},
+            ],
+            "loss_carryforward_years": 5, "opening_losses": [],
+        },
+    }
+    return payload
+
+
+def test_tax_rules_revision_roundtrip_and_effective(client: TestClient, db_session: Session) -> None:
+    """含税则/池的 Profile 登记 → 覆盖保存 → Effective 重合并往返相等。
+
+    写入读回后 tax_rules/credit_pools 相等；旧 Profile 对象不受新覆盖修改
+    （合并前后登记内容复用同一幂等行）。
+    """
+    headers, pid = _owner(client, db_session, name="tax_owner")
+    tax_payload = _tax_profile_payload()
+    resp = client.post(
+        "/api/finance-profiles", json={"finance_profile": tax_payload}, headers=headers)
+    assert resp.status_code == 200, resp.text
+    resp = client.put(
+        f"/api/projects/{pid}/finance-profile",
+        json={"profile_ref": {"id": "cn-tax-demo"}},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    tax_overrides = {
+        "schema": "ies.finance-overrides",
+        "schema_version": "3.0.0",
+        "profile_ref": {"id": "cn-tax-demo"},
+        "credit_pools": {
+            "main_pool": {
+                "opening_credit": {"value": "90000", "unit": "CNY"},
+                "refunds": [{"period": 14, "amount": {"value": "1500", "unit": "CNY"},
+                             "arrival_period": 15}],
+            },
+        },
+        "tax_rules": {
+            "income": {
+                "deductible_maintenance": {
+                    "mode": "explicit_items",
+                    "items": [{"year": 2, "position": 1, "deductible": True}],
+                },
+            },
+        },
+    }
+    resp = client.put(
+        f"/api/projects/{pid}/finance-overrides",
+        json={"finance_overrides": tax_overrides, "expected_revision": 1},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    effective = EffectiveFinanceConfig.from_dict(body["effective_finance_config"])
+    assert effective.tax_rules["income"].deductible_maintenance.items[0].deductible is True  # type: ignore[union-attr]
+    assert effective.credit_pools["main_pool"].opening_credit.value == Decimal("90000")
+    assert [(r.period, r.arrival_period) for r in
+            effective.credit_pools["main_pool"].refunds] == [(14, 15)]
+    # 原规则集合完整保留
+    assert set(effective.tax_rules) == {"operating_vat", "income"}
+    # GET 读回覆盖与发送一致
+    resp = client.get(f"/api/projects/{pid}/finance-overrides", headers=headers)
+    assert resp.status_code == 200
+    reread = FinanceOverrides.from_dict(resp.json()["finance_overrides"])
+    assert reread.to_dict()["tax_rules"]["income"] == FinanceOverrides.from_dict(
+        tax_overrides).to_dict()["tax_rules"]["income"]
+    # 登记的 Profile 内容仍为原文（幂等复用同一行，未被覆盖修改）
+    again = client.post(
+        "/api/finance-profiles", json={"finance_profile": tax_payload}, headers=headers)
+    assert again.status_code == 200, again.text
 
 
 def test_overrides_scope_violations_rejected(client: TestClient, db_session: Session) -> None:
